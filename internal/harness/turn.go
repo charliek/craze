@@ -307,6 +307,23 @@ func (s *Session) run(ctx context.Context, text string, wake bool, sink func(Eve
 	// From here Steer is accepted, and only from here: a prompt the store
 	// refused above never became a turn, so there was nothing to steer into.
 	t.steers.begin()
+	// The pre-turn check (plan 028 §3.6) runs with the box open (P36): a
+	// compaction can take a while, and what the person types meanwhile is
+	// the turn's to take up — in its first request, once one ran
+	// (compactedBeforeFirst). The compaction is written ahead of the held
+	// prompt, which goes out with the first step after it, and the history
+	// is the store's again, from the summary on.
+	compacted, err := s.preTurnCompaction(t, user.Message)
+	if err != nil {
+		return t.stopBeforeRequest(err)
+	}
+	if compacted {
+		t.mu.Lock()
+		t.compactedBeforeFirst = true
+		t.mu.Unlock()
+		msgs, results = s.store.ContextWithResults(m.id())
+		history = redactHistory(s.redactor(), msgs, results)
+	}
 	agent := s.newAgent(m.lm, s.system, t.agentTools())
 	res, err := agent.Stream(turnCtx, t.call(text, history))
 	return t.finish(res, err)
@@ -454,6 +471,11 @@ type turn struct {
 	// (plan 023 §3.4, D-51).
 	planApproved bool
 	approvedAt   int // the asking call's place in its step (toolCall.order)
+
+	// compactedBeforeFirst says a pre-turn compaction ran (plan 028 §3.6,
+	// R2-2): the steers accepted while it did are taken up at the turn's
+	// first request, which otherwise takes none (prepareStep).
+	compactedBeforeFirst bool
 
 	// Interject's steers, spliced into every step's messages from the one that
 	// first saw them (steer.go, plan 019 §3.10). steers is the session's box,
@@ -908,6 +930,25 @@ func (t *turn) finish(res *fantasy.AgentResult, err error) (out Result, ferr err
 	default:
 		return Result{}, classify(err, t.model.id())
 	}
+}
+
+// stopBeforeRequest is how run ends a turn that stopped before its first
+// request (plan 028 §3.6): its pre-turn compaction was cancelled, or could not
+// be written (P5). Nothing streamed and no call was made, so there is nothing
+// to persist or settle but the steers: the box is shut and every steer it
+// accepted — while the compaction ran, say — comes back unanswered, as on any
+// ending (settleSteers). The prompt stays held, like the prompt of a turn
+// that produced nothing, and the next turn's replaces it. A save failure
+// fails the turn; a cancel is a cancelled turn.
+func (t *turn) stopBeforeRequest(err error) (Result, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	defer func() { t.ended = true }()
+	unanswered := t.settleSteers()
+	if errors.As(err, new(*errCompactionSaveFailed)) {
+		return Result{Unanswered: unanswered}, fmt.Errorf("harness: saving the compaction: %w", t.tools.redactErr(err))
+	}
+	return Result{StopReason: StopCancelled, Unanswered: unanswered}, nil
 }
 
 // saveInterrupted appends the step a cancel or a failure cut short, marked

@@ -143,12 +143,19 @@ type Prompted struct {
 // the summary (§3.7), or Err, why no summary was written — redacted, one line.
 // A replay (Session.Replay) emits the ended one of each stored compaction, in
 // place.
+//
+// Usage, on a live ended one, is what the compaction's summarizer requests
+// were billed, every attempt summed — on its model, the entry's — whether or
+// not an entry holds it: it is how a sub-agent's compactions reach what its
+// parent is told the child spent (§3.17, P19). A replayed one carries none: a
+// replay spends nothing.
 type Compacted struct {
 	Phase        string
 	Reason       string
 	TokensBefore int64
 	TokensAfter  int64
 	Err          string
+	Usage        Usage
 }
 
 // A Compacted's phases.

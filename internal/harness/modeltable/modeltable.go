@@ -114,6 +114,11 @@ type Table struct {
 	// section": a child defaults to the parent's own model and effort, and
 	// only BuiltinTiers are recognised, each unmapped.
 	Subagents Subagents
+	// Compaction is models.toml's optional [compaction] section (plan 028
+	// §3.6): when the native harness compacts a session's context on its own,
+	// and how much of it a compaction keeps verbatim. Its zero value is "no
+	// section": every setting at its default.
+	Compaction Compaction
 	// Warnings are problems Load fixed on its own, for the caller to print:
 	// today only a providers.toml found readable by others and tightened. A
 	// warning names a path and a mode, never file contents. Save ignores it.
@@ -172,6 +177,77 @@ type Subagents struct {
 	// configured none.
 	Tiers map[string]string
 }
+
+// The [compaction] defaults (plan 028 §3.6, owner decision 1): compact on
+// its own, at 85% of the model's context window, keeping a verbatim tail of
+// at most 20,000 tokens.
+const (
+	DefaultCompactionAuto   = true
+	DefaultThresholdPercent = 85
+	DefaultTailTokens       = 20000
+)
+
+// Compaction is one Table's [compaction] section (plan 028 §3.6). Each field
+// is nil when the file leaves its key out, which is its default, so a table
+// saves exactly the keys its file wrote — none, and no section, for a file
+// with none — and an import keeps the section as the owner wrote it. Read the
+// settings through Auto, ThresholdPercent and TailTokens, which apply the
+// defaults. The section applies to every model; a per-model override is a
+// follow-up.
+type Compaction struct {
+	// AutoSet is `auto`: whether a session compacts on its own — before a
+	// turn and between its steps — when its context reaches the threshold.
+	// Off, only /compact and the recovery from a request the provider
+	// refused as too large compact.
+	AutoSet *bool
+	// ThresholdPercentSet is `threshold_percent`: the share of a model's
+	// context window, 1 to 99, at which a session compacts on its own.
+	ThresholdPercentSet *int
+	// TailTokensSet is `tail_tokens`: the most, in estimated tokens, a
+	// compaction keeps of the newest conversation verbatim, whole steps only;
+	// 0 keeps none. The harness also caps it at a quarter of the threshold.
+	TailTokensSet *int
+}
+
+// Auto is `auto`, or DefaultCompactionAuto when the section leaves it out.
+func (c Compaction) Auto() bool {
+	if c.AutoSet == nil {
+		return DefaultCompactionAuto
+	}
+	return *c.AutoSet
+}
+
+// ThresholdPercent is `threshold_percent`, or DefaultThresholdPercent.
+func (c Compaction) ThresholdPercent() int {
+	if c.ThresholdPercentSet == nil {
+		return DefaultThresholdPercent
+	}
+	return *c.ThresholdPercentSet
+}
+
+// TailTokens is `tail_tokens`, or DefaultTailTokens.
+func (c Compaction) TailTokens() int {
+	if c.TailTokensSet == nil {
+		return DefaultTailTokens
+	}
+	return *c.TailTokensSet
+}
+
+// Clone is c with values of its own: changing one of the copy's settings
+// through its pointer never changes c's.
+func (c Compaction) Clone() Compaction {
+	return Compaction{AutoSet: clonePtr(c.AutoSet), ThresholdPercentSet: clonePtr(c.ThresholdPercentSet),
+		TailTokensSet: clonePtr(c.TailTokensSet)}
+}
+
+func clonePtr[T any](p *T) *T {
+	if p == nil {
+		return nil
+	}
+	v := *p
+	return &v
+}
+
 type Resolved struct {
 	Alias           string
 	ProviderID      string
@@ -213,8 +289,19 @@ type modelsDoc struct {
 	// Subagents is nil whenever Table.Subagents is its zero value, so a
 	// table with no sub-agent configuration saves byte-identically to a
 	// models.toml written before this section existed (plan 026 §3.6).
-	Subagents *subagentsDoc         `toml:"subagents,omitempty"`
-	Models    map[string]modelEntry `toml:"models,omitempty"`
+	Subagents *subagentsDoc `toml:"subagents,omitempty"`
+	// Compaction is nil whenever Table.Compaction sets nothing, for the same
+	// reason (plan 028 §3.6).
+	Compaction *compactionDoc        `toml:"compaction,omitempty"`
+	Models     map[string]modelEntry `toml:"models,omitempty"`
+}
+
+// compactionDoc is [compaction]'s on-disk shape: Compaction's, a nil pointer
+// a key the file leaves out.
+type compactionDoc struct {
+	Auto             *bool `toml:"auto,omitempty"`
+	ThresholdPercent *int  `toml:"threshold_percent,omitempty"`
+	TailTokens       *int  `toml:"tail_tokens,omitempty"`
 }
 
 // subagentsDoc is [subagents]'s on-disk shape. Tiers is a free-form map (any
@@ -349,6 +436,7 @@ func load(dir string, forImport bool) (*Table, error) {
 		Providers:    make(map[string]Provider, len(pd.Providers)),
 		Models:       make(map[string]Model, len(md.Models)),
 		Subagents:    subagentsFromDoc(md.Subagents),
+		Compaction:   compactionFromDoc(md.Compaction),
 		Warnings:     warnings,
 	}
 	for id, e := range pd.Providers {
@@ -490,8 +578,29 @@ func (t *Table) encodeModels() ([]byte, error) {
 		// the reverse) is a compile error rather than a field Save drops.
 		entries[alias] = modelEntry(m)
 	}
-	top := &modelsDoc{Version: Version, DefaultModel: t.DefaultModel, Subagents: subagentsToDoc(t.Subagents)}
+	top := &modelsDoc{Version: Version, DefaultModel: t.DefaultModel, Subagents: subagentsToDoc(t.Subagents),
+		Compaction: compactionToDoc(t.Compaction)}
 	return encodeFile(modelsHeader, top, "models", entries)
+}
+
+// compactionFromDoc is the empty Compaction when d is nil (no [compaction] in
+// the file), else what it sets.
+func compactionFromDoc(d *compactionDoc) Compaction {
+	if d == nil {
+		return Compaction{}
+	}
+	return Compaction{AutoSet: d.Auto, ThresholdPercentSet: d.ThresholdPercent, TailTokensSet: d.TailTokens}
+}
+
+// compactionToDoc is nil exactly when c sets nothing, so Save omits
+// [compaction] entirely rather than writing an empty table: a table with no
+// compaction settings saves byte-identically to a models.toml written before
+// the section existed.
+func compactionToDoc(c Compaction) *compactionDoc {
+	if c.AutoSet == nil && c.ThresholdPercentSet == nil && c.TailTokensSet == nil {
+		return nil
+	}
+	return &compactionDoc{Auto: c.AutoSet, ThresholdPercent: c.ThresholdPercentSet, TailTokens: c.TailTokensSet}
 }
 
 // subagentsFromDoc is the empty Subagents when d is nil (no [subagents] in
@@ -575,7 +684,7 @@ func validate(t *Table, pfile, mfile string, read crossFile) error {
 	if err := validateSubagents(mfile, t.Subagents, t.Models); err != nil {
 		return err
 	}
-	return nil
+	return validateCompaction(mfile, t.Compaction)
 }
 
 func validateProvider(file, id string, p Provider) error {
@@ -821,6 +930,23 @@ func nilIfEmptyMap(m map[string]string) map[string]string {
 		return nil
 	}
 	return m
+}
+
+// validateCompaction checks [compaction]'s settings (plan 028 §3.6):
+// threshold_percent, when set, is 1 to 99 — 0 would compact before every turn,
+// and 100 never before the provider refuses the request — and tail_tokens,
+// when set, is not negative.
+func validateCompaction(file string, c Compaction) error {
+	at := func(key, reason string) error {
+		return &FileError{File: file, Table: "compaction", Key: key, Reason: reason}
+	}
+	if p := c.ThresholdPercentSet; p != nil && (*p < 1 || *p > 99) {
+		return at("threshold_percent", fmt.Sprintf("%d is out of range: want a percentage of the context window from 1 to 99", *p))
+	}
+	if n := c.TailTokensSet; n != nil && *n < 0 {
+		return at("tail_tokens", "must not be negative")
+	}
+	return nil
 }
 
 // tierKeyPattern is the format a [subagents.tiers] key must match: lowercase

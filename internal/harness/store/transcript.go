@@ -401,7 +401,15 @@ func (t *Transcript) contextAt(leaf string, current Model) ([]fantasy.Message, [
 	}
 	head := len(msgs) // the summary message, which the trim below never removes
 	rest, restMarks := t.messages(entries, current)
-	msgs, marks = append(msgs, rest...), append(marks, restMarks...)
+	msgs, marks = trimUnanswered(append(msgs, rest...), append(marks, restMarks...), head)
+	return msgs, marks, nil
+}
+
+// trimUnanswered is msgs, with marks beside them, less the trailing messages
+// no answer follows on this path (ContextAt's last rule): an entry's user
+// message, or an assistant message whose calls are still to be answered. The
+// first head messages are never removed.
+func trimUnanswered(msgs []fantasy.Message, marks []bool, head int) ([]fantasy.Message, []bool) {
 	for len(msgs) > head {
 		last := msgs[len(msgs)-1]
 		unanswered := last.Role == fantasy.MessageRoleUser ||
@@ -411,7 +419,57 @@ func (t *Transcript) contextAt(leaf string, current Model) ([]fantasy.Message, [
 		}
 		msgs, marks = msgs[:len(msgs)-1], marks[:len(marks)-1]
 	}
-	return msgs, marks, nil
+	return msgs, marks
+}
+
+// Frontier is where a context's size is counted from (plan 028 §3.7, P16):
+// the last assistant entry of the context whose request's usage the
+// provider reported, and what the context sends after it. Its usage covers
+// everything that request sent and the answer it got, so the size of the
+// context is that usage plus an estimate of After — the entry's own tool
+// message, and the steers, results and reminders after it — and nothing
+// before it is counted twice: the tool message a step's usage does not
+// cover is After's first message, once.
+type Frontier struct {
+	// Entry is the assistant entry, a copy (Entry.clone): its Usage, and the
+	// model that reported it.
+	Entry Entry
+	// After is what a request to current sends for the entries after Entry,
+	// by ContextAt's rules, with Marks beside it (ContextWithResults).
+	After []fantasy.Message
+	Marks []bool
+}
+
+// FrontierAt is the frontier of the context at leaf (Frontier): the last
+// assistant entry on the path that carries usage and was written after the
+// latest successful compaction on it — never one of that compaction's tail,
+// whose usage counted the context the compaction replaced. ok is false when
+// there is none: no assistant entry since the latest compaction carries
+// usage (an interrupted answer never does), or the path is empty. A failed
+// compaction replaced nothing, so an entry before it still counts. Leaf ""
+// is none; an unknown leaf is ErrUnknownEntry.
+func (t *Transcript) FrontierAt(leaf string, current Model) (f Frontier, ok bool, err error) {
+	path, err := t.walk(leaf) // leaf to root
+	if err != nil {
+		return Frontier{}, false, err
+	}
+	for k, i := range path {
+		e := &t.Entries[i]
+		if e.Type == TypeCompaction && e.Compaction.Succeeded() {
+			return Frontier{}, false, nil
+		}
+		if e.Type != TypeMessage || e.Message.Role != fantasy.MessageRoleAssistant || e.Usage == nil {
+			continue
+		}
+		after := make([]*Entry, 0, k)
+		for j := k - 1; j >= 0; j-- {
+			after = append(after, &t.Entries[path[j]])
+		}
+		msgs, marks := t.messages(after, current)
+		msgs, marks = trimUnanswered(msgs, marks, 0)
+		return Frontier{Entry: e.clone(), After: msgs, Marks: marks}, true, nil
+	}
+	return Frontier{}, false, nil
 }
 
 // contextEntries is what a request from leaf is built from (ContextAt): the

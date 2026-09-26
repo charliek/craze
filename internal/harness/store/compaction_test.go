@@ -954,3 +954,64 @@ func compactionText(t *testing.T, id, parent, fields string) string {
 		`"provider":"fireworks","model":"fireworks/kimi-k3","wire_model":"accounts/fireworks/models/kimi-k3",` +
 		`"usage":{"input":12,"output":34,"reasoning":5,"cache_read":6789,"cache_creation":1},` + fields + `}`
 }
+
+// TestTheFrontierIsAfterTheLatestCompaction (plan 028 §3.7, P16): the
+// frontier is the last assistant entry on the path that carries usage, and
+// what the context sends after it — a step's own tool message, and an
+// interrupted answer, which carries none — until a successful compaction,
+// after which it is only ever an entry written since: the tail's usage
+// counted the context the compaction replaced. A failed compaction replaces
+// nothing and moves nothing.
+func TestTheFrontierIsAfterTheLatestCompaction(t *testing.T) {
+	s := newStore(t, compacted(testOptions(t)))
+	if _, ok := s.Frontier(kimi); ok {
+		t.Fatal("an empty store has a frontier")
+	}
+	u1, u2 := Usage{Input: 1000, Output: 20, CacheRead: 300}, Usage{Input: 5, Output: 6, CacheCreation: 7}
+	check := func(what string, want Usage, after []string) {
+		t.Helper()
+		f, ok := s.Frontier(kimi)
+		if !ok || f.Entry.Usage == nil || *f.Entry.Usage != want || f.Entry.Model != kimi {
+			t.Fatalf("%s: frontier = %+v, %v; want the entry with usage %+v", what, f.Entry, ok, want)
+		}
+		if got := messageTexts(f.After); !slices.Equal(got, after) || len(f.Marks) != len(f.After) {
+			t.Fatalf("%s: after the frontier = %q (marks %v), want %q", what, got, f.Marks, after)
+		}
+	}
+
+	if err := s.AppendUser(user("q1", kimi)); err != nil {
+		t.Fatal(err)
+	}
+	step := calls(kimi, "call_a")
+	step.Usage = &u1
+	if _, err := s.AppendStep(nil, step, results(kimi, "call_a")); err != nil {
+		t.Fatal(err)
+	}
+	check("a tool step", u1, []string{resultA})
+
+	cut := answer("", "cut short", kimi)
+	cut.Interrupted, cut.StopReason = true, "cancelled"
+	if err := s.AppendAssistant(cut); err != nil {
+		t.Fatal(err)
+	}
+	check("an interrupted answer after it", u1, []string{resultA, "assistant: cut short"})
+
+	compact(t, s, 2, failure("the summarizer failed"))
+	check("a failed compaction", u1, []string{resultA, "assistant: cut short"})
+
+	compact(t, s, 2, success("one", entryByText(t, s, "q1")))
+	if f, ok := s.Frontier(kimi); ok {
+		t.Fatalf("right after a compaction whose tail holds the step: frontier = %+v; want none", f.Entry)
+	}
+
+	s.DiscardHeldUsers()
+	if err := s.AppendUser(user("q2", kimi)); err != nil {
+		t.Fatal(err)
+	}
+	a2 := answer("", "a2", kimi)
+	a2.Usage = &u2
+	if err := s.AppendAssistant(a2); err != nil {
+		t.Fatal(err)
+	}
+	check("a turn after the compaction", u2, nil)
+}

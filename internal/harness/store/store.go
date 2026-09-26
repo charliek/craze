@@ -849,6 +849,16 @@ func (s *Store) Steps(current Model) []Step {
 	return steps
 }
 
+// Frontier is the frontier of the context the next request sends to current
+// (Transcript.FrontierAt, plan 028 §3.7). Held entries are not in it. It
+// works after Close.
+func (s *Store) Frontier(current Model) (Frontier, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	f, ok, _ := s.t.FrontierAt(s.t.Leaf(), current) // the leaf is always known
+	return f, ok
+}
+
 // Transcript is a copy of the transcript as the store holds it: the header,
 // and every entry written, or read back and kept by Open, in file order.
 // Held entries are not in it. The copy's entry list is its own, so later

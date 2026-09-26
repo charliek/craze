@@ -18,19 +18,12 @@ import (
 // session's context so it fits the model's window again. compact does the
 // work; Session.Compact is /compact's turn of its own (§3.12's harness
 // side — the wire and the adapter are C13's). Neither decides WHEN to
-// compact: the pre-turn and mid-turn checks, the [compaction] config and
-// suppression are C10's; the segmented turn that restarts after a mid-turn
-// compaction is C11's; overflow recovery — the loop that calls compact with
-// reason overflow after a request fails too large, and decides what happens
-// next — is C12's.
-//
-// Provisional defaults, pending C10's [compaction] config in models.toml
-// (§3.6): the threshold percentage and tail budget compact assumes until a
-// model table entry can name its own. C10 replaces both with the table's.
-const (
-	defaultThresholdPercent = 85
-	defaultTailTokens       = int64(20000)
-)
+// compact: the pre-turn check, the threshold and suppression are
+// autocompact.go's (§3.6, §3.7); the segmented turn that restarts after a
+// mid-turn compaction is C11's; overflow recovery — the loop that calls
+// compact with reason overflow after a request fails too large, and decides
+// what happens next — is C12's. The settings are models.toml's [compaction]
+// (modeltable.Compaction).
 
 // summarizerAttempts bounds the summarizer's tries: the first and two more
 // (plan 028 §3.8 item 5).
@@ -115,7 +108,8 @@ var errTextFormOverflow = fmt.Errorf("harness: %w: the compaction's text form do
 // compact summarizes the session's context and cuts it (plan 028 §3.8,
 // §3.9, §3.10). m is the model the summarizer runs on: a turn's own for a
 // pre-turn, mid-turn or overflow compaction (§3.6, §3.11, §3.12), the
-// session's current one for a manual /compact (Session.Compact). turn is
+// session's current one for a manual /compact (Session.Compact); the
+// previous-model rule runs it on another (compactOn). turn is
 // the turn number the compaction entry records (§3.2, P10): the turn it
 // precedes for an automatic one, or the compaction's own for a manual one —
 // the caller's, since only the caller (run's segment loop, or
@@ -125,8 +119,10 @@ var errTextFormOverflow = fmt.Errorf("harness: %w: the compaction's text form do
 // command the `/compact …` they typed, recorded on the entry and replayed
 // as a Prompted (P10). emit is told Compacted{started} before the first
 // summarizer attempt and Compacted{ended} once compact returns, whatever the
-// outcome — always, by a defer (P34) — except when there was nothing to
-// compact at all, which emits neither (below).
+// outcome — on every return path (P34) — except when there was nothing to
+// compact at all, which emits neither (below). The ended one carries every
+// attempt's usage, recorded or not, so a child's observer counts what its
+// compactions cost (§3.17, P19).
 //
 // (The signature adapts §3.8's `(ctx, m, reason, focus, emit)`: turn and
 // command are added, since the entry needs both and compact is the one
@@ -154,6 +150,18 @@ var errTextFormOverflow = fmt.Errorf("harness: %w: the compaction's text form do
 // compact returns CompactResult{}, ctx.Err() either way — Session.Compact
 // turns that into a cancelled Result, as Run's finish does.
 func (s *Session) compact(ctx context.Context, m model, turn int, reason, focus, command string, emit func(Event)) (CompactResult, error) {
+	return s.compactOn(ctx, m, m.r, reason == store.CompactionOverflow, turn, reason, focus, command, emit)
+}
+
+// compactOn is compact with the two choices the previous-model rule makes
+// otherwise (plan 028 §3.6, PD13; autocompact.go): fit is the model whose
+// threshold the compacted context must get under — the turn's, when m is the
+// previous model that holds the context — which bounds the tail (tailBudget,
+// PD23); and textForm starts the summarizer in the text form rather than
+// switching to it on an overflow, as every overflow compaction does (P17)
+// and a pre-turn one whose previous model no longer resolves does on the
+// turn's model, whose window the aligned request may not fit.
+func (s *Session) compactOn(ctx context.Context, m model, fit modeltable.Resolved, textForm bool, turn int, reason, focus, command string, emit func(Event)) (CompactResult, error) {
 	if emit == nil {
 		emit = func(Event) {}
 	}
@@ -170,8 +178,8 @@ func (s *Session) compact(ctx context.Context, m model, turn int, reason, focus,
 	before := s.estimateContext(history)
 
 	steps := s.store.Steps(m.id())
-	threshold := compactionThreshold(m.r)
-	budget := tailBudget(defaultTailTokens, threshold)
+	cfg := s.compactionConfig()
+	budget := tailBudget(int64(cfg.TailTokens()), compactionThreshold(fit, cfg.ThresholdPercent()))
 	k := store.Cut(steps, budget, messageTokens)
 	if k == 0 {
 		// X32: a cut that would keep every step is no tail — summarize
@@ -190,7 +198,6 @@ func (s *Session) compact(ctx context.Context, m model, turn int, reason, focus,
 		usage   store.Usage
 		lastErr error
 	)
-	textForm := reason == store.CompactionOverflow
 	priorSummary, hasPrior := priorSummaryText(msgs, marks)
 
 attempts:
@@ -262,11 +269,11 @@ attempts:
 func (s *Session) compactCancelled(ctx context.Context, m model, turn int, reason, command string, usage store.Usage, before int64, emit func(Event)) (CompactResult, error) {
 	if usage != (store.Usage{}) {
 		if _, err := s.appendCompactionFailure(m, turn, reason, command, usage, ctx.Err().Error()); err != nil {
-			emit(Compacted{Phase: CompactionEnded, Reason: reason, TokensBefore: before, Err: s.redactor().String(err.Error())})
+			emit(Compacted{Phase: CompactionEnded, Reason: reason, TokensBefore: before, Err: s.redactor().String(err.Error()), Usage: usage})
 			return CompactResult{}, &errCompactionSaveFailed{err}
 		}
 	}
-	emit(Compacted{Phase: CompactionEnded, Reason: reason, TokensBefore: before, Err: "cancelled"})
+	emit(Compacted{Phase: CompactionEnded, Reason: reason, TokensBefore: before, Err: "cancelled", Usage: usage})
 	return CompactResult{}, ctx.Err()
 }
 
@@ -278,10 +285,10 @@ func (s *Session) compactCancelled(ctx context.Context, m model, turn int, reaso
 func (s *Session) compactFailed(m model, turn int, reason, command string, usage store.Usage, before int64, cause error, emit func(Event)) (CompactResult, error) {
 	msg := s.redactor().String(cleanErrorText(cause))
 	if _, err := s.appendCompactionFailure(m, turn, reason, command, usage, msg); err != nil {
-		emit(Compacted{Phase: CompactionEnded, Reason: reason, TokensBefore: before, Err: s.redactor().String(err.Error())})
+		emit(Compacted{Phase: CompactionEnded, Reason: reason, TokensBefore: before, Err: s.redactor().String(err.Error()), Usage: usage})
 		return CompactResult{}, &errCompactionSaveFailed{err}
 	}
-	emit(Compacted{Phase: CompactionEnded, Reason: reason, TokensBefore: before, Err: msg})
+	emit(Compacted{Phase: CompactionEnded, Reason: reason, TokensBefore: before, Err: msg, Usage: usage})
 	return CompactResult{}, cause
 }
 
@@ -290,7 +297,7 @@ func (s *Session) compactFailed(m model, turn int, reason, command string, usage
 func (s *Session) compactSucceeded(m model, turn int, reason, command string, usage store.Usage, before int64, firstKeptID string, k int, steps []store.Step, reply string, emit func(Event)) (CompactResult, error) {
 	n, err := s.nextSegmentNumber()
 	if err != nil {
-		emit(Compacted{Phase: CompactionEnded, Reason: reason, TokensBefore: before, Err: s.redactor().String(err.Error())})
+		emit(Compacted{Phase: CompactionEnded, Reason: reason, TokensBefore: before, Err: s.redactor().String(err.Error()), Usage: usage})
 		return CompactResult{}, &errCompactionSaveFailed{err}
 	}
 	segName := store.SegmentName(n)
@@ -318,10 +325,10 @@ func (s *Session) compactSucceeded(m model, turn int, reason, command string, us
 	id, err := s.store.AppendCompaction(turn, m.id(), usage, c)
 	if err != nil {
 		s.diagUnsaved(emit, turn, reason, usage, err)
-		emit(Compacted{Phase: CompactionEnded, Reason: reason, TokensBefore: before, Err: s.redactor().String(err.Error())})
+		emit(Compacted{Phase: CompactionEnded, Reason: reason, TokensBefore: before, Err: s.redactor().String(err.Error()), Usage: usage})
 		return CompactResult{}, &errCompactionSaveFailed{err}
 	}
-	emit(Compacted{Phase: CompactionEnded, Reason: reason, TokensBefore: c.TokensBefore, TokensAfter: c.TokensAfter})
+	emit(Compacted{Phase: CompactionEnded, Reason: reason, TokensBefore: c.TokensBefore, TokensAfter: c.TokensAfter, Usage: usage})
 	return CompactResult{EntryID: id, TokensBefore: c.TokensBefore, TokensAfter: c.TokensAfter}, nil
 }
 
@@ -386,9 +393,14 @@ func (s *Session) Compact(ctx context.Context, focus, command string, sink func(
 	if err := s.record(m, changes); err != nil {
 		return Result{}, err
 	}
-	_, cerr := s.compact(turnCtx, m, number, store.CompactionManual, focus, command, sink)
+	res, cerr := s.compact(turnCtx, m, number, store.CompactionManual, focus, command, sink)
 	switch {
 	case cerr == nil:
+		// A /compact is never suppressed, and it is one of the ways back:
+		// one that got the context under the threshold turns automatic
+		// compaction on again, and one that did not turns it off, as any
+		// compaction still over does (§3.6, PD23).
+		s.compacted(m, res)
 		return Result{StopReason: StopEndTurn}, nil
 	case errors.Is(cerr, store.ErrNothingToCompact):
 		// Nothing was recorded: the turn number this claim reserved is given
@@ -416,27 +428,6 @@ func (s *Session) estimateContext(msgs []fantasy.Message) int64 {
 		n += messageTokens(m)
 	}
 	return n
-}
-
-// compactionThreshold is §3.6's threshold for r: min(85% of the context
-// window, the window less its output ceiling), or 0 when the window is
-// unknown. Provisional (defaultThresholdPercent) until C10's [compaction]
-// config names its own percentage.
-func compactionThreshold(r modeltable.Resolved) int64 {
-	if r.ContextWindow <= 0 {
-		return 0
-	}
-	window := int64(r.ContextWindow)
-	t := window * defaultThresholdPercent / 100
-	if r.MaxOutputTokens > 0 {
-		if alt := window - int64(r.MaxOutputTokens); alt < t {
-			t = alt
-		}
-	}
-	if t < 0 {
-		t = 0
-	}
-	return t
 }
 
 // summarizerFailureKind classifies a failed summarizer attempt (plan 028

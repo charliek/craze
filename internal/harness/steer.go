@@ -189,7 +189,10 @@ type splice struct {
 //
 // The steers are skipped at the first step: its input is the prompt Run was
 // called with, and a steer accepted before it has a whole turn ahead of it to
-// be taken up in. The reminder is not, and this is why prepareStep no longer
+// be taken up in — unless a pre-turn compaction ran before it (plan 028 §3.6,
+// P36, R2-2): the person typed while it did, so the first request takes the
+// steer up, after the prompt and its reminder, as a later step would. The
+// reminder is not skipped, and this is why prepareStep no longer
 // returns at once there: Fantasy builds the turn's list once, as system +
 // Messages + Prompt, and keeps it across the steps (agent.go:1279-1284, 943),
 // so a reminder appended to Messages would land ahead of the prompt and one
@@ -200,7 +203,7 @@ func (t *turn) prepareStep(ctx context.Context, o fantasy.PrepareStepFunctionOpt
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if t.ctx.Err() == nil {
-		if o.StepNumber > 0 {
+		if o.StepNumber > 0 || t.compactedBeforeFirst {
 			for _, text := range t.steers.take() {
 				t.spliced = append(t.spliced, splice{text: text, at: len(o.Messages), msg: fantasy.NewUserMessage(text)})
 				// The turn's goroutine is the only one that reports a steer, and

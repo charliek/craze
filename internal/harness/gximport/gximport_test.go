@@ -783,6 +783,56 @@ func TestImportPreservesSubagents(t *testing.T) {
 	}
 }
 
+// TestImportKeepsCompaction: gx has no compaction settings, so an existing
+// [compaction] section survives a merge exactly as written — the keys it set,
+// and none it left out — without the merged table aliasing the caller's, and
+// through a Save and Load too (plan 028 §3.6, as [subagents] is kept).
+func TestImportKeepsCompaction(t *testing.T) {
+	off, pct := false, 70
+	existing := existingTable()
+	existing.Compaction = modeltable.Compaction{AutoSet: &off, ThresholdPercentSet: &pct}
+	if err := existing.Validate(); err != nil {
+		t.Fatalf("control: the existing table is invalid: %v", err)
+	}
+	got, _, err := Import(fixture, existing)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := modeltable.Compaction{AutoSet: &off, ThresholdPercentSet: &pct}
+	if !reflect.DeepEqual(got.Compaction, want) {
+		t.Fatalf("Compaction = %+v, want it kept as %+v", got.Compaction, want)
+	}
+	if got.Compaction.TailTokensSet != nil {
+		t.Fatal("the import set tail_tokens, which the section left out")
+	}
+	*got.Compaction.ThresholdPercentSet = 90
+	if pct != 70 {
+		t.Fatal("the merged table's section aliases the caller's")
+	}
+	*got.Compaction.ThresholdPercentSet = 70
+
+	dir := filepath.Join(t.TempDir(), "native")
+	if err := modeltable.Save(dir, got); err != nil {
+		t.Fatal(err)
+	}
+	back, err := modeltable.Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(back.Compaction, want) {
+		t.Fatalf("after Save/Load, Compaction = %+v, want %+v", back.Compaction, want)
+	}
+
+	// No existing table: no section.
+	fresh, _, err := Import(fixture, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(fresh.Compaction, modeltable.Compaction{}) {
+		t.Fatalf("Compaction with no existing table = %+v, want the zero value", fresh.Compaction)
+	}
+}
+
 func TestImportDefaultModelRule(t *testing.T) {
 	const two = okProvider + `
 [model."ok/a"]

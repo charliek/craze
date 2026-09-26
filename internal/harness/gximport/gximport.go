@@ -732,6 +732,9 @@ func clone(t *modeltable.Table) *modeltable.Table {
 		Effort: t.Subagents.Effort,
 		Tiers:  maps.Clone(t.Subagents.Tiers),
 	}
+	// [compaction] likewise (plan 028 §3.6): gx has no such settings, and the
+	// owner's survive every import as written — keys left out stay out.
+	out.Compaction = t.Compaction.Clone()
 	return out
 }
 

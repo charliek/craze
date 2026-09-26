@@ -1148,13 +1148,21 @@ func (o *childObserver) observe(ev Event) {
 		// refused for its ids and one whose save failed included — so the sum
 		// counts them all, however the child's turn then ended (panel P6).
 		o.steps++
-		u := &o.usage
-		u.Input, u.Output, u.Reasoning = u.Input+e.Usage.Input, u.Output+e.Usage.Output, u.Reasoning+e.Usage.Reasoning
-		u.CacheRead, u.CacheCreation = u.CacheRead+e.Usage.CacheRead, u.CacheCreation+e.Usage.CacheCreation
+		o.usage = addUsage(o.usage, e.Usage)
 		if strings.TrimSpace(o.cur.String()) != "" {
 			o.last = o.cur.String()
 		}
 		o.cur.Reset()
+	case Compacted:
+		// A compaction the child ran is billed like a step, on the child's
+		// model, and is no step (plan 028 §3.17, P19): its summarizer's
+		// usage — every attempt's, recorded or not — joins the sum, so both
+		// of the parent's feeds, SubagentFinished.Usage and the result's
+		// ChildUsage, carry it. The child's own entries hold it too; the
+		// parent's transcript only ever holds the sum.
+		if e.Phase == CompactionEnded {
+			o.usage = addUsage(o.usage, e.Usage)
+		}
 	}
 }
 

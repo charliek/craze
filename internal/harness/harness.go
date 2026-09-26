@@ -341,6 +341,11 @@ type Session struct {
 	replayed bool                    // Replay has run
 	cancel   context.CancelCauseFunc // the live turn's; nil when idle
 	done     chan struct{}           // closed when the live turn has returned
+	// autoOff is automatic compaction switched off (autocompact.go, plan 028
+	// §3.6): after a failed automatic compaction, or one that left the
+	// context over the threshold; on again after one under it, or a model
+	// change.
+	autoOff suppression
 }
 
 // renderer is what the session hands its store (store.Renderer, plan 028
