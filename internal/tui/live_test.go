@@ -269,10 +269,21 @@ func TestWiredModelChangeGoesThroughTheModelOption(t *testing.T) {
 // parity watch (parity_test.go), so every fold of every test in the package is
 // held against a model folded from the same events (plan 024 A11); a broken
 // rule fails the test that broke it, and the run.
+//
+// It also pins the command gate's mode for the package (plan 027 §3.12 "Unit
+// tests"): a model a test builds runs its gated calls inline, today's control
+// flow, so a test that drives Update directly sees Enter's effect in the
+// Update that pressed it. The frame runner takes its mode from FrameOpts, and
+// every frame golden runs in both (runFrameModes); the pump and a test that
+// asks (asyncGate) run asynchronously. And it installs the gate's
+// invisibility watch (gate_test.go), so every gate any test opens is held
+// still from its issuing Update to its reply.
 func TestMain(m *testing.M) {
 	pristineEnv = os.Environ()
 	lipgloss.SetColorProfile(termenv.TrueColor)
 	installParityWatch()
+	gateSyncDefault = true
+	installGateWatch()
 	// No test may shell out to xclip, overwrite the developer's clipboard or
 	// read it. The seam itself stays real so the OSC 52 bytes are still
 	// asserted; only the native tools are stubbed out, and the tests that care
@@ -283,6 +294,10 @@ func TestMain(m *testing.M) {
 	code := m.Run()
 	parity.report()
 	if err := parity.err(); err != nil && code == 0 {
+		fmt.Fprintln(os.Stderr, err)
+		code = 1
+	}
+	if err := gateWatch.err(); err != nil && code == 0 {
 		fmt.Fprintln(os.Stderr, err)
 		code = 1
 	}

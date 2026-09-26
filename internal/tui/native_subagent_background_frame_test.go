@@ -84,17 +84,21 @@ func after(gate <-chan struct{}, step frameStep) frameStep {
 // receipt — and the parent has said its piece and gone idle while the child
 // works on.
 func TestFrameGoldenNativeSubagentBackgroundRows80x24(t *testing.T) {
-	ws := frameWorkspace(t)
-	writeFrameFile(t, ws, "main.go", "package main\n")
-	echo := newFrameRouter("test", "wire-echo")
 	const task = "Find every Go file and say what it does."
-	echo.route("go", frameCalls(frameBackgroundCall("a1", "Scan the repo", task)),
-		frameParts(nativeTextParts("started the scan in the background"), nativeFinishParts()))
-	echo.route(task, frameRead("r1", "main.go"))
-	echo.hold(task, frameOpenText("main.go is the entry point"))
-	sess := frameBackground(t, ws, echo, &frameClock{})
+	// Each gate mode's run builds its session afresh (runFrameModes).
+	build := func() (agent.Session, string) {
+		ws := frameWorkspace(t)
+		writeFrameFile(t, ws, "main.go", "package main\n")
+		echo := newFrameRouter("test", "wire-echo")
+		echo.route("go", frameCalls(frameBackgroundCall("a1", "Scan the repo", task)),
+			frameParts(nativeTextParts("started the scan in the background"), nativeFinishParts()))
+		echo.route(task, frameRead("r1", "main.go"))
+		echo.hold(task, frameOpenText("main.go is the entry point"))
+		sess := frameBackground(t, ws, echo, &frameClock{})
+		return sess, ws
+	}
 
-	got := runNativeSubagentFrame(t, sess, ws, 80, 24,
+	got := runNativeSubagentFrame(t, build, 80, 24,
 		"<wait:idle>go<enter><wait:text:started the scan in the background><wait:idle><wait:text:15 tok>")
 	assertGolden(t, "native-subagent-background-rows-80x24", 80, 24, got)
 	for _, want := range []string{
@@ -115,22 +119,26 @@ func TestFrameGoldenNativeSubagentBackgroundRows80x24(t *testing.T) {
 // answered; the child's row lingers finished, still marked `bg`. The status
 // row never flips to working for the wake (§3.11: grok's behaviour, kept).
 func TestFrameGoldenNativeSubagentBackgroundWake100x30(t *testing.T) {
-	ws := frameWorkspace(t)
-	writeFrameFile(t, ws, "main.go", "package main\n")
-	echo := newFrameRouter("test", "wire-echo")
 	const task = "Find every Go file and say what it does."
-	parentDone := make(chan struct{})
-	echo.route("go",
-		frameCalls(frameBackgroundCall("a1", "Scan the repo", task)),
-		thenClose(frameParts(nativeTextParts("started the scan in the background"), nativeFinishParts()), parentDone))
-	echo.route(task, frameRead("r1", "main.go"),
-		after(parentDone, frameParts(nativeTextParts("main.go is the entry point"), nativeFinishParts())))
-	// The wake: the session's own turn, whose request ends with the result.
-	echo.routeWake(frameParts(nativeTextParts("the scan is in: main.go is the entry point, and that is the whole program"), nativeFinishParts()))
-	echo.route("thanks", frameParts(nativeTextParts("you are welcome"), nativeFinishParts()))
-	sess := frameBackground(t, ws, echo, &frameClock{})
+	// Each gate mode's run builds its session afresh (runFrameModes).
+	build := func() (agent.Session, string) {
+		ws := frameWorkspace(t)
+		writeFrameFile(t, ws, "main.go", "package main\n")
+		echo := newFrameRouter("test", "wire-echo")
+		parentDone := make(chan struct{})
+		echo.route("go",
+			frameCalls(frameBackgroundCall("a1", "Scan the repo", task)),
+			thenClose(frameParts(nativeTextParts("started the scan in the background"), nativeFinishParts()), parentDone))
+		echo.route(task, frameRead("r1", "main.go"),
+			after(parentDone, frameParts(nativeTextParts("main.go is the entry point"), nativeFinishParts())))
+		// The wake: the session's own turn, whose request ends with the result.
+		echo.routeWake(frameParts(nativeTextParts("the scan is in: main.go is the entry point, and that is the whole program"), nativeFinishParts()))
+		echo.route("thanks", frameParts(nativeTextParts("you are welcome"), nativeFinishParts()))
+		sess := frameBackground(t, ws, echo, &frameClock{})
+		return sess, ws
+	}
 
-	got := runNativeSubagentFrame(t, sess, ws, 100, 30,
+	got := runNativeSubagentFrame(t, build, 100, 30,
 		"<wait:idle>go<enter><wait:text:started the scan in the background><wait:idle>"+
 			"<wait:text:the agent continues><wait:text:the whole program>thanks<enter><wait:text:you are welcome><wait:idle>")
 	assertGolden(t, "native-subagent-background-wake-100x30", 100, 30, got)

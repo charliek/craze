@@ -138,7 +138,9 @@ func (m Model) confirmProvider(p agent.Provider, explicit bool) (tea.Model, tea.
 	}
 	// The same batch Init returns, for the same reason: the session this just
 	// built may be a load, and its replay is emitted from the client's read
-	// loop while Start is still running (§3.5).
+	// loop while Start is still running (§3.5). The read it arms is the one the
+	// command gate's reader rule counts (readOn).
+	m.reading = m.eng != nil
 	return m, tea.Batch(m.startCmd(), waitEvent(m.eng))
 }
 

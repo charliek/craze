@@ -51,17 +51,19 @@ func TestFrameGoldenNativeMenu(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	model := &nativeScriptedModel{provider: "test", wire: "wire-echo"}
-	sess := agent.NewNative(agent.Options{Workspace: ws, ContentHome: home},
-		nativeSessionTweak(t.TempDir(), nativeOneModelTable(), model))
-
 	// "lin" narrows the menu to the three rows this test is about, so the
-	// golden is the labelling rather than a page of craze's own builtins.
-	got, _, err := RunFrameScript(Config{
-		Session:   sess,
-		Theme:     "tokyo-night",
-		Workspace: ws,
-		Yolo:      true,
+	// golden is the labelling rather than a page of craze's own builtins. The
+	// workspace and the content home are only read, so both gate modes' runs
+	// share them; each has a session and a model of its own (runFrameModes).
+	got, _, err := runFrameModes(t, func() Config {
+		model := &nativeScriptedModel{provider: "test", wire: "wire-echo"}
+		return Config{
+			Session: agent.NewNative(agent.Options{Workspace: ws, ContentHome: home},
+				nativeSessionTweak(t.TempDir(), nativeOneModelTable(), model)),
+			Theme:     "tokyo-night",
+			Workspace: ws,
+			Yolo:      true,
+		}
 	}, 100, 30, "<wait:idle>/lin", FrameOpts{Timeout: 10 * time.Second})
 	if err != nil {
 		t.Fatalf("run frame script: %v", err)

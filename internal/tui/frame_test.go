@@ -222,19 +222,70 @@ func frameWorkspace(t *testing.T) string {
 	return ws
 }
 
+// frameGateModes is the two modes every frame golden runs in (plan 027 §3.12
+// (d)): the gateSync baseline — a gated call inline, today's synchronous
+// control flow — and the asynchronous gate every real run uses. Both run in
+// every run of the package; there is no knob that skips one.
+var frameGateModes = [...]struct {
+	name string
+	sync bool
+}{{"gateSync", true}, {"async", false}}
+
+// runFrameModes runs a frame script once in each gate mode, each against a
+// fresh Config from build — a session is spent by the run that drives it —
+// and fails, naming the mode, unless the two runs end on the same frame, plain
+// and raw, with the same error. It answers the async run's, which the caller
+// holds against its golden: two equal frames make that one golden check hold
+// for both modes, so a continuation that is not today's post-call code, or an
+// order the gate changed, moves the golden in one mode and fails here.
+func runFrameModes(t *testing.T, build func() Config, cols, rows int, script string, opts FrameOpts) (string, string, error) {
+	t.Helper()
+	type run struct {
+		plain, raw string
+		err        error
+	}
+	var runs [len(frameGateModes)]run
+	for i, mode := range frameGateModes {
+		o := opts
+		o.gateSync = mode.sync
+		plain, raw, err := RunFrameScript(build(), cols, rows, script, o)
+		runs[i] = run{plain, raw, err}
+	}
+	base, got := runs[0], runs[1]
+	if fmt.Sprint(base.err) != fmt.Sprint(got.err) {
+		t.Fatalf("the gate modes disagree: %s ended with %v, %s with %v\n--- %s ---\n%s\n--- %s ---\n%s",
+			frameGateModes[0].name, base.err, frameGateModes[1].name, got.err,
+			frameGateModes[0].name, base.plain, frameGateModes[1].name, got.plain)
+	}
+	if base.plain != got.plain || base.raw != got.raw {
+		t.Fatalf("the gate modes disagree: the %s frame is not the %s frame (%s)\n--- %s ---\n%s\n--- %s ---\n%s",
+			frameGateModes[1].name, frameGateModes[0].name, frameLineDiff(base.plain, got.plain),
+			frameGateModes[0].name, base.plain, frameGateModes[1].name, got.plain)
+	}
+	return got.plain, got.raw, got.err
+}
+
+// frameLineDiff names the first line two frames differ on.
+func frameLineDiff(a, b string) string {
+	al, bl := strings.Split(a, "\n"), strings.Split(b, "\n")
+	for i := range max(len(al), len(bl)) {
+		var x, y string
+		if i < len(al) {
+			x = al[i]
+		}
+		if i < len(bl) {
+			y = bl[i]
+		}
+		if x != y {
+			return fmt.Sprintf("line %d: %q vs %q", i+1, x, y)
+		}
+	}
+	return "the raw frames differ"
+}
+
 func runStubFrame(t *testing.T, cols, rows int, script string) string {
 	t.Helper()
-	isolateSkillsHome(t)
-	plain, _, err := RunFrameScript(Config{
-		Session:   NewStub(),
-		Theme:     "tokyo-night",
-		Workspace: frameWorkspace(t),
-		Model:     "grok",
-		Yolo:      true,
-	}, cols, rows, script, FrameOpts{Timeout: 10 * time.Second})
-	if err != nil {
-		t.Fatalf("run frame script: %v", err)
-	}
+	plain, _ := runStubFrameRaw(t, cols, rows, script)
 	return plain
 }
 
@@ -244,12 +295,14 @@ func runStubFrame(t *testing.T, cols, rows int, script string) string {
 func runStubFrameRaw(t *testing.T, cols, rows int, script string) (string, string) {
 	t.Helper()
 	isolateSkillsHome(t)
-	plain, raw, err := RunFrameScript(Config{
-		Session:   NewStub(),
-		Theme:     "tokyo-night",
-		Workspace: frameWorkspace(t),
-		Model:     "grok",
-		Yolo:      true,
+	plain, raw, err := runFrameModes(t, func() Config {
+		return Config{
+			Session:   NewStub(),
+			Theme:     "tokyo-night",
+			Workspace: frameWorkspace(t),
+			Model:     "grok",
+			Yolo:      true,
+		}
 	}, cols, rows, script, FrameOpts{Timeout: 10 * time.Second})
 	if err != nil {
 		t.Fatalf("run frame script: %v", err)
@@ -262,12 +315,14 @@ func runStubFrameRaw(t *testing.T, cols, rows int, script string) (string, strin
 func runThemeFrame(t *testing.T, cols, rows int, theme, script string) (string, string) {
 	t.Helper()
 	isolateSkillsHome(t)
-	plainOut, raw, err := RunFrameScript(Config{
-		Session:   NewStub(),
-		Theme:     theme,
-		Workspace: frameWorkspace(t),
-		Model:     "grok",
-		Yolo:      true,
+	plainOut, raw, err := runFrameModes(t, func() Config {
+		return Config{
+			Session:   NewStub(),
+			Theme:     theme,
+			Workspace: frameWorkspace(t),
+			Model:     "grok",
+			Yolo:      true,
+		}
 	}, cols, rows, script, FrameOpts{Timeout: 10 * time.Second, ANSI: true})
 	if err != nil {
 		t.Fatalf("run frame script: %v", err)
@@ -814,32 +869,33 @@ func runFakeFrameOpts(t *testing.T, script string, cols, rows int, keys string, 
 	t.Helper()
 	bin := buildFakeAgent(t)
 	isolateSkillsHome(t)
-	ws := frameWorkspace(t)
 	if o.provider.Name() == "" {
 		o.provider = agent.CursorProvider()
 	}
 	prov := o.provider
-	sess := agent.New(agent.Options{
-		Binary:      bin,
-		ExtraArgs:   []string{"-script=" + script},
-		Workspace:   ws,
-		Force:       o.force,
-		PluginDirs:  o.pluginDirs,
-		Interactive: true,
-		Stderr:      io.Discard,
-		Provider:    &prov,
-	})
 	timeout := o.timeout
 	if timeout <= 0 {
 		timeout = 15 * time.Second
 	}
-	plain, _, err := RunFrameScript(Config{
-		Session:        sess,
-		Theme:          "tokyo-night",
-		Workspace:      ws,
-		Yolo:           o.force,
-		Provider:       prov,
-		ProviderLocked: true,
+	plain, _, err := runFrameModes(t, func() Config {
+		ws := frameWorkspace(t)
+		return Config{
+			Session: agent.New(agent.Options{
+				Binary:      bin,
+				ExtraArgs:   []string{"-script=" + script},
+				Workspace:   ws,
+				Force:       o.force,
+				PluginDirs:  o.pluginDirs,
+				Interactive: true,
+				Stderr:      io.Discard,
+				Provider:    &prov,
+			}),
+			Theme:          "tokyo-night",
+			Workspace:      ws,
+			Yolo:           o.force,
+			Provider:       prov,
+			ProviderLocked: true,
+		}
 	}, cols, rows, keys, FrameOpts{Timeout: timeout, Freeze: o.freeze})
 	if err != nil {
 		t.Fatalf("run %s frame: %v", script, err)
@@ -1193,14 +1249,16 @@ func TestFrameGoldenModelDialog(t *testing.T) {
 func runStubCatalogFrame(t *testing.T, cols, rows int, cfg []agent.ConfigOption, script string) string {
 	t.Helper()
 	isolateSkillsHome(t)
-	stub := NewStub()
-	stub.SetModelCatalogs(map[string][]agent.ConfigOption{"grok": cfg})
-	plain, _, err := RunFrameScript(Config{
-		Session:   stub,
-		Theme:     "tokyo-night",
-		Workspace: frameWorkspace(t),
-		Model:     "grok",
-		Yolo:      true,
+	plain, _, err := runFrameModes(t, func() Config {
+		stub := NewStub()
+		stub.SetModelCatalogs(map[string][]agent.ConfigOption{"grok": cfg})
+		return Config{
+			Session:   stub,
+			Theme:     "tokyo-night",
+			Workspace: frameWorkspace(t),
+			Model:     "grok",
+			Yolo:      true,
+		}
 	}, cols, rows, script, FrameOpts{Timeout: 10 * time.Second})
 	if err != nil {
 		t.Fatalf("run frame script: %v", err)
@@ -1439,21 +1497,22 @@ func TestFrameGoldenSelection(t *testing.T) {
 func TestFrameGoldenSelectStyledRow(t *testing.T) {
 	bin := buildFakeAgent(t)
 	isolateSkillsHome(t)
-	ws := frameWorkspace(t)
-	sess := agent.New(agent.Options{
-		Binary:      bin,
-		ExtraArgs:   []string{"-script=diff"},
-		Workspace:   ws,
-		Force:       true,
-		Interactive: true,
-		Stderr:      io.Discard,
-	})
 	// Rows 10 and 11 of the expanded diff are the − and + lines.
-	plain, raw, err := RunFrameScript(Config{
-		Session:   sess,
-		Theme:     "tokyo-night",
-		Workspace: ws,
-		Yolo:      true,
+	plain, raw, err := runFrameModes(t, func() Config {
+		ws := frameWorkspace(t)
+		return Config{
+			Session: agent.New(agent.Options{
+				Binary:      bin,
+				ExtraArgs:   []string{"-script=diff"},
+				Workspace:   ws,
+				Force:       true,
+				Interactive: true,
+				Stderr:      io.Discard,
+			}),
+			Theme:     "tokyo-night",
+			Workspace: ws,
+			Yolo:      true,
+		}
 	}, 100, 30, "<wait:idle>go<enter><wait:text:done diff><wait:idle><ctrl-o>"+
 		"<wait:text:package main><drag:5,10,45,11><wait:copied>", FrameOpts{Timeout: 15 * time.Second})
 	if err != nil {

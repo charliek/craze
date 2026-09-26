@@ -39,9 +39,16 @@ func (b *engineBackend) ClientID() string                { return b.client }
 
 // Read reads the engine's primary directly: the session's own stream, into
 // which the engine publishes too, so one read carries the agent's events and
-// the engine's alike. A ctx already done returns its error and takes no event;
-// a closed primary is ErrClosed (the log never closes it while a program
-// reads it, but a reader must not take a closed channel for an event).
+// the engine's alike. A closed primary is ErrClosed (the log never closes it
+// while a program reads it, but a reader must not take a closed channel for
+// an event).
+//
+// The contract is backend.Backend.Read's: a ctx done before an event is taken
+// returns its error and takes nothing, and an event that was taken is always
+// returned. The receive and ctx.Done race in the select below, and Go may
+// pick the event after the ctx is done; once it has, the event is the answer
+// — it is never checked against the ctx again and dropped, because it is
+// already off the primary.
 func (b *engineBackend) Read(ctx context.Context) (backend.Item, error) {
 	if err := ctx.Err(); err != nil {
 		return backend.Item{}, err

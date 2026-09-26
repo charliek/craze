@@ -78,6 +78,9 @@ type pumpItem struct {
 // the single reader of the session's event stream, and the bookkeeping that
 // stops any of it outliving the test.
 type pump struct {
+	// mode is the gate mode the test's model came to the pump in, which the
+	// pump hands it back in whenever it is left with no gate open (update).
+	mode bool
 	// ctrl is the engine the model drives its session through, which is also
 	// where the one event stream comes from: the engine publishes into the
 	// session's own log, so the reader below sees the agent's events and the
@@ -152,6 +155,7 @@ func pumpFor(t *testing.T, m Model) *pump {
 		ctrl = engineOf(t, m)
 	}
 	p := &pump{
+		mode:       m.gateSync,
 		ctrl:       ctrl,
 		msgs:       make(chan pumpItem, 256),
 		dead:       make(chan struct{}),
@@ -240,6 +244,24 @@ func (p *pump) setReceivedHook(h func(agent.Event)) {
 	p.stateMu.Lock()
 	p.afterReceive = h
 	p.stateMu.Unlock()
+}
+
+// update is Update as the pump runs it: the model's gated calls asynchronous,
+// as they are in a real program (plan 027 §3.12 "Unit tests") — the pump is a
+// runtime, running every command on a goroutine of its own, so a gate's reply
+// comes back through it like any other command's message. The model is handed
+// back in the mode it came to the pump in (mode) once no gate is open and
+// nothing is held, so a test that goes on to drive Update directly drives it
+// as a unit fixture does; one left mid-gate stays asynchronous, as a real
+// program would be, until the pump finishes the gate.
+func (p *pump) update(m Model, msg tea.Msg) (Model, tea.Cmd) {
+	m.gateSync = false
+	tm, cmd := m.Update(msg)
+	next := tm.(Model)
+	if next.gate == nil && len(next.held) == 0 {
+		next.gateSync = p.mode
+	}
+	return next, cmd
 }
 
 // deliver queues a message for Update, or reports that the test is over.
@@ -636,8 +658,7 @@ func (p *pump) drain(m Model) Model {
 // apply is the one place a message reaches Update: it runs the handler,
 // dispatches what it asked for, and accounts for the command that reported it.
 func (p *pump) apply(m Model, item pumpItem) Model {
-	tm, cmd := m.Update(item.msg)
-	next := tm.(Model)
+	next, cmd := p.update(m, item.msg)
 	p.dispatch(cmd)
 	if item.fromCmd {
 		p.resolved()
@@ -650,8 +671,7 @@ func (p *pump) apply(m Model, item pumpItem) Model {
 func pumpApply(t *testing.T, m Model, msg tea.Msg) Model {
 	t.Helper()
 	p := pumpFor(t, m)
-	tm, cmd := m.Update(msg)
-	m = tm.(Model)
+	m, cmd := p.update(m, msg)
 	p.dispatch(cmd)
 	return m
 }

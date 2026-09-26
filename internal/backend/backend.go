@@ -41,9 +41,15 @@ type Backend interface {
 	// engine.Command).
 	ClientID() string
 
-	// Read is the stream: one item at a time, in order, from one reader. A
-	// cancelled ctx returns ctx.Err() without consuming an item. ErrClosed
-	// once the stream has ended.
+	// Read is the stream: one item at a time, in order, from one reader.
+	// ErrClosed once the stream has ended.
+	//
+	// A ctx that is done before an item is taken returns ctx.Err() and takes
+	// nothing: the item is still there for the next Read. An item that was
+	// taken is ALWAYS returned, with a nil error, even if ctx was cancelled
+	// meanwhile — a done ctx and a ready item race, and either may win — so
+	// a caller must never discard what a Read answers: an item it drops is
+	// gone from the stream for good.
 	Read(ctx context.Context) (Item, error)
 
 	// Commands: engine.Control's, ctx first. In process the ones that wait

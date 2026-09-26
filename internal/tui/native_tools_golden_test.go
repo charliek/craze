@@ -27,26 +27,28 @@ import (
 // which installs it and sets CRAZE_REQUIRE_RG.
 func TestFrameGoldenNativeTools80x24(t *testing.T) {
 	requireFrameRG(t)
-	ws := frameWorkspace(t)
-	writeFrameFile(t, ws, "main.go", "package main\n\n// TODO: ship it\n")
-	writeFrameFile(t, ws, "notes.txt", "alpha\n")
+	// Each gate mode's run edits a workspace of its own, with a model of its
+	// own (runFrameModes).
+	got, _, err := runFrameModes(t, func() Config {
+		ws := frameWorkspace(t)
+		writeFrameFile(t, ws, "main.go", "package main\n\n// TODO: ship it\n")
+		writeFrameFile(t, ws, "notes.txt", "alpha\n")
 
-	model := &nativeScriptedModel{provider: "test", wire: "wire-echo"}
-	model.steps = [][]fantasy.StreamPart{
-		nativeToolStep("c1", "read", `{"filePath":"main.go"}`),
-		nativeToolStep("c2", "edit", `{"filePath":"notes.txt","oldString":"alpha","newString":"beta"}`),
-		nativeToolStep("c3", "bash", `{"command":"echo hi"}`),
-		nativeToolStep("c4", "bash", `{"command":"echo boom >&2; exit 3"}`),
-		nativeToolStep("c5", "grep", `{"pattern":"TODO","path":"."}`),
-		cat(nativeTextParts("done tools"), nativeFinishParts()),
-	}
-	sess := agent.NewNative(agent.Options{Workspace: ws, ContentHome: t.TempDir()}, nativeSessionTweak(t.TempDir(), nativeOneModelTable(), model))
-
-	got, _, err := RunFrameScript(Config{
-		Session:   sess,
-		Theme:     "tokyo-night",
-		Workspace: ws,
-		Yolo:      true,
+		model := &nativeScriptedModel{provider: "test", wire: "wire-echo"}
+		model.steps = [][]fantasy.StreamPart{
+			nativeToolStep("c1", "read", `{"filePath":"main.go"}`),
+			nativeToolStep("c2", "edit", `{"filePath":"notes.txt","oldString":"alpha","newString":"beta"}`),
+			nativeToolStep("c3", "bash", `{"command":"echo hi"}`),
+			nativeToolStep("c4", "bash", `{"command":"echo boom >&2; exit 3"}`),
+			nativeToolStep("c5", "grep", `{"pattern":"TODO","path":"."}`),
+			cat(nativeTextParts("done tools"), nativeFinishParts()),
+		}
+		return Config{
+			Session:   agent.NewNative(agent.Options{Workspace: ws, ContentHome: t.TempDir()}, nativeSessionTweak(t.TempDir(), nativeOneModelTable(), model)),
+			Theme:     "tokyo-night",
+			Workspace: ws,
+			Yolo:      true,
+		}
 	}, 80, 24, "<wait:idle>go<enter><wait:text:done tools><wait:idle><ctrl-o><wait:text:package main>",
 		FrameOpts{Timeout: 20 * time.Second})
 	if err != nil {

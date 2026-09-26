@@ -396,6 +396,19 @@ func (m Model) slashExactlyTyped() bool {
 	return strings.EqualFold(name, it.Name) || strings.EqualFold(name, it.qualifiedAlias())
 }
 
+// noAnswerRenameNote is /rename's note when SetTitle did not answer in time
+// (ErrNoAnswer): the command may have run, so the note says the title may have
+// changed, and the status line shows whatever the session says it is.
+const noAnswerRenameNote = "no answer from the session — the title may have changed"
+
+// renamed is what a rename that landed shows: the session's title read back,
+// and the note.
+func (m Model) renamed(title string) Model {
+	m.refreshSnap()
+	m.addNote("renamed to " + title)
+	return m
+}
+
 func (m Model) runBuiltin(name, args string) (tea.Model, tea.Cmd) {
 	// Every branch consumes the draft — clearing it, replacing it, or sending
 	// it — so the menu that draft opened goes with it.
@@ -440,28 +453,48 @@ func (m Model) runBuiltin(name, args string) (tea.Model, tea.Cmd) {
 			m.addError("session is still starting")
 			return m, nil
 		}
-		if m.eng != nil {
-			// SetTitle renames, pins and records the row (plan 021 §3.8). Two
-			// different failures come back from it:
-			//
-			//   - the rename itself was refused — the log's outbox is backed up
-			//     — and nothing was renamed or pinned, so the note and the row
-			//     would both be saying something untrue: the error alone;
-			//   - the rename happened and only the index write failed
-			//     (ErrIndexWrite), which is the error row writeIndex used to
-			//     draw, followed by the note, in that order, because the
-			//     session really is renamed.
-			if err := m.eng.SetTitle(context.Background(), m.nextCmd(), title); err != nil {
-				if !errors.Is(err, engine.ErrIndexWrite) {
+		if m.eng == nil {
+			return m.renamed(title), nil
+		}
+		// SetTitle renames, pins and records the row (plan 021 §3.8), and can
+		// wait on the index's lock, so it goes through the command gate
+		// (§3.12): the call runs off the Update, and everything that followed
+		// it — here, and nothing in handleEnter, handleKey or update after this
+		// returns — is its continuation. The command id is minted now, in the
+		// Update that issued it.
+		c := m.nextCmd()
+		return m.run(gateDeadline,
+			func(ctx context.Context, b backend.Backend) (any, error) {
+				return nil, b.SetTitle(ctx, c, title)
+			},
+			func(m Model, r gateReply) (Model, tea.Cmd) {
+				// Three different failures come back from it:
+				//
+				//   - no answer in time (ErrNoAnswer): the rename may or may not
+				//     have happened, so the title is read back from the session
+				//     and the note says the outcome is unknown;
+				//   - the rename itself was refused — the log's outbox is backed
+				//     up — and nothing was renamed or pinned, so the note and
+				//     the row would both be saying something untrue: the error
+				//     alone;
+				//   - the rename happened and only the index write failed
+				//     (ErrIndexWrite), which is the error row writeIndex used to
+				//     draw, followed by the note, in that order, because the
+				//     session really is renamed.
+				switch err := r.err; {
+				case err == nil:
+				case errors.Is(err, ErrNoAnswer):
+					m.refreshSnap()
+					m.addNote(noAnswerRenameNote)
+					return m, nil
+				case !errors.Is(err, engine.ErrIndexWrite):
 					m.addError(err.Error())
 					return m, nil
+				default:
+					m.addError(indexWriteText(err))
 				}
-				m.addError(indexWriteText(err))
-			}
-		}
-		m.refreshSnap()
-		m.addNote("renamed to " + title)
-		return m, nil
+				return m.renamed(title), nil
+			})
 	case "model":
 		if args == "" {
 			m.input.SetValue("")

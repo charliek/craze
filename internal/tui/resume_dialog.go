@@ -230,6 +230,9 @@ func (m Model) confirmResume(row sessions.Row) (tea.Model, tea.Cmd) {
 	if m.model == "" {
 		m.model = "default"
 	}
+	// Init's batch, as confirmProvider returns it; the read it arms is the one
+	// the command gate's reader rule counts (readOn).
+	m.reading = m.eng != nil
 	return m, tea.Batch(m.startCmd(), waitEvent(m.eng))
 }
 

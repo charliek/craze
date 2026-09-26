@@ -71,7 +71,7 @@ func TestFrameGoldenNativeResume100x30(t *testing.T) {
 		return Config{Session: sess, Theme: "tokyo-night", Workspace: ws, Yolo: true, Loading: true}
 	}
 
-	got, _, err := RunFrameScript(build(), 100, 30, "<wait:text:restored><wait:idle>", FrameOpts{Timeout: 20 * time.Second})
+	got, _, err := runFrameModes(t, build, 100, 30, "<wait:text:restored><wait:idle>", FrameOpts{Timeout: 20 * time.Second})
 	if err != nil {
 		t.Fatalf("run frame script: %v", err)
 	}
@@ -100,7 +100,7 @@ func TestFrameGoldenNativeResume100x30(t *testing.T) {
 
 	// Expanded, each row with a body ends with the label after its output:
 	// the read's content, and each command's stream.
-	open, _, err := RunFrameScript(build(), 100, 50, "<wait:text:restored><wait:idle><ctrl-o><wait:text:(replayed)>", FrameOpts{Timeout: 20 * time.Second})
+	open, _, err := runFrameModes(t, build, 100, 50, "<wait:text:restored><wait:idle><ctrl-o><wait:text:(replayed)>", FrameOpts{Timeout: 20 * time.Second})
 	if err != nil {
 		t.Fatalf("run frame script: %v", err)
 	}

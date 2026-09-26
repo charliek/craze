@@ -69,6 +69,13 @@ type FrameOpts struct {
 	// built by the caller, outside. Its result replaces that Config entirely
 	// (§3.7). nil leaves the passed Config alone.
 	Setup func() (Config, error)
+	// gateSync runs the model's gated calls inline — the command gate's
+	// test-only baseline (gate.go), today's synchronous control flow — where
+	// the zero value runs them asynchronously, as every production run does.
+	// It is unexported so only internal/tui's own tests can choose it: every
+	// frame golden runs in both modes against the same golden file (plan 027
+	// §3.12 (d)), and `craze frame` is always asynchronous.
+	gateSync bool
 }
 
 type frameTokenKind int
@@ -328,6 +335,12 @@ func parseFrameQuad(s string) (int, int, int, int, error) {
 }
 
 func (w waitSpec) match(s frameState) bool {
+	if s.gated {
+		// A frame published while a gated call waits for its reply shows the
+		// issuing Update's own work and nothing after it: no wait may match it
+		// (plan 027 §3.12, "The frame harness").
+		return false
+	}
 	switch w.kind {
 	case "idle":
 		// A loaded session is not idle while its replay is still arriving:
@@ -349,6 +362,10 @@ func (w waitSpec) match(s frameState) bool {
 }
 
 // frameState is one published frame plus the model state the waits look at.
+//
+// sync is the last sync token the model acknowledged (Model.syncAck), which is
+// what each token's barrier waits for. gated says a gated call was waiting for
+// its reply when the frame was published: such a frame matches no wait.
 type frameState struct {
 	view    string
 	plain   string
@@ -362,6 +379,7 @@ type frameState struct {
 	card      bool
 	copied    bool
 	sync      int
+	gated     bool
 }
 
 // frameBus carries frames from the bubbletea goroutine to the script runner.
@@ -455,7 +473,11 @@ func (b *frameBus) await(pred func(frameState) bool, timeout time.Duration, stop
 }
 
 // frameSyncMsg is a no-op message the runner uses to know its previous message
-// has been processed and published.
+// has been processed and published. It goes through the model's own FIFO: the
+// model acknowledges it (Model.syncAck) when it is reduced — at once when
+// nothing is waiting, in the release of a gated call it arrived during, or
+// when drained behind the messages held before it (gate.go's syncFrame) — and
+// it never runs the Update wrapper.
 type frameSyncMsg struct{ n int }
 
 // frameModel wraps the real Model and publishes inner.View() after every
@@ -463,7 +485,6 @@ type frameSyncMsg struct{ n int }
 type frameModel struct {
 	inner Model
 	bus   *frameBus
-	sync  int
 }
 
 func (f frameModel) Init() tea.Cmd {
@@ -473,11 +494,6 @@ func (f frameModel) Init() tea.Cmd {
 }
 
 func (f frameModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	if s, ok := msg.(frameSyncMsg); ok {
-		f.sync = s.n
-		f.publish()
-		return f, nil
-	}
 	im, cmd := f.inner.Update(msg)
 	f.inner = im.(Model)
 	f.publish()
@@ -497,7 +513,8 @@ func (f frameModel) publish() {
 		replaying: f.inner.replaying,
 		card:      f.inner.cardOpen(),
 		copied:    f.inner.copyLingering(),
-		sync:      f.sync,
+		sync:      f.inner.syncAck,
+		gated:     f.inner.gate != nil,
 	})
 }
 
@@ -574,6 +591,10 @@ func RunFrameScript(cfg Config, cols, rows int, script string, opts FrameOpts) (
 
 	m := New(cfg)
 	m.frozen = opts.Freeze
+	// Always set from the options, never left to New: a test binary's default
+	// is the baseline (gateSyncDefault), and a frame is asynchronous unless its
+	// caller asked for the baseline.
+	m.gateSync = opts.gateSync
 	p := tea.NewProgram(frameModel{inner: m, bus: bus}, tea.WithoutRenderer(), tea.WithInput(nil))
 	done := make(chan error, 1)
 	finished := make(chan struct{})
@@ -652,8 +673,12 @@ func (r *frameRunner) run(toks []frameToken, cols, rows int) error {
 // startedSpec matches once Start has returned, either way: a failed Start
 // leaves the model in the error state rather than started. A pre-start picker
 // counts too — nothing is starting until the script chooses a row, and the
-// script is what the runner is holding.
+// script is what the runner is holding. Like every wait, it never matches a
+// gated frame.
 func startedSpec(s frameState) bool {
+	if s.gated {
+		return false
+	}
 	return s.started || s.status == statusError || s.picking
 }
 

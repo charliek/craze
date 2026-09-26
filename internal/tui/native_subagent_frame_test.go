@@ -271,14 +271,19 @@ func frameOpenText(text string) []fantasy.StreamPart {
 	return parts[:len(parts)-1]
 }
 
-// runNativeSubagentFrame runs keys against sess and returns the frame.
-func runNativeSubagentFrame(t *testing.T, sess agent.Session, ws string, cols, rows int, keys string) string {
+// runNativeSubagentFrame runs keys against the session build makes, in its
+// workspace, and returns the frame: once per gate mode (runFrameModes), each
+// run against a session built afresh, since a run spends its routers' steps.
+func runNativeSubagentFrame(t *testing.T, build func() (agent.Session, string), cols, rows int, keys string) string {
 	t.Helper()
-	got, _, err := RunFrameScript(Config{
-		Session:   sess,
-		Theme:     "tokyo-night",
-		Workspace: ws,
-		Yolo:      true,
+	got, _, err := runFrameModes(t, func() Config {
+		sess, ws := build()
+		return Config{
+			Session:   sess,
+			Theme:     "tokyo-night",
+			Workspace: ws,
+			Yolo:      true,
+		}
 	}, cols, rows, keys, FrameOpts{Timeout: 20 * time.Second, Freeze: true})
 	if err != nil {
 		t.Fatalf("run frame script: %v", err)
@@ -309,8 +314,7 @@ func oneRunningChild(t *testing.T) (agent.Session, string) {
 // which only the call's second event carries, and the child's tokens, which
 // are final once the child is held.
 func TestFrameGoldenNativeSubagentRows80x24(t *testing.T) {
-	sess, ws := oneRunningChild(t)
-	got := runNativeSubagentFrame(t, sess, ws, 80, 24, "<wait:idle>go<enter><wait:text:Scan the repo  running><wait:text:15 tok>")
+	got := runNativeSubagentFrame(t, func() (agent.Session, string) { return oneRunningChild(t) }, 80, 24, "<wait:idle>go<enter><wait:text:Scan the repo  running><wait:text:15 tok>")
 	assertGolden(t, "native-subagent-rows-80x24", 80, 24, got)
 	for _, want := range []string{"○ general-purpose  Scan the repo  0s · 15 tok", "● agent  Scan the repo  running", "← 1 agent"} {
 		if !strings.Contains(got, want) {
@@ -325,8 +329,7 @@ func TestFrameGoldenNativeSubagentRows80x24(t *testing.T) {
 // children get. The answer so far is the child's last event before it is
 // held, so once it is drawn every event before it has been.
 func TestFrameGoldenNativeSubagentView100x30(t *testing.T) {
-	sess, ws := oneRunningChild(t)
-	got := runNativeSubagentFrame(t, sess, ws, 100, 30,
+	got := runNativeSubagentFrame(t, func() (agent.Session, string) { return oneRunningChild(t) }, 100, 30,
 		"<wait:idle>go<enter><wait:text:Scan the repo  running><wait:text:15 tok><down><enter>"+
 			"<wait:text:main.go is the entry point><wait:text:15 tok>")
 	assertGolden(t, "native-subagent-view-100x30", 100, 30, got)
@@ -348,28 +351,32 @@ func TestFrameGoldenNativeSubagentView100x30(t *testing.T) {
 // transcripts in the sub-agent view): two children running at once, the view
 // on the first and Tab to the second, whose own transcript is drawn.
 func TestFrameGoldenNativeSubagentTwoView100x30(t *testing.T) {
-	ws := frameWorkspace(t)
-	writeFrameFile(t, ws, "main.go", "package main\n")
-	writeFrameFile(t, ws, "README.md", "# ws\n")
-	echo, two := newFrameRouter("test", "wire-echo"), newFrameRouter("test", "wire-two")
 	const first, second = "Read main.go and summarise it.", "Read README.md and summarise it."
-	firstAsked := make(chan struct{})
-	var once sync.Once
-	echo.asked = func(prompt string) {
-		if prompt == first {
-			once.Do(func() { close(firstAsked) })
+	// Each gate mode's run builds its session afresh (runFrameModes).
+	build := func() (agent.Session, string) {
+		ws := frameWorkspace(t)
+		writeFrameFile(t, ws, "main.go", "package main\n")
+		writeFrameFile(t, ws, "README.md", "# ws\n")
+		echo, two := newFrameRouter("test", "wire-echo"), newFrameRouter("test", "wire-two")
+		firstAsked := make(chan struct{})
+		var once sync.Once
+		echo.asked = func(prompt string) {
+			if prompt == first {
+				once.Do(func() { close(firstAsked) })
+			}
 		}
+		echo.route("go", frameCalls(
+			frameAgentCall("a1", "Summarise main", first),
+			frameAgentCall("a2", "Summarise README", second, "model", "test/two")))
+		echo.route(first, frameRead("r1", "main.go"))
+		echo.hold(first, frameOpenText("main.go declares package main"))
+		two.route(second, frameRead("r2", "README.md"))
+		two.hold(second, frameOpenText("README.md is one heading"))
+		sess := frameSubagents(t, ws, echo, two, &frameClock{}, firstAsked)
+		return sess, ws
 	}
-	echo.route("go", frameCalls(
-		frameAgentCall("a1", "Summarise main", first),
-		frameAgentCall("a2", "Summarise README", second, "model", "test/two")))
-	echo.route(first, frameRead("r1", "main.go"))
-	echo.hold(first, frameOpenText("main.go declares package main"))
-	two.route(second, frameRead("r2", "README.md"))
-	two.hold(second, frameOpenText("README.md is one heading"))
-	sess := frameSubagents(t, ws, echo, two, &frameClock{}, firstAsked)
 
-	got := runNativeSubagentFrame(t, sess, ws, 100, 30,
+	got := runNativeSubagentFrame(t, build, 100, 30,
 		"<wait:idle>go<enter><wait:text:Summarise README  running><wait:text:Summarise README  0s · 15 tok>"+
 			"<wait:text:Summarise main  0s · 15 tok><down><enter><wait:text:main.go declares package main>"+
 			"<tab><wait:text:README.md is one heading><wait:text:15 tok>")
@@ -394,19 +401,23 @@ func TestFrameGoldenNativeSubagentTwoView100x30(t *testing.T) {
 // for a receipt, which a native task row is once its call has finished
 // (panel P15) — with the durations the parent's clock gives.
 func TestFrameGoldenNativeSubagentFail80x24(t *testing.T) {
-	ws := frameWorkspace(t)
-	echo, two := newFrameRouter("test", "wire-echo"), newFrameRouter("test", "wire-two")
-	clock := &frameClock{}
-	echo.route("go",
-		frameCalls(frameAgentCall("a1", "Scan the repo", "Scan it.")),
-		frameCalls(frameAgentCall("a2", "Break it", "Break it.")),
-		frameParts(nativeTextParts("one answered, one broke"), nativeFinishParts()))
-	echo.route("Scan it.", clock.timed(1200*time.Millisecond, nativeTextParts("scanned"), nativeFinishParts()))
-	echo.route("Break it.", clock.timed(800*time.Millisecond, frameOpenText("half an answer"),
-		[]fantasy.StreamPart{{Type: fantasy.StreamPartTypeError, Error: errors.New("the provider went away")}}))
-	sess := frameSubagents(t, ws, echo, two, clock, nil)
+	// Each gate mode's run builds its session afresh (runFrameModes).
+	build := func() (agent.Session, string) {
+		ws := frameWorkspace(t)
+		echo, two := newFrameRouter("test", "wire-echo"), newFrameRouter("test", "wire-two")
+		clock := &frameClock{}
+		echo.route("go",
+			frameCalls(frameAgentCall("a1", "Scan the repo", "Scan it.")),
+			frameCalls(frameAgentCall("a2", "Break it", "Break it.")),
+			frameParts(nativeTextParts("one answered, one broke"), nativeFinishParts()))
+		echo.route("Scan it.", clock.timed(1200*time.Millisecond, nativeTextParts("scanned"), nativeFinishParts()))
+		echo.route("Break it.", clock.timed(800*time.Millisecond, frameOpenText("half an answer"),
+			[]fantasy.StreamPart{{Type: fantasy.StreamPartTypeError, Error: errors.New("the provider went away")}}))
+		sess := frameSubagents(t, ws, echo, two, clock, nil)
+		return sess, ws
+	}
 
-	got := runNativeSubagentFrame(t, sess, ws, 80, 24, "<wait:idle>go<enter><wait:text:one answered, one broke><wait:idle>")
+	got := runNativeSubagentFrame(t, build, 80, 24, "<wait:idle>go<enter><wait:text:one answered, one broke><wait:idle>")
 	assertGolden(t, "native-subagent-fail-80x24", 80, 24, got)
 	for _, want := range []string{
 		"✓ agent  Scan the repo  1.2s · echo",

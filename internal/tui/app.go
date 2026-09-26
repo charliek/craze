@@ -626,6 +626,28 @@ type Model struct {
 	// (applyForeignCancelled, plan 026 X48).
 	foreignEnded uint64
 	foreignNoted uint64
+
+	// The command gate (gate.go, plan 027 §3.12). gate is the one gated call
+	// whose reply the model is waiting for, nil when none is open; gateSeq
+	// numbers them. held is every message that arrived while a gate was open,
+	// or while earlier held ones were still draining, in arrival order, and
+	// heldBytes the payload they retain (payloadBytes). reading says a Read of
+	// the backend's stream is in flight: exactly one ever is (readOn). syncAck
+	// is the last frame-sync token acknowledged, which the frame harness
+	// publishes as its barrier, and syncPending one that arrived while a gate
+	// was open, acknowledged by the release that leaves none open. gateSync is
+	// the test-only baseline that runs a gated call inline (gateSyncDefault).
+	//
+	// None of this is drawn: it is the gate's own bookkeeping, and the
+	// invisibility watch leaves it out of the state it holds still.
+	gate        *gate
+	gateSeq     uint64
+	held        []heldMsg
+	heldBytes   int
+	reading     bool
+	syncAck     int
+	syncPending int
+	gateSync    bool
 }
 
 // now reads the clock through an indirection so tests can inject one.
@@ -967,7 +989,8 @@ func New(cfg Config) Model {
 		replaying: cfg.Loading,
 		// Turn 1 is the session before the first prompt: every event has an
 		// identity from the start, and no engine turn carries it.
-		turnSeq: 1,
+		turnSeq:  1,
+		gateSync: gateSyncDefault,
 	}
 	m.git = discoverGit(cwd)
 	m.branch = m.git.branch()
@@ -997,6 +1020,11 @@ func New(cfg Config) Model {
 	// id belongs to Config.Session — the row --continue resolved — so a picker
 	// that builds another session carries its own row's id instead.
 	m.setSession(sess, m.crazeID)
+	// Init arms the stream's first read exactly when it has a session to read
+	// and no picker to wait for, and it cannot record that itself (a value
+	// receiver whose model is thrown away), so the model starts out agreeing
+	// with it here: the gate's reader rule counts that read as in flight.
+	m.reading = m.eng != nil && !m.picking()
 	m.refreshSnap()
 	if m.model == "" && m.snap.CurrentModel != "" {
 		m.model = m.snap.CurrentModel
@@ -1178,6 +1206,9 @@ func finishRun(out io.Writer, final tea.Model, m Model, h Host) (bool, error) {
 // is a no-op with no cards and no running turn, refreshSnap is idempotent, and
 // the only card-producing events — permission, question and plan — are requests
 // an agent makes of a live turn and never appear in a replay (§2.1).
+//
+// The read it arms is the one the command gate's reader rule counts: New set
+// m.reading to match, since this value receiver cannot.
 func (m Model) Init() tea.Cmd {
 	if m.picking() {
 		return nil
@@ -1212,14 +1243,20 @@ func (m Model) startCmd() tea.Cmd {
 // applies. It is interface identity: the same backend, not an equal one.
 func (m Model) staleFor(b backend.Backend) bool { return b != nil && b != m.eng }
 
-// Update runs the handler and then lays the frame out exactly once, from the
-// state the handler left behind, and keeps the single tick chain alive.
+// Update is the command gate (gate.go) over the handler: a message that
+// arrives while a gated call is waiting for its reply, or while the messages
+// held behind one are still draining, is held in arrival order; everything
+// else runs the handler and then the wrapper (finish).
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	tm, cmd := m.update(msg)
-	next, ok := tm.(Model)
-	if !ok {
-		return tm, cmd
-	}
+	return m.gated(msg, Model.update)
+}
+
+// finish is the Update wrapper, run after the handler of every message that is
+// applied — never for a held one, which runs it when it is drained: it lays
+// the frame out exactly once, from the state the handler left behind, and
+// keeps the single tick chain alive.
+func (m Model) finish(cmd tea.Cmd) (Model, tea.Cmd) {
+	next := m
 	// Mutation only marks the transcript dirty. Paint the drawn one here so a
 	// background transcript (U3b) never moves m.vp.
 	if next.cur().dirty {
@@ -1508,14 +1545,12 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return next, cmd
 
-	case eventMsg:
-		// Every ending is one event now, the engine's EventTurn{ended}, and
-		// everything a settled turn left to do — the drain, an armed send-now,
-		// the queue the chain policy clears — is the engine's own decision,
-		// arriving as the events it authored. There is nothing left for the
-		// model to settle here but the reader it re-arms.
-		m.applyEvent(msg.ev)
-		return m, waitEvent(m.eng)
+	// An eventMsg never reaches the handler: the gate applies an event itself,
+	// through applyEvent, and owns the reader (gate.go's apply and readOn), so
+	// no path can arm a second read of the stream. Every ending is one event
+	// now, the engine's EventTurn{ended}, and everything a settled turn left to
+	// do — the drain, an armed send-now, the queue the chain policy clears — is
+	// the engine's own decision, arriving as the events it authored.
 
 	case tea.KeyMsg:
 		return m.handleKey(msg)
@@ -3712,11 +3747,16 @@ func workspaceName(cwd string) string {
 // primary client keeps reading until it closes the engine, because the log's
 // outbox may still be publishing after a turn's ending.
 //
-// An event is an eventMsg, whose handler re-arms the reader. A stream that has
+// An event is an eventMsg, after which the command gate decides whether the
+// next read starts (readOn): exactly one is ever in flight. A stream that has
 // ended (backend.ErrClosed, an End item) or failed is nil, as a closed channel
 // always was: nothing more is coming, and the reader is not re-armed. Ready and
 // Restore are the socket backend's (PR 4), which nothing in process delivers
 // and nothing here handles yet: the reader reads past them.
+//
+// The read's context never ends. Read returns every item it takes, a context
+// cancelled meanwhile or not (backend.Backend.Read), and a read that is never
+// cancelled is never abandoned either: nothing this reader takes is dropped.
 func waitEvent(b backend.Backend) tea.Cmd {
 	if b == nil {
 		return nil
