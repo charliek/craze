@@ -40,6 +40,13 @@
 // what the host recorded, and its lock file only while it still holds it. A
 // session lock file is never unlinked.
 //
+// The trees' modes stop another user opening the socket on this machine, and
+// nothing once it is reached another way (an SSH-forwarded socket is opened by
+// sshd), so each end also asks the kernel who the other runs as (peer.go): a
+// host checks every connection it accepts before reading a byte of it
+// (PeerCheck), and a client the host it dialed before writing one
+// (DialCheck).
+//
 // Every function takes an Env rather than reading the process environment, so
 // a test can build hostile trees in parallel; ProcessEnv is the real one.
 package rundir

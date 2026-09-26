@@ -240,9 +240,12 @@ linters:
         # the standard library and only the three craze leaves it needs —
         # internal/paths (the home and craze directories), internal/atomicfile
         # (the registry's atomic write) and internal/protocol (the entry's
-        # protocol version). Strict, so every other craze package, and any
-        # module, is denied by default. Its tests answer to no rule ("!$test",
-        # as protocol's rule does).
+        # protocol version) — and golang.org/x/sys/unix, for the peer
+        # credentials: macOS's LOCAL_PEERCRED and LOCAL_PEERPID are beyond the
+        # syscall package, and Linux's SO_PEERCRED is read the same way so
+        # both halves are one API (plan 027 §3.8). Strict, so every other
+        # craze package, and any other module, is denied by default. Its tests
+        # answer to no rule ("!$test", as protocol's rule does).
         rundir:
           list-mode: strict
           files:
@@ -253,6 +256,7 @@ linters:
             - github.com/charliek/craze/internal/paths
             - github.com/charliek/craze/internal/atomicfile
             - github.com/charliek/craze/internal/protocol
+            - golang.org/x/sys/unix
   exclusions:
     presets:
       - std-error-handling

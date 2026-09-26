@@ -22,16 +22,23 @@ import (
 // Options configure a Server. The zero value serves a host with a fresh
 // hostId, this build's version and this process's pid.
 type Options struct {
-	// Log receives one line per connection opened or closed, and why it
-	// ended; nil logs nothing. It is never handed anything a client sent, and
-	// never a token. The same facts go to the session's journal as a diag
-	// note (journal.DiagControlConn).
+	// Log receives one line per connection opened, refused or closed — the
+	// peer's pid and uid when PeerCheck named them, and why it ended; nil
+	// logs nothing. It is never handed anything a client sent, and never a
+	// token. The same facts go to the session's journal as a diag note
+	// (journal.DiagControlConn).
 	Log func(string)
 	// PeerCheck is run on every accepted connection before a byte of it is
-	// read (plan 027 §3.8; internal/rundir installs one in PR 2): an error
-	// closes the connection and is noted. nil checks nothing — PR 1's tests.
-	// A connection that is not a *net.UnixConn fails a non-nil check.
-	PeerCheck func(*net.UnixConn) error
+	// read, before the connection is counted or its reader started (plan 027
+	// §3.8): internal/rundir's PeerCheck, which requires the host's own uid.
+	// It returns the peer's pid (0 when the OS cannot say) and uid — negative
+	// when it could not name the peer — which the connection's open note
+	// carries, and so does a refusal's when the uid is known. An error closes
+	// the connection unread and is noted as a refusal. nil checks nothing and
+	// notes no pid or uid (the tests that dial a socket of their own, and the
+	// fake host). A connection that is not a *net.UnixConn fails a non-nil
+	// check.
+	PeerCheck func(*net.UnixConn) (pid, uid int, err error)
 	// MaxBudget is the largest subscription budget a client may ask an attach
 	// for: a larger member is held to it, and an absent one is the log's own
 	// default. The zero value is DefaultMaxBudget: four times the event log's
@@ -473,17 +480,19 @@ func (s *Server) isClosed() bool {
 	return s.closed
 }
 
-// accept checks the peer, before a byte is read, and starts the connection's
-// reader and writer.
+// accept checks the peer, before a byte is read — before the connection is
+// built, counted or its reader started — and starts the connection's reader
+// and writer.
 func (s *Server) accept(nc net.Conn) {
+	pid, uid := 0, -1 // the peer as PeerCheck named it; a negative uid is no one
 	if check := s.opts.PeerCheck; check != nil {
 		err := errors.New("not a unix socket connection")
 		if uc, ok := nc.(*net.UnixConn); ok {
-			err = check(uc)
+			pid, uid, err = check(uc)
 		}
 		if err != nil {
 			_ = nc.Close()
-			s.connNote(0, map[string]any{"event": "refused", "reason": "peer check: " + err.Error()})
+			s.connNote(0, withPeer(map[string]any{"event": "refused", "reason": "peer check: " + err.Error()}, pid, uid))
 			return
 		}
 	}
@@ -499,9 +508,18 @@ func (s *Server) accept(nc net.Conn) {
 	s.conns[c] = struct{}{}
 	s.transport.Add(2)
 	s.connMu.Unlock()
-	s.connNote(c.id, map[string]any{"event": "open"})
+	s.connNote(c.id, withPeer(map[string]any{"event": "open"}, pid, uid))
 	go c.read()
 	go c.write()
+}
+
+// withPeer is fields with the peer's pid and uid added when the peer check
+// named the peer (a uid that is not negative).
+func withPeer(fields map[string]any, pid, uid int) map[string]any {
+	if uid >= 0 {
+		fields["pid"], fields["uid"] = pid, uid
+	}
+	return fields
 }
 
 // forget takes a closed connection out of the set.
@@ -599,6 +617,9 @@ func (s *Server) connNote(id uint64, fields map[string]any) {
 	}
 	if s.opts.Log != nil {
 		line := fmt.Sprintf("control: conn %d %v", id, fields["event"])
+		if uid, ok := fields["uid"].(int); ok {
+			line += fmt.Sprintf(" pid %v uid %d", fields["pid"], uid)
+		}
 		if c, ok := fields["clientId"].(string); ok && c != "" {
 			line += " client " + c
 		}

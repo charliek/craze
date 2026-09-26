@@ -35,9 +35,12 @@ type Options struct {
 	// Empty dials a host directly, and a hub answering there is an error
 	// (ErrEndpoint).
 	Connect string
-	// PeerCheck is run on every connection before a byte is written (PR 2's
-	// rundir installs one; nil checks nothing). A connection that is not a
-	// *net.UnixConn fails a non-nil check.
+	// PeerCheck is run on every connection right after its dial, before a
+	// byte is written (plan 027 §3.8): internal/rundir's DialCheck, which
+	// requires the host to run as this user. An error closes the connection
+	// unwritten and fails the dial, or that redial attempt. nil checks
+	// nothing. A connection that is not a *net.UnixConn fails a non-nil
+	// check.
 	PeerCheck func(*net.UnixConn) error
 	// Dial opens the transport to path. nil dials a Unix socket. A test's
 	// seam: it may wrap the connection.

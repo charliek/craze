@@ -113,6 +113,9 @@
 // # Logging
 //
 // Each connection's open and close, and why it ended, is a journal diag note
-// (journal.DiagControlConn) through Control.Note, and a line to Options.Log.
-// Nothing a client sends is logged, and never a resume token.
+// (journal.DiagControlConn) through Control.Note, and a line to Options.Log;
+// so is a connection the peer check refused, which is closed before a byte of
+// it is read. The open note — and a refusal's, when the check could name the
+// peer — carries the peer's pid and uid (Options.PeerCheck). Nothing a client
+// sends is logged, and never a resume token.
 package control
