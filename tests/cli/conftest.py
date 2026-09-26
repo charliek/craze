@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import os
 import shutil
-from collections.abc import Mapping
+import tempfile
+from collections.abc import Iterator, Mapping
 from pathlib import Path
 
 import pytest
@@ -38,7 +39,7 @@ def fake_agent_bin() -> Path:
 
 
 @pytest.fixture(autouse=True)
-def isolate_run_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def isolate_run_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     """Isolate everything a craze run reads out of the environment.
 
     Every helper here builds its child environment from ``os.environ``, so one
@@ -67,6 +68,22 @@ def isolate_run_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     # wants a host sets exactly the ones it needs, aimed at its own fake socket.
     for name in host_env_names(os.environ):
         monkeypatch.delenv(name, raising=False)
+    # Every TUI serves its session over a control socket (plan 027 C13), bound
+    # in the first usable runtime base -- $XDG_RUNTIME_DIR/craze on a desktop,
+    # which is the developer's own. Each test gets a short base of its own
+    # instead, under the real /tmp and never under tmp_path: a macOS temp path
+    # is long enough to overflow sun_path with the socket's name under it.
+    # The opt-out is scrubbed too, so an exported one cannot turn the socket
+    # off under the cases that assert it exists; a case that wants it off sets
+    # it itself.
+    runtime_dir = tempfile.mkdtemp(prefix="czt-", dir="/tmp")
+    monkeypatch.setenv("CRAZE_RUNTIME_DIR", runtime_dir)
+    monkeypatch.delenv("XDG_RUNTIME_DIR", raising=False)
+    monkeypatch.delenv("CRAZE_CONTROL_SOCKET", raising=False)
+    try:
+        yield
+    finally:
+        shutil.rmtree(runtime_dir, ignore_errors=True)
 
 
 def without_seq(events: list[dict], subject: dict | list[dict]) -> dict | list[dict]:

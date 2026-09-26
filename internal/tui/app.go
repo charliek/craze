@@ -137,6 +137,25 @@ type Config struct {
 	// one only when a host's environment gate is met, and Run closes it on
 	// every exit path.
 	Host Host
+	// OnEngine is handed every engine setSession installs, right after the
+	// session owner holds it — the one New builds and the one a picker builds
+	// alike — and never nil. It runs inside Update when a picker confirms, so
+	// it must not block. nil calls nothing, which is what every test Config,
+	// every golden and the frame runner get; internal/cli's hook serves the
+	// engine over the control socket, claims a new session's craze id and
+	// rewrites the host's registry entry (plan 027 §3.8–§3.9).
+	OnEngine func(*engine.Engine)
+	// ClaimSession claims the row the resume picker is about to load, before
+	// anything is built (plan 027 §3.9, SQ16): it answers the row's durable
+	// craze id — a legacy row is given one first — and a release for the claim
+	// it took, or the refusal, whose text the picker shows. It may block on
+	// the session index's lock (bounded), so the picker calls it from a
+	// tea.Cmd, never from Update, and builds the session only when the answer
+	// lands while the picker is still waiting for it; an answer that arrives
+	// for an abandoned attempt is released at once. nil keeps the picker's
+	// synchronous load exactly as it was — every test Config, the frame
+	// runner and the resume goldens.
+	ClaimSession func(sessions.Row) (crazeID string, release func(), err error)
 }
 
 // SessionIndex is the write half of internal/sessions.Store, as the TUI needs
@@ -372,10 +391,20 @@ type Model struct {
 	// its own flag rather than a mode of pickingProvider because the two
 	// answer a click outside the box differently: the provider picker starts
 	// its default, and there is no default session to start (§3.7).
-	pickingResume   bool
-	resumeCursor    int
-	resume          []sessions.Row
-	loadSession     func(agent.Provider, sessions.Row) agent.Session
+	pickingResume bool
+	resumeCursor  int
+	resume        []sessions.Row
+	loadSession   func(agent.Provider, sessions.Row) agent.Session
+	// claimSession is Config.ClaimSession. resumeAttempt stamps each claim
+	// the picker starts, resumeWaiting is the one it is waiting for (0 for
+	// none), and resumeErr is the last refusal, drawn as the dialog's error
+	// row until the cursor moves.
+	claimSession  func(sessions.Row) (string, func(), error)
+	resumeAttempt int
+	resumeWaiting int
+	resumeErr     string
+	// onEngine is Config.OnEngine.
+	onEngine        func(*engine.Engine)
 	providerLocked  bool
 	persistProvider bool
 	fallbackDefault bool
@@ -805,6 +834,12 @@ func (m *Model) setSession(s agent.Session, crazeID string) {
 	// replaced orders nothing on this one.
 	m.chains = &chainLock{}
 	m.owner.set(eng)
+	// After the owner holds it, so whatever the hook starts — a socket
+	// serving this engine — can never name an engine the exit tail would not
+	// close.
+	if m.onEngine != nil {
+		m.onEngine(eng)
+	}
 }
 
 // nextCmd is the model's next command id. Every mutating engine call carries
@@ -866,6 +901,8 @@ func New(cfg Config) Model {
 		providers:       pickerRows(cfg.Providers, prov),
 		newSession:      cfg.NewSession,
 		loadSession:     cfg.LoadSession,
+		claimSession:    cfg.ClaimSession,
+		onEngine:        cfg.OnEngine,
 		resume:          resumeRows(cfg.Resume),
 		sessionIndex:    cfg.SessionIndex,
 		crazeID:         cfg.CrazeSessionID,
@@ -1200,6 +1237,9 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case hiddenRetryMsg:
 		m.handleHiddenRetry()
 		return m, nil
+
+	case resumeClaimMsg:
+		return m.resumeClaimed(msg)
 
 	case startedMsg:
 		// Half of the gate: Start has returned. For a new session that is the

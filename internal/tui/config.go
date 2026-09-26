@@ -155,6 +155,33 @@ func ConfigJournal() (on bool, why string) {
 	return on, ""
 }
 
+// ConfigControlSocket is whether craze may serve its session over the control
+// socket (plan 027 §4 item 6), and why not when it may not. It is
+// ConfigJournal's rule for `control_socket`: default on, and fail closed,
+// because it is an access switch — a control surface the user meant to close
+// must not open because of a typo. On only when the config parsed and the key
+// is absent or exactly `true`; an explicit `control_socket = false` is off with
+// no reason given, and anything else off is a mistake why names, in a few
+// words for a one-line diagnostic.
+func ConfigControlSocket() (on bool, why string) {
+	cfg, err := readConfig()
+	switch {
+	case errors.Is(err, ErrConfigMalformed):
+		return false, "config.toml could not be parsed"
+	case err != nil:
+		return false, "config.toml could not be read"
+	}
+	v, ok := cfg["control_socket"]
+	if !ok {
+		return true, ""
+	}
+	on, ok = v.(bool)
+	if !ok {
+		return false, "config.toml control_socket is not a bool"
+	}
+	return on, ""
+}
+
 // ConfigCompatClaude is the [compat.claude] table — which classes of Claude's
 // own content a native session reads (plan 022 §3.5) — and the lines to say
 // about it. Every key defaults to true, so an absent table, a partial one and

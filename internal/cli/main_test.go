@@ -30,7 +30,22 @@ import (
 func TestMain(m *testing.M) {
 	dirs := realJournalDirs()
 	before := journalsIn(dirs)
+	// Every TUI run serves a control socket (plan 027 C13), in the runtime
+	// base's first usable candidate: $XDG_RUNTIME_DIR/craze on a desktop.
+	// A test that reached it would leave its namespace directory in the
+	// developer's own runtime directory, so the whole package runs under a
+	// short one of its own (never $TMPDIR: sun_path, plan 027 §3.8). A test
+	// that wants another sets CRAZE_RUNTIME_DIR itself.
+	runtimeDir, err := os.MkdirTemp("/tmp", "czc")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "FAIL: a runtime directory for the package:", err)
+		os.Exit(1)
+	}
+	_ = os.Setenv("CRAZE_RUNTIME_DIR", runtimeDir)
+	_ = os.Unsetenv("XDG_RUNTIME_DIR")
+	_ = os.Unsetenv(controlSocketEnv)
 	code := m.Run()
+	_ = os.RemoveAll(runtimeDir)
 	if leaked := journaledBy(os.Getpid(), dirs, before); len(leaked) > 0 {
 		fmt.Fprintln(os.Stderr, "FAIL: a test journaled into the real craze directory; set CRAZE_HOME to a temp dir in it:")
 		for _, path := range leaked {

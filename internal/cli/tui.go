@@ -14,6 +14,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/charliek/craze/internal/agent"
+	"github.com/charliek/craze/internal/rundir"
 	"github.com/charliek/craze/internal/sessions"
 	"github.com/charliek/craze/internal/tui"
 )
@@ -85,6 +86,13 @@ func runTUI(cmd *cobra.Command, f *tuiFlags, env hostEnv) error {
 	if f.noForce {
 		f.force = false
 	}
+	// The host id first: the session claims write it into their lock files,
+	// with a control socket or without one (plan 027 §3.9). Its teardown is
+	// deferred from here, so every return after it releases what was claimed
+	// — a --continue refused below included — and, once a socket is bound,
+	// closes and unlinks it after tui.Run has closed the engine (serve.go).
+	hostID := rundir.NewHostID()
+	runEnv := rundir.ProcessEnv()
 	ws, err := resolveWorkspace(f.workspace)
 	if err != nil {
 		return err
@@ -109,6 +117,8 @@ func runTUI(cmd *cobra.Command, f *tuiFlags, env hostEnv) error {
 	// stderr and craze's own warnings are held here and printed once the screen
 	// is back.
 	diag := &deferredStderr{}
+	rh := &runHost{claims: newSessionClaims(runEnv, hostID, diag.craze())}
+	defer rh.close()
 	// A loaded session takes its provider from the row it loads, so whatever
 	// $CRAZE_PROVIDER or the config file resolved to is only the picker's
 	// preselection and the explicit-flag filter — and an unknown id's
@@ -173,12 +183,20 @@ func runTUI(cmd *cobra.Command, f *tuiFlags, env hostEnv) error {
 		Background: tui.ConfigBackground() && !f.noBackground &&
 			lipgloss.ColorProfile() != termenv.Ascii,
 	}
-	if err := resolveLoad(cmd, f, indexCWD, &cfg, build); err != nil {
+	if err := resolveLoad(cmd, f, indexCWD, &cfg, build, rh.claims); err != nil {
 		return err
 	}
 	if cfg.Session == nil && cfg.Resume == nil && resolved.Locked {
 		cfg.Session = newSession(resolved.Provider)
 	}
+	// Only a run that reaches tui.Run serves, so a refused --continue has
+	// bound nothing. The claims above were taken either way: the session lock
+	// does not depend on the opt-out (plan 027 §3.8).
+	if controlSocketOn(diag.craze()) {
+		rh.ctl = serveControl(runEnv, hostID, indexCWD, diag.craze())
+	}
+	cfg.OnEngine = rh.onEngine
+	cfg.ClaimSession = rh.claims.pickerClaim
 	// Only after resolveLoad: a --continue with no row has returned above, so
 	// the hub's goroutines start only for a run that reaches tui.Run, whose
 	// exit tail closes the hub before diag is flushed.
@@ -234,7 +252,15 @@ func sessionOptions(f *tuiFlags, ws, mode string, stderr, diag io.Writer, env []
 // 1 before a frame is drawn, and so is an index craze cannot read (§3.8) —
 // which is never rewritten by the attempt, exactly as a malformed config file
 // is not.
-func resolveLoad(cmd *cobra.Command, f *tuiFlags, cwd string, cfg *tui.Config, build func(agent.Provider, sessions.Row) agent.Session) error {
+//
+// --continue claims its row before anything is built (plan 027 §3.9, SQ16):
+// the row is given its durable craze id under the index's lock, bounded, and
+// that id is claimed (sessionClaims.claimRow). A session another craze holds
+// is exit 1, `craze: that session is open in another craze (pid N)`, and an
+// index held busy past the bound is exit 1 too — in both cases build is never
+// called, so no agent is spawned. --resume claims nothing here: its picker
+// claims the row it is given, through Config.ClaimSession.
+func resolveLoad(cmd *cobra.Command, f *tuiFlags, cwd string, cfg *tui.Config, build func(agent.Provider, sessions.Row) agent.Session, claims *sessionClaims) error {
 	if !f.cont && !f.resume {
 		return nil
 	}
@@ -279,15 +305,24 @@ func resolveLoad(cmd *cobra.Command, f *tuiFlags, cwd string, cfg *tui.Config, b
 	if err != nil {
 		return exitf(1, "craze: %v", err)
 	}
+	// Claimed before build, which has no error return and would otherwise
+	// have to hand back a session that must never start.
+	crazeID, _, err := claims.claimRow(row)
+	if err != nil {
+		return exitf(1, "craze: %s", refusal(err))
+	}
 	cfg.Provider = p
 	cfg.ProviderLocked = true
 	cfg.FallbackDefault = false
 	cfg.Loading = true
 	// The row's durable craze id travels with the session built from it: this
 	// is the same thread of work, loaded into another agent session (session
-	// control SD-22). A row written before crazeId existed has none, and the
-	// engine mints one that the row gains on its next write.
-	cfg.CrazeSessionID = row.CrazeID
+	// control SD-22). It is the id just claimed — a row written before crazeId
+	// existed was given one first — so the claim and the engine agree. Only
+	// when no id could be written is it empty, and then the engine mints one
+	// that the row gains on its next write.
+	cfg.CrazeSessionID = crazeID
+	row.CrazeID = crazeID
 	cfg.Session = build(p, row)
 	return nil
 }
