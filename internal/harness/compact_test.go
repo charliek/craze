@@ -1304,6 +1304,60 @@ func TestLastSummaryBlockIgnoresATrailingUnfinishedOpener(t *testing.T) {
 	}
 }
 
+// review r1-c14-c9e finding 1: a real summary can itself quote "<summary>"
+// at the start of a later line (the model echoing the instruction back,
+// this time on its own line rather than mid-sentence). lastSummaryBlock must
+// take the FIRST opener that begins a line before the last "</summary>", not
+// the last one, or every heading before the quote is lost.
+func TestLastSummaryBlockPrefersTheFirstOpenerThatBeginsALine(t *testing.T) {
+	reply := "<summary>\n" +
+		"1. Request and intent\nDo the thing.\n\n" +
+		"2. User messages\n" +
+		"The user wrote:\n" +
+		"<summary>\n" +
+		"this is a quoted heading example, not the real block\n\n" +
+		"3. Decisions and context\nNone.\n" +
+		"</summary>"
+	block, ok := lastSummaryBlock(reply)
+	if !ok {
+		t.Fatal("lastSummaryBlock found no block, want the real one")
+	}
+	if !strings.HasPrefix(block, "<summary>\n1. Request and intent") {
+		t.Fatalf("lastSummaryBlock = %q, want it to start at the real (first) opener, section 1 kept", block)
+	}
+	if !strings.Contains(block, "2. User messages") {
+		t.Errorf("lastSummaryBlock = %q, want section 2 kept too", block)
+	}
+	if !strings.Contains(block, "3. Decisions and context") {
+		t.Errorf("lastSummaryBlock = %q, want section 3 kept", block)
+	}
+}
+
+// review r1-c14-c9e finding 1: a CRLF reply's real opener, indented with a
+// tab after a "\r\n" line ending, must still be recognized as beginning a
+// line — and preferred over a later mid-line quote of "<summary>" that sits
+// closer to the final "</summary>".
+func TestLastSummaryBlockRecognizesACRLFLineStartWithATab(t *testing.T) {
+	reply := "Preamble line one.\r\n" +
+		"Preamble line two.\r\n" +
+		"\t<summary>\r\n" +
+		"1. Request and intent\r\nDo the thing.\r\n\r\n" +
+		"2. User messages\r\n" +
+		"The user said: \"quote <summary> mid-line, not a real opener\"\r\n\r\n" +
+		"3. Decisions and context\r\nNone.\r\n" +
+		"</summary>"
+	block, ok := lastSummaryBlock(reply)
+	if !ok {
+		t.Fatal("lastSummaryBlock found no block, want the real one")
+	}
+	if !strings.HasPrefix(block, "<summary>\r\n1. Request and intent") {
+		t.Fatalf("lastSummaryBlock = %q, want it to start at the tab-indented CRLF opener, section 1 kept", block)
+	}
+	if !strings.Contains(block, "3. Decisions and context") {
+		t.Errorf("lastSummaryBlock = %q, want section 3 kept", block)
+	}
+}
+
 // C9e item 1 (smoke, PR 2 live): the live shape — the model quoted the
 // compaction instruction under heading 2, so a second, mid-line "<summary>"
 // sits inside the real block, closer to the last "</summary>" than the real

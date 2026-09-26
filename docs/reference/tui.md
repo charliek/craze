@@ -570,27 +570,35 @@ Sent while a turn is already running, `/compact` is never queued into it —
 like any interjection it is refused and runs as its own turn once the
 current one ends; `Ctrl+L` on a refused `/compact` draft shows "nothing to
 interject into" and keeps the draft, and `Enter` queues it for after. A
-`/compact` that succeeds turns compacting-on-its-own back on if a previous
-compaction had switched it off.
+`/compact` that succeeds turns compacting-on-its-own back on only when it
+leaves the context under the threshold; if the context is still at or over
+the threshold afterward, automatic compaction stays off (or turns off, if it
+was not already).
 
 ### Resuming a compacted session
 
 [Resuming](#native-sessions) a session that compacted at some point replays
 its notes in place, exactly where they happened in the original session, and
 the next turn's request to the model carries the summary in place of
-everything it stood for, with the kept tail — the most recent turns,
-verbatim — following it unchanged.
+everything it stood for, with the kept tail — the most recent whole steps
+(a step is never split from its own tool results), up to `tail_tokens` and
+never more than a quarter of the threshold, and possibly empty — following it
+unchanged.
 
 ### Segment files
 
-Whatever a compaction drops from the context is not lost. Before it writes
-the summary, craze saves everything the summary stands for to a Markdown
-file beside the transcript — `<stem>.compaction/segment_001.md`,
+Before it writes the summary, craze saves what the summary stands for to a
+Markdown file beside the transcript — `<stem>.compaction/segment_001.md`,
 `segment_002.md`, and so on, one file per compaction — which the model can
 `read` or `grep` like any other file under the harness home, exactly as it
-can the [plan file](#modes). The summary message names the directory, so the
-model knows the files are there when an exact detail — a command, an error
-string, a path — matters more than the summary's own account of it.
+can the [plan file](#modes). The segment keeps each tool result's first 8 KiB
+(a note says how much was left out), and the file itself is capped at 512
+KiB: over that, the oldest turns are dropped first, with a line pointing at
+the transcript instead — which, unlike the segment, keeps everything, so an
+exact detail can still be found there when the segment no longer has it. The
+summary message names the directory, so the model knows the files are there
+when an exact detail — a command, an error string, a path — matters more
+than the summary's own account of it.
 
 ## Cards
 

@@ -2015,6 +2015,27 @@ def test_native_mid_turn_compaction(
     assert "big.txt" in content, content
     assert "small.txt" not in content, content
 
+    # review r1-c14-c9e finding 2: ONE turn, precisely -- not just an entry
+    # and a segment consistent with staying in one turn, but the transcript
+    # itself showing exactly one turn opened and exactly one ended, and the
+    # final scripted answer belonging to that same turn (turn=1). Only a user
+    # entry ever carries "turn" (it is what opens one, store/entry.go), so a
+    # second one would mean a second turn started; there is none.
+    messages = [e for e in entries if e.get("type") == "message"]
+    user_entries = [e for e in messages if e.get("message", {}).get("role") == "user"]
+    assert len(user_entries) == 1, entries
+    assert user_entries[0].get("turn") == 1, user_entries[0]
+    # The mid-turn compaction ran inside that same turn.
+    assert c["turn"] == 1, c
+    # Exactly one turn ending for the whole prompt, and it is the one
+    # carrying the final scripted answer -- a regression that ended turn 1 at
+    # the compaction and ran the final answer as a turn of its own would
+    # either show a second "turn"-opening user entry, or a second end_turn,
+    # or the wrong one holding the final text.
+    end_turns = [e for e in messages if e.get("stopReason") == "end_turn"]
+    assert len(end_turns) == 1, entries
+    assert "compaction done, continuing now" in json.dumps(end_turns[0]["message"]), end_turns[0]
+
 
 def test_native_resume_of_a_compacted_session(
     craze_bin: Path, tmp_path: Path, fixture_server: SSEFixture
@@ -2028,7 +2049,16 @@ def test_native_resume_of_a_compacted_session(
     """
     craze_home = tmp_path / "craze-home"
     workspace = tmp_path / "ws"
-    _run_mid_turn_compaction(craze_bin, craze_home, workspace, fixture_server)
+    session_id = _run_mid_turn_compaction(craze_bin, craze_home, workspace, fixture_server)
+
+    # review r1-c14-c9e finding 2: the STORED summary text, read straight from
+    # the transcript's own compaction entry -- what the resumed request's
+    # summary message must be checked against, not just the wrapper's fixed
+    # wording.
+    stored = _compaction_entries(_entries_of(_transcripts_of(craze_home, session_id)[0]))
+    assert len(stored) == 1, stored
+    stored_summary = stored[0]["summary"]
+    assert stored_summary, stored[0]
 
     fixture_server.set_script([answer("second turn done")])
     with PTYCraze(
@@ -2047,6 +2077,16 @@ def test_native_resume_of_a_compacted_session(
         assert "context compacted" in restored, restored[-4000:]
         assert "compaction done, continuing now" in restored, restored[-4000:]
 
+        # The replayed note is IN PLACE: after the rows of the steps it
+        # followed and before the row that came after it, in the restored
+        # screen's own order -- not merely present somewhere in the
+        # accumulated output (review r1-c14-c9e finding 2).
+        i_big = restored.index("✓ read  big.txt")
+        i_small = restored.index("✓ read  small.txt")
+        i_note = restored.index("context compacted")
+        i_answer = restored.index("compaction done, continuing now")
+        assert i_big < i_small < i_note < i_answer, restored[-4000:]
+
         tui.write(b"keep going now\r")
         tui.wait_contains("second turn done", timeout=30)
         quit_craze(tui)
@@ -2056,6 +2096,7 @@ def test_native_resume_of_a_compacted_session(
     assert users, last.messages
     assert users[0].startswith("<compacted_context>"), users[0][:500]
     assert "compacted to fit the model" in users[0], users[0][:500]
+    assert stored_summary in users[0], (stored_summary, users[0][:2000])
     assert "keep going now" in users, users
 
     # The tail is small.txt's own step, verbatim; big.txt's is gone (it is in

@@ -1038,17 +1038,20 @@ func dropAnalysisBlocks(s string) string {
 }
 
 // lastSummaryBlock is the last COMPLETE <summary>…</summary> span in s, tags
-// included: the last </summary> first, then its opener — the last <summary>
-// before it that begins a line (the start of s, or after a newline and
-// optional spaces), falling back to the nearest one only when none does
-// (C9e item 1, review r2-c13a-c9d finding "found by the smoke"). Live, a
-// model quoting the compaction instruction under heading 2 puts a second,
-// mid-line "<summary>" inside the real block, closer to the last
-// "</summary>" than the real opener is; taking the nearest one there loses
-// everything before the quote. A trailing, unfinished opener after the last
-// real block (the model started a second one and was cut off) is ignored
-// either way, since it never precedes the last "</summary>" (review r1-c9
-// finding 12).
+// included: the last </summary> first, then its opener — the FIRST
+// <summary> before it that begins a line (the start of s, or after a
+// newline — a "\r\n" ending counts — optionally followed by spaces or
+// tabs), falling back to the first one of any kind only when none begins a
+// line (C9e item 1; review r1-c14-c9e finding 1 corrected this from the
+// LAST line-start opener). Live, a model quoting the compaction instruction
+// under heading 2 (or echoing it back on a line of its own) puts a second
+// "<summary>" inside the real block, closer to the last "</summary>" than
+// the real opener is; taking the last line-start opener, or falling back to
+// the nearest one of any kind, loses everything before the quote — the
+// real, FIRST opener must win instead. A trailing, unfinished opener after
+// the last real block (the model started a second one and was cut off) is
+// ignored either way, since it never precedes the last "</summary>" (review
+// r1-c9 finding 12).
 func lastSummaryBlock(s string) (string, bool) {
 	const open, close = "<summary>", "</summary>"
 	end := strings.LastIndex(s, close)
@@ -1056,9 +1059,9 @@ func lastSummaryBlock(s string) (string, bool) {
 		return "", false
 	}
 	head := s[:end+len(close)]
-	start := lastLineStartIndex(head, open)
+	start := firstLineStartIndex(head, open)
 	if start == -1 {
-		start = strings.LastIndex(head, open)
+		start = strings.Index(head, open)
 	}
 	if start == -1 {
 		return "", false
@@ -1066,22 +1069,29 @@ func lastSummaryBlock(s string) (string, bool) {
 	return head[start:], true
 }
 
-// lastLineStartIndex is the index of the last occurrence of sub in s that
+// firstLineStartIndex is the index of the first occurrence of sub in s that
 // begins a line — s[:i] is empty, or ends in a newline optionally followed
-// by spaces — or -1 if none does.
-func lastLineStartIndex(s, sub string) int {
-	for i := strings.LastIndex(s, sub); i != -1; i = strings.LastIndex(s[:i], sub) {
+// by spaces or tabs — or -1 if none does.
+func firstLineStartIndex(s, sub string) int {
+	for i := strings.Index(s, sub); i != -1; {
 		if beginsLine(s, i) {
 			return i
 		}
+		next := strings.Index(s[i+len(sub):], sub)
+		if next == -1 {
+			return -1
+		}
+		i += len(sub) + next
 	}
 	return -1
 }
 
 // beginsLine reports whether s[i:] begins a line: i is 0, or every byte
-// back to the previous newline is a space.
+// back to the previous newline is a space or a tab. A "\r\n" line ending
+// still counts: the byte immediately before the run of spaces/tabs is the
+// "\n", regardless of the "\r" that precedes it.
 func beginsLine(s string, i int) bool {
-	for i > 0 && s[i-1] == ' ' {
+	for i > 0 && (s[i-1] == ' ' || s[i-1] == '\t') {
 		i--
 	}
 	return i == 0 || s[i-1] == '\n'

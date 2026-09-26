@@ -416,13 +416,18 @@ controls:
 [compaction]
 auto              = true    # optional; compact on its own at all
 threshold_percent = 85      # optional, 1-99: % of the model's context window
-tail_tokens       = 20000   # optional, >= 0: verbatim tail a compaction keeps
+tail_tokens       = 20000   # optional, >= 0: the most, in tokens, of a
+                             # verbatim tail a compaction keeps (whole steps
+                             # only), also capped at a quarter of the threshold
 ```
 
 Every key is optional and applies to every model — a per-model override is a
-follow-up. A table with none of these keys is written back byte for byte, and
-`craze import gx` keeps an existing `[compaction]` section whole: gx has no
-concept of it, so import never touches it.
+follow-up. `craze import gx` keeps the values of an existing `[compaction]`
+section — gx has no concept of it, so import never touches them — and a save
+keeps every value already set. Neither keeps the section byte for byte or
+whole: a save re-encodes the whole `models.toml` in its own canonical layout,
+so hand-written comments and formatting are not preserved, and a section left
+with none of these keys is dropped (omitted) rather than written out empty.
 
 ## Environment
 
