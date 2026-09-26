@@ -479,11 +479,13 @@ func chained(frames []frameState, n int, fast bool, waits ...waitSpec) []string 
 
 // TestTheGatedFrameSequenceIsTodays (§3.12, astra r3 23; X34): one
 // deterministic message schedule per gated site, in every arrival order,
-// through the gateSync baseline and asynchronously — /rename (C17) and the
-// prompt's call sites (C18a, gate_submit_test.go).
+// through the gateSync baseline and asynchronously — /rename (C17), the
+// prompt's call sites (C18a, gate_submit_test.go), and the queue verbs and the
+// Ctrl+C and Esc chains (C18b, gate_queue_test.go).
 func TestTheGatedFrameSequenceIsTodays(t *testing.T) {
 	t.Run("rename", renameFrameSequence)
 	t.Run("submit", submitFrameSequences)
+	t.Run("queue", chainFrameSequences)
 }
 
 // renameFrameSequence is /rename's: for every order in which the rename's

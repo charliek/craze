@@ -424,11 +424,14 @@ func (m Model) runBuiltin(name, args string) (tea.Model, tea.Cmd) {
 		// Nothing pending survives a clear: a queued message sent minutes
 		// later, into a transcript that no longer shows why it was queued, is
 		// worse than losing it. The pending state goes first, because ending
-		// an edit puts the displaced draft back into the composer.
-		m.clearPending()
-		m.input.SetValue("")
-		m.clearTranscript()
-		return m, nil
+		// an edit puts the displaced draft back into the composer — so the
+		// draft and the transcript go in the chain's continuation, once the
+		// queue has answered (§3.12).
+		return m.clearPending(func(m Model) (Model, tea.Cmd) {
+			m.input.SetValue("")
+			m.clearTranscript()
+			return m, nil
+		})
 	case "tasks":
 		m.input.SetValue("")
 		return m.cycleTasks()

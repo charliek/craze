@@ -552,10 +552,11 @@ type Model struct {
 	// no started can ever carry that cause again.
 	armedDraft string
 	// disarmed is the Disarm command whose effect the model has already applied,
-	// for the same reason: Esc writes its own note in the Update that pressed
-	// it, and the delta the engine publishes for that same command is then this
-	// model's own echo. A withdrawn delta from any other command is somebody
-	// else's Disarm and is worded for the user.
+	// for the same reason: Esc writes its own note in the Disarm's
+	// continuation — before any event the command caused, which the command
+	// gate holds until then (§3.12) — and the delta the engine publishes for
+	// that same command is then this model's own echo. A withdrawn delta from
+	// any other command is somebody else's Disarm and is worded for the user.
 	disarmed string
 
 	tickGen     int
@@ -1958,10 +1959,10 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.cycleMode()
 	}
 	if m.queueFocus {
-		handled, next := m.handleQueueKey(msg)
+		handled, next, cmd := m.handleQueueKey(msg)
 		m = next
 		if handled {
-			return m, nil
+			return m, cmd
 		}
 	}
 	if m.agentFocus {
@@ -2009,9 +2010,9 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		if m.sendNowPending() {
 			// The cancel is still in flight; taking the send-now back here is
-			// what takes the text back before it turns into a turn.
-			m.withdrawSendNow("send now dropped")
-			return m, nil
+			// what takes the text back before it turns into a turn. The ladder
+			// ends here, so the Disarm's continuation is all there is after it.
+			return m.withdrawSendNow("send now dropped", linkDone)
 		}
 		if m.status == statusWorking {
 			// The queue survives Esc on purpose: cancelling this turn is not
@@ -2186,30 +2187,103 @@ func (m Model) handleCtrlC() (tea.Model, tea.Cmd) {
 	}
 	// One key stops everything pending, not just the turn: the queue, the
 	// confirm, the send-now that was waiting for the cancel, and the edit.
-	m.clearPending()
-	tm, cmd := m.cancelTurn()
-	next := tm.(Model)
-	next.ctrlCDeadline = now.Add(ctrlCWindow)
-	return next, cmd
+	//
+	// The cancel is the chain's last link (§3.12, astra 3): it is issued only
+	// once the Disarm and the ClearQueue have answered, so the turn it ends
+	// cannot settle into a row the user was clearing. The window is armed from
+	// the moment of the key, read above, not from when the call answered.
+	return m.clearPending(func(m Model) (Model, tea.Cmd) {
+		tm, cmd := m.cancelTurn()
+		next := tm.(Model)
+		next.ctrlCDeadline = now.Add(ctrlCWindow)
+		return next, cmd
+	})
 }
 
 // clearPending empties everything the queue band is holding. The strong send's
 // text does not come back here: Ctrl+C means stop, and a draft reappearing
 // under the cursor would be one more thing to undo. It says nothing about the
 // send-now it took back either — Ctrl+C is already the whole answer — which is
-// why the withdrawal is applied here with no note and its own delta skipped.
-func (m *Model) clearPending() {
+// why the withdrawal is applied with no note and its own delta skipped.
+//
+// Its two engine calls are ONE gated call (§3.12; clearPendingCall): the
+// Disarm and then the ClearQueue, back to back on the call's goroutine, as
+// they were back to back in today's one Update. Two gates would put a reply's
+// round trip between them, and a send-now's own cancel that settles the turn
+// inside it would drain the queue's head — a row the user was clearing —
+// before the ClearQueue could take it. The confirm comes down, and both
+// command ids are minted, in the Update that asks; the continuation is
+// everything after, in today's order: the Disarm's outcome, the edit's end,
+// the band, then the caller's own post-call work (then) — Ctrl+C's cancel,
+// /clear's transcript. A call that did not answer (ErrNoAnswer) knows neither
+// outcome: it says both, in that order, and goes on — the user asked for
+// everything to stop.
+func (m Model) clearPending(then linkThen) (Model, tea.Cmd) {
 	m.confirm = nil
-	m.withdrawSendNow("")
+	if m.eng == nil {
+		// No backend, so neither call: what followed them still runs.
+		m.settlePending(engine.Command{}, clearAnswer{disarm: errNoBackend, clear: errNoBackend}, false)
+		return then(m)
+	}
+	dc, cc := m.nextCmd(), m.nextCmd()
+	return m.run(gateDeadline, clearPendingCall(dc, cc),
+		func(m Model, r gateReply) (Model, tea.Cmd) {
+			ans, ok := r.result.(clearAnswer)
+			if !ok || r.err != nil {
+				ans = clearAnswer{disarm: ErrNoAnswer, clear: ErrNoAnswer}
+			}
+			m.settlePending(dc, ans, ok && r.err == nil)
+			return then(m)
+		})
+}
+
+// errNoBackend stands for a call a model with no backend never made: refused,
+// with nothing to say, as today's code skipped it.
+var errNoBackend = errors.New("tui: no backend")
+
+// clearAnswer is clearPending's one call answered: what each of its two verbs
+// came to, and the session's state read right after the second.
+type clearAnswer struct {
+	disarm, clear error
+	st            engine.State
+}
+
+// clearPendingCall is clearPending's gated call: the Disarm, then the
+// ClearQueue whatever the Disarm came to — nothing armed is the usual answer,
+// and the queue is cleared all the same — then the band's transitional read
+// (verbRead's). Each verb that gave up because the call's deadline passed did
+// not answer (unanswered).
+func clearPendingCall(dc, cc engine.Command) gateCall {
+	return func(ctx context.Context, b backend.Backend) (any, error) {
+		var ans clearAnswer
+		ans.disarm = unanswered(ctx, b.Disarm(ctx, dc))
+		_, err := b.ClearQueue(ctx, cc)
+		ans.clear = unanswered(ctx, err)
+		ans.st = b.State()
+		return ans, nil
+	}
+}
+
+// settlePending is clearPending's continuation up to the caller's own work, in
+// today's order: the Disarm's outcome, the edit's end, then the band — from
+// the call's read when the ClearQueue answered, from the session now when it
+// did not (read says whether the call brought one back).
+func (m *Model) settlePending(dc engine.Command, ans clearAnswer, read bool) {
+	m.withdrawn(dc, "", ans.disarm)
 	if m.queueEdit != "" {
 		m.cancelQueueEdit()
 	}
-	if m.eng != nil {
-		_, _ = m.eng.ClearQueue(context.Background(), m.nextCmd())
+	noAnswer := errors.Is(ans.clear, ErrNoAnswer)
+	if noAnswer {
+		m.note(noAnswerClearNote)
 	}
 	m.queueFocus = false
 	m.queueHov = noHover()
-	m.refreshSnap()
+	if read && !noAnswer {
+		m.refreshSnapFrom(ans.st)
+	} else {
+		m.refreshSnap()
+	}
 }
 
 func (m Model) handleEnter() (tea.Model, tea.Cmd) {
@@ -2225,7 +2299,7 @@ func (m Model) handleEnter() (tea.Model, tea.Cmd) {
 		return m.acceptSlash(m.slashSel), nil
 	}
 	if m.queueEdit != "" {
-		return m.saveQueueEdit()
+		return m.saveQueueEdit(linkDone)
 	}
 	name, args, ok := parseSlashLine(m.input.Value())
 	if ok && (name == "exit" || name == "rename") {
@@ -3570,8 +3644,8 @@ func (m *Model) applyStateDelta(ev agent.Event) {
 		switch st.Reason {
 		case agent.SendNowWithdrawn:
 			if ev.Cause != "" && ev.Cause == m.disarmed {
-				// This model's own Disarm, whose note it wrote in the Update that
-				// asked for it. Anything else is somebody else taking it back.
+				// This model's own Disarm, whose note it wrote when the Disarm
+				// answered. Anything else is somebody else taking it back.
 				m.disarmed = ""
 			} else {
 				m.note("send now dropped")
@@ -3716,7 +3790,12 @@ func (m *Model) refreshSnap() {
 	if m.eng == nil {
 		return
 	}
-	st := m.eng.State()
+	m.refreshSnapFrom(m.eng.State())
+}
+
+// refreshSnapFrom is refreshSnap over a state already read: a queue verb's, read
+// in its gated call right after the verb (verbRead).
+func (m *Model) refreshSnapFrom(st engine.State) {
 	m.snap = st.Snapshot
 	m.queue = st.Queue
 	if m.modeInFlight != "" {

@@ -263,10 +263,18 @@ func (p callPanic) String() string { return fmt.Sprintf("%v\n\n%s", p.value, p.s
 // own error. It is the asynchronous gate's: the baseline has no deadline.
 func callGated(ctx context.Context, b backend.Backend, id uint64, call gateCall) gateReply {
 	res, err := call(ctx, b)
+	return gateReply{id: id, result: res, err: unanswered(ctx, err)}
+}
+
+// unanswered is err, or ErrNoAnswer when it is ctx's own error once ctx has
+// ended: a call that gave up because its deadline passed did not answer. A
+// gated call that makes more than one backend call (clearPending's) judges
+// each outcome by it.
+func unanswered(ctx context.Context, err error) error {
 	if err != nil && ctx.Err() != nil && errors.Is(err, ctx.Err()) {
-		err = ErrNoAnswer
+		return ErrNoAnswer
 	}
-	return gateReply{id: id, result: res, err: err}
+	return err
 }
 
 // gated is Update: the gate over handle and the Update wrapper.

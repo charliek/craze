@@ -38,8 +38,17 @@ type schedRun struct {
 	frames []frameState
 	calls  []tea.Cmd
 	others []tea.Cmd
-	drains int
-	n      int
+	// cancels are the cancel commands the model handed back (cancelTurn's),
+	// kept for a schedule to run when the runtime would (C18b's Ctrl+C).
+	cancels []tea.Cmd
+	drains  int
+	// noDrain leaves owed drains for the schedule to apply (drainOwed), so a
+	// release's own state can be read before anything held is applied.
+	noDrain bool
+	// blind runs messages through the model with no frame drawn or published:
+	// a prepare whose frames no schedule compares, which costs no View.
+	blind bool
+	n     int
 }
 
 // newSchedRun is a started model at a fixed clock with its frames frozen, so
@@ -81,16 +90,34 @@ func (r *schedRun) sort(cmd tea.Cmd) {
 		r.calls = append(r.calls, cmd)
 	case strings.HasPrefix(name, tuiPkg+"Model.applyMode"), strings.HasPrefix(name, tuiPkg+"Model.implementPlan"):
 		r.others = append(r.others, cmd)
+	case strings.HasPrefix(name, tuiPkg+"Model.cancelTurn"):
+		r.cancels = append(r.cancels, cmd)
 	}
 }
 
 // step is one message through the frameModel, and every drain it owes.
 func (r *schedRun) step(msg tea.Msg) {
 	r.t.Helper()
-	tm, cmd := r.f.Update(msg)
-	r.f = tm.(frameModel)
-	r.frames = append(r.frames, r.f.bus.last())
+	var cmd tea.Cmd
+	if r.blind {
+		var tm tea.Model
+		tm, cmd = r.f.inner.Update(msg)
+		r.f.inner = tm.(Model)
+	} else {
+		var tm tea.Model
+		tm, cmd = r.f.Update(msg)
+		r.f = tm.(frameModel)
+		r.frames = append(r.frames, r.f.bus.last())
+	}
 	r.sort(cmd)
+	if !r.noDrain {
+		r.drainOwed()
+	}
+}
+
+// drainOwed applies every drain the model owes, as they come due.
+func (r *schedRun) drainOwed() {
+	r.t.Helper()
 	for r.drains > 0 {
 		r.drains--
 		r.step(drainMsg{})
@@ -208,15 +235,25 @@ func endings(n int) func([]agent.Event) bool {
 }
 
 // aWorkingTurn is a prepare: a prompt whose turn stays open until cancelled,
-// applied until the model shows it working.
+// applied until the model shows it working, and open at the session. A cancel
+// that reaches a prompt the session is still claiming withdraws it instead
+// (Stub.HangNext) — no ending of its own, the engine's synthetic one — and at
+// one CPU the claim can still be under way when a schedule's cancel (an arm's,
+// Ctrl+C's) lands, which made the cancel's events a matter of how the
+// goroutines were scheduled.
 func aWorkingTurn(r *schedRun) {
 	r.t.Helper()
-	r.stub.HangNext()
+	hung := r.stub.HangNext()
 	r.typeText("go")
 	r.key(enter())
 	r.feed()
 	if r.m().status != statusWorking {
 		r.t.Fatalf("prepare: the held turn left the model %s", r.m().status)
+	}
+	select {
+	case <-hung:
+	case <-time.After(pumpWatchdog):
+		r.t.Fatal("prepare: the hung turn never opened")
 	}
 }
 

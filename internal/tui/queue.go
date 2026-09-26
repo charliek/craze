@@ -11,6 +11,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/charliek/craze/internal/agent"
+	"github.com/charliek/craze/internal/backend"
 	"github.com/charliek/craze/internal/engine"
 )
 
@@ -302,35 +303,107 @@ func (m Model) sendNowPending() bool {
 	return m.eng != nil && m.eng.State().SendNow != nil
 }
 
+// linkThen is what a caller did once a gated call it made had returned and
+// been applied: its own post-call work, which runs in the callee's
+// continuation after the callee's own, and where a chain's next link is issued
+// (§3.12 "The operation chain").
+type linkThen func(m Model) (Model, tea.Cmd)
+
+// linkDone is the caller with nothing left to do once the call has been
+// applied: it returned there.
+func linkDone(m Model) (Model, tea.Cmd) { return m, nil }
+
+// The queue verbs' notes when their call did not answer in time (ErrNoAnswer,
+// §3.12 "On expiry"): the command may have run, so each says what may be so,
+// and the band shows the session's facts.
+const (
+	noAnswerDisarmNote = "no answer from the session — the send may still be armed"
+	noAnswerClearNote  = "no answer from the session — the queue may not have been cleared"
+	noAnswerRowNote    = "no answer from the session — the row may have changed"
+)
+
+// verbRead is a queue verb's gated call: the verb, and then the session's
+// state read right after it, which its continuation shows (refreshAfter). That
+// is the transitional live read (§3.12 "What a continuation shows"), taken
+// where the synchronous code took it — right after the call — because the
+// engine does not wait for the reply to be applied: by the time it lands, a
+// settlement can have drained a row or a send-now fired, and a read then would
+// draw that ahead of the events that say so (X37 2, Submit's same read). It is
+// in process only, and goes with the transitional State() (C21).
+func verbRead(verb func(ctx context.Context, b backend.Backend) error) gateCall {
+	return func(ctx context.Context, b backend.Backend) (any, error) {
+		err := verb(ctx, b)
+		return b.State(), err
+	}
+}
+
+// refreshAfter is a queue verb's refreshSnap, in its continuation: the state
+// its call read right after the verb (verbRead). A verb that did not answer
+// brought no read back, so the session is read now — whatever it holds.
+func (m *Model) refreshAfter(r gateReply) {
+	if st, ok := r.result.(engine.State); ok && !errors.Is(r.err, ErrNoAnswer) {
+		m.refreshSnapFrom(st)
+		return
+	}
+	m.refreshSnap()
+}
+
 // withdrawSendNow takes back an armed send-now. The text is wherever it was — the
 // composer for a draft, the queue for a row — so nothing is restored and nothing
 // is lost, and the turn that was cancelled to make room for it simply settles
 // into whatever was queued behind it.
 //
-// The note is written here, in the Update that asked, and the delta the engine
-// publishes for this same command is then this model's own echo and is skipped:
-// apply your own command's effect from its return value, skip exactly that
-// effect's echo (§3.4). Which is also why the caller says what the note is —
-// Esc owes one, Ctrl+C does not.
-func (m *Model) withdrawSendNow(note string) {
+// The note is written in Disarm's continuation, before any event the command
+// caused is applied — the command gate holds them until then (§3.12) — and the
+// delta the engine publishes for this same command is then this model's own
+// echo and is skipped: apply your own command's effect from its return value,
+// skip exactly that effect's echo (§3.4). Which is also why the caller says
+// what the note is — Esc owes one, Ctrl+C does not.
+//
+// The command id is minted in the Update that asks; everything after the call
+// — the marker, the note, and the caller's own post-call work (then) — is the
+// continuation. A Disarm that did not answer (ErrNoAnswer) sets no marker and
+// clears no draft, says the send may still be armed, and the caller's work
+// goes on: a Ctrl+C still clears and cancels.
+func (m Model) withdrawSendNow(note string, then linkThen) (Model, tea.Cmd) {
 	if m.eng == nil {
-		return
+		return then(m)
 	}
 	c := m.nextCmd()
-	if err := m.eng.Disarm(context.Background(), c); err != nil {
+	return m.run(gateDeadline,
+		func(ctx context.Context, b backend.Backend) (any, error) {
+			return nil, b.Disarm(ctx, c)
+		},
+		func(m Model, r gateReply) (Model, tea.Cmd) {
+			m.withdrawn(c, note, r.err)
+			return then(m)
+		})
+}
+
+// withdrawn applies what a Disarm this model sent as c came to: Esc's
+// withdrawal, and the first half of clearPending's one call.
+func (m *Model) withdrawn(c engine.Command, note string, err error) {
+	switch {
+	case err == nil:
+		m.disarmed = c.Cause()
+		// The arm this took back is gone, so the draft it was holding is
+		// nobody's to consume. Disarm refuses when there is nothing armed, so
+		// reaching here means the arm really was still waiting — which is what
+		// makes clearing the marker safe: an arm that had already fired would
+		// have been refused instead, leaving its started free to take the draft
+		// it went with.
+		m.armedDraft = ""
+		if note != "" {
+			m.note(note)
+		}
+	case errors.Is(err, ErrNoAnswer):
+		// The outcome is unknown: the arm may still be waiting, or may be gone.
+		// Neither marker moves — its own delta, if it went, is then noted as
+		// anyone's would be.
+		m.note(noAnswerDisarmNote)
+	default:
 		// Nothing was armed, or the engine is no longer admitting: either way
 		// there is nothing to say about a send that is not waiting.
-		return
-	}
-	m.disarmed = c.Cause()
-	// The arm this took back is gone, so the draft it was holding is nobody's to
-	// consume. Disarm refuses when there is nothing armed, so reaching here means
-	// the arm really was still waiting — which is what makes clearing the marker
-	// safe: an arm that had already fired would have been refused instead, leaving
-	// its started free to take the draft it went with.
-	m.armedDraft = ""
-	if note != "" {
-		m.note(note)
 	}
 }
 
@@ -406,28 +479,65 @@ func (m *Model) startQueueEdit(p agent.QueuedPrompt) {
 // saveQueueEdit writes the composer back into the row. The edit is
 // unconditional — expectedVersion nil — because the TUI is the only client of its
 // engine in S1b; the check-and-edit is what a second one will pass a version to.
-func (m Model) saveQueueEdit() (tea.Model, tea.Cmd) {
+//
+// The call goes through the command gate (§3.12): the text and the command id
+// are read in the Update that saves; the edit's end, the band, and the
+// caller's own post-call work (then — Ctrl+L's send of the saved row) are the
+// continuation. A save that did not answer (ErrNoAnswer) stays in edit mode —
+// the composer still holds the text, so nothing is lost and Enter saves again
+// — notes that the row may have changed, and shows the session's band.
+func (m Model) saveQueueEdit(then linkThen) (Model, tea.Cmd) {
 	id := m.queueEdit
 	text := strings.TrimSpace(m.input.Value())
 	if m.eng == nil {
-		return m, nil
+		return then(m)
 	}
+	c := m.nextCmd()
 	if text == "" {
 		// An emptied edit is a cancel: an empty message is not a message. The
 		// shell context goes with it — it was context for the message that is
 		// no longer being sent, not a message of its own.
-		_, _ = m.eng.Unqueue(context.Background(), m.nextCmd(), id)
-		m.finishQueueEdit()
-		m.refreshSnap()
-		return m, nil
+		return m.run(gateDeadline,
+			verbRead(func(ctx context.Context, b backend.Backend) error {
+				_, err := b.Unqueue(ctx, c, id)
+				return err
+			}),
+			func(m Model, r gateReply) (Model, tea.Cmd) {
+				if errors.Is(r.err, ErrNoAnswer) {
+					return m.saveUnanswered(then)
+				}
+				m.finishQueueEdit()
+				m.refreshAfter(r)
+				return then(m)
+			})
 	}
-	if err := m.eng.EditQueued(context.Background(), m.nextCmd(), id, m.queueEditCtx+text, nil); err != nil {
-		m.note(queueErrNote(err))
-		return m, nil
-	}
-	m.finishQueueEdit()
+	edited := m.queueEditCtx + text
+	return m.run(gateDeadline,
+		verbRead(func(ctx context.Context, b backend.Backend) error {
+			return b.EditQueued(ctx, c, id, edited, nil)
+		}),
+		func(m Model, r gateReply) (Model, tea.Cmd) {
+			switch {
+			case errors.Is(r.err, ErrNoAnswer):
+				return m.saveUnanswered(then)
+			case r.err != nil:
+				m.note(queueErrNote(r.err))
+				return then(m)
+			}
+			m.finishQueueEdit()
+			m.refreshAfter(r)
+			return then(m)
+		})
+}
+
+// saveUnanswered is a save whose call did not answer: the edit stays open with
+// the text the user wrote, the note says the row may have changed, and the
+// band is the session's, read now. A row that turns out to be gone ends the
+// edit on its own (syncQueue).
+func (m Model) saveUnanswered(then linkThen) (Model, tea.Cmd) {
+	m.note(noAnswerRowNote)
 	m.refreshSnap()
-	return m, nil
+	return then(m)
 }
 
 // finishQueueEdit leaves edit mode and puts the draft back. The row's shell
@@ -585,18 +695,22 @@ func (m Model) handleStrongSend() (tea.Model, tea.Cmd) {
 	if id := m.queueEdit; id != "" {
 		// The composer holds a queued row, not a draft: Ctrl+L saves the
 		// edit and sends that row now, so the text cannot go out twice
-		// (once as a draft and again from the queue).
-		tm, _ := m.saveQueueEdit()
-		m = tm.(Model)
-		if m.queueEdit != "" {
-			return m, nil // the save was refused and said why
-		}
-		for _, p := range m.queue {
-			if p.ID == id {
-				return m.sendQueuedNow(p)
+		// (once as a draft and again from the queue). A chain of two links
+		// (§3.12): the send, and the look for the row it sends, need the
+		// save's answer, so they are the save's continuation, which issues
+		// the Submit.
+		return m.saveQueueEdit(func(m Model) (Model, tea.Cmd) {
+			if m.queueEdit != "" {
+				return m, nil // the save was refused, or not answered, and said why
 			}
-		}
-		return m, nil // an emptied edit cancelled the row
+			for _, p := range m.queue {
+				if p.ID == id {
+					tm, cmd := m.sendQueuedNow(p)
+					return tm.(Model), cmd
+				}
+			}
+			return m, nil // an emptied edit cancelled the row
+		})
 	}
 	if p, ok := m.queueSelected(); ok {
 		return m.sendQueuedNow(p)
@@ -631,13 +745,14 @@ func (m Model) sendQueuedNow(p agent.QueuedPrompt) (tea.Model, tea.Cmd) {
 
 // handleQueueKey is the keyboard while the band has it. Anything that is not a
 // row key hands the keyboard back to the composer and is then handled as
-// usual, so typing never needs a second press.
-func (m Model) handleQueueKey(msg tea.KeyMsg) (bool, Model) {
+// usual, so typing never needs a second press. A handled key's command is the
+// band's own (Backspace's gated Unqueue), which the caller returns.
+func (m Model) handleQueueKey(msg tea.KeyMsg) (bool, Model, tea.Cmd) {
 	items := m.visibleQueue()
 	if len(items) == 0 {
 		m.focusComposer()
 		m.queueFocus = false
-		return false, m
+		return false, m, nil
 	}
 	sel, _ := m.queueSelected()
 	switch msg.Type {
@@ -648,11 +763,11 @@ func (m Model) handleQueueKey(msg tea.KeyMsg) (bool, Model) {
 		} else {
 			m.moveQueue(-1)
 		}
-		return true, m
+		return true, m, nil
 	case tea.KeyDown:
 		if m.queueSel < len(items)-1 {
 			m.moveQueue(1)
-			return true, m
+			return true, m, nil
 		}
 		// Past the last row: the sub-agent rows are the next band down, and
 		// the composer when there are none.
@@ -663,28 +778,55 @@ func (m Model) handleQueueKey(msg tea.KeyMsg) (bool, Model) {
 			m.focusComposer()
 			m.queueFocus = false
 		}
-		return true, m
+		return true, m, nil
 	case tea.KeyEnter:
 		m.startQueueEdit(sel)
-		return true, m
+		return true, m, nil
 	case tea.KeyBackspace, tea.KeyDelete:
-		if m.eng != nil {
-			_, _ = m.eng.Unqueue(context.Background(), m.nextCmd(), sel.ID)
-		}
-		m.refreshSnap()
-		if len(m.visibleQueue()) == 0 {
-			m.focusComposer()
-			m.queueFocus = false
-		}
-		return true, m
+		// Where the keyboard goes depends on the band the Unqueue leaves, so
+		// it is decided in the continuation.
+		next, cmd := m.dropQueuedRow(sel.ID, func(m Model) (Model, tea.Cmd) {
+			if len(m.visibleQueue()) == 0 {
+				m.focusComposer()
+				m.queueFocus = false
+			}
+			return m, nil
+		})
+		return true, next, cmd
 	case tea.KeyEsc:
 		m.focusComposer()
 		m.queueFocus = false
-		return true, m
+		return true, m, nil
 	}
 	m.focusComposer()
 	m.queueFocus = false
-	return false, m
+	return false, m, nil
+}
+
+// dropQueuedRow drops a row the user cancelled from the band — Backspace on it,
+// or its [cancel] — through the command gate (§3.12): the command id is minted
+// in the Update that asks, and the band the Unqueue leaves and the caller's
+// own post-call work (then) are the continuation. A refusal (the row already
+// gone) says nothing, as it never has; a call that did not answer says the row
+// may have changed, over the session's band.
+func (m Model) dropQueuedRow(id string, then linkThen) (Model, tea.Cmd) {
+	unqueued := func(m Model, r gateReply) (Model, tea.Cmd) {
+		if errors.Is(r.err, ErrNoAnswer) {
+			m.note(noAnswerRowNote)
+		}
+		m.refreshAfter(r)
+		return then(m)
+	}
+	if m.eng == nil {
+		return unqueued(m, gateReply{})
+	}
+	c := m.nextCmd()
+	return m.run(gateDeadline,
+		verbRead(func(ctx context.Context, b backend.Backend) error {
+			_, err := b.Unqueue(ctx, c, id)
+			return err
+		}),
+		unqueued)
 }
 
 // -------------------------------------------------------------------- mouse
@@ -723,11 +865,9 @@ func (m Model) queueClick(x, row int) (tea.Model, tea.Cmd) {
 		m.startQueueEdit(p)
 		return m, nil
 	case actionCancel:
-		if m.eng != nil {
-			_, _ = m.eng.Unqueue(context.Background(), m.nextCmd(), p.ID)
-		}
-		m.refreshSnap()
-		return m, nil
+		// The focus moved above, in the Update of the click; the band the
+		// Unqueue leaves is the continuation's.
+		return m.dropQueuedRow(p.ID, linkDone)
 	}
 	return m, nil
 }
