@@ -1,8 +1,12 @@
 package harness
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net/http/httputil"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -145,6 +149,16 @@ type ProviderError struct {
 	StatusCode int    // the HTTP status; 0 for an error with none, such as a stream error event
 	Message    string
 
+	// Code and Type are the provider's own machine-readable names for the
+	// failure, from its response's structured error (structuredError): the
+	// OpenAI-family envelope's error.code and error.type — for a quota
+	// that is gone, "insufficient_quota" — or "" when it sent none. They are
+	// what the provider says the failure is, where Message is display text
+	// cut to maxMessageBytes, so a decision that turns on the kind of
+	// failure reads them first (compact.go's quotaExhausted, review r2 major
+	// 2). Like Message they are text from outside craze, on one line.
+	Code, Type string
+
 	kind error
 }
 
@@ -181,7 +195,9 @@ func (e *ProviderError) Unwrap() error { return e.kind }
 //     is judged by its last error, the one the user would have seen.
 //   - The wrapper's *llm.MidStreamError (a failure after output began) and a
 //     *fantasy.ProviderError are classified the same way: by status, the
-//     auth flag, and the context-too-large flag.
+//     auth flag, and the context-too-large flag. A *fantasy.ProviderError
+//     also gives up the structured error's code and type from the response
+//     body it kept (structuredError); a MidStreamError keeps no body.
 //   - Anything else — a connection that failed, say — is a ProviderError
 //     with no status, carrying the error's text.
 func classify(err error, m store.Model) error {
@@ -205,11 +221,66 @@ func classify(err error, m store.Model) error {
 			pe.Message = fpe.Title
 		}
 		pe.kind = kindOf(fpe.StatusCode, fpe.AuthError, fpe.IsContextTooLarge())
+		code, typ := structuredError(fpe.ResponseBody)
+		pe.Code, pe.Type = oneLine(code, maxMessageBytes), oneLine(typ, maxMessageBytes)
 	default:
 		pe.Message = err.Error()
 	}
 	pe.Message = oneLine(pe.Message, maxMessageBytes)
 	return pe
+}
+
+// structuredError is the code and type of the structured error in body, the
+// response body a *fantasy.ProviderError kept (already scrubbed by package
+// llm): the OpenAI-family envelope, {"error": {"code": …, "type": …}}, which
+// both of craze's drivers speak. body is either that envelope itself — a
+// stream's in-band error event — or, for an HTTP error, the response dumped
+// whole: status line and headers, a blank line, then the body, which may be
+// chunked. A code or type that is not a string (OpenRouter's code is the
+// HTTP status, a number) names nothing, and is "". Anything that does not
+// parse is "", "": the caller falls back to the message.
+func structuredError(body []byte) (code, typ string) {
+	if !bytes.HasPrefix(body, []byte("HTTP/")) {
+		code, typ, _ = errorEnvelope(body)
+		return code, typ
+	}
+	_, rest, ok := bytes.Cut(body, []byte("\r\n\r\n"))
+	if !ok {
+		return "", ""
+	}
+	if code, typ, ok = errorEnvelope(rest); ok {
+		return code, typ
+	}
+	// A chunked body leads with its first chunk's size: undo the chunking,
+	// keeping whatever reads before an error.
+	dechunked, _ := io.ReadAll(httputil.NewChunkedReader(bytes.NewReader(rest)))
+	code, typ, _ = errorEnvelope(dechunked)
+	return code, typ
+}
+
+// errorEnvelope decodes the first JSON value in b as the OpenAI-family error
+// envelope, ignoring whatever follows it (a chunked body's trailer); ok is
+// false when b does not start with one.
+func errorEnvelope(b []byte) (code, typ string, ok bool) {
+	var env struct {
+		Error *struct {
+			Code json.RawMessage `json:"code"`
+			Type json.RawMessage `json:"type"`
+		} `json:"error"`
+	}
+	if err := json.NewDecoder(bytes.NewReader(b)).Decode(&env); err != nil || env.Error == nil {
+		return "", "", false
+	}
+	return jsonString(env.Error.Code), jsonString(env.Error.Type), true
+}
+
+// jsonString is raw as a string when it is a JSON string, else "".
+func jsonString(raw json.RawMessage) string {
+	var s string
+	if json.Unmarshal(raw, &s) != nil {
+		return ""
+	}
+	return s
 }
 
 // badToolCalls is the error a turn ends with when a step's tool calls had an

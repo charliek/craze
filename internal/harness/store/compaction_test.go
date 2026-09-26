@@ -148,20 +148,116 @@ func TestCompactionEntryRoundTrips(t *testing.T) {
 }
 
 // TestLeadsWithSummary (review r1-c9 finding 13, harness compact.go's own
-// astra review of C9): LeadsWithSummary is true exactly when the context at
-// the leaf begins with a rendered prior-summary message — after a
-// successful compaction, never before one.
+// astra review of C9; review r2 minor 5): LeadsWithSummary is true exactly
+// when the context at the leaf begins with a rendered prior-summary message —
+// contextAt's own rule — and never because of what the first message says.
+// The summary renders here as the harness renders it, inside the
+// <compacted_context> wrapper, so a rule that guessed from content could not
+// tell it from a background result that quotes the wrapper, the case such a
+// guess gets wrong; every case checks the answer against the context's own
+// first message.
 func TestLeadsWithSummary(t *testing.T) {
-	opts := compacted(testOptions(t))
-	s := newStore(t, opts)
-	turn(t, s, "q1", "a1", kimi)
-	if s.LeadsWithSummary() {
-		t.Fatal("LeadsWithSummary before any compaction, want false")
+	wrap := func(text string) string { return "<compacted_context>\n" + text + "\n</compacted_context>" }
+	wrapped := Renderer{
+		Reminder: testRenderer.Reminder,
+		Summary:  func(c Compaction) fantasy.Message { return fantasy.NewUserMessage(wrap(c.Summary)) },
 	}
-	compact(t, s, 2, success("one", ""))
-	if !s.LeadsWithSummary() {
-		t.Fatal("LeadsWithSummary after a successful compaction, want true")
+	open := func(t *testing.T) *Store {
+		opts := testOptions(t)
+		opts.Render = wrapped
+		return newStore(t, opts)
 	}
+	// leads checks tr's answer, and that the context's first message is the
+	// summary rendered — or, for want false, is not one.
+	leads := func(t *testing.T, tr *Transcript, want bool, summary string) {
+		t.Helper()
+		msgs, _ := tr.ContextWithResults(kimi)
+		if got := tr.LeadsWithSummary(); got != want {
+			t.Fatalf("LeadsWithSummary = %v, want %v (context %q)", got, want, messageTexts(msgs))
+		}
+		if want && (len(msgs) == 0 || messageTexts(msgs[:1])[0] != "user: "+wrap(summary)) {
+			t.Fatalf("the context %q does not begin with the summary %q", messageTexts(msgs), summary)
+		}
+	}
+
+	t.Run("a marked background result quoting the wrapper", func(t *testing.T) {
+		s := open(t)
+		child := MessageEntry{Message: fantasy.NewUserMessage(wrap("a child's own output")), Model: kimi, Turn: 1, SubagentResults: true}
+		if err := s.AppendUser(child); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.AppendAssistant(answer("", "noted", kimi)); err != nil {
+			t.Fatal(err)
+		}
+		msgs, marks := s.ContextWithResults(kimi)
+		if len(marks) == 0 || !marks[0] || messageTexts(msgs[:1])[0] != "user: "+wrap("a child's own output") {
+			t.Fatalf("test setup: the context %q (marks %v) must begin with the marked result", messageTexts(msgs), marks)
+		}
+		leads(t, s.Transcript(), false, "")
+	})
+	t.Run("before any compaction", func(t *testing.T) {
+		s := open(t)
+		turn(t, s, "q1", "a1", kimi)
+		leads(t, s.Transcript(), false, "")
+	})
+	t.Run("a success with a tail", func(t *testing.T) {
+		s := open(t)
+		turn(t, s, "q1", "a1", kimi)
+		turn(t, s, "q2", "a2", kimi)
+		compact(t, s, 3, success("one", entryByText(t, s, "q2")))
+		leads(t, s.Transcript(), true, "one")
+	})
+	t.Run("a success with no tail", func(t *testing.T) {
+		s := open(t)
+		turn(t, s, "q1", "a1", kimi)
+		compact(t, s, 2, success("all of it", ""))
+		leads(t, s.Transcript(), true, "all of it")
+		if msgs := s.Context(kimi); len(msgs) != 1 {
+			t.Fatalf("the context is %q, want the summary alone", messageTexts(msgs))
+		}
+	})
+	t.Run("a failure after a success", func(t *testing.T) {
+		s := open(t)
+		turn(t, s, "q1", "a1", kimi)
+		compact(t, s, 2, success("one", ""))
+		turn(t, s, "q3", "a3", kimi)
+		compact(t, s, 4, failure("summarizer: 3 attempts failed"))
+		leads(t, s.Transcript(), true, "one")
+	})
+	t.Run("two successes", func(t *testing.T) {
+		s := open(t)
+		turn(t, s, "q1", "a1", kimi)
+		compact(t, s, 2, success("one", ""))
+		turn(t, s, "q3", "a3", kimi)
+		compact(t, s, 4, success("two", ""))
+		leads(t, s.Transcript(), true, "two")
+	})
+	t.Run("a trimmed trailing entry", func(t *testing.T) {
+		// After the compaction, a prompt answered only by another model's
+		// reasoning: for kimi the answer has nothing to send and is dropped,
+		// and the prompt it leaves unanswered is trimmed — every message
+		// after the summary, which the trim never removes.
+		u := compactUsage
+		c, err := encodeEntry(Entry{Type: TypeCompaction, ID: "00000003", ParentID: "00000002", Timestamp: fixedTime,
+			Compaction: success("all of it", ""), MessageEntry: MessageEntry{Turn: 2, Model: kimi, Usage: &u}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		tr := mustLoad(t, lines(headerText(t),
+			userLine(t, "00000001", "", "q1"),
+			replyLine(t, "00000002", "00000001", "", "a1", kimi),
+			string(c),
+			userLine(t, "00000004", "00000003", "q2"),
+			replyLine(t, "00000005", "00000004", "minimax thinks", "", minimax)))
+		tr.render = wrapped
+		if leaf := tr.Leaf(); leaf != "00000005" {
+			t.Fatalf("test setup: the leaf is %q, want the reasoning-only answer", leaf)
+		}
+		leads(t, tr, true, "all of it")
+		if msgs := tr.Context(kimi); len(msgs) != 1 {
+			t.Fatalf("the context is %q, want the summary alone once the trailing entries are trimmed", messageTexts(msgs))
+		}
+	})
 }
 
 // TestContextAppliesTheLatestCompaction (A14): from a successful compaction

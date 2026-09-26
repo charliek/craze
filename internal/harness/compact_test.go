@@ -692,43 +692,75 @@ func TestACancelDuringCompactionSurfacesASaveFailureThroughSessionCompact(t *tes
 	}
 }
 
-// finding 4: Compacted{ended} is emitted even when the summarizer's own
-// agent panics, and the panic still propagates.
+// finding 4, review r2 minor 3: Compacted{ended} is emitted exactly once
+// whatever panics — the summarizer's own agent, the sink itself while it
+// handles ended, or both — and the panic that propagates is the one that
+// ended compact: a sink that panics on ended is not sent a second one, and a
+// panic of its own on the ended compact's defer sends does not replace the
+// agent's.
 func TestAPanicDuringSummarizationStillEmitsEnded(t *testing.T) {
-	f := newFixture(t, "http://unused")
-	opts := f.options()
-	s := f.open(opts)
-	s.newSummarizerAgent = func(_ fantasy.LanguageModel, _ string, tools []fantasy.AgentTool) fantasy.Agent {
-		return fakeAgent{tools: tools, run: func(_ context.Context, _ []fantasy.AgentTool, _ fantasy.AgentStreamCall) (*fantasy.AgentResult, error) {
-			panic("boom")
-		}}
-	}
-
-	f.models["test/a"].push(answerWith("hi"))
-	run(t, s, "hello")
-
-	var ev events
-	defer func() {
-		r := recover()
-		if r == nil {
-			t.Fatal("compact did not repanic; want the panic to propagate after ended is emitted")
-		}
-		var sawStarted, sawEnded bool
-		for _, e := range ev.list() {
-			if c, ok := e.(Compacted); ok {
-				switch c.Phase {
-				case CompactionStarted:
-					sawStarted = true
-				case CompactionEnded:
-					sawEnded = true
+	for _, tc := range []struct {
+		name        string
+		agentPanics bool   // the summarizer's agent panics "boom"
+		sinkPanics  bool   // the sink panics on each ended it handles, once it has recorded it
+		want        string // the panic compact must propagate
+	}{
+		{"the agent panics", true, false, "boom"},
+		{"the sink panics on ended", false, true, "sink: ended 1"},
+		{"the agent panics and the sink panics on ended", true, true, "boom"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFixture(t, "http://unused")
+			opts := f.options()
+			s := f.open(opts)
+			if tc.agentPanics {
+				s.newSummarizerAgent = func(_ fantasy.LanguageModel, _ string, tools []fantasy.AgentTool) fantasy.Agent {
+					return fakeAgent{tools: tools, run: func(_ context.Context, _ []fantasy.AgentTool, _ fantasy.AgentStreamCall) (*fantasy.AgentResult, error) {
+						panic("boom")
+					}}
 				}
 			}
-		}
-		if !sawStarted || !sawEnded {
-			t.Fatalf("events = %+v, want Compacted{started} and Compacted{ended} even after a panic", ev.list())
-		}
-	}()
-	_, _ = s.compact(context.Background(), s.cur, 2, store.CompactionAuto, "", "", ev.sink)
+
+			f.models["test/a"].push(answerWith("hi"))
+			run(t, s, "hello")
+			if !tc.agentPanics {
+				f.models["test/a"].push(answerWith(longSummary("1. Request and intent\nhello.")))
+			}
+
+			var ev events
+			endeds := 0
+			sink := func(e Event) {
+				ev.sink(e)
+				if c, ok := e.(Compacted); ok && c.Phase == CompactionEnded && tc.sinkPanics {
+					endeds++
+					panic(fmt.Sprintf("sink: ended %d", endeds))
+				}
+			}
+			got := func() (r any) {
+				defer func() { r = recover() }()
+				_, _ = s.compact(context.Background(), s.cur, 2, store.CompactionAuto, "", "", sink)
+				return nil
+			}()
+			if got != tc.want {
+				t.Errorf("compact propagated the panic %v, want %q: the one that ended compact", got, tc.want)
+			}
+			var started, ended int
+			for _, e := range ev.list() {
+				if c, ok := e.(Compacted); ok {
+					switch c.Phase {
+					case CompactionStarted:
+						started++
+					case CompactionEnded:
+						ended++
+					}
+				}
+			}
+			if started != 1 || ended != 1 {
+				t.Fatalf("Compacted{started} ×%d, Compacted{ended} ×%d; want exactly one of each, whatever panicked (events %+v)",
+					started, ended, ev.list())
+			}
+		})
+	}
 }
 
 // finding 5: transient 4xx classification. 408 and an ordinary 429 are
@@ -779,6 +811,58 @@ func TestQuotaExhaustedEndsTheSummarizerAtOnce(t *testing.T) {
 	entries := compactionEntries(t, s)
 	if len(entries) != 1 || entries[0].Compaction.Succeeded() {
 		t.Fatalf("compaction entries = %+v, want one failure", entries)
+	}
+}
+
+// review r2 major 2: a 429 whose structured error names the quota as gone —
+// code and type insufficient_quota — ends the summarizer at once even when
+// its message holds none of the phrases quotaExhaustedPattern knows: the
+// decision is the provider's own code, kept by classify from the real
+// response, not its display text. The body arrives sized and chunked alike
+// (a provider that streams its error response sends no Content-Length).
+func TestQuotaExhaustionIsReadFromTheStructuredCode(t *testing.T) {
+	const message = "Your request was refused for this account."
+	if quotaExhaustedPattern.MatchString(message) {
+		t.Fatalf("test setup: %q must hold none of the quota phrases", message)
+	}
+	body := fmt.Sprintf(`{"error":{"message":%q,"type":"insufficient_quota","param":null,"code":"insufficient_quota"}}`, message)
+	for _, tc := range []struct {
+		name    string
+		chunked bool
+	}{{"sized", false}, {"chunked", true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			quota := func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusTooManyRequests)
+				if tc.chunked {
+					// The header goes out before the body is written, so
+					// the server cannot size it: the body is chunked.
+					w.(http.Flusher).Flush()
+				}
+				fmt.Fprint(w, body)
+			}
+			// Three quota replies queued: a summarizer that retried would get
+			// the same answer each time, not the unqueued teapot.
+			w := newWire(t, sseReply(textChunk("hi"), finishChunk("stop", true)), quota, quota, quota)
+			f, opts := wireFixture(t, w)
+			s := f.open(opts)
+			s.sleep = func(context.Context, time.Duration) {}
+			run(t, s, "hello")
+
+			before := len(w.requests())
+			_, err := s.compact(context.Background(), s.cur, 2, store.CompactionAuto, "", "", nil)
+			var pe *ProviderError
+			if !errors.As(err, &pe) || pe.StatusCode != http.StatusTooManyRequests {
+				t.Fatalf("compact's error = %v, want the 429's *ProviderError", err)
+			}
+			if got := len(w.requests()) - before; got != 1 {
+				t.Fatalf("the summarizer sent %d requests, want 1: a 429 whose structured code is insufficient_quota ends it at once (error %v)", got, err)
+			}
+			entries := compactionEntries(t, s)
+			if len(entries) != 1 || entries[0].Compaction.Succeeded() {
+				t.Fatalf("compaction entries = %+v, want one failure", entries)
+			}
+		})
 	}
 }
 
@@ -833,7 +917,9 @@ func TestThreeAttemptsSendAtMostThreeRequests(t *testing.T) {
 }
 
 // finding 7: the unsaved-usage diagnostic reaches the real emitter, on a
-// failed failure-entry append too (not only a failed success append).
+// failed failure-entry append too (not only a failed success append), and
+// carries the attempt's billed usage — the value no entry holds (review r2
+// minor 7), not only the diagnostic's delivery.
 func TestUnsavedUsageDiagnosticReachesTheRealEmitterOnAFailureAppend(t *testing.T) {
 	f := newFixture(t, "http://unused")
 	opts := f.options()
@@ -850,21 +936,28 @@ func TestUnsavedUsageDiagnosticReachesTheRealEmitterOnAFailureAppend(t *testing.
 	f.models["test/a"].push(answerWith("hi"))
 	run(t, s, "hello")
 
-	f.models["test/a"].push(errorStep(&fantasy.ProviderError{StatusCode: 404, Message: "no such model"}))
+	// Billed, then failed: the one attempt's usage is what the failure entry
+	// would have held.
+	f.models["test/a"].push(billedThenFail(&fantasy.ProviderError{StatusCode: 404, Message: "no such model"}))
 	var ev events
 	_, err := s.compact(context.Background(), s.cur, 2, store.CompactionAuto, "", "", ev.sink)
 	var saveErr *errCompactionSaveFailed
 	if !errors.As(err, &saveErr) {
 		t.Fatalf("compact's error = %v, want *errCompactionSaveFailed", err)
 	}
-	var sawDiag bool
+	var diags []Diag
 	for _, e := range ev.list() {
 		if d, ok := e.(Diag); ok && d.Kind == DiagCompactionUnsaved {
-			sawDiag = true
+			diags = append(diags, d)
 		}
 	}
-	if !sawDiag {
+	if len(diags) == 0 {
 		t.Fatal("no DiagCompactionUnsaved event reached the sink: the unsaved-usage diagnostic was dropped")
+	}
+	want := fmt.Sprintf("input=%d output=%d reasoning=0 cache_read=%d cache_creation=0",
+		stepUsage.InputTokens, stepUsage.OutputTokens, stepUsage.CacheReadTokens)
+	if len(diags) != 1 || diags[0].Fields["usage"] != want {
+		t.Fatalf("DiagCompactionUnsaved = %+v, want one, carrying the billed attempt's usage %q", diags, want)
 	}
 }
 
@@ -975,23 +1068,32 @@ func TestDefaultSleepEndsAtOnceOnCancel(t *testing.T) {
 	}
 }
 
-// finding 10: a cancel during compact's own backoff ends the attempts at
-// once, rather than waiting out the delay and only then failing the next
-// attempt's own way.
+// finding 10, review r2 minor 4: a cancel during compact's own backoff ends
+// the attempts at once, through the production wiring — the sleep Open gave
+// the session, and backoff's own look at ctx after it — rather than waiting
+// out the delay and only then failing the next attempt's own way. The test
+// hands that production sleep a backoff of an hour, far past await's
+// watchdog: a sleep that ignored the cancel times the test out, and an
+// attempts loop that went on after a cancelled backoff sends a second
+// request.
 func TestBackoffEndsTheAttemptsAtOnceOnCancel(t *testing.T) {
 	f := newFixture(t, "http://unused")
 	opts := f.options()
 	s := f.open(opts)
+	production := s.sleep // Open's own: what compact backs off with outside a test
 	reachedBackoff := make(chan struct{})
-	s.sleep = func(ctx context.Context, d time.Duration) {
-		close(reachedBackoff)
-		defaultSleep(ctx, d)
+	var once sync.Once
+	s.sleep = func(ctx context.Context, _ time.Duration) {
+		once.Do(func() { close(reachedBackoff) })
+		production(ctx, time.Hour)
 	}
 
 	f.models["test/a"].push(answerWith("hi"))
 	run(t, s, "hello")
 
-	f.models["test/a"].push(billedThenFail(&fantasy.ProviderError{StatusCode: 500, Message: "boom"}))
+	before := len(f.models["test/a"].requests())
+	f.models["test/a"].push(billedThenFail(&fantasy.ProviderError{StatusCode: 500, Message: "boom"}),
+		answerWith(longSummary("1. Request and intent\nhello.")))
 	ctx, cancel := context.WithCancel(context.Background())
 	type outcome1 struct {
 		res CompactResult
@@ -1002,11 +1104,14 @@ func TestBackoffEndsTheAttemptsAtOnceOnCancel(t *testing.T) {
 		res, err := s.compact(ctx, s.cur, 2, store.CompactionAuto, "", "", nil)
 		done <- outcome1{res, err}
 	}()
-	<-reachedBackoff
+	await(t, reachedBackoff, "compact to back off after a failed attempt")
 	cancel()
-	got := await(t, done, "compact to return promptly after a cancel during backoff")
+	got := await(t, done, "compact to return promptly after a cancel during an hour's backoff")
 	if !errors.Is(got.err, context.Canceled) {
 		t.Fatalf("compact's error = %v, want context.Canceled", got.err)
+	}
+	if n := len(f.models["test/a"].requests()) - before; n != 1 {
+		t.Fatalf("the summarizer sent %d requests, want 1: no attempt follows a backoff the cancel ended", n)
 	}
 }
 
@@ -1071,16 +1176,45 @@ func TestLastSummaryBlockIgnoresATrailingUnfinishedOpener(t *testing.T) {
 	}
 }
 
-// finding 13: the prior summary is identified by the store's own precise
-// mark, never guessed from a message's content — a background result can
-// legitimately hold text that reads like the summary wrapper.
-func TestPriorSummaryTextIsNeverGuessedFromContent(t *testing.T) {
-	msgs := []fantasy.Message{fantasy.NewUserMessage("<" + compactedTag + ">\nnot really a summary, a child's own output\n</" + compactedTag + ">")}
-	if text, ok := priorSummaryText(msgs, false); ok || text != "" {
-		t.Fatalf("priorSummaryText(_, false) = (%q, %v), want (\"\", false)", text, ok)
+// finding 13, review r2 minor 5: the prior summary is the store's to name
+// (LeadsWithSummary), never guessed from a message's content. A context
+// whose first message is a MARKED background result — a wake's entry of
+// sub-agents' results, which a child wrote, redacted like a summary — that
+// quotes the summary wrapper's own tag is no prior summary: the text form
+// sends it once, as its turn's own line, and never also keeps it whole ahead
+// of the turns as it keeps a summary. (The store's TestLeadsWithSummary has
+// the rule's other cases.)
+func TestTextFormNeverTakesABackgroundResultForThePriorSummary(t *testing.T) {
+	f := newFixture(t, "http://unused")
+	opts := f.options()
+	s := f.open(opts)
+	m := s.cur
+
+	const childSays = "not a summary: a child's own output, quoting the wrapper"
+	child := "<" + compactedTag + ">\n" + childSays + "\n</" + compactedTag + ">"
+	if err := s.store.AppendUser(store.MessageEntry{Message: fantasy.NewUserMessage(child), Model: m.id(), Turn: 1, SubagentResults: true}); err != nil {
+		t.Fatal(err)
 	}
-	if text, ok := priorSummaryText(msgs, true); !ok || text == "" {
-		t.Fatalf("priorSummaryText(_, true) = (%q, %v), want the message's own text and true", text, ok)
+	answer := fantasy.Message{Role: fantasy.MessageRoleAssistant, Content: []fantasy.MessagePart{fantasy.TextPart{Text: "noted"}}}
+	if err := s.store.AppendAssistant(store.MessageEntry{Message: answer, Model: m.id(), StopReason: "end_turn"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, marks := s.store.ContextWithResults(m.id()); len(marks) == 0 || !marks[0] {
+		t.Fatalf("test setup: the context's first message must be marked as results (marks %v)", marks)
+	}
+
+	f.models["test/a"].push(answerWith(longSummary("1. Request and intent\nThe child reported.")))
+	if _, err := s.compactOn(context.Background(), m, m.r, true, 2, store.CompactionManual, "", "", nil); err != nil {
+		t.Fatalf("compact: %v", err)
+	}
+	calls := f.models["test/a"].requests()
+	last := calls[len(calls)-1]
+	prompt := textOf(last.Prompt[len(last.Prompt)-1])
+	if n := strings.Count(prompt, childSays); n != 1 {
+		t.Errorf("the text form's prompt holds the background result %d times, want once — as its turn's line, not also kept whole as a prior summary:\n%s", n, prompt)
+	}
+	if !strings.HasPrefix(prompt, "[User]: ") {
+		t.Errorf("the text form's prompt does not lead with the turn's own line — something was taken for a prior summary:\n%s", prompt)
 	}
 }
 
@@ -1114,6 +1248,155 @@ func TestUnknownWindowFallbackBudgetsFromTheOverflowingRequest(t *testing.T) {
 	}
 }
 
+// review r2 minor 6: with an unknown window, the text form's budget is 60%
+// of the estimate of the request that overflowed — the history, plus the
+// compaction prompt weighed as the user message it is sent as (its JSON,
+// messageTokens, as the history's messages are weighed), not as bare text.
+// At the tightest before that estimate lets the whole request fit, it fits;
+// one token less, it does not.
+func TestUnknownWindowBudgetWeighsThePromptAsAMessage(t *testing.T) {
+	f := newFixture(t, "http://unused")
+	opts := f.options()
+	s := f.open(opts)
+	red := s.redactor()
+
+	m := s.cur
+	m.r.ContextWindow = 0 // the unknown-window fallback
+
+	promptCore := s.compactionPromptText("", red)
+	asMessage := messageTokens(fantasy.NewUserMessage(promptCore))
+	if gap := asMessage - textTokens(promptCore); gap*60/100 < 1 {
+		t.Fatalf("test setup: the message's JSON adds %d tokens to the prompt's text, too few to move a 60%% budget", gap)
+	}
+	// The assembled request with no turn and no prior summary: the system
+	// prompt, then the newline before the prompt core, and the core.
+	need := textTokens(s.system) + textTokens("\n"+promptCore)
+	before := int64(0)
+	for textFormBudget(m.r, before+asMessage) < need {
+		before++
+	}
+	if before == 0 {
+		t.Fatal("test setup: the prompt alone already fits; no tight before to test at")
+	}
+
+	if _, err := s.textFormPrompt(m, before, nil, "", "", red); err != nil {
+		t.Fatalf("textFormPrompt(before %d) = %v, want it to fit: 60%% of the overflowing request, its prompt weighed as a message, is exactly the request's size", before, err)
+	}
+	if _, err := s.textFormPrompt(m, before-1, nil, "", "", red); !errors.Is(err, errTextFormOverflow) {
+		t.Fatalf("textFormPrompt(before %d) = %v, want errTextFormOverflow: one token less of budget does not fit the request", before-1, err)
+	}
+}
+
+// review r2 major 1: the final check of the assembled request never drops
+// the newest turn. One real turn, stored as a step is, sized so that the
+// fixed part and the turn fit the budget piece by piece while the assembled
+// request — the newline before the prompt core, never counted apart — is one
+// token over: with a result to cut, the turn is kept with its results cut to
+// resultLadderCap; with none, the compaction fails. Neither returns the
+// fixed prompt alone, as if the context had no turn at all.
+func TestTextFormFinalCheckNeverDropsTheNewestTurn(t *testing.T) {
+	result := strings.Repeat("a line of the file being read\n", 60) // 1,800 characters: under the ordinary cap, over the ladder's
+	// storedTurn opens a session holding one turn — a read and its result,
+	// or a plain answer — whose prompt is padded until the turn's text-form
+	// lines are a whole number of tokens, so the one separator byte assembly
+	// adds costs a token the pieces never counted.
+	storedTurn := func(t *testing.T, withResult bool) (*Session, []store.Step, int64) {
+		t.Helper()
+		for pad := range 4 {
+			f := newFixture(t, "http://unused")
+			s := f.open(f.options())
+			id := s.cur.id()
+			prompt := "read big.txt" + strings.Repeat("!", pad)
+			if err := s.store.AppendUser(store.MessageEntry{Message: fantasy.NewUserMessage(prompt), Model: id, Turn: 1}); err != nil {
+				t.Fatal(err)
+			}
+			if withResult {
+				call := fantasy.Message{Role: fantasy.MessageRoleAssistant, Content: []fantasy.MessagePart{
+					fantasy.TextPart{Text: "reading"},
+					fantasy.ToolCallPart{ToolCallID: "c1", ToolName: "read", Input: `{"filePath":"big.txt"}`},
+				}}
+				res := fantasy.Message{Role: fantasy.MessageRoleTool, Content: []fantasy.MessagePart{
+					fantasy.ToolResultPart{ToolCallID: "c1", Output: fantasy.ToolResultOutputContentText{Text: result}},
+				}}
+				if _, err := s.store.AppendStep(nil, store.MessageEntry{Message: call, Model: id, StopReason: "tool_use"},
+					&store.MessageEntry{Message: res, Model: id}); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				answer := fantasy.Message{Role: fantasy.MessageRoleAssistant, Content: []fantasy.MessagePart{fantasy.TextPart{Text: "an answer with nothing to cut"}}}
+				if err := s.store.AppendAssistant(store.MessageEntry{Message: answer, Model: id, StopReason: "end_turn"}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			steps := s.store.Steps(id)
+			if len(steps) != 1 {
+				t.Fatalf("test setup: the context has %d steps, want 1", len(steps))
+			}
+			lines := textLines(redactStepMessages(s.redactor(), steps[0].Messages), resultLineCap)
+			if len(lines)%bytesPerToken == 0 {
+				return s, steps, textTokens(lines)
+			}
+		}
+		t.Fatal("test setup: no padding made the turn's lines a whole number of tokens")
+		return nil, nil, 0
+	}
+	// exactBudget is r with a known window whose text-form budget is target.
+	exactBudget := func(r modeltable.Resolved, target int64) modeltable.Resolved {
+		r.ContextWindow = int(target * 2)
+		r.MaxOutputTokens = int(int64(r.ContextWindow)*70/100 - target)
+		if got := textFormBudget(r, 0); got != target {
+			t.Fatalf("test setup: the budget is %d, want %d", got, target)
+		}
+		return r
+	}
+	// focusFor is a focus that makes the prompt core a whole number of
+	// tokens too.
+	focusFor := func(s *Session) (focus, promptCore string) {
+		for pad := range 4 {
+			focus = strings.Repeat("x", pad)
+			if promptCore = s.compactionPromptText(focus, s.redactor()); len(promptCore)%bytesPerToken == 0 {
+				return focus, promptCore
+			}
+		}
+		t.Fatal("test setup: no focus made the prompt core a whole number of tokens")
+		return "", ""
+	}
+
+	t.Run("a result to cut", func(t *testing.T) {
+		s, steps, turn := storedTurn(t, true)
+		focus, promptCore := focusFor(s)
+		m := s.cur
+		budget := textTokens(s.system) + textTokens(promptCore) + turn // the pieces, exactly
+		m.r = exactBudget(m.r, budget)
+
+		prompt, err := s.textFormPrompt(m, 0, steps, "", focus, s.redactor())
+		if err != nil {
+			t.Fatalf("textFormPrompt = %v, want the newest turn kept with its results cut to %d characters", err, resultLadderCap)
+		}
+		if !strings.Contains(prompt, "[User]: read big.txt") {
+			t.Fatalf("the text form's prompt dropped the only turn, leaving the fixed part alone:\n%s", prompt)
+		}
+		if !strings.Contains(prompt, "[Tool result]: "+capText(result, resultLadderCap)+"\n") {
+			t.Errorf("the turn's result is not cut to %d characters:\n%s", resultLadderCap, prompt)
+		}
+		if got := textTokens(s.system) + textTokens(prompt); got > budget {
+			t.Errorf("the assembled request is %d tokens, over the budget of %d", got, budget)
+		}
+	})
+
+	t.Run("nothing to cut", func(t *testing.T) {
+		s, steps, turn := storedTurn(t, false)
+		focus, promptCore := focusFor(s)
+		m := s.cur
+		m.r = exactBudget(m.r, textTokens(s.system)+textTokens(promptCore)+turn)
+
+		prompt, err := s.textFormPrompt(m, 0, steps, "", focus, s.redactor())
+		if !errors.Is(err, errTextFormOverflow) {
+			t.Fatalf("textFormPrompt = (%q, %v), want errTextFormOverflow: the newest turn, with nothing to cut, still does not fit, and is never dropped for a prompt of the fixed part alone", prompt, err)
+		}
+	})
+}
+
 // finding 15: the text form checks the assembled request once more,
 // separators included — a fixed part that lands exactly at budget, with no
 // turn left to trim, must not silently return an over-budget prompt.
@@ -1142,8 +1425,11 @@ outer:
 			continue
 		}
 		fixed = textTokens(s.system) + textTokens(promptCore)
+		// The overflowing request's estimate is before plus the prompt as
+		// the message it is sent as (textFormPrompt, review r2 minor 6).
+		asMessage := messageTokens(fantasy.NewUserMessage(promptCore))
 		for b := int64(0); b < 20000; b++ {
-			if textFormBudget(m.r, b+textTokens(promptCore)) == fixed {
+			if textFormBudget(m.r, b+asMessage) == fixed {
 				before, found = b, true
 				break outer
 			}

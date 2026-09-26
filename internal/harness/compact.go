@@ -200,6 +200,17 @@ func (s *Session) compactOn(ctx context.Context, m model, fit modeltable.Resolve
 		usage   store.Usage
 		lastErr error
 	)
+	// endedSent is whether Compacted{ended} has gone to the sink: set before
+	// the sink is called, so an ended the sink panicked while handling
+	// counts as sent (review r2 minor 3).
+	endedSent := false
+	sink := emit
+	emit = func(ev Event) {
+		if c, ok := ev.(Compacted); ok && c.Phase == CompactionEnded {
+			endedSent = true
+		}
+		sink(ev)
+	}
 	// ended is deferred once started is emitted, on every exit path this
 	// function takes — a panic included, from agent construction or
 	// streaming (review r1-c9 finding 4, P34): a recovering caller must not
@@ -207,13 +218,24 @@ func (s *Session) compactOn(ctx context.Context, m model, fit modeltable.Resolve
 	// below emits Compacted{ended} itself before it returns, which is not a
 	// panic, so recover() there is nil and this defer does nothing; "nothing
 	// to compact" (above) returns before started is even emitted, and stays
-	// event-free, as it always has.
+	// event-free, as it always has. ended goes out exactly once (review r2
+	// minor 3): a panic from the sink while it handled an ended already sent
+	// is propagated as it is, not answered with a second ended; and the
+	// panic propagated is always the one that ended compact — a sink that
+	// panics again on this defer's own ended does not replace it.
 	defer func() {
-		if r := recover(); r != nil {
-			emit(Compacted{Phase: CompactionEnded, Reason: reason, TokensBefore: before,
-				Err: fmt.Sprintf("panic: %v", r), Usage: usage})
-			panic(r)
+		r := recover()
+		if r == nil {
+			return
 		}
+		if !endedSent {
+			func() {
+				defer func() { _ = recover() }() // r, not the sink's, is what propagates
+				emit(Compacted{Phase: CompactionEnded, Reason: reason, TokensBefore: before,
+					Err: fmt.Sprintf("panic: %v", r), Usage: usage})
+			}()
+		}
+		panic(r)
 	}()
 	priorSummary, hasPrior := priorSummaryText(history, s.store.LeadsWithSummary())
 
@@ -502,27 +524,48 @@ func summarizerFailureKind(err error) string {
 // quotaExhaustedPattern matches the provider's own text for a 429 that means
 // the account has no quota or credit left, rather than an ordinary rate
 // limit worth retrying: OpenAI-family "insufficient_quota", and the more
-// common human phrasing around it (review r1-c9, decision 4).
+// common human phrasing around it (review r1-c9, decision 4). It is
+// quotaExhausted's fallback, for an error with no structured code or type
+// that names the failure.
 var quotaExhaustedPattern = regexp.MustCompile(
 	`(?i)insufficient_quota|insufficient quota|exceeded (?:your |its )?(?:current )?quota|quota exceeded|out of credits?|credit balance`)
+
+// quotaExhaustedCodes are the structured error codes and types (lowercase)
+// that name a 429 as the account's quota or credit being gone
+// (ProviderError.Code, .Type): OpenAI-family "insufficient_quota".
+var quotaExhaustedCodes = map[string]bool{"insufficient_quota": true}
 
 // transientClientStatus reports whether a classified 4xx failure is worth
 // retrying rather than ending the summarizer at once (plan 028 §3.8 decision
 // 4, review r1-c9 finding 5): HTTP 408 (request timeout) and 429 (rate
 // limit) are transient — EXCEPT a 429 whose provider error says the
-// account's quota or credit is exhausted, which a retry cannot fix. HTTP 402
-// (payment required) is exactly that failure by its status alone, whatever
-// it says, and every other 4xx (400, 404 already handled by its own
-// sentinel above, 422, …) is fatal, as before.
+// account's quota or credit is exhausted (quotaExhausted), which a retry
+// cannot fix. HTTP 402 (payment required) is exactly that failure by its
+// status alone, whatever it says, and every other 4xx (400, 404 already
+// handled by its own sentinel above, 422, …) is fatal, as before.
 func transientClientStatus(pe *ProviderError) bool {
 	switch pe.StatusCode {
 	case 408:
 		return true
 	case 429:
-		return !quotaExhaustedPattern.MatchString(pe.Message)
+		return !quotaExhausted(pe)
 	default:
 		return false
 	}
+}
+
+// quotaExhausted reports whether a 429 says the account's quota or credit is
+// gone rather than that it is merely rate limited (review r2 major 2): by the
+// provider's structured error first — its code or type, what the provider
+// says the failure IS (quotaExhaustedCodes), kept whole by classify — and
+// then, as a fallback for a provider whose error carries no such name, by
+// the phrases of its message (quotaExhaustedPattern), which is display text,
+// cleaned and cut to maxMessageBytes.
+func quotaExhausted(pe *ProviderError) bool {
+	if quotaExhaustedCodes[strings.ToLower(pe.Code)] || quotaExhaustedCodes[strings.ToLower(pe.Type)] {
+		return true
+	}
+	return quotaExhaustedPattern.MatchString(pe.Message)
 }
 
 // cleanErrorText is a failed summarizer's error, on one line, for the
@@ -700,15 +743,21 @@ func textFormBudget(r modeltable.Resolved, overflowed int64) int64 {
 // does for the same reason. Once assembled, the whole prompt — separators
 // included — is checked against budget once more (review r1-c9 finding 15),
 // trimming further, oldest first, if the pieces summed short of what
-// assembling them actually costs; if the fixed part alone, or still the
-// newest turn once trimmed to nothing, exceeds the budget, errTextFormOverflow.
+// assembling them actually costs — but never the newest turn (review r2
+// major 1): once it is all that is left and the whole is still over, its
+// results are cut to resultLadderCap as above, and if the fixed part plus
+// that cut turn still exceed the budget — or the fixed part alone does —
+// errTextFormOverflow. A context with turns never becomes a prompt that is
+// the fixed part alone.
 func (s *Session) textFormPrompt(m model, before int64, steps []store.Step, priorSummary, focus string, red *redact.Replacer) (string, error) {
 	promptCore := s.compactionPromptText(focus, red)
 	// The aligned request's own estimate: what actually overflowed, for the
 	// unknown-window fallback (textFormBudget, finding 14). before already
 	// counts the system prompt, the tools and the history (estimateContext);
-	// promptCore is the one user message compact adds on top of it.
-	overflowed := before + textTokens(promptCore)
+	// promptCore is the one user message compact adds on top of it, weighed
+	// as the message it is sent as — its JSON, not its bare text (review r2
+	// minor 6) — exactly as before weighs each message of the history.
+	overflowed := before + messageTokens(fantasy.NewUserMessage(promptCore))
 	budget := textFormBudget(m.r, overflowed)
 	fixed := textTokens(s.system) + textTokens(promptCore) + textTokens(priorSummary)
 	if fixed > budget {
@@ -719,6 +768,14 @@ func (s *Session) textFormPrompt(m model, before int64, steps []store.Step, prio
 	type chosen struct {
 		lines string
 		size  int64
+		cut   bool // the newest turn, its results cut to resultLadderCap
+	}
+	// newestCut is the newest turn with its results cut to resultLadderCap:
+	// what a turn that does not fit at the ordinary cap is tried as, once,
+	// before the compaction fails.
+	newestCut := func() chosen {
+		lines := textLines(redactStepMessages(red, steps[len(steps)-1].Messages), resultLadderCap)
+		return chosen{lines, textTokens(lines), true}
 	}
 	var picked []chosen
 	sum := int64(0)
@@ -729,16 +786,14 @@ func (s *Session) textFormPrompt(m model, before int64, steps []store.Step, prio
 			break
 		}
 		sum += n
-		picked = append([]chosen{{lines, n}}, picked...)
+		picked = append([]chosen{{lines, n, false}}, picked...)
 	}
 	if len(picked) == 0 && len(steps) > 0 {
-		last := steps[len(steps)-1]
-		lines := textLines(redactStepMessages(red, last.Messages), resultLadderCap)
-		n := textTokens(lines)
-		if n > remaining {
+		c := newestCut()
+		if c.size > remaining {
 			return "", errTextFormOverflow
 		}
-		picked = []chosen{{lines, n}}
+		picked = []chosen{c}
 	}
 
 	assemble := func(picked []chosen) string {
@@ -761,11 +816,18 @@ func (s *Session) textFormPrompt(m model, before int64, steps []store.Step, prio
 	// summary, the newline before the prompt core) that were never counted
 	// (review r1-c9 finding 15). Check the assembled whole, system prompt
 	// and all, once more, trimming the oldest picked turn at a time until it
-	// fits, or there is nothing left to trim.
+	// fits or only the newest is left — picked is always a run of the newest
+	// turns, so its last is the newest. That one is never dropped (review r2
+	// major 1): it is cut to resultLadderCap instead, unless it already is,
+	// and if the whole is still over, the compaction fails.
 	total := func(result string) int64 { return textTokens(s.system) + textTokens(result) }
 	result := assemble(picked)
-	for total(result) > budget && len(picked) > 0 {
+	for total(result) > budget && len(picked) > 1 {
 		picked = picked[1:]
+		result = assemble(picked)
+	}
+	if total(result) > budget && len(picked) == 1 && !picked[0].cut {
+		picked = []chosen{newestCut()}
 		result = assemble(picked)
 	}
 	if total(result) > budget {
