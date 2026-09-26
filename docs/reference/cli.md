@@ -134,6 +134,40 @@ misbehaved. Three things still refuse instead: the session already
 **held** by another craze, a **busy** index, and a legacy row that
 **vanished** from the index before it could be given an id.
 
+### Native sessions
+
+Native sessions are indexed and resumable on the same terms as cursor's and
+grok's: `--continue` and `--resume` find and load a native row the same way,
+and `--plan`/`--ask` set the resumed session's mode explicitly, overriding
+whatever mode the transcript's own last `mode_change` recorded (see
+[Resuming a session](tui.md#resuming-a-session)).
+
+`--agent-bin`/`CRAZE_AGENT_BIN` refuse a native row exactly as they refuse a
+new native session — it has nothing to spawn — exit 2, before the index is
+touched or anything claimed:
+
+```text
+craze: --agent-bin cannot be used with provider native, which runs inside craze
+craze: CRAZE_AGENT_BIN cannot be used with provider native, which runs inside craze; unset it
+```
+
+A row whose transcript file does not exist yet — its first prompt was
+cancelled before any output came back — is not a failed load: craze opens an
+**empty** session under that same id instead of refusing. This is the one
+deliberate exception to "a load never falls back to a new session" above —
+it is still the same session, continuing from nothing, not a different one,
+so nothing is silently switched out from under you.
+
+A native transcript adds its own lock beneath [the claim
+above](#a-session-already-open-in-another-craze): a transcript another craze
+process already has open refuses the load the same way. A transcript left
+with a torn or cut-off tail by a crash is trimmed back to its last complete
+step on open, and the dropped bytes are kept beside it in a
+`<transcript>.torn-<UTC stamp>` file rather than discarded; a tail written by
+a newer craze build — one this version does not recognize — is never
+trimmed, and the load is refused instead, so nothing unrecognized is thrown
+away.
+
 ### The control socket
 
 Every craze TUI process binds a control socket in the runtime namespace and

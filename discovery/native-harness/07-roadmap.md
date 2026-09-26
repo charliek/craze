@@ -641,11 +641,12 @@ Live smoke, all three PRs (plan artifacts, outside the repo — see
 **Planned (Plan 028, 2026-09-25):** FINAL after the S2 seam review and the
 panel (round 1: astra, GLM, CodeRabbit; rounds 2–5: astra alone; round 5
 found nothing blocking). Three PRs, each branched from a freshly fetched
-`origin/main` and paused after merge with a kickoff for the next (PD1): PR 1
-`feature/plan-028-h7-resume` (the store reopens; provenance fields; the
-harness opens a stored session and replays it; the adapter's load; native
-indexed and resumable; CLI and picker — native sessions resume with
-`-c`/`-r`, `/rename` persists); PR 2 `feature/plan-028-h7-compaction`
+`origin/main` and paused after merge with a kickoff for the next (PD1).
+**PR 1 (resume): implemented on `feature/plan-028-h7-resume`** (the store
+reopens; provenance fields; the harness opens a stored session and replays
+it; the adapter's load; native indexed and resumable; CLI and picker —
+native sessions resume with `-c`/`-r`, `/rename` persists). PR 2
+`feature/plan-028-h7-compaction`
 (reminders stored as variants; the compaction entry and context rule; the
 summarizer and segments; when to compact; the segmented turn; overflow
 recovery; the `compaction` event; `/compact` — long sessions compact and
