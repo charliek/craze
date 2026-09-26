@@ -1,6 +1,7 @@
 package rundir
 
 import (
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -80,14 +81,16 @@ func TestASymlinkedAncestorIntoAGroupWritableDirectoryIsRefused(t *testing.T) {
 
 func TestAGroupOrWorldWritableAncestorWithoutStickyIsRefused(t *testing.T) {
 	t.Parallel()
-	for _, mode := range []os.FileMode{0o770, 0o777, 0o707} {
+	for mode, fix := range map[os.FileMode]string{0o770: "g-w", 0o777: "go-w", 0o707: "o-w"} {
 		t.Run(strconv.FormatUint(uint64(mode), 8), func(t *testing.T) {
 			t.Parallel()
 			env := testEnv(t)
 			parent := env.CrazeRuntimeDir
 			env.CrazeRuntimeDir = filepath.Join(parent, "rt")
 			chmod(t, parent, mode)
-			bindErr(t, env, "CRAZE_RUNTIME_DIR", "ancestor "+mustCanonical(t, parent)+" is group- or world-writable")
+			canon := mustCanonical(t, parent)
+			bindErr(t, env, "CRAZE_RUNTIME_DIR", "ancestor "+canon+" is group- or world-writable",
+				"run: chmod "+fix+" "+canon)
 		})
 	}
 }
@@ -220,11 +223,113 @@ func groupWritableParent(t *testing.T, env *Env, mode os.FileMode) int {
 	return gid
 }
 
+// localNSSwitch is an nsswitch.conf whose users and groups are all local:
+// the owner's own box, where the user-private-group exemption applies.
+const localNSSwitch = "# comment\npasswd:         files systemd\ngroup:          files systemd\nhosts: files dns\nnetgroup: nis\n"
+
 func TestAUserPrivateGroupAncestorIsAccepted(t *testing.T) {
 	t.Parallel()
 	env := testEnv(t)
 	env.PrivateGID = groupWritableParent(t, &env, 0o775)
+	env.NSSwitch = localNSSwitch
 	bind(t, env)
+}
+
+func TestTheUserPrivateGroupExemptionNeedsLocalAccounts(t *testing.T) {
+	t.Parallel()
+	for name, nsswitch := range map[string]string{
+		"sssd":                     "passwd: files sss\ngroup: files sss\n",
+		"ldap for groups":          "passwd: files systemd\ngroup: files ldap\n",
+		"compat":                   "passwd: compat\ngroup: compat\n",
+		"no nsswitch.conf":         "",
+		"no group line":            "passwd: files\n",
+		"initgroups from winbind":  localNSSwitch + "initgroups: files winbind\n",
+		"a line this cannot parse": "passwd files\ngroup: files\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			env := testEnv(t)
+			env.PrivateGID = groupWritableParent(t, &env, 0o775)
+			env.NSSwitch = nsswitch
+			parent := mustCanonical(t, filepath.Dir(env.CrazeRuntimeDir))
+			bindErr(t, env, "ancestor "+parent+" is group- or world-writable without the sticky bit (mode 0775)",
+				"run: chmod g-w "+parent)
+		})
+	}
+}
+
+func TestLocalAccounts(t *testing.T) {
+	t.Parallel()
+	for in, want := range map[string]bool{
+		"passwd: files\ngroup: files\n":                                                 true,
+		"passwd: files systemd\ngroup: files systemd\n":                                 true,
+		"passwd: files [SUCCESS=merge] systemd\ngroup: files [SUCCESS=merge] systemd\n": true,
+		"passwd:\tfiles[NOTFOUND=return]  systemd\r\ngroup :files\n":                    true,
+		"passwd: files # ldap\ngroup: systemd files\nshadow: files sss\n":               true,
+		localNSSwitch + "initgroups: files\n":                                           true,
+		"passwd: compat\ngroup: compat\n":                                               false,
+		"passwd: files sss\ngroup: files sss\n":                                         false,
+		"passwd: files ldap\ngroup: files\n":                                            false,
+		"passwd: files\ngroup: files nis\n":                                             false,
+		"passwd: files winbind\ngroup: files\n":                                         false,
+		"passwd: Files\ngroup: files\n":                                                 false,
+		"passwd: files\n":                                                               false,
+		"group: files\n":                                                                false,
+		"# passwd: files\n# group: files\n":                                             false,
+		"":                                                                              false,
+		"passwd:\ngroup: files\n":                                                       false,
+		"passwd: [NOTFOUND=return] files\ngroup: files\n":                               false,
+		"passwd: files [NOTFOUND=return\ngroup: files\n":                                false,
+		"passwd: files [a=[b]]\ngroup: files\n":                                         false,
+		"passwd: files\npasswd: ldap\ngroup: files\n":                                   false,
+		"passwd: files\nPASSWD: ldap\ngroup: files\n":                                   false,
+		"passwd: files\ngroup: files\ninitgroups: ldap\n":                               false,
+		"passwd files\ngroup: files\n":                                                  false,
+		"passwd: files\ngroup: files\ngarbage\n":                                        false,
+		": files\npasswd: files\ngroup: files\n":                                        false,
+	} {
+		if got := localAccounts(in); got != want {
+			t.Errorf("localAccounts(%q) = %v, want %v", in, got, want)
+		}
+	}
+}
+
+func TestProcessAccountsReadsLinuxOnly(t *testing.T) {
+	t.Parallel()
+	files := map[string]string{
+		nsswitchPath: localNSSwitch,
+		passwdPath:   "u:x:1000:1000::/home/u:/bin/sh\n",
+		groupPath:    "u:x:1000:\n",
+	}
+	read := func(missing string) func(string) ([]byte, error) {
+		return func(p string) ([]byte, error) {
+			s, ok := files[p]
+			if !ok || p == missing {
+				return nil, fs.ErrNotExist
+			}
+			return []byte(s), nil
+		}
+	}
+	for name, tc := range map[string]struct {
+		goos, missing string
+		gid           int
+		nsswitch      string
+	}{
+		"linux":            {"linux", "", 1000, localNSSwitch},
+		"darwin, never":    {"darwin", "", 0, ""},
+		"no nsswitch.conf": {"linux", nsswitchPath, 1000, ""},
+		"no passwd":        {"linux", passwdPath, 0, localNSSwitch},
+		"no group":         {"linux", groupPath, 0, localNSSwitch},
+	} {
+		gid, nsswitch := processAccounts(tc.goos, 1000, read(tc.missing))
+		if gid != tc.gid || nsswitch != tc.nsswitch {
+			t.Errorf("%s: processAccounts = %d, %q; want %d, %q", name, gid, nsswitch, tc.gid, tc.nsswitch)
+		}
+		exempt := Env{EUID: 1000, PrivateGID: gid, NSSwitch: nsswitch}.privateGroupWritable(1000, 1000, 0o775)
+		if want := name == "linux"; exempt != want {
+			t.Errorf("%s: a 0775 directory of the user's private group exempt = %v, want %v", name, exempt, want)
+		}
+	}
 }
 
 func TestAGroupWritableAncestorOfAnotherGroupIsRefused(t *testing.T) {
@@ -242,12 +347,13 @@ func TestAGroupWritableAncestorOfAnotherGroupIsRefused(t *testing.T) {
 			env := testEnv(t)
 			gid := groupWritableParent(t, &env, tc.mode)
 			env.PrivateGID = tc.private(gid)
+			env.NSSwitch = localNSSwitch
 			bindErr(t, env, "is group- or world-writable without the sticky bit")
 		})
 	}
 	// Another owner's directory never qualifies, whatever its group: the
 	// exemption is for the user's own directories.
-	env := Env{EUID: 1000, PrivateGID: 1000}
+	env := Env{EUID: 1000, PrivateGID: 1000, NSSwitch: localNSSwitch}
 	if env.privateGroupWritable(1001, 1000, 0o775) || env.privateGroupWritable(0, 1000, 0o775) {
 		t.Fatal("a group-writable directory of another owner passed as the user's own")
 	}

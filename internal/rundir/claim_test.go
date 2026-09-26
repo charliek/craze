@@ -2,10 +2,12 @@ package rundir
 
 import (
 	"errors"
+	"math"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -65,12 +67,22 @@ func TestAHeldClaimNamesItsHolder(t *testing.T) {
 	}
 }
 
+// noSuchPID is a pid no process can have: above pid_max on Linux (2^22 at
+// most) and on Darwin (99999).
+const noSuchPID = 1 << 30
+
 func TestAHolderThatHasNotWrittenReadsPIDZero(t *testing.T) {
 	t.Parallel()
+	if err := syscall.Kill(noSuchPID, 0); !errors.Is(err, syscall.ESRCH) {
+		t.Fatalf("setup: kill(%d, 0) = %v, want ESRCH", noSuchPID, err)
+	}
 	for name, content := range map[string]string{
 		"empty":        "",
 		"half-written": strconv.Itoa(os.Getpid()) + " 0123",
 		"no newline":   strconv.Itoa(os.Getpid()) + " 0123456789ab",
+		// A predecessor that died holding the lock left its line complete,
+		// and this holder has not truncated it yet.
+		"a dead predecessor's line": strconv.Itoa(noSuchPID) + " 0123456789ab\n",
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
@@ -164,15 +176,18 @@ func TestABadSessionIDIsRefusedBeforeAnyPathIsBuilt(t *testing.T) {
 func TestParseHolder(t *testing.T) {
 	t.Parallel()
 	for in, want := range map[string]Holder{
-		"42 0123456789ab\n":    {PID: 42, HostID: "0123456789ab"},
-		"42 0123456789ab":      {},
-		"42\n":                 {},
-		"0 0123456789ab\n":     {},
-		"-1 0123456789ab\n":    {},
-		"42 0123456789AB\n":    {},
-		"42  0123456789ab\n":   {},
-		"x 0123456789ab\n":     {},
-		"42 0123456789ab\nx\n": {},
+		"42 0123456789ab\n":         {PID: 42, HostID: "0123456789ab"},
+		"42 0123456789ab":           {},
+		"42\n":                      {},
+		"0 0123456789ab\n":          {},
+		"-1 0123456789ab\n":         {},
+		"42 0123456789AB\n":         {},
+		"42  0123456789ab\n":        {},
+		"x 0123456789ab\n":          {},
+		"42 0123456789ab\nx\n":      {},
+		"2147483647 0123456789ab\n": {PID: math.MaxInt32, HostID: "0123456789ab"},
+		"2147483648 0123456789ab\n": {}, // no pid_t: kill would truncate it
+		"4294967297 0123456789ab\n": {}, // pid 1, truncated
 	} {
 		if got := parseHolder(in); got != want {
 			t.Errorf("parseHolder(%q) = %+v, want %+v", in, got, want)

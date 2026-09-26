@@ -2,6 +2,7 @@ package rundir
 
 import (
 	"errors"
+	"math"
 	"net"
 	"os"
 	"path/filepath"
@@ -195,5 +196,41 @@ func TestDialCheckIsPeerChecksRule(t *testing.T) {
 	lookupFailed := errors.New("injected: no credentials")
 	if err := DialCheckWith(1000, lookupOf(4242, 1000, lookupFailed))(client); !errors.Is(err, lookupFailed) {
 		t.Fatalf("DialCheckWith a failed lookup: %v, want the lookup's error", err)
+	}
+}
+
+// TestAnXucredThatNamesNobodyIsRefused: macOS's LOCAL_PEERCRED result is
+// trusted only when it looks like one the kernel wrote. The zeroed struct a
+// getsockopt that wrote nothing leaves behind — version 0, uid 0, no groups —
+// is refused, and so a root host's PeerCheck(0) does not take it for root.
+// xucredUID runs on every platform, so Linux CI checks the rule too.
+func TestAnXucredThatNamesNobodyIsRefused(t *testing.T) {
+	t.Parallel()
+	for name, tc := range map[string]struct {
+		version, uid uint32
+		ngroups      int16
+		want         int // noUID: refused
+	}{
+		"a user's":           {version: 0, uid: 501, ngroups: 3, want: 501},
+		"root's":             {version: 0, uid: 0, ngroups: 1, want: 0},
+		"all groups":         {version: 0, uid: 501, ngroups: 16, want: 501},
+		"the zeroed struct":  {version: 0, uid: 0, ngroups: 0, want: noUID},
+		"a user's, no group": {version: 0, uid: 501, ngroups: 0, want: noUID},
+		"a negative count":   {version: 0, uid: 501, ngroups: -1, want: noUID},
+		"too many groups":    {version: 0, uid: 501, ngroups: 17, want: noUID},
+		"another version":    {version: 1, uid: 501, ngroups: 1, want: noUID},
+		"no credentials":     {version: 0, uid: math.MaxUint32, ngroups: 1, want: noUID},
+	} {
+		uid, err := xucredUID(tc.version, tc.uid, tc.ngroups)
+		if uid != tc.want || (err != nil) != (tc.want == noUID) {
+			t.Errorf("%s: xucredUID = %d, %v; want uid %d", name, uid, err, tc.want)
+		}
+	}
+	zeroed := func(*net.UnixConn) (int, int, error) {
+		uid, err := xucredUID(0, 0, 0)
+		return 0, uid, err
+	}
+	if pid, uid, err := PeerCheckWith(0, zeroed)(nil); err == nil || uid != noUID || pid != 0 {
+		t.Fatalf("PeerCheck(0) of a zeroed xucred: (%d, %d, %v), want a refusal naming no uid", pid, uid, err)
 	}
 }

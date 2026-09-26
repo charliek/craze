@@ -3,6 +3,8 @@ package rundir
 import (
 	"errors"
 	"fmt"
+	"io/fs"
+	"math"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -11,11 +13,20 @@ import (
 	"syscall"
 )
 
-// openNoFollow opens path with O_NOFOLLOW and O_CLOEXEC — a symlink at path
-// is refused, and no child craze spawns (an agent) inherits the descriptor,
-// or a lock with it — and refuses anything but a regular file.
+// openNoFollow is openRegular with O_NOFOLLOW: a symlink at path is refused.
+// Every open under either tree is one.
 func openNoFollow(path string, flag int, perm os.FileMode) (*os.File, error) {
-	f, err := os.OpenFile(path, flag|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, perm)
+	return openRegular(path, flag|syscall.O_NOFOLLOW, perm)
+}
+
+// openRegular opens path and refuses anything but a regular file, checked on
+// the open descriptor (fstat) before a byte is read or written. The open is
+// O_NONBLOCK, so a FIFO planted at path is refused at once instead of
+// waiting forever for a writer; on a regular file the flag changes nothing.
+// O_CLOEXEC: no child craze spawns (an agent) inherits the descriptor, or a
+// lock with it.
+func openRegular(path string, flag int, perm os.FileMode) (*os.File, error) {
+	f, err := os.OpenFile(path, flag|syscall.O_NONBLOCK|syscall.O_CLOEXEC, perm)
 	if err != nil {
 		return nil, err
 	}
@@ -27,6 +38,28 @@ func openNoFollow(path string, flag int, perm os.FileMode) (*os.File, error) {
 	if !fi.Mode().IsRegular() {
 		_ = f.Close()
 		return nil, fmt.Errorf("%s is not a regular file", path)
+	}
+	return f, nil
+}
+
+// openLock opens the lock file at path read-write, creating it 0600 when it
+// is missing. The create is exclusive, so a file this call made is known to
+// be its own, and that one is fchmod-ed 0600, as directories and sockets are
+// chmod-ed: the umask may have cleared the owner's bits, and a lock file
+// without them could never be opened again — by Hosts, probing a live host,
+// or by the session's next claim. A file that already exists is opened as it
+// is, and never changed.
+func openLock(path string) (*os.File, error) {
+	f, err := openNoFollow(path, os.O_CREATE|os.O_EXCL|os.O_RDWR, 0o600)
+	if errors.Is(err, fs.ErrExist) {
+		return openNoFollow(path, os.O_RDWR, 0)
+	}
+	if err != nil {
+		return nil, err
+	}
+	if err := f.Chmod(0o600); err != nil {
+		_ = f.Close()
+		return nil, err
 	}
 	return f, nil
 }
@@ -89,10 +122,18 @@ func parseHolder(s string) Holder {
 		return Holder{}
 	}
 	pid, err := strconv.Atoi(pidText)
-	if err != nil || pid <= 0 || !ValidHostID(hostID) {
+	// A pid_t is 32 bits: a larger number is no pid, and kill would truncate it.
+	if err != nil || pid <= 0 || pid > math.MaxInt32 || !ValidHostID(hostID) {
 		return Holder{}
 	}
 	return Holder{PID: pid, HostID: hostID}
+}
+
+// alive reports whether a process with this pid exists: kill(pid, 0) sends
+// nothing, and fails with ESRCH only when there is none (EPERM is a process
+// of another uid, which exists).
+func alive(pid int) bool {
+	return !errors.Is(syscall.Kill(pid, 0), syscall.ESRCH)
 }
 
 // sameFile reports whether path still names the file f has open: the check
@@ -119,8 +160,9 @@ func unlinkFile(path string) error {
 }
 
 // Holder is who holds a lock: the pid and host id its file names. PID 0 is a
-// holder that has not written its line yet (the instant after its flock) —
-// "pid ?" — and the lock is held all the same.
+// holder that has not written its line yet (the instant after its flock), or
+// whose file still names a process that no longer exists — "pid ?" — and the
+// lock is held all the same.
 type Holder struct {
 	PID    int
 	HostID string
@@ -175,7 +217,7 @@ func ClaimSession(env Env, crazeID, hostID string) (*Claim, error) {
 		return nil, err
 	}
 	path := filepath.Join(dir, crazeID+".lock")
-	f, err := openNoFollow(path, os.O_CREATE|os.O_RDWR, 0o600)
+	f, err := openLock(path)
 	if err != nil {
 		return nil, fmt.Errorf("rundir: open the session lock: %w", err)
 	}
@@ -187,6 +229,12 @@ func ClaimSession(env Env, crazeID, hostID string) (*Claim, error) {
 	if !taken {
 		holder := readHolder(f)
 		_ = f.Close()
+		// A process that died holding the lock leaves its line complete, and
+		// the next holder truncates it only after its own flock: a claimer
+		// in between reads the dead one's. A pid no process has is nobody's.
+		if holder.PID > 0 && !alive(holder.PID) {
+			holder = Holder{}
+		}
 		return nil, &HeldError{CrazeID: crazeID, Holder: holder}
 	}
 	if err := writeHolder(f, hostID); err != nil {

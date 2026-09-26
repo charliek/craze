@@ -55,6 +55,10 @@ func TestALongSocketPathIsRefusedBeforeBind(t *testing.T) {
 	if names, _ := os.ReadDir(parent); len(names) != 0 {
 		t.Fatalf("%s holds %d entries after the refusal; nothing may be created", parent, len(names))
 	}
+	// Nor in the cache tree: the home is fresh, so its .cache would be new.
+	if exists(t, filepath.Join(env.Home, cacheName)) {
+		t.Fatal("the cache tree was built before the socket path was measured")
+	}
 }
 
 func TestAnUnusableXDGRuntimeDirFallsThrough(t *testing.T) {

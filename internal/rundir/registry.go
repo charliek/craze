@@ -50,6 +50,10 @@ type Entry struct {
 // ErrClosed is Update on a closed Host.
 var ErrClosed = errors.New("rundir: the host is closed")
 
+// lstatBound is the lstat of the socket Bind has just bound: os.Lstat, which
+// a test replaces (never in parallel) to fail it.
+var lstatBound = os.Lstat
+
 // Host is a bound control socket and everything registered for it: the
 // listener, the host's lifetime lock (hosts/<hostId>.lock, held until Close)
 // and its registry entry.
@@ -73,8 +77,9 @@ type Host struct {
 
 // Bind validates both trees, takes the host's lock, binds its socket and
 // registers it (plan 027 §3.8):
-//  1. the cache tree and the socket base with its <ns> are validated (and
-//     their leaves created);
+//  1. the socket base with its <ns>, then the cache tree, are validated (and
+//     their leaves created) — the base first, so that a socket path too long
+//     for sun_path is refused before either tree is touched;
 //  2. hosts/<hostID>.lock is opened without truncating, flocked without
 //     blocking, then truncated to "<pid> <hostId>";
 //  3. the socket is bound at <base>/<ns>/<hostID>.sock — no probe and no
@@ -93,11 +98,14 @@ func Bind(env Env, hostID string, entry Entry) (*Host, error) {
 	if err != nil {
 		return nil, err
 	}
-	hosts, err := env.cacheSubdir(hostsName, true)
+	// The socket base first: it measures the socket path against sun_path
+	// before it creates anything, so a path too long is refused with nothing
+	// created in either tree.
+	dir, err := env.socketDir(ns, hostID)
 	if err != nil {
 		return nil, err
 	}
-	dir, err := env.socketDir(ns, hostID)
+	hosts, err := env.cacheSubdir(hostsName, true)
 	if err != nil {
 		return nil, err
 	}
@@ -117,7 +125,7 @@ func Bind(env Env, hostID string, entry Entry) (*Host, error) {
 
 // bind is Bind's steps 2–5; whatever it built is on h for teardown.
 func (h *Host) bind(entry Entry) error {
-	lock, err := openNoFollow(h.lockPath, os.O_CREATE|os.O_RDWR, 0o600)
+	lock, err := openLock(h.lockPath)
 	if err != nil {
 		return fmt.Errorf("rundir: open the host lock: %w", err)
 	}
@@ -143,8 +151,15 @@ func (h *Host) bind(entry Entry) error {
 	// unlink.
 	ln.SetUnlinkOnClose(false)
 	h.ln = ln
-	fi, err := os.Lstat(h.socket)
+	fi, err := lstatBound(h.socket)
 	if err != nil {
+		// Unlinked by name, as there is no identity yet to check it against,
+		// because nothing else would ever remove it: no registry entry names
+		// it for a sweep. The name is safe to trust: it is in <base>/<ns>,
+		// just validated as a leaf — the euid's own directory, mode 0700 — so
+		// since ListenUnix made it only this uid (or root) can have put
+		// anything else there.
+		_ = unlinkFile(h.socket)
 		return fmt.Errorf("rundir: stat the control socket: %w", err)
 	}
 	if fi.Mode().Type() != fs.ModeSocket {
@@ -205,6 +220,14 @@ func (h *Host) Entry() Entry {
 // becomes ready, and when it changes — and records the new file's identity.
 // Protocol, HostID, PID and Socket are kept as Bind wrote them. After Close it
 // returns ErrClosed and writes nothing.
+//
+// A residual, accepted: when the rewrite's rename succeeds but the lstat
+// after it fails, Update returns the error and keeps the old entry and the
+// old identity. Close then finds a file that is not the one recorded and
+// leaves it, while it removes the host's lock; and a sweep, whose only
+// authority is that lock, skips an entry without one forever. It takes a
+// transient lstat failure on a file just renamed in the host's own 0700
+// directory.
 func (h *Host) Update(fn func(*Entry)) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()

@@ -1,32 +1,133 @@
 package rundir
 
 import (
+	"io"
 	"os"
 	"strconv"
 	"strings"
 )
 
-// processPrivateGID is the euid's user-private group as the local account
-// files describe it (privateGID), or 0. Accounts only a directory service
-// knows (LDAP, sssd) get no exemption: a group-writable ancestor is refused
-// for them, which is the safe side.
-func processPrivateGID(euid int) int {
-	passwd, err := os.ReadFile("/etc/passwd")
-	if err != nil {
-		return 0
+// The account files ProcessEnv reads, on Linux only.
+const (
+	nsswitchPath = "/etc/nsswitch.conf"
+	passwdPath   = "/etc/passwd"
+	groupPath    = "/etc/group"
+)
+
+// processAccounts is ProcessEnv's PrivateGID and NSSwitch on goos, each file
+// read with read (readSystemFile). Off Linux both are empty, so a
+// group-writable ancestor is never exempt there: macOS takes its accounts from
+// Directory Services, which none of these files describe, and a macOS user's
+// primary group is the shared staff. A file that cannot be read leaves what
+// it feeds empty, which denies the exemption.
+func processAccounts(goos string, euid int, read func(string) ([]byte, error)) (gid int, nsswitch string) {
+	if goos != "linux" {
+		return 0, ""
 	}
-	group, err := os.ReadFile("/etc/group")
-	if err != nil {
-		return 0
+	if b, err := read(nsswitchPath); err == nil {
+		nsswitch = string(b)
 	}
-	return privateGID(euid, string(passwd), string(group))
+	passwd, err := read(passwdPath)
+	if err != nil {
+		return 0, nsswitch
+	}
+	group, err := read(groupPath)
+	if err != nil {
+		return 0, nsswitch
+	}
+	return privateGID(euid, string(passwd), string(group)), nsswitch
+}
+
+// readSystemFile reads one of the root-owned files above. Links are followed
+// (NixOS links /etc/nsswitch.conf into /etc/static), but only a regular file
+// is read, and a FIFO is refused without waiting for a writer (openRegular).
+func readSystemFile(path string) ([]byte, error) {
+	f, err := openRegular(path, os.O_RDONLY, 0)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	return io.ReadAll(f)
+}
+
+// localAccounts reports whether nsswitch — /etc/nsswitch.conf's contents —
+// takes users and groups from local sources alone, which is what lets
+// privateGID's reading of /etc/passwd and /etc/group stand for every account
+// on the machine. An account from NIS, LDAP or sssd can share a local user's
+// primary gid, and /etc/passwd never shows it.
+//
+// The passwd and group lines must be present, and each, like an initgroups
+// line if there is one (it can grant groups the group line does not name),
+// must name at least one service and only the services "files" and
+// "systemd"; action items ("[NOTFOUND=return]") are ignored. Anything else is
+// false: another service (compat, nis, ldap, sss, winbind, …), a missing or
+// repeated line, or syntax this simple parser does not know.
+func localAccounts(nsswitch string) bool {
+	seen := map[string]bool{}
+	for _, line := range strings.Split(nsswitch, "\n") {
+		if i := strings.IndexByte(line, '#'); i >= 0 {
+			line = line[:i]
+		}
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		end := strings.IndexAny(line, ": \t")
+		if end <= 0 {
+			return false
+		}
+		rest, ok := strings.CutPrefix(strings.TrimLeft(line[end:], " \t"), ":")
+		if !ok {
+			return false
+		}
+		db := strings.ToLower(line[:end])
+		if db != "passwd" && db != "group" && db != "initgroups" {
+			continue
+		}
+		if seen[db] || !localServices(rest) {
+			return false
+		}
+		seen[db] = true
+	}
+	return seen["passwd"] && seen["group"]
+}
+
+// localServices reports whether one nsswitch line's service list names one or
+// more services, each "files" or "systemd", with any action items after a
+// service skipped.
+func localServices(list string) bool {
+	services := 0
+	for {
+		list = strings.TrimLeft(list, " \t")
+		switch {
+		case list == "":
+			return services > 0
+		case list[0] == '[':
+			end := strings.IndexByte(list, ']')
+			if services == 0 || end < 0 || strings.IndexByte(list[1:end], '[') >= 0 {
+				return false
+			}
+			list = list[end+1:]
+		default:
+			end := strings.IndexAny(list, " \t[")
+			if end < 0 {
+				end = len(list)
+			}
+			if name := list[:end]; name != "files" && name != "systemd" {
+				return false
+			}
+			services++
+			list = list[end:]
+		}
+	}
 }
 
 // privateGID is the gid of uid's user-private group, or 0 when it has none,
 // by the rule OpenSSH's Debian user-group-modes patch applies before it
 // trusts a group-writable directory: uid's primary group carries the user's
 // own name, has no supplementary member but the user, and is no other
-// account's primary group. passwd and group are /etc/passwd and /etc/group.
+// account's primary group. passwd and group are /etc/passwd and /etc/group;
+// the accounts they cannot show are localAccounts' concern.
 func privateGID(uid int, passwd, group string) int {
 	var name string
 	gid := -1

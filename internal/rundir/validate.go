@@ -88,7 +88,8 @@ func (env Env) checkAncestors(dir string) error {
 // symlink swapped in since the path was canonicalised shows here), must be a
 // directory owned by root or the euid, and must not be group- or
 // world-writable unless the sticky bit is set, or it is the euid's own and
-// only its user-private group can write it (Env.PrivateGID).
+// only its user-private group can write it (privateGroupWritable). A writable
+// one is refused with the chmod that would make it acceptable.
 func (env Env) checkAncestor(p string) error {
 	fi, err := os.Lstat(p)
 	if err != nil {
@@ -107,16 +108,28 @@ func (env Env) checkAncestor(p string) error {
 	mode := permOf(fi)
 	if mode&(modeGroupWrite|modeOtherWrite) != 0 && mode&modeSticky == 0 &&
 		!env.privateGroupWritable(int(st.Uid), int(st.Gid), mode) {
-		return fmt.Errorf("ancestor %s is group- or world-writable without the sticky bit (mode %04o)", p, mode)
+		who := "go"
+		switch mode & (modeGroupWrite | modeOtherWrite) {
+		case modeGroupWrite:
+			who = "g"
+		case modeOtherWrite:
+			who = "o"
+		}
+		return fmt.Errorf("ancestor %s is group- or world-writable without the sticky bit (mode %04o), "+
+			"so another user could replace what craze puts under it; if nobody else should write to it, run: chmod %s-w %s",
+			p, mode, who, p)
 	}
 	return nil
 }
 
 // privateGroupWritable is the one writable-ancestor exemption besides the
-// sticky bit: the directory is the euid's, others cannot write it, and the
-// group that can is the euid's user-private group.
+// sticky bit: the directory is the euid's, others cannot write it, the group
+// that can is the euid's user-private group, and every account is local
+// (localAccounts), so that group's membership is all in the files privateGID
+// read.
 func (env Env) privateGroupWritable(uid, gid int, mode uint32) bool {
-	return mode&modeOtherWrite == 0 && uid == env.EUID && env.PrivateGID > 0 && gid == env.PrivateGID
+	return mode&modeOtherWrite == 0 && uid == env.EUID && env.PrivateGID > 0 && gid == env.PrivateGID &&
+		localAccounts(env.NSSwitch)
 }
 
 // mkdirPrivate makes p 0700: mkdir 0700 (the umask can only clear bits), then

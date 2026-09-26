@@ -5,7 +5,9 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"syscall"
 	"testing"
+	"time"
 )
 
 func TestHostsListsALiveHost(t *testing.T) {
@@ -146,6 +148,51 @@ func TestTheSweepLeavesASocketNotNamedForItsHost(t *testing.T) {
 	}
 	if !exists(t, sock) || !exists(t, other.Socket()) {
 		t.Fatal("the sweep unlinked a socket not named for the dead host")
+	}
+}
+
+func TestAFIFOEntryDoesNotHangHosts(t *testing.T) {
+	t.Parallel()
+	for name, held := range map[string]bool{"its lock held": true, "its lock free": false} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			env := testEnv(t)
+			h := bind(t, env)
+			if !held {
+				h.die()
+			}
+			entry := filepath.Join(hostsDir(env), h.ID()+".json")
+			if err := os.Remove(entry); err != nil {
+				t.Fatal(err)
+			}
+			if err := syscall.Mkfifo(entry, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			type result struct {
+				got []Entry
+				err error
+			}
+			done := make(chan result, 1)
+			go func() {
+				got, err := Hosts(env)
+				done <- result{got, err}
+			}()
+			var r result
+			select {
+			case r = <-done:
+			case <-time.After(10 * time.Second):
+				t.Fatal("Hosts is still opening a FIFO registry entry, waiting for a writer")
+			}
+			if r.err != nil || len(r.got) != 0 {
+				t.Fatalf("Hosts = %v, %v; want no host (the entry is no regular file)", entries(r.got), r.err)
+			}
+			// A live host's unreadable entry is skipped and left; a dead one's
+			// is swept with its lock.
+			if exists(t, entry) != held || exists(t, filepath.Join(hostsDir(env), h.ID()+".lock")) != held {
+				t.Fatalf("after Hosts: entry kept %v, lock kept %v; want both %v",
+					exists(t, entry), exists(t, filepath.Join(hostsDir(env), h.ID()+".lock")), held)
+			}
+		})
 	}
 }
 

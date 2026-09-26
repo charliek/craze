@@ -3,6 +3,7 @@ package rundir
 import (
 	"errors"
 	"fmt"
+	"math"
 	"net"
 )
 
@@ -30,6 +31,42 @@ var ErrPeerUID = errors.New("rundir: the peer runs as another user")
 // noUID is the uid a lookup reports when it names nobody: a failed lookup's.
 // It is never a real uid, so it is never read as root's by mistake.
 const noUID = -1
+
+// macOS's struct xucred (<sys/ucred.h>), which LOCAL_PEERCRED fills.
+// x/sys/unix exports neither constant.
+const (
+	// xucredVersion is XUCRED_VERSION, the only layout the kernel has
+	// written; libc's getpeereid refuses any other version, and so does
+	// xucredUID.
+	xucredVersion = 0
+	// xucredGroups is XU_NGROUPS, the most groups one carries.
+	xucredGroups = 16
+)
+
+// xucredUID is the uid a LOCAL_PEERCRED result names (peer_darwin.go), or an
+// error when its fields cannot be trusted to name anyone. It lives here, not
+// in the darwin file, so every platform's tests check it.
+//
+// unix.GetsockoptXucred drops the length getsockopt wrote, so a call that
+// succeeded having written nothing, or too little, would leave the zeroed
+// struct it started from: version 0, which is XUCRED_VERSION, and uid 0,
+// which is root's — and PeerCheck(0) would accept a peer whose uid was never
+// read. The group count closes that without a getsockopt of craze's own
+// (which would need unsafe): the kernel copies the peer's POSIX credential,
+// whose groups always hold at least its effective gid, so a real xucred
+// carries 1 to XU_NGROUPS of them, and the zeroed one carries none. A uid of
+// (uid_t)-1 is a socket with no credentials.
+func xucredUID(version, uid uint32, ngroups int16) (int, error) {
+	switch {
+	case version != xucredVersion:
+		return noUID, fmt.Errorf("xucred version %d, want %d", version, xucredVersion)
+	case ngroups < 1 || ngroups > xucredGroups:
+		return noUID, fmt.Errorf("xucred carries %d groups, and a real one carries 1 to %d: no credentials were read", ngroups, xucredGroups)
+	case uid == math.MaxUint32:
+		return noUID, errors.New("the socket has no peer credentials")
+	}
+	return int(uid), nil
+}
 
 // PeerCred is the peer's pid (0 when the OS cannot say) and effective uid, as
 // the kernel recorded them when the connection was made. On an error the pid

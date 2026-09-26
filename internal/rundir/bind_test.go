@@ -10,6 +10,7 @@ import (
 	"runtime"
 	"strconv"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -123,6 +124,16 @@ func TestCloseUnlinksOnlyWhatItBound(t *testing.T) {
 	env := testEnv(t)
 	h := bind(t, env)
 	entry := filepath.Join(hostsDir(env), h.ID()+".json")
+	// Each successor must be another file, not merely another name: ext4
+	// hands a freed inode's number straight back to the next file created
+	// near it, and a (dev, ino) check cannot tell that file from ours. Our
+	// socket's inode is held by the host's open listener, so removing it frees
+	// nothing; our entry's is held by an open descriptor until the test ends.
+	held, err := os.Open(entry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer held.Close()
 	for _, p := range []string{h.Socket(), entry} {
 		if err := os.Remove(p); err != nil {
 			t.Fatal(err)
@@ -231,6 +242,9 @@ func TestProcessEnvIsThisProcess(t *testing.T) {
 	if wantRunUser := runtime.GOOS == "linux"; (env.RunUserRoot == "/run/user") != wantRunUser {
 		t.Fatalf("RunUserRoot = %q on %s", env.RunUserRoot, runtime.GOOS)
 	}
+	if runtime.GOOS != "linux" && (env.PrivateGID != 0 || env.NSSwitch != "") {
+		t.Fatalf("PrivateGID = %d, NSSwitch = %q on %s; the exemption is Linux's only", env.PrivateGID, env.NSSwitch, runtime.GOOS)
+	}
 }
 
 func TestCloseIsIdempotent(t *testing.T) {
@@ -265,6 +279,75 @@ func TestAFailedBindUnwinds(t *testing.T) {
 			t.Errorf("the unwind left %s", name)
 		}
 	}
+}
+
+// TestAFailedStatOfTheBoundSocketUnlinksIt is not parallel: it replaces
+// lstatBound, which every Bind calls.
+func TestAFailedStatOfTheBoundSocketUnlinksIt(t *testing.T) {
+	env := testEnv(t)
+	var bound string
+	lstatBound = func(p string) (fs.FileInfo, error) {
+		if fi, err := os.Lstat(p); err != nil || fi.Mode().Type() != fs.ModeSocket {
+			t.Errorf("the stat after bind found %v, %v; want the socket just bound", fi, err)
+		}
+		bound = p
+		return nil, errors.New("injected lstat failure")
+	}
+	t.Cleanup(func() { lstatBound = os.Lstat })
+	id := NewHostID()
+	if h, err := Bind(env, id, Entry{}); err == nil {
+		_ = h.Close()
+		t.Fatal("Bind succeeded although the stat of its socket failed")
+	}
+	if bound == "" {
+		t.Fatal("Bind never stat-ed its socket")
+	}
+	if exists(t, bound) {
+		t.Fatal("a failed stat after bind left the socket, which no registry entry names")
+	}
+	for _, name := range []string{id + ".lock", id + ".json"} {
+		if exists(t, filepath.Join(hostsDir(env), name)) {
+			t.Errorf("the unwind left %s", name)
+		}
+	}
+}
+
+// TestLockFilesAre0600UnderAnyUmask is not parallel: the umask is the
+// process's, and every file another test made meanwhile would take it.
+func TestLockFilesAre0600UnderAnyUmask(t *testing.T) {
+	env := testEnv(t) // its directories made before the umask changes
+	h, c := func() (*Host, *Claim) {
+		old := syscall.Umask(0o777)
+		defer syscall.Umask(old)
+		h, err := Bind(env, NewHostID(), Entry{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = h.Close() })
+		c, err := ClaimSession(env, "s-1", h.ID())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return h, c
+	}()
+	for _, p := range []string{filepath.Join(hostsDir(env), h.ID()+".lock"), c.Path()} {
+		if got := perm(t, p); got != 0o600 {
+			t.Errorf("%s has mode %04o under umask 0777, want 0600", p, got)
+		}
+	}
+	// Each is opened again: the host's lock by a resolver, the session's by
+	// its next claim.
+	if got, err := Hosts(env); err != nil || len(got) != 1 {
+		t.Fatalf("Hosts = %v, %v; want the live host", entries(got), err)
+	}
+	if err := c.Release(); err != nil {
+		t.Fatal(err)
+	}
+	again, err := ClaimSession(env, "s-1", NewHostID())
+	if err != nil {
+		t.Fatalf("a session released under umask 0777 could not be claimed again: %v", err)
+	}
+	_ = again.Release()
 }
 
 func TestBindRefusesABadHostID(t *testing.T) {

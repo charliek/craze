@@ -29,7 +29,8 @@
 //     or the euid (with links resolved, the owner check is what stops a path
 //     through another user's directory), and not group- or world-writable
 //     unless the sticky bit is set — or the directory is the euid's own and
-//     only its user-private group can write it (Env.PrivateGID).
+//     only its user-private group can write it, on Linux with every account
+//     local (Env.PrivateGID, Env.NSSwitch).
 //   - Every directory craze names is a leaf: lstat-ed and never followed; a
 //     missing one is created 0700 (then chmod-ed 0700 against the umask); a
 //     present one must be a directory owned by the euid with mode exactly
@@ -93,11 +94,18 @@ type Env struct {
 	TmpRoot string
 	// PrivateGID is the gid of the euid's user-private group, or 0 when it has
 	// none (privateGID). A directory owned by the euid, writable by its group
-	// but not by others, is an acceptable ancestor when its group is this one:
-	// under user-private groups (Debian, Ubuntu, Fedora; umask 002) that group
-	// has the user as its only member, so a 0775 ~/.cache is writable by no
-	// one else (OpenSSH's Debian user-group-modes rule).
+	// but not by others, is an acceptable ancestor when its group is this one
+	// and NSSwitch says every account is local: under user-private groups
+	// (Debian, Ubuntu, Fedora; umask 002) that group has the user as its only
+	// member, so a 0775 ~/.cache is writable by no one else (OpenSSH's Debian
+	// user-group-modes rule).
 	PrivateGID int
+	// NSSwitch is /etc/nsswitch.conf's contents, read on Linux only ("" on
+	// macOS, and wherever it cannot be read). The PrivateGID exemption holds
+	// only while it takes users and groups from files and systemd alone
+	// (localAccounts): /etc/passwd cannot show that a NIS, LDAP or sssd
+	// account shares the user's primary gid.
+	NSSwitch string
 }
 
 // The environment variable names ProcessEnv reads.
@@ -116,8 +124,8 @@ func ProcessEnv() Env {
 		XDGRuntimeDir:   os.Getenv(envXDGRuntimeDir),
 		EUID:            euid,
 		TmpRoot:         "/tmp",
-		PrivateGID:      processPrivateGID(euid),
 	}
+	env.PrivateGID, env.NSSwitch = processAccounts(runtime.GOOS, euid, readSystemFile)
 	if runtime.GOOS == "linux" {
 		env.RunUserRoot = "/run/user"
 	}
