@@ -62,6 +62,14 @@ const (
 // kind is the adapter's own word; the journal does not interpret kinds.
 const diagSubagentWarning = "subagent_warning"
 
+// diagResumeWarning is the journal diag a harness Options.Warn line from Open
+// is written as: a resumed session that could not continue on its
+// transcript's model and moved on to another, or whose last mode this craze
+// does not know (plan 028 §3.3). Its one field, "text", is the line, redacted,
+// and the same line goes to the session's diagnostics (note), where the user
+// reads native's other startup warnings.
+const diagResumeWarning = "resume_warning"
+
 // agentEntry is one persona file as the scan read it, before any mapping: its
 // tool lists are as the file wrote them. Kind is PluginKindAgent, always; it is
 // a type of its own rather than a PluginEntry so that it cannot land in the
@@ -616,22 +624,32 @@ func nativeModelMatcher(table *modeltable.Table) func(string) (string, bool) {
 	}
 }
 
-// subagentWarn is harness.Options.Warn: a runtime fall-through the harness
-// reports, journaled as one diagSubagentWarning note (plan 026 §3.4, §3.6).
+// harnessWarn is harness.Options.Warn: a fall-through the harness reports
+// rather than fails on, journaled. Which one it is follows from when it
+// arrives. Before Open has returned (opened is still empty) it is Open's own,
+// a resumed session's (plan 028 §3.3): one diagResumeWarning note, and the
+// line on the session's diagnostics too, since it changes what the session
+// runs on and the user would otherwise learn it only from the model label.
+// After, it is a sub-agent call's, from inside a turn: one diagSubagentWarning
+// note (plan 026 §3.4, §3.6).
 //
-// The line quotes content — a persona's model, as its file wrote it — so it is
-// redacted before it is written: by red, the keys this session started with,
-// and once the harness is open by its own redactor as well, which also covers
-// a key the session learned after Open (Session.Redact). opened is where
-// open() puts the session when Open returns; the harness only warns from
-// inside a turn, so in practice it is always there. It is called on the agent
-// call's goroutine with no lock of the adapter's held, and Note never blocks.
-func (s *nativeSession) subagentWarn(red *redact.Replacer, opened *atomic.Pointer[harness.Session]) func(string) {
+// The line quotes content — a persona's model, as its file wrote it, or a
+// transcript's model and mode — so it is redacted before it is written: by
+// red, the keys this session started with, and once the harness is open by
+// its own redactor as well, which also covers a key the session learned after
+// Open (Session.Redact). opened is where open() puts the session when Open
+// returns. It is called with no lock of the adapter's held — on Start's
+// goroutine inside Open, or on the agent call's — and Note never blocks.
+func (s *nativeSession) harnessWarn(red *redact.Replacer, opened *atomic.Pointer[harness.Session]) func(string) {
 	return func(msg string) {
 		text := red.String(msg)
-		if hs := opened.Load(); hs != nil {
-			text = hs.Redact(text)
+		hs := opened.Load()
+		if hs == nil {
+			s.log.Note(journal.DiagNote{Kind: diagResumeWarning, Fields: map[string]any{"text": text}})
+			s.note(sanitizeLine(text))
+			return
 		}
+		text = hs.Redact(text)
 		s.log.Note(journal.DiagNote{Kind: diagSubagentWarning, Fields: map[string]any{"text": text}})
 	}
 }

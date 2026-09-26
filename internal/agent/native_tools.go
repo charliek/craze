@@ -345,6 +345,13 @@ func (s *nativeSession) toolProgress(owner string, e harness.ToolProgress) {
 // have evicted the child since (review r8, finding 3). One that never started
 // a child — a refused type, a failed Open, a call aborted while it waited for
 // a slot — takes them from its own result and duration.
+//
+// A replayed result (e.Replayed, a load's; plan 028 §3.4, P9) is the text the
+// model read and nothing else, so its row is drawn from that alone
+// (replayedOutput): no diff, no exit code, no duration, and a label saying so.
+// An error stays an error, and an agent row is closed as a task from its
+// result — the child's final text for a foreground call, the launch receipt
+// for a background one — with no model and no duration, since no child ran.
 func (s *nativeSession) toolFinished(owner string, e harness.ToolFinished) {
 	res := e.Result
 	status, ms := taskStatusOf(res), int(e.Duration.Milliseconds())
@@ -362,6 +369,17 @@ func (s *nativeSession) toolFinished(owner string, e harness.ToolFinished) {
 		t.Status = toolCompleted
 		if res.IsError {
 			t.Status = toolFailed
+		}
+		if e.Replayed {
+			t.Output = replayedOutput(res, t.Kind)
+			if task && t.Task != nil {
+				resafeTask(t, safe)
+				if t.Task.Status == "" {
+					t.Task.Status = status
+				}
+				t.Task.Receipt = true
+			}
+			return
 		}
 		if len(res.Edits) > 0 {
 			t.Diffs = nativeDiffs(res.Edits)
@@ -415,6 +433,48 @@ func (s *nativeSession) toolFinished(owner string, e harness.ToolFinished) {
 			t.Task.Receipt = true
 		}
 	})
+}
+
+// replayedLabel is the last line of a replayed row's body (plan 028 §3.4,
+// P9): the row was rebuilt from the transcript, which keeps only the text the
+// model read, so what a live row draws beside it — an exit code, a diff, a
+// truncation — is not missing from the call but from the record.
+const replayedLabel = "(replayed)"
+
+// replayedOutput is a replayed result's row body: the stored text — Content,
+// which is the text the model read (ToolFinished.Replayed) — with the label
+// after it, as the content an expanded row draws and, on an execute row, the
+// stream it draws as well (setStdout). The label goes last so a collapsed row
+// looks like a live one: an execute row previews the first line of its stream
+// (StdoutHead), which is the output's own, and a read row draws no body until
+// it is expanded. An expanded row ends with the label, unless the output runs
+// past the rows an expanded row draws. ExitCode stays nil: a replay has no
+// code, and a zero would say the command succeeded. The text is tail-capped
+// to leave room for the label, so the label survives a long output's cap, and
+// Truncated says when the text was cut.
+//
+// Nothing a row draws can say "replayed" on its own — the head row's suffix
+// is computed from the exit code and the diff, and an edit or an agent row
+// draws no body — so the label lives in the body: an expanded execute or read
+// row shows it, and every other row carries it in its content.
+func replayedOutput(res tool.Result, kind string) *ToolOutput {
+	text := res.Content
+	if text == "" {
+		text = res.Text
+	}
+	clean := sanitizeText(text)
+	room := outputTailCap - len(replayedLabel) - 1
+	body := replayedLabel
+	if clean != "" {
+		body = tailUTF8(clean, room) + "\n" + replayedLabel
+	}
+	out := ToolOutput{}
+	setContent(&out, body)
+	if kind == string(tool.KindExecute) {
+		setStdout(&out, body)
+	}
+	out.Truncated = len(clean) > room
+	return &out
 }
 
 // taskStatusOf is a finished agent call's status from its result alone, for a
