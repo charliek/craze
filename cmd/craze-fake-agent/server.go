@@ -21,6 +21,11 @@ const fakeSessionID = "fake-session-1"
 // tmux smoke's "● agent then ✓ agent" expectation is vacuous.
 const taskRunFor = 250 * time.Millisecond
 
+// fakeSpinnerBeat is the TUI's fast tick (internal/tui's fastTick), spelled
+// here because the fake agent imports nothing of the TUI's: a script whose
+// frame is captured unfrozen ends its turn off the beat (grokSubagentLate).
+const fakeSpinnerBeat = 250 * time.Millisecond
+
 // lingerMax bounds CRAZE_FAKE_LINGER, so a test that crashes cannot leave a
 // lingering fake behind for long.
 const lingerMax = 30 * time.Second
@@ -1159,6 +1164,15 @@ func (s *server) grokSubagent(id json.RawMessage, mode grokSubagentMode) {
 		return
 	}
 	if mode == grokSubagentLate {
+		// The parent turn ends midway between two of the TUI's spinner beats,
+		// never on one. The pause above is taskRunFor, the TUI's fastTick is
+		// also 250 ms, and the late golden (grok-subagent-late-80x24,
+		// unfrozen) captures the glyph at <wait:idle>: an ending at ~250 ms
+		// raced the first beat by a few milliseconds, so a loaded machine drew
+		// the glyph before it. Half a beat more lands the ending at ~375 ms,
+		// the first beat (✴, the golden's glyph) long applied and the second
+		// ~125 ms away.
+		time.Sleep(fakeSpinnerBeat / 2)
 		s.finishPrompt(id, acp.StopEndTurn)
 		time.Sleep(400 * time.Millisecond)
 		s.childText(child, "agent_message_chunk", " late line")
