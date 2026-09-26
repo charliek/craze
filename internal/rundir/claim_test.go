@@ -87,10 +87,7 @@ func TestAHolderThatHasNotWrittenReadsPIDZero(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 			env := testEnv(t)
-			dir, err := env.cacheSubdir(locksName, true)
-			if err != nil {
-				t.Fatal(err)
-			}
+			dir := cacheSubdir(t, env, locksName)
 			// Another holder, the instant after its flock.
 			f, err := os.OpenFile(filepath.Join(dir, "s-1.lock"), os.O_CREATE|os.O_RDWR, 0o600)
 			if err != nil {
@@ -198,10 +195,7 @@ func TestParseHolder(t *testing.T) {
 func TestASymlinkedSessionLockIsRefused(t *testing.T) {
 	t.Parallel()
 	env := testEnv(t)
-	dir, err := env.cacheSubdir(locksName, true)
-	if err != nil {
-		t.Fatal(err)
-	}
+	dir := cacheSubdir(t, env, locksName)
 	target := filepath.Join(shortDir(t), "elsewhere")
 	writeFile(t, target, "keep")
 	symlink(t, target, filepath.Join(dir, "s-1.lock"))

@@ -12,8 +12,10 @@ import (
 // bridge` and `craze attach` resolve a session against. It reads files and
 // never connects.
 //
-// For each hosts/<id>.json (a name that is not a host id is ignored) it
-// opens hosts/<id>.lock without creating it:
+// The registry directory is walked and held (cacheDir), its entries read from
+// that descriptor, and every open, read and unlink below is relative to it.
+// For each hosts/<id>.json (a name that is not a host id is ignored) it opens
+// hosts/<id>.lock without creating it:
 //   - missing: the host is mid-exit (it unlinks its entry before its lock) or
 //     a sweeper is at work; skipped, nothing created;
 //   - held by another: live; the entry is read (O_NOFOLLOW) and listed, or
@@ -28,36 +30,37 @@ import (
 // A registry tree that does not exist yet is no hosts, and is not created;
 // one that fails validation is an error.
 func Hosts(env Env) ([]Entry, error) {
-	dir, err := env.cacheSubdir(hostsName, false)
+	hosts, err := env.cacheDir(hostsName, false)
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, err
 	}
-	names, err := os.ReadDir(dir)
+	defer func() { _ = hosts.close() }()
+	names, err := hosts.names()
 	if err != nil {
 		return nil, err
 	}
 	var live []Entry
-	for _, de := range names {
-		id, ok := strings.CutSuffix(de.Name(), ".json")
+	for _, name := range names {
+		id, ok := strings.CutSuffix(name, ".json")
 		if !ok || !ValidHostID(id) {
 			continue
 		}
-		if e, ok := env.probe(dir, id); ok {
+		if e, ok := env.probe(hosts, id); ok {
 			live = append(live, e)
 		}
 	}
 	return live, nil
 }
 
-// probe is one registry entry's check: its live Entry, or false when it is
-// not listed (stale and swept, mid-exit, or unreadable).
-func (env Env) probe(dir, id string) (Entry, bool) {
-	entryPath := filepath.Join(dir, id+".json")
-	lockPath := filepath.Join(dir, id+".lock")
-	lock, err := openNoFollow(lockPath, os.O_RDWR, 0)
+// probe is one registry entry's check, in the held registry directory: its
+// live Entry, or false when it is not listed (stale and swept, mid-exit, or
+// unreadable).
+func (env Env) probe(hosts *dir, id string) (Entry, bool) {
+	lockName := id + ".lock"
+	lock, err := hosts.openFile(lockName, os.O_RDWR, 0)
 	if err != nil {
 		return Entry{}, false
 	}
@@ -67,7 +70,7 @@ func (env Env) probe(dir, id string) (Entry, bool) {
 		return Entry{}, false
 	}
 	if !taken {
-		e, err := readEntry(entryPath)
+		e, err := readEntry(hosts, id+".json")
 		if err != nil || e.HostID != id {
 			return Entry{}, false
 		}
@@ -77,26 +80,28 @@ func (env Env) probe(dir, id string) (Entry, bool) {
 	// The lock taken must still be the one at the name: a sweeper that got
 	// here first unlinked it, and this descriptor holds a lock on a file no
 	// longer anyone's.
-	if sameFile(lock, lockPath) {
-		env.sweep(id, entryPath, lockPath)
+	if hosts.sameFile(lock, lockName) {
+		env.sweep(hosts, id)
 	}
 	return Entry{}, false
 }
 
-// sweep removes a dead host's files; its lock is held by the caller.
-func (env Env) sweep(id, entryPath, lockPath string) {
-	e, err := readEntry(entryPath)
-	_ = unlinkFile(entryPath)
+// sweep removes a dead host's files from the held registry directory; its
+// lock is held by the caller.
+func (env Env) sweep(hosts *dir, id string) {
+	e, err := readEntry(hosts, id+".json")
+	_ = hosts.unlink(id + ".json")
 	if err == nil {
 		env.sweepSocket(id, e.Socket)
 	}
-	_ = unlinkFile(lockPath)
+	_ = hosts.unlink(id + ".lock")
 }
 
 // sweepSocket unlinks a dead host's socket only when it is where a host puts
 // one: an absolute, clean path named <id>.sock, in a directory that
-// validates as a leaf under ancestors that validate (the path is canonical
-// as Bind recorded it, so no component may be a symlink), and a socket.
+// validates as a leaf under ancestors that validate — by path and the strict
+// rule, as the runtime tree is (the path is canonical as Bind recorded it, so
+// no component may be a symlink) — and a socket.
 func (env Env) sweepSocket(id, sock string) {
 	if !filepath.IsAbs(sock) || filepath.Clean(sock) != sock || filepath.Base(sock) != id+sockSuffix {
 		return

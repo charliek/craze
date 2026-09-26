@@ -285,9 +285,7 @@ func TestHostsFollowsNoSymlinkedEntry(t *testing.T) {
 func TestBindRefusesASymlinkedHostLock(t *testing.T) {
 	t.Parallel()
 	env := testEnv(t)
-	if _, err := env.cacheSubdir(hostsName, true); err != nil {
-		t.Fatal(err)
-	}
+	cacheSubdir(t, env, hostsName)
 	id := NewHostID()
 	lock := filepath.Join(hostsDir(env), id+".lock")
 	target := filepath.Join(shortDir(t), "elsewhere")

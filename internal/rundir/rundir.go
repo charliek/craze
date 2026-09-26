@@ -25,16 +25,28 @@
 //     (Fedora Silverblue's /home, macOS's /tmp, a ~/.cache on another disk).
 //     Here the parent of each chain craze owns is canonicalised once
 //     (filepath.EvalSymlinks), and every component of the canonical path is
-//     then an ancestor: lstat-ed, a directory, not a symlink, owned by root
-//     or the euid (with links resolved, the owner check is what stops a path
-//     through another user's directory), and not group- or world-writable
-//     unless the sticky bit is set — or the directory is the euid's own and
-//     only its user-private group can write it, on Linux with every account
-//     local (Env.PrivateGID, Env.NSSwitch).
-//   - Every directory craze names is a leaf: lstat-ed and never followed; a
-//     missing one is created 0700 (then chmod-ed 0700 against the umask); a
-//     present one must be a directory owned by the euid with mode exactly
-//     0700. A leaf is never repaired: 0755 is refused, not chmod-ed.
+//     then an ancestor: a directory, not a symlink, owned by root or the euid
+//     (with links resolved, the owner check is what stops a path through
+//     another user's directory), and not group- or world-writable unless the
+//     sticky bit is set (ancestorFault).
+//   - Every directory craze names is a leaf: never followed; a missing one is
+//     created 0700 (then chmod-ed 0700 against the umask); a present one must
+//     be a directory owned by the euid with mode exactly 0700. A leaf is
+//     never repaired: 0755 is refused, not chmod-ed.
+//
+// The two trees differ in how they are held after that:
+//
+//   - The runtime tree is used by path, because bind(2) takes one: its
+//     components are lstat-ed, and nothing holds them between the check and
+//     the use. So its rule is the strict one: a group-writable ancestor is
+//     refused whoever owns it.
+//   - The cache tree is held by descriptor (held.go): walked from "/" with
+//     openat(O_NOFOLLOW) and fstat, one component at a time, and everything
+//     below its leaves done relative to the leaf's descriptor. A rename after
+//     validation changes nothing craze touches, so an ancestor of the euid's
+//     own that its group can write (a user-private group's 0775 ~/.cache
+//     under umask 002) is accepted there: the worst a member of the group can
+//     do is make the next walk refuse. No system file is read to decide it.
 //
 // Every open under either tree carries O_NOFOLLOW. A host's socket and
 // registry entry are unlinked at exit only while their (dev, ino) still match
@@ -92,20 +104,6 @@ type Env struct {
 	// ("" skips it). Never $TMPDIR: on macOS it is about 50 bytes long and
 	// would eat sun_path. A test points it at a directory of its own.
 	TmpRoot string
-	// PrivateGID is the gid of the euid's user-private group, or 0 when it has
-	// none (privateGID). A directory owned by the euid, writable by its group
-	// but not by others, is an acceptable ancestor when its group is this one
-	// and NSSwitch says every account is local: under user-private groups
-	// (Debian, Ubuntu, Fedora; umask 002) that group has the user as its only
-	// member, so a 0775 ~/.cache is writable by no one else (OpenSSH's Debian
-	// user-group-modes rule).
-	PrivateGID int
-	// NSSwitch is /etc/nsswitch.conf's contents, read on Linux only ("" on
-	// macOS, and wherever it cannot be read). The PrivateGID exemption holds
-	// only while it takes users and groups from files and systemd alone
-	// (localAccounts): /etc/passwd cannot show that a NIS, LDAP or sssd
-	// account shares the user's primary gid.
-	NSSwitch string
 }
 
 // The environment variable names ProcessEnv reads.
@@ -116,16 +114,14 @@ const (
 
 // ProcessEnv is the running process's Env.
 func ProcessEnv() Env {
-	euid := os.Geteuid()
 	env := Env{
 		Home:            paths.HomeDir(),
 		CrazeDir:        paths.CrazeDir(),
 		CrazeRuntimeDir: os.Getenv(envRuntimeDir),
 		XDGRuntimeDir:   os.Getenv(envXDGRuntimeDir),
-		EUID:            euid,
+		EUID:            os.Geteuid(),
 		TmpRoot:         "/tmp",
 	}
-	env.PrivateGID, env.NSSwitch = processAccounts(runtime.GOOS, euid, readSystemFile)
 	if runtime.GOOS == "linux" {
 		env.RunUserRoot = "/run/user"
 	}

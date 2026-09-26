@@ -163,11 +163,7 @@ func TestARewriteRefreshesTheRegistryIdentity(t *testing.T) {
 		t.Fatal(err)
 	}
 	entry := filepath.Join(hostsDir(env), h.ID()+".json")
-	e, err := readEntry(entry)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !e.Ready || e.ProviderSessionID != "p-1" {
+	if e := readEntryFile(t, entry); !e.Ready || e.ProviderSessionID != "p-1" {
 		t.Fatalf("the rewritten entry is %+v", e)
 	}
 	if err := h.Close(); err != nil {
@@ -241,9 +237,6 @@ func TestProcessEnvIsThisProcess(t *testing.T) {
 	}
 	if wantRunUser := runtime.GOOS == "linux"; (env.RunUserRoot == "/run/user") != wantRunUser {
 		t.Fatalf("RunUserRoot = %q on %s", env.RunUserRoot, runtime.GOOS)
-	}
-	if runtime.GOOS != "linux" && (env.PrivateGID != 0 || env.NSSwitch != "") {
-		t.Fatalf("PrivateGID = %d, NSSwitch = %q on %s; the exemption is Linux's only", env.PrivateGID, env.NSSwitch, runtime.GOOS)
 	}
 }
 

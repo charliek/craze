@@ -6,53 +6,23 @@ import (
 	"io/fs"
 	"math"
 	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
 	"syscall"
 )
 
-// openNoFollow is openRegular with O_NOFOLLOW: a symlink at path is refused.
-// Every open under either tree is one.
-func openNoFollow(path string, flag int, perm os.FileMode) (*os.File, error) {
-	return openRegular(path, flag|syscall.O_NOFOLLOW, perm)
-}
-
-// openRegular opens path and refuses anything but a regular file, checked on
-// the open descriptor (fstat) before a byte is read or written. The open is
-// O_NONBLOCK, so a FIFO planted at path is refused at once instead of
-// waiting forever for a writer; on a regular file the flag changes nothing.
-// O_CLOEXEC: no child craze spawns (an agent) inherits the descriptor, or a
-// lock with it.
-func openRegular(path string, flag int, perm os.FileMode) (*os.File, error) {
-	f, err := os.OpenFile(path, flag|syscall.O_NONBLOCK|syscall.O_CLOEXEC, perm)
-	if err != nil {
-		return nil, err
-	}
-	fi, err := f.Stat()
-	if err != nil {
-		_ = f.Close()
-		return nil, err
-	}
-	if !fi.Mode().IsRegular() {
-		_ = f.Close()
-		return nil, fmt.Errorf("%s is not a regular file", path)
-	}
-	return f, nil
-}
-
-// openLock opens the lock file at path read-write, creating it 0600 when it
-// is missing. The create is exclusive, so a file this call made is known to
-// be its own, and that one is fchmod-ed 0600, as directories and sockets are
-// chmod-ed: the umask may have cleared the owner's bits, and a lock file
-// without them could never be opened again — by Hosts, probing a live host,
-// or by the session's next claim. A file that already exists is opened as it
-// is, and never changed.
-func openLock(path string) (*os.File, error) {
-	f, err := openNoFollow(path, os.O_CREATE|os.O_EXCL|os.O_RDWR, 0o600)
+// openLock opens the lock file name in d read-write, creating it 0600 when
+// it is missing (d.openFile: O_NOFOLLOW, regular files only). The create is
+// exclusive, so a file this call made is known to be its own, and that one is
+// fchmod-ed 0600, as directories and sockets are chmod-ed: the umask may have
+// cleared the owner's bits, and a lock file without them could never be
+// opened again — by Hosts, probing a live host, or by the session's next
+// claim. A file that already exists is opened as it is, and never changed.
+func openLock(d *dir, name string) (*os.File, error) {
+	f, err := d.openFile(name, os.O_CREATE|os.O_EXCL|os.O_RDWR, 0o600)
 	if errors.Is(err, fs.ErrExist) {
-		return openNoFollow(path, os.O_RDWR, 0)
+		return d.openFile(name, os.O_RDWR, 0)
 	}
 	if err != nil {
 		return nil, err
@@ -136,22 +106,9 @@ func alive(pid int) bool {
 	return !errors.Is(syscall.Kill(pid, 0), syscall.ESRCH)
 }
 
-// sameFile reports whether path still names the file f has open: the check
-// that a lock taken on a descriptor is still the lock at its name before
-// anything is unlinked on its authority.
-func sameFile(f *os.File, path string) bool {
-	held, err := f.Stat()
-	if err != nil {
-		return false
-	}
-	named, err := os.Lstat(path)
-	if err != nil {
-		return false
-	}
-	return idOf(held) == idOf(named)
-}
-
-// unlinkFile removes a non-directory; one already gone is not an error.
+// unlinkFile removes the non-directory at path; one already gone is not an
+// error. Path-based: for the runtime tree's socket (the cache tree's unlinks
+// are dir.unlink).
 func unlinkFile(path string) error {
 	if err := syscall.Unlink(path); err != nil && !errors.Is(err, syscall.ENOENT) {
 		return fmt.Errorf("unlink %s: %w", path, err)
@@ -204,7 +161,9 @@ type Claim struct {
 // session whatever else differs between them, and it is taken even when the
 // control socket is off. A session another process holds is a *HeldError
 // naming the holder its lock file names. crazeID is checked (ValidToken)
-// before any path is built.
+// before any path is built. The locks directory is walked and held for the
+// claim alone (cacheDir) and the lock file opened relative to it; the Claim
+// keeps only the lock file's descriptor.
 func ClaimSession(env Env, crazeID, hostID string) (*Claim, error) {
 	if !ValidToken(crazeID) {
 		return nil, fmt.Errorf("rundir: session id %q is not a token of 1-128 characters from [A-Za-z0-9._-]", crazeID)
@@ -212,12 +171,14 @@ func ClaimSession(env Env, crazeID, hostID string) (*Claim, error) {
 	if !ValidHostID(hostID) {
 		return nil, fmt.Errorf("rundir: host id %q is not 12 lowercase hex digits", hostID)
 	}
-	dir, err := env.cacheSubdir(locksName, true)
+	locks, err := env.cacheDir(locksName, true)
 	if err != nil {
 		return nil, err
 	}
-	path := filepath.Join(dir, crazeID+".lock")
-	f, err := openLock(path)
+	defer func() { _ = locks.close() }()
+	name := crazeID + ".lock"
+	path := locks.join(name)
+	f, err := openLock(locks, name)
 	if err != nil {
 		return nil, fmt.Errorf("rundir: open the session lock: %w", err)
 	}

@@ -12,7 +12,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/charliek/craze/internal/atomicfile"
 	"github.com/charliek/craze/internal/protocol"
 )
 
@@ -56,17 +55,18 @@ var lstatBound = os.Lstat
 
 // Host is a bound control socket and everything registered for it: the
 // listener, the host's lifetime lock (hosts/<hostId>.lock, held until Close)
-// and its registry entry.
+// and its registry entry. It holds the registry directory open for its life
+// (held.go): every rewrite and unlink of its entry and lock is relative to
+// that descriptor, never to a path walked again.
 type Host struct {
-	id        string
-	ns        string
-	socket    string
-	entryPath string
-	lockPath  string
-	ln        *net.UnixListener
+	id     string
+	ns     string
+	socket string
+	ln     *net.UnixListener
 
 	mu       sync.Mutex // serialises rewrites and Close
 	closed   bool
+	hosts    *dir     // the registry directory; nil once closed
 	lock     *os.File // nil once released
 	sockID   fileID
 	hasSock  bool
@@ -75,11 +75,16 @@ type Host struct {
 	hasEntry bool
 }
 
+// entryName and lockName are the host's files in the registry directory.
+func (h *Host) entryName() string { return h.id + ".json" }
+func (h *Host) lockName() string  { return h.id + ".lock" }
+
 // Bind validates both trees, takes the host's lock, binds its socket and
 // registers it (plan 027 §3.8):
 //  1. the socket base with its <ns>, then the cache tree, are validated (and
 //     their leaves created) — the base first, so that a socket path too long
-//     for sun_path is refused before either tree is touched;
+//     for sun_path is refused before either tree is touched — and the
+//     registry directory is held from here to Close;
 //  2. hosts/<hostID>.lock is opened without truncating, flocked without
 //     blocking, then truncated to "<pid> <hostId>";
 //  3. the socket is bound at <base>/<ns>/<hostID>.sock — no probe and no
@@ -105,17 +110,11 @@ func Bind(env Env, hostID string, entry Entry) (*Host, error) {
 	if err != nil {
 		return nil, err
 	}
-	hosts, err := env.cacheSubdir(hostsName, true)
+	hosts, err := env.cacheDir(hostsName, true)
 	if err != nil {
 		return nil, err
 	}
-	h := &Host{
-		id:        hostID,
-		ns:        ns,
-		socket:    filepath.Join(dir, hostID+sockSuffix),
-		entryPath: filepath.Join(hosts, hostID+".json"),
-		lockPath:  filepath.Join(hosts, hostID+".lock"),
-	}
+	h := &Host{id: hostID, ns: ns, socket: filepath.Join(dir, hostID+sockSuffix), hosts: hosts}
 	if err := h.bind(entry); err != nil {
 		_ = h.teardown()
 		return nil, err
@@ -125,7 +124,7 @@ func Bind(env Env, hostID string, entry Entry) (*Host, error) {
 
 // bind is Bind's steps 2–5; whatever it built is on h for teardown.
 func (h *Host) bind(entry Entry) error {
-	lock, err := openLock(h.lockPath)
+	lock, err := openLock(h.hosts, h.lockName())
 	if err != nil {
 		return fmt.Errorf("rundir: open the host lock: %w", err)
 	}
@@ -135,11 +134,11 @@ func (h *Host) bind(entry Entry) error {
 		if err == nil {
 			err = errors.New("another process holds it")
 		}
-		return fmt.Errorf("rundir: lock %s: %w", h.lockPath, err)
+		return fmt.Errorf("rundir: lock %s: %w", h.hosts.join(h.lockName()), err)
 	}
 	h.lock = lock
 	if err := writeHolder(lock, h.id); err != nil {
-		return fmt.Errorf("rundir: write %s: %w", h.lockPath, err)
+		return fmt.Errorf("rundir: write %s: %w", h.hosts.join(h.lockName()), err)
 	}
 
 	ln, err := net.ListenUnix("unix", &net.UnixAddr{Name: h.socket, Net: "unix"})
@@ -177,22 +176,21 @@ func (h *Host) bind(entry Entry) error {
 	return h.writeEntry(entry)
 }
 
-// writeEntry writes e as the registry entry (atomically: a rename) and
-// records the new file's (dev, ino), so Close always names the current file.
-// On an error the recorded entry and identity are unchanged.
+// writeEntry writes e as the registry entry, atomically and relative to the
+// held registry directory (dir.replace), and records the new file's
+// (dev, ino), so Close always names the current file. On an error nothing
+// was renamed onto the entry, and the recorded entry and identity are
+// unchanged.
 func (h *Host) writeEntry(e Entry) error {
 	b, err := json.MarshalIndent(e, "", "  ")
 	if err != nil {
 		return err
 	}
-	if err := atomicfile.Write(h.entryPath, append(b, '\n'), 0o600); err != nil {
+	id, err := h.hosts.replace(h.entryName(), append(b, '\n'), 0o600)
+	if err != nil {
 		return fmt.Errorf("rundir: write the registry entry: %w", err)
 	}
-	fi, err := os.Lstat(h.entryPath)
-	if err != nil {
-		return fmt.Errorf("rundir: stat the registry entry: %w", err)
-	}
-	h.entry, h.entryID, h.hasEntry = e, idOf(fi), true
+	h.entry, h.entryID, h.hasEntry = e, id, true
 	return nil
 }
 
@@ -219,15 +217,9 @@ func (h *Host) Entry() Entry {
 // Update rewrites the registry entry with fn's changes — when the engine
 // becomes ready, and when it changes — and records the new file's identity.
 // Protocol, HostID, PID and Socket are kept as Bind wrote them. After Close it
-// returns ErrClosed and writes nothing.
-//
-// A residual, accepted: when the rewrite's rename succeeds but the lstat
-// after it fails, Update returns the error and keeps the old entry and the
-// old identity. Close then finds a file that is not the one recorded and
-// leaves it, while it removes the host's lock; and a sweep, whose only
-// authority is that lock, skips an entry without one forever. It takes a
-// transient lstat failure on a file just renamed in the host's own 0700
-// directory.
+// returns ErrClosed and writes nothing. The new file's identity is taken
+// from the descriptor it was written through, before the rename, so a rename
+// that succeeds always records the file it installed.
 func (h *Host) Update(fn func(*Entry)) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -243,9 +235,13 @@ func (h *Host) Update(fn func(*Entry)) error {
 // Close unregisters the host, and is idempotent: it closes the listener if
 // it is still open (which unlinks nothing); unlinks the registry entry and
 // then the socket, each only while its (dev, ino) is still what was
-// recorded; and unlinks the host's lock file while still holding it, then
-// LOCK_UN, then close. The caller may have closed the listener already (the
-// control server's Close does).
+// recorded; unlinks the host's lock file while still holding it, then
+// LOCK_UN, then close; and closes the registry directory last. The entry and
+// the lock are unlinked relative to that directory's descriptor (fstatat,
+// then unlinkat), so they are the files in the directory Bind validated,
+// wherever it has been moved since; the socket, in the runtime tree, by its
+// path. The caller may have closed the listener already (the control
+// server's Close does).
 func (h *Host) Close() error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -266,7 +262,7 @@ func (h *Host) teardown() error {
 		}
 	}
 	if h.hasEntry {
-		errs = append(errs, unlinkIfOurs(h.entryPath, h.entryID))
+		errs = append(errs, h.hosts.unlinkIfOurs(h.entryName(), h.entryID))
 	}
 	if h.hasSock {
 		errs = append(errs, unlinkIfOurs(h.socket, h.sockID))
@@ -274,19 +270,23 @@ func (h *Host) teardown() error {
 	if h.lock != nil {
 		// Unlinked while held: host ids are never reused, so nobody but a
 		// sweeper ever opens another host's lock, and a sweeper checks that
-		// the lock it took is still the file at the name (sameFile).
-		if sameFile(h.lock, h.lockPath) {
-			errs = append(errs, unlinkFile(h.lockPath))
+		// the lock it took is still the file at the name (dir.sameFile).
+		if h.hosts.sameFile(h.lock, h.lockName()) {
+			errs = append(errs, h.hosts.unlink(h.lockName()))
 		}
 		errs = append(errs, unlock(h.lock), h.lock.Close())
 		h.lock = nil
 	}
+	if h.hosts != nil {
+		errs = append(errs, h.hosts.close())
+		h.hosts = nil
+	}
 	return errors.Join(errs...)
 }
 
-// unlinkIfOurs removes path only while it is still the file whose identity
-// was recorded: a file put in its place since is left alone, as is a path
-// already gone.
+// unlinkIfOurs removes path — the runtime tree's socket — only while it is
+// still the file whose identity was recorded: a file put in its place since
+// is left alone, as is a path already gone.
 func unlinkIfOurs(path string, want fileID) error {
 	fi, err := os.Lstat(path)
 	if errors.Is(err, fs.ErrNotExist) {
@@ -304,9 +304,10 @@ func unlinkIfOurs(path string, want fileID) error {
 // entryMax bounds a registry entry read: a real one is a few hundred bytes.
 const entryMax = 64 << 10
 
-// readEntry reads a registry entry, O_NOFOLLOW.
-func readEntry(path string) (Entry, error) {
-	f, err := openNoFollow(path, os.O_RDONLY, 0)
+// readEntry reads the registry entry name in the registry directory d
+// (dir.openFile: O_NOFOLLOW, a regular file).
+func readEntry(d *dir, name string) (Entry, error) {
+	f, err := d.openFile(name, os.O_RDONLY, 0)
 	if err != nil {
 		return Entry{}, err
 	}
@@ -316,11 +317,11 @@ func readEntry(path string) (Entry, error) {
 		return Entry{}, err
 	}
 	if len(b) > entryMax {
-		return Entry{}, fmt.Errorf("%s is over %d bytes", path, entryMax)
+		return Entry{}, fmt.Errorf("%s is over %d bytes", d.join(name), entryMax)
 	}
 	var e Entry
 	if err := json.Unmarshal(b, &e); err != nil {
-		return Entry{}, fmt.Errorf("%s: %w", path, err)
+		return Entry{}, fmt.Errorf("%s: %w", d.join(name), err)
 	}
 	return e, nil
 }

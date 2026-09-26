@@ -22,14 +22,13 @@ const (
 type fileID struct{ dev, ino uint64 }
 
 // statOf is fi's raw stat. Every FileInfo this package reads comes from
-// os.Lstat or (*os.File).Stat on Linux or Darwin, where it is a
-// *syscall.Stat_t.
+// os.Lstat on Linux or Darwin, where it is a *syscall.Stat_t.
 func statOf(fi fs.FileInfo) *syscall.Stat_t {
 	return fi.Sys().(*syscall.Stat_t)
 }
 
 // idOf is fi's (dev, ino). Stat_t.Dev is an int32 on Darwin and a uint64 on
-// Linux; the conversion is the same on both.
+// Linux; the conversion is the same on both, and the same as idOfStat's.
 func idOf(fi fs.FileInfo) fileID {
 	st := statOf(fi)
 	return fileID{dev: uint64(st.Dev), ino: uint64(st.Ino)}
@@ -42,7 +41,8 @@ func permOf(fi fs.FileInfo) uint32 {
 
 // canonical resolves every symlink in the absolute path p. It is how a
 // chain's parent — the part of a path craze does not own — is made real
-// before each of its components is validated as an ancestor.
+// before each of its components is validated as an ancestor. In the cache
+// tree it only says where to walk (walk); the walk refuses a link.
 func canonical(p string) (string, error) {
 	c, err := filepath.EvalSymlinks(p)
 	if err != nil {
@@ -72,8 +72,67 @@ func components(p string) []string {
 	return out
 }
 
+// ancestorFault is the ancestor rule on one directory's stat — why p cannot
+// be a directory a craze path runs through, or nil. It must be a directory
+// owned by root or the euid (with links resolved, the owner check is what
+// stops a path through another user's directory), and not group- or
+// world-writable unless the sticky bit is set. ownGroupWritable admits one
+// more: a directory of the euid's own that its group, and not others, can
+// write (a user-private group's 0775 ~/.cache under umask 002). Only the cache
+// tree passes it, because only the cache tree is held by descriptor (walk): a
+// group member who renames what craze validated there changes nothing craze
+// touches. The runtime tree is used by path, so there a group-writable
+// directory is refused whoever owns it, and a root-owned one is refused in
+// both. A writable one is refused with the chmod that would make it
+// acceptable.
+func (env Env) ancestorFault(p string, isDir bool, uid int, perm uint32, ownGroupWritable bool) error {
+	if !isDir {
+		return fmt.Errorf("ancestor %s is not a directory", p)
+	}
+	if uid != 0 && uid != env.EUID {
+		return fmt.Errorf("ancestor %s is owned by uid %d, not root or uid %d", p, uid, env.EUID)
+	}
+	writable := perm & (modeGroupWrite | modeOtherWrite)
+	if writable == 0 || perm&modeSticky != 0 ||
+		(ownGroupWritable && writable == modeGroupWrite && uid == env.EUID) {
+		return nil
+	}
+	who := "go"
+	switch writable {
+	case modeGroupWrite:
+		who = "g"
+	case modeOtherWrite:
+		who = "o"
+	}
+	return fmt.Errorf("ancestor %s is group- or world-writable without the sticky bit (mode %04o), "+
+		"so another user could replace what craze puts under it; if nobody else should write to it, run: chmod %s-w %s",
+		p, perm, who, p)
+}
+
+// leafFault is the leaf rule on one directory's stat — why p, a directory
+// craze names, cannot be used, or nil: it must be a directory owned by the
+// euid with mode exactly 0700. It is never repaired: a leaf with any other
+// mode is refused, and its mode is left as it was. (A symlink never reaches
+// here: a leaf is lstat-ed, or opened O_NOFOLLOW.)
+func (env Env) leafFault(p string, isDir bool, uid int, perm uint32) error {
+	if !isDir {
+		return fmt.Errorf("%s is not a directory (remove it)", p)
+	}
+	if uid != env.EUID {
+		return fmt.Errorf("%s is owned by uid %d, not uid %d", p, uid, env.EUID)
+	}
+	if perm != modeLeaf {
+		return fmt.Errorf("%s has mode %04o, and 0700 is required; craze never changes it (chmod 700 it or remove it)", p, perm)
+	}
+	return nil
+}
+
+// The runtime tree — the socket's — is validated by path, because bind(2)
+// takes one: checkAncestors, leaf and mkdirPrivate below. Nothing holds it
+// between the check and the use, so its ancestors take the strict rule.
+
 // checkAncestors validates every component of the canonical path dir, dir
-// included, as an ancestor (checkAncestor).
+// included, as a runtime-tree ancestor (checkAncestor).
 func (env Env) checkAncestors(dir string) error {
 	for _, p := range components(dir) {
 		if err := env.checkAncestor(p); err != nil {
@@ -83,13 +142,9 @@ func (env Env) checkAncestors(dir string) error {
 	return nil
 }
 
-// checkAncestor refuses a directory a craze path runs through unless nobody
-// but root and the euid can replace what is under it: it is lstat-ed (so a
-// symlink swapped in since the path was canonicalised shows here), must be a
-// directory owned by root or the euid, and must not be group- or
-// world-writable unless the sticky bit is set, or it is the euid's own and
-// only its user-private group can write it (privateGroupWritable). A writable
-// one is refused with the chmod that would make it acceptable.
+// checkAncestor is the strict ancestor rule (ancestorFault, with no
+// group-writable exemption) on p, lstat-ed: a symlink swapped in since the
+// path was canonicalised shows here.
 func (env Env) checkAncestor(p string) error {
 	fi, err := os.Lstat(p)
 	if err != nil {
@@ -98,44 +153,14 @@ func (env Env) checkAncestor(p string) error {
 	if fi.Mode()&fs.ModeSymlink != 0 {
 		return fmt.Errorf("ancestor %s is a symlink", p)
 	}
-	if !fi.IsDir() {
-		return fmt.Errorf("ancestor %s is not a directory", p)
-	}
-	st := statOf(fi)
-	if uid := int(st.Uid); uid != 0 && uid != env.EUID {
-		return fmt.Errorf("ancestor %s is owned by uid %d, not root or uid %d", p, uid, env.EUID)
-	}
-	mode := permOf(fi)
-	if mode&(modeGroupWrite|modeOtherWrite) != 0 && mode&modeSticky == 0 &&
-		!env.privateGroupWritable(int(st.Uid), int(st.Gid), mode) {
-		who := "go"
-		switch mode & (modeGroupWrite | modeOtherWrite) {
-		case modeGroupWrite:
-			who = "g"
-		case modeOtherWrite:
-			who = "o"
-		}
-		return fmt.Errorf("ancestor %s is group- or world-writable without the sticky bit (mode %04o), "+
-			"so another user could replace what craze puts under it; if nobody else should write to it, run: chmod %s-w %s",
-			p, mode, who, p)
-	}
-	return nil
-}
-
-// privateGroupWritable is the one writable-ancestor exemption besides the
-// sticky bit: the directory is the euid's, others cannot write it, the group
-// that can is the euid's user-private group, and every account is local
-// (localAccounts), so that group's membership is all in the files privateGID
-// read.
-func (env Env) privateGroupWritable(uid, gid int, mode uint32) bool {
-	return mode&modeOtherWrite == 0 && uid == env.EUID && env.PrivateGID > 0 && gid == env.PrivateGID &&
-		localAccounts(env.NSSwitch)
+	return env.ancestorFault(p, fi.IsDir(), int(statOf(fi).Uid), permOf(fi), false)
 }
 
 // mkdirPrivate makes p 0700: mkdir 0700 (the umask can only clear bits), then
 // an explicit chmod 0700 that restores owner bits a hostile umask stripped. A
 // p that already exists — a peer won the race — is left as it is, for the
-// caller to validate like any other.
+// caller to validate like any other. Path-based: for the runtime tree, whose
+// parents take the strict rule.
 func mkdirPrivate(p string) error {
 	switch err := os.Mkdir(p, modeLeaf); {
 	case err == nil:
@@ -147,12 +172,10 @@ func mkdirPrivate(p string) error {
 	}
 }
 
-// leaf validates a directory craze names — p, whose parent is already
-// validated — lstat-ed, never followed. Missing: made 0700 (mkdirPrivate)
-// when create is set, else an error wrapping fs.ErrNotExist (Hosts reads a
-// tree it never builds). Present, or just made: a directory, not a symlink,
-// owned by the euid, mode exactly 0700. Never repaired: a leaf with any other
-// mode is refused, and its mode is left as it was.
+// leaf validates a runtime-tree directory craze names — p, whose parent is
+// already validated — lstat-ed, never followed. Missing: made 0700
+// (mkdirPrivate) when create is set, else an error wrapping fs.ErrNotExist.
+// Present, or just made: not a symlink, and the leaf rule (leafFault).
 func (env Env) leaf(p string, create bool) error {
 	fi, err := os.Lstat(p)
 	if errors.Is(err, fs.ErrNotExist) {
@@ -170,14 +193,5 @@ func (env Env) leaf(p string, create bool) error {
 	if fi.Mode()&fs.ModeSymlink != 0 {
 		return fmt.Errorf("%s is a symlink; craze follows no link to a directory it owns (remove it)", p)
 	}
-	if !fi.IsDir() {
-		return fmt.Errorf("%s is not a directory (remove it)", p)
-	}
-	if uid := int(statOf(fi).Uid); uid != env.EUID {
-		return fmt.Errorf("%s is owned by uid %d, not uid %d", p, uid, env.EUID)
-	}
-	if mode := permOf(fi); mode != modeLeaf {
-		return fmt.Errorf("%s has mode %04o, and 0700 is required; craze never changes it (chmod 700 it or remove it)", p, mode)
-	}
-	return nil
+	return env.leafFault(p, fi.IsDir(), int(statOf(fi).Uid), permOf(fi))
 }

@@ -1,6 +1,7 @@
 package rundir
 
 import (
+	"encoding/json"
 	"errors"
 	"io/fs"
 	"net"
@@ -30,7 +31,9 @@ func shortDir(t *testing.T) string {
 func testEnv(t *testing.T) Env {
 	t.Helper()
 	// t.TempDir makes its directory 0777 less the umask: 0775 under a
-	// user-private-group umask, which is a group-writable ancestor.
+	// user-private-group umask. The cache tree accepts that (the euid's own),
+	// but a test that puts a runtime directory under the home would not, so
+	// every test starts from the same 0700 home whatever the umask.
 	home := t.TempDir()
 	chmod(t, home, 0o700)
 	return Env{
@@ -131,7 +134,8 @@ func bindErr(t *testing.T, env Env, want ...string) error {
 }
 
 // die abandons h the way a killed process does: the kernel releases its lock
-// and closes its listener, and nothing is unlinked.
+// and closes its listener and its registry directory, and nothing is
+// unlinked.
 func (h *Host) die() {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -140,11 +144,41 @@ func (h *Host) die() {
 	_ = unlock(h.lock)
 	_ = h.lock.Close()
 	h.lock = nil
+	_ = h.hosts.close()
+	h.hosts = nil
 }
 
 // hostsDir is env's registry directory.
 func hostsDir(env Env) string {
 	return filepath.Join(env.Home, cacheName, crazeName, hostsName)
+}
+
+// cacheSubdir builds and validates env's cache tree down to sub, and returns
+// that directory's canonical path (not held).
+func cacheSubdir(t *testing.T, env Env, sub string) string {
+	t.Helper()
+	d, err := env.cacheDir(sub, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := d.close(); err != nil {
+		t.Fatal(err)
+	}
+	return d.path
+}
+
+// readEntryFile is the registry entry at path, read by path.
+func readEntryFile(t *testing.T, path string) Entry {
+	t.Helper()
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var e Entry
+	if err := json.Unmarshal(b, &e); err != nil {
+		t.Fatalf("%s: %v", path, err)
+	}
+	return e
 }
 
 // listenAt binds a socket at p and closes it without unlinking: a socket file
