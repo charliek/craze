@@ -187,23 +187,34 @@ type splice struct {
 // steers and re-inserted like them, but never a steer — it is not reported,
 // not bounded by the steer cap, and never comes back in Result.Unanswered.
 //
-// The steers are skipped at the first step: its input is the prompt Run was
-// called with, and a steer accepted before it has a whole turn ahead of it to
-// be taken up in — unless a pre-turn compaction ran before it (plan 028 §3.6,
-// P36, R2-2): the person typed while it did, so the first request takes the
-// steer up, after the prompt and its reminder, as a later step would. The
-// reminder is not skipped, and this is why prepareStep no longer
-// returns at once there: Fantasy builds the turn's list once, as system +
-// Messages + Prompt, and keeps it across the steps (agent.go:1279-1284, 943),
-// so a reminder appended to Messages would land ahead of the prompt and one
-// spliced from the second step on would move the prefix under the cache
-// (panel correction 7). A turn in agent mode with nothing to announce
-// composes none, and its requests are the bytes they have always been.
+// The steers are skipped at the turn's first request: its input is the
+// prompt Run was called with, and a steer accepted before it has a whole turn
+// ahead of it to be taken up in — unless a pre-turn compaction ran before it
+// (plan 028 §3.6, P36, R2-2): the person typed while it did, so the first
+// request takes the steer up, after the prompt and its reminder, as a later
+// step would. A segment's first request after a restart is not the turn's
+// first (§3.11 table): it takes the steers accepted while the turn compacted,
+// as the pre-turn case does. The reminder is not skipped, and this is why
+// prepareStep no longer returns at once there: Fantasy builds the turn's list
+// once, as system + Messages + Prompt, and keeps it across the steps
+// (agent.go:1279-1284, 943), so a reminder appended to Messages would land
+// ahead of the prompt and one spliced from the second step on would move the
+// prefix under the cache (panel correction 7). A turn in agent mode with
+// nothing to announce composes none, and its requests are the bytes they
+// have always been.
+//
+// At a segment's first request the splices the segment carried over — the
+// ones no append committed, kept by newSegment — are first re-placed at the
+// end of the new base (§3.11 item 6); nothing new is taken up for them, and
+// no Steered is emitted for them again.
 func (t *turn) prepareStep(ctx context.Context, o fantasy.PrepareStepFunctionOptions) (context.Context, fantasy.PrepareStepResult, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	if t.segmentFirstRequest {
+		t.replaceSplices(len(o.Messages))
+	}
 	if t.ctx.Err() == nil {
-		if o.StepNumber > 0 || t.compactedBeforeFirst {
+		if !t.turnFirstRequest || t.compactedBeforeFirst {
 			for _, text := range t.steers.take() {
 				t.spliced = append(t.spliced, splice{text: text, at: len(o.Messages), msg: fantasy.NewUserMessage(text)})
 				// The turn's goroutine is the only one that reports a steer, and

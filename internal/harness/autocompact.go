@@ -18,10 +18,10 @@ import (
 // runs the same turn code on its own model's window and its parent's table,
 // so it compacts by the same rules (§3.17).
 //
-// C11's mid-turn check reuses compactionThreshold, contextTokens, the
-// suppression and compacted; it is called once per step boundary, as the
-// pre-turn check is called once before a turn's first request, and each
-// makes at most one compaction.
+// The mid-turn check (midTurnDue, midTurnCompaction) reuses
+// compactionThreshold, contextTokens, the suppression and compacted; it is
+// asked once per step boundary, as the pre-turn check is asked once before a
+// turn's first request, and each makes at most one compaction.
 
 // compactionConfig is the model table's [compaction] section, read under mu
 // like every read of the table.
@@ -211,6 +211,69 @@ func (s *Session) preTurnCompaction(t *turn, prompt fantasy.Message) (compacted 
 	t.compactedBeforeFirst = true
 	t.mu.Unlock()
 	return err == nil, nil
+}
+
+// autoCompacts reports whether a turn on m can compact on its own at all
+// (plan 028 §3.6): [compaction] auto is on and m's window is known. What a
+// suppression says is asked at each boundary, not here: it can come and go
+// within a turn (a compaction that fails, a /compact cannot run mid-turn, but
+// a still-over compaction suppresses the boundaries after it).
+func (s *Session) autoCompacts(m model) bool {
+	cfg := s.compactionConfig()
+	return cfg.Auto() && compactionThreshold(m.r, cfg.ThresholdPercent()) > 0
+}
+
+// midTurnDue is the mid-turn check (plan 028 §3.6, §3.11 item 1), asked by
+// the turn under its lock at the end of a saved tool_use step: whether the
+// context that step left (contextTokens: the step's own assistant entry is
+// the frontier, its tool message counted once, §3.7) reaches m's threshold,
+// with automatic compaction on and not suppressed. It takes the store lock
+// and the redactor's leaf locks under the turn's, the order takeResults
+// already takes them in; the session's lock too (compactionConfig,
+// autoSuppressed), which recordMode takes under the turn's already.
+func (s *Session) midTurnDue(m model) bool {
+	suppressed := s.autoSuppressed(m)
+	cfg := s.compactionConfig()
+	if !cfg.Auto() {
+		return false
+	}
+	threshold := compactionThreshold(m.r, cfg.ThresholdPercent())
+	if threshold == 0 || suppressed {
+		return false
+	}
+	tokens, _ := s.contextTokens(m)
+	return tokens >= threshold
+}
+
+// midTurnCompaction is the compaction between two segments of t (plan 028
+// §3.11 items 4, 9), run with no lock of the turn's held (compact streams no
+// deltas; its Compacted events go through t.emitLocked): reason auto,
+// recorded as the turn it is in, on the turn's own model — the frontier is
+// the step that just finished, so there is no previous model to prefer. Its
+// outcome is triaged as the pre-turn one's is (preTurnCompaction): a
+// summary switches suppression by what it left (compacted); nothing to
+// compact — which a turn with a persisted step cannot meet — changes
+// nothing; a summarizer failure, its entry written, suppresses automatic
+// compaction and the turn goes on with the context it had; and err is
+// non-nil only when the turn must stop between requests: the compaction was
+// cancelled, or its entry could not be written (*errCompactionSaveFailed,
+// P5), which outranks the cancel.
+func (s *Session) midTurnCompaction(t *turn) error {
+	m := t.model
+	res, err := s.compact(t.ctx, m, t.number, store.CompactionAuto, "", "", t.emitLocked)
+	var saveErr *errCompactionSaveFailed
+	switch {
+	case err == nil:
+		s.compacted(m, res)
+		return nil
+	case errors.Is(err, store.ErrNothingToCompact):
+		return nil
+	case errors.As(err, &saveErr), t.ctx.Err() != nil:
+		return err
+	default:
+		s.suppressAuto(m)
+		return nil
+	}
 }
 
 // sameModel reports whether a and b name one model: the same provider and

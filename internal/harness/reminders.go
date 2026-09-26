@@ -7,6 +7,7 @@ import (
 	"sync"
 
 	"charm.land/fantasy"
+	"github.com/charliek/craze/internal/harness/store"
 )
 
 // Modes and the reminders that carry them (plan 023 §3.1, §3.3).
@@ -343,6 +344,64 @@ func (m *modes) reminderFor(step int, carried string) (pendingReminder, bool) {
 	return pendingReminder{}, false
 }
 
+// restartReminder is the reminder a segment's first request after a restart
+// carries, if any (plan 028 §3.11 table, R2-3, R3-2, R4-1): the request
+// replays a history rebuilt from the store — from a summary on, or the same
+// one after a compaction that failed — and what that history holds decides,
+// never the summary's prose. A transition is composed exactly as reminderFor
+// composes one, by the told state (carried standing in for it, as there):
+// the mode differs from the one the model was last told, so it is said. With
+// nothing to announce, the mode's standing reminder is sent again — the
+// turn's first request sent one, and a summary may have swallowed it —
+// unless last, the variant of the last reminder the request's history holds
+// (the retained history's, or a reminder carried uncommitted from a request
+// that never completed, C12), is a standing one for this mode: then it is
+// already there, and nothing is composed. A re-send never advances the
+// alternation: it is the turn's reminder said again, not a turn's own.
+func (m *modes) restartReminder(carried, last string) (pendingReminder, bool) {
+	m.mu.Lock()
+	mode, told, parity, gen := m.mode, m.told, m.turns, m.gen
+	m.mu.Unlock()
+	if carried != "" {
+		told = carried
+	}
+	if m.child && mode == modePlan {
+		if mode == told && last == variantChildPlan {
+			return pendingReminder{}, false
+		}
+		return m.compose(variantChildPlan, gen, false), true
+	}
+	if mode != told {
+		return m.compose(m.transition(mode, told), gen, mode == modePlan), true
+	}
+	if standingFor(last) == mode {
+		return pendingReminder{}, false
+	}
+	switch mode {
+	case modePlan:
+		return m.compose(m.planStanding(parity), gen, false), true
+	case modeAsk:
+		return m.compose(variantAsk, gen, false), true
+	}
+	return pendingReminder{}, false
+}
+
+// standingFor is the mode variant is the standing reminder of — plan mode's
+// full and sparse texts, ask mode's, a sub-agent's plan text — and "" for a
+// transition notice (the re-entry notice and the two exits) or no variant:
+// what suppresses a restart's re-send (restartReminder). A standing text is
+// what the model reads at every turn of the mode; a transition says the mode
+// changed, once.
+func standingFor(variant string) string {
+	switch variant {
+	case variantPlanFullEmpty, variantPlanFullWritten, variantPlanSparse, variantChildPlan:
+		return modePlan
+	case variantAsk:
+		return modeAsk
+	}
+	return ""
+}
+
 // transition is the variant the model reads when the mode changed under it:
 // the mode it is in now, and, for a return to agent mode, which mode it has
 // left. A plan-to-ask switch announces ask's restrictions rather than plan's
@@ -443,10 +502,19 @@ type reminder struct {
 // remind composes the reminder this step's request will carry, if any, and
 // records it at the end of the step's own messages — right after the user's
 // prompt at step 0, and at the boundary where it first appears for a
-// transition notice, which never moves or replaces one sent earlier. mu is
-// held.
+// transition notice, which never moves or replaces one sent earlier. A
+// turn's first request, and every later step of a segment, compose as they
+// always have (reminderFor: R3-2 keeps the per-turn alternation); the first
+// request of a segment after a restart composes over the rebuilt history
+// (restartReminder, plan 028 §3.11 table). mu is held.
 func (t *turn) remind(step int, base []fantasy.Message) {
-	r, ok := t.modes.reminderFor(step, t.carried)
+	var r pendingReminder
+	var ok bool
+	if t.segmentFirstRequest && !t.turnFirstRequest {
+		r, ok = t.modes.restartReminder(t.carried, t.lastReminder())
+	} else {
+		r, ok = t.modes.reminderFor(step, t.carried)
+	}
 	if !ok {
 		return
 	}
@@ -459,6 +527,34 @@ func (t *turn) remind(step int, base []fantasy.Message) {
 // always a suffix, as the steers are: an append writes every one taken up
 // before it, or none. mu is held.
 func (t *turn) unwrittenReminders() []reminder { return t.reminders[t.remWritten:] }
+
+// lastReminder is the variant of the last reminder the next request's
+// history holds, at a segment's first request (restartReminder, plan 028
+// §3.11 table, R4-1): the last of the reminders carried over uncommitted,
+// which go out after the rebuilt history, else the rebuilt history's own
+// last reminder entry (retainedReminder), else "". mu is held.
+func (t *turn) lastReminder() string {
+	if n := len(t.reminders); n > 0 {
+		return t.reminders[n-1].variant
+	}
+	return t.retainedReminder
+}
+
+// lastReminderVariant is the variant of the last reminder entry among steps,
+// a context's (store.Steps), or "" when none holds one: what the history
+// rebuilt for a restart says the model was last reminded of. A compaction's
+// summary is prose and never counts (R2-3).
+func lastReminderVariant(steps []store.Step) string {
+	last := ""
+	for _, st := range steps {
+		for _, e := range st.Entries {
+			if e.Type == store.TypeReminder {
+				last = e.Variant
+			}
+		}
+	}
+	return last
+}
 
 // reminderSent is called as the step's request goes out (stepStarted): the
 // alternation advances here, because that is a fact about requests, and the

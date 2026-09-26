@@ -31,15 +31,17 @@ type internalPart struct {
 }
 
 // takeResults is prepareStep's taking up of background results before step n
-// (from 0), whose input is base: every pending one, and at the first step of a
-// turn a person started — not a wake's — every suspended one too, reserved for
-// this step (its number from 1, t.step's), and made one user part (§3.11). mu
-// is held; the runner's regMu is taken under it, never the other way round.
+// (from 0, the segment's own numbering), whose input is base: every pending
+// one, and at the first request of a turn a person started — not a wake's,
+// and never again at a segment's restart (plan 028 §3.11 table) — every
+// suspended one too, reserved for this step (its number from 1, t.step's,
+// global across the turn's segments), and made one user part (§3.11). mu is
+// held; the runner's regMu is taken under it, never the other way round.
 func (t *turn) takeResults(n int, base []fantasy.Message) {
 	if t.subs == nil {
 		return
 	}
-	b := t.subs.reserve(owner{turn: t.number, step: n + 1, wake: t.wake}, n == 0 && !t.wake)
+	b := t.subs.reserve(owner{turn: t.number, step: t.stepBase + n + 1, wake: t.wake}, t.turnFirstRequest && !t.wake)
 	if b == nil {
 		return
 	}
