@@ -3,6 +3,7 @@ package harness
 import (
 	"context"
 	"slices"
+	"strconv"
 	"sync"
 	"unicode/utf8"
 
@@ -135,21 +136,50 @@ type todoMark struct {
 // redactTodos is items with every key red covers redacted from each item's id
 // and content: the list as a tool entry stores it and a replay shows it (plan
 // 028 §3.2, §3.4). The model wrote both, as it wrote the todo_write call's
-// arguments, which are redacted in the same places. Two ids that redact alike
-// would make a list the store refuses (a repeated id), so the later of the
-// two is dropped: a list with a key in two ids keeps the first.
+// arguments, which are redacted in the same places.
+//
+// Every item is kept, so the stored list is as long as the live one and a
+// resume restores every task the model had. Two distinct ids can redact alike
+// — a key in each, at the same place — which would make a list the store
+// refuses (a repeated id), so every repeat after the first is disambiguated
+// (uniqueTodoIDs).
 func redactTodos(red *redact.Replacer, items []tool.Todo) []tool.Todo {
-	out := make([]tool.Todo, 0, len(items))
-	seen := make(map[string]bool, len(items))
-	for _, it := range items {
+	out := make([]tool.Todo, len(items))
+	for i, it := range items {
 		it.ID, it.Content = red.String(it.ID), red.String(it.Content)
-		if seen[it.ID] {
+		out[i] = it
+	}
+	uniqueTodoIDs(red, out)
+	return out
+}
+
+// uniqueTodoIDs makes items' ids unique in place: the first item with an id
+// keeps it, and each later one with the same id takes the first "<id>-<n>",
+// n from 2, that no item of the list has — checked against the whole list,
+// so a suffixed id never lands on one a later item holds — and that red
+// leaves as it is, so a suffix can never complete a key. It is deterministic:
+// the same list comes out the same every time, whoever redacts it.
+func uniqueTodoIDs(red *redact.Replacer, items []tool.Todo) {
+	taken := make(map[string]bool, len(items))
+	for _, it := range items {
+		taken[it.ID] = true
+	}
+	seen := make(map[string]bool, len(items))
+	for i := range items {
+		id := items[i].ID
+		if !seen[id] {
+			seen[id] = true
 			continue
 		}
-		seen[it.ID] = true
-		out = append(out, it)
+		for n := 2; ; n++ {
+			cand := id + "-" + strconv.Itoa(n)
+			if !taken[cand] && red.String(cand) == cand {
+				items[i].ID = cand
+				taken[cand], seen[cand] = true, true
+				break
+			}
+		}
 	}
-	return out
 }
 
 // storeTodos and toolTodos convert a list between the harness's shape and

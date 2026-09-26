@@ -612,8 +612,9 @@ func TestResumeRestoresTheLastTodos(t *testing.T) {
 // fresh session's todo list is written to its tool entry through the
 // session's redactor, as the call's arguments and its result are, so the
 // transcript never holds a key the session knows. Two ids that redact alike
-// keep the first, so the list stays one the store accepts. A resume restores
-// the list as written: redacted.
+// are both kept, the second suffixed, so the list stays as long as the live
+// one and one the store accepts. A resume restores the list as written:
+// redacted, every item there.
 func TestTodosAreStoredRedacted(t *testing.T) {
 	f := newFixture(t, "http://127.0.0.1:1/v1")
 	s, err := Open(f.options())
@@ -647,6 +648,7 @@ func TestTodosAreStoredRedacted(t *testing.T) {
 	}
 	want := []store.Todo{
 		{ID: "k-" + redact.Marker, Content: "deploy with " + redact.Marker, Status: "pending"},
+		{ID: "k-" + redact.Marker + "-2", Content: "and " + redact.Marker, Status: "pending"},
 		{ID: "plain", Content: "nothing secret", Status: "pending"},
 	}
 	if stored == nil || !slices.Equal(*stored, want) {

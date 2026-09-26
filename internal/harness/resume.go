@@ -185,7 +185,9 @@ func (s *Session) openResumed(opts Options) (_ *Session, err error) {
 	// turn that wrote it (redactTodos), so a key in an item is the marker from
 	// here on, in the list the model builds on and in the next list written.
 	// That is the transcript's own rule for everything it keeps; a key learned
-	// since is redacted where the list is shown (Replay).
+	// since is redacted where the list is shown (Replay). Every item the live
+	// list had is there: ids that redacted alike were told apart by a suffix,
+	// never dropped.
 	if was.todos != nil {
 		s.tools.todos.restore(toolTodos(*was.todos))
 	}

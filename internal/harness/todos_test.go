@@ -10,6 +10,7 @@ import (
 	"unicode/utf8"
 
 	"charm.land/fantasy"
+	"github.com/charliek/craze/internal/harness/redact"
 	"github.com/charliek/craze/internal/harness/tool"
 	"github.com/charliek/craze/internal/harness/tool/opencode"
 )
@@ -614,5 +615,47 @@ func TestTodoEventsOrderedThroughARealTurn(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+// TestRedactedTodoIDsStayUnique (plan 028 §3.2, sol's C2a finding): a list
+// whose ids redact alike keeps every item — the stored list is as long as the
+// live one, so a resume loses no task — and each repeat after the first takes
+// the first "-<n>" suffix no item of the whole list holds, so a suffixed id
+// never lands on another item's, and the store's repeated-id check passes.
+func TestRedactedTodoIDsStayUnique(t *testing.T) {
+	red := redact.New(canary, canaryOther)
+	m := redact.Marker
+	for _, tc := range []struct {
+		name string
+		ids  []string
+		want []string
+	}{
+		{"no key", []string{"a", "b"}, []string{"a", "b"}},
+		{"two keys at one place", []string{"k-" + canary, "k-" + canaryOther, "plain"},
+			[]string{"k-" + m, "k-" + m + "-2", "plain"}},
+		{"three", []string{canary, canaryOther, canary + "x", canaryOther + "x"},
+			[]string{m, m + "-2", m + "x", m + "x-2"}},
+		{"a suffix another item already holds", []string{"k-" + canary, "k-" + canaryOther, "k-" + m + "-2"},
+			[]string{"k-" + m, "k-" + m + "-3", "k-" + m + "-2"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			items := make([]tool.Todo, len(tc.ids))
+			for i, id := range tc.ids {
+				items[i] = tool.Todo{ID: id, Content: fmt.Sprintf("task %d", i), Status: tool.TodoPending}
+			}
+			got := redactTodos(red, items)
+			ids := make([]string, len(got))
+			for i, it := range got {
+				ids[i] = it.ID
+				if it.Content != fmt.Sprintf("task %d", i) {
+					t.Fatalf("item %d is %+v; want the items in order, none dropped", i, it)
+				}
+			}
+			equal(t, "the redacted ids", ids, tc.want)
+			if items[0].ID != tc.ids[0] {
+				t.Fatal("redactTodos changed the live list")
+			}
+		})
 	}
 }
