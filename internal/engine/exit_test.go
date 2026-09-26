@@ -121,6 +121,7 @@ func TestTwoClientsSubmittingAndQueueingAtOnceAgreeOnEveryTurn(t *testing.T) {
 	}
 	t.Cleanup(second.Close)
 
+	// Even, so that every client's last command is a Submit (below).
 	const each = 12
 	clients := []string{r.e.NewClientID(), r.e.NewClientID()}
 	if clients[0] == clients[1] {
@@ -135,7 +136,7 @@ func TestTwoClientsSubmittingAndQueueingAtOnceAgreeOnEveryTurn(t *testing.T) {
 				cmd := Command{Client: client, ID: fmt.Sprint(i)}
 				text := fmt.Sprintf("%s-%d", client, i)
 				var err error
-				if i%2 == 1 {
+				if i%2 == 0 {
 					// Enter: start now if the engine is admitting, else queue.
 					_, err = r.e.Submit(cmd, text, SubmitQueue, "")
 				} else {
@@ -153,6 +154,13 @@ func TestTwoClientsSubmittingAndQueueingAtOnceAgreeOnEveryTurn(t *testing.T) {
 	// Every command has been answered, so the whole set is in flight: 2*each
 	// turns will start and end, in some order the two clients' interleaving
 	// decided. Both subscriptions are read to the last of them.
+	//
+	// In flight because the last command of all is a Submit. Queue never starts a
+	// turn however idle the engine is (queue.go), so a row queued after the engine
+	// has settled waits for a send, and a schedule that ended on one would strand
+	// it whenever the agent outran the client that queued it. The last Submit
+	// either starts a turn, whose settlement drains every row queued before it, or
+	// finds one current and queues behind those rows.
 	mine := record(t, r.sub, 2*each)
 	theirs := record(t, second, 2*each)
 
