@@ -236,7 +236,9 @@ func (s *Session) run(ctx context.Context, text string, wake bool, sink func(Eve
 	// are redacted as when a step is persisted (redactCalls, redactResults): a
 	// tool call's arguments and a tool result's text, never the model's own
 	// text or reasoning — and the text of an entry of background results,
-	// which a child wrote (plan 026 §3.11), never a person's prompt.
+	// which a child wrote (plan 026 §3.11), and of a compaction's summary
+	// message, which the summarizer wrote from tool output among the rest
+	// (plan 028 P30), never a person's prompt.
 	//
 	// The replacer is the session's live union, the keys Session.Redact
 	// covers — the parent's, every registered child's, and every background
@@ -1091,10 +1093,11 @@ func redactResults(red *redact.Replacer, m fantasy.Message) fantasy.Message {
 
 // redactHistory is msgs with every provider key gone from the tool calls'
 // arguments and the tool results' text (see Run), and from the text of every
-// message results marks as an entry of background sub-agents' results (plan
-// 026 §3.11, astra r14): a child wrote it, as a tool wrote a result, so a key
-// the session learned after it was committed must not go out in a later
-// request. results is msgs' marks, message for message
+// message results marks: an entry of background sub-agents' results (plan
+// 026 §3.11, astra r14), or a compaction's summary message (plan 028 P30). A
+// child wrote the one and the summarizer the other, as a tool wrote a
+// result, so a key the session learned after it was committed must not go
+// out in a later request. results is msgs' marks, message for message
 // (store.ContextWithResults). A message holding none is carried over as it
 // is, parts and all, so the bytes a provider sees do not change — a person's
 // prompt among them, which is never marked; msgs itself, which the store

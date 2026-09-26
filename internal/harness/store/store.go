@@ -40,6 +40,13 @@
 // A step's tool calls and results keep the pairing invariant (see pairing),
 // which AppendStep checks before writing and Load checks on every line.
 //
+// A compaction entry (plan 028 §3.9) is the one entry written alone, between
+// two steps, and at once (AppendCompaction): the held entries wait for the
+// next step. It is complete on its own line, so Load keeps one that no step
+// follows. From the latest successful one on a path, the context is its
+// summary message, its tail of whole steps, and what came after it
+// (Transcript.ContextAt); a compaction cuts a context's steps with Cut.
+//
 // One write(2) is not atomic across a crash: what reaches the disk can be any
 // prefix of it, possibly ending on a line boundary. There is no fsync (a
 // transcript is not a database); Load instead drops a malformed last line
@@ -116,6 +123,11 @@ var (
 	// entry is held: the first write must carry the turn's user entry, or
 	// the transcript would start with an answer to nothing.
 	ErrNoUser = errors.New("store: no user entry to write with the first step")
+
+	// ErrNothingToCompact is AppendCompaction's refusal while the transcript
+	// has no entries: a compaction stands for a conversation, and there is
+	// none yet (plan 028 §3.8).
+	ErrNothingToCompact = errors.New("store: nothing to compact")
 )
 
 // Options are a session's fixed facts.
@@ -149,9 +161,10 @@ type Options struct {
 	PersonaPath    string
 
 	// Render is the harness's renderer for the entries whose text the store
-	// never keeps — a reminder's (plan 028 §3.15) — which the context renders
-	// at their places (Renderer). New and Open take it; the zero value leaves
-	// such entries out of the context.
+	// never keeps — a reminder's (plan 028 §3.15), and a compaction's summary
+	// message (§3.9) — which the context renders at their places (Renderer).
+	// New and Open take it; the zero value leaves those messages out of the
+	// context.
 	Render Renderer
 
 	// Test seams, settable only inside the package; zero means production.
@@ -547,6 +560,43 @@ func checkLead(l Lead) error {
 	return nil
 }
 
+// AppendCompaction writes a compaction entry (plan 028 §3.2, §3.8): turn is
+// the turn it ran in, m the model that summarized, usage every attempt's,
+// summed, and c the rest (Compaction). It is written at once and alone:
+// the entries held for the next step — its user entries, changes, and Open's
+// resume entry — stay held, and go out after it with that step, so a
+// compaction before a turn's first request sits ahead of the prompt it
+// preceded. It returns the entry's id.
+//
+// c must keep a compaction's rule (Compaction's doc) and, with a tail, start
+// it at a step before it (Transcript.checkTail), or AppendCompaction refuses
+// it with nothing written; so does a transcript with no entries
+// (ErrNothingToCompact). Pairing holds for it as for any entry: one cannot
+// come between an assistant entry's calls and their results (ErrUnpaired).
+// The write is a step's, with a step's failure: one that writes part of the
+// line fails the store (ErrFailed), and one that writes nothing fails only
+// itself.
+func (s *Store) AppendCompaction(turn int, m Model, usage Usage, c Compaction) (string, error) {
+	e := Entry{Type: TypeCompaction, Compaction: c, MessageEntry: MessageEntry{Turn: turn, Model: m, Usage: &usage}}
+	if err := checkCompaction(e); err != nil {
+		return "", fmt.Errorf("store: AppendCompaction: %w", err)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.usable(); err != nil {
+		return "", err
+	}
+	if len(s.t.Entries) == 0 {
+		return "", ErrNothingToCompact
+	}
+	e.Timestamp = s.stamp()
+	batch := []Entry{e}
+	if err := s.write(batch); err != nil {
+		return "", err
+	}
+	return batch[0].ID, nil
+}
+
 // AppendAssistant writes a text-only answer as a step with no steers and no
 // tool message: what the runner saves of a step a cancel or a failure cut
 // short. A message with no non-blank text is ErrNoOutput and changes
@@ -628,6 +678,11 @@ func (s *Store) write(batch []Entry) error {
 		}
 		if err := pair.next(back, parent); err != nil {
 			return err
+		}
+		// A compaction is written alone (AppendCompaction), so its parent
+		// is the transcript's last entry, and its ancestors are all there.
+		if err := s.t.checkTail(&back, parent); err != nil {
+			return fmt.Errorf("store: %w", err)
 		}
 		batch[i] = back
 		parent = &batch[i]
@@ -769,6 +824,16 @@ func (s *Store) ContextWithResults(current Model) ([]fantasy.Message, []bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.t.ContextWithResults(current)
+}
+
+// Steps is the context the next request sends to current, grouped into steps
+// (Transcript.Steps): what a compaction cuts (Cut). Held entries are in none.
+// It works after Close.
+func (s *Store) Steps(current Model) []Step {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	steps, _ := s.t.Steps(s.t.Leaf(), current) // the leaf is always known
+	return steps
 }
 
 // Transcript is a copy of the transcript as the store holds it: the header,

@@ -70,6 +70,22 @@ func PlanPath(sessionPath string) string {
 	return strings.TrimSuffix(sessionPath, ".jsonl") + ".plan.md"
 }
 
+// SegmentDir is where a session's compaction segments live: the transcript's
+// sibling directory, <UTC stamp>_<session id>.compaction (plan 028 §3.10,
+// D-63), beside the plan file and for the same reasons. One file per
+// successful compaction holds the part of the conversation its summary stands
+// for (SegmentName), and the summary message names the directory.
+func SegmentDir(sessionPath string) string {
+	return strings.TrimSuffix(sessionPath, ".jsonl") + ".compaction"
+}
+
+// SegmentName is the file name of a session's nth segment, from 1:
+// segment_001.md, segment_002.md, … (plan 028 §3.10); past 999 the number
+// simply grows a digit.
+func SegmentName(n int) string {
+	return fmt.Sprintf("segment_%03d.md", n)
+}
+
 // CreatePlanFile creates path empty when nothing is there, with the
 // transcript's own permissions — 0600 under 0700 directories, since a plan is
 // written from the user's work — and does nothing at all when the file

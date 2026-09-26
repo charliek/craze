@@ -331,12 +331,19 @@ type Session struct {
 }
 
 // renderer is what the session hands its store (store.Renderer, plan 028
-// §3.15): the texts the transcript holds only by name, rendered as this
-// session's requests sent them. It reads the session's modes when it is
-// called — they are fixed once Open returns, and only a turn's history, after
-// Open, renders anything.
+// §3.15, §3.9): the texts the transcript holds only by name — a reminder — or
+// only in part — a compaction's summary message, whose wrapper names the
+// session's segment directory — rendered as this session's requests sent
+// them. It reads the session's modes and its store when it is called — both
+// are fixed once Open returns, and only a history built after Open renders
+// anything.
 func (s *Session) renderer() store.Renderer {
-	return store.Renderer{Reminder: func(variant string) (fantasy.Message, bool) { return s.modes.render(variant) }}
+	return store.Renderer{
+		Reminder: func(variant string) (fantasy.Message, bool) { return s.modes.render(variant) },
+		Summary: func(c store.Compaction) fantasy.Message {
+			return summaryMessage(store.SegmentDir(s.store.Path()), c)
+		},
+	}
 }
 
 // defaultAgent is a turn's agent: Fantasy's, with the frozen system prompt,

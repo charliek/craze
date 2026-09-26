@@ -5,7 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
+	"unicode"
 
 	"charm.land/fantasy"
 )
@@ -30,6 +32,10 @@ const (
 	// it carried it: its variant, never its text, which the harness renders
 	// back into the context (Renderer, plan 028 §3.15).
 	TypeReminder = "reminder"
+	// TypeCompaction ends one compaction (plan 028 §3.2, §3.9): a summary that
+	// stands for the context before it, or a failure that stands for nothing
+	// (Compaction).
+	TypeCompaction = "compaction"
 )
 
 // knownType reports whether this craze writes and reads entries of type typ.
@@ -37,10 +43,95 @@ const (
 // and never trimmed away by Open (ErrNewerTranscript).
 func knownType(typ string) bool {
 	switch typ {
-	case TypeMessage, TypeModelChange, TypeEffortChange, TypeModeChange, TypeResume, TypeReminder:
+	case TypeMessage, TypeModelChange, TypeEffortChange, TypeModeChange, TypeResume, TypeReminder, TypeCompaction:
 		return true
 	}
 	return false
+}
+
+// A compaction's reasons (Compaction.Reason, plan 028 §3.6).
+const (
+	CompactionAuto     = "auto"     // the context reached the threshold
+	CompactionManual   = "manual"   // a person asked, with /compact
+	CompactionOverflow = "overflow" // the provider refused a request as too large
+)
+
+// Compaction is what a compaction entry records (plan 028 §3.2), besides the
+// three fields it shares with a message entry: Entry's Turn is the turn it ran
+// in (a compaction before a turn's first request carries the turn it
+// precedes, a manual one its own), Model the model that wrote the summary, and
+// Usage every attempt's usage, summed — present on every compaction entry,
+// failures included, since each attempt was paid for.
+//
+// Every compaction ends in exactly one entry (PD20):
+//
+//   - A success has a Summary and no Error. From it on the context is its
+//     summary message, then its tail — the entries from FirstKeptID up to it
+//     — then the entries after it (ContextAt). FirstKeptID "" is no tail; one
+//     that is set names an entry before it on its path that starts a step
+//     (plan 028 §3.9, P14). Segment is the file, in the session's segment
+//     directory (SegmentDir), that holds what the summary stands for.
+//   - A failure has an Error and no Summary, FirstKeptID or Segment. It stands
+//     for nothing: the context passes over it as if it were not there.
+//
+// Command is what a person typed (/compact …), on a manual compaction only.
+// TokensBefore and TokensAfter are the context's size in tokens before it and
+// after, estimated (plan 028 §3.7).
+type Compaction struct {
+	Summary      string
+	FirstKeptID  string
+	TokensBefore int64
+	TokensAfter  int64
+	Reason       string
+	Command      string
+	Segment      string
+	Error        string
+}
+
+// Succeeded reports whether c is a success: a summary the context starts from.
+func (c Compaction) Succeeded() bool { return c.Summary != "" }
+
+// maxSegmentName bounds a segment's file name, as most filesystems do.
+const maxSegmentName = 255
+
+// checkCompaction is a compaction entry's rule on its own (plan 028 §3.2):
+// the turn it ran in, the model and usage every one records, a known reason,
+// a command only on a manual one, and exactly one of a summary and an error,
+// a failure naming no tail and no segment. AppendCompaction runs it on what
+// it is handed, and decodeEntry on every line it reads (errInvalid). Where a
+// tail starts is the tree's to check (Transcript.checkTail).
+func checkCompaction(e Entry) error {
+	c, u := e.Compaction, e.Usage
+	switch {
+	case e.Turn < 1:
+		return fmt.Errorf("a compaction's turn is %d; turns are numbered from 1", e.Turn)
+	case e.Model.Provider == "" || e.Model.Alias == "" || e.Model.WireModel == "":
+		return fmt.Errorf("a compaction needs a provider, model and wire model, got %+v", e.Model)
+	case u == nil:
+		return errors.New("a compaction records no usage")
+	case u.Input < 0 || u.Output < 0 || u.Reasoning < 0 || u.CacheRead < 0 || u.CacheCreation < 0:
+		return fmt.Errorf("a compaction's usage %+v is negative", *u)
+	case c.TokensBefore < 0 || c.TokensAfter < 0:
+		return fmt.Errorf("a compaction's tokens %d → %d are negative", c.TokensBefore, c.TokensAfter)
+	case c.Reason != CompactionAuto && c.Reason != CompactionManual && c.Reason != CompactionOverflow:
+		return fmt.Errorf("a compaction's reason is %q, not %s, %s or %s", c.Reason, CompactionAuto, CompactionManual, CompactionOverflow)
+	case c.Command != "" && c.Reason != CompactionManual:
+		return fmt.Errorf("an %s compaction carries the command %q; only a manual one does", c.Reason, c.Command)
+	case (c.Summary == "") == (c.Error == ""):
+		return errors.New("a compaction has a summary or an error: exactly one of them")
+	case c.Error != "" && (c.FirstKeptID != "" || c.Segment != ""):
+		return fmt.Errorf("a failed compaction stands for nothing, but names the tail %q and the segment %q", c.FirstKeptID, c.Segment)
+	case c.Segment != "" && !plainFileName(c.Segment):
+		return fmt.Errorf("a compaction's segment %q is not a file name", c.Segment)
+	}
+	return nil
+}
+
+// plainFileName reports whether name names a file in a directory, and only
+// that: not empty, not . or .., no separator, no control character.
+func plainFileName(name string) bool {
+	return name != "" && name != "." && name != ".." && len(name) <= maxSegmentName &&
+		!strings.ContainsAny(name, `/\`) && !strings.ContainsFunc(name, unicode.IsControl)
 }
 
 // maxVariant bounds a reminder variant's length. A variant is a name, never
@@ -67,7 +158,9 @@ func checkVariant(v string) error {
 
 // errInvalid marks a line that decodes — whole JSON, a good envelope, a
 // payload of the right shape for its type — but breaks a rule on the fields
-// H7 added (checkFields, and a reminder's checkVariant). No crash writes one:
+// H7 added (checkFields, a reminder's checkVariant, a compaction's
+// decodeCompaction), or, against the tree, a compaction's tail
+// (Transcript.checkTail). No crash writes one:
 // a torn append leaves a prefix of a line, never a whole line, so, like a
 // break of the pairing invariant, it is ErrCorrupt wherever it is, the last
 // line included, and never skipped as a torn tail (plan 028 P14).
@@ -238,9 +331,9 @@ type Contract struct {
 // Entry is one line after the header, as written or read back. Type selects
 // which of the fields mean anything: the embedded MessageEntry for a message,
 // its Model for a model_change, its Effort for an effort_change, Mode for a
-// mode_change, Contract for a resume, Variant for a reminder, none for a type
-// from a newer craze, which is kept only so the parent chain through it stays
-// whole.
+// mode_change, Contract for a resume, Variant for a reminder, Compaction and
+// the embedded Turn, Model and Usage for a compaction, none for a type from a
+// newer craze, which is kept only so the parent chain through it stays whole.
 type Entry struct {
 	Type      string
 	ID        string // 8 hex chars, unique within the file
@@ -257,6 +350,9 @@ type Entry struct {
 	// carried at the entry's place, by name (checkVariant). The text itself is
 	// never stored; the context renders it again (Renderer, plan 028 §3.15).
 	Variant string
+	// Compaction is what a compaction entry records besides its turn, model
+	// and usage, which are MessageEntry's (Compaction's doc).
+	Compaction Compaction
 	MessageEntry
 }
 
@@ -380,6 +476,92 @@ func decodeVariant(raw json.RawMessage) (string, error) {
 		return "", invalid("%v", err)
 	}
 	return v, nil
+}
+
+// compactionLine is a compaction entry on disk (plan 028 §3.2): the turn, the
+// summary or the error, where the tail starts, the size before and after, the
+// reason, a manual one's command, the model as a message entry names it, the
+// usage, and the segment. The optional ones are omitted when empty.
+type compactionLine struct {
+	envelope
+	Turn         int    `json:"turn"`
+	Summary      string `json:"summary,omitempty"`
+	FirstKeptID  string `json:"firstKeptId,omitempty"`
+	TokensBefore int64  `json:"tokensBefore"`
+	TokensAfter  int64  `json:"tokensAfter"`
+	Reason       string `json:"reason"`
+	Command      string `json:"command,omitempty"`
+	Provider     string `json:"provider"`
+	Model        string `json:"model"`
+	WireModel    string `json:"wire_model"`
+	Usage        Usage  `json:"usage"`
+	Segment      string `json:"segment,omitempty"`
+	Error        string `json:"error,omitempty"`
+}
+
+// compactionFields is a compaction line's fields as they read back, raw, so
+// that decodeCompaction checks each one's shape itself: a whole line with a
+// field of the wrong JSON type, or without one it needs, is errInvalid like
+// one that breaks checkCompaction, never a decoding failure that the last
+// line would be forgiven as a torn tail (P14).
+type compactionFields struct {
+	Turn         json.RawMessage `json:"turn"`
+	Summary      json.RawMessage `json:"summary"`
+	FirstKeptID  json.RawMessage `json:"firstKeptId"`
+	TokensBefore json.RawMessage `json:"tokensBefore"`
+	TokensAfter  json.RawMessage `json:"tokensAfter"`
+	Reason       json.RawMessage `json:"reason"`
+	Command      json.RawMessage `json:"command"`
+	Provider     json.RawMessage `json:"provider"`
+	Model        json.RawMessage `json:"model"`
+	WireModel    json.RawMessage `json:"wire_model"`
+	Usage        json.RawMessage `json:"usage"`
+	Segment      json.RawMessage `json:"segment"`
+	Error        json.RawMessage `json:"error"`
+}
+
+// decodeCompaction reads a compaction line's fields into e: each of the
+// right JSON type, the required ones present, and all of them keeping
+// checkCompaction's rule; anything else is errInvalid.
+func decodeCompaction(line []byte, e *Entry) error {
+	var f compactionFields
+	if err := json.Unmarshal(line, &f); err != nil {
+		return err // not an object: decodeEntry's envelope has already refused that
+	}
+	var u Usage
+	for _, field := range []struct {
+		name     string
+		raw      json.RawMessage
+		required bool
+		into     any
+	}{
+		{"turn", f.Turn, true, &e.Turn},
+		{"summary", f.Summary, false, &e.Compaction.Summary},
+		{"firstKeptId", f.FirstKeptID, false, &e.Compaction.FirstKeptID},
+		{"tokensBefore", f.TokensBefore, true, &e.Compaction.TokensBefore},
+		{"tokensAfter", f.TokensAfter, true, &e.Compaction.TokensAfter},
+		{"reason", f.Reason, true, &e.Compaction.Reason},
+		{"command", f.Command, false, &e.Compaction.Command},
+		{"provider", f.Provider, true, &e.Model.Provider},
+		{"model", f.Model, true, &e.Model.Alias},
+		{"wire_model", f.WireModel, true, &e.Model.WireModel},
+		{"usage", f.Usage, true, &u},
+		{"segment", f.Segment, false, &e.Compaction.Segment},
+		{"error", f.Error, false, &e.Compaction.Error},
+	} {
+		switch {
+		case field.raw == nil && field.required:
+			return invalid("a compaction has no %s", field.name)
+		case field.raw == nil:
+		case string(field.raw) == "null" || json.Unmarshal(field.raw, field.into) != nil:
+			return invalid("a compaction's %s is %s, the wrong type", field.name, field.raw)
+		}
+	}
+	e.Usage = &u
+	if err := checkCompaction(*e); err != nil {
+		return invalid("%v", err)
+	}
+	return nil
 }
 
 type modelChangeLine struct {
@@ -556,6 +738,27 @@ func encodeEntry(e Entry) ([]byte, error) {
 			return nil, err
 		}
 		return json.Marshal(reminderLine{envelope: env, Variant: v})
+	case TypeCompaction:
+		if err := checkCompaction(e); err != nil {
+			return nil, fmt.Errorf("store: %w", err)
+		}
+		c := e.Compaction
+		return json.Marshal(compactionLine{
+			envelope:     env,
+			Turn:         e.Turn,
+			Summary:      c.Summary,
+			FirstKeptID:  c.FirstKeptID,
+			TokensBefore: c.TokensBefore,
+			TokensAfter:  c.TokensAfter,
+			Reason:       c.Reason,
+			Command:      c.Command,
+			Provider:     e.Model.Provider,
+			Model:        e.Model.Alias,
+			WireModel:    e.Model.WireModel,
+			Usage:        *e.Usage,
+			Segment:      c.Segment,
+			Error:        c.Error,
+		})
 	default:
 		return nil, fmt.Errorf("store: cannot write entry type %q", e.Type)
 	}
@@ -563,8 +766,9 @@ func encodeEntry(e Entry) ([]byte, error) {
 
 // decodeEntry parses one non-header line. It checks the line on its own; the
 // tree checks id uniqueness and the parent (Transcript.check). An error that
-// wraps errInvalid is a whole line that breaks checkFields or, for a
-// reminder, checkVariant; any other is a line that does not decode.
+// wraps errInvalid is a whole line that breaks checkFields, or, for a
+// reminder, checkVariant, or, for a compaction, the shape of its fields or
+// checkCompaction; any other is a line that does not decode.
 func decodeEntry(line []byte) (Entry, error) {
 	var env envelope
 	if err := json.Unmarshal(line, &env); err != nil {
@@ -654,6 +858,10 @@ func decodeEntry(line []byte) (Entry, error) {
 			return Entry{}, err
 		}
 		if e.Variant, err = decodeVariant(rl.Variant); err != nil {
+			return Entry{}, err
+		}
+	case TypeCompaction:
+		if err := decodeCompaction(line, &e); err != nil {
 			return Entry{}, err
 		}
 	}

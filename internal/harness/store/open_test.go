@@ -437,7 +437,7 @@ func TestOpenAddsAMissingNewline(t *testing.T) {
 func TestOpenRefusesToTrimANewerEntryType(t *testing.T) {
 	u1 := userLine(t, "00000001", "", "q1")
 	a1 := replyLine(t, "00000002", "00000001", "", "a1", kimi)
-	newer := `{"type":"compaction","id":"00000003","parentId":"00000002","timestamp":"2026-09-18T12:00:00.000Z","summary":"so far"}`
+	newer := `{"type":"bookmark","id":"00000003","parentId":"00000002","timestamp":"2026-09-18T12:00:00.000Z","summary":"so far"}`
 	u2 := userLine(t, "00000004", "00000003", "q2")
 	for name, raw := range map[string]string{
 		"alone at the end":        lines(headerText(t), u1, a1, newer),
@@ -449,7 +449,7 @@ func TestOpenRefusesToTrimANewerEntryType(t *testing.T) {
 			rec := &steps{}
 			opts := testOptions(t)
 			opts.SessionID, opts.fsStep = "", rec.seam
-			if _, err := Open(opts, path); !errors.Is(err, ErrNewerTranscript) || !strings.Contains(err.Error(), `"compaction"`) {
+			if _, err := Open(opts, path); !errors.Is(err, ErrNewerTranscript) || !strings.Contains(err.Error(), `"bookmark"`) {
 				t.Fatalf("Open = %v, want ErrNewerTranscript naming the type", err)
 			}
 			if got, _ := os.ReadFile(path); string(got) != raw || len(rec.names) != 0 || len(tornCopies(t, path)) != 0 {
@@ -466,7 +466,7 @@ func TestOpenRefusesToTrimANewerEntryType(t *testing.T) {
 		opts := testOptions(t)
 		opts.SessionID = ""
 		r := reopen(t, opts, path)
-		if tr := r.Transcript(); len(tr.Entries) != 5 || tr.Entries[2].Type != "compaction" {
+		if tr := r.Transcript(); len(tr.Entries) != 5 || tr.Entries[2].Type != "bookmark" {
 			t.Fatalf("kept %d entries; want all 5, the newer one among them", len(tr.Entries))
 		}
 	})
@@ -485,10 +485,10 @@ func TestOpenNeverTrimsANewerLine(t *testing.T) {
 	a1 := replyLine(t, "00000002", "00000001", "", "a1", kimi)
 	whole := lines(headerText(t), u1, a1)
 	for name, last := range map[string]string{
-		"a parent it never saw":     `{"type":"compaction","id":"new-id","parentId":"missing-id","timestamp":"2026-09-18T12:00:00Z"}` + "\n",
-		"no newline":                `{"type":"compaction","id":"new-id","parentId":"missing-id","timestamp":"2026-09-18T12:00:00Z"}`,
-		"an id it repeats":          `{"type":"compaction","id":"00000002","parentId":"00000002","timestamp":"2026-09-18T12:00:00Z"}` + "\n",
-		"an envelope it refuses":    `{"type":"compaction","timestamp":"2026-09-18T12:00:00Z"}` + "\n",
+		"a parent it never saw":     `{"type":"bookmark","id":"new-id","parentId":"missing-id","timestamp":"2026-09-18T12:00:00Z"}` + "\n",
+		"no newline":                `{"type":"bookmark","id":"new-id","parentId":"missing-id","timestamp":"2026-09-18T12:00:00Z"}`,
+		"an id it repeats":          `{"type":"bookmark","id":"00000002","parentId":"00000002","timestamp":"2026-09-18T12:00:00Z"}` + "\n",
+		"an envelope it refuses":    `{"type":"bookmark","timestamp":"2026-09-18T12:00:00Z"}` + "\n",
 		"a type that is not a name": `{"type":7,"id":"new-id","parentId":"00000002","timestamp":"2026-09-18T12:00:00Z"}` + "\n",
 		"no type at all":            `{"id":"new-id","parentId":"00000002","timestamp":"2026-09-18T12:00:00Z"}` + "\n",
 	} {
@@ -514,7 +514,7 @@ func TestOpenNeverTrimsANewerLine(t *testing.T) {
 	}
 	for name, last := range map[string]string{
 		"control: a known type's line failing the check": `{"type":"model_change","id":"new-id","parentId":"missing-id","timestamp":"2026-09-18T12:00:00Z","provider":"p","model":"m","wire_model":"w"}` + "\n",
-		"control: a torn line of the newer type":         `{"type":"compaction","id":"new-id","parentId":"missing-`,
+		"control: a torn line of the newer type":         `{"type":"bookmark","id":"new-id","parentId":"missing-`,
 		"control: zero bytes":                            "\x00\x00\x00\x00",
 	} {
 		t.Run(name, func(t *testing.T) {
