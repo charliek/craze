@@ -358,17 +358,22 @@ while one has not yet fully ended is `bad_request`, reason
 | `when?` | `"ready"` (default) or `"now"` |
 | `budget?` | `{maxItems?, maxBytes?, snapshotBytes?}` — a client may lower the subscription's item/byte budget, or raise it up to the host's own maximum; `snapshotBytes` is capped at 8 MiB |
 
-This budget is not what actually limits a slow reader: the forwarder moves
-records from the subscription into the connection's own writer queue (32
-MiB, `protocol.WriterQueueBytes`, every outbound byte counted) and only
-waits once *that* queue is full (`internal/control/forward.go`) — the
-subscription's item/byte budget is what the log holds for it *behind* that
-queue while the forwarder waits. So a reader that stops reading is reset
-`slow_consumer` only after the writer queue (and the kernel's own socket
-buffers past it) have filled and the subscription's own budget then
-overflows too — a lowered budget alone does not make a stalled reader reset
-any sooner, though a single record bigger than the budget still does, at
-once (the wire fixture `04-slow-consumer-reattach`'s design).
+The item/byte budget bounds what the log holds for this subscription that
+its forwarder has not yet taken: a live record that would take it past
+that budget ends the subscription as a slow consumer, and the forwarder
+then queues its `reset{slow_consumer}` (a cursor replay already larger
+than the budget is refused when the attach subscribes instead). The
+forwarder moves records from the subscription into the connection's writer
+queue (32 MiB, `protocol.WriterQueueBytes`, every outbound byte counted, of
+which 1 KiB is kept for a final reset) and waits only when the next line
+would not fit in the rest. So a reader that
+simply stops reading is usually reset only once the kernel's socket
+buffers and most of that writer queue have filled and the subscription's
+budget then overflows behind them — a stalled reader of a modest reply may
+never be reset at all. A burst that outruns the forwarder can overflow a
+small budget sooner, however full the writer queue is, and a single live
+record larger than the budget overflows it at once (the wire fixture
+`04-slow-consumer-reattach`'s design).
 
 `when: "ready"` (the default) waits until the session's start has finished —
 a `session/load` replay therefore reaches this client as a **snapshot**,

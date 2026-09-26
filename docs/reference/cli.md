@@ -124,14 +124,15 @@ lookup — `--continue`'s `Latest`, or `--resume`'s scan for rows — still exit
 1 if it cannot be read, the same as no session found at all: there is no row
 yet to warn about. Once a row is in hand, two things warn on stderr and let
 the load proceed **unclaimed**: a **legacy row** (one with no durable
-`crazeId`) whose id cannot be written to the index, and a claim that cannot
-even be *attempted* because the lock tree itself is unusable — whether the
-row already had an id or was just given one. Either way the lock protects
-against a second craze, and must not lock you out of your own session
-merely because its filesystem misbehaved. Three things still refuse
-instead: the session already **held** by another craze, a **busy** index,
-and a legacy row that **vanished** from the index before it could be given
-an id.
+`crazeId`) whose id cannot be written to the index, and any failure to take
+the session's claim other than another craze holding it (the lock tree
+unusable, the lock file unopenable or unwritable) — whether the row already
+had an id or was just given one. An unclaimed load has no protection
+against a second craze loading the same session; the lock exists to stop
+one, not to lock you out of your own session because a filesystem
+misbehaved. Three things still refuse instead: the session already
+**held** by another craze, a **busy** index, and a legacy row that
+**vanished** from the index before it could be given an id.
 
 ### The control socket
 

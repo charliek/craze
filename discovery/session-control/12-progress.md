@@ -2014,10 +2014,12 @@ schedule are in the plan (`~/.claude/plans/craze/027-session-control-s2-socket.m
    failing still exits 1, same as no session found — there is no row yet to
    warn about. Once a row is in hand, two things warn and proceed
    **unclaimed** instead of refusing: a **legacy** row (no `crazeId`) whose
-   id cannot be written to the index, and a claim that cannot even be
-   *attempted* because the lock tree itself is unusable (`serve.go:515`) —
-   whether the row already had an id or was just given one — the lock must
-   not lock the user out of their own session over a filesystem fault. The
+   id cannot be written to the index, and any claim failure other than a
+   held claim (the lock tree unusable, the lock file unopenable or
+   unwritable; `serve.go:515`) — whether the row already had an id or was
+   just given one. An unclaimed load has no protection against a second
+   craze; the lock must not lock the user out of their own session over a
+   filesystem fault. The
    resume picker's error row
    names the pid only, not `craze attach --session <id>`, which does not
    exist until PR 4.
