@@ -84,6 +84,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"maps"
 	"os"
 	"path/filepath"
@@ -247,6 +248,13 @@ type Options struct {
 
 	// tools are the tool set's test seams (tools.go); zero is production.
 	tools toolSeams
+	// storeOpenFile is store.Options.OpenFile for a NEW session (compact.go,
+	// plan 028 C9): a test's descriptor that can fail a later write — the
+	// compaction entry's, say — having written nothing or part of it, so
+	// AppendCompaction's failure is a save failure like any step's (P5). nil
+	// is production (store.New's own os.OpenFile). Not threaded into a
+	// resumed session's Open, which does not take it.
+	storeOpenFile func(name string, flag int, perm os.FileMode) (io.WriteCloser, error)
 }
 
 // ModelInfo is one model-table entry as a model picker shows it.
@@ -313,6 +321,11 @@ type Session struct {
 	// alias match) and warn's (discard) are handled where each is called.
 	matchModel func(raw string) (alias string, ok bool)
 	warn       func(string)
+
+	// sleep is compact's backoff between summarizer attempts (compact.go,
+	// plan 028 §3.8 item 5): time.Sleep in production, a test's no-op or
+	// recorder otherwise, so a retry test takes no real time.
+	sleep func(time.Duration)
 
 	mu      sync.Mutex
 	table   *modeltable.Table
@@ -432,6 +445,7 @@ func Open(opts Options) (*Session, error) {
 	if s.now == nil {
 		s.now = time.Now
 	}
+	s.sleep = time.Sleep
 	// A session that is not a sub-agent can start them: its runner exists
 	// before its tools, which hand it to the agent tool (Env.Subagents), and
 	// reads the rest of the session only when a call arrives, by which time
@@ -510,6 +524,7 @@ func Open(opts Options) (*Session, error) {
 		// before it has a file (Options.SessionID). A child's is set below.
 		SessionID: opts.SessionID,
 		Render:    s.renderer(),
+		OpenFile:  opts.storeOpenFile,
 	}
 	if child != nil {
 		// The header goes to disk as it is. The type and the persona's path

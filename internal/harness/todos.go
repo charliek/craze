@@ -202,6 +202,22 @@ func toolTodos(items []store.Todo) []tool.Todo {
 	return out
 }
 
+// todoLines is the session's todo list as a compaction's state section lists
+// it (plan 028 §3.8, PD24): one line per item, in the list's order, its
+// status, id and content redacted with red; none for a session with no list
+// (a sub-agent) or an empty one.
+func (s *Session) todoLines(red *redact.Replacer) []string {
+	if s.tools.todos == nil {
+		return nil
+	}
+	items := redactTodos(red, s.tools.todos.snapshot())
+	out := make([]string, len(items))
+	for i, it := range items {
+		out[i] = "- [" + string(it.Status) + "] " + it.ID + ": " + it.Content
+	}
+	return out
+}
+
 // attach makes emit the target of every Write while a turn runs, and returns
 // the func that detaches it once the turn ends. turn.go's Run calls it right
 // after building the turn and defers the release, the same way it hands the

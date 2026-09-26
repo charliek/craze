@@ -87,6 +87,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"maps"
 	"os"
 	"path/filepath"
@@ -166,6 +167,14 @@ type Options struct {
 	// New and Open take it; the zero value leaves those messages out of the
 	// context.
 	Render Renderer
+
+	// OpenFile, when set, opens a new session's descriptor — the temporary
+	// file New's first write creates and every later append of that session
+	// goes through — in place of os.OpenFile. It is a test seam for another
+	// package's tests (the harness's, plan 028 C9): a writer that fails a
+	// write, having written nothing or part of it. Production leaves it nil.
+	// Open does not use it, and neither does a package test that sets openFile.
+	OpenFile func(name string, flag int, perm os.FileMode) (io.WriteCloser, error)
 
 	// Test seams, settable only inside the package; zero means production.
 	entryID  func() string
@@ -275,6 +284,10 @@ func newBare(opts Options) *Store {
 	}
 	if s.entryID == nil {
 		s.entryID = randomEntryID
+	}
+	if s.openFile == nil && opts.OpenFile != nil {
+		open := opts.OpenFile
+		s.openFile = func(name string, flag int, perm os.FileMode) (file, error) { return open(name, flag, perm) }
 	}
 	if s.openFile == nil {
 		s.openFile = openOSFile

@@ -1,0 +1,13 @@
+Summarize this conversation so it can continue after everything above is removed from your context. Write one <summary> block with these seven headings, in this order, each on its own line with its content beneath it. Write "None." under a heading with nothing to report.
+
+1. Request and intent
+2. User messages (each, in order; verbatim when short)
+3. Decisions and context
+4. Files and code
+5. Errors and fixes
+6. Work state (Done / In progress / Blocked)
+7. Next step (quoting the instruction it follows from)
+
+Do not call tools. Do not continue the task.
+
+If an earlier summary appears in the conversation, treat it as accurate and carry forward everything in it that still matters: whatever you leave out is lost. Where it conflicts with later messages, the later messages win. Preserve exact paths, identifiers, commands, error strings and URLs.
