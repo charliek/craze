@@ -233,6 +233,26 @@ linters:
               desc: "the fake host speaks the control socket's wire over a Stub; the ACP wire below the session seam is not its concern (plan 027 §3.11)"
             - pkg: github.com/charliek/craze/internal/harness
               desc: "the fake host speaks the control socket's wire over a Stub; a provider transport below the session seam is not its concern (plan 027 §3.11)"
+        # The runtime namespace (plan 027 §3.8): where a host's socket, its
+        # registry entry and its locks live, and the validation that makes
+        # those paths safe to trust. The server, the bridge and the CLI build
+        # on it, so it sits under all of them: its non-test files may import
+        # the standard library and only the three craze leaves it needs —
+        # internal/paths (the home and craze directories), internal/atomicfile
+        # (the registry's atomic write) and internal/protocol (the entry's
+        # protocol version). Strict, so every other craze package, and any
+        # module, is denied by default. Its tests answer to no rule ("!$test",
+        # as protocol's rule does).
+        rundir:
+          list-mode: strict
+          files:
+            - "**/internal/rundir/**"
+            - "!$test"
+          allow:
+            - $gostd
+            - github.com/charliek/craze/internal/paths
+            - github.com/charliek/craze/internal/atomicfile
+            - github.com/charliek/craze/internal/protocol
   exclusions:
     presets:
       - std-error-handling
