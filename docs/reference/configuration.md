@@ -405,6 +405,25 @@ choice overwrites a stale unknown id; `Esc` on the fallback default does not).
 `--agent-bin` / `$CRAZE_AGENT_BIN` override the **binary**. They do not select
 the dialect.
 
+## Native compaction
+
+On the native provider (`--provider native`, hidden), `~/.craze/native/models.toml`
+(or `$CRAZE_HOME/native/` when the home is relocated) may carry an optional
+`[compaction]` section — see [Compaction](tui.md#compaction) for what it
+controls:
+
+```toml
+[compaction]
+auto              = true    # optional; compact on its own at all
+threshold_percent = 85      # optional, 1-99: % of the model's context window
+tail_tokens       = 20000   # optional, >= 0: verbatim tail a compaction keeps
+```
+
+Every key is optional and applies to every model — a per-model override is a
+follow-up. A table with none of these keys is written back byte for byte, and
+`craze import gx` keeps an existing `[compaction]` section whole: gx has no
+concept of it, so import never touches it.
+
 ## Environment
 
 | Variable | Purpose |

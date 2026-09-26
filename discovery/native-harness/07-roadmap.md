@@ -642,24 +642,23 @@ Live smoke, all three PRs (plan artifacts, outside the repo — see
 panel (round 1: astra, GLM, CodeRabbit; rounds 2–5: astra alone; round 5
 found nothing blocking). Three PRs, each branched from a freshly fetched
 `origin/main` and paused after merge with a kickoff for the next (PD1).
-**PR 1 (resume): implemented on `feature/plan-028-h7-resume`** (the store
-reopens; provenance fields; the harness opens a stored session and replays
-it; the adapter's load; native indexed and resumable; CLI and picker —
-native sessions resume with `-c`/`-r`, `/rename` persists). PR 2
-`feature/plan-028-h7-compaction`
-(reminders stored as variants; the compaction entry and context rule; the
-summarizer and segments; when to compact; the segmented turn; overflow
-recovery; the `compaction` event; `/compact` — long sessions compact and
-continue, exit criterion 1); PR 3 `feature/plan-028-h7-cost` (per-model
-`cost`; spend; `Usage` on the wire; the status row; docs; then native
-becomes visible — exit criterion 2). The owner's four decisions: compact at
-85% of the model's context window (capped at the output ceiling), keeping a
-20k-token verbatim tail of whole steps (Q9, D-62); mid-turn compaction at
-step boundaries, through a segmented turn that restarts `Agent.Stream` from
-the store without owning the loop — this answers HL's first trigger on
-purpose (below); prices live per model in `models.toml` (D-64); native
-becomes visible (Q10, D-65) once PR 3's smoke passes on Linux and the
-mac-mini — no rewind, no fork.
+**PR 1 (resume) shipped: #57 → `885415e`** (the store reopens; provenance
+fields; the harness opens a stored session and replays it; the adapter's
+load; native indexed and resumable; CLI and picker — native sessions resume
+with `-c`/`-r`, `/rename` persists). **PR 2 (compaction): implemented on
+`feature/plan-028-h7-compaction`** (reminders stored as variants; the
+compaction entry and context rule; the summarizer and segments; when to
+compact; the segmented turn; overflow recovery; the `compaction` event;
+`/compact` — long sessions compact and continue, exit criterion 1). PR 3
+`feature/plan-028-h7-cost` (per-model `cost`; spend; `Usage` on the wire;
+the status row; docs; then native becomes visible — exit criterion 2). The
+owner's four decisions: compact at 85% of the model's context window (capped
+at the output ceiling), keeping a 20k-token verbatim tail of whole steps (Q9,
+D-62); mid-turn compaction at step boundaries, through a segmented turn that
+restarts `Agent.Stream` from the store without owning the loop — this
+answers HL's first trigger on purpose (below); prices live per model in
+`models.toml` (D-64); native becomes visible (Q10, D-65) once PR 3's smoke
+passes on Linux and the mac-mini — no rewind, no fork.
 
 ### H8 — images
 

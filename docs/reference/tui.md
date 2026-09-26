@@ -145,7 +145,8 @@ above, over its own transcript in place of an agent's `session/load`:
 
 The title is kept, and — native sessions being indexed now —
 [`/rename`](#slash-commands) persists it back to the index like any other
-provider's.
+provider's. A session that compacted at some point replays those notes in
+place too; see [Compaction](#compaction).
 
 ## Tab title
 
@@ -516,6 +517,80 @@ haiku  = "fireworks/deepseek-v4-flash"
 
 The `agent` tool runs at most four children at once; a fifth call waits for
 a slot to free.
+
+## Compaction
+
+On the native provider (`--provider native`, hidden), a long session
+summarizes its own context rather than growing it forever. Once the context
+reaches 85% of the model's context window — capped at the window less its
+output ceiling, when `models.toml` sets one — craze summarizes the
+conversation so far and carries on from the summary in place of it. The
+check runs before a turn's first request and again after every step that
+called a tool, so a turn that crosses the line partway through splits into
+two requests without ending: the same turn, one final `done`. Separately, a
+request the provider refuses outright as too large for the model's context
+window compacts once and retries, on the same turn — a second such refusal,
+or the compaction itself failing, fails the turn instead, its message saying
+so ("even after compacting" when a compaction did run first). Switching to a
+model with a smaller context window compacts on the *previous* model first,
+so its own context and prefix cache are what gets summarized, falling back
+to the new model when the previous one no longer resolves. A model with no
+known context window (`context_window` unset in `models.toml`) never
+compacts on its own — `/compact` below and the provider-refused case above
+still work. See [`[compaction]`](configuration.md#native-compaction) in the
+configuration reference for `auto`, `threshold_percent` and `tail_tokens`.
+Compacting on its own switches itself off after a compaction that failed or
+still left the context over the threshold, and back on after one that
+succeeded under it, or a model change.
+
+While a compaction runs, status row 1 reads `compacting context…` in place
+of the model or the elapsed time. Once it ends it leaves one note in the
+transcript:
+
+| how it ended | note |
+|---|---|
+| on its own | `context compacted · 890k → 21k tokens` |
+| `/compact` | `context compacted on request · 890k → 21k tokens` |
+| the provider refused the request | `context was too large — compacted · 890k → 21k tokens` |
+| failed | `compaction failed: <why>` |
+
+Token counts are plain under 1,000, else `k` or `M` to three significant
+figures (`890k`, `1.21M`).
+
+### `/compact`
+
+Native advertises one [slash command](#slash-commands), `/compact [focus]` —
+"Summarize the conversation so far to free context; `/compact <what to
+keep>`" — so a plugin's own `compact` is offered qualified, the same rule any
+name collision follows. Typed as a prompt, `/compact` is never sent to the
+model: it is a turn of its own, ending as soon as the compaction does, with
+no model turn after it. `/compact` with nothing in the context yet says so
+("nothing to compact yet") instead of compacting an empty conversation.
+Sent while a turn is already running, `/compact` is never queued into it —
+like any interjection it is refused and runs as its own turn once the
+current one ends; `Ctrl+L` on a refused `/compact` draft shows "nothing to
+interject into" and keeps the draft, and `Enter` queues it for after. A
+`/compact` that succeeds turns compacting-on-its-own back on if a previous
+compaction had switched it off.
+
+### Resuming a compacted session
+
+[Resuming](#native-sessions) a session that compacted at some point replays
+its notes in place, exactly where they happened in the original session, and
+the next turn's request to the model carries the summary in place of
+everything it stood for, with the kept tail — the most recent turns,
+verbatim — following it unchanged.
+
+### Segment files
+
+Whatever a compaction drops from the context is not lost. Before it writes
+the summary, craze saves everything the summary stands for to a Markdown
+file beside the transcript — `<stem>.compaction/segment_001.md`,
+`segment_002.md`, and so on, one file per compaction — which the model can
+`read` or `grep` like any other file under the harness home, exactly as it
+can the [plan file](#modes). The summary message names the directory, so the
+model knows the files are there when an exact detail — a command, an error
+string, a path — matters more than the summary's own account of it.
 
 ## Cards
 
