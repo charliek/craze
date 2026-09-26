@@ -1996,10 +1996,13 @@ schedule are in the plan (`~/.claude/plans/craze/027-session-control-s2-socket.m
    `tui.Config.OnEngine` claims a new session's id (unless this process
    already holds it) and queues a registry rewrite (`enqueue`, off the
    `Update` goroutine), each write carrying the engine's complete identity;
-   the queue lands on the registry's one writer goroutine, in order, so a
-   failed rewrite is made good only once a next one for that engine
-   succeeds — until then, or before the first engine is ever attached, the
-   entry can still describe the previous engine, or the empty bind-time one.
+   the queue lands on the registry's one writer goroutine, which processes a
+   **current**-engine rewrite in queue order and drops one whose engine has
+   since been superseded (`writeLoop`) — so a failed rewrite is made good
+   only once a *next one for that engine* succeeds, and may never be, if
+   none follows. Until it lands — or before the first engine is ever
+   attached — the entry can still describe the previous engine, or the empty
+   bind-time one.
    SQ16 itself is `atomicfile.LockWithin` (a
    bounded, polled `LOCK_NB`) plus `sessions.Store.EnsureCrazeID` (mints a
    legacy row's id once, under the index's own lock) — three refusals: a
@@ -2009,11 +2012,13 @@ schedule are in the plan (`~/.claude/plans/craze/027-session-control-s2-socket.m
    astra r30: otherwise two loaders could mint two ids for one provider
    session). The initial lookup (`--continue`'s `Latest`, `--resume`'s scan)
    failing still exits 1, same as no session found — there is no row yet to
-   warn about; once a row is in hand, only a failure while giving a **legacy**
-   row (no `crazeId`) its id is a warning, and the load proceeds
-   unclaimed — the lock must not lock the user out of their own session over
-   a filesystem fault. A row that already has an id is claimed normally
-   regardless of that failure. The resume picker's error row
+   warn about. Once a row is in hand, two things warn and proceed
+   **unclaimed** instead of refusing: a **legacy** row (no `crazeId`) whose
+   id cannot be written to the index, and a claim that cannot even be
+   *attempted* because the lock tree itself is unusable (`serve.go:515`) —
+   whether the row already had an id or was just given one — the lock must
+   not lock the user out of their own session over a filesystem fault. The
+   resume picker's error row
    names the pid only, not `craze attach --session <id>`, which does not
    exist until PR 4.
 4. **Plan 027 X30 (C11b `2e70c28`, C11c `75e3cf1`, C13a `92036d2`'s
@@ -2057,14 +2062,17 @@ schedule are in the plan (`~/.claude/plans/craze/027-session-control-s2-socket.m
    bounded (10 s), and the peer check runs before the first byte crosses
    either direction. The published binary ladder (`protocol.md` "SSH exec")
    is one argv `sh -c '<ladder>'`, each rung `[ -f "$p" ] && [ -x "$p" ] &&
-   exec "$p" bridge …`, tried in order — `$HOME/.local/bin/craze`,
-   `command -v craze` (accepted only absolute), `/opt/homebrew/bin/craze`,
-   `/usr/local/bin/craze`, `/home/linuxbrew/.linuxbrew/bin/craze`,
-   `/usr/bin/craze`, `$HOME/.nix-profile/bin/craze`,
+   exec "$p" bridge …`, tried in order — `$HOME/.local/bin/craze` (only when
+   `$HOME` is itself absolute, `case "${HOME:-}" in /*) …`, so a relative or
+   empty `HOME` cannot make this rung exec something relative to whatever
+   directory the shell started in), `command -v craze` (accepted only
+   absolute), `/opt/homebrew/bin/craze`, `/usr/local/bin/craze`,
+   `/home/linuxbrew/.linuxbrew/bin/craze`, `/usr/bin/craze`,
+   `$HOME/.nix-profile/bin/craze` (the same absolute-`HOME` guard),
    `/etc/profiles/per-user/$USER/bin/craze`, `/run/current-system/sw/bin/craze`,
    else `craze: command not found` at exit 127 — following roost's ladder and
    craze's own Homebrew tap; every interpolated value, the session id
-   included, is shell-quoted going in. Verified by running it
-   (`bin/ladder-check.sh`). Craze ships no remote-exec code of its own; the
+   included, is shell-quoted going in. Verified by running it with `sh -c`
+   the way an SSH exec would. Craze ships no remote-exec code of its own; the
    ladder is published for shed (or anything else driving this over SSH) to
    copy verbatim.

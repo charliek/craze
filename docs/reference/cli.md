@@ -122,13 +122,16 @@ loading it, and the picker keeps running.
 An unreadable lock tree or session index does not fail one way. The initial
 lookup — `--continue`'s `Latest`, or `--resume`'s scan for rows — still exits
 1 if it cannot be read, the same as no session found at all: there is no row
-yet to warn about. Once a row is in hand, only a failure while giving a
-**legacy row** (one with no durable `crazeId`) its id is a warning on
-stderr, with the load proceeding unclaimed — the lock protects against a
-second craze, and must not lock you out of your own session merely because
-an id could not be written. A row that already has an id is claimed
-normally regardless of that failure; a failure to *rewrite* the index while
-claiming an already-durable row goes unmentioned.
+yet to warn about. Once a row is in hand, two things warn on stderr and let
+the load proceed **unclaimed**: a **legacy row** (one with no durable
+`crazeId`) whose id cannot be written to the index, and a claim that cannot
+even be *attempted* because the lock tree itself is unusable — whether the
+row already had an id or was just given one. Either way the lock protects
+against a second craze, and must not lock you out of your own session
+merely because its filesystem misbehaved. Three things still refuse
+instead: the session already **held** by another craze, a **busy** index,
+and a legacy row that **vanished** from the index before it could be given
+an id.
 
 ### The control socket
 

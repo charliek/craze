@@ -358,6 +358,18 @@ while one has not yet fully ended is `bad_request`, reason
 | `when?` | `"ready"` (default) or `"now"` |
 | `budget?` | `{maxItems?, maxBytes?, snapshotBytes?}` — a client may lower the subscription's item/byte budget, or raise it up to the host's own maximum; `snapshotBytes` is capped at 8 MiB |
 
+This budget is not what actually limits a slow reader: the forwarder moves
+records from the subscription into the connection's own writer queue (32
+MiB, `protocol.WriterQueueBytes`, every outbound byte counted) and only
+waits once *that* queue is full (`internal/control/forward.go`) — the
+subscription's item/byte budget is what the log holds for it *behind* that
+queue while the forwarder waits. So a reader that stops reading is reset
+`slow_consumer` only after the writer queue (and the kernel's own socket
+buffers past it) have filled and the subscription's own budget then
+overflows too — a lowered budget alone does not make a stalled reader reset
+any sooner, though a single record bigger than the budget still does, at
+once (the wire fixture `04-slow-consumer-reattach`'s design).
+
 `when: "ready"` (the default) waits until the session's start has finished —
 a `session/load` replay therefore reaches this client as a **snapshot**,
 never as a live burst. The wait is bounded by the client's own patience, not
@@ -971,10 +983,12 @@ update: **queued** the moment an engine is attached to the socket — the one
 the TUI starts with, or the one its provider or resume picker builds, a
 fresh incarnation each time — and again once that engine becomes ready, when
 the provider session id is finally known. Queuing is not landing: the
-rewrite is written by the registry's one writer, in the order queued, and
-until it lands — or, if it fails, until the next one for that engine
-succeeds — the entry can still describe the previous engine, or, before the
-first engine is attached, the empty bind-time entry. A resolver treats the
+registry's one writer processes a **current**-engine rewrite in the order
+queued, but drops one whose engine has since been superseded — so it may
+never be written at all — and until a rewrite lands, or, if it fails, until
+the next one for that engine succeeds, the entry can still describe the
+previous engine, or, before the first engine is attached, the empty
+bind-time entry. A resolver treats the
 entry as a pointer to a socket, not as the engine's live identity: `hello`
 and `sessions.list`, answered by the socket itself once dialed, are what
 actually says which engine is live.
@@ -1044,7 +1058,12 @@ may — and may not — assume:
   *directory* would otherwise pass and then fail the `exec` at 126), tried in
   this order:
 
-  1. `$HOME/.local/bin/craze`
+  1. `$HOME/.local/bin/craze` — gated on `$HOME` itself being **absolute**
+     (`case "${HOME:-}" in /*) …`), the same way rung 2 gates on
+     `command -v`'s answer: an unset, empty, or relative `HOME` (`HOME=.`,
+     say) must not turn `$HOME/.local/bin/craze` into a path relative to
+     whatever directory the shell happened to start in, which `[ -f ] &&
+     [ -x ]` alone cannot tell from a real absolute one
   2. `command -v craze`, accepted only when it resolves to an **absolute**
      path (a builtin, function or alias answers with a bare word, which this
      rung refuses — a non-interactive `PATH` essentially never carries a
@@ -1054,7 +1073,8 @@ may — and may not — assume:
   4. `/usr/local/bin/craze`
   5. `/home/linuxbrew/.linuxbrew/bin/craze`
   6. `/usr/bin/craze`
-  7. `$HOME/.nix-profile/bin/craze`
+  7. `$HOME/.nix-profile/bin/craze` — the same absolute-`HOME` guard as
+     rung 1
   8. `/etc/profiles/per-user/$USER/bin/craze`
   9. `/run/current-system/sw/bin/craze`
   10. else: `printf 'craze: command not found\n' >&2; exit 127`
@@ -1080,14 +1100,14 @@ may — and may not — assume:
   quoted exactly as above — copy this verbatim and substitute the id:
 
   ```sh
-  sh -c 'if [ -n "${HOME:-}" ]; then p="$HOME/.local/bin/craze"; [ -f "$p" ] && [ -x "$p" ] && exec "$p" bridge --session '"'"'01a0bbe5-69b4-79de-b75c-483a15b73d78'"'"'; fi; p=$(command -v craze 2>/dev/null) || p=; case "$p" in /*) [ -f "$p" ] && [ -x "$p" ] && exec "$p" bridge --session '"'"'01a0bbe5-69b4-79de-b75c-483a15b73d78'"'"';; esac; p="/opt/homebrew/bin/craze"; [ -f "$p" ] && [ -x "$p" ] && exec "$p" bridge --session '"'"'01a0bbe5-69b4-79de-b75c-483a15b73d78'"'"'; p="/usr/local/bin/craze"; [ -f "$p" ] && [ -x "$p" ] && exec "$p" bridge --session '"'"'01a0bbe5-69b4-79de-b75c-483a15b73d78'"'"'; p="/home/linuxbrew/.linuxbrew/bin/craze"; [ -f "$p" ] && [ -x "$p" ] && exec "$p" bridge --session '"'"'01a0bbe5-69b4-79de-b75c-483a15b73d78'"'"'; p="/usr/bin/craze"; [ -f "$p" ] && [ -x "$p" ] && exec "$p" bridge --session '"'"'01a0bbe5-69b4-79de-b75c-483a15b73d78'"'"'; if [ -n "${HOME:-}" ]; then p="$HOME/.nix-profile/bin/craze"; [ -f "$p" ] && [ -x "$p" ] && exec "$p" bridge --session '"'"'01a0bbe5-69b4-79de-b75c-483a15b73d78'"'"'; fi; if [ -n "${USER:-}" ]; then p="/etc/profiles/per-user/$USER/bin/craze"; [ -f "$p" ] && [ -x "$p" ] && exec "$p" bridge --session '"'"'01a0bbe5-69b4-79de-b75c-483a15b73d78'"'"'; fi; p="/run/current-system/sw/bin/craze"; [ -f "$p" ] && [ -x "$p" ] && exec "$p" bridge --session '"'"'01a0bbe5-69b4-79de-b75c-483a15b73d78'"'"'; printf '"'"'%s\n'"'"' '"'"'craze: command not found'"'"' >&2; exit 127'
+  sh -c 'case "${HOME:-}" in /*) p="$HOME/.local/bin/craze"; [ -f "$p" ] && [ -x "$p" ] && exec "$p" bridge --session '"'"'01a0bbe5-69b4-79de-b75c-483a15b73d78'"'"';; esac; p=$(command -v craze 2>/dev/null) || p=; case "$p" in /*) [ -f "$p" ] && [ -x "$p" ] && exec "$p" bridge --session '"'"'01a0bbe5-69b4-79de-b75c-483a15b73d78'"'"';; esac; p="/opt/homebrew/bin/craze"; [ -f "$p" ] && [ -x "$p" ] && exec "$p" bridge --session '"'"'01a0bbe5-69b4-79de-b75c-483a15b73d78'"'"'; p="/usr/local/bin/craze"; [ -f "$p" ] && [ -x "$p" ] && exec "$p" bridge --session '"'"'01a0bbe5-69b4-79de-b75c-483a15b73d78'"'"'; p="/home/linuxbrew/.linuxbrew/bin/craze"; [ -f "$p" ] && [ -x "$p" ] && exec "$p" bridge --session '"'"'01a0bbe5-69b4-79de-b75c-483a15b73d78'"'"'; p="/usr/bin/craze"; [ -f "$p" ] && [ -x "$p" ] && exec "$p" bridge --session '"'"'01a0bbe5-69b4-79de-b75c-483a15b73d78'"'"'; case "${HOME:-}" in /*) p="$HOME/.nix-profile/bin/craze"; [ -f "$p" ] && [ -x "$p" ] && exec "$p" bridge --session '"'"'01a0bbe5-69b4-79de-b75c-483a15b73d78'"'"';; esac; if [ -n "${USER:-}" ]; then p="/etc/profiles/per-user/$USER/bin/craze"; [ -f "$p" ] && [ -x "$p" ] && exec "$p" bridge --session '"'"'01a0bbe5-69b4-79de-b75c-483a15b73d78'"'"'; fi; p="/run/current-system/sw/bin/craze"; [ -f "$p" ] && [ -x "$p" ] && exec "$p" bridge --session '"'"'01a0bbe5-69b4-79de-b75c-483a15b73d78'"'"'; printf '"'"'%s\n'"'"' '"'"'craze: command not found'"'"' >&2; exit 127'
   ```
 
   With no `--session` (the one-running-session default), every `bridge …`
   above is plain `bridge`, and the same ladder is:
 
   ```sh
-  sh -c 'if [ -n "${HOME:-}" ]; then p="$HOME/.local/bin/craze"; [ -f "$p" ] && [ -x "$p" ] && exec "$p" bridge; fi; p=$(command -v craze 2>/dev/null) || p=; case "$p" in /*) [ -f "$p" ] && [ -x "$p" ] && exec "$p" bridge;; esac; p="/opt/homebrew/bin/craze"; [ -f "$p" ] && [ -x "$p" ] && exec "$p" bridge; p="/usr/local/bin/craze"; [ -f "$p" ] && [ -x "$p" ] && exec "$p" bridge; p="/home/linuxbrew/.linuxbrew/bin/craze"; [ -f "$p" ] && [ -x "$p" ] && exec "$p" bridge; p="/usr/bin/craze"; [ -f "$p" ] && [ -x "$p" ] && exec "$p" bridge; if [ -n "${HOME:-}" ]; then p="$HOME/.nix-profile/bin/craze"; [ -f "$p" ] && [ -x "$p" ] && exec "$p" bridge; fi; if [ -n "${USER:-}" ]; then p="/etc/profiles/per-user/$USER/bin/craze"; [ -f "$p" ] && [ -x "$p" ] && exec "$p" bridge; fi; p="/run/current-system/sw/bin/craze"; [ -f "$p" ] && [ -x "$p" ] && exec "$p" bridge; printf '"'"'%s\n'"'"' '"'"'craze: command not found'"'"' >&2; exit 127'
+  sh -c 'case "${HOME:-}" in /*) p="$HOME/.local/bin/craze"; [ -f "$p" ] && [ -x "$p" ] && exec "$p" bridge;; esac; p=$(command -v craze 2>/dev/null) || p=; case "$p" in /*) [ -f "$p" ] && [ -x "$p" ] && exec "$p" bridge;; esac; p="/opt/homebrew/bin/craze"; [ -f "$p" ] && [ -x "$p" ] && exec "$p" bridge; p="/usr/local/bin/craze"; [ -f "$p" ] && [ -x "$p" ] && exec "$p" bridge; p="/home/linuxbrew/.linuxbrew/bin/craze"; [ -f "$p" ] && [ -x "$p" ] && exec "$p" bridge; p="/usr/bin/craze"; [ -f "$p" ] && [ -x "$p" ] && exec "$p" bridge; case "${HOME:-}" in /*) p="$HOME/.nix-profile/bin/craze"; [ -f "$p" ] && [ -x "$p" ] && exec "$p" bridge;; esac; if [ -n "${USER:-}" ]; then p="/etc/profiles/per-user/$USER/bin/craze"; [ -f "$p" ] && [ -x "$p" ] && exec "$p" bridge; fi; p="/run/current-system/sw/bin/craze"; [ -f "$p" ] && [ -x "$p" ] && exec "$p" bridge; printf '"'"'%s\n'"'"' '"'"'craze: command not found'"'"' >&2; exit 127'
   ```
 
   Both forms were verified by running them with `sh -c` the way an SSH exec

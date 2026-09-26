@@ -212,8 +212,10 @@ session it runs over it — what [`craze bridge`](cli.md#craze-bridge) and a
 future `craze attach` dial into. See the
 [protocol reference](protocol.md#reaching-a-host) for the runtime namespace,
 the registry, and where the socket itself lives; the registry and its locks
-sit under your real `$HOME`, not `CRAZE_HOME` — an SSH login shares the one,
-whatever the tab that started the host had set for the other. Binding
+sit under the bridge process's own `$HOME`, not `CRAZE_HOME` — an SSH login
+is **assumed** to share that `$HOME` with the tab that started the host,
+true for an ordinary SSH login as the same user, whatever the tab had set
+for the other variables. Binding
 happens only once a run is actually starting a TUI: a `--continue`
 [refused by SQ16](cli.md#a-session-already-open-in-another-craze) binds
 nothing.
