@@ -14,11 +14,13 @@ import (
 
 // openLock opens the lock file name in d read-write, creating it 0600 when
 // it is missing (d.openFile: O_NOFOLLOW, regular files only). The create is
-// exclusive, so a file this call made is known to be its own, and that one is
-// fchmod-ed 0600, as directories and sockets are chmod-ed: the umask may have
-// cleared the owner's bits, and a lock file without them could never be
-// opened again — by Hosts, probing a live host, or by the session's next
-// claim. A file that already exists is opened as it is, and never changed.
+// exclusive, so the descriptor it returns is the very file this call made —
+// nothing can be substituted between the create and the chmod, as a
+// directory can be at a name (mkdirAt) — and that one is fchmod-ed 0600 on
+// it, as the socket is chmod-ed: the umask may have cleared the owner's bits,
+// and a lock file without them could never be opened again — by Hosts,
+// probing a live host, or by the session's next claim. A file that already
+// exists is opened as it is, and never changed.
 func openLock(d *dir, name string) (*os.File, error) {
 	f, err := d.openFile(name, os.O_CREATE|os.O_EXCL|os.O_RDWR, 0o600)
 	if errors.Is(err, fs.ErrExist) {

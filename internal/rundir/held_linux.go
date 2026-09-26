@@ -9,6 +9,6 @@ import "golang.org/x/sys/unix"
 // looked up in — so an ancestor its owner made search-only for others (a
 // root-owned 0711 /home) is walked as lstat walked it. fstat and the *at calls
 // relative to an O_PATH descriptor work as they do on any other; the leaves,
-// which craze lists, reads and fchmods, are opened dirFlags. Never through a
+// which craze lists and reads, are opened dirFlags. Never through a
 // symlink at its own name; openat adds O_CLOEXEC.
 const ancestorFlags = unix.O_PATH | unix.O_DIRECTORY | unix.O_NOFOLLOW

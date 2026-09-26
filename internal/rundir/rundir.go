@@ -30,9 +30,14 @@
 //     another user's directory), and not group- or world-writable unless the
 //     sticky bit is set (ancestorFault).
 //   - Every directory craze names is a leaf: never followed; a missing one is
-//     created 0700 (then chmod-ed 0700 against the umask); a present one must
-//     be a directory owned by the euid with mode exactly 0700. A leaf is
-//     never repaired: 0755 is refused, not chmod-ed.
+//     created 0700; a present one must be a directory owned by the euid with
+//     permission bits exactly 0700 (setgid allowed: without group bits it
+//     grants nothing; setuid and sticky refused). A leaf is never repaired:
+//     0755 is refused, not chmod-ed. A runtime-tree leaf craze has just made
+//     is chmod-ed 0700 against the umask (by path; its parents are nobody
+//     else's to write). A cache-tree one is not, even then (held.go): it must
+//     be 0700 as made (2700 under a setgid parent), so a umask that removes
+//     owner permissions is refused there, by name.
 //
 // The two trees differ in how they are held after that:
 //
@@ -51,7 +56,10 @@
 // Every open under either tree carries O_NOFOLLOW. A host's socket and
 // registry entry are unlinked at exit only while their (dev, ino) still match
 // what the host recorded, and its lock file only while it still holds it. A
-// session lock file is never unlinked.
+// session lock file is never unlinked. A dead host's entry, temporaries and
+// lock are swept (Hosts) under its lock; its socket never is, since a lock
+// in the cache tree is no authority over a file in the runtime tree, so it
+// stays until that directory is cleared.
 //
 // The trees' modes stop another user opening the socket on this machine, and
 // nothing once it is reached another way (an SSH-forwarded socket is opened by

@@ -57,7 +57,13 @@ func TestTheAncestorRule(t *testing.T) {
 		{true, other, 0o700, false},
 		{true, 0, 0o700, false},
 		{true, me, 0o755, false},
-		{true, me, 0o2700, false},
+		{true, me, 0o2700, true},  // setgid: no group bits, so it grants nothing
+		{true, me, 0o4700, false}, // setuid
+		{true, me, 0o1700, false}, // sticky
+		{true, me, 0o6700, false}, // setuid and setgid
+		{true, me, 0o3700, false}, // sticky and setgid
+		{true, me, 0o2750, false}, // setgid does not excuse group bits
+		{true, me, 0o2500, false}, // nor missing owner bits
 		{false, me, 0o700, false},
 	} {
 		if err := env.leafFault("/d", tc.isDir, tc.uid, tc.perm); (err == nil) != tc.want {
@@ -348,20 +354,27 @@ func TestTheWalkRefusesAComponentReplacedByASymlink(t *testing.T) {
 	}
 }
 
-// TestTheCacheTreeIsMade0700UnderAnyUmask is not parallel: the umask is the
-// process's. Each umask takes a different road to 0700: none needed (077),
-// an fchmod through the descriptor of a directory made 0500 (200), and a
-// chmod by name, never following a link, of one made 0000, which cannot be
-// opened (777).
-func TestTheCacheTreeIsMade0700UnderAnyUmask(t *testing.T) {
-	for _, mask := range []int{0o077, 0o200, 0o777} {
+// claimUnder is ClaimSession with the process's umask set to mask for the
+// call.
+func claimUnder(env Env, mask int) (*Claim, error) {
+	old := syscall.Umask(mask)
+	defer syscall.Umask(old)
+	return ClaimSession(env, "s-1", NewHostID())
+}
+
+// TestTheCacheTreeUnderEveryUmask is not parallel: the umask is the
+// process's. A cache-tree directory is made 0700 and never chmod-ed. Every
+// ordinary umask leaves mkdir's 0700 as it is. One that removes owner
+// permissions leaves a directory the leaf rule refuses — made 0500 (277), or
+// 0000 and so not even openable (777) — and the refusal names it and the
+// umask; the directory is left as the umask made it, and nothing is made in
+// it. The first directory made may be ~/.cache itself, or craze under a
+// ~/.cache already there.
+func TestTheCacheTreeUnderEveryUmask(t *testing.T) {
+	for _, mask := range []int{0o002, 0o022, 0o027, 0o077} {
 		t.Run(strconv.FormatInt(int64(mask), 8), func(t *testing.T) {
 			env := testEnv(t)
-			c, err := func() (*Claim, error) {
-				old := syscall.Umask(mask)
-				defer syscall.Umask(old)
-				return ClaimSession(env, "s-1", NewHostID())
-			}()
+			c, err := claimUnder(env, mask)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -374,6 +387,91 @@ func TestTheCacheTreeIsMade0700UnderAnyUmask(t *testing.T) {
 				if got := perm(t, p); got != 0o700 {
 					t.Errorf("%s has mode %04o under umask %04o, want 0700", p, got, mask)
 				}
+			}
+		})
+	}
+	for _, mask := range []int{0o277, 0o777} {
+		for first, cacheThere := range map[string]bool{cacheName: false, crazeName: true} {
+			t.Run(strconv.FormatInt(int64(mask), 8)+"/"+first, func(t *testing.T) {
+				env := testEnv(t)
+				made := filepath.Join(env.Home, cacheName)
+				if cacheThere {
+					mkdir(t, made, 0o700)
+					made = filepath.Join(made, crazeName)
+				}
+				c, err := claimUnder(env, mask)
+				if err == nil {
+					_ = c.Release()
+					t.Fatalf("a claim under umask %04o succeeded", mask)
+				}
+				made = filepath.Join(mustCanonical(t, filepath.Dir(made)), filepath.Base(made))
+				for _, w := range []string{made + " was just made", "the umask removed owner permissions"} {
+					if !strings.Contains(err.Error(), w) {
+						t.Fatalf("ClaimSession error %q does not contain %q", err, w)
+					}
+				}
+				if got, want := perm(t, made), uint32(0o700&^mask); got != want {
+					t.Fatalf("%s has mode %04o, want %04o as the umask made it: craze chmod-ed it", made, got, want)
+				}
+				chmod(t, made, 0o700) // to look inside, and for the cleanup
+				if names, err := os.ReadDir(made); err != nil || len(names) != 0 {
+					t.Fatalf("%s holds %v (%v); want nothing made in a refused directory", made, names, err)
+				}
+			})
+		}
+	}
+}
+
+// TestADirectorySwappedInAfterItsMkdiratIsRefused is not parallel: it
+// replaces afterMkdirat. It is r31's schedule (item 4): craze's mkdirat of
+// ~/.cache/craze succeeds, and before the open that validates it a writer of
+// ~/.cache renames it aside and renames another directory of the victim's to
+// its name. That directory is refused as it is — never chmod-ed, nothing
+// made in it — whether its mode is one a chmod after the mkdirat would have
+// "restored" to 0700 (0500) or not (0755).
+func TestADirectorySwappedInAfterItsMkdiratIsRefused(t *testing.T) {
+	for _, mode := range []os.FileMode{0o500, 0o755} {
+		t.Run(strconv.FormatUint(uint64(mode), 8), func(t *testing.T) {
+			env := testEnv(t)
+			cache := filepath.Join(env.Home, cacheName)
+			mkdir(t, cache, 0o700)
+			sibling := filepath.Join(cache, "sibling")
+			mkdir(t, sibling, mode)
+			at := filepath.Join(mustCanonical(t, cache), crazeName)
+			swapped := false
+			old := afterMkdirat
+			t.Cleanup(func() { afterMkdirat = old })
+			afterMkdirat = func(p string) {
+				if p != at || swapped {
+					return
+				}
+				swapped = true
+				if err := os.Rename(p, p+"-made"); err != nil {
+					t.Error(err)
+				}
+				if err := os.Rename(sibling, p); err != nil {
+					t.Error(err)
+				}
+			}
+			c, err := ClaimSession(env, "s-1", NewHostID())
+			if !swapped {
+				t.Fatal("setup: the mkdirat of craze never ran")
+			}
+			if err == nil {
+				_ = c.Release()
+				t.Fatalf("a claim used the %04o directory swapped in after the mkdirat", mode)
+			}
+			if !strings.Contains(err.Error(), at) {
+				t.Fatalf("ClaimSession error %q does not name %s", err, at)
+			}
+			if got := perm(t, at); got != uint32(mode) {
+				t.Fatalf("the swapped-in directory has mode %04o, was %04o: craze chmod-ed it", got, mode)
+			}
+			if names, err := os.ReadDir(at); err != nil || len(names) != 0 {
+				t.Fatalf("the swapped-in directory holds %v (%v); want nothing made in it", names, err)
+			}
+			if got := perm(t, at+"-made"); got != 0o700 {
+				t.Fatalf("the directory craze made has mode %04o, want 0700", got)
 			}
 		})
 	}

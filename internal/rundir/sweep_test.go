@@ -2,6 +2,7 @@ package rundir
 
 import (
 	"encoding/json"
+	"net"
 	"os"
 	"path/filepath"
 	"slices"
@@ -42,13 +43,17 @@ func TestHostsSweepsADeadHost(t *testing.T) {
 		t.Fatalf("Hosts = %v, want only the live %s", ids, live.ID())
 	}
 	for _, p := range []string{
-		dead.Socket(),
 		filepath.Join(hostsDir(env), dead.ID()+".json"),
 		filepath.Join(hostsDir(env), dead.ID()+".lock"),
 	} {
 		if exists(t, p) {
 			t.Errorf("the sweep left %s", p)
 		}
+	}
+	// The sweep removes no socket: the dead host's stays in its runtime
+	// directory, under a name never reused.
+	if !isSocket(t, dead.Socket()) {
+		t.Errorf("the sweep removed the dead host's socket %s", dead.Socket())
 	}
 }
 
@@ -92,62 +97,134 @@ func deadWithSocket(t *testing.T, env Env, sock func(id string) string) *Host {
 	return h
 }
 
-func TestTheSweepLeavesASocketOutsideAValidDirectory(t *testing.T) {
-	t.Parallel()
-	for name, spoil := range map[string]func(t *testing.T, dir string){
-		"a 0755 directory":       func(t *testing.T, dir string) { chmod(t, dir, 0o755) },
-		"a 0770 directory":       func(t *testing.T, dir string) { chmod(t, dir, 0o770) },
-		"an open ancestor":       func(t *testing.T, dir string) { chmod(t, filepath.Dir(dir), 0o777) },
-		"a symlinked directory":  nil,                         // the entry names the socket through a link
-		"a directory left as is": func(*testing.T, string) {}, // the control: it is unlinked
-	} {
-		t.Run(name, func(t *testing.T) {
-			t.Parallel()
-			env := testEnv(t)
-			dir := filepath.Join(mustCanonical(t, shortDir(t)), "ns")
-			mkdir(t, dir, 0o700)
-			var sock string
-			h := deadWithSocket(t, env, func(id string) string {
-				sock = filepath.Join(dir, id+".sock")
-				listenAt(t, sock)
-				if spoil == nil {
-					link := filepath.Join(filepath.Dir(dir), "link")
-					symlink(t, dir, link)
-					return filepath.Join(link, id+".sock")
-				}
-				spoil(t, dir)
-				return sock
-			})
-			if _, err := Hosts(env); err != nil {
-				t.Fatal(err)
-			}
-			if kept := exists(t, sock); kept != (name != "a directory left as is") {
-				t.Fatalf("socket kept = %v", kept)
-			}
-			if exists(t, filepath.Join(hostsDir(env), h.ID()+".json")) {
-				t.Fatal("the sweep left the stale entry")
-			}
-		})
-	}
-}
-
-func TestTheSweepLeavesASocketNotNamedForItsHost(t *testing.T) {
+// The sweep removes no socket, wherever the stale entry points: not the dead
+// host's own, in the directory it bound in; not a stray one; not a live
+// host's. The stale entries and their locks go.
+func TestTheSweepRemovesNoSocket(t *testing.T) {
 	t.Parallel()
 	env := testEnv(t)
-	other := bind(t, env) // a valid namespace directory, and a live neighbour
-	sock := filepath.Join(filepath.Dir(other.Socket()), "stray.sock")
-	listenAt(t, sock)
-	deadWithSocket(t, env, func(string) string { return sock })
-	deadWithSocket(t, env, func(string) string { return other.Socket() }) // a live host's
+	live := bind(t, env) // a valid namespace directory, and a live neighbour
+	stray := filepath.Join(filepath.Dir(live.Socket()), "stray.sock")
+	listenAt(t, stray)
+	own := bind(t, env) // its entry names its own socket, where it bound it
+	own.die()
+	dead := []*Host{
+		own,
+		deadWithSocket(t, env, func(string) string { return stray }),
+		deadWithSocket(t, env, func(string) string { return live.Socket() }),
+	}
 	got, err := Hosts(env)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if ids := entries(got); !slices.Equal(ids, []string{other.ID()}) {
-		t.Fatalf("Hosts = %v, want only %s", ids, other.ID())
+	if ids := entries(got); !slices.Equal(ids, []string{live.ID()}) {
+		t.Fatalf("Hosts = %v, want only %s", ids, live.ID())
 	}
-	if !exists(t, sock) || !exists(t, other.Socket()) {
-		t.Fatal("the sweep unlinked a socket not named for the dead host")
+	for _, sock := range []string{own.Socket(), stray, live.Socket()} {
+		if !isSocket(t, sock) {
+			t.Errorf("the sweep unlinked %s", sock)
+		}
+	}
+	for _, h := range dead {
+		for _, n := range []string{h.ID() + ".json", h.ID() + ".lock"} {
+			if exists(t, filepath.Join(hostsDir(env), n)) {
+				t.Errorf("the sweep left %s", n)
+			}
+		}
+	}
+}
+
+// The copy attack (r31, item 3): a sweep's lock is authority over its own
+// registry, never over a socket. A copy of the registry the victim owns —
+// under another name, its <id>.lock a copy, another inode, so not the live
+// host's lock — renamed into ~/.cache/craze by a writer of ~/.cache while the
+// host lives hands Hosts a lock it can take. The copy's entry and lock are
+// swept; the live host's socket survives, still accepting, and the live
+// registry, renamed aside, is untouched.
+func TestASweepOfACopiedRegistryLeavesTheLiveSocket(t *testing.T) {
+	t.Parallel()
+	env := testEnv(t)
+	h := bind(t, env)
+	cache := filepath.Join(env.Home, cacheName)
+	crazeDir := filepath.Join(cache, crazeName)
+	backup := filepath.Join(cache, "craze-backup")
+	mkdir(t, filepath.Join(backup, hostsName), 0o700)
+	chmod(t, backup, 0o700)
+	names := []string{h.ID() + ".json", h.ID() + ".lock"}
+	for _, n := range names {
+		b, err := os.ReadFile(filepath.Join(crazeDir, hostsName, n))
+		if err != nil {
+			t.Fatal(err)
+		}
+		writeFile(t, filepath.Join(backup, hostsName, n), string(b))
+	}
+	aside := filepath.Join(cache, "craze-live")
+	if err := os.Rename(crazeDir, aside); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(backup, crazeDir); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := Hosts(env)
+	if err != nil || len(got) != 0 {
+		t.Fatalf("Hosts = %v, %v; want none (the copied lock is nobody's)", entries(got), err)
+	}
+	if !isSocket(t, h.Socket()) {
+		t.Fatalf("a sweep of a copied registry unlinked the live host's socket %s", h.Socket())
+	}
+	conn, err := net.Dial("unix", h.Socket())
+	if err != nil {
+		t.Fatalf("the live host's socket no longer accepts: %v", err)
+	}
+	_ = conn.Close()
+	if left, err := os.ReadDir(filepath.Join(crazeDir, hostsName)); err != nil || len(left) != 0 {
+		t.Fatalf("the copy holds %v (%v); want its stale entry and lock swept", left, err)
+	}
+	for _, n := range names {
+		if !exists(t, filepath.Join(aside, hostsName, n)) {
+			t.Errorf("the live registry lost %s", n)
+		}
+	}
+}
+
+// A dead host's temporaries — writes that died before their rename — are
+// swept with it, under its lock: only its own, never a live host's, and
+// never a name that only looks like one.
+func TestTheSweepRemovesTheDeadHostsTemporaries(t *testing.T) {
+	t.Parallel()
+	env := testEnv(t)
+	live := bind(t, env)
+	dead := bind(t, env)
+	dead.die()
+	hosts := hostsDir(env)
+	gone := []string{"." + dead.ID() + ".json.1", "." + dead.ID() + ".json.4294967295"}
+	kept := []string{
+		"." + live.ID() + ".json.7",       // a live host's, mid-write
+		"." + dead.ID() + ".json.x1",      // not a temporary's name
+		"." + dead.ID() + ".json.",        // nor this
+		"." + dead.ID() + ".lock.1",       // nor this
+		"." + dead.ID() + ".json.1.extra", // nor this
+	}
+	for _, n := range append(append([]string(nil), gone...), kept...) {
+		writeFile(t, filepath.Join(hosts, n), "{")
+	}
+	got, err := Hosts(env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ids := entries(got); !slices.Equal(ids, []string{live.ID()}) {
+		t.Fatalf("Hosts = %v, want only %s", ids, live.ID())
+	}
+	for _, n := range gone {
+		if exists(t, filepath.Join(hosts, n)) {
+			t.Errorf("the sweep left the dead host's temporary %s", n)
+		}
+	}
+	for _, n := range kept {
+		if !exists(t, filepath.Join(hosts, n)) {
+			t.Errorf("the sweep removed %s", n)
+		}
 	}
 }
 

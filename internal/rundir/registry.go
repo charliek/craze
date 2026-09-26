@@ -153,8 +153,8 @@ func (h *Host) bind(entry Entry) error {
 	fi, err := lstatBound(h.socket)
 	if err != nil {
 		// Unlinked by name, as there is no identity yet to check it against,
-		// because nothing else would ever remove it: no registry entry names
-		// it for a sweep. The name is safe to trust: it is in <base>/<ns>,
+		// because nothing else would ever remove it: no sweep removes a
+		// socket. The name is safe to trust: it is in <base>/<ns>,
 		// just validated as a leaf — the euid's own directory, mode 0700 — so
 		// since ListenUnix made it only this uid (or root) can have put
 		// anything else there.

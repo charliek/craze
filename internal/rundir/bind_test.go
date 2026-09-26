@@ -8,11 +8,14 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"sync"
 	"syscall"
 	"testing"
 	"time"
+
+	"golang.org/x/sys/unix"
 
 	"github.com/charliek/craze/internal/protocol"
 )
@@ -309,6 +312,11 @@ func TestAFailedStatOfTheBoundSocketUnlinksIt(t *testing.T) {
 // process's, and every file another test made meanwhile would take it.
 func TestLockFilesAre0600UnderAnyUmask(t *testing.T) {
 	env := testEnv(t) // its directories made before the umask changes
+	// So is the cache tree: a cache-tree directory made under umask 0777 is
+	// refused, never chmod-ed (TestTheCacheTreeUnderEveryUmask). A file is
+	// fchmod-ed through the descriptor its exclusive create returned.
+	cacheSubdir(t, env, hostsName)
+	cacheSubdir(t, env, locksName)
 	h, c := func() (*Host, *Claim) {
 		old := syscall.Umask(0o777)
 		defer syscall.Umask(old)
@@ -341,6 +349,58 @@ func TestLockFilesAre0600UnderAnyUmask(t *testing.T) {
 		t.Fatalf("a session released under umask 0777 could not be claimed again: %v", err)
 	}
 	_ = again.Release()
+}
+
+// TestAFailedEntryWriteLeavesNoTemporary is not parallel: it replaces
+// fstatTemp. A registry write's temporary is unlinked on any failure, and
+// that unlink is installed the moment the exclusive create returns, so a
+// step after it that fails — the fstat, here — leaves no temporary: an
+// Update's failure leaves the entry as it was, and a Bind's leaves nothing.
+func TestAFailedEntryWriteLeavesNoTemporary(t *testing.T) {
+	env := testEnv(t)
+	h := bind(t, env)
+	entry := filepath.Join(hostsDir(env), h.ID()+".json")
+	before, err := os.ReadFile(entry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := fstatTemp
+	t.Cleanup(func() { fstatTemp = old })
+	fstatTemp = func(int, *unix.Stat_t) error { return unix.EIO }
+
+	if err := h.Update(func(e *Entry) { e.Ready = true }); !errors.Is(err, unix.EIO) {
+		t.Fatalf("Update with a failing fstat = %v, want EIO", err)
+	}
+	if after, err := os.ReadFile(entry); err != nil || string(after) != string(before) {
+		t.Fatalf("the entry holds %q (%v) after a failed Update, want it unchanged", after, err)
+	}
+	if got := dirNames(t, hostsDir(env)); !slices.Equal(got, []string{h.ID() + ".json", h.ID() + ".lock"}) {
+		t.Fatalf("the registry holds %v after a failed Update, want only the entry and the lock", got)
+	}
+
+	if h, err := Bind(env, NewHostID(), Entry{}); !errors.Is(err, unix.EIO) {
+		if err == nil {
+			_ = h.Close()
+		}
+		t.Fatalf("Bind with a failing fstat = %v, want EIO", err)
+	}
+	if got := dirNames(t, hostsDir(env)); !slices.Equal(got, []string{h.ID() + ".json", h.ID() + ".lock"}) {
+		t.Fatalf("the registry holds %v after a failed Bind, want only the first host's entry and lock", got)
+	}
+}
+
+// dirNames is the names in the directory p, sorted.
+func dirNames(t *testing.T, p string) []string {
+	t.Helper()
+	des, err := os.ReadDir(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for _, de := range des {
+		names = append(names, de.Name())
+	}
+	return names
 }
 
 func TestBindRefusesABadHostID(t *testing.T) {

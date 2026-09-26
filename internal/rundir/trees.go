@@ -70,8 +70,11 @@ func (env Env) cacheDir(sub string, create bool) (*dir, error) {
 }
 
 // makeCache creates the missing <Home>/.cache (cache) 0700 in the canonical
-// home directory, walked and held (mkdirAt). Another process making it first
-// is no error; the cache walk validates whatever is there.
+// home directory, walked and held (mkdirAt), and validates the directory it
+// made as a leaf (openLeaf) — never chmod-ed, so a umask that removed owner
+// permissions is refused here, by name, rather than as a failure to make
+// craze under it. Another process making it first is no error; the cache
+// walk validates whatever is there.
 func (env Env) makeCache(cache string) error {
 	home, err := canonical(env.Home)
 	if err != nil {
@@ -82,8 +85,16 @@ func (env Env) makeCache(cache string) error {
 		return fmt.Errorf("rundir: the home directory: %w", err)
 	}
 	defer func() { _ = d.close() }()
-	if err := env.mkdirAt(d, cacheName); err != nil {
+	made, err := mkdirAt(d, cacheName)
+	if err != nil {
 		return fmt.Errorf("rundir: create %s: %w", cache, err)
+	}
+	if made {
+		leaf, err := env.openLeaf(d, cacheName, true)
+		if err != nil {
+			return fmt.Errorf("rundir: the cache tree: %w", err)
+		}
+		_ = leaf.close()
 	}
 	return nil
 }
@@ -209,7 +220,7 @@ func (env Env) tryBase(c candidate, ns, hostID string, tried map[string]string) 
 		return "", err.Error()
 	}
 	for _, dir := range []string{base, filepath.Join(base, ns)} {
-		if err := env.leaf(dir, true); err != nil {
+		if err := env.leaf(dir); err != nil {
 			return "", err.Error()
 		}
 	}

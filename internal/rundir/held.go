@@ -155,20 +155,35 @@ func (env Env) walk(p string) (*dir, error) {
 
 // leafAt opens name in d as a cache-tree leaf and returns it held. Missing:
 // made 0700 (mkdirAt) when create is set, else an error wrapping
-// fs.ErrNotExist. Then opened O_NOFOLLOW, and the leaf rule (leafFault)
-// applied to the descriptor's fstat: never repaired.
+// fs.ErrNotExist. Then opened and validated as it is (openLeaf): never
+// repaired, even when this call has just made it.
 func (env Env) leafAt(d *dir, name string, create bool) (*dir, error) {
-	p := d.join(name)
+	made := false
 	if create {
-		if err := env.mkdirAt(d, name); err != nil {
-			return nil, fmt.Errorf("create %s: %w", p, err)
+		var err error
+		if made, err = mkdirAt(d, name); err != nil {
+			return nil, fmt.Errorf("create %s: %w", d.join(name), err)
 		}
 	}
+	return env.openLeaf(d, name, made)
+}
+
+// openLeaf opens name in d O_NOFOLLOW (dirFlags) and applies the leaf rule
+// (leafFault) to the fstat of the descriptor it holds: a directory, owned by
+// the euid, permission bits exactly 0700 (setgid allowed). made is whether
+// mkdirAt has just made name; when it has, a refusal the umask explains says
+// so (madeFault), since what failed is then the process's setting, not a
+// directory someone left.
+func (env Env) openLeaf(d *dir, name string, made bool) (*dir, error) {
+	p := d.join(name)
 	leaf, st, err := d.openDir(name)
-	if errors.Is(err, unix.ENOENT) {
+	switch {
+	case errors.Is(err, unix.ENOENT):
 		return nil, fmt.Errorf("%s: %w", p, fs.ErrNotExist)
-	}
-	if err != nil {
+	case made && errors.Is(err, unix.EACCES):
+		// Made 0700 and not readable: the umask took the owner's read bit.
+		return nil, fmt.Errorf("%s was just made and cannot be opened: %s", p, umaskFix(p))
+	case err != nil:
 		switch d.openFault(name, err) {
 		case "is a symlink":
 			return nil, fmt.Errorf("%s is a symlink; craze follows no link to a directory it owns (remove it)", p)
@@ -179,55 +194,68 @@ func (env Env) leafAt(d *dir, name string, create bool) (*dir, error) {
 	}
 	if err := env.leafFault(p, isDirStat(&st), int(st.Uid), permOfStat(&st)); err != nil {
 		_ = leaf.close()
+		if made {
+			if merr := env.madeFault(p, &st); merr != nil {
+				return nil, merr
+			}
+		}
 		return nil, err
 	}
 	return leaf, nil
 }
 
-// mkdirAt makes name in d, 0700, when it is missing; a name already there is
-// left as it is, for the caller to validate like any other. The umask can
-// only clear bits, so the directory made is 0700 or less (or 2700: Linux
-// passes a setgid parent's bit on), and it is chmod-ed 0700 to restore owner
-// bits a hostile umask stripped — only a directory this call made. Under a
-// parent its group can write, a group member could swap another directory
-// of the euid's in at the name between the mkdirat and the chmod, so the
-// chmod is also only for a directory owned by the euid with no group or
-// other bits: one with any is left, to be refused. It is fchmod-ed through
-// an O_NOFOLLOW open, or, when the umask took the owner's read bit too so
-// that it cannot be opened, chmod-ed by name without following a link.
-func (env Env) mkdirAt(d *dir, name string) error {
+// afterMkdirat runs between a cache-tree directory's mkdirat and the open
+// that validates it (mkdirAt), with the new directory's path: nothing in
+// production, and in a test (never in parallel) a writer of the parent
+// renaming another directory to the name.
+var afterMkdirat = func(string) {}
+
+// mkdirAt makes name in d, mode 0700, when it is missing, and reports whether
+// this call made it; a name already there is left as it is, for the caller
+// to validate like any other.
+//
+// Nothing is chmod-ed afterwards, not even the directory this call made. In a
+// parent its group can write — the ~/.cache this tree accepts
+// (ancestorFault) — a member of the group can rename another directory of
+// the euid's to the name the instant after the mkdirat, so no step by name
+// after it (an open and fchmod, a chmod that follows no link) can prove it
+// acts on the directory made. The name is opened and validated as it is,
+// like any other leaf (openLeaf). The umask only clears bits, and every
+// ordinary one (002, 022, 027, 077) leaves mkdir's 0700 as it is (2700 in a
+// setgid parent on Linux, which the leaf rule allows); one that removes
+// owner permissions (277, 777) leaves a directory the leaf rule refuses, and
+// the refusal says so (madeFault).
+func mkdirAt(d *dir, name string) (bool, error) {
 	switch err := unix.Mkdirat(d.fd, name, modeLeaf); {
 	case errors.Is(err, unix.EEXIST):
-		return nil
+		return false, nil
 	case err != nil:
-		return err
+		return false, err
 	}
-	restore := func(st *unix.Stat_t) bool {
-		perm := permOfStat(st)
-		return isDirStat(st) && int(st.Uid) == env.EUID && perm != modeLeaf && perm&0o077 == 0
-	}
-	fd, err := openat(d.fd, name, dirFlags, 0)
-	if errors.Is(err, unix.EACCES) {
-		st, err := d.lstat(name)
-		if err != nil || !restore(&st) {
-			return err
-		}
-		// fchmodat2 on Linux (6.6 and later); earlier kernels answer
-		// EOPNOTSUPP, and the umask must leave the owner's bits.
-		if err := unix.Fchmodat(d.fd, name, modeLeaf, unix.AT_SYMLINK_NOFOLLOW); err != nil {
-			return fmt.Errorf("restore the owner's bits the umask cleared (use a umask that keeps them, such as 022): %w", err)
-		}
+	afterMkdirat(d.join(name))
+	return true, nil
+}
+
+// madeFault is why a directory mkdirAt has just made at p, with stat st,
+// fails the leaf rule, when its shape is what the umask leaves: the euid's
+// own, with no group or other bits, and short of an owner bit. nil
+// otherwise, and leafFault's message stands. p is refused, not chmod-ed: by
+// now the name may be someone else's directory. (A setgid bit, which Linux
+// passes on to a directory made in a setgid one, is no fault: leafFault
+// allows it.)
+func (env Env) madeFault(p string, st *unix.Stat_t) error {
+	perm := permOfStat(st)
+	if !isDirStat(st) || int(st.Uid) != env.EUID || perm&0o077 != 0 || perm&modeLeaf == modeLeaf {
 		return nil
 	}
-	if err != nil {
-		return nil // something else is at the name now: the leaf's own open names it
-	}
-	defer func() { _ = unix.Close(fd) }()
-	var st unix.Stat_t
-	if err := unix.Fstat(fd, &st); err != nil || !restore(&st) {
-		return err
-	}
-	return unix.Fchmod(fd, modeLeaf)
+	return fmt.Errorf("%s was just made mode %04o, not 0700: %s", p, perm, umaskFix(p))
+}
+
+// umaskFix names the cause and the fix of a cache-tree directory the umask
+// left without owner permissions.
+func umaskFix(p string) string {
+	return "the umask removed owner permissions, and craze never chmods a directory it makes " +
+		"(set a umask that keeps them, such as 022, then remove " + p + ")"
 }
 
 // openFile opens the regular file name in d: openat O_NOFOLLOW (a symlink at
@@ -278,31 +306,61 @@ func (d *dir) names() ([]string, error) {
 // tempTries bounds replace's search for an unused temporary name.
 const tempTries = 10000
 
+// tempName is a fresh temporary name for name, in name's directory:
+// ".<name>.<random decimal>" (replace).
+func tempName(name string) string {
+	return "." + name + "." + strconv.FormatUint(uint64(rand.Uint32()), 10)
+}
+
+// isTempOf reports whether n is one of name's temporaries (tempName): the
+// debris of a write that died before its rename.
+func isTempOf(n, name string) bool {
+	rest, ok := strings.CutPrefix(n, "."+name+".")
+	if !ok || rest == "" {
+		return false
+	}
+	for i := range len(rest) {
+		if rest[i] < '0' || rest[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// fstatTemp is replace's fstat of the temporary it has just created:
+// unix.Fstat, which a test replaces (never in parallel) to fail it.
+var fstatTemp = unix.Fstat
+
 // replace makes name in d a new file holding b, mode perm, atomically: a
-// temporary ".<name>.<random>" is created O_CREAT|O_EXCL|O_NOFOLLOW in d,
-// written, fchmod-ed perm (past the umask) and closed, then renameat-ed onto
-// name, so a reader never sees a half-written file and a failed write never
-// truncates name; the temporary is unlinked on any failure. It returns the
-// new file's identity, fstat-ed on the descriptor it was written through:
+// temporary (tempName) is created O_CREAT|O_EXCL|O_NOFOLLOW in d — a regular
+// file, and the very one this call made — then fstat-ed, written, fchmod-ed
+// perm (past the umask) and closed, then renameat-ed onto name, so a reader
+// never sees a half-written file and a failed write never truncates name.
+// The temporary's unlink is installed the moment the exclusive create
+// returns, before any step that can fail, so no failure leaves it. It returns
+// the new file's identity, fstat-ed on the descriptor it was written through:
 // there is no stat after the rename to fail.
 func (d *dir) replace(name string, b []byte, perm uint32) (fileID, error) {
 	var f *os.File
 	var tmp string
 	for range tempTries {
-		tmp = "." + name + "." + strconv.FormatUint(uint64(rand.Uint32()), 10)
-		var err error
-		f, err = d.openFile(tmp, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
-		if errors.Is(err, fs.ErrExist) {
+		tmp = tempName(name)
+		fd, err := openat(d.fd, tmp, unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL|unix.O_NOFOLLOW, 0o600)
+		if errors.Is(err, unix.EEXIST) {
 			continue
 		}
 		if err != nil {
-			return fileID{}, err
+			return fileID{}, &fs.PathError{Op: "create", Path: d.join(tmp), Err: err}
 		}
+		f = os.NewFile(uintptr(fd), d.join(tmp))
 		break
 	}
 	if f == nil {
 		return fileID{}, fmt.Errorf("no unused temporary name for %s in %d tries", d.join(name), tempTries)
 	}
+	// Unlinked by name, which is safe here: d is the euid's own 0700 leaf,
+	// held by descriptor, so only the euid (or root) can have put anything
+	// else at tmp since the exclusive create made it.
 	renamed := false
 	defer func() {
 		if !renamed {
@@ -310,12 +368,12 @@ func (d *dir) replace(name string, b []byte, perm uint32) (fileID, error) {
 		}
 	}()
 	var st unix.Stat_t
-	_, err := f.Write(b)
+	err := fstatTemp(int(f.Fd()), &st)
 	if err == nil {
-		err = unix.Fchmod(int(f.Fd()), perm)
+		_, err = f.Write(b)
 	}
 	if err == nil {
-		err = unix.Fstat(int(f.Fd()), &st)
+		err = unix.Fchmod(int(f.Fd()), perm)
 	}
 	if cerr := f.Close(); err == nil {
 		err = cerr

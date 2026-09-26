@@ -106,6 +106,19 @@ func exists(t *testing.T, p string) bool {
 	return false
 }
 
+// isSocket reports whether p is a socket (lstat-ed); false when it is gone.
+func isSocket(t *testing.T, p string) bool {
+	t.Helper()
+	fi, err := os.Lstat(p)
+	if errors.Is(err, fs.ErrNotExist) {
+		return false
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	return fi.Mode().Type() == fs.ModeSocket
+}
+
 // bind is Bind for a fresh host id, closed at cleanup.
 func bind(t *testing.T, env Env) *Host {
 	t.Helper()

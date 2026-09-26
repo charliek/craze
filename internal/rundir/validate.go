@@ -12,6 +12,7 @@ import (
 // The mode bits the rules read (st_mode & 07777).
 const (
 	modeSticky     = 0o1000
+	modeSetgid     = 0o2000
 	modeGroupWrite = 0o020
 	modeOtherWrite = 0o002
 	modeLeaf       = 0o700
@@ -111,9 +112,14 @@ func (env Env) ancestorFault(p string, isDir bool, uid int, perm uint32, ownGrou
 
 // leafFault is the leaf rule on one directory's stat — why p, a directory
 // craze names, cannot be used, or nil: it must be a directory owned by the
-// euid with mode exactly 0700. It is never repaired: a leaf with any other
-// mode is refused, and its mode is left as it was. (A symlink never reaches
-// here: a leaf is lstat-ed, or opened O_NOFOLLOW.)
+// euid whose permission bits are exactly 0700. The setgid bit is allowed: on
+// a directory it only decides which group new entries take, and with no
+// group permission bits it grants nothing — and Linux sets it on every
+// directory made in a setgid one, so refusing it would refuse craze under a
+// setgid ~/.cache or home. Setuid and sticky are refused. The rule is the
+// same in both trees. It is never repaired: a leaf with any other mode is
+// refused, and its mode is left as it was. (A symlink never reaches here: a
+// leaf is lstat-ed, or opened O_NOFOLLOW.)
 func (env Env) leafFault(p string, isDir bool, uid int, perm uint32) error {
 	if !isDir {
 		return fmt.Errorf("%s is not a directory (remove it)", p)
@@ -121,7 +127,7 @@ func (env Env) leafFault(p string, isDir bool, uid int, perm uint32) error {
 	if uid != env.EUID {
 		return fmt.Errorf("%s is owned by uid %d, not uid %d", p, uid, env.EUID)
 	}
-	if perm != modeLeaf {
+	if perm&^modeSetgid != modeLeaf {
 		return fmt.Errorf("%s has mode %04o, and 0700 is required; craze never changes it (chmod 700 it or remove it)", p, perm)
 	}
 	return nil
@@ -160,7 +166,9 @@ func (env Env) checkAncestor(p string) error {
 // an explicit chmod 0700 that restores owner bits a hostile umask stripped. A
 // p that already exists — a peer won the race — is left as it is, for the
 // caller to validate like any other. Path-based: for the runtime tree, whose
-// parents take the strict rule.
+// parents take the strict rule, so nobody else can rename a directory to p
+// between the mkdir and the chmod. (The cache tree, whose parents may be the
+// euid's own group-writable ones, chmods nothing it makes: mkdirAt.)
 func mkdirPrivate(p string) error {
 	switch err := os.Mkdir(p, modeLeaf); {
 	case err == nil:
@@ -174,14 +182,11 @@ func mkdirPrivate(p string) error {
 
 // leaf validates a runtime-tree directory craze names — p, whose parent is
 // already validated — lstat-ed, never followed. Missing: made 0700
-// (mkdirPrivate) when create is set, else an error wrapping fs.ErrNotExist.
-// Present, or just made: not a symlink, and the leaf rule (leafFault).
-func (env Env) leaf(p string, create bool) error {
+// (mkdirPrivate). Present, or just made: not a symlink, and the leaf rule
+// (leafFault).
+func (env Env) leaf(p string) error {
 	fi, err := os.Lstat(p)
 	if errors.Is(err, fs.ErrNotExist) {
-		if !create {
-			return fmt.Errorf("%s: %w", p, fs.ErrNotExist)
-		}
 		if err := mkdirPrivate(p); err != nil {
 			return fmt.Errorf("create %s: %w", p, err)
 		}

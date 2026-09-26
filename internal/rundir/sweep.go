@@ -4,7 +4,6 @@ import (
 	"errors"
 	"io/fs"
 	"os"
-	"path/filepath"
 	"strings"
 )
 
@@ -22,10 +21,9 @@ import (
 //     skipped when it cannot be read;
 //   - taken: the holder is dead and its entry stale. Holding that lock — the
 //     only authority to unlink anything of another host's; a failed connect
-//     is none — the sweep removes the entry, the socket it names (only when
-//     that socket's directory validates, its name is <id>.sock and it is a
-//     socket), and the lock file itself, then LOCK_UN. Host ids are never
-//     reused, so a dead host's lock file can go.
+//     is none — the sweep removes the entry, the host's temporaries and the
+//     lock file itself, then LOCK_UN (sweep). Host ids are never reused, so a
+//     dead host's lock file can go. The sweep never removes a socket.
 //
 // A registry tree that does not exist yet is no hosts, and is not created;
 // one that fails validation is an error.
@@ -48,7 +46,7 @@ func Hosts(env Env) ([]Entry, error) {
 		if !ok || !ValidHostID(id) {
 			continue
 		}
-		if e, ok := env.probe(hosts, id); ok {
+		if e, ok := probe(hosts, id); ok {
 			live = append(live, e)
 		}
 	}
@@ -58,7 +56,7 @@ func Hosts(env Env) ([]Entry, error) {
 // probe is one registry entry's check, in the held registry directory: its
 // live Entry, or false when it is not listed (stale and swept, mid-exit, or
 // unreadable).
-func (env Env) probe(hosts *dir, id string) (Entry, bool) {
+func probe(hosts *dir, id string) (Entry, bool) {
 	lockName := id + ".lock"
 	lock, err := hosts.openFile(lockName, os.O_RDWR, 0)
 	if err != nil {
@@ -81,38 +79,36 @@ func (env Env) probe(hosts *dir, id string) (Entry, bool) {
 	// here first unlinked it, and this descriptor holds a lock on a file no
 	// longer anyone's.
 	if hosts.sameFile(lock, lockName) {
-		env.sweep(hosts, id)
+		sweep(hosts, id)
 	}
 	return Entry{}, false
 }
 
-// sweep removes a dead host's files from the held registry directory; its
-// lock is held by the caller.
-func (env Env) sweep(hosts *dir, id string) {
-	e, err := readEntry(hosts, id+".json")
-	_ = hosts.unlink(id + ".json")
-	if err == nil {
-		env.sweepSocket(id, e.Socket)
+// sweep removes a dead host's files from the held registry directory, whose
+// <id>.lock the caller holds: the entry, the entry's temporaries (isTempOf:
+// writes that died before their rename; listed here, under the lock, when
+// the host can make no more) and, last, the lock file. Each is unlinked
+// relative to the held directory — the directory whose lock was taken.
+//
+// It never removes a socket. The lock is authority over this registry's own
+// entry and lock, not over a file in the runtime tree an entry names: a copy
+// of the registry the victim owns (under another name, its <id>.lock a copy —
+// another inode, which no live host holds) renamed into ~/.cache/craze by a
+// writer of ~/.cache hands a sweep a lock it can take while the host its
+// copied entry names is alive, and that host's socket must survive it. A dead
+// host's socket stays in its runtime directory, under a name never reused,
+// until that directory is cleared (/run/user is a tmpfs emptied at logout,
+// /tmp is emptied at boot or by systemd-tmpfiles); a host's own Close removes
+// its socket, identity-checked.
+func sweep(hosts *dir, id string) {
+	entry := id + ".json"
+	_ = hosts.unlink(entry)
+	if names, err := hosts.names(); err == nil {
+		for _, n := range names {
+			if isTempOf(n, entry) {
+				_ = hosts.unlink(n)
+			}
+		}
 	}
 	_ = hosts.unlink(id + ".lock")
-}
-
-// sweepSocket unlinks a dead host's socket only when it is where a host puts
-// one: an absolute, clean path named <id>.sock, in a directory that
-// validates as a leaf under ancestors that validate — by path and the strict
-// rule, as the runtime tree is (the path is canonical as Bind recorded it, so
-// no component may be a symlink) — and a socket.
-func (env Env) sweepSocket(id, sock string) {
-	if !filepath.IsAbs(sock) || filepath.Clean(sock) != sock || filepath.Base(sock) != id+sockSuffix {
-		return
-	}
-	dir := filepath.Dir(sock)
-	if env.checkAncestors(filepath.Dir(dir)) != nil || env.leaf(dir, false) != nil {
-		return
-	}
-	fi, err := os.Lstat(sock)
-	if err != nil || fi.Mode().Type() != fs.ModeSocket {
-		return
-	}
-	_ = unlinkFile(sock)
 }
