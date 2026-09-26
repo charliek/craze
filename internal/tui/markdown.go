@@ -6,10 +6,11 @@ import (
 	"unicode"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 )
 
 // markdown-lite: headings, bullet and numbered lists, fenced and inline code,
-// bold, italic, blockquote and rules. Tables and links stay literal, and an
+// bold, italic, blockquote, rules and pipe tables. Links stay literal, and an
 // unmatched marker prints as typed. No glamour.
 
 const (
@@ -58,6 +59,9 @@ func renderMarkdown(text string, width int, th Theme) []string {
 		case bulletRe.MatchString(ln) || numberRe.MatchString(ln):
 			r.flush()
 			i = r.list(lines, i)
+		case isTable(lines, i):
+			r.flush()
+			i = r.table(lines, i)
 		default:
 			r.para = append(r.para, strings.TrimSpace(ln))
 		}
@@ -191,6 +195,342 @@ func isRule(s string) bool {
 		}
 	}
 	return n >= 3
+}
+
+// tableGap is the column gutter. tableJunction is the same three cells drawn
+// under it, so the rule meets the bar instead of slipping a column sideways.
+const (
+	tableGap      = " │ "
+	tableJunction = "─┼─"
+)
+
+type mdAlign int
+
+const (
+	alignLeft mdAlign = iota
+	alignCenter
+	alignRight
+)
+
+// A delimiter cell is optional colons around one or more dashes: :---, ---:,
+// :---:, ---. One dash is enough; the border pipes are not part of the cell.
+var delimCellRe = regexp.MustCompile(`^:?-+:?$`)
+
+// isTable reports whether line i opens a pipe table: a header row and, on the
+// next line, a delimiter with one dash-cell per header cell. A pipe with no
+// delimiter stays prose, which is what keeps "a | b" a sentence.
+func isTable(lines []string, i int) bool {
+	_, _, ok := tableHeader(lines, i)
+	return ok
+}
+
+func tableHeader(lines []string, i int) (header []string, aligns []mdAlign, ok bool) {
+	if i+1 >= len(lines) {
+		return nil, nil, false
+	}
+	header = splitTableRow(lines[i])
+	aligns = delimiterAligns(lines[i+1])
+	if header == nil || aligns == nil || len(header) != len(aligns) {
+		return nil, nil, false
+	}
+	return header, aligns, true
+}
+
+// table renders one pipe table and returns the index of its last line. The
+// line after it — a blank, a heading, a list — is left for the main loop.
+// Cells wrap inside their column, so a wide row stays columns instead of
+// joining the next row into the paragraph.
+func (r *mdRenderer) table(lines []string, i int) int {
+	header, aligns, ok := tableHeader(lines, i)
+	if !ok {
+		return i
+	}
+	rows := [][]string{header}
+	j := i + 2
+	for ; j < len(lines); j++ {
+		ln := strings.TrimRight(lines[j], " \t")
+		cells := splitTableRow(ln)
+		if tableRowBreak(ln) || cells == nil {
+			break
+		}
+		rows = append(rows, fitRow(cells, len(aligns)))
+	}
+	r.drawTable(rows, aligns)
+	return j - 1
+}
+
+// tableRowBreak is a line a table must not swallow. A cell may itself start
+// with a dash ("- item" lives after the pipe); the line-level check is what
+// ends the table, so a following list or heading stays that block.
+func tableRowBreak(ln string) bool {
+	if strings.TrimSpace(ln) == "" {
+		return true
+	}
+	return fenceRe.MatchString(ln) || headingRe.MatchString(ln) || isRule(ln) ||
+		quoteRe.MatchString(ln) || bulletRe.MatchString(ln) || numberRe.MatchString(ln)
+}
+
+// splitTableRow splits one markdown table row into cells. A leading or
+// trailing pipe is the border, not a cell. A pipe inside `code`, or written
+// as \|, stays in the cell. A line with no separator pipe is not a row.
+func splitTableRow(line string) []string {
+	rs := []rune(strings.TrimSpace(line))
+	if len(rs) == 0 {
+		return nil
+	}
+	var (
+		cells []string
+		b     strings.Builder
+		saw   bool
+	)
+	for i := 0; i < len(rs); {
+		if rs[i] == '`' {
+			if j := indexRuneFrom(rs, '`', i+1); j > i+1 {
+				b.WriteString(string(rs[i : j+1]))
+				i = j + 1
+				continue
+			}
+		}
+		if rs[i] == '\\' && i+1 < len(rs) && rs[i+1] == '|' {
+			b.WriteRune('|')
+			i += 2
+			continue
+		}
+		if rs[i] == '|' {
+			saw = true
+			cells = append(cells, cleanCell(b.String()))
+			b.Reset()
+			i++
+			continue
+		}
+		b.WriteRune(rs[i])
+		i++
+	}
+	if !saw {
+		return nil
+	}
+	cells = append(cells, cleanCell(b.String()))
+	if rs[0] == '|' && len(cells) > 0 && cells[0] == "" {
+		cells = cells[1:]
+	}
+	if bareTrailingPipe(rs) && len(cells) > 0 && cells[len(cells)-1] == "" {
+		cells = cells[:len(cells)-1]
+	}
+	if len(cells) == 0 {
+		return nil
+	}
+	return cells
+}
+
+func cleanCell(s string) string {
+	return strings.TrimSpace(strings.ReplaceAll(s, "\t", " "))
+}
+
+// bareTrailingPipe reports whether the line ends in a separator pipe. An odd
+// run of backslashes escapes it, so "\|" is a cell that happens to end in |.
+func bareTrailingPipe(rs []rune) bool {
+	if len(rs) == 0 || rs[len(rs)-1] != '|' {
+		return false
+	}
+	n := 0
+	for i := len(rs) - 2; i >= 0 && rs[i] == '\\'; i-- {
+		n++
+	}
+	return n%2 == 0
+}
+
+func delimiterAligns(line string) []mdAlign {
+	cells := splitTableRow(line)
+	if len(cells) == 0 {
+		return nil
+	}
+	aligns := make([]mdAlign, len(cells))
+	for i, c := range cells {
+		if !delimCellRe.MatchString(c) {
+			return nil
+		}
+		switch {
+		case strings.HasPrefix(c, ":") && strings.HasSuffix(c, ":"):
+			aligns[i] = alignCenter
+		case strings.HasSuffix(c, ":"):
+			aligns[i] = alignRight
+		default:
+			aligns[i] = alignLeft
+		}
+	}
+	return aligns
+}
+
+// fitRow pads a short body row and folds extra cells into the last column so
+// a row with one pipe too many does not drop the tail.
+func fitRow(cells []string, n int) []string {
+	if n < 1 || len(cells) == n {
+		return cells
+	}
+	out := make([]string, n)
+	if len(cells) < n {
+		copy(out, cells)
+		return out
+	}
+	copy(out, cells[:n-1])
+	out[n-1] = strings.Join(cells[n-1:], " | ")
+	return out
+}
+
+// fitColumns shrinks the widest column until the row fits budget. A short
+// label column keeps its width while the long one wraps; equal columns give
+// up the rightmost first, which is where the prose usually is.
+func fitColumns(natural []int, budget int) []int {
+	widths := append([]int(nil), natural...)
+	sum := 0
+	for _, w := range widths {
+		sum += w
+	}
+	over := sum - budget
+	if budget < 0 {
+		over = sum
+	}
+	for over > 0 {
+		maxI := -1
+		for i, w := range widths {
+			if w > 1 && (maxI < 0 || w >= widths[maxI]) {
+				maxI = i
+			}
+		}
+		if maxI < 0 {
+			break
+		}
+		widths[maxI]--
+		over--
+	}
+	return widths
+}
+
+func (r *mdRenderer) drawTable(rows [][]string, aligns []mdAlign) {
+	n := len(aligns)
+	if n == 0 || len(rows) == 0 {
+		return
+	}
+	styled := make([][]string, len(rows))
+	natural := make([]int, n)
+	for ri, row := range rows {
+		styled[ri] = make([]string, n)
+		for i := 0; i < n; i++ {
+			if i < len(row) && row[i] != "" {
+				styled[ri][i] = inlineMarkdown(row[i], r.th)
+			}
+			if w := lipgloss.Width(styled[ri][i]); w > natural[i] {
+				natural[i] = w
+			}
+		}
+	}
+	for i := range natural {
+		if natural[i] < 1 {
+			natural[i] = 1
+		}
+	}
+	gaps := 0
+	if n > 1 {
+		gaps = (n - 1) * lipgloss.Width(tableGap)
+	}
+	widths := fitColumns(natural, proseWidth(r.width)-gaps)
+	head := lipgloss.NewStyle().Foreground(r.th.Bright).Bold(true)
+	body := styleFG(r.th.Assistant)
+	dim := styleFG(r.th.Dim)
+	r.drawTableRow(styled[0], widths, aligns, head, dim)
+	r.drawTableRule(widths, dim)
+	for _, row := range styled[1:] {
+		r.drawTableRow(row, widths, aligns, body, dim)
+	}
+}
+
+func (r *mdRenderer) drawTableRow(cells []string, widths []int, aligns []mdAlign, textSt, barSt lipgloss.Style) {
+	wrapped := make([][]string, len(widths))
+	height := 1
+	for i, w := range widths {
+		cell := ""
+		if i < len(cells) {
+			cell = cells[i]
+		}
+		lines := wrapCell(cell, w)
+		wrapped[i] = lines
+		if len(lines) > height {
+			height = len(lines)
+		}
+	}
+	for line := 0; line < height; line++ {
+		segs := make([]seg, 0, len(widths)*2)
+		for i, w := range widths {
+			if i > 0 {
+				segs = append(segs, seg{tableGap, barSt})
+			}
+			text := ""
+			if line < len(wrapped[i]) {
+				text = wrapped[i][line]
+			}
+			align := alignLeft
+			if i < len(aligns) {
+				align = aligns[i]
+			}
+			segs = append(segs, seg{padCell(text, w, align), textSt})
+		}
+		r.out = append(r.out, renderSegs(r.width, segs...))
+	}
+}
+
+func (r *mdRenderer) drawTableRule(widths []int, st lipgloss.Style) {
+	var b strings.Builder
+	for i, w := range widths {
+		if i > 0 {
+			b.WriteString(tableJunction)
+		}
+		if w > 0 {
+			b.WriteString(strings.Repeat("─", w))
+		}
+	}
+	r.out = append(r.out, renderSegs(r.width, seg{b.String(), st}))
+}
+
+// wrapCell wraps already-styled cell text to width. Markers are resolved
+// before this, so a span broken across the wrap keeps the colour it opened
+// with, the same way a paragraph does.
+func wrapCell(s string, width int) []string {
+	if width < 1 {
+		width = 1
+	}
+	if s == "" {
+		return []string{""}
+	}
+	wrapped := ansi.Hardwrap(ansi.Wordwrap(s, width, ""), width, true)
+	lines := strings.Split(wrapped, "\n")
+	if len(lines) > 1 && lines[len(lines)-1] == "" {
+		lines = lines[:len(lines)-1]
+	}
+	for i, ln := range lines {
+		if lipgloss.Width(ln) > width {
+			lines[i] = clampWidth(ln, width)
+		}
+	}
+	if len(lines) == 0 {
+		return []string{""}
+	}
+	return lines
+}
+
+func padCell(s string, width int, align mdAlign) string {
+	gap := width - lipgloss.Width(s)
+	if gap <= 0 {
+		return s
+	}
+	switch align {
+	case alignRight:
+		return strings.Repeat(" ", gap) + s
+	case alignCenter:
+		left := gap / 2
+		return strings.Repeat(" ", left) + s + strings.Repeat(" ", gap-left)
+	default:
+		return s + strings.Repeat(" ", gap)
+	}
 }
 
 // inlineMarkdown styles `code`, **bold** and *italic* / _italic_ spans. A
