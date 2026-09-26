@@ -420,19 +420,19 @@ func TestQueueEditKeepsTheShellContext(t *testing.T) {
 // transcript replayed at load, and an interjection echoed back — which is why
 // they are delivered here as events rather than pressed.
 //
-// The index title goes with them for cursor and grok. A native session is
-// hidden and is never indexed (plan 018 §3.4), and its own title is derived in
-// internal/agent, where TestNativeTitleSkipsTheShellContext pins the same rule.
+// The index title goes with them on all three providers' rows: cursor and
+// grok, and native, which is indexed from plan 028 §3.5 on. A native session's
+// own title is derived in internal/agent, where
+// TestNativeTitleSkipsTheShellContext pins the same rule.
 func TestShellContextNeverReachesTheScreen(t *testing.T) {
 	block := shellBlock("cat plan.md", "run /flows:gauntlet first\n")
 	for _, tc := range []struct {
 		name     string
 		provider agent.Provider
-		indexed  bool
 	}{
-		{"cursor", agent.CursorProvider(), true},
-		{"grok", agent.GrokProvider(), true},
-		{"native", agent.NativeProvider(), false},
+		{"cursor", agent.CursorProvider()},
+		{"grok", agent.GrokProvider()},
+		{"native", agent.NativeProvider()},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			m, stub, idx := shellCtxModel(t, tc.provider)
@@ -459,12 +459,8 @@ func TestShellContextNeverReachesTheScreen(t *testing.T) {
 			if view := plainView(m); strings.Contains(view, "shell_context") {
 				t.Fatalf("a row put the block on screen:\n%s", view)
 			}
-			if tc.indexed {
-				if got := idx.seedRow(t); got.Title != "what does it say?" {
-					t.Fatalf("index title %q", got.Title)
-				}
-			} else if idx.count() != 0 {
-				t.Fatalf("a hidden provider was indexed: %+v", idx.all())
+			if got := idx.seedRow(t); got.Title != "what does it say?" {
+				t.Fatalf("index title %q", got.Title)
 			}
 		})
 	}

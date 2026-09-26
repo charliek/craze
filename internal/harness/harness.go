@@ -131,11 +131,22 @@ type Options struct {
 	// in a resume entry written with the first step.
 	//
 	// A session with no file at all is ErrNoTranscript, returned wrapped with
-	// nothing opened; a file that is not the session's, or that the store
-	// cannot reopen — busy, corrupt, a child's, a newer craze's tail — is the
-	// store's error, wrapped "harness: resume <id>: …". "" starts a new
-	// session. A sub-agent is never resumed.
+	// nothing opened — a caller continuing it opens a new session under the
+	// same id instead (SessionID); a file that is not the session's, or that
+	// the store cannot reopen — busy, corrupt, a child's, a newer craze's
+	// tail — is the store's error, wrapped "harness: resume <id>: …". ""
+	// starts a new session. A sub-agent is never resumed.
 	Resume string
+	// SessionID is the id a NEW session is opened under; "" mints a fresh
+	// one. It is for a session whose id is already known and whose file was
+	// never written: an index row seeded by a first prompt that produced no
+	// output, which a load then opens empty under the row's own id rather than
+	// as another session (plan 028 §3.5, P35) — the caller's answer to
+	// ErrNoTranscript. It must be an id Find would accept (store.ErrBadSessionID
+	// otherwise). Nothing is written until the first turn that produces
+	// output, as for any new session. It cannot be combined with Resume, which
+	// names the id itself, nor with Child, whose id is its runner's.
+	SessionID string
 	// Prompt is what the caller adds to the frozen system prompt: the
 	// instruction documents this workspace's user and project wrote, and the
 	// catalog of the skills and commands installed for it (plan 022 §3.4).
@@ -416,6 +427,9 @@ func Open(opts Options) (*Session, error) {
 			prompt: opts.Prompt.clone(), seams: opts.tools,
 		}
 	}
+	if opts.SessionID != "" && (opts.Resume != "" || child != nil) {
+		return nil, errors.New("harness: SessionID names a new session's id, and is not one to resume nor a sub-agent's")
+	}
 	if opts.Resume != "" {
 		if child != nil {
 			return nil, errors.New("harness: a sub-agent's session is never resumed")
@@ -456,6 +470,14 @@ func Open(opts Options) (*Session, error) {
 		return nil, err
 	}
 	s.system = s.tools.system
+	if opts.SessionID != "" {
+		// Held to Find's rule rather than only New's, so that the session a
+		// caller opens under an id of its own can be found by it again (plan
+		// 028 §3.5).
+		if err := store.CheckSessionID(opts.SessionID); err != nil {
+			return nil, fmt.Errorf("harness: %w", s.tools.redactErr(err))
+		}
+	}
 	sopts := store.Options{
 		Home: opts.Home,
 		// The real working directory: the header records it and the prompt
@@ -467,6 +489,9 @@ func Open(opts Options) (*Session, error) {
 		ToolProfile:  s.tools.profile,
 		Tools:        s.tools.wire,
 		Now:          opts.Now,
+		// "" for a fresh id; a caller's own for a session whose id is known
+		// before it has a file (Options.SessionID). A child's is set below.
+		SessionID: opts.SessionID,
 	}
 	if child != nil {
 		// The header goes to disk as it is. The type and the persona's path

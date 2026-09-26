@@ -90,10 +90,17 @@ type Provider struct {
 	optional bool
 	// hidden keeps a provider out of Providers() altogether: it lives in the
 	// hidden list, which only ProviderByName reads, so it resolves by id but
-	// no listing ever shows it, and it is never persisted as the default nor
-	// written to the session index (plan 018 §3.4). optional is "listed when
-	// installed"; hidden is "never listed".
+	// no listing ever shows it, and it is never persisted as the default
+	// (plan 018 §3.4). optional is "listed when installed"; hidden is "never
+	// listed".
 	hidden bool
+	// resumable is a provider whose sessions craze can load again, so they
+	// are written to the session index and offered by --continue, --resume
+	// and the resume picker (plan 028 §3.5). It is its own field rather than
+	// !hidden: native is hidden and resumable. Zero — every provider
+	// RegisterHiddenProviderForTest plants — is never indexed and never
+	// offered, which is the safe answer for a provider nothing can load.
+	resumable bool
 	// inProcess is a provider craze runs itself rather than spawning over ACP,
 	// so there is no binary to look up.
 	inProcess bool
@@ -215,6 +222,7 @@ func CursorProvider() Provider {
 		forceArgs:       []string{"--force"},
 		authMethods:     []authMethod{{id: acp.AuthCursorLogin}},
 		loginHint:       "agent login",
+		resumable:       true,
 		capabilities: Capabilities{
 			FastToggle:          true,
 			Effort:              true,
@@ -265,6 +273,7 @@ func GrokProvider() Provider {
 			{id: acp.AuthCachedToken, meta: grokHeadlessMeta()},
 		},
 		loginHint: "grok login",
+		resumable: true,
 		capabilities: Capabilities{
 			FastToggle:          false,
 			Effort:              true,
@@ -316,8 +325,10 @@ func GxProvider() Provider {
 // process rather than spawning, so everything ACP-shaped — binaries, spawn
 // args, dialect, auth, skill and plugin scans — is zero. It is hidden: it
 // resolves by id (--provider native, CRAZE_PROVIDER, a hand-written
-// config.toml) and no listing shows it, it is never persisted as the default,
-// and its sessions are never indexed until H7 gives them a loader (§3.4).
+// config.toml) and no listing shows it, and it is never persisted as the
+// default (§3.4). It is also resumable: H7 gave its sessions a loader, so
+// they are indexed and --continue, --resume and the picker offer them like
+// any other provider's (plan 028 §3.5).
 //
 // Effort and interject came with H2's tool loop, which gives a turn later
 // steps, and with the steer that merges into the next one (plan 019 §3.10,
@@ -343,6 +354,7 @@ func NativeProvider() Provider {
 		name:            nativeName,
 		displayName:     nativeName,
 		hidden:          true,
+		resumable:       true,
 		inProcess:       true,
 		modeKinds:       cursorModeKinds,
 		implementPrompt: cursorImplementPrompt,
@@ -409,9 +421,11 @@ func hiddenProvider(name string) (Provider, bool) {
 // label label to the hidden list, and returns it with the function that takes
 // it out again (idempotent; pass it to t.Cleanup). Its only purpose is to let
 // the tests in internal/tui and internal/cli hold the hidden-provider rules —
-// never listed, never persisted, never indexed — without a real hidden
-// provider to hand. It lives outside a _test.go file because other packages'
-// tests cannot see those.
+// never listed, never persisted — and the unresumable ones — never indexed,
+// never offered — without a real such provider to hand: what it plants is
+// not Resumable (plan 028 §3.5), so it keeps every rule native had before H7
+// gave native a loader. It lives outside a _test.go file because other
+// packages' tests cannot see those.
 //
 // It panics on an empty name, or on one the registry already resolves: an
 // entry that collided with a listed provider could never be reached, and one
@@ -501,9 +515,17 @@ func (p Provider) DisplayName() string {
 func (p Provider) Optional() bool { return p.optional }
 
 // Hidden reports whether p is one no listing shows: resolvable by id through
-// ProviderByName, never in Providers, never persisted as the default and never
-// written to the session index (plan 018 §3.4).
+// ProviderByName, never in Providers, and never persisted as the default
+// (plan 018 §3.4). Whether its sessions are indexed is Resumable's question,
+// not this one's.
 func (p Provider) Hidden() bool { return p.hidden }
+
+// Resumable reports whether craze can load p's sessions again: they are
+// written to the session index, and --continue, --resume and the resume
+// picker offer them (plan 028 §3.5). Cursor, grok, gx and native are; a
+// provider RegisterHiddenProviderForTest plants is not, so its sessions stay
+// out of the index and a row naming one is never offered.
+func (p Provider) Resumable() bool { return p.resumable }
 
 // InProcess reports whether craze runs p itself rather than spawning an agent
 // binary over ACP.

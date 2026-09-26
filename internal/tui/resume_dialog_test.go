@@ -266,10 +266,10 @@ func TestResumePickerDropsAnUnknownProvider(t *testing.T) {
 	}
 }
 
-// TestResumePickerDropsAHiddenProvider: a hidden provider resolves by id, but
-// its sessions have no loader yet (plan 018 §3.4), so its row is dropped
-// exactly as an unknown provider's is — even as the newest row, and even when
-// the caller built the list without internal/cli's filter.
+// TestResumePickerDropsAHiddenProvider: the planted hidden provider resolves by
+// id, but it is not resumable (plan 028 §3.5), so its row is dropped exactly as
+// an unknown provider's is — even as the newest row, and even when the caller
+// built the list without internal/cli's filter.
 func TestResumePickerDropsAHiddenProvider(t *testing.T) {
 	plantHidden(t)
 	m, _ := newResumePicker(t, []sessions.Row{

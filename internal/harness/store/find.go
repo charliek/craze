@@ -49,7 +49,7 @@ const maxHeaderBytes = 64 << 10
 // the way of id's. Any other is a file that is not where it belongs.
 //
 // The errors: ErrBadSessionID for an id that cannot be a session's
-// (checkSessionID); ErrNoTranscript when no candidate is the session's and
+// (CheckSessionID); ErrNoTranscript when no candidate is the session's and
 // none was refused; ErrCorrupt for a candidate that is not a regular file,
 // or whose header names another workspace, or another session that the file
 // is not named for, and for two candidates that are the session's;
@@ -57,7 +57,7 @@ const maxHeaderBytes = 64 << 10
 // when the session is a sub-agent's. Find reads only headers, and takes no
 // lock: Open does both properly.
 func Find(home, cwd, id string) (string, error) {
-	if err := checkSessionID(id); err != nil {
+	if err := CheckSessionID(id); err != nil {
 		return "", err
 	}
 	if !filepath.IsAbs(home) {
@@ -111,12 +111,14 @@ func Find(home, cwd, id string) (string, error) {
 	return found[0], nil
 }
 
-// checkSessionID refuses an id that cannot be a stored session's: one that is
+// CheckSessionID refuses an id that cannot be a stored session's: one that is
 // empty, would move the file it names (a separator of either kind), puts a
 // control character in its name, or would mean something else to a glob
 // (*, ?, [, \) — Find never globs, but an id that could is not an id craze
-// minted.
-func checkSessionID(id string) error {
+// minted. It is Find's check, and the one a new session opened under a
+// caller's id is held to (harness.Options.SessionID, plan 028 §3.5), so that
+// Find can look that session up again.
+func CheckSessionID(id string) error {
 	switch {
 	case id == "":
 		return fmt.Errorf("%w: it is empty", ErrBadSessionID)

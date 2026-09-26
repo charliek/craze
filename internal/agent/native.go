@@ -954,14 +954,60 @@ func (s *nativeSession) open() (*harness.Session, *modeltable.Table, nativeLoad,
 	}
 
 	hs, err := harness.Open(hopts)
-	if err != nil {
-		if hopts.Resume != "" {
-			return nil, nil, none, phraseLoadError(err, table, hopts.Model, hopts.Resume)
+	switch {
+	case err == nil:
+	case hopts.Resume != "" && errors.Is(err, harness.ErrNoTranscript):
+		if hs, err = s.openEmpty(hopts); err != nil {
+			return nil, nil, none, err
 		}
+	case hopts.Resume != "":
+		return nil, nil, none, phraseLoadError(err, table, hopts.Model, hopts.Resume)
+	default:
 		return nil, nil, none, phraseSetupError(err, table, hopts.Model)
 	}
 	opened.Store(hs)
 	return hs, table, content, nil
+}
+
+// diagResumeEmpty is the journal diag a load that opened empty is noted as
+// (openEmpty): its one field, "session", is the id it was opened under.
+const diagResumeEmpty = "resume_empty"
+
+// openEmpty is a load of a session that has no transcript at all (plan 028
+// §3.5, P35, PD8): Open found no file for hopts.Resume, so the session is
+// opened new under that same id instead — the file is written, as any new
+// session's is, with its first output — and journaled as resume_empty. That is
+// the ordinary life of a native row: the index row is written by the session's
+// first prompt, the transcript only by its first output, so "prompt, Esc, quit,
+// craze -c" leaves a row with no file. The id, the row and the title the load
+// seeded are unchanged, so this is the same session going on, not a different
+// one standing in for it — which is why it is a deliberate exception to plan
+// 013 §3.8's "a load never falls back to session/new" (D-60).
+//
+// Only ErrNoTranscript — no file at all — qualifies. A file that is there and
+// cannot be resumed (busy, corrupt, not the session's, a child's, a newer
+// craze's) is open()'s error, as it has always been.
+//
+// With no file there is no transcript's model, effort or mode to resume on,
+// so they are a new session's: an explicit --model, else the funded default
+// (fundedModel), and --plan/--ask or agent. Nothing is replayed; the load still
+// opens and closes its bracket and installs its state (load).
+func (s *nativeSession) openEmpty(hopts harness.Options) (*harness.Session, error) {
+	id := hopts.Resume
+	hopts.Resume, hopts.SessionID = "", id
+	if hopts.Model == "" {
+		alias, err := s.fundedModel(hopts.Table, hopts.Getenv)
+		if err != nil {
+			return nil, err
+		}
+		hopts.Model = alias
+	}
+	hs, err := harness.Open(hopts)
+	if err != nil {
+		return nil, phraseSetupError(err, hopts.Table, hopts.Model)
+	}
+	s.log.Note(journal.DiagNote{Kind: diagResumeEmpty, Fields: map[string]any{"session": hs.ID()}})
+	return hs, nil
 }
 
 // sealedGetenv is getenv sealed for the startup window: until release is
@@ -1352,10 +1398,11 @@ func (s *nativeSession) prompt(ctx context.Context, text string, rel chan struct
 			// the event silently (counted in droppedAtClose) rather than
 			// returning an error. enqueueDeltaLocked cannot fail this call.
 			//
-			// Indexing is unchanged: native stays unindexed, and the index
-			// observer keys on Event.Text (engine.go), which stays empty
-			// here — this is craze's own title, not the agent naming the
-			// session.
+			// Indexing is unchanged: the index observer keys on Event.Text
+			// (engine.go), which stays empty here — this is craze's own
+			// title, not the agent naming the session — so a native row
+			// (plan 028 §3.5) keeps the first-prompt title the engine seeds
+			// it with, as any row the agent never names does.
 			s.enqueueDeltaLocked("", Event{}, &StateDelta{Title: &title})
 		}
 	}

@@ -103,7 +103,9 @@ func (o *frameOpts) run(cmd *cobra.Command) error {
 	}
 	if !o.cont && !o.resume {
 		// As on the root command: a load starts the seeded row's provider,
-		// not the resolved one. The frame runner has no --ask/--plan.
+		// not the resolved one, so a load is checked against the row's once
+		// it is known (seedAndResolve, plan 028 §3.5). The frame runner has
+		// no --ask/--plan.
 		if err := refuseInProcess("craze frame", resolved.Provider, o.agentBin, ""); err != nil {
 			return err
 		}
@@ -188,6 +190,9 @@ func (o *frameOpts) seedAndResolve(cmd *cobra.Command, base tui.Config, ws strin
 	}
 	cfg := base
 	cfg.SessionIndex = index
+	// The seeded row's provider is held to the spawn flags a new session's is,
+	// as the root command's loads are (resolveLoad, plan 028 §3.5).
+	refuseLoad := func(p agent.Provider) error { return refuseInProcess("craze frame", p, o.agentBin, "") }
 	build := func(p agent.Provider, row sessions.Row) agent.Session {
 		prov := p
 		return agent.New(agent.Options{
@@ -218,6 +223,9 @@ func (o *frameOpts) seedAndResolve(cmd *cobra.Command, base tui.Config, ws strin
 		if err != nil {
 			return cfg, err
 		}
+		if err := refuseLoad(p); err != nil {
+			return cfg, err
+		}
 		cfg.Provider = p
 		cfg.Session = build(p, row)
 		cfg.Loading = true
@@ -237,6 +245,7 @@ func (o *frameOpts) seedAndResolve(cmd *cobra.Command, base tui.Config, ws strin
 		cfg.Session = nil
 		cfg.Resume = rows
 		cfg.LoadSession = build
+		cfg.RefuseLoad = refuseLoad
 	}
 	return cfg, nil
 }

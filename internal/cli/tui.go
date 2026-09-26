@@ -47,6 +47,17 @@ type tuiFlags struct {
 	resume bool
 }
 
+// mode is the session mode --ask or --plan names, "" for neither.
+func (f *tuiFlags) mode() string {
+	switch {
+	case f.ask:
+		return "ask"
+	case f.plan:
+		return "plan"
+	}
+	return ""
+}
+
 // resumeRowLimit is how many rows --resume offers. The dialog caps at the
 // same number, so the picker is the last ten sessions however many the index
 // holds.
@@ -105,13 +116,7 @@ func runTUI(cmd *cobra.Command, f *tuiFlags, env hostEnv) error {
 	if abs, err := filepath.Abs(ws); err == nil {
 		indexCWD = abs
 	}
-	mode := ""
-	switch {
-	case f.ask:
-		mode = "ask"
-	case f.plan:
-		mode = "plan"
-	}
+	mode := f.mode()
 	// The TUI owns the alt screen for the whole run, so nothing else may write
 	// to the terminal: a diagnostic from cursor-agent lands on top of a frame,
 	// takes none of the renderer's locks, and would garble it. The agent's
@@ -133,12 +138,13 @@ func runTUI(cmd *cobra.Command, f *tuiFlags, env hostEnv) error {
 		return err
 	}
 	if f.cont || f.resume {
+		// A load starts the row's own provider, not the resolved one, so it
+		// is the row's provider the spawn flags are checked against, once the
+		// row is known (resolveLoad's refuseLoad, plan 028 §3.5): whatever the
+		// environment or the config resolved has no say in it.
 		resolved.Fallback = false
 	} else if err := refuseInProcess("craze", resolved.Provider, f.agentBin, mode); err != nil {
-		// Only a new session is started on the resolved provider. A load
-		// starts the row's own provider, which is never an in-process one
-		// (knownProvider), so --agent-bin and --ask/--plan still mean what
-		// they say there, whatever the environment or the config resolved.
+		// Only a new session is started on the resolved provider.
 		return err
 	}
 	if cmd == nil {
@@ -260,6 +266,14 @@ func sessionOptions(f *tuiFlags, ws, mode string, stderr, diag io.Writer, env []
 // which is never rewritten by the attempt, exactly as a malformed config file
 // is not.
 //
+// The row's provider is held to the spawn flags a new session's is
+// (refuseInProcess, plan 028 §3.5): --agent-bin or CRAZE_AGENT_BIN with a row
+// of an in-process provider — native — is exit 2 with the same usage error,
+// before the index is written, a craze id minted or anything claimed; and
+// --ask/--plan go through, since native has modes. --continue asks it of its
+// row here; --resume hands the same closure to the picker (Config.RefuseLoad),
+// which asks it of the row chosen before it claims that row.
+//
 // --continue claims its row before anything is built (plan 027 §3.9, SQ16):
 // the row is given its durable craze id under the index's lock, bounded, and
 // that id is claimed (sessionClaims.claimRow). A session another craze holds
@@ -284,6 +298,8 @@ func resolveLoad(cmd *cobra.Command, f *tuiFlags, cwd string, cfg *tui.Config, b
 		filter = cfg.Provider.Name()
 	}
 	cfg.PersistProvider = explicit
+	mode := f.mode()
+	refuseLoad := func(p agent.Provider) error { return refuseInProcess("craze", p, f.agentBin, mode) }
 
 	index := &sessions.Store{KnownProvider: knownProvider}
 	if f.resume {
@@ -295,6 +311,7 @@ func resolveLoad(cmd *cobra.Command, f *tuiFlags, cwd string, cfg *tui.Config, b
 			return exitf(1, "%s", noSessionMsg(cwd, filter))
 		}
 		cfg.Resume = rows
+		cfg.RefuseLoad = refuseLoad
 		return nil
 	}
 	row, ok, err := index.Latest(cwd, filter)
@@ -312,6 +329,12 @@ func resolveLoad(cmd *cobra.Command, f *tuiFlags, cwd string, cfg *tui.Config, b
 	p, err := agent.ProviderByName(row.Provider)
 	if err != nil {
 		return exitf(1, "craze: %v", err)
+	}
+	// Refused before the claim, whose EnsureCrazeID may write the index: a
+	// load the command line can never start leaves no trace (plan 028 §3.5,
+	// seam 6).
+	if err := refuseLoad(p); err != nil {
+		return err
 	}
 	// Claimed before build, which has no error return and would otherwise
 	// have to hand back a session that must never start.

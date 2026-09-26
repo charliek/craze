@@ -59,12 +59,24 @@ func pickerRows(list []agent.Provider, def agent.Provider) []agent.Provider {
 }
 
 // hiddenProvider reports whether id resolves to a provider the registry never
-// lists. Such a provider is not written as the default on startedMsg and its
-// sessions are not indexed (plan 018 §3.4). The registry answers rather than
-// the snapshot, which carries the id alone.
+// lists. Such a provider is not written as the default on startedMsg (plan 018
+// §3.4). The registry answers rather than the snapshot, which carries the id
+// alone.
 func hiddenProvider(id string) bool {
 	p, err := agent.ProviderByName(id)
 	return err == nil && p.Hidden()
+}
+
+// unindexedProvider is hiddenProvider's twin for the session index: whether id
+// resolves to a provider whose sessions craze cannot load again, which the
+// engine then never writes a row for (engine.IndexOptions.Unindexed), so
+// --continue and --resume never offer one (plan 028 §3.5). The two questions
+// used to be one; native is where they part — hidden, and resumable. An id the
+// registry does not know is not refused here, as it is not by hiddenProvider:
+// a session only ever reports its own provider's id.
+func unindexedProvider(id string) bool {
+	p, err := agent.ProviderByName(id)
+	return err == nil && !p.Resumable()
 }
 
 func (m Model) providerIndex(p agent.Provider) int {

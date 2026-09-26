@@ -505,6 +505,121 @@ func TestNativeLoadOfAnEmptyTranscriptBracketsNothing(t *testing.T) {
 	}
 }
 
+// TestAMissingTranscriptOpensEmptyUnderTheSameID (A11; plan 028 §3.5, P35,
+// PD8): a load of a session with no transcript at all — the row its first
+// prompt seeded, and no output ever — opens a new, empty session under the
+// row's own id rather than refusing: the title seeded as a load's is, both
+// brackets with the install delta between them and nothing replayed, a
+// resume_empty note in the journal, and no file until the first output, which
+// files the transcript under that id — so a second load resumes it, the same
+// session going on. With no transcript to resume on, the model and the mode
+// are a new session's: an explicit --model or --plan, else the funded default
+// and agent. Only a missing file qualifies: a candidate the store cannot read,
+// or a transcript another load holds, is still the load's error and creates
+// nothing.
+func TestAMissingTranscriptOpensEmptyUnderTheSameID(t *testing.T) {
+	const id = "0b8f3c1e-5d2a-4c7e-9f10-2a3b4c5d6e7f"
+	t.Run("opens empty, then files under the id", func(t *testing.T) {
+		f := newNativeFixture(t)
+		ws := t.TempDir()
+		dir := filepath.Join(t.TempDir(), "journal")
+		s := f.session(Options{Workspace: ws, LoadSessionID: id, Title: "the first prompt", JournalDir: dir})
+		evs, err := startLoad(t, s)
+		if err != nil {
+			t.Fatalf("Start: %v", err)
+		}
+		want := []string{
+			"meta title=the first prompt",
+			"replay:start",
+			"meta title=the first prompt model=test/a mode=agent config commands=0 plugins [r]",
+			"replay:end",
+		}
+		if got := loadLines(evs); !slices.Equal(got, want) {
+			t.Fatalf("the empty open published %q, want %q", got, want)
+		}
+		if got := s.Snapshot().SessionID; got != id {
+			t.Fatalf("the empty open is session %q, want the row's %s", got, id)
+		}
+		if got := f.transcripts(); len(got) != 0 {
+			t.Fatalf("the empty open wrote %v before any output", got)
+		}
+
+		f.models["test/a"].push(answer("carried on"))
+		if _, err := s.Prompt(context.Background(), "carry on"); err != nil {
+			t.Fatalf("the first turn: %v", err)
+		}
+		if got := titleDeltas(deltaSettled(t, s)); len(got) != 0 {
+			t.Fatalf("the first prompt renamed the seeded session: %q", got)
+		}
+		path := storedPath(t, f, id)
+		if h, err := store.ReadHeader(path); err != nil || h.ID != id {
+			t.Fatalf("the transcript's header is %+v (%v); want session %s", h, err, id)
+		}
+		w := journalOf(t, s.log)
+		closeJournaled(t, s, w)
+		if notes := diags(fileLines(t, w), diagResumeEmpty); len(notes) != 1 || notes[0]["session"] != id {
+			t.Fatalf("the journal's resume_empty notes are %v; want one naming %s", notes, id)
+		}
+
+		again := f.session(Options{Workspace: ws, LoadSessionID: id})
+		evs, err = startLoad(t, again)
+		if err != nil {
+			t.Fatalf("the second load: %v", err)
+		}
+		if got := loadLines(evs); !slices.Contains(got, "user: carry on [r]") || !slices.Contains(got, "text: carried on [r]") {
+			t.Fatalf("the second load replayed %q; want the turn the empty open went on to", got)
+		}
+		if got := f.transcripts(); len(got) != 1 {
+			t.Fatalf("the session has %d transcripts, want its one: %v", len(got), got)
+		}
+	})
+	t.Run("a new session's model and mode", func(t *testing.T) {
+		f := newNativeFixture(t)
+		s := f.session(Options{LoadSessionID: id, Model: "other/c", Mode: "plan"})
+		if _, err := startLoad(t, s); err != nil {
+			t.Fatalf("Start: %v", err)
+		}
+		if snap := s.Snapshot(); snap.SessionID != id || snap.CurrentModel != "other/c" || snap.CurrentMode != "plan" {
+			t.Fatalf("opened %s on %s in %s; want %s on the explicit other/c in plan mode", snap.SessionID, snap.CurrentModel, snap.CurrentMode, id)
+		}
+	})
+	t.Run("only a missing file", func(t *testing.T) {
+		f := newNativeFixture(t)
+		ws := t.TempDir()
+		// A candidate named for the id whose first line is no header.
+		sessions := filepath.Join(f.dir, "sessions", store.Slug(ws))
+		if err := os.MkdirAll(sessions, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(sessions, "20260918T120000_"+id+".jsonl"), []byte("not a header\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		// And a stored session another load holds.
+		held := storeNativeSession(t, f, Options{Workspace: ws}, "test/a", []step{answer("one")})
+		holder := f.session(Options{Workspace: ws, LoadSessionID: held})
+		if _, err := startLoad(t, holder); err != nil {
+			t.Fatalf("the holder's load: %v", err)
+		}
+		before := dirListing(t, sessions)
+		for _, tc := range []struct {
+			id   string
+			want error
+		}{{id, store.ErrNoHeader}, {held, store.ErrBusy}} {
+			s := f.session(Options{Workspace: ws, LoadSessionID: tc.id})
+			evs, err := startLoad(t, s)
+			if !errors.Is(err, tc.want) || !strings.Contains(err.Error(), `native: session "`+tc.id+`" cannot be resumed`) {
+				t.Fatalf("the load of %s: %v; want %v, naming the session", tc.id, err, tc.want)
+			}
+			if got := loadLines(evs); !slices.Equal(got, []string{"replay:start"}) {
+				t.Fatalf("the refused load of %s published %q", tc.id, got)
+			}
+		}
+		if after := dirListing(t, sessions); !slices.Equal(after, before) {
+			t.Fatalf("a refused load changed the session directory:\nbefore %q\nafter  %q", before, after)
+		}
+	})
+}
+
 // TestNativeReplayedResultsDrawTheirText (plan 028 §3.4, P9): a replayed
 // result is the text the model read, drawn as the row's body with the label
 // after it — a command's stream, whose collapsed preview is the output's own

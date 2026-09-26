@@ -156,6 +156,15 @@ type Config struct {
 	// synchronous load exactly as it was — every test Config, the frame
 	// runner and the resume goldens.
 	ClaimSession func(sessions.Row) (crazeID string, release func(), err error)
+	// RefuseLoad is the command line's refusal of a row's provider, asked by
+	// the resume picker before it claims or builds the row it was given (plan
+	// 028 §3.5, P41): internal/cli's closure over --agent-bin,
+	// CRAZE_AGENT_BIN and --ask/--plan, the same check --continue makes of
+	// its row. A refusal is the picker's error row, and nothing is claimed or
+	// built. It is a pure function of the provider and runs inside Update, so
+	// it must not block. nil refuses nothing — every test Config and the
+	// resume goldens.
+	RefuseLoad func(agent.Provider) error
 }
 
 // SessionIndex is the write half of internal/sessions.Store, as the TUI needs
@@ -403,6 +412,8 @@ type Model struct {
 	resumeAttempt int
 	resumeWaiting int
 	resumeErr     string
+	// refuseLoad is Config.RefuseLoad.
+	refuseLoad func(agent.Provider) error
 	// onEngine is Config.OnEngine.
 	onEngine        func(*engine.Engine)
 	providerLocked  bool
@@ -819,8 +830,11 @@ func (m *Model) setSession(s agent.Session, crazeID string) {
 			// The provider a row is recorded under before the session has
 			// answered with one of its own: the resolved default it was
 			// started as.
-			Provider:  m.providerDefault.Name(),
-			Hidden:    hiddenProvider,
+			Provider: m.providerDefault.Name(),
+			// A provider craze cannot load again stays out of the index
+			// (plan 028 §3.5): unresumable, which is not the same question
+			// as hidden — native is hidden and indexed.
+			Unindexed: unindexedProvider,
 			TitleLine: indexTitleLine,
 		},
 	})
@@ -902,6 +916,7 @@ func New(cfg Config) Model {
 		newSession:      cfg.NewSession,
 		loadSession:     cfg.LoadSession,
 		claimSession:    cfg.ClaimSession,
+		refuseLoad:      cfg.RefuseLoad,
 		onEngine:        cfg.OnEngine,
 		resume:          resumeRows(cfg.Resume),
 		sessionIndex:    cfg.SessionIndex,

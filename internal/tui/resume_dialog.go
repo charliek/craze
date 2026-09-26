@@ -36,8 +36,9 @@ const (
 // does not resolve *is* offered: the spawn error is the right message, which
 // is what plan 012 settled for `--provider gx` on a machine without gx.
 //
-// A hidden provider's row is dropped the same way, although the registry
-// resolves the id: its sessions have no loader yet (plan 018 §3.4).
+// A row whose provider is not resumable is dropped the same way, although the
+// registry resolves the id: craze cannot load its sessions (plan 028 §3.5).
+// Hidden is not the question — native is hidden and its rows are offered.
 // internal/cli's knownProvider already keeps such a row out of the list it
 // hands over; this is the same rule for a Config built any other way.
 func resumeRows(rows []sessions.Row) []sessions.Row {
@@ -46,7 +47,7 @@ func resumeRows(rows []sessions.Row) []sessions.Row {
 		if len(out) >= resumeDialogMax {
 			break
 		}
-		if p, err := agent.ProviderByName(row.Provider); err != nil || p.Hidden() {
+		if p, err := agent.ProviderByName(row.Provider); err != nil || !p.Resumable() {
 			continue
 		}
 		out = append(out, row)
@@ -109,18 +110,25 @@ type resumeClaimMsg struct {
 	err     error
 }
 
-// chooseResume is Enter (or a click) on a picker row. With no ClaimSession it
-// loads the row at once, as the picker always has. With one, the claim — the
-// session index's lock, bounded, and the session's own lock — runs in a
-// tea.Cmd, never in this Update, and the row is built only when its answer
-// lands (resumeClaimed). While an attempt is in flight another Enter does
-// nothing; Esc still quits.
+// chooseResume is Enter (or a click) on a picker row. The command line's
+// refusal of the row's provider comes first (Config.RefuseLoad, plan 028 §3.5):
+// a refused row is the error row, and nothing is claimed or built. With no
+// ClaimSession the row then loads at once, as the picker always has. With one,
+// the claim — the session index's lock, bounded, and the session's own lock —
+// runs in a tea.Cmd, never in this Update, and the row is built only when its
+// answer lands (resumeClaimed). While an attempt is in flight another Enter
+// does nothing; Esc still quits.
 func (m Model) chooseResume(row sessions.Row) (tea.Model, tea.Cmd) {
+	if m.resumeWaiting != 0 {
+		// Only ever set with a ClaimSession: an attempt is in flight.
+		return m, nil
+	}
+	if err := m.refuseResume(row); err != nil {
+		m.resumeErr = err.Error()
+		return m, nil
+	}
 	if m.claimSession == nil {
 		return m.confirmResume(row)
-	}
-	if m.resumeWaiting != 0 {
-		return m, nil
 	}
 	m.resumeAttempt++
 	m.resumeWaiting = m.resumeAttempt
@@ -130,6 +138,20 @@ func (m Model) chooseResume(row sessions.Row) (tea.Model, tea.Cmd) {
 		id, release, err := claim(row)
 		return resumeClaimMsg{attempt: attempt, row: row, crazeID: id, release: release, err: err}
 	}
+}
+
+// refuseResume is Config.RefuseLoad asked of row's provider. A provider the
+// registry does not resolve is not refused here: resumeRows has already
+// dropped such a row, and confirmResume answers one that got through anyway.
+func (m Model) refuseResume(row sessions.Row) error {
+	if m.refuseLoad == nil {
+		return nil
+	}
+	p, err := agent.ProviderByName(row.Provider)
+	if err != nil {
+		return nil
+	}
+	return m.refuseLoad(p)
 }
 
 // resumeClaimed is a claim's answer. It builds the row's session only while

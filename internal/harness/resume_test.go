@@ -257,6 +257,55 @@ func TestResumeRefusals(t *testing.T) {
 	}
 }
 
+// TestANewSessionOpensUnderTheCallersID (plan 028 §3.5, P35): Options.SessionID
+// opens a new session under an id the caller already has — the adapter's
+// answer to ErrNoTranscript — writing nothing until its first turn, which
+// files the transcript under that id, so Resume finds it. An id Find would
+// refuse is store.ErrBadSessionID, and SessionID beside Resume or Child is
+// refused.
+func TestANewSessionOpensUnderTheCallersID(t *testing.T) {
+	f := newFixture(t, "http://127.0.0.1:1/v1")
+	const id = "0b8f3c1e-0000-4000-8000-000000000001"
+	opts := f.options()
+	opts.SessionID = id
+	s, err := Open(opts)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if s.ID() != id {
+		t.Fatalf("opened as %s, want %s", s.ID(), id)
+	}
+	if _, err := os.Stat(filepath.Join(f.home, "sessions")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("a new session wrote before its first turn (stat: %v)", err)
+	}
+	cur, _ := s.Current()
+	f.models[cur].push(answerWith("ok"))
+	run(t, s, "hi")
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	r := resumed(t, resumeOptions(f.options(), id))
+	equal(t, "the resumed session's user turns", userTurns(transcript(t, r)), []int{1})
+
+	for _, bad := range []string{"a*b", "../x"} {
+		opts := f.options()
+		opts.SessionID = bad
+		if _, err := Open(opts); !errors.Is(err, store.ErrBadSessionID) {
+			t.Fatalf("SessionID %q = %v; want store.ErrBadSessionID", bad, err)
+		}
+	}
+	both := resumeOptions(f.options(), id)
+	both.SessionID = id
+	if _, err := Open(both); err == nil || !strings.Contains(err.Error(), "SessionID") {
+		t.Fatalf("SessionID with Resume = %v; want a refusal", err)
+	}
+	child := f.options()
+	child.SessionID, child.Child = id, &ChildOptions{ID: "child-1"}
+	if _, err := Open(child); err == nil || !strings.Contains(err.Error(), "SessionID") {
+		t.Fatalf("SessionID with Child = %v; want a refusal", err)
+	}
+}
+
 // TestResumeModelPrecedence (A5, the harness's part): an explicit model wins
 // and must resolve; unspecified, the transcript's model is found by identity
 // — its own alias while it still names it, else the first alias in sorted
