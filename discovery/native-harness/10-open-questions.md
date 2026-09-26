@@ -2,9 +2,9 @@
 
 Owner's calls, in the order the roadmap meets them. Resolve by adding a row
 to `08-decisions.md`. **Q1–Q4 were resolved by Plan 018 on 2026-09-18**
-(D-27..D-30); **Q8 was resolved by Plan 026 on 2026-09-24** (D-54); their
-rows are kept below for history, each marked with the decision that closed
-it.
+(D-27..D-30); **Q8 was resolved by Plan 026 on 2026-09-24** (D-54); **Q9 and
+Q10 were resolved by Plan 028 on 2026-09-25** (D-62, D-65); their rows are
+kept below for history, each marked with the decision that closed it.
 
 | # | question | default if unanswered | needed by |
 |---|---|---|---|
@@ -16,8 +16,8 @@ it.
 | Q6 | Should `always` grants also be offered per-session-only (grok's `allow-edits-session`)? H3 itself is reworded: the owner's likely direction is an auto-mode evaluator over the H2 gate, not ask-on-everything (D-39), so this question — and the grants question generally — waits for H3 to be planned, after session-control S1. | Yes, one extra option on edit-kind asks, if H3 keeps an asks model at all. | H3 |
 | Q7 | Marketplace: stay on Claude Code's cache, or build the native git installer? H4 (Plan 022, owner decision 5) stays on Claude Code's own install and reads only the plugins installed and enabled there, so this question is untouched by H4 and stays open. | Cache; installer deferred. | after H4 |
 | Q8 | **Resolved (D-54).** In-process sub-agents after the child-process cut, or never? | **Answered:** in-process now, for H6; the process path stays behind the runner's seam, triggered only by a child crash or leak seen in practice, or session-control S4 wanting children as separately attachable hosts. | H6 |
-| Q9 | Compaction trigger: `context − 16k reserve` (pi) or 85 % of window (grok)? Tail to keep: 20k tokens (pi) or `clamp(usable×0.25, 2k, 15k)` (opencode)? | pi's numbers. | H7 |
-| Q10 | When does the provider become visible (D-16)? After H7? After H8? | After H7 passes its smoke on both platforms. | — |
+| Q9 | **Resolved (D-62).** Compaction trigger: `context − 16k reserve` (pi) or 85 % of window (grok)? Tail to keep: 20k tokens (pi) or `clamp(usable×0.25, 2k, 15k)` (opencode)? | **Answered:** 85% of the window, capped at `window − max_output_tokens`; a tail of whole steps up to 20k tokens, itself capped at 25% of the threshold. | H7 |
+| Q10 | **Resolved (D-65).** When does the provider become visible (D-16)? After H7? After H8? | **Answered:** after H7's smoke passes on both Linux and the mac-mini, in PR 3's last commit — no rewind, no fork. | — |
 | Q11 | ChatGPT-plan auth: port gx's token minting, or crush's oauth package, or skip for good? | Skip until asked. | — |
 
 H5 (Plan 023, 2026-09-21) leaves three items as follow-ups rather than
@@ -31,3 +31,5 @@ follow-up stands. R3 measured the plan-mode reminder's cache cost stated in
 `05`: a full cache-read miss on every plan-mode turn's first request on
 Fireworks (0 against ~9,000–10,000 in agent mode) — worse than expected, so
 the variant-marker replay is now a priority follow-up, not a nice-to-have.
+Plan 028 (D-66) answers it: reminders are stored as `reminder` entries
+carrying a variant marker, not their rendered text, closing this follow-up.
