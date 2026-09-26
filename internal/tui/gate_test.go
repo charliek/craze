@@ -234,10 +234,10 @@ func gatedModel(t *testing.T) (Model, *Stub) {
 // TestTheGateHoldsEveryMessageKind: while a gate is open every kind of message
 // that reaches Update is held, in arrival order, and changes nothing — a key,
 // the mouse, both pastes, a resize, a tick, an event, the start's answer, a
-// settings reply, the hidden-answer beat — and the frame harness's sync token
-// is remembered, not acknowledged. The reply is applied alone, the token
-// acknowledged with it; then each held message is applied in its own Update,
-// in order.
+// settings reply, the hidden-answer beat — and so is the frame harness's sync
+// token, arriving behind them (C17c): not acknowledged at the release, which
+// applies the reply alone, but in its own turn as the held messages drain,
+// each in its own Update, in order.
 func TestTheGateHoldsEveryMessageKind(t *testing.T) {
 	m, stub := gatedModel(t)
 	r := newGateRig(t, m)
@@ -270,9 +270,7 @@ func TestTheGateHoldsEveryMessageKind(t *testing.T) {
 			want = append(want, "tui.eventMsg")
 		} else {
 			r.send(msg)
-			if _, sync := msg.(frameSyncMsg); !sync {
-				want = append(want, fmt.Sprintf("%T", msg))
-			}
+			want = append(want, fmt.Sprintf("%T", msg))
 		}
 		if changed := issued.diff(digestModel(&r.m)); len(changed) != 0 {
 			t.Fatalf("holding %T changed %v", msg, changed)
@@ -281,8 +279,8 @@ func TestTheGateHoldsEveryMessageKind(t *testing.T) {
 	if got := heldKinds(r.m); !slices.Equal(got, want) {
 		t.Fatalf("held %v, want every arrival in order %v", got, want)
 	}
-	if r.m.syncAck == 7 || r.m.syncPending != 7 {
-		t.Fatalf("the sync token that arrived while gated is acked %d, pending %d: want it pending until the release", r.m.syncAck, r.m.syncPending)
+	if r.m.syncAck == 7 || r.m.syncPending != 0 {
+		t.Fatalf("the sync token that arrived behind held messages is acked %d, pending %d: want it held behind them", r.m.syncAck, r.m.syncPending)
 	}
 	if len(r.reads) != 1 {
 		t.Fatalf("%d reads outstanding while the gate is open, want the one that keeps the primary draining", len(r.reads))
@@ -303,8 +301,8 @@ func TestTheGateHoldsEveryMessageKind(t *testing.T) {
 	if r.m.input.Value() != "" || r.m.width != width {
 		t.Fatalf("the release applied a held key or resize: composer %q, width %d", r.m.input.Value(), r.m.width)
 	}
-	if r.m.syncAck != 7 || r.m.syncPending != 0 {
-		t.Fatalf("the release acked %d (pending %d), want the token that arrived while gated", r.m.syncAck, r.m.syncPending)
+	if r.m.syncAck == 7 {
+		t.Fatal("the release acknowledged a token held behind messages it did not apply")
 	}
 	if r.drains != 1 {
 		t.Fatalf("the release owes %d drains, want one", r.drains)
@@ -325,6 +323,13 @@ func TestTheGateHoldsEveryMessageKind(t *testing.T) {
 			if r.m.width != 90 {
 				t.Fatalf("the drained resize left width %d", r.m.width)
 			}
+		case "tui.frameSyncMsg":
+			if r.m.syncAck != 7 || r.m.input.Value() != "xpasted more" {
+				t.Fatalf("the drained token acked %d with composer %q: want it acknowledged after every message before it", r.m.syncAck, r.m.input.Value())
+			}
+		}
+		if want[i] != "tui.frameSyncMsg" && i < len(want)-1 && r.m.syncAck == 7 {
+			t.Fatalf("drain %d (%s) acknowledged the token ahead of its turn", i+1, want[i])
 		}
 	}
 	if r.m.input.Value() != "xpasted more" {

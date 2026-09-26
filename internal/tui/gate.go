@@ -296,7 +296,7 @@ func (m Model) gated(msg tea.Msg, handle handler) (tea.Model, tea.Cmd) {
 	case drainMsg:
 		return m.drain(handle)
 	case frameSyncMsg:
-		return m.syncFrame(msg), nil
+		return m.syncFrame(msg)
 	case eventMsg:
 		// The one outstanding read is over; readOn decides whether another
 		// starts, once this event is placed.
@@ -440,22 +440,26 @@ func (m Model) drain(handle handler) (tea.Model, tea.Cmd) {
 }
 
 // syncFrame is the frame harness's token (frame.go), through the model's FIFO:
-// acknowledged at once when nothing is open or held, as it always was; while a
-// gate is open, remembered and acknowledged by the release that leaves no gate
-// open; while held messages drain, held behind them and acknowledged when
-// drained. It never runs the Update wrapper.
-func (m Model) syncFrame(s frameSyncMsg) Model {
+// acknowledged after every message that arrived before it (C17c, astra C17b
+// 1). Nothing open or held: at once, as it always was. A gate open and nothing
+// held: the gate is its own key's — the frame runner hands the program a key
+// and its token as one message, so nothing can come between them — and the
+// token is remembered and acknowledged by the release that leaves no gate
+// open, the key's whole chain done. Anything held — a gate an earlier or an
+// asynchronous message opened, or a drain under way — and the token is held
+// behind it, the key it came with included, and acknowledged when drained. It
+// never runs the Update wrapper.
+func (m Model) syncFrame(s frameSyncMsg) (tea.Model, tea.Cmd) {
 	switch {
+	case len(m.held) > 0:
+		return m.hold(s)
 	case m.gate != nil:
 		m.syncPending = s.n
 		m.noteGate(gateHeld)
-	case len(m.held) > 0:
-		m.pushHeld(heldMsg{msg: s, bytes: heldCharge})
-		m.heldBytes += heldCharge
 	default:
 		m.syncAck = s.n
 	}
-	return m
+	return m, nil
 }
 
 // pushHeld appends h to the held queue. An append that moves the queue to a

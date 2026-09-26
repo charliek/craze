@@ -381,31 +381,13 @@ func submitSchedule(t *testing.T, site submitSite, sync bool, order []string) ([
 }
 
 // siteBaseline is what an async arrival order is for the gateSync baseline:
-// no reply — the call returned inside the issuing Update — and a token that
-// arrived while the gate was open placed right after the issuing message,
-// where today's harness puts it: the next message after that message's
-// blocked Update (§3.12 "The frame harness"). Everything else keeps its
-// place.
+// the same order with no reply — the call returned inside the issuing Update.
+// The token keeps its place (C17c): acknowledged after every message that
+// arrived before it, in both modes — at the release when it arrived with
+// nothing held (under a gate its own key opened, or with no gate at all),
+// behind the held messages otherwise.
 func siteBaseline(order []string) []string {
-	r := slices.Index(order, "R")
-	s := slices.Index(order, "S")
-	issuer := slices.Index(order, "P") // -1: the sending key, before every arrival
-	var out []string
-	moved := issuer < s && s < r
-	if moved && issuer < 0 {
-		out = append(out, "S")
-	}
-	for i, a := range order {
-		switch {
-		case a == "R", a == "S" && moved:
-			continue
-		}
-		out = append(out, a)
-		if moved && i == issuer {
-			out = append(out, "S")
-		}
-	}
-	return out
+	return slices.DeleteFunc(slices.Clone(order), func(a string) bool { return a == "R" })
 }
 
 // siteOrders is every arrival order of the labels in which the events keep
@@ -624,8 +606,9 @@ func submitFrameSequences(t *testing.T) {
 
 // TestTheWorkingFrameSurvivesAShortTurn (astra 1; §3.12 "reshaped"): the whole
 // `<enter><wait:working>` script over a turn so short that its started and its
-// ended are both on the stream — and held — before the runner's sync token
-// arrives, the reply last. The token is acknowledged by the release, so the
+// ended are both on the stream — and held — before the reply. The runner's
+// sync token comes with its key (one message, C17c), so it is parked under the
+// key's gate with nothing held, and acknowledged by the release, so the
 // barrier's match is the release frame, which shows the turn working; the
 // drained events' frames follow it, the ending last; and a <wait:working> run
 // right after the barrier finds the release frame, one run after the drained
@@ -634,7 +617,7 @@ func submitFrameSequences(t *testing.T) {
 // working frame is the frame harness's rendezvous, not this schedule's.)
 func TestTheWorkingFrameSurvivesAShortTurn(t *testing.T) {
 	site := submitSites()[0]
-	order := []string{"E1", "E2", "S", "R"}
+	order := []string{"S", "E1", "E2", "R"}
 	var views [2][]frameSeqState
 	for i, mode := range frameGateModes {
 		t.Run(mode.name, func(t *testing.T) {

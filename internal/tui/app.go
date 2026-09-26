@@ -653,6 +653,9 @@ type Model struct {
 	syncAck     int
 	syncPending int
 	gateSync    bool
+	// harnessQuit says the frame runner's quit message (frameQuitMsg) has been
+	// applied: the frame of that Update is the run's capture (frame.go).
+	harnessQuit bool
 }
 
 // foldedSeq is the seq of the last event the model folded into its shared
@@ -1565,6 +1568,12 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// now, the engine's EventTurn{ended}, and everything a settled turn left to
 	// do — the drain, an armed send-now, the queue the chain policy clears — is
 	// the engine's own decision, arriving as the events it authored.
+
+	case frameQuitMsg:
+		// The frame runner's quit, applied in its turn behind whatever had
+		// arrived before it (frame.go).
+		m.harnessQuit = true
+		return m, tea.Quit
 
 	case tea.KeyMsg:
 		return m.handleKey(msg)

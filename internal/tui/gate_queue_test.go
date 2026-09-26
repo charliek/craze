@@ -146,25 +146,29 @@ func chainOrders(s chainSite) [][]string {
 }
 
 // chainBaseline is what an async arrival order is for the gateSync baseline:
-// no replies — every link ran inside the key's Update — and a token that
-// arrived while any link was open placed right after the key, where today's
-// harness puts it; the release that leaves no gate open acknowledges it
-// (TestASyncTokenWaitsForTheChainsEnd). Everything else keeps its place.
-func chainBaseline(order []string, links int) []string {
-	last := slices.Index(order, fmt.Sprintf("R%d", links))
+// the same order with no replies — every link ran inside the key's Update. The
+// token keeps its place (C17c): one that arrived with nothing held (right
+// behind its key, or after replies alone) is the chain's end's to acknowledge
+// (TestASyncTokenWaitsForTheChainsEnd), and one behind held messages is
+// acknowledged when drained, after them — in both modes.
+func chainBaseline(order []string, _ int) []string {
+	return slices.DeleteFunc(slices.Clone(order), func(a string) bool { return strings.HasPrefix(a, "R") })
+}
+
+// parkedToken reports that the key's token was parked under the chain: it
+// arrived before the chain's end with only replies before it, so nothing was
+// held when it came.
+func parkedToken(order []string, links int) bool {
 	s := slices.Index(order, "S")
-	moved := s < last
-	var out []string
-	if moved {
-		out = append(out, "S")
+	if s > slices.Index(order, fmt.Sprintf("R%d", links)) {
+		return false
 	}
-	for _, a := range order {
-		if strings.HasPrefix(a, "R") || (a == "S" && moved) {
-			continue
+	for _, a := range order[:s] {
+		if !strings.HasPrefix(a, "R") {
+			return false
 		}
-		out = append(out, a)
 	}
-	return out
+	return true
 }
 
 // chainSchedule runs one site in one gate mode and one arrival order. It
@@ -565,10 +569,12 @@ func chainFrameSequences(t *testing.T) {
 							t.Fatalf("a chained wait (fast runner %v) matched differently:\ngateSync %q\nasync    %q", fast, bw, aw)
 						}
 						// A runner that keeps up (the frame harness's rendezvous, X36),
-						// whose token the chain's end acknowledged, finds every wait. One
-						// that fell behind, or whose token arrived after everything, can
-						// find the latest frame alone — in both modes alike, above.
-						early := slices.Index(order, "S") < slices.Index(order, fmt.Sprintf("R%d", site.links))
+						// whose token the chain's end acknowledged — parked, with nothing
+						// held before it, the one order the runner's one-message delivery
+						// makes (C17c) — finds every wait. One that fell behind, or whose
+						// token arrived behind held messages or after everything, can find
+						// the latest frame alone — in both modes alike, above.
+						early := parkedToken(order, site.links)
 						if fast && early && slices.Contains(aw, "") {
 							t.Fatalf("a chained wait matched nothing: %q", aw)
 						}
@@ -665,10 +671,12 @@ func TestTheCtrlCChainRunsWhole(t *testing.T) {
 						case len(m.queue) != 2 || !m.ctrlCDeadline.IsZero():
 							t.Fatalf("the band (%d rows) or the window (%s) moved before the call answered", len(m.queue), m.ctrlCDeadline)
 						}
-						// The clock moves; a key and the key's token arrive.
+						// The key's token comes with it — one message, nothing between
+						// them (C17c) — and is parked under the key's own gate. The
+						// clock moves; another key arrives, and is held.
+						r.step(frameSyncMsg{n: tok})
 						now = t0.Add(5 * time.Second)
 						r.step(runeKey('k'))
-						r.step(frameSyncMsg{n: tok})
 
 						rep := runWatched(t, r.calls[0])
 						r.calls = nil

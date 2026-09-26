@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -14,6 +15,8 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/muesli/termenv"
+
+	"github.com/charliek/craze/internal/agent"
 )
 
 const (
@@ -88,6 +91,12 @@ type FrameOpts struct {
 	// message it hands the program, with that message: how a test makes the
 	// runner fall behind the program at a point of its choosing.
 	afterSend func(msg tea.Msg)
+	// beforeQuit, when a test sets it, runs once the script has ended and the
+	// model has settled at the capture's boundary, before the quit is sent,
+	// with a way to hand the program a message of the test's own and the
+	// bus's newest frame: how a test makes something arrive after the settle
+	// and before the quit.
+	beforeQuit func(send func(tea.Msg), last func() frameState)
 }
 
 type frameTokenKind int
@@ -400,6 +409,9 @@ type frameState struct {
 	// (RunFrameScript).
 	settled bool
 	folded  uint64
+	// final says the frame runner's quit message had been applied: this is
+	// the frame the run captures (RunFrameScript).
+	final bool
 }
 
 // frameBus carries frames from the bubbletea goroutine to the script runner.
@@ -420,6 +432,9 @@ type frameBus struct {
 	took     chan struct{}
 	over     chan struct{}
 	overOnce sync.Once
+	// captured is the first final frame published, if any (have it).
+	captured     frameState
+	haveCaptured bool
 }
 
 func newFrameBus(print io.Writer) *frameBus {
@@ -472,6 +487,9 @@ func (b *frameBus) publish(s frameState) {
 	n := b.n
 	b.latest = s
 	b.have = true
+	if s.final && !b.haveCaptured {
+		b.captured, b.haveCaptured = s, true
+	}
 	if len(b.queue) >= frameQueueMax {
 		b.queue = append(b.queue[:0], b.queue[1:]...)
 	}
@@ -492,6 +510,50 @@ func (b *frameBus) last() frameState {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return b.latest
+}
+
+// capture is the run's frame: the one the quit message's Update published,
+// or, for a run that ended some other way — a script that quits, a panic, a
+// kill — the newest.
+func (b *frameBus) capture() frameState {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.haveCaptured {
+		return b.captured
+	}
+	return b.latest
+}
+
+// awaitLatest is await on the newest frame alone: it returns once the newest
+// published frame satisfies pred, never an older queued one (C17c, astra
+// C17b 3), or false at the deadline or once stop is closed.
+func (b *frameBus) awaitLatest(pred func(frameState) bool, timeout time.Duration, stop <-chan struct{}) (frameState, bool) {
+	deadline := time.Now().Add(timeout)
+	for {
+		b.mu.Lock()
+		have, last := b.have, b.latest
+		b.mu.Unlock()
+		if have && pred(last) {
+			return last, true
+		}
+		wait := time.Until(deadline)
+		if wait <= 0 {
+			return last, false
+		}
+		timer := time.NewTimer(wait)
+		select {
+		case <-b.wake:
+			timer.Stop()
+		case <-stop:
+			timer.Stop()
+			b.mu.Lock()
+			have, last = b.have, b.latest
+			b.mu.Unlock()
+			return last, have && pred(last)
+		case <-timer.C:
+			return last, false
+		}
+	}
 }
 
 // await returns the first frame matching pred: the newest state if it already
@@ -559,6 +621,15 @@ type frameTokenMsg struct {
 	n   int
 }
 
+// frameQuitMsg is the frame runner's quit, through the model's FIFO (C17c,
+// astra C17b 3): held behind an open gate and the messages held before it,
+// like a key, and applied in arrival order, where it marks the model
+// (harnessQuit) and answers tea.Quit. So the quit lands after every message
+// that reached the program before it — as bubbletea's own quit did before a
+// held message could be waiting — and the frame its Update publishes is the
+// run's capture.
+type frameQuitMsg struct{}
+
 // frameSyncMsg is a no-op message the runner uses to know its previous message
 // has been processed and published. It goes through the model's own FIFO: the
 // model acknowledges it (Model.syncAck) when it is reduced — at once when
@@ -622,6 +693,7 @@ func (f frameModel) publish() {
 		gated:     f.inner.gate != nil,
 		settled:   f.inner.gate == nil && len(f.inner.held) == 0,
 		folded:    f.inner.foldedSeq(),
+		final:     f.inner.harnessQuit,
 	})
 }
 
@@ -713,32 +785,45 @@ func RunFrameScript(cfg Config, cols, rows int, script string, opts FrameOpts) (
 		close(finished)
 	}()
 
-	// shutdown ends the run: the runner is done, however the script ended —
-	// its last token, a wait that timed out, a hook's error or panic — so a
-	// program waiting at a rendezvous is let go before it is asked to quit (or
-	// the quit would never be reduced); then the program quits, or is killed,
-	// and the engine it ended with is closed.
+	// shutdown ends the run, every step bounded (C17c, astra C17b 2): the
+	// runner is done, however the script ended — its last token, a wait that
+	// timed out, a hook's error or panic — so a program waiting at a
+	// rendezvous is let go; the quit goes in through the model's FIFO
+	// (frameQuitMsg), handed over on a goroutine of its own so a program
+	// blocked inside an Update cannot block the runner; and if the program has
+	// not ended within the timeout, the engine is closed — which is what a
+	// call blocked inside an Update is waiting on, and what a gate held open
+	// by a call that never answers is waiting on — and the program is killed.
+	// Past a second timeout the program is abandoned, with an error, rather
+	// than waited for without end.
 	//
 	// The engine is the owner's, not m's: a pre-start picker has none at New,
 	// the one the picker built is the one that owns a child process, and on a
-	// recovered panic p.Run hands back no model to read it from. Read after
-	// done is received, so the program has stopped setting it. Closing the
+	// recovered panic p.Run hands back no model to read it from. Closing the
 	// engine closes its session, and stops its driver: Close blocks until the
 	// child is reaped, and is safe even if Start is still in flight — it will
-	// not adopt a child into a closed session.
+	// not adopt a child into a closed session. It is idempotent.
+	closeEngine := func() {
+		if eng := m.owner.current(); eng != nil {
+			_ = eng.Close()
+		}
+	}
 	shutdown := func() error {
 		bus.finish()
-		p.Quit()
+		go p.Send(frameQuitMsg{})
 		var runErr error
 		select {
 		case runErr = <-done:
 		case <-time.After(timeout):
+			closeEngine()
 			p.Kill()
-			<-done
+			select {
+			case runErr = <-done:
+			case <-time.After(timeout):
+				runErr = fmt.Errorf("frame: the program did not stop within %s of being killed", timeout)
+			}
 		}
-		if eng := m.owner.current(); eng != nil {
-			_ = eng.Close()
-		}
+		closeEngine()
 		return runErr
 	}
 	shut := false
@@ -761,14 +846,17 @@ func RunFrameScript(cfg Config, cols, rows int, script string, opts FrameOpts) (
 		// messages drain (§3.12), may still have left on the stream. Today's
 		// synchronous Update left nothing arrived unreduced and its reader
 		// never parked; the gateSync baseline is always settled.
-		scriptErr = r.settle(streamHead(m.owner, timeout))
+		scriptErr = r.settleAt(m.owner)
+		if scriptErr == nil && opts.beforeQuit != nil {
+			opts.beforeQuit(p.Send, bus.last)
+		}
 	}
 	shut = true
 	if runErr := shutdown(); scriptErr == nil {
 		scriptErr = runErr
 	}
 
-	final := bus.last()
+	final := bus.capture()
 	if te, ok := scriptErr.(*WaitTimeoutError); ok {
 		te.LastFrame = final.plain
 	}
@@ -829,13 +917,25 @@ func (r *frameRunner) await(pred func(frameState) bool, what string) error {
 	return &WaitTimeoutError{Wait: what, Timeout: r.timeout}
 }
 
-// settle waits, within the frame timeout, for a frame of a settled model — no
-// gated call waiting, nothing held — that has folded the session's stream up
-// to head: every event published before the script ended. A program that has
-// ended is as settled as it gets.
+// settleAt establishes the capture's boundary — the session's stream head
+// when the script ended (streamHead) — and waits for the model to settle at
+// it (settle).
+func (r *frameRunner) settleAt(owner *sessionOwner) error {
+	head, err := streamHead(owner, r.timeout)
+	if err != nil {
+		return fmt.Errorf("frame: the capture's boundary could not be established: %w", err)
+	}
+	return r.settle(head)
+}
+
+// settle waits, within the frame timeout, for the newest frame — never an
+// older queued one — to be of a settled model (no gated call waiting, nothing
+// held) that has folded the session's stream up to head: every event
+// published before the script ended. A program that has ended is as settled
+// as it gets.
 func (r *frameRunner) settle(head uint64) error {
 	pred := func(s frameState) bool { return s.settled && s.folded >= head }
-	if _, ok := r.bus.await(pred, r.timeout, r.finished); ok || r.done() {
+	if _, ok := r.bus.awaitLatest(pred, r.timeout, r.finished); ok || r.done() {
 		return nil
 	}
 	return &WaitTimeoutError{Wait: "<settle>", Timeout: r.timeout}
@@ -843,20 +943,25 @@ func (r *frameRunner) settle(head uint64) error {
 
 // streamHead is the seq the session's stream has reached: every event the
 // engine had enqueued is delivered to the model's stream first (SyncSeq). It
-// is the in-process engine's; with no engine, or one that is closing, it is
-// 0, and nothing is waited for.
-func streamHead(owner *sessionOwner, timeout time.Duration) uint64 {
+// is the in-process engine's; with no engine it is 0. An engine that is
+// closing or closed publishes nothing more: 0, with nothing to wait for. Any
+// other failure — the timeout above all — is an error: the boundary could not
+// be established, and a capture without it would be incomplete.
+func streamHead(owner *sessionOwner, timeout time.Duration) (uint64, error) {
 	b, ok := owner.current().(*engineBackend)
 	if !ok || b == nil {
-		return 0
+		return 0, nil
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	head, err := b.eng.SyncSeq(ctx)
-	if err != nil {
-		return 0
+	switch {
+	case err == nil:
+		return head, nil
+	case errors.Is(err, agent.ErrLogClosing), errors.Is(err, agent.ErrClosed), errors.Is(err, agent.ErrFlushGaveUp):
+		return 0, nil
 	}
-	return head
+	return 0, err
 }
 
 // send hands the program msg and its sync token as one message (frameTokenMsg)

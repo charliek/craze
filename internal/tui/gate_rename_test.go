@@ -399,23 +399,12 @@ func renameSchedule(t *testing.T, sync bool, order []string) ([]frameState, int)
 }
 
 // baselineOrder is what an async arrival order is for the gateSync baseline:
-// no reply (the call returned inside Enter's Update), and a token that arrived
-// while the gate was open placed right after Enter — where today's harness
-// puts it, the next message after the key's blocked Update (§3.12 "The frame
-// harness").
+// the same order with no reply — the call returned inside Enter's Update. The
+// token keeps its place (C17c): acknowledged after every message that arrived
+// before it, in both modes — at the release when it arrived with nothing held
+// (right behind its key), behind the held messages otherwise.
 func baselineOrder(order []string) []string {
-	r := slices.Index(order, "R")
-	var out []string
-	if s := slices.Index(order, "S"); s < r {
-		out = append(out, "S")
-	}
-	for i, a := range order {
-		if a == "R" || (a == "S" && i < r) {
-			continue
-		}
-		out = append(out, a)
-	}
-	return out
+	return slices.DeleteFunc(slices.Clone(order), func(a string) bool { return a == "R" })
 }
 
 // matchable is the frames a wait after Enter's barrier can see: none published
