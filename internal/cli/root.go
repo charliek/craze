@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -72,6 +73,7 @@ func NewRootCmd() *cobra.Command {
 	cmd.AddCommand(newPromptCmd())
 	cmd.AddCommand(newFrameCmd())
 	cmd.AddCommand(newImportCmd())
+	cmd.AddCommand(newBridgeCmd())
 	return cmd
 }
 
@@ -88,17 +90,50 @@ func newVersionCmd() *cobra.Command {
 }
 
 func Execute() {
-	if err := NewRootCmd().Execute(); err != nil {
-		var ee *exitError
-		code := 1
-		if errors.As(err, &ee) {
-			code = ee.code
-			if ee.msg != "" {
-				fmt.Fprintln(os.Stderr, ee.msg)
-			}
-			os.Exit(code)
-		}
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(code)
+	ranCmd, err := NewRootCmd().ExecuteC()
+	if err == nil {
+		return
 	}
+	line, code := diagnose(ranCmd, err)
+	if line != "" {
+		fmt.Fprintln(os.Stderr, line)
+	}
+	os.Exit(code)
+}
+
+// diagnose is what Execute prints (one line, or none) and the code it exits
+// with, for ranCmd's error: craze bridge's own contract (bridgeLine, exit 1)
+// for every error that reaches it once the ran command is bridge's — flag
+// parsing, an extra argument, and the root's shared PersistentPreRunE (a
+// stray removed config-file variable in an SSH environment) included, since bridge defines
+// none of its own (root.go's own rule: no subcommand may) — or, for every
+// other command, today's mapping: an exitError's own code and message, else
+// exit 1 with the error printed as it is.
+func diagnose(ranCmd *cobra.Command, err error) (line string, code int) {
+	if ranCmd != nil && ranCmd.Name() == "bridge" {
+		return bridgeLine(err), 1
+	}
+	var ee *exitError
+	if errors.As(err, &ee) {
+		return ee.msg, ee.code
+	}
+	return err.Error(), 1
+}
+
+// bridgeLine is diagnose's bridge-specific mapping: an exitError's own
+// message — a stray removed config-file variable's "craze: ..." (usagef, exit 2) included,
+// its leading "craze: " stripped — or, for a raw cobra error (an unknown
+// flag, an extra argument), its own text; bridgePrefix is added once, never
+// twice, since bridge.go's own errors already carry it.
+func bridgeLine(err error) string {
+	msg := err.Error()
+	var ee *exitError
+	if errors.As(err, &ee) {
+		msg = ee.msg
+	}
+	msg = strings.TrimPrefix(msg, "craze: ")
+	if strings.HasPrefix(msg, bridgePrefix) {
+		return msg
+	}
+	return bridgePrefix + msg
 }
