@@ -1042,6 +1042,52 @@ func TestNativeLoadClosedDuringTheFinalFlush(t *testing.T) {
 	}
 }
 
+// TestNativeLoadClosedDuringTheEndBracket (sol r2-c3 F2; X27): a Close that
+// begins while the end bracket is being published, after Publish has read
+// done, can leave the bracket delivered — Publish's select picks at random
+// between a ready primary send and the closed done — and its publish
+// answering true. Start still returns "session closed", and only once that
+// Close has finished, as at every other window of the load. The seam begins
+// the Close once the publish has answered true, which is the send's side of
+// that random choice made certain; the bracket is out, as the load's comment
+// allows.
+func TestNativeLoadClosedDuringTheEndBracket(t *testing.T) {
+	f := newNativeFixture(t)
+	ws := t.TempDir()
+	id := storeNativeSession(t, f, Options{Workspace: ws}, "test/a", []step{answer("one")})
+	s := f.session(Options{Workspace: ws, LoadSessionID: id})
+
+	closed := make(chan struct{})
+	s.loadEndSeam = func() {
+		go func() {
+			_ = s.Close()
+			close(closed)
+		}()
+		<-s.done
+	}
+
+	var err error
+	within(t, "the load's Start", func() { err = s.Start(context.Background()) })
+	select {
+	case <-s.closeDone:
+	default:
+		t.Fatal("Start returned before the Close that interrupted the load had finished")
+	}
+	within(t, "the Close", func() { <-closed })
+	if err == nil || err.Error() != "agent: session closed" {
+		t.Fatalf("Start: %v; want the session closed", err)
+	}
+	if got := loadLines(drained(s)); len(got) == 0 || got[len(got)-1] != "replay:end" {
+		t.Fatalf("the load published %q; want the end bracket last, published before the Close began", got)
+	}
+	s.mu.Lock()
+	loading := s.loading
+	s.mu.Unlock()
+	if loading || s.replaying.Load() {
+		t.Fatalf("after the closed load loading=%v replaying=%v; want both down", loading, s.replaying.Load())
+	}
+}
+
 // TestNativeLoadPanicLowersTheFlags (astra r1-c3 F2, the review's note): a
 // panic out of the replay's sink propagates out of Start, and leaves neither
 // the load's refusal nor its replayed stamp up behind it.

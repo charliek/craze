@@ -250,6 +250,14 @@ type nativeSession struct {
 	// can hold two setters at that point and prove each announces what the
 	// harness holds rather than what it asked for (r6 finding 3).
 	modeSeam func()
+	// loadEndSeam runs in load once the end bracket's publish has answered
+	// true and before the re-check of s.closed that follows it, with no lock
+	// held. **A test seam: nil in production**, set only by a test in this
+	// package before Start. It exists so a test can begin a Close in the
+	// window a publish that raced one leaves behind (sol r2-c3 F2): Publish's
+	// primary send and a closed done are a random choice, so that window
+	// cannot be pinned from inside the publish.
+	loadEndSeam func()
 }
 
 // steerText is one interjection in both of its spellings: sent is what went
@@ -664,7 +672,9 @@ func (s *nativeSession) openReplay() {
 // delta's flush, or between that flush and the end bracket — makes it return
 // "session closed" with no end bracket (X19), through loadClosed, which waits
 // for that Close to have finished, so the install delta cannot be delivered
-// after Start has returned (astra r1-c3 F2).
+// after Start has returned (astra r1-c3 F2). So does a Close that begins
+// during the end bracket's publish, although the bracket may be out by then
+// (sol r2-c3 F2).
 func (s *nativeSession) load(hs *harness.Session) error {
 	// Only after the end bracket may a turn or a setter begin: its first
 	// event can no longer land inside the bracket. Deferred, so the flags go
@@ -720,6 +730,24 @@ func (s *nativeSession) load(hs *harness.Session) error {
 	// (emitCtx answers false only for a Close): the load did not end, so
 	// Start does not say it did.
 	if !s.emitCtx(context.Background(), Event{Type: EventReplay, Replay: &ReplayInfo{Phase: ReplayEnd}}) {
+		return s.loadClosed()
+	}
+	if seam := s.loadEndSeam; seam != nil {
+		seam()
+	}
+	// A true answer does not say that no Close began (sol r2-c3 F2): Publish
+	// reads done before its primary send, and a Close that closes done after
+	// that reading leaves the send and done both ready, which its select picks
+	// between at random. Close marks s.closed in the section that closes done,
+	// so a Close that began before this reading — inside the publish or after
+	// it — is seen here, and Start answers "session closed" through
+	// loadClosed, as every other window does. In that window the end bracket
+	// may already have been published: the session is closing, and its
+	// caller, told so by the error, takes the load as not having ended.
+	s.mu.Lock()
+	closed = s.closed
+	s.mu.Unlock()
+	if closed {
 		return s.loadClosed()
 	}
 	return nil
