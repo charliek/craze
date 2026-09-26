@@ -1120,6 +1120,13 @@ type childObserver struct {
 	// cur is the step's text so far; last is the text of the last finished
 	// step that had any. A retry discards cur, as the turn discards its own
 	// deltas (turn.retry): what the failed attempt streamed is not the answer.
+	// So does a compaction's start (plan 028 R3-1): a child's overflow is
+	// compacted right after the failed request's transition discarded its
+	// attempt (turn.failedRequest), and nothing the child streams comes
+	// between the two, so a discarded attempt never reaches the child's final
+	// text, its parent's tool result or a background delivery; before any
+	// other compaction cur is empty already — a turn's first request has not
+	// gone out, or a step has just finished.
 	cur         strings.Builder
 	last        string
 	usage       Usage
@@ -1159,8 +1166,13 @@ func (o *childObserver) observe(ev Event) {
 		// usage — every attempt's, recorded or not — joins the sum, so both
 		// of the parent's feeds, SubagentFinished.Usage and the result's
 		// ChildUsage, carry it. The child's own entries hold it too; the
-		// parent's transcript only ever holds the sum.
-		if e.Phase == CompactionEnded {
+		// parent's transcript only ever holds the sum. Its start drops what
+		// the current step streamed, keeping the last finished step's text
+		// (cur's rule, above).
+		switch e.Phase {
+		case CompactionStarted:
+			o.cur.Reset()
+		case CompactionEnded:
 			o.usage = addUsage(o.usage, e.Usage)
 		}
 	}

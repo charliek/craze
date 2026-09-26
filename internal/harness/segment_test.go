@@ -924,16 +924,23 @@ func TestMidTurnCancelAfterTheFinalStepKeepsEverySegmentsUsage(t *testing.T) {
 // carries that notice again and nothing beside it: exactly one reminder, and
 // the parity where the failed request left it.
 //
-// Two controls pin what a carried notice is told apart from. The same notice
+// A control pins what a carried notice is told apart from: the same notice
 // merely retained — committed with its step, in the rebuilt history — is a
 // transition the restart's request is no retry of, so the standing reminder
-// is re-sent (sparse, at parity 1, which the re-send does not advance). And a
-// carried notice for a mode the session has left since — switched to ask
-// while the turn compacted — does not cover it: ask's notice is composed
-// after it.
+// is re-sent (sparse, at parity 1, which the re-send does not advance).
+//
+// And a carried notice for a mode the session has left since is not reused
+// (X36, sol r3-c9b-c11a item 5): its request failed, so the model never heard
+// it. Switched to ask while the turn compacted, the replacement request
+// carries ask's notice alone, composed from the told state, not the plan
+// notice beside it; switched back to agent — the mode the model was last
+// told — it carries none, and the step that answers it records agent, not
+// the plan mode the dropped notice announced.
 func TestMidTurnACarriedReminderIsReused(t *testing.T) {
 	// failed is the turn once its first request, carrying the re-entry
-	// notice, went out: m's alternation is at 1 and nothing is told yet.
+	// notice, went out: m's alternation is at 1 and nothing is told yet. The
+	// modes each of its steps hands the store are logged.
+	var logged []string
 	failed := func(t *testing.T) (*modes, *turn) {
 		t.Helper()
 		plan := filepath.Join(t.TempDir(), "s.plan.md")
@@ -942,7 +949,9 @@ func TestMidTurnACarriedReminderIsReused(t *testing.T) {
 		}
 		m := newModes(modeAgent, plan, tool.NewModeGate(modeAgent, nil))
 		m.set(modePlan)
-		tn := &turn{ctx: context.Background(), modes: m, steers: &steerbox{}, logMode: func(string) error { return nil },
+		logged = nil
+		tn := &turn{ctx: context.Background(), modes: m, steers: &steerbox{},
+			logMode:          func(mode string) error { logged = append(logged, mode); return nil },
 			turnFirstRequest: true, segmentFirstRequest: true}
 		if got := requestReminders(t, tn, []fantasy.Message{fantasy.NewUserMessage("plan it")}); !slices.Equal(got, []string{variantPlanReentry}) || m.turns != 1 {
 			t.Fatalf("the turn's first request carries %q at parity %d; want the re-entry notice, the alternation at 1", got, m.turns)
@@ -978,12 +987,25 @@ func TestMidTurnACarriedReminderIsReused(t *testing.T) {
 		}
 	})
 
-	t.Run("control: carried for a mode since left, the transition is added", func(t *testing.T) {
+	t.Run("carried for a mode since left: dropped, the transition alone", func(t *testing.T) {
 		m, tn := failed(t)
 		tn.newSegment()
 		m.set(modeAsk) // while the turn compacted
-		if got := requestReminders(t, tn, summary); !slices.Equal(got, []string{variantPlanReentry, variantAsk}) {
-			t.Fatalf("the replacement request carries %q; want the carried notice, then ask's", got)
+		if got := requestReminders(t, tn, summary); !slices.Equal(got, []string{variantAsk}) {
+			t.Fatalf("the replacement request carries %q; want ask's notice alone, the plan notice nobody heard dropped", got)
+		}
+	})
+
+	t.Run("carried for a mode since left, back in the told one: none", func(t *testing.T) {
+		m, tn := failed(t)
+		tn.newSegment()
+		m.set(modeAgent) // while the turn compacted: what the model was last told
+		if got := requestReminders(t, tn, summary); len(got) != 0 {
+			t.Fatalf("the replacement request carries %q; want none: the model was never told of plan mode, so there is nothing to leave", got)
+		}
+		tn.modeChangeHeld() // the replacement's step, about to be appended
+		if !slices.Equal(logged, []string{modeAgent}) {
+			t.Fatalf("the replacement's step hands the store the mode changes %q; want agent, the told one — not the dropped notice's plan", logged)
 		}
 	})
 }

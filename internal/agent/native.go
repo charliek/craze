@@ -2521,7 +2521,7 @@ func phraseTurnError(err error) error {
 		return phrase(fmt.Sprintf("native: provider %q does not serve model %q%s; check its wire_model in models.toml",
 			provider, model, status))
 	case errors.Is(err, harness.ErrContextTooLarge):
-		return phrase(fmt.Sprintf("native: the conversation no longer fits model %q's context window%s; start a new session (compaction arrives with H7)",
+		return phrase(fmt.Sprintf("native: the conversation no longer fits model %q's context window even after compacting%s; start a new session",
 			model, status))
 	}
 	msg := fmt.Sprintf("native: provider %q failed%s", provider, status)

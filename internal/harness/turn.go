@@ -136,6 +136,11 @@ type Result struct {
 //     nothing more, and the turn keeps that step's stop reason, with every
 //     step's usage summed as for any completed turn; a cancel after a tool
 //     step is a cancelled turn, whatever Fantasy reports.
+//   - A request the provider refuses as longer than the window is not saved
+//     at all, once per turn: what it streamed is dropped, its calls settled
+//     as not run, the context compacted, and the turn goes on with a request
+//     that replaces it (overflow recovery, plan 028 §3.12). A second one, or
+//     one the compaction cannot help, fails the turn with ErrContextTooLarge.
 //
 // A model or effort switch made since the last turn (SetModel, SetEffort) is
 // handed to the store first, so it is written just ahead of this turn's
@@ -343,25 +348,95 @@ func (s *Session) run(ctx context.Context, text string, wake bool, sink func(Eve
 	// Nothing is restarted after a segment that also ended by a save
 	// failure, unusable call ids, the doom-loop guard, an approved plan, a
 	// cancel or the step allowance (restartDue): those end the turn as they
-	// always have. Overflow recovery (§3.12, C12) is decided here too, on the
-	// error a segment returns, before finish ever sees it.
+	// always have.
+	//
+	// Overflow recovery (§3.12, D-08, P2) is decided here too, on the error a
+	// segment returns, before finish ever sees it — finish would persist the
+	// failed request's partial answer and write the held prompt with it. A
+	// request the provider refused as too large for the window, once per
+	// turn and never suppressed (overflowRecovers): the failed request is
+	// settled and discarded (failedRequest, §3.11 item 5), the context is
+	// compacted in the text form (reason overflow, §3.8 item 5, P17), and
+	// the next segment starts from the summary, with the turn's prompt sent
+	// again iff no append of the turn has written it yet — a first request
+	// that overflowed; after a step the prompt is in the summary — and the
+	// steers, reminder and results the failed request carried, uncommitted,
+	// re-placed after it (§3.11 item 6). A second overflow, a compaction
+	// that failed, or a context with nothing stored to compact — a new
+	// session's first request, whose prompt alone is too large — fails the
+	// turn with ErrContextTooLarge; a cancel during the compaction ends it
+	// cancelled, and one that cannot be written stops it (P5), as between
+	// any two segments.
 	prompt := text
+	recovered := false
 	for {
 		res, err := agent.Stream(turnCtx, t.call(prompt, history))
-		if !t.restartDue(err) {
+		switch {
+		case t.restartDue(err):
+			// Between requests: the completed step's call state is retired and
+			// nothing is outstanding, so a cancel here — during the summarizer —
+			// persists nothing more (P1), and a compaction that cannot be
+			// written stops the turn as a failed step save does (P5).
+			if err := s.midTurnCompaction(t); err != nil {
+				return t.stopBeforeRequest(err)
+			}
+			prompt = ""
+		case !recovered && s.overflowRecovers(t, err):
+			recovered = true
+			held := t.failedRequest()
+			if cerr := s.overflowCompaction(t); cerr != nil {
+				var saveErr *errCompactionSaveFailed
+				if errors.As(cerr, &saveErr) || turnCtx.Err() != nil {
+					return t.stopBeforeRequest(cerr)
+				}
+				// The summarizer failed (its failure entry is written): the
+				// turn fails with the overflow, between requests — the failed
+				// request is settled already, and nothing of it is
+				// persisted.
+				return t.finish(res, err)
+			}
+			prompt = ""
+			if held {
+				prompt = text
+			}
+		default:
 			return t.finish(res, err)
 		}
-		// Between requests: the completed step's call state is retired and
-		// nothing is outstanding, so a cancel here — during the summarizer —
-		// persists nothing more (P1), and a compaction that cannot be
-		// written stops the turn as a failed step save does (P5).
-		if err := s.midTurnCompaction(t); err != nil {
-			return t.stopBeforeRequest(err)
-		}
 		history = s.rebuildHistory(t)
-		prompt = ""
 		t.newSegment()
 	}
+}
+
+// overflowRecovers reports whether err, the error a segment's agent.Stream
+// returned, is an overflow run recovers from by compacting (plan 028 §3.12):
+// the provider refused the request as too large for the model's window
+// (overflowed), and the context holds something stored to compact — a new
+// session whose first request overflowed has nothing, and fails at once, as
+// it always has (§3.8 item 5, R2-9). It is asked once per turn at most: run
+// recovers once. It holds no lock of the turn's.
+func (s *Session) overflowRecovers(t *turn, err error) bool {
+	if !t.overflowed(err) {
+		return false
+	}
+	msgs, _ := s.store.ContextWithResults(t.model.id())
+	return len(msgs) > 0
+}
+
+// overflowCompaction is overflow recovery's compaction (plan 028 §3.12): reason
+// overflow — so the text form (§3.8 item 5, P17), the aligned request being
+// the one that just overflowed — recorded as the turn it is in, on the
+// turn's own model, run with no lock of the turn's held, as the mid-turn
+// one is (midTurnCompaction). It is never suppressed, and a summary switches
+// automatic compaction on or off by what it left, as any compaction's does
+// (compacted). The error is compact's: a summarizer failure, whose failure
+// entry is written, a cancel, or *errCompactionSaveFailed (P5); run triages
+// it.
+func (s *Session) overflowCompaction(t *turn) error {
+	res, err := s.compact(t.ctx, t.model, t.number, store.CompactionOverflow, "", "", t.emitLocked)
+	if err == nil {
+		s.compacted(t.model, res)
+	}
+	return err
 }
 
 // rebuildHistory is the history the next request replays, rebuilt from the
@@ -554,6 +629,11 @@ type turn struct {
 	// first request's reminder is decided by (reminders.go, restartReminder)
 	// — apart from a reminder carried uncommitted, which decides differently
 	// (carriedReminder, R4-1).
+	//
+	// userWritten says an append of the turn has written its own user entry,
+	// which the store holds from run's AppendUser until the first append,
+	// whichever it is (wrote): the overflow restart sends the prompt again
+	// only while it has not (§3.12).
 	compactCheck        func() bool
 	compactDue          bool
 	stepBase            int
@@ -562,6 +642,7 @@ type turn struct {
 	between             bool
 	total               Usage
 	retainedReminder    string
+	userWritten         bool
 
 	// Interject's steers, spliced into every step's messages from the one that
 	// first saw them (steer.go, plan 019 §3.10). steers is the session's box,
@@ -734,7 +815,7 @@ func (t *turn) compactionDue([]fantasy.StepResult) bool {
 // (stepResults) — marks the turn between requests, and counts the segment's
 // requests into stepBase, so the next segment's numbering carries on from
 // the last request started (the consumer table's global step; R2-1 counts a
-// request that started and never finished the same way, C12).
+// request that started and never finished the same way, failedRequest).
 func (t *turn) restartDue(err error) bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -749,6 +830,57 @@ func (t *turn) restartDue(err error) bool {
 	t.between = true
 	t.stepBase = t.step
 	return true
+}
+
+// overflowed reports whether err, the error a segment's agent.Stream
+// returned, is the provider refusing the request as longer than the model's
+// context window — classified as finish classifies it (classify), so a
+// retried step's last error, a *fantasy.ProviderError and the wrapper's
+// *llm.MidStreamError, an overflow after output began, are judged alike
+// (IsContextTooLarge) — and nothing else ended the turn: not a cancel, which
+// is a cancel whatever error it surfaced as, and none of the conditions that
+// forbid a restart (restartDue; they end a segment before a request fails,
+// so this is a defence), the step allowance included — the request that
+// failed was a request, and one past the allowance is never sent.
+func (t *turn) overflowed(err error) bool {
+	if err == nil {
+		return false
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.ctx.Err() != nil || t.saveErr != nil || t.badIDs || t.loop.stopped || t.planApproved || t.step >= maxSteps {
+		return false
+	}
+	return errors.Is(classify(err, t.model.id()), ErrContextTooLarge)
+}
+
+// failedRequest is the failed-request transition (plan 028 §3.11 item 5,
+// R2-1, R3-1): what run does, before the overflow's compaction, with a
+// request that ended without OnStepFinish. Its announced calls are settled
+// as not run, so every ToolStarted has its ToolFinished and the dispatcher
+// holds nothing of them; its partial text and reasoning are dropped from the
+// deltas — the user saw them stream, and the compaction that follows closes
+// that stream (a child's observer drops them there too, childObserver) — so a
+// later interrupted save holds the replacement's own alone; it counts toward
+// stepBase, as a request started, so no id or StepDone number of it is ever
+// used again; and nothing of it is persisted. The turn is between requests
+// from here, as at a mid-turn boundary: a cancel during the compaction
+// persists nothing, and the steers it drained, the reminder it carried and
+// the background results it reserved — none written by an append — are
+// carried into the next segment by newSegment, their reservations kept.
+//
+// held reports whether the turn's own user entry is still held by the store:
+// no append of the turn has written it (wrote), so the failed request was
+// the turn's first to carry it, and the next segment sends the prompt again.
+func (t *turn) failedRequest() (held bool) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.settleCalls(incomplete)
+	t.resetCalls(true)
+	t.resetDeltas()
+	t.between = true
+	t.stepBase = t.step
+	return !t.userWritten
 }
 
 // newSegment opens the next segment, once the compaction — or its failure —
@@ -1088,10 +1220,13 @@ func (t *turn) finish(res *fantasy.AgentResult, err error) (out Result, ferr err
 	// only what this runner kept says what the user saw. A context
 	// cancelled for any reason is a cancel, whatever error it surfaced as.
 	// Between requests (plan 028 §3.11 item 3) nothing is outstanding — the
-	// completed step is persisted and its call state retired — so nothing
-	// is saved again: an ending there is cancelled, or the error, with the
-	// steers alone. (run ends a turn between requests through
-	// stopBeforeRequest; this is the defence should it ever get here.)
+	// completed step is persisted and its call state retired, or the request
+	// that failed is settled and discarded (failedRequest) — so nothing is
+	// saved: an ending there is cancelled, or the error, with the steers
+	// alone. run ends a turn here between requests only for an overflow whose
+	// compaction produced no summary (§3.12): the turn fails with the
+	// overflow, and the steers the failed request drained come back
+	// unanswered.
 	partial := !t.between && (t.text.Len() > 0 || t.reasoning.Len() > 0 || t.announced() > 0)
 	var saveErr error
 	if !t.between {

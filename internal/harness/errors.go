@@ -47,10 +47,13 @@ var (
 	ErrModelNotFound = errors.New("harness: the provider does not know the model")
 
 	// ErrContextTooLarge is a provider saying the request is longer than the
-	// model's context window. There is no compaction until H7, so every
-	// later turn would fail the same way: the session is done, and a
-	// ProviderError of this kind says so, naming the model (plan 019 §3.5).
-	ErrContextTooLarge = errors.New("harness: the conversation no longer fits the model's context window; start a new session (compaction arrives with H7)")
+	// model's context window, and the turn could not recover from it (plan
+	// 028 §3.12): a turn compacts once on an overflow and tries again, so a
+	// turn fails with it on a second overflow, when that compaction failed,
+	// or when there was nothing stored to compact — a new session's first
+	// request, whose prompt alone is too large. A ProviderError of this kind
+	// says so, naming the model (plan 019 §3.5).
+	ErrContextTooLarge = errors.New("harness: the conversation no longer fits the model's context window even after compacting; start a new session")
 
 	// ErrBadToolCalls is a provider fault: a step's tool calls had an empty
 	// or a repeated call id, so their results could not be paired with them
@@ -166,7 +169,7 @@ func (e *ProviderError) Error() string {
 	head := "harness: provider error"
 	switch {
 	case e.kind == ErrContextTooLarge:
-		head = fmt.Sprintf("harness: the conversation no longer fits model %q's context window; start a new session (compaction arrives with H7)", e.Model)
+		head = fmt.Sprintf("harness: the conversation no longer fits model %q's context window even after compacting; start a new session", e.Model)
 	case e.kind != nil:
 		head = e.kind.Error()
 	}

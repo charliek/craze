@@ -97,9 +97,18 @@ func (m *router) requests(prompt string) []fantasy.Call {
 // could route ahead of time.
 const compactedKey = "<compacted>"
 
+// textFormKey is the key a compaction's text-form request is routed under
+// (overflow_test.go): its one user message is the context serialized, then
+// the compaction prompt (compact.go's textFormPrompt), which no test could
+// route ahead of time either. It is the one request that offers no tools.
+const textFormKey = "<text form>"
+
 func (m *router) Stream(ctx context.Context, call fantasy.Call) (fantasy.StreamResponse, error) {
 	key := firstUserText(call)
-	if strings.HasPrefix(key, "<"+compactedTag+">") {
+	switch {
+	case isTextForm(call):
+		key = textFormKey
+	case strings.HasPrefix(key, "<"+compactedTag+">"):
 		key = compactedKey
 	}
 	m.mu.Lock()

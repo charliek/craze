@@ -126,8 +126,12 @@ func (t *turn) unwrittenParts() []*internalPart {
 // user first), and commits its results once. And an agent_output call commits its reservation only when
 // its own result is in the tool entry written — outputs are those calls'
 // harness ids (outputCalls) — by that entry's id. An append that failed, or
-// had nothing to write, commits nothing: it never gets here. mu is held.
+// had nothing to write, commits nothing: it never gets here. Every append
+// writes the entries the store holds first, so the turn's own user entry is
+// written by whichever append of the turn comes first (userWritten). mu is
+// held.
 func (t *turn) wrote(ids []string, lead []*internalPart, withTool bool, outputs []string) {
+	t.userWritten = true
 	tail := 1 // the answer
 	if withTool {
 		tail++

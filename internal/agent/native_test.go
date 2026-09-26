@@ -761,7 +761,7 @@ func TestNativeTypedErrorsArePhrased(t *testing.T) {
 		{"404", &fantasy.ProviderError{StatusCode: 404, Message: "no such model"}, harness.ErrModelNotFound,
 			`native: provider "test" does not serve model "test/a" (HTTP 404); check its wire_model in models.toml`},
 		{"context too large", &fantasy.ProviderError{StatusCode: 400, ContextTooLargeErr: true}, harness.ErrContextTooLarge,
-			`native: the conversation no longer fits model "test/a"'s context window (HTTP 400); start a new session (compaction arrives with H7)`},
+			`native: the conversation no longer fits model "test/a"'s context window even after compacting (HTTP 400); start a new session`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newNativeFixture(t)
