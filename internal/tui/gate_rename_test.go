@@ -15,6 +15,7 @@ import (
 	"github.com/charliek/craze/internal/agent"
 	"github.com/charliek/craze/internal/backend"
 	"github.com/charliek/craze/internal/engine"
+	"github.com/charliek/craze/internal/transcript"
 )
 
 // titleBackend is the in-process backend with SetTitle in a test's hands:
@@ -99,6 +100,45 @@ func TestTheInvisibilityWatchSeesAHeldMutation(t *testing.T) {
 	m = tm.(Model)
 	if broke.phase != gateHeld || !slices.Contains(broke.fields, "main") {
 		t.Fatalf("the watch saw %+v, want the held message's comparison to name the pane (main)", broke)
+	}
+}
+
+// TestTheInvisibilityWatchSeesASharedEntryRewritten (astra C17 5): the digest
+// holds the shared transcript's contents, not only its sizes. An earlier entry
+// rewritten under an open gate to different text of the same length — the
+// sequence, the state, every length, byte count and tail unchanged — is seen
+// at the next held message, named as the shared model.
+func TestTheInvisibilityWatchSeesASharedEntryRewritten(t *testing.T) {
+	m, stub := gatedModel(t)
+	r := newGateRig(t, m)
+	stub.Emit(agent.Event{Type: agent.EventUser, Text: "the original line", Replayed: true})
+	stub.Emit(agent.Event{Type: agent.EventText, Text: "an answer still streaming"})
+	r.read()
+	r.read()
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+	r.send(gateOpMsg{call: blockedCall(release, nil), cont: noteCont("released")})
+	g := r.m.gate
+	broke := gateWatch.expectBreak(g)
+	t.Cleanup(func() { gateWatch.forget(g) })
+
+	var user *transcript.Entry
+	for _, e := range r.m.shared.Main.Entries() {
+		if e.Kind == transcript.KindUser {
+			user = e
+		}
+	}
+	if user == nil {
+		t.Fatal("no user entry was folded")
+	}
+	bytes, tail := r.m.shared.Main.Bytes(), r.m.shared.Main.Tail()
+	user.Text = "the rewrote! line"
+	if len(user.Text) != len("the original line") || r.m.shared.Main.Bytes() != bytes || r.m.shared.Main.Tail() != tail {
+		t.Fatal("the rewrite moved a size or the tail: it proves nothing")
+	}
+	r.send(runeKey('k'))
+	if broke.phase != gateHeld || !slices.Contains(broke.fields, "shared") {
+		t.Fatalf("the watch saw %+v, want the held message's comparison to name the shared model", broke)
 	}
 }
 

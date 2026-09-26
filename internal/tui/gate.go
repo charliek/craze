@@ -6,11 +6,11 @@ import (
 	"fmt"
 	"reflect"
 	"runtime/debug"
+	"sync"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"github.com/charliek/craze/internal/agent"
 	"github.com/charliek/craze/internal/backend"
 )
 
@@ -94,10 +94,17 @@ type gate struct {
 // gateReply is a gated call's answer: its result and error, or ErrNoAnswer. A
 // reply whose id is not the open gate's is late — its gate was released
 // without it — and is dropped.
+//
+// linger is set on an ErrNoAnswer the deadline gave: the call is still
+// running, and its outcome will arrive there. Whoever takes the reply — the
+// release, or the drop of a late one — waits for it in a tea.Cmd (lingerOn),
+// so a call that panics after its deadline panics inside Update, where
+// bubbletea recovers it, never on a goroutine nothing recovers.
 type gateReply struct {
 	id     uint64
 	result any
 	err    error
+	linger <-chan callOutcome
 }
 
 // drainMsg applies the next held message.
@@ -169,10 +176,11 @@ func (m Model) run(deadline time.Duration, call gateCall, cont gateCont) (Model,
 		panic("tui: a gated call was issued with no backend")
 	}
 	if m.gateSync {
-		ctx, cancel := context.WithTimeout(context.Background(), deadline)
-		r := callGated(ctx, b, 0, call)
-		cancel()
-		return cont(m, r)
+		// Today's control flow exactly: the call inline, with the context
+		// today's direct calls were given, which never ends. The deadline is
+		// the asynchronous gate's alone.
+		res, err := call(context.Background(), b)
+		return cont(m, gateReply{result: res, err: err})
 	}
 	m.gateSeq++
 	g := &gate{id: m.gateSeq, cont: cont, deadline: deadline}
@@ -180,41 +188,64 @@ func (m Model) run(deadline time.Duration, call gateCall, cont gateCont) (Model,
 	return m, func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), deadline)
 		defer cancel()
-		done := make(chan gateReply, 1)
-		caught := make(chan callPanic)
-		gone := make(chan struct{})
-		defer close(gone)
-		go func() {
-			defer func() {
-				if v := recover(); v != nil {
-					p := callPanic{value: v, stack: debug.Stack()}
-					select {
-					case caught <- p:
-					case <-gone:
-						// The command gave up at the deadline and returned:
-						// there is nobody to carry the panic to, and it is
-						// not swallowed.
-						panic(p)
-					}
-				}
-			}()
-			done <- callGated(ctx, b, g.id, call)
-		}()
+		// Buffered, so the call's goroutine always parks its outcome and
+		// ends, whoever is still there to take it: it never panics itself.
+		out := make(chan callOutcome, 1)
+		go func() { out <- runGated(ctx, b, g.id, call) }()
 		select {
-		case r := <-done:
-			return r
-		case p := <-caught:
-			// The call panicked. Re-raised here, on the command's own
-			// goroutine, bubbletea recovers it and ends the program with
-			// ErrProgramPanic — what a panic inside the synchronous call did
-			// from inside its Update — rather than a bare goroutine taking
-			// the process down with the terminal still raw.
-			panic(p)
+		case o := <-out:
+			if o.panicked != nil {
+				// The call panicked. Re-raised here, on the command's own
+				// goroutine, bubbletea recovers it and ends the program with
+				// ErrProgramPanic — what a panic inside the synchronous call
+				// did from inside its Update — rather than a bare goroutine
+				// taking the process down with the terminal still raw.
+				panic(*o.panicked)
+			}
+			return o.reply
 		case <-ctx.Done():
-			return gateReply{id: g.id, err: ErrNoAnswer}
+			// No answer in time. The call may still be running — or may
+			// have panicked just now — so its outcome goes with the reply,
+			// to be waited for where a panic is recovered (lingerOn).
+			return gateReply{id: g.id, err: ErrNoAnswer, linger: out}
 		}
 	}
 }
+
+// callOutcome is how a gated call ended: its reply, or the panic it raised.
+type callOutcome struct {
+	reply    gateReply
+	panicked *callPanic
+}
+
+// runGated runs the call on its own goroutine's behalf and answers how it
+// ended, a panic included, with the stack it panicked on.
+func runGated(ctx context.Context, b backend.Backend, id uint64, call gateCall) (o callOutcome) {
+	defer func() {
+		if v := recover(); v != nil {
+			o = callOutcome{panicked: &callPanic{value: v, stack: debug.Stack()}}
+		}
+	}()
+	return callOutcome{reply: callGated(ctx, b, id, call)}
+}
+
+// lingerOn waits for a call its gate stopped waiting for at the deadline. A
+// call that returns is discarded — its answer came too late to mean anything
+// — and one that panics comes back as callPanicMsg, which panics inside
+// Update: bubbletea recovers that, restores the terminal and runs the exit
+// tails, as it does for any Update panic.
+func lingerOn(out <-chan callOutcome) tea.Cmd {
+	return func() tea.Msg {
+		if o := <-out; o.panicked != nil {
+			return callPanicMsg{p: *o.panicked}
+		}
+		return nil
+	}
+}
+
+// callPanicMsg is a lingering call's panic, on its way into Update. It is
+// never held: it panics in the Update it reaches.
+type callPanicMsg struct{ p callPanic }
 
 // callPanic is a gated call's panic on its way to the command's goroutine,
 // with the stack of the goroutine it happened on: re-raised there, the stack
@@ -229,7 +260,7 @@ func (p callPanic) String() string { return fmt.Sprintf("%v\n\n%s", p.value, p.s
 // callGated runs call with ctx, which ends at the call's deadline, and answers
 // its reply. A call that gave up because that deadline passed did not answer:
 // that is ErrNoAnswer, the outcome the deadline promises, not the context's
-// own error.
+// own error. It is the asynchronous gate's: the baseline has no deadline.
 func callGated(ctx context.Context, b backend.Backend, id uint64, call gateCall) gateReply {
 	res, err := call(ctx, b)
 	if err != nil && ctx.Err() != nil && errors.Is(err, ctx.Err()) {
@@ -241,8 +272,16 @@ func callGated(ctx context.Context, b backend.Backend, id uint64, call gateCall)
 // gated is Update: the gate over handle and the Update wrapper.
 func (m Model) gated(msg tea.Msg, handle handler) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case callPanicMsg:
+		panic(msg.p)
 	case gateReply:
 		if m.gate == nil || msg.id != m.gate.id {
+			// Late: its gate was released without it (the held queue's
+			// bound). A call still running past its deadline is still
+			// waited for, where its panic would be recovered.
+			if msg.linger != nil {
+				return m, lingerOn(msg.linger)
+			}
 			return m, nil
 		}
 		return m.release(msg)
@@ -301,7 +340,7 @@ func (m Model) apply(msg tea.Msg, handle handler, drained bool) (tea.Model, tea.
 // is open (readOn).
 func (m Model) hold(msg tea.Msg) (tea.Model, tea.Cmd) {
 	n := payloadBytes(msg)
-	m.held = append(m.held, heldMsg{msg: msg, bytes: n})
+	m.pushHeld(heldMsg{msg: msg, bytes: n})
 	m.heldBytes += n
 	if m.gate != nil {
 		m.noteGate(gateHeld)
@@ -338,6 +377,9 @@ func (m Model) release(r gateReply) (tea.Model, tea.Cmd) {
 	if next.gate == nil && len(next.held) > 0 {
 		cmd = tea.Batch(cmd, drainNext)
 	}
+	if r.linger != nil {
+		cmd = tea.Batch(cmd, lingerOn(r.linger))
+	}
 	read := next.readOn()
 	return next, tea.Batch(cmd, read)
 }
@@ -351,12 +393,23 @@ func (m Model) drain(handle handler) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	h := m.held[0]
+	// The drained slot is emptied before the queue moves past it: its payload
+	// has been credited back, and the array must not keep it alive while
+	// later messages stay held (astra C17 13).
+	m.held[0] = heldMsg{}
 	m.held = m.held[1:]
+	m.heldDrained++
 	m.heldBytes -= h.bytes
-	if len(m.held) == 0 {
-		// Let the array go: a hold of large records is not kept alive by the
-		// slice that has drained them.
-		m.held, m.heldBytes = nil, 0
+	switch {
+	case len(m.held) == 0:
+		// Let the array go.
+		m.held, m.heldBytes, m.heldDrained = nil, 0, 0
+	case 2*m.heldDrained > cap(m.held)+m.heldDrained:
+		// More than half the array is drained slots: the rest moves to an
+		// array of its own, so a long drain that reopens gates neither keeps
+		// the old array nor grows it without bound.
+		m.held = append([]heldMsg(nil), m.held...)
+		m.heldDrained = 0
 	}
 	var next Model
 	var cmd tea.Cmd
@@ -389,11 +442,23 @@ func (m Model) syncFrame(s frameSyncMsg) Model {
 		m.syncPending = s.n
 		m.noteGate(gateHeld)
 	case len(m.held) > 0:
-		m.held = append(m.held, heldMsg{msg: s})
+		m.pushHeld(heldMsg{msg: s, bytes: heldCharge})
+		m.heldBytes += heldCharge
 	default:
 		m.syncAck = s.n
 	}
 	return m
+}
+
+// pushHeld appends h to the held queue. An append that moves the queue to a
+// new array leaves the drained slots behind with the old one, so the count of
+// drained slots the array holds starts again (drain's compaction).
+func (m *Model) pushHeld(h heldMsg) {
+	before := cap(m.held)
+	m.held = append(m.held, h)
+	if cap(m.held) != before {
+		m.heldDrained = 0
+	}
 }
 
 // readOn is the one reader rule (§3.12, astra 4, r2 8), run after every
@@ -420,44 +485,47 @@ func (m *Model) readOn() tea.Cmd {
 // internal/transcript's accounting keeps (transcript's errValueBytes).
 const errValueBytes = 256
 
+// heldCharge is what every held message costs before its payload — its place
+// in the queue and its own words — so no held message is free.
+const heldCharge = 64
+
 var errorType = reflect.TypeFor[error]()
 
 // payloadBytes estimates the bytes a held message retains (§3.12, astra r2 17,
-// r3 17). The messages that carry a payload are counted, and every other one
-// is charged nothing and bounded by the message count alone:
+// r3 17, C17 7): heldCharge, plus the message's own data, walked by
+// reflection so a payload field added to any message is counted without being
+// named here — an event's text and payloads, a key's runes (a bracketed
+// paste), a clipboard paste, a settings result's values and notes, and what a
+// later message carries (a restored snapshot, PR 4).
 //
-//   - an event: every string and byte slice it reaches — its text, the tool's
-//     input, output and diffs, a plan, a question, a delta's lists — with an
-//     error value charged errValueBytes (eventBytes);
-//   - a key: its runes, which is what a bracketed paste arrives as;
-//   - a clipboard paste (Ctrl+V): its text.
+// The rule, which decides both what is counted and what is never read:
 //
-// A restore item (PR 4) carries a snapshot; no message delivers one in process
-// yet — waitEvent reads past it — and the message that does joins this switch.
+//   - a string counts its length, a slice of numbers (bytes, runes) its
+//     length times the element's size;
+//   - structs, arrays, slices and maps are walked, the message's own copy;
+//   - an error value is charged errValueBytes and never walked;
+//   - a pointer is followed only to plain data (plainData): a type built of
+//     numbers, strings, errors and further plain data, not in the deny list;
+//   - any other interface (a backend, a session, a message), a func, a chan,
+//     and a pointer to anything else (the model, the engine, a controller, a
+//     lock) is a handle, and is neither counted nor read: a live engine is
+//     written by its own goroutines, so reading it would race as well as
+//     miscount.
+//
+// internal/transcript accounts an entry's retained bytes the same way
+// (entryBytes: its text and its payload's strings, an unreadable error at a
+// fixed charge) but exports no estimator for a message or an event.
 func payloadBytes(msg tea.Msg) int {
-	switch msg := msg.(type) {
-	case eventMsg:
-		return eventBytes(msg.ev)
-	case tea.KeyMsg:
-		return len(msg.Runes) * int(reflect.TypeFor[rune]().Size())
-	case pasteMsg:
-		return len(msg.text)
+	if msg == nil {
+		return heldCharge
 	}
-	return 0
+	return heldCharge + ownedBytes(reflect.ValueOf(msg), map[uintptr]bool{})
 }
 
-// eventBytes is an event's retained bytes. internal/transcript accounts an
-// entry's retained bytes the same way (entryBytes: its text and its payload's
-// strings, an unreadable error at a fixed charge) but exports no estimator for
-// an event, so this is the TUI's own. It walks the event by reflection, so a
-// payload field added to any event type is counted without being named here.
-// An event is plain data — no handle, lock or channel — built once and never
-// written again, so the walk reads nothing another goroutine is writing.
-func eventBytes(ev agent.Event) int {
-	return reachBytes(reflect.ValueOf(ev), map[uintptr]bool{})
-}
-
-func reachBytes(v reflect.Value, seen map[uintptr]bool) int {
+func ownedBytes(v reflect.Value, seen map[uintptr]bool) int {
+	if payloadOpaque[v.Type()] {
+		return 0
+	}
 	switch v.Kind() {
 	case reflect.String:
 		return v.Len()
@@ -472,26 +540,21 @@ func reachBytes(v reflect.Value, seen map[uintptr]bool) int {
 		}
 		n := 0
 		for i := range v.Len() {
-			n += reachBytes(v.Index(i), seen)
+			n += ownedBytes(v.Index(i), seen)
 		}
 		return n
 	case reflect.Array:
 		n := 0
 		for i := range v.Len() {
-			n += reachBytes(v.Index(i), seen)
+			n += ownedBytes(v.Index(i), seen)
 		}
 		return n
 	case reflect.Pointer:
-		if v.IsNil() || seen[v.Pointer()] {
+		if v.IsNil() || seen[v.Pointer()] || !plainData(v.Type().Elem()) {
 			return 0
 		}
 		seen[v.Pointer()] = true
-		if v.Type() == reflect.TypeFor[*time.Location]() {
-			// A time's zone is shared by every time in the process, and its
-			// cache is written lazily: it is not the event's to count.
-			return 0
-		}
-		return reachBytes(v.Elem(), seen)
+		return ownedBytes(v.Elem(), seen)
 	case reflect.Interface:
 		if v.IsNil() {
 			return 0
@@ -499,11 +562,11 @@ func reachBytes(v reflect.Value, seen map[uintptr]bool) int {
 		if v.Type().Implements(errorType) || v.Elem().Type().Implements(errorType) {
 			return errValueBytes
 		}
-		return reachBytes(v.Elem(), seen)
+		return 0
 	case reflect.Struct:
 		n := 0
 		for i := range v.NumField() {
-			n += reachBytes(v.Field(i), seen)
+			n += ownedBytes(v.Field(i), seen)
 		}
 		return n
 	case reflect.Map:
@@ -514,9 +577,80 @@ func reachBytes(v reflect.Value, seen map[uintptr]bool) int {
 		n := 0
 		it := v.MapRange()
 		for it.Next() {
-			n += reachBytes(it.Key(), seen) + reachBytes(it.Value(), seen)
+			n += ownedBytes(it.Key(), seen) + ownedBytes(it.Value(), seen)
 		}
 		return n
 	}
 	return 0
+}
+
+// payloadOpaque is the deny list: types a held message may carry that are
+// never walked, by value or behind a pointer — the model itself, a time's
+// zone (shared by every time in the process, its cache written lazily), and
+// the locks.
+var payloadOpaque = map[reflect.Type]bool{
+	reflect.TypeFor[Model]():         true,
+	reflect.TypeFor[time.Location](): true,
+	reflect.TypeFor[sync.Mutex]():    true,
+	reflect.TypeFor[sync.RWMutex]():  true,
+	reflect.TypeFor[sync.Once]():     true,
+}
+
+var (
+	plainMu    sync.Mutex
+	plainTypes = map[reflect.Type]bool{}
+)
+
+// plainData reports whether t is plain data, which a held message's pointer
+// may be followed to: numbers, strings, errors (charged, never walked), and
+// structs, arrays, slices, maps and pointers of plain data — nothing in
+// payloadOpaque or package sync, and no func, chan or other interface. An
+// event's payloads (a tool, a plan, a question, a delta) are plain data; an
+// engine, a controller or the model is not.
+func plainData(t reflect.Type) bool {
+	plainMu.Lock()
+	defer plainMu.Unlock()
+	return plainLocked(t)
+}
+
+func plainLocked(t reflect.Type) bool {
+	if ok, known := plainTypes[t]; known {
+		return ok
+	}
+	// A recursive type is plain unless some other part of it is not.
+	plainTypes[t] = true
+	ok := plainShape(t)
+	plainTypes[t] = ok
+	return ok
+}
+
+func plainShape(t reflect.Type) bool {
+	if payloadOpaque[t] || t.PkgPath() == "sync" || t.PkgPath() == "sync/atomic" {
+		return false
+	}
+	if t == reflect.TypeFor[time.Time]() {
+		// Numbers and a zone pointer, and the zone is opaque: walked no
+		// further.
+		return true
+	}
+	switch t.Kind() {
+	case reflect.Bool, reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
+		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr,
+		reflect.Float32, reflect.Float64, reflect.Complex64, reflect.Complex128, reflect.String:
+		return true
+	case reflect.Interface:
+		return t == errorType
+	case reflect.Pointer, reflect.Slice, reflect.Array:
+		return plainLocked(t.Elem())
+	case reflect.Map:
+		return plainLocked(t.Key()) && plainLocked(t.Elem())
+	case reflect.Struct:
+		for i := range t.NumField() {
+			if !plainLocked(t.Field(i).Type) {
+				return false
+			}
+		}
+		return true
+	}
+	return false
 }

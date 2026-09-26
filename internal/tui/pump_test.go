@@ -483,18 +483,23 @@ func cmdFuncName(cmd tea.Cmd) string {
 // key, then say what the user should end up seeing.
 //
 // The predicate is checked after each Update and once before the first, so a
-// state already reached is not waited for.
+// state already reached is not waited for — and only on a model with no gated
+// call waiting and nothing held (plan 027 §3.12, astra C17 11): a state the
+// model shows mid-gate is its issuing Update's half-done frame, which no test
+// asserts on. A test that means to stand mid-gate says so (awaitGate, the
+// gate's own rig).
 func pumpUntil(t *testing.T, m Model, pred func(Model) bool) Model {
 	t.Helper()
 	p := pumpFor(t, m)
-	if pred(m) {
+	reached := func(m Model) bool { return m.gate == nil && len(m.held) == 0 && pred(m) }
+	if reached(m) {
 		return m
 	}
 	timeout := deadline()
 	for {
 		if item, ok := p.popFront(); ok {
 			m = p.apply(m, item)
-			if pred(m) {
+			if reached(m) {
 				return m
 			}
 			continue
@@ -502,7 +507,7 @@ func pumpUntil(t *testing.T, m Model, pred func(Model) bool) Model {
 		select {
 		case item := <-p.msgs:
 			m = p.apply(m, item)
-			if pred(m) {
+			if reached(m) {
 				return m
 			}
 		case <-timeout:

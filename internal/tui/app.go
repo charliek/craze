@@ -632,7 +632,9 @@ type Model struct {
 	// whose reply the model is waiting for, nil when none is open; gateSeq
 	// numbers them. held is every message that arrived while a gate was open,
 	// or while earlier held ones were still draining, in arrival order, and
-	// heldBytes the payload they retain (payloadBytes). reading says a Read of
+	// heldBytes the payload they retain (payloadBytes); heldDrained counts the
+	// drained slots at the front of held's array (drain compacts it once they
+	// are more than half of it). reading says a Read of
 	// the backend's stream is in flight: exactly one ever is (readOn). syncAck
 	// is the last frame-sync token acknowledged, which the frame harness
 	// publishes as its barrier, and syncPending one that arrived while a gate
@@ -645,6 +647,7 @@ type Model struct {
 	gateSeq     uint64
 	held        []heldMsg
 	heldBytes   int
+	heldDrained int
 	reading     bool
 	syncAck     int
 	syncPending int

@@ -76,6 +76,13 @@ type FrameOpts struct {
 	// frame golden runs in both modes against the same golden file (plan 027
 	// §3.12 (d)), and `craze frame` is always asynchronous.
 	gateSync bool
+	// beforeBarrier, when a test sets it, runs in the runner after each
+	// token's sync message is sent and before its barrier is awaited, with the
+	// token and its number and the bus's newest frame; an error it returns
+	// ends the script there, with the barrier not taken. It is how a test
+	// holds the runner back while the program runs on (the rendezvous), or
+	// makes the runner give up while the program waits on it.
+	beforeBarrier func(tok string, n int, last func() frameState) error
 }
 
 type frameTokenKind int
@@ -383,7 +390,8 @@ type frameState struct {
 }
 
 // frameBus carries frames from the bubbletea goroutine to the script runner.
-// Publishing never blocks the program loop.
+// Publishing never blocks the program loop; the rendezvous (meet) does, and
+// only the frame runner's program meets.
 type frameBus struct {
 	mu     sync.Mutex
 	latest frameState
@@ -392,10 +400,57 @@ type frameBus struct {
 	n      int
 	print  io.Writer
 	wake   chan struct{}
+	// taken is the newest sync token whose barrier the runner has taken, and
+	// took wakes a program waiting on it. over is closed when the runner is
+	// done, however it ended, and releases any rendezvous for good.
+	taken    int
+	took     chan struct{}
+	over     chan struct{}
+	overOnce sync.Once
 }
 
 func newFrameBus(print io.Writer) *frameBus {
-	return &frameBus{print: print, wake: make(chan struct{}, 1)}
+	return &frameBus{print: print, wake: make(chan struct{}, 1), took: make(chan struct{}, 1), over: make(chan struct{})}
+}
+
+// take records that the runner has taken token n's barrier.
+func (b *frameBus) take(n int) {
+	b.mu.Lock()
+	b.taken = max(b.taken, n)
+	b.mu.Unlock()
+	select {
+	case b.took <- struct{}{}:
+	default:
+	}
+}
+
+// finish says the runner is done: no barrier will be taken again, and no
+// program may wait for one.
+func (b *frameBus) finish() { b.overOnce.Do(func() { close(b.over) }) }
+
+// meet is the rendezvous (plan 027 C17a, astra C17 1): the program has just
+// published the frame that acknowledges sync token n, and waits here — the
+// program loop blocked — until the runner has taken that token's barrier, or
+// is done. So the barrier's newest frame is always the acknowledgement, the
+// barrier clears exactly the frames up to it, and every frame published after
+// it is queued for the next wait (§2.7). Without it, a program that drained a
+// short turn's held ending before the runner resumed left an idle newest frame
+// for the barrier to match, and the barrier cleared the release's working
+// frame with the rest.
+func (b *frameBus) meet(n int) {
+	for {
+		b.mu.Lock()
+		taken := b.taken >= n
+		b.mu.Unlock()
+		if taken {
+			return
+		}
+		select {
+		case <-b.took:
+		case <-b.over:
+			return
+		}
+	}
 }
 
 func (b *frameBus) publish(s frameState) {
@@ -430,6 +485,12 @@ func (b *frameBus) last() frameState {
 // matches, otherwise the oldest unconsumed frame that does, otherwise it blocks
 // for new frames until the deadline or until stop is closed. Closing stop only
 // ends the blocking; already-published frames are still checked first.
+//
+// A documented residual, of these semantics and not of the command gate's: a
+// state that comes and goes on its own after a barrier and before the next
+// wait runs — a card that opens and closes by itself before the runner reaches
+// <wait:card> — is still matched by the oldest-queued fallback, although the
+// newest frame no longer shows it (astra C17 1's converse schedule).
 func (b *frameBus) await(pred func(frameState) bool, timeout time.Duration, stop <-chan struct{}) (frameState, bool) {
 	deadline := time.Now().Add(timeout)
 	stopped := false
@@ -481,10 +542,14 @@ func (b *frameBus) await(pred func(frameState) bool, timeout time.Duration, stop
 type frameSyncMsg struct{ n int }
 
 // frameModel wraps the real Model and publishes inner.View() after every
-// message, so the script runner sees exactly what a terminal would.
+// message, so the script runner sees exactly what a terminal would. meet is
+// the frame runner's program: an Update that acknowledges a sync token waits
+// there for the runner to take its barrier (frameBus.meet). A test driving a
+// frameModel by hand leaves it false.
 type frameModel struct {
 	inner Model
 	bus   *frameBus
+	meet  bool
 }
 
 func (f frameModel) Init() tea.Cmd {
@@ -494,9 +559,16 @@ func (f frameModel) Init() tea.Cmd {
 }
 
 func (f frameModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	acked := f.inner.syncAck
 	im, cmd := f.inner.Update(msg)
 	f.inner = im.(Model)
 	f.publish()
+	// A token acknowledged — at once, by a release's pending ack, or drained —
+	// and its frame published: nothing more is reduced until the runner has
+	// taken its barrier.
+	if f.meet && f.inner.syncAck > acked {
+		f.bus.meet(f.inner.syncAck)
+	}
 	return f, cmd
 }
 
@@ -519,11 +591,12 @@ func (f frameModel) publish() {
 }
 
 type frameRunner struct {
-	p        *tea.Program
-	bus      *frameBus
-	timeout  time.Duration
-	finished <-chan struct{}
-	seq      int
+	p             *tea.Program
+	bus           *frameBus
+	timeout       time.Duration
+	finished      <-chan struct{}
+	seq           int
+	beforeBarrier func(tok string, n int, last func() frameState) error
 }
 
 func (r *frameRunner) done() bool {
@@ -595,7 +668,7 @@ func RunFrameScript(cfg Config, cols, rows int, script string, opts FrameOpts) (
 	// is the baseline (gateSyncDefault), and a frame is asynchronous unless its
 	// caller asked for the baseline.
 	m.gateSync = opts.gateSync
-	p := tea.NewProgram(frameModel{inner: m, bus: bus}, tea.WithoutRenderer(), tea.WithInput(nil))
+	p := tea.NewProgram(frameModel{inner: m, bus: bus, meet: true}, tea.WithoutRenderer(), tea.WithInput(nil))
 	done := make(chan error, 1)
 	finished := make(chan struct{})
 	go func() {
@@ -604,8 +677,12 @@ func RunFrameScript(cfg Config, cols, rows int, script string, opts FrameOpts) (
 		close(finished)
 	}()
 
-	r := &frameRunner{p: p, bus: bus, timeout: timeout, finished: finished}
+	r := &frameRunner{p: p, bus: bus, timeout: timeout, finished: finished, beforeBarrier: opts.beforeBarrier}
 	scriptErr := r.run(toks, cols, rows)
+	// The runner is done, however the script ended — at its last token, a wait
+	// that timed out, a hook's error: a program waiting at a rendezvous is let
+	// go before it is asked to quit, or the quit would never be reduced.
+	bus.finish()
 
 	p.Quit()
 	select {
@@ -702,8 +779,16 @@ func (r *frameRunner) sync(what string) error {
 	r.seq++
 	n := r.seq
 	r.p.Send(frameSyncMsg{n: n})
+	if r.beforeBarrier != nil {
+		if err := r.beforeBarrier(what, n, r.bus.last); err != nil {
+			return err
+		}
+	}
 	pred := func(s frameState) bool { return s.sync >= n }
-	if _, ok := r.bus.await(pred, r.timeout, r.finished); ok {
+	_, ok := r.bus.await(pred, r.timeout, r.finished)
+	// Taken, matched or not: the program may go on (frameBus.meet).
+	r.bus.take(n)
+	if ok {
 		return nil
 	}
 	if r.done() {

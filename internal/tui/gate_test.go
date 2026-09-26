@@ -7,6 +7,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -82,6 +83,9 @@ type gateRig struct {
 	maxReads int
 	calls    []tea.Cmd
 	drains   int
+	// lingers are the waits for calls a gate stopped waiting for at their
+	// deadline (lingerOn), not run until a test runs one.
+	lingers []tea.Cmd
 }
 
 // newGateRig takes over m with the one read Init armed outstanding, as New
@@ -131,6 +135,8 @@ func (r *gateRig) sort(cmd tea.Cmd) {
 		r.drains++
 	case strings.HasPrefix(name, tuiPkg+"Model.run"):
 		r.calls = append(r.calls, cmd)
+	case strings.HasPrefix(name, tuiPkg+"lingerOn"):
+		r.lingers = append(r.lingers, cmd)
 	}
 	// Anything else — a timer above all — is never run: the tests deliver
 	// their own ticks.
@@ -640,15 +646,41 @@ func TestAGatedCallThatNeverAnswersReleasesAtItsDeadline(t *testing.T) {
 	if len(got) != 2 || !errors.Is(got[1], ErrNoAnswer) {
 		t.Fatalf("a call that gave up at its deadline answered %v, want ErrNoAnswer", got)
 	}
-	// Inline, in the baseline, the call's own answer is the only one there
-	// is: its context's error still reads as no answer.
-	r.m.gateSync = true
-	r.send(gateOpMsg{deadline: 20 * time.Millisecond, cont: cont, call: func(ctx context.Context, _ backend.Backend) (any, error) {
-		<-ctx.Done()
-		return nil, fmt.Errorf("gave up: %w", ctx.Err())
+	// The deadline is the asynchronous gate's alone, and it reaches the call
+	// as its context's. A call that answers with that context's error, once
+	// the context has ended, answered nothing (callGated) — whichever of the
+	// call and the deadline the command sees first.
+	var asyncCtx context.Context
+	r.send(gateOpMsg{deadline: time.Minute, cont: cont, call: func(ctx context.Context, _ backend.Backend) (any, error) {
+		asyncCtx = ctx
+		return nil, nil
 	}})
-	if len(got) != 3 || !errors.Is(got[2], ErrNoAnswer) {
-		t.Fatalf("an inline call that gave up at its deadline answered %v, want ErrNoAnswer", got)
+	r.answer()
+	if _, ok := asyncCtx.Deadline(); !ok {
+		t.Fatal("the asynchronous call's context carries no deadline")
+	}
+	expired, cancel := context.WithTimeout(context.Background(), -time.Second)
+	defer cancel()
+	if rep := callGated(expired, nil, 9, func(ctx context.Context, _ backend.Backend) (any, error) {
+		return nil, fmt.Errorf("gave up: %w", ctx.Err())
+	}); !errors.Is(rep.err, ErrNoAnswer) || rep.id != 9 {
+		t.Fatalf("a call that answered its expired context's error came back %+v, want ErrNoAnswer", rep)
+	}
+
+	// The gateSync baseline is today's control flow exactly (C17a, note 9):
+	// the call inline, with the context today's direct calls had — one that
+	// never ends — and its own answer, never ErrNoAnswer.
+	r.m.gateSync = true
+	var inlineCtx context.Context
+	r.send(gateOpMsg{deadline: 20 * time.Millisecond, cont: cont, call: func(ctx context.Context, _ backend.Backend) (any, error) {
+		inlineCtx = ctx
+		return nil, errors.New("its own answer")
+	}})
+	if _, ok := inlineCtx.Deadline(); ok || inlineCtx.Done() != nil {
+		t.Fatal("the baseline's inline call was given a context that ends: the deadline is the asynchronous gate's alone")
+	}
+	if last := got[len(got)-1]; last == nil || last.Error() != "its own answer" {
+		t.Fatalf("the baseline's continuation saw %v, want the call's own answer", last)
 	}
 }
 
@@ -758,4 +790,164 @@ func cmdHas(cmd tea.Cmd, name string) bool {
 		return false
 	}
 	return strings.HasPrefix(fn, name)
+}
+
+// TestACallThatPanicsAfterItsDeadlinePanicsInUpdate (astra C18a r42 5): a
+// call still running when its deadline releases the gate is still waited for
+// — by the release, or by the drop of a late reply after the held queue's
+// bound released it — in a command (lingerOn) whose panic message panics in
+// the Update it reaches, held or not, where bubbletea recovers it. A lingering
+// call that returns produces no message at all.
+func TestACallThatPanicsAfterItsDeadlinePanicsInUpdate(t *testing.T) {
+	lateCall := func(late <-chan struct{}, panics bool) gateCall {
+		return func(context.Context, backend.Backend) (any, error) {
+			<-late
+			if panics {
+				panic("a panic after the deadline")
+			}
+			return "too late", nil
+		}
+	}
+	// panicsInUpdate hands msg to the model with a gate open, and answers what
+	// the Update panicked with.
+	panicsInUpdate := func(t *testing.T, r *gateRig, msg tea.Msg) (v any) {
+		t.Helper()
+		never := make(chan struct{})
+		t.Cleanup(func() { close(never) })
+		r.send(gateOpMsg{call: blockedCall(never, nil), cont: noteCont("second")})
+		defer func() { v = recover() }()
+		r.send(msg)
+		return nil
+	}
+	assertTheCallsPanic := func(t *testing.T, v any) {
+		t.Helper()
+		p, ok := v.(callPanic)
+		if !ok || p.value != "a panic after the deadline" {
+			t.Fatalf("the Update panicked with %#v, want the lingering call's own panic", v)
+		}
+	}
+
+	t.Run("released by its deadline", func(t *testing.T) {
+		m, _ := gatedModel(t)
+		r := newGateRig(t, m)
+		late := make(chan struct{})
+		r.send(gateOpMsg{deadline: 20 * time.Millisecond, call: lateCall(late, true), cont: noteCont("released")})
+		rep := r.answer()
+		if !errors.Is(rep.err, ErrNoAnswer) || rep.linger == nil {
+			t.Fatalf("the deadline's reply is %+v, want ErrNoAnswer carrying the call's outcome", rep)
+		}
+		if len(r.lingers) != 1 {
+			t.Fatalf("the release waits for the lingering call %d times, want once", len(r.lingers))
+		}
+		close(late)
+		msg := runWatched(t, r.lingers[0])
+		if _, ok := msg.(callPanicMsg); !ok {
+			t.Fatalf("the lingering call's wait answered %#v, want its panic", msg)
+		}
+		assertTheCallsPanic(t, panicsInUpdate(t, r, msg))
+	})
+
+	t.Run("its gate released by the bound first", func(t *testing.T) {
+		m, _ := gatedModel(t)
+		r := newGateRig(t, m)
+		late := make(chan struct{})
+		r.send(gateOpMsg{deadline: 20 * time.Millisecond, call: lateCall(late, true), cont: noteCont("released")})
+		big := strings.Repeat("p", 8<<20)
+		for r.m.gate != nil {
+			r.send(pasteMsg{text: big})
+		}
+		// The command is still in its select: its deadline passes now, and
+		// its reply finds no gate open.
+		rep := r.answer()
+		if !errors.Is(rep.err, ErrNoAnswer) || len(r.lingers) != 1 {
+			t.Fatalf("the late reply %+v left %d waits for its call, want one", rep, len(r.lingers))
+		}
+		close(late)
+		msg := runWatched(t, r.lingers[0])
+		assertTheCallsPanic(t, panicsInUpdate(t, r, msg))
+	})
+
+	t.Run("a lingering call that returns is discarded", func(t *testing.T) {
+		m, _ := gatedModel(t)
+		r := newGateRig(t, m)
+		late := make(chan struct{})
+		r.send(gateOpMsg{deadline: 20 * time.Millisecond, call: lateCall(late, false), cont: noteCont("released")})
+		r.answer()
+		close(late)
+		if msg := runWatched(t, r.lingers[0]); msg != nil {
+			t.Fatalf("a lingering call that returned produced %#v, want nothing", msg)
+		}
+	})
+}
+
+// stallsThenPanics is a session whose Begin stalls past the gate's deadline
+// and then panics: the gated Submit's call is still running when its gate is
+// released, and panics after. closes counts Close calls.
+type stallsThenPanics struct {
+	*Stub
+	stall  time.Duration
+	closes *atomic.Int32
+}
+
+func (s stallsThenPanics) Begin(string) func(context.Context) (agent.Result, error) {
+	time.Sleep(s.stall)
+	panic("Begin panicked after the gate's deadline")
+}
+
+func (s stallsThenPanics) Close() error {
+	s.closes.Add(1)
+	return s.Stub.Close()
+}
+
+// TestAGatedCallThatPanicsAfterItsDeadlineEndsTheProgram (astra C18a r42 5)
+// through the real program: Submit's Begin stalls past the gate's deadline,
+// the gate releases with ErrNoAnswer, and then the call panics. bubbletea
+// recovers it — through Update, where the lingering call's wait delivers it —
+// and ends the program with ErrProgramPanic, the session closed exactly once;
+// the test binary does not crash. The gateSync baseline panics inside Enter's
+// Update, as the synchronous call always did.
+func TestAGatedCallThatPanicsAfterItsDeadlineEndsTheProgram(t *testing.T) {
+	prev := gateDeadline
+	gateDeadline = 50 * time.Millisecond
+	t.Cleanup(func() { gateDeadline = prev })
+	for _, mode := range frameGateModes {
+		t.Run(mode.name, func(t *testing.T) {
+			isolateSkillsHome(t)
+			var closes atomic.Int32
+			_, _, err := RunFrameScript(Config{
+				Session:   stallsThenPanics{Stub: NewStub(), stall: 300 * time.Millisecond, closes: &closes},
+				Theme:     "tokyo-night",
+				Workspace: frameWorkspace(t),
+				Model:     "grok",
+				Yolo:      true,
+			}, 80, 24, "<wait:idle>hi<enter><sleep:1500ms>", FrameOpts{Timeout: 5 * time.Second, gateSync: mode.sync})
+			if !errors.Is(err, tea.ErrProgramPanic) {
+				t.Fatalf("RunFrameScript returned %v, want the program's panic", err)
+			}
+			if n := closes.Load(); n != 1 {
+				t.Fatalf("the session was closed %d times, want once", n)
+			}
+		})
+	}
+}
+
+// TestPumpUntilWaitsOutAnOpenGate (astra C17 11): pumpUntil answers only a
+// model with no gated call waiting and nothing held, however early its
+// predicate holds: a model mid-gate is its issuing Update's half-done frame.
+func TestPumpUntilWaitsOutAnOpenGate(t *testing.T) {
+	m := asyncGate(t, sized(t))
+	m.input.SetValue("/rename pumped")
+	tm, cmd := m.Update(enter())
+	m = tm.(Model)
+	if m.gate == nil {
+		t.Fatal("/rename opened no gate")
+	}
+	m = pumpCmd(t, m, cmd)
+	m = pumpUntil(t, m, func(Model) bool { return true })
+	if m.gate != nil || len(m.held) != 0 {
+		t.Fatalf("pumpUntil answered a model mid-gate (gate %v, %d held)", m.gate, len(m.held))
+	}
+	if !slices.Contains(texts(m, entryNote), "renamed to pumped") {
+		t.Fatalf("the rename's continuation had not run: notes %q", texts(m, entryNote))
+	}
 }

@@ -160,6 +160,7 @@ var gateDigestSkips = map[string]string{
 	"gateSeq":     "the gate's numbering",
 	"held":        "the held queue",
 	"heldBytes":   "the held queue's bytes",
+	"heldDrained": "the held queue's drained slots",
 	"reading":     "the reader's flag: an event arriving while gated moves it",
 	"syncPending": "the frame harness's pending token",
 	"gateSync":    "the gate's mode",
@@ -217,16 +218,23 @@ func digestModel(m *Model) gateDigest {
 	return d
 }
 
-// digestShared is the shared transcript as the parity watch reads it: its
-// position, its state and each transcript's size and tail.
+// digestShared is the shared transcript as a frame and the parity watch read
+// it: its position and state, and every transcript's every entry — kind, text,
+// payload, times, the open stream's tail materialised — with each
+// transcript's trim, window and stream flags and todo counts (History), the
+// endings of the asks it has seen (EndedAsks), and each transcript's size and
+// tail. An entry rewritten in place, to text of the same length, moves it
+// (astra C17 5).
 func digestShared(w *digestWriter, m *Model) {
 	s := m.shared
 	if s == nil {
 		w.str("nil")
 		return
 	}
-	w.buf = fmt.Appendf(w.buf, "seq=%d ", s.Seq())
+	w.buf = fmt.Appendf(w.buf, "seq=%d incarnation=%q ", s.Seq(), s.Incarnation())
 	w.walk(reflect.ValueOf(s.State()))
+	w.walk(reflect.ValueOf(s.History()))
+	w.walk(reflect.ValueOf(s.EndedAsks()))
 	for _, id := range append([]string{""}, s.Subs()...) {
 		tr := s.Main
 		if id != "" {
