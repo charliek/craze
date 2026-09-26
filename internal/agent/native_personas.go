@@ -634,22 +634,28 @@ func nativeModelMatcher(table *modeltable.Table) func(string) (string, bool) {
 // note (plan 026 §3.4, §3.6).
 //
 // The line quotes content — a persona's model, as its file wrote it, or a
-// transcript's model and mode — so it is redacted before it is written: by
-// red, the keys this session started with, and once the harness is open by
-// its own redactor as well, which also covers a key the session learned after
-// Open (Session.Redact). opened is where open() puts the session when Open
-// returns. It is called with no lock of the adapter's held — on Start's
-// goroutine inside Open, or on the agent call's — and Note never blocks.
+// transcript's model and mode, off disk — so it takes the discipline every
+// such string does, redact, sanitize, redact (nativeSafe.line), before it is
+// journaled or shown: a key split by a zero-width space passes the first
+// redaction whole and is put back together by the sanitizer, so only the
+// redaction after it can catch it (astra r1-c3 F4). The redactor is red, the
+// keys this session started with, and once the harness is open its own as
+// well, which also covers a key the session learned after Open
+// (Session.Redact). The journal and the diagnostics carry the one line, so
+// neither can hold what the other does not. opened is where open() puts the
+// session when Open returns. It is called with no lock of the adapter's held
+// — on Start's goroutine inside Open, or on the agent call's — and Note never
+// blocks.
 func (s *nativeSession) harnessWarn(red *redact.Replacer, opened *atomic.Pointer[harness.Session]) func(string) {
 	return func(msg string) {
-		text := red.String(msg)
 		hs := opened.Load()
 		if hs == nil {
+			text := nativeSafe{red: red.String}.line(msg)
 			s.log.Note(journal.DiagNote{Kind: diagResumeWarning, Fields: map[string]any{"text": text}})
-			s.note(sanitizeLine(text))
+			s.note(text)
 			return
 		}
-		text = hs.Redact(text)
+		text := nativeSafe{red: func(v string) string { return hs.Redact(red.String(v)) }}.line(msg)
 		s.log.Note(journal.DiagNote{Kind: diagSubagentWarning, Fields: map[string]any{"text": text}})
 	}
 }

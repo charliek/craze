@@ -10,10 +10,12 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"charm.land/fantasy"
 	"github.com/charliek/craze/internal/harness"
+	"github.com/charliek/craze/internal/harness/redact"
 	"github.com/charliek/craze/internal/harness/store"
 	"github.com/charliek/craze/internal/harness/tool"
 )
@@ -626,7 +628,9 @@ func TestAMissingTranscriptOpensEmptyUnderTheSameID(t *testing.T) {
 // first line as a live row's is, and a read's content — with no exit code,
 // even for a command whose text records a non-zero one; an error stays an
 // error; an empty result is the label alone; and an output longer than the
-// row's cap keeps the text's tail and the label, and says it was cut.
+// row's cap keeps the text's tail and the label, and says it was cut — while
+// a long command's collapsed preview is still its output's first line, the
+// head taken from the whole stored text as a live row's is (astra r1-c3 F3).
 func TestNativeReplayedResultsDrawTheirText(t *testing.T) {
 	f := newNativeFixture(t)
 	s := f.started(Options{})
@@ -664,6 +668,19 @@ func TestNativeReplayedResultsDrawTheirText(t *testing.T) {
 	if o := big.Output; o == nil || !strings.HasSuffix(o.Content, "the end\n"+replayedLabel) || !strings.HasPrefix(o.Content, ellipsis+"xxx") ||
 		len(o.Content) != outputTailCap || !o.Truncated {
 		t.Fatalf("the replayed long read's content is %d bytes (truncated %v); want the tail, the label, the cap", len(big.Output.Content), big.Output.Truncated)
+	}
+
+	ran := "first line\n" + strings.Repeat("y", outputTailCap) + "\nlast line"
+	tall := row("e5.0", tool.KindExecute, harness.ToolRequest{Tool: "bash", Command: "yes | head"}, tool.Result{Text: ran, Content: ran})
+	o := tall.Output
+	if o == nil {
+		t.Fatal("the replayed long command's row has no output")
+	}
+	if !strings.HasPrefix(o.StdoutHead, "first line\n") || len(o.StdoutHead) > outputHeadCap ||
+		!strings.HasSuffix(o.Stdout, "last line\n"+replayedLabel) || !strings.HasPrefix(o.Stdout, ellipsis+"yyy") ||
+		o.Content != o.Stdout || !o.Truncated || o.ExitCode != nil {
+		t.Fatalf("the replayed long command's row previews %.40q and ends %q (truncated %v); want its first line, the tail, the label",
+			o.StdoutHead, o.Stdout[max(len(o.Stdout)-40, 0):], o.Truncated)
 	}
 }
 
@@ -878,5 +895,232 @@ func TestNativeLoadRefusesAPromptUntilTheBracketCloses(t *testing.T) {
 	f.models["test/a"].push(answer("two"))
 	if _, err := s.Prompt(context.Background(), "in time"); err != nil {
 		t.Fatalf("a prompt after the load: %v", err)
+	}
+}
+
+// TestNativeLoadRefusesSettingsUntilTheBracketCloses (astra r1-c3 F1): nothing
+// but the replay reaches a load's session between its brackets. A direct
+// caller's SetModel, SetMode, SetConfig or SetTitle — the engine sends none
+// before Started, a raw caller can — is refused as not started at each of the
+// load's three windows: while the harness opens, while the replay walks, and
+// while the install delta's flush waits (the drainer held on that batch until
+// the setters have been tried, so a delta they enqueued could only have landed
+// behind the end bracket, stamped replayed). The load publishes exactly what an
+// undisturbed one does, and once Start has returned the setters take.
+func TestNativeLoadRefusesSettingsUntilTheBracketCloses(t *testing.T) {
+	f := newNativeFixture(t)
+	ws := t.TempDir()
+	id := storeNativeSession(t, f, Options{Workspace: ws}, "test/a", []step{answer("one")})
+	s := f.session(Options{Workspace: ws, LoadSessionID: id})
+
+	var admitted []string
+	try := func(where string) {
+		for _, set := range []struct {
+			name string
+			call func() error
+		}{
+			{"SetModel", func() error { _, err := s.SetModel(context.Background(), "", "test/b"); return err }},
+			{"SetMode", func() error { _, err := setMode(s, "plan"); return err }},
+			{"SetConfig", func() error {
+				_, err := s.SetConfig(context.Background(), "", nativeEffortID, "low", "")
+				return err
+			}},
+			{"SetTitle", func() error { return s.SetTitle("", "renamed") }},
+		} {
+			if err := set.call(); err == nil || err.Error() != "agent: session not started" {
+				admitted = append(admitted, fmt.Sprintf("%s during %s: %v", set.name, where, err))
+			}
+		}
+	}
+	var inOpen, inReplay, inFlush sync.Once
+	f.edit = func(*harness.Options) { inOpen.Do(func() { try("the open") }) }
+	s.sinkSeam = func(ev harness.Event) {
+		if _, ok := ev.(harness.Prompted); ok {
+			inReplay.Do(func() { try("the replay") })
+		}
+	}
+	held := make(chan struct{})
+	var first atomic.Bool
+	s.log.hooks = &logHooks{
+		// An untitled load enqueues one batch, the install delta.
+		outboxAdmitting: func(int) {
+			if first.CompareAndSwap(false, true) {
+				<-held
+			}
+		},
+		flushParked: func(uint64) {
+			inFlush.Do(func() {
+				try("the final flush")
+				close(held)
+			})
+		},
+	}
+
+	evs, err := startLoad(t, s)
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if len(admitted) != 0 {
+		t.Fatalf("setters reached the load's session:\n%s", strings.Join(admitted, "\n"))
+	}
+	want := []string{
+		"replay:start",
+		"user: prompt 1 [r]",
+		"text: one [r]",
+		"meta title= model=test/a mode=agent config commands=0 plugins [r]",
+		"replay:end",
+	}
+	if got := loadLines(evs); !slices.Equal(got, want) {
+		t.Fatalf("the load published\n%q\nwant\n%q", got, want)
+	}
+	if snap := s.Snapshot(); snap.CurrentModel != "test/a" || snap.CurrentMode != "agent" || snap.Title != "" {
+		t.Fatalf("after the load the session is on %s in %s titled %q; want it as the transcript left it", snap.CurrentModel, snap.CurrentMode, snap.Title)
+	}
+	if _, err := s.SetModel(context.Background(), "", "test/b"); err != nil {
+		t.Fatalf("SetModel after the load: %v", err)
+	}
+	if err := s.SetTitle("", "renamed"); err != nil {
+		t.Fatalf("SetTitle after the load: %v", err)
+	}
+	for _, ev := range deltaSettled(t, s) {
+		if ev.Replayed {
+			t.Fatalf("a delta after the load is stamped replayed: %s", loadLine(ev))
+		}
+	}
+}
+
+// TestNativeLoadClosedDuringTheFinalFlush (astra r1-c3 F2; X19): a Close that
+// reaches a load while the install delta's flush waits — the drainer held on
+// that batch, as a stalled primary holds it, until Close cuts the outbox —
+// makes Start return "session closed", with no end bracket, and Start returns
+// only once nothing the load enqueued can still be delivered: the log commits
+// nothing after it.
+func TestNativeLoadClosedDuringTheFinalFlush(t *testing.T) {
+	f := newNativeFixture(t)
+	ws := t.TempDir()
+	id := storeNativeSession(t, f, Options{Workspace: ws}, "test/a", []step{answer("one")})
+	s := f.session(Options{Workspace: ws, LoadSessionID: id})
+
+	closed := make(chan struct{})
+	var first atomic.Bool
+	var once sync.Once
+	s.log.hooks = &logHooks{
+		outboxAdmitting: func(int) {
+			if first.CompareAndSwap(false, true) {
+				<-s.log.outboxCut
+			}
+		},
+		flushParked: func(uint64) {
+			once.Do(func() {
+				go func() {
+					_ = s.Close()
+					close(closed)
+				}()
+				<-s.done
+			})
+		},
+	}
+
+	var err error
+	within(t, "the load's Start", func() { err = s.Start(context.Background()) })
+	head := s.log.committed.Load()
+	within(t, "the Close", func() { <-closed })
+	if err == nil || err.Error() != "agent: session closed" {
+		t.Fatalf("Start: %v; want the session closed", err)
+	}
+	if after := s.log.committed.Load(); after != head {
+		t.Fatalf("the log committed %d events after Start returned", after-head)
+	}
+	if got := loadLines(drained(s)); slices.Contains(got, "replay:end") {
+		t.Fatalf("the closed load published %q; want no end bracket", got)
+	}
+	s.mu.Lock()
+	loading := s.loading
+	s.mu.Unlock()
+	if loading || s.replaying.Load() {
+		t.Fatalf("after the closed load loading=%v replaying=%v; want both down", loading, s.replaying.Load())
+	}
+}
+
+// TestNativeLoadPanicLowersTheFlags (astra r1-c3 F2, the review's note): a
+// panic out of the replay's sink propagates out of Start, and leaves neither
+// the load's refusal nor its replayed stamp up behind it.
+func TestNativeLoadPanicLowersTheFlags(t *testing.T) {
+	f := newNativeFixture(t)
+	ws := t.TempDir()
+	id := storeNativeSession(t, f, Options{Workspace: ws}, "test/a", []step{answer("one")})
+	s := f.session(Options{Workspace: ws, LoadSessionID: id})
+	s.sinkSeam = func(ev harness.Event) {
+		if _, ok := ev.(harness.Prompted); ok {
+			panic("the sink")
+		}
+	}
+	var recovered any
+	within(t, "the load's Start", func() {
+		defer func() { recovered = recover() }()
+		_ = s.Start(context.Background())
+	})
+	if recovered != "the sink" {
+		t.Fatalf("Start recovered %v; want the sink's panic", recovered)
+	}
+	s.mu.Lock()
+	loading := s.loading
+	s.mu.Unlock()
+	if loading || s.replaying.Load() {
+		t.Fatalf("after the panic loading=%v replaying=%v; want both down", loading, s.replaying.Load())
+	}
+}
+
+// TestNativeResumeWarningRedactedAfterSanitizing (astra r1-c3 F4; X20): a
+// resume warning quotes the transcript's model, which comes off disk, so it
+// takes the redact, sanitize, redact discipline before it is journaled or
+// shown: a stored wire model that is the provider key split by a zero-width
+// space passes the first redaction whole, and sanitizing it would put the key
+// back together on the diagnostics.
+func TestNativeResumeWarningRedactedAfterSanitizing(t *testing.T) {
+	f := newNativeFixture(t)
+	ws := t.TempDir()
+	id := storeNativeSession(t, f, Options{Workspace: ws}, "test/a", []step{answer("one")})
+	path := storedPath(t, f, id)
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The key with a zero-width space inside it: no alias in the table has
+	// this wire model, so the load falls back to the default, warned.
+	zwsp := string(rune(0x200b))
+	split := nativeCanary[:len("sk-canary-")] + zwsp + nativeCanary[len("sk-canary-"):]
+	edited := strings.ReplaceAll(string(raw), `"wire_model":"wire-a"`, `"wire_model":"`+split+`"`)
+	if edited == string(raw) {
+		t.Fatalf("the transcript names no wire model to replace:\n%s", raw)
+	}
+	if err := os.WriteFile(path, []byte(edited), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var diag bytes.Buffer
+	dir := filepath.Join(t.TempDir(), "journal")
+	s := f.session(Options{Workspace: ws, LoadSessionID: id, Diag: &diag, JournalDir: dir})
+	if _, err := startLoad(t, s); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if !strings.Contains(diag.String(), "continuing on test/a") || !strings.Contains(diag.String(), redact.Marker) ||
+		strings.Contains(diag.String(), nativeCanary) {
+		t.Fatalf("the diagnostics say %q; want the fall-back with the key redacted", diag.String())
+	}
+	w := journalOf(t, s.log)
+	closeJournaled(t, s, w)
+	lines := fileLines(t, w)
+	notes := diags(lines, diagResumeWarning)
+	if len(notes) != 1 {
+		t.Fatalf("%d resume_warning notes, want one", len(notes))
+	}
+	if text := fmt.Sprint(notes[0]["text"]); !strings.Contains(text, redact.Marker) || strings.Contains(text, zwsp) {
+		t.Fatalf("the journaled warning is %q; want it sanitized and redacted", text)
+	}
+	for _, l := range lines {
+		if strings.Contains(fmt.Sprint(l), nativeCanary) {
+			t.Fatalf("the journal carries the key: %v", l)
+		}
 	}
 }

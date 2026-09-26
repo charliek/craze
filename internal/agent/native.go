@@ -74,13 +74,17 @@ type nativeSession struct {
 	closeDone chan struct{}
 
 	// replaying is true between a load's two EventReplay phases (plan 028
-	// §3.4), exactly as on the live session: emitCtx and enqueueDeltaLocked
-	// stamp Event.Replayed from it, so everything the replay publishes — the
-	// rows, the text, the restored todo list and the install delta — says it
-	// was replayed, and the brackets themselves and the title seeded before
-	// them do not. It is written on Start's goroutine and read by publishers
-	// that take no lock of the adapter's (emitCtx is lock-free), so it is an
-	// atomic rather than a field under s.mu.
+	// §3.4), as on the live session: emitCtx stamps Event.Replayed from it, so
+	// everything the replay publishes — the rows, the text, the restored todo
+	// list — says it was replayed, and the brackets themselves and the title
+	// seeded before them do not. The install delta, the one thing a load
+	// enqueues inside the bracket, is stamped by name where it is enqueued
+	// (load) rather than from this flag, so no other enqueue can ever carry
+	// the stamp; and the flag goes down as soon as that delta's flush has
+	// returned, so nothing published after it can either (astra r1-c3 F1). It
+	// is written on Start's goroutine and read by publishers that take no lock
+	// of the adapter's (emitCtx is lock-free), so it is an atomic rather than
+	// a field under s.mu.
 	replaying atomic.Bool
 
 	// Interject adds no ordering: it reads the turn state under s.mu, releases
@@ -159,13 +163,24 @@ type nativeSession struct {
 	snap        Snapshot
 	titlePinned bool
 	// loading is a load's (Options.LoadSessionID, plan 028 §3.4): true from
-	// the section that installs the reopened harness until the replay's end
-	// bracket has gone out. A prompt is refused as not started while it holds
-	// — the harness is installed so that the replay's rows are merged and
-	// redacted as a live turn's are, not so that a turn can begin — which
-	// keeps anything of a turn's from landing inside the bracket or racing
-	// the replay for the harness. The engine admits nothing before Started,
-	// so only a caller that prompts before Start returned ever meets it.
+	// the section that marks the session started — before the title is
+	// seeded and the bracket opens — until the replay's end bracket has gone
+	// out (or the load has failed). Nothing but the replay may reach the
+	// session's state in that window (astra r1-c3 F1), so every entry point
+	// that would publish or enqueue refuses while it holds, as not started: a
+	// prompt, and the four setters — SetModel, SetMode, SetConfig, SetTitle —
+	// whose deltas would otherwise land inside the bracket, or behind the end
+	// bracket and after Start's return. The harness is installed before the
+	// replay so that the replay's rows are merged and redacted as a live
+	// turn's are, not so that anything else can use it. The engine admits
+	// nothing before Started, so only a raw caller ever meets the refusal.
+	//
+	// The rest need no check, as the review found: Interject refuses as no
+	// turn (inPrompt is never set while loading); Cancel finds no claim to
+	// cancel and publishes nothing (the mark it leaves is cleared by the next
+	// claim); a wake cannot start, since a reopened harness has no child and
+	// nothing pending (wakeReadyLocked's HasPending), and CancelSubagent has
+	// no child to stop; no ask is open. None of them emits or enqueues here.
 	loading    bool
 	claimed    bool
 	inPrompt   bool
@@ -424,9 +439,13 @@ func (s *nativeSession) start(context.Context) error {
 		return fmt.Errorf("agent: session closed")
 	}
 	s.started = true
+	// A load refuses everything but its replay from here until its end
+	// bracket (s.loading): from before the title is seeded, so no setter can
+	// slip in between the seed and the bracket, or into the harness's open.
+	load := s.opts.LoadSessionID != ""
+	s.loading = load
 	s.mu.Unlock()
 
-	load := s.opts.LoadSessionID != ""
 	if load {
 		s.openReplay()
 	}
@@ -439,11 +458,18 @@ func (s *nativeSession) start(context.Context) error {
 		// never closes it, as the live session's failed session/load does
 		// (live.go's loadSession): Start's error is the end of it, and the
 		// flag goes down first so that nothing published after this is
-		// stamped replayed (plan 028 §3.4, P23).
+		// stamped replayed (plan 028 §3.4, P23). The refusal goes down in the
+		// section that unmarks the start, so a second Start sets it afresh.
 		s.replaying.Store(false)
 		s.mu.Lock()
-		s.started = false
+		s.started, s.loading = false, false
+		closing := s.closed
 		s.mu.Unlock()
+		if load && closing {
+			// A Close interrupted the load as well: its answer, and its wait,
+			// since the seeded title may still be in the outbox (loadClosed).
+			return s.loadClosed()
+		}
 		return err
 	}
 	models := hs.Models()
@@ -478,8 +504,12 @@ func (s *nativeSession) start(context.Context) error {
 		// Close ran while the table was loading and found no harness to
 		// close; this one is closed here so it cannot outlive the session.
 		_ = hs.Close()
+		s.loading = false
 		s.mu.Unlock()
 		s.replaying.Store(false)
+		if load {
+			return s.loadClosed()
+		}
 		return fmt.Errorf("agent: session closed")
 	}
 	s.hs = hs
@@ -509,8 +539,8 @@ func (s *nativeSession) start(context.Context) error {
 	if load {
 		// The install delta waits for the replay (load): it says what the
 		// session is once its transcript has been shown, and it is the last
-		// thing inside the bracket.
-		s.loading = true
+		// thing inside the bracket. s.loading has held since the start was
+		// marked, above.
 		s.mu.Unlock()
 		if err := s.load(hs); err != nil {
 			return err
@@ -609,7 +639,10 @@ func (s *nativeSession) openReplay() {
 
 // load is the rest of a load once the reopened harness is installed (plan 028
 // §3.4, steps 4–7): the stored conversation replayed, the install delta, the
-// session note, and the bracket closed. s.loading is set, and load clears it.
+// session note, and the bracket closed. s.loading is set, and load clears it
+// — by a defer, so however load ends, a panic out of the sink included
+// (hs.Replay runs the sink on this goroutine and recovers nothing), neither it
+// nor s.replaying is left up behind it.
 //
 // Every event goes out in order inside the bracket, before Start returns and
 // so before the engine's Started (S2's conditions, seam 5). The replay's text,
@@ -626,42 +659,90 @@ func (s *nativeSession) openReplay() {
 // Publishing synchronously is why a native load, like every load, needs the
 // primary read while Start runs (Session.Start): a transcript longer than the
 // primary's buffer blocks the replay's next publish until a reader drains it.
+//
+// A Close that interrupts it anywhere — during the replay, during the install
+// delta's flush, or between that flush and the end bracket — makes it return
+// "session closed" with no end bracket (X19), through loadClosed, which waits
+// for that Close to have finished, so the install delta cannot be delivered
+// after Start has returned (astra r1-c3 F2).
 func (s *nativeSession) load(hs *harness.Session) error {
+	// Only after the end bracket may a turn or a setter begin: its first
+	// event can no longer land inside the bracket. Deferred, so the flags go
+	// down on every way out (the function's comment); on the ordinary one
+	// they go down after the end bracket, which is published below.
+	defer func() {
+		s.replaying.Store(false)
+		s.mu.Lock()
+		s.loading = false
+		s.mu.Unlock()
+	}()
 	replayErr := hs.Replay(s.sink)
 	s.mu.Lock()
 	closed := s.closed
 	if replayErr == nil && !closed {
 		// The session as the transcript left it — model, effort, mode — the
 		// title the row seeded, and the commands and plugin rows this start
-		// resolved: one delta, stamped replayed, as live.go's load install is.
-		s.enqueueDeltaLocked("", Event{}, s.installDeltaLocked(true))
+		// resolved: one delta, stamped replayed, as live.go's load install is
+		// — by name, the one enqueue a load stamps (replaying's comment).
+		s.enqueueDeltaLocked("", Event{Replayed: true}, s.installDeltaLocked(true))
 	}
 	s.mu.Unlock()
-	if replayErr != nil || closed {
+	if closed || errors.Is(replayErr, harness.ErrClosed) {
 		// Close ran during the replay — it closed the harness, so the walk's
-		// events went nowhere — or the replay was refused. The load did not
-		// complete, and like a failed open it ends with no end bracket.
+		// events went nowhere. The load did not complete, and like a failed
+		// open it ends with no end bracket.
 		s.replaying.Store(false)
-		s.mu.Lock()
-		s.loading = false
-		s.mu.Unlock()
-		if closed || errors.Is(replayErr, harness.ErrClosed) {
-			return fmt.Errorf("agent: session closed")
-		}
+		return s.loadClosed()
+	}
+	if replayErr != nil {
+		// The replay was refused: no end bracket either.
+		s.replaying.Store(false)
 		return &nativeError{msg: "native: replaying session " + sanitizeLine(hs.ID()) + ": " + sanitizeLine(replayErr.Error()), cause: replayErr}
 	}
-	_ = s.log.Flush(context.Background(), s.done)
+	flushErr := s.log.Flush(context.Background(), s.done)
+	// The install delta was the last thing inside the bracket: from here on
+	// nothing this session publishes is stamped replayed.
+	s.replaying.Store(false)
+	// The flush fails only once a Close has begun — done closed, or the log's
+	// Close under way — and a Close may begin just after a flush that
+	// succeeded: either way the load is over, and the end bracket, which
+	// would be dropped, is not attempted.
+	s.mu.Lock()
+	closed = s.closed
+	s.mu.Unlock()
+	if flushErr != nil || closed {
+		return s.loadClosed()
+	}
 	// Noted with s.mu released, as every note is (plan 020 §3.5); a Close in
 	// that window drops it, which noteSession accepts and counts.
 	s.log.noteSession(journal.SessionNote{ProviderSessionID: hs.ID(), LoadedFrom: s.opts.LoadSessionID})
-	s.replaying.Store(false)
-	s.emit(Event{Type: EventReplay, Replay: &ReplayInfo{Phase: ReplayEnd}})
-	// Only now may a turn begin: its first event can no longer land inside
-	// the bracket.
-	s.mu.Lock()
-	s.loading = false
-	s.mu.Unlock()
+	// A Close in the last window, after the check above, drops the bracket
+	// (emitCtx answers false only for a Close): the load did not end, so
+	// Start does not say it did.
+	if !s.emitCtx(context.Background(), Event{Type: EventReplay, Replay: &ReplayInfo{Phase: ReplayEnd}}) {
+		return s.loadClosed()
+	}
 	return nil
+}
+
+// loadClosed is a load's "session closed" (X19): Start's answer when a Close
+// interrupted the load. It returns only once that Close has finished — its
+// log closed, and with it the outbox drained into the record — so nothing the
+// load enqueued (the seeded title, the install delta) can reach a consumer
+// after Start has returned (astra r1-c3 F2). Every caller has seen a Close
+// begin (s.closed, or a flush or publish the log refused, which only Close
+// makes it do), and nothing that Close waits for waits on this goroutine: no
+// turn or wake runs while the session is loading, and the replay has
+// returned. The wait is taken only while s.closed says a Close has begun, so
+// a caller that is wrong about that cannot hang Start.
+func (s *nativeSession) loadClosed() error {
+	s.mu.Lock()
+	closing := s.closed
+	s.mu.Unlock()
+	if closing {
+		<-s.closeDone
+	}
+	return fmt.Errorf("agent: session closed")
 }
 
 // notePromptSources is the provenance of the prompt this session just froze
@@ -1879,8 +1960,13 @@ func (s *nativeSession) SetModel(_ context.Context, cause, modelID string) (SetO
 	s.mu.Lock()
 	hs, table := s.hs, s.table
 	models := s.snap.Models
+	loading := s.loading
 	s.mu.Unlock()
-	if hs == nil {
+	// A load's harness is installed before its replay, and the session is not
+	// started until the end bracket (s.loading). loading only ever goes down
+	// once the harness is set, so a setter that passed this check enqueues
+	// behind the end bracket.
+	if hs == nil || loading {
 		return SetOutcome{}, fmt.Errorf("agent: session not started")
 	}
 	alias, err := MatchModel(Snapshot{Models: models}, modelID)
@@ -1953,19 +2039,20 @@ func (s *nativeSession) announceCurrent(cause string) (model, effort string, t *
 }
 
 // enqueueDeltaLocked is live.go's, for this session: one EventMeta carrying st,
-// stamped as emit stamps what it publishes, enqueued under s.mu in the section
-// that changed the snapshot. s.mu is held.
+// stamped with its time as emit stamps what it publishes, enqueued under s.mu
+// in the section that changed the snapshot. s.mu is held.
+//
+// It does not read s.replaying. A load's install delta is part of the replay
+// (plan 028 §3.4), as live.go's is, and says so through base.Replayed, set by
+// the one caller that enqueues it (load): an enqueue is delivered whenever the
+// drainer reaches it, so a stamp taken from the flag could ride on a delta
+// that lands after the end bracket (astra r1-c3 F1).
 func (s *nativeSession) enqueueDeltaLocked(cause string, base Event, st *StateDelta) *Ticket {
 	base.Type = EventMeta
 	base.State = st
 	base.Cause = cause
 	if base.At.IsZero() {
 		base.At = time.Now()
-	}
-	// A load's install delta is part of the replay (plan 028 §3.4), as
-	// live.go's is.
-	if s.replaying.Load() {
-		base.Replayed = true
 	}
 	return s.log.EnqueueTicket(base)
 }
@@ -1986,8 +2073,9 @@ func (s *nativeSession) SetMode(_ context.Context, cause, modeID string) (SetOut
 	s.mu.Lock()
 	hs, seam := s.hs, s.modeSeam
 	ids := modeIDs(s.snap.Modes)
+	loading := s.loading
 	s.mu.Unlock()
-	if hs == nil {
+	if hs == nil || loading { // SetModel's refusal, for its reason
 		return SetOutcome{}, fmt.Errorf("agent: session not started")
 	}
 	id, err := nativeResolveMode(modeID, ids)
@@ -2064,8 +2152,9 @@ func (s *nativeSession) SetConfig(_ context.Context, cause, id, value, forModel 
 	hs, table := s.hs, s.table
 	alias := s.snap.CurrentModel
 	levels := s.efforts[alias]
+	loading := s.loading
 	s.mu.Unlock()
-	if hs == nil {
+	if hs == nil || loading { // SetModel's refusal, for its reason
 		return SetOutcome{}, fmt.Errorf("agent: session not started")
 	}
 	if forModel != "" && alias != forModel {
@@ -2096,9 +2185,16 @@ func (s *nativeSession) SetConfig(_ context.Context, cause, id, value, forModel 
 // otherwise give the session, and said in a Title delta with no Event.Text —
 // the live session's shape exactly (live.go's SetTitle), including the check
 // for room that is atomic with the mutation because no provider is asked.
+//
+// It needs no harness, so before Start it takes as it always has; while a
+// load runs it is refused as not started, as every setter is (s.loading):
+// the title a load shows is the row's, seeded before the bracket.
 func (s *nativeSession) SetTitle(cause, title string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.loading {
+		return fmt.Errorf("agent: session not started")
+	}
 	if !s.log.OutboxRoom() {
 		return ErrSetUnavailable
 	}

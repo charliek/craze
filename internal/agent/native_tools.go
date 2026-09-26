@@ -451,7 +451,10 @@ const replayedLabel = "(replayed)"
 // past the rows an expanded row draws. ExitCode stays nil: a replay has no
 // code, and a zero would say the command succeeded. The text is tail-capped
 // to leave room for the label, so the label survives a long output's cap, and
-// Truncated says when the text was cut.
+// Truncated says when the text was cut. The head is taken from the whole
+// stored text, not from that capped tail, exactly as setStdout takes a live
+// row's — so a long command still previews its own first line rather than
+// the start of what the cap kept (astra r1-c3 F3).
 //
 // Nothing a row draws can say "replayed" on its own — the head row's suffix
 // is computed from the exit code and the diff, and an edit or an agent row
@@ -464,14 +467,16 @@ func replayedOutput(res tool.Result, kind string) *ToolOutput {
 	}
 	clean := sanitizeText(text)
 	room := outputTailCap - len(replayedLabel) - 1
-	body := replayedLabel
+	body, whole := replayedLabel, replayedLabel
 	if clean != "" {
 		body = tailUTF8(clean, room) + "\n" + replayedLabel
+		whole = clean + "\n" + replayedLabel
 	}
 	out := ToolOutput{}
 	setContent(&out, body)
 	if kind == string(tool.KindExecute) {
 		setStdout(&out, body)
+		out.StdoutHead = truncateUTF8(whole, outputHeadCap)
 	}
 	out.Truncated = len(clean) > room
 	return &out
