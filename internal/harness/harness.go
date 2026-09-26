@@ -281,6 +281,13 @@ type Session struct {
 	// session's tools. It is fantasy.NewAgent (defaultAgent); a test may
 	// replace it before the first Run.
 	newAgent func(lm fantasy.LanguageModel, system string, tools []fantasy.AgentTool) fantasy.Agent
+	// newSummarizerAgent builds the summarizer's own agent (compact.go, plan
+	// 028 §3.8 item 6, review r1-c9): defaultSummarizerAgent, with retries of
+	// its own switched off — the outer attempts loop is compact's whole retry
+	// budget, so three attempts send at most three provider requests, never
+	// Fantasy's own retry stacked on top of it (newAgent's, maxRetries). A
+	// test may replace it before compact runs.
+	newSummarizerAgent func(lm fantasy.LanguageModel, system string, tools []fantasy.AgentTool) fantasy.Agent
 
 	closeOnce sync.Once
 	closeErr  error
@@ -323,9 +330,10 @@ type Session struct {
 	warn       func(string)
 
 	// sleep is compact's backoff between summarizer attempts (compact.go,
-	// plan 028 §3.8 item 5): time.Sleep in production, a test's no-op or
-	// recorder otherwise, so a retry test takes no real time.
-	sleep func(time.Duration)
+	// plan 028 §3.8 item 5): a context-aware wait in production (defaultSleep)
+	// so a cancel during backoff ends it at once (review r1-c9 finding 10), a
+	// test's no-op or recorder otherwise, so a retry test takes no real time.
+	sleep func(context.Context, time.Duration)
 
 	mu      sync.Mutex
 	table   *modeltable.Table
@@ -371,6 +379,28 @@ func defaultAgent(lm fantasy.LanguageModel, system string, tools []fantasy.Agent
 		fantasy.WithSystemPrompt(system),
 		fantasy.WithMaxRetries(maxRetries),
 		fantasy.WithTools(tools...))
+}
+
+// defaultSummarizerAgent is the summarizer's own agent (compact.go, plan 028
+// §3.8 item 6): Fantasy's, with the frozen system prompt, no retries of its
+// own, and the tools it is offered (inert, or none for the text form).
+func defaultSummarizerAgent(lm fantasy.LanguageModel, system string, tools []fantasy.AgentTool) fantasy.Agent {
+	return fantasy.NewAgent(lm,
+		fantasy.WithSystemPrompt(system),
+		fantasy.WithMaxRetries(0),
+		fantasy.WithTools(tools...))
+}
+
+// defaultSleep is compact's production backoff (Session.sleep): d, or less
+// when ctx ends first, so a cancel during backoff is not waited out (review
+// r1-c9 finding 10).
+func defaultSleep(ctx context.Context, d time.Duration) {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+	case <-t.C:
+	}
 }
 
 // model is a built model and the effort a turn sends it: everything a turn
@@ -432,14 +462,15 @@ func Open(opts Options) (*Session, error) {
 	}
 	child := opts.Child
 	s := &Session{
-		getenv:     opts.Getenv,
-		newModel:   opts.NewModel,
-		newAgent:   defaultAgent,
-		table:      opts.Table,
-		child:      child != nil,
-		matchModel: opts.MatchModel,
-		warn:       opts.Warn,
-		now:        opts.Now,
+		getenv:             opts.Getenv,
+		newModel:           opts.NewModel,
+		newAgent:           defaultAgent,
+		newSummarizerAgent: defaultSummarizerAgent,
+		table:              opts.Table,
+		child:              child != nil,
+		matchModel:         opts.MatchModel,
+		warn:               opts.Warn,
+		now:                opts.Now,
 	}
 	if s.getenv == nil {
 		s.getenv = os.Getenv
@@ -450,7 +481,7 @@ func Open(opts Options) (*Session, error) {
 	if s.now == nil {
 		s.now = time.Now
 	}
-	s.sleep = time.Sleep
+	s.sleep = defaultSleep
 	// A session that is not a sub-agent can start them: its runner exists
 	// before its tools, which hand it to the agent tool (Env.Subagents), and
 	// reads the rest of the session only when a call arrives, by which time

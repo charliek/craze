@@ -147,6 +147,23 @@ func TestCompactionEntryRoundTrips(t *testing.T) {
 	}
 }
 
+// TestLeadsWithSummary (review r1-c9 finding 13, harness compact.go's own
+// astra review of C9): LeadsWithSummary is true exactly when the context at
+// the leaf begins with a rendered prior-summary message — after a
+// successful compaction, never before one.
+func TestLeadsWithSummary(t *testing.T) {
+	opts := compacted(testOptions(t))
+	s := newStore(t, opts)
+	turn(t, s, "q1", "a1", kimi)
+	if s.LeadsWithSummary() {
+		t.Fatal("LeadsWithSummary before any compaction, want false")
+	}
+	compact(t, s, 2, success("one", ""))
+	if !s.LeadsWithSummary() {
+		t.Fatal("LeadsWithSummary after a successful compaction, want true")
+	}
+}
+
 // TestContextAppliesTheLatestCompaction (A14): from a successful compaction
 // on, the context is its summary message (marked for redaction, P30), its
 // tail — whole steps, from its FirstKeptID up to it — and the entries after

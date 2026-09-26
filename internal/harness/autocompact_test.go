@@ -333,7 +333,7 @@ func TestAStillOverCompactionSuppresses(t *testing.T) {
 func TestAFailedAutoCompactionSuppressesUntilSuccess(t *testing.T) {
 	f := newFixture(t, "http://unused")
 	s := f.open(f.options())
-	s.sleep = func(time.Duration) {}
+	s.sleep = func(context.Context, time.Duration) {}
 	base := s.estimateContext(nil)
 	setWindow(s, int(4*base), 0) // a summary and the prompt and tools fit well under it
 	big := 5 * base

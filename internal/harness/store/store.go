@@ -839,6 +839,13 @@ func (s *Store) ContextWithResults(current Model) ([]fantasy.Message, []bool) {
 	return s.t.ContextWithResults(current)
 }
 
+// LeadsWithSummary is Transcript.LeadsWithSummary. It works after Close.
+func (s *Store) LeadsWithSummary() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.t.LeadsWithSummary()
+}
+
 // Steps is the context the next request sends to current, grouped into steps
 // (Transcript.Steps): what a compaction cuts (Cut). Held entries are in none.
 // It works after Close.

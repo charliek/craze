@@ -387,6 +387,21 @@ func (t *Transcript) ContextWithResults(current Model) ([]fantasy.Message, []boo
 	return msgs, results
 }
 
+// LeadsWithSummary reports whether the context at the leaf (ContextWithResults)
+// begins with the rendered prior-summary message: precisely, not inferred
+// from a message's content (plan 028 §3.8 item 5, review r1-c9 finding 13) —
+// a background sub-agent's result can legitimately hold text that looks like
+// the summary wrapper (background.go), so a caller that needs to know
+// whether msgs[0] really is the summary asks here instead of guessing from
+// what it contains. It is exactly contextAt's own rule for prepending one.
+func (t *Transcript) LeadsWithSummary() bool {
+	c, _, err := t.contextEntries(t.Leaf()) // the leaf is always known
+	if err != nil {
+		return false
+	}
+	return c != nil && t.render.Summary != nil
+}
+
 // contextAt is ContextAt, with each message's mark beside it
 // (ContextWithResults).
 func (t *Transcript) contextAt(leaf string, current Model) ([]fantasy.Message, []bool, error) {

@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"charm.land/fantasy"
 	"github.com/charliek/craze/internal/harness/modeltable"
@@ -35,8 +37,8 @@ const summarizerAttempts = 3
 var summarizerBackoff = []time.Duration{2 * time.Second, 4 * time.Second}
 
 // minSummaryLen is the shortest cleaned summary compact accepts without
-// retrying (plan 028 §3.8 item 5): shorter than this, or empty, is
-// degenerate.
+// retrying, in characters (degenerateLen), tags excluded (plan 028 §3.8 item
+// 5, review r1-c9 finding 16): shorter than this, or empty, is degenerate.
 const minSummaryLen = 500
 
 // compactionPrompt is craze's own compaction prompt (plan 028 §3.8 item 2,
@@ -95,7 +97,7 @@ func (e *errCompactionSaveFailed) Error() string { return e.err.Error() }
 func (e *errCompactionSaveFailed) Unwrap() error { return e.err }
 
 // errDegenerateSummary is a cleaned summary compact would not accept: empty,
-// or under minSummaryLen bytes (plan 028 §3.8 item 5). It is retried like a
+// or under minSummaryLen characters (plan 028 §3.8 item 5). It is retried like a
 // transient provider failure, and is the failure entry's Error when every
 // attempt was one.
 var errDegenerateSummary = errors.New("harness: the summarizer's reply was too short to be a real summary")
@@ -198,7 +200,22 @@ func (s *Session) compactOn(ctx context.Context, m model, fit modeltable.Resolve
 		usage   store.Usage
 		lastErr error
 	)
-	priorSummary, hasPrior := priorSummaryText(msgs, marks)
+	// ended is deferred once started is emitted, on every exit path this
+	// function takes — a panic included, from agent construction or
+	// streaming (review r1-c9 finding 4, P34): a recovering caller must not
+	// keep an unmatched compaction lifecycle. Every ordinary return path
+	// below emits Compacted{ended} itself before it returns, which is not a
+	// panic, so recover() there is nil and this defer does nothing; "nothing
+	// to compact" (above) returns before started is even emitted, and stays
+	// event-free, as it always has.
+	defer func() {
+		if r := recover(); r != nil {
+			emit(Compacted{Phase: CompactionEnded, Reason: reason, TokensBefore: before,
+				Err: fmt.Sprintf("panic: %v", r), Usage: usage})
+			panic(r)
+		}
+	}()
+	priorSummary, hasPrior := priorSummaryText(history, s.store.LeadsWithSummary())
 
 attempts:
 	for attempt := 1; attempt <= summarizerAttempts; attempt++ {
@@ -235,18 +252,18 @@ attempts:
 				lastErr = err
 			default:
 				lastErr = err
-				if attempt < summarizerAttempts {
-					s.sleep(summarizerBackoff[attempt-1])
+				if attempt < summarizerAttempts && !s.backoff(ctx, summarizerBackoff[attempt-1]) {
+					return s.compactCancelled(ctx, m, turn, reason, command, usage, before, emit)
 				}
 				continue attempts
 			}
 			break attempts
 		}
 		cleaned := cleanSummary(out, red)
-		if len(cleaned) < minSummaryLen {
+		if degenerateLen(cleaned) < minSummaryLen {
 			lastErr = errDegenerateSummary
-			if attempt < summarizerAttempts {
-				s.sleep(summarizerBackoff[attempt-1])
+			if attempt < summarizerAttempts && !s.backoff(ctx, summarizerBackoff[attempt-1]) {
+				return s.compactCancelled(ctx, m, turn, reason, command, usage, before, emit)
 			}
 			continue attempts
 		}
@@ -263,12 +280,21 @@ attempts:
 	return s.compactSucceeded(m, turn, reason, command, usage, before, firstKeptID, k, steps, reply, emit)
 }
 
+// backoff is s.sleep(ctx, d), then whether ctx is still live: false ends the
+// attempts loop at once rather than waiting out the rest of the delay and
+// then failing the next attempt's own way (review r1-c9 finding 10 — a
+// cancel during backoff must not be waited out).
+func (s *Session) backoff(ctx context.Context, d time.Duration) bool {
+	s.sleep(ctx, d)
+	return ctx.Err() == nil
+}
+
 // compactCancelled is compact's return once ctx has ended (item 8): a
 // failure entry only if some attempt was billed, and the caller's own
 // cancellation either way.
 func (s *Session) compactCancelled(ctx context.Context, m model, turn int, reason, command string, usage store.Usage, before int64, emit func(Event)) (CompactResult, error) {
 	if usage != (store.Usage{}) {
-		if _, err := s.appendCompactionFailure(m, turn, reason, command, usage, ctx.Err().Error()); err != nil {
+		if _, err := s.appendCompactionFailure(m, turn, reason, command, usage, ctx.Err().Error(), emit); err != nil {
 			emit(Compacted{Phase: CompactionEnded, Reason: reason, TokensBefore: before, Err: s.redactor().String(err.Error()), Usage: usage})
 			return CompactResult{}, &errCompactionSaveFailed{err}
 		}
@@ -284,7 +310,7 @@ func (s *Session) compactCancelled(ctx context.Context, m model, turn int, reaso
 // point worth deferring around without hiding what each path carries).
 func (s *Session) compactFailed(m model, turn int, reason, command string, usage store.Usage, before int64, cause error, emit func(Event)) (CompactResult, error) {
 	msg := s.redactor().String(cleanErrorText(cause))
-	if _, err := s.appendCompactionFailure(m, turn, reason, command, usage, msg); err != nil {
+	if _, err := s.appendCompactionFailure(m, turn, reason, command, usage, msg, emit); err != nil {
 		emit(Compacted{Phase: CompactionEnded, Reason: reason, TokensBefore: before, Err: s.redactor().String(err.Error()), Usage: usage})
 		return CompactResult{}, &errCompactionSaveFailed{err}
 	}
@@ -302,6 +328,12 @@ func (s *Session) compactSucceeded(m model, turn int, reason, command string, us
 	}
 	segName := store.SegmentName(n)
 	red := s.redactor()
+	// The redactor above is taken fresh, at persistence time, and may know a
+	// key the one the attempts ran under did not: a running background child
+	// can learn one while the summarizer was retrying (review r1-c9 finding
+	// 9). Re-redacting is a no-op for every key already gone from reply, so
+	// this only ever removes what only the fresh redactor knows.
+	reply = red.String(reply)
 	content := s.segmentContent(s.store.ID(), n, steps[:k], reply, red)
 	if err := s.store.WriteSegment(segName, content); err != nil {
 		// A segment write failure is a summarizer-class failure (§3.10): the
@@ -334,12 +366,15 @@ func (s *Session) compactSucceeded(m model, turn int, reason, command string, us
 
 // appendCompactionFailure writes a failure entry: no summary, no tail, no
 // segment, the attempts' usage and msg as the error (PD20). A store failure
-// here is reported through DiagCompactionUnsaved by the caller.
-func (s *Session) appendCompactionFailure(m model, turn int, reason, command string, usage store.Usage, msg string) (string, error) {
+// here is reported through DiagCompactionUnsaved, on emit — the caller's own
+// (review r1-c9 finding 7: a no-op here would silently drop the diagnostic
+// on every failure-entry append failure, not only the successful-summary
+// one).
+func (s *Session) appendCompactionFailure(m model, turn int, reason, command string, usage store.Usage, msg string, emit func(Event)) (string, error) {
 	c := store.Compaction{Reason: reason, Command: command, Error: msg}
 	id, err := s.store.AppendCompaction(turn, m.id(), usage, c)
 	if err != nil {
-		s.diagUnsaved(func(Event) {}, turn, reason, usage, err)
+		s.diagUnsaved(emit, turn, reason, usage, err)
 		return "", err
 	}
 	return id, nil
@@ -410,9 +445,17 @@ func (s *Session) Compact(ctx context.Context, focus, command string, sink func(
 		s.turns--
 		s.mu.Unlock()
 		return Result{}, cerr
-	case turnCtx.Err() != nil:
-		return Result{StopReason: StopCancelled}, nil
 	default:
+		// A save failure must reach the caller as one — stop, as for any
+		// other save failure (P5) — even when ctx also ended: cerr being
+		// *errCompactionSaveFailed takes priority over turnCtx having ended,
+		// or a real append failure a cancellation raced with would be
+		// silently turned into an ordinary cancelled result and lost (review
+		// r1-c9 finding 3).
+		var saveErr *errCompactionSaveFailed
+		if !errors.As(cerr, &saveErr) && turnCtx.Err() != nil {
+			return Result{StopReason: StopCancelled}, nil
+		}
 		return Result{}, cerr
 	}
 }
@@ -448,9 +491,38 @@ func summarizerFailureKind(err error) string {
 	}
 	var pe *ProviderError
 	if errors.As(err, &pe) && pe.StatusCode >= 400 && pe.StatusCode < 500 {
+		if transientClientStatus(pe) {
+			return ""
+		}
 		return "fatal"
 	}
 	return ""
+}
+
+// quotaExhaustedPattern matches the provider's own text for a 429 that means
+// the account has no quota or credit left, rather than an ordinary rate
+// limit worth retrying: OpenAI-family "insufficient_quota", and the more
+// common human phrasing around it (review r1-c9, decision 4).
+var quotaExhaustedPattern = regexp.MustCompile(
+	`(?i)insufficient_quota|insufficient quota|exceeded (?:your |its )?(?:current )?quota|quota exceeded|out of credits?|credit balance`)
+
+// transientClientStatus reports whether a classified 4xx failure is worth
+// retrying rather than ending the summarizer at once (plan 028 §3.8 decision
+// 4, review r1-c9 finding 5): HTTP 408 (request timeout) and 429 (rate
+// limit) are transient — EXCEPT a 429 whose provider error says the
+// account's quota or credit is exhausted, which a retry cannot fix. HTTP 402
+// (payment required) is exactly that failure by its status alone, whatever
+// it says, and every other 4xx (400, 404 already handled by its own
+// sentinel above, 422, …) is fatal, as before.
+func transientClientStatus(pe *ProviderError) bool {
+	switch pe.StatusCode {
+	case 408:
+		return true
+	case 429:
+		return !quotaExhaustedPattern.MatchString(pe.Message)
+	default:
+		return false
+	}
 }
 
 // cleanErrorText is a failed summarizer's error, on one line, for the
@@ -473,6 +545,20 @@ func addUsage(a, b store.Usage) store.Usage {
 	}
 }
 
+// observeUsage is the OnStreamFinish callback both summarizer forms give
+// their call: a stream can report its usage in a Finish part and only then
+// fail — a cancellation after it, say, or a provider error riding in on the
+// same stream (review r1-c9 finding 1) — and Fantasy's AgentResult never
+// reaches the caller when Stream itself returns an error, so that usage
+// would otherwise be lost. *into is set on every call (there is at most one
+// Finish part before StopWhen ends the one step both forms run).
+func observeUsage(into *store.Usage) func(fantasy.Usage, fantasy.FinishReason, fantasy.ProviderMetadata) error {
+	return func(u fantasy.Usage, _ fantasy.FinishReason, _ fantasy.ProviderMetadata) error {
+		*into = *store.UsageOf(u)
+		return nil
+	}
+}
+
 // summarizeAligned sends the summarizer's aligned request (plan 028 §3.8
 // item 1, P11, PD10): the session's own agent, with the session's tools
 // offered inert (s.inertTools, same Info as a turn's) so Fantasy converts
@@ -480,14 +566,18 @@ func addUsage(a, b store.Usage) store.Usage {
 // (fantasy.StepCountIs(1)), the same provider options and output ceiling as
 // a turn. Messages is history, exactly the next request's; Prompt is the
 // compaction prompt, the state section, and, for a focus, the "Focus this
-// summary on" line (item 1, item 2, item 3).
+// summary on" line (item 1, item 2, item 3). Its agent's own retries are off
+// (newSummarizerAgent, review r1-c9 "three attempts means three requests"):
+// compact's outer attempts are the whole retry budget.
 func (s *Session) summarizeAligned(ctx context.Context, m model, history []fantasy.Message, focus string, red *redact.Replacer) (string, store.Usage, error) {
-	agent := s.newAgent(m.lm, s.system, s.inertTools())
+	agent := s.newSummarizerAgent(m.lm, s.system, s.inertTools())
+	var observed store.Usage
 	call := fantasy.AgentStreamCall{
 		Prompt:          s.compactionPromptText(focus, red),
 		Messages:        history,
 		ProviderOptions: m.effortOpts,
 		StopWhen:        []fantasy.StopCondition{fantasy.StepCountIs(1)},
+		OnStreamFinish:  observeUsage(&observed),
 	}
 	if n := m.r.MaxOutputTokens; n > 0 {
 		ceiling := int64(n)
@@ -495,7 +585,7 @@ func (s *Session) summarizeAligned(ctx context.Context, m model, history []fanta
 	}
 	res, err := agent.Stream(ctx, call)
 	if err != nil {
-		return "", store.Usage{}, classify(err, m.id())
+		return "", observed, classify(err, m.id())
 	}
 	return res.Response.Content.Text(), *store.UsageOf(res.TotalUsage), nil
 }
@@ -503,17 +593,20 @@ func (s *Session) summarizeAligned(ctx context.Context, m model, history []fanta
 // summarizeText sends the summarizer's text-form request (plan 028 §3.8
 // item 5): the context serialized as opencode's lines, budgeted, with the
 // same prompt and no tools at all (not even inert ones — there is nothing
-// left to answer a call with room for).
+// left to answer a call with room for). Its agent's own retries are off, as
+// summarizeAligned's are.
 func (s *Session) summarizeText(ctx context.Context, m model, before int64, steps []store.Step, priorSummary, focus string, red *redact.Replacer) (string, store.Usage, error) {
 	prompt, err := s.textFormPrompt(m, before, steps, priorSummary, focus, red)
 	if err != nil {
 		return "", store.Usage{}, err
 	}
-	agent := s.newAgent(m.lm, s.system, nil)
+	agent := s.newSummarizerAgent(m.lm, s.system, nil)
+	var observed store.Usage
 	call := fantasy.AgentStreamCall{
 		Prompt:          prompt,
 		ProviderOptions: m.effortOpts,
 		StopWhen:        []fantasy.StopCondition{fantasy.StepCountIs(1)},
+		OnStreamFinish:  observeUsage(&observed),
 	}
 	if n := m.r.MaxOutputTokens; n > 0 {
 		ceiling := int64(n)
@@ -521,7 +614,7 @@ func (s *Session) summarizeText(ctx context.Context, m model, before int64, step
 	}
 	res, err := agent.Stream(ctx, call)
 	if err != nil {
-		return "", store.Usage{}, classify(err, m.id())
+		return "", observed, classify(err, m.id())
 	}
 	return res.Response.Content.Text(), *store.UsageOf(res.TotalUsage), nil
 }
@@ -558,7 +651,11 @@ func (s *Session) stateSection(red *redact.Replacer) string {
 	} else {
 		b.WriteString("\n")
 		for i, c := range children {
-			fmt.Fprintf(&b, "- %s (%s): %s", c.id, c.typ, c.desc)
+			// c.desc was redacted at launch, under whatever the redactor knew
+			// then; red is the one current now, which may know a key the
+			// child's own description exposed since (review r1-c9 finding
+			// 8) — re-redacting is a no-op otherwise.
+			fmt.Fprintf(&b, "- %s (%s): %s", c.id, c.typ, red.String(c.desc))
 			if i < len(children)-1 {
 				b.WriteString("\n")
 			}
@@ -569,12 +666,14 @@ func (s *Session) stateSection(red *redact.Replacer) string {
 
 // textFormBudget is the text form's whole-request budget (plan 028 §3.8
 // item 5, R2-5): 70% of the window less its output ceiling, or, with an
-// unknown window, 60% of before — the estimate of the request that
-// overflowed (the aligned request compact always builds first, whether or
-// not it was sent).
-func textFormBudget(r modeltable.Resolved, before int64) int64 {
+// unknown window, 60% of overflowed — the estimate of the request that
+// ACTUALLY overflowed: the aligned summarizer request compact always builds
+// first, whether or not it was sent, including the compaction prompt, the
+// state section and the focus (review r1-c9 finding 14) — not the raw
+// context alone, which never went to the model by itself.
+func textFormBudget(r modeltable.Resolved, overflowed int64) int64 {
 	if r.ContextWindow <= 0 {
-		return before * 60 / 100
+		return overflowed * 60 / 100
 	}
 	window := int64(r.ContextWindow)
 	limit := window * 70 / 100
@@ -593,12 +692,24 @@ func textFormBudget(r modeltable.Resolved, before int64) int64 {
 // turns (steps) added newest-first while the assembled request stays within
 // budget; ordinary turns that do not fit are simply left out (oldest
 // dropped). If even the newest turn does not fit at the ordinary cap, its
-// results are cut to resultLadderCap and the fit is checked once more; if the
-// fixed part alone, or still the newest turn, exceeds the budget,
-// errTextFormOverflow.
+// results are cut to resultLadderCap and the fit is checked once more.
+// Each step's messages are redacted with the live redactor before they are
+// rendered (liveRedact, review r1-c9 finding 2): steps carries no per-message
+// "results" mark the way redactHistory's callers do, so it redacts every
+// message's text unconditionally, as segment.go's own transcript rendering
+// does for the same reason. Once assembled, the whole prompt — separators
+// included — is checked against budget once more (review r1-c9 finding 15),
+// trimming further, oldest first, if the pieces summed short of what
+// assembling them actually costs; if the fixed part alone, or still the
+// newest turn once trimmed to nothing, exceeds the budget, errTextFormOverflow.
 func (s *Session) textFormPrompt(m model, before int64, steps []store.Step, priorSummary, focus string, red *redact.Replacer) (string, error) {
-	budget := textFormBudget(m.r, before)
 	promptCore := s.compactionPromptText(focus, red)
+	// The aligned request's own estimate: what actually overflowed, for the
+	// unknown-window fallback (textFormBudget, finding 14). before already
+	// counts the system prompt, the tools and the history (estimateContext);
+	// promptCore is the one user message compact adds on top of it.
+	overflowed := before + textTokens(promptCore)
+	budget := textFormBudget(m.r, overflowed)
 	fixed := textTokens(s.system) + textTokens(promptCore) + textTokens(priorSummary)
 	if fixed > budget {
 		return "", errTextFormOverflow
@@ -612,7 +723,7 @@ func (s *Session) textFormPrompt(m model, before int64, steps []store.Step, prio
 	var picked []chosen
 	sum := int64(0)
 	for i := len(steps) - 1; i >= 0; i-- {
-		lines := textLines(steps[i].Messages, resultLineCap)
+		lines := textLines(redactStepMessages(red, steps[i].Messages), resultLineCap)
 		n := textTokens(lines)
 		if sum+n > remaining {
 			break
@@ -622,7 +733,7 @@ func (s *Session) textFormPrompt(m model, before int64, steps []store.Step, prio
 	}
 	if len(picked) == 0 && len(steps) > 0 {
 		last := steps[len(steps)-1]
-		lines := textLines(last.Messages, resultLadderCap)
+		lines := textLines(redactStepMessages(red, last.Messages), resultLadderCap)
 		n := textTokens(lines)
 		if n > remaining {
 			return "", errTextFormOverflow
@@ -630,17 +741,47 @@ func (s *Session) textFormPrompt(m model, before int64, steps []store.Step, prio
 		picked = []chosen{{lines, n}}
 	}
 
-	var b strings.Builder
-	if priorSummary != "" {
-		b.WriteString(priorSummary)
-		b.WriteString("\n\n")
+	assemble := func(picked []chosen) string {
+		var b strings.Builder
+		if priorSummary != "" {
+			b.WriteString(priorSummary)
+			b.WriteString("\n\n")
+		}
+		for _, c := range picked {
+			b.WriteString(c.lines)
+		}
+		b.WriteString("\n")
+		b.WriteString(promptCore)
+		return b.String()
 	}
-	for _, c := range picked {
-		b.WriteString(c.lines)
+
+	// The pieces were budgeted separately, against a budget meant to bound
+	// the whole request (system prompt included, as fixed above does);
+	// assembling them adds separators (the blank line after the prior
+	// summary, the newline before the prompt core) that were never counted
+	// (review r1-c9 finding 15). Check the assembled whole, system prompt
+	// and all, once more, trimming the oldest picked turn at a time until it
+	// fits, or there is nothing left to trim.
+	total := func(result string) int64 { return textTokens(s.system) + textTokens(result) }
+	result := assemble(picked)
+	for total(result) > budget && len(picked) > 0 {
+		picked = picked[1:]
+		result = assemble(picked)
 	}
-	b.WriteString("\n")
-	b.WriteString(promptCore)
-	return b.String(), nil
+	if total(result) > budget {
+		return "", errTextFormOverflow
+	}
+	return result, nil
+}
+
+// redactStepMessages is msgs, live-redacted (liveRedact) message for
+// message: a copy, msgs itself untouched.
+func redactStepMessages(red *redact.Replacer, msgs []fantasy.Message) []fantasy.Message {
+	out := make([]fantasy.Message, len(msgs))
+	for i, m := range msgs {
+		out[i] = liveRedact(red, m)
+	}
+	return out
 }
 
 // textLines renders msgs (one step's, or a segment's) as opencode's lines
@@ -686,30 +827,37 @@ func resultText(r fantasy.ToolResultPart) string {
 	return ""
 }
 
-// capText is s cut to at most limit bytes, "[truncated]" appended when it
-// was (limit < 0 is no cap).
+// capText is s cut to at most limit runes — not bytes (review r1-c9 finding
+// 16): a non-ASCII result kept substantially less than the cap, and cutting
+// on bytes alone could split a multi-byte rune — with "[truncated]" appended
+// when it was cut (limit < 0 is no cap).
 func capText(s string, limit int) string {
-	if limit < 0 || len(s) <= limit {
+	if limit < 0 {
 		return s
 	}
-	return s[:limit] + "[truncated]"
+	n := 0
+	for i := range s {
+		if n == limit {
+			return s[:i] + "[truncated]"
+		}
+		n++
+	}
+	return s
 }
 
 // priorSummaryText is the prior compaction's summary message, verbatim, when
 // msgs starts with one (plan 028 §3.8 item 5: "the prior summary message
-// always kept whole"): msgs[0] is a compaction's summary rather than a
-// results entry when it is marked (marks[0]) and wraps compactedTag —
-// exactly what summaryMessage writes and nothing a sub-agent's results ever
-// would.
-func priorSummaryText(msgs []fantasy.Message, marks []bool) (string, bool) {
-	if len(msgs) == 0 || len(marks) == 0 || !marks[0] {
+// always kept whole"): hasSummary says so precisely (store.LeadsWithSummary,
+// review r1-c9 finding 13) rather than by guessing from msgs[0]'s content —
+// a background sub-agent's result can legitimately hold text that reads like
+// the summary wrapper, and is never mistaken for it now. msgs is the
+// redacted history (redactHistory's own output), so the text returned here
+// is already live-redacted.
+func priorSummaryText(msgs []fantasy.Message, hasSummary bool) (string, bool) {
+	if !hasSummary || len(msgs) == 0 {
 		return "", false
 	}
-	t := textOf(msgs[0])
-	if !strings.Contains(t, "<"+compactedTag+">") {
-		return "", false
-	}
-	return t, true
+	return textOf(msgs[0]), true
 }
 
 // priorSummaryIf is text form's convenience for priorSummaryText's result:
@@ -781,18 +929,35 @@ func dropAnalysisBlocks(s string) string {
 	}
 }
 
-// lastSummaryBlock is the last <summary>…</summary> span in s, tags
-// included.
+// lastSummaryBlock is the last COMPLETE <summary>…</summary> span in s, tags
+// included: the last </summary> first, then the nearest <summary> before it
+// — so a trailing, unfinished opener after the last real block (the model
+// started a second one and was cut off) is ignored rather than defeating
+// extraction of the one that did close (review r1-c9 finding 12).
 func lastSummaryBlock(s string) (string, bool) {
 	const open, close = "<summary>", "</summary>"
-	start := strings.LastIndex(s, open)
-	if start == -1 {
-		return "", false
-	}
-	rest := s[start:]
-	end := strings.Index(rest, close)
+	end := strings.LastIndex(s, close)
 	if end == -1 {
 		return "", false
 	}
-	return rest[:end+len(close)], true
+	head := s[:end+len(close)]
+	start := strings.LastIndex(head, open)
+	if start == -1 {
+		return "", false
+	}
+	return head[start:], true
+}
+
+// degenerateLen is the length compact's minSummaryLen check counts (review
+// r1-c9 finding 16): runes, not bytes — a non-ASCII summary must not pass
+// the check simply for being encoded in more bytes per character — of the
+// summary's own text, tags excluded — the retained <summary></summary>
+// wrapper must not count toward the minimum either.
+func degenerateLen(cleaned string) int {
+	const open, close = "<summary>", "</summary>"
+	text := cleaned
+	if strings.HasPrefix(text, open) && strings.HasSuffix(text, close) {
+		text = text[len(open) : len(text)-len(close)]
+	}
+	return utf8.RuneCountInString(text)
 }

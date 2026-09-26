@@ -1170,6 +1170,18 @@ func redactText(red *redact.Replacer, m fantasy.Message) fantasy.Message {
 	})
 }
 
+// liveRedact is m with every provider key gone from its calls, its results
+// and its own text, unconditionally — segment.go's own rule for a step past
+// the frontier, which has no per-message "results" mark to consult the way
+// redactHistory does: text-redacting every message is harmless where none is
+// present (a no-op), and needed for the two kinds a step's stored form does
+// not otherwise cover, a reminder and a compaction's own summary message
+// (P30). compact.go's text form reuses it for the same reason (review r1-c9
+// finding 2).
+func liveRedact(red *redact.Replacer, m fantasy.Message) fantasy.Message {
+	return redactText(red, redactResults(red, redactCalls(red, m)))
+}
+
 // mapParts is m with f applied to each part, f reporting whether it changed
 // one; m itself, its parts untouched, when f changes none. (Parts are not
 // compared: some hold maps, and an interface holding one panics on ==.)

@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"charm.land/fantasy"
 	"github.com/charliek/craze/internal/harness/redact"
@@ -31,17 +32,25 @@ const resultByteCap = 8 * 1024
 // Summary", then "## Transcript" — discarded's steps, oldest first, each
 // message through the live redactor (P30). Over maxSegmentBytes, the OLDEST
 // turns are dropped first, with a line naming the transcript so an exact
-// detail can still be found there.
+// detail can still be found there — a line the fit itself now counts
+// (review r1-c9 finding 11): the loop drops one more turn than it used to
+// wherever the notice's own bytes would otherwise have tipped the file over
+// the cap. If the header and the summary alone still do not fit once every
+// turn is gone, the summary itself is cut, with its own marker, rather than
+// left to overflow the cap on its own.
 func (s *Session) segmentContent(id string, n int, discarded []store.Step, summary string, red *redact.Replacer) []byte {
-	var head strings.Builder
-	fmt.Fprintf(&head, "# craze session %s — segment %03d (historical; do not edit)\n", id, n)
-	if line, ok := segmentMetaLine(discarded); ok {
-		head.WriteString(line)
-		head.WriteString("\n")
+	head := func(sum string) string {
+		var b strings.Builder
+		fmt.Fprintf(&b, "# craze session %s — segment %03d (historical; do not edit)\n", id, n)
+		if line, ok := segmentMetaLine(discarded); ok {
+			b.WriteString(line)
+			b.WriteString("\n")
+		}
+		b.WriteString("\n## Summary\n\n")
+		b.WriteString(sum)
+		b.WriteString("\n\n## Transcript\n\n")
+		return b.String()
 	}
-	head.WriteString("\n## Summary\n\n")
-	head.WriteString(summary)
-	head.WriteString("\n\n## Transcript\n\n")
 
 	blocks := make([]string, len(discarded))
 	for i, st := range discarded {
@@ -50,20 +59,53 @@ func (s *Session) segmentContent(id string, n int, discarded []store.Step, summa
 
 	dropped := 0
 	body := strings.Join(blocks, "")
-	for len(head.String())+len(body) > maxSegmentBytes && len(blocks) > 0 {
+	notice := ""
+	fits := func() bool { return len(head(summary))+len(notice)+len(body) <= maxSegmentBytes }
+	for !fits() && len(blocks) > 0 {
 		blocks = blocks[1:]
 		dropped++
 		body = strings.Join(blocks, "")
+		notice = omissionNotice(dropped, s.store.Path())
+	}
+	if !fits() {
+		// Every turn is already gone (body is "" here) and the header plus
+		// the summary alone still do not fit: cut the summary itself, with
+		// its own marker, rather than let the file overflow the cap.
+		budget := maxSegmentBytes - len(head("")) - len(notice)
+		summary = truncateForSegment(summary, budget)
 	}
 
 	var out strings.Builder
-	out.WriteString(head.String())
-	if dropped > 0 {
-		fmt.Fprintf(&out, "[%d earlier turn(s) omitted to fit the %d KiB segment cap; see the transcript %s]\n\n",
-			dropped, maxSegmentBytes/1024, filepath.Base(s.store.Path()))
-	}
+	out.WriteString(head(summary))
+	out.WriteString(notice)
 	out.WriteString(body)
 	return []byte(out.String())
+}
+
+// omissionNotice is the line segmentContent prepends to the transcript body
+// once dropped turns were needed to fit the cap.
+func omissionNotice(dropped int, transcriptPath string) string {
+	return fmt.Sprintf("[%d earlier turn(s) omitted to fit the %d KiB segment cap; see the transcript %s]\n\n",
+		dropped, maxSegmentBytes/1024, filepath.Base(transcriptPath))
+}
+
+// summaryTruncatedMarker is appended to a summary segmentContent had to cut
+// to fit the cap on its own (no transcript turn was left to drop instead).
+const summaryTruncatedMarker = "\n\n[summary truncated to fit the segment cap]"
+
+// truncateForSegment is summary cut to at most budget bytes, on a rune
+// boundary, with summaryTruncatedMarker appended; budget at or under the
+// marker's own length keeps no summary text at all, just the marker.
+func truncateForSegment(summary string, budget int) string {
+	room := budget - len(summaryTruncatedMarker)
+	if room <= 0 {
+		return strings.TrimPrefix(summaryTruncatedMarker, "\n\n")
+	}
+	cut := min(room, len(summary))
+	for cut > 0 && !utf8.RuneStart(summary[cut]) {
+		cut--
+	}
+	return summary[:cut] + summaryTruncatedMarker
 }
 
 // segmentMetaLine is the metadata line naming discarded's first and last
@@ -107,7 +149,7 @@ func segmentMetaLine(discarded []store.Step) (string, bool) {
 func segmentStepBlock(st store.Step, red *redact.Replacer) string {
 	var b strings.Builder
 	for _, m := range st.Messages {
-		m = redactText(red, redactResults(red, redactCalls(red, m)))
+		m = liveRedact(red, m)
 		switch m.Role {
 		case fantasy.MessageRoleUser:
 			if t := textOf(m); t != "" {

@@ -16,6 +16,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"charm.land/fantasy"
 	"github.com/charliek/craze/internal/harness/llm"
@@ -27,8 +28,8 @@ import (
 
 // recordSleep is a fixture's s.sleep seam: it records every delay instead of
 // waiting, so a retry test takes no real time.
-func recordSleep(rec *[]time.Duration) func(time.Duration) {
-	return func(d time.Duration) { *rec = append(*rec, d) }
+func recordSleep(rec *[]time.Duration) func(context.Context, time.Duration) {
+	return func(_ context.Context, d time.Duration) { *rec = append(*rec, d) }
 }
 
 // longSummary pads s with filler text until it is at least minSummaryLen
@@ -336,7 +337,7 @@ func TestAFailedSummarizerWritesAFailureEntry(t *testing.T) {
 	f := newFixture(t, "http://unused")
 	opts := f.options()
 	s := f.open(opts)
-	s.sleep = func(time.Duration) {}
+	s.sleep = func(context.Context, time.Duration) {}
 
 	f.models["test/a"].push(answerWith("hi"))
 	run(t, s, "hello")
@@ -373,7 +374,7 @@ func testOverflowUsesTextForm(t *testing.T, contextWindow int) {
 	f := newFixture(t, "http://unused")
 	opts := f.options()
 	s := f.open(opts)
-	s.sleep = func(time.Duration) {}
+	s.sleep = func(context.Context, time.Duration) {}
 
 	f.models["test/a"].push(answerWith("hi"))
 	run(t, s, "hello")
@@ -411,7 +412,7 @@ func TestOverflowingSummaryKeepsThePriorSummary(t *testing.T) {
 	f := newFixture(t, "http://unused")
 	opts := f.options()
 	s := f.open(opts)
-	s.sleep = func(time.Duration) {}
+	s.sleep = func(context.Context, time.Duration) {}
 
 	f.models["test/a"].push(answerWith("hi"))
 	run(t, s, "hello")
@@ -542,6 +543,685 @@ func TestACancelDuringCompactionEndsTheTurnCancelled(t *testing.T) {
 	// failure entry.
 	if entries := compactionEntries(t, s); len(entries) != 0 {
 		t.Fatalf("compaction entries = %+v, want none (nothing was billed)", entries)
+	}
+}
+
+// --- review r1-c9 (astra, C9) fixes -------------------------------------
+
+// billedThenFail is a step that reports usage in a Finish part and then
+// fails: a stream that reports usage before it errors or is cancelled
+// (review r1-c9 finding 1).
+func billedThenFail(err error) step {
+	return reply(finish(fantasy.FinishReasonStop), errorPart(err))
+}
+
+// finding 1: billed usage of failed attempts, without a cancel.
+func TestFailedAttemptsBillUsageBeforeTheyFail(t *testing.T) {
+	f := newFixture(t, "http://unused")
+	opts := f.options()
+	s := f.open(opts)
+	s.sleep = func(context.Context, time.Duration) {}
+
+	f.models["test/a"].push(answerWith("hi"))
+	run(t, s, "hello")
+
+	boom := &fantasy.ProviderError{StatusCode: 500, Message: "boom"}
+	f.models["test/a"].push(billedThenFail(boom), billedThenFail(boom), billedThenFail(boom))
+	_, err := s.compact(context.Background(), s.cur, 2, store.CompactionAuto, "", "", nil)
+	if err == nil {
+		t.Fatal("compact succeeded with three billed-then-failed attempts")
+	}
+	entries := compactionEntries(t, s)
+	if len(entries) != 1 || entries[0].Compaction.Succeeded() {
+		t.Fatalf("compaction entries = %+v, want one failure", entries)
+	}
+	want := store.Usage{
+		Input: stepUsage.InputTokens * 3, Output: stepUsage.OutputTokens * 3,
+		CacheRead: stepUsage.CacheReadTokens * 3,
+	}
+	if got := *entries[0].Usage; got != want {
+		t.Errorf("the failure entry's usage = %+v, want the sum of all three billed-then-failed attempts %+v", got, want)
+	}
+}
+
+// finding 1: a cancel after a billed attempt still writes a failure entry
+// carrying that attempt's usage.
+func TestACancelAfterABilledAttemptWritesAFailureEntry(t *testing.T) {
+	f := newFixture(t, "http://unused")
+	opts := f.options()
+	s := f.open(opts)
+
+	f.models["test/a"].push(answerWith("hi"))
+	run(t, s, "hello")
+
+	g := newGate()
+	f.models["test/a"].push(g.hold(finish(fantasy.FinishReasonStop), textParts("unused")))
+	ctx, cancel := context.WithCancel(context.Background())
+	type outcome1 struct {
+		res CompactResult
+		err error
+	}
+	done := make(chan outcome1, 1)
+	go func() {
+		res, err := s.compact(ctx, s.cur, 2, store.CompactionManual, "", "", nil)
+		done <- outcome1{res, err}
+	}()
+	<-g.reached
+	cancel()
+	got := await(t, done, "compact to return after a cancel")
+	if !errors.Is(got.err, context.Canceled) {
+		t.Fatalf("compact's error = %v, want context.Canceled", got.err)
+	}
+	entries := compactionEntries(t, s)
+	if len(entries) != 1 || entries[0].Compaction.Succeeded() {
+		t.Fatalf("compaction entries = %+v, want one failure (usage was billed before the cancel)", entries)
+	}
+	want := store.Usage{Input: stepUsage.InputTokens, Output: stepUsage.OutputTokens, CacheRead: stepUsage.CacheReadTokens}
+	if got := *entries[0].Usage; got != want {
+		t.Errorf("the failure entry's usage = %+v, want the billed attempt's %+v", got, want)
+	}
+}
+
+// finding 2: the text form's request goes through live redaction, including
+// a key learned only after the history was stored.
+func TestTextFormRedactsAKeyLearnedAfterItWasStored(t *testing.T) {
+	f := newFixture(t, "http://unused")
+	env := map[string]string{"TEST_API_KEY": canary}
+	opts := f.options()
+	opts.Getenv = func(k string) string { return env[k] }
+	s := f.open(opts)
+	s.sleep = func(context.Context, time.Duration) {}
+
+	f.models["test/a"].push(answerWith("the account also uses " + canaryOther))
+	run(t, s, "remember this for later")
+
+	env["OTHER_API_KEY"] = canaryOther
+	if err := s.SetModel("other/c"); err != nil {
+		t.Fatalf("SetModel: %v", err)
+	}
+	m := s.cur
+
+	f.models["other/c"].push(answerWith(longSummary("1. Request and intent\nFrom the text form.")))
+	res, err := s.compactOn(context.Background(), m, m.r, true, 2, store.CompactionManual, "", "", nil)
+	if err != nil {
+		t.Fatalf("compact: %v", err)
+	}
+	if res.EntryID == "" {
+		t.Fatal("compact reported no entry id")
+	}
+	calls := f.models["other/c"].requests()
+	last := calls[len(calls)-1]
+	text := textOf(last.Prompt[len(last.Prompt)-1])
+	if strings.Contains(text, canaryOther) {
+		t.Errorf("the text form's prompt leaked a key learned after it was stored:\n%s", text)
+	}
+}
+
+// finding 3: a cancel must not hide a save failure that happened on the same
+// return path, through Session.Compact.
+func TestACancelDuringCompactionSurfacesASaveFailureThroughSessionCompact(t *testing.T) {
+	f := newFixture(t, "http://unused")
+	opts := f.options()
+	opts.storeOpenFile = func(name string, flag int, perm os.FileMode) (io.WriteCloser, error) {
+		file, err := os.OpenFile(name, flag, perm)
+		if err != nil {
+			return nil, err
+		}
+		// 1st write: turn one's step; 2nd: the cancellation's failure entry.
+		return &failWriter{f: file, failAt: 2}, nil
+	}
+	s := f.open(opts)
+
+	f.models["test/a"].push(answerWith("hi"))
+	run(t, s, "hello")
+
+	g := newGate()
+	f.models["test/a"].push(g.hold(finish(fantasy.FinishReasonStop), textParts("unused")))
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan outcome, 1)
+	go func() {
+		res, err := s.Compact(ctx, "", "/compact", nil)
+		done <- outcome{res, err}
+	}()
+	<-g.reached
+	cancel()
+	got := await(t, done, "Compact to return after a cancel")
+	var saveErr *errCompactionSaveFailed
+	if !errors.As(got.err, &saveErr) {
+		t.Fatalf("Compact's error = %v (%T), want *errCompactionSaveFailed: a save failure must not be hidden behind an ordinary cancellation", got.err, got.err)
+	}
+}
+
+// finding 4: Compacted{ended} is emitted even when the summarizer's own
+// agent panics, and the panic still propagates.
+func TestAPanicDuringSummarizationStillEmitsEnded(t *testing.T) {
+	f := newFixture(t, "http://unused")
+	opts := f.options()
+	s := f.open(opts)
+	s.newSummarizerAgent = func(_ fantasy.LanguageModel, _ string, tools []fantasy.AgentTool) fantasy.Agent {
+		return fakeAgent{tools: tools, run: func(_ context.Context, _ []fantasy.AgentTool, _ fantasy.AgentStreamCall) (*fantasy.AgentResult, error) {
+			panic("boom")
+		}}
+	}
+
+	f.models["test/a"].push(answerWith("hi"))
+	run(t, s, "hello")
+
+	var ev events
+	defer func() {
+		r := recover()
+		if r == nil {
+			t.Fatal("compact did not repanic; want the panic to propagate after ended is emitted")
+		}
+		var sawStarted, sawEnded bool
+		for _, e := range ev.list() {
+			if c, ok := e.(Compacted); ok {
+				switch c.Phase {
+				case CompactionStarted:
+					sawStarted = true
+				case CompactionEnded:
+					sawEnded = true
+				}
+			}
+		}
+		if !sawStarted || !sawEnded {
+			t.Fatalf("events = %+v, want Compacted{started} and Compacted{ended} even after a panic", ev.list())
+		}
+	}()
+	_, _ = s.compact(context.Background(), s.cur, 2, store.CompactionAuto, "", "", ev.sink)
+}
+
+// finding 5: transient 4xx classification. 408 and an ordinary 429 are
+// retried; a quota-exhausted 429 and a plain 402 are not.
+func TestTransientClientStatusClassification(t *testing.T) {
+	cases := []struct {
+		status int
+		msg    string
+		want   bool
+	}{
+		{408, "request timeout", true},
+		{429, "rate limited, please retry later", true},
+		{429, "insufficient_quota: no credits left", false},
+		{429, "You exceeded your current quota, please check your plan and billing details.", false},
+		{402, "payment required", false},
+		{400, "bad request", false},
+		{422, "unprocessable", false},
+	}
+	for _, c := range cases {
+		pe := &ProviderError{StatusCode: c.status, Message: c.msg}
+		if got := transientClientStatus(pe); got != c.want {
+			t.Errorf("transientClientStatus(%d, %q) = %v, want %v", c.status, c.msg, got, c.want)
+		}
+	}
+}
+
+// finding 5: a quota-exhausted 429 ends the summarizer at once (one request,
+// one failure entry), unlike an ordinary 429 (finding 6's own test covers a
+// plain 500 the same way).
+func TestQuotaExhaustedEndsTheSummarizerAtOnce(t *testing.T) {
+	f := newFixture(t, "http://unused")
+	opts := f.options()
+	s := f.open(opts)
+	s.sleep = func(context.Context, time.Duration) {}
+
+	f.models["test/a"].push(answerWith("hi"))
+	run(t, s, "hello")
+
+	before := len(f.models["test/a"].requests())
+	f.models["test/a"].push(errorStep(&fantasy.ProviderError{StatusCode: 429, Message: "insufficient_quota: no credits left"}))
+	_, err := s.compact(context.Background(), s.cur, 2, store.CompactionAuto, "", "", nil)
+	if err == nil {
+		t.Fatal("compact succeeded on a quota-exhausted 429")
+	}
+	if got := len(f.models["test/a"].requests()) - before; got != 1 {
+		t.Fatalf("the summarizer sent %d requests, want 1 (quota exhaustion ends it at once)", got)
+	}
+	entries := compactionEntries(t, s)
+	if len(entries) != 1 || entries[0].Compaction.Succeeded() {
+		t.Fatalf("compaction entries = %+v, want one failure", entries)
+	}
+}
+
+// finding 5: an ordinary 429 (no quota/credit text) is transient, retried
+// like a 500 across all three attempts.
+func TestTransient429IsRetriedLikeAFiveHundred(t *testing.T) {
+	f := newFixture(t, "http://unused")
+	opts := f.options()
+	s := f.open(opts)
+	s.sleep = func(context.Context, time.Duration) {}
+
+	f.models["test/a"].push(answerWith("hi"))
+	run(t, s, "hello")
+
+	before := len(f.models["test/a"].requests())
+	rateLimited := func() step {
+		return errorStep(&fantasy.ProviderError{StatusCode: 429, Message: "rate limited, try again"})
+	}
+	f.models["test/a"].push(rateLimited(), rateLimited(), rateLimited())
+	_, err := s.compact(context.Background(), s.cur, 2, store.CompactionAuto, "", "", nil)
+	if err == nil {
+		t.Fatal("compact succeeded with three rate-limited attempts")
+	}
+	if got := len(f.models["test/a"].requests()) - before; got != summarizerAttempts {
+		t.Fatalf("the summarizer sent %d requests, want %d (429 without quota text is transient, retried like a 500)", got, summarizerAttempts)
+	}
+}
+
+// finding 6: three attempts send at most three provider requests — the
+// summarizer's own agent must not stack Fantasy's internal retry on top of
+// compact's outer attempts.
+func TestThreeAttemptsSendAtMostThreeRequests(t *testing.T) {
+	f := newFixture(t, "http://unused")
+	opts := f.options()
+	s := f.open(opts)
+	s.sleep = func(context.Context, time.Duration) {}
+
+	f.models["test/a"].push(answerWith("hi"))
+	run(t, s, "hello")
+
+	before := len(f.models["test/a"].requests())
+	serverError := func() step { return errorStep(&fantasy.ProviderError{StatusCode: 500, Message: "boom"}) }
+	f.models["test/a"].push(serverError(), serverError(), serverError())
+	_, err := s.compact(context.Background(), s.cur, 2, store.CompactionAuto, "", "", nil)
+	if err == nil {
+		t.Fatal("compact succeeded with three failing attempts")
+	}
+	if got := len(f.models["test/a"].requests()) - before; got != summarizerAttempts {
+		t.Fatalf("the summarizer sent %d requests for %d attempts, want %d (no nested retry of its own on top)",
+			got, summarizerAttempts, summarizerAttempts)
+	}
+}
+
+// finding 7: the unsaved-usage diagnostic reaches the real emitter, on a
+// failed failure-entry append too (not only a failed success append).
+func TestUnsavedUsageDiagnosticReachesTheRealEmitterOnAFailureAppend(t *testing.T) {
+	f := newFixture(t, "http://unused")
+	opts := f.options()
+	opts.storeOpenFile = func(name string, flag int, perm os.FileMode) (io.WriteCloser, error) {
+		file, err := os.OpenFile(name, flag, perm)
+		if err != nil {
+			return nil, err
+		}
+		// 1st write: turn one's step; 2nd: the (would-be) failure entry.
+		return &failWriter{f: file, failAt: 2}, nil
+	}
+	s := f.open(opts)
+
+	f.models["test/a"].push(answerWith("hi"))
+	run(t, s, "hello")
+
+	f.models["test/a"].push(errorStep(&fantasy.ProviderError{StatusCode: 404, Message: "no such model"}))
+	var ev events
+	_, err := s.compact(context.Background(), s.cur, 2, store.CompactionAuto, "", "", ev.sink)
+	var saveErr *errCompactionSaveFailed
+	if !errors.As(err, &saveErr) {
+		t.Fatalf("compact's error = %v, want *errCompactionSaveFailed", err)
+	}
+	var sawDiag bool
+	for _, e := range ev.list() {
+		if d, ok := e.(Diag); ok && d.Kind == DiagCompactionUnsaved {
+			sawDiag = true
+		}
+	}
+	if !sawDiag {
+		t.Fatal("no DiagCompactionUnsaved event reached the sink: the unsaved-usage diagnostic was dropped")
+	}
+}
+
+// finding 8: a running background child's description is re-redacted with
+// the redactor current when the state section is rendered, not only the one
+// it launched under.
+func TestRunningChildDescriptionsAreRedactedWithTheCurrentKey(t *testing.T) {
+	f := newFixture(t, "http://unused")
+	env := map[string]string{"TEST_API_KEY": canary}
+	opts := f.options()
+	opts.Getenv = func(k string) string { return env[k] }
+	s := f.open(opts)
+
+	s.subs.regMu.Lock()
+	s.subs.results["c1"] = &bgResult{id: "c1", typ: "code", desc: "job " + canaryOther, state: resultRunning}
+	s.subs.order = append(s.subs.order, "c1")
+	s.subs.regMu.Unlock()
+	defer func() {
+		s.subs.regMu.Lock()
+		delete(s.subs.results, "c1")
+		s.subs.order = nil
+		s.subs.regMu.Unlock()
+	}()
+
+	env["OTHER_API_KEY"] = canaryOther
+	if err := s.SetModel("other/c"); err != nil {
+		t.Fatalf("SetModel: %v", err)
+	}
+
+	section := s.stateSection(s.redactor())
+	if strings.Contains(section, canaryOther) {
+		t.Errorf("the state section leaked a key learned after the child launched:\n%s", section)
+	}
+}
+
+// finding 9: the persisted summary (the entry and the segment) is
+// re-redacted with the redactor current at persistence time, not the one the
+// attempts ran under.
+func TestPersistedSummaryUsesTheRedactorCurrentAtPersistence(t *testing.T) {
+	env := map[string]string{"TEST_API_KEY": canary}
+	f := newFixture(t, "http://unused")
+	opts := f.options()
+	opts.Getenv = func(k string) string { return env[k] }
+	s := f.open(opts)
+
+	f.models["test/a"].push(answerWith("hi"))
+	run(t, s, "hello")
+
+	g := newGate()
+	summaryWithLateKey := longSummary("1. Request and intent\nThe account also uses " + canaryOther)
+	after := cat(textParts(summaryWithLateKey), finish(fantasy.FinishReasonStop))
+	f.models["test/a"].push(g.hold(nil, after))
+
+	type outcome1 struct {
+		res CompactResult
+		err error
+	}
+	done := make(chan outcome1, 1)
+	go func() {
+		res, err := s.compact(context.Background(), s.cur, 2, store.CompactionManual, "", "", nil)
+		done <- outcome1{res, err}
+	}()
+	<-g.reached
+	env["OTHER_API_KEY"] = canaryOther
+	if err := s.SetModel("other/c"); err != nil {
+		t.Fatalf("SetModel: %v", err)
+	}
+	close(g.release)
+	got := await(t, done, "compact to return")
+	if got.err != nil {
+		t.Fatalf("compact: %v", got.err)
+	}
+	if got.res.EntryID == "" {
+		t.Fatal("compact reported no entry id")
+	}
+
+	entries := compactionEntries(t, s)
+	if len(entries) != 1 || !entries[0].Compaction.Succeeded() {
+		t.Fatalf("compaction entries = %+v, want one success", entries)
+	}
+	if strings.Contains(entries[0].Compaction.Summary, canaryOther) {
+		t.Errorf("the persisted summary leaked a key learned only after the attempts ran:\n%s", entries[0].Compaction.Summary)
+	}
+	dir := store.SegmentDir(s.store.Path())
+	seg, err := os.ReadFile(filepath.Join(dir, store.SegmentName(1)))
+	if err != nil {
+		t.Fatalf("reading the segment: %v", err)
+	}
+	if strings.Contains(string(seg), canaryOther) {
+		t.Errorf("the segment leaked a key learned only after the attempts ran:\n%s", seg)
+	}
+}
+
+// finding 10: defaultSleep, compact's production backoff, ends at once on a
+// cancel rather than waiting out the whole delay.
+func TestDefaultSleepEndsAtOnceOnCancel(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defaultSleep(ctx, time.Hour)
+		close(done)
+	}()
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(waitTimeout):
+		t.Fatal("defaultSleep did not return promptly after a cancel")
+	}
+}
+
+// finding 10: a cancel during compact's own backoff ends the attempts at
+// once, rather than waiting out the delay and only then failing the next
+// attempt's own way.
+func TestBackoffEndsTheAttemptsAtOnceOnCancel(t *testing.T) {
+	f := newFixture(t, "http://unused")
+	opts := f.options()
+	s := f.open(opts)
+	reachedBackoff := make(chan struct{})
+	s.sleep = func(ctx context.Context, d time.Duration) {
+		close(reachedBackoff)
+		defaultSleep(ctx, d)
+	}
+
+	f.models["test/a"].push(answerWith("hi"))
+	run(t, s, "hello")
+
+	f.models["test/a"].push(billedThenFail(&fantasy.ProviderError{StatusCode: 500, Message: "boom"}))
+	ctx, cancel := context.WithCancel(context.Background())
+	type outcome1 struct {
+		res CompactResult
+		err error
+	}
+	done := make(chan outcome1, 1)
+	go func() {
+		res, err := s.compact(ctx, s.cur, 2, store.CompactionAuto, "", "", nil)
+		done <- outcome1{res, err}
+	}()
+	<-reachedBackoff
+	cancel()
+	got := await(t, done, "compact to return promptly after a cancel during backoff")
+	if !errors.Is(got.err, context.Canceled) {
+		t.Fatalf("compact's error = %v, want context.Canceled", got.err)
+	}
+}
+
+// finding 11: the segment cap counts the omission notice's own bytes: two
+// discarded steps sized so that stopping the drop once the notice-less total
+// fits (the old rule) leaves the real, notice-included file over the cap.
+func TestSegmentCapCountsTheOmissionNotice(t *testing.T) {
+	f := newFixture(t, "http://unused")
+	opts := f.options()
+	s := f.open(opts)
+	red := s.redactor()
+
+	mkStep := func(n int) store.Step {
+		return store.Step{Messages: []fantasy.Message{fantasy.NewUserMessage(strings.Repeat("x", n))}}
+	}
+	summary := longSummary("1. Request and intent\nSized precisely.")
+	headOnly := s.segmentContent("sess", 1, nil, summary, red)
+	notice := omissionNotice(1, s.store.Path())
+
+	// Once the small (oldest) step alone is dropped, the remaining step's
+	// own size lands the notice-less total within the cap by less than the
+	// notice's own length.
+	slack := len(notice) - 1
+	bigStep := mkStep(maxSegmentBytes - len(headOnly) - slack)
+	steps := []store.Step{mkStep(50), bigStep}
+
+	got := s.segmentContent("sess", 1, steps, summary, red)
+	if len(got) > maxSegmentBytes {
+		t.Fatalf("the segment is %d bytes, want at most %d (the fit must count the omission notice)", len(got), maxSegmentBytes)
+	}
+}
+
+// finding 11: when the header and the summary alone do not fit even with
+// every turn dropped, the summary itself is truncated rather than left to
+// overflow the cap.
+func TestSegmentTruncatesAnOversizedSummary(t *testing.T) {
+	f := newFixture(t, "http://unused")
+	opts := f.options()
+	s := f.open(opts)
+	red := s.redactor()
+
+	summary := strings.Repeat("s", maxSegmentBytes+1000)
+	got := s.segmentContent("sess", 1, nil, summary, red)
+	if len(got) > maxSegmentBytes {
+		t.Fatalf("the segment is %d bytes, want at most %d even when the summary alone would not fit", len(got), maxSegmentBytes)
+	}
+	if !strings.Contains(string(got), "truncated") {
+		t.Error("the segment does not say the summary was truncated")
+	}
+}
+
+// finding 12: the last COMPLETE <summary>…</summary> block is used even when
+// an unfinished opener follows it.
+func TestLastSummaryBlockIgnoresATrailingUnfinishedOpener(t *testing.T) {
+	reply := "<summary>valid summary text</summary> trailing text <summary>unfinished"
+	block, ok := lastSummaryBlock(reply)
+	if !ok {
+		t.Fatal("lastSummaryBlock found no block, want the completed one")
+	}
+	if block != "<summary>valid summary text</summary>" {
+		t.Errorf("lastSummaryBlock = %q, want the completed block alone", block)
+	}
+}
+
+// finding 13: the prior summary is identified by the store's own precise
+// mark, never guessed from a message's content — a background result can
+// legitimately hold text that reads like the summary wrapper.
+func TestPriorSummaryTextIsNeverGuessedFromContent(t *testing.T) {
+	msgs := []fantasy.Message{fantasy.NewUserMessage("<" + compactedTag + ">\nnot really a summary, a child's own output\n</" + compactedTag + ">")}
+	if text, ok := priorSummaryText(msgs, false); ok || text != "" {
+		t.Fatalf("priorSummaryText(_, false) = (%q, %v), want (\"\", false)", text, ok)
+	}
+	if text, ok := priorSummaryText(msgs, true); !ok || text == "" {
+		t.Fatalf("priorSummaryText(_, true) = (%q, %v), want the message's own text and true", text, ok)
+	}
+}
+
+// finding 14: the unknown-window fallback budgets from the estimate of the
+// request that actually overflowed — the aligned summarizer request,
+// including the compaction prompt, the state section and the focus — not
+// from the raw history alone.
+func TestUnknownWindowFallbackBudgetsFromTheOverflowingRequest(t *testing.T) {
+	f := newFixture(t, "http://unused")
+	opts := f.options()
+	s := f.open(opts)
+
+	f.models["test/a"].push(answerWith("hi"))
+	run(t, s, "hi")
+
+	m := s.cur
+	m.r.ContextWindow = 0 // the unknown-window fallback
+	red := s.redactor()
+
+	// A focus long enough to dwarf the system prompt, whatever its size, so
+	// the compaction prompt's own weight dominates the fixed cost.
+	focus := strings.Repeat("f", 100000)
+	promptCore := s.compactionPromptText(focus, red)
+	fixed := textTokens(s.system) + textTokens(promptCore)
+	before := fixed // 60% of before alone never clears fixed; 60% of
+	// before+promptCore comfortably does.
+
+	steps := s.store.Steps(s.cur.id())
+	if _, err := s.textFormPrompt(m, before, steps, "", focus, red); err != nil {
+		t.Fatalf("textFormPrompt = %v, want it to fit: the fallback budget must be 60%% of the request that actually overflowed, not of the raw history alone", err)
+	}
+}
+
+// finding 15: the text form checks the assembled request once more,
+// separators included — a fixed part that lands exactly at budget, with no
+// turn left to trim, must not silently return an over-budget prompt.
+func TestTextFormChecksTheAssembledRequestOnceMore(t *testing.T) {
+	f := newFixture(t, "http://unused")
+	opts := f.options()
+	s := f.open(opts)
+	red := s.redactor()
+
+	m := s.cur
+	m.r.ContextWindow = 0 // the unknown-window fallback, so budget is a
+	// plain function of "before" this test can search over exactly.
+
+	var (
+		focus      string
+		promptCore string
+		fixed      int64
+		before     int64
+		found      bool
+	)
+outer:
+	for pad := range 4 {
+		focus = strings.Repeat("x", pad)
+		promptCore = s.compactionPromptText(focus, red)
+		if len(promptCore)%4 != 0 {
+			continue
+		}
+		fixed = textTokens(s.system) + textTokens(promptCore)
+		for b := int64(0); b < 20000; b++ {
+			if textFormBudget(m.r, b+textTokens(promptCore)) == fixed {
+				before, found = b, true
+				break outer
+			}
+		}
+	}
+	if !found {
+		t.Fatal("test setup: could not find a before/focus combination landing the fixed part exactly at budget")
+	}
+
+	if _, err := s.textFormPrompt(m, before, nil, "", focus, red); !errors.Is(err, errTextFormOverflow) {
+		t.Fatalf("textFormPrompt = %v, want errTextFormOverflow: the assembled request (the newline before the prompt core, never counted separately) is exactly one token over budget", err)
+	}
+}
+
+// finding 16: the degenerate-summary floor counts characters, tags excluded,
+// not bytes: a CJK summary with under minSummaryLen runes but well over it
+// in bytes must still count as degenerate.
+func TestDegenerateLenCountsRunesNotBytesWithoutTags(t *testing.T) {
+	text := strings.Repeat("测", 200) // 200 runes, 600 bytes
+	tagged := "<summary>" + text + "</summary>"
+	if got := degenerateLen(tagged); got != 200 {
+		t.Errorf("degenerateLen(tagged) = %d, want 200 (runes, tags excluded)", got)
+	}
+	if got := degenerateLen(text); got != 200 {
+		t.Errorf("degenerateLen(untagged) = %d, want 200", got)
+	}
+	if bytes := len(tagged); bytes < minSummaryLen {
+		t.Fatalf("test setup: %d bytes is not over minSummaryLen; the byte-vs-rune distinction would not be exercised", bytes)
+	}
+}
+
+// finding 16: a short CJK summary is retried as degenerate despite being
+// well over minSummaryLen bytes.
+func TestShortCJKSummaryIsRetriedDespiteItsByteLength(t *testing.T) {
+	f := newFixture(t, "http://unused")
+	opts := f.options()
+	s := f.open(opts)
+	s.sleep = func(context.Context, time.Duration) {}
+
+	f.models["test/a"].push(answerWith("hi"))
+	run(t, s, "hello")
+
+	shortCJK := "<summary>" + strings.Repeat("测", 200) + "</summary>"
+	f.models["test/a"].push(answerWith(shortCJK), answerWith(longSummary("1. Request and intent\nOK.")))
+	res, err := s.compact(context.Background(), s.cur, 2, store.CompactionAuto, "", "", nil)
+	if err != nil {
+		t.Fatalf("compact: %v", err)
+	}
+	if res.EntryID == "" {
+		t.Fatal("compact reported no entry id after the retry succeeded")
+	}
+	entries := compactionEntries(t, s)
+	if len(entries) != 1 || !entries[0].Compaction.Succeeded() {
+		t.Fatalf("compaction entries = %+v, want one success (the CJK summary should have been retried as degenerate, then replaced)", entries)
+	}
+	if strings.Contains(entries[0].Compaction.Summary, "测") {
+		t.Errorf("the degenerate CJK summary was kept instead of retried:\n%s", entries[0].Compaction.Summary)
+	}
+}
+
+// finding 16: capText cuts on rune boundaries, not byte offsets.
+func TestCapTextCutsOnRuneBoundaries(t *testing.T) {
+	s := strings.Repeat("测", 10) // 10 runes, 30 bytes
+	got := capText(s, 5)
+	if n := utf8.RuneCountInString(strings.TrimSuffix(got, "[truncated]")); n != 5 {
+		t.Errorf("capText kept %d runes, want 5", n)
+	}
+	if !utf8.ValidString(got) {
+		t.Errorf("capText produced invalid UTF-8: %q", got)
+	}
+	if !strings.HasSuffix(got, "[truncated]") {
+		t.Errorf("capText = %q, want the truncation marker", got)
+	}
+	if full := capText(s, 10); full != s {
+		t.Errorf("capText at the exact rune count truncated: got %q, want %q unchanged", full, s)
+	}
+	if untouched := capText(s, 20); untouched != s {
+		t.Errorf("capText under the cap changed the string: got %q, want %q", untouched, s)
 	}
 }
 
