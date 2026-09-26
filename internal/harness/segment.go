@@ -176,10 +176,16 @@ func segmentStepBlock(st store.Step, red *redact.Replacer) string {
 }
 
 // capResultText is a result's text, cut to resultByteCap with a note of how
-// much was left out (plan 028 §3.10).
+// much was left out (plan 028 §3.10). The cut backs up to a rune boundary so
+// a multi-byte character straddling the cap is never split, keeping the
+// segment's Markdown valid UTF-8; the omitted count reflects the actual cut.
 func capResultText(s string) string {
 	if len(s) <= resultByteCap {
 		return s
 	}
-	return fmt.Sprintf("%s\n[… %d bytes omitted]", s[:resultByteCap], len(s)-resultByteCap)
+	cut := resultByteCap
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return fmt.Sprintf("%s\n[… %d bytes omitted]", s[:cut], len(s)-cut)
 }

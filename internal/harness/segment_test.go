@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"charm.land/fantasy"
 	"github.com/charliek/craze/internal/harness/store"
@@ -1041,4 +1042,30 @@ func requestReminders(t *testing.T, tn *turn, base []fantasy.Message) []string {
 		t.Fatalf("the request carries %d reminders, the turn records %d (%q)", len(sent), len(variants), variants)
 	}
 	return variants
+}
+
+// A multi-byte tool-result character straddling the resultByteCap boundary:
+// capResultText must back up to a rune boundary rather than cut at the fixed
+// byte offset, so the segment's Markdown stays valid UTF-8, and the omitted
+// count must reflect the actual (rune-aligned) cut.
+func TestCapResultTextCutsOnRuneBoundaries(t *testing.T) {
+	prefix := strings.Repeat("a", resultByteCap-2)
+	s := prefix + "测" // a 3-byte rune occupies bytes resultByteCap-2..resultByteCap, straddling the cap
+	got := capResultText(s)
+
+	body, notice, ok := strings.Cut(got, "\n[")
+	if !ok {
+		t.Fatalf("capResultText = %q, want an omitted-bytes marker", got)
+	}
+	if !utf8.ValidString(body) {
+		t.Fatalf("capResultText produced invalid UTF-8: %q", body)
+	}
+	if body != prefix {
+		t.Errorf("capResultText cut at %d bytes (%q), want the straddling rune backed out entirely, keeping %q", len(body), body, prefix)
+	}
+	wantOmitted := len(s) - len(body)
+	wantNotice := fmt.Sprintf("… %d bytes omitted]", wantOmitted)
+	if notice != wantNotice {
+		t.Errorf("capResultText notice = %q, want %q (omitted count must equal len(s)-cut)", notice, wantNotice)
+	}
 }
