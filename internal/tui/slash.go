@@ -14,6 +14,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/charliek/craze/internal/agent"
+	"github.com/charliek/craze/internal/backend"
 	"github.com/charliek/craze/internal/engine"
 )
 
@@ -450,7 +451,7 @@ func (m Model) runBuiltin(name, args string) (tea.Model, tea.Cmd) {
 			//     (ErrIndexWrite), which is the error row writeIndex used to
 			//     draw, followed by the note, in that order, because the
 			//     session really is renamed.
-			if err := m.eng.SetTitle(m.nextCmd(), title); err != nil {
+			if err := m.eng.SetTitle(context.Background(), m.nextCmd(), title); err != nil {
 				if !errors.Is(err, engine.ErrIndexWrite) {
 					m.addError(err.Error())
 					return m, nil
@@ -590,6 +591,10 @@ func (m Model) applyModelEffort(id, effort string) (tea.Model, tea.Cmd) {
 	// minted here because the closure runs off this Update and may not touch
 	// the model. An id that goes unused is simply a number nobody spent.
 	eng, cmds, at := m.eng, m.nextCmds(2), m.modelRev
+	// The provider the effort step judges the catalog by (runModelEffort): its
+	// local vocabulary, which says what an option is, taken from the mirror
+	// here in the Update, since the closure may not read the model.
+	prov := m.snap.Provider
 	// Behind every chain of this client's issued before it and ahead of every
 	// one issued after, its place taken here, in this Update (chainLock): a
 	// dialog reopened on the model this command is switching to binds its steps
@@ -619,13 +624,14 @@ func (m Model) applyModelEffort(id, effort string) (tea.Model, tea.Cmd) {
 		if res.Value != id {
 			return effortNotAppliedMsg{note: optionNotAppliedNote("effort", id, effort, notAppliedStale)}
 		}
-		return runModelEffort(ctx, eng, cmds[1], id, effort)
+		return runModelEffort(ctx, eng, prov, cmds[1], id, effort)
 	})
 }
 
 // runModelEffort is `/model`'s effort step, on a command's goroutine once the
-// model step has landed on model: it reads the engine and never the Model,
-// which belongs to Update.
+// model step has landed on model: it reads the backend's settings and never the
+// Model, which belongs to Update, and judges them by prov, the session's
+// provider as the Update that dispatched the chain saw it.
 //
 // The candidate is judged against the catalog the session holds now, which the
 // model step installed: that model's effort option, whatever its id (effort,
@@ -642,12 +648,17 @@ func (m Model) applyModelEffort(id, effort string) (tea.Model, tea.Cmd) {
 // (engine.ErrStaleModel) — "the model changed"; the model has no effort, or
 // the agent's answer no longer lists it (agent.ErrOptionGone) — "has no
 // effort"; the model does not offer the value — "does not offer". Any other
-// refusal is the error row it always was.
-func runModelEffort(ctx context.Context, eng *engine.Engine, cmd engine.Command, model, effort string) tea.Msg {
+// refusal is the error row it always was, and so is a settings read that
+// failed (a socket backend's round trip; in process it cannot).
+func runModelEffort(ctx context.Context, b backend.Backend, prov agent.ProviderInfo, cmd engine.Command, model, effort string) tea.Msg {
 	note := func(why notAppliedReason) tea.Msg {
 		return effortNotAppliedMsg{note: optionNotAppliedNote("effort", model, effort, why)}
 	}
-	snap := eng.State().Snapshot
+	set, err := b.Settings(ctx)
+	if err != nil {
+		return actionErrMsg{err}
+	}
+	snap := settingsSnapshot(set, prov)
 	if snap.CurrentModel != model {
 		// Moved again before the effort could be sent: the catalog read here is
 		// some other model's, and judging the effort against it would say the
@@ -662,7 +673,7 @@ func runModelEffort(ctx context.Context, eng *engine.Engine, cmd engine.Command,
 	if !ok {
 		return note(notAppliedUnoffered)
 	}
-	_, err := eng.Set(ctx, cmd, engine.Setting{
+	_, err = b.Set(ctx, cmd, engine.Setting{
 		Kind: engine.SettingConfig, ID: opt.ID, Value: value, ForModel: model,
 	})
 	switch {

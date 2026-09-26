@@ -567,7 +567,7 @@ func TestFinishRunOrder(t *testing.T) {
 		// swap's, not the exit tail's, so the log starts again after it.
 		assertOrder(t, log, "sess close")
 		log.events = nil
-		if updated.(Model).eng.Session() == initial.eng.Session() {
+		if engineOf(t, updated.(Model)).Session() == engineOf(t, initial).Session() {
 			t.Fatal("setup: confirmProvider did not swap the session")
 		}
 		if _, err := finishRun(w, nil, initial, h); err != nil {

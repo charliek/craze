@@ -317,7 +317,7 @@ func (m *Model) withdrawSendNow(note string) {
 		return
 	}
 	c := m.nextCmd()
-	if err := m.eng.Disarm(c); err != nil {
+	if err := m.eng.Disarm(context.Background(), c); err != nil {
 		// Nothing was armed, or the engine is no longer admitting: either way
 		// there is nothing to say about a send that is not waiting.
 		return
@@ -414,12 +414,12 @@ func (m Model) saveQueueEdit() (tea.Model, tea.Cmd) {
 		// An emptied edit is a cancel: an empty message is not a message. The
 		// shell context goes with it — it was context for the message that is
 		// no longer being sent, not a message of its own.
-		_, _ = m.eng.Unqueue(m.nextCmd(), id)
+		_, _ = m.eng.Unqueue(context.Background(), m.nextCmd(), id)
 		m.finishQueueEdit()
 		m.refreshSnap()
 		return m, nil
 	}
-	if err := m.eng.EditQueued(m.nextCmd(), id, m.queueEditCtx+text, nil); err != nil {
+	if err := m.eng.EditQueued(context.Background(), m.nextCmd(), id, m.queueEditCtx+text, nil); err != nil {
 		m.note(queueErrNote(err))
 		return m, nil
 	}
@@ -662,7 +662,7 @@ func (m Model) handleQueueKey(msg tea.KeyMsg) (bool, Model) {
 		return true, m
 	case tea.KeyBackspace, tea.KeyDelete:
 		if m.eng != nil {
-			_, _ = m.eng.Unqueue(m.nextCmd(), sel.ID)
+			_, _ = m.eng.Unqueue(context.Background(), m.nextCmd(), sel.ID)
 		}
 		m.refreshSnap()
 		if len(m.visibleQueue()) == 0 {
@@ -717,7 +717,7 @@ func (m Model) queueClick(x, row int) (tea.Model, tea.Cmd) {
 		return m, nil
 	case actionCancel:
 		if m.eng != nil {
-			_, _ = m.eng.Unqueue(m.nextCmd(), p.ID)
+			_, _ = m.eng.Unqueue(context.Background(), m.nextCmd(), p.ID)
 		}
 		m.refreshSnap()
 		return m, nil

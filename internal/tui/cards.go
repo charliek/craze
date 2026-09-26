@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strings"
@@ -156,7 +157,10 @@ func (m *Model) pushCard(c card) {
 // can ever raise again.
 //
 // With no engine, or a card with no ask id, there is nothing to consult and
-// the mask drops it, which is what it did for everything before.
+// the mask drops it, which is what it did for everything before. A read that
+// fails (a socket backend's round trip; in process it cannot) says nothing
+// about the ask, so the card is kept: stranding a live ask is the one outcome
+// the mask must never produce, and an ended one's card goes with its ending.
 func (m Model) maskDrops(c card) bool {
 	if !m.cardMasking {
 		return false
@@ -165,7 +169,10 @@ func (m Model) maskDrops(c card) bool {
 	if m.eng == nil || id == "" {
 		return true
 	}
-	rec, known := m.eng.Ask(id)
+	rec, known, err := m.eng.Ask(context.Background(), id)
+	if err != nil {
+		return false
+	}
 	return !known || rec.Status != agent.AskOpen
 }
 
@@ -225,7 +232,7 @@ func (m *Model) answerCard(popped card, id string, a agent.AskAnswer) bool {
 		return false
 	}
 	cmd := m.nextCmd()
-	err := m.eng.Answer(cmd, id, a)
+	err := m.eng.Answer(context.Background(), cmd, id, a)
 	switch {
 	case err == nil:
 		// The ending this answer causes names this command, and its effect —

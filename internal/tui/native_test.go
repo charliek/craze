@@ -287,7 +287,7 @@ func TestNativeModelSwitchGainsTheEffortOption(t *testing.T) {
 			m = tm.(Model)
 		}
 		synced := make(chan struct{})
-		eng := m.eng
+		eng := engineOf(t, m)
 		go func() { defer close(synced); _ = eng.Sync(context.Background()) }()
 		for done := false; !done; {
 			select {

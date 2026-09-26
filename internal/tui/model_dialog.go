@@ -13,6 +13,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/charliek/craze/internal/agent"
+	"github.com/charliek/craze/internal/backend"
 	"github.com/charliek/craze/internal/engine"
 )
 
@@ -680,8 +681,13 @@ func (m Model) applyModelDialog() (tea.Model, tea.Cmd) {
 	// user applied in, and not when the program gets round to starting it
 	// (chainLock.take).
 	eng, cmds := m.eng, m.nextCmds(len(steps))
+	// The provider every option step is judged by (runModelApply): its local
+	// vocabulary says which option is the effort and which the fast toggle,
+	// and it is taken from the mirror here, since the closure may not read
+	// the model.
+	prov := m.snap.Provider
 	return m, m.chains.take(func() tea.Msg {
-		return runModelApply(eng, cmds, steps, forModel, gen)
+		return runModelApply(eng, prov, cmds, steps, forModel, gen)
 	})
 }
 
@@ -852,12 +858,17 @@ func (l *chainLock) runHead(head *chainTicket) {
 // (agent.ErrBadCatalog) included, which ends it too, since no option can be
 // judged against a catalog nobody could read, but whose row says the outcome
 // is unknown (modelApplyMsg.unread).
-func runModelApply(eng *engine.Engine, cmds []engine.Command, steps []applyStep, forModel string, gen int) modelApplyMsg {
+//
+// The snapshot a step is judged on is the backend's settings read then, with
+// prov, the session's provider as the Update that dispatched the chain saw it.
+// A settings read that fails (a socket backend's round trip; in process it
+// cannot) names its step and ends the chain, as any other failed step does.
+func runModelApply(b backend.Backend, prov agent.ProviderInfo, cmds []engine.Command, steps []applyStep, forModel string, gen int) modelApplyMsg {
 	ctx := context.Background()
 	out := modelApplyMsg{gen: gen}
 	for i, st := range steps {
 		if st.cfgID == "" {
-			res, err := applyModelStep(ctx, eng, cmds[i], forModel)
+			res, err := applyModelStep(ctx, b, cmds[i], forModel)
 			if err != nil {
 				out.step, out.err = st.label, err
 				out.unread = errors.Is(err, agent.ErrBadCatalog)
@@ -878,7 +889,12 @@ func runModelApply(eng *engine.Engine, cmds []engine.Command, steps []applyStep,
 			out.done = append(out.done, st)
 			continue
 		}
-		snap := eng.State().Snapshot
+		set, err := b.Settings(ctx)
+		if err != nil {
+			out.step, out.err = st.label, err
+			return out
+		}
+		snap := settingsSnapshot(set, prov)
 		if snap.CurrentModel != forModel {
 			// Moved before this step could be sent: the catalog read here is
 			// some other model's, and judging the step against it would say
@@ -890,7 +906,7 @@ func runModelApply(eng *engine.Engine, cmds []engine.Command, steps []applyStep,
 			out.done = append(out.done, st)
 			continue
 		}
-		res, err := eng.Set(ctx, cmds[i], engine.Setting{
+		res, err := b.Set(ctx, cmds[i], engine.Setting{
 			Kind: engine.SettingConfig, ID: st.cfgID, Value: st.value, ForModel: forModel,
 		})
 		switch {
@@ -1028,8 +1044,8 @@ func (m Model) settleStep(st applyStep) Model {
 // refused: the agent answered, and may have switched. Nothing of that answer
 // was installed, so both callers show what the session's snapshot says and say
 // the outcome is unknown (unreadModelText).
-func applyModelStep(ctx context.Context, eng *engine.Engine, cmd engine.Command, id string) (engine.SetResult, error) {
-	return eng.Set(ctx, cmd, engine.Setting{Kind: engine.SettingModel, Value: id})
+func applyModelStep(ctx context.Context, b backend.Backend, cmd engine.Command, id string) (engine.SetResult, error) {
+	return b.Set(ctx, cmd, engine.Setting{Kind: engine.SettingModel, Value: id})
 }
 
 // unreadModelText is the error row for a model change whose answer could not

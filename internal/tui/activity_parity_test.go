@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"context"
 	"errors"
 	"reflect"
 	"testing"
@@ -117,7 +118,7 @@ func parityModel(t *testing.T) (Model, *scriptedSession) {
 func assertParity(t *testing.T, m Model, what string) {
 	t.Helper()
 	want, wantOK := host.Derive(m.hostInput())
-	got, gotOK := host.Derive(inputFromState(m.eng.State()))
+	got, gotOK := host.Derive(inputFromState(engineOf(t, m).State()))
 	if wantOK != gotOK || want != got {
 		t.Fatalf("%s:\n the TUI's mirror derives ok=%v %+v\n the engine's State  ok=%v %+v\n%s",
 			what, wantOK, want, gotOK, got, plainView(m))
@@ -168,7 +169,7 @@ func TestEngineStateDerivesTheSameHostStatusAsTheTUIsMirror(t *testing.T) {
 		if err := m.eng.Close(); err != nil {
 			t.Fatalf("close: %v", err)
 		}
-		if act := m.eng.State().Activity; act != engine.ActivityClosing {
+		if act := engineOf(t, m).State().Activity; act != engine.ActivityClosing {
 			t.Fatalf("setup: the closed engine is %s", act)
 		}
 		assertParity(t, m, "the engine closing")
@@ -348,7 +349,7 @@ func TestEngineStateDerivesTheSameHostStatusAsTheTUIsMirror(t *testing.T) {
 		}
 		// The engine refuses everything from here, which is the state this
 		// parity is about: StartFailed with the error beside it.
-		if _, err := m.eng.Submit(engine.Command{}, "anything", engine.SubmitQueue, ""); !errors.Is(err, engine.ErrNotAccepting) {
+		if _, err := m.eng.Submit(context.Background(), engine.Command{}, "anything", engine.SubmitQueue, ""); !errors.Is(err, engine.ErrNotAccepting) {
 			t.Fatalf("a submit after a failed start: %v", err)
 		}
 	})
@@ -407,7 +408,7 @@ func TestInputFromStateReadsEveryFieldDeriveDoes(t *testing.T) {
 	m = pumpDrained(t, m)
 	// Every field the TUI fills for a blocked, working session, filled from the
 	// engine's State as well.
-	mine, theirs := m.hostInput(), inputFromState(m.eng.State())
+	mine, theirs := m.hostInput(), inputFromState(engineOf(t, m).State())
 	if mine != theirs {
 		t.Fatalf("the two Inputs differ:\n TUI    %+v\n engine %+v", mine, theirs)
 	}

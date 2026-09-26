@@ -96,7 +96,7 @@ func TestAnswerThroughControl(t *testing.T) {
 	// (plan 021 C11: a resend is the SAME id with the SAME payload, never a
 	// second attempt with a different one, which a command id table now
 	// answers with ErrBadRequest rather than running).
-	if err := m.eng.Answer(m.nextCmd(), "ask-1", agent.AskAnswer{OptionID: "opt-a"}); !errors.Is(err, agent.ErrBadAnswer) {
+	if err := m.eng.Answer(context.Background(), m.nextCmd(), "ask-1", agent.AskAnswer{OptionID: "opt-a"}); !errors.Is(err, agent.ErrBadAnswer) {
 		t.Fatalf("a permission's answer must not fit a question: %v", err)
 	}
 	if engine.Code(errors.New("x")) == "" {
@@ -105,17 +105,17 @@ func TestAnswerThroughControl(t *testing.T) {
 	if got := len(stub.Calls()); got != 0 {
 		t.Fatalf("a refused answer resolved the ask: %+v", stub.Calls())
 	}
-	if err := m.eng.Answer(m.nextCmd(), "ask-1", agent.AskAnswer{Skip: true}); err != nil {
+	if err := m.eng.Answer(context.Background(), m.nextCmd(), "ask-1", agent.AskAnswer{Skip: true}); err != nil {
 		t.Fatalf("the ask must still be answerable: %v", err)
 	}
-	if err := m.eng.Answer(m.nextCmd(), "ask-1", agent.AskAnswer{Skip: true}); !errors.Is(err, agent.ErrAlreadyResolved) {
+	if err := m.eng.Answer(context.Background(), m.nextCmd(), "ask-1", agent.AskAnswer{Skip: true}); !errors.Is(err, agent.ErrAlreadyResolved) {
 		t.Fatalf("a second answer: %v", err)
 	}
 	calls := stub.Calls()
 	if len(calls) != 1 || calls[0].ID != "ask-1" || !calls[0].Skip {
 		t.Fatalf("one ending, and it is the skip: %+v", calls)
 	}
-	if err := m.eng.Answer(m.nextCmd(), "ask-404", agent.AskAnswer{Skip: true}); !errors.Is(err, agent.ErrUnknownAsk) {
+	if err := m.eng.Answer(context.Background(), m.nextCmd(), "ask-404", agent.AskAnswer{Skip: true}); !errors.Is(err, agent.ErrUnknownAsk) {
 		t.Fatalf("an id nobody issued: %v", err)
 	}
 }
@@ -326,7 +326,7 @@ func TestStateHeadAskMatchesTheCardTheModelDraws(t *testing.T) {
 			m, stub := sizedCards(t)
 			m.yolo = false
 			m = cardEvent(t, m, stub, tc.ev)
-			st := m.eng.State()
+			st := engineOf(t, m).State()
 			if st.PendingAsks != 1 || st.HeadAsk.Kind != tc.kind {
 				t.Fatalf("state %+v", st.HeadAsk)
 			}
@@ -651,8 +651,8 @@ func TestTheLoserOfAnAnswerRaceKeepsTheWinnersRow(t *testing.T) {
 	m = cardEvent(t, m, stub, agent.Event{Type: agent.EventQuestion, Question: stubQuestion()})
 
 	// Another client on the same engine answers first.
-	other := engine.Command{Client: m.eng.NewClientID(), ID: "1"}
-	if err := m.eng.Answer(other, "ask-1", agent.AskAnswer{Answers: map[string][]string{"q1": {"opt-b"}}}); err != nil {
+	other := engine.Command{Client: engineOf(t, m).NewClientID(), ID: "1"}
+	if err := engineOf(t, m).Answer(other, "ask-1", agent.AskAnswer{Answers: map[string][]string{"q1": {"opt-b"}}}); err != nil {
 		t.Fatalf("the other client's answer: %v", err)
 	}
 

@@ -1,6 +1,8 @@
 package tui
 
 import (
+	"context"
+
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/charliek/craze/internal/agent"
@@ -85,7 +87,7 @@ func (m Model) stopSubagent(info agent.SubagentInfo) (bool, Model) {
 		return false, m
 	}
 	if m.eng != nil {
-		_ = m.eng.CancelSubagent(m.nextCmd(), info.ID)
+		_ = m.eng.CancelSubagent(context.Background(), m.nextCmd(), info.ID)
 	}
 	return true, m
 }

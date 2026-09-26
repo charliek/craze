@@ -145,8 +145,14 @@ func pumpFor(t *testing.T, m Model) *pump {
 		pumpsMu.Unlock()
 		return p
 	}
+	// The engine behind the model's in-process backend: the pump reads its
+	// primary and closes it, as the model's own reader and exit tail would.
+	var ctrl *engine.Engine
+	if m.eng != nil {
+		ctrl = engineOf(t, m)
+	}
 	p := &pump{
-		ctrl:       m.eng,
+		ctrl:       ctrl,
 		msgs:       make(chan pumpItem, 256),
 		dead:       make(chan struct{}),
 		quietened:  make(chan struct{}, 1),
@@ -856,7 +862,7 @@ func enqueueRow(t *testing.T, m Model, text string) {
 	if m.eng == nil {
 		t.Fatal("the model has no engine to queue through")
 	}
-	if _, err := m.eng.Queue(engine.Command{}, text); err != nil {
+	if _, err := engineOf(t, m).Queue(engine.Command{}, text); err != nil {
 		t.Fatalf("queueing %q: %v", text, err)
 	}
 }
@@ -866,7 +872,7 @@ func unqueueRow(t *testing.T, m Model, id string) {
 	if m.eng == nil {
 		t.Fatal("the model has no engine to unqueue through")
 	}
-	if _, err := m.eng.Unqueue(engine.Command{}, id); err != nil {
+	if _, err := engineOf(t, m).Unqueue(engine.Command{}, id); err != nil {
 		t.Fatalf("unqueueing %q: %v", id, err)
 	}
 }
@@ -877,7 +883,11 @@ func queuedRows(m Model) []agent.QueuedPrompt {
 	if m.eng == nil {
 		return nil
 	}
-	return m.eng.State().Queue
+	eng, ok := engineIn(m)
+	if !ok {
+		panic(fmt.Sprintf("queuedRows: the model's backend is %T, not the in-process engine", m.eng))
+	}
+	return eng.State().Queue
 }
 
 // queueTexts is the queued messages, in order. The band draws them, but a test
@@ -934,7 +944,7 @@ func TestPumpSkipsTheTickChainAndTheEventReader(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = eng.Close() })
-	reader := waitEvent(eng)
+	reader := waitEvent(newEngineBackend(eng))
 	if reader == nil {
 		t.Fatal("waitEvent must return a command for a live session")
 	}

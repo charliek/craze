@@ -19,6 +19,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/charliek/craze/internal/agent"
+	"github.com/charliek/craze/internal/backend"
 	"github.com/charliek/craze/internal/engine"
 	"github.com/charliek/craze/internal/host"
 	"github.com/charliek/craze/internal/sessions"
@@ -139,11 +140,13 @@ type Config struct {
 	Host Host
 	// OnEngine is handed every engine setSession installs, right after the
 	// session owner holds it — the one New builds and the one a picker builds
-	// alike — and never nil. It runs inside Update when a picker confirms, so
-	// it must not block. nil calls nothing, which is what every test Config,
-	// every golden and the frame runner get; internal/cli's hook serves the
-	// engine over the control socket, claims a new session's craze id and
-	// rewrites the host's registry entry (plan 027 §3.8–§3.9).
+	// alike — and never nil. It is the raw *engine.Engine the model's backend
+	// wraps, since what the hook serves is the engine itself. It runs inside
+	// Update when a picker confirms, so it must not block. nil calls nothing,
+	// which is what every test Config, every golden and the frame runner get;
+	// internal/cli's hook serves the engine over the control socket, claims a
+	// new session's craze id and rewrites the host's registry entry (plan 027
+	// §3.8–§3.9).
 	OnEngine func(*engine.Engine)
 	// ClaimSession claims the row the resume picker is about to load, before
 	// anything is built (plan 027 §3.9, SQ16): it answers the row's durable
@@ -192,24 +195,28 @@ type Model struct {
 	vp    viewport.Model
 	input textarea.Model
 
-	// eng is the engine the model drives its session through: admission, the
-	// message queue and its verbs, send-now, cancel, the asks, the settings,
-	// and — since C12 — the session index and the durable session id (plan 021
-	// §3.4, §3.6, §3.8). No production path reaches past it for the session
-	// underneath — the engine's own methods are the only way in — and it is
-	// assigned only in setSession, which records it in owner too.
-	eng *engine.Engine
-	// client is this model's client id on eng, minted once per engine, and
-	// cmdSeq numbers its commands from 1, so every mutating command it sends
-	// names itself and the events it caused can be told from another client's
-	// (§3.2). Receipts do not exist until later; this is what makes Event.Cause
-	// mean something.
-	client string
+	// eng is the session's backend (plan 027 §3.12): the engine in process —
+	// an engineBackend wrapping the *engine.Engine setSession built — or, from
+	// PR 4, a socket to the host that owns the engine. The model drives its
+	// session through it alone: admission, the message queue and its verbs,
+	// send-now, cancel, the asks, the settings, and — since C12 — the session
+	// index and the durable session id (plan 021 §3.4, §3.6, §3.8). No
+	// production path reaches past it for the engine or the session
+	// underneath, and it is assigned only in setSession, which records it in
+	// owner too. It keeps the name it had when it was the engine itself.
+	//
+	// It is nil or a live backend, never a nil *engineBackend: every
+	// `m.eng == nil` check reads "no session", which a typed nil would defeat.
+	eng backend.Backend
+	// cmdSeq numbers this model's commands from 1. Each command also names the
+	// backend's client id, read per command (nextCmd) and never cached, so
+	// every mutating command it sends names itself and the events it caused
+	// can be told from another client's (§3.2).
 	cmdSeq int
 	// chains orders this client's model changes against each other: the
 	// dialog's apply chains and `/model <id> [<effort>]` each take a place in
 	// its line in the Update that issues them, and run whole, one at a time, in
-	// that order (chainLock). It is minted with the client id in setSession,
+	// that order (chainLock). It is minted with the backend in setSession,
 	// one per engine, and is a pointer so every copy bubbletea makes shares it.
 	chains *chainLock
 	// engErr is what wrapping the session in an engine came back with. It is
@@ -635,18 +642,18 @@ type eventMsg struct{ ev agent.Event }
 // errMsg is that command's other answer, and the only error that reaches craze's
 // exit status.
 //
-// Both name the engine they are for. A start command outlives the model copy that
-// made it — a picker's choice closes one engine and builds another in the same
-// Update, with the old command still in flight — and neither message may then
-// speak for the engine that replaced the one it was about: a stale startedMsg
-// would open the new engine's gate before its own Start had returned, and a stale
-// errMsg would fail a session that is starting perfectly well. A nil eng means
-// "whichever engine the model holds", which is what a test injecting either
-// message by hand intends.
-type startedMsg struct{ eng *engine.Engine }
+// Both name the backend they are for. A start command outlives the model copy
+// that made it — a picker's choice closes one engine and builds another in the
+// same Update, with the old command still in flight — and neither message may
+// then speak for the backend that replaced the one it was about: a stale
+// startedMsg would open the new engine's gate before its own Start had
+// returned, and a stale errMsg would fail a session that is starting perfectly
+// well. A nil eng means "whichever backend the model holds", which is what a
+// test injecting either message by hand intends.
+type startedMsg struct{ eng backend.Backend }
 type errMsg struct {
 	err error
-	eng *engine.Engine
+	eng backend.Backend
 }
 type actionErrMsg struct{ err error }
 
@@ -755,21 +762,23 @@ func mayApply(applied, at, rev uint64) bool {
 //
 // It holds the ENGINE and not the session (plan 021 §3.1): closing the engine
 // closes the session, and closing only the session would leave the engine's
-// driver goroutine running and its last events unpublished.
+// driver goroutine running and its last events unpublished. It holds it as the
+// model does, as the session's backend (plan 027 §3.12), whose Close is the
+// engine's in process.
 type sessionOwner struct {
 	mu  sync.Mutex
-	eng *engine.Engine
+	eng backend.Backend
 }
 
-func (o *sessionOwner) set(e *engine.Engine) {
+func (o *sessionOwner) set(b backend.Backend) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
-	o.eng = e
+	o.eng = b
 }
 
-// current is the engine last set. The lock is released before it returns, so
+// current is the backend last set. The lock is released before it returns, so
 // a caller never holds it across Close, which blocks until the agent is reaped.
-func (o *sessionOwner) current() *engine.Engine {
+func (o *sessionOwner) current() backend.Backend {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	return o.eng
@@ -821,7 +830,7 @@ func (m *Model) setSession(s agent.Session, crazeID string) {
 	// A new session is a new transcript: the shared model is folded from its
 	// events alone.
 	m.newShared()
-	m.client, m.cmdSeq, m.chains = "", 0, nil
+	m.cmdSeq, m.chains = 0, nil
 	m.owner.set(nil)
 	if s == nil {
 		return
@@ -847,18 +856,22 @@ func (m *Model) setSession(s agent.Session, crazeID string) {
 		},
 	})
 	if err != nil {
+		// m.eng stays the untyped nil it was set to above: a failure leaves no
+		// backend, never a nil *engineBackend that would read as one.
 		m.engErr = err
 		return
 	}
-	m.eng = eng
-	m.client = eng.NewClientID()
+	// The backend mints this model's client on the engine, once: the
+	// in-process client is never released (plan 027 §3.6).
+	m.eng = newEngineBackend(eng)
 	// A new client, so a new order: a chain still running on the engine this
 	// replaced orders nothing on this one.
 	m.chains = &chainLock{}
-	m.owner.set(eng)
+	m.owner.set(m.eng)
 	// After the owner holds it, so whatever the hook starts — a socket
 	// serving this engine — can never name an engine the exit tail would not
-	// close.
+	// close. The hook is handed the engine itself, not the backend: what it
+	// serves is the engine.
 	if m.onEngine != nil {
 		m.onEngine(eng)
 	}
@@ -867,12 +880,21 @@ func (m *Model) setSession(s agent.Session, crazeID string) {
 // nextCmd is the model's next command id. Every mutating engine call carries
 // one, so the events it causes name their cause and the model can tell its own
 // effects' echoes from another client's change (§3.2).
+//
+// The client is the backend's, read here for every command and never kept
+// (plan 027 §3.12): a socket client that reconnects without resuming has a new
+// id, and a command must name the client it is sent as. No backend, or one
+// with no client, is the zero Command, as it always was.
 func (m *Model) nextCmd() engine.Command {
-	if m.client == "" {
+	if m.eng == nil {
+		return engine.Command{}
+	}
+	client := m.eng.ClientID()
+	if client == "" {
 		return engine.Command{}
 	}
 	m.cmdSeq++
-	return engine.Command{Client: m.client, ID: fmt.Sprintf("%d", m.cmdSeq)}
+	return engine.Command{Client: client, ID: fmt.Sprintf("%d", m.cmdSeq)}
 }
 
 // nextCmds is n command ids at once, for an Update that hands a tea.Cmd more
@@ -1185,9 +1207,10 @@ func (m Model) startCmd() tea.Cmd {
 	}
 }
 
-// staleFor reports that a start command's message is about an engine the model no
-// longer holds — one a picker closed and replaced — so nothing it says applies.
-func (m Model) staleFor(eng *engine.Engine) bool { return eng != nil && eng != m.eng }
+// staleFor reports that a start command's message is about a backend the model
+// no longer holds — one a picker closed and replaced — so nothing it says
+// applies. It is interface identity: the same backend, not an equal one.
+func (m Model) staleFor(b backend.Backend) bool { return b != nil && b != m.eng }
 
 // Update runs the handler and then lays the frame out exactly once, from the
 // state the handler left behind, and keeps the single tick chain alive.
@@ -2143,7 +2166,7 @@ func (m *Model) clearPending() {
 		m.cancelQueueEdit()
 	}
 	if m.eng != nil {
-		_, _ = m.eng.ClearQueue(m.nextCmd())
+		_, _ = m.eng.ClearQueue(context.Background(), m.nextCmd())
 	}
 	m.queueFocus = false
 	m.queueHov = noHover()
@@ -2329,7 +2352,7 @@ func (m Model) submit(text string, mode engine.SubmitMode, fromRow string) (Mode
 		}
 	}
 	c := m.nextCmd()
-	res, err := m.eng.Submit(c, text, mode, fromRow)
+	res, err := m.eng.Submit(context.Background(), c, text, mode, fromRow)
 	switch {
 	case err != nil:
 		m.note(submitErrNote(err))
@@ -3062,7 +3085,7 @@ func (m *Model) answerHidden(id string, a agent.AskAnswer) {
 		return
 	}
 	cmd := m.nextCmd()
-	switch err := m.eng.Answer(cmd, id, a); {
+	switch err := m.eng.Answer(context.Background(), cmd, id, a); {
 	case err == nil:
 		m.noteAskEcho(cmd.Cause())
 	case errors.Is(err, agent.ErrAskUnavailable):
@@ -3683,21 +3706,35 @@ func workspaceName(cwd string) string {
 	return base
 }
 
-// waitEvent reads the engine's primary — the session's own, unchanged: the
-// engine publishes into the same log, so one stream carries the agent's events
-// and the engine's alike. A primary client keeps reading until it closes the
-// engine, because the log's outbox may still be publishing after a turn's
-// ending.
-func waitEvent(eng *engine.Engine) tea.Cmd {
-	if eng == nil {
+// waitEvent reads the backend's stream, one item: in process the engine's
+// primary — the session's own, unchanged: the engine publishes into the same
+// log, so one stream carries the agent's events and the engine's alike. A
+// primary client keeps reading until it closes the engine, because the log's
+// outbox may still be publishing after a turn's ending.
+//
+// An event is an eventMsg, whose handler re-arms the reader. A stream that has
+// ended (backend.ErrClosed, an End item) or failed is nil, as a closed channel
+// always was: nothing more is coming, and the reader is not re-armed. Ready and
+// Restore are the socket backend's (PR 4), which nothing in process delivers
+// and nothing here handles yet: the reader reads past them.
+func waitEvent(b backend.Backend) tea.Cmd {
+	if b == nil {
 		return nil
 	}
 	return func() tea.Msg {
-		ev, ok := <-eng.Events()
-		if !ok {
+		for {
+			it, err := b.Read(context.Background())
+			if err != nil {
+				return nil
+			}
+			switch it.Kind {
+			case backend.ItemEvent:
+				return eventMsg{it.Event}
+			case backend.ItemReady, backend.ItemRestore:
+				continue
+			}
 			return nil
 		}
-		return eventMsg{ev}
 	}
 }
 

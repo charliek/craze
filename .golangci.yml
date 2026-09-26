@@ -179,6 +179,32 @@ linters:
               desc: "the control server speaks to engine.Control alone; the ACP wire is not its concern, in a test either (plan 027 §3.7)"
             - pkg: github.com/charliek/craze/internal/harness
               desc: "the control server speaks to engine.Control alone; a provider transport is not its concern, in a test either (plan 027 §3.7)"
+        # The TUI's seam onto a session (plan 027 §3.12): the Backend
+        # interface, in engine, agent and transcript types, which the TUI's
+        # in-process engineBackend and PR 4's remote.Session both satisfy
+        # structurally. So it knows neither side — no client package, no
+        # server, no wire — and no provider transport. Its tests answer to no
+        # rule ("!$test", as control's rule does).
+        backend:
+          list-mode: lax
+          files:
+            - "**/internal/backend/**"
+            - "!$test"
+          deny:
+            - pkg: github.com/charliek/craze/internal/tui
+              desc: "the TUI's seam onto a session is in engine/agent types, so a socket client can satisfy it without either side importing the other; the TUI imports it, never the reverse (plan 027 §3.12)"
+            - pkg: github.com/charliek/craze/internal/cli
+              desc: "the TUI's seam onto a session is in engine/agent types, so a socket client can satisfy it without either side importing the other; a client package builds on it, never the reverse (plan 027 §3.12)"
+            - pkg: github.com/charliek/craze/internal/acp
+              desc: "the TUI's seam onto a session is in engine/agent types; the ACP wire below the session seam is not its concern (plan 027 §3.12)"
+            - pkg: github.com/charliek/craze/internal/harness
+              desc: "the TUI's seam onto a session is in engine/agent types; a provider transport below the session seam is not its concern (plan 027 §3.12)"
+            - pkg: github.com/charliek/craze/internal/control
+              desc: "the TUI's seam onto a session is in engine/agent types, so a socket client can satisfy it without either side importing the other; the server is one implementation's far end (plan 027 §3.12)"
+            - pkg: github.com/charliek/craze/internal/remote
+              desc: "the TUI's seam onto a session is in engine/agent types, so a socket client can satisfy it without either side importing the other; remote.Session implements it, never the reverse (plan 027 §3.12)"
+            - pkg: github.com/charliek/craze/internal/protocol
+              desc: "the TUI's seam onto a session is in engine/agent types, so a socket client can satisfy it without either side importing the other; the wire is one implementation's transport (plan 027 §3.12)"
         # The control socket's Go client (plan 027 §3.14): it speaks
         # internal/protocol to a host over a socket and needs nothing else of
         # craze — above all not the server it talks to (internal/control), and
