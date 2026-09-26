@@ -137,11 +137,13 @@ type IndexOptions struct {
 	// Provider is the provider id to record before the session has reported
 	// one of its own: the resolved default the session was started as.
 	Provider string
-	// Hidden reports whether a provider id is one whose sessions stay out of
-	// the shared index until it has a loader (plan 018 §3.4), so --continue
-	// and --resume never offer a row nothing can load. nil means none is.
-	// Skipping counts as DONE, never as failed: no retry, and no error row.
-	Hidden func(provider string) bool
+	// Unindexed reports whether a provider id is one whose sessions stay out
+	// of the shared index because craze cannot load them again — a provider
+	// that is not agent.Provider.Resumable (plan 028 §3.5, which split this
+	// from plan 018 §3.4's "hidden") — so --continue and --resume never offer
+	// a row nothing can load. nil means none is. Skipping counts as DONE,
+	// never as failed: no retry, and no error row.
+	Unindexed func(provider string) bool
 	// TitleLine folds a title onto the one line an index row holds and caps
 	// it. It is the client's, not the engine's: how a title is made safe to
 	// draw is a rendering rule, and the TUI's own is what every row in the
@@ -694,7 +696,7 @@ func (w *indexWriter) seed(cause, prompt string) bool {
 // (finish) finds everything this attempt owes already there.
 //
 // All of that bookkeeping is a DEFER keyed on ok, so it runs on the way out of
-// a PANIC too (r31 finding 3): sessions.Store.Upsert, the snapshot, the hidden
+// a PANIC too (r31 finding 3): sessions.Store.Upsert, the snapshot, the unindexed
 // predicate, the title fold and the report callback are all somebody else's
 // code, and one of them blowing up under a caller that recovers — Submit's
 // own — used to leave seeding true and seedDone open for good. Every later turn
@@ -768,7 +770,8 @@ func (w *indexWriter) write(cause, title string, kind sessions.TitleKind) bool {
 // takes a file lock and rewrites a file.
 //
 // Two things count as DONE without writing anything, and neither is an error
-// or a reason to retry: no store at all, and a hidden provider (plan 018 §3.4).
+// or a reason to retry: no store at all, and an unindexed provider (plan 028
+// §3.5).
 // A third writes nothing and is NOT done — a session that has not learned its
 // id yet — and it is the one "not done" that is not a failure either: nothing
 // is reported and nothing is drawn, and the next write tries again.
@@ -783,7 +786,7 @@ func (w *indexWriter) upsert(cause, title string, kind sessions.TitleKind, repor
 		// the resolved default is the one it was started as.
 		provider = w.opts.Provider
 	}
-	if w.opts.Hidden != nil && w.opts.Hidden(provider) {
+	if w.opts.Unindexed != nil && w.opts.Unindexed(provider) {
 		return nil
 	}
 	if snap.SessionID == "" {

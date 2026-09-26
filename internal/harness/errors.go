@@ -72,8 +72,29 @@ var (
 	ErrChildMode = errors.New("harness: a sub-agent's mode is its parent's and cannot be switched")
 
 	// ErrInTurn is Run's refusal while another Run is live on the session.
-	// The adapter serializes turns itself, so it never reaches a user.
+	// The adapter serializes turns itself, so it never reaches a user. It is
+	// also Replay's refusal once a turn has begun, or while one (or another
+	// Replay) runs: a replay shows the transcript as the session was opened
+	// on it (plan 028 §3.4).
 	ErrInTurn = errors.New("harness: a turn is already running")
+
+	// ErrReplayed is Replay's refusal of a second replay: a session's stored
+	// conversation is walked once, before its first turn (plan 028 §3.4).
+	ErrReplayed = errors.New("harness: the session has already been replayed")
+
+	// ErrNoTranscript is the store's: a resumed session (Options.Resume) has
+	// no file at all in its workspace's session directory — and only that; a
+	// file that is there and is not the session's transcript is another
+	// error (plan 028 §3.2, R2-15). Open returns it wrapped, having opened
+	// nothing, for the caller to decide what an absent file means (§3.5).
+	ErrNoTranscript = store.ErrNoTranscript
+
+	// ErrResumeModel is Open's refusal to resume a session no model in the
+	// table can continue (plan 028 §3.3): none was asked for, and neither the
+	// transcript's own model nor the table's default resolves — has its key
+	// and the tool profile the session's header records. It names the
+	// profile and why each candidate failed.
+	ErrResumeModel = errors.New("harness: no model with the session's tool profile is available")
 
 	// ErrNothingPending is Wake's answer when no background sub-agent's result
 	// was waiting to be delivered as it began (plan 026 §3.11): nothing was

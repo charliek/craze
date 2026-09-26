@@ -69,6 +69,14 @@
 // and its result is delivered to the model once — at a running turn's next
 // step boundary, at the start of the next turn, by Wake, a turn of its own, or
 // by the agent_output tool — never through the steer box.
+//
+// # Resume
+//
+// A session opened with Options.Resume continues a stored one (resume.go,
+// plan 028 §3.3): the same transcript, reopened under its lock, with the
+// model, effort, mode, todo list and turn numbering its path records. Replay
+// hands the stored conversation to a sink as the events a turn would have
+// emitted for it, once, before the first turn (replay.go, §3.4).
 package harness
 
 import (
@@ -100,7 +108,45 @@ type Options struct {
 	// Table is the model catalog. The session reads it and never changes it.
 	Table *modeltable.Table
 	// Model is the alias the session starts on; "" is the table's default.
+	// For a resumed session (Resume) "" is unspecified — the transcript's own
+	// model, found by its identity, else the default — and anything else is
+	// explicit and must resolve (plan 028 §3.3).
 	Model string
+	// Resume reopens the stored session with this id instead of starting one
+	// (plan 028 §3.3): its transcript in Workspace's session directory under
+	// Home is found (store.Find) and reopened for appending under its lock
+	// (store.Open), and the session continues it — the same id, the same file,
+	// the next turn numbered after the last recorded. The header's tool
+	// profile is the session's, and a model with another is never resumed
+	// on. Model, Effort and Mode set are explicit and win; each left "" is
+	// the transcript's own: the last model on its path, matched by (provider,
+	// wire model) — its own alias if that still names the model, else the
+	// first alias in sorted order that does — then the table's default, and
+	// ErrResumeModel if neither resolves (a fall-back from the transcript's
+	// model is reported to Warn); the last effort, if that model accepts it,
+	// else its default; the last mode_change, else agent. The todo list is
+	// the last one a tool entry on the path recorded, and the model is not
+	// told again of a mode it heard. The system prompt is rebuilt from Prompt
+	// (D-30: frozen per incarnation), and the transcript records its digest
+	// in a resume entry written with the first step.
+	//
+	// A session with no file at all is ErrNoTranscript, returned wrapped with
+	// nothing opened — a caller continuing it opens a new session under the
+	// same id instead (SessionID); a file that is not the session's, or that
+	// the store cannot reopen — busy, corrupt, a child's, a newer craze's
+	// tail — is the store's error, wrapped "harness: resume <id>: …". ""
+	// starts a new session. A sub-agent is never resumed.
+	Resume string
+	// SessionID is the id a NEW session is opened under; "" mints a fresh
+	// one. It is for a session whose id is already known and whose file was
+	// never written: an index row seeded by a first prompt that produced no
+	// output, which a load then opens empty under the row's own id rather than
+	// as another session (plan 028 §3.5, P35) — the caller's answer to
+	// ErrNoTranscript. It must be an id Find would accept (store.ErrBadSessionID
+	// otherwise). Nothing is written until the first turn that produces
+	// output, as for any new session. It cannot be combined with Resume, which
+	// names the id itself, nor with Child, whose id is its runner's.
+	SessionID string
 	// Prompt is what the caller adds to the frozen system prompt: the
 	// instruction documents this workspace's user and project wrote, and the
 	// catalog of the skills and commands installed for it (plan 022 §3.4).
@@ -109,13 +155,15 @@ type Options struct {
 	// as data. The zero value sends the tool profile's text alone.
 	Prompt PromptExtras
 	// Effort is the effort the session starts at; "" is the model's
-	// default_effort (none, for a model with no effort control).
+	// default_effort (none, for a model with no effort control) — for a
+	// resumed session, the transcript's last effort first (Resume).
 	Effort string
 	// Mode is the mode the session starts in: "" or "agent" (implement),
 	// "plan" or "ask". Anything else is ErrUnknownMode and refuses Open. A
 	// session opened in plan mode creates its plan file and tells the model
 	// at its first step (reminders.go, plan 023 §3.1). A sub-agent's mode is
-	// Child.Mode, and this is not read.
+	// Child.Mode, and this is not read. For a resumed session "" is the
+	// transcript's own mode, and "agent" is explicit (Resume).
 	Mode string
 	// Asker is how the session's tools reach a person: ask_user_question and
 	// exit_plan_mode block on it (tool.Asker, plan 023 §3.4). The adapter in
@@ -163,7 +211,9 @@ type Options struct {
 	// errors: a sub-agent persona's or the configured default's model or
 	// effort that does not resolve, so resolution moves on to the next
 	// candidate instead of failing the call (subagent_models.go, plan 026
-	// §3.6). nil discards; the adapter journals what it is handed.
+	// §3.6); and a resumed session that cannot continue on its transcript's
+	// model, or read its last mode, and moves on to the next (Resume, plan
+	// 028 §3.3). nil discards; the adapter journals what it is handed.
 	Warn func(string)
 
 	// Background lets the agent tool start a sub-agent in the background
@@ -209,11 +259,15 @@ type ModelInfo struct {
 
 // Session is one conversation. See the package comment.
 type Session struct {
-	system   string // the frozen system prompt, the tool profile's
-	store    *store.Store
-	tools    *toolset // fixed at Open
-	getenv   func(string) string
-	newModel func(modeltable.Resolved) (fantasy.LanguageModel, error)
+	system string // the frozen system prompt, the tool profile's
+	// promptSHA is the hex SHA-256 of system, as the transcript records it
+	// for this incarnation: the header's for a new session, the resume
+	// entry's for a resumed one (PromptSHA256).
+	promptSHA string
+	store     *store.Store
+	tools     *toolset // fixed at Open
+	getenv    func(string) string
+	newModel  func(modeltable.Resolved) (fantasy.LanguageModel, error)
 	// newAgent builds a turn's agent: the model, the system prompt and the
 	// session's tools. It is fantasy.NewAgent (defaultAgent); a test may
 	// replace it before the first Run.
@@ -264,10 +318,15 @@ type Session struct {
 	cur     model  // what the next turn runs on; Current reports it
 	logged  logged // what the transcript was last told the model, effort and mode are
 	closed  bool
-	running bool
-	turns   int                     // turns begun, which number their tool calls' ids
-	cancel  context.CancelCauseFunc // the live turn's; nil when idle
-	done    chan struct{}           // closed when the live turn has returned
+	running bool // a turn, or a Replay, holds the session
+	// turns numbers the turns: the turns begun, which number their tool
+	// calls' ids — for a resumed session counted on from the largest turn its
+	// transcript recorded (plan 028 §3.3).
+	turns    int
+	begun    bool                    // a turn has begun since Open: Replay is too late
+	replayed bool                    // Replay has run
+	cancel   context.CancelCauseFunc // the live turn's; nil when idle
+	done     chan struct{}           // closed when the live turn has returned
 }
 
 // defaultAgent is a turn's agent: Fantasy's, with the frozen system prompt,
@@ -328,6 +387,10 @@ type logged struct {
 // no plan file, nobody to ask, and the parent's path locks. A key inside that
 // prompt refuses it (errChildPromptKey), as does one in its home's path, which
 // begins every spill path of its calls (errChildHomeKey).
+//
+// With Options.Resume set it reopens a stored session instead (resume.go,
+// plan 028 §3.3). That Open holds the transcript's file and its lock from the
+// store's Open on, and releases both on every error after it.
 func Open(opts Options) (*Session, error) {
 	if opts.Table == nil {
 		return nil, errors.New("harness: no model table")
@@ -364,6 +427,15 @@ func Open(opts Options) (*Session, error) {
 			prompt: opts.Prompt.clone(), seams: opts.tools,
 		}
 	}
+	if opts.SessionID != "" && (opts.Resume != "" || child != nil) {
+		return nil, errors.New("harness: SessionID names a new session's id, and is not one to resume nor a sub-agent's")
+	}
+	if opts.Resume != "" {
+		if child != nil {
+			return nil, errors.New("harness: a sub-agent's session is never resumed")
+		}
+		return s.openResumed(opts)
+	}
 
 	modeID, asker := opts.Mode, opts.Asker
 	if child != nil {
@@ -394,10 +466,18 @@ func Open(opts Options) (*Session, error) {
 	if m, err = withEffort(m, effort); err != nil {
 		return nil, err
 	}
-	if s.tools, err = openTools(opts.Home, filepath.Clean(opts.Workspace), mode, asker, opts.Table, s.getenv, m.r, opts.Prompt, opts.Personas, child, s.subs, opts.tools); err != nil {
+	if s.tools, err = openTools(opts.Home, filepath.Clean(opts.Workspace), mode, asker, opts.Table, s.getenv, modelRef(m.r), opts.Prompt, opts.Personas, child, s.subs, opts.tools); err != nil {
 		return nil, err
 	}
 	s.system = s.tools.system
+	if opts.SessionID != "" {
+		// Held to Find's rule rather than only New's, so that the session a
+		// caller opens under an id of its own can be found by it again (plan
+		// 028 §3.5).
+		if err := store.CheckSessionID(opts.SessionID); err != nil {
+			return nil, fmt.Errorf("harness: %w", s.tools.redactErr(err))
+		}
+	}
 	sopts := store.Options{
 		Home: opts.Home,
 		// The real working directory: the header records it and the prompt
@@ -409,6 +489,9 @@ func Open(opts Options) (*Session, error) {
 		ToolProfile:  s.tools.profile,
 		Tools:        s.tools.wire,
 		Now:          opts.Now,
+		// "" for a fresh id; a caller's own for a session whose id is known
+		// before it has a file (Options.SessionID). A child's is set below.
+		SessionID: opts.SessionID,
 	}
 	if child != nil {
 		// The header goes to disk as it is. The type and the persona's path
@@ -449,6 +532,7 @@ func Open(opts Options) (*Session, error) {
 		return nil, errHeaderKey
 	}
 	s.store = st
+	s.promptSHA = st.Header().SystemPromptSHA256
 	s.cur = m
 	s.logged = logged{model: m.id(), effort: m.effort, mode: modeAgent}
 	// The plan file is the transcript's sibling, so it is named only now that
@@ -687,17 +771,19 @@ func (s *Session) ID() string { return s.store.ID() }
 
 // PromptSize and PromptSHA256 describe the frozen system prompt — the
 // profile's text with Options.Prompt rendered after it — without handing it
-// out: its size in bytes, and the digest the transcript's header already
-// records for it (store.New). The adapter writes both into the journal note
-// that says which files went into the prompt (plan 022 §3.4), and it is the
-// header's own value rather than a second SHA-256 of the same string, so a
-// note and a transcript can never disagree about which prompt a session sent.
-// The text itself stays unexported: it is never stored, and a caller that
-// could read it back would be a caller that could log it.
+// out: its size in bytes, and the digest the transcript records for it — the
+// header's own value for a new session (store.New), rather than a second
+// SHA-256 of the same string, and for a resumed one the digest its resume
+// entry records for this incarnation (store.Open), the hex SHA-256 of the
+// same string by the same rule (promptDigest). The adapter writes both into
+// the journal note that says which files went into the prompt (plan 022
+// §3.4), so a note and a transcript never disagree about which prompt a
+// session sent. The text itself stays unexported: it is never stored, and a
+// caller that could read it back would be a caller that could log it.
 //
 // Both are fixed at Open and take no lock.
 func (s *Session) PromptSize() int      { return len(s.system) }
-func (s *Session) PromptSHA256() string { return s.store.Header().SystemPromptSHA256 }
+func (s *Session) PromptSHA256() string { return s.promptSHA }
 
 // Redact is the session's redactor, over text a caller is about to hand to
 // Run or Steer. Everything the harness itself writes or reports goes through

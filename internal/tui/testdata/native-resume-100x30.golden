@@ -1,0 +1,30 @@
+❯ fix the notes                                                                                     
+✓ read  main.go                                                                                     
+✓ edit  notes.txt                                                                                   
+✓ bash  echo hi                                                                                     
+  hi                                                                                                
+✓ bash  echo boom >&2; exit 3                                                                       
+  boom                                                                                              
+✓ todo  1 todo                                                                                      
++ Thought                                                                                           
+done tools                                                                                          
+tasks: 2 planned                                                                                    
+restored                                                                                            
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+TASKS 1/2                                                                                           
+┃ ▸ Run the tests                                                                                   
+──────────────────────────────────────────────────────────────────────────────────── fix the notes ─
+❯ message  / for commands                                                                           
+────────────────────────────────────────────────────────────────────────────────────────────────────
+ws │ native │ Echo │ 0m                                                                             
+◆ agent · shift+tab · ▸▸ bypass permissions on                                                      

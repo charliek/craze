@@ -19,6 +19,7 @@ import subprocess
 import threading
 import time
 import urllib.request
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -40,6 +41,7 @@ from sse_fixture import (
     user_prompt,
     write_native_config,
 )
+from test_tui import PTYCraze, _ANSI, quit_craze
 
 
 @pytest.fixture
@@ -1592,3 +1594,314 @@ def test_native_agent_plan_and_ask_children(
     assert rows and rows[-1]["status"] == "failed", rows
     assert tree(ws) == before, f"{mode} let a child change the workspace"
     assert first.tool_names == CHILD_TOOLS, first.tool_names
+
+
+# --- Plan 028 C5: native resume, end to end --------------------------------
+#
+# A native session is resumable from plan 028 §3.5 on: its first prompt writes
+# a sessions.jsonl row, and its transcript is the one store the harness
+# reopens on `-c`/`-r`. These drive the real TUI over a pty (test_tui.PTYCraze,
+# the class every cursor/grok resume test in test_tui.py already uses), the
+# loopback SSE fixture answering it exactly as the headless tests above do.
+
+
+def _seed_native_row(craze_home: Path, workspace: Path, session_id: str, title: str) -> Path:
+    """One sessions.jsonl row directly under craze_home, no ".craze" folder:
+    what `-c`/`-r` resolve against whenever CRAZE_HOME names the directory
+    itself, as every other test in this file sets it up (write_native_config's
+    sibling). test_tui._seed_index writes the other layout craze falls back to
+    when CRAZE_HOME is unset (HOME/.craze), which does not apply here.
+    """
+    craze_home.mkdir(parents=True, exist_ok=True)
+    stamp = (
+        datetime.now(timezone.utc).replace(tzinfo=None).isoformat(timespec="microseconds") + "Z"
+    )
+    row = {
+        "sessionId": session_id,
+        "provider": "native",
+        "cwd": str(workspace),
+        "title": title,
+        "pinned": False,
+        "createdAt": stamp,
+        "updatedAt": stamp,
+    }
+    index = craze_home / "sessions.jsonl"
+    index.write_text(json.dumps(row) + "\n", encoding="utf-8")
+    return index
+
+
+def _transcripts_of(craze_home: Path, session_id: str) -> list[Path]:
+    """Every native transcript file filed under session_id (§3.2's naming)."""
+    return list((craze_home / "native" / "sessions").rglob(f"*_{session_id}.jsonl"))
+
+
+def _entries_of(path: Path) -> list[dict]:
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+
+
+def test_native_resume_round_trip(
+    craze_bin: Path, tmp_path: Path, fixture_server: SSEFixture
+) -> None:
+    """A12(1): a native PTY session survives `-c`, transcript and all.
+
+    Turn one calls bash and answers in words; quitting and `-c` in the same
+    workspace restores the whole thing on screen -- the user row, the tool
+    card with its output, the model's text, and the `restored` note that
+    closes a replay (transcript.NoteRestored) -- and a second prompt continues
+    the session: the wire carries the whole first turn back to the fixture
+    (plan 028 §3.4), and the transcript is still the one file, now carrying
+    the `resume` entry §3.2 records for each later incarnation.
+    """
+    craze_home = tmp_path / "craze-home"
+    write_native_config(craze_home / "native", fixture_server.base_url)
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+
+    fixture_server.set_script(
+        [call_step("bash", {"command": "echo hi"}), answer("done checking")]
+    )
+    with PTYCraze(
+        craze_bin,
+        None,
+        workspace,
+        provider="native",
+        env_extra={"CRAZE_HOME": str(craze_home)},
+    ) as tui:
+        tui.wait_contains("native")
+        tui.write(b"check it\r")
+        tui.wait_contains("✓ bash  echo hi", timeout=30)
+        tui.wait_contains("  hi", timeout=10)
+        tui.wait_contains("done checking", timeout=30)
+        quit_craze(tui)
+
+    index = craze_home / "sessions.jsonl"
+    rows = [json.loads(line) for line in index.read_text(encoding="utf-8").splitlines()]
+    assert len(rows) == 1, rows
+    row = rows[0]
+    assert row["provider"] == "native", row
+    assert row["title"] == "check it", row
+    session_id = row["sessionId"]
+
+    before = _transcripts_of(craze_home, session_id)
+    assert len(before) == 1, before
+
+    # `-c`: no --provider, no --agent-bin -- the row's own provider loads it
+    # (resolveLoad, plan 028 §3.5).
+    fixture_server.set_script([answer("second turn done")])
+    with PTYCraze(
+        craze_bin,
+        None,
+        workspace,
+        provider="",
+        extra_args=["-c"],
+        env_extra={"CRAZE_HOME": str(craze_home)},
+    ) as tui:
+        tui.wait_contains("restored", timeout=30)
+        restored = _ANSI.sub("", tui.screen())
+        # The gutter mark proves the replayed USER ROW was drawn, not just the
+        # composer rule's title (which also reads "check it" -- the title is
+        # the first prompt's text, plan 028 §3.4): "❯ " is how craze draws a
+        # user row (TestFrameGoldenNativeResume100x30 in internal/tui).
+        assert "❯ check it" in restored, restored[-3000:]
+        assert "✓ bash  echo hi" in restored, restored[-3000:]
+        assert "  hi" in restored, restored[-3000:]
+        assert "done checking" in restored, restored[-3000:]
+
+        tui.write(b"keep going now\r")
+        tui.wait_contains("second turn done", timeout=30)
+        quit_craze(tui)
+
+    # The wire: the continued turn's request carries the whole first turn.
+    last = fixture_server.requests[-1]
+    users = user_contents(last)
+    assert "check it" in users, users
+    assert "keep going now" in users, users
+    tool_calls = [m for m in last.messages if m.get("role") == "assistant" and m.get("tool_calls")]
+    assert tool_calls, last.messages
+    tool_results = {m["tool_call_id"]: m["content"] for m in last.messages if m.get("role") == "tool"}
+    assert any("hi" in v for v in tool_results.values()), tool_results
+    assert any(
+        m.get("role") == "assistant" and "done checking" in (m.get("content") or "")
+        for m in last.messages
+    ), last.messages
+
+    # One file, one header, one resume entry: reopened, never duplicated.
+    after = _transcripts_of(craze_home, session_id)
+    assert len(after) == 1, after
+    entries = _entries_of(after[0])
+    assert sum(1 for e in entries if e.get("type") == "session") == 1, entries
+    assert sum(1 for e in entries if e.get("type") == "resume") == 1, entries
+
+
+def test_native_resume_picker_loads_the_row(
+    craze_bin: Path, tmp_path: Path, fixture_server: SSEFixture
+) -> None:
+    """A12(2): `-r` offers the native row (resumeRows keeps it: native is
+    resumable even while it is still hidden, plan 028 §3.5) and Enter restores
+    it, the same as it does for cursor and grok.
+    """
+    craze_home = tmp_path / "craze-home"
+    write_native_config(craze_home / "native", fixture_server.base_url)
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+
+    fixture_server.set_ok(text_parts=["picker fixture reply"])
+    with PTYCraze(
+        craze_bin,
+        None,
+        workspace,
+        provider="native",
+        env_extra={"CRAZE_HOME": str(craze_home)},
+    ) as tui:
+        tui.wait_contains("native")
+        tui.write(b"pick me\r")
+        tui.wait_contains("picker fixture reply", timeout=30)
+        quit_craze(tui)
+
+    with PTYCraze(
+        craze_bin,
+        None,
+        workspace,
+        provider="",
+        extra_args=["-r"],
+        env_extra={"CRAZE_HOME": str(craze_home)},
+    ) as tui:
+        tui.wait_contains("resume")
+        tui.wait_contains("pick me")
+        tui.wait_contains("native")
+        tui.write(b"\r")
+        tui.wait_contains("restored", timeout=30)
+        quit_craze(tui)
+
+
+def test_native_resume_of_an_empty_session(
+    craze_bin: Path, tmp_path: Path, fixture_server: SSEFixture
+) -> None:
+    """A12(3): "prompt, Esc, quit, `-c`" -- P35/PD8/X25 end to end.
+
+    The turn is cancelled before the fixture ever answers, so the index row
+    exists (a native session's first prompt writes it, §3.5) but no transcript
+    file does (only its first output writes that, §3.2). `-c` then opens a NEW
+    session under the SAME id -- the deliberate exception to "a load never
+    falls back to session/new" (D-60) -- journaling `resume_empty`, and a
+    following prompt creates the transcript there.
+    """
+    craze_home = tmp_path / "craze-home"
+    write_native_config(craze_home / "native", fixture_server.base_url)
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+
+    got_request = threading.Event()
+    release = threading.Event()
+
+    def stall(_request: RecordedRequest) -> Step:
+        # Scripted as a callable so it runs outside the fixture's lock (the
+        # race test above this section relies on the same property): it can
+        # block here for as long as it likes without wedging other requests.
+        got_request.set()
+        release.wait(timeout=30)
+        return answer("never reached")
+
+    fixture_server.set_script([stall])
+
+    with PTYCraze(
+        craze_bin,
+        None,
+        workspace,
+        provider="native",
+        env_extra={"CRAZE_HOME": str(craze_home)},
+    ) as tui:
+        tui.wait_contains("native")
+        tui.write(b"go\r")
+        assert got_request.wait(timeout=10), "the fixture never saw the request"
+        tui.write(b"\x1b")  # Esc: cancel the turn (help_dialog.go's own binding)
+        tui.wait_contains("cancelled", timeout=10)
+        quit_craze(tui)
+    release.set()
+
+    index = craze_home / "sessions.jsonl"
+    rows = [json.loads(line) for line in index.read_text(encoding="utf-8").splitlines()]
+    assert len(rows) == 1, rows
+    session_id = rows[0]["sessionId"]
+    assert rows[0]["provider"] == "native", rows[0]
+
+    assert _transcripts_of(craze_home, session_id) == []
+
+    fixture_server.set_script([answer("fresh after empty resume")])
+    with PTYCraze(
+        craze_bin,
+        None,
+        workspace,
+        provider="",
+        extra_args=["-c"],
+        env_extra={"CRAZE_HOME": str(craze_home)},
+    ) as tui:
+        # The load's replay bracket must close before a prompt is accepted
+        # (X19/X27: `prompt()` refuses "session not started" while it holds),
+        # which "restored" -- drawn once it does -- is the synchronisation for.
+        tui.wait_contains("restored", timeout=30)
+        tui.write(b"try again\r")
+        tui.wait_contains("fresh after empty resume", timeout=30)
+        quit_craze(tui)
+
+    rows2 = [json.loads(line) for line in index.read_text(encoding="utf-8").splitlines()]
+    assert len(rows2) == 1, rows2
+    assert rows2[0]["sessionId"] == session_id, rows2
+
+    after = _transcripts_of(craze_home, session_id)
+    assert len(after) == 1, after
+
+    journal_lines: list[dict] = []
+    for jf in sorted((craze_home / "journal").glob("*/*.jsonl")):
+        journal_lines += _entries_of(jf)
+    resume_empties = [
+        ln for ln in journal_lines if ln.get("type") == "diag" and ln.get("kind") == "resume_empty"
+    ]
+    assert len(resume_empties) == 1, journal_lines
+    assert resume_empties[0]["fields"]["session"] == session_id, resume_empties[0]
+
+
+def test_native_resume_refuses_agent_bin(craze_bin: Path, tmp_path: Path) -> None:
+    """A12(4): `--agent-bin`/`CRAZE_AGENT_BIN` with a native row exits 2 with
+    the in-process message, before any claim or index write (plan 028 §3.5's
+    refuseInProcess, run before S2's EnsureCrazeID + claim) -- so the index
+    file is untouched and no session lock is ever created.
+    """
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    craze_home = tmp_path / "craze-home"
+    index = _seed_native_row(craze_home, workspace, "sess-native-refuse", "hi")
+    before = index.read_bytes()
+    locks_dir = workspace / ".cache" / "craze" / "locks"
+
+    with PTYCraze(
+        craze_bin,
+        Path("/bin/true"),
+        workspace,
+        provider="",
+        extra_args=["-c"],
+        env_extra={"CRAZE_HOME": str(craze_home)},
+    ) as tui:
+        code = tui.wait_exit(timeout=10)
+        text = _ANSI.sub("", tui.screen())
+        assert code == 2, text[-2000:]
+        assert "--agent-bin" in text and "native" in text, text
+
+    assert index.read_bytes() == before
+    assert not locks_dir.exists() or list(locks_dir.iterdir()) == []
+
+    with PTYCraze(
+        craze_bin,
+        None,
+        workspace,
+        provider="",
+        extra_args=["-c"],
+        env_extra={"CRAZE_HOME": str(craze_home), "CRAZE_AGENT_BIN": "/bin/true"},
+    ) as tui:
+        code = tui.wait_exit(timeout=10)
+        text = _ANSI.sub("", tui.screen())
+        assert code == 2, text[-2000:]
+        assert "CRAZE_AGENT_BIN" in text and "native" in text, text
+
+    assert index.read_bytes() == before
+    assert not locks_dir.exists() or list(locks_dir.iterdir()) == []

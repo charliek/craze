@@ -75,6 +75,7 @@ func TestARunWhoseSocketFailsStillRuns(t *testing.T) {
 	if strings.Contains(tail.text(), "control socket off") {
 		t.Fatal("the warning reached the terminal while the TUI owned it")
 	}
+	waitSessionStarted(t, ptmx, tail)
 	if _, err := ptmx.Write([]byte{0x04}); err != nil {
 		t.Fatal(err)
 	}
@@ -180,6 +181,7 @@ func TestTheTeardownRunsBeforeTheFlush(t *testing.T) {
 		t.Fatalf("while running: entries %q, session locks %q; want one of each", entries, locks)
 	}
 	entry, _ := readEntryFile(t, entries[0])
+	waitSessionStarted(t, ptmx, tail)
 	if _, err := ptmx.Write([]byte{0x04}); err != nil {
 		t.Fatal(err)
 	}
@@ -217,6 +219,31 @@ func TestTheTeardownRunsBeforeTheFlush(t *testing.T) {
 	if lockHeldBy(t, locks[0], os.Getpid()) {
 		t.Fatal("the session lock outlived the run")
 	}
+}
+
+// waitSessionStarted types "hi" and presses Enter until the fake agent's
+// "echo: hi" proves the session actually started, so the Ctrl+D that follows
+// cannot race startup the way it used to: the composer rule (" craze ─") is
+// drawn before the session finishes starting, and the composer itself refuses
+// Enter until it does (Model.send, "the composer refuses Enter before the
+// gate opens"). A single Enter right after the rule appears can therefore be
+// dropped as a no-op — this keeps retrying it until the reply lands.
+func waitSessionStarted(t *testing.T, ptmx *os.File, tail *ptyTail) {
+	t.Helper()
+	if _, err := ptmx.Write([]byte("hi")); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if strings.Contains(tail.text(), "echo: hi") {
+			return
+		}
+		if _, err := ptmx.Write([]byte("\r")); err != nil {
+			t.Fatal(err)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("the session never started; got %q", tail.text())
 }
 
 // lockHeldBy reports whether path is flocked by someone and names pid.

@@ -17,7 +17,10 @@ import (
 //   - sub-agents (plan 026 §3.9): SubagentStarted, SubagentEvent — one of a
 //     child's own events, wrapped — and SubagentFinished; and, for a
 //     background child the session closed before delivering (§3.11),
-//     SubagentUndelivered.
+//     SubagentUndelivered;
+//   - a stored session replayed (Session.Replay, plan 028 §3.4): Prompted,
+//     which only a replay emits, among the answer's and the tool calls' own
+//     events rebuilt from the transcript.
 //
 // Every field is a plain value that survives a JSON round trip, so a
 // journal can record exactly what the sink was handed (plan 019 §3.5);
@@ -99,11 +102,33 @@ type ToolProgress struct {
 // Every call a ToolStarted announced gets exactly one, whether or not it
 // ran. Duration runs from its ToolCalled, and is zero for a call that never
 // had one.
+//
+// Replayed marks a result Session.Replay rebuilt from the transcript (plan
+// 028 §3.4, P9) rather than one a call just produced. The transcript keeps
+// only what the model read, so such a result is that text converted for a
+// card: Result.Text and Result.Content are both the stored output, redacted —
+// the card's content, and an execute card's output — IsError is the stored
+// result's, and nothing else is known: no exit code (Result.Output is nil),
+// no diff (Edits), no truncation (Trunc), no child's usage, a zero Duration.
+// A card for it says it was replayed, since what it lacks is not what the
+// call lacked.
 type ToolFinished struct {
 	ID       string
 	Result   tool.Result
 	At       time.Time
 	Duration time.Duration
+	Replayed bool
+}
+
+// Prompted is a user message of a stored session, as Session.Replay walks it
+// (plan 028 §3.4): the text a person — or craze on their behalf — sent, with
+// Steer set for one interjected into a running turn (Session.Steer) rather
+// than one a turn opened with. No live turn emits it: a turn's own prompt is
+// the caller's, and its steers are Steered. Text is the stored message's,
+// redacted with the session's redactor.
+type Prompted struct {
+	Text  string
+	Steer bool
 }
 
 // StepDone reports a finished model step: what it was, what it cost, and
@@ -169,8 +194,9 @@ type Retrying struct {
 // events somehow reached it apart — and, since sessionTodos.Write (todos.go)
 // makes the mutation and this emit one critical section, they never do:
 // the events a session emits arrive in exactly the order Write produced the
-// lists. Items is a copy the store made for this event alone. Not persisted
-// in the transcript (H7 may add it).
+// lists. Items is a copy the store made for this event alone. The list itself
+// is persisted on the tool entry of the step that changed it (plan 028 §3.2),
+// and a replay ends with one of these for the list a resume restored.
 type Todos struct{ Items []tool.Todo }
 
 // Diag reports what has no other event: results the runner wrote for calls
@@ -307,6 +333,7 @@ func (SubagentStarted) isEvent()     {}
 func (SubagentEvent) isEvent()       {}
 func (SubagentFinished) isEvent()    {}
 func (SubagentUndelivered) isEvent() {}
+func (Prompted) isEvent()            {}
 
 // Usage is a step's or a turn's token counts: input, output, reasoning, and
 // the prompt-cache reads and writes, which show whether a provider's prefix

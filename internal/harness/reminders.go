@@ -158,6 +158,19 @@ func newModes(mode, plan string, gate modeGate) *modes {
 	return m
 }
 
+// resumedModes starts a resumed session in mode, having told the model of
+// told already (plan 028 §3.3, P29): the mode of the transcript's last
+// mode_change, which is written only with the step whose request carried the
+// notice for it, so it is exactly what the conversation says the model heard
+// (recordMode, heard). A session resumed in that mode is not told it again —
+// in plan mode it reads the standing reminder, never the re-entry notice's
+// "previously exited" — and one resumed in another gets the transition.
+func resumedModes(mode, told, plan string, gate modeGate) *modes {
+	m := newModes(mode, plan, gate)
+	m.told = told
+	return m
+}
+
 // newChildModes starts a sub-agent in mode, its parent's, with no plan file:
 // the gate's plan path stays "", so in plan mode every edit is refused (plan
 // 026 §3.2). The model is told the mode at its first step boundary, as any

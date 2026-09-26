@@ -2,9 +2,13 @@ package harness
 
 import (
 	"context"
+	"slices"
+	"strconv"
 	"sync"
 	"unicode/utf8"
 
+	"github.com/charliek/craze/internal/harness/redact"
+	"github.com/charliek/craze/internal/harness/store"
 	"github.com/charliek/craze/internal/harness/tool"
 )
 
@@ -45,14 +49,158 @@ import (
 // The nesting (b.mu, then t.mu, inside it) is one-directional: nothing
 // elsewhere in the harness takes t.mu and then reaches for b.mu — turn.go's
 // callbacks that already hold t.mu (OnTextDelta and the rest) never call
-// into this file — so the two locks cannot deadlock on each other.
+// into this file for anything but the record below, which has a lock of its
+// own — so the two locks cannot deadlock on each other.
+//
+// # The record, and resume
+//
+// The transcript keeps the list (plan 028 §3.2, P7): a step that left it
+// different writes the list as it stood after the step on its tool entry,
+// redacted (redactTodos), and a resumed session restores the last one on its
+// path (restore). The step's append runs under t.mu, where b.mu may not be
+// taken, so a Write that changes the list also leaves a copy of it in rec —
+// under recMu, a leaf lock that is held across nothing and taken under b.mu
+// by Write and under t.mu by the step (unrecorded, recordedAt). A step
+// attaches the list when it differs from the one the last written tool entry
+// carried — not from the list at the step's start — so calls that change an
+// item and change it back leave nothing to write, and a list whose append
+// failed is carried to the next tool entry written (X13).
 type sessionTodos struct {
 	mu    sync.Mutex
 	items []tool.Todo
 	emit  func(Event) // the running turn's emitLocked; nil between turns
+
+	recMu sync.Mutex
+	rec   todoRecord
+}
+
+// todoRecord is what the transcript knows of the list: latest is the list as
+// the last Write left it, and written is the list the last tool entry written
+// carried, as the harness holds it (unredacted) — for a resumed session the
+// one it restored, and empty before either.
+type todoRecord struct {
+	latest, written []tool.Todo
 }
 
 func newSessionTodos() *sessionTodos { return &sessionTodos{} }
+
+// restore makes items the list, written: a resumed session's, from the last
+// tool entry on its transcript's path that carries one (plan 028 §3.3). Open
+// calls it before the session is handed out, so no Write or turn races it.
+func (b *sessionTodos) restore(items []tool.Todo) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.items = cloneTodos(items)
+	b.recMu.Lock()
+	defer b.recMu.Unlock()
+	b.rec = todoRecord{latest: cloneTodos(items), written: cloneTodos(items)}
+}
+
+// snapshot is a copy of the list as it is now.
+func (b *sessionTodos) snapshot() []tool.Todo {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return cloneTodos(b.items)
+}
+
+// unrecorded is the list a step's tool entry should carry — the list as the
+// last Write left it, a copy to hand recordedAt once that entry is written —
+// with ok false when it is the list the last written entry carried, however
+// many Writes changed it since. The caller may hold t.mu: recMu is a leaf.
+func (b *sessionTodos) unrecorded() (list []tool.Todo, ok bool) {
+	b.recMu.Lock()
+	defer b.recMu.Unlock()
+	if slices.Equal(b.rec.latest, b.rec.written) {
+		return nil, false
+	}
+	return cloneTodos(b.rec.latest), true
+}
+
+// recordedAt says a written tool entry carries list (unrecorded's).
+func (b *sessionTodos) recordedAt(list []tool.Todo) {
+	b.recMu.Lock()
+	defer b.recMu.Unlock()
+	b.rec.written = cloneTodos(list)
+}
+
+// todoMark is the list a step's tool entry was handed (turn.todosOn), as the
+// harness holds it, for turn.todosWritten to record once the entry is
+// written; the zero mark is none. It is a type of this file's so that
+// turn.go, which may not import the tool framework (TestSeamOne), can hold
+// one.
+type todoMark struct {
+	list []tool.Todo
+	set  bool
+}
+
+// redactTodos is items with every key red covers redacted from each item's id
+// and content: the list as a tool entry stores it and a replay shows it (plan
+// 028 §3.2, §3.4). The model wrote both, as it wrote the todo_write call's
+// arguments, which are redacted in the same places.
+//
+// Every item is kept, so the stored list is as long as the live one and a
+// resume restores every task the model had. Two distinct ids can redact alike
+// — a key in each, at the same place — which would make a list the store
+// refuses (a repeated id), so every repeat after the first is disambiguated
+// (uniqueTodoIDs).
+func redactTodos(red *redact.Replacer, items []tool.Todo) []tool.Todo {
+	out := make([]tool.Todo, len(items))
+	for i, it := range items {
+		it.ID, it.Content = red.String(it.ID), red.String(it.Content)
+		out[i] = it
+	}
+	uniqueTodoIDs(red, out)
+	return out
+}
+
+// uniqueTodoIDs makes items' ids unique in place: the first item with an id
+// keeps it, and each later one with the same id takes the first "<id>-<n>",
+// n from 2, that no item of the list has — checked against the whole list,
+// so a suffixed id never lands on one a later item holds — and that red
+// leaves as it is, so a suffix can never complete a key. It is deterministic:
+// the same list comes out the same every time, whoever redacts it.
+func uniqueTodoIDs(red *redact.Replacer, items []tool.Todo) {
+	taken := make(map[string]bool, len(items))
+	for _, it := range items {
+		taken[it.ID] = true
+	}
+	seen := make(map[string]bool, len(items))
+	for i := range items {
+		id := items[i].ID
+		if !seen[id] {
+			seen[id] = true
+			continue
+		}
+		for n := 2; ; n++ {
+			cand := id + "-" + strconv.Itoa(n)
+			if !taken[cand] && red.String(cand) == cand {
+				items[i].ID = cand
+				taken[cand], seen[cand] = true, true
+				break
+			}
+		}
+	}
+}
+
+// storeTodos and toolTodos convert a list between the harness's shape and
+// the transcript's (store.Todo), which carries the status as a plain string.
+// storeTodos never returns nil, so an emptied list is written as [] — which a
+// resume tells from "never set".
+func storeTodos(items []tool.Todo) []store.Todo {
+	out := make([]store.Todo, len(items))
+	for i, it := range items {
+		out[i] = store.Todo{ID: it.ID, Content: it.Content, Status: string(it.Status)}
+	}
+	return out
+}
+
+func toolTodos(items []store.Todo) []tool.Todo {
+	out := make([]tool.Todo, len(items))
+	for i, it := range items {
+		out[i] = tool.Todo{ID: it.ID, Content: it.Content, Status: tool.TodoStatus(it.Status)}
+	}
+	return out
+}
 
 // attach makes emit the target of every Write while a turn runs, and returns
 // the func that detaches it once the turn ends. turn.go's Run calls it right
@@ -95,6 +243,9 @@ func (b *sessionTodos) Write(ctx context.Context, merge *bool, updates []tool.To
 	if !useMerge && autoUpgrade(b.items, updates) {
 		useMerge = true
 	}
+	// Both builders return a new slice, so prev is the list before this write
+	// whatever happens to b.items below.
+	prev := b.items
 	if useMerge {
 		b.items = applyMerge(b.items, updates)
 	} else {
@@ -103,6 +254,11 @@ func (b *sessionTodos) Write(ctx context.Context, merge *bool, updates []tool.To
 	if len(b.items) > tool.TodoCap {
 		dropped = len(b.items) - tool.TodoCap
 		b.items = b.items[:tool.TodoCap]
+	}
+	if !slices.Equal(prev, b.items) {
+		b.recMu.Lock()
+		b.rec.latest = cloneTodos(b.items)
+		b.recMu.Unlock()
 	}
 
 	list = cloneTodos(b.items)

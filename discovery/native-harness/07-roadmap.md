@@ -13,7 +13,7 @@ hidden throughout (`01`). Sizes are guidance from the reference reviews.
 | H4 | complete | Claude compat and the shell mode shipped across PRs #39, #40, #43: content sources behind one seam with native discovery and the two projections (#39, `b861865`); the prompt-extras seam, the `@path` instruction loader with confinement, the model-facing catalog, and `[compat.claude]` toggles (#40, `c2940a6`); the composer shell mode, its process runner, and shell output carried to the agent with the next prompt (#43, `be05da9`); live smoke round-tripped on cursor and native, grok covered by `TestShellContextNeverReachesTheScreen` rather than driven live |
 | H5 | complete | modes shipped across two PRs, #45 (`b0ea4c4`) and #48 (`feature/plan-023-h5-modes`): the three tools (`ask_user_question`, `exit_plan_mode`, `todo_write`), modes switched on for native, the plan file under the harness home, and the existing offer implementing an approved plan |
 | H6 | complete | sub-agents shipped across three PRs: PR 1 (#51, `f5c3cfd`) end to end; PR 2 (#53, `5901e4a`) per-child stop; PR 3 (`feature/plan-026-h6-background`) background children — `run_in_background`, `agent_output`, the session-level wake, `bg` on the row |
-| H7 | not started | resume and compaction over the store, `--continue`/`--resume`/rename, cost in the status row |
+| H7 | in progress (Plan 028) | resume and compaction over the store, `--continue`/`--resume`/rename, cost in the status row |
 | H8 | not started | images: clipboard read per OS, composer attachments, vision flag strip |
 | HL | unscheduled | own the turn loop — see D-40's triggers |
 
@@ -638,6 +638,29 @@ Live smoke, all three PRs (plan artifacts, outside the repo — see
   row.
 - **Exit**: resume a compacted session; spend visible per turn.
 
+**Planned (Plan 028, 2026-09-25):** FINAL after the S2 seam review and the
+panel (round 1: astra, GLM, CodeRabbit; rounds 2–5: astra alone; round 5
+found nothing blocking). Three PRs, each branched from a freshly fetched
+`origin/main` and paused after merge with a kickoff for the next (PD1).
+**PR 1 (resume): implemented on `feature/plan-028-h7-resume`** (the store
+reopens; provenance fields; the harness opens a stored session and replays
+it; the adapter's load; native indexed and resumable; CLI and picker —
+native sessions resume with `-c`/`-r`, `/rename` persists). PR 2
+`feature/plan-028-h7-compaction`
+(reminders stored as variants; the compaction entry and context rule; the
+summarizer and segments; when to compact; the segmented turn; overflow
+recovery; the `compaction` event; `/compact` — long sessions compact and
+continue, exit criterion 1); PR 3 `feature/plan-028-h7-cost` (per-model
+`cost`; spend; `Usage` on the wire; the status row; docs; then native
+becomes visible — exit criterion 2). The owner's four decisions: compact at
+85% of the model's context window (capped at the output ceiling), keeping a
+20k-token verbatim tail of whole steps (Q9, D-62); mid-turn compaction at
+step boundaries, through a segmented turn that restarts `Agent.Stream` from
+the store without owning the loop — this answers HL's first trigger on
+purpose (below); prices live per model in `models.toml` (D-64); native
+becomes visible (Q10, D-65) once PR 3's smoke passes on Linux and the
+mac-mini — no rewind, no fork.
+
 ### H8 — images
 
 - Clipboard image read (Linux, macOS), composer attachment, `FilePart`,
@@ -651,7 +674,8 @@ Not a numbered phase: no plan exists yet. Recorded so H2's pragmatic choice
 to stay on Fantasy's `Agent.Stream` (D-40) is not forgotten. Any one of
 these five triggers starts a plan:
 
-- H7 needs persist-before-run or mid-turn compaction.
+- H7 needs persist-before-run, or mid-turn compaction the segmented turn
+  cannot express (D-62).
 - A Fantasy bug in the loop cannot be worked around from outside.
 - A Fantasy upgrade changes callback semantics the runner depends on.
 - The gate needs to pause a whole step rather than one call.

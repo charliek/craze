@@ -145,13 +145,14 @@ func drainSessionEvents(t *testing.T, m *Model, sess agent.Session) {
 
 // TestNativeSessionDoesNotPersistOrIndex drives a real native session — not
 // tui.Stub — through startedMsg and one full turn, and holds plan 018 §3.4's
-// two "never persisted, never indexed" rules together against production
-// code neither TestStartedMsgDoesNotPersistAHiddenProvider (a planted stub)
-// nor internal/agent's own tests (no TUI in them) can reach: a hidden
-// provider's session must not write a row to the shared index (the
-// fakeIndex recorder catches an Upsert), and must not replace the persisted
-// default (config.toml's seeded "grok" must survive startedMsg's own
-// SaveProvider).
+// "never persisted" rule, with plan 028 §3.5's index rule beside it, against
+// production code neither TestStartedMsgDoesNotPersistAHiddenProvider (a
+// planted stub) nor internal/agent's own tests (no TUI in them) can reach: a
+// hidden provider's session must not replace the persisted default
+// (config.toml's seeded "grok" must survive startedMsg's own SaveProvider) —
+// and, since H7 gave native a loader, its first prompt DOES write its row to
+// the shared index, under the harness's own session id, as a resumable
+// provider's does (the fakeIndex recorder catches the Upsert).
 func TestNativeSessionDoesNotPersistOrIndex(t *testing.T) {
 	isolateSkillsHome(t)
 	path := writeConfigFile(t, "provider = \"grok\"\n")
@@ -213,8 +214,11 @@ func TestNativeSessionDoesNotPersistOrIndex(t *testing.T) {
 		t.Fatalf("the answer never rendered:\n%s", plainView(m))
 	}
 
-	if idx.count() != 0 {
-		t.Fatalf("a completed turn on a hidden provider was indexed: %+v", idx.all())
+	// The first prompt seeded the row, keyed by the id the transcript is
+	// filed under, so --continue can load it (plan 028 §3.5).
+	waitRows(t, idx, 1)
+	if row := idx.seedRow(t); row.Provider != "native" || row.SessionID != sess.Snapshot().SessionID || row.CWD != ws || row.Title != "hello" {
+		t.Fatalf("a native turn's row is %+v; want native, session %s, in %s, titled by the prompt", row, sess.Snapshot().SessionID, ws)
 	}
 	if got := ConfigProvider(); got != "grok" {
 		body, _ := os.ReadFile(path)

@@ -120,6 +120,33 @@ A restored session does not reconstruct everything:
   `grok --resume` still show whatever title the agent itself gave the
   session.
 
+### Native sessions
+
+The native provider (`--provider native`, hidden) resumes the same way as
+above, over its own transcript in place of an agent's `session/load`:
+
+- **Tool cards** have no exit code, diff or truncation metadata to restore —
+  only the stored output text — so a replayed card's body ends with a
+  `(replayed)` line: a collapsed row still previews its output's first line,
+  an expanded one ends with the label, and a card with no body of its own
+  (an edit, or an `agent` call) carries the label unseen.
+- **The model** is the transcript's last one, matched by identity (provider
+  and wire model) rather than restored by name — a re-pointed alias never
+  silently switches models; one no longer available falls back to the model
+  table's default and warns on stderr, naming the alias it fell back to and
+  why. **The mode** (agent/plan/ask) is the transcript's last `mode → <id>`
+  change, unless `--plan`/`--ask` set it explicitly; an unrecognised last
+  mode restores agent mode instead, warning the same way.
+- **The todo list** is restored from the last tool entry that recorded one.
+- As with an ACP load, replay shows text output only: a foreground `agent`
+  call folds to a `task` card with the child's final text, a background one
+  to its launch receipt, and no sub-agent rows come back — there is no live
+  view behind them to reopen.
+
+The title is kept, and — native sessions being indexed now —
+[`/rename`](#slash-commands) persists it back to the index like any other
+provider's.
+
 ## Tab title
 
 craze sets the terminal tab title (Ghostty, roost, and anything else that

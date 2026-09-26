@@ -153,7 +153,15 @@ type toolset struct {
 // §3.3); a child has no agent tool, and personas are not read for it. subs is
 // the session's sub-agent runner, which the agent tool hands its calls to
 // (Env.Subagents); nil for a child, whose Env.Subagents stays a nil interface.
-func openTools(home, workspace, mode string, asker tool.Asker, table *modeltable.Table, getenv func(string) string, r modeltable.Resolved, prompt PromptExtras, personas []tool.Persona, child *ChildOptions, subs *subagents, seams toolSeams) (*toolset, error) {
+//
+// ref is how the profile is chosen: a new session's starting model
+// (modelRef), or, for a resumed one, the profile its transcript's header names
+// and nothing else — the tools and the prompt are that profile's whichever
+// model the session resumes on, and a model with another profile is not one
+// it may resume on (plan 028 §3.3). The mode only seeds the gate: a resumed
+// session learns its own from the transcript and sets it (newModes) before it
+// is handed out.
+func openTools(home, workspace, mode string, asker tool.Asker, table *modeltable.Table, getenv func(string) string, ref tool.ModelRef, prompt PromptExtras, personas []tool.Persona, child *ChildOptions, subs *subagents, seams toolSeams) (*toolset, error) {
 	keys, err := table.Keys(getenv)
 	if err != nil {
 		return nil, fmt.Errorf("harness: %w", err)
@@ -189,7 +197,7 @@ func openTools(home, workspace, mode string, asker tool.Asker, table *modeltable
 	if ts.registry, err = build(); err != nil {
 		return nil, fmt.Errorf("harness: %w", err)
 	}
-	p, err := ts.registry.ProfileFor(modelRef(r))
+	p, err := ts.registry.ProfileFor(ref)
 	if err != nil {
 		return nil, fmt.Errorf("harness: %w", err)
 	}
@@ -576,12 +584,16 @@ func (e *redactedError) Unwrap() error { return e.err }
 // store's errors name the file they could not write, under a home craze was
 // configured with, and a path can hold anything (plan 019 §3.8). An error
 // whose message holds no key is returned as it is; nil stays nil.
-func (ts *toolset) redactErr(err error) error {
+func (ts *toolset) redactErr(err error) error { return redactErrWith(ts.redactor(), err) }
+
+// redactErrWith is redactErr with red, for an error met before the session
+// has a toolset to redact with (a resume's search for its transcript).
+func redactErrWith(red *redact.Replacer, err error) error {
 	if err == nil {
 		return nil
 	}
 	text := err.Error()
-	msg := ts.redactor().String(text)
+	msg := red.String(text)
 	if msg == text {
 		return err
 	}
@@ -607,6 +619,11 @@ func defaultProfiles() (*tool.Registry, error) {
 func modelRef(r modeltable.Resolved) tool.ModelRef {
 	return tool.ModelRef{Provider: r.ProviderID, Alias: r.Alias, WireModel: r.WireModel, Profile: r.ToolProfile}
 }
+
+// profileRef is how a resumed session's profile is chosen: by the name its
+// transcript's header records, and no model's (plan 028 §3.3). "" is the
+// registry's default, as a model with no tool_profile gets.
+func profileRef(name string) tool.ModelRef { return tool.ModelRef{Profile: name} }
 
 // check refuses a switch to r unless r's model gets the session's profile:
 // the tools and the system prompt are the session's, fixed at Open.

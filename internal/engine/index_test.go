@@ -226,7 +226,7 @@ func (f *fakeIndex) waitFor(t *testing.T, n int, have func() int, what string) {
 }
 
 // indexed is a rig whose engine writes an index: the options every test here
-// shares, with a provider the hidden predicate accepts.
+// shares, with a provider the unindexed predicate lets through.
 func indexed(t *testing.T, idx Index, craze string) *rig {
 	t.Helper()
 	return indexedHooked(t, idx, craze, nil)
@@ -242,7 +242,7 @@ func indexedHooked(t *testing.T, idx Index, craze string, h *hooks) *rig {
 			Store:     idx,
 			CWD:       "/w",
 			Provider:  "cursor",
-			Hidden:    func(p string) bool { return p == "native" },
+			Unindexed: func(p string) bool { return p == "native" },
 			TitleLine: func(s string) string { return strings.TrimSpace(s) },
 		},
 	}, agent.EventLogOptions{NoPrimary: true}, h)
@@ -778,7 +778,7 @@ func TestASeedOpportunityIsRetainedByThePreWriteHook(t *testing.T) {
 
 // TestASeedWhoseWriteBlowsUpStillHandsOnWhatItOwed is r31 finding 3. The seed's
 // bookkeeping — seeding, the retained opportunity's kick, and the close of
-// seedDone — is a defer, so an Upsert (or a snapshot, a hidden predicate, a
+// seedDone — is a defer, so an Upsert (or a snapshot, an unindexed predicate, a
 // title fold, a report callback) that PANICS under a caller which recovers
 // leaves the retry state exactly as a failed write would.
 //
@@ -1776,14 +1776,16 @@ func TestCloseAbandonsALastWriteNothingCanInterrupt(t *testing.T) {
 }
 
 // TestAHiddenProvidersSessionIsNeverIndexed is A15's native clause (plan 018
-// §3.4): until the harness has a loader, a native session stays out of the
-// shared index, so --continue and --resume never offer a row nothing can load.
+// §3.4), now keyed on the unindexed predicate (plan 028 §3.5): a provider the
+// predicate names — one craze cannot load — stays out of the shared index, so
+// --continue and --resume never offer a row nothing can load. The id is only
+// the predicate's; which providers it names is the client's (Resumable).
 // Skipping counts as DONE — no retry, and no error row.
 func TestAHiddenProvidersSessionIsNeverIndexed(t *testing.T) {
 	idx := newFakeIndex()
 	r := newRig(t, Options{Index: IndexOptions{
 		Store: idx, CWD: "/w", Provider: "native",
-		Hidden: func(p string) bool { return p == "native" },
+		Unindexed: func(p string) bool { return p == "native" },
 	}})
 	r.submit("a prompt")
 	r.until(lastEnding)

@@ -698,12 +698,14 @@ func TestFirstSendRetriesAFailedIndexWrite(t *testing.T) {
 	}
 }
 
-// TestHiddenProviderSessionIsNeverIndexed is plan 018 §3.4: a hidden
-// provider's sessions stay out of the shared index until they have a loader,
-// so no write moment — the first send, an agent title, a turn's end, /rename —
-// reaches Upsert. Skipping counts as done, so the first-prompt write is not
-// retried, and it is not an error line. The provider is read from the
-// snapshot, or from the resolved default before a session has reported one.
+// TestHiddenProviderSessionIsNeverIndexed is plan 018 §3.4's rule as plan 028
+// §3.5 keys it (engine.IndexOptions.Unindexed): the planted hidden provider is
+// not resumable, so its sessions stay out of the shared index — craze could
+// not load them — and no write moment — the first send, an agent title, a
+// turn's end, /rename — reaches Upsert. Skipping counts as done, so the
+// first-prompt write is not retried, and it is not an error line. The provider
+// is read from the snapshot, or from the resolved default before a session has
+// reported one.
 func TestHiddenProviderSessionIsNeverIndexed(t *testing.T) {
 	hidden := plantHidden(t)
 	for _, tc := range []struct {

@@ -52,6 +52,21 @@
 // anything leaves the file as it was, so it fails only that turn. Files are
 // 0600 and directories 0700: transcripts hold the user's prompts.
 //
+// # Reopening, and the lock
+//
+// A session is reopened by Open (plan 028 §3.2), the same file grown by the
+// same rules; Find locates it by session id. One process writes a transcript
+// at a time: a Store holds an exclusive flock(2) on its file from before the
+// file has its name until Close — New's is taken on the temporary file before
+// the link publishes it, Open's before it reads a byte — and a second Open is
+// ErrBusy. The lock is advisory and per open file description: it keeps two
+// crazes from appending to one session, which would interleave their steps.
+//
+// Open is the one writer that repairs, and only the tail: what Load would roll
+// back is cut off the file, after a copy of the cut bytes is made durable
+// beside it, so that the next step appends after a whole one (appending after
+// a cut step would break the pairing invariant). Load itself never writes.
+//
 // A Store is safe for concurrent use; the harness drives it from one turn at
 // a time, with Close possibly arriving from another goroutine.
 package store
@@ -63,6 +78,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"strings"
@@ -133,13 +149,28 @@ type Options struct {
 	// Test seams, settable only inside the package; zero means production.
 	entryID  func() string
 	openFile func(name string, flag int, perm os.FileMode) (file, error)
+	// fsStep performs, or observes, or fails, one step of a file operation
+	// whose order a test must see: it is handed the step's name and the
+	// step itself (do), and its error is the step's. New's create names
+	// "link"; Open's repair names its steps (open.go's step constants).
+	// Open does not use openFile.
+	fsStep func(op string, do func() error) error
 }
 
 // file is what the store needs of its descriptor: the seam a test counts
-// writes through.
+// writes through. Production's is an *os.File, which also offers Fd, and the
+// lock is taken on that descriptor (lockTemp).
 type file interface {
 	Write(p []byte) (int, error)
 	Close() error
+}
+
+// runStep runs do, the file-operation step op, through the fsStep seam.
+func runStep(seam func(string, func() error) error, op string, do func() error) error {
+	if seam != nil {
+		return seam(op, do)
+	}
+	return do()
 }
 
 func openOSFile(name string, flag int, perm os.FileMode) (file, error) {
@@ -158,8 +189,15 @@ type Store struct {
 	now      func() time.Time
 	entryID  func() string
 	openFile func(name string, flag int, perm os.FileMode) (file, error)
+	fsStep   func(op string, do func() error) error
 
-	f       file    // nil until the first write, and after Close
+	// f is the descriptor appends go through and the session's lock is held
+	// on: nil until the first write of a New session, and after Close.
+	f file
+	// lk is a second descriptor holding the lock, only when f cannot: a
+	// test's openFile double with no Fd (lockTemp). Nil in production.
+	lk      *os.File
+	resume  *Entry  // Open's resume entry, until the first step after it is written
 	users   []Entry // held user entries, in order, until the step answering them is written
 	changes []Entry // unwritten model and effort changes, in order
 	closed  bool
@@ -176,16 +214,7 @@ func New(opts Options) (*Store, error) {
 	if !filepath.IsAbs(opts.Workspace) {
 		return nil, fmt.Errorf("store: workspace %q is not an absolute path", opts.Workspace)
 	}
-	s := &Store{now: opts.Now, entryID: opts.entryID, openFile: opts.openFile}
-	if s.now == nil {
-		s.now = time.Now
-	}
-	if s.entryID == nil {
-		s.entryID = randomEntryID
-	}
-	if s.openFile == nil {
-		s.openFile = openOSFile
-	}
+	s := newBare(opts)
 	id := opts.SessionID
 	switch {
 	case id == "":
@@ -196,27 +225,56 @@ func New(opts Options) (*Store, error) {
 		return nil, fmt.Errorf("store: session id %q cannot name a file", id)
 	}
 	cwd := filepath.Clean(opts.Workspace)
-	sum := sha256.Sum256([]byte(opts.SystemPrompt))
+	c := contractOf(opts)
 	h := Header{
 		Version:            FormatVersion,
 		ID:                 id,
 		Timestamp:          s.stamp(),
 		Cwd:                cwd,
-		CrazeVersion:       opts.CrazeVersion,
-		SystemPromptSHA256: hex.EncodeToString(sum[:]),
-		ToolProfile:        opts.ToolProfile,
+		CrazeVersion:       c.CrazeVersion,
+		SystemPromptSHA256: c.SystemPromptSHA256,
+		ToolProfile:        c.ToolProfile,
+		ToolsSHA256:        c.ToolsSHA256,
 		ParentSession:      opts.ParentSession,
 		ParentToolCall:     opts.ParentToolCall,
 		SubagentType:       opts.SubagentType,
 		PersonaPath:        opts.PersonaPath,
 	}
-	if len(opts.Tools) > 0 {
-		sum := sha256.Sum256(opts.Tools)
-		h.ToolsSHA256 = hex.EncodeToString(sum[:])
-	}
 	s.t = newTranscript(h)
 	s.path = sessionPath(filepath.Clean(opts.Home), cwd, id, h.Timestamp)
 	return s, nil
+}
+
+// newBare is a Store with opts' clock and seams and nothing else yet.
+func newBare(opts Options) *Store {
+	s := &Store{now: opts.Now, entryID: opts.entryID, openFile: opts.openFile, fsStep: opts.fsStep}
+	if s.now == nil {
+		s.now = time.Now
+	}
+	if s.entryID == nil {
+		s.entryID = randomEntryID
+	}
+	if s.openFile == nil {
+		s.openFile = openOSFile
+	}
+	return s
+}
+
+// contractOf is the contract opts describe: the header's for New, the resume
+// entry's for Open. The system prompt and the tools array are recorded only as
+// their SHA-256; ToolsSHA256 is "" when there are no tools.
+func contractOf(opts Options) Contract {
+	sum := sha256.Sum256([]byte(opts.SystemPrompt))
+	c := Contract{
+		CrazeVersion:       opts.CrazeVersion,
+		SystemPromptSHA256: hex.EncodeToString(sum[:]),
+		ToolProfile:        opts.ToolProfile,
+	}
+	if len(opts.Tools) > 0 {
+		sum := sha256.Sum256(opts.Tools)
+		c.ToolsSHA256 = hex.EncodeToString(sum[:])
+	}
+	return c
 }
 
 // randomEntryID is 8 hex chars from 32 random bits.
@@ -232,7 +290,7 @@ func (s *Store) stamp() time.Time {
 	return s.now().UTC().Truncate(time.Millisecond)
 }
 
-// ID, Path and Header read what New fixed, so they take no lock.
+// ID, Path and Header read what New or Open fixed, so they take no lock.
 
 // ID is the session id, in the header and the file name: a UUID, or the
 // caller's own (Options.SessionID).
@@ -258,12 +316,19 @@ func (s *Store) usable() error {
 	return s.err
 }
 
-// checkMessage refuses e unless it has role and names its model in full.
+// checkMessage refuses e unless it has role, names its model in full, and
+// keeps checkFields' rules for its turn and todos.
 func checkMessage(call string, e MessageEntry, role fantasy.MessageRole) error {
 	if e.Message.Role != role {
 		return fmt.Errorf("store: %s needs a %s message, got role %q", call, role, e.Message.Role)
 	}
-	return e.Model.validate("a message entry")
+	if err := e.Model.validate("a message entry"); err != nil {
+		return err
+	}
+	if err := checkFields(e); err != nil {
+		return fmt.Errorf("store: %s: %w", call, err)
+	}
+	return nil
 }
 
 // AppendUser holds a user entry until AppendStep writes it, ahead of the
@@ -271,7 +336,8 @@ func checkMessage(call string, e MessageEntry, role fantasy.MessageRole) error {
 // after the first; both are written, in order. A caller that wants an
 // earlier turn's unanswered prompt left out of the transcript — because no
 // request it sent since had that prompt in its history — calls
-// DiscardHeldUsers first.
+// DiscardHeldUsers first. The entry a turn opens with carries the turn's
+// number (MessageEntry.Turn); this is the one place a turn is recorded.
 func (s *Store) AppendUser(e MessageEntry) error {
 	if err := checkMessage("AppendUser", e, fantasy.MessageRoleUser); err != nil {
 		return err
@@ -340,7 +406,8 @@ func (s *Store) holdChange(e Entry) error {
 	return nil
 }
 
-// AppendStep writes a finished step in one append: any held changes, the
+// AppendStep writes a finished step in one append: the resume entry Open
+// holds, if this is the first step since, any held changes, the
 // held user entries, steers (user messages interjected mid-turn that the
 // model first saw at this step, and the entries of background sub-agents'
 // results it first saw there, plan 026 §3.11), the assistant message, and
@@ -349,7 +416,9 @@ func (s *Store) holdChange(e Entry) error {
 // the model called tools. The first append also carries the header and
 // creates the file. It returns the ids of the entries it wrote, in file
 // order: the assistant message's is the last, or the one before the tool
-// message's.
+// message's. A steer opens no turn, so one with a Turn is refused; the tool
+// message carries the step's todo list when its calls changed it
+// (MessageEntry.Todos).
 //
 // The assistant message must have output, non-blank text or a tool call,
 // or AppendStep returns ErrNoOutput and changes nothing. The step must keep
@@ -365,6 +434,9 @@ func (s *Store) AppendStep(steers []MessageEntry, assistant MessageEntry, tool *
 	for _, st := range steers {
 		if err := checkMessage("a steer", st, fantasy.MessageRoleUser); err != nil {
 			return nil, err
+		}
+		if st.Turn != 0 {
+			return nil, fmt.Errorf("store: a steer carries turn %d; only the entry a turn opens with (AppendUser) does", st.Turn)
 		}
 	}
 	if err := checkMessage("AppendStep", assistant, fantasy.MessageRoleAssistant); err != nil {
@@ -383,11 +455,17 @@ func (s *Store) AppendStep(steers []MessageEntry, assistant MessageEntry, tool *
 	if err := s.usable(); err != nil {
 		return nil, err
 	}
-	if s.f == nil && len(s.users) == 0 {
+	// The transcript's first entry must be a user entry: none before the
+	// file exists, and none in a reopened file whose every entry Open cut.
+	if len(s.t.Entries) == 0 && len(s.users) == 0 {
 		return nil, ErrNoUser
 	}
 
-	batch := append(append([]Entry(nil), s.changes...), s.users...)
+	var batch []Entry
+	if s.resume != nil {
+		batch = append(batch, *s.resume)
+	}
+	batch = append(append(batch, s.changes...), s.users...)
 	for _, st := range steers {
 		batch = append(batch, Entry{Type: TypeMessage, Timestamp: s.stamp(), MessageEntry: st})
 	}
@@ -398,7 +476,7 @@ func (s *Store) AppendStep(steers []MessageEntry, assistant MessageEntry, tool *
 	if err := s.write(batch); err != nil {
 		return nil, err
 	}
-	s.users, s.changes = nil, nil
+	s.resume, s.users, s.changes = nil, nil, nil
 	ids := make([]string, len(batch))
 	for i, b := range batch {
 		ids[i] = b.ID
@@ -522,10 +600,17 @@ func (s *Store) write(batch []Entry) error {
 // Linux and macOS home filesystems all support hard links; one that does
 // not fails every first write with the link's error.
 //
-// Any failure removes the temporary file (best effort; each attempt uses a
-// fresh name, so a leftover cannot block the next) and returns an error with
-// the session path untouched, so the next turn tries again from the start.
-// The caller holds mu.
+// The session's lock (see the package comment) is taken on the temporary
+// file's descriptor as soon as it is open, so the file is locked before the
+// link gives it the session's name: there is no moment at which another
+// process could find the transcript and lock it first (plan 028 P6). The
+// descriptor, and the lock with it, is kept for later appends.
+//
+// Any failure closes the descriptor, which releases the lock, removes the
+// temporary file (best effort; each attempt uses a fresh name, so a leftover
+// cannot block the next) and returns an error with the session path
+// untouched, so the next turn tries again from the start. The caller holds
+// mu.
 func (s *Store) create(first []byte) error {
 	dir := filepath.Dir(s.path)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
@@ -536,20 +621,30 @@ func (s *Store) create(first []byte) error {
 	if err != nil {
 		return fmt.Errorf("store: %w", err)
 	}
-	if _, err := f.Write(first); err != nil {
+	var lk *os.File
+	abandon := func() {
 		_ = f.Close()
+		if lk != nil {
+			_ = lk.Close()
+		}
 		_ = os.Remove(tmp)
+	}
+	if lk, err = lockTemp(f, tmp); err != nil {
+		abandon()
+		return fmt.Errorf("store: lock %s: %w", tmp, err)
+	}
+	if _, err := f.Write(first); err != nil {
+		abandon()
 		return fmt.Errorf("store: first write to %s: %w", s.path, err)
 	}
-	if err := os.Link(tmp, s.path); err != nil {
-		_ = f.Close()
-		_ = os.Remove(tmp)
+	if err := runStep(s.fsStep, "link", func() error { return os.Link(tmp, s.path) }); err != nil {
+		abandon()
 		return fmt.Errorf("store: %w", err)
 	}
 	// The transcript now has its real name; the temporary one is only a
 	// second link to the same file, and a leftover is harmless.
 	_ = os.Remove(tmp)
-	s.f = f
+	s.f, s.lk = f, lk
 	return nil
 }
 
@@ -606,9 +701,27 @@ func (s *Store) ContextWithResults(current Model) ([]fantasy.Message, []bool) {
 	return s.t.ContextWithResults(current)
 }
 
-// Close releases the descriptor. Held entries are discarded: they belong to
-// a turn that produced no output. Close is idempotent, and every Append
-// after it is ErrClosed.
+// Transcript is a copy of the transcript as the store holds it: the header,
+// and every entry written, or read back and kept by Open, in file order.
+// Held entries are not in it. The copy's entry list is its own, so later
+// appends do not change it, and so is each entry (Entry.clone), so a caller
+// that changes one does not change the store's; only the messages' parts,
+// and the provider options, are shared, as Context's are. It works after
+// Close.
+func (s *Store) Transcript() *Transcript {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	entries := make([]Entry, len(s.t.Entries))
+	for i, e := range s.t.Entries {
+		entries[i] = e.clone()
+	}
+	return &Transcript{Header: s.t.Header, Entries: entries, index: maps.Clone(s.t.index)}
+}
+
+// Close releases the descriptor, and with it the session's lock. Held
+// entries are discarded: they belong to a turn that produced no output, and
+// Open's resume entry to an incarnation that wrote nothing. Close is
+// idempotent, and every Append after it is ErrClosed.
 func (s *Store) Close() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -616,12 +729,15 @@ func (s *Store) Close() error {
 		return nil
 	}
 	s.closed = true
-	s.users, s.changes = nil, nil
+	s.resume, s.users, s.changes = nil, nil, nil
 	if s.f == nil {
 		return nil
 	}
 	err := s.f.Close()
-	s.f = nil
+	if s.lk != nil {
+		err = errors.Join(err, s.lk.Close())
+	}
+	s.f, s.lk = nil, nil
 	if err != nil {
 		return fmt.Errorf("store: close %s: %w", s.path, err)
 	}

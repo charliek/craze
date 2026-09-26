@@ -10,6 +10,7 @@ import (
 	"unicode/utf8"
 
 	"charm.land/fantasy"
+	"github.com/charliek/craze/internal/harness/redact"
 	"github.com/charliek/craze/internal/harness/tool"
 	"github.com/charliek/craze/internal/harness/tool/opencode"
 )
@@ -329,6 +330,95 @@ func TestSessionTodosNilEmitIsSafe(t *testing.T) {
 	equalTodos(t, list, []tool.Todo{todoItem("1", "a", tool.TodoPending)})
 }
 
+// stepTodos is what a step's tool entry would carry now (turn.todosOn): ok is
+// false when it would carry no list. written says the entry was then written
+// (turn.todosWritten), or its append failed.
+func stepTodos(b *sessionTodos, written bool) (list []tool.Todo, ok bool) {
+	list, ok = b.unrecorded()
+	if ok && written {
+		b.recordedAt(list)
+	}
+	return list, ok
+}
+
+// TestSessionTodosRecordTheListLastWritten (plan 028 §3.2, P7): a tool entry
+// carries the list when it differs from the one the last written entry
+// carried — not when a call merely changed it: calls that change an item and
+// change it back leave nothing to write. A list whose entry failed to append
+// is carried to the next entry written (X13), and a change back to what is
+// on disk after such a failure leaves nothing to write either. A restored
+// list is on disk already.
+func TestSessionTodosRecordTheListLastWritten(t *testing.T) {
+	pending := []tool.Todo{todoItem("a", "alpha", tool.TodoPending)}
+	done := []tool.Todo{todoItem("a", "alpha", tool.TodoCompleted)}
+	set := func(b *sessionTodos, s tool.TodoStatus) {
+		writeTodos(t, b, nil, []tool.TodoUpdate{{ID: "a", Content: str("alpha"), Status: status(s)}})
+	}
+
+	b := newSessionTodos()
+	if _, ok := stepTodos(b, true); ok {
+		t.Fatal("a list never written to carries something")
+	}
+	set(b, tool.TodoPending)
+	if list, ok := stepTodos(b, true); !ok {
+		t.Fatal("a new list carries nothing")
+	} else {
+		equalTodos(t, list, pending)
+	}
+
+	// A step whose calls change the item and change it back.
+	set(b, tool.TodoCompleted)
+	set(b, tool.TodoPending)
+	if list, ok := stepTodos(b, true); ok {
+		t.Fatalf("a step that left the list as written carries %+v", list)
+	}
+
+	// A change whose entry failed to append is carried to the next entry
+	// written, from a step that changed nothing.
+	set(b, tool.TodoCompleted)
+	if _, ok := stepTodos(b, false); !ok {
+		t.Fatal("a changed list carries nothing")
+	}
+	if list, ok := stepTodos(b, true); !ok {
+		t.Fatal("a change whose append failed is not carried")
+	} else {
+		equalTodos(t, list, done)
+	}
+	if list, ok := stepTodos(b, true); ok {
+		t.Fatalf("a list written already carries %+v again", list)
+	}
+
+	// A change whose append failed, then a step that changes it back to what
+	// the last written entry holds: nothing to write.
+	set(b, tool.TodoPending)
+	if _, ok := stepTodos(b, false); !ok {
+		t.Fatal("a changed list carries nothing")
+	}
+	set(b, tool.TodoCompleted)
+	if list, ok := stepTodos(b, true); ok {
+		t.Fatalf("a list back to the one written carries %+v", list)
+	}
+
+	// Emptied: carried, as an empty list.
+	replace := false
+	writeTodos(t, b, &replace, nil)
+	if list, ok := stepTodos(b, true); !ok || len(list) != 0 {
+		t.Fatalf("an emptied list carries %+v, %v; want an empty one", list, ok)
+	}
+
+	// A restored list is the one on disk.
+	r := newSessionTodos()
+	r.restore(pending)
+	if list, ok := stepTodos(r, true); ok {
+		t.Fatalf("a restored list carries %+v", list)
+	}
+	set(r, tool.TodoCompleted)
+	set(r, tool.TodoPending)
+	if list, ok := stepTodos(r, true); ok {
+		t.Fatalf("a restored list changed and back carries %+v", list)
+	}
+}
+
 // TestSessionTodosOrderedEventsUnderParallelWrites (plan 023 §3.4, run under
 // -race): N goroutines write through the closest seam to the real turn path
 // — sessionTodos.attach wired to a real turn's emitLocked, exactly as
@@ -525,5 +615,47 @@ func TestTodoEventsOrderedThroughARealTurn(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+// TestRedactedTodoIDsStayUnique (plan 028 §3.2, sol's C2a finding): a list
+// whose ids redact alike keeps every item — the stored list is as long as the
+// live one, so a resume loses no task — and each repeat after the first takes
+// the first "-<n>" suffix no item of the whole list holds, so a suffixed id
+// never lands on another item's, and the store's repeated-id check passes.
+func TestRedactedTodoIDsStayUnique(t *testing.T) {
+	red := redact.New(canary, canaryOther)
+	m := redact.Marker
+	for _, tc := range []struct {
+		name string
+		ids  []string
+		want []string
+	}{
+		{"no key", []string{"a", "b"}, []string{"a", "b"}},
+		{"two keys at one place", []string{"k-" + canary, "k-" + canaryOther, "plain"},
+			[]string{"k-" + m, "k-" + m + "-2", "plain"}},
+		{"three", []string{canary, canaryOther, canary + "x", canaryOther + "x"},
+			[]string{m, m + "-2", m + "x", m + "x-2"}},
+		{"a suffix another item already holds", []string{"k-" + canary, "k-" + canaryOther, "k-" + m + "-2"},
+			[]string{"k-" + m, "k-" + m + "-3", "k-" + m + "-2"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			items := make([]tool.Todo, len(tc.ids))
+			for i, id := range tc.ids {
+				items[i] = tool.Todo{ID: id, Content: fmt.Sprintf("task %d", i), Status: tool.TodoPending}
+			}
+			got := redactTodos(red, items)
+			ids := make([]string, len(got))
+			for i, it := range got {
+				ids[i] = it.ID
+				if it.Content != fmt.Sprintf("task %d", i) {
+					t.Fatalf("item %d is %+v; want the items in order, none dropped", i, it)
+				}
+			}
+			equal(t, "the redacted ids", ids, tc.want)
+			if items[0].ID != tc.ids[0] {
+				t.Fatal("redactTodos changed the live list")
+			}
+		})
 	}
 }

@@ -179,7 +179,7 @@ func (s *Session) run(ctx context.Context, text string, wake bool, sink func(Eve
 	if sink == nil {
 		sink = func(Event) {}
 	}
-	m, changes, turnCtx, number, err := s.begin(ctx)
+	m, changes, turnCtx, number, err := s.begin(ctx, wake)
 	if err != nil {
 		return Result{}, err
 	}
@@ -197,18 +197,26 @@ func (s *Session) run(ctx context.Context, text string, wake bool, sink func(Eve
 	defer s.end()
 	defer func() { gave = s.subs.restoreTurn(number) }()
 
-	user := store.MessageEntry{Model: m.id(), Effort: m.effort}
+	// The entry the turn opens with records the turn's number (plan 028 §3.2,
+	// P10): it is how a replay tells a prompt from a steer, and where a
+	// resumed session's numbering continues from. A wake's is its results.
+	user := store.MessageEntry{Model: m.id(), Effort: m.effort, Turn: number}
 	var held []string
 	if wake {
 		// Taken under the runner's lock now the session is claimed, owned by
 		// the wake's first step (P47) before anything is sent.
 		b := s.subs.reserve(owner{turn: number, step: 1, wake: true}, false)
+		s.mu.Lock()
 		if b == nil {
-			// Nothing was waiting: no turn was, and its number is not spent.
-			// The session is still claimed, so no other turn has begun.
-			s.mu.Lock()
+			// Nothing was waiting: no turn was, its number is not spent, and a
+			// Replay is still in time. The session is still claimed, so no
+			// other turn has begun.
 			s.turns--
-			s.mu.Unlock()
+		} else {
+			s.begun = true // a turn from here, as a Run's is from begin
+		}
+		s.mu.Unlock()
+		if b == nil {
 			return Result{}, ErrNothingPending
 		}
 		text, held = b.text, b.ids
@@ -305,8 +313,9 @@ func (s *Session) run(ctx context.Context, text string, wake bool, sink func(Eve
 // which switches the transcript has not been told about, numbers the turn
 // (its tool calls' ids start with it), and registers the turn's cancel func
 // before the lock is released, so a Close from then on finds it (crush's
-// order).
-func (s *Session) begin(ctx context.Context) (model, []func(*store.Store) error, context.Context, int, error) {
+// order). A Run's turn has begun from here, so a Replay is too late; a
+// wake's only once it has found results to take (run).
+func (s *Session) begin(ctx context.Context, wake bool) (model, []func(*store.Store) error, context.Context, int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	switch {
@@ -337,6 +346,9 @@ func (s *Session) begin(ctx context.Context) (model, []func(*store.Store) error,
 	turnCtx, cancel := context.WithCancelCause(ctx)
 	s.turns++
 	s.running, s.cancel, s.done = true, cancel, make(chan struct{})
+	if !wake {
+		s.begun = true
+	}
 	return m, changes, turnCtx, s.turns, nil
 }
 
@@ -706,6 +718,7 @@ func (t *turn) stepFinished(step fantasy.StepResult) error {
 			StopReason: t.stop,
 		}
 		var toolEntry *store.MessageEntry
+		var todos todoMark
 		if results != nil {
 			// The children's usage rides on the entry that holds their results,
 			// each row priced by its own model; the entry itself is stamped with
@@ -716,6 +729,7 @@ func (t *turn) stepFinished(step fantasy.StepResult) error {
 			writes := func(c *toolCall) bool { return slices.Contains(answered, c) }
 			toolEntry = &store.MessageEntry{Message: redactResults(t.redactor(), *results), Model: t.model.id(), Effort: t.model.effort,
 				SubagentUsage: subagentUsage(t.list, writes)}
+			todos = t.todosOn(toolEntry)
 		}
 		// The mode this step's request announced is handed over first, so the
 		// store writes the mode_change ahead of this step's own entries
@@ -732,6 +746,7 @@ func (t *turn) stepFinished(step fantasy.StepResult) error {
 		case err == nil:
 			t.written = len(t.spliced)
 			t.wrote(ids, lead, toolEntry != nil, outputCalls(answered))
+			t.todosWritten(todos)
 			done.Saved, done.Entries = true, ids
 			// The conversation now holds the step the model read the notice
 			// in, so the mode is told for good (plan 023 §3.3).
@@ -767,6 +782,37 @@ func (t *turn) stepDone(step fantasy.StepResult) StepDone {
 		StopReason:       t.stop,
 		TimeToFirstToken: t.firstToken,
 		Usage:            t.usage,
+	}
+}
+
+// todosOn puts on e, a step's tool entry about to be appended, the session's
+// todo list when it is not the list a written tool entry last carried — the
+// list after the step: Fantasy has joined every call of the step, the
+// parallel todo_write calls among them, before the step finishes (plan 028
+// §3.2, P7). It is redacted with the turn's redactor, as the step's calls
+// and results are (redactCalls, redactResults), so the transcript never
+// holds a key the session knows in plaintext. It returns the mark
+// todosWritten records once e is written: none when nothing was put on it,
+// and for a sub-agent, which has no list. mu is held; the list's record has
+// a leaf lock of its own (todos.go).
+func (t *turn) todosOn(e *store.MessageEntry) todoMark {
+	if t.tools.todos == nil {
+		return todoMark{}
+	}
+	list, ok := t.tools.todos.unrecorded()
+	if !ok {
+		return todoMark{}
+	}
+	stored := storeTodos(redactTodos(t.redactor(), list))
+	e.Todos = &stored
+	return todoMark{list: list, set: true}
+}
+
+// todosWritten records that the tool entry todosOn put mark's list on has
+// been written. mu is held.
+func (t *turn) todosWritten(mark todoMark) {
+	if mark.set {
+		t.tools.todos.recordedAt(mark.list)
 	}
 }
 

@@ -1080,8 +1080,9 @@ def test_tui_native_one_turn_leaves_config_and_index_alone(
 
     The provider is hidden (§3.4): the status bar shows it (it still has to
     be usable), but startedMsg's SaveProvider skips it, so the config file's
-    provider is exactly what it was before, and no sessions.jsonl is created
-    at all -- writeIndex skips a hidden provider's snapshot too. No fake
+    provider is exactly what it was before. It is resumable, though (plan 028
+    §3.5), so its first prompt writes its row to sessions.jsonl -- under the
+    id its transcript is filed by, which is what --continue loads. No fake
     agent is spawned here (`--agent-bin` and an in-process provider are a
     usage error, refuseInProcess), so the only server on the other end of
     this turn is the loopback SSE fixture standing in for a real provider.
@@ -1117,7 +1118,15 @@ def test_tui_native_one_turn_leaves_config_and_index_alone(
         assert CANARY not in text, text[-3000:]
 
     assert config_path.read_text(encoding="utf-8") == before
-    assert not (craze_home / "sessions.jsonl").exists()
+    index = craze_home / "sessions.jsonl"
+    rows = [json.loads(line) for line in index.read_text(encoding="utf-8").splitlines()]
+    assert len(rows) == 1, rows
+    row = rows[0]
+    assert row["provider"] == "native", row
+    assert row["cwd"] == str(workspace), row
+    assert row["title"] == "hi", row
+    transcripts = list((craze_home / "native" / "sessions").rglob(f"*_{row['sessionId']}.jsonl"))
+    assert len(transcripts) == 1, (row, transcripts)
 
 
 def test_tui_native_tool_loop_draws_its_rows(craze_bin: Path, tmp_path: Path) -> None:
@@ -1203,10 +1212,12 @@ def test_tui_continue_prefers_the_cursor_row_over_a_native_default(
     stops the load) for a session that is really cursor's.
 
     CRAZE_PROVIDER=native stands in for "whatever the environment or config
-    resolved" (§3.4's "a native default from env or config"); runTUI skips
-    refuseInProcess entirely under --continue/--resume (internal/cli/tui.go),
-    and resolveLoad hands the seeded cursor row to LoadSession instead of the
-    resolved provider, so the fake agent still runs and still gets
+    resolved" (§3.4's "a native default from env or config"); under
+    --continue/--resume runTUI never checks the resolved provider against the
+    spawn flags -- resolveLoad checks the row's own provider instead (plan 028
+    §3.5), and cursor's is not in-process -- and it hands the seeded cursor row
+    to LoadSession instead of the resolved provider, so the fake agent still
+    runs and still gets
     session/load for that id -- proof cursor, not native, is what actually
     started.
     """

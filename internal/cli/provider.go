@@ -94,7 +94,9 @@ const envAgentBin = "CRAZE_AGENT_BIN"
 // provider without modes is still refused (plan 023 §3.6). One function covers
 // all three callers — prompt, a fresh TUI session and frame, which has no mode
 // flag of its own and passes "" — so `craze --provider native --plan` switches
-// plan mode on in the TUI path too.
+// plan mode on in the TUI path too. A load asks it of the loaded row's own
+// provider, whatever was resolved: --continue of its row, and the resume
+// picker of the row chosen, both before anything is claimed (plan 028 §3.5).
 //
 // The environment variable counts exactly as acp reads it — set and
 // non-empty — so a run the refusal lets through could never have spawned that
@@ -116,13 +118,14 @@ func refuseInProcess(cmd string, p agent.Provider, agentBin, mode string) error 
 
 // knownProvider is the session index's view of the registry: a row whose
 // provider id this build does not know is kept in the file but never offered
-// (§3.2), because craze has no way to start it. A hidden provider counts as
-// unknown here (plan 018 §3.4): its sessions have no loader yet, so a row
-// naming one — which craze never writes, but the index is user-editable JSON —
-// is kept and never offered by --continue or --resume either.
+// (§3.2), because craze has no way to start it. A provider that is not
+// resumable counts as unknown here (plan 028 §3.5): craze cannot load its
+// sessions, so a row naming one — which craze never writes, but the index is
+// user-editable JSON — is kept and never offered by --continue or --resume
+// either. Hidden is not the question: native is hidden, and its rows load.
 func knownProvider(id string) bool {
 	p, err := agent.ProviderByName(id)
-	return err == nil && !p.Hidden()
+	return err == nil && p.Resumable()
 }
 
 // providerFlagExplicit is "--provider was passed, and named something". It is

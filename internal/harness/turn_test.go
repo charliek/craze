@@ -618,7 +618,7 @@ func TestRefusedSwitchIsHandedOverAgain(t *testing.T) {
 	if _, err := s.Run(context.Background(), "hi", nil); !errors.Is(err, store.ErrClosed) {
 		t.Fatalf("Run = %v, want the store's refusal", err)
 	}
-	_, changes, _, _, err := s.begin(context.Background())
+	_, changes, _, _, err := s.begin(context.Background(), false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -635,7 +635,7 @@ func TestRecordedIsTheTurnsModel(t *testing.T) {
 	if err := s.SetModel("test/b"); err != nil {
 		t.Fatal(err)
 	}
-	m, changes, _, _, err := s.begin(context.Background())
+	m, changes, _, _, err := s.begin(context.Background(), false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -646,7 +646,7 @@ func TestRecordedIsTheTurnsModel(t *testing.T) {
 		t.Fatal(err)
 	}
 	s.end()
-	_, next, _, _, err := s.begin(context.Background())
+	_, next, _, _, err := s.begin(context.Background(), false)
 	if err != nil {
 		t.Fatal(err)
 	}

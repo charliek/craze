@@ -576,8 +576,10 @@ func TestNativeStartRefusals(t *testing.T) {
 		want  []string // substrings of the error
 		is    error
 	}{
-		{name: "session/load", opts: Options{LoadSessionID: "abc"},
-			want: []string{"agent: native does not support session/load yet"}},
+		// Native loads (plan 028 §3.4); an id that cannot be a stored
+		// session's is refused before anything is read.
+		{name: "session/load of a bad id", opts: Options{LoadSessionID: "../abc"},
+			want: []string{`native: session "../abc" cannot be resumed`, "bad session id"}, is: store.ErrBadSessionID},
 		// A mode native has not got. The three it has start a session
 		// (TestNativeStartsInPlanMode); an id the vocabulary cannot resolve is
 		// refused rather than quietly ignored, because a caller that asked for
