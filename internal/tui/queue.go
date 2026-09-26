@@ -342,6 +342,10 @@ func (m *Model) withdrawSendNow(note string) {
 // until the send actually fires there is still a chance it never will, and
 // text that exists in exactly one place cannot be lost by a path that forgot
 // to put it back.
+//
+// The confirm comes down here, before the Submit: it is the Update that
+// answered the question, and the gated call's continuation (submit's) has
+// nothing of this function's left to run.
 func (m Model) confirmStrongSend() (tea.Model, tea.Cmd) {
 	pending := m.confirm
 	m.confirm = nil
@@ -362,11 +366,9 @@ func (m Model) confirmStrongSend() (tea.Model, tea.Cmd) {
 		// the context is read now rather than when the question went up,
 		// because a command that finished while it was up is context for this
 		// message too (plan 022 §3.6).
-		next, _, _ := m.submitOwn(pending.text, mode)
-		return next, nil
+		return m.submitOwn(pending.text, mode, submitted)
 	}
-	next, _, _ := m.submit(pending.text, mode, pending.from)
-	return next, nil
+	return m.submit(pending.text, mode, pending.from, submitted)
 }
 
 // declineStrongSend is Esc or any other key on the confirm: nothing was taken
@@ -608,16 +610,21 @@ func (m Model) handleStrongSend() (tea.Model, tea.Cmd) {
 // its confirm, or one whose turn could not start, is still where it was.
 func (m Model) sendQueuedNow(p agent.QueuedPrompt) (tea.Model, tea.Cmd) {
 	if m.status != statusWorking {
-		// Nothing to cancel, so nothing to confirm: the row just goes.
-		next, res, _ := m.submit(p.Text, engine.SubmitQueue, p.ID)
-		if res.Turn == "" {
-			// It could not start — the agent is running a turn of its own — so
-			// the row is still queued and the band keeps the keyboard.
+		// Nothing to cancel, so nothing to confirm: the row just goes. Where
+		// the keyboard goes next depends on Submit's answer, so it is decided
+		// in the continuation, after submit has applied that answer.
+		return m.submit(p.Text, engine.SubmitQueue, p.ID, func(next Model, res engine.SubmitResult, _ error) (Model, tea.Cmd) {
+			if res.Turn == "" {
+				// It could not start — the agent is running a turn of its own,
+				// or the session did not answer (ErrNoAnswer) — so the row is
+				// still queued, as far as this client knows, and the band keeps
+				// the keyboard.
+				return next, nil
+			}
+			next.focusComposer()
+			next.queueFocus = false
 			return next, nil
-		}
-		next.focusComposer()
-		next.queueFocus = false
-		return next, nil
+		})
 	}
 	return m.askStrongSend(p.Text, p.ID)
 }

@@ -3,7 +3,9 @@ package tui
 import (
 	"context"
 	"errors"
+	"fmt"
 	"reflect"
+	"runtime/debug"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -179,15 +181,50 @@ func (m Model) run(deadline time.Duration, call gateCall, cont gateCont) (Model,
 		ctx, cancel := context.WithTimeout(context.Background(), deadline)
 		defer cancel()
 		done := make(chan gateReply, 1)
-		go func() { done <- callGated(ctx, b, g.id, call) }()
+		caught := make(chan callPanic)
+		gone := make(chan struct{})
+		defer close(gone)
+		go func() {
+			defer func() {
+				if v := recover(); v != nil {
+					p := callPanic{value: v, stack: debug.Stack()}
+					select {
+					case caught <- p:
+					case <-gone:
+						// The command gave up at the deadline and returned:
+						// there is nobody to carry the panic to, and it is
+						// not swallowed.
+						panic(p)
+					}
+				}
+			}()
+			done <- callGated(ctx, b, g.id, call)
+		}()
 		select {
 		case r := <-done:
 			return r
+		case p := <-caught:
+			// The call panicked. Re-raised here, on the command's own
+			// goroutine, bubbletea recovers it and ends the program with
+			// ErrProgramPanic — what a panic inside the synchronous call did
+			// from inside its Update — rather than a bare goroutine taking
+			// the process down with the terminal still raw.
+			panic(p)
 		case <-ctx.Done():
 			return gateReply{id: g.id, err: ErrNoAnswer}
 		}
 	}
 }
+
+// callPanic is a gated call's panic on its way to the command's goroutine,
+// with the stack of the goroutine it happened on: re-raised there, the stack
+// bubbletea prints would otherwise be the command's, which says nothing.
+type callPanic struct {
+	value any
+	stack []byte
+}
+
+func (p callPanic) String() string { return fmt.Sprintf("%v\n\n%s", p.value, p.stack) }
 
 // callGated runs call with ctx, which ends at the call's deadline, and answers
 // its reply. A call that gave up because that deadline passed did not answer:

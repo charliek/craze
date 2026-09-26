@@ -514,8 +514,9 @@ type Model struct {
 	// not mean (§3.7).
 	turnID string
 	// ownTurn is the one turn id the model skips the started event for: the one
-	// Submit handed it back synchronously, whose row, working status and
-	// turnStart the Update that pressed Enter has already applied. Echo
+	// Submit handed back, whose row, working status and turnStart its
+	// continuation has already applied — before any event the Submit caused,
+	// which the command gate holds until then (§3.12). Echo
 	// suppression is per effect, so every other started — a drained row, an
 	// armed send firing, another client's prompt — draws its row (§3.4).
 	ownTurn string
@@ -2309,8 +2310,7 @@ func (m Model) send() (tea.Model, tea.Cmd) {
 		// session that is still restoring would race the replay it is reading.
 		return m, nil
 	}
-	next, _, _ := m.submitOwn(text, engine.SubmitQueue)
-	return next, nil
+	return m.submitOwn(text, engine.SubmitQueue, submitted)
 }
 
 // sendText starts a turn with text of craze's own: today the plan offer's
@@ -2326,8 +2326,7 @@ func (m Model) sendText(text string) (tea.Model, tea.Cmd) {
 		// The plan offer refuses for the composer's reason, above.
 		return m, nil
 	}
-	next, _, _ := m.submit(text, engine.SubmitQueue, "")
-	return next, nil
+	return m.submit(text, engine.SubmitQueue, "", submitted)
 }
 
 // submitOwn is submit for the text this composer is holding: the draft's send,
@@ -2336,25 +2335,54 @@ func (m Model) sendText(text string) (tea.Model, tea.Cmd) {
 // context, and it is what clears it — only once the text was accepted, so a
 // refusal leaves the block with the draft it belongs to, for the send that
 // follows.
-func (m Model) submitOwn(text string, mode engine.SubmitMode) (Model, engine.SubmitResult, error) {
-	next, res, err := m.submit(m.withShellContext(text), mode, "")
-	if shellContextTaken(res, err) {
-		next.dropShellContext()
-	}
-	return next, res, err
+//
+// The context is attached now, in the Update that sends, and dropped in the
+// continuation, once the answer says the text was taken. A Submit that did not
+// answer (ErrNoAnswer) keeps it: the prompt may never have been sent, and the
+// block stays with the draft it belongs to, as for any refusal — the next send
+// carries it.
+func (m Model) submitOwn(text string, mode engine.SubmitMode, then submitThen) (Model, tea.Cmd) {
+	return m.submit(m.withShellContext(text), mode, "", func(m Model, res engine.SubmitResult, err error) (Model, tea.Cmd) {
+		if shellContextTaken(res, err) {
+			m.dropShellContext()
+		}
+		return then(m, res, err)
+	})
 }
+
+// submitThen is what a caller of submit did once Submit had returned: its own
+// post-call work, which runs in submit's continuation after submit's own
+// (§3.12 "The operation chain").
+type submitThen func(m Model, res engine.SubmitResult, err error) (Model, tea.Cmd)
+
+// submitted is the caller with nothing left to do once submit has applied the
+// answer: send, sendText and confirmStrongSend all returned there.
+func submitted(m Model, _ engine.SubmitResult, _ error) (Model, tea.Cmd) { return m, nil }
+
+// noAnswerSubmitNote is a Submit that did not answer in time (ErrNoAnswer,
+// §3.12): the command may have run, so the note says the prompt may have been
+// sent, and the draft is kept — nothing was drawn and nothing is cleared.
+const noAnswerSubmitNote = "no answer from the session — the prompt may have been sent"
 
 // submit hands one prompt to the engine and applies what it answered. It is the
 // one place the model does: a plain send, the plan offer's implement prompt, a
 // row's send now, and a confirmed send-now all come through here, so the echo
-// rule has one synchronous half to match.
+// rule has one half to match, applied before any event the Submit caused.
+//
+// The call goes through the command gate (§3.12): what comes before it — the
+// row's text read from the band, the command id — runs in the Update that
+// sends; the answer is applied in the continuation, where the model is exactly
+// as that Update left it and nothing that arrived meanwhile has been applied
+// yet, and then the caller's own post-call work runs (then). In the gateSync
+// baseline both halves run in the one Update, today's control flow.
 //
 // Exactly one thing happened, and the model applies exactly that one:
 //
 //   - a turn started while the model had nothing running, so the row is drawn,
-//     the status goes working and the turn is stamped in this very Update — which
-//     is what a frame capture right after Enter sees — and that turn id is the one
-//     started event the model will skip;
+//     the status goes working and the turn is stamped in the Update the answer
+//     lands in — which is what a frame capture right after Enter sees, the
+//     frames between being the gate's — and that turn id is the one started
+//     event the model will skip;
 //   - a turn started while the model was still displaying another one as working:
 //     nothing is drawn, and the turn is recorded as the pending successor
 //     (nextTurn), which is what stops the model drawing it ahead of the events of
@@ -2368,13 +2396,15 @@ func (m Model) submitOwn(text string, mode engine.SubmitMode) (Model, engine.Sub
 //   - or it was refused, which is one line for the user. Every one of these
 //     refusals was unreachable before the engine — Begin could not refuse a
 //     prompt the model had already gated — so what matters is that a prompt which
-//     went nowhere says so.
+//     went nowhere says so. A Submit that did not answer at all (ErrNoAnswer) is
+//     the same one line, saying the outcome is unknown: nothing drawn, no echo
+//     marker set, the draft kept.
 //
-// It waits on nothing: Submit is one locked section in the engine and calls
-// nothing that blocks.
-func (m Model) submit(text string, mode engine.SubmitMode, fromRow string) (Model, engine.SubmitResult, error) {
+// In process Submit waits on nothing but the inline index seed's lock; over the
+// socket it is a round trip, which is why it is gated.
+func (m Model) submit(text string, mode engine.SubmitMode, fromRow string, then submitThen) (Model, tea.Cmd) {
 	if m.eng == nil {
-		return m, engine.SubmitResult{}, nil
+		return then(m, engine.SubmitResult{}, nil)
 	}
 	if fromRow != "" {
 		// The engine sends the row's own text, so the row the model draws is
@@ -2387,7 +2417,36 @@ func (m Model) submit(text string, mode engine.SubmitMode, fromRow string) (Mode
 		}
 	}
 	c := m.nextCmd()
-	res, err := m.eng.Submit(context.Background(), c, text, mode, fromRow)
+	return m.run(gateDeadline,
+		func(ctx context.Context, b backend.Backend) (any, error) {
+			res, err := b.Submit(ctx, c, text, mode, fromRow)
+			return submitAnswer{res: res, queue: b.State().Queue}, err
+		},
+		func(m Model, r gateReply) (Model, tea.Cmd) {
+			ans, _ := r.result.(submitAnswer)
+			m = m.submitted(text, mode, fromRow, c, ans, r.err)
+			return then(m, ans.res, r.err)
+		})
+}
+
+// submitAnswer is Submit's reply as its continuation applies it: the result,
+// and the queue as the engine held it the moment Submit returned. That is the
+// transitional live read (§3.12 "What a continuation shows"), taken where the
+// synchronous code took it — right after the call — because the engine does
+// not wait for the reply to be applied: by the time it lands, a row armed as a
+// send-now can already have fired and left the queue, and a band read then
+// would drop the row from the frame the call's own Update used to draw, ahead
+// of the events that say it went. The read is in process only, and goes with
+// the transitional State() (C21).
+type submitAnswer struct {
+	res   engine.SubmitResult
+	queue []agent.QueuedPrompt
+}
+
+// submitted is submit's continuation: Submit's answer applied to the model, as
+// the Update that sent it left it, before any event the Submit caused.
+func (m Model) submitted(text string, mode engine.SubmitMode, fromRow string, c engine.Command, ans submitAnswer, err error) Model {
+	res := ans.res
 	switch {
 	case err != nil:
 		m.note(submitErrNote(err))
@@ -2428,8 +2487,16 @@ func (m Model) submit(text string, mode engine.SubmitMode, fromRow string) (Mode
 	case res.Queued != nil && fromRow == "":
 		m.clearMatchingDraft(text)
 	}
-	m.refreshQueue()
-	return m, res, err
+	// The band shows the engine's queue as the call left it — this Submit's
+	// row, or its row gone (submitAnswer). A Submit that did not answer
+	// brought no read back, so the band is read now: whatever the session
+	// holds.
+	if errors.Is(err, ErrNoAnswer) {
+		m.refreshQueue()
+	} else {
+		m.queue = ans.queue
+	}
+	return m
 }
 
 // beginTurn is what one turn starting does to the model's view of the session,
@@ -2513,6 +2580,8 @@ func submitErrNote(err error) string {
 	switch {
 	case err == nil:
 		return ""
+	case errors.Is(err, ErrNoAnswer):
+		return noAnswerSubmitNote
 	case errors.Is(err, engine.ErrNotAccepting):
 		return "not ready to send yet"
 	case errors.Is(err, engine.ErrAlreadyPending):

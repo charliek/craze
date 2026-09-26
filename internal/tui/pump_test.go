@@ -91,6 +91,11 @@ type pump struct {
 	// command that has finished never holds its goroutine open waiting for the
 	// test to get round to it.
 	msgs chan pumpItem
+	// front is what pumpApply set aside while a gated call of the test's own
+	// message waited for its reply (awaitGate), oldest first: it reaches Update
+	// ahead of everything still in msgs, which arrived after it. Only the
+	// test's goroutine touches it.
+	front []pumpItem
 	// dead is closed at cleanup: a goroutine still holding a message gives up
 	// on delivering it instead of blocking on a queue nobody reads again.
 	dead chan struct{}
@@ -340,7 +345,7 @@ func (p *pump) resolved() {
 // outstanding until its message has been applied, and the only other publisher
 // is the test's own goroutine, which is inside pumpSettled.
 func (p *pump) quiet() bool {
-	if len(p.msgs) != 0 || len(p.ctrl.Events()) != 0 {
+	if len(p.front) != 0 || len(p.msgs) != 0 || len(p.ctrl.Events()) != 0 {
 		return false
 	}
 	p.stateMu.Lock()
@@ -423,7 +428,7 @@ func (p *pump) pending() string {
 	defer p.stateMu.Unlock()
 	return fmt.Sprintf("commands outstanding=%d queued=%d unread events=%d "+
 		"engine turn=%q activity=%s queued rows=%d armed=%v foreign=%v",
-		p.outstanding, len(p.msgs), len(p.ctrl.Events()),
+		p.outstanding, len(p.front)+len(p.msgs), len(p.ctrl.Events()),
 		st.Turn, st.Activity, len(st.Queue), st.SendNow != nil, st.ForeignTurn)
 }
 
@@ -487,6 +492,13 @@ func pumpUntil(t *testing.T, m Model, pred func(Model) bool) Model {
 	}
 	timeout := deadline()
 	for {
+		if item, ok := p.popFront(); ok {
+			m = p.apply(m, item)
+			if pred(m) {
+				return m
+			}
+			continue
+		}
 		select {
 		case item := <-p.msgs:
 			m = p.apply(m, item)
@@ -643,8 +655,16 @@ func pumpQuiet(t *testing.T, m Model, what string, done func(*pump) bool) Model 
 	}
 }
 
-// drain applies everything already queued, without waiting for more.
+// drain applies everything already queued, without waiting for more: what
+// pumpApply set aside first, then the queue.
 func (p *pump) drain(m Model) Model {
+	for {
+		item, ok := p.popFront()
+		if !ok {
+			break
+		}
+		m = p.apply(m, item)
+	}
 	for {
 		select {
 		case item := <-p.msgs:
@@ -668,12 +688,57 @@ func (p *pump) apply(m Model, item pumpItem) Model {
 
 // pumpApply hands the model one message and dispatches what it asked for,
 // without waiting: the caller says next what it is waiting for.
+//
+// The one wait it does is the old synchronous Update's (plan 027 §3.12): a
+// message whose Update issues a gated call — Enter's Submit — had that call's
+// effect when its Update returned, and has it now in the Update the reply
+// lands in. So a gate the message opened is waited out (awaitGate), and the
+// model comes back as the old Update left it.
 func pumpApply(t *testing.T, m Model, msg tea.Msg) Model {
 	t.Helper()
 	p := pumpFor(t, m)
 	m, cmd := p.update(m, msg)
 	p.dispatch(cmd)
+	if m.gate != nil {
+		m = p.awaitGate(t, m)
+	}
 	return m
+}
+
+// awaitGate waits out a gate the test's own message opened, to the release
+// that leaves none open (a chain's end): only the gate's replies reach Update.
+// Everything else that arrives meanwhile is set aside in front, in arrival
+// order and unapplied, as it waited in the runtime's queue while the old
+// synchronous call blocked the Update — so the test's next key still reaches
+// the model ahead of it, as it always has here, and the pump's later waits
+// apply it first.
+func (p *pump) awaitGate(t *testing.T, m Model) Model {
+	t.Helper()
+	timeout := deadline()
+	for m.gate != nil {
+		select {
+		case item := <-p.msgs:
+			if _, ok := item.msg.(gateReply); ok {
+				m = p.apply(m, item)
+				continue
+			}
+			p.front = append(p.front, item)
+		case <-timeout:
+			t.Fatalf("pumpApply: the gated call did not answer in %s (%s)\n%s",
+				pumpWatchdog, p.pending(), plainView(m))
+		}
+	}
+	return m
+}
+
+// popFront takes the oldest message pumpApply set aside.
+func (p *pump) popFront() (pumpItem, bool) {
+	if len(p.front) == 0 {
+		return pumpItem{}, false
+	}
+	item := p.front[0]
+	p.front = p.front[1:]
+	return item, true
 }
 
 // pumpKey presses a key the way a terminal delivers it.
