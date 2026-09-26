@@ -6,9 +6,25 @@
 package atomicfile
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"syscall"
+	"time"
+)
+
+// ErrLockBusy is LockWithin's answer when another holder kept the lock for the
+// whole bound.
+var ErrLockBusy = errors.New("atomicfile: the lock is busy")
+
+// lockPoll is how often LockWithin tries a busy lock again.
+const lockPoll = 20 * time.Millisecond
+
+// now and sleep are LockWithin's clock: a seam for the test that releases a
+// holder just past the bound, time.Now and time.Sleep in production.
+var (
+	now   = time.Now
+	sleep = time.Sleep
 )
 
 // Lock takes an exclusive lock on path, creating it if it does not exist.
@@ -33,10 +49,59 @@ func Lock(path string) (unlock func(), err error) {
 		_ = f.Close()
 		return noop, err
 	}
+	return unlocker(f), nil
+}
+
+// LockWithin is Lock with a bound: it tries LOCK_EX|LOCK_NB, again every
+// lockPoll, until it holds the lock or d has passed, and then answers
+// ErrLockBusy. It never waits past d (a flock cannot be interrupted, so a
+// caller that must not block — a picker's claim, --continue — cannot use Lock),
+// and it tries at least once, so d <= 0 is a single attempt. Every try after
+// the first is made only while d has not passed: a lock held for the whole
+// bound is ErrLockBusy even when its holder lets go an instant after it. Any
+// other open or flock error is returned as it is.
+//
+// The returned unlock is always non-nil, as Lock's is.
+func LockWithin(path string, d time.Duration) (unlock func(), err error) {
+	noop := func() {}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return noop, err
+	}
+	deadline := now().Add(d)
+	for first := true; ; first = false {
+		if !first && !now().Before(deadline) {
+			_ = f.Close()
+			return noop, ErrLockBusy
+		}
+		err := flockNB(f)
+		switch {
+		case err == nil:
+			return unlocker(f), nil
+		case !errors.Is(err, syscall.EWOULDBLOCK):
+			_ = f.Close()
+			return noop, err
+		}
+		sleep(min(lockPoll, max(deadline.Sub(now()), 0)))
+	}
+}
+
+// flockNB is one LOCK_EX|LOCK_NB try on f, retried on EINTR.
+func flockNB(f *os.File) error {
+	for {
+		err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+		if !errors.Is(err, syscall.EINTR) {
+			return err
+		}
+	}
+}
+
+// unlocker releases a lock Lock or LockWithin took, and closes its file.
+func unlocker(f *os.File) func() {
 	return func() {
 		_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
 		_ = f.Close()
-	}, nil
+	}
 }
 
 // Write replaces the contents of path with b atomically: a temp file named

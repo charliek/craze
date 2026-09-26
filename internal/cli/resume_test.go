@@ -12,6 +12,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/charliek/craze/internal/agent"
+	"github.com/charliek/craze/internal/rundir"
 	"github.com/charliek/craze/internal/sessions"
 	"github.com/charliek/craze/internal/tui"
 )
@@ -24,6 +25,12 @@ import (
 func indexHome(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
+	// 0700, as a home is: t.TempDir's mode follows the umask, and a
+	// group-writable home is an ancestor the session locks' cache tree may
+	// refuse (plan 027 §3.8), which would leave every claim a warning.
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	t.Setenv("HOME", dir)
 	t.Setenv("CRAZE_HOME", dir)
 	t.Setenv("CRAZE_PROVIDER", "")
@@ -105,6 +112,12 @@ func parseTUIFlags(t *testing.T, argv ...string) (*cobra.Command, *tuiFlags) {
 // built from.
 func runResolveLoad(t *testing.T, cwd string, argv ...string) (tui.Config, []agent.Options, error) {
 	t.Helper()
+	return runResolveLoadWith(t, cwd, testClaims(t, io.Discard), argv...)
+}
+
+// runResolveLoadWith is runResolveLoad with the run's session claims given.
+func runResolveLoadWith(t *testing.T, cwd string, claims *sessionClaims, argv ...string) (tui.Config, []agent.Options, error) {
+	t.Helper()
 	cmd, f := parseTUIFlags(t, argv...)
 	resolved, err := resolveProvider(cmd, f.provider, io.Discard, false)
 	if err != nil {
@@ -121,7 +134,17 @@ func runResolveLoad(t *testing.T, cwd string, argv ...string) (tui.Config, []age
 		built = append(built, sessionOptions(f, cwd, "", io.Discard, io.Discard, nil, p, row))
 		return nil
 	}
-	return cfg, built, resolveLoad(cmd, f, cwd, &cfg, build)
+	err = resolveLoad(cmd, f, cwd, &cfg, build, claims)
+	return cfg, built, err
+}
+
+// testClaims is a run's session claims under this test's HOME, released when
+// the test ends, as runTUI's teardown releases them.
+func testClaims(t *testing.T, diag io.Writer) *sessionClaims {
+	t.Helper()
+	c := newSessionClaims(rundir.ProcessEnv(), rundir.NewHostID(), diag)
+	t.Cleanup(c.releaseAll)
+	return c
 }
 
 func exitCode(t *testing.T, err error) (int, string) {
@@ -260,8 +283,9 @@ func TestContinueLoadsTheRow(t *testing.T) {
 // TestContinueCarriesTheRowsCrazeID is SD-22's first load path: --continue
 // resolves its row in internal/cli, so this is the one place the row's durable
 // id can reach the engine — through Config. A row written before crazeId
-// existed carries none, and the engine mints one the row gains on its next
-// write.
+// existed is given one before it is claimed (plan 027 §3.9,
+// sessions.Store.EnsureCrazeID): the id in Config is the one now in the file,
+// and the row the session is built from carries it.
 func TestContinueCarriesTheRowsCrazeID(t *testing.T) {
 	for _, tc := range []struct{ name, id string }{
 		{"a row with a durable id", "018f-the-thread"},
@@ -279,8 +303,19 @@ func TestContinueCarriesTheRowsCrazeID(t *testing.T) {
 			if err != nil {
 				t.Fatalf("continue: %v", err)
 			}
-			if cfg.CrazeSessionID != tc.id {
-				t.Fatalf("Config.CrazeSessionID is %q, want %q", cfg.CrazeSessionID, tc.id)
+			want := tc.id
+			if want == "" {
+				row, ok, err := (&sessions.Store{}).Latest(ws, "")
+				if err != nil || !ok {
+					t.Fatalf("Latest: ok=%v err=%v", ok, err)
+				}
+				if row.CrazeID == "" {
+					t.Fatal("the legacy row was not given a craze id before it was claimed")
+				}
+				want = row.CrazeID
+			}
+			if cfg.CrazeSessionID != want {
+				t.Fatalf("Config.CrazeSessionID is %q, want %q", cfg.CrazeSessionID, want)
 			}
 		})
 	}

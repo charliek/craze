@@ -22,6 +22,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"uuid"
 
 	"github.com/charliek/craze/internal/atomicfile"
 	"github.com/charliek/craze/internal/paths"
@@ -203,6 +204,73 @@ func (s *Store) Upsert(in Row) error {
 
 	return writeRecords(path, records)
 }
+
+// EnsureCrazeID is row's durable craze session id, given one first if it has
+// none (plan 027 §3.9, SQ16): a session is claimed by its craze id before it
+// is loaded, and a row written before crazeId existed has no id to claim.
+// Minting one per load would let two crazes load the one provider session
+// under two ids, so the id is minted once, in the file, under the index's own
+// lock — the lock Upsert takes — and two loaders of one legacy row serialise
+// on it: the second reads the first's id.
+//
+// The row is found by (Provider, SessionID). One that has an id answers it
+// and writes nothing; one that has none is given a UUIDv7, which is persisted
+// before it is returned. The file is otherwise rewritten exactly as Upsert
+// rewrites it — every other row and every unknown key kept — and the row's
+// UpdatedAt is left alone: loading is not using. A row no longer in the file
+// answers its own id when it carries one, and is an error wrapping
+// ErrNotInIndex when it does not: there is nowhere durable to mint one.
+//
+// The lock is taken with a bound (atomicfile.LockWithin): a caller that must
+// not block — the resume picker's claim, --continue — is answered an error
+// wrapping atomicfile.ErrLockBusy once within has passed with another writer
+// still holding it.
+func (s *Store) EnsureCrazeID(row Row, within time.Duration) (string, error) {
+	path := paths.SessionsPath()
+	if path == "" {
+		return "", errors.New("sessions: no home directory for the session index")
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return "", err
+	}
+	unlock, err := atomicfile.LockWithin(path+indexLockSuffix, within)
+	if err != nil {
+		return "", fmt.Errorf("sessions: the index lock: %w", err)
+	}
+	defer unlock()
+
+	records, err := readRecords(path)
+	if err != nil {
+		return "", err
+	}
+	k := key{provider: row.Provider, sessionID: row.SessionID}
+	for i := range records {
+		if records[i].key() != k {
+			continue
+		}
+		if id := records[i].Row.CrazeID; id != "" {
+			return id, nil
+		}
+		id := uuid.NewV7().String()
+		records[i].Row.CrazeID = id
+		if err := writeRecords(path, records); err != nil {
+			return "", err
+		}
+		return id, nil
+	}
+	if row.CrazeID != "" {
+		return row.CrazeID, nil
+	}
+	return "", fmt.Errorf("sessions: session %s (%s) is %w", row.SessionID, row.Provider, ErrNotInIndex)
+}
+
+// ErrNotInIndex is EnsureCrazeID's answer for a row with no craze id that is
+// no longer in the index — evicted, or removed, since the caller read it.
+// There is nowhere durable to mint its id, and a caller that loaded it anyway
+// under an id of its own could load one provider session beside another craze
+// that loaded it under the id it was given before it left (plan 027 §3.9,
+// SQ16): the caller refuses, and reads the index again.
+var ErrNotInIndex = errors.New("no longer in the index")
 
 // applyTitle folds in's title into row according to in.TitleKind, per
 // Upsert's doc.

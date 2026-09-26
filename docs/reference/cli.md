@@ -3,6 +3,7 @@
 ```bash
 craze [flags]
 craze prompt [text] [flags]
+craze bridge [flags]
 craze version
 ```
 
@@ -88,6 +89,64 @@ never falls back to starting a new session, and the exit code on quit is 1.
 See [`/rename`](tui.md#slash-commands) and
 [Resuming a session](tui.md#resuming-a-session) for what a restored session
 looks like in the TUI.
+
+### A session already open in another craze
+
+`--continue` claims the row it loads before anything is built: its own lock
+under `~/.cache/craze/locks/`, independent of `CRAZE_HOME` and the runtime
+directory (see [Protocol reference](protocol.md#reaching-a-host)). A session
+another running `craze` already holds refuses instead of loading it:
+
+```text
+craze: that session is open in another craze (pid N)
+```
+
+exit 1, and no agent is spawned — nothing is built once the row's session is
+found to be held. Two narrower refusals cover the claim mechanism itself,
+not the session:
+
+```text
+craze: the session index is busy — try again
+craze: the session index changed — try again
+```
+
+The first is another writer holding the session index past a two-second
+bound; the second is a legacy row with no durable id that left the index
+between being read and being given one (another loader may already hold it
+under an id this one does not know about — trying again re-reads the index).
+
+`--resume`'s picker claims each row the same way, when you press <kbd>Enter</kbd>
+on it: a refused row shows an error naming the holder's pid in place of
+loading it, and the picker keeps running.
+
+An unreadable lock tree or session index does not fail one way. The initial
+lookup — `--continue`'s `Latest`, or `--resume`'s scan for rows — still exits
+1 if it cannot be read, the same as no session found at all: there is no row
+yet to warn about. Once a row is in hand, two things warn on stderr and let
+the load proceed **unclaimed**: a **legacy row** (one with no durable
+`crazeId`) whose id cannot be written to the index, and any failure to take
+the session's claim other than another craze holding it (the lock tree
+unusable, the lock file unopenable or unwritable) — whether the row already
+had an id or was just given one. An unclaimed load has no protection
+against a second craze loading the same session; the lock exists to stop
+one, not to lock you out of your own session because a filesystem
+misbehaved. Three things still refuse instead: the session already
+**held** by another craze, a **busy** index, and a legacy row that
+**vanished** from the index before it could be given an id.
+
+### The control socket
+
+Every craze TUI process binds a control socket in the runtime namespace and
+serves the session it runs over it (see
+[Protocol reference](protocol.md#reaching-a-host)), which is what
+[`craze bridge`](#craze-bridge) and a future `craze attach` reach. Binding
+happens only for a run that actually starts the TUI — a `--continue` SQ16
+refuses above binds nothing and creates no socket.
+
+`control_socket = false` in `config.toml`, or `CRAZE_CONTROL_SOCKET=0` (or
+`false`) for one run, turns it off; see
+[Configuration](configuration.md#the-control-socket). The session lock above
+is still taken either way — it does not depend on the socket.
 
 ## craze prompt
 
@@ -220,6 +279,66 @@ Before every exit, `craze prompt` drains the stream: when no sub-agent was
 ever spawned nothing is added; otherwise events keep being read and written
 until every sub-agent is terminal, then 250 ms pass with no event, or 1.5 s
 elapse — whichever comes first.
+
+## craze bridge
+
+```bash
+./bin/craze bridge
+./bin/craze bridge --session 01a0bbe5-69b4-79de-b75c-483a15b73d78
+```
+
+A pure byte pump for an SSH client (plan 027 §3.10): resolves the one
+running craze session — or `--session`'s — dials its control socket, and
+relays stdin/stdout to it verbatim. It speaks no protocol itself; `hello` is
+the client's job, not this command's.
+
+| Flag | Description |
+|------|-------------|
+| `--session` | A craze session id, a provider session id, or a host id (default: the one running session) |
+
+`--session`'s id is resolved against the registry under the bridge
+process's own `$HOME` (`~/.cache/craze/hosts/*.json`; see
+[Protocol reference](protocol.md#reaching-a-host)) — `HOME` wins over the
+account database, so neither `CRAZE_HOME` nor `$XDG_RUNTIME_DIR` in an SSH
+login's own environment can hide or misdirect it, but the SSH exec is
+**assumed** to run with the same `HOME` as the tab that started the host:
+true for an ordinary SSH login as the same user, not guaranteed in general.
+With no `--session`, exactly one live host in total is the target; zero or
+several is an error listing them on one line.
+
+**The pump** (roost's bridge rules):
+
+- stdout carries only bytes read off the socket, flushed as they arrive.
+- stdin's EOF half-closes the socket's write side (`CloseWrite`) and keeps
+  reading the socket — the session may still have plenty left to send.
+- The socket's own EOF ends the pump and exits 0.
+
+**The error contract: every failure is one line on stderr, exit 1.** That
+covers every failure *before* the pump starts — resolving the target,
+dialing, the peer check — and "nothing on stdout" is true only for those:
+flag parsing is included, so a stray removed config-file environment
+variable (see [Configuration](configuration.md#the-craze-directory)) in an
+SSH environment still reads as a bridge error in this same shape. Once the
+pump is running, stdout carries socket bytes only (see below); a failure
+mid-stream still exits 1 with the same one stderr line, but after whatever
+socket bytes were already relayed to stdout:
+
+```text
+craze bridge: no session running
+craze bridge: no session <id>
+craze bridge: 2 sessions running; pass --session <id>: <id> (grok, /a), <id> (cursor, /b)
+craze bridge: session <id> is unreachable: <reason>
+```
+
+`craze bridge: no session <id>` is the contract line for an unknown
+`--session`: a device reading it back knows the id it asked for is not (or no
+longer) running here, not that something else broke.
+
+| Code | When |
+|------|------|
+| 0 | The socket closed cleanly (the session ended, or the far side hung up) |
+| 1 | Every failure above: no session, an ambiguous `--session`, an unreachable socket, a read or write error. Never 255 (`ssh`'s own exit code for a failed connection) |
+| 127 | Not `craze bridge`'s own exit: what an SSH client sees when the far end's shell falls off the published binary ladder (see [Protocol reference](protocol.md#ssh-exec-what-a-client-may-assume)) without ever reaching a `craze` to exec |
 
 ## craze version
 

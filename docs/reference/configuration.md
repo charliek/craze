@@ -205,6 +205,49 @@ plain `true` means *off*, not on: a `config.toml` it cannot read or parse, a
 so; an explicit `false` is your own choice and is silent. Journaling is on only
 when the config parsed and `journal` is absent or exactly `true`.
 
+## The control socket
+
+Every craze TUI process binds a Unix-domain control socket and serves the
+session it runs over it — what [`craze bridge`](cli.md#craze-bridge) and a
+future `craze attach` dial into. See the
+[protocol reference](protocol.md#reaching-a-host) for the runtime namespace,
+the registry, and where the socket itself lives; the registry and its locks
+sit under the bridge process's own `$HOME`, not `CRAZE_HOME` — an SSH login
+is **assumed** to share that `$HOME` with the tab that started the host,
+true for an ordinary SSH login as the same user, whatever the tab had set
+for the other variables. Binding
+happens only once a run is actually starting a TUI: a `--continue`
+[refused by SQ16](cli.md#a-session-already-open-in-another-craze) binds
+nothing.
+
+`control_socket = false` in `config.toml`, or `CRAZE_CONTROL_SOCKET=0` (or
+`false`) for one run, turns it off; a craze with no socket serves nothing for
+another process to reach, though the session's own SQ16 lock is still taken
+either way — it does not depend on the socket.
+
+**The opt-out fails closed**, [the journal's](#session-journal) own rule and
+for the same reason: this is an access switch, so anything craze cannot read
+as a plain `true` means *off*. `CRAZE_CONTROL_SOCKET`, when set, decides
+**alone**: an unreadable-as-bool value turns the socket off with its own one
+line on stderr, and `config.toml` is then not even read, so at most that one
+line prints. Only when `CRAZE_CONTROL_SOCKET` is unset (or reads as true)
+does `config.toml` get read at all, and there the same rule applies — a
+`config.toml` it cannot read or parse, or a `control_socket` key that is not
+a bool, prints its own one line. An explicit `false`, from either switch, is
+your own choice and is silent. The socket is served only when the config
+parsed and `control_socket` is absent or exactly `true`, *and*
+`CRAZE_CONTROL_SOCKET` (when set) reads as true — either switch turning it
+off is final; neither can turn it back on against the other.
+
+A failure to *bind* at all — the runtime directory is unusable, or the
+socket's own path would be too long for `sun_path` — is not the opt-out and
+is not a privacy switch: it prints one line, `craze: control socket off:
+<why>`, embedding the underlying error's own text as is — in the ordinary
+case that is one stderr line, but nothing here promises the error text
+itself is free of a line break (a runtime path containing one, say). The run
+carries on exactly as it would with the opt-out set.
+`CRAZE_RUNTIME_DIR` (below) is the fix when the reason is length.
+
 ## Terminal tab title
 
 `terminal_title = false` in `config.toml` turns off every terminal tab-title
@@ -370,6 +413,8 @@ the dialect.
 | `CRAZE_AGENT_BIN` | Agent binary when `--agent-bin` is unset |
 | `CRAZE_PROVIDER` | Provider id when `--provider` is unset (`cursor`, `grok`, or `gx`) |
 | `CRAZE_JOURNAL` | Turns the [session journal](#session-journal) off for this run when it reads as false. It cannot turn one on against `journal = false`, and a value craze cannot read as a bool turns it off with one line saying so. Empty or unset leaves the decision to the config file |
+| `CRAZE_CONTROL_SOCKET` | Turns [the control socket](#the-control-socket) off for this run when it reads as false. It cannot turn one on against `control_socket = false`, and a value craze cannot read as a bool turns it off with one line saying so. Empty or unset leaves the decision to the config file |
+| `CRAZE_RUNTIME_DIR` | Overrides [the control socket's](#the-control-socket) runtime base (default: `$XDG_RUNTIME_DIR/craze`, then `/run/user/<uid>/craze` on Linux, then `/tmp/craze-<uid>`): an absolute path, short enough to leave room for `<ns>/<hostId>.sock` under `sun_path`'s limit. Meant for tests and unusual hosts; see [Protocol reference](protocol.md#reaching-a-host) |
 | `XAI_API_KEY` | Grok API key; used when initialize advertises `xai.api_key` |
 | `GROK_CODE_XAI_API_KEY` | Legacy alias for `XAI_API_KEY` |
 | `HERDR_ENV`, `HERDR_SOCKET_PATH`, `HERDR_PANE_ID` | Read, never set. `HERDR_ENV=1` with the other two set means craze is in a herdr pane and reports [host status](#host-status) to it; `HERDR_ENV` is then removed from the agent's environment |

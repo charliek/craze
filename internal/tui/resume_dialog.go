@@ -97,6 +97,68 @@ func (m Model) resumeRowText(row sessions.Row, inner int) string {
 	return clampWidth(title, max(budget, 0)) + tail
 }
 
+// resumeClaimMsg is Config.ClaimSession's answer for the row the picker chose
+// (plan 027 §3.9, SQ16), carried back from the tea.Cmd that asked. attempt is
+// the stamp chooseResume gave it: the picker acts on the answer only while it
+// is still waiting for exactly that attempt.
+type resumeClaimMsg struct {
+	attempt int
+	row     sessions.Row
+	crazeID string
+	release func()
+	err     error
+}
+
+// chooseResume is Enter (or a click) on a picker row. With no ClaimSession it
+// loads the row at once, as the picker always has. With one, the claim — the
+// session index's lock, bounded, and the session's own lock — runs in a
+// tea.Cmd, never in this Update, and the row is built only when its answer
+// lands (resumeClaimed). While an attempt is in flight another Enter does
+// nothing; Esc still quits.
+func (m Model) chooseResume(row sessions.Row) (tea.Model, tea.Cmd) {
+	if m.claimSession == nil {
+		return m.confirmResume(row)
+	}
+	if m.resumeWaiting != 0 {
+		return m, nil
+	}
+	m.resumeAttempt++
+	m.resumeWaiting = m.resumeAttempt
+	m.resumeErr = ""
+	attempt, claim := m.resumeAttempt, m.claimSession
+	return m, func() tea.Msg {
+		id, release, err := claim(row)
+		return resumeClaimMsg{attempt: attempt, row: row, crazeID: id, release: release, err: err}
+	}
+}
+
+// resumeClaimed is a claim's answer. It builds the row's session only while
+// the picker is still up, not quitting, and waiting for this very attempt;
+// otherwise the claim it carries belongs to nobody and is released here and
+// now. A refusal keeps the picker open with the refusal's text as its error
+// row, and builds nothing.
+func (m Model) resumeClaimed(msg resumeClaimMsg) (tea.Model, tea.Cmd) {
+	if !m.pickingResume || m.quitting || msg.attempt != m.resumeWaiting {
+		if msg.release != nil {
+			msg.release()
+		}
+		return m, nil
+	}
+	m.resumeWaiting = 0
+	if msg.err != nil {
+		if msg.release != nil {
+			msg.release()
+		}
+		m.resumeErr = msg.err.Error()
+		return m, nil
+	}
+	// The id the claim is for — a legacy row's freshly minted one included —
+	// is the id the engine is built with, so the two agree.
+	row := msg.row
+	row.CrazeID = msg.crazeID
+	return m.confirmResume(row)
+}
+
 // confirmResume loads the chosen row. It is confirmProvider's twin, and ends
 // the same way: the session the row describes, and the batch Init returns.
 //
@@ -128,9 +190,11 @@ func (m Model) confirmResume(row sessions.Row) (tea.Model, tea.Cmd) {
 			_ = m.eng.Close()
 		}
 		// The row's own durable id travels with it: this is the same thread of
-		// work, loaded into another agent session (session control SD-22). A
-		// row written before crazeId existed carries none, and the engine mints
-		// one that the next write puts in the file.
+		// work, loaded into another agent session (session control SD-22).
+		// With a ClaimSession it is the id the claim was taken for, a legacy
+		// row's freshly minted one included; without one, a row written before
+		// crazeId existed carries none, and the engine mints one that the next
+		// write puts in the file.
 		m.setSession(m.loadSession(p, row), row.CrazeID)
 	}
 	if m.eng == nil && m.engErr == nil {
@@ -153,7 +217,7 @@ func (m Model) handleResumeDialogKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 	switch msg.Type {
 	case tea.KeyEnter:
-		return m.confirmResume(m.resume[m.resumeCursor])
+		return m.chooseResume(m.resume[m.resumeCursor])
 	case tea.KeyEsc:
 		// Esc quits, and quits clean: no session was ever started, so
 		// startErr is nil and Run returns nil (§3.7). There is no "default
@@ -163,9 +227,13 @@ func (m Model) handleResumeDialogKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.requestQuit()
 	case tea.KeyUp, tea.KeyShiftTab:
 		m.resumeCursor = (m.resumeCursor - 1 + n) % n
+		// A refusal is about the row it was for: once the cursor leaves it,
+		// the error row goes.
+		m.resumeErr = ""
 		return m, nil
 	case tea.KeyDown, tea.KeyTab:
 		m.resumeCursor = (m.resumeCursor + 1) % n
+		m.resumeErr = ""
 		return m, nil
 	}
 	return m, nil
@@ -174,9 +242,16 @@ func (m Model) handleResumeDialogKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // resumeDialogPlan is providerDialogPlan for the resume list: the window onto
 // the rows and whether the footer survived, with the window following the
 // cursor so a short box never hides the row Enter would load.
+//
+// A refusal's error row goes under the list and above the footer, and a short
+// box keeps it over the footer but never over the last list row: it is about
+// the row the cursor is on. With no refusal the plan is exactly what it was.
 func (m Model) resumeDialogPlan(budget int) (top, shown int, footer bool) {
-	footer = budget >= 3
 	rows := budget - 1
+	if m.resumeErrShown(budget) {
+		rows--
+	}
+	footer = rows >= 2
 	if footer {
 		rows--
 	}
@@ -184,11 +259,20 @@ func (m Model) resumeDialogPlan(budget int) (top, shown int, footer bool) {
 	return top, shown, footer
 }
 
+// resumeErrShown is whether the error row fits the budget: the title, one list
+// row and itself.
+func (m Model) resumeErrShown(budget int) bool {
+	return m.resumeErr != "" && budget >= 3
+}
+
 func (m Model) resumeDialogBody(inner, budget int) []string {
 	top, shown, footer := m.resumeDialogPlan(budget)
 	rows := []string{m.dialogTitle(resumeDialogTitle, inner)}
 	for i := top; i < top+shown; i++ {
 		rows = append(rows, m.dialogRow(m.resumeRowText(m.resume[i], inner), "", i == m.resumeCursor, true, inner))
+	}
+	if m.resumeErrShown(budget) {
+		rows = append(rows, styleFG(m.theme.Err).Render(clampWidth(sanitizeLine(m.resumeErr), inner)))
 	}
 	if footer {
 		rows = append(rows, m.dialogFooter(resumeDialogHint, inner))
@@ -205,5 +289,5 @@ func (m Model) resumeDialogClick(i int) (tea.Model, tea.Cmd) {
 	if row < 0 || row >= shown {
 		return m, nil
 	}
-	return m.confirmResume(m.resume[top+row])
+	return m.chooseResume(m.resume[top+row])
 }

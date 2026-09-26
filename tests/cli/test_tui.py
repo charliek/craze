@@ -8,6 +8,8 @@ import pty
 import re
 import select
 import signal
+import socket
+import stat
 import struct
 import subprocess
 import sys
@@ -878,6 +880,197 @@ def test_tui_continue_replays_and_leaves_the_config_alone(
     _wait_fake_gone(fake_agent_bin)
 
     assert config.read_text(encoding="utf-8") == before
+
+
+def _wait_glob(directory: Path, pattern: str, timeout: float = 10) -> list[Path]:
+    """The files matching pattern in directory, once there is at least one."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        found = sorted(directory.glob(pattern)) if directory.is_dir() else []
+        if found:
+            return found
+        time.sleep(0.05)
+    raise AssertionError(f"nothing matched {directory}/{pattern}")
+
+
+def _wait_entry(path: Path, ok, timeout: float = 10) -> dict:
+    """The registry entry at path, once ok says it is the one wanted.
+
+    It is rewritten by an atomic rename, so a read never sees half a file.
+    """
+    deadline = time.monotonic() + timeout
+    entry: dict = {}
+    while time.monotonic() < deadline:
+        try:
+            entry = json.loads(path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            entry = {}
+        if entry and ok(entry):
+            return entry
+        time.sleep(0.05)
+    raise AssertionError(f"the registry entry never got there: {entry}")
+
+
+def _lock_is_held(path: Path) -> bool:
+    """Whether another open file description holds path's flock."""
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        return True
+    else:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        return False
+    finally:
+        os.close(fd)
+
+
+def _read_line(sock: socket.socket) -> bytes:
+    """One newline-terminated line from sock, or b"" at EOF."""
+    buf = bytearray()
+    while not buf.endswith(b"\n"):
+        chunk = sock.recv(1)
+        if not chunk:
+            return bytes(buf)
+        buf += chunk
+    return bytes(buf)
+
+
+def test_tui_serves_its_session_and_cleans_up(
+    craze_bin: Path, fake_agent_bin: Path, tmp_path: Path
+) -> None:
+    """Plan 027 C13: every TUI serves its session over a control socket.
+
+    While it runs there is exactly one registry entry under $HOME/.cache/craze,
+    naming a socket in CRAZE_RUNTIME_DIR/<ns>/ (0600, in a 0700 directory),
+    beside the host's lifetime lock, and the entry follows the engine to ready.
+    A raw hello over the socket is answered by the host. After the quit the
+    socket, the entry and the host lock are gone, the host closed our
+    connection, and the session's lock file is still there: it is never
+    unlinked, only released.
+    """
+    runtime = Path(os.environ["CRAZE_RUNTIME_DIR"]).resolve()
+    cache = tmp_path / ".cache" / "craze"
+    with PTYCraze(craze_bin, fake_agent_bin, tmp_path) as tui:
+        tui.wait_contains("cursor")
+        (entry_path,) = _wait_glob(cache / "hosts", "*.json")
+        entry = _wait_entry(entry_path, lambda e: e["ready"])
+        host_id = entry["hostId"]
+        assert entry_path.name == f"{host_id}.json"
+        assert entry["pid"] == tui.proc.pid
+        assert entry["workspace"] == str(tmp_path)
+        assert entry["crazeSessionId"] and entry["providerSessionId"]
+        assert entry["provider"] == "cursor"
+        assert sorted(p.name for p in (cache / "hosts").iterdir()) == [
+            f"{host_id}.json",
+            f"{host_id}.lock",
+        ]
+        sock_path = Path(entry["socket"])
+        assert sock_path.parent.parent == runtime, (sock_path, runtime)
+        assert sock_path.name == f"{host_id}.sock"
+        st = os.lstat(sock_path)
+        assert stat.S_ISSOCK(st.st_mode)
+        assert stat.S_IMODE(st.st_mode) == 0o600
+        assert stat.S_IMODE(os.lstat(sock_path.parent).st_mode) == 0o700
+        session_lock = cache / "locks" / f"{entry['crazeSessionId']}.lock"
+        assert _lock_is_held(session_lock)
+        assert session_lock.read_text(encoding="utf-8") == f"{tui.proc.pid} {host_id}\n"
+
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+            client.settimeout(10)
+            client.connect(str(sock_path))
+            hello = {
+                "jsonrpc": "2.0",
+                "id": "1",
+                "method": "hello",
+                "params": {"protocols": [1], "client": {"kind": "test", "name": "pytest"}},
+            }
+            client.sendall(json.dumps(hello).encode() + b"\n")
+            reply = json.loads(_read_line(client))
+            assert reply["id"] == "1", reply
+            result = reply["result"]
+            assert result["endpoint"]["kind"] == "host", result
+            assert result["endpoint"]["hostId"] == host_id
+            assert result["endpoint"]["pid"] == tui.proc.pid
+            assert result["clientId"] and result["token"], result
+
+            quit_craze(tui)
+            # The session's end closes the connection: nothing more, then EOF.
+            assert _read_line(client) == b""
+    _wait_fake_gone(fake_agent_bin)
+
+    assert not sock_path.exists()
+    assert not entry_path.exists()
+    assert not (cache / "hosts" / f"{host_id}.lock").exists()
+    assert session_lock.exists()
+    assert not _lock_is_held(session_lock)
+
+
+def test_tui_control_socket_opt_out_still_claims_the_session(
+    craze_bin: Path, fake_agent_bin: Path, tmp_path: Path
+) -> None:
+    """CRAZE_CONTROL_SOCKET=0 serves nothing -- no socket, no namespace
+    directory, no registry entry -- and says nothing, since it is the user's own
+    choice. The session's lock is taken all the same: it does not depend on the
+    opt-out (plan 027 §3.8)."""
+    runtime = Path(os.environ["CRAZE_RUNTIME_DIR"])
+    cache = tmp_path / ".cache" / "craze"
+    with PTYCraze(
+        craze_bin, fake_agent_bin, tmp_path, env_extra={"CRAZE_CONTROL_SOCKET": "0"}
+    ) as tui:
+        tui.wait_contains("cursor")
+        (lock,) = _wait_glob(cache / "locks", "*.lock")
+        assert _lock_is_held(lock)
+        assert lock.read_text(encoding="utf-8").startswith(f"{tui.proc.pid} ")
+        assert list(runtime.iterdir()) == []
+        assert not (cache / "hosts").exists() or list((cache / "hosts").iterdir()) == []
+        quit_craze(tui)
+    _wait_fake_gone(fake_agent_bin)
+    assert "control socket" not in _ANSI.sub("", tui.screen())
+    assert not _lock_is_held(lock)
+
+
+def test_tui_continue_twice_refuses_the_second(
+    craze_bin: Path, fake_agent_bin: Path, tmp_path: Path
+) -> None:
+    """SQ16 (plan 027 §3.9): a second `craze -c` of a session the first is
+    running exits 1 naming the first's pid, and spawns no agent.
+
+    The row is a legacy one (no crazeId): the first craze gives it one under
+    the index lock before claiming it, and the second reads that same id.
+    """
+    index = _seed_index(tmp_path, tmp_path, "sess-load-1", "cursor", "yesterday's thread")
+    argv_dump = tmp_path / "second-agent-argv"
+    with PTYCraze(
+        craze_bin,
+        fake_agent_bin,
+        tmp_path,
+        script="load",
+        provider="",
+        extra_args=["--continue"],
+    ) as first:
+        first.wait_contains("restored")
+        with PTYCraze(
+            craze_bin,
+            fake_agent_bin,
+            tmp_path,
+            script="load",
+            provider="",
+            extra_args=["--continue"],
+            env_extra={"CRAZE_FAKE_DUMP_ARGV": str(argv_dump)},
+        ) as second:
+            assert second.wait_exit(timeout=10) == 1, second.screen()[-3000:]
+            text = _ANSI.sub("", second.screen())
+            assert f"craze: that session is open in another craze (pid {first.proc.pid})" in text, text[-2000:]
+        assert not argv_dump.exists(), "the refused craze spawned an agent"
+        assert _cmdline_pids(str(fake_agent_bin)) != []
+        first.write(b"\x04")
+        assert first.wait_exit() == 0, first.screen()[-3000:]
+    _wait_fake_gone(fake_agent_bin)
+
+    row = json.loads(index.read_text(encoding="utf-8").splitlines()[0])
+    assert row["crazeId"], row
+    assert (tmp_path / ".cache" / "craze" / "locks" / f"{row['crazeId']}.lock").exists()
 
 
 def test_tui_native_one_turn_leaves_config_and_index_alone(

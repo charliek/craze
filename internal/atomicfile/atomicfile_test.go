@@ -71,6 +71,138 @@ func TestLockSerialisesTwoCallers(t *testing.T) {
 	}
 }
 
+// TestLockWithinAcquiresAFreeLock: nothing holds it, so the first try takes
+// it, and a Lock after the unlock is not kept waiting.
+func TestLockWithinAcquiresAFreeLock(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "index.lock")
+	unlock, err := LockWithin(path, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	unlock()
+	again, err := LockWithin(path, 0)
+	if err != nil {
+		t.Fatalf("a released lock was not free to a single try: %v", err)
+	}
+	again()
+}
+
+// TestLockWithinTimesOutAtItsBound: a holder that keeps the lock past the
+// bound is ErrLockBusy — not before the bound, and not long after it: the poll
+// never sleeps past the deadline.
+func TestLockWithinTimesOutAtItsBound(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "index.lock")
+	held, err := Lock(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer held()
+	const bound = 150 * time.Millisecond
+	start := time.Now()
+	unlock, err := LockWithin(path, bound)
+	took := time.Since(start)
+	if !errors.Is(err, ErrLockBusy) {
+		unlock()
+		t.Fatalf("LockWithin on a held lock = %v, want ErrLockBusy", err)
+	}
+	if unlock == nil {
+		t.Fatal("unlock must be non-nil even on error")
+	}
+	unlock() // a no-op, and must not release the holder's lock
+	if took < bound {
+		t.Fatalf("gave up after %s, before its bound of %s", took, bound)
+	}
+	// One poll interval of slack for the last try, plus scheduling.
+	if took > bound+lockPoll+time.Second {
+		t.Fatalf("took %s, long past its bound of %s", took, bound)
+	}
+	if _, err := LockWithin(path, 0); !errors.Is(err, ErrLockBusy) {
+		t.Fatalf("the failed LockWithin's unlock released the holder's lock: %v", err)
+	}
+}
+
+// TestLockWithinTakesALockReleasedInsideTheBound: a holder that lets go while
+// LockWithin is polling is waited for, not reported busy.
+func TestLockWithinTakesALockReleasedInsideTheBound(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "index.lock")
+	held, err := Lock(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	released := make(chan struct{})
+	go func() {
+		time.Sleep(3 * lockPoll)
+		held()
+		close(released)
+	}()
+	unlock, err := LockWithin(path, 10*time.Second)
+	if err != nil {
+		t.Fatalf("LockWithin = %v, want the lock once its holder let go", err)
+	}
+	unlock()
+	<-released
+}
+
+// TestLockWithinNeverAcquiresPastItsBound (astra r30 7): every try after the
+// first is made inside the bound, so a lock held for the whole of it is
+// ErrLockBusy even when its holder lets go just past it. The clock is the
+// test's: each poll's sleep overshoots by a nanosecond, as a real one does by
+// scheduling, and the holder lets go the instant the clock passes the
+// deadline — during the last sleep, before any try could see it.
+func TestLockWithinNeverAcquiresPastItsBound(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "index.lock")
+	held, err := Lock(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	released := false
+	release := func() {
+		if !released {
+			released = true
+			held()
+		}
+	}
+	defer release()
+	const bound = 5 * lockPoll / 2 // two whole polls, then half of one
+	clock := time.Unix(1_000_000, 0)
+	deadline := clock.Add(bound)
+	now = func() time.Time { return clock }
+	sleep = func(d time.Duration) {
+		clock = clock.Add(d + time.Nanosecond)
+		if clock.After(deadline) {
+			release()
+		}
+	}
+	t.Cleanup(func() { now, sleep = time.Now, time.Sleep })
+
+	unlock, err := LockWithin(path, bound)
+	if !errors.Is(err, ErrLockBusy) {
+		unlock()
+		t.Fatalf("LockWithin = %v, its holder gone only %s past the bound; want ErrLockBusy", err, clock.Sub(deadline))
+	}
+	if !released {
+		t.Fatal("the holder never let go: the poll never slept past its deadline")
+	}
+	unlock()
+	// The holder really did let go: the next try takes it.
+	again, err := LockWithin(path, 0)
+	if err != nil {
+		t.Fatalf("the released lock is still busy: %v", err)
+	}
+	again()
+}
+
+// TestLockWithinReturnsTheOpenError is Lock's contract: a lock file that
+// cannot be opened is its own error, not ErrLockBusy.
+func TestLockWithinReturnsTheOpenError(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "missing-dir", "index.lock")
+	unlock, err := LockWithin(path, time.Second)
+	if err == nil || errors.Is(err, ErrLockBusy) {
+		t.Fatalf("LockWithin = %v, want the open error", err)
+	}
+	unlock()
+}
+
 func TestWriteRoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "sessions.jsonl")
