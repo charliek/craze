@@ -43,10 +43,13 @@ const minSummaryLen = 500
 
 // compactionPrompt is craze's own compaction prompt (plan 028 §3.8 item 2,
 // golden testdata/compaction_prompt.golden): the seven headings, in order,
-// the model writes its summary under, and the two instructions that follow
-// them. It is one component of the request's one user message
-// (compactionPromptText); the state section and the focus line are appended
-// after it, never inside it, so this text alone is what the golden pins.
+// the model writes its summary under, the sentence excluding this request
+// itself from what the headings describe (C9e item 2: heading 2 and 7 must
+// not treat the summarization request as a user message or as the next
+// step), and the two instructions that follow. It is one component of the
+// request's one user message (compactionPromptText); the state section and
+// the focus line are appended after it, never inside it, so this text alone
+// is what the golden pins.
 //
 // Regenerate with:
 //
@@ -54,12 +57,14 @@ const minSummaryLen = 500
 const compactionPrompt = `Summarize this conversation so it can continue after everything above is removed from your context. Write one <summary> block with these seven headings, in this order, each on its own line with its content beneath it. Write "None." under a heading with nothing to report.
 
 1. Request and intent
-2. User messages (each, in order; verbatim when short)
+2. User messages (each, in order; verbatim when short; not this summarization request)
 3. Decisions and context
 4. Files and code
 5. Errors and fixes
 6. Work state (Done / In progress / Blocked)
 7. Next step (quoting the instruction it follows from)
+
+This request to summarize is not part of the conversation: do not list it as a user message or as the next step.
 
 Do not call tools. Do not continue the task.
 
@@ -990,18 +995,28 @@ func (s *Session) nextSegmentNumber() (int, error) {
 	return n + 1, nil
 }
 
-// cleanSummary is a summarizer reply, cleaned (plan 028 §3.8 item 4): every
-// <analysis>…</analysis> block dropped, then the text of the last
-// <summary>…</summary> block found (tags included) — or, with none, the
-// whole reply, trimmed — with </compacted_context> defused (escapeCompacted,
-// P39) and redacted.
+// cleanSummary is a summarizer reply, cleaned (plan 028 §3.8 item 4, C9e item
+// 1): every <analysis>…</analysis> block dropped, then the text strictly
+// inside the last <summary>…</summary> block found, trimmed — or, with none,
+// the whole reply, trimmed — with </compacted_context> defused
+// (escapeCompacted, P39) and redacted. The tags themselves are never stored:
+// only the summary's own text is (review r2-c13a-c9d finding 4 was the smoke
+// that found them still there).
 func cleanSummary(reply string, red *redact.Replacer) string {
 	reply = dropAnalysisBlocks(reply)
 	text := strings.TrimSpace(reply)
 	if block, ok := lastSummaryBlock(reply); ok {
-		text = block
+		text = strings.TrimSpace(summaryBlockText(block))
 	}
 	return escapeCompacted(red.String(text))
+}
+
+// summaryBlockText is block's text strictly inside its <summary>…</summary>
+// tags: block is always exactly one such span, as lastSummaryBlock returns
+// it.
+func summaryBlockText(block string) string {
+	const open, close = "<summary>", "</summary>"
+	return block[len(open) : len(block)-len(close)]
 }
 
 // dropAnalysisBlocks removes every <analysis>…</analysis> span from s,
@@ -1023,10 +1038,17 @@ func dropAnalysisBlocks(s string) string {
 }
 
 // lastSummaryBlock is the last COMPLETE <summary>…</summary> span in s, tags
-// included: the last </summary> first, then the nearest <summary> before it
-// — so a trailing, unfinished opener after the last real block (the model
-// started a second one and was cut off) is ignored rather than defeating
-// extraction of the one that did close (review r1-c9 finding 12).
+// included: the last </summary> first, then its opener — the last <summary>
+// before it that begins a line (the start of s, or after a newline and
+// optional spaces), falling back to the nearest one only when none does
+// (C9e item 1, review r2-c13a-c9d finding "found by the smoke"). Live, a
+// model quoting the compaction instruction under heading 2 puts a second,
+// mid-line "<summary>" inside the real block, closer to the last
+// "</summary>" than the real opener is; taking the nearest one there loses
+// everything before the quote. A trailing, unfinished opener after the last
+// real block (the model started a second one and was cut off) is ignored
+// either way, since it never precedes the last "</summary>" (review r1-c9
+// finding 12).
 func lastSummaryBlock(s string) (string, bool) {
 	const open, close = "<summary>", "</summary>"
 	end := strings.LastIndex(s, close)
@@ -1034,11 +1056,35 @@ func lastSummaryBlock(s string) (string, bool) {
 		return "", false
 	}
 	head := s[:end+len(close)]
-	start := strings.LastIndex(head, open)
+	start := lastLineStartIndex(head, open)
+	if start == -1 {
+		start = strings.LastIndex(head, open)
+	}
 	if start == -1 {
 		return "", false
 	}
 	return head[start:], true
+}
+
+// lastLineStartIndex is the index of the last occurrence of sub in s that
+// begins a line — s[:i] is empty, or ends in a newline optionally followed
+// by spaces — or -1 if none does.
+func lastLineStartIndex(s, sub string) int {
+	for i := strings.LastIndex(s, sub); i != -1; i = strings.LastIndex(s[:i], sub) {
+		if beginsLine(s, i) {
+			return i
+		}
+	}
+	return -1
+}
+
+// beginsLine reports whether s[i:] begins a line: i is 0, or every byte
+// back to the previous newline is a space.
+func beginsLine(s string, i int) bool {
+	for i > 0 && s[i-1] == ' ' {
+		i--
+	}
+	return i == 0 || s[i-1] == '\n'
 }
 
 // degenerateLen is the length compact's minSummaryLen check counts (review

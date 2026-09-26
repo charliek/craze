@@ -178,3 +178,26 @@ func TestSpinnerWaitsOnACard(t *testing.T) {
 		t.Fatal("a pending card keeps the fast chain")
 	}
 }
+
+// TestWantFastTickDuringAnIdleCompaction (C9e item 3): a foreign-turn or wake
+// compaction can open main's fold while status stays idle (no turn, no
+// child running) — spinnerVisible already shows the working line then
+// (TestTheWorkingLineSaysCompactingWithNoTurnRunning) — so the tick chain
+// must be the fast one too, or the glyph it draws only moves once a minute.
+func TestWantFastTickDuringAnIdleCompaction(t *testing.T) {
+	m := sized(t)
+	if m.status != statusIdle {
+		t.Fatalf("status %v, want idle", m.status)
+	}
+	if m.wantFastTick() {
+		t.Fatal("no compaction open yet: the fast chain is not wanted")
+	}
+	m = feed(t, m, agent.Event{Type: agent.EventCompaction, At: m.now(),
+		Compaction: &agent.CompactionInfo{Phase: agent.CompactionStarted, Reason: agent.CompactionOverflow}})
+	if m.status != statusIdle {
+		t.Fatalf("status %v, want still idle", m.status)
+	}
+	if !m.wantFastTick() {
+		t.Fatal("an idle-status main compaction must want the fast chain")
+	}
+}

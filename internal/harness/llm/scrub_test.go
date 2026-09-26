@@ -534,6 +534,32 @@ func TestANonJSONBodyIsScrubbedAsBytesAsBefore(t *testing.T) {
 	}
 }
 
+// C9e item 4, review r2-c13a-c9d finding 4: an empty chunked dump's body is
+// just its terminating chunk, "0\r\n\r\n" — read as JSON before the chunking
+// is undone, that parses as the bare number 0 followed by whitespace, which
+// redactJSON accepts, and the chunk framing is lost. Detecting the
+// Transfer-Encoding header and dechunking first keeps the rebuilt body a
+// chunked one a reader can dechunk, empty, same as the original.
+func TestAnEmptyChunkedBodyStaysChunked(t *testing.T) {
+	const head = "HTTP/1.1 502 Bad Gateway\r\nTransfer-Encoding: chunked\r\n\r\n"
+	pe := &fantasy.ProviderError{Title: "t", Message: "m", StatusCode: 502, ResponseBody: []byte(head + chunked())}
+	var out *fantasy.ProviderError
+	if err := newScrubber(canary).err(pe); !errors.As(err, &out) {
+		t.Fatalf("scrubbed error %#v is no longer a ProviderError", err)
+	}
+	gotHead, body, ok := bytes.Cut(out.ResponseBody, []byte("\r\n\r\n"))
+	if !ok || !bytes.Contains(bytes.ToLower(gotHead), []byte("transfer-encoding: chunked")) {
+		t.Fatalf("ResponseBody = %q, want the chunked head kept whole", out.ResponseBody)
+	}
+	d, derr := io.ReadAll(httputil.NewChunkedReader(bytes.NewReader(body)))
+	if derr != nil {
+		t.Fatalf("the rebuilt body no longer undoes its chunking (%v): %q", derr, out.ResponseBody)
+	}
+	if len(d) != 0 {
+		t.Errorf("the dechunked body is %q, want empty", d)
+	}
+}
+
 func TestMidStreamErrorCopiesClassification(t *testing.T) {
 	pe := dirtyProviderError()
 	pe.Title = "stream error"

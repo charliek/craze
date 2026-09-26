@@ -126,10 +126,12 @@ func (s *scrubber) body(raw []byte) []byte {
 		}
 		head, rest = raw[:i+4], raw[i+4:]
 	}
-	if j, ok := s.redactJSON(rest); ok {
-		return slices.Concat(s.bytes(head), s.bytes(j))
-	}
-	if head != nil {
+	// A declared chunked body is dechunked before anything reads it as JSON
+	// (C9e item 4, review r2-c13a-c9d finding 4): read undechunked, an empty
+	// body's terminating chunk, "0\r\n\r\n", parses as the bare JSON number 0
+	// followed by whitespace, which redactJSON accepts, losing the chunk
+	// framing entirely.
+	if bytes.Contains(bytes.ToLower(head), []byte("transfer-encoding: chunked")) {
 		if body, tail, err := dechunk(rest); err == nil {
 			if j, ok := s.redactJSON(body); ok {
 				out := bytes.NewBuffer(s.bytes(head))
@@ -140,6 +142,10 @@ func (s *scrubber) body(raw []byte) []byte {
 				return out.Bytes()
 			}
 		}
+		return s.bytes(raw)
+	}
+	if j, ok := s.redactJSON(rest); ok {
+		return slices.Concat(s.bytes(head), s.bytes(j))
 	}
 	return s.bytes(raw)
 }

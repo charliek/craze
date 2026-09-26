@@ -62,7 +62,7 @@ func (m *Model) handleTick(msg tickMsg) {
 func (m Model) wantFastTick() bool {
 	return m.status == statusWorking || m.cardOpen() || m.tasksLingering() ||
 		m.agentLingering() || m.copyLingering() || m.anySubagentRunning() ||
-		m.shellRunning()
+		m.shellRunning() || m.compacting("")
 }
 
 // untilNextMinute lines the slow chain up with the minute boundary so a

@@ -1304,6 +1304,49 @@ func TestLastSummaryBlockIgnoresATrailingUnfinishedOpener(t *testing.T) {
 	}
 }
 
+// C9e item 1 (smoke, PR 2 live): the live shape — the model quoted the
+// compaction instruction under heading 2, so a second, mid-line "<summary>"
+// sits inside the real block, closer to the last "</summary>" than the real
+// opener is. lastSummaryBlock must take the opener that begins a line (here,
+// the start of the reply), not the nearest one, or section 1 is lost.
+func TestLastSummaryBlockPrefersAnOpenerThatBeginsALine(t *testing.T) {
+	reply := "<summary>\n" +
+		"1. Request and intent\nDo the thing.\n\n" +
+		"2. User messages (each, in order; verbatim when short)\n" +
+		`The user said: "Write one <summary> block with these seven headings…"` + "\n\n" +
+		"3. Decisions and context\nNone.\n" +
+		"</summary>"
+	block, ok := lastSummaryBlock(reply)
+	if !ok {
+		t.Fatal("lastSummaryBlock found no block, want the real one")
+	}
+	if !strings.HasPrefix(block, "<summary>\n1. Request and intent") {
+		t.Fatalf("lastSummaryBlock = %q, want it to start at the real opener (section 1 kept)", block)
+	}
+	if !strings.Contains(block, "3. Decisions and context") {
+		t.Fatalf("lastSummaryBlock = %q, want section 3 kept too", block)
+	}
+
+	// The mid-line "<summary>" is a quote inside the real content (heading
+	// 2) and stays; only the wrapper tags come off.
+	cleaned := cleanSummary(reply, nil)
+	if strings.HasPrefix(cleaned, "<summary>") || strings.HasSuffix(cleaned, "</summary>") {
+		t.Errorf("cleanSummary = %q, want the wrapper tags stripped", cleaned)
+	}
+	if !strings.HasPrefix(cleaned, "1. Request and intent") {
+		t.Errorf("cleanSummary = %q, want it to start with section 1", cleaned)
+	}
+}
+
+// C9e item 1: cleanSummary stores the text strictly inside the tags,
+// trimmed — the tags themselves are no longer kept.
+func TestCleanSummaryStripsTheTags(t *testing.T) {
+	reply := "<summary>\n  hello world  \n</summary>"
+	if got, want := cleanSummary(reply, nil), "hello world"; got != want {
+		t.Errorf("cleanSummary = %q, want %q", got, want)
+	}
+}
+
 // finding 13, review r2 minor 5: the prior summary is the store's to name
 // (LeadsWithSummary), never guessed from a message's content. A context
 // whose first message is a MARKED background result — a wake's entry of
