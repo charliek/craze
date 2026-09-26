@@ -54,7 +54,9 @@ type Transcript struct {
 // breaks it is not rolled back. No crash can produce one. AppendStep refuses
 // to write a step that breaks the invariant, and a crash only takes lines
 // off the end of an append, so every whole line left was checked against
-// the line before it when it was written.
+// the line before it when it was written. A line whose turn or todos breaks
+// its own rules (checkFields) is ErrCorrupt wherever it is, for the same
+// reason (plan 028 P14).
 //
 // Then the incomplete step at the tail, if any, is rolled back
 // (dropIncompleteTurn). The store writes each step as one append — held
@@ -74,6 +76,37 @@ func Load(path string) (*Transcript, error) {
 	if err != nil {
 		return nil, fmt.Errorf("store: %w", err)
 	}
+	p, err := parse(data, path)
+	if err != nil {
+		return nil, err
+	}
+	p.t.dropIncompleteTurn()
+	return p.t, nil
+}
+
+// parsed is a session file as Load reads it, before the incomplete step at
+// its tail is rolled back, and where in the bytes each line ends: what Open
+// needs to cut the file back to the entries Load keeps.
+type parsed struct {
+	t *Transcript
+	// headerEnd and ends[i] are the offsets just past the header's line and
+	// entry i's, each line's newline included when it has one.
+	headerEnd int
+	ends      []int
+}
+
+// keptLen is the length of the file's prefix that holds the header and its
+// first keep entries.
+func (p *parsed) keptLen(keep int) int {
+	if keep == 0 {
+		return p.headerEnd
+	}
+	return p.ends[keep-1]
+}
+
+// parse is Load's reading of data, the contents of the file at path (named
+// only in errors); see Load for every rule.
+func parse(data []byte, path string) (*parsed, error) {
 	lines := bytes.Split(data, []byte("\n"))
 	// A file that ends in a newline splits into a final empty element that
 	// is not a line.
@@ -87,7 +120,11 @@ func Load(path string) (*Transcript, error) {
 	if err != nil {
 		return nil, fmt.Errorf("%w: %s: line 1: %v", ErrNoHeader, path, err)
 	}
-	t := newTranscript(h)
+	// end is the offset just past a line that starts at start: past its
+	// newline, or at the end of data for a last line with none.
+	end := func(start int, line []byte) int { return min(start+len(line)+1, len(data)) }
+	p := &parsed{t: newTranscript(h), headerEnd: end(0, lines[0])}
+	t, pos := p.t, p.headerEnd
 	var pair pairing
 	for i, line := range lines[1:] {
 		e, err := decodeEntry(line)
@@ -95,18 +132,22 @@ func Load(path string) (*Transcript, error) {
 			err = t.check(e)
 		}
 		if err != nil {
-			if i == len(lines)-2 {
+			if i == len(lines)-2 && !errors.Is(err, errInvalid) {
 				break // the last line: a torn tail
 			}
 			return nil, fmt.Errorf("%w: %s: line %d: %v", ErrCorrupt, path, i+2, err)
 		}
+		// Every rule a whole line can break against the tree — pairing
+		// today — is checked here, outside the torn-tail branch above, so a
+		// whole last line that breaks one is refused, never trimmed (P14).
 		if err := pair.next(e, t.entry(e.ParentID)); err != nil {
 			return nil, fmt.Errorf("%w: %s: line %d: %w", ErrCorrupt, path, i+2, err)
 		}
 		t.add(e)
+		pos = end(pos, line)
+		p.ends = append(p.ends, pos)
 	}
-	t.dropIncompleteTurn()
-	return t, nil
+	return p, nil
 }
 
 // dropIncompleteTurn removes every entry after the last complete step: an
@@ -115,8 +156,9 @@ func Load(path string) (*Transcript, error) {
 // only once Load has refused every line that breaks the invariant, so the
 // one unpaired entry it can meet is an assistant message with open calls as
 // the last line — its tool message cut off — and that goes, together with
-// the steers, user entries and changes written ahead of it (see Load).
-func (t *Transcript) dropIncompleteTurn() {
+// the steers, user entries, changes and resume entry written ahead of it (see
+// Load). It returns how many entries it kept.
+func (t *Transcript) dropIncompleteTurn() int {
 	keep := 0
 	for i := range t.Entries {
 		e := &t.Entries[i]
@@ -136,6 +178,7 @@ func (t *Transcript) dropIncompleteTurn() {
 		delete(t.index, e.ID)
 	}
 	t.Entries = t.Entries[:keep]
+	return keep
 }
 
 func newTranscript(h Header) *Transcript {
@@ -192,6 +235,44 @@ func (t *Transcript) Leaf() string {
 	return t.Entries[len(t.Entries)-1].ID
 }
 
+// walk is the positions in Entries of leaf and each of its ancestors, leaf
+// first and the root last; none for leaf "".
+func (t *Transcript) walk(leaf string) ([]int, error) {
+	if leaf == "" {
+		return nil, nil
+	}
+	i, ok := t.index[leaf]
+	if !ok {
+		return nil, fmt.Errorf("%w %q", ErrUnknownEntry, leaf)
+	}
+	var path []int
+	for {
+		path = append(path, i)
+		parent := t.Entries[i].ParentID
+		if parent == "" {
+			return path, nil
+		}
+		i = t.index[parent] // check guaranteed it exists and comes earlier
+	}
+}
+
+// Branch is the entries on the path from the root to leaf, in that order:
+// what a resumed session reads its state from and replays, never file order
+// (plan 028, "the path"). Leaf "" is none; an unknown leaf is
+// ErrUnknownEntry. The entries share their messages' parts with the
+// transcript, as Context's do; a caller must not mutate them.
+func (t *Transcript) Branch(leaf string) ([]Entry, error) {
+	path, err := t.walk(leaf)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]Entry, len(path))
+	for k, i := range path {
+		out[len(path)-1-k] = t.Entries[i]
+	}
+	return out, nil
+}
+
 // Context is ContextAt from the leaf; see there.
 func (t *Transcript) Context(current Model) []fantasy.Message {
 	msgs, _ := t.ContextAt(t.Leaf(), current) // the leaf is always known
@@ -242,21 +323,9 @@ func (t *Transcript) ContextWithResults(current Model) ([]fantasy.Message, []boo
 
 // contextAt is ContextAt, with each message's SubagentResults mark beside it.
 func (t *Transcript) contextAt(leaf string, current Model) ([]fantasy.Message, []bool, error) {
-	if leaf == "" {
-		return nil, nil, nil
-	}
-	i, ok := t.index[leaf]
-	if !ok {
-		return nil, nil, fmt.Errorf("%w %q", ErrUnknownEntry, leaf)
-	}
-	var path []int
-	for {
-		path = append(path, i)
-		parent := t.Entries[i].ParentID
-		if parent == "" {
-			break
-		}
-		i = t.index[parent] // check guaranteed it exists and comes earlier
+	path, err := t.walk(leaf)
+	if err != nil {
+		return nil, nil, err
 	}
 	var msgs []fantasy.Message
 	var results []bool

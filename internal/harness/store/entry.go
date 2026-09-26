@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"time"
 
 	"charm.land/fantasy"
@@ -22,7 +23,33 @@ const (
 	TypeModelChange  = "model_change"
 	TypeEffortChange = "effort_change"
 	TypeModeChange   = "mode_change"
+	// TypeResume opens each later incarnation of a reopened session (Open):
+	// the contract it runs under, as information (plan 028 §3.2).
+	TypeResume = "resume"
 )
+
+// knownType reports whether this craze writes and reads entries of type typ.
+// Any other type is a newer craze's: kept in the tree, never in the context,
+// and never trimmed away by Open (ErrNewerTranscript).
+func knownType(typ string) bool {
+	switch typ {
+	case TypeMessage, TypeModelChange, TypeEffortChange, TypeModeChange, TypeResume:
+		return true
+	}
+	return false
+}
+
+// errInvalid marks a line that decodes — whole JSON, a good envelope, a
+// payload of the right shape for its type — but breaks a rule on the fields
+// H7 added (checkFields). No crash writes one: a torn append leaves a prefix
+// of a line, never a whole line, so, like a break of the pairing invariant, it
+// is ErrCorrupt wherever it is, the last line included, and never skipped as a
+// torn tail (plan 028 P14).
+var errInvalid = errors.New("invalid entry")
+
+func invalid(format string, args ...any) error {
+	return fmt.Errorf("%w: %s", errInvalid, fmt.Sprintf(format, args...))
+}
 
 // timeLayout is every timestamp's format: UTC with milliseconds, as pi (and
 // JavaScript's toISOString) write it. Fixed-width, so lines sort and diff
@@ -83,6 +110,21 @@ type ModelUsage struct {
 	Usage     Usage  `json:"usage"`
 }
 
+// Todo is one item of a session's todo list as a tool entry records it (plan
+// 028 §3.2): the harness's own item in the store's shape, so the file does not
+// change when the harness's type does, and the store needs nothing of the
+// harness to read it. Status is one of todoStatuses.
+type Todo struct {
+	ID      string `json:"id"`
+	Content string `json:"content"`
+	Status  string `json:"status"`
+}
+
+// todoStatuses are the four statuses todo_write's schema promises (the
+// harness's tool.TodoStatus; a test keeps the two in step). A list holding any
+// other is not one this craze wrote.
+var todoStatuses = map[string]bool{"pending": true, "in_progress": true, "completed": true, "cancelled": true}
+
 // MessageEntry is what a caller hands AppendUser or AppendStep: the message
 // in Fantasy's own shape and what it was sent to. Usage and StopReason belong
 // to assistant messages. Interrupted belongs to an assistant message, and to
@@ -102,6 +144,16 @@ type ModelUsage struct {
 // its text, so a replay redacts it with the turn's redactor as it redacts a
 // tool result (the harness's history), where a person's prompt is replayed as
 // it was written. Such an entry carries its results' SubagentUsage too.
+//
+// Turn and Todos are H7's (plan 028 §3.2), both additive and omitted when
+// unset, so an older craze ignores them and an entry without them is written
+// byte for byte as before. Turn is the number of the turn a user entry opens:
+// set on the entry a Run or a Wake opens turn N with (AppendUser), never on a
+// steer or on mid-turn results (AppendStep refuses one there), and 0 on every
+// other entry and on every entry written before H7. Todos is the session's
+// todo list after the step, on the tool entry of a step whose calls changed
+// it: nil when they did not, and a pointer to an empty list when they emptied
+// it, which is how a resume tells "cleared" from "never set".
 type MessageEntry struct {
 	Message         fantasy.Message
 	Model           Model
@@ -111,13 +163,57 @@ type MessageEntry struct {
 	Interrupted     bool // a partial step, cut short by a cancel or an error
 	SubagentUsage   []ModelUsage
 	SubagentResults bool
+	Turn            int
+	Todos           *[]Todo
+}
+
+// checkFields checks H7's fields against the message's role (plan 028 §3.2):
+// a turn only on a user message and never negative; todos only on a tool
+// message, each item with a non-empty id no other item has and one of the four
+// statuses. AppendUser and AppendStep run it on what they are handed, and
+// decodeEntry on every line it reads (errInvalid).
+func checkFields(e MessageEntry) error {
+	switch {
+	case e.Turn < 0:
+		return fmt.Errorf("turn %d is negative", e.Turn)
+	case e.Turn != 0 && e.Message.Role != fantasy.MessageRoleUser:
+		return fmt.Errorf("a %s message carries turn %d; only a user message opens a turn", e.Message.Role, e.Turn)
+	case e.Todos != nil && e.Message.Role != fantasy.MessageRoleTool:
+		return fmt.Errorf("a %s message carries todos; only a tool message does", e.Message.Role)
+	case e.Todos == nil:
+		return nil
+	}
+	seen := make(map[string]bool, len(*e.Todos))
+	for i, it := range *e.Todos {
+		switch {
+		case it.ID == "":
+			return fmt.Errorf("todo %d has no id", i)
+		case seen[it.ID]:
+			return fmt.Errorf("todo %d repeats id %q", i, it.ID)
+		case !todoStatuses[it.Status]:
+			return fmt.Errorf("todo %q has status %q", it.ID, it.Status)
+		}
+		seen[it.ID] = true
+	}
+	return nil
+}
+
+// Contract is what one incarnation of a session ran under: the header's
+// fields for the session's first, and a resume entry's for each later one
+// (Open). It is information: nothing refuses a session whose contract
+// changed, and the harness decides what a change means (plan 028 §3.2, §3.3).
+type Contract struct {
+	CrazeVersion       string
+	SystemPromptSHA256 string // hex
+	ToolProfile        string // "" for none
+	ToolsSHA256        string // hex; "" for none
 }
 
 // Entry is one line after the header, as written or read back. Type selects
 // which of the fields mean anything: the embedded MessageEntry for a message,
 // its Model for a model_change, its Effort for an effort_change, Mode for a
-// mode_change, none for a type from a newer craze, which is kept only so the
-// parent chain through it stays whole.
+// mode_change, Contract for a resume, none for a type from a newer craze,
+// which is kept only so the parent chain through it stays whole.
 type Entry struct {
 	Type      string
 	ID        string // 8 hex chars, unique within the file
@@ -127,6 +223,9 @@ type Entry struct {
 	// the Entry rather than on MessageEntry because no message carries one:
 	// the mode is a fact about the turn's rules, not about what was sent.
 	Mode string
+	// Contract is what a resume entry records: the contract of the
+	// incarnation that reopened the session (Open).
+	Contract Contract
 	MessageEntry
 }
 
@@ -160,6 +259,74 @@ type messageLine struct {
 	// entry of background results carries it, and an older craze reading one
 	// ignores it, replaying the entry as a plain user message.
 	SubagentResults bool `json:"subagent_results,omitempty"`
+	// Turn and Todos are additive in the same way (plan 028 §3.2). They are
+	// kept raw here so that decodeEntry checks their shape itself: a whole
+	// line whose turn or todos is the wrong JSON type is errInvalid, like one
+	// whose todo has no id, not a decoding failure that the last line would
+	// be forgiven as a torn tail (P14).
+	Turn  json.RawMessage `json:"turn,omitempty"`
+	Todos json.RawMessage `json:"todos,omitempty"`
+}
+
+// encodeTurn is a turn as the line carries it: nothing for 0.
+func encodeTurn(n int) json.RawMessage {
+	if n == 0 {
+		return nil
+	}
+	return strconv.AppendInt(nil, int64(n), 10)
+}
+
+// encodeTodos is a list as the line carries it: nothing for nil, and "[]" for
+// an empty list, never "null".
+func encodeTodos(todos *[]Todo) (json.RawMessage, error) {
+	if todos == nil {
+		return nil, nil
+	}
+	items := *todos
+	if items == nil {
+		items = []Todo{}
+	}
+	return json.Marshal(items)
+}
+
+// decodeTurn and decodeTodos read the raw fields back: absent is the zero
+// value, and anything but an integer, or an array of objects, is errInvalid.
+func decodeTurn(raw json.RawMessage) (int, error) {
+	if raw == nil {
+		return 0, nil
+	}
+	var n int
+	if string(raw) == "null" || json.Unmarshal(raw, &n) != nil {
+		return 0, invalid("turn %s is not an integer", raw)
+	}
+	return n, nil
+}
+
+func decodeTodos(raw json.RawMessage) (*[]Todo, error) {
+	if raw == nil {
+		return nil, nil
+	}
+	if string(raw) == "null" {
+		return nil, invalid("todos is null, not a list")
+	}
+	var items []Todo
+	if err := json.Unmarshal(raw, &items); err != nil {
+		return nil, invalid("todos: %v", err)
+	}
+	if items == nil {
+		items = []Todo{}
+	}
+	return &items, nil
+}
+
+// resumeLine is a resume entry: the contract's fields, named and ordered as
+// the header's, and the optional two omitted when empty as the header's are.
+type resumeLine struct {
+	envelope
+	CrazeVersion       string `json:"craze_version"`
+	SystemPromptSHA256 string `json:"system_prompt_sha256"`
+	ToolProfile        string `json:"tool_profile,omitempty"`
+	ToolsSHA256        string `json:"tools_sha256,omitempty"`
 }
 
 type modelChangeLine struct {
@@ -289,6 +456,10 @@ func encodeEntry(e Entry) ([]byte, error) {
 	}
 	switch e.Type {
 	case TypeMessage:
+		todos, err := encodeTodos(e.Todos)
+		if err != nil {
+			return nil, err
+		}
 		return json.Marshal(messageLine{
 			envelope:        env,
 			Message:         e.Message,
@@ -301,6 +472,8 @@ func encodeEntry(e Entry) ([]byte, error) {
 			Interrupted:     e.Interrupted,
 			SubagentUsage:   e.SubagentUsage,
 			SubagentResults: e.SubagentResults,
+			Turn:            encodeTurn(e.Turn),
+			Todos:           todos,
 		})
 	case TypeModelChange:
 		return json.Marshal(modelChangeLine{
@@ -313,13 +486,23 @@ func encodeEntry(e Entry) ([]byte, error) {
 		return json.Marshal(effortChangeLine{envelope: env, Effort: e.Effort})
 	case TypeModeChange:
 		return json.Marshal(modeChangeLine{envelope: env, Mode: e.Mode})
+	case TypeResume:
+		return json.Marshal(resumeLine{
+			envelope:           env,
+			CrazeVersion:       e.Contract.CrazeVersion,
+			SystemPromptSHA256: e.Contract.SystemPromptSHA256,
+			ToolProfile:        e.Contract.ToolProfile,
+			ToolsSHA256:        e.Contract.ToolsSHA256,
+		})
 	default:
 		return nil, fmt.Errorf("store: cannot write entry type %q", e.Type)
 	}
 }
 
 // decodeEntry parses one non-header line. It checks the line on its own; the
-// tree checks id uniqueness and the parent (Transcript.add).
+// tree checks id uniqueness and the parent (Transcript.check). An error that
+// wraps errInvalid is a whole line that breaks checkFields; any other is a
+// line that does not decode.
 func decodeEntry(line []byte) (Entry, error) {
 	var env envelope
 	if err := json.Unmarshal(line, &env); err != nil {
@@ -351,6 +534,14 @@ func decodeEntry(line []byte) (Entry, error) {
 		if ml.Message.Role == "" {
 			return Entry{}, errors.New("message has no role")
 		}
+		turn, err := decodeTurn(ml.Turn)
+		if err != nil {
+			return Entry{}, err
+		}
+		todos, err := decodeTodos(ml.Todos)
+		if err != nil {
+			return Entry{}, err
+		}
 		e.MessageEntry = MessageEntry{
 			Message:         ml.Message,
 			Model:           Model{Provider: ml.Provider, Alias: ml.Model, WireModel: ml.WireModel},
@@ -360,6 +551,11 @@ func decodeEntry(line []byte) (Entry, error) {
 			Interrupted:     ml.Interrupted,
 			SubagentUsage:   ml.SubagentUsage,
 			SubagentResults: ml.SubagentResults,
+			Turn:            turn,
+			Todos:           todos,
+		}
+		if err := checkFields(e.MessageEntry); err != nil {
+			return Entry{}, fmt.Errorf("%w: %v", errInvalid, err)
 		}
 	case TypeModelChange:
 		var mc modelChangeLine
@@ -379,6 +575,17 @@ func decodeEntry(line []byte) (Entry, error) {
 			return Entry{}, err
 		}
 		e.Mode = mc.Mode
+	case TypeResume:
+		var rl resumeLine
+		if err := json.Unmarshal(line, &rl); err != nil {
+			return Entry{}, err
+		}
+		e.Contract = Contract{
+			CrazeVersion:       rl.CrazeVersion,
+			SystemPromptSHA256: rl.SystemPromptSHA256,
+			ToolProfile:        rl.ToolProfile,
+			ToolsSHA256:        rl.ToolsSHA256,
+		}
 	}
 	return e, nil
 }
