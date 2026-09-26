@@ -133,8 +133,9 @@ type Result struct {
 //     cancel and report "Tool execution aborted"; their step then finishes
 //     and is saved as usual, and the turn stops there, cancelled.
 //   - A cancel that lands after the model's final step was persisted writes
-//     nothing more, and the turn keeps that step's stop reason; a cancel
-//     after a tool step is a cancelled turn, whatever Fantasy reports.
+//     nothing more, and the turn keeps that step's stop reason, with every
+//     step's usage summed as for any completed turn; a cancel after a tool
+//     step is a cancelled turn, whatever Fantasy reports.
 //
 // A model or effort switch made since the last turn (SetModel, SetEffort) is
 // handed to the store first, so it is written just ahead of this turn's
@@ -550,7 +551,9 @@ type turn struct {
 	// limited turn returns (R3-3) — never one call's TotalUsage.
 	// retainedReminder is the variant of the last reminder entry in the
 	// history a restart replays (rebuildHistory), "" for none, which its
-	// first request's reminder is decided by (reminders.go, restartReminder).
+	// first request's reminder is decided by (reminders.go, restartReminder)
+	// — apart from a reminder carried uncommitted, which decides differently
+	// (carriedReminder, R4-1).
 	compactCheck        func() bool
 	compactDue          bool
 	stepBase            int
@@ -1104,8 +1107,11 @@ func (t *turn) finish(res *fantasy.AgentResult, err error) (out Result, ferr err
 		return Result{}, fmt.Errorf("harness: saving the interrupted answer: %w", t.tools.redactErr(saveErr))
 	case cancelled && t.stepped && !partial && t.stop != StopToolUse:
 		// The model's last step was final and is persisted: the cancel came
-		// too late to stop anything.
-		return Result{StopReason: t.stop, Usage: t.usage}, nil
+		// too late to stop anything. The turn completed, so it carries what
+		// every segment's steps spent (plan 028 §3.11 item 7, R3-3) — the
+		// last step's alone would drop the steps before a compaction (astra
+		// r1-c11, finding 1).
+		return Result{StopReason: t.stop, Usage: t.total}, nil
 	case cancelled:
 		return Result{StopReason: StopCancelled}, nil
 	case saveErr != nil:

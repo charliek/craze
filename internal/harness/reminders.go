@@ -345,28 +345,44 @@ func (m *modes) reminderFor(step int, carried string) (pendingReminder, bool) {
 }
 
 // restartReminder is the reminder a segment's first request after a restart
-// carries, if any (plan 028 §3.11 table, R2-3, R3-2, R4-1): the request
+// carries, if any (plan 028 §3.11 table, R2-3, R3-2, R4-1). The request
 // replays a history rebuilt from the store — from a summary on, or the same
-// one after a compaction that failed — and what that history holds decides,
-// never the summary's prose. A transition is composed exactly as reminderFor
-// composes one, by the told state (carried standing in for it, as there):
-// the mode differs from the one the model was last told, so it is said. With
-// nothing to announce, the mode's standing reminder is sent again — the
-// turn's first request sent one, and a summary may have swallowed it —
-// unless last, the variant of the last reminder the request's history holds
-// (the retained history's, or a reminder carried uncommitted from a request
-// that never completed, C12), is a standing one for this mode: then it is
-// already there, and nothing is composed. A re-send never advances the
-// alternation: it is the turn's reminder said again, not a turn's own.
-func (m *modes) restartReminder(carried, last string) (pendingReminder, bool) {
+// one after a compaction that failed — and, re-placed after it, the
+// reminders a request that never completed carried uncommitted (C12's
+// overflow case). carried is the variant of the last of those, and retained
+// the variant of the history's last reminder entry, each "" for none; they
+// decide, never a summary's prose, and they are not alike (R4-1):
+//
+//   - A carried reminder is in this very request, so it stands in for told,
+//     as reminderFor's carried does. When it speaks for the mode the session
+//     is in — a transition into it, or the mode's standing text — it is what
+//     the request needs and is reused as it is: nothing is composed beside
+//     it, the parity is untouched, and the replacement request carries
+//     exactly one. When the mode has moved on since, the transition it does
+//     not cover is composed.
+//   - With nothing carried, a transition is composed exactly as reminderFor
+//     composes one, by the told state: the mode differs from the one the
+//     model was last told, so it is said. With nothing to announce, the
+//     mode's standing reminder is sent again — the turn's first request sent
+//     one, and a summary may have swallowed it — unless retained is a
+//     standing one for this mode: then the history already says it. A
+//     retained transition — the re-entry notice, say — does not: it said the
+//     mode changed, once, in a request the restart's is not a retry of.
+//
+// A re-send never advances the alternation: it is the turn's reminder said
+// again, not a turn's own.
+func (m *modes) restartReminder(carried, retained string) (pendingReminder, bool) {
 	m.mu.Lock()
 	mode, told, parity, gen := m.mode, m.told, m.turns, m.gen
 	m.mu.Unlock()
 	if carried != "" {
-		told = carried
+		told = reminderVariants[carried].mode
+		if told == mode { // it says what is needed: reused, never joined
+			return pendingReminder{}, false
+		}
 	}
 	if m.child && mode == modePlan {
-		if mode == told && last == variantChildPlan {
+		if mode == told && retained == variantChildPlan {
 			return pendingReminder{}, false
 		}
 		return m.compose(variantChildPlan, gen, false), true
@@ -374,7 +390,7 @@ func (m *modes) restartReminder(carried, last string) (pendingReminder, bool) {
 	if mode != told {
 		return m.compose(m.transition(mode, told), gen, mode == modePlan), true
 	}
-	if standingFor(last) == mode {
+	if standingFor(retained) == mode {
 		return pendingReminder{}, false
 	}
 	switch mode {
@@ -511,7 +527,7 @@ func (t *turn) remind(step int, base []fantasy.Message) {
 	var r pendingReminder
 	var ok bool
 	if t.segmentFirstRequest && !t.turnFirstRequest {
-		r, ok = t.modes.restartReminder(t.carried, t.lastReminder())
+		r, ok = t.modes.restartReminder(t.carriedReminder(), t.retainedReminder)
 	} else {
 		r, ok = t.modes.reminderFor(step, t.carried)
 	}
@@ -528,16 +544,17 @@ func (t *turn) remind(step int, base []fantasy.Message) {
 // before it, or none. mu is held.
 func (t *turn) unwrittenReminders() []reminder { return t.reminders[t.remWritten:] }
 
-// lastReminder is the variant of the last reminder the next request's
-// history holds, at a segment's first request (restartReminder, plan 028
-// §3.11 table, R4-1): the last of the reminders carried over uncommitted,
-// which go out after the rebuilt history, else the rebuilt history's own
-// last reminder entry (retainedReminder), else "". mu is held.
-func (t *turn) lastReminder() string {
+// carriedReminder is, at a segment's first request, the variant of the last
+// reminder carried over uncommitted from a request that never completed —
+// newSegment keeps exactly those, and they go out again after the rebuilt
+// history — or "" when none was (restartReminder, plan 028 §3.11 table,
+// R4-1). The rebuilt history's own last reminder entry is retainedReminder,
+// kept apart: the two decide differently. mu is held.
+func (t *turn) carriedReminder() string {
 	if n := len(t.reminders); n > 0 {
 		return t.reminders[n-1].variant
 	}
-	return t.retainedReminder
+	return ""
 }
 
 // lastReminderVariant is the variant of the last reminder entry among steps,

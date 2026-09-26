@@ -850,3 +850,173 @@ func TestAMidTurnCompactionThatCannotBeWrittenStopsTheTurn(t *testing.T) {
 		t.Fatalf("transcript:\n%s\nwant the one step, once", strings.Join(lines, "\n"))
 	}
 }
+
+// lateCancelAgent is a turn's agent that reports a cancel landing after its
+// final step was persisted as the stream's error. Fantasy's own loop ends on a
+// final step and returns nil, but finish has always defended the case — the
+// cancel came too late to stop anything — and this is how a test reaches that
+// branch, as TestSynthesisDefence reaches its own. surfaced counts the times
+// it did.
+type lateCancelAgent struct {
+	fantasy.Agent
+	surfaced *int
+}
+
+func (a lateCancelAgent) Stream(ctx context.Context, c fantasy.AgentStreamCall) (*fantasy.AgentResult, error) {
+	res, err := a.Agent.Stream(ctx, c)
+	if err == nil && ctx.Err() != nil {
+		*a.surfaced++
+		return nil, ctx.Err()
+	}
+	return res, err
+}
+
+// TestMidTurnCancelAfterTheFinalStepKeepsEverySegmentsUsage (plan 028 §3.11
+// item 7, R3-3; astra r1-c11 finding 1): a segmented turn — a tool step at
+// the threshold, the compaction, then the final answer — whose cancel lands
+// once that answer is persisted, and whose agent returns it as the stream's
+// error, ends as finish's too-late branch ends it: end_turn, with nothing
+// written after the answer. The turn completed, so Result.Usage is the sum
+// over both segments' steps, as a completed turn's always is — not the final
+// step's alone. Only a turn that really is cancelled carries none.
+func TestMidTurnCancelAfterTheFinalStepKeepsEverySegmentsUsage(t *testing.T) {
+	f := newFixture(t, "http://127.0.0.1:1/v1")
+	windowed(f, "test/a", testWindow, 0)
+	s := f.open(f.options())
+	surfaced := 0
+	s.newAgent = func(lm fantasy.LanguageModel, system string, tools []fantasy.AgentTool) fantasy.Agent {
+		return lateCancelAgent{Agent: defaultAgent(lm, system, tools), surfaced: &surfaced}
+	}
+	a := f.models["test/a"]
+	a.push(toolStep(1, over), summaryOf("looping."), answerWith("done"))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var ev events
+	res, err := s.Run(ctx, "loop", func(e Event) {
+		ev.sink(e)
+		if d, ok := e.(StepDone); ok && d.Step == 2 && d.Saved && d.StopReason == StopEndTurn {
+			cancel()
+		}
+	})
+	if surfaced != 1 {
+		t.Fatalf("the late cancel was surfaced %d times; want once, by the second segment's stream", surfaced)
+	}
+	want := Usage{Input: over + 10, Output: 10, CacheRead: 8}
+	if err != nil || res.StopReason != StopEndTurn || res.Usage != want {
+		t.Fatalf("the turn = %+v, %v; want end_turn with both segments' steps summed, %+v", res, err, want)
+	}
+	if got := usageOf(ev.list()); got != want {
+		t.Fatalf("the StepDones' usage = %+v, want %+v", got, want)
+	}
+	lines := entries(transcript(t, s))
+	if last := lines[len(lines)-1]; last != "assistant test/a high end_turn: done" {
+		t.Fatalf("transcript:\n%s\nwant the final answer last, as it was persisted", strings.Join(lines, "\n"))
+	}
+}
+
+// TestMidTurnACarriedReminderIsReused (plan 028 §3.11 table, R4-1; astra
+// r1-c11 finding 2): C12's seam, driven at the reminder's composition, since
+// the overflow restart is C12's. A session with a plan already written
+// switches from agent to plan mode; the turn's first request carries the
+// re-entry notice — the alternation advancing as it goes out — and fails
+// before its step finishes, so nothing of it is committed and newSegment
+// carries the notice over, as C12's restart will. The replacement request
+// carries that notice again and nothing beside it: exactly one reminder, and
+// the parity where the failed request left it.
+//
+// Two controls pin what a carried notice is told apart from. The same notice
+// merely retained — committed with its step, in the rebuilt history — is a
+// transition the restart's request is no retry of, so the standing reminder
+// is re-sent (sparse, at parity 1, which the re-send does not advance). And a
+// carried notice for a mode the session has left since — switched to ask
+// while the turn compacted — does not cover it: ask's notice is composed
+// after it.
+func TestMidTurnACarriedReminderIsReused(t *testing.T) {
+	// failed is the turn once its first request, carrying the re-entry
+	// notice, went out: m's alternation is at 1 and nothing is told yet.
+	failed := func(t *testing.T) (*modes, *turn) {
+		t.Helper()
+		plan := filepath.Join(t.TempDir(), "s.plan.md")
+		if err := os.WriteFile(plan, []byte("## The plan\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		m := newModes(modeAgent, plan, tool.NewModeGate(modeAgent, nil))
+		m.set(modePlan)
+		tn := &turn{ctx: context.Background(), modes: m, steers: &steerbox{}, logMode: func(string) error { return nil },
+			turnFirstRequest: true, segmentFirstRequest: true}
+		if got := requestReminders(t, tn, []fantasy.Message{fantasy.NewUserMessage("plan it")}); !slices.Equal(got, []string{variantPlanReentry}) || m.turns != 1 {
+			t.Fatalf("the turn's first request carries %q at parity %d; want the re-entry notice, the alternation at 1", got, m.turns)
+		}
+		return m, tn
+	}
+	summary := []fantasy.Message{fantasy.NewUserMessage("the summary")}
+
+	t.Run("carried and still the mode: reused alone", func(t *testing.T) {
+		m, tn := failed(t)
+		// The request never finished: nothing committed, the summary
+		// retains no reminder, and newSegment keeps the notice.
+		tn.newSegment()
+		got := requestReminders(t, tn, summary)
+		if !slices.Equal(got, []string{variantPlanReentry}) {
+			t.Fatalf("the replacement request carries %q; want the carried re-entry notice alone", got)
+		}
+		if m.turns != 1 {
+			t.Fatalf("the alternation is at %d; want 1, where the failed request left it", m.turns)
+		}
+	})
+
+	t.Run("control: retained, not carried, the standing reminder is re-sent", func(t *testing.T) {
+		m, tn := failed(t)
+		// The step finished and its append wrote the notice (stepFinished):
+		// the model has been told, and the compaction kept it in the tail.
+		tn.remWritten = len(tn.reminders)
+		tn.modeHeard()
+		tn.retainedReminder = variantPlanReentry
+		tn.newSegment()
+		if got := requestReminders(t, tn, summary); !slices.Equal(got, []string{variantPlanSparse}) || m.turns != 1 {
+			t.Fatalf("the restart's request composes %q at parity %d; want the sparse standing text, the alternation still at 1", got, m.turns)
+		}
+	})
+
+	t.Run("control: carried for a mode since left, the transition is added", func(t *testing.T) {
+		m, tn := failed(t)
+		tn.newSegment()
+		m.set(modeAsk) // while the turn compacted
+		if got := requestReminders(t, tn, summary); !slices.Equal(got, []string{variantPlanReentry, variantAsk}) {
+			t.Fatalf("the replacement request carries %q; want the carried notice, then ask's", got)
+		}
+	})
+}
+
+// requestReminders drives one request of tn as Fantasy does — PrepareStep,
+// then OnStepStart — and returns the variants of the reminders the request
+// carries, in the order it carries them; and it holds them to the request's
+// own messages, so a reminder recorded and not sent fails the test.
+func requestReminders(t *testing.T, tn *turn, base []fantasy.Message) []string {
+	t.Helper()
+	_, prep, err := tn.prepareStep(context.Background(), fantasy.PrepareStepFunctionOptions{Messages: base})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := tn.stepStarted(0); err != nil {
+		t.Fatal(err)
+	}
+	msgs := prep.Messages
+	if msgs == nil {
+		msgs = base
+	}
+	var sent []string
+	for _, line := range promptOf(fantasy.Call{Prompt: msgs}) {
+		if strings.Contains(line, "<"+reminderTag+">") {
+			sent = append(sent, line)
+		}
+	}
+	var variants []string
+	for _, r := range tn.reminders {
+		variants = append(variants, r.variant)
+	}
+	if len(sent) != len(variants) {
+		t.Fatalf("the request carries %d reminders, the turn records %d (%q)", len(sent), len(variants), variants)
+	}
+	return variants
+}
