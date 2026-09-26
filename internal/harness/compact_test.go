@@ -1291,104 +1291,156 @@ func TestSegmentTruncatesAnOversizedSummary(t *testing.T) {
 	}
 }
 
-// finding 12: the last COMPLETE <summary>…</summary> block is used even when
-// an unfinished opener follows it.
-func TestLastSummaryBlockIgnoresATrailingUnfinishedOpener(t *testing.T) {
-	reply := "<summary>valid summary text</summary> trailing text <summary>unfinished"
-	block, ok := lastSummaryBlock(reply)
-	if !ok {
-		t.Fatal("lastSummaryBlock found no block, want the completed one")
+// lastSummaryBlock, table-driven over every shape seen live and in review:
+// orchestrator decision X41 (review r1-c14a finding 1) pins the rule —
+// within [P, C), P the end of the last complete block before the last
+// "</summary>" (0 if none) and C that last "</summary>" itself, the FIRST
+// opener that begins a line wins; falling back to the first opener of any
+// kind in [P, C), and then, only if [P, C) has no opener at all, to the
+// first line-start opener before C anywhere. Restarting the search at P
+// (not the start of the reply) is what keeps a draft block and its
+// corrected replacement from being joined into one.
+func TestLastSummaryBlock(t *testing.T) {
+	tests := []struct {
+		name        string
+		reply       string
+		wantOk      bool
+		wantExact   string   // block must equal this exactly, when set
+		wantPrefix  string   // block must start with this, when set
+		wantContain []string // block must contain each of these
+		wantAbsent  []string // block must not contain any of these
+		wantCleaned string   // cleanSummary(reply, nil) must equal this, when set
+	}{
+		{
+			// C9e item 1 (smoke, PR 2 live): the model quoted the
+			// compaction instruction under heading 2, so a second,
+			// mid-line "<summary>" sits inside the real block, closer to
+			// the last "</summary>" than the real opener is. The opener
+			// that begins a line (here, the start of the reply) wins,
+			// not the nearest one, or section 1 is lost.
+			name: "mid-line quoted summary inside the real block",
+			reply: "<summary>\n" +
+				"1. Request and intent\nDo the thing.\n\n" +
+				"2. User messages (each, in order; verbatim when short)\n" +
+				`The user said: "Write one <summary> block with these seven headings…"` + "\n\n" +
+				"3. Decisions and context\nNone.\n" +
+				"</summary>",
+			wantOk:      true,
+			wantPrefix:  "<summary>\n1. Request and intent",
+			wantContain: []string{"3. Decisions and context"},
+			wantCleaned: "1. Request and intent\nDo the thing.\n\n" +
+				"2. User messages (each, in order; verbatim when short)\n" +
+				`The user said: "Write one <summary> block with these seven headings…"` + "\n\n" +
+				"3. Decisions and context\nNone.",
+		},
+		{
+			// review r1-c14-c9e finding 1: a real summary can itself
+			// quote "<summary>" at the start of a later line (the model
+			// echoing the instruction back, this time on its own line
+			// rather than mid-sentence). The FIRST opener that begins a
+			// line in [P, C) wins, not the last one, or every heading
+			// before the quote is lost.
+			name: "later line-start quoted summary inside the real body",
+			reply: "<summary>\n" +
+				"1. Request and intent\nDo the thing.\n\n" +
+				"2. User messages\n" +
+				"The user wrote:\n" +
+				"<summary>\n" +
+				"this is a quoted heading example, not the real block\n\n" +
+				"3. Decisions and context\nNone.\n" +
+				"</summary>",
+			wantOk:     true,
+			wantPrefix: "<summary>\n1. Request and intent",
+			wantContain: []string{
+				"2. User messages",
+				"3. Decisions and context",
+			},
+		},
+		{
+			// orchestrator decision X41, review r1-c14a finding 1: a
+			// complete draft summary followed by a complete corrected one
+			// must not be joined into a single block — restarting the
+			// opener search at P (just past the draft's own
+			// "</summary>") makes the final block's own opener the first
+			// one in range, so only the final block survives, tags
+			// stripped, and nothing of the draft leaks into the stored
+			// text.
+			name: "draft block then a corrected block",
+			reply: "<summary>draft text, discard me</summary>\n" +
+				"<summary>final text, keep me</summary>",
+			wantOk:      true,
+			wantExact:   "<summary>final text, keep me</summary>",
+			wantAbsent:  []string{"draft", "</summary>\n<summary>"},
+			wantCleaned: "final text, keep me",
+		},
+		{
+			// review r1-c14-c9e finding 1: a CRLF reply's real opener,
+			// indented with a tab after a "\r\n" line ending, must still
+			// be recognized as beginning a line — and preferred over a
+			// later mid-line quote of "<summary>" that sits closer to
+			// the final "</summary>".
+			name: "CRLF with a tab-indented preamble",
+			reply: "Preamble line one.\r\n" +
+				"Preamble line two.\r\n" +
+				"\t<summary>\r\n" +
+				"1. Request and intent\r\nDo the thing.\r\n\r\n" +
+				"2. User messages\r\n" +
+				"The user said: \"quote <summary> mid-line, not a real opener\"\r\n\r\n" +
+				"3. Decisions and context\r\nNone.\r\n" +
+				"</summary>",
+			wantOk:      true,
+			wantPrefix:  "<summary>\r\n1. Request and intent",
+			wantContain: []string{"3. Decisions and context"},
+		},
+		{
+			// finding 12: the last COMPLETE <summary>…</summary> block is
+			// used even when an unfinished opener follows it.
+			name:      "trailing unfinished opener",
+			reply:     "<summary>valid summary text</summary> trailing text <summary>unfinished",
+			wantOk:    true,
+			wantExact: "<summary>valid summary text</summary>",
+		},
+		{
+			// no "</summary>" anywhere: lastSummaryBlock reports no
+			// block, and cleanSummary falls back to the whole reply,
+			// trimmed.
+			name:        "no closer at all",
+			reply:       "<summary>never closed, the reply just ends",
+			wantOk:      false,
+			wantCleaned: "<summary>never closed, the reply just ends",
+		},
 	}
-	if block != "<summary>valid summary text</summary>" {
-		t.Errorf("lastSummaryBlock = %q, want the completed block alone", block)
-	}
-}
 
-// review r1-c14-c9e finding 1: a real summary can itself quote "<summary>"
-// at the start of a later line (the model echoing the instruction back,
-// this time on its own line rather than mid-sentence). lastSummaryBlock must
-// take the FIRST opener that begins a line before the last "</summary>", not
-// the last one, or every heading before the quote is lost.
-func TestLastSummaryBlockPrefersTheFirstOpenerThatBeginsALine(t *testing.T) {
-	reply := "<summary>\n" +
-		"1. Request and intent\nDo the thing.\n\n" +
-		"2. User messages\n" +
-		"The user wrote:\n" +
-		"<summary>\n" +
-		"this is a quoted heading example, not the real block\n\n" +
-		"3. Decisions and context\nNone.\n" +
-		"</summary>"
-	block, ok := lastSummaryBlock(reply)
-	if !ok {
-		t.Fatal("lastSummaryBlock found no block, want the real one")
-	}
-	if !strings.HasPrefix(block, "<summary>\n1. Request and intent") {
-		t.Fatalf("lastSummaryBlock = %q, want it to start at the real (first) opener, section 1 kept", block)
-	}
-	if !strings.Contains(block, "2. User messages") {
-		t.Errorf("lastSummaryBlock = %q, want section 2 kept too", block)
-	}
-	if !strings.Contains(block, "3. Decisions and context") {
-		t.Errorf("lastSummaryBlock = %q, want section 3 kept", block)
-	}
-}
-
-// review r1-c14-c9e finding 1: a CRLF reply's real opener, indented with a
-// tab after a "\r\n" line ending, must still be recognized as beginning a
-// line — and preferred over a later mid-line quote of "<summary>" that sits
-// closer to the final "</summary>".
-func TestLastSummaryBlockRecognizesACRLFLineStartWithATab(t *testing.T) {
-	reply := "Preamble line one.\r\n" +
-		"Preamble line two.\r\n" +
-		"\t<summary>\r\n" +
-		"1. Request and intent\r\nDo the thing.\r\n\r\n" +
-		"2. User messages\r\n" +
-		"The user said: \"quote <summary> mid-line, not a real opener\"\r\n\r\n" +
-		"3. Decisions and context\r\nNone.\r\n" +
-		"</summary>"
-	block, ok := lastSummaryBlock(reply)
-	if !ok {
-		t.Fatal("lastSummaryBlock found no block, want the real one")
-	}
-	if !strings.HasPrefix(block, "<summary>\r\n1. Request and intent") {
-		t.Fatalf("lastSummaryBlock = %q, want it to start at the tab-indented CRLF opener, section 1 kept", block)
-	}
-	if !strings.Contains(block, "3. Decisions and context") {
-		t.Errorf("lastSummaryBlock = %q, want section 3 kept", block)
-	}
-}
-
-// C9e item 1 (smoke, PR 2 live): the live shape — the model quoted the
-// compaction instruction under heading 2, so a second, mid-line "<summary>"
-// sits inside the real block, closer to the last "</summary>" than the real
-// opener is. lastSummaryBlock must take the opener that begins a line (here,
-// the start of the reply), not the nearest one, or section 1 is lost.
-func TestLastSummaryBlockPrefersAnOpenerThatBeginsALine(t *testing.T) {
-	reply := "<summary>\n" +
-		"1. Request and intent\nDo the thing.\n\n" +
-		"2. User messages (each, in order; verbatim when short)\n" +
-		`The user said: "Write one <summary> block with these seven headings…"` + "\n\n" +
-		"3. Decisions and context\nNone.\n" +
-		"</summary>"
-	block, ok := lastSummaryBlock(reply)
-	if !ok {
-		t.Fatal("lastSummaryBlock found no block, want the real one")
-	}
-	if !strings.HasPrefix(block, "<summary>\n1. Request and intent") {
-		t.Fatalf("lastSummaryBlock = %q, want it to start at the real opener (section 1 kept)", block)
-	}
-	if !strings.Contains(block, "3. Decisions and context") {
-		t.Fatalf("lastSummaryBlock = %q, want section 3 kept too", block)
-	}
-
-	// The mid-line "<summary>" is a quote inside the real content (heading
-	// 2) and stays; only the wrapper tags come off.
-	cleaned := cleanSummary(reply, nil)
-	if strings.HasPrefix(cleaned, "<summary>") || strings.HasSuffix(cleaned, "</summary>") {
-		t.Errorf("cleanSummary = %q, want the wrapper tags stripped", cleaned)
-	}
-	if !strings.HasPrefix(cleaned, "1. Request and intent") {
-		t.Errorf("cleanSummary = %q, want it to start with section 1", cleaned)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			block, ok := lastSummaryBlock(tc.reply)
+			if ok != tc.wantOk {
+				t.Fatalf("lastSummaryBlock ok = %v, want %v (block %q)", ok, tc.wantOk, block)
+			}
+			if ok {
+				if tc.wantExact != "" && block != tc.wantExact {
+					t.Errorf("lastSummaryBlock = %q, want %q", block, tc.wantExact)
+				}
+				if tc.wantPrefix != "" && !strings.HasPrefix(block, tc.wantPrefix) {
+					t.Errorf("lastSummaryBlock = %q, want prefix %q", block, tc.wantPrefix)
+				}
+				for _, want := range tc.wantContain {
+					if !strings.Contains(block, want) {
+						t.Errorf("lastSummaryBlock = %q, want it to contain %q", block, want)
+					}
+				}
+				for _, absent := range tc.wantAbsent {
+					if strings.Contains(block, absent) {
+						t.Errorf("lastSummaryBlock = %q, want it to NOT contain %q", block, absent)
+					}
+				}
+			}
+			if tc.wantCleaned != "" {
+				if cleaned := cleanSummary(tc.reply, nil); cleaned != tc.wantCleaned {
+					t.Errorf("cleanSummary = %q, want %q", cleaned, tc.wantCleaned)
+				}
+			}
+		})
 	}
 }
 

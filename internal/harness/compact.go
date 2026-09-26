@@ -1038,35 +1038,73 @@ func dropAnalysisBlocks(s string) string {
 }
 
 // lastSummaryBlock is the last COMPLETE <summary>…</summary> span in s, tags
-// included: the last </summary> first, then its opener — the FIRST
-// <summary> before it that begins a line (the start of s, or after a
-// newline — a "\r\n" ending counts — optionally followed by spaces or
-// tabs), falling back to the first one of any kind only when none begins a
-// line (C9e item 1; review r1-c14-c9e finding 1 corrected this from the
-// LAST line-start opener). Live, a model quoting the compaction instruction
-// under heading 2 (or echoing it back on a line of its own) puts a second
-// "<summary>" inside the real block, closer to the last "</summary>" than
-// the real opener is; taking the last line-start opener, or falling back to
-// the nearest one of any kind, loses everything before the quote — the
-// real, FIRST opener must win instead. A trailing, unfinished opener after
-// the last real block (the model started a second one and was cut off) is
-// ignored either way, since it never precedes the last "</summary>" (review
-// r1-c9 finding 12).
+// included (orchestrator decision X41, review r1-c14a finding 1, replacing
+// the plain first-opener rule that finding pinned down):
+//
+//   - C is the index of the last "</summary>". None → ("", false); the
+//     caller falls back to the whole reply, trimmed.
+//   - P is the index just past the last "</summary>" before C, or 0 when
+//     there is none — the end of the previous complete block, if any.
+//   - The opener is the FIRST "<summary>" in [P, C) that begins a line (at
+//     P itself, or the start of s, or after a newline — a "\r\n" ending
+//     counts — optionally followed by spaces or tabs); if none in [P, C)
+//     begins a line, the FIRST "<summary>" in [P, C) of any kind; if
+//     [P, C) has no "<summary>" at all, the first line-start "<summary>"
+//     before C anywhere (this last fallback uses ordinary line starts, not
+//     P, since there is no in-range opener to anchor on).
+//
+// Restarting the opener search at P (instead of the start of s) is what
+// keeps a draft block and its corrected replacement — two complete,
+// back-to-back <summary>…</summary> spans — from being joined into one:
+// the draft's own opener lives before P and is out of range, so the final
+// block's opener wins outright. Within a single real block, a model quoting
+// the compaction instruction under heading 2 (or echoing it back on a line
+// of its own) puts a second "<summary>" inside the real body, closer to C
+// than the real opener is; taking the first line-start opener in range
+// still picks the real, first one. A trailing, unfinished opener after C
+// (the model started a second block and was cut off) is ignored either
+// way, since it never precedes C (review r1-c9 finding 12).
 func lastSummaryBlock(s string) (string, bool) {
 	const open, close = "<summary>", "</summary>"
-	end := strings.LastIndex(s, close)
-	if end == -1 {
+	c := strings.LastIndex(s, close)
+	if c == -1 {
 		return "", false
 	}
-	head := s[:end+len(close)]
-	start := firstLineStartIndex(head, open)
+	p := 0
+	if prev := strings.LastIndex(s[:c], close); prev != -1 {
+		p = prev + len(close)
+	}
+	start := firstOpenerInRange(s, open, p, c)
 	if start == -1 {
-		start = strings.Index(head, open)
+		start = firstLineStartIndex(s[:c], open)
 	}
 	if start == -1 {
 		return "", false
 	}
-	return head[start:], true
+	return s[start : c+len(close)], true
+}
+
+// firstOpenerInRange is the index of the first occurrence of sub in
+// s[p:c) that begins a line (per beginsLineFrom, treating p itself as a
+// line start), or, if none in that range does, the first occurrence of any
+// kind in that range; -1 if sub does not occur in [p, c) at all.
+func firstOpenerInRange(s, sub string, p, c int) int {
+	first := -1
+	for i := p; i < c; {
+		j := strings.Index(s[i:c], sub)
+		if j == -1 {
+			break
+		}
+		idx := i + j
+		if first == -1 {
+			first = idx
+		}
+		if beginsLineFrom(s, idx, p) {
+			return idx
+		}
+		i = idx + len(sub)
+	}
+	return first
 }
 
 // firstLineStartIndex is the index of the first occurrence of sub in s that
@@ -1091,10 +1129,21 @@ func firstLineStartIndex(s, sub string) int {
 // still counts: the byte immediately before the run of spaces/tabs is the
 // "\n", regardless of the "\r" that precedes it.
 func beginsLine(s string, i int) bool {
-	for i > 0 && (s[i-1] == ' ' || s[i-1] == '\t') {
+	return beginsLineFrom(s, i, 0)
+}
+
+// beginsLineFrom reports whether s[i:] begins a line, treating position
+// from as an implicit line start in addition to the ordinary rule: i ==
+// from, or every byte back to from or the previous newline is a space or a
+// tab, and the byte immediately before that run (if any, and if it exists
+// before reaching from) is a newline. A "\r\n" line ending still counts:
+// the byte immediately before the run of spaces/tabs is the "\n",
+// regardless of the "\r" that precedes it.
+func beginsLineFrom(s string, i, from int) bool {
+	for i > from && (s[i-1] == ' ' || s[i-1] == '\t') {
 		i--
 	}
-	return i == 0 || s[i-1] == '\n'
+	return i == from || s[i-1] == '\n'
 }
 
 // degenerateLen is the length compact's minSummaryLen check counts (review

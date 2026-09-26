@@ -593,8 +593,9 @@ Markdown file beside the transcript — `<stem>.compaction/segment_001.md`,
 `read` or `grep` like any other file under the harness home, exactly as it
 can the [plan file](#modes). The segment keeps each tool result's first 8 KiB
 (a note says how much was left out), and the file itself is capped at 512
-KiB: over that, the oldest turns are dropped first, with a line pointing at
-the transcript instead — which, unlike the segment, keeps everything, so an
+KiB: over that, the oldest steps are dropped first — which can drop only
+part of a turn, not the whole thing — with a line pointing at the
+transcript instead — which, unlike the segment, keeps everything, so an
 exact detail can still be found there when the segment no longer has it. The
 summary message names the directory, so the model knows the files are there
 when an exact detail — a command, an error string, a path — matters more
