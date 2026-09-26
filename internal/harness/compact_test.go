@@ -642,7 +642,7 @@ func TestTextFormRedactsAKeyLearnedAfterItWasStored(t *testing.T) {
 	m := s.cur
 
 	f.models["other/c"].push(answerWith(longSummary("1. Request and intent\nFrom the text form.")))
-	res, err := s.compactOn(context.Background(), m, m.r, true, 2, store.CompactionManual, "", "", nil)
+	res, err := s.compactOn(context.Background(), m, m.r, true, 0, 2, store.CompactionManual, "", "", nil)
 	if err != nil {
 		t.Fatalf("compact: %v", err)
 	}
@@ -692,22 +692,26 @@ func TestACancelDuringCompactionSurfacesASaveFailureThroughSessionCompact(t *tes
 	}
 }
 
-// finding 4, review r2 minor 3: Compacted{ended} is emitted exactly once
-// whatever panics — the summarizer's own agent, the sink itself while it
-// handles ended, or both — and the panic that propagates is the one that
-// ended compact: a sink that panics on ended is not sent a second one, and a
-// panic of its own on the ended compact's defer sends does not replace the
-// agent's.
+// finding 4, review r2 minor 3, review r3 minor 3: Compacted{ended} is
+// emitted exactly once whatever panics — the summarizer's own agent, the
+// sink itself while it handles started or ended, or both — and the panic
+// that propagates is the one that ended compact: a sink that panics on ended
+// is not sent a second one, and a panic of its own on the ended compact's
+// defer sends does not replace the one that ended compact. A sink that
+// records started and then panics still gets its ended.
 func TestAPanicDuringSummarizationStillEmitsEnded(t *testing.T) {
 	for _, tc := range []struct {
-		name        string
-		agentPanics bool   // the summarizer's agent panics "boom"
-		sinkPanics  bool   // the sink panics on each ended it handles, once it has recorded it
-		want        string // the panic compact must propagate
+		name          string
+		agentPanics   bool   // the summarizer's agent panics "boom"
+		sinkPanics    bool   // the sink panics on each ended it handles, once it has recorded it
+		startedPanics bool   // the sink panics on started, once it has recorded it
+		want          string // the panic compact must propagate
 	}{
-		{"the agent panics", true, false, "boom"},
-		{"the sink panics on ended", false, true, "sink: ended 1"},
-		{"the agent panics and the sink panics on ended", true, true, "boom"},
+		{"the agent panics", true, false, false, "boom"},
+		{"the sink panics on ended", false, true, false, "sink: ended 1"},
+		{"the agent panics and the sink panics on ended", true, true, false, "boom"},
+		{"the sink panics on started", false, false, true, "sink: started"},
+		{"the sink panics on started and on ended", false, true, true, "sink: started"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newFixture(t, "http://unused")
@@ -731,6 +735,9 @@ func TestAPanicDuringSummarizationStillEmitsEnded(t *testing.T) {
 			endeds := 0
 			sink := func(e Event) {
 				ev.sink(e)
+				if c, ok := e.(Compacted); ok && c.Phase == CompactionStarted && tc.startedPanics {
+					panic("sink: started")
+				}
 				if c, ok := e.(Compacted); ok && c.Phase == CompactionEnded && tc.sinkPanics {
 					endeds++
 					panic(fmt.Sprintf("sink: ended %d", endeds))
@@ -861,6 +868,127 @@ func TestQuotaExhaustionIsReadFromTheStructuredCode(t *testing.T) {
 			entries := compactionEntries(t, s)
 			if len(entries) != 1 || entries[0].Compaction.Succeeded() {
 				t.Fatalf("compaction entries = %+v, want one failure", entries)
+			}
+		})
+	}
+}
+
+// review r3 major 2 (C9c): the code and type are read from the response as
+// it arrived, before it is scrubbed. A body the provider sent in several
+// chunks — the key and three links in the first, insufficient_quota in the
+// second — is dumped by the SDK as chunked, and the scrub rewrites the
+// chunk that holds the key and the links' query strings (each "?x" becomes
+// "?[redacted]", longer than it was) without the size the chunk declares, so
+// undoing the chunking of the scrubbed dump cut the error short and lost its
+// code — and the quota's 429 was retried as an ordinary one. It ends the
+// summarizer at once, one request.
+func TestQuotaExhaustionSurvivesAScrubbedEarlierChunk(t *testing.T) {
+	const message = "Your request was refused for this account. See https://example.test/a?b, https://example.test/c?d and https://example.test/e?f"
+	if quotaExhaustedPattern.MatchString(message) {
+		t.Fatalf("test setup: %q must hold none of the quota phrases", message)
+	}
+	quota := func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusTooManyRequests)
+		w.(http.Flusher).Flush() // unsized: the body is chunked
+		// Chunk 1 echoes the key and carries the links; chunk 2 names the
+		// failure.
+		fmt.Fprintf(w, `{"error":{"message":%q,"param":%q,`, message, r.Header.Get("Authorization"))
+		w.(http.Flusher).Flush()
+		fmt.Fprint(w, `"type":"insufficient_quota","code":"insufficient_quota"}}`)
+	}
+	w := newWire(t, sseReply(textChunk("hi"), finishChunk("stop", true)), quota, quota, quota)
+	f, opts := wireFixture(t, w)
+	s := f.open(opts)
+	s.sleep = func(context.Context, time.Duration) {}
+	run(t, s, "hello")
+
+	before := len(w.requests())
+	_, err := s.compact(context.Background(), s.cur, 2, store.CompactionAuto, "", "", nil)
+	var pe *ProviderError
+	if !errors.As(err, &pe) || pe.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("compact's error = %v, want the 429's *ProviderError", err)
+	}
+	if got := len(w.requests()) - before; got != 1 {
+		t.Fatalf("the summarizer sent %d requests, want 1: the later chunk's insufficient_quota ends it at once (error %v, code %q, type %q)",
+			got, err, pe.Code, pe.Type)
+	}
+	if found := leaks(err, canary); len(found) > 0 {
+		t.Fatalf("the key is reachable from the error at %v", found)
+	}
+}
+
+// review r3 major 2 (C9c): a provider error's Code and Type never hold the
+// key, however the response spells it. JSON-escaped ("sk-c…"), the key
+// is not the bytes a scrub of the body looks for, and decoding the scrubbed
+// body afterwards turned it back into the key itself. A code or type is kept
+// only when it is a short lowercase identifier, which a key like this is not.
+func TestAProviderErrorsCodeNeverHoldsTheKey(t *testing.T) {
+	var escaped strings.Builder
+	for _, r := range canary {
+		fmt.Fprintf(&escaped, `\u%04x`, r)
+	}
+	body := fmt.Sprintf(`{"error":{"message":"refused","type":"%s","code":"%s"}}`, escaped.String(), escaped.String())
+	w := newWire(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		fmt.Fprint(w, body)
+	})
+	f, opts := wireFixture(t, w)
+	s := f.open(opts)
+	_, err := s.Run(context.Background(), "hi", nil)
+	var pe *ProviderError
+	if !errors.As(err, &pe) || pe.StatusCode != http.StatusBadRequest {
+		t.Fatalf("Run = %v, want the 400's *ProviderError", err)
+	}
+	if strings.Contains(pe.Code, canary) || strings.Contains(pe.Type, canary) {
+		t.Fatalf("ProviderError.Code = %q, .Type = %q: the key, decoded from its escaped spelling", pe.Code, pe.Type)
+	}
+	if found := leaks(err, canary); len(found) > 0 {
+		t.Fatalf("the key is reachable from the error at %v", found)
+	}
+}
+
+// review r3 other finding (C9c): an in-band stream error — an error event in
+// a 200 response, so no HTTP status — whose code says insufficient_quota
+// ends the summarizer at once too, before any output (a *ProviderError with
+// status 0) and after it (the wrapper's *llm.MidStreamError, which keeps the
+// code and type): quota exhaustion is not only a 429's.
+func TestAnInBandQuotaErrorEndsTheSummarizerAtOnce(t *testing.T) {
+	const event = `{"error":{"message":"Your request was refused for this account.","type":"insufficient_quota","code":"insufficient_quota"}}`
+	for _, tc := range []struct {
+		name   string
+		before []string // chunks streamed before the error event
+	}{
+		{"before any output", nil},
+		{"after output began", []string{textChunk("1. Request and intent")}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			quota := func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "text/event-stream")
+				for _, c := range tc.before {
+					fmt.Fprintf(w, "data: %s\n\n", c)
+				}
+				fmt.Fprintf(w, "data: %s\n\n", event)
+			}
+			w := newWire(t, sseReply(textChunk("hi"), finishChunk("stop", true)), quota, quota, quota)
+			f, opts := wireFixture(t, w)
+			s := f.open(opts)
+			s.sleep = func(context.Context, time.Duration) {}
+			run(t, s, "hello")
+
+			before := len(w.requests())
+			_, err := s.compact(context.Background(), s.cur, 2, store.CompactionAuto, "", "", nil)
+			var pe *ProviderError
+			if !errors.As(err, &pe) || pe.StatusCode != 0 {
+				t.Fatalf("compact's error = %v, want the stream error's *ProviderError, no status", err)
+			}
+			if got := len(w.requests()) - before; got != 1 {
+				t.Fatalf("the summarizer sent %d requests, want 1: an in-band insufficient_quota ends it at once (error %v, code %q, type %q)",
+					got, err, pe.Code, pe.Type)
+			}
+			if pe.Code != "insufficient_quota" || pe.Type != "insufficient_quota" {
+				t.Fatalf("ProviderError.Code = %q, .Type = %q; want the event's, insufficient_quota both", pe.Code, pe.Type)
 			}
 		})
 	}
@@ -1204,7 +1332,7 @@ func TestTextFormNeverTakesABackgroundResultForThePriorSummary(t *testing.T) {
 	}
 
 	f.models["test/a"].push(answerWith(longSummary("1. Request and intent\nThe child reported.")))
-	if _, err := s.compactOn(context.Background(), m, m.r, true, 2, store.CompactionManual, "", "", nil); err != nil {
+	if _, err := s.compactOn(context.Background(), m, m.r, true, 0, 2, store.CompactionManual, "", "", nil); err != nil {
 		t.Fatalf("compact: %v", err)
 	}
 	calls := f.models["test/a"].requests()
@@ -1243,8 +1371,20 @@ func TestUnknownWindowFallbackBudgetsFromTheOverflowingRequest(t *testing.T) {
 	// before+promptCore comfortably does.
 
 	steps := s.store.Steps(s.cur.id())
-	if _, err := s.textFormPrompt(m, before, steps, "", focus, red); err != nil {
+	if _, err := s.textFormPrompt(m, before, 0, steps, "", focus, red); err != nil {
 		t.Fatalf("textFormPrompt = %v, want it to fit: the fallback budget must be 60%% of the request that actually overflowed, not of the raw history alone", err)
+	}
+}
+
+// C9c item 5: the text form's own overflow is an ErrContextTooLarge, and its
+// text says "harness: " once — it wrapped the sentinel behind a second copy
+// of the sentinel's own prefix.
+func TestTheTextFormsOverflowReadsOnce(t *testing.T) {
+	if !errors.Is(errTextFormOverflow, ErrContextTooLarge) {
+		t.Fatal("errTextFormOverflow is not an ErrContextTooLarge")
+	}
+	if got := errTextFormOverflow.Error(); strings.Count(got, "harness:") != 1 {
+		t.Fatalf("errTextFormOverflow reads %q; want \"harness:\" once", got)
 	}
 }
 
@@ -1279,10 +1419,10 @@ func TestUnknownWindowBudgetWeighsThePromptAsAMessage(t *testing.T) {
 		t.Fatal("test setup: the prompt alone already fits; no tight before to test at")
 	}
 
-	if _, err := s.textFormPrompt(m, before, nil, "", "", red); err != nil {
+	if _, err := s.textFormPrompt(m, before, 0, nil, "", "", red); err != nil {
 		t.Fatalf("textFormPrompt(before %d) = %v, want it to fit: 60%% of the overflowing request, its prompt weighed as a message, is exactly the request's size", before, err)
 	}
-	if _, err := s.textFormPrompt(m, before-1, nil, "", "", red); !errors.Is(err, errTextFormOverflow) {
+	if _, err := s.textFormPrompt(m, before-1, 0, nil, "", "", red); !errors.Is(err, errTextFormOverflow) {
 		t.Fatalf("textFormPrompt(before %d) = %v, want errTextFormOverflow: one token less of budget does not fit the request", before-1, err)
 	}
 }
@@ -1369,7 +1509,7 @@ func TestTextFormFinalCheckNeverDropsTheNewestTurn(t *testing.T) {
 		budget := textTokens(s.system) + textTokens(promptCore) + turn // the pieces, exactly
 		m.r = exactBudget(m.r, budget)
 
-		prompt, err := s.textFormPrompt(m, 0, steps, "", focus, s.redactor())
+		prompt, err := s.textFormPrompt(m, 0, 0, steps, "", focus, s.redactor())
 		if err != nil {
 			t.Fatalf("textFormPrompt = %v, want the newest turn kept with its results cut to %d characters", err, resultLadderCap)
 		}
@@ -1390,7 +1530,7 @@ func TestTextFormFinalCheckNeverDropsTheNewestTurn(t *testing.T) {
 		m := s.cur
 		m.r = exactBudget(m.r, textTokens(s.system)+textTokens(promptCore)+turn)
 
-		prompt, err := s.textFormPrompt(m, 0, steps, "", focus, s.redactor())
+		prompt, err := s.textFormPrompt(m, 0, 0, steps, "", focus, s.redactor())
 		if !errors.Is(err, errTextFormOverflow) {
 			t.Fatalf("textFormPrompt = (%q, %v), want errTextFormOverflow: the newest turn, with nothing to cut, still does not fit, and is never dropped for a prompt of the fixed part alone", prompt, err)
 		}
@@ -1439,7 +1579,7 @@ outer:
 		t.Fatal("test setup: could not find a before/focus combination landing the fixed part exactly at budget")
 	}
 
-	if _, err := s.textFormPrompt(m, before, nil, "", focus, red); !errors.Is(err, errTextFormOverflow) {
+	if _, err := s.textFormPrompt(m, before, 0, nil, "", focus, red); !errors.Is(err, errTextFormOverflow) {
 		t.Fatalf("textFormPrompt = %v, want errTextFormOverflow: the assembled request (the newline before the prompt core, never counted separately) is exactly one token over budget", err)
 	}
 }

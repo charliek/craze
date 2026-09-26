@@ -207,6 +207,9 @@ type splice struct {
 // ones no append committed, kept by newSegment — are first re-placed at the
 // end of the new base (§3.11 item 6); nothing new is taken up for them, and
 // no Steered is emitted for them again.
+//
+// The input it hands on is kept as t.request: an overflow's compaction is
+// budgeted by the request that overflowed (requestTokens, review r1-c12).
 func (t *turn) prepareStep(ctx context.Context, o fantasy.PrepareStepFunctionOptions) (context.Context, fantasy.PrepareStepResult, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -228,9 +231,31 @@ func (t *turn) prepareStep(ctx context.Context, o fantasy.PrepareStepFunctionOpt
 		t.remind(o.StepNumber, o.Messages)
 	}
 	if len(t.spliced) == 0 && len(t.reminders) == 0 && len(t.internal) == 0 {
+		t.request = o.Messages
 		return ctx, fantasy.PrepareStepResult{}, nil
 	}
-	return ctx, fantasy.PrepareStepResult{Messages: t.spliceInto(o.Messages)}, nil
+	t.request = t.spliceInto(o.Messages)
+	return ctx, fantasy.PrepareStepResult{Messages: t.request}, nil
+}
+
+// requestTokens is the bytes/4 estimate of the request prepareStep last
+// prepared (t.request) — Fantasy's step input as it went out, the system
+// prompt its system message, the history, the prompt and the steers,
+// reminders and results spliced in — with the session's tools:
+// estimateContext's weighing (tokens.go), the system prompt as text and
+// every other message as its JSON. It is weighed only when asked, after the
+// request failed (failedRequest): nothing prepares another request before
+// then, so t.request is still the messages that went out. mu is held.
+func (t *turn) requestTokens() int64 {
+	n := tokensOf(len(t.tools.wire))
+	for _, m := range t.request {
+		if m.Role == fantasy.MessageRoleSystem {
+			n += textTokens(textOf(m))
+			continue
+		}
+		n += messageTokens(m)
+	}
+	return n
 }
 
 // spliceInto is base with every steer, every reminder and every part of

@@ -129,9 +129,12 @@ func TestProviderErrorText(t *testing.T) {
 		{&ProviderError{Provider: "p", Model: "m", StatusCode: 500},
 			`harness: provider error (provider "p", model "m", HTTP 500)`},
 		// The turn could not recover by compacting, and the text says so,
-		// naming the model (plan 019 §3.5, plan 028 §3.12).
-		{&ProviderError{Provider: "p", Model: "m", StatusCode: 400, Message: "too long", kind: ErrContextTooLarge},
+		// naming the model (plan 019 §3.5, plan 028 §3.12) — "even after
+		// compacting" only when it did compact for it (C9c item 4).
+		{&ProviderError{Provider: "p", Model: "m", StatusCode: 400, Message: "too long", kind: ErrContextTooLarge, Compacted: true},
 			`harness: the conversation no longer fits model "m"'s context window even after compacting; start a new session (provider "p", model "m", HTTP 400): too long`},
+		{&ProviderError{Provider: "p", Model: "m", StatusCode: 400, Message: "too long", kind: ErrContextTooLarge},
+			`harness: the request alone is too large for model "m"'s context window (provider "p", model "m", HTTP 400): too long`},
 		{badToolCalls(store.Model{Provider: "p", Alias: "m", WireModel: "w"}).(*ProviderError),
 			`harness: the provider sent tool calls with missing or repeated ids (provider "p", model "m"): a tool call in the response had an empty or repeated id, so none of the response's tool calls was run`},
 	}

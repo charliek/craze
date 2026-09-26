@@ -104,8 +104,9 @@ var errDegenerateSummary = errors.New("harness: the summarizer's reply was too s
 
 // errTextFormOverflow is the text form's own budget refusing to fit even the
 // fixed part, or the newest turn alone (plan 028 §3.8 item 5, R2-5): the
-// compaction fails.
-var errTextFormOverflow = fmt.Errorf("harness: %w: the compaction's text form does not fit its budget", ErrContextTooLarge)
+// compaction fails. It wraps the sentinel, whose text brings the "harness: "
+// prefix, so it adds none of its own (C9c item 5).
+var errTextFormOverflow = fmt.Errorf("%w: the compaction's text form does not fit its budget", ErrContextTooLarge)
 
 // compact summarizes the session's context and cuts it (plan 028 §3.8,
 // §3.9, §3.10). m is the model the summarizer runs on: a turn's own for a
@@ -152,18 +153,23 @@ var errTextFormOverflow = fmt.Errorf("harness: %w: the compaction's text form do
 // compact returns CompactResult{}, ctx.Err() either way — Session.Compact
 // turns that into a cancelled Result, as Run's finish does.
 func (s *Session) compact(ctx context.Context, m model, turn int, reason, focus, command string, emit func(Event)) (CompactResult, error) {
-	return s.compactOn(ctx, m, m.r, reason == store.CompactionOverflow, turn, reason, focus, command, emit)
+	return s.compactOn(ctx, m, m.r, reason == store.CompactionOverflow, 0, turn, reason, focus, command, emit)
 }
 
-// compactOn is compact with the two choices the previous-model rule makes
-// otherwise (plan 028 §3.6, PD13; autocompact.go): fit is the model whose
-// threshold the compacted context must get under — the turn's, when m is the
-// previous model that holds the context — which bounds the tail (tailBudget,
-// PD23); and textForm starts the summarizer in the text form rather than
-// switching to it on an overflow, as every overflow compaction does (P17)
-// and a pre-turn one whose previous model no longer resolves does on the
-// turn's model, whose window the aligned request may not fit.
-func (s *Session) compactOn(ctx context.Context, m model, fit modeltable.Resolved, textForm bool, turn int, reason, focus, command string, emit func(Event)) (CompactResult, error) {
+// compactOn is compact with the choices the previous-model rule and overflow
+// recovery make otherwise (plan 028 §3.6, PD13, §3.12; autocompact.go,
+// turn.go): fit is the model whose threshold the compacted context must get
+// under — the turn's, when m is the previous model that holds the context —
+// which bounds the tail (tailBudget, PD23); textForm starts the summarizer in
+// the text form rather than switching to it on an overflow, as every
+// overflow compaction does (P17) and a pre-turn one whose previous model no
+// longer resolves does on the turn's model, whose window the aligned request
+// may not fit; and sent, for an overflow compaction, is the estimate of the
+// turn's request the provider refused (turn.requestTokens) — the request
+// that overflowed, which an unknown window's text form is budgeted by
+// (textFormBudget, review r1-c12) — and 0 for every other compaction, whose
+// text form follows the aligned summarizer request it would have sent.
+func (s *Session) compactOn(ctx context.Context, m model, fit modeltable.Resolved, textForm bool, sent int64, turn int, reason, focus, command string, emit func(Event)) (CompactResult, error) {
 	if emit == nil {
 		emit = func(Event) {}
 	}
@@ -194,7 +200,6 @@ func (s *Session) compactOn(ctx context.Context, m model, fit modeltable.Resolve
 		firstKeptID = steps[k].First
 	}
 
-	emit(Compacted{Phase: CompactionStarted, Reason: reason})
 	var (
 		reply   string
 		usage   store.Usage
@@ -211,18 +216,20 @@ func (s *Session) compactOn(ctx context.Context, m model, fit modeltable.Resolve
 		}
 		sink(ev)
 	}
-	// ended is deferred once started is emitted, on every exit path this
-	// function takes — a panic included, from agent construction or
-	// streaming (review r1-c9 finding 4, P34): a recovering caller must not
-	// keep an unmatched compaction lifecycle. Every ordinary return path
-	// below emits Compacted{ended} itself before it returns, which is not a
-	// panic, so recover() there is nil and this defer does nothing; "nothing
-	// to compact" (above) returns before started is even emitted, and stays
-	// event-free, as it always has. ended goes out exactly once (review r2
-	// minor 3): a panic from the sink while it handled an ended already sent
-	// is propagated as it is, not answered with a second ended; and the
-	// panic propagated is always the one that ended compact — a sink that
-	// panics again on this defer's own ended does not replace it.
+	// ended is deferred before started is emitted, so it covers every exit
+	// path from there on — a panic included, from agent construction or
+	// streaming (review r1-c9 finding 4, P34), or from the sink itself while
+	// it handles started, which it may already have recorded (review r3
+	// minor 3): a recovering caller must not keep an unmatched compaction
+	// lifecycle. Every ordinary return path below emits Compacted{ended}
+	// itself before it returns, which is not a panic, so recover() there is
+	// nil and this defer does nothing; "nothing to compact" (above) returns
+	// before started is even emitted, and stays event-free, as it always
+	// has. ended goes out exactly once (review r2 minor 3): a panic from the
+	// sink while it handled an ended already sent is propagated as it is,
+	// not answered with a second ended; and the panic propagated is always
+	// the one that ended compact — a sink that panics again on this defer's
+	// own ended does not replace it.
 	defer func() {
 		r := recover()
 		if r == nil {
@@ -237,6 +244,7 @@ func (s *Session) compactOn(ctx context.Context, m model, fit modeltable.Resolve
 		}
 		panic(r)
 	}()
+	emit(Compacted{Phase: CompactionStarted, Reason: reason})
 	priorSummary, hasPrior := priorSummaryText(history, s.store.LeadsWithSummary())
 
 attempts:
@@ -247,7 +255,7 @@ attempts:
 			err error
 		)
 		if textForm {
-			out, u, err = s.summarizeText(ctx, m, before, steps, priorSummaryIf(hasPrior, priorSummary), focus, red)
+			out, u, err = s.summarizeText(ctx, m, before, sent, steps, priorSummaryIf(hasPrior, priorSummary), focus, red)
 		} else {
 			out, u, err = s.summarizeAligned(ctx, m, history, focus, red)
 		}
@@ -498,10 +506,12 @@ func (s *Session) estimateContext(msgs []fantasy.Message) int64 {
 // summarizerFailureKind classifies a failed summarizer attempt (plan 028
 // §3.8 item 5): "overflow" for the provider refusing the request as too
 // large (switches every later attempt to the text form); "fatal" for
-// authentication, model-not-found, or any other client error the provider
-// raised deliberately (quota included: a 4xx this craze has no more specific
-// name for) — these end the summarizer at once; "" for anything else — a
-// 5xx, a timeout, a stream error — which is retried.
+// authentication, model-not-found, an account whose quota or credit is gone
+// whatever the status says (quotaExhausted — an in-band stream error has
+// none, review r3), or any other client error the provider raised
+// deliberately (a 4xx this craze has no more specific name for) — these end
+// the summarizer at once; "" for anything else — a 5xx, a timeout, a stream
+// error — which is retried.
 func summarizerFailureKind(err error) string {
 	switch {
 	case err == nil:
@@ -512,10 +522,13 @@ func summarizerFailureKind(err error) string {
 		return "fatal"
 	}
 	var pe *ProviderError
-	if errors.As(err, &pe) && pe.StatusCode >= 400 && pe.StatusCode < 500 {
-		if transientClientStatus(pe) {
-			return ""
-		}
+	if !errors.As(err, &pe) {
+		return ""
+	}
+	switch {
+	case quotaExhausted(pe):
+		return "fatal"
+	case pe.StatusCode >= 400 && pe.StatusCode < 500 && !transientClientStatus(pe):
 		return "fatal"
 	}
 	return ""
@@ -531,8 +544,9 @@ var quotaExhaustedPattern = regexp.MustCompile(
 	`(?i)insufficient_quota|insufficient quota|exceeded (?:your |its )?(?:current )?quota|quota exceeded|out of credits?|credit balance`)
 
 // quotaExhaustedCodes are the structured error codes and types (lowercase)
-// that name a 429 as the account's quota or credit being gone
-// (ProviderError.Code, .Type): OpenAI-family "insufficient_quota".
+// that name a failure as the account's quota or credit being gone — a 429's
+// or an in-band stream error's alike (ProviderError.Code, .Type):
+// OpenAI-family "insufficient_quota".
 var quotaExhaustedCodes = map[string]bool{"insufficient_quota": true}
 
 // transientClientStatus reports whether a classified 4xx failure is worth
@@ -554,16 +568,22 @@ func transientClientStatus(pe *ProviderError) bool {
 	}
 }
 
-// quotaExhausted reports whether a 429 says the account's quota or credit is
+// quotaExhausted reports whether pe says the account's quota or credit is
 // gone rather than that it is merely rate limited (review r2 major 2): by the
 // provider's structured error first — its code or type, what the provider
-// says the failure IS (quotaExhaustedCodes), kept whole by classify — and
-// then, as a fallback for a provider whose error carries no such name, by
-// the phrases of its message (quotaExhaustedPattern), which is display text,
-// cleaned and cut to maxMessageBytes.
+// says the failure IS (quotaExhaustedCodes), kept by classify — whatever the
+// status, since an in-band stream error carries none (review r3); and then,
+// as a fallback for a provider whose error carries no such name, by the
+// phrases of its message (quotaExhaustedPattern), which is display text,
+// cleaned and cut to maxMessageBytes — for a 429, or an error with no
+// status, alone: a status that says the failure is something else (a 5xx,
+// say) outranks a phrase.
 func quotaExhausted(pe *ProviderError) bool {
 	if quotaExhaustedCodes[strings.ToLower(pe.Code)] || quotaExhaustedCodes[strings.ToLower(pe.Type)] {
 		return true
+	}
+	if pe.StatusCode != 429 && pe.StatusCode != 0 {
+		return false
 	}
 	return quotaExhaustedPattern.MatchString(pe.Message)
 }
@@ -637,9 +657,9 @@ func (s *Session) summarizeAligned(ctx context.Context, m model, history []fanta
 // item 5): the context serialized as opencode's lines, budgeted, with the
 // same prompt and no tools at all (not even inert ones — there is nothing
 // left to answer a call with room for). Its agent's own retries are off, as
-// summarizeAligned's are.
-func (s *Session) summarizeText(ctx context.Context, m model, before int64, steps []store.Step, priorSummary, focus string, red *redact.Replacer) (string, store.Usage, error) {
-	prompt, err := s.textFormPrompt(m, before, steps, priorSummary, focus, red)
+// summarizeAligned's are. before and sent are textFormPrompt's.
+func (s *Session) summarizeText(ctx context.Context, m model, before, sent int64, steps []store.Step, priorSummary, focus string, red *redact.Replacer) (string, store.Usage, error) {
+	prompt, err := s.textFormPrompt(m, before, sent, steps, priorSummary, focus, red)
 	if err != nil {
 		return "", store.Usage{}, err
 	}
@@ -710,9 +730,11 @@ func (s *Session) stateSection(red *redact.Replacer) string {
 // textFormBudget is the text form's whole-request budget (plan 028 §3.8
 // item 5, R2-5): 70% of the window less its output ceiling, or, with an
 // unknown window, 60% of overflowed — the estimate of the request that
-// ACTUALLY overflowed: the aligned summarizer request compact always builds
+// ACTUALLY overflowed: for an overflow compaction, the turn's own request
+// the provider refused, held prompt and carried splices included (review
+// r1-c12); otherwise the aligned summarizer request compact always builds
 // first, whether or not it was sent, including the compaction prompt, the
-// state section and the focus (review r1-c9 finding 14) — not the raw
+// state section and the focus (review r1-c9 finding 14) — never the raw
 // context alone, which never went to the model by itself.
 func textFormBudget(r modeltable.Resolved, overflowed int64) int64 {
 	if r.ContextWindow <= 0 {
@@ -749,15 +771,24 @@ func textFormBudget(r modeltable.Resolved, overflowed int64) int64 {
 // that cut turn still exceed the budget — or the fixed part alone does —
 // errTextFormOverflow. A context with turns never becomes a prompt that is
 // the fixed part alone.
-func (s *Session) textFormPrompt(m model, before int64, steps []store.Step, priorSummary, focus string, red *redact.Replacer) (string, error) {
+//
+// before is the stored context's estimate (estimateContext); sent is an
+// overflow compaction's estimate of the turn's request that overflowed, 0
+// for any other compaction (compactOn).
+func (s *Session) textFormPrompt(m model, before, sent int64, steps []store.Step, priorSummary, focus string, red *redact.Replacer) (string, error) {
 	promptCore := s.compactionPromptText(focus, red)
-	// The aligned request's own estimate: what actually overflowed, for the
-	// unknown-window fallback (textFormBudget, finding 14). before already
-	// counts the system prompt, the tools and the history (estimateContext);
-	// promptCore is the one user message compact adds on top of it, weighed
-	// as the message it is sent as — its JSON, not its bare text (review r2
-	// minor 6) — exactly as before weighs each message of the history.
-	overflowed := before + messageTokens(fantasy.NewUserMessage(promptCore))
+	// What actually overflowed, for the unknown-window fallback
+	// (textFormBudget): an overflow compaction's refused turn request, sent
+	// (review r1-c12); otherwise the aligned summarizer request's own
+	// estimate (finding 14) — before already counts the system prompt, the
+	// tools and the history (estimateContext), and promptCore is the one user
+	// message compact adds on top of it, weighed as the message it is sent as
+	// — its JSON, not its bare text (review r2 minor 6) — exactly as before
+	// weighs each message of the history.
+	overflowed := sent
+	if overflowed <= 0 {
+		overflowed = before + messageTokens(fantasy.NewUserMessage(promptCore))
+	}
 	budget := textFormBudget(m.r, overflowed)
 	fixed := textTokens(s.system) + textTokens(promptCore) + textTokens(priorSummary)
 	if fixed > budget {

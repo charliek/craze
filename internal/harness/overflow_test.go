@@ -503,13 +503,21 @@ func TestAnOverflowRestartCarriesExactlyOneReminder(t *testing.T) {
 // interrupted — with no compaction tried (TestWireErrors' case, with output
 // before the refusal). So does an overflow of the turn's last allowed request
 // (§3.11 items 2, 8): its replacement would be a request past the allowance.
+// Neither of those two compacted anything, and their text says the request
+// alone is too large, never "even after compacting" (C9c item 4).
 func TestASecondOverflowFails(t *testing.T) {
-	check := func(t *testing.T, res Result, err error) {
+	check := func(t *testing.T, res Result, err error, compacted bool) {
 		t.Helper()
 		var pe *ProviderError
-		if !errors.Is(err, ErrContextTooLarge) || !errors.As(err, &pe) || !empty(res) ||
-			!strings.Contains(err.Error(), "even after compacting") {
-			t.Fatalf("the turn = %+v, %v; want ErrContextTooLarge, saying it was compacted, and an empty Result", res, err)
+		if !errors.Is(err, ErrContextTooLarge) || !errors.As(err, &pe) || !empty(res) {
+			t.Fatalf("the turn = %+v, %v; want ErrContextTooLarge and an empty Result", res, err)
+		}
+		const after, alone = "even after compacting", `the request alone is too large for model "test/a"'s context window`
+		switch said := err.Error(); {
+		case compacted && !strings.Contains(said, after):
+			t.Fatalf("the turn's error = %q; want it to say it was compacted (%q)", said, after)
+		case !compacted && (strings.Contains(said, after) || !strings.Contains(said, alone)):
+			t.Fatalf("the turn's error = %q; nothing was compacted, want it to say %q and never %q", said, alone, after)
 		}
 	}
 
@@ -520,7 +528,7 @@ func TestASecondOverflowFails(t *testing.T) {
 		a.push(overflowed(), summaryOf("a greeting."), overflowed(), summaryOf("never"))
 		var ev events
 		res, err := s.Run(context.Background(), "again", ev.sink)
-		check(t, res, err)
+		check(t, res, err, true)
 		if reqs := a.requests(); len(reqs) != 4 || summarizers(reqs) != 1 {
 			t.Fatalf("%d requests, %d of them the summarizer; want turn one, the overflow, one compaction, and the replacement's overflow", len(reqs), summarizers(reqs))
 		}
@@ -539,7 +547,7 @@ func TestASecondOverflowFails(t *testing.T) {
 		a.push(overflowed(), errorStep(&fantasy.ProviderError{StatusCode: 404, Message: "no such model"}), answerWith("never"))
 		var ev events
 		res, err := s.Run(context.Background(), "again", ev.sink)
-		check(t, res, err)
+		check(t, res, err, true)
 		if errors.Is(err, ErrModelNotFound) {
 			t.Fatalf("the turn failed with the summarizer's error, %v; want the overflow's", err)
 		}
@@ -559,7 +567,7 @@ func TestASecondOverflowFails(t *testing.T) {
 		a.push(reply(textParts("partial"), errorPart(midStreamOverflow())), summaryOf("never"))
 		var ev events
 		res, err := s.Run(context.Background(), "hi", ev.sink)
-		check(t, res, err)
+		check(t, res, err, false)
 		if reqs := a.requests(); len(reqs) != 1 {
 			t.Fatalf("%d requests; want the one that overflowed, and no compaction", len(reqs))
 		}
@@ -579,9 +587,52 @@ func TestASecondOverflowFails(t *testing.T) {
 		}
 		a.push(overflowed(), summaryOf("never"), answerWith("never"))
 		res, err := s.Run(context.Background(), "loop", nil)
-		check(t, res, err)
+		check(t, res, err, false)
 		if reqs := a.requests(); len(reqs) != maxSteps || summarizers(reqs) != 0 {
 			t.Fatalf("%d requests, %d of them the summarizer; want the %d allowed and no compaction", len(reqs), summarizers(reqs), maxSteps)
 		}
 	})
+}
+
+// TestAnUnknownWindowsOverflowIsBudgetedByTheRequestThatOverflowed (review
+// r1-c12, P17, §3.8 item 5): with an unknown window, an overflow's text form
+// is budgeted at 60% of the estimate of the request that actually overflowed
+// — the system prompt and tools, the history as sent, and the prompt the
+// turn still holds — not of the aligned summarizer request compact would
+// have built, which never went out and holds no prompt. A stored turn of
+// about 10k tokens and a held prompt of about 20k: 60% of the refused ~30k
+// request holds the stored turn; 60% of the stored context alone never
+// could, and the compaction failed locally, the summarizer never asked, the
+// turn failing with the overflow.
+func TestAnUnknownWindowsOverflowIsBudgetedByTheRequestThatOverflowed(t *testing.T) {
+	f := newFixture(t, "http://127.0.0.1:1/v1")
+	s := f.open(f.options())
+	a := f.models["test/a"]
+	if w := s.cur.r.ContextWindow; w != 0 {
+		t.Fatalf("test setup: test/a's window is %d, want it unknown", w)
+	}
+	stored := strings.Repeat("a stored answer. ", 2400) // ~40 KB: ~10k tokens, ordinary text no cap cuts
+	a.push(answerWith(stored))
+	run(t, s, "hello")
+
+	prompt := strings.Repeat("a long prompt. ", 5500) // ~80 KB: ~20k tokens, held until a step writes it
+	a.push(overflowed(), summaryOf("a greeting."), answerWith("done"))
+	res, err := s.Run(context.Background(), prompt, nil)
+	if err != nil {
+		t.Fatalf("Run = %v; want the turn to recover: 60%% of the request that overflowed holds the stored turn", err)
+	}
+	if res.StopReason != StopEndTurn {
+		t.Fatalf("Run's stop reason = %q, want end_turn", res.StopReason)
+	}
+	reqs := a.requests()
+	if len(reqs) != 4 || !isTextForm(reqs[2]) {
+		t.Fatalf("%d requests (the third a text form: %v); want turn one, the overflow, the text-form summarizer, and the replacement",
+			len(reqs), len(reqs) > 2 && isTextForm(reqs[2]))
+	}
+	if !strings.Contains(messageText(reqs[2].Prompt[len(reqs[2].Prompt)-1]), "[Assistant]: "+stored) {
+		t.Fatal("the text form's prompt does not hold the stored turn whole")
+	}
+	if got := compactions(t, s); !slices.Equal(got, []string{"overflow test/a ok"}) {
+		t.Fatalf("compactions = %q; want the overflow's, a summary", got)
+	}
 }

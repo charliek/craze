@@ -296,6 +296,51 @@ func TestMidStreamErrorCopiesClassification(t *testing.T) {
 	}
 }
 
+// review r3 major 2: the provider's names for a failure are read from its
+// response as it arrived and kept only as short lowercase identifiers that
+// the scrub leaves as they are — before output (on the rebuilt
+// ProviderError) and after it (on the MidStreamError) alike. A key that is
+// itself such an identifier is caught by the scrub's own pass; anything that
+// is not an identifier is dropped, whatever it is.
+func TestErrorNamesKeepOnlyIdentifiersTheScrubPasses(t *testing.T) {
+	const idKey = "abcdef0123456789abcdef0123456789" // a key that is a lowercase identifier
+	s := newScrubber(idKey)
+	for _, tc := range []struct {
+		name, body, code, typ string
+	}{
+		{"quota", `{"error":{"code":"insufficient_quota","type":"insufficient_quota"}}`, "insufficient_quota", "insufficient_quota"},
+		{"an in-band event's names", `{"error":{"message":"m","type":"server_error"}}`, "", "server_error"},
+		{"the key as a code", `{"error":{"code":"` + idKey + `","type":"rate_limit_exceeded"}}`, "", "rate_limit_exceeded"},
+		{"not identifiers", `{"error":{"code":"Insufficient Quota","type":"sk-abc"}}`, "", ""},
+		{"too long", `{"error":{"code":"` + strings.Repeat("a", 65) + `","type":"` + strings.Repeat("a", 64) + `"}}`, "", strings.Repeat("a", 64)},
+		{"a number", `{"error":{"code":429,"type":"rate_limit_exceeded"}}`, "", "rate_limit_exceeded"},
+		{"an HTTP dump", "HTTP/1.1 429 Too Many Requests\r\nContent-Type: application/json\r\n\r\n" +
+			`{"error":{"code":"insufficient_quota","type":"insufficient_quota"}}`, "insufficient_quota", "insufficient_quota"},
+		{"no envelope", `upstream failed`, "", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pe := &fantasy.ProviderError{StatusCode: 429, Message: "m", ResponseBody: []byte(tc.body)}
+			err := s.err(pe)
+			if code, typ := ErrorNames(err); code != tc.code || typ != tc.typ {
+				t.Errorf("ErrorNames(the rebuilt ProviderError) = %q, %q; want %q, %q", code, typ, tc.code, tc.typ)
+			}
+			mse := s.midStream(pe)
+			if code, typ := ErrorNames(mse); code != tc.code || typ != tc.typ || mse.Code != tc.code || mse.Type != tc.typ {
+				t.Errorf("the MidStreamError's names = %q, %q; want %q, %q", mse.Code, mse.Type, tc.code, tc.typ)
+			}
+			for _, e := range []error{err, mse} {
+				if found := leaks(e, idKey); len(found) > 0 {
+					t.Fatalf("the key is reachable at %v", found)
+				}
+			}
+			var out *fantasy.ProviderError
+			if !errors.As(err, &out) || out.IsRetryable() != pe.IsRetryable() || fantasy.IsTransportError(out.Cause) {
+				t.Errorf("the names changed how Fantasy classifies the error: %#v", err)
+			}
+		})
+	}
+}
+
 // stubModel is an inner model whose every method fails with err, or, for
 // Stream and StreamObject when err is nil, yields parts.
 type stubModel struct {

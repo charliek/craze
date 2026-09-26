@@ -195,7 +195,7 @@ func (s *Session) preTurnCompaction(t *turn, prompt fantasy.Message) (compacted 
 				frontier.Model.Alias, frontier.Model.Provider, frontier.Model.WireModel, m.r.Alias)
 		}
 	}
-	res, err := s.compactOn(t.ctx, on, m.r, textForm, t.number, store.CompactionAuto, "", "", t.emitLocked)
+	res, err := s.compactOn(t.ctx, on, m.r, textForm, 0, t.number, store.CompactionAuto, "", "", t.emitLocked)
 	var saveErr *errCompactionSaveFailed
 	switch {
 	case err == nil:

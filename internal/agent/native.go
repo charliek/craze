@@ -2520,8 +2520,13 @@ func phraseTurnError(err error) error {
 	case errors.Is(err, harness.ErrModelNotFound):
 		return phrase(fmt.Sprintf("native: provider %q does not serve model %q%s; check its wire_model in models.toml",
 			provider, model, status))
-	case errors.Is(err, harness.ErrContextTooLarge):
+	case errors.Is(err, harness.ErrContextTooLarge) && pe.Compacted:
 		return phrase(fmt.Sprintf("native: the conversation no longer fits model %q's context window even after compacting%s; start a new session",
+			model, status))
+	case errors.Is(err, harness.ErrContextTooLarge):
+		// Nothing was compacted for it (C9c item 4): a new session's first
+		// request, or an overflow at the step allowance.
+		return phrase(fmt.Sprintf("native: the request alone is too large for model %q's context window%s",
 			model, status))
 	}
 	msg := fmt.Sprintf("native: provider %q failed%s", provider, status)

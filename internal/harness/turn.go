@@ -383,8 +383,8 @@ func (s *Session) run(ctx context.Context, text string, wake bool, sink func(Eve
 			prompt = ""
 		case !recovered && s.overflowRecovers(t, err):
 			recovered = true
-			held := t.failedRequest()
-			if cerr := s.overflowCompaction(t); cerr != nil {
+			held, sent := t.failedRequest()
+			if cerr := s.overflowCompaction(t, sent); cerr != nil {
 				var saveErr *errCompactionSaveFailed
 				if errors.As(cerr, &saveErr) || turnCtx.Err() != nil {
 					return t.stopBeforeRequest(cerr)
@@ -426,13 +426,23 @@ func (s *Session) overflowRecovers(t *turn, err error) bool {
 // overflow — so the text form (§3.8 item 5, P17), the aligned request being
 // the one that just overflowed — recorded as the turn it is in, on the
 // turn's own model, run with no lock of the turn's held, as the mid-turn
-// one is (midTurnCompaction). It is never suppressed, and a summary switches
-// automatic compaction on or off by what it left, as any compaction's does
-// (compacted). The error is compact's: a summarizer failure, whose failure
-// entry is written, a cancel, or *errCompactionSaveFailed (P5); run triages
-// it.
-func (s *Session) overflowCompaction(t *turn) error {
-	res, err := s.compact(t.ctx, t.model, t.number, store.CompactionOverflow, "", "", t.emitLocked)
+// one is (midTurnCompaction). An unknown window's text form is budgeted by
+// sent, the estimate of the turn's request that overflowed (failedRequest,
+// review r1-c12), not by the aligned summarizer request, which never went
+// out and holds neither the prompt nor what the request carried. It is never
+// suppressed, and a summary switches automatic compaction on or off by what
+// it left, as any compaction's does (compacted). Once it has run — anything
+// but nothing to compact — the turn's overflow error says it compacted
+// (overflowCompacted). The error is compact's: a summarizer failure, whose
+// failure entry is written, a cancel, or *errCompactionSaveFailed (P5); run
+// triages it.
+func (s *Session) overflowCompaction(t *turn, sent int64) error {
+	res, err := s.compactOn(t.ctx, t.model, t.model.r, true, sent, t.number, store.CompactionOverflow, "", "", t.emitLocked)
+	if !errors.Is(err, store.ErrNothingToCompact) {
+		t.mu.Lock()
+		t.overflowCompacted = true
+		t.mu.Unlock()
+	}
 	if err == nil {
 		s.compacted(t.model, res)
 	}
@@ -634,6 +644,13 @@ type turn struct {
 	// which the store holds from run's AppendUser until the first append,
 	// whichever it is (wrote): the overflow restart sends the prompt again
 	// only while it has not (§3.12).
+	//
+	// request is the input of the request prepareStep last prepared, as it
+	// went out, which an overflow's compaction is budgeted by (requestTokens,
+	// review r1-c12); overflowCompacted says the turn compacted for an
+	// overflow (§3.12) — the compaction ran, to a summary or to a failure —
+	// so the ErrContextTooLarge it may still end with says "even after
+	// compacting" (classify, C9c item 4).
 	compactCheck        func() bool
 	compactDue          bool
 	stepBase            int
@@ -643,6 +660,8 @@ type turn struct {
 	total               Usage
 	retainedReminder    string
 	userWritten         bool
+	request             []fantasy.Message
+	overflowCompacted   bool
 
 	// Interject's steers, spliced into every step's messages from the one that
 	// first saw them (steer.go, plan 019 §3.10). steers is the session's box,
@@ -854,6 +873,20 @@ func (t *turn) overflowed(err error) bool {
 	return errors.Is(classify(err, t.model.id()), ErrContextTooLarge)
 }
 
+// classify is the turn's failure as the session returns it: classify on the
+// turn's model, and an overflow marked Compacted when the turn compacted for
+// one (overflowCompacted, §3.12) — then it failed even after compacting;
+// otherwise nothing was compacted for it and the request alone is too large
+// (C9c item 4). mu is held.
+func (t *turn) classify(err error) error {
+	cerr := classify(err, t.model.id())
+	var pe *ProviderError
+	if t.overflowCompacted && errors.As(cerr, &pe) && pe.kind == ErrContextTooLarge {
+		pe.Compacted = true
+	}
+	return cerr
+}
+
 // failedRequest is the failed-request transition (plan 028 §3.11 item 5,
 // R2-1, R3-1): what run does, before the overflow's compaction, with a
 // request that ended without OnStepFinish. Its announced calls are settled
@@ -872,15 +905,20 @@ func (t *turn) overflowed(err error) bool {
 // held reports whether the turn's own user entry is still held by the store:
 // no append of the turn has written it (wrote), so the failed request was
 // the turn's first to carry it, and the next segment sends the prompt again.
-func (t *turn) failedRequest() (held bool) {
+// sent is the failed request's own estimate (requestTokens): what the
+// provider refused, held prompt and carried splices included, which the
+// compaction's text form is budgeted by when the window is unknown (§3.8
+// item 5, review r1-c12).
+func (t *turn) failedRequest() (held bool, sent int64) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	sent = t.requestTokens()
 	t.settleCalls(incomplete)
 	t.resetCalls(true)
 	t.resetDeltas()
 	t.between = true
 	t.stepBase = t.step
-	return !t.userWritten
+	return !t.userWritten, sent
 }
 
 // newSegment opens the next segment, once the compaction — or its failure —
@@ -1250,10 +1288,10 @@ func (t *turn) finish(res *fantasy.AgentResult, err error) (out Result, ferr err
 	case cancelled:
 		return Result{StopReason: StopCancelled}, nil
 	case saveErr != nil:
-		return Result{}, errors.Join(classify(err, t.model.id()),
+		return Result{}, errors.Join(t.classify(err),
 			fmt.Errorf("harness: saving the interrupted answer: %w", t.tools.redactErr(saveErr)))
 	default:
-		return Result{}, classify(err, t.model.id())
+		return Result{}, t.classify(err)
 	}
 }
 

@@ -28,10 +28,10 @@ var ErrEmptyStep = errors.New("llm: the provider ended the step with no content 
 // the step fails once, instead (D-32).
 //
 // It keeps what the harness classifies by: the provider's message, scrubbed
-// of the key; the HTTP status; the auth flag; and whether the provider said
-// the context was too large. Its fields and IsContextTooLarge mirror
-// *fantasy.ProviderError's, so the runner can classify either one the same
-// way.
+// of the key; the HTTP status; the auth flag; whether the provider said the
+// context was too large; and the provider's own code and type for the
+// failure. Its fields and IsContextTooLarge mirror *fantasy.ProviderError's,
+// so the runner can classify either one the same way.
 type MidStreamError struct {
 	// Message is the original error's text, scrubbed.
 	Message string
@@ -40,6 +40,11 @@ type MidStreamError struct {
 	StatusCode int
 	// AuthError is the original's fantasy.ProviderError.AuthError.
 	AuthError bool
+	// Code and Type are the provider's names for the failure, read from the
+	// original's response as it arrived and kept only as ErrorNames keeps
+	// them: "" unless a short lowercase identifier — "insufficient_quota",
+	// say — that the scrub leaves as it is.
+	Code, Type string
 
 	contextTooLarge bool
 }
