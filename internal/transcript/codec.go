@@ -187,16 +187,25 @@ type wireSnapshotIn struct {
 }
 
 type wireTranscriptIn struct {
-	Trimmed     bool          `json:"trimmed"`
-	Windowed    bool          `json:"windowed"`
-	Dropped     int           `json:"dropped"`
-	StreamOpen  bool          `json:"streamOpen"`
-	TailCut     bool          `json:"tailCut"`
-	TodoPlanned int           `json:"todoPlanned"`
-	TodoDone    bool          `json:"todoDone"`
-	OmittedRun  string        `json:"omittedRun"`
-	Omitted     []wireOmitted `json:"omitted"`
-	Entries     []wireEntry   `json:"entries"`
+	Trimmed     bool            `json:"trimmed"`
+	Windowed    bool            `json:"windowed"`
+	Dropped     int             `json:"dropped"`
+	StreamOpen  bool            `json:"streamOpen"`
+	TailCut     bool            `json:"tailCut"`
+	TodoPlanned int             `json:"todoPlanned"`
+	TodoDone    bool            `json:"todoDone"`
+	OmittedRun  string          `json:"omittedRun"`
+	Compacting  *wireCompacting `json:"compacting"`
+	Omitted     []wireOmitted   `json:"omitted"`
+	Entries     []wireEntry     `json:"entries"`
+}
+
+// wireCompacting is a transcript's open compaction (Compacting) as a decoder
+// reads it; the encoder writes it member by member (appendScalars), a zero
+// member absent, and the object present whenever the transcript has one.
+type wireCompacting struct {
+	Since  time.Time `json:"since,omitzero"`
+	Reason string    `json:"reason,omitempty"`
 }
 
 // wireOmitted is one ledger record as a decoder reads it: [bytes] or
@@ -419,6 +428,7 @@ type transcriptScalars struct {
 	todoPlanned int
 	todoDone    bool
 	omittedRun  Kind
+	compacting  *Compacting
 }
 
 func transcriptScalarsOf(id string, sub bool, ts *TranscriptSnap) transcriptScalars {
@@ -427,7 +437,7 @@ func transcriptScalarsOf(id string, sub bool, ts *TranscriptSnap) transcriptScal
 		trimmed: ts.Trimmed, windowed: ts.Windowed, dropped: ts.Dropped,
 		streamOpen: ts.StreamOpen, tailCut: ts.TailCut,
 		todoPlanned: ts.TodoPlanned, todoDone: ts.TodoDone,
-		omittedRun: ts.OmittedRun,
+		omittedRun: ts.OmittedRun, compacting: ts.Compacting,
 	}
 }
 
@@ -478,6 +488,27 @@ func appendScalars(b []byte, sc transcriptScalars) ([]byte, int) {
 		b = appendJSONString(b, name)
 		b = append(b, ',')
 	}
+	if c := sc.compacting; c != nil {
+		// An object, present whenever there is one — {} for an empty one —
+		// with its time as the rest of the codec writes one (RFC 3339 with
+		// nanoseconds, in UTC). A year JSON cannot carry is refused before
+		// this is ever written (appendTranscript).
+		member("compacting")
+		b = append(b, '{')
+		if !c.Since.IsZero() {
+			b = append(b, `"since":"`...)
+			b = c.Since.UTC().AppendFormat(b, time.RFC3339Nano)
+			b = append(b, '"')
+			if c.Reason != "" {
+				b = append(b, ',')
+			}
+		}
+		if c.Reason != "" {
+			b = append(b, `"reason":`...)
+			b = appendJSONString(b, c.Reason)
+		}
+		b = append(b, "},"...)
+	}
 	return b, n
 }
 
@@ -522,6 +553,11 @@ func plainJSON(s string) bool {
 func appendTranscript(jw *jsonWriter, b []byte, sc transcriptScalars, ts *TranscriptSnap) ([]byte, error) {
 	if _, err := kindName(sc.omittedRun); err != nil {
 		return nil, err
+	}
+	if c := sc.compacting; c != nil && !c.Since.IsZero() {
+		if y := c.Since.UTC().Year(); y < 0 || y > 9999 {
+			return nil, fmt.Errorf("transcript: encode snapshot: a compaction since year %d, which JSON cannot carry", y)
+		}
 	}
 	b = append(b, '{')
 	b, n := appendScalars(b, sc)
@@ -764,6 +800,9 @@ func (w *wireTranscriptIn) transcript() (TranscriptSnap, error) {
 		TailCut:     w.TailCut,
 		TodoPlanned: w.TodoPlanned,
 		TodoDone:    w.TodoDone,
+	}
+	if c := w.Compacting; c != nil {
+		ts.Compacting = &Compacting{Since: c.Since.UTC(), Reason: c.Reason}
 	}
 	var err error
 	if ts.OmittedRun, err = parseKind(w.OmittedRun); err != nil {

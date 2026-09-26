@@ -525,12 +525,13 @@ func TestNativeStart(t *testing.T) {
 	}
 	// The three modes are cursor's ids, so every spelling ResolveMode knows
 	// reaches them, and a session with no Options.Mode is in agent mode
-	// (plan 023 §3.6). Commands and the fast toggle stay native's two nos.
+	// (plan 023 §3.6). The one command is /compact (plan 028 §3.12), and the
+	// fast toggle stays a no.
 	wantModes := []ModeInfo{{ID: "agent", Name: "Agent"}, {ID: "plan", Name: "Plan"}, {ID: "ask", Name: "Ask"}}
 	if !reflect.DeepEqual(snap.Modes, wantModes) || snap.CurrentMode != "agent" {
 		t.Fatalf("a native snapshot advertises modes %+v at %q, want %+v at agent", snap.Modes, snap.CurrentMode, wantModes)
 	}
-	if len(snap.Commands) != 0 || FastOption(snap) != nil {
+	if !reflect.DeepEqual(snap.Commands, nativeCommands()) || FastOption(snap) != nil {
 		t.Fatalf("a native snapshot advertises commands %v, fast %v", snap.Commands, FastOption(snap))
 	}
 	// Nothing is written until a turn has output.

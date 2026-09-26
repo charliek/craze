@@ -646,6 +646,53 @@ eventual fix is additive — a `session.cancel{expect: "foreign"}` that answers
 `stale_turn` if the turn has already moved on — behind a future capability,
 not in protocol 1.
 
+## Compaction
+
+A native session compacts its context: it summarizes the conversation so far
+and continues from the summary — on its own when the context nears the
+model's window, when a request is refused as too large, or on request, when
+the user sends `/compact [focus]` (the one command a native session
+advertises, and an ordinary prompt on the wire: no method, no capability). No
+ACP provider compacts through craze, so none of these events ever comes from
+one.
+
+On the event stream a compaction is two `compaction` events, `started` then
+`ended`, `{phase, reason, tokensBefore?, tokensAfter?, err?}`, with the
+event's `agent` naming the sub-agent whose context it was (absent for the
+session's own):
+
+```json
+{"type":"compaction","compaction":{"phase":"started","reason":"manual"},"at":"..."}
+{"type":"compaction","compaction":{"phase":"ended","reason":"manual","tokensBefore":890000,"tokensAfter":21000},"at":"..."}
+{"type":"compaction","agent":"child-1","compaction":{"phase":"ended","reason":"overflow","tokensBefore":300000,"err":"native: provider \"x\" failed (HTTP 500)"},"at":"..."}
+```
+
+`reason` is `auto`, `manual` or `overflow` — an **open string**, like the
+foreign turn's: an unknown value is still a compaction. An `ended` carries
+`tokensBefore`, the context's estimated size before it, and either
+`tokensAfter`, its estimated size after, or `err`, why no summary was written.
+A `session/load` replay carries only the `ended` of each stored compaction, in
+place — with the `/compact …` user event before it for one the user asked
+for — stamped `replayed` like the rest of the replay.
+
+Every `started` is followed by its `ended`, whatever becomes of the
+compaction. A client folding the stream draws "compacting context…" from the
+`started` until the `ended`, and also stops at whatever ends the turn it ran
+in — for the session's own, the turn's ending (`done`, `error`, `turn` ended,
+a `foreign_turn` ending) or a replay's end; for a child's, that child's
+`finished` — so a lost `ended` can never leave it up. The `ended` draws one
+note in the transcript, `context compacted · 890k → 21k tokens` (`on request`
+for `manual`, `context was too large — compacted` for `overflow`), or
+`compaction failed: <err>`.
+
+A snapshot carries an open compaction on the transcript it belongs to — the
+main one or a child's — as `compacting {since, reason}`, absent when none is
+open, so a client that attaches mid-compaction draws the same "compacting
+context…" until the `ended` it folds next. Both fields are additive: a client
+that does not know them ignores the kind and the member (see [Tolerant
+inbound, strict outbound](#tolerant-inbound-strict-outbound)), and neither
+bumps a codec version.
+
 ## Errors and retry
 
 A refused call's `error` object:

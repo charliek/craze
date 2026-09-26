@@ -8,6 +8,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/charliek/craze/internal/agent"
+	"github.com/charliek/craze/internal/transcript"
 )
 
 func (m *Model) ensureSub(id string) *pane {
@@ -408,7 +409,10 @@ func (m Model) subagentSpinnerView() string {
 		return ""
 	}
 	activity := sanitizeLine(info.Activity)
-	if activity == "" {
+	switch {
+	case m.compacting(info.ID):
+		activity = transcript.CompactingLabel
+	case activity == "":
 		activity = "Working"
 	}
 	text := activity + " · " + m.subElapsed(info)

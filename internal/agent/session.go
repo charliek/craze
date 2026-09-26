@@ -146,6 +146,39 @@ const (
 	// ending every one of them now gets, from the ask registry
 	// (AskRegistry, asks.go), which is its one author.
 	EventAsk EventType = "ask"
+	// EventCompaction is one end of a compaction of a session's context (plan
+	// 028 §3.13): the native harness summarizing the conversation so far to
+	// free context — on its own at the threshold, on request (/compact), or
+	// after a request the model's window refused. Event.Compaction carries
+	// it, and Event.Agent names the sub-agent whose context it was, "" for
+	// the session's own. Every started is followed by its ended; a load's
+	// replay has only the ended of each stored compaction. No ACP provider
+	// emits it.
+	EventCompaction EventType = "compaction"
+)
+
+// CompactionInfo is Event.Compaction: one end of one compaction (plan 028
+// §3.13). Phase is CompactionStarted or CompactionEnded. Reason is
+// CompactionAuto, CompactionManual or CompactionOverflow — an open string,
+// so a reason a later craze adds is still a compaction to a client that does
+// not know it. An ended one carries TokensBefore, the context's estimated
+// size before it, and either TokensAfter, its estimated size after, or Err,
+// why no summary was written: one line, redacted.
+type CompactionInfo struct {
+	Phase        string
+	Reason       string
+	TokensBefore int64
+	TokensAfter  int64
+	Err          string
+}
+
+// A CompactionInfo's phases and reasons.
+const (
+	CompactionStarted  = "started"
+	CompactionEnded    = "ended"
+	CompactionAuto     = "auto"
+	CompactionManual   = "manual"
+	CompactionOverflow = "overflow"
 )
 
 // ReplayInfo is one end of the session/load replay bracket.
@@ -483,8 +516,8 @@ type Event struct {
 	// plan → ask → plan leaves it exactly as it was — so the event has to
 	// carry the fact that it changed at all.
 	Mode string
-	// Agent is the child session id for EventText/Thought/Tool/User that
-	// belong to a sub-agent. "" is the main session.
+	// Agent is the child session id for EventText/Thought/Tool/User/
+	// Compaction that belong to a sub-agent. "" is the main session.
 	Agent          string
 	Tool           *ToolEvent
 	Todos          []Todo
@@ -512,6 +545,8 @@ type Event struct {
 	// rather than produced now. It is stamped on every event emitted between
 	// the two EventReplay phases.
 	Replayed bool
+	// Compaction is set on EventCompaction: one end of one compaction.
+	Compaction *CompactionInfo
 	// Turn is set on EventTurn: one phase of one engine-driven turn.
 	Turn *TurnInfo
 	// Ask is set on EventAsk: how one ask ended (plan 021 §3.6). It carries

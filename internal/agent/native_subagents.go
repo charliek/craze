@@ -303,6 +303,12 @@ func (s *nativeSession) subagentEvent(e harness.SubagentEvent) {
 		if tokens > 0 {
 			s.subagentProgress(id, nativeSafe{red: s.redactor()}, func(info *SubagentInfo) { info.TokensUsed += tokens })
 		}
+	case harness.Compacted:
+		// The child compacts as the parent does (plan 028 §3.17): its pair
+		// goes out under its id, so the child's transcript view draws the
+		// note and its working line says so while it runs. What it cost is
+		// already in the child's usage feeds, harness-side (X34).
+		s.compacted(id, c)
 	case harness.Retrying, harness.Todos, harness.Steered, harness.Diag:
 		// Dropped, by name. A retry discards what its step streamed, which the
 		// runner's own text rule already does (childObserver); a child has no

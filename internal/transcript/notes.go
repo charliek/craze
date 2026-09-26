@@ -33,7 +33,76 @@ const (
 	// entries were dropped (Trimmed). It is the client's row, not an entry;
 	// the wording lives here so every client draws the same one.
 	TrimmedNote = "… earlier transcript trimmed"
+	// CompactingLabel is what a client's working line reads while a
+	// transcript has a compaction open (Transcript.Compacting, plan 028
+	// §3.13). Like TrimmedNote it is the client's to draw, not an entry; the
+	// wording lives here so every client draws the same one.
+	CompactingLabel = "compacting context…"
 )
+
+// The compaction notes (plan 028 §3.13): the row a compaction's ended draws,
+// by its reason, each followed by " · <before> → <after> tokens"
+// (compactionNote), and the failure's, followed by ": <why>".
+const (
+	NoteCompacted          = "context compacted"
+	NoteCompactedOnRequest = "context compacted on request"
+	NoteCompactedOverflow  = "context was too large — compacted"
+	NoteCompactionFailed   = "compaction failed"
+)
+
+// compactionNote is the row an ended compaction draws: how it went, and what
+// it did to the context's estimated size — `context compacted · 890k → 21k
+// tokens`, worded by the reason (a reason this build does not know reads as
+// an automatic one: it is still a compaction) — or why it failed,
+// `compaction failed: <err>`, the error folded onto one line.
+func compactionNote(c *agent.CompactionInfo) string {
+	if c.Err != "" {
+		if why := sanitizeLine(c.Err); why != "" {
+			return NoteCompactionFailed + ": " + why
+		}
+		return NoteCompactionFailed
+	}
+	head := NoteCompacted
+	switch c.Reason {
+	case agent.CompactionManual:
+		head = NoteCompactedOnRequest
+	case agent.CompactionOverflow:
+		head = NoteCompactedOverflow
+	}
+	return head + " · " + tokenCount(c.TokensBefore) + " → " + tokenCount(c.TokensAfter) + " tokens"
+}
+
+// tokenCount is a token count as the compaction note says it: the number
+// itself under a thousand, else in k or M to three significant figures with
+// trailing zeros dropped — 850, 1.23k, 12.3k, 890k, 1.21M, 2M. A negative
+// count, which no harness reports, reads as 0.
+func tokenCount(n int64) string {
+	if n < 1000 {
+		return strconv.FormatInt(max(n, 0), 10)
+	}
+	v, unit := float64(n)/1e3, "k"
+	if n >= 1e6 {
+		v, unit = float64(n)/1e6, "M"
+	}
+	digits := 0
+	switch {
+	case v < 10:
+		digits = 2
+	case v < 100:
+		digits = 1
+	}
+	s := strconv.FormatFloat(v, 'f', digits, 64)
+	if unit == "k" {
+		if r, err := strconv.ParseFloat(s, 64); err == nil && r >= 1000 {
+			// 999,600 rounds to "1000k": it is a million.
+			s, unit = "1", "M"
+		}
+	}
+	if strings.Contains(s, ".") {
+		s = strings.TrimRight(strings.TrimRight(s, "0"), ".")
+	}
+	return s + unit
+}
 
 // stopCancelled is the one stop reason the fold reads: EventDone's, and a
 // synthetic TurnEnded's.

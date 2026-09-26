@@ -92,6 +92,7 @@ var kinds = map[agent.EventType]kindRow{
 	agent.EventForeignTurn: {class: classMarker | classStream, main: foldForeignTurn, childIgnored: true},
 	agent.EventReplay:      {class: classMarker | classStream, main: foldReplay, childIgnored: true},
 	agent.EventTurn:        {class: classState | classStream, main: foldTurn, childIgnored: true},
+	agent.EventCompaction:  {class: classMarker | classStream, main: foldCompaction, child: childCompaction},
 }
 
 // ------------------------------------------------------------ stream kinds
@@ -145,6 +146,8 @@ func foldError(m *Model, ev agent.Event) {
 	if ev.Err == nil {
 		return
 	}
+	// The turn is over, whatever becomes of its row (P34).
+	m.Main.clearCompaction()
 	text, known := m.errText(ev.Err)
 	if known && text == "" {
 		return
@@ -258,6 +261,7 @@ func foldAsk(m *Model, ev agent.Event) {
 func foldDone(m *Model, ev agent.Event) {
 	at := m.stamp(ev.At)
 	m.Main.closeStream(at)
+	m.Main.clearCompaction()
 	if ev.StopReason == stopCancelled {
 		m.Main.addNote(NoteCancelled, at)
 	}
@@ -274,7 +278,11 @@ func foldForeignTurn(m *Model, ev agent.Event) {
 	m.Main.closeStream(at)
 	if ev.ForeignTurn != nil && ev.ForeignTurn.Running {
 		m.Main.addNote(noteForForeignTurn(ev.ForeignTurn.Reason), at)
+		return
 	}
+	// A foreign turn has no EventDone of its own: its end is its turn's end,
+	// and a compaction a native wake ran cannot outlive it (P34).
+	m.Main.clearCompaction()
 }
 
 // foldReplay is a session/load replay bracket. Its end closes the last
@@ -294,6 +302,9 @@ func foldReplay(m *Model, ev agent.Event) {
 		m.fc.state = true
 		at := m.stamp(ev.At)
 		m.Main.closeStream(at)
+		// A replay carries only the ended of each compaction, so nothing it
+		// folded is open — but a replay's end is where nothing can be (P34).
+		m.Main.clearCompaction()
 		m.Main.addNote(NoteRestored, at)
 	}
 }
@@ -321,6 +332,9 @@ func foldTurn(m *Model, ev agent.Event) {
 			m.turn.ID = ""
 		}
 		m.fc.state = true
+		// Whatever turn it names, the session is between turns: no
+		// compaction of the main transcript's is still running (P34).
+		m.Main.clearCompaction()
 		failed := tu.Err != ""
 		switch {
 		case tu.Synthetic && !failed && tu.StopReason == stopCancelled:
@@ -328,6 +342,29 @@ func foldTurn(m *Model, ev agent.Event) {
 		case tu.Synthetic && failed:
 			m.Main.addError(tu.Err, m.stamp(ev.At))
 		}
+	}
+}
+
+// -------------------------------------------------------------- compaction
+
+func foldCompaction(m *Model, ev agent.Event) { childCompaction(m.Main, ev) }
+
+// childCompaction is one end of a compaction of the context of the transcript
+// the event names — the main session's, or a child's (plan 028 §3.13, §3.17):
+// a started closes the run above it and opens Compacting; an ended clears it
+// and draws the note, in place. A replay's ended, with no started before it,
+// draws the note alone. A phase that is neither, or a nil payload, is
+// ignored.
+func childCompaction(t *Transcript, ev agent.Event) {
+	c := ev.Compaction
+	if c == nil {
+		return
+	}
+	switch c.Phase {
+	case agent.CompactionStarted:
+		t.openCompaction(c.Reason, t.model.stamp(ev.At))
+	case agent.CompactionEnded:
+		t.endCompaction(c, t.model.stamp(ev.At))
 	}
 }
 
@@ -388,8 +425,10 @@ func foldSubagent(m *Model, ev agent.Event) {
 	row.truncated = false
 	switch ev.SubagentChange {
 	case agent.SubagentChangeSpawned:
-		// A new attempt no longer holds a finish slot.
+		// A new attempt no longer holds a finish slot, nor an earlier
+		// attempt's compaction.
 		row.finish = 0
+		t.clearCompaction()
 	case agent.SubagentChangeFinished:
 		// A finish is claimed once per run: a restated finish is not the
 		// newest one (subagents.go stampFinishLocked).
@@ -405,6 +444,8 @@ func foldSubagent(m *Model, ev agent.Event) {
 		// one, like every other event-driven close (r1: the TUI's
 		// applySubagentEvent carried the same fix).
 		t.closeStream(m.stamp(ev.At))
+		// Nor does it compact any more: its end is its turn's (P34).
+		t.clearCompaction()
 		// A finished child streams no more (a new attempt starts over with
 		// spawned), so its builder's capacity goes now rather than with the
 		// row's eviction: children are where transcripts are many (r2
