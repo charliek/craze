@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -110,8 +111,10 @@ func TestAChildIsNotResumable(t *testing.T) {
 // for the session — the directory missing included; a file named for it that
 // is not its transcript is never "not there" (plan 028 R2-15). The files
 // beside a transcript (its plan, a torn copy, a leftover temporary file) are
-// not candidates, nor is another session's whose id ends in _<id>, nor a
-// directory.
+// not candidates, and another session's own file, whose id ends in _<id>, is
+// passed over. Anything named for the session that is not a regular file —
+// a directory, a named pipe (never opened for reading, which would block), a
+// link to either — is ErrCorrupt, naming it.
 func TestFindErrors(t *testing.T) {
 	const id = "00000000-0000-4000-8000-000000000001"
 	home := filepath.Join(t.TempDir(), "native")
@@ -162,13 +165,41 @@ func TestFindErrors(t *testing.T) {
 			}
 		})
 	}
-	t.Run("a directory named like one", func(t *testing.T) {
+	for what, mk := range map[string]func(path string) error{
+		"a directory named like one":  func(path string) error { return os.Mkdir(path, 0o700) },
+		"a named pipe named like one": func(path string) error { return syscall.Mkfifo(path, 0o600) },
+		"a link to a directory named like one": func(path string) error {
+			target := filepath.Join(dir, "elsewhere")
+			if err := os.Mkdir(target, 0o700); err != nil {
+				return err
+			}
+			return os.Symlink(target, path)
+		},
+	} {
+		t.Run(what, func(t *testing.T) {
+			clear(t)
+			if err := os.MkdirAll(dir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := mk(filepath.Join(dir, name)); err != nil {
+				t.Fatal(err)
+			}
+			_, err := Find(home, testWorkspace, id)
+			if !errors.Is(err, ErrCorrupt) || errors.Is(err, ErrNoTranscript) || !strings.Contains(err.Error(), name) {
+				t.Fatalf("Find = %v, want ErrCorrupt naming %s", err, name)
+			}
+		})
+	}
+	t.Run("a dangling link named like one", func(t *testing.T) {
 		clear(t)
-		if err := os.MkdirAll(filepath.Join(dir, name), 0o700); err != nil {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := Find(home, testWorkspace, id); !errors.Is(err, ErrNoTranscript) {
-			t.Fatalf("Find = %v, want ErrNoTranscript", err)
+		if err := os.Symlink(filepath.Join(dir, "gone"), filepath.Join(dir, name)); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := Find(home, testWorkspace, id); err == nil || errors.Is(err, ErrNoTranscript) {
+			t.Fatalf("Find = %v, want an error that is not ErrNoTranscript", err)
 		}
 	})
 
@@ -204,5 +235,93 @@ func TestFindErrors(t *testing.T) {
 		if _, err := Find(bad[0], bad[1], id); err == nil || errors.Is(err, ErrNoTranscript) {
 			t.Errorf("Find(home %q, cwd %q) = %v, want a refusal of the relative path", bad[0], bad[1], err)
 		}
+	}
+}
+
+// TestReadHeaderReadsOnlyTheHeader: ReadHeader is the header the store wrote,
+// read from the first line alone, so damage past it is Open's to find, not
+// ReadHeader's; the control is Load of the same file, which refuses it.
+func TestReadHeaderReadsOnlyTheHeader(t *testing.T) {
+	opts := testOptions(t)
+	opts.ToolProfile, opts.Tools = "opencode", []byte(`[{"name":"read"}]`)
+	s := newStore(t, opts)
+	turn(t, s, "q1", "a1", kimi)
+	turn(t, s, "q2", "a2", kimi)
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(s.Path())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ls := strings.SplitAfter(string(b), "\n")
+	ls[2] = "{not json\n"
+	if err := os.WriteFile(s.Path(), []byte(strings.Join(ls, "")), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(s.Path()); !errors.Is(err, ErrCorrupt) {
+		t.Fatalf("control: Load = %v, want ErrCorrupt", err)
+	}
+	h, err := ReadHeader(s.Path())
+	if err != nil || h != s.Header() {
+		t.Fatalf("ReadHeader = %+v, %v; want %+v", h, err, s.Header())
+	}
+}
+
+// TestFindTakesTheSuffixRule (plan 028 §3.2, astra r1-c0c1): every file whose
+// name ends in _<id>.jsonl is a candidate, whatever its stamp holds, and its
+// header decides. The session's own header makes it the transcript; another
+// session's own file — whose name also ends in _<its id>.jsonl, as a session
+// x_<id>'s does — is passed over, so it never poisons the session's lookup;
+// any other header is ErrCorrupt, and so are two files of the session's own.
+func TestFindTakesTheSuffixRule(t *testing.T) {
+	const id = "00000000-0000-4000-8000-000000000001"
+	const other = "00000000-0000-4000-8000-000000000009"
+	own := "20260918T120000Z_" + id + ".jsonl"
+	odd := "20260918_extra_" + id + ".jsonl"    // a stamp with a '_' in it
+	xs := "20260918T120000Z_x_" + id + ".jsonl" // session x_<id>'s own
+	for what, tc := range map[string]struct {
+		files map[string]string // file name → the id its header names
+		want  string            // the file Find takes; "" when it refuses
+		err   error
+	}{
+		"a stamp with an underscore":                   {map[string]string{odd: id}, odd, nil},
+		"beside session x_<id>'s own":                  {map[string]string{own: id, xs: "x_" + id}, own, nil},
+		"session x_<id>'s own alone":                   {map[string]string{xs: "x_" + id}, "", ErrNoTranscript},
+		"named as x_<id>'s, holding the session's":     {map[string]string{xs: id}, xs, nil},
+		"two of its own, one with an odd stamp":        {map[string]string{own: id, odd: id}, "", ErrCorrupt},
+		"an odd stamp holding another session's":       {map[string]string{odd: other}, "", ErrCorrupt},
+		"named as x_<id>'s, holding a third session's": {map[string]string{xs: other}, "", ErrCorrupt},
+	} {
+		t.Run(what, func(t *testing.T) {
+			home := filepath.Join(t.TempDir(), "native")
+			dir := filepath.Join(home, "sessions", Slug(testWorkspace))
+			if err := os.MkdirAll(dir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			for name, hid := range tc.files {
+				b, err := encodeHeader(Header{Version: FormatVersion, ID: hid, Timestamp: fixedTime, Cwd: testWorkspace})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(dir, name), append(b, '\n'), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			got, err := Find(home, testWorkspace, id)
+			if tc.want != "" {
+				if err != nil || got != filepath.Join(dir, tc.want) {
+					t.Fatalf("Find = %q, %v; want %s", got, err, tc.want)
+				}
+			} else if !errors.Is(err, tc.err) || (!errors.Is(tc.err, ErrNoTranscript) && errors.Is(err, ErrNoTranscript)) {
+				t.Fatalf("Find = %q, %v; want %v", got, err, tc.err)
+			}
+			// Session x_<id> finds its own file whatever lies beside it.
+			if hid, ok := tc.files[xs]; ok && hid == "x_"+id {
+				if got, err := Find(home, testWorkspace, "x_"+id); err != nil || got != filepath.Join(dir, xs) {
+					t.Fatalf("Find of x_<id> = %q, %v; want %s", got, err, xs)
+				}
+			}
+		})
 	}
 }

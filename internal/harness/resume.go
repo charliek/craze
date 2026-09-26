@@ -26,9 +26,9 @@ import (
 // the incarnation's contract — the rebuilt system prompt's digest and the
 // tools' — so the tools must exist before it; and the tools are the header's
 // profile's, which must be known before them. The header is the file's first
-// line and never changes once written, so it is read first, unlocked (Load);
-// everything else is read from the transcript as the store's Open read it,
-// under the lock.
+// line and never changes once written, so it alone is read first, unlocked
+// (ReadHeader); everything else is read from the transcript as the store's
+// Open read it, under the lock, which also refuses a damaged file.
 
 // openResumed is Open for Options.Resume. s is Open's session, its runner and
 // base set; everything else is filled in here.
@@ -62,11 +62,11 @@ func (s *Session) openResumed(opts Options) (_ *Session, err error) {
 	if err != nil {
 		return nil, fail(redactErrWith(early, err))
 	}
-	head, err := store.Load(path)
+	head, err := store.ReadHeader(path)
 	if err != nil {
 		return nil, fail(redactErrWith(early, err))
 	}
-	profile := head.Header.ToolProfile
+	profile := head.ToolProfile
 
 	// The tools and the prompt are the header's profile's, whatever model the
 	// session resumes on, and are rebuilt: the prompt is frozen per

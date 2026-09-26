@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"charm.land/fantasy"
 	"github.com/charliek/craze/internal/harness/tool"
 )
 
@@ -280,5 +281,73 @@ func TestBranchWalksThePath(t *testing.T) {
 	}
 	if got, _ := s.Transcript().Branch(s.Transcript().Leaf()); len(got) != 4 {
 		t.Fatalf("a fresh copy's branch has %d entries, want 4", len(got))
+	}
+}
+
+// TestACopySharesNothingMutable (astra r1-c0c1): the store's Transcript, and
+// a Branch of any transcript, are copies a caller can write through — the
+// todo list and its items, the usage, the sub-agent usage rows, a message's
+// parts list — without reaching what they were copied from: the store's next
+// copy, and the transcript the branch was taken from, read as before. Every
+// field is compared by the entry's line, which holds them all.
+func TestACopySharesNothingMutable(t *testing.T) {
+	s := newStore(t, testOptions(t))
+	if err := s.AppendUser(withTurn(user("q", kimi), 1)); err != nil {
+		t.Fatal(err)
+	}
+	a := calls(kimi, "call_a")
+	a.Usage = &Usage{Input: 10, Output: 5}
+	tool := withTodos(results(kimi, "call_a"), []Todo{{ID: "read", Content: "read the notes", Status: "pending"}})
+	tool.SubagentUsage = []ModelUsage{{Provider: "test", Model: "test/b", WireModel: "wire-b", Usage: Usage{Input: 1}}}
+	step(t, s, nil, a, tool)
+	step(t, s, nil, answer("", "done", kimi), nil)
+
+	lines := func(es []Entry) []string {
+		t.Helper()
+		out := make([]string, len(es))
+		for i, e := range es {
+			b, err := encodeEntry(e)
+			if err != nil {
+				t.Fatal(err)
+			}
+			out[i] = string(b)
+		}
+		return out
+	}
+	scribble := func(es []Entry) {
+		for i := range es {
+			e := &es[i]
+			if e.Todos != nil {
+				(*e.Todos)[0].Status = "cancelled"
+				*e.Todos = append(*e.Todos, Todo{ID: "added", Content: "x", Status: "pending"})
+			}
+			if e.Usage != nil {
+				e.Usage.Input = 999
+			}
+			for j := range e.SubagentUsage {
+				e.SubagentUsage[j].Usage.Input = 999
+			}
+			if len(e.Message.Content) > 0 {
+				e.Message.Content[0] = fantasy.TextPart{Text: "rewritten"}
+			}
+		}
+	}
+
+	want := lines(s.Transcript().Entries)
+	scribble(s.Transcript().Entries)
+	if got := lines(s.Transcript().Entries); !slices.Equal(got, want) {
+		t.Fatalf("a write through Transcript's copy reached the store:\n%s\nwant\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+	}
+	tr := s.Transcript()
+	branch, err := tr.Branch(tr.Leaf())
+	if err != nil {
+		t.Fatal(err)
+	}
+	scribble(branch)
+	if got := lines(tr.Entries); !slices.Equal(got, want) {
+		t.Fatalf("a write through a Branch reached its transcript:\n%s\nwant\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+	}
+	if got := lines(s.Transcript().Entries); !slices.Equal(got, want) {
+		t.Fatal("a write through a Branch reached the store")
 	}
 }

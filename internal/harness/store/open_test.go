@@ -472,6 +472,70 @@ func TestOpenRefusesToTrimANewerEntryType(t *testing.T) {
 	})
 }
 
+// TestOpenNeverTrimsANewerLine (A2, astra r1-c0c1): what Open would cut is
+// judged line by line, not by the entries that joined the tree. A whole last
+// line of a type this craze does not know is a newer craze's even when it
+// fails this craze's checks — a parent it never saw, an id it repeats, an
+// envelope it refuses — and so never joined the entries: Open refuses with
+// ErrNewerTranscript and leaves every byte, where Load, read-only, still
+// skips the line as it always has. The controls: a known type's line failing
+// the same check, and a torn line of the newer type, are cut and kept aside.
+func TestOpenNeverTrimsANewerLine(t *testing.T) {
+	u1 := userLine(t, "00000001", "", "q1")
+	a1 := replyLine(t, "00000002", "00000001", "", "a1", kimi)
+	whole := lines(headerText(t), u1, a1)
+	for name, last := range map[string]string{
+		"a parent it never saw":     `{"type":"compaction","id":"new-id","parentId":"missing-id","timestamp":"2026-09-18T12:00:00Z"}` + "\n",
+		"no newline":                `{"type":"compaction","id":"new-id","parentId":"missing-id","timestamp":"2026-09-18T12:00:00Z"}`,
+		"an id it repeats":          `{"type":"compaction","id":"00000002","parentId":"00000002","timestamp":"2026-09-18T12:00:00Z"}` + "\n",
+		"an envelope it refuses":    `{"type":"compaction","timestamp":"2026-09-18T12:00:00Z"}` + "\n",
+		"a type that is not a name": `{"type":7,"id":"new-id","parentId":"00000002","timestamp":"2026-09-18T12:00:00Z"}` + "\n",
+		"no type at all":            `{"id":"new-id","parentId":"00000002","timestamp":"2026-09-18T12:00:00Z"}` + "\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			raw := whole + last
+			path := writeFile(t, raw)
+			if tr, err := Load(path); err != nil || len(tr.Entries) != 2 {
+				t.Fatalf("control: Load = %v; want the line skipped as before", err)
+			}
+			rec := &steps{}
+			opts := testOptions(t)
+			opts.SessionID, opts.fsStep = "", rec.seam
+			if _, err := Open(opts, path); !errors.Is(err, ErrNewerTranscript) {
+				t.Fatalf("Open = %v, want ErrNewerTranscript", err)
+			}
+			if got, _ := os.ReadFile(path); string(got) != raw || len(rec.names) != 0 || len(tornCopies(t, path)) != 0 {
+				t.Fatalf("a refused Open touched the file (steps %q)", rec.names)
+			}
+			if lockedElsewhere(t, path) {
+				t.Fatal("the refused Open kept the lock")
+			}
+		})
+	}
+	for name, last := range map[string]string{
+		"control: a known type's line failing the check": `{"type":"model_change","id":"new-id","parentId":"missing-id","timestamp":"2026-09-18T12:00:00Z","provider":"p","model":"m","wire_model":"w"}` + "\n",
+		"control: a torn line of the newer type":         `{"type":"compaction","id":"new-id","parentId":"missing-`,
+		"control: zero bytes":                            "\x00\x00\x00\x00",
+	} {
+		t.Run(name, func(t *testing.T) {
+			path := writeFile(t, whole+last)
+			opts := testOptions(t)
+			opts.SessionID = ""
+			reopen(t, opts, path)
+			if got, _ := os.ReadFile(path); string(got) != whole {
+				t.Fatalf("the transcript after Open is\n%s\nwant\n%s", got, whole)
+			}
+			copies := tornCopies(t, path)
+			if len(copies) != 1 {
+				t.Fatalf("copies beside the transcript = %q, want one", copies)
+			}
+			if got, _ := os.ReadFile(copies[0]); string(got) != last {
+				t.Fatalf("the copy holds %q, want %q", got, last)
+			}
+		})
+	}
+}
+
 // TestOpenRollsBackEveryCrashPrefix (A3): a crash can persist any byte
 // prefix of an append. For every prefix of one step's — written by a
 // reopened store, so a resume entry, then a held model change, the turn's

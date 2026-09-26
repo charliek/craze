@@ -1,6 +1,8 @@
 package store
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -17,9 +19,10 @@ var (
 	ErrBusy = errors.New("store: busy")
 
 	// ErrNewerTranscript is Open's refusal to cut the tail off a transcript
-	// when what it would cut holds an entry of a type this craze does not
+	// when what it would cut holds a whole line of a type this craze does not
 	// know: a newer craze wrote it, maybe as a whole unit this one cannot
-	// tell from a cut step, and a repair must never destroy that.
+	// tell from a cut step, maybe under rules this one would refuse it by,
+	// and a repair must never destroy that.
 	ErrNewerTranscript = errors.New("store: written by a newer craze; not trimming")
 
 	// ErrNotResumable is Find's and Open's refusal of a sub-agent's
@@ -52,9 +55,10 @@ const (
 //     ErrCorrupt.
 //  3. When the file extends past the end of the last complete step — a torn
 //     last line, or a cut step — it cuts the file back to that end, the
-//     transcript Load would have returned. If anything cut is an entry of a
-//     type this craze does not know, it refuses with ErrNewerTranscript
-//     instead. Otherwise the cut bytes are first written to
+//     transcript Load would have returned. If any line it would cut is a
+//     whole JSON object of a type this craze does not know, it refuses with
+//     ErrNewerTranscript instead, whether or not the line joined the entries
+//     (see newerLine). Otherwise the cut bytes are first written to
 //     <stem>.torn-<UTC yyyymmddThhmmssZ> beside the transcript (0600, never
 //     over an existing file), which is fsynced, and so is the directory;
 //     only then is the transcript truncated. A failure before the truncate
@@ -80,7 +84,7 @@ func Open(opts Options, path string) (_ *Store, err error) {
 	}()
 	if err := flockNB(f.Fd()); err != nil {
 		if errors.Is(err, syscall.EWOULDBLOCK) {
-			return nil, fmt.Errorf("%w: native session %s is open in another process", ErrBusy, idFromPath(path))
+			return nil, fmt.Errorf("%w: native session %s is open in another process", ErrBusy, sessionName(opts.SessionID, path))
 		}
 		return nil, fmt.Errorf("store: lock %s: %w", path, err)
 	}
@@ -103,9 +107,7 @@ func Open(opts Options, path string) (_ *Store, err error) {
 	}
 
 	s := newBare(opts)
-	read := p.t.Entries // every entry that decoded, before the roll back
-	keep := p.t.dropIncompleteTurn()
-	if err := s.repair(f, path, data, p.keptLen(keep), read[keep:]); err != nil {
+	if err := s.repair(f, path, data, p.keptLen(p.t.dropIncompleteTurn())); err != nil {
 		return nil, err
 	}
 	s.path, s.t, s.f = path, p.t, f
@@ -114,10 +116,8 @@ func Open(opts Options, path string) (_ *Store, err error) {
 }
 
 // repair cuts data, the transcript read through f, back to its first kept
-// bytes, and ends it in a newline; see Open, step 3. cut is the entries in
-// the bytes it cuts that decoded: a torn last line never did, and holds no
-// whole entry of any type.
-func (s *Store) repair(f *os.File, path string, data []byte, kept int, cut []Entry) error {
+// bytes, and ends it in a newline; see Open, step 3.
+func (s *Store) repair(f *os.File, path string, data []byte, kept int) error {
 	if kept == len(data) {
 		if len(data) == 0 || data[len(data)-1] == '\n' {
 			return nil
@@ -128,10 +128,8 @@ func (s *Store) repair(f *os.File, path string, data []byte, kept int, cut []Ent
 		return s.syncTranscript(f, path)
 	}
 
-	for _, e := range cut {
-		if !knownType(e.Type) {
-			return fmt.Errorf("%w: %s: entry %q of type %q is past the last complete step", ErrNewerTranscript, path, e.ID, e.Type)
-		}
+	if typ, ok := newerLine(data[kept:]); ok {
+		return fmt.Errorf("%w: %s: a line of type %s is past the last complete step", ErrNewerTranscript, path, typ)
 	}
 	torn := strings.TrimSuffix(path, ".jsonl") + ".torn-" + s.now().UTC().Format(fileStampLayout)
 	created, err := s.saveTorn(torn, data[kept:])
@@ -149,6 +147,35 @@ func (s *Store) repair(f *os.File, path string, data []byte, kept int, cut []Ent
 	// From here the transcript is cut, and the copy is the only place the
 	// cut bytes are: it stays, whatever fails next.
 	return s.syncTranscript(f, path)
+}
+
+// newerLine finds, in cut, the bytes Open would cut, a line a newer craze may
+// have written: a whole JSON object whose type (typ, as the line spells it,
+// or "(none)") is not one this craze knows. The lines are judged by their
+// bytes, not by the entries they became, because a newer type's line can
+// fail this craze's checks — a parent this craze never saw, an id it repeats,
+// an envelope it refuses — and then, as the last line, it is skipped like a
+// torn one and never joins the entries at all. Anything else may be cut: a
+// line that is not a JSON object is a torn write (a prefix of a line is never
+// a whole object, and zero bytes are not JSON), and a known type's line is
+// this craze's own, whole or not.
+func newerLine(cut []byte) (typ string, ok bool) {
+	for line := range bytes.SplitSeq(cut, []byte("\n")) {
+		var obj map[string]json.RawMessage
+		if json.Unmarshal(line, &obj) != nil || obj == nil {
+			continue
+		}
+		raw, has := obj["type"]
+		var t string
+		if has && json.Unmarshal(raw, &t) == nil && (t == typeSession || knownType(t)) {
+			continue
+		}
+		if !has {
+			return "(none)", true
+		}
+		return string(raw), true
+	}
+	return "", false
 }
 
 // saveTorn writes the bytes Open cuts to a new file at torn, and makes both
@@ -206,13 +233,17 @@ func writeAll(f *os.File, b []byte) error {
 	return err
 }
 
-// idFromPath is the session id in a transcript's file name,
-// <UTC stamp>_<session id>.jsonl, for an error that has nothing better to
-// name the session by; the file's base name when it has no such shape.
-func idFromPath(path string) string {
-	base := filepath.Base(path)
-	if _, id, ok := strings.Cut(strings.TrimSuffix(base, ".jsonl"), "_"); ok && id != "" {
+// sessionName is what an error names the session at path by, before its
+// header is read: id, the caller's (Options.SessionID), when it has one; else
+// the id in the file's name, <UTC stamp>_<session id>.jsonl as New writes it;
+// else the file's base name.
+func sessionName(id, path string) string {
+	if id != "" {
 		return id
+	}
+	base := filepath.Base(path)
+	if _, named, ok := strings.Cut(strings.TrimSuffix(base, ".jsonl"), "_"); ok && named != "" {
+		return named
 	}
 	return base
 }

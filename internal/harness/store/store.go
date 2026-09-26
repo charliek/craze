@@ -81,7 +81,6 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -705,12 +704,18 @@ func (s *Store) ContextWithResults(current Model) ([]fantasy.Message, []bool) {
 // Transcript is a copy of the transcript as the store holds it: the header,
 // and every entry written, or read back and kept by Open, in file order.
 // Held entries are not in it. The copy's entry list is its own, so later
-// appends do not change it; the messages' parts are shared, as Context's are.
-// It works after Close.
+// appends do not change it, and so is each entry (Entry.clone), so a caller
+// that changes one does not change the store's; only the messages' parts,
+// and the provider options, are shared, as Context's are. It works after
+// Close.
 func (s *Store) Transcript() *Transcript {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return &Transcript{Header: s.t.Header, Entries: slices.Clone(s.t.Entries), index: maps.Clone(s.t.index)}
+	entries := make([]Entry, len(s.t.Entries))
+	for i, e := range s.t.Entries {
+		entries[i] = e.clone()
+	}
+	return &Transcript{Header: s.t.Header, Entries: entries, index: maps.Clone(s.t.index)}
 }
 
 // Close releases the descriptor, and with it the session's lock. Held

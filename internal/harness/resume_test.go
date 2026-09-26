@@ -169,7 +169,8 @@ func TestResumeContinuesTheSameTranscript(t *testing.T) {
 
 // TestResumeRefusals: a session with no file is ErrNoTranscript, and opens
 // nothing; one another session holds is the store's ErrBusy, wrapped with
-// the session's id; and a sub-agent is never resumed.
+// the session's id; a sub-agent is never resumed; and a damaged transcript
+// is the store's ErrCorrupt.
 func TestResumeRefusals(t *testing.T) {
 	f := newFixture(t, "http://127.0.0.1:1/v1")
 	_, err := Open(resumeOptions(f.options(), "0b8f3c1e-0000-4000-8000-000000000000"))
@@ -194,6 +195,30 @@ func TestResumeRefusals(t *testing.T) {
 	opts.Child = &ChildOptions{ID: "child-1"}
 	if _, err := Open(opts); err == nil || !strings.Contains(err.Error(), "never resumed") {
 		t.Fatalf("resuming as a sub-agent = %v; want a refusal", err)
+	}
+
+	// Only the header is read before the store's Open (store.ReadHeader), so
+	// a transcript damaged past it is refused there, and left as it was.
+	id = storedTurn(t, f, f.options(), nil)
+	path, err := store.Find(f.home, f.options().Workspace, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ls := strings.SplitAfter(string(b), "\n")
+	ls[1] = "{not json\n"
+	damaged := strings.Join(ls, "")
+	if err := os.WriteFile(path, []byte(damaged), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Open(resumeOptions(f.options(), id)); !errors.Is(err, store.ErrCorrupt) {
+		t.Fatalf("resuming a damaged transcript = %v; want store.ErrCorrupt", err)
+	}
+	if got, _ := os.ReadFile(path); string(got) != damaged {
+		t.Fatal("a refused resume changed the damaged transcript")
 	}
 }
 

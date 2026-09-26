@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"slices"
 
 	"charm.land/fantasy"
 )
@@ -259,8 +260,9 @@ func (t *Transcript) walk(leaf string) ([]int, error) {
 // Branch is the entries on the path from the root to leaf, in that order:
 // what a resumed session reads its state from and replays, never file order
 // (plan 028, "the path"). Leaf "" is none; an unknown leaf is
-// ErrUnknownEntry. The entries share their messages' parts with the
-// transcript, as Context's do; a caller must not mutate them.
+// ErrUnknownEntry. The entries are copies (Entry.clone): only their messages'
+// parts, and the provider options, are shared with the transcript, as
+// Context's are, and a caller must not mutate those.
 func (t *Transcript) Branch(leaf string) ([]Entry, error) {
 	path, err := t.walk(leaf)
 	if err != nil {
@@ -268,9 +270,27 @@ func (t *Transcript) Branch(leaf string) ([]Entry, error) {
 	}
 	out := make([]Entry, len(path))
 	for k, i := range path {
-		out[len(path)-1-k] = t.Entries[i]
+		out[len(path)-1-k] = t.Entries[i].clone()
 	}
 	return out, nil
+}
+
+// clone is a copy of e that a caller can change without changing e: its own
+// usage, sub-agent usage rows, todo list, and message parts list. What the
+// parts and the message's provider options hold is still shared, as it is
+// in every message Context builds: a caller must not mutate it.
+func (e Entry) clone() Entry {
+	if e.Usage != nil {
+		u := *e.Usage
+		e.Usage = &u
+	}
+	e.SubagentUsage = slices.Clone(e.SubagentUsage)
+	if e.Todos != nil {
+		items := slices.Clone(*e.Todos)
+		e.Todos = &items
+	}
+	e.Message.Content = slices.Clone(e.Message.Content)
+	return e
 }
 
 // Context is ContextAt from the leaf; see there.
