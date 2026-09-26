@@ -24,8 +24,8 @@ import (
 // the in-turn history identical to what the transcript replays next turn.
 //
 // A steer is written by the first step that saw it, as a leading user entry of
-// that step's append (store.AppendStep). One that no step persisted — the turn
-// ended before a step took it up, or that step's stream failed or was
+// that step's append (store.AppendStepLed). One that no step persisted — the
+// turn ended before a step took it up, or that step's stream failed or was
 // cancelled, so OnStepFinish never fired — comes back in Result.Unanswered for
 // the caller to put where the user can still see it. Accepted text is written
 // or returned, never both and never neither.
@@ -267,18 +267,10 @@ func (t *turn) spliceInto(base []fantasy.Message) []fantasy.Message {
 // none. mu is held.
 func (t *turn) unwritten() []splice { return t.spliced[t.written:] }
 
-// steerEntries are the unwritten steers as the store takes them: the leading
-// user entries of the step about to be written (store.AppendStep). mu is held.
-func (t *turn) steerEntries() []store.MessageEntry {
-	pending := t.unwritten()
-	if len(pending) == 0 {
-		return nil
-	}
-	out := make([]store.MessageEntry, 0, len(pending))
-	for _, sp := range pending {
-		out = append(out, store.MessageEntry{Message: sp.msg, Model: t.model.id(), Effort: t.model.effort})
-	}
-	return out
+// steerEntry is sp as the store takes it: a leading user entry of the step
+// about to be written (leadingEntries), stamped with the turn's model.
+func (t *turn) steerEntry(sp splice) store.MessageEntry {
+	return store.MessageEntry{Message: sp.msg, Model: t.model.id(), Effort: t.model.effort}
 }
 
 // settleSteers ends the turn's side of Interject, under mu, as the first thing

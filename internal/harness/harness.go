@@ -34,8 +34,9 @@
 // The mode is enforced by the tool gate — plan mode lets an edit-kind call
 // touch only the session's plan file, ask mode refuses everything that is not
 // read-only — and told to the model by a reminder spliced into the step's
-// input, which is never persisted and never shown (reminders.go, plan 023
-// §3.1, §3.3).
+// input, which is never shown and is persisted only by name, so a later
+// history sends it again exactly as it was sent (reminders.go, plan 023 §3.1,
+// §3.3; plan 028 §3.15).
 //
 // # Concurrency
 //
@@ -329,6 +330,15 @@ type Session struct {
 	done     chan struct{}           // closed when the live turn has returned
 }
 
+// renderer is what the session hands its store (store.Renderer, plan 028
+// §3.15): the texts the transcript holds only by name, rendered as this
+// session's requests sent them. It reads the session's modes when it is
+// called — they are fixed once Open returns, and only a turn's history, after
+// Open, renders anything.
+func (s *Session) renderer() store.Renderer {
+	return store.Renderer{Reminder: func(variant string) (fantasy.Message, bool) { return s.modes.render(variant) }}
+}
+
 // defaultAgent is a turn's agent: Fantasy's, with the frozen system prompt,
 // one retry, and the session's tools in the profile's order.
 func defaultAgent(lm fantasy.LanguageModel, system string, tools []fantasy.AgentTool) fantasy.Agent {
@@ -492,6 +502,7 @@ func Open(opts Options) (*Session, error) {
 		// "" for a fresh id; a caller's own for a session whose id is known
 		// before it has a file (Options.SessionID). A child's is set below.
 		SessionID: opts.SessionID,
+		Render:    s.renderer(),
 	}
 	if child != nil {
 		// The header goes to disk as it is. The type and the persona's path

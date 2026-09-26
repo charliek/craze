@@ -1,9 +1,12 @@
 package harness
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -22,28 +25,49 @@ import (
 // planPathOf is the session's plan file.
 func planPathOf(s *Session) string { return s.modes.planPath }
 
-// reminderIn is the one reminder in request n of m, and the index it sits at,
-// or ("", -1) when there is none. A request with more than one fails the
-// test: the turn composes one, plus a transition notice the tests that want
-// one look for themselves.
+// reminderIn is the one reminder request n of m carries for its own turn, and
+// the index it sits at, or ("", -1) when there is none. A request whose turn
+// carries more than one fails the test: the turn composes one, plus a
+// transition notice the tests that want one look for themselves.
+//
+// The reminders of the turns before it are in the request too, in the history
+// it replays (plan 028 §3.15), and are not its turn's: they are before
+// turnStart.
 func reminderIn(t *testing.T, m *scripted, n int) (string, int) {
 	t.Helper()
 	calls := m.requests()
 	if n >= len(calls) {
 		t.Fatalf("the model saw %d requests, want at least %d", len(calls), n+1)
 	}
+	lines, from := promptOf(calls[n]), turnStart(calls[n])
 	var text string
 	at := -1
-	for i, line := range promptOf(calls[n]) {
-		if !strings.Contains(line, "<"+reminderTag+">") {
+	for i := from; i < len(lines); i++ {
+		if !strings.Contains(lines[i], "<"+reminderTag+">") {
 			continue
 		}
 		if at >= 0 {
-			t.Fatalf("request %d carries two reminders: %v", n+1, promptOf(calls[n]))
+			t.Fatalf("request %d's turn carries two reminders: %v", n+1, lines[from:])
 		}
-		text, at = line, i
+		text, at = lines[i], i
 	}
 	return text, at
+}
+
+// turnStart is where a request's own turn begins among its messages: just past
+// the last answer with no tool call in it. A turn that ended cleanly ended in
+// such an answer, and every assistant message of a running turn's own steps
+// has a call, so what follows it is the turn's. (A turn that follows one cut
+// off after a tool step starts earlier by this reckoning, with that turn:
+// reminderIn then sees both turns' reminders, and fails on two.)
+func turnStart(c fantasy.Call) int {
+	for i := len(c.Prompt) - 1; i >= 0; i-- {
+		m := c.Prompt[i]
+		if m.Role == fantasy.MessageRoleAssistant && len(openCalls(m)) == 0 {
+			return i + 1
+		}
+	}
+	return 0
 }
 
 // remindersIn is every reminder in request n, in order.
@@ -161,10 +185,10 @@ func TestSetModeLifecycle(t *testing.T) {
 
 // TestPlanModeRemindsEveryTurn is the alternation (plan 023 §3.3): the first
 // turn in plan mode reads the full text, the next the sparse one, the next
-// the full one again — each of them naming the absolute plan path, since the
-// history the next turn replays has no reminder in it. A turn cancelled
-// before its request goes out keeps the parity and carries no reminder at
-// all, and SetMode resets it.
+// the full one again — each of them naming the absolute plan path, so that
+// none leans on an earlier one for it. A turn cancelled before its request
+// goes out keeps the parity and carries no reminder at all, and SetMode
+// resets it.
 func TestPlanModeRemindsEveryTurn(t *testing.T) {
 	f := newFixture(t, "http://127.0.0.1:1/v1")
 	s := f.open(modeOptions(f, "plan"))
@@ -439,9 +463,12 @@ func TestModeChangeAtAStepBoundary(t *testing.T) {
 		t.Fatalf("the second step's notice is %q at %d", text, at)
 	}
 	// The entry is between the tool step and the step that went out under the
-	// new mode, and it was held until that step's output was written.
+	// new mode, and it was held until that step's output was written — which
+	// wrote the notice that step's request carried, at its place (plan 028
+	// §3.15).
 	lines := entries(transcript(t, s))
-	if len(lines) != 5 || lines[3] != "mode_change plan" || lines[4] != "assistant test/a high end_turn: done" {
+	if len(lines) != 6 || lines[3] != "mode_change plan" || lines[4] != "reminder plan_full_empty" ||
+		lines[5] != "assistant test/a high end_turn: done" {
 		t.Fatalf("transcript:\n%s", strings.Join(lines, "\n"))
 	}
 }
@@ -482,7 +509,8 @@ func TestATransitionNoticeLeavesTheEarlierReminderAlone(t *testing.T) {
 		t.Fatalf("the notice is %q, want the exit text at the end", got[1])
 	}
 	lines := entries(transcript(t, s))
-	if len(lines) != 6 || lines[0] != "mode_change plan" || lines[4] != "mode_change agent" {
+	if len(lines) != 8 || lines[0] != "mode_change plan" || lines[2] != "reminder plan_full_empty" ||
+		lines[5] != "mode_change agent" || lines[6] != "reminder plan_exit" {
 		t.Fatalf("transcript:\n%s", strings.Join(lines, "\n"))
 	}
 }
@@ -520,6 +548,7 @@ func TestModeChangeWithoutAnOutputStep(t *testing.T) {
 		"assistant test/a high end_turn: one",
 		"mode_change ask",
 		"user test/a high: now answer",
+		"reminder ask",
 		"assistant test/a high end_turn: two",
 	})
 }
@@ -701,6 +730,7 @@ func TestATransitionNoticeSurvivesATurnThatPersistsNothing(t *testing.T) {
 	equal(t, "transcript", entries(transcript(t, s)), []string{
 		"mode_change plan",
 		"user test/a high: again",
+		"reminder plan_full_empty",
 		"assistant test/a high end_turn: planned",
 	})
 }
@@ -735,7 +765,9 @@ func TestAHeldModeChangeDoesNotOutliveASwitchBack(t *testing.T) {
 // The same for a cancelled turn, whose partial answer is persisted:
 // interrupted output is not the step that announced the mode finishing, so
 // the model is told again and the mode_change sits with the turn that does
-// finish (plan 023 §3.3).
+// finish (plan 023 §3.3). The partial answer is saved with the notice its
+// request carried ahead of it, as every step is (plan 028 §3.15), so the
+// history then says it twice — never not at all.
 func TestATransitionNoticeSurvivesACancelledTurn(t *testing.T) {
 	f := newFixture(t, "http://127.0.0.1:1/v1")
 	s := f.open(modeOptions(f, "ask"))
@@ -761,9 +793,11 @@ func TestATransitionNoticeSurvivesACancelledTurn(t *testing.T) {
 	}
 	equal(t, "transcript", entries(transcript(t, s)), []string{
 		"user test/a high: ask away",
+		"reminder ask",
 		"assistant test/a high cancelled interrupted: partial",
 		"mode_change ask",
 		"user test/a high: and again",
+		"reminder ask",
 		"assistant test/a high end_turn: it says alpha",
 	})
 }
@@ -797,8 +831,10 @@ func TestAReminderUnderARetriedStep(t *testing.T) {
 	equal(t, "transcript", entries(transcript(t, s)), []string{
 		"mode_change plan",
 		"user test/a high: plan it",
+		"reminder plan_full_empty",
 		"assistant test/a high end_turn: planned",
 		"user test/a high: and on",
+		"reminder plan_sparse",
 		"assistant test/a high end_turn: again",
 	})
 }
@@ -886,5 +922,184 @@ func TestReminderTagsAreEscaped(t *testing.T) {
 	}
 	if msg.Role != fantasy.MessageRoleUser {
 		t.Fatalf("a reminder is a %s message, want user", msg.Role)
+	}
+}
+
+// TestEveryReminderTextHasOneVariant (plan 028 §3.15, A13, P12): the texts a
+// reminder can carry are enumerated by composing them — reminderFor driven
+// over every state it reads: the mode, what the model was told, what the turn
+// already carries, the step, the alternation's parity, whether the plan file
+// has anything in it, and a session's modes or a child's — and each text is
+// exactly one variant, each variant exactly one text, speaking for the mode
+// it was composed in. Rendered again from its variant after the plan file has
+// changed under it, and after it is gone, every one is the message that was
+// composed, byte for byte: rendering reads the path, never the file. Every
+// variant in the table is one the composition writes, and one the table does
+// not know renders as nothing.
+func TestEveryReminderTextHasOneVariant(t *testing.T) {
+	plan := filepath.Join(t.TempDir(), "s.plan.md")
+	setPlan := func(content string) {
+		t.Helper()
+		if err := os.WriteFile(plan, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	all := []string{modeAgent, modePlan, modeAsk}
+	type composed struct {
+		m       *modes
+		variant string
+		msg     []byte
+	}
+	var got []composed
+	textsOf, variantsOf := map[string]map[string]bool{}, map[string]map[string]bool{}
+	add := func(set map[string]map[string]bool, k, v string) {
+		if set[k] == nil {
+			set[k] = map[string]bool{}
+		}
+		set[k][v] = true
+	}
+	for _, written := range []string{"", "## The plan\n"} {
+		setPlan(written)
+		for _, child := range []bool{false, true} {
+			for _, mode := range all {
+				// A child's mode never changes, so it has only ever been told of
+				// nothing (agent) or of its own mode, and carries no other.
+				told, carried := all, append([]string{""}, all...)
+				if child {
+					told, carried = []string{modeAgent, mode}, []string{"", mode}
+				}
+				for _, tl := range told {
+					for _, c := range carried {
+						for _, step := range []int{0, 1} {
+							for _, parity := range []int{0, 1} {
+								gate := tool.NewModeGate(mode, nil)
+								m := newModes(mode, plan, gate)
+								if child {
+									m = newChildModes(mode, gate)
+								}
+								m.told, m.turns = tl, parity
+								r, ok := m.reminderFor(step, c)
+								if !ok {
+									continue
+								}
+								if r.mode != mode {
+									t.Errorf("in %s mode (told %s, carried %q, step %d) the %s reminder speaks for %s", mode, tl, c, step, r.variant, r.mode)
+								}
+								add(textsOf, r.variant, r.text)
+								add(variantsOf, r.text, r.variant)
+								got = append(got, composed{m, r.variant, mustJSON(t, reminderMessage(r.text))})
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	for text, vs := range variantsOf {
+		if len(vs) != 1 {
+			t.Errorf("the text %q is composed as %d variants: %v", text, len(vs), slices.Sorted(maps.Keys(vs)))
+		}
+	}
+	for v, texts := range textsOf {
+		if len(texts) != 1 {
+			t.Errorf("variant %s is %d texts: %q", v, len(texts), slices.Sorted(maps.Keys(texts)))
+		}
+	}
+	if written, table := slices.Sorted(maps.Keys(textsOf)), slices.Sorted(maps.Keys(reminderVariants)); !slices.Equal(written, table) {
+		t.Fatalf("the composition writes %q; the table holds %q", written, table)
+	}
+
+	// The plan file changes under every one of them, empties, and goes: none
+	// is rendered from it.
+	for _, content := range []string{"## Another plan\n", "", "-"} {
+		if content == "-" {
+			if err := os.Remove(plan); err != nil {
+				t.Fatal(err)
+			}
+		} else {
+			setPlan(content)
+		}
+		for _, c := range got {
+			msg, ok := c.m.render(c.variant)
+			if !ok {
+				t.Fatalf("variant %s does not render", c.variant)
+			}
+			if back := mustJSON(t, msg); !bytes.Equal(back, c.msg) {
+				t.Fatalf("variant %s rendered again is\n%s\nwas composed as\n%s", c.variant, back, c.msg)
+			}
+		}
+	}
+	if _, ok := got[0].m.render("plan_v2"); ok {
+		t.Fatal("a variant the table does not know rendered")
+	}
+}
+
+// mustJSON is v's JSON.
+func mustJSON(t *testing.T, v any) []byte {
+	t.Helper()
+	b, err := json.Marshal(v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
+
+// A step's reminder leads the background results the same request carried
+// (plan 028 §3.15 with plan 026 §3.11): at a turn's first step the request
+// holds the prompt, the reminder, then the results, and the append writes
+// them in that order, the results entry committing its result by its own id.
+// A wake's results are its user entry and its reminder follows them; they
+// commit by the user entry's id, never the reminder's.
+func TestAReminderLeadsTheResultsItWasSentWith(t *testing.T) {
+	for _, wake := range []bool{false, true} {
+		t.Run(fmt.Sprintf("wake=%v", wake), func(t *testing.T) {
+			b := openBG(t)
+			a := b.routers["test/a"]
+			ws, ids := b.spawn(t, "child one")
+			if err := b.s.SetMode("ask"); err != nil {
+				t.Fatal(err)
+			}
+			b.finish(t, ws[0])
+			a.route("go", answerWith("got it"))
+			var err error
+			if wake {
+				_, err = b.s.Wake(context.Background(), nil)
+			} else {
+				_, err = b.s.Run(context.Background(), "next", nil)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			res := block(ids[0], SubagentCompleted, "did child one")
+			notice := "user: " + reminderMessageText(askReminder)
+			reqs := a.requests("go")
+			prompt := promptOf(reqs[len(reqs)-1])
+			want := []string{"user: next", notice, "user: " + res}
+			if wake {
+				want = []string{"user: " + res, notice}
+			}
+			if tail := prompt[len(prompt)-len(want):]; !slices.Equal(tail, want) {
+				t.Fatalf("the turn's request ends with %q; want %q", tail, want)
+			}
+
+			tr := transcript(t, b.s)
+			lines := entries(tr)
+			n := len(lines)
+			wantLines := []string{"mode_change ask", "user test/a high: next", "reminder ask", "user test/a high: " + res, "assistant test/a high end_turn: got it"}
+			at := n - 2 // the results entry
+			if wake {
+				wantLines = []string{"mode_change ask", "user test/a high: " + res, "reminder ask", "assistant test/a high end_turn: got it"}
+				at = n - 3
+			}
+			if !slices.Equal(lines[n-len(wantLines):], wantLines) {
+				t.Fatalf("transcript:\n%s", strings.Join(lines, "\n"))
+			}
+			if r := resultOf(t, b.s, ids[0]); r.state != resultCommitted || r.entry != tr.Entries[at].ID || !tr.Entries[at].SubagentResults {
+				t.Fatalf("the result is %v by %q; want committed by its results entry %s", r.state, r.entry, tr.Entries[at].ID)
+			}
+			settled(t, b.s)
+		})
 	}
 }

@@ -113,11 +113,14 @@ type Result struct {
 //   - A finished step appends its assistant message (text, reasoning and
 //     tool calls, as Fantasy recorded them) with its usage and stop reason,
 //     and, when it called tools, the tool message holding their results, in
-//     one append (store.AppendStep). A step whose calls Fantasy did not run —
-//     an abnormal finish — gets a not_executed result per call first. When
-//     the step's messages lack text the user saw stream — Fantasy commits a
-//     text block only on its end part, which a provider can omit — the
-//     answer's text is the streamed deltas, with the step's tool calls.
+//     one append (store.AppendStepLed), led by what its request carried that
+//     no append has written yet: the mode reminder, as its variant (plan 028
+//     §3.15), the steers and background results. A step whose calls Fantasy
+//     did not run — an abnormal finish — gets a not_executed result per call
+//     first. When the step's messages lack text the user saw stream —
+//     Fantasy commits a text block only on its end part, which a provider
+//     can omit — the answer's text is the streamed deltas, with the step's
+//     tool calls.
 //   - A step that cannot be saved stops the turn before another request,
 //     and Run returns the error. A step whose calls have an empty or repeated
 //     provider id runs none of them, is not saved, and fails the turn with
@@ -454,7 +457,7 @@ type turn struct {
 	// which has its own lock; spliced and written are this turn's, under mu.
 	steers  *steerbox
 	spliced []splice // the steers taken up, in order, each at a fixed index
-	written int      // how many of spliced an AppendStep has written
+	written int      // how many of spliced an append has written
 
 	// The background sub-agents' results this turn delivers (delivery.go,
 	// plan 026 §3.11): subs is the session's runner, nil for a sub-agent's;
@@ -472,8 +475,9 @@ type turn struct {
 	// The mode's reminders (reminders.go, plan 023 §3.3): modes is the
 	// session's box, which has its own lock; the rest is this turn's, under
 	// mu. reminders is a collection of its own — never spliced, never
-	// persisted, never emitted — and pending is the one composed for the step
-	// about to go out.
+	// emitted — and pending is the one composed for the step about to go out.
+	// Each is written, as its variant, with the first append after it (plan
+	// 028 §3.15); remWritten counts those an append has written.
 	//
 	// carried and sent are the two halves of announcing a mode. carried is the
 	// mode this turn's reminders already speak for, from the moment one is
@@ -485,6 +489,7 @@ type turn struct {
 	modes      *modes
 	logMode    func(mode string) error
 	reminders  []reminder
+	remWritten int
 	pending    pendingReminder
 	hasPending bool
 	carried    string
@@ -739,12 +744,13 @@ func (t *turn) stepFinished(step fantasy.StepResult) error {
 		// The steers no step has written yet lead the append: this is the
 		// first step that could write them, and the transcript then holds
 		// them exactly where this step's request had them — and so do the
-		// background results the step's requests carried (§3.11).
+		// background results the step's requests carried (§3.11), and the
+		// reminders, as their variants (plan 028 §3.15).
 		leading, lead := t.leadingEntries()
-		ids, err := t.store.AppendStep(leading, entry, toolEntry)
+		ids, err := t.store.AppendStepLed(leading, entry, toolEntry)
 		switch {
 		case err == nil:
-			t.written = len(t.spliced)
+			t.written, t.remWritten = len(t.spliced), len(t.reminders)
 			t.wrote(ids, lead, toolEntry != nil, outputCalls(answered))
 			t.todosWritten(todos)
 			done.Saved, done.Entries = true, ids
@@ -919,9 +925,10 @@ func (t *turn) saveInterrupted(cancelled bool) error {
 	}
 	// The background results the cut step's request carried lead the answer,
 	// as they would a finished step's, and commit when it is written (plan 026
-	// §3.11); its steers do not, and go back to the user.
+	// §3.11), and so do its reminders (plan 028 §3.15); its steers do not, and
+	// go back to the user.
 	leading, lead := t.internalEntries()
-	ids, err := t.store.AppendAnswer(leading, store.MessageEntry{
+	ids, err := t.store.AppendAnswerLed(leading, store.MessageEntry{
 		Message:     streamed(t.reasoning.String(), t.text.String()),
 		Model:       t.model.id(),
 		Effort:      t.model.effort,
@@ -929,6 +936,7 @@ func (t *turn) saveInterrupted(cancelled bool) error {
 		Interrupted: true,
 	})
 	if err == nil {
+		t.remWritten = len(t.reminders)
 		t.wrote(ids, lead, false, nil)
 	}
 	if errors.Is(err, store.ErrNoOutput) {

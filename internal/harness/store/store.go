@@ -14,7 +14,9 @@
 // A transcript only ever grows by whole steps. A turn is one or more steps;
 // a step is the model's assistant message and, when it called tools, the
 // tool message holding their results, led by any steers (user messages
-// interjected mid-turn) that the model first saw at that step. The file and
+// interjected mid-turn) that the model first saw at that step, and by the
+// mode reminder its request carried, as a reminder entry that names the
+// text's variant and never holds the text (AppendStepLed). The file and
 // its directory are created lazily, by the first step that produced output.
 // The header, the turn's user entry and that step go out in one write(2) to
 // a temporary file beside the session's, which is then hard-linked into
@@ -146,6 +148,12 @@ type Options struct {
 	SubagentType   string
 	PersonaPath    string
 
+	// Render is the harness's renderer for the entries whose text the store
+	// never keeps — a reminder's (plan 028 §3.15) — which the context renders
+	// at their places (Renderer). New and Open take it; the zero value leaves
+	// such entries out of the context.
+	Render Renderer
+
 	// Test seams, settable only inside the package; zero means production.
 	entryID  func() string
 	openFile func(name string, flag int, perm os.FileMode) (file, error)
@@ -241,6 +249,7 @@ func New(opts Options) (*Store, error) {
 		PersonaPath:        opts.PersonaPath,
 	}
 	s.t = newTranscript(h)
+	s.t.render = opts.Render
 	s.path = sessionPath(filepath.Clean(opts.Home), cwd, id, h.Timestamp)
 	return s, nil
 }
@@ -406,6 +415,29 @@ func (s *Store) holdChange(e Entry) error {
 	return nil
 }
 
+// Lead is one entry that leads a step's append, ahead of its answer, in the
+// order the step's request carried them: a user message — a steer, or an
+// entry of background sub-agents' results (plan 026 §3.11) — or, with
+// Reminder set and Message left zero, a reminder entry of that variant: the
+// mode reminder the request carried at that place, whose text the store never
+// holds (plan 028 §3.15).
+type Lead struct {
+	Message  MessageEntry
+	Reminder string
+}
+
+// leadsOf is steers as the leads of a step.
+func leadsOf(steers []MessageEntry) []Lead {
+	if len(steers) == 0 {
+		return nil
+	}
+	out := make([]Lead, len(steers))
+	for i, st := range steers {
+		out[i] = Lead{Message: st}
+	}
+	return out
+}
+
 // AppendStep writes a finished step in one append: the resume entry Open
 // holds, if this is the first step since, any held changes, the
 // held user entries, steers (user messages interjected mid-turn that the
@@ -431,12 +463,18 @@ func (s *Store) holdChange(e Entry) error {
 // a crash can persist any prefix of it, which Load rolls back to the last
 // complete step (see the package comment).
 func (s *Store) AppendStep(steers []MessageEntry, assistant MessageEntry, tool *MessageEntry) ([]string, error) {
-	for _, st := range steers {
-		if err := checkMessage("a steer", st, fantasy.MessageRoleUser); err != nil {
+	return s.AppendStepLed(leadsOf(steers), assistant, tool)
+}
+
+// AppendStepLed is AppendStep with the entries that lead the answer given as
+// Leads, so that the reminders the step's request carried are written among
+// its steers and results, each at its own place (plan 028 §3.15): after the
+// held user entries, in lead's order. A reminder's variant must be a name
+// (checkVariant), or the step is refused with nothing written.
+func (s *Store) AppendStepLed(lead []Lead, assistant MessageEntry, tool *MessageEntry) ([]string, error) {
+	for _, l := range lead {
+		if err := checkLead(l); err != nil {
 			return nil, err
-		}
-		if st.Turn != 0 {
-			return nil, fmt.Errorf("store: a steer carries turn %d; only the entry a turn opens with (AppendUser) does", st.Turn)
 		}
 	}
 	if err := checkMessage("AppendStep", assistant, fantasy.MessageRoleAssistant); err != nil {
@@ -466,8 +504,12 @@ func (s *Store) AppendStep(steers []MessageEntry, assistant MessageEntry, tool *
 		batch = append(batch, *s.resume)
 	}
 	batch = append(append(batch, s.changes...), s.users...)
-	for _, st := range steers {
-		batch = append(batch, Entry{Type: TypeMessage, Timestamp: s.stamp(), MessageEntry: st})
+	for _, l := range lead {
+		if l.Reminder != "" {
+			batch = append(batch, Entry{Type: TypeReminder, Timestamp: s.stamp(), Variant: l.Reminder})
+			continue
+		}
+		batch = append(batch, Entry{Type: TypeMessage, Timestamp: s.stamp(), MessageEntry: l.Message})
 	}
 	batch = append(batch, Entry{Type: TypeMessage, Timestamp: s.stamp(), MessageEntry: assistant})
 	if tool != nil {
@@ -482,6 +524,27 @@ func (s *Store) AppendStep(steers []MessageEntry, assistant MessageEntry, tool *
 		ids[i] = b.ID
 	}
 	return ids, nil
+}
+
+// checkLead refuses a lead that is neither a reminder — a variant of the
+// right shape, and no message — nor a user message that opens no turn.
+func checkLead(l Lead) error {
+	if l.Reminder != "" {
+		if l.Message.Message.Role != "" || len(l.Message.Message.Content) > 0 {
+			return fmt.Errorf("store: a reminder lead (%q) carries a message too", l.Reminder)
+		}
+		if err := checkVariant(l.Reminder); err != nil {
+			return fmt.Errorf("store: %w", err)
+		}
+		return nil
+	}
+	if err := checkMessage("a steer", l.Message, fantasy.MessageRoleUser); err != nil {
+		return err
+	}
+	if l.Message.Turn != 0 {
+		return fmt.Errorf("store: a steer carries turn %d; only the entry a turn opens with (AppendUser) does", l.Message.Turn)
+	}
+	return nil
 }
 
 // AppendAssistant writes a text-only answer as a step with no steers and no
@@ -501,13 +564,20 @@ func (s *Store) AppendAssistant(e MessageEntry) error {
 // AppendAssistant's must, or it is ErrNoOutput and nothing is written — the
 // leading entries neither.
 func (s *Store) AppendAnswer(leading []MessageEntry, e MessageEntry) ([]string, error) {
+	return s.AppendAnswerLed(leadsOf(leading), e)
+}
+
+// AppendAnswerLed is AppendAnswer with its leading entries given as Leads:
+// the reminders the cut step's request carried go among them, as a finished
+// step's do (AppendStepLed).
+func (s *Store) AppendAnswerLed(lead []Lead, e MessageEntry) ([]string, error) {
 	if err := checkMessage("AppendAssistant", e, fantasy.MessageRoleAssistant); err != nil {
 		return nil, err
 	}
 	if !hasText(e.Message) {
 		return nil, ErrNoOutput
 	}
-	return s.AppendStep(leading, e, nil)
+	return s.AppendStepLed(lead, e, nil)
 }
 
 // write gives batch its ids and parents, as a chain from the leaf, and
@@ -715,7 +785,7 @@ func (s *Store) Transcript() *Transcript {
 	for i, e := range s.t.Entries {
 		entries[i] = e.clone()
 	}
-	return &Transcript{Header: s.t.Header, Entries: entries, index: maps.Clone(s.t.index)}
+	return &Transcript{Header: s.t.Header, Entries: entries, index: maps.Clone(s.t.index), render: s.t.render}
 }
 
 // Close releases the descriptor, and with it the session's lock. Held

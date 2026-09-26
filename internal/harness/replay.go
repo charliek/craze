@@ -34,7 +34,9 @@ import (
 //     are replayed, as no ACP load rebuilds them.
 //   - Changes of model, effort and mode, resume entries, and entries of a
 //     type this craze does not know are nothing: the session's state now is
-//     what the caller reads from it (Current, Mode).
+//     what the caller reads from it (Current, Mode). So are reminder entries
+//     (plan 028 §3.15): a reminder is what the harness told the model, never
+//     shown live, and never shown again.
 //   - Last, a Todos with the list the resume restored, when it has any item.
 //
 // A replayed call's id is "<entry id>.<k>": the id of the assistant entry
@@ -108,9 +110,9 @@ type replayer struct {
 func (r *replayer) entry(e *store.Entry) {
 	steer, results := r.turns.read(e)
 	if e.Type != store.TypeMessage {
-		// model_change, effort_change, mode_change, resume, and a newer
-		// craze's types: nothing. (Plan 028 PR 2's compaction entry is replayed
-		// here, as Compacted — C9.)
+		// model_change, effort_change, mode_change, resume, reminder, and a
+		// newer craze's types: nothing. (Plan 028 PR 2's compaction entry is
+		// replayed here, as Compacted — C9.)
 		return
 	}
 	switch e.Message.Role {

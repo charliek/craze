@@ -26,6 +26,10 @@ const (
 	// TypeResume opens each later incarnation of a reopened session (Open):
 	// the contract it runs under, as information (plan 028 §3.2).
 	TypeResume = "resume"
+	// TypeReminder is a mode reminder a step's request carried, at the place
+	// it carried it: its variant, never its text, which the harness renders
+	// back into the context (Renderer, plan 028 §3.15).
+	TypeReminder = "reminder"
 )
 
 // knownType reports whether this craze writes and reads entries of type typ.
@@ -33,18 +37,40 @@ const (
 // and never trimmed away by Open (ErrNewerTranscript).
 func knownType(typ string) bool {
 	switch typ {
-	case TypeMessage, TypeModelChange, TypeEffortChange, TypeModeChange, TypeResume:
+	case TypeMessage, TypeModelChange, TypeEffortChange, TypeModeChange, TypeResume, TypeReminder:
 		return true
 	}
 	return false
 }
 
+// maxVariant bounds a reminder variant's length. A variant is a name, never
+// text (checkVariant).
+const maxVariant = 64
+
+// checkVariant is a reminder variant's rule (plan 028 §3.15): a name of
+// lowercase letters, digits and underscores, at most maxVariant bytes. The
+// store knows no variant's text and no list of them — the harness renders a
+// variant it does not know as nothing (Renderer) — but the shape keeps the
+// promise that a reminder's text is never stored (plan 023 owner decision 5):
+// no text a reminder composes is a name of that shape.
+func checkVariant(v string) error {
+	if v == "" || len(v) > maxVariant {
+		return fmt.Errorf("a reminder variant must be 1 to %d bytes, got %d", maxVariant, len(v))
+	}
+	for i := 0; i < len(v); i++ {
+		if c := v[i]; (c < 'a' || c > 'z') && (c < '0' || c > '9') && c != '_' {
+			return fmt.Errorf("reminder variant %q has %q, which is not a lowercase letter, a digit or _", v, c)
+		}
+	}
+	return nil
+}
+
 // errInvalid marks a line that decodes — whole JSON, a good envelope, a
 // payload of the right shape for its type — but breaks a rule on the fields
-// H7 added (checkFields). No crash writes one: a torn append leaves a prefix
-// of a line, never a whole line, so, like a break of the pairing invariant, it
-// is ErrCorrupt wherever it is, the last line included, and never skipped as a
-// torn tail (plan 028 P14).
+// H7 added (checkFields, and a reminder's checkVariant). No crash writes one:
+// a torn append leaves a prefix of a line, never a whole line, so, like a
+// break of the pairing invariant, it is ErrCorrupt wherever it is, the last
+// line included, and never skipped as a torn tail (plan 028 P14).
 var errInvalid = errors.New("invalid entry")
 
 func invalid(format string, args ...any) error {
@@ -212,8 +238,9 @@ type Contract struct {
 // Entry is one line after the header, as written or read back. Type selects
 // which of the fields mean anything: the embedded MessageEntry for a message,
 // its Model for a model_change, its Effort for an effort_change, Mode for a
-// mode_change, Contract for a resume, none for a type from a newer craze,
-// which is kept only so the parent chain through it stays whole.
+// mode_change, Contract for a resume, Variant for a reminder, none for a type
+// from a newer craze, which is kept only so the parent chain through it stays
+// whole.
 type Entry struct {
 	Type      string
 	ID        string // 8 hex chars, unique within the file
@@ -226,6 +253,10 @@ type Entry struct {
 	// Contract is what a resume entry records: the contract of the
 	// incarnation that reopened the session (Open).
 	Contract Contract
+	// Variant is what a reminder entry records: which text the request
+	// carried at the entry's place, by name (checkVariant). The text itself is
+	// never stored; the context renders it again (Renderer, plan 028 §3.15).
+	Variant string
 	MessageEntry
 }
 
@@ -327,6 +358,28 @@ type resumeLine struct {
 	SystemPromptSHA256 string `json:"system_prompt_sha256"`
 	ToolProfile        string `json:"tool_profile,omitempty"`
 	ToolsSHA256        string `json:"tools_sha256,omitempty"`
+}
+
+// reminderLine is a reminder entry: the variant alone. It is kept raw so that
+// decodeEntry checks its shape itself, as a message's turn and todos are: a
+// whole line whose variant is missing, not a string or not a name is
+// errInvalid, never a torn tail (P14).
+type reminderLine struct {
+	envelope
+	Variant json.RawMessage `json:"variant"`
+}
+
+// decodeVariant reads a reminder line's variant back: a JSON string that
+// checkVariant accepts, or errInvalid.
+func decodeVariant(raw json.RawMessage) (string, error) {
+	var v string
+	if raw == nil || string(raw) == "null" || json.Unmarshal(raw, &v) != nil {
+		return "", invalid("a reminder's variant %s is not a string", raw)
+	}
+	if err := checkVariant(v); err != nil {
+		return "", invalid("%v", err)
+	}
+	return v, nil
 }
 
 type modelChangeLine struct {
@@ -494,6 +547,15 @@ func encodeEntry(e Entry) ([]byte, error) {
 			ToolProfile:        e.Contract.ToolProfile,
 			ToolsSHA256:        e.Contract.ToolsSHA256,
 		})
+	case TypeReminder:
+		if err := checkVariant(e.Variant); err != nil {
+			return nil, fmt.Errorf("store: %w", err)
+		}
+		v, err := json.Marshal(e.Variant)
+		if err != nil {
+			return nil, err
+		}
+		return json.Marshal(reminderLine{envelope: env, Variant: v})
 	default:
 		return nil, fmt.Errorf("store: cannot write entry type %q", e.Type)
 	}
@@ -501,8 +563,8 @@ func encodeEntry(e Entry) ([]byte, error) {
 
 // decodeEntry parses one non-header line. It checks the line on its own; the
 // tree checks id uniqueness and the parent (Transcript.check). An error that
-// wraps errInvalid is a whole line that breaks checkFields; any other is a
-// line that does not decode.
+// wraps errInvalid is a whole line that breaks checkFields or, for a
+// reminder, checkVariant; any other is a line that does not decode.
 func decodeEntry(line []byte) (Entry, error) {
 	var env envelope
 	if err := json.Unmarshal(line, &env); err != nil {
@@ -585,6 +647,14 @@ func decodeEntry(line []byte) (Entry, error) {
 			SystemPromptSHA256: rl.SystemPromptSHA256,
 			ToolProfile:        rl.ToolProfile,
 			ToolsSHA256:        rl.ToolsSHA256,
+		}
+	case TypeReminder:
+		var rl reminderLine
+		if err := json.Unmarshal(line, &rl); err != nil {
+			return Entry{}, err
+		}
+		if e.Variant, err = decodeVariant(rl.Variant); err != nil {
+			return Entry{}, err
 		}
 	}
 	return e, nil

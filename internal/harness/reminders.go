@@ -17,26 +17,37 @@ import (
 // <system-reminder> tags as grok-build wraps its own, spliced into the step's
 // input right after the user's prompt.
 //
-// A reminder is not part of the conversation. It is never persisted, never
+// A reminder is not part of the conversation a person sees. It is never
 // emitted as an Event and never reported in Result.Unanswered; it lives in a
 // collection of its own, separate from the steers (steer.go), so nothing that
 // reads those can see one. The model reads it in every request of the turn
-// that composed it and in none of the next turn's, because the next turn's
-// history is rebuilt from the transcript, which has no reminders in it. That
-// costs one prefix-cache miss per turn in plan and ask mode, stated in the
-// plan (§3.3) and accepted: within a turn the prefix is exactly stable.
+// that composed it — and in every later turn's too: the step whose request
+// carried it writes a reminder entry at its place, after the step's user
+// entries and before its steers, as spliceInto orders them, and the history
+// the next turn rebuilds from the transcript renders it again there, byte for
+// byte what was sent (plan 028 §3.15). So a turn's first request begins with
+// the whole of the last request before it, and the provider's prefix cache
+// holds across turns in plan and ask mode as it does in agent mode (H5's R3
+// measured a full miss on every plan-mode turn while reminders were not
+// stored). The entry names the text's variant and never holds the text (plan
+// 023 owner decision 5): every text a reminder can carry is exactly one
+// variant (reminderVariants), and a variant and the plan file's path are all
+// it takes to write the text again — whether the plan file had anything in it
+// is part of the variant, so rendering one never reads the file, and a plan
+// written since changes nothing the history says was sent.
 //
 // What the model is told is a function of the mode and of what it was told
 // last. A mode it has not been told about produces a transition notice at the
 // next step boundary — the step the request goes out on, whether that is the
 // turn's first or its fifth — and, in plan and ask mode, every later turn
-// opens with the mode's standing reminder. "Told" means told in a step whose
-// output the transcript kept: a reminder is not persisted, so a notice sent in
-// a turn that failed, was cancelled or only thought is a notice the next
-// turn's history says nothing about, and it goes out again (§3.3). Plan mode's alternates between a
-// full text and a sparse one, as grok-build's does, and both name the plan
-// file: history is rebuilt from a store that omits reminders, so a sparse one
-// that named no path would leave the model without it (panel correction 8).
+// opens with the mode's standing reminder. "Told" means told in a step that
+// finished and whose output the transcript kept: a notice sent in a turn that
+// failed, was cancelled or only thought is not told for good, and it goes out
+// again (§3.3) — even when the cut step's partial answer was saved with the
+// notice's entry ahead of it, which leaves the history saying it twice rather
+// than never. Plan mode's alternates between a full text and a sparse one, as
+// grok-build's does, and both name the plan file, so that a sparse one never
+// leaves the model without the path (panel correction 8).
 
 // reminderTag wraps every reminder. grok-build's tag, so a model that has
 // seen one recognizes it.
@@ -117,6 +128,48 @@ Your turn should only end with either ask_user_question to clarify requirements 
 	childPlanReminder = "The agent that started you is in plan mode: do not edit or write any file (every such call is denied). " +
 		"Read, search, and run only commands that change nothing."
 )
+
+// The reminder variants (plan 028 §3.15): one name for each text a reminder
+// can carry, which is what a reminder entry stores in its place. The two full
+// plan texts are two variants because they differ by the plan file's state
+// when they were composed, which a later render must not read.
+const (
+	variantPlanFullEmpty   = "plan_full_empty"   // the full plan text: no plan written yet
+	variantPlanFullWritten = "plan_full_written" // the full plan text: a plan file exists
+	variantPlanSparse      = "plan_sparse"
+	variantPlanReentry     = "plan_reentry"
+	variantPlanExit        = "plan_exit"
+	variantAsk             = "ask"
+	variantAskExit         = "ask_exit"
+	variantChildPlan       = "child_plan"
+)
+
+// reminderVariant is one variant's meaning: the mode its text speaks for, and
+// the text itself, a function of the plan file's path and nothing else.
+type reminderVariant struct {
+	mode string
+	text func(plan string) string
+}
+
+// reminderVariants are every variant, and the one place each text is
+// written: a reminder the turn composes (reminderFor) and one a history
+// renders again (render) both come from here, so the two are the same bytes.
+// A test composes every text reminderFor can and holds each to exactly one of
+// these.
+var reminderVariants = map[string]reminderVariant{
+	variantPlanFullEmpty: {modePlan, func(plan string) string {
+		return fmt.Sprintf(planReminderFull, fmt.Sprintf(planFileEmpty, plan))
+	}},
+	variantPlanFullWritten: {modePlan, func(plan string) string {
+		return fmt.Sprintf(planReminderFull, fmt.Sprintf(planFileWritten, plan))
+	}},
+	variantPlanSparse:  {modePlan, func(plan string) string { return fmt.Sprintf(planReminderSparse, plan) }},
+	variantPlanReentry: {modePlan, func(plan string) string { return fmt.Sprintf(planReminderReentry, plan) }},
+	variantPlanExit:    {modeAgent, func(plan string) string { return fmt.Sprintf(planReminderExit, plan) }},
+	variantAsk:         {modeAsk, func(string) string { return askReminder }},
+	variantAskExit:     {modeAgent, func(string) string { return askReminderExit }},
+	variantChildPlan:   {modePlan, func(string) string { return childPlanReminder }},
+}
 
 // modes is a session's mode: what the gate enforces, what the model has been
 // told, and where the plan file is.
@@ -200,14 +253,36 @@ func (m *modes) set(mode string) {
 	m.gate.SetMode(mode)
 }
 
-// pendingReminder is one composed reminder: the text, the mode it speaks for,
-// the reset generation it was composed at, and whether the alternation
-// advances once the request carrying it has gone out.
+// pendingReminder is one composed reminder: its variant and text, the mode it
+// speaks for, the reset generation it was composed at, and whether the
+// alternation advances once the request carrying it has gone out.
 type pendingReminder struct {
-	text   string
-	mode   string
-	gen    int  // the reset generation it was composed at (see modes.gen)
-	counts bool // a plan-mode reminder: the alternation advances with it
+	variant string
+	text    string
+	mode    string
+	gen     int  // the reset generation it was composed at (see modes.gen)
+	counts  bool // a plan-mode reminder: the alternation advances with it
+}
+
+// compose is the reminder of variant, composed at reset generation gen: its
+// text for this session's plan file, and the mode it speaks for.
+func (m *modes) compose(variant string, gen int, counts bool) pendingReminder {
+	v := reminderVariants[variant]
+	return pendingReminder{variant: variant, text: v.text(m.planPath), mode: v.mode, gen: gen, counts: counts}
+}
+
+// render is the message a reminder entry of variant stands for in this
+// session's history (store.Renderer, plan 028 §3.15): the one the request
+// that carried it sent, from the same text and the same wrapper. It reads
+// nothing but the plan file's path, fixed at Open. ok is false for a variant
+// this craze does not know — a newer one's — which the history then leaves
+// out.
+func (m *modes) render(variant string) (fantasy.Message, bool) {
+	v, ok := reminderVariants[variant]
+	if !ok {
+		return fantasy.Message{}, false
+	}
+	return reminderMessage(v.text(m.planPath)), true
 }
 
 // reminder is the reminder step's request should carry, if any: the mode's
@@ -236,66 +311,67 @@ func (m *modes) reminderFor(step int, carried string) (pendingReminder, bool) {
 
 	switch {
 	case m.child && mode == modePlan:
-		// A sub-agent's plan mode bypasses transition, planEntryText and
-		// planText, every one of which would name a plan file it does not
+		// A sub-agent's plan mode bypasses transition, planEntry and
+		// planStanding, every one of which would name a plan file it does not
 		// have. The text never alternates, so nothing counts; otherwise it is
 		// composed when any plan reminder would be.
 		if mode == told && step > 0 {
 			return pendingReminder{}, false
 		}
-		return pendingReminder{text: childPlanReminder, mode: mode, gen: gen}, true
+		return m.compose(variantChildPlan, gen, false), true
 	case mode != told:
-		return pendingReminder{text: m.transition(mode, told), mode: mode, gen: gen, counts: mode == modePlan}, true
+		return m.compose(m.transition(mode, told), gen, mode == modePlan), true
 	case step > 0:
 		// Nothing has changed since the last boundary, and the turn's own
 		// reminder is already in every request of it.
 		return pendingReminder{}, false
 	case mode == modePlan:
-		return pendingReminder{text: m.planText(parity), mode: mode, gen: gen, counts: true}, true
+		return m.compose(m.planStanding(parity), gen, true), true
 	case mode == modeAsk:
-		return pendingReminder{text: askReminder, mode: mode, gen: gen}, true
+		return m.compose(variantAsk, gen, false), true
 	}
 	return pendingReminder{}, false
 }
 
-// transition is what the model reads when the mode changed under it: the mode
-// it is in now, and, for a return to agent mode, which mode it has left. A
-// plan-to-ask switch announces ask's restrictions rather than plan's exit,
-// because ask is where the model now is.
+// transition is the variant the model reads when the mode changed under it:
+// the mode it is in now, and, for a return to agent mode, which mode it has
+// left. A plan-to-ask switch announces ask's restrictions rather than plan's
+// exit, because ask is where the model now is.
 func (m *modes) transition(mode, told string) string {
 	switch {
 	case mode == modePlan:
-		return m.planEntryText()
+		return m.planEntry()
 	case mode == modeAsk:
-		return askReminder
+		return variantAsk
 	case told == modePlan:
-		return fmt.Sprintf(planReminderExit, m.planPath)
+		return variantPlanExit
 	default:
-		return askReminderExit
+		return variantAskExit
 	}
 }
 
-// planEntryText is plan mode's text on entry: grok-build's re-entry notice
+// planEntry is plan mode's variant on entry: grok-build's re-entry notice
 // when a plan was written in this session already, and the full reminder
 // otherwise.
-func (m *modes) planEntryText() string {
+func (m *modes) planEntry() string {
 	if planHasContent(m.planPath) {
-		return fmt.Sprintf(planReminderReentry, m.planPath)
+		return variantPlanReentry
 	}
-	return m.planText(0)
+	return m.planStanding(0)
 }
 
-// planText is the standing plan reminder at parity: the full text on even
-// turns and the sparse one on odd, as grok-build alternates them.
-func (m *modes) planText(parity int) string {
-	if parity%2 == 1 {
-		return fmt.Sprintf(planReminderSparse, m.planPath)
+// planStanding is the standing plan reminder's variant at parity: the full
+// text on even turns and the sparse one on odd, as grok-build alternates
+// them. Which full text it is — a plan written or none yet — is read from the
+// plan file here, at composition, and never again.
+func (m *modes) planStanding(parity int) string {
+	switch {
+	case parity%2 == 1:
+		return variantPlanSparse
+	case planHasContent(m.planPath):
+		return variantPlanFullWritten
 	}
-	line := planFileEmpty
-	if planHasContent(m.planPath) {
-		line = planFileWritten
-	}
-	return fmt.Sprintf(planReminderFull, fmt.Sprintf(line, m.planPath))
+	return variantPlanFullEmpty
 }
 
 // sent records that the request carrying r has gone out, which is all one
@@ -342,13 +418,15 @@ func planHasContent(path string) bool {
 	return err == nil && info.Size() > 0
 }
 
-// reminder is one reminder the turn shows the model: the message, and the
-// index it is re-inserted at in every later step's input. It is deliberately
-// not a splice (steer.go): nothing that reads the steers may see a reminder,
-// and two types are how that stays true.
+// reminder is one reminder the turn shows the model: the message, the index
+// it is re-inserted at in every later step's input, and its variant, which the
+// append of the step that first carried it writes at that place (plan 028
+// §3.15). It is deliberately not a splice (steer.go): nothing that reads the
+// steers may see a reminder, and two types are how that stays true.
 type reminder struct {
-	at  int
-	msg fantasy.Message
+	at      int
+	msg     fantasy.Message
+	variant string
 }
 
 // remind composes the reminder this step's request will carry, if any, and
@@ -361,10 +439,15 @@ func (t *turn) remind(step int, base []fantasy.Message) {
 	if !ok {
 		return
 	}
-	t.reminders = append(t.reminders, reminder{at: len(base), msg: reminderMessage(r.text)})
+	t.reminders = append(t.reminders, reminder{at: len(base), msg: reminderMessage(r.text), variant: r.variant})
 	t.pending, t.hasPending = r, true
 	t.carried = r.mode
 }
+
+// unwrittenReminders are the reminders no append has written yet. They are
+// always a suffix, as the steers are: an append writes every one taken up
+// before it, or none. mu is held.
+func (t *turn) unwrittenReminders() []reminder { return t.reminders[t.remWritten:] }
 
 // reminderSent is called as the step's request goes out (stepStarted): the
 // alternation advances here, because that is a fact about requests, and the

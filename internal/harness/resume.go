@@ -94,6 +94,7 @@ func (s *Session) openResumed(opts Options) (_ *Session, err error) {
 		Tools:        s.tools.wire,
 		Now:          opts.Now,
 		SessionID:    id,
+		Render:       s.renderer(),
 	}, path)
 	if err != nil {
 		return nil, fail(s.tools.redactErr(err))

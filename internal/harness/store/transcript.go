@@ -37,6 +37,25 @@ type Transcript struct {
 	Entries []Entry
 
 	index map[string]int // entry id → position in Entries
+	// render is the harness's renderer (Options.Render), for the entries
+	// whose text the file does not hold: the Store's transcript has its own,
+	// and one Load returns has none.
+	render Renderer
+}
+
+// Renderer turns the entries whose text the store never keeps back into the
+// messages a request sends in their place (plan 028 §3.15; §3.9's summary
+// message joins it). The store composes no text of its own and knows none:
+// the harness hands it this at New or Open, and the context (ContextAt) calls
+// it at each such entry's place on the path. Each field may be nil, and a
+// transcript without a renderer — one Load returns — leaves those entries out
+// of its context, as it leaves out a newer craze's types.
+type Renderer struct {
+	// Reminder is the message a reminder entry of variant stands for: byte
+	// for byte the one the request that carried it sent. ok is false for a
+	// variant the harness does not know (a newer craze's), which the context
+	// then leaves out.
+	Reminder func(variant string) (msg fantasy.Message, ok bool)
 }
 
 // Load reads a session file. The header must be valid. A malformed last line
@@ -56,19 +75,21 @@ type Transcript struct {
 // to write a step that breaks the invariant, and a crash only takes lines
 // off the end of an append, so every whole line left was checked against
 // the line before it when it was written. A line whose turn or todos breaks
-// its own rules (checkFields) is ErrCorrupt wherever it is, for the same
-// reason (plan 028 P14).
+// its own rules (checkFields), and a reminder whose variant is not a name
+// (checkVariant), is ErrCorrupt wherever it is, for the same reason (plan 028
+// P14).
 //
 // Then the incomplete step at the tail, if any, is rolled back
 // (dropIncompleteTurn). The store writes each step as one append — held
-// changes, held user entries, steers, the assistant message, and the tool
-// message when there is one — but a crash can persist any prefix of it,
-// including one that ends on a line boundary. After the malformed last line
-// is skipped, what can remain of a cut step is exactly its first lines, so
-// the tail is the entries after the last complete step: changes, user
-// entries and steers with no answer after them, possibly followed by an
-// assistant message whose tool calls have no line after it at all, because
-// the tool message was the line the cut removed. That missing line, as the
+// changes, held user entries, the reminders and steers that lead it, the
+// assistant message, and the tool message when there is one — but a crash
+// can persist any prefix of it, including one that ends on a line boundary.
+// After the malformed last line is skipped, what can remain of a cut step is
+// exactly its first lines, so the tail is the entries after the last complete
+// step: changes, user entries, reminders and steers with no answer after
+// them, possibly followed by an assistant message whose tool calls have no
+// line after it at all, because the tool message was the line the cut
+// removed. That missing line, as the
 // end of the file, is the only unpaired state rolled back rather than
 // refused. None of the tail is history, so a file holding only a header, or
 // a header and a user entry, loads with no entries.
@@ -157,8 +178,8 @@ func parse(data []byte, path string) (*parsed, error) {
 // only once Load has refused every line that breaks the invariant, so the
 // one unpaired entry it can meet is an assistant message with open calls as
 // the last line — its tool message cut off — and that goes, together with
-// the steers, user entries, changes and resume entry written ahead of it (see
-// Load). It returns how many entries it kept.
+// the steers, reminders, user entries, changes and resume entry written ahead
+// of it (see Load). It returns how many entries it kept.
 func (t *Transcript) dropIncompleteTurn() int {
 	keep := 0
 	for i := range t.Entries {
@@ -300,9 +321,12 @@ func (t *Transcript) Context(current Model) []fantasy.Message {
 }
 
 // ContextAt is the history a request from leaf sends: the message entries on
-// the path from the root to leaf, in order. It builds new messages and never
-// changes an entry (the file is never rewritten), applying these rules, each
-// of which keeps tool calls paired with their results:
+// the path from the root to leaf, in order, and at each reminder entry's place
+// the message the harness's renderer makes of it (Renderer) — byte for byte
+// the reminder that request carried there, so the history is what was sent
+// (plan 028 §3.15). It builds new messages and never changes an entry (the
+// file is never rewritten), applying these rules, each of which keeps tool
+// calls paired with their results:
 //
 //   - Reasoning, and calls the provider executed with their results, are
 //     replayed only to the model that produced them: an assistant message's
@@ -352,6 +376,16 @@ func (t *Transcript) contextAt(leaf string, current Model) ([]fantasy.Message, [
 	dropped := false // the message before this one was an assistant message replayed as nothing
 	for k := len(path) - 1; k >= 0; k-- {
 		e := &t.Entries[path[k]]
+		if e.Type == TypeReminder {
+			// Pairing keeps a reminder from ever sitting between an assistant
+			// message and its tool message, so it cannot separate the two.
+			if m, ok := t.renderReminder(e.Variant); ok {
+				msgs = append(msgs, m)
+				results = append(results, false)
+			}
+			dropped = false
+			continue
+		}
 		if e.Type != TypeMessage {
 			continue
 		}
@@ -379,6 +413,16 @@ func (t *Transcript) contextAt(leaf string, current Model) ([]fantasy.Message, [
 		msgs, results = msgs[:len(msgs)-1], results[:len(results)-1]
 	}
 	return msgs, results, nil
+}
+
+// renderReminder is the message a reminder entry of variant stands for, from
+// the harness's renderer; nothing when there is none, or it does not know
+// the variant.
+func (t *Transcript) renderReminder(variant string) (fantasy.Message, bool) {
+	if t.render.Reminder == nil {
+		return fantasy.Message{}, false
+	}
+	return t.render.Reminder(variant)
 }
 
 // replayed is e's message as a request to current sends it: a copy with its
