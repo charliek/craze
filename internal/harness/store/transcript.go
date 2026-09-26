@@ -547,8 +547,14 @@ func (t *Transcript) Steps(leaf string, current Model) ([]Step, error) {
 // budget; the first step that would take it over ends the walk and is not
 // kept, and neither is any step before it. It returns k: steps[k:] is the
 // tail, and steps[k].First the compaction's FirstKeptID; k == len(steps) is
-// no tail — a budget of 0, or a newest step alone over the budget.
+// no tail — a budget of 0 or less, or a newest step alone over the budget. A
+// budget of 0 keeps nothing even when the newest steps weigh nothing (P13's
+// tail_tokens = 0): a step of another model's provider-executed parts alone
+// sends this model no message, but its entries would still be the tail.
 func Cut(steps []Step, budget int64, size func(fantasy.Message) int64) int {
+	if budget <= 0 {
+		return len(steps)
+	}
 	k, sum := len(steps), int64(0)
 	for ; k > 0; k-- {
 		n := int64(0)

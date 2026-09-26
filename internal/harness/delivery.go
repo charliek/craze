@@ -58,21 +58,24 @@ func (t *turn) entry(p *internalPart) store.MessageEntry {
 // the order the step's request had them — by index, and at a shared index the
 // reminders, then the steers, then the results (spliceInto; plan 028 §3.15) —
 // each entry's part beside it (nil for a reminder or a steer). mu is held.
-func (t *turn) leadingEntries() ([]store.Lead, []*internalPart) { return t.leads(t.unwritten()) }
+func (t *turn) leadingEntries() ([]store.Lead, []*internalPart) {
+	return t.leads(t.unwrittenReminders(), t.unwritten())
+}
 
-// internalEntries are the leading entries of a save that carries no steer:
-// the partial answer a cancel or a failure cut short, and the step the runner
-// synthesizes — whose unwritten steers go back to the user, as they always
-// have. The reminders and the parts of results the cut step's request carried
-// lead it as they would a finished step's. mu is held.
-func (t *turn) internalEntries() ([]store.Lead, []*internalPart) { return t.leads(nil) }
+// internalEntries are the leading entries of a save that carries no steer and
+// no reminder: the partial answer a cancel or a failure cut short, and the
+// step the runner synthesizes. Its unwritten steers go back to the user, as
+// they always have, and its reminders are not written, since the model was not
+// told them for good (reminders.go); the parts of results the cut step's
+// request carried lead it as they would a finished step's. mu is held.
+func (t *turn) internalEntries() ([]store.Lead, []*internalPart) { return t.leads(nil, nil) }
 
-// leads merges the unwritten reminders, steers and parts of results into the
+// leads merges rems, steers and the unwritten parts of results into the
 // store's leading entries, by index — the smallest next each time, and at a
 // shared index a reminder before a steer before a part — which is where
 // spliceInto puts them. mu is held.
-func (t *turn) leads(steers []splice) ([]store.Lead, []*internalPart) {
-	rems, parts := t.unwrittenReminders(), t.unwrittenParts()
+func (t *turn) leads(rems []reminder, steers []splice) ([]store.Lead, []*internalPart) {
+	parts := t.unwrittenParts()
 	n := len(rems) + len(steers) + len(parts)
 	if n == 0 {
 		return nil, nil

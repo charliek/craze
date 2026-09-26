@@ -126,7 +126,8 @@ type Result struct {
 //     provider id runs none of them, is not saved, and fails the turn with
 //     ErrBadToolCalls.
 //   - A cancel or failure mid-step appends what streamed, marked
-//     interrupted, once Fantasy has returned; the append uses no context, so
+//     interrupted and led by no mode reminder (reminders.go), once Fantasy
+//     has returned; the append uses no context, so
 //     the cancel that ended the turn cannot abort it. With no text streamed
 //     (thinking alone counts as none) nothing is written. Tools honour the
 //     cancel and report "Tool execution aborted"; their step then finishes
@@ -478,8 +479,9 @@ type turn struct {
 	// session's box, which has its own lock; the rest is this turn's, under
 	// mu. reminders is a collection of its own — never spliced, never
 	// emitted — and pending is the one composed for the step about to go out.
-	// Each is written, as its variant, with the first append after it (plan
-	// 028 §3.15); remWritten counts those an append has written.
+	// Each is written, as its variant, with the first finished step's append
+	// after it (plan 028 §3.15) — never with an interrupted save
+	// (reminders.go); remWritten counts those an append has written.
 	//
 	// carried and sent are the two halves of announcing a mode. carried is the
 	// mode this turn's reminders already speak for, from the moment one is
@@ -927,8 +929,8 @@ func (t *turn) saveInterrupted(cancelled bool) error {
 	}
 	// The background results the cut step's request carried lead the answer,
 	// as they would a finished step's, and commit when it is written (plan 026
-	// §3.11), and so do its reminders (plan 028 §3.15); its steers do not, and
-	// go back to the user.
+	// §3.11); its steers do not, and go back to the user, and neither does its
+	// reminder, which the model was not told for good (reminders.go).
 	leading, lead := t.internalEntries()
 	ids, err := t.store.AppendAnswerLed(leading, store.MessageEntry{
 		Message:     streamed(t.reasoning.String(), t.text.String()),
@@ -938,7 +940,6 @@ func (t *turn) saveInterrupted(cancelled bool) error {
 		Interrupted: true,
 	})
 	if err == nil {
-		t.remWritten = len(t.reminders)
 		t.wrote(ids, lead, false, nil)
 	}
 	if errors.Is(err, store.ErrNoOutput) {

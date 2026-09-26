@@ -14,6 +14,7 @@ import (
 	"testing"
 
 	"charm.land/fantasy"
+	"github.com/charliek/craze/internal/harness/llm"
 	"github.com/charliek/craze/internal/harness/store"
 	"github.com/charliek/craze/internal/harness/tool"
 )
@@ -765,9 +766,9 @@ func TestAHeldModeChangeDoesNotOutliveASwitchBack(t *testing.T) {
 // The same for a cancelled turn, whose partial answer is persisted:
 // interrupted output is not the step that announced the mode finishing, so
 // the model is told again and the mode_change sits with the turn that does
-// finish (plan 023 §3.3). The partial answer is saved with the notice its
-// request carried ahead of it, as every step is (plan 028 §3.15), so the
-// history then says it twice — never not at all.
+// finish (plan 023 §3.3). The partial answer is saved without the notice its
+// request carried (plan 028 X29, astra r1-c7), so the history says it once,
+// with the turn that finishes — never twice, and never not at all.
 func TestATransitionNoticeSurvivesACancelledTurn(t *testing.T) {
 	f := newFixture(t, "http://127.0.0.1:1/v1")
 	s := f.open(modeOptions(f, "ask"))
@@ -791,15 +792,119 @@ func TestATransitionNoticeSurvivesACancelledTurn(t *testing.T) {
 	if text, _ := reminderIn(t, a, 1); !strings.Contains(text, "Ask mode is active") {
 		t.Fatalf("the next turn read %q; the notice must go out again", text)
 	}
+	if all := remindersIn(t, a, 1); len(all) != 1 {
+		t.Fatalf("the next turn's request says the notice %d times: %v", len(all), all)
+	}
 	equal(t, "transcript", entries(transcript(t, s)), []string{
 		"user test/a high: ask away",
-		"reminder ask",
 		"assistant test/a high cancelled interrupted: partial",
 		"mode_change ask",
 		"user test/a high: and again",
 		"reminder ask",
 		"assistant test/a high end_turn: it says alpha",
 	})
+}
+
+// lastToldIn is the mode request n of m leaves the model under: the mode the
+// last reminder anywhere in it speaks for — its own turn's, or one the history
+// replays — or agent, which nothing need be said about, when it carries none.
+// Every reminder in it must be the text of one of reminderVariants for s's
+// plan file.
+func lastToldIn(t *testing.T, s *Session, m *scripted, n int) string {
+	t.Helper()
+	told := modeAgent
+	for _, line := range remindersIn(t, m, n) {
+		found := false
+		for _, v := range reminderVariants {
+			if line == "user: "+reminderMessageText(v.text(planPathOf(s))) {
+				told, found = v.mode, true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("request %d carries a reminder no variant renders: %q", n+1, line)
+		}
+	}
+	return told
+}
+
+// TestACutStepLeavesNoModeBehind is astra r1-c7's finding: a step a cancel or
+// a failure cut short is saved without the reminder its request carried. The
+// model is told a mode for good only by a step that finished (modeHeard), so
+// a reminder written with a partial answer is history the told state knows
+// nothing of. Cut short in ask or plan mode and then back in agent mode — by
+// SetMode, or by a resume, which seeds the told mode from the transcript's
+// last mode_change and finds none — the next turn composes no exit notice, so
+// its request must hold nothing of the old mode's rule either: the model
+// reads the mode the gate enforces.
+func TestACutStepLeavesNoModeBehind(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		mode   string
+		fail   bool // cut short by a failure mid-stream, not a cancel
+		resume bool // back in agent mode by a resume, not SetMode
+		cut    string
+	}{
+		{name: "ask, cancelled, SetMode", mode: modeAsk, cut: "assistant test/a high cancelled interrupted: partial"},
+		{name: "plan, cancelled, SetMode", mode: modePlan, cut: "assistant test/a high cancelled interrupted: partial"},
+		{name: "ask, cancelled, resumed", mode: modeAsk, resume: true, cut: "assistant test/a high cancelled interrupted: partial"},
+		{name: "plan, cancelled, resumed", mode: modePlan, resume: true, cut: "assistant test/a high cancelled interrupted: partial"},
+		{name: "ask, failed, SetMode", mode: modeAsk, fail: true, cut: "assistant test/a high interrupted: partial"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFixture(t, "http://127.0.0.1:1/v1")
+			s, err := Open(modeOptions(f, tc.mode))
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = s.Close() })
+			a := f.models["test/a"]
+			if tc.fail {
+				a.push(reply(openText("partial"), errorPart(&llm.MidStreamError{Message: "stream error - upstream gone"})))
+				if _, err := s.Run(context.Background(), "look at it", nil); err == nil {
+					t.Fatal("the failed turn returned no error")
+				}
+			} else {
+				g := newGate()
+				a.push(g.hold(openText("partial"), finishText()))
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				out := start(ctx, s, "look at it", nil)
+				await(t, g.reached, "the first step")
+				cancel()
+				if got := await(t, out, "the cancelled turn"); got.res.StopReason != StopCancelled {
+					t.Fatalf("Run = %+v, %v; want cancelled", got.res, got.err)
+				}
+			}
+			if told := lastToldIn(t, s, a, 0); told != tc.mode {
+				t.Fatalf("the cut step's request spoke for %s mode, want %s", told, tc.mode)
+			}
+
+			want := []string{"user test/a high: look at it", tc.cut}
+			if tc.resume {
+				id := s.ID()
+				if err := s.Close(); err != nil {
+					t.Fatal(err)
+				}
+				s = resumed(t, resumeOptions(f.options(), id))
+				if s.Mode() != modeAgent {
+					t.Fatalf("resumed in %q; the transcript records no mode, so want agent", s.Mode())
+				}
+				want = append(want, "resume")
+			} else if err := s.SetMode(modeAgent); err != nil {
+				t.Fatal(err)
+			}
+			a.push(answerWith("done"))
+			run(t, s, "now do it")
+			if told := lastToldIn(t, s, a, 1); told != modeAgent {
+				t.Fatalf("back in agent mode the model reads %s mode's rule: %v", told, promptOf(a.requests()[1]))
+			}
+			equal(t, "transcript", entries(transcript(t, s)), append(want,
+				"user test/a high: now do it",
+				"assistant test/a high end_turn: done",
+			))
+		})
+	}
 }
 
 // A retried step carries one reminder and settles it once. Fantasy prepares

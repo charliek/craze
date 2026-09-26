@@ -21,15 +21,15 @@ import (
 // emitted as an Event and never reported in Result.Unanswered; it lives in a
 // collection of its own, separate from the steers (steer.go), so nothing that
 // reads those can see one. The model reads it in every request of the turn
-// that composed it — and in every later turn's too: the step whose request
-// carried it writes a reminder entry at its place, after the step's user
-// entries and before its steers, as spliceInto orders them, and the history
-// the next turn rebuilds from the transcript renders it again there, byte for
-// byte what was sent (plan 028 §3.15). So a turn's first request begins with
-// the whole of the last request before it, and the provider's prefix cache
-// holds across turns in plan and ask mode as it does in agent mode (H5's R3
-// measured a full miss on every plan-mode turn while reminders were not
-// stored). The entry names the text's variant and never holds the text (plan
+// that composed it — and in every later turn's too: the finished step whose
+// request carried it writes a reminder entry at its place, after the step's
+// user entries and before its steers, as spliceInto orders them, and the
+// history the next turn rebuilds from the transcript renders it again there,
+// byte for byte what was sent (plan 028 §3.15). So a turn's first request
+// begins with the whole of the last request before it, and the provider's
+// prefix cache holds across turns in plan and ask mode as it does in agent
+// mode (H5's R3 measured a full miss on every plan-mode turn while reminders
+// were not stored). The entry names the text's variant and never holds the text (plan
 // 023 owner decision 5): every text a reminder can carry is exactly one
 // variant (reminderVariants), and a variant and the plan file's path are all
 // it takes to write the text again — whether the plan file had anything in it
@@ -43,11 +43,21 @@ import (
 // opens with the mode's standing reminder. "Told" means told in a step that
 // finished and whose output the transcript kept: a notice sent in a turn that
 // failed, was cancelled or only thought is not told for good, and it goes out
-// again (§3.3) — even when the cut step's partial answer was saved with the
-// notice's entry ahead of it, which leaves the history saying it twice rather
-// than never. Plan mode's alternates between a full text and a sparse one, as
-// grok-build's does, and both name the plan file, so that a sparse one never
-// leaves the model without the path (panel correction 8).
+// again (§3.3). Plan mode's alternates between a full text and a sparse one,
+// as grok-build's does, and both name the plan file, so that a sparse one
+// never leaves the model without the path (panel correction 8).
+//
+// So a step a cancel or a failure cut short is saved without the reminder its
+// request carried (plan 028 X29, astra r1-c7): a reminder entry is only ever
+// one a finished step's request carried, which is what "told" means, and the
+// transcript and the told state say the same thing. Written with the partial
+// answer, a reminder would be history the told state knows nothing of —
+// cancelled in ask mode and switched back to agent, the next turn would
+// compose no exit notice (told is still agent) while its history replayed
+// ask's "every such call is denied"; and a resume, which seeds told from the
+// transcript's last mode_change (which only a finished step writes), would do
+// the same. The cost is the next turn's first request, which is not the cut
+// request plus more: one prefix-cache miss after a cancel or a failure.
 
 // reminderTag wraps every reminder. grok-build's tag, so a model that has
 // seen one recognizes it.
@@ -382,9 +392,10 @@ func (m *modes) planStanding(parity int) string {
 //
 // It deliberately does not record told. A request that went out can still end
 // in nothing the conversation keeps — a failure, a cancel, a step that only
-// thought — and the next turn's history, rebuilt from a transcript with no
-// reminders in it, would then leave the model with a mode it was told about
-// in a turn that left no trace (plan 023 §3.3). heard is that half.
+// thought — and the next turn's history, rebuilt from a transcript that holds
+// no reminder of that request's (an interrupted save writes none), would then
+// leave the model with a mode it was told about in a turn that left no trace
+// (plan 023 §3.3). heard is that half.
 func (m *modes) sent(r pendingReminder) {
 	m.mu.Lock()
 	defer m.mu.Unlock()

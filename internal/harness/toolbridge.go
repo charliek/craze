@@ -471,8 +471,9 @@ func (t *turn) synthesizeStep(stop string) (done bool, err error) {
 	// agent_output call read, only when its own result is written here
 	// (§3.11). The step's request carried the background results its
 	// boundary took up, and they lead the append as they would a finished
-	// step's, as its reminders do (plan 028 §3.15); the user's steers do not,
-	// and go back to them (Unanswered), as before.
+	// step's; the user's steers do not, and go back to them (Unanswered), as
+	// before, and neither does its reminder, which the model was not told for
+	// good (reminders.go).
 	writes := func(c *toolCall) bool { return slices.Contains(answered, c) }
 	leading, lead := t.internalEntries()
 	toolEntry := &store.MessageEntry{Message: redactResults(t.redactor(), toolMsg), Model: t.model.id(), Effort: t.model.effort, Interrupted: true,
@@ -484,7 +485,6 @@ func (t *turn) synthesizeStep(stop string) (done bool, err error) {
 		store.MessageEntry{Message: redactCalls(t.redactor(), assistant), Model: t.model.id(), Effort: t.model.effort, StopReason: stop, Interrupted: true},
 		toolEntry)
 	if err == nil {
-		t.remWritten = len(t.reminders)
 		t.wrote(entries, lead, true, outputCalls(answered))
 		t.todosWritten(todos)
 	}

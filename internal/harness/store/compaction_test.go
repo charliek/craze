@@ -452,6 +452,34 @@ func TestD33InTheTail(t *testing.T) {
 	}
 }
 
+// TestAZeroBudgetKeepsNoTail (§3.9, P13, astra r1-c8): tail_tokens = 0 is no
+// tail, even when the newest step sends nothing. A step that holds only another
+// model's provider-executed call (TestD33InTheTail's) weighs 0 to this model,
+// so a walk that only compared sizes would keep it within a budget of 0 — and
+// with it a firstKeptId whose parts the model that ran the call would replay.
+func TestAZeroBudgetKeepsNoTail(t *testing.T) {
+	s := newStore(t, compacted(testOptions(t)))
+	turn(t, s, "q1", "a1", kimi)
+	hosted := MessageEntry{Model: minimax, StopReason: "end_turn", Message: fantasy.Message{Role: fantasy.MessageRoleAssistant, Content: []fantasy.MessagePart{
+		fantasy.ToolCallPart{ToolCallID: "ws_1", ToolName: "web_search", Input: `{"q":"x"}`, ProviderExecuted: true},
+		fantasy.ToolResultPart{ToolCallID: "ws_1", Output: fantasy.ToolResultOutputContentText{Text: "found"}, ProviderExecuted: true},
+	}}}
+	if _, err := s.AppendStep(nil, hosted, nil); err != nil {
+		t.Fatal(err)
+	}
+	steps := s.Steps(kimi)
+	if len(steps) != 2 || len(steps[1].Messages) != 0 {
+		t.Fatalf("%d steps, the newest sending %q; want 2, the newest sending nothing", len(steps), messageTexts(steps[len(steps)-1].Messages))
+	}
+	if got := Cut(steps, 0, textSize); got != len(steps) {
+		t.Fatalf("Cut(budget 0) = %d; tail_tokens = 0 is no tail (%d)", got, len(steps))
+	}
+	// The control: any budget at all keeps the empty step, and only it.
+	if got := Cut(steps, 1, textSize); got != 1 {
+		t.Fatalf("Cut(budget 1) = %d, want 1", got)
+	}
+}
+
 // TestAContextMayEndInTheSummary (A14): a compaction with no tail and nothing
 // after it leaves a context of its summary message alone — a user message the
 // trailing trim never removes, which a request then sends with no prompt of
