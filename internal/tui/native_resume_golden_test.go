@@ -36,8 +36,7 @@ func TestFrameGoldenNativeResume100x30(t *testing.T) {
 	writeFrameFile(t, ws, "notes.txt", "alpha\n")
 	table := nativeOneModelTable()
 	harnessHome := t.TempDir()
-	model := &nativeScriptedModel{provider: "test", wire: "wire-echo"}
-	model.steps = [][]fantasy.StreamPart{
+	steps := [][]fantasy.StreamPart{
 		nativeToolStep("c1", "read", `{"filePath":"main.go"}`),
 		nativeToolStep("c2", "edit", `{"filePath":"notes.txt","oldString":"alpha","newString":"beta"}`),
 		nativeToolStep("c3", "bash", `{"command":"echo hi"}`),
@@ -47,7 +46,8 @@ func TestFrameGoldenNativeResume100x30(t *testing.T) {
 	}
 
 	// The stored session: one turn, then closed, as a quit leaves it.
-	first := agent.NewNative(agent.Options{Workspace: ws, ContentHome: t.TempDir()}, nativeSessionTweak(harnessHome, table, model))
+	first := agent.NewNative(agent.Options{Workspace: ws, ContentHome: t.TempDir()},
+		nativeSessionTweak(harnessHome, table, &nativeScriptedModel{provider: "test", wire: "wire-echo", steps: steps}))
 	if err := first.Start(context.Background()); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -60,26 +60,21 @@ func TestFrameGoldenNativeResume100x30(t *testing.T) {
 		t.Fatalf("Close: %v", err)
 	}
 
-	// Each frame loads the stored session afresh: the runner closes its engine,
-	// and with it the session and the transcript's lock, when the script ends.
-	load := func(cols, rows int, script string) string {
-		t.Helper()
+	// build is the loaded session's builder: a fresh session (and its scripted
+	// model, though a plain load never calls it) every time it runs, so a
+	// both-gate-modes wrapper can call it once per mode (S2's runFrameModes
+	// seam). The runner closes its engine, and with it the session and the
+	// transcript's lock, when the script ends.
+	build := func() Config {
 		sess := agent.NewNative(agent.Options{Workspace: ws, ContentHome: t.TempDir(), LoadSessionID: id, Title: "fix the notes"},
-			nativeSessionTweak(harnessHome, table, model))
-		got, _, err := RunFrameScript(Config{
-			Session:   sess,
-			Theme:     "tokyo-night",
-			Workspace: ws,
-			Yolo:      true,
-			Loading:   true,
-		}, cols, rows, script, FrameOpts{Timeout: 20 * time.Second})
-		if err != nil {
-			t.Fatalf("run frame script: %v", err)
-		}
-		return got
+			nativeSessionTweak(harnessHome, table, &nativeScriptedModel{provider: "test", wire: "wire-echo", steps: steps}))
+		return Config{Session: sess, Theme: "tokyo-night", Workspace: ws, Yolo: true, Loading: true}
 	}
 
-	got := load(100, 30, "<wait:text:restored><wait:idle>")
+	got, _, err := RunFrameScript(build(), 100, 30, "<wait:text:restored><wait:idle>", FrameOpts{Timeout: 20 * time.Second})
+	if err != nil {
+		t.Fatalf("run frame script: %v", err)
+	}
 	assertFrameGolden(t, "native-resume-100x30", 100, 30, got,
 		[]string{
 			"❯ fix the notes",
@@ -105,7 +100,10 @@ func TestFrameGoldenNativeResume100x30(t *testing.T) {
 
 	// Expanded, each row with a body ends with the label after its output:
 	// the read's content, and each command's stream.
-	open := load(100, 50, "<wait:text:restored><wait:idle><ctrl-o><wait:text:(replayed)>")
+	open, _, err := RunFrameScript(build(), 100, 50, "<wait:text:restored><wait:idle><ctrl-o><wait:text:(replayed)>", FrameOpts{Timeout: 20 * time.Second})
+	if err != nil {
+		t.Fatalf("run frame script: %v", err)
+	}
 	assertFrameGolden(t, "", 100, 50, open, []string{"package main", "// TODO: ship it", "exit code: 3"}, nil)
 	if got := frameLineAfter(open, "✓ bash  echo hi"); got != "hi" {
 		t.Fatalf("the expanded row previews %q, want its output first:\n%s", got, open)

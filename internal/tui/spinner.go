@@ -79,7 +79,10 @@ func (m Model) spinnerVisible() bool {
 	if m.viewing != "" {
 		return m.viewedRunning() || m.cardOpen()
 	}
-	return m.status == statusWorking || m.cardOpen() || m.anySubagentRunning()
+	// A foreign-turn or wake compaction can open main's fold while status
+	// stays idle and nothing else is running (no turn, no child): the working
+	// line still has to show while it does (plan 028 §3.13).
+	return m.status == statusWorking || m.cardOpen() || m.anySubagentRunning() || m.compacting("")
 }
 
 // spinnerGlyph is the current frame of the cycle, shared with the merged form

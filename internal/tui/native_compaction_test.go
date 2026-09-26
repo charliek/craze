@@ -65,21 +65,25 @@ func longThought(n int) string {
 // suite runs.
 func TestFrameGoldenNativeCompaction100x30(t *testing.T) {
 	isolateSkillsHome(t)
-	model := &nativeScriptedModel{provider: "test", wire: "wire-echo"}
-	model.steps = [][]fantasy.StreamPart{
-		cat(nativeThoughtParts(longThought(compactionGoldenThought)), nativeTextParts("hi there"), nativeFinishParts()),
-		nativeSummaryParts("The user greeted the agent.", compactionGoldenSummary),
-	}
 	ws := frameWorkspace(t)
-	sess := agent.NewNative(agent.Options{Workspace: ws, ContentHome: t.TempDir()},
-		nativeSessionTweak(t.TempDir(), nativeOneModelTable(), model))
 
-	got, _, err := RunFrameScript(Config{
-		Session:   sess,
-		Theme:     "tokyo-night",
-		Workspace: ws,
-		Yolo:      true,
-	}, 100, 30, "<wait:idle>hello<enter><wait:text:hi there><wait:idle>/compact keep the greeting<enter><wait:text:context compacted><wait:idle>",
+	// The session and its scripted model are built fresh inside the closure —
+	// a session is spent by its one run — so a both-gate-modes wrapper can
+	// call build() once per mode (S2's runFrameModes seam). The call count is
+	// asserted against the model this run built, captured here.
+	var model *nativeScriptedModel
+	build := func() Config {
+		model = &nativeScriptedModel{provider: "test", wire: "wire-echo"}
+		model.steps = [][]fantasy.StreamPart{
+			cat(nativeThoughtParts(longThought(compactionGoldenThought)), nativeTextParts("hi there"), nativeFinishParts()),
+			nativeSummaryParts("The user greeted the agent.", compactionGoldenSummary),
+		}
+		sess := agent.NewNative(agent.Options{Workspace: ws, ContentHome: t.TempDir()},
+			nativeSessionTweak(t.TempDir(), nativeOneModelTable(), model))
+		return Config{Session: sess, Theme: "tokyo-night", Workspace: ws, Yolo: true}
+	}
+
+	got, _, err := RunFrameScript(build(), 100, 30, "<wait:idle>hello<enter><wait:text:hi there><wait:idle>/compact keep the greeting<enter><wait:text:context compacted><wait:idle>",
 		FrameOpts{Timeout: 10 * time.Second})
 	if err != nil {
 		t.Fatalf("run frame script: %v", err)
@@ -92,11 +96,14 @@ func TestFrameGoldenNativeCompaction100x30(t *testing.T) {
 		t.Fatalf("the session sent %d requests; want the turn's and the summarizer's", model.calls)
 	}
 
-	// The menu offers it: native's one command, with its own description.
-	menu := agent.NewNative(agent.Options{Workspace: ws, ContentHome: t.TempDir()},
-		nativeSessionTweak(t.TempDir(), nativeOneModelTable(), &nativeScriptedModel{provider: "test", wire: "wire-echo"}))
-	got, _, err = RunFrameScript(Config{Session: menu, Theme: "tokyo-night", Workspace: ws, Yolo: true},
-		100, 30, "<wait:idle>/comp", FrameOpts{Timeout: 10 * time.Second})
+	// The menu offers it: native's one command, with its own description. A
+	// separate builder, its own session and model fresh per call too.
+	buildMenu := func() Config {
+		menu := agent.NewNative(agent.Options{Workspace: ws, ContentHome: t.TempDir()},
+			nativeSessionTweak(t.TempDir(), nativeOneModelTable(), &nativeScriptedModel{provider: "test", wire: "wire-echo"}))
+		return Config{Session: menu, Theme: "tokyo-night", Workspace: ws, Yolo: true}
+	}
+	got, _, err = RunFrameScript(buildMenu(), 100, 30, "<wait:idle>/comp", FrameOpts{Timeout: 10 * time.Second})
 	if err != nil {
 		t.Fatalf("run frame script: %v", err)
 	}
@@ -333,5 +340,39 @@ func TestTheWorkingLineSaysCompacting(t *testing.T) {
 	}
 	if got := m.shared.Main.Entries(); len(got) == 0 || got[len(got)-1].Text != "context compacted · 890k → 21k tokens" {
 		t.Fatalf("the entries are %+v; want the note last", got)
+	}
+}
+
+// TestTheWorkingLineSaysCompactingWithNoTurnRunning: a foreign-turn or wake
+// compaction — the parent turn already ended, its last background child
+// already finished — opens main's fold while status is idle and nothing else
+// is running. The working line still has to show "compacting context…"
+// (plan 028 §3.13); once the ended is folded, the line goes back to hidden.
+func TestTheWorkingLineSaysCompactingWithNoTurnRunning(t *testing.T) {
+	m := sized(t)
+	if m.status != statusIdle {
+		t.Fatalf("status %v, want idle", m.status)
+	}
+	if m.spinnerVisible() {
+		t.Fatalf("the spinner is visible before any compaction: %q", m.spinnerView())
+	}
+	m = feed(t, m, agent.Event{Type: agent.EventCompaction, At: m.now(),
+		Compaction: &agent.CompactionInfo{Phase: agent.CompactionStarted, Reason: agent.CompactionOverflow}})
+	if m.status != statusIdle {
+		t.Fatalf("status %v, want still idle", m.status)
+	}
+	if !m.spinnerVisible() {
+		t.Fatal("the spinner is not visible while an idle-status compaction is open")
+	}
+	if v := m.spinnerView(); !strings.Contains(v, transcript.CompactingLabel) {
+		t.Fatalf("the working line while compacting is %q", v)
+	}
+	m = feed(t, m, agent.Event{Type: agent.EventCompaction, At: m.now(),
+		Compaction: &agent.CompactionInfo{Phase: agent.CompactionEnded, Reason: agent.CompactionOverflow, TokensBefore: 890_000, TokensAfter: 21_000}})
+	if m.spinnerVisible() {
+		t.Fatalf("the spinner is still visible after the compaction ended: %q", m.spinnerView())
+	}
+	if v := m.spinnerView(); v != "" {
+		t.Fatalf("the working line after the compaction ended is %q, want none", v)
 	}
 }
