@@ -1041,6 +1041,33 @@ func TestTheStateMirrorsMatchTheModelWhenQuiet(t *testing.T) {
 		m = pumpSettled(t, m)
 		check(t, m, "after a turn")
 
+		// A tool, running and then terminal: the ordered tools the mirror
+		// reads (astra r53 9).
+		running := agent.ToolEvent{ID: "read-1", Kind: "read", Status: "in_progress", Title: "Read a.go", Locations: []string{"a.go"}}
+		stub.Emit(agent.Event{Type: agent.EventTool, Tool: &running})
+		m = pumpSettled(t, m)
+		if len(m.shared.Tools()) == 0 {
+			t.Fatal("fixture: the running tool is not in the fold")
+		}
+		check(t, m, "with a tool running")
+		finished := running
+		finished.Status = "completed"
+		stub.Emit(agent.Event{Type: agent.EventTool, Tool: &finished})
+		m = pumpSettled(t, m)
+		check(t, m, "after the tool finished")
+
+		// The agent's own turn, its bracket open and then closed: the foreign
+		// turn the mirror reads.
+		stub.Emit(agent.Event{Type: agent.EventForeignTurn, ForeignTurn: &agent.ForeignTurnInfo{ID: "f-1", Running: true}})
+		m = pumpSettled(t, m)
+		if f := m.shared.State().Turn.Foreign; f == nil || !f.Running {
+			t.Fatal("fixture: the agent's own turn is not in the fold")
+		}
+		check(t, m, "with the agent's own turn running")
+		stub.Emit(agent.Event{Type: agent.EventForeignTurn, ForeignTurn: &agent.ForeignTurnInfo{ID: "f-1"}})
+		m = pumpSettled(t, m)
+		check(t, m, "after the agent's own turn ended")
+
 		todos := []agent.Todo{{ID: "1", Content: "Read", Status: "in_progress"}, {ID: "2", Content: "Edit", Status: "pending"}}
 		stub.SetTodos(todos)
 		stub.Emit(agent.Event{Type: agent.EventTodos, Todos: todos})

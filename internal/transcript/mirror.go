@@ -16,18 +16,21 @@ import (
 // after every fold — a streamed chunk included — without paying for the size
 // of the transcripts it holds. The tools are walked, entry by entry, which is
 // what their order is.
+//
+// Every value it holds is the caller's own, down to the last slice and
+// pointer — the settings' sections and their options' values, the queue, the
+// roster rows and what they list, the todo list, the foreign-turn bracket, the
+// tools and their payloads: nothing a caller writes into one reaches the
+// model, or races its next fold.
 type Mirror struct {
 	// Seq is the last event folded.
 	Seq uint64
 	// Settings is every StateDelta section as the last delta that carried it
-	// left it (Model's Settings). Config is the caller's own slice of
-	// options; Commands and Plugins are the model's, never written after the
-	// delta that replaced them, as State's are.
+	// left it (Model's Settings).
 	Settings Settings
-	// Queue is the message queue, front first, in a slice of the caller's own.
+	// Queue is the message queue, front first.
 	Queue []agent.QueuedPrompt
-	// Agents is the roster, in the order the rows first appeared, in a slice
-	// of the caller's own.
+	// Agents is the roster, in the order the rows first appeared.
 	Agents []agent.SubagentInfo
 	// Todos is the todo list, as the last EventTodos carried it.
 	Todos []agent.Todo
@@ -35,7 +38,7 @@ type Mirror struct {
 	// one is running.
 	Turn Turn
 	// Tools is Tools(): every retained tool's last state in entry order, main
-	// first and then each child's in creation order, each the caller's own.
+	// first and then each child's in creation order.
 	Tools []agent.ToolEvent
 }
 
@@ -48,25 +51,31 @@ func (m *Model) Mirror() Mirror {
 	mr := Mirror{
 		Seq:      m.seq,
 		Settings: m.settings,
-		Todos:    m.todos,
+		Todos:    slices.Clone(m.todos),
 		Turn:     m.turn,
 	}
-	if len(m.settings.Config) > 0 {
-		mr.Settings.Config = slices.Clone(m.settings.Config)
+	if len(m.queue) > 0 {
+		// An emptied queue is nil, as State's is.
+		mr.Queue = slices.Clone(m.queue)
 	}
+	mr.Settings.Config = cloneOptions(m.settings.Config)
+	mr.Settings.Commands = slices.Clone(m.settings.Commands)
+	mr.Settings.Plugins = slices.Clone(m.settings.Plugins)
 	if u := m.settings.Usage; u != nil {
-		// The caller's own copy, as every cut's is (cut's Usage): a value
-		// type, so one copy owns it whole.
+		// A value type, so one copy owns it whole (as every cut's Usage is).
 		cu := *u
 		mr.Settings.Usage = &cu
 	}
-	if len(m.queue) > 0 {
-		mr.Queue = slices.Clone(m.queue)
+	if f := m.turn.Foreign; f != nil {
+		cf := *f
+		mr.Turn.Foreign = &cf
 	}
 	if len(m.agentOrder) > 0 {
 		mr.Agents = make([]agent.SubagentInfo, 0, len(m.agentOrder))
 		for _, id := range m.agentOrder {
-			mr.Agents = append(mr.Agents, m.agents[id].info)
+			info := m.agents[id].info
+			info.ToolsUsed = slices.Clone(info.ToolsUsed)
+			mr.Agents = append(mr.Agents, info)
 		}
 	}
 	mr.Tools = appendTools(mr.Tools, m.Main.live())
@@ -74,4 +83,14 @@ func (m *Model) Mirror() Mirror {
 		mr.Tools = appendTools(mr.Tools, m.subs[id].live())
 	}
 	return mr
+}
+
+// cloneOptions is a config catalog the caller owns: each option, and each
+// option's own list of values, copied.
+func cloneOptions(opts []agent.ConfigOption) []agent.ConfigOption {
+	out := slices.Clone(opts)
+	for i := range out {
+		out[i].SelectValues = slices.Clone(out[i].SelectValues)
+	}
+	return out
 }
