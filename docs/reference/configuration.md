@@ -429,6 +429,42 @@ whole: a save re-encodes the whole `models.toml` in its own canonical layout,
 so hand-written comments and formatting are not preserved, and a section left
 with none of these keys is dropped (omitted) rather than written out empty.
 
+## Native cost
+
+On the native provider, `~/.craze/native/models.toml` (or `$CRAZE_HOME/native/`
+when the home is relocated) may carry an optional per-model `cost` table —
+what the [status row](tui.md#usage-and-cost) and the [usage
+section](protocol.md#usage) price a session's spend from:
+
+```toml
+[models."fireworks/kimi-k3".cost]
+input       = 0.60   # $ per 1,000,000 uncached input tokens
+output      = 2.50   # $ per 1,000,000 output tokens (reasoning included)
+cache_read  = 0.15
+cache_write = 0.0
+```
+
+Every key is optional and independent; a model with no `[cost]` table saves
+exactly as it did before this section existed. Each rate is dollars per
+1,000,000 tokens, from 0 up to $10,000 — a rate outside that range, or one
+that is not a finite number (`nan`, `inf`), is refused at load. There are no
+tiers yet: a tier is per request, and a sub-agent's usage row already sums
+many requests, so a per-request price cannot be recovered from it.
+
+craze prices a usage record by **identity** — the model's `(provider, wire
+model)` pair — never by the alias it happened to run under, since a resumed
+session's alias can stop existing while the identity it named still does.
+At load craze builds one canonical identity → rates map: for every alias
+that shares an identity, the **first in sorted order that has a `cost`**
+prices that identity. Two priced aliases of the same identity that set a
+*different* `cost` still load, with a warning naming both and saying which
+one's price is used. An identity with no priced alias is simply unpriced —
+its usage is still counted in tokens, but adds no cost.
+
+`craze import gx` keeps an existing entry's `cost` across a reimport — gx
+has no concept of it, so import never touches this table, the same as
+[`[compaction]`](#native-compaction) above.
+
 ## Environment
 
 | Variable | Purpose |

@@ -601,6 +601,32 @@ summary message names the directory, so the model knows the files are there
 when an exact detail — a command, an error string, a path — matters more
 than the summary's own account of it.
 
+## Usage and cost
+
+On the native provider, status row 1 gains a usage part after the model name
+once the session has taken a step — how full the context is, and what it has
+spent, the turn's amount then the session's:
+
+| state | text |
+|---|---|
+| priced | `34% ctx · $0.04 / $1.20` |
+| some usage had no price | `34% ctx · $0.04 / $1.20+` |
+| nothing priced at all | `34% ctx · 12.3k / 1.21M tok` |
+| a window craze does not know | `$0.04 / $1.20` (the `NN% ctx ·` prefix is left out) |
+| no usage yet (ACP, or before native's first step) | no part at all |
+
+Money is to the cent, rounded half up, and reads `<$0.01` for an amount
+above nothing that would otherwise round to nothing. A `+` on an amount
+means at least some of the usage behind it had no [price](configuration.md#native-cost)
+in `models.toml` — it is a floor, not the true cost. With nothing priced at
+all, the row falls back to billed tokens instead of a dollar figure: input,
+cache, and output, added together. The turn's amount is what the turn the
+last report followed spent; the session's is everything the session has
+spent, including its compactions' usage and its sub-agents', each priced by
+its own model. Row 1 drops its parts in a pinned order as the terminal
+narrows — elapsed first, then the branch, then this usage part, then the
+provider, and the model last of all.
+
 ## Cards
 
 A blocking request from the agent is a card, and the card owns the keyboard and
