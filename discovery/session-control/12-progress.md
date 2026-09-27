@@ -1684,11 +1684,11 @@ What S2 inherits:
 
 | | |
 |---|---|
-| Status | planned (Plan 027, FINAL after panel review 2026-09-24); PR 1 merged; PR 2 executing |
+| Status | planned (Plan 027, FINAL after panel review 2026-09-24); PR 1 merged; PR 2 merged; PR 3 executing (`feature/plan-027-s2-tui-async`) |
 | Plan | `027-session-control-s2-socket` (outside the repo, `~/.claude/plans/craze/`, raw panel reviews in its `panel/` folder) |
 | Baseline | `origin/main` `5901e4a`: H6 PR 2 (#53, sub-agent stop), merged on top of S1c PR 2 `79eb082` (#52, which completes S1) |
 | Branch / PRs | four sequential PRs, each branched from a freshly fetched `origin/main` after the previous one merges: `feature/plan-027-s2-wire`, `feature/plan-027-s2-host`, `feature/plan-027-s2-tui-async`, `feature/plan-027-s2-attach` |
-| Merged | PR 1 — #55 `318fc76` (2026-09-25); PR 2 — — (filled in as it lands) |
+| Merged | PR 1 — #55 `318fc76` (2026-09-25); PR 2 — #56 `2acd54a` (2026-09-26); PR 3 — — (filled in as it lands) |
 
 ### The PR cut
 
@@ -1845,6 +1845,54 @@ No owner decision was reopened at any round.
   the registry, host locks, and session locks under `<HOME>/.cache/craze/` (a
   fixed per-user path discovery can rely on) rather than in the runtime
   namespace.
+
+### What shipped per commit
+
+**PR 3 — `feature/plan-027-s2-tui-async`** (executing): C16 (`33cdebb` — the
+TUI holds a `backend.Backend`, `internal/backend/backend.go:67-102`; every
+command and read takes a `context.Context` first; `ClientID`, `Epoch` and
+`Info` are added; `Settings` narrows to `{Model, Mode, Config}`, no
+provider); C17 (`b8bf66b` — the command gate: `Model.run`/`gated`
+(`internal/tui/gate.go:179`, `:297`) wraps a gated call in a goroutine under
+`gateDeadline` (15 s, `:55`), `runFrameModes` runs every frame golden in
+both the synchronous and asynchronous gate modes) with its fix rounds C17a
+(`c0a0e59` — the frame harness's rendezvous closes the barrier race, the
+invisibility digest widened, every payload-bearing message charged, the
+drained slot zeroed), C17b (`9749185` — a key/mouse/resize token and its
+sync token become one program message, delivered back to back), and C17c
+(`1040cda` — a token parks only when nothing is held, the capture waits for
+a settled model then quits through the model's own FIFO, shutdown bounded);
+C18a (`5c801ee` — `Submit` through the gate, `internal/tui/app.go`; the
+band's transitional read moves into the call; a gated call's panic is
+re-raised on the command's goroutine so bubbletea recovers it); the
+fake-agent flake fix (`ac0030e` — `grok-subagent-late` ends its turn between
+spinner beats, X38); C18b (`c396b35` — the queue verbs and Ctrl+C/Esc
+through the gate; `clearPending`'s Disarm and ClearQueue are one gated call,
+back to back on the call's goroutine, `internal/tui/app.go:2406-2461`) and
+C18b1 (`c8fa58e` — a settling-turn Ctrl+C property test, test-only); C18c
+(`1dd6fe3` — answers, Interject and the masked opening (`pushCard` while
+`cardMasking`) through the gate; `m.sessGen` and `Backend.Epoch()`
+(`internal/tui/engine_backend.go:58`) fence every command and chain step;
+V8's seeded-jitter run: 760 passes, 0 diffs); the H7 compaction golden wrap
+(`f2ece4b`); C19 (`fd72eee` — the Stub's `InstallOnStart`
+(`internal/tui/stub.go:99`) publishes the live session's one install delta
+and flushes, for `internal/tui`'s Stubs only); C20 (`a2655f1` —
+`Backend.Info()` (`internal/tui/engine_backend.go:225`) and ordered
+`Tools()`) with C20a (`f604b2a` — `Tools()` deep-copies every tool's nested
+fields) and C20b (`ad200c0` — `State().Tools` clones too); C21 (`a280912` —
+the mirror is the fold: `recompute` (`internal/tui/mirror.go:39`) is the one
+writer of `m.snap`, `m.queue` and the send-now arm, through
+`transcript.Model.Mirror()` (`internal/transcript/mirror.go:48`);
+`refreshSnap`, `refreshQueue` and `Backend.State()` are deleted) with the H7
+usage golden wrap (`f44f7ca`) and C21a (`d086fe4` — `Mirror()` deep-copies
+every slice and pointer it hands out); C22 (`674da35` — two clients on one
+queue: `expectedVersion` captured at edit start on every save,
+`internal/tui/engine_backend.go:141`; a stale refusal keeps the edit's text
+and refreshes its version instead of stranding it); C23 (`240718f` —
+`stopSubagent` returns a `tea.Cmd`, `internal/tui/subcancel.go:91`, never
+gated, threaded through `handleRowsKey` and `handleViewKey`).
+
+Proof: filled in at the PR tip.
 
 ### Deviations from the plan
 
@@ -2078,3 +2126,194 @@ schedule are in the plan (`~/.claude/plans/craze/027-session-control-s2-socket.m
    the way an SSH exec would. Craze ships no remote-exec code of its own; the
    ladder is published for shed (or anything else driving this over SSH) to
    copy verbatim.
+
+**PR 3's execution amendments X33–X48**, one paragraph each, mirrored here
+as `12`'s own record; the full text and every failing schedule are in the
+plan (`~/.claude/plans/craze/027-session-control-s2-socket.md`, "Execution
+amendments — PR 3"). Review rounds: `reviews/dispositions-pr3.md`. None
+reopens a pinned decision.
+
+**PR 3** (C16–C23):
+
+1. **Plan 027 X33 (C16 `33cdebb`)** — the Backend as built: `Model.eng` keeps
+   its name, typed `backend.Backend` — H7 PR 2 edits `app.go` in parallel and
+   a rename would turn every `m.eng` hunk into a conflict; its doc says it is
+   the session's backend, in process now and a socket in PR 4. Every Backend
+   command and read takes a `context.Context` first, the permanent interface
+   (SD-33): the backend epoch rides in it, and in process the non-waiting
+   verbs ignore it. `Settings` narrows to `{Model, Mode, Config}`, carrying no
+   provider — the effort/fast vocabulary does not depend on the provider
+   today (`agent/provider.go:624-633`), so the chains' captured
+   `m.snap.Provider` is invisible to every test. `Backend.Info()` is C20's;
+   tests reach the engine through `engineOf(t, m)`, so C21's later deletion
+   of the transitional `State()` touches no test.
+2. **Plan 027 X34** — a test-placement note, not a behaviour change: the
+   gate's mechanism tests (FIFO order, nesting, the deadline release, the
+   byte bound) land in C17 over a test-only gated operation plus `/rename`;
+   the site-specific gate tests land with their sites in C18a, C18b and C18c.
+3. **Plan 027 X35 (C17 `b8bf66b`)** — the gate as built: the release Update
+   runs the old Update wrapper (`finish`) after the continuation, so nothing
+   held is applied in that Update; the held queue's bound is queue-wide — a
+   gate opened while the backlog is already at the bound releases
+   `ErrNoAnswer` at its first held message, keeping memory bounded; `m.run`
+   panics if a gate is already open or there is no backend. `runFrameModes`
+   runs 111 frame goldens through both the synchronous and asynchronous gate
+   modes (the six picker goldens, pre-start dialogs where no gate can open,
+   run in one mode only). `Makefile`'s `test-race` timeout moved to 10 m (was
+   5 m): `internal/tui`'s `-race` run went from ~60 s to 105–180 s running
+   every golden twice.
+4. **Plan 027 X36 (C17a, astra r41)** — the frame barrier's rendezvous: a
+   short turn's held `started`/`ended` could drain right after the release
+   and, if the runner resumed late, the barrier's "latest frame" was already
+   idle, clearing the release's working frame. Fixed structurally in the
+   harness: the program now pauses after publishing a frame that
+   acknowledges a sync token until the runner has taken that barrier, so the
+   barrier's latest frame is always the acknowledgement and every later frame
+   stays queued for the next wait. **Residual, documented:** a card that
+   opens and closes on its own before the runner reaches it can still be
+   matched by `await`'s oldest-queued fallback — today's `await` semantics,
+   not the gate's, unreachable in a golden whose card waits for the script's
+   answer.
+5. **Plan 027 X37 (C18a `5c801ee`)** — Submit through the gate as built:
+   `submit` is continuation-passing, so only two callers above the gate have
+   post-call work left to move. The band's transitional read moves into the
+   call itself (read at the release, applied by the continuation) rather
+   than re-reading `refreshQueue` afterward: reading only at the release let
+   an armed send-now that fired right after `Submit` returned drop a row the
+   same Update's frame had shown. `ErrNoAnswer` writes to the status line and
+   keeps the shell context. The gate re-raises a gated call's panic on the
+   command's goroutine, where bubbletea recovers it — C17's bare goroutine
+   would have crashed the process with the terminal left raw. The pump's
+   `pumpApply` waits out a gate its own key opened, delivering only that
+   gate's replies and setting other arrivals aside for later waits, matching
+   the synchronous-era pump's own behaviour.
+6. **Plan 027 X38** — a pre-existing golden flake found inside C18a's gate:
+   `TestFrameGoldenGrokSubagentLate80x24` raced the TUI's 250 ms tick against
+   the fake agent's `grok-subagent-late` script, which ended the parent turn
+   about 250 ms in. Fixed in the fake agent alone — the script now ends
+   mid-way between beats; no golden's bytes moved. **Residual:** the two
+   clocks stay unsynchronised, so the fix narrows the race (0/180 under load)
+   rather than removing it; removing it means freezing the golden, which
+   moves its bytes — the owner's call.
+7. **Plan 027 X39 (astra r43)** — accepted residuals after C17a: a gated call
+   that never returns keeps both its worker and, after a deadline release,
+   its `linger` goroutine — bounded by however many calls are already stuck,
+   each of which already kept its worker. C17b's unification of a runner's
+   key and its sync token into one program message closes the pre-send
+   window structurally.
+8. **Plan 027 X40 (C18b `c396b35`)** — the queue verbs and the Ctrl+C/Esc
+   chains as built: the band's transitional read moves into the call for
+   every queue verb, as X37 did for Submit. `clearPending`'s `Disarm` and
+   `ClearQueue` are **one gated call**, run back to back on the call's
+   goroutine (`internal/tui/app.go:2406-2461`) rather than two gates: the
+   implementer found that two gates put a reply's round trip between them,
+   letting the arm's own in-flight cancel settle and drain the queue head
+   before the second gate's `ClearQueue` landed — a row the user was clearing
+   would run. One call keeps today's in-process window and call order.
+   **Residual for PR 4**, recorded as `13`'s SF-50: over the socket the two
+   calls become two sequential round trips, so closing the window needs a
+   combined engine verb (a wire change). A non-empty edit whose row drains
+   while its save goes unanswered is ended by `syncQueue`, which restores the
+   pre-edit draft and loses the edited text — today's existing rule for any
+   row that leaves the queue mid-edit, which the gate only reaches by a rare
+   15-s-deadline route; keeping the edited text is a UX change, recorded as
+   `13`'s SF-51. `handleQueueKey` returns `(bool, Model, tea.Cmd)`. V1's
+   `internal/tui` `-race` pass runs under `-timeout 150m`, not 60 m: the
+   both-mode goldens' 1,200+ schedule orders make one pass ~165 s, so 20
+   passes exceed the plan's original bound.
+9. **Plan 027 X41 (C17b `9749185`)** — the frame runner made deterministic: a
+   key, mouse or resize token and its sync token are delivered as **one**
+   program message, applied back to back in one frame-model Update, so the
+   token always follows its key. The run's shutdown is deferred, and the
+   capture is of a settled model — after the last token, the runner waits for
+   a frame with no gate open, nothing held and the fold at the stream's head.
+10. **Plan 027 X42 (C17c `1040cda`; the harness review converged at astra
+    r47)** — the frame runner's final shape: a sync token waits where its key
+    waits, parked under an open gate only when nothing is held, otherwise
+    held behind what arrived first. The capture settles on the newest frame,
+    then sends a harness-only quit through the model's own FIFO, so the
+    captured frame is the model after every message that reached the program
+    before the quit, in order, and none after it (a message arriving after
+    the quit may remain held — an r47 restatement, not an overclaim). The
+    baseline (`gateSync`) capture changed the same way; every golden is
+    byte-identical in both modes. Shutdown is bounded: the engine is closed
+    (unblocking a call an Update waits in), the program killed, then waited
+    for. **Residual, pre-existing:** the engine's `Close` in this test-only
+    shutdown path sits outside every timeout, since session close is
+    unbounded by contract — the test binary's own timeout is the backstop.
+11. **Plan 027 X43 (C18c `1dd6fe3`)** — answers, interjections and the mask
+    as built: a card's answer is a gate; Interject is a gate with a 60-s
+    deadline whose `ErrNoAnswer` keeps the draft and the shell context. The
+    masked opening (`pushCard` while `cardMasking`) is the one gate an
+    **event** opens. Hidden answers stay fire-and-forget Cmds in both gate
+    modes, never gated. The session generation (`m.sessGen`) and the backend
+    epoch (`Backend.Epoch()`, `internal/tui/engine_backend.go:58`) fence
+    every command, both chains and the hidden answers: a gate reply from
+    another session releases its gate without running the continuation
+    (dropping it outright would leave the gate open forever; C27 decides what
+    a restore does to an open gate). V8's seeded-jitter run (0–10 ms, 33
+    golden tests, 38 runs, `CRAZE_V8_SEEDS=20`): 760 passes, 0 diffs.
+12. **Plan 027 X44 (C19 `fd72eee`)** — the Stub publishes what a live session
+    would: `InstallOnStart` is on for `internal/tui`'s Stubs through a
+    package `TestMain` default (`internal/tui/stub.go:99`); `SetCommands`/
+    `SetPlugins` publish their one-section delta and flush, as the live
+    session's catalog update does. **Found:** the install reaches far fewer
+    unit tests than planned, since the Stub's `Start` runs only where
+    something calls it. **Decided for C21:** `startSession` starts the
+    session as `Init` does — one helper line, measured green across the whole
+    suite, reaching 412 of 917 tests at the time — recorded rather than put
+    to the owner (decide-don't-ask). **Plan correction:** the install delta
+    cannot end "a transcript run with a new entry", since the fold's meta
+    handler touches no transcript; only seq numbers move.
+13. **Plan 027 X45 (C20 `a2655f1`, C20a `f604b2a`, C20b `ad200c0`)** —
+    ordered tools and `Info`, as built: `Backend.Info()`'s `Workspace` is the
+    TUI's own resolved cwd (`internal/tui/engine_backend.go:225`), passed in
+    rather than read from the engine, which holds none. `m.caps()` reads
+    `Info()` — the engine's `State()` — on every call, several per frame, but
+    the engine's index I/O runs outside its lock, so no UI stall. Every tool
+    projection is the caller's own: `Tools()` (C20a) and `State().Tools`
+    (C20b) both clone each tool's nested fields, so two tests that had
+    compared a `State().Tools` value with the folded payload by pointer now
+    compare by value, their meaning unchanged. One unexplained `tests/cli`
+    failure in C20's implementer gate was closed as not PR 3's — 0/30 at both
+    the failing and the fixed commit in isolation, confirmed by H7's own
+    author — a watch, not a fix.
+14. **Plan 027 X46 (C21 `a280912`, C21a `d086fe4`)** — the mirror is the
+    fold, as built: `recompute` (`internal/tui/mirror.go:39`) is the one
+    writer of `m.snap`, `m.queue` and the send-now mirror, built from a new
+    `transcript.Model.Mirror()` read (`internal/transcript/mirror.go:48`,
+    under the lock, without copying any transcript), `Backend.Info()` and the
+    overlays; `refreshSnap`, `refreshQueue`, `verbRead` and `refreshAfter` are
+    gone, and `Backend.State()` is deleted. The mode overlay carries `Rev`,
+    since a Set to the current mode publishes no delta and would otherwise
+    never retire. **Two plan gaps found**, both given a TUI-side workaround
+    pending a source fix: (a) the fold's roster does not carry a grok child's
+    `Activity` (it moves with each tool call, `agent/tools.go:150-153`, with
+    no roster event), so the mirror derives it from the child's own tool-call
+    titles until the next roster event carries the row whole
+    (`internal/tui/mirror.go:74-84`) — recorded as `13`'s SF-54, for carrying
+    it in the fold; (b) the fold's send-now stays armed after the send fires,
+    since firing publishes no delta, only the `started`
+    (`internal/tui/mirror.go:69-73`, `engine.go`'s `nextLocked`) — must be
+    fixed at the source for PR 4, carried into `kickoff-pr4.md` and recorded
+    as `13`'s SF-55. C21a widened `Mirror()` to deep-copy every slice and
+    pointer it hands out (astra r53), with a reflective ownership test.
+15. **Plan 027 X47 (C22 `674da35`)** — two clients on one queue, as built:
+    the sent row is drawn from `SubmitResult.Text`; `expectedVersion` is
+    captured at edit start from the row as the band shows it and sent on
+    every save. **UX, decided by the orchestrator:** a stale refusal does not
+    strand the edit — the text stays, nothing is installed, and the edit's
+    version refreshes to the row's current one, so a second Enter knowingly
+    saves over the other client's change (residual: a change not yet folded
+    when the refusal lands makes the second Enter a refusal too, never an
+    overwrite of a change this client was never shown). The edited-row
+    overlay's version is `expectedVersion + 1` — the engine's confirmed
+    answer, since the check (`engine/queue.go:87`) and `PromptQueue.Edit`'s
+    `Version++` (`agent/queue.go:145`) run in one locked section.
+16. **Plan 027 X48 (C23 `240718f`)** — the sub-agent stop, as built:
+    `stopSubagent` (`internal/tui/subcancel.go:91`) returns a `tea.Cmd` (the
+    command id and `dispatchCtx` taken in the Update, no result message,
+    every error ignored as before), threaded through `handleRowsKey` (now
+    `(bool, Model, tea.Cmd)`) and `handleViewKey`; never gated, the same in
+    both gate modes. `TestStopKeyStopsTheRunningChild` was rewritten, since it
+    had encoded the synchronous call this commit removes.
