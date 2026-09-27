@@ -143,17 +143,18 @@ func drainSessionEvents(t *testing.T, m *Model, sess agent.Session) {
 	}
 }
 
-// TestNativeSessionDoesNotPersistOrIndex drives a real native session — not
-// tui.Stub — through startedMsg and one full turn, and holds plan 018 §3.4's
-// "never persisted" rule, with plan 028 §3.5's index rule beside it, against
-// production code neither TestStartedMsgDoesNotPersistAHiddenProvider (a
-// planted stub) nor internal/agent's own tests (no TUI in them) can reach: a
-// hidden provider's session must not replace the persisted default
-// (config.toml's seeded "grok" must survive startedMsg's own SaveProvider) —
-// and, since H7 gave native a loader, its first prompt DOES write its row to
-// the shared index, under the harness's own session id, as a resumable
-// provider's does (the fakeIndex recorder catches the Upsert).
-func TestNativeSessionDoesNotPersistOrIndex(t *testing.T) {
+// TestNativeSessionPersistsAndIndexes drives a real native session — not
+// tui.Stub — through startedMsg and one full turn, and holds plan 028
+// §3.16/D-65's "listed, so persisted" rule, with §3.5's index rule beside it,
+// against production code neither a planted stub nor internal/agent's own
+// tests (no TUI in them) can reach: native is a listed, resumable provider
+// now, so startedMsg's own SaveProvider replaces the seeded "grok" default
+// with "native" the same way any other provider's session would (it was the
+// opposite through H7: a hidden provider's session left the persisted default
+// alone) — and its first prompt writes its row to the shared index, under the
+// harness's own session id, as a resumable provider's does (the fakeIndex
+// recorder catches the Upsert).
+func TestNativeSessionPersistsAndIndexes(t *testing.T) {
 	isolateSkillsHome(t)
 	path := writeConfigFile(t, "provider = \"grok\"\n")
 
@@ -193,8 +194,8 @@ func TestNativeSessionDoesNotPersistOrIndex(t *testing.T) {
 	if idx.count() != 0 {
 		t.Fatalf("startedMsg indexed a session with no prompt yet: %+v", idx.all())
 	}
-	if got := ConfigProvider(); got != "grok" {
-		t.Fatalf("startedMsg replaced the persisted default with %q", got)
+	if got := ConfigProvider(); got != "native" {
+		t.Fatalf("startedMsg left the persisted default at %q, want native (plan 028 D-65)", got)
 	}
 
 	m.input.SetValue("hello")
@@ -220,9 +221,9 @@ func TestNativeSessionDoesNotPersistOrIndex(t *testing.T) {
 	if row := idx.seedRow(t); row.Provider != "native" || row.SessionID != sess.Snapshot().SessionID || row.CWD != ws || row.Title != "hello" {
 		t.Fatalf("a native turn's row is %+v; want native, session %s, in %s, titled by the prompt", row, sess.Snapshot().SessionID, ws)
 	}
-	if got := ConfigProvider(); got != "grok" {
+	if got := ConfigProvider(); got != "native" {
 		body, _ := os.ReadFile(path)
-		t.Fatalf("a native turn replaced the persisted default: %q\n%s", got, body)
+		t.Fatalf("a native turn moved the persisted default away from native: %q\n%s", got, body)
 	}
 }
 

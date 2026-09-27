@@ -413,8 +413,8 @@ func TestProviderPickerShowsAHiddenDefaultAsOneLabelledRow(t *testing.T) {
 		list []agent.Provider
 		want []string
 	}{
-		{"default list", nil, []string{"cursor", "grok", hiddenID}},
-		{"every provider", agent.Providers(), []string{"cursor", "grok", "gx", hiddenID}},
+		{"default list", nil, []string{"cursor", "grok", "native", hiddenID}},
+		{"every provider", agent.Providers(), []string{"cursor", "grok", "gx", "native", hiddenID}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := providerRowNames(pickerRows(tc.list, agent.CursorProvider())); slices.Contains(got, hiddenID) {
@@ -626,23 +626,25 @@ func TestFrameGoldenProviderPicker(t *testing.T) {
 	}
 }
 
-// TestProviderPickerThreeRows is the gx-installed picker: three rows, in
-// registry order, with the default tagged. Passing a list that already holds
-// the default also pins the deduplication — the union must not draw cursor
-// twice.
-func TestProviderPickerThreeRows(t *testing.T) {
+// TestProviderPickerFourRows is the gx-installed, native-listed picker: four
+// rows, in registry order, with the default tagged. Passing a list that
+// already holds the default also pins the deduplication — the union must not
+// draw cursor twice.
+func TestProviderPickerFourRows(t *testing.T) {
 	m := newPickerRows(t, agent.CursorProvider(), agent.Providers())
-	if got := providerRowNames(m.providers); !reflect.DeepEqual(got, []string{"cursor", "grok", "gx"}) {
-		t.Fatalf("rows %q, want [cursor grok gx]", got)
+	if got := providerRowNames(m.providers); !reflect.DeepEqual(got, []string{"cursor", "grok", "gx", "native"}) {
+		t.Fatalf("rows %q, want [cursor grok gx native]", got)
 	}
-	for _, name := range []string{"cursor", "grok", "gx"} {
+	for _, name := range []string{"cursor", "grok", "gx", "native"} {
 		pickerRowLine(t, m, name)
 	}
 	if row := pickerRowLine(t, m, "cursor"); !strings.Contains(row, "default") {
 		t.Fatalf("the default row is untagged: %q", row)
 	}
-	if row := pickerRowLine(t, m, "gx"); strings.Contains(row, "default") {
-		t.Fatalf("only the default row may be tagged: %q", row)
+	for _, name := range []string{"gx", "native"} {
+		if row := pickerRowLine(t, m, name); strings.Contains(row, "default") {
+			t.Fatalf("only the default row may be tagged: %q", row)
+		}
 	}
 }
 
@@ -703,7 +705,7 @@ func TestProviderPickerGxDefaultPreselectsThirdRow(t *testing.T) {
 // about what Esc does.
 func TestProviderPickerShowsDefaultMissingFromTheList(t *testing.T) {
 	m := newPickerRows(t, agent.GxProvider(), agent.DefaultProviders())
-	if got := providerRowNames(m.providers); !reflect.DeepEqual(got, []string{"cursor", "grok", "gx"}) {
+	if got := providerRowNames(m.providers); !reflect.DeepEqual(got, []string{"cursor", "grok", "gx", "native"}) {
 		t.Fatalf("rows %q, want the absent default inserted in registry order", got)
 	}
 	if m.providerCursor != 2 {
@@ -725,8 +727,8 @@ func TestProviderPickerShowsDefaultMissingFromTheList(t *testing.T) {
 // providers falls back to agent.DefaultProviders() and never to the host's
 // PATH. A tui that resolved binaries itself would satisfy every other test here
 // and still make the two existing picker goldens differ between a dev box with
-// gx installed and CI, so this case runs with a gx on PATH and demands two
-// rows.
+// gx installed and CI, so this case runs with a gx on PATH and demands cursor,
+// grok and native — gx never among them.
 func TestProviderPickerZeroConfigIsHermetic(t *testing.T) {
 	t.Setenv("CRAZE_AGENT_BIN", "")
 	bin := t.TempDir()
@@ -736,8 +738,8 @@ func TestProviderPickerZeroConfigIsHermetic(t *testing.T) {
 	t.Setenv("PATH", bin)
 	isolateSkillsHome(t)
 	m := New(Config{Workspace: t.TempDir()})
-	if got := providerRowNames(m.providers); !reflect.DeepEqual(got, []string{"cursor", "grok"}) {
-		t.Fatalf("zero Config rows %q, want [cursor grok]", got)
+	if got := providerRowNames(m.providers); !reflect.DeepEqual(got, []string{"cursor", "grok", "native"}) {
+		t.Fatalf("zero Config rows %q, want [cursor grok native]", got)
 	}
 }
 
@@ -749,7 +751,7 @@ func TestProviderPickerClickMovesHighlight(t *testing.T) {
 	r := m.lay.Dialog
 	// Row 0 is the top border and row 1 the title, so row 2 is the first
 	// provider.
-	for i, name := range []string{"cursor", "grok", "gx"} {
+	for i, name := range []string{"cursor", "grok", "gx", "native"} {
 		out := clickXY(t, m, r.X+2, r.Y+2+i)
 		if out.providerCursor != i {
 			t.Fatalf("click on %q moved the cursor to %d, want %d", name, out.providerCursor, i)

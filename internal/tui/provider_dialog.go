@@ -71,9 +71,10 @@ func hiddenProvider(id string) bool {
 // resolves to a provider whose sessions craze cannot load again, which the
 // engine then never writes a row for (engine.IndexOptions.Unindexed), so
 // --continue and --resume never offer one (plan 028 §3.5). The two questions
-// used to be one; native is where they part — hidden, and resumable. An id the
-// registry does not know is not refused here, as it is not by hiddenProvider:
-// a session only ever reports its own provider's id.
+// used to be one; native was where they first parted — hidden, yet resumable
+// — until D-65 listed it too. An id the registry does not know is not refused
+// here, as it is not by hiddenProvider: a session only ever reports its own
+// provider's id.
 func unindexedProvider(id string) bool {
 	p, err := agent.ProviderByName(id)
 	return err == nil && !p.Resumable()

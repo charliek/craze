@@ -38,9 +38,10 @@ const (
 //
 // A row whose provider is not resumable is dropped the same way, although the
 // registry resolves the id: craze cannot load its sessions (plan 028 §3.5).
-// Hidden is not the question — native is hidden and its rows are offered.
-// internal/cli's knownProvider already keeps such a row out of the list it
-// hands over; this is the same rule for a Config built any other way.
+// Hidden is not the question — before D-65 listed it, native was hidden and
+// its rows were still offered. internal/cli's knownProvider already keeps
+// such a row out of the list it hands over; this is the same rule for a
+// Config built any other way.
 func resumeRows(rows []sessions.Row) []sessions.Row {
 	out := make([]sessions.Row, 0, len(rows))
 	for _, row := range rows {

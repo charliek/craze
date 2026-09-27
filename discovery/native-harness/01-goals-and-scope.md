@@ -55,13 +55,17 @@ These are deliberate. Each has a row in `08-decisions.md`.
 
 ## Visibility policy
 
-The native provider is **hidden**. It never appears in the startup picker,
-even when everything it needs is present. It is reachable only when named
+**Superseded by plan 028 §3.16/D-65 (H7, 2026-09-26): native is now listed.**
+The policy below held from H1 through H7's live gate and is kept for the
+history; `07-roadmap.md` and `08-decisions.md` D-65 have the flip as shipped.
+
+The native provider was **hidden**. It never appeared in the startup picker,
+even when everything it needed was present. It was reachable only when named
 directly: `--provider native`, `CRAZE_PROVIDER=native`, or a persisted
-`provider = "native"` in craze's config (which only gets there after an
-explicit selection). This holds through every phase until the roadmap says
-otherwise; flipping it to visible is its own decision, not a side effect of
-a phase landing.
+`provider = "native"` in craze's config (which only got there after an
+explicit selection). This held through every phase until the roadmap said
+otherwise; flipping it to visible was its own decision, not a side effect of
+a phase landing — Q10, answered at H7's end (owner decision 4).
 
 Implementation note: `agent.Provider` already has `optional` (hidden unless
 the binary resolves — gx). This needs a second, stricter flag, `hidden`

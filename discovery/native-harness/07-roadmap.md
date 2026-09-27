@@ -1,8 +1,9 @@
 # 07 — Roadmap
 
 Each phase is one panel-reviewed plan (outside the repo) and one or two
-PRs, gated per commit, closed by a mac-mini live smoke. The provider stays
-hidden throughout (`01`). Sizes are guidance from the reference reviews.
+PRs, gated per commit, closed by a mac-mini live smoke. The provider stayed
+hidden through H7 (`01`); H7's C19 lists it (D-65). Sizes are guidance from
+the reference reviews.
 
 | ID | status | one line |
 |---|---|---|
@@ -13,7 +14,7 @@ hidden throughout (`01`). Sizes are guidance from the reference reviews.
 | H4 | complete | Claude compat and the shell mode shipped across PRs #39, #40, #43: content sources behind one seam with native discovery and the two projections (#39, `b861865`); the prompt-extras seam, the `@path` instruction loader with confinement, the model-facing catalog, and `[compat.claude]` toggles (#40, `c2940a6`); the composer shell mode, its process runner, and shell output carried to the agent with the next prompt (#43, `be05da9`); live smoke round-tripped on cursor and native, grok covered by `TestShellContextNeverReachesTheScreen` rather than driven live |
 | H5 | complete | modes shipped across two PRs, #45 (`b0ea4c4`) and #48 (`feature/plan-023-h5-modes`): the three tools (`ask_user_question`, `exit_plan_mode`, `todo_write`), modes switched on for native, the plan file under the harness home, and the existing offer implementing an approved plan |
 | H6 | complete | sub-agents shipped across three PRs: PR 1 (#51, `f5c3cfd`) end to end; PR 2 (#53, `5901e4a`) per-child stop; PR 3 (`feature/plan-026-h6-background`) background children — `run_in_background`, `agent_output`, the session-level wake, `bg` on the row |
-| H7 | complete; native becomes a listed provider in C19 after the live gate | resume and compaction over the store, `--continue`/`--resume`/rename, cost in the status row |
+| H7 | complete; native is a listed provider (D-65) | resume and compaction over the store, `--continue`/`--resume`/rename, cost in the status row |
 | H8 | not started | images: clipboard read per OS, composer attachments, vision flag strip |
 | HL | unscheduled | own the turn loop — see D-40's triggers |
 
@@ -656,9 +657,9 @@ model's context window (capped at the output ceiling), keeping a 20k-token
 verbatim tail of whole steps (Q9, D-62); mid-turn compaction at step
 boundaries, through a segmented turn that restarts `Agent.Stream` from the
 store without owning the loop — this answers HL's first trigger on purpose
-(below); prices live per model in `models.toml` (D-64); native becomes a
+(below); prices live per model in `models.toml` (D-64); native became a
 listed, resumable, persistable provider (Q10, D-65) once PR 3's smoke
-passes on Linux and the mac-mini — landing in **C19**, after this docs
+passed on Linux and the mac-mini — landing in **C19**, after the docs
 commit and the live gate — no rewind, no fork.
 
 **Exit result:** **exit criterion 1 (resume a compacted session)** was met
@@ -666,12 +667,19 @@ live, on both Linux and the mac-mini: V4 quit-and-`--continue` on a session
 that had compacted mid-turn replayed both compaction notes in place, and the
 model recalled the codeword planted at the very start from the stored
 summary alone, with no tool call. **Exit criterion 2 (spend visible per
-turn)** is PR 3's own live smoke (V7) — *placeholder: not yet run; recorded
-by C19, after this commit and the automated gate.* HL's first trigger stays
-amended as D-62 states it: the segmented turn held up live under an
-adversarial case neither reference tool exercises the same way — two
-mid-turn compactions ran inside one turn, on both platforms, and the turn
-still ended as a single `done`.
+turn)** was met live, on both platforms (V7): hand sums over the transcript
+(`spend.py`, §3.14's rule) equal the status row's number for every session
+and every turn, including the compactions inside them — Linux session 1
+(V1) `$0.0528 → $0.05`, session 2 (V3–V5) `$0.6501 → $0.65`; the mac-mini's
+sessions round to `$0.06` and `$0.69` — and the unpriced model
+(`glm-5.3-flash`, no rate on either box) shows tokens instead of a dollar
+figure (`1% ctx · 9.6k / 9.6k tok`). V8, non-gating, confirmed spend
+survives compaction and resume: the row read the same before quitting and
+after `--continue` on both platforms. HL's first trigger stays amended as
+D-62 states it: the segmented turn held up live under an adversarial case
+neither reference tool exercises the same way — two mid-turn compactions
+ran inside one turn, on both platforms, and the turn still ended as a
+single `done`.
 
 Live smoke (plan artifacts, outside the repo — see
 `028-native-harness-h7-resume-compaction/smoke/pr{1,2}/{linux,mac}.md`):
@@ -685,7 +693,8 @@ Live smoke (plan artifacts, outside the repo — see
 | V5 (PR 2) | `/compact [focus]`: the focused summary keeps only what was asked; replays in place on resume | Linux, mac-mini | pass |
 | V6 (PR 2) | cache alignment: a compaction request hits 0.90–0.99 of the prefix (auto and manual, agent and plan mode); the first post-compaction request misses, the next hits 0.80 | Linux, mac-mini | pass |
 | V9 (PR 2, non-gating) | H5 R3 re-measured: turn 2's first plan-mode request went from a full miss (0%, H5's measurement) to 98–99% cached, from the stored `reminder` variants | Linux (0.98), mac-mini (0.99) | pass |
-| V7 (PR 3) | **exit criterion 2**: spend visible per turn, live | Linux, mac-mini | *placeholder — recorded by C19* |
+| V7 (PR 3) | **exit criterion 2**: spend visible per turn, live | Linux, mac-mini | pass — hand sums (`spend.py`) equal the status row for every session and turn, compactions included; the unpriced model shows tokens |
+| V8 (PR 3, non-gating) | spend survives compaction and resume: the row before quitting and after `--continue` agree | Linux, mac-mini | pass |
 
 ### H8 — images
 

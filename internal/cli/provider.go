@@ -122,7 +122,8 @@ func refuseInProcess(cmd string, p agent.Provider, agentBin, mode string) error 
 // resumable counts as unknown here (plan 028 §3.5): craze cannot load its
 // sessions, so a row naming one — which craze never writes, but the index is
 // user-editable JSON — is kept and never offered by --continue or --resume
-// either. Hidden is not the question: native is hidden, and its rows load.
+// either. Hidden is not the question: before D-65 listed it, native was
+// hidden and its rows still loaded.
 func knownProvider(id string) bool {
 	p, err := agent.ProviderByName(id)
 	return err == nil && p.Resumable()

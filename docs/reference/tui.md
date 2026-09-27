@@ -122,7 +122,7 @@ A restored session does not reconstruct everything:
 
 ### Native sessions
 
-The native provider (`--provider native`, hidden) resumes the same way as
+The native provider (`--provider native`) resumes the same way as
 above, over its own transcript in place of an agent's `session/load`:
 
 - **Tool cards** have no exit code, diff or truncation metadata to restore —
@@ -478,7 +478,7 @@ mode and the offer disappears once the composer is non-empty. `Esc` clears the
 offer without losing focus. Changing mode, `/clear`, the next turn or a card
 arriving all clear it too.
 
-On the native provider (`--provider native`, hidden) the same `/plan`,
+On the native provider (`--provider native`) the same `/plan`,
 `/ask`, `/agent`, `Shift+Tab` and the offer above work. Plan mode lets the
 model edit only its plan file, which lives under the harness home beside the
 session transcript — by default
@@ -520,7 +520,7 @@ a slot to free.
 
 ## Compaction
 
-On the native provider (`--provider native`, hidden), a long session
+On the native provider (`--provider native`), a long session
 summarizes its own context rather than growing it forever. Once the context
 reaches 85% of the model's context window — capped at the window less its
 output ceiling, when `models.toml` sets one — craze summarizes the
@@ -566,10 +566,11 @@ name collision follows. Typed as a prompt, `/compact` is never sent to the
 model: it is a turn of its own, ending as soon as the compaction does, with
 no model turn after it. `/compact` with nothing in the context yet says so
 ("nothing to compact yet") instead of compacting an empty conversation.
-Sent while a turn is already running, `/compact` is never queued into it —
-like any interjection it is refused and runs as its own turn once the
-current one ends; `Ctrl+L` on a refused `/compact` draft shows "nothing to
-interject into" and keeps the draft, and `Enter` queues it for after. A
+Sent while a turn is already running, `/compact` is never sent into it as a
+steer — like any interjection it is refused, which keeps the draft rather
+than sending it (`Ctrl+L` on it shows "nothing to interject into"). Nothing
+queues it automatically: pressing `Enter` on the kept draft is what queues
+it, to run as its own turn once the current one ends. A
 `/compact` that succeeds turns compacting-on-its-own back on only when it
 leaves the context under the threshold; if the context is still at or over
 the threshold afterward, automatic compaction stays off (or turns off, if it

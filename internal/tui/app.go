@@ -833,7 +833,8 @@ func (m *Model) setSession(s agent.Session, crazeID string) {
 			Provider: m.providerDefault.Name(),
 			// A provider craze cannot load again stays out of the index
 			// (plan 028 §3.5): unresumable, which is not the same question
-			// as hidden — native is hidden and indexed.
+			// as hidden — before D-65 listed it, native was hidden and
+			// indexed.
 			Unindexed: unindexedProvider,
 			TitleLine: indexTitleLine,
 		},

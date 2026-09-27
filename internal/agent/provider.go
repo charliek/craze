@@ -97,9 +97,11 @@ type Provider struct {
 	// resumable is a provider whose sessions craze can load again, so they
 	// are written to the session index and offered by --continue, --resume
 	// and the resume picker (plan 028 §3.5). It is its own field rather than
-	// !hidden: native is hidden and resumable. Zero — every provider
-	// RegisterHiddenProviderForTest plants — is never indexed and never
-	// offered, which is the safe answer for a provider nothing can load.
+	// !hidden: before H7 gave native a loader, native was hidden yet
+	// resumable — the case a planted test provider still exercises. Zero —
+	// every provider RegisterHiddenProviderForTest plants — is never indexed
+	// and never offered, which is the safe answer for a provider nothing can
+	// load.
 	resumable bool
 	// inProcess is a provider craze runs itself rather than spawning over ACP,
 	// so there is no binary to look up.
@@ -323,12 +325,15 @@ func GxProvider() Provider {
 
 // NativeProvider is craze's own harness (plan 018): a provider craze runs in
 // process rather than spawning, so everything ACP-shaped — binaries, spawn
-// args, dialect, auth, skill and plugin scans — is zero. It is hidden: it
-// resolves by id (--provider native, CRAZE_PROVIDER, a hand-written
-// config.toml) and no listing shows it, and it is never persisted as the
-// default (§3.4). It is also resumable: H7 gave its sessions a loader, so
-// they are indexed and --continue, --resume and the picker offer them like
-// any other provider's (plan 028 §3.5).
+// args, dialect, auth, skill and plugin scans — is zero. It was hidden
+// through H7: resolvable by id (--provider native, CRAZE_PROVIDER, a
+// hand-written config.toml) but shown by no listing and never persisted as
+// the default. Once H7's V1–V8 smoke passed on both platforms, D-65 lists it
+// like any other provider — the picker, --help, the unknown-provider error,
+// and persistProvider/SaveProvider all see it (plan 028 §3.16). It is also
+// resumable: H7 gave its sessions a loader, so they are indexed and
+// --continue, --resume and the picker offer them like any other provider's
+// (plan 028 §3.5).
 //
 // Effort and interject came with H2's tool loop, which gives a turn later
 // steps, and with the steer that merges into the next one (plan 019 §3.10,
@@ -353,7 +358,6 @@ func NativeProvider() Provider {
 	return Provider{
 		name:            nativeName,
 		displayName:     nativeName,
-		hidden:          true,
 		resumable:       true,
 		inProcess:       true,
 		modeKinds:       cursorModeKinds,
@@ -382,16 +386,19 @@ func NativeProvider() Provider {
 // A hidden provider is not here at all but in hiddenProviders, so every
 // listing — the picker, --help, the unknown-provider error, and any written
 // later — leaves it out without having to remember a filter (plan 018
-// §3.4).
+// §3.4). Native was one of those until H7's smoke passed on both platforms;
+// D-65 lists it here, after gx (plan 028 §3.16).
 func Providers() []Provider {
-	return []Provider{CursorProvider(), GrokProvider(), GxProvider()}
+	return []Provider{CursorProvider(), GrokProvider(), GxProvider(), NativeProvider()}
 }
 
 // hiddenProviders is the second registry: providers ProviderByName resolves
 // and nothing lists. Listing them in Providers and filtering at each listing
 // site was the alternative; keeping them out makes the safe answer the
 // default one. ProviderByName reads this list after the public one, so a
-// hidden entry can never shadow a listed id.
+// hidden entry can never shadow a listed id. Nothing production code
+// registers is hidden any more (native was the one entry, until D-65); only
+// RegisterHiddenProviderForTest plants one now.
 //
 // hiddenMu exists for RegisterHiddenProviderForTest. Production code never
 // writes the list once the package is initialised, but a test in another
@@ -399,7 +406,7 @@ func Providers() []Provider {
 // provider names on another goroutine.
 var (
 	hiddenMu        sync.RWMutex
-	hiddenProviders = []Provider{NativeProvider()}
+	hiddenProviders []Provider
 )
 
 // hiddenProvider is ProviderByName's lookup in the hidden list. Ids are

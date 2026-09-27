@@ -1073,14 +1073,15 @@ def test_tui_continue_twice_refuses_the_second(
     assert (tmp_path / ".cache" / "craze" / "locks" / f"{row['crazeId']}.lock").exists()
 
 
-def test_tui_native_one_turn_leaves_config_and_index_alone(
+def test_tui_native_one_turn_persists_provider_and_indexes(
     craze_bin: Path, tmp_path: Path
 ) -> None:
-    """Plan 018 C11: a native turn in the real TUI never persists.
+    """Plan 028 §3.16/D-65: native is a listed provider, so a turn persists it.
 
-    The provider is hidden (§3.4): the status bar shows it (it still has to
-    be usable), but startedMsg's SaveProvider skips it, so the config file's
-    provider is exactly what it was before. It is resumable, though (plan 028
+    Through H7, native was hidden (plan 018 §3.4) and startedMsg's SaveProvider
+    skipped it; now it is listed like cursor or grok, so an explicit
+    `--provider native` run saves it as the default the same way theirs would,
+    leaving every other config key alone. It was already resumable (plan 028
     §3.5), so its first prompt writes its row to sessions.jsonl -- under the
     id its transcript is filed by, which is what --continue loads. No fake
     agent is spawned here (`--agent-bin` and an in-process provider are a
@@ -1117,7 +1118,7 @@ def test_tui_native_one_turn_leaves_config_and_index_alone(
         text = _ANSI.sub("", tui.screen())
         assert CANARY not in text, text[-3000:]
 
-    assert config_path.read_text(encoding="utf-8") == before
+    assert config_path.read_text(encoding="utf-8") == 'provider = "native"\ntheme = "tokyo-night"\n'
     index = craze_home / "sessions.jsonl"
     rows = [json.loads(line) for line in index.read_text(encoding="utf-8").splitlines()]
     assert len(rows) == 1, rows

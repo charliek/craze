@@ -523,24 +523,44 @@ model_provider = "respo"
 	}
 }
 
-// TestImportGxHelpNeverMentionsNative pins §3.4's "hidden": the command that
-// fills the native harness's config must not be the place a reader first
-// learns the provider exists.
-func TestImportGxHelpNeverMentionsNative(t *testing.T) {
-	for _, argv := range [][]string{{"--help"}, {"import", "--help"}, {"import", "gx", "--help"}} {
-		var stdout bytes.Buffer
-		cmd := NewRootCmd()
-		cmd.SetOut(&stdout)
-		cmd.SetErr(&stdout)
-		cmd.SetArgs(argv)
-		if err := cmd.Execute(); err != nil {
-			t.Fatalf("%q: %v", argv, err)
-		}
-		got := strings.ToLower(stdout.String())
+// TestImportGxHelpNeverMentionsTheHarness pins two different things now that
+// native is listed (plan 028 §3.16/D-65, superseding plan 018 §3.4's
+// "hidden"): the root --help legitimately names native, once, as one of the
+// --provider flag's choices — that is the one place a reader learns the
+// provider exists — but "harness" is an implementation word this command
+// never needed and still must not leak; and `import gx --help`, which fills
+// native's own config, must not be a second, earlier place a reader learns
+// the provider exists — so it says neither word.
+func TestImportGxHelpNeverMentionsTheHarness(t *testing.T) {
+	rootHelp := runHelp(t, "--help")
+	if strings.Contains(rootHelp, "harness") {
+		t.Fatalf("craze --help mentions \"harness\":\n%s", rootHelp)
+	}
+	if got := strings.Count(rootHelp, "native"); got != 1 {
+		t.Fatalf("craze --help names \"native\" %d times, want exactly 1 (the --provider flag):\n%s", got, rootHelp)
+	}
+
+	for _, argv := range [][]string{{"import", "--help"}, {"import", "gx", "--help"}} {
+		got := strings.ToLower(runHelp(t, argv...))
 		for _, bad := range []string{"native", "harness"} {
 			if strings.Contains(got, bad) {
-				t.Fatalf("craze %v --help mentions %q:\n%s", argv, bad, stdout.String())
+				t.Fatalf("craze %v --help mentions %q:\n%s", argv, bad, got)
 			}
 		}
 	}
+}
+
+// runHelp runs craze with argv and returns its combined stdout/stderr,
+// lower-cased is the caller's to decide.
+func runHelp(t *testing.T, argv ...string) string {
+	t.Helper()
+	var stdout bytes.Buffer
+	cmd := NewRootCmd()
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stdout)
+	cmd.SetArgs(argv)
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("%q: %v", argv, err)
+	}
+	return stdout.String()
 }
