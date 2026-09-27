@@ -19,15 +19,16 @@ import (
 type stopRecorder struct {
 	*Stub
 
-	stopMu sync.Mutex
-	stops  []string
+	stopMu  sync.Mutex
+	stops   []string
+	stopErr error // returned by CancelSubagent after recording, nil unless set
 }
 
 func (s *stopRecorder) CancelSubagent(id string) error {
 	s.stopMu.Lock()
 	defer s.stopMu.Unlock()
 	s.stops = append(s.stops, id)
-	return nil
+	return s.stopErr
 }
 
 // stopped is every id the engine asked to stop, in order.
@@ -122,12 +123,16 @@ func TestStopKeyFallsThroughWithoutCapability(t *testing.T) {
 	})
 }
 
-// TestStopKeyStopsTheRunningChild (A12, §3.10): with the verb, Backspace and
-// Delete each stop the running child the keyboard is on — the focused row, or
-// the child in view — through the engine, once per press with that child's id
-// and a command of its own (a reused command would be replayed, not asked
-// again). The keyboard stays where it was and the draft is untouched; with no
-// engine the key is still the stop's, and does nothing.
+// TestStopKeyStopsTheRunningChild (A12, §3.10; C23, §3.17): with the verb,
+// Backspace and Delete each stop the running child the keyboard is on — the
+// focused row, or the child in view — through the engine, once per press with
+// that child's id and a command of its own (a reused command would be
+// replayed, not asked again). The call is fire-and-forget (§3.12): the key's
+// own Update returns a Cmd and nothing has reached the engine yet — the
+// pressKeyCmd helper never runs it — until runCmd does, on the same goroutine
+// a real bubbletea loop would use. The keyboard stays where it was and the
+// draft is untouched; with no engine the key is still the stop's, returns no
+// Cmd, and does nothing.
 func TestStopKeyStopsTheRunningChild(t *testing.T) {
 	m, rec := stopModel(t, agent.NativeProvider(),
 		stopKid("kid-1", "job one", agent.SubagentRunning), stopKid("kid-2", "job two", agent.SubagentRunning))
@@ -147,7 +152,15 @@ func TestStopKeyStopsTheRunningChild(t *testing.T) {
 		if step.move != 0 {
 			m = pressKey(t, m, step.move)
 		}
-		m = pressKey(t, m, step.key)
+		var cmd tea.Cmd
+		m, cmd = pressKeyCmd(t, m, step.key)
+		if cmd == nil {
+			t.Fatalf("%v on %s returned no Cmd; want the fire-and-forget stop", step.key, step.id)
+		}
+		if got := rec.stopped(); !slices.Equal(got, want) {
+			t.Fatalf("before the Cmd ran, the session was already asked to stop %q; want %q (the call belongs to the Cmd, not the Update)", got, want)
+		}
+		runCmd(cmd)
 		want = append(want, step.id)
 		if got := rec.stopped(); !slices.Equal(got, want) {
 			t.Fatalf("after %v on %s the session was asked to stop %q; want %q", step.key, step.id, got, want)
@@ -156,13 +169,21 @@ func TestStopKeyStopsTheRunningChild(t *testing.T) {
 			t.Fatalf("after the stop: rows focused %v on %q, composer focused %v, draft %q; want the rows kept, the draft untouched",
 				m.agentFocus, m.agentID, m.input.Focused(), m.input.Value())
 		}
+		if m.gate != nil {
+			t.Fatalf("the fire-and-forget stop opened a gate")
+		}
 	}
 	m = pressKey(t, m, tea.KeyEnter)
 	if m.viewing != "kid-2" {
 		t.Fatalf("control: viewing %q, want kid-2", m.viewing)
 	}
 	for _, k := range []tea.KeyType{tea.KeyBackspace, tea.KeyDelete} {
-		m = pressKey(t, m, k)
+		var cmd tea.Cmd
+		m, cmd = pressKeyCmd(t, m, k)
+		if cmd == nil {
+			t.Fatalf("%v in the view returned no Cmd; want the fire-and-forget stop", k)
+		}
+		runCmd(cmd)
 		want = append(want, "kid-2")
 		if got := rec.stopped(); !slices.Equal(got, want) {
 			t.Fatalf("after %v in the view the session was asked to stop %q; want %q", k, got, want)
@@ -170,11 +191,57 @@ func TestStopKeyStopsTheRunningChild(t *testing.T) {
 		if m.viewing != "kid-2" || m.input.Value() != "hey" {
 			t.Fatalf("after the stop in the view: viewing %q, draft %q; want the view kept", m.viewing, m.input.Value())
 		}
+		if m.gate != nil {
+			t.Fatalf("the fire-and-forget stop opened a gate")
+		}
 	}
 
 	m.eng = nil
-	if m = pressKey(t, m, tea.KeyDelete); m.viewing != "kid-2" || m.input.Value() != "hey" {
+	var cmd tea.Cmd
+	m, cmd = pressKeyCmd(t, m, tea.KeyDelete)
+	if cmd != nil {
+		t.Fatalf("with no engine: got a Cmd; want none, since there is nothing to call")
+	}
+	if m.viewing != "kid-2" || m.input.Value() != "hey" {
 		t.Fatalf("with no engine: viewing %q, draft %q; want the key taken and nothing done", m.viewing, m.input.Value())
+	}
+}
+
+// pressKeyCmd is pressKey with the Cmd kept: the fire-and-forget stop's call
+// lives in the Cmd, not the Update, so a caller that cares which one ran needs
+// it (unlike pressKey's other callers, which never do).
+func pressKeyCmd(t *testing.T, m Model, k tea.KeyType) (Model, tea.Cmd) {
+	t.Helper()
+	tm, cmd := m.Update(tea.KeyMsg{Type: k})
+	return tm.(Model), cmd
+}
+
+// TestStopKeyIgnoresUnknownSubagent (C23, §3.17): a stop that races the
+// child's own end — agent.ErrNoSuchSubagent, "unknown_subagent" — changes
+// nothing on screen. The row is whatever the child's own finished event left
+// it as; the stop's Cmd returns no message, so there is nothing for Update to
+// apply either way.
+func TestStopKeyIgnoresUnknownSubagent(t *testing.T) {
+	m, rec := stopModel(t, agent.NativeProvider(), stopKid("kid-1", "job one", agent.SubagentRunning))
+	rec.stopErr = agent.ErrNoSuchSubagent
+	m.input.SetValue("hey")
+	m = pressKey(t, m, tea.KeyDown)
+	before := m.View()
+	m, cmd := pressKeyCmd(t, m, tea.KeyBackspace)
+	if cmd == nil {
+		t.Fatal("backspace returned no Cmd; want the fire-and-forget stop")
+	}
+	if msg := runCmd(cmd); msg != nil {
+		t.Fatalf("the Cmd returned a message %#v; want none, ErrNoSuchSubagent included", msg)
+	}
+	if got := rec.stopped(); !slices.Equal(got, []string{"kid-1"}) {
+		t.Fatalf("the session was asked to stop %q; want [kid-1]", got)
+	}
+	if got := m.View(); got != before {
+		t.Fatalf("the refused stop changed the screen:\nbefore:\n%s\nafter:\n%s", before, got)
+	}
+	if m.gate != nil {
+		t.Fatal("the fire-and-forget stop opened a gate")
 	}
 }
 

@@ -116,8 +116,8 @@ func (m *Model) switchView(delta int) {
 }
 
 func (m Model) handleViewKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	if stopped, next := m.stopViewKey(msg); stopped { // subcancel.go
-		return next, nil
+	if stopped, next, cmd := m.stopViewKey(msg); stopped { // subcancel.go
+		return next, cmd
 	}
 	switch msg.Type {
 	case tea.KeyCtrlY:

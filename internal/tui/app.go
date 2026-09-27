@@ -2163,10 +2163,10 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 	if m.agentFocus {
-		handled, next := m.handleRowsKey(msg)
+		handled, next, cmd := m.handleRowsKey(msg)
 		m = next
 		if handled {
-			return m, nil
+			return m, cmd
 		}
 	}
 	if msg.Type == tea.KeyEsc {
@@ -2300,14 +2300,14 @@ func (m *Model) focusComposer() {
 // Esc and any key that is not a row key return to the composer; that key is
 // then handled as usual (handled == false), so typing never needs a second
 // press.
-func (m Model) handleRowsKey(msg tea.KeyMsg) (bool, Model) {
+func (m Model) handleRowsKey(msg tea.KeyMsg) (bool, Model, tea.Cmd) {
 	items := m.visibleAgents()
 	if len(items) == 0 {
 		m.focusComposer()
-		return false, m
+		return false, m, nil
 	}
-	if stopped, next := m.stopRowKey(msg, items); stopped { // subcancel.go
-		return true, next
+	if stopped, next, cmd := m.stopRowKey(msg, items); stopped { // subcancel.go
+		return true, next, cmd
 	}
 	switch msg.Type {
 	case tea.KeyUp:
@@ -2320,25 +2320,25 @@ func (m Model) handleRowsKey(msg tea.KeyMsg) (bool, Model) {
 		default:
 			m.focusComposer()
 		}
-		return true, m
+		return true, m, nil
 	case tea.KeyDown:
 		if m.agentSel < len(items)-1 {
 			m.moveAgent(1)
 		}
-		return true, m
+		return true, m, nil
 	case tea.KeyEnter:
 		if m.agentID != "" {
 			m.enterView(m.agentID)
 		} else {
 			m.selectAgent(m.agentSelection(len(items)))
 		}
-		return true, m
+		return true, m, nil
 	case tea.KeyEsc:
 		m.focusComposer()
-		return true, m
+		return true, m, nil
 	}
 	m.focusComposer()
-	return false, m
+	return false, m, nil
 }
 
 func (m *Model) updateComposer(msg tea.KeyMsg) tea.Cmd {
