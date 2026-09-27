@@ -258,6 +258,13 @@ func readPath(path []store.Entry) pathState {
 // entry before it on the path is a tool entry — a steer is taken up only at a
 // step boundary, after the step's results — or another steer, as a second
 // steer of one step follows the first.
+//
+// It also says which turn each entry belongs to (turn), which a session's
+// spend is attributed by (spend.go, plan 028 §3.14, R2-4): the turn of the
+// latest record at or before it on the path that numbers one — a turn-opening
+// user entry, a wake's results entry, a compaction, which belongs to its own
+// turn — or, before turns were recorded, the turn its prompt was inferred to
+// open.
 type turnReader struct {
 	aware bool // a turn-aware craze wrote the entries from here on
 	// prev is the last message entry read: prevTool, prevSteer, or prevOther
@@ -265,6 +272,9 @@ type turnReader struct {
 	prev     int
 	largest  int // the largest turn recorded
 	inferred int // the turns inferred before aware
+	// turn is the turn the entry read last belongs to: 0 before any entry
+	// that numbers one.
+	turn int
 }
 
 const (
@@ -286,6 +296,7 @@ func (r *turnReader) read(e *store.Entry) (steer, results bool) {
 	if e.Turn > 0 {
 		r.aware = true
 		r.largest = max(r.largest, e.Turn)
+		r.turn = e.Turn
 	}
 	switch {
 	case e.Type == store.TypeResume:
@@ -311,6 +322,7 @@ func (r *turnReader) read(e *store.Entry) (steer, results bool) {
 		steer = true
 	default:
 		r.inferred++
+		r.turn = r.inferred
 	}
 	r.prev = prevOther
 	if steer {

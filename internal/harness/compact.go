@@ -174,7 +174,42 @@ func (s *Session) compact(ctx context.Context, m model, turn int, reason, focus,
 // that overflowed, which an unknown window's text form is budgeted by
 // (textFormBudget, review r1-c12) — and 0 for every other compaction, whose
 // text form follows the aligned summarizer request it would have sent.
+//
+// A compaction that ran — every one but nothing to compact, which emits
+// nothing — is followed on emit, in a session that is not a sub-agent, by the
+// Spent it leaves (spend.go, plan 028 §3.14): turn's spend and the session's,
+// and the context the next request sends to fit's model. One whose entry
+// could not be written (*errCompactionSaveFailed) first has its attempts'
+// usage — its Compacted{ended}'s, every attempt's — noted as observed and
+// unsaved on m, so the spend still counts what no entry holds. A panic from
+// the summarizer or the sink is propagated, as compactRun propagates it, with
+// no Spent after its ended.
 func (s *Session) compactOn(ctx context.Context, m model, fit modeltable.Resolved, textForm bool, sent int64, turn int, reason, focus, command string, emit func(Event)) (CompactResult, error) {
+	if emit == nil {
+		emit = func(Event) {}
+	}
+	if s.child {
+		return s.compactRun(ctx, m, fit, textForm, sent, turn, reason, focus, command, emit)
+	}
+	var ended *Compacted
+	res, err := s.compactRun(ctx, m, fit, textForm, sent, turn, reason, focus, command, func(ev Event) {
+		if c, ok := ev.(Compacted); ok && c.Phase == CompactionEnded {
+			ended = &c
+		}
+		emit(ev)
+	})
+	if ended != nil {
+		if errors.As(err, new(*errCompactionSaveFailed)) {
+			s.noteUnsaved(turn, m.id(), ended.Usage)
+		}
+		emit(s.spent(turn, fit))
+	}
+	return res, err
+}
+
+// compactRun is compactOn's compaction itself, every event of it on emit and
+// no Spent (see compactOn).
+func (s *Session) compactRun(ctx context.Context, m model, fit modeltable.Resolved, textForm bool, sent int64, turn int, reason, focus, command string, emit func(Event)) (CompactResult, error) {
 	if emit == nil {
 		emit = func(Event) {}
 	}

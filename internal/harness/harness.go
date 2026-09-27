@@ -354,6 +354,10 @@ type Session struct {
 	// context over the threshold; on again after one under it, or a model
 	// change.
 	autoOff suppression
+	// unsaved is the usage this incarnation was billed for that no entry
+	// holds (spend.go, plan 028 §3.14): a session's spend counts it beside
+	// the transcript's.
+	unsaved []unsavedUsage
 }
 
 // renderer is what the session hands its store (store.Renderer, plan 028
@@ -415,8 +419,12 @@ type model struct {
 
 // id is how the transcript names m's model: the table's values as they are
 // now, so the file stays readable after the alias is re-pointed.
-func (m model) id() store.Model {
-	return store.Model{Provider: m.r.ProviderID, Alias: m.r.Alias, WireModel: m.r.WireModel}
+func (m model) id() store.Model { return idOf(m.r) }
+
+// idOf is how the transcript names r's model (model.id): for a caller that
+// holds the table's entry and not a built model.
+func idOf(r modeltable.Resolved) store.Model {
+	return store.Model{Provider: r.ProviderID, Alias: r.Alias, WireModel: r.WireModel}
 }
 
 // logged is the model, effort and mode the transcript last had a turn or a

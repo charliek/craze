@@ -292,6 +292,11 @@ func (s *Session) run(ctx context.Context, text string, wake bool, sink func(Eve
 	if s.autoCompacts(m) {
 		t.compactCheck = func() bool { return s.midTurnDue(m) }
 	}
+	// Every finished step is followed by what the session has spent (plan 028
+	// §3.14) — in a session that is not a sub-agent (P33).
+	if !s.child {
+		t.spent = func(d StepDone) Spent { return s.stepSpent(number, m, d) }
+	}
 	// The session's todo store reaches this turn's sink only through here
 	// (todos.go, plan 023 §3.4): attach for the turn's whole life, detached
 	// once Run returns, the same way modes and the steer box are handed a
@@ -631,7 +636,10 @@ type turn struct {
 	// compactCheck is the mid-turn check (midTurnDue), asked under mu at the
 	// end of a saved tool_use step; nil when the session never compacts on
 	// its own. compactDue is its answer for the step just finished, which the
-	// stop condition compactionDue reports; stepStarted clears it. total is
+	// stop condition compactionDue reports; stepStarted clears it. spent is
+	// what a finished step reports after its StepDone (Session.stepSpent,
+	// spend.go): the step noted when no append wrote it, and the Spent it
+	// leaves; nil for a sub-agent, which reports none (plan 028 P33). total is
 	// every StepDone's usage summed over every segment, what a completed or
 	// limited turn returns (R3-3) — never one call's TotalUsage.
 	// retainedReminder is the variant of the last reminder entry in the
@@ -652,6 +660,7 @@ type turn struct {
 	// so the ErrContextTooLarge it may still end with says "even after
 	// compacting" (classify, C9c item 4).
 	compactCheck        func() bool
+	spent               func(StepDone) Spent
 	compactDue          bool
 	stepBase            int
 	turnFirstRequest    bool
@@ -1079,7 +1088,7 @@ func (t *turn) stepFinished(step fantasy.StepResult) error {
 		t.emit(Diag{Kind: DiagBadToolCalls, Fields: map[string]string{
 			"step": strconv.Itoa(t.step), "calls": strconv.Itoa(len(open)),
 		}})
-		t.emit(done)
+		t.stepReport(done)
 		return nil
 	}
 	if ok {
@@ -1142,8 +1151,21 @@ func (t *turn) stepFinished(step fantasy.StepResult) error {
 			t.emit(Diag{Kind: DiagSaveFailed, Fields: map[string]string{"step": strconv.Itoa(t.step), "error": done.SaveError}})
 		}
 	}
-	t.emit(done)
+	t.stepReport(done)
 	return nil
+}
+
+// stepReport emits a finished step's StepDone and, in a session that is not
+// a sub-agent, the Spent it leaves right after it (plan 028 §3.14): a step no
+// append wrote — a failed save, ids refused, nothing to write — is noted as
+// observed and unsaved first, so the session's spend still counts it. mu is
+// held; spent takes the session's and the store's locks under it, as the
+// mid-turn check does (midTurnDue).
+func (t *turn) stepReport(done StepDone) {
+	t.emit(done)
+	if t.spent != nil {
+		t.emit(t.spent(done))
+	}
 }
 
 // stepDone is the StepDone for step, with its persistence outcome still to

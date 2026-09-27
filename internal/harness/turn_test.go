@@ -33,6 +33,9 @@ func TestTurnsCarryHistory(t *testing.T) {
 	equal(t, "events", plain(ev.list()), []Event{
 		ThoughtDelta{Text: "greet back"}, TextDelta{Text: "hel"}, TextDelta{Text: "lo"},
 		done(1, fantasy.FinishReasonStop, StopEndTurn, 2), // the user entry and the answer
+		// What the session has spent: the step, and the context its usage
+		// says the next request starts from (input, cache reads, output).
+		unpricedSpent(19, wantUsage, wantUsage),
 	})
 	if d := of[StepDone](ev.list())[0]; d.TimeToFirstToken <= 0 {
 		t.Errorf("StepDone's time to first token = %v, want the time the thinking took to start", d.TimeToFirstToken)
@@ -179,14 +182,21 @@ func TestUnknownToolIsAnErrorResult(t *testing.T) {
 		t.Fatalf("Run = %+v, %v; want end_turn", res, err)
 	}
 	notFound := "tool not found: read_file. Available tools: bash, read, glob, grep, edit, write, agent, agent_output, todo_write, ask_user_question, exit_plan_mode"
+	// After the first step the context is its usage and its tool message's
+	// estimate; after the second, the second's usage alone.
+	one := Usage{Input: 10, Output: 5, CacheRead: 4}
+	two := Usage{Input: 20, Output: 10, CacheRead: 8}
+	result := messageTokens(transcript(t, s).Entries[2].Message)
 	equal(t, "events", plain(ev.list()), []Event{
 		TextDelta{Text: "let me look"},
 		ToolStarted{ID: "t1.1.1", Step: 1, Tool: "read_file"},
 		ToolCalled{ID: "t1.1.1", CallID: "call-1", Request: ToolRequest{Tool: "read_file", Input: `{"path":"x"}`}},
 		ToolFinished{ID: "t1.1.1", Result: tool.Result{Text: notFound, IsError: true, Class: tool.ClassInvalidInput}},
 		done(1, fantasy.FinishReasonToolCalls, StopToolUse, 3), // the user entry, the call, the result
+		unpricedSpent(19+result, one, one),
 		TextDelta{Text: "ok"},
 		done(2, fantasy.FinishReasonStop, StopEndTurn, 1),
+		unpricedSpent(19, two, two),
 	})
 	run(t, s, "next")
 	equal(t, "the next request", promptOf(f.models["test/a"].requests()[2])[1:], []string{
@@ -711,10 +721,13 @@ func TestFailedSaveFailsTheTurn(t *testing.T) {
 	evs := plain(ev.list())
 	failed := done(1, fantasy.FinishReasonStop, StopEndTurn, 0)
 	failed.SaveError = store.ErrClosed.Error()
+	// The step's usage is still spent — observed, in no entry — and the
+	// context, with nothing written, is the request's fixed part alone.
 	equal(t, "events", evs, []Event{
 		TextDelta{Text: "lost"},
 		Diag{Kind: DiagSaveFailed, Fields: map[string]string{"step": "1", "error": store.ErrClosed.Error()}},
 		failed,
+		unpricedSpent(s.estimateContext(nil), failed.Usage, failed.Usage),
 	})
 	noTranscript(t, s)
 }
