@@ -79,13 +79,13 @@ func loadedModelCard(t *testing.T, cols, rows int, withCard bool) Model {
 
 	todos := stubTodos()
 	stub.SetTodos(todos)
-	tm, _ = m.Update(eventMsg{agent.Event{Type: agent.EventTodos, Todos: todos}})
+	tm, _ = m.Update(eventMsg{ev: agent.Event{Type: agent.EventTodos, Todos: todos}})
 	m = tm.(Model)
 
 	if !withCard {
 		return m
 	}
-	tm, _ = m.Update(eventMsg{agent.Event{
+	tm, _ = m.Update(eventMsg{ev: agent.Event{
 		Type:       agent.EventPermission,
 		Permission: &agent.PermissionEvent{ID: "perm-1", Tool: "bash"},
 	}})
@@ -468,7 +468,7 @@ func TestEveryDrawnRegionOwnsItsRows(t *testing.T) {
 // them is inside the band the layout handed it.
 func TestQuestionCardOwnsTheModalBand(t *testing.T) {
 	m := loadedModelCard(t, 100, 30, false)
-	tm, _ := m.Update(eventMsg{agent.Event{Type: agent.EventQuestion, Question: stubQuestion()}})
+	tm, _ := m.Update(eventMsg{ev: agent.Event{Type: agent.EventQuestion, Question: stubQuestion()}})
 	m = tm.(Model)
 
 	band := m.lay.Region(regionModal)

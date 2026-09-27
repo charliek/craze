@@ -344,7 +344,7 @@ func TestAgentOrderIsSpawnOrderAndStable(t *testing.T) {
 		{Type: agent.EventSubagent, Subagent: &subs[0], SubagentChange: agent.SubagentChangeProgress},
 		{Type: agent.EventText, Agent: "task-a", Text: "hi"},
 	} {
-		tm, _ = m.Update(eventMsg{ev})
+		tm, _ = m.Update(eventMsg{ev: ev})
 		m = tm.(Model)
 	}
 	if got := ids(); got != "task-a,task-b,task-c" {
@@ -360,7 +360,7 @@ func TestAgentOrderIsSpawnOrderAndStable(t *testing.T) {
 	done.Status = agent.SubagentCompleted
 	stub := stubOf(t, m)
 	stub.SetSubagents([]agent.SubagentInfo{done, subs[1], subs[2]})
-	tm, _ = m.Update(eventMsg{agent.Event{Type: agent.EventSubagent, Subagent: &done, SubagentChange: agent.SubagentChangeFinished}})
+	tm, _ = m.Update(eventMsg{ev: agent.Event{Type: agent.EventSubagent, Subagent: &done, SubagentChange: agent.SubagentChangeFinished}})
 	m = tm.(Model)
 	if got := ids(); got != "task-a,task-b,task-c" {
 		t.Fatalf("finish reordered the rows: %s", got)
@@ -523,7 +523,7 @@ func TestAgentRowMarksBackgroundOnlyForAProviderWithIt(t *testing.T) {
 	running := subagentsFromTools(tools)[0]
 	running.Background = true
 	stub.SetSubagents([]agent.SubagentInfo{running})
-	tm, _ := m.Update(eventMsg{agent.Event{Type: agent.EventSubagent, Subagent: &running, SubagentChange: agent.SubagentChangeSpawned}})
+	tm, _ := m.Update(eventMsg{ev: agent.Event{Type: agent.EventSubagent, Subagent: &running, SubagentChange: agent.SubagentChangeSpawned}})
 	m = tm.(Model)
 	finished := running
 	finished.Status = agent.SubagentCompleted
@@ -593,7 +593,7 @@ func TestFinishSeenInASnapshotBeforeItsEventKeepsTheRow(t *testing.T) {
 	stub.SetSubagents([]agent.SubagentInfo{done, subs[1]})
 	settled := finishedTaskTool("task-a", "job a")
 	stub.SetTools([]agent.ToolEvent{settled, tools[1]})
-	tm, _ := m.Update(eventMsg{agent.Event{Type: agent.EventTool, Tool: &settled}})
+	tm, _ := m.Update(eventMsg{ev: agent.Event{Type: agent.EventTool, Tool: &settled}})
 	m = tm.(Model)
 	items := m.agentItems()
 	if len(items) != 2 || items[0].ID != "task-a" {
@@ -602,7 +602,7 @@ func TestFinishSeenInASnapshotBeforeItsEventKeepsTheRow(t *testing.T) {
 	if m.agentID != "task-a" || m.agentSel != 0 {
 		t.Fatalf("selection moved: %q at row %d", m.agentID, m.agentSel)
 	}
-	tm, _ = m.Update(eventMsg{agent.Event{Type: agent.EventSubagent, Subagent: &done, SubagentChange: agent.SubagentChangeFinished}})
+	tm, _ = m.Update(eventMsg{ev: agent.Event{Type: agent.EventSubagent, Subagent: &done, SubagentChange: agent.SubagentChangeFinished}})
 	m = tm.(Model)
 	if m.agentID != "task-a" || m.agentSel != 0 {
 		t.Fatalf("selection after finished: %q at row %d", m.agentID, m.agentSel)

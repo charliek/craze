@@ -370,7 +370,7 @@ func renameSchedule(t *testing.T, sync bool, order []string) ([]frameState, int)
 		}
 	}
 	for _, ev := range pending() {
-		step(eventMsg{ev})
+		step(eventMsg{ev: ev})
 	}
 	n := 0
 	for _, k := range "/rename fix it" {
@@ -391,13 +391,13 @@ func renameSchedule(t *testing.T, sync bool, order []string) ([]frameState, int)
 	if len(title) != 1 || title[0].State == nil || title[0].State.Title == nil {
 		t.Fatalf("the rename published %+v, want its one title delta", title)
 	}
-	arrivals["E1"] = eventMsg{title[0]}
+	arrivals["E1"] = eventMsg{ev: title[0]}
 	stub.Emit(agent.Event{Type: agent.EventText, Text: "after the rename"})
 	after := pending()
 	if len(after) != 1 {
 		t.Fatalf("the emit published %+v", after)
 	}
-	arrivals["E2"] = eventMsg{after[0]}
+	arrivals["E2"] = eventMsg{ev: after[0]}
 	for _, a := range order {
 		if msg, ok := arrivals[a]; ok {
 			step(msg)

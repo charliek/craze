@@ -380,7 +380,7 @@ func TestAMaskReadThatFailsShowsTheCard(t *testing.T) {
 			r := newSchedRun(t, false)
 			openings, after := maskedNoTurn(r, resolvedAsk)
 			sb := r.stall("Ask", ran)
-			r.step(eventMsg{openings[0]})
+			r.step(eventMsg{ev: openings[0]})
 			if len(r.calls) != 1 || r.m().gate == nil {
 				t.Fatalf("the masked opening opened no gate (%d calls)", len(r.calls))
 			}
@@ -397,7 +397,7 @@ func TestAMaskReadThatFailsShowsTheCard(t *testing.T) {
 			r := newSchedRun(t, false)
 			opening, _ := maskedOpening(r, true)
 			sb := r.stall("Ask", ran)
-			r.step(eventMsg{opening})
+			r.step(eventMsg{ev: opening})
 			r.answerStalled(sb)
 			if headAsk(r.m()) != "ask-live" {
 				t.Fatalf("a mask read that failed dropped a live card: %+v", r.m().cards)
@@ -415,7 +415,7 @@ func TestAMaskReadThatFailsShowsTheCard(t *testing.T) {
 		t.Run("control: a read that answers drops the resolved opening/"+mode.name, func(t *testing.T) {
 			r := newSchedRun(t, mode.sync)
 			openings, after := maskedNoTurn(r, resolvedAsk)
-			r.step(eventMsg{openings[0]})
+			r.step(eventMsg{ev: openings[0]})
 			if !mode.sync && len(r.calls) != 1 {
 				t.Fatalf("the masked opening issued %d gated calls, want its read", len(r.calls))
 			}
@@ -443,7 +443,7 @@ func TestAMaskedOpeningIsDecidedInItsContinuation(t *testing.T) {
 				r := newSchedRun(t, mode.sync)
 				opening, after := maskedOpening(r, live)
 				r.f.inner.confirm = &strongSend{text: "held"}
-				r.step(eventMsg{opening})
+				r.step(eventMsg{ev: opening})
 				if !mode.sync {
 					m := r.m()
 					if m.confirm == nil || slices.ContainsFunc(m.cards, func(c card) bool { return cardAskID(c) == "ask-q" || cardAskID(c) == "ask-live" }) {
@@ -632,7 +632,7 @@ func TestHiddenAnswersAreFireAndForget(t *testing.T) {
 			// notes an echo; each refusal comes back on the retry list, and
 			// arms its beat.
 			for i, e := range evs {
-				tm, cmd := m.Update(eventMsg{e})
+				tm, cmd := m.Update(eventMsg{ev: e})
 				m = tm.(Model)
 				if m.gate != nil || len(m.held) != 0 {
 					t.Fatal("a hidden answer opened a gate")
@@ -695,7 +695,7 @@ func TestHiddenAnswersAreFireAndForget(t *testing.T) {
 			}
 			before := plainView(m)
 			for _, e := range endings {
-				tm, _ := m.Update(eventMsg{e})
+				tm, _ := m.Update(eventMsg{ev: e})
 				m = tm.(Model)
 			}
 			if m.cardOpen() || plainView(m) != before {
@@ -771,7 +771,7 @@ func TestAStaleSettingsReplyIsDroppedAfterARestore(t *testing.T) {
 			ev := agent.Event{Type: agent.EventQuestion, Question: stubQuestion()}
 			stub.Emit(ev)
 			release := saturate(t, stub)
-			tm, cmd := m.Update(eventMsg{ev})
+			tm, cmd := m.Update(eventMsg{ev: ev})
 			cmds := hiddenAnswerCmds(cmd)
 			if len(cmds) != 1 {
 				t.Fatalf("%d hidden answers", len(cmds))
@@ -1094,7 +1094,7 @@ func maskSchedule(t *testing.T, live, sync bool, order []string) ([]frameState, 
 	r.blind = false
 	r.f.publish()
 	r.frames = append(r.frames, r.f.bus.last())
-	r.step(eventMsg{opening})
+	r.step(eventMsg{ev: opening})
 	r.n++
 	arrivals := map[string]any{
 		"K": frameTokenMsg{msg: tea.KeyMsg{Type: tea.KeyDown}, n: r.n},

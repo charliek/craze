@@ -283,7 +283,7 @@ func TestAStaleStartMessageLeavesTheNewEnginesGateShut(t *testing.T) {
 func endedEvent(turn string, fill func(*agent.TurnInfo)) tea.Msg {
 	t := &agent.TurnInfo{ID: turn, Phase: agent.TurnEnded}
 	fill(t)
-	return eventMsg{agent.Event{Type: agent.EventTurn, Turn: t}}
+	return eventMsg{ev: agent.Event{Type: agent.EventTurn, Turn: t}}
 }
 
 // twoTurnsDeep is a model on its second turn, with the first turn's id: the state

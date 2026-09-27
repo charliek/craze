@@ -527,6 +527,11 @@ const (
 	// proofLocal: an error of the TUI's own — a file, a process, a dialog, a
 	// config — that no Backend call answers.
 	proofLocal = "local"
+	// proofOutcome: errors.Is of backend.ErrOutcomeUnknown, which every
+	// outcome-unknown answer the client makes itself is, and no host's
+	// refusal ever is (checked here, over every twin; the client's own are
+	// TestOnlyTheClientsOwnOutcomesAreOutcomeUnknown's too).
+	proofOutcome = "outcome"
 )
 
 // tuiSites is every error read in internal/tui's production files
@@ -535,10 +540,8 @@ var tuiSites = []tuiSite{
 	{"app.go", "runErrAfterHangup", "Is", "tea.ErrProgramPanic", 1, proofLocal},
 	{"app.go", "finishRun", "Is", "agent.ErrAgentExited", 1, proofViewClose},
 	{"app.go", "update", "Error", "err", 1, proofLocal}, // SaveProvider's
-	// errMsg (Start's failure), actionErrMsg (a Set or Settings refusal),
-	// revertModeMsg ×2 and revertModelMsg (a Set's), modelApplyMsg (a step's),
-	// cancelFailedMsg (a Cancel's).
-	{"app.go", "update", "Error", "msg.err", 7, proofText},
+	// errMsg (Start's failure).
+	{"app.go", "update", "Error", "msg.err", 1, proofText},
 	{"app.go", "settlePending", "Is", "ErrNoAnswer", 1, proofGate},
 	{"app.go", "submitErrNote", "Is", "ErrNoAnswer", 1, proofGate},
 	{"app.go", "submitErrNote", "Is", "engine.ErrNotAccepting", 1, proofSentinel},
@@ -564,6 +567,16 @@ var tuiSites = []tuiSite{
 	{"frame.go", "streamHead", "Is", "agent.ErrClosed", 1, proofLocal},
 	{"frame.go", "streamHead", "Is", "agent.ErrFlushGaveUp", 1, proofLocal},
 	{"gate.go", "unanswered", "Is", "ctx.Err()", 1, proofDeadline},
+	// A gated reply's error, and a command's or a chain's failure as the
+	// reducer words it (failureText): ErrNoAnswer for the client's own
+	// outcome-unknown answers, the host's error unchanged otherwise.
+	{"gate.go", "noAnswerFor", "Is", "ErrNoAnswer", 1, proofGate},
+	{"gate.go", "noAnswerFor", "Is", "backend.ErrOutcomeUnknown", 1, proofOutcome},
+	{"gate.go", "Error", "Error", "ErrNoAnswer", 1, proofLocal},
+	// actionErrMsg (a Set or Settings refusal), revertModeMsg ×2 and
+	// revertModelMsg (a Set's), modelApplyMsg (a step's), cancelFailedMsg (a
+	// Cancel's): the host's text, or ErrNoAnswer's for an outcome unknown.
+	{"gate.go", "failureText", "Error", "noAnswerFor(err)", 1, proofText},
 	{"model_dialog.go", "runModelApply", "Is", "agent.ErrBadCatalog", 1, proofSentinel},
 	{"model_dialog.go", "runModelApply", "Is", "engine.ErrStaleModel", 1, proofSentinel},
 	{"model_dialog.go", "runModelApply", "Is", "agent.ErrOptionGone", 1, proofSentinel},
@@ -707,6 +720,17 @@ func TestEveryTUIErrorSiteWorksOverTheWire(t *testing.T) {
 			for _, tw := range twins {
 				if errors.Is(reconstructed(t, tw.err), tui.ErrNoAnswer) {
 					t.Errorf("%s %s: the host's %s reconstructs the gate's ErrNoAnswer", s.file, s.fn, tw.sentinel)
+				}
+			}
+		case proofOutcome:
+			for _, tw := range twins {
+				if errors.Is(reconstructed(t, tw.err), backend.ErrOutcomeUnknown) {
+					t.Errorf("%s %s: the host's %s reconstructs an outcome unknown", s.file, s.fn, tw.sentinel)
+				}
+			}
+			for _, reason := range []protocol.Reason{protocol.ReasonResumeLost, protocol.ReasonDisconnected} {
+				if err := error(&remote.OutcomeUnknownError{Method: protocol.MethodSessionPrompt, CommandID: "1", Reason: reason}); !errors.Is(err, backend.ErrOutcomeUnknown) {
+					t.Errorf("%s %s: the client's own %s is not an outcome unknown", s.file, s.fn, reason)
 				}
 			}
 		}

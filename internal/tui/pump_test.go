@@ -219,7 +219,7 @@ func (p *pump) read() {
 			if h := p.receivedHook(); h != nil {
 				h(ev)
 			}
-			if !p.deliver(pumpItem{msg: eventMsg{ev}}) {
+			if !p.deliver(pumpItem{msg: eventMsg{ev: ev}}) {
 				return
 			}
 		case p.parked <- struct{}{}:

@@ -18,10 +18,10 @@ func mixedEvents() []tea.Msg {
 	var out []tea.Msg
 	for i := 0; i < 5; i++ {
 		out = append(out,
-			eventMsg{agent.Event{Type: agent.EventThought, Text: "thinking "}},
-			eventMsg{agent.Event{Type: agent.EventText, Text: "chunk "}},
-			eventMsg{agent.Event{Type: agent.EventTool, Tool: &tool}},
-			eventMsg{agent.Event{Type: agent.EventTodos, Todos: todos}},
+			eventMsg{ev: agent.Event{Type: agent.EventThought, Text: "thinking "}},
+			eventMsg{ev: agent.Event{Type: agent.EventText, Text: "chunk "}},
+			eventMsg{ev: agent.Event{Type: agent.EventTool, Tool: &tool}},
+			eventMsg{ev: agent.Event{Type: agent.EventTodos, Todos: todos}},
 		)
 	}
 	return out
@@ -152,12 +152,12 @@ func TestSpinnerVisibilityAndText(t *testing.T) {
 	// and the child's finish on the roster.
 	tool.Status, task.Status = "completed", "completed"
 	m = applyInFlight(t, m, []agent.ToolEvent{tool, task})
-	tm, _ := m.Update(eventMsg{agent.Event{Type: agent.EventThought, Text: "hm"}})
+	tm, _ := m.Update(eventMsg{ev: agent.Event{Type: agent.EventThought, Text: "hm"}})
 	m = tm.(Model)
 	if got := m.spinnerActivity(); got != "Thinking…" {
 		t.Fatalf("activity %q", got)
 	}
-	tm, _ = m.Update(eventMsg{agent.Event{Type: agent.EventText, Text: "reply"}})
+	tm, _ = m.Update(eventMsg{ev: agent.Event{Type: agent.EventText, Text: "reply"}})
 	m = tm.(Model)
 	if got := m.spinnerActivity(); got != "Working" {
 		t.Fatalf("activity %q", got)
@@ -166,7 +166,7 @@ func TestSpinnerVisibilityAndText(t *testing.T) {
 
 func TestSpinnerWaitsOnACard(t *testing.T) {
 	m := sized(t)
-	tm, _ := m.Update(eventMsg{agent.Event{
+	tm, _ := m.Update(eventMsg{ev: agent.Event{
 		Type:       agent.EventPermission,
 		Permission: &agent.PermissionEvent{ID: "perm-1", Tool: "bash"},
 	}})

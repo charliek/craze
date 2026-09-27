@@ -750,9 +750,9 @@ func assertQuitCmd(t *testing.T, cmd tea.Cmd) {
 
 func TestCoalesceStreamChunks(t *testing.T) {
 	m := sized(t)
-	tm, _ := m.Update(eventMsg{agent.Event{Type: agent.EventText, Text: "P"}})
+	tm, _ := m.Update(eventMsg{ev: agent.Event{Type: agent.EventText, Text: "P"}})
 	m = tm.(Model)
-	tm, _ = m.Update(eventMsg{agent.Event{Type: agent.EventText, Text: "ONG"}})
+	tm, _ = m.Update(eventMsg{ev: agent.Event{Type: agent.EventText, Text: "ONG"}})
 	m = tm.(Model)
 	got := texts(m, entryAssistant)
 	if len(got) != 1 || got[0] != "PONG" {
@@ -761,9 +761,9 @@ func TestCoalesceStreamChunks(t *testing.T) {
 	if !strings.Contains(plainView(m), "PONG") {
 		t.Fatalf("missing PONG:\n%s", plainView(m))
 	}
-	tm, _ = m.Update(eventMsg{agent.Event{Type: agent.EventDone, StopReason: "end_turn"}})
+	tm, _ = m.Update(eventMsg{ev: agent.Event{Type: agent.EventDone, StopReason: "end_turn"}})
 	m = tm.(Model)
-	tm, _ = m.Update(eventMsg{agent.Event{Type: agent.EventText, Text: "next"}})
+	tm, _ = m.Update(eventMsg{ev: agent.Event{Type: agent.EventText, Text: "next"}})
 	m = tm.(Model)
 	got = texts(m, entryAssistant)
 	if len(got) != 2 || got[1] != "next" {
@@ -773,9 +773,9 @@ func TestCoalesceStreamChunks(t *testing.T) {
 
 func TestThoughtsCoalesceSeparately(t *testing.T) {
 	m := sized(t)
-	tm, _ := m.Update(eventMsg{agent.Event{Type: agent.EventThought, Text: "th"}})
+	tm, _ := m.Update(eventMsg{ev: agent.Event{Type: agent.EventThought, Text: "th"}})
 	m = tm.(Model)
-	tm, _ = m.Update(eventMsg{agent.Event{Type: agent.EventThought, Text: "ink"}})
+	tm, _ = m.Update(eventMsg{ev: agent.Event{Type: agent.EventThought, Text: "ink"}})
 	m = tm.(Model)
 	got := texts(m, entryThought)
 	if len(got) != 1 || got[0] != "think" {
@@ -1044,7 +1044,7 @@ func TestWrapProseHardWrapsAtTinyWidths(t *testing.T) {
 
 func TestToolRowsStayOneRow(t *testing.T) {
 	m := sized(t)
-	tm, _ := m.Update(eventMsg{agent.Event{Type: agent.EventTool, Tool: &agent.ToolEvent{
+	tm, _ := m.Update(eventMsg{ev: agent.Event{Type: agent.EventTool, Tool: &agent.ToolEvent{
 		ID:     "call-abc-0\nfc_123",
 		Kind:   "execute\nextra",
 		Status: "pending\nextra",
@@ -1861,7 +1861,7 @@ func applyInFlight(t *testing.T, m Model, tools []agent.ToolEvent) Model {
 	}
 	for i := range tools {
 		tool := tools[i]
-		tm, _ := m.Update(eventMsg{agent.Event{Type: agent.EventTool, Tool: &tool}})
+		tm, _ := m.Update(eventMsg{ev: agent.Event{Type: agent.EventTool, Tool: &tool}})
 		m = tm.(Model)
 	}
 	for i := range subs {
@@ -1870,7 +1870,7 @@ func applyInFlight(t *testing.T, m Model, tools []agent.ToolEvent) Model {
 		if subagentTerminal(info) {
 			change = agent.SubagentChangeFinished
 		}
-		tm, _ := m.Update(eventMsg{agent.Event{
+		tm, _ := m.Update(eventMsg{ev: agent.Event{
 			Type:           agent.EventSubagent,
 			Subagent:       &info,
 			SubagentChange: change,
@@ -1958,11 +1958,11 @@ func waitInTurn(t *testing.T, s *Stub) {
 
 func TestInPlaceToolLineSameID(t *testing.T) {
 	m := sized(t)
-	tm, _ := m.Update(eventMsg{agent.Event{Type: agent.EventTool, Tool: &agent.ToolEvent{
+	tm, _ := m.Update(eventMsg{ev: agent.Event{Type: agent.EventTool, Tool: &agent.ToolEvent{
 		ID: "call-1", Kind: "execute", Status: "pending", Title: "Shell",
 	}}})
 	m = tm.(Model)
-	tm, _ = m.Update(eventMsg{agent.Event{Type: agent.EventTool, Tool: &agent.ToolEvent{
+	tm, _ = m.Update(eventMsg{ev: agent.Event{Type: agent.EventTool, Tool: &agent.ToolEvent{
 		ID: "call-1", Kind: "execute", Status: "completed", Title: "Shell", RawInput: "echo hi",
 	}}})
 	m = tm.(Model)
@@ -2033,7 +2033,7 @@ func TestExitWhileWorkingQuitsHelpDoesNot(t *testing.T) {
 
 func TestClearThenToolUpdateAppends(t *testing.T) {
 	m := sized(t)
-	tm, _ := m.Update(eventMsg{agent.Event{Type: agent.EventTool, Tool: &agent.ToolEvent{
+	tm, _ := m.Update(eventMsg{ev: agent.Event{Type: agent.EventTool, Tool: &agent.ToolEvent{
 		ID: "old-1", Kind: "execute", Status: "pending", Title: "Shell",
 	}}})
 	m = tm.(Model)
@@ -2052,7 +2052,7 @@ func TestClearThenToolUpdateAppends(t *testing.T) {
 	if len(m.main.pathDirs) != 0 || m.main.trimmed {
 		t.Fatalf("clear left the path cache %+v (trimmed=%v)", m.main.pathDirs, m.main.trimmed)
 	}
-	tm, _ = m.Update(eventMsg{agent.Event{Type: agent.EventTool, Tool: &agent.ToolEvent{
+	tm, _ = m.Update(eventMsg{ev: agent.Event{Type: agent.EventTool, Tool: &agent.ToolEvent{
 		ID: "old-1", Kind: "execute", Status: "completed", Title: "Shell",
 	}}})
 	m = tm.(Model)
@@ -2093,7 +2093,7 @@ func intoPlanMode(t *testing.T, m Model) Model {
 func feed(t *testing.T, m Model, evs ...agent.Event) Model {
 	t.Helper()
 	for _, ev := range evs {
-		tm, _ := m.Update(eventMsg{ev})
+		tm, _ := m.Update(eventMsg{ev: ev})
 		m = tm.(Model)
 	}
 	return m

@@ -92,6 +92,10 @@ type paritySample struct {
 // each of the TUI's panes must hold.
 type parityRec struct {
 	shadow *transcript.Model
+	// base is the snapshot the model was restored from (restoreHook), nil for
+	// a model folded from its first event: the shadow and every from-scratch
+	// check start from it.
+	base *transcript.Snapshot
 	// replay is what the shadow's fold is handed: the sample the TUI's fold
 	// was handed for the same event.
 	replay paritySample
@@ -113,6 +117,7 @@ var parity = &parityWatch{recs: map[weak.Pointer[transcript.Model]]*parityRec{}}
 func installParityWatch() {
 	parity.strict = os.Getenv("CRAZE_PARITY_STRICT") != ""
 	foldHook = parity.hook
+	restoreHook = parity.restored
 }
 
 // err is the first rule the watch saw broken, if any.
@@ -163,12 +168,21 @@ func (w *parityWatch) fail(format string, args ...any) {
 // so a model the watch has no record of is folding its first event; the
 // record goes when the model does.
 func (w *parityWatch) rec(m *transcript.Model) *parityRec {
-	key := weak.Make(m)
-	if r := w.recs[key]; r != nil {
+	if r := w.recs[weak.Make(m)]; r != nil {
 		return r
 	}
-	r := &parityRec{panes: map[*pane]*paneWant{}}
+	return w.newRec(m, nil)
+}
+
+// newRec is a fresh record for m: its shadow a new model, or base restored
+// (restoreHook). The caller holds mu.
+func (w *parityWatch) newRec(m *transcript.Model, base *transcript.Snapshot) *parityRec {
+	key := weak.Make(m)
+	r := &parityRec{panes: map[*pane]*paneWant{}, base: base}
 	r.shadow = transcript.New(replayOptions(&r.replay))
+	if base != nil {
+		r.shadow = transcript.Restore(base, replayOptions(&r.replay))
+	}
 	w.recs[key] = r
 	w.stats.models++
 	runtime.AddCleanup(m, func(k weak.Pointer[transcript.Model]) {
@@ -177,6 +191,49 @@ func (w *parityWatch) rec(m *transcript.Model) *parityRec {
 		w.mu.Unlock()
 	}, key)
 	return r
+}
+
+// restored is restoreHook (plan 027 §3.14): the TUI's shared model was just
+// restored from snap and every pane rebuilt from it. The watch starts a record
+// of its own for the new model — its shadow restores the same snapshot — and
+// holds the TUI to it at once: the same model (P0), and every pane exactly
+// the rebuild's rows (P2's account starts from them), each a shared row
+// showing its entry (P1, P3, P4), none hidden and none local.
+func (w *parityWatch) restored(m *Model, snap *transcript.Snapshot) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	r := w.newRec(m.shared, snap)
+	if got, want := m.shared.History(), r.shadow.History(); !reflect.DeepEqual(got, want) {
+		w.fail("restore at seq %d: the TUI's model's history is not the snapshot's\n got %+v\nwant %+v", snap.Seq, got, want)
+	}
+	if got, want := m.shared.State(), r.shadow.State(); !reflect.DeepEqual(got, want) {
+		w.fail("restore at seq %d: the TUI's model's state is not the snapshot's\n got %+v\nwant %+v", snap.Seq, got, want)
+	}
+	ev := agent.Event{Type: "restore"}
+	for scope, p := range panesOf(m) {
+		want := &paneWant{emptied: p.emptied, rows: slices.Clone(p.rows), shows: map[*entry]transcript.EntryID{},
+			byID: map[transcript.EntryID]*entry{}, re: map[*entry]bool{}}
+		tr := scopeOf(m.shared, scope)
+		var ents []*transcript.Entry
+		if tr != nil {
+			ents = tr.Entries()
+		}
+		if len(p.rows) > len(ents) {
+			w.fail("restore at seq %d: pane %q holds %d rows for %d entries", snap.Seq, scope, len(p.rows), len(ents))
+		}
+		// The rows are the newest entries, in order: the pane's caps may have
+		// taken the oldest.
+		ents = ents[len(ents)-len(p.rows):]
+		for i, row := range p.rows {
+			if row.local || row.id != ents[i].ID {
+				w.fail("restore at seq %d: pane %q row %d shows %v (local=%v), want entry %v", snap.Seq, scope, i, row.id, row.local, ents[i].ID)
+			}
+			want.shows[row] = row.id
+			want.byID[row.id] = row
+		}
+		r.panes[p] = want
+		w.wholePane(m, r, ev, scope, p)
+	}
 }
 
 // panesOf is every pane the Model holds, by scope ("" is main).
@@ -642,6 +699,9 @@ func (w *parityWatch) fresh(m *Model, r *parityRec, ev agent.Event) {
 	w.stats.fresh++
 	var cur paritySample
 	f := transcript.New(replayOptions(&cur))
+	if r.base != nil {
+		f = transcript.Restore(r.base, replayOptions(&cur))
+	}
 	for _, s := range r.events {
 		cur = s
 		f.Fold(s.ev)

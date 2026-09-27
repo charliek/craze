@@ -39,7 +39,7 @@ func republish(t *testing.T, m Model) Model {
 func applyPending(t *testing.T, m Model) Model {
 	t.Helper()
 	drainPending(t, m, func(ev agent.Event) {
-		tm, _ := m.Update(eventMsg{ev})
+		tm, _ := m.Update(eventMsg{ev: ev})
 		m = tm.(Model)
 	})
 	return m

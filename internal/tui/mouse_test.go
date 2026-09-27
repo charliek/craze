@@ -111,7 +111,7 @@ func scrollable(t *testing.T) Model {
 	for i := 0; i < 60; i++ {
 		fmt.Fprintf(&b, "line %02d\n\n", i)
 	}
-	tm, _ := m.Update(eventMsg{agent.Event{Type: agent.EventText, Text: b.String()}})
+	tm, _ := m.Update(eventMsg{ev: agent.Event{Type: agent.EventText, Text: b.String()}})
 	return tm.(Model)
 }
 
@@ -183,7 +183,7 @@ func TestClickOnTheTasksHeaderCycles(t *testing.T) {
 	m = tm.(Model)
 	todos := stubTodos()
 	stubOf(t, m).SetTodos(todos)
-	tm, _ = m.Update(eventMsg{agent.Event{Type: agent.EventTodos, Todos: todos}})
+	tm, _ = m.Update(eventMsg{ev: agent.Event{Type: agent.EventTodos, Todos: todos}})
 	m = tm.(Model)
 	if m.lay.Region(regionTasks).Empty() {
 		t.Fatalf("expected a tasks panel:\n%s", plainView(m))
@@ -284,7 +284,7 @@ func TestWheelIsIgnoredWhileACardIsUp(t *testing.T) {
 	for i := 0; i < 60; i++ {
 		fmt.Fprintf(&b, "line %02d\n\n", i)
 	}
-	tm, _ := m.Update(eventMsg{agent.Event{Type: agent.EventText, Text: b.String()}})
+	tm, _ := m.Update(eventMsg{ev: agent.Event{Type: agent.EventText, Text: b.String()}})
 	m = cardEvent(t, tm.(Model), stub, agent.Event{Type: agent.EventQuestion, Question: stubQuestion()})
 	bottom := m.vp.YOffset
 	if bottom < 2*wheelLines {

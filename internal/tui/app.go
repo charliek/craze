@@ -59,7 +59,18 @@ func (s status) String() string {
 }
 
 type Config struct {
-	Session   agent.Session
+	Session agent.Session
+	// Backend is a session served elsewhere (plan 027 PR 4, §3.14): a socket
+	// to the host that owns the engine. When it is set New drives it as the
+	// model's backend and builds nothing — no engine, no picker, no OnEngine,
+	// no session index, no claim: Session, the pickers' closures, SessionIndex,
+	// CrazeSessionID, OnEngine and ClaimSession are the in-process path's and
+	// are not read. Init starts it and arms its reader exactly as it does an
+	// engine's, and the model behaves as it does over one; what its stream
+	// adds — a Ready, a Restore, an End — the model handles as the stream
+	// delivers it (restore.go). nil is the in-process path: every test
+	// Config, every golden and a plain craze.
+	Backend   backend.Backend
 	Theme     string
 	Workspace string
 	Model     string
@@ -675,6 +686,13 @@ type Model struct {
 	// harnessQuit says the frame runner's quit message (frameQuitMsg) has been
 	// applied: the frame of that Update is the run's capture (frame.go).
 	harnessQuit bool
+	// ended says the backend's stream ended (an End item: the session closed
+	// on its host, or the transport gave up), which quits the program, and
+	// endErr is why — nil for the session's own end (restore.go's endMsg).
+	// The final model carries both for the command line's last word; in
+	// process no End ever comes.
+	ended  bool
+	endErr error
 }
 
 // foldedSeq is the seq of the last event the model folded into its shared
@@ -694,7 +712,15 @@ func (m Model) now() time.Time {
 	return time.Now()
 }
 
-type eventMsg struct{ ev agent.Event }
+// eventMsg is one event of the backend's stream, and gen the stream
+// generation it came from (backend.Item.Gen): 0 in process, where the stream
+// is never replaced; over the socket the attachment it was read on, which a
+// restore replaces — so a restore held behind it can tell an event its
+// snapshot already holds (restore.go, dropSuperseded).
+type eventMsg struct {
+	ev  agent.Event
+	gen uint64
+}
 
 // startedMsg says the session is up: the start command's Start has returned.
 // errMsg is that command's other answer, and the only error that reaches craze's
@@ -766,6 +792,25 @@ func (m *Model) outdated(msg tea.Msg) bool {
 	}
 	gen := s.issuedUnder()
 	return gen != 0 && gen != m.sessGen
+}
+
+// ownStart reports whether msg is the start answer (startedMsg, errMsg) of
+// the backend the model holds now. A start answers for its backend, not for a
+// session generation: a restore from another incarnation moves the generation
+// (restore.go) and keeps the backend, whose Start returns once, so dropping its
+// answer would leave the model never started. An answer from a backend the
+// model has replaced (setSession) is outdated as ever, and staleFor besides.
+func (m Model) ownStart(msg tea.Msg) bool {
+	var b backend.Backend
+	switch msg := msg.(type) {
+	case startedMsg:
+		b = msg.eng
+	case errMsg:
+		b = msg.eng
+	default:
+		return false
+	}
+	return b != nil && b == m.eng
 }
 
 // revertModeMsg is a mode change coming back refused, or never coming back
@@ -980,6 +1025,75 @@ func (o *sessionOwner) current() backend.Backend {
 // which the engine mints an id for. The provider picker builds a NEW session
 // and so passes "" deliberately.
 func (m *Model) setSession(s agent.Session, crazeID string) {
+	m.dropSession()
+	if s == nil {
+		return
+	}
+	// The zero ChainPolicy is the TUI's: Esc stops a turn and the queue behind
+	// it carries on, and a prompt the session refuses is shown as the refusal it
+	// is rather than waited out (engine.ChainPolicy).
+	eng, err := engine.New(s, engine.Options{
+		CrazeSessionID: crazeID,
+		Index: engine.IndexOptions{
+			Store: m.sessionIndex,
+			CWD:   m.cwd,
+			// The provider a row is recorded under before the session has
+			// answered with one of its own: the resolved default it was
+			// started as.
+			Provider: m.providerDefault.Name(),
+			// A provider craze cannot load again stays out of the index
+			// (plan 028 §3.5): unresumable, which is not the same question
+			// as hidden — before D-65 listed it, native was hidden and
+			// indexed.
+			Unindexed: unindexedProvider,
+			TitleLine: indexTitleLine,
+		},
+	})
+	if err != nil {
+		// m.eng stays the untyped nil it was set to above: a failure leaves no
+		// backend, never a nil *engineBackend that would read as one.
+		m.engErr = err
+		return
+	}
+	// The backend mints this model's client on the engine, once: the
+	// in-process client is never released (plan 027 §3.6).
+	m.adopt(newEngineBackend(eng, m.cwd))
+	// After the owner holds it, so whatever the hook starts — a socket
+	// serving this engine — can never name an engine the exit tail would not
+	// close. The hook is handed the engine itself, not the backend: what it
+	// serves is the engine.
+	if m.onEngine != nil {
+		m.onEngine(eng)
+	}
+}
+
+// setBackend is setSession for a session served elsewhere (Config.Backend):
+// the same reset of everything the model held about a session, and b as its
+// backend — with nothing built, since the engine is the host's.
+func (m *Model) setBackend(b backend.Backend) {
+	m.dropSession()
+	if b != nil {
+		m.adopt(b)
+	}
+}
+
+// adopt makes b the model's backend, recorded in the owner too, with a
+// command order of its own (chains).
+func (m *Model) adopt(b backend.Backend) {
+	m.eng = b
+	if sessionBackendHook != nil {
+		m.eng = sessionBackendHook(m.eng)
+	}
+	// A new client, so a new order: a chain still running on the backend this
+	// replaced orders nothing on this one.
+	m.chains = &chainLock{}
+	m.owner.set(m.eng)
+}
+
+// dropSession is the half of setSession and setBackend that lets go of the
+// session the model held: its commands, its generation, its fold, its
+// overlays and its client, leaving no backend.
+func (m *Model) dropSession() {
 	// A command belongs to the session it was run from — its workspace is that
 	// session's — so a session change ends it. It does not *wait* for it: this
 	// runs inside Update, on the one goroutine bubbletea draws from, and a
@@ -1014,56 +1128,10 @@ func (m *Model) setSession(s agent.Session, crazeID string) {
 	m.modeRev, m.modelRev, m.configRev = 0, 0, 0
 	m.cmdSeq, m.chains = 0, nil
 	m.owner.set(nil)
-	if s == nil {
-		return
-	}
-	// The zero ChainPolicy is the TUI's: Esc stops a turn and the queue behind
-	// it carries on, and a prompt the session refuses is shown as the refusal it
-	// is rather than waited out (engine.ChainPolicy).
-	eng, err := engine.New(s, engine.Options{
-		CrazeSessionID: crazeID,
-		Index: engine.IndexOptions{
-			Store: m.sessionIndex,
-			CWD:   m.cwd,
-			// The provider a row is recorded under before the session has
-			// answered with one of its own: the resolved default it was
-			// started as.
-			Provider: m.providerDefault.Name(),
-			// A provider craze cannot load again stays out of the index
-			// (plan 028 §3.5): unresumable, which is not the same question
-			// as hidden — before D-65 listed it, native was hidden and
-			// indexed.
-			Unindexed: unindexedProvider,
-			TitleLine: indexTitleLine,
-		},
-	})
-	if err != nil {
-		// m.eng stays the untyped nil it was set to above: a failure leaves no
-		// backend, never a nil *engineBackend that would read as one.
-		m.engErr = err
-		return
-	}
-	// The backend mints this model's client on the engine, once: the
-	// in-process client is never released (plan 027 §3.6).
-	m.eng = newEngineBackend(eng, m.cwd)
-	if sessionBackendHook != nil {
-		m.eng = sessionBackendHook(m.eng)
-	}
-	// A new client, so a new order: a chain still running on the engine this
-	// replaced orders nothing on this one.
-	m.chains = &chainLock{}
-	m.owner.set(m.eng)
-	// After the owner holds it, so whatever the hook starts — a socket
-	// serving this engine — can never name an engine the exit tail would not
-	// close. The hook is handed the engine itself, not the backend: what it
-	// serves is the engine.
-	if m.onEngine != nil {
-		m.onEngine(eng)
-	}
 }
 
-// sessionBackendHook, when a test sets it, wraps every backend setSession
-// builds: the jitter run (plan 027 §8, V8) delays each of the backend's
+// sessionBackendHook, when a test sets it, wraps every backend the model
+// adopts — the one setSession builds, and a Config.Backend: the jitter run (plan 027 §8, V8) delays each of the backend's
 // answers and reads through it. It is nil in production — no Config field or
 // flag reaches it — like gateHook.
 var sessionBackendHook func(backend.Backend) backend.Backend
@@ -1165,6 +1233,9 @@ func New(cfg Config) Model {
 	m.branch = m.git.branch()
 	sess := cfg.Session
 	switch {
+	case cfg.Backend != nil:
+		// A session served elsewhere: there is nothing to pick, build or
+		// claim (Config.Backend).
 	case len(m.resume) > 0:
 		// --resume outranks the provider picker: every row carries its own
 		// provider and choosing one locks it, so asking which provider to
@@ -1188,7 +1259,11 @@ func New(cfg Config) Model {
 	// was, usually nothing, and its own setSession replaces it. Config's craze
 	// id belongs to Config.Session — the row --continue resolved — so a picker
 	// that builds another session carries its own row's id instead.
-	m.setSession(sess, m.crazeID)
+	if cfg.Backend != nil {
+		m.setBackend(cfg.Backend)
+	} else {
+		m.setSession(sess, m.crazeID)
+	}
 	// Init arms the stream's first read exactly when it has a session to read
 	// and no picker to wait for, and it cannot record that itself (a value
 	// receiver whose model is thrown away), so the model starts out agreeing
@@ -1476,12 +1551,33 @@ func (m Model) finish(cmd tea.Cmd) (Model, tea.Cmd) {
 }
 
 func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	if m.outdated(msg) {
+	if m.outdated(msg) && !m.ownStart(msg) {
 		// A result issued for a session the model has since left (issued):
 		// nothing it says applies to this one.
 		return m, nil
 	}
 	switch msg := msg.(type) {
+	case restoreMsg:
+		// The backend's stream replaced what the model held (restore.go): the
+		// whole model is initialised from the snapshot and its facts.
+		m.applyRestore(msg)
+		return m, nil
+
+	case readyMsg:
+		// The host's start completed: the backend's Info already holds the
+		// facts it published (its catalogs above all), so the mirror is read
+		// again. A start that failed is answered by Start too, as errMsg.
+		m.recompute()
+		return m, nil
+
+	case endMsg:
+		// The stream ended: the session closed on its host, or the transport
+		// gave up. Nothing more will come, so the program quits, and the final
+		// model says why (ended, endErr) for the command line's last word.
+		m.ended, m.endErr = true, msg.err
+		m.quitting = true
+		return m, tea.Quit
+
 	case tea.WindowSizeMsg:
 		// Stickiness is decided from where the user was before the resize; the
 		// layout itself is left to the one relayout the Update wrapper runs.
@@ -1567,7 +1663,7 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case actionErrMsg:
 		m.land(msg.landed)
-		m.addError(msg.err.Error())
+		m.addError(failureText(msg.err))
 		return m, nil
 
 	case revertModeMsg:
@@ -1577,7 +1673,7 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// overlay down nor clear its flag. The error is still theirs to
 			// see — the agent refused something they asked for, and
 			// swallowing that would be a bug of its own.
-			m.addError(msg.err.Error())
+			m.addError(failureText(msg.err))
 			return m, nil
 		}
 		// The revert is the last word on this request: its overlay goes, and
@@ -1586,7 +1682,7 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// the chip rather than lost behind a captured value.
 		m.modeInFlight = ""
 		m.refuseMode(msg.gen)
-		m.addError(msg.err.Error())
+		m.addError(failureText(msg.err))
 		return m, nil
 
 	case modeAppliedMsg:
@@ -1598,7 +1694,7 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// agent or another client has moved it to since. The error row is the
 		// user's to see either way.
 		m.refuseModel(msg.gen)
-		m.addError(msg.err.Error())
+		m.addError(failureText(msg.err))
 		return m, nil
 
 	case modelUnreadMsg:
@@ -1639,7 +1735,7 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case msg.unread:
 			m.addError(m.unreadModelText())
 		case msg.err != nil:
-			m.addError(msg.step + ": " + msg.err.Error())
+			m.addError(msg.step + ": " + failureText(msg.err))
 		}
 		return m, nil
 
@@ -1665,7 +1761,7 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// this cancel is the engine's, and it disarms it in the section that
 		// releases the cancel's hold, with the cancel_failed reason the delta
 		// carries — so the note arrives on that event and not from here.
-		m.addError(msg.err.Error())
+		m.addError(failureText(msg.err))
 		return m, nil
 
 	case foreignCancelledMsg:
@@ -3914,8 +4010,9 @@ func (m Model) modeSettled(gen int, value string, rev uint64) Model {
 // sets replaying, so it means exactly what m.started alone used to.
 func (m Model) sessionReady() bool { return m.started && !m.replaying }
 
-// sessionUp is the tail startedMsg used to run alone: the status goes idle,
-// the elapsed counter starts and the skills are rescanned. It is called from
+// sessionUp is the tail startedMsg used to run alone: the status goes idle —
+// unless a restore said a turn is running — the elapsed counter starts and the
+// skills are rescanned. It is called from
 // both keys and does nothing until both have landed, so it runs exactly once
 // however they are ordered.
 //
@@ -3926,7 +4023,14 @@ func (m *Model) sessionUp() {
 	if !m.sessionReady() {
 		return
 	}
-	m.status = statusIdle
+	// A restore that says a turn is running set the working status and the
+	// turn it names (restore.go): the session coming up does not end it. In
+	// process no turn can be running before the session is up — the engine
+	// admits nothing before its Start has returned — so this is idle there,
+	// as it always was.
+	if m.status != statusWorking || m.turnID == "" {
+		m.status = statusIdle
+	}
 	m.sessStart = m.now()
 	m.rescanSkills()
 }
@@ -4021,12 +4125,15 @@ func workspaceName(cwd string) string {
 // primary client keeps reading until it closes the engine, because the log's
 // outbox may still be publishing after a turn's ending.
 //
-// An event is an eventMsg, after which the command gate decides whether the
-// next read starts (readOn): exactly one is ever in flight. A stream that has
-// ended (backend.ErrClosed, an End item) or failed is nil, as a closed channel
-// always was: nothing more is coming, and the reader is not re-armed. Ready and
-// Restore are the socket backend's (PR 4), which nothing in process delivers
-// and nothing here handles yet: the reader reads past them.
+// Every item is delivered, each as its message: an event as an eventMsg with
+// its stream generation; and the three a socket's stream adds (PR 4; nothing
+// in process delivers them) — a Restore as a restoreMsg, a Ready as a readyMsg
+// and an End as an endMsg (restore.go). After each the command gate decides
+// whether the next read starts (readOn): exactly one is ever in flight, and
+// each is held and drained in arrival order like any other message. A stream
+// that has ended (backend.ErrClosed, after its End) or failed is nil, as a
+// closed channel always was: nothing more is coming, and the reader is not
+// re-armed.
 //
 // The read's context never ends. Read returns every item it takes, a context
 // cancelled meanwhile or not (backend.Backend.Read), and a read that is never
@@ -4043,11 +4150,16 @@ func waitEvent(b backend.Backend) tea.Cmd {
 			}
 			switch it.Kind {
 			case backend.ItemEvent:
-				return eventMsg{it.Event}
-			case backend.ItemReady, backend.ItemRestore:
-				continue
+				return eventMsg{ev: it.Event, gen: it.Gen}
+			case backend.ItemRestore:
+				return restoreMsg{info: it.Info, snap: it.Snapshot, gen: it.Gen}
+			case backend.ItemReady:
+				return readyMsg{info: it.Info, err: it.Err}
+			case backend.ItemEnd:
+				return endMsg{err: it.Err}
 			}
-			return nil
+			// A kind this build does not know carries nothing to apply: it
+			// is read past, as the stream's own unknown items are.
 		}
 	}
 }

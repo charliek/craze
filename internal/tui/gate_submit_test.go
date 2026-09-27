@@ -208,7 +208,7 @@ func (r *schedRun) feedUntil(done func([]agent.Event) bool) {
 func (r *schedRun) stepEvents(evs []agent.Event) {
 	r.t.Helper()
 	for _, ev := range evs {
-		r.step(eventMsg{ev})
+		r.step(eventMsg{ev: ev})
 	}
 }
 

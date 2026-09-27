@@ -125,7 +125,7 @@ func TestStatusRowShowsTheBranchAndRefreshesAtTurnEnd(t *testing.T) {
 	if strings.Contains(statusText(m.statusRow1()), "side") {
 		t.Fatal("the branch must not be re-read on every frame")
 	}
-	tm, _ := m.Update(eventMsg{agent.Event{Type: agent.EventDone, StopReason: "end_turn"}})
+	tm, _ := m.Update(eventMsg{ev: agent.Event{Type: agent.EventDone, StopReason: "end_turn"}})
 	m = tm.(Model)
 	if !strings.Contains(statusText(m.statusRow1()), "side") {
 		t.Fatalf("the turn ended, so the branch should refresh:\n%s", statusText(m.statusRow1()))

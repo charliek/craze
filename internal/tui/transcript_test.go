@@ -20,7 +20,7 @@ func fill(m *Model, n int) {
 }
 
 func toolEvent(m Model, t *agent.ToolEvent) Model {
-	tm, _ := m.Update(eventMsg{agent.Event{Type: agent.EventTool, Tool: t}})
+	tm, _ := m.Update(eventMsg{ev: agent.Event{Type: agent.EventTool, Tool: t}})
 	return tm.(Model)
 }
 
@@ -40,14 +40,14 @@ func TestStreamChunkRendersExactlyOneEntry(t *testing.T) {
 	fill(&m, 20)
 	before := m.main.renders
 
-	tm, _ := m.Update(eventMsg{agent.Event{Type: agent.EventText, Text: "chunk"}})
+	tm, _ := m.Update(eventMsg{ev: agent.Event{Type: agent.EventText, Text: "chunk"}})
 	m = tm.(Model)
 	if got := m.main.renders - before; got != 1 {
 		t.Fatalf("a new stream entry rendered %d entries, want 1", got)
 	}
 
 	before = m.main.renders
-	tm, _ = m.Update(eventMsg{agent.Event{Type: agent.EventText, Text: " more"}})
+	tm, _ = m.Update(eventMsg{ev: agent.Event{Type: agent.EventText, Text: " more"}})
 	m = tm.(Model)
 	if got := m.main.renders - before; got != 1 {
 		t.Fatalf("a stream chunk rendered %d entries, want 1", got)
@@ -83,7 +83,7 @@ func TestStickToBottomAcrossChunkResizeThemeAndCtrlO(t *testing.T) {
 	if !m.vp.AtBottom() {
 		t.Fatal("setup should stick to the bottom")
 	}
-	tm, _ := m.Update(eventMsg{agent.Event{Type: agent.EventText, Text: "tail chunk"}})
+	tm, _ := m.Update(eventMsg{ev: agent.Event{Type: agent.EventText, Text: "tail chunk"}})
 	m = tm.(Model)
 	if !m.vp.AtBottom() {
 		t.Fatal("a chunk unstuck the viewport")
@@ -115,7 +115,7 @@ func TestScrolledUpSurvivesChunkResizeThemeAndCtrlO(t *testing.T) {
 	}
 	offset := m.vp.YOffset
 
-	tm, _ = m.Update(eventMsg{agent.Event{Type: agent.EventText, Text: "tail chunk"}})
+	tm, _ = m.Update(eventMsg{ev: agent.Event{Type: agent.EventText, Text: "tail chunk"}})
 	m = tm.(Model)
 	if m.vp.YOffset != offset {
 		t.Fatalf("a chunk moved the viewport: %d -> %d", offset, m.vp.YOffset)
@@ -162,7 +162,7 @@ func TestTodoToolIsNeverAddedRenders(t *testing.T) {
 func TestThoughtRunCollapsesToOneRowRenders(t *testing.T) {
 	m := sized(t)
 	for _, chunk := range []string{"weighing ", "the options"} {
-		tm, _ := m.Update(eventMsg{agent.Event{Type: agent.EventThought, Text: chunk}})
+		tm, _ := m.Update(eventMsg{ev: agent.Event{Type: agent.EventThought, Text: chunk}})
 		m = tm.(Model)
 	}
 	view := plainView(m)
@@ -172,7 +172,7 @@ func TestThoughtRunCollapsesToOneRowRenders(t *testing.T) {
 	if strings.Contains(view, "weighing") {
 		t.Fatalf("a collapsed thought must not show its text:\n%s", view)
 	}
-	tm, _ := m.Update(eventMsg{agent.Event{Type: agent.EventText, Text: "answer"}})
+	tm, _ := m.Update(eventMsg{ev: agent.Event{Type: agent.EventText, Text: "answer"}})
 	m = tm.(Model)
 	view = plainView(m)
 	if !strings.Contains(view, "+ Thought") {
@@ -193,9 +193,9 @@ func TestThoughtRunCollapsesToOneRowRenders(t *testing.T) {
 func TestThoughtRunShowsAMeasuredDurationRenders(t *testing.T) {
 	m := sized(t)
 	base := time.Now()
-	tm, _ := m.Update(eventMsg{agent.Event{Type: agent.EventThought, Text: "weighing", At: base}})
+	tm, _ := m.Update(eventMsg{ev: agent.Event{Type: agent.EventThought, Text: "weighing", At: base}})
 	m = tm.(Model)
-	tm, _ = m.Update(eventMsg{agent.Event{
+	tm, _ = m.Update(eventMsg{ev: agent.Event{
 		Type: agent.EventText,
 		Text: "answer",
 		At:   base.Add(5 * time.Second),
@@ -211,15 +211,15 @@ func TestThoughtRunClosesWhenANoteLandsAfterItRenders(t *testing.T) {
 	base := time.Now()
 	m.clock = func() time.Time { return base.Add(5 * time.Second) }
 
-	tm, _ := m.Update(eventMsg{agent.Event{Type: agent.EventThought, Text: "weighing", At: base}})
+	tm, _ := m.Update(eventMsg{ev: agent.Event{Type: agent.EventThought, Text: "weighing", At: base}})
 	m = tm.(Model)
-	tm, _ = m.Update(eventMsg{agent.Event{
+	tm, _ = m.Update(eventMsg{ev: agent.Event{
 		Type:  agent.EventTodos,
 		Todos: []agent.Todo{{ID: "1", Content: "Read main.go", Status: "pending"}},
 		At:    base.Add(5 * time.Second),
 	}})
 	m = tm.(Model)
-	tm, _ = m.Update(eventMsg{agent.Event{Type: agent.EventDone, StopReason: "end_turn", At: base.Add(9 * time.Second)}})
+	tm, _ = m.Update(eventMsg{ev: agent.Event{Type: agent.EventDone, StopReason: "end_turn", At: base.Add(9 * time.Second)}})
 	m = tm.(Model)
 
 	view := plainView(m)
@@ -425,7 +425,7 @@ func TestModeChangeLeavesANote(t *testing.T) {
 // client.
 func TestCancelledTurnLeavesANoteRenders(t *testing.T) {
 	m := sized(t)
-	tm, _ := m.Update(eventMsg{agent.Event{Type: agent.EventDone, StopReason: "cancelled"}})
+	tm, _ := m.Update(eventMsg{ev: agent.Event{Type: agent.EventDone, StopReason: "cancelled"}})
 	m = tm.(Model)
 	if m.status != statusIdle {
 		t.Fatalf("status %v after a cancel", m.status)

@@ -119,6 +119,13 @@ func errorEvent(ev agent.Event) bool {
 // (A11), which needs both sides of the consumption. It is nil in production.
 var foldHook func(m *Model, ev agent.Event, ch transcript.Change, hide transcript.Kind) (consumed func())
 
+// restoreHook, when a test sets it, is told of every restore (restore.go) once
+// the shared model is restored and the panes rebuilt from it, before anything
+// else the restore writes: the parity watch's shadow restores the same
+// snapshot, and holds every pane to it (plan 027 §3.14). It is nil in
+// production, like foldHook.
+var restoreHook func(m *Model, snap *transcript.Snapshot)
+
 // foldEvent folds one event the primary delivered into the shared model, and
 // hands what the fold changed to the pane that shows its transcript. Both
 // arguments besides the event are decided by the caller from this client's

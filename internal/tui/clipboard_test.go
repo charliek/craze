@@ -267,7 +267,7 @@ func TestCtrlYWorksWithNoMouse(t *testing.T) {
 	m = tm.(Model)
 	tm, _ = m.Update(startedMsg{})
 	m = tm.(Model)
-	tm, _ = m.Update(eventMsg{agent.Event{Type: agent.EventText, Text: "the reply"}})
+	tm, _ = m.Update(eventMsg{ev: agent.Event{Type: agent.EventText, Text: "the reply"}})
 	m = tm.(Model)
 
 	tm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlY})
