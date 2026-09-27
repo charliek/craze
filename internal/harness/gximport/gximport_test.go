@@ -833,6 +833,64 @@ func TestImportKeepsCompaction(t *testing.T) {
 	}
 }
 
+// TestImportKeepsCost: gx has no concept of cost, so a priced model's cost
+// survives a re-import whether the rest of its entry is untouched (kept
+// verbatim, "Unchanged") or gx changed some other field and replaces it
+// wholesale ("Updated") — the fix at gximport.go's merge, not clone alone
+// (plan 028 §3.14). A freshly imported model, with no existing entry to
+// carry a price from, has none.
+func TestImportKeepsCost(t *testing.T) {
+	priced := &modeltable.Cost{Input: ptrFloat(0.60), Output: ptrFloat(2.50)}
+	existing := existingTable()
+	kimi := existing.Models["fireworks/kimi-k3"] // gx, changed elsewhere: Updated
+	kimi.Cost = priced
+	existing.Models["fireworks/kimi-k3"] = kimi
+	glm := existing.Models["glm-5.3"] // gx, identical otherwise: Unchanged
+	glm.Cost = priced
+	existing.Models["glm-5.3"] = glm
+	if err := existing.Validate(); err != nil {
+		t.Fatalf("control: the existing table is invalid: %v", err)
+	}
+
+	got, report, err := Import(fixture, existing)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(report.Models.Updated, "fireworks/kimi-k3") {
+		t.Fatalf("Models.Updated = %v, want fireworks/kimi-k3 (its other fields still changed)", report.Models.Updated)
+	}
+	if !slices.Contains(report.Models.Unchanged, "glm-5.3") {
+		t.Fatalf("Models.Unchanged = %v, want glm-5.3 (cost is the only difference, and sameModel ignores it)", report.Models.Unchanged)
+	}
+	for _, alias := range []string{"fireworks/kimi-k3", "glm-5.3"} {
+		if got := got.Models[alias].Cost; !reflect.DeepEqual(got, priced) {
+			t.Fatalf("%s.Cost = %+v, want it kept as %+v", alias, got, priced)
+		}
+	}
+	// fireworks/kimi-k3's other fields still came from gx, replaced wholesale.
+	if got := got.Models["fireworks/kimi-k3"].MaxOutputTokens; got != 65536 {
+		t.Fatalf("MaxOutputTokens = %d, want gx's 65536 (only Cost is kept, not the whole old entry)", got)
+	}
+
+	// The merged table's Cost is not the caller's pointer: mutating it must
+	// not reach back into existing.
+	got.Models["glm-5.3"].Cost.Input = ptrFloat(999)
+	if *existing.Models["glm-5.3"].Cost.Input != 0.60 {
+		t.Fatal("the merged table's Cost aliases the caller's")
+	}
+
+	// No existing table: a freshly imported model has no cost to carry.
+	fresh, _, err := Import(fixture, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := fresh.Models["fireworks/kimi-k3"].Cost; got != nil {
+		t.Fatalf("Cost with no existing table = %+v, want nil", got)
+	}
+}
+
+func ptrFloat(v float64) *float64 { return &v }
+
 func TestImportDefaultModelRule(t *testing.T) {
 	const two = okProvider + `
 [model."ok/a"]

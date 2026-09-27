@@ -171,12 +171,17 @@ func Import(grokHome string, existing *modeltable.Table) (*modeltable.Table, Rep
 	models, modelSkips := importModels(subtable(cfg, "model"), providers, providerCtx, providerSkips)
 
 	merged := clone(existing)
-	report.Providers = merge(merged.Providers, providers, func(p modeltable.Provider) string { return p.Source }, sameProvider)
+	keepProvider := func(cur, next modeltable.Provider) modeltable.Provider { return next } // gx sets every field
+	report.Providers = merge(merged.Providers, providers, func(p modeltable.Provider) string { return p.Source }, sameProvider, keepProvider)
 	report.Providers.Skipped = sortedSkips(providerSkips)
 	for _, id := range slices.Sorted(maps.Keys(providerNotes)) {
 		report.Providers.Notes = append(report.Providers.Notes, Note{ID: id, Text: providerNotes[id]})
 	}
-	report.Models = merge(merged.Models, models, func(m modeltable.Model) string { return m.Source }, sameModel)
+	// gx has no concept of cost (plan 028 §3.14): a re-import that replaces a
+	// gx-sourced model wholesale still carries the owner's cost forward, the
+	// way [subagents] and [compaction] survive an import untouched.
+	keepModel := func(cur, next modeltable.Model) modeltable.Model { next.Cost = cur.Cost.Clone(); return next }
+	report.Models = merge(merged.Models, models, func(m modeltable.Model) string { return m.Source }, sameModel, keepModel)
 	report.Models.Skipped = sortedSkips(modelSkips)
 
 	if len(merged.Models) == 0 {
@@ -659,8 +664,12 @@ func (f *fields) set(key string) bool {
 }
 
 // merge applies the source rule to one kind of entry, adding and replacing
-// in dst, and says what it did. Skipped is the caller's to fill.
-func merge[T any](dst, imported map[string]T, source func(T) string, same func(a, b T) bool) Changes {
+// in dst, and says what it did. Skipped is the caller's to fill. carry runs
+// only when a gx-sourced entry is replaced wholesale (the default case
+// below): it lets the caller fold a field gx has no concept of forward from
+// the entry being replaced onto the one replacing it (plan 028 §3.14: a
+// model's cost).
+func merge[T any](dst, imported map[string]T, source func(T) string, same func(a, b T) bool, carry func(cur, next T) T) Changes {
 	var c Changes
 	for _, id := range slices.Sorted(maps.Keys(dst)) {
 		if source(dst[id]) != modeltable.SourceGX {
@@ -680,7 +689,7 @@ func merge[T any](dst, imported map[string]T, source func(T) string, same func(a
 		case same(cur, imported[id]):
 			c.Unchanged = append(c.Unchanged, id)
 		default:
-			dst[id] = imported[id]
+			dst[id] = carry(cur, imported[id])
 			c.Updated = append(c.Updated, id)
 		}
 	}
@@ -689,7 +698,9 @@ func merge[T any](dst, imported map[string]T, source func(T) string, same func(a
 
 // sameProvider and sameModel compare whole entries (so a field added later is
 // compared without anyone remembering to), with an empty list and an absent
-// one counted equal, as they are on disk.
+// one counted equal, as they are on disk. sameModel also ignores Cost: gx
+// never sets it, so a priced entry whose other fields are unchanged is not
+// seen as changed (plan 028 §3.14).
 func sameProvider(a, b modeltable.Provider) bool {
 	a.EnvKeys, b.EnvKeys = nilIfEmpty(a.EnvKeys), nilIfEmpty(b.EnvKeys)
 	return reflect.DeepEqual(a, b)
@@ -697,6 +708,7 @@ func sameProvider(a, b modeltable.Provider) bool {
 
 func sameModel(a, b modeltable.Model) bool {
 	a.Efforts, b.Efforts = nilIfEmpty(a.Efforts), nilIfEmpty(b.Efforts)
+	a.Cost, b.Cost = nil, nil
 	return reflect.DeepEqual(a, b)
 }
 
@@ -725,6 +737,7 @@ func clone(t *modeltable.Table) *modeltable.Table {
 	}
 	for alias, m := range t.Models {
 		m.Efforts = slices.Clone(m.Efforts)
+		m.Cost = m.Cost.Clone()
 		out.Models[alias] = m
 	}
 	out.Subagents = modeltable.Subagents{
