@@ -784,11 +784,17 @@ func TestASubmitThatNeverAnswersKeepsTheDraft(t *testing.T) {
 				if len(m.shellCtx) != 1 {
 					t.Fatalf("the shell context went: %+v", m.shellCtx)
 				}
-				// The band is the engine's queue: the row a lost answer queued is
-				// there, and nothing when the command never ran.
+				// At the release the band is the fold's, never a read of the
+				// engine (plan 027 §3.12: from C21 the band shows the fold's
+				// facts); once what the session published is folded, it is the
+				// engine's queue: the row a lost answer queued is there, and
+				// nothing when the command never ran.
+				if fq := m.shared.State().Queue; !reflect.DeepEqual(noneIsNil(m.queue), fq) {
+					t.Fatalf("at the release the band holds %+v, the fold %+v", m.queue, fq)
+				}
 				eq := eng.State().Queue
-				if !reflect.DeepEqual(m.queue, eq) {
-					t.Fatalf("the band holds %+v, the engine %+v", m.queue, eq)
+				if folded := feed(t, m, stubDeltas(t, stub)...); !reflect.DeepEqual(folded.queue, eq) {
+					t.Fatalf("the band holds %+v, the engine %+v", folded.queue, eq)
 				}
 				if queued := len(eq) == 1; queued != (working && ran) {
 					t.Fatalf("the engine's queue %+v: working %v, ran %v", eq, working, ran)

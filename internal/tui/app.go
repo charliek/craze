@@ -346,17 +346,34 @@ type Model struct {
 	askEchoes       []string
 	hiddenRetry     []hiddenAnswer
 	hiddenRetryLive bool
-	snap            agent.Snapshot
-	// queue is the engine's message queue, in send order: refreshSnap and
-	// refreshQueue fill it from Control.State().Queue, which is where the
-	// queue lives now that it has left the provider seam (plan 021 §3.5).
-	queue []agent.QueuedPrompt
+	// snap is the session's state as the TUI draws it, and queue the message
+	// queue in send order: both derived (recompute, mirror.go) from this
+	// client's fold, the backend's static facts and its own overlays, after
+	// every fold and every overlay write (plan 027 §3.13). sendNowArmed is the
+	// armed send-now as the same mirror says (sendNowPending). Nothing else
+	// writes them.
+	snap         agent.Snapshot
+	queue        []agent.QueuedPrompt
+	sendNowArmed bool
+	// ov is this client's overlays on the fold: what its own commands
+	// confirmed, or asked for and have not heard back about, that the fold
+	// has not caught up with (overlays, mirror.go).
+	ov overlays
+	// armCause is the command whose arm the fold's send-now section last
+	// armed, and armFired says the started that fired it has been folded since:
+	// firing publishes no delta, so the section alone would stay armed
+	// (observe).
+	armCause string
+	armFired bool
+	// childActivity is each child's activity as its own tool events have moved
+	// it since the roster last carried its row (observe): the live session
+	// keeps a child's activity without publishing it.
+	childActivity map[string]string
 	// modeInFlight is a mode change of craze's own that the agent has not
-	// answered yet. The chip flips when the user asks for it and reverts only
-	// if the agent refuses, but the session's snapshot still says the old mode
-	// for the length of that round trip — so refreshSnap keeps this one on the
-	// chip instead, or any unrelated update landing inside the window flickers
-	// it back to the mode the user just left.
+	// answered yet: set when the user asks for it, cleared by the answer —
+	// success or refusal — for its own request. What the chip shows meanwhile
+	// is the mode overlay's (requestMode), which holds past a success until
+	// the change's own delta is folded (plan 027 §3.13).
 	//
 	// modeGen is which request it belongs to. The mode id cannot stand in for
 	// that: changes are not serialised, two of them can be answered out of
@@ -364,22 +381,20 @@ type Model struct {
 	// request's protection to the first request's answer. Every writer bumps
 	// the generation and every answer carries it back, so an answer that is
 	// not the current generation is stale and may neither clear the flag nor
-	// speak for the chip. The flag *overrides* the session's snapshot, so a
-	// stuck or wrongly-cleared one makes the chip lie for the life of the
-	// process, where the bug it was introduced for only made it flicker.
+	// speak for the chip.
 	modeInFlight string
 	modeGen      int
 
 	// modeRev, modelRev and configRev are the highest StateDelta Seq this model
 	// has applied for each settings section: the mode, the model, and the
 	// config options — one revision for all of them, because a config delta
-	// carries every option in full.
+	// carries every option in full (observe).
 	//
-	// They are what a delayed answer is judged against (mayApply). modeGen,
-	// applyGen and modeInFlight stay exactly what they were: optimistic view
-	// state about this model's own requests. These are about the shared state
-	// the session actually holds, which another client can change too, and the
-	// only thing that orders the two is the revision the deltas carry.
+	// They are what a confirmed settings overlay is judged against (settled,
+	// mayApply). modeGen, applyGen and modeInFlight are view state about this
+	// model's own requests. These are about the shared state the session
+	// actually holds, which another client can change too, and the only thing
+	// that orders the two is the revision the deltas carry.
 	modeRev   uint64
 	modelRev  uint64
 	configRev uint64
@@ -390,9 +405,10 @@ type Model struct {
 	dialog  dialogKind
 	mdlg    modelDialog
 	helpTop int
-	// applyGen counts the model dialog's applies. The box closes optimistically,
-	// so a second apply can be under way before the first one answers, and only
-	// the newest one is allowed to settle what the rows show.
+	// applyGen counts this client's model changes: the model dialog's applies
+	// and `/model`'s. The box closes optimistically, so a second change can be
+	// under way before the first one answers; each answer carries its own, and
+	// settles only the overlays its own request wrote (mirror.go).
 	applyGen int
 
 	// Theme dialog: the list is frozen when it opens because the live preview
@@ -483,8 +499,8 @@ type Model struct {
 	// confirm is the send-now waiting for an answer. The confirm line is
 	// client-local UI: nothing is taken from anywhere and the engine has not
 	// heard of it. The send-now it turns into, on the other hand, is the
-	// engine's armed send (State().SendNow), because the cancel that makes room
-	// for it is the engine's.
+	// engine's armed send (the mirror's sendNowArmed), because the cancel that
+	// makes room for it is the engine's.
 	confirm *strongSend
 	// mouseAll records which motion mode the terminal is in, so the queue
 	// going 0 → 1 rows and back issues exactly one transition each way.
@@ -707,10 +723,12 @@ type errMsg struct {
 }
 
 // actionErrMsg is a failure a command reports as an error row: a chain's
-// settings read or Set that failed.
+// settings read or Set that failed. landed is `/model`'s model step when it
+// landed before the effort step failed (modelLanded), applied first.
 type actionErrMsg struct {
 	issued
-	err error
+	err    error
+	landed modelLanded
 }
 
 // issued stamps a session-dependent asynchronous result — a gated call's
@@ -755,9 +773,11 @@ func (m *Model) outdated(msg tea.Msg) bool {
 }
 
 // revertModeMsg is a mode change coming back refused, or never coming back
-// inside modeCallTimeout. gen is the request it answers for; prev is what the
-// chip showed before that request asked, and at the mode section's revision
-// when it asked (mayApply).
+// inside modeCallTimeout. gen is the request it answers for, whose mode
+// overlay it takes down; prev is what the chip showed before that request
+// asked, and at the mode section's revision when it asked — the request's
+// record. Nothing puts prev back: with the overlay gone the chip reads the
+// fold, which is the session's mode as far as this client has heard (§3.13).
 type revertModeMsg struct {
 	issued
 	gen  int
@@ -766,22 +786,29 @@ type revertModeMsg struct {
 	at   uint64
 }
 
-// modeAppliedMsg is a mode change coming back accepted: the session's snapshot
-// carries this mode now, so the chip can go back to reading it. gen is the
-// request it answers for. It writes no value of its own — it only takes the
-// chip's mask down — so it needs no revision.
+// modeAppliedMsg is a mode change coming back accepted (plan 027 §3.13: every
+// settings success reaches the reducer with its result): gen is the request it
+// answers for, id the mode the session confirmed (engine.SetResult.Value,
+// which is not always the one asked for) and rev the revision it committed it
+// at. Its overlay holds that value until the fold's mode revision reaches rev
+// — or its own delta is folded, the same event — and, with no revision to wait
+// for (rev 0: a change that published nothing), until the fold shows it
+// (confirmMode).
 type modeAppliedMsg struct {
 	issued
 	gen int
 	id  string
+	rev uint64
 }
 
-// revertModelMsg is a model change coming back refused. at is the model
-// section's revision when it asked: a refusal that arrives after somebody
-// else's change has been applied may show its error but may not put prev back
-// (mayApply).
+// revertModelMsg is a model change coming back refused. gen is the request it
+// answers for, whose model overlay it takes down; prev is the model the screen
+// showed when it asked, and at the model section's revision then — the
+// request's record. Nothing puts prev back (SF-38): two overlapping refusals
+// both land on the fold's model, never on the first one's optimistic value.
 type revertModelMsg struct {
 	issued
+	gen  int
 	prev string
 	err  error
 	at   uint64
@@ -789,14 +816,59 @@ type revertModelMsg struct {
 
 // modelUnreadMsg is a model change coming back with an answer the session
 // could not read (agent.ErrBadCatalog). It is not revertModelMsg: the agent
-// answered and may have switched, so nothing says the model was refused and
-// there is no prev to put back. Nothing of the answer was installed, so the
-// screen reads the session's snapshot back, and the row says the outcome is
-// unknown (unreadModelText).
-type modelUnreadMsg struct{ issued }
+// answered and may have switched, so nothing says the model was refused. Its
+// overlay goes all the same — nothing of the answer was installed — so the
+// screen reads the fold, and the row says the outcome is unknown
+// (unreadModelText).
+type modelUnreadMsg struct {
+	issued
+	gen int
+}
 
-// refreshSnapMsg reads the session's snapshot back: a chain's last step
-// landed. Tests send it bare, as a nudge.
+// modelLanded is `/model`'s model step coming back accepted (plan 027 §3.13:
+// every settings success reaches the reducer with its result): gen is the
+// request, cause the step's command and at the model section's revision when
+// it was sent, and res what the session confirmed and the revision it
+// committed it at, which the model overlay holds until the fold reaches
+// (confirmModel). set says there is one.
+type modelLanded struct {
+	set   bool
+	gen   int
+	cause string
+	at    uint64
+	res   engine.SetResult
+}
+
+// land applies a landed model step to the model overlay, when there is one.
+func (m *Model) land(l modelLanded) {
+	if l.set {
+		m.confirmModel(l.gen, l.cause, l.res.Value, l.at, l.res.Rev)
+	}
+}
+
+// modelSetMsg is `/model <id>` — no effort — coming back accepted: the model
+// step's landing, and nothing after it. With an effort the chain answers the
+// effort step's own message instead — effortSetMsg, effortNotAppliedMsg or
+// actionErrMsg — carrying the model step's landing beside what the effort came
+// to.
+type modelSetMsg struct {
+	issued
+	landed modelLanded
+}
+
+// effortSetMsg is `/model <id> <effort>`'s effort step coming back accepted:
+// option id, sent as cause from the model step's request (landed.gen) when the
+// config section stood at at, confirmed at res (confirmOption).
+type effortSetMsg struct {
+	issued
+	cause, id string
+	at        uint64
+	res       engine.SetResult
+	// landed is the model step's landing (modelLanded), applied first.
+	landed modelLanded
+}
+
+// refreshSnapMsg redraws the mirror: tests send it bare, as a nudge.
 type refreshSnapMsg struct{ issued }
 
 // dblClickMsg is the frame runner's <dblclick:X,Y>: the gesture without the
@@ -820,6 +892,8 @@ type planImplementMsg struct {
 	seq  int
 	gen  int
 	mode string
+	// rev is the mode change's revision (modeAppliedMsg's).
+	rev uint64
 }
 type planImplementFailedMsg struct {
 	issued
@@ -938,6 +1012,10 @@ func (m *Model) setSession(s agent.Session, crazeID string) {
 	// A new session is a new transcript: the shared model is folded from its
 	// events alone.
 	m.newShared()
+	// And nothing this client laid over the old session's fold is about the
+	// new one (plan 027 §3.13: a restore clears every overlay).
+	m.clearOverlays()
+	m.modeRev, m.modelRev, m.configRev = 0, 0, 0
 	m.cmdSeq, m.chains = 0, nil
 	m.owner.set(nil)
 	if s == nil {
@@ -1120,7 +1198,7 @@ func New(cfg Config) Model {
 	// receiver whose model is thrown away), so the model starts out agreeing
 	// with it here: the gate's reader rule counts that read as in flight.
 	m.reading = m.eng != nil && !m.picking()
-	m.refreshSnap()
+	m.recompute()
 	if m.model == "" && m.snap.CurrentModel != "" {
 		m.model = m.snap.CurrentModel
 	}
@@ -1298,7 +1376,7 @@ func finishRun(out io.Writer, final tea.Model, m Model, h Host) (bool, error) {
 //
 // Applying events before started is safe because nothing in applyEvent depends
 // on m.started: the engine authors no turn event before it is started, cancelTurn
-// is a no-op with no cards and no running turn, refreshSnap is idempotent, and
+// is a no-op with no cards and no running turn, recompute is idempotent, and
 // the only card-producing events — permission, question and plan — are requests
 // an agent makes of a live turn and never appear in a replay (§2.1).
 //
@@ -1453,7 +1531,7 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.started = true
 		m.branch = m.git.branch()
-		m.refreshSnap()
+		m.recompute()
 		if m.persistProvider && (!m.fallbackDefault || m.pickedExplicit) {
 			name := m.snap.Provider.Name
 			if name == "" {
@@ -1492,55 +1570,60 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case actionErrMsg:
+		m.land(msg.landed)
 		m.addError(msg.err.Error())
 		return m, nil
 
 	case revertModeMsg:
 		if msg.gen != m.modeGen {
 			// Stale: a newer request of the user's own is what the chip is
-			// showing, so this refusal may neither roll the chip back to a
-			// mode two changes ago nor drop the newer request's protection.
-			// The error is still theirs to see — the agent refused something
-			// they asked for, and swallowing that would be a bug of its own.
+			// showing, so this refusal may neither take the newer request's
+			// overlay down nor clear its flag. The error is still theirs to
+			// see — the agent refused something they asked for, and
+			// swallowing that would be a bug of its own.
 			m.addError(msg.err.Error())
 			return m, nil
 		}
-		// The revert is the last word on this request, so nothing may put the
-		// refused mode back on the chip afterwards. prev is what the chip
-		// showed before it asked; the session is the real authority, and with
-		// the flag down nothing masks it any more, so it is read straight back
-		// — an agent-initiated mode that landed while this was on the wire is
-		// on the chip rather than lost behind prev. refreshSnap is a no-op
-		// before a session exists, which is what leaves prev in place then.
+		// The revert is the last word on this request: its overlay goes, and
+		// nothing is put back in its place — the chip reads the fold, so an
+		// agent-initiated mode that landed while this was on the wire is on
+		// the chip rather than lost behind a captured value.
 		m.modeInFlight = ""
-		if mayApply(m.modeRev, msg.at, 0) {
-			m.snap.CurrentMode = msg.prev
-		}
-		m.refreshSnap()
+		m.refuseMode(msg.gen)
 		m.addError(msg.err.Error())
 		return m, nil
 
 	case modeAppliedMsg:
-		return m.modeSettled(msg.gen), nil
+		return m.modeSettled(msg.gen, msg.id, msg.rev), nil
 
 	case revertModelMsg:
-		// The guard /model never had: another client — or the agent — may have
-		// changed the model while this request was in flight, and a refusal
-		// about a value nobody is on any more must not put its prev back. The
-		// error row is still the user's to see either way.
-		if mayApply(m.modelRev, msg.at, 0) {
-			m.snap.CurrentModel = msg.prev
-			m.model = msg.prev
-		}
+		// Its own overlay goes, and nothing is put back (SF-38): the screen
+		// reads the fold's model — the one before the call, or whatever the
+		// agent or another client has moved it to since. The error row is the
+		// user's to see either way.
+		m.refuseModel(msg.gen)
 		m.addError(msg.err.Error())
 		return m, nil
 
 	case modelUnreadMsg:
-		// Read back rather than put back: the snapshot is the model the
-		// session is on as far as anyone can say — the one before the call,
-		// or whatever the agent or another client has moved it to since.
-		m.refreshSnap()
+		// Read back rather than put back: nothing of the answer was
+		// installed, so the overlay goes and the fold is the model the
+		// session is on as far as anyone can say.
+		m.refuseModel(msg.gen)
 		m.addError(m.unreadModelText())
+		return m, nil
+
+	case modelSetMsg:
+		// The model step landed: its overlay holds what the session confirmed
+		// until the fold's model revision reaches it.
+		m.land(msg.landed)
+		return m, nil
+
+	case effortSetMsg:
+		// The model step landed, and then the effort step: each overlay holds
+		// what the session confirmed until the fold reaches it.
+		m.land(msg.landed)
+		m.confirmOption(msg.landed.gen, msg.cause, msg.id, msg.res.Value, msg.at, msg.res.Rev)
 		return m, nil
 
 	case modelApplyMsg:
@@ -1548,16 +1631,12 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		for _, st := range msg.done {
 			m.addNote(st.note)
 		}
-		if msg.gen == m.applyGen {
-			// Only the newest apply settles the rows: the snapshot is re-read
-			// so they show what the agent has, and the steps this apply landed
-			// are written over it. An older apply is not allowed to speak —
-			// its failure would undo a value the user has changed since.
-			m.refreshSnap()
-			for _, st := range msg.done {
-				m = m.settleStep(st)
-			}
-		}
+		// This apply's overlays: a step that landed holds its confirmed value
+		// until the fold reaches it, and every other one of its requests —
+		// refused, skipped, or never sent once an earlier step failed — goes,
+		// with nothing put back. An older apply's answer settles its own
+		// overlays the same way, and cannot touch a newer one's (settleApply).
+		m.settleApply(msg)
 		// After the rows are settled, because a model step whose answer could
 		// not be read names the model the screen then shows.
 		switch {
@@ -1569,14 +1648,14 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case refreshSnapMsg:
-		m.refreshSnap()
+		m.recompute()
 		return m, nil
 
 	case effortNotAppliedMsg:
-		// The model step landed, so the rows are read back as the landed effort
-		// step's refreshSnapMsg reads them, and then the note says why the
-		// effort did not follow it.
-		m.refreshSnap()
+		// The model step landed and the effort did not follow it: nothing of
+		// the effort was written, so the note says why.
+		m.land(msg.landed)
+		m.recompute()
 		m.addNote(msg.note)
 		return m, nil
 
@@ -1632,7 +1711,7 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case planImplementMsg:
 		// The session is in the implement mode now, so the note is honest
 		// whatever else has happened meanwhile — and so is its snapshot.
-		m = m.modeSettled(msg.gen)
+		m = m.modeSettled(msg.gen, msg.mode, msg.rev)
 		m.addNote(modeNote(m.snap.Modes, msg.mode))
 		if msg.seq != m.turnSeq {
 			// A turn of the user's own started while SetMode was in flight, so
@@ -2334,7 +2413,7 @@ func (m Model) clearPending(then linkThen) (Model, tea.Cmd) {
 	m.confirm = nil
 	if m.eng == nil {
 		// No backend, so neither call: what followed them still runs.
-		m.settlePending(engine.Command{}, clearAnswer{disarm: errNoBackend, clear: errNoBackend}, false)
+		m.settlePending(engine.Command{}, engine.Command{}, clearAnswer{disarm: errNoBackend, clear: errNoBackend})
 		return then(m)
 	}
 	dc, cc := m.nextCmd(), m.nextCmd()
@@ -2344,7 +2423,7 @@ func (m Model) clearPending(then linkThen) (Model, tea.Cmd) {
 			if !ok || r.err != nil {
 				ans = clearAnswer{disarm: ErrNoAnswer, clear: ErrNoAnswer}
 			}
-			m.settlePending(dc, ans, ok && r.err == nil)
+			m.settlePending(dc, cc, ans)
 			return then(m)
 		})
 }
@@ -2354,48 +2433,50 @@ func (m Model) clearPending(then linkThen) (Model, tea.Cmd) {
 var errNoBackend = errors.New("tui: no backend")
 
 // clearAnswer is clearPending's one call answered: what each of its two verbs
-// came to, and the session's state read right after the second.
+// came to, and the rows the ClearQueue removed.
 type clearAnswer struct {
 	disarm, clear error
-	st            engine.State
+	removed       []agent.QueuedPrompt
 }
 
 // clearPendingCall is clearPending's gated call: the Disarm, then the
 // ClearQueue whatever the Disarm came to — nothing armed is the usual answer,
-// and the queue is cleared all the same — then the band's transitional read
-// (verbRead's). Each verb that gave up because the call's deadline passed did
-// not answer (unanswered).
+// and the queue is cleared all the same. Each verb that gave up because the
+// call's deadline passed did not answer (unanswered).
 func clearPendingCall(dc, cc engine.Command) gateCall {
 	return func(ctx context.Context, b backend.Backend) (any, error) {
 		var ans clearAnswer
 		ans.disarm = unanswered(ctx, b.Disarm(ctx, dc))
-		_, err := b.ClearQueue(ctx, cc)
+		removed, err := b.ClearQueue(ctx, cc)
 		ans.clear = unanswered(ctx, err)
-		ans.st = b.State()
+		ans.removed = removed
 		return ans, nil
 	}
 }
 
 // settlePending is clearPending's continuation up to the caller's own work, in
 // today's order: the Disarm's outcome, the edit's end, then the band — from
-// the call's read when the ClearQueue answered, from the session now when it
-// did not (read says whether the call brought one back).
-func (m *Model) settlePending(dc engine.Command, ans clearAnswer, read bool) {
+// the ClearQueue's result: each row it removed is hidden until that row's own
+// removal is folded, whether or not this client had folded the row at all (a
+// row another client added a moment ago is among them, and must not flash
+// back; §3.12's table). A ClearQueue that did not answer hides nothing: the
+// band is the fold's.
+func (m *Model) settlePending(dc, cc engine.Command, ans clearAnswer) {
 	m.withdrawn(dc, "", ans.disarm)
 	if m.queueEdit != "" {
 		m.cancelQueueEdit()
 	}
-	noAnswer := errors.Is(ans.clear, ErrNoAnswer)
-	if noAnswer {
+	if errors.Is(ans.clear, ErrNoAnswer) {
 		m.note(noAnswerClearNote)
 	}
 	m.queueFocus = false
 	m.queueHov = noHover()
-	if read && !noAnswer {
-		m.refreshSnapFrom(ans.st)
-	} else {
-		m.refreshSnap()
+	if ans.clear == nil && cc.Cause() != "" {
+		for _, row := range ans.removed {
+			m.ov = m.ov.withResult(rowAbsent(cc.Cause(), row.ID))
+		}
 	}
+	m.recompute()
 }
 
 func (m Model) handleEnter() (tea.Model, tea.Cmd) {
@@ -2608,34 +2689,18 @@ func (m Model) submit(text string, mode engine.SubmitMode, fromRow string, then 
 	c := m.nextCmd()
 	return m.run(gateDeadline,
 		func(ctx context.Context, b backend.Backend) (any, error) {
-			res, err := b.Submit(ctx, c, text, mode, fromRow)
-			return submitAnswer{res: res, queue: b.State().Queue}, err
+			return b.Submit(ctx, c, text, mode, fromRow)
 		},
 		func(m Model, r gateReply) (Model, tea.Cmd) {
-			ans, _ := r.result.(submitAnswer)
-			m = m.submitted(text, mode, fromRow, c, ans, r.err)
-			return then(m, ans.res, r.err)
+			res, _ := r.result.(engine.SubmitResult)
+			m = m.submitted(text, mode, fromRow, c, res, r.err)
+			return then(m, res, r.err)
 		})
-}
-
-// submitAnswer is Submit's reply as its continuation applies it: the result,
-// and the queue as the engine held it the moment Submit returned. That is the
-// transitional live read (§3.12 "What a continuation shows"), taken where the
-// synchronous code took it — right after the call — because the engine does
-// not wait for the reply to be applied: by the time it lands, a row armed as a
-// send-now can already have fired and left the queue, and a band read then
-// would drop the row from the frame the call's own Update used to draw, ahead
-// of the events that say it went. The read is in process only, and goes with
-// the transitional State() (C21).
-type submitAnswer struct {
-	res   engine.SubmitResult
-	queue []agent.QueuedPrompt
 }
 
 // submitted is submit's continuation: Submit's answer applied to the model, as
 // the Update that sent it left it, before any event the Submit caused.
-func (m Model) submitted(text string, mode engine.SubmitMode, fromRow string, c engine.Command, ans submitAnswer, err error) Model {
-	res := ans.res
+func (m Model) submitted(text string, mode engine.SubmitMode, fromRow string, c engine.Command, res engine.SubmitResult, err error) Model {
 	switch {
 	case err != nil:
 		m.note(submitErrNote(err))
@@ -2676,14 +2741,22 @@ func (m Model) submitted(text string, mode engine.SubmitMode, fromRow string, c 
 	case res.Queued != nil && fromRow == "":
 		m.clearMatchingDraft(text)
 	}
-	// The band shows the engine's queue as the call left it — this Submit's
-	// row, or its row gone (submitAnswer). A Submit that did not answer
-	// brought no read back, so the band is read now: whatever the session
-	// holds.
-	if errors.Is(err, ErrNoAnswer) {
-		m.refreshQueue()
-	} else {
-		m.queue = ans.queue
+	// What the frame shows of it comes from the result (§3.12's table), as an
+	// overlay until the Submit's own event for its item is folded: the row it
+	// queued present, the row it started a turn from gone, the send-now it
+	// armed armed. A row Submit found still queued — it cannot start yet — is
+	// a success that says nothing (engine.go's submit), and installs nothing;
+	// so is a turn started from the composer's text, whose row Enter drew. A
+	// refusal and an unanswered Submit install nothing: the band is the fold's.
+	if err == nil {
+		switch {
+		case res.Armed:
+			m.noteResult(resultEntry{kind: resultArmed, cause: c.Cause()})
+		case res.Turn != "" && fromRow != "":
+			m.noteResult(rowAbsent(c.Cause(), fromRow))
+		case res.Queued != nil && fromRow == "":
+			m.noteResult(resultEntry{kind: resultRowPresent, cause: c.Cause(), row: *res.Queued})
+		}
 	}
 	return m
 }
@@ -2849,9 +2922,6 @@ func (m Model) implementPlan() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	prev := m.snap.CurrentMode
-	// Optimistic, the way applyMode is: the chip flips now and reverts if the
-	// agent refuses, and the snapshot may not put the old mode back meanwhile.
-	m.snap.CurrentMode = id
 	m.modeGen++
 	m.modeInFlight = id
 	gen := m.modeGen
@@ -2860,13 +2930,17 @@ func (m Model) implementPlan() (tea.Model, tea.Cmd) {
 	m.planOfferSeq = 0
 	seq := m.turnSeq
 	eng, cmd, at, iss, base := m.eng, m.nextCmd(), m.modeRev, m.issue(), dispatchCtx(m.eng)
+	// Optimistic, the way applyMode is: the chip flips now, by the request's
+	// overlay, and reverts only if the agent refuses.
+	m.requestMode(gen, cmd.Cause(), id)
 	return m, func() tea.Msg {
 		ctx, cancel := context.WithTimeout(base, modeCallTimeout)
 		defer cancel()
-		if _, err := eng.Set(ctx, cmd, engine.Setting{Kind: engine.SettingMode, Value: id}); err != nil {
+		res, err := eng.Set(ctx, cmd, engine.Setting{Kind: engine.SettingMode, Value: id})
+		if err != nil {
 			return planImplementFailedMsg{issued: iss, seq: seq, gen: gen, prev: prev, err: err, at: at}
 		}
-		return planImplementMsg{issued: iss, seq: seq, gen: gen, mode: id}
+		return planImplementMsg{issued: iss, seq: seq, gen: gen, mode: res.Value, rev: res.Rev}
 	}
 }
 
@@ -2958,8 +3032,8 @@ type cancelFailedMsg struct {
 }
 
 // foreignTurnStoppable says Esc has a turn of the agent's own to stop (plan 026
-// X44): the model's mirror of the session's flag says one is running —
-// m.snap.ForeignTurn, refreshed on the bracket that opens it — and no card
+// X44): the model's mirror says one is running — m.snap.ForeignTurn, the
+// fold's last foreign-turn bracket (plan 027 X8, §3.13) — and no card
 // holds the key. It is any provider's: the native session's wake, which
 // delivers a background sub-agent's result and which nothing else could stop
 // since it never sets working, and grok's interjection fallback alike. A flag
@@ -3032,10 +3106,10 @@ type foreignCancelledMsg struct {
 
 // foreignEpisode names the agent's turn the model's flag says is running: one
 // more than the foreign-turn endings it has applied. It is counted from the
-// endings rather than the openings so that a flag a refresh read ahead of its
-// opening bracket — refreshSnap on any event reads the session's state as it
-// is now — is already the new episode, and never the one before it, whose
-// note may be drawn. It starts at 1, so 0 can mean "no note drawn".
+// endings rather than the openings, so the flag the mirror shows — the fold's,
+// which moves with the brackets alone — names the episode whose opening it
+// folded, and never the one before it, whose note may be drawn. It starts at
+// 1, so 0 can mean "no note drawn".
 //
 // The limit is the model's own view: a turn that ended and a next one that
 // started while the model's flag stayed up, both brackets still in the
@@ -3139,10 +3213,13 @@ func (m *Model) reduceEvent(ev agent.Event) tea.Cmd {
 	//   - the echo rule: the started of the turn Submit handed back draws no
 	//     row, because the optimistic row Enter drew is its display;
 	//   - the todo notes: this pane's dedupe decides which note it shows (X31
-	//     revised), over the list todosOf picks after refreshSnap — today's
-	//     order — so a note the fold writes that the pane has already drawn
-	//     gets no row, and one the pane owes that the fold does not write is
-	//     the pane's own, written below;
+	//     revised), over the list the event itself carries — the fold's rule is
+	//     replacement, so that list is the whole of the new one, and an empty
+	//     one clears it (plan 027 §3.13: no fallback to the mirror, which
+	//     before this fold is the list this event replaces) — so a note the
+	//     fold writes that the pane has already drawn gets no row, and one the
+	//     pane owes that the fold does not write is the pane's own, written
+	//     below;
 	//   - an error's text, read once for the row and for m.err alike.
 	var (
 		hide     transcript.Kind
@@ -3153,16 +3230,19 @@ func (m *Model) reduceEvent(ev agent.Event) tea.Cmd {
 	case m.ownStarted(ev):
 		hide = transcript.KindUser
 	case ev.Type == agent.EventTodos && ev.Agent == "":
-		m.refreshSnap()
-		todos := m.todosOf(ev)
-		m.noteTodoLifecycle(todos)
-		if todoNote = m.todoNoteOwed(todos); todoNote == "" {
+		m.noteTodoLifecycle(ev.Todos)
+		if todoNote = m.todoNoteOwed(ev.Todos); todoNote == "" {
 			hide = transcript.KindNote
 		}
 	case errorEvent(ev):
 		errText = ev.Err.Error()
 	}
 	ch := m.foldEvent(ev, hide, errText)
+	// The mirror follows the fold at once, before any arm reads it (plan 027
+	// §3.13): the event's own bookkeeping — revisions, the send-now's arm, the
+	// overlays it retires — and then the mirror rebuilt from the fold.
+	m.observe(ev)
+	m.recompute()
 	if ev.Type == agent.EventSubagent {
 		m.applySubagentEvent(ev)
 		return nil
@@ -3196,7 +3276,6 @@ func (m *Model) reduceEvent(ev agent.Event) tea.Cmd {
 		// session is up as far as the replay is concerned. The fold has closed
 		// the last replayed run and written the restored note under it.
 		m.replaying = false
-		m.refreshSnap()
 		m.sessionUp()
 		return nil
 	case agent.EventCommand:
@@ -3205,9 +3284,8 @@ func (m *Model) reduceEvent(ev agent.Event) tea.Cmd {
 		// say.
 		return nil
 	case agent.EventQueue:
-		// The band draws from the engine's queue, which refreshSnap re-reads;
-		// nothing else has to happen.
-		m.refreshSnap()
+		// The band draws from the mirror's queue, which the fold has already
+		// moved; nothing else has to happen.
 		if ev.QueueChange == agent.QueueRemoved && m.status == statusError {
 			m.note("queue cleared")
 		}
@@ -3238,7 +3316,6 @@ func (m *Model) reduceEvent(ev agent.Event) tea.Cmd {
 			// applyForeignCancelled).
 			m.cancelled = false
 		}
-		m.refreshSnap()
 		return nil
 	case agent.EventText:
 		if ev.Text != "" {
@@ -3247,13 +3324,10 @@ func (m *Model) reduceEvent(ev agent.Event) tea.Cmd {
 			// on the screen to implement.
 			m.sawAssistantSeq = m.turnSeq
 		}
-	case agent.EventTool:
-		m.refreshSnap()
 	case agent.EventTodos:
 		// A todos fold appends nothing but its note, so no append is no note:
-		// a note the pane owes that the fold did not write — which a /clear,
-		// or todosOf's fallback to a newer list, makes possible — is the
-		// pane's own, stamped at the event's At.
+		// a note the pane owes that the fold did not write — which a /clear
+		// makes possible — is the pane's own, stamped at the event's At.
 		if todoNote != "" && ch.AppendedFrom.IsZero() {
 			m.main.appendLocal(entry{kind: entryNote, text: todoNote}, m.stamp(ev.At))
 		}
@@ -3357,11 +3431,9 @@ func (m *Model) reduceEvent(ev agent.Event) tea.Cmd {
 			// change carries its payload in State alone (§3.8).
 			m.retirePlanOffer()
 		}
-		m.refreshSnap()
 		// session_info_update fills ev.Text: the agent named the session, and
 		// the engine's observer writes that to the index as an agent title
-		// (plan 021 §3.8). The composer's own title is read back by refreshSnap
-		// above, as it always was.
+		// (plan 021 §3.8). The title the mirror shows is the fold's.
 	}
 	return nil
 }
@@ -3757,27 +3829,12 @@ func (m *Model) applyTurnEnded(t *agent.TurnInfo) {
 // armed send, of which there is one at a time, and what it writes is a note and a
 // row: nothing here settles any state, so a delta that arrives late says something
 // true about a send that is gone rather than contradicting the one that replaced
-// it. Whether a send is armed *now* is read from the engine (sendNowPending),
-// never from these events — and which arm a draft belongs to is armedDraft's, which
-// this deliberately leaves alone.
+// it. Whether a send is armed *now* is the mirror's (sendNowPending) — and which
+// arm a draft belongs to is armedDraft's, which this deliberately leaves alone.
+// The settings sections draw nothing here: the mirror has already taken them
+// from the fold, and their revisions (observe).
 func (m *Model) applyStateDelta(ev agent.Event) {
 	st := ev.State
-	// The settings sections draw nothing, and the mirror is still read from the
-	// session (refreshSnap, below in applyEvent): what is taken from them here
-	// is only their revision — the highest Seq applied per section — which is
-	// what tells a delayed answer whether the value it is about is still the
-	// current one (mayApply). It is recorded for every delta, this model's own
-	// included: an echo is still a change that has been applied, and the
-	// revision has to be able to overtake a request issued before it.
-	if st.Mode != nil && ev.Seq > m.modeRev {
-		m.modeRev = ev.Seq
-	}
-	if st.Model != nil && ev.Seq > m.modelRev {
-		m.modelRev = ev.Seq
-	}
-	if st.Config != nil && ev.Seq > m.configRev {
-		m.configRev = ev.Seq
-	}
 	// The note: what was lost, which only a cleared send-now section can say. It
 	// does not touch armedDraft: this delta names the command that caused the
 	// DISARM, not the one that armed what it retired, so clearing the marker from
@@ -3831,30 +3888,20 @@ func (m Model) toggleExpanded() (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// todosOf prefers the list the event carried and falls back to the snapshot.
-func (m Model) todosOf(ev agent.Event) []agent.Todo {
-	if len(ev.Todos) > 0 {
-		return ev.Todos
-	}
-	return m.snap.Todos
-}
-
-// modeSettled is SetMode coming back accepted, for gen. The snapshot is always
-// re-read: the session is the authority on the mode, and refreshSnap puts a
-// newer request of craze's own back over it, so reading it can never contradict
-// one. What only the current generation may do is take the mask down — an older
-// answer arriving late says nothing about the request the chip is showing.
-//
-// The re-read is the point, not bookkeeping: the RPC succeeding and this
-// message being handled are two different moments, and an agent-initiated mode
-// can land in between. refreshSnap masked it at the time, and clearing the flag
-// without reading it back would leave the chip on the mode craze asked for
-// while the session is in another one, with nothing to correct it afterwards.
-func (m Model) modeSettled(gen int) Model {
+// modeSettled is SetMode coming back accepted, for request gen, confirming
+// value at revision rev. Only the current generation takes the in-flight flag
+// down — an older
+// answer arriving late says nothing about the request the chip is showing —
+// and the chip is not taken back to the fold on success: the request's
+// overlay holds the confirmed mode until the change's own delta is folded
+// (confirmMode, plan 027 §3.13), so the chip never snaps back to the mode the
+// user just left while that delta is on its way. An agent-initiated mode that
+// lands after it is the fold's, and shows once the overlay is retired.
+func (m Model) modeSettled(gen int, value string, rev uint64) Model {
 	if gen == m.modeGen {
 		m.modeInFlight = ""
 	}
-	m.refreshSnap()
+	m.confirmMode(gen, value, rev)
 	return m
 }
 
@@ -3919,76 +3966,6 @@ func capRunes(s string, n int) string {
 		count++
 	}
 	return s
-}
-
-// refreshSnap re-reads the session's state through the engine, which embeds the
-// session's own snapshot and merges its own fields into it. It draws no
-// conclusions from what changed: a mode change is reported by the event that
-// carries it, because applyMode has already written the user's own change into
-// the snapshot and an agent-side change that went round in a circle leaves
-// nothing to compare.
-//
-// The queue is the engine's alone now (plan 021 §3.5): m.queue, not a field on
-// m.snap, is what everything that draws the band reads.
-func (m *Model) refreshSnap() {
-	if m.eng == nil {
-		return
-	}
-	m.refreshSnapFrom(m.eng.State())
-}
-
-// refreshSnapFrom is refreshSnap over a state already read: a queue verb's, read
-// in its gated call right after the verb (verbRead).
-func (m *Model) refreshSnapFrom(st engine.State) {
-	m.snap = st.Snapshot
-	m.queue = st.Queue
-	if m.modeInFlight != "" {
-		// A SetMode of craze's own is still on the wire. The snapshot answers
-		// with the mode the session is still in, which is the one the user
-		// just left: taking it would flicker the chip back for as long as the
-		// round trip lasts.
-		m.snap.CurrentMode = m.modeInFlight
-	}
-	if m.snap.CurrentModel != "" {
-		m.model = m.snap.CurrentModel
-	}
-	if m.dialog == dialogModel {
-		// The model dialog's tabs are this snapshot's catalog, which a delta
-		// can change under the open box — another client's model change
-		// brings another model's options. A focused tab whose option has gone
-		// hands the focus back to the list for good, rather than taking it
-		// back if the option returns (plan 025 design 4).
-		m.mdlg = m.mdlg.repaired(m.modelDialogTabs())
-	}
-	// Stamp the rows on first sight in a snapshot, not only on the lifecycle
-	// event: a tool re-emit can carry a finished status one Update ahead of
-	// the `finished` event, and a finished row without its stamp would drop
-	// out of the band for that frame and move the selection under the user.
-	for i := range m.snap.Subagents {
-		s := &m.snap.Subagents[i]
-		if subagentTerminal(*s) {
-			m.noteAgentDone(s.ID)
-		} else {
-			m.noteAgentStart(s.ID)
-		}
-	}
-}
-
-// refreshQueue re-reads the message queue alone. It is what a submit owes: the
-// band changed — a row taken, or a row queued — and nothing else the model mirrors
-// did.
-//
-// The rest of the snapshot is deliberately left alone, and refreshSnap is not what
-// runs here. The turn this same Update just started is already running on the
-// engine's goroutine, and a session that names itself from the prompt (native's
-// own title) writes that while the Update is still in progress: re-reading the
-// whole snapshot here would show a change this Update has no business showing, and
-// which frame it first appeared in would be a race.
-func (m *Model) refreshQueue() {
-	if m.eng == nil {
-		return
-	}
-	m.queue = m.eng.State().Queue
 }
 
 // View places the regions the layout decided, each forced to exactly its own

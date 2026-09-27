@@ -110,7 +110,7 @@ func parityModel(t *testing.T) (Model, *scriptedSession) {
 	})
 	tm, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
 	m = tm.(Model)
-	return deliver(t, m, startedMsg{}), sess
+	return startedLikeInit(t, m), sess
 }
 
 // assertParity is the comparison itself, with no pumping: the two Inputs, one
@@ -341,6 +341,7 @@ func TestEngineStateDerivesTheSameHostStatusAsTheTUIsMirror(t *testing.T) {
 		if _, ok := host.Derive(m.hostInput()); ok {
 			t.Fatal("setup: a status was publishable before the session came up")
 		}
+		m = republish(t, m)
 		m = deliver(t, m, errMsg{err: errors.New("authentication failed: no key\nsee cursor-agent login")})
 		assertParity(t, m, "the session that never came up")
 		s, ok := host.Derive(m.hostInput())

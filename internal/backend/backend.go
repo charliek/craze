@@ -139,12 +139,6 @@ type Backend interface {
 	// State().Snapshot's; over the socket, session.state's settings. It is
 	// what the multi-Set chains judge their next step on.
 	Settings(ctx context.Context) (Settings, error)
-
-	// State is TRANSITIONAL, and in process only: the engine's live state,
-	// which the TUI's mirror still reads until it is the fold. C21 deletes
-	// it (§3.12 "Transitional", §3.13), and a socket backend never
-	// implements it for real.
-	State() engine.State
 }
 
 // Settings is the session's current settings (§3.12): the model, the mode and

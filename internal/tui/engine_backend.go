@@ -238,10 +238,6 @@ func (b *engineBackend) Info() backend.SessionInfo {
 	}
 }
 
-// State is the transitional live read the mirror still makes (§3.12); C21
-// deletes it with the mirror's move onto the fold.
-func (b *engineBackend) State() engine.State { return b.eng.State() }
-
 // settingsSnapshot is the snapshot a model-change chain judges its next step
 // on: the settings the backend holds now, read in the chain's tea.Cmd, with
 // the provider the chain captured when it was dispatched in the Update. What

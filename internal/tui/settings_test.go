@@ -169,21 +169,24 @@ func TestMayApply(t *testing.T) {
 }
 
 // TestAModeDeltaIsMaskedWhileAChangeOfItsOwnIsInFlight: the delta path is
-// masked exactly as refreshSnap has always been (modeInFlight). Mode A is
-// requested, then mode B; A's delta arrives, and it must not put the chip back
-// on A — the newer request of the user's own is what the chip shows until it is
-// answered (plan 021 §3.8's "make sure the delta path is masked the same way").
+// masked as the rest of the mirror is, by the mode overlay (requestMode). Mode
+// A is requested, then mode B; A's delta arrives, and it must not put the chip
+// back on A — the newer request of the user's own is what the chip shows until
+// it is answered (plan 021 §3.8's "make sure the delta path is masked the same
+// way").
 func TestAModeDeltaIsMaskedWhileAChangeOfItsOwnIsInFlight(t *testing.T) {
 	m := sized(t)
 	m, first := askMode(t, m, "plan")
 	m, second := askMode(t, m, "ask")
-	// A's delta lands while B is still in flight.
-	m = feed(t, m, modeDelta(7, "plan"))
+	// A's delta lands while B is still in flight: A's change is made, and the
+	// delta it published — at the revision it was committed at — is applied.
+	firstAnswer := runCmd(first)
+	m = feed(t, m, stubDeltas(t, stubOf(t, m))...)
 	if got := m.snap.CurrentMode; got != "ask" {
 		t.Fatalf("the chip is on %q, want the request that is still in flight", got)
 	}
 	// Both answers arrive; the chip ends on what the session holds.
-	m = deliver(t, m, runCmd(first))
+	m = deliver(t, m, firstAnswer)
 	m = deliver(t, m, runCmd(second))
 	if got := m.snap.CurrentMode; got != sessionMode(stubOf(t, m)) {
 		t.Fatalf("the chip says %q and the session %q", got, sessionMode(stubOf(t, m)))
@@ -222,7 +225,7 @@ func configBackedModel(t *testing.T, m Model) (Model, *Stub) {
 	t.Helper()
 	stub := stubOf(t, m)
 	stub.ModelConfigOption("model")
-	m.refreshSnap()
+	m = republish(t, m)
 	if agent.ModelConfigOption(m.snap) == nil {
 		t.Fatal("the session did not take the model option")
 	}
@@ -307,8 +310,8 @@ func TestAModelChangeThroughTheModelOptionEndsOnTheNewModel(t *testing.T) {
 				t.Fatalf("the optimistic value is %q", m.snap.CurrentModel)
 			}
 			msg := runCmd(cmd)
-			if msg != nil {
-				t.Fatalf("a /model with no effort answers with nothing, got %T", msg)
+			if set, ok := msg.(modelSetMsg); !ok || set.landed.res.Value != "fast" || set.landed.res.Rev == 0 {
+				t.Fatalf("a /model with no effort answers with its result (plan 027 §3.13), got %#v", msg)
 			}
 			evs := stubDeltas(t, stub)
 			if len(evs) != 1 || evs[0].State == nil || evs[0].State.Model == nil || evs[0].State.Config == nil {
@@ -401,6 +404,7 @@ func TestAModelAnswerThatCouldNotBeReadIsNotARefusal(t *testing.T) {
 			want := "grok"
 			if tc.moved != "" {
 				agentSetsModel(stub, tc.moved)
+				m = feed(t, m, modelDelta(11, tc.moved))
 				want = tc.moved
 			}
 			m = deliver(t, m, msg)
@@ -471,7 +475,7 @@ func twoModelSelectors(t *testing.T, m Model) (Model, *Stub) {
 	stub := stubOf(t, m)
 	stub.ModelConfigOption("p")
 	stub.ModelConfigOption("q")
-	m.refreshSnap()
+	m = republish(t, m)
 	if opt := agent.ModelConfigOption(m.snap); opt == nil || opt.ID != "p" {
 		t.Fatalf("the screen's model option is %+v, want p", opt)
 	}

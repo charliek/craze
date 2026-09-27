@@ -54,7 +54,7 @@ func tallChild(t *testing.T, m Model, n int) Model {
 	t.Helper()
 	// Grok: a receipt-only provider would rebuild the view from the receipt.
 	stubOf(t, m).SetProvider(agent.GrokProvider())
-	m.refreshSnap()
+	m.recompute()
 	tr := m.ensureSub("task-1")
 	for i := 0; i < n; i++ {
 		tr.appendEntry(entry{kind: entryAssistant, text: fmt.Sprintf("childline%d", i)}, m.now())
@@ -791,6 +791,12 @@ func TestRespawnedAttemptResetsRowTiming(t *testing.T) {
 	}
 }
 
+// TestFinishOnlySightingLeavesNoStaleStamp: a record whose only sighting is its
+// finish. The roster is the fold's (plan 027 §3.13), and the fold upserts a row
+// from the event that carries it, so the finish-only row is on the roster, with
+// the done stamp its linger counts from; once the roster lets it go — evicted
+// past the finished rows it keeps — the stamp goes with it, so a later record
+// with the same id cannot measure its linger from this stale clock.
 func TestFinishOnlySightingLeavesNoStaleStamp(t *testing.T) {
 	now := time.Date(2026, 9, 12, 10, 0, 0, 0, time.UTC)
 	m := agentModel(t, &now)
@@ -798,8 +804,15 @@ func TestFinishOnlySightingLeavesNoStaleStamp(t *testing.T) {
 	ghost := agent.SubagentInfo{ID: "ghost", Status: agent.SubagentCompleted, Description: "never spawned here"}
 	tm, _ := m.Update(eventMsg{agent.Event{Type: agent.EventSubagent, Subagent: &ghost, SubagentChange: agent.SubagentChangeFinished}})
 	m = tm.(Model)
+	if _, ok := liveInfo(m.snap.Subagents, "ghost"); !ok {
+		t.Fatal("the fold's roster holds the finish-only row the event carried")
+	}
+	if _, ok := m.agentDone["ghost"]; !ok {
+		t.Fatal("the finish-only row keeps its done stamp while it is on the roster")
+	}
+	m = evictFinishedChild(t, m, ghost)
 	if _, ok := m.agentDone["ghost"]; ok {
-		t.Fatal("a record the snapshot never held must not keep a done stamp")
+		t.Fatal("a record the roster no longer holds must not keep a done stamp")
 	}
 }
 
@@ -807,7 +820,7 @@ func TestCursorFinishedWhileViewedGetsTheWarnBanner(t *testing.T) {
 	now := time.Date(2026, 9, 12, 10, 0, 0, 0, time.UTC)
 	m := agentModel(t, &now)
 	stubOf(t, m).SetProvider(agent.CursorProvider())
-	m.refreshSnap()
+	m.recompute()
 	m = applyInFlight(t, m, []agent.ToolEvent{taskTool("task-1", "count lines", "in_progress")})
 	m.status = statusWorking
 	m = openView(t, m)

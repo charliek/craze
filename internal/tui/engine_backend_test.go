@@ -172,7 +172,7 @@ func TestTheChainsJudgeSettingsAsTheEnginesSnapshot(t *testing.T) {
 			stub.mu.Lock()
 			stub.snap.CurrentMode = "plan"
 			stub.mu.Unlock()
-			m.refreshSnap()
+			m = republish(t, m)
 
 			set, err := m.eng.Settings(context.Background())
 			if err != nil {
@@ -229,7 +229,7 @@ func TestAChainWhoseSettingsReadFailsEndsAtThatStep(t *testing.T) {
 		t.Fatalf("the chain did %+v and sent %+v, want the model step alone", out.done, sent)
 	}
 
-	msg := runModelEffort(context.Background(), issued{}, b, agent.ProviderInfo{}, engine.Command{}, "grok-4.6", "high")
+	msg := runModelEffort(context.Background(), issued{}, b, agent.ProviderInfo{}, engine.Command{}, "grok-4.6", "high", modelLanded{}, 0)
 	if am, ok := msg.(actionErrMsg); !ok || !errors.Is(am.err, lost) {
 		t.Fatalf("/model's effort step answered %#v, want the failed read's error row", msg)
 	}

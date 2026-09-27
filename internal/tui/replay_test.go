@@ -746,7 +746,8 @@ func TestHiddenProviderSessionIsNeverIndexed(t *testing.T) {
 			sc := scriptHeld()
 			m = startScripted(t, m, sess, "the first prompt", sc)
 			sess.AgentTitle("an agent title")
-			sess.Emit(agent.Event{Type: agent.EventMeta, Text: "an agent title"})
+			title := "an agent title"
+			sess.Emit(agent.Event{Type: agent.EventMeta, Text: title, State: &agent.StateDelta{Title: &title}})
 			m = pumpUntil(t, m, viewHas("an agent title"))
 			sc.Release()
 			m = pumpUntil(t, m, isIdle)

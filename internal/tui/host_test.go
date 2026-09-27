@@ -69,7 +69,7 @@ func hostModelWith(t *testing.T, sess agent.Session, loading bool) (Model, *recH
 func startedHostModel(t *testing.T) (Model, *Stub, *recHost) {
 	t.Helper()
 	m, stub, rec := hostModel(t, false)
-	m = deliver(t, m, startedMsg{})
+	m = startedLikeInit(t, m)
 	assertStatuses(t, rec, idleStatus(host.DetailReady))
 	rec.statuses = nil
 	return m, stub, rec
@@ -90,7 +90,7 @@ func scriptedHostModel(t *testing.T) (Model, *scriptedSession, *recHost) {
 func startedScriptedHostModel(t *testing.T) (Model, *scriptedSession, *recHost) {
 	t.Helper()
 	m, s, rec := scriptedHostModel(t)
-	m = deliver(t, m, startedMsg{})
+	m = startedLikeInit(t, m)
 	assertStatuses(t, rec, idleStatus(host.DetailReady))
 	rec.statuses = nil
 	return m, s, rec
@@ -165,7 +165,7 @@ func TestHostStatusPermissionTurn(t *testing.T) {
 	if len(rec.statuses) != 0 {
 		t.Fatalf("published before the session was up: %s", fmtStatuses(rec.statuses))
 	}
-	m = deliver(t, m, startedMsg{})
+	m = startedLikeInit(t, m)
 	sc := scriptHeld().endsThenWaits()
 	m = startScripted(t, m, sess, "run it", sc)
 	sess.Emit(agent.Event{Type: agent.EventPermission, Permission: stubPermissionEvent(false)})
@@ -325,7 +325,7 @@ func TestHostStatusCancelEndings(t *testing.T) {
 // when a host first hears from it, as ready.
 func TestHostStatusLoadedSessionWaitsForReplay(t *testing.T) {
 	m, _, rec := hostModel(t, true)
-	m = deliver(t, m, startedMsg{})
+	m = startedLikeInit(t, m)
 	m = feed(t, m, replayEvent(agent.ReplayStart))
 	for _, ev := range replayTranscript() {
 		m = feed(t, m, replayed(ev))
@@ -343,6 +343,7 @@ func TestHostStatusLoadedSessionWaitsForReplay(t *testing.T) {
 // the session being ready.
 func TestHostStatusStartFailure(t *testing.T) {
 	m, _, rec := hostModel(t, false)
+	m = republish(t, m)
 	_ = deliver(t, m, errMsg{err: errors.New("authentication failed: no key\nsee cursor-agent login")})
 	assertStatuses(t, rec, hostStatus(host.Failed, host.DetailStartFailed, "authentication failed: no key"))
 }
@@ -361,7 +362,7 @@ func TestHostStatusPublishesOnChangeOnly(t *testing.T) {
 	if _, err := stub.SetModel(context.Background(), "", "fast"); err != nil {
 		t.Fatal(err)
 	}
-	m = deliver(t, m, refreshSnapMsg{})
+	m = feed(t, m, stubDeltas(t, stub)...)
 	_ = deliver(t, m, tickMsg{gen: m.tickGen})
 	want := idleStatus(host.DetailReady)
 	want.Model = "fast"
@@ -400,7 +401,7 @@ func TestHostStatusProviderIsTheOneStarted(t *testing.T) {
 	}
 	m, _ = press(m, tea.KeyMsg{Type: tea.KeyDown})
 	m, _ = press(m, enter())
-	_ = deliver(t, m, startedMsg{})
+	_ = startedLikeInit(t, m)
 	assertStatuses(t, rec, idleStatus(host.DetailReady))
 }
 

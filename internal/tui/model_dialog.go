@@ -75,9 +75,9 @@ type modelDialog struct {
 	focus  dialogFocus
 	// chosen is each tab's value, by option id: seeded from currentOrFirst for
 	// every tab when the box opens, and for a tab that appears while it is
-	// open the first time it is needed (repaired). It is copied on write, like
-	// setConfigCurrent's slice: every Model copy shares the map, and a key
-	// must not write through into a copy bubbletea has already discarded.
+	// open the first time it is needed (repaired). It is copied on write:
+	// every Model copy shares the map, and a key must not write through into a
+	// copy bubbletea has already discarded.
 	chosen map[string]string
 	// touched is the tabs the user has moved (choose), by option id, copied on
 	// write like chosen. Only a touched tab is a choice: an untouched one
@@ -233,10 +233,10 @@ func tabIndex(tabs []modelTab, f dialogFocus) int {
 // chosen for an option that has gone is kept, and counts again if the option
 // comes back offering it.
 //
-// It acts on the snapshot the model observes, not on every catalog the
-// session passed through: a delta carries revisions, and refreshSnap reads the
-// session as it is when the event is handled. So deltas that take a catalog
-// away and bring it back (A→B→A) before Update sees either leave the focus
+// It acts on the mirror the model draws, not on every catalog the session
+// passed through: recompute runs once the event is folded, and a repair is
+// made on each mirror it builds. So deltas that take a catalog away and bring
+// it back (A→B→A) before the model has folded either leave the focus
 // and a touched choice standing, which is correct rather than a missed repair
 // (plan 025 X13, astra r4 item 5): the choice is again one its option offers,
 // on the model it was chosen for, and whatever Enter then sends is still bound
@@ -338,6 +338,10 @@ type modelApplyMsg struct {
 // (plan 021 §3.8, panel astra 15).
 type applyStep struct {
 	cfgID string
+	// gen and cause are the request the step belongs to (Model.applyGen) and
+	// the command it is sent as, which name its overlay (settleApply).
+	gen   int
+	cause string
 	// value is what the step asks for until it lands, and from then on what
 	// the session installed (landed): the value the agent's answer holds,
 	// which is not always the one asked for (plan 025 design 1).
@@ -642,8 +646,6 @@ func (m Model) applyModelDialog() (tea.Model, tea.Cmd) {
 	if d.sel >= 0 && d.sel < len(list) && list[d.sel].ID != m.snap.CurrentModel {
 		id := list[d.sel].ID
 		steps = append(steps, applyStep{value: id, note: "model → " + id, label: "model", at: m.modelRev})
-		m.snap.CurrentModel = id
-		m.model = id
 		forModel = id
 	}
 	for _, t := range tabs {
@@ -666,7 +668,6 @@ func (m Model) applyModelDialog() (tea.Model, tea.Cmd) {
 		st := applyStep{cfgID: t.opt.ID, value: v, label: t.label, role: t.role, opt: t.opt, at: m.configRev}
 		st.note = st.landedNote()
 		steps = append(steps, st)
-		m = m.setConfigCurrent(t.opt.ID, v)
 	}
 	if len(steps) == 0 {
 		return m, nil
@@ -682,6 +683,18 @@ func (m Model) applyModelDialog() (tea.Model, tea.Cmd) {
 	// user applied in, and not when the program gets round to starting it
 	// (chainLock.take).
 	eng, cmds := m.eng, m.nextCmds(len(steps))
+	// Optimistic: the box closes on what the user chose, each step's overlay
+	// naming the command it will be sent as, so the rows show the choice from
+	// now until that step is answered and the fold catches up with it
+	// (settleApply; plan 027 §3.13).
+	for i := range steps {
+		steps[i].gen, steps[i].cause = gen, cmds[i].Cause()
+		if steps[i].cfgID == "" {
+			m.requestModel(gen, steps[i].cause, steps[i].value)
+		} else {
+			m.requestOption(gen, steps[i].cause, steps[i].cfgID, steps[i].value)
+		}
+	}
 	// The provider every option step is judged by (runModelApply): its local
 	// vocabulary says which option is the effort and which the fast toggle,
 	// and it is taken from the mirror here, since the closure may not read
@@ -994,17 +1007,35 @@ func (st applyStep) valueOn(to *agent.ConfigOption) (string, bool) {
 	return st.value, offers(to, st.value)
 }
 
-// settleStep writes a step the agent accepted into the snapshot. It is the
-// optimistic write made good, and what it writes is what the session installed
-// (applyStep.landed), never the request: an agent whose answer holds another
-// value than the one asked for is showing that value, and so must the rows.
+// settleApply is the dialog's chain answered (plan 027 §3.13): request gen's
+// overlays settled from what each of its steps came to. A step the agent
+// accepted holds what the session installed (settleStep). Every other step of
+// the request — refused, noted instead of applied, or never sent once an
+// earlier one failed — takes its overlay down, and nothing is put back: the
+// rows read the fold. An older apply settles its own overlays the same way,
+// and never one a newer apply has written over.
+func (m *Model) settleApply(msg modelApplyMsg) {
+	for _, st := range msg.done {
+		*m = m.settleStep(st)
+	}
+	// A step re-resolved onto another option of the destination's catalog
+	// (resolveOn) landed on that option, so the overlay the box wrote for the
+	// source option is among the unconfirmed ones that go.
+	m.dropUnconfirmed(msg.gen)
+}
+
+// settleStep is one step the agent accepted, as an overlay: its confirmed
+// value — what the session installed (applyStep.landed), never the request:
+// an agent whose answer holds another value than the one asked for is showing
+// that value, and so must the rows — held until the fold's revision for its
+// section reaches the step's (confirmModel, confirmOption).
 //
 // Unless something newer has been applied since. A step is written only if no
 // delta for its section with a higher revision has reached this model since the
 // chain was issued: another client changing the model while this chain ran, or
 // this step's own confirmation coming back older than a change already applied,
-// would otherwise be overwritten by an answer about a value that is no longer
-// current (plan 021 §3.8, panel astra 15).
+// would otherwise be shown over the newer value it is no longer about (plan 021
+// §3.8, panel astra 15). A step not written leaves the model exactly as it was.
 func (m Model) settleStep(st applyStep) Model {
 	if st.skipped {
 		return m
@@ -1017,14 +1048,9 @@ func (m Model) settleStep(st applyStep) Model {
 		return m
 	}
 	if st.cfgID != "" {
-		return m.setConfigCurrent(st.cfgID, st.value)
-	}
-	m.snap.CurrentModel = st.value
-	// m.model keeps the last model anyone named, as refreshSnap keeps it:
-	// the value is the session's word as it is (landed), and a word that
-	// names no model leaves the status row nothing to draw from.
-	if st.value != "" {
-		m.model = st.value
+		m.confirmOption(st.gen, st.cause, st.cfgID, st.value, st.at, st.rev)
+	} else {
+		m.confirmModel(st.gen, st.cause, st.value, st.at, st.rev)
 	}
 	return m
 }
@@ -1066,20 +1092,6 @@ func (m Model) unreadModelText() string {
 		shown = m.model
 	}
 	return "model: the agent's answer could not be read — it may have switched; craze still shows " + sanitizeLine(shown)
-}
-
-// setConfigCurrent writes an option's new value into this model's own
-// snapshot, copy-on-write: every Model copy shares the slice, so the optimistic
-// value must not be written through into the one bubbletea already discarded.
-func (m Model) setConfigCurrent(id, value string) Model {
-	cfg := append([]agent.ConfigOption(nil), m.snap.Config...)
-	for i := range cfg {
-		if cfg[i].ID == id {
-			cfg[i].Current = value
-		}
-	}
-	m.snap.Config = cfg
-	return m
 }
 
 // fastWord names a fast value the way the user picked it, not the way the

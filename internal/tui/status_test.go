@@ -33,9 +33,7 @@ func statusFixture(t *testing.T) Model {
 	})
 	m.clock = func() time.Time { return now }
 	tm, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 30})
-	m = tm.(Model)
-	tm, _ = m.Update(startedMsg{})
-	m = tm.(Model)
+	m = startedLikeInit(t, tm.(Model))
 
 	m.cwd = "/home/dev/craze"
 	m.branch = "feature/status-rows"

@@ -912,9 +912,16 @@ func TestAQueueVerbThatNeverAnswersSaysSo(t *testing.T) {
 	up := tea.KeyMsg{Type: tea.KeyUp}
 	bs := tea.KeyMsg{Type: tea.KeyBackspace}
 
-	// bandIsTheSessions: the band shows the engine's queue.
+	// bandIsTheSessions: at the release the band is the fold's — what this
+	// client has folded, never a read of the engine's live queue (plan 027
+	// §3.12: from C21 the band shows the fold's facts) — and once the
+	// command's events, held behind the gate, are folded, it is the session's.
 	bandIsTheSessions := func(t *testing.T, r *schedRun) {
 		t.Helper()
+		if fq := r.m().shared.State().Queue; !reflect.DeepEqual(noneIsNil(r.m().queue), fq) {
+			t.Fatalf("at the release the band holds %+v, the fold %+v", r.m().queue, fq)
+		}
+		r.feed()
 		if eq := r.eng.State().Queue; !reflect.DeepEqual(r.m().queue, eq) {
 			t.Fatalf("the band holds %+v, the session %+v", r.m().queue, eq)
 		}
@@ -966,6 +973,7 @@ func TestAQueueVerbThatNeverAnswersSaysSo(t *testing.T) {
 					t.Fatal("an unanswered Disarm moved a marker")
 				}
 				bandIsTheSessions(t, r)
+				m = r.m()
 				if len(m.queue) != 1 || m.queueFocus {
 					t.Fatalf("the band %+v (focus %v): the ClearQueue never ran", m.queue, m.queueFocus)
 				}
@@ -992,9 +1000,9 @@ func TestAQueueVerbThatNeverAnswersSaysSo(t *testing.T) {
 						r.step(enter())
 					}
 					r.answerStalled(sb)
-					m := r.m()
 					noted(t, r, noAnswerClearNote)
 					bandIsTheSessions(t, r)
+					m := r.m()
 					if got := len(m.queue); got != map[bool]int{false: 1, true: 0}[ran] {
 						t.Fatalf("the band holds %d rows (ran %v)", got, ran)
 					}
@@ -1050,6 +1058,7 @@ func TestAQueueVerbThatNeverAnswersSaysSo(t *testing.T) {
 					t.Fatalf("an unanswered save left edit mode: editing %q (want %q), composer %q", m.queueEdit, id, m.input.Value())
 				}
 				bandIsTheSessions(t, r)
+				m = r.m()
 				if got := m.queue[0].Text; got != map[bool]string{false: "ROW", true: "ROW!"}[ran] {
 					t.Fatalf("the band's row reads %q (ran %v)", got, ran)
 				}
@@ -1086,8 +1095,8 @@ func TestAQueueVerbThatNeverAnswersSaysSo(t *testing.T) {
 				sb := r.stall("Unqueue", ran)
 				r.step(enter())
 				r.answerStalled(sb)
-				m := r.m()
 				bandIsTheSessions(t, r)
+				m := r.m()
 				if !ran {
 					// The row is still there, and so is the edit.
 					noted(t, r, noAnswerRowNote)

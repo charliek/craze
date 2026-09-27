@@ -186,7 +186,7 @@ func TestTheStubsStartAndCatalogsReachTheFold(t *testing.T) {
 }
 
 // installFrameRun is one run of a Stub golden script for
-// TestStubInstallDeltaMovesNoFrame.
+// TestStubGoldensHoldWithTheInstall.
 type installFrameRun struct {
 	plain, raw string
 	err        error
@@ -335,25 +335,26 @@ func eventKinds(evs []agent.Event) []string {
 	return out
 }
 
-// TestStubInstallDeltaMovesNoFrame is plan 027 §3.13's named seq-sensitivity
-// check for C19. Turning the Stub's install on (TestMain) puts one more event
-// on every Stub golden's stream — seq 1 for a new session, so every later
-// event is numbered one higher; and, for a load, an event between the last
-// replayed event, whose assistant run is still open, and EventReplay{end}.
-// It runs representative Stub goldens — a turn, a settings change through the
-// dialog, a title delta, a load — with the install on and off, in both gate
-// modes, and holds, for each:
+// TestStubGoldensHoldWithTheInstall is plan 027 §3.13's named check for the
+// Stub's install, as the mirror onto the fold (C21) leaves it. C19 ran it with
+// the install on and off to show the install moved no frame while the mirror
+// still read the session live; since C21 the install is where every frame's
+// settings come from — the fold holds what the stream said — so with it off a
+// frame has no model, mode or catalog to draw, and the comparison with the
+// install off is gone. What it holds now, for representative Stub goldens — a
+// turn, a settings change through the dialog, a title delta, a load — in both
+// gate modes:
 //
-//   - the install is on the stream exactly where the live session puts it,
-//     and only when on, and the rest of the stream is the same either way;
-//   - the captured frame is the golden's, byte for byte, either way, and the
-//     raw frames are equal;
-//   - the frames the program published — every frame a wait could match,
-//     a run of equal frames kept once — are the same either way.
-//
-// So no frame a golden captures, and no frame its waits can match, moves with
-// the install. (The golden suite itself runs with the install on.)
-func TestStubInstallDeltaMovesNoFrame(t *testing.T) {
+//   - the captured frame is the golden's, byte for byte, with the install on
+//     (the golden suite itself runs with it on);
+//   - the install is on the stream exactly where the live session puts it — a
+//     new session's first event, a load's last before EventReplay{end} —
+//     exactly once;
+//   - with the install off there is none on the stream, and, for a script whose
+//     steps do not need the install's settings to be taken, the rest of the
+//     stream is the same either way. (The dialog's script cannot run without
+//     them: its tab is the install's catalog.)
+func TestStubGoldensHoldWithTheInstall(t *testing.T) {
 	// TestFrameGoldenReplay's transcript.
 	replay := []agent.Event{
 		{Type: agent.EventUser, Text: "List the files in the current working directory in one line."},
@@ -366,11 +367,13 @@ func TestStubInstallDeltaMovesNoFrame(t *testing.T) {
 		cols, rows int
 		script     string
 		replay     []agent.Event
+		// offRuns says the script's steps can be taken with the install off.
+		offRuns bool
 	}{
-		{"echo-80x24", 80, 24, "<wait:idle>" + echoPrompt() + "<enter><wait:text:echo:><wait:idle>", nil},
-		{"model-dialog-fast-100x30", 100, 30, "<wait:idle>/model<enter><tab><tab><right><enter><wait:text:fast → on>", nil},
-		{"rename-100x30", 100, 30, "<wait:idle>/rename fix the flaky pty test<enter><wait:text:renamed>", nil},
-		{"replay-100x30", 100, 30, "<wait:text:restored><wait:idle>", replay},
+		{"echo-80x24", 80, 24, "<wait:idle>" + echoPrompt() + "<enter><wait:text:echo:><wait:idle>", nil, true},
+		{"model-dialog-fast-100x30", 100, 30, "<wait:idle>/model<enter><tab><tab><right><enter><wait:text:fast → on>", nil, false},
+		{"rename-100x30", 100, 30, "<wait:idle>/rename fix the flaky pty test<enter><wait:text:renamed>", nil, true},
+		{"replay-100x30", 100, 30, "<wait:text:restored><wait:idle>", replay, true},
 	} {
 		t.Run(c.golden, func(t *testing.T) {
 			isolateSkillsHome(t)
@@ -380,42 +383,28 @@ func TestStubInstallDeltaMovesNoFrame(t *testing.T) {
 			}
 			for _, mode := range frameGateModes {
 				on := runInstallFrame(t, c.cols, c.rows, c.script, c.replay, true, mode.sync)
-				off := runInstallFrame(t, c.cols, c.rows, c.script, c.replay, false, mode.sync)
-				for _, r := range []struct {
-					name string
-					run  installFrameRun
-				}{{"on", on}, {"off", off}} {
-					if r.run.err != nil {
-						t.Fatalf("%s, the install %s: %v", mode.name, r.name, r.run.err)
-					}
-					if r.run.plain != string(want) {
-						t.Fatalf("%s, the install %s: the captured frame is not the golden's (%s)\n--- golden ---\n%s\n--- got ---\n%s",
-							mode.name, r.name, frameLineDiff(string(want), r.run.plain), want, r.run.plain)
-					}
+				if on.err != nil {
+					t.Fatalf("%s: %v", mode.name, on.err)
 				}
-				if on.raw != off.raw {
-					t.Fatalf("%s: the raw frames differ with the install on and off", mode.name)
-				}
-				if i := slices.IndexFunc(on.frames, func(f string) bool { return !slices.Contains(off.frames, f) }); i >= 0 || !slices.Equal(on.frames, off.frames) {
-					t.Fatalf("%s: the published frames differ with the install on (%d) and off (%d); first new with it on:\n%s",
-						mode.name, len(on.frames), len(off.frames), firstOr(on.frames, i))
+				if on.plain != string(want) {
+					t.Fatalf("%s: the captured frame is not the golden's (%s)\n--- golden ---\n%s\n--- got ---\n%s",
+						mode.name, frameLineDiff(string(want), on.plain), want, on.plain)
 				}
 				checkInstallPlace(t, on.events, c.replay != nil, true)
+				if !c.offRuns {
+					t.Logf("%s: %d distinct frames; %d events", mode.name, len(on.frames), len(on.events))
+					continue
+				}
+				off := runInstallFrame(t, c.cols, c.rows, c.script, c.replay, false, mode.sync)
+				if off.err != nil {
+					t.Fatalf("%s, the install off: %v", mode.name, off.err)
+				}
 				checkInstallPlace(t, off.events, c.replay != nil, false)
 				if a, b := eventKinds(on.events), eventKinds(off.events); !slices.Equal(a, b) {
 					t.Fatalf("%s: the rest of the stream differs with the install on and off:\n on: %v\noff: %v", mode.name, a, b)
 				}
-				t.Logf("%s: %d distinct frames either way; %d events with the install, %d without", mode.name, len(on.frames), len(on.events), len(off.events))
+				t.Logf("%s: %d distinct frames; %d events with the install, %d without", mode.name, len(on.frames), len(on.events), len(off.events))
 			}
 		})
 	}
-}
-
-// firstOr is frames[i], or a note that no frame is new and the two runs only
-// ordered or counted their frames differently.
-func firstOr(frames []string, i int) string {
-	if i < 0 || i >= len(frames) {
-		return "(none is new: the same frames, ordered or repeated differently)"
-	}
-	return frames[i]
 }

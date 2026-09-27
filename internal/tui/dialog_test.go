@@ -383,10 +383,9 @@ func TestFastRowReadsWhatTheValuesMean(t *testing.T) {
 				ID: "fast", Name: "Fast", Category: "model_config", Type: "select",
 				Current: "true", SelectValues: tc.values,
 			}}
-			tm, _ := m.Update(refreshSnapMsg{})
-			m = tm.(Model)
+			m = republish(t, m)
 			m = m.openModelDialog()
-			tm, _ = m.Update(refreshSnapMsg{})
+			tm, _ := m.Update(refreshSnapMsg{})
 			m = tm.(Model)
 			view := plainView(m)
 			if !strings.Contains(view, tc.want) {

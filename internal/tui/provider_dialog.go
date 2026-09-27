@@ -129,7 +129,7 @@ func (m Model) confirmProvider(p agent.Provider, explicit bool) (tea.Model, tea.
 	if m.eng == nil && m.engErr == nil {
 		m.setSession(NewStub(), "")
 	}
-	m.refreshSnap()
+	m.recompute()
 	if m.model == "" && m.snap.CurrentModel != "" {
 		m.model = m.snap.CurrentModel
 	}

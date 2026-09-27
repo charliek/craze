@@ -230,7 +230,7 @@ func TestWiredModelChangeGoesThroughTheModelOption(t *testing.T) {
 	tm, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
 	m = tm.(Model)
 	tm, _ = m.Update(startedMsg{})
-	m = tm.(Model)
+	m = applyPending(t, tm.(Model))
 	if opt := agent.ModelConfigOption(m.snap); opt == nil || opt.Current != "default" {
 		t.Fatalf("the agent advertised %+v, want the model option at its starting value", opt)
 	}

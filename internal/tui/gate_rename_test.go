@@ -233,7 +233,15 @@ func TestARenameThatNeverAnswersSaysTheTitleMayHaveChanged(t *testing.T) {
 			if slices.Contains(notes, "renamed to lost answer") || len(texts(r.m, entryError)) != 0 {
 				t.Fatalf("an unknown outcome drew the rename's note or an error: notes %q, errors %q", notes, texts(r.m, entryError))
 			}
-			if got := r.m.snap.Title; got != tc.titled || got != stub.Snapshot().Title {
+			// At the release the title is the fold's, never a read of the
+			// session (plan 027 §3.12: from C21 the title shows the fold's
+			// facts); once what the session published is folded, it is the
+			// session's.
+			if got, folded := r.m.snap.Title, r.m.shared.State().Settings.Title; got != folded {
+				t.Fatalf("at the release the title shows %q, the fold %q", got, folded)
+			}
+			m = feed(t, r.m, stubDeltas(t, stub)...)
+			if got := m.snap.Title; got != tc.titled || got != stub.Snapshot().Title {
 				t.Fatalf("the title shows %q, the session has %q; want %q", got, stub.Snapshot().Title, tc.titled)
 			}
 		})

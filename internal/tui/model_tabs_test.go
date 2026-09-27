@@ -77,7 +77,7 @@ func cursorStub(t *testing.T, current string) (Model, *Stub) {
 	stub.snap.CurrentModel = current
 	stub.mu.Unlock()
 	stub.SetModelCatalogs(cursorCatalogs())
-	m.refreshSnap()
+	m = republish(t, m)
 	stubDeltas(t, stub)
 	return m, stub
 }
@@ -102,7 +102,8 @@ func openDialog(t *testing.T, m Model) Model {
 	return m
 }
 
-// applyDialog is Enter, with the chain run and its answer delivered.
+// applyDialog is Enter, with the chain run and its answer delivered, and then
+// the deltas its steps published, as the event reader would deliver them.
 func applyDialog(t *testing.T, m Model) Model {
 	t.Helper()
 	tm, cmd := m.Update(enter())
@@ -110,7 +111,7 @@ func applyDialog(t *testing.T, m Model) Model {
 	if m.dialog != dialogNone {
 		t.Fatal("enter closes the dialog optimistically")
 	}
-	return flushCmd(t, m, cmd)
+	return applyPending(t, flushCmd(t, m, cmd))
 }
 
 // stubConfigCalls is how many SetConfig calls reached the Stub.
@@ -217,7 +218,7 @@ func TestAnAdvertisedTabIsShownWhateverTheCapabilityBit(t *testing.T) {
 	m := sized(t)
 	stub := stubOf(t, m)
 	stub.SetProvider(agent.GrokProvider())
-	m.refreshSnap()
+	m.recompute()
 	if m.caps().FastToggle {
 		t.Fatal("grok's provider has no fast toggle")
 	}
@@ -609,7 +610,7 @@ func TestEachStepIsJudgedOnTheLatestCatalog(t *testing.T) {
 				SelectValues: []agent.SelectValue{{Value: "300k"}, {Value: "1m"}},
 			})
 			stub.SetModelCatalogs(cfg)
-			m.refreshSnap()
+			m = republish(t, m)
 			writes := configWrites(stub)
 			stub.DropOptionOnSetOf("effort", "fast")
 			m = openDialog(t, m)
@@ -812,10 +813,12 @@ func deliverAnswers(t *testing.T, m Model, stub *Stub, deltasFirst bool, msgs ..
 // ends on medium. Before, the second chain read the session's medium, found
 // nothing to change, sent nothing, and high won.
 //
-// The rows can say medium too, when anything refreshes them from the session
-// while high is outstanding: the box then opens on medium, and medium chosen
-// there — moved off and back — is still a choice, and still sent. Dropped at
-// Enter for equalling the rows, it was lost to high the same way.
+// The rows used to say medium when anything refreshed them from the session
+// while high was outstanding. Since the mirror is the fold (plan 027 §3.13)
+// they cannot: the request's overlay holds high until the request is answered
+// and the fold has caught up with it, so a refresh under it still shows high,
+// and the later choice is made from there; the session's word — medium, the
+// later choice's — is what the rows show once both are answered.
 func TestALaterChoiceLandsAfterTheChangeStillOutstanding(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
@@ -823,7 +826,7 @@ func TestALaterChoiceLandsAfterTheChangeStillOutstanding(t *testing.T) {
 		keys     []tea.KeyType // on effort, in the reopened box
 	}{
 		{name: "the rows show the change", keys: []tea.KeyType{tea.KeyLeft}},
-		{name: "the rows were read back under it", readBack: true, keys: []tea.KeyType{tea.KeyRight, tea.KeyLeft}},
+		{name: "the rows are refreshed under it", readBack: true, keys: []tea.KeyType{tea.KeyLeft}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			answerOrders(t, func(t *testing.T, deltasFirst bool) {
@@ -843,12 +846,12 @@ func TestALaterChoiceLandsAfterTheChangeStillOutstanding(t *testing.T) {
 				if got := optionCurrent(stub.Snapshot().Config, "effort"); got != "medium" {
 					t.Fatalf("the session is on %q: high should still be waiting for its answer", got)
 				}
-				want := "high"
 				if tc.readBack {
 					m = deliver(t, m, refreshSnapMsg{})
-					want = "medium"
 				}
-				if got := optionCurrent(m.snap.Config, "effort"); got != want {
+				// The outstanding request's value, whatever refreshes the rows
+				// under it.
+				if got, want := optionCurrent(m.snap.Config, "effort"), "high"; got != want {
 					t.Fatalf("the rows show %q, want %q", got, want)
 				}
 
@@ -1289,7 +1292,7 @@ func TestADuplicateIDKeepsOneOccurrenceAndItsRole(t *testing.T) {
 	stub.mu.Lock()
 	stub.snap.Config = cloneStubConfig(cfg)
 	stub.mu.Unlock()
-	m.refreshSnap()
+	m = republish(t, m)
 	m = openDialog(t, m)
 	view := plainView(m)
 	if !strings.Contains(view, "  thinking  [false]  true") || strings.Contains(view, "effort") {
@@ -1314,8 +1317,8 @@ func TestADuplicateIDKeepsOneOccurrenceAndItsRole(t *testing.T) {
 // tab the delta brings is seeded from its option's value.
 //
 // Each switch is delivered before the next is made, which is what makes the
-// catalog without the option one the model reads: the repair acts on what
-// refreshSnap reads, never on a catalog the session only passed through.
+// catalog without the option one the model reads: the repair acts on the
+// mirror recompute builds, never on a catalog the session only passed through.
 // Deltas that take the option away and bring it back before Update handles
 // either leave the focus and the choice standing, again valid on the model
 // they were chosen for (repaired; plan 025 X13, astra r4 item 5).

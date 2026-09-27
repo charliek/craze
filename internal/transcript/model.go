@@ -776,18 +776,22 @@ func (c *cut) state() State {
 // addTools visits, kept as a slice instead of folded into a map. Each is a
 // deep copy (cloneTool): the caller owns it whole.
 func (c *cut) tools() []agent.ToolEvent {
-	var out []agent.ToolEvent
-	addTools := func(tc *transcriptCut) {
-		for _, e := range tc.entries {
-			if e.Kind != KindTool || e.Tool == nil || e.Tool.ID == "" {
-				continue
-			}
-			out = append(out, cloneTool(e.Tool))
-		}
-	}
-	addTools(&c.main)
+	out := appendTools(nil, c.main.entries)
 	for i := range c.subs {
-		addTools(&c.subs[i].t)
+		out = appendTools(out, c.subs[i].t.entries)
+	}
+	return out
+}
+
+// appendTools appends every KindTool entry's payload of ents to out, in entry
+// order, each a deep copy (cloneTool): Tools' rule, for a cut's entries or —
+// Mirror's, under the lock — a transcript's live ones.
+func appendTools(out []agent.ToolEvent, ents []*Entry) []agent.ToolEvent {
+	for _, e := range ents {
+		if e.Kind != KindTool || e.Tool == nil || e.Tool.ID == "" {
+			continue
+		}
+		out = append(out, cloneTool(e.Tool))
 	}
 	return out
 }

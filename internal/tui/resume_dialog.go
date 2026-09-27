@@ -223,7 +223,7 @@ func (m Model) confirmResume(row sessions.Row) (tea.Model, tea.Cmd) {
 	if m.eng == nil && m.engErr == nil {
 		m.setSession(NewStub(), "")
 	}
-	m.refreshSnap()
+	m.recompute()
 	if m.model == "" && m.snap.CurrentModel != "" {
 		m.model = m.snap.CurrentModel
 	}

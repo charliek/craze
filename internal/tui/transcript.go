@@ -253,11 +253,10 @@ func (m Model) displayPath(tr *pane, p string) string {
 // is given no row otherwise, and a note the pane owes that the fold does not
 // write is the pane's own (applyEvent).
 //
-// The two do disagree. /clear lowers the pane's counters and not the model's;
-// and todos is todosOf's choice, which falls back to the snapshot for an event
-// that carries no list — where refreshSnap can already see a newer list the
-// next event carries, so the pane notes it one event early, from the
-// snapshot, and the fold notes it when that event arrives.
+// The two disagree only where /clear lowers the pane's counters and not the
+// model's. todos is the event's own list, the whole of the new one (the fold's
+// rule is replacement; plan 027 §3.13), so the pane never notes a list ahead
+// of the event that carries it, nor an old one for an event that clears it.
 func (m *Model) todoNoteOwed(todos []agent.Todo) string {
 	if len(todos) == 0 {
 		return ""

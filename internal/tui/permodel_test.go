@@ -41,7 +41,7 @@ func perModelStub(t *testing.T) (Model, *Stub) {
 		"fast":     fastOnly(stub),
 		"composer": fastOnly(stub),
 	})
-	m.refreshSnap()
+	m = republish(t, m)
 	stubDeltas(t, stub)
 	return m, stub
 }
@@ -276,7 +276,7 @@ func TestTheChipsFollowTheLaterOfAReplyAndAPush(t *testing.T) {
 			tm, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
 			m = tm.(Model)
 			tm, _ = m.Update(startedMsg{})
-			m = tm.(Model)
+			m = applyPending(t, tm.(Model))
 			if got := m.modelLabel(); got != "Grok 4.6 (high · fast)" {
 				t.Fatalf("the session started as %q", got)
 			}

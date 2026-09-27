@@ -149,7 +149,7 @@ func (s *session) mergeToolLocked(owner string, d toolDelta) (ToolEvent, bool, [
 	// rec is the owning child (nil for the main session): §3.1's Activity is
 	// the title of its most recent tool call.
 	if rec != nil && out.Title != "" {
-		rec.info.Activity = truncateUTF8(out.Title, subagentActivityCap)
+		rec.info.Activity = SubagentActivity(out.Title)
 	}
 
 	var extras []Event
@@ -401,6 +401,17 @@ func locationPaths(raw json.RawMessage) []string {
 	}
 	return out
 }
+
+// SubagentActivityCap is the bound on a child's activity, in bytes
+// (subagentActivityCap).
+const SubagentActivityCap = subagentActivityCap
+
+// SubagentActivity is a child's activity as the title of its most recent tool
+// call sets it (the owning child's Activity, above): at most
+// SubagentActivityCap bytes, cut on a rune boundary and ended with an
+// ellipsis. A client that follows a child's tool events itself, ahead of the
+// roster event that carries the row, applies the same rule by calling it.
+func SubagentActivity(title string) string { return truncateUTF8(title, subagentActivityCap) }
 
 func truncateUTF8(s string, max int) string {
 	if len(s) <= max {

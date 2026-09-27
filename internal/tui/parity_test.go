@@ -705,10 +705,13 @@ func (w *parityWatch) wholePane(m *Model, r *parityRec, ev agent.Event, scope st
 	}
 }
 
-// stateMirrors is what the TUI mirrors from State() of what the shared model
-// folds too (plan 024 §3.8): the settings — the usage section among them (plan
-// 028 §3.14, seam 8: the status row reads it) — the todo list, the roster and
-// the queue. An empty list is nil on both sides (X10).
+// stateMirrors is every field the TUI's mirror reads from the shared model
+// (plan 027 §3.13: m.snap and m.queue are derived from the fold): the
+// settings — the usage section among them (plan 028 §3.14, seam 8: the status
+// row reads it) — the todo list, the roster, the queue, the ordered tools and
+// the agent's own turn. An empty list is nil on both sides (X10). The armed
+// send-now and the backend's static facts are checked beside it
+// (TestTheStateMirrorsMatchTheModelWhenQuiet's check).
 type stateMirrors struct {
 	Title, Mode, Model string
 	Config             []agent.ConfigOption
@@ -718,6 +721,8 @@ type stateMirrors struct {
 	Todos              []agent.Todo
 	Agents             []agent.SubagentInfo
 	Queue              []agent.QueuedPrompt
+	Tools              []agent.ToolEvent
+	ForeignTurn        bool
 }
 
 func noneIsNil[S ~[]E, E any](s S) S {
@@ -727,23 +732,27 @@ func noneIsNil[S ~[]E, E any](s S) S {
 	return s
 }
 
-// tuiMirrors is the TUI's side: m.snap and m.queue, read from State().
+// tuiMirrors is the TUI's side: m.snap and m.queue.
 func tuiMirrors(m Model) stateMirrors {
 	return stateMirrors{
 		Title: m.snap.Title, Mode: m.snap.CurrentMode, Model: m.snap.CurrentModel,
 		Config: noneIsNil(m.snap.Config), Commands: noneIsNil(m.snap.Commands), Plugins: noneIsNil(m.snap.Plugins),
 		Usage: m.snap.Usage,
 		Todos: noneIsNil(m.snap.Todos), Agents: noneIsNil(m.snap.Subagents), Queue: noneIsNil(m.queue),
+		Tools: noneIsNil(m.snap.Tools), ForeignTurn: m.snap.ForeignTurn,
 	}
 }
 
-// modelMirrors is the shared model's side.
-func modelMirrors(st transcript.State) stateMirrors {
+// modelMirrors is the shared model's side: its state projection, and its
+// ordered tools.
+func modelMirrors(sm *transcript.Model) stateMirrors {
+	st := sm.State()
 	return stateMirrors{
 		Title: st.Settings.Title, Mode: st.Settings.Mode, Model: st.Settings.Model,
 		Config: st.Settings.Config, Commands: st.Settings.Commands, Plugins: st.Settings.Plugins,
 		Usage: st.Settings.Usage,
 		Todos: st.Todos, Agents: st.Agents, Queue: st.Queue,
+		Tools: noneIsNil(sm.Tools()), ForeignTurn: st.Turn.Foreign != nil && st.Turn.Foreign.Running,
 	}
 }
 
@@ -967,11 +976,15 @@ func paritySessionSwap(t *testing.T) {
 	)
 }
 
-// TestTheStateMirrorsMatchTheModelWhenQuiet is plan 024 A11's second half:
-// with everything the session published consumed (pumpSettled, and pumpDrained
-// under a held turn), what the TUI mirrors from State() — m.snap's title, mode,
-// model, config, commands and plugins, the todo list, the sub-agent roster, and
-// m.queue — equals what the shared model folded from the stream.
+// TestTheStateMirrorsMatchTheModelWhenQuiet is plan 024 A11's second half, as
+// plan 027 §3.13 widens it: with everything the session published consumed
+// (pumpSettled, and pumpDrained under a held turn), every field the TUI's
+// mirror reads — m.snap's title, mode, model, config, commands and plugins, the
+// todo list, the sub-agent roster, the ordered tools and the agent's own turn,
+// and m.queue — equals what the shared model folded from the stream; no overlay
+// is left standing over it; the armed send-now it shows is the session's; and
+// its static facts — the provider, its session id, the model and mode catalogs
+// — are the backend's Info.
 //
 // There is no exemption left for the install (plan 024 X34's is deleted, plan
 // 027 C19): the Stub publishes the install delta at Start as the live session
@@ -988,13 +1001,21 @@ func paritySessionSwap(t *testing.T) {
 // other Settings.Title (fold.go), and the native case below proves the two
 // agree instead of excepting the field.
 func TestTheStateMirrorsMatchTheModelWhenQuiet(t *testing.T) {
-	check := func(t *testing.T, m Model, when string, exempt ...string) {
+	check := func(t *testing.T, m Model, when string) {
 		t.Helper()
-		for _, d := range mirrorDiff(tuiMirrors(m), modelMirrors(m.shared.State())) {
-			if slices.ContainsFunc(exempt, func(f string) bool { return strings.HasPrefix(d, f+":") }) {
-				continue
-			}
+		for _, d := range mirrorDiff(tuiMirrors(m), modelMirrors(m.shared)) {
 			t.Fatalf("%s: the TUI's mirror and the shared model differ on %s", when, d)
+		}
+		noOverlays(t, m, when)
+		if armed := engineOf(t, m).State().SendNow != nil; m.sendNowPending() != armed {
+			t.Fatalf("%s: the mirror's send-now armed %v, the session's %v", when, m.sendNowPending(), armed)
+		}
+		info := m.eng.Info()
+		if m.snap.Provider.Name != info.Provider || m.snap.SessionID != info.ProviderSessionID ||
+			!reflect.DeepEqual(m.snap.Models, info.Models) || !reflect.DeepEqual(m.snap.Modes, info.Modes) {
+			t.Fatalf("%s: the mirror's static facts %q/%q/%+v/%+v, Info's %q/%q/%+v/%+v", when,
+				m.snap.Provider.Name, m.snap.SessionID, m.snap.Models, m.snap.Modes,
+				info.Provider, info.ProviderSessionID, info.Models, info.Modes)
 		}
 	}
 
@@ -1057,6 +1078,62 @@ func TestTheStateMirrorsMatchTheModelWhenQuiet(t *testing.T) {
 		m = pumpEsc(t, m)
 		m = pumpSettled(t, m)
 		check(t, m, "after the queue drained")
+	})
+
+	t.Run("a send-now armed, withdrawn, and fired", func(t *testing.T) {
+		m, sess := scriptedModel(t)
+		m = pumpSettled(t, m)
+		check(t, m, "started")
+
+		// Armed over a held turn, the arm's own cancel held at the session.
+		first := scriptHeld()
+		t.Cleanup(first.Release)
+		m = startScripted(t, m, sess, "go", first)
+		awaitBarrier(t, first.opened, "the first turn opening")
+		m.input.SetValue("SOONER")
+		m = pumpKey(t, m, tea.KeyMsg{Type: tea.KeyCtrlL})
+		release := sess.HoldNextCancelPastItsDeadline()
+		t.Cleanup(release)
+		m = pumpKey(t, m, enter())
+		awaitBarrier(t, sess.Cancels(), "the arm's cancel reaching the session")
+		m = pumpDrained(t, m)
+		if !m.sendNowPending() {
+			t.Fatalf("fixture: no send-now armed:\n%s", plainView(m))
+		}
+		check(t, m, "with a send-now armed")
+
+		// Withdrawn: Esc takes it back.
+		m = pumpEsc(t, m)
+		m = pumpDrained(t, m)
+		check(t, m, "after it was withdrawn")
+		release()
+		m = pumpUntil(t, m, isIdle)
+		m = pumpSettled(t, m)
+		check(t, m, "after the cancelled turn settled")
+
+		// Fired: armed again, and the turn it replaces settles into it. The
+		// fold's send-now section stays armed — firing publishes no delta —
+		// and the mirror takes the started that fired it for the arm's end.
+		second, sent := scriptHeld(), scriptHeld()
+		t.Cleanup(second.Release)
+		t.Cleanup(sent.Release)
+		m = startScripted(t, m, sess, "again", second)
+		awaitBarrier(t, second.opened, "the second turn opening")
+		sess.Script(sent)
+		m.input.SetValue("NOW")
+		m = pumpKey(t, m, tea.KeyMsg{Type: tea.KeyCtrlL})
+		m = pumpKey(t, m, enter())
+		awaitBarrier(t, sent.opened, "the armed send's turn opening")
+		m = pumpUntil(t, m, turnsDrawn(3))
+		m = pumpDrained(t, m)
+		if !m.shared.State().Settings.SendNow.Armed {
+			t.Fatal("fixture: the fold's send-now section is expected to stay armed after the send fired")
+		}
+		check(t, m, "after the send-now fired")
+		sent.Release()
+		m = pumpUntil(t, m, isIdle)
+		m = pumpSettled(t, m)
+		check(t, m, "after the fired turn")
 	})
 
 	t.Run("a native session", func(t *testing.T) {
