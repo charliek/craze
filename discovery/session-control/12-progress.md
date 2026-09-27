@@ -1850,12 +1850,14 @@ No owner decision was reopened at any round.
 
 **PR 3 — `feature/plan-027-s2-tui-async`** (executing): C16 (`33cdebb` — the
 TUI holds a `backend.Backend`, `internal/backend/backend.go:67-102`; every
-command and read takes a `context.Context` first; `ClientID`, `Epoch` and
-`Info` are added; `Settings` narrows to `{Model, Mode, Config}`, no
+command, `Read`, `Ask` and `Settings` takes a `context.Context` first —
+`ClientID`, `Started`, `Close`, `Info` and `Epoch` wait on nothing and take
+none (`backend.go:94`); `Settings` narrows to `{Model, Mode, Config}`, no
 provider); C17 (`b8bf66b` — the command gate: `Model.run`/`gated`
 (`internal/tui/gate.go:179`, `:297`) wraps a gated call in a goroutine under
-`gateDeadline` (15 s, `:55`), `runFrameModes` runs every frame golden in
-both the synchronous and asynchronous gate modes) with its fix rounds C17a
+`gateDeadline` (15 s, `:55`), `runFrameModes` runs every frame golden but
+the six pre-start pickers in both the synchronous and asynchronous gate
+modes) with its fix rounds C17a
 (`c0a0e59` — the frame harness's rendezvous closes the barrier race, the
 invisibility digest widened, every payload-bearing message charged, the
 drained slot zeroed), C17b (`9749185` — a key/mouse/resize token and its
@@ -1873,7 +1875,7 @@ C18b1 (`c8fa58e` — a settling-turn Ctrl+C property test, test-only); C18c
 (`1dd6fe3` — answers, Interject and the masked opening (`pushCard` while
 `cardMasking`) through the gate; `m.sessGen` and `Backend.Epoch()`
 (`internal/tui/engine_backend.go:58`) fence every command and chain step;
-V8's seeded-jitter run: 760 passes, 0 diffs); the H7 compaction golden wrap
+V8's seeded-jitter run, async only: 760 passes, 0 diffs); the H7 compaction golden wrap
 (`f2ece4b`); C19 (`fd72eee` — the Stub's `InstallOnStart`
 (`internal/tui/stub.go:99`) publishes the live session's one install delta
 and flushes, for `internal/tui`'s Stubs only); C20 (`a2655f1` —
@@ -2139,9 +2141,13 @@ reopens a pinned decision.
    its name, typed `backend.Backend` — H7 PR 2 edits `app.go` in parallel and
    a rename would turn every `m.eng` hunk into a conflict; its doc says it is
    the session's backend, in process now and a socket in PR 4. Every Backend
-   command and read takes a `context.Context` first, the permanent interface
-   (SD-33): the backend epoch rides in it, and in process the non-waiting
-   verbs ignore it. `Settings` narrows to `{Model, Mode, Config}`, carrying no
+   command, `Read`, `Ask` and `Settings` take a `context.Context` first, the
+   permanent interface (SD-33) — `ClientID`, `Started`, `Close`, `Info` and
+   `Epoch` wait on nothing and take none: the backend epoch rides in the ctx.
+   In process the non-waiting verbs pass no ctx to the engine; since C18c
+   every command, `Ask` and `Settings` check the ctx's epoch first
+   (`internal/tui/engine_backend.go:120`). `Settings` narrows to `{Model,
+   Mode, Config}`, carrying no
    provider — the effort/fast vocabulary does not depend on the provider
    today (`agent/provider.go:624-633`), so the chains' captured
    `m.snap.Provider` is invisible to every test. `Backend.Info()` is C20's;
@@ -2252,7 +2258,8 @@ reopens a pinned decision.
     another session releases its gate without running the continuation
     (dropping it outright would leave the gate open forever; C27 decides what
     a restore does to an open gate). V8's seeded-jitter run (0–10 ms, 33
-    golden tests, 38 runs, `CRAZE_V8_SEEDS=20`): 760 passes, 0 diffs.
+    golden tests, 38 runs, `CRAZE_V8_SEEDS=20`, async only): 760 passes, 0
+    diffs.
 12. **Plan 027 X44 (C19 `fd72eee`)** — the Stub publishes what a live session
     would: `InstallOnStart` is on for `internal/tui`'s Stubs through a
     package `TestMain` default (`internal/tui/stub.go:99`); `SetCommands`/
@@ -2270,11 +2277,12 @@ reopens a pinned decision.
     TUI's own resolved cwd (`internal/tui/engine_backend.go:225`), passed in
     rather than read from the engine, which holds none. `m.caps()` reads
     `Info()` — the engine's `State()` — on every call, several per frame, but
-    the engine's index I/O runs outside its lock, so no UI stall. Every tool
-    projection is the caller's own: `Tools()` (C20a) and `State().Tools`
-    (C20b) both clone each tool's nested fields, so two tests that had
-    compared a `State().Tools` value with the folded payload by pointer now
-    compare by value, their meaning unchanged. One unexplained `tests/cli`
+    the engine's index I/O runs outside its lock, so no UI stall. The tool
+    projections `Tools()` (C20a) and `State().Tools` (C20b) are the caller's
+    own — both clone each tool's nested fields (`History()`'s entries still
+    share their payload, SF-53) — so two tests that had compared a
+    `State().Tools` value with the folded payload by pointer now compare by
+    value, their meaning unchanged. One unexplained `tests/cli`
     failure in C20's implementer gate was closed as not PR 3's — 0/30 at both
     the failing and the fixed commit in isolation, confirmed by H7's own
     author — a watch, not a fix.
