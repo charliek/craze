@@ -1138,9 +1138,9 @@ func TestTheStateMirrorsMatchTheModelWhenQuiet(t *testing.T) {
 		m = pumpSettled(t, m)
 		check(t, m, "after the cancelled turn settled")
 
-		// Fired: armed again, and the turn it replaces settles into it. The
-		// fold's send-now section stays armed — firing publishes no delta —
-		// and the mirror takes the started that fired it for the arm's end.
+		// Fired: armed again, and the turn it replaces settles into it.
+		// Firing publishes no delta; the fold ends the arm on the send_now
+		// started that says the send went (SF-55), and the mirror reads it.
 		second, sent := scriptHeld(), scriptHeld()
 		t.Cleanup(second.Release)
 		t.Cleanup(sent.Release)
@@ -1153,8 +1153,8 @@ func TestTheStateMirrorsMatchTheModelWhenQuiet(t *testing.T) {
 		awaitBarrier(t, sent.opened, "the armed send's turn opening")
 		m = pumpUntil(t, m, turnsDrawn(3))
 		m = pumpDrained(t, m)
-		if !m.shared.State().Settings.SendNow.Armed {
-			t.Fatal("fixture: the fold's send-now section is expected to stay armed after the send fired")
+		if m.shared.State().Settings.SendNow.Armed {
+			t.Fatal("the fold's send-now section is still armed after the send fired")
 		}
 		check(t, m, "after the send-now fired")
 		sent.Release()

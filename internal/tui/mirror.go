@@ -1,7 +1,6 @@
 package tui
 
 import (
-	"maps"
 	"slices"
 
 	"github.com/charliek/craze/internal/agent"
@@ -66,22 +65,10 @@ func (m *Model) recompute() {
 		Usage: f.Settings.Usage,
 	}
 	queue := f.Queue
-	// The fold's send-now section stays armed after the send fires: firing
-	// publishes no delta of its own, only the started that says the send went
-	// (engine.go's nextLocked). So the fold's word is taken with that started
-	// folded in (armFired, observe).
-	armed := f.Settings.SendNow.Armed && !m.armFired
-	// A child's activity is not carried by the fold's roster as the live
-	// session holds it: the live session moves it with each of the child's
-	// tool calls and publishes no roster event for that (agent's tools.go), so
-	// the mirror takes it from the child's own tool events until the next
-	// roster event carries the row whole (childActivity, observe). A plan gap,
-	// kept here on the TUI's side until the fold carries it itself.
-	for i := range snap.Subagents {
-		if a, ok := m.childActivity[snap.Subagents[i].ID]; ok {
-			snap.Subagents[i].Activity = a
-		}
-	}
+	// The fold ends the arm on the started that fires it (SF-55), and carries
+	// each child's activity as the live session moves it (SF-54): both are
+	// the fold's word as it stands.
+	armed := f.Settings.SendNow.Armed
 	m.ov.apply(&snap, &queue, &armed)
 	m.snap, m.queue, m.sendNowArmed = snap, queue, armed
 
@@ -128,7 +115,7 @@ func providerNamed(name string) agent.ProviderInfo {
 }
 
 // sendNowPending reports whether a send-now is armed, as the mirror says: the
-// fold's send-now section with its firing folded in, under this client's own
+// fold's send-now section, under this client's own
 // Submit and Disarm result overlays (§3.13, "Live reads that decide
 // behaviour") — so the Esc ladder sees this client's own arm or disarm at
 // once, as the live read it replaces did.
@@ -139,8 +126,8 @@ func (m Model) sendNowPending() bool {
 // ---------------------------------------------------------------- observing
 
 // observe is what one folded event does to the mirror's own bookkeeping,
-// before recompute reads the fold: the settings sections' revisions, the
-// send-now's arm and firing, and the overlays the event retires — a settings
+// before recompute reads the fold: the settings sections' revisions and the
+// overlays the event retires — a settings
 // overlay by its own delta, a command-result overlay by its command's own
 // event for its item (§3.12, "Retirement is by the command's own event for
 // that item").
@@ -165,59 +152,12 @@ func (m *Model) observe(ev agent.Event) {
 		if st.Config != nil && ev.Seq > m.configRev {
 			m.configRev = ev.Seq
 		}
-		if sn := st.SendNow; sn != nil {
-			m.armCause, m.armFired = "", false
-			if sn.Armed {
-				m.armCause = ev.Cause
-			}
-		}
 		m.ov = m.ov.retireDelta(ev.Cause, st)
-	case agent.EventTurn:
-		if t := ev.Turn; t != nil && t.Phase == agent.TurnStarted && t.Origin == agent.TurnOriginSendNow &&
-			ev.Cause != "" && ev.Cause == m.armCause {
-			// The armed send fired: its started carries the arming command's
-			// cause, and nothing else will say the arm is gone.
-			m.armFired = true
-		}
 	case agent.EventQueue:
 		if ev.Queue != nil {
 			m.ov = m.ov.retireRow(ev.Cause, ev.Queue.ID)
 		}
-	case agent.EventTool:
-		if ev.Agent != "" && ev.Tool != nil && ev.Tool.Title != "" {
-			// A child's activity is the title of its most recent tool call,
-			// and the live session keeps it so without publishing a roster
-			// event for it (agent's tools.go, the owning child's Activity): a
-			// row's Activity is folded only when the next roster event carries
-			// the row whole. So the mirror follows the child's own tool events,
-			// by the live session's rule, until that roster event replaces it.
-			m.childActivity = withActivity(m.childActivity, ev.Agent, agent.SubagentActivity(ev.Tool.Title))
-		}
-	case agent.EventSubagent:
-		if ev.Subagent != nil {
-			// The row, whole, is the roster's word on its activity from here.
-			m.childActivity = withActivity(m.childActivity, ev.Subagent.ID, "")
-		}
 	}
-}
-
-// withActivity is acts with child id's activity set to a — "" removes it —
-// on a fresh map when anything changes, since every copy of Model shares it.
-func withActivity(acts map[string]string, id, a string) map[string]string {
-	cur, ok := acts[id]
-	if (a == "" && !ok) || (a != "" && ok && cur == a) {
-		return acts
-	}
-	out := maps.Clone(acts)
-	if out == nil {
-		out = make(map[string]string, 1)
-	}
-	if a == "" {
-		delete(out, id)
-	} else {
-		out[id] = a
-	}
-	return out
 }
 
 // ---------------------------------------------------------------- overlays
@@ -649,6 +589,4 @@ func (m *Model) noteResult(r resultEntry) {
 // restore, a new session).
 func (m *Model) clearOverlays() {
 	m.ov = overlays{}
-	m.armCause, m.armFired = "", false
-	m.childActivity = nil
 }

@@ -359,16 +359,6 @@ type Model struct {
 	// confirmed, or asked for and have not heard back about, that the fold
 	// has not caught up with (overlays, mirror.go).
 	ov overlays
-	// armCause is the command whose arm the fold's send-now section last
-	// armed, and armFired says the started that fired it has been folded since:
-	// firing publishes no delta, so the section alone would stay armed
-	// (observe).
-	armCause string
-	armFired bool
-	// childActivity is each child's activity as its own tool events have moved
-	// it since the roster last carried its row (observe): the live session
-	// keeps a child's activity without publishing it.
-	childActivity map[string]string
 	// modeInFlight is a mode change of craze's own that the agent has not
 	// answered yet: set when the user asks for it, cleared by the answer —
 	// success or refusal — for its own request. What the chip shows meanwhile

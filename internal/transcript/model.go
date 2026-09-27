@@ -170,7 +170,11 @@ type Settings struct {
 	Config             []agent.ConfigOption
 	Commands           []agent.CommandInfo
 	Plugins            []agent.PluginCommand
-	// SendNow is the engine's armed send-now; Armed false means none.
+	// SendNow is the engine's armed send-now; Armed false means none. A
+	// send_now-origin started ends it too (foldTurn): firing publishes no
+	// delta of its own, so the fold ends the arm on the started that says the
+	// send went, leaving the zero value — what a disarm delta carries — and a
+	// snapshot taken after a fire restores nothing armed.
 	SendNow agent.SendNowState
 	// Usage is the session's usage section (plan 028 §3.14): what it has
 	// spent and how full its context is, nil until a delta carries one — and
