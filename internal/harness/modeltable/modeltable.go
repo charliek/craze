@@ -25,6 +25,7 @@ import (
 	"io/fs"
 	"maps"
 	"math"
+	"math/big"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -871,10 +872,12 @@ func validateModel(file, alias string, m Model, providers map[string]Provider, c
 	return validateCost(file, alias, m.Cost)
 }
 
-// validateCost checks c's set rates (plan 028 §3.14): each, when set, is not
-// negative and not more than MaxCostPerMillion. c is nil for a model with no
-// [cost] table, which is always valid. Checked in a fixed field order so the
-// same table always reports the same problem first.
+// validateCost checks c's set rates (plan 028 §3.14): each, when set, is a
+// finite number, not negative and not more than MaxCostPerMillion. NaN is
+// refused by name, because it compares false with both ends of the range
+// (TOML spells it `nan`). c is nil for a model with no [cost] table, which is
+// always valid. Checked in a fixed field order so the same table always
+// reports the same problem first.
 func validateCost(file, alias string, c *Cost) error {
 	if c == nil {
 		return nil
@@ -890,7 +893,7 @@ func validateCost(file, alias string, c *Cost) error {
 		if f.v == nil {
 			continue
 		}
-		if *f.v < 0 || *f.v > MaxCostPerMillion {
+		if math.IsNaN(*f.v) || math.IsInf(*f.v, 0) || *f.v < 0 || *f.v > MaxCostPerMillion {
 			return at(f.key, *f.v)
 		}
 	}
@@ -1038,12 +1041,18 @@ func (t *Table) Price(provider, wireModel string) (Rates, bool) {
 // pricedIdentities builds the canonical (provider, wire model) → Rates map
 // (R2-7): for each identity, the first alias in sorted order that has a Cost.
 // warn is one line per identity where two or more priced aliases disagree on
-// the rate, naming every alias whose rate differs from the one used — the
-// table's existing warning channel, appended by load. An identity no priced
-// alias names is simply absent from prices (Price's ok = false).
+// the configured cost, naming every alias whose cost differs from the one
+// used — the table's existing warning channel, appended by load. The
+// comparison is of the Cost as written, all four keys, not of the rounded
+// Rates: two prices the owner wrote differently are a conflict even when
+// both round to the same picodollars (0.0000001 and 0.0000002 are both 0
+// p$/token), and so is a key one alias sets and the other leaves out. An
+// identity no priced alias names is simply absent from prices (Price's
+// ok = false).
 func pricedIdentities(models map[string]Model) (prices map[identity]Rates, warn []string) {
 	type priced struct {
 		alias string
+		cost  *Cost
 		rates Rates
 	}
 	byIdentity := make(map[identity][]priced)
@@ -1053,7 +1062,7 @@ func pricedIdentities(models map[string]Model) (prices map[identity]Rates, warn 
 			continue
 		}
 		id := identity{m.Provider, m.WireModel}
-		byIdentity[id] = append(byIdentity[id], priced{alias, ratesFromCost(m.Cost)})
+		byIdentity[id] = append(byIdentity[id], priced{alias, m.Cost, ratesFromCost(m.Cost)})
 	}
 	if len(byIdentity) == 0 {
 		return nil, nil
@@ -1064,7 +1073,7 @@ func pricedIdentities(models map[string]Model) (prices map[identity]Rates, warn 
 		prices[id] = entries[0].rates
 		var diffs []string
 		for _, e := range entries[1:] {
-			if e.rates != entries[0].rates {
+			if !e.cost.sameAs(entries[0].cost) {
 				diffs = append(diffs, e.alias)
 			}
 		}
@@ -1075,6 +1084,15 @@ func pricedIdentities(models map[string]Model) (prices map[identity]Rates, warn 
 		}
 	}
 	return prices, warn
+}
+
+// sameAs reports whether c and o configure the same cost: each of the four
+// keys is left out of both, or set in both to the same value. Neither is nil
+// here (pricedIdentities only compares models that have a Cost).
+func (c *Cost) sameAs(o *Cost) bool {
+	same := func(a, b *float64) bool { return (a == nil) == (b == nil) && (a == nil || *a == *b) }
+	return same(c.Input, o.Input) && same(c.Output, o.Output) &&
+		same(c.CacheRead, o.CacheRead) && same(c.CacheWrite, o.CacheWrite)
 }
 
 // sortedIdentities returns m's keys in a deterministic order (by provider,
@@ -1107,13 +1125,29 @@ func ratesFromCost(c *Cost) Rates {
 
 // picodollarsPerToken rounds a $-per-1,000,000-token rate to the nearest
 // integer number of picodollars per token: $1/M is 1,000,000 p$/token, so
-// the conversion is ×1,000,000 rounded to the nearest integer. A nil rate
-// (the file left the key out) prices as 0.
+// the conversion is ×1,000,000 rounded to the nearest integer, half up. It
+// is done in decimal, not in float64: the rate is read back as its shortest
+// decimal spelling — what the file wrote — and shifted exactly, because a
+// binary product can land a decimal half step on the wrong side (0.0001245 ×
+// 1e6 is 124.49999999999999 in float64, while 124.5 rounds to 125). A nil
+// rate (the file left the key out) prices as 0, as does a non-finite one,
+// which Validate refuses before any table is priced.
 func picodollarsPerToken(dollarsPerMillion *float64) int64 {
-	if dollarsPerMillion == nil {
+	if dollarsPerMillion == nil || math.IsNaN(*dollarsPerMillion) || math.IsInf(*dollarsPerMillion, 0) {
 		return 0
 	}
-	return int64(math.Round(*dollarsPerMillion * 1_000_000))
+	r, ok := new(big.Rat).SetString(strconv.FormatFloat(*dollarsPerMillion, 'f', -1, 64))
+	if !ok { // unreachable: 'f' spells every finite float64 as a decimal SetString reads
+		return 0
+	}
+	r.Mul(r, big.NewRat(1_000_000, 1))
+	// Half up, away from zero: q is the quotient truncated toward zero, and
+	// a remainder of at least half the denominator moves it one step out.
+	q, m := new(big.Int).QuoRem(r.Num(), r.Denom(), new(big.Int))
+	if m.Abs(m).Lsh(m, 1).Cmp(r.Denom()) >= 0 {
+		q.Add(q, big.NewInt(int64(r.Sign())))
+	}
+	return q.Int64()
 }
 
 func sourceOrManual(s string) string {

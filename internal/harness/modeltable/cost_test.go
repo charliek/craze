@@ -1,6 +1,7 @@
 package modeltable
 
 import (
+	"math"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -85,10 +86,10 @@ func TestCostUnknownKeyIsStrict(t *testing.T) {
 	}
 }
 
-// TestValidateCostBounds: each set rate is 0 to MaxCostPerMillion, whether
-// the table was loaded — the error then names the file's path — or built in
-// memory; both ends of the range load, and a model with no [cost] is always
-// valid.
+// TestValidateCostBounds: each set rate is a finite number from 0 to
+// MaxCostPerMillion, whether the table was loaded — the error then names the
+// file's path — or built in memory; both ends of the range load, NaN and
+// either infinity do not, and a model with no [cost] is always valid.
 func TestValidateCostBounds(t *testing.T) {
 	for _, tc := range []struct {
 		key   string
@@ -97,6 +98,10 @@ func TestValidateCostBounds(t *testing.T) {
 	}{
 		{"input", &Cost{Input: ptr(-0.01)}, false},
 		{"input", &Cost{Input: ptr(MaxCostPerMillion + 1)}, false},
+		{"input", &Cost{Input: ptr(math.NaN())}, false},
+		{"output", &Cost{Output: ptr(math.Inf(1))}, false},
+		{"cache_read", &Cost{CacheRead: ptr(math.Inf(-1))}, false},
+		{"cache_write", &Cost{CacheWrite: ptr(math.NaN())}, false},
 		{"output", &Cost{Output: ptr(-1.0)}, false},
 		{"cache_read", &Cost{CacheRead: ptr(-1.0)}, false},
 		{"cache_write", &Cost{CacheWrite: ptr(-1.0)}, false},
@@ -120,10 +125,33 @@ func TestValidateCostBounds(t *testing.T) {
 	}
 }
 
+// TestNonFiniteCostFailsLoad: TOML spells NaN and infinity (`nan`, `inf`),
+// and a [cost] rate written that way fails the load like any other rate out
+// of range, naming the file, the table and the key — NaN compares false with
+// both ends of the range, so it has to be refused by name.
+func TestNonFiniteCostFailsLoad(t *testing.T) {
+	for _, tc := range []struct{ key, value string }{
+		{"input", "nan"},
+		{"output", "+nan"},
+		{"cache_read", "inf"},
+		{"cache_write", "-inf"},
+	} {
+		t.Run(tc.key+"="+tc.value, func(t *testing.T) {
+			dir := writeFiles(t, validProviders,
+				validModels+"\n[models.\"fireworks/kimi-k3\".cost]\n"+tc.key+" = "+tc.value+"\n")
+			_, err := Load(dir)
+			wantFileError(t, err, filepath.Join(dir, ModelsFile), `models."fireworks/kimi-k3".cost`, tc.key)
+		})
+	}
+}
+
 // TestPicodollarRatesAreExact: a rate is rounded to picodollars per token
-// exactly once (PD22) — $1/M is 1,000,000 p$/token — and 0.15 and 0.0375,
-// which are not exact in float64, still round to the exact integers the plan
-// names.
+// exactly once (PD22) — $1/M is 1,000,000 p$/token — in decimal, from the
+// rate as the file spells it, half up: 0.15 and 0.0375, which are not exact
+// in float64, still round to the exact integers the plan names, and
+// 0.0001245 — whose float64 product with 1,000,000 is 124.49999999999999 —
+// is the decimal half step 124.5 and rounds up to 125, as does 0.0000005's
+// 0.5.
 func TestPicodollarRatesAreExact(t *testing.T) {
 	for _, tc := range []struct {
 		dollarsPerMillion float64
@@ -134,6 +162,13 @@ func TestPicodollarRatesAreExact(t *testing.T) {
 		{1, 1000000},
 		{0, 0},
 		{10000, 10000000000},
+		{0.0001245, 125},
+		{0.0000005, 1},
+		{0.0000004, 0},
+		{0.0000001, 0},
+		{0.0000015, 2},
+		{1.0000005, 1000001},
+		{3.0, 3000000},
 	} {
 		if got := picodollarsPerToken(&tc.dollarsPerMillion); got != tc.want {
 			t.Errorf("picodollarsPerToken(%v) = %d, want %d", tc.dollarsPerMillion, got, tc.want)
@@ -239,5 +274,48 @@ input = 0.60
 	}
 	if len(got2.Warnings) != 0 {
 		t.Fatalf("Warnings = %q, want none for agreeing prices", got2.Warnings)
+	}
+}
+
+// TestConflictingConfiguredPricesWarnEvenWhenTheyRoundAlike: the conflict is
+// between the configured costs, not the rounded rates — 0.0000001 and
+// 0.0000002 are different prices the owner wrote down, though both round to
+// 0 p$/token, so the table still warns naming both aliases. A rate one alias
+// sets and the other leaves out is a conflict too, even at 0.
+func TestConflictingConfiguredPricesWarnEvenWhenTheyRoundAlike(t *testing.T) {
+	for _, tc := range []struct{ name, a, b string }{
+		{"round alike", "input = 0.0000001\n", "input = 0.0000002\n"},
+		{"set vs left out", "input = 0.60\ncache_write = 0.0\n", "input = 0.60\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			models := `version = 1
+default_model = "fireworks/kimi-k3"
+
+[models."fireworks/kimi-k3"]
+provider = "fireworks"
+wire_model = "accounts/fireworks/models/kimi-k3"
+
+[models."fireworks/kimi-k3".cost]
+` + tc.a + `
+[models."fireworks/kimi-k3-alt"]
+provider = "fireworks"
+wire_model = "accounts/fireworks/models/kimi-k3"
+
+[models."fireworks/kimi-k3-alt".cost]
+` + tc.b
+			got, err := Load(writeFiles(t, validProviders, models))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if a, b := ratesFromCost(got.Models["fireworks/kimi-k3"].Cost),
+				ratesFromCost(got.Models["fireworks/kimi-k3-alt"].Cost); a != b {
+				t.Fatalf("control: rates %+v and %+v differ; the case needs rates that round alike", a, b)
+			}
+			if !slices.ContainsFunc(got.Warnings, func(w string) bool {
+				return strings.Contains(w, "fireworks/kimi-k3 and fireworks/kimi-k3-alt")
+			}) {
+				t.Fatalf("Warnings = %q, want one naming both aliases", got.Warnings)
+			}
+		})
 	}
 }
