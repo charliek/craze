@@ -1899,13 +1899,15 @@ Proof, at the code tip `240718f` (the commits after it touch only `discovery/`):
 V1 — `-race -count=20` on tui (`-timeout 150m`: 3,673 s, about 184 s a
 pass), backend, engine, agent, transcript, control and remote: all ok, no
 race; V2 — `craze prompt --json` against the plan-021 baseline: 103/103
-SAME by bytes; V8 — the seeded 0–10 ms jitter run, async only: 20 seeds,
-760 golden runs, 0 failures; V6 — mac-mini key latency under a four-child
+SAME by bytes; V8 — the seeded 0–10 ms jitter run, async only: 33 golden
+tests (38 runs with their subtests) under 20 seeds, 760 passes, 0 failures;
+V6 — mac-mini key latency under a four-child
 native fan-out with gated commands mid-stream (PR 3 at `674da35` against
 `main` at `ddd9812`): worst key-to-screen 26.2 ms against 23.4 ms, no
 significant difference (rank-sum p = 0.19 over the fan-out, 0.85 after a
-gated command), and the mirror's per-event `Info()` read costs about 15%
-more CPU per event (X46 6); starvation — every golden under a 5% CPU quota:
+gated command), and PR 3's whole process used about 15% more CPU per
+journal event (2.40 against 2.09 ms, not attributed further; X46 6 expected
+the fold mirror's per-event copies to cost CPU); starvation — every golden under a 5% CPU quota:
 83/83 pass. `git diff --stat origin/main..HEAD -- '*testdata*'` is empty.
 
 ### Deviations from the plan
