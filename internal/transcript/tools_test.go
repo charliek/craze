@@ -4,6 +4,7 @@ import (
 	"reflect"
 	"slices"
 	"testing"
+	"time"
 
 	"github.com/charliek/craze/internal/agent"
 )
@@ -97,89 +98,232 @@ func TestARestoredModelsToolsKeepOrder(t *testing.T) {
 	}
 }
 
-// ownedTool is a tool payload with every nested field set: the slices, the
-// Output and its ExitCode, the Task. Each call builds a fresh one, so a test
-// can hold one as the expected value while the model holds another.
-func ownedTool(id string) *agent.ToolEvent {
-	code := 3
-	return &agent.ToolEvent{
-		ID: id, Status: "completed", Kind: "edit", Title: "Edit a.go",
-		Locations: []string{"a.go", "b.go"},
-		Output:    &agent.ToolOutput{ExitCode: &code, Stdout: "out", Stderr: "err"},
-		Diffs:     []agent.ToolDiff{{Path: "a.go", OldText: "x", NewText: "y", Added: 1, Removed: 1}},
-		Task:      &agent.TaskInfo{Description: "count", AgentID: "child-1", Status: agent.SubagentRunning},
+// ownedTool is a tool payload with every field set, every nested one
+// included — the slices (two elements each), the Output and its ExitCode, the
+// Task — by reflection (fillAll), so a field added to agent.ToolEvent later is
+// set too, or fails the test that builds it. Each call builds a fresh one, so
+// a test can hold one as the expected value while the model holds another.
+func ownedTool(t testing.TB, id string) *agent.ToolEvent {
+	t.Helper()
+	tv := &agent.ToolEvent{}
+	fillAll(t, reflect.ValueOf(tv).Elem(), "orig", true)
+	tv.ID = id
+	return tv
+}
+
+// scribble writes over every field of tv a caller can reach, through the
+// memory tv already points at: each element of each slice in place, each
+// pointee in place, never a new allocation — so whatever tv shares with the
+// model is written, and a later field is reached by the same walk.
+func scribble(t testing.TB, tv *agent.ToolEvent) {
+	t.Helper()
+	fillAll(t, reflect.ValueOf(tv).Elem(), "scribbled", false)
+}
+
+// fillAll sets every leaf reachable from v to a value derived from word. With
+// alloc it makes what is missing — a nil pointer's pointee, two elements for
+// an empty slice — so every leaf exists; without it, it writes only through
+// what is there. A kind it does not know how to fill (a map, an interface, a
+// func) fails the test, so a field of a new shape cannot slip past it.
+func fillAll(t testing.TB, v reflect.Value, word string, alloc bool) {
+	t.Helper()
+	switch v.Kind() {
+	case reflect.String:
+		v.SetString(word + "-" + v.Type().Name())
+	case reflect.Bool:
+		v.SetBool(!v.Bool() || alloc)
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		v.SetInt(int64(len(word)) + v.Int() + 1)
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+		v.SetUint(uint64(len(word)) + v.Uint() + 1)
+	case reflect.Float32, reflect.Float64:
+		v.SetFloat(float64(len(word)) + v.Float() + 1)
+	case reflect.Pointer:
+		if v.IsNil() {
+			if !alloc {
+				t.Fatalf("scribble: a nil %s the filled payload should have set", v.Type())
+			}
+			v.Set(reflect.New(v.Type().Elem()))
+		}
+		fillAll(t, v.Elem(), word, alloc)
+	case reflect.Slice:
+		if v.Len() == 0 {
+			if !alloc {
+				t.Fatalf("scribble: an empty %s the filled payload should have set", v.Type())
+			}
+			v.Set(reflect.MakeSlice(v.Type(), 2, 2))
+		}
+		for i := range v.Len() {
+			fillAll(t, v.Index(i), word, alloc)
+		}
+	case reflect.Struct:
+		if v.Type() == reflect.TypeFor[time.Time]() {
+			v.Set(reflect.ValueOf(time.Date(2026, 9, 26, 10, len(word), 0, 0, time.UTC)))
+			return
+		}
+		for i := range v.NumField() {
+			if !v.Type().Field(i).IsExported() {
+				t.Fatalf("fillAll: %s has an unexported field %s it cannot set", v.Type(), v.Type().Field(i).Name)
+			}
+			fillAll(t, v.Field(i), word, alloc)
+		}
+	default:
+		t.Fatalf("fillAll: %s is a %s, which this walk does not fill: teach it, so the ownership tests cover it", v.Type(), v.Kind())
 	}
 }
 
-// scribble writes over every field of tv a caller could reach, the nested
-// ones included.
-func scribble(tv *agent.ToolEvent) {
-	tv.Status = "scribbled"
-	tv.Locations[0] = "scribbled"
-	tv.Diffs[0].Path = "scribbled"
-	tv.Output.Stdout = "scribbled"
-	*tv.Output.ExitCode = 99
-	tv.Task.Status = agent.SubagentFailed
-	tv.Task.AgentID = "scribbled"
-}
-
 // TestToolsAreTheCallersOwn (sol r50 5): what Tools() answers is the caller's
-// to change, the nested fields included — Locations, Diffs, the Output and
-// its ExitCode, the Task — and nothing a caller writes into it reaches the
-// model, the folded event's own payload, or what the next Tools() answers.
-// Negative control: cut.tools copying the struct alone (`*e.Tool`) shares
-// every nested field with the model, and this test goes red on the first of
-// them.
+// to change, every nested field included, and nothing a caller writes into it
+// reaches the model: not the folded event's own payload, not what the next
+// Tools() or State() answers, not a snapshot. Negative control: cut.tools
+// copying the struct alone (`*e.Tool`) shares every nested field with the
+// model, and this test goes red on the first of them; dropping any one field
+// from cloneTool (the Task's copy, say) goes red too, because scribble writes
+// every field there is.
 func TestToolsAreTheCallersOwn(t *testing.T) {
 	m := New(Options{})
-	folded := ownedTool("t1")
+	folded := ownedTool(t, "t1")
 	foldAll(t, m, true,
 		agent.Event{Type: agent.EventTool, Tool: folded, Seq: 1},
-		agent.Event{Type: agent.EventTool, Agent: "sub", Tool: ownedTool("s1"), Seq: 2},
+		agent.Event{Type: agent.EventTool, Agent: "sub", Tool: ownedTool(t, "s1"), Seq: 2},
 	)
+	snapBefore, err := m.Snapshot(0)
+	if err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
 	got := m.Tools()
 	if len(got) != 2 {
 		t.Fatalf("setup: Tools() is %+v, want two rows", got)
 	}
 	for i := range got {
-		scribble(&got[i])
+		scribble(t, &got[i])
 	}
-	if !reflect.DeepEqual(folded, ownedTool("t1")) {
-		t.Fatalf("writing into Tools()' answer changed the folded event's payload: %+v", folded)
+	checkToolsUntouched(t, m, folded, snapBefore, "Tools()' answer")
+}
+
+// TestStateToolsAreTheCallersOwn (sol r51 4): State().Tools' values are the
+// caller's own too — pointers to copies, never the model's retained payloads —
+// so a caller writing through one changes nothing the model holds. Negative
+// control: addTools storing e.Tool itself (the pointer the model retains) goes
+// red on the folded event's payload.
+func TestStateToolsAreTheCallersOwn(t *testing.T) {
+	m := New(Options{})
+	folded := ownedTool(t, "t1")
+	foldAll(t, m, true,
+		agent.Event{Type: agent.EventTool, Tool: folded, Seq: 1},
+		agent.Event{Type: agent.EventTool, Agent: "sub", Tool: ownedTool(t, "s1"), Seq: 2},
+	)
+	snapBefore, err := m.Snapshot(0)
+	if err != nil {
+		t.Fatalf("Snapshot: %v", err)
 	}
-	again := m.Tools()
-	if want := []agent.ToolEvent{*ownedTool("t1"), *ownedTool("s1")}; !reflect.DeepEqual(again, want) {
-		t.Fatalf("writing into Tools()' answer reached the model: Tools() now %+v, want %+v", again, want)
+	st := m.State()
+	if len(st.Tools) != 2 {
+		t.Fatalf("setup: State().Tools is %+v, want two rows", st.Tools)
 	}
-	if st := m.State(); !reflect.DeepEqual(st.Tools[ToolKey{ID: "t1"}], ownedTool("t1")) {
-		t.Fatalf("writing into Tools()' answer reached the state projection: %+v", st.Tools[ToolKey{ID: "t1"}])
+	for _, tv := range st.Tools {
+		scribble(t, tv)
+	}
+	checkToolsUntouched(t, m, folded, snapBefore, "State().Tools' values")
+}
+
+// checkToolsUntouched holds the model of the two ownership tests to what it
+// folded: the folded payload as it was built, Tools() and State().Tools
+// answering it, and a snapshot equal to the one taken before the writes.
+func checkToolsUntouched(t *testing.T, m *Model, folded *agent.ToolEvent, snapBefore *Snapshot, what string) {
+	t.Helper()
+	if !reflect.DeepEqual(folded, ownedTool(t, "t1")) {
+		t.Fatalf("writing into %s changed the folded event's payload: %+v", what, folded)
+	}
+	if got, want := m.Tools(), []agent.ToolEvent{*ownedTool(t, "t1"), *ownedTool(t, "s1")}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("writing into %s reached the model: Tools() now %+v, want %+v", what, got, want)
+	}
+	st := m.State()
+	if !reflect.DeepEqual(st.Tools[ToolKey{ID: "t1"}], ownedTool(t, "t1")) || !reflect.DeepEqual(st.Tools[ToolKey{Agent: "sub", ID: "s1"}], ownedTool(t, "s1")) {
+		t.Fatalf("writing into %s reached the state projection: %+v", what, st.Tools)
+	}
+	snapAfter, err := m.Snapshot(0)
+	if err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
+	if !reflect.DeepEqual(snapAfter, snapBefore) {
+		t.Fatalf("writing into %s reached a snapshot:\nbefore %+v\nafter  %+v", what, snapBefore, snapAfter)
 	}
 }
 
-// TestToolsAnswerDoesNotRaceTheModel is TestToolsAreTheCallersOwn under the
-// race detector: a caller writing into what Tools() answered while the model
-// is read — a snapshot encodes every tool's nested fields — and folded is no
-// data race, because nothing it holds is the model's. Negative control: as
-// above; with -race this test reports the race between the write and the
-// snapshot's read of the shared slice.
+// TestToolsAnswerDoesNotRaceTheModel is the ownership tests under the race
+// detector, with the writes overlapping the model's own work on the same tool:
+// the reader folds an update of that tool, takes Tools() and State() and hands
+// both answers to a writer goroutine, then goes straight on to snapshot the
+// model — which encodes every nested field of the payloads it retains — and to
+// fold the next update, while the writer writes every field of what it was
+// handed. Nothing orders the writer's writes before the reader's next reads, so
+// if any answer shared memory with the model the race detector would report it.
+// Both goroutines start at one barrier and the writer keeps writing the last
+// answers until the reader is done, so they run side by side for the whole
+// loop. Negative control: either projection sharing its payloads (cut.tools
+// copying `*e.Tool`, or addTools storing e.Tool) reports a data race here
+// under -race.
 func TestToolsAnswerDoesNotRaceTheModel(t *testing.T) {
 	m := New(Options{})
-	m.Fold(agent.Event{Type: agent.EventTool, Tool: ownedTool("t1"), Seq: 1})
-	got := m.Tools()
-	done := make(chan struct{})
+	m.Fold(agent.Event{Type: agent.EventTool, Tool: ownedTool(t, "t1"), Seq: 1})
+	type answers struct {
+		tools []agent.ToolEvent
+		state *agent.ToolEvent
+	}
+	handed := make(chan answers, 1)
+	start, stop, done := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	// The writer reports nothing (scribbleNoT): Fatalf is the test
+	// goroutine's alone.
 	go func() {
 		defer close(done)
-		for range 200 {
-			scribble(&got[0])
+		<-start
+		var last answers
+		for {
+			select {
+			case <-stop:
+				return
+			case a := <-handed:
+				last = a
+			default:
+			}
+			for i := range last.tools {
+				scribbleNoT(&last.tools[i])
+			}
+			if last.state != nil {
+				scribbleNoT(last.state)
+			}
 		}
 	}()
-	for i := range 200 {
+	close(start)
+	for i := range 300 {
+		m.Fold(agent.Event{Type: agent.EventTool, Tool: ownedTool(t, "t1"), Seq: uint64(2 + i)})
+		a := answers{tools: m.Tools(), state: m.State().Tools[ToolKey{ID: "t1"}]}
+		select {
+		case handed <- a:
+		default:
+		}
 		if _, err := m.Snapshot(0); err != nil {
 			t.Errorf("Snapshot: %v", err)
 			break
 		}
-		m.Fold(agent.Event{Type: agent.EventText, Text: "x", Seq: uint64(2 + i)})
 		_ = m.Tools()
+		_ = m.State()
 	}
+	close(stop)
 	<-done
 }
+
+// scribbleNoT is scribble for a goroutine that is not the test's: the same
+// walk, reporting nothing (the payloads it is handed were built by ownedTool,
+// which has already proved the walk fills every field).
+func scribbleNoT(tv *agent.ToolEvent) {
+	fillAll(noT{}, reflect.ValueOf(tv).Elem(), "scribbled", false)
+}
+
+// noT is a testing.TB that ignores a failure: scribbleNoT's walk never fails
+// on a payload ownedTool built.
+type noT struct{ testing.TB }
+
+func (noT) Helper()               {}
+func (noT) Fatalf(string, ...any) {}

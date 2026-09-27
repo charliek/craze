@@ -471,7 +471,9 @@ type State struct {
 	// the window omitted (its placeholder carries only an id and a size, X23),
 	// so its Tools is the first model's restricted to the rows it shares with
 	// it: the exactness of a windowed restore is the suffix, the non-tool
-	// state, and the tools of the suffix (plan 024 §3.5, X23).
+	// state, and the tools of the suffix (plan 024 §3.5, X23). Each value is
+	// the caller's own (cloneTool), as Tools()' are: nothing written through
+	// one reaches the model.
 	Tools map[ToolKey]*agent.ToolEvent
 	// TruncatedAgents names the roster rows whose Prompt or Output the
 	// snapshot this model was restored from carried only the head of (over
@@ -745,7 +747,8 @@ func (c *cut) state() State {
 			if s.Tools == nil {
 				s.Tools = make(map[ToolKey]*agent.ToolEvent)
 			}
-			s.Tools[ToolKey{Agent: agentID, ID: e.Tool.ID}] = e.Tool
+			tool := cloneTool(e.Tool)
+			s.Tools[ToolKey{Agent: agentID, ID: e.Tool.ID}] = &tool
 		}
 	}
 	addTools("", &c.main)

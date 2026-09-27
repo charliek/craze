@@ -150,7 +150,7 @@ func TestToolsUpsertByIDAndAnIDlessToolAppends(t *testing.T) {
 		t.Fatal("the row must hold the update's payload, by pointer")
 	}
 	st := m.State()
-	if len(st.Tools) != 2 || st.Tools[ToolKey{ID: "t1"}] != second || st.Tools[ToolKey{Agent: "sub", ID: "t1"}].Status != "child" {
+	if len(st.Tools) != 2 || !reflect.DeepEqual(st.Tools[ToolKey{ID: "t1"}], second) || st.Tools[ToolKey{Agent: "sub", ID: "t1"}].Status != "child" {
 		t.Fatalf("every tool's last state, by transcript and id: %v", st.Tools)
 	}
 }
