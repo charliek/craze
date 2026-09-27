@@ -1528,9 +1528,12 @@ func TestFrameGoldenGrokAsk(t *testing.T) {
 }
 
 func TestFrameGoldenGrokPlan(t *testing.T) {
+	// Under starvation the "Waiting for your answer" line can capture on a
+	// later spin frame than the golden's (spin frame 0, ✳): the frame's
+	// clock and spinner are frozen so the capture always lands on frame 0.
 	keys := "<wait:idle>go<enter><wait:card>"
 	for _, size := range []struct{ cols, rows int }{{80, 24}, {100, 30}} {
-		got := runFakeFrameProvider(t, "grok-plan", size.cols, size.rows, keys, agent.GrokProvider(), true)
+		got := runFakeFrameFrozen(t, "grok-plan", size.cols, size.rows, keys, agent.GrokProvider())
 		name := fmt.Sprintf("grok-plan-%dx%d", size.cols, size.rows)
 		assertGolden(t, name, size.cols, size.rows, got)
 		for _, want := range []string{"[a]ccept", "[r]eject", "esc cancel"} {
@@ -1559,9 +1562,18 @@ func TestFrameGoldenGrokSubagentRows(t *testing.T) {
 }
 
 func TestFrameGoldenGrokSubagentView(t *testing.T) {
-	keys := "<wait:idle>go<enter><wait:text:4.7k tok><down><enter><wait:text:✓ tool  list_dir>"
+	// Same race as TestFrameGoldenGrokSubagentRows (SF-45's class): the
+	// parent row's "4.7k tok" is read from the live snapshot (refreshSnap),
+	// which can run ahead of the event stream, so a script that only waits
+	// on the tokens can finish (taskRunFor after progress) and be captured
+	// with the child already completed instead of running. The hold script
+	// sends nothing after progress, the wait-tool row is waited on before
+	// the tokens (drawn only by its own event), and the capture is frozen so
+	// the running child's elapsed time and spinner frame are deterministic.
+	keys := "<wait:idle>go<enter><wait:text:◌ tool  get_command_or_subagent_output><wait:text:4.7k tok>" +
+		"<down><enter><wait:text:✓ tool  list_dir>"
 	for _, size := range []struct{ cols, rows int }{{80, 24}, {100, 30}} {
-		got := runFakeFrameProvider(t, "grok-subagent", size.cols, size.rows, keys, agent.GrokProvider(), true)
+		got := runFakeFrameFrozen(t, "grok-subagent-hold", size.cols, size.rows, keys, agent.GrokProvider())
 		name := fmt.Sprintf("grok-subagent-view-%dx%d", size.cols, size.rows)
 		assertGolden(t, name, size.cols, size.rows, got)
 		if !strings.Contains(got, "esc to return") {

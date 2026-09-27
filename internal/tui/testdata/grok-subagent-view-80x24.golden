@@ -15,7 +15,7 @@ main.py README.md
                                                                                 
                                                                                 
                                                                                 
-✴ list_dir · 0s · 4.7k tok                                                      
+✳ list_dir · 0s · 4.7k tok                                                      
 ────────────────────────────────────────────── (grok-4.6) List directory files ─
 ○ @explore · read-only · esc to return                                          
 ────────────────────────────────────────────────────────────────────────────────
