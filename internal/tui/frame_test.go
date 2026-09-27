@@ -1590,9 +1590,19 @@ func TestFrameGoldenGrokSubagentViewDone100x30(t *testing.T) {
 }
 
 func TestFrameGoldenGrokSubagentTwoView100x30(t *testing.T) {
-	got := runFakeFrameProvider(t, "grok-subagent-two", 100, 30,
-		"<wait:idle>go<enter><wait:text:4.7k tok><down><enter><tab><wait:text:✓ tool  read_file>",
-		agent.GrokProvider(), true)
+	// Two races, both PR #60's macOS flake (SF-45's class): the plain
+	// grok-subagent-two script finishes both children taskRunFor after sub-1's
+	// progress, and the down/enter/tab below can lose that race on a slow
+	// runner — the hold script never sends the finish. And sub-1's row
+	// "4.7k tok" is read from the live snapshot (refreshSnap), which can run
+	// ahead of the event stream: the multi-wait tool row is drawn only by its
+	// own event, sent after sub-2's "# hi" on the same stream, so waiting on
+	// it (before the tokens) orders "hi" too, the way
+	// TestFrameGoldenGrokSubagentRows does. The capture is frozen so the
+	// wall-clock elapsed ("0s") and the spinner frame are deterministic.
+	keys := "<wait:idle>go<enter><wait:text:◌ tool  multi-wait (wait_all)><wait:text:4.7k tok>" +
+		"<down><enter><tab><wait:text:✓ tool  read_file>"
+	got := runFakeFrameFrozen(t, "grok-subagent-two-hold", 100, 30, keys, agent.GrokProvider())
 	assertGolden(t, "grok-subagent-two-view-100x30", 100, 30, got)
 	if !strings.Contains(got, "Report README first line") {
 		t.Fatalf("tab should switch to sub-2:\n%s", got)

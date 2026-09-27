@@ -694,7 +694,16 @@ def test_frame_gx_echo(craze_bin: Path, fake_agent_bin: Path, tmp_path: Path) ->
 # cells; these own the trip through the command. The rows case waits on the
 # progress suffix (`4.7k tok`) rather than on the row itself because the
 # suffix is what proves the progress notification landed, the way the Go
-# golden's <wait:text:4.7k tok> does.
+# golden's <wait:text:4.7k tok> does. The two-agent view case runs the
+# grok-subagent-two-hold script, not grok-subagent-two, and waits on the
+# multi-wait tool row before the tokens — two races, both PR #60's macOS
+# flake (SF-45's class). The plain script finishes both children
+# taskRunFor (250ms) after sub-1's progress, and a slow runner can lose the
+# down/enter/tab race; the hold script never sends the finish. And sub-1's
+# row "4.7k tok" is read from the live snapshot (refreshSnap), which can run
+# ahead of the event stream: the multi-wait tool row is drawn only by its
+# own event, sent after sub-2's "# hi" on the same stream, so waiting on it
+# first orders "hi" too.
 
 # case id, script, cols, rows, keys, substrings that must be on the frame
 GROK_SUBAGENT_CASES = [
@@ -722,10 +731,11 @@ GROK_SUBAGENT_CASES = [
     ),
     (
         "grok-subagent-two",
-        "grok-subagent-two",
+        "grok-subagent-two-hold",
         100,
         30,
-        "<wait:idle>go<enter><wait:text:4.7k tok><down><enter><tab><wait:text:✓ tool  read_file>",
+        "<wait:idle>go<enter><wait:text:◌ tool  multi-wait (wait_all)><wait:text:4.7k tok>"
+        "<down><enter><tab><wait:text:✓ tool  read_file>",
         ["Report README first line", "esc to return · tab next agent", "← 2 agents"],
     ),
     (

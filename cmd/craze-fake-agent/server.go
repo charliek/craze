@@ -582,7 +582,9 @@ func (s *server) handlePrompt(msg *acp.Message) {
 	case "grok-subagent-fail":
 		s.grokSubagent(msg.ID, grokSubagentFail)
 	case "grok-subagent-two":
-		s.grokSubagentTwo(msg.ID)
+		s.grokSubagentTwo(msg.ID, false)
+	case "grok-subagent-two-hold":
+		s.grokSubagentTwo(msg.ID, true)
 	case "grok-subagent-nested":
 		s.grokSubagentNested(msg.ID)
 	case "grok-subagent-late":
@@ -1215,7 +1217,19 @@ func (s *server) grokSubagent(id json.RawMessage, mode grokSubagentMode) {
 // a child update for unknown sub-9 and the echo foreign other-session update
 // exercise the drop path; a duplicate spawned for sub-1 is a no-op. sub-2
 // finishes first; multi-wait retitles after both finished, as live.
-func (s *server) grokSubagentTwo(id json.RawMessage) {
+//
+// hold stops the script after sub-1's subagent_progress and hangs the turn
+// open instead of finishing both children taskRunFor later: this flake
+// (PR #60, SF-45's class, the same class 83e58e3 fixed for the rows golden)
+// is two races. First, without hold, the two-agent view's script presses
+// down/enter/tab against the same 250ms window the rows golden raced in
+// 83e58e3, and a slow runner could lose; with hold, progress is the last
+// thing either child ever gets, so the view has nothing left to race.
+// Second, sub-1's row "4.7k tok" is read from the live snapshot
+// (refreshSnap), which can run ahead of the event stream, so the test also
+// waits on the multi-wait tool row (drawn only by its own event) before the
+// tokens — see the comment at "# hi" below.
+func (s *server) grokSubagentTwo(id json.RawMessage, hold bool) {
 	s.thought("Spawning two explore subagents.")
 	s.toolMeta(fakeSessionID, "call-spawn-1", "spawn_subagent", "spawn_subagent", map[string]any{
 		"description":   "List python files",
@@ -1290,6 +1304,14 @@ func (s *server) grokSubagentTwo(id json.RawMessage) {
 	// The two-view golden waits on sub-2's tool completion and captures
 	// before its answer; the pause keeps that frame from racing the text.
 	time.Sleep(taskRunFor)
+	// "# hi" goes out before the multi-wait tool_call below and sub-1's
+	// subagent_progress after it: sub-1's row "4.7k tok" is read from the
+	// live snapshot (refreshSnap), which can run ahead of the event stream
+	// (83e58e3, SF-45), so a script that only waits on "4.7k tok" can capture
+	// before "# hi" or the multi-wait row ever reached the transcript. The
+	// multi-wait tool row is drawn solely by its own tool_call event, sent
+	// after "# hi" on this same stream, so the goldens wait on that row
+	// first — ordering "# hi" too — and only then on the tokens.
 	s.childText("sub-2", "agent_message_chunk", "# hi")
 	s.toolMeta(fakeSessionID, "call-wait-1", "multi-wait (wait_all)", "get_command_or_subagent_output", map[string]any{
 		"task_ids":   []string{"sub-1", "sub-2"},
@@ -1305,6 +1327,10 @@ func (s *server) grokSubagentTwo(id json.RawMessage) {
 		"tokens_used":       4740,
 		"tools_used":        []string{"list_dir"},
 	})
+	if hold {
+		s.hang(id)
+		return
+	}
 	time.Sleep(taskRunFor)
 	s.subagentNotify(fakeSessionID, map[string]any{
 		"sessionUpdate":    "subagent_finished",
