@@ -175,7 +175,8 @@ type Settings struct {
 	// Usage is the session's usage section (plan 028 §3.14): what it has
 	// spent and how full its context is, nil until a delta carries one — and
 	// always, for an ACP session. It is the delta's copy, replaced whole by
-	// the next and never written through. It has no strings, so no
+	// the next and never written through, and each projection (State,
+	// Snapshot) carries a copy of its own. It has no strings, so no
 	// truncation mark.
 	Usage *agent.UsageState
 	// Truncated names the sections the snapshot this model was restored from
@@ -625,6 +626,15 @@ func (m *Model) cutLocked() cut {
 		replaying:   m.replaying,
 		settings:    m.settings,
 		queue:       append([]agent.QueuedPrompt(nil), m.queue...),
+	}
+	if u := m.settings.Usage; u != nil {
+		// The cut's own copy, as with a transcript's Compacting: every
+		// projection is built from a cut of its own (State, Snapshot,
+		// SnapshotFor), so none shares the usage with another or with the
+		// model, and writing through one moves nothing else (astra r1-c17).
+		// The fold keeps the delta's copy on the way in.
+		cu := *u
+		c.settings.Usage = &cu
 	}
 	c.todosTruncated = m.todosTruncated
 	if len(m.queueTruncated) > 0 {

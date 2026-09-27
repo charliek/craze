@@ -705,6 +705,12 @@ usage through craze, so for every ACP session the key is **absent** — never
 `null` and never `{}` — as it is for a native session before its first step.
 A client reads the key's presence as "this session reports usage".
 
+`settings.usage` is **reported state, not a setting**: it sits in `settings`
+because that is where a session's state sections are read, but no client
+changes it. It is never a `session.set` kind — those are `model`, `mode` and
+`config` — so a client that draws `settings` as controls leaves it out of
+them, and shows it as a read-out.
+
 ```json
 {"type":"meta","state":{"usage":{"contextTokens":68000,"contextWindow":200000,
   "turn":{"input":8000,"output":2000,"reasoning":0,"cacheRead":58000,"cacheCreation":0,"costPicoUsd":71400000000,"unpriced":false},

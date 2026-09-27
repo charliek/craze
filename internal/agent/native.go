@@ -1621,7 +1621,10 @@ func (s *nativeSession) prompt(ctx context.Context, text string, rel chan struct
 	// context (asks.go's EndTurn) — the tool has already returned by here,
 	// since Fantasy joins it before Run returns — and the flush then puts those
 	// endings, and any opening still behind them, in the record ahead of the
-	// EventDone (plan 021 §3.6, plan 023 §3.5).
+	// EventDone (plan 021 §3.6, plan 023 §3.5). The same flush publishes the
+	// turn's usage reports (spent) — enqueued on the harness's callbacks
+	// before Run or Compact returned — so the turn's final usage precedes its
+	// ending on every path a turn ran: end_turn, cancelled, failed, /compact.
 	//
 	// It is bounded by s.done, as every emit below it is: Close closes done and
 	// then waits for this continuation (rel) BEFORE it closes the log, and with
@@ -1862,6 +1865,16 @@ func (s *nativeSession) sink(ev harness.Event) {
 // Every report carries the whole of it — the context, the turn's spend and
 // the session's — so a delta that arrives late is simply a later one's
 // predecessor: nothing is summed here.
+//
+// A turn's reports are all in the stream before the turn's end (the S2
+// seam): spent runs on the harness's own callbacks, inside Run or Compact,
+// so every report a turn leaves — its last step's, a /compact's — is
+// enqueued before prompt's pre-ending flush, which publishes it ahead of the
+// EventDone or EventError on every path a turn ran; and the engine enqueues
+// its EventTurn{ended} into the same FIFO outbox only once Prompt has
+// returned. A client that folds to the turn's end and draws the idle frame
+// there reads the turn's own spend (TestATurnsUsageReachesTheStreamBeforeItsEnd,
+// on the engine, in internal/tui).
 func (s *nativeSession) spent(e harness.Spent) {
 	u := UsageState{
 		ContextTokens: e.ContextTokens,

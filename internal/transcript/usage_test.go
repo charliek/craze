@@ -80,6 +80,44 @@ func TestAUsageDeltaFoldsIntoTheSettings(t *testing.T) {
 	}
 }
 
+// TestProjectionsNeverShareTheUsage (astra r1-c17): every projection the
+// model hands out — State, Snapshot, SnapshotFor — carries a usage section of
+// its own, as the fold keeps the delta's copy on the way in: writing through
+// one projection's Usage moves no other projection and not the model, whose
+// next State and Snapshot still read what the session reported.
+func TestProjectionsNeverShareTheUsage(t *testing.T) {
+	m := New(Options{})
+	want := agent.UsageState{ContextTokens: 12_300, ContextWindow: 100_000,
+		Turn: agent.Spend{Input: 10, Output: 5, CostPicoUSD: 20_000_000}, Session: agent.Spend{Input: 30, Output: 15, CostPicoUSD: 60_000_000}}
+	u := want
+	foldAll(t, m, true, agent.Event{Type: agent.EventMeta, State: &agent.StateDelta{Usage: &u}, At: at(1)})
+
+	a, b := mustSnapshot(t, m), mustSnapshot(t, m)
+	f, err := m.SnapshotFor("", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st := m.State()
+	for name, got := range map[string]*agent.UsageState{"snapshot a": a.Settings.Usage, "snapshot b": b.Settings.Usage,
+		"SnapshotFor": f.Settings.Usage, "State": st.Settings.Usage} {
+		if got == nil || *got != want {
+			t.Fatalf("control: %s's usage is %+v, want %+v", name, got, want)
+		}
+	}
+
+	a.Settings.Usage.Session.Input = 999   // one snapshot's copy, written after the cut
+	st.Settings.Usage.Turn.CostPicoUSD = 1 // and one State's
+	for name, got := range map[string]*agent.UsageState{"snapshot b": b.Settings.Usage, "SnapshotFor": f.Settings.Usage,
+		"the model's next State": m.State().Settings.Usage, "the model's next Snapshot": mustSnapshot(t, m).Settings.Usage} {
+		if got == nil || *got != want {
+			t.Errorf("%s's usage moved to %+v when another projection's was written; want %+v", name, got, want)
+		}
+	}
+	if a.Settings.Usage.Turn.CostPicoUSD != want.Turn.CostPicoUSD {
+		t.Errorf("snapshot a shares State's usage: %+v", a.Settings.Usage)
+	}
+}
+
 // mustSnapshot is m's snapshot at the default budget.
 func mustSnapshot(t *testing.T, m *Model) *Snapshot {
 	t.Helper()
