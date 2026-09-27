@@ -96,3 +96,90 @@ func TestARestoredModelsToolsKeepOrder(t *testing.T) {
 		}
 	}
 }
+
+// ownedTool is a tool payload with every nested field set: the slices, the
+// Output and its ExitCode, the Task. Each call builds a fresh one, so a test
+// can hold one as the expected value while the model holds another.
+func ownedTool(id string) *agent.ToolEvent {
+	code := 3
+	return &agent.ToolEvent{
+		ID: id, Status: "completed", Kind: "edit", Title: "Edit a.go",
+		Locations: []string{"a.go", "b.go"},
+		Output:    &agent.ToolOutput{ExitCode: &code, Stdout: "out", Stderr: "err"},
+		Diffs:     []agent.ToolDiff{{Path: "a.go", OldText: "x", NewText: "y", Added: 1, Removed: 1}},
+		Task:      &agent.TaskInfo{Description: "count", AgentID: "child-1", Status: agent.SubagentRunning},
+	}
+}
+
+// scribble writes over every field of tv a caller could reach, the nested
+// ones included.
+func scribble(tv *agent.ToolEvent) {
+	tv.Status = "scribbled"
+	tv.Locations[0] = "scribbled"
+	tv.Diffs[0].Path = "scribbled"
+	tv.Output.Stdout = "scribbled"
+	*tv.Output.ExitCode = 99
+	tv.Task.Status = agent.SubagentFailed
+	tv.Task.AgentID = "scribbled"
+}
+
+// TestToolsAreTheCallersOwn (sol r50 5): what Tools() answers is the caller's
+// to change, the nested fields included — Locations, Diffs, the Output and
+// its ExitCode, the Task — and nothing a caller writes into it reaches the
+// model, the folded event's own payload, or what the next Tools() answers.
+// Negative control: cut.tools copying the struct alone (`*e.Tool`) shares
+// every nested field with the model, and this test goes red on the first of
+// them.
+func TestToolsAreTheCallersOwn(t *testing.T) {
+	m := New(Options{})
+	folded := ownedTool("t1")
+	foldAll(t, m, true,
+		agent.Event{Type: agent.EventTool, Tool: folded, Seq: 1},
+		agent.Event{Type: agent.EventTool, Agent: "sub", Tool: ownedTool("s1"), Seq: 2},
+	)
+	got := m.Tools()
+	if len(got) != 2 {
+		t.Fatalf("setup: Tools() is %+v, want two rows", got)
+	}
+	for i := range got {
+		scribble(&got[i])
+	}
+	if !reflect.DeepEqual(folded, ownedTool("t1")) {
+		t.Fatalf("writing into Tools()' answer changed the folded event's payload: %+v", folded)
+	}
+	again := m.Tools()
+	if want := []agent.ToolEvent{*ownedTool("t1"), *ownedTool("s1")}; !reflect.DeepEqual(again, want) {
+		t.Fatalf("writing into Tools()' answer reached the model: Tools() now %+v, want %+v", again, want)
+	}
+	if st := m.State(); !reflect.DeepEqual(st.Tools[ToolKey{ID: "t1"}], ownedTool("t1")) {
+		t.Fatalf("writing into Tools()' answer reached the state projection: %+v", st.Tools[ToolKey{ID: "t1"}])
+	}
+}
+
+// TestToolsAnswerDoesNotRaceTheModel is TestToolsAreTheCallersOwn under the
+// race detector: a caller writing into what Tools() answered while the model
+// is read — a snapshot encodes every tool's nested fields — and folded is no
+// data race, because nothing it holds is the model's. Negative control: as
+// above; with -race this test reports the race between the write and the
+// snapshot's read of the shared slice.
+func TestToolsAnswerDoesNotRaceTheModel(t *testing.T) {
+	m := New(Options{})
+	m.Fold(agent.Event{Type: agent.EventTool, Tool: ownedTool("t1"), Seq: 1})
+	got := m.Tools()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for range 200 {
+			scribble(&got[0])
+		}
+	}()
+	for i := range 200 {
+		if _, err := m.Snapshot(0); err != nil {
+			t.Errorf("Snapshot: %v", err)
+			break
+		}
+		m.Fold(agent.Event{Type: agent.EventText, Text: "x", Seq: uint64(2 + i)})
+		_ = m.Tools()
+	}
+	<-done
+}

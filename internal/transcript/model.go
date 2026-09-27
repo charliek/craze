@@ -542,7 +542,8 @@ func (m *Model) History() History {
 // gone, exactly as State's Tools excludes it, and so is a todo tool: neither
 // ever becomes a KindTool entry (upsertTool drops a todo tool before one is
 // made, and a trimmed one is dropped from entries by bounds.go). Cut under the
-// lock like State; the caller owns every value.
+// lock like State; the caller owns every value, nested fields and all
+// (cloneTool): nothing it writes into one reaches the model.
 func (m *Model) Tools() []agent.ToolEvent {
 	c := m.cut()
 	return c.tools()
@@ -769,7 +770,8 @@ func (c *cut) state() State {
 
 // tools is Tools' projection: every KindTool entry's payload, main first then
 // each sub in creation order, each in entry order — the same rows state's own
-// addTools visits, kept as a slice instead of folded into a map.
+// addTools visits, kept as a slice instead of folded into a map. Each is a
+// deep copy (cloneTool): the caller owns it whole.
 func (c *cut) tools() []agent.ToolEvent {
 	var out []agent.ToolEvent
 	addTools := func(tc *transcriptCut) {
@@ -777,12 +779,41 @@ func (c *cut) tools() []agent.ToolEvent {
 			if e.Kind != KindTool || e.Tool == nil || e.Tool.ID == "" {
 				continue
 			}
-			out = append(out, *e.Tool)
+			out = append(out, cloneTool(e.Tool))
 		}
 	}
 	addTools(&c.main)
 	for i := range c.subs {
 		addTools(&c.subs[i].t)
+	}
+	return out
+}
+
+// cloneTool is a tool payload the caller owns: the struct and everything it
+// points at — Locations, Diffs, the Output and its ExitCode, the Task — copied,
+// as agent's own snapshot copies a tool (agent's cloneTool, tools.go). A
+// retained payload is the event's own, shared with whatever else holds that
+// event, and is never written after it is folded; a caller of Tools may do as
+// it likes with what it gets, and nothing of it reaches back into the model.
+func cloneTool(t *agent.ToolEvent) agent.ToolEvent {
+	out := *t
+	if t.Locations != nil {
+		out.Locations = append([]string(nil), t.Locations...)
+	}
+	if t.Diffs != nil {
+		out.Diffs = append([]agent.ToolDiff(nil), t.Diffs...)
+	}
+	if t.Output != nil {
+		o := *t.Output
+		if o.ExitCode != nil {
+			code := *o.ExitCode
+			o.ExitCode = &code
+		}
+		out.Output = &o
+	}
+	if t.Task != nil {
+		task := *t.Task
+		out.Task = &task
 	}
 	return out
 }
