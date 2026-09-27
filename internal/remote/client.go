@@ -930,6 +930,19 @@ func (c *Client) ClientID() string {
 	return c.hello.ClientID
 }
 
+// Identity names the client identity the client holds now: 1 from the first
+// hello, moved on — before the reconnect re-attaches, and so before the
+// Restore its re-attach brings is queued — by every hello that did not resume
+// (a retired client, a replaced engine, a restarted host, a resume the client
+// cannot trust). A resumed hello keeps it. A command bound to one identity is
+// never sent under another (CommandOptions.Identity): it is remote.Session's
+// backend epoch.
+func (c *Client) Identity() uint64 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.identity
+}
+
 // ResumeState is what a caller persists so a new process can Dial from it
 // (A4): the client id, its token, the next command id, and the stream's
 // cursor (nil before the stream has handed out an attach).

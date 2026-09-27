@@ -4,7 +4,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 
+	"github.com/charliek/craze/internal/backend"
 	"github.com/charliek/craze/internal/protocol"
 )
 
@@ -12,8 +14,15 @@ import (
 // craze code a client decides from, the reason naming the exact sentinel,
 // the host's message verbatim, and the two things an error may carry beside
 // it — a result (session.cancel's CancelResult, hello's supported versions)
-// and a wrapped failure's text. It is a plain struct in PR 1; PR 4 maps
-// (Code, Reason) to the engine's and agent's sentinels.
+// and a wrapped failure's text.
+//
+// It reconstructs the host's Go error for a caller that matches by sentinel
+// (plan 027 §3.14, A16): Is maps (Code, Reason) to the engine's or agent's
+// sentinel through one table (sentinels, sentinels.go), so errors.Is(err,
+// agent.ErrQueueFull) holds over the socket exactly where it holds in process;
+// Unwrap is the wrapped failure's text (Cause) as an error, so errors.Unwrap
+// reaches ErrIndexWrite's cause as it does in process; and Error is the
+// host's message verbatim, the text the host's own error had.
 type Error struct {
 	// RPC is the JSON-RPC error integer: -32000 for every craze-level
 	// refusal, -32600/-32601/-32602/-32700 for the envelope's own.
@@ -35,6 +44,22 @@ type Error struct {
 // Error is the host's message, verbatim: the text the host's own error had.
 func (e *Error) Error() string { return e.Message }
 
+// Is reports whether target is a sentinel the host's error was (or wrapped):
+// the table's answer for (Code, Reason) — sentinels, the one table.
+func (e *Error) Is(target error) bool { return slices.Contains(sentinels(e.Code, e.Reason), target) }
+
+// Unwrap is the wrapped failure the host sent beside its error (Cause) — the
+// store's own message behind an engine.ErrIndexWrite, a start's failure — as
+// an error whose text is the host's, or nil when it sent none. In process
+// errors.Unwrap of an ErrIndexWrite is the store's error, whose text is this
+// one (engine/index.go's indexWriteError).
+func (e *Error) Unwrap() error {
+	if e.Cause == "" {
+		return nil
+	}
+	return errors.New(e.Cause)
+}
+
 // newError is a response's error object as an *Error.
 func newError(pe *protocol.Error) *Error {
 	return &Error{
@@ -52,25 +77,44 @@ func newError(pe *protocol.Error) *Error {
 // protocol's client-side reasons, which no host ever sends — says why:
 // resume_lost (a reconnect the host answered resumed: false: nothing is
 // resent, since a resend under a fresh client id could run a completed command
-// a second time) or disconnected (the client's redials are spent, or it was
-// closed). The client re-reads state. errors.Is(err, ErrOutcomeUnknown)
-// matches every *OutcomeUnknownError.
-var ErrOutcomeUnknown = errors.New("remote: the command's outcome is unknown")
+// a second time; or a command bound to a client identity the client has since
+// left, never sent under another) or disconnected (the client's redials are
+// spent, or it was closed). The client re-reads state. errors.Is(err,
+// ErrOutcomeUnknown) matches every *OutcomeUnknownError.
+//
+// It IS backend.ErrOutcomeUnknown — one sentinel, so a caller of the Backend
+// seam (the TUI) matches it without importing this package, and one that holds
+// a *Client matches the same value.
+var ErrOutcomeUnknown = backend.ErrOutcomeUnknown
 
 // OutcomeUnknownError is ErrOutcomeUnknown for one command: its method, its
-// command id, and the client-side reason.
+// command id, the client-side reason, and — for a command refused because the
+// client identity it was bound to is gone (a stale backend epoch) —
+// backend.ErrStaleEpoch in Err, which errors.Is finds through Unwrap.
 type OutcomeUnknownError struct {
 	Method    string
 	CommandID string
 	Reason    protocol.Reason
+	// Err is what else the outcome is (nil for none): backend.ErrStaleEpoch
+	// for a command bound to an identity the client has left, never sent
+	// under the one it holds now.
+	Err error
 }
 
 func (e *OutcomeUnknownError) Error() string {
-	return fmt.Sprintf("remote: %s (command %s): the outcome is unknown (%s): it may have run", e.Method, e.CommandID, e.Reason)
+	s := fmt.Sprintf("remote: %s (command %s): the outcome is unknown (%s): it may have run", e.Method, e.CommandID, e.Reason)
+	if e.Err != nil {
+		s += ": " + e.Err.Error()
+	}
+	return s
 }
 
-// Is makes errors.Is(err, ErrOutcomeUnknown) true.
+// Is makes errors.Is(err, ErrOutcomeUnknown) true — and so errors.Is(err,
+// backend.ErrOutcomeUnknown), the same value.
 func (e *OutcomeUnknownError) Is(target error) bool { return target == ErrOutcomeUnknown }
+
+// Unwrap is Err: errors.Is(err, backend.ErrStaleEpoch) for a stale one.
+func (e *OutcomeUnknownError) Unwrap() error { return e.Err }
 
 // TooLargeError is a command the client settled not run because the host a
 // reconnect reached reads shorter lines than the one it was sized against

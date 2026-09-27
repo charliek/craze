@@ -1,6 +1,11 @@
 package remote
 
-import "context"
+import (
+	"context"
+
+	"github.com/charliek/craze/internal/agent"
+	"github.com/charliek/craze/internal/protocol"
+)
 
 // Waiting is how many commands have a caller waiting on them: sent and
 // unanswered, or held for a connection.
@@ -48,7 +53,12 @@ type TestHooks struct {
 
 // DialForTest is Dial with h in place.
 func DialForTest(ctx context.Context, path string, o Options, h TestHooks) (*Client, error) {
-	return dial(ctx, path, o, hooks{
+	return dial(ctx, path, o, h.hooks())
+}
+
+// hooks is h as the client's own.
+func (h TestHooks) hooks() hooks {
+	return hooks{
 		registered: h.Registered,
 		attempted:  h.Attempted,
 		claimed:    h.Claimed,
@@ -61,7 +71,7 @@ func DialForTest(ctx context.Context, path string, o Options, h TestHooks) (*Cli
 		pausing:    h.Pausing,
 		posted:     h.Posted,
 		postRan:    h.PostRan,
-	})
+	}
 }
 
 // QueuedBytes is what the stream's queue counts now; QueuedItems how many
@@ -87,3 +97,18 @@ var ErrMalformed = errMalformed
 
 // ItemSize is what it counts against the stream's byte bound.
 func ItemSize(it Item) int { return it.size() }
+
+// DialSessionForTest is DialSession with h in place.
+func DialSessionForTest(ctx context.Context, path string, o SessionOptions, h TestHooks) (*Session, error) {
+	return dialSession(ctx, path, o, h.hooks())
+}
+
+// ErrorFromWire is a host's error object as the client reads it off a reply
+// (the one construction every refusal goes through).
+func ErrorFromWire(pe *protocol.Error) *Error { return newError(pe) }
+
+// Sentinels is the reconstruction table's row for (code, reason).
+func Sentinels(code protocol.Code, reason protocol.Reason) []error { return sentinels(code, reason) }
+
+// CapabilitiesFromWire is the session capability set on the wire as agent's.
+func CapabilitiesFromWire(c protocol.SessionCapabilities) agent.Capabilities { return capabilities(c) }
