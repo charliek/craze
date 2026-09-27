@@ -379,10 +379,12 @@ sessions, skills); that is the fork's current behaviour, not a guarantee
 craze makes.
 
 gx is gated separately from the other ids: it appears in the startup picker
-only when a binary for it resolves (see [Environment](#environment) below
-for lookup order); cursor, grok and native are always offered, so the picker
-can never be empty. `--provider gx` works regardless of whether a binary
-resolves, and fails at spawn — `agent binary not found: …` — if it does
+when a binary for it resolves, or when it is the resolved default (the default
+is always included, so `Esc` never starts a provider the picker did not show)
+— see [Environment](#environment) below for lookup order; cursor, grok and
+native are always offered, so the picker can never be empty. `--provider gx`
+works regardless of whether a binary resolves, and fails at spawn — `agent
+binary not found: …` — if it does
 not; this matches how `craze prompt --provider gx` and `craze frame
 --provider gx` already behave, since neither consults the picker. Setting
 `--agent-bin` or `$CRAZE_AGENT_BIN` also makes gx appear in the picker,

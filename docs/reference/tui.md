@@ -8,11 +8,12 @@
 The TUI is the default command. It refuses to start on a non-tty.
 
 Without `--provider`, a centred **provider** dialog lists `cursor`, `grok`,
-`gx` and `native` — `gx` shown only when a binary for it resolves, since gx is
-a third-party fork nobody can assume is installed (see
-[Configuration](configuration.md#provider-precedence)) — before the session
-is constructed. The preselected row is the resolved default (see
-[Configuration](configuration.md)). `↑`/`↓`/`Tab` move, `Enter` starts
+`gx` and `native` — `gx` shown when a binary for it resolves, or when it is
+the resolved default (the default is always listed, so `Esc` never starts a
+row the picker did not show), since gx is a third-party fork nobody can assume
+is installed (see [Configuration](configuration.md#provider-precedence)) —
+before the session is constructed. The preselected row is the resolved default
+(see [Configuration](configuration.md)). `↑`/`↓`/`Tab` move, `Enter` starts
 that row, `Esc` starts the default. After Start the provider cannot change.
 
 A row the command line rules out is not started: `native` with `--agent-bin`
