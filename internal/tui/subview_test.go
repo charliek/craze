@@ -11,6 +11,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/charliek/craze/internal/agent"
+	"github.com/charliek/craze/internal/transcript"
 )
 
 func openView(t *testing.T, m Model) Model {
@@ -429,13 +430,48 @@ func TestDegradationToZeroRowsKeepsTheViewOpen(t *testing.T) {
 	}
 }
 
+// evictFinishedChild takes fin — the one child of a roster that holds it
+// alone — out of the roster the only way the live session's roster lets a
+// child go (agent/subagents.go evictFinishedLocked, the fold's evictFinished):
+// it finishes, then as many other children as the roster keeps finished rows
+// spawn and finish after it, so it is the oldest finish past the bound. Each
+// step is the roster event a live session sends, beside the roster that step
+// leaves on the Stub.
+func evictFinishedChild(t *testing.T, m Model, fin agent.SubagentInfo) Model {
+	t.Helper()
+	stub := stubOf(t, m)
+	roster := []agent.SubagentInfo{fin}
+	send := func(info agent.SubagentInfo, change string) {
+		stub.SetSubagents(roster)
+		m = feed(t, m, agent.Event{Type: agent.EventSubagent, Subagent: &info, SubagentChange: change})
+	}
+	send(fin, agent.SubagentChangeFinished)
+	bound := transcript.DefaultBounds().Agents
+	for i := 1; i <= bound; i++ {
+		other := agent.SubagentInfo{ID: fmt.Sprintf("other-%02d", i), ToolCallID: fmt.Sprintf("other-%02d", i), Description: "another child", Status: agent.SubagentRunning}
+		roster = append(roster, other)
+		send(other, agent.SubagentChangeSpawned)
+		other.Status = agent.SubagentCompleted
+		roster[len(roster)-1] = other
+		if i == bound {
+			// bound+1 finished rows: the oldest finish, fin, is the one
+			// the roster drops.
+			roster = roster[1:]
+		}
+		send(other, agent.SubagentChangeFinished)
+	}
+	if m.shared.Sub(fin.ID) != nil {
+		t.Fatalf("fixture: the shared model kept %s, the oldest of %d finished children", fin.ID, bound+1)
+	}
+	return m
+}
+
 func TestEvictionWhileViewedKeepsTombstoneUntilEsc(t *testing.T) {
 	now := time.Date(2026, 9, 12, 10, 0, 0, 0, time.UTC)
 	m := agentModel(t, &now)
 	m = applyInFlight(t, m, []agent.ToolEvent{taskTool("task-1", "count lines", "in_progress")})
 	m = openView(t, m)
-	stubOf(t, m).SetSubagents(nil)
-	m = poke(t, m)
+	m = evictFinishedChild(t, m, subagentsFromTools([]agent.ToolEvent{finishedTaskTool("task-1", "count lines")})[0])
 	if m.viewing != "task-1" {
 		t.Fatal("eviction while viewed must keep the tombstone")
 	}

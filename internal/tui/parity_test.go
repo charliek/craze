@@ -973,11 +973,14 @@ func paritySessionSwap(t *testing.T) {
 // model, config, commands and plugins, the todo list, the sub-agent roster, and
 // m.queue — equals what the shared model folded from the stream.
 //
-// One documented exemption, of the session and not the fold: the Stub
-// publishes no install delta at Start, where the live session and native both
-// do (live.go installDeltaLocked, native.go's Start): its start-up catalog is
-// test set-up, like its Set* helpers. The stub cases publish that delta
-// themselves, as a live session's Start would.
+// There is no exemption left for the install (plan 024 X34's is deleted, plan
+// 027 C19): the Stub publishes the install delta at Start as the live session
+// and native do (live.go installDeltaLocked, native.go's Start) — TestMain
+// turns InstallOnStart on for this package — and the stub case starts its
+// session as Init does (sizedLikeInit), so its fold holds the start-up catalog
+// from the Stub's own stream. Its catalog setters publish their deltas too
+// (SetCommands, SetPlugins), so nothing below publishes on the session's
+// behalf.
 //
 // native's title was a second exemption until C8 (SF-01): native set it from
 // the first prompt without publishing it, so the TUI's mirror had it and the
@@ -996,9 +999,8 @@ func TestTheStateMirrorsMatchTheModelWhenQuiet(t *testing.T) {
 	}
 
 	t.Run("a stub session, publishing as a live session does", func(t *testing.T) {
-		m := sized(t)
+		m := sizedLikeInit(t)
 		stub := stubOf(t, m)
-		stub.Emit(agent.Event{Type: agent.EventMeta, State: installDelta(stub.Snapshot())})
 		m = pumpSettled(t, m)
 		check(t, m, "started")
 
@@ -1026,10 +1028,8 @@ func TestTheStateMirrorsMatchTheModelWhenQuiet(t *testing.T) {
 
 		cmds := []agent.CommandInfo{{Name: "research"}, {Name: "review", Description: "a new one"}}
 		stub.SetCommands(cmds)
-		stub.Emit(agent.Event{Type: agent.EventMeta, State: &agent.StateDelta{Commands: &agent.CommandsState{Commands: cmds}}})
 		plugins := []agent.PluginCommand{{Qualified: "p:c", Kind: agent.PluginKindCommand}}
 		stub.SetPlugins(plugins)
-		stub.Emit(agent.Event{Type: agent.EventMeta, State: &agent.StateDelta{Plugins: &agent.PluginsState{Plugins: plugins}}})
 		m = pumpSettled(t, m)
 		check(t, m, "after the catalogs moved")
 
@@ -1093,20 +1093,6 @@ func TestTheStateMirrorsMatchTheModelWhenQuiet(t *testing.T) {
 		}
 		check(t, m, "after a mode change")
 	})
-}
-
-// installDelta is the delta a live session's Start publishes (live.go
-// installDeltaLocked): every section of the snapshot, as it stands.
-func installDelta(s agent.Snapshot) *agent.StateDelta {
-	title, mode, model := s.Title, s.CurrentMode, s.CurrentModel
-	return &agent.StateDelta{
-		Title:    &title,
-		Mode:     &mode,
-		Model:    &model,
-		Config:   &agent.ConfigState{Options: append([]agent.ConfigOption(nil), s.Config...)},
-		Commands: &agent.CommandsState{Commands: append([]agent.CommandInfo(nil), s.Commands...)},
-		Plugins:  &agent.PluginsState{Plugins: append([]agent.PluginCommand(nil), s.Plugins...)},
-	}
 }
 
 // TestTheParityWatchCountsEveryDrop is review r17's fifth finding: the watch's

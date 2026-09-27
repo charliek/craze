@@ -166,8 +166,11 @@ func TestFocusMatrix(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			m, stub := queueWorking(t)
 			if tc.agents {
-				stub.SetSubagents(subs)
 				stub.SetProvider(agent.GrokProvider())
+				// The child spawns as a live session says so: its roster
+				// event, beside the roster it leaves.
+				stub.SetSubagents(subs)
+				m = feed(t, m, agent.Event{Type: agent.EventSubagent, Subagent: &subs[0], SubagentChange: agent.SubagentChangeSpawned})
 			}
 			if tc.queued {
 				m = typeEnter(t, m, "PINEAPPLE")
@@ -194,8 +197,10 @@ func TestFocusMatrix(t *testing.T) {
 // rows, and ↑ past the first sub-agent row comes back to the band.
 func TestQueueBandAndRowsCross(t *testing.T) {
 	m, stub := queueWorking(t)
-	stub.SetSubagents([]agent.SubagentInfo{{ID: "sub-1", Description: "one", Status: agent.SubagentRunning}})
 	stub.SetProvider(agent.GrokProvider())
+	sub := agent.SubagentInfo{ID: "sub-1", Description: "one", Status: agent.SubagentRunning}
+	stub.SetSubagents([]agent.SubagentInfo{sub})
+	m = feed(t, m, agent.Event{Type: agent.EventSubagent, Subagent: &sub, SubagentChange: agent.SubagentChangeSpawned})
 	m = typeEnter(t, m, "PINEAPPLE")
 	tm, _ := m.Update(refreshSnapMsg{})
 	m = tm.(Model)

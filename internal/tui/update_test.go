@@ -58,9 +58,18 @@ func startStub(t *testing.T, stub *Stub, ws string, cols, rows int) Model {
 }
 
 // startSession is startStub for a session that is not a bare Stub — the
-// scripted decorator — so the standard config stays in one place.
+// scripted decorator — so the standard config stays in one place. It sends
+// startedMsg itself, so the session's own Start never runs and nothing it
+// would publish — a Stub's install — is on the stream; sizedLikeInit starts
+// it as Init does instead.
 func startSession(t *testing.T, sess agent.Session, ws string, cols, rows int) Model {
 	t.Helper()
+	tm, _ := sizedSession(sess, ws, cols, rows).Update(startedMsg{})
+	return tm.(Model)
+}
+
+// sizedSession is the standard config around sess, sized and not started.
+func sizedSession(sess agent.Session, ws string, cols, rows int) Model {
 	m := New(Config{
 		Session:   sess,
 		Theme:     "tokyo-night",
@@ -69,9 +78,48 @@ func startSession(t *testing.T, sess agent.Session, ws string, cols, rows int) M
 		Yolo:      true,
 	})
 	tm, _ := m.Update(tea.WindowSizeMsg{Width: cols, Height: rows})
-	m = tm.(Model)
-	tm, _ = m.Update(startedMsg{})
 	return tm.(Model)
+}
+
+// sizedLikeInit is sized with the session started as Init starts it
+// (startedLikeInit): the Stub's own Start runs, and the fold holds the install
+// it published (plan 027 §3.13).
+func sizedLikeInit(t *testing.T) Model {
+	t.Helper()
+	isolateSkillsHome(t)
+	return startedLikeInit(t, sizedSession(NewStub(), t.TempDir(), 80, 24))
+}
+
+// startedLikeInit starts m's session the way Init does and applies what the
+// start produced: the start command's own Start — for a Stub, the install
+// delta a live session's Start publishes, which TestMain turns on (plan 027
+// §3.13) — then its startedMsg, then every event that Start published, read
+// off the session's primary as the event reader Init arms would read them.
+// The log is flushed first, so a model built here starts with nothing of its
+// session's start left unread, and its fold holds the settings a live
+// session's stream would give it. A fixture that sends startedMsg itself
+// (startSession, and every fixture that builds its model by hand) starts no
+// session at all and folds no install.
+func startedLikeInit(t *testing.T, m Model) Model {
+	t.Helper()
+	tm, _ := m.Update(m.startCmd()())
+	m = tm.(Model)
+	eng := engineOf(t, m)
+	if _, err := eng.SyncSeq(context.Background()); err != nil {
+		t.Fatalf("flushing what the session's start published: %v", err)
+	}
+	for {
+		select {
+		case ev, ok := <-eng.Events():
+			if !ok {
+				return m
+			}
+			tm, _ = m.Update(eventMsg{ev})
+			m = tm.(Model)
+		default:
+			return m
+		}
+	}
 }
 
 func enter() tea.KeyMsg { return tea.KeyMsg{Type: tea.KeyEnter} }

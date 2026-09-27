@@ -11,8 +11,14 @@ import (
 // has to emit the same bracket the live session's session/load path does —
 // start, every replayed event marked Replayed, end — and nothing at all when
 // there is no replay to hand back.
+//
+// It, TestStubStartWithoutReplayEmitsNothing and TestStubEmptyReplayStillBrackets
+// are the bracket alone, so each runs the Stub other packages build, with
+// InstallOnStart off (TestMain turns it on for this package's Stubs). Where
+// the install sits in the bracket is TestStubInstallsAtStartAsTheLiveSessionDoes's.
 func TestStubReplayIsBracketed(t *testing.T) {
 	s := NewStub()
+	s.InstallOnStart = false
 	t.Cleanup(func() { _ = s.Close() })
 	s.Replay = []agent.Event{
 		{Type: agent.EventUser, Text: "yesterday's prompt"},
@@ -52,6 +58,7 @@ func TestStubReplayIsBracketed(t *testing.T) {
 
 func TestStubStartWithoutReplayEmitsNothing(t *testing.T) {
 	s := NewStub()
+	s.InstallOnStart = false
 	t.Cleanup(func() { _ = s.Close() })
 	if err := s.Start(t.Context()); err != nil {
 		t.Fatal(err)
@@ -105,6 +112,7 @@ func TestStubSetTitlePins(t *testing.T) {
 // something a reader can act on.
 func TestStubEmptyReplayStillBrackets(t *testing.T) {
 	s := NewStub()
+	s.InstallOnStart = false
 	t.Cleanup(func() { _ = s.Close() })
 	s.Replay = []agent.Event{}
 	if err := s.Start(t.Context()); err != nil {

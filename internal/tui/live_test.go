@@ -278,11 +278,19 @@ func TestWiredModelChangeGoesThroughTheModelOption(t *testing.T) {
 // asks (asyncGate) run asynchronously. And it installs the gate's
 // invisibility watch (gate_test.go), so every gate any test opens is held
 // still from its issuing Update to its reply.
+//
+// And it turns the Stub's install on for the package (plan 027 §3.13, "The
+// Stub publishes what the live session would"): every Stub a test here builds
+// publishes, at Start, the install delta a live session's Start publishes, so
+// the fold holds the settings a live session's stream would give it. Other
+// packages' Stubs, and production's, keep today's Start; a test here that
+// needs it says so by setting InstallOnStart false on its Stub.
 func TestMain(m *testing.M) {
 	pristineEnv = os.Environ()
 	lipgloss.SetColorProfile(termenv.TrueColor)
 	installParityWatch()
 	gateSyncDefault = true
+	stubInstallOnStartDefault = true
 	installGateWatch()
 	// No test may shell out to xclip, overwrite the developer's clipboard or
 	// read it. The seam itself stays real so the OSC 52 bytes are still
