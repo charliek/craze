@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -1520,9 +1521,39 @@ func TestNativeAskWithNoTurnOpensNothing(t *testing.T) {
 // commit nothing and every Flush parks. TryPublish never blocks, so an event
 // something else put there first cannot wedge the test; the length check is
 // what says the primary is really full rather than that the boundary was busy.
+//
+// It first waits for the outbox to go quiet (drained == enqueued): a batch's
+// publishBatch sends each event into the primary and then holds the boundary
+// through commitLocked and the rest of the batch before it releases (plan
+// 021 §3.3) — TryPublish refuses at once whenever the boundary is held, batch
+// or not — so filling the moment the primary shows the batch's own event
+// (its card up) can still race a boundary the drainer has not yet released.
+// Once the outbox is quiet nothing else holds the boundary, so a refused
+// TryPublish here can only be the boundary briefly busy with a filled primary
+// (the log is not closed), and retrying while the primary is short of
+// primaryCap resolves it.
 func fillPrimaryHere(t *testing.T, l *EventLog) {
 	t.Helper()
-	for l.TryPublish(textEvent("fill")) {
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		_, _, enqueued, drained, _ := outboxState(l)
+		if drained == enqueued {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the outbox never went quiet: drained %d, enqueued %d", drained, enqueued)
+		}
+		runtime.Gosched()
+	}
+	deadline = time.Now().Add(5 * time.Second)
+	for len(l.Primary()) < primaryCap {
+		if l.TryPublish(textEvent("fill")) {
+			continue
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the primary holds %d of %d events; it never filled", len(l.Primary()), primaryCap)
+		}
+		runtime.Gosched()
 	}
 	if n := len(l.Primary()); n != primaryCap {
 		t.Fatalf("the primary holds %d of %d events; it never filled", n, primaryCap)
@@ -1563,11 +1594,14 @@ func TestNativeCloseReturnsWhileTheToolsFlushIsParked(t *testing.T) {
 	out := startPrompt(s, "ask me")
 	q := w.waitType(EventQuestion).Question
 
-	// The card is up, which means the asker's first flush returned and the
-	// tool is parked on Wait: the outbox is empty and nothing else is
-	// publishing. The reader stops — draining what it still held — and the
-	// primary is filled, so the asker's SECOND flush, the one it makes once
-	// Close resolves the ask, has something to park on.
+	// The card is up. That says only that the batch carrying it reached the
+	// primary: the drainer can still hold the boundary behind it (inside
+	// commitLocked or a later event of the same batch), and the asker's first
+	// flush has its answer only once that batch is committed. The reader
+	// stops — draining what it still held — and fillPrimaryHere waits for the
+	// outbox to go quiet before it fills the primary, so the asker's SECOND
+	// flush, the one it makes once Close resolves the ask, has something to
+	// park on.
 	w.pause()
 	fillPrimaryHere(t, s.log)
 	_, _, enqueued, _, _ := outboxState(s.log)
