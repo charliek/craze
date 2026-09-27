@@ -1851,8 +1851,9 @@ No owner decision was reopened at any round.
 **PR 3 — `feature/plan-027-s2-tui-async`** (executing): C16 (`33cdebb` — the
 TUI holds a `backend.Backend`, `internal/backend/backend.go:67-102`; every
 command, `Read`, `Ask` and `Settings` takes a `context.Context` first —
-`ClientID`, `Started`, `Close`, `Info` and `Epoch` wait on nothing and take
-none (`backend.go:94`); `Settings` narrows to `{Model, Mode, Config}`, no
+`ClientID`, `Started`, `Close`, `Info` and `Epoch` take none, and all but
+`Close` wait on nothing — `Close` can block while the agent is reaped
+(`backend.go:75-78`, `:94`); `Settings` narrows to `{Model, Mode, Config}`, no
 provider); C17 (`b8bf66b` — the command gate: `Model.run`/`gated`
 (`internal/tui/gate.go:179`, `:297`) wraps a gated call in a goroutine under
 `gateDeadline` (15 s, `:55`), `runFrameModes` runs every frame golden but
@@ -1894,7 +1895,18 @@ and refreshes its version instead of stranding it); C23 (`240718f` —
 `stopSubagent` returns a `tea.Cmd`, `internal/tui/subcancel.go:91`, never
 gated, threaded through `handleRowsKey` and `handleViewKey`).
 
-Proof: filled in at the PR tip.
+Proof, at the code tip `240718f` (the commits after it touch only `discovery/`):
+V1 — `-race -count=20` on tui (`-timeout 150m`: 3,673 s, about 184 s a
+pass), backend, engine, agent, transcript, control and remote: all ok, no
+race; V2 — `craze prompt --json` against the plan-021 baseline: 103/103
+SAME by bytes; V8 — the seeded 0–10 ms jitter run, async only: 20 seeds,
+760 golden runs, 0 failures; V6 — mac-mini key latency under a four-child
+native fan-out with gated commands mid-stream (PR 3 at `674da35` against
+`main` at `ddd9812`): worst key-to-screen 26.2 ms against 23.4 ms, no
+significant difference (rank-sum p = 0.19 over the fan-out, 0.85 after a
+gated command), and the mirror's per-event `Info()` read costs about 15%
+more CPU per event (X46 6); starvation — every golden under a 5% CPU quota:
+83/83 pass. `git diff --stat origin/main..HEAD -- '*testdata*'` is empty.
 
 ### Deviations from the plan
 
@@ -2143,7 +2155,8 @@ reopens a pinned decision.
    the session's backend, in process now and a socket in PR 4. Every Backend
    command, `Read`, `Ask` and `Settings` take a `context.Context` first, the
    permanent interface (SD-33) — `ClientID`, `Started`, `Close`, `Info` and
-   `Epoch` wait on nothing and take none: the backend epoch rides in the ctx.
+   `Epoch` take none (the backend epoch rides in the ctx), and all but `Close`
+   wait on nothing: `Close` can block while the agent is reaped.
    In process the non-waiting verbs pass no ctx to the engine; since C18c
    every command, `Ask` and `Settings` check the ctx's epoch first
    (`internal/tui/engine_backend.go:120`). `Settings` narrows to `{Model,
@@ -2222,7 +2235,7 @@ reopens a pinned decision.
    while its save goes unanswered is ended by `syncQueue`, which restores the
    pre-edit draft and loses the edited text — today's existing rule for any
    row that leaves the queue mid-edit, which the gate only reaches by a rare
-   15-s-deadline route; keeping the edited text is a UX change, recorded as
+   no-answer route (its 15-s deadline, or the held queue's bound); keeping the edited text is a UX change, recorded as
    `13`'s SF-51. `handleQueueKey` returns `(bool, Model, tea.Cmd)`. V1's
    `internal/tui` `-race` pass runs under `-timeout 150m`, not 60 m: the
    both-mode goldens' 1,200+ schedule orders make one pass ~165 s, so 20
