@@ -579,6 +579,17 @@ func emitSiteEvents() []emitSiteEvent {
 		{"a send-now disarmed for a reason with no failure behind it", Event{Type: EventMeta, State: &StateDelta{
 			SendNow: &SendNowState{}, Reason: SendNowRowGone,
 		}, At: at}},
+		{"a native step's usage, some of it unpriced", Event{Type: EventMeta, State: &StateDelta{Usage: &UsageState{
+			ContextTokens: 340_000, ContextWindow: 1_000_000,
+			Turn:    Spend{Input: 1_200, Output: 800, Reasoning: 300, CacheRead: 330_000, CostPicoUSD: 40_000_000_000},
+			Session: Spend{Input: 9_000, Output: 6_000, Reasoning: 2_000, CacheRead: 1_200_000, CacheCreation: 40_000, CostPicoUSD: 1_200_000_000_000, Unpriced: true},
+		}}, At: at}},
+		{"a load's install, carrying what the stored session spent", Event{Type: EventMeta, Replayed: true, State: &StateDelta{
+			Title: ptr("resumed"), Model: ptr("test/a"), Mode: ptr("agent"), Config: &ConfigState{},
+			Commands: &CommandsState{}, Plugins: &PluginsState{},
+			Usage: &UsageState{ContextTokens: 12_300, Turn: Spend{Input: 10, Output: 5, Unpriced: true},
+				Session: Spend{Input: 30, Output: 15, Unpriced: true}},
+		}, At: at}},
 		{"no time at all", Event{Type: EventText, Text: "x"}},
 	}
 }
@@ -742,6 +753,65 @@ func pinnedWireShapes() []pinnedWireShape {
 		{Event{Type: EventCompaction, Agent: "child-1", Compaction: &CompactionInfo{Phase: CompactionEnded, Reason: CompactionManual,
 			TokensBefore: 890000, TokensAfter: 21000}},
 			`{"type":"compaction","agent":"child-1","compaction":{"phase":"ended","reason":"manual","tokensBefore":890000,"tokensAfter":21000}}`},
+		// The usage section (plan 028 §3.14): every key always, a zero and a
+		// false included, where every other section omits its zero values —
+		// and the section itself absent when nil, as every delta above shows.
+		{Event{Type: EventMeta, State: &StateDelta{Usage: &UsageState{
+			ContextTokens: 340000, ContextWindow: 1000000,
+			Turn:    Spend{Input: 1200, Output: 800, Reasoning: 300, CacheRead: 330000, CostPicoUSD: 40000000000},
+			Session: Spend{Input: 9000, Output: 6000, CostPicoUSD: 1200000000000, Unpriced: true},
+		}}},
+			`{"type":"meta","state":{"usage":{"contextTokens":340000,"contextWindow":1000000,` +
+				`"turn":{"input":1200,"output":800,"reasoning":300,"cacheRead":330000,"cacheCreation":0,"costPicoUsd":40000000000,"unpriced":false},` +
+				`"session":{"input":9000,"output":6000,"reasoning":0,"cacheRead":0,"cacheCreation":0,"costPicoUsd":1200000000000,"unpriced":true}}}}`},
+		{Event{Type: EventMeta, State: &StateDelta{Usage: &UsageState{}}},
+			`{"type":"meta","state":{"usage":{"contextTokens":0,"contextWindow":0,` +
+				`"turn":{"input":0,"output":0,"reasoning":0,"cacheRead":0,"cacheCreation":0,"costPicoUsd":0,"unpriced":false},` +
+				`"session":{"input":0,"output":0,"reasoning":0,"cacheRead":0,"cacheCreation":0,"costPicoUsd":0,"unpriced":false}}}}`},
+	}
+}
+
+// TestUsageIsAbsentOnTheWireWhenNil (plan 028 A32, seam 4): a delta and a
+// leaf with no usage section carry no "usage" key at all — never null and
+// never {} — which is every delta an ACP session publishes: the install a
+// live session's Start enqueues has every section but this one, and its
+// body is what it was before the section existed. So no fixture of an ACP
+// session's wire moves (TestWireFixtures), and a client reads the key's
+// presence as "this session reports usage".
+func TestUsageIsAbsentOnTheWireWhenNil(t *testing.T) {
+	install := Event{Type: EventMeta, State: &StateDelta{
+		Title: ptr("t"), Mode: ptr("agent"), Model: ptr("grok"),
+		Config:   &ConfigState{Options: []ConfigOption{{ID: "effort", Current: "high"}}},
+		Commands: &CommandsState{Commands: []CommandInfo{{Name: "research"}}},
+		Plugins:  &PluginsState{Plugins: []PluginCommand{{Qualified: "p:c"}}},
+		SendNow:  &SendNowState{},
+	}}
+	body, err := EncodeEvent(install)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(body, `"usage"`) {
+		t.Fatalf("a delta with no usage section writes one: %s", body)
+	}
+	const want = `{"type":"meta","state":{"title":"t","mode":"agent","model":"grok","config":{"options":[{"id":"effort","current":"high"}]},` +
+		`"commands":{"commands":[{"name":"research"}]},"plugins":{"plugins":[{"qualified":"p:c"}]},"sendNow":{}}}`
+	if body != want {
+		t.Fatalf("an ACP install's body moved:\n got %s\nwant %s", body, want)
+	}
+	if raw, err := EncodeUsageState(nil); raw != nil || err != nil {
+		t.Fatalf("EncodeUsageState(nil) = %q, %v; want no bytes at all", raw, err)
+	}
+	for _, raw := range []string{"", "null"} {
+		if u, err := DecodeUsageState(json.RawMessage(raw)); u != nil || err != nil {
+			t.Fatalf("DecodeUsageState(%q) = %+v, %v; want nil", raw, u, err)
+		}
+	}
+	back, err := DecodeEvent(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if back.State == nil || back.State.Usage != nil {
+		t.Fatalf("decoded, the delta has usage %+v", back.State)
 	}
 }
 
@@ -1279,6 +1349,8 @@ func TestLeafWrappersWriteWhatTheEventCarries(t *testing.T) {
 		[]string{"state", "plugins"}, EncodePluginsState, DecodePluginsState)
 	checkLeaf(t, "SendNowState", func(v *SendNowState) Event { return Event{Type: EventMeta, State: &StateDelta{SendNow: v}} },
 		[]string{"state", "sendNow"}, EncodeSendNowState, DecodeSendNowState)
+	checkLeaf(t, "UsageState", func(v *UsageState) Event { return Event{Type: EventMeta, State: &StateDelta{Usage: v}} },
+		[]string{"state", "usage"}, EncodeUsageState, DecodeUsageState)
 	checkLeaf(t, "ForeignTurnInfo", func(v *ForeignTurnInfo) Event { return Event{Type: EventForeignTurn, ForeignTurn: v} },
 		[]string{"foreignTurn"}, EncodeForeignTurnInfo, DecodeForeignTurnInfo)
 

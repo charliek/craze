@@ -1,13 +1,18 @@
 """Plan 018 C11: `craze --provider native` from the outside.
 
-The native provider is hidden (plan 018 §3.4): never listed, never persisted,
-never indexed. These tests drive the real `craze` binary against a loopback
-SSE fixture standing in for a real OpenAI-compatible provider (sse_fixture.py)
-and check the CLI-visible contract: text streams and the turn ends end_turn,
-`--help` and an unknown-provider error never say "native", a run never
-touches config.toml's provider or creates sessions.jsonl, and a canary key
-never reaches stdout or stderr -- including when the provider answers 401 or
-500 with the key echoed back, the realistic leak path (plan 018 §3.5).
+Through H7 the native provider was hidden (plan 018 §3.4): never listed,
+never persisted, never indexed. Plan 028 §3.16/D-65 lists it once H7's smoke
+passed on both platforms: it is now in `--help` and the unknown-provider
+error like cursor, grok and gx, and an explicit `--provider native` run
+persists it as the default the same way theirs would (plan 028 §3.5 already
+made it indexed). These tests drive the real `craze` binary against a
+loopback SSE fixture standing in for a real OpenAI-compatible provider
+(sse_fixture.py) and check the CLI-visible contract: text streams and the
+turn ends end_turn, `--help` and the unknown-provider error both say
+"native", a run persists it to config.toml's provider and leaves every other
+key alone, and a canary key never reaches stdout or stderr -- including when
+the provider answers 401 or 500 with the key echoed back, the realistic leak
+path (plan 018 §3.5).
 """
 
 from __future__ import annotations
@@ -473,14 +478,24 @@ def test_native_compat_non_bool_is_the_default_and_one_line(
     assert COMPAT_MARKERS["skills"] in system_text(fixture_server.requests[0])
 
 
-def test_native_absent_from_help_and_unknown_provider_error(
+def test_native_is_in_help_and_unknown_provider_error(
     craze_bin: Path, tmp_path: Path
 ) -> None:
+    """Plan 028 §3.16/D-65: native is listed like cursor, grok and gx.
+
+    `--help`'s --provider flag names it -- as the one that runs inside craze,
+    not one of the ACP agents (C19a) -- and an unknown --provider's error
+    offers it alongside the others.
+    """
     help_proc = subprocess.run(
         [str(craze_bin), "--help"], capture_output=True, text=True, timeout=5
     )
     assert help_proc.returncode == 0, help_proc.stderr
-    assert "native" not in help_proc.stdout.lower(), help_proc.stdout
+    assert (
+        "cursor, grok, gx (ACP agents) or native (runs inside craze)"
+        in help_proc.stdout
+    ), help_proc.stdout
+    assert "ACP provider" not in help_proc.stdout, help_proc.stdout
 
     unknown_proc = subprocess.run(
         [
@@ -498,13 +513,17 @@ def test_native_absent_from_help_and_unknown_provider_error(
     )
     assert unknown_proc.returncode == 2
     assert "unknown provider" in unknown_proc.stderr
-    assert "native" not in unknown_proc.stderr.lower(), unknown_proc.stderr
+    assert "cursor, grok, gx, or native" in unknown_proc.stderr, unknown_proc.stderr
     assert unknown_proc.stdout == ""
 
 
-def test_native_run_leaves_config_and_sessions_alone(
+def test_native_run_persists_provider_and_leaves_sessions_alone(
     craze_bin: Path, tmp_path: Path, fixture_server: SSEFixture
 ) -> None:
+    """Plan 028 §3.16/D-65: native is listed, so `craze prompt --provider
+    native` persists it as the default the same way cursor or grok would,
+    leaving every other config key alone. `craze prompt` still writes no
+    session index, listed or not (§2.5)."""
     fixture_server.set_ok(text_parts=["ok"])
     craze_home = tmp_path / "craze-home"
     craze_home.mkdir()
@@ -516,7 +535,7 @@ def test_native_run_leaves_config_and_sessions_alone(
     proc = run_native(craze_bin, craze_home, tmp_path, "hi")
     assert proc.returncode == 0, proc.stderr
 
-    assert config_path.read_text(encoding="utf-8") == before
+    assert config_path.read_text(encoding="utf-8") == 'provider = "native"\ntheme = "tokyo-night"\n'
     assert not (craze_home / "sessions.jsonl").exists()
 
 

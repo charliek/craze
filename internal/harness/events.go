@@ -13,7 +13,9 @@ import (
 //   - the answer: TextDelta, ThoughtDelta;
 //   - tool calls: ToolStarted, ToolCalled, ToolProgress, ToolFinished;
 //   - the turn's course: StepDone, Steered, Retrying, Diag;
-//   - the harness's own state, projected: Todos, Compacted (plan 028 §3.13);
+//   - the harness's own state, projected: Todos, Compacted (plan 028 §3.13),
+//     and Spent, what the session has spent (§3.14), which only a session
+//     that is not a sub-agent emits;
 //   - sub-agents (plan 026 §3.9): SubagentStarted, SubagentEvent — one of a
 //     child's own events, wrapped — and SubagentFinished; and, for a
 //     background child the session closed before delivering (§3.11),
@@ -163,6 +165,47 @@ const (
 	CompactionStarted = "started"
 	CompactionEnded   = "ended"
 )
+
+// Spent reports what the session has spent (plan 028 §3.14, PD18): after
+// every step the session's turns finish — a step whose append failed, or that
+// was refused for its call ids, included — after every compaction that ran,
+// whatever became of it, and once at the end of a Replay of a stored session
+// with anything on its path. Only a session that is not a sub-agent emits it
+// (P33): a child's usage reaches its parent's spend through the subagent_usage
+// rows its parent's entries carry, and a Spent of its own would be counted
+// again by whoever summed the two.
+//
+// Session is the session's spend (spend.go): the usage of its assistant
+// entries on the transcript's path, of the subagent_usage rows every entry on
+// it carries and of every compaction entry on it, plus what this incarnation
+// was billed that no entry holds — a step whose append failed, a compaction
+// whose entry could not be written. Turn is the part of it that belongs to
+// Turn's turn: the turn of the step or the compaction the Spent follows, and,
+// after a Replay, the last turn the path numbers. Each usage is priced by its
+// own model's (provider, wire model) through the model table (D-02,
+// modeltable.Table.Price), never by the alias it names.
+//
+// ContextTokens is the size, in tokens, of what the next request sends
+// (§3.7): the last reported usage and the estimate of what the context has
+// gained since, or the whole context's estimate. ContextWindow is the context
+// window of the model that request goes to, 0 when the table does not know it.
+type Spent struct {
+	ContextTokens, ContextWindow int64
+	Turn, Session                Spend
+}
+
+// Spend is a sum of usage and what it cost: the token counts — Reasoning is
+// inside Output, as the provider bills it, and is reported for what it is,
+// never priced a second time — and CostPicoUSD, the priced part's cost in
+// picodollars (10⁻¹² $; modeltable.Rates), exact in int64. Unpriced says some
+// usage in the sum had no price — its model's identity has no cost in the
+// table — so CostPicoUSD is less than what was billed; its tokens are counted
+// all the same.
+type Spend struct {
+	Input, Output, Reasoning, CacheRead, CacheCreation int64
+	CostPicoUSD                                        int64
+	Unpriced                                           bool
+}
 
 // StepDone reports a finished model step: what it was, what it cost, and
 // whether it was persisted. It comes after the step's text and tool calls,
@@ -373,6 +416,7 @@ func (SubagentFinished) isEvent()    {}
 func (SubagentUndelivered) isEvent() {}
 func (Prompted) isEvent()            {}
 func (Compacted) isEvent()           {}
+func (Spent) isEvent()               {}
 
 // Usage is a step's or a turn's token counts: input, output, reasoning, and
 // the prompt-cache reads and writes, which show whether a provider's prefix

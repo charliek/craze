@@ -24,6 +24,8 @@ import (
 	"fmt"
 	"io/fs"
 	"maps"
+	"math"
+	"math/big"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -157,6 +159,43 @@ type Model struct {
 	// import; source = "manual" keeps it.
 	ToolProfile string
 	Source      string
+	// Cost is [models."<alias>".cost] (plan 028 §3.14): nil when the file's
+	// entry has no such table, so a model with no cost saves exactly as it
+	// did before this section existed (mirrors [compaction]). Rates are
+	// dollars per 1,000,000 tokens; a usage's price in picodollars per token
+	// comes from Table.Price, not from reading this struct directly.
+	Cost *Cost
+}
+
+// Cost is one model's [models."<alias>".cost] section (plan 028 §3.14): each
+// rate is $ per 1,000,000 tokens, nil when the file leaves that key out —
+// every key is independently optional, and there are no tiers (PD21).
+// Validate checks a set rate is not negative and not more than
+// MaxCostPerMillion. Output carries reasoning too (§2.2): a provider's
+// reasoning tokens are billed as output, never split out.
+type Cost struct {
+	Input      *float64 `toml:"input,omitempty"`
+	Output     *float64 `toml:"output,omitempty"`
+	CacheRead  *float64 `toml:"cache_read,omitempty"`
+	CacheWrite *float64 `toml:"cache_write,omitempty"`
+}
+
+// MaxCostPerMillion is the highest rate, in dollars per 1,000,000 tokens,
+// Validate accepts. No real provider prices anywhere near this; a rate above
+// it is almost certainly a misplaced decimal point or a per-token value
+// written as though it were per-million.
+const MaxCostPerMillion = 10000.0
+
+// Clone is c with pointers of its own, nil when c is nil: changing the
+// clone's rates through its pointers never changes c's (mirrors
+// Compaction.Clone, for the same reason — a merge that carries c forward
+// must not alias the table it carries it from).
+func (c *Cost) Clone() *Cost {
+	if c == nil {
+		return nil
+	}
+	return &Cost{Input: clonePtr(c.Input), Output: clonePtr(c.Output),
+		CacheRead: clonePtr(c.CacheRead), CacheWrite: clonePtr(c.CacheWrite)}
 }
 
 // Subagents is one Table's [subagents] section (plan 026 §3.6): what a
@@ -324,6 +363,13 @@ type modelEntry struct {
 	Vision          bool     `toml:"vision,omitempty"`
 	ToolProfile     string   `toml:"tool_profile,omitempty"`
 	Source          string   `toml:"source,omitempty"`
+	// Cost is encoded separately, by encodeModels, as its own
+	// [models."<alias>".cost] table: encoding it here, nested inside this
+	// struct's own standalone Encode call, would print an unqualified
+	// [cost] header instead (BurntSushi has no notion of the enclosing
+	// manual header at that point). It is still decoded normally: strict
+	// decoding needs no such split, since the whole file is one document.
+	Cost *Cost `toml:"cost,omitempty"`
 }
 
 func (d *providersDoc) version() int { return d.Version }
@@ -457,6 +503,8 @@ func load(dir string, forImport bool) (*Table, error) {
 	if err := validate(t, ppath, mpath, crossFile{providers: !pMissing, models: !mMissing}); err != nil {
 		return nil, err
 	}
+	_, priceWarnings := pricedIdentities(t.Models)
+	t.Warnings = append(t.Warnings, priceWarnings...)
 	return t, nil
 }
 
@@ -571,6 +619,11 @@ func (t *Table) encodeProviders() ([]byte, error) {
 	return encodeFile(providersHeader, &providersDoc{Version: Version}, "providers", entries)
 }
 
+// encodeModels does not use encodeFile: an entry's Cost, when set, is written
+// as its own [models."<alias>".cost] table rather than through the entry's
+// own Encode call, which knows nothing of the manual header already written
+// and would print an unqualified [cost] instead (a sibling of [models], not
+// a child of the alias's table).
 func (t *Table) encodeModels() ([]byte, error) {
 	entries := make(map[string]modelEntry, len(t.Models))
 	for alias, m := range t.Models {
@@ -580,7 +633,28 @@ func (t *Table) encodeModels() ([]byte, error) {
 	}
 	top := &modelsDoc{Version: Version, DefaultModel: t.DefaultModel, Subagents: subagentsToDoc(t.Subagents),
 		Compaction: compactionToDoc(t.Compaction)}
-	return encodeFile(modelsHeader, top, "models", entries)
+
+	var buf bytes.Buffer
+	buf.WriteString(modelsHeader)
+	if err := toml.NewEncoder(&buf).Encode(top); err != nil {
+		return nil, fmt.Errorf("modeltable: encoding: %w", err)
+	}
+	for _, id := range slices.Sorted(maps.Keys(entries)) {
+		e := entries[id]
+		cost := e.Cost
+		e.Cost = nil // written after, at its own full table path
+		fmt.Fprintf(&buf, "\n[%s]\n", toml.Key{"models", id})
+		if err := toml.NewEncoder(&buf).Encode(e); err != nil {
+			return nil, fmt.Errorf("modeltable: encoding: %w", err)
+		}
+		if cost != nil {
+			fmt.Fprintf(&buf, "\n[%s]\n", toml.Key{"models", id, "cost"})
+			if err := toml.NewEncoder(&buf).Encode(cost); err != nil {
+				return nil, fmt.Errorf("modeltable: encoding: %w", err)
+			}
+		}
+	}
+	return buf.Bytes(), nil
 }
 
 // compactionFromDoc is the empty Compaction when d is nil (no [compaction] in
@@ -795,6 +869,34 @@ func validateModel(file, alias string, m Model, providers map[string]Provider, c
 		return at("tool_profile", fmt.Sprintf("unknown tool profile %q: want one of %s, or leave it out for the default",
 			m.ToolProfile, strings.Join(names, ", ")))
 	}
+	return validateCost(file, alias, m.Cost)
+}
+
+// validateCost checks c's set rates (plan 028 §3.14): each, when set, is a
+// finite number, not negative and not more than MaxCostPerMillion. NaN is
+// refused by name, because it compares false with both ends of the range
+// (TOML spells it `nan`). c is nil for a model with no [cost] table, which is
+// always valid. Checked in a fixed field order so the same table always
+// reports the same problem first.
+func validateCost(file, alias string, c *Cost) error {
+	if c == nil {
+		return nil
+	}
+	at := func(key string, v float64) error {
+		return &FileError{File: file, Table: toml.Key{"models", alias, "cost"}.String(), Key: key,
+			Reason: fmt.Sprintf("%v is out of range: want a rate in dollars per 1,000,000 tokens from 0 to %v", v, MaxCostPerMillion)}
+	}
+	for _, f := range []struct {
+		key string
+		v   *float64
+	}{{"input", c.Input}, {"output", c.Output}, {"cache_read", c.CacheRead}, {"cache_write", c.CacheWrite}} {
+		if f.v == nil {
+			continue
+		}
+		if math.IsNaN(*f.v) || math.IsInf(*f.v, 0) || *f.v < 0 || *f.v > MaxCostPerMillion {
+			return at(f.key, *f.v)
+		}
+	}
 	return nil
 }
 
@@ -905,6 +1007,147 @@ func (t *Table) Keys(getenv func(string) string) ([]Secret, error) {
 // Aliases returns every model alias, sorted.
 func (t *Table) Aliases() []string {
 	return slices.Sorted(maps.Keys(t.Models))
+}
+
+// Rates is one identity's per-token rates, in picodollars — an integer
+// number of trillionths of a dollar, so that a usage's cost is exact in
+// int64 (PD22): $1 per 1,000,000 tokens is 1,000,000 p$/token. Each is the
+// model's Cost rate rounded to the nearest picodollar exactly once, by
+// ratesFromCost; a rate the Cost left unset is 0.
+type Rates struct {
+	Input, Output, CacheRead, CacheWrite int64
+}
+
+// identity is (provider, wire model): what Table prices by (R2-7), because a
+// resumed session's alias may no longer exist while the identity it named
+// still does, and two aliases of one identity should price the same way.
+type identity struct {
+	Provider, WireModel string
+}
+
+// Price returns the picodollar-per-token rates priced for the (provider,
+// wire model) identity, and whether one was found. It is the canonical map's
+// lookup (R2-7): among every alias sharing that identity, the first in
+// sorted order that has a Cost. C16 prices every usage record through it,
+// resolving the record's alias to its identity first — Price itself never
+// takes an alias, so a record whose alias no longer resolves can still be
+// priced from its identity.
+func (t *Table) Price(provider, wireModel string) (Rates, bool) {
+	prices, _ := pricedIdentities(t.Models)
+	r, ok := prices[identity{provider, wireModel}]
+	return r, ok
+}
+
+// pricedIdentities builds the canonical (provider, wire model) → Rates map
+// (R2-7): for each identity, the first alias in sorted order that has a Cost.
+// warn is one line per identity where two or more priced aliases disagree on
+// the configured cost, naming every alias whose cost differs from the one
+// used — the table's existing warning channel, appended by load. The
+// comparison is of the Cost as written, all four keys, not of the rounded
+// Rates: two prices the owner wrote differently are a conflict even when
+// both round to the same picodollars (0.0000001 and 0.0000002 are both 0
+// p$/token), and so is a key one alias sets and the other leaves out. An
+// identity no priced alias names is simply absent from prices (Price's
+// ok = false).
+func pricedIdentities(models map[string]Model) (prices map[identity]Rates, warn []string) {
+	type priced struct {
+		alias string
+		cost  *Cost
+		rates Rates
+	}
+	byIdentity := make(map[identity][]priced)
+	for _, alias := range slices.Sorted(maps.Keys(models)) {
+		m := models[alias]
+		if m.Cost == nil {
+			continue
+		}
+		id := identity{m.Provider, m.WireModel}
+		byIdentity[id] = append(byIdentity[id], priced{alias, m.Cost, ratesFromCost(m.Cost)})
+	}
+	if len(byIdentity) == 0 {
+		return nil, nil
+	}
+	prices = make(map[identity]Rates, len(byIdentity))
+	for _, id := range sortedIdentities(byIdentity) {
+		entries := byIdentity[id] // already alias-sorted, from the range above
+		prices[id] = entries[0].rates
+		var diffs []string
+		for _, e := range entries[1:] {
+			if !e.cost.sameAs(entries[0].cost) {
+				diffs = append(diffs, e.alias)
+			}
+		}
+		if len(diffs) > 0 {
+			warn = append(warn, fmt.Sprintf(
+				"modeltable: %s and %s are both %s %s but set different cost; %s's price (sorted first) is used",
+				entries[0].alias, strings.Join(diffs, ", "), id.Provider, id.WireModel, entries[0].alias))
+		}
+	}
+	return prices, warn
+}
+
+// sameAs reports whether c and o configure the same cost: each of the four
+// keys is left out of both, or set in both to the same value. Neither is nil
+// here (pricedIdentities only compares models that have a Cost).
+func (c *Cost) sameAs(o *Cost) bool {
+	same := func(a, b *float64) bool { return (a == nil) == (b == nil) && (a == nil || *a == *b) }
+	return same(c.Input, o.Input) && same(c.Output, o.Output) &&
+		same(c.CacheRead, o.CacheRead) && same(c.CacheWrite, o.CacheWrite)
+}
+
+// sortedIdentities returns m's keys in a deterministic order (by provider,
+// then wire model), so pricedIdentities' warnings are stable from one load
+// to the next.
+func sortedIdentities[V any](m map[identity]V) []identity {
+	ids := make([]identity, 0, len(m))
+	for id := range m {
+		ids = append(ids, id)
+	}
+	slices.SortFunc(ids, func(a, b identity) int {
+		if c := strings.Compare(a.Provider, b.Provider); c != 0 {
+			return c
+		}
+		return strings.Compare(a.WireModel, b.WireModel)
+	})
+	return ids
+}
+
+// ratesFromCost rounds c's set rates to picodollars per token exactly once
+// (PD22). c is never nil: callers only call it for a Model whose Cost is set.
+func ratesFromCost(c *Cost) Rates {
+	return Rates{
+		Input:      picodollarsPerToken(c.Input),
+		Output:     picodollarsPerToken(c.Output),
+		CacheRead:  picodollarsPerToken(c.CacheRead),
+		CacheWrite: picodollarsPerToken(c.CacheWrite),
+	}
+}
+
+// picodollarsPerToken rounds a $-per-1,000,000-token rate to the nearest
+// integer number of picodollars per token: $1/M is 1,000,000 p$/token, so
+// the conversion is ×1,000,000 rounded to the nearest integer, half up. It
+// is done in decimal, not in float64: the rate is read back as its shortest
+// decimal spelling — what the file wrote — and shifted exactly, because a
+// binary product can land a decimal half step on the wrong side (0.0001245 ×
+// 1e6 is 124.49999999999999 in float64, while 124.5 rounds to 125). A nil
+// rate (the file left the key out) prices as 0, as does a non-finite one,
+// which Validate refuses before any table is priced.
+func picodollarsPerToken(dollarsPerMillion *float64) int64 {
+	if dollarsPerMillion == nil || math.IsNaN(*dollarsPerMillion) || math.IsInf(*dollarsPerMillion, 0) {
+		return 0
+	}
+	r, ok := new(big.Rat).SetString(strconv.FormatFloat(*dollarsPerMillion, 'f', -1, 64))
+	if !ok { // unreachable: 'f' spells every finite float64 as a decimal SetString reads
+		return 0
+	}
+	r.Mul(r, big.NewRat(1_000_000, 1))
+	// Half up, away from zero: q is the quotient truncated toward zero, and
+	// a remainder of at least half the denominator moves it one step out.
+	q, m := new(big.Int).QuoRem(r.Num(), r.Denom(), new(big.Int))
+	if m.Abs(m).Lsh(m, 1).Cmp(r.Denom()) >= 0 {
+		q.Add(q, big.NewInt(int64(r.Sign())))
+	}
+	return q.Int64()
 }
 
 func sourceOrManual(s string) string {

@@ -560,6 +560,14 @@ var deltaFields = []deltaField{
 			m.settings.Truncated.SendNow = false
 		}
 	}},
+	// Usage (plan 028 §3.14, seam 8): a copy, so the model holds nothing the
+	// event it came from does. It has no truncation mark to clear.
+	{name: "Usage", apply: func(m *Model, st *agent.StateDelta, _ time.Time) {
+		if st.Usage != nil {
+			u := *st.Usage
+			m.settings.Usage = &u
+		}
+	}},
 	// Reason names what happened to a send-now; alone it draws nothing, and
 	// its words are the client's toasts, never rows.
 	{name: "Reason", report: true, apply: func(*Model, *agent.StateDelta, time.Time) {}},

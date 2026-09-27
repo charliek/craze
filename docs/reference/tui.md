@@ -8,12 +8,19 @@
 The TUI is the default command. It refuses to start on a non-tty.
 
 Without `--provider`, a centred **provider** dialog lists `cursor`, `grok`,
-and `gx` — the last shown only when a binary for it resolves, since gx is a
-third-party fork nobody can assume is installed (see
-[Configuration](configuration.md#provider-precedence)) — before the session
-is constructed. The preselected row is the resolved default (see
-[Configuration](configuration.md)). `↑`/`↓`/`Tab` move, `Enter` starts
+`gx` and `native` — `gx` shown when a binary for it resolves, or when it is
+the resolved default (the default is always listed, so `Esc` never starts a
+row the picker did not show), since gx is a third-party fork nobody can assume
+is installed (see [Configuration](configuration.md#provider-precedence)) —
+before the session is constructed. The preselected row is the resolved default
+(see [Configuration](configuration.md)). `↑`/`↓`/`Tab` move, `Enter` starts
 that row, `Esc` starts the default. After Start the provider cannot change.
+
+A row the command line rules out is not started: `native` with `--agent-bin`
+or `CRAZE_AGENT_BIN` set, since it runs inside craze and has no binary to
+spawn. `Enter` on it shows the refusal `--provider native` would have exited 2
+with, as an error row under the list, and the dialog stays open for another
+choice; nothing is saved as the default. Moving the cursor clears the row.
 
 `--resume` shows a **resume** picker instead of that dialog, and `--continue`
 skips both and loads a session directly — see [Resuming a
@@ -122,7 +129,7 @@ A restored session does not reconstruct everything:
 
 ### Native sessions
 
-The native provider (`--provider native`, hidden) resumes the same way as
+The native provider (`--provider native`) resumes the same way as
 above, over its own transcript in place of an agent's `session/load`:
 
 - **Tool cards** have no exit code, diff or truncation metadata to restore —
@@ -478,7 +485,7 @@ mode and the offer disappears once the composer is non-empty. `Esc` clears the
 offer without losing focus. Changing mode, `/clear`, the next turn or a card
 arriving all clear it too.
 
-On the native provider (`--provider native`, hidden) the same `/plan`,
+On the native provider (`--provider native`) the same `/plan`,
 `/ask`, `/agent`, `Shift+Tab` and the offer above work. Plan mode lets the
 model edit only its plan file, which lives under the harness home beside the
 session transcript — by default
@@ -520,7 +527,7 @@ a slot to free.
 
 ## Compaction
 
-On the native provider (`--provider native`, hidden), a long session
+On the native provider (`--provider native`), a long session
 summarizes its own context rather than growing it forever. Once the context
 reaches 85% of the model's context window — capped at the window less its
 output ceiling, when `models.toml` sets one — craze summarizes the
@@ -566,10 +573,11 @@ name collision follows. Typed as a prompt, `/compact` is never sent to the
 model: it is a turn of its own, ending as soon as the compaction does, with
 no model turn after it. `/compact` with nothing in the context yet says so
 ("nothing to compact yet") instead of compacting an empty conversation.
-Sent while a turn is already running, `/compact` is never queued into it —
-like any interjection it is refused and runs as its own turn once the
-current one ends; `Ctrl+L` on a refused `/compact` draft shows "nothing to
-interject into" and keeps the draft, and `Enter` queues it for after. A
+Sent while a turn is already running, `/compact` is never sent into it as a
+steer — like any interjection it is refused, which keeps the draft rather
+than sending it (`Ctrl+L` on it shows "nothing to interject into"). Nothing
+queues it automatically: pressing `Enter` on the kept draft is what queues
+it, to run as its own turn once the current one ends. A
 `/compact` that succeeds turns compacting-on-its-own back on only when it
 leaves the context under the threshold; if the context is still at or over
 the threshold afterward, automatic compaction stays off (or turns off, if it
@@ -600,6 +608,32 @@ exact detail can still be found there when the segment no longer has it. The
 summary message names the directory, so the model knows the files are there
 when an exact detail — a command, an error string, a path — matters more
 than the summary's own account of it.
+
+## Usage and cost
+
+On the native provider, status row 1 gains a usage part after the model name
+once the session has taken a step — how full the context is, and what it has
+spent, the turn's amount then the session's:
+
+| state | text |
+|---|---|
+| priced | `34% ctx · $0.04 / $1.20` |
+| some usage had no price | `34% ctx · $0.04 / $1.20+` |
+| nothing priced at all | `34% ctx · 12.3k / 1.21M tok` |
+| a window craze does not know | `$0.04 / $1.20` (the `NN% ctx ·` prefix is left out) |
+| no usage yet (ACP, or before native's first step) | no part at all |
+
+Money is to the cent, rounded half up, and reads `<$0.01` for an amount
+above nothing that would otherwise round to nothing. A `+` on an amount
+means at least some of the usage behind it had no [price](configuration.md#native-cost)
+in `models.toml` — it is a floor, not the true cost. With nothing priced at
+all, the row falls back to billed tokens instead of a dollar figure: input,
+cache, and output, added together. The turn's amount is what the turn the
+last report followed spent; the session's is everything the session has
+spent, including its compactions' usage and its sub-agents', each priced by
+its own model. Row 1 drops its parts in a pinned order as the terminal
+narrows — elapsed first, then the branch, then this usage part, then the
+provider, and the model last of all.
 
 ## Cards
 

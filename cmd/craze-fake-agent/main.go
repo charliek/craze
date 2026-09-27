@@ -28,6 +28,8 @@ Flags:
           grok-subagent one grok explore child with progress and finish
           grok-subagent-fail same, child finishes failed
           grok-subagent-two two parallel children, colliding tool ids
+          grok-subagent-two-hold same, hangs after sub-1's progress instead
+                      of finishing (a golden's last event to wait on)
           grok-subagent-nested grandchild spawned on the child's session
           grok-subagent-late child still running at prompt_complete
           grok-subagent-cancel cancel with a running child (finish after)
@@ -180,7 +182,7 @@ func main() {
 		"bash", "task", "task-late", "commands", "nocommands", "callorder", "markdown", "title", "planmode", "planmode-card",
 		"env", "turnfail",
 		"grok-echo", "grok-ask", "grok-plan", "grok-ask-wrapped",
-		"grok-subagent", "grok-subagent-fail", "grok-subagent-two", "grok-subagent-nested",
+		"grok-subagent", "grok-subagent-fail", "grok-subagent-two", "grok-subagent-two-hold", "grok-subagent-nested",
 		"grok-subagent-late", "grok-subagent-hold", "grok-subagent-cancel", "grok-subagent-cancel-early",
 		"long-turn", "grok-long-turn", "grok-long-turn-fallback",
 		"load", "grok-load", "load-missing", "load-hang", "load-long", "load-settings",

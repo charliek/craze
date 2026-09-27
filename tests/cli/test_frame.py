@@ -691,27 +691,38 @@ def test_frame_gx_echo(craze_bin: Path, fake_agent_bin: Path, tmp_path: Path) ->
 # test_frame_grok_echo does: the cursor dialect drops every
 # _x.ai/session_notification, so without the flag there is no row to wait on.
 # The keys mirror internal/tui/frame_test.go's goldens, which own the exact
-# cells; these own the trip through the command. The rows case waits on the
-# progress suffix (`4.7k tok`) rather than on the row itself because the
-# suffix is what proves the progress notification landed, the way the Go
-# golden's <wait:text:4.7k tok> does.
+# cells; these own the trip through the command.
+#
+# The cases that capture a child still running (rows, view, two) guard two
+# races, SF-45's class (83e58e3 for the Go rows golden; plan 028 C19c/C19e
+# here). The plain scripts finish their children taskRunFor (250ms) after
+# progress, and a starved runner captures after that finish; the -hold
+# scripts never send it. And the row's "4.7k tok" is read from the live
+# snapshot (refreshSnap), which can run ahead of the event stream, so each
+# case first waits on the parent's wait-tool row (`◌ tool
+# get_command_or_subagent_output`, or `◌ tool  multi-wait (wait_all)` for two
+# children), which only its own event draws and which follows the children's
+# output on that stream. The rows and view cases also freeze the capture
+# (`craze frame --freeze`) because their wants hold the elapsed "0s".
 
-# case id, script, cols, rows, keys, substrings that must be on the frame
+# case id, script, cols, rows, keys, substrings that must be on the frame, freeze
 GROK_SUBAGENT_CASES = [
     (
         "grok-subagent-rows",
-        "grok-subagent",
+        "grok-subagent-hold",
         80,
         24,
-        "<wait:idle>go<enter><wait:text:4.7k tok>",
+        "<wait:idle>go<enter><wait:text:◌ tool  get_command_or_subagent_output><wait:text:4.7k tok>",
         ["○ explore  List directory files  0s · 4.7k tok", "← 1 agent"],
+        True,
     ),
     (
         "grok-subagent-view",
-        "grok-subagent",
+        "grok-subagent-hold",
         80,
         24,
-        "<wait:idle>go<enter><wait:text:4.7k tok><down><enter><wait:text:esc to return>",
+        "<wait:idle>go<enter><wait:text:◌ tool  get_command_or_subagent_output><wait:text:4.7k tok>"
+        "<down><enter><wait:text:esc to return>",
         [
             "(grok-4.6) List directory files",
             "read-only · esc to return",
@@ -719,14 +730,17 @@ GROK_SUBAGENT_CASES = [
             "● explore",
             "list_dir · 0s · 4.7k tok",
         ],
+        True,
     ),
     (
         "grok-subagent-two",
-        "grok-subagent-two",
+        "grok-subagent-two-hold",
         100,
         30,
-        "<wait:idle>go<enter><wait:text:4.7k tok><down><enter><tab><wait:text:✓ tool  read_file>",
+        "<wait:idle>go<enter><wait:text:◌ tool  multi-wait (wait_all)><wait:text:4.7k tok>"
+        "<down><enter><tab><wait:text:✓ tool  read_file>",
         ["Report README first line", "esc to return · tab next agent", "← 2 agents"],
+        False,
     ),
     (
         "grok-subagent-fail",
@@ -735,6 +749,7 @@ GROK_SUBAGENT_CASES = [
         24,
         "<wait:idle>go<enter><wait:text:✗ explore><wait:idle>",
         ["✗ explore  List directory files  2.9s · grok-4.6"],
+        False,
     ),
     (
         "grok-subagent-cancel",
@@ -744,6 +759,7 @@ GROK_SUBAGENT_CASES = [
         "<wait:idle>go<enter><wait:text:○ general-purpose><esc>"
         "<wait:text:– general-purpose><down><enter><wait:text:Execute sleep>",
         ["– tool  Execute sleep 45 && echo finished", "cancelled"],
+        False,
     ),
     (
         "grok-subagent-late",
@@ -752,12 +768,13 @@ GROK_SUBAGENT_CASES = [
         24,
         "<wait:idle>go<enter><wait:idle>",
         ["○ explore", "← 1 agent"],
+        False,
     ),
 ]
 
 
 @pytest.mark.parametrize(
-    "case,script,cols,rows,keys,wants",
+    "case,script,cols,rows,keys,wants,freeze",
     GROK_SUBAGENT_CASES,
     ids=[c[0] for c in GROK_SUBAGENT_CASES],
 )
@@ -771,6 +788,7 @@ def test_frame_grok_subagent_scripts(
     rows: int,
     keys: str,
     wants: list[str],
+    freeze: bool,
 ) -> None:
     proc = frame(
         craze_bin,
@@ -781,6 +799,7 @@ def test_frame_grok_subagent_scripts(
         rows=rows,
         keys=keys,
         provider="grok",
+        freeze=freeze,
     )
     text = "\n".join(frame_lines(proc, cols, rows))
     for want in wants:

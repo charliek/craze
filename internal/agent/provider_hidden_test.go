@@ -52,8 +52,14 @@ func TestHiddenProviderResolvesButIsNeverListed(t *testing.T) {
 		}
 	}
 	for _, q := range Providers() {
-		if q.Hidden() || q.InProcess() {
-			t.Fatalf("listed provider %q is hidden=%v inProcess=%v", q.Name(), q.Hidden(), q.InProcess())
+		if q.Hidden() {
+			t.Fatalf("listed provider %q is hidden", q.Name())
+		}
+		// native is listed and in-process (D-65); the safe answer for one is
+		// that it can be loaded again and has modes like every ACP provider.
+		if q.InProcess() && (!q.Resumable() || !q.Capabilities().Modes) {
+			t.Fatalf("listed in-process provider %q must be resumable and have modes: resumable=%v modes=%v",
+				q.Name(), q.Resumable(), q.Capabilities().Modes)
 		}
 	}
 }

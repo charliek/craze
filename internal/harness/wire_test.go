@@ -811,6 +811,7 @@ func TestWireRetryBeforeOutput(t *testing.T) {
 		Retrying{Delay: time.Millisecond, Attempt: 1, Reason: "HTTP 503: busy: Bearer [redacted]"},
 		TextDelta{Text: "recovered"},
 		recovered,
+		unpricedSpent(56+64+8, recovered.Usage, recovered.Usage), // the failed attempt spent nothing
 	})
 	equal(t, "transcript", entries(transcript(t, s)), []string{
 		"user test/a high: hi",

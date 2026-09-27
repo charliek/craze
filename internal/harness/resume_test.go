@@ -624,8 +624,9 @@ func TestResumeRestoresTheLastTodos(t *testing.T) {
 		t.Fatal(err)
 	}
 	evs := ev.list()
-	if _, final := evs[len(evs)-1].(Todos); !final {
-		t.Fatalf("the replay ends with a %T; want the Todos", evs[len(evs)-1])
+	_, todos := evs[len(evs)-2].(Todos)
+	if _, spent := evs[len(evs)-1].(Spent); !todos || !spent {
+		t.Fatalf("the replay ends with a %T and a %T; want the Todos, then the Spent", evs[len(evs)-2], evs[len(evs)-1])
 	}
 	if todos := of[Todos](evs); len(todos) != 1 || !slices.Equal(todos[0].Items, last) {
 		t.Fatalf("the replay's Todos: %+v; want one, last, with the restored list", todos)
@@ -899,6 +900,7 @@ func TestReplayWalksTheTranscript(t *testing.T) {
 		"steer: also check the tests",
 		"text: all done",
 		"todos 1",
+		"harness.Spent",
 	})
 
 	// Each call is described as it was live, and finished with the text the

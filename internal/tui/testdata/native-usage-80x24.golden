@@ -1,7 +1,7 @@
 ❯ hello                                                                         
-+ Thought                                                                       
-hi there                                                                        
-                                                                                
+the first answer                                                                
+❯ again                                                                         
+the second answer                                                               
                                                                                 
                                                                                 
                                                                                 
@@ -20,5 +20,5 @@ hi there
 ──────────────────────────────────────────────────────────────────────── hello ─
 ❯ message  / for commands                                                       
 ────────────────────────────────────────────────────────────────────────────────
-ws │ native │ Echo │ 15 / 15 tok │ 0m                                           
+ws │ native │ Echo │ 34% ctx · $0.07 / $0.27 │ 0m                               
 ◆ agent · shift+tab · ▸▸ bypass permissions on                                  

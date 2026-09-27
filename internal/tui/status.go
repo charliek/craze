@@ -8,6 +8,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/charliek/craze/internal/agent"
+	"github.com/charliek/craze/internal/transcript"
 )
 
 const (
@@ -82,11 +83,12 @@ func (m Model) statusView(lay frameLayout) string {
 	return row1 + "\n" + row2
 }
 
-// statusRow1 is workspace · branch · provider · model (effort) · elapsed. It
-// drops from the right in the pinned order — elapsed, branch, provider — and
-// gives the model up last, so the narrowest row is still the workspace name.
-// The mode is not here: it is row 2's chip, and it appears in exactly one
-// place.
+// statusRow1 is workspace · branch · provider · model (effort) · usage ·
+// elapsed. It drops in the pinned order — elapsed, branch, usage, provider —
+// and gives the model up last, so the narrowest row is still the workspace
+// name. The usage part is a native session's alone (usagePart); every other
+// session has none, and its row is what it always was. The mode is not here:
+// it is row 2's chip, and it appears in exactly one place.
 func (m Model) statusRow1() (string, []segSpan) {
 	dim := styleFG(m.theme.Dim)
 	ws := statusPart{text: workspaceName(m.cwd), style: styleFG(m.theme.Bright).Bold(true)}
@@ -109,12 +111,87 @@ func (m Model) statusRow1() (string, []segSpan) {
 	return fitStatus([]statusPart{
 		ws,
 		{text: m.branch, style: dim, drop: 2},
-		{text: m.snap.Provider.Label(), style: styleFG(m.theme.Provider), drop: 3},
+		{text: m.snap.Provider.Label(), style: styleFG(m.theme.Provider), drop: 4},
 		// The model span is what V3's dialog will open from; nothing
 		// hit-tests it yet.
-		{text: m.modelLabel(), style: styleFG(m.theme.FG), drop: 4, id: spanModel},
+		{text: m.modelLabel(), style: styleFG(m.theme.FG), drop: 5, id: spanModel},
+		{text: usagePart(m.snap.Usage), style: dim, drop: 3},
 		{text: m.sessionElapsed(), style: dim, drop: 1},
 	}, statusSep, dim, m.width)
+}
+
+// usagePart is row 1's usage part (plan 028 §3.14): how full the context is
+// and what the session has spent, the turn's then the session's, as the
+// snapshot's usage section last had it — read from m.snap, which a usage
+// delta refreshes like any other (seam 8), never asked of the engine here.
+//
+//   - priced: `34% ctx · $0.04 / $1.20`, money to the cent, half up, and
+//     `<$0.01` for an amount above nothing and under half a cent;
+//   - an amount with some usage in it that had no price carries a `+` — it
+//     is at least that much: `34% ctx · $0.04 / $1.20+`;
+//   - nothing priced at all — the session's cost is nothing and some of its
+//     usage had no price — says the billed tokens instead, input, cache and
+//     output: `34% ctx · 12.3k / 1.21M tok`;
+//   - a window craze does not know leaves the `NN% ctx · ` prefix out;
+//   - no usage section — every ACP session, and a native one before its
+//     first step — is no part at all.
+func usagePart(u *agent.UsageState) string {
+	if u == nil {
+		return ""
+	}
+	var b strings.Builder
+	if u.ContextWindow > 0 {
+		fmt.Fprintf(&b, "%d%% ctx%s", contextPercent(u.ContextTokens, u.ContextWindow), statusDot)
+	}
+	if u.Session.CostPicoUSD == 0 && u.Session.Unpriced {
+		b.WriteString(transcript.TokenCount(billedTokens(u.Turn)) + " / " + transcript.TokenCount(billedTokens(u.Session)) + " tok")
+		return b.String()
+	}
+	b.WriteString(spendMoney(u.Turn) + " / " + spendMoney(u.Session))
+	return b.String()
+}
+
+// contextPercent is tokens as a whole percentage of window, rounded half up;
+// window is not zero. A context past its window says so, over 100.
+func contextPercent(tokens, window int64) int64 {
+	if tokens < 0 {
+		tokens = 0
+	}
+	return (tokens*100 + window/2) / window
+}
+
+// billedTokens is what a spend was billed for, in tokens: its input, its
+// cache reads and writes, and its output — reasoning is inside output, and
+// is not counted twice.
+func billedTokens(s agent.Spend) int64 {
+	return s.Input + s.CacheRead + s.CacheCreation + s.Output
+}
+
+// spendMoney is a spend's cost as the row says it: formatUSD, and a `+` when
+// some usage in it had no price.
+func spendMoney(s agent.Spend) string {
+	if s.Unpriced {
+		return formatUSD(s.CostPicoUSD) + "+"
+	}
+	return formatUSD(s.CostPicoUSD)
+}
+
+// halfCentPicoUSD is half a cent in picodollars (10⁻¹² $): a cent is 10¹⁰.
+const halfCentPicoUSD = 5_000_000_000
+
+// formatUSD is an amount of picodollars in dollars and cents, rounded half
+// up — $0.00, $0.04, $1.20, $1234.57 — and `<$0.01` for one above nothing that
+// would round to nothing. A negative amount, which no pricing produces, reads
+// as nothing.
+func formatUSD(pico int64) string {
+	if pico < 0 {
+		pico = 0
+	}
+	if pico > 0 && pico < halfCentPicoUSD {
+		return "<$0.01"
+	}
+	cents := pico/(2*halfCentPicoUSD) + (pico%(2*halfCentPicoUSD)+halfCentPicoUSD)/(2*halfCentPicoUSD)
+	return fmt.Sprintf("$%d.%02d", cents/100, cents%100)
 }
 
 // statusRow2 is the mode chip, the permission chip, the in-flight tool counts

@@ -321,10 +321,38 @@
         "commands": {"$ref": "#/$defs/commands"},
         "plugins": {"$ref": "#/$defs/plugins"},
         "sendNow": {"$ref": "#/$defs/sendNow"},
+        "usage": {"$ref": "#/$defs/usage"},
         "reason": {"type": "string"},
         "detail": {"type": "string"},
         "indexErr": {"type": "string"}
       },
+      "additionalProperties": false
+    },
+    "usage": {
+      "description": "The usage section (UsageState; native only, absent for every ACP session and never null or {}): the estimated size in tokens of what the session's next request sends (contextTokens) and the context window of the model it goes to (contextWindow, 0 when unknown), and what the session has spent — in the turn the report followed (after a load, the last turn the stored session recorded) and in all (session). Always every key.",
+      "type": "object",
+      "properties": {
+        "contextTokens": {"type": "integer"},
+        "contextWindow": {"type": "integer"},
+        "turn": {"$ref": "#/$defs/spend"},
+        "session": {"$ref": "#/$defs/spend"}
+      },
+      "required": ["contextTokens", "contextWindow", "turn", "session"],
+      "additionalProperties": false
+    },
+    "spend": {
+      "description": "A sum of usage and its cost (Spend): the tokens as the provider billed them — input is the uncached input, reasoning is part of output — and costPicoUsd, the priced part's cost in picodollars (10^-12 USD; $1 is 1000000000000), exact. unpriced says some usage in it had no price in craze's model table: its tokens are counted and it added no cost. Always every key.",
+      "type": "object",
+      "properties": {
+        "input": {"type": "integer"},
+        "output": {"type": "integer"},
+        "reasoning": {"type": "integer"},
+        "cacheRead": {"type": "integer"},
+        "cacheCreation": {"type": "integer"},
+        "costPicoUsd": {"type": "integer"},
+        "unpriced": {"type": "boolean"}
+      },
+      "required": ["input", "output", "reasoning", "cacheRead", "cacheCreation", "costPicoUsd", "unpriced"],
       "additionalProperties": false
     },
     "config": {

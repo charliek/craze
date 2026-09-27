@@ -143,6 +143,9 @@ type wireSettings struct {
 	Commands json.RawMessage `json:"commands,omitempty"`
 	Plugins  json.RawMessage `json:"plugins,omitempty"`
 	SendNow  json.RawMessage `json:"sendNow,omitempty"`
+	// Usage is the usage section in the event codec's own shape, absent when
+	// the model has none (plan 028 §3.14): never null or {}.
+	Usage json.RawMessage `json:"usage,omitempty"`
 	// Truncated is Settings.Truncated, absent when no section is marked.
 	Truncated *wireSettingsTruncated `json:"truncated,omitempty"`
 }
@@ -371,12 +374,15 @@ func encodeSettings(s *Settings) (*wireSettings, error) {
 			return nil, err
 		}
 	}
+	if w.Usage, err = agent.EncodeUsageState(s.Usage); err != nil {
+		return nil, err
+	}
 	if t := s.Truncated; t != (SettingsTruncated{}) {
 		w.Truncated = &wireSettingsTruncated{Title: t.Title, Mode: t.Mode, Model: t.Model,
 			Config: t.Config, Commands: t.Commands, Plugins: t.Plugins, SendNow: t.SendNow}
 	}
-	if w.Title == "" && w.Mode == "" && w.Model == "" &&
-		w.Config == nil && w.Commands == nil && w.Plugins == nil && w.SendNow == nil && w.Truncated == nil {
+	if w.Title == "" && w.Mode == "" && w.Model == "" && w.Config == nil && w.Commands == nil &&
+		w.Plugins == nil && w.SendNow == nil && w.Usage == nil && w.Truncated == nil {
 		return nil, nil
 	}
 	return w, nil
@@ -787,6 +793,9 @@ func decodeSettings(w *wireSettings) (Settings, error) {
 	}
 	if sn != nil {
 		s.SendNow = *sn
+	}
+	if s.Usage, err = agent.DecodeUsageState(w.Usage); err != nil {
+		return s, err
 	}
 	return s, nil
 }

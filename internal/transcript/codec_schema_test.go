@@ -40,6 +40,7 @@ var snapshotRaw = map[string]string{
 	"wireSettings.commands":  "event.json#/$defs/commands",
 	"wireSettings.plugins":   "event.json#/$defs/plugins",
 	"wireSettings.sendNow":   "event.json#/$defs/sendNow",
+	"wireSettings.usage":     "event.json#/$defs/usage",
 	"wireEntry.tool":         "event.json#/$defs/tool",
 	"wireEntry.plan":         "event.json#/$defs/plan",
 }

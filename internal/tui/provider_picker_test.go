@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -281,6 +282,165 @@ func TestProviderPickerNilFactoryFallsBackToAStub(t *testing.T) {
 	assertOwned(t, m, nil) // the fallback is internal; nothing external names it
 }
 
+// TestProviderPickerRefusesWhatTheCommandLineRefuses is C19a (sol r1-c19): the
+// picker asks Config.RefuseLoad of the provider it is about to start, as the
+// resume picker asks it of a row. internal/cli checks only the resolved default
+// before the picker opens, so `craze --agent-bin X` with cursor the default
+// started native — a row nothing had checked — and ignored the binary, where
+// `craze --provider native --agent-bin X` exits 2. A refused row is the error
+// row and nothing else: the picker stays up, nothing is built or persisted, and
+// a cursor move clears the row. Another row still starts, and persists, under
+// the same refusal.
+func TestProviderPickerRefusesWhatTheCommandLineRefuses(t *testing.T) {
+	// Skills first: isolateSkillsHome clears CRAZE_HOME, which is where
+	// writeConfigFile puts the seeded default.
+	isolateSkillsHome(t)
+	const before = "provider = \"grok\"\n"
+	path := writeConfigFile(t, before)
+	const refusal = "craze: --agent-bin cannot be used with provider native, which runs inside craze"
+	var asked, built []string
+	m := New(Config{
+		Theme:           "tokyo-night",
+		Workspace:       t.TempDir(),
+		Model:           "grok",
+		Yolo:            true,
+		Provider:        agent.CursorProvider(),
+		Providers:       agent.Providers(),
+		PersistProvider: true,
+		// internal/cli's closure under --agent-bin, in the one respect this
+		// test needs: an in-process provider is refused, a spawned one is not.
+		RefuseLoad: func(p agent.Provider) error {
+			asked = append(asked, p.Name())
+			if p.InProcess() {
+				return errors.New(refusal)
+			}
+			return nil
+		},
+		NewSession: func(p agent.Provider) agent.Session {
+			built = append(built, p.Name())
+			s := NewStub()
+			s.SetProvider(p)
+			return s
+		},
+	})
+	tm, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	// Up from the default wraps to the last row, which is native.
+	tm, _ = tm.Update(tea.KeyMsg{Type: tea.KeyUp})
+	m = tm.(Model)
+	if got := m.providers[m.providerCursor].Name(); got != "native" {
+		t.Fatalf("fixture: the cursor is on %q, want native", got)
+	}
+
+	tm, cmd := m.Update(enter())
+	m = tm.(Model)
+	if cmd != nil {
+		t.Fatal("Enter on the refused native row returned a command")
+	}
+	if !m.pickingProvider || m.dialog != dialogProvider || m.eng != nil || len(built) != 0 {
+		t.Fatalf("a refused row closed the picker or built a session: picking %v, dialog %v, built %v",
+			m.pickingProvider, m.dialog, built)
+	}
+	if !reflect.DeepEqual(asked, []string{"native"}) {
+		t.Fatalf("the refusal was asked of %v, want [native]", asked)
+	}
+	view := plainView(m)
+	if !strings.Contains(view, "craze: --agent-bin cannot be used") {
+		t.Fatalf("no error row:\n%s", view)
+	}
+	for _, want := range []string{"cursor", "grok", "gx", "native", providerDialogHint} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("the error row pushed %q out of a full-size box:\n%s", want, view)
+		}
+	}
+	if body, err := os.ReadFile(path); err != nil || string(body) != before {
+		t.Fatalf("a refused row touched the config (%v):\n%s", err, body)
+	}
+
+	// Down wraps back to the default: the refusal was about native, so its row
+	// goes with the cursor.
+	tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	m = tm.(Model)
+	if strings.Contains(plainView(m), "cannot be used") {
+		t.Fatalf("the cursor moved and the error row stayed:\n%s", plainView(m))
+	}
+	tm, cmd = m.Update(enter())
+	m = tm.(Model)
+	if m.pickingProvider || cmd == nil || !reflect.DeepEqual(built, []string{"cursor"}) {
+		t.Fatalf("Enter on cursor under the same refusal: picking %v, command %v, built %v",
+			m.pickingProvider, cmd != nil, built)
+	}
+	tm, _ = m.Update(runCmd(cmd))
+	m = tm.(Model)
+	if !m.started || m.snap.Provider.Name != "cursor" {
+		t.Fatalf("started %v on %q, want cursor", m.started, m.snap.Provider.Name)
+	}
+	if got := ConfigProvider(); got != "cursor" {
+		t.Fatalf("persisted %q, want the cursor row that started", got)
+	}
+}
+
+// TestProviderPickerClickClearsTheRefusal: a click that moves the cursor off a
+// refused row clears its error row, as a key does; a click on the refused row
+// itself moves nothing and keeps it.
+func TestProviderPickerClickClearsTheRefusal(t *testing.T) {
+	isolateSkillsHome(t)
+	m := New(Config{
+		Theme:      "tokyo-night",
+		Workspace:  t.TempDir(),
+		Provider:   agent.CursorProvider(),
+		Providers:  agent.Providers(),
+		RefuseLoad: func(p agent.Provider) error { return fmt.Errorf("craze: %s refused", p.Name()) },
+		NewSession: pickerFactory(t),
+	})
+	tm, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	tm, _ = tm.Update(tea.KeyMsg{Type: tea.KeyUp})
+	tm, _ = tm.Update(enter())
+	m = tm.(Model)
+	if !strings.Contains(plainView(m), "craze: native refused") {
+		t.Fatalf("setup: no error row:\n%s", plainView(m))
+	}
+	r := m.lay.Dialog
+	// Row 0 is the top border and row 1 the title, so native, the fourth
+	// provider, is row 5.
+	if out := clickXY(t, m, r.X+2, r.Y+5); out.providerCursor != 3 || !strings.Contains(plainView(out), "craze: native refused") {
+		t.Fatalf("a click on the refused row itself: cursor %d\n%s", out.providerCursor, plainView(out))
+	}
+	out := clickXY(t, m, r.X+2, r.Y+2)
+	if out.providerCursor != 0 || strings.Contains(plainView(out), "refused") {
+		t.Fatalf("a click on cursor: cursor %d, the error row stayed\n%s", out.providerCursor, plainView(out))
+	}
+}
+
+// TestProviderPickerErrorRowNeverTakesTheLastListRow is the resume picker's
+// short-box rule (TestTheErrorRowNeverTakesTheLastListRow) for the provider
+// picker's error row: it goes before the footer does, never before the row the
+// cursor is on, and never past the budget.
+func TestProviderPickerErrorRowNeverTakesTheLastListRow(t *testing.T) {
+	m := newPickerRows(t, agent.CursorProvider(), agent.Providers())
+	m.providerErr = "craze: --agent-bin cannot be used with provider native, which runs inside craze"
+	m.providerCursor = 3
+	for budget, want := range map[int]struct {
+		shown       int
+		err, footer bool
+	}{
+		2: {shown: 1},
+		3: {shown: 1, err: true},
+		4: {shown: 1, err: true, footer: true},
+		5: {shown: 2, err: true, footer: true},
+	} {
+		top, shown, footer := m.providerDialogPlan(budget)
+		if shown != want.shown || footer != want.footer || m.providerErrShown(budget) != want.err {
+			t.Fatalf("budget %d: shown %d footer %v err %v, want %+v", budget, shown, footer, m.providerErrShown(budget), want)
+		}
+		if m.providerCursor < top || m.providerCursor >= top+shown {
+			t.Fatalf("budget %d: the window [%d,%d) lost the cursor", budget, top, top+shown)
+		}
+		if body := m.providerDialogBody(dialogMaxWidth-dialogBorder, budget); len(body) > budget {
+			t.Fatalf("budget %d: %d rows", budget, len(body))
+		}
+	}
+}
+
 func TestStartedMsgPersistsProvider(t *testing.T) {
 	path := writeConfigFile(t, "")
 	if err := os.Remove(path); err != nil {
@@ -413,8 +573,8 @@ func TestProviderPickerShowsAHiddenDefaultAsOneLabelledRow(t *testing.T) {
 		list []agent.Provider
 		want []string
 	}{
-		{"default list", nil, []string{"cursor", "grok", hiddenID}},
-		{"every provider", agent.Providers(), []string{"cursor", "grok", "gx", hiddenID}},
+		{"default list", nil, []string{"cursor", "grok", "native", hiddenID}},
+		{"every provider", agent.Providers(), []string{"cursor", "grok", "gx", "native", hiddenID}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := providerRowNames(pickerRows(tc.list, agent.CursorProvider())); slices.Contains(got, hiddenID) {
@@ -626,23 +786,25 @@ func TestFrameGoldenProviderPicker(t *testing.T) {
 	}
 }
 
-// TestProviderPickerThreeRows is the gx-installed picker: three rows, in
-// registry order, with the default tagged. Passing a list that already holds
-// the default also pins the deduplication — the union must not draw cursor
-// twice.
-func TestProviderPickerThreeRows(t *testing.T) {
+// TestProviderPickerFourRows is the gx-installed, native-listed picker: four
+// rows, in registry order, with the default tagged. Passing a list that
+// already holds the default also pins the deduplication — the union must not
+// draw cursor twice.
+func TestProviderPickerFourRows(t *testing.T) {
 	m := newPickerRows(t, agent.CursorProvider(), agent.Providers())
-	if got := providerRowNames(m.providers); !reflect.DeepEqual(got, []string{"cursor", "grok", "gx"}) {
-		t.Fatalf("rows %q, want [cursor grok gx]", got)
+	if got := providerRowNames(m.providers); !reflect.DeepEqual(got, []string{"cursor", "grok", "gx", "native"}) {
+		t.Fatalf("rows %q, want [cursor grok gx native]", got)
 	}
-	for _, name := range []string{"cursor", "grok", "gx"} {
+	for _, name := range []string{"cursor", "grok", "gx", "native"} {
 		pickerRowLine(t, m, name)
 	}
 	if row := pickerRowLine(t, m, "cursor"); !strings.Contains(row, "default") {
 		t.Fatalf("the default row is untagged: %q", row)
 	}
-	if row := pickerRowLine(t, m, "gx"); strings.Contains(row, "default") {
-		t.Fatalf("only the default row may be tagged: %q", row)
+	for _, name := range []string{"gx", "native"} {
+		if row := pickerRowLine(t, m, name); strings.Contains(row, "default") {
+			t.Fatalf("only the default row may be tagged: %q", row)
+		}
 	}
 }
 
@@ -703,7 +865,7 @@ func TestProviderPickerGxDefaultPreselectsThirdRow(t *testing.T) {
 // about what Esc does.
 func TestProviderPickerShowsDefaultMissingFromTheList(t *testing.T) {
 	m := newPickerRows(t, agent.GxProvider(), agent.DefaultProviders())
-	if got := providerRowNames(m.providers); !reflect.DeepEqual(got, []string{"cursor", "grok", "gx"}) {
+	if got := providerRowNames(m.providers); !reflect.DeepEqual(got, []string{"cursor", "grok", "gx", "native"}) {
 		t.Fatalf("rows %q, want the absent default inserted in registry order", got)
 	}
 	if m.providerCursor != 2 {
@@ -725,8 +887,8 @@ func TestProviderPickerShowsDefaultMissingFromTheList(t *testing.T) {
 // providers falls back to agent.DefaultProviders() and never to the host's
 // PATH. A tui that resolved binaries itself would satisfy every other test here
 // and still make the two existing picker goldens differ between a dev box with
-// gx installed and CI, so this case runs with a gx on PATH and demands two
-// rows.
+// gx installed and CI, so this case runs with a gx on PATH and demands cursor,
+// grok and native — gx never among them.
 func TestProviderPickerZeroConfigIsHermetic(t *testing.T) {
 	t.Setenv("CRAZE_AGENT_BIN", "")
 	bin := t.TempDir()
@@ -736,8 +898,8 @@ func TestProviderPickerZeroConfigIsHermetic(t *testing.T) {
 	t.Setenv("PATH", bin)
 	isolateSkillsHome(t)
 	m := New(Config{Workspace: t.TempDir()})
-	if got := providerRowNames(m.providers); !reflect.DeepEqual(got, []string{"cursor", "grok"}) {
-		t.Fatalf("zero Config rows %q, want [cursor grok]", got)
+	if got := providerRowNames(m.providers); !reflect.DeepEqual(got, []string{"cursor", "grok", "native"}) {
+		t.Fatalf("zero Config rows %q, want [cursor grok native]", got)
 	}
 }
 
@@ -749,7 +911,7 @@ func TestProviderPickerClickMovesHighlight(t *testing.T) {
 	r := m.lay.Dialog
 	// Row 0 is the top border and row 1 the title, so row 2 is the first
 	// provider.
-	for i, name := range []string{"cursor", "grok", "gx"} {
+	for i, name := range []string{"cursor", "grok", "gx", "native"} {
 		out := clickXY(t, m, r.X+2, r.Y+2+i)
 		if out.providerCursor != i {
 			t.Fatalf("click on %q moved the cursor to %d, want %d", name, out.providerCursor, i)
@@ -794,10 +956,10 @@ func markedPickerRow(t *testing.T, body []string, shown int) string {
 // with gx able to be the default at index 2 is what made it reachable, but a
 // two-row picker had it at any budget of two.
 //
-// The budgets go to the body directly: craze's 40x12 floor still fits three
-// rows (TestFrameGoldenProviderPickerFloor pins that), so a fourth provider or
-// a band that takes a transcript row is what would reach this through a real
-// WindowSizeMsg.
+// The budgets go to the body directly: craze's 40x12 floor fits three rows, and
+// the fourth provider D-65 listed is what reaches a squeeze through a real
+// WindowSizeMsg (TestFrameGoldenProviderPickerFloor), with the cursor on a row
+// that still fits.
 func TestProviderPickerShortBudgetKeepsTheSelectedRow(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
@@ -904,10 +1066,11 @@ func TestProviderPickerWindowDoesNotScrollWhenEverythingFits(t *testing.T) {
 	}
 }
 
-// TestFrameGoldenProviderPickerFloor is the three-row picker at 40x12, the
-// smallest frame craze draws, with the default on the last row. Every row still
-// fits there, so the golden is what says the window did not scroll at the size
-// where the box is closest to giving a row up.
+// TestFrameGoldenProviderPickerFloor is the full picker at 40x12, the smallest
+// frame craze draws, with gx the default. Three rows fit there and D-65's fourth,
+// native, does not: the box ends on the default's row and clips native below
+// it, so the golden is what says the window scrolls no further than the cursor
+// forces at the size where the box gives a row up (C19 left it unmoved).
 func TestFrameGoldenProviderPickerFloor(t *testing.T) {
 	isolateSkillsHome(t)
 	m := goldenPicker(t, agent.GxProvider(), agent.Providers(), 40, 12)

@@ -30,13 +30,19 @@ these documents, one per roadmap phase.
 | 2026-09-24 | Plan 026 (H6) planned and panel-reviewed: sub-agents run in-process (D-54, superseding D-10), the `agent` tool (kind `task`), personas, per-child cancel, and background children across three PRs; decisions D-54..D-59; not yet executed |
 | 2026-09-24 | H6 foreground complete — PR 1 (#51) shipped in-process sub-agents end to end; PR 2 (`feature/plan-026-h6-stop`) adds per-child stop: Delete/Backspace on a running native row or in its view, `Control.CancelSubagent`; PR 3 (background children) next |
 | 2026-09-25 | H6 complete — PR 3 (`feature/plan-026-h6-background`) ships background children: `run_in_background`, `agent_output`, the session-level wake bracketed as a foreign turn (`ForeignTurnInfo.Reason`, `agent.AdmissionFence`), the `bg` row marker, and SF-21 closed (a drained row refused by the wake is restored) |
+| 2026-09-25 | Plan 028 (H7) planned and panel-reviewed: resume, mid-turn compaction, and cost across three PRs, each paused after merge; decisions D-60..D-66 |
+| 2026-09-26 | H7 PR 1 (resume) shipped: #57 → `885415e` — the store reopens under a lock, provenance fields (`turn`, `todos`, `resume`), the harness opens and replays a stored session, the adapter's load, native indexed and resumable, CLI and picker; native sessions resume with `-c`/`-r`, `/rename` persists; live smoke (V1, V2) passed on Linux and the mac-mini |
+| 2026-09-26 | H7 PR 2 (compaction) shipped: #59 → `d097845` — reminders stored as variants, the compaction entry and context rule, the summarizer and segments, when to compact, the segmented turn, overflow recovery, the `compaction` event, `/compact`; exit criterion 1 (resume a compacted session) and cache alignment verified live on Linux and the mac-mini (V3–V6, V9) |
+| 2026-09-26 | H7 PR 3 (cost) shipped: per-model `cost` in `models.toml`, spend, `Usage` on the wire, and the status row's usage part |
+| 2026-09-26/27 | H7 complete — C19's V1–V8 live gate passed on Linux and the mac-mini: exit criterion 2 (spend visible per turn) met, hand sums equal the row on both platforms, the unpriced model shows tokens, spend survives compaction and resume (V8); native became a listed, resumable, persistable provider (Q10, D-65) |
 
-**H0, H1, H2, H4, H5 and H6 are complete (Plan 026: PR 1 #51, PR 2 #53, and
-PR 3's background children) — H3 (approval) still comes after H8 (D-48).**
+**H0, H1, H2, H4, H5, H6 and H7 are complete — native is a listed provider
+(D-65) — H3 (approval) still comes after H8 (D-48).**
 [11-h0-progress-and-results.md](11-h0-progress-and-results.md) holds H0's
 evidence and, at its top, the review that corrected four of its conclusions.
-The harness is built in this repository as a hidden side quest beside the
-daily-driver TUI (D-26).
+The harness was built in this repository as a hidden side quest beside the
+daily-driver TUI (D-26); H7 listed it (D-65), so it now stands beside cursor,
+grok and gx as craze's fourth provider.
 
 ## Reading order
 

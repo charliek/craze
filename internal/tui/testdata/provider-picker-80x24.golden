@@ -8,9 +8,9 @@
              │provider                                            │             
              │> cursor                                     default│             
              │  grok                                              │             
+             │  native                                            │             
              │↑↓ · tab · enter starts · esc uses default          │             
              ╰────────────────────────────────────────────────────╯             
-                                                                                
                                                                                 
                                                                                 
                                                                                 

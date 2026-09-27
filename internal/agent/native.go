@@ -595,7 +595,11 @@ func (s *nativeSession) start(context.Context) error {
 // command list from the install on (plan 028 P21). withTitle adds the Title
 // section, which only a load's install carries — "there is no title"
 // included, for a load of an untitled row — because a new session's title is
-// its first prompt's to publish. s.mu is held.
+// its first prompt's to publish. The Usage section is carried whenever the
+// session has one, which only a load's does: the Spent its replay ended with
+// (spent, plan 028 §3.14) — a new session, and a load of a stored session
+// with nothing on its path, have spent nothing and say so by no section, as
+// Snapshot.Usage says it by nil. s.mu is held.
 func (s *nativeSession) installDeltaLocked(withTitle bool) *StateDelta {
 	model, mode := s.snap.CurrentModel, s.snap.CurrentMode
 	st := &StateDelta{
@@ -608,6 +612,10 @@ func (s *nativeSession) installDeltaLocked(withTitle bool) *StateDelta {
 	if withTitle {
 		title := s.snap.Title
 		st.Title = &title
+	}
+	if u := s.snap.Usage; u != nil {
+		c := *u
+		st.Usage = &c
 	}
 	return st
 }
@@ -695,10 +703,11 @@ func (s *nativeSession) load(hs *harness.Session) error {
 	s.mu.Lock()
 	closed := s.closed
 	if replayErr == nil && !closed {
-		// The session as the transcript left it — model, effort, mode — the
-		// title the row seeded, and the commands and plugin rows this start
-		// resolved: one delta, stamped replayed, as live.go's load install is
-		// — by name, the one enqueue a load stamps (replaying's comment).
+		// The session as the transcript left it — model, effort, mode, and
+		// what it spent (the replay's Spent, spent) — the title the row
+		// seeded, and the commands and plugin rows this start resolved: one
+		// delta, stamped replayed, as live.go's load install is — by name, the
+		// one enqueue a load stamps (replaying's comment).
 		s.enqueueDeltaLocked("", Event{Replayed: true}, s.installDeltaLocked(true))
 	}
 	s.mu.Unlock()
@@ -1612,7 +1621,10 @@ func (s *nativeSession) prompt(ctx context.Context, text string, rel chan struct
 	// context (asks.go's EndTurn) — the tool has already returned by here,
 	// since Fantasy joins it before Run returns — and the flush then puts those
 	// endings, and any opening still behind them, in the record ahead of the
-	// EventDone (plan 021 §3.6, plan 023 §3.5).
+	// EventDone (plan 021 §3.6, plan 023 §3.5). The same flush publishes the
+	// turn's usage reports (spent) — enqueued on the harness's callbacks
+	// before Run or Compact returned — so the turn's final usage precedes its
+	// ending on every path a turn ran: end_turn, cancelled, failed, /compact.
 	//
 	// It is bounded by s.done, as every emit below it is: Close closes done and
 	// then waits for this continuation (rel) BEFORE it closes the log, and with
@@ -1717,21 +1729,24 @@ func nativeTitle(prompt string) string {
 // native_tools.go merges, its todo list becomes the snapshot's and one
 // EventTodos (native_asks.go), and its sub-agents become the roster, the
 // children's own tagged events and the agent row's task (native_subagents.go,
-// plan 026 §3.9), and a compaction becomes its EventCompaction pair (plan 028
-// §3.13, compacted). StepDone, Retrying and Diag have no agent event and are
-// dropped: usage goes to the transcript only — but for the sub-agent usage an
-// unsaved step could not record, which is journaled (noteSubagentUsage) — the
-// harness allows one silent retry (plan 018 §3.8), and a Diag is for the
-// journal and for diagnosis, not for a consumer (plan 019 §3.5). ToolProgress
-// never blocks here, since the harness drops a snapshot rather than wait on
-// it.
+// plan 026 §3.9), a compaction becomes its EventCompaction pair (plan 028
+// §3.13, compacted), and what the session has spent becomes the snapshot's
+// usage section and its state delta (§3.14, spent). StepDone, Retrying and
+// Diag have no agent event and are dropped: a step's own usage goes to the
+// transcript, and reaches a client summed, through Spent — but for the
+// sub-agent usage an unsaved step could not record, which is journaled
+// (noteSubagentUsage) — the harness allows one silent retry (plan 018 §3.8),
+// and a Diag is for the journal and for diagnosis, not for a consumer (plan
+// 019 §3.5). ToolProgress never blocks here, since the harness drops a
+// snapshot rather than wait on it.
 //
 // It runs synchronously on Fantasy's callbacks — the tool ones on tool
 // goroutines — which is why emit gives up once Close has begun.
 //
 // A load's replay (plan 028 §3.4) hands it the same events on Start's
-// goroutine — text, thinking, ToolStarted, ToolCalled and ToolFinished, Todos —
-// and one of its own, Prompted, a stored user message; everything
+// goroutine — text, thinking, ToolStarted, ToolCalled and ToolFinished, Todos,
+// the Spent the stored session leaves — and one of its own, Prompted, a
+// stored user message; everything
 // published meanwhile is stamped replayed (s.replaying), and nothing else here
 // knows the difference, which is the point: a restored row is merged, capped
 // and redacted exactly as a live one. The one exception is the result, which
@@ -1762,6 +1777,9 @@ func nativeTitle(prompt string) string {
 //   - StepDone (the parent's): the journal's Note, which never blocks.
 //   - Compacted, the parent's and a child's: s.mu for the redactor's read
 //     alone, released before the event is published (compacted).
+//   - Spent, the parent's only (a child emits none, plan 028 P33): s.mu for
+//     the snapshot's usage section and its delta's enqueue, the outbox mutex
+//     a leaf beneath it; nothing is published under it (spent).
 //   - the three sub-agent events: rosterMu for the roster and its enqueue (the
 //     outbox mutex, a leaf beneath it), toolMu for the child's set in sections
 //     of its own, never nested, and the log's Flush with no lock held. The
@@ -1824,7 +1842,56 @@ func (s *nativeSession) sink(ev harness.Event) {
 		s.replayedPrompt(e)
 	case harness.Compacted:
 		s.compacted("", e)
+	case harness.Spent:
+		s.spent(e)
 	}
+}
+
+// spent is what the session has spent, as the harness reports it after every
+// step, every compaction that ran and a load's replay (plan 028 §3.14): the
+// snapshot's usage section, replaced whole, and the state delta that says so,
+// enqueued in the section that replaced it — the one author of the section,
+// under s.mu, so a client that folds the deltas and one that reads Snapshot
+// agree on which report was last (StateDelta's rule; seam 8: the fold's
+// mirror is re-derived from these deltas).
+//
+// A load's replay gets no delta of its own: the install delta load enqueues
+// once the replay is over carries the section as the replay left it, so a
+// restored session's usage is part of what the load installed, stamped
+// replayed with it, and nothing it enqueues can land after the end bracket
+// unstamped (X27). s.loading holds from the start's mark to the end of the
+// load, and no turn or wake runs meanwhile, so it tells the two apart.
+//
+// Every report carries the whole of it — the context, the turn's spend and
+// the session's — so a delta that arrives late is simply a later one's
+// predecessor: nothing is summed here.
+//
+// A turn's reports are all in the stream before the turn's end (the S2
+// seam): spent runs on the harness's own callbacks, inside Run or Compact,
+// so every report a turn leaves — its last step's, a /compact's — is
+// enqueued before prompt's pre-ending flush, which publishes it ahead of the
+// EventDone or EventError on every path a turn ran; and the engine enqueues
+// its EventTurn{ended} into the same FIFO outbox only once Prompt has
+// returned. A client that folds to the turn's end and draws the idle frame
+// there reads the turn's own spend (TestATurnsUsageReachesTheStreamBeforeItsEnd,
+// on the engine, in internal/tui).
+func (s *nativeSession) spent(e harness.Spent) {
+	u := UsageState{
+		ContextTokens: e.ContextTokens,
+		ContextWindow: e.ContextWindow,
+		Turn:          Spend(e.Turn),
+		Session:       Spend(e.Session),
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.snap.Usage = &u
+	if s.loading {
+		return
+	}
+	// The delta's own copy: the snapshot's is handed out by Snapshot, and
+	// the event is encoded on the drainer's goroutine.
+	d := u
+	s.enqueueDeltaLocked("", Event{}, &StateDelta{Usage: &d})
 }
 
 // compacted is one end of a compaction of a session's context — the parent's
@@ -2304,6 +2371,13 @@ func (s *nativeSession) Snapshot() Snapshot {
 	// consumer that sorted or filtered the array it was handed would be
 	// changing what the next Snapshot answers with (live.go does the same).
 	out.Todos = append([]Todo(nil), s.snap.Todos...)
+	// The usage section is replaced whole on every report (spent) and never
+	// written through, but a consumer holding this pointer could: its own
+	// copy.
+	if u := s.snap.Usage; u != nil {
+		c := *u
+		out.Usage = &c
+	}
 	return out
 }
 

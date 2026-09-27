@@ -102,15 +102,15 @@ func TestProviderRegistryRoundTrip(t *testing.T) {
 		}
 		seen[p.Name()] = true
 	}
-	if got := names; !reflect.DeepEqual(got, []string{"cursor", "grok", "gx"}) {
-		t.Fatalf("Providers order %q, want [cursor grok gx]", got)
+	if got := names; !reflect.DeepEqual(got, []string{"cursor", "grok", "gx", "native"}) {
+		t.Fatalf("Providers order %q, want [cursor grok gx native]", got)
 	}
 	var defaults []string
 	for _, p := range DefaultProviders() {
 		defaults = append(defaults, p.Name())
 	}
-	if !reflect.DeepEqual(defaults, []string{"cursor", "grok"}) {
-		t.Fatalf("DefaultProviders %q, want [cursor grok]", defaults)
+	if !reflect.DeepEqual(defaults, []string{"cursor", "grok", "native"}) {
+		t.Fatalf("DefaultProviders %q, want [cursor grok native]", defaults)
 	}
 }
 

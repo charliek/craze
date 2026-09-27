@@ -503,13 +503,17 @@ type ArmedSend struct {
 }
 
 // Settings is the session's live settings as the host reads them: the
-// current model and mode ("" when the session has none), and the provider's
+// current model and mode ("" when the session has none), the provider's
 // config options as the event codec's config section
-// (event.json#/$defs/config: {"options": […]}, or {} for none).
+// (event.json#/$defs/config: {"options": […]}, or {} for none), and what the
+// session has spent as the event codec's usage section
+// (event.json#/$defs/usage; plan 028 §3.14) — a native session's once it
+// has one, absent otherwise: never null or {}.
 type Settings struct {
 	Model  string          `json:"model"`
 	Mode   string          `json:"mode"`
 	Config json.RawMessage `json:"config"`
+	Usage  json.RawMessage `json:"usage,omitempty"`
 }
 
 // SnapshotParams is session.snapshot's params, which ask for one bounded

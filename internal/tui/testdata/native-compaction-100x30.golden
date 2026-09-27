@@ -26,5 +26,5 @@ context compacted on request · 150k → 110k tokens
 ──────────────────────────────────────────────────────────────────────────────────────────── hello ─
 ❯ message  / for commands                                                                           
 ────────────────────────────────────────────────────────────────────────────────────────────────────
-ws │ native │ Echo │ 0m                                                                             
+ws │ native │ Echo │ 15 / 30 tok │ 0m                                                               
 ◆ agent · shift+tab · ▸▸ bypass permissions on                                                      

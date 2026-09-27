@@ -17,7 +17,7 @@ kept below for history, each marked with the decision that closed it.
 | Q7 | Marketplace: stay on Claude Code's cache, or build the native git installer? H4 (Plan 022, owner decision 5) stays on Claude Code's own install and reads only the plugins installed and enabled there, so this question is untouched by H4 and stays open. | Cache; installer deferred. | after H4 |
 | Q8 | **Resolved (D-54).** In-process sub-agents after the child-process cut, or never? | **Answered:** in-process now, for H6; the process path stays behind the runner's seam, triggered only by a child crash or leak seen in practice, or session-control S4 wanting children as separately attachable hosts. | H6 |
 | Q9 | **Resolved (D-62).** Compaction trigger: `context − 16k reserve` (pi) or 85 % of window (grok)? Tail to keep: 20k tokens (pi) or `clamp(usable×0.25, 2k, 15k)` (opencode)? | **Answered:** 85% of the window, capped at `window − max_output_tokens`; a tail of whole steps up to 20k tokens, itself capped at 25% of the threshold. | H7 |
-| Q10 | **Resolved (D-65).** When does the provider become visible (D-16)? After H7? After H8? | **Answered:** after H7's smoke passes on both Linux and the mac-mini, in PR 3's last commit — no rewind, no fork. | — |
+| Q10 | **Resolved (D-65).** When does the provider become visible (D-16)? After H7? After H8? | **Answered:** after H7's smoke passed on both Linux and the mac-mini, in PR 3's last commit (C19) — no rewind, no fork. | — |
 | Q11 | ChatGPT-plan auth: port gx's token minting, or crush's oauth package, or skip for good? | Skip until asked. | — |
 
 H5 (Plan 023, 2026-09-21) leaves three items as follow-ups rather than

@@ -20,7 +20,7 @@ flags; see [craze prompt](#craze-prompt).
 | `--workspace` | Existing workspace directory (default: current directory) |
 | `--model` | ACP model id |
 | `--agent-bin` | Path to the agent binary (or `CRAZE_AGENT_BIN`) |
-| `--provider` | ACP provider: `cursor`, `grok`, or `gx`. Empty is unset. Unknown id exits 2 |
+| `--provider` | Provider: `cursor`, `grok`, `gx` (ACP agents) or `native` (runs inside craze). Empty is unset. Unknown id exits 2 |
 | `--force` | Spawn the agent with `--force` / `--always-approve` (yolo). Default: on |
 | `--no-force` | Disable yolo and handle permission requests |
 | `--no-mouse` | Disable mouse reporting (wheel scroll and clicks) |
@@ -38,9 +38,12 @@ flags; see [craze prompt](#craze-prompt).
 
 `--provider` on the TUI skips the startup picker. Without it, `$CRAZE_PROVIDER`
 then `provider` in the config file then `cursor` is the default, and the picker
-lets you change it before Start. `craze prompt` has no picker; it uses the same
-precedence. `craze frame` ignores env and config and defaults to cursor unless
-`--provider` is passed.
+lets you change it before Start. The picker holds its choice to the same flags
+`--provider` is held to: picking `native` with `--agent-bin` or
+`CRAZE_AGENT_BIN` set shows the message `--provider native` would exit 2
+with, as an error row, and starts nothing (see [TUI reference](tui.md)).
+`craze prompt` has no picker; it uses the same precedence. `craze frame`
+ignores env and config and defaults to cursor unless `--provider` is passed.
 
 ```bash
 ./bin/craze
@@ -201,7 +204,7 @@ echo "hello" | ./bin/craze prompt --json
 | `--workspace` | Existing workspace directory (default: current directory) |
 | `--model` | ACP model id (`session/set_model` after `session/new`) |
 | `--agent-bin` | Path to the agent binary (or `CRAZE_AGENT_BIN`) |
-| `--provider` | ACP provider: `cursor`, `grok`, or `gx` |
+| `--provider` | Provider: `cursor`, `grok`, `gx` (ACP agents) or `native` (runs inside craze) |
 | `--follow-up` | Additional prompt on the same ACP session (repeatable) — the headless queue, see below |
 | `--permission-decision` | Headless permission answer: `allow-once` or `reject-once` (repeatable) |
 | `--force` | Spawn the agent with the provider's yolo flag (`--force` for Cursor, `--always-approve` for Grok). Default: on |

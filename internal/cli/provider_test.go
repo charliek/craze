@@ -65,7 +65,7 @@ func TestUnknownProviderErrorNamesEveryProvider(t *testing.T) {
 	if !errors.As(err, &ee) {
 		t.Fatalf("%v", err)
 	}
-	const want = `craze: unknown provider "codex" (want cursor, grok, or gx)`
+	const want = `craze: unknown provider "codex" (want cursor, grok, gx, or native)`
 	if ee.msg != want {
 		t.Fatalf("msg %q, want %q", ee.msg, want)
 	}
@@ -268,11 +268,12 @@ func providerNames(list []agent.Provider) []string {
 	return out
 }
 
-// TestPickerProviders pins the picker's availability filter: cursor and grok
-// are unconditional, so the picker is never empty, and gx appears only when a
-// binary for it resolves. Resolution is the same question spawn asks, so
-// --agent-bin reveals gx and an unresolvable --agent-bin hides it even with gx
-// on PATH (§3.3, AC 4 and AC 9).
+// TestPickerProviders pins the picker's availability filter: cursor, grok and
+// native are unconditional, so the picker is never empty, and gx appears only
+// when a binary for it resolves. Resolution is the same question spawn asks,
+// so --agent-bin reveals gx and an unresolvable --agent-bin hides it even with
+// gx on PATH (§3.3, AC 4 and AC 9). Native is in-process and never optional
+// (plan 028 §3.16), so it is unaffected by PATH or --agent-bin.
 //
 // CRAZE_AGENT_BIN is cleared once for every case and each builds its own PATH
 // in a temp directory, so none of them can read what the host happens to have
@@ -281,23 +282,23 @@ func TestPickerProviders(t *testing.T) {
 	t.Setenv("CRAZE_AGENT_BIN", "")
 	t.Run("gx absent", func(t *testing.T) {
 		t.Setenv("PATH", t.TempDir())
-		if got := providerNames(pickerProviders("")); !reflect.DeepEqual(got, []string{"cursor", "grok"}) {
-			t.Fatalf("rows %q, want [cursor grok]", got)
+		if got := providerNames(pickerProviders("")); !reflect.DeepEqual(got, []string{"cursor", "grok", "native"}) {
+			t.Fatalf("rows %q, want [cursor grok native]", got)
 		}
 	})
 	t.Run("gx on PATH", func(t *testing.T) {
 		dir := t.TempDir()
 		writeExecutable(t, dir, "gx")
 		t.Setenv("PATH", dir)
-		if got := providerNames(pickerProviders("")); !reflect.DeepEqual(got, []string{"cursor", "grok", "gx"}) {
-			t.Fatalf("rows %q, want [cursor grok gx]", got)
+		if got := providerNames(pickerProviders("")); !reflect.DeepEqual(got, []string{"cursor", "grok", "gx", "native"}) {
+			t.Fatalf("rows %q, want [cursor grok gx native]", got)
 		}
 	})
 	t.Run("agent-bin reveals gx", func(t *testing.T) {
 		bin := writeExecutable(t, t.TempDir(), "some-agent")
 		t.Setenv("PATH", t.TempDir())
-		if got := providerNames(pickerProviders(bin)); !reflect.DeepEqual(got, []string{"cursor", "grok", "gx"}) {
-			t.Fatalf("rows %q, want [cursor grok gx]", got)
+		if got := providerNames(pickerProviders(bin)); !reflect.DeepEqual(got, []string{"cursor", "grok", "gx", "native"}) {
+			t.Fatalf("rows %q, want [cursor grok gx native]", got)
 		}
 	})
 	t.Run("invalid agent-bin hides gx", func(t *testing.T) {
@@ -305,8 +306,8 @@ func TestPickerProviders(t *testing.T) {
 		writeExecutable(t, dir, "gx")
 		t.Setenv("PATH", dir)
 		missing := filepath.Join(t.TempDir(), "does-not-exist")
-		if got := providerNames(pickerProviders(missing)); !reflect.DeepEqual(got, []string{"cursor", "grok"}) {
-			t.Fatalf("rows %q, want [cursor grok] — the override is exclusive", got)
+		if got := providerNames(pickerProviders(missing)); !reflect.DeepEqual(got, []string{"cursor", "grok", "native"}) {
+			t.Fatalf("rows %q, want [cursor grok native] — the override is exclusive", got)
 		}
 	})
 }
@@ -380,5 +381,67 @@ func TestPromptPersistsGxProviderKeepingOtherKeys(t *testing.T) {
 	}
 	if got := tui.ConfigTheme(); got != "gruvbox" {
 		t.Fatalf("saving the provider disturbed theme: %q", got)
+	}
+}
+
+// TestNativeIsListedAndPersistable is A34, plan 028 §3.16/D-65: native sits in
+// Providers() right after gx and ProviderNames names it, so it is no longer
+// the hidden exception knownProvider and the picker used to carve out — and,
+// being a listed in-process provider, it can be loaded again and has modes,
+// the safe answer C19's narrowed registry test (internal/agent) also pins.
+// Choosing it persists it the same way any other provider's session would
+// (persistProvider/SaveProvider), which through H7 a hidden provider never
+// did (TestPersistProviderSkipsAHiddenProvider, above).
+func TestNativeIsListedAndPersistable(t *testing.T) {
+	if got, want := agent.ProviderNames(), []string{"cursor", "grok", "gx", "native"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("ProviderNames %q, want %q", got, want)
+	}
+	native, err := agent.ProviderByName("native")
+	if err != nil {
+		t.Fatalf("ProviderByName(native): %v", err)
+	}
+	if native.Hidden() {
+		t.Fatal("native is listed now (D-65): it must not be hidden")
+	}
+	if !native.InProcess() || !native.Resumable() || !native.Capabilities().Modes {
+		t.Fatalf("native inProcess=%v resumable=%v modes=%v, want all true",
+			native.InProcess(), native.Resumable(), native.Capabilities().Modes)
+	}
+
+	writeCrazeConfig(t, "provider = \"grok\"\ntheme = \"gruvbox\"\n")
+	if err := persistProvider(resolvedProvider{Provider: native}); err != nil {
+		t.Fatalf("persistProvider: %v", err)
+	}
+	if got := tui.ConfigProvider(); got != "native" {
+		t.Fatalf("choosing native did not persist it: %q", got)
+	}
+	if got := tui.ConfigTheme(); got != "gruvbox" {
+		t.Fatalf("persisting the provider disturbed theme: %q", got)
+	}
+}
+
+// TestProviderFlagUsageSaysWhatRunsWhere is C19a (sol r1-c19): once D-65 listed
+// native, --provider's help called all four "ACP provider"s, and native is not
+// one — it runs inside craze. Every command that takes the flag says which are
+// the ACP agents craze spawns and which runs inside craze.
+func TestProviderFlagUsageSaysWhatRunsWhere(t *testing.T) {
+	const want = "provider: cursor, grok, gx (ACP agents) or native (runs inside craze)"
+	root := NewRootCmd()
+	for _, path := range [][]string{nil, {"prompt"}, {"frame"}} {
+		cmd, _, err := root.Find(path)
+		if err != nil {
+			t.Fatalf("%v: %v", path, err)
+		}
+		flag := cmd.Flags().Lookup("provider")
+		if flag == nil {
+			t.Fatalf("%q has no --provider", cmd.Name())
+		}
+		if flag.Usage != want {
+			t.Fatalf("%s --provider usage %q, want %q", cmd.Name(), flag.Usage, want)
+		}
+	}
+	// A registry of ACP agents alone names no harness.
+	if got := providerUsage([]agent.Provider{agent.CursorProvider(), agent.GrokProvider()}); got != "provider: cursor, grok (ACP agents)" {
+		t.Fatalf("ACP agents alone: %q", got)
 	}
 }

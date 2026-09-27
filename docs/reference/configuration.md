@@ -367,7 +367,7 @@ terminal is reset, the same as the tab title.
 
 ## Provider precedence
 
-Ids are `cursor`, `grok`, and `gx`. An empty string (`--provider ""`,
+Ids are `cursor`, `grok`, `gx`, and `native`. An empty string (`--provider ""`,
 `$CRAZE_PROVIDER=""`, `provider = ""`) is unset, not unknown.
 
 `gx` is [`charliek/grok-build`](https://github.com/charliek/grok-build), a
@@ -378,17 +378,21 @@ applies to it too. It currently shares grok's `~/.grok` home (config, auth,
 sessions, skills); that is the fork's current behaviour, not a guarantee
 craze makes.
 
-gx is gated separately from the other two ids: it appears in the startup
-picker only when a binary for it resolves (see [Environment](#environment)
-below for lookup order); cursor and grok are always offered, so the picker
-can never be empty. `--provider gx` works regardless of whether a binary
-resolves, and fails at spawn — `agent binary not found: …` — if it does
+gx is gated separately from the other ids: it appears in the startup picker
+when a binary for it resolves, or when it is the resolved default (the default
+is always included, so `Esc` never starts a provider the picker did not show)
+— see [Environment](#environment) below for lookup order; cursor, grok and
+native are always offered, so the picker can never be empty. `--provider gx`
+works regardless of whether a binary resolves, and fails at spawn — `agent
+binary not found: …` — if it does
 not; this matches how `craze prompt --provider gx` and `craze frame
 --provider gx` already behave, since neither consults the picker. Setting
 `--agent-bin` or `$CRAZE_AGENT_BIN` also makes gx appear in the picker,
 because with either set a gx session genuinely would spawn that binary; the
 override is exclusive, so one pointing at nothing hides gx even when `gx`
-is itself on `PATH`.
+is itself on `PATH`. `native` runs in process (see [Native
+compaction](#native-compaction) below and [Native sessions](tui.md#native-sessions))
+— there is no binary to resolve, so it is never gated the way gx is.
 
 For the TUI and `craze prompt`, the first hit wins:
 
@@ -407,7 +411,7 @@ the dialect.
 
 ## Native compaction
 
-On the native provider (`--provider native`, hidden), `~/.craze/native/models.toml`
+On the native provider (`--provider native`), `~/.craze/native/models.toml`
 (or `$CRAZE_HOME/native/` when the home is relocated) may carry an optional
 `[compaction]` section — see [Compaction](tui.md#compaction) for what it
 controls:
@@ -429,13 +433,51 @@ whole: a save re-encodes the whole `models.toml` in its own canonical layout,
 so hand-written comments and formatting are not preserved, and a section left
 with none of these keys is dropped (omitted) rather than written out empty.
 
+## Native cost
+
+On the native provider, `~/.craze/native/models.toml` (or `$CRAZE_HOME/native/`
+when the home is relocated) may carry an optional per-model `cost` table —
+what the [status row](tui.md#usage-and-cost) and the [usage
+section](protocol.md#usage) price a session's spend from:
+
+```toml
+[models."fireworks/kimi-k3".cost]
+input       = 0.60   # $ per 1,000,000 uncached input tokens
+output      = 2.50   # $ per 1,000,000 output tokens (reasoning included)
+cache_read  = 0.15
+cache_write = 0.0
+```
+
+Every key is optional and independent; a model with no `[cost]` table saves
+exactly as it did before this section existed. Each rate is dollars per
+1,000,000 tokens, from 0 up to $10,000 — a rate outside that range, or one
+that is not a finite number (`nan`, `inf`), is refused at load. There are no
+tiers yet: a tier is per request, and a sub-agent's usage row already sums
+many requests, so a per-request price cannot be recovered from it.
+
+craze prices a usage record by **identity** — the model's `(provider, wire
+model)` pair — never by the alias it happened to run under, since a resumed
+session's alias can stop existing while the identity it named still does.
+On every price lookup craze rebuilds the canonical identity → rates map from
+the table's models: for every alias that shares an identity, the **first in
+sorted order that has a `cost`** prices that identity, and each rate is
+rounded to an exact number of picodollars per token, half up, on that same
+lookup — not built once and cached at load. Two priced aliases of the same
+identity that set a *different* `cost` still load, with a warning naming
+both and saying which one's price is used. An identity with no priced alias
+is simply unpriced — its usage is still counted in tokens, but adds no cost.
+
+`craze import gx` keeps an existing entry's `cost` across a reimport — gx
+has no concept of it, so import never touches this table, the same as
+[`[compaction]`](#native-compaction) above.
+
 ## Environment
 
 | Variable | Purpose |
 |----------|---------|
 | `CRAZE_HOME` | The [craze directory](#the-craze-directory) (default `~/.craze`): `config.toml` and the [session index](#session-index) live directly inside it. Skills and plugin caches still follow `HOME` |
 | `CRAZE_AGENT_BIN` | Agent binary when `--agent-bin` is unset |
-| `CRAZE_PROVIDER` | Provider id when `--provider` is unset (`cursor`, `grok`, or `gx`) |
+| `CRAZE_PROVIDER` | Provider id when `--provider` is unset (`cursor`, `grok`, `gx`, or `native`) |
 | `CRAZE_JOURNAL` | Turns the [session journal](#session-journal) off for this run when it reads as false. It cannot turn one on against `journal = false`, and a value craze cannot read as a bool turns it off with one line saying so. Empty or unset leaves the decision to the config file |
 | `CRAZE_CONTROL_SOCKET` | Turns [the control socket](#the-control-socket) off for this run when it reads as false. It cannot turn one on against `control_socket = false`, and a value craze cannot read as a bool turns it off with one line saying so. Empty or unset leaves the decision to the config file |
 | `CRAZE_RUNTIME_DIR` | Overrides [the control socket's](#the-control-socket) runtime base (default: `$XDG_RUNTIME_DIR/craze`, then `/run/user/<uid>/craze` on Linux, then `/tmp/craze-<uid>`): an absolute path, short enough to leave room for `<ns>/<hostId>.sock` under `sun_path`'s limit. Meant for tests and unusual hosts; see [Protocol reference](protocol.md#reaching-a-host) |

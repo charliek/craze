@@ -437,18 +437,19 @@ func endings(t *testing.T, evs []Event, stop string) error {
 	return nil
 }
 
-// TestNativeProviderIsRegisteredHidden: the native provider resolves by id
-// and is listed nowhere (plan 018 §3.4), is in-process, shows its label, and
-// has exactly the capabilities the harness backs. Modes came with plan 023's
-// PR 2, and with them the mode table and the implement prompt the plan offer
-// needs: without the table the chip has no colour and the offer has no mode to
-// go to (tui's implementModeID), and without the prompt it would send nothing.
-func TestNativeProviderIsRegisteredHidden(t *testing.T) {
+// TestNativeProviderIsRegisteredListed: the native provider resolves by id
+// and is listed like any other (plan 028 §3.16/D-65, superseding plan 018
+// §3.4's "listed nowhere"), is in-process, shows its label, and has exactly
+// the capabilities the harness backs. Modes came with plan 023's PR 2, and
+// with them the mode table and the implement prompt the plan offer needs:
+// without the table the chip has no colour and the offer has no mode to go to
+// (tui's implementModeID), and without the prompt it would send nothing.
+func TestNativeProviderIsRegisteredListed(t *testing.T) {
 	p, err := ProviderByName("native")
 	if err != nil {
 		t.Fatalf("ProviderByName(native): %v", err)
 	}
-	if !p.Hidden() || !p.InProcess() || p.DisplayName() != "native" {
+	if p.Hidden() || !p.InProcess() || p.DisplayName() != "native" {
 		t.Fatalf("native is hidden=%v inProcess=%v label %q", p.Hidden(), p.InProcess(), p.DisplayName())
 	}
 	want := Capabilities{Effort: true, Interject: true, Modes: true, Todos: true, AskCards: true, PlanCards: true,
@@ -464,8 +465,8 @@ func TestNativeProviderIsRegisteredHidden(t *testing.T) {
 	if got := p.ImplementPrompt(); got != "Implement the plan above." {
 		t.Fatalf("ImplementPrompt = %q", got)
 	}
-	if slices.Contains(ProviderNames(), "native") {
-		t.Fatalf("ProviderNames lists native: %q", ProviderNames())
+	if !slices.Contains(ProviderNames(), "native") {
+		t.Fatalf("ProviderNames does not list native: %q", ProviderNames())
 	}
 	if !p.BinaryResolves("") {
 		t.Fatal("an in-process provider must resolve without a binary")

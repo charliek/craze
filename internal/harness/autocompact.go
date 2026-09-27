@@ -65,7 +65,15 @@ func compactionThreshold(r modeltable.Resolved, percent int) int64 {
 // that holds the context and its prefix cache (the previous-model rule) — and
 // nil otherwise.
 func (s *Session) contextTokens(m model) (tokens int64, frontier *store.Entry) {
-	f, ok := s.store.Frontier(m.id())
+	return s.contextTokensOn(m.id())
+}
+
+// contextTokensOn is contextTokens for the model id names: the history as a
+// request to it would send it (the store's reasoning rule, D-33, is by
+// model). The Spent a session reports sizes the next request with it
+// (spend.go), for a model it holds the table's entry of.
+func (s *Session) contextTokensOn(id store.Model) (tokens int64, frontier *store.Entry) {
+	f, ok := s.store.Frontier(id)
 	if ok {
 		frontier = &f.Entry
 		u := f.Entry.Usage
@@ -76,7 +84,7 @@ func (s *Session) contextTokens(m model) (tokens int64, frontier *store.Entry) {
 			return n, frontier
 		}
 	}
-	msgs, marks := s.store.ContextWithResults(m.id())
+	msgs, marks := s.store.ContextWithResults(id)
 	return s.estimateContext(redactHistory(s.redactor(), msgs, marks)), frontier
 }
 

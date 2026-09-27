@@ -1073,14 +1073,15 @@ def test_tui_continue_twice_refuses_the_second(
     assert (tmp_path / ".cache" / "craze" / "locks" / f"{row['crazeId']}.lock").exists()
 
 
-def test_tui_native_one_turn_leaves_config_and_index_alone(
+def test_tui_native_one_turn_persists_provider_and_indexes(
     craze_bin: Path, tmp_path: Path
 ) -> None:
-    """Plan 018 C11: a native turn in the real TUI never persists.
+    """Plan 028 §3.16/D-65: native is a listed provider, so a turn persists it.
 
-    The provider is hidden (§3.4): the status bar shows it (it still has to
-    be usable), but startedMsg's SaveProvider skips it, so the config file's
-    provider is exactly what it was before. It is resumable, though (plan 028
+    Through H7, native was hidden (plan 018 §3.4) and startedMsg's SaveProvider
+    skipped it; now it is listed like cursor or grok, so an explicit
+    `--provider native` run saves it as the default the same way theirs would,
+    leaving every other config key alone. It was already resumable (plan 028
     §3.5), so its first prompt writes its row to sessions.jsonl -- under the
     id its transcript is filed by, which is what --continue loads. No fake
     agent is spawned here (`--agent-bin` and an in-process provider are a
@@ -1117,7 +1118,7 @@ def test_tui_native_one_turn_leaves_config_and_index_alone(
         text = _ANSI.sub("", tui.screen())
         assert CANARY not in text, text[-3000:]
 
-    assert config_path.read_text(encoding="utf-8") == before
+    assert config_path.read_text(encoding="utf-8") == 'provider = "native"\ntheme = "tokyo-night"\n'
     index = craze_home / "sessions.jsonl"
     rows = [json.loads(line) for line in index.read_text(encoding="utf-8").splitlines()]
     assert len(rows) == 1, rows
@@ -1238,3 +1239,54 @@ def test_tui_continue_prefers_the_cursor_row_over_a_native_default(
         tui.write(b"\x04")
         assert tui.wait_exit() == 0, tui.screen()[-3000:]
     _wait_fake_gone(fake_agent_bin)
+
+
+def test_tui_picker_refuses_native_under_agent_bin(
+    craze_bin: Path, fake_agent_bin: Path, tmp_path: Path
+) -> None:
+    """C19a (sol r1-c19): the provider picker holds its row to the spawn flags.
+
+    `craze --provider native --agent-bin X` exits 2 (refuseInProcess), and
+    once D-65 listed native the picker offered the same combination one key
+    away: `craze --agent-bin X` with cursor the resolved default checked only
+    cursor, then started native from its row and silently dropped the binary.
+    runTUI now hands the picker the same refusal (tui.Config.RefuseLoad), so
+    Enter on native is the dialog's error row -- no agent spawned, no default
+    persisted -- and Esc still starts the default, the fake agent --agent-bin
+    names.
+    """
+    config_path = tmp_path / ".craze" / "config.toml"
+    argv_dump = tmp_path / "agent-argv"
+    with PTYCraze(
+        craze_bin,
+        fake_agent_bin,
+        tmp_path,
+        provider="",
+        env_extra={"CRAZE_FAKE_DUMP_ARGV": str(argv_dump)},
+    ) as tui:
+        tui.wait_contains("esc uses default")
+        # The rows are cursor, grok, gx (--agent-bin resolves it) and native,
+        # with cursor preselected, so Up wraps onto native.
+        mark = tui.mark()
+        tui.write(b"\x1b[A")
+        tui.wait_contains_since("> native", mark)
+        mark = tui.mark()
+        tui.write(b"\r")
+        tui.wait_contains_since("craze: --agent-bin cannot be used with provider", mark)
+        assert tui.proc.poll() is None, tui.screen()[-3000:]
+        assert not argv_dump.exists(), argv_dump.read_text(encoding="utf-8")
+        assert not config_path.exists(), config_path.read_text(encoding="utf-8")
+
+        # A lone ESC, and nothing written behind it until the default has
+        # spawned: bytes that followed it into the same read would make it Alt.
+        tui.write(b"\x1b")
+        deadline = time.monotonic() + 10
+        while not argv_dump.exists():
+            assert time.monotonic() < deadline, f"Esc spawned no agent: {tui.screen()[-3000:]}"
+            assert tui.proc.poll() is None, tui.screen()[-3000:]
+            time.sleep(0.05)
+        tui.write(b"hello\r")
+        tui.wait_contains("echo: hello")
+        quit_craze(tui)
+    _wait_fake_gone(fake_agent_bin)
+    assert config_path.read_text(encoding="utf-8") == 'provider = "cursor"\n'

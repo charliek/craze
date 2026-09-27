@@ -75,7 +75,7 @@
       "additionalProperties": false
     },
     "settings": {
-      "description": "The settings, each list section in the event codec's own section shape, absent when empty.",
+      "description": "The settings, each list section in the event codec's own section shape, absent when empty; usage, the last usage section a delta carried (native only), absent when none has.",
       "type": "object",
       "properties": {
         "title": {"type": "string"},
@@ -85,6 +85,7 @@
         "commands": {"$ref": "event.json#/$defs/commands"},
         "plugins": {"$ref": "event.json#/$defs/plugins"},
         "sendNow": {"$ref": "event.json#/$defs/sendNow"},
+        "usage": {"$ref": "event.json#/$defs/usage"},
         "truncated": {"$ref": "#/$defs/settingsTruncated"}
       },
       "additionalProperties": false

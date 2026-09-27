@@ -198,6 +198,20 @@ func TestEventJSONDropsAStateDelta(t *testing.T) {
 	}
 }
 
+// TestEventJSONDropsAUsageDelta (plan 028 §3.13, §3.14): a native session's
+// usage section rides on an EventMeta with no Text too, after every step, so
+// it prints no --json line — it still takes a seq, which is why a native
+// session's --json seq values have gaps — and an ACP session's output is
+// exactly what it was (A36).
+func TestEventJSONDropsAUsageDelta(t *testing.T) {
+	_, ok := eventJSON(agent.Event{Type: agent.EventMeta, Seq: 7, State: &agent.StateDelta{
+		Usage: &agent.UsageState{ContextTokens: 1_000, Session: agent.Spend{Input: 10, Output: 5, Unpriced: true}},
+	}})
+	if ok {
+		t.Fatal("eventJSON must not render a usage delta")
+	}
+}
+
 func TestDrainSkippedWhenNothingSpawned(t *testing.T) {
 	evs := make(chan agent.Event)
 	start := time.Now()

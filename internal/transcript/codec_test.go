@@ -549,6 +549,16 @@ func pinnedSnapshots() []pinnedSnapshot {
 				`"commands":{"commands":[{"name":"review","description":"look it over"}]},` +
 				`"plugins":{"plugins":[{"plugin":"p","bare":"b","qualified":"p:b","kind":"skill"}]},` +
 				`"sendNow":{"armed":true,"text":"now","fromRow":"q-2","turn":"turn-3"}},"main":{}}`},
+		// The usage section (plan 028 §3.14): the event codec's own shape,
+		// every key of it written, a zero included, and the section absent
+		// from every settings above, which have none.
+		{"the settings' usage section", Snapshot{Settings: Settings{Model: "test/a", Usage: &agent.UsageState{
+			ContextTokens: 34_000, ContextWindow: 100_000,
+			Turn:    agent.Spend{Input: 10, Output: 5, CostPicoUSD: 20_000_000},
+			Session: agent.Spend{Input: 30, Output: 15, CacheRead: 1_000, CostPicoUSD: 60_000_000, Unpriced: true}}}},
+			`{"version":1,"settings":{"model":"test/a","usage":{"contextTokens":34000,"contextWindow":100000,` +
+				`"turn":{"input":10,"output":5,"reasoning":0,"cacheRead":0,"cacheCreation":0,"costPicoUsd":20000000,"unpriced":false},` +
+				`"session":{"input":30,"output":15,"reasoning":0,"cacheRead":1000,"cacheCreation":0,"costPicoUsd":60000000,"unpriced":true}}},"main":{}}`},
 		{"the settings' truncation marks", Snapshot{Settings: Settings{Truncated: SettingsTruncated{
 			Title: true, Mode: true, Model: true, Config: true, Commands: true, Plugins: true, SendNow: true}}},
 			`{"version":1,"settings":{"truncated":{"title":true,"mode":true,"model":true,"config":true,"commands":true,"plugins":true,"sendNow":true}},"main":{}}`},

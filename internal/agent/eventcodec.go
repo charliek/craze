@@ -27,11 +27,11 @@ import (
 // agent type reaches the wire by a line here — which the completeness test
 // (eventcodec_test.go) refuses to let anyone forget. The flat leaf types
 // (Todo, ToolDiff, PermissionOption, Option, ToolOutput, PluginCommand,
-// ForeignTurnInfo, ReplayInfo, TurnInfo, CompactionInfo) are converted rather
-// than copied field by field: their wire twins have the same fields in the
-// same order, so a field added to one of them stops this file compiling until
-// the twin has it too. Held by pointer, they convert as pointers, and a nil
-// one converts to nil.
+// ForeignTurnInfo, ReplayInfo, TurnInfo, CompactionInfo, Spend) are converted
+// rather than copied field by field: their wire twins have the same fields in
+// the same order, so a field added to one of them stops this file compiling
+// until the twin has it too. Held by pointer, they convert as pointers, and a
+// nil one converts to nil.
 //
 // JSON cannot carry every Go value bit for bit, so "lossless" is defined, and
 // the tests hold the codec to exactly this:
@@ -573,6 +573,7 @@ type wireState struct {
 	Commands *wireCommands    `json:"commands,omitempty"`
 	Plugins  *wirePluginsList `json:"plugins,omitempty"`
 	SendNow  *wireSendNow     `json:"sendNow,omitempty"`
+	Usage    *wireUsage       `json:"usage,omitempty"`
 	Reason   string           `json:"reason,omitempty"`
 	Detail   string           `json:"detail,omitempty"`
 	IndexErr string           `json:"indexErr,omitempty"`
@@ -622,6 +623,30 @@ type wireSendNow struct {
 	Text    string `json:"text,omitempty"`
 	FromRow string `json:"fromRow,omitempty"`
 	Turn    string `json:"turn,omitempty"`
+}
+
+// wireUsage is a UsageState (plan 028 §3.14): always every key, as wireError
+// is, so a jq filter over a journal reads .state.usage.session.costPicoUsd
+// without a default — a 0 and a false are values here, not absences. The
+// section itself is absent when nil (wireState's omitempty), never null or
+// {}: no ACP session's delta ever carries one.
+type wireUsage struct {
+	ContextTokens int64     `json:"contextTokens"`
+	ContextWindow int64     `json:"contextWindow"`
+	Turn          wireSpend `json:"turn"`
+	Session       wireSpend `json:"session"`
+}
+
+// wireSpend is Spend, field for field in the same order, so it converts by a
+// plain conversion; every key always written, as wireUsage's are.
+type wireSpend struct {
+	Input         int64 `json:"input"`
+	Output        int64 `json:"output"`
+	Reasoning     int64 `json:"reasoning"`
+	CacheRead     int64 `json:"cacheRead"`
+	CacheCreation int64 `json:"cacheCreation"`
+	CostPicoUSD   int64 `json:"costPicoUsd"`
+	Unpriced      bool  `json:"unpriced"`
 }
 
 type wireReplay struct {
@@ -741,8 +766,8 @@ func toWireEvent(ev Event) wireEvent {
 	if s := ev.State; s != nil {
 		w.State = &wireState{
 			Title: s.Title, Mode: s.Mode, Model: s.Model,
-			SendNow: (*wireSendNow)(s.SendNow), Reason: s.Reason, Detail: s.Detail,
-			IndexErr: s.IndexErr,
+			SendNow: (*wireSendNow)(s.SendNow), Usage: toWireUsage(s.Usage),
+			Reason: s.Reason, Detail: s.Detail, IndexErr: s.IndexErr,
 		}
 		w.State.Config = toWireConfig(s.Config)
 		w.State.Commands = toWireCommands(s.Commands)
@@ -750,6 +775,25 @@ func toWireEvent(ev Event) wireEvent {
 	}
 	w.Err = toWireError(ev.Err)
 	return w
+}
+
+// toWireUsage is a usage section on the wire, nil for nil: a StateDelta's and
+// a transcript snapshot's (EncodeUsageState).
+func toWireUsage(u *UsageState) *wireUsage {
+	if u == nil {
+		return nil
+	}
+	return &wireUsage{ContextTokens: u.ContextTokens, ContextWindow: u.ContextWindow,
+		Turn: wireSpend(u.Turn), Session: wireSpend(u.Session)}
+}
+
+// usage is a wireUsage back as a UsageState, nil for nil.
+func (w *wireUsage) usage() *UsageState {
+	if w == nil {
+		return nil
+	}
+	return &UsageState{ContextTokens: w.ContextTokens, ContextWindow: w.ContextWindow,
+		Turn: Spend(w.Turn), Session: Spend(w.Session)}
 }
 
 // toWireQueued is a QueuedPrompt on the wire, nil for nil: an EventQueue's
@@ -1007,8 +1051,8 @@ func (w *wireEvent) event() Event {
 	if s := w.State; s != nil {
 		ev.State = &StateDelta{
 			Title: s.Title, Mode: s.Mode, Model: s.Model,
-			SendNow: (*SendNowState)(s.SendNow), Reason: s.Reason, Detail: s.Detail,
-			IndexErr: s.IndexErr,
+			SendNow: (*SendNowState)(s.SendNow), Usage: s.Usage.usage(),
+			Reason: s.Reason, Detail: s.Detail, IndexErr: s.IndexErr,
 		}
 		ev.State.Config = s.Config.config()
 		ev.State.Commands = s.Commands.commands()
@@ -1386,6 +1430,22 @@ func EncodeSendNowState(s *SendNowState) (json.RawMessage, error) {
 func DecodeSendNowState(raw json.RawMessage) (*SendNowState, error) {
 	w, err := decodeLeaf[wireSendNow]("send-now", raw)
 	return (*SendNowState)(w), err
+}
+
+// EncodeUsageState is u as the event codec writes a StateDelta's Usage section
+// (plan 028 §3.14), nil for nil: what a transcript snapshot's settings and
+// session.state's settings carry.
+func EncodeUsageState(u *UsageState) (json.RawMessage, error) {
+	if u == nil {
+		return nil, nil
+	}
+	return encodeLeaf("usage", toWireUsage(u))
+}
+
+// DecodeUsageState is EncodeUsageState's inverse.
+func DecodeUsageState(raw json.RawMessage) (*UsageState, error) {
+	w, err := decodeLeaf[wireUsage]("usage", raw)
+	return w.usage(), err
 }
 
 // EncodeForeignTurnInfo is f as the event codec writes an EventForeignTurn's

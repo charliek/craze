@@ -37,7 +37,9 @@ import (
 //     what the caller reads from it (Current, Mode). So are reminder entries
 //     (plan 028 §3.15): a reminder is what the harness told the model, never
 //     shown live, and never shown again.
-//   - Last, a Todos with the list the resume restored, when it has any item.
+//   - Then a Todos with the list the resume restored, when it has any item.
+//   - Last, when the path holds anything, a Spent (spend.go, plan 028 §3.14):
+//     the session's spend as the transcript records it, and its last turn's.
 //
 // A replayed call's id is "<entry id>.<k>": the id of the assistant entry
 // that made it, and k its place among that entry's calls, from 0 — unique in
@@ -90,6 +92,18 @@ func (s *Session) Replay(sink func(Event)) error {
 			// The list as written can hold a key learned since (redactTodos).
 			sink(Todos{Items: redactTodos(r.red, items)})
 		}
+	}
+	// And what the stored session spent (spend.go, plan 028 §3.14): the
+	// last turn the path numbers — the largest, which the session's numbering
+	// continues from (§3.3) — and the whole, and the context the next request
+	// sends to the model the session continues on. A sub-agent reports none
+	// (P33); an empty path has spent nothing, and says so by nothing, as a
+	// new session does until its first step.
+	if !s.child && len(path) > 0 {
+		s.mu.Lock()
+		turn, next := s.turns, s.cur.r
+		s.mu.Unlock()
+		sink(s.spent(turn, next))
 	}
 	return nil
 }

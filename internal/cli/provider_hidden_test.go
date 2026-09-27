@@ -189,7 +189,7 @@ func TestProviderIDsNeverNameAHiddenProvider(t *testing.T) {
 	if err := cmd.Execute(); !errors.As(err, &ee) {
 		t.Fatalf("%v", err)
 	}
-	if want := `craze: unknown provider "codex" (want cursor, grok, or gx)`; ee.msg != want {
+	if want := `craze: unknown provider "codex" (want cursor, grok, gx, or native)`; ee.msg != want {
 		t.Fatalf("msg %q, want %q", ee.msg, want)
 	}
 }
@@ -261,12 +261,16 @@ func TestInProcessProviderRefusesSpawnFlags(t *testing.T) {
 }
 
 // TestRefuseInProcessLeavesSpawnedProvidersAlone: the binary half of the
-// refusal is for in-process providers only; every ACP provider takes
+// refusal is for in-process providers only; every ACP provider (native is
+// listed among Providers() now, plan 028 §3.16, but is not one) takes
 // --agent-bin and the modes exactly as before, and native with neither is let
 // through.
 func TestRefuseInProcessLeavesSpawnedProvidersAlone(t *testing.T) {
 	t.Setenv("CRAZE_AGENT_BIN", "/bin/true")
 	for _, p := range agent.Providers() {
+		if p.InProcess() {
+			continue
+		}
 		if err := refuseInProcess("craze", p, "/bin/true", "plan"); err != nil {
 			t.Fatalf("%s: %v", p.Name(), err)
 		}

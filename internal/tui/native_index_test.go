@@ -70,10 +70,11 @@ func TestNativeSessionIsIndexed(t *testing.T) {
 	}
 }
 
-// TestResumableSplitsFromHidden is A9's other half: Hidden and Resumable are two
-// questions. The planted hidden provider is neither listed nor resumable, so
-// its sessions stay out of the index and its rows out of the picker; native is
-// hidden and resumable, so its sessions are indexed and its rows offered.
+// TestResumableSplitsFromHidden is A9's other half: Hidden and Resumable are
+// two questions. The planted hidden provider is neither listed nor resumable,
+// so its sessions stay out of the index and its rows out of the picker;
+// native was hidden yet resumable through H7 and is listed now (plan 028
+// §3.16/D-65), so its sessions are indexed and its rows offered either way.
 // Hidden keeps its own meaning for both — never persisted as the default —
 // and every listed provider is resumable.
 func TestResumableSplitsFromHidden(t *testing.T) {
@@ -86,7 +87,7 @@ func TestResumableSplitsFromHidden(t *testing.T) {
 		{agent.CursorProvider(), false, true},
 		{agent.GrokProvider(), false, true},
 		{agent.GxProvider(), false, true},
-		{native, true, true},
+		{native, false, true},
 		{planted, true, false},
 	} {
 		name := tc.p.Name()
@@ -160,7 +161,7 @@ func TestNativeLoadSeedsTitleAndPin(t *testing.T) {
 
 	sess := agent.NewNative(agent.Options{Workspace: ws, ContentHome: t.TempDir(), LoadSessionID: id, Title: "hello"},
 		nativeSessionTweak(harnessHome, table, model))
-	// Started before the model is built, as TestNativeSessionDoesNotPersistOrIndex
+	// Started before the model is built, as TestNativeSessionPersistsAndIndexes
 	// starts its session: the replay is short, so it is all buffered for the
 	// drain below.
 	if err := sess.Start(context.Background()); err != nil {

@@ -42,7 +42,33 @@ type resolvedProvider struct {
 }
 
 func registerProviderFlag(cmd *cobra.Command, dst *string) {
-	cmd.Flags().StringVar(dst, "provider", "", "ACP provider: "+providerIDs)
+	cmd.Flags().StringVar(dst, "provider", "", providerUsage(agent.Providers()))
+}
+
+// providerUsage is --provider's help: every listed provider, with the ACP
+// agents craze spawns told apart from the one that runs inside it — "cursor,
+// grok, gx (ACP agents) or native (runs inside craze)". Computed from the
+// registry, as providerIDs is, so a new provider cannot be named in one and
+// missing from the other. "Runs inside craze" is the refusal's own wording
+// (refuseInProcess) and not "harness", an implementation word the root --help
+// must not carry (TestImportGxHelpNeverMentionsTheHarness).
+func providerUsage(ps []agent.Provider) string {
+	var acp, own []string
+	for _, p := range ps {
+		if p.InProcess() {
+			own = append(own, p.Name())
+		} else {
+			acp = append(acp, p.Name())
+		}
+	}
+	var groups []string
+	if len(acp) > 0 {
+		groups = append(groups, strings.Join(acp, ", ")+" (ACP agents)")
+	}
+	if len(own) > 0 {
+		groups = append(groups, strings.Join(own, ", ")+" (runs inside craze)")
+	}
+	return "provider: " + joinOr(groups)
 }
 
 func resolveProvider(cmd *cobra.Command, flag string, stderr io.Writer, hermetic bool) (resolvedProvider, error) {
@@ -97,6 +123,8 @@ const envAgentBin = "CRAZE_AGENT_BIN"
 // plan mode on in the TUI path too. A load asks it of the loaded row's own
 // provider, whatever was resolved: --continue of its row, and the resume
 // picker of the row chosen, both before anything is claimed (plan 028 §3.5).
+// The provider picker asks it of the provider chosen, before that is started
+// or persisted (C19a): the resolved default is not the only one it can start.
 //
 // The environment variable counts exactly as acp reads it — set and
 // non-empty — so a run the refusal lets through could never have spawned that
@@ -122,7 +150,8 @@ func refuseInProcess(cmd string, p agent.Provider, agentBin, mode string) error 
 // resumable counts as unknown here (plan 028 §3.5): craze cannot load its
 // sessions, so a row naming one — which craze never writes, but the index is
 // user-editable JSON — is kept and never offered by --continue or --resume
-// either. Hidden is not the question: native is hidden, and its rows load.
+// either. Hidden is not the question: before D-65 listed it, native was
+// hidden and its rows still loaded.
 func knownProvider(id string) bool {
 	p, err := agent.ProviderByName(id)
 	return err == nil && p.Resumable()
