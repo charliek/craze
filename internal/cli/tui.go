@@ -58,6 +58,16 @@ func (f *tuiFlags) mode() string {
 	return ""
 }
 
+// refuse is refuseInProcess over this command line's spawn flags. Every
+// provider the TUI may start is asked it: the resolved default before anything,
+// a --continue row before it is claimed, and whatever either picker is about to
+// start (Config.RefuseLoad). So no route to a session lets --agent-bin,
+// CRAZE_AGENT_BIN or --ask/--plan through that `--provider` would have refused
+// (plan 028 §3.5 and §3.16, C19a).
+func (f *tuiFlags) refuse(p agent.Provider) error {
+	return refuseInProcess("craze", p, f.agentBin, f.mode())
+}
+
 // resumeRowLimit is how many rows --resume offers. The dialog caps at the
 // same number, so the picker is the last ten sessions however many the index
 // holds.
@@ -143,8 +153,10 @@ func runTUI(cmd *cobra.Command, f *tuiFlags, env hostEnv) error {
 		// row is known (resolveLoad's refuseLoad, plan 028 §3.5): whatever the
 		// environment or the config resolved has no say in it.
 		resolved.Fallback = false
-	} else if err := refuseInProcess("craze", resolved.Provider, f.agentBin, mode); err != nil {
-		// Only a new session is started on the resolved provider.
+	} else if err := f.refuse(resolved.Provider); err != nil {
+		// Only a new session is started on the resolved provider. The
+		// provider picker may start another, and asks it the same question
+		// (Config.RefuseLoad, below).
 		return err
 	}
 	if cmd == nil {
@@ -181,8 +193,12 @@ func runTUI(cmd *cobra.Command, f *tuiFlags, env hostEnv) error {
 		FallbackDefault: resolved.Fallback,
 		NewSession:      newSession,
 		LoadSession:     build,
-		SessionIndex:    &sessions.Store{KnownProvider: knownProvider},
-		TerminalTitle:   tui.ConfigTerminalTitle(),
+		// The provider picker's choice is held to the spawn flags the
+		// resolved default was, before it is built or persisted; --resume
+		// sets the same closure again in resolveLoad.
+		RefuseLoad:    f.refuse,
+		SessionIndex:  &sessions.Store{KnownProvider: knownProvider},
+		TerminalTitle: tui.ConfigTerminalTitle(),
 		// Resolved once, here: config, then the flag, then the colour
 		// profile. NO_COLOR and TERM=dumb land on the Ascii profile, and a
 		// craze that paints no SGR colour must not repaint the terminal
@@ -298,8 +314,7 @@ func resolveLoad(cmd *cobra.Command, f *tuiFlags, cwd string, cfg *tui.Config, b
 		filter = cfg.Provider.Name()
 	}
 	cfg.PersistProvider = explicit
-	mode := f.mode()
-	refuseLoad := func(p agent.Provider) error { return refuseInProcess("craze", p, f.agentBin, mode) }
+	refuseLoad := f.refuse
 
 	index := &sessions.Store{KnownProvider: knownProvider}
 	if f.resume {

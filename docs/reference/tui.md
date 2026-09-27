@@ -8,12 +8,18 @@
 The TUI is the default command. It refuses to start on a non-tty.
 
 Without `--provider`, a centred **provider** dialog lists `cursor`, `grok`,
-and `gx` — the last shown only when a binary for it resolves, since gx is a
-third-party fork nobody can assume is installed (see
+`gx` and `native` — `gx` shown only when a binary for it resolves, since gx is
+a third-party fork nobody can assume is installed (see
 [Configuration](configuration.md#provider-precedence)) — before the session
 is constructed. The preselected row is the resolved default (see
 [Configuration](configuration.md)). `↑`/`↓`/`Tab` move, `Enter` starts
 that row, `Esc` starts the default. After Start the provider cannot change.
+
+A row the command line rules out is not started: `native` with `--agent-bin`
+or `CRAZE_AGENT_BIN` set, since it runs inside craze and has no binary to
+spawn. `Enter` on it shows the refusal `--provider native` would have exited 2
+with, as an error row under the list, and the dialog stays open for another
+choice; nothing is saved as the default. Moving the cursor clears the row.
 
 `--resume` shows a **resume** picker instead of that dialog, and `--continue`
 skips both and loads a session directly — see [Resuming a

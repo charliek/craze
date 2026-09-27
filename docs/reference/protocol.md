@@ -543,7 +543,7 @@ reply](#the-reply)); `capabilities`' fields are documented in full under
 | `incarnation` | the event log's id: the scope of seqs, turn ids and ask ids, and a cursor's first half |
 | `hostId` | the host serving this session |
 | `workspace` | the session's working directory |
-| `provider` | `{name, label}` — `name` is the ACP provider id (`cursor`, `grok`, `gx`, or `native`'s own), `label` what a client shows |
+| `provider` | `{name, label}` — `name` is the provider id (`cursor`, `grok` or `gx` for the ACP agents, `native` for the one that runs inside craze), `label` what a client shows |
 | `catalogs` | `{models[{id,name}], modes[{id,name,description}]}` — empty until the session is ready |
 | `capabilities` | the session's own capability set, below |
 | `retryHorizon` | `{commands, ageMs}` — the command-id table's size and age bound |

@@ -483,14 +483,19 @@ def test_native_is_in_help_and_unknown_provider_error(
 ) -> None:
     """Plan 028 §3.16/D-65: native is listed like cursor, grok and gx.
 
-    `--help`'s --provider flag names it, and an unknown --provider's error
+    `--help`'s --provider flag names it -- as the one that runs inside craze,
+    not one of the ACP agents (C19a) -- and an unknown --provider's error
     offers it alongside the others.
     """
     help_proc = subprocess.run(
         [str(craze_bin), "--help"], capture_output=True, text=True, timeout=5
     )
     assert help_proc.returncode == 0, help_proc.stderr
-    assert "cursor, grok, gx, or native" in help_proc.stdout, help_proc.stdout
+    assert (
+        "cursor, grok, gx (ACP agents) or native (runs inside craze)"
+        in help_proc.stdout
+    ), help_proc.stdout
+    assert "ACP provider" not in help_proc.stdout, help_proc.stdout
 
     unknown_proc = subprocess.run(
         [

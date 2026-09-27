@@ -1239,3 +1239,54 @@ def test_tui_continue_prefers_the_cursor_row_over_a_native_default(
         tui.write(b"\x04")
         assert tui.wait_exit() == 0, tui.screen()[-3000:]
     _wait_fake_gone(fake_agent_bin)
+
+
+def test_tui_picker_refuses_native_under_agent_bin(
+    craze_bin: Path, fake_agent_bin: Path, tmp_path: Path
+) -> None:
+    """C19a (sol r1-c19): the provider picker holds its row to the spawn flags.
+
+    `craze --provider native --agent-bin X` exits 2 (refuseInProcess), and
+    once D-65 listed native the picker offered the same combination one key
+    away: `craze --agent-bin X` with cursor the resolved default checked only
+    cursor, then started native from its row and silently dropped the binary.
+    runTUI now hands the picker the same refusal (tui.Config.RefuseLoad), so
+    Enter on native is the dialog's error row -- no agent spawned, no default
+    persisted -- and Esc still starts the default, the fake agent --agent-bin
+    names.
+    """
+    config_path = tmp_path / ".craze" / "config.toml"
+    argv_dump = tmp_path / "agent-argv"
+    with PTYCraze(
+        craze_bin,
+        fake_agent_bin,
+        tmp_path,
+        provider="",
+        env_extra={"CRAZE_FAKE_DUMP_ARGV": str(argv_dump)},
+    ) as tui:
+        tui.wait_contains("esc uses default")
+        # The rows are cursor, grok, gx (--agent-bin resolves it) and native,
+        # with cursor preselected, so Up wraps onto native.
+        mark = tui.mark()
+        tui.write(b"\x1b[A")
+        tui.wait_contains_since("> native", mark)
+        mark = tui.mark()
+        tui.write(b"\r")
+        tui.wait_contains_since("craze: --agent-bin cannot be used with provider", mark)
+        assert tui.proc.poll() is None, tui.screen()[-3000:]
+        assert not argv_dump.exists(), argv_dump.read_text(encoding="utf-8")
+        assert not config_path.exists(), config_path.read_text(encoding="utf-8")
+
+        # A lone ESC, and nothing written behind it until the default has
+        # spawned: bytes that followed it into the same read would make it Alt.
+        tui.write(b"\x1b")
+        deadline = time.monotonic() + 10
+        while not argv_dump.exists():
+            assert time.monotonic() < deadline, f"Esc spawned no agent: {tui.screen()[-3000:]}"
+            assert tui.proc.poll() is None, tui.screen()[-3000:]
+            time.sleep(0.05)
+        tui.write(b"hello\r")
+        tui.wait_contains("echo: hello")
+        quit_craze(tui)
+    _wait_fake_gone(fake_agent_bin)
+    assert config_path.read_text(encoding="utf-8") == 'provider = "cursor"\n'

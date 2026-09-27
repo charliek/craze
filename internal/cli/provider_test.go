@@ -419,3 +419,29 @@ func TestNativeIsListedAndPersistable(t *testing.T) {
 		t.Fatalf("persisting the provider disturbed theme: %q", got)
 	}
 }
+
+// TestProviderFlagUsageSaysWhatRunsWhere is C19a (sol r1-c19): once D-65 listed
+// native, --provider's help called all four "ACP provider"s, and native is not
+// one — it runs inside craze. Every command that takes the flag says which are
+// the ACP agents craze spawns and which runs inside craze.
+func TestProviderFlagUsageSaysWhatRunsWhere(t *testing.T) {
+	const want = "provider: cursor, grok, gx (ACP agents) or native (runs inside craze)"
+	root := NewRootCmd()
+	for _, path := range [][]string{nil, {"prompt"}, {"frame"}} {
+		cmd, _, err := root.Find(path)
+		if err != nil {
+			t.Fatalf("%v: %v", path, err)
+		}
+		flag := cmd.Flags().Lookup("provider")
+		if flag == nil {
+			t.Fatalf("%q has no --provider", cmd.Name())
+		}
+		if flag.Usage != want {
+			t.Fatalf("%s --provider usage %q, want %q", cmd.Name(), flag.Usage, want)
+		}
+	}
+	// A registry of ACP agents alone names no harness.
+	if got := providerUsage([]agent.Provider{agent.CursorProvider(), agent.GrokProvider()}); got != "provider: cursor, grok (ACP agents)" {
+		t.Fatalf("ACP agents alone: %q", got)
+	}
+}

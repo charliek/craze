@@ -90,10 +90,26 @@ func (m Model) providerIndex(p agent.Provider) int {
 	return 0
 }
 
+// confirmProvider starts p: Enter on a row (explicit), or the default on Esc
+// and on a click outside the box. The command line's refusal comes first
+// (Config.RefuseLoad), as the resume picker asks it of a row: internal/cli
+// checked only the resolved default before the picker opened, and a row it
+// never checked — native under --agent-bin — is exactly what `craze --provider
+// native --agent-bin X` exits 2 over. A refused provider is the error row and
+// nothing else: the picker stays up for another choice, no session is built,
+// the current engine is left alone, and — since nothing starts — nothing is
+// persisted on startedMsg either.
 func (m Model) confirmProvider(p agent.Provider, explicit bool) (tea.Model, tea.Cmd) {
 	if p.Name() == "" {
 		p = agent.CursorProvider()
 	}
+	if m.refuseLoad != nil {
+		if err := m.refuseLoad(p); err != nil {
+			m.providerErr = err.Error()
+			return m, nil
+		}
+	}
+	m.providerErr = ""
 	m.pickingProvider = false
 	m.dialog = dialogNone
 	m.pickedExplicit = explicit
@@ -138,9 +154,13 @@ func (m Model) handleProviderDialogKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.confirmProvider(m.providerDefault, false)
 	case tea.KeyUp, tea.KeyShiftTab:
 		m.providerCursor = (m.providerCursor - 1 + n) % n
+		// A refusal is about the row it was for: once the cursor leaves it,
+		// the error row goes.
+		m.providerErr = ""
 		return m, nil
 	case tea.KeyDown, tea.KeyTab:
 		m.providerCursor = (m.providerCursor + 1) % n
+		m.providerErr = ""
 		return m, nil
 	}
 	return m, nil
@@ -158,9 +178,16 @@ func (m Model) handleProviderDialogKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // would bound clicks to rows that are not the ones on screen. Three rows and a
 // default at the last index is what makes that reachable, but the arithmetic is
 // the same one row or ten.
+//
+// A refusal's error row is laid out the way the resume picker's is: under the
+// list and above the footer, and a short box keeps it over the footer but never
+// over the last list row. With no refusal the plan is exactly what it was.
 func (m Model) providerDialogPlan(budget int) (top, shown int, footer bool) {
-	footer = budget >= 3
 	rows := budget - 1
+	if m.providerErrShown(budget) {
+		rows--
+	}
+	footer = rows >= 2
 	if footer {
 		rows--
 	}
@@ -168,6 +195,12 @@ func (m Model) providerDialogPlan(budget int) (top, shown int, footer bool) {
 	// fits still starts at row 0 and the goldens are unmoved.
 	top, shown = dialogListWindow(len(m.providers), m.providerCursor, max(rows, 0))
 	return top, shown, footer
+}
+
+// providerErrShown is whether the error row fits the budget: the title, one
+// list row and itself.
+func (m Model) providerErrShown(budget int) bool {
+	return m.providerErr != "" && budget >= 3
 }
 
 // providerDialogBody draws the window the plan settled. There is no ▲/▼ marker
@@ -186,6 +219,9 @@ func (m Model) providerDialogBody(inner, budget int) []string {
 		// the started session are matched by.
 		rows = append(rows, m.dialogRow(p.DisplayName(), tag, i == m.providerCursor, true, inner))
 	}
+	if m.providerErrShown(budget) {
+		rows = append(rows, styleFG(m.theme.Err).Render(clampWidth(sanitizeLine(m.providerErr), inner)))
+	}
 	if footer {
 		rows = append(rows, m.dialogFooter(providerDialogHint, inner))
 	}
@@ -197,6 +233,11 @@ func (m Model) providerDialogClick(i int) (tea.Model, tea.Cmd) {
 	row := i - 1 // the title row
 	if row < 0 || row >= shown {
 		return m, nil
+	}
+	if top+row != m.providerCursor {
+		// The click moves the cursor, as a key would, and the refusal was
+		// about the row it leaves.
+		m.providerErr = ""
 	}
 	m.providerCursor = top + row
 	return m, nil

@@ -156,14 +156,18 @@ type Config struct {
 	// synchronous load exactly as it was — every test Config, the frame
 	// runner and the resume goldens.
 	ClaimSession func(sessions.Row) (crazeID string, release func(), err error)
-	// RefuseLoad is the command line's refusal of a row's provider, asked by
-	// the resume picker before it claims or builds the row it was given (plan
-	// 028 §3.5, P41): internal/cli's closure over --agent-bin,
-	// CRAZE_AGENT_BIN and --ask/--plan, the same check --continue makes of
-	// its row. A refusal is the picker's error row, and nothing is claimed or
-	// built. It is a pure function of the provider and runs inside Update, so
-	// it must not block. nil refuses nothing — every test Config and the
-	// resume goldens.
+	// RefuseLoad is the command line's refusal of a provider, asked by both
+	// pre-start pickers before they start anything: the resume picker of the
+	// chosen row's provider before it claims or builds that row (plan 028
+	// §3.5, P41), and the provider picker of the chosen provider before it
+	// builds a session or lets one persist (§3.16, C19a). It is internal/cli's
+	// closure over --agent-bin, CRAZE_AGENT_BIN and --ask/--plan, the same
+	// check --continue makes of its row and a --provider run of its provider,
+	// so `craze --agent-bin X` picking native is refused exactly as `craze
+	// --provider native --agent-bin X` is. A refusal is the picker's error
+	// row, and nothing is claimed, built or persisted. It is a pure function
+	// of the provider and runs inside Update, so it must not block. nil
+	// refuses nothing — every test Config and every picker golden.
 	RefuseLoad func(agent.Provider) error
 }
 
@@ -412,7 +416,7 @@ type Model struct {
 	resumeAttempt int
 	resumeWaiting int
 	resumeErr     string
-	// refuseLoad is Config.RefuseLoad.
+	// refuseLoad is Config.RefuseLoad, which both pickers ask.
 	refuseLoad func(agent.Provider) error
 	// onEngine is Config.OnEngine.
 	onEngine        func(*engine.Engine)
@@ -421,6 +425,9 @@ type Model struct {
 	fallbackDefault bool
 	pickedExplicit  bool
 	providerCursor  int
+	// providerErr is the provider picker's last refusal (refuseLoad), drawn as
+	// its error row until the cursor moves: resumeErr's twin.
+	providerErr     string
 	providerDefault agent.Provider
 	// providers is the picker's rows, settled once in New: the caller's
 	// availability-filtered list unioned with providerDefault (§3.4). Nothing
