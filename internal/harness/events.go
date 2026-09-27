@@ -13,7 +13,7 @@ import (
 //   - the answer: TextDelta, ThoughtDelta;
 //   - tool calls: ToolStarted, ToolCalled, ToolProgress, ToolFinished;
 //   - the turn's course: StepDone, Steered, Retrying, Diag;
-//   - the harness's own state, projected: Todos;
+//   - the harness's own state, projected: Todos, Compacted (plan 028 §3.13);
 //   - sub-agents (plan 026 §3.9): SubagentStarted, SubagentEvent — one of a
 //     child's own events, wrapped — and SubagentFinished; and, for a
 //     background child the session closed before delivering (§3.11),
@@ -131,6 +131,39 @@ type Prompted struct {
 	Steer bool
 }
 
+// Compacted reports a compaction of the session's context (plan 028 §3.8,
+// §3.13): Phase CompactionStarted before its first summarizer request, and
+// CompactionEnded once it is over, however it ended — the ended one is
+// emitted by a defer, so an open "compacting" never outlives the compaction
+// (P34). Reason is store.CompactionAuto, CompactionManual or
+// CompactionOverflow.
+//
+// An ended one carries TokensBefore, the context's estimated size before it,
+// and either TokensAfter, the estimated size of the context that starts from
+// the summary (§3.7), or Err, why no summary was written — redacted, one line.
+// A replay (Session.Replay) emits the ended one of each stored compaction, in
+// place.
+//
+// Usage, on a live ended one, is what the compaction's summarizer requests
+// were billed, every attempt summed — on its model, the entry's — whether or
+// not an entry holds it: it is how a sub-agent's compactions reach what its
+// parent is told the child spent (§3.17, P19). A replayed one carries none: a
+// replay spends nothing.
+type Compacted struct {
+	Phase        string
+	Reason       string
+	TokensBefore int64
+	TokensAfter  int64
+	Err          string
+	Usage        Usage
+}
+
+// A Compacted's phases.
+const (
+	CompactionStarted = "started"
+	CompactionEnded   = "ended"
+)
+
 // StepDone reports a finished model step: what it was, what it cost, and
 // whether it was persisted. It comes after the step's text and tool calls,
 // once the step's append was tried.
@@ -230,6 +263,11 @@ const (
 	// the call, the tool, the count, and whether this one also ended the turn
 	// ("stopped"), which the fifth does.
 	DiagDoomLoop = "doom_loop"
+	// DiagCompactionUnsaved: a compaction's entry could not be appended, so
+	// no entry holds what its summarizer requests spent (plan 028 §3.8, §3.14):
+	// Fields name the turn, the reason, the error and the usage, which is
+	// observed and unsaved.
+	DiagCompactionUnsaved = "compaction_unsaved"
 )
 
 // SubagentStarted reports that the agent call CallID (its ToolStarted.ID)
@@ -334,6 +372,7 @@ func (SubagentEvent) isEvent()       {}
 func (SubagentFinished) isEvent()    {}
 func (SubagentUndelivered) isEvent() {}
 func (Prompted) isEvent()            {}
+func (Compacted) isEvent()           {}
 
 // Usage is a step's or a turn's token counts: input, output, reasoning, and
 // the prompt-cache reads and writes, which show whether a provider's prefix

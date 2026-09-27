@@ -304,7 +304,7 @@ func TestNativeLoadReplaysTheTranscript(t *testing.T) {
 		"steer: also check the tests [r]",
 		"text: all done [r]",
 		"todos 1 [r]",
-		"meta title=resumed title model=test/a mode=agent config commands=0 plugins [r]",
+		"meta title=resumed title model=test/a mode=agent config commands=1 plugins [r]",
 		"replay:end",
 	})
 
@@ -400,7 +400,7 @@ func TestNativeLoadReplaysPastThePrimarysBuffer(t *testing.T) {
 	for i := range turns {
 		want = append(want, fmt.Sprintf("user: prompt %d [r]", i+1), fmt.Sprintf("text: answer %d [r]", i+1))
 	}
-	want = append(want, "meta title= model=test/a mode=agent config commands=0 plugins [r]", "replay:end")
+	want = append(want, "meta title= model=test/a mode=agent config commands=1 plugins [r]", "replay:end")
 	if got := loadLines(evs); !slices.Equal(got, want) {
 		t.Fatalf("the long load published %d events, want %d:\n%s", len(got), len(want), strings.Join(got, "\n"))
 	}
@@ -498,7 +498,7 @@ func TestNativeLoadOfAnEmptyTranscriptBracketsNothing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	want := []string{"replay:start", "meta title= model=test/a mode=agent config commands=0 plugins [r]", "replay:end"}
+	want := []string{"replay:start", "meta title= model=test/a mode=agent config commands=1 plugins [r]", "replay:end"}
 	if got := loadLines(evs); !slices.Equal(got, want) {
 		t.Fatalf("the empty load published %q, want %q", got, want)
 	}
@@ -533,7 +533,7 @@ func TestAMissingTranscriptOpensEmptyUnderTheSameID(t *testing.T) {
 		want := []string{
 			"meta title=the first prompt",
 			"replay:start",
-			"meta title=the first prompt model=test/a mode=agent config commands=0 plugins [r]",
+			"meta title=the first prompt model=test/a mode=agent config commands=1 plugins [r]",
 			"replay:end",
 		}
 		if got := loadLines(evs); !slices.Equal(got, want) {
@@ -734,7 +734,7 @@ func TestNativeLoadSeedsTitleAndPin(t *testing.T) {
 			if len(lines) < len(tc.first) || !slices.Equal(lines[:len(tc.first)], tc.first) {
 				t.Fatalf("the load opened with %q, want %q", lines, tc.first)
 			}
-			if got := lines[len(lines)-2]; got != "meta title="+tc.opts.Title+" model=test/a mode=agent config commands=0 plugins [r]" {
+			if got := lines[len(lines)-2]; got != "meta title="+tc.opts.Title+" model=test/a mode=agent config commands=1 plugins [r]" {
 				t.Fatalf("the install delta is %q; want the seeded title in it", got)
 			}
 			if got := s.Snapshot().Title; got != tc.opts.Title {
@@ -967,7 +967,7 @@ func TestNativeLoadRefusesSettingsUntilTheBracketCloses(t *testing.T) {
 		"replay:start",
 		"user: prompt 1 [r]",
 		"text: one [r]",
-		"meta title= model=test/a mode=agent config commands=0 plugins [r]",
+		"meta title= model=test/a mode=agent config commands=1 plugins [r]",
 		"replay:end",
 	}
 	if got := loadLines(evs); !slices.Equal(got, want) {

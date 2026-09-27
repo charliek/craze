@@ -96,6 +96,7 @@ type owner struct {
 // field but the fixed ones is guarded by regMu.
 type bgResult struct {
 	id, typ string // the child's id, and its agent type, redacted
+	desc    string // the call's description, redacted: what a compaction's state section names it by
 	callID  string // the agent call that started it: its result's spill file is named for it
 
 	state, prior delivery // prior: what a reservation gives back to (pending or suspended)
@@ -228,7 +229,7 @@ func (r *subagents) runBackground(ctx context.Context, link *turnLink, call tool
 	child.mu.Unlock()
 	red := r.union(child)
 	typ := red.String(persona.Name)
-	res, ok := r.launch(id, typ, call.ID)
+	res, ok := r.launch(id, typ, red.String(call.Description), call.ID)
 	if !ok {
 		return abortedResult() // Close sealed the registry since the child registered
 	}
@@ -252,13 +253,13 @@ func (r *subagents) runBackground(ctx context.Context, link *turnLink, call tool
 // Close has sealed it, it refuses, and the call is aborted before anything
 // was reported. So every goroutine Close's join waits for was counted before
 // the seal.
-func (r *subagents) launch(id, typ, callID string) (*bgResult, bool) {
+func (r *subagents) launch(id, typ, desc, callID string) (*bgResult, bool) {
 	r.regMu.Lock()
 	defer r.regMu.Unlock()
 	if r.sealed {
 		return nil, false
 	}
-	res := &bgResult{id: id, typ: typ, callID: callID, state: resultRunning, done: make(chan struct{})}
+	res := &bgResult{id: id, typ: typ, desc: desc, callID: callID, state: resultRunning, done: make(chan struct{})}
 	r.results[id] = res
 	r.order = append(r.order, id)
 	r.workers.Add(1)
@@ -415,6 +416,28 @@ func (r *subagents) hasPending() bool {
 // handler may call it; a caller that delivers checks it again whenever a turn
 // ends, since a result can become pending while one runs.
 func (s *Session) HasPending() bool { return s.subs.hasPending() }
+
+// runningChild is a background child still running, as a compaction's state
+// section names it (plan 028 §3.8, PD24): its id, its agent type and its
+// call's description, both redacted when it was launched.
+type runningChild struct{ id, typ, desc string }
+
+// running lists the background children still running, in launch order. It
+// takes regMu alone.
+func (r *subagents) running() []runningChild {
+	if r == nil {
+		return nil
+	}
+	r.regMu.Lock()
+	defer r.regMu.Unlock()
+	var out []runningChild
+	for _, id := range r.order {
+		if res := r.results[id]; res != nil && res.state == resultRunning {
+			out = append(out, runningChild{id: res.id, typ: res.typ, desc: res.desc})
+		}
+	}
+	return out
+}
 
 // reserve takes, for own, every result waiting to be delivered — every
 // suspended one as well when withSuspended — in the order they finished, and

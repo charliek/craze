@@ -1905,3 +1905,275 @@ def test_native_resume_refuses_agent_bin(craze_bin: Path, tmp_path: Path) -> Non
 
     assert index.read_bytes() == before
     assert not locks_dir.exists() or list(locks_dir.iterdir()) == []
+
+
+# ---------------------------------------------------------------------------
+# Plan 028 PR 2 (compaction, C14, A29): the harness compacting on its own
+# mid-turn, a resumed session showing the summary and its kept tail, and
+# /compact's own compaction lines over --json.
+
+
+def _compaction_entries(entries: list[dict]) -> list[dict]:
+    return [e for e in entries if e.get("type") == "compaction"]
+
+
+def _run_mid_turn_compaction(
+    craze_bin: Path, craze_home: Path, workspace: Path, fixture_server: SSEFixture
+) -> str:
+    """Runs the scripted turn that crosses a small model's compaction
+    threshold mid-turn (plan 028 §3.6, §3.7, §3.9, §3.11), quits, and returns
+    the session id. Both compaction tests below build their own session from
+    this: one asserts what it left on disk, the other resumes it.
+
+    The window is 4000 tokens (threshold 3400; the tail budget is a quarter of
+    that, 850, since 850 is under the default tail_tokens 20000, plan 028
+    §3.9). Reading big.txt (step one) reports the fixture's fixed, tiny
+    default usage and stays far under the threshold, so the turn goes on;
+    reading small.txt (step two) is scripted with an inflated reported
+    prompt_tokens -- a real provider's own count, which is what the harness's
+    threshold check actually reads (plan 028 §3.7) -- that alone crosses it.
+    big.txt (~6 KB) is far bigger than the tail budget in bytes, so the cut
+    drops it into the segment file and keeps small.txt's own tiny step as the
+    tail: a resumed session then shows a real kept tail, not just a bare
+    summary.
+    """
+    write_native_config(craze_home / "native", fixture_server.base_url, context_window=4000)
+    workspace.mkdir(parents=True, exist_ok=True)
+    (workspace / "big.txt").write_text(("B" * 80 + "\n") * 75, encoding="utf-8")
+    (workspace / "small.txt").write_text("ok\n", encoding="utf-8")
+
+    summary_text = "<summary>" + ("Work summary detail. " * 30) + "</summary>"
+    fixture_server.set_script(
+        [
+            call_step("read", {"filePath": "big.txt"}),
+            call_step("read", {"filePath": "small.txt"}, usage=(3500, 0)),
+            answer(summary_text),
+            answer("compaction done, continuing now"),
+        ]
+    )
+
+    with PTYCraze(
+        craze_bin,
+        None,
+        workspace,
+        provider="native",
+        env_extra={"CRAZE_HOME": str(craze_home)},
+    ) as tui:
+        tui.wait_contains("native")
+        tui.write(b"read the two files\r")
+        tui.wait_contains("✓ read  big.txt", timeout=30)
+        tui.wait_contains("✓ read  small.txt", timeout=30)
+        tui.wait_contains("context compacted", timeout=30)
+        tui.wait_contains("compaction done, continuing now", timeout=30)
+        quit_craze(tui)
+
+    assert fixture_server.script_remaining == 0
+    assert fixture_server.unscripted == 0
+
+    index = craze_home / "sessions.jsonl"
+    rows = [json.loads(line) for line in index.read_text(encoding="utf-8").splitlines()]
+    assert len(rows) == 1, rows
+    return rows[0]["sessionId"]
+
+
+def test_native_mid_turn_compaction(
+    craze_bin: Path, tmp_path: Path, fixture_server: SSEFixture
+) -> None:
+    """A29(1): the scripted turn above (_run_mid_turn_compaction) compacts
+    mid-turn and still ends as ONE turn: the transcript holds its
+    `compaction` entry (§3.2, §3.9) and the segment file it wrote (§3.10)
+    holds the dropped step -- big.txt's read, never small.txt's, which the
+    cut kept as the tail.
+    """
+    craze_home = tmp_path / "craze-home"
+    workspace = tmp_path / "ws"
+    session_id = _run_mid_turn_compaction(craze_bin, craze_home, workspace, fixture_server)
+
+    transcripts = _transcripts_of(craze_home, session_id)
+    assert len(transcripts) == 1, transcripts
+    entries = _entries_of(transcripts[0])
+    compactions = _compaction_entries(entries)
+    assert len(compactions) == 1, entries
+    c = compactions[0]
+    assert c["reason"] == "auto", c
+    assert "error" not in c, c
+    assert c["summary"], c
+    assert c["tokensBefore"] >= 3400, c
+    assert 0 < c["tokensAfter"] < c["tokensBefore"], c
+    segment_name = c.get("segment")
+    assert segment_name, c
+
+    path = str(transcripts[0])
+    assert path.endswith(".jsonl"), path
+    segment_dir = Path(path[: -len(".jsonl")] + ".compaction")
+    segment_file = segment_dir / segment_name
+    assert segment_file.is_file(), sorted(p.name for p in segment_dir.iterdir())
+    content = segment_file.read_text(encoding="utf-8")
+    assert "# craze session" in content, content[:2000]
+    # The dropped step (big.txt) is in the segment; the kept tail (small.txt)
+    # never duplicates into it.
+    assert "big.txt" in content, content
+    assert "small.txt" not in content, content
+
+    # review r1-c14-c9e finding 2: ONE turn, precisely -- not just an entry
+    # and a segment consistent with staying in one turn, but the transcript
+    # itself showing exactly one turn opened and exactly one ended, and the
+    # final scripted answer belonging to that same turn (turn=1). Only a user
+    # entry ever carries "turn" (it is what opens one, store/entry.go), so a
+    # second one would mean a second turn started; there is none.
+    messages = [e for e in entries if e.get("type") == "message"]
+    user_entries = [e for e in messages if e.get("message", {}).get("role") == "user"]
+    assert len(user_entries) == 1, entries
+    assert user_entries[0].get("turn") == 1, user_entries[0]
+    # The mid-turn compaction ran inside that same turn.
+    assert c["turn"] == 1, c
+    # Exactly one turn ending for the whole prompt, and it is the one
+    # carrying the final scripted answer -- a regression that ended turn 1 at
+    # the compaction and ran the final answer as a turn of its own would
+    # either show a second "turn"-opening user entry, or a second end_turn,
+    # or the wrong one holding the final text.
+    end_turns = [e for e in messages if e.get("stopReason") == "end_turn"]
+    assert len(end_turns) == 1, entries
+    assert "compaction done, continuing now" in json.dumps(end_turns[0]["message"]), end_turns[0]
+
+
+def test_native_resume_of_a_compacted_session(
+    craze_bin: Path, tmp_path: Path, fixture_server: SSEFixture
+) -> None:
+    """A29(2): the same session, quit and `craze -c`: the compaction note
+    replays in place (plan 028 §3.13, "Replayed Compacted{ended} draws the
+    note in place"), and the next prompt's request -- what the fixture
+    actually received -- starts with the summary message (`<compacted_context>`)
+    and then the kept tail (small.txt's call and result), never big.txt's,
+    which the cut dropped.
+    """
+    craze_home = tmp_path / "craze-home"
+    workspace = tmp_path / "ws"
+    session_id = _run_mid_turn_compaction(craze_bin, craze_home, workspace, fixture_server)
+
+    # review r1-c14-c9e finding 2: the STORED summary text, read straight from
+    # the transcript's own compaction entry -- what the resumed request's
+    # summary message must be checked against, not just the wrapper's fixed
+    # wording.
+    stored = _compaction_entries(_entries_of(_transcripts_of(craze_home, session_id)[0]))
+    assert len(stored) == 1, stored
+    stored_summary = stored[0]["summary"]
+    assert stored_summary, stored[0]
+
+    fixture_server.set_script([answer("second turn done")])
+    with PTYCraze(
+        craze_bin,
+        None,
+        workspace,
+        provider="",
+        extra_args=["-c"],
+        env_extra={"CRAZE_HOME": str(craze_home)},
+    ) as tui:
+        tui.wait_contains("restored", timeout=30)
+        restored = _ANSI.sub("", tui.screen())
+        assert "read the two files" in restored, restored[-4000:]
+        assert "✓ read  big.txt" in restored, restored[-4000:]
+        assert "✓ read  small.txt" in restored, restored[-4000:]
+        assert "context compacted" in restored, restored[-4000:]
+        assert "compaction done, continuing now" in restored, restored[-4000:]
+
+        # The replayed note is IN PLACE: after the rows of the steps it
+        # followed and before the row that came after it, in the restored
+        # screen's own order -- not merely present somewhere in the
+        # accumulated output (review r1-c14-c9e finding 2).
+        i_big = restored.index("✓ read  big.txt")
+        i_small = restored.index("✓ read  small.txt")
+        i_note = restored.index("context compacted")
+        i_answer = restored.index("compaction done, continuing now")
+        assert i_big < i_small < i_note < i_answer, restored[-4000:]
+
+        tui.write(b"keep going now\r")
+        tui.wait_contains("second turn done", timeout=30)
+        quit_craze(tui)
+
+    last = fixture_server.requests[-1]
+    users = user_contents(last)
+    assert users, last.messages
+    assert users[0].startswith("<compacted_context>"), users[0][:500]
+    assert "compacted to fit the model" in users[0], users[0][:500]
+    assert stored_summary in users[0], (stored_summary, users[0][:2000])
+    assert "keep going now" in users, users
+
+    # The tail is small.txt's own step, verbatim; big.txt's is gone (it is in
+    # the segment file, not the request).
+    tool_calls = [m for m in last.messages if m.get("role") == "assistant" and m.get("tool_calls")]
+    assert any("small.txt" in json.dumps(m["tool_calls"]) for m in tool_calls), tool_calls
+    assert not any("big.txt" in json.dumps(m["tool_calls"]) for m in tool_calls), tool_calls
+    tool_results = {m["tool_call_id"]: m["content"] for m in last.messages if m.get("role") == "tool"}
+    assert any("ok" in v for v in tool_results.values()), tool_results
+
+
+def test_native_compact_command_json_lines(
+    craze_bin: Path, tmp_path: Path, fixture_server: SSEFixture
+) -> None:
+    """A29(3): `/compact` and `/compact <focus>` over `craze prompt --json`
+    (plan 028 §3.12, §3.13) -- each a turn of its own, with no model turn
+    after it: the `compaction` lines carry `seq`, no `agent` (the parent's),
+    and `error` omitted on a successful summary but present when the
+    summarizer's replies are all too short to accept (plan 028 §3.8 item 5).
+    """
+    craze_home = tmp_path / "craze-home"
+    write_native_config(craze_home / "native", fixture_server.base_url)
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+
+    summary_text = "<summary>" + ("Everything so far, in detail. " * 20) + "</summary>"
+    fixture_server.set_script(
+        [
+            answer("hello"),
+            answer(summary_text),
+            answer("too short"),
+            answer("still short"),
+            answer("nope"),
+        ]
+    )
+
+    proc = run_native(
+        craze_bin,
+        craze_home,
+        workspace,
+        "hi",
+        "--follow-up",
+        "/compact",
+        "--follow-up",
+        "/compact keep the summary",
+        timeout=30,
+    )
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert fixture_server.script_remaining == 0
+    assert fixture_server.unscripted == 0
+    assert len(fixture_server.requests) == 5, len(fixture_server.requests)
+
+    events = parse_events(proc.stdout)
+    compactions = [e for e in events if e.get("type") == "compaction"]
+    assert len(compactions) == 4, events
+    for c in compactions:
+        assert "seq" in c, c
+        assert "agent" not in c, c
+
+    started1, ended1, started2, ended2 = compactions
+    assert started1["phase"] == "started" and started1["reason"] == "manual", started1
+    assert ended1["phase"] == "ended" and ended1["reason"] == "manual", ended1
+    assert "error" not in ended1, ended1
+    assert ended1["tokensAfter"] > 0, ended1
+
+    assert started2["phase"] == "started" and started2["reason"] == "manual", started2
+    assert ended2["phase"] == "ended" and ended2["reason"] == "manual", ended2
+    assert "too short to be a real summary" in ended2["error"], ended2
+
+    # No model turn follows either /compact: the only "text" event is the
+    # first, ordinary turn's.
+    assert joined(events, "text") == "hello"
+
+    dones = [e for e in events if e.get("type") == "done"]
+    assert len(dones) == 2, events
+    assert all(d["stopReason"] == "end_turn" for d in dones), dones
+
+    errors = [e for e in events if e.get("type") == "error"]
+    assert len(errors) == 1, events
+    assert "too short to be a real summary" in errors[0]["message"], errors[0]

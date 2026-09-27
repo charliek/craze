@@ -525,12 +525,13 @@ func TestNativeStart(t *testing.T) {
 	}
 	// The three modes are cursor's ids, so every spelling ResolveMode knows
 	// reaches them, and a session with no Options.Mode is in agent mode
-	// (plan 023 §3.6). Commands and the fast toggle stay native's two nos.
+	// (plan 023 §3.6). The one command is /compact (plan 028 §3.12), and the
+	// fast toggle stays a no.
 	wantModes := []ModeInfo{{ID: "agent", Name: "Agent"}, {ID: "plan", Name: "Plan"}, {ID: "ask", Name: "Ask"}}
 	if !reflect.DeepEqual(snap.Modes, wantModes) || snap.CurrentMode != "agent" {
 		t.Fatalf("a native snapshot advertises modes %+v at %q, want %+v at agent", snap.Modes, snap.CurrentMode, wantModes)
 	}
-	if len(snap.Commands) != 0 || FastOption(snap) != nil {
+	if !reflect.DeepEqual(snap.Commands, nativeCommands()) || FastOption(snap) != nil {
 		t.Fatalf("a native snapshot advertises commands %v, fast %v", snap.Commands, FastOption(snap))
 	}
 	// Nothing is written until a turn has output.
@@ -760,8 +761,10 @@ func TestNativeTypedErrorsArePhrased(t *testing.T) {
 			`native: provider "test" rejected the API key (HTTP 400); check its env_keys or api_key in providers.toml`},
 		{"404", &fantasy.ProviderError{StatusCode: 404, Message: "no such model"}, harness.ErrModelNotFound,
 			`native: provider "test" does not serve model "test/a" (HTTP 404); check its wire_model in models.toml`},
+		// A new session's first request: nothing to compact, so nothing was
+		// (C9c item 4).
 		{"context too large", &fantasy.ProviderError{StatusCode: 400, ContextTooLargeErr: true}, harness.ErrContextTooLarge,
-			`native: the conversation no longer fits model "test/a"'s context window (HTTP 400); start a new session (compaction arrives with H7)`},
+			`native: the request alone is too large for model "test/a"'s context window (HTTP 400)`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newNativeFixture(t)
@@ -778,6 +781,35 @@ func TestNativeTypedErrorsArePhrased(t *testing.T) {
 				t.Fatal("the EventError does not carry the returned error")
 			}
 		})
+	}
+}
+
+// TestNativeOverflowAfterCompactingIsPhrased (C9c item 4): a turn that
+// compacted for an overflow and overflowed again says so — "even after
+// compacting" — where one that compacted nothing says the request alone is
+// too large (TestNativeTypedErrorsArePhrased's case).
+func TestNativeOverflowAfterCompactingIsPhrased(t *testing.T) {
+	f := newNativeFixture(t)
+	s := f.started(Options{})
+	f.models["test/a"].push(answer("hi"))
+	if _, err := s.Prompt(context.Background(), "hello"); err != nil {
+		t.Fatalf("the first turn: %v", err)
+	}
+	overflow := func() step {
+		return reply(errorParts(&fantasy.ProviderError{StatusCode: 400, ContextTooLargeErr: true}))
+	}
+	summary := "1. Request and intent\nA greeting." + strings.Repeat(" More of the summary, so it is not degenerate.", 20)
+	f.models["test/a"].push(overflow(), answer(summary), overflow())
+	_, err := s.Prompt(context.Background(), "again")
+	const want = `native: the conversation no longer fits model "test/a"'s context window even after compacting (HTTP 400); start a new session`
+	if err == nil || err.Error() != want {
+		t.Fatalf("error %q, want %q", err, want)
+	}
+	if !errors.Is(err, harness.ErrContextTooLarge) {
+		t.Fatalf("error %q does not match ErrContextTooLarge", err)
+	}
+	if n := f.models["test/a"].callCount(); n != 4 {
+		t.Fatalf("test/a saw %d requests; want the first turn, the overflow, the summarizer and the replacement", n)
 	}
 }
 

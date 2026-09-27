@@ -6,6 +6,8 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+
+	"github.com/charliek/craze/internal/transcript"
 )
 
 // fastTick drives the spinner and the clock-based lingers; idle falls back to
@@ -60,7 +62,7 @@ func (m *Model) handleTick(msg tickMsg) {
 func (m Model) wantFastTick() bool {
 	return m.status == statusWorking || m.cardOpen() || m.tasksLingering() ||
 		m.agentLingering() || m.copyLingering() || m.anySubagentRunning() ||
-		m.shellRunning()
+		m.shellRunning() || m.compacting("")
 }
 
 // untilNextMinute lines the slow chain up with the minute boundary so a
@@ -77,7 +79,10 @@ func (m Model) spinnerVisible() bool {
 	if m.viewing != "" {
 		return m.viewedRunning() || m.cardOpen()
 	}
-	return m.status == statusWorking || m.cardOpen() || m.anySubagentRunning()
+	// A foreign-turn or wake compaction can open main's fold while status
+	// stays idle and nothing else is running (no turn, no child): the working
+	// line still has to show while it does (plan 028 §3.13).
+	return m.status == statusWorking || m.cardOpen() || m.anySubagentRunning() || m.compacting("")
 }
 
 // spinnerGlyph is the current frame of the cycle, shared with the merged form
@@ -117,9 +122,13 @@ func (m Model) turnElapsed() string {
 	return formatElapsed(m.now().Sub(m.turnStart))
 }
 
-// spinnerActivity names what the turn is doing. A sub-agent in flight wins,
-// then the tool kinds, then the thought stream.
+// spinnerActivity names what the turn is doing. A compaction of the
+// session's context wins — nothing else of the turn moves while it runs —
+// then a sub-agent in flight, then the tool kinds, then the thought stream.
 func (m Model) spinnerActivity() string {
+	if m.compacting("") {
+		return transcript.CompactingLabel
+	}
 	var tasks, exec, edit, read int
 	var execCmd, editPath, readPath string
 	for i := range m.snap.Tools {
@@ -171,6 +180,18 @@ func (m Model) spinnerActivity() string {
 		return "Thinking…"
 	}
 	return "Working"
+}
+
+// compacting reports whether the shared model has a compaction of scope's
+// context open ("" the main session's, else a child's): the working line
+// reads transcript.CompactingLabel while it does (plan 028 §3.13). It is the
+// fold's, so a client restored mid-compaction reads the same (seam 7).
+func (m Model) compacting(scope string) bool {
+	if m.shared == nil {
+		return false
+	}
+	tr := scopeOf(m.shared, scope)
+	return tr != nil && tr.Compacting() != nil
 }
 
 func plural(n int) string {

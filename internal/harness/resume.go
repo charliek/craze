@@ -4,7 +4,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
-	"maps"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -94,6 +93,7 @@ func (s *Session) openResumed(opts Options) (_ *Session, err error) {
 		Tools:        s.tools.wire,
 		Now:          opts.Now,
 		SessionID:    id,
+		Render:       s.renderer(),
 	}, path)
 	if err != nil {
 		return nil, fail(s.tools.redactErr(err))
@@ -345,18 +345,7 @@ func (s *Session) resumeModel(opts Options, was pathState) (model, error) {
 	}
 	var candidates []string
 	if was.hasModel {
-		same := func(alias string) bool {
-			m, ok := table.Models[alias]
-			return ok && m.Provider == was.model.Provider && m.WireModel == was.model.WireModel
-		}
-		if same(was.model.Alias) {
-			candidates = append(candidates, was.model.Alias)
-		}
-		for _, alias := range slices.Sorted(maps.Keys(table.Models)) {
-			if alias != was.model.Alias && same(alias) {
-				candidates = append(candidates, alias)
-			}
-		}
+		candidates = identityAliases(table, was.model)
 	}
 	own := len(candidates)
 	if def := table.DefaultModel; def != "" && !slices.Contains(candidates, def) {

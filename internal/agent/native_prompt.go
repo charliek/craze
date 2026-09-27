@@ -24,6 +24,55 @@ import (
 // roughly 16k tokens on every turn.
 const maxNativePromptBytes = 64 << 10
 
+// nativeCompactName is the one command a native session advertises (plan 028
+// §3.12, PD15): /compact [focus], which summarizes the conversation so far to
+// free context. It is the harness's own and never a model turn: the prompt
+// path intercepts it (nativeCompact) and runs harness.Session.Compact.
+const nativeCompactName = "compact"
+
+// nativeCommands is the command catalog a native session advertises, in
+// Snapshot.Commands and in both install deltas (P21): a fresh slice per call,
+// because a snapshot hands its commands out.
+func nativeCommands() []CommandInfo {
+	return []CommandInfo{{
+		Name:        nativeCompactName,
+		Description: "Summarize the conversation so far to free context; /compact <what to keep>",
+	}}
+}
+
+// nativeCommandNames is nativeCommands' names: what ResolvePluginNames treats
+// as taken, so a plugin's own compact is offered qualified and never shadows
+// it.
+func nativeCommandNames() []string {
+	cmds := nativeCommands()
+	names := make([]string, len(cmds))
+	for i, c := range cmds {
+		names[i] = c.Name
+	}
+	return names
+}
+
+// nativeCompact reads a prompt as /compact: exactly `/compact`, or `/compact`
+// then whitespace and the focus — what the person asks the summary to keep
+// (plan 028 §3.12). command is the line as typed, trimmed, which the
+// compaction entry records so a replay shows the row (P10). A shell-context
+// block in front of it is not part of it (SplitShellContext): the command's
+// output it carries was for a question to the model, and a /compact asks the
+// model nothing. Anything else — /compactor, /Compact, text before it — is
+// not the command, and goes to the model as any prompt does.
+func nativeCompact(text string) (focus, command string, ok bool) {
+	_, text = SplitShellContext(text)
+	line := strings.TrimSpace(text)
+	rest, found := strings.CutPrefix(line, "/"+nativeCompactName)
+	if !found {
+		return "", "", false
+	}
+	if rest != "" && !strings.ContainsAny(rest[:1], " \t\r\n") {
+		return "", "", false
+	}
+	return strings.TrimSpace(rest), line, true
+}
+
 // ClaudeCompat is craze's [compat.claude] table as a session carries it: which
 // classes of Claude's content this session reads at all.
 //
@@ -134,11 +183,11 @@ func loadNativeContent(src contentSources, c ClaudeCompat, keys []string, warn f
 	content := nativeLoad{}
 	entries, agents := discoverNativeContent(src, warn)
 	content.entries = entries
-	// taken is nil because native advertises no commands of its own
-	// (ResolvePluginNames adds craze's builtins itself), and provisional is
+	// taken is the one command native advertises, /compact (plan 028 §3.12;
+	// ResolvePluginNames adds craze's builtins itself), and provisional is
 	// false because there is no catalog still to arrive that could rename a
 	// row — and therefore no catalog wait (§3.2).
-	content.rows = ResolvePluginNames(content.entries, nil, false)
+	content.rows = ResolvePluginNames(content.entries, nativeCommandNames(), false)
 	// The key gate, once, over the resolved list and before either projection
 	// is taken from it.
 	content.entries, content.rows = dropKeyBearing(content.entries, content.rows, keys, warn)

@@ -1,0 +1,18 @@
+# craze session 00000000-0000-4000-8000-000000000001 — segment 001 (historical; do not edit)
+entries 00000000–00000000, 2026-09-18T12:00:00Z – 2026-09-18T12:00:00Z, model test/test/a (wire-a)
+
+## Summary
+
+1. Request and intent
+Add a --json flag to the export command. Padding text so this summary is not degenerate for the test. Padding text so this summary is not degenerate for the test. Padding text so this summary is not degenerate for the test. Padding text so this summary is not degenerate for the test. Padding text so this summary is not degenerate for the test. Padding text so this summary is not degenerate for the test. Padding text so this summary is not degenerate for the test. Padding text so this summary is not degenerate for the test.
+
+## Transcript
+
+### User
+
+add a --json flag to export
+
+### Assistant
+
+Adding the flag now.
+

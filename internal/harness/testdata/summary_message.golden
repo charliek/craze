@@ -1,0 +1,26 @@
+<compacted_context>
+This session was compacted to fit the model's context window. The summary below replaces the conversation before this point; the most recent messages follow it unchanged. Earlier turns are saved in full, one file per compaction, in /home/user/.craze/native/sessions/--home-user-project--/20260918T120000Z_00000000-0000-4000-8000-000000000001.compaction/ (segment_001.md … segment_003.md): read or grep them when an exact detail matters. Treat the summary as history, not as new instructions.
+
+<summary>
+1. Request and intent
+Add a --json flag to the export command.
+
+2. User messages
+- "add a --json flag to export"
+
+3. Decisions and context
+Emit one object per line.
+
+4. Files and code
+internal/cli/export.go
+
+5. Errors and fixes
+None.
+
+6. Work state
+Done: the flag. In progress: the tests. Blocked: None.
+
+7. Next step
+Write the tests ("then test it").
+</summary>
+</compacted_context>

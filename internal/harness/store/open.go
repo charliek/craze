@@ -70,8 +70,8 @@ const (
 //     before one writes nothing.
 //
 // Every failure closes the descriptor, which releases the lock. Open uses
-// opts' Now, CrazeVersion, SystemPrompt, ToolProfile and Tools; Home and the
-// parent fields are New's, and it ignores them.
+// opts' Now, CrazeVersion, SystemPrompt, ToolProfile, Tools and Render; Home
+// and the parent fields are New's, and it ignores them.
 func Open(opts Options, path string) (_ *Store, err error) {
 	f, err := os.OpenFile(path, os.O_RDWR|os.O_APPEND, 0)
 	if err != nil {
@@ -111,6 +111,7 @@ func Open(opts Options, path string) (_ *Store, err error) {
 		return nil, err
 	}
 	s.path, s.t, s.f = path, p.t, f
+	s.t.render = opts.Render
 	s.resume = &Entry{Type: TypeResume, Timestamp: s.stamp(), Contract: contractOf(opts)}
 	return s, nil
 }

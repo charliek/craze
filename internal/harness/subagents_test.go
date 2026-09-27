@@ -91,8 +91,26 @@ func (m *router) requests(prompt string) []fantasy.Call {
 	return slices.Clone(m.calls[prompt])
 }
 
+// compactedKey is the key a request whose history begins with a compaction's
+// summary message is routed under (segment_test.go): the summary is then the
+// first user message, and its text is the summarizer's, not a prompt a test
+// could route ahead of time.
+const compactedKey = "<compacted>"
+
+// textFormKey is the key a compaction's text-form request is routed under
+// (overflow_test.go): its one user message is the context serialized, then
+// the compaction prompt (compact.go's textFormPrompt), which no test could
+// route ahead of time either. It is the one request that offers no tools.
+const textFormKey = "<text form>"
+
 func (m *router) Stream(ctx context.Context, call fantasy.Call) (fantasy.StreamResponse, error) {
 	key := firstUserText(call)
+	switch {
+	case isTextForm(call):
+		key = textFormKey
+	case strings.HasPrefix(key, "<"+compactedTag+">"):
+		key = compactedKey
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.calls[key] = append(m.calls[key], call)

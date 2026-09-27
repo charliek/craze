@@ -24,8 +24,8 @@ import (
 // the in-turn history identical to what the transcript replays next turn.
 //
 // A steer is written by the first step that saw it, as a leading user entry of
-// that step's append (store.AppendStep). One that no step persisted — the turn
-// ended before a step took it up, or that step's stream failed or was
+// that step's append (store.AppendStepLed). One that no step persisted — the
+// turn ended before a step took it up, or that step's stream failed or was
 // cancelled, so OnStepFinish never fired — comes back in Result.Unanswered for
 // the caller to put where the user can still see it. Accepted text is written
 // or returned, never both and never neither.
@@ -187,20 +187,37 @@ type splice struct {
 // steers and re-inserted like them, but never a steer — it is not reported,
 // not bounded by the steer cap, and never comes back in Result.Unanswered.
 //
-// The steers are skipped at the first step: its input is the prompt Run was
-// called with, and a steer accepted before it has a whole turn ahead of it to
-// be taken up in. The reminder is not, and this is why prepareStep no longer
-// returns at once there: Fantasy builds the turn's list once, as system +
-// Messages + Prompt, and keeps it across the steps (agent.go:1279-1284, 943),
-// so a reminder appended to Messages would land ahead of the prompt and one
-// spliced from the second step on would move the prefix under the cache
-// (panel correction 7). A turn in agent mode with nothing to announce
-// composes none, and its requests are the bytes they have always been.
+// The steers are skipped at the turn's first request: its input is the
+// prompt Run was called with, and a steer accepted before it has a whole turn
+// ahead of it to be taken up in — unless a pre-turn compaction ran before it
+// (plan 028 §3.6, P36, R2-2): the person typed while it did, so the first
+// request takes the steer up, after the prompt and its reminder, as a later
+// step would. A segment's first request after a restart is not the turn's
+// first (§3.11 table): it takes the steers accepted while the turn compacted,
+// as the pre-turn case does. The reminder is not skipped, and this is why
+// prepareStep no longer returns at once there: Fantasy builds the turn's list
+// once, as system + Messages + Prompt, and keeps it across the steps
+// (agent.go:1279-1284, 943), so a reminder appended to Messages would land
+// ahead of the prompt and one spliced from the second step on would move the
+// prefix under the cache (panel correction 7). A turn in agent mode with
+// nothing to announce composes none, and its requests are the bytes they
+// have always been.
+//
+// At a segment's first request the splices the segment carried over — the
+// ones no append committed, kept by newSegment — are first re-placed at the
+// end of the new base (§3.11 item 6); nothing new is taken up for them, and
+// no Steered is emitted for them again.
+//
+// The input it hands on is kept as t.request: an overflow's compaction is
+// budgeted by the request that overflowed (requestTokens, review r1-c12).
 func (t *turn) prepareStep(ctx context.Context, o fantasy.PrepareStepFunctionOptions) (context.Context, fantasy.PrepareStepResult, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	if t.segmentFirstRequest {
+		t.replaceSplices(len(o.Messages))
+	}
 	if t.ctx.Err() == nil {
-		if o.StepNumber > 0 {
+		if !t.turnFirstRequest || t.compactedBeforeFirst {
 			for _, text := range t.steers.take() {
 				t.spliced = append(t.spliced, splice{text: text, at: len(o.Messages), msg: fantasy.NewUserMessage(text)})
 				// The turn's goroutine is the only one that reports a steer, and
@@ -214,9 +231,31 @@ func (t *turn) prepareStep(ctx context.Context, o fantasy.PrepareStepFunctionOpt
 		t.remind(o.StepNumber, o.Messages)
 	}
 	if len(t.spliced) == 0 && len(t.reminders) == 0 && len(t.internal) == 0 {
+		t.request = o.Messages
 		return ctx, fantasy.PrepareStepResult{}, nil
 	}
-	return ctx, fantasy.PrepareStepResult{Messages: t.spliceInto(o.Messages)}, nil
+	t.request = t.spliceInto(o.Messages)
+	return ctx, fantasy.PrepareStepResult{Messages: t.request}, nil
+}
+
+// requestTokens is the bytes/4 estimate of the request prepareStep last
+// prepared (t.request) — Fantasy's step input as it went out, the system
+// prompt its system message, the history, the prompt and the steers,
+// reminders and results spliced in — with the session's tools:
+// estimateContext's weighing (tokens.go), the system prompt as text and
+// every other message as its JSON. It is weighed only when asked, after the
+// request failed (failedRequest): nothing prepares another request before
+// then, so t.request is still the messages that went out. mu is held.
+func (t *turn) requestTokens() int64 {
+	n := tokensOf(len(t.tools.wire))
+	for _, m := range t.request {
+		if m.Role == fantasy.MessageRoleSystem {
+			n += textTokens(textOf(m))
+			continue
+		}
+		n += messageTokens(m)
+	}
+	return n
 }
 
 // spliceInto is base with every steer, every reminder and every part of
@@ -267,18 +306,10 @@ func (t *turn) spliceInto(base []fantasy.Message) []fantasy.Message {
 // none. mu is held.
 func (t *turn) unwritten() []splice { return t.spliced[t.written:] }
 
-// steerEntries are the unwritten steers as the store takes them: the leading
-// user entries of the step about to be written (store.AppendStep). mu is held.
-func (t *turn) steerEntries() []store.MessageEntry {
-	pending := t.unwritten()
-	if len(pending) == 0 {
-		return nil
-	}
-	out := make([]store.MessageEntry, 0, len(pending))
-	for _, sp := range pending {
-		out = append(out, store.MessageEntry{Message: sp.msg, Model: t.model.id(), Effort: t.model.effort})
-	}
-	return out
+// steerEntry is sp as the store takes it: a leading user entry of the step
+// about to be written (leadingEntries), stamped with the turn's model.
+func (t *turn) steerEntry(sp splice) store.MessageEntry {
+	return store.MessageEntry{Message: sp.msg, Model: t.model.id(), Effort: t.model.effort}
 }
 
 // settleSteers ends the turn's side of Interject, under mu, as the first thing

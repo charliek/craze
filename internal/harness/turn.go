@@ -113,24 +113,34 @@ type Result struct {
 //   - A finished step appends its assistant message (text, reasoning and
 //     tool calls, as Fantasy recorded them) with its usage and stop reason,
 //     and, when it called tools, the tool message holding their results, in
-//     one append (store.AppendStep). A step whose calls Fantasy did not run —
-//     an abnormal finish — gets a not_executed result per call first. When
-//     the step's messages lack text the user saw stream — Fantasy commits a
-//     text block only on its end part, which a provider can omit — the
-//     answer's text is the streamed deltas, with the step's tool calls.
+//     one append (store.AppendStepLed), led by what its request carried that
+//     no append has written yet: the mode reminder, as its variant (plan 028
+//     §3.15), the steers and background results. A step whose calls Fantasy
+//     did not run — an abnormal finish — gets a not_executed result per call
+//     first. When the step's messages lack text the user saw stream —
+//     Fantasy commits a text block only on its end part, which a provider
+//     can omit — the answer's text is the streamed deltas, with the step's
+//     tool calls.
 //   - A step that cannot be saved stops the turn before another request,
 //     and Run returns the error. A step whose calls have an empty or repeated
 //     provider id runs none of them, is not saved, and fails the turn with
 //     ErrBadToolCalls.
 //   - A cancel or failure mid-step appends what streamed, marked
-//     interrupted, once Fantasy has returned; the append uses no context, so
+//     interrupted and led by no mode reminder (reminders.go), once Fantasy
+//     has returned; the append uses no context, so
 //     the cancel that ended the turn cannot abort it. With no text streamed
 //     (thinking alone counts as none) nothing is written. Tools honour the
 //     cancel and report "Tool execution aborted"; their step then finishes
 //     and is saved as usual, and the turn stops there, cancelled.
 //   - A cancel that lands after the model's final step was persisted writes
-//     nothing more, and the turn keeps that step's stop reason; a cancel
-//     after a tool step is a cancelled turn, whatever Fantasy reports.
+//     nothing more, and the turn keeps that step's stop reason, with every
+//     step's usage summed as for any completed turn; a cancel after a tool
+//     step is a cancelled turn, whatever Fantasy reports.
+//   - A request the provider refuses as longer than the window is not saved
+//     at all, once per turn: what it streamed is dropped, its calls settled
+//     as not run, the context compacted, and the turn goes on with a request
+//     that replaces it (overflow recovery, plan 028 §3.12). A second one, or
+//     one the compaction cannot help, fails the turn with ErrContextTooLarge.
 //
 // A model or effort switch made since the last turn (SetModel, SetEffort) is
 // handed to the store first, so it is written just ahead of this turn's
@@ -233,7 +243,9 @@ func (s *Session) run(ctx context.Context, text string, wake bool, sink func(Eve
 	// are redacted as when a step is persisted (redactCalls, redactResults): a
 	// tool call's arguments and a tool result's text, never the model's own
 	// text or reasoning — and the text of an entry of background results,
-	// which a child wrote (plan 026 §3.11), never a person's prompt.
+	// which a child wrote (plan 026 §3.11), and of a compaction's summary
+	// message, which the summarizer wrote from tool output among the rest
+	// (plan 028 P30), never a person's prompt.
 	//
 	// The replacer is the session's live union, the keys Session.Redact
 	// covers — the parent's, every registered child's, and every background
@@ -272,8 +284,14 @@ func (s *Session) run(ctx context.Context, text string, wake bool, sink func(Eve
 		subs:    s.subs,
 		wake:    wake,
 		held:    held,
+
+		turnFirstRequest:    true,
+		segmentFirstRequest: true,
 	}
 	t.resetCalls(true) // Fantasy opens every step with OnStepStart; this is a defence
+	if s.autoCompacts(m) {
+		t.compactCheck = func() bool { return s.midTurnDue(m) }
+	}
 	// The session's todo store reaches this turn's sink only through here
 	// (todos.go, plan 023 §3.4): attach for the turn's whole life, detached
 	// once Run returns, the same way modes and the steer box are handed a
@@ -301,9 +319,151 @@ func (s *Session) run(ctx context.Context, text string, wake bool, sink func(Eve
 	// From here Steer is accepted, and only from here: a prompt the store
 	// refused above never became a turn, so there was nothing to steer into.
 	t.steers.begin()
+	// The pre-turn check (plan 028 §3.6) runs with the box open (P36): a
+	// compaction can take a while, and what the person types meanwhile is
+	// the turn's to take up — in its first request, once one ran, to a
+	// summary or to a summarizer failure (compactedBeforeFirst, which
+	// preTurnCompaction sets). The compaction is written ahead of the held
+	// prompt, which goes out with the first step after it, and after a
+	// summary the history is the store's again, from the summary on.
+	compacted, err := s.preTurnCompaction(t, user.Message)
+	if err != nil {
+		return t.stopBeforeRequest(err)
+	}
+	if compacted {
+		history = s.rebuildHistory(t)
+	}
 	agent := s.newAgent(m.lm, s.system, t.agentTools())
-	res, err := agent.Stream(turnCtx, t.call(text, history))
-	return t.finish(res, err)
+
+	// The segmented turn (plan 028 §3.11, owner decision 2): one turn is a
+	// loop over segments, each one agent.Stream. A segment ends at a step
+	// boundary when the step that just finished — persisted, and stopped
+	// tool_use — left the context at the threshold (compactionDue, the
+	// turn's third stop condition, beside the step limit and halted); the
+	// loop, not finish, decides whether the turn goes on: it compacts, then
+	// starts the next segment from the store, in the same turn, with an
+	// empty prompt — the rebuilt history ends in the last step's tool
+	// message, or in the summary message when there is no tail, both of
+	// which Fantasy allows a prompt of "" after (agent.go:1247-1275).
+	// Nothing is restarted after a segment that also ended by a save
+	// failure, unusable call ids, the doom-loop guard, an approved plan, a
+	// cancel or the step allowance (restartDue): those end the turn as they
+	// always have.
+	//
+	// Overflow recovery (§3.12, D-08, P2) is decided here too, on the error a
+	// segment returns, before finish ever sees it — finish would persist the
+	// failed request's partial answer and write the held prompt with it. A
+	// request the provider refused as too large for the window, once per
+	// turn and never suppressed (overflowRecovers): the failed request is
+	// settled and discarded (failedRequest, §3.11 item 5), the context is
+	// compacted in the text form (reason overflow, §3.8 item 5, P17), and
+	// the next segment starts from the summary, with the turn's prompt sent
+	// again iff no append of the turn has written it yet — a first request
+	// that overflowed; after a step the prompt is in the summary — and the
+	// steers, reminder and results the failed request carried, uncommitted,
+	// re-placed after it (§3.11 item 6). A second overflow, a compaction
+	// that failed, or a context with nothing stored to compact — a new
+	// session's first request, whose prompt alone is too large — fails the
+	// turn with ErrContextTooLarge; a cancel during the compaction ends it
+	// cancelled, and one that cannot be written stops it (P5), as between
+	// any two segments.
+	prompt := text
+	recovered := false
+	for {
+		res, err := agent.Stream(turnCtx, t.call(prompt, history))
+		switch {
+		case t.restartDue(err):
+			// Between requests: the completed step's call state is retired and
+			// nothing is outstanding, so a cancel here — during the summarizer —
+			// persists nothing more (P1), and a compaction that cannot be
+			// written stops the turn as a failed step save does (P5).
+			if err := s.midTurnCompaction(t); err != nil {
+				return t.stopBeforeRequest(err)
+			}
+			prompt = ""
+		case !recovered && s.overflowRecovers(t, err):
+			recovered = true
+			held, sent := t.failedRequest()
+			if cerr := s.overflowCompaction(t, sent); cerr != nil {
+				var saveErr *errCompactionSaveFailed
+				if errors.As(cerr, &saveErr) || turnCtx.Err() != nil {
+					return t.stopBeforeRequest(cerr)
+				}
+				// The summarizer failed (its failure entry is written): the
+				// turn fails with the overflow, between requests — the failed
+				// request is settled already, and nothing of it is
+				// persisted.
+				return t.finish(res, err)
+			}
+			prompt = ""
+			if held {
+				prompt = text
+			}
+		default:
+			return t.finish(res, err)
+		}
+		history = s.rebuildHistory(t)
+		t.newSegment()
+	}
+}
+
+// overflowRecovers reports whether err, the error a segment's agent.Stream
+// returned, is an overflow run recovers from by compacting (plan 028 §3.12):
+// the provider refused the request as too large for the model's window
+// (overflowed), and the context holds something stored to compact — a new
+// session whose first request overflowed has nothing, and fails at once, as
+// it always has (§3.8 item 5, R2-9). It is asked once per turn at most: run
+// recovers once. It holds no lock of the turn's.
+func (s *Session) overflowRecovers(t *turn, err error) bool {
+	if !t.overflowed(err) {
+		return false
+	}
+	msgs, _ := s.store.ContextWithResults(t.model.id())
+	return len(msgs) > 0
+}
+
+// overflowCompaction is overflow recovery's compaction (plan 028 §3.12): reason
+// overflow — so the text form (§3.8 item 5, P17), the aligned request being
+// the one that just overflowed — recorded as the turn it is in, on the
+// turn's own model, run with no lock of the turn's held, as the mid-turn
+// one is (midTurnCompaction). An unknown window's text form is budgeted by
+// sent, the estimate of the turn's request that overflowed (failedRequest,
+// review r1-c12), not by the aligned summarizer request, which never went
+// out and holds neither the prompt nor what the request carried. It is never
+// suppressed, and a summary switches automatic compaction on or off by what
+// it left, as any compaction's does (compacted). Once it has run — anything
+// but nothing to compact — the turn's overflow error says it compacted
+// (overflowCompacted). The error is compact's: a summarizer failure, whose
+// failure entry is written, a cancel, or *errCompactionSaveFailed (P5); run
+// triages it.
+func (s *Session) overflowCompaction(t *turn, sent int64) error {
+	res, err := s.compactOn(t.ctx, t.model, t.model.r, true, sent, t.number, store.CompactionOverflow, "", "", t.emitLocked)
+	if !errors.Is(err, store.ErrNothingToCompact) {
+		t.mu.Lock()
+		t.overflowCompacted = true
+		t.mu.Unlock()
+	}
+	if err == nil {
+		s.compacted(t.model, res)
+	}
+	return err
+}
+
+// rebuildHistory is the history the next request replays, rebuilt from the
+// store — after a compaction, from its summary on — redacted as run's first
+// build is (see there). It also fixes, for the segment about to start, what
+// the retained history says the model was last reminded of (retainedReminder,
+// plan 028 §3.11 table): the variant of the last reminder entry among the
+// context's steps, which a restart's first request decides its own reminder
+// by. It holds no lock of the turn's; the turn is between requests.
+func (s *Session) rebuildHistory(t *turn) []fantasy.Message {
+	msgs, results := s.store.ContextWithResults(t.model.id())
+	history := redactHistory(s.redactor(), msgs, results)
+	retained := lastReminderVariant(s.store.Steps(t.model.id()))
+	t.mu.Lock()
+	t.retainedReminder = retained
+	t.mu.Unlock()
+	return history
 }
 
 // begin claims the session for one turn: it refuses when closed or busy,
@@ -449,12 +609,66 @@ type turn struct {
 	planApproved bool
 	approvedAt   int // the asking call's place in its step (toolCall.order)
 
+	// compactedBeforeFirst says a pre-turn compaction ran (plan 028 §3.6,
+	// R2-2) — to a summary or to a summarizer failure, the turn going on
+	// either way (preTurnCompaction): the steers accepted while it did are
+	// taken up at the turn's first request, which otherwise takes none
+	// (prepareStep).
+	compactedBeforeFirst bool
+
+	// The segmented turn's state (plan 028 §3.11; run's loop). Fantasy numbers
+	// the steps of one Agent.Stream from 0, and a turn may run several
+	// (segments), so what each consumer of that number uses is spelled out in
+	// §3.11's table: step is global — stepBase + n + 1, stepBase being the
+	// requests started in earlier segments, finished or not (R2-1), so no tool
+	// id, StepDone or reservation owner repeats across a restart;
+	// turnFirstRequest is true until the turn's first request goes out
+	// (stepStarted) — a pre-turn compaction does not clear it — and
+	// segmentFirstRequest at each segment's first; between says the turn is
+	// between requests — the completed step's call state retired, nothing
+	// outstanding — so an ending there persists nothing more (P1).
+	//
+	// compactCheck is the mid-turn check (midTurnDue), asked under mu at the
+	// end of a saved tool_use step; nil when the session never compacts on
+	// its own. compactDue is its answer for the step just finished, which the
+	// stop condition compactionDue reports; stepStarted clears it. total is
+	// every StepDone's usage summed over every segment, what a completed or
+	// limited turn returns (R3-3) — never one call's TotalUsage.
+	// retainedReminder is the variant of the last reminder entry in the
+	// history a restart replays (rebuildHistory), "" for none, which its
+	// first request's reminder is decided by (reminders.go, restartReminder)
+	// — apart from a reminder carried uncommitted, which decides differently
+	// (carriedReminder, R4-1).
+	//
+	// userWritten says an append of the turn has written its own user entry,
+	// which the store holds from run's AppendUser until the first append,
+	// whichever it is (wrote): the overflow restart sends the prompt again
+	// only while it has not (§3.12).
+	//
+	// request is the input of the request prepareStep last prepared, as it
+	// went out, which an overflow's compaction is budgeted by (requestTokens,
+	// review r1-c12); overflowCompacted says the turn compacted for an
+	// overflow (§3.12) — the compaction ran, to a summary or to a failure —
+	// so the ErrContextTooLarge it may still end with says "even after
+	// compacting" (classify, C9c item 4).
+	compactCheck        func() bool
+	compactDue          bool
+	stepBase            int
+	turnFirstRequest    bool
+	segmentFirstRequest bool
+	between             bool
+	total               Usage
+	retainedReminder    string
+	userWritten         bool
+	request             []fantasy.Message
+	overflowCompacted   bool
+
 	// Interject's steers, spliced into every step's messages from the one that
 	// first saw them (steer.go, plan 019 §3.10). steers is the session's box,
 	// which has its own lock; spliced and written are this turn's, under mu.
 	steers  *steerbox
 	spliced []splice // the steers taken up, in order, each at a fixed index
-	written int      // how many of spliced an AppendStep has written
+	written int      // how many of spliced an append has written
 
 	// The background sub-agents' results this turn delivers (delivery.go,
 	// plan 026 §3.11): subs is the session's runner, nil for a sub-agent's;
@@ -472,8 +686,10 @@ type turn struct {
 	// The mode's reminders (reminders.go, plan 023 §3.3): modes is the
 	// session's box, which has its own lock; the rest is this turn's, under
 	// mu. reminders is a collection of its own — never spliced, never
-	// persisted, never emitted — and pending is the one composed for the step
-	// about to go out.
+	// emitted — and pending is the one composed for the step about to go out.
+	// Each is written, as its variant, with the first finished step's append
+	// after it (plan 028 §3.15) — never with an interrupted save
+	// (reminders.go); remWritten counts those an append has written.
 	//
 	// carried and sent are the two halves of announcing a mode. carried is the
 	// mode this turn's reminders already speak for, from the moment one is
@@ -485,6 +701,7 @@ type turn struct {
 	modes      *modes
 	logMode    func(mode string) error
 	reminders  []reminder
+	remWritten int
 	pending    pendingReminder
 	hasPending bool
 	carried    string
@@ -522,7 +739,9 @@ func (t *turn) call(text string, history []fantasy.Message) fantasy.AgentStreamC
 		Prompt:          text,
 		Messages:        history,
 		ProviderOptions: t.model.effortOpts,
-		StopWhen:        []fantasy.StopCondition{fantasy.StepCountIs(maxSteps), t.halted},
+		// The step allowance is the turn's, not the segment's (plan 028
+		// §3.11 item 8): a segment may make what earlier ones left of it.
+		StopWhen: []fantasy.StopCondition{fantasy.StepCountIs(maxSteps - t.stepBase), t.halted, t.compactionDue},
 
 		PrepareStep: t.prepareStep,
 		OnStepStart: t.stepStarted,
@@ -594,6 +813,155 @@ func (t *turn) halted([]fantasy.StepResult) bool {
 	return t.saveErr != nil || t.badIDs || t.loop.stopped || t.planApproved || t.ctx.Err() != nil
 }
 
+// compactionDue is the segmented turn's stop condition (plan 028 §3.11 item
+// 1), checked after every step beside halted: the step just finished was
+// persisted, stopped tool_use, and left the context at the threshold
+// (stepFinished, midTurnDue). It ends the segment, not the turn: run's loop
+// compacts and starts the next one (restartDue).
+func (t *turn) compactionDue([]fantasy.StepResult) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.compactDue
+}
+
+// restartDue decides, once a segment's agent.Stream has returned err,
+// whether run starts another segment (plan 028 §3.11 items 2, 3): only when
+// the segment ended by compactionDue and by nothing else — not a failure of
+// the stream, a save failure, unusable call ids, the doom-loop guard, an
+// approved plan, a cancel, or the step allowance, each of which ends the turn
+// as it always has (finish). When it does, it retires the completed step's
+// call state — the step is persisted, and every call of it settled
+// (stepResults) — marks the turn between requests, and counts the segment's
+// requests into stepBase, so the next segment's numbering carries on from
+// the last request started (the consumer table's global step; R2-1 counts a
+// request that started and never finished the same way, failedRequest).
+func (t *turn) restartDue(err error) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if err != nil || !t.compactDue {
+		return false
+	}
+	if t.saveErr != nil || t.badIDs || t.loop.stopped || t.planApproved || t.ctx.Err() != nil || t.step >= maxSteps {
+		return false
+	}
+	t.resetCalls(true)
+	t.resetDeltas()
+	t.between = true
+	t.stepBase = t.step
+	return true
+}
+
+// overflowed reports whether err, the error a segment's agent.Stream
+// returned, is the provider refusing the request as longer than the model's
+// context window — classified as finish classifies it (classify), so a
+// retried step's last error, a *fantasy.ProviderError and the wrapper's
+// *llm.MidStreamError, an overflow after output began, are judged alike
+// (IsContextTooLarge) — and nothing else ended the turn: not a cancel, which
+// is a cancel whatever error it surfaced as, and none of the conditions that
+// forbid a restart (restartDue; they end a segment before a request fails,
+// so this is a defence), the step allowance included — the request that
+// failed was a request, and one past the allowance is never sent.
+func (t *turn) overflowed(err error) bool {
+	if err == nil {
+		return false
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.ctx.Err() != nil || t.saveErr != nil || t.badIDs || t.loop.stopped || t.planApproved || t.step >= maxSteps {
+		return false
+	}
+	return errors.Is(classify(err, t.model.id()), ErrContextTooLarge)
+}
+
+// classify is the turn's failure as the session returns it: classify on the
+// turn's model, and an overflow marked Compacted when the turn compacted for
+// one (overflowCompacted, §3.12) — then it failed even after compacting;
+// otherwise nothing was compacted for it and the request alone is too large
+// (C9c item 4). mu is held.
+func (t *turn) classify(err error) error {
+	cerr := classify(err, t.model.id())
+	var pe *ProviderError
+	if t.overflowCompacted && errors.As(cerr, &pe) && pe.kind == ErrContextTooLarge {
+		pe.Compacted = true
+	}
+	return cerr
+}
+
+// failedRequest is the failed-request transition (plan 028 §3.11 item 5,
+// R2-1, R3-1): what run does, before the overflow's compaction, with a
+// request that ended without OnStepFinish. Its announced calls are settled
+// as not run, so every ToolStarted has its ToolFinished and the dispatcher
+// holds nothing of them; its partial text and reasoning are dropped from the
+// deltas — the user saw them stream, and the compaction that follows closes
+// that stream (a child's observer drops them there too, childObserver) — so a
+// later interrupted save holds the replacement's own alone; it counts toward
+// stepBase, as a request started, so no id or StepDone number of it is ever
+// used again; and nothing of it is persisted. The turn is between requests
+// from here, as at a mid-turn boundary: a cancel during the compaction
+// persists nothing, and the steers it drained, the reminder it carried and
+// the background results it reserved — none written by an append — are
+// carried into the next segment by newSegment, their reservations kept.
+//
+// held reports whether the turn's own user entry is still held by the store:
+// no append of the turn has written it (wrote), so the failed request was
+// the turn's first to carry it, and the next segment sends the prompt again.
+// sent is the failed request's own estimate (requestTokens): what the
+// provider refused, held prompt and carried splices included, which the
+// compaction's text form is budgeted by when the window is unknown (§3.8
+// item 5, review r1-c12).
+func (t *turn) failedRequest() (held bool, sent int64) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	sent = t.requestTokens()
+	t.settleCalls(incomplete)
+	t.resetCalls(true)
+	t.resetDeltas()
+	t.between = true
+	t.stepBase = t.step
+	return !t.userWritten, sent
+}
+
+// newSegment opens the next segment, once the compaction — or its failure —
+// is recorded and the history rebuilt (plan 028 §3.11 items 4, 6): the
+// turn is no longer between requests, the segment's first request is next,
+// and the splices are what the rebuilt history does not hold. A steer, a
+// reminder or a part of results is committed once a step's append wrote it,
+// and a committed one is in the history now, so it is dropped from the
+// lists; an uncommitted one — drained or reserved for a request that never
+// completed, C12's overflow case — is kept, its reservation with it, to be
+// re-placed at the new base's end by the segment's first prepareStep, and
+// its Steered is never emitted again (it was, when it was taken up). The mode
+// the segment's requests already announce is what the kept reminders say,
+// or nothing: everything else is told for good, in the transcript (heard).
+func (t *turn) newSegment() {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.between = false
+	t.segmentFirstRequest = true
+	t.spliced, t.written = slices.Clone(t.spliced[t.written:]), 0
+	t.reminders, t.remWritten = slices.Clone(t.reminders[t.remWritten:]), 0
+	t.internal = slices.DeleteFunc(slices.Clone(t.internal), func(p internalPart) bool { return p.written })
+	t.carried = ""
+	for _, r := range t.reminders {
+		t.carried = reminderVariants[r.variant].mode
+	}
+}
+
+// replaceSplices puts every splice the segment carries over at the end of
+// the segment's first base, at, keeping their order among themselves
+// (spliceInto's, at a shared index). mu is held.
+func (t *turn) replaceSplices(at int) {
+	for i := range t.spliced {
+		t.spliced[i].at = at
+	}
+	for i := range t.reminders {
+		t.reminders[i].at = at
+	}
+	for i := range t.internal {
+		t.internal[i].at = at
+	}
+}
+
 // planWasApproved records that the person approved the plan. The session's
 // asker calls it, on the tool goroutine that asked, before exit_plan_mode has
 // its answer (asker.go).
@@ -617,16 +985,20 @@ func (t *turn) planWasApproved() {
 	}
 }
 
-// stepStarted opens step n (from 0): its number, its clock, and an empty
-// set of tool calls. The step's request goes out next, so this is also where
-// the reminder prepareStep composed for it becomes one the model will read
-// (reminderSent) — for a turn whose context is still live, since Fantasy
-// opens a step whether or not the request can be sent.
+// stepStarted opens step n (from 0, the segment's own numbering): its
+// number in the turn — global across segments (plan 028 §3.11 table) — its
+// clock, and an empty set of tool calls. The step's request goes out next,
+// so this is also where the reminder prepareStep composed for it becomes one
+// the model will read (reminderSent) — for a turn whose context is still
+// live, since Fantasy opens a step whether or not the request can be sent —
+// and where the turn's, and the segment's, first request has gone out.
 func (t *turn) stepStarted(n int) error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	t.step = n + 1
+	t.step = t.stepBase + n + 1
 	t.stepStart, t.firstToken, t.retries = time.Now(), 0, 0
+	t.compactDue = false
+	t.turnFirstRequest, t.segmentFirstRequest = false, false
 	t.resetCalls(true)
 	t.reminderSent()
 	return nil
@@ -690,6 +1062,7 @@ func (t *turn) stepFinished(step fantasy.StepResult) error {
 	open := openCalls(assistant)
 	t.stop = stepStop(step.FinishReason, len(open))
 	t.usage = *store.UsageOf(step.Usage)
+	t.total = addUsage(t.total, t.usage)
 	done := t.stepDone(step)
 	// What the step's sub-agents spent, a row per model (plan 026 §3.7): on
 	// the step's tool entry below, and on its StepDone whatever becomes of the
@@ -739,18 +1112,27 @@ func (t *turn) stepFinished(step fantasy.StepResult) error {
 		// The steers no step has written yet lead the append: this is the
 		// first step that could write them, and the transcript then holds
 		// them exactly where this step's request had them — and so do the
-		// background results the step's requests carried (§3.11).
+		// background results the step's requests carried (§3.11), and the
+		// reminders, as their variants (plan 028 §3.15).
 		leading, lead := t.leadingEntries()
-		ids, err := t.store.AppendStep(leading, entry, toolEntry)
+		ids, err := t.store.AppendStepLed(leading, entry, toolEntry)
 		switch {
 		case err == nil:
-			t.written = len(t.spliced)
+			t.written, t.remWritten = len(t.spliced), len(t.reminders)
 			t.wrote(ids, lead, toolEntry != nil, outputCalls(answered))
 			t.todosWritten(todos)
 			done.Saved, done.Entries = true, ids
 			// The conversation now holds the step the model read the notice
 			// in, so the mode is told for good (plan 023 §3.3).
 			t.modeHeard()
+			// The mid-turn check (plan 028 §3.6, §3.11 item 1), once the step
+			// is persisted and only for one the model is not done with: a
+			// final step never compacts mid-turn. Fantasy asks the stop
+			// conditions right after this callback, and compactionDue answers
+			// with this.
+			if t.stop == StopToolUse && t.compactCheck != nil {
+				t.compactDue = t.compactCheck()
+			}
 		case errors.Is(err, store.ErrNoOutput): // thinking alone: nothing to persist
 		default:
 			if t.saveErr == nil {
@@ -866,18 +1248,28 @@ func (t *turn) finish(res *fantasy.AgentResult, err error) (out Result, ferr err
 				stop = StopEndTurn
 			}
 		}
-		var total Usage
-		if res != nil {
-			total = *store.UsageOf(res.TotalUsage)
-		}
-		return Result{StopReason: stop, Usage: total}, nil
+		// The turn's own sum over every segment's steps (plan 028 §3.11 item
+		// 7): res.TotalUsage covers the last segment's call alone, and a
+		// compaction's usage is on its entry, never here.
+		return Result{StopReason: stop, Usage: t.total}, nil
 	}
 
 	// Fantasy discards everything on a cancel or a failure (plan 018 §2.4);
 	// only what this runner kept says what the user saw. A context
 	// cancelled for any reason is a cancel, whatever error it surfaced as.
-	partial := t.text.Len() > 0 || t.reasoning.Len() > 0 || t.announced() > 0
-	saveErr := t.saveInterrupted(cancelled)
+	// Between requests (plan 028 §3.11 item 3) nothing is outstanding — the
+	// completed step is persisted and its call state retired, or the request
+	// that failed is settled and discarded (failedRequest) — so nothing is
+	// saved: an ending there is cancelled, or the error, with the steers
+	// alone. run ends a turn here between requests only for an overflow whose
+	// compaction produced no summary (§3.12): the turn fails with the
+	// overflow, and the steers the failed request drained come back
+	// unanswered.
+	partial := !t.between && (t.text.Len() > 0 || t.reasoning.Len() > 0 || t.announced() > 0)
+	var saveErr error
+	if !t.between {
+		saveErr = t.saveInterrupted(cancelled)
+	}
 	why := incomplete
 	if cancelled {
 		why = aborted
@@ -888,16 +1280,42 @@ func (t *turn) finish(res *fantasy.AgentResult, err error) (out Result, ferr err
 		return Result{}, fmt.Errorf("harness: saving the interrupted answer: %w", t.tools.redactErr(saveErr))
 	case cancelled && t.stepped && !partial && t.stop != StopToolUse:
 		// The model's last step was final and is persisted: the cancel came
-		// too late to stop anything.
-		return Result{StopReason: t.stop, Usage: t.usage}, nil
+		// too late to stop anything. The turn completed, so it carries what
+		// every segment's steps spent (plan 028 §3.11 item 7, R3-3) — the
+		// last step's alone would drop the steps before a compaction (astra
+		// r1-c11, finding 1).
+		return Result{StopReason: t.stop, Usage: t.total}, nil
 	case cancelled:
 		return Result{StopReason: StopCancelled}, nil
 	case saveErr != nil:
-		return Result{}, errors.Join(classify(err, t.model.id()),
+		return Result{}, errors.Join(t.classify(err),
 			fmt.Errorf("harness: saving the interrupted answer: %w", t.tools.redactErr(saveErr)))
 	default:
-		return Result{}, classify(err, t.model.id())
+		return Result{}, t.classify(err)
 	}
+}
+
+// stopBeforeRequest is how run ends a turn that stopped before its next
+// request: before its first (plan 028 §3.6), or between two segments' (§3.11
+// item 3), when the compaction there was cancelled or could not be written
+// (P5). Nothing is outstanding — no request streamed, or the last step is
+// persisted and its calls settled — so there is nothing to persist or settle
+// but the steers: the box is shut and every steer it accepted — while the
+// compaction ran, say — comes back unanswered, as on any ending
+// (settleSteers). Before the first request the prompt stays held, like the
+// prompt of a turn that produced nothing, and the next turn's replaces it;
+// between requests the steps so far are in the transcript and stay there,
+// written once. A save failure fails the turn; a cancel is a cancelled turn,
+// with no usage, as a cancel after a tool step has always been (R3-3).
+func (t *turn) stopBeforeRequest(err error) (Result, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	defer func() { t.ended = true }()
+	unanswered := t.settleSteers()
+	if errors.As(err, new(*errCompactionSaveFailed)) {
+		return Result{Unanswered: unanswered}, fmt.Errorf("harness: saving the compaction: %w", t.tools.redactErr(err))
+	}
+	return Result{StopReason: StopCancelled, Unanswered: unanswered}, nil
 }
 
 // saveInterrupted appends the step a cancel or a failure cut short, marked
@@ -919,9 +1337,10 @@ func (t *turn) saveInterrupted(cancelled bool) error {
 	}
 	// The background results the cut step's request carried lead the answer,
 	// as they would a finished step's, and commit when it is written (plan 026
-	// §3.11); its steers do not, and go back to the user.
+	// §3.11); its steers do not, and go back to the user, and neither does its
+	// reminder, which the model was not told for good (reminders.go).
 	leading, lead := t.internalEntries()
-	ids, err := t.store.AppendAnswer(leading, store.MessageEntry{
+	ids, err := t.store.AppendAnswerLed(leading, store.MessageEntry{
 		Message:     streamed(t.reasoning.String(), t.text.String()),
 		Model:       t.model.id(),
 		Effort:      t.model.effort,
@@ -1083,10 +1502,11 @@ func redactResults(red *redact.Replacer, m fantasy.Message) fantasy.Message {
 
 // redactHistory is msgs with every provider key gone from the tool calls'
 // arguments and the tool results' text (see Run), and from the text of every
-// message results marks as an entry of background sub-agents' results (plan
-// 026 §3.11, astra r14): a child wrote it, as a tool wrote a result, so a key
-// the session learned after it was committed must not go out in a later
-// request. results is msgs' marks, message for message
+// message results marks: an entry of background sub-agents' results (plan
+// 026 §3.11, astra r14), or a compaction's summary message (plan 028 P30). A
+// child wrote the one and the summarizer the other, as a tool wrote a
+// result, so a key the session learned after it was committed must not go
+// out in a later request. results is msgs' marks, message for message
 // (store.ContextWithResults). A message holding none is carried over as it
 // is, parts and all, so the bytes a provider sees do not change — a person's
 // prompt among them, which is never marked; msgs itself, which the store
@@ -1115,6 +1535,18 @@ func redactText(red *redact.Replacer, m fantasy.Message) fantasy.Message {
 		}
 		return p, false
 	})
+}
+
+// liveRedact is m with every provider key gone from its calls, its results
+// and its own text, unconditionally — segment.go's own rule for a step past
+// the frontier, which has no per-message "results" mark to consult the way
+// redactHistory does: text-redacting every message is harmless where none is
+// present (a no-op), and needed for the two kinds a step's stored form does
+// not otherwise cover, a reminder and a compaction's own summary message
+// (P30). compact.go's text form reuses it for the same reason (review r1-c9
+// finding 2).
+func liveRedact(red *redact.Replacer, m fantasy.Message) fantasy.Message {
+	return redactText(red, redactResults(red, redactCalls(red, m)))
 }
 
 // mapParts is m with f applied to each part, f reporting whether it changed

@@ -43,10 +43,16 @@ var (
 	ErrModelNotFound = errors.New("harness: the provider does not know the model")
 
 	// ErrContextTooLarge is a provider saying the request is longer than the
-	// model's context window. There is no compaction until H7, so every
-	// later turn would fail the same way: the session is done, and a
-	// ProviderError of this kind says so, naming the model (plan 019 §3.5).
-	ErrContextTooLarge = errors.New("harness: the conversation no longer fits the model's context window; start a new session (compaction arrives with H7)")
+	// model's context window, and the turn could not recover from it (plan
+	// 028 §3.12): a turn compacts once on an overflow and tries again, so a
+	// turn fails with it on a second overflow, when that compaction failed,
+	// or when there was nothing stored to compact — a new session's first
+	// request, whose prompt alone is too large — or no request left to retry
+	// with (the step allowance). A ProviderError of this kind says so, naming
+	// the model (plan 019 §3.5), and says "even after compacting" only when
+	// the turn did compact for it (ProviderError.Compacted). The sentinel's
+	// own text claims neither.
+	ErrContextTooLarge = errors.New("harness: the request is too large for the model's context window")
 
 	// ErrBadToolCalls is a provider fault: a step's tool calls had an empty
 	// or a repeated call id, so their results could not be paired with them
@@ -145,14 +151,36 @@ type ProviderError struct {
 	StatusCode int    // the HTTP status; 0 for an error with none, such as a stream error event
 	Message    string
 
+	// Code and Type are the provider's own machine-readable names for the
+	// failure, from its response's structured error (llm.ErrorNames): the
+	// OpenAI-family envelope's error.code and error.type — for a quota
+	// that is gone, "insufficient_quota" — or "" when it sent none. They are
+	// what the provider says the failure is, where Message is display text
+	// cut to maxMessageBytes, so a decision that turns on the kind of
+	// failure reads them first (compact.go's quotaExhausted, review r2 major
+	// 2). Package llm read them from the response as it arrived, before the
+	// scrub, and kept each only as a short lowercase identifier the scrub
+	// leaves as it is, so neither can hold the key (review r3 major 2).
+	Code, Type string
+
+	// Compacted is set on an ErrContextTooLarge the turn compacted for (plan
+	// 028 §3.12): its overflow compaction ran, and either failed or left a
+	// context whose replacement request overflowed too. Unset, nothing was
+	// compacted for it — a new session's first request, an overflow at the
+	// step allowance, or a summarizer's own request — and the text says the
+	// request alone is too large, not "even after compacting" (C9c item 4).
+	Compacted bool
+
 	kind error
 }
 
 func (e *ProviderError) Error() string {
 	head := "harness: provider error"
 	switch {
+	case e.kind == ErrContextTooLarge && e.Compacted:
+		head = fmt.Sprintf("harness: the conversation no longer fits model %q's context window even after compacting; start a new session", e.Model)
 	case e.kind == ErrContextTooLarge:
-		head = fmt.Sprintf("harness: the conversation no longer fits model %q's context window; start a new session (compaction arrives with H7)", e.Model)
+		head = fmt.Sprintf("harness: the request alone is too large for model %q's context window", e.Model)
 	case e.kind != nil:
 		head = e.kind.Error()
 	}
@@ -181,9 +209,14 @@ func (e *ProviderError) Unwrap() error { return e.kind }
 //     is judged by its last error, the one the user would have seen.
 //   - The wrapper's *llm.MidStreamError (a failure after output began) and a
 //     *fantasy.ProviderError are classified the same way: by status, the
-//     auth flag, and the context-too-large flag.
+//     auth flag, and the context-too-large flag; and both give up the
+//     provider's code and type for the failure (llm.ErrorNames), which
+//     package llm read from the response before scrubbing it.
 //   - Anything else — a connection that failed, say — is a ProviderError
 //     with no status, carrying the error's text.
+//
+// The error is never Compacted: only the turn knows whether it compacted
+// for an overflow (turn.classify).
 func classify(err error, m store.Model) error {
 	if errors.Is(err, ErrEmptyStep) {
 		return fmt.Errorf("harness: model %q: %w", m.Alias, ErrEmptyStep)
@@ -199,12 +232,14 @@ func classify(err error, m store.Model) error {
 	case errors.As(err, &mse):
 		pe.StatusCode, pe.Message = mse.StatusCode, mse.Message
 		pe.kind = kindOf(mse.StatusCode, mse.AuthError, mse.IsContextTooLarge())
+		pe.Code, pe.Type = mse.Code, mse.Type
 	case errors.As(err, &fpe):
 		pe.StatusCode, pe.Message = fpe.StatusCode, fpe.Message
 		if pe.Message == "" {
 			pe.Message = fpe.Title
 		}
 		pe.kind = kindOf(fpe.StatusCode, fpe.AuthError, fpe.IsContextTooLarge())
+		pe.Code, pe.Type = llm.ErrorNames(fpe)
 	default:
 		pe.Message = err.Error()
 	}

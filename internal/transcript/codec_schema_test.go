@@ -57,6 +57,7 @@ var snapshotPresence = map[string]bool{
 	"wireTranscriptIn.todoPlanned": false,
 	"wireTranscriptIn.todoDone":    false,
 	"wireTranscriptIn.omittedRun":  false,
+	"wireTranscriptIn.compacting":  false,
 	"wireTranscriptIn.omitted":     false,
 	"wireTranscriptIn.entries":     false,
 }

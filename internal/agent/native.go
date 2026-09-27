@@ -15,6 +15,7 @@ import (
 	"github.com/charliek/craze/internal/harness"
 	"github.com/charliek/craze/internal/harness/modeltable"
 	"github.com/charliek/craze/internal/harness/redact"
+	"github.com/charliek/craze/internal/harness/store"
 	"github.com/charliek/craze/internal/journal"
 	"github.com/charliek/craze/internal/paths"
 	"github.com/charliek/craze/internal/version"
@@ -526,6 +527,10 @@ func (s *nativeSession) start(context.Context) error {
 	s.plugins = entries
 	s.snap.Plugins = rows
 	s.snap.Models = infos
+	// The one command native advertises, /compact (plan 028 §3.12): the
+	// harness's own, which the prompt path intercepts. Both installs carry it
+	// — this section's for a new session, load's for a restored one (P21).
+	s.snap.Commands = nativeCommands()
 	// For a load, the stored session's own id: the harness reopened the
 	// transcript under it, so it is the index row's sessionId, the id a bridge
 	// or an attach resolves the session by (plan 028 §3.4, seam 2).
@@ -585,12 +590,12 @@ func (s *nativeSession) start(context.Context) error {
 // installDeltaLocked is the one delta a Start's install publishes: every
 // section it installed, in full, as the snapshot now stands — live.go's
 // installDeltaLocked, whose rule it follows (a section is restated rather than
-// left out). Commands is carried by both installs even while native
-// advertises none, so a client that folds the stream learns the command list
-// from the install on (plan 028 P21). withTitle adds the Title section, which
-// only a load's install carries — "there is no title" included, for a load of
-// an untitled row — because a new session's title is its first prompt's to
-// publish. s.mu is held.
+// left out). Commands — /compact, the one command native advertises — is
+// carried by both installs, so a client that folds the stream learns the
+// command list from the install on (plan 028 P21). withTitle adds the Title
+// section, which only a load's install carries — "there is no title"
+// included, for a load of an untitled row — because a new session's title is
+// its first prompt's to publish. s.mu is held.
 func (s *nativeSession) installDeltaLocked(withTitle bool) *StateDelta {
 	model, mode := s.snap.CurrentModel, s.snap.CurrentMode
 	st := &StateDelta{
@@ -1462,7 +1467,11 @@ func (s *nativeSession) prompt(ctx context.Context, text string, rel chan struct
 	s.doneEmitted = false
 	s.turnCancel = cancel
 	s.turnToken = tok
-	if !s.titlePinned && s.snap.Title == "" {
+	// /compact [focus] is the harness's own turn, never a prompt to the model
+	// (plan 028 §3.12, PD15): it names nothing — a session is not called
+	// "/compact" — and expands nothing.
+	focus, command, compact := nativeCompact(text)
+	if !compact && !s.titlePinned && s.snap.Title == "" {
 		// The typed text, not the expansion: a session called after the whole
 		// of a command file would say nothing about what the user asked for.
 		// The journal's prompt note (Begin) keeps the typed text for the same
@@ -1538,22 +1547,33 @@ func (s *nativeSession) prompt(ctx context.Context, text string, rel chan struct
 		_ = s.log.Flush(context.Background(), s.done)
 	}
 
-	// One string, not content blocks: the harness takes the whole user message
-	// at once (turn.go). Redacted with the session's own redactor, because Run
-	// persists and sends it unchanged.
-	sent, expanded := nativePrompt(text, refs, sessionID, hs.Redact)
-	for _, cmd := range expanded {
-		// Its own copy, not a pointer into the slice: the event outlives this
-		// loop, and the range variable is per-iteration. A publish abandoned on
-		// the turn's cancelled context stops the announcements and nothing else
-		// — the turn below still runs, returns StopCancelled at once and emits
-		// the one ending it owes.
-		if !s.emitCtx(turnCtx, Event{Type: EventCommand, Command: &cmd}) {
-			break
+	var (
+		res harness.Result
+		err error
+	)
+	if compact {
+		// The compaction is a turn of its own: it claims the harness as Run
+		// does, reports Compacted{started…ended} through the sink (the
+		// EventCompaction pair), and ends end_turn with no model turn after
+		// it. The command is recorded redacted, as a prompt is.
+		res, err = hs.Compact(turnCtx, hs.Redact(focus), hs.Redact(command), s.sink)
+	} else {
+		// One string, not content blocks: the harness takes the whole user
+		// message at once (turn.go). Redacted with the session's own
+		// redactor, because Run persists and sends it unchanged.
+		sent, expanded := nativePrompt(text, refs, sessionID, hs.Redact)
+		for _, cmd := range expanded {
+			// Its own copy, not a pointer into the slice: the event outlives
+			// this loop, and the range variable is per-iteration. A publish
+			// abandoned on the turn's cancelled context stops the
+			// announcements and nothing else — the turn below still runs,
+			// returns StopCancelled at once and emits the one ending it owes.
+			if !s.emitCtx(turnCtx, Event{Type: EventCommand, Command: &cmd}) {
+				break
+			}
 		}
+		res, err = hs.Run(turnCtx, sent, s.sink)
 	}
-
-	res, err := hs.Run(turnCtx, sent, s.sink)
 	// Translated the moment Run hands it over, and before anything reads it:
 	// what a turn could not answer comes back in the spelling craze sent, and
 	// every use of it downstream — the queue's row, the size cap that row is
@@ -1697,7 +1717,8 @@ func nativeTitle(prompt string) string {
 // native_tools.go merges, its todo list becomes the snapshot's and one
 // EventTodos (native_asks.go), and its sub-agents become the roster, the
 // children's own tagged events and the agent row's task (native_subagents.go,
-// plan 026 §3.9). StepDone, Retrying and Diag have no agent event and are
+// plan 026 §3.9), and a compaction becomes its EventCompaction pair (plan 028
+// §3.13, compacted). StepDone, Retrying and Diag have no agent event and are
 // dropped: usage goes to the transcript only — but for the sub-agent usage an
 // unsaved step could not record, which is journaled (noteSubagentUsage) — the
 // harness allows one silent retry (plan 018 §3.8), and a Diag is for the
@@ -1739,6 +1760,8 @@ func nativeTitle(prompt string) string {
 //     the parent's — a child has no todo list, and its Todos is dropped. s.mu
 //     is held across nothing that waits on a sink.
 //   - StepDone (the parent's): the journal's Note, which never blocks.
+//   - Compacted, the parent's and a child's: s.mu for the redactor's read
+//     alone, released before the event is published (compacted).
 //   - the three sub-agent events: rosterMu for the roster and its enqueue (the
 //     outbox mutex, a leaf beneath it), toolMu for the child's set in sections
 //     of its own, never nested, and the log's Flush with no lock held. The
@@ -1799,7 +1822,33 @@ func (s *nativeSession) sink(ev harness.Event) {
 		s.emit(Event{Type: EventUser, Text: s.typedSteer(e.Text), Interjection: true})
 	case harness.Prompted:
 		s.replayedPrompt(e)
+	case harness.Compacted:
+		s.compacted("", e)
 	}
+}
+
+// compacted is one end of a compaction of a session's context — the parent's
+// ("" agent) or a child's (subagentEvent) — as EventCompaction (plan 028
+// §3.13, §3.17): the phase, the reason and the estimated sizes as the harness
+// reported them, and the failure's text redacted and folded onto one line.
+// Its Usage, the harness's own account of what the summarizer was billed
+// (X34), never goes on the wire: what a compaction cost reaches a client
+// through the session's spend, not through this event. A load's replay hands
+// over the ended of each stored compaction, and the event is stamped
+// replayed like everything the replay publishes (emitCtx), so it draws its
+// note in place. It takes no lock but the redactor's read of s.mu, released
+// before the publish.
+func (s *nativeSession) compacted(agentID string, e harness.Compacted) {
+	info := &CompactionInfo{
+		Phase:        e.Phase,
+		Reason:       e.Reason,
+		TokensBefore: e.TokensBefore,
+		TokensAfter:  e.TokensAfter,
+	}
+	if e.Err != "" {
+		info.Err = nativeSafe{red: s.redactor()}.line(e.Err)
+	}
+	s.emit(Event{Type: EventCompaction, Agent: agentID, Compaction: info})
 }
 
 // replayedPrompt is a stored user message a load's replay walked (plan 028
@@ -2362,6 +2411,14 @@ func (s *nativeSession) interject(_ context.Context, text string) error {
 	case !live:
 		return ErrNotInTurn
 	}
+	if _, _, compact := nativeCompact(text); compact {
+		// /compact is a turn of its own, never words for the model (plan 028
+		// §3.12, P31): merged into the running turn it would reach the model
+		// as a steer. Refused as an interjection with no turn to take it, so
+		// it comes back to the caller, which queues it — it then runs as its
+		// own turn after this one, where the prompt path intercepts it.
+		return ErrNotInTurn
+	}
 	// An interjection expands by the same rules a prompt does, so the same
 	// text does not mean two different things depending on whether the turn
 	// happened to be running when it was sent: a refused interjection comes
@@ -2501,6 +2558,10 @@ func phraseTurnError(err error) error {
 	if errors.Is(err, harness.ErrEmptyPrompt) {
 		return phrase("native: nothing to send: the prompt is empty")
 	}
+	if errors.Is(err, store.ErrNothingToCompact) {
+		// A /compact with no message in the context yet (plan 028 §3.12).
+		return phrase("native: nothing to compact yet")
+	}
 	if errors.Is(err, harness.ErrClosed) {
 		return phrase("agent: session closed")
 	}
@@ -2520,8 +2581,13 @@ func phraseTurnError(err error) error {
 	case errors.Is(err, harness.ErrModelNotFound):
 		return phrase(fmt.Sprintf("native: provider %q does not serve model %q%s; check its wire_model in models.toml",
 			provider, model, status))
+	case errors.Is(err, harness.ErrContextTooLarge) && pe.Compacted:
+		return phrase(fmt.Sprintf("native: the conversation no longer fits model %q's context window even after compacting%s; start a new session",
+			model, status))
 	case errors.Is(err, harness.ErrContextTooLarge):
-		return phrase(fmt.Sprintf("native: the conversation no longer fits model %q's context window%s; start a new session (compaction arrives with H7)",
+		// Nothing was compacted for it (C9c item 4): a new session's first
+		// request, or an overflow at the step allowance.
+		return phrase(fmt.Sprintf("native: the request alone is too large for model %q's context window%s",
 			model, status))
 	}
 	msg := fmt.Sprintf("native: provider %q failed%s", provider, status)

@@ -27,11 +27,11 @@ import (
 // agent type reaches the wire by a line here — which the completeness test
 // (eventcodec_test.go) refuses to let anyone forget. The flat leaf types
 // (Todo, ToolDiff, PermissionOption, Option, ToolOutput, PluginCommand,
-// ForeignTurnInfo, ReplayInfo, TurnInfo) are converted rather than copied
-// field by field: their wire twins have the same fields in the same order, so
-// a field added to one of them stops this file compiling until the twin has
-// it too. Held by pointer, they convert as pointers, and a nil one converts
-// to nil.
+// ForeignTurnInfo, ReplayInfo, TurnInfo, CompactionInfo) are converted rather
+// than copied field by field: their wire twins have the same fields in the
+// same order, so a field added to one of them stops this file compiling until
+// the twin has it too. Held by pointer, they convert as pointers, and a nil
+// one converts to nil.
 //
 // JSON cannot carry every Go value bit for bit, so "lossless" is defined, and
 // the tests hold the codec to exactly this:
@@ -359,6 +359,7 @@ type wireEvent struct {
 	State          *wireState       `json:"state,omitempty"`
 	Replay         *wireReplay      `json:"replay,omitempty"`
 	Replayed       bool             `json:"replayed,omitempty"`
+	Compaction     *wireCompaction  `json:"compaction,omitempty"`
 	Cause          string           `json:"cause,omitempty"`
 	Err            *wireError       `json:"err,omitempty"`
 	StopReason     string           `json:"stopReason,omitempty"`
@@ -627,6 +628,16 @@ type wireReplay struct {
 	Phase string `json:"phase,omitempty"`
 }
 
+// wireCompaction is CompactionInfo, field for field in the same order, so it
+// converts by a plain pointer cast like wireReplay does (plan 028 §3.13).
+type wireCompaction struct {
+	Phase        string `json:"phase,omitempty"`
+	Reason       string `json:"reason,omitempty"`
+	TokensBefore int64  `json:"tokensBefore,omitempty"`
+	TokensAfter  int64  `json:"tokensAfter,omitempty"`
+	Err          string `json:"err,omitempty"`
+}
+
 // wireError is an Event.Err: always all three keys, so a jq filter over a
 // journal can read .err.class without a default.
 type wireError struct {
@@ -689,6 +700,7 @@ func toWireEvent(ev Event) wireEvent {
 		Turn:           (*wireTurn)(ev.Turn),
 		Replay:         (*wireReplay)(ev.Replay),
 		Replayed:       ev.Replayed,
+		Compaction:     (*wireCompaction)(ev.Compaction),
 		Cause:          ev.Cause,
 		StopReason:     ev.StopReason,
 		At:             ev.At.UTC(),
@@ -952,6 +964,7 @@ func (w *wireEvent) event() Event {
 		Turn:           (*TurnInfo)(w.Turn),
 		Replay:         (*ReplayInfo)(w.Replay),
 		Replayed:       w.Replayed,
+		Compaction:     (*CompactionInfo)(w.Compaction),
 		Cause:          w.Cause,
 		StopReason:     w.StopReason,
 		At:             w.At.UTC(),

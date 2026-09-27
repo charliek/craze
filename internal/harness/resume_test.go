@@ -550,8 +550,8 @@ func TestResumeSeedsTheToldMode(t *testing.T) {
 	if strings.Contains(got, "previously exited") || !strings.Contains(got, fmt.Sprintf(planFileWritten, plan)) {
 		t.Fatalf("the resumed plan-mode turn read %q; want the standing reminder for a written plan", got)
 	}
-	tail := entries(transcript(t, s2))[3:] // after the first turn's mode_change, prompt and answer
-	equal(t, "the resumed turn's entries", tail, []string{"resume", "user test/a high: go on", "assistant test/a high end_turn: still planning"})
+	tail := entries(transcript(t, s2))[4:] // after the first turn's mode_change, prompt, reminder and answer
+	equal(t, "the resumed turn's entries", tail, []string{"resume", "user test/a high: go on", "reminder plan_full_written", "assistant test/a high end_turn: still planning"})
 	if err := s2.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -564,8 +564,8 @@ func TestResumeSeedsTheToldMode(t *testing.T) {
 	if got, _ := reminderIn(t, a, len(a.requests())-1); got != "user: "+reminderMessageText(fmt.Sprintf(planReminderExit, plan)) {
 		t.Fatalf("resumed from plan into agent mode, the turn read %q; want the exit notice", got)
 	}
-	tail = entries(transcript(t, s3))[6:]
-	equal(t, "the switch", tail, []string{"resume", "mode_change agent", "user test/a high: build it", "assistant test/a high end_turn: implementing"})
+	tail = entries(transcript(t, s3))[8:]
+	equal(t, "the switch", tail, []string{"resume", "mode_change agent", "user test/a high: build it", "reminder plan_exit", "assistant test/a high end_turn: implementing"})
 }
 
 // reminderMessageText is a reminder's text as promptOf shows its message.

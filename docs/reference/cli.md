@@ -244,6 +244,7 @@ stderr if it is still going after that.
 | `command` | A plugin command or skill craze expanded into the prompt |
 | `queue` | One change to craze's own message queue |
 | `foreign_turn` | A turn the agent started without a craze prompt, bracketed |
+| `compaction` | One end of a native session's compaction of its context; `agent` as on `text` |
 | `tool` | Tool call create/update, merged by id; `agent` as on `text`; a sub-agent tool also carries `task` |
 | `todos` | Todo list replace or merge |
 | `permission` / `question` / `plan` | Blocking request, answered headless by `--permission-decision`; a permission with no decision left is rejected |
@@ -307,6 +308,16 @@ it. Plain (non-`--json`) mode prints none of this.
 `foreign_turn` is `{"type":"foreign_turn","event":"started|ended","id":"…",
 "text":"…"}`; the id is Grok's `interject-fallback-…` prompt id. Nothing
 drains between the two lines.
+
+`compaction` is `{"type":"compaction","phase":"started|ended",
+"reason":"auto|manual|overflow","tokensBefore":…,"tokensAfter":…,
+"error":"…"}`, with `agent` for a sub-agent's: the native session summarizing
+its conversation to free context, on its own near the model's window, after
+a request the window refused, or for `/compact [focus]` sent as the prompt
+(`manual`). A `started` line is followed by its `ended` one; the counts are
+the context's estimated size before and after, `0` on a `started` line and
+for the after of one that failed, which carries `error` instead. `agent` and
+`error` are omitted when empty.
 
 `done` is **not** EOF: it says the *turn* ended, not the sub-agents.
 Lifecycle lines for a still-running sub-agent may follow the turn's `done` —

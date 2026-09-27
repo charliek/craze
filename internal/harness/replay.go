@@ -34,7 +34,9 @@ import (
 //     are replayed, as no ACP load rebuilds them.
 //   - Changes of model, effort and mode, resume entries, and entries of a
 //     type this craze does not know are nothing: the session's state now is
-//     what the caller reads from it (Current, Mode).
+//     what the caller reads from it (Current, Mode). So are reminder entries
+//     (plan 028 §3.15): a reminder is what the harness told the model, never
+//     shown live, and never shown again.
 //   - Last, a Todos with the list the resume restored, when it has any item.
 //
 // A replayed call's id is "<entry id>.<k>": the id of the assistant entry
@@ -107,10 +109,13 @@ type replayer struct {
 // entry replays one entry of the path.
 func (r *replayer) entry(e *store.Entry) {
 	steer, results := r.turns.read(e)
+	if e.Type == store.TypeCompaction {
+		r.compaction(e)
+		return
+	}
 	if e.Type != store.TypeMessage {
-		// model_change, effort_change, mode_change, resume, and a newer
-		// craze's types: nothing. (Plan 028 PR 2's compaction entry is replayed
-		// here, as Compacted — C9.)
+		// model_change, effort_change, mode_change, resume, and reminder:
+		// nothing.
 		return
 	}
 	switch e.Message.Role {
@@ -177,6 +182,26 @@ func (r *replayer) results(e *store.Entry) {
 		k++
 		r.sink(ToolFinished{ID: id, Result: replayedResult(r.red, res.Output), At: e.Timestamp, Replayed: true})
 	}
+}
+
+// compaction replays one compaction entry (plan 028 §3.4, harness side; the
+// wire mapping is C13's): a manual one — Compaction.Command set — first
+// replays Prompted{Text: command}, its own prompt row, since turnReader
+// counts its turn but reports neither a prompt nor a steer for it; then
+// Compacted{ended}, in place: a success carries the estimated token counts,
+// a failure its error — both redacted with the replay's own redactor, so a
+// key learned since is not shown again.
+func (r *replayer) compaction(e *store.Entry) {
+	if e.Compaction.Command != "" {
+		r.sink(Prompted{Text: r.red.String(e.Compaction.Command)})
+	}
+	ev := Compacted{Phase: CompactionEnded, Reason: e.Compaction.Reason, TokensBefore: e.Compaction.TokensBefore}
+	if e.Compaction.Succeeded() {
+		ev.TokensAfter = e.Compaction.TokensAfter
+	} else {
+		ev.Err = r.red.String(e.Compaction.Error)
+	}
+	r.sink(ev)
 }
 
 // textOf is a message's text parts, joined: a user entry's text, as Run and

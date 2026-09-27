@@ -10,6 +10,7 @@ import (
 	"maps"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"slices"
 	"strings"
 	"sync"
@@ -434,11 +435,11 @@ func TestSteerPrefixIsStable(t *testing.T) {
 // begins with the whole of the one before it, byte for byte, so the prefix
 // cache keeps hitting across the turn's three steps (D-30 within a turn).
 //
-// It is also where the cost §3.3 states shows: the next turn's history is
-// rebuilt from the transcript, which holds no reminder, so the turn's own
-// reminder is in none of the next turn's requests and that turn's first
-// request diverges from the previous one right after the previous prompt.
-// The control is the steer, which is the conversation: it is replayed.
+// And across turns (plan 028 §3.15, which closed the cost plan 023 §3.3
+// stated): the transcript holds the reminder as its variant, so the next
+// turn's history renders it again at its index and that turn's first request
+// begins with the whole of the previous one too. The control is the steer,
+// which is the conversation: it is replayed as well.
 func TestReminderPrefixIsStable(t *testing.T) {
 	// The index both land at: the system prompt and the turn's prompt are
 	// ahead of the reminder, and the first tool step's assistant message and
@@ -505,22 +506,176 @@ func TestReminderPrefixIsStable(t *testing.T) {
 		t.Fatalf("the steer is not at %d: %s", steerAt, got)
 	}
 
-	// The next turn: its own reminder is the only one, and it is the last
-	// message again — the previous turn's was never persisted, so the history
-	// it replays has none and the prefix breaks right after the last prompt
-	// (the cost §3.3 states).
-	last := messages(t, bodies[3])
+	// The next turn: the previous turn's reminder is still at its index, in
+	// the history it replays, and the turn's own is the last message — so the
+	// request begins with the whole of the previous one and adds the answer,
+	// the prompt and that reminder.
+	prev, last := messages(t, bodies[2]), messages(t, bodies[3])
+	if k := prefixBreak(prev, last); k >= 0 {
+		t.Fatalf("the next turn's request does not begin with the previous one: message %d differs\n%s\n%s", k, prev[k], last[min(k, len(last)-1)])
+	}
+	if len(last) != len(prev)+3 {
+		t.Fatalf("the next turn's request has %d messages, want the previous %d plus the answer, the prompt and a reminder", len(last), len(prev))
+	}
 	for k, m := range last {
-		if holds := bytes.Contains(m, []byte(reminderTag)); holds != (k == len(last)-1) {
+		if holds := bytes.Contains(m, []byte(reminderTag)); holds != (k == reminderAt || k == len(last)-1) {
 			t.Fatalf("the next turn's message %d holds a reminder = %v:\n%s", k, holds, m)
 		}
-	}
-	if k := prefixBreak(messages(t, bodies[2]), last); k != reminderAt {
-		t.Fatalf("the next turn's request diverges at %d, want the reminder's index %d", k, reminderAt)
 	}
 	// The control: the steer, which is the conversation, was replayed.
 	if !bytes.Contains(bodies[3], []byte(steerText)) {
 		t.Fatal("control: the steer was not replayed next turn")
+	}
+}
+
+// TestReminderHistoryMatchesTheSentRequest is plan 028 §3.15 (A13) on the
+// wire: the history a turn replays is what the turns before it sent. A
+// plan-mode turn reads its reminder right after the prompt; at its second
+// step a switch to ask mode is announced and a steer taken up at the same
+// boundary, the notice ahead of the steer, where spliceInto puts it. The next
+// turn's first request is then the turn's last request byte for byte, then
+// the turn's answer, the prompt and the new turn's own reminder. The
+// transcript holds each reminder as its variant, at the place its request
+// had it, and never its text.
+func TestReminderHistoryMatchesTheSentRequest(t *testing.T) {
+	read := `{"filePath":"a.txt"}`
+	w := newWire(t,
+		sseReply(toolCallChunk("call_1", "read", read), finishChunk("tool_calls", true)),
+		sseReply(toolCallChunk("call_2", "read", read), finishChunk("tool_calls", true)),
+		sseReply(textChunk("Here is what I found."), finishChunk("stop", true)),
+		sseReply(textChunk("Still reading."), finishChunk("stop", true)),
+	)
+	f, opts := wireFixture(t, w)
+	opts.Now = time.Now // a real clock: nothing may reach the prompt
+	opts.Prompt = testPromptExtras()
+	opts.Mode = "plan"
+	s := f.open(opts)
+	f.put("a.txt", "alpha\n")
+
+	// Between the first step's request and the second's, from the sink: the
+	// second announces ask mode and takes the steer up.
+	var once atomic.Bool
+	if _, err := s.Run(context.Background(), "What should we change?", func(ev Event) {
+		if _, ok := ev.(ToolCalled); !ok || !once.CompareAndSwap(false, true) {
+			return
+		}
+		if err := s.SetMode("ask"); err != nil {
+			t.Errorf("SetMode from the sink: %v", err)
+		}
+		if err := sendSteer(s, steerText); err != nil {
+			t.Errorf("Steer from the sink: %v", err)
+		}
+	}); err != nil {
+		t.Fatal(err)
+	}
+	run(t, s, "Carry on.")
+
+	bodies := w.requests()
+	if len(bodies) != 4 {
+		t.Fatalf("the server saw %d requests, want 4", len(bodies))
+	}
+	// Where the turn's last request had them: the plan reminder after the
+	// prompt, then the first step, then the ask notice ahead of the steer.
+	sent := messages(t, bodies[2])
+	for k, want := range map[int]string{2: "Plan mode is active", 5: "Ask mode is active", 6: steerText} {
+		if !bytes.Contains(sent[k], []byte(want)) {
+			t.Fatalf("the turn's last request's message %d is not the %q one:\n%s", k, want, sent[k])
+		}
+	}
+	next := messages(t, bodies[3])
+	if k := prefixBreak(sent, next); k >= 0 {
+		t.Fatalf("the next turn's request does not begin with the turn's last one: message %d differs\n%s\n%s", k, sent[k], next[min(k, len(next)-1)])
+	}
+	if len(next) != len(sent)+3 || !bytes.Contains(next[len(sent)], []byte("Here is what I found.")) ||
+		!bytes.Contains(next[len(sent)+1], []byte("Carry on.")) || !bytes.Contains(next[len(sent)+2], []byte("Ask mode is active")) {
+		t.Fatalf("after the turn's last request the next one has %d messages: %s", len(next)-len(sent), next[len(sent):])
+	}
+
+	tr := transcript(t, s)
+	equal(t, "transcript", heads(entries(tr)), []string{
+		"mode_change plan",
+		"user test/a high: What should we change?",
+		"reminder plan_full_empty",
+		`assistant test/a high tool_use: [call call_1 read {"filePath":"a.txt"}]`,
+		"tool test/a high: [result call_1:",
+		"mode_change ask",
+		"reminder ask",
+		"user test/a high: " + steerText,
+		`assistant test/a high tool_use: [call call_2 read {"filePath":"a.txt"}]`,
+		"tool test/a high: [result call_2:",
+		"assistant test/a high end_turn: Here is what I found.",
+		"user test/a high: Carry on.",
+		"reminder ask",
+		"assistant test/a high end_turn: Still reading.",
+	})
+	data, err := os.ReadFile(s.store.Path())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, text := range reminderCanaries {
+		if bytes.Contains(data, []byte(text)) {
+			t.Fatalf("the transcript holds a reminder's text (%q)", text)
+		}
+	}
+}
+
+// TestReminderSurvivesAPlanFileWrite (plan 028 §3.15, A13, P12): a reminder is
+// rendered again from its variant and the plan file's path, never from the
+// file. The first turn's request reads the full plan text for a plan not yet
+// written; the plan is then written — before the history the next turn
+// rebuilds, and before a resume — and the history says what was sent all the
+// same: the next request begins with the first, byte for byte. The control is
+// what the next turn composes for itself, at the full text again (SetMode,
+// or the resume, starts the alternation over): it reads the written plan.
+// The restart case is C11's (TestReminderSurvivesAPlanFileWriteAcrossARestart).
+func TestReminderSurvivesAPlanFileWrite(t *testing.T) {
+	for _, resume := range []bool{false, true} {
+		t.Run(fmt.Sprintf("resume=%v", resume), func(t *testing.T) {
+			w := newWire(t,
+				sseReply(textChunk("Planning."), finishChunk("stop", true)),
+				sseReply(textChunk("Planned."), finishChunk("stop", true)),
+			)
+			f, opts := wireFixture(t, w)
+			opts.Mode = "plan"
+			s := f.open(opts)
+			run(t, s, "Plan the change.")
+			plan := planPathOf(s)
+			if err := os.WriteFile(plan, []byte("## The plan\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if resume {
+				id := s.ID()
+				if err := s.Close(); err != nil {
+					t.Fatal(err)
+				}
+				s = resumed(t, resumeOptions(opts, id))
+				if planPathOf(s) != plan {
+					t.Fatalf("resumed with plan file %s, want %s", planPathOf(s), plan)
+				}
+			} else if err := s.SetMode("plan"); err != nil {
+				t.Fatal(err)
+			}
+			run(t, s, "Go on.")
+
+			bodies := w.requests()
+			if len(bodies) != 2 {
+				t.Fatalf("the server saw %d requests, want 2", len(bodies))
+			}
+			first, next := messages(t, bodies[0]), messages(t, bodies[1])
+			if !bytes.Contains(first[2], []byte("No plan written yet")) {
+				t.Fatalf("the first turn's reminder is not the one for an empty plan:\n%s", first[2])
+			}
+			if k := prefixBreak(first, next); k >= 0 {
+				t.Fatalf("the next request does not begin with the first: message %d differs\n%s\n%s", k, first[k], next[min(k, len(next)-1)])
+			}
+			if own := next[len(next)-1]; len(next) != len(first)+3 || !bytes.Contains(own, []byte("A plan file exists")) {
+				t.Fatalf("the next turn's own reminder is not the written plan's (control):\n%s", own)
+			}
+			lines := entries(transcript(t, s))
+			if !slices.Contains(lines, "reminder plan_full_empty") || !slices.Contains(lines, "reminder plan_full_written") {
+				t.Fatalf("transcript:\n%s", strings.Join(lines, "\n"))
+			}
+		})
 	}
 }
 

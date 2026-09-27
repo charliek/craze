@@ -422,6 +422,7 @@ func noTranscript(t *testing.T, s *Session) {
 //	model_change test/b
 //	effort_change medium
 //	mode_change plan
+//	reminder plan_full_empty
 func entries(tr *store.Transcript) []string {
 	var out []string
 	for _, e := range tr.Entries {
@@ -432,6 +433,10 @@ func entries(tr *store.Transcript) []string {
 			out = append(out, "effort_change "+e.Effort)
 		case store.TypeModeChange:
 			out = append(out, "mode_change "+e.Mode)
+		case store.TypeReminder:
+			out = append(out, "reminder "+e.Variant)
+		case store.TypeCompaction:
+			out = append(out, "compaction "+compactionSummary(e.Compaction))
 		case store.TypeMessage:
 			head := []string{string(e.Message.Role), e.Model.Alias}
 			for _, extra := range []string{e.Effort, e.StopReason} {
@@ -448,6 +453,24 @@ func entries(tr *store.Transcript) []string {
 		}
 	}
 	return out
+}
+
+// compactionSummary is one compaction entry's line in entries(): its reason,
+// whether it kept a tail, its segment, its command (manual only), or its
+// error for a failure.
+func compactionSummary(c store.Compaction) string {
+	if !c.Succeeded() {
+		return c.Reason + " failed: " + c.Error
+	}
+	tail := "no-tail"
+	if c.FirstKeptID != "" {
+		tail = "tail=" + c.FirstKeptID
+	}
+	line := c.Reason + " " + tail + " " + c.Segment
+	if c.Command != "" {
+		line += " command=" + c.Command
+	}
+	return line
 }
 
 // messageText is a message's parts in order, reasoning as "(thinking: …)",

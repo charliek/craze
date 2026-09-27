@@ -138,6 +138,24 @@ type Transcript struct {
 	lhead      int
 	ptools     map[string]int
 	omittedRun Kind
+
+	// compacting is the compaction of this transcript's context that is open
+	// (plan 028 §3.13, seam 7): set by a compaction's started, cleared by its
+	// ended, and by whatever ends the turn it ran in — the main transcript's
+	// turn ending or a replay's, a child's own finish — so a lost ended cannot
+	// leave it open (P34). nil while none is.
+	compacting *Compacting
+}
+
+// Compacting is a compaction of one transcript's context that is still
+// running (plan 028 §3.13): the harness summarizing the conversation so far,
+// between its started and its ended. Since is the started's At and Reason its
+// reason (agent.CompactionAuto, CompactionManual, CompactionOverflow — an
+// open string). A client draws CompactingLabel for it; a snapshot carries it,
+// so a client that attaches mid-compaction draws the same.
+type Compacting struct {
+	Since  time.Time
+	Reason string
 }
 
 func newTranscript(m *Model, agentID string, maxEntries, maxBytes int) *Transcript {
@@ -252,6 +270,19 @@ func (t *Transcript) StreamOpen() bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	return t.streamOpen
+}
+
+// Compacting is the compaction of this transcript's context still running, a
+// copy, or nil when none is (plan 028 §3.13): what a client's working line
+// reads CompactingLabel for.
+func (t *Transcript) Compacting() *Compacting {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.compacting == nil {
+		return nil
+	}
+	c := *t.compacting
+	return &c
 }
 
 // Bytes is the retained bytes the transcript accounts for, a restored
@@ -793,6 +824,35 @@ func (t *Transcript) addErrValue(err error, text string, now time.Time) {
 		return
 	}
 	t.appendEntry(&Entry{Kind: KindError, Err: err, Text: text}, now)
+}
+
+// openCompaction is a compaction's started: the run above it ends there — the
+// summarizer streams nothing into this transcript, and what follows the
+// compaction is not a continuation of whatever was streaming when it began
+// (plan 028 §3.13) — and the compaction is open, at at, until its ended.
+func (t *Transcript) openCompaction(reason string, at time.Time) {
+	t.closeStream(at)
+	t.compacting = &Compacting{Since: at, Reason: reason}
+	t.model.fc.state = true
+}
+
+// endCompaction is a compaction's ended: the open one, if any, is over, and
+// the note says how it went (compactionNote). The note, like every entry,
+// ends the run above it, so after an overflow the replacement request's text
+// starts below it rather than continuing the discarded attempt's (§3.11).
+func (t *Transcript) endCompaction(c *agent.CompactionInfo, at time.Time) {
+	t.clearCompaction()
+	t.addNote(compactionNote(c), at)
+}
+
+// clearCompaction closes an open compaction without a note: the turn it ran
+// in is over, whatever became of its ended (P34).
+func (t *Transcript) clearCompaction() {
+	if t.compacting == nil {
+		return
+	}
+	t.compacting = nil
+	t.model.fc.state = true
 }
 
 // noteTodos turns the todo stream into the two notes, under today's dedupe:

@@ -119,6 +119,35 @@ type jsonForeignTurn struct {
 	Text  string `json:"text,omitempty"`
 }
 
+// jsonCompaction is one end of a compaction of the native session's context
+// (plan 028 §3.13, P24): phase started, then ended, with its reason (auto,
+// manual or overflow) and, on the ended, the context's estimated size before
+// and after it — or, for a failure, the error, and no after. agent names the
+// sub-agent whose context it was; both it and error are left out when empty,
+// and the counts are always there, 0 on a started.
+type jsonCompaction struct {
+	Type         string `json:"type"`
+	Seq          uint64 `json:"seq,omitempty"`
+	Agent        string `json:"agent,omitempty"`
+	Phase        string `json:"phase"`
+	Reason       string `json:"reason"`
+	TokensBefore int64  `json:"tokensBefore"`
+	TokensAfter  int64  `json:"tokensAfter"`
+	Error        string `json:"error,omitempty"`
+}
+
+func compactionJSON(ev agent.Event) jsonCompaction {
+	j := jsonCompaction{Type: "compaction", Seq: ev.Seq, Agent: ev.Agent}
+	if c := ev.Compaction; c != nil {
+		j.Phase = c.Phase
+		j.Reason = c.Reason
+		j.TokensBefore = c.TokensBefore
+		j.TokensAfter = c.TokensAfter
+		j.Error = c.Err
+	}
+	return j
+}
+
 func queueJSON(ev agent.Event) jsonQueue {
 	j := jsonQueue{Type: "queue", Seq: ev.Seq, Event: string(ev.QueueChange), Position: ev.QueuePos}
 	if ev.Queue != nil {
@@ -232,6 +261,8 @@ func eventJSON(ev agent.Event) (any, bool) {
 		return foreignTurnJSON(ev), ev.ForeignTurn != nil
 	case agent.EventReplay:
 		return replayJSON(ev), ev.Replay != nil
+	case agent.EventCompaction:
+		return compactionJSON(ev), ev.Compaction != nil
 	case agent.EventSubagent:
 		return subagentJSON(ev), ev.Subagent != nil
 	case agent.EventTool:

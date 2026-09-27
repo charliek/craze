@@ -186,6 +186,13 @@ func convergenceFixtures() []convergenceFixture {
 		{name: "turn ended", ev: ev(agent.Event{Type: agent.EventTurn, Turn: &agent.TurnInfo{ID: "turn-1", Phase: agent.TurnEnded, StopReason: "end_turn"}})},
 		{name: "turn ended cancelled", ev: ev(agent.Event{Type: agent.EventTurn, Turn: &agent.TurnInfo{ID: "turn-1", Phase: agent.TurnEnded, StopReason: "cancelled", Synthetic: true}}), appends: true},
 		{name: "turn ended refused", ev: ev(agent.Event{Type: agent.EventTurn, Turn: &agent.TurnInfo{ID: "turn-1", Phase: agent.TurnEnded, Synthetic: true, Err: "refused"}}), appends: true},
+		{name: "compaction starts", ev: ev(agent.Event{Type: agent.EventCompaction, Compaction: &agent.CompactionInfo{Phase: agent.CompactionStarted, Reason: agent.CompactionAuto}})},
+		{name: "compaction ends", ev: ev(agent.Event{Type: agent.EventCompaction, Compaction: &agent.CompactionInfo{
+			Phase: agent.CompactionEnded, Reason: agent.CompactionAuto, TokensBefore: 890_000, TokensAfter: 21_000}}), appends: true},
+		{name: "compaction fails", ev: ev(agent.Event{Type: agent.EventCompaction, Compaction: &agent.CompactionInfo{
+			Phase: agent.CompactionEnded, Reason: agent.CompactionManual, TokensBefore: 890_000, Err: "provider failed"}}), appends: true},
+		{name: "a child's compaction starts", ev: ev(agent.Event{Type: agent.EventCompaction, Agent: "sub-1",
+			Compaction: &agent.CompactionInfo{Phase: agent.CompactionStarted, Reason: agent.CompactionOverflow}})},
 	}
 }
 

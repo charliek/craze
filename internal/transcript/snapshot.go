@@ -131,6 +131,10 @@ type TranscriptSnap struct {
 	// draw nothing, and grow its placeholder — the ledger's last — until
 	// something ends it.
 	OmittedRun Kind
+	// Compacting is the transcript's open compaction (plan 028 §3.13, seam
+	// 7), nil for none: a client restored mid-compaction draws
+	// CompactingLabel until the ended it folds next.
+	Compacting *Compacting
 }
 
 // Omitted is one ledger record: an entry a snapshot's window omitted, as a
@@ -444,6 +448,7 @@ func (w *window) scalars(k int) transcriptScalars {
 		todoPlanned: w.tc.todoPlanned,
 		todoDone:    w.tc.todoDone,
 		omittedRun:  w.tc.omittedRun,
+		compacting:  w.tc.compacting,
 	}
 	if sc.omittedRun == 0 && w.openLast && k == 0 {
 		sc.omittedRun = w.tc.entries[w.n-1].Kind
@@ -521,6 +526,7 @@ func (w *window) snap() TranscriptSnap {
 		TodoPlanned: sc.todoPlanned,
 		TodoDone:    sc.todoDone,
 		OmittedRun:  sc.omittedRun,
+		Compacting:  sc.compacting,
 	}
 	if w.k > 0 {
 		ts.Entries = make([]Entry, w.k)
@@ -890,6 +896,10 @@ func (t *Transcript) restore(ts *TranscriptSnap) {
 	t.windowed = ts.Windowed
 	t.dropped = ts.Dropped
 	t.todoPlanned, t.todoDone = ts.TodoPlanned, ts.TodoDone
+	if ts.Compacting != nil {
+		c := *ts.Compacting
+		t.compacting = &c
+	}
 	n := len(ts.Entries)
 	openLast := ts.StreamOpen && n > 0 && ts.Entries[n-1].Streaming
 	for i := range ts.Entries {

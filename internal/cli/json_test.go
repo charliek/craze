@@ -260,6 +260,7 @@ func TestJSONSeqIsTheSecondKeyOfEveryLine(t *testing.T) {
 		{Type: agent.EventQueue, QueueChange: agent.QueueQueued, Queue: &agent.QueuedPrompt{ID: "q-1", Text: "later"}},
 		{Type: agent.EventForeignTurn, ForeignTurn: &agent.ForeignTurnInfo{ID: "interject-fallback-1", Running: true}},
 		{Type: agent.EventReplay, Replay: &agent.ReplayInfo{Phase: agent.ReplayStart}},
+		{Type: agent.EventCompaction, Compaction: &agent.CompactionInfo{Phase: agent.CompactionStarted, Reason: agent.CompactionAuto}},
 		{Type: agent.EventSubagent, SubagentChange: agent.SubagentChangeSpawned, Subagent: &agent.SubagentInfo{ID: "sub-1"}},
 		{Type: agent.EventTool, Tool: &agent.ToolEvent{ID: "call-1", Name: "Shell", Status: "pending"}},
 		{Type: agent.EventTodos, Todos: []agent.Todo{{ID: "1", Content: "read", Status: "pending"}}},
@@ -292,8 +293,8 @@ func TestJSONSeqIsTheSecondKeyOfEveryLine(t *testing.T) {
 	}
 	want := []string{
 		"text", "thought", "user", "command", "queue", "foreign_turn", "replay",
-		"subagent", "tool", "todos", "permission", "question", "plan", "title",
-		"done", "error",
+		"compaction", "subagent", "tool", "todos", "permission", "question", "plan",
+		"title", "done", "error",
 	}
 	if strings.Join(kinds, ",") != strings.Join(want, ",") {
 		t.Fatalf("line kinds\n got %v\nwant %v", kinds, want)
@@ -325,6 +326,39 @@ func TestJSONSeqExactLines(t *testing.T) {
 				t.Fatalf("line\n got %s\nwant %s", got, tc.want)
 			}
 		})
+	}
+}
+
+// TestJSONCompactionLines (plan 028 §3.13, P24): a compaction's two ends as
+// `craze prompt --json` prints them — type, seq, the child it belongs to,
+// phase, reason, both counts (0 on a started, and after a failure), and the
+// error — with agent and error left out when empty, byte for byte.
+func TestJSONCompactionLines(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		ev   agent.Event
+		want string
+	}{
+		{"a started", agent.Event{Type: agent.EventCompaction, Seq: 12,
+			Compaction: &agent.CompactionInfo{Phase: agent.CompactionStarted, Reason: agent.CompactionManual}},
+			`{"type":"compaction","seq":12,"phase":"started","reason":"manual","tokensBefore":0,"tokensAfter":0}`},
+		{"an ended", agent.Event{Type: agent.EventCompaction, Seq: 13,
+			Compaction: &agent.CompactionInfo{Phase: agent.CompactionEnded, Reason: agent.CompactionManual, TokensBefore: 890000, TokensAfter: 21000}},
+			`{"type":"compaction","seq":13,"phase":"ended","reason":"manual","tokensBefore":890000,"tokensAfter":21000}`},
+		{"a child's that failed", agent.Event{Type: agent.EventCompaction, Seq: 40, Agent: "sub-1",
+			Compaction: &agent.CompactionInfo{Phase: agent.CompactionEnded, Reason: agent.CompactionOverflow, TokensBefore: 300000, Err: "native: boom"}},
+			`{"type":"compaction","seq":40,"agent":"sub-1","phase":"ended","reason":"overflow","tokensBefore":300000,"tokensAfter":0,"error":"native: boom"}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := encodeOne(t, tc.ev); got != tc.want {
+				t.Fatalf("line\n got %s\nwant %s", got, tc.want)
+			}
+		})
+	}
+	// A compaction event with no payload has nothing to say.
+	var buf bytes.Buffer
+	if err := encodeEvent(&buf, agent.Event{Type: agent.EventCompaction, Seq: 1}); err != nil || buf.Len() != 0 {
+		t.Fatalf("a payload-less compaction printed %q (%v)", buf.String(), err)
 	}
 }
 

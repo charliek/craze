@@ -104,7 +104,7 @@
       "additionalProperties": false
     },
     "transcriptFields": {
-      "description": "A transcript's members: its continuation (trimmed, streamOpen, tailCut, todoPlanned, todoDone), its window (windowed, dropped, the omitted-entry ledger, omittedRun) and its entries, oldest first. Written member by member by the codec; a zero member is absent.",
+      "description": "A transcript's members: its continuation (trimmed, streamOpen, tailCut, todoPlanned, todoDone, and the compaction of its context still running, compacting), its window (windowed, dropped, the omitted-entry ledger, omittedRun) and its entries, oldest first. Written member by member by the codec; a zero member is absent.",
       "type": "object",
       "properties": {
         "trimmed": {"type": "boolean"},
@@ -115,6 +115,7 @@
         "todoPlanned": {"type": "integer"},
         "todoDone": {"type": "boolean"},
         "omittedRun": {"$ref": "#/$defs/entryKind"},
+        "compacting": {"$ref": "#/$defs/compacting"},
         "omitted": {"type": "array", "items": {"$ref": "#/$defs/omitted"}},
         "entries": {"type": "array", "items": {"$ref": "#/$defs/entry"}}
       }
@@ -172,6 +173,15 @@
         "code": {"type": "integer"}
       },
       "required": ["class", "code"],
+      "additionalProperties": false
+    },
+    "compacting": {
+      "description": "The compaction of a transcript's context still running (native only): since, when its started came; reason, its reason (auto, manual or overflow, an open string). Present from the compaction's started until its ended, or the end of the turn it ran in; a client draws its working label for it.",
+      "type": "object",
+      "properties": {
+        "since": {"$ref": "event.json#/$defs/time"},
+        "reason": {"type": "string"}
+      },
       "additionalProperties": false
     },
     "entryKind": {

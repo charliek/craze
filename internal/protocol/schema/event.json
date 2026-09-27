@@ -8,7 +8,7 @@
     "type": {
       "description": "The event's kind. A client ignores a kind it does not know.",
       "type": "string",
-      "enum": ["text", "thought", "tool", "todos", "permission", "question", "plan", "done", "error", "meta", "user", "subagent", "queue", "command", "foreign_turn", "replay", "turn", "ask"]
+      "enum": ["text", "thought", "tool", "todos", "permission", "question", "plan", "done", "error", "meta", "user", "subagent", "queue", "command", "foreign_turn", "replay", "turn", "ask", "compaction"]
     },
     "text": {"type": "string", "description": "A text, thought or user chunk; a title (meta)."},
     "mode": {"type": "string", "description": "The mode an agent-initiated meta reports."},
@@ -31,6 +31,7 @@
     "state": {"$ref": "#/$defs/state"},
     "replay": {"$ref": "#/$defs/replay"},
     "replayed": {"type": "boolean", "description": "The event came from a session/load replay."},
+    "compaction": {"$ref": "#/$defs/compaction"},
     "cause": {"type": "string", "description": "The command that caused it, \"clientId/commandId\"."},
     "err": {"$ref": "#/$defs/error"},
     "stopReason": {"type": "string"},
@@ -397,6 +398,18 @@
       "type": "object",
       "properties": {
         "phase": {"type": "string"}
+      },
+      "additionalProperties": false
+    },
+    "compaction": {
+      "description": "One end of a compaction of a session's context (CompactionInfo; native only): phase started, then ended. reason is auto, manual or overflow, an open string. An ended one carries tokensBefore, the context's estimated size before it, and either tokensAfter, its estimated size after, or err, why no summary was written. A replay carries only the ended one of each stored compaction. The event's agent names the sub-agent whose context it was.",
+      "type": "object",
+      "properties": {
+        "phase": {"type": "string"},
+        "reason": {"type": "string"},
+        "tokensBefore": {"type": "integer", "minimum": 0},
+        "tokensAfter": {"type": "integer", "minimum": 0},
+        "err": {"type": "string"}
       },
       "additionalProperties": false
     },

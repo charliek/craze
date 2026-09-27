@@ -34,8 +34,9 @@
 // The mode is enforced by the tool gate — plan mode lets an edit-kind call
 // touch only the session's plan file, ask mode refuses everything that is not
 // read-only — and told to the model by a reminder spliced into the step's
-// input, which is never persisted and never shown (reminders.go, plan 023
-// §3.1, §3.3).
+// input, which is never shown and is persisted only by name, so a later
+// history sends it again exactly as it was sent (reminders.go, plan 023 §3.1,
+// §3.3; plan 028 §3.15).
 //
 // # Concurrency
 //
@@ -83,6 +84,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"maps"
 	"os"
 	"path/filepath"
@@ -246,6 +248,13 @@ type Options struct {
 
 	// tools are the tool set's test seams (tools.go); zero is production.
 	tools toolSeams
+	// storeOpenFile is store.Options.OpenFile for a NEW session (compact.go,
+	// plan 028 C9): a test's descriptor that can fail a later write — the
+	// compaction entry's, say — having written nothing or part of it, so
+	// AppendCompaction's failure is a save failure like any step's (P5). nil
+	// is production (store.New's own os.OpenFile). Not threaded into a
+	// resumed session's Open, which does not take it.
+	storeOpenFile func(name string, flag int, perm os.FileMode) (io.WriteCloser, error)
 }
 
 // ModelInfo is one model-table entry as a model picker shows it.
@@ -272,6 +281,13 @@ type Session struct {
 	// session's tools. It is fantasy.NewAgent (defaultAgent); a test may
 	// replace it before the first Run.
 	newAgent func(lm fantasy.LanguageModel, system string, tools []fantasy.AgentTool) fantasy.Agent
+	// newSummarizerAgent builds the summarizer's own agent (compact.go, plan
+	// 028 §3.8 item 6, review r1-c9): defaultSummarizerAgent, with retries of
+	// its own switched off — the outer attempts loop is compact's whole retry
+	// budget, so three attempts send at most three provider requests, never
+	// Fantasy's own retry stacked on top of it (newAgent's, maxRetries). A
+	// test may replace it before compact runs.
+	newSummarizerAgent func(lm fantasy.LanguageModel, system string, tools []fantasy.AgentTool) fantasy.Agent
 
 	closeOnce sync.Once
 	closeErr  error
@@ -313,6 +329,12 @@ type Session struct {
 	matchModel func(raw string) (alias string, ok bool)
 	warn       func(string)
 
+	// sleep is compact's backoff between summarizer attempts (compact.go,
+	// plan 028 §3.8 item 5): a context-aware wait in production (defaultSleep)
+	// so a cancel during backoff ends it at once (review r1-c9 finding 10), a
+	// test's no-op or recorder otherwise, so a retry test takes no real time.
+	sleep func(context.Context, time.Duration)
+
 	mu      sync.Mutex
 	table   *modeltable.Table
 	cur     model  // what the next turn runs on; Current reports it
@@ -327,6 +349,27 @@ type Session struct {
 	replayed bool                    // Replay has run
 	cancel   context.CancelCauseFunc // the live turn's; nil when idle
 	done     chan struct{}           // closed when the live turn has returned
+	// autoOff is automatic compaction switched off (autocompact.go, plan 028
+	// §3.6): after a failed automatic compaction, or one that left the
+	// context over the threshold; on again after one under it, or a model
+	// change.
+	autoOff suppression
+}
+
+// renderer is what the session hands its store (store.Renderer, plan 028
+// §3.15, §3.9): the texts the transcript holds only by name — a reminder — or
+// only in part — a compaction's summary message, whose wrapper names the
+// session's segment directory — rendered as this session's requests sent
+// them. It reads the session's modes and its store when it is called — both
+// are fixed once Open returns, and only a history built after Open renders
+// anything.
+func (s *Session) renderer() store.Renderer {
+	return store.Renderer{
+		Reminder: func(variant string) (fantasy.Message, bool) { return s.modes.render(variant) },
+		Summary: func(c store.Compaction) fantasy.Message {
+			return summaryMessage(store.SegmentDir(s.store.Path()), c)
+		},
+	}
 }
 
 // defaultAgent is a turn's agent: Fantasy's, with the frozen system prompt,
@@ -336,6 +379,28 @@ func defaultAgent(lm fantasy.LanguageModel, system string, tools []fantasy.Agent
 		fantasy.WithSystemPrompt(system),
 		fantasy.WithMaxRetries(maxRetries),
 		fantasy.WithTools(tools...))
+}
+
+// defaultSummarizerAgent is the summarizer's own agent (compact.go, plan 028
+// §3.8 item 6): Fantasy's, with the frozen system prompt, no retries of its
+// own, and the tools it is offered (inert, or none for the text form).
+func defaultSummarizerAgent(lm fantasy.LanguageModel, system string, tools []fantasy.AgentTool) fantasy.Agent {
+	return fantasy.NewAgent(lm,
+		fantasy.WithSystemPrompt(system),
+		fantasy.WithMaxRetries(0),
+		fantasy.WithTools(tools...))
+}
+
+// defaultSleep is compact's production backoff (Session.sleep): d, or less
+// when ctx ends first, so a cancel during backoff is not waited out (review
+// r1-c9 finding 10).
+func defaultSleep(ctx context.Context, d time.Duration) {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+	case <-t.C:
+	}
 }
 
 // model is a built model and the effort a turn sends it: everything a turn
@@ -397,14 +462,15 @@ func Open(opts Options) (*Session, error) {
 	}
 	child := opts.Child
 	s := &Session{
-		getenv:     opts.Getenv,
-		newModel:   opts.NewModel,
-		newAgent:   defaultAgent,
-		table:      opts.Table,
-		child:      child != nil,
-		matchModel: opts.MatchModel,
-		warn:       opts.Warn,
-		now:        opts.Now,
+		getenv:             opts.Getenv,
+		newModel:           opts.NewModel,
+		newAgent:           defaultAgent,
+		newSummarizerAgent: defaultSummarizerAgent,
+		table:              opts.Table,
+		child:              child != nil,
+		matchModel:         opts.MatchModel,
+		warn:               opts.Warn,
+		now:                opts.Now,
 	}
 	if s.getenv == nil {
 		s.getenv = os.Getenv
@@ -415,6 +481,7 @@ func Open(opts Options) (*Session, error) {
 	if s.now == nil {
 		s.now = time.Now
 	}
+	s.sleep = defaultSleep
 	// A session that is not a sub-agent can start them: its runner exists
 	// before its tools, which hand it to the agent tool (Env.Subagents), and
 	// reads the rest of the session only when a call arrives, by which time
@@ -492,6 +559,8 @@ func Open(opts Options) (*Session, error) {
 		// "" for a fresh id; a caller's own for a session whose id is known
 		// before it has a file (Options.SessionID). A child's is set below.
 		SessionID: opts.SessionID,
+		Render:    s.renderer(),
+		OpenFile:  opts.storeOpenFile,
 	}
 	if child != nil {
 		// The header goes to disk as it is. The type and the persona's path

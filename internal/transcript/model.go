@@ -472,6 +472,10 @@ type State struct {
 	// a model folded from the event stream. The next roster event for a row
 	// replaces it whole and takes it out of this set.
 	TruncatedAgents map[string]bool
+	// Compacting is every transcript's open compaction (Transcript.Compacting,
+	// plan 028 §3.13), by the transcript it belongs to: "" the main one, else
+	// the child's id. nil when none is open.
+	Compacting map[string]Compacting
 }
 
 // ToolKey names one tool call: the transcript it is in ("" main, else the
@@ -572,6 +576,8 @@ type transcriptCut struct {
 	dropped    int
 	omitted    []Omitted
 	omittedRun Kind
+	// compacting is the transcript's open compaction, a copy (nil for none).
+	compacting *Compacting
 }
 
 type subCut struct {
@@ -647,6 +653,10 @@ func (t *Transcript) cutLocked() transcriptCut {
 	if t.held() > 0 {
 		tc.omitted = append([]Omitted(nil), t.ledger[t.lhead:]...)
 	}
+	if t.compacting != nil {
+		c := *t.compacting
+		tc.compacting = &c
+	}
 	if n := len(tc.entries); t.streamOpen && n > 0 && tc.entries[n-1].Streaming {
 		// A fresh copy carrying the run's end, cut, accounting and tail: the
 		// stored entry's End, Cut and Bytes are its opening's (X24).
@@ -709,6 +719,19 @@ func (c *cut) state() State {
 	addTools("", &c.main)
 	for i := range c.subs {
 		addTools(c.subs[i].id, &c.subs[i].t)
+	}
+	addCompacting := func(agentID string, tc *transcriptCut) {
+		if tc.compacting == nil {
+			return
+		}
+		if s.Compacting == nil {
+			s.Compacting = make(map[string]Compacting)
+		}
+		s.Compacting[agentID] = *tc.compacting
+	}
+	addCompacting("", &c.main)
+	for i := range c.subs {
+		addCompacting(c.subs[i].id, &c.subs[i].t)
 	}
 	return s
 }

@@ -472,7 +472,8 @@ func (t *turn) synthesizeStep(stop string) (done bool, err error) {
 	// (§3.11). The step's request carried the background results its
 	// boundary took up, and they lead the append as they would a finished
 	// step's; the user's steers do not, and go back to them (Unanswered), as
-	// before.
+	// before, and neither does its reminder, which the model was not told for
+	// good (reminders.go).
 	writes := func(c *toolCall) bool { return slices.Contains(answered, c) }
 	leading, lead := t.internalEntries()
 	toolEntry := &store.MessageEntry{Message: redactResults(t.redactor(), toolMsg), Model: t.model.id(), Effort: t.model.effort, Interrupted: true,
@@ -480,7 +481,7 @@ func (t *turn) synthesizeStep(stop string) (done bool, err error) {
 	// A call that ran may have changed the todo list, which the tool entry
 	// carries as a finished step's does (plan 028 §3.2).
 	todos := t.todosOn(toolEntry)
-	entries, err := t.store.AppendStep(leading,
+	entries, err := t.store.AppendStepLed(leading,
 		store.MessageEntry{Message: redactCalls(t.redactor(), assistant), Model: t.model.id(), Effort: t.model.effort, StopReason: stop, Interrupted: true},
 		toolEntry)
 	if err == nil {
@@ -731,6 +732,26 @@ func (t *turn) agentTools() []fantasy.AgentTool {
 	out := make([]fantasy.AgentTool, len(t.tools.specs))
 	for i, s := range t.tools.specs {
 		out[i] = newBridged(s, t.runTool)
+	}
+	return out
+}
+
+// inertToolText is what a tool call made while the conversation is being
+// compacted is answered with (plan 028 §3.8): the call never runs.
+const inertToolText = "Tools are not available while the conversation is compacted."
+
+// inertTools are the session's tools as a summarizer request offers them
+// (plan 028 §3.8, P11): each with the same Info a turn's has — so Fantasy
+// converts and normalizes them into the same bytes, and the request is the
+// turn's own — and a Run that answers every call with inertToolText and runs
+// nothing.
+func (s *Session) inertTools() []fantasy.AgentTool {
+	inert := func(context.Context, fantasy.ToolCall) fantasy.ToolResponse {
+		return fantasy.ToolResponse{Type: "text", Content: inertToolText, IsError: true}
+	}
+	out := make([]fantasy.AgentTool, len(s.tools.specs))
+	for i, spec := range s.tools.specs {
+		out[i] = newBridged(spec, inert)
 	}
 	return out
 }

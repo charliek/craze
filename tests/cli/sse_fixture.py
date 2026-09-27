@@ -115,6 +115,16 @@ class Step:
     calls: tuple[ToolCall, ...] = ()
     finish: str = ""
     interleaved: bool = True
+    # usage overrides the finish chunk's reported (prompt_tokens,
+    # completion_tokens); None keeps the fixed default (5, 2). The harness's
+    # compaction math (plan 028 §3.7) sizes a step's context from the
+    # provider's OWN reported usage on its frontier entry, so a case that
+    # wants to script a request as having pushed the context over a small
+    # test window's threshold sets this rather than growing the request body
+    # itself -- the fixed default would otherwise make every scripted step
+    # look equally (and unrealistically) small regardless of how much
+    # history it actually carries.
+    usage: tuple[int, int] | None = None
 
     def finish_reason(self) -> str:
         if self.finish:
@@ -122,12 +132,24 @@ class Step:
         return "tool_calls" if self.calls else "stop"
 
 
-def answer(*text: str, reasoning: tuple[str, ...] | list[str] = (), finish: str = "") -> Step:
+def answer(
+    *text: str,
+    reasoning: tuple[str, ...] | list[str] = (),
+    finish: str = "",
+    usage: tuple[int, int] | None = None,
+) -> Step:
     """A step that answers in words and ends the turn."""
-    return Step(text=tuple(text), reasoning=tuple(reasoning), finish=finish)
+    return Step(text=tuple(text), reasoning=tuple(reasoning), finish=finish, usage=usage)
 
 
-def call_step(name: str, arguments: dict | str, *, call_id: str = "", finish: str = "") -> Step:
+def call_step(
+    name: str,
+    arguments: dict | str,
+    *,
+    call_id: str = "",
+    finish: str = "",
+    usage: tuple[int, int] | None = None,
+) -> Step:
     """A step that calls one tool. A dict is sent as compact JSON.
 
     call_id defaults to the tool's own name, which is unique within a
@@ -135,7 +157,7 @@ def call_step(name: str, arguments: dict | str, *, call_id: str = "", finish: st
     message than a counter would.
     """
     raw = arguments if isinstance(arguments, str) else json.dumps(arguments, separators=(",", ":"))
-    return Step(calls=(ToolCall(call_id or name, name, raw),), finish=finish)
+    return Step(calls=(ToolCall(call_id or name, name, raw),), finish=finish, usage=usage)
 
 
 def parallel_step(*calls: ToolCall, finish: str = "", interleaved: bool = True) -> Step:
@@ -461,13 +483,18 @@ def _delta_chunk(delta: dict) -> str:
     )
 
 
-def _finish_chunk(reason: str) -> str:
+def _finish_chunk(reason: str, usage: tuple[int, int] | None = None) -> str:
+    prompt_tokens, completion_tokens = usage if usage is not None else (5, 2)
     return json.dumps(
         {
             "id": "c",
             "object": "chat.completion.chunk",
             "choices": [{"index": 0, "delta": {}, "finish_reason": reason}],
-            "usage": {"prompt_tokens": 5, "completion_tokens": 2, "total_tokens": 7},
+            "usage": {
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "total_tokens": prompt_tokens + completion_tokens,
+            },
         }
     )
 
@@ -524,7 +551,7 @@ def _sse_body(step: Step) -> bytes:
     chunks = [_delta_chunk({"reasoning_content": r}) for r in step.reasoning]
     chunks += [_delta_chunk({"content": t}) for t in step.text]
     chunks += sse_call_chunks(step)
-    chunks.append(_finish_chunk(step.finish_reason()))
+    chunks.append(_finish_chunk(step.finish_reason(), step.usage))
     out = "".join(f"data: {c}\n\n" for c in chunks)
     out += "data: [DONE]\n\n"
     return out.encode("utf-8")
@@ -539,6 +566,7 @@ def write_native_config(
     alias: str = "fixture-model",
     wire_model: str = "fixture-wire-model",
     name: str = "Fixture Model",
+    context_window: int = 0,
 ) -> None:
     """Write providers.toml (0600) and models.toml (0644) in the version-1
     schema internal/harness/modeltable reads (modeltable.go's providerEntry
@@ -548,6 +576,12 @@ def write_native_config(
     -- so the inline api_key is what actually resolves (modeltable.Resolve
     tries env_keys before the inline key), and no real provider key sitting in
     a developer's shell can shadow it.
+
+    context_window is the model's context_window (plan 028 §3.6): 0 (the
+    default) omits it, which is every existing case's "no automatic
+    compaction" behaviour; a case that wants a small test window for
+    compaction sets it and leaves [compaction]'s own settings (threshold_percent
+    85, tail_tokens 20000) at their defaults.
     """
     native_dir.mkdir(parents=True, exist_ok=True)
     os.chmod(native_dir, 0o700)
@@ -566,16 +600,18 @@ def write_native_config(
     providers_path.write_text(providers_toml, encoding="utf-8")
     os.chmod(providers_path, 0o600)
 
-    models_toml = (
-        "version = 1\n"
-        f'default_model = "{alias}"\n'
-        "\n"
-        f"[models.{alias}]\n"
-        f'provider = "{provider_id}"\n'
-        f'wire_model = "{wire_model}"\n'
-        f'name = "{name}"\n'
-        'source = "manual"\n'
-    )
+    model_lines = [
+        "version = 1\n",
+        f'default_model = "{alias}"\n',
+        "\n",
+        f"[models.{alias}]\n",
+        f'provider = "{provider_id}"\n',
+        f'wire_model = "{wire_model}"\n',
+        f'name = "{name}"\n',
+        'source = "manual"\n',
+    ]
+    if context_window:
+        model_lines.append(f"context_window = {context_window}\n")
     models_path = native_dir / "models.toml"
-    models_path.write_text(models_toml, encoding="utf-8")
+    models_path.write_text("".join(model_lines), encoding="utf-8")
     os.chmod(models_path, 0o644)

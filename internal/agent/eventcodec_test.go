@@ -517,6 +517,12 @@ func emitSiteEvents() []emitSiteEvent {
 		{"the replay's start", Event{Type: EventReplay, Replay: &ReplayInfo{Phase: ReplayStart}, At: at}},
 		{"a replayed text", Event{Type: EventText, Text: "from history", Replayed: true, At: at}},
 		{"the replay's end", Event{Type: EventReplay, Replay: &ReplayInfo{Phase: ReplayEnd}, At: at}},
+		{"a compaction started", Event{Type: EventCompaction, Compaction: &CompactionInfo{Phase: CompactionStarted, Reason: CompactionAuto}, At: at}},
+		{"a compaction ended", Event{Type: EventCompaction, Compaction: &CompactionInfo{Phase: CompactionEnded, Reason: CompactionManual,
+			TokensBefore: 890_000, TokensAfter: 21_000}, At: at}},
+		{"a child's compaction that failed, replayed", Event{Type: EventCompaction, Agent: "child-1", Replayed: true,
+			Compaction: &CompactionInfo{Phase: CompactionEnded, Reason: CompactionOverflow, TokensBefore: 300_000,
+				Err: `native: provider "test" failed (HTTP 500)`}, At: at}},
 		{"an error", Event{Type: EventError, Err: &acp.RPCError{Code: -32603, Message: "Internal error"}, At: at}},
 		{"a turn started, with its cause", Event{Type: EventTurn, Cause: "cli-1/7", Turn: &TurnInfo{
 			ID: "turn-3", Phase: TurnStarted, Text: "fix the tests", Origin: TurnOriginSubmit,
@@ -729,6 +735,13 @@ func pinnedWireShapes() []pinnedWireShape {
 			Title: ptr(""), Config: &ConfigState{}, Commands: &CommandsState{}, Plugins: &PluginsState{},
 		}},
 			`{"type":"meta","state":{"title":"","config":{},"commands":{},"plugins":{}}}`},
+		// A compaction's two ends (plan 028 §3.13): a started carries no
+		// counts, and a child's names the child beside it.
+		{Event{Type: EventCompaction, Compaction: &CompactionInfo{Phase: CompactionStarted, Reason: CompactionAuto}},
+			`{"type":"compaction","compaction":{"phase":"started","reason":"auto"}}`},
+		{Event{Type: EventCompaction, Agent: "child-1", Compaction: &CompactionInfo{Phase: CompactionEnded, Reason: CompactionManual,
+			TokensBefore: 890000, TokensAfter: 21000}},
+			`{"type":"compaction","agent":"child-1","compaction":{"phase":"ended","reason":"manual","tokensBefore":890000,"tokensAfter":21000}}`},
 	}
 }
 

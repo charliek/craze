@@ -209,7 +209,7 @@ func TestResumeEntryRoundTrips(t *testing.T) {
 			t.Fatalf("resume entry read back as %+v, want %+v", back, e)
 		}
 	}
-	if !knownType(TypeResume) || knownType("compaction") {
+	if !knownType(TypeResume) || knownType("bookmark") {
 		t.Fatal("knownType does not know resume, or knows a type this craze does not write")
 	}
 }

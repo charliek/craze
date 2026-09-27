@@ -14,7 +14,9 @@
 // A transcript only ever grows by whole steps. A turn is one or more steps;
 // a step is the model's assistant message and, when it called tools, the
 // tool message holding their results, led by any steers (user messages
-// interjected mid-turn) that the model first saw at that step. The file and
+// interjected mid-turn) that the model first saw at that step, and by the
+// mode reminder its request carried, as a reminder entry that names the
+// text's variant and never holds the text (AppendStepLed). The file and
 // its directory are created lazily, by the first step that produced output.
 // The header, the turn's user entry and that step go out in one write(2) to
 // a temporary file beside the session's, which is then hard-linked into
@@ -37,6 +39,13 @@
 //
 // A step's tool calls and results keep the pairing invariant (see pairing),
 // which AppendStep checks before writing and Load checks on every line.
+//
+// A compaction entry (plan 028 §3.9) is the one entry written alone, between
+// two steps, and at once (AppendCompaction): the held entries wait for the
+// next step. It is complete on its own line, so Load keeps one that no step
+// follows. From the latest successful one on a path, the context is its
+// summary message, its tail of whole steps, and what came after it
+// (Transcript.ContextAt); a compaction cuts a context's steps with Cut.
 //
 // One write(2) is not atomic across a crash: what reaches the disk can be any
 // prefix of it, possibly ending on a line boundary. There is no fsync (a
@@ -78,6 +87,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"maps"
 	"os"
 	"path/filepath"
@@ -114,6 +124,11 @@ var (
 	// entry is held: the first write must carry the turn's user entry, or
 	// the transcript would start with an answer to nothing.
 	ErrNoUser = errors.New("store: no user entry to write with the first step")
+
+	// ErrNothingToCompact is AppendCompaction's refusal while the transcript
+	// has no entries: a compaction stands for a conversation, and there is
+	// none yet (plan 028 §3.8).
+	ErrNothingToCompact = errors.New("store: nothing to compact")
 )
 
 // Options are a session's fixed facts.
@@ -145,6 +160,21 @@ type Options struct {
 	ParentToolCall string
 	SubagentType   string
 	PersonaPath    string
+
+	// Render is the harness's renderer for the entries whose text the store
+	// never keeps — a reminder's (plan 028 §3.15), and a compaction's summary
+	// message (§3.9) — which the context renders at their places (Renderer).
+	// New and Open take it; the zero value leaves those messages out of the
+	// context.
+	Render Renderer
+
+	// OpenFile, when set, opens a new session's descriptor — the temporary
+	// file New's first write creates and every later append of that session
+	// goes through — in place of os.OpenFile. It is a test seam for another
+	// package's tests (the harness's, plan 028 C9): a writer that fails a
+	// write, having written nothing or part of it. Production leaves it nil.
+	// Open does not use it, and neither does a package test that sets openFile.
+	OpenFile func(name string, flag int, perm os.FileMode) (io.WriteCloser, error)
 
 	// Test seams, settable only inside the package; zero means production.
 	entryID  func() string
@@ -241,6 +271,7 @@ func New(opts Options) (*Store, error) {
 		PersonaPath:        opts.PersonaPath,
 	}
 	s.t = newTranscript(h)
+	s.t.render = opts.Render
 	s.path = sessionPath(filepath.Clean(opts.Home), cwd, id, h.Timestamp)
 	return s, nil
 }
@@ -253,6 +284,10 @@ func newBare(opts Options) *Store {
 	}
 	if s.entryID == nil {
 		s.entryID = randomEntryID
+	}
+	if s.openFile == nil && opts.OpenFile != nil {
+		open := opts.OpenFile
+		s.openFile = func(name string, flag int, perm os.FileMode) (file, error) { return open(name, flag, perm) }
 	}
 	if s.openFile == nil {
 		s.openFile = openOSFile
@@ -406,6 +441,29 @@ func (s *Store) holdChange(e Entry) error {
 	return nil
 }
 
+// Lead is one entry that leads a step's append, ahead of its answer, in the
+// order the step's request carried them: a user message — a steer, or an
+// entry of background sub-agents' results (plan 026 §3.11) — or, with
+// Reminder set and Message left zero, a reminder entry of that variant: the
+// mode reminder the request carried at that place, whose text the store never
+// holds (plan 028 §3.15).
+type Lead struct {
+	Message  MessageEntry
+	Reminder string
+}
+
+// leadsOf is steers as the leads of a step.
+func leadsOf(steers []MessageEntry) []Lead {
+	if len(steers) == 0 {
+		return nil
+	}
+	out := make([]Lead, len(steers))
+	for i, st := range steers {
+		out[i] = Lead{Message: st}
+	}
+	return out
+}
+
 // AppendStep writes a finished step in one append: the resume entry Open
 // holds, if this is the first step since, any held changes, the
 // held user entries, steers (user messages interjected mid-turn that the
@@ -431,12 +489,18 @@ func (s *Store) holdChange(e Entry) error {
 // a crash can persist any prefix of it, which Load rolls back to the last
 // complete step (see the package comment).
 func (s *Store) AppendStep(steers []MessageEntry, assistant MessageEntry, tool *MessageEntry) ([]string, error) {
-	for _, st := range steers {
-		if err := checkMessage("a steer", st, fantasy.MessageRoleUser); err != nil {
+	return s.AppendStepLed(leadsOf(steers), assistant, tool)
+}
+
+// AppendStepLed is AppendStep with the entries that lead the answer given as
+// Leads, so that the reminders the step's request carried are written among
+// its steers and results, each at its own place (plan 028 §3.15): after the
+// held user entries, in lead's order. A reminder's variant must be a name
+// (checkVariant), or the step is refused with nothing written.
+func (s *Store) AppendStepLed(lead []Lead, assistant MessageEntry, tool *MessageEntry) ([]string, error) {
+	for _, l := range lead {
+		if err := checkLead(l); err != nil {
 			return nil, err
-		}
-		if st.Turn != 0 {
-			return nil, fmt.Errorf("store: a steer carries turn %d; only the entry a turn opens with (AppendUser) does", st.Turn)
 		}
 	}
 	if err := checkMessage("AppendStep", assistant, fantasy.MessageRoleAssistant); err != nil {
@@ -466,8 +530,12 @@ func (s *Store) AppendStep(steers []MessageEntry, assistant MessageEntry, tool *
 		batch = append(batch, *s.resume)
 	}
 	batch = append(append(batch, s.changes...), s.users...)
-	for _, st := range steers {
-		batch = append(batch, Entry{Type: TypeMessage, Timestamp: s.stamp(), MessageEntry: st})
+	for _, l := range lead {
+		if l.Reminder != "" {
+			batch = append(batch, Entry{Type: TypeReminder, Timestamp: s.stamp(), Variant: l.Reminder})
+			continue
+		}
+		batch = append(batch, Entry{Type: TypeMessage, Timestamp: s.stamp(), MessageEntry: l.Message})
 	}
 	batch = append(batch, Entry{Type: TypeMessage, Timestamp: s.stamp(), MessageEntry: assistant})
 	if tool != nil {
@@ -482,6 +550,64 @@ func (s *Store) AppendStep(steers []MessageEntry, assistant MessageEntry, tool *
 		ids[i] = b.ID
 	}
 	return ids, nil
+}
+
+// checkLead refuses a lead that is neither a reminder — a variant of the
+// right shape, and no message — nor a user message that opens no turn.
+func checkLead(l Lead) error {
+	if l.Reminder != "" {
+		if l.Message.Message.Role != "" || len(l.Message.Message.Content) > 0 {
+			return fmt.Errorf("store: a reminder lead (%q) carries a message too", l.Reminder)
+		}
+		if err := checkVariant(l.Reminder); err != nil {
+			return fmt.Errorf("store: %w", err)
+		}
+		return nil
+	}
+	if err := checkMessage("a steer", l.Message, fantasy.MessageRoleUser); err != nil {
+		return err
+	}
+	if l.Message.Turn != 0 {
+		return fmt.Errorf("store: a steer carries turn %d; only the entry a turn opens with (AppendUser) does", l.Message.Turn)
+	}
+	return nil
+}
+
+// AppendCompaction writes a compaction entry (plan 028 §3.2, §3.8): turn is
+// the turn it ran in, m the model that summarized, usage every attempt's,
+// summed, and c the rest (Compaction). It is written at once and alone:
+// the entries held for the next step — its user entries, changes, and Open's
+// resume entry — stay held, and go out after it with that step, so a
+// compaction before a turn's first request sits ahead of the prompt it
+// preceded. It returns the entry's id.
+//
+// c must keep a compaction's rule (Compaction's doc) and, with a tail, start
+// it at a step before it (Transcript.checkTail), or AppendCompaction refuses
+// it with nothing written; so does a transcript with no entries
+// (ErrNothingToCompact). Pairing holds for it as for any entry: one cannot
+// come between an assistant entry's calls and their results (ErrUnpaired).
+// The write is a step's, with a step's failure: one that writes part of the
+// line fails the store (ErrFailed), and one that writes nothing fails only
+// itself.
+func (s *Store) AppendCompaction(turn int, m Model, usage Usage, c Compaction) (string, error) {
+	e := Entry{Type: TypeCompaction, Compaction: c, MessageEntry: MessageEntry{Turn: turn, Model: m, Usage: &usage}}
+	if err := checkCompaction(e); err != nil {
+		return "", fmt.Errorf("store: AppendCompaction: %w", err)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.usable(); err != nil {
+		return "", err
+	}
+	if len(s.t.Entries) == 0 {
+		return "", ErrNothingToCompact
+	}
+	e.Timestamp = s.stamp()
+	batch := []Entry{e}
+	if err := s.write(batch); err != nil {
+		return "", err
+	}
+	return batch[0].ID, nil
 }
 
 // AppendAssistant writes a text-only answer as a step with no steers and no
@@ -501,13 +627,20 @@ func (s *Store) AppendAssistant(e MessageEntry) error {
 // AppendAssistant's must, or it is ErrNoOutput and nothing is written — the
 // leading entries neither.
 func (s *Store) AppendAnswer(leading []MessageEntry, e MessageEntry) ([]string, error) {
+	return s.AppendAnswerLed(leadsOf(leading), e)
+}
+
+// AppendAnswerLed is AppendAnswer with its leading entries given as Leads:
+// the reminders the cut step's request carried go among them, as a finished
+// step's do (AppendStepLed).
+func (s *Store) AppendAnswerLed(lead []Lead, e MessageEntry) ([]string, error) {
 	if err := checkMessage("AppendAssistant", e, fantasy.MessageRoleAssistant); err != nil {
 		return nil, err
 	}
 	if !hasText(e.Message) {
 		return nil, ErrNoOutput
 	}
-	return s.AppendStep(leading, e, nil)
+	return s.AppendStepLed(lead, e, nil)
 }
 
 // write gives batch its ids and parents, as a chain from the leaf, and
@@ -558,6 +691,11 @@ func (s *Store) write(batch []Entry) error {
 		}
 		if err := pair.next(back, parent); err != nil {
 			return err
+		}
+		// A compaction is written alone (AppendCompaction), so its parent
+		// is the transcript's last entry, and its ancestors are all there.
+		if err := s.t.checkTail(&back, parent); err != nil {
+			return fmt.Errorf("store: %w", err)
 		}
 		batch[i] = back
 		parent = &batch[i]
@@ -701,6 +839,33 @@ func (s *Store) ContextWithResults(current Model) ([]fantasy.Message, []bool) {
 	return s.t.ContextWithResults(current)
 }
 
+// LeadsWithSummary is Transcript.LeadsWithSummary. It works after Close.
+func (s *Store) LeadsWithSummary() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.t.LeadsWithSummary()
+}
+
+// Steps is the context the next request sends to current, grouped into steps
+// (Transcript.Steps): what a compaction cuts (Cut). Held entries are in none.
+// It works after Close.
+func (s *Store) Steps(current Model) []Step {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	steps, _ := s.t.Steps(s.t.Leaf(), current) // the leaf is always known
+	return steps
+}
+
+// Frontier is the frontier of the context the next request sends to current
+// (Transcript.FrontierAt, plan 028 §3.7). Held entries are not in it. It
+// works after Close.
+func (s *Store) Frontier(current Model) (Frontier, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	f, ok, _ := s.t.FrontierAt(s.t.Leaf(), current) // the leaf is always known
+	return f, ok
+}
+
 // Transcript is a copy of the transcript as the store holds it: the header,
 // and every entry written, or read back and kept by Open, in file order.
 // Held entries are not in it. The copy's entry list is its own, so later
@@ -715,7 +880,7 @@ func (s *Store) Transcript() *Transcript {
 	for i, e := range s.t.Entries {
 		entries[i] = e.clone()
 	}
-	return &Transcript{Header: s.t.Header, Entries: entries, index: maps.Clone(s.t.index)}
+	return &Transcript{Header: s.t.Header, Entries: entries, index: maps.Clone(s.t.index), render: s.t.render}
 }
 
 // Close releases the descriptor, and with it the session's lock. Held
