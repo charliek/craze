@@ -533,6 +533,21 @@ func (m *Model) History() History {
 	return c.history()
 }
 
+// Tools returns every retained tool's last state, in entry order (plan 027
+// §3.13, "Ordered tools" — SF-43): the main transcript's tools first, then
+// each child's in the order the child was created, each transcript's own
+// tools in the order their entries hold them — the row an update replaces in
+// place (Transcript.upsertTool) keeps its original position, so this is
+// creation order even across interleaved updates. A tool the model trimmed is
+// gone, exactly as State's Tools excludes it, and so is a todo tool: neither
+// ever becomes a KindTool entry (upsertTool drops a todo tool before one is
+// made, and a trimmed one is dropped from entries by bounds.go). Cut under the
+// lock like State; the caller owns every value.
+func (m *Model) Tools() []agent.ToolEvent {
+	c := m.cut()
+	return c.tools()
+}
+
 // ----------------------------------------------------------------- the cut
 
 // cut is the model at one Seq, taken under mu with pointer copies only —
@@ -750,6 +765,26 @@ func (c *cut) state() State {
 		addCompacting(c.subs[i].id, &c.subs[i].t)
 	}
 	return s
+}
+
+// tools is Tools' projection: every KindTool entry's payload, main first then
+// each sub in creation order, each in entry order — the same rows state's own
+// addTools visits, kept as a slice instead of folded into a map.
+func (c *cut) tools() []agent.ToolEvent {
+	var out []agent.ToolEvent
+	addTools := func(tc *transcriptCut) {
+		for _, e := range tc.entries {
+			if e.Kind != KindTool || e.Tool == nil || e.Tool.ID == "" {
+				continue
+			}
+			out = append(out, *e.Tool)
+		}
+	}
+	addTools(&c.main)
+	for i := range c.subs {
+		addTools(&c.subs[i].t)
+	}
+	return out
 }
 
 func (c *cut) history() History {

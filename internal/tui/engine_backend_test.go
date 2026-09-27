@@ -5,7 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/charliek/craze/internal/agent"
 	"github.com/charliek/craze/internal/backend"
@@ -246,7 +248,7 @@ func TestEngineBackendReadHonoursItsContext(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = eng.Close() })
-	b := newEngineBackend(eng)
+	b := newEngineBackend(eng, "")
 	// The in-process client is minted once, when the engine is wrapped, and
 	// is the same on every read: only a socket client's can change.
 	first, again := b.ClientID(), b.ClientID()
@@ -266,5 +268,120 @@ func TestEngineBackendReadHonoursItsContext(t *testing.T) {
 	}
 	if it.Kind != backend.ItemEvent || it.Event.Type != agent.EventText || it.Event.Text != "kept" || it.Gen != 0 {
 		t.Fatalf("the next Read took %+v, want the event the cancelled one left", it)
+	}
+}
+
+// TestInfoReflectsTheEnginesStaticFacts (§3.13, X33 4): Info() maps every
+// field from the engine's own State — the snapshot's static ones
+// (Provider.Name/Label/Capabilities, SessionID, Models, Modes) and State's own
+// (Incarnation, CrazeSessionID, RetryHorizon) — plus the workspace the backend
+// was built with, which is the caller's own resolved cwd and never a read of
+// the engine (engineBackend.workspace's doc: the engine holds no workspace of
+// its own).
+func TestInfoReflectsTheEnginesStaticFacts(t *testing.T) {
+	stub := NewStub()
+	stub.SetProvider(agent.GrokProvider())
+	eng, err := engine.New(stub, engine.Options{CrazeSessionID: "cz-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = eng.Close() })
+	b := newEngineBackend(eng, "/work/dir")
+
+	info := b.Info()
+	st := eng.State()
+	if info.CrazeSessionID != "cz-1" || info.CrazeSessionID != st.CrazeSessionID {
+		t.Fatalf("CrazeSessionID is %q, want %q", info.CrazeSessionID, st.CrazeSessionID)
+	}
+	if info.ProviderSessionID == "" || info.ProviderSessionID != st.SessionID {
+		t.Fatalf("ProviderSessionID is %q, want the snapshot's %q", info.ProviderSessionID, st.SessionID)
+	}
+	if info.Incarnation == "" || info.Incarnation != st.Incarnation {
+		t.Fatalf("Incarnation is %q, want %q", info.Incarnation, st.Incarnation)
+	}
+	if info.Workspace != "/work/dir" {
+		t.Fatalf("Workspace is %q, want the backend's own construction value, not a read of the engine", info.Workspace)
+	}
+	if info.Provider != "grok" || info.Label != agent.GrokProvider().Info().Label() {
+		t.Fatalf("Provider/Label are %q/%q, want grok's", info.Provider, info.Label)
+	}
+	if info.Capabilities != agent.GrokProvider().Capabilities() {
+		t.Fatalf("Capabilities are %+v, want grok's own table (Snapshot.Provider.Capabilities())", info.Capabilities)
+	}
+	if !reflect.DeepEqual(info.Models, st.Models) || !reflect.DeepEqual(info.Modes, st.Modes) {
+		t.Fatalf("Models/Modes are %+v/%+v, want the snapshot's %+v/%+v", info.Models, info.Modes, st.Models, st.Modes)
+	}
+	if info.RetryHorizon != st.RetryHorizon {
+		t.Fatalf("RetryHorizon is %+v, want %+v", info.RetryHorizon, st.RetryHorizon)
+	}
+}
+
+// TestInfoBeforeStartReflectsTheConfiguredProvider (§3.13, GLM 11): Info
+// answers before Start is ever called, from the session's own initial
+// snapshot — the configured provider — exactly as the TUI reads it today.
+func TestInfoBeforeStartReflectsTheConfiguredProvider(t *testing.T) {
+	stub := NewStub()
+	stub.SetProvider(agent.NativeProvider())
+	eng, err := engine.New(stub, engine.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = eng.Close() })
+	b := newEngineBackend(eng, "")
+
+	info := b.Info()
+	if info.Provider != "native" || info.Capabilities != agent.NativeProvider().Capabilities() {
+		t.Fatalf("Info before Start is %+v, want native's configured facts", info)
+	}
+}
+
+// TestInfoWaitsOnNothing (§3.12's interface paragraph, "Info() ... waits on
+// nothing"): Info reads State().Snapshot's static fields exactly as Settings
+// already does on every model-change chain step (settings_test.go,
+// TestTheChainsJudgeSettingsAsTheEnginesSnapshot above) — State reads the
+// snapshot outside the engine's own mutex and takes it only briefly to merge
+// in its own fields (engine/state.go's State doc) — so Info is no new way to
+// block. This races Info against the engine's snapshot changing underneath it
+// (caught by -race) and bounds every answer well past what an in-memory read
+// needs, so a real deadlock — Info waiting on something the writer holds —
+// fails loudly rather than hanging the suite.
+func TestInfoWaitsOnNothing(t *testing.T) {
+	stub := NewStub()
+	eng, err := engine.New(stub, engine.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = eng.Close() })
+	b := newEngineBackend(eng, "")
+
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			stub.SetProvider(agent.GrokProvider())
+			_ = eng.State()
+			stub.SetProvider(agent.CursorProvider())
+		}
+	}()
+	defer func() {
+		close(stop)
+		wg.Wait()
+	}()
+
+	for i := 0; i < 200; i++ {
+		done := make(chan backend.SessionInfo, 1)
+		go func() { done <- b.Info() }()
+		select {
+		case <-done:
+		case <-time.After(time.Second):
+			t.Fatal("Info blocked for a second while the engine's snapshot was busy — it must wait on nothing")
+		}
 	}
 }

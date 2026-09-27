@@ -24,6 +24,14 @@ import (
 type engineBackend struct {
 	eng    *engine.Engine
 	client string
+	// workspace is Info's Workspace: the session's working directory as the
+	// TUI resolved it (tui.New's cwd), captured once when the backend is
+	// built. The engine itself never holds a workspace — Options carries
+	// none, and the session's own agent.Options.Workspace is not read back
+	// out of it — so this is the same source the control server's
+	// sessionInfo uses for the socket path (s.opts.Workspace, its own
+	// configured value rather than a live engine read; control/info.go).
+	workspace string
 	// epoch is Epoch: inProcessEpoch for the backend's whole life — it is
 	// bound to one engine — and never written in production. It is atomic
 	// only because a test moves it, from another goroutine, to stand in for
@@ -37,9 +45,11 @@ const inProcessEpoch = 1
 
 var _ backend.Backend = (*engineBackend)(nil)
 
-// newEngineBackend wraps eng, minting this client's id on it.
-func newEngineBackend(eng *engine.Engine) *engineBackend {
-	b := &engineBackend{eng: eng, client: eng.NewClientID()}
+// newEngineBackend wraps eng, minting this client's id on it. workspace is
+// Info's Workspace (see the field's doc): the caller's own resolved cwd, not
+// read from the engine.
+func newEngineBackend(eng *engine.Engine, workspace string) *engineBackend {
+	b := &engineBackend{eng: eng, client: eng.NewClientID(), workspace: workspace}
 	b.epoch.Store(inProcessEpoch)
 	return b
 }
@@ -201,6 +211,31 @@ func (b *engineBackend) Settings(ctx context.Context) (backend.Settings, error) 
 	}
 	snap := b.eng.State().Snapshot
 	return backend.Settings{Model: snap.CurrentModel, Mode: snap.CurrentMode, Config: snap.Config}, nil
+}
+
+// Info is the session's static facts (§3.13), read from State().Snapshot's
+// static fields and State's own (Incarnation, CrazeSessionID, RetryHorizon).
+// It waits on nothing: State() reads the session's snapshot outside the
+// engine's mutex and merges the engine's own fields in only briefly under it
+// (engine/state.go's State doc), exactly what Settings above already reads on
+// every model-change chain step, so a call here is no new way to block. Before
+// Start it answers from the session's initial snapshot — the configured
+// provider, an empty ProviderSessionID and empty catalogs — as the TUI reads
+// it today (GLM 11).
+func (b *engineBackend) Info() backend.SessionInfo {
+	st := b.eng.State()
+	return backend.SessionInfo{
+		CrazeSessionID:    st.CrazeSessionID,
+		ProviderSessionID: st.SessionID,
+		Incarnation:       st.Incarnation,
+		Workspace:         b.workspace,
+		Provider:          st.Provider.Name,
+		Label:             st.Provider.Label(),
+		Capabilities:      st.Provider.Capabilities(),
+		Models:            st.Models,
+		Modes:             st.Modes,
+		RetryHorizon:      st.RetryHorizon,
+	}
 }
 
 // State is the transitional live read the mirror still makes (§3.12); C21

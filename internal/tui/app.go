@@ -971,7 +971,7 @@ func (m *Model) setSession(s agent.Session, crazeID string) {
 	}
 	// The backend mints this model's client on the engine, once: the
 	// in-process client is never released (plan 027 §3.6).
-	m.eng = newEngineBackend(eng)
+	m.eng = newEngineBackend(eng, m.cwd)
 	if sessionBackendHook != nil {
 		m.eng = sessionBackendHook(m.eng)
 	}

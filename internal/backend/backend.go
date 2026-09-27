@@ -91,6 +91,15 @@ type Backend interface {
 	// ctx carries another epoch is refused with ErrStaleEpoch before
 	// anything is sent (CheckEpoch). It waits on nothing.
 	Epoch() uint64
+	// Info is the session's static facts (§3.13), fixed once the session is
+	// up: the provider's name and label, its capabilities as advertised
+	// (never rebuilt from the client binary's own provider table — astra
+	// 25), the provider and craze session ids, the model and mode catalogs,
+	// the incarnation and the retry horizon. In process it reads
+	// State().Snapshot's static fields; over the socket it is the attach
+	// reply's copy, updated by Ready. It waits on nothing, and before Start
+	// it reflects the configured provider, as the TUI does today (GLM 11).
+	Info() SessionInfo
 
 	// Read is the stream: one item at a time, in order, from one reader.
 	// ErrClosed once the stream has ended.

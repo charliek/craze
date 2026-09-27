@@ -539,6 +539,9 @@ func TestAgentRowMarksBackgroundOnlyForAProviderWithIt(t *testing.T) {
 	if got := m.agentSuffix(finished); got != "8.0s · grok-4.6-high-fast" {
 		t.Fatalf("a finished background row on a provider without the capability reads %q", got)
 	}
+	// caps() now reads the backend's advertised set (§3.13), so the stub's
+	// own provider must change too, not only the mirror's.
+	stub.SetProvider(agent.NativeProvider())
 	m.snap.Provider = agent.NativeProvider().Info()
 	if !m.caps().SubagentBackground {
 		t.Fatal("native has background children")

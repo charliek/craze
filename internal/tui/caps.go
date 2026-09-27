@@ -2,7 +2,15 @@ package tui
 
 import "github.com/charliek/craze/internal/agent"
 
+// caps is the session's capability set: the backend's own advertised set
+// (Info().Capabilities, §3.13) once one exists — over a socket the host's,
+// never rebuilt from this binary's own provider table (astra 25) — and the
+// mirror's provider table before there is a backend at all: a test that
+// builds a bare Model, and the provider picker before a session exists.
 func (m Model) caps() agent.Capabilities {
+	if m.eng != nil {
+		return m.eng.Info().Capabilities
+	}
 	return m.snap.Provider.Capabilities()
 }
 

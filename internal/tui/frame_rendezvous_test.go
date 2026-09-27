@@ -589,7 +589,7 @@ func TestTheCaptureBoundaryIsAnErrorWhenItCannotBeRead(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = eng.Close() })
 	owner := &sessionOwner{}
-	owner.set(newEngineBackend(eng))
+	owner.set(newEngineBackend(eng, ""))
 	// The primary full and nobody reading: the flush cannot finish.
 	saturateStub(t, stub)
 	if head, err := streamHead(owner, 50*time.Millisecond); err == nil {

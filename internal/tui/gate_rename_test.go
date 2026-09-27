@@ -569,7 +569,7 @@ func TestEngineBackendReturnsAnItemItTook(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = eng.Close() })
-	b := newEngineBackend(eng)
+	b := newEngineBackend(eng, "")
 	stub.Emit(agent.Event{Type: agent.EventText, Text: "taken"})
 	if err := stub.EventLog().Flush(context.Background(), nil); err != nil {
 		t.Fatal(err)
