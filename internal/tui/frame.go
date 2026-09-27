@@ -404,13 +404,16 @@ type frameState struct {
 	// settled says no gated call was waiting for its reply and nothing was
 	// held: every message that had reached the model was reduced. folded is
 	// the seq of the last event the model folded (its shared transcript's).
-	// The runner captures only once a frame is settled and has folded the
-	// session's stream as far as it had gone when the script ended
-	// (RunFrameScript).
+	// The runner sends its quit only once the newest frame is settled and has
+	// folded the session's stream as far as it had gone when the script ended
+	// (RunFrameScript); the capture itself need not be settled (final).
 	settled bool
 	folded  uint64
 	// final says the frame runner's quit message had been applied: this is
-	// the frame the run captures (RunFrameScript).
+	// the frame the run captures (RunFrameScript) — the model after every
+	// message that reached the program before the quit, in order, and none
+	// after it. A message that arrived after the quit may still be held then,
+	// and is not part of the capture (astra r47 3).
 	final bool
 }
 
@@ -512,9 +515,10 @@ func (b *frameBus) last() frameState {
 	return b.latest
 }
 
-// capture is the run's frame: the one the quit message's Update published,
-// or, for a run that ended some other way — a script that quits, a panic, a
-// kill — the newest.
+// capture is the run's frame: the one the quit message's Update published —
+// the model after every message that reached the program before the quit, in
+// order, and none after it (frameQuitMsg) — or, for a run that ended some
+// other way — a script that quits, a panic, a kill — the newest.
 func (b *frameBus) capture() frameState {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -627,7 +631,11 @@ type frameTokenMsg struct {
 // (harnessQuit) and answers tea.Quit. So the quit lands after every message
 // that reached the program before it — as bubbletea's own quit did before a
 // held message could be waiting — and the frame its Update publishes is the
-// run's capture.
+// run's capture: the model after every message that reached the program
+// before the quit, in order, and none after it. A message that arrives after
+// the quit — behind a gate that opened late, say — may remain held, and is not
+// part of the capture; "nothing held" is not what the capture promises (astra
+// r47 3).
 type frameQuitMsg struct{}
 
 // frameSyncMsg is a no-op message the runner uses to know its previous message
@@ -785,17 +793,19 @@ func RunFrameScript(cfg Config, cols, rows int, script string, opts FrameOpts) (
 		close(finished)
 	}()
 
-	// shutdown ends the run, every step bounded (C17c, astra C17b 2): the
-	// runner is done, however the script ended — its last token, a wait that
-	// timed out, a hook's error or panic — so a program waiting at a
-	// rendezvous is let go; the quit goes in through the model's FIFO
-	// (frameQuitMsg), handed over on a goroutine of its own so a program
-	// blocked inside an Update cannot block the runner; and if the program has
-	// not ended within the timeout, the engine is closed — which is what a
-	// call blocked inside an Update is waiting on, and what a gate held open
-	// by a call that never answers is waiting on — and the program is killed.
-	// Past a second timeout the program is abandoned, with an error, rather
-	// than waited for without end.
+	// shutdown ends the run (C17c, astra C17b 2): the runner is done, however
+	// the script ended — its last token, a wait that timed out, a hook's error
+	// or panic — so a program waiting at a rendezvous is let go; the quit goes
+	// in through the model's FIFO (frameQuitMsg), handed over on a goroutine of
+	// its own so a program blocked inside an Update cannot block the runner;
+	// and if the program has not ended within the timeout, the engine is
+	// closed — which is what a call blocked inside an Update is waiting on, and
+	// what a gate held open by a call that never answers is waiting on — and
+	// the program is killed, and then waited for. It is never abandoned (astra
+	// r47): a program still running — blocked in a PrintFrames writer, say —
+	// would outlive the run that restores HOME, the clipboard's recording and
+	// the colour profile around it, and overlap the next run. A program that
+	// never ends even then is the test binary's timeout's to catch.
 	//
 	// The engine is the owner's, not m's: a pre-start picker has none at New,
 	// the one the picker built is the one that owns a child process, and on a
@@ -817,11 +827,7 @@ func RunFrameScript(cfg Config, cols, rows int, script string, opts FrameOpts) (
 		case <-time.After(timeout):
 			closeEngine()
 			p.Kill()
-			select {
-			case runErr = <-done:
-			case <-time.After(timeout):
-				runErr = fmt.Errorf("frame: the program did not stop within %s of being killed", timeout)
-			}
+			runErr = <-done
 		}
 		closeEngine()
 		return runErr
@@ -838,14 +844,18 @@ func RunFrameScript(cfg Config, cols, rows int, script string, opts FrameOpts) (
 	r := &frameRunner{p: p, bus: bus, timeout: timeout, finished: finished, beforeBarrier: opts.beforeBarrier, afterSend: opts.afterSend}
 	scriptErr := r.run(toks, cols, rows)
 	if scriptErr == nil {
-		// The capture is of a settled model (C17b): every message that reached
-		// the model before the quit is reduced first — a gate's release and the
-		// drain of what it held, which the drain's own commands would otherwise
-		// race the quit to — and so is every event the session had published by
-		// the time the script ended, which the reader, parked while held
-		// messages drain (§3.12), may still have left on the stream. Today's
-		// synchronous Update left nothing arrived unreduced and its reader
-		// never parked; the gateSync baseline is always settled.
+		// The quit waits for a settled model (C17b): every message that
+		// reached the model by the end of the script is reduced first — a
+		// gate's release and the drain of what it held, which the drain's own
+		// commands would otherwise race the quit to — and so is every event the
+		// session had published by the time the script ended, which the
+		// reader, parked while held messages drain (§3.12), may still have
+		// left on the stream. Today's synchronous Update left nothing arrived
+		// unreduced and its reader never parked; the gateSync baseline is
+		// always settled. The capture is then the quit's frame (frameQuitMsg):
+		// the model after every message that reached the program before the
+		// quit, in order, and none after it — which is not always a settled
+		// one, since a message arriving after the quit may still be held.
 		scriptErr = r.settleAt(m.owner)
 		if scriptErr == nil && opts.beforeQuit != nil {
 			opts.beforeQuit(p.Send, bus.last)
@@ -943,18 +953,19 @@ func (r *frameRunner) settle(head uint64) error {
 
 // streamHead is the seq the session's stream has reached: every event the
 // engine had enqueued is delivered to the model's stream first (SyncSeq). It
-// is the in-process engine's; with no engine it is 0. An engine that is
+// is the in-process engine's — the backend's own, or the one a test's wrapper
+// around it names (engineBehind); with no engine it is 0. An engine that is
 // closing or closed publishes nothing more: 0, with nothing to wait for. Any
 // other failure — the timeout above all — is an error: the boundary could not
 // be established, and a capture without it would be incomplete.
 func streamHead(owner *sessionOwner, timeout time.Duration) (uint64, error) {
-	b, ok := owner.current().(*engineBackend)
-	if !ok || b == nil {
+	eng := engineBehind(owner.current())
+	if eng == nil {
 		return 0, nil
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	head, err := b.eng.SyncSeq(ctx)
+	head, err := eng.SyncSeq(ctx)
 	switch {
 	case err == nil:
 		return head, nil

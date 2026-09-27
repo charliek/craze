@@ -321,6 +321,7 @@ func offers(opt *agent.ConfigOption, value string) bool {
 // says the model was refused — the agent may have switched — so the row says
 // the outcome is unknown (unreadModelText) rather than naming a refusal.
 type modelApplyMsg struct {
+	issued
 	gen    int
 	done   []applyStep
 	step   string
@@ -684,10 +685,11 @@ func (m Model) applyModelDialog() (tea.Model, tea.Cmd) {
 	// The provider every option step is judged by (runModelApply): its local
 	// vocabulary says which option is the effort and which the fast toggle,
 	// and it is taken from the mirror here, since the closure may not read
-	// the model.
-	prov := m.snap.Provider
+	// the model. So are the session generation its answer carries and the
+	// backend epoch every step is fenced by (§3.12).
+	prov, iss, ctx := m.snap.Provider, m.issue(), dispatchCtx(m.eng)
 	return m, m.chains.take(func() tea.Msg {
-		return runModelApply(eng, prov, cmds, steps, forModel, gen)
+		return runModelApply(ctx, iss, eng, prov, cmds, steps, forModel, gen)
 	})
 }
 
@@ -863,9 +865,14 @@ func (l *chainLock) runHead(head *chainTicket) {
 // prov, the session's provider as the Update that dispatched the chain saw it.
 // A settings read that fails (a socket backend's round trip; in process it
 // cannot) names its step and ends the chain, as any other failed step does.
-func runModelApply(b backend.Backend, prov agent.ProviderInfo, cmds []engine.Command, steps []applyStep, forModel string, gen int) modelApplyMsg {
-	ctx := context.Background()
-	out := modelApplyMsg{gen: gen}
+//
+// ctx carries the epoch the chain was dispatched under, so every step's read
+// and Set is refused before it is sent once the backend is bound to another
+// session (backend.ErrStaleEpoch: the step named, the chain ended, nothing
+// more sent), and the answer carries iss, the session generation, so one that
+// lands after a replacement is dropped (§3.12, astra r3 13).
+func runModelApply(ctx context.Context, iss issued, b backend.Backend, prov agent.ProviderInfo, cmds []engine.Command, steps []applyStep, forModel string, gen int) modelApplyMsg {
+	out := modelApplyMsg{issued: iss, gen: gen}
 	for i, st := range steps {
 		if st.cfgID == "" {
 			res, err := applyModelStep(ctx, b, cmds[i], forModel)

@@ -225,7 +225,8 @@ func frameWorkspace(t *testing.T) string {
 // frameGateModes is the two modes every frame golden runs in (plan 027 §3.12
 // (d)): the gateSync baseline — a gated call inline, today's synchronous
 // control flow — and the asynchronous gate every real run uses. Both run in
-// every run of the package; there is no knob that skips one.
+// every run of the package; the one knob that skips one is V8's
+// (frameModesJittered), which a run turns on only by asking for V8.
 var frameGateModes = [...]struct {
 	name string
 	sync bool
@@ -240,6 +241,13 @@ var frameGateModes = [...]struct {
 // order the gate changed, moves the golden in one mode and fails here.
 func runFrameModes(t *testing.T, build func() Config, cols, rows int, script string, opts FrameOpts) (string, string, error) {
 	t.Helper()
+	if frameModesJittered {
+		// V8's jitter run (v8_jitter_test.go): the asynchronous gate alone,
+		// over a backend whose every answer and read is delayed, held against
+		// the same golden by the caller.
+		opts.gateSync = false
+		return RunFrameScript(build(), cols, rows, script, opts)
+	}
 	type run struct {
 		plain, raw string
 		err        error

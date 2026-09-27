@@ -779,22 +779,28 @@ func TestAHoldOfLargeRecordsReleasesAtItsBytes(t *testing.T) {
 
 // cmdHas reports whether cmd, or any member of a batch it is, is the function
 // the linker named name.
-func cmdHas(cmd tea.Cmd, name string) bool {
+func cmdHas(cmd tea.Cmd, name string) bool { return len(cmdsNamed(cmd, name)) > 0 }
+
+// cmdsNamed is every command cmd is, or a batch it is holds, that is the
+// function the linker named name, in order.
+func cmdsNamed(cmd tea.Cmd, name string) []tea.Cmd {
 	if cmd == nil {
-		return false
+		return nil
 	}
 	fn := cmdFuncName(cmd)
 	if strings.HasPrefix(fn, teaPkg+"compactCmds") || strings.HasPrefix(fn, teaPkg+"Batch") {
+		var out []tea.Cmd
 		if b, ok := cmd().(tea.BatchMsg); ok {
 			for _, c := range b {
-				if cmdHas(c, name) {
-					return true
-				}
+				out = append(out, cmdsNamed(c, name)...)
 			}
 		}
-		return false
+		return out
 	}
-	return strings.HasPrefix(fn, name)
+	if strings.HasPrefix(fn, name) {
+		return []tea.Cmd{cmd}
+	}
+	return nil
 }
 
 // TestACallThatPanicsAfterItsDeadlinePanicsInUpdate (astra C18a r42 5): a

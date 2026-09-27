@@ -246,29 +246,51 @@ func (m Model) strongSendDraft() (tea.Model, tea.Cmd) {
 // from the session's broadcast, not from here: one source per entry.
 //
 // It goes through the engine, which adds nothing but the door — the refusals are
-// the session's own — and, like the session's Interject before it, it blocks and
-// is nonetheless called from Update. That wart is unchanged here; it moves with
-// the rest when the TUI becomes a socket client (plan 021 §3.2).
+// the session's own — and it waits: the session's Interject returns once the
+// agent has taken the message. So it goes through the command gate (plan 027
+// §3.12), with a minute's deadline (interjectDeadline): the text and the command
+// id are read in the Update that sends, and the draft's fate is the
+// continuation, once the answer says what became of it — cleared with the
+// pending shell context only once the turn has taken it. A refusal keeps both,
+// because the draft is still in the composer and the output is still what it is
+// about (plan 022 §3.6). So does an Interject that did not answer in time
+// (ErrNoAnswer): the message may have been sent, and the note says so; the
+// draft stays, for the user to judge.
 func (m Model) interject(text string) (tea.Model, tea.Cmd) {
 	if m.eng == nil {
 		return m, nil
 	}
 	// The composer's own text, so it carries the pending shell context exactly
-	// as a send does — and clears it only once the turn has taken it. A
-	// refusal keeps both, because the draft is still in the composer and the
-	// output is still what it is about (plan 022 §3.6).
-	if err := m.eng.Interject(context.Background(), m.nextCmd(), m.withShellContext(text)); err != nil {
-		m.note(interjectErrNote(err))
-		return m, nil
-	}
-	m.dropShellContext()
-	m.input.SetValue("")
-	m.resetSlash()
-	return m, nil
+	// as a send does.
+	c := m.nextCmd()
+	sent := m.withShellContext(text)
+	return m.run(interjectDeadline,
+		func(ctx context.Context, b backend.Backend) (any, error) {
+			return nil, b.Interject(ctx, c, sent)
+		},
+		func(m Model, r gateReply) (Model, tea.Cmd) {
+			if r.err != nil {
+				m.note(interjectErrNote(r.err))
+				return m, nil
+			}
+			m.dropShellContext()
+			m.input.SetValue("")
+			m.resetSlash()
+			return m, nil
+		})
 }
 
+// noAnswerInterjectNote is an Interject that did not answer in time
+// (ErrNoAnswer, §3.12): the command may have run, so the note says the message
+// may have been sent, and the draft and its shell context are kept.
+const noAnswerInterjectNote = "no answer from the session — the message may have been sent"
+
+// interjectErrNote is a refused Interject as one line, the unanswered one
+// among them (submitErrNote's shape).
 func interjectErrNote(err error) string {
 	switch {
+	case errors.Is(err, ErrNoAnswer):
+		return noAnswerInterjectNote
 	case errors.Is(err, agent.ErrNotInTurn):
 		return "nothing to interject into"
 	case errors.Is(err, agent.ErrUnsupported):

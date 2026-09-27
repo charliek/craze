@@ -13,6 +13,48 @@ import (
 // ever be read from this backend.
 var ErrClosed = errors.New("backend: the stream has ended")
 
+// ErrStaleEpoch is a call refused before anything was sent, because the epoch
+// it carries (WithEpoch) is not the one the backend is bound to now: it was
+// dispatched for a session the backend has since left (plan 027 §3.12, "Chains
+// are fenced in the backend too"; astra r3 13). A step of a chain issued for
+// session A therefore never executes against session B.
+//
+// In process the epoch never moves, so an engine-backed call is never refused.
+// A socket backend (PR 4) that reconnected to another incarnation answers the
+// refusal as its ErrOutcomeUnknown with the reason resume_lost, wrapping this
+// sentinel, so a caller matching either finds it: the command was not sent on
+// the new binding, and what became of anything sent on the old one is unknown.
+var ErrStaleEpoch = errors.New("backend: the call was for a session this backend is no longer bound to")
+
+// epochKey is WithEpoch's context key.
+type epochKey struct{}
+
+// WithEpoch is ctx carrying epoch e: the Backend.Epoch its caller read when it
+// dispatched the call, in the Update, so a call that runs later — a gated
+// call's goroutine, a chain's next step — is refused if the backend has moved
+// on since (CheckEpoch).
+func WithEpoch(ctx context.Context, e uint64) context.Context {
+	return context.WithValue(ctx, epochKey{}, e)
+}
+
+// EpochFrom is the epoch ctx carries, and whether it carries one.
+func EpochFrom(ctx context.Context) (uint64, bool) {
+	e, ok := ctx.Value(epochKey{}).(uint64)
+	return e, ok
+}
+
+// CheckEpoch is the fence every backend call passes before it sends anything:
+// ErrStaleEpoch when ctx carries an epoch that is not current, the epoch the
+// backend is bound to now; nil otherwise. A ctx with no epoch is not fenced —
+// a call whose caller captured none (a test's, a lifecycle call) goes as it
+// always has.
+func CheckEpoch(ctx context.Context, current uint64) error {
+	if e, ok := EpochFrom(ctx); ok && e != current {
+		return ErrStaleEpoch
+	}
+	return nil
+}
+
 // Backend is the session as the TUI drives it (plan 027 §3.12): its lifecycle,
 // its one ordered stream, the commands engine.Control carries — with a
 // context first — and the reads the TUI makes.
@@ -40,6 +82,15 @@ type Backend interface {
 	// client has a new id. "" means commands name no client (the zero
 	// engine.Command).
 	ClientID() string
+	// Epoch names the session the backend is bound to now (§3.12, "Chains
+	// are fenced in the backend too"). It is constant in process — one
+	// engine for the backend's life; a socket backend (PR 4) bumps it when a
+	// reconnect lands on another incarnation, before any Restore is
+	// delivered. A caller reads it when it dispatches a call and passes it
+	// with every call of that operation (WithEpoch); a command or read whose
+	// ctx carries another epoch is refused with ErrStaleEpoch before
+	// anything is sent (CheckEpoch). It waits on nothing.
+	Epoch() uint64
 
 	// Read is the stream: one item at a time, in order, from one reader.
 	// ErrClosed once the stream has ended.
@@ -54,8 +105,9 @@ type Backend interface {
 
 	// Commands: engine.Control's, ctx first. In process the ones that wait
 	// on nothing (Submit, Answer, Unqueue, EditQueued, ClearQueue, Disarm,
-	// SetTitle, CancelSubagent) ignore ctx; Interject, Set and Cancel wait,
-	// and are bounded by it.
+	// SetTitle, CancelSubagent) use ctx only for its epoch (CheckEpoch);
+	// Interject, Set and Cancel wait, and are bounded by it. Every command
+	// and read (Ask, Settings) is fenced by the epoch ctx carries.
 	Submit(ctx context.Context, c engine.Command, text string, mode engine.SubmitMode, fromRow string) (engine.SubmitResult, error)
 	Answer(ctx context.Context, c engine.Command, id string, a agent.AskAnswer) error
 	Unqueue(ctx context.Context, c engine.Command, id string) (agent.QueuedPrompt, error)

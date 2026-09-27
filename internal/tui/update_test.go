@@ -780,7 +780,7 @@ func TestShiftTabCyclesMode(t *testing.T) {
 	if cmd == nil {
 		t.Fatal("expected SetMode cmd")
 	}
-	if msg := cmd(); msg != (modeAppliedMsg{gen: m.modeGen, id: "plan"}) {
+	if msg := cmd(); msg != (modeAppliedMsg{issued: m.issue(), gen: m.modeGen, id: "plan"}) {
 		t.Fatalf("stub SetMode returned %T %v", msg, msg)
 	}
 	if !strings.Contains(plainView(m), "plan") {

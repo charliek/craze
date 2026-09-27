@@ -35,13 +35,11 @@ func engineOf(t testing.TB, m Model) *engine.Engine {
 }
 
 // engineIn is engineOf for a helper with no test to fail: ok is false when the
-// model holds no backend, or one that is not the in-process engine.
+// model holds no backend, or one that is not the in-process engine — nor a
+// test's wrapper around it that names its engine (engineBehind).
 func engineIn(m Model) (*engine.Engine, bool) {
-	b, ok := m.eng.(*engineBackend)
-	if !ok || b == nil {
-		return nil, false
-	}
-	return b.engine(), true
+	eng := engineBehind(m.eng)
+	return eng, eng != nil
 }
 
 // fakeBackend is a Backend whose every method panics except the ones a test
@@ -221,7 +219,7 @@ func TestAChainWhoseSettingsReadFailsEndsAtThatStep(t *testing.T) {
 		{value: "grok-4.6", label: "model"},
 		{cfgID: "effort", value: "high", label: "effort", role: roleEffort},
 	}
-	out := runModelApply(b, agent.ProviderInfo{}, make([]engine.Command, len(steps)), steps, "grok-4.6", 7)
+	out := runModelApply(context.Background(), issued{}, b, agent.ProviderInfo{}, make([]engine.Command, len(steps)), steps, "grok-4.6", 7)
 	if out.step != "effort" || !errors.Is(out.err, lost) || out.unread {
 		t.Fatalf("the chain ended at %q with %v (unread %v), want the effort step's failed read", out.step, out.err, out.unread)
 	}
@@ -229,7 +227,7 @@ func TestAChainWhoseSettingsReadFailsEndsAtThatStep(t *testing.T) {
 		t.Fatalf("the chain did %+v and sent %+v, want the model step alone", out.done, sent)
 	}
 
-	msg := runModelEffort(context.Background(), b, agent.ProviderInfo{}, engine.Command{}, "grok-4.6", "high")
+	msg := runModelEffort(context.Background(), issued{}, b, agent.ProviderInfo{}, engine.Command{}, "grok-4.6", "high")
 	if am, ok := msg.(actionErrMsg); !ok || !errors.Is(am.err, lost) {
 		t.Fatalf("/model's effort step answered %#v, want the failed read's error row", msg)
 	}

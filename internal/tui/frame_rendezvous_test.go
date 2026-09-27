@@ -544,9 +544,10 @@ func (s stuckTitleStub) Close() error {
 // TestAShutdownIsBoundedWhenACallBlocks (C17c, astra C17b 2): a rename blocked
 // until the session closes — inside Enter's Update in the gateSync baseline,
 // holding its gate open asynchronously — times the barrier out; the shutdown
-// then neither blocks on handing the program its quit nor waits for it without
-// end: past its timeout it closes the engine, which unblocks the call, and
-// kills the program. RunFrameScript returns the barrier's timeout, promptly.
+// then neither blocks on handing the program its quit nor waits on the blocked
+// call for good: past its timeout it closes the engine, which unblocks the
+// call, kills the program and waits for it to end (never abandoning it, astra
+// r47). RunFrameScript returns the barrier's timeout, promptly.
 func TestAShutdownIsBoundedWhenACallBlocks(t *testing.T) {
 	for _, mode := range frameGateModes {
 		t.Run(mode.name, func(t *testing.T) {

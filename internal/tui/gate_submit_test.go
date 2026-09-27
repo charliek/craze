@@ -195,15 +195,19 @@ func (r *schedRun) until(done func([]agent.Event) bool) []agent.Event {
 // feed applies every event the stream holds now.
 func (r *schedRun) feed() {
 	r.t.Helper()
-	for _, ev := range r.pending() {
-		r.step(eventMsg{ev})
-	}
+	r.stepEvents(r.pending())
 }
 
 // feedUntil applies the stream's events until done.
 func (r *schedRun) feedUntil(done func([]agent.Event) bool) {
 	r.t.Helper()
-	for _, ev := range r.until(done) {
+	r.stepEvents(r.until(done))
+}
+
+// stepEvents is each of evs through step, in order.
+func (r *schedRun) stepEvents(evs []agent.Event) {
+	r.t.Helper()
+	for _, ev := range evs {
 		r.step(eventMsg{ev})
 	}
 }
@@ -367,9 +371,7 @@ func submitSchedule(t *testing.T, site submitSite, sync bool, order []string) ([
 		}
 		switch msg := msg.(type) {
 		case []agent.Event:
-			for _, ev := range msg {
-				r.step(eventMsg{ev})
-			}
+			r.stepEvents(msg)
 		default:
 			r.step(msg)
 		}

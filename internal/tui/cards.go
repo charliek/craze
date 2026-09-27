@@ -10,6 +10,8 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/charliek/craze/internal/agent"
+	"github.com/charliek/craze/internal/backend"
+	"github.com/charliek/craze/internal/engine"
 )
 
 // cardKind names the blocking agent request a card answers.
@@ -105,15 +107,46 @@ func (m Model) headCard() (card, bool) {
 // A card event that was already on its way when the turn was cancelled is
 // dropped: Cancel answered every request the session was holding, so a card for
 // it would be one nobody could answer. **What decides that is the ask itself,
-// not the mask alone** (maskCards).
+// not the mask alone** (maskCards, maskDrops).
+//
+// While the mask is up, that decision is a read of the session's ask registry,
+// which over the socket is a round trip (asks.get), so it goes through the
+// command gate (plan 027 §3.12, §3.13 "Live reads that decide behaviour"): the
+// read is the gated call, and the card's push — or its drop — is the
+// continuation, with everything after it: the rest of the event's arm in
+// reduceEvent, which for the three card arms is nothing more, and the rest of
+// the event's Update (the gate's apply: its reader and the wrapper), which the
+// release runs after the continuation. This is the one gate an event opens;
+// its command goes back through applyEvent's. The mask down, or nothing to
+// consult, and nothing is read: today's path, in this Update.
 //
 // The run above the card has already ended: the shared model's fold ends it at
 // every non-Auto opening, at the opening's At, whether or not this client
 // raises a card for it (plan 024 §3.3).
-func (m *Model) pushCard(c card) {
-	if m.maskDrops(c) {
-		return
+func (m *Model) pushCard(c card) tea.Cmd {
+	if !m.cardMasking {
+		m.placeCard(c)
+		return nil
 	}
+	id := cardAskID(c)
+	if m.eng == nil || id == "" {
+		// Nothing to consult: the mask drops it, which is what it did for
+		// everything before.
+		return nil
+	}
+	var cmd tea.Cmd
+	*m, cmd = m.run(gateDeadline, maskRead(id), func(m Model, r gateReply) (Model, tea.Cmd) {
+		if !maskDrops(r) {
+			m.placeCard(c)
+		}
+		return m, nil
+	})
+	return cmd
+}
+
+// placeCard is pushCard's push: the card joins the queue, and the rest of the
+// UI makes way for it.
+func (m *Model) placeCard(c card) {
 	m.cards = append(append([]card(nil), m.cards...), c)
 	// A card is a question the user has to answer first, so the offer stands
 	// down while it is up — but it is not retired. cursor answers a plan-mode
@@ -143,10 +176,26 @@ func (m *Model) pushCard(c card) {
 	*m = m.closeDialog(true)
 }
 
-// maskDrops reports whether the cancel mask swallows this opening. The mask
-// being up is not enough: an opening is dropped only when **its ask is no
-// longer open**, read synchronously from the registry through the engine
-// (Control.Ask, which waits on nothing).
+// askRead is the mask's read of one ask (maskRead): its record, and whether
+// the session knows it.
+type askRead struct {
+	rec   agent.AskRecord
+	known bool
+}
+
+// maskRead is the mask's gated call: the ask's record, read from the session's
+// registry (Backend.Ask) — waiting on nothing in process, a round trip over
+// the socket.
+func maskRead(id string) gateCall {
+	return func(ctx context.Context, b backend.Backend) (any, error) {
+		rec, known, err := b.Ask(ctx, id)
+		return askRead{rec: rec, known: known}, err
+	}
+}
+
+// maskDrops reports whether the cancel mask swallows an opening, from the
+// gated read of its ask (maskRead, pushCard). The mask being up is not enough:
+// an opening is dropped only when **its ask is no longer open**.
 //
 // The registry's state leads its events, and an ask only ever goes open →
 // resolved, so the two answers are both final. "Not open now" means the ending
@@ -156,24 +205,17 @@ func (m *Model) pushCard(c card) {
 // cancel touched, and dropping it would strand the provider on a card nobody
 // can ever raise again.
 //
-// With no engine, or a card with no ask id, there is nothing to consult and
-// the mask drops it, which is what it did for everything before. A read that
-// fails (a socket backend's round trip; in process it cannot) says nothing
-// about the ask, so the card is kept: stranding a live ask is the one outcome
-// the mask must never produce, and an ended one's card goes with its ending.
-func (m Model) maskDrops(c card) bool {
-	if !m.cardMasking {
+// A read that failed, or never answered (ErrNoAnswer, the gate's deadline),
+// says nothing about the ask — "the read failed" is not "known closed" (§3.12,
+// astra r2 12) — so the card is shown: stranding a live ask is the one outcome
+// the mask must never produce, and a card whose ask the cancel had already
+// resolved goes with its ending when that arrives.
+func maskDrops(r gateReply) bool {
+	a, ok := r.result.(askRead)
+	if r.err != nil || !ok {
 		return false
 	}
-	id := cardAskID(c)
-	if m.eng == nil || id == "" {
-		return true
-	}
-	rec, known, err := m.eng.Ask(context.Background(), id)
-	if err != nil {
-		return false
-	}
-	return !known || rec.Status != agent.AskOpen
+	return !a.known || a.rec.Status != agent.AskOpen
 }
 
 // setHead replaces the visible card. The queue is copied rather than written
@@ -196,15 +238,23 @@ func (m *Model) popCard() (card, bool) {
 	return c, true
 }
 
-// answerCard answers one ask in the same Update that popped its card, and
-// reports whether the answer was taken.
+// answerCard answers one ask whose card the caller has just popped, and hands
+// then whether the answer was taken, for the caller's own post-call work (the
+// answer's notes).
 //
-// This is deliberately not a tea.Cmd. Control.Answer validates and claims the
-// ask in one registry section and enqueues its ending — it waits on nothing,
-// so it cannot block the UI. Doing it later would leave a window in which the
-// card is gone from the queue but the ask is still open, and a cancel arriving
-// in that window would claim it and send the agent `cancelled` for something
-// the user had already answered.
+// The answer goes through the command gate (plan 027 §3.12): the command id is
+// minted in the Update that popped the card, the call runs off it, and
+// everything after the call — the echo marker or the card raised again, the
+// error row, and the caller's notes (then) — is the continuation. There is a
+// window between the pop and the answer, in which the card is gone from the
+// queue but the ask is still open; this client's own keys cannot reach into
+// it, because the gate holds every message until the reply, so the only thing
+// that can race it is another client's command — a cancel above all. The
+// engine resolves that race atomically: Control.Answer validates and claims the
+// ask in one registry section, so exactly one of the two takes it, and a
+// cancel that won answers this with agent.ErrAlreadyResolved — the card is
+// raised again and the cancel's ending removes it — never with the agent sent
+// `cancelled` for something the user had already answered.
 //
 // The card is popped before the answer is sent, so **every refusal that leaves
 // the ask unanswered puts it back at the head**; otherwise the agent waits for
@@ -224,22 +274,68 @@ func (m *Model) popCard() (card, bool) {
 //     ending removes it and writes the winner's answer through the ordinary path
 //     (applyAskEnded) — where before the row was lost altogether and an error the
 //     user could do nothing about was written instead.
+//   - ErrNoAnswer: no answer in time, so the outcome is unknown — and "unknown"
+//     is not "known closed" (§3.12, astra r2 12). The card comes back, as for
+//     ErrAskUnavailable, with the note that says so: pressing again is the
+//     retry, and if the answer did land after all, its ending removes the card
+//     as any ending does.
 //
 // Every other failure is the error row it has always been — the ask is gone
 // either way, so there is no card to restore.
-func (m *Model) answerCard(popped card, id string, a agent.AskAnswer) bool {
+func (m Model) answerCard(popped card, id string, a agent.AskAnswer, then answerThen) (Model, tea.Cmd) {
 	if m.eng == nil {
-		return false
+		return then(m, false)
 	}
-	cmd := m.nextCmd()
-	err := m.eng.Answer(context.Background(), cmd, id, a)
+	c := m.nextCmd()
+	return m.run(gateDeadline,
+		func(ctx context.Context, b backend.Backend) (any, error) {
+			return nil, b.Answer(ctx, c, id, a)
+		},
+		func(m Model, r gateReply) (Model, tea.Cmd) {
+			// Two statements: answered writes m, and then must see it written.
+			taken := m.answered(popped, c, r.err)
+			return then(m, taken)
+		})
+}
+
+// answerThen is what a caller of answerCard did once the answer had returned:
+// its notes, when taken says the session took it.
+type answerThen func(m Model, taken bool) (Model, tea.Cmd)
+
+// answeredCard is the caller with nothing left to do once the answer has been
+// applied: a permission writes no row.
+func answeredCard(m Model, _ bool) (Model, tea.Cmd) { return m, nil }
+
+// noteIfTaken is the caller whose post-call work is one note, written once the
+// session took the answer: a skipped question's, an answered plan's.
+func noteIfTaken(note string) answerThen {
+	return func(m Model, taken bool) (Model, tea.Cmd) {
+		if taken {
+			m.addNote(note)
+		}
+		return m, nil
+	}
+}
+
+// noAnswerCardNote is a card's answer that did not answer in time (ErrNoAnswer,
+// §3.12): the card is back, and the note says to press again.
+const noAnswerCardNote = "no answer from the session — try again"
+
+// answered is answerCard's continuation: what the answer sent as c came to,
+// applied to the model as the Update that popped the card left it, before any
+// event the answer caused. It reports whether the answer was taken.
+func (m *Model) answered(popped card, c engine.Command, err error) bool {
 	switch {
 	case err == nil:
 		// The ending this answer causes names this command, and its effect —
-		// the card gone, the note written — has been applied here. The echo is
-		// skipped when it arrives (applyAskEnded).
-		m.noteAskEcho(cmd.Cause())
+		// the card gone, the note written — is applied here, before that ending
+		// can be. The echo is skipped when it arrives (applyAskEnded).
+		m.noteAskEcho(c.Cause())
 		return true
+	case errors.Is(err, ErrNoAnswer):
+		m.raiseCard(popped)
+		m.addNote(noAnswerCardNote)
+		return false
 	case errors.Is(err, agent.ErrAlreadyResolved):
 		m.raiseCard(popped)
 		return false
@@ -315,8 +411,7 @@ func (m Model) answerPermission(kind string) (tea.Model, tea.Cmd) {
 	if id, offered := agent.OptionIDForKind(c.perm.Options, kind); offered {
 		a = agent.AskAnswer{OptionID: id}
 	}
-	m.answerCard(c, c.perm.ID, a)
-	return m, nil
+	return m.answerCard(c, c.perm.ID, a, answeredCard)
 }
 
 func permissionOffers(p *agent.PermissionEvent, kind string) bool {
@@ -401,11 +496,12 @@ func (m Model) commitQuestion(c card) (tea.Model, tea.Cmd) {
 	}
 	// The notes follow the answer the session took, so the transcript cannot
 	// claim a question was answered when the reply never reached the agent.
-	if !m.answerCard(c, c.ask.ID, agent.AskAnswer{Answers: answers}) {
+	return m.answerCard(c, c.ask.ID, agent.AskAnswer{Answers: answers}, func(m Model, taken bool) (Model, tea.Cmd) {
+		if taken {
+			m.addAnswerNotes(c.ask, answers)
+		}
 		return m, nil
-	}
-	m.addAnswerNotes(c.ask, answers)
-	return m, nil
+	})
 }
 
 // addAnswerNotes is one note per question, naming what was picked. It is what
@@ -426,11 +522,7 @@ func (m Model) skipQuestion() (tea.Model, tea.Cmd) {
 	if !ok || c.ask == nil {
 		return m, nil
 	}
-	if !m.answerCard(c, c.ask.ID, agent.AskAnswer{Skip: true}) {
-		return m, nil
-	}
-	m.addNote(skipNote(c.ask))
-	return m, nil
+	return m.answerCard(c, c.ask.ID, agent.AskAnswer{Skip: true}, noteIfTaken(skipNote(c.ask)))
 }
 
 // skipNote is what a skipped question writes, wherever the skip came from.
@@ -489,11 +581,7 @@ func (m Model) answerPlan(accept bool) (tea.Model, tea.Cmd) {
 	if !ok || c.plan == nil {
 		return m, nil
 	}
-	if !m.answerCard(c, c.plan.ID, agent.AskAnswer{Accept: accept, Reject: !accept}) {
-		return m, nil
-	}
-	m.addNote(planNote(c.plan, accept))
-	return m, nil
+	return m.answerCard(c, c.plan.ID, agent.AskAnswer{Accept: accept, Reject: !accept}, noteIfTaken(planNote(c.plan, accept)))
 }
 
 // planNote is what an answered plan writes, wherever the answer came from.

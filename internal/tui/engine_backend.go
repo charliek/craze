@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"sync/atomic"
 
 	"github.com/charliek/craze/internal/agent"
 	"github.com/charliek/craze/internal/backend"
@@ -15,22 +16,64 @@ import (
 //
 // The client is minted once, when the engine is wrapped, and never released:
 // the in-process client lives as long as its engine (§3.6), as it always has.
+//
+// Every command and read passes the epoch fence first (fence): a ctx carrying
+// an epoch other than this backend's is refused with backend.ErrStaleEpoch
+// before the engine is called at all (§3.12, "Chains are fenced in the
+// backend too").
 type engineBackend struct {
 	eng    *engine.Engine
 	client string
+	// epoch is Epoch: inProcessEpoch for the backend's whole life — it is
+	// bound to one engine — and never written in production. It is atomic
+	// only because a test moves it, from another goroutine, to stand in for
+	// PR 4's reconnect to another incarnation (TestAChainStopsAtABackendReplacement).
+	epoch atomic.Uint64
 }
+
+// inProcessEpoch is every in-process backend's epoch: it names the one engine
+// the backend wraps, and nothing can rebind it.
+const inProcessEpoch = 1
 
 var _ backend.Backend = (*engineBackend)(nil)
 
 // newEngineBackend wraps eng, minting this client's id on it.
 func newEngineBackend(eng *engine.Engine) *engineBackend {
-	return &engineBackend{eng: eng, client: eng.NewClientID()}
+	b := &engineBackend{eng: eng, client: eng.NewClientID()}
+	b.epoch.Store(inProcessEpoch)
+	return b
 }
 
-// engine is the engine this backend wraps. It is for tests alone (engineOf):
-// no production path other than setSession — which built the engine and hands
-// it to Config.OnEngine — reaches the engine except through the Backend.
+// Epoch is the session this backend is bound to: constant in process.
+func (b *engineBackend) Epoch() uint64 { return b.epoch.Load() }
+
+// fence is the epoch check every command and read makes before it calls the
+// engine (backend.CheckEpoch).
+func (b *engineBackend) fence(ctx context.Context) error {
+	return backend.CheckEpoch(ctx, b.Epoch())
+}
+
+// engine is the engine this backend wraps. It is for the frame harness's
+// capture boundary (streamHead) and tests alone (engineOf): no production path
+// other than setSession — which built the engine and hands it to
+// Config.OnEngine — reaches the engine except through the Backend.
 func (b *engineBackend) engine() *engine.Engine { return b.eng }
+
+// engineBehind is the in-process engine b is or wraps: the backend's own, or
+// the one a test's wrapper around it names (engine(); V8's jitter backend).
+// It is nil for any other backend, and for none. It is for engine's callers.
+func engineBehind(b backend.Backend) *engine.Engine {
+	switch b := b.(type) {
+	case *engineBackend:
+		if b == nil {
+			return nil
+		}
+		return b.eng
+	case interface{ engine() *engine.Engine }:
+		return b.engine()
+	}
+	return nil
+}
 
 func (b *engineBackend) Start(ctx context.Context) error { return b.eng.Start(ctx) }
 func (b *engineBackend) Started(err error)               { b.eng.Started(err) }
@@ -64,57 +107,98 @@ func (b *engineBackend) Read(ctx context.Context) (backend.Item, error) {
 	}
 }
 
-func (b *engineBackend) Submit(_ context.Context, c engine.Command, text string, mode engine.SubmitMode, fromRow string) (engine.SubmitResult, error) {
+func (b *engineBackend) Submit(ctx context.Context, c engine.Command, text string, mode engine.SubmitMode, fromRow string) (engine.SubmitResult, error) {
+	if err := b.fence(ctx); err != nil {
+		return engine.SubmitResult{}, err
+	}
 	return b.eng.Submit(c, text, mode, fromRow)
 }
 
-func (b *engineBackend) Answer(_ context.Context, c engine.Command, id string, a agent.AskAnswer) error {
+func (b *engineBackend) Answer(ctx context.Context, c engine.Command, id string, a agent.AskAnswer) error {
+	if err := b.fence(ctx); err != nil {
+		return err
+	}
 	return b.eng.Answer(c, id, a)
 }
 
-func (b *engineBackend) Unqueue(_ context.Context, c engine.Command, id string) (agent.QueuedPrompt, error) {
+func (b *engineBackend) Unqueue(ctx context.Context, c engine.Command, id string) (agent.QueuedPrompt, error) {
+	if err := b.fence(ctx); err != nil {
+		return agent.QueuedPrompt{}, err
+	}
 	return b.eng.Unqueue(c, id)
 }
 
-func (b *engineBackend) EditQueued(_ context.Context, c engine.Command, id, text string, expectedVersion *int) error {
+func (b *engineBackend) EditQueued(ctx context.Context, c engine.Command, id, text string, expectedVersion *int) error {
+	if err := b.fence(ctx); err != nil {
+		return err
+	}
 	return b.eng.EditQueued(c, id, text, expectedVersion)
 }
 
-func (b *engineBackend) ClearQueue(_ context.Context, c engine.Command) ([]agent.QueuedPrompt, error) {
+func (b *engineBackend) ClearQueue(ctx context.Context, c engine.Command) ([]agent.QueuedPrompt, error) {
+	if err := b.fence(ctx); err != nil {
+		return nil, err
+	}
 	return b.eng.ClearQueue(c)
 }
 
-func (b *engineBackend) Disarm(_ context.Context, c engine.Command) error { return b.eng.Disarm(c) }
+func (b *engineBackend) Disarm(ctx context.Context, c engine.Command) error {
+	if err := b.fence(ctx); err != nil {
+		return err
+	}
+	return b.eng.Disarm(c)
+}
 
 func (b *engineBackend) Interject(ctx context.Context, c engine.Command, text string) error {
+	if err := b.fence(ctx); err != nil {
+		return err
+	}
 	return b.eng.Interject(ctx, c, text)
 }
 
-func (b *engineBackend) SetTitle(_ context.Context, c engine.Command, title string) error {
+func (b *engineBackend) SetTitle(ctx context.Context, c engine.Command, title string) error {
+	if err := b.fence(ctx); err != nil {
+		return err
+	}
 	return b.eng.SetTitle(c, title)
 }
 
 func (b *engineBackend) Set(ctx context.Context, c engine.Command, s engine.Setting) (engine.SetResult, error) {
+	if err := b.fence(ctx); err != nil {
+		return engine.SetResult{}, err
+	}
 	return b.eng.Set(ctx, c, s)
 }
 
 func (b *engineBackend) Cancel(ctx context.Context, c engine.Command, turn string) (engine.CancelResult, error) {
+	if err := b.fence(ctx); err != nil {
+		return engine.CancelResult{}, err
+	}
 	return b.eng.Cancel(ctx, c, turn)
 }
 
-func (b *engineBackend) CancelSubagent(_ context.Context, c engine.Command, id string) error {
+func (b *engineBackend) CancelSubagent(ctx context.Context, c engine.Command, id string) error {
+	if err := b.fence(ctx); err != nil {
+		return err
+	}
 	return b.eng.CancelSubagent(c, id)
 }
 
 // Ask waits on nothing in process: the ask registry's own read.
-func (b *engineBackend) Ask(_ context.Context, id string) (agent.AskRecord, bool, error) {
+func (b *engineBackend) Ask(ctx context.Context, id string) (agent.AskRecord, bool, error) {
+	if err := b.fence(ctx); err != nil {
+		return agent.AskRecord{}, false, err
+	}
 	rec, ok := b.eng.Ask(id)
 	return rec, ok, nil
 }
 
 // Settings is the engine's snapshot's model, mode and config, read now. In
-// process it cannot fail.
-func (b *engineBackend) Settings(context.Context) (backend.Settings, error) {
+// process it fails only at the epoch fence, which a test alone can move.
+func (b *engineBackend) Settings(ctx context.Context) (backend.Settings, error) {
+	if err := b.fence(ctx); err != nil {
+		return backend.Settings{}, err
+	}
 	snap := b.eng.State().Snapshot
 	return backend.Settings{Model: snap.CurrentModel, Mode: snap.CurrentMode, Config: snap.Config}, nil
 }

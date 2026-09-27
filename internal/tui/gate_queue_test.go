@@ -296,9 +296,7 @@ func chainSchedule(t *testing.T, site chainSite, sync bool, order []string, coun
 		}
 		switch msg := msg.(type) {
 		case []agent.Event:
-			for _, ev := range msg {
-				r.step(eventMsg{ev})
-			}
+			r.stepEvents(msg)
 		default:
 			r.step(msg)
 		}
@@ -345,7 +343,22 @@ func queuedBehind(r *schedRun, rows ...string) {
 // release.
 func armedOver(r *schedRun) func() {
 	r.t.Helper()
-	release := holdTheCancel(r)
+	return armedHeld(r, holdTheCancel(r))
+}
+
+// armedOverPastItsDeadline is armedOver with the arm's cancel held past the
+// engine's own deadline for it (HoldNextCancelPastItsDeadline): for a test
+// whose property needs the turn alive until it lets the cancel go, however
+// slowly the run goes (sol r46 4).
+func armedOverPastItsDeadline(r *schedRun) func() {
+	r.t.Helper()
+	return armedHeld(r, r.sess.HoldNextCancelPastItsDeadline())
+}
+
+// armedHeld arms the send-now with the cancel's hold, release, already in
+// place.
+func armedHeld(r *schedRun, release func()) func() {
+	r.t.Helper()
 	r.typeText("NOW")
 	r.key(tea.KeyMsg{Type: tea.KeyCtrlL})
 	r.key(enter())
@@ -527,12 +540,16 @@ func chainSites() []chainSite {
 // modes; no frame published while a gate was open carries the token; the
 // issuing Update's frame shows only its pre-call work; and no cancel is handed
 // back before the chain's end.
-func chainFrameSequences(t *testing.T) {
+func chainFrameSequences(t *testing.T) { chainFrameSequencesOf(t, chainSites()) }
+
+// chainFrameSequencesOf is chainFrameSequences over sites: C18b's, and C18c's
+// key-issued ones (answerFrameSequences).
+func chainFrameSequencesOf(t *testing.T, sites []chainSite) {
 	type baseline struct {
 		frames []frameState
 		n      int
 	}
-	for _, site := range chainSites() {
+	for _, site := range sites {
 		t.Run(site.name, func(t *testing.T) {
 			orders := chainOrders(site)
 			if len(orders) == 0 {
@@ -685,9 +702,7 @@ func TestTheCtrlCChainRunsWhole(t *testing.T) {
 							t.Fatalf("the call published %d events, want %d (a withdrawal when armed, a removal per row)", len(evs), want)
 						}
 						// The call's own events arrive before its reply, and are held.
-						for _, ev := range evs {
-							r.step(eventMsg{ev})
-						}
+						r.stepEvents(evs)
 						if held := len(r.m().held); held != 1+len(evs) {
 							t.Fatalf("%d messages held, want the key and the call's events", held)
 						}
@@ -774,10 +789,11 @@ func TestTheCtrlCChainRunsWhole(t *testing.T) {
 
 // ------------------------------------------------------ the verbs unanswered
 
-// stallBackend is the in-process backend with one queue verb that does not
-// answer before the test ends: it runs the engine's own first when ran says so
-// — the answer lost — and not at all otherwise. Every other call is the
-// engine's.
+// stallBackend is the in-process backend with one verb that does not answer
+// before the test ends: it runs the engine's own first when ran says so — the
+// answer lost — and not at all otherwise. Every other call is the engine's.
+// The queue verbs are C18b's; Answer, Interject and Ask are C18c's
+// (gate_answers_test.go).
 type stallBackend struct {
 	backend.Backend
 	verb  string
@@ -789,10 +805,15 @@ type stallBackend struct {
 	settled chan struct{}
 }
 
-func stalling(t *testing.T, inner backend.Backend, verb string, ran bool) *stallBackend {
+// stall puts the model's backend behind a stallBackend for verb, until the
+// test ends, and hands it back: its settled for answerStalled, its Backend to
+// put back.
+func (r *schedRun) stall(verb string, ran bool) *stallBackend {
 	never := make(chan struct{})
-	t.Cleanup(func() { close(never) })
-	return &stallBackend{Backend: inner, verb: verb, ran: ran, never: never, settled: make(chan struct{})}
+	r.t.Cleanup(func() { close(never) })
+	sb := &stallBackend{Backend: r.m().eng, verb: verb, ran: ran, never: never, settled: make(chan struct{})}
+	r.f.inner.eng = sb
+	return sb
 }
 
 func (b *stallBackend) stall(verb string, call func()) bool {
@@ -833,6 +854,27 @@ func (b *stallBackend) EditQueued(ctx context.Context, c engine.Command, id, tex
 		return nil
 	}
 	return b.Backend.EditQueued(ctx, c, id, text, v)
+}
+
+func (b *stallBackend) Answer(ctx context.Context, c engine.Command, id string, a agent.AskAnswer) error {
+	if b.stall("Answer", func() { _ = b.Backend.Answer(ctx, c, id, a) }) {
+		return nil
+	}
+	return b.Backend.Answer(ctx, c, id, a)
+}
+
+func (b *stallBackend) Interject(ctx context.Context, c engine.Command, text string) error {
+	if b.stall("Interject", func() { _ = b.Backend.Interject(ctx, c, text) }) {
+		return nil
+	}
+	return b.Backend.Interject(ctx, c, text)
+}
+
+func (b *stallBackend) Ask(ctx context.Context, id string) (agent.AskRecord, bool, error) {
+	if b.stall("Ask", func() { _, _, _ = b.Backend.Ask(ctx, id) }) {
+		return agent.AskRecord{}, false, nil
+	}
+	return b.Backend.Ask(ctx, id)
 }
 
 // answerStalled runs every gated call waiting, one at a time, and applies its
@@ -890,8 +932,7 @@ func TestAQueueVerbThatNeverAnswersSaysSo(t *testing.T) {
 				aWorkingTurn(r)
 				t.Cleanup(armedOver(r))
 				before := r.m()
-				sb := stalling(t, r.m().eng, "Disarm", ran)
-				r.f.inner.eng = sb
+				sb := r.stall("Disarm", ran)
 				r.step(tea.KeyMsg{Type: tea.KeyEsc})
 				r.answerStalled(sb)
 				m := r.m()
@@ -916,8 +957,7 @@ func TestAQueueVerbThatNeverAnswersSaysSo(t *testing.T) {
 				queuedBehind(r, "ROW")
 				t.Cleanup(armedOver(r))
 				before := r.m()
-				sb := stalling(t, r.m().eng, "Disarm", ran)
-				r.f.inner.eng = sb
+				sb := r.stall("Disarm", ran)
 				r.step(ctrlC)
 				r.answerStalled(sb)
 				m := r.m()
@@ -942,8 +982,7 @@ func TestAQueueVerbThatNeverAnswersSaysSo(t *testing.T) {
 				t.Run(from+"'s call, stalled in its ClearQueue", func(t *testing.T) {
 					r := newSchedRun(t, false)
 					queuedBehind(r, "ROW")
-					sb := stalling(t, r.m().eng, "ClearQueue", ran)
-					r.f.inner.eng = sb
+					sb := r.stall("ClearQueue", ran)
 					if from == "Ctrl+C" {
 						r.step(ctrlC)
 					} else {
@@ -977,8 +1016,7 @@ func TestAQueueVerbThatNeverAnswersSaysSo(t *testing.T) {
 					r := newSchedRun(t, false)
 					queuedBehind(r, "ROW", "NEXT")
 					r.key(up)
-					sb := stalling(t, r.m().eng, "Unqueue", ran)
-					r.f.inner.eng = sb
+					sb := r.stall("Unqueue", ran)
 					if how == "Backspace" {
 						r.step(bs)
 					} else {
@@ -1003,8 +1041,7 @@ func TestAQueueVerbThatNeverAnswersSaysSo(t *testing.T) {
 				r.key(enter())
 				id := r.m().queueEdit
 				r.key(runeKey('!'))
-				sb := stalling(t, r.m().eng, "EditQueued", ran)
-				r.f.inner.eng = sb
+				sb := r.stall("EditQueued", ran)
 				r.step(enter())
 				r.answerStalled(sb)
 				m := r.m()
@@ -1024,8 +1061,7 @@ func TestAQueueVerbThatNeverAnswersSaysSo(t *testing.T) {
 				r.key(enter())
 				id := r.m().queueEdit
 				r.key(runeKey('!'))
-				sb := stalling(t, r.m().eng, "EditQueued", ran)
-				r.f.inner.eng = sb
+				sb := r.stall("EditQueued", ran)
 				r.step(ctrlL)
 				r.answerStalled(sb)
 				m := r.m()
@@ -1047,8 +1083,7 @@ func TestAQueueVerbThatNeverAnswersSaysSo(t *testing.T) {
 				for range "ROW" {
 					r.key(bs)
 				}
-				sb := stalling(t, r.m().eng, "Unqueue", ran)
-				r.f.inner.eng = sb
+				sb := r.stall("Unqueue", ran)
 				r.step(enter())
 				r.answerStalled(sb)
 				m := r.m()
@@ -1191,14 +1226,23 @@ func TestClearPendingsCallJudgesEachVerbByItsDeadline(t *testing.T) {
 //
 // A successor the engine did claim is held before its prompt reaches the
 // session (HoldNextBegin), so the check cannot pass on the Stub's prompts
-// alone while a claimed successor has yet to record its own.
+// alone while a claimed successor has yet to record its own. The arm's cancel
+// is held past the engine's own two-second deadline for it
+// (armedOverPastItsDeadline): a slow run must not let the old turn settle
+// before the test releases it (sol r46 4).
+//
+// Only the asynchronous subtest stands in the window between the call's
+// return and its reply: the gateSync baseline runs the call AND applies its
+// reply inside the key's Update, and the turn settles only after that (sol
+// r46 3). The baseline is the same property over today's control flow, not a
+// second run of the window.
 func TestACtrlCOverASettlingTurnRunsNoQueuedRow(t *testing.T) {
 	ctrlC := tea.KeyMsg{Type: tea.KeyCtrlC}
 	for _, mode := range frameGateModes {
 		t.Run(mode.name, func(t *testing.T) {
 			r := newSchedRun(t, mode.sync)
 			queuedBehind(r, "ROW")
-			release := armedOver(r)
+			release := armedOverPastItsDeadline(r)
 			t.Cleanup(release)
 			_, releaseBegin := r.sess.HoldNextBegin()
 			t.Cleanup(releaseBegin)
@@ -1212,9 +1256,7 @@ func TestACtrlCOverASettlingTurnRunsNoQueuedRow(t *testing.T) {
 			settle := func() {
 				release()
 				after = r.until(endings(1))
-				for _, ev := range after {
-					r.step(eventMsg{ev})
-				}
+				r.stepEvents(after)
 				settled = true
 			}
 			r.step(ctrlC)
@@ -1240,9 +1282,7 @@ func TestACtrlCOverASettlingTurnRunsNoQueuedRow(t *testing.T) {
 			}
 			r.cancels = nil
 			rest := r.pending()
-			for _, ev := range rest {
-				r.step(eventMsg{ev})
-			}
+			r.stepEvents(rest)
 
 			// The engine's own record: the old turn's ending, and nothing
 			// started after it.

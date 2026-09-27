@@ -553,16 +553,19 @@ func (m Model) applyMode(id string) (tea.Model, tea.Cmd) {
 	// The revision the mode section stood at when this asked, so a refusal that
 	// comes back after somebody else's change cannot roll that change back
 	// (revertModeMsg).
-	eng, cmd, at := m.eng, m.nextCmd(), m.modeRev
+	//
+	// The answer carries the session generation, and the call the backend
+	// epoch, both read here, in the Update (issued, dispatchCtx).
+	eng, cmd, at, iss, base := m.eng, m.nextCmd(), m.modeRev, m.issue(), dispatchCtx(m.eng)
 	return m, func() tea.Msg {
 		// Bounded, so an agent that never answers produces a revert instead of
 		// pinning the chip for ever. See modeCallTimeout.
-		ctx, cancel := context.WithTimeout(context.Background(), modeCallTimeout)
+		ctx, cancel := context.WithTimeout(base, modeCallTimeout)
 		defer cancel()
 		if _, err := eng.Set(ctx, cmd, engine.Setting{Kind: engine.SettingMode, Value: id}); err != nil {
-			return revertModeMsg{gen: gen, prev: prev, err: err, at: at}
+			return revertModeMsg{issued: iss, gen: gen, prev: prev, err: err, at: at}
 		}
-		return modeAppliedMsg{gen: gen, id: id}
+		return modeAppliedMsg{issued: iss, gen: gen, id: id}
 	}
 }
 
@@ -596,7 +599,10 @@ func resolveModelArgs(snap agent.Snapshot, args string, shorthand bool) (id, eff
 // (optionNotAppliedNote). Nothing failed — the model the user chose does not
 // take that effort, or the session is no longer on it — so it is a note and
 // never an error row.
-type effortNotAppliedMsg struct{ note string }
+type effortNotAppliedMsg struct {
+	issued
+	note string
+}
 
 // applyModelEffort is `/model <id> [effort]`: optimistic, and one model Set,
 // the dialog's model step (applyModelStep) — which call moves the model is the
@@ -629,24 +635,26 @@ func (m Model) applyModelEffort(id, effort string) (tea.Model, tea.Cmd) {
 	eng, cmds, at := m.eng, m.nextCmds(2), m.modelRev
 	// The provider the effort step judges the catalog by (runModelEffort): its
 	// local vocabulary, which says what an option is, taken from the mirror
-	// here in the Update, since the closure may not read the model.
-	prov := m.snap.Provider
+	// here in the Update, since the closure may not read the model. So are
+	// the session generation every answer carries and the backend epoch every
+	// step is fenced by (§3.12): a step for this session never executes
+	// against another, and an answer for it never lands on another.
+	prov, iss, ctx := m.snap.Provider, m.issue(), dispatchCtx(m.eng)
 	// Behind every chain of this client's issued before it and ahead of every
 	// one issued after, its place taken here, in this Update (chainLock): a
 	// dialog reopened on the model this command is switching to binds its steps
 	// to that model, and must not read the session before this switch has
 	// landed, whichever of the two commands the program starts first.
 	return m, m.chains.take(func() tea.Msg {
-		ctx := context.Background()
 		res, err := applyModelStep(ctx, eng, cmds[0], id)
 		switch {
 		case errors.Is(err, agent.ErrBadCatalog):
 			// The agent may have switched, so there is no prev to put back and
 			// no effort to judge: the catalog it would be judged against is
 			// the one nobody could read.
-			return modelUnreadMsg{}
+			return modelUnreadMsg{issued: iss}
 		case err != nil:
-			return revertModelMsg{prev: prev, err: err, at: at}
+			return revertModelMsg{issued: iss, prev: prev, err: err, at: at}
 		}
 		if effort == "" {
 			return nil
@@ -658,9 +666,9 @@ func (m Model) applyModelEffort(id, effort string) (tea.Model, tea.Cmd) {
 		// would send the effort to a model nobody chose (plan 025 X13,
 		// superseding X10 (a); astra r4 item 1). So the effort is stale.
 		if res.Value != id {
-			return effortNotAppliedMsg{note: optionNotAppliedNote("effort", id, effort, notAppliedStale)}
+			return effortNotAppliedMsg{issued: iss, note: optionNotAppliedNote("effort", id, effort, notAppliedStale)}
 		}
-		return runModelEffort(ctx, eng, prov, cmds[1], id, effort)
+		return runModelEffort(ctx, iss, eng, prov, cmds[1], id, effort)
 	})
 }
 
@@ -686,13 +694,19 @@ func (m Model) applyModelEffort(id, effort string) (tea.Model, tea.Cmd) {
 // effort"; the model does not offer the value — "does not offer". Any other
 // refusal is the error row it always was, and so is a settings read that
 // failed (a socket backend's round trip; in process it cannot).
-func runModelEffort(ctx context.Context, b backend.Backend, prov agent.ProviderInfo, cmd engine.Command, model, effort string) tea.Msg {
+//
+// ctx carries the epoch the chain was dispatched under, so each of the step's
+// calls is refused before it is sent if the backend has moved to another
+// session since (backend.ErrStaleEpoch, an error row like any failure), and
+// every answer carries iss, the session generation, so one that lands after a
+// replacement is dropped (§3.12).
+func runModelEffort(ctx context.Context, iss issued, b backend.Backend, prov agent.ProviderInfo, cmd engine.Command, model, effort string) tea.Msg {
 	note := func(why notAppliedReason) tea.Msg {
-		return effortNotAppliedMsg{note: optionNotAppliedNote("effort", model, effort, why)}
+		return effortNotAppliedMsg{issued: iss, note: optionNotAppliedNote("effort", model, effort, why)}
 	}
 	set, err := b.Settings(ctx)
 	if err != nil {
-		return actionErrMsg{err}
+		return actionErrMsg{issued: iss, err: err}
 	}
 	snap := settingsSnapshot(set, prov)
 	if snap.CurrentModel != model {
@@ -718,9 +732,9 @@ func runModelEffort(ctx context.Context, b backend.Backend, prov agent.ProviderI
 	case errors.Is(err, agent.ErrOptionGone):
 		return note(notAppliedMissing)
 	case err != nil:
-		return actionErrMsg{err}
+		return actionErrMsg{issued: iss, err: err}
 	}
-	return refreshSnapMsg{}
+	return refreshSnapMsg{issued: iss}
 }
 
 // acceptSlash puts row i into the draft: only the token under the cursor is

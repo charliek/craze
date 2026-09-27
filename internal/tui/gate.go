@@ -50,10 +50,15 @@ var ErrNoAnswer = errors.New("no answer from the session")
 
 // gateDeadline is the deadline a gated call is given (§3.12): fifteen seconds —
 // long enough for the flock an index write can wait on, short enough that a
-// stuck one does not freeze the TUI for good. An Interject waits on the agent
-// taking it and is given a minute, passed to run by its own site (C18c). It is
-// a variable so a test can shorten it; nothing else writes it.
+// stuck one does not freeze the TUI for good. It is a variable so a test can
+// shorten it; nothing else writes it.
 var gateDeadline = 15 * time.Second
+
+// interjectDeadline is an Interject's (§3.12): it waits on the agent taking
+// the message into its running turn — at its next tool result — so it is
+// given a minute, passed to run by its site (interject). A variable for the
+// same reason as gateDeadline.
+var interjectDeadline = 60 * time.Second
 
 // The held queue's bounds (§3.12, astra r2 17): a gate whose held messages
 // reach either is released with ErrNoAnswer, and the reader parks while they
@@ -101,6 +106,10 @@ type gate struct {
 // so a call that panics after its deadline panics inside Update, where
 // bubbletea recovers it, never on a goroutine nothing recovers.
 type gateReply struct {
+	// issued is the session generation the call was issued under: a reply
+	// for a session the model has since left releases its gate without
+	// running the continuation (release).
+	issued
 	id     uint64
 	result any
 	err    error
@@ -175,18 +184,24 @@ func (m Model) run(deadline time.Duration, call gateCall, cont gateCont) (Model,
 	if b == nil {
 		panic("tui: a gated call was issued with no backend")
 	}
+	// The call carries the backend epoch read now, in the issuing Update, so a
+	// backend that has moved to another session by the time it runs refuses
+	// it before sending anything (backend.ErrStaleEpoch; §3.12, "Chains are
+	// fenced in the backend too"); its reply carries the session generation,
+	// so one that lands after a replacement is dropped (issued, release).
+	base, iss := dispatchCtx(b), m.issue()
 	if m.gateSync {
 		// Today's control flow exactly: the call inline, with the context
 		// today's direct calls were given, which never ends. The deadline is
 		// the asynchronous gate's alone.
-		res, err := call(context.Background(), b)
-		return cont(m, gateReply{result: res, err: err})
+		res, err := call(base, b)
+		return cont(m, gateReply{issued: iss, result: res, err: err})
 	}
 	m.gateSeq++
 	g := &gate{id: m.gateSeq, cont: cont, deadline: deadline}
 	m.gate = g
 	return m, func() tea.Msg {
-		ctx, cancel := context.WithTimeout(context.Background(), deadline)
+		ctx, cancel := context.WithTimeout(base, deadline)
 		defer cancel()
 		// Buffered, so the call's goroutine always parks its outcome and
 		// ends, whoever is still there to take it: it never panics itself.
@@ -202,12 +217,13 @@ func (m Model) run(deadline time.Duration, call gateCall, cont gateCont) (Model,
 				// taking the process down with the terminal still raw.
 				panic(*o.panicked)
 			}
+			o.reply.issued = iss
 			return o.reply
 		case <-ctx.Done():
 			// No answer in time. The call may still be running — or may
 			// have panicked just now — so its outcome goes with the reply,
 			// to be waited for where a panic is recovered (lingerOn).
-			return gateReply{id: g.id, err: ErrNoAnswer, linger: out}
+			return gateReply{issued: iss, id: g.id, err: ErrNoAnswer, linger: out}
 		}
 	}
 }
@@ -319,10 +335,13 @@ func (m Model) apply(msg tea.Msg, handle handler, drained bool) (tea.Model, tea.
 	if isEvent {
 		// The reader goes where the event handler's own command always went,
 		// ahead of the wrapper's: the batch an event's Update answers keeps its
-		// shape.
-		m.applyEvent(ev.ev)
+		// shape. The event's own commands follow it: the hidden answers it
+		// sends, and the gated read of a masked opening's ask — the one gate
+		// an event opens (pushCard), watched from here like a handler's, with
+		// the reader reconciled for it by readOn.
+		evCmd := m.applyEvent(ev.ev)
 		read := m.readOn()
-		next, cmd = m.finish(read)
+		next, cmd = m.finish(tea.Batch(read, evCmd))
 	} else {
 		tm, c := handle(m, msg)
 		n, ok := tm.(Model)
@@ -374,7 +393,15 @@ func (m Model) release(r gateReply) (tea.Model, tea.Cmd) {
 	g := m.gate
 	m.noteGate(gateReleasing)
 	m.gate = nil
-	next, cmd := g.cont(m, r)
+	next, cmd := m, tea.Cmd(nil)
+	if !m.outdated(r) {
+		next, cmd = g.cont(m, r)
+	}
+	// else: the reply is for a session the model has since left (issued) —
+	// PR 4's restore from another incarnation; in process a session changes
+	// only in a picker's Update, which no gate is ever open across. Nothing it
+	// says applies to this session, so no continuation runs, and the gate is
+	// released without it: nothing else would release it.
 	next, cmd = next.finish(cmd)
 	if next.gate != nil {
 		next.noteGate(gateOpened)

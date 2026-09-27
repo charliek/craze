@@ -208,6 +208,13 @@ type Model struct {
 	// It is nil or a live backend, never a nil *engineBackend: every
 	// `m.eng == nil` check reads "no session", which a typed nil would defeat.
 	eng backend.Backend
+	// sessGen is the session generation (plan 027 §3.12, astra r2 13): it
+	// moves whenever the session the model drives is replaced — setSession,
+	// on every engine swap, and in PR 4 a restore from another incarnation —
+	// and every session-dependent asynchronous result carries the generation
+	// it was issued under (issued), so one that lands after a replacement is
+	// dropped rather than writing the old session's facts into the new one.
+	sessGen uint64
 	// cmdSeq numbers this model's commands from 1. Each command also names the
 	// backend's client id, read per command (nextCmd) and never cached, so
 	// every mutating command it sends names itself and the events it caused
@@ -689,18 +696,70 @@ type eventMsg struct{ ev agent.Event }
 // returned, and a stale errMsg would fail a session that is starting perfectly
 // well. A nil eng means "whichever backend the model holds", which is what a
 // test injecting either message by hand intends.
-type startedMsg struct{ eng backend.Backend }
+type startedMsg struct {
+	issued
+	eng backend.Backend
+}
 type errMsg struct {
+	issued
 	err error
 	eng backend.Backend
 }
-type actionErrMsg struct{ err error }
+
+// actionErrMsg is a failure a command reports as an error row: a chain's
+// settings read or Set that failed.
+type actionErrMsg struct {
+	issued
+	err error
+}
+
+// issued stamps a session-dependent asynchronous result — a gated call's
+// reply, a settings answer, a cancel's report, a hidden answer the outbox
+// refused, a start's answer — with the session generation it was issued
+// under (plan 027 §3.12, astra r2 13): the model's sessGen, read in the Update
+// that dispatched the command, never on the command's goroutine. A result
+// whose generation is no longer the model's is about a session the model has
+// left, and is dropped where it lands (outdated): an engine swap and, in
+// PR 4, a restore from another incarnation move the generation, and a result
+// issued before must not write that session's facts into this one. This is
+// staleFor generalised from the start messages to every result.
+//
+// The zero stamp is a message a test built by hand, and means whichever
+// session the model holds — as a start message's nil backend does.
+type issued struct{ sessGen uint64 }
+
+func (i issued) issuedUnder() uint64 { return i.sessGen }
+
+// issue is the stamp a command dispatched now carries.
+func (m Model) issue() issued { return issued{sessGen: m.sessGen} }
+
+// dispatchCtx is the context a call dispatched now against b carries — and
+// every later call of the same operation, a chain's next step among them: b's
+// epoch, read here, in the Update, never on the command's goroutine
+// (backend.WithEpoch). A call that runs once b has moved to another session is
+// refused before anything is sent (§3.12, "Chains are fenced in the backend
+// too"). It never ends; a site that needs a deadline derives one from it.
+func dispatchCtx(b backend.Backend) context.Context {
+	return backend.WithEpoch(context.Background(), b.Epoch())
+}
+
+// outdated reports that msg is a result issued under a session generation
+// other than the model's: dropped, unapplied.
+func (m *Model) outdated(msg tea.Msg) bool {
+	s, ok := msg.(interface{ issuedUnder() uint64 })
+	if !ok {
+		return false
+	}
+	gen := s.issuedUnder()
+	return gen != 0 && gen != m.sessGen
+}
 
 // revertModeMsg is a mode change coming back refused, or never coming back
 // inside modeCallTimeout. gen is the request it answers for; prev is what the
 // chip showed before that request asked, and at the mode section's revision
 // when it asked (mayApply).
 type revertModeMsg struct {
+	issued
 	gen  int
 	prev string
 	err  error
@@ -712,6 +771,7 @@ type revertModeMsg struct {
 // request it answers for. It writes no value of its own — it only takes the
 // chip's mask down — so it needs no revision.
 type modeAppliedMsg struct {
+	issued
 	gen int
 	id  string
 }
@@ -721,6 +781,7 @@ type modeAppliedMsg struct {
 // else's change has been applied may show its error but may not put prev back
 // (mayApply).
 type revertModelMsg struct {
+	issued
 	prev string
 	err  error
 	at   uint64
@@ -732,8 +793,11 @@ type revertModelMsg struct {
 // there is no prev to put back. Nothing of the answer was installed, so the
 // screen reads the session's snapshot back, and the row says the outcome is
 // unknown (unreadModelText).
-type modelUnreadMsg struct{}
-type refreshSnapMsg struct{}
+type modelUnreadMsg struct{ issued }
+
+// refreshSnapMsg reads the session's snapshot back: a chain's last step
+// landed. Tests send it bare, as a nudge.
+type refreshSnapMsg struct{ issued }
 
 // dblClickMsg is the frame runner's <dblclick:X,Y>: the gesture without the
 // two presses and the 400 ms between them.
@@ -752,11 +816,13 @@ type dblClickMsg struct{ X, Y int }
 // and modeAppliedMsg do: the turn says whether the prompt is still wanted, the
 // generation says whether this is still the mode request the chip is showing.
 type planImplementMsg struct {
+	issued
 	seq  int
 	gen  int
 	mode string
 }
 type planImplementFailedMsg struct {
+	issued
 	seq  int
 	gen  int
 	prev string
@@ -865,6 +931,9 @@ func (m *Model) setSession(s agent.Session, crazeID string) {
 	// after this cannot put itself back (shellController.disown).
 	m.shell.disown()
 	m.dropShellContext()
+	// A new session, so a new generation: every result still in flight for
+	// the one this replaces is dropped where it lands (issued).
+	m.sessGen++
 	m.eng, m.engErr = nil, nil
 	// A new session is a new transcript: the shared model is folded from its
 	// events alone.
@@ -903,6 +972,9 @@ func (m *Model) setSession(s agent.Session, crazeID string) {
 	// The backend mints this model's client on the engine, once: the
 	// in-process client is never released (plan 027 §3.6).
 	m.eng = newEngineBackend(eng)
+	if sessionBackendHook != nil {
+		m.eng = sessionBackendHook(m.eng)
+	}
 	// A new client, so a new order: a chain still running on the engine this
 	// replaced orders nothing on this one.
 	m.chains = &chainLock{}
@@ -915,6 +987,12 @@ func (m *Model) setSession(s agent.Session, crazeID string) {
 		m.onEngine(eng)
 	}
 }
+
+// sessionBackendHook, when a test sets it, wraps every backend setSession
+// builds: the jitter run (plan 027 §8, V8) delays each of the backend's
+// answers and reads through it. It is nil in production — no Config field or
+// flag reaches it — like gateHook.
+var sessionBackendHook func(backend.Backend) backend.Backend
 
 // nextCmd is the model's next command id. Every mutating engine call carries
 // one, so the events it causes name their cause and the model can tell its own
@@ -1247,17 +1325,22 @@ func (m Model) startCmd() tea.Cmd {
 			return errMsg{err: fmt.Errorf("craze: no session")}
 		}
 	}
+	iss := m.issue()
 	return func() tea.Msg {
 		if err := eng.Start(context.Background()); err != nil {
-			return errMsg{err: err, eng: eng}
+			return errMsg{issued: iss, err: err, eng: eng}
 		}
-		return startedMsg{eng: eng}
+		return startedMsg{issued: iss, eng: eng}
 	}
 }
 
 // staleFor reports that a start command's message is about a backend the model
 // no longer holds — one a picker closed and replaced — so nothing it says
-// applies. It is interface identity: the same backend, not an equal one.
+// applies. It is interface identity: the same backend, not an equal one. The
+// start messages carry the session generation too (issued, outdated), which
+// every other result now carries: a restore from another incarnation (PR 4)
+// moves the generation without replacing the backend. staleFor stays for a
+// start message a test builds by hand around a backend.
 func (m Model) staleFor(b backend.Backend) bool { return b != nil && b != m.eng }
 
 // Update is the command gate (gate.go) over the handler: a message that
@@ -1319,6 +1402,11 @@ func (m Model) finish(cmd tea.Cmd) (Model, tea.Cmd) {
 }
 
 func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if m.outdated(msg) {
+		// A result issued for a session the model has since left (issued):
+		// nothing it says applies to this one.
+		return m, nil
+	}
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		// Stickiness is decided from where the user was before the resize; the
@@ -1335,7 +1423,13 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case hiddenRetryMsg:
-		m.handleHiddenRetry()
+		cmd := m.handleHiddenRetry()
+		return m, cmd
+
+	case hiddenRefusedMsg:
+		// The outbox had no room for a hidden answer: it goes back on the
+		// retry list, and the wrapper arms its beat (armHiddenRetry).
+		m.hiddenRetry = append(append([]hiddenAnswer(nil), m.hiddenRetry...), msg.h)
 		return m, nil
 
 	case resumeClaimMsg:
@@ -2765,14 +2859,14 @@ func (m Model) implementPlan() (tea.Model, tea.Cmd) {
 	// screen, and that path is allowed to put the offer back.
 	m.planOfferSeq = 0
 	seq := m.turnSeq
-	eng, cmd, at := m.eng, m.nextCmd(), m.modeRev
+	eng, cmd, at, iss, base := m.eng, m.nextCmd(), m.modeRev, m.issue(), dispatchCtx(m.eng)
 	return m, func() tea.Msg {
-		ctx, cancel := context.WithTimeout(context.Background(), modeCallTimeout)
+		ctx, cancel := context.WithTimeout(base, modeCallTimeout)
 		defer cancel()
 		if _, err := eng.Set(ctx, cmd, engine.Setting{Kind: engine.SettingMode, Value: id}); err != nil {
-			return planImplementFailedMsg{seq: seq, gen: gen, prev: prev, err: err, at: at}
+			return planImplementFailedMsg{issued: iss, seq: seq, gen: gen, prev: prev, err: err, at: at}
 		}
-		return planImplementMsg{seq: seq, gen: gen, mode: id}
+		return planImplementMsg{issued: iss, seq: seq, gen: gen, mode: id}
 	}
 }
 
@@ -2830,9 +2924,9 @@ func (m Model) cancelTurn() (tea.Model, tea.Cmd) {
 	if working {
 		turn = m.turnID
 	}
-	c := m.nextCmd()
+	c, iss, base := m.nextCmd(), m.issue(), dispatchCtx(eng)
 	return m, func() tea.Msg {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		ctx, cancel := context.WithTimeout(base, 2*time.Second)
 		defer cancel()
 		res, err := eng.Cancel(ctx, c, turn)
 		if err == nil {
@@ -2851,14 +2945,17 @@ func (m Model) cancelTurn() (tea.Model, tea.Cmd) {
 			// draw the row twice, and in whichever order the two arrived.
 			return nil
 		}
-		return cancelFailedMsg{err: err}
+		return cancelFailedMsg{issued: iss, err: err}
 	}
 }
 
 // cancelFailedMsg says the cancel never reached the agent, and is the model's own
 // report of it: it is returned only where the engine published nothing for the
 // failure (engine.CancelResult.Reported).
-type cancelFailedMsg struct{ err error }
+type cancelFailedMsg struct {
+	issued
+	err error
+}
 
 // foreignTurnStoppable says Esc has a turn of the agent's own to stop (plan 026
 // X44): the model's mirror of the session's flag says one is running —
@@ -2901,21 +2998,21 @@ func (m Model) cancelForeignTurn() (tea.Model, tea.Cmd) {
 	if eng == nil {
 		return m, nil
 	}
-	c := m.nextCmd()
+	c, iss, base := m.nextCmd(), m.issue(), dispatchCtx(eng)
 	episode, seq := m.foreignEpisode(), m.turnSeq
 	return m, func() tea.Msg {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		ctx, cancel := context.WithTimeout(base, 2*time.Second)
 		defer cancel()
 		res, err := eng.Cancel(ctx, c, "")
 		switch {
 		case err == nil:
-			return foreignCancelledMsg{turn: res.Turn, episode: episode, seq: seq}
+			return foreignCancelledMsg{issued: iss, turn: res.Turn, episode: episode, seq: seq}
 		case errors.Is(err, engine.ErrNotAccepting), errors.Is(err, engine.ErrStaleTurn):
 			return nil
 		case res.Reported:
 			return nil
 		}
-		return cancelFailedMsg{err: err}
+		return cancelFailedMsg{issued: iss, err: err}
 	}
 }
 
@@ -2927,6 +3024,7 @@ func (m Model) cancelForeignTurn() (tea.Model, tea.Cmd) {
 // craze turn's id when it landed on one instead (SF-48). episode is the
 // model's foreignEpisode when Esc was pressed, and seq its turnSeq.
 type foreignCancelledMsg struct {
+	issued
 	turn    string
 	episode uint64
 	seq     int
@@ -3015,14 +3113,25 @@ func (m Model) requestQuit() (tea.Model, tea.Cmd) {
 	}
 }
 
-func (m *Model) applyEvent(ev agent.Event) {
+func (m *Model) applyEvent(ev agent.Event) tea.Cmd {
 	// An event means the log is moving, which is what a hidden answer the outbox
 	// had no room for is waiting on (retryHidden) — the fast path, ahead of the
 	// beat that guarantees the retry (armHiddenRetry). It runs before the event
 	// is applied, so a hidden ask answered here is not counted twice by an
-	// answerHidden this same event causes.
-	m.retryHidden()
-	// The shared model folds every event next, before anything below can return
+	// answerHidden this same event causes. Its answers are commands of their
+	// own (fire-and-forget, never gated, §3.12), handed back with whatever
+	// this event's arm hands back: several in one Update are several commands.
+	// The retry list is taken here, once, for every arm (reduceEvent): no
+	// return of the event's can drop a retried answer.
+	retry := m.retryHidden()
+	return tea.Batch(retry, m.reduceEvent(ev))
+}
+
+// reduceEvent is applyEvent's event itself: the fold, then its arm, answering
+// the arm's own command — a masked opening's gated read, a hidden ask's
+// answer — or nil.
+func (m *Model) reduceEvent(ev agent.Event) tea.Cmd {
+	// The shared model folds every event, before anything below can return
 	// early (plan 024 §3.8): every row an event draws is the fold's, and the
 	// panes show what it changed. What the fold takes from this client's own
 	// state is decided first, before that state moves:
@@ -3056,11 +3165,11 @@ func (m *Model) applyEvent(ev agent.Event) {
 	ch := m.foldEvent(ev, hide, errText)
 	if ev.Type == agent.EventSubagent {
 		m.applySubagentEvent(ev)
-		return
+		return nil
 	}
 	if ev.Agent != "" {
 		m.applyChildEvent(ev)
-		return
+		return nil
 	}
 	// The spinner names what the turn is doing; only a thought chunk leaves it
 	// on "Thinking…".
@@ -3071,17 +3180,17 @@ func (m *Model) applyEvent(ev agent.Event) {
 		// main-session echo — grok and gx send one for every prompt the user
 		// types — draws nothing anywhere: the row is the turn's started's
 		// (§2.2).
-		return
+		return nil
 	case agent.EventReplay:
 		if ev.Replay == nil {
-			return
+			return nil
 		}
 		if ev.Replay.Phase != agent.ReplayEnd {
 			// The start phase is informational: the model was built replaying
 			// because Config.Loading knew a load was coming, and it had to be,
 			// since tea.Batch could deliver startedMsg before this event ever
 			// arrived (§3.5).
-			return
+			return nil
 		}
 		// The restored snapshot is installed, so this is the moment the
 		// session is up as far as the replay is concerned. The fold has closed
@@ -3089,12 +3198,12 @@ func (m *Model) applyEvent(ev agent.Event) {
 		m.replaying = false
 		m.refreshSnap()
 		m.sessionUp()
-		return
+		return nil
 	case agent.EventCommand:
 		// It arrives before the request reaches the wire, so the fold's line
 		// lands under the user block and above anything the agent goes on to
 		// say.
-		return
+		return nil
 	case agent.EventQueue:
 		// The band draws from the engine's queue, which refreshSnap re-reads;
 		// nothing else has to happen.
@@ -3102,10 +3211,10 @@ func (m *Model) applyEvent(ev agent.Event) {
 		if ev.QueueChange == agent.QueueRemoved && m.status == statusError {
 			m.note("queue cleared")
 		}
-		return
+		return nil
 	case agent.EventTurn:
 		if ev.Turn == nil {
-			return
+			return nil
 		}
 		switch ev.Turn.Phase {
 		case agent.TurnStarted:
@@ -3113,7 +3222,7 @@ func (m *Model) applyEvent(ev agent.Event) {
 		case agent.TurnEnded:
 			m.applyTurnEnded(ev.Turn)
 		}
-		return
+		return nil
 	case agent.EventForeignTurn:
 		// Either bracket ends the run above it, and the start heads what
 		// follows with the note that stops the reply reading as an answer to
@@ -3130,7 +3239,7 @@ func (m *Model) applyEvent(ev agent.Event) {
 			m.cancelled = false
 		}
 		m.refreshSnap()
-		return
+		return nil
 	case agent.EventText:
 		if ev.Text != "" {
 			// Only a chunk that says something is evidence: the fold drops an
@@ -3150,21 +3259,19 @@ func (m *Model) applyEvent(ev agent.Event) {
 		}
 	case agent.EventPermission:
 		if ev.Permission != nil {
-			m.pushCard(card{kind: cardPermission, perm: ev.Permission})
+			return m.pushCard(card{kind: cardPermission, perm: ev.Permission})
 		}
 	case agent.EventQuestion:
 		// An auto-answered request (headless) is already decided; only an
 		// interactive one is a card.
 		if ev.Question != nil && !ev.Question.Auto {
 			if m.showAsk() {
-				m.pushCard(card{kind: cardQuestion, ask: ev.Question})
-			} else {
-				// The config hides questions: it is skipped where it stands,
-				// with no card and — as it always has — no row. The ending it
-				// causes names this command and is skipped with the rest of
-				// this model's own echoes.
-				m.answerHidden(ev.Question.ID, agent.AskAnswer{Skip: true})
+				return m.pushCard(card{kind: cardQuestion, ask: ev.Question})
 			}
+			// The config hides questions: it is skipped where it stands, with
+			// no card and — as it always has — no row. Its ending finds no
+			// card to remove, and writes nothing (applyAskEnded).
+			return m.answerHidden(ev.Question.ID, agent.AskAnswer{Skip: true})
 		}
 	case agent.EventAsk:
 		if ev.Ask != nil {
@@ -3175,10 +3282,9 @@ func (m *Model) applyEvent(ev agent.Event) {
 			// The plan itself is transcript material, the fold's plan entry;
 			// the card is only the three answers it needs.
 			if m.showPlan() {
-				m.pushCard(card{kind: cardPlan, plan: ev.Plan})
-			} else {
-				m.answerHidden(ev.Plan.ID, agent.AskAnswer{Reject: true})
+				return m.pushCard(card{kind: cardPlan, plan: ev.Plan})
 			}
+			return m.answerHidden(ev.Plan.ID, agent.AskAnswer{Reject: true})
 		}
 	case agent.EventDone:
 		// The wire's own ending. It orders the transcript — the fold closes
@@ -3257,6 +3363,7 @@ func (m *Model) applyEvent(ev agent.Event) {
 		// (plan 021 §3.8). The composer's own title is read back by refreshSnap
 		// above, as it always was.
 	}
+	return nil
 }
 
 // hiddenAnswer is one answer to a hidden ask that has still to be taken
@@ -3279,33 +3386,51 @@ type hiddenAnswer struct {
 // again, by the next event the model applies and by a beat of its own until one
 // of them takes it (retryHidden, armHiddenRetry). It is bounded by the number of
 // hidden asks open at once.
-func (m *Model) answerHidden(id string, a agent.AskAnswer) {
+//
+// The answer is fire-and-forget (plan 027 §3.12): a command of its own, never
+// gated, because nothing it answers is drawn — no card exists for it — and
+// nothing after it needs its result in the Update that sent it. The command's
+// one message is the refusal for room (hiddenRefusedMsg), which puts the
+// answer back on the retry list, stamped with the session generation and
+// fenced by the backend epoch like any other result. No echo is noted: an
+// echo only matters for a card, and this ask's ending finds none to remove, so
+// it writes nothing either way (applyAskEnded).
+func (m *Model) answerHidden(id string, a agent.AskAnswer) tea.Cmd {
 	if m.eng == nil {
-		return
+		return nil
 	}
-	cmd := m.nextCmd()
-	switch err := m.eng.Answer(context.Background(), cmd, id, a); {
-	case err == nil:
-		m.noteAskEcho(cmd.Cause())
-	case errors.Is(err, agent.ErrAskUnavailable):
-		m.hiddenRetry = append(append([]hiddenAnswer(nil), m.hiddenRetry...), hiddenAnswer{id: id, a: a})
+	b, c, iss, ctx := m.eng, m.nextCmd(), m.issue(), dispatchCtx(m.eng)
+	return func() tea.Msg {
+		if err := b.Answer(ctx, c, id, a); errors.Is(err, agent.ErrAskUnavailable) {
+			return hiddenRefusedMsg{issued: iss, h: hiddenAnswer{id: id, a: a}}
+		}
+		return nil
 	}
 }
 
-// retryHidden re-sends the hidden answers the outbox had no room for. Each one
-// is either taken, refused for good — the ask was resolved some other way in the
-// meantime, agent.ErrAlreadyResolved among them — or kept for the next try by
-// answerHidden itself. The list is taken first, so one that is kept is appended
-// to an empty list rather than walked twice.
-func (m *Model) retryHidden() {
+// hiddenRefusedMsg is a hidden answer the outbox had no room for
+// (answerHidden): it goes back on the retry list.
+type hiddenRefusedMsg struct {
+	issued
+	h hiddenAnswer
+}
+
+// retryHidden re-sends the hidden answers the outbox had no room for, one
+// command each. Each one is either taken, refused for good — the ask was
+// resolved some other way in the meantime, agent.ErrAlreadyResolved among them
+// — or refused for room again, and put back by its own message. The list is
+// taken first, so an answer is never in flight twice.
+func (m *Model) retryHidden() tea.Cmd {
 	if len(m.hiddenRetry) == 0 {
-		return
+		return nil
 	}
 	pending := m.hiddenRetry
 	m.hiddenRetry = nil
+	cmds := make([]tea.Cmd, 0, len(pending))
 	for _, h := range pending {
-		m.answerHidden(h.id, h.a)
+		cmds = append(cmds, m.answerHidden(h.id, h.a))
 	}
+	return tea.Batch(cmds...)
 }
 
 // hiddenRetryEvery is how long a hidden answer refused for room waits before it
@@ -3339,11 +3464,12 @@ func (m *Model) armHiddenRetry() tea.Cmd {
 }
 
 // handleHiddenRetry spends one beat on the answers still waiting for room.
-// Update arms the next one only if something was refused for room again, so a
-// list that empties — taken, or ended by somebody else — stops the timer.
-func (m *Model) handleHiddenRetry() {
+// Update arms the next one only if something was refused for room again — its
+// refusal back on the list (hiddenRefusedMsg) — so a list that empties, taken
+// or ended by somebody else, stops the timer.
+func (m *Model) handleHiddenRetry() tea.Cmd {
 	m.hiddenRetryLive = false
-	m.retryHidden()
+	return m.retryHidden()
 }
 
 // noteAskEcho records that the ending caused by cause is this model's own: its
