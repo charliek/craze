@@ -316,6 +316,10 @@ func (s *nativeSession) subagentEvent(e harness.SubagentEvent) {
 		// parent's rule (plan 019 §3.5).
 	case harness.SubagentStarted, harness.SubagentEvent, harness.SubagentFinished:
 		// A child starts no child of its own (depth 1, §3.2): never sent.
+	case harness.Spent:
+		// Never sent: a child reports no spend of its own (plan 028 P33) —
+		// what it spent reaches the parent's through the usage rows the
+		// parent's entries carry, and a second report would be counted twice.
 	}
 }
 

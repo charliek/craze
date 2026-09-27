@@ -706,13 +706,15 @@ func (w *parityWatch) wholePane(m *Model, r *parityRec, ev agent.Event, scope st
 }
 
 // stateMirrors is what the TUI mirrors from State() of what the shared model
-// folds too (plan 024 §3.8): the settings, the todo list, the roster and the
-// queue. An empty list is nil on both sides (X10).
+// folds too (plan 024 §3.8): the settings — the usage section among them (plan
+// 028 §3.14, seam 8: the status row reads it) — the todo list, the roster and
+// the queue. An empty list is nil on both sides (X10).
 type stateMirrors struct {
 	Title, Mode, Model string
 	Config             []agent.ConfigOption
 	Commands           []agent.CommandInfo
 	Plugins            []agent.PluginCommand
+	Usage              *agent.UsageState
 	Todos              []agent.Todo
 	Agents             []agent.SubagentInfo
 	Queue              []agent.QueuedPrompt
@@ -730,6 +732,7 @@ func tuiMirrors(m Model) stateMirrors {
 	return stateMirrors{
 		Title: m.snap.Title, Mode: m.snap.CurrentMode, Model: m.snap.CurrentModel,
 		Config: noneIsNil(m.snap.Config), Commands: noneIsNil(m.snap.Commands), Plugins: noneIsNil(m.snap.Plugins),
+		Usage: m.snap.Usage,
 		Todos: noneIsNil(m.snap.Todos), Agents: noneIsNil(m.snap.Subagents), Queue: noneIsNil(m.queue),
 	}
 }
@@ -739,6 +742,7 @@ func modelMirrors(st transcript.State) stateMirrors {
 	return stateMirrors{
 		Title: st.Settings.Title, Mode: st.Settings.Mode, Model: st.Settings.Model,
 		Config: st.Settings.Config, Commands: st.Settings.Commands, Plugins: st.Settings.Plugins,
+		Usage: st.Settings.Usage,
 		Todos: st.Todos, Agents: st.Agents, Queue: st.Queue,
 	}
 }
@@ -1072,6 +1076,12 @@ func TestTheStateMirrorsMatchTheModelWhenQuiet(t *testing.T) {
 		m = pumpEnter(t, m, "hello")
 		m = pumpSettled(t, m)
 		check(t, m, "after a turn")
+		// The turn's step reported what it spent (plan 028 §3.14): a usage
+		// delta the fold took, and the snapshot the status row reads — the
+		// check above holds the two to each other.
+		if m.snap.Usage == nil {
+			t.Fatal("a native turn left the TUI's snapshot with no usage")
+		}
 		// A mode change is a delta, which re-reads the snapshot — and with it
 		// the title native took from the first prompt.
 		m = pumpKey(t, m, tea.KeyMsg{Type: tea.KeyShiftTab})

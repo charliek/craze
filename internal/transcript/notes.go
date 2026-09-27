@@ -72,6 +72,11 @@ func compactionNote(c *agent.CompactionInfo) string {
 	return head + " · " + tokenCount(c.TokensBefore) + " → " + tokenCount(c.TokensAfter) + " tokens"
 }
 
+// TokenCount is a token count as craze says one anywhere it is drawn — the
+// compaction note's "890k → 21k tokens" and the status row's usage part
+// (plan 028 §3.14) alike: tokenCount's rule, below.
+func TokenCount(n int64) string { return tokenCount(n) }
+
 // tokenCount is a token count as the compaction note says it: the number
 // itself under a thousand, else in k or M to three significant figures with
 // trailing zeros dropped — 850, 1.23k, 12.3k, 890k, 1.21M, 2M. A negative

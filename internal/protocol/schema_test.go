@@ -88,6 +88,7 @@ var protocolRaw = map[string]string{
 	"AttachResult.snapshot":      "snapshot.json#",
 	"StateResult.queue[]":        "event.json#/$defs/queued",
 	"Settings.config":            "event.json#/$defs/config",
+	"Settings.usage":             "event.json#/$defs/usage",
 	"SnapshotResult.snapshot":    "snapshot.json#",
 	"PromptResult.queued":        "event.json#/$defs/queued",
 	"QueueAddResult.row":         "event.json#/$defs/queued",

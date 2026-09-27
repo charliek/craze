@@ -45,7 +45,8 @@ by construction:
   full ask (`asks.get`) caps each body string at 256 KiB and sets `truncated`
   when it cut one;
 - `session.state`'s queue rows are capped at 32 KiB each, and its settings
-  carry only the provider's own (bounded) config catalog.
+  carry only the provider's own (bounded) config catalog and, for a native
+  session, the fixed-size [usage section](#usage).
 
 A host tolerates a final line at end-of-file with no trailing `\n` (a lone
 trailing `\r` is stripped): a peer that half-closes right after an
@@ -692,6 +693,47 @@ context…" until the `ended` it folds next. Both fields are additive: a client
 that does not know them ignores the kind and the member (see [Tolerant
 inbound, strict outbound](#tolerant-inbound-strict-outbound)), and neither
 bumps a codec version.
+
+## Usage
+
+A native session reports what it has spent and how full its context is: the
+**usage section**, `{contextTokens, contextWindow, turn, session}`. It is a
+state delta section like the model or the config — `state.usage` on a `meta`
+event — and it stands in the two reads of where things are: `session.state`'s
+`settings.usage` and a snapshot's `settings.usage`. No ACP provider reports
+usage through craze, so for every ACP session the key is **absent** — never
+`null` and never `{}` — as it is for a native session before its first step.
+A client reads the key's presence as "this session reports usage".
+
+```json
+{"type":"meta","state":{"usage":{"contextTokens":68000,"contextWindow":200000,
+  "turn":{"input":8000,"output":2000,"reasoning":0,"cacheRead":58000,"cacheCreation":0,"costPicoUsd":71400000000,"unpriced":false},
+  "session":{"input":68000,"output":3500,"reasoning":0,"cacheRead":58000,"cacheCreation":0,"costPicoUsd":273900000000,"unpriced":false}}},"at":"..."}
+```
+
+- `contextTokens` is the estimated size of what the session's next request
+  sends; `contextWindow` is the window of the model it goes to, `0` when craze
+  does not know it.
+- `turn` is what the turn the report followed spent — after a load, the last
+  turn the stored session recorded — and `session` what the whole session has:
+  its own requests, its compactions' (a `/compact` is a turn of its own), and
+  the sub-agents its turns ran, each priced by its own model.
+- Tokens are as the provider billed them: `input` is the uncached input, and
+  `reasoning` is part of `output`, never counted twice. `costPicoUsd` is the
+  priced part's cost in **picodollars** (10⁻¹² US dollars: `$1` is
+  `1000000000000`), exact. `unpriced: true` says some usage in the sum had no
+  price in craze's model table: its tokens are counted and it added no cost,
+  so the cost is a floor.
+- Every key is always present, a `0` and a `false` included.
+
+A report comes after every step, every compaction that ran, and once at the
+end of a `session/load` replay. Each carries the whole section — nothing is
+summed on the client — so the last one folded is where the session stands. A
+load's report rides in the load's install delta (the one stamped `replayed`
+before the replay's `end`), never in a delta of its own inside the bracket. A
+usage-only delta prints no `craze prompt --json` line, but it takes a `seq`
+like every event. The section is additive, like `compaction`: no codec
+version bump and no capability.
 
 ## Errors and retry
 

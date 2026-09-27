@@ -113,6 +113,12 @@ func stateResult(st engine.State) (protocol.StateResult, error) {
 	if err != nil {
 		return protocol.StateResult{}, err
 	}
+	// The usage section, absent when the session has none (every ACP session;
+	// a native one before its first step): nil encodes to no key at all.
+	usage, err := agent.EncodeUsageState(st.Usage)
+	if err != nil {
+		return protocol.StateResult{}, err
+	}
 	r := protocol.StateResult{
 		Activity:    protocol.Activity(st.Activity),
 		ForeignTurn: st.ForeignTurn,
@@ -125,7 +131,7 @@ func stateResult(st engine.State) (protocol.StateResult, error) {
 		StartFailed: st.StartFailed,
 		Prompted:    st.Prompted,
 		Cancelled:   st.Cancelled,
-		Settings:    protocol.Settings{Model: st.CurrentModel, Mode: st.CurrentMode, Config: config},
+		Settings:    protocol.Settings{Model: st.CurrentModel, Mode: st.CurrentMode, Config: config, Usage: usage},
 	}
 	if a := st.SendNow; a != nil {
 		r.SendNow = &protocol.ArmedSend{Text: a.Text, FromRow: a.FromRow, Turn: a.Turn, Cause: a.Cause}

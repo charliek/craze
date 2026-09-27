@@ -172,6 +172,12 @@ type Settings struct {
 	Plugins            []agent.PluginCommand
 	// SendNow is the engine's armed send-now; Armed false means none.
 	SendNow agent.SendNowState
+	// Usage is the session's usage section (plan 028 §3.14): what it has
+	// spent and how full its context is, nil until a delta carries one — and
+	// always, for an ACP session. It is the delta's copy, replaced whole by
+	// the next and never written through. It has no strings, so no
+	// truncation mark.
+	Usage *agent.UsageState
 	// Truncated names the sections the snapshot this model was restored from
 	// carried only the head of some string of (over ItemCap, plan 024 §3.5),
 	// so a client can say so. A model folded from the event stream never sets

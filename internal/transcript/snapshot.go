@@ -877,6 +877,11 @@ func Restore(s *Snapshot, o Options) *Model {
 	m.turn = s.Turn
 	m.replaying = s.Replaying
 	m.settings = s.Settings
+	if u := s.Settings.Usage; u != nil {
+		// The model's own copy, as a delta's is (fold.go's Usage row).
+		c := *u
+		m.settings.Usage = &c
+	}
 	m.queue = nilIfEmpty(slices.Clone(s.Queue))
 	for _, id := range s.TruncatedQueue {
 		if !slices.ContainsFunc(m.queue, func(q agent.QueuedPrompt) bool { return q.ID == id }) {

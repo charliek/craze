@@ -307,6 +307,13 @@ type StateDelta struct {
 	// not touch it, Armed true for a send just armed, and a value with Armed
 	// false for one that is gone, with Reason saying why.
 	SendNow *SendNowState
+	// Usage is what the session has spent and how full its context is, as
+	// Snapshot.Usage now stands (plan 028 §3.14): a native session's, authored
+	// under its lock from the harness's report after every step, every
+	// compaction and a load's replay. It is never cleared — a session that
+	// has spent something has spent it — so a non-nil Usage is always the
+	// whole of it, and no ACP session ever sends one.
+	Usage *UsageState
 	// Reason names what happened, from the SendNow* constants below. It usually
 	// stands beside the section it is about — a send-now that was lost — but it
 	// may stand alone, with every section nil: that is a delta whose news is the
@@ -374,6 +381,40 @@ type SendNowState struct {
 	// Turn is the turn it was armed against: the one whose settlement fires
 	// it.
 	Turn string
+}
+
+// UsageState is a session's usage section (plan 028 §3.14), on
+// StateDelta.Usage and Snapshot.Usage alike: the context the next request
+// sends and the window it goes to, and what the session has spent — in its
+// current turn and in all.
+//
+// ContextTokens is the estimated size, in tokens, of what the session's next
+// request sends; ContextWindow is the context window of the model it goes to,
+// 0 when craze does not know it. Turn is the spend of the turn the report
+// followed — after a load, the last turn the stored session recorded — and
+// Session the whole session's: its own requests, its compactions' and the
+// sub-agents its turns ran (a child's own transcript is never added in).
+type UsageState struct {
+	ContextTokens int64
+	ContextWindow int64
+	Turn          Spend
+	Session       Spend
+}
+
+// Spend is a sum of token usage and what it cost: the token counts, as the
+// provider billed them — Input is the uncached input, Reasoning is part of
+// Output and never counted twice — and CostPicoUSD, the priced part's cost in
+// picodollars (10⁻¹² US dollars, so $1 is 1e12), exact. Unpriced says some
+// usage in the sum had no price in craze's model table: its tokens are counted
+// and it added no cost, so CostPicoUSD is less than what was billed.
+//
+// It has harness.Spend's fields in the same order, and the native adapter
+// converts one to the other directly, so a field added to either stops the
+// adapter compiling until both have it.
+type Spend struct {
+	Input, Output, Reasoning, CacheRead, CacheCreation int64
+	CostPicoUSD                                        int64
+	Unpriced                                           bool
 }
 
 // Why an armed send-now was lost, on StateDelta.Reason. Each is a distinct
@@ -458,6 +499,12 @@ type Snapshot struct {
 	// provider, already resolved to the names the menu and the wire both use,
 	// in discovery order. Cloned by Snapshot.
 	Plugins []PluginCommand
+	// Usage is the session's usage section (plan 028 §3.14): what it has
+	// spent and how full its context is, as the last StateDelta.Usage left
+	// it. nil until a native session's first step — or its load's replay —
+	// reports one, and always nil for an ACP session. Its own copy, cloned by
+	// Snapshot.
+	Usage *UsageState
 }
 
 // SubagentInfo is one grok child or cursor task, in spawn order on Snapshot.
