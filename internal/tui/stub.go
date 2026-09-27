@@ -326,7 +326,9 @@ func (s *Stub) SetTodos(todos []agent.Todo) {
 // says so, as the live session's available_commands_update does (live.go's
 // onUpdate: enqueued under the lock that changed the snapshot, then flushed).
 // A delta is what a watching client folds; the snapshot is what today's
-// mirror reads.
+// mirror reads. The flush makes it a test-side call only (flushSetter): past
+// the primary's buffer with nobody reading it, it blocks, and it must never
+// be called from the primary's reader.
 func (s *Stub) SetCommands(cmds []agent.CommandInfo) {
 	s.mu.Lock()
 	s.snap.Commands = append([]agent.CommandInfo(nil), cmds...)
@@ -337,8 +339,9 @@ func (s *Stub) SetCommands(cmds []agent.CommandInfo) {
 
 // SetPlugins replaces Snapshot.Plugins with an already-resolved list, as the
 // live session does at Start and again on every available_commands_update, and
-// publishes the Plugins delta that says so, as SetCommands does. Tests build it
-// through agent.ResolvePluginNames so the naming rule under test is the one the
+// publishes the Plugins delta that says so, as SetCommands does — under the
+// same test-side constraint (flushSetter). Tests build it through
+// agent.ResolvePluginNames so the naming rule under test is the one the
 // session applies.
 func (s *Stub) SetPlugins(plugins []agent.PluginCommand) {
 	s.mu.Lock()
@@ -351,10 +354,15 @@ func (s *Stub) SetPlugins(plugins []agent.PluginCommand) {
 // flushSetter is the live session's flushDelta after a catalog delta: the
 // delta a setter enqueued is committed before the setter returns, so "set"
 // means buffered as "emitted" does (Emit) and an event the test publishes next
-// is numbered after it. The setters are test set-up, called from a test's
-// goroutine and never from a model's Update (the primary's reader), which is
-// what makes the barrier safe; it is bounded by the Stub's own close, like
-// every other flush here.
+// is numbered after it. It is bounded by the Stub's own close, like every
+// other flush here.
+//
+// The flush waits for the primary's delivery (agent.EventLog.Flush), which is
+// a constraint on the test that calls a setter — one no suite test reaches:
+// on a Stub with a primary, a setter called while nobody reads that primary
+// and its buffer (256 events) is full blocks until someone does, and one
+// called from the primary's reader — a model's Update — would wait on itself.
+// The setters are test set-up, called from a test's goroutine.
 func (s *Stub) flushSetter() { _ = s.log.Flush(context.Background(), s.closed) }
 
 // SetTitle is /rename, with the live session's semantics: it replaces

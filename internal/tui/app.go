@@ -492,10 +492,16 @@ type Model struct {
 	// the edit displaced and Esc puts back. queueEditCtx is the shell context
 	// that row was queued with, held out of the composer for the length of the
 	// edit and put back in front of whatever is saved (plan 022 §3.6).
+	// queueEditVer is the row's version when the edit began: a save of the
+	// edit is a check-and-edit against it (plan 027 §3.13, C22), so a row
+	// another client changed meanwhile refuses the save rather than being
+	// overwritten; the refusal refreshes it to the row the band then shows,
+	// for a second Enter that saves over that change knowingly.
 	queueEdit    string
 	queueEditPos int
 	editDraft    string
 	queueEditCtx string
+	queueEditVer int
 	// confirm is the send-now waiting for an answer. The confirm line is
 	// client-local UI: nothing is taken from anywhere and the engine has not
 	// heard of it. The send-now it turns into, on the other hand, is the
@@ -2677,11 +2683,12 @@ func (m Model) submit(text string, mode engine.SubmitMode, fromRow string, then 
 		return then(m, engine.SubmitResult{}, nil)
 	}
 	if fromRow != "" {
-		// The engine sends the row's own text, so the row the model draws is
+		// The engine sends the row's own text, so what this client asks with is
 		// read from the band it is looking at rather than from whatever the
-		// caller remembered. In S1b there is one client, so the two are the same
-		// text; a second client editing a row between the read and the submit is
-		// S2's problem, with a receipt to answer it.
+		// caller remembered. It is not what the sent row is drawn from: another
+		// client can edit the row between this read and the engine taking it,
+		// and a turn started from it draws the text the engine answers it
+		// started with (SubmitResult.Text, submitted).
 		if row, ok := m.queuedRow(fromRow); ok {
 			text = row.Text
 		}
@@ -2721,12 +2728,17 @@ func (m Model) submitted(text string, mode engine.SubmitMode, fromRow string, c 
 		} else {
 			// The optimistic row: this client's own send, drawn at Enter and
 			// at its own clock, before any event about the turn exists. The
-			// started that follows is its echo (applyTurnStarted).
-			m.addUser(text)
+			// started that follows is its echo (applyTurnStarted). It is the
+			// text the turn started with, as the engine answers it — for a
+			// typed send the text sent, for a row the row's text as the engine
+			// took it, which another client may have edited since this one
+			// read the band (plan 027 §3.13, "Two-client correctness").
+			m.addUser(res.Text)
 			m.beginTurn(res.Turn)
 			m.ownTurn = res.Turn
 		}
 		if fromRow == "" {
+			// The composer's draft is matched against what this client sent.
 			m.clearMatchingDraft(text)
 		}
 	case res.Armed:

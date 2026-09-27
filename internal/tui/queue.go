@@ -204,13 +204,17 @@ func (m *Model) note(text string) {
 // that means queue-ONLY, and the TUI has no such action: its band edits and
 // removes rows, it never adds one without meaning to send it.
 
+// queueErrNote is a refused queue verb as one line. The two refusals it names
+// are matched by sentinel (plan 027 §3.13, "Errors by sentinel"), not by the
+// error's text: over the socket the error is the remote client's
+// reconstruction, whose Is answers for the sentinel whatever its text says.
 func queueErrNote(err error) string {
 	switch {
 	case err == nil:
 		return ""
-	case strings.Contains(err.Error(), "queue is full"):
+	case errors.Is(err, agent.ErrQueueFull):
 		return "queue full"
-	case strings.Contains(err.Error(), "too long"):
+	case errors.Is(err, agent.ErrQueueTextTooLong):
 		return "message too long"
 	default:
 		return sanitizeLine(err.Error())
@@ -336,6 +340,12 @@ const (
 	noAnswerClearNote  = "no answer from the session — the queue may not have been cleared"
 	noAnswerRowNote    = "no answer from the session — the row may have changed"
 )
+
+// staleEditNote is a queue edit refused ErrStaleVersion: another client
+// changed the row after this edit began, so this edit was not written over it
+// (plan 027 §4 behaviour change 9). The draft and the edit are kept, and the
+// edit's version is refreshed, so Enter again saves over that change.
+const staleEditNote = "the message changed — your edit was not saved; Enter again saves over it"
 
 // unqueueCall is an Unqueue of row id, sent as c, as a gated call: its answer
 // is the error alone, and a continuation that succeeded shows the row gone
@@ -463,6 +473,11 @@ func (m *Model) declineStrongSend() {
 // past — and could delete, or corrupt — is not text they wrote. It is held
 // aside here and put back by saveQueueEdit, so the row keeps the output it was
 // queued with whatever the edit does to the message (plan 022 §3.6).
+//
+// The row's version is recorded too, as it stands in the band this edit was
+// begun from: it is what a save of this edit is checked against, so the edit
+// applies only to the row the user loaded — until a refusal has told the user
+// the row changed, and refreshed it (saveQueueEdit).
 func (m *Model) startQueueEdit(p agent.QueuedPrompt) {
 	if m.queueEdit == "" {
 		// Only the first edit displaces a draft. Moving from one row to
@@ -470,6 +485,7 @@ func (m *Model) startQueueEdit(p agent.QueuedPrompt) {
 		m.editDraft = m.input.Value()
 	}
 	m.queueEdit = p.ID
+	m.queueEditVer = p.Version
 	m.queueEditPos = m.queueSel
 	block, text := agent.SplitShellContext(p.Text)
 	m.queueEditCtx = block
@@ -479,16 +495,27 @@ func (m *Model) startQueueEdit(p agent.QueuedPrompt) {
 	m.queueFocus = false
 }
 
-// saveQueueEdit writes the composer back into the row. The edit is
-// unconditional — expectedVersion nil — because the TUI is the only client of its
-// engine in S1b; the check-and-edit is what a second one will pass a version to.
+// saveQueueEdit writes the composer back into the row. The edit is a
+// check-and-edit (plan 027 §3.13, "Two-client correctness"): it carries the
+// row's version as it was when the edit began (startQueueEdit), and another
+// client's edit since — folded here or not — refuses it with ErrStaleVersion
+// rather than being silently overwritten. The refusal keeps the edit open with
+// the text the user wrote and says the message changed; the band is the
+// fold's, which shows the other client's text once its edit is folded. The
+// refusal also refreshes the edit's version to the row's as this band shows it
+// then, so a second Enter knowingly saves over the change the note told the
+// user of — never over one this client's fold had not shown at the refusal: a
+// change still on its way then, or one made since, refuses that Enter too, and
+// refreshes the version again. A row restored after a refused drain keeps its
+// id and its version (plan 027 X1), so an edit begun before that drain still
+// applies after it.
 //
-// The call goes through the command gate (§3.12): the text and the command id
-// are read in the Update that saves; the edit's end, the band, and the
-// caller's own post-call work (then — Ctrl+L's send of the saved row) are the
-// continuation. A save that did not answer (ErrNoAnswer) stays in edit mode —
-// the composer still holds the text, so nothing is lost and Enter saves again
-// — notes that the row may have changed, and shows the fold's band.
+// The call goes through the command gate (§3.12): the text, the version and
+// the command id are read in the Update that saves; the edit's end, the band,
+// and the caller's own post-call work (then — Ctrl+L's send of the saved row)
+// are the continuation. A save that did not answer (ErrNoAnswer) stays in edit
+// mode — the composer still holds the text, so nothing is lost and Enter saves
+// again — notes that the row may have changed, and shows the fold's band.
 func (m Model) saveQueueEdit(then linkThen) (Model, tea.Cmd) {
 	id := m.queueEdit
 	text := strings.TrimSpace(m.input.Value())
@@ -499,7 +526,9 @@ func (m Model) saveQueueEdit(then linkThen) (Model, tea.Cmd) {
 	if text == "" {
 		// An emptied edit is a cancel: an empty message is not a message. The
 		// shell context goes with it — it was context for the message that is
-		// no longer being sent, not a message of its own.
+		// no longer being sent, not a message of its own. It carries no
+		// version: a removal is not a check-and-edit, and Unqueue takes none —
+		// the user asked for the row to go, whatever it holds now.
 		return m.run(gateDeadline, unqueueCall(c, id),
 			func(m Model, r gateReply) (Model, tea.Cmd) {
 				if errors.Is(r.err, ErrNoAnswer) {
@@ -515,29 +544,43 @@ func (m Model) saveQueueEdit(then linkThen) (Model, tea.Cmd) {
 			})
 	}
 	edited := m.queueEditCtx + text
-	// The version the row will have once edited: the engine counts each edit
-	// (agent.PromptQueue.Edit), and this is the row as this client shows it.
-	version := 0
-	if row, ok := m.queuedRow(id); ok {
-		version = row.Version + 1
-	}
+	expected := m.queueEditVer
 	return m.run(gateDeadline,
 		func(ctx context.Context, b backend.Backend) (any, error) {
-			return nil, b.EditQueued(ctx, c, id, edited, nil)
+			return nil, b.EditQueued(ctx, c, id, edited, &expected)
 		},
 		func(m Model, r gateReply) (Model, tea.Cmd) {
 			switch {
 			case errors.Is(r.err, ErrNoAnswer):
 				return m.saveUnanswered(then)
+			case errors.Is(r.err, engine.ErrStaleVersion):
+				// Another client changed the row since this edit began: the
+				// edit stays open with the user's text, nothing is installed,
+				// and the band is the fold's. The edit now begins from the row
+				// as this band shows it, so the next Enter saves over the
+				// change the note has just told the user of — and only that
+				// one: a change this fold has not shown yet refuses it again.
+				// A row the band no longer holds keeps nothing to refresh
+				// from; syncQueue ends its edit.
+				if row, ok := m.queuedRow(id); ok && m.queueEdit == id {
+					m.queueEditVer = row.Version
+				}
+				m.note(staleEditNote)
+				return then(m)
 			case r.err != nil:
 				m.note(queueErrNote(r.err))
 				return then(m)
 			}
 			m.finishQueueEdit()
 			// The row holds the new text, from the result, until this edit's
-			// own event is folded (§3.12's table).
+			// own event is folded (§3.12's table) — at the version the engine
+			// committed, which the check makes an answer rather than a guess:
+			// the save carried expected, so its success says the engine's row
+			// was at expected (engine/queue.go:87's check), and the engine's
+			// edit adds exactly one in that same locked section
+			// (agent/queue.go:145's Version++ in PromptQueue.Edit).
 			m.noteResult(resultEntry{kind: resultRowEdited, cause: c.Cause(),
-				row: agent.QueuedPrompt{ID: id, Text: edited, Version: version}})
+				row: agent.QueuedPrompt{ID: id, Text: edited, Version: expected + 1}})
 			return then(m)
 		})
 }
@@ -558,6 +601,7 @@ func (m Model) saveUnanswered(then linkThen) (Model, tea.Cmd) {
 func (m *Model) finishQueueEdit() {
 	m.queueEdit = ""
 	m.queueEditCtx = ""
+	m.queueEditVer = 0
 	m.input.SetValue(m.editDraft)
 	m.editDraft = ""
 	m.resetSlash()

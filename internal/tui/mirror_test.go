@@ -341,6 +341,282 @@ func TestARestoredRowReappears(t *testing.T) {
 	noOverlays(t, r.m(), "the row restored and rerun")
 }
 
+// editRow is a schedule's keys for an edit of the band's first row: the band
+// focused, the row loaded into the composer, its text replaced by text — not
+// saved.
+func editRow(r *schedRun, text string) {
+	r.t.Helper()
+	r.key(tea.KeyMsg{Type: tea.KeyUp})
+	r.key(enter())
+	if r.m().queueEdit == "" {
+		r.t.Fatal("prepare: no row is being edited")
+	}
+	for range r.m().input.Value() {
+		r.key(tea.KeyMsg{Type: tea.KeyBackspace})
+	}
+	r.typeText(text)
+}
+
+// TestASentRowShowsTheTextThatWasSent (plan 027 §3.13, "Two-client
+// correctness"; A23): another client edits a queued row after this client
+// read it from its band and before this client's send-now of it reaches the
+// engine. The turn starts with the row's text as the engine took it — the
+// other client's — and so does the user row this client draws for it: the
+// optimistic row is SubmitResult.Text, not the text this client read, and the
+// transcript never shows a message the agent was not sent.
+func TestASentRowShowsTheTextThatWasSent(t *testing.T) {
+	for _, mode := range frameGateModes {
+		t.Run(mode.name, func(t *testing.T) {
+			r := newSchedRun(t, mode.sync)
+			strandedRows(r, "ROW")
+			row := r.m().queue[0]
+			r.key(tea.KeyMsg{Type: tea.KeyUp})
+			if sel, ok := r.m().queueSelected(); !ok || sel.ID != row.ID || sel.Text != "ROW" {
+				t.Fatalf("fixture: the band's selection is %+v, %v", sel, ok)
+			}
+			// Another client edits the row; this client has not folded it.
+			if err := r.eng.EditQueued(otherClient(t, r.m()), row.ID, "THEIRS", nil); err != nil {
+				t.Fatal(err)
+			}
+			r.key(tea.KeyMsg{Type: tea.KeyCtrlL})
+			if r.m().turnID == "" || r.m().queueHasID(row.ID) {
+				t.Fatalf("fixture: the send-now: turn %q, band %+v — want a turn begun from the row", r.m().turnID, r.m().queue)
+			}
+			if got := texts(r.m(), entryUser); !slices.Equal(got, []string{"THEIRS"}) {
+				t.Fatalf("the sent row reads %q, want the text the turn started with, THEIRS", got)
+			}
+			// Folded, the turn's own started is the row's echo: still the one
+			// row, the text the agent was sent.
+			r.feedUntil(endings(1))
+			if got := texts(r.m(), entryUser); !slices.Equal(got, []string{"THEIRS"}) {
+				t.Fatalf("once folded the user rows are %q, want THEIRS once", got)
+			}
+			assertPrompts(t, r.stub, "THEIRS")
+			noOverlays(t, r.m(), "the send folded")
+		})
+	}
+}
+
+// TestTwoEditorsDoNotOverwriteEachOther (plan 027 §3.13, "Two-client
+// correctness"; §4 behaviour change 9; A23): two clients edit one queued row.
+// The other client saves first; this client's save, begun from the row's
+// earlier version, is refused stale_version — the other client's text stands
+// — and keeps the edit open with the text the user wrote, with a note saying
+// the message changed and that Enter again saves over it; nothing is
+// installed, and the band is the fold's row. The refusal refreshes the edit's
+// version to the row the band shows then, so the second Enter saves over the
+// change the note told of — and only that change: one the fold had not shown
+// at the refusal (still on its way, or made since) refuses that Enter too, and
+// refreshes the version again.
+//
+// The brief's v0/v1 schedule for astra r53 1 (B's unfolded edit, then A's
+// save) is the "on its way" case: with the check, A's save is a stale refusal
+// that installs no overlay, so no version is shown that the engine did not
+// commit.
+func TestTwoEditorsDoNotOverwriteEachOther(t *testing.T) {
+	type step func(r *schedRun, row agent.QueuedPrompt)
+	// theirs is the other client's edit of the row, checked against version v.
+	theirs := func(text string, v int) step {
+		return func(r *schedRun, row agent.QueuedPrompt) {
+			r.t.Helper()
+			if err := r.eng.EditQueued(otherClient(r.t, r.m()), row.ID, text, &v); err != nil {
+				r.t.Fatalf("fixture: the other client's save of %q: %v", text, err)
+			}
+		}
+	}
+	fold := func(r *schedRun, _ agent.QueuedPrompt) { r.feed() }
+	// refused is this client's Enter, refused: the edit kept with MINE, the
+	// note this Enter's own, the engine's row the other client's want at its
+	// version, nothing installed, and the edit's version refreshed to ver.
+	refused := func(want string, at, ver int) step {
+		return func(r *schedRun, row agent.QueuedPrompt) {
+			r.t.Helper()
+			m := r.m()
+			m.copyNote = ""
+			r.inner(m)
+			r.key(enter())
+			m = r.m()
+			if m.queueEdit != row.ID || m.input.Value() != "MINE" {
+				r.t.Fatalf("a refused save: editing %q with %q, want the edit of %s kept with MINE", m.queueEdit, m.input.Value(), row.ID)
+			}
+			if m.copyNote != staleEditNote {
+				r.t.Fatalf("a refused save: the note is %q, want %q", m.copyNote, staleEditNote)
+			}
+			if got := queuedRows(m); len(got) != 1 || got[0].Text != want || got[0].Version != at {
+				r.t.Fatalf("a refused save: the engine's queue is %+v, want the other client's %q at version %d", got, want, at)
+			}
+			noOverlays(r.t, m, "a refused save")
+			if m.queueEditVer != ver {
+				r.t.Fatalf("a refused save: the edit's version is %d, want %d", m.queueEditVer, ver)
+			}
+		}
+	}
+	// saved is this client's Enter, saving over the other client's change at
+	// version at: the edit done, and the band's row, from the result, the
+	// engine's own — text and version — before the edit's event is folded.
+	saved := func(at int) step {
+		return func(r *schedRun, row agent.QueuedPrompt) {
+			r.t.Helper()
+			m := r.m()
+			m.copyNote = ""
+			r.inner(m)
+			r.key(enter())
+			m = r.m()
+			if m.queueEdit != "" || m.copyNote != "" {
+				r.t.Fatalf("the save: editing %q, note %q — want it saved", m.queueEdit, m.copyNote)
+			}
+			eq := queuedRows(m)
+			if len(eq) != 1 || eq[0].Text != "MINE" || eq[0].Version != at+1 {
+				r.t.Fatalf("the save: the engine's queue is %+v, want MINE at version %d", eq, at+1)
+			}
+			if len(m.queue) != 1 || m.queue[0].Text != eq[0].Text || m.queue[0].Version != eq[0].Version {
+				r.t.Fatalf("the save's result shows %+v, want the engine's row %+v", m.queue, eq[0])
+			}
+			r.feed()
+			if got := r.m().queue; len(got) != 1 || got[0].Text != "MINE" || got[0].Version != at+1 {
+				r.t.Fatalf("once folded the band draws %+v, want MINE at version %d", got, at+1)
+			}
+			noOverlays(r.t, r.m(), "the save folded")
+		}
+	}
+	for _, c := range []struct {
+		name  string
+		steps []step
+	}{
+		{"the fold has shown the change", []step{
+			theirs("THEIRS", 0), fold,
+			refused("THEIRS", 1, 1),
+			saved(1),
+		}},
+		{"the change still on its way", []step{
+			theirs("THEIRS", 0),
+			// Nothing of it in the fold: nothing to save over yet.
+			refused("THEIRS", 1, 0),
+			refused("THEIRS", 1, 0),
+			fold,
+			refused("THEIRS", 1, 1),
+			saved(1),
+		}},
+		{"the other client edits again", []step{
+			theirs("THEIRS", 0), fold,
+			refused("THEIRS", 1, 1),
+			theirs("AGAIN", 1), fold,
+			refused("AGAIN", 2, 2),
+			saved(2),
+		}},
+	} {
+		for _, mode := range frameGateModes {
+			t.Run(c.name+"/"+mode.name, func(t *testing.T) {
+				r := newSchedRun(t, mode.sync)
+				queuedBehind(r, "ROW")
+				row := queuedRowOf(t, r.m(), "ROW")
+				if row.Version != 0 {
+					t.Fatalf("fixture: the row is at version %d", row.Version)
+				}
+				editRow(r, "MINE")
+				if r.m().queueEditVer != row.Version {
+					t.Fatalf("the edit began from version %d, want the row's %d", r.m().queueEditVer, row.Version)
+				}
+				for _, s := range c.steps {
+					s(r, row)
+				}
+			})
+		}
+	}
+}
+
+// TestAnEditsResultIsTheVersionTheEngineCommitted (astra r53 1): a saved
+// edit's row shows, until its own event is folded, the version the engine
+// committed — the check's answer, not a guess from the band — so an edit of
+// the same row begun from it before that fold is checked against the right
+// version and saves, rather than being refused by this client's own edit.
+func TestAnEditsResultIsTheVersionTheEngineCommitted(t *testing.T) {
+	for _, mode := range frameGateModes {
+		t.Run(mode.name, func(t *testing.T) {
+			r := newSchedRun(t, mode.sync)
+			queuedBehind(r, "ROW")
+			for i, text := range []string{"ONE", "TWO"} {
+				editRow(r, text)
+				r.key(enter())
+				m := r.m()
+				if m.queueEdit != "" {
+					t.Fatalf("save %d: still editing, note %q", i+1, m.copyNote)
+				}
+				eq := queuedRows(m)
+				if len(eq) != 1 || eq[0].Text != text || eq[0].Version != i+1 {
+					t.Fatalf("save %d: the engine's queue is %+v, want %s at version %d", i+1, eq, text, i+1)
+				}
+				if len(m.queue) != 1 || m.queue[0].Text != eq[0].Text || m.queue[0].Version != eq[0].Version {
+					t.Fatalf("save %d: the result shows %+v, want the engine's row %+v", i+1, m.queue, eq[0])
+				}
+			}
+			r.feed()
+			if got := r.m().queue; len(got) != 1 || got[0].Text != "TWO" || got[0].Version != 2 {
+				t.Fatalf("once folded the band draws %+v, want TWO at version 2", got)
+			}
+			noOverlays(t, r.m(), "both edits folded")
+		})
+	}
+}
+
+// TestAnEditBegunBeforeARefusedDrainAppliesAfterIt is X1's pin for C22 (plan
+// 027, execution amendment X1): a row the drain takes and the agent's own turn
+// refuses is put back with its own id and version, so an edit begun before
+// that drain — checked against the version it began from — applies after it,
+// and the row then runs with the edited text.
+func TestAnEditBegunBeforeARefusedDrainAppliesAfterIt(t *testing.T) {
+	for _, mode := range frameGateModes {
+		t.Run(mode.name, func(t *testing.T) {
+			r := newSchedRun(t, mode.sync)
+			queuedBehind(r, "ROW")
+			row := queuedRowOf(t, r.m(), "ROW")
+			editRow(r, "MINE")
+			// The working turn ends and the drain takes the row; the agent
+			// has begun a turn of its own by the time the claim is answered,
+			// and refuses it. The agent's turn is up before the refusal, so
+			// the restored row's paced recheck finds it running and leaves the
+			// row queued until it ends.
+			sc := r.sess.Script(&scriptedTurn{claimed: make(chan struct{}), openWhen: make(chan struct{}), refuse: agent.ErrForeignTurn})
+			endHeldTurn(t, r.sess)
+			awaitBarrier(t, sc.claimed, "the drain claiming the row")
+			r.stub.SetForeignTurn(agent.ForeignTurnInfo{ID: "agent-1", Text: "the agent's own", Running: true})
+			sc.Open()
+			restored := func(evs []agent.Event) bool {
+				return slices.ContainsFunc(evs, func(ev agent.Event) bool {
+					return ev.Type == agent.EventQueue && ev.QueueChange == agent.QueueQueued && ev.Queue != nil && ev.Queue.ID == row.ID
+				})
+			}
+			// The drain's sent and the restoring queued, not folded here: the
+			// edit is still open over the row as this client last saw it.
+			evs := r.until(restored)
+			if got := queuedRows(r.m()); len(got) != 1 || got[0].ID != row.ID || got[0].Version != row.Version {
+				t.Fatalf("fixture: the engine's queue is %+v, want the row restored at version %d", got, row.Version)
+			}
+			r.key(enter())
+			if m := r.m(); m.queueEdit != "" || m.copyNote == staleEditNote {
+				t.Fatalf("the save after the restore: editing %q, note %q — want it saved", m.queueEdit, m.copyNote)
+			}
+			if got := queuedRows(r.m()); len(got) != 1 || got[0].ID != row.ID || got[0].Text != "MINE" || got[0].Version != row.Version+1 {
+				t.Fatalf("the engine's queue is %+v, want the restored row edited to MINE at version %d", got, row.Version+1)
+			}
+			r.stepEvents(evs)
+			r.feed()
+			if got := r.m().queue; len(got) != 1 || got[0].Text != "MINE" {
+				t.Fatalf("once folded the band draws %+v, want MINE", got)
+			}
+			noOverlays(t, r.m(), "the restore and the edit folded")
+			// The agent's turn ends, and the row runs with the edited text.
+			r.stub.SetForeignTurn(agent.ForeignTurnInfo{ID: "agent-1", Running: false})
+			r.feedUntil(func(evs []agent.Event) bool {
+				return slices.ContainsFunc(evs, func(ev agent.Event) bool {
+					return ev.Type == agent.EventTurn && ev.Turn != nil && ev.Turn.Phase == agent.TurnStarted && ev.Turn.Text == "MINE"
+				})
+			})
+			assertPrompts(t, r.stub, "go", "ROW", "MINE")
+		})
+	}
+}
+
 // TestTheModeChipHoldsUntilItsDelta (§3.13, astra r2 11): a mode change's
 // success reaches the reducer with its result, and the chip holds the
 // confirmed mode until the fold's mode revision reaches it — it does not snap

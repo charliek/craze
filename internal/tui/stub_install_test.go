@@ -202,9 +202,10 @@ type installFrameRun struct {
 var frameHeader = regexp.MustCompile(`(?m)^--- frame \d+ (.*) ---\n`)
 
 // distinctFrames splits the frame bus's printed frames and keeps a run of
-// equal ones once: two runs that differ only by a frame equal to the one
-// before it — an Update that changed nothing drawn — published the same
-// frames for every wait to match.
+// equal ones once — an Update that changed nothing drawn publishes a twin of
+// the frame before it. So two runs' distinct frames are the same sequence
+// whether or not either published an extra identical frame: it tells distinct
+// frame sequences apart, not every frame a wait could match (sol r50 4).
 func distinctFrames(printed string) []string {
 	idx := frameHeader.FindAllStringSubmatchIndex(printed, -1)
 	var out []string
@@ -338,12 +339,16 @@ func eventKinds(evs []agent.Event) []string {
 // TestStubGoldensHoldWithTheInstall is plan 027 §3.13's named check for the
 // Stub's install, as the mirror onto the fold (C21) leaves it. C19 ran it with
 // the install on and off to show the install moved no frame while the mirror
-// still read the session live; since C21 the install is where every frame's
-// settings come from — the fold holds what the stream said — so with it off a
-// frame has no model, mode or catalog to draw, and the comparison with the
-// install off is gone. What it holds now, for representative Stub goldens — a
-// turn, a settings change through the dialog, a title delta, a load — in both
-// gate modes:
+// still read the session live — what that proved was the install's place on
+// the stream and each script's distinct frame sequence (distinctFrames), not
+// literally every frame a wait could match: an extra identical publication
+// matched as its twin did (sol r50 4). Since C21 the install is where every
+// frame's settings come from — the fold holds what the stream said — so with
+// it off a frame has no model, mode or catalog to draw, and the comparison
+// with the install off is gone (the distinct frames are only counted in the
+// log). What it holds now, for representative Stub goldens — a turn, a
+// settings change through the dialog, a title delta, a load — in both gate
+// modes:
 //
 //   - the captured frame is the golden's, byte for byte, with the install on
 //     (the golden suite itself runs with it on);
