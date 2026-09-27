@@ -16,15 +16,17 @@ import (
 func runReplayStubFrame(t *testing.T, cols, rows int, script string, replay []agent.Event) string {
 	t.Helper()
 	isolateSkillsHome(t)
-	stub := NewStub()
-	stub.Replay = replay
-	plain, _, err := RunFrameScript(Config{
-		Session:   stub,
-		Theme:     "tokyo-night",
-		Workspace: frameWorkspace(t),
-		Model:     "grok",
-		Yolo:      true,
-		Loading:   true,
+	plain, _, err := runFrameModes(t, func() Config {
+		stub := NewStub()
+		stub.Replay = replay
+		return Config{
+			Session:   stub,
+			Theme:     "tokyo-night",
+			Workspace: frameWorkspace(t),
+			Model:     "grok",
+			Yolo:      true,
+			Loading:   true,
+		}
 	}, cols, rows, script, FrameOpts{Timeout: 10 * time.Second})
 	if err != nil {
 		t.Fatalf("run replay frame script: %v", err)
@@ -113,26 +115,27 @@ func runLoadFrame(t *testing.T, script string, cols, rows int, keys string) stri
 	t.Helper()
 	bin := buildFakeAgent(t)
 	isolateSkillsHome(t)
-	ws := frameWorkspace(t)
 	prov := agent.CursorProvider()
-	sess := agent.New(agent.Options{
-		Binary:        bin,
-		ExtraArgs:     []string{"-script=" + script},
-		Workspace:     ws,
-		Force:         true,
-		Interactive:   true,
-		Stderr:        io.Discard,
-		Provider:      &prov,
-		LoadSessionID: "sess-load-1",
-	})
-	plain, _, err := RunFrameScript(Config{
-		Session:        sess,
-		Theme:          "tokyo-night",
-		Workspace:      ws,
-		Yolo:           true,
-		Provider:       prov,
-		ProviderLocked: true,
-		Loading:        true,
+	plain, _, err := runFrameModes(t, func() Config {
+		ws := frameWorkspace(t)
+		return Config{
+			Session: agent.New(agent.Options{
+				Binary:        bin,
+				ExtraArgs:     []string{"-script=" + script},
+				Workspace:     ws,
+				Force:         true,
+				Interactive:   true,
+				Stderr:        io.Discard,
+				Provider:      &prov,
+				LoadSessionID: "sess-load-1",
+			}),
+			Theme:          "tokyo-night",
+			Workspace:      ws,
+			Yolo:           true,
+			Provider:       prov,
+			ProviderLocked: true,
+			Loading:        true,
+		}
 	}, cols, rows, keys, FrameOpts{Timeout: 20 * time.Second})
 	if err != nil {
 		t.Fatalf("run %s frame: %v", script, err)

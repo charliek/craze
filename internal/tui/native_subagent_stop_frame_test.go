@@ -7,6 +7,8 @@ import (
 	"testing"
 
 	"charm.land/fantasy"
+
+	"github.com/charliek/craze/internal/agent"
 )
 
 // Stopping one native sub-agent on screen (plan 026 §3.10, A12, V9): the stop
@@ -63,25 +65,29 @@ func afterStopped(stopped <-chan struct{}, parts ...[]fantasy.StreamPart) frameS
 // (frameSubagents' gate), so by the time the second's row is drawn the first is
 // in its held step and the stop cancels that step's stream.
 func TestFrameGoldenNativeSubagentStopRows80x24(t *testing.T) {
-	ws := frameWorkspace(t)
-	echo, two := newFrameRouter("test", "wire-echo"), newFrameRouter("test", "wire-two")
 	const first, second = "Look for TODO comments.", "Summarise the README."
-	firstAsked := make(chan struct{})
-	var once sync.Once
-	echo.asked = func(prompt string) {
-		if prompt == first {
-			once.Do(func() { close(firstAsked) })
+	// Each gate mode's run builds its session afresh (runFrameModes).
+	build := func() (agent.Session, string) {
+		ws := frameWorkspace(t)
+		echo, two := newFrameRouter("test", "wire-echo"), newFrameRouter("test", "wire-two")
+		firstAsked := make(chan struct{})
+		var once sync.Once
+		echo.asked = func(prompt string) {
+			if prompt == first {
+				once.Do(func() { close(firstAsked) })
+			}
 		}
+		stopped := make(chan struct{})
+		echo.route("go",
+			frameCalls(frameAgentCall("a1", "Find TODOs", first), frameAgentCall("a2", "Summarise README", second, "model", "test/two")),
+			frameParts(nativeTextParts("one stopped, one answered"), nativeFinishParts()))
+		echo.route(first, untilStopped(stopped, frameOpenText("two TODOs so far")))
+		two.route(second, afterStopped(stopped, nativeTextParts("README.md is one heading"), nativeFinishParts()))
+		sess := frameSubagents(t, ws, echo, two, &frameClock{}, firstAsked)
+		return sess, ws
 	}
-	stopped := make(chan struct{})
-	echo.route("go",
-		frameCalls(frameAgentCall("a1", "Find TODOs", first), frameAgentCall("a2", "Summarise README", second, "model", "test/two")),
-		frameParts(nativeTextParts("one stopped, one answered"), nativeFinishParts()))
-	echo.route(first, untilStopped(stopped, frameOpenText("two TODOs so far")))
-	two.route(second, afterStopped(stopped, nativeTextParts("README.md is one heading"), nativeFinishParts()))
-	sess := frameSubagents(t, ws, echo, two, &frameClock{}, firstAsked)
 
-	got := runNativeSubagentFrame(t, sess, ws, 80, 24,
+	got := runNativeSubagentFrame(t, build, 80, 24,
 		"<wait:idle>go<enter><wait:text:Summarise README  running><wait:text:Find TODOs  0s>"+
 			"<wait:text:Summarise README  0s><down><backspace><wait:text:one stopped, one answered><wait:idle>")
 	assertGolden(t, "native-subagent-stop-rows-80x24", 80, 24, got)
@@ -104,17 +110,21 @@ func TestFrameGoldenNativeSubagentStopRows80x24(t *testing.T) {
 // its banner turns to the finished child's: cancelled, and saying the user
 // stopped it. The parent's turn goes on to its answer behind the view.
 func TestFrameGoldenNativeSubagentStopView100x30(t *testing.T) {
-	ws := frameWorkspace(t)
-	writeFrameFile(t, ws, "main.go", "package main\n")
-	echo, two := newFrameRouter("test", "wire-echo"), newFrameRouter("test", "wire-two")
 	const task = "Find every Go file and say what it does."
-	echo.route("go", frameCalls(frameAgentCall("a1", "Scan the repo", task)),
-		frameParts(nativeTextParts("the scan was stopped"), nativeFinishParts()))
-	echo.route(task, frameRead("r1", "main.go"))
-	echo.hold(task, frameOpenText("main.go is the entry point"))
-	sess := frameSubagents(t, ws, echo, two, &frameClock{}, nil)
+	// Each gate mode's run builds its session afresh (runFrameModes).
+	build := func() (agent.Session, string) {
+		ws := frameWorkspace(t)
+		writeFrameFile(t, ws, "main.go", "package main\n")
+		echo, two := newFrameRouter("test", "wire-echo"), newFrameRouter("test", "wire-two")
+		echo.route("go", frameCalls(frameAgentCall("a1", "Scan the repo", task)),
+			frameParts(nativeTextParts("the scan was stopped"), nativeFinishParts()))
+		echo.route(task, frameRead("r1", "main.go"))
+		echo.hold(task, frameOpenText("main.go is the entry point"))
+		sess := frameSubagents(t, ws, echo, two, &frameClock{}, nil)
+		return sess, ws
+	}
 
-	got := runNativeSubagentFrame(t, sess, ws, 100, 30,
+	got := runNativeSubagentFrame(t, build, 100, 30,
 		"<wait:idle>go<enter><wait:text:Scan the repo  running><wait:text:15 tok><down><enter>"+
 			"<wait:text:main.go is the entry point><wait:text:esc to return · del to stop><delete>"+
 			"<wait:text:stopped by the user><wait:idle>")

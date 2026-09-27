@@ -26,21 +26,25 @@ import (
 // after it — delivering the result the cancelled wake set aside, so its
 // request ends with the result and is routed as a wake's.
 func TestFrameEscStopsARunningWake(t *testing.T) {
-	ws := frameWorkspace(t)
-	echo := newFrameRouter("test", "wire-echo")
 	const task = "child work"
-	parentDone := make(chan struct{})
-	echo.route("go", frameCalls(frameBackgroundCall("a1", "job", task)),
-		thenClose(frameParts(nativeTextParts("started"), nativeFinishParts()), parentDone))
-	echo.route(task, after(parentDone, frameParts(nativeTextParts("did work"), nativeFinishParts())))
-	// The wake: held until its context ends, which Esc's cancel does.
-	echo.routeWake(heldFrameStep(nil, nil, make(chan struct{}), make(chan struct{})))
-	reply := frameParts(nativeTextParts("you are welcome"), nativeFinishParts())
-	echo.route("thanks", reply)
-	echo.routeWake(reply)
-	sess := frameBackground(t, ws, echo, &frameClock{})
+	// Each gate mode's run builds its session afresh (runFrameModes).
+	build := func() (agent.Session, string) {
+		ws := frameWorkspace(t)
+		echo := newFrameRouter("test", "wire-echo")
+		parentDone := make(chan struct{})
+		echo.route("go", frameCalls(frameBackgroundCall("a1", "job", task)),
+			thenClose(frameParts(nativeTextParts("started"), nativeFinishParts()), parentDone))
+		echo.route(task, after(parentDone, frameParts(nativeTextParts("did work"), nativeFinishParts())))
+		// The wake: held until its context ends, which Esc's cancel does.
+		echo.routeWake(heldFrameStep(nil, nil, make(chan struct{}), make(chan struct{})))
+		reply := frameParts(nativeTextParts("you are welcome"), nativeFinishParts())
+		echo.route("thanks", reply)
+		echo.routeWake(reply)
+		sess := frameBackground(t, ws, echo, &frameClock{})
+		return sess, ws
+	}
 
-	got := runNativeSubagentFrame(t, sess, ws, 100, 30,
+	got := runNativeSubagentFrame(t, build, 100, 30,
 		"<wait:idle>go<enter><wait:text:started><wait:idle><wait:text:the agent continues><esc>"+
 			"<wait:text:cancelled>thanks<enter><wait:text:you are welcome><wait:idle>")
 	assertFrameGolden(t, "", 100, 30, got, []string{
@@ -58,17 +62,21 @@ func TestFrameEscStopsARunningWake(t *testing.T) {
 // craze's own working and no wake running cancels nothing — the background
 // child is not a turn, and it runs on.
 func TestFrameEscWhileIdleLeavesABackgroundChildRunning(t *testing.T) {
-	ws := frameWorkspace(t)
-	writeFrameFile(t, ws, "main.go", "package main\n")
-	echo := newFrameRouter("test", "wire-echo")
 	const task = "Find every Go file and say what it does."
-	echo.route("go", frameCalls(frameBackgroundCall("a1", "Scan the repo", task)),
-		frameParts(nativeTextParts("started the scan in the background"), nativeFinishParts()))
-	echo.route(task, frameRead("r1", "main.go"))
-	echo.hold(task, frameOpenText("main.go is the entry point"))
-	sess := frameBackground(t, ws, echo, &frameClock{})
+	// Each gate mode's run builds its session afresh (runFrameModes).
+	build := func() (agent.Session, string) {
+		ws := frameWorkspace(t)
+		writeFrameFile(t, ws, "main.go", "package main\n")
+		echo := newFrameRouter("test", "wire-echo")
+		echo.route("go", frameCalls(frameBackgroundCall("a1", "Scan the repo", task)),
+			frameParts(nativeTextParts("started the scan in the background"), nativeFinishParts()))
+		echo.route(task, frameRead("r1", "main.go"))
+		echo.hold(task, frameOpenText("main.go is the entry point"))
+		sess := frameBackground(t, ws, echo, &frameClock{})
+		return sess, ws
+	}
 
-	got := runNativeSubagentFrame(t, sess, ws, 80, 24,
+	got := runNativeSubagentFrame(t, build, 80, 24,
 		"<wait:idle>go<enter><wait:text:started the scan in the background><wait:idle><wait:text:15 tok><esc><wait:text:15 tok>")
 	assertFrameGolden(t, "", 80, 24, got,
 		[]string{"○ general-purpose  Scan the repo  bg · 0s · 15 tok", "started the scan in the background"},

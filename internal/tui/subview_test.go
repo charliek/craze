@@ -11,6 +11,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/charliek/craze/internal/agent"
+	"github.com/charliek/craze/internal/transcript"
 )
 
 func openView(t *testing.T, m Model) Model {
@@ -53,7 +54,7 @@ func tallChild(t *testing.T, m Model, n int) Model {
 	t.Helper()
 	// Grok: a receipt-only provider would rebuild the view from the receipt.
 	stubOf(t, m).SetProvider(agent.GrokProvider())
-	m.refreshSnap()
+	m.recompute()
 	tr := m.ensureSub("task-1")
 	for i := 0; i < n; i++ {
 		tr.appendEntry(entry{kind: entryAssistant, text: fmt.Sprintf("childline%d", i)}, m.now())
@@ -429,13 +430,48 @@ func TestDegradationToZeroRowsKeepsTheViewOpen(t *testing.T) {
 	}
 }
 
+// evictFinishedChild takes fin — the one child of a roster that holds it
+// alone — out of the roster the only way the live session's roster lets a
+// child go (agent/subagents.go evictFinishedLocked, the fold's evictFinished):
+// it finishes, then as many other children as the roster keeps finished rows
+// spawn and finish after it, so it is the oldest finish past the bound. Each
+// step is the roster event a live session sends, beside the roster that step
+// leaves on the Stub.
+func evictFinishedChild(t *testing.T, m Model, fin agent.SubagentInfo) Model {
+	t.Helper()
+	stub := stubOf(t, m)
+	roster := []agent.SubagentInfo{fin}
+	send := func(info agent.SubagentInfo, change string) {
+		stub.SetSubagents(roster)
+		m = feed(t, m, agent.Event{Type: agent.EventSubagent, Subagent: &info, SubagentChange: change})
+	}
+	send(fin, agent.SubagentChangeFinished)
+	bound := transcript.DefaultBounds().Agents
+	for i := 1; i <= bound; i++ {
+		other := agent.SubagentInfo{ID: fmt.Sprintf("other-%02d", i), ToolCallID: fmt.Sprintf("other-%02d", i), Description: "another child", Status: agent.SubagentRunning}
+		roster = append(roster, other)
+		send(other, agent.SubagentChangeSpawned)
+		other.Status = agent.SubagentCompleted
+		roster[len(roster)-1] = other
+		if i == bound {
+			// bound+1 finished rows: the oldest finish, fin, is the one
+			// the roster drops.
+			roster = roster[1:]
+		}
+		send(other, agent.SubagentChangeFinished)
+	}
+	if m.shared.Sub(fin.ID) != nil {
+		t.Fatalf("fixture: the shared model kept %s, the oldest of %d finished children", fin.ID, bound+1)
+	}
+	return m
+}
+
 func TestEvictionWhileViewedKeepsTombstoneUntilEsc(t *testing.T) {
 	now := time.Date(2026, 9, 12, 10, 0, 0, 0, time.UTC)
 	m := agentModel(t, &now)
 	m = applyInFlight(t, m, []agent.ToolEvent{taskTool("task-1", "count lines", "in_progress")})
 	m = openView(t, m)
-	stubOf(t, m).SetSubagents(nil)
-	m = poke(t, m)
+	m = evictFinishedChild(t, m, subagentsFromTools([]agent.ToolEvent{finishedTaskTool("task-1", "count lines")})[0])
 	if m.viewing != "task-1" {
 		t.Fatal("eviction while viewed must keep the tombstone")
 	}
@@ -755,6 +791,12 @@ func TestRespawnedAttemptResetsRowTiming(t *testing.T) {
 	}
 }
 
+// TestFinishOnlySightingLeavesNoStaleStamp: a record whose only sighting is its
+// finish. The roster is the fold's (plan 027 §3.13), and the fold upserts a row
+// from the event that carries it, so the finish-only row is on the roster, with
+// the done stamp its linger counts from; once the roster lets it go — evicted
+// past the finished rows it keeps — the stamp goes with it, so a later record
+// with the same id cannot measure its linger from this stale clock.
 func TestFinishOnlySightingLeavesNoStaleStamp(t *testing.T) {
 	now := time.Date(2026, 9, 12, 10, 0, 0, 0, time.UTC)
 	m := agentModel(t, &now)
@@ -762,8 +804,15 @@ func TestFinishOnlySightingLeavesNoStaleStamp(t *testing.T) {
 	ghost := agent.SubagentInfo{ID: "ghost", Status: agent.SubagentCompleted, Description: "never spawned here"}
 	tm, _ := m.Update(eventMsg{agent.Event{Type: agent.EventSubagent, Subagent: &ghost, SubagentChange: agent.SubagentChangeFinished}})
 	m = tm.(Model)
+	if _, ok := liveInfo(m.snap.Subagents, "ghost"); !ok {
+		t.Fatal("the fold's roster holds the finish-only row the event carried")
+	}
+	if _, ok := m.agentDone["ghost"]; !ok {
+		t.Fatal("the finish-only row keeps its done stamp while it is on the roster")
+	}
+	m = evictFinishedChild(t, m, ghost)
 	if _, ok := m.agentDone["ghost"]; ok {
-		t.Fatal("a record the snapshot never held must not keep a done stamp")
+		t.Fatal("a record the roster no longer holds must not keep a done stamp")
 	}
 }
 
@@ -771,7 +820,7 @@ func TestCursorFinishedWhileViewedGetsTheWarnBanner(t *testing.T) {
 	now := time.Date(2026, 9, 12, 10, 0, 0, 0, time.UTC)
 	m := agentModel(t, &now)
 	stubOf(t, m).SetProvider(agent.CursorProvider())
-	m.refreshSnap()
+	m.recompute()
 	m = applyInFlight(t, m, []agent.ToolEvent{taskTool("task-1", "count lines", "in_progress")})
 	m.status = statusWorking
 	m = openView(t, m)

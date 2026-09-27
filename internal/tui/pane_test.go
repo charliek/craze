@@ -707,7 +707,7 @@ func noteTexts(p *pane) []string {
 // r17: the shared model's todo-note dedupe is the session's and never resets,
 // and the pane's — which /clear resets — decides what the pane shows, in both
 // directions. The pane shows exactly the notes today's dedupe would, for the
-// list todosOf chose: a note the fold wrote is the display when the pane owes
+// event's own list: a note the fold wrote is the display when the pane owes
 // it, a note the pane owes that the fold did not write is written by the pane,
 // locally, at the event's At, and a note the fold wrote that the pane does not
 // owe gets no row.
@@ -736,7 +736,7 @@ func TestTodoNotesAfterClearAreThePanes(t *testing.T) {
 		t.Helper()
 		step++
 		m = feed(t, m, agent.Event{Type: agent.EventTodos, Todos: list, At: base.Add(time.Duration(step) * time.Second)})
-		// Every list here is the event's own, so it is the one todosOf picks.
+		// Every list here is the event's own, which is the one the pane notes.
 		today.see(list)
 		if got := noteTexts(m.main); !slices.Equal(got, today.notes) {
 			t.Fatalf("step %d: the pane shows the notes %q, and today's dedupe %q", step, got, today.notes)
@@ -789,13 +789,12 @@ func TestTodoNotesAfterClearAreThePanes(t *testing.T) {
 
 // TestADelayedTodoListIsNotedOnce is the schedule review r17 found against
 // X31 as first pinned: an empty EventTodos and then a one-item list are both
-// published before the TUI consumes either. Applying the empty one,
-// refreshSnap already sees the newer list and todosOf falls back to it, so the
-// pane notes "tasks: 1 planned" from the snapshot, one event early; the next
-// event's fold writes the same note in the shared model. The pane shows it
-// once — today's dedupe over the lists todosOf chose — and the fold's note,
-// which the pane does not owe, gets no row; the events are still folded as
-// they came.
+// published before the TUI consumes either. It used to note "tasks: 1 planned"
+// from the live snapshot while applying the empty one, one event early, as the
+// pane's own row (todosOf's fallback). Since the mirror is the fold (plan 027
+// §3.13) the todos arm reads each event's own list: the empty one notes
+// nothing, and the second one's note — the fold's, at its own At — is the one
+// the pane shows. SF-44's lagged schedule cannot occur any more.
 func TestADelayedTodoListIsNotedOnce(t *testing.T) {
 	base := time.Date(2026, 9, 24, 9, 0, 0, 0, time.UTC)
 	m := sized(t)
@@ -803,24 +802,25 @@ func TestADelayedTodoListIsNotedOnce(t *testing.T) {
 	one := []agent.Todo{{ID: "1", Content: "Read", Status: "pending"}}
 	// The session's state has moved on to the list the second event carries.
 	stub.SetTodos(one)
-	m = feed(t, m,
-		agent.Event{Type: agent.EventTodos, At: base},
-		agent.Event{Type: agent.EventTodos, Todos: one, At: base.Add(time.Second)},
-	)
+	m = feed(t, m, agent.Event{Type: agent.EventTodos, At: base})
+	if got := noteTexts(m.main); len(got) != 0 {
+		t.Fatalf("the empty list noted %q: it carries nothing to note", got)
+	}
+	m = feed(t, m, agent.Event{Type: agent.EventTodos, Todos: one, At: base.Add(time.Second)})
 	var today todayTodoNotes
-	today.see(one) // the first event's list, as todosOf chose it
+	today.see(nil) // the first event's own list
 	today.see(one) // the second's
 	if got := noteTexts(m.main); !slices.Equal(got, today.notes) || len(got) != 1 {
 		t.Fatalf("the pane shows the notes %q, want today's %q", got, today.notes)
 	}
-	if got := shownRows(m.main); !got[0].local {
-		t.Fatalf("the note is the pane's own, written from the snapshot: %v", got)
+	if got := shownRows(m.main); got[0].local {
+		t.Fatalf("the note is the fold's, not the pane's own: %v", got)
 	}
-	if f := lastFact(t, m.main, "note", "tasks: 1 planned"); !f.At.Equal(base) {
-		t.Fatalf("the pane's note is stamped %v, want the first event's %v", f.At, base)
+	if f := lastFact(t, m.main, "note", "tasks: 1 planned"); !f.At.Equal(base.Add(time.Second)) {
+		t.Fatalf("the note is stamped %v, want the second event's %v", f.At, base.Add(time.Second))
 	}
 	// The shared model folded both events as they came: its one note is the
-	// second event's, which no row shows.
+	// second event's, and the pane's row shows it.
 	var notes []*transcript.Entry
 	for _, e := range m.shared.Main.Entries() {
 		if e.Kind == transcript.KindNote {
@@ -830,8 +830,8 @@ func TestADelayedTodoListIsNotedOnce(t *testing.T) {
 	if len(notes) != 1 || notes[0].Text != "tasks: 1 planned" || !notes[0].At.Equal(base.Add(time.Second)) {
 		t.Fatalf("the shared model's notes: %+v", notes)
 	}
-	if m.main.ids[notes[0].ID] != nil {
-		t.Fatal("the fold's note, which the pane does not owe, has a row")
+	if m.main.ids[notes[0].ID] == nil {
+		t.Fatal("the fold's note, which the pane owes, has no row")
 	}
 }
 

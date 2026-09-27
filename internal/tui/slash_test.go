@@ -613,7 +613,7 @@ func TestCommandsUpdateClampsTheSlashSelection(t *testing.T) {
 		t.Fatalf("fixture: selection %d", m.slashSel)
 	}
 	setStubCommands(stub, "cmda", "cmdb", "cmdc")
-	m = poke(t, m)
+	m = applyPending(t, m)
 	if len(m.filteredSlash()) != 3 {
 		t.Fatalf("the catalog should have shrunk: %v", slashNames(m))
 	}
@@ -770,7 +770,7 @@ func slashPluginModel(t *testing.T, entries []agent.PluginEntry, advertised ...s
 	t.Helper()
 	m, stub := slashModel(t, 100, 30, advertised...)
 	stub.SetPlugins(agent.ResolvePluginNames(entries, advertised, false))
-	m.refreshSnap()
+	m = republish(t, m)
 	return m
 }
 

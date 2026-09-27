@@ -101,15 +101,16 @@ func nativeFrameSession(t *testing.T, ws, mode string, model *nativeScriptedMode
 // agent — the id, coloured by what the provider says it means, with shift+tab
 // beside it (A7).
 func TestFrameGoldenNativePlanMode(t *testing.T) {
-	ws := frameWorkspace(t)
-	model := &nativeScriptedModel{provider: "test", wire: "wire-echo"}
-	model.steps = [][]fantasy.StreamPart{cat(nativeTextParts("still planning"), nativeFinishParts())}
-
-	got, _, err := RunFrameScript(Config{
-		Session:   nativeFrameSession(t, ws, "plan", model),
-		Theme:     "tokyo-night",
-		Workspace: ws,
-		Yolo:      true,
+	got, _, err := runFrameModes(t, func() Config {
+		ws := frameWorkspace(t)
+		model := &nativeScriptedModel{provider: "test", wire: "wire-echo"}
+		model.steps = [][]fantasy.StreamPart{cat(nativeTextParts("still planning"), nativeFinishParts())}
+		return Config{
+			Session:   nativeFrameSession(t, ws, "plan", model),
+			Theme:     "tokyo-night",
+			Workspace: ws,
+			Yolo:      true,
+		}
 	}, 100, 30, "<wait:idle>what should we do<enter><wait:text:still planning><wait:idle>",
 		FrameOpts{Timeout: 20 * time.Second})
 	if err != nil {
@@ -126,20 +127,21 @@ func TestFrameGoldenNativePlanMode(t *testing.T) {
 // in words — it presents a plan and the plan is accepted — and the offer is
 // still armed, because a native plan is a file rather than a reply.
 func TestFrameGoldenNativePlanOffer(t *testing.T) {
-	ws := frameWorkspace(t)
-	model := &nativeScriptedModel{provider: "test", wire: "wire-echo"}
-	model.onCall = writesThePlan(t)
-	model.steps = [][]fantasy.StreamPart{
-		nativeToolStep("c1", "exit_plan_mode", "{}"),
-		// Never reached: approving the plan ends the turn (D-51).
-		cat(nativeTextParts("never requested"), nativeFinishParts()),
-	}
-
-	got, _, err := RunFrameScript(Config{
-		Session:   nativeFrameSession(t, ws, "plan", model),
-		Theme:     "tokyo-night",
-		Workspace: ws,
-		Yolo:      true,
+	got, _, err := runFrameModes(t, func() Config {
+		ws := frameWorkspace(t)
+		model := &nativeScriptedModel{provider: "test", wire: "wire-echo"}
+		model.onCall = writesThePlan(t)
+		model.steps = [][]fantasy.StreamPart{
+			nativeToolStep("c1", "exit_plan_mode", "{}"),
+			// Never reached: approving the plan ends the turn (D-51).
+			cat(nativeTextParts("never requested"), nativeFinishParts()),
+		}
+		return Config{
+			Session:   nativeFrameSession(t, ws, "plan", model),
+			Theme:     "tokyo-night",
+			Workspace: ws,
+			Yolo:      true,
+		}
 	}, 100, 30, "<wait:idle>plan it<enter><wait:card>a<wait:text:"+planOfferPlaceholder+">",
 		FrameOpts{Timeout: 20 * time.Second})
 	if err != nil {
@@ -157,22 +159,23 @@ func TestFrameGoldenNativePlanOffer(t *testing.T) {
 // dimmed under its label. An option with none draws the row it always has,
 // which is what keeps every ACP question's frame where it was.
 func TestFrameGoldenNativeQuestion(t *testing.T) {
-	ws := frameWorkspace(t)
-	model := &nativeScriptedModel{provider: "test", wire: "wire-echo"}
-	model.steps = [][]fantasy.StreamPart{
-		nativeToolStep("c1", "ask_user_question", `{"questions":[{"question":"Which storage?",`+
-			`"header":"storage","options":[`+
-			`{"label":"sqlite","description":"one file, no server, good enough for a laptop"},`+
-			`{"label":"postgres","description":"a server to run, and every query it can answer"},`+
-			`{"label":"neither"}]}]}`),
-		cat(nativeTextParts("noted"), nativeFinishParts()),
-	}
-
-	got, _, err := RunFrameScript(Config{
-		Session:   nativeFrameSession(t, ws, "", model),
-		Theme:     "tokyo-night",
-		Workspace: ws,
-		Yolo:      true,
+	got, _, err := runFrameModes(t, func() Config {
+		ws := frameWorkspace(t)
+		model := &nativeScriptedModel{provider: "test", wire: "wire-echo"}
+		model.steps = [][]fantasy.StreamPart{
+			nativeToolStep("c1", "ask_user_question", `{"questions":[{"question":"Which storage?",`+
+				`"header":"storage","options":[`+
+				`{"label":"sqlite","description":"one file, no server, good enough for a laptop"},`+
+				`{"label":"postgres","description":"a server to run, and every query it can answer"},`+
+				`{"label":"neither"}]}]}`),
+			cat(nativeTextParts("noted"), nativeFinishParts()),
+		}
+		return Config{
+			Session:   nativeFrameSession(t, ws, "", model),
+			Theme:     "tokyo-night",
+			Workspace: ws,
+			Yolo:      true,
+		}
 	}, 100, 30, "<wait:idle>ask me<enter><wait:card>", FrameOpts{Timeout: 20 * time.Second})
 	if err != nil {
 		t.Fatalf("run frame script: %v", err)
@@ -195,19 +198,23 @@ func TestFrameGoldenNativeQuestion(t *testing.T) {
 // what a denied edit has always shown — the heading, failed, with no reason
 // beside it (§4's known limitation). The model reads the refusal and says so.
 func TestFrameGoldenNativePlanDenied(t *testing.T) {
-	ws := frameWorkspace(t)
-	writeFrameFile(t, ws, "notes.txt", "alpha\n")
-	model := &nativeScriptedModel{provider: "test", wire: "wire-echo"}
-	model.steps = [][]fantasy.StreamPart{
-		nativeToolStep("c1", "edit", `{"filePath":"notes.txt","oldString":"alpha","newString":"beta"}`),
-		cat(nativeTextParts("I cannot edit files in plan mode"), nativeFinishParts()),
-	}
-
-	got, _, err := RunFrameScript(Config{
-		Session:   nativeFrameSession(t, ws, "plan", model),
-		Theme:     "tokyo-night",
-		Workspace: ws,
-		Yolo:      true,
+	// Each gate mode's run has a workspace of its own, and each is checked.
+	var workspaces []string
+	got, _, err := runFrameModes(t, func() Config {
+		ws := frameWorkspace(t)
+		workspaces = append(workspaces, ws)
+		writeFrameFile(t, ws, "notes.txt", "alpha\n")
+		model := &nativeScriptedModel{provider: "test", wire: "wire-echo"}
+		model.steps = [][]fantasy.StreamPart{
+			nativeToolStep("c1", "edit", `{"filePath":"notes.txt","oldString":"alpha","newString":"beta"}`),
+			cat(nativeTextParts("I cannot edit files in plan mode"), nativeFinishParts()),
+		}
+		return Config{
+			Session:   nativeFrameSession(t, ws, "plan", model),
+			Theme:     "tokyo-night",
+			Workspace: ws,
+			Yolo:      true,
+		}
 	}, 100, 30, "<wait:idle>edit it<enter><wait:text:I cannot edit files in plan mode><wait:idle>",
 		FrameOpts{Timeout: 20 * time.Second})
 	if err != nil {
@@ -218,8 +225,10 @@ func TestFrameGoldenNativePlanDenied(t *testing.T) {
 		// The refusal reaches the model, never the row (transcript.go has no
 		// class on a ToolEvent).
 		[]string{"Rejected:", "+ beta", "- alpha"})
-	if body := readFrameFile(t, ws, "notes.txt"); body != "alpha\n" {
-		t.Fatalf("the workspace file is %q; a denied edit writes nothing", body)
+	for _, ws := range workspaces {
+		if body := readFrameFile(t, ws, "notes.txt"); body != "alpha\n" {
+			t.Fatalf("the workspace file is %q; a denied edit writes nothing", body)
+		}
 	}
 }
 
@@ -227,21 +236,22 @@ func TestFrameGoldenNativePlanDenied(t *testing.T) {
 // harness's own tool, the adapter projects the whole list into the snapshot and
 // one event, and the panel the ACP providers have always had draws it (A5).
 func TestFrameGoldenNativeTodos(t *testing.T) {
-	ws := frameWorkspace(t)
-	model := &nativeScriptedModel{provider: "test", wire: "wire-echo"}
-	model.steps = [][]fantasy.StreamPart{
-		nativeToolStep("c1", "todo_write", `{"todos":[`+
-			`{"id":"1","content":"Read main.go","status":"completed"},`+
-			`{"id":"2","content":"Edit main.go","status":"in_progress"},`+
-			`{"id":"3","content":"Run go vet","status":"pending"}]}`),
-		cat(nativeTextParts("done todos"), nativeFinishParts()),
-	}
-
-	got, _, err := RunFrameScript(Config{
-		Session:   nativeFrameSession(t, ws, "", model),
-		Theme:     "tokyo-night",
-		Workspace: ws,
-		Yolo:      true,
+	got, _, err := runFrameModes(t, func() Config {
+		ws := frameWorkspace(t)
+		model := &nativeScriptedModel{provider: "test", wire: "wire-echo"}
+		model.steps = [][]fantasy.StreamPart{
+			nativeToolStep("c1", "todo_write", `{"todos":[`+
+				`{"id":"1","content":"Read main.go","status":"completed"},`+
+				`{"id":"2","content":"Edit main.go","status":"in_progress"},`+
+				`{"id":"3","content":"Run go vet","status":"pending"}]}`),
+			cat(nativeTextParts("done todos"), nativeFinishParts()),
+		}
+		return Config{
+			Session:   nativeFrameSession(t, ws, "", model),
+			Theme:     "tokyo-night",
+			Workspace: ws,
+			Yolo:      true,
+		}
 	}, 100, 30, "<wait:idle>go<enter><wait:text:done todos><wait:idle>", FrameOpts{Timeout: 20 * time.Second})
 	if err != nil {
 		t.Fatalf("run frame script: %v", err)

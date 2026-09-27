@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"context"
 	"errors"
 	"strings"
 	"sync/atomic"
@@ -10,6 +11,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/charliek/craze/internal/agent"
+	"github.com/charliek/craze/internal/backend"
 	"github.com/charliek/craze/internal/engine"
 	"github.com/charliek/craze/internal/host"
 	"github.com/charliek/craze/internal/sessions"
@@ -20,18 +22,19 @@ import (
 // EventTurn{started} the model skips and which it draws.
 
 // stubOf is the one way a test reaches the *Stub a model's engine wraps: the
-// model itself keeps no session of its own (plan 024 §3.9 SF-03) — m.eng.Session()
-// is the only session left to ask for, and it fails the test rather than the
-// caller's next line when there is no engine, or the engine wraps something
-// other than a Stub.
+// model itself keeps no session of its own (plan 024 §3.9 SF-03) — the engine's
+// Session(), reached through the model's backend (engineOf), is the only session
+// left to ask for, and it fails the test rather than the caller's next line when
+// there is no engine, or the engine wraps something other than a Stub.
 func stubOf(t *testing.T, m Model) *Stub {
 	t.Helper()
 	if m.eng == nil {
 		t.Fatal("the model has no engine")
 	}
-	stub, ok := m.eng.Session().(*Stub)
+	eng := engineOf(t, m)
+	stub, ok := eng.Session().(*Stub)
 	if !ok {
-		t.Fatalf("the engine wraps %T, want *Stub", m.eng.Session())
+		t.Fatalf("the engine wraps %T, want *Stub", eng.Session())
 	}
 	return stub
 }
@@ -67,8 +70,8 @@ func TestClosingTheOwnerClosesTheEngineAndTheSession(t *testing.T) {
 	if m.owner.current() != m.eng {
 		t.Fatal("the owner and the model name different engines")
 	}
-	if m.eng.Session() != agent.Session(sess) {
-		t.Fatalf("the engine wraps %T, want the session it was given", m.eng.Session())
+	if engineOf(t, m).Session() != agent.Session(sess) {
+		t.Fatalf("the engine wraps %T, want the session it was given", engineOf(t, m).Session())
 	}
 
 	eng := m.owner.current()
@@ -80,7 +83,7 @@ func TestClosingTheOwnerClosesTheEngineAndTheSession(t *testing.T) {
 	}
 	// Close joined the engine's goroutines before it returned, and the engine
 	// admits nothing afterwards: there is no driver left to admit it to.
-	if _, err := eng.Submit(engine.Command{}, "after the close", engine.SubmitQueue, ""); err == nil {
+	if _, err := eng.Submit(context.Background(), engine.Command{}, "after the close", engine.SubmitQueue, ""); err == nil {
 		t.Fatal("a closed engine accepted a prompt")
 	}
 	// Idempotent, as the exit tail relies on: requestQuit closes it and finishRun
@@ -153,7 +156,7 @@ func TestSwappingTheSessionClosesTheOldEngine(t *testing.T) {
 				t.Fatalf("the old session was closed %d times, want once", got)
 			}
 			// The old engine is closed, which is what says its driver was joined.
-			if _, err := old.Submit(engine.Command{}, "after the swap", engine.SubmitQueue, ""); err == nil {
+			if _, err := old.Submit(context.Background(), engine.Command{}, "after the swap", engine.SubmitQueue, ""); err == nil {
 				t.Fatal("the old engine still admits prompts")
 			}
 			if got := second.closes.Load(); got != 0 {
@@ -216,10 +219,10 @@ func TestASecondEngineOnOneSessionIsRefused(t *testing.T) {
 func TestAStaleStartMessageLeavesTheNewEnginesGateShut(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
-		stale func(eng *engine.Engine) tea.Msg
+		stale func(eng backend.Backend) tea.Msg
 	}{
-		{"a stale startedMsg", func(eng *engine.Engine) tea.Msg { return startedMsg{eng: eng} }},
-		{"a stale errMsg", func(eng *engine.Engine) tea.Msg {
+		{"a stale startedMsg", func(eng backend.Backend) tea.Msg { return startedMsg{eng: eng} }},
+		{"a stale errMsg", func(eng backend.Backend) tea.Msg {
 			return errMsg{err: errors.New("the old session never came up"), eng: eng}
 		}},
 	} {
@@ -252,10 +255,10 @@ func TestAStaleStartMessageLeavesTheNewEnginesGateShut(t *testing.T) {
 			if m.status == statusError || m.startErr != nil {
 				t.Fatalf("a stale message failed the new session: status %s startErr %v", m.status, m.startErr)
 			}
-			if got := m.eng.State().Activity; got != engine.ActivityStarting {
+			if got := engineOf(t, m).State().Activity; got != engine.ActivityStarting {
 				t.Fatalf("the new engine's activity is %q, want it still starting", got)
 			}
-			if _, err := m.eng.Submit(engine.Command{}, "too early", engine.SubmitQueue, ""); !errors.Is(err, engine.ErrNotAccepting) {
+			if _, err := m.eng.Submit(context.Background(), engine.Command{}, "too early", engine.SubmitQueue, ""); !errors.Is(err, engine.ErrNotAccepting) {
 				t.Fatalf("the new engine's gate opened: Submit = %v", err)
 			}
 
@@ -264,7 +267,7 @@ func TestAStaleStartMessageLeavesTheNewEnginesGateShut(t *testing.T) {
 			if !m.started {
 				t.Fatal("the current engine's own startedMsg was ignored too")
 			}
-			if got := m.eng.State().Activity; got != engine.ActivityIdle {
+			if got := engineOf(t, m).State().Activity; got != engine.ActivityIdle {
 				t.Fatalf("the new engine's activity is %q, want idle", got)
 			}
 		})
@@ -899,9 +902,9 @@ func TestAnotherClientsSendNowLeavesThisComposerAlone(t *testing.T) {
 	sess.Script(sent)
 	// A second client on the same engine, arming a send-now of its own — which the
 	// model's composer happens to be holding the text of.
-	other := m.eng.NewClientID()
+	other := engineOf(t, m).NewClientID()
 	m.input.SetValue("PINEAPPLE")
-	if _, err := m.eng.Submit(engine.Command{Client: other, ID: "1"}, "PINEAPPLE", engine.SubmitSendNow, ""); err != nil {
+	if _, err := engineOf(t, m).Submit(engine.Command{Client: other, ID: "1"}, "PINEAPPLE", engine.SubmitSendNow, ""); err != nil {
 		t.Fatalf("the other client's send-now: %v", err)
 	}
 
@@ -1144,7 +1147,7 @@ func TestTheCrazeSessionIDTravelsEveryConstructionPath(t *testing.T) {
 	if m.eng == nil {
 		t.Fatal("setup: no engine")
 	}
-	if got := m.eng.State().CrazeSessionID; got != "018f-the-thread" {
+	if got := engineOf(t, m).State().CrazeSessionID; got != "018f-the-thread" {
 		t.Fatalf("--continue's engine holds %q, want the row's own id", got)
 	}
 
@@ -1154,7 +1157,7 @@ func TestTheCrazeSessionIDTravelsEveryConstructionPath(t *testing.T) {
 	tm, _ := m.confirmResume(row)
 	m = tm.(Model)
 	t.Cleanup(func() { _ = m.eng.Close() })
-	if got := m.eng.State().CrazeSessionID; got != "018f-another-thread" {
+	if got := engineOf(t, m).State().CrazeSessionID; got != "018f-another-thread" {
 		t.Fatalf("the resume picker's engine holds %q, want the chosen row's id", got)
 	}
 
@@ -1164,7 +1167,7 @@ func TestTheCrazeSessionIDTravelsEveryConstructionPath(t *testing.T) {
 	tm, _ = m.confirmResume(old)
 	m = tm.(Model)
 	t.Cleanup(func() { _ = m.eng.Close() })
-	minted := m.eng.State().CrazeSessionID
+	minted := engineOf(t, m).State().CrazeSessionID
 	if minted == "" || minted == "018f-another-thread" {
 		t.Fatalf("a row with no durable id left the engine holding %q", minted)
 	}
@@ -1174,7 +1177,7 @@ func TestTheCrazeSessionIDTravelsEveryConstructionPath(t *testing.T) {
 	tm, _ = m.confirmProvider(agent.GrokProvider(), true)
 	m = tm.(Model)
 	t.Cleanup(func() { _ = m.eng.Close() })
-	fresh := m.eng.State().CrazeSessionID
+	fresh := engineOf(t, m).State().CrazeSessionID
 	if fresh == "" || fresh == minted || fresh == "018f-another-thread" {
 		t.Fatalf("a new session took an old identity: %q", fresh)
 	}

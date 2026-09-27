@@ -14,6 +14,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/charliek/craze/internal/agent"
+	"github.com/charliek/craze/internal/backend"
 	"github.com/charliek/craze/internal/engine"
 )
 
@@ -395,6 +396,21 @@ func (m Model) slashExactlyTyped() bool {
 	return strings.EqualFold(name, it.Name) || strings.EqualFold(name, it.qualifiedAlias())
 }
 
+// noAnswerRenameNote is /rename's note when SetTitle did not answer in time
+// (ErrNoAnswer): the command may have run, so the note says the title may have
+// changed, and the status line shows the fold's title.
+const noAnswerRenameNote = "no answer from the session — the title may have changed"
+
+// renamed is what a rename that landed shows: the new name, from the result —
+// an overlay asserting the title is title until the rename's own delta is
+// folded (§3.12's table; noteResult) — and the note. cause is the SetTitle's
+// command; "" (no backend, so no command) installs nothing.
+func (m Model) renamed(title, cause string) Model {
+	m.noteResult(resultEntry{kind: resultTitle, cause: cause, title: title})
+	m.addNote("renamed to " + title)
+	return m
+}
+
 func (m Model) runBuiltin(name, args string) (tea.Model, tea.Cmd) {
 	// Every branch consumes the draft — clearing it, replacing it, or sending
 	// it — so the menu that draft opened goes with it.
@@ -410,11 +426,14 @@ func (m Model) runBuiltin(name, args string) (tea.Model, tea.Cmd) {
 		// Nothing pending survives a clear: a queued message sent minutes
 		// later, into a transcript that no longer shows why it was queued, is
 		// worse than losing it. The pending state goes first, because ending
-		// an edit puts the displaced draft back into the composer.
-		m.clearPending()
-		m.input.SetValue("")
-		m.clearTranscript()
-		return m, nil
+		// an edit puts the displaced draft back into the composer — so the
+		// draft and the transcript go in the chain's continuation, once the
+		// queue has answered (§3.12).
+		return m.clearPending(func(m Model) (Model, tea.Cmd) {
+			m.input.SetValue("")
+			m.clearTranscript()
+			return m, nil
+		})
 	case "tasks":
 		m.input.SetValue("")
 		return m.cycleTasks()
@@ -439,28 +458,48 @@ func (m Model) runBuiltin(name, args string) (tea.Model, tea.Cmd) {
 			m.addError("session is still starting")
 			return m, nil
 		}
-		if m.eng != nil {
-			// SetTitle renames, pins and records the row (plan 021 §3.8). Two
-			// different failures come back from it:
-			//
-			//   - the rename itself was refused — the log's outbox is backed up
-			//     — and nothing was renamed or pinned, so the note and the row
-			//     would both be saying something untrue: the error alone;
-			//   - the rename happened and only the index write failed
-			//     (ErrIndexWrite), which is the error row writeIndex used to
-			//     draw, followed by the note, in that order, because the
-			//     session really is renamed.
-			if err := m.eng.SetTitle(m.nextCmd(), title); err != nil {
-				if !errors.Is(err, engine.ErrIndexWrite) {
+		if m.eng == nil {
+			return m.renamed(title, ""), nil
+		}
+		// SetTitle renames, pins and records the row (plan 021 §3.8), and can
+		// wait on the index's lock, so it goes through the command gate
+		// (§3.12): the call runs off the Update, and everything that followed
+		// it — here, and nothing in handleEnter, handleKey or update after this
+		// returns — is its continuation. The command id is minted now, in the
+		// Update that issued it.
+		c := m.nextCmd()
+		return m.run(gateDeadline,
+			func(ctx context.Context, b backend.Backend) (any, error) {
+				return nil, b.SetTitle(ctx, c, title)
+			},
+			func(m Model, r gateReply) (Model, tea.Cmd) {
+				// Three different failures come back from it:
+				//
+				//   - no answer in time (ErrNoAnswer): the rename may or may not
+				//     have happened, so the title is the fold's and the note says
+				//     the outcome is unknown;
+				//   - the rename itself was refused — the log's outbox is backed
+				//     up — and nothing was renamed or pinned, so the note and
+				//     the row would both be saying something untrue: the error
+				//     alone;
+				//   - the rename happened and only the index write failed
+				//     (ErrIndexWrite), which is the error row writeIndex used to
+				//     draw, followed by the note, in that order, because the
+				//     session really is renamed.
+				switch err := r.err; {
+				case err == nil:
+				case errors.Is(err, ErrNoAnswer):
+					m.recompute()
+					m.addNote(noAnswerRenameNote)
+					return m, nil
+				case !errors.Is(err, engine.ErrIndexWrite):
 					m.addError(err.Error())
 					return m, nil
+				default:
+					m.addError(indexWriteText(err))
 				}
-				m.addError(indexWriteText(err))
-			}
-		}
-		m.refreshSnap()
-		m.addNote("renamed to " + title)
-		return m, nil
+				return m.renamed(title, c.Cause()), nil
+			})
 	case "model":
 		if args == "" {
 			m.input.SetValue("")
@@ -502,30 +541,37 @@ func (m Model) applyMode(id string) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	prev := m.snap.CurrentMode
-	m.snap.CurrentMode = id
 	// The generation is what the answer is matched on, not the mode id: see
 	// Model.modeGen. It is captured for the closure here, because m.modeGen
 	// belongs to a copy the next change is free to bump.
 	m.modeGen++
 	m.modeInFlight = id
 	gen := m.modeGen
+	// The answer carries the session generation, and the call the backend
+	// epoch, both read here, in the Update (issued, dispatchCtx). The revision
+	// the mode section stood at when this asked is the request's record
+	// (revertModeMsg).
+	eng, cmd, at, iss, base := m.eng, m.nextCmd(), m.modeRev, m.issue(), dispatchCtx(m.eng)
+	// Optimistic: the chip flips now, by the request's overlay, and holds
+	// until the request is refused, a newer one replaces it, or its own delta
+	// is folded (plan 027 §3.13).
+	m.requestMode(gen, cmd.Cause(), id)
 	// Leaving the mode the plan was made in retires the offer with it, and the
 	// kill is recorded against the turn so a late ending cannot bring it back.
 	m.retirePlanOffer()
 	m.addNote(modeNote(m.snap.Modes, id))
-	// The revision the mode section stood at when this asked, so a refusal that
-	// comes back after somebody else's change cannot roll that change back
-	// (revertModeMsg).
-	eng, cmd, at := m.eng, m.nextCmd(), m.modeRev
 	return m, func() tea.Msg {
 		// Bounded, so an agent that never answers produces a revert instead of
 		// pinning the chip for ever. See modeCallTimeout.
-		ctx, cancel := context.WithTimeout(context.Background(), modeCallTimeout)
+		ctx, cancel := context.WithTimeout(base, modeCallTimeout)
 		defer cancel()
-		if _, err := eng.Set(ctx, cmd, engine.Setting{Kind: engine.SettingMode, Value: id}); err != nil {
-			return revertModeMsg{gen: gen, prev: prev, err: err, at: at}
+		res, err := eng.Set(ctx, cmd, engine.Setting{Kind: engine.SettingMode, Value: id})
+		if err != nil {
+			return revertModeMsg{issued: iss, gen: gen, prev: prev, err: err, at: at}
 		}
-		return modeAppliedMsg{gen: gen, id: id}
+		// Every success reaches the reducer with what it confirmed (§3.13):
+		// the session's word, not the request.
+		return modeAppliedMsg{issued: iss, gen: gen, id: res.Value, rev: res.Rev}
 	}
 }
 
@@ -559,7 +605,12 @@ func resolveModelArgs(snap agent.Snapshot, args string, shorthand bool) (id, eff
 // (optionNotAppliedNote). Nothing failed — the model the user chose does not
 // take that effort, or the session is no longer on it — so it is a note and
 // never an error row.
-type effortNotAppliedMsg struct{ note string }
+type effortNotAppliedMsg struct {
+	issued
+	note string
+	// landed is the model step's landing (modelLanded), applied first.
+	landed modelLanded
+}
 
 // applyModelEffort is `/model <id> [effort]`: optimistic, and one model Set,
 // the dialog's model step (applyModelStep) — which call moves the model is the
@@ -582,33 +633,46 @@ func (m Model) applyModelEffort(id, effort string) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	prev := m.snap.CurrentModel
-	m.snap.CurrentModel = id
-	m.model = id
 	m.input.SetValue("")
 
 	// One command per call the closure can make — the model and the effort —
 	// minted here because the closure runs off this Update and may not touch
 	// the model. An id that goes unused is simply a number nobody spent.
-	eng, cmds, at := m.eng, m.nextCmds(2), m.modelRev
+	eng, cmds, at, cfgAt := m.eng, m.nextCmds(2), m.modelRev, m.configRev
+	// Optimistic: the status row shows id now, by the request's overlay, held
+	// until the model step is refused, a newer change replaces it, or the fold
+	// reaches what the step confirmed (plan 027 §3.13).
+	m.applyGen++
+	gen := m.applyGen
+	m.requestModel(gen, cmds[0].Cause(), id)
+	// The provider the effort step judges the catalog by (runModelEffort): its
+	// local vocabulary, which says what an option is, taken from the mirror
+	// here in the Update, since the closure may not read the model. So are
+	// the session generation every answer carries and the backend epoch every
+	// step is fenced by (§3.12): a step for this session never executes
+	// against another, and an answer for it never lands on another.
+	prov, iss, ctx := m.snap.Provider, m.issue(), dispatchCtx(m.eng)
 	// Behind every chain of this client's issued before it and ahead of every
 	// one issued after, its place taken here, in this Update (chainLock): a
 	// dialog reopened on the model this command is switching to binds its steps
 	// to that model, and must not read the session before this switch has
 	// landed, whichever of the two commands the program starts first.
 	return m, m.chains.take(func() tea.Msg {
-		ctx := context.Background()
 		res, err := applyModelStep(ctx, eng, cmds[0], id)
 		switch {
 		case errors.Is(err, agent.ErrBadCatalog):
-			// The agent may have switched, so there is no prev to put back and
-			// no effort to judge: the catalog it would be judged against is
-			// the one nobody could read.
-			return modelUnreadMsg{}
+			// The agent may have switched, so there is no effort to judge: the
+			// catalog it would be judged against is the one nobody could read.
+			return modelUnreadMsg{issued: iss, gen: gen}
 		case err != nil:
-			return revertModelMsg{prev: prev, err: err, at: at}
+			return revertModelMsg{issued: iss, gen: gen, prev: prev, err: err, at: at}
 		}
+		// The model step's success reaches the reducer with its result
+		// whatever the effort step then comes to (§3.13): /model with no
+		// effort used to answer nothing at all.
+		landed := modelLanded{set: true, gen: gen, cause: cmds[0].Cause(), at: at, res: res}
 		if effort == "" {
-			return nil
+			return modelSetMsg{issued: iss, landed: landed}
 		}
 		// Bound to the model the command names, never the one the session
 		// reports back: id is canonical, off the model list (MatchModel), so
@@ -617,15 +681,17 @@ func (m Model) applyModelEffort(id, effort string) (tea.Model, tea.Cmd) {
 		// would send the effort to a model nobody chose (plan 025 X13,
 		// superseding X10 (a); astra r4 item 1). So the effort is stale.
 		if res.Value != id {
-			return effortNotAppliedMsg{note: optionNotAppliedNote("effort", id, effort, notAppliedStale)}
+			return effortNotAppliedMsg{issued: iss, note: optionNotAppliedNote("effort", id, effort, notAppliedStale), landed: landed}
 		}
-		return runModelEffort(ctx, eng, cmds[1], id, effort)
+		// The effort step's own answer, carrying the model step's landing.
+		return runModelEffort(ctx, iss, eng, prov, cmds[1], id, effort, landed, cfgAt)
 	})
 }
 
 // runModelEffort is `/model`'s effort step, on a command's goroutine once the
-// model step has landed on model: it reads the engine and never the Model,
-// which belongs to Update.
+// model step has landed on model: it reads the backend's settings and never the
+// Model, which belongs to Update, and judges them by prov, the session's
+// provider as the Update that dispatched the chain saw it.
 //
 // The candidate is judged against the catalog the session holds now, which the
 // model step installed: that model's effort option, whatever its id (effort,
@@ -642,12 +708,29 @@ func (m Model) applyModelEffort(id, effort string) (tea.Model, tea.Cmd) {
 // (engine.ErrStaleModel) — "the model changed"; the model has no effort, or
 // the agent's answer no longer lists it (agent.ErrOptionGone) — "has no
 // effort"; the model does not offer the value — "does not offer". Any other
-// refusal is the error row it always was.
-func runModelEffort(ctx context.Context, eng *engine.Engine, cmd engine.Command, model, effort string) tea.Msg {
+// refusal is the error row it always was, and so is a settings read that
+// failed (a socket backend's round trip; in process it cannot).
+//
+// ctx carries the epoch the chain was dispatched under, so each of the step's
+// calls is refused before it is sent if the backend has moved to another
+// session since (backend.ErrStaleEpoch, an error row like any failure), and
+// every answer carries iss, the session generation, so one that lands after a
+// replacement is dropped (§3.12).
+//
+// Every answer carries landed too, the model step's landing, applied first
+// (§3.13: the model step's success reaches the reducer with its result
+// whatever the effort step comes to). The effort's own overlay belongs to that
+// step's request (landed.gen), and is judged from at, where the config
+// section stood when the chain was dispatched.
+func runModelEffort(ctx context.Context, iss issued, b backend.Backend, prov agent.ProviderInfo, cmd engine.Command, model, effort string, landed modelLanded, at uint64) tea.Msg {
 	note := func(why notAppliedReason) tea.Msg {
-		return effortNotAppliedMsg{note: optionNotAppliedNote("effort", model, effort, why)}
+		return effortNotAppliedMsg{issued: iss, note: optionNotAppliedNote("effort", model, effort, why), landed: landed}
 	}
-	snap := eng.State().Snapshot
+	set, err := b.Settings(ctx)
+	if err != nil {
+		return actionErrMsg{issued: iss, err: err, landed: landed}
+	}
+	snap := settingsSnapshot(set, prov)
 	if snap.CurrentModel != model {
 		// Moved again before the effort could be sent: the catalog read here is
 		// some other model's, and judging the effort against it would say the
@@ -662,7 +745,7 @@ func runModelEffort(ctx context.Context, eng *engine.Engine, cmd engine.Command,
 	if !ok {
 		return note(notAppliedUnoffered)
 	}
-	_, err := eng.Set(ctx, cmd, engine.Setting{
+	res, err := b.Set(ctx, cmd, engine.Setting{
 		Kind: engine.SettingConfig, ID: opt.ID, Value: value, ForModel: model,
 	})
 	switch {
@@ -671,9 +754,10 @@ func runModelEffort(ctx context.Context, eng *engine.Engine, cmd engine.Command,
 	case errors.Is(err, agent.ErrOptionGone):
 		return note(notAppliedMissing)
 	case err != nil:
-		return actionErrMsg{err}
+		return actionErrMsg{issued: iss, err: err, landed: landed}
 	}
-	return refreshSnapMsg{}
+	// The success, with its result, for the effort's overlay (§3.13).
+	return effortSetMsg{issued: iss, cause: cmd.Cause(), id: opt.ID, at: at, res: res, landed: landed}
 }
 
 // acceptSlash puts row i into the draft: only the token under the cursor is

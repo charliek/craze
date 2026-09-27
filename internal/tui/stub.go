@@ -99,16 +99,21 @@ type Stub struct {
 	// InstallOnStart makes Start publish one install delta carrying every
 	// section of the snapshot — title, mode, model, config, commands, plugins
 	// — exactly as the live session's installDeltaLocked does (live.go:798-808).
-	// Default off, so an ordinary Stub's Start is byte-for-byte what it always
-	// was: a new session emits nothing, and a load's replay bracket carries no
-	// install. On, it mirrors where the live session enqueues it relative to a
-	// load's replay bracket: enqueued (not flushed, live.go:723) before Start
-	// returns for a new session, or after every replayed event but before
+	// Off, an ordinary Stub's Start is byte-for-byte what it always was: a new
+	// session emits nothing, and a load's replay bracket carries no install.
+	// On, it mirrors where the live session enqueues it relative to a load's
+	// replay bracket: enqueued (not flushed, live.go:723) before Start returns
+	// for a new session, or after every replayed event but before
 	// EventReplay{end} for a load (live.go:927), flushed first so the install
 	// is committed ahead of that bracket's own emit (live.go's flushDelta
 	// before its EventReplay{end}). Set before Start, like Replay.
-	// internal/fakehost's fake host is the one caller that turns it on, so its
-	// wire fixtures carry the install every real client would see.
+	//
+	// A new Stub takes it from stubInstallOnStartDefault: off in production
+	// (the TUI's fallback session) and in every other package's tests, on for
+	// every Stub internal/tui's own tests build (its TestMain, plan 027 §3.13),
+	// so the fold those tests read has the facts a live session's Start
+	// publishes. internal/fakehost's fake host sets it on itself, so its wire
+	// fixtures carry the install every real client would see.
 	InstallOnStart bool
 
 	// Replay is the transcript Start hands back before the session is up, as
@@ -157,6 +162,17 @@ type stubCall struct {
 	Cancelled bool
 }
 
+// stubInstallOnStartDefault is InstallOnStart's value in a new Stub. Production
+// leaves it false, and so does every package whose tests build a Stub but
+// internal/tui (internal/engine's, internal/fakehost's, internal/control's…):
+// their Stubs start exactly as they always have. internal/tui's TestMain sets
+// it, so every Stub the package's tests build publishes the install at Start
+// that the live session publishes (plan 027 §3.13, "The Stub publishes what
+// the live session would"); a tui test that needs the old Start says so by
+// setting the field false on its Stub. It is never a Config field or a
+// constructor argument: no production caller can choose it.
+var stubInstallOnStartDefault bool
+
 // NewStub is the Stub every test and the TUI's own fallback session use.
 func NewStub() *Stub { return newStub(false) }
 
@@ -169,11 +185,12 @@ func NewStubNoPrimary() *Stub { return newStub(true) }
 
 func newStub(noPrimary bool) *Stub {
 	s := &Stub{
-		failConfigAt: -1,
-		NoPrimary:    noPrimary,
-		log:          agent.NewEventLog(agent.EventLogOptions{NoPrimary: noPrimary}),
-		closed:       make(chan struct{}),
-		cancel:       make(chan struct{}, 1),
+		failConfigAt:   -1,
+		NoPrimary:      noPrimary,
+		InstallOnStart: stubInstallOnStartDefault,
+		log:            agent.NewEventLog(agent.EventLogOptions{NoPrimary: noPrimary}),
+		closed:         make(chan struct{}),
+		cancel:         make(chan struct{}, 1),
 		snap: agent.Snapshot{
 			// A session id, as a started live session has: the index writes
 			// are guarded by one, so a stub without it could never exercise
@@ -272,22 +289,32 @@ func (s *Stub) ParkNext() <-chan struct{} {
 	return s.parked
 }
 
-// SetTools replaces Snapshot.Tools (copy-on-write). Tests send EventTool
-// afterwards so the TUI refreshSnap() picks the in-flight set up.
+// SetTools replaces Snapshot.Tools (copy-on-write). It is a fixture-only
+// snapshot writer and publishes nothing (plan 027 §3.13): it replaces the
+// whole list, which no event can say. A test that starts from a list sets it
+// here; a test that moves one — a tool settling — sends what a live session
+// sends, the tool's EventTool with its new status, beside the list that status
+// leaves (applyInFlight does both).
 func (s *Stub) SetTools(tools []agent.ToolEvent) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.snap.Tools = cloneStubTools(tools)
 }
 
-// SetSubagents replaces Snapshot.Subagents (copy-on-write).
+// SetSubagents replaces Snapshot.Subagents (copy-on-write). Like SetTools it
+// is a fixture-only snapshot writer and publishes nothing: a child's spawn or
+// finish is an EventSubagent the test sends beside the roster it leaves, and a
+// child leaves the roster only as the live session's does — past the finished
+// rows the roster keeps (subview_test.go's evictFinishedChild).
 func (s *Stub) SetSubagents(subs []agent.SubagentInfo) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.snap.Subagents = cloneStubSubagents(subs)
 }
 
-// SetTodos replaces Snapshot.Todos. Tests send EventTodos afterwards.
+// SetTodos replaces Snapshot.Todos. It publishes nothing (plan 027 §3.13):
+// every test that sets a list sends the EventTodos carrying it afterwards
+// (sendTodos), and a second event of its own would note the list twice.
 func (s *Stub) SetTodos(todos []agent.Todo) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -295,23 +322,48 @@ func (s *Stub) SetTodos(todos []agent.Todo) {
 	s.snap.TodosUpdatedAt = s.now()
 }
 
-// SetCommands replaces Snapshot.Commands, as an available_commands_update
-// would. Tests poke the model afterwards so refreshSnap picks the set up.
+// SetCommands replaces Snapshot.Commands and publishes the Commands delta that
+// says so, as the live session's available_commands_update does (live.go's
+// onUpdate: enqueued under the lock that changed the snapshot, then flushed).
+// A delta is what a watching client folds; the snapshot is what today's
+// mirror reads. The flush makes it a test-side call only (flushSetter): past
+// the primary's buffer with nobody reading it, it blocks, and it must never
+// be called from the primary's reader.
 func (s *Stub) SetCommands(cmds []agent.CommandInfo) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	s.snap.Commands = append([]agent.CommandInfo(nil), cmds...)
+	s.enqueueDeltaLocked("", &agent.StateDelta{Commands: &agent.CommandsState{Commands: append([]agent.CommandInfo(nil), cmds...)}})
+	s.mu.Unlock()
+	s.flushSetter()
 }
 
 // SetPlugins replaces Snapshot.Plugins with an already-resolved list, as the
-// live session does at Start and again on every available_commands_update.
-// Tests build it through agent.ResolvePluginNames so the naming rule under test
-// is the one the session applies.
+// live session does at Start and again on every available_commands_update, and
+// publishes the Plugins delta that says so, as SetCommands does — under the
+// same test-side constraint (flushSetter). Tests build it through
+// agent.ResolvePluginNames so the naming rule under test is the one the
+// session applies.
 func (s *Stub) SetPlugins(plugins []agent.PluginCommand) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	s.snap.Plugins = append([]agent.PluginCommand(nil), plugins...)
+	s.enqueueDeltaLocked("", &agent.StateDelta{Plugins: &agent.PluginsState{Plugins: append([]agent.PluginCommand(nil), plugins...)}})
+	s.mu.Unlock()
+	s.flushSetter()
 }
+
+// flushSetter is the live session's flushDelta after a catalog delta: the
+// delta a setter enqueued is committed before the setter returns, so "set"
+// means buffered as "emitted" does (Emit) and an event the test publishes next
+// is numbered after it. It is bounded by the Stub's own close, like every
+// other flush here.
+//
+// The flush waits for the primary's delivery (agent.EventLog.Flush), which is
+// a constraint on the test that calls a setter — one no suite test reaches:
+// on a Stub with a primary, a setter called while nobody reads that primary
+// and its buffer (256 events) is full blocks until someone does, and one
+// called from the primary's reader — a model's Update — would wait on itself.
+// The setters are test set-up, called from a test's goroutine.
+func (s *Stub) flushSetter() { _ = s.log.Flush(context.Background(), s.closed) }
 
 // SetTitle is /rename, with the live session's semantics: it replaces
 // Snapshot.Title, pins it against a later agent one, and says so in a Title
@@ -335,12 +387,13 @@ func (s *Stub) SetTitle(cause, title string) error {
 // SetTitle refuses. It is how a test reaches the live session's rule without
 // an agent.
 //
-// Like SetCommands, SetPlugins and the rest of the Set* helpers on this type it
-// publishes nothing: it is test set-up — how a test builds the session it wants
-// before the model looks at it — and not a change a session made while a client
-// was watching. The live session's own equivalent is the read loop's
-// session_info_update, which does publish a delta (live.go's onUpdate); the one
-// helper here that is a *seam* method, SetTitle, publishes one too.
+// Like SetTools, SetSubagents and SetTodos it publishes nothing: it is test
+// set-up — how a test builds the session it wants before the model looks at it
+// — and not a change a session made while a client was watching. The live
+// session's own equivalent is the read loop's session_info_update, which does
+// publish a delta (live.go's onUpdate); SetTitle, the seam method, publishes
+// one, and so do the catalog setters, SetCommands and SetPlugins (plan 027
+// §3.13).
 func (s *Stub) AgentTitle(title string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

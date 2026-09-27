@@ -144,6 +144,44 @@ func TestQueueFullAndTooLongKeepTheDraft(t *testing.T) {
 	}
 }
 
+// wireErr is a refusal as a socket client reconstructs one (plan 027 §3.14's
+// remote.Error): its text is whatever the server said, and Is answers for the
+// sentinel its code and reason name.
+type wireErr struct {
+	sentinel error
+	text     string
+}
+
+func (e wireErr) Error() string        { return e.text }
+func (e wireErr) Is(target error) bool { return target == e.sentinel }
+
+// TestQueueRefusalsAreNotedBySentinel (plan 027 §3.13, "Errors by sentinel"):
+// a full queue and a message past the cap are noted by what the error is, not
+// by what its text says — so the notes read the same over the socket, whose
+// errors are reconstructions — and any other refusal is its own text, on one
+// line.
+func TestQueueRefusalsAreNotedBySentinel(t *testing.T) {
+	for _, c := range []struct {
+		err  error
+		want string
+	}{
+		{agent.ErrQueueFull, "queue full"},
+		{agent.ErrQueueTextTooLong, "message too long"},
+		{fmt.Errorf("submit: %w", agent.ErrQueueFull), "queue full"},
+		{wireErr{agent.ErrQueueFull, "session: 32 messages are already waiting"}, "queue full"},
+		{wireErr{agent.ErrQueueTextTooLong, "session: 40001 bytes, over the 32768 cap"}, "message too long"},
+		{errors.New("engine: unknown queued message\nq-1"), "engine: unknown queued message q-1"},
+	} {
+		if got := queueErrNote(c.err); got != c.want {
+			t.Errorf("queueErrNote(%q) = %q, want %q", c.err, got, c.want)
+		}
+		// A refused Submit falls through to the same notes.
+		if got := submitErrNote(c.err); got != c.want {
+			t.Errorf("submitErrNote(%q) = %q, want %q", c.err, got, c.want)
+		}
+	}
+}
+
 // TestFocusMatrix walks §3.4's six cases: which band ↑ and ↓ reach from the
 // composer, given what is on screen.
 func TestFocusMatrix(t *testing.T) {
@@ -166,8 +204,11 @@ func TestFocusMatrix(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			m, stub := queueWorking(t)
 			if tc.agents {
-				stub.SetSubagents(subs)
 				stub.SetProvider(agent.GrokProvider())
+				// The child spawns as a live session says so: its roster
+				// event, beside the roster it leaves.
+				stub.SetSubagents(subs)
+				m = feed(t, m, agent.Event{Type: agent.EventSubagent, Subagent: &subs[0], SubagentChange: agent.SubagentChangeSpawned})
 			}
 			if tc.queued {
 				m = typeEnter(t, m, "PINEAPPLE")
@@ -194,8 +235,10 @@ func TestFocusMatrix(t *testing.T) {
 // rows, and ↑ past the first sub-agent row comes back to the band.
 func TestQueueBandAndRowsCross(t *testing.T) {
 	m, stub := queueWorking(t)
-	stub.SetSubagents([]agent.SubagentInfo{{ID: "sub-1", Description: "one", Status: agent.SubagentRunning}})
 	stub.SetProvider(agent.GrokProvider())
+	sub := agent.SubagentInfo{ID: "sub-1", Description: "one", Status: agent.SubagentRunning}
+	stub.SetSubagents([]agent.SubagentInfo{sub})
+	m = feed(t, m, agent.Event{Type: agent.EventSubagent, Subagent: &sub, SubagentChange: agent.SubagentChangeSpawned})
 	m = typeEnter(t, m, "PINEAPPLE")
 	tm, _ := m.Update(refreshSnapMsg{})
 	m = tm.(Model)

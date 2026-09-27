@@ -322,7 +322,7 @@ func TestModelEffortOverTheLiveSession(t *testing.T) {
 	tm, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
 	m = tm.(Model)
 	tm, _ = m.Update(startedMsg{})
-	m = tm.(Model)
+	m = applyPending(t, tm.(Model))
 	if got := m.modelLabel(); got != "Grok 4.6 (high · fast)" {
 		t.Fatalf("the session started as %q", got)
 	}
@@ -434,7 +434,7 @@ func TestAnUntouchedTabOnAnUnofferedValueIsNotSent(t *testing.T) {
 		}
 	}
 	stub.SetModelCatalogs(cfg)
-	m.refreshSnap()
+	m = republish(t, m)
 	m = openDialog(t, m)
 	if view := plainView(m); !strings.Contains(view, "  effort  [low]  medium") {
 		t.Fatalf("the tab should show the first offered value:\n%s", view)

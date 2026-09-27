@@ -60,9 +60,7 @@ func themeModel(t *testing.T, name string) Model {
 		Yolo:      true,
 	})
 	tm, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
-	m = tm.(Model)
-	tm, _ = m.Update(startedMsg{})
-	return tm.(Model)
+	return startedLikeInit(t, tm.(Model))
 }
 
 var hexColor = regexp.MustCompile(`^#[0-9a-f]{6}$`)

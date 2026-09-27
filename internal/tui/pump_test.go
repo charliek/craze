@@ -78,6 +78,9 @@ type pumpItem struct {
 // the single reader of the session's event stream, and the bookkeeping that
 // stops any of it outliving the test.
 type pump struct {
+	// mode is the gate mode the test's model came to the pump in, which the
+	// pump hands it back in whenever it is left with no gate open (update).
+	mode bool
 	// ctrl is the engine the model drives its session through, which is also
 	// where the one event stream comes from: the engine publishes into the
 	// session's own log, so the reader below sees the agent's events and the
@@ -88,6 +91,11 @@ type pump struct {
 	// command that has finished never holds its goroutine open waiting for the
 	// test to get round to it.
 	msgs chan pumpItem
+	// front is what pumpApply set aside while a gated call of the test's own
+	// message waited for its reply (awaitGate), oldest first: it reaches Update
+	// ahead of everything still in msgs, which arrived after it. Only the
+	// test's goroutine touches it.
+	front []pumpItem
 	// dead is closed at cleanup: a goroutine still holding a message gives up
 	// on delivering it instead of blocking on a queue nobody reads again.
 	dead chan struct{}
@@ -145,8 +153,15 @@ func pumpFor(t *testing.T, m Model) *pump {
 		pumpsMu.Unlock()
 		return p
 	}
+	// The engine behind the model's in-process backend: the pump reads its
+	// primary and closes it, as the model's own reader and exit tail would.
+	var ctrl *engine.Engine
+	if m.eng != nil {
+		ctrl = engineOf(t, m)
+	}
 	p := &pump{
-		ctrl:       m.eng,
+		mode:       m.gateSync,
+		ctrl:       ctrl,
 		msgs:       make(chan pumpItem, 256),
 		dead:       make(chan struct{}),
 		quietened:  make(chan struct{}, 1),
@@ -236,6 +251,24 @@ func (p *pump) setReceivedHook(h func(agent.Event)) {
 	p.stateMu.Unlock()
 }
 
+// update is Update as the pump runs it: the model's gated calls asynchronous,
+// as they are in a real program (plan 027 §3.12 "Unit tests") — the pump is a
+// runtime, running every command on a goroutine of its own, so a gate's reply
+// comes back through it like any other command's message. The model is handed
+// back in the mode it came to the pump in (mode) once no gate is open and
+// nothing is held, so a test that goes on to drive Update directly drives it
+// as a unit fixture does; one left mid-gate stays asynchronous, as a real
+// program would be, until the pump finishes the gate.
+func (p *pump) update(m Model, msg tea.Msg) (Model, tea.Cmd) {
+	m.gateSync = false
+	tm, cmd := m.Update(msg)
+	next := tm.(Model)
+	if next.gate == nil && len(next.held) == 0 {
+		next.gateSync = p.mode
+	}
+	return next, cmd
+}
+
 // deliver queues a message for Update, or reports that the test is over.
 func (p *pump) deliver(item pumpItem) bool {
 	select {
@@ -312,7 +345,7 @@ func (p *pump) resolved() {
 // outstanding until its message has been applied, and the only other publisher
 // is the test's own goroutine, which is inside pumpSettled.
 func (p *pump) quiet() bool {
-	if len(p.msgs) != 0 || len(p.ctrl.Events()) != 0 {
+	if len(p.front) != 0 || len(p.msgs) != 0 || len(p.ctrl.Events()) != 0 {
 		return false
 	}
 	p.stateMu.Lock()
@@ -395,7 +428,7 @@ func (p *pump) pending() string {
 	defer p.stateMu.Unlock()
 	return fmt.Sprintf("commands outstanding=%d queued=%d unread events=%d "+
 		"engine turn=%q activity=%s queued rows=%d armed=%v foreign=%v",
-		p.outstanding, len(p.msgs), len(p.ctrl.Events()),
+		p.outstanding, len(p.front)+len(p.msgs), len(p.ctrl.Events()),
 		st.Turn, st.Activity, len(st.Queue), st.SendNow != nil, st.ForeignTurn)
 }
 
@@ -450,19 +483,31 @@ func cmdFuncName(cmd tea.Cmd) string {
 // key, then say what the user should end up seeing.
 //
 // The predicate is checked after each Update and once before the first, so a
-// state already reached is not waited for.
+// state already reached is not waited for — and only on a model with no gated
+// call waiting and nothing held (plan 027 §3.12, astra C17 11): a state the
+// model shows mid-gate is its issuing Update's half-done frame, which no test
+// asserts on. A test that means to stand mid-gate says so (awaitGate, the
+// gate's own rig).
 func pumpUntil(t *testing.T, m Model, pred func(Model) bool) Model {
 	t.Helper()
 	p := pumpFor(t, m)
-	if pred(m) {
+	reached := func(m Model) bool { return m.gate == nil && len(m.held) == 0 && pred(m) }
+	if reached(m) {
 		return m
 	}
 	timeout := deadline()
 	for {
+		if item, ok := p.popFront(); ok {
+			m = p.apply(m, item)
+			if reached(m) {
+				return m
+			}
+			continue
+		}
 		select {
 		case item := <-p.msgs:
 			m = p.apply(m, item)
-			if pred(m) {
+			if reached(m) {
 				return m
 			}
 		case <-timeout:
@@ -615,8 +660,16 @@ func pumpQuiet(t *testing.T, m Model, what string, done func(*pump) bool) Model 
 	}
 }
 
-// drain applies everything already queued, without waiting for more.
+// drain applies everything already queued, without waiting for more: what
+// pumpApply set aside first, then the queue.
 func (p *pump) drain(m Model) Model {
+	for {
+		item, ok := p.popFront()
+		if !ok {
+			break
+		}
+		m = p.apply(m, item)
+	}
 	for {
 		select {
 		case item := <-p.msgs:
@@ -630,8 +683,7 @@ func (p *pump) drain(m Model) Model {
 // apply is the one place a message reaches Update: it runs the handler,
 // dispatches what it asked for, and accounts for the command that reported it.
 func (p *pump) apply(m Model, item pumpItem) Model {
-	tm, cmd := m.Update(item.msg)
-	next := tm.(Model)
+	next, cmd := p.update(m, item.msg)
 	p.dispatch(cmd)
 	if item.fromCmd {
 		p.resolved()
@@ -641,13 +693,57 @@ func (p *pump) apply(m Model, item pumpItem) Model {
 
 // pumpApply hands the model one message and dispatches what it asked for,
 // without waiting: the caller says next what it is waiting for.
+//
+// The one wait it does is the old synchronous Update's (plan 027 §3.12): a
+// message whose Update issues a gated call — Enter's Submit — had that call's
+// effect when its Update returned, and has it now in the Update the reply
+// lands in. So a gate the message opened is waited out (awaitGate), and the
+// model comes back as the old Update left it.
 func pumpApply(t *testing.T, m Model, msg tea.Msg) Model {
 	t.Helper()
 	p := pumpFor(t, m)
-	tm, cmd := m.Update(msg)
-	m = tm.(Model)
+	m, cmd := p.update(m, msg)
 	p.dispatch(cmd)
+	if m.gate != nil {
+		m = p.awaitGate(t, m)
+	}
 	return m
+}
+
+// awaitGate waits out a gate the test's own message opened, to the release
+// that leaves none open (a chain's end): only the gate's replies reach Update.
+// Everything else that arrives meanwhile is set aside in front, in arrival
+// order and unapplied, as it waited in the runtime's queue while the old
+// synchronous call blocked the Update — so the test's next key still reaches
+// the model ahead of it, as it always has here, and the pump's later waits
+// apply it first.
+func (p *pump) awaitGate(t *testing.T, m Model) Model {
+	t.Helper()
+	timeout := deadline()
+	for m.gate != nil {
+		select {
+		case item := <-p.msgs:
+			if _, ok := item.msg.(gateReply); ok {
+				m = p.apply(m, item)
+				continue
+			}
+			p.front = append(p.front, item)
+		case <-timeout:
+			t.Fatalf("pumpApply: the gated call did not answer in %s (%s)\n%s",
+				pumpWatchdog, p.pending(), plainView(m))
+		}
+	}
+	return m
+}
+
+// popFront takes the oldest message pumpApply set aside.
+func (p *pump) popFront() (pumpItem, bool) {
+	if len(p.front) == 0 {
+		return pumpItem{}, false
+	}
+	item := p.front[0]
+	p.front = p.front[1:]
+	return item, true
 }
 
 // pumpKey presses a key the way a terminal delivers it.
@@ -856,7 +952,7 @@ func enqueueRow(t *testing.T, m Model, text string) {
 	if m.eng == nil {
 		t.Fatal("the model has no engine to queue through")
 	}
-	if _, err := m.eng.Queue(engine.Command{}, text); err != nil {
+	if _, err := engineOf(t, m).Queue(engine.Command{}, text); err != nil {
 		t.Fatalf("queueing %q: %v", text, err)
 	}
 }
@@ -866,7 +962,7 @@ func unqueueRow(t *testing.T, m Model, id string) {
 	if m.eng == nil {
 		t.Fatal("the model has no engine to unqueue through")
 	}
-	if _, err := m.eng.Unqueue(engine.Command{}, id); err != nil {
+	if _, err := engineOf(t, m).Unqueue(engine.Command{}, id); err != nil {
 		t.Fatalf("unqueueing %q: %v", id, err)
 	}
 }
@@ -877,7 +973,11 @@ func queuedRows(m Model) []agent.QueuedPrompt {
 	if m.eng == nil {
 		return nil
 	}
-	return m.eng.State().Queue
+	eng, ok := engineIn(m)
+	if !ok {
+		panic(fmt.Sprintf("queuedRows: the model's backend is %T, not the in-process engine", m.eng))
+	}
+	return eng.State().Queue
 }
 
 // queueTexts is the queued messages, in order. The band draws them, but a test
@@ -934,7 +1034,7 @@ func TestPumpSkipsTheTickChainAndTheEventReader(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = eng.Close() })
-	reader := waitEvent(eng)
+	reader := waitEvent(newEngineBackend(eng, ""))
 	if reader == nil {
 		t.Fatal("waitEvent must return a command for a live session")
 	}

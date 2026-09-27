@@ -261,7 +261,7 @@ func TestNativeModelSwitchGainsTheEffortOption(t *testing.T) {
 	tm, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
 	m = tm.(Model)
 	tm, _ = m.Update(startedMsg{})
-	m = tm.(Model)
+	m = applyPending(t, tm.(Model))
 	if agent.EffortOption(m.snap) != nil || !strings.Contains(plainView(m), "native │ Plain │") {
 		t.Fatalf("a model with no efforts shows one:\n%s", plainView(m))
 	}
@@ -287,7 +287,7 @@ func TestNativeModelSwitchGainsTheEffortOption(t *testing.T) {
 			m = tm.(Model)
 		}
 		synced := make(chan struct{})
-		eng := m.eng
+		eng := engineOf(t, m)
 		go func() { defer close(synced); _ = eng.Sync(context.Background()) }()
 		for done := false; !done; {
 			select {

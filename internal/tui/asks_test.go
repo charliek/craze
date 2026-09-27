@@ -96,7 +96,7 @@ func TestAnswerThroughControl(t *testing.T) {
 	// (plan 021 C11: a resend is the SAME id with the SAME payload, never a
 	// second attempt with a different one, which a command id table now
 	// answers with ErrBadRequest rather than running).
-	if err := m.eng.Answer(m.nextCmd(), "ask-1", agent.AskAnswer{OptionID: "opt-a"}); !errors.Is(err, agent.ErrBadAnswer) {
+	if err := m.eng.Answer(context.Background(), m.nextCmd(), "ask-1", agent.AskAnswer{OptionID: "opt-a"}); !errors.Is(err, agent.ErrBadAnswer) {
 		t.Fatalf("a permission's answer must not fit a question: %v", err)
 	}
 	if engine.Code(errors.New("x")) == "" {
@@ -105,17 +105,17 @@ func TestAnswerThroughControl(t *testing.T) {
 	if got := len(stub.Calls()); got != 0 {
 		t.Fatalf("a refused answer resolved the ask: %+v", stub.Calls())
 	}
-	if err := m.eng.Answer(m.nextCmd(), "ask-1", agent.AskAnswer{Skip: true}); err != nil {
+	if err := m.eng.Answer(context.Background(), m.nextCmd(), "ask-1", agent.AskAnswer{Skip: true}); err != nil {
 		t.Fatalf("the ask must still be answerable: %v", err)
 	}
-	if err := m.eng.Answer(m.nextCmd(), "ask-1", agent.AskAnswer{Skip: true}); !errors.Is(err, agent.ErrAlreadyResolved) {
+	if err := m.eng.Answer(context.Background(), m.nextCmd(), "ask-1", agent.AskAnswer{Skip: true}); !errors.Is(err, agent.ErrAlreadyResolved) {
 		t.Fatalf("a second answer: %v", err)
 	}
 	calls := stub.Calls()
 	if len(calls) != 1 || calls[0].ID != "ask-1" || !calls[0].Skip {
 		t.Fatalf("one ending, and it is the skip: %+v", calls)
 	}
-	if err := m.eng.Answer(m.nextCmd(), "ask-404", agent.AskAnswer{Skip: true}); !errors.Is(err, agent.ErrUnknownAsk) {
+	if err := m.eng.Answer(context.Background(), m.nextCmd(), "ask-404", agent.AskAnswer{Skip: true}); !errors.Is(err, agent.ErrUnknownAsk) {
 		t.Fatalf("an id nobody issued: %v", err)
 	}
 }
@@ -171,8 +171,14 @@ func TestABadAnswerReRaisesTheCard(t *testing.T) {
 		t.Fatal("fixture: no card")
 	}
 	// A plan's answer against a question's id: nothing fits, so nothing is
-	// claimed.
-	if m.answerCard(head, "ask-1", agent.AskAnswer{Accept: true}) {
+	// claimed. The answer's outcome reaches its caller's continuation
+	// (C18c: answerCard goes through the command gate).
+	taken := true
+	m, _ = m.answerCard(head, "ask-1", agent.AskAnswer{Accept: true}, func(m Model, ok bool) (Model, tea.Cmd) {
+		taken = ok
+		return m, nil
+	})
+	if taken {
 		t.Fatal("a mis-addressed answer must not be taken")
 	}
 	if len(m.cards) != 2 || m.cards[0].kind != cardQuestion {
@@ -326,7 +332,7 @@ func TestStateHeadAskMatchesTheCardTheModelDraws(t *testing.T) {
 			m, stub := sizedCards(t)
 			m.yolo = false
 			m = cardEvent(t, m, stub, tc.ev)
-			st := m.eng.State()
+			st := engineOf(t, m).State()
 			if st.PendingAsks != 1 || st.HeadAsk.Kind != tc.kind {
 				t.Fatalf("state %+v", st.HeadAsk)
 			}
@@ -525,21 +531,51 @@ func TestAnAnswerRefusedForRoomKeepsTheCard(t *testing.T) {
 	}
 }
 
+// hiddenAnswered runs the hidden answers an Update handed back — commands of
+// their own, fire-and-forget (plan 027 §3.12, C18c) — and delivers what each
+// answered, as the program would: the refusals for room go back on the retry
+// list. Every other command is left alone.
+func hiddenAnswered(t *testing.T) func(tea.Model, tea.Cmd) Model {
+	return func(tm tea.Model, cmd tea.Cmd) Model {
+		t.Helper()
+		m := tm.(Model)
+		for _, c := range hiddenAnswerCmds(cmd) {
+			if msg := runWatched(t, c); msg != nil {
+				tm, _ := m.Update(msg)
+				m = tm.(Model)
+			}
+		}
+		return m
+	}
+}
+
+// hiddenAnswerCmds is the hidden answers among cmd's commands, in order.
+func hiddenAnswerCmds(cmd tea.Cmd) []tea.Cmd {
+	return cmdsNamed(cmd, tuiPkg+"(*Model).answerHidden")
+}
+
+// hiddenAsksModel is a started model over a Stub whose provider has no
+// capabilities at all: questions and plans are hidden, which is the path that
+// answers with no card and no row.
+func hiddenAsksModel(t *testing.T) (Model, *Stub) {
+	t.Helper()
+	isolateSkillsHome(t)
+	stub := NewStub()
+	stub.SetProvider(plantHidden(t))
+	m := startStub(t, stub, t.TempDir(), 80, 24)
+	if m.showAsk() {
+		t.Fatal("the fixture needs a provider whose questions are hidden")
+	}
+	return m, stub
+}
+
 // The hidden half of finding 5: a question the config shows no card for is
 // answered where it stands, so a refusal for room there is a provider parked
 // with nothing on screen to retry it. The answer is kept and retried on the
 // next event the model applies — the fast path; the beat below is what carries
 // the retry when no event ever follows.
 func TestAHiddenAnswerRefusedForRoomIsRetried(t *testing.T) {
-	isolateSkillsHome(t)
-	stub := NewStub()
-	// A provider with no capabilities at all: questions and plans are hidden,
-	// which is the path that answers with no card and no row.
-	stub.SetProvider(plantHidden(t))
-	m := startStub(t, stub, t.TempDir(), 80, 24)
-	if m.showAsk() {
-		t.Fatal("the fixture needs a provider whose questions are hidden")
-	}
+	m, stub := hiddenAsksModel(t)
 
 	// The ask is opened while there is still room, and delivered to the model
 	// after the log has backed up: the opening was already on its way.
@@ -547,8 +583,7 @@ func TestAHiddenAnswerRefusedForRoomIsRetried(t *testing.T) {
 	stub.Emit(ev)
 	release := saturate(t, stub)
 
-	tm, _ := m.Update(eventMsg{ev})
-	m = tm.(Model)
+	m = hiddenAnswered(t)(m.Update(eventMsg{ev}))
 	if m.cardOpen() {
 		t.Fatalf("a hidden question raised a card: %+v", m.cards)
 	}
@@ -562,8 +597,7 @@ func TestAHiddenAnswerRefusedForRoomIsRetried(t *testing.T) {
 	// The backlog drains, and the next event the model applies carries the
 	// retry with it: no timer, and nothing to press.
 	release()
-	tm, _ = m.Update(eventMsg{agent.Event{Type: agent.EventText, Text: "the agent carries on"}})
-	m = tm.(Model)
+	m = hiddenAnswered(t)(m.Update(eventMsg{agent.Event{Type: agent.EventText, Text: "the agent carries on"}}))
 	if len(m.hiddenRetry) != 0 {
 		t.Fatalf("the retry is spent once taken: %+v", m.hiddenRetry)
 	}
@@ -584,13 +618,7 @@ func TestAHiddenAnswerRefusedForRoomIsRetried(t *testing.T) {
 // answer's own beat is the only thing that can take it, and there is exactly
 // one of those in flight at a time and none once the list is empty.
 func TestAHiddenAnswerRefusedForRoomIsRetriedByItsOwnBeat(t *testing.T) {
-	isolateSkillsHome(t)
-	stub := NewStub()
-	stub.SetProvider(plantHidden(t))
-	m := startStub(t, stub, t.TempDir(), 80, 24)
-	if m.showAsk() {
-		t.Fatal("the fixture needs a provider whose questions are hidden")
-	}
+	m, stub := hiddenAsksModel(t)
 	if cmd := m.armHiddenRetry(); cmd != nil {
 		t.Fatal("a beat was armed with nothing waiting for room")
 	}
@@ -599,8 +627,7 @@ func TestAHiddenAnswerRefusedForRoomIsRetriedByItsOwnBeat(t *testing.T) {
 	stub.Emit(ev)
 	release := saturate(t, stub)
 
-	tm, _ := m.Update(eventMsg{ev})
-	m = tm.(Model)
+	m = hiddenAnswered(t)(m.Update(eventMsg{ev}))
 	if len(m.hiddenRetry) != 1 || !m.hiddenRetryLive {
 		t.Fatalf("a refusal for room must keep the answer and arm its beat: %+v live=%v",
 			m.hiddenRetry, m.hiddenRetryLive)
@@ -613,8 +640,7 @@ func TestAHiddenAnswerRefusedForRoomIsRetriedByItsOwnBeat(t *testing.T) {
 
 	// A beat while the log is still backed up: refused again, kept again, and
 	// the next beat is armed by the same one-in-flight rule.
-	tm, _ = m.Update(hiddenRetryMsg{})
-	m = tm.(Model)
+	m = hiddenAnswered(t)(m.Update(hiddenRetryMsg{}))
 	if len(m.hiddenRetry) != 1 || !m.hiddenRetryLive {
 		t.Fatalf("a beat refused for room must keep going: %+v live=%v", m.hiddenRetry, m.hiddenRetryLive)
 	}
@@ -625,8 +651,7 @@ func TestAHiddenAnswerRefusedForRoomIsRetriedByItsOwnBeat(t *testing.T) {
 	// The backlog drains, with no event left for the model to apply. The beat
 	// alone takes the answer.
 	release()
-	tm, _ = m.Update(hiddenRetryMsg{})
-	m = tm.(Model)
+	m = hiddenAnswered(t)(m.Update(hiddenRetryMsg{}))
 	if len(m.hiddenRetry) != 0 || m.hiddenRetryLive {
 		t.Fatalf("the retry is spent once taken: %+v live=%v", m.hiddenRetry, m.hiddenRetryLive)
 	}
@@ -651,8 +676,8 @@ func TestTheLoserOfAnAnswerRaceKeepsTheWinnersRow(t *testing.T) {
 	m = cardEvent(t, m, stub, agent.Event{Type: agent.EventQuestion, Question: stubQuestion()})
 
 	// Another client on the same engine answers first.
-	other := engine.Command{Client: m.eng.NewClientID(), ID: "1"}
-	if err := m.eng.Answer(other, "ask-1", agent.AskAnswer{Answers: map[string][]string{"q1": {"opt-b"}}}); err != nil {
+	other := engine.Command{Client: engineOf(t, m).NewClientID(), ID: "1"}
+	if err := engineOf(t, m).Answer(other, "ask-1", agent.AskAnswer{Answers: map[string][]string{"q1": {"opt-b"}}}); err != nil {
 		t.Fatalf("the other client's answer: %v", err)
 	}
 

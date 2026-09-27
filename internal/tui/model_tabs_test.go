@@ -2,14 +2,18 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/charliek/craze/internal/agent"
+	"github.com/charliek/craze/internal/backend"
+	"github.com/charliek/craze/internal/engine"
 )
 
 // Plan 025 C2a: the model dialog's tabs come from the current model's catalog
@@ -77,7 +81,7 @@ func cursorStub(t *testing.T, current string) (Model, *Stub) {
 	stub.snap.CurrentModel = current
 	stub.mu.Unlock()
 	stub.SetModelCatalogs(cursorCatalogs())
-	m.refreshSnap()
+	m = republish(t, m)
 	stubDeltas(t, stub)
 	return m, stub
 }
@@ -102,7 +106,8 @@ func openDialog(t *testing.T, m Model) Model {
 	return m
 }
 
-// applyDialog is Enter, with the chain run and its answer delivered.
+// applyDialog is Enter, with the chain run and its answer delivered, and then
+// the deltas its steps published, as the event reader would deliver them.
 func applyDialog(t *testing.T, m Model) Model {
 	t.Helper()
 	tm, cmd := m.Update(enter())
@@ -110,7 +115,7 @@ func applyDialog(t *testing.T, m Model) Model {
 	if m.dialog != dialogNone {
 		t.Fatal("enter closes the dialog optimistically")
 	}
-	return flushCmd(t, m, cmd)
+	return applyPending(t, flushCmd(t, m, cmd))
 }
 
 // stubConfigCalls is how many SetConfig calls reached the Stub.
@@ -217,7 +222,7 @@ func TestAnAdvertisedTabIsShownWhateverTheCapabilityBit(t *testing.T) {
 	m := sized(t)
 	stub := stubOf(t, m)
 	stub.SetProvider(agent.GrokProvider())
-	m.refreshSnap()
+	m.recompute()
 	if m.caps().FastToggle {
 		t.Fatal("grok's provider has no fast toggle")
 	}
@@ -444,7 +449,17 @@ func TestAnotherClientsModelChangeMidChainIsANote(t *testing.T) {
 	for _, tc := range []struct {
 		name, filter string
 		arm          func(*Stub)
-		wantNotes    []string
+		// armAfterEnter arms the barrier once Enter's own Update is over, so
+		// the first read of the session it meets is the chain's — Enter's
+		// overlays redraw the mirror, and that reads the session too
+		// (recompute → Info), which would otherwise take the barrier.
+		armAfterEnter bool
+		// engineRefuses says the engine's worker is what refuses a step, as
+		// stale, rather than the chain's own read seeing the move and sending
+		// nothing: exactly one option step reaches the engine and comes back
+		// engine.ErrStaleModel.
+		engineRefuses bool
+		wantNotes     []string
 	}{
 		{
 			// No model step: the option steps are bound to grok-4.6, and the
@@ -462,17 +477,20 @@ func TestAnotherClientsModelChangeMidChainIsANote(t *testing.T) {
 			// No model step, and the move lands straight after the chain's
 			// read of grok-4.6: the engine's worker, which reads the session
 			// again before the provider is asked, is what refuses it.
-			name:      "with no model step, the engine refuses it",
-			arm:       func(s *Stub) { s.MoveModelOnRead("grok-4.6", "composer-2.5") },
-			wantNotes: []string{"effort not applied: the model changed", "fast not applied: the model changed"},
+			name:          "with no model step, the engine refuses it",
+			arm:           func(s *Stub) { s.MoveModelOnRead("grok-4.6", "composer-2.5") },
+			armAfterEnter: true,
+			engineRefuses: true,
+			wantNotes:     []string{"effort not applied: the model changed", "fast not applied: the model changed"},
 		},
 		{
 			// The chain reads claude-opus-5's catalog and re-resolves both
 			// steps against it; the move lands straight after that read, so
 			// the worker's ForModel check is what refuses the first of them.
 			name: "after the chain has read the destination, the engine refuses it", filter: "claude",
-			arm:       func(s *Stub) { s.MoveModelOnRead("claude-opus-5", "composer-2.5") },
-			wantNotes: []string{"model → claude-opus-5", "effort not applied: the model changed", "fast not applied: the model changed"},
+			arm:           func(s *Stub) { s.MoveModelOnRead("claude-opus-5", "composer-2.5") },
+			engineRefuses: true,
+			wantNotes:     []string{"model → claude-opus-5", "effort not applied: the model changed", "fast not applied: the model changed"},
 		},
 		{
 			// The move lands with the model step's own answer, so the chain's
@@ -509,9 +527,16 @@ func TestAnotherClientsModelChangeMidChainIsANote(t *testing.T) {
 				m = pressKey(t, m, tea.KeyLeft) // effort → low
 				m = pressKey(t, m, tea.KeyTab)
 				m = pressKey(t, m, tea.KeyRight) // fast → on
-				tc.arm(stub)
+				sets := &staleSets{Backend: m.eng}
+				m.eng = sets
+				if !tc.armAfterEnter {
+					tc.arm(stub)
+				}
 				tm, cmd := m.Update(enter())
 				m = tm.(Model)
+				if tc.armAfterEnter {
+					tc.arm(stub)
+				}
 				applied, ok := runCmd(cmd).(modelApplyMsg)
 				if !ok || applied.err != nil {
 					t.Fatalf("the chain came back %+v", applied)
@@ -534,6 +559,14 @@ func TestAnotherClientsModelChangeMidChainIsANote(t *testing.T) {
 				if n := stubConfigCalls(stub); n != 0 {
 					t.Fatalf("%d option changes reached the agent", n)
 				}
+				want := 0
+				if tc.engineRefuses {
+					want = 1
+				}
+				if got := sets.count(); got != want {
+					t.Fatalf("%d option steps came back refused by the engine as stale, want %d: the %s", got, want,
+						map[bool]string{true: "engine's worker is the path under test", false: "chain's own read is the path under test"}[tc.engineRefuses])
+				}
 				snap := stub.Snapshot()
 				if snap.CurrentModel != "composer-2.5" || agent.FastOn(snap) {
 					t.Fatalf("the other client's model is %q with %+v, want composer-2.5 untouched", snap.CurrentModel, snap.Config)
@@ -547,6 +580,31 @@ func TestAnotherClientsModelChangeMidChainIsANote(t *testing.T) {
 			})
 		}
 	}
+}
+
+// staleSets is a backend that counts the settings changes the engine refused
+// as stale (engine.ErrStaleModel): the worker's ForModel check, as against a
+// chain that saw the move in its own read and sent nothing.
+type staleSets struct {
+	backend.Backend
+	mu    sync.Mutex
+	stale int
+}
+
+func (b *staleSets) Set(ctx context.Context, c engine.Command, s engine.Setting) (engine.SetResult, error) {
+	res, err := b.Backend.Set(ctx, c, s)
+	if errors.Is(err, engine.ErrStaleModel) {
+		b.mu.Lock()
+		b.stale++
+		b.mu.Unlock()
+	}
+	return res, err
+}
+
+func (b *staleSets) count() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.stale
 }
 
 // TestAnOptionGoneIsANoteAndTheChainGoesOn: the agent takes a step, and the
@@ -609,7 +667,7 @@ func TestEachStepIsJudgedOnTheLatestCatalog(t *testing.T) {
 				SelectValues: []agent.SelectValue{{Value: "300k"}, {Value: "1m"}},
 			})
 			stub.SetModelCatalogs(cfg)
-			m.refreshSnap()
+			m = republish(t, m)
 			writes := configWrites(stub)
 			stub.DropOptionOnSetOf("effort", "fast")
 			m = openDialog(t, m)
@@ -812,10 +870,12 @@ func deliverAnswers(t *testing.T, m Model, stub *Stub, deltasFirst bool, msgs ..
 // ends on medium. Before, the second chain read the session's medium, found
 // nothing to change, sent nothing, and high won.
 //
-// The rows can say medium too, when anything refreshes them from the session
-// while high is outstanding: the box then opens on medium, and medium chosen
-// there — moved off and back — is still a choice, and still sent. Dropped at
-// Enter for equalling the rows, it was lost to high the same way.
+// The rows used to say medium when anything refreshed them from the session
+// while high was outstanding. Since the mirror is the fold (plan 027 §3.13)
+// they cannot: the request's overlay holds high until the request is answered
+// and the fold has caught up with it, so a refresh under it still shows high,
+// and the later choice is made from there; the session's word — medium, the
+// later choice's — is what the rows show once both are answered.
 func TestALaterChoiceLandsAfterTheChangeStillOutstanding(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
@@ -823,7 +883,7 @@ func TestALaterChoiceLandsAfterTheChangeStillOutstanding(t *testing.T) {
 		keys     []tea.KeyType // on effort, in the reopened box
 	}{
 		{name: "the rows show the change", keys: []tea.KeyType{tea.KeyLeft}},
-		{name: "the rows were read back under it", readBack: true, keys: []tea.KeyType{tea.KeyRight, tea.KeyLeft}},
+		{name: "the rows are refreshed under it", readBack: true, keys: []tea.KeyType{tea.KeyLeft}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			answerOrders(t, func(t *testing.T, deltasFirst bool) {
@@ -843,12 +903,12 @@ func TestALaterChoiceLandsAfterTheChangeStillOutstanding(t *testing.T) {
 				if got := optionCurrent(stub.Snapshot().Config, "effort"); got != "medium" {
 					t.Fatalf("the session is on %q: high should still be waiting for its answer", got)
 				}
-				want := "high"
 				if tc.readBack {
 					m = deliver(t, m, refreshSnapMsg{})
-					want = "medium"
 				}
-				if got := optionCurrent(m.snap.Config, "effort"); got != want {
+				// The outstanding request's value, whatever refreshes the rows
+				// under it.
+				if got, want := optionCurrent(m.snap.Config, "effort"), "high"; got != want {
 					t.Fatalf("the rows show %q, want %q", got, want)
 				}
 
@@ -1289,7 +1349,7 @@ func TestADuplicateIDKeepsOneOccurrenceAndItsRole(t *testing.T) {
 	stub.mu.Lock()
 	stub.snap.Config = cloneStubConfig(cfg)
 	stub.mu.Unlock()
-	m.refreshSnap()
+	m = republish(t, m)
 	m = openDialog(t, m)
 	view := plainView(m)
 	if !strings.Contains(view, "  thinking  [false]  true") || strings.Contains(view, "effort") {
@@ -1314,8 +1374,8 @@ func TestADuplicateIDKeepsOneOccurrenceAndItsRole(t *testing.T) {
 // tab the delta brings is seeded from its option's value.
 //
 // Each switch is delivered before the next is made, which is what makes the
-// catalog without the option one the model reads: the repair acts on what
-// refreshSnap reads, never on a catalog the session only passed through.
+// catalog without the option one the model reads: the repair acts on the
+// mirror recompute builds, never on a catalog the session only passed through.
 // Deltas that take the option away and bring it back before Update handles
 // either leave the focus and the choice standing, again valid on the model
 // they were chosen for (repaired; plan 025 X13, astra r4 item 5).

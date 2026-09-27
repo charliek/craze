@@ -19,6 +19,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/charliek/craze/internal/agent"
+	"github.com/charliek/craze/internal/backend"
 	"github.com/charliek/craze/internal/engine"
 	"github.com/charliek/craze/internal/host"
 	"github.com/charliek/craze/internal/sessions"
@@ -139,11 +140,13 @@ type Config struct {
 	Host Host
 	// OnEngine is handed every engine setSession installs, right after the
 	// session owner holds it — the one New builds and the one a picker builds
-	// alike — and never nil. It runs inside Update when a picker confirms, so
-	// it must not block. nil calls nothing, which is what every test Config,
-	// every golden and the frame runner get; internal/cli's hook serves the
-	// engine over the control socket, claims a new session's craze id and
-	// rewrites the host's registry entry (plan 027 §3.8–§3.9).
+	// alike — and never nil. It is the raw *engine.Engine the model's backend
+	// wraps, since what the hook serves is the engine itself. It runs inside
+	// Update when a picker confirms, so it must not block. nil calls nothing,
+	// which is what every test Config, every golden and the frame runner get;
+	// internal/cli's hook serves the engine over the control socket, claims a
+	// new session's craze id and rewrites the host's registry entry (plan 027
+	// §3.8–§3.9).
 	OnEngine func(*engine.Engine)
 	// ClaimSession claims the row the resume picker is about to load, before
 	// anything is built (plan 027 §3.9, SQ16): it answers the row's durable
@@ -192,24 +195,35 @@ type Model struct {
 	vp    viewport.Model
 	input textarea.Model
 
-	// eng is the engine the model drives its session through: admission, the
-	// message queue and its verbs, send-now, cancel, the asks, the settings,
-	// and — since C12 — the session index and the durable session id (plan 021
-	// §3.4, §3.6, §3.8). No production path reaches past it for the session
-	// underneath — the engine's own methods are the only way in — and it is
-	// assigned only in setSession, which records it in owner too.
-	eng *engine.Engine
-	// client is this model's client id on eng, minted once per engine, and
-	// cmdSeq numbers its commands from 1, so every mutating command it sends
-	// names itself and the events it caused can be told from another client's
-	// (§3.2). Receipts do not exist until later; this is what makes Event.Cause
-	// mean something.
-	client string
+	// eng is the session's backend (plan 027 §3.12): the engine in process —
+	// an engineBackend wrapping the *engine.Engine setSession built — or, from
+	// PR 4, a socket to the host that owns the engine. The model drives its
+	// session through it alone: admission, the message queue and its verbs,
+	// send-now, cancel, the asks, the settings, and — since C12 — the session
+	// index and the durable session id (plan 021 §3.4, §3.6, §3.8). No
+	// production path reaches past it for the engine or the session
+	// underneath, and it is assigned only in setSession, which records it in
+	// owner too. It keeps the name it had when it was the engine itself.
+	//
+	// It is nil or a live backend, never a nil *engineBackend: every
+	// `m.eng == nil` check reads "no session", which a typed nil would defeat.
+	eng backend.Backend
+	// sessGen is the session generation (plan 027 §3.12, astra r2 13): it
+	// moves whenever the session the model drives is replaced — setSession,
+	// on every engine swap, and in PR 4 a restore from another incarnation —
+	// and every session-dependent asynchronous result carries the generation
+	// it was issued under (issued), so one that lands after a replacement is
+	// dropped rather than writing the old session's facts into the new one.
+	sessGen uint64
+	// cmdSeq numbers this model's commands from 1. Each command also names the
+	// backend's client id, read per command (nextCmd) and never cached, so
+	// every mutating command it sends names itself and the events it caused
+	// can be told from another client's (§3.2).
 	cmdSeq int
 	// chains orders this client's model changes against each other: the
 	// dialog's apply chains and `/model <id> [<effort>]` each take a place in
 	// its line in the Update that issues them, and run whole, one at a time, in
-	// that order (chainLock). It is minted with the client id in setSession,
+	// that order (chainLock). It is minted with the backend in setSession,
 	// one per engine, and is a pointer so every copy bubbletea makes shares it.
 	chains *chainLock
 	// engErr is what wrapping the session in an engine came back with. It is
@@ -332,17 +346,34 @@ type Model struct {
 	askEchoes       []string
 	hiddenRetry     []hiddenAnswer
 	hiddenRetryLive bool
-	snap            agent.Snapshot
-	// queue is the engine's message queue, in send order: refreshSnap and
-	// refreshQueue fill it from Control.State().Queue, which is where the
-	// queue lives now that it has left the provider seam (plan 021 §3.5).
-	queue []agent.QueuedPrompt
+	// snap is the session's state as the TUI draws it, and queue the message
+	// queue in send order: both derived (recompute, mirror.go) from this
+	// client's fold, the backend's static facts and its own overlays, after
+	// every fold and every overlay write (plan 027 §3.13). sendNowArmed is the
+	// armed send-now as the same mirror says (sendNowPending). Nothing else
+	// writes them.
+	snap         agent.Snapshot
+	queue        []agent.QueuedPrompt
+	sendNowArmed bool
+	// ov is this client's overlays on the fold: what its own commands
+	// confirmed, or asked for and have not heard back about, that the fold
+	// has not caught up with (overlays, mirror.go).
+	ov overlays
+	// armCause is the command whose arm the fold's send-now section last
+	// armed, and armFired says the started that fired it has been folded since:
+	// firing publishes no delta, so the section alone would stay armed
+	// (observe).
+	armCause string
+	armFired bool
+	// childActivity is each child's activity as its own tool events have moved
+	// it since the roster last carried its row (observe): the live session
+	// keeps a child's activity without publishing it.
+	childActivity map[string]string
 	// modeInFlight is a mode change of craze's own that the agent has not
-	// answered yet. The chip flips when the user asks for it and reverts only
-	// if the agent refuses, but the session's snapshot still says the old mode
-	// for the length of that round trip — so refreshSnap keeps this one on the
-	// chip instead, or any unrelated update landing inside the window flickers
-	// it back to the mode the user just left.
+	// answered yet: set when the user asks for it, cleared by the answer —
+	// success or refusal — for its own request. What the chip shows meanwhile
+	// is the mode overlay's (requestMode), which holds past a success until
+	// the change's own delta is folded (plan 027 §3.13).
 	//
 	// modeGen is which request it belongs to. The mode id cannot stand in for
 	// that: changes are not serialised, two of them can be answered out of
@@ -350,22 +381,20 @@ type Model struct {
 	// request's protection to the first request's answer. Every writer bumps
 	// the generation and every answer carries it back, so an answer that is
 	// not the current generation is stale and may neither clear the flag nor
-	// speak for the chip. The flag *overrides* the session's snapshot, so a
-	// stuck or wrongly-cleared one makes the chip lie for the life of the
-	// process, where the bug it was introduced for only made it flicker.
+	// speak for the chip.
 	modeInFlight string
 	modeGen      int
 
 	// modeRev, modelRev and configRev are the highest StateDelta Seq this model
 	// has applied for each settings section: the mode, the model, and the
 	// config options — one revision for all of them, because a config delta
-	// carries every option in full.
+	// carries every option in full (observe).
 	//
-	// They are what a delayed answer is judged against (mayApply). modeGen,
-	// applyGen and modeInFlight stay exactly what they were: optimistic view
-	// state about this model's own requests. These are about the shared state
-	// the session actually holds, which another client can change too, and the
-	// only thing that orders the two is the revision the deltas carry.
+	// They are what a confirmed settings overlay is judged against (settled,
+	// mayApply). modeGen, applyGen and modeInFlight are view state about this
+	// model's own requests. These are about the shared state the session
+	// actually holds, which another client can change too, and the only thing
+	// that orders the two is the revision the deltas carry.
 	modeRev   uint64
 	modelRev  uint64
 	configRev uint64
@@ -376,9 +405,10 @@ type Model struct {
 	dialog  dialogKind
 	mdlg    modelDialog
 	helpTop int
-	// applyGen counts the model dialog's applies. The box closes optimistically,
-	// so a second apply can be under way before the first one answers, and only
-	// the newest one is allowed to settle what the rows show.
+	// applyGen counts this client's model changes: the model dialog's applies
+	// and `/model`'s. The box closes optimistically, so a second change can be
+	// under way before the first one answers; each answer carries its own, and
+	// settles only the overlays its own request wrote (mirror.go).
 	applyGen int
 
 	// Theme dialog: the list is frozen when it opens because the live preview
@@ -462,15 +492,21 @@ type Model struct {
 	// the edit displaced and Esc puts back. queueEditCtx is the shell context
 	// that row was queued with, held out of the composer for the length of the
 	// edit and put back in front of whatever is saved (plan 022 §3.6).
+	// queueEditVer is the row's version when the edit began: a save of the
+	// edit is a check-and-edit against it (plan 027 §3.13, C22), so a row
+	// another client changed meanwhile refuses the save rather than being
+	// overwritten; the refusal refreshes it to the row the band then shows,
+	// for a second Enter that saves over that change knowingly.
 	queueEdit    string
 	queueEditPos int
 	editDraft    string
 	queueEditCtx string
+	queueEditVer int
 	// confirm is the send-now waiting for an answer. The confirm line is
 	// client-local UI: nothing is taken from anywhere and the engine has not
 	// heard of it. The send-now it turns into, on the other hand, is the
-	// engine's armed send (State().SendNow), because the cancel that makes room
-	// for it is the engine's.
+	// engine's armed send (the mirror's sendNowArmed), because the cancel that
+	// makes room for it is the engine's.
 	confirm *strongSend
 	// mouseAll records which motion mode the terminal is in, so the queue
 	// going 0 → 1 rows and back issues exactly one transition each way.
@@ -507,8 +543,9 @@ type Model struct {
 	// not mean (§3.7).
 	turnID string
 	// ownTurn is the one turn id the model skips the started event for: the one
-	// Submit handed it back synchronously, whose row, working status and
-	// turnStart the Update that pressed Enter has already applied. Echo
+	// Submit handed back, whose row, working status and turnStart its
+	// continuation has already applied — before any event the Submit caused,
+	// which the command gate holds until then (§3.12). Echo
 	// suppression is per effect, so every other started — a drained row, an
 	// armed send firing, another client's prompt — draws its row (§3.4).
 	ownTurn string
@@ -544,10 +581,11 @@ type Model struct {
 	// no started can ever carry that cause again.
 	armedDraft string
 	// disarmed is the Disarm command whose effect the model has already applied,
-	// for the same reason: Esc writes its own note in the Update that pressed
-	// it, and the delta the engine publishes for that same command is then this
-	// model's own echo. A withdrawn delta from any other command is somebody
-	// else's Disarm and is worded for the user.
+	// for the same reason: Esc writes its own note in the Disarm's
+	// continuation — before any event the command caused, which the command
+	// gate holds until then (§3.12) — and the delta the engine publishes for
+	// that same command is then this model's own echo. A withdrawn delta from
+	// any other command is somebody else's Disarm and is worded for the user.
 	disarmed string
 
 	tickGen     int
@@ -619,6 +657,43 @@ type Model struct {
 	// (applyForeignCancelled, plan 026 X48).
 	foreignEnded uint64
 	foreignNoted uint64
+
+	// The command gate (gate.go, plan 027 §3.12). gate is the one gated call
+	// whose reply the model is waiting for, nil when none is open; gateSeq
+	// numbers them. held is every message that arrived while a gate was open,
+	// or while earlier held ones were still draining, in arrival order, and
+	// heldBytes the payload they retain (payloadBytes); heldDrained counts the
+	// drained slots at the front of held's array (drain compacts it once they
+	// are more than half of it). reading says a Read of
+	// the backend's stream is in flight: exactly one ever is (readOn). syncAck
+	// is the last frame-sync token acknowledged, which the frame harness
+	// publishes as its barrier, and syncPending one that arrived while a gate
+	// was open, acknowledged by the release that leaves none open. gateSync is
+	// the test-only baseline that runs a gated call inline (gateSyncDefault).
+	//
+	// None of this is drawn: it is the gate's own bookkeeping, and the
+	// invisibility watch leaves it out of the state it holds still.
+	gate        *gate
+	gateSeq     uint64
+	held        []heldMsg
+	heldBytes   int
+	heldDrained int
+	reading     bool
+	syncAck     int
+	syncPending int
+	gateSync    bool
+	// harnessQuit says the frame runner's quit message (frameQuitMsg) has been
+	// applied: the frame of that Update is the run's capture (frame.go).
+	harnessQuit bool
+}
+
+// foldedSeq is the seq of the last event the model folded into its shared
+// transcript, 0 before it has one.
+func (m Model) foldedSeq() uint64 {
+	if m.shared == nil {
+		return 0
+	}
+	return m.shared.Seq()
 }
 
 // now reads the clock through an indirection so tests can inject one.
@@ -635,46 +710,111 @@ type eventMsg struct{ ev agent.Event }
 // errMsg is that command's other answer, and the only error that reaches craze's
 // exit status.
 //
-// Both name the engine they are for. A start command outlives the model copy that
-// made it — a picker's choice closes one engine and builds another in the same
-// Update, with the old command still in flight — and neither message may then
-// speak for the engine that replaced the one it was about: a stale startedMsg
-// would open the new engine's gate before its own Start had returned, and a stale
-// errMsg would fail a session that is starting perfectly well. A nil eng means
-// "whichever engine the model holds", which is what a test injecting either
-// message by hand intends.
-type startedMsg struct{ eng *engine.Engine }
-type errMsg struct {
-	err error
-	eng *engine.Engine
+// Both name the backend they are for. A start command outlives the model copy
+// that made it — a picker's choice closes one engine and builds another in the
+// same Update, with the old command still in flight — and neither message may
+// then speak for the backend that replaced the one it was about: a stale
+// startedMsg would open the new engine's gate before its own Start had
+// returned, and a stale errMsg would fail a session that is starting perfectly
+// well. A nil eng means "whichever backend the model holds", which is what a
+// test injecting either message by hand intends.
+type startedMsg struct {
+	issued
+	eng backend.Backend
 }
-type actionErrMsg struct{ err error }
+type errMsg struct {
+	issued
+	err error
+	eng backend.Backend
+}
+
+// actionErrMsg is a failure a command reports as an error row: a chain's
+// settings read or Set that failed. landed is `/model`'s model step when it
+// landed before the effort step failed (modelLanded), applied first.
+type actionErrMsg struct {
+	issued
+	err    error
+	landed modelLanded
+}
+
+// issued stamps a session-dependent asynchronous result — a gated call's
+// reply, a settings answer, a cancel's report, a hidden answer the outbox
+// refused, a start's answer — with the session generation it was issued
+// under (plan 027 §3.12, astra r2 13): the model's sessGen, read in the Update
+// that dispatched the command, never on the command's goroutine. A result
+// whose generation is no longer the model's is about a session the model has
+// left, and is dropped where it lands (outdated): an engine swap and, in
+// PR 4, a restore from another incarnation move the generation, and a result
+// issued before must not write that session's facts into this one. This is
+// staleFor generalised from the start messages to every result.
+//
+// The zero stamp is a message a test built by hand, and means whichever
+// session the model holds — as a start message's nil backend does.
+type issued struct{ sessGen uint64 }
+
+func (i issued) issuedUnder() uint64 { return i.sessGen }
+
+// issue is the stamp a command dispatched now carries.
+func (m Model) issue() issued { return issued{sessGen: m.sessGen} }
+
+// dispatchCtx is the context a call dispatched now against b carries — and
+// every later call of the same operation, a chain's next step among them: b's
+// epoch, read here, in the Update, never on the command's goroutine
+// (backend.WithEpoch). A call that runs once b has moved to another session is
+// refused before anything is sent (§3.12, "Chains are fenced in the backend
+// too"). It never ends; a site that needs a deadline derives one from it.
+func dispatchCtx(b backend.Backend) context.Context {
+	return backend.WithEpoch(context.Background(), b.Epoch())
+}
+
+// outdated reports that msg is a result issued under a session generation
+// other than the model's: dropped, unapplied.
+func (m *Model) outdated(msg tea.Msg) bool {
+	s, ok := msg.(interface{ issuedUnder() uint64 })
+	if !ok {
+		return false
+	}
+	gen := s.issuedUnder()
+	return gen != 0 && gen != m.sessGen
+}
 
 // revertModeMsg is a mode change coming back refused, or never coming back
-// inside modeCallTimeout. gen is the request it answers for; prev is what the
-// chip showed before that request asked, and at the mode section's revision
-// when it asked (mayApply).
+// inside modeCallTimeout. gen is the request it answers for, whose mode
+// overlay it takes down; prev is what the chip showed before that request
+// asked, and at the mode section's revision when it asked — the request's
+// record. Nothing puts prev back: with the overlay gone the chip reads the
+// fold, which is the session's mode as far as this client has heard (§3.13).
 type revertModeMsg struct {
+	issued
 	gen  int
 	prev string
 	err  error
 	at   uint64
 }
 
-// modeAppliedMsg is a mode change coming back accepted: the session's snapshot
-// carries this mode now, so the chip can go back to reading it. gen is the
-// request it answers for. It writes no value of its own — it only takes the
-// chip's mask down — so it needs no revision.
+// modeAppliedMsg is a mode change coming back accepted (plan 027 §3.13: every
+// settings success reaches the reducer with its result): gen is the request it
+// answers for, id the mode the session confirmed (engine.SetResult.Value,
+// which is not always the one asked for) and rev the revision it committed it
+// at. Its overlay holds that value until the fold's mode revision reaches rev
+// — or its own delta is folded, the same event — and, with no revision to wait
+// for (rev 0: a change that published nothing), until the fold shows it
+// (confirmMode).
 type modeAppliedMsg struct {
+	issued
 	gen int
 	id  string
+	rev uint64
 }
 
-// revertModelMsg is a model change coming back refused. at is the model
-// section's revision when it asked: a refusal that arrives after somebody
-// else's change has been applied may show its error but may not put prev back
-// (mayApply).
+// revertModelMsg is a model change coming back refused. gen is the request it
+// answers for, whose model overlay it takes down; prev is the model the screen
+// showed when it asked, and at the model section's revision then — the
+// request's record. Nothing puts prev back (SF-38): two overlapping refusals
+// both land on the fold's model, never on the first one's optimistic value.
 type revertModelMsg struct {
+	issued
+	gen  int
 	prev string
 	err  error
 	at   uint64
@@ -682,12 +822,60 @@ type revertModelMsg struct {
 
 // modelUnreadMsg is a model change coming back with an answer the session
 // could not read (agent.ErrBadCatalog). It is not revertModelMsg: the agent
-// answered and may have switched, so nothing says the model was refused and
-// there is no prev to put back. Nothing of the answer was installed, so the
-// screen reads the session's snapshot back, and the row says the outcome is
-// unknown (unreadModelText).
-type modelUnreadMsg struct{}
-type refreshSnapMsg struct{}
+// answered and may have switched, so nothing says the model was refused. Its
+// overlay goes all the same — nothing of the answer was installed — so the
+// screen reads the fold, and the row says the outcome is unknown
+// (unreadModelText).
+type modelUnreadMsg struct {
+	issued
+	gen int
+}
+
+// modelLanded is `/model`'s model step coming back accepted (plan 027 §3.13:
+// every settings success reaches the reducer with its result): gen is the
+// request, cause the step's command and at the model section's revision when
+// it was sent, and res what the session confirmed and the revision it
+// committed it at, which the model overlay holds until the fold reaches
+// (confirmModel). set says there is one.
+type modelLanded struct {
+	set   bool
+	gen   int
+	cause string
+	at    uint64
+	res   engine.SetResult
+}
+
+// land applies a landed model step to the model overlay, when there is one.
+func (m *Model) land(l modelLanded) {
+	if l.set {
+		m.confirmModel(l.gen, l.cause, l.res.Value, l.at, l.res.Rev)
+	}
+}
+
+// modelSetMsg is `/model <id>` — no effort — coming back accepted: the model
+// step's landing, and nothing after it. With an effort the chain answers the
+// effort step's own message instead — effortSetMsg, effortNotAppliedMsg or
+// actionErrMsg — carrying the model step's landing beside what the effort came
+// to.
+type modelSetMsg struct {
+	issued
+	landed modelLanded
+}
+
+// effortSetMsg is `/model <id> <effort>`'s effort step coming back accepted:
+// option id, sent as cause from the model step's request (landed.gen) when the
+// config section stood at at, confirmed at res (confirmOption).
+type effortSetMsg struct {
+	issued
+	cause, id string
+	at        uint64
+	res       engine.SetResult
+	// landed is the model step's landing (modelLanded), applied first.
+	landed modelLanded
+}
+
+// refreshSnapMsg redraws the mirror: tests send it bare, as a nudge.
+type refreshSnapMsg struct{ issued }
 
 // dblClickMsg is the frame runner's <dblclick:X,Y>: the gesture without the
 // two presses and the 400 ms between them.
@@ -706,11 +894,15 @@ type dblClickMsg struct{ X, Y int }
 // and modeAppliedMsg do: the turn says whether the prompt is still wanted, the
 // generation says whether this is still the mode request the chip is showing.
 type planImplementMsg struct {
+	issued
 	seq  int
 	gen  int
 	mode string
+	// rev is the mode change's revision (modeAppliedMsg's).
+	rev uint64
 }
 type planImplementFailedMsg struct {
+	issued
 	seq  int
 	gen  int
 	prev string
@@ -755,21 +947,23 @@ func mayApply(applied, at, rev uint64) bool {
 //
 // It holds the ENGINE and not the session (plan 021 §3.1): closing the engine
 // closes the session, and closing only the session would leave the engine's
-// driver goroutine running and its last events unpublished.
+// driver goroutine running and its last events unpublished. It holds it as the
+// model does, as the session's backend (plan 027 §3.12), whose Close is the
+// engine's in process.
 type sessionOwner struct {
 	mu  sync.Mutex
-	eng *engine.Engine
+	eng backend.Backend
 }
 
-func (o *sessionOwner) set(e *engine.Engine) {
+func (o *sessionOwner) set(b backend.Backend) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
-	o.eng = e
+	o.eng = b
 }
 
-// current is the engine last set. The lock is released before it returns, so
+// current is the backend last set. The lock is released before it returns, so
 // a caller never holds it across Close, which blocks until the agent is reaped.
-func (o *sessionOwner) current() *engine.Engine {
+func (o *sessionOwner) current() backend.Backend {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	return o.eng
@@ -817,11 +1011,18 @@ func (m *Model) setSession(s agent.Session, crazeID string) {
 	// after this cannot put itself back (shellController.disown).
 	m.shell.disown()
 	m.dropShellContext()
+	// A new session, so a new generation: every result still in flight for
+	// the one this replaces is dropped where it lands (issued).
+	m.sessGen++
 	m.eng, m.engErr = nil, nil
 	// A new session is a new transcript: the shared model is folded from its
 	// events alone.
 	m.newShared()
-	m.client, m.cmdSeq, m.chains = "", 0, nil
+	// And nothing this client laid over the old session's fold is about the
+	// new one (plan 027 §3.13: a restore clears every overlay).
+	m.clearOverlays()
+	m.modeRev, m.modelRev, m.configRev = 0, 0, 0
+	m.cmdSeq, m.chains = 0, nil
 	m.owner.set(nil)
 	if s == nil {
 		return
@@ -847,32 +1048,54 @@ func (m *Model) setSession(s agent.Session, crazeID string) {
 		},
 	})
 	if err != nil {
+		// m.eng stays the untyped nil it was set to above: a failure leaves no
+		// backend, never a nil *engineBackend that would read as one.
 		m.engErr = err
 		return
 	}
-	m.eng = eng
-	m.client = eng.NewClientID()
+	// The backend mints this model's client on the engine, once: the
+	// in-process client is never released (plan 027 §3.6).
+	m.eng = newEngineBackend(eng, m.cwd)
+	if sessionBackendHook != nil {
+		m.eng = sessionBackendHook(m.eng)
+	}
 	// A new client, so a new order: a chain still running on the engine this
 	// replaced orders nothing on this one.
 	m.chains = &chainLock{}
-	m.owner.set(eng)
+	m.owner.set(m.eng)
 	// After the owner holds it, so whatever the hook starts — a socket
 	// serving this engine — can never name an engine the exit tail would not
-	// close.
+	// close. The hook is handed the engine itself, not the backend: what it
+	// serves is the engine.
 	if m.onEngine != nil {
 		m.onEngine(eng)
 	}
 }
 
+// sessionBackendHook, when a test sets it, wraps every backend setSession
+// builds: the jitter run (plan 027 §8, V8) delays each of the backend's
+// answers and reads through it. It is nil in production — no Config field or
+// flag reaches it — like gateHook.
+var sessionBackendHook func(backend.Backend) backend.Backend
+
 // nextCmd is the model's next command id. Every mutating engine call carries
 // one, so the events it causes name their cause and the model can tell its own
 // effects' echoes from another client's change (§3.2).
+//
+// The client is the backend's, read here for every command and never kept
+// (plan 027 §3.12): a socket client that reconnects without resuming has a new
+// id, and a command must name the client it is sent as. No backend, or one
+// with no client, is the zero Command, as it always was.
 func (m *Model) nextCmd() engine.Command {
-	if m.client == "" {
+	if m.eng == nil {
+		return engine.Command{}
+	}
+	client := m.eng.ClientID()
+	if client == "" {
 		return engine.Command{}
 	}
 	m.cmdSeq++
-	return engine.Command{Client: m.client, ID: fmt.Sprintf("%d", m.cmdSeq)}
+	return engine.Command{Client: client, ID: fmt.Sprintf("%d", m.cmdSeq)}
 }
 
 // nextCmds is n command ids at once, for an Update that hands a tea.Cmd more
@@ -945,7 +1168,8 @@ func New(cfg Config) Model {
 		replaying: cfg.Loading,
 		// Turn 1 is the session before the first prompt: every event has an
 		// identity from the start, and no engine turn carries it.
-		turnSeq: 1,
+		turnSeq:  1,
+		gateSync: gateSyncDefault,
 	}
 	m.git = discoverGit(cwd)
 	m.branch = m.git.branch()
@@ -975,7 +1199,12 @@ func New(cfg Config) Model {
 	// id belongs to Config.Session — the row --continue resolved — so a picker
 	// that builds another session carries its own row's id instead.
 	m.setSession(sess, m.crazeID)
-	m.refreshSnap()
+	// Init arms the stream's first read exactly when it has a session to read
+	// and no picker to wait for, and it cannot record that itself (a value
+	// receiver whose model is thrown away), so the model starts out agreeing
+	// with it here: the gate's reader rule counts that read as in flight.
+	m.reading = m.eng != nil && !m.picking()
+	m.recompute()
 	if m.model == "" && m.snap.CurrentModel != "" {
 		m.model = m.snap.CurrentModel
 	}
@@ -1153,9 +1382,12 @@ func finishRun(out io.Writer, final tea.Model, m Model, h Host) (bool, error) {
 //
 // Applying events before started is safe because nothing in applyEvent depends
 // on m.started: the engine authors no turn event before it is started, cancelTurn
-// is a no-op with no cards and no running turn, refreshSnap is idempotent, and
+// is a no-op with no cards and no running turn, recompute is idempotent, and
 // the only card-producing events — permission, question and plan — are requests
 // an agent makes of a live turn and never appear in a replay (§2.1).
+//
+// The read it arms is the one the command gate's reader rule counts: New set
+// m.reading to match, since this value receiver cannot.
 func (m Model) Init() tea.Cmd {
 	if m.picking() {
 		return nil
@@ -1177,26 +1409,38 @@ func (m Model) startCmd() tea.Cmd {
 			return errMsg{err: fmt.Errorf("craze: no session")}
 		}
 	}
+	iss := m.issue()
 	return func() tea.Msg {
 		if err := eng.Start(context.Background()); err != nil {
-			return errMsg{err: err, eng: eng}
+			return errMsg{issued: iss, err: err, eng: eng}
 		}
-		return startedMsg{eng: eng}
+		return startedMsg{issued: iss, eng: eng}
 	}
 }
 
-// staleFor reports that a start command's message is about an engine the model no
-// longer holds — one a picker closed and replaced — so nothing it says applies.
-func (m Model) staleFor(eng *engine.Engine) bool { return eng != nil && eng != m.eng }
+// staleFor reports that a start command's message is about a backend the model
+// no longer holds — one a picker closed and replaced — so nothing it says
+// applies. It is interface identity: the same backend, not an equal one. The
+// start messages carry the session generation too (issued, outdated), which
+// every other result now carries: a restore from another incarnation (PR 4)
+// moves the generation without replacing the backend. staleFor stays for a
+// start message a test builds by hand around a backend.
+func (m Model) staleFor(b backend.Backend) bool { return b != nil && b != m.eng }
 
-// Update runs the handler and then lays the frame out exactly once, from the
-// state the handler left behind, and keeps the single tick chain alive.
+// Update is the command gate (gate.go) over the handler: a message that
+// arrives while a gated call is waiting for its reply, or while the messages
+// held behind one are still draining, is held in arrival order; everything
+// else runs the handler and then the wrapper (finish).
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	tm, cmd := m.update(msg)
-	next, ok := tm.(Model)
-	if !ok {
-		return tm, cmd
-	}
+	return m.gated(msg, Model.update)
+}
+
+// finish is the Update wrapper, run after the handler of every message that is
+// applied — never for a held one, which runs it when it is drained: it lays
+// the frame out exactly once, from the state the handler left behind, and
+// keeps the single tick chain alive.
+func (m Model) finish(cmd tea.Cmd) (Model, tea.Cmd) {
+	next := m
 	// Mutation only marks the transcript dirty. Paint the drawn one here so a
 	// background transcript (U3b) never moves m.vp.
 	if next.cur().dirty {
@@ -1242,6 +1486,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if m.outdated(msg) {
+		// A result issued for a session the model has since left (issued):
+		// nothing it says applies to this one.
+		return m, nil
+	}
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		// Stickiness is decided from where the user was before the resize; the
@@ -1258,7 +1507,13 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case hiddenRetryMsg:
-		m.handleHiddenRetry()
+		cmd := m.handleHiddenRetry()
+		return m, cmd
+
+	case hiddenRefusedMsg:
+		// The outbox had no room for a hidden answer: it goes back on the
+		// retry list, and the wrapper arms its beat (armHiddenRetry).
+		m.hiddenRetry = append(append([]hiddenAnswer(nil), m.hiddenRetry...), msg.h)
 		return m, nil
 
 	case resumeClaimMsg:
@@ -1282,7 +1537,7 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.started = true
 		m.branch = m.git.branch()
-		m.refreshSnap()
+		m.recompute()
 		if m.persistProvider && (!m.fallbackDefault || m.pickedExplicit) {
 			name := m.snap.Provider.Name
 			if name == "" {
@@ -1321,55 +1576,60 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case actionErrMsg:
+		m.land(msg.landed)
 		m.addError(msg.err.Error())
 		return m, nil
 
 	case revertModeMsg:
 		if msg.gen != m.modeGen {
 			// Stale: a newer request of the user's own is what the chip is
-			// showing, so this refusal may neither roll the chip back to a
-			// mode two changes ago nor drop the newer request's protection.
-			// The error is still theirs to see — the agent refused something
-			// they asked for, and swallowing that would be a bug of its own.
+			// showing, so this refusal may neither take the newer request's
+			// overlay down nor clear its flag. The error is still theirs to
+			// see — the agent refused something they asked for, and
+			// swallowing that would be a bug of its own.
 			m.addError(msg.err.Error())
 			return m, nil
 		}
-		// The revert is the last word on this request, so nothing may put the
-		// refused mode back on the chip afterwards. prev is what the chip
-		// showed before it asked; the session is the real authority, and with
-		// the flag down nothing masks it any more, so it is read straight back
-		// — an agent-initiated mode that landed while this was on the wire is
-		// on the chip rather than lost behind prev. refreshSnap is a no-op
-		// before a session exists, which is what leaves prev in place then.
+		// The revert is the last word on this request: its overlay goes, and
+		// nothing is put back in its place — the chip reads the fold, so an
+		// agent-initiated mode that landed while this was on the wire is on
+		// the chip rather than lost behind a captured value.
 		m.modeInFlight = ""
-		if mayApply(m.modeRev, msg.at, 0) {
-			m.snap.CurrentMode = msg.prev
-		}
-		m.refreshSnap()
+		m.refuseMode(msg.gen)
 		m.addError(msg.err.Error())
 		return m, nil
 
 	case modeAppliedMsg:
-		return m.modeSettled(msg.gen), nil
+		return m.modeSettled(msg.gen, msg.id, msg.rev), nil
 
 	case revertModelMsg:
-		// The guard /model never had: another client — or the agent — may have
-		// changed the model while this request was in flight, and a refusal
-		// about a value nobody is on any more must not put its prev back. The
-		// error row is still the user's to see either way.
-		if mayApply(m.modelRev, msg.at, 0) {
-			m.snap.CurrentModel = msg.prev
-			m.model = msg.prev
-		}
+		// Its own overlay goes, and nothing is put back (SF-38): the screen
+		// reads the fold's model — the one before the call, or whatever the
+		// agent or another client has moved it to since. The error row is the
+		// user's to see either way.
+		m.refuseModel(msg.gen)
 		m.addError(msg.err.Error())
 		return m, nil
 
 	case modelUnreadMsg:
-		// Read back rather than put back: the snapshot is the model the
-		// session is on as far as anyone can say — the one before the call,
-		// or whatever the agent or another client has moved it to since.
-		m.refreshSnap()
+		// Read back rather than put back: nothing of the answer was
+		// installed, so the overlay goes and the fold is the model the
+		// session is on as far as anyone can say.
+		m.refuseModel(msg.gen)
 		m.addError(m.unreadModelText())
+		return m, nil
+
+	case modelSetMsg:
+		// The model step landed: its overlay holds what the session confirmed
+		// until the fold's model revision reaches it.
+		m.land(msg.landed)
+		return m, nil
+
+	case effortSetMsg:
+		// The model step landed, and then the effort step: each overlay holds
+		// what the session confirmed until the fold reaches it.
+		m.land(msg.landed)
+		m.confirmOption(msg.landed.gen, msg.cause, msg.id, msg.res.Value, msg.at, msg.res.Rev)
 		return m, nil
 
 	case modelApplyMsg:
@@ -1377,16 +1637,12 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		for _, st := range msg.done {
 			m.addNote(st.note)
 		}
-		if msg.gen == m.applyGen {
-			// Only the newest apply settles the rows: the snapshot is re-read
-			// so they show what the agent has, and the steps this apply landed
-			// are written over it. An older apply is not allowed to speak —
-			// its failure would undo a value the user has changed since.
-			m.refreshSnap()
-			for _, st := range msg.done {
-				m = m.settleStep(st)
-			}
-		}
+		// This apply's overlays: a step that landed holds its confirmed value
+		// until the fold reaches it, and every other one of its requests —
+		// refused, skipped, or never sent once an earlier step failed — goes,
+		// with nothing put back. An older apply's answer settles its own
+		// overlays the same way, and cannot touch a newer one's (settleApply).
+		m.settleApply(msg)
 		// After the rows are settled, because a model step whose answer could
 		// not be read names the model the screen then shows.
 		switch {
@@ -1398,14 +1654,14 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case refreshSnapMsg:
-		m.refreshSnap()
+		m.recompute()
 		return m, nil
 
 	case effortNotAppliedMsg:
-		// The model step landed, so the rows are read back as the landed effort
-		// step's refreshSnapMsg reads them, and then the note says why the
-		// effort did not follow it.
-		m.refreshSnap()
+		// The model step landed and the effort did not follow it: nothing of
+		// the effort was written, so the note says why.
+		m.land(msg.landed)
+		m.recompute()
 		m.addNote(msg.note)
 		return m, nil
 
@@ -1461,7 +1717,7 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case planImplementMsg:
 		// The session is in the implement mode now, so the note is honest
 		// whatever else has happened meanwhile — and so is its snapshot.
-		m = m.modeSettled(msg.gen)
+		m = m.modeSettled(msg.gen, msg.mode, msg.rev)
 		m.addNote(modeNote(m.snap.Modes, msg.mode))
 		if msg.seq != m.turnSeq {
 			// A turn of the user's own started while SetMode was in flight, so
@@ -1485,14 +1741,18 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return next, cmd
 
-	case eventMsg:
-		// Every ending is one event now, the engine's EventTurn{ended}, and
-		// everything a settled turn left to do — the drain, an armed send-now,
-		// the queue the chain policy clears — is the engine's own decision,
-		// arriving as the events it authored. There is nothing left for the
-		// model to settle here but the reader it re-arms.
-		m.applyEvent(msg.ev)
-		return m, waitEvent(m.eng)
+	// An eventMsg never reaches the handler: the gate applies an event itself,
+	// through applyEvent, and owns the reader (gate.go's apply and readOn), so
+	// no path can arm a second read of the stream. Every ending is one event
+	// now, the engine's EventTurn{ended}, and everything a settled turn left to
+	// do — the drain, an armed send-now, the queue the chain policy clears — is
+	// the engine's own decision, arriving as the events it authored.
+
+	case frameQuitMsg:
+		// The frame runner's quit, applied in its turn behind whatever had
+		// arrived before it (frame.go).
+		m.harnessQuit = true
+		return m, tea.Quit
 
 	case tea.KeyMsg:
 		return m.handleKey(msg)
@@ -1896,17 +2156,17 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.cycleMode()
 	}
 	if m.queueFocus {
-		handled, next := m.handleQueueKey(msg)
+		handled, next, cmd := m.handleQueueKey(msg)
 		m = next
 		if handled {
-			return m, nil
+			return m, cmd
 		}
 	}
 	if m.agentFocus {
-		handled, next := m.handleRowsKey(msg)
+		handled, next, cmd := m.handleRowsKey(msg)
 		m = next
 		if handled {
-			return m, nil
+			return m, cmd
 		}
 	}
 	if msg.Type == tea.KeyEsc {
@@ -1947,9 +2207,9 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		if m.sendNowPending() {
 			// The cancel is still in flight; taking the send-now back here is
-			// what takes the text back before it turns into a turn.
-			m.withdrawSendNow("send now dropped")
-			return m, nil
+			// what takes the text back before it turns into a turn. The ladder
+			// ends here, so the Disarm's continuation is all there is after it.
+			return m.withdrawSendNow("send now dropped", linkDone)
 		}
 		if m.status == statusWorking {
 			// The queue survives Esc on purpose: cancelling this turn is not
@@ -2040,14 +2300,14 @@ func (m *Model) focusComposer() {
 // Esc and any key that is not a row key return to the composer; that key is
 // then handled as usual (handled == false), so typing never needs a second
 // press.
-func (m Model) handleRowsKey(msg tea.KeyMsg) (bool, Model) {
+func (m Model) handleRowsKey(msg tea.KeyMsg) (bool, Model, tea.Cmd) {
 	items := m.visibleAgents()
 	if len(items) == 0 {
 		m.focusComposer()
-		return false, m
+		return false, m, nil
 	}
-	if stopped, next := m.stopRowKey(msg, items); stopped { // subcancel.go
-		return true, next
+	if stopped, next, cmd := m.stopRowKey(msg, items); stopped { // subcancel.go
+		return true, next, cmd
 	}
 	switch msg.Type {
 	case tea.KeyUp:
@@ -2060,25 +2320,25 @@ func (m Model) handleRowsKey(msg tea.KeyMsg) (bool, Model) {
 		default:
 			m.focusComposer()
 		}
-		return true, m
+		return true, m, nil
 	case tea.KeyDown:
 		if m.agentSel < len(items)-1 {
 			m.moveAgent(1)
 		}
-		return true, m
+		return true, m, nil
 	case tea.KeyEnter:
 		if m.agentID != "" {
 			m.enterView(m.agentID)
 		} else {
 			m.selectAgent(m.agentSelection(len(items)))
 		}
-		return true, m
+		return true, m, nil
 	case tea.KeyEsc:
 		m.focusComposer()
-		return true, m
+		return true, m, nil
 	}
 	m.focusComposer()
-	return false, m
+	return false, m, nil
 }
 
 func (m *Model) updateComposer(msg tea.KeyMsg) tea.Cmd {
@@ -2124,30 +2384,105 @@ func (m Model) handleCtrlC() (tea.Model, tea.Cmd) {
 	}
 	// One key stops everything pending, not just the turn: the queue, the
 	// confirm, the send-now that was waiting for the cancel, and the edit.
-	m.clearPending()
-	tm, cmd := m.cancelTurn()
-	next := tm.(Model)
-	next.ctrlCDeadline = now.Add(ctrlCWindow)
-	return next, cmd
+	//
+	// The cancel is the chain's last link (§3.12, astra 3): it is issued only
+	// once the Disarm and the ClearQueue have answered, so the turn it ends
+	// cannot settle into a row the user was clearing. The window is armed from
+	// the moment of the key, read above, not from when the call answered.
+	return m.clearPending(func(m Model) (Model, tea.Cmd) {
+		tm, cmd := m.cancelTurn()
+		next := tm.(Model)
+		next.ctrlCDeadline = now.Add(ctrlCWindow)
+		return next, cmd
+	})
 }
 
 // clearPending empties everything the queue band is holding. The strong send's
 // text does not come back here: Ctrl+C means stop, and a draft reappearing
 // under the cursor would be one more thing to undo. It says nothing about the
 // send-now it took back either — Ctrl+C is already the whole answer — which is
-// why the withdrawal is applied here with no note and its own delta skipped.
-func (m *Model) clearPending() {
+// why the withdrawal is applied with no note and its own delta skipped.
+//
+// Its two engine calls are ONE gated call (§3.12; clearPendingCall): the
+// Disarm and then the ClearQueue, back to back on the call's goroutine, as
+// they were back to back in today's one Update. Two gates would put a reply's
+// round trip between them, and a send-now's own cancel that settles the turn
+// inside it would drain the queue's head — a row the user was clearing —
+// before the ClearQueue could take it. The confirm comes down, and both
+// command ids are minted, in the Update that asks; the continuation is
+// everything after, in today's order: the Disarm's outcome, the edit's end,
+// the band, then the caller's own post-call work (then) — Ctrl+C's cancel,
+// /clear's transcript. A call that did not answer (ErrNoAnswer) knows neither
+// outcome: it says both, in that order, and goes on — the user asked for
+// everything to stop.
+func (m Model) clearPending(then linkThen) (Model, tea.Cmd) {
 	m.confirm = nil
-	m.withdrawSendNow("")
+	if m.eng == nil {
+		// No backend, so neither call: what followed them still runs.
+		m.settlePending(engine.Command{}, engine.Command{}, clearAnswer{disarm: errNoBackend, clear: errNoBackend})
+		return then(m)
+	}
+	dc, cc := m.nextCmd(), m.nextCmd()
+	return m.run(gateDeadline, clearPendingCall(dc, cc),
+		func(m Model, r gateReply) (Model, tea.Cmd) {
+			ans, ok := r.result.(clearAnswer)
+			if !ok || r.err != nil {
+				ans = clearAnswer{disarm: ErrNoAnswer, clear: ErrNoAnswer}
+			}
+			m.settlePending(dc, cc, ans)
+			return then(m)
+		})
+}
+
+// errNoBackend stands for a call a model with no backend never made: refused,
+// with nothing to say, as today's code skipped it.
+var errNoBackend = errors.New("tui: no backend")
+
+// clearAnswer is clearPending's one call answered: what each of its two verbs
+// came to, and the rows the ClearQueue removed.
+type clearAnswer struct {
+	disarm, clear error
+	removed       []agent.QueuedPrompt
+}
+
+// clearPendingCall is clearPending's gated call: the Disarm, then the
+// ClearQueue whatever the Disarm came to — nothing armed is the usual answer,
+// and the queue is cleared all the same. Each verb that gave up because the
+// call's deadline passed did not answer (unanswered).
+func clearPendingCall(dc, cc engine.Command) gateCall {
+	return func(ctx context.Context, b backend.Backend) (any, error) {
+		var ans clearAnswer
+		ans.disarm = unanswered(ctx, b.Disarm(ctx, dc))
+		removed, err := b.ClearQueue(ctx, cc)
+		ans.clear = unanswered(ctx, err)
+		ans.removed = removed
+		return ans, nil
+	}
+}
+
+// settlePending is clearPending's continuation up to the caller's own work, in
+// today's order: the Disarm's outcome, the edit's end, then the band — from
+// the ClearQueue's result: each row it removed is hidden until that row's own
+// removal is folded, whether or not this client had folded the row at all (a
+// row another client added a moment ago is among them, and must not flash
+// back; §3.12's table). A ClearQueue that did not answer hides nothing: the
+// band is the fold's.
+func (m *Model) settlePending(dc, cc engine.Command, ans clearAnswer) {
+	m.withdrawn(dc, "", ans.disarm)
 	if m.queueEdit != "" {
 		m.cancelQueueEdit()
 	}
-	if m.eng != nil {
-		_, _ = m.eng.ClearQueue(m.nextCmd())
+	if errors.Is(ans.clear, ErrNoAnswer) {
+		m.note(noAnswerClearNote)
 	}
 	m.queueFocus = false
 	m.queueHov = noHover()
-	m.refreshSnap()
+	if ans.clear == nil && cc.Cause() != "" {
+		for _, row := range ans.removed {
+			m.ov = m.ov.withResult(rowAbsent(cc.Cause(), row.ID))
+		}
+	}
+	m.recompute()
 }
 
 func (m Model) handleEnter() (tea.Model, tea.Cmd) {
@@ -2163,7 +2498,7 @@ func (m Model) handleEnter() (tea.Model, tea.Cmd) {
 		return m.acceptSlash(m.slashSel), nil
 	}
 	if m.queueEdit != "" {
-		return m.saveQueueEdit()
+		return m.saveQueueEdit(linkDone)
 	}
 	name, args, ok := parseSlashLine(m.input.Value())
 	if ok && (name == "exit" || name == "rename") {
@@ -2251,8 +2586,7 @@ func (m Model) send() (tea.Model, tea.Cmd) {
 		// session that is still restoring would race the replay it is reading.
 		return m, nil
 	}
-	next, _, _ := m.submitOwn(text, engine.SubmitQueue)
-	return next, nil
+	return m.submitOwn(text, engine.SubmitQueue, submitted)
 }
 
 // sendText starts a turn with text of craze's own: today the plan offer's
@@ -2268,8 +2602,7 @@ func (m Model) sendText(text string) (tea.Model, tea.Cmd) {
 		// The plan offer refuses for the composer's reason, above.
 		return m, nil
 	}
-	next, _, _ := m.submit(text, engine.SubmitQueue, "")
-	return next, nil
+	return m.submit(text, engine.SubmitQueue, "", submitted)
 }
 
 // submitOwn is submit for the text this composer is holding: the draft's send,
@@ -2278,25 +2611,54 @@ func (m Model) sendText(text string) (tea.Model, tea.Cmd) {
 // context, and it is what clears it — only once the text was accepted, so a
 // refusal leaves the block with the draft it belongs to, for the send that
 // follows.
-func (m Model) submitOwn(text string, mode engine.SubmitMode) (Model, engine.SubmitResult, error) {
-	next, res, err := m.submit(m.withShellContext(text), mode, "")
-	if shellContextTaken(res, err) {
-		next.dropShellContext()
-	}
-	return next, res, err
+//
+// The context is attached now, in the Update that sends, and dropped in the
+// continuation, once the answer says the text was taken. A Submit that did not
+// answer (ErrNoAnswer) keeps it: the prompt may never have been sent, and the
+// block stays with the draft it belongs to, as for any refusal — the next send
+// carries it.
+func (m Model) submitOwn(text string, mode engine.SubmitMode, then submitThen) (Model, tea.Cmd) {
+	return m.submit(m.withShellContext(text), mode, "", func(m Model, res engine.SubmitResult, err error) (Model, tea.Cmd) {
+		if shellContextTaken(res, err) {
+			m.dropShellContext()
+		}
+		return then(m, res, err)
+	})
 }
+
+// submitThen is what a caller of submit did once Submit had returned: its own
+// post-call work, which runs in submit's continuation after submit's own
+// (§3.12 "The operation chain").
+type submitThen func(m Model, res engine.SubmitResult, err error) (Model, tea.Cmd)
+
+// submitted is the caller with nothing left to do once submit has applied the
+// answer: send, sendText and confirmStrongSend all returned there.
+func submitted(m Model, _ engine.SubmitResult, _ error) (Model, tea.Cmd) { return m, nil }
+
+// noAnswerSubmitNote is a Submit that did not answer in time (ErrNoAnswer,
+// §3.12): the command may have run, so the note says the prompt may have been
+// sent, and the draft is kept — nothing was drawn and nothing is cleared.
+const noAnswerSubmitNote = "no answer from the session — the prompt may have been sent"
 
 // submit hands one prompt to the engine and applies what it answered. It is the
 // one place the model does: a plain send, the plan offer's implement prompt, a
 // row's send now, and a confirmed send-now all come through here, so the echo
-// rule has one synchronous half to match.
+// rule has one half to match, applied before any event the Submit caused.
+//
+// The call goes through the command gate (§3.12): what comes before it — the
+// row's text read from the band, the command id — runs in the Update that
+// sends; the answer is applied in the continuation, where the model is exactly
+// as that Update left it and nothing that arrived meanwhile has been applied
+// yet, and then the caller's own post-call work runs (then). In the gateSync
+// baseline both halves run in the one Update, today's control flow.
 //
 // Exactly one thing happened, and the model applies exactly that one:
 //
 //   - a turn started while the model had nothing running, so the row is drawn,
-//     the status goes working and the turn is stamped in this very Update — which
-//     is what a frame capture right after Enter sees — and that turn id is the one
-//     started event the model will skip;
+//     the status goes working and the turn is stamped in the Update the answer
+//     lands in — which is what a frame capture right after Enter sees, the
+//     frames between being the gate's — and that turn id is the one started
+//     event the model will skip;
 //   - a turn started while the model was still displaying another one as working:
 //     nothing is drawn, and the turn is recorded as the pending successor
 //     (nextTurn), which is what stops the model drawing it ahead of the events of
@@ -2310,26 +2672,42 @@ func (m Model) submitOwn(text string, mode engine.SubmitMode) (Model, engine.Sub
 //   - or it was refused, which is one line for the user. Every one of these
 //     refusals was unreachable before the engine — Begin could not refuse a
 //     prompt the model had already gated — so what matters is that a prompt which
-//     went nowhere says so.
+//     went nowhere says so. A Submit that did not answer at all (ErrNoAnswer) is
+//     the same one line, saying the outcome is unknown: nothing drawn, no echo
+//     marker set, the draft kept.
 //
-// It waits on nothing: Submit is one locked section in the engine and calls
-// nothing that blocks.
-func (m Model) submit(text string, mode engine.SubmitMode, fromRow string) (Model, engine.SubmitResult, error) {
+// In process Submit waits on nothing but the inline index seed's lock; over the
+// socket it is a round trip, which is why it is gated.
+func (m Model) submit(text string, mode engine.SubmitMode, fromRow string, then submitThen) (Model, tea.Cmd) {
 	if m.eng == nil {
-		return m, engine.SubmitResult{}, nil
+		return then(m, engine.SubmitResult{}, nil)
 	}
 	if fromRow != "" {
-		// The engine sends the row's own text, so the row the model draws is
+		// The engine sends the row's own text, so what this client asks with is
 		// read from the band it is looking at rather than from whatever the
-		// caller remembered. In S1b there is one client, so the two are the same
-		// text; a second client editing a row between the read and the submit is
-		// S2's problem, with a receipt to answer it.
+		// caller remembered. It is not what the sent row is drawn from: another
+		// client can edit the row between this read and the engine taking it,
+		// and a turn started from it draws the text the engine answers it
+		// started with (SubmitResult.Text, submitted).
 		if row, ok := m.queuedRow(fromRow); ok {
 			text = row.Text
 		}
 	}
 	c := m.nextCmd()
-	res, err := m.eng.Submit(c, text, mode, fromRow)
+	return m.run(gateDeadline,
+		func(ctx context.Context, b backend.Backend) (any, error) {
+			return b.Submit(ctx, c, text, mode, fromRow)
+		},
+		func(m Model, r gateReply) (Model, tea.Cmd) {
+			res, _ := r.result.(engine.SubmitResult)
+			m = m.submitted(text, mode, fromRow, c, res, r.err)
+			return then(m, res, r.err)
+		})
+}
+
+// submitted is submit's continuation: Submit's answer applied to the model, as
+// the Update that sent it left it, before any event the Submit caused.
+func (m Model) submitted(text string, mode engine.SubmitMode, fromRow string, c engine.Command, res engine.SubmitResult, err error) Model {
 	switch {
 	case err != nil:
 		m.note(submitErrNote(err))
@@ -2350,12 +2728,17 @@ func (m Model) submit(text string, mode engine.SubmitMode, fromRow string) (Mode
 		} else {
 			// The optimistic row: this client's own send, drawn at Enter and
 			// at its own clock, before any event about the turn exists. The
-			// started that follows is its echo (applyTurnStarted).
-			m.addUser(text)
+			// started that follows is its echo (applyTurnStarted). It is the
+			// text the turn started with, as the engine answers it — for a
+			// typed send the text sent, for a row the row's text as the engine
+			// took it, which another client may have edited since this one
+			// read the band (plan 027 §3.13, "Two-client correctness").
+			m.addUser(res.Text)
 			m.beginTurn(res.Turn)
 			m.ownTurn = res.Turn
 		}
 		if fromRow == "" {
+			// The composer's draft is matched against what this client sent.
 			m.clearMatchingDraft(text)
 		}
 	case res.Armed:
@@ -2370,8 +2753,24 @@ func (m Model) submit(text string, mode engine.SubmitMode, fromRow string) (Mode
 	case res.Queued != nil && fromRow == "":
 		m.clearMatchingDraft(text)
 	}
-	m.refreshQueue()
-	return m, res, err
+	// What the frame shows of it comes from the result (§3.12's table), as an
+	// overlay until the Submit's own event for its item is folded: the row it
+	// queued present, the row it started a turn from gone, the send-now it
+	// armed armed. A row Submit found still queued — it cannot start yet — is
+	// a success that says nothing (engine.go's submit), and installs nothing;
+	// so is a turn started from the composer's text, whose row Enter drew. A
+	// refusal and an unanswered Submit install nothing: the band is the fold's.
+	if err == nil {
+		switch {
+		case res.Armed:
+			m.noteResult(resultEntry{kind: resultArmed, cause: c.Cause()})
+		case res.Turn != "" && fromRow != "":
+			m.noteResult(rowAbsent(c.Cause(), fromRow))
+		case res.Queued != nil && fromRow == "":
+			m.noteResult(resultEntry{kind: resultRowPresent, cause: c.Cause(), row: *res.Queued})
+		}
+	}
+	return m
 }
 
 // beginTurn is what one turn starting does to the model's view of the session,
@@ -2455,6 +2854,8 @@ func submitErrNote(err error) string {
 	switch {
 	case err == nil:
 		return ""
+	case errors.Is(err, ErrNoAnswer):
+		return noAnswerSubmitNote
 	case errors.Is(err, engine.ErrNotAccepting):
 		return "not ready to send yet"
 	case errors.Is(err, engine.ErrAlreadyPending):
@@ -2533,9 +2934,6 @@ func (m Model) implementPlan() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	prev := m.snap.CurrentMode
-	// Optimistic, the way applyMode is: the chip flips now and reverts if the
-	// agent refuses, and the snapshot may not put the old mode back meanwhile.
-	m.snap.CurrentMode = id
 	m.modeGen++
 	m.modeInFlight = id
 	gen := m.modeGen
@@ -2543,14 +2941,18 @@ func (m Model) implementPlan() (tea.Model, tea.Cmd) {
 	// screen, and that path is allowed to put the offer back.
 	m.planOfferSeq = 0
 	seq := m.turnSeq
-	eng, cmd, at := m.eng, m.nextCmd(), m.modeRev
+	eng, cmd, at, iss, base := m.eng, m.nextCmd(), m.modeRev, m.issue(), dispatchCtx(m.eng)
+	// Optimistic, the way applyMode is: the chip flips now, by the request's
+	// overlay, and reverts only if the agent refuses.
+	m.requestMode(gen, cmd.Cause(), id)
 	return m, func() tea.Msg {
-		ctx, cancel := context.WithTimeout(context.Background(), modeCallTimeout)
+		ctx, cancel := context.WithTimeout(base, modeCallTimeout)
 		defer cancel()
-		if _, err := eng.Set(ctx, cmd, engine.Setting{Kind: engine.SettingMode, Value: id}); err != nil {
-			return planImplementFailedMsg{seq: seq, gen: gen, prev: prev, err: err, at: at}
+		res, err := eng.Set(ctx, cmd, engine.Setting{Kind: engine.SettingMode, Value: id})
+		if err != nil {
+			return planImplementFailedMsg{issued: iss, seq: seq, gen: gen, prev: prev, err: err, at: at}
 		}
-		return planImplementMsg{seq: seq, gen: gen, mode: id}
+		return planImplementMsg{issued: iss, seq: seq, gen: gen, mode: res.Value, rev: res.Rev}
 	}
 }
 
@@ -2608,9 +3010,9 @@ func (m Model) cancelTurn() (tea.Model, tea.Cmd) {
 	if working {
 		turn = m.turnID
 	}
-	c := m.nextCmd()
+	c, iss, base := m.nextCmd(), m.issue(), dispatchCtx(eng)
 	return m, func() tea.Msg {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		ctx, cancel := context.WithTimeout(base, 2*time.Second)
 		defer cancel()
 		res, err := eng.Cancel(ctx, c, turn)
 		if err == nil {
@@ -2629,18 +3031,21 @@ func (m Model) cancelTurn() (tea.Model, tea.Cmd) {
 			// draw the row twice, and in whichever order the two arrived.
 			return nil
 		}
-		return cancelFailedMsg{err: err}
+		return cancelFailedMsg{issued: iss, err: err}
 	}
 }
 
 // cancelFailedMsg says the cancel never reached the agent, and is the model's own
 // report of it: it is returned only where the engine published nothing for the
 // failure (engine.CancelResult.Reported).
-type cancelFailedMsg struct{ err error }
+type cancelFailedMsg struct {
+	issued
+	err error
+}
 
 // foreignTurnStoppable says Esc has a turn of the agent's own to stop (plan 026
-// X44): the model's mirror of the session's flag says one is running —
-// m.snap.ForeignTurn, refreshed on the bracket that opens it — and no card
+// X44): the model's mirror says one is running — m.snap.ForeignTurn, the
+// fold's last foreign-turn bracket (plan 027 X8, §3.13) — and no card
 // holds the key. It is any provider's: the native session's wake, which
 // delivers a background sub-agent's result and which nothing else could stop
 // since it never sets working, and grok's interjection fallback alike. A flag
@@ -2679,21 +3084,21 @@ func (m Model) cancelForeignTurn() (tea.Model, tea.Cmd) {
 	if eng == nil {
 		return m, nil
 	}
-	c := m.nextCmd()
+	c, iss, base := m.nextCmd(), m.issue(), dispatchCtx(eng)
 	episode, seq := m.foreignEpisode(), m.turnSeq
 	return m, func() tea.Msg {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		ctx, cancel := context.WithTimeout(base, 2*time.Second)
 		defer cancel()
 		res, err := eng.Cancel(ctx, c, "")
 		switch {
 		case err == nil:
-			return foreignCancelledMsg{turn: res.Turn, episode: episode, seq: seq}
+			return foreignCancelledMsg{issued: iss, turn: res.Turn, episode: episode, seq: seq}
 		case errors.Is(err, engine.ErrNotAccepting), errors.Is(err, engine.ErrStaleTurn):
 			return nil
 		case res.Reported:
 			return nil
 		}
-		return cancelFailedMsg{err: err}
+		return cancelFailedMsg{issued: iss, err: err}
 	}
 }
 
@@ -2705,6 +3110,7 @@ func (m Model) cancelForeignTurn() (tea.Model, tea.Cmd) {
 // craze turn's id when it landed on one instead (SF-48). episode is the
 // model's foreignEpisode when Esc was pressed, and seq its turnSeq.
 type foreignCancelledMsg struct {
+	issued
 	turn    string
 	episode uint64
 	seq     int
@@ -2712,10 +3118,10 @@ type foreignCancelledMsg struct {
 
 // foreignEpisode names the agent's turn the model's flag says is running: one
 // more than the foreign-turn endings it has applied. It is counted from the
-// endings rather than the openings so that a flag a refresh read ahead of its
-// opening bracket — refreshSnap on any event reads the session's state as it
-// is now — is already the new episode, and never the one before it, whose
-// note may be drawn. It starts at 1, so 0 can mean "no note drawn".
+// endings rather than the openings, so the flag the mirror shows — the fold's,
+// which moves with the brackets alone — names the episode whose opening it
+// folded, and never the one before it, whose note may be drawn. It starts at
+// 1, so 0 can mean "no note drawn".
 //
 // The limit is the model's own view: a turn that ended and a next one that
 // started while the model's flag stayed up, both brackets still in the
@@ -2793,14 +3199,25 @@ func (m Model) requestQuit() (tea.Model, tea.Cmd) {
 	}
 }
 
-func (m *Model) applyEvent(ev agent.Event) {
+func (m *Model) applyEvent(ev agent.Event) tea.Cmd {
 	// An event means the log is moving, which is what a hidden answer the outbox
 	// had no room for is waiting on (retryHidden) — the fast path, ahead of the
 	// beat that guarantees the retry (armHiddenRetry). It runs before the event
 	// is applied, so a hidden ask answered here is not counted twice by an
-	// answerHidden this same event causes.
-	m.retryHidden()
-	// The shared model folds every event next, before anything below can return
+	// answerHidden this same event causes. Its answers are commands of their
+	// own (fire-and-forget, never gated, §3.12), handed back with whatever
+	// this event's arm hands back: several in one Update are several commands.
+	// The retry list is taken here, once, for every arm (reduceEvent): no
+	// return of the event's can drop a retried answer.
+	retry := m.retryHidden()
+	return tea.Batch(retry, m.reduceEvent(ev))
+}
+
+// reduceEvent is applyEvent's event itself: the fold, then its arm, answering
+// the arm's own command — a masked opening's gated read, a hidden ask's
+// answer — or nil.
+func (m *Model) reduceEvent(ev agent.Event) tea.Cmd {
+	// The shared model folds every event, before anything below can return
 	// early (plan 024 §3.8): every row an event draws is the fold's, and the
 	// panes show what it changed. What the fold takes from this client's own
 	// state is decided first, before that state moves:
@@ -2808,10 +3225,13 @@ func (m *Model) applyEvent(ev agent.Event) {
 	//   - the echo rule: the started of the turn Submit handed back draws no
 	//     row, because the optimistic row Enter drew is its display;
 	//   - the todo notes: this pane's dedupe decides which note it shows (X31
-	//     revised), over the list todosOf picks after refreshSnap — today's
-	//     order — so a note the fold writes that the pane has already drawn
-	//     gets no row, and one the pane owes that the fold does not write is
-	//     the pane's own, written below;
+	//     revised), over the list the event itself carries — the fold's rule is
+	//     replacement, so that list is the whole of the new one, and an empty
+	//     one clears it (plan 027 §3.13: no fallback to the mirror, which
+	//     before this fold is the list this event replaces) — so a note the
+	//     fold writes that the pane has already drawn gets no row, and one the
+	//     pane owes that the fold does not write is the pane's own, written
+	//     below;
 	//   - an error's text, read once for the row and for m.err alike.
 	var (
 		hide     transcript.Kind
@@ -2822,23 +3242,26 @@ func (m *Model) applyEvent(ev agent.Event) {
 	case m.ownStarted(ev):
 		hide = transcript.KindUser
 	case ev.Type == agent.EventTodos && ev.Agent == "":
-		m.refreshSnap()
-		todos := m.todosOf(ev)
-		m.noteTodoLifecycle(todos)
-		if todoNote = m.todoNoteOwed(todos); todoNote == "" {
+		m.noteTodoLifecycle(ev.Todos)
+		if todoNote = m.todoNoteOwed(ev.Todos); todoNote == "" {
 			hide = transcript.KindNote
 		}
 	case errorEvent(ev):
 		errText = ev.Err.Error()
 	}
 	ch := m.foldEvent(ev, hide, errText)
+	// The mirror follows the fold at once, before any arm reads it (plan 027
+	// §3.13): the event's own bookkeeping — revisions, the send-now's arm, the
+	// overlays it retires — and then the mirror rebuilt from the fold.
+	m.observe(ev)
+	m.recompute()
 	if ev.Type == agent.EventSubagent {
 		m.applySubagentEvent(ev)
-		return
+		return nil
 	}
 	if ev.Agent != "" {
 		m.applyChildEvent(ev)
-		return
+		return nil
 	}
 	// The spinner names what the turn is doing; only a thought chunk leaves it
 	// on "Thinking…".
@@ -2849,41 +3272,39 @@ func (m *Model) applyEvent(ev agent.Event) {
 		// main-session echo — grok and gx send one for every prompt the user
 		// types — draws nothing anywhere: the row is the turn's started's
 		// (§2.2).
-		return
+		return nil
 	case agent.EventReplay:
 		if ev.Replay == nil {
-			return
+			return nil
 		}
 		if ev.Replay.Phase != agent.ReplayEnd {
 			// The start phase is informational: the model was built replaying
 			// because Config.Loading knew a load was coming, and it had to be,
 			// since tea.Batch could deliver startedMsg before this event ever
 			// arrived (§3.5).
-			return
+			return nil
 		}
 		// The restored snapshot is installed, so this is the moment the
 		// session is up as far as the replay is concerned. The fold has closed
 		// the last replayed run and written the restored note under it.
 		m.replaying = false
-		m.refreshSnap()
 		m.sessionUp()
-		return
+		return nil
 	case agent.EventCommand:
 		// It arrives before the request reaches the wire, so the fold's line
 		// lands under the user block and above anything the agent goes on to
 		// say.
-		return
+		return nil
 	case agent.EventQueue:
-		// The band draws from the engine's queue, which refreshSnap re-reads;
-		// nothing else has to happen.
-		m.refreshSnap()
+		// The band draws from the mirror's queue, which the fold has already
+		// moved; nothing else has to happen.
 		if ev.QueueChange == agent.QueueRemoved && m.status == statusError {
 			m.note("queue cleared")
 		}
-		return
+		return nil
 	case agent.EventTurn:
 		if ev.Turn == nil {
-			return
+			return nil
 		}
 		switch ev.Turn.Phase {
 		case agent.TurnStarted:
@@ -2891,7 +3312,7 @@ func (m *Model) applyEvent(ev agent.Event) {
 		case agent.TurnEnded:
 			m.applyTurnEnded(ev.Turn)
 		}
-		return
+		return nil
 	case agent.EventForeignTurn:
 		// Either bracket ends the run above it, and the start heads what
 		// follows with the note that stops the reply reading as an answer to
@@ -2907,8 +3328,7 @@ func (m *Model) applyEvent(ev agent.Event) {
 			// applyForeignCancelled).
 			m.cancelled = false
 		}
-		m.refreshSnap()
-		return
+		return nil
 	case agent.EventText:
 		if ev.Text != "" {
 			// Only a chunk that says something is evidence: the fold drops an
@@ -2916,33 +3336,28 @@ func (m *Model) applyEvent(ev agent.Event) {
 			// on the screen to implement.
 			m.sawAssistantSeq = m.turnSeq
 		}
-	case agent.EventTool:
-		m.refreshSnap()
 	case agent.EventTodos:
 		// A todos fold appends nothing but its note, so no append is no note:
-		// a note the pane owes that the fold did not write — which a /clear,
-		// or todosOf's fallback to a newer list, makes possible — is the
-		// pane's own, stamped at the event's At.
+		// a note the pane owes that the fold did not write — which a /clear
+		// makes possible — is the pane's own, stamped at the event's At.
 		if todoNote != "" && ch.AppendedFrom.IsZero() {
 			m.main.appendLocal(entry{kind: entryNote, text: todoNote}, m.stamp(ev.At))
 		}
 	case agent.EventPermission:
 		if ev.Permission != nil {
-			m.pushCard(card{kind: cardPermission, perm: ev.Permission})
+			return m.pushCard(card{kind: cardPermission, perm: ev.Permission})
 		}
 	case agent.EventQuestion:
 		// An auto-answered request (headless) is already decided; only an
 		// interactive one is a card.
 		if ev.Question != nil && !ev.Question.Auto {
 			if m.showAsk() {
-				m.pushCard(card{kind: cardQuestion, ask: ev.Question})
-			} else {
-				// The config hides questions: it is skipped where it stands,
-				// with no card and — as it always has — no row. The ending it
-				// causes names this command and is skipped with the rest of
-				// this model's own echoes.
-				m.answerHidden(ev.Question.ID, agent.AskAnswer{Skip: true})
+				return m.pushCard(card{kind: cardQuestion, ask: ev.Question})
 			}
+			// The config hides questions: it is skipped where it stands, with
+			// no card and — as it always has — no row. Its ending finds no
+			// card to remove, and writes nothing (applyAskEnded).
+			return m.answerHidden(ev.Question.ID, agent.AskAnswer{Skip: true})
 		}
 	case agent.EventAsk:
 		if ev.Ask != nil {
@@ -2953,10 +3368,9 @@ func (m *Model) applyEvent(ev agent.Event) {
 			// The plan itself is transcript material, the fold's plan entry;
 			// the card is only the three answers it needs.
 			if m.showPlan() {
-				m.pushCard(card{kind: cardPlan, plan: ev.Plan})
-			} else {
-				m.answerHidden(ev.Plan.ID, agent.AskAnswer{Reject: true})
+				return m.pushCard(card{kind: cardPlan, plan: ev.Plan})
 			}
+			return m.answerHidden(ev.Plan.ID, agent.AskAnswer{Reject: true})
 		}
 	case agent.EventDone:
 		// The wire's own ending. It orders the transcript — the fold closes
@@ -3029,12 +3443,11 @@ func (m *Model) applyEvent(ev agent.Event) {
 			// change carries its payload in State alone (§3.8).
 			m.retirePlanOffer()
 		}
-		m.refreshSnap()
 		// session_info_update fills ev.Text: the agent named the session, and
 		// the engine's observer writes that to the index as an agent title
-		// (plan 021 §3.8). The composer's own title is read back by refreshSnap
-		// above, as it always was.
+		// (plan 021 §3.8). The title the mirror shows is the fold's.
 	}
+	return nil
 }
 
 // hiddenAnswer is one answer to a hidden ask that has still to be taken
@@ -3057,33 +3470,51 @@ type hiddenAnswer struct {
 // again, by the next event the model applies and by a beat of its own until one
 // of them takes it (retryHidden, armHiddenRetry). It is bounded by the number of
 // hidden asks open at once.
-func (m *Model) answerHidden(id string, a agent.AskAnswer) {
+//
+// The answer is fire-and-forget (plan 027 §3.12): a command of its own, never
+// gated, because nothing it answers is drawn — no card exists for it — and
+// nothing after it needs its result in the Update that sent it. The command's
+// one message is the refusal for room (hiddenRefusedMsg), which puts the
+// answer back on the retry list, stamped with the session generation and
+// fenced by the backend epoch like any other result. No echo is noted: an
+// echo only matters for a card, and this ask's ending finds none to remove, so
+// it writes nothing either way (applyAskEnded).
+func (m *Model) answerHidden(id string, a agent.AskAnswer) tea.Cmd {
 	if m.eng == nil {
-		return
+		return nil
 	}
-	cmd := m.nextCmd()
-	switch err := m.eng.Answer(cmd, id, a); {
-	case err == nil:
-		m.noteAskEcho(cmd.Cause())
-	case errors.Is(err, agent.ErrAskUnavailable):
-		m.hiddenRetry = append(append([]hiddenAnswer(nil), m.hiddenRetry...), hiddenAnswer{id: id, a: a})
+	b, c, iss, ctx := m.eng, m.nextCmd(), m.issue(), dispatchCtx(m.eng)
+	return func() tea.Msg {
+		if err := b.Answer(ctx, c, id, a); errors.Is(err, agent.ErrAskUnavailable) {
+			return hiddenRefusedMsg{issued: iss, h: hiddenAnswer{id: id, a: a}}
+		}
+		return nil
 	}
 }
 
-// retryHidden re-sends the hidden answers the outbox had no room for. Each one
-// is either taken, refused for good — the ask was resolved some other way in the
-// meantime, agent.ErrAlreadyResolved among them — or kept for the next try by
-// answerHidden itself. The list is taken first, so one that is kept is appended
-// to an empty list rather than walked twice.
-func (m *Model) retryHidden() {
+// hiddenRefusedMsg is a hidden answer the outbox had no room for
+// (answerHidden): it goes back on the retry list.
+type hiddenRefusedMsg struct {
+	issued
+	h hiddenAnswer
+}
+
+// retryHidden re-sends the hidden answers the outbox had no room for, one
+// command each. Each one is either taken, refused for good — the ask was
+// resolved some other way in the meantime, agent.ErrAlreadyResolved among them
+// — or refused for room again, and put back by its own message. The list is
+// taken first, so an answer is never in flight twice.
+func (m *Model) retryHidden() tea.Cmd {
 	if len(m.hiddenRetry) == 0 {
-		return
+		return nil
 	}
 	pending := m.hiddenRetry
 	m.hiddenRetry = nil
+	cmds := make([]tea.Cmd, 0, len(pending))
 	for _, h := range pending {
-		m.answerHidden(h.id, h.a)
+		cmds = append(cmds, m.answerHidden(h.id, h.a))
 	}
+	return tea.Batch(cmds...)
 }
 
 // hiddenRetryEvery is how long a hidden answer refused for room waits before it
@@ -3117,11 +3548,12 @@ func (m *Model) armHiddenRetry() tea.Cmd {
 }
 
 // handleHiddenRetry spends one beat on the answers still waiting for room.
-// Update arms the next one only if something was refused for room again, so a
-// list that empties — taken, or ended by somebody else — stops the timer.
-func (m *Model) handleHiddenRetry() {
+// Update arms the next one only if something was refused for room again — its
+// refusal back on the list (hiddenRefusedMsg) — so a list that empties, taken
+// or ended by somebody else, stops the timer.
+func (m *Model) handleHiddenRetry() tea.Cmd {
 	m.hiddenRetryLive = false
-	m.retryHidden()
+	return m.retryHidden()
 }
 
 // noteAskEcho records that the ending caused by cause is this model's own: its
@@ -3409,27 +3841,12 @@ func (m *Model) applyTurnEnded(t *agent.TurnInfo) {
 // armed send, of which there is one at a time, and what it writes is a note and a
 // row: nothing here settles any state, so a delta that arrives late says something
 // true about a send that is gone rather than contradicting the one that replaced
-// it. Whether a send is armed *now* is read from the engine (sendNowPending),
-// never from these events — and which arm a draft belongs to is armedDraft's, which
-// this deliberately leaves alone.
+// it. Whether a send is armed *now* is the mirror's (sendNowPending) — and which
+// arm a draft belongs to is armedDraft's, which this deliberately leaves alone.
+// The settings sections draw nothing here: the mirror has already taken them
+// from the fold, and their revisions (observe).
 func (m *Model) applyStateDelta(ev agent.Event) {
 	st := ev.State
-	// The settings sections draw nothing, and the mirror is still read from the
-	// session (refreshSnap, below in applyEvent): what is taken from them here
-	// is only their revision — the highest Seq applied per section — which is
-	// what tells a delayed answer whether the value it is about is still the
-	// current one (mayApply). It is recorded for every delta, this model's own
-	// included: an echo is still a change that has been applied, and the
-	// revision has to be able to overtake a request issued before it.
-	if st.Mode != nil && ev.Seq > m.modeRev {
-		m.modeRev = ev.Seq
-	}
-	if st.Model != nil && ev.Seq > m.modelRev {
-		m.modelRev = ev.Seq
-	}
-	if st.Config != nil && ev.Seq > m.configRev {
-		m.configRev = ev.Seq
-	}
 	// The note: what was lost, which only a cleared send-now section can say. It
 	// does not touch armedDraft: this delta names the command that caused the
 	// DISARM, not the one that armed what it retired, so clearing the marker from
@@ -3440,8 +3857,8 @@ func (m *Model) applyStateDelta(ev agent.Event) {
 		switch st.Reason {
 		case agent.SendNowWithdrawn:
 			if ev.Cause != "" && ev.Cause == m.disarmed {
-				// This model's own Disarm, whose note it wrote in the Update that
-				// asked for it. Anything else is somebody else taking it back.
+				// This model's own Disarm, whose note it wrote when the Disarm
+				// answered. Anything else is somebody else taking it back.
 				m.disarmed = ""
 			} else {
 				m.note("send now dropped")
@@ -3483,30 +3900,20 @@ func (m Model) toggleExpanded() (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// todosOf prefers the list the event carried and falls back to the snapshot.
-func (m Model) todosOf(ev agent.Event) []agent.Todo {
-	if len(ev.Todos) > 0 {
-		return ev.Todos
-	}
-	return m.snap.Todos
-}
-
-// modeSettled is SetMode coming back accepted, for gen. The snapshot is always
-// re-read: the session is the authority on the mode, and refreshSnap puts a
-// newer request of craze's own back over it, so reading it can never contradict
-// one. What only the current generation may do is take the mask down — an older
-// answer arriving late says nothing about the request the chip is showing.
-//
-// The re-read is the point, not bookkeeping: the RPC succeeding and this
-// message being handled are two different moments, and an agent-initiated mode
-// can land in between. refreshSnap masked it at the time, and clearing the flag
-// without reading it back would leave the chip on the mode craze asked for
-// while the session is in another one, with nothing to correct it afterwards.
-func (m Model) modeSettled(gen int) Model {
+// modeSettled is SetMode coming back accepted, for request gen, confirming
+// value at revision rev. Only the current generation takes the in-flight flag
+// down — an older
+// answer arriving late says nothing about the request the chip is showing —
+// and the chip is not taken back to the fold on success: the request's
+// overlay holds the confirmed mode until the change's own delta is folded
+// (confirmMode, plan 027 §3.13), so the chip never snaps back to the mode the
+// user just left while that delta is on its way. An agent-initiated mode that
+// lands after it is the fold's, and shows once the overlay is retired.
+func (m Model) modeSettled(gen int, value string, rev uint64) Model {
 	if gen == m.modeGen {
 		m.modeInFlight = ""
 	}
-	m.refreshSnap()
+	m.confirmMode(gen, value, rev)
 	return m
 }
 
@@ -3573,71 +3980,6 @@ func capRunes(s string, n int) string {
 	return s
 }
 
-// refreshSnap re-reads the session's state through the engine, which embeds the
-// session's own snapshot and merges its own fields into it. It draws no
-// conclusions from what changed: a mode change is reported by the event that
-// carries it, because applyMode has already written the user's own change into
-// the snapshot and an agent-side change that went round in a circle leaves
-// nothing to compare.
-//
-// The queue is the engine's alone now (plan 021 §3.5): m.queue, not a field on
-// m.snap, is what everything that draws the band reads.
-func (m *Model) refreshSnap() {
-	if m.eng == nil {
-		return
-	}
-	st := m.eng.State()
-	m.snap = st.Snapshot
-	m.queue = st.Queue
-	if m.modeInFlight != "" {
-		// A SetMode of craze's own is still on the wire. The snapshot answers
-		// with the mode the session is still in, which is the one the user
-		// just left: taking it would flicker the chip back for as long as the
-		// round trip lasts.
-		m.snap.CurrentMode = m.modeInFlight
-	}
-	if m.snap.CurrentModel != "" {
-		m.model = m.snap.CurrentModel
-	}
-	if m.dialog == dialogModel {
-		// The model dialog's tabs are this snapshot's catalog, which a delta
-		// can change under the open box — another client's model change
-		// brings another model's options. A focused tab whose option has gone
-		// hands the focus back to the list for good, rather than taking it
-		// back if the option returns (plan 025 design 4).
-		m.mdlg = m.mdlg.repaired(m.modelDialogTabs())
-	}
-	// Stamp the rows on first sight in a snapshot, not only on the lifecycle
-	// event: a tool re-emit can carry a finished status one Update ahead of
-	// the `finished` event, and a finished row without its stamp would drop
-	// out of the band for that frame and move the selection under the user.
-	for i := range m.snap.Subagents {
-		s := &m.snap.Subagents[i]
-		if subagentTerminal(*s) {
-			m.noteAgentDone(s.ID)
-		} else {
-			m.noteAgentStart(s.ID)
-		}
-	}
-}
-
-// refreshQueue re-reads the message queue alone. It is what a submit owes: the
-// band changed — a row taken, or a row queued — and nothing else the model mirrors
-// did.
-//
-// The rest of the snapshot is deliberately left alone, and refreshSnap is not what
-// runs here. The turn this same Update just started is already running on the
-// engine's goroutine, and a session that names itself from the prompt (native's
-// own title) writes that while the Update is still in progress: re-reading the
-// whole snapshot here would show a change this Update has no business showing, and
-// which frame it first appeared in would be a race.
-func (m *Model) refreshQueue() {
-	if m.eng == nil {
-		return
-	}
-	m.queue = m.eng.State().Queue
-}
-
 // View places the regions the layout decided, each forced to exactly its own
 // row count, so the frame is always exactly as tall as the terminal.
 func (m Model) View() string {
@@ -3683,21 +4025,40 @@ func workspaceName(cwd string) string {
 	return base
 }
 
-// waitEvent reads the engine's primary — the session's own, unchanged: the
-// engine publishes into the same log, so one stream carries the agent's events
-// and the engine's alike. A primary client keeps reading until it closes the
-// engine, because the log's outbox may still be publishing after a turn's
-// ending.
-func waitEvent(eng *engine.Engine) tea.Cmd {
-	if eng == nil {
+// waitEvent reads the backend's stream, one item: in process the engine's
+// primary — the session's own, unchanged: the engine publishes into the same
+// log, so one stream carries the agent's events and the engine's alike. A
+// primary client keeps reading until it closes the engine, because the log's
+// outbox may still be publishing after a turn's ending.
+//
+// An event is an eventMsg, after which the command gate decides whether the
+// next read starts (readOn): exactly one is ever in flight. A stream that has
+// ended (backend.ErrClosed, an End item) or failed is nil, as a closed channel
+// always was: nothing more is coming, and the reader is not re-armed. Ready and
+// Restore are the socket backend's (PR 4), which nothing in process delivers
+// and nothing here handles yet: the reader reads past them.
+//
+// The read's context never ends. Read returns every item it takes, a context
+// cancelled meanwhile or not (backend.Backend.Read), and a read that is never
+// cancelled is never abandoned either: nothing this reader takes is dropped.
+func waitEvent(b backend.Backend) tea.Cmd {
+	if b == nil {
 		return nil
 	}
 	return func() tea.Msg {
-		ev, ok := <-eng.Events()
-		if !ok {
+		for {
+			it, err := b.Read(context.Background())
+			if err != nil {
+				return nil
+			}
+			switch it.Kind {
+			case backend.ItemEvent:
+				return eventMsg{it.Event}
+			case backend.ItemReady, backend.ItemRestore:
+				continue
+			}
 			return nil
 		}
-		return eventMsg{ev}
 	}
 }
 

@@ -39,7 +39,7 @@ func TestFrameGoldenNativeUsage80x24(t *testing.T) {
 	isolateSkillsHome(t)
 	ws := frameWorkspace(t)
 
-	var model *nativeScriptedModel
+	var models []*nativeScriptedModel
 	build := func() Config {
 		table := nativeOneModelTable()
 		echo := table.Models["test/echo"]
@@ -47,17 +47,18 @@ func TestFrameGoldenNativeUsage80x24(t *testing.T) {
 		in, out, cached := 3.0, 15.0, 0.30
 		echo.Cost = &modeltable.Cost{Input: &in, Output: &out, CacheRead: &cached}
 		table.Models["test/echo"] = echo
-		model = &nativeScriptedModel{provider: "test", wire: "wire-echo"}
+		model := &nativeScriptedModel{provider: "test", wire: "wire-echo"}
 		model.steps = [][]fantasy.StreamPart{
 			cat(nativeTextParts("the first answer"), nativeUsageFinish(60_000, 0, 1_500)),
 			cat(nativeTextParts("the second answer"), nativeUsageFinish(8_000, 58_000, 2_000)),
 		}
+		models = append(models, model)
 		sess := agent.NewNative(agent.Options{Workspace: ws, ContentHome: t.TempDir()},
 			nativeSessionTweak(t.TempDir(), table, model))
 		return Config{Session: sess, Theme: "tokyo-night", Workspace: ws, Yolo: true}
 	}
 
-	got, _, err := RunFrameScript(build(), 80, 24,
+	got, _, err := runFrameModes(t, build, 80, 24,
 		"<wait:idle>hello<enter><wait:text:the first answer><wait:idle>again<enter><wait:text:the second answer><wait:idle>",
 		FrameOpts{Timeout: 10 * time.Second})
 	if err != nil {
@@ -66,7 +67,9 @@ func TestFrameGoldenNativeUsage80x24(t *testing.T) {
 	assertFrameGolden(t, "native-usage-80x24", 80, 24, got,
 		[]string{"the first answer", "the second answer", "ws │ native │ Echo │ 34% ctx · $0.07 / $0.27 │ 0m"},
 		[]string{" tok"})
-	if model.calls != 2 {
-		t.Fatalf("the session sent %d requests; want one per turn", model.calls)
+	for _, model := range models {
+		if model.calls != 2 {
+			t.Fatalf("the session sent %d requests; want one per turn", model.calls)
+		}
 	}
 }

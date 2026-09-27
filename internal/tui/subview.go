@@ -116,8 +116,8 @@ func (m *Model) switchView(delta int) {
 }
 
 func (m Model) handleViewKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	if stopped, next := m.stopViewKey(msg); stopped { // subcancel.go
-		return next, nil
+	if stopped, next, cmd := m.stopViewKey(msg); stopped { // subcancel.go
+		return next, cmd
 	}
 	switch msg.Type {
 	case tea.KeyCtrlY:
@@ -159,7 +159,9 @@ func (m *Model) applySubagentEvent(ev agent.Event) {
 	}
 	info := *ev.Subagent
 	id := info.ID
-	m.refreshSnap()
+	// The mirror already holds the roster this event folded (reduceEvent), so
+	// the tombstone, the stamps and the receipt pane below read it as it now
+	// stands.
 	m.ensureSub(id)
 	if m.viewing == id {
 		cp := info
@@ -203,7 +205,6 @@ func (m *Model) applyChildEvent(ev agent.Event) {
 	id := ev.Agent
 	m.ensureSub(id)
 	if ev.Type == agent.EventTool {
-		m.refreshSnap()
 		m.noteAgentStart(id)
 	}
 }

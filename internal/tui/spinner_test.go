@@ -148,10 +148,11 @@ func TestSpinnerVisibilityAndText(t *testing.T) {
 		t.Fatalf("a sub-agent wins: %q", got)
 	}
 
-	stubOf(t, m).SetTools(nil)
-	tm, _ := m.Update(refreshSnapMsg{})
-	m = tm.(Model)
-	tm, _ = m.Update(eventMsg{agent.Event{Type: agent.EventThought, Text: "hm"}})
+	// Both settle, as a live session says so: each tool's terminal status,
+	// and the child's finish on the roster.
+	tool.Status, task.Status = "completed", "completed"
+	m = applyInFlight(t, m, []agent.ToolEvent{tool, task})
+	tm, _ := m.Update(eventMsg{agent.Event{Type: agent.EventThought, Text: "hm"}})
 	m = tm.(Model)
 	if got := m.spinnerActivity(); got != "Thinking…" {
 		t.Fatalf("activity %q", got)

@@ -97,7 +97,7 @@ func TestAPickerClaimBuildsWithTheClaimedID(t *testing.T) {
 	if (*loaded)[0].CrazeID != "018f-claimed" {
 		t.Fatalf("the row was built as %q", (*loaded)[0].CrazeID)
 	}
-	if got := out.eng.State().CrazeSessionID; got != "018f-claimed" {
+	if got := engineOf(t, out).State().CrazeSessionID; got != "018f-claimed" {
 		t.Fatalf("the engine's craze id is %q, want the claimed one", got)
 	}
 	if f.releases.Load() != 0 {
@@ -227,8 +227,10 @@ func TestOnEngineSeesEveryInstalledEngine(t *testing.T) {
 		if e == nil {
 			t.Fatal("OnEngine was handed nil")
 		}
-		if owner != nil && owner.current() != e {
-			t.Fatal("OnEngine ran before the owner held the engine")
+		if owner != nil {
+			if b, _ := owner.current().(*engineBackend); b == nil || b.engine() != e {
+				t.Fatal("OnEngine ran before the owner held the engine")
+			}
 		}
 		seen = append(seen, e)
 	}
@@ -237,7 +239,7 @@ func TestOnEngineSeesEveryInstalledEngine(t *testing.T) {
 		ProviderLocked: true, Session: NewStub(), OnEngine: hook,
 	})
 	t.Cleanup(func() { _ = m.eng.Close() })
-	if len(seen) != 1 || seen[0] != m.eng {
+	if len(seen) != 1 || seen[0] != engineOf(t, m) {
 		t.Fatalf("New's engine: seen %d", len(seen))
 	}
 
@@ -253,7 +255,7 @@ func TestOnEngineSeesEveryInstalledEngine(t *testing.T) {
 	tm, _ := p.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	out := tm.(Model)
 	t.Cleanup(func() { _ = out.eng.Close() })
-	if len(seen) != 1 || seen[0] != out.eng {
+	if len(seen) != 1 || seen[0] != engineOf(t, out) {
 		t.Fatalf("the picker's engine: seen %d", len(seen))
 	}
 }

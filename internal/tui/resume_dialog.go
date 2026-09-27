@@ -223,13 +223,16 @@ func (m Model) confirmResume(row sessions.Row) (tea.Model, tea.Cmd) {
 	if m.eng == nil && m.engErr == nil {
 		m.setSession(NewStub(), "")
 	}
-	m.refreshSnap()
+	m.recompute()
 	if m.model == "" && m.snap.CurrentModel != "" {
 		m.model = m.snap.CurrentModel
 	}
 	if m.model == "" {
 		m.model = "default"
 	}
+	// Init's batch, as confirmProvider returns it; the read it arms is the one
+	// the command gate's reader rule counts (readOn).
+	m.reading = m.eng != nil
 	return m, tea.Batch(m.startCmd(), waitEvent(m.eng))
 }
 

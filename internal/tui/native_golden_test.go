@@ -25,20 +25,22 @@ import (
 // HOME (plan 018 §3.8's note to C10), so Start's real code path runs against
 // a table this test controls regardless of where HOME points during the run.
 func TestFrameGoldenNativeEcho80x24(t *testing.T) {
-	table := nativeOneModelTable()
-	model := &nativeScriptedModel{provider: "test", wire: "wire-echo"}
-	model.steps = [][]fantasy.StreamPart{
-		cat(nativeThoughtParts("working it out"), nativeTextParts("hi there"), nativeFinishParts()),
-	}
-	harnessHome := t.TempDir()
-	ws := frameWorkspace(t)
-	sess := agent.NewNative(agent.Options{Workspace: ws, ContentHome: t.TempDir()}, nativeSessionTweak(harnessHome, table, model))
-
-	got, _, err := RunFrameScript(Config{
-		Session:   sess,
-		Theme:     "tokyo-night",
-		Workspace: ws,
-		Yolo:      true,
+	// Each gate mode's run gets a session, a scripted model and a workspace of
+	// its own: a run spends its model's steps (runFrameModes).
+	got, _, err := runFrameModes(t, func() Config {
+		table := nativeOneModelTable()
+		model := &nativeScriptedModel{provider: "test", wire: "wire-echo"}
+		model.steps = [][]fantasy.StreamPart{
+			cat(nativeThoughtParts("working it out"), nativeTextParts("hi there"), nativeFinishParts()),
+		}
+		harnessHome := t.TempDir()
+		ws := frameWorkspace(t)
+		return Config{
+			Session:   agent.NewNative(agent.Options{Workspace: ws, ContentHome: t.TempDir()}, nativeSessionTweak(harnessHome, table, model)),
+			Theme:     "tokyo-night",
+			Workspace: ws,
+			Yolo:      true,
+		}
 	}, 80, 24, "<wait:idle>hello<enter><wait:text:hi there><wait:idle>", FrameOpts{Timeout: 10 * time.Second})
 	if err != nil {
 		t.Fatalf("run frame script: %v", err)

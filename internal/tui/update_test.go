@@ -58,9 +58,17 @@ func startStub(t *testing.T, stub *Stub, ws string, cols, rows int) Model {
 }
 
 // startSession is startStub for a session that is not a bare Stub — the
-// scripted decorator — so the standard config stays in one place.
+// scripted decorator — so the standard config stays in one place. It starts
+// the session as Init does (startedLikeInit): the session's own Start runs, and
+// the fold — which the mirror draws from (plan 027 §3.13) — holds what it
+// published, a Stub's install among it.
 func startSession(t *testing.T, sess agent.Session, ws string, cols, rows int) Model {
 	t.Helper()
+	return startedLikeInit(t, sizedSession(sess, ws, cols, rows))
+}
+
+// sizedSession is the standard config around sess, sized and not started.
+func sizedSession(sess agent.Session, ws string, cols, rows int) Model {
 	m := New(Config{
 		Session:   sess,
 		Theme:     "tokyo-night",
@@ -69,8 +77,34 @@ func startSession(t *testing.T, sess agent.Session, ws string, cols, rows int) M
 		Yolo:      true,
 	})
 	tm, _ := m.Update(tea.WindowSizeMsg{Width: cols, Height: rows})
-	m = tm.(Model)
-	tm, _ = m.Update(startedMsg{})
+	return tm.(Model)
+}
+
+// sizedLikeInit is sized with the session started as Init starts it
+// (startedLikeInit): the Stub's own Start runs, and the fold holds the install
+// it published (plan 027 §3.13).
+func sizedLikeInit(t *testing.T) Model {
+	t.Helper()
+	isolateSkillsHome(t)
+	return startedLikeInit(t, sizedSession(NewStub(), t.TempDir(), 80, 24))
+}
+
+// startedLikeInit starts m's session the way Init does and applies what the
+// start produced: the start command's own Start runs — for a Stub, publishing
+// the install delta a live session's Start publishes, which TestMain turns on
+// (plan 027 §3.13) — then every event that Start published is applied, read
+// off the session's primary as the event reader Init arms would read them, and
+// then the start's answer, startedMsg. That is one of the orders Init's batch
+// can deliver them in (a live session enqueues its install before Start
+// returns), and the one where the session is up with its install folded: the
+// log is flushed first, so a model built here starts with nothing of its
+// session's start left unread, and its fold — which the mirror draws from —
+// holds the settings a live session's stream would give it. A fixture that
+// sends startedMsg itself starts no session at all and folds no install.
+func startedLikeInit(t *testing.T, m Model) Model {
+	t.Helper()
+	started := m.startCmd()()
+	tm, _ := applyPending(t, m).Update(started)
 	return tm.(Model)
 }
 
@@ -780,7 +814,7 @@ func TestShiftTabCyclesMode(t *testing.T) {
 	if cmd == nil {
 		t.Fatal("expected SetMode cmd")
 	}
-	if msg := cmd(); msg != (modeAppliedMsg{gen: m.modeGen, id: "plan"}) {
+	if msg := cmd(); msg != (modeAppliedMsg{issued: m.issue(), gen: m.modeGen, id: "plan", rev: 2}) {
 		t.Fatalf("stub SetMode returned %T %v", msg, msg)
 	}
 	if !strings.Contains(plainView(m), "plan") {
@@ -830,8 +864,8 @@ func TestSlashHelpExitAndModel(t *testing.T) {
 	if cmd == nil {
 		t.Fatal("expected SetModel cmd")
 	}
-	if msg := cmd(); msg != nil {
-		t.Fatalf("stub SetModel returned %v", msg)
+	if set, ok := cmd().(modelSetMsg); !ok || set.landed.res.Value != "fast" || set.landed.res.Rev == 0 {
+		t.Fatalf("stub SetModel returned %#v, want the model step's result (plan 027 §3.13)", set)
 	}
 	m.input.SetValue("/exit")
 	tm, cmd = m.Update(enter())
@@ -1328,9 +1362,7 @@ func TestSetModelFailReverts(t *testing.T) {
 	stub.FailNextSetModel()
 	m := New(Config{Session: stub, Workspace: t.TempDir(), Yolo: true})
 	tm, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
-	m = tm.(Model)
-	tm, _ = m.Update(startedMsg{})
-	m = tm.(Model)
+	m = startedLikeInit(t, tm.(Model))
 	m.input.SetValue("/model fast")
 	tm, cmd := m.Update(enter())
 	m = tm.(Model)
@@ -1356,9 +1388,7 @@ func TestSetModeFailureKeepsWorkingStatus(t *testing.T) {
 	stub.FailNextSetMode()
 	m := New(Config{Session: stub, Workspace: t.TempDir(), Yolo: true})
 	tm, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
-	m = tm.(Model)
-	tm, _ = m.Update(startedMsg{})
-	m = tm.(Model)
+	m = startedLikeInit(t, tm.(Model))
 	m.status = statusWorking
 	tm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyShiftTab})
 	m = tm.(Model)
@@ -1389,8 +1419,8 @@ func TestSetModeFailureKeepsWorkingStatus(t *testing.T) {
 //
 // A mode change is a round trip. The chip flips the moment the user asks for
 // it, and the session's own snapshot only catches up when the agent answers —
-// so for the length of that trip refreshSnap draws the requested mode instead
-// of the session's. That mask is what stops an unrelated update flickering the
+// so for the length of that trip the mirror draws the requested mode (the mode
+// overlay, requestMode) instead of the session's. That mask is what stops an unrelated update flickering the
 // chip back, and it is also what makes a wrong answer expensive: a mask that is
 // never taken down, or taken down by the wrong answer, leaves the chip lying
 // for the life of the process rather than for a frame. Model.modeGen is what
@@ -1442,8 +1472,8 @@ func agentSetsMode(s *Stub, id string) {
 }
 
 // unrelatedUpdate is the shape the mask exists for: an available_commands_update
-// arrives as a mode-less EventMeta, refreshSnap re-reads the whole snapshot, and
-// the session's answer for the mode is still the one the user just left.
+// arrives as a mode-less EventMeta, the mirror is recomputed from the fold, and
+// the fold's mode is still the one the user just left.
 func unrelatedUpdate(t *testing.T, m Model) Model {
 	t.Helper()
 	return feed(t, m, agent.Event{Type: agent.EventMeta})
@@ -1533,6 +1563,9 @@ func TestModeAnswersSettleInAnyOrder(t *testing.T) {
 					m = deliver(t, m, answers[o.req])
 				}
 			}
+			// And what the session published, as the event reader delivers it:
+			// the chip is the fold's once nothing of craze's own is in flight.
+			m = applyPending(t, m)
 			if m.modeInFlight != "" {
 				t.Fatalf("every answer is in: %q is still masking the chip", m.modeInFlight)
 			}
@@ -1627,10 +1660,11 @@ func TestModeAnswerForARepeatedModeIsNotTheNewerRequests(t *testing.T) {
 
 // TestAgentModeArrivingBeforeTheAnswerIsNotMasked: the RPC succeeding and its
 // answer being handled are two different moments, and the agent can change the
-// mode by itself in between. The mask hides that change for as long as the
-// answer is outstanding, so the answer has to read the session back — otherwise
-// the chip keeps the mode craze asked for while the session is in another one,
-// and no later event is owed to correct it.
+// mode by itself in between. The mask used to hide that change until the answer
+// read the session back. Since the mirror is the fold (plan 027 §3.13) the
+// request's overlay is retired by the request's own delta, which the log orders
+// ahead of the agent's update, so the agent's mode shows the moment it is
+// folded — before any answer — and the answer, landing last, moves nothing.
 func TestAgentModeArrivingBeforeTheAnswerIsNotMasked(t *testing.T) {
 	m := sized(t)
 	stub := stubOf(t, m)
@@ -1639,20 +1673,33 @@ func TestAgentModeArrivingBeforeTheAnswerIsNotMasked(t *testing.T) {
 	if got := sessionMode(stub); got != "plan" {
 		t.Fatalf("session %q: the RPC was accepted", got)
 	}
-	// The agent moves the mode again, of its own accord, and its update is
-	// handled before craze's own answer is.
+	// The agent moves the mode again, of its own accord: its update — the
+	// section a live session's current_mode_update carries — is published
+	// behind the delta craze's own change published, as the log orders them.
 	agentSetsMode(stub, "ask")
-	m = feed(t, m, agent.Event{Type: agent.EventMeta, Mode: "ask"})
-	if m.snap.CurrentMode != "plan" {
-		t.Fatalf("chip %q: the mask is what stops the round trip flickering", m.snap.CurrentMode)
+	ask := "ask"
+	stub.Emit(agent.Event{Type: agent.EventMeta, Mode: ask, State: &agent.StateDelta{Mode: &ask}})
+	evs := stubDeltas(t, stub)
+	if len(evs) != 2 {
+		t.Fatalf("fixture: %d events published, want craze's own delta and the agent's", len(evs))
 	}
-
+	// craze's own delta retires the overlay: the chip is the fold's from here.
+	m = feed(t, m, evs[0])
+	if m.snap.CurrentMode != "plan" {
+		t.Fatalf("chip %q after craze's own delta, want plan", m.snap.CurrentMode)
+	}
+	// The agent's update shows the moment it is folded, before any answer:
+	// nothing of craze's own is masking the chip any more.
+	m = feed(t, m, evs[1])
+	if m.snap.CurrentMode != "ask" {
+		t.Fatalf("chip %q, session %q: the agent's mode must show when folded", m.snap.CurrentMode, sessionMode(stub))
+	}
 	m = deliver(t, m, applied)
 	if m.modeInFlight != "" {
 		t.Fatalf("modeInFlight %q: the answer for this request is in", m.modeInFlight)
 	}
 	if m.snap.CurrentMode != "ask" {
-		t.Fatalf("chip %q, session %q: taking the mask down has to read the session back",
+		t.Fatalf("chip %q, session %q: the answer, arriving last, must not move the chip",
 			m.snap.CurrentMode, sessionMode(stub))
 	}
 }
@@ -1726,9 +1773,7 @@ func TestModeChangeTimesOutInsteadOfPinningTheChip(t *testing.T) {
 	isolateSkillsHome(t)
 	m := New(Config{Session: wedgedMode{NewStub()}, Workspace: t.TempDir(), Yolo: true})
 	tm, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
-	m = tm.(Model)
-	tm, _ = m.Update(startedMsg{})
-	m = tm.(Model)
+	m = startedLikeInit(t, tm.(Model))
 
 	m, cmd := askMode(t, m, "plan")
 	answer := runCmd(cmd)

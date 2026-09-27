@@ -415,6 +415,7 @@ func TestEveryDrawnRegionOwnsItsRows(t *testing.T) {
 			}
 			if tc.queue {
 				enqueueRow(t, m, "PINEAPPLE")
+				m = applyPending(t, m)
 			}
 			tm, _ := m.Update(refreshSnapMsg{})
 			m = tm.(Model)

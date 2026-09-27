@@ -286,7 +286,7 @@ func assertConverged(t *testing.T, fx convergenceFixture, what string, once, aga
 		t.Fatalf("%s moved the state beyond the tools its history displaced:\nonce  %+v\nagain %+v", what, o, a)
 	}
 	for k, tool := range again.Tools {
-		if once.Tools[k] != tool {
+		if !reflect.DeepEqual(once.Tools[k], tool) {
 			t.Fatalf("%s changed or re-added tool %v: it may only displace", what, k)
 		}
 	}

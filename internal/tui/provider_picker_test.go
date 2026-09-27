@@ -28,7 +28,7 @@ func pickerFactory(t *testing.T) func(agent.Provider) agent.Session {
 // capturingFactory is pickerFactory's *Stub build, plus the one thing
 // pickerFactory does not hand back: the exact session it built, in *built
 // once the picker has run it. That is the identity assertOwned now checks
-// m.eng.Session() against (sol r19 finding 3) — the test controls the
+// the engine's Session() against (sol r19 finding 3) — the test controls the
 // factory, so it is the one place left to name "the right session" now that
 // m.sess is gone (SF-03).
 func capturingFactory(t *testing.T) (build func(agent.Provider) agent.Session, built *agent.Session) {
@@ -48,8 +48,8 @@ func capturingFactory(t *testing.T) (build func(agent.Provider) agent.Session, b
 // not merely some non-nil one. The exit tails close the owner's, so a session
 // assigned around setSession is one that no exit path would close.
 //
-// The identity check used to compare m.eng.Session() against the model's own
-// m.sess mirror (SF-03); m.sess is gone, so want — the session the caller's
+// The identity check used to compare the engine's Session() against the
+// model's own m.sess mirror (SF-03); m.sess is gone, so want — the session the caller's
 // own factory built, captured independently by capturingFactory — is what
 // stands in for it now. want is variadic and not a plain argument so every
 // caller that has no such session to name (the picker still showing, no
@@ -70,7 +70,7 @@ func assertOwned(t *testing.T, m Model, want ...agent.Session) {
 	if m.eng == nil {
 		return
 	}
-	got := m.eng.Session()
+	got := engineOf(t, m).Session()
 	if got == nil {
 		t.Fatal("the engine wraps no session")
 	}

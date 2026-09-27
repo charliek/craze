@@ -69,7 +69,7 @@ func hostModelWith(t *testing.T, sess agent.Session, loading bool) (Model, *recH
 func startedHostModel(t *testing.T) (Model, *Stub, *recHost) {
 	t.Helper()
 	m, stub, rec := hostModel(t, false)
-	m = deliver(t, m, startedMsg{})
+	m = startedLikeInit(t, m)
 	assertStatuses(t, rec, idleStatus(host.DetailReady))
 	rec.statuses = nil
 	return m, stub, rec
@@ -90,7 +90,7 @@ func scriptedHostModel(t *testing.T) (Model, *scriptedSession, *recHost) {
 func startedScriptedHostModel(t *testing.T) (Model, *scriptedSession, *recHost) {
 	t.Helper()
 	m, s, rec := scriptedHostModel(t)
-	m = deliver(t, m, startedMsg{})
+	m = startedLikeInit(t, m)
 	assertStatuses(t, rec, idleStatus(host.DetailReady))
 	rec.statuses = nil
 	return m, s, rec
@@ -165,7 +165,7 @@ func TestHostStatusPermissionTurn(t *testing.T) {
 	if len(rec.statuses) != 0 {
 		t.Fatalf("published before the session was up: %s", fmtStatuses(rec.statuses))
 	}
-	m = deliver(t, m, startedMsg{})
+	m = startedLikeInit(t, m)
 	sc := scriptHeld().endsThenWaits()
 	m = startScripted(t, m, sess, "run it", sc)
 	sess.Emit(agent.Event{Type: agent.EventPermission, Permission: stubPermissionEvent(false)})
@@ -325,7 +325,7 @@ func TestHostStatusCancelEndings(t *testing.T) {
 // when a host first hears from it, as ready.
 func TestHostStatusLoadedSessionWaitsForReplay(t *testing.T) {
 	m, _, rec := hostModel(t, true)
-	m = deliver(t, m, startedMsg{})
+	m = startedLikeInit(t, m)
 	m = feed(t, m, replayEvent(agent.ReplayStart))
 	for _, ev := range replayTranscript() {
 		m = feed(t, m, replayed(ev))
@@ -343,6 +343,7 @@ func TestHostStatusLoadedSessionWaitsForReplay(t *testing.T) {
 // the session being ready.
 func TestHostStatusStartFailure(t *testing.T) {
 	m, _, rec := hostModel(t, false)
+	m = republish(t, m)
 	_ = deliver(t, m, errMsg{err: errors.New("authentication failed: no key\nsee cursor-agent login")})
 	assertStatuses(t, rec, hostStatus(host.Failed, host.DetailStartFailed, "authentication failed: no key"))
 }
@@ -361,7 +362,7 @@ func TestHostStatusPublishesOnChangeOnly(t *testing.T) {
 	if _, err := stub.SetModel(context.Background(), "", "fast"); err != nil {
 		t.Fatal(err)
 	}
-	m = deliver(t, m, refreshSnapMsg{})
+	m = feed(t, m, stubDeltas(t, stub)...)
 	_ = deliver(t, m, tickMsg{gen: m.tickGen})
 	want := idleStatus(host.DetailReady)
 	want.Model = "fast"
@@ -400,7 +401,7 @@ func TestHostStatusProviderIsTheOneStarted(t *testing.T) {
 	}
 	m, _ = press(m, tea.KeyMsg{Type: tea.KeyDown})
 	m, _ = press(m, enter())
-	_ = deliver(t, m, startedMsg{})
+	_ = startedLikeInit(t, m)
 	assertStatuses(t, rec, idleStatus(host.DetailReady))
 }
 
@@ -567,7 +568,7 @@ func TestFinishRunOrder(t *testing.T) {
 		// swap's, not the exit tail's, so the log starts again after it.
 		assertOrder(t, log, "sess close")
 		log.events = nil
-		if updated.(Model).eng.Session() == initial.eng.Session() {
+		if engineOf(t, updated.(Model)).Session() == engineOf(t, initial).Session() {
 			t.Fatal("setup: confirmProvider did not swap the session")
 		}
 		if _, err := finishRun(w, nil, initial, h); err != nil {
@@ -668,8 +669,11 @@ func TestRecoveredPanicClosesThePickedSession(t *testing.T) {
 }
 
 // beginPanics is a session whose Begin panics. The engine's Submit calls Begin
-// inside the Update that pressed Enter, in the locked section that claims the turn,
-// so a prompt typed at it is an Update panic with no hook in production code.
+// in the locked section that claims the turn, so a prompt typed at it panics
+// wherever Submit runs: inside the Update that pressed Enter in the command
+// gate's gateSync baseline — an Update panic with no hook in production code —
+// and on the gated call's goroutine asynchronously (plan 027 §3.12), from where
+// the gate re-raises it on the command's goroutine for bubbletea to recover.
 // closes counts Close calls from any copy.
 type beginPanics struct {
 	*Stub
@@ -688,35 +692,47 @@ func (s beginPanics) Close() error {
 // TestFramePanicClosesThePickedSession is issue #19 in the frame runner, which
 // had the same hole: it closed the session of the model p.Run handed back, and
 // a recovered panic hands back nil. The model starts as a provider picker with
-// no session at all, Enter builds one, and a prompt panics inside Update. The
-// runner has nothing to read the session from but the owner, so it is the
-// owner's that must close. On a quit the old path already found the right
-// session; only the panic tells the two apart. That p.Run's model is nil here
-// is TestRecoveredPanicClosesThePickedSession's to pin; this sees the error it
+// no session at all, Enter builds one, and a prompt panics. The runner has
+// nothing to read the session from but the owner, so it is the owner's that
+// must close. On a quit the old path already found the right session; only the
+// panic tells the two apart. That p.Run's model is nil after an Update panic is
+// TestRecoveredPanicClosesThePickedSession's to pin; this sees the error it
 // comes with.
+//
+// It runs in both gate modes (plan 027 §3.12). The gateSync baseline is the
+// run that holds issue #19's claim: Submit runs inside Enter's Update, so the
+// panic is an Update panic, p.Run hands back nil, and only the owner can name
+// the session. Asynchronously Submit runs on the gated call's goroutine: the
+// panic must still end the program with ErrProgramPanic — re-raised on the
+// command's goroutine, which bubbletea recovers — rather than take the process
+// down, and the picked session is still closed exactly once.
 func TestFramePanicClosesThePickedSession(t *testing.T) {
-	isolateSkillsHome(t)
-	var built, closes atomic.Int32
-	_, _, err := RunFrameScript(Config{
-		Theme:     "tokyo-night",
-		Workspace: frameWorkspace(t),
-		Model:     "grok",
-		Yolo:      true,
-		NewSession: func(p agent.Provider) agent.Session {
-			built.Add(1)
-			s := NewStub()
-			s.SetProvider(p)
-			return beginPanics{Stub: s, closes: &closes}
-		},
-	}, 80, 24, "<enter><wait:idle>hi<enter>", FrameOpts{Timeout: 5 * time.Second})
-	if !errors.Is(err, tea.ErrProgramPanic) {
-		t.Fatalf("RunFrameScript returned %v, want the program's panic", err)
-	}
-	if n := built.Load(); n != 1 {
-		t.Fatalf("the picker built %d sessions, want 1", n)
-	}
-	if n := closes.Load(); n != 1 {
-		t.Fatalf("the picked session was closed %d times, want once", n)
+	for _, mode := range frameGateModes {
+		t.Run(mode.name, func(t *testing.T) {
+			isolateSkillsHome(t)
+			var built, closes atomic.Int32
+			_, _, err := RunFrameScript(Config{
+				Theme:     "tokyo-night",
+				Workspace: frameWorkspace(t),
+				Model:     "grok",
+				Yolo:      true,
+				NewSession: func(p agent.Provider) agent.Session {
+					built.Add(1)
+					s := NewStub()
+					s.SetProvider(p)
+					return beginPanics{Stub: s, closes: &closes}
+				},
+			}, 80, 24, "<enter><wait:idle>hi<enter>", FrameOpts{Timeout: 5 * time.Second, gateSync: mode.sync})
+			if !errors.Is(err, tea.ErrProgramPanic) {
+				t.Fatalf("RunFrameScript returned %v, want the program's panic", err)
+			}
+			if n := built.Load(); n != 1 {
+				t.Fatalf("the picker built %d sessions, want 1", n)
+			}
+			if n := closes.Load(); n != 1 {
+				t.Fatalf("the picked session was closed %d times, want once", n)
+			}
+		})
 	}
 }
 

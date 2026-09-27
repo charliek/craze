@@ -56,7 +56,13 @@ type scriptedSession struct {
 	// anything. It is what keeps a turn alive across the arm of a send-now: the
 	// cancel the engine makes for the arm is the one thing that would otherwise
 	// end that turn at once, on a goroutine no test can hold back.
-	cancelHold chan struct{}
+	// cancelHoldFirm says that hold outlasts the call's own context
+	// (HoldNextCancelPastItsDeadline).
+	cancelHold     chan struct{}
+	cancelHoldFirm bool
+	// beginHold, when non-nil, makes the next Begin hand nothing to the Stub
+	// yet (HoldNextBegin); beginHeld closes when its continuation is waiting.
+	beginHold, beginHeld chan struct{}
 }
 
 func newScriptedSession() *scriptedSession {
@@ -95,21 +101,55 @@ func (s *scriptedSession) FailNextCancel(err error) {
 // until then, which is how a test stands in the window between an arm and its
 // cancel, or lets that turn end some way other than by the cancel. The release is
 // idempotent, and closing the session frees a held cancel too.
-func (s *scriptedSession) HoldNextCancel() func() {
+func (s *scriptedSession) HoldNextCancel() func() { return s.holdNextCancel(false) }
+
+// HoldNextCancelPastItsDeadline is HoldNextCancel for a cancel whose context
+// must not end the hold: the engine gives the cancel an armed send-now asks
+// for a real deadline of its own (armedCancelTimeout), and HoldNextCancel's
+// hold gives way when that context ends — on a slow -race or one-CPU run,
+// before the test has let it go (sol r46 4). This hold waits for the release
+// or the session's close alone; the Stub's Cancel, which ignores its context,
+// then runs as it would have.
+func (s *scriptedSession) HoldNextCancelPastItsDeadline() func() { return s.holdNextCancel(true) }
+
+func (s *scriptedSession) holdNextCancel(firm bool) func() {
 	hold := make(chan struct{})
 	var once sync.Once
 	s.mu.Lock()
-	s.cancelHold = hold
+	s.cancelHold, s.cancelHoldFirm = hold, firm
 	s.mu.Unlock()
 	return func() { once.Do(func() { close(hold) }) }
 }
 
-func (s *scriptedSession) takeCancelHold() chan struct{} {
+// HoldNextBegin makes the next Begin the engine makes claim nothing at the
+// Stub yet: Begin returns at once — the engine has its turn — and the
+// continuation waits, before the prompt reaches the Stub (so Prompts does not
+// hold it) and before anything runs, until release. held closes once the
+// continuation is waiting there. A Begin the Stub would refuse is not held.
+// The release is idempotent, and closing the session frees a held one too.
+func (s *scriptedSession) HoldNextBegin() (held <-chan struct{}, release func()) {
+	hold, h := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	s.mu.Lock()
+	s.beginHold, s.beginHeld = hold, h
+	s.mu.Unlock()
+	return h, func() { once.Do(func() { close(hold) }) }
+}
+
+func (s *scriptedSession) takeBeginHold() (hold, held chan struct{}) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	hold := s.cancelHold
-	s.cancelHold = nil
-	return hold
+	hold, held = s.beginHold, s.beginHeld
+	s.beginHold, s.beginHeld = nil, nil
+	return hold, held
+}
+
+func (s *scriptedSession) takeCancelHold() (hold chan struct{}, firm bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	hold, firm = s.cancelHold, s.cancelHoldFirm
+	s.cancelHold, s.cancelHoldFirm = nil, false
+	return hold, firm
 }
 
 func (s *scriptedSession) takeScript() *scriptedTurn {
@@ -132,6 +172,23 @@ func (s *scriptedSession) Begin(text string) func(context.Context) (agent.Result
 	s.admit.Lock()
 	defer s.admit.Unlock()
 	busy := s.stubBusy()
+	if !busy {
+		if hold, held := s.takeBeginHold(); hold != nil {
+			// Claimed by the engine, and nothing handed to the Stub yet: the
+			// prompt is recorded (Prompts) and run only once the hold is let go.
+			return func(ctx context.Context) (agent.Result, error) {
+				close(held)
+				select {
+				case <-hold:
+				case <-s.closed:
+					return agent.Result{}, agent.ErrPromptCancelled
+				case <-ctx.Done():
+					return agent.Result{}, agent.ErrPromptCancelled
+				}
+				return s.Stub.Begin(text)(ctx)
+			}
+		}
+	}
 	run := s.Stub.Begin(text)
 	if busy {
 		return run
@@ -164,11 +221,16 @@ func (s *scriptedSession) Cancel(ctx context.Context) (agent.CancelOutcome, erro
 	// Before the Stub's own Cancel, and before a failure is returned: the barrier
 	// says a cancel arrived, not what became of it.
 	s.cancelsOnce.Do(func() { close(s.cancels) })
-	if hold := s.takeCancelHold(); hold != nil {
+	if hold, firm := s.takeCancelHold(); hold != nil {
+		done := ctx.Done()
+		if firm {
+			// A nil channel: the call's own deadline does not end this hold.
+			done = nil
+		}
 		select {
 		case <-hold:
 		case <-s.closed:
-		case <-ctx.Done():
+		case <-done:
 		}
 	}
 	if err != nil {

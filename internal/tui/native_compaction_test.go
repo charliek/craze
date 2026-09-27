@@ -69,21 +69,23 @@ func TestFrameGoldenNativeCompaction100x30(t *testing.T) {
 
 	// The session and its scripted model are built fresh inside the closure —
 	// a session is spent by its one run — so a both-gate-modes wrapper can
-	// call build() once per mode (S2's runFrameModes seam). The call count is
-	// asserted against the model this run built, captured here.
-	var model *nativeScriptedModel
+	// call build() once per mode (S2's runFrameModes seam). Every model build()
+	// makes is appended here, so the call count is asserted against each of
+	// them: one per mode.
+	var models []*nativeScriptedModel
 	build := func() Config {
-		model = &nativeScriptedModel{provider: "test", wire: "wire-echo"}
+		model := &nativeScriptedModel{provider: "test", wire: "wire-echo"}
 		model.steps = [][]fantasy.StreamPart{
 			cat(nativeThoughtParts(longThought(compactionGoldenThought)), nativeTextParts("hi there"), nativeFinishParts()),
 			nativeSummaryParts("The user greeted the agent.", compactionGoldenSummary),
 		}
+		models = append(models, model)
 		sess := agent.NewNative(agent.Options{Workspace: ws, ContentHome: t.TempDir()},
 			nativeSessionTweak(t.TempDir(), nativeOneModelTable(), model))
 		return Config{Session: sess, Theme: "tokyo-night", Workspace: ws, Yolo: true}
 	}
 
-	got, _, err := RunFrameScript(build(), 100, 30, "<wait:idle>hello<enter><wait:text:hi there><wait:idle>/compact keep the greeting<enter><wait:text:context compacted><wait:idle>",
+	got, _, err := runFrameModes(t, build, 100, 30, "<wait:idle>hello<enter><wait:text:hi there><wait:idle>/compact keep the greeting<enter><wait:text:context compacted><wait:idle>",
 		FrameOpts{Timeout: 10 * time.Second})
 	if err != nil {
 		t.Fatalf("run frame script: %v", err)
@@ -92,8 +94,10 @@ func TestFrameGoldenNativeCompaction100x30(t *testing.T) {
 		[]string{"❯ hello", "hi there", "❯ /compact keep the greeting", "context compacted on request · "},
 		// The summary is the harness's, never the transcript's.
 		[]string{"Request and intent", "compacting context"})
-	if model.calls != 2 {
-		t.Fatalf("the session sent %d requests; want the turn's and the summarizer's", model.calls)
+	for _, model := range models {
+		if model.calls != 2 {
+			t.Fatalf("the session sent %d requests; want the turn's and the summarizer's", model.calls)
+		}
 	}
 
 	// The menu offers it: native's one command, with its own description. A
@@ -103,7 +107,7 @@ func TestFrameGoldenNativeCompaction100x30(t *testing.T) {
 			nativeSessionTweak(t.TempDir(), nativeOneModelTable(), &nativeScriptedModel{provider: "test", wire: "wire-echo"}))
 		return Config{Session: menu, Theme: "tokyo-night", Workspace: ws, Yolo: true}
 	}
-	got, _, err = RunFrameScript(buildMenu(), 100, 30, "<wait:idle>/comp", FrameOpts{Timeout: 10 * time.Second})
+	got, _, err = runFrameModes(t, buildMenu, 100, 30, "<wait:idle>/comp", FrameOpts{Timeout: 10 * time.Second})
 	if err != nil {
 		t.Fatalf("run frame script: %v", err)
 	}

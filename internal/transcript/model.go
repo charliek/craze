@@ -471,7 +471,9 @@ type State struct {
 	// the window omitted (its placeholder carries only an id and a size, X23),
 	// so its Tools is the first model's restricted to the rows it shares with
 	// it: the exactness of a windowed restore is the suffix, the non-tool
-	// state, and the tools of the suffix (plan 024 §3.5, X23).
+	// state, and the tools of the suffix (plan 024 §3.5, X23). Each value is
+	// the caller's own (cloneTool), as Tools()' are: nothing written through
+	// one reaches the model.
 	Tools map[ToolKey]*agent.ToolEvent
 	// TruncatedAgents names the roster rows whose Prompt or Output the
 	// snapshot this model was restored from carried only the head of (over
@@ -531,6 +533,22 @@ func (m *Model) State() State {
 func (m *Model) History() History {
 	c := m.cut()
 	return c.history()
+}
+
+// Tools returns every retained tool's last state, in entry order (plan 027
+// §3.13, "Ordered tools" — SF-43): the main transcript's tools first, then
+// each child's in the order the child was created, each transcript's own
+// tools in the order their entries hold them — the row an update replaces in
+// place (Transcript.upsertTool) keeps its original position, so this is
+// creation order even across interleaved updates. A tool the model trimmed is
+// gone, exactly as State's Tools excludes it, and so is a todo tool: neither
+// ever becomes a KindTool entry (upsertTool drops a todo tool before one is
+// made, and a trimmed one is dropped from entries by bounds.go). Cut under the
+// lock like State; the caller owns every value, nested fields and all
+// (cloneTool): nothing it writes into one reaches the model.
+func (m *Model) Tools() []agent.ToolEvent {
+	c := m.cut()
+	return c.tools()
 }
 
 // ----------------------------------------------------------------- the cut
@@ -729,7 +747,8 @@ func (c *cut) state() State {
 			if s.Tools == nil {
 				s.Tools = make(map[ToolKey]*agent.ToolEvent)
 			}
-			s.Tools[ToolKey{Agent: agentID, ID: e.Tool.ID}] = e.Tool
+			tool := cloneTool(e.Tool)
+			s.Tools[ToolKey{Agent: agentID, ID: e.Tool.ID}] = &tool
 		}
 	}
 	addTools("", &c.main)
@@ -750,6 +769,60 @@ func (c *cut) state() State {
 		addCompacting(c.subs[i].id, &c.subs[i].t)
 	}
 	return s
+}
+
+// tools is Tools' projection: every KindTool entry's payload, main first then
+// each sub in creation order, each in entry order — the same rows state's own
+// addTools visits, kept as a slice instead of folded into a map. Each is a
+// deep copy (cloneTool): the caller owns it whole.
+func (c *cut) tools() []agent.ToolEvent {
+	out := appendTools(nil, c.main.entries)
+	for i := range c.subs {
+		out = appendTools(out, c.subs[i].t.entries)
+	}
+	return out
+}
+
+// appendTools appends every KindTool entry's payload of ents to out, in entry
+// order, each a deep copy (cloneTool): Tools' rule, for a cut's entries or —
+// Mirror's, under the lock — a transcript's live ones.
+func appendTools(out []agent.ToolEvent, ents []*Entry) []agent.ToolEvent {
+	for _, e := range ents {
+		if e.Kind != KindTool || e.Tool == nil || e.Tool.ID == "" {
+			continue
+		}
+		out = append(out, cloneTool(e.Tool))
+	}
+	return out
+}
+
+// cloneTool is a tool payload the caller owns: the struct and everything it
+// points at — Locations, Diffs, the Output and its ExitCode, the Task — copied,
+// as agent's own snapshot copies a tool (agent's cloneTool, tools.go). A
+// retained payload is the event's own, shared with whatever else holds that
+// event, and is never written after it is folded; a caller of Tools may do as
+// it likes with what it gets, and nothing of it reaches back into the model.
+func cloneTool(t *agent.ToolEvent) agent.ToolEvent {
+	out := *t
+	if t.Locations != nil {
+		out.Locations = append([]string(nil), t.Locations...)
+	}
+	if t.Diffs != nil {
+		out.Diffs = append([]agent.ToolDiff(nil), t.Diffs...)
+	}
+	if t.Output != nil {
+		o := *t.Output
+		if o.ExitCode != nil {
+			code := *o.ExitCode
+			o.ExitCode = &code
+		}
+		out.Output = &o
+	}
+	if t.Task != nil {
+		task := *t.Task
+		out.Task = &task
+	}
+	return out
 }
 
 func (c *cut) history() History {

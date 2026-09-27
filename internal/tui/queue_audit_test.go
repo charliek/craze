@@ -254,8 +254,7 @@ func TestEditChipFollowsTheRow(t *testing.T) {
 	// Removed behind the model's back, as another client would: the row goes from
 	// the queue the band draws, which is the engine's.
 	unqueueRow(t, m, first)
-	tm, _ = m.Update(refreshSnapMsg{})
-	m = tm.(Model)
+	m = applyPending(t, m)
 	if v := plainView(m); !strings.Contains(v, "editing #1") {
 		t.Fatalf("the chip must follow the row:\n%s", v)
 	}
