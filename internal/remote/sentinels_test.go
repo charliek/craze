@@ -278,7 +278,11 @@ func TestEveryReasonReconstructsItsSentinel(t *testing.T) {
 		}
 	}
 	// Every sentinel classify's own source names is a twin's, or never on the
-	// wire, with why.
+	// wire, with why; is in the match set every comparison above runs over;
+	// and — unless it is never on the wire — is one the production table
+	// (sentinels.go) reconstructs from some reason. So a sentinel classify
+	// gains cannot pass here unmatched by leaving it out of both the match
+	// set and the table (astra r61 6).
 	have := map[string]bool{}
 	for _, tw := range twins {
 		have[tw.sentinel] = true
@@ -287,7 +291,31 @@ func TestEveryReasonReconstructsItsSentinel(t *testing.T) {
 		if !have[name] && neverOnTheWire[name] == "" {
 			t.Errorf("classify names %s, which has no twin here and is not listed as never on the wire", name)
 		}
+		if name == "engine.errNotRun" {
+			// Unexported, so neither set can hold it: its twin's reason
+			// reconstructs what it wraps (the comparison above).
+			continue
+		}
+		v, ok := set[name]
+		switch {
+		case !ok:
+			t.Errorf("classify names %s, which the match set (matchSet) does not hold: no comparison checks it", name)
+		case neverOnTheWire[name] != "":
+		case !reconstructedByTable(v):
+			t.Errorf("classify names %s, which the production table (sentinels.go) reconstructs from no reason", name)
+		}
 	}
+}
+
+// reconstructedByTable says the production table answers target for some
+// reason a host sends.
+func reconstructedByTable(target error) bool {
+	for _, info := range protocol.Reasons() {
+		if slices.Contains(remote.Sentinels(info.Code, info.Reason), target) {
+			return true
+		}
+	}
+	return false
 }
 
 // classifySentinels is every sentinel classify (engine/control.go) matches by

@@ -49,6 +49,13 @@ type TestHooks struct {
 	// connection's writer; PostRan on the writer once it has run one.
 	Posted  func()
 	PostRan func()
+	// Waiting runs on a call once it waits for a connection.
+	Waiting func()
+	// Entered runs on a Session command once it has taken its binding,
+	// before the command is registered; Attached on a Session's Attach once
+	// the client's attach has returned, before the Session holds the stream.
+	Entered  func(commandID string)
+	Attached func()
 }
 
 // DialForTest is Dial with h in place.
@@ -71,6 +78,9 @@ func (h TestHooks) hooks() hooks {
 		pausing:    h.Pausing,
 		posted:     h.Posted,
 		postRan:    h.PostRan,
+		waiting:    h.Waiting,
+		entered:    h.Entered,
+		attached:   h.Attached,
 	}
 }
 

@@ -51,10 +51,12 @@
 // documents as the stream receives them, capabilities as the host sent them
 // (astra 25); its Read decodes the stream (the lossless event codec, the
 // snapshot codec) into events with their seqs and stream generations, Ready,
-// Restore and End; its commands send the caller's own command ids, bound to
-// the client identity the caller's command names (CommandOptions.ClientID,
-// .Identity) and fenced by the backend epoch, which is the client's identity
-// (Client.Identity); its errors are the host's, reconstructed: *Error's Is
+// Restore and End; its commands and reads go under the caller's own command
+// ids, bound to the client identity taken at entry — by its number
+// (CommandOptions.Identity), which the ctx's backend epoch must name and the
+// caller's command's client id must be that identity's — and are never
+// written on another identity's connection; its errors are the host's,
+// reconstructed: *Error's Is
 // maps (code, reason) to the engine's and agent's sentinels through one
 // table (sentinels.go), and every *OutcomeUnknownError is
 // backend.ErrOutcomeUnknown.

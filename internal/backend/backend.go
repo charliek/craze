@@ -20,10 +20,13 @@ var ErrClosed = errors.New("backend: the stream has ended")
 // session A therefore never executes against session B.
 //
 // In process the epoch never moves, so an engine-backed call is never refused.
-// A socket backend (PR 4) that reconnected to another incarnation answers the
-// refusal as its ErrOutcomeUnknown with the reason resume_lost, wrapping this
-// sentinel, so a caller matching either finds it: the command was not sent on
-// the new binding, and what became of anything sent on the old one is unknown.
+// A socket backend (PR 4) whose reconnect could not resume — another client
+// identity: a retired client, a replaced engine, a restarted host — answers a
+// command's refusal as its ErrOutcomeUnknown with the reason resume_lost,
+// wrapping this sentinel, so a caller matching either finds it: the command was
+// not sent on the new binding, and what became of anything sent on the old one
+// is unknown. A read's refusal is this sentinel alone, as in process: a read
+// has no outcome to be unknown.
 var ErrStaleEpoch = errors.New("backend: the call was for a session this backend is no longer bound to")
 
 // ErrOutcomeUnknown is what a backend answers for a command that may have run
@@ -95,9 +98,11 @@ type Backend interface {
 	ClientID() string
 	// Epoch names the session the backend is bound to now (§3.12, "Chains
 	// are fenced in the backend too"). It is constant in process — one
-	// engine for the backend's life; a socket backend (PR 4) bumps it when a
-	// reconnect lands on another incarnation, before any Restore is
-	// delivered. A caller reads it when it dispatches a call and passes it
+	// engine for the backend's life; a socket backend (PR 4) moves it when a
+	// reconnect could not resume (another client identity — the same
+	// incarnation included), before any Restore is delivered, and binds
+	// every command and read to it: none is ever written under another. A
+	// caller reads it when it dispatches a call and passes it
 	// with every call of that operation (WithEpoch); a command or read whose
 	// ctx carries another epoch is refused with ErrStaleEpoch before
 	// anything is sent (CheckEpoch). It waits on nothing.

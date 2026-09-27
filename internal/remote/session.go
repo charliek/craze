@@ -39,12 +39,14 @@ import (
 //     notification as the stream receives it, whether or not Read is being
 //     called — or with the host's start failure, whose Error is the host's
 //     start error text (StartError).
-//   - The commands send the caller's own command id, only under the client
-//     identity the caller's engine.Command names (CommandOptions.ClientID,
-//     .Identity), fenced by the backend epoch — the client's identity
-//     (Client.Identity) — before anything is sent, and never retried by code:
-//     the in-process calls never were. A refusal is an *Error, which
-//     reconstructs the engine's sentinel (sentinels.go).
+//   - The commands send the caller's own command id, bound to the client
+//     identity taken at entry — its number (Client.Identity, the backend
+//     epoch), which the ctx's epoch must name, and whose client id the
+//     caller's engine.Command must name — refused before anything is sent
+//     otherwise, never written under another identity after, and never
+//     retried by code: the in-process calls never were. The reads are bound
+//     the same way. A refusal is an *Error, which reconstructs the engine's
+//     sentinel (sentinels.go).
 //   - Close is a view close (§3.9): the stream detached, the client closed.
 //     The session goes on on its host.
 //
@@ -237,16 +239,30 @@ func (s *Session) Attach(ctx context.Context) error {
 		s.attaching = ch
 		s.mu.Unlock()
 		st, err := s.c.Attach(ctx, AttachOptions{SessionID: s.opts.SessionID, When: s.opts.When, Budget: s.opts.Budget, observe: s.observe})
+		if h := s.c.hooks.attached; h != nil {
+			h()
+		}
 		s.mu.Lock()
 		s.attaching = nil
 		close(ch)
+		closing := s.closing
 		if err == nil {
-			// Set even if Close began meanwhile: its client close ends the
-			// stream with the transport.
+			// Held even if Close began meanwhile, so the Session's stream is
+			// the one thing either of them closes; Close read it under this
+			// lock, so it either closes it itself or left it to this.
 			s.stream = st
 			close(s.attached)
 		}
 		s.mu.Unlock()
+		if err == nil && closing {
+			// Close ran while the attach was out, and saw no stream: this
+			// detaches the one it made, bounded as Close's own is, and Read
+			// hands up nothing of it (backend.ErrClosed).
+			cctx, cancel := context.WithTimeout(context.Background(), closeBound)
+			_ = st.Close(cctx)
+			cancel()
+			return backend.ErrClosed
+		}
 		return err
 	}
 }
@@ -408,7 +424,8 @@ func (s *Session) readyLocked(err error) {
 // always returned — the stream items that map to no backend item
 // (synchronized, an attach whose cursor was honoured) are taken and passed
 // over, and only then is ctx looked at again. After End, Read is
-// backend.ErrClosed, and so it is once Close has run.
+// backend.ErrClosed, and so it is once Close has begun, whatever the stream
+// still holds.
 //
 // An event or a snapshot that does not decode — or a Restore from a host
 // whose codecs this build does not read (a reconnect reached another host) —
@@ -424,7 +441,7 @@ func (s *Session) Read(ctx context.Context) (backend.Item, error) {
 	}
 	for {
 		s.mu.Lock()
-		over := s.over
+		over := s.over || s.closing
 		s.mu.Unlock()
 		if over {
 			return backend.Item{}, backend.ErrClosed
@@ -459,6 +476,7 @@ func (s *Session) attachedStream(ctx context.Context) (*Stream, error) {
 		}
 		select {
 		case <-s.attached:
+			// Read's loop answers backend.ErrClosed for a stream Close beat.
 		case <-s.closed:
 			return nil, backend.ErrClosed
 		case <-ctx.Done():
@@ -523,10 +541,17 @@ func (s *Session) item(st *Stream, it Item) (backend.Item, bool) {
 }
 
 // broken ends the stream for err (an End item carrying it) and detaches it,
-// on a goroutine of the Session's (Close joins it), bounded by closeBound.
+// on a goroutine of the Session's (Close joins it), bounded by closeBound. It
+// ends the Session as the stream's own End does: a Start still waiting for the
+// session's readiness — which no ready can bring now: the detach drops it —
+// returns with err.
 func (s *Session) broken(st *Stream, err error) backend.Item {
 	s.mu.Lock()
 	s.over = true
+	if !s.isEnded {
+		s.isEnded, s.endErr = true, err
+		close(s.ended)
+	}
 	detach := !s.closing
 	if detach {
 		s.wg.Add(1)
@@ -545,52 +570,63 @@ func (s *Session) broken(st *Stream, err error) backend.Item {
 
 // --------------------------------------------------------------- commands
 
-// command sends one command (§3.6) as the caller's engine.Command c: its own
-// command id, bound to the client identity c names and the ctx's epoch names
-// (CommandOptions), after the epoch fence — a stale epoch is refused before
-// anything is sent, as ErrOutcomeUnknown (resume_lost) matching
-// backend.ErrStaleEpoch — and never retried by code. params builds the
+// command sends one command (§3.6) as the caller's engine.Command c, with its
+// own command id, and never retried by code. It takes its binding at entry —
+// the identity the client holds and that identity's client id, read together
+// — and is refused before anything is sent, as ErrOutcomeUnknown (resume_lost)
+// matching backend.ErrStaleEpoch, when the ctx's epoch is not that identity
+// or c names another client id; it then goes under that identity's NUMBER
+// (CommandOptions.Identity), which registration, the adoption that moves the
+// identity and every attempt compare — never the client id's spelling, which
+// a replaced engine or a restarted host mints again. A ctx with no epoch
+// binds the command to the identity current at entry. params builds the
 // method's params for the session id the Session is attached to.
 func (s *Session) command(ctx context.Context, c engine.Command, method string, params func(sid string) any, result any) error {
-	epoch, pinned := backend.EpochFrom(ctx)
-	if err := backend.CheckEpoch(ctx, s.Epoch()); err != nil {
+	ident, client := s.c.binding()
+	if err := backend.CheckEpoch(ctx, ident); err != nil {
 		return staleIdentity(method, c.ID)
 	}
 	if c.Client == "" || c.ID == "" {
 		return fmt.Errorf("remote: %s: %w: a command over the socket names its client and its id (got %q/%q)", method, engine.ErrBadRequest, c.Client, c.ID)
 	}
-	sid, err := s.sessionID(ctx)
-	if err != nil {
+	if c.Client != client {
+		return staleIdentity(method, c.ID)
+	}
+	if h := s.c.hooks.entered; h != nil {
+		h(c.ID)
+	}
+	sid, err := s.sessionID(ctx, ident)
+	switch {
+	case errors.Is(err, backend.ErrStaleEpoch):
+		return staleIdentity(method, c.ID)
+	case err != nil:
 		return err
 	}
-	opts := CommandOptions{ID: c.ID, ClientID: c.Client}
-	if pinned {
-		opts.Identity = epoch
-	}
-	_, err = s.c.Command(ctx, method, params(sid), result, opts)
+	_, err = s.c.Command(ctx, method, params(sid), result, CommandOptions{ID: c.ID, Identity: ident})
 	return err
 }
 
-// read makes one read (§3.3) after the epoch fence: a stale epoch is
-// backend.ErrStaleEpoch, as in process, nothing sent — and so is an answer
-// that came back once the client had left the epoch the read was made for. A
-// read whose connection went before its reply is made again (reads are safe to
-// repeat) while ctx allows.
+// read makes one read (§3.3), bound as a command is: to the identity the
+// client holds at entry, which the ctx's epoch must name. It is written only
+// on a connection of that identity (Client.callAs) — so a read made for one
+// session never goes out to another, not even one that waited for a
+// connection across a resume loss — and once the client has left that
+// identity it is backend.ErrStaleEpoch, nothing sent, as in process. A read
+// whose connection went before its reply is made again (reads are safe to
+// repeat), under the same binding, while ctx allows.
 func (s *Session) read(ctx context.Context, method string, params func(sid string) any, result any) error {
+	ident := s.c.Identity()
+	if err := backend.CheckEpoch(ctx, ident); err != nil {
+		return err
+	}
 	for {
-		if err := backend.CheckEpoch(ctx, s.Epoch()); err != nil {
-			return err
-		}
-		sid, err := s.sessionID(ctx)
+		sid, err := s.sessionID(ctx, ident)
 		if err != nil {
 			return err
 		}
-		err = s.c.Call(ctx, method, params(sid), result)
+		err = s.c.callAs(ctx, ident, method, params(sid), result)
 		if errors.Is(err, ErrConnectionLost) && ctx.Err() == nil {
 			continue
-		}
-		if ferr := backend.CheckEpoch(ctx, s.Epoch()); ferr != nil {
-			return ferr
 		}
 		return err
 	}
@@ -598,8 +634,9 @@ func (s *Session) read(ctx context.Context, method string, params func(sid strin
 
 // sessionID is the craze session the Session's calls name: the stream's (it
 // changes only when a reconnect finds the host serving another), before any
-// attach the options', and else the host's one session (sessions.list).
-func (s *Session) sessionID(ctx context.Context) (string, error) {
+// attach the options', and else the host's one session (sessions.list, bound
+// to identity ident as the call it is for).
+func (s *Session) sessionID(ctx context.Context, ident uint64) (string, error) {
 	s.mu.Lock()
 	st := s.stream
 	s.mu.Unlock()
@@ -610,7 +647,7 @@ func (s *Session) sessionID(ctx context.Context) (string, error) {
 		return s.opts.SessionID, nil
 	}
 	var list protocol.SessionsListResult
-	if err := s.c.Call(ctx, protocol.MethodSessionsList, protocol.SessionsListParams{}, &list); err != nil {
+	if err := s.c.callAs(ctx, ident, protocol.MethodSessionsList, protocol.SessionsListParams{}, &list); err != nil {
 		return "", err
 	}
 	if len(list.Sessions) != 1 {

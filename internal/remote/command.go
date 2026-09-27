@@ -74,13 +74,17 @@ import (
 // resolves "not run" with ErrRequestTooLarge — not a byte was written (X21).
 //
 // BOUND TO AN IDENTITY (plan 027 PR 4, remote.Session). A caller may bind a
-// command to the client identity it was issued for (CommandOptions.ClientID,
-// .Identity): the identity is checked at registration and again, under
-// Client.mu, by attemptOn — which also picks the connection the attempt is
-// written on, and a connection's identity is fixed for its life — so a bound
-// command is never written under another identity, not even one that waited
-// for a connection across a resume loss. It resolves ErrOutcomeUnknown,
-// reason resume_lost, carrying backend.ErrStaleEpoch.
+// command to the client identity it was issued for (CommandOptions.Identity:
+// the identity's NUMBER, Client.Identity, never its client id's spelling — a
+// replaced engine or a restarted host mints "c-1" again). The number is
+// compared at registration and again, under Client.mu, by attemptOn — which
+// also picks the connection the attempt is written on, and a connection's
+// identity is fixed for its life — so a bound command is never written under
+// another identity, not even one that waited for a connection across a resume
+// loss; and the adoption that moves the identity resolves every command bound
+// to the old one at once, sent or not (reconnect.go), so none waits out a
+// re-attach to learn it. It resolves ErrOutcomeUnknown, reason resume_lost,
+// carrying backend.ErrStaleEpoch.
 
 // CommandOptions shape one Command.
 type CommandOptions struct {
@@ -92,7 +96,8 @@ type CommandOptions struct {
 	// own. The retries end with ctx.
 	Retry bool
 	// ID, when set, is the command id to send — the caller's own, a canonical
-	// positive decimal — in place of one the client mints: a caller that keys
+	// positive decimal no larger than maxCommandID — in place of one the
+	// client mints: a caller that keys
 	// what it shows by the command's cause (engine.Command.Cause, the host's
 	// stamp on the command's events) must send exactly the id it minted. The
 	// client's own counter is kept above every id sent (ResumeState's
@@ -101,27 +106,36 @@ type CommandOptions struct {
 	// against the ones already answered: a caller that sends its own keeps
 	// them its own (remote.Session sends the TUI's, never one minted here).
 	ID string
-	// ClientID and Identity, when set, bind the command to a client identity
-	// (Identity: the one Identity named when the caller dispatched it;
-	// ClientID: the client id that identity held). A command whose identity
-	// the client has left — a reconnect the host answered resumed: false —
-	// is never sent under the one it holds now: it resolves
-	// *OutcomeUnknownError, reason resume_lost, carrying
-	// backend.ErrStaleEpoch, whether that is found at registration or at the
-	// attempt that would write its first byte (the package doc's "BOUND TO AN
-	// IDENTITY"). A ClientID with no Identity binds the command to the
-	// identity that holds that client id at registration.
-	ClientID string
+	// Identity, when not 0, binds the command to that client identity (the
+	// number Client.Identity answered when the caller took its binding —
+	// never a client id's spelling, which a replaced engine or a restarted
+	// host mints again). A command whose identity the client has left — a
+	// reconnect the host answered resumed: false — is never sent under the
+	// one it holds now: it resolves *OutcomeUnknownError, reason
+	// resume_lost, carrying backend.ErrStaleEpoch, whether that is found at
+	// registration, at the adoption that moves the identity, or at the
+	// attempt that would write its first byte (the package doc's "BOUND TO
+	// AN IDENTITY").
 	Identity uint64
 }
+
+// maxCommandID is the largest command id the client sends, minted or a
+// caller's: the next id it would mint (nextCmd) then stays below
+// math.MaxUint64, so the counter never wraps and ResumeState's NextCommand is
+// always above every id sent.
+const maxCommandID = math.MaxUint64 - 2
 
 // ErrCommandInFlight is a Command whose caller's id (CommandOptions.ID) is
 // already in flight on this client: nothing is sent.
 var ErrCommandInFlight = errors.New("remote: that command id is already in flight")
 
 // ErrCommandID is a caller's command id (CommandOptions.ID) that is not a
-// canonical positive decimal below the largest uint64: nothing is sent.
-var ErrCommandID = errors.New("remote: a command id is a canonical positive decimal")
+// canonical positive decimal at most maxCommandID: nothing is sent.
+var ErrCommandID = errors.New("remote: a command id is a canonical positive decimal below the counter's end")
+
+// ErrCommandIDsSpent is a command the client has no id left to mint for: its
+// counter has reached maxCommandID. Nothing is sent.
+var ErrCommandIDsSpent = errors.New("remote: the client has minted its last command id")
 
 // command is one command whose caller waits (Command).
 type command struct {
@@ -172,8 +186,8 @@ type command struct {
 	resolved   bool
 	gone       bool
 	backoff    time.Duration
-	// pinned is the identity the command is bound to (CommandOptions
-	// .ClientID, .Identity), 0 when it is bound to none. Set at
+	// pinned is the identity the command is bound to
+	// (CommandOptions.Identity), 0 when it is bound to none. Set at
 	// registration, never written after.
 	pinned uint64
 }
@@ -207,7 +221,7 @@ func (cmd *command) deliver(r cmdResult) {
 // out and resends); otherwise it resolves *OutcomeUnknownError (reason
 // resume_lost, or disconnected once the redials are spent), and one that never
 // left the client is ErrNotRun — unless it was bound to an identity the client
-// has since left (opts.ClientID, opts.Identity), which is never sent under
+// has since left (opts.Identity), which is never sent under
 // another and resolves outcome unknown, resume_lost, carrying
 // backend.ErrStaleEpoch. Retry by code is opts.Retry. A ctx that ends returns
 // ctx.Err(): the command may still run, and a resend of its id (none is made
@@ -227,7 +241,7 @@ func (c *Client) Command(ctx context.Context, method string, params, result any,
 	var own uint64
 	if opts.ID != "" {
 		n, err := strconv.ParseUint(opts.ID, 10, 64)
-		if err != nil || n == 0 || n == math.MaxUint64 || strconv.FormatUint(n, 10) != opts.ID {
+		if err != nil || n == 0 || n > maxCommandID || strconv.FormatUint(n, 10) != opts.ID {
 			return opts.ID, fmt.Errorf("%w: %q", ErrCommandID, opts.ID)
 		}
 		own = n
@@ -240,6 +254,10 @@ func (c *Client) Command(ctx context.Context, method string, params, result any,
 	}
 	id := opts.ID
 	if own == 0 {
+		if c.nextCmd > maxCommandID {
+			c.mu.Unlock()
+			return "", ErrCommandIDsSpent
+		}
 		id = strconv.FormatUint(c.nextCmd, 10)
 		c.nextCmd++
 	} else if own >= c.nextCmd {
@@ -269,14 +287,14 @@ func (c *Client) Command(ctx context.Context, method string, params, result any,
 		c.mu.Unlock()
 		return id, err
 	}
-	if opts.ClientID != "" || opts.Identity != 0 {
-		// Bound to the identity the caller dispatched it for: refused, nothing
-		// sent, if the client has left it already.
-		if (opts.Identity != 0 && opts.Identity != c.identity) || (opts.ClientID != "" && opts.ClientID != c.hello.ClientID) {
+	if opts.Identity != 0 {
+		// Bound to the identity the caller took its binding under — its
+		// number: refused, nothing sent, if the client has left it already.
+		if opts.Identity != c.identity {
 			c.mu.Unlock()
 			return id, staleIdentity(method, id)
 		}
-		cmd.pinned = c.identity
+		cmd.pinned = opts.Identity
 	}
 	if own != 0 && slices.ContainsFunc(c.cmds, func(x *command) bool { return x.id == id }) {
 		c.mu.Unlock()

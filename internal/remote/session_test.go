@@ -34,6 +34,21 @@ func dialSession(t *testing.T, path string, tp *tap, o remote.SessionOptions) *r
 
 func tryDialSession(t *testing.T, path string, tp *tap, o remote.SessionOptions) (*remote.Session, error) {
 	t.Helper()
+	return tryDialSessionHooked(t, path, tp, o, remote.TestHooks{})
+}
+
+// dialSessionHooked is dialSession with the client's schedule hooks h.
+func dialSessionHooked(t *testing.T, path string, tp *tap, o remote.SessionOptions, h remote.TestHooks) *remote.Session {
+	t.Helper()
+	s, err := tryDialSessionHooked(t, path, tp, o, h)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	return s
+}
+
+func tryDialSessionHooked(t *testing.T, path string, tp *tap, o remote.SessionOptions, h remote.TestHooks) (*remote.Session, error) {
+	t.Helper()
 	o.Client.Dial = tp.dial
 	if o.Client.Client.Kind == "" {
 		o.Client.Client = protocol.ClientInfo{Kind: "test", Name: "remote_test"}
@@ -43,7 +58,7 @@ func tryDialSession(t *testing.T, path string, tp *tap, o remote.SessionOptions)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), watchdog)
 	defer cancel()
-	s, err := remote.DialSessionForTest(ctx, path, o, remote.TestHooks{})
+	s, err := remote.DialSessionForTest(ctx, path, o, h)
 	if err != nil {
 		return nil, err
 	}
