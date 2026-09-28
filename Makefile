@@ -53,14 +53,14 @@ test:
 # Packages run concurrently, so the wall clock is about the slowest
 # of them. CI runs this same target, so a local pass and a CI pass mean the
 # same thing; the two flakes that reached main in 2026-09 only ever showed
-# under -race. The timeout is 15m because internal/tui runs every frame golden
+# under -race. The timeout is 20m because internal/tui runs every frame golden
 # three times from plan 027 C29 on — once per command-gate mode in process, and
 # once over the control socket — which took its -race run here from about 190s
-# to 250s (it was about 60s before C17's gate modes): macOS CI ran PR 3's in
-# 333s, 1.8 times this box's, so the old 10m would be clipped by the next
-# slower runner.
+# to 250s (it was about 60s before C17's gate modes): macOS CI measured
+# internal/tui's -race run at 636s and 547s (ubuntu's at about 431s), so the
+# old 15m would be clipped by the next slower runner.
 test-race:
-	CRAZE_GOLDEN_TRANSPORT=both go test -timeout 15m -race ./internal/acp ./internal/agent ./internal/engine/... ./internal/host ./internal/tui ./internal/harness/... ./internal/journal/... ./internal/transcript/... ./internal/protocol/... ./internal/control/... ./internal/remote/... ./internal/fakehost/... ./internal/rundir/... ./internal/backend/...
+	CRAZE_GOLDEN_TRANSPORT=both go test -timeout 20m -race ./internal/acp ./internal/agent ./internal/engine/... ./internal/host ./internal/tui ./internal/harness/... ./internal/journal/... ./internal/transcript/... ./internal/protocol/... ./internal/control/... ./internal/remote/... ./internal/fakehost/... ./internal/rundir/... ./internal/backend/...
 
 test-cli:
 	@if [ ! -f tests/cli/pyproject.toml ]; then echo "tests/cli not present yet"; exit 0; fi
