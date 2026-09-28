@@ -262,7 +262,9 @@ uv run crazeeval validate [--tasks <ids|split:...>]
 # A batch. --craze-bin is required for craze; never /usr/local/bin/craze.
 uv run crazeeval run --harness craze,gx,opencode,codex --model muse-spark-1.3-contributor,glm-5.3-flash \
     --tasks split:smoke --reps 1 --craze-bin ../bin/craze --label smoke [--parallel 4] \
-    [--cap-zai 2] [--cap-other 3] [--out DIR] [--timeout S]
+    [--cap-zai 2] [--cap-other 3] [--out DIR] [--timeout S] [--first-rep N]
+# --first-rep numbers reps from N instead of 1 -- a later batch adding a second rep
+# where budget allows, without re-running (and so replacing) rep1.
 # The batch directory is created exclusively and locked; an existing one is refused.
 # --resume reopens --out when its identity fingerprint matches -- task definitions and
 # testdata, fixtures, the config snapshot, model settings and prices, every executable's

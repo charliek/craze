@@ -42,6 +42,9 @@ def cmd_run(a) -> int:
     from crazeeval.sandbox import Toolchains, bwrap_available
     from crazeeval.tasks import load_tasks, select_tasks
 
+    if a.first_rep < 1:
+        print(f"--first-rep must be >= 1, got {a.first_rep}", file=sys.stderr)
+        return 2
     harnesses = _csv(a.harness) or list(HARNESSES)
     for h in harnesses:
         if h not in HARNESSES:
@@ -112,6 +115,7 @@ def cmd_run(a) -> int:
         out=out,
         label=label,
         snap=snap,
+        first_rep=a.first_rep,
         craze_bin=craze_bin,
         parallel=a.parallel,
         caps=caps,
@@ -123,7 +127,13 @@ def cmd_run(a) -> int:
         resume=a.resume,
         opencode_seed=seed,
     )
-    print(f"batch {label}: {len(harnesses)} harness(es) x {len(models)} model(s) x {len(tasks)} task(s) x {a.reps} rep(s) -> {out}")
+    if a.first_rep == 1:
+        rep_desc = f"{a.reps} rep(s)"
+    elif a.reps == 1:
+        rep_desc = f"rep {a.first_rep}"
+    else:
+        rep_desc = f"reps {a.first_rep}-{a.first_rep + a.reps - 1}"
+    print(f"batch {label}: {len(harnesses)} harness(es) x {len(models)} model(s) x {len(tasks)} task(s) x {rep_desc} -> {out}")
     from crazeeval.batch import BatchDirError
 
     try:
@@ -508,6 +518,8 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("--model", help="comma list of eval model keys (default: all)")
     r.add_argument("--tasks", help="comma list of task ids and/or split:<dev|heldout|smoke|all>")
     r.add_argument("--reps", type=int, default=1)
+    r.add_argument("--first-rep", type=int, default=1,
+                    help="number reps from N (a later batch adding rep N to an earlier one)")
     r.add_argument("--craze-bin", help="the craze binary under test (required for craze)")
     r.add_argument("--label", default="batch")
     r.add_argument("--parallel", type=int, default=4)

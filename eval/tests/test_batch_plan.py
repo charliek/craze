@@ -27,6 +27,19 @@ def test_plan_runs_skips_unsupported_and_orders_kimi_last(tmp_path):
     assert {r.rep for r in runs} == {1, 2}
 
 
+def test_plan_runs_first_rep_plans_only_that_rep(tmp_path):
+    """A later batch adding rep2 to an earlier one: ``--first-rep 2 --reps 1`` plans
+    exactly rep2, and its run directory ends in ``rep2`` (never re-planning rep1)."""
+    ms = load_models()
+    models = [ms["glm-5.3-flash"]]
+    tasks = select_tasks(load_tasks(), "smoke-explain")
+    c = cfg(tmp_path, ["craze"], models, tasks)
+    c.first_rep = 2
+    runs = plan_runs(c)
+    assert [r.rep for r in runs] == [2]
+    assert run_dir(c, runs[0]).name == "rep2"
+
+
 def test_heldout_runs_live_in_the_sealed_part(tmp_path):
     ms = load_models()
     t = load_tasks()["smoke-explain"]
@@ -227,6 +240,36 @@ def test_resume_refuses_a_changed_task_executable_or_setting(tmp_path):
 
     with pytest.raises(BatchDirError, match=r"execution\.parallel"):
         resumed2(seeded(parallel=8))
+
+
+def test_batch_identity_records_first_rep_only_when_not_one(tmp_path):
+    """A config with the default ``first_rep=1`` has the same identity dict
+    FIELDS as before this field existed (no ``first_rep`` key); the fingerprint
+    itself still moves with any evaluator source change, this one included.
+    ``first_rep=2`` records it and changes the fingerprint too."""
+    ms = load_models()
+    t = select_tasks(load_tasks(), "smoke-explain")
+    default = cfg(tmp_path, ["craze"], [ms["glm-5.3-flash"]], t)
+    ident_default = _ident(default)
+    assert "first_rep" not in ident_default
+
+    bumped = cfg(tmp_path, ["craze"], [ms["glm-5.3-flash"]], t)
+    bumped.first_rep = 2
+    ident_bumped = _ident(bumped)
+    assert ident_bumped["first_rep"] == 2
+    assert ident_bumped["fingerprint"] != ident_default["fingerprint"]
+
+    # Setting it back to 1 explicitly reproduces the pre-existing identity exactly.
+    explicit_one = cfg(tmp_path, ["craze"], [ms["glm-5.3-flash"]], t)
+    explicit_one.first_rep = 1
+    assert _ident(explicit_one) == ident_default
+
+
+def test_cli_rejects_first_rep_below_one(capsys):
+    from crazeeval.cli import main
+
+    assert main(["run", "--first-rep", "0"]) == 2
+    assert "--first-rep must be >= 1" in capsys.readouterr().err
 
 
 def test_select_tasks():

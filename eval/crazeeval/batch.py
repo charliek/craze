@@ -91,6 +91,7 @@ class BatchConfig:
     out: Path
     label: str
     snap: Snapshot
+    first_rep: int = 1
     craze_bin: Path | None = None
     parallel: int = 4
     caps: dict[str, int] = field(default_factory=dict)
@@ -149,6 +150,13 @@ def batch_identity(cfg: BatchConfig, executables: dict, prices: dict) -> dict:
         "label": cfg.label,
         "harnesses": sorted(cfg.harnesses),
         "reps": cfg.reps,
+        # Only when a batch numbers its reps from something other than 1 (a later
+        # batch adding a rep to an earlier one) -- so a default batch's identity
+        # FIELDS are what they were before this field's addition. The fingerprint
+        # below also hashes the evaluator's own source tree (see "evaluator"), so
+        # it -- and --resume, which requires an exact fingerprint match -- already
+        # changes with any change under eval/, this one included.
+        **({"first_rep": cfg.first_rep} if cfg.first_rep != 1 else {}),
         # Task definitions with their testdata (prompts, checks, hidden tests,
         # reference patches, setup patches, timeouts) and the fixtures they use.
         "tasks": {t.id: tree_hash(t.dir) for t in cfg.tasks},
@@ -199,7 +207,7 @@ def plan_runs(cfg: BatchConfig) -> list[RunSpec]:
             for h in cfg.harnesses:
                 if not RUNNERS[h].supports(em, task):
                     continue
-                for rep in range(1, cfg.reps + 1):
+                for rep in range(cfg.first_rep, cfg.first_rep + cfg.reps):
                     runs.append(RunSpec(h, em, task, rep))
     return runs
 
