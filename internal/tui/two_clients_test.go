@@ -23,8 +23,8 @@ import (
 // serialise on one process-wide HOME (CodeRabbit 16). What either client does
 // reaches the other through the host, and the two end on the same transcript.
 
-// servedHost is a host over sess — started — on a short socket path, as
-// newAttachHost's is over a Stub: the session is built NoPrimary by the
+// servedHost is a host over sess — started — on a short socket path under
+// /tmp itself, as newAttachHost's is over a Stub: the session is built NoPrimary by the
 // caller, since nothing in the host's process reads its primary.
 func servedHost(t *testing.T, sess agent.Session) *attachHost {
 	t.Helper()
@@ -41,7 +41,7 @@ func servedHost(t *testing.T, sess agent.Session) *attachHost {
 	if err := h.eng.Start(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	dir, err := os.MkdirTemp("", "czt-")
+	dir, err := os.MkdirTemp("/tmp", "czt-")
 	if err != nil {
 		t.Fatal(err)
 	}

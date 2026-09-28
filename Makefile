@@ -21,8 +21,13 @@ lint:
 	@n=$$(go list -f '{{join .Imports "\n"}}' ./internal/tui ./internal/cli | grep -c internal/acp || true); \
 	echo "$$n"; test "$$n" = "0"
 
+# CRAZE_GOLDEN_TRANSPORT is pinned to both in the two test targets, whatever
+# the caller exported: every frame golden runs in process AND over the control
+# socket in the gate (plan 027 §3.16). A developer narrows the matrix — the
+# local fast loop, CRAZE_GOLDEN_TRANSPORT=inproc — only by running go test
+# directly.
 test:
-	go test -timeout 5m -v ./...
+	CRAZE_GOLDEN_TRANSPORT=both go test -timeout 5m -v ./...
 
 # The packages with concurrency worth the 10x slowdown: the ACP client's
 # reader and writer goroutines, the session's event fan-out, the engine (one
@@ -55,7 +60,7 @@ test:
 # 333s, 1.8 times this box's, so the old 10m would be clipped by the next
 # slower runner.
 test-race:
-	go test -timeout 15m -race ./internal/acp ./internal/agent ./internal/engine/... ./internal/host ./internal/tui ./internal/harness/... ./internal/journal/... ./internal/transcript/... ./internal/protocol/... ./internal/control/... ./internal/remote/... ./internal/fakehost/... ./internal/rundir/... ./internal/backend/...
+	CRAZE_GOLDEN_TRANSPORT=both go test -timeout 15m -race ./internal/acp ./internal/agent ./internal/engine/... ./internal/host ./internal/tui ./internal/harness/... ./internal/journal/... ./internal/transcript/... ./internal/protocol/... ./internal/control/... ./internal/remote/... ./internal/fakehost/... ./internal/rundir/... ./internal/backend/...
 
 test-cli:
 	@if [ ! -f tests/cli/pyproject.toml ]; then echo "tests/cli not present yet"; exit 0; fi

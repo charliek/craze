@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -174,6 +175,19 @@ type socketHost struct {
 	started    chan struct{}
 	startOnce  sync.Once
 	unregister func()
+	// hooks is socketHostHooks as the host was built.
+	hooks socketHostHookSet
+}
+
+// socketHostHooks, when a test sets them, run at the socket run's two last
+// points: afterMatch once the check has passed (still parked), afterBarrier
+// once the final barrier has returned. Each is handed the host. It is how
+// TestNoResetEscapesTheSocketRunsVerdict makes the host write a reset where
+// astra r69 5's schedule has it.
+var socketHostHooks socketHostHookSet
+
+type socketHostHookSet struct {
+	afterMatch, afterBarrier func(*socketHost)
 }
 
 // buildSocketHost is frameSocketHook: steps 1–3 above around cfg, whose
@@ -198,7 +212,7 @@ func buildSocketHost(cfg Config) (*frameHost, error) {
 	if cfg.OnEngine != nil {
 		cfg.OnEngine(eng)
 	}
-	h := &socketHost{eng: eng, served: make(chan error, 1), started: make(chan struct{}), tap: &wireTap{}}
+	h := &socketHost{eng: eng, served: make(chan error, 1), started: make(chan struct{}), tap: &wireTap{}, hooks: socketHostHooks}
 	fail := func(err error) (*frameHost, error) {
 		_ = eng.Close()
 		if h.srv != nil {
@@ -212,7 +226,9 @@ func buildSocketHost(cfg Config) (*frameHost, error) {
 		}
 		return nil, err
 	}
-	if h.dir, err = os.MkdirTemp("", "czg-"); err != nil {
+	// Under /tmp itself, never $TMPDIR: macOS's /var/folders/… overflows
+	// sun_path (§3.8).
+	if h.dir, err = os.MkdirTemp("/tmp", "czg-"); err != nil {
 		return fail(err)
 	}
 	path := filepath.Join(h.dir, "s")
@@ -252,7 +268,7 @@ func buildSocketHost(cfg Config) (*frameHost, error) {
 	run := cfg
 	run.Session = nil
 	run.Backend = h.sess
-	return &frameHost{cfg: run, head: h.head, start: h.start, match: h.match, end: h.end}, nil
+	return &frameHost{cfg: run, head: h.head, start: h.start, match: h.match, barrier: h.barrier, end: h.end}, nil
 }
 
 // engineOnly names an engine to engineBehind and is nothing else: the host's
@@ -310,13 +326,42 @@ func (h *socketHost) match(shared *transcript.Model) (bool, error) {
 		return false, fmt.Errorf("frame: over the socket the TUI's fold is not the host engine's model at seq %d: %s", snap.Seq, d)
 	}
 	socketMatches.Add(1)
+	if h.hooks.afterMatch != nil {
+		h.hooks.afterMatch(h)
+	}
 	return true, nil
+}
+
+// barrier is the socket run's final barrier (astra r69 5): a session.sync
+// round trip on the model's own connection. The host answers it only once
+// the connection's attachment has queued every record up to its head — or
+// its terminal reset — to the connection's one FIFO writer (control's reply
+// barrier), so its reply follows every line the host has written to the
+// connection by then, and the client's one reader has read them all — through
+// the tap — by the time the reply reaches the call. So a reset the host wrote
+// up to here is in the verdict however slow the reader was; one written
+// after it precedes the view close's detach reply, which the verdict
+// requires to have been read (wireTap.verdict).
+func (h *socketHost) barrier(timeout time.Duration) error {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	var res protocol.SyncResult
+	err := h.sess.Client().Call(ctx, protocol.MethodSessionSync, protocol.SyncParams{SessionID: h.sess.Info().CrazeSessionID}, &res)
+	if err != nil {
+		return fmt.Errorf("frame: the socket run's final barrier (session.sync): %w", err)
+	}
+	if h.hooks.afterBarrier != nil {
+		h.hooks.afterBarrier(h)
+	}
+	return nil
 }
 
 // end closes what the host holds — the model's session (a view close,
 // already made by the run's shutdown; idempotent), then the engine, then the
 // server — and answers what a golden may not depend on: a session built with
-// a primary nobody read, a reconnect, a re-attach or a reset (wireTap).
+// a primary nobody read, a reconnect, a re-attach, a reset, or a view close
+// whose detach went unanswered, behind which a reset may lie unread
+// (wireTap).
 func (h *socketHost) end() error {
 	var errs []error
 	_ = h.sess.Close()
@@ -348,14 +393,31 @@ func (h *socketHost) end() error {
 // ------------------------------------------------------------------ the tap
 
 // wireTap watches the socket run's connections (remote.Options.Dial): the
-// dials, the attaches the client writes and the resets it reads. One dial and
-// one attach are the whole of a golden's transport (§3.4, §3.16: any reset
-// fails the test).
+// dials, the attaches the client writes and the resets it reads, and the view
+// close's detach and its answer. One dial and one attach are the whole of a
+// golden's transport, and no reset may be written to it (§3.4, §3.16: any
+// reset fails the test).
+//
+// What it reads is what the client's one reader has read, in the host's
+// write order, so every line the host wrote before one the tap has read has
+// been read too. Two replies make that everything (astra r69 5): the final
+// barrier's (socketHost.barrier), which follows every line written up to it,
+// and the view close's detach reply, which the host queues only once the
+// attachment's forwarder has stopped — after every line of the subscription
+// it wrote. A detach the tap never saw answered — the view close gave up on
+// it (remote's close bound) — leaves the lines before its reply unread, and
+// fails the run.
 type wireTap struct {
 	mu       sync.Mutex
 	dials    int
 	attaches int
 	resets   []string
+	// detaches is each session.detach the client wrote, by its request id,
+	// and whether the tap has read its reply.
+	detaches map[string]bool
+	conns    []*tapConn
+	// holdUntil is when the reads the tap holds (holdReads) go on.
+	holdUntil time.Time
 }
 
 func (w *wireTap) dial(ctx context.Context, path string) (net.Conn, error) {
@@ -364,10 +426,42 @@ func (w *wireTap) dial(ctx context.Context, path string) (net.Conn, error) {
 	if err != nil {
 		return nil, err
 	}
+	tc := &tapConn{Conn: c, w: w, closed: make(chan struct{})}
 	w.mu.Lock()
 	w.dials++
+	w.conns = append(w.conns, tc)
 	w.mu.Unlock()
-	return &tapConn{Conn: c, w: w}, nil
+	return tc, nil
+}
+
+// holdReads makes the client's reader wait d before it reads another byte —
+// a reader delayed, as astra r69 5's schedule has it — kicking a read already
+// waiting on the socket out of it (a deadline the tap swallows), so nothing
+// arriving meanwhile is read before d is up. A closed connection lets go.
+func (w *wireTap) holdReads(d time.Duration) {
+	w.mu.Lock()
+	w.holdUntil = time.Now().Add(d)
+	conns := slices.Clone(w.conns)
+	w.mu.Unlock()
+	for _, c := range conns {
+		c.kicked.Store(true)
+		_ = c.SetReadDeadline(time.Now())
+	}
+}
+
+// held waits out a hold (holdReads), or until c is closed.
+func (w *wireTap) held(c *tapConn) {
+	w.mu.Lock()
+	until := w.holdUntil
+	w.mu.Unlock()
+	if d := time.Until(until); d > 0 {
+		timer := time.NewTimer(d)
+		defer timer.Stop()
+		select {
+		case <-timer.C:
+		case <-c.closed:
+		}
+	}
 }
 
 // verdict is what the tap saw a golden may not depend on.
@@ -384,12 +478,22 @@ func (w *wireTap) verdict() error {
 	if len(w.resets) > 0 {
 		errs = append(errs, fmt.Errorf("the host reset the stream: %v", w.resets))
 	}
+	answered := 0
+	for _, ok := range w.detaches {
+		if ok {
+			answered++
+		}
+	}
+	if len(w.detaches) == 0 || answered < len(w.detaches) {
+		errs = append(errs, fmt.Errorf("the view close's detach went unanswered (%d of %d detaches answered): a reset written before its reply may be unread", answered, len(w.detaches)))
+	}
 	return errors.Join(errs...)
 }
 
 // wireLine is the part of a line the tap reads.
 type wireLine struct {
-	Method string `json:"method"`
+	ID     json.RawMessage `json:"id"`
+	Method string          `json:"method"`
 	Params struct {
 		Reason string `json:"reason"`
 	} `json:"params"`
@@ -406,8 +510,17 @@ func (w *wireTap) saw(line []byte, out bool) {
 	switch {
 	case out && l.Method == protocol.MethodSessionAttach:
 		w.attaches++
+	case out && l.Method == protocol.MethodSessionDetach:
+		if w.detaches == nil {
+			w.detaches = map[string]bool{}
+		}
+		w.detaches[string(l.ID)] = false
 	case !out && l.Method == protocol.NotifyReset:
 		w.resets = append(w.resets, l.Params.Reason)
+	case !out && l.Method == "" && len(l.ID) > 0:
+		if _, ok := w.detaches[string(l.ID)]; ok {
+			w.detaches[string(l.ID)] = true
+		}
 	}
 }
 
@@ -417,12 +530,29 @@ type tapConn struct {
 	net.Conn
 	w          *wireTap
 	rbuf, wbuf []byte
+	// kicked says the tap set a past read deadline to kick a waiting read out
+	// (holdReads): the timeout it causes is the tap's, not the client's.
+	kicked    atomic.Bool
+	closed    chan struct{}
+	closeOnce sync.Once
 }
 
 func (c *tapConn) Read(p []byte) (int, error) {
-	n, err := c.Conn.Read(p)
-	c.rbuf = c.lines(c.rbuf, p[:n], false)
-	return n, err
+	for {
+		c.w.held(c)
+		n, err := c.Conn.Read(p)
+		if n == 0 && errors.Is(err, os.ErrDeadlineExceeded) && c.kicked.CompareAndSwap(true, false) {
+			_ = c.SetReadDeadline(time.Time{})
+			continue
+		}
+		c.rbuf = c.lines(c.rbuf, p[:n], false)
+		return n, err
+	}
+}
+
+func (c *tapConn) Close() error {
+	c.closeOnce.Do(func() { close(c.closed) })
+	return c.Conn.Close()
 }
 
 func (c *tapConn) Write(p []byte) (int, error) {
@@ -737,5 +867,60 @@ func TestASocketRunsHostIsReachedThroughItsSession(t *testing.T) {
 	}
 	if _, ok := engineIn(m); ok {
 		t.Fatal("an ended host is still named by its session")
+	}
+}
+
+// TestNoResetEscapesTheSocketRunsVerdict (astra r69 5): a reset the host writes
+// to a socket run's connection fails the run however late it comes and however
+// slow the client's reader is. The host publishes an event over the log's
+// record bound — a subscriber is handed it Omitted, and the host writes
+// reset{omitted} — with the client's reader held past remote's view-close
+// bound (3 s), so the view close gives up on its detach before the reader
+// could read the reset:
+//
+//   - once the engine check has passed, before the final barrier — the
+//     reviewer's schedule: the barrier's reply follows the reset, so the reset
+//     is read, and the run fails on it;
+//   - once the barrier has returned, just before the view close: the detach's
+//     reply follows the reset, and a detach the view close gave up on fails
+//     the run — the reset behind it is never read, and still escapes nothing.
+func TestNoResetEscapesTheSocketRunsVerdict(t *testing.T) {
+	const hold = 3500 * time.Millisecond // past remote's closeBound
+	for _, tc := range []struct {
+		name string
+		at   func(hooks *socketHostHookSet, f func(*socketHost))
+		want string
+	}{
+		{"after the check", func(k *socketHostHookSet, f func(*socketHost)) { k.afterMatch = f }, "the host reset the stream: [omitted]"},
+		{"after the barrier", func(k *socketHostHookSet, f func(*socketHost)) { k.afterBarrier = f }, "the view close's detach went unanswered"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var stub *Stub
+			build := func(s *Stub) Config {
+				stub = s
+				return stubFrameConfig(t)(s)
+			}
+			prev := socketHostHooks
+			t.Cleanup(func() { socketHostHooks = prev })
+			published := false
+			tc.at(&socketHostHooks, func(h *socketHost) {
+				h.tap.holdReads(hold)
+				stub.Emit(agent.Event{Type: agent.EventText, Text: strings.Repeat("O", 8<<20+1<<10)})
+				// Written by the time the log has committed it: the forwarder
+				// meets the record Omitted and queues the reset.
+				if _, err := h.eng.SyncSeq(context.Background()); err != nil {
+					t.Errorf("the host's sync: %v", err)
+				}
+				published = true
+			})
+			_, err := socketFrame(t, build, "<wait:idle>hi<enter><wait:text:echo: hi><wait:idle>", FrameOpts{})
+			if !published {
+				t.Fatal("fixture: the host never published the oversized event")
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("a run whose host wrote a reset passed, or failed otherwise: %v", err)
+			}
+			t.Logf("the run's error: %v", err)
+		})
 	}
 }

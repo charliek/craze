@@ -33,8 +33,8 @@ import (
 
 // attachHost is a real host, as internal/remote's own tests have one: the
 // control server (internal/control) in front of an engine over a Stub with no
-// primary — nothing in the host's process reads it — on a SHORT socket path
-// (t.TempDir() overflows sun_path on macOS).
+// primary — nothing in the host's process reads it — on a SHORT socket path,
+// under /tmp itself (t.TempDir() and $TMPDIR overflow sun_path on macOS).
 type attachHost struct {
 	stub *Stub
 	eng  *engine.Engine
@@ -56,7 +56,7 @@ func newAttachHost(t *testing.T, start bool) *attachHost {
 			t.Fatal(err)
 		}
 	}
-	dir, err := os.MkdirTemp("", "czt-")
+	dir, err := os.MkdirTemp("/tmp", "czt-")
 	if err != nil {
 		t.Fatal(err)
 	}

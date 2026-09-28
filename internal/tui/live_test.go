@@ -311,6 +311,12 @@ func TestMain(m *testing.M) {
 		fmt.Fprintln(os.Stderr, err)
 		code = 1
 	}
+	if code == 0 {
+		if err := goldenCoverage(); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			code = 1
+		}
+	}
 	if fakeAgentDir != "" {
 		_ = os.RemoveAll(fakeAgentDir)
 	}

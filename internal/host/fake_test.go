@@ -56,11 +56,11 @@ type fakeUDS struct {
 
 // shortSocketPath is a unix socket path, not yet bound, in a fresh temp dir
 // removed at test cleanup. The path is asserted short: macOS's sun_path is 104
-// bytes, and t.TempDir() paths routinely exceed that, so os.MkdirTemp("", ...)
-// is used instead.
+// bytes, and t.TempDir() paths — and $TMPDIR's /var/folders/… there —
+// routinely exceed that, so the directory is made under /tmp itself.
 func shortSocketPath(t *testing.T) string {
 	t.Helper()
-	dir, err := os.MkdirTemp("", "h")
+	dir, err := os.MkdirTemp("/tmp", "h")
 	if err != nil {
 		t.Fatalf("MkdirTemp: %v", err)
 	}

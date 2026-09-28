@@ -145,6 +145,11 @@ type frameHost struct {
 	// the host's model: false when the two are not at one seq (the host has
 	// moved on), an error when they are and differ.
 	match func(shared *transcript.Model) (bool, error)
+	// barrier runs once match has passed, within timeout: a round trip to
+	// the host whose answer follows every line the host has written to the
+	// model's connection so far, so every one of them has been read by the
+	// time it returns — what end judges the run's transport by (astra r69 5).
+	barrier func(timeout time.Duration) error
 	// end runs once the program has ended and the model's backend is closed:
 	// it closes the host's engine and its server, and answers what the run's
 	// transport did that a golden may not depend on (a reset, a re-attach).
@@ -1116,8 +1121,9 @@ func streamHead(owner *sessionOwner, timeout time.Duration) (uint64, error) {
 // and a sync token parks the program at its rendezvous — nothing folds while
 // it is parked — where host.match holds the fold, as its acknowledging frame
 // names it, against the host's model at that one seq. A host that has moved
-// on meanwhile is followed, and the check is made again. The run's shutdown
-// then quits the program.
+// on meanwhile is followed, and the check is made again. Then the host's
+// barrier: every line the host has written to the connection so far is read
+// (frameHost.barrier). The run's shutdown then quits the program.
 func (r *frameRunner) captureThenMatch(host *frameHost) error {
 	go r.p.Send(frameQuitMsg{linger: true})
 	// Every frame from the quit's on is final (harnessQuit stays set); the
@@ -1166,7 +1172,7 @@ func (r *frameRunner) captureThenMatch(host *frameHost) error {
 		case err != nil:
 			return err
 		case same:
-			return nil
+			return host.barrier(r.timeout)
 		}
 	}
 }

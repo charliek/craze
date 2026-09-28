@@ -113,3 +113,15 @@ func requireFrameRG(t *testing.T) {
 		t.Skipf("ripgrep (rg) is not on PATH (set CRAZE_REQUIRE_RG=1 to fail instead): %v", err)
 	}
 }
+
+// frameRGMissing is why requireFrameRG skips its test, nil when it does not:
+// ripgrep is on PATH, or CRAZE_REQUIRE_RG makes its absence a failure. The
+// golden coverage check excuses that test's golden by the same rule
+// (goldenCoverage).
+func frameRGMissing() error {
+	if os.Getenv("CRAZE_REQUIRE_RG") == "1" {
+		return nil
+	}
+	_, err := exec.LookPath("rg")
+	return err
+}

@@ -131,10 +131,11 @@ type host struct {
 	logs  *logSink
 }
 
-// shortDir is a fresh directory short enough for a socket path.
+// shortDir is a fresh directory short enough for a socket path: under /tmp
+// itself, never $TMPDIR, whose macOS /var/folders/… overflows sun_path.
 func shortDir(t *testing.T) string {
 	t.Helper()
-	dir, err := os.MkdirTemp("", "czr-")
+	dir, err := os.MkdirTemp("/tmp", "czr-")
 	if err != nil {
 		t.Fatal(err)
 	}

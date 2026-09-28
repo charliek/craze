@@ -51,8 +51,14 @@ jobs:
     # (plan 019 §3.9, D-41), and their tests skip when it is missing, so a
     # laptop without rg still passes. Here that skip would be a quiet pass on
     # a runner that lost rg; CRAZE_REQUIRE_RG turns it into a failure.
+    #
+    # CRAZE_GOLDEN_TRANSPORT pins the frame goldens to both transports — in
+    # process and over the control socket (plan 027 §3.16) — for both Go test
+    # steps below, the direct `go test` and `make test-race` (whose recipe
+    # pins it too), so no inherited value can narrow what CI runs.
     env:
       CRAZE_REQUIRE_RG: "1"
+      CRAZE_GOLDEN_TRANSPORT: both
     steps:
       # persist-credentials: false — actions/checkout otherwise leaves the job
       # token in .git/config, and the very next step runs `go test ./...`, i.e.

@@ -431,9 +431,9 @@ func newFixtureRunner(t *testing.T) *fixtureRunner {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// A short temp dir: t.TempDir() can overflow sun_path on macOS
-	// (internal/control's own tests avoid it the same way).
-	dir, err := os.MkdirTemp("", "czfh-")
+	// A short dir under /tmp itself: t.TempDir() and $TMPDIR can overflow
+	// sun_path on macOS (internal/control's own tests avoid it the same way).
+	dir, err := os.MkdirTemp("/tmp", "czfh-")
 	if err != nil {
 		t.Fatal(err)
 	}

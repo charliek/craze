@@ -253,19 +253,31 @@ var frameRuns = [...]frameRun{
 
 // goldenTransports is CRAZE_GOLDEN_TRANSPORT: which transports runFrameModes
 // runs — inproc, socket, or both, the default (GLM 13: a local fast loop may
-// run inproc; every gate and PR tip runs both). Anything else fails the test.
+// run inproc, by running go test directly). The gate cannot be narrowed: the
+// Makefile's test and test-race recipes set it to both whatever the caller
+// exported, and CI's test job sets it for every Go test step (astra r69 3).
+// Anything else fails the test.
 func goldenTransports(t testing.TB) (inproc, socket bool) {
 	t.Helper()
+	inproc, socket, err := goldenTransportSet()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return inproc, socket
+}
+
+// goldenTransportSet is goldenTransports' reading of CRAZE_GOLDEN_TRANSPORT,
+// with no test to fail.
+func goldenTransportSet() (inproc, socket bool, err error) {
 	switch v := os.Getenv("CRAZE_GOLDEN_TRANSPORT"); v {
 	case "", "both":
-		return true, true
+		return true, true, nil
 	case "inproc":
-		return true, false
+		return true, false, nil
 	case "socket":
-		return false, true
+		return false, true, nil
 	default:
-		t.Fatalf("CRAZE_GOLDEN_TRANSPORT=%q: want inproc, socket or both", v)
-		return false, false
+		return false, false, fmt.Errorf("CRAZE_GOLDEN_TRANSPORT=%q: want inproc, socket or both", v)
 	}
 }
 
@@ -306,11 +318,6 @@ func runFrameModes(t *testing.T, build func() Config, cols, rows int, script str
 		plain, raw, err := RunFrameScript(cfg, cols, rows, script, o)
 		results = append(results, result{run, plain, raw, err})
 	}
-	ran := map[frameTransport]bool{}
-	for _, r := range results {
-		ran[r.run.transport] = true
-	}
-	noteFrameTransports(t, ran)
 	base := results[0]
 	for _, got := range results[1:] {
 		if fmt.Sprint(base.err) != fmt.Sprint(got.err) {
@@ -324,7 +331,14 @@ func runFrameModes(t *testing.T, build func() Config, cols, rows int, script str
 				base.run.name, base.plain, got.run.name, got.plain)
 		}
 	}
+	// The frame every run ended on carries the transports that made it, for
+	// the assertion of that frame alone (creditFrame).
+	ran := map[frameTransport]bool{}
+	for _, r := range results {
+		ran[r.run.transport] = true
+	}
 	last := results[len(results)-1]
+	creditFrame(t, last.plain, ran)
 	return last.plain, last.raw, last.err
 }
 
@@ -406,8 +420,9 @@ func assertGolden(t *testing.T, name string, cols, rows int, got string) {
 		t.Fatalf("frame is %d rows, want %d:\n%s", h, rows, got)
 	}
 	// The frame was produced under the transports the manifest lists for this
-	// golden (golden_manifest_test.go, plan 027 §3.16).
-	checkGoldenTransports(t, name)
+	// golden (golden_manifest_test.go, plan 027 §3.16): its own credit, spent
+	// here.
+	ran := checkGoldenTransports(t, name, got)
 	path := filepath.Join("testdata", name+".golden")
 	if *updateGoldens {
 		if err := os.MkdirAll("testdata", 0o755); err != nil {
@@ -425,6 +440,7 @@ func assertGolden(t *testing.T, name string, cols, rows int, got string) {
 	if string(want) != got {
 		t.Fatalf("golden %s mismatch\n--- want ---\n%s\n--- got ---\n%s", name, want, got)
 	}
+	noteGoldenAsserted(name, ran)
 }
 
 // assertFrameGolden is assertGolden plus the substrings a case names, so a

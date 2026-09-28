@@ -307,8 +307,9 @@ func TestAttachHostBuildsAHubOnlyForAnActiveHost(t *testing.T) {
 // the report and the release fails first is the one warning.
 func TestHostWarnIsOneLineOnDiag(t *testing.T) {
 	indexHome(t)
-	// Not t.TempDir(): a unix socket path is capped at 104 bytes on macOS.
-	dir, err := os.MkdirTemp("", "h")
+	// Under /tmp itself, not t.TempDir() or $TMPDIR: a unix socket path is
+	// capped at 104 bytes on macOS.
+	dir, err := os.MkdirTemp("/tmp", "h")
 	if err != nil {
 		t.Fatal(err)
 	}

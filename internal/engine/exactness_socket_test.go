@@ -33,11 +33,12 @@ import (
 // trace is published faster than it reads.
 var wireBudget = control.Budget{MaxItems: 1 << 20, MaxBytes: 1 << 30}
 
-// serveWire serves e on a short socket path (t.TempDir() overflows sun_path
-// on macOS) until the test ends, and answers the path.
+// serveWire serves e on a short socket path under /tmp itself (t.TempDir()
+// and $TMPDIR overflow sun_path on macOS) until the test ends, and answers
+// the path.
 func serveWire(t *testing.T, e *engine.Engine) string {
 	t.Helper()
-	dir, err := os.MkdirTemp("", "czx-")
+	dir, err := os.MkdirTemp("/tmp", "czx-")
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -81,7 +81,8 @@ func BenchmarkPublishWithSocketSubscribers(b *testing.B) {
 // joined, Server.Close waited on).
 func runPublishWithSocketSubscribers(b *testing.B, subs int, stalled bool) {
 	b.Helper()
-	dir, err := os.MkdirTemp("", "czb-")
+	// Under /tmp itself, never $TMPDIR: sun_path on macOS.
+	dir, err := os.MkdirTemp("/tmp", "czb-")
 	if err != nil {
 		b.Fatalf("MkdirTemp: %v", err)
 	}
