@@ -511,11 +511,15 @@ def test_missing_usage_keeps_the_reservation(tmp_path):
 
 def test_budget_stop_and_run_cap(tmp_path):
     async def go():
-        # A run cap smaller than one 16k-token reservation at muse-spark-1.3's output price.
-        async with rig(tmp_path, run_cap=0.05) as (proxy, up, led, s):
+        # A run cap smaller than one 16k-token reservation at muse-spark-1.3's output price does not refuse the
+        # first request: the cap counts what the run has actually spent, not the next request's worst case.
+        # Once the settled spend reaches the cap, the next request is refused.
+        async with rig(tmp_path, run_cap=1e-9) as (proxy, up, led, s):
             route = proxy.register_run("r1", "craze", {"muse-spark-1.3"}, tmp_path / "run" / "capture.jsonl")
             st, body, _ = await post(s, proxy.base_url(route, "meta") + "/chat/completions", chat("muse-spark-1.3"))
-            assert st == 402 and b"budget-capped" in body and up.seen == []
+            assert st == 200 and len(up.seen) == 1
+            st, body, _ = await post(s, proxy.base_url(route, "meta") + "/chat/completions", chat("muse-spark-1.3"))
+            assert st == 402 and b"budget-capped" in body and len(up.seen) == 1
             summary = await proxy.end_run(route)
             assert "budget-capped" in summary["flags"]
         async with rig(tmp_path / "b", cap=0.01) as (proxy, up, led, s):

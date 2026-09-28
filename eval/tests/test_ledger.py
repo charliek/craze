@@ -101,7 +101,12 @@ def test_file_lock_keeps_two_processes_under_the_cap(tmp_path):
 
 def test_per_run_cap(tmp_path):
     led = Ledger(tmp_path / "l.jsonl", cap=95.0, run_cap=3.0)
-    assert led.admit(run_id="a", harness="h", model="m", provider="p", amount=2.5).ok
+    # The cap counts what the run has actually spent: open reservations, however large, do not cap it
+    # (a no-limit request reserves the model's whole output ceiling).
+    first = led.admit(run_id="a", harness="h", model="m", provider="p", amount=5.9)
+    assert first.ok
+    assert led.admit(run_id="a", harness="h", model="m", provider="p", amount=5.9).ok
+    led.settle(first.reservation, Usage(input=10, output=1), 3.1, 3.1)  # this run has now spent $3.10
     a = led.admit(run_id="a", harness="h", model="m", provider="p", amount=0.6)
     assert not a.ok and a.reason == BUDGET_CAPPED
     assert led.admit(run_id="b", harness="h", model="m", provider="p", amount=0.6).ok  # another run is fine

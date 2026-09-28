@@ -157,15 +157,17 @@ class Ledger:
                 return e[part][name]
         return None
 
-    def _totals(self, run_id: str) -> tuple[float, float]:
-        """Charges so far: everyone's, and ``run_id``'s."""
-        total = run_total = 0.0
+    def _totals(self, run_id: str) -> tuple[float, float, float]:
+        """Charges so far: everyone's, ``run_id``'s, and ``run_id``'s settled (actually spent) part."""
+        total = run_total = run_settled = 0.0
         for e in self._entries.values():
             c = self._charge(e)
             total += c
             if self._field(e, "run_id") == run_id:
                 run_total += c
-        return total, run_total
+                if e["settle"] is not None:
+                    run_settled += c
+        return total, run_total, run_settled
 
     def totals(self) -> dict:
         with self._locked():
@@ -219,10 +221,14 @@ class Ledger:
         """Reserve ``amount`` under the lock, or refuse (budget-stop / budget-capped)."""
         with self._locked():
             self._sync()
-            total, run_total = self._totals(run_id)
+            total, run_total, run_settled = self._totals(run_id)
             if total + amount > self.cap:
                 return Admission(False, BUDGET_STOP, None, total, run_total)
-            if run_total + amount > self.run_cap:
+            # The per-run cap is a runaway guard on what a run has actually spent. It is not checked against this
+            # request's reservation: a request with no output limit reserves the model's whole output ceiling
+            # (about $6 on kimi-k3), which would cap a run that has spent almost nothing. The global cap above still
+            # counts every reservation, so the budget itself stays a hard bound.
+            if run_settled >= self.run_cap:
                 return Admission(False, BUDGET_CAPPED, None, total, run_total)
             res = Reservation(
                 id=uuid.uuid4().hex,
