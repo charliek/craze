@@ -1173,7 +1173,9 @@ func TestFrameGoldenStatus60x24(t *testing.T) {
 // TestFrameGoldenAsk100x30 is the question card as cursor's own request drew
 // it: one question at a time, with its position in the request.
 func TestFrameGoldenAsk100x30(t *testing.T) {
-	got := runFakeFrame(t, "ask", 100, 30, "<wait:idle>go<enter><wait:card>")
+	// Frozen: under starvation the "Waiting for your answer" line can capture
+	// on a later spin frame than the golden's (spin frame 0, ✳).
+	got := runFakeFrameOpts(t, "ask", 100, 30, "<wait:idle>go<enter><wait:card>", fakeFrameOpts{force: true, freeze: true})
 	assertGolden(t, "ask-100x30", 100, 30, got)
 	for _, want := range []string{"question 1/2  Pick one", "> 1 A", "  2 B", "esc skip", "Waiting for your answer"} {
 		if !strings.Contains(got, want) {
@@ -1222,7 +1224,9 @@ func TestFrameAskEscSkips(t *testing.T) {
 // TestFrameGoldenPlan100x30 shows both halves of §3.11's plan card: the plan
 // itself as a transcript note block, and the two lines that answer it.
 func TestFrameGoldenPlan100x30(t *testing.T) {
-	got := runFakeFrame(t, "plan", 100, 30, "<wait:idle>go<enter><wait:card>")
+	// Frozen: the plan card's spinner and elapsed counters would otherwise
+	// straddle a spin-frame boundary under starvation (spin frame 0, ✳).
+	got := runFakeFrameOpts(t, "plan", 100, 30, "<wait:idle>go<enter><wait:card>", fakeFrameOpts{force: true, freeze: true})
 	assertGolden(t, "plan-100x30", 100, 30, got)
 	for _, want := range []string{
 		"PLAN Fake Plan", "Two steps, then stop.", "Steps", "• read main.go",
@@ -1265,7 +1269,10 @@ func TestFramePlanEscCancels(t *testing.T) {
 // TestFrameGoldenPermissionNoForce100x30 is the permission line in its pinned
 // position, with the [A]lways the fake request offers.
 func TestFrameGoldenPermissionNoForce100x30(t *testing.T) {
-	got := runFakeFrameForce(t, "permission", 100, 30, "<wait:idle>go<enter><wait:card>", false)
+	// Frozen: under starvation the "Waiting for your answer" line can capture
+	// on a later spin frame than the golden's (spin frame 0, ✳).
+	got := runFakeFrameOpts(t, "permission", 100, 30, "<wait:idle>go<enter><wait:card>",
+		fakeFrameOpts{force: false, freeze: true})
 	assertGolden(t, "permission-noforce-100x30", 100, 30, got)
 	for _, want := range []string{
 		"permission Shell  [a]llow once  [A]lways  [n] reject",
@@ -1658,9 +1665,11 @@ func TestFrameGoldenGrokEcho(t *testing.T) {
 }
 
 func TestFrameGoldenGrokAsk(t *testing.T) {
+	// Frozen: under starvation the "Waiting for your answer" line can capture
+	// on a later spin frame than the golden's (spin frame 0, ✳).
 	keys := "<wait:idle>go<enter><wait:card>"
 	for _, size := range []struct{ cols, rows int }{{80, 24}, {100, 30}} {
-		got := runFakeFrameProvider(t, "grok-ask", size.cols, size.rows, keys, agent.GrokProvider(), true)
+		got := runFakeFrameFrozen(t, "grok-ask", size.cols, size.rows, keys, agent.GrokProvider())
 		name := fmt.Sprintf("grok-ask-%dx%d", size.cols, size.rows)
 		assertGolden(t, name, size.cols, size.rows, got)
 		for _, want := range []string{"question 1/2  Pick one", "> 1 A", "  2 B", "esc skip"} {
