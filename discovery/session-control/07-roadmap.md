@@ -187,20 +187,32 @@ on Linux (cursor, grok) and the mac-mini (grok, native; cursor skipped there,
 the login keychain over ssh, as every earlier phase found too); and SD-33's
 addition — the full TUI runs unchanged over the socket, goldens included — is
 `golden_manifest_test.go`'s 119-file manifest (113 goldens under both
-transports, six picker frames in process only), enforced two ways since C29a
-(astra r69): `assertGolden` spends the *frame's own* transport credit
-(`internal/tui/frame_test.go:410-425`), and `TestMain`'s `goldenCoverage`
-(`internal/tui/golden_manifest_test.go:301`) fails an unfiltered run — no
-`-run`/`-skip`/`-list`/`-update` — if any manifest golden was never asserted
-under every transport it lists. `make test`/`test-race` and CI's `test` job
+transports, six picker frames in process only,
+`internal/tui/golden_manifest_test.go:460-461`), enforced through two fix
+rounds (astra r69, r71). Every frame `RunFrameScript` produces — a golden
+matrix's (`runFrameModes`) or a direct call's — is logged in order
+(`frameProductions`, `:192-229`); `assertGolden` judges the frame it holds by
+the **most recent production of those exact bytes** in that test
+(`judgeFrame`, `:243-264`, called through `checkGoldenTransports` at
+`internal/tui/frame_test.go:426`): an unspent matrix credit is spent, while a
+direct run, an already-spent credit, or no production at all is in process
+alone — so an identical-looking frame a later direct call produces can steal
+an earlier matrix run's unspent credit (`TestATransportCreditIsTheFramesOwn`,
+`:475-517`, pins both directions). `TestMain`'s `goldenCoverage` (`:355-403`)
+fails an unfiltered run — no `-run`/`-skip`/`-list`, and only once `-count`
+runs at least one iteration — if any manifest golden, except
+`native-tools-80x24` when `ripgrep` is missing (the same rule its own test
+skips by), was not asserted under every transport it lists, **in every one
+of the run's `-count` iterations** (coverage is counted per test-and-golden
+pair, per iteration, `:318-339`). `make test`/`test-race` and CI's `test` job
 pin `CRAZE_GOLDEN_TRANSPORT=both` (Makefile, `.github/workflows/ci.yml`); a
 local run narrows the matrix only by running `go test` itself. A socket
 run's verdict also checks that no reset escaped it: a final `session.sync`
 barrier on the model's own connection, and the view close's `session.detach`
 answered, both read through the tap (`internal/tui/frame_socket_test.go:335-409`).
 No golden moved in PR 3 or PR 4. The execution amendments (X1–X55), C29a's
-fix round, the review record, and the live smoke's findings and backlog are
-in `12` and `13`. **S3 (the shed lane) is next.**
+and C29b's fix rounds, the review record, and the live smoke's findings and
+backlog are in `12` and `13`. **S3 (the shed lane) is next.**
 
 ### S3 — shed lane
 

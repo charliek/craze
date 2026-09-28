@@ -108,16 +108,21 @@ through the holder's host id, after one line on stderr:
 craze: that session is open in another craze (pid N); attaching
 ```
 
-Most flags a *new* session would take (`--model`, `--ask`, `--plan`,
-`--agent-bin`) do not apply to an attach; they are ignored, and the line
-names the ones this command line gave, e.g. `(ignored: --model)`. Nothing is
-built, spawned, bound, or claimed for it. **`--provider` is not one of
-them** — an explicit `--provider` is validated and filters the session index
-*before* the lookup that finds the row to claim ([above](#-continue-and-resume)),
-so a `--provider` that excludes the held session's own provider means that
-row is never found at all: the ordinary no-match refusal fires
-(`craze: no session to continue … for provider …`), and the attach path is
-never reached. Two cases keep the plain "session held" refusal instead of
+The flags a *new* session would take (`--model`, `--ask`, `--plan`,
+`--agent-bin`, `--provider`) do not apply to an attach; each one this command
+line gave is named in the note (`ignoredForAttach`,
+`internal/cli/attach.go:442-463`), e.g. `(ignored: --model, --provider)`.
+Nothing is built, spawned, bound, or claimed for it. **A nonempty, explicit
+`--provider` also does one more thing the others don't**: it filters the
+session index *before* the lookup that finds the row to claim
+(`providerFlagExplicit`, `internal/cli/provider.go:165-166`;
+[above](#-continue-and-resume)), so a `--provider` that excludes the held
+session's own provider means that row is never found at all — the ordinary
+no-match refusal fires (`craze: no session to continue … for provider …`),
+and the attach path is never reached. Only once the row is found (no
+`--provider`, or one that matches it) does `--provider` join the note as an
+ignored flag too. An empty explicit `--provider ''` neither filters nor is
+named as ignored. Two cases keep the plain "session held" refusal instead of
 attaching:
 
 - **A legacy row** (no durable craze id yet, from before `crazeId` existed)

@@ -1959,24 +1959,39 @@ socket run builds a `NoPrimary` session, serves it over `internal/control` on
 its own `/tmp`-rooted directory, and attaches `when: "now"` before the host's
 `Start`; the coverage manifest lists 119 golden files, 113 under both
 transports and the six picker frames in process only
-(`internal/tui/golden_manifest_test.go:392-393`); `TestSocketGoldensMatchTheEngine`
+(`internal/tui/golden_manifest_test.go:460-461`); `TestSocketGoldensMatchTheEngine`
 pins an exact common seq at a sync-token rendezvous;
 `TestAttachMidTurnOverTheSocketReproducesTheFirst`
 (`internal/engine/exactness_socket_test.go:184`) attaches over a real server
 at every cut of a 144-event recorded trace plus eight mid-turn cuts over the
-fake agent) with its fix round **C29a** (`680d345` — astra r69: transport
-credit is the frame's own, not the test's — `runFrameModes` records the
-frame `assertGolden` spends it against (`internal/tui/frame_test.go:410-425`),
-and `TestMain`'s `goldenCoverage` (`internal/tui/golden_manifest_test.go:301`)
-fails an unfiltered run if any manifest golden was never asserted under its
-full transport set; `make test`/`test-race` and CI's `test` job pin
-`CRAZE_GOLDEN_TRANSPORT=both`, narrowed locally only by running `go test`
-itself; a socket run's verdict adds a final `session.sync` barrier on the
-model's connection and requires the view close's `session.detach` to have
-been answered, both read through the tap, so no reset can escape it
-unread (`internal/tui/frame_socket_test.go:335-409`); every test that binds
-a socket makes its directory under `/tmp` explicitly, never `TMPDIR`, which
-overflows `sun_path` on macOS); C30 (`docs: S2 complete`, this commit).
+fake agent) with two fix rounds. **C29a** (`680d345`, astra r69): a
+transport credit keyed by (test, frame digest) — none existed before this —
+plus a suite-level `TestMain` coverage check, `make test`/`test-race` and
+CI's `test` job pinning `CRAZE_GOLDEN_TRANSPORT=both`, and a socket run's
+verdict adding a final `session.sync` barrier plus requiring the view
+close's `session.detach` to have been answered, both read through the tap,
+so no reset can escape it unread (`internal/tui/frame_socket_test.go:335-409`);
+every test that binds a socket makes its directory under `/tmp` explicitly,
+never `TMPDIR`, which overflows `sun_path` on macOS. **C29b** (`0dbed9f`,
+astra r71): C29a's credit matched by digest alone and spent the *oldest*
+matching one — but identical golden frames exist in the tree
+(`composer-six-lines`/`composer-nine-lines-top`, `select-two-lines`/
+`select-reverse`, `task-80x24`/`task-late-80x24`), so an unspent matrix
+frame's credit could be spent by an identical *direct*, in-process frame
+instead — fixed by logging every frame `RunFrameScript` produces, in
+production order (`frameProductions`, `internal/tui/golden_manifest_test.go:192-229`),
+and judging the frame an assertion holds by the **most recent production of
+its exact bytes** in that test (`judgeFrame`, `:243-264`): an unspent matrix
+credit is spent, while a direct run, an already-spent credit, or no
+production at all is in process alone
+(`TestATransportCreditIsTheFramesOwn`, `:475-517`, a negative control
+requiring the direct and matrix frames differ). Coverage is now counted per
+(test, golden) pair, per iteration (`goldenAssertions`, `:318-339`): under
+`-count=N` each pair must be asserted in all `N` iterations
+(`goldenCoverage`, `:355-403`), `-count=0` runs no check, and the one
+standing exemption — `native-tools-80x24` may go unasserted when `ripgrep`
+is missing, the same rule its own test skips by (`:386-388`) — still
+applies; C30 (`docs: S2 complete`, this commit).
 
 Proof: filled in at the PR tip.
 
@@ -2538,7 +2553,7 @@ reopens a pinned decision.
    pins an exact common seq at a sync-token rendezvous, since "once the host
    is quiescent" cannot otherwise be enforced. The coverage manifest lists
    119 golden files — 113 under both transports, the six picker frames in
-   process only (`internal/tui/golden_manifest_test.go:392-393`).
+   process only (`internal/tui/golden_manifest_test.go:460-461`).
    `TestAttachMidTurnOverTheSocketReproducesTheFirst`
    (`internal/engine/exactness_socket_test.go:184`) lives in `internal/engine`
    beside A2's recorder: every cut of a recorded Stub trace (144 events, 145
@@ -2552,16 +2567,14 @@ reopens a pinned decision.
    had been recorded per *test*, not per frame, so a second `RunFrameScript`
    in one test inherited an earlier frame's `{inproc, socket}` record with no
    suite-level check that every golden was actually asserted both ways —
-   fixed by keying the credit to the exact frame `assertGolden` compares
-   (`internal/tui/frame_test.go:410-425`, `golden_manifest_test.go:171-198`)
-   and adding `TestMain`'s `goldenCoverage`
-   (`internal/tui/golden_manifest_test.go:301-335`), which fails an
-   unfiltered run — no `-run`/`-skip`/`-list`/`-update` — if any manifest
-   golden was never asserted under its full transport set (the one
-   exemption is `native-tools-80x24` when its test itself skips, no
-   `ripgrep`). `CRAZE_GOLDEN_TRANSPORT` could be narrowed to `inproc` by an
-   exported env var reaching `make test`/`make test-race` and CI alike,
-   silently weakening the coverage check to match — fixed by pinning
+   fixed by a credit keyed to (test, frame digest) and `TestMain`'s
+   `goldenCoverage`, which fails an unfiltered run — no
+   `-run`/`-skip`/`-list`/`-update` — if any manifest golden was never
+   asserted under its full transport set (the one exemption is
+   `native-tools-80x24` when its test itself skips, no `ripgrep`).
+   `CRAZE_GOLDEN_TRANSPORT` could be narrowed to `inproc` by an exported env
+   var reaching `make test`/`make test-race` and CI alike, silently
+   weakening the coverage check to match — fixed by pinning
    `CRAZE_GOLDEN_TRANSPORT=both` inside both `Makefile` targets and CI's
    `test` job; a local run now narrows the matrix only by invoking `go test`
    directly. One major: a reset the server wrote after the run's comparison
@@ -2577,6 +2590,27 @@ reopens a pinned decision.
    test across `internal/cli`, `internal/control`, `internal/engine`,
    `internal/fakehost`, `internal/host`, `internal/remote` and `internal/tui`
    that binds a control socket.
+   **Fix round C29b (`0dbed9f`; astra r71).** C29a's credit matched by digest
+   alone and spent the *oldest* matching one, but identical golden frames
+   exist in the tree (`composer-six-lines`/`composer-nine-lines-top`,
+   `select-two-lines`/`select-reverse`, `task-80x24`/`task-late-80x24`), so
+   an unspent matrix frame's credit could be spent by an identical *direct*,
+   in-process frame instead — fixed by logging every frame `RunFrameScript`
+   produces, in production order (`frameProductions`,
+   `internal/tui/golden_manifest_test.go:192-229`), and judging the frame an
+   assertion holds by the **most recent production of its exact bytes** in
+   that test (`judgeFrame`, `:243-264`, spent through `checkGoldenTransports`
+   at `internal/tui/frame_test.go:426`): an unspent matrix credit is spent,
+   while a direct run, an already-spent credit, or no production at all is
+   in process alone (`TestATransportCreditIsTheFramesOwn`, `:475-517`, a
+   negative control requiring the direct and matrix frames differ). One
+   major, also fixed: with `-count=2` a golden covered in the first
+   iteration hid a socket run skipped in the second, one persistent coverage
+   entry per pair — fixed by counting coverage per (test, golden) pair, per
+   iteration (`goldenAssertions`, `:318-339`): under `-count=N` each pair
+   must be asserted in all `N` iterations (`goldenCoverage`, `:355-403`).
+   One minor: `-count=0` used to fail the coverage check though it runs
+   nothing — fixed to run no check.
 
 ### S2 — as shipped
 
@@ -2622,12 +2656,17 @@ detail in the plan's §7 acceptance table, A1–A25):
   both transports, byte-identical, except the six picker frames (in process
   only, since pickers exist only in the host TUI); no golden moved in PR 3 or
   PR 4 (`git diff --stat -- '*testdata*'` empty at both tips). Coverage is
-  enforced, not just recorded: `assertGolden` spends the transport credit of
-  the exact frame it compares, and `TestMain`'s `goldenCoverage` fails an
-  unfiltered run if any manifest golden was never asserted under its full
-  transport set (C29a, `680d345`); `make test`/`test-race` and CI's `test`
-  job pin `CRAZE_GOLDEN_TRANSPORT=both`, so this coverage cannot be silently
-  narrowed there — only a direct `go test` invocation narrows it.
+  enforced, not just recorded: `assertGolden` judges the frame it holds by
+  the most recent production of those exact bytes in that test — a matrix
+  run's unspent credit, or in process alone (`judgeFrame`,
+  `internal/tui/golden_manifest_test.go:243-264`) — and `TestMain`'s
+  `goldenCoverage` (`:355-403`) fails an unfiltered run if any manifest
+  golden, except `native-tools-80x24` when `ripgrep` is missing, was not
+  asserted under its full transport set in every one of the run's `-count`
+  iterations (C29a `680d345`, C29b `0dbed9f`); `make test`/`test-race` and
+  CI's `test` job pin `CRAZE_GOLDEN_TRANSPORT=both`, so this coverage cannot
+  be silently narrowed there — only a direct `go test` invocation narrows
+  it.
 
 `craze attach` (PR 4) is the first full client the protocol has ever had
 outside the host TUI itself and the test harness: it is what actually proves
