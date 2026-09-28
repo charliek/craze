@@ -149,6 +149,13 @@ func (m *Model) applyRestore(r restoreMsg) {
 	m.askEchoes = nil
 	m.cardMask, m.cardMasking = "", false
 	m.planOfferSeq = 0
+	if !first {
+		// An implementation already dispatched from the offer answers for the
+		// transcript this restore replaces: its result sends nothing and puts
+		// no offer back (offerGen). Before the first restore there is no
+		// session, and so no offer.
+		m.offerGen++
+	}
 	m.lastThought = false
 	m.sel = selection{}
 	m.pruneAgentStamps(st.Agents)
@@ -163,9 +170,12 @@ func (m *Model) applyRestore(r restoreMsg) {
 	m.restoreCards(st.Asks, priorCards, moved)
 	m.restoreViewing()
 	wasReplaying := m.replaying
-	if st.Replaying || st.Seq > 0 {
-		// A snapshot that folded anything says whether a replay is running.
-		// One that folded nothing — cut before its host started — says
+	if st.Replaying || st.Seq > 0 || moved {
+		// A snapshot that folded anything says whether a replay is running,
+		// and so does another incarnation's, whatever it folded: its session
+		// is not the one a guard was set for, and its own replay's start sets
+		// the guard again if it loads. One of this session that folded
+		// nothing — the first restore, cut before its host started — says
 		// nothing about a load to come, and leaves a guard Config.Loading set
 		// where it stands (the replay-start arm sets it too).
 		m.replaying = st.Replaying
@@ -217,12 +227,17 @@ func (m *Model) pruneAgentStamps(rows []agent.SubagentInfo) {
 // is another session — its turn ids start again, so even the same id is a new
 // turn — whose error and cancellation the old one's are not.
 func (m *Model) restoreTurn(t transcript.Turn, moved bool) {
-	if moved {
+	if moved && m.status == statusError {
 		// Another incarnation's turns are numbered afresh: its turn-1 is not
-		// the one this model held, whatever the id says.
-		if m.status == statusError {
-			m.status, m.err = statusIdle, ""
-		}
+		// the one this model held, whatever the id says, and its error is not
+		// the old session's.
+		m.status, m.err = statusIdle, ""
+	}
+	if moved || t.ID == "" || t.ID != m.turnID {
+		// The cancelled flag stands only for the very engine turn it was set
+		// for, restored running: any other turn, the agent's own turn (whose
+		// restored episode starts uncancelled), or no turn at all is not the
+		// one a cancel ended.
 		m.cancelled = false
 	}
 	if t.ID != m.turnID || moved {
@@ -234,7 +249,6 @@ func (m *Model) restoreTurn(t transcript.Turn, moved bool) {
 				m.turnStart = m.now()
 			}
 			m.err = ""
-			m.cancelled = false
 		}
 	}
 	if t.ID != "" || t.Origin != "" {

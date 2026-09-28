@@ -570,6 +570,12 @@ type Model struct {
 	planApprovedSeq int
 	planOfferSeq    int
 	planDeadSeq     int
+	// offerGen is the plan offer's generation: every restore but the first
+	// moves it (restore.go), and an implementation dispatched from the offer
+	// carries the one it was dispatched under (implementPlan). One that lands
+	// under another answers for a transcript a restore has replaced: it sends
+	// nothing, and puts no offer back.
+	offerGen int
 	// turnID is the engine turn turnSeq names: what the model is looking at, and
 	// what a cancel is asked against, so a cancel delayed across a queue
 	// transition is refused as stale rather than stopping the turn the user did
@@ -985,21 +991,25 @@ type dblClickMsg struct{ X, Y int }
 // Both carry the mode generation as well, for the same reason revertModeMsg
 // and modeAppliedMsg do: the turn says whether the prompt is still wanted, the
 // generation says whether this is still the mode request the chip is showing.
+// And both carry the offer's generation (offerGen): a restore since the
+// dispatch retired the offer they answer for.
 type planImplementMsg struct {
 	issued
-	seq  int
-	gen  int
-	mode string
+	seq   int
+	gen   int
+	offer int
+	mode  string
 	// rev is the mode change's revision (modeAppliedMsg's).
 	rev uint64
 }
 type planImplementFailedMsg struct {
 	issued
-	seq  int
-	gen  int
-	prev string
-	err  error
-	at   uint64
+	seq   int
+	gen   int
+	offer int
+	prev  string
+	err   error
+	at    uint64
 }
 
 // mayApply reports whether a settings answer that has come back late may still
@@ -1184,6 +1194,8 @@ func (m *Model) dropSession() {
 	m.clearOverlays()
 	m.modeRev, m.modelRev, m.configRev = 0, 0, 0
 	m.cmdSeq, m.chains = 0, nil
+	// A new session is a new start: its session-is-up tail is still to run.
+	m.upDone = false
 	m.owner.set(nil)
 }
 
@@ -1879,9 +1891,15 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.selectWord(pos).copySelection()
 
 	case planImplementMsg:
+		m = m.modeSettled(msg.gen, msg.mode, msg.rev)
+		if msg.offer != m.offerGen {
+			// A restore retired the offer this answers (offerGen): the plan
+			// it would implement is not the transcript on screen. The mode
+			// request's own bookkeeping settles; nothing is written or sent.
+			return m, nil
+		}
 		// The session is in the implement mode now, so the note is honest
 		// whatever else has happened meanwhile — and so is its snapshot.
-		m = m.modeSettled(msg.gen, msg.mode, msg.rev)
 		m.addNote(modeNote(m.snap.Modes, msg.mode))
 		if msg.seq != m.turnSeq {
 			// A turn of the user's own started while SetMode was in flight, so
@@ -1897,10 +1915,11 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Nothing was sent: the mode reverts the way any failed SetMode does,
 		// and the plan is still the last thing on screen, so it is still on
 		// offer — unless something retired it while SetMode was in flight, in
-		// which case there is no plan above to implement any more.
+		// which case there is no plan above to implement any more: an action,
+		// or a restore (offerGen).
 		tm, cmd := m.update(revertModeMsg{gen: msg.gen, prev: msg.prev, err: msg.err, at: msg.at})
 		next := tm.(Model)
-		if msg.seq == next.turnSeq && next.planDeadSeq != next.turnSeq {
+		if msg.seq == next.turnSeq && next.planDeadSeq != next.turnSeq && msg.offer == next.offerGen {
 			next.planOfferSeq = next.turnSeq
 		}
 		return next, cmd
@@ -3104,7 +3123,7 @@ func (m Model) implementPlan() (tea.Model, tea.Cmd) {
 	// The offer is spent, not retired: a SetMode that fails leaves the plan on
 	// screen, and that path is allowed to put the offer back.
 	m.planOfferSeq = 0
-	seq := m.turnSeq
+	seq, offer := m.turnSeq, m.offerGen
 	eng, cmd, at, iss, base := m.eng, m.nextCmd(), m.modeRev, m.issue(), dispatchCtx(m.eng)
 	// Optimistic, the way applyMode is: the chip flips now, by the request's
 	// overlay, and reverts only if the agent refuses.
@@ -3114,9 +3133,9 @@ func (m Model) implementPlan() (tea.Model, tea.Cmd) {
 		defer cancel()
 		res, err := eng.Set(ctx, cmd, engine.Setting{Kind: engine.SettingMode, Value: id})
 		if err != nil {
-			return planImplementFailedMsg{issued: iss, seq: seq, gen: gen, prev: prev, err: err, at: at}
+			return planImplementFailedMsg{issued: iss, seq: seq, gen: gen, offer: offer, prev: prev, err: err, at: at}
 		}
-		return planImplementMsg{issued: iss, seq: seq, gen: gen, mode: res.Value, rev: res.Rev}
+		return planImplementMsg{issued: iss, seq: seq, gen: gen, offer: offer, mode: res.Value, rev: res.Rev}
 	}
 }
 

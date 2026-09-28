@@ -1005,19 +1005,69 @@ func TestAQueueEditAcrossARestore(t *testing.T) {
 			t.Fatalf("editing %q, composer %q, note %q — want the edit ended", m.queueEdit, m.input.Value(), m.copyNote)
 		}
 	})
+	// C27b: the row survived with a version another client moved it to. The
+	// edit stands, and its save is the check-and-edit it always was (C22):
+	// refused stale_version, the text kept, the version refreshed to the row's
+	// as the restored band shows it — the next Enter saves over it knowingly.
+	t.Run("the same incarnation, the row changed", func(t *testing.T) {
+		isolateSkillsHome(t)
+		stub := NewStub()
+		t.Cleanup(func() { _ = stub.Close() })
+		m := startStub(t, stub, t.TempDir(), 80, 24)
+		eng := engineOf(t, m)
+		open := stub.HangNext()
+		m.input.SetValue("go")
+		m = deliver(t, m, enter())
+		awaitBarrier(t, open, "the turn opening")
+		m.input.SetValue("queued")
+		m = deliver(t, m, enter())
+		// The host's own snapshot of itself: this session, as a restore
+		// carries it.
+		hostRestore := func(m Model, gen uint64) restoreMsg {
+			t.Helper()
+			if _, err := eng.SyncSeq(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			snap, err := eng.TranscriptSnapshot("", 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return restoreOf(m, snap, gen)
+		}
+		m = deliver(t, m, hostRestore(m, 1))
+		if len(m.queue) != 1 || m.queue[0].Version != 0 {
+			t.Fatalf("fixture: the queue %+v", m.queue)
+		}
+		row := m.queue[0]
+		m.startQueueEdit(row)
+		m.input.SetValue("mine")
+		v := row.Version
+		if err := eng.EditQueued(otherClient(t, m), row.ID, "theirs", &v); err != nil {
+			t.Fatalf("fixture: the other client's edit: %v", err)
+		}
+		m = deliver(t, m, hostRestore(m, 2))
+		if m.queueEdit != row.ID || m.queue[0].Version != 1 {
+			t.Fatalf("fixture: editing %q over the restored row %+v", m.queueEdit, m.queue[0])
+		}
+		m = deliver(t, m, enter())
+		if m.queueEdit != row.ID || m.input.Value() != "mine" || m.copyNote != staleEditNote || m.queueEditVer != 1 {
+			t.Fatalf("editing %q, composer %q, note %q, version %d — want the save refused stale, the text kept, the version refreshed to 1",
+				m.queueEdit, m.input.Value(), m.copyNote, m.queueEditVer)
+		}
+	})
 }
 
-// TestAPreStartRestoreKeepsTheReplayGuard (C27a, astra r63 5): a TUI attached
-// when: "now" before its host starts a load restores the empty session, then
-// folds the load's replay; Start's answer can reach it inside the replay, or
-// before it has read the replay's start. Either way no send is admitted while
-// the replay drains — the guard Config.Loading set holds across the empty
-// restore, and the replay's start sets it where nothing did — and the
-// session-is-up tail runs once.
+// TestAPreStartRestoreKeepsTheReplayGuard (C27a, astra r63 5; C27b): a TUI
+// attached when: "now" before its host starts a load restores the empty
+// session, then folds the load's replay; Start's answer can reach it before it
+// has read the replay's start, inside the replay, or after its end. Whichever,
+// no send is admitted while the replay drains — the guard Config.Loading set
+// holds across the empty restore, and the replay's start sets it where nothing
+// did — and the session-is-up tail runs, once.
 func TestAPreStartRestoreKeepsTheReplayGuard(t *testing.T) {
 	for _, loading := range []bool{false, true} {
-		for _, early := range []bool{false, true} {
-			name := fmt.Sprintf("loading=%v/started before the replay's start=%v", loading, early)
+		for _, order := range []string{"before the replay", "inside the replay", "after the replay"} {
+			name := fmt.Sprintf("loading=%v/started %s", loading, order)
 			t.Run(name, func(t *testing.T) {
 				h := newAttachHost(t, false)
 				s := attachSession(t, h, protocol.WhenNow)
@@ -1058,12 +1108,12 @@ func TestAPreStartRestoreKeepsTheReplayGuard(t *testing.T) {
 					r.send(enter())
 				}
 				var upAt time.Time
-				if early {
+				if order == "before the replay" {
 					r.send(started)
 					if loading {
 						refused("the start's answer before the replay, the load announced")
-					} else if !r.m.sessionReady() {
-						t.Fatal("the start's answer, nothing announced: the session is not up")
+					} else if !r.m.sessionReady() || r.m.sessStart.IsZero() {
+						t.Fatal("the start's answer, nothing announced: the session is not up, or its tail did not run")
 					}
 					upAt = r.m.sessStart
 				}
@@ -1072,7 +1122,7 @@ func TestAPreStartRestoreKeepsTheReplayGuard(t *testing.T) {
 					t.Fatalf("the stream's next item is %#v, want the replay's start", replayStart)
 				}
 				r.send(replayStart)
-				if !early {
+				if order == "inside the replay" {
 					r.send(started)
 				}
 				refused("inside the replay")
@@ -1084,8 +1134,12 @@ func TestAPreStartRestoreKeepsTheReplayGuard(t *testing.T) {
 					}
 					refused("inside the replay")
 				}
-				if !r.m.sessionReady() {
-					t.Fatal("the replay ended and the session is not up")
+				if order == "after the replay" {
+					refused("the replay over, Start's answer still out")
+					r.send(started)
+				}
+				if !r.m.sessionReady() || r.m.sessStart.IsZero() {
+					t.Fatalf("the replay ended and Start answered: ready %v, the tail ran at %v", r.m.sessionReady(), r.m.sessStart)
 				}
 				if !upAt.IsZero() && r.m.sessStart != upAt {
 					t.Fatalf("the session-is-up tail ran again at the replay's end (%v, first %v)", r.m.sessStart, upAt)
@@ -1107,6 +1161,43 @@ func TestAPreStartRestoreKeepsTheReplayGuard(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// TestARestoreFromAnotherIncarnationTakesItsReplayGuard (C27b, astra r65 2):
+// a model whose session was replaying when its host was replaced restores the
+// replacement's empty, pre-start snapshot: that session is not the one the
+// guard was set for, so the snapshot's word — no replay — stands. The new,
+// non-loading session comes up on Start's answer alone: sends are admitted, and
+// the tail runs, once.
+func TestARestoreFromAnotherIncarnationTakesItsReplayGuard(t *testing.T) {
+	m, _ := loadedStub(t, nil)
+	var tick int64
+	m.clock = func() time.Time { tick++; return restoreAt.Add(time.Duration(tick) * time.Second) }
+	started := runCmd(m.startCmd())
+	if _, ok := started.(startedMsg); !ok {
+		t.Fatalf("the start answered %#v", started)
+	}
+	m = restoredWith(t, m, "inc-a", 1, seqd(1, replayEvent(agent.ReplayStart))...)
+	if !m.replaying {
+		t.Fatal("fixture: A is not replaying")
+	}
+	m = deliver(t, m, restoreOf(m, snapshotFolded(t, "inc-b"), 2))
+	if m.replaying {
+		t.Fatal("B's empty snapshot kept A's replay guard")
+	}
+	m = deliver(t, m, started)
+	if !m.sessionReady() || m.sessStart.IsZero() {
+		t.Fatalf("B's start: ready %v, the tail ran at %v", m.sessionReady(), m.sessStart)
+	}
+	upAt := m.sessStart
+	m = deliver(t, m, readyMsg{})
+	next, cmd := typeAndEnter(t, m, "hello")
+	if cmd == nil || next.status != statusWorking {
+		t.Fatalf("a send on B was refused: status %s", next.status)
+	}
+	if next.sessStart != upAt {
+		t.Fatalf("the tail ran again (%v, first %v)", next.sessStart, upAt)
 	}
 }
 
@@ -1260,9 +1351,126 @@ func TestALateForeignCancelFindsNoRestoredEpisode(t *testing.T) {
 			t.Fatalf("fixture: A's cancel drew %d notes", cancelNotes(m))
 		}
 		m = restoredWith(t, m, "inc-1", 2, withB...)
+		if m.cancelled {
+			t.Fatal("B was restored cancelled: A's cancel leaked into it")
+		}
 		m = deliver(t, m, lateFor(m))
 		if cancelNotes(m) != 1 || !m.cancelled {
 			t.Fatalf("B's own cancel drew %d notes, cancelled %v — want its note, and B cancelled", cancelNotes(m), m.cancelled)
 		}
 	})
+}
+
+// TestARestoreRetiresAPendingPlanImplementation (C27b, astra r65 3): a client
+// attached with no turn of its own sees the agent's own turn earn the plan
+// offer, and Enter dispatches its implementation — a mode change, then the
+// prompt. A same-incarnation restore replaces the transcript before the mode
+// change answers: its answer then implements nothing — a success sends no
+// prompt, and a failure puts no offer back.
+func TestARestoreRetiresAPendingPlanImplementation(t *testing.T) {
+	for _, fail := range []bool{false, true} {
+		t.Run(fmt.Sprintf("the mode change failed=%v", fail), func(t *testing.T) {
+			m := sized(t)
+			stub := stubOf(t, m)
+			planID := ""
+			for _, md := range m.snap.Modes {
+				if m.snap.Provider.Kind(md.ID) == agent.ModePlan {
+					planID = md.ID
+				}
+			}
+			if planID == "" || m.implementModeID() == "" || m.snap.Provider.ImplementPrompt() == "" {
+				t.Fatal("fixture: the provider offers no plan to implement")
+			}
+			inPlan := seqd(1, agent.Event{Type: agent.EventMeta, State: &agent.StateDelta{Mode: &planID}})
+			m = restoredWith(t, m, "inc-1", 1, inPlan...)
+			foreign := func(running bool) agent.Event {
+				return agent.Event{Type: agent.EventForeignTurn, ForeignTurn: &agent.ForeignTurnInfo{ID: "f-1", Running: running}}
+			}
+			for _, ev := range seqd(2, foreign(true), agent.Event{Type: agent.EventText, Text: "the plan"},
+				agent.Event{Type: agent.EventDone, StopReason: "end_turn"}, foreign(false)) {
+				m = deliver(t, m, eventMsg{ev: ev, gen: 1})
+			}
+			if !m.planOffering() {
+				t.Fatal("fixture: the agent's own turn earned no offer")
+			}
+			if fail {
+				stub.FailNextSetMode()
+			}
+			tm, cmd := m.Update(enter())
+			m = tm.(Model)
+			impl := namedCmds(cmd, "implementPlan")
+			if len(impl) != 1 {
+				t.Fatalf("Enter dispatched %d implementations", len(impl))
+			}
+			answer := impl[0]()
+			m = restoredWith(t, m, "inc-1", 2, inPlan...)
+			m = deliver(t, m, answer)
+			sent := slices.ContainsFunc(m.main.rows, func(r *entry) bool { return r.local && r.kind == entryUser })
+			if m.status == statusWorking || sent {
+				t.Fatalf("the retired implementation sent its prompt: status %s, rows %q", m.status, mainRows(m))
+			}
+			if m.planArmed() {
+				t.Fatal("the retired implementation's failure put the offer back")
+			}
+		})
+	}
+}
+
+// TestARestoreClearsTheCancelledFlag (C27b, astra r65 6): the cancelled flag
+// stands only for the very engine turn it was set for, restored running on
+// the same incarnation; the agent's own turn a restore brings starts
+// uncancelled, whatever this client cancelled before it.
+func TestARestoreClearsTheCancelledFlag(t *testing.T) {
+	foreign := func(id string, running bool) agent.Event {
+		return agent.Event{Type: agent.EventForeignTurn, ForeignTurn: &agent.ForeignTurnInfo{ID: id, Running: running}}
+	}
+	t.Run("the agent's own turn B after A's cancel", func(t *testing.T) {
+		m := restoredWith(t, sized(t), "inc-1", 1, seqd(1, foreign("f-a", true))...)
+		m = deliver(t, m, foreignCancelledMsg{issued: m.issue(), episode: m.foreignEpisode(), seq: m.turnSeq})
+		if !m.cancelled {
+			t.Fatal("fixture: A's cancel did not mark it")
+		}
+		m = restoredWith(t, m, "inc-1", 2, seqd(1, foreign("f-a", true), foreign("f-a", false), foreign("f-b", true))...)
+		if m.cancelled {
+			t.Fatal("B was restored cancelled")
+		}
+	})
+	started := func(id string) agent.Event {
+		return agent.Event{Type: agent.EventTurn, Turn: &agent.TurnInfo{ID: id, Phase: agent.TurnStarted, Text: "go", Origin: agent.TurnOriginSubmit}}
+	}
+	for _, tc := range []struct {
+		name, inc, turn string
+		kept            bool
+	}{
+		{"the same engine turn, restored running", "inc-1", "turn-1", true},
+		{"another engine turn", "inc-1", "turn-2", false},
+		{"the same id, another incarnation", "inc-2", "turn-1", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := restoredWith(t, sized(t), "inc-1", 1, seqd(1, started("turn-1"))...)
+			m.cancelled = true
+			m = restoredWith(t, m, tc.inc, 2, seqd(1, started(tc.turn))...)
+			if m.cancelled != tc.kept {
+				t.Fatalf("cancelled %v after the restore, want %v", m.cancelled, tc.kept)
+			}
+		})
+	}
+}
+
+// TestANewSessionIsANewStart (C27b): a session replacing the one the model
+// held owes its own session-is-up tail.
+func TestANewSessionIsANewStart(t *testing.T) {
+	m := sized(t)
+	if !m.upDone {
+		t.Fatal("fixture: the session's tail has not run")
+	}
+	next := NewStub()
+	t.Cleanup(func() { _ = next.Close() })
+	if b := m.eng; b != nil {
+		t.Cleanup(func() { _ = b.Close() })
+	}
+	m.setSession(next, "")
+	if m.upDone {
+		t.Fatal("the new session's tail is counted as run")
+	}
 }
