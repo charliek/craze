@@ -8,6 +8,7 @@ import (
 	"math"
 	"slices"
 	"strconv"
+	"sync"
 	"sync/atomic"
 	"testing"
 
@@ -140,23 +141,7 @@ func TestAdoptionSettlesEveryCommandBoundToTheOldIdentity(t *testing.T) {
 func TestADecodeEndedStreamEndsTheSession(t *testing.T) {
 	h := newHost(t, withoutStart())
 	tp := newTap(t)
-	tp.setRewriteIn(func(l wireLine) [][]byte {
-		if l.method != protocol.NotifyEvent || !bytes.Contains(l.raw, []byte("poison")) {
-			return nil
-		}
-		var p protocol.EventParams
-		if err := json.Unmarshal(l.params, &p); err != nil {
-			t.Errorf("the event: %v", err)
-			return nil
-		}
-		p.Event = json.RawMessage(`{"type":"text","text":5}`)
-		b, err := json.Marshal(protocol.Notification{JSONRPC: protocol.JSONRPCVersion, Method: protocol.NotifyEvent, Params: mustJSON(t, p)})
-		if err != nil {
-			t.Errorf("the event: %v", err)
-			return nil
-		}
-		return [][]byte{b}
-	})
+	poisonEvents(t, tp)
 	s := dialSession(t, h.path, tp, remote.SessionOptions{When: protocol.WhenNow})
 	if err := s.Attach(tctx(t)); err != nil {
 		t.Fatal(err)
@@ -174,6 +159,176 @@ func TestADecodeEndedStreamEndsTheSession(t *testing.T) {
 	}
 	if _, err := s.Read(tctx(t)); !errors.Is(err, backend.ErrClosed) {
 		t.Fatalf("a Read after the End: %v", err)
+	}
+}
+
+// poisonEvents makes every event the host writes whose text is "poison" one
+// the client cannot decode: valid JSON, a numeric text.
+func poisonEvents(t *testing.T, tp *tap) {
+	tp.setRewriteIn(func(l wireLine) [][]byte {
+		if l.method != protocol.NotifyEvent || !bytes.Contains(l.raw, []byte("poison")) {
+			return nil
+		}
+		var p protocol.EventParams
+		if err := json.Unmarshal(l.params, &p); err != nil {
+			t.Errorf("the event: %v", err)
+			return nil
+		}
+		p.Event = json.RawMessage(`{"type":"text","text":5}`)
+		b, err := json.Marshal(protocol.Notification{JSONRPC: protocol.JSONRPCVersion, Method: protocol.NotifyEvent, Params: mustJSON(t, p)})
+		if err != nil {
+			t.Errorf("the event: %v", err)
+			return nil
+		}
+		return [][]byte{b}
+	})
+}
+
+// TestAReadyAfterADecodeEndDoesNotStartTheSession (astra r62 3): a stream
+// ended by an event the client cannot decode, then — its detach not yet made
+// — the host's ready for it, received before Start looks: Start answers the
+// end (the decode error), never the ready. readyLocked settles nothing once
+// the Session has ended, and Start decides by the Session's state, whichever
+// of its channels it sees.
+func TestAReadyAfterADecodeEndDoesNotStartTheSession(t *testing.T) {
+	h := newHost(t, withoutStart())
+	tp := newTap(t)
+	poisonEvents(t, tp)
+	hold := make(chan struct{})
+	s := dialSessionHooked(t, h.path, tp, remote.SessionOptions{When: protocol.WhenNow}, remote.TestHooks{Broken: func() { <-hold }})
+	// Registered after the Session, so it runs before the Session's Close,
+	// which joins the detach this holds.
+	t.Cleanup(func() { closeOnce(hold) })
+	if err := s.Attach(tctx(t)); err != nil {
+		t.Fatal(err)
+	}
+	readKind(t, s, backend.ItemRestore)
+	h.text("poison")
+	end := readKind(t, s, backend.ItemEnd)
+	if err := h.eng.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	tp.await(t, "the host's ready", func() bool {
+		return len(tp.received(func(l wireLine) bool { return l.method == protocol.NotifyReady })) == 1
+	})
+	// A round trip on the same connection: its reply follows the ready on the
+	// wire, so the client's reader has taken the ready by the time it answers.
+	if err := s.Client().Call(tctx(t), protocol.MethodSessionSync, protocol.SyncParams{SessionID: h.sid()}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Start(tctx(t)); !errors.Is(err, end.Err) {
+		t.Fatalf("Start after a decode end and a later ready: %v, want the decode error %v", err, end.Err)
+	}
+	if info := s.Info(); len(info.Models) != 0 {
+		t.Fatalf("a document after the end moved Info: %+v", info)
+	}
+	closeOnce(hold)
+}
+
+// TestAdoptionWakesAReadWaitingForAConnection (astra r62 6): reads bound to
+// identity E wait for a connection — one bounded by its deadline, one not at
+// all — while the client reconnects; the reconnect adopts E+1, and the
+// replacement's re-attach waits for its start, unanswered, the episode's clock
+// stopped. Both reads answer backend.ErrStaleEpoch at the adoption, before the
+// re-attach is answered, and neither goes out.
+func TestAdoptionWakesAReadWaitingForAConnection(t *testing.T) {
+	old, slow := newHost(t), newHost(t, withoutStart())
+	tp := newTap(t)
+	t.Cleanup(tp.releaseDials)
+	waiting := make(chan struct{}, 2)
+	s := dialSessionHooked(t, old.path, tp, remote.SessionOptions{}, remote.TestHooks{Waiting: func() {
+		select {
+		case waiting <- struct{}{}:
+		default:
+		}
+	}})
+	if err := s.Start(tctx(t)); err != nil {
+		t.Fatal(err)
+	}
+	readKind(t, s, backend.ItemRestore)
+	epoch := s.Epoch()
+	held := tp.holdDials()
+	tp.kill()
+	await(t, held, "the redial")
+	bounded, unbounded := make(chan error, 1), make(chan error, 1)
+	go func() {
+		_, err := s.Settings(backend.WithEpoch(tctx(t), epoch))
+		bounded <- err
+	}()
+	go func() {
+		_, _, err := s.Ask(backend.WithEpoch(context.Background(), epoch), "perm-1")
+		unbounded <- err
+	}()
+	await(t, waiting, "a read to wait for a connection")
+	await(t, waiting, "the other read to wait for a connection")
+	tp.redirect(slow.path)
+	tp.releaseDials()
+	for name, ch := range map[string]chan error{"the bounded read": bounded, "the unbounded read": unbounded} {
+		if err := recv(t, ch); !errors.Is(err, backend.ErrStaleEpoch) {
+			t.Fatalf("%s across the adoption: %v, want backend.ErrStaleEpoch", name, err)
+		}
+	}
+	if answered := tp.received(func(l wireLine) bool {
+		return l.conn == 1 && l.method == protocol.MethodSessionAttach && l.resp != nil
+	}); len(answered) != 0 {
+		t.Fatal("the premise: the re-attach was answered before the reads were")
+	}
+	for _, m := range []string{protocol.MethodSessionState, protocol.MethodAsksGet} {
+		if sent := tp.sentOn(1, m); len(sent) != 0 {
+			t.Fatalf("%s went out under the new identity", m)
+		}
+	}
+	if err := slow.eng.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestAReadsAnswerIsJudgedAgainstItsBinding (astra r62, new): a read made on
+// identity E whose answer has reached its caller — held there, not yet
+// decoded — while the connection goes and the reconnect adopts E+1, answers
+// backend.ErrStaleEpoch: never E's settings, or E's "no such ask", handed to a
+// caller bound elsewhere now.
+func TestAReadsAnswerIsJudgedAgainstItsBinding(t *testing.T) {
+	h := newHost(t)
+	tp := newTap(t)
+	t.Cleanup(tp.releaseDials)
+	var arm atomic.Bool
+	var reached sync.WaitGroup
+	reached.Add(2)
+	resume := make(chan struct{})
+	t.Cleanup(func() { closeOnce(resume) })
+	s := dialSessionHooked(t, h.path, tp, remote.SessionOptions{}, remote.TestHooks{Answered: func(m string) {
+		if arm.Load() && (m == protocol.MethodSessionState || m == protocol.MethodAsksGet) {
+			reached.Done()
+			<-resume
+		}
+	}})
+	if err := s.Start(tctx(t)); err != nil {
+		t.Fatal(err)
+	}
+	readKind(t, s, backend.ItemRestore)
+	epoch := s.Epoch()
+	arm.Store(true)
+	settings, ask := make(chan error, 1), make(chan error, 1)
+	go func() {
+		_, err := s.Settings(backend.WithEpoch(tctx(t), epoch))
+		settings <- err
+	}()
+	go func() {
+		_, _, err := s.Ask(backend.WithEpoch(tctx(t), epoch), "no-such-ask")
+		ask <- err
+	}()
+	answers := make(chan struct{})
+	go func() { reached.Wait(); close(answers) }()
+	await(t, answers, "both answers to reach their callers")
+	arm.Store(false)
+	retire(t, h, tp, s)()
+	waitFor(t, "the adoption of a new identity", func() bool { return s.Epoch() != epoch })
+	close(resume)
+	for name, ch := range map[string]chan error{"Settings": settings, "Ask": ask} {
+		if err := recv(t, ch); !errors.Is(err, backend.ErrStaleEpoch) {
+			t.Fatalf("%s answered on E, returned after E+1: %v, want backend.ErrStaleEpoch", name, err)
+		}
 	}
 }
 

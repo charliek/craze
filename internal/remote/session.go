@@ -290,19 +290,7 @@ func (s *Session) Start(ctx context.Context) error {
 	case <-s.ready:
 		return s.started()
 	case <-s.ended:
-		select {
-		case <-s.ready:
-			// The ready was queued before the end.
-			return s.started()
-		default:
-		}
-		s.mu.Lock()
-		err := s.endErr
-		s.mu.Unlock()
-		if err == nil {
-			err = errors.New("the session ended")
-		}
-		return fmt.Errorf("remote: the stream ended before the session was ready: %w", err)
+		return s.started()
 	case <-s.closed:
 		return backend.ErrClosed
 	case <-ctx.Done():
@@ -310,11 +298,21 @@ func (s *Session) Start(ctx context.Context) error {
 	}
 }
 
-// started is the start's outcome once ready is closed.
+// started is the start's outcome once ready or ended is closed, decided by
+// the Session's state, whichever channel woke the caller: the start's
+// outcome when the session was ready first — readyLocked never settles one
+// after the end — and otherwise the end.
 func (s *Session) started() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.startErr
+	if s.isReady {
+		return s.startErr
+	}
+	err := s.endErr
+	if err == nil {
+		err = errors.New("the session ended")
+	}
+	return fmt.Errorf("remote: the stream ended before the session was ready: %w", err)
 }
 
 // Started is a no-op: the host's engine is started by its host, and the host
@@ -377,10 +375,16 @@ func (s *Session) Info() backend.SessionInfo {
 // observe is the stream's observer (AttachOptions.observe): each item as the
 // stream queues it, in stream order, under the queue's lock. The documents
 // replace Info; an attach reply that says ready, or a Ready, settles the
-// start; the stream's last item settles its end.
+// start; the stream's last item settles its end. Once the Session has ended —
+// the stream's End, or an item Read could not decode (broken) — nothing more
+// is observed: Read hands up nothing after that end, so no later document
+// moves Info and no later Ready settles the start.
 func (s *Session) observe(it Item) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.isEnded {
+		return
+	}
 	switch it.Kind {
 	case KindAttached, KindRestore:
 		s.info = sessionInfo(&it.Reply.Session)
@@ -406,9 +410,11 @@ func (s *Session) observe(it Item) {
 	}
 }
 
-// readyLocked settles the start, once: err is its failure; s.mu is held.
+// readyLocked settles the start, once, and never once the Session has ended:
+// a stream that ended before readiness ends Start with its end, whatever the
+// host says afterwards. err is the start's failure; s.mu is held.
 func (s *Session) readyLocked(err error) {
-	if s.isReady {
+	if s.isReady || s.isEnded {
 		return
 	}
 	s.isReady, s.startErr = true, err
@@ -560,6 +566,9 @@ func (s *Session) broken(st *Stream, err error) backend.Item {
 	if detach {
 		go func() {
 			defer s.wg.Done()
+			if h := s.c.hooks.broken; h != nil {
+				h()
+			}
 			ctx, cancel := context.WithTimeout(context.Background(), closeBound)
 			defer cancel()
 			_ = st.Close(ctx)
@@ -611,9 +620,13 @@ func (s *Session) command(ctx context.Context, c engine.Command, method string, 
 // on a connection of that identity (Client.callAs) — so a read made for one
 // session never goes out to another, not even one that waited for a
 // connection across a resume loss — and once the client has left that
-// identity it is backend.ErrStaleEpoch, nothing sent, as in process. A read
-// whose connection went before its reply is made again (reads are safe to
-// repeat), under the same binding, while ctx allows.
+// identity it is backend.ErrStaleEpoch, nothing sent, as in process. Its
+// answer is judged against the binding once it has come back too: an answer
+// read on the old identity's connection that reaches its caller after the
+// client has left that identity is backend.ErrStaleEpoch, never the old
+// session's state handed to a caller now bound elsewhere. A read whose
+// connection went before its reply is made again (reads are safe to repeat),
+// under the same binding, while ctx allows.
 func (s *Session) read(ctx context.Context, method string, params func(sid string) any, result any) error {
 	ident := s.c.Identity()
 	if err := backend.CheckEpoch(ctx, ident); err != nil {
@@ -627,6 +640,11 @@ func (s *Session) read(ctx context.Context, method string, params func(sid strin
 		err = s.c.callAs(ctx, ident, method, params(sid), result)
 		if errors.Is(err, ErrConnectionLost) && ctx.Err() == nil {
 			continue
+		}
+		if s.c.Identity() != ident {
+			// Whatever came back came back from a session this read's caller
+			// is no longer bound to.
+			return backend.ErrStaleEpoch
 		}
 		return err
 	}

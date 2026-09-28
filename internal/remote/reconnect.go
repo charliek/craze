@@ -368,6 +368,13 @@ func (c *Client) adopt(ep *episode, w *wire, h protocol.HelloResult, resume *pro
 		c.identity++
 		c.hostID = h.Endpoint.HostID
 		c.unresumed = true
+		// Every wait on the client's state is told: a read bound to the
+		// identity just left, waiting for a connection (wireAs), answers
+		// backend.ErrStaleEpoch now — not once the re-attach is answered and
+		// the connection published, which a slow start can hold off, the
+		// episode's clock stopped. The other waiters (wireAs unbound,
+		// awaitNot) look again and wait on.
+		c.changedLocked()
 		for _, cmd := range c.cmds {
 			// Settled here, at once, and not when the re-attach is answered
 			// (which may wait out a slow start with the episode's clock

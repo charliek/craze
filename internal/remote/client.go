@@ -211,14 +211,20 @@ type hooks struct {
 	posted  func()
 	postRan func()
 	// waiting runs on a call (Call, a Session read) once it waits for a
-	// connection: the client is reconnecting.
-	waiting func()
+	// connection: the client is reconnecting. answered runs on a call once
+	// its reply (or its connection's end) has reached it, before it is
+	// decoded.
+	waiting  func()
+	answered func(method string)
 	// entered runs on a Session command once it has taken its binding — the
 	// identity and client id it goes under — before the command is
 	// registered; attached on a Session's Attach once the client's attach
 	// has returned, before the Session holds the stream.
 	entered  func(commandID string)
 	attached func()
+	// broken runs on a Session's detach of a stream a decode failure ended,
+	// before the detach is made.
+	broken func()
 }
 
 // wire is one connection: its reader's framing, its writer's lock, and the
@@ -937,6 +943,9 @@ func (c *Client) callOn(ctx context.Context, w *wire, method string, params, res
 	}
 	select {
 	case r := <-ch:
+		if h := c.hooks.answered; h != nil {
+			h(method)
+		}
 		if r.err != nil {
 			return r.err
 		}
