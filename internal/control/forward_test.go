@@ -27,6 +27,14 @@ type replyCase struct {
 	// has nothing to wait for: a refusal, or a cancel, whose turn's ending is
 	// the turn's own, later. refused says it is answered with an error.
 	quiet, refused bool
+	// mayEmit says quiet is only the usual case, not a guarantee: the
+	// command's settlement is asynchronous (the hung turn's cancel returns
+	// before the turn itself ends), and under load the ending can commit
+	// before the barrier's door (S0 > head). Both outcomes prove the same
+	// property — the reply is on the wire after every event committed
+	// before the command returned — so the case follows S0 against head at
+	// the door instead of asserting quiet outright.
+	mayEmit bool
 }
 
 // hangTurn opens a turn that stays open, through the attachment.
@@ -75,7 +83,7 @@ func TestAReplyFollowsItsEvents(t *testing.T) {
 			h.stub.SetProvider(agent.GrokProvider())
 			hangTurn(t, h, c)
 		}, call: prompt(protocol.PromptInterject, "and also")},
-		{name: "cancel", setup: hangTurn, quiet: true, call: func(h *host, c *client) string {
+		{name: "cancel", setup: hangTurn, quiet: true, mayEmit: true, call: func(h *host, c *client) string {
 			return c.send(protocol.MethodSessionCancel, protocol.CancelParams{SessionID: sid(h), CommandID: c.cmd()})
 		}},
 		// Nothing is armed: a Stub's turn ends at the arm's own cancel, so a
@@ -150,12 +158,21 @@ func TestAReplyFollowsItsEvents(t *testing.T) {
 			gate.arm(head)
 			id := tc.call(h, c)
 			s0 := doors.await(t, "the command's barrier")
+			// emitting is whether this run took the path where the command's
+			// own event committed before the door. For a plain (!quiet) case
+			// it always did; for quiet it never did; for mayEmit it depends
+			// on how the async settlement raced the door (see mayEmit's
+			// doc).
+			emitting := !tc.quiet || (tc.mayEmit && s0 > head)
+			if tc.mayEmit {
+				t.Logf("s0 %d, head %d: %s path", s0, head, map[bool]string{true: "emitting", false: "quiet"}[emitting])
+			}
 			switch {
-			case tc.quiet && s0 != head:
+			case tc.quiet && !tc.mayEmit && s0 != head:
 				t.Fatalf("a quiet command emitted: S0 %d, head %d", s0, head)
 			case !tc.quiet && s0 <= head:
 				t.Fatalf("the command emitted nothing before it returned: S0 %d, head %d", s0, head)
-			case !tc.quiet:
+			case emitting:
 				// The forwarder holds the command's first event, and the
 				// barrier waits for it: the reply is not queued.
 				if held := gate.awaitHeld(t); held != head+1 {

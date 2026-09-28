@@ -970,10 +970,35 @@ func TestNoResetEscapesTheSocketRunsVerdict(t *testing.T) {
 			if !published {
 				t.Fatal("fixture: the host never published the oversized event")
 			}
-			if tc.omitted {
+			switch {
+			case tc.omitted:
 				// One omission: one or two resets and re-attaches (X22).
 				assertOneOmission(t, host, err)
-			} else if err == nil || !strings.Contains(err.Error(), tc.want) {
+			case err != nil && strings.Contains(err.Error(), "the host reset the stream: [omitted"):
+				// Under load the reset can reach the tap before the barrier
+				// even in the "after the barrier" arm — and once the reader
+				// was held past the close bound, a re-attach the reset
+				// brings can itself lose the race to the view close's own
+				// shutdown and never happen. Either way the run still fails
+				// because of the reset, the property this test proves
+				// either way, so bound the resets as assertOneOmission does
+				// (one or two, every one omitted) without its re-attach
+				// floor: X22's re-attach count is a ceiling here, not a
+				// guarantee.
+				_, resets := host.tap.counts()
+				if len(resets) < 1 || len(resets) > 2 {
+					t.Fatalf("one omission brought %d resets %v, want one or two", len(resets), resets)
+				}
+				for _, r := range resets {
+					if r != string(protocol.ResetOmitted) {
+						t.Fatalf("the host reset the stream for %q, want only omitted: %v", r, resets)
+					}
+				}
+			case err != nil && strings.Contains(err.Error(), tc.want):
+				// The documented schedule: the detach's reply follows the
+				// reset, and the view close gave up on the detach before
+				// ever reading anything behind it.
+			default:
 				t.Fatalf("a run whose host wrote a reset passed, or failed otherwise: %v", err)
 			}
 			t.Logf("the run's error: %v", err)
