@@ -561,9 +561,20 @@ func TestAttachOverTheFakeAgentReproducesTheFirst(t *testing.T) {
 }
 
 // fakeAgentGate points the fake agent's CRAZE_FAKE_GATE at a fresh FIFO and
-// returns what releases one held turn: it writes the one byte the fixture
-// waits for. Opening the FIFO waits for the fake to be at its gate, so the
-// write is done on a goroutine and bounded by ctx, the watchdog.
+// returns what releases one held turn: it writes the one byte the fixture's
+// awaitGate reads (cmd/craze-fake-agent/server.go) — both sides reopen the
+// FIFO fresh on every turn, not just once at startup. The closure that
+// releases it, though, is made once here and reused for every turn; each
+// call instead gets its own fresh, watchdog-sized stepCtx off ctx, not a
+// share of one deadline fixed when the gate was made: a caller with a loop
+// of releases must not have an early one's wait eat into a later,
+// individually healthy one's budget (the same shape C29f fixed for
+// dialWire, applied here after CodeRabbit found this call site still shared
+// one). That decoupling is only complete for a caller whose own ctx carries
+// no deadline of its own: TestAttachOverTheFakeAgentReproducesTheFirst below
+// still passes its original 40s parent context, which each step's stepCtx
+// inherits, so its later releases can still be squeezed by that outer
+// deadline even though each now also has its own watchdog ceiling.
 func fakeAgentGate(t *testing.T, ctx context.Context) func() {
 	t.Helper()
 	fifo := filepath.Join(t.TempDir(), "gate")
@@ -573,6 +584,8 @@ func fakeAgentGate(t *testing.T, ctx context.Context) func() {
 	t.Setenv("CRAZE_FAKE_GATE", fifo)
 	return func() {
 		t.Helper()
+		releaseCtx, cancel := stepCtx(ctx, watchdog)
+		defer cancel()
 		done := make(chan error, 1)
 		go func() {
 			w, err := os.OpenFile(fifo, os.O_WRONLY, 0)
@@ -591,8 +604,8 @@ func fakeAgentGate(t *testing.T, ctx context.Context) func() {
 			if err != nil {
 				t.Fatalf("releasing the fake agent's gate: %v", err)
 			}
-		case <-ctx.Done():
-			t.Fatalf("releasing the fake agent's gate: %v", ctx.Err())
+		case <-releaseCtx.Done():
+			t.Fatalf("releasing the fake agent's gate: %v", releaseCtx.Err())
 		}
 	}
 }

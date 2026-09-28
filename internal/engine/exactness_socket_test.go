@@ -317,14 +317,20 @@ func TestAttachMidTurnOverTheSocketReproducesTheFirst(t *testing.T) {
 		// Same shape as the trace loop above, checked: eight cuts sharing
 		// one ctx is milder (no O(n^2) fold matrix), but a whole-loop
 		// deadline still squeezes later cuts. ctx itself carries no
-		// deadline; gateCtx keeps fakeAgentGate's own watchdog-scale bound
-		// (its release() closure is created once and reused across all
-		// eight cuts, unlike the other steps below), and every other
-		// blocking step gets its own fresh stepCtx.
+		// deadline; fakeAgentGate's release() closure is created once and
+		// reused across all eight cuts (both sides reopen the FIFO fresh
+		// each turn — the fake agent's own awaitGate included — the
+		// closure is just made once here), but it now takes its own fresh,
+		// watchdog-sized stepCtx off ctx on every call rather than sharing
+		// one deadline — CodeRabbit found the previous
+		// gateCtx (4*watchdog, fixed at this subtest's start) was exactly
+		// the whole-loop shape C29f fixed elsewhere, just not yet here
+		// (measured: this subtest ran up to 38.10s under a 25% cgroup
+		// quota, well past a single 40s budget's remaining slack by its
+		// last cut). Every other blocking step below gets its own fresh
+		// stepCtx too.
 		ctx := context.Background()
-		gateCtx, gateCancel := context.WithTimeout(ctx, 4*watchdog)
-		defer gateCancel()
-		release := fakeAgentGate(t, gateCtx)
+		release := fakeAgentGate(t, ctx)
 		sess := agent.New(agent.Options{
 			Binary: fakeAgentBin(t), ExtraArgs: []string{"-script=tasks"},
 			Workspace: t.TempDir(), Stderr: io.Discard,
