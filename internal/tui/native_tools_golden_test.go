@@ -44,7 +44,7 @@ func TestFrameGoldenNativeTools80x24(t *testing.T) {
 			cat(nativeTextParts("done tools"), nativeFinishParts()),
 		}
 		return Config{
-			Session:   agent.NewNative(agent.Options{Workspace: ws, ContentHome: t.TempDir()}, nativeSessionTweak(t.TempDir(), nativeOneModelTable(), model)),
+			Session:   agent.NewNative(agent.Options{Workspace: ws, ContentHome: t.TempDir(), NoPrimary: frameNoPrimary}, nativeSessionTweak(t.TempDir(), nativeOneModelTable(), model)),
 			Theme:     "tokyo-night",
 			Workspace: ws,
 			Yolo:      true,

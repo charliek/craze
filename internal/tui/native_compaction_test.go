@@ -80,7 +80,7 @@ func TestFrameGoldenNativeCompaction100x30(t *testing.T) {
 			nativeSummaryParts("The user greeted the agent.", compactionGoldenSummary),
 		}
 		models = append(models, model)
-		sess := agent.NewNative(agent.Options{Workspace: ws, ContentHome: t.TempDir()},
+		sess := agent.NewNative(agent.Options{Workspace: ws, ContentHome: t.TempDir(), NoPrimary: frameNoPrimary},
 			nativeSessionTweak(t.TempDir(), nativeOneModelTable(), model))
 		return Config{Session: sess, Theme: "tokyo-night", Workspace: ws, Yolo: true}
 	}
@@ -103,7 +103,7 @@ func TestFrameGoldenNativeCompaction100x30(t *testing.T) {
 	// The menu offers it: native's one command, with its own description. A
 	// separate builder, its own session and model fresh per call too.
 	buildMenu := func() Config {
-		menu := agent.NewNative(agent.Options{Workspace: ws, ContentHome: t.TempDir()},
+		menu := agent.NewNative(agent.Options{Workspace: ws, ContentHome: t.TempDir(), NoPrimary: frameNoPrimary},
 			nativeSessionTweak(t.TempDir(), nativeOneModelTable(), &nativeScriptedModel{provider: "test", wire: "wire-echo"}))
 		return Config{Session: menu, Theme: "tokyo-night", Workspace: ws, Yolo: true}
 	}

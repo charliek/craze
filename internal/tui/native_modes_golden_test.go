@@ -92,7 +92,7 @@ func writesThePlan(t *testing.T) func(fantasy.Call) {
 func nativeFrameSession(t *testing.T, ws, mode string, model *nativeScriptedModel) agent.Session {
 	t.Helper()
 	return agent.NewNative(
-		agent.Options{Workspace: ws, ContentHome: t.TempDir(), Mode: mode, Interactive: true},
+		agent.Options{Workspace: ws, ContentHome: t.TempDir(), Mode: mode, Interactive: true, NoPrimary: frameNoPrimary},
 		nativeSessionTweak(t.TempDir(), nativeOneModelTable(), model))
 }
 

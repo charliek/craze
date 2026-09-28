@@ -53,7 +53,7 @@ func TestFrameGoldenNativeUsage80x24(t *testing.T) {
 			cat(nativeTextParts("the second answer"), nativeUsageFinish(8_000, 58_000, 2_000)),
 		}
 		models = append(models, model)
-		sess := agent.NewNative(agent.Options{Workspace: ws, ContentHome: t.TempDir()},
+		sess := agent.NewNative(agent.Options{Workspace: ws, ContentHome: t.TempDir(), NoPrimary: frameNoPrimary},
 			nativeSessionTweak(t.TempDir(), table, model))
 		return Config{Session: sess, Theme: "tokyo-night", Workspace: ws, Yolo: true}
 	}

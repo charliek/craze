@@ -222,55 +222,110 @@ func frameWorkspace(t *testing.T) string {
 	return ws
 }
 
-// frameGateModes is the two modes every frame golden runs in (plan 027 §3.12
-// (d)): the gateSync baseline — a gated call inline, today's synchronous
-// control flow — and the asynchronous gate every real run uses. Both run in
-// every run of the package; the one knob that skips one is V8's
-// (frameModesJittered), which a run turns on only by asking for V8.
+// frameGateModes is the two gate modes every frame golden runs in in process
+// (plan 027 §3.12 (d)): the gateSync baseline — a gated call inline, today's
+// synchronous control flow — and the asynchronous gate every real run uses.
+// Both run in every run of the package (frameRuns, beside the socket run);
+// the knobs that skip one are V8's (frameModesJittered), which a run turns on
+// only by asking for V8, and CRAZE_GOLDEN_TRANSPORT=socket.
 var frameGateModes = [...]struct {
 	name string
 	sync bool
 }{{"gateSync", true}, {"async", false}}
 
-// runFrameModes runs a frame script once in each gate mode, each against a
-// fresh Config from build — a session is spent by the run that drives it —
-// and fails, naming the mode, unless the two runs end on the same frame, plain
-// and raw, with the same error. It answers the async run's, which the caller
-// holds against its golden: two equal frames make that one golden check hold
-// for both modes, so a continuation that is not today's post-call code, or an
-// order the gate changed, moves the golden in one mode and fails here.
+// frameRun is one of the runs runFrameModes makes of a frame script: a gate
+// mode and a transport.
+type frameRun struct {
+	name      string
+	sync      bool
+	transport frameTransport
+}
+
+// frameRuns is every run a frame golden makes (plan 027 §3.12 (d), §3.16):
+// PR 3's two gate modes in process — the gateSync baseline and the
+// asynchronous gate — and PR 4's run over the socket, asynchronous only, the
+// model a remote.Session to a host serving the builder's session.
+var frameRuns = [...]frameRun{
+	{"gateSync", true, transportInproc},
+	{"async", false, transportInproc},
+	{"socket", false, transportSocket},
+}
+
+// goldenTransports is CRAZE_GOLDEN_TRANSPORT: which transports runFrameModes
+// runs — inproc, socket, or both, the default (GLM 13: a local fast loop may
+// run inproc; every gate and PR tip runs both). Anything else fails the test.
+func goldenTransports(t testing.TB) (inproc, socket bool) {
+	t.Helper()
+	switch v := os.Getenv("CRAZE_GOLDEN_TRANSPORT"); v {
+	case "", "both":
+		return true, true
+	case "inproc":
+		return true, false
+	case "socket":
+		return false, true
+	default:
+		t.Fatalf("CRAZE_GOLDEN_TRANSPORT=%q: want inproc, socket or both", v)
+		return false, false
+	}
+}
+
+// runFrameModes runs a frame script once per run in frameRuns that
+// CRAZE_GOLDEN_TRANSPORT leaves in — each against a fresh Config from build, a
+// session being spent by the run that drives it; the socket run's build makes
+// its session NoPrimary (frameNoPrimary) — and fails, naming the runs, unless
+// they all end on the same frame, plain and raw, with the same error. It
+// answers that frame, which the caller holds against its golden: equal frames
+// make that one golden check hold for every run, so a continuation that is not
+// today's post-call code, an order the gate changed, or anything the socket
+// moves, moves the golden in one run and fails here. The transports it ran are
+// recorded for the golden manifest's check (assertGolden).
+//
+// V8's jitter run (v8_jitter_test.go) keeps the asynchronous runs alone, in
+// process and over the socket, each over a backend whose every answer and read
+// is delayed.
 func runFrameModes(t *testing.T, build func() Config, cols, rows int, script string, opts FrameOpts) (string, string, error) {
 	t.Helper()
-	if frameModesJittered {
-		// V8's jitter run (v8_jitter_test.go): the asynchronous gate alone,
-		// over a backend whose every answer and read is delayed, held against
-		// the same golden by the caller.
-		opts.gateSync = false
-		return RunFrameScript(build(), cols, rows, script, opts)
-	}
-	type run struct {
+	inproc, socket := goldenTransports(t)
+	type result struct {
+		run        frameRun
 		plain, raw string
 		err        error
 	}
-	var runs [len(frameGateModes)]run
-	for i, mode := range frameGateModes {
+	var results []result
+	for _, run := range frameRuns {
+		if frameModesJittered && run.sync {
+			continue
+		}
+		if run.transport == transportSocket && !socket || run.transport == transportInproc && !inproc {
+			continue
+		}
 		o := opts
-		o.gateSync = mode.sync
-		plain, raw, err := RunFrameScript(build(), cols, rows, script, o)
-		runs[i] = run{plain, raw, err}
+		o.gateSync = run.sync
+		o.transport = run.transport
+		cfg := buildFor(run.transport, build)
+		plain, raw, err := RunFrameScript(cfg, cols, rows, script, o)
+		results = append(results, result{run, plain, raw, err})
 	}
-	base, got := runs[0], runs[1]
-	if fmt.Sprint(base.err) != fmt.Sprint(got.err) {
-		t.Fatalf("the gate modes disagree: %s ended with %v, %s with %v\n--- %s ---\n%s\n--- %s ---\n%s",
-			frameGateModes[0].name, base.err, frameGateModes[1].name, got.err,
-			frameGateModes[0].name, base.plain, frameGateModes[1].name, got.plain)
+	ran := map[frameTransport]bool{}
+	for _, r := range results {
+		ran[r.run.transport] = true
 	}
-	if base.plain != got.plain || base.raw != got.raw {
-		t.Fatalf("the gate modes disagree: the %s frame is not the %s frame (%s)\n--- %s ---\n%s\n--- %s ---\n%s",
-			frameGateModes[1].name, frameGateModes[0].name, frameLineDiff(base.plain, got.plain),
-			frameGateModes[0].name, base.plain, frameGateModes[1].name, got.plain)
+	noteFrameTransports(t, ran)
+	base := results[0]
+	for _, got := range results[1:] {
+		if fmt.Sprint(base.err) != fmt.Sprint(got.err) {
+			t.Fatalf("the runs disagree: %s ended with %v, %s with %v\n--- %s ---\n%s\n--- %s ---\n%s",
+				base.run.name, base.err, got.run.name, got.err,
+				base.run.name, base.plain, got.run.name, got.plain)
+		}
+		if base.plain != got.plain || base.raw != got.raw {
+			t.Fatalf("the runs disagree: the %s frame is not the %s frame (%s)\n--- %s ---\n%s\n--- %s ---\n%s",
+				got.run.name, base.run.name, frameLineDiff(base.plain, got.plain),
+				base.run.name, base.plain, got.run.name, got.plain)
+		}
 	}
-	return got.plain, got.raw, got.err
+	last := results[len(results)-1]
+	return last.plain, last.raw, last.err
 }
 
 // frameLineDiff names the first line two frames differ on.
@@ -305,7 +360,7 @@ func runStubFrameRaw(t *testing.T, cols, rows int, script string) (string, strin
 	isolateSkillsHome(t)
 	plain, raw, err := runFrameModes(t, func() Config {
 		return Config{
-			Session:   NewStub(),
+			Session:   frameStub(),
 			Theme:     "tokyo-night",
 			Workspace: frameWorkspace(t),
 			Model:     "grok",
@@ -325,7 +380,7 @@ func runThemeFrame(t *testing.T, cols, rows int, theme, script string) (string, 
 	isolateSkillsHome(t)
 	plainOut, raw, err := runFrameModes(t, func() Config {
 		return Config{
-			Session:   NewStub(),
+			Session:   frameStub(),
 			Theme:     theme,
 			Workspace: frameWorkspace(t),
 			Model:     "grok",
@@ -350,6 +405,9 @@ func assertGolden(t *testing.T, name string, cols, rows int, got string) {
 	if h := lipgloss.Height(got); h != rows {
 		t.Fatalf("frame is %d rows, want %d:\n%s", h, rows, got)
 	}
+	// The frame was produced under the transports the manifest lists for this
+	// golden (golden_manifest_test.go, plan 027 §3.16).
+	checkGoldenTransports(t, name)
 	path := filepath.Join("testdata", name+".golden")
 	if *updateGoldens {
 		if err := os.MkdirAll("testdata", 0o755); err != nil {
@@ -897,6 +955,7 @@ func runFakeFrameOpts(t *testing.T, script string, cols, rows int, keys string, 
 				Interactive: true,
 				Stderr:      io.Discard,
 				Provider:    &prov,
+				NoPrimary:   frameNoPrimary,
 			}),
 			Theme:          "tokyo-night",
 			Workspace:      ws,
@@ -1258,7 +1317,7 @@ func runStubCatalogFrame(t *testing.T, cols, rows int, cfg []agent.ConfigOption,
 	t.Helper()
 	isolateSkillsHome(t)
 	plain, _, err := runFrameModes(t, func() Config {
-		stub := NewStub()
+		stub := frameStub()
 		stub.SetModelCatalogs(map[string][]agent.ConfigOption{"grok": cfg})
 		return Config{
 			Session:   stub,
@@ -1516,6 +1575,7 @@ func TestFrameGoldenSelectStyledRow(t *testing.T) {
 				Force:       true,
 				Interactive: true,
 				Stderr:      io.Discard,
+				NoPrimary:   frameNoPrimary,
 			}),
 			Theme:     "tokyo-night",
 			Workspace: ws,

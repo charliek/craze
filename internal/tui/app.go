@@ -1096,26 +1096,7 @@ func (m *Model) setSession(s agent.Session, crazeID string) {
 	if s == nil {
 		return
 	}
-	// The zero ChainPolicy is the TUI's: Esc stops a turn and the queue behind
-	// it carries on, and a prompt the session refuses is shown as the refusal it
-	// is rather than waited out (engine.ChainPolicy).
-	eng, err := engine.New(s, engine.Options{
-		CrazeSessionID: crazeID,
-		Index: engine.IndexOptions{
-			Store: m.sessionIndex,
-			CWD:   m.cwd,
-			// The provider a row is recorded under before the session has
-			// answered with one of its own: the resolved default it was
-			// started as.
-			Provider: m.providerDefault.Name(),
-			// A provider craze cannot load again stays out of the index
-			// (plan 028 §3.5): unresumable, which is not the same question
-			// as hidden — before D-65 listed it, native was hidden and
-			// indexed.
-			Unindexed: unindexedProvider,
-			TitleLine: indexTitleLine,
-		},
-	})
+	eng, err := engine.New(s, engineOptions(crazeID, m.sessionIndex, m.cwd, m.providerDefault.Name()))
 	if err != nil {
 		// m.eng stays the untyped nil it was set to above: a failure leaves no
 		// backend, never a nil *engineBackend that would read as one.
@@ -1132,6 +1113,58 @@ func (m *Model) setSession(s agent.Session, crazeID string) {
 	if m.onEngine != nil {
 		m.onEngine(eng)
 	}
+}
+
+// engineOptions is the engine.Options a session's engine is built with: the
+// one place they are spelled, for setSession and for the frame harness's
+// socket host (plan 027 §3.16), which builds its engine exactly as the TUI
+// would have. crazeID is the durable craze session id the session already has
+// ("" mints one), index the session index (nil persists nothing), cwd the
+// workspace as New resolved it (configWorkspace), and provider the resolved
+// default's name (configProvider).
+//
+// The zero ChainPolicy is the TUI's: Esc stops a turn and the queue behind it
+// carries on, and a prompt the session refuses is shown as the refusal it is
+// rather than waited out (engine.ChainPolicy).
+func engineOptions(crazeID string, index SessionIndex, cwd, provider string) engine.Options {
+	return engine.Options{
+		CrazeSessionID: crazeID,
+		Index: engine.IndexOptions{
+			Store: index,
+			CWD:   cwd,
+			// The provider a row is recorded under before the session has
+			// answered with one of its own: the resolved default it was
+			// started as.
+			Provider: provider,
+			// A provider craze cannot load again stays out of the index
+			// (plan 028 §3.5): unresumable, which is not the same question
+			// as hidden — before D-65 listed it, native was hidden and
+			// indexed.
+			Unindexed: unindexedProvider,
+			TitleLine: indexTitleLine,
+		},
+	}
+}
+
+// configWorkspace is the session's working directory as New resolves
+// Config.Workspace: the process's own when it names none, made absolute.
+func configWorkspace(ws string) string {
+	if ws == "" {
+		ws, _ = os.Getwd()
+	}
+	if abs, err := filepath.Abs(ws); err == nil {
+		ws = abs
+	}
+	return ws
+}
+
+// configProvider is the resolved default New starts from: Config.Provider, or
+// cursor when it names none.
+func configProvider(p agent.Provider) agent.Provider {
+	if p.Name() == "" {
+		return agent.CursorProvider()
+	}
+	return p
 }
 
 // setBackend is setSession for a session served elsewhere (Config.Backend):
@@ -1239,13 +1272,7 @@ func (m *Model) nextCmds(n int) []engine.Command {
 
 func New(cfg Config) Model {
 	cfg = cfg.viewing()
-	cwd := cfg.Workspace
-	if cwd == "" {
-		cwd, _ = os.Getwd()
-	}
-	if abs, err := filepath.Abs(cwd); err == nil {
-		cwd = abs
-	}
+	cwd := configWorkspace(cfg.Workspace)
 
 	vp := viewport.New(0, 0)
 	vp.KeyMap = viewport.KeyMap{
@@ -1254,10 +1281,7 @@ func New(cfg Config) Model {
 	}
 
 	th := Preset(cfg.Theme)
-	prov := cfg.Provider
-	if prov.Name() == "" {
-		prov = agent.CursorProvider()
-	}
+	prov := configProvider(cfg.Provider)
 	m := Model{
 		theme:           th,
 		queueHov:        noHover(),
@@ -1937,8 +1961,13 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case frameQuitMsg:
 		// The frame runner's quit, applied in its turn behind whatever had
-		// arrived before it (frame.go).
+		// arrived before it (frame.go). A lingering one marks the capture and
+		// leaves the program running: the socket run's check after it
+		// (frameRunner.captureThenMatch).
 		m.harnessQuit = true
+		if msg.linger {
+			return m, nil
+		}
 		return m, tea.Quit
 
 	case tea.KeyMsg:

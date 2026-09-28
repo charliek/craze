@@ -36,7 +36,7 @@ func TestFrameGoldenNativeEcho80x24(t *testing.T) {
 		harnessHome := t.TempDir()
 		ws := frameWorkspace(t)
 		return Config{
-			Session:   agent.NewNative(agent.Options{Workspace: ws, ContentHome: t.TempDir()}, nativeSessionTweak(harnessHome, table, model)),
+			Session:   agent.NewNative(agent.Options{Workspace: ws, ContentHome: t.TempDir(), NoPrimary: frameNoPrimary}, nativeSessionTweak(harnessHome, table, model)),
 			Theme:     "tokyo-night",
 			Workspace: ws,
 			Yolo:      true,

@@ -28,7 +28,7 @@ func frameBackground(t *testing.T, ws string, echo *frameRouter, c *frameClock) 
 	t.Helper()
 	home := t.TempDir()
 	table := frameTable()
-	return agent.NewNative(agent.Options{Workspace: ws, ContentHome: t.TempDir(), Interactive: true}, func(o *harness.Options) {
+	return agent.NewNative(agent.Options{Workspace: ws, ContentHome: t.TempDir(), Interactive: true, NoPrimary: frameNoPrimary}, func(o *harness.Options) {
 		o.Home = home
 		o.Table = table
 		o.Getenv = func(k string) string {

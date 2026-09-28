@@ -58,7 +58,7 @@ func TestFrameGoldenNativeMenu(t *testing.T) {
 	got, _, err := runFrameModes(t, func() Config {
 		model := &nativeScriptedModel{provider: "test", wire: "wire-echo"}
 		return Config{
-			Session: agent.NewNative(agent.Options{Workspace: ws, ContentHome: home},
+			Session: agent.NewNative(agent.Options{Workspace: ws, ContentHome: home, NoPrimary: frameNoPrimary},
 				nativeSessionTweak(t.TempDir(), nativeOneModelTable(), model)),
 			Theme:     "tokyo-night",
 			Workspace: ws,

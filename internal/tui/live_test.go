@@ -292,6 +292,7 @@ func TestMain(m *testing.M) {
 	gateSyncDefault = true
 	stubInstallOnStartDefault = true
 	installGateWatch()
+	installFrameSocketHost()
 	// No test may shell out to xclip, overwrite the developer's clipboard or
 	// read it. The seam itself stays real so the OSC 52 bytes are still
 	// asserted; only the native tools are stubbed out, and the tests that care
@@ -301,6 +302,7 @@ func TestMain(m *testing.M) {
 		func() (string, error) { return "", nil })
 	code := m.Run()
 	parity.report()
+	reportSocketRuns()
 	if err := parity.err(); err != nil && code == 0 {
 		fmt.Fprintln(os.Stderr, err)
 		code = 1

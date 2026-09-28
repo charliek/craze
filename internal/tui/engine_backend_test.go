@@ -40,9 +40,14 @@ func engineOf(t testing.TB, m Model) *engine.Engine {
 
 // engineIn is engineOf for a helper with no test to fail: ok is false when the
 // model holds no backend, or one that is not the in-process engine — nor a
-// test's wrapper around it that names its engine (engineBehind).
+// test's wrapper around it that names its engine (engineBehind) — nor a socket
+// run's session, whose host engine the registry names (hostEngineOf, plan 027
+// §3.16).
 func engineIn(m Model) (*engine.Engine, bool) {
 	eng := engineBehind(m.eng)
+	if eng == nil {
+		eng = hostEngineOf(m.eng)
+	}
 	return eng, eng != nil
 }
 
