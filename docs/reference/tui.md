@@ -155,6 +155,18 @@ The title is kept, and — native sessions being indexed now —
 provider's. A session that compacted at some point replays those notes in
 place too; see [Compaction](#compaction).
 
+#### What the model is told
+
+Native's system prompt is craze's own text, not adapted from another agent's.
+After it come the resolved project and user instruction files, and the
+skills-and-commands catalog — the same one the [slash menu](#slash-commands)
+is built from. The prompt's last section is a session-start snapshot: today's
+local date, and — only when the workspace sits inside a git work tree — the
+branch, the default branch, the status, and the last few commits, taken once
+when the session opens or resumes and never updated afterwards; outside a git
+work tree nothing runs, and the git part of the snapshot is left out. No part
+of the prompt's own text is reproduced here.
+
 ## Tab title
 
 craze sets the terminal tab title (Ghostty, roost, and anything else that

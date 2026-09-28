@@ -731,7 +731,8 @@ background bash with auto-background · the process-based sub-agent runner
 (D-54's fallback, triggered by a crash/leak or S4) · sandboxing ·
 flipping the provider to visible · lazy loading of nested instruction files
 (deferred out of H4 by D-47) · `paths:` gating of rules (deferred out of H4
-by D-47).
+by D-47) · OpenAI provider integration, as gx has (a Responses API driver and
+ChatGPT-plan auth).
 
 ## Conventions per phase
 
@@ -741,6 +742,8 @@ by D-47).
   per commit; `make docs` when published docs or docs tooling changes.
 - Update `08-decisions.md` when a phase changes a decision; update the
   status column above when a phase merges.
+- Changes to native's prompt, tool descriptions or request parameters are
+  measured with `eval/` (D-69) before they ship.
 - The harness is a side quest beside the daily-driver TUI (D-26): size each
   phase's process to its risk. A spike is a throwaway `main`, and it keeps
   raw provider responses (credentials stripped) so a failure can be diagnosed
