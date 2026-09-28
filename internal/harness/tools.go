@@ -287,7 +287,7 @@ func openTools(home, workspace, mode string, asker tool.Asker, table *modeltable
 	if child != nil && child.BaseSystem != "" && child.BaseProfile == p.Name {
 		ts.system, err = withChildRole(child.BaseSystem, child.Role, red)
 	} else {
-		ts.system, err = withPromptExtras(systemPrompt(p, workspace, runtime.GOOS), prompt, red)
+		ts.system, err = withPromptExtras(systemPrompt(p, workspace, runtime.GOOS, opencode.Shell()), prompt, red)
 		if err == nil && child != nil {
 			ts.system, err = withChildRole(ts.system, child.Role, red)
 		}

@@ -39,6 +39,7 @@ type Profile struct {
 type SystemEnv struct {
 	Workspace string // the session's working directory, absolute and cleaned
 	OS        string // runtime.GOOS
+	Shell     string // the shell path the bash tool runs commands with
 }
 
 // ModelRef is how a profile is chosen: the resolved model, and the optional

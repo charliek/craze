@@ -12,11 +12,11 @@ import (
 )
 
 // systemPrompt builds the first half of a session's system prompt: the
-// session's tool profile's (plan 019 §3.6), from its workspace and the
-// operating system (runtime.GOOS). The profile writes the text for its own
-// tools — the opencode profile's is opencode's default prompt reduced to what
-// is true of craze, with H1's environment block — and the session fixes it
-// when it opens, as it fixes the profile.
+// session's tool profile's (plan 019 §3.6), from its workspace, its operating
+// system (runtime.GOOS) and the shell its bash tool runs commands with. The
+// profile writes the text for its own tools — the opencode profile's is
+// craze's own prompt, written for these tools (plan 029 §3.2 L1) — and the
+// session fixes it when it opens, as it fixes the profile.
 //
 // The second half, from H4, is the caller's own content: the instruction
 // documents craze read for this workspace and the catalog of the skills and
@@ -39,8 +39,8 @@ import (
 // pins the opencode profile's and testdata/system_prompt_extras.golden the
 // rendering of the extras after it. It is never stored; the transcript
 // header records its SHA-256.
-func systemPrompt(p tool.Profile, workspace, goos string) string {
-	return p.System(tool.SystemEnv{Workspace: workspace, OS: goos})
+func systemPrompt(p tool.Profile, workspace, goos, shell string) string {
+	return p.System(tool.SystemEnv{Workspace: workspace, OS: goos, Shell: shell})
 }
 
 // PromptExtras is what a caller adds to the system prompt: the instruction

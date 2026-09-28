@@ -45,7 +45,6 @@ Where each description comes from
 | descriptions/grep.txt   | grep.txt                                                  |
 | descriptions/glob.txt   | glob.txt                                                  |
 | descriptions/bash.txt   | shell/shell.txt with shell/prompt.ts's bash values        |
-| system.txt              | ../session/prompt/default.txt (see "The system prompt")   |
 
 opencode renders its shell description at run time from shell/shell.txt and
 shell/prompt.ts. descriptions/bash.txt is that rendering for a bash shell,
@@ -93,27 +92,101 @@ allowed edits change nothing. opencode fills ${tmp} with its own directory
 The system prompt
 -----------------
 
-system.txt is the profile's system prompt (plan 019 section 3.6). It is
-opencode's packages/opencode/src/session/prompt/default.txt, the prompt
-opencode sends a model with no family prompt of its own
-(session/system.ts:50), byte for byte except for the edits below, followed
-by the environment block of craze's H1 prompt. The same rules apply as to
-the descriptions, by analogy: remove what is false of craze, replace
-"opencode" with "craze", and reword nothing else. opencode's own
-environment block (session/system.ts:69-86) is not used: it holds the
-date, which would change the prompt, and with it every request's cache
-prefix, at midnight (D-30).
+system.txt is the profile's system prompt (plan 019 section 3.6), and, as of
+plan 029 section 3.2 L1, it is craze's own text, written for this tool set —
+not opencode's default.txt, which it replaced. Nothing in it is ported the
+way the descriptions above are; it is drafted, reviewed and kept on its own
+merits (plan 029's evaluation harness, section 3.1). Its three placeholders,
+${workspace}, ${os} and ${shell}, are the session's workspace, runtime.GOOS
+and the path of the shell the bash tool runs commands with (opencode.Shell(),
+the shell bash's own description also names, by its basename); nothing else
+varies, so every request in a session still starts with the same bytes (D-30).
+No clock or git state is in it.
 
-| original                                                                                                          | now                                   | why |
-|-------------------------------------------------------------------------------------------------------------------|---------------------------------------|-----|
-| "You are opencode, an interactive CLI tool ..."                                                                   | "You are craze, an interactive CLI tool ..." | the rename |
-| "If the user asks for help or wants to give feedback inform them of the following:" and its two bullets (/help, opencode's issue tracker) | removed | opencode's own help command and tracker |
-| "When the user directly asks about opencode (...), first use the WebFetch tool to gather information to answer the question from opencode docs at https://opencode.ai" | removed | names WebFetch, which craze does not have, and opencode's docs |
-| the example "user: what command should I run to watch files in the current directory?", whose answer is "[use the ls tool to list the files ...] npm run dev" | removed | names an ls tool, which craze does not have (read lists directories) |
-| "If you are unable to find the correct command, ask the user for the command to run and if they supply it, proactively suggest writing it to AGENTS.md so that you will know to run it next time." (end of the lint bullet) | removed; the sentence before it stays | false: craze reads no AGENTS.md until instruction files arrive (H4-H6) |
-| "- Tool results and user messages may include <system-reminder> tags. ..." (with the blank line before it)        | removed                               | false: craze adds no system-reminder tags (read's are not ported, above) |
-| "- When doing file search, prefer to use the Task tool in order to reduce context usage."                         | removed                               | names the Task tool, which craze does not have |
-| (none: appended after the final example)                                                                          | "\nEnvironment:\n- Working directory: ${workspace}\n- Operating system: ${os}\n" | H1's environment block, kept (D-30): the session's workspace and runtime.GOOS, the prompt's only two substitutions |
+Some of its sentences read close to a sentence in one of three reference
+prompts the plan asked to be compared against, because the idea and the
+words it is put in are both worth keeping; where that is so, the source is
+recorded below. An idea alone — something every one of these tools' prompts
+says in its own words, such as "run the tests before you claim to be done" —
+is not recorded; only a sentence whose wording is recognizably close to a
+specific source sentence is. Nothing here is copied source code, and no
+sentence is reproduced whole from a reference: each is craze's own sentence,
+shaped like the tools around it, adapted for a wording that is close to one
+listed:
+
+    grok-build (the owner's local checkout), Apache License 2.0
+    commit e5fd4816d43260c15ba785f103990c1ed6cea230 (2026-08-13)
+    crates/codegen/xai-grok-agent/templates/prompt.md
+    Copyright 2023-2026 SpaceXAI
+
+    opencode, MIT License (the license reproduced at the top of this file)
+    https://github.com/anomalyco/opencode
+    commit b9f3b382fcfd82b57103b29b77572f112ce9e1e5 (2026-08-10)
+    packages/opencode/src/session/prompt/default.txt and meta.txt
+
+    codex, Apache License 2.0
+    https://github.com/openai/codex
+    commit 2cf2a6a844f1fc2ddd489c8a67fa8bc2f59a6f3d (2026-06-23)
+    codex-rs/models-manager/prompt.md
+
+| system.txt (paraphrased)                                                                          | close to (source, paraphrased)                                                                                                                                          |
+|-----------------------------------------------------------------------------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| "Use the instructions below and the tools available to you."                                        | opencode default.txt: "Use the instructions below and the tools available to you to assist the user."                                                                     |
+| "coding agent working in the user's terminal"                                                       | codex: "a coding agent running in the Codex CLI, a terminal-based coding assistant"                                                                                        |
+| "When they ask for a change, make it. When they ask a question ... answer it without editing files they did not ask you to change." | grok-build: "Match your response to the user's intent. Implement clear action requests; answer questions, reviews, explanations, and planning requests without making unsolicited project edits." |
+| "do not end your turn by offering to do work that is plainly part of the request: do it ... genuinely blocked ... say exactly what is blocking you" | grok-build: "... genuinely blocked. If something is blocked, say so plainly rather than quietly dropping it."; codex: "keep going until the query is completely resolved, before ending your turn" |
+| "Keep every part of the request in view."                                                           | grok-build: "Keep every explicit requirement of the request in view until it is completed ..."                                                                             |
+| "Look for the root cause of a problem rather than patching its symptom."                             | codex: "Fix the problem at the root cause rather than applying surface-level patches, when possible."                                                                      |
+| "Say that something is done, fixed, working or tested only when output from a tool in this session shows it. Otherwise say what you did not verify and why." | grok-build: "Claim that something is done, fixed, tested, or addressed only when tool output supports the claim. Otherwise state what you did not verify and why."       |
+| "Find the commands in the project's README, instruction files, Makefile or equivalent rather than assuming a framework." | opencode default.txt: "NEVER assume specific test framework or test script. Check the README or search codebase to determine the testing approach."                       |
+| "Write in complete sentences. Being concise means choosing what to include, not clipping sentences into fragments or shorthand." | grok-build: "Communicate directly and concisely, in complete sentences. Concise means being selective about what you include, not clipping the prose: no telegraphic fragments ..." |
+| "Lead with the answer or the outcome, then give the supporting detail."                              | grok-build: "Lead with the answer: Answer the user's actual question first ... then give supporting detail."                                                              |
+| "Keep progress notes during the work short. Your final message must stand on its own for a reader who has not seen your tool calls ..." | grok-build: "Keep intermediate progress updates short and infrequent. The final message must stand alone ..."; "Write every user-facing message for a reader who has NOT seen your tool calls ..." |
+| "State facts literally and use the project's own terms. If you disagree with the user's premise ... say so." | grok-build: "State facts literally. Do not invent metaphors, idioms, or catchy labels ..."; opencode meta.txt: "Disagree when necessary, even if it may not be what the user wants to hear." |
+| "Refer to code as `file_path:line_number` so the user can jump to it."                                | opencode default.txt / meta.txt: "include the pattern `file_path:line_number` to allow the user to easily navigate to the source code location" (craze's own prompt already carried this, unchanged in wording until now) |
+| "Your output is rendered as GitHub-flavored markdown in a terminal. ... Do not use emojis unless the user asks for them." | opencode default.txt: "Your responses can use GitHub-flavored markdown for formatting ..."; "Only use emojis if the user explicitly requests it."; grok-build: "Your text output is rendered as GitHub-flavored markdown (CommonMark). Use markdown actively when it aids the reader ..." |
+| "Prefer the dedicated tools to shell commands for files ... Use bash to run programs, tests, builds and git." | grok-build: "prefer dedicated file tools ... Reserve bash tools exclusively for actual system commands and terminal operations"; opencode meta.txt: "use dedicated tools: `read` for reading files instead of `cat`/`head`/`tail` ..." |
+| "When several tool calls do not depend on each other, make them in one message so they run in parallel." | opencode meta.txt: "Always make tool calls in parallel if you intend to call multiple tools and there are no dependencies between them."                                    |
+| "Read enough to be sure. Read a whole file when it is small or when the answer depends on it, rather than many narrow slices." | opencode meta.txt: "Use full file reads only when the user asks for the beginning or entire file, or when you already know the file is small."                             |
+| "use it [the agent tool] to delegate broad searches or self-contained pieces of work that would otherwise fill your context" | opencode meta.txt: "Use the Task tool to minimize context token usage whenever tool calls generate large outputs but only a small subset is useful ..."                     |
+| "Never use shell commands or code comments to talk to the user; write to the user directly."          | opencode default.txt: "Output text to communicate with the user ... Never use tools like Bash or code comments as means to communicate with the user during the session." |
+| "Follow the conventions of the code around you ... Check that a library is already used in the project before you use it." | opencode default.txt: "first understand the file's code conventions. Mimic code style, use existing libraries ..."; "first check that this codebase already uses the given library" |
+| "Keep changes to what the request needs. Do not refactor, rename or reformat unrelated code."         | codex: "don't overstep (i.e. changing filenames or variables unnecessarily)"                                                                                                |
+| "Write a comment only where it explains something the code cannot say, such as a non-obvious constraint. Do not narrate what the code does or what you changed." | grok-build: "comments should be short, factual, and only explain non-obvious constraints ... never narrate your reasoning or implementation steps"                        |
+| "Never introduce code that exposes or logs secrets or keys, and never commit them."                   | opencode default.txt: "Never introduce code that exposes or logs secrets and keys. Never commit secrets or keys to the repository."                                        |
+| "Do not commit, push or create branches unless the user asks you to."                                 | opencode default.txt: "NEVER commit changes unless the user explicitly asks you to."; codex: "Do not `git commit` your changes or create new git branches unless explicitly requested." |
+| "Never guess or invent URLs. Use URLs the user gave you or that appear in the project."                | opencode default.txt / meta.txt: "NEVER generate or guess URLs for the user unless you are confident ...; You may use URLs provided by the user in their messages or local files." (craze's prompt already carried this rule; the sentence is reworded here) |
+| "Some messages in the conversation come from craze, not from the user. They are wrapped in system reminder tags ... Follow them." | opencode default.txt's removed sentence, restated for real use now that H5 and H7 send them: "Tool results and user messages may include <system-reminder> tags ... They are NOT part of the user's provided input"; opencode meta.txt: "you will see a <system-reminder> about this" |
+| the environment block naming the shell (${shell})                                                     | grok-build's `<user_info>` block, which lists the OS, the shell and the workspace among the facts it puts in front of the model                                             |
+
+Every other sentence in system.txt — the identity paragraph's first half, the
+persistence, verification and formatting rules not listed above, the tools
+section's todo_write and agent guidance beyond what is listed, the
+compacted-context and shell-context sentences (craze's own constructs; no
+reference prompt has an analog), and the environment block's working
+directory and operating system lines (H1's, kept) — is original to craze,
+without a close match in any of the three prompts above.
+
+X9 (plan amendment): the "Messages from craze" section describes craze's
+reminder, compaction and shell-context messages in words — "system reminder
+tags", "a compacted context block", "a shell context block" — rather than
+spelling out their literal wire tags (<system-reminder>, <compacted_context>,
+<shell_context>). Internal/harness's own tests use the bare word
+"system-reminder" (reminderTag, reminders.go) as a canary for a reminder
+leaking where it must not be, across child_test.go, reminders_test.go,
+segment_test.go, wire_test.go and canary_test.go; spelling the tag out in the
+prompt sent every one of those canaries off the moment the prompt itself
+became part of what they scan. Describing the tags without the literal
+substrings keeps that promise true without touching any of those tests.
+
+Removed with L1, and asserted absent by
+TestSystemPromptDoesNotMandateBrevity: "You MUST answer concisely with fewer
+than 4 lines", "One word answers are best", "You should minimize output
+tokens as much as possible", "After working on a file, just stop, rather
+than providing an explanation of what you did", and "DO NOT ADD ***ANY***
+COMMENTS unless asked" — opencode's brevity mandate, on the evidence in plan
+029 section 1 that it made craze's answers too thin against grok, opencode,
+codex and cursor on the same models.
 
 
 Parameter schemas

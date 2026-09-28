@@ -20,6 +20,7 @@ import (
 	"github.com/charliek/craze/internal/harness/redact"
 	"github.com/charliek/craze/internal/harness/store"
 	"github.com/charliek/craze/internal/harness/tool"
+	"github.com/charliek/craze/internal/harness/tool/opencode"
 )
 
 // The secrets canaries (plan 019 §3.8, §7.8): craze's own provider keys must
@@ -284,7 +285,7 @@ func keyEnv(name, value string) func(string) string {
 // quietly moved the prefix.
 func TestProfileKeyIsRefused(t *testing.T) {
 	f := newFixture(t, "http://127.0.0.1:1/v1")
-	base := systemPrompt(opencodeProfile(t), filepath.Clean(f.workspace), runtime.GOOS)
+	base := systemPrompt(opencodeProfile(t), filepath.Clean(f.workspace), runtime.GOOS, opencode.Shell())
 	inside, _, _ := strings.Cut(base, "\n")
 	if len(inside) < modeltable.MinKeyLen {
 		t.Fatalf("the profile's first line is %d bytes, too short to stand in for a key", len(inside))
