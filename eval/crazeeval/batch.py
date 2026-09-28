@@ -55,6 +55,15 @@ DEFAULT_CAP_OTHER = 3
 OVERSIZE = "oversize"
 TERMINAL = {"ok", "crashed", "timeout", "contaminated", KEY_EXPOSURE, BUDGET_CAPPED, BUDGET_STOP, "infra", "launch-error",
             OVERSIZE}
+# The statuses objective_pass counts as a crash.
+CRASHED = ("crashed", "infra", "launch-error")
+
+
+def run_objective_pass(checks: list[dict], timed_out: bool, status: str | None) -> bool:
+    """A run's ``objective_pass``: every check passed, no timeout, no crash, and the
+    status ``ok`` (so a key-exposure run never passes). ``crazeeval rescore`` recomputes
+    it with this too."""
+    return objective_pass(checks, timed_out, status in CRASHED) and status == "ok"
 
 
 class BatchDirError(RuntimeError):
@@ -385,7 +394,6 @@ class Batch:
         metrics["roundtrips"] = tool_roundtrips(records)
         status = classify(sres, launch_error, proxy_summary, ext, records, contamination, check_error,
                           evidence_error=evidence_error, oversize=too_big)
-        crashed = status in ("crashed", "infra", "launch-error")
         res = {
             "label": cfg.label,
             "run_key": spec.key,
@@ -414,7 +422,7 @@ class Batch:
             + ([gitpost_note_] if gitpost_note_ else []),
             "extract": ext.extra,
             "status": status,
-            "objective_pass": objective_pass(checks, bool(sres and sres.timed_out), crashed) and status == "ok",
+            "objective_pass": run_objective_pass(checks, bool(sres and sres.timed_out), status),
             "checks": checks,
             "contamination": contamination,
             "metrics": metrics,

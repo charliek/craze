@@ -99,10 +99,16 @@ def load_task(d: Path) -> Task:
             raise TaskError(f"{tid}: fixture {fixture!r} not found under eval/fixtures")
     setup = repo.get("setup_patch")
     checks = list(doc.get("checks") or [])
+    seen_names: set[str] = set()
     for c in checks:
         if c.get("type") not in CHECK_TYPES:
             raise TaskError(f"{tid}: unknown check type {c.get('type')!r}")
         c.setdefault("name", c["type"])
+        # The name checks.result() records (review c11/c12 P2): a task with two checks
+        # sharing a name would let one silently stand in for the other at rescore time.
+        if c["name"] in seen_names:
+            raise TaskError(f"{tid}: duplicate check name {c['name']!r}")
+        seen_names.add(c["name"])
         if c["type"] in ("tests", "test_discrimination"):
             # Trusted runners only (review r1-c1 finding 14): no free-form command.
             if "command" in c:

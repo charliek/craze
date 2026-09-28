@@ -71,7 +71,11 @@ harness (in bwrap, its own netns) ──> 127.0.0.1:<port> ──relay──> pr
    - the answer is extracted from the harness's own output, with its explicit terminal
      success or failure (a run is `ok` only on a successful completion);
    - the final manifest is compared with the start manifest (ignore patterns apply to
-     additions only). A file over **50 MiB** or a workspace over **500 MiB** (apparent
+     additions only; for a craze-repo task they include the craze repository's own
+     `.gitignore`, so the build outputs verifying leaves -- `bin/craze`,
+     `tests/cli/.venv/` -- are no change, as git and `diff.patch` never show them either;
+     a leading `/` anchors a pattern at the workspace root, as in gitignore). A file over
+     **50 MiB** or a workspace over **500 MiB** (apparent
      sizes) fails the run as `oversize` before anything is copied or hashed further;
      scoring copies enforce the same limits while copying, and log tails are read by
      seeking;
@@ -296,6 +300,12 @@ uv run crazeeval calibrate --batch DIR [--seed N]
 uv run crazeeval report --batch DIR [--batch LATER ...] [--baseline DIR] [--verdicts DIR ...] [--unseal] \
     [--compare OLD --compare-verdicts DIR] [--out DIR]
 uv run crazeeval captures --run DIR [--out DIR] [--unseal]
+
+# Recompute a finished batch's diff and its diff-derived checks (no_writes, diff_scope)
+# from each rep's final attempt's manifests with today's ignores (X15); every other
+# check stands, objective_pass is recomputed. Held-out runs only with --unseal; --dry-run
+# prints the summary and writes nothing. Reads manifests, batch.json and result.json only.
+uv run crazeeval rescore --batch DIR [--unseal] [--dry-run]
 ```
 
 ## Tasks
@@ -315,7 +325,9 @@ The check types:
 - `facts`: regexes over the answer.
 - `no_writes`: final state only. It fails if a tracked file is modified or deleted, or if a
   new file exists outside the ignore list (`__pycache__/`, `*.pyc`, `.pytest_cache/`,
-  `*.test`, and the task's `ignore`).
+  `*.test`, the task's `ignore`, the harness's own workspace state and, for a craze-repo
+  task, the patterns of the craze repository's `.gitignore` at 3eabb31:
+  `workspace.CRAZE_REPO_IGNORES`). `diff_scope` sees the same diff.
 - `tests`: hidden files are added (`add`), trusted files are restored over the agent's
   copies (`restore` from testdata, `restore_from_start`), then a **trusted runner** runs,
   sandboxed and offline, on a scoring copy -- `runner = "pytest"` or `"go"`, with
@@ -412,6 +424,12 @@ Each batch writes:
 - `results.jsonl`
 - `summary.json`
 - `proxy-refusals.jsonl`
+- `rescore.jsonl` (after `crazeeval rescore`): one line per rescored run -- run id and
+  key, task, harness, model, the checks whose verdict flipped, `objective_pass` before and
+  after; a held-out run's line goes to `heldout/rescore.jsonl`. A rescored run's
+  `result.json` (rep and attempt level) carries a `rescored` record, and its original
+  is kept once, never overwritten, as `result.pre-rescore.json` beside it. `results.jsonl`
+  and `summary.json` keep the scores as the batch wrote them.
 
 Per-run disk stays small (a baseline batch is ~250 runs): after the key scan each attempt
 drops its Go cache, the harness's download and state caches (opencode's npm cache,

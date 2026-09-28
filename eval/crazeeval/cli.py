@@ -1,5 +1,5 @@
 """``uv run crazeeval <command>``: run, validate, proxy, snapshot-config, probe, keyscan, ledger,
-judge-pair, judge-batch, calibrate, judge-hash, report, captures."""
+judge-pair, judge-batch, calibrate, judge-hash, report, rescore, captures."""
 
 from __future__ import annotations
 
@@ -479,6 +479,18 @@ def cmd_report(a) -> int:
     return 0
 
 
+def cmd_rescore(a) -> int:
+    from crazeeval.rescore import RescoreError, rescore
+
+    try:
+        summary = rescore(Path(a.batch), unseal=a.unseal, dry_run=a.dry_run)
+    except RescoreError as e:
+        print(str(e), file=sys.stderr)
+        return 2
+    print(json.dumps(summary, indent=2))
+    return 0
+
+
 def cmd_captures(a) -> int:
     from crazeeval import captures
 
@@ -602,6 +614,12 @@ def main(argv: list[str] | None = None) -> int:
     rp_.add_argument("--compare-verdicts", action="append", help="verdicts of the new build vs the old (craze vs craze)")
     rp_.add_argument("--out")
     rp_.set_defaults(fn=cmd_report)
+
+    rs = sub.add_parser("rescore", help="recompute a batch's diff and diff-derived checks from its manifests (X15)")
+    rs.add_argument("--batch", required=True, help="a batch directory")
+    rs.add_argument("--unseal", action="store_true", help="also rescore the held-out runs")
+    rs.add_argument("--dry-run", action="store_true", help="compute and print; write nothing")
+    rs.set_defaults(fn=cmd_rescore)
 
     cp = sub.add_parser("captures", help="the wire-capture report (§3.1.10) and AC-A8 fidelity checks")
     cp.add_argument("--run", required=True, help="a batch directory")

@@ -30,9 +30,12 @@ from crazeeval.sandbox import Toolchains, bwrap_available
 from crazeeval.tasks import TaskError, load_task, load_tasks
 from crazeeval.validate import _synthetic_capture, validate_task
 from crazeeval.workspace import (
+    CRAZE_REPO_IGNORES,
+    GENERATED_IGNORES,
     build_manifest,
     compare,
     craze_template,
+    dir_ignored,
     git,
     ignores_for,
     is_ignored,
@@ -181,6 +184,101 @@ def test_ignore_patterns():
     assert is_ignored("x.pyc", pats) and is_ignored("pkg/foo.test", pats)
     assert is_ignored(".opencode/plans/p.md", pats)
     assert not is_ignored("tests/test_x.py", pats) and not is_ignored("pycache.py", pats)
+
+
+def test_anchored_ignore_patterns():
+    # A leading "/" anchors at the workspace root, as in gitignore (X15).
+    assert is_ignored("bin/craze", ["/bin/"]) and is_ignored("bin/sub/x", ["/bin/"])
+    assert not is_ignored("internal/bin/x", ["/bin/"])
+    assert not is_ignored("bin", ["/bin/"])  # a directory pattern: a root file named bin is not under it
+    assert dir_ignored("bin", ["/bin/"]) and not dir_ignored("internal/bin", ["/bin/"])
+    assert is_ignored("x.txt", ["/x.txt"]) and not is_ignored("a/x.txt", ["/x.txt"])
+    # Component by component: "*" never crosses a "/" in an anchored pattern.
+    assert is_ignored("a/b.go", ["/a/*.go"]) and not is_ignored("a/b/c.go", ["/a/*.go"])
+    assert is_ignored("tests/cli/.venv/x", ["/tests/*/.venv/"]) and not is_ignored("tests/a/b/.venv/x", ["/tests/*/.venv/"])
+    # The unanchored patterns keep their meaning: a bare name matches at any depth...
+    assert is_ignored("bin/x", ["bin/"]) and is_ignored("internal/bin/x", ["bin/"])
+    assert is_ignored("a/x.txt", ["x.txt"]) and is_ignored("x.txt", ["x.txt"])
+    # ...and a path with "/" matches from the root, with fnmatch's "*" (which crosses "/").
+    assert is_ignored("tests/cli/.venv/lib/x.py", ["tests/cli/.venv/"])
+    assert not is_ignored("x/tests/cli/.venv/y", ["tests/cli/.venv/"])
+    assert dir_ignored("tests/cli/.venv/lib", ["tests/cli/.venv/"])
+    assert is_ignored("a/b/c.go", ["a/*.go"]) and not is_ignored("z/a/b.go", ["a/*.go"])
+    assert is_ignored(".claude/settings.local.json", [".claude/settings.local.json"])
+    assert not is_ignored("x/.claude/settings.local.json", [".claude/settings.local.json"])
+
+
+def test_craze_repo_ignores_are_the_template_gitignore():
+    """CRAZE_REPO_IGNORES is the template commit's .gitignore, line for line (X15)."""
+    text = git(paths.REPO_ROOT, "show", f"{paths.CRAZE_TEMPLATE_COMMIT}:.gitignore", check=False)
+    if not text:
+        pytest.skip("the craze template commit is not in this checkout")
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip() and not ln.strip().startswith("#")]
+    assert lines == CRAZE_REPO_IGNORES
+    assert not any(ln.startswith("!") for ln in lines)  # no negations to support
+
+
+def test_ignores_for_adds_the_craze_repo_ignores_to_craze_tasks_only():
+    tasks = load_tasks()
+    craze, fixture = tasks["T-E1"], tasks["smoke-explain"]
+    assert craze.repo_kind == "craze" and fixture.repo_kind == "fixture"
+    got = ignores_for(craze, ["state/"])
+    assert all(p in got for p in CRAZE_REPO_IGNORES) and got[-1] == "state/"
+    assert ignores_for(fixture) == GENERATED_IGNORES + fixture.ignore
+    assert "/bin/" not in ignores_for(fixture) and "/bin/" not in ignores_for(None)
+
+
+def test_compare_ignores_the_craze_repo_build_outputs_for_additions_only():
+    craze, fixture = load_tasks()["T-E1"], load_tasks()["smoke-explain"]
+    start = {"internal/x.go": "f:0644:a", "bin/tracked.sh": "f:0755:a", "tests/cli/.venv/pinned.cfg": "f:0644:a",
+             "gone/y.go": "f:0644:a"}
+    final = {
+        "internal/x.go": "f:0644:a",
+        "bin/tracked.sh": "f:0755:b",  # tracked, under an ignored pattern: still a change
+        "tests/cli/.venv/pinned.cfg": "f:0644:a",
+        "bin/craze": "f:0755:c",
+        "bin/craze-fake-agent": "f:0755:c",
+        "tests/cli/.venv/x": "f:0644:c",
+        "tests/cli/.venv/lib/python3/site.py": "f:0644:c",
+        "coverage.out": "f:0644:c",
+        ".claude/settings.local.json": "f:0644:c",
+        "internal/bin/new.go": "f:0644:c",  # not the root bin: counts
+        "NOTES.md": "f:0644:c",
+    }
+    d = compare(start, final, ignores_for(craze))
+    assert d == {"added": ["NOTES.md", "internal/bin/new.go"], "modified": ["bin/tracked.sh"], "deleted": ["gone/y.go"]}
+    # A tracked file under an ignored pattern that is deleted still counts too.
+    gone = dict(final)
+    del gone["tests/cli/.venv/pinned.cfg"]
+    assert "tests/cli/.venv/pinned.cfg" in compare(start, gone, ignores_for(craze))["deleted"]
+    # A fixture task gets no such ignores: the same additions count.
+    fx = compare(start, final, ignores_for(fixture))
+    assert "bin/craze" in fx["added"] and "tests/cli/.venv/x" in fx["added"]
+
+
+def test_craze_repo_ignores_also_hide_a_directory_named_like_a_bare_pattern():
+    """git ignores a directory sharing a bare (no trailing "/") pattern's name too -- and
+    everything under it -- not just a file of that name (review r1-c11/c12 P3)."""
+    craze = load_tasks()["T-E1"]
+    start = {"go.mod": "f:0644:a"}
+    final = {
+        "go.mod": "f:0644:a",
+        "coverage.out/x.go": "f:0644:c",  # "coverage.out" is a bare pattern in CRAZE_REPO_IGNORES
+        "sub/.DS_Store/y": "f:0644:c",  # ".DS_Store" too, nested and anywhere
+    }
+    d = compare(start, final, ignores_for(craze))
+    assert d["added"] == []
+
+
+def test_generated_ignores_bare_pattern_stays_file_only_for_a_fixture_task():
+    """GENERATED_IGNORES' bare "*.test" keeps this module's plain meaning (file-only): a
+    directory named "x.test" is not ignored, nor is a file under it (pinned, review P3 --
+    the pattern language is unchanged for every caller but CRAZE_REPO_IGNORES)."""
+    fixture = load_tasks()["smoke-explain"]
+    start = {"go.mod": "f:0644:a"}
+    final = {"go.mod": "f:0644:a", "x.test/y.go": "f:0644:c"}
+    d = compare(start, final, ignores_for(fixture))
+    assert d["added"] == ["x.test/y.go"]
 
 
 def test_facts_and_executed_code():
@@ -376,6 +474,26 @@ def test_tests_checks_need_a_trusted_runner_and_expected_ids(tmp_path):
     (dst / "task.toml").write_text(text.replace('runner = "pytest"', 'command = ["true"]'))
     with pytest.raises(TaskError):
         load_task(dst)
+
+
+def test_task_loading_rejects_a_repeated_check_name(tmp_path):
+    """review r1-c11/c12 P2: rescore indexes a task's checks by name, so two checks
+    sharing a name (whatever `checks.result()` would record) must never load."""
+    src = paths.TASKS_DIR / "smoke-explain"
+    dst = tmp_path / "tasks" / "smoke-explain"
+    shutil.copytree(src, dst)
+    text = (dst / "task.toml").read_text()
+    # smoke-explain already has a check named "facts"; add a second one under that name.
+    text += '\n[[checks]]\ntype = "no_writes"\nname = "facts"\n'
+    (dst / "task.toml").write_text(text)
+    with pytest.raises(TaskError, match="duplicate check name 'facts'"):
+        load_task(dst)
+
+
+def test_every_shipped_task_has_unique_check_names():
+    for t in load_tasks().values():
+        names = [c["name"] for c in t.checks]
+        assert len(names) == len(set(names)), (t.id, names)
 
 
 @needs_bwrap

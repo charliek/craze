@@ -38,6 +38,40 @@ IMPORT_MESSAGE = "Import workspace"
 # Generated artefacts never count as writes (plan 029 §3.1.5).
 GENERATED_IGNORES = ["__pycache__/", "*.pyc", ".pytest_cache/", "*.test"]
 
+# The craze repository's own .gitignore at the template commit (paths.CRAZE_TEMPLATE_COMMIT),
+# one entry per line, comments and blank lines dropped (plan 029 X15). A craze-repo task's
+# own ignored build outputs -- bin/craze from `make build`, tests/cli/.venv from `make
+# test-cli` -- are what verifying leaves behind, and git (so the run's diff.patch) never
+# shows them; they are no change. Each line already means here what it means to git: a
+# leading "/" anchors at the root, a "/" inside a pattern matches from the root, a bare
+# name matches at any depth. This list is kept as the file's own text -- git's extra rule
+# that a pattern without a trailing "/" also matches a directory of that name (and
+# everything under it) is layered on at the one place these patterns are added
+# (ignores_for, via _dir_and_file_forms), not baked into the list itself (review r1-c11/c12
+# P3). The file has no "!" negations, which this language does not support.
+CRAZE_REPO_IGNORES = [
+    "/bin/",
+    "/scratch/",
+    "/dist/",
+    ".idea/",
+    ".vscode/",
+    "*.swp",
+    "*.swo",
+    "coverage.out",
+    "*.test",
+    "tests/cli/.venv/",
+    "__pycache__/",
+    "*.pyc",
+    ".DS_Store",
+    ".venv/",
+    "site-build/",
+    "/smoke-captures/",
+    "/.cache/",
+    ".claude/settings.local.json",
+    ".claude/projects/",
+    ".claude/worktrees/",
+]
+
 
 class WorkspaceError(RuntimeError):
     pass
@@ -322,9 +356,32 @@ def materialise(task: Task, dest: Path, cache: Path | None = None) -> Start:
     return Start(commit=commit, manifest=build_manifest(dest), isolation=isolation)
 
 
+def _dir_and_file_forms(patterns: list[str]) -> list[str]:
+    """Git's directory semantics for a bare pattern (review r1-c11/c12 P3): a pattern
+    with no trailing "/" -- "coverage.out", "*.swp", ".DS_Store" -- matches a *file* of
+    that name here (:func:`is_ignored`), but in git it also matches a *directory* of that
+    name, and so everything under it. Each such pattern is added a second time with a
+    trailing "/", so :func:`dir_ignored` catches the directory case too; a pattern that
+    already ends in "/" is directory-only already and is passed through once. This is
+    only for a caller that wants git's fuller meaning (``CRAZE_REPO_IGNORES``, whose
+    patterns are real gitignore lines) -- ``GENERATED_IGNORES``, a task's own ``ignore``
+    list and a runner's ``workspace_state`` keep meaning exactly what this module's
+    pattern language says (file-only unless written with a trailing "/")."""
+    out = []
+    for p in patterns:
+        out.append(p)
+        if not p.endswith("/"):
+            out.append(p + "/")
+    return out
+
+
 def ignores_for(task: Task | None, extra: list[str] | None = None) -> list[str]:
     out = list(GENERATED_IGNORES)
     if task is not None:
+        if task.repo_kind == "craze":
+            # The task repository's own ignored build outputs (X15), with git's directory
+            # semantics (P3): a bare pattern also hides a directory of that name.
+            out += _dir_and_file_forms(CRAZE_REPO_IGNORES)
         out += task.ignore
     out += extra or []
     return out
@@ -333,15 +390,29 @@ def ignores_for(task: Task | None, extra: list[str] | None = None) -> list[str]:
 # -- manifests ---------------------------------------------------------------------------
 
 
+def _anchored(rel: str, pat: str, prefix: bool) -> bool:
+    """``rel`` against a root-anchored pattern (its leading "/" removed), one path
+    component per pattern component, so "*" never crosses a "/" (as in gitignore). With
+    ``prefix``, ``rel`` may continue below the match (a directory's contents)."""
+    want, got = pat.split("/"), rel.split("/")
+    if len(got) < len(want) or (not prefix and len(got) != len(want)):
+        return False
+    return all(fnmatch.fnmatch(g, w) for g, w in zip(got, want))
+
+
 def dir_ignored(rel_dir: str, patterns: list[str]) -> bool:
     """A directory pattern ends in "/": a bare name matches that directory anywhere,
-    a path with "/" matches from the workspace root."""
+    a path with "/" matches from the workspace root, and a leading "/" anchors it at the
+    root as in gitignore ("/bin/" is the root's bin directory, never internal/bin)."""
     base = rel_dir.rsplit("/", 1)[-1]
     for pat in patterns:
         if not pat.endswith("/"):
             continue
         name = pat.rstrip("/")
-        if "/" in name:
+        if name.startswith("/"):
+            if _anchored(rel_dir, name[1:], prefix=True):
+                return True
+        elif "/" in name:
             if rel_dir == name or rel_dir.startswith(name + "/") or fnmatch.fnmatch(rel_dir, name):
                 return True
         elif fnmatch.fnmatch(base, name):
@@ -350,6 +421,9 @@ def dir_ignored(rel_dir: str, patterns: list[str]) -> bool:
 
 
 def is_ignored(rel: str, patterns: list[str]) -> bool:
+    """A file pattern (no trailing "/"): a bare name matches the file's name at any
+    depth, a path with "/" is matched against the whole path, and a leading "/" anchors
+    it at the root ("/x.txt" is the root's x.txt only)."""
     parts = rel.split("/")
     for i in range(1, len(parts)):
         if dir_ignored("/".join(parts[:i]), patterns):
@@ -357,7 +431,10 @@ def is_ignored(rel: str, patterns: list[str]) -> bool:
     for pat in patterns:
         if pat.endswith("/"):
             continue
-        if "/" in pat:
+        if pat.startswith("/"):
+            if _anchored(rel, pat[1:], prefix=False):
+                return True
+        elif "/" in pat:
             if fnmatch.fnmatch(rel, pat):
                 return True
         elif fnmatch.fnmatch(parts[-1], pat):
@@ -405,8 +482,9 @@ def oversize(manifest: dict[str, str]) -> list[str]:
 
 def compare(start: dict[str, str], final: dict[str, str], ignores: list[str] | None = None) -> dict[str, list[str]]:
     """Changes from ``start`` to ``final``. Every path present at the start is always
-    compared (a tracked file matching an ignore pattern still counts); generated-file
-    ignores apply only to additions."""
+    compared (a tracked file matching an ignore pattern still counts); the ignores --
+    generated files, harness state, a craze-repo task's own .gitignore -- apply only to
+    additions."""
     ignores = ignores or []
     added = sorted(p for p in set(final) - set(start) if not is_ignored(p, ignores))
     deleted = sorted(set(start) - set(final))
