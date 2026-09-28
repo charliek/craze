@@ -108,11 +108,17 @@ through the holder's host id, after one line on stderr:
 craze: that session is open in another craze (pid N); attaching
 ```
 
-The flags a *new* session would take (`--model`, `--ask`, `--plan`,
-`--agent-bin`, `--provider`) do not apply to an attach; they are ignored, and
-the line names the ones this command line gave, e.g. `(ignored: --model)`.
-Nothing is built, spawned, bound, or claimed for it. Two cases keep the
-plain refusal instead of attaching:
+Most flags a *new* session would take (`--model`, `--ask`, `--plan`,
+`--agent-bin`) do not apply to an attach; they are ignored, and the line
+names the ones this command line gave, e.g. `(ignored: --model)`. Nothing is
+built, spawned, bound, or claimed for it. **`--provider` is not one of
+them** — an explicit `--provider` is validated and filters the session index
+*before* the lookup that finds the row to claim ([above](#-continue-and-resume)),
+so a `--provider` that excludes the held session's own provider means that
+row is never found at all: the ordinary no-match refusal fires
+(`craze: no session to continue … for provider …`), and the attach path is
+never reached. Two cases keep the plain "session held" refusal instead of
+attaching:
 
 - **A legacy row** (no durable craze id yet, from before `crazeId` existed)
   is refused before the claim, whose `EnsureCrazeID` would otherwise mint

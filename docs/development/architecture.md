@@ -26,7 +26,7 @@ flowchart LR
 | `internal/acp` | JSON-RPC over stdio: spawn, framing, `session/new`, prompt, and the blocking agent→client requests (permission, question, plan) |
 | `internal/agent` | Session wrapper: events, tool merge, todos, model/mode catalog |
 | `internal/backend` | The TUI's seam onto a session (plan 027 §3.12): the `Backend` interface, `Item`, `SessionInfo`, the epoch sentinels (`ErrStaleEpoch`, `ErrOutcomeUnknown`) both the in-process and socket implementations share |
-| `internal/tui` | Bubbletea screen: transcript, cards, composer, themes, slash, mouse; every engine call goes through a command gate onto a `Backend` (in process, or over the socket for `craze attach`) |
+| `internal/tui` | Bubbletea screen: transcript, cards, composer, themes, slash, mouse; a command gate carries almost every engine call onto a `Backend` (in process, or over the socket for `craze attach`) — a hidden ask's answer and a sub-agent stop are the exceptions, fire-and-forget `tea.Cmd`s that are never gated |
 | `internal/protocol` | The control-socket wire, protocol 1 (plan 027 §3.2–§3.4): envelope, methods, notifications, codes, reasons, limits and the JSON Schema — the one place `internal/control`, `internal/remote` and `internal/fakehost` take their shapes from |
 | `internal/control` | The control socket's server (plan 027 §3.7): connections, `hello`, the binding table, command handlers, attach and forwarding, run by any process that serves a session (`craze`'s own TUI process today) |
 | `internal/remote` | The control socket's Go client (plan 027 §3.14): `remote.Session` implements `backend.Backend` over the wire — dial, resume, the reply barrier, reconnect and resend rules — for `craze attach` and `craze frame`'s socket-transport goldens |

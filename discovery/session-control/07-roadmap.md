@@ -174,19 +174,33 @@ proof): two TUIs on one live session show the same transcript
 (`TestSocketGoldensMatchTheEngine`, `TestAttachMidTurnOverTheSocketReproducesTheFirst`,
 V4/V6); a prompt from either appears in both (V4/V6); an ask answered in one
 closes in the other (V4/V6); kill and reattach resumes silently from
-`afterSeq` (`TestAKilledConnectionResumesSilently`,
-`TestAClientProcessRestartResumesFromItsCursor`, V3/V4/V6); a stalled client
+`afterSeq` — the silent cursor resume itself is `TestAKilledConnectionResumesSilently`
+and `TestAClientProcessRestartResumesFromItsCursor` (`internal/remote`) plus
+PR 2's V3 live legs (the bridge killed and resumed by its token and cursor;
+the smoke client itself `kill -9`-ed and restarted from its persisted cursor
+file); `craze attach` has no persisted cursor of its own, so V4/V6 leg 7 is a
+different case, a snapshot attach after the kill, not a cursor resume; a stalled client
 is reset `slow_consumer` without delaying the agent
 (`TestAStalledClientIsResetWithoutDelayingTheAgent`); the socket refuses
 another uid (`TestAnotherUIDIsRefusedBeforeAByteIsRead`, V5); live smoke ran
 on Linux (cursor, grok) and the mac-mini (grok, native; cursor skipped there,
 the login keychain over ssh, as every earlier phase found too); and SD-33's
 addition — the full TUI runs unchanged over the socket, goldens included — is
-`golden_manifest_test.go`'s 119-file manifest, both transports byte-identical
-except the six picker frames (in process only). No golden moved in PR 3 or
-PR 4. The execution amendments (X1–X55), the review record, and the live
-smoke's findings and backlog are in `12` and `13`. **S3 (the shed lane) is
-next.**
+`golden_manifest_test.go`'s 119-file manifest (113 goldens under both
+transports, six picker frames in process only), enforced two ways since C29a
+(astra r69): `assertGolden` spends the *frame's own* transport credit
+(`internal/tui/frame_test.go:410-425`), and `TestMain`'s `goldenCoverage`
+(`internal/tui/golden_manifest_test.go:301`) fails an unfiltered run — no
+`-run`/`-skip`/`-list`/`-update` — if any manifest golden was never asserted
+under every transport it lists. `make test`/`test-race` and CI's `test` job
+pin `CRAZE_GOLDEN_TRANSPORT=both` (Makefile, `.github/workflows/ci.yml`); a
+local run narrows the matrix only by running `go test` itself. A socket
+run's verdict also checks that no reset escaped it: a final `session.sync`
+barrier on the model's own connection, and the view close's `session.detach`
+answered, both read through the tap (`internal/tui/frame_socket_test.go:335-409`).
+No golden moved in PR 3 or PR 4. The execution amendments (X1–X55), C29a's
+fix round, the review record, and the live smoke's findings and backlog are
+in `12` and `13`. **S3 (the shed lane) is next.**
 
 ### S3 — shed lane
 
