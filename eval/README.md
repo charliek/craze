@@ -306,7 +306,9 @@ uv run crazeeval captures --run DIR [--out DIR] [--unseal]
 # Recompute a finished batch's diff and its diff-derived checks (no_writes, diff_scope)
 # from each rep's final attempt's manifests with today's ignores (X15); every other
 # check stands, objective_pass is recomputed. Held-out runs only with --unseal; --dry-run
-# prints the summary and writes nothing. Reads manifests, batch.json and result.json only.
+# prints the summary and writes nothing. Reads manifests, batch.json and result.json, plus
+# the current task definitions (hashed to check each run's task fingerprint against the
+# batch); never answers, captures or anything key-bearing.
 uv run crazeeval rescore --batch DIR [--unseal] [--dry-run]
 ```
 
@@ -426,9 +428,10 @@ Each batch writes:
 - `results.jsonl`
 - `summary.json`
 - `proxy-refusals.jsonl`
-- `rescore.jsonl` (after `crazeeval rescore`): one line per rescored run -- run id and
-  key, task, harness, model, the checks whose verdict flipped, `objective_pass` before and
-  after; a held-out run's line goes to `heldout/rescore.jsonl`. A rescored run's
+- `rescore.jsonl` (after `crazeeval rescore`): one line per changed run -- an unchanged
+  run writes no line -- with the run id and key, task, harness, model, the checks whose
+  verdict flipped, `objective_pass` before and after; a held-out run's line goes to
+  `heldout/rescore.jsonl`. A rescored run's
   `result.json` (rep and attempt level) carries a `rescored` record, and its original
   is kept once, never overwritten, as `result.pre-rescore.json` beside it. `results.jsonl`
   and `summary.json` keep the scores as the batch wrote them.
