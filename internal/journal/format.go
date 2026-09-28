@@ -115,10 +115,11 @@ const (
 	DiagRecordOmitted      = "record_omitted"       // an event journaled without its body
 	DiagClosing            = "closing"              // the session's log is closing
 	// DiagPromptSources is what a native session froze into its system
-	// prompt at Open (plan 022 §3.4): the prompt's size and digest, and one
-	// "<sha256> <bytes> <path>" per instruction document and per catalog row.
-	// It is the only record of which files a session read, because the prompt
-	// itself is never stored.
+	// prompt at Open (plan 022 §3.4): the prompt's size and digest, one
+	// "<sha256> <bytes> <path>" per instruction document and per catalog row,
+	// and the session-start section's "<sha256> <bytes>" (snapshot, plan 029
+	// §3.2 L2). It is the only record of which files a session read, because
+	// the prompt itself is never stored.
 	DiagPromptSources = "prompt_sources"
 	// DiagAskLostDelivery is an ask whose decision never reached the agent: it
 	// was answered, and something else — a cancelled reply that won the race,

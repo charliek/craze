@@ -69,11 +69,14 @@ func (s *Session) openResumed(opts Options) (_ *Session, err error) {
 
 	// The tools and the prompt are the header's profile's, whatever model the
 	// session resumes on, and are rebuilt: the prompt is frozen per
-	// incarnation (D-30), from this Open's Options.Prompt. The mode only seeds
+	// incarnation (D-30), from this Open's Options.Prompt and Options.Snapshot.
+	// Its session-start section has no model line: the model is resolved
+	// below (resumeModel), after the store's Open has recorded the prompt's
+	// digest, so it is not known here (plan 029 §2.1, §9). The mode only seeds
 	// the gate; the session's own is set below, before it is handed out.
 	ws := filepath.Clean(opts.Workspace)
 	if s.tools, err = openTools(opts.Home, ws, modeAgent, opts.Asker, opts.Table, s.getenv,
-		profileRef(profile), opts.Prompt, opts.Personas, nil, s.subs, opts.tools); err != nil {
+		profileRef(profile), opts.Prompt, sessionStart{snap: opts.Snapshot}, opts.Personas, nil, s.subs, opts.tools); err != nil {
 		return nil, err
 	}
 	s.system = s.tools.system

@@ -813,7 +813,7 @@ func (r *subagents) openChild(h *childHandle, call tool.SubagentCall, persona to
 		ID: h.id, ParentSession: parent.ID(), ParentCall: call.ID,
 		Type: persona.Name, PersonaPath: persona.Path, Role: persona.Role,
 		AllTools: all, Tools: ids,
-		BaseSystem: parent.system, BaseProfile: parent.tools.profile,
+		BaseSystem: parent.system, BaseProfile: parent.tools.profile, top: parent.base.top,
 		Mode: mode, Strictness: &h.strictness, Locks: parent.tools.locks,
 	}))
 }
@@ -1080,16 +1080,16 @@ type childPanic struct{ value any }
 func (p childPanic) Error() string { return fmt.Sprintf("it panicked: %v", p.value) }
 
 // childOpenOptions are the Options a child of s opens with (§3.2): the
-// parent's own values, its extras cloned, with the child's model and effort
-// and c. Its test seams go with them, so a test's profile and gate are the
-// child's too.
+// parent's own values, its extras cloned and its session-start snapshot, with
+// the child's model and effort and c. Its test seams go with them, so a test's
+// profile and gate are the child's too.
 func (s *Session) childOpenOptions(alias, effort string, c *ChildOptions) Options {
 	s.mu.Lock()
 	table := s.table
 	s.mu.Unlock()
 	return Options{
 		Home: s.base.home, Workspace: s.base.workspace, Table: table,
-		Model: alias, Effort: effort, Prompt: s.base.prompt.clone(), Child: c,
+		Model: alias, Effort: effort, Prompt: s.base.prompt.clone(), Snapshot: s.base.snapshot, Child: c,
 		NewModel: s.newModel, Getenv: s.getenv, Now: s.base.now, Version: s.base.version,
 		MatchModel: s.matchModel, Warn: s.warn,
 		tools: s.base.seams,
@@ -1102,7 +1102,12 @@ type childBase struct {
 	home, workspace, version string
 	now                      func() time.Time
 	prompt                   PromptExtras // a clone, taken at Open
-	seams                    toolSeams
+	// snapshot is Options.Snapshot and top the model the session started on,
+	// zero for a resumed incarnation: the session-start section a child on
+	// another profile renders again (plan 029 §3.2 L2).
+	snapshot SessionStart
+	top      startModel
+	seams    toolSeams
 }
 
 // clone is p with slices of its own; their elements are strings.

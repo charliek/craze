@@ -64,9 +64,15 @@ type ChildOptions struct {
 	// profile it was written for. A child whose model resolves that profile
 	// sends BaseSystem verbatim with its role section after it; one whose
 	// model resolves another builds its own from Options.Prompt, which the
-	// runner fills with a clone of the parent's extras (§3.2).
+	// runner fills with a clone of the parent's extras (§3.2), and
+	// Options.Snapshot, which it fills with the parent's snapshot.
 	BaseSystem  string
 	BaseProfile string
+	// top is the model the parent — the top-level session — started on, zero
+	// when it was resumed: the model line of the session-start section a child
+	// on another profile renders, which is the parent's section rendered again
+	// (sessionStart). Set by the runner alone, from the parent's childBase.
+	top startModel
 	// Mode is the parent's mode when the child opens; Options.Mode is not
 	// read for a child. SetMode on a child is ErrChildMode (§3.5).
 	Mode string
@@ -134,8 +140,17 @@ var childFramingTexts = append(slices.Clone(framingTexts), "your role as a sub-a
 // result redacted and only then measured and cut, since every one of those
 // can change its length (X14's rule). A role with nothing in it leaves the
 // heading and the preamble, which are the whole contract with the parent.
-func renderChildRole(role string, red *redact.Replacer) string {
-	section := childRoleHeading + "\n\n" + childRolePreamble
+//
+// The preamble opens with the model the sub-agent runs on (own; zero leaves
+// the line out). The session-start section before it, inherited from the
+// parent, names the model the top-level session started on, which is not
+// necessarily this one (plan 029 §3.2 L2).
+func renderChildRole(role string, own startModel, red *redact.Replacer) string {
+	section := childRoleHeading + "\n\n"
+	if own != (startModel{}) {
+		section += "You run on " + own.phrase(red) + ".\n"
+	}
+	section += childRolePreamble
 	text := red.String(escapeFramingOf(normalizeLines(role), childFramingTexts))
 	if strings.TrimSpace(text) == "" {
 		return section
@@ -160,8 +175,8 @@ func renderChildRole(role string, red *redact.Replacer) string {
 // here: base must stay the parent's bytes, and the framing is craze's. So a
 // prompt the redactor would change refuses the child (errChildPromptKey), and
 // the parent's model reads a failed sub-agent.
-func withChildRole(base, role string, red *redact.Replacer) (string, error) {
-	out := base + "\n" + renderChildRole(role, red)
+func withChildRole(base, role string, own startModel, red *redact.Replacer) (string, error) {
+	out := base + "\n" + renderChildRole(role, own, red)
 	if red.String(out) != out {
 		return "", errChildPromptKey
 	}

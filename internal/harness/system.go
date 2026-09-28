@@ -24,21 +24,32 @@ import (
 // (plan 022 §3.4). The harness reads no file for either; both arrive as data
 // in Options.Prompt, resolved once, before Open.
 //
-// A sub-agent's prompt has a third part, its role, rendered after both with a
-// budget of its own (child.go, plan 026 §3.2). A parent's prompt never has
-// one, so nothing here changes for it.
+// After both comes the session-start section: the date and the workspace's
+// git state as the adapter collected them before Open, and the model the
+// session started on (withSnapshot, plan 029 §3.2 L2), from Options.Snapshot.
+// A session opened without one has no such section.
 //
-// Open calls both once and the session sends the result, unchanged, with
-// every request: it holds no clock, no git state, and nothing else that
-// changes between requests, so every request in a session starts with the
-// same bytes and a provider's prefix cache can hit (plan 018 §3.7, owner
-// decision 6, D-30). The profile's text is a byte-identical prefix whether
-// there are extras or not, and with none the prompt is the profile's text
-// alone. Changing a byte of it changes every session's prompt-cache prefix
-// and the hash in new transcripts' headers; testdata/system_prompt.golden
-// pins the opencode profile's and testdata/system_prompt_extras.golden the
-// rendering of the extras after it. It is never stored; the transcript
-// header records its SHA-256.
+// A sub-agent's prompt has one more part, its role, rendered after all of
+// them with a budget of its own (child.go, plan 026 §3.2); on its parent's
+// profile everything before the role is the parent's bytes, the section
+// included. A parent's prompt never has a role, so nothing here changes for
+// it.
+//
+// Open calls all of them once and the session sends the result, unchanged,
+// with every request, so every request in a session starts with the same
+// bytes and a provider's prefix cache can hit (plan 018 §3.7, owner decision
+// 6, D-30). The prompt is identical for identical Options: the harness holds
+// no clock and runs no command, and the one part that varies between sessions
+// is the session-start section, rendered last from Options.Snapshot (D-67,
+// which amends D-30), so the profile's text and the extras stay a prefix
+// every session on a workspace shares. The profile's text is a byte-identical
+// prefix whether there are extras or not, and with none the prompt is the
+// profile's text alone. Changing a byte of it changes every session's
+// prompt-cache prefix and the hash in new transcripts' headers;
+// testdata/system_prompt.golden pins the opencode profile's,
+// testdata/system_prompt_extras.golden the rendering of the extras after it,
+// and testdata/system_prompt_snapshot.golden the section after both. It is
+// never stored; the transcript header records its SHA-256.
 func systemPrompt(p tool.Profile, workspace, goos, shell string) string {
 	return p.System(tool.SystemEnv{Workspace: workspace, OS: goos, Shell: shell})
 }
@@ -402,8 +413,11 @@ func foldLine(s string) string {
 // what is shown is what is opened.
 func absClean(p string) bool { return p != "" && filepath.IsAbs(p) && filepath.Clean(p) == p }
 
-// framingTexts are the words that open craze's own sections, lowercased.
-var framingTexts = []string{"project and user instructions", "skills and commands", "from:"}
+// framingTexts are the words that open craze's own sections, lowercased. The
+// session-start section's is among them although it comes after the extras: a
+// document that wrote it could otherwise put a date or a git state of its own
+// under craze's heading.
+var framingTexts = []string{"project and user instructions", "skills and commands", "from:", "session start"}
 
 // escapeFraming is text with a backslash before every line that would read as
 // one of craze's own headings, and nothing else touched. The headings are the
@@ -493,4 +507,333 @@ func setextUnderline(line string) bool {
 		return false
 	}
 	return strings.Trim(t, t[:1]) == ""
+}
+
+// SessionStart is what the adapter saw when the session started (plan 029
+// §3.2 L2): the local date and, for a workspace inside a git work tree, git's
+// own account of it. The harness holds no clock and runs no command (D-02), so
+// the adapter collects it once per Open, before it, and hands it over as data
+// in Options.Snapshot; withSnapshot renders it as the frozen prompt's last
+// section. Every field is optional, and the zero value renders nothing.
+//
+// The name is not Snapshot because craze already has one: internal/agent's,
+// the session's state as a client folds it, which this is not.
+type SessionStart struct {
+	// Date is the local date the session started on, as "2006-01-02
+	// (Monday)".
+	Date string
+	// Branch is the current branch and DefaultBranch the one origin/HEAD
+	// names; "" for a detached HEAD, or a remote with no HEAD, or a part the
+	// adapter could not collect.
+	Branch, DefaultBranch string
+	// Status is `git status --porcelain=v1 --branch`'s output and Log is `git
+	// log --oneline -n 5`'s, already bounded by the adapter.
+	Status, Log string
+}
+
+// The session-start section: its heading, which framingTexts protects, and
+// the sentence that says what the git block under it is.
+const (
+	snapshotHeading  = "# Session start"
+	snapshotGitIntro = "The block below is the workspace's git state, a snapshot taken from git at\n" +
+		"session start. It does not update during the session: run git for the current\n" +
+		"state.\n"
+
+	// maxSnapshotSection bounds the whole section as it is sent, heading
+	// included (§3.2 L2): measured after the final redaction, which can grow
+	// it, so the status gets whatever room the rest leaves then.
+	maxSnapshotSection = 6 << 10
+
+	// The per-field bounds. They are the adapter's own (internal/agent's
+	// native_snapshot.go), applied again here after the harness's own
+	// cleaning and redaction, because the harness cannot know a caller
+	// applied them and because redaction can grow a field.
+	maxSnapshotLine        = 200     // one line: the date, a branch name, a model's name or its provider/wire pair
+	maxSnapshotStatus      = 4 << 10 // the status's bytes, the truncation marker's line included
+	maxSnapshotStatusLines = 100     // the status's lines, the marker's included
+	maxSnapshotCommits     = 5       // lines of the log
+	maxSnapshotCommit      = 160     // bytes of one line of the log
+)
+
+// startModel names a model the way the prompt does: its name from the table,
+// and the provider/wire pair a request goes to. The zero value is no model.
+type startModel struct{ name, provider, wire string }
+
+// sessionStart is what one Open says of its start: the adapter's snapshot, the
+// model the top-level session started on, and — for a sub-agent — the model
+// the sub-agent runs on, which its role section names (renderChildRole).
+//
+// top is zero for a resumed incarnation, whose prompt is frozen before its
+// model resolves (resume.go, plan 029 §2.1), so its section has no model line.
+// A sub-agent's top is its parent's, whatever model the sub-agent itself runs
+// on: the section is the parent's, inherited as bytes on the parent's profile
+// and rendered again from the same data on another.
+type sessionStart struct {
+	snap SessionStart
+	top  startModel
+	own  startModel
+}
+
+// phrase is m as the prompt writes it: its name, then the provider/wire pair
+// as code — Model A (`test/wire-a`) — each folded onto one line, redacted and
+// bounded like any other field of the section.
+func (m startModel) phrase(red *redact.Replacer) string {
+	name := cutLine(red.String(foldLine(m.name)), maxSnapshotLine)
+	id := cutLine(red.String(foldLine(m.provider+"/"+m.wire)), maxSnapshotLine)
+	return name + " (" + codeSpan(id) + ")"
+}
+
+// withSnapshot is system with the session-start section after it, separated
+// by the blank line the extras' sections are: the date, for a new session the
+// model the top-level session started on (top; zero leaves the line out), and
+// the git state in a fenced block (renderSnapshot). An empty snapshot adds
+// nothing, model line included, so system comes back byte for byte.
+//
+// system is already whole — the profile's text and the extras, redacted and
+// checked by withPromptExtras — and must stay the prefix of what this returns,
+// because it is the part every session on the workspace shares while the
+// section is the part that varies between them (D-67). So the key rule is
+// withPromptExtras': every field is redacted as it is rendered, the whole is
+// redacted once more to close the joins between fields, and a key that pass
+// would have to rewrite part of system to remove — one spelled across its last
+// bytes and the section's first — refuses the session (errProfileKey) rather
+// than move the prefix.
+//
+// The final pass has two more ways to break the section, and both are checked
+// on what it left, since that is what is sent. It can rewrite craze's own
+// framing, when a key is spelled across it — a fence made of the key's
+// backticks, say — and leave quoted git text, a forged heading included,
+// outside its quotation: that refuses (errSnapshotKey, framingIntact). And it
+// grows what it redacts, a marker being longer than most keys, so the section
+// is measured after it: one over its bound is rendered again with that much
+// less room for the status, and one that is over with no status left refuses
+// (errSnapshotKey).
+func withSnapshot(system string, snap SessionStart, top startModel, red *redact.Replacer) (string, error) {
+	for room := maxSnapshotStatus; ; {
+		r := renderSnapshot(snap, top, red, room)
+		if r.text == "" {
+			return system, nil
+		}
+		out := red.String(system + "\n" + r.text)
+		if !strings.HasPrefix(out, system) {
+			return "", errProfileKey
+		}
+		sent := out[len(system)+1:]
+		if !framingIntact(sent, r.fence) {
+			return "", errSnapshotKey
+		}
+		over := len(sent) - maxSnapshotSection
+		switch {
+		case over <= 0:
+			return out, nil
+		case r.status == 0:
+			return "", errSnapshotKey
+		}
+		room = r.status - over
+	}
+}
+
+// snapshotRender is one rendering of the section: its text, "" when the
+// snapshot has nothing to say; the fence around its git block, "" when it has
+// none; and how many bytes of it the status took.
+type snapshotRender struct {
+	text, fence string
+	status      int
+}
+
+// renderSnapshot is the section, with at most statusRoom bytes of status.
+//
+// Everything in snap came from the workspace — a branch name, a file name, a
+// commit subject — and a repository controls all of it, so it is read as
+// hostile: the one-line fields are folded (foldLine), the two blocks keep
+// their newlines and lose every other control rune (cleanBlock), and the git
+// text goes inside a fenced block whose fence is longer than any run of
+// backticks in it, where no line of it can close the fence, start a heading of
+// craze's — porcelain's own "## branch" line would otherwise be one — or read
+// as anything but quoted output. Each field is cleaned and redacted and only
+// then bounded, as the extras are (X14): a branch name to maxSnapshotLine, the
+// status to maxSnapshotStatus and maxSnapshotStatusLines with its marker
+// counted in both, the log to maxSnapshotCommits lines of maxSnapshotCommit.
+// The section's own bound is withSnapshot's, measured after the final pass.
+func renderSnapshot(snap SessionStart, top startModel, red *redact.Replacer, statusRoom int) snapshotRender {
+	line := func(s string) string { return cutLine(red.String(foldLine(s)), maxSnapshotLine) }
+	date, branch, def := line(snap.Date), line(snap.Branch), line(snap.DefaultBranch)
+	log := cutCommits(red.String(cleanBlock(snap.Log)))
+	status := red.String(cleanBlock(snap.Status))
+	if date == "" && branch == "" && def == "" && log == "" && status == "" {
+		return snapshotRender{}
+	}
+	status = cutLines(status, min(maxSnapshotStatus, statusRoom), maxSnapshotStatusLines)
+
+	head := snapshotHeading + "\n\n"
+	if date != "" {
+		head += "Today's date at session start: " + date + "\n"
+	}
+	if top != (startModel{}) {
+		head += "The top-level session started on " + top.phrase(red) + "; a later model switch is not reflected here.\n"
+	}
+	var parts []string
+	names := ""
+	if branch != "" {
+		names += "Current branch: " + branch + "\n"
+	}
+	if def != "" {
+		names += "Default branch: " + def + "\n"
+	}
+	if names != "" {
+		parts = append(parts, names)
+	}
+	if status != "" {
+		parts = append(parts, "git status --porcelain=v1 --branch:\n"+status)
+	}
+	if log != "" {
+		parts = append(parts, "git log --oneline -n 5:\n"+log)
+	}
+	if len(parts) == 0 {
+		return snapshotRender{text: head}
+	}
+	body := strings.Join(parts, "\n")
+	fence := strings.Repeat("`", max(3, longestRun(body, '`')+1))
+	if head != snapshotHeading+"\n\n" {
+		head += "\n"
+	}
+	return snapshotRender{
+		text:   head + snapshotGitIntro + "\n" + fence + "\n" + body + fence + "\n",
+		fence:  fence,
+		status: len(status),
+	}
+}
+
+// framingIntact reports whether sent — the section as the final redaction
+// left it — still has craze's framing where the renderer put it, fence being
+// its git block's ("" for none): the heading first, and for a block the
+// sentence that introduces it with the opening fence after it, once; the
+// closing fence last; and no line between the two that could close the block
+// early.
+//
+// Redaction replaces a key with the marker, which holds no backtick, so it
+// never lengthens a run and cannot make a line inside the block close it. What
+// it can do is replace a fence, or part of the heading or the sentence, when a
+// key is spelled across one; then text that was quoted — a forged heading
+// among it — would be read outside the quotation, and nothing about the
+// section could be changed to prevent it.
+func framingIntact(sent, fence string) bool {
+	if !strings.HasPrefix(sent, snapshotHeading+"\n\n") {
+		return false
+	}
+	if fence == "" {
+		return true
+	}
+	open, closing := snapshotGitIntro+"\n"+fence+"\n", "\n"+fence+"\n"
+	at, end := strings.Index(sent, open), len(sent)-len(closing)
+	if at < 0 || strings.Count(sent, open) != 1 || !strings.HasSuffix(sent, closing) || at+len(open) > end+1 {
+		return false
+	}
+	for _, l := range strings.Split(sent[at+len(open):end+1], "\n") {
+		if l != "" && len(l) >= len(fence) && strings.Trim(l, "`") == "" {
+			return false
+		}
+	}
+	return true
+}
+
+// cutLines is text — whole lines, each ending in a newline — within maxBytes
+// bytes and maxLines lines, truncatedLine counted in both when anything is
+// left out. A first line too long to fit keeps what fits of it, cut at a rune
+// boundary. "" when not even the marker and one byte fit.
+func cutLines(text string, maxBytes, maxLines int) string {
+	if len(text) <= maxBytes && strings.Count(text, "\n") <= maxLines {
+		return text
+	}
+	room := maxBytes - len(truncatedLine)
+	if room < 2 || maxLines < 2 {
+		return ""
+	}
+	var b strings.Builder
+	for n, rest := 0, text; rest != "" && n < maxLines-1; n++ {
+		line, after, _ := strings.Cut(rest, "\n")
+		if b.Len()+len(line)+1 > room {
+			if b.Len() == 0 {
+				b.WriteString(cutLine(line, room-1) + "\n")
+			}
+			break
+		}
+		b.WriteString(line + "\n")
+		rest = after
+	}
+	return b.String() + truncatedLine
+}
+
+// cutCommits is the log within its bounds: its first maxSnapshotCommits
+// lines, each cut to maxSnapshotCommit bytes at a rune boundary.
+func cutCommits(text string) string {
+	if text == "" {
+		return ""
+	}
+	lines := strings.Split(strings.TrimSuffix(text, "\n"), "\n")
+	lines = lines[:min(len(lines), maxSnapshotCommits)]
+	for i, l := range lines {
+		lines[i] = cutLine(l, maxSnapshotCommit)
+	}
+	return strings.Join(lines, "\n") + "\n"
+}
+
+// cleanBlock is s as the lines of a fenced block: a Unicode line or paragraph
+// separator (U+2028, U+2029) made the newline it is, so every line counts as
+// one; every control rune but the newline replaced with U+FFFD, and every byte
+// that is not UTF-8 too, so nothing a repository wrote can move a cursor or
+// hide the text after it; blank lines at either end dropped; and a newline at
+// the end. "" when nothing is left.
+func cleanBlock(s string) string {
+	s = strings.Map(func(r rune) rune {
+		switch {
+		case unicode.In(r, unicode.Zl, unicode.Zp):
+			return '\n'
+		case r != '\n' && unicode.IsControl(r):
+			return utf8.RuneError
+		}
+		return r
+	}, strings.ToValidUTF8(s, string(utf8.RuneError)))
+	s = strings.Trim(s, "\n")
+	if strings.TrimSpace(s) == "" {
+		return ""
+	}
+	return s + "\n"
+}
+
+// cutLine is s within limit bytes, cut at a rune boundary.
+func cutLine(s string, limit int) string {
+	if len(s) <= limit {
+		return s
+	}
+	for limit > 0 && !utf8.RuneStart(s[limit]) {
+		limit--
+	}
+	return s[:limit]
+}
+
+// longestRun is the length of the longest run of c in s.
+func longestRun(s string, c byte) int {
+	longest, run := 0, 0
+	for i := 0; i < len(s); i++ {
+		if s[i] != c {
+			run = 0
+			continue
+		}
+		run++
+		longest = max(longest, run)
+	}
+	return longest
+}
+
+// codeSpan is s as markdown inline code: delimited by one backtick more than
+// the longest run inside it, so no run of s can end the span early, and
+// padded with a space where s itself begins or ends with a backtick, which the
+// delimiter would otherwise absorb.
+func codeSpan(s string) string {
+	ticks := strings.Repeat("`", longestRun(s, '`')+1)
+	if strings.HasPrefix(s, "`") || strings.HasSuffix(s, "`") {
+		s = " " + s + " "
+	}
+	return ticks + s + ticks
 }

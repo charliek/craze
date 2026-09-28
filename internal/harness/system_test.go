@@ -63,13 +63,17 @@ func TestSystemPromptGolden(t *testing.T) {
 }
 
 // TestSystemPromptIsFrozen: two sessions on one workspace, opened at
-// different times, send byte-identical prompts — the profile's, which name
-// the workspace and this OS, and the caller's extras rendered after them; and
-// a turn's transcript header records the prompt's hash, craze's version, the
-// tool profile and the hash of the tools the requests carried. Both runs
-// matter: with extras it is A9's "the same prompt hash over the same inputs",
-// and the hash covering the extras is what puts them under the header with no
-// code of their own.
+// different times with identical Options, send byte-identical prompts — the
+// profile's, which name the workspace and this OS, and the caller's extras
+// rendered after them; and a turn's transcript header records the prompt's
+// hash, craze's version, the tool profile and the hash of the tools the
+// requests carried. The harness holds no clock, so the time between the two
+// Opens changes nothing: a prompt varies between sessions only through
+// Options.Snapshot, the session-start section rendered last (D-67, which
+// amends D-30; TestSessionStartIsTheOnlyVaryingTail), and these sessions
+// have none. Both runs matter: with extras it is A9's "the same prompt hash
+// over the same inputs", and the hash covering the extras is what puts them
+// under the header with no code of their own.
 func TestSystemPromptIsFrozen(t *testing.T) {
 	for _, extras := range []bool{false, true} {
 		t.Run(fmt.Sprintf("extras=%v", extras), func(t *testing.T) {
