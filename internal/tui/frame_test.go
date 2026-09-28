@@ -1792,7 +1792,7 @@ func TestFrameGoldenGrokSubagentCancel100x30(t *testing.T) {
 }
 
 func TestFrameGoldenGrokSubagentLate80x24(t *testing.T) {
-	got := runFakeFrameProvider(t, "grok-subagent-late", 80, 24,
+	got := runFakeFrameProvider(t, "grok-subagent-late-hold", 80, 24,
 		"<wait:idle>go<enter><wait:idle>",
 		agent.GrokProvider(), true)
 	assertGolden(t, "grok-subagent-late-80x24", 80, 24, got)

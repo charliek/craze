@@ -594,6 +594,8 @@ func (s *server) handlePrompt(msg *acp.Message) {
 		s.grokSubagentNested(msg.ID)
 	case "grok-subagent-late":
 		s.grokSubagent(msg.ID, grokSubagentLate)
+	case "grok-subagent-late-hold":
+		s.grokSubagent(msg.ID, grokSubagentLateHold)
 	case "grok-subagent-hold":
 		s.grokSubagent(msg.ID, grokSubagentHold)
 	case "grok-subagent-cancel":
@@ -636,6 +638,26 @@ func (s *server) hang(id json.RawMessage) {
 	}
 	<-ch
 	s.reply(id, map[string]any{"stopReason": acp.StopCancelled})
+}
+
+// holdOpen is hang without the reply: for a turn that has already been
+// answered (finishPrompt already replied to the parent's session/prompt), it
+// blocks the child's goroutine on the same hangWait idiom, closed only by
+// session/cancel, so nothing further is ever sent for the child. The process
+// exiting when the session closes is what ends the block for good.
+func (s *server) holdOpen() {
+	s.mu.Lock()
+	ch := make(chan struct{})
+	s.hangWait = ch
+	already := s.cancelled.Load()
+	if already {
+		s.hangWait = nil
+	}
+	s.mu.Unlock()
+	if already {
+		return
+	}
+	<-ch
 }
 
 // hangAck is hang, plus one agent-message chunk sent before it blocks. hang by
@@ -1084,6 +1106,15 @@ const (
 	// golden of the running row has a last event to wait on instead of racing
 	// the finish the other modes send taskRunFor later.
 	grokSubagentHold
+	// grokSubagentLateHold is grokSubagentLate up through finishPrompt — the
+	// same off-beat parent ending — but the child is then held: no late line,
+	// no subagent_finished, no tool completion, ever. grokSubagentLate's
+	// child finish 400ms later is what TestFrameGoldenGrokSubagentLate80x24
+	// raced under CPU starvation (the socket run's capture settle can outlast
+	// 400ms, catching the child already finished); holding it, like
+	// grokSubagentHold holds the parent turn, leaves the child with nothing
+	// to finish into, so the frame can only ever show it running.
+	grokSubagentLateHold
 )
 
 // grokSubagent is the one-child script: parent thought, spawn_subagent
@@ -1163,7 +1194,7 @@ func (s *server) grokSubagent(id json.RawMessage, mode grokSubagentMode) {
 		s.hang(id)
 		return
 	}
-	if mode == grokSubagentLate {
+	if mode == grokSubagentLate || mode == grokSubagentLateHold {
 		// The parent turn ends midway between two of the TUI's spinner beats,
 		// never on one. The pause above is taskRunFor, the TUI's fastTick is
 		// also 250 ms, and the late golden (grok-subagent-late-80x24,
@@ -1174,6 +1205,12 @@ func (s *server) grokSubagent(id json.RawMessage, mode grokSubagentMode) {
 		// ~125 ms away.
 		time.Sleep(fakeSpinnerBeat / 2)
 		s.finishPrompt(id, acp.StopEndTurn)
+		if mode == grokSubagentLateHold {
+			// Held here for good: no late line, no subagent_finished, no
+			// tool completion. See grokSubagentLateHold's doc comment.
+			s.holdOpen()
+			return
+		}
 		time.Sleep(400 * time.Millisecond)
 		s.childText(child, "agent_message_chunk", " late line")
 		s.subagentNotify(fakeSessionID, map[string]any{

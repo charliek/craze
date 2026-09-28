@@ -32,6 +32,9 @@ Flags:
                       of finishing (a golden's last event to wait on)
           grok-subagent-nested grandchild spawned on the child's session
           grok-subagent-late child still running at prompt_complete
+          grok-subagent-late-hold same off-beat prompt_complete, but the
+                      child is then held forever (no late line, no finish):
+                      the running frame can never race a child that finished
           grok-subagent-cancel cancel with a running child (finish after)
           grok-subagent-cancel-early cancel after the child finished
           commands    echo, but session/new advertises 24 commands with long
@@ -183,7 +186,7 @@ func main() {
 		"env", "turnfail",
 		"grok-echo", "grok-ask", "grok-plan", "grok-ask-wrapped",
 		"grok-subagent", "grok-subagent-fail", "grok-subagent-two", "grok-subagent-two-hold", "grok-subagent-nested",
-		"grok-subagent-late", "grok-subagent-hold", "grok-subagent-cancel", "grok-subagent-cancel-early",
+		"grok-subagent-late", "grok-subagent-late-hold", "grok-subagent-hold", "grok-subagent-cancel", "grok-subagent-cancel-early",
 		"long-turn", "grok-long-turn", "grok-long-turn-fallback",
 		"load", "grok-load", "load-missing", "load-hang", "load-long", "load-settings",
 		"permodel", "permodel-empty", "permodel-noreply", "permodel-refuse", "permodel-nomodel",
