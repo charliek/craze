@@ -290,3 +290,63 @@ socket it dials.
   agree with its own mistake.
 - `shed-craze` (Rust, S3) is the second implementation that proves the
   contract rather than the plumbing.
+
+## As shipped (S2, Plan 027)
+
+The published spec is `docs/reference/protocol.md`, generated against and
+checked by the code (`TestSchemaCoversEveryWireField`,
+`TestPublishedSchemaIsTheEmbedded`, `TestPublishedGateTableIsTheTested`) —
+this section records only where this sketch's shape differs from what
+shipped, and what PR 4 settled on the client side without changing the wire
+at all (X55 1: PR 4 added no method, notification, code or reason).
+
+**Departures from this file's sketch, all pinned in PR 1–2 and unchanged
+since:**
+
+- The snapshot travels **in the attach reply** (`session.attach`'s `snapshot`
+  field), not as a separate `snapshot` notification.
+- `hello` gains `protocols` (the tolerant list), `token`/`resume`, and `via`
+  (`hub` or `host`), beyond this sketch.
+- `reset{reason}` is the plan's §3.4 list (`slow_consumer`,
+  `session_replaced`, `session_closed`, …), not this file's.
+- "A session whose `session/load` failed never reaches `synchronized`"
+  becomes: `synchronized` is the stream's catch-up regardless, and a failed
+  start is `ready{startFailed}` (or `not_accepting`, reason `start_failed`,
+  for a `when: "ready"` attach); mutating commands are refused either way.
+- **`history(beforeSeq, limit)` became `session.snapshot`**: a bounded
+  snapshot with its own cut, no paging. Paging older entries waits for a
+  client that needs it, behind a new capability — see `13`, SF-65.
+- SD-27's "umask around bind" became chmod inside the validated 0700
+  directory.
+- `02`'s `h/<short-id>` became `<ns>/<hostId>.sock` in the runtime base, with
+  the registry, host locks and session locks under `<HOME>/.cache/craze/` —
+  independent of the runtime namespace and `CRAZE_HOME` — rather than inside
+  it (see `docs/reference/protocol.md` "Reaching a host" in the published
+  spec).
+
+**What PR 4 settled, client-side only (`internal/remote`, plan X50):**
+
+- **Command ids are the client's own**, minted per client and counted from 1
+  (already the wire's rule, `docs/reference/protocol.md` "Methods"); PR 4's
+  `remote.Session` is the first client to prove it end to end — the TUI keys
+  every echo and overlay by the id it sent, which the host's reply and every
+  event the command caused must carry back unchanged.
+- **A client binds every command, and every read, to the identity current at
+  its entry** — the identity *number* (`Session.Epoch()`,
+  `internal/remote/session.go:360`), captured atomically with the client id,
+  never the id's spelling, which a restarted engine mints again. A command or
+  read is never sent on another identity's connection; a stale one is
+  refused before anything crosses the wire.
+- **`resumed: false` on a reconnect's `hello` means outcome-unknown, never a
+  resend.** Every command still bound to the identity the client just left —
+  sent or not — resolves `backend.ErrOutcomeUnknown` (reason `resume_lost`,
+  wrapping `backend.ErrStaleEpoch`): it may have run, it was not refused, and
+  the client re-reads state (`session.state`, the next attach's snapshot)
+  rather than risk running it twice under a fresh id. This was already the
+  design (§3.14); PR 4 is where a real client relies on it.
+- **`craze attach` is the protocol's first full client** outside the host TUI
+  and the test harness. It is what actually exercises one attachment per
+  connection (SQ14), the full TUI running unchanged over the socket (SQ7, and
+  SD-33's exit addition), and `--continue` of an already-open session
+  attaching instead of only refusing (SQ16) — see [`10`](10-open-questions.md)
+  and `docs/reference/cli.md`'s "craze attach".

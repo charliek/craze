@@ -9,7 +9,7 @@ non-test source lines, from the reference reviews (`09`).
 |---|---|---|
 | S0 | complete | Discovery: four codebases reviewed, topology / protocol / remote scope / journaling settled |
 | S1 | complete | Engine core: fan-out, sequenced journal, engine-owned asks and turn state, render-free transcript; TUI becomes the first client. **S1a complete (2026-09-19)**; **S1b complete (Plan 021, all three PRs merged, 2026-09-21)**; **S1c complete (Plan 024, PRs #50 and #52, 2026-09-24)** |
-| S2 | in progress (Plan 027, PR 3 of 4) | Per-session Unix socket, published protocol spec + schema, fake host, `craze bridge`, `craze attach` |
+| S2 | complete (Plan 027, 4 PRs: #55, #56, #61, PR 4) | Per-session Unix socket, published protocol spec + schema, fake host, `craze bridge`, `craze attach` |
 | S3 | not started | `shed-craze` lane adapter in shed; craze in shed-mobile's `LANE_KINDS` |
 | S4 | not started | Headless session hosts, per-machine hub, `craze serve` / `craze ps`, detach |
 | S5 | not started | Agent view in the TUI |
@@ -162,6 +162,31 @@ which is also the best test client), the fake host, published reference docs.
   `afterSeq`; a deliberately stalled client is reset as `slow_consumer`
   without delaying the agent; socket refused for another uid; live smoke on
   Linux and the mac-mini.
+
+**Exit result (S2):** complete, plan `027-session-control-s2-socket`, four
+sequential PRs from fresh `origin/main` — `feature/plan-027-s2-wire` (#55,
+`318fc76`), `feature/plan-027-s2-host` (#56, `2acd54a`),
+`feature/plan-027-s2-tui-async` (#61, `3eabb31`), `feature/plan-027-s2-attach`
+(PR 4; the orchestrator fills in its number and merge commit here). Every
+exit clause met, each against a named test or live leg (the plan's §7
+acceptance table, A1–A25; `12`'s "S2 — as shipped" has the clause-by-clause
+proof): two TUIs on one live session show the same transcript
+(`TestSocketGoldensMatchTheEngine`, `TestAttachMidTurnOverTheSocketReproducesTheFirst`,
+V4/V6); a prompt from either appears in both (V4/V6); an ask answered in one
+closes in the other (V4/V6); kill and reattach resumes silently from
+`afterSeq` (`TestAKilledConnectionResumesSilently`,
+`TestAClientProcessRestartResumesFromItsCursor`, V3/V4/V6); a stalled client
+is reset `slow_consumer` without delaying the agent
+(`TestAStalledClientIsResetWithoutDelayingTheAgent`); the socket refuses
+another uid (`TestAnotherUIDIsRefusedBeforeAByteIsRead`, V5); live smoke ran
+on Linux (cursor, grok) and the mac-mini (grok, native; cursor skipped there,
+the login keychain over ssh, as every earlier phase found too); and SD-33's
+addition — the full TUI runs unchanged over the socket, goldens included — is
+`golden_manifest_test.go`'s 119-file manifest, both transports byte-identical
+except the six picker frames (in process only). No golden moved in PR 3 or
+PR 4. The execution amendments (X1–X55), the review record, and the live
+smoke's findings and backlog are in `12` and `13`. **S3 (the shed lane) is
+next.**
 
 ### S3 — shed lane
 
