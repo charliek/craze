@@ -293,8 +293,8 @@ socket it dials.
 
 ## As shipped (S2, Plan 027)
 
-The published spec is `docs/reference/protocol.md`, generated against and
-checked by the code (`TestSchemaCoversEveryWireField`,
+The published schema and gate table in `docs/reference/protocol.md` are
+checked against the code (`TestSchemaCoversEveryWireField`,
 `TestPublishedSchemaIsTheEmbedded`, `TestPublishedGateTableIsTheTested`) —
 this section records only where this sketch's shape differs from what
 shipped, and what PR 4 settled on the client side without changing the wire

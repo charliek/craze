@@ -110,23 +110,21 @@ craze: that session is open in another craze (pid N); attaching
 
 The flags a *new* session would take (`--model`, `--ask`, `--plan`,
 `--agent-bin`, `--provider`) do not apply to an attach; each one this command
-line explicitly passed is named in the note — `ignoredForAttach` checks
-whether the flag was **changed** on the command line, not what it is worth
-(`internal/cli/attach.go:454-457`) — e.g. `(ignored: --model, --provider)`.
-Nothing is built, spawned, bound, or claimed for it. **A nonempty, explicit
-`--provider` also does one more thing the others don't**: it filters the
-session index *before* the lookup that finds the row to claim
-(`providerFlagExplicit`, `internal/cli/provider.go:165-166`;
-[above](#-continue-and-resume)), so a `--provider` that excludes the held
-session's own provider means that row is never found at all — the ordinary
-no-match refusal fires (`craze: no session to continue … for provider …`),
-and the attach path, note included, is never reached. An empty, or all
-whitespace, explicit `--provider` (`''`, `' '`) does **not** filter the
-index — `providerFlagExplicit` trims the value before checking it is
-nonempty — so the row is still found and the attach path is still reached —
-and `--provider` is still named in the note, exactly like the others,
-because it was still changed on the command line. Two cases keep
-the plain "session held" refusal instead of attaching:
+line explicitly passed is named in the note — whether the flag was
+**changed** on the command line, not what it is worth — e.g. `(ignored:
+--model, --provider)`. Nothing is built, spawned, bound, or claimed for it.
+**A nonempty, explicit `--provider` also does one more thing the others
+don't**: it filters the session index *before* the lookup that finds the row
+to claim ([above](#-continue-and-resume)), so a `--provider` that excludes
+the held session's own provider means that row is never found at all — the
+ordinary no-match refusal fires (`craze: no session to continue … for
+provider …`), and the attach path, note included, is never reached. An
+empty, or all-whitespace, explicit `--provider` (`''`, `' '`) does **not**
+filter the index — only a value with visible content counts — so the row is
+still found and the attach path is still reached — and `--provider` is still
+named in the note, exactly like the others, because it was still changed on
+the command line. Two cases keep the plain "session held" refusal instead of
+attaching:
 
 - **A legacy row** (no durable craze id yet, from before `crazeId` existed)
   is refused before the claim, whose `EnsureCrazeID` would otherwise mint

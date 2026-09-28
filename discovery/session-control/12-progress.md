@@ -2023,7 +2023,20 @@ C29a (`680d345`, `logs/gate-c29a-orch.log`) failed in `make test-race` on
 `TestASocketRunFailsOnAnyReset` — C29's own test had pinned exactly two
 attaches, but X22 (§3.4's table) allows up to two re-attaches per omission,
 and a run met three; diagnosed from the log, not retried, and fixed in
-C29b (`0dbed9f`). Every other commit's gate passed outright. Pre-push
+C29b (`0dbed9f`). Every other commit's gate passed outright, `make
+test-race` included: the orchestrator's own gates at C29b (`0dbed9f`, 448 s,
+`logs/gate-c29b-orch.log`), C29c (`f9fdc40`, 439 s,
+`logs/gate-c29c-orch.log`) and C29d (`adac650`, 462 s,
+`logs/gate-c29d-orch.log`) each passed in full — a post-C29b `make
+test-race` result, not only the narrower pre-push run below. CI's
+`pull_request` run on #63 also passed in full. **CI's `push` run on the
+same SHA** (`efb6a3c`) **failed two tests under runner load** —
+`TestAReplyFollowsItsEvents/cancel` (a PR 1 test) and
+`TestNoResetEscapesTheSocketRunsVerdict/after_the_barrier` — both assumed
+one legitimate ordering where two exist under load (an async settlement
+landing before the reply barrier; a reset reaching the tap before the
+barrier, or the view close beating the re-attach); fixed test-side, both
+cases now accepted, in C29e (`21ca66d`), the commit before this one. Pre-push
 `-cpu=1 -count=2` at `0dbed9f` on
 `internal/tui`, `internal/remote`, `internal/backend`, `internal/transcript`,
 `internal/cli` and `internal/engine`, and the mac-mini's own `-count=1` at
@@ -2033,7 +2046,7 @@ C29b (`0dbed9f`). Every other commit's gate passed outright. Pre-push
 (233 s), `internal/rundir`, `internal/protocol` and `internal/fakehost` —
 all ok, 0 DATA RACE, 1,230 s wall; at `0dbed9f`, `internal/tui`
 `-timeout 180m` — 4,833 s, ~242 s a pass — ok, 0 DATA RACE (the commits
-after `0dbed9f` are C29c, C29d and docs, test-only or docs). V2 at
+after `0dbed9f` are C29c, C29d, C29e and docs, test-only or docs). V2 at
 `2da9be2`: 102/103 SAME by bytes, `sigint-between-turns` byte-identical to
 PR 2's recorded race variant of the baseline's own → 103/103 SAME by
 content. V8 at `0dbed9f`, 20 seeds: 760 golden passes, 0 fail, 780
