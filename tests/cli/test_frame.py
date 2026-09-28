@@ -432,6 +432,11 @@ def test_frame_mode_chip_click_cycles(
     rather than on the note, because the chip is what this asserts: waiting on
     the transcript would let the two disagree about which frame is the one
     under test.
+
+    `<wait:idle>` only says the session started; the chip's mode comes from a
+    separate settings fold that can land after that, so a press on an idle
+    frame with no chip yet hits nothing. Waiting for `◆ agent` first makes
+    sure the chip is drawn, and so clickable, before the click is sent.
     """
     proc = frame(
         craze_bin,
@@ -440,7 +445,7 @@ def test_frame_mode_chip_click_cycles(
         script="echo",
         cols=80,
         rows=24,
-        keys="<wait:idle><click:1,23><wait:text:◆ plan>",
+        keys="<wait:idle><wait:text:◆ agent><click:1,23><wait:text:◆ plan>",
     )
     text = "\n".join(frame_lines(proc, 80, 24))
     assert "mode → plan" in text, text
