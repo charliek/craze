@@ -96,6 +96,9 @@ func (m Model) visibleQueue() []agent.QueuedPrompt {
 	return items
 }
 
+// editGoneNote is a queue edit ended because its row left the queue.
+const editGoneNote = "the message you were editing is gone"
+
 // syncQueue re-finds the selection against the rows this frame will draw. The
 // selection is held by id so it survives a row leaving the band above it, and
 // an emptied band gives the keyboard back to the composer.
@@ -105,7 +108,7 @@ func (m *Model) syncQueue() {
 	// The edit ends rather than saving into a row that is gone.
 	if m.queueEdit != "" && !m.queueHasID(m.queueEdit) {
 		m.cancelQueueEdit()
-		m.note("the message you were editing is gone")
+		m.note(editGoneNote)
 	}
 	items := m.visibleQueue()
 	if len(items) == 0 {

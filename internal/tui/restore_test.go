@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"os"
 	"path/filepath"
@@ -254,9 +255,12 @@ func TestAttachMidTurnWithAnOpenQuestionCanAnswerAtOnce(t *testing.T) {
 	}
 }
 
-// restoreOf is a restore of snap: the stream's item, as the reader hands it.
-func restoreOf(snap *transcript.Snapshot, gen uint64) restoreMsg {
-	return restoreMsg{snap: snap, gen: gen}
+// restoreOf is a restore of snap as m's stream would hand it: the item's
+// facts are the ones m's backend holds, as the snapshot's incarnation's.
+func restoreOf(m Model, snap *transcript.Snapshot, gen uint64) restoreMsg {
+	info := m.eng.Info()
+	info.Incarnation = snap.Incarnation
+	return restoreMsg{info: info, snap: snap, gen: gen}
 }
 
 // ------------------------------------------------------ restores by hand
@@ -296,7 +300,7 @@ func snapshotFolded(t *testing.T, inc string, evs ...agent.Event) *transcript.Sn
 // evs folded, as the stream's generation gen.
 func restoredWith(t *testing.T, m Model, inc string, gen uint64, evs ...agent.Event) Model {
 	t.Helper()
-	return deliver(t, m, restoreOf(snapshotFolded(t, inc, evs...), gen))
+	return deliver(t, m, restoreOf(m, snapshotFolded(t, inc, evs...), gen))
 }
 
 // rowKindNames names the row kinds mainRows spells.
@@ -363,7 +367,7 @@ func TestARestoreDuringAHoldFoldsNothingTwice(t *testing.T) {
 	}
 	send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("x")})
 	snap := snapshotFolded(t, "inc-1", append(append([]agent.Event(nil), hello...), old...)...)
-	stream(restoreOf(snap, 2))
+	stream(restoreOf(r.m, snap, 2))
 	if got, want := heldKinds(r.m), []string{"tea.KeyMsg", "tui.restoreMsg"}; !slices.Equal(got, want) {
 		t.Fatalf("held behind the gate: %v, want %v — the replaced stream's events dropped as the restore was held", got, want)
 	}
@@ -495,7 +499,7 @@ func TestARestoreRaisesEveryOpenAsksCard(t *testing.T) {
 	})
 	t.Run("hidden", func(t *testing.T) {
 		m, _ := hiddenAsksModel(t)
-		tm, cmd := m.Update(restoreOf(snapshotFolded(t, "inc-1", evs...), 1))
+		tm, cmd := m.Update(restoreOf(m, snapshotFolded(t, "inc-1", evs...), 1))
 		m = tm.(Model)
 		if got, want := ids(m.cards), []string{"perm-1"}; !slices.Equal(got, want) {
 			t.Fatalf("the cards %v, want %v: a hidden kind raises none", got, want)
@@ -561,7 +565,7 @@ func TestARestoreFromAnotherIncarnationMovesTheGeneration(t *testing.T) {
 					t.Fatal(err)
 				}
 				s.Incarnation = inc
-				tm, _ := m.update(restoreOf(s, 1))
+				tm, _ := m.update(restoreOf(m, s, 1))
 				return tm.(Model)
 			}
 			applies := func(m Model) bool {
@@ -728,7 +732,7 @@ func TestARestoreIsChargedInTheHold(t *testing.T) {
 	// Under the stream cap, which a streamed entry's text is held to.
 	big := strings.Repeat("x", 60<<10)
 	snap := snapshotFolded(t, "inc-1", seqd(1, agent.Event{Type: agent.EventText, Text: big})...)
-	if got := payloadBytes(restoreOf(snap, 1)); got < len(big) {
+	if got := payloadBytes(restoreMsg{snap: snap, gen: 1}); got < len(big) {
 		t.Fatalf("a restore of %d bytes of text is charged %d", len(big), got)
 	}
 }
@@ -953,6 +957,312 @@ func TestAnOutcomeUnknownIsNoAnswer(t *testing.T) {
 		m = deliver(t, tm.(Model), runCmd(cmd))
 		if !hasLocalRow(m, entryError, ErrNoAnswer.Error()) {
 			t.Fatalf("the rows %q, want the mode change's failure as no answer", mainRows(m))
+		}
+	})
+}
+
+// ------------------------------------------------------------ C27a
+
+// queuedRow is a queue event that queues row id with text.
+func queuedRow(id, text string) agent.Event {
+	return agent.Event{Type: agent.EventQueue, Queue: &agent.QueuedPrompt{ID: id, Text: text}, QueueChange: agent.QueueQueued}
+}
+
+// TestAQueueEditAcrossARestore (C27a, astra r63 1): queue ids start again at
+// q-1 in every incarnation, so an edit begun on incarnation A's q-1 ends when a
+// restore brings another incarnation — whatever its queue holds under that id
+// — as an edit whose row left the queue ends: the draft back, the note said.
+// On the same incarnation the edit stands while its row does, and ends when it
+// does not (syncQueue).
+func TestAQueueEditAcrossARestore(t *testing.T) {
+	editing := func(t *testing.T) Model {
+		t.Helper()
+		m := restoredWith(t, sized(t), "inc-a", 1, seqd(1, queuedRow("q-1", "A's row"))...)
+		if len(m.queue) != 1 || m.queue[0].ID != "q-1" {
+			t.Fatalf("fixture: the queue %+v", m.queue)
+		}
+		m.input.SetValue("my draft")
+		m.startQueueEdit(m.queue[0])
+		m.input.SetValue("edited")
+		return m
+	}
+	t.Run("another incarnation", func(t *testing.T) {
+		m := restoredWith(t, editing(t), "inc-b", 2, seqd(1, queuedRow("q-1", "B's row"))...)
+		if m.queueEdit != "" || m.input.Value() != "my draft" || m.copyNote != editGoneNote {
+			t.Fatalf("editing %q, composer %q, note %q — want the edit ended, the draft back and %q",
+				m.queueEdit, m.input.Value(), m.copyNote, editGoneNote)
+		}
+	})
+	t.Run("the same incarnation, the row still queued", func(t *testing.T) {
+		m := restoredWith(t, editing(t), "inc-a", 2, seqd(1, queuedRow("q-1", "A's row"))...)
+		if m.queueEdit != "q-1" || m.input.Value() != "edited" {
+			t.Fatalf("editing %q, composer %q — want the edit standing", m.queueEdit, m.input.Value())
+		}
+	})
+	t.Run("the same incarnation, the row gone", func(t *testing.T) {
+		m := restoredWith(t, editing(t), "inc-a", 2, seqd(1, agent.Event{Type: agent.EventText, Text: "hi"})...)
+		if m.queueEdit != "" || m.input.Value() != "my draft" || m.copyNote != editGoneNote {
+			t.Fatalf("editing %q, composer %q, note %q — want the edit ended", m.queueEdit, m.input.Value(), m.copyNote)
+		}
+	})
+}
+
+// TestAPreStartRestoreKeepsTheReplayGuard (C27a, astra r63 5): a TUI attached
+// when: "now" before its host starts a load restores the empty session, then
+// folds the load's replay; Start's answer can reach it inside the replay, or
+// before it has read the replay's start. Either way no send is admitted while
+// the replay drains — the guard Config.Loading set holds across the empty
+// restore, and the replay's start sets it where nothing did — and the
+// session-is-up tail runs once.
+func TestAPreStartRestoreKeepsTheReplayGuard(t *testing.T) {
+	for _, loading := range []bool{false, true} {
+		for _, early := range []bool{false, true} {
+			name := fmt.Sprintf("loading=%v/started before the replay's start=%v", loading, early)
+			t.Run(name, func(t *testing.T) {
+				h := newAttachHost(t, false)
+				s := attachSession(t, h, protocol.WhenNow)
+				isolateSkillsHome(t)
+				m := New(Config{Backend: s, Theme: "tokyo-night", Workspace: frameWorkspace(t), Yolo: true, Loading: loading})
+				tm, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+				m = tm.(Model)
+				var tick int64
+				m.clock = func() time.Time { tick++; return restoreAt.Add(time.Duration(tick) * time.Second) }
+				ctx, cancel := context.WithTimeout(context.Background(), pumpWatchdog)
+				defer cancel()
+				if err := s.Attach(ctx); err != nil {
+					t.Fatal(err)
+				}
+				r := newGateRig(t, m)
+				r.send(r.nextStreamMsg()) // the empty session's restore
+				if r.m.replaying != loading {
+					t.Fatalf("the empty restore left the guard %v, want Config.Loading's %v", r.m.replaying, loading)
+				}
+
+				// The host's load: its replay, then its start.
+				h.stub.Emit(replayEvent(agent.ReplayStart))
+				h.stub.Emit(replayed(agent.Event{Type: agent.EventUser, Text: "an earlier prompt"}))
+				h.stub.Emit(replayEvent(agent.ReplayEnd))
+				if err := h.eng.Start(ctx); err != nil {
+					t.Fatal(err)
+				}
+				started := runWatched(t, r.m.startCmd())
+				if _, ok := started.(startedMsg); !ok {
+					t.Fatalf("the start answered %#v", started)
+				}
+				refused := func(when string) {
+					t.Helper()
+					if r.m.sessionReady() {
+						t.Fatalf("%s: the session is up", when)
+					}
+					r.m.input.SetValue("too soon")
+					r.send(enter())
+				}
+				var upAt time.Time
+				if early {
+					r.send(started)
+					if loading {
+						refused("the start's answer before the replay, the load announced")
+					} else if !r.m.sessionReady() {
+						t.Fatal("the start's answer, nothing announced: the session is not up")
+					}
+					upAt = r.m.sessStart
+				}
+				replayStart, ok := r.nextStreamMsg().(eventMsg)
+				if !ok || replayStart.ev.Type != agent.EventReplay {
+					t.Fatalf("the stream's next item is %#v, want the replay's start", replayStart)
+				}
+				r.send(replayStart)
+				if !early {
+					r.send(started)
+				}
+				refused("inside the replay")
+				for {
+					msg := r.nextStreamMsg()
+					r.send(msg)
+					if ev, ok := msg.(eventMsg); ok && ev.ev.Type == agent.EventReplay {
+						break
+					}
+					refused("inside the replay")
+				}
+				if !r.m.sessionReady() {
+					t.Fatal("the replay ended and the session is not up")
+				}
+				if !upAt.IsZero() && r.m.sessStart != upAt {
+					t.Fatalf("the session-is-up tail ran again at the replay's end (%v, first %v)", r.m.sessStart, upAt)
+				}
+				// The rest of the start, its Ready included: the tail stays run.
+				upAt = r.m.sessStart
+				for {
+					msg := r.nextStreamMsg()
+					r.send(msg)
+					if _, ok := msg.(readyMsg); ok {
+						break
+					}
+				}
+				if r.m.sessStart != upAt || !r.m.sessionReady() {
+					t.Fatalf("after the start's Ready: the tail ran again (%v, first %v), or the session is down", r.m.sessStart, upAt)
+				}
+				if p := h.stub.Prompts(); len(p) != 0 {
+					t.Fatalf("a send reached the host during the replay: %q", p)
+				}
+			})
+		}
+	}
+}
+
+// TestARestoreRetiresTheTurnsTransients (C27a, astra r63): the send-now
+// confirm raised against the turn the model held, and the Ctrl+C window, are
+// retired by a restore as that turn's own ending retires them — Enter then
+// sends nothing now against the turn the restore brought, and Ctrl+C cancels it
+// rather than quitting.
+func TestARestoreRetiresTheTurnsTransients(t *testing.T) {
+	m, stub := func() (Model, *Stub) {
+		isolateSkillsHome(t)
+		stub := NewStub()
+		t.Cleanup(func() { _ = stub.Close() })
+		return startStub(t, stub, t.TempDir(), 80, 24), stub
+	}()
+	open := stub.HangNext()
+	m.input.SetValue("go")
+	m = deliver(t, m, enter())
+	awaitBarrier(t, open, "turn A opening")
+	tm, _ := m.askStrongSend("NOW", "")
+	m = tm.(Model)
+	m.ctrlCDeadline = m.now().Add(time.Hour)
+	if m.confirm == nil {
+		t.Fatal("fixture: no confirm up")
+	}
+	turnB := seqd(1, agent.Event{Type: agent.EventTurn, Turn: &agent.TurnInfo{ID: "turn-b", Phase: agent.TurnStarted, Text: "b", Origin: agent.TurnOriginSubmit}})
+	m = restoredWith(t, m, "inc-1", 1, turnB...)
+	if m.confirm != nil || !m.ctrlCDeadline.IsZero() || m.copyNote != "send now dropped" {
+		t.Fatalf("confirm %+v, Ctrl+C window %v, note %q — want both retired and the drop noted", m.confirm, m.ctrlCDeadline, m.copyNote)
+	}
+	m = deliver(t, m, enter())
+	if stub.CancelsSent() != 0 || m.sendNowPending() {
+		t.Fatalf("Enter after the restore sent now against turn B: %d cancels, armed %v", stub.CancelsSent(), m.sendNowPending())
+	}
+	tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
+	if m = tm.(Model); m.quitting {
+		t.Fatal("Ctrl+C after the restore quit on a window armed for turn A")
+	}
+}
+
+// TestAnotherIncarnationsSameNumberedTurnIsANewTurn (C27a, astra r63): an
+// engine numbers its turns from turn-1, so another incarnation's turn-1 is a
+// new turn whatever its id: its start, its identity (turnSeq, which the plan
+// evidence is keyed to) and its cancellation are its own.
+func TestAnotherIncarnationsSameNumberedTurnIsANewTurn(t *testing.T) {
+	started := func(sec int) agent.Event {
+		return agent.Event{Type: agent.EventTurn, Turn: &agent.TurnInfo{ID: "turn-1", Phase: agent.TurnStarted, Text: "go", Origin: agent.TurnOriginSubmit},
+			At: restoreAt.Add(time.Duration(sec) * time.Second)}
+	}
+	m := restoredWith(t, sized(t), "inc-a", 1, seqd(1, started(1))...)
+	m = deliver(t, m, eventMsg{ev: seqd(2, agent.Event{Type: agent.EventText, Text: "words"})[0], gen: 1})
+	m.cancelled = true
+	seq := m.turnSeq
+	if m.turnID != "turn-1" || m.sawAssistantSeq != seq || !m.turnStart.Equal(restoreAt.Add(time.Second)) {
+		t.Fatalf("fixture: turn %q, evidence %d of %d, start %v", m.turnID, m.sawAssistantSeq, seq, m.turnStart)
+	}
+	m = restoredWith(t, m, "inc-b", 2, seqd(1, started(100))...)
+	if m.turnSeq == seq || m.sawAssistantSeq == m.turnSeq || m.cancelled || !m.turnStart.Equal(restoreAt.Add(100*time.Second)) {
+		t.Fatalf("another incarnation's turn-1 kept the old one's: seq %d (was %d), evidence %d, cancelled %v, start %v",
+			m.turnSeq, seq, m.sawAssistantSeq, m.cancelled, m.turnStart)
+	}
+}
+
+// laterInfo is a backend whose Info already holds the facts of a later
+// restore than the one the model is applying, as a socket backend's does once
+// it has received that restore.
+type laterInfo struct {
+	backend.Backend
+	eng  *engine.Engine
+	info backend.SessionInfo
+}
+
+func (l *laterInfo) engine() *engine.Engine    { return l.eng }
+func (l *laterInfo) Info() backend.SessionInfo { return l.info }
+
+// TestARestoreReadsItsOwnInfo (C27a, astra r63): a restore decides with the
+// facts its own item carries — which kinds raise a card, the provider the
+// mirror names — never with the backend's, which a socket may already have
+// replaced with a later restore's.
+func TestARestoreReadsItsOwnInfo(t *testing.T) {
+	isolateSkillsHome(t)
+	stub := NewStub()
+	eng, err := engine.New(stub, engine.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = eng.Close() })
+	ws := t.TempDir()
+	inner := newEngineBackend(eng, ws)
+	own := inner.Info()
+	own.Incarnation = "inc-a"
+	later := own
+	later.Incarnation, later.Provider, later.Label = "inc-b", "grok", "Grok"
+	later.Capabilities.AskCards = false
+	b := &laterInfo{Backend: inner, eng: eng, info: later}
+	m := New(Config{Backend: b, Theme: "tokyo-night", Workspace: ws, Yolo: true})
+	tm, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	m = startedLikeInit(t, tm.(Model))
+	if !own.Capabilities.AskCards || own.Provider == "grok" {
+		t.Fatalf("fixture: the restore's own facts %+v", own)
+	}
+	snap := snapshotFolded(t, "inc-a", seqd(1, agent.Event{Type: agent.EventQuestion, Question: oneQuestion("ask-1")})...)
+	m = deliver(t, m, restoreMsg{info: own, snap: snap, gen: 1})
+	if !m.cardOpen() {
+		t.Fatal("the restore judged its question by the later restore's capabilities: no card")
+	}
+	if m.snap.Provider.Name != own.Provider {
+		t.Fatalf("the mirror names %q, want the restore's own %q", m.snap.Provider.Name, own.Provider)
+	}
+}
+
+// TestALateForeignCancelFindsNoRestoredEpisode (C27a, astra r63): the answer
+// to a cancel of the agent's own turn A, still on its way when a restore
+// brings A's ending and the agent's turn B, neither marks B cancelled nor keeps
+// B's own cancel from drawing its note.
+func TestALateForeignCancelFindsNoRestoredEpisode(t *testing.T) {
+	foreign := func(id string, running bool) agent.Event {
+		return agent.Event{Type: agent.EventForeignTurn, ForeignTurn: &agent.ForeignTurnInfo{ID: id, Running: running}}
+	}
+	withA := seqd(1, foreign("f-a", true))
+	withB := seqd(1, foreign("f-a", true), foreign("f-a", false), foreign("f-b", true))
+	cancelNotes := func(m Model) int {
+		n := 0
+		for _, r := range m.main.rows {
+			if r.local && r.kind == entryNote && r.text == stopCancelled {
+				n++
+			}
+		}
+		return n
+	}
+	lateFor := func(m Model) foreignCancelledMsg {
+		return foreignCancelledMsg{issued: m.issue(), episode: m.foreignEpisode(), seq: m.turnSeq}
+	}
+
+	t.Run("a late answer does not mark B", func(t *testing.T) {
+		m := restoredWith(t, sized(t), "inc-1", 1, withA...)
+		if !m.snap.ForeignTurn {
+			t.Fatal("fixture: A is not running")
+		}
+		late := lateFor(m)
+		m = restoredWith(t, m, "inc-1", 2, withB...)
+		m = deliver(t, m, late)
+		if m.cancelled {
+			t.Fatal("A's late answer marked B cancelled")
+		}
+	})
+	t.Run("A's note does not silence B's", func(t *testing.T) {
+		m := restoredWith(t, sized(t), "inc-1", 1, withA...)
+		m = deliver(t, m, lateFor(m))
+		if cancelNotes(m) != 1 {
+			t.Fatalf("fixture: A's cancel drew %d notes", cancelNotes(m))
+		}
+		m = restoredWith(t, m, "inc-1", 2, withB...)
+		m = deliver(t, m, lateFor(m))
+		if cancelNotes(m) != 1 || !m.cancelled {
+			t.Fatalf("B's own cancel drew %d notes, cancelled %v — want its note, and B cancelled", cancelNotes(m), m.cancelled)
 		}
 	})
 }

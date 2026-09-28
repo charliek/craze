@@ -39,7 +39,9 @@ func (m *Model) recompute() {
 	if m.eng == nil {
 		return
 	}
-	info := m.eng.Info()
+	// The backend's facts — or, while a restore is applied, its item's own
+	// (Model.info).
+	info := m.info()
 	var f transcript.Mirror
 	if m.shared != nil {
 		f = m.shared.Mirror()

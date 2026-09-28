@@ -196,9 +196,12 @@ func (w *parityWatch) newRec(m *transcript.Model, base *transcript.Snapshot) *pa
 // restored is restoreHook (plan 027 §3.14): the TUI's shared model was just
 // restored from snap and every pane rebuilt from it. The watch starts a record
 // of its own for the new model — its shadow restores the same snapshot — and
-// holds the TUI to it at once: the same model (P0), and every pane exactly
-// the rebuild's rows (P2's account starts from them), each a shared row
-// showing its entry (P1, P3, P4), none hidden and none local.
+// holds the TUI to it at once: the same model (P0); a pane for the main
+// transcript and for every child transcript the shadow holds, and none other;
+// and in each exactly the rows the shadow's own transcript calls for — its
+// newest entries, as many as the pane's caps keep (restoredRows), in order, each
+// a shared row showing its entry (P1–P4), none hidden and none local. P2's
+// account starts from them.
 func (w *parityWatch) restored(m *Model, snap *transcript.Snapshot) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -209,21 +212,23 @@ func (w *parityWatch) restored(m *Model, snap *transcript.Snapshot) {
 	if got, want := m.shared.State(), r.shadow.State(); !reflect.DeepEqual(got, want) {
 		w.fail("restore at seq %d: the TUI's model's state is not the snapshot's\n got %+v\nwant %+v", snap.Seq, got, want)
 	}
+	live := panesOf(m)
+	scopes := append([]string{""}, r.shadow.Subs()...)
+	if len(live) != len(scopes) {
+		w.fail("restore at seq %d: the TUI holds panes %v, the snapshot transcripts %v", snap.Seq, slices.Sorted(maps.Keys(live)), scopes)
+	}
 	ev := agent.Event{Type: "restore"}
-	for scope, p := range panesOf(m) {
+	for _, scope := range scopes {
+		p := live[scope]
+		if p == nil {
+			w.fail("restore at seq %d: no pane for the snapshot's transcript %q", snap.Seq, scope)
+		}
+		ents := restoredRows(scopeOf(r.shadow, scope), p)
+		if len(p.rows) != len(ents) {
+			w.fail("restore at seq %d: pane %q holds %d rows, the snapshot's transcript calls for %d", snap.Seq, scope, len(p.rows), len(ents))
+		}
 		want := &paneWant{emptied: p.emptied, rows: slices.Clone(p.rows), shows: map[*entry]transcript.EntryID{},
 			byID: map[transcript.EntryID]*entry{}, re: map[*entry]bool{}}
-		tr := scopeOf(m.shared, scope)
-		var ents []*transcript.Entry
-		if tr != nil {
-			ents = tr.Entries()
-		}
-		if len(p.rows) > len(ents) {
-			w.fail("restore at seq %d: pane %q holds %d rows for %d entries", snap.Seq, scope, len(p.rows), len(ents))
-		}
-		// The rows are the newest entries, in order: the pane's caps may have
-		// taken the oldest.
-		ents = ents[len(ents)-len(p.rows):]
 		for i, row := range p.rows {
 			if row.local || row.id != ents[i].ID {
 				w.fail("restore at seq %d: pane %q row %d shows %v (local=%v), want entry %v", snap.Seq, scope, i, row.id, row.local, ents[i].ID)
@@ -234,6 +239,34 @@ func (w *parityWatch) restored(m *Model, snap *transcript.Snapshot) {
 		r.panes[p] = want
 		w.wholePane(m, r, ev, scope, p)
 	}
+}
+
+// restoredRows is the entries of tr a pane made for it now shows, derived from
+// tr and the pane's caps alone (never from the pane's rows): every entry, less
+// the oldest past the pane's row cap, then — on a pane with a text budget —
+// the oldest while their text is over it, keeping the last (pane.enforceCaps).
+func restoredRows(tr *transcript.Transcript, p *pane) []*transcript.Entry {
+	ents := tr.Entries()
+	if n := paneCap(p); len(ents) > n {
+		ents = ents[len(ents)-n:]
+	}
+	if p.textBudget > 0 {
+		text := func(e *transcript.Entry) int {
+			if e.Streaming {
+				return len(tr.Tail())
+			}
+			return len(e.Text)
+		}
+		total := 0
+		for _, e := range ents {
+			total += text(e)
+		}
+		for total > p.textBudget && len(ents) > 1 {
+			total -= text(ents[0])
+			ents = ents[1:]
+		}
+	}
+	return ents
 }
 
 // panesOf is every pane the Model holds, by scope ("" is main).

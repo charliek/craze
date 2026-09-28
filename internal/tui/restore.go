@@ -61,7 +61,11 @@ type endMsg struct{ err error }
 const reloadedNote = "transcript reloaded"
 
 // applyRestore initialises the model from a restore (§3.14, astra 16): from the
-// restored model's State and the facts the backend now holds.
+// restored model's State and the restore item's own facts (r.info) — read in
+// place of the backend's Info for every decision the restore makes, since a
+// socket backend replaces its Info as it receives the next restore, which may
+// already be on its way (infoPin; C27a). The next recompute after the restore
+// reads the backend again.
 //
 // The first restore — the model held no incarnation — draws nothing of its own:
 // attached before its session started, as the socket goldens attach, it
@@ -78,6 +82,9 @@ func (m *Model) applyRestore(r restoreMsg) {
 	if r.snap == nil {
 		return
 	}
+	info := r.info
+	m.infoPin = &info
+	defer func() { m.infoPin = nil }()
 	held := ""
 	if m.shared != nil {
 		held = m.shared.Incarnation()
@@ -93,6 +100,33 @@ func (m *Model) applyRestore(r restoreMsg) {
 		m.hiddenRetry = nil
 		m.agentStart, m.agentDone = nil, nil
 	}
+	if moved && m.queueEdit != "" {
+		// Queue ids are the incarnation's (they start again at q-1): the row
+		// this edit began from is gone with it, whatever the new queue holds
+		// under its id, so the edit ends as one whose row left the queue does
+		// (syncQueue). On the same incarnation the edit stands while its row
+		// does — syncQueue ends it otherwise — and the version check keeps it
+		// honest.
+		m.cancelQueueEdit()
+		m.note(editGoneNote)
+	}
+	if !first {
+		// The foreign turn's episodes are counted from what this client
+		// folded, and a restore may hold endings and openings it never folded:
+		// the count starts again past every episode a reply still on its way
+		// can name (foreignEpisode), so a late cancel's answer neither marks
+		// nor silences an episode it was not about (applyForeignCancelled).
+		m.foreignEnded = m.foreignEpisode() + 1
+	}
+	// A send-now waiting for its confirm, and the Ctrl+C window, belong to the
+	// turn the model was looking at, which the restore replaces: they are
+	// retired as that turn's own ending would have retired them
+	// (applyTurnEnded).
+	if m.confirm != nil {
+		m.confirm = nil
+		m.note("send now dropped")
+	}
+	m.ctrlCDeadline = time.Time{}
 	priorTodos, priorCards := m.snap.Todos, m.cards
 
 	// The fold, and every pane from it: all of its rows are the session's.
@@ -129,7 +163,13 @@ func (m *Model) applyRestore(r restoreMsg) {
 	m.restoreCards(st.Asks, priorCards, moved)
 	m.restoreViewing()
 	wasReplaying := m.replaying
-	m.replaying = st.Replaying
+	if st.Replaying || st.Seq > 0 {
+		// A snapshot that folded anything says whether a replay is running.
+		// One that folded nothing — cut before its host started — says
+		// nothing about a load to come, and leaves a guard Config.Loading set
+		// where it stands (the replay-start arm sets it too).
+		m.replaying = st.Replaying
+	}
 	if wasReplaying && !m.replaying {
 		// The replay's end is inside the snapshot, and will not come as an
 		// event: this is where the session is up, if Start has returned.
@@ -174,12 +214,18 @@ func (m *Model) pruneAgentStamps(rows []agent.SubagentInfo) {
 // against — and none is not. A turn the model was not looking at is a new
 // turn's identity (beginTurn's rule: it retires the last turn's plan evidence
 // and offer); the one it was looking at goes on as it was. Another incarnation
-// is another session, whose error the old one's is not.
+// is another session — its turn ids start again, so even the same id is a new
+// turn — whose error and cancellation the old one's are not.
 func (m *Model) restoreTurn(t transcript.Turn, moved bool) {
-	if moved && m.status == statusError {
-		m.status, m.err = statusIdle, ""
+	if moved {
+		// Another incarnation's turns are numbered afresh: its turn-1 is not
+		// the one this model held, whatever the id says.
+		if m.status == statusError {
+			m.status, m.err = statusIdle, ""
+		}
+		m.cancelled = false
 	}
-	if t.ID != m.turnID {
+	if t.ID != m.turnID || moved {
 		m.turnSeq++
 		m.turnID = t.ID
 		if t.ID != "" {

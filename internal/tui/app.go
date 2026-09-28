@@ -693,6 +693,26 @@ type Model struct {
 	// process no End ever comes.
 	ended  bool
 	endErr error
+	// infoPin is the facts the model reads in place of the backend's Info
+	// while a restore is being applied: the restore item's own (applyRestore),
+	// so every decision the restore makes reads the session it restores and
+	// never a later one a socket backend has already received. nil at every
+	// other moment (info).
+	infoPin *backend.SessionInfo
+	// upDone says the session-is-up tail has run (sessionUp): it runs once,
+	// whichever of its keys lands last and however often a replay closes the
+	// gate again.
+	upDone bool
+}
+
+// info is the session's static facts as the model reads them (plan 027
+// §3.13): the backend's Info, or the restore item's own while that restore is
+// being applied (infoPin).
+func (m Model) info() backend.SessionInfo {
+	if m.infoPin != nil {
+		return *m.infoPin
+	}
+	return m.eng.Info()
 }
 
 // foldedSeq is the seq of the last event the model folded into its shared
@@ -3364,10 +3384,16 @@ func (m *Model) reduceEvent(ev agent.Event) tea.Cmd {
 			return nil
 		}
 		if ev.Replay.Phase != agent.ReplayEnd {
-			// The start phase is informational: the model was built replaying
-			// because Config.Loading knew a load was coming, and it had to be,
-			// since tea.Batch could deliver startedMsg before this event ever
-			// arrived (§3.5).
+			// The model was built replaying when Config.Loading knew a load
+			// was coming, and it had to be, since tea.Batch could deliver
+			// startedMsg before this event ever arrived (§3.5) — so in process
+			// this changes nothing. A client the load was not announced to —
+			// one attached over a socket before its host started (plan 027
+			// C27a) — learns of the replay here, and the session is not up
+			// until its end: sends wait, and the tail runs once (sessionUp).
+			if ev.Replay.Phase == agent.ReplayStart {
+				m.replaying = true
+			}
 			return nil
 		}
 		// The restored snapshot is installed, so this is the moment the
@@ -4012,17 +4038,19 @@ func (m Model) sessionReady() bool { return m.started && !m.replaying }
 
 // sessionUp is the tail startedMsg used to run alone: the status goes idle —
 // unless a restore said a turn is running — the elapsed counter starts and the
-// skills are rescanned. It is called from
-// both keys and does nothing until both have landed, so it runs exactly once
-// however they are ordered.
+// skills are rescanned. It is called from both keys and does nothing until
+// both have landed, and it runs once (upDone): however they are ordered, and
+// when a replay a socket's stream is still draining closes the gate again after
+// the session came up (the replay-start arm).
 //
 // A loaded session's index row used to be touched here. It is the engine's
 // now, keyed to the one event that says a load is over — EventReplay{end},
 // which only a load produces (plan 021 §3.8).
 func (m *Model) sessionUp() {
-	if !m.sessionReady() {
+	if !m.sessionReady() || m.upDone {
 		return
 	}
+	m.upDone = true
 	// A restore that says a turn is running set the working status and the
 	// turn it names (restore.go): the session coming up does not end it. In
 	// process no turn can be running before the session is up — the engine
