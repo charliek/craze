@@ -2018,7 +2018,13 @@ unfrozen, freezing it would move its glyph (X38, the owner's). C30
 (`docs: S2 complete`, `d6daeaf`) through this commit.
 
 Proof: the gate passed at every commit, implementer and orchestrator, on
-the exported SHA. Pre-push `-cpu=1 -count=2` at `0dbed9f` on
+the exported SHA, with one diagnosed failure: the orchestrator's gate at
+C29a (`680d345`, `logs/gate-c29a-orch.log`) failed in `make test-race` on
+`TestASocketRunFailsOnAnyReset` — C29's own test had pinned exactly two
+attaches, but X22 (§3.4's table) allows up to two re-attaches per omission,
+and a run met three; diagnosed from the log, not retried, and fixed in
+C29b (`0dbed9f`). Every other commit's gate passed outright. Pre-push
+`-cpu=1 -count=2` at `0dbed9f` on
 `internal/tui`, `internal/remote`, `internal/backend`, `internal/transcript`,
 `internal/cli` and `internal/engine`, and the mac-mini's own `-count=1` at
 `0dbed9f` — all ok. V1 `-race -count=20`: at `680d345`, `internal/backend`,
@@ -2036,7 +2042,7 @@ quota), every golden test, at `adac650`: 85/85 — two earlier runs at
 `0dbed9f` and `f9fdc40` found three fixture races, fixed in C29c and C29d,
 never retried. V4/V6/V9 live smoke at `2da9be2`
 (`smoke/RESULTS-pr4.md`): Linux cursor and grok, the mac-mini's grok and
-native, every leg PASS on all four, `check.py` PASS ×4. Reviews r61–r77.
+native, every leg PASS on all four, `check.py` PASS ×4. Reviews r61–r78.
 
 ### Deviations from the plan
 
