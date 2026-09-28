@@ -60,11 +60,12 @@ class GxRunner(Runner):
 
     def command(self, em, task, ws_inside, snap):
         cmd = ["gx", "-m", em.gx, "-p", task.prompt, "--output-format", "streaming-messages-json", "--cwd", ws_inside]
-        # --always-approve overrides --permission-mode plan (plan 029 X8), so a plan task
-        # asks for plan mode alone. Verified in C2 (glm-5.3-flash, T-P2): gx starts in
-        # permissionMode "plan", calls enter_plan_mode, writes its plan.md in the session
-        # directory, calls exit_plan_mode and ends the turn with end_turn, workspace untouched.
-        cmd += ["--permission-mode", "plan"] if task.is_plan else ["--always-approve"]
+        # Plan tasks run prompt-only (plan 029 X12): gx's headless plan mode cannot approve a
+        # sub-agent — no --allow rule matches spawn_subagent, and --always-approve overrides
+        # --permission-mode plan (X8) — so a gx plan that delegates was cancelled and the turn
+        # ended in error (base-meta-spark T-P1), where an interactive user would approve the spawn.
+        # The task prompt asks for a plan and no changes, and the no-writes check still applies.
+        cmd += ["--always-approve"]
         return cmd
 
     def extract(self, stdout, home, task):
@@ -75,4 +76,4 @@ class GxRunner(Runner):
     prune_paths = [".grok/docs"]
 
     def plan_mode(self, task):
-        return "--permission-mode plan" if task.is_plan else None
+        return "prompt-only" if task.is_plan else None
