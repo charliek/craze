@@ -32,9 +32,9 @@ func selModel(t *testing.T, now *time.Time, reply string) Model {
 	m = tm.(Model)
 	tm, _ = m.Update(startedMsg{})
 	m = tm.(Model)
-	tm, _ = m.Update(eventMsg{agent.Event{Type: agent.EventText, Text: reply}})
+	tm, _ = m.Update(eventMsg{ev: agent.Event{Type: agent.EventText, Text: reply}})
 	m = tm.(Model)
-	tm, _ = m.Update(eventMsg{agent.Event{Type: agent.EventDone, StopReason: "end_turn"}})
+	tm, _ = m.Update(eventMsg{ev: agent.Event{Type: agent.EventDone, StopReason: "end_turn"}})
 	return tm.(Model)
 }
 
@@ -221,7 +221,7 @@ func TestPressOnAnotherBandStartsNoSelection(t *testing.T) {
 	m = tm.(Model)
 	todos := stubTodos()
 	stubOf(t, m).SetTodos(todos)
-	tm, _ = m.Update(eventMsg{agent.Event{Type: agent.EventTodos, Todos: todos}})
+	tm, _ = m.Update(eventMsg{ev: agent.Event{Type: agent.EventTodos, Todos: todos}})
 	m = tm.(Model)
 	if m.lay.Region(regionTasks).Empty() {
 		t.Fatalf("expected a tasks panel:\n%s", plainView(m))
@@ -467,7 +467,7 @@ func TestCardArrivalDiscardsTheDrag(t *testing.T) {
 	rec := captureCopies(t)
 	tm, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
 	m = tm.(Model)
-	tm, _ = m.Update(eventMsg{agent.Event{Type: agent.EventText, Text: twoRows}})
+	tm, _ = m.Update(eventMsg{ev: agent.Event{Type: agent.EventText, Text: twoRows}})
 	m = tm.(Model)
 	top := m.lay.Region(regionTranscript).Top
 	m = mousePress(t, m, 0, top)
@@ -495,7 +495,7 @@ func TestTranscriptChangeClearsTheSelection(t *testing.T) {
 		poke func(Model) Model
 	}{
 		{"streaming chunk", func(m Model) Model {
-			tm, _ := m.Update(eventMsg{agent.Event{Type: agent.EventText, Text: "more"}})
+			tm, _ := m.Update(eventMsg{ev: agent.Event{Type: agent.EventText, Text: "more"}})
 			return tm.(Model)
 		}},
 		{"resize", func(m Model) Model {

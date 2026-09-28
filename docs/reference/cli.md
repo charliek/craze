@@ -4,6 +4,7 @@
 craze [flags]
 craze prompt [text] [flags]
 craze bridge [flags]
+craze attach [flags]
 craze version
 ```
 
@@ -97,16 +98,56 @@ looks like in the TUI.
 
 `--continue` claims the row it loads before anything is built: its own lock
 under `~/.cache/craze/locks/`, independent of `CRAZE_HOME` and the runtime
-directory (see [Protocol reference](protocol.md#reaching-a-host)). A session
-another running `craze` already holds refuses instead of loading it:
+directory (see [Protocol reference](protocol.md#reaching-a-host)). **A row
+that already has a craze id is claimed first, and a session another running
+`craze` already holds is attached to instead of refused** — the second
+`craze -c` becomes [`craze attach --session <id>`](#craze-attach), resolved
+through the holder's host id, after one line on stderr:
+
+```text
+craze: that session is open in another craze (pid N); attaching
+```
+
+The flags a *new* session would take (`--model`, `--ask`, `--plan`,
+`--agent-bin`, `--provider`) do not apply to an attach; each one this command
+line explicitly passed is named in the note — whether the flag was
+**changed** on the command line, not what it is worth — e.g. `(ignored:
+--model, --provider)`. Nothing is built, spawned, bound, or claimed for it.
+**A nonempty, explicit `--provider` also does one more thing the others
+don't**: it filters the session index *before* the lookup that finds the row
+to claim ([above](#-continue-and-resume)), so a `--provider` that excludes
+the held session's own provider means that row is never found at all — the
+ordinary no-match refusal fires (`craze: no session to continue … for
+provider …`), and the attach path, note included, is never reached. An
+empty, or all-whitespace, explicit `--provider` (`''`, `' '`) does **not**
+filter the index — only a value with visible content counts — so the row is
+still found and the attach path is still reached — and `--provider` is still
+named in the note, exactly like the others, because it was still changed on
+the command line. Two cases keep the plain "session held" refusal instead of
+attaching:
+
+- **A legacy row** (no durable craze id yet, from before `crazeId` existed)
+  is refused before the claim, whose `EnsureCrazeID` would otherwise mint
+  and write its id for a load the command line can never start.
+- **The spawn flags this command line gives are refused first**, once this
+  run holds the claim: `craze -c --agent-bin X` for a *held* session still
+  attaches (an attach takes none of the spawn flags), but for a session this
+  run just claimed itself, the same usage errors a new session's flags would
+  give still apply, and the claim is released.
+
+A holder whose live registry entry does not serve the claimed session (or
+whose socket has not been bound yet) keeps the plain refusal instead, with
+why appended: `— it serves no control socket` or `— it serves another
+session`. A holder whose lock names no pid yet (`pid ?`, the instant after
+its `flock`) also keeps the plain refusal:
 
 ```text
 craze: that session is open in another craze (pid N)
 ```
 
 exit 1, and no agent is spawned — nothing is built once the row's session is
-found to be held. Two narrower refusals cover the claim mechanism itself,
-not the session:
+found to be held and cannot be attached to. Two narrower refusals cover the
+claim mechanism itself, not the session:
 
 ```text
 craze: the session index is busy — try again
@@ -119,8 +160,11 @@ between being read and being given one (another loader may already hold it
 under an id this one does not know about — trying again re-reads the index).
 
 `--resume`'s picker claims each row the same way, when you press <kbd>Enter</kbd>
-on it: a refused row shows an error naming the holder's pid in place of
-loading it, and the picker keeps running.
+on it — but it never attaches itself: a held row's error names the holder's
+pid, plus `craze attach --session <hostId>` when the holder's live entry
+actually serves that session, or why it cannot be reached instead (`— it
+serves no control socket`, `— it serves another session`); the picker keeps
+running either way, in place of loading it.
 
 An unreadable lock tree or session index does not fail one way. The initial
 lookup — `--continue`'s `Latest`, or `--resume`'s scan for rows — still exits
@@ -179,9 +223,10 @@ away.
 Every craze TUI process binds a control socket in the runtime namespace and
 serves the session it runs over it (see
 [Protocol reference](protocol.md#reaching-a-host)), which is what
-[`craze bridge`](#craze-bridge) and a future `craze attach` reach. Binding
-happens only for a run that actually starts the TUI — a `--continue` SQ16
-refuses above binds nothing and creates no socket.
+[`craze bridge`](#craze-bridge) and [`craze attach`](#craze-attach) reach.
+Binding happens only for a run that actually starts the TUI — a `--continue`
+that attaches instead (below) or refuses binds nothing and creates no socket
+of its own.
 
 `control_socket = false` in `config.toml`, or `CRAZE_CONTROL_SOCKET=0` (or
 `false`) for one run, turns it off; see
@@ -390,6 +435,132 @@ longer) running here, not that something else broke.
 | 0 | The socket closed cleanly (the session ended, or the far side hung up) |
 | 1 | Every failure above: no session, an ambiguous `--session`, an unreachable socket, a read or write error. Never 255 (`ssh`'s own exit code for a failed connection) |
 | 127 | Not `craze bridge`'s own exit: what an SSH client sees when the far end's shell falls off the published binary ladder (see [Protocol reference](protocol.md#ssh-exec-what-a-client-may-assume)) without ever reaching a `craze` to exec |
+
+## craze attach
+
+```bash
+./bin/craze attach
+./bin/craze attach --session 01a0bbe5-69b4-79de-b75c-483a15b73d78
+```
+
+Runs the full TUI over a running craze session's control socket (plan 027
+§3.15): the session another `craze` process in this directory is hosting, or
+`--session`'s. Quitting it leaves the session running on its host — nothing
+is spawned, nothing binds a socket, no session claim is taken, and no index
+row is written.
+
+| Flag | Description |
+|------|-------------|
+| `--session` | A craze session id, a provider session id, or a host id (default: the one session running in this directory) |
+| `--theme` | TUI theme preset. See [Configuration](configuration.md) |
+| `--no-mouse` | Disable mouse reporting (wheel scroll and clicks) |
+| `--no-background` | Keep the terminal's own background and text colours instead of the theme's |
+
+`--continue`/`-c`, `--resume`/`-r`, `--provider` and `--model` are refused —
+an attach joins a running session rather than starting or loading one:
+
+```text
+craze attach: --continue does not apply: attach joins a running session
+```
+
+### Resolution
+
+With an explicit `--session`, the one entry it names (matched the way
+[`craze bridge`](#craze-bridge) matches, by craze session id, provider
+session id or host id); an invalid `--session` — whatever its value, `""`
+included — is a usage error, exit 2, before a registry read builds a path.
+No match is exit 1:
+
+```text
+craze attach: no session <id>
+```
+
+and several matches is exit 2, listing them (ids do not collide in practice,
+but nothing here assumes it).
+
+With no `--session`, the live sessions whose workspace is the current
+directory (both sides made absolute, cleaned and symlink-resolved, so
+`/tmp/x` and macOS's `/private/tmp/x` are one directory): exactly one is the
+target. Several is exit 2:
+
+```text
+craze: 2 running craze sessions in /abs/workspace:
+  01a0bbe5…  /abs/workspace  My session
+  01a0bbe6…  /abs/workspace
+attach to one with: craze attach --session <id>
+```
+
+None in this directory is exit 1, naming the sessions running elsewhere (id,
+workspace, and title when the session index has one) plus the same hint — or
+just the first line alone when nothing runs anywhere:
+
+```text
+craze: no running craze session in /abs/workspace
+  01a0bbe7…  /abs/other      Other session
+attach to one with: craze attach --session <id>
+```
+
+A listing never connects to a session just to describe it: the workspace and
+title come from the registry and the session index alone.
+
+Resolution runs before the terminal is checked, so a usage error or an
+unambiguous exit 1/2 above is reported whatever stdout is; only once a target
+is resolved does attach refuse a non-tty the same way the TUI does (a real
+termios check per OS, so `craze attach >/dev/null` is refused too):
+
+```text
+craze attach: refusing to start TUI on a non-tty
+```
+
+A resolved target that cannot be dialled — the socket is gone, or the peer
+check fails — is exit 1:
+
+```text
+craze attach: session <id> is unreachable: <reason>
+```
+
+### Viewer mode
+
+The pickers, provider persistence, session swaps, host status reporting
+(the herdr pane or roost tab belongs to the host) and session-index writes
+are all the host's; an attach does none of them. Shell mode (`!`) still runs
+locally, in the session's own workspace. The permission chip shows craze's
+own default (yolo) — the wire does not carry the host's `--force`/
+`--no-force` choice.
+
+### Keys
+
+Identical to the host TUI's (plan 027 §3.19): the session — its queue and its
+turn — is shared, so the first <kbd>Ctrl+C</kbd> while a turn works cancels
+the turn and clears the queue for **every** attached client, exactly as it
+does in the host TUI. <kbd>Ctrl+C</kbd> when idle, a second <kbd>Ctrl+C</kbd>,
+<kbd>Ctrl+D</kbd> and `/exit` all close the view.
+
+### Quitting vs. the session ending
+
+Every way of leaving `craze attach` — <kbd>Ctrl+C</kbd>, <kbd>Ctrl+D</kbd>,
+`/exit` — is a **view close**: it detaches and exits 0, and the session goes
+on running on its host. Only the **host** quitting ends the session; an
+attach TUI whose host quit prints one line on stderr once its own screen is
+restored, and exits 0:
+
+```text
+craze: session ended
+```
+
+A transport failure the client's redials could not recover from — the
+session may still be running, but this client lost it — is exit 1 instead:
+
+```text
+craze: lost the session: <reason>
+```
+
+### `craze -c` of an open session
+
+See [A session already open in another craze](#a-session-already-open-in-another-craze):
+from PR 4 on, `--continue`/`-c` (and the resume picker's hint) of a session
+already open in another `craze` attaches to it through this same command,
+rather than only refusing.
 
 ## craze version
 

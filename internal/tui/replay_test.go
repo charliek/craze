@@ -293,7 +293,7 @@ func TestSessionComesUpInEitherOrder(t *testing.T) {
 			m, _ := loadedStub(t, nil)
 			m = feed(t, m, replayEvent(agent.ReplayStart), replayed(replayTranscript()[0]))
 
-			first, second := tea.Msg(startedMsg{}), tea.Msg(eventMsg{replayEvent(agent.ReplayEnd)})
+			first, second := tea.Msg(startedMsg{}), tea.Msg(eventMsg{ev: replayEvent(agent.ReplayEnd)})
 			if tc.name == "replay end first" {
 				first, second = second, first
 			}

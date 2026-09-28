@@ -367,6 +367,35 @@ func openRun(tr *transcript.Transcript) (transcript.EntryID, int) {
 	return transcript.EntryID{}, 0
 }
 
+// rebuild shows tr whole, as a pane made for it now (plan 027 §3.14, a
+// restore): every row goes — local and shared alike, with the trim note, the
+// clear mark and the paths only those rows had shown — and every entry tr
+// holds gets a shared row, in its order, none hidden: a restore's rows are all
+// the session's (restore.go). The trim note leads them when tr was trimmed or
+// its snapshot windowed. The pane's caps apply as on any append. A pane that
+// holds nothing is left as it is when tr holds nothing either, so a restore of
+// an empty session changes nothing a frame, or the pane's own record, shows.
+func (t *pane) rebuild(tr *transcript.Transcript) {
+	pristine := len(t.rows) == 0 && len(t.ids) == 0 && len(t.reappended) == 0 &&
+		!t.trimmed && len(t.pathDirs) == 0 && t.clearOpen.IsZero()
+	if !pristine {
+		t.clearRows()
+	}
+	if tr == nil {
+		return
+	}
+	for _, e := range tr.Entries() {
+		t.showNew(tr, e, &entry{})
+	}
+	if tr.Trimmed() || tr.Windowed() {
+		t.trimmed = true
+		t.dirty = true
+	}
+	if len(t.rows) > 0 {
+		t.enforceCaps()
+	}
+}
+
 // detach lets go of the entries of a shared model that has been replaced: the
 // rows stay on screen, but they are no event's of the session now folding, so
 // they are this client's alone — local — and no id of the new model can find

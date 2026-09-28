@@ -456,7 +456,7 @@ func TestCardClosesThePickerAndRevertsThePreview(t *testing.T) {
 		t.Fatalf("preview %q", m.theme.Name)
 	}
 
-	tm, _ = m.Update(eventMsg{agent.Event{
+	tm, _ = m.Update(eventMsg{ev: agent.Event{
 		Type: agent.EventPermission,
 		Permission: &agent.PermissionEvent{
 			ID:      "perm-1",

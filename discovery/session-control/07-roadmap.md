@@ -9,7 +9,7 @@ non-test source lines, from the reference reviews (`09`).
 |---|---|---|
 | S0 | complete | Discovery: four codebases reviewed, topology / protocol / remote scope / journaling settled |
 | S1 | complete | Engine core: fan-out, sequenced journal, engine-owned asks and turn state, render-free transcript; TUI becomes the first client. **S1a complete (2026-09-19)**; **S1b complete (Plan 021, all three PRs merged, 2026-09-21)**; **S1c complete (Plan 024, PRs #50 and #52, 2026-09-24)** |
-| S2 | in progress (Plan 027, PR 3 of 4) | Per-session Unix socket, published protocol spec + schema, fake host, `craze bridge`, `craze attach` |
+| S2 | complete (Plan 027, 4 PRs: #55, #56, #61, PR 4) | Per-session Unix socket, published protocol spec + schema, fake host, `craze bridge`, `craze attach` |
 | S3 | not started | `shed-craze` lane adapter in shed; craze in shed-mobile's `LANE_KINDS` |
 | S4 | not started | Headless session hosts, per-machine hub, `craze serve` / `craze ps`, detach |
 | S5 | not started | Agent view in the TUI |
@@ -162,6 +162,63 @@ which is also the best test client), the fake host, published reference docs.
   `afterSeq`; a deliberately stalled client is reset as `slow_consumer`
   without delaying the agent; socket refused for another uid; live smoke on
   Linux and the mac-mini.
+
+**Exit result (S2):** complete, plan `027-session-control-s2-socket`, four
+sequential PRs from fresh `origin/main` — `feature/plan-027-s2-wire` (#55,
+`318fc76`), `feature/plan-027-s2-host` (#56, `2acd54a`),
+`feature/plan-027-s2-tui-async` (#61, `3eabb31`), `feature/plan-027-s2-attach`
+(PR 4; the orchestrator fills in its number and merge commit here). Every
+exit clause met, each against a named test or live leg (the plan's §7
+acceptance table, A1–A25; `12`'s "S2 — as shipped" has the clause-by-clause
+proof): two TUIs on one live session show the same transcript
+(`TestSocketGoldensMatchTheEngine`, `TestAttachMidTurnOverTheSocketReproducesTheFirst`,
+V4/V6); a prompt from either appears in both (V4/V6); an ask answered in one
+closes in the other (V4/V6); kill and reattach resumes silently from
+`afterSeq` — the silent cursor resume itself is `TestAKilledConnectionResumesSilently`
+and `TestAClientProcessRestartResumesFromItsCursor` (`internal/remote`) plus
+PR 2's V3 live legs (the bridge killed and resumed by its token and cursor;
+the smoke client itself `kill -9`-ed and restarted from its persisted cursor
+file); `craze attach` has no persisted cursor of its own, so V4/V6 leg 7 is a
+different case, a snapshot attach after the kill, not a cursor resume; a stalled client
+is reset `slow_consumer` without delaying the agent
+(`TestAStalledClientIsResetWithoutDelayingTheAgent`); the socket refuses
+another uid (`TestAnotherUIDIsRefusedBeforeAByteIsRead`, V5); live smoke ran
+on Linux (cursor, grok) and the mac-mini (grok, native; cursor skipped there,
+the login keychain over ssh, as every earlier phase found too); and SD-33's
+addition — the full TUI runs unchanged over the socket, goldens included — is
+`golden_manifest_test.go`'s 119-file manifest (113 goldens under both
+transports, six picker frames in process only,
+`internal/tui/golden_manifest_test.go:460-461`), enforced through two fix
+rounds (astra r69, r71). Every frame `RunFrameScript` produces — a golden
+matrix's (`runFrameModes`) or a direct call's — is logged in order
+(`frameProductions`, `:192-229`); `assertGolden` judges the frame it holds by
+the **most recent production of those exact bytes in one global log**, across
+the whole test binary, not scoped to the asserting test itself
+(`judgeFrame`, `:243-264`, called through `checkGoldenTransports` at
+`internal/tui/frame_test.go:426`; the scan stops at the first byte match,
+whichever test produced it, which is also `13`'s SF-67 (a)): an unspent
+matrix credit belonging to the asserting test is spent, while a direct run,
+an already-spent credit, another test's credit, or no production at all is
+in process alone — so an identical-looking frame a later direct call
+produces can steal an earlier matrix run's unspent credit
+(`TestATransportCreditIsTheFramesOwn`, `:475-517`, pins both directions).
+`TestMain`'s `goldenCoverage` (`:355-403`) fails an unfiltered run — no
+`-run`/`-skip`/`-list`, `-update` off, and `-count` greater than 0 — if any
+manifest golden, except `native-tools-80x24` when `ripgrep` is missing (the
+same rule its own test skips by), was not asserted under every transport it
+lists, **in every one
+of the run's `-count` iterations** (coverage is counted per test-and-golden
+pair, per iteration, `:318-339`). `make test`/`test-race` and CI's `test` job
+pin `CRAZE_GOLDEN_TRANSPORT=both` (Makefile, `.github/workflows/ci.yml`); a
+local run narrows the matrix only by running `go test` itself. A socket
+run's verdict also checks that no reset escaped it: a final `session.sync`
+barrier on the model's own connection, and the view close's `session.detach`
+answered, both read through the tap (`internal/tui/frame_socket_test.go:335-409`).
+No golden file's bytes moved in PR 3 or PR 4 (`git diff --stat -- '*testdata*'`
+empty at every commit through `adac650`). The execution amendments
+(X1–X57), C29a through C29d's fix rounds, the review record, and the live
+smoke's findings and
+backlog are in `12` and `13`. **S3 (the shed lane) is next.**
 
 ### S3 — shed lane
 

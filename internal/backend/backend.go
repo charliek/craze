@@ -20,11 +20,25 @@ var ErrClosed = errors.New("backend: the stream has ended")
 // session A therefore never executes against session B.
 //
 // In process the epoch never moves, so an engine-backed call is never refused.
-// A socket backend (PR 4) that reconnected to another incarnation answers the
-// refusal as its ErrOutcomeUnknown with the reason resume_lost, wrapping this
-// sentinel, so a caller matching either finds it: the command was not sent on
-// the new binding, and what became of anything sent on the old one is unknown.
+// A socket backend (PR 4) whose reconnect could not resume — another client
+// identity: a retired client, a replaced engine, a restarted host — answers a
+// command's refusal as its ErrOutcomeUnknown with the reason resume_lost,
+// wrapping this sentinel, so a caller matching either finds it: the command was
+// not sent on the new binding, and what became of anything sent on the old one
+// is unknown. A read's refusal is this sentinel alone, as in process: a read
+// has no outcome to be unknown.
 var ErrStaleEpoch = errors.New("backend: the call was for a session this backend is no longer bound to")
+
+// ErrOutcomeUnknown is what a backend answers for a command that may have run
+// and whose answer can no longer be learned: it was not refused, and nothing
+// says whether it executed, so the caller re-reads state rather than trusting
+// either outcome (plan 027 §3.14). A socket backend answers it after a
+// reconnect the host answered resumed: false (reason resume_lost), once its
+// redials are spent (disconnected), and for a call refused before sending
+// because its epoch is stale (resume_lost, matching ErrStaleEpoch as well). An
+// in-process backend never answers it: the engine call it makes always
+// returns. Its match is errors.Is, never the text.
+var ErrOutcomeUnknown = errors.New("backend: the command's outcome is unknown: it may have run")
 
 // epochKey is WithEpoch's context key.
 type epochKey struct{}
@@ -84,9 +98,11 @@ type Backend interface {
 	ClientID() string
 	// Epoch names the session the backend is bound to now (§3.12, "Chains
 	// are fenced in the backend too"). It is constant in process — one
-	// engine for the backend's life; a socket backend (PR 4) bumps it when a
-	// reconnect lands on another incarnation, before any Restore is
-	// delivered. A caller reads it when it dispatches a call and passes it
+	// engine for the backend's life; a socket backend (PR 4) moves it when a
+	// reconnect could not resume (another client identity — the same
+	// incarnation included), before any Restore is delivered, and binds
+	// every command and read to it: none is ever written under another. A
+	// caller reads it when it dispatches a call and passes it
 	// with every call of that operation (WithEpoch); a command or read whose
 	// ctx carries another epoch is refused with ErrStaleEpoch before
 	// anything is sent (CheckEpoch). It waits on nothing.
@@ -97,8 +113,10 @@ type Backend interface {
 	// 25), the provider and craze session ids, the model and mode catalogs,
 	// the incarnation and the retry horizon. In process it reads
 	// State().Snapshot's static fields; over the socket it is the attach
-	// reply's copy, updated by Ready. It waits on nothing, and before Start
-	// it reflects the configured provider, as the TUI does today (GLM 11).
+	// reply's copy, replaced by each Ready and Restore as the stream receives
+	// them. It waits on nothing, and before Start (over the socket: before
+	// the first attach reply) it reflects the configured provider, as the
+	// TUI does today (GLM 11).
 	Info() SessionInfo
 
 	// Read is the stream: one item at a time, in order, from one reader.
@@ -164,8 +182,9 @@ type ItemKind int
 const (
 	// ItemEvent is one event of the session's stream: Event, and Gen.
 	ItemEvent ItemKind = iota + 1
-	// ItemReady says the session is up (remote only): Info is its facts as
-	// the host read them once it was ready (§3.4).
+	// ItemReady says the session's start has completed (remote only): Info
+	// is its facts as the host read them once it was ready (§3.4), and Err
+	// the start's failure — nil when the session came up.
 	ItemReady
 	// ItemRestore replaces what the client holds (remote only): Info, and
 	// Snapshot, the transcript as the host holds it (§3.4, §3.14).
@@ -190,7 +209,9 @@ type Item struct {
 	Info SessionInfo
 	// Snapshot is the transcript an ItemRestore restores.
 	Snapshot *transcript.Snapshot
-	// Err is why the stream ended, on ItemEnd.
+	// Err is, on ItemEnd, why the stream ended (nil for the session's own
+	// end, reset{session_closed}); on ItemReady, the start's failure (nil when
+	// the session came up), whose Error() is the host's start error text.
 	Err error
 }
 

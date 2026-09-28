@@ -1684,11 +1684,11 @@ What S2 inherits:
 
 | | |
 |---|---|
-| Status | planned (Plan 027, FINAL after panel review 2026-09-24); PR 1 merged; PR 2 merged; PR 3 executing (`feature/plan-027-s2-tui-async`) |
+| Status | planned (Plan 027, FINAL after panel review 2026-09-24); PR 1 merged; PR 2 merged; PR 3 merged; PR 4 — `feature/plan-027-s2-attach`, in review (the orchestrator updates this line at merge if timing allows). **S2 is complete at PR 4's merge.** |
 | Plan | `027-session-control-s2-socket` (outside the repo, `~/.claude/plans/craze/`, raw panel reviews in its `panel/` folder) |
 | Baseline | `origin/main` `5901e4a`: H6 PR 2 (#53, sub-agent stop), merged on top of S1c PR 2 `79eb082` (#52, which completes S1) |
 | Branch / PRs | four sequential PRs, each branched from a freshly fetched `origin/main` after the previous one merges: `feature/plan-027-s2-wire`, `feature/plan-027-s2-host`, `feature/plan-027-s2-tui-async`, `feature/plan-027-s2-attach` |
-| Merged | PR 1 — #55 `318fc76` (2026-09-25); PR 2 — #56 `2acd54a` (2026-09-26); PR 3 — — (filled in as it lands) |
+| Merged | PR 1 — #55 `318fc76` (2026-09-25); PR 2 — #56 `2acd54a` (2026-09-26); PR 3 — #61 `3eabb31` (2026-09-27); PR 4 — — (filled in as it lands) |
 
 ### The PR cut
 
@@ -1848,7 +1848,8 @@ No owner decision was reopened at any round.
 
 ### What shipped per commit
 
-**PR 3 — `feature/plan-027-s2-tui-async`** (executing): C16 (`33cdebb` — the
+**PR 3 — `feature/plan-027-s2-tui-async`** (shipped, #61 `3eabb31`,
+2026-09-27): C16 (`33cdebb` — the
 TUI holds a `backend.Backend`, `internal/backend/backend.go:67-102`; every
 command, `Read`, `Ask` and `Settings` takes a `context.Context` first —
 `ClientID`, `Started`, `Close`, `Info` and `Epoch` take none, and all but
@@ -1909,6 +1910,152 @@ gated command), and PR 3's whole process used about 15% more CPU per
 journal event (2.40 against 2.09 ms, not attributed further; X46 6 expected
 the fold mirror's per-event copies to cost CPU); starvation — every golden under a 5% CPU quota:
 83/83 pass. `git diff --stat origin/main..HEAD -- '*testdata*'` is empty.
+
+**PR 4 — `feature/plan-027-s2-attach`** (in review): C26 (`9acd8d1` —
+`remote.Session` implements `backend.Backend`: `DialSession`
+(`internal/remote/session.go:161`) says hello and checks the host's codecs;
+`Info()` (`:366`) is the Session's own copy, updated by `Ready`/`Restore` as
+received; `Epoch()` (`:360`) returns the client's identity number; errors
+reconstruct through one sentinel table, `internal/remote/errors.go`) with its
+fix rounds C26a (`4c37522` — a command or read binds to the client identity
+*number* captured atomically at the Session's entry, never the id's spelling,
+so a restarted engine minting the same `c-1` cannot run an old command against
+the replacement; an adoption settles every command bound to the identity it
+left, sent or not) and C26b (`851b34b` — the adoption wakes every waiter under
+`changedLocked`, so a bound read sleeping through a slow re-attach answers
+`ErrStaleEpoch` on time; a read's reply is judged against its binding after it
+arrives); the prelude (`fd5a7e3` — SF-55 fixed in the fold: every
+`send_now`-origin `started` ends the fold's arm under the engine's lock, no
+`Cause` needed; SF-54 fixed in the fold: a child's `EventTool` with a title
+sets its roster row's `Activity` (`internal/transcript/fold.go:170-172`,
+`:483-491`), and the mirror's `armFired`/`childActivity` compensations are
+gone); C27 (`9118a9f` — a restored session: `tui.Config.Backend` builds no
+engine, picker, `OnEngine`, index or claim; `applyRestore`
+(`internal/tui/restore.go:81`) rebuilds every pane, a card per open ask, the
+turn, the foreign turn, the queue band and every revision guard, and clears
+every overlay and echo marker; older-generation events are dropped while the
+restore is HELD, not when applied; `TestAttachMidTurnWithAnOpenQuestionCanAnswerAtOnce`,
+`TestARestoreDuringAHoldFoldsNothingTwice`) with C27a (`72ed882` — a restore
+from another incarnation ends any queue edit, retires every turn-bound
+transient (the send-now confirm, the Ctrl+C window), and uses the restored
+item's own `Info` for its decisions) and C27b (`eef9775` — the replay guard's
+empty-snapshot rule is narrowed to the first or a same-incarnation restore; a
+pending plan implementation retires on a restore's both outcomes; `cancelled`
+is kept only for the same running engine turn; `upDone` resets in
+`dropSession`); C28 (`7b3c1f5` — `craze attach`, `internal/cli/attach.go`:
+resolution through the bridge's matcher, `tui.Config.Viewer` clears the
+pickers/claims/index/host reporting, SQ16 attaches through `attachHeld`) with
+C28a (`2da9be2` — a row with a craze id is claimed first: held routes to the
+attach path with the spawn flags it ignores named in the note, claimed routes
+to the spawn-flag refusal (releasing the claim on a refusal); the holder's
+registry entry must also name the claimed session (`holderEntry`,
+`internal/cli/attach.go:382-404`); the tty check is a real termios check per
+OS); C28b dropped (the owner's rule, header 5: the ask-note marks fit, but the
+model/title notes would duplicate an open model dialog or an in-flight
+`/model` chain — three deliberate "no extra note" tests pin it; status quo,
+SF-18 stays with this finding); C29 (`1256e18` — every frame golden also runs
+over the socket: `FrameOpts.transport` is test-only, installed by a hook; the
+socket run builds a `NoPrimary` session, serves it over `internal/control` on
+its own `/tmp`-rooted directory, and attaches `when: "now"` before the host's
+`Start`; the coverage manifest lists 119 golden files, 113 under both
+transports and the six picker frames in process only
+(`internal/tui/golden_manifest_test.go:460-461`); `TestSocketGoldensMatchTheEngine`
+pins an exact common seq at a sync-token rendezvous;
+`TestAttachMidTurnOverTheSocketReproducesTheFirst`
+(`internal/engine/exactness_socket_test.go:184`) attaches over a real server
+at every cut of a 144-event recorded trace plus eight mid-turn cuts over the
+fake agent) with four fix rounds. **C29a** (`680d345`, astra r69): a
+transport credit keyed by (test, frame digest) — none existed before this —
+plus a suite-level `TestMain` coverage check, `make test`/`test-race` and
+CI's `test` job pinning `CRAZE_GOLDEN_TRANSPORT=both`, and a socket run's
+verdict adding a final `session.sync` barrier plus requiring the view
+close's `session.detach` to have been answered, both read through the tap,
+so no reset can escape it unread (`internal/tui/frame_socket_test.go:335-409`);
+every test that binds a socket makes its directory under `/tmp` explicitly,
+never `TMPDIR`, which overflows `sun_path` on macOS. **C29b** (`0dbed9f`,
+astra r71): C29a's credit matched by digest alone and spent the *oldest*
+matching one — but identical golden frames exist in the tree
+(`composer-six-lines`/`composer-nine-lines-top`, `select-two-lines`/
+`select-reverse`, `task-80x24`/`task-late-80x24`), so an unspent matrix
+frame's credit could be spent by an identical *direct*, in-process frame
+instead — fixed by logging every frame `RunFrameScript` produces, in
+production order (`frameProductions`, `internal/tui/golden_manifest_test.go:192-229`),
+and judging the frame an assertion holds by the **most recent production of
+its exact bytes in that one global log** — not scoped to the asserting test;
+the scan stops at the first byte match, whichever test produced it
+(`judgeFrame`, `:243-264`; `13`'s SF-67 (a) is what that residual costs): an
+unspent matrix credit belonging to the asserting test is spent, while a
+direct run, an already-spent credit, another test's credit, or no
+production at all is in process alone
+(`TestATransportCreditIsTheFramesOwn`, `:475-517`, a negative control
+requiring the direct and matrix frames differ). Coverage is now counted per
+(test, golden) pair, per iteration (`goldenAssertions`, `:318-339`): under
+`-count=N` each pair must be asserted in all `N` iterations
+(`goldenCoverage`, `:355-403`), `-count=0` runs no check, and the one
+standing exemption — `native-tools-80x24` may go unasserted when `ripgrep`
+is missing, the same rule its own test skips by (`:386-388`) — still
+applies. **C29c** (`f9fdc40`, orchestrator starvation run at `0dbed9f`):
+under a 5% CPU quota the socket run's capture settle outlasted
+`grok-subagent-late`'s 400 ms child-finish timer and folded the finish
+first, so `TestFrameGoldenGrokSubagentLate80x24` could capture the child
+already gone; fixed with a new fake-agent mode, `grok-subagent-late-hold`,
+which ends the parent exactly as `grok-subagent-late` does but holds the
+child until the session closes (the golden's own bytes are unchanged — the
+frame shows the child running either way); every other user of
+`grok-subagent-late` keeps the old mode; the spinner-glyph race this golden
+still carries (X38) stays, unfrozen, since freezing it would move its glyph
+(the owner's call). **C29d** (`adac650`, orchestrator starvation run at
+`f9fdc40`): the same quota caught two more spinner races —
+`TestFrameGoldenPermissionNoForce100x30` (async in process vs `gateSync`)
+and `TestFrameGoldenNativeQuestion` (socket vs `gateSync`) captured the
+spinner a beat apart, since an unfrozen golden that shows the spinner races
+the 250 ms tick; fixed by freezing every golden whose frozen frame already
+draws `spinnerGlyphs[0]` (✳) — `ask-100x30`, `plan-100x30`,
+`permission-noforce-100x30`, `grok-ask-{100x30,80x24}` and
+`native-question-100x30` — which moves no byte, since that is the glyph
+each already holds; `grok-subagent-late-80x24` holds ✴ (frame 1) and stays
+unfrozen, freezing it would move its glyph (X38, the owner's). C30
+(`docs: S2 complete`, `d6daeaf`) through this commit.
+
+Proof: the gate passed at every commit, implementer and orchestrator, on
+the exported SHA, with one diagnosed failure: the orchestrator's gate at
+C29a (`680d345`, `logs/gate-c29a-orch.log`) failed in `make test-race` on
+`TestASocketRunFailsOnAnyReset` — C29's own test had pinned exactly two
+attaches, but X22 (§3.4's table) allows up to two re-attaches per omission,
+and a run met three; diagnosed from the log, not retried, and fixed in
+C29b (`0dbed9f`). Every other commit's gate passed outright, `make
+test-race` included: the orchestrator's own gates at C29b (`0dbed9f`, 448 s,
+`logs/gate-c29b-orch.log`), C29c (`f9fdc40`, 439 s,
+`logs/gate-c29c-orch.log`) and C29d (`adac650`, 462 s,
+`logs/gate-c29d-orch.log`) each passed in full — a post-C29b `make
+test-race` result, not only the narrower pre-push run below. CI's
+`pull_request` run on #63 also passed in full. **CI's `push` run on the
+same SHA** (`efb6a3c`) **failed two tests under runner load** —
+`TestAReplyFollowsItsEvents/cancel` (a PR 1 test) and
+`TestNoResetEscapesTheSocketRunsVerdict/after_the_barrier` — both assumed
+one legitimate ordering where two exist under load (an async settlement
+landing before the reply barrier; a reset reaching the tap before the
+barrier, or the view close beating the re-attach); fixed test-side, both
+cases now accepted, in C29e (`21ca66d`), the commit before this one. Pre-push
+`-cpu=1 -count=2` at `0dbed9f` on
+`internal/tui`, `internal/remote`, `internal/backend`, `internal/transcript`,
+`internal/cli` and `internal/engine`, and the mac-mini's own `-count=1` at
+`0dbed9f` — all ok. V1 `-race -count=20`: at `680d345`, `internal/backend`,
+`internal/engine` (835 s), `internal/agent` (1,220 s), `internal/transcript`
+(706 s), `internal/control` (832 s, plus its wire test), `internal/remote`
+(233 s), `internal/rundir`, `internal/protocol` and `internal/fakehost` —
+all ok, 0 DATA RACE, 1,230 s wall; at `0dbed9f`, `internal/tui`
+`-timeout 180m` — 4,833 s, ~242 s a pass — ok, 0 DATA RACE (the commits
+after `0dbed9f` are C29c, C29d, C29e and docs, test-only or docs). V2 at
+`2da9be2`: 102/103 SAME by bytes, `sigint-between-turns` byte-identical to
+PR 2's recorded race variant of the baseline's own → 103/103 SAME by
+content. V8 at `0dbed9f`, 20 seeds: 760 golden passes, 0 fail, 780
+jittered socket runs all matching the host's model. Starvation (5% CPU
+quota), every golden test, at `adac650`: 85/85 — two earlier runs at
+`0dbed9f` and `f9fdc40` found three fixture races, fixed in C29c and C29d,
+never retried. V4/V6/V9 live smoke at `2da9be2`
+(`smoke/RESULTS-pr4.md`): Linux cursor and grok, the mac-mini's grok and
+native, every leg PASS on all four, `check.py` PASS ×4. Reviews r61–r78.
 
 ### Deviations from the plan
 
@@ -2340,3 +2487,289 @@ reopens a pinned decision.
     `(bool, Model, tea.Cmd)`) and `handleViewKey`; never gated, the same in
     both gate modes. `TestStopKeyStopsTheRunningChild` was rewritten, since it
     had encoded the synchronous call this commit removes.
+
+**PR 4's execution amendments X49–X57**, one paragraph each, mirrored here as
+`12`'s own record; the full text and every failing schedule are in the plan
+(`~/.claude/plans/craze/027-session-control-s2-socket.md`, "Execution
+amendments — PR 4"). Review rounds: `reviews/dispositions-pr4.md`. None
+reopens a pinned decision.
+
+**PR 4** (C26–C30):
+
+1. **Plan 027 X49 (C26)** — SF-50 stays open: Ctrl+C's `Disarm` and
+   `ClearQueue` stay two engine calls, so over the socket the window X40 2
+   named becomes two sequential round trips rather than the one local round
+   trip in process. A combined verb needs a wire change (a new method or
+   param behind a capability); nothing asks for it yet, and the fix is
+   additive when a client does.
+2. **Plan 027 X50 (C26 `9acd8d1`, C26a `4c37522`, C26b `851b34b`; astra
+   r61–r64, converged)** — `remote.Session` as built: `DialSession` checks
+   the host's codecs and says hello; `Attach` is exported so the golden
+   matrix attaches before the host starts; `Start` returns once readiness is
+   received or the host's start fails (`*StartError`). `Read` delivers
+   `ItemRestore`, `ItemEvent`, `ItemReady` and `ItemEnd`; a decode failure
+   ends the Session as `End` does. Commands send the caller's own command id
+   (`CommandOptions.ID`), and a command or read binds to the client
+   **identity number** current at its entry — never the id's spelling, which
+   a restarted host mints again — atomically with the client id;
+   `Epoch()` is that identity, and it moves on every `hello` that did not
+   resume. `backend.ErrOutcomeUnknown` covers resume_lost, disconnected and a
+   stale-epoch command; a stale *read* is plain `backend.ErrStaleEpoch`.
+   `*remote.Error.Is` maps `(code, reason)` through one table
+   (`internal/remote/errors.go`); `TestEveryReasonReconstructsItsSentinel` and
+   `TestEveryTUIErrorSiteWorksOverTheWire` (an AST inventory) cover it. Three
+   review rounds fixed, in order: (r61) a command with no epoch bound by the
+   client id's *spelling*, not its number, across a host restart; an unsent
+   command bound to the old identity left unresolved at adoption; an event
+   whose body fails the codec ending the stream without closing `s.ended`; (r62)
+   adoption not waking a bound read (`changedLocked` added); a `Ready`
+   received after `broken()` still closing `ready`; a post-call epoch check
+   dropped, so a buffered reply on a stale identity could still be returned.
+   r64: no finding, the C26 series converged.
+3. **Plan 027 X51 (the prelude, `fd5a7e3`)** — SF-55 and SF-54 fixed in the
+   fold: every `send_now`-origin `started` ends the fold's arm (the engine
+   holds one arm, a `send_now` Submit while armed is `already_submitted`, and
+   the started and a later arm are ordered under the engine's lock — no wire
+   change, no `Cause` needed); a child's `EventTool` with a title sets its
+   roster row's `Activity` (`agent.SubagentActivity`, `internal/transcript/fold.go:170-172`,
+   `:483-491`) until a roster event replaces the row. The mirror's `armFired`
+   and `childActivity` compensations are gone; two `fixture:` guards that
+   pinned the gaps were inverted. **Residual (astra r63 8b), a `13` row
+   (SF-56):** the fold's activity is still the PR 3 mirror's rule — native
+   sets `Activity` on `ToolCalled` only, and grok changes it on an update it
+   does not publish — so it is a derivation until a provider publishes it as
+   a roster fact.
+4. **Plan 027 X52 (C27 `9118a9f`, C27a `72ed882`, C27b `eef9775`; astra r63,
+   r65, r67, converged)** — the TUI's restore as built: `tui.Config.Backend`
+   builds no engine, picker, `OnEngine`, index or claim. The reader delivers
+   every item (`eventMsg`, `restoreMsg`, `readyMsg`, `endMsg`), each held and
+   drained through the gate; older-generation events are dropped **when the
+   restore is HELD**, not when applied (§3.14 said "when applied" — with one
+   read outstanding they always sit ahead of their restore, so a drop at
+   application would come too late). `applyRestore` (`internal/tui/restore.go:81`)
+   rebuilds the fold, every pane, a card per open ask in opening order, the
+   turn, the foreign turn, replaying, the queue band and every revision
+   guard; it clears every overlay, echo marker, the cancel mask and the plan
+   offer. A restore from another incarnation ends any queue edit, the
+   send-now confirm and the Ctrl+C window, and a pending plan implementation;
+   `cancelled` is kept only for the same running engine turn; the replay
+   guard's empty-snapshot rule is narrowed to the first or a same-incarnation
+   restore. `End` quits (`m.ended`, `m.endErr`). Three review rounds fixed a
+   queue edit surviving a restore from another incarnation, the empty
+   pre-start restore clobbering `Config.Loading`, a send-now confirm
+   surviving another turn's restore, the empty-snapshot replay-guard rule
+   over-applying, and a pending plan implementation surviving a
+   same-incarnation restore. **Residuals, `13` rows:** (SF-57) a turn that
+   failed while a client was disconnected restores as idle, because the
+   snapshot's `Turn` keeps no ending outcome; (SF-58) a remote model whose
+   `Start` failed does not recover on a restored replacement incarnation —
+   unreachable in S2, since a host replaces its engine only in the pre-start
+   pickers, and a start failure offers no picker; S4's headless hosts make it
+   reachable; (SF-59, astra r67) a restore keeps a foreign episode's plan
+   evidence, so a restored foreign turn's `Done` with no text of its own can
+   re-arm the implement offer from the previous episode — a spurious *offer*
+   only, never an unasked action.
+5. **Plan 027 X53 (C28 `7b3c1f5`, C28a `2da9be2`; sol r66, r68, converged)**
+   — `craze attach` as built: resolution is the bridge's matcher
+   (`matchSession`), cwd compared absolute, cleaned and symlink-resolved on
+   both sides; titles come from the session index by craze id, never by
+   connecting; an invalid explicit `--session` is exit 2; resolution runs
+   before the tty check, which is now a real termios check shared with the
+   host TUI (`craze >/dev/null` is refused too). `tui.Config.Viewer` clears
+   the pickers, session builders, claims, `PersistProvider`, the index,
+   `OnEngine` and the host reporter; the shell runs in `Info().Workspace`.
+   SQ16 attaches (`internal/cli/tui.go:305-318`, `:366-393`,
+   `internal/cli/attach.go:406-436`): a `--continue` row with a craze id is
+   claimed first — held routes to the attach path (the note names the spawn
+   flags it ignores), claimed routes to the spawn-flag refusal, releasing the
+   claim on a refusal; a legacy row keeps the refusal before any index write.
+   The resume picker's refusal names `craze attach --session <hostId>`
+   (`internal/cli/serve.go:538-566`) only when the holder serves that exact
+   session, else why it cannot be reached. Review fixed: `resolveLoad`
+   applying the spawn-flag refusal before learning a row was held (a held
+   native session with `--agent-bin` refused instead of attaching);
+   `holderEntry` matching the holder's host id alone, not also its claimed
+   session; the tty check accepting any character device; `attachExit`
+   checking `Ended` before a `tui.Run` error. **Residual, a `13` row
+   (SF-60):** the attach TUI's permission chip shows craze's own default
+   (yolo) — the host's `--force` is not on the wire.
+6. **Plan 027 X54 (C28b dropped; the owner's rule, header 5)** — the ask-note
+   marks fit the rule, but the model/title notes would duplicate what an open
+   model dialog or an in-flight `/model` chain already shows: three
+   deliberate tests (`TestAnotherClientsModelChangeBeforeTheEffortIsANote`,
+   `TestAnotherClientsModelChangeMidChainIsANote`,
+   `TestATabThatAppearsWhileOpenIsSeeded`) pin "no extra note" for a foreign
+   change landing during this client's own chain or box. Status quo; SF-18
+   stays in `13` with this finding.
+7. **Plan 027 X55 (C29 `1256e18`)** — the goldens over the socket, as built:
+   `FrameOpts.transport` is unexported and test-only, installed by a hook
+   (`frameSocketHook`), so `craze frame` stays in process and production
+   links no server. `runFrameModes` runs three: `gateSync` and async in
+   process, async over the socket — all three end on the same frame and
+   error. The socket run builds the session `NoPrimary` through the same
+   builders, serves the host engine over `internal/control` on a directory
+   made under `/tmp` (not `t.TempDir()`, which overflows `sun_path` on
+   macOS) with `MaxBudget` and the attach budget raised to 1M items / 1 GiB,
+   and attaches `when: "now"` before the host's `Start`; a second dial, a
+   second attach or any reset fails the run. `TestSocketGoldensMatchTheEngine`
+   pins an exact common seq at a sync-token rendezvous, since "once the host
+   is quiescent" cannot otherwise be enforced. The coverage manifest lists
+   119 golden files — 113 under both transports, the six picker frames in
+   process only (`internal/tui/golden_manifest_test.go:460-461`).
+   `TestAttachMidTurnOverTheSocketReproducesTheFirst`
+   (`internal/engine/exactness_socket_test.go:184`) lives in `internal/engine`
+   beside A2's recorder: every cut of a recorded Stub trace (144 events, 145
+   cuts) attaches over a real server and folds to the first client's model,
+   plus eight mid-turn cuts over the fake agent. The two-client tests run two
+   pump-driven remote models on one host, since `RunFrameScript` serialises
+   on one HOME. Cost: `internal/tui` 70 → 93.5 s (`test`), 187 → 251 s
+   (`-race`) on this box; `Makefile`'s `test-race` timeout is 15 m (moved in
+   PR 3, X35, confirmed still enough for PR 4's heavier `-race` pass).
+   **Fix round C29a (`680d345`; astra r69).** Two blockers: transport credit
+   had been recorded per *test*, not per frame, so a second `RunFrameScript`
+   in one test inherited an earlier frame's `{inproc, socket}` record with no
+   suite-level check that every golden was actually asserted both ways —
+   fixed by a credit keyed to (test, frame digest) and `TestMain`'s
+   `goldenCoverage`, which fails an unfiltered run — no
+   `-run`/`-skip`/`-list`/`-update` — if any manifest golden was never
+   asserted under its full transport set (the one exemption is
+   `native-tools-80x24` when its test itself skips, no `ripgrep`).
+   `CRAZE_GOLDEN_TRANSPORT` could be narrowed to `inproc` by an exported env
+   var reaching `make test`/`make test-race` and CI alike, silently
+   weakening the coverage check to match — fixed by pinning
+   `CRAZE_GOLDEN_TRANSPORT=both` inside both `Makefile` targets and CI's
+   `test` job; a local run now narrows the matrix only by invoking `go test`
+   directly. One major: a reset the server wrote after the run's comparison
+   but before the client's reader had consumed it could escape the tap's
+   verdict — fixed by a final `session.sync` barrier on the model's own
+   connection (answered only once every record up to it is queued to the
+   connection) plus requiring the view close's `session.detach` to have been
+   answered too, both read back through the tap
+   (`internal/tui/frame_socket_test.go:335-409`). One minor: every socket
+   test's directory is now made under `/tmp` explicitly (`os.MkdirTemp("/tmp",
+   …)`) rather than the default temp dir, which overflows `sun_path` under a
+   long macOS `TMPDIR` — not only the golden harness's own hosts, but every
+   test across `internal/cli`, `internal/control`, `internal/engine`,
+   `internal/fakehost`, `internal/host`, `internal/remote` and `internal/tui`
+   that binds a control socket.
+   **Fix round C29b (`0dbed9f`; astra r71).** C29a's credit matched by digest
+   alone and spent the *oldest* matching one, but identical golden frames
+   exist in the tree (`composer-six-lines`/`composer-nine-lines-top`,
+   `select-two-lines`/`select-reverse`, `task-80x24`/`task-late-80x24`), so
+   an unspent matrix frame's credit could be spent by an identical *direct*,
+   in-process frame instead — fixed by logging every frame `RunFrameScript`
+   produces, in production order (`frameProductions`,
+   `internal/tui/golden_manifest_test.go:192-229`), and judging the frame an
+   assertion holds by the **most recent production of its exact bytes in
+   that one global log** — the scan is not scoped to the asserting test and
+   stops at the first byte match, whichever test produced it (`judgeFrame`,
+   `:243-264`, spent through `checkGoldenTransports` at
+   `internal/tui/frame_test.go:426`; a residual of this shape is `13`'s
+   SF-67 (a)): an unspent matrix credit belonging to the asserting test is
+   spent, while a direct run, an already-spent credit, another test's
+   credit, or no production at all is in process alone
+   (`TestATransportCreditIsTheFramesOwn`, `:475-517`, a negative control
+   requiring the direct and matrix frames differ). One
+   major, also fixed: with `-count=2` a golden covered in the first
+   iteration hid a socket run skipped in the second, one persistent coverage
+   entry per pair — fixed by counting coverage per (test, golden) pair, per
+   iteration (`goldenAssertions`, `:318-339`): under `-count=N` each pair
+   must be asserted in all `N` iterations (`goldenCoverage`, `:355-403`).
+   One minor: `-count=0` used to fail the coverage check though it runs
+   nothing — fixed to run no check.
+8. **Plan 027 X56 (C29c `f9fdc40`)** — found by the orchestrator's own
+   starvation run (5% CPU quota) at `0dbed9f`: under that quota the socket
+   run's capture settle outlasted `grok-subagent-late`'s 400 ms wall-clock
+   child-finish timer, so `TestFrameGoldenGrokSubagentLate80x24`'s socket
+   run could capture the child already gone, where the in-process run still
+   caught it running. Fixed with a new fake-agent mode,
+   `grok-subagent-late-hold`: it ends the parent exactly as
+   `grok-subagent-late` does, but holds the child running until the session
+   closes, so the timer can never race the capture; the golden's own bytes
+   are unchanged, since the frame shows the child running either way. Every
+   other user of `grok-subagent-late` keeps the old, timed mode. The
+   spinner-glyph race this golden still carries (X38) is unchanged and
+   stays unfrozen: freezing it would move its glyph, which is the owner's
+   call, not this fix's.
+9. **Plan 027 X57 (C29d `adac650`)** — found by the orchestrator's next
+   starvation run at `f9fdc40`: the same 5% CPU quota caught two more
+   spinner races between frame-modes —
+   `TestFrameGoldenPermissionNoForce100x30` (async in process vs
+   `gateSync`) and `TestFrameGoldenNativeQuestion` (socket vs `gateSync`)
+   captured the 250 ms spinner tick a beat apart between their two runs,
+   since an unfrozen golden that shows the spinner races that tick. Fixed
+   by freezing every golden whose frame already draws `spinnerGlyphs[0]`
+   (✳) — `ask-100x30`, `plan-100x30`, `permission-noforce-100x30`,
+   `grok-ask-100x30`, `grok-ask-80x24` and `native-question-100x30` — which
+   moves no byte in any of them, since ✳ is what each already held; the
+   rest of the spinner goldens were frozen already. `grok-subagent-late-80x24`
+   holds ✴ (frame 1), not ✳, so freezing it would move its glyph; it stays
+   unfrozen (X38, the owner's).
+
+### S2 — as shipped
+
+The roadmap's S2 exit (`07`), clause by clause, plus SD-33's addition (full
+detail in the plan's §7 acceptance table, A1–A25):
+
+- **Two TUIs on one live session show the same transcript** (A1): the live
+  exit smoke on Linux (cursor, grok) and the mac-mini (grok, native), with the
+  two TUIs' transcript regions compared line by line at quiescent points
+  (`compare.py`) — SAME on every leg of every run
+  (`027-session-control-s2-socket/smoke/RESULTS-pr4.md`). Automated:
+  `TestSocketGoldensMatchTheEngine`, `TestAttachMidTurnOverTheSocketReproducesTheFirst`.
+- **A prompt from either appears in both** (A2): V4/V6 leg 2, every run;
+  `TestAPromptFromEitherClientAppearsInBoth`.
+- **An ask answered in one closes in the other** (A3): V4/V6 leg 3 (a plan
+  card on cursor, a question on grok and native); `TestAnAnswerClosesTheCard`-
+  class tests and `TestAnAskAnsweredInOneClosesInTheOther`.
+- **Kill and reattach resumes silently from `afterSeq`** (A4): the silent
+  cursor resume itself is proven in `internal/remote`
+  (`TestAKilledConnectionResumesSilently`, `resume_test.go:26`;
+  `TestAClientProcessRestartResumesFromItsCursor`, `resume_test.go:232`) and
+  by PR 2's V3 live legs — the bridge process killed and the client resuming
+  with its persisted token and cursor, and the smoke client itself `kill -9`-ed
+  and restarted from its own persisted cursor file, in both cases with no
+  `Restore` item on screen. `craze attach` (PR 4) has no persisted cursor to
+  resume from: **V4/V6 leg 7 is a different case, a snapshot attach** — the
+  `kill -9`-ed attach's replacement is a *fresh* `craze attach`, which takes a
+  new snapshot rather than resuming (what it visibly lacks against the host is
+  F1, `smoke/RESULTS-pr4.md`).
+- **A deliberately stalled client is reset `slow_consumer` without delaying
+  the agent** (A5): `TestAStalledClientIsResetWithoutDelayingTheAgent` (PR 1);
+  no live leg needed one in PR 4.
+- **The socket is refused for another uid** (A6): `TestAnotherUIDIsRefusedBeforeAByteIsRead`,
+  `TestAFailedCredentialLookupRejects` (PR 2).
+- **Live smoke on Linux and the mac-mini** (A7): V4 (Linux, cursor and grok),
+  V6 (mac-mini, grok and native — cursor skipped there, the login keychain
+  over ssh, as every earlier phase found too), V9 (`check.py` PASS on all
+  four journals). Two findings, both accepted rather than fixed in S2 — see
+  `13`, SF-61 and SF-62 — and two cosmetic observations (SF-63; native's
+  roster rows lingering ~10 s past attach, outside the transcript region).
+- **SD-33's addition — the full TUI runs unchanged over the socket, goldens
+  included** (A8, A9): every golden in `golden_manifest_test.go` runs under
+  both transports, byte-identical, except the six picker frames (in process
+  only, since pickers exist only in the host TUI); no golden file's bytes
+  moved in PR 3 or PR 4, C29c's and C29d's fixture and freezing fix rounds
+  included (`git diff --stat -- '*testdata*'` empty at every commit through
+  `adac650`). Coverage is
+  enforced, not just recorded: `assertGolden` judges the frame it holds by
+  the most recent production of those exact bytes in one global log, across
+  the whole binary rather than scoped to the asserting test — a matrix
+  run's unspent credit, or in process alone (`judgeFrame`,
+  `internal/tui/golden_manifest_test.go:243-264`; `13`'s SF-67 (a) is that
+  scan's residual) — and `TestMain`'s `goldenCoverage` (`:355-403`) fails an
+  unfiltered run — no `-run`/`-skip`/`-list`, `-update` off, `-count` above
+  0 — if any manifest golden, except `native-tools-80x24` when `ripgrep` is
+  missing, was not asserted under its full transport set in every one of the
+  run's `-count` iterations (C29a `680d345`, C29b `0dbed9f`); `make
+  test`/`test-race` and CI's `test` job pin `CRAZE_GOLDEN_TRANSPORT=both`,
+  so this coverage cannot be silently narrowed there — only a direct
+  `go test` invocation narrows
+  it.
+
+`craze attach` (PR 4) is the first full client the protocol has ever had
+outside the host TUI itself and the test harness: it is what actually proves
+one attachment per connection (SQ14), the full TUI over the socket (SQ7), and
+`--continue` of an open session attaching (SQ16) rather than only refusing.
+What `13` still owes after S2 is closed out below and in `13` itself; nothing
+open blocks the exit clauses above.

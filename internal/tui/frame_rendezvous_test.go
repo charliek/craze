@@ -341,7 +341,7 @@ func TestTheCaptureWaitsForEverythingThatArrived(t *testing.T) {
 	isolateSkillsHome(t)
 	got, _, err := runFrameModes(t, func() Config {
 		return Config{
-			Session:   chattyStub{Stub: NewStub(), lines: 60},
+			Session:   chattyStub{Stub: frameStub(), lines: 60},
 			Theme:     "tokyo-night",
 			Workspace: frameWorkspace(t),
 			Model:     "grok",

@@ -17,6 +17,7 @@ import (
 	"github.com/muesli/termenv"
 
 	"github.com/charliek/craze/internal/agent"
+	"github.com/charliek/craze/internal/transcript"
 )
 
 const (
@@ -80,6 +81,18 @@ type FrameOpts struct {
 	// frame golden runs in both modes against the same golden file (plan 027
 	// §3.12 (d)), and `craze frame` is always asynchronous.
 	gateSync bool
+	// transport is how the model reaches its session (plan 027 §3.16): in
+	// process, the zero value — the engine New builds, as every production
+	// run and `craze frame` have it — or over the control socket, where a
+	// host built by frameSocketHook serves the session's engine and the model
+	// runs over a remote.Session to it (Config.Backend). Unexported like
+	// gateSync: the socket host is internal/tui's tests' alone, so the
+	// production package links no server for `craze frame`.
+	transport frameTransport
+	// matrix says the run is one of internal/tui's tests' golden matrix
+	// (runFrameModes), which accounts for the frame its runs agree on itself;
+	// frameProducedHook is told so. Unexported: only those tests set it.
+	matrix bool
 	// beforeBarrier, when a test sets it, runs in the runner after each
 	// token's sync message is sent and before its barrier is awaited, with the
 	// token and its number and the bus's newest frame; an error it returns
@@ -98,6 +111,67 @@ type FrameOpts struct {
 	// and before the quit.
 	beforeQuit func(send func(tea.Msg), last func() frameState)
 }
+
+// frameTransport is FrameOpts.transport: how a frame's model reaches its
+// session.
+type frameTransport string
+
+const (
+	// transportInproc is the model over the engine New builds: the default.
+	transportInproc frameTransport = ""
+	// transportSocket is the model over a remote.Session to a host that serves
+	// the session's engine on a control socket (frameSocketHook).
+	transportSocket frameTransport = "socket"
+)
+
+// String is the transport's name, as the golden manifest spells it.
+func (t frameTransport) String() string {
+	if t == transportInproc {
+		return "inproc"
+	}
+	return string(t)
+}
+
+// frameHost is a socket run's host (plan 027 §3.16): what frameSocketHook
+// built around the caller's Config — the session's engine, served on a control
+// socket, and a remote.Session attached to it before the engine starts.
+type frameHost struct {
+	// cfg is the Config the model runs with: the caller's, its Backend the
+	// remote session.
+	cfg Config
+	// head is the host's engine's stream head (its SyncSeq, streamHead's
+	// rule): the capture's boundary, and the check's.
+	head func(timeout time.Duration) (uint64, error)
+	// start starts the host's engine as a headless host does, once the
+	// program is running.
+	start func()
+	// match holds the model's fold, read while the program is parked, against
+	// the host's model: false when the two are not at one seq (the host has
+	// moved on), an error when they are and differ.
+	match func(shared *transcript.Model) (bool, error)
+	// barrier runs once match has passed, within timeout: a round trip to
+	// the host whose answer follows every line the host has written to the
+	// model's connection so far, so every one of them has been read by the
+	// time it returns — what end judges the run's transport by (astra r69 5).
+	barrier func(timeout time.Duration) error
+	// end runs once the program has ended and the model's backend is closed:
+	// it closes the host's engine and its server, and answers what the run's
+	// transport did that a golden may not depend on (a reset, a re-attach).
+	end func() error
+}
+
+// frameProducedHook, when a test sets it, is handed every frame RunFrameScript
+// returns, plain, with the options it ran with: the golden manifest's record
+// of which invocation produced which frame (golden_manifest_test.go, astra r71
+// 1). It is nil in production, like frameSocketHook, and changes nothing a
+// run does.
+var frameProducedHook func(opts FrameOpts, plain string)
+
+// frameSocketHook builds a socket run's host around cfg (FrameOpts.transport).
+// It is nil in production — no Config field or flag reaches it — and
+// internal/tui's tests install it (frame_socket_test.go), like
+// sessionBackendHook.
+var frameSocketHook func(cfg Config) (*frameHost, error)
 
 type frameTokenKind int
 
@@ -409,6 +483,10 @@ type frameState struct {
 	// (RunFrameScript); the capture itself need not be settled (final).
 	settled bool
 	folded  uint64
+	// shared is the model's fold (m.shared) as the frame was published: a
+	// socket run's check reads it while the program is parked
+	// (captureThenMatch).
+	shared *transcript.Model
 	// final says the frame runner's quit message had been applied: this is
 	// the frame the run captures (RunFrameScript) — the model after every
 	// message that reached the program before the quit, in order, and none
@@ -636,7 +714,12 @@ type frameTokenMsg struct {
 // the quit — behind a gate that opened late, say — may remain held, and is not
 // part of the capture; "nothing held" is not what the capture promises (astra
 // r47 3).
-type frameQuitMsg struct{}
+//
+// linger marks the capture and quits nothing: a socket run's program runs on
+// after its capture, so the check that follows it (captureThenMatch) can let
+// the fold follow the host to a seq both hold without moving what was
+// captured; the run's shutdown then quits it with a plain one.
+type frameQuitMsg struct{ linger bool }
 
 // frameSyncMsg is a no-op message the runner uses to know its previous message
 // has been processed and published. It goes through the model's own FIFO: the
@@ -701,6 +784,7 @@ func (f frameModel) publish() {
 		gated:     f.inner.gate != nil,
 		settled:   f.inner.gate == nil && len(f.inner.held) == 0,
 		folded:    f.inner.foldedSeq(),
+		shared:    f.inner.shared,
 		final:     f.inner.harnessQuit,
 	})
 }
@@ -756,6 +840,35 @@ func RunFrameScript(cfg Config, cols, rows int, script string, opts FrameOpts) (
 		}
 	}
 
+	// A socket run's host is built here, inside the isolated HOME too, since
+	// the agent its engine starts inherits it: the session the Config names,
+	// served on a control socket, with the model's backend attached to it
+	// before its engine starts (frameSocketHook, plan 027 §3.16). Its end
+	// closes the engine and the server after the program's shutdown — the
+	// model's view close — however the run ends: deferred before that
+	// shutdown's own defer below, so it runs after it on a panic, and called
+	// in line after it otherwise, where what it answers is the run's error.
+	var host *frameHost
+	hostEnded := false
+	endHost := func() error {
+		if host == nil || hostEnded {
+			return nil
+		}
+		hostEnded = true
+		return host.end()
+	}
+	if opts.transport == transportSocket {
+		if frameSocketHook == nil {
+			return "", "", errors.New("frame: the socket transport has no host: only internal/tui's tests build one")
+		}
+		host, err = frameSocketHook(cfg)
+		if err != nil {
+			return "", "", fmt.Errorf("frame: the socket host: %w", err)
+		}
+		cfg = host.cfg
+		defer func() { _ = endHost() }()
+	}
+
 	// The runner prints its final frame to stdout, so an OSC 52 sequence in
 	// that stream would corrupt it — and nothing under `make test` may reach for
 	// the developer's own clipboard. Both writes are recorded instead. The
@@ -792,6 +905,13 @@ func RunFrameScript(cfg Config, cols, rows int, script string, opts FrameOpts) (
 		done <- runErr
 		close(finished)
 	}()
+	if host != nil {
+		// The model's start waits for the session's readiness (its backend's
+		// Start); the host starts its engine as a headless host does, and the
+		// start's events reach the model live, as the primary's reach an
+		// in-process one.
+		host.start()
+	}
 
 	// shutdown ends the run (C17c, astra C17b 2): the runner is done, however
 	// the script ended — its last token, a wait that timed out, a hook's error
@@ -812,7 +932,10 @@ func RunFrameScript(cfg Config, cols, rows int, script string, opts FrameOpts) (
 	// recovered panic p.Run hands back no model to read it from. Closing the
 	// engine closes its session, and stops its driver: Close blocks until the
 	// child is reaped, and is safe even if Start is still in flight — it will
-	// not adopt a child into a closed session. It is idempotent.
+	// not adopt a child into a closed session. It is idempotent. Over the
+	// socket the owner holds the remote session, whose Close is a view close:
+	// every call waiting on it is answered, and the host's engine is the
+	// host's to close (endHost).
 	closeEngine := func() {
 		if eng := m.owner.current(); eng != nil {
 			_ = eng.Close()
@@ -856,9 +979,20 @@ func RunFrameScript(cfg Config, cols, rows int, script string, opts FrameOpts) (
 		// the model after every message that reached the program before the
 		// quit, in order, and none after it — which is not always a settled
 		// one, since a message arriving after the quit may still be held.
-		scriptErr = r.settleAt(m.owner)
+		//
+		// Over the socket the boundary is the host's engine's head: the model's
+		// backend is a remote session, with no engine behind it in this
+		// process.
+		head := func() (uint64, error) { return streamHead(m.owner, timeout) }
+		if host != nil {
+			head = func() (uint64, error) { return host.head(timeout) }
+		}
+		scriptErr = r.settleAt(head)
 		if scriptErr == nil && opts.beforeQuit != nil {
 			opts.beforeQuit(p.Send, bus.last)
+		}
+		if scriptErr == nil && host != nil {
+			scriptErr = r.captureThenMatch(host)
 		}
 	}
 	shut = true
@@ -869,6 +1003,19 @@ func RunFrameScript(cfg Config, cols, rows int, script string, opts FrameOpts) (
 	final := bus.capture()
 	if te, ok := scriptErr.(*WaitTimeoutError); ok {
 		te.LastFrame = final.plain
+	}
+	if err := endHost(); err != nil {
+		// What the socket host saw — a reset, a re-attach — fails the run
+		// whatever else it came to: it is the socket run's alone, so a run
+		// that failed the same way in process still disagrees with it.
+		if scriptErr == nil {
+			scriptErr = err
+		} else {
+			scriptErr = fmt.Errorf("%w; %w", scriptErr, err)
+		}
+	}
+	if frameProducedHook != nil {
+		frameProducedHook(opts, final.plain)
 	}
 	return final.plain, final.view, scriptErr
 }
@@ -928,14 +1075,14 @@ func (r *frameRunner) await(pred func(frameState) bool, what string) error {
 }
 
 // settleAt establishes the capture's boundary — the session's stream head
-// when the script ended (streamHead) — and waits for the model to settle at
-// it (settle).
-func (r *frameRunner) settleAt(owner *sessionOwner) error {
-	head, err := streamHead(owner, r.timeout)
+// when the script ended (head: streamHead, or a socket run's host engine's) —
+// and waits for the model to settle at it (settle).
+func (r *frameRunner) settleAt(head func() (uint64, error)) error {
+	at, err := head()
 	if err != nil {
 		return fmt.Errorf("frame: the capture's boundary could not be established: %w", err)
 	}
-	return r.settle(head)
+	return r.settle(at)
 }
 
 // settle waits, within the frame timeout, for the newest frame — never an
@@ -957,7 +1104,8 @@ func (r *frameRunner) settle(head uint64) error {
 // around it names (engineBehind); with no engine it is 0. An engine that is
 // closing or closed publishes nothing more: 0, with nothing to wait for. Any
 // other failure — the timeout above all — is an error: the boundary could not
-// be established, and a capture without it would be incomplete.
+// be established, and a capture without it would be incomplete. (A socket
+// run's boundary is its host's engine's head, by the same rule: frameHost.)
 func streamHead(owner *sessionOwner, timeout time.Duration) (uint64, error) {
 	eng := engineBehind(owner.current())
 	if eng == nil {
@@ -973,6 +1121,74 @@ func streamHead(owner *sessionOwner, timeout time.Duration) (uint64, error) {
 		return 0, nil
 	}
 	return 0, err
+}
+
+// captureThenMatch is a socket run's end (plan 027 §3.16): the capture, then
+// the check that the model's fold is the host's model.
+//
+// The capture is taken exactly as an in-process run takes it — the quit's
+// frame, the model after every message that reached the program before the
+// quit, in order — but the quit lingers (frameQuitMsg): the program runs on
+// after it, so the check can wait for the fold to reach a seq the host's model
+// is at too without anything it waits for reaching the capture. Then, within
+// the frame timeout: the host's head is read, the model is let settle at it,
+// and a sync token parks the program at its rendezvous — nothing folds while
+// it is parked — where host.match holds the fold, as its acknowledging frame
+// names it, against the host's model at that one seq. A host that has moved
+// on meanwhile is followed, and the check is made again. Then the host's
+// barrier: every line the host has written to the connection so far is read
+// (frameHost.barrier). The run's shutdown then quits the program.
+func (r *frameRunner) captureThenMatch(host *frameHost) error {
+	go r.p.Send(frameQuitMsg{linger: true})
+	// Every frame from the quit's on is final (harnessQuit stays set); the
+	// first is the capture (frameBus.capture).
+	captured := func(s frameState) bool { return s.final }
+	if _, ok := r.bus.awaitLatest(captured, r.timeout, r.finished); !ok {
+		if r.done() {
+			// The script ended the program itself: its frame is the capture
+			// (frameBus.capture), and no fold is left to check.
+			return errors.New("frame: the program ended before its capture: a socket run's fold cannot be checked")
+		}
+		return &WaitTimeoutError{Wait: "<capture>", Timeout: r.timeout}
+	}
+	deadline := time.Now().Add(r.timeout)
+	for {
+		left := time.Until(deadline)
+		if left <= 0 {
+			return &WaitTimeoutError{Wait: "<match> (the host's model and the fold at one seq)", Timeout: r.timeout}
+		}
+		head, err := host.head(left)
+		if err != nil {
+			return fmt.Errorf("frame: the host's head for the check: %w", err)
+		}
+		if err := r.settle(head); err != nil {
+			return err
+		}
+		if r.done() {
+			return errors.New("frame: the program ended before the host's model could be checked")
+		}
+		r.seq++
+		n := r.seq
+		r.p.Send(frameSyncMsg{n: n})
+		st, ok := r.bus.awaitLatest(func(s frameState) bool { return s.sync >= n }, time.Until(deadline), r.finished)
+		var same bool
+		if ok {
+			// Parked: the frame that acknowledged n is the newest, and the
+			// program waits at its rendezvous until the barrier is taken.
+			same, err = host.match(st.shared)
+		}
+		r.bus.take(n)
+		switch {
+		case !ok && r.done():
+			return errors.New("frame: the program ended before the host's model could be checked")
+		case !ok:
+			return &WaitTimeoutError{Wait: "<match> (frame sync)", Timeout: r.timeout}
+		case err != nil:
+			return err
+		case same:
+			return host.barrier(r.timeout)
+		}
+	}
 }
 
 // send hands the program msg and its sync token as one message (frameTokenMsg)

@@ -116,12 +116,7 @@ func resolveTarget(entries []rundir.Entry, session string) (rundir.Entry, error)
 				len(entries), formatEntries(entries))
 		}
 	}
-	var matches []rundir.Entry
-	for _, e := range entries {
-		if e.CrazeSessionID == session || e.ProviderSessionID == session || e.HostID == session {
-			matches = append(matches, e)
-		}
-	}
+	matches := matchSession(entries, session)
 	switch len(matches) {
 	case 0:
 		return rundir.Entry{}, bridgeErrorf("no session %s", session)
@@ -131,6 +126,19 @@ func resolveTarget(entries []rundir.Entry, session string) (rundir.Entry, error)
 		return rundir.Entry{}, bridgeErrorf("%d sessions match --session %s: %s",
 			len(matches), session, formatEntries(matches))
 	}
+}
+
+// matchSession is every entry --session names: the live entries whose
+// crazeSessionId, providerSessionId or hostId equals it exactly (§3.10). craze
+// bridge and craze attach resolve an id the same way (§3.15).
+func matchSession(entries []rundir.Entry, session string) []rundir.Entry {
+	var matches []rundir.Entry
+	for _, e := range entries {
+		if e.CrazeSessionID == session || e.ProviderSessionID == session || e.HostID == session {
+			matches = append(matches, e)
+		}
+	}
+	return matches
 }
 
 // formatEntries is several entries named on the one line every bridge error

@@ -49,7 +49,17 @@ type card struct {
 	optSel  int
 	picked  []bool
 	answers map[string][]string
+
+	// truncated says the card was raised from a snapshot that carried only
+	// the head of some text of its ask (transcript.Ask.Truncated, over the
+	// snapshot's ItemCap): the card says so (truncatedTag). A card raised from
+	// its opening event never is.
+	truncated bool
 }
+
+// truncatedTag is what a card raised from a cut-short snapshot says of itself
+// (card.truncated), beside what it names.
+const truncatedTag = "(truncated)"
 
 // question is the one question the card is showing.
 func (c card) question() agent.Question {
@@ -148,6 +158,13 @@ func (m *Model) pushCard(c card) tea.Cmd {
 // UI makes way for it.
 func (m *Model) placeCard(c card) {
 	m.cards = append(append([]card(nil), m.cards...), c)
+	m.makeWayForCard()
+}
+
+// makeWayForCard is what a card's arrival does to the rest of the UI: a
+// pushed card's (placeCard), and a restore's for the cards it raises
+// (restore.go).
+func (m *Model) makeWayForCard() {
 	// A card is a question the user has to answer first, so the offer stands
 	// down while it is up — but it is not retired. cursor answers a plan-mode
 	// turn with a cursor/create_plan card *and* assistant text, so the card
@@ -667,10 +684,12 @@ func (m Model) permissionView(c card) string {
 		// A request offering none of them can only be got rid of by cancelling.
 		keys = append(keys, "esc cancel")
 	}
-	return renderSegs(m.width,
-		seg{"permission " + sanitizeLine(c.perm.Tool) + "  ", styleFG(m.theme.ChipPrompt)},
-		seg{strings.Join(keys, "  "), styleFG(m.theme.Dim)},
-	)
+	segs := []seg{{"permission " + sanitizeLine(c.perm.Tool) + "  ", styleFG(m.theme.ChipPrompt)}}
+	if c.truncated {
+		segs = append(segs, seg{truncatedTag + "  ", styleFG(m.theme.Dim)})
+	}
+	segs = append(segs, seg{strings.Join(keys, "  "), styleFG(m.theme.Dim)})
+	return renderSegs(m.width, segs...)
 }
 
 // questionCardBody is one question at a time: its position in the request, the
@@ -682,10 +701,12 @@ func (m Model) questionCardBody(c card) string {
 	}
 	q := c.question()
 	inner := max(1, m.width-4)
-	rows := []string{renderSegs(inner,
-		seg{fmt.Sprintf("question %d/%d  ", c.qIdx+1, len(c.ask.Questions)), styleFG(m.theme.ChipPrompt)},
-		seg{sanitizeLine(q.Prompt), styleFG(m.theme.FG)},
-	)}
+	head := []seg{{fmt.Sprintf("question %d/%d  ", c.qIdx+1, len(c.ask.Questions)), styleFG(m.theme.ChipPrompt)}}
+	if c.truncated {
+		head = append(head, seg{truncatedTag + "  ", styleFG(m.theme.Dim)})
+	}
+	head = append(head, seg{sanitizeLine(q.Prompt), styleFG(m.theme.FG)})
+	rows := []string{renderSegs(inner, head...)}
 	for i, o := range q.Options {
 		mark, st := " ", styleFG(m.theme.FG)
 		if i == c.optSel {
@@ -726,10 +747,12 @@ func (m Model) planCardView(c card) string {
 	if c.plan == nil {
 		return ""
 	}
-	return renderSegs(m.width,
-		seg{"plan ", styleFG(m.theme.ChipPrompt)},
-		seg{planName(c.plan), styleFG(m.theme.Accent)},
-	) + "\n" + renderSegs(m.width,
+	head := []seg{{"plan ", styleFG(m.theme.ChipPrompt)}}
+	if c.truncated {
+		head = append(head, seg{truncatedTag + " ", styleFG(m.theme.Dim)})
+	}
+	head = append(head, seg{planName(c.plan), styleFG(m.theme.Accent)})
+	return renderSegs(m.width, head...) + "\n" + renderSegs(m.width,
 		seg{"[a]ccept  [r]eject  esc cancel", styleFG(m.theme.Dim)},
 	)
 }

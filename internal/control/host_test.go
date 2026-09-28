@@ -173,7 +173,8 @@ func newHost(t *testing.T, opts ...hostOpt) *host {
 	for _, o := range opts {
 		o(&cfg)
 	}
-	dir, err := os.MkdirTemp("", "czc-")
+	// Under /tmp itself, never $TMPDIR: sun_path on macOS.
+	dir, err := os.MkdirTemp("/tmp", "czc-")
 	if err != nil {
 		t.Fatal(err)
 	}

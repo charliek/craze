@@ -396,7 +396,7 @@ func TestEscOnAForeignTurnMasksAnOpeningItsCancelAnswered(t *testing.T) {
 	// Fed by hand, as the card tests are: no pump reads the primary, so the
 	// opening below reaches the model only where this test applies it.
 	startWake(stub, "wake-1")
-	tm, _ := m.Update(eventMsg{awaitStubEvent(t, stub, agent.EventForeignTurn)})
+	tm, _ := m.Update(eventMsg{ev: awaitStubEvent(t, stub, agent.EventForeignTurn)})
 	m = tm.(Model)
 	if !m.snap.ForeignTurn {
 		t.Fatal("setup: the model has not seen the wake")
@@ -409,7 +409,7 @@ func TestEscOnAForeignTurnMasksAnOpeningItsCancelAnswered(t *testing.T) {
 	if open := stub.Asks().Asks(); len(open) != 0 {
 		t.Fatalf("setup: the cancel left %+v open", open)
 	}
-	tm, _ = m.Update(eventMsg{opening})
+	tm, _ = m.Update(eventMsg{ev: opening})
 	m = tm.(Model)
 	if m.cardOpen() {
 		t.Fatalf("an opening the cancel had already answered raised a card: %+v", m.cards)

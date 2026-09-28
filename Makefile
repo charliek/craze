@@ -21,8 +21,13 @@ lint:
 	@n=$$(go list -f '{{join .Imports "\n"}}' ./internal/tui ./internal/cli | grep -c internal/acp || true); \
 	echo "$$n"; test "$$n" = "0"
 
+# CRAZE_GOLDEN_TRANSPORT is pinned to both in the two test targets, whatever
+# the caller exported: every frame golden runs in process AND over the control
+# socket in the gate (plan 027 §3.16). A developer narrows the matrix — the
+# local fast loop, CRAZE_GOLDEN_TRANSPORT=inproc — only by running go test
+# directly.
 test:
-	go test -timeout 5m -v ./...
+	CRAZE_GOLDEN_TRANSPORT=both go test -timeout 5m -v ./...
 
 # The packages with concurrency worth the 10x slowdown: the ACP client's
 # reader and writer goroutines, the session's event fan-out, the engine (one
@@ -48,12 +53,14 @@ test:
 # Packages run concurrently, so the wall clock is about the slowest
 # of them. CI runs this same target, so a local pass and a CI pass mean the
 # same thing; the two flakes that reached main in 2026-09 only ever showed
-# under -race. The timeout is 10m because internal/tui runs every frame golden
-# twice from plan 027 C17 on — once per command-gate mode — which took its
-# -race run here from about 60s to 105-176s beside the other packages: too
-# close to the old 5m for a slower CI runner.
+# under -race. The timeout is 20m because internal/tui runs every frame golden
+# three times from plan 027 C29 on — once per command-gate mode in process, and
+# once over the control socket — which took its -race run here from about 190s
+# to 250s (it was about 60s before C17's gate modes): macOS CI measured
+# internal/tui's -race run at 636s and 547s (ubuntu's at about 431s), so the
+# old 15m would be clipped by the next slower runner.
 test-race:
-	go test -timeout 10m -race ./internal/acp ./internal/agent ./internal/engine/... ./internal/host ./internal/tui ./internal/harness/... ./internal/journal/... ./internal/transcript/... ./internal/protocol/... ./internal/control/... ./internal/remote/... ./internal/fakehost/... ./internal/rundir/... ./internal/backend/...
+	CRAZE_GOLDEN_TRANSPORT=both go test -timeout 20m -race ./internal/acp ./internal/agent ./internal/engine/... ./internal/host ./internal/tui ./internal/harness/... ./internal/journal/... ./internal/transcript/... ./internal/protocol/... ./internal/control/... ./internal/remote/... ./internal/fakehost/... ./internal/rundir/... ./internal/backend/...
 
 test-cli:
 	@if [ ! -f tests/cli/pyproject.toml ]; then echo "tests/cli not present yet"; exit 0; fi

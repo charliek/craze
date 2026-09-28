@@ -92,6 +92,10 @@ type paritySample struct {
 // each of the TUI's panes must hold.
 type parityRec struct {
 	shadow *transcript.Model
+	// base is the snapshot the model was restored from (restoreHook), nil for
+	// a model folded from its first event: the shadow and every from-scratch
+	// check start from it.
+	base *transcript.Snapshot
 	// replay is what the shadow's fold is handed: the sample the TUI's fold
 	// was handed for the same event.
 	replay paritySample
@@ -113,6 +117,7 @@ var parity = &parityWatch{recs: map[weak.Pointer[transcript.Model]]*parityRec{}}
 func installParityWatch() {
 	parity.strict = os.Getenv("CRAZE_PARITY_STRICT") != ""
 	foldHook = parity.hook
+	restoreHook = parity.restored
 }
 
 // err is the first rule the watch saw broken, if any.
@@ -163,12 +168,21 @@ func (w *parityWatch) fail(format string, args ...any) {
 // so a model the watch has no record of is folding its first event; the
 // record goes when the model does.
 func (w *parityWatch) rec(m *transcript.Model) *parityRec {
-	key := weak.Make(m)
-	if r := w.recs[key]; r != nil {
+	if r := w.recs[weak.Make(m)]; r != nil {
 		return r
 	}
-	r := &parityRec{panes: map[*pane]*paneWant{}}
+	return w.newRec(m, nil)
+}
+
+// newRec is a fresh record for m: its shadow a new model, or base restored
+// (restoreHook). The caller holds mu.
+func (w *parityWatch) newRec(m *transcript.Model, base *transcript.Snapshot) *parityRec {
+	key := weak.Make(m)
+	r := &parityRec{panes: map[*pane]*paneWant{}, base: base}
 	r.shadow = transcript.New(replayOptions(&r.replay))
+	if base != nil {
+		r.shadow = transcript.Restore(base, replayOptions(&r.replay))
+	}
 	w.recs[key] = r
 	w.stats.models++
 	runtime.AddCleanup(m, func(k weak.Pointer[transcript.Model]) {
@@ -177,6 +191,82 @@ func (w *parityWatch) rec(m *transcript.Model) *parityRec {
 		w.mu.Unlock()
 	}, key)
 	return r
+}
+
+// restored is restoreHook (plan 027 §3.14): the TUI's shared model was just
+// restored from snap and every pane rebuilt from it. The watch starts a record
+// of its own for the new model — its shadow restores the same snapshot — and
+// holds the TUI to it at once: the same model (P0); a pane for the main
+// transcript and for every child transcript the shadow holds, and none other;
+// and in each exactly the rows the shadow's own transcript calls for — its
+// newest entries, as many as the pane's caps keep (restoredRows), in order, each
+// a shared row showing its entry (P1–P4), none hidden and none local. P2's
+// account starts from them.
+func (w *parityWatch) restored(m *Model, snap *transcript.Snapshot) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	r := w.newRec(m.shared, snap)
+	if got, want := m.shared.History(), r.shadow.History(); !reflect.DeepEqual(got, want) {
+		w.fail("restore at seq %d: the TUI's model's history is not the snapshot's\n got %+v\nwant %+v", snap.Seq, got, want)
+	}
+	if got, want := m.shared.State(), r.shadow.State(); !reflect.DeepEqual(got, want) {
+		w.fail("restore at seq %d: the TUI's model's state is not the snapshot's\n got %+v\nwant %+v", snap.Seq, got, want)
+	}
+	live := panesOf(m)
+	scopes := append([]string{""}, r.shadow.Subs()...)
+	if len(live) != len(scopes) {
+		w.fail("restore at seq %d: the TUI holds panes %v, the snapshot transcripts %v", snap.Seq, slices.Sorted(maps.Keys(live)), scopes)
+	}
+	ev := agent.Event{Type: "restore"}
+	for _, scope := range scopes {
+		p := live[scope]
+		if p == nil {
+			w.fail("restore at seq %d: no pane for the snapshot's transcript %q", snap.Seq, scope)
+		}
+		ents := restoredRows(scopeOf(r.shadow, scope), p)
+		if len(p.rows) != len(ents) {
+			w.fail("restore at seq %d: pane %q holds %d rows, the snapshot's transcript calls for %d", snap.Seq, scope, len(p.rows), len(ents))
+		}
+		want := &paneWant{emptied: p.emptied, rows: slices.Clone(p.rows), shows: map[*entry]transcript.EntryID{},
+			byID: map[transcript.EntryID]*entry{}, re: map[*entry]bool{}}
+		for i, row := range p.rows {
+			if row.local || row.id != ents[i].ID {
+				w.fail("restore at seq %d: pane %q row %d shows %v (local=%v), want entry %v", snap.Seq, scope, i, row.id, row.local, ents[i].ID)
+			}
+			want.shows[row] = row.id
+			want.byID[row.id] = row
+		}
+		r.panes[p] = want
+		w.wholePane(m, r, ev, scope, p)
+	}
+}
+
+// restoredRows is the entries of tr a pane made for it now shows, derived from
+// tr and the pane's caps alone (never from the pane's rows): every entry, less
+// the oldest past the pane's row cap, then — on a pane with a text budget —
+// the oldest while their text is over it, keeping the last (pane.enforceCaps).
+func restoredRows(tr *transcript.Transcript, p *pane) []*transcript.Entry {
+	ents := tr.Entries()
+	if n := paneCap(p); len(ents) > n {
+		ents = ents[len(ents)-n:]
+	}
+	if p.textBudget > 0 {
+		text := func(e *transcript.Entry) int {
+			if e.Streaming {
+				return len(tr.Tail())
+			}
+			return len(e.Text)
+		}
+		total := 0
+		for _, e := range ents {
+			total += text(e)
+		}
+		for total > p.textBudget && len(ents) > 1 {
+			total -= text(ents[0])
+			ents = ents[1:]
+		}
+	}
+	return ents
 }
 
 // panesOf is every pane the Model holds, by scope ("" is main).
@@ -642,6 +732,9 @@ func (w *parityWatch) fresh(m *Model, r *parityRec, ev agent.Event) {
 	w.stats.fresh++
 	var cur paritySample
 	f := transcript.New(replayOptions(&cur))
+	if r.base != nil {
+		f = transcript.Restore(r.base, replayOptions(&cur))
+	}
 	for _, s := range r.events {
 		cur = s
 		f.Fold(s.ev)
@@ -1138,9 +1231,9 @@ func TestTheStateMirrorsMatchTheModelWhenQuiet(t *testing.T) {
 		m = pumpSettled(t, m)
 		check(t, m, "after the cancelled turn settled")
 
-		// Fired: armed again, and the turn it replaces settles into it. The
-		// fold's send-now section stays armed — firing publishes no delta —
-		// and the mirror takes the started that fired it for the arm's end.
+		// Fired: armed again, and the turn it replaces settles into it.
+		// Firing publishes no delta; the fold ends the arm on the send_now
+		// started that says the send went (SF-55), and the mirror reads it.
 		second, sent := scriptHeld(), scriptHeld()
 		t.Cleanup(second.Release)
 		t.Cleanup(sent.Release)
@@ -1153,8 +1246,8 @@ func TestTheStateMirrorsMatchTheModelWhenQuiet(t *testing.T) {
 		awaitBarrier(t, sent.opened, "the armed send's turn opening")
 		m = pumpUntil(t, m, turnsDrawn(3))
 		m = pumpDrained(t, m)
-		if !m.shared.State().Settings.SendNow.Armed {
-			t.Fatal("fixture: the fold's send-now section is expected to stay armed after the send fired")
+		if m.shared.State().Settings.SendNow.Armed {
+			t.Fatal("the fold's send-now section is still armed after the send fired")
 		}
 		check(t, m, "after the send-now fired")
 		sent.Release()

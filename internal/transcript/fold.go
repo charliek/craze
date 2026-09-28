@@ -160,7 +160,18 @@ func foldError(m *Model, ev agent.Event) {
 func foldTool(m *Model, ev agent.Event) { childTool(m.Main, ev) }
 
 func childTool(t *Transcript, ev agent.Event) {
-	if ev.Tool == nil || ev.Tool.IsTodoTool() {
+	if ev.Tool == nil {
+		return
+	}
+	if t.agent != "" && ev.Tool.Title != "" {
+		// A child's activity is the title of its most recent tool call, which
+		// the live session sets on each of the child's tool calls — a todo
+		// tool's too — without a roster event (SF-54; agent's tools.go, the
+		// owning child's Activity): the same rule, and the same cap, here. A
+		// roster event replaces the row whole, its Activity with it.
+		t.model.setActivity(t.agent, agent.SubagentActivity(ev.Tool.Title))
+	}
+	if ev.Tool.IsTodoTool() {
 		return
 	}
 	t.upsertTool(ev.Tool, ev.At)
@@ -310,7 +321,8 @@ func foldReplay(m *Model, ev agent.Event) {
 }
 
 // foldTurn is one end of an engine-driven turn. A started is the turn's user
-// row, whoever sent it (§3.2); an ended settles the turn it names, and the
+// row, whoever sent it (§3.2), and a send_now one ends the armed send-now
+// (SF-55); an ended settles the turn it names, and the
 // two synthetic endings the wire never reports leave their rows — a cancel's
 // note, a refusal's error — whichever turn is current.
 func foldTurn(m *Model, ev agent.Event) {
@@ -325,6 +337,19 @@ func foldTurn(m *Model, ev agent.Event) {
 		// The event carries Text whole, so a head a snapshot truncated is gone.
 		m.turn.Truncated = false
 		m.fc.state = true
+		if tu.Origin == agent.TurnOriginSendNow {
+			// The armed send fired (SF-55): firing consumes the arm with no
+			// delta of its own, and this started is what says the send has
+			// gone (the engine's nextLocked). So every send_now started ends
+			// the arm, and no cause is needed to know it is this arm's: the
+			// engine holds at most one; a send_now Submit while one is armed
+			// is refused (already_submitted), so it starts nothing; one that
+			// starts at once, idle, had no arm to end. The section becomes
+			// the zero value — exactly what a disarm delta carries — and,
+			// being empty, holds no head a snapshot could have cut.
+			m.settings.SendNow = agent.SendNowState{}
+			m.settings.Truncated.SendNow = false
+		}
 		_, text := agent.SplitShellContext(tu.Text)
 		m.Main.addUser(text, at)
 	case agent.TurnEnded:
@@ -453,6 +478,19 @@ func foldSubagent(m *Model, ev agent.Event) {
 		t.bufRelease()
 		m.evictFinished(id)
 	}
+}
+
+// setActivity is child id's roster row with its Activity set to a, as the live
+// session keeps it (childTool). A child the roster has no row for has nothing
+// to set: the roster event that makes its row carries the row whole.
+func (m *Model) setActivity(id, a string) {
+	row, ok := m.agents[id]
+	if !ok || row.info.Activity == a {
+		return
+	}
+	row.info.Activity = a
+	m.agents[id] = row
+	m.fc.state = true
 }
 
 // evictFinished is the live session's roster rule, replicated exactly

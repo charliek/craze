@@ -715,7 +715,7 @@ func TestAHoldOfLargeRecordsReleasesAtItsBytes(t *testing.T) {
 		big := strings.Repeat("x", 8<<20)
 		const records = 7
 		for i := range records {
-			send(eventMsg{agent.Event{Type: agent.EventText, Text: big, Seq: uint64(i + 1)}})
+			send(eventMsg{ev: agent.Event{Type: agent.EventText, Text: big, Seq: uint64(i + 1)}})
 			if m.gate == nil {
 				t.Fatalf("released after %d records (%d bytes held), before the bound", i+1, m.heldBytes)
 			}
@@ -732,7 +732,7 @@ func TestAHoldOfLargeRecordsReleasesAtItsBytes(t *testing.T) {
 			t.Fatalf("%d messages held after the release, want all %d", n, records+1)
 		}
 		// The reader parks: the next event is held, and no read follows it.
-		cmd := send(eventMsg{agent.Event{Type: agent.EventText, Text: "after", Seq: records + 1}})
+		cmd := send(eventMsg{ev: agent.Event{Type: agent.EventText, Text: "after", Seq: records + 1}})
 		if m.reading || cmdHas(cmd, tuiPkg+"waitEvent") {
 			t.Fatal("the reader was re-armed while the backlog drains")
 		}

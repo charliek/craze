@@ -1,6 +1,11 @@
 package remote
 
-import "context"
+import (
+	"context"
+
+	"github.com/charliek/craze/internal/agent"
+	"github.com/charliek/craze/internal/protocol"
+)
 
 // Waiting is how many commands have a caller waiting on them: sent and
 // unanswered, or held for a connection.
@@ -44,11 +49,28 @@ type TestHooks struct {
 	// connection's writer; PostRan on the writer once it has run one.
 	Posted  func()
 	PostRan func()
+	// Waiting runs on a call once it waits for a connection; Answered once
+	// its reply has reached it, before it is decoded.
+	Waiting  func()
+	Answered func(method string)
+	// Entered runs on a Session command once it has taken its binding,
+	// before the command is registered; Attached on a Session's Attach once
+	// the client's attach has returned, before the Session holds the stream.
+	Entered  func(commandID string)
+	Attached func()
+	// Broken runs on a Session's detach of a stream a decode failure ended,
+	// before the detach is made.
+	Broken func()
 }
 
 // DialForTest is Dial with h in place.
 func DialForTest(ctx context.Context, path string, o Options, h TestHooks) (*Client, error) {
-	return dial(ctx, path, o, hooks{
+	return dial(ctx, path, o, h.hooks())
+}
+
+// hooks is h as the client's own.
+func (h TestHooks) hooks() hooks {
+	return hooks{
 		registered: h.Registered,
 		attempted:  h.Attempted,
 		claimed:    h.Claimed,
@@ -61,7 +83,12 @@ func DialForTest(ctx context.Context, path string, o Options, h TestHooks) (*Cli
 		pausing:    h.Pausing,
 		posted:     h.Posted,
 		postRan:    h.PostRan,
-	})
+		waiting:    h.Waiting,
+		answered:   h.Answered,
+		entered:    h.Entered,
+		attached:   h.Attached,
+		broken:     h.Broken,
+	}
 }
 
 // QueuedBytes is what the stream's queue counts now; QueuedItems how many
@@ -87,3 +114,18 @@ var ErrMalformed = errMalformed
 
 // ItemSize is what it counts against the stream's byte bound.
 func ItemSize(it Item) int { return it.size() }
+
+// DialSessionForTest is DialSession with h in place.
+func DialSessionForTest(ctx context.Context, path string, o SessionOptions, h TestHooks) (*Session, error) {
+	return dialSession(ctx, path, o, h.hooks())
+}
+
+// ErrorFromWire is a host's error object as the client reads it off a reply
+// (the one construction every refusal goes through).
+func ErrorFromWire(pe *protocol.Error) *Error { return newError(pe) }
+
+// Sentinels is the reconstruction table's row for (code, reason).
+func Sentinels(code protocol.Code, reason protocol.Reason) []error { return sentinels(code, reason) }
+
+// CapabilitiesFromWire is the session capability set on the wire as agent's.
+func CapabilitiesFromWire(c protocol.SessionCapabilities) agent.Capabilities { return capabilities(c) }

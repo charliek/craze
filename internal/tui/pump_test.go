@@ -8,12 +8,14 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/charliek/craze/internal/agent"
+	"github.com/charliek/craze/internal/backend"
 	"github.com/charliek/craze/internal/engine"
 )
 
@@ -84,8 +86,19 @@ type pump struct {
 	// ctrl is the engine the model drives its session through, which is also
 	// where the one event stream comes from: the engine publishes into the
 	// session's own log, so the reader below sees the agent's events and the
-	// engine's in one order.
+	// engine's in one order. For a model over a socket session (remote) it is
+	// the host's engine, as the registry names it (hostEngineOf): what the
+	// pump asks the session's state and head of.
 	ctrl *engine.Engine
+	// remote is the model's backend when it is a socket session (plan 027
+	// §3.16, C29): the reader reads its stream (Read) — the host's engine has
+	// no primary — and cleanup closes it (a view close), leaving the host's
+	// engine to the host. nil for an in-process model.
+	remote backend.Backend
+	// head is the host's stream head the last outbox barrier read (sync), for
+	// a remote pump: its model is quiet only once it has folded that far,
+	// since what the socket still carries is counted nowhere else.
+	head atomic.Uint64
 	// msgs carries every message bound for Update, from the event reader and
 	// from the commands alike, in the order they were produced. Buffered so a
 	// command that has finished never holds its goroutine open waiting for the
@@ -139,8 +152,17 @@ type pump struct {
 // model and its stub are its own too.
 var (
 	pumpsMu sync.Mutex
-	pumps   = map[*testing.T]*pump{}
+	pumps   = map[pumpID]*pump{}
 )
+
+// pumpID names a pump: the test's, and for a model over a socket session that
+// session too, so two remote models in one test — two clients of one host
+// (TestAPromptFromEitherClientAppearsInBoth) — are pumped each by its own.
+// An in-process model's pump is its test's alone, as it always was.
+type pumpID struct {
+	t      *testing.T
+	remote backend.Backend
+}
 
 // pumpFor returns this test's pump, starting the event reader on the first
 // call. The cleanup is registered there too: closing the session is what
@@ -148,13 +170,18 @@ var (
 // nothing the pump started is still running when the test returns.
 func pumpFor(t *testing.T, m Model) *pump {
 	t.Helper()
+	id := pumpID{t: t}
+	if m.eng != nil && engineBehind(m.eng) == nil && hostEngineOf(m.eng) != nil {
+		id.remote = m.eng
+	}
 	pumpsMu.Lock()
-	if p, ok := pumps[t]; ok {
+	if p, ok := pumps[id]; ok {
 		pumpsMu.Unlock()
 		return p
 	}
 	// The engine behind the model's in-process backend: the pump reads its
 	// primary and closes it, as the model's own reader and exit tail would.
+	// Over a socket it is the host's engine, and the stream is the session's.
 	var ctrl *engine.Engine
 	if m.eng != nil {
 		ctrl = engineOf(t, m)
@@ -162,6 +189,7 @@ func pumpFor(t *testing.T, m Model) *pump {
 	p := &pump{
 		mode:       m.gateSync,
 		ctrl:       ctrl,
+		remote:     id.remote,
 		msgs:       make(chan pumpItem, 256),
 		dead:       make(chan struct{}),
 		quietened:  make(chan struct{}, 1),
@@ -169,7 +197,7 @@ func pumpFor(t *testing.T, m Model) *pump {
 		resume:     make(chan struct{}),
 		readerGone: make(chan struct{}),
 	}
-	pumps[t] = p
+	pumps[id] = p
 	pumpsMu.Unlock()
 	if p.ctrl == nil {
 		t.Fatal("pump: the model has no session to drive")
@@ -182,7 +210,7 @@ func pumpFor(t *testing.T, m Model) *pump {
 	}()
 	t.Cleanup(func() {
 		pumpsMu.Lock()
-		delete(pumps, t)
+		delete(pumps, id)
 		pumpsMu.Unlock()
 		// dead first: it is what stops the reader and stops a command that came
 		// back with a message from waiting on a queue nobody reads again.
@@ -193,8 +221,13 @@ func pumpFor(t *testing.T, m Model) *pump {
 		// Then the engine, which closes the session — releasing a prompt still
 		// parked or hung inside the stub, and reaping a real agent — and joins
 		// its own goroutines. Then the join, which is the assertion that nothing
-		// the pump started outlives the test.
-		_ = p.ctrl.Close()
+		// the pump started outlives the test. A socket session is closed
+		// instead — a view close — and its host's engine is the host's.
+		if p.remote != nil {
+			_ = p.remote.Close()
+		} else {
+			_ = p.ctrl.Close()
+		}
 		p.wg.Wait()
 	})
 	return p
@@ -209,6 +242,10 @@ func pumpFor(t *testing.T, m Model) *pump {
 // the pump and know that an event is either still on the stream or already
 // queued, with nowhere else to be.
 func (p *pump) read() {
+	if p.remote != nil {
+		p.readRemote()
+		return
+	}
 	ch := p.ctrl.Events()
 	for {
 		select {
@@ -219,7 +256,7 @@ func (p *pump) read() {
 			if h := p.receivedHook(); h != nil {
 				h(ev)
 			}
-			if !p.deliver(pumpItem{msg: eventMsg{ev}}) {
+			if !p.deliver(pumpItem{msg: eventMsg{ev: ev}}) {
 				return
 			}
 		case p.parked <- struct{}{}:
@@ -232,6 +269,77 @@ func (p *pump) read() {
 			return
 		}
 	}
+}
+
+// readRemote is read over a socket session: its stream's items, as the model's
+// own reader delivers them (waitEvent) — an event with its generation, a
+// restore, a ready, the end. A fetcher of its own reads the stream, since a
+// read blocks where the primary's receive would select; the loop keeps the
+// rendezvous's shape. What the fetcher holds is not counted by quiet, which
+// is why a remote pump is quiet only once its model has folded to the host's
+// head (pumpQuiet).
+func (p *pump) readRemote() {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	got := make(chan tea.Msg)
+	p.wg.Add(1)
+	go func() {
+		defer p.wg.Done()
+		defer close(got)
+		for {
+			it, err := p.remote.Read(ctx)
+			if err != nil {
+				return
+			}
+			var msg tea.Msg
+			switch it.Kind {
+			case backend.ItemEvent:
+				if h := p.receivedHook(); h != nil {
+					h(it.Event)
+				}
+				msg = eventMsg{ev: it.Event, gen: it.Gen}
+			case backend.ItemRestore:
+				msg = restoreMsg{info: it.Info, snap: it.Snapshot, gen: it.Gen}
+			case backend.ItemReady:
+				msg = readyMsg{info: it.Info, err: it.Err}
+			case backend.ItemEnd:
+				msg = endMsg{err: it.Err}
+			default:
+				continue
+			}
+			select {
+			case got <- msg:
+			case <-p.dead:
+				return
+			}
+		}
+	}()
+	for {
+		select {
+		case msg, ok := <-got:
+			if !ok {
+				return
+			}
+			if !p.deliver(pumpItem{msg: msg}) {
+				return
+			}
+		case p.parked <- struct{}{}:
+			select {
+			case <-p.resume:
+			case <-p.dead:
+				return
+			}
+		case <-p.dead:
+			return
+		}
+	}
+}
+
+// caughtUp is the remote pump's term of quiet: m has folded the host's head as
+// the last outbox barrier read it. An in-process pump's reader sees the
+// primary itself (quiet), so it is always caught up here.
+func (p *pump) caughtUp(m Model) bool {
+	return p.remote == nil || m.foldedSeq() >= p.head.Load()
 }
 
 // receivedHook is the window between taking an event off the stream and queueing
@@ -407,6 +515,13 @@ func (p *pump) sync() <-chan error {
 			case <-ctx.Done():
 			}
 		}()
+		if p.remote != nil {
+			// The host's head, which the model must fold to (caughtUp).
+			head, err := p.ctrl.SyncSeq(ctx)
+			p.head.Store(head)
+			out <- err
+			return
+		}
 		out <- p.ctrl.Sync(ctx)
 	}()
 	return out
@@ -633,7 +748,7 @@ func pumpQuiet(t *testing.T, m Model, what string, done func(*pump) bool) Model 
 		}
 		// Both terms are read with the reader parked, so neither can be answered
 		// from a moment an event was in flight somewhere this does not look.
-		quiet := p.quiet() && done(p)
+		quiet := p.quiet() && done(p) && p.caughtUp(m)
 		if parked {
 			p.resumeReader()
 		}

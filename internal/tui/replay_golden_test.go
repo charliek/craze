@@ -17,7 +17,7 @@ func runReplayStubFrame(t *testing.T, cols, rows int, script string, replay []ag
 	t.Helper()
 	isolateSkillsHome(t)
 	plain, _, err := runFrameModes(t, func() Config {
-		stub := NewStub()
+		stub := frameStub()
 		stub.Replay = replay
 		return Config{
 			Session:   stub,
@@ -128,6 +128,7 @@ func runLoadFrame(t *testing.T, script string, cols, rows int, keys string) stri
 				Stderr:        io.Discard,
 				Provider:      &prov,
 				LoadSessionID: "sess-load-1",
+				NoPrimary:     frameNoPrimary,
 			}),
 			Theme:          "tokyo-night",
 			Workspace:      ws,

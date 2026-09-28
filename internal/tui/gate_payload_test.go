@@ -102,7 +102,7 @@ func TestTheHeldChargeFollowsItsRule(t *testing.T) {
 	// An event's payload behind its pointers is plain data, and counted.
 	big := strings.Repeat("o", 1<<16)
 	ev := agent.Event{Type: agent.EventTool, Tool: &agent.ToolEvent{ID: "c", Output: &agent.ToolOutput{Stdout: big}}}
-	if got := payloadBytes(eventMsg{ev}); got < len(big) {
+	if got := payloadBytes(eventMsg{ev: ev}); got < len(big) {
 		t.Fatalf("an event with a %d-byte tool output is charged %d", len(big), got)
 	}
 }

@@ -222,55 +222,125 @@ func frameWorkspace(t *testing.T) string {
 	return ws
 }
 
-// frameGateModes is the two modes every frame golden runs in (plan 027 §3.12
-// (d)): the gateSync baseline — a gated call inline, today's synchronous
-// control flow — and the asynchronous gate every real run uses. Both run in
-// every run of the package; the one knob that skips one is V8's
-// (frameModesJittered), which a run turns on only by asking for V8.
+// frameGateModes is the two gate modes every frame golden runs in in process
+// (plan 027 §3.12 (d)): the gateSync baseline — a gated call inline, today's
+// synchronous control flow — and the asynchronous gate every real run uses.
+// Both run in every run of the package (frameRuns, beside the socket run);
+// the knobs that skip one are V8's (frameModesJittered), which a run turns on
+// only by asking for V8, and CRAZE_GOLDEN_TRANSPORT=socket.
 var frameGateModes = [...]struct {
 	name string
 	sync bool
 }{{"gateSync", true}, {"async", false}}
 
-// runFrameModes runs a frame script once in each gate mode, each against a
-// fresh Config from build — a session is spent by the run that drives it —
-// and fails, naming the mode, unless the two runs end on the same frame, plain
-// and raw, with the same error. It answers the async run's, which the caller
-// holds against its golden: two equal frames make that one golden check hold
-// for both modes, so a continuation that is not today's post-call code, or an
-// order the gate changed, moves the golden in one mode and fails here.
+// frameRun is one of the runs runFrameModes makes of a frame script: a gate
+// mode and a transport.
+type frameRun struct {
+	name      string
+	sync      bool
+	transport frameTransport
+}
+
+// frameRuns is every run a frame golden makes (plan 027 §3.12 (d), §3.16):
+// PR 3's two gate modes in process — the gateSync baseline and the
+// asynchronous gate — and PR 4's run over the socket, asynchronous only, the
+// model a remote.Session to a host serving the builder's session.
+var frameRuns = [...]frameRun{
+	{"gateSync", true, transportInproc},
+	{"async", false, transportInproc},
+	{"socket", false, transportSocket},
+}
+
+// goldenTransports is CRAZE_GOLDEN_TRANSPORT: which transports runFrameModes
+// runs — inproc, socket, or both, the default (GLM 13: a local fast loop may
+// run inproc, by running go test directly). The gate cannot be narrowed: the
+// Makefile's test and test-race recipes set it to both whatever the caller
+// exported, and CI's test job sets it for every Go test step (astra r69 3).
+// Anything else fails the test.
+func goldenTransports(t testing.TB) (inproc, socket bool) {
+	t.Helper()
+	inproc, socket, err := goldenTransportSet()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return inproc, socket
+}
+
+// goldenTransportSet is goldenTransports' reading of CRAZE_GOLDEN_TRANSPORT,
+// with no test to fail.
+func goldenTransportSet() (inproc, socket bool, err error) {
+	switch v := os.Getenv("CRAZE_GOLDEN_TRANSPORT"); v {
+	case "", "both":
+		return true, true, nil
+	case "inproc":
+		return true, false, nil
+	case "socket":
+		return false, true, nil
+	default:
+		return false, false, fmt.Errorf("CRAZE_GOLDEN_TRANSPORT=%q: want inproc, socket or both", v)
+	}
+}
+
+// runFrameModes runs a frame script once per run in frameRuns that
+// CRAZE_GOLDEN_TRANSPORT leaves in — each against a fresh Config from build, a
+// session being spent by the run that drives it; the socket run's build makes
+// its session NoPrimary (frameNoPrimary) — and fails, naming the runs, unless
+// they all end on the same frame, plain and raw, with the same error. It
+// answers that frame, which the caller holds against its golden: equal frames
+// make that one golden check hold for every run, so a continuation that is not
+// today's post-call code, an order the gate changed, or anything the socket
+// moves, moves the golden in one run and fails here. The transports it ran are
+// recorded for the golden manifest's check (assertGolden).
+//
+// V8's jitter run (v8_jitter_test.go) keeps the asynchronous runs alone, in
+// process and over the socket, each over a backend whose every answer and read
+// is delayed.
 func runFrameModes(t *testing.T, build func() Config, cols, rows int, script string, opts FrameOpts) (string, string, error) {
 	t.Helper()
-	if frameModesJittered {
-		// V8's jitter run (v8_jitter_test.go): the asynchronous gate alone,
-		// over a backend whose every answer and read is delayed, held against
-		// the same golden by the caller.
-		opts.gateSync = false
-		return RunFrameScript(build(), cols, rows, script, opts)
-	}
-	type run struct {
+	inproc, socket := goldenTransports(t)
+	type result struct {
+		run        frameRun
 		plain, raw string
 		err        error
 	}
-	var runs [len(frameGateModes)]run
-	for i, mode := range frameGateModes {
+	var results []result
+	for _, run := range frameRuns {
+		if frameModesJittered && run.sync {
+			continue
+		}
+		if run.transport == transportSocket && !socket || run.transport == transportInproc && !inproc {
+			continue
+		}
 		o := opts
-		o.gateSync = mode.sync
-		plain, raw, err := RunFrameScript(build(), cols, rows, script, o)
-		runs[i] = run{plain, raw, err}
+		o.gateSync = run.sync
+		o.transport = run.transport
+		o.matrix = true
+		cfg := buildFor(run.transport, build)
+		plain, raw, err := RunFrameScript(cfg, cols, rows, script, o)
+		results = append(results, result{run, plain, raw, err})
 	}
-	base, got := runs[0], runs[1]
-	if fmt.Sprint(base.err) != fmt.Sprint(got.err) {
-		t.Fatalf("the gate modes disagree: %s ended with %v, %s with %v\n--- %s ---\n%s\n--- %s ---\n%s",
-			frameGateModes[0].name, base.err, frameGateModes[1].name, got.err,
-			frameGateModes[0].name, base.plain, frameGateModes[1].name, got.plain)
+	base := results[0]
+	for _, got := range results[1:] {
+		if fmt.Sprint(base.err) != fmt.Sprint(got.err) {
+			t.Fatalf("the runs disagree: %s ended with %v, %s with %v\n--- %s ---\n%s\n--- %s ---\n%s",
+				base.run.name, base.err, got.run.name, got.err,
+				base.run.name, base.plain, got.run.name, got.plain)
+		}
+		if base.plain != got.plain || base.raw != got.raw {
+			t.Fatalf("the runs disagree: the %s frame is not the %s frame (%s)\n--- %s ---\n%s\n--- %s ---\n%s",
+				got.run.name, base.run.name, frameLineDiff(base.plain, got.plain),
+				base.run.name, base.plain, got.run.name, got.plain)
+		}
 	}
-	if base.plain != got.plain || base.raw != got.raw {
-		t.Fatalf("the gate modes disagree: the %s frame is not the %s frame (%s)\n--- %s ---\n%s\n--- %s ---\n%s",
-			frameGateModes[1].name, frameGateModes[0].name, frameLineDiff(base.plain, got.plain),
-			frameGateModes[0].name, base.plain, frameGateModes[1].name, got.plain)
+	// The frame every run ended on carries the transports that made it, for
+	// the assertion of that frame alone (creditFrame).
+	ran := map[frameTransport]bool{}
+	for _, r := range results {
+		ran[r.run.transport] = true
 	}
-	return got.plain, got.raw, got.err
+	last := results[len(results)-1]
+	creditFrame(t, last.plain, ran)
+	return last.plain, last.raw, last.err
 }
 
 // frameLineDiff names the first line two frames differ on.
@@ -305,7 +375,7 @@ func runStubFrameRaw(t *testing.T, cols, rows int, script string) (string, strin
 	isolateSkillsHome(t)
 	plain, raw, err := runFrameModes(t, func() Config {
 		return Config{
-			Session:   NewStub(),
+			Session:   frameStub(),
 			Theme:     "tokyo-night",
 			Workspace: frameWorkspace(t),
 			Model:     "grok",
@@ -325,7 +395,7 @@ func runThemeFrame(t *testing.T, cols, rows int, theme, script string) (string, 
 	isolateSkillsHome(t)
 	plainOut, raw, err := runFrameModes(t, func() Config {
 		return Config{
-			Session:   NewStub(),
+			Session:   frameStub(),
 			Theme:     theme,
 			Workspace: frameWorkspace(t),
 			Model:     "grok",
@@ -350,6 +420,10 @@ func assertGolden(t *testing.T, name string, cols, rows int, got string) {
 	if h := lipgloss.Height(got); h != rows {
 		t.Fatalf("frame is %d rows, want %d:\n%s", h, rows, got)
 	}
+	// The frame was produced under the transports the manifest lists for this
+	// golden (golden_manifest_test.go, plan 027 §3.16): its own credit, spent
+	// here.
+	checkGoldenTransports(t, name, got)
 	path := filepath.Join("testdata", name+".golden")
 	if *updateGoldens {
 		if err := os.MkdirAll("testdata", 0o755); err != nil {
@@ -367,6 +441,7 @@ func assertGolden(t *testing.T, name string, cols, rows int, got string) {
 	if string(want) != got {
 		t.Fatalf("golden %s mismatch\n--- want ---\n%s\n--- got ---\n%s", name, want, got)
 	}
+	noteGoldenAsserted(t, name)
 }
 
 // assertFrameGolden is assertGolden plus the substrings a case names, so a
@@ -897,6 +972,7 @@ func runFakeFrameOpts(t *testing.T, script string, cols, rows int, keys string, 
 				Interactive: true,
 				Stderr:      io.Discard,
 				Provider:    &prov,
+				NoPrimary:   frameNoPrimary,
 			}),
 			Theme:          "tokyo-night",
 			Workspace:      ws,
@@ -1097,7 +1173,9 @@ func TestFrameGoldenStatus60x24(t *testing.T) {
 // TestFrameGoldenAsk100x30 is the question card as cursor's own request drew
 // it: one question at a time, with its position in the request.
 func TestFrameGoldenAsk100x30(t *testing.T) {
-	got := runFakeFrame(t, "ask", 100, 30, "<wait:idle>go<enter><wait:card>")
+	// Frozen: under starvation the "Waiting for your answer" line can capture
+	// on a later spin frame than the golden's (spin frame 0, ✳).
+	got := runFakeFrameOpts(t, "ask", 100, 30, "<wait:idle>go<enter><wait:card>", fakeFrameOpts{force: true, freeze: true})
 	assertGolden(t, "ask-100x30", 100, 30, got)
 	for _, want := range []string{"question 1/2  Pick one", "> 1 A", "  2 B", "esc skip", "Waiting for your answer"} {
 		if !strings.Contains(got, want) {
@@ -1146,7 +1224,9 @@ func TestFrameAskEscSkips(t *testing.T) {
 // TestFrameGoldenPlan100x30 shows both halves of §3.11's plan card: the plan
 // itself as a transcript note block, and the two lines that answer it.
 func TestFrameGoldenPlan100x30(t *testing.T) {
-	got := runFakeFrame(t, "plan", 100, 30, "<wait:idle>go<enter><wait:card>")
+	// Frozen: the plan card's spinner and elapsed counters would otherwise
+	// straddle a spin-frame boundary under starvation (spin frame 0, ✳).
+	got := runFakeFrameOpts(t, "plan", 100, 30, "<wait:idle>go<enter><wait:card>", fakeFrameOpts{force: true, freeze: true})
 	assertGolden(t, "plan-100x30", 100, 30, got)
 	for _, want := range []string{
 		"PLAN Fake Plan", "Two steps, then stop.", "Steps", "• read main.go",
@@ -1189,7 +1269,10 @@ func TestFramePlanEscCancels(t *testing.T) {
 // TestFrameGoldenPermissionNoForce100x30 is the permission line in its pinned
 // position, with the [A]lways the fake request offers.
 func TestFrameGoldenPermissionNoForce100x30(t *testing.T) {
-	got := runFakeFrameForce(t, "permission", 100, 30, "<wait:idle>go<enter><wait:card>", false)
+	// Frozen: under starvation the "Waiting for your answer" line can capture
+	// on a later spin frame than the golden's (spin frame 0, ✳).
+	got := runFakeFrameOpts(t, "permission", 100, 30, "<wait:idle>go<enter><wait:card>",
+		fakeFrameOpts{force: false, freeze: true})
 	assertGolden(t, "permission-noforce-100x30", 100, 30, got)
 	for _, want := range []string{
 		"permission Shell  [a]llow once  [A]lways  [n] reject",
@@ -1258,7 +1341,7 @@ func runStubCatalogFrame(t *testing.T, cols, rows int, cfg []agent.ConfigOption,
 	t.Helper()
 	isolateSkillsHome(t)
 	plain, _, err := runFrameModes(t, func() Config {
-		stub := NewStub()
+		stub := frameStub()
 		stub.SetModelCatalogs(map[string][]agent.ConfigOption{"grok": cfg})
 		return Config{
 			Session:   stub,
@@ -1516,6 +1599,7 @@ func TestFrameGoldenSelectStyledRow(t *testing.T) {
 				Force:       true,
 				Interactive: true,
 				Stderr:      io.Discard,
+				NoPrimary:   frameNoPrimary,
 			}),
 			Theme:     "tokyo-night",
 			Workspace: ws,
@@ -1581,9 +1665,11 @@ func TestFrameGoldenGrokEcho(t *testing.T) {
 }
 
 func TestFrameGoldenGrokAsk(t *testing.T) {
+	// Frozen: under starvation the "Waiting for your answer" line can capture
+	// on a later spin frame than the golden's (spin frame 0, ✳).
 	keys := "<wait:idle>go<enter><wait:card>"
 	for _, size := range []struct{ cols, rows int }{{80, 24}, {100, 30}} {
-		got := runFakeFrameProvider(t, "grok-ask", size.cols, size.rows, keys, agent.GrokProvider(), true)
+		got := runFakeFrameFrozen(t, "grok-ask", size.cols, size.rows, keys, agent.GrokProvider())
 		name := fmt.Sprintf("grok-ask-%dx%d", size.cols, size.rows)
 		assertGolden(t, name, size.cols, size.rows, got)
 		for _, want := range []string{"question 1/2  Pick one", "> 1 A", "  2 B", "esc skip"} {
@@ -1715,7 +1801,7 @@ func TestFrameGoldenGrokSubagentCancel100x30(t *testing.T) {
 }
 
 func TestFrameGoldenGrokSubagentLate80x24(t *testing.T) {
-	got := runFakeFrameProvider(t, "grok-subagent-late", 80, 24,
+	got := runFakeFrameProvider(t, "grok-subagent-late-hold", 80, 24,
 		"<wait:idle>go<enter><wait:idle>",
 		agent.GrokProvider(), true)
 	assertGolden(t, "grok-subagent-late-80x24", 80, 24, got)

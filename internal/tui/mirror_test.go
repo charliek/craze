@@ -39,7 +39,7 @@ func republish(t *testing.T, m Model) Model {
 func applyPending(t *testing.T, m Model) Model {
 	t.Helper()
 	drainPending(t, m, func(ev agent.Event) {
-		tm, _ := m.Update(eventMsg{ev})
+		tm, _ := m.Update(eventMsg{ev: ev})
 		m = tm.(Model)
 	})
 	return m
@@ -808,9 +808,10 @@ func TestAClearingTodosEventNotesNothingOld(t *testing.T) {
 
 // TestAGrokChildsActivityFollowsItsToolTitles (decision B): the live session
 // keeps a child's activity as the title of its most recent tool call without
-// publishing a roster event for it, so the mirror follows the child's own tool
-// events — the live rule, and the live 256-byte cap — until the next roster
-// event carries the row whole.
+// publishing a roster event for it, so the fold carries it from the child's
+// own tool events — the live rule, and the live 256-byte cap — until the next
+// roster event carries the row whole (SF-54), and the mirror draws the fold's
+// row.
 func TestAGrokChildsActivityFollowsItsToolTitles(t *testing.T) {
 	m := sized(t)
 	stubOf(t, m).SetProvider(agent.GrokProvider())
@@ -827,8 +828,8 @@ func TestAGrokChildsActivityFollowsItsToolTitles(t *testing.T) {
 	if got := activity(m); got != "read_file" {
 		t.Fatalf("the child's activity is %q, want its tool's title", got)
 	}
-	if info, _ := liveInfo(m.shared.State().Agents, "c1"); info.Activity != "" {
-		t.Fatalf("fixture: the fold's row carries %q: this schedule needs one that does not", info.Activity)
+	if info, _ := liveInfo(m.shared.State().Agents, "c1"); info.Activity != "read_file" {
+		t.Fatalf("the fold's row carries %q, want its tool's title", info.Activity)
 	}
 	progressed := child
 	progressed.Activity = "thinking"

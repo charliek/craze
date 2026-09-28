@@ -206,6 +206,14 @@ type AttachOptions struct {
 	When protocol.When
 	// Budget is the subscription's budget, every attach's.
 	Budget *protocol.AttachBudget
+
+	// observe, when set, sees every item as the stream queues it for Next —
+	// as the stream receives it, ahead of Next — in the order Next will hand
+	// them up (remote.Session's Info and readiness, session.go). It runs
+	// under the queue's lock, on whatever goroutine queues the item (the
+	// connection's reader, or a failing client's), so it must be quick and
+	// take no lock but a leaf of its own.
+	observe func(Item)
 }
 
 // Stream is a client's attachment to its session (Attach): Next hands its
@@ -346,7 +354,9 @@ func (c *Client) Attach(ctx context.Context, o AttachOptions) (*Stream, error) {
 		}
 		o.SessionID = list.Sessions[0].SessionID
 	}
-	s := &Stream{c: c, q: newItemQueue(c.opts.StreamBytes), opts: o, first: make(chan error, 1), sessionID: o.SessionID}
+	q := newItemQueue(c.opts.StreamBytes)
+	q.observe = o.observe
+	s := &Stream{c: c, q: q, opts: o, first: make(chan error, 1), sessionID: o.SessionID}
 	c.mu.Lock()
 	switch {
 	case c.err != nil:
@@ -1215,6 +1225,9 @@ type itemQueue struct {
 	closed  bool
 	dropped bool
 	changed chan struct{}
+	// observe sees each item as it is queued, under mu (AttachOptions
+	// .observe); nil sees nothing.
+	observe func(Item)
 }
 
 func newItemQueue(max int) *itemQueue {
@@ -1246,8 +1259,19 @@ func (q *itemQueue) offer(items ...Item) bool {
 	}
 	q.items = append(q.items, items...)
 	q.bytes += cost
+	q.observeLocked(items...)
 	q.changedLocked()
 	return true
+}
+
+// observeLocked shows the observer items just queued; q.mu is held.
+func (q *itemQueue) observeLocked(items ...Item) {
+	if q.observe == nil {
+		return
+	}
+	for _, it := range items {
+		q.observe(it)
+	}
 }
 
 // roomFor says a fallen-behind stream's caller has drained enough for it to
@@ -1272,6 +1296,7 @@ func (q *itemQueue) finish(items ...Item) {
 		q.items = append(q.items, it)
 		q.bytes += it.cost
 	}
+	q.observeLocked(items...)
 	q.closed = true
 	q.changedLocked()
 }

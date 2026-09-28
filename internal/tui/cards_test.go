@@ -59,7 +59,7 @@ func sizedCards(t *testing.T) (Model, *Stub) {
 func cardEvent(t *testing.T, m Model, stub *Stub, ev agent.Event) Model {
 	t.Helper()
 	stub.Emit(ev)
-	tm, _ := m.Update(eventMsg{ev})
+	tm, _ := m.Update(eventMsg{ev: ev})
 	return tm.(Model)
 }
 
@@ -565,7 +565,7 @@ func TestCardEventAfterACancelIsDropped(t *testing.T) {
 		t.Fatalf("the cancel left %+v open: the schedule needs every opening answered", open)
 	}
 
-	tm, _ = m.Update(eventMsg{inFlight[0]})
+	tm, _ = m.Update(eventMsg{ev: inFlight[0]})
 	m = tm.(Model)
 	if m.cardOpen() {
 		t.Fatalf("an event from a cancelled turn raised a card: %+v", m.cards)
@@ -579,8 +579,8 @@ func TestCardEventAfterACancelIsDropped(t *testing.T) {
 	// directly and can overtake an opening of the cancelled turn still in the
 	// outbox, so a card arriving after it is still one nobody could answer.
 	cancelled := m.turnID
-	tm, _ = m.Update(eventMsg{agent.Event{Type: agent.EventDone, StopReason: "cancelled"}})
-	tm, _ = tm.(Model).Update(eventMsg{inFlight[1]})
+	tm, _ = m.Update(eventMsg{ev: agent.Event{Type: agent.EventDone, StopReason: "cancelled"}})
+	tm, _ = tm.(Model).Update(eventMsg{ev: inFlight[1]})
 	m = tm.(Model)
 	if m.cardOpen() {
 		t.Fatalf("a done took the mask down: %+v", m.cards)
@@ -684,7 +684,7 @@ func TestANoTurnCancelMasksTheOpeningItAnswered(t *testing.T) {
 		t.Fatalf("the cancel left %+v open", open)
 	}
 
-	tm, _ := m.Update(eventMsg{opening})
+	tm, _ := m.Update(eventMsg{ev: opening})
 	m = tm.(Model)
 	if m.cardOpen() {
 		t.Fatalf("an opening the cancel had already answered flashed a card up: %+v", m.cards)
@@ -722,7 +722,7 @@ func TestTheCancelMaskDoesNotLeakOntoTheNextTurn(t *testing.T) {
 
 	// A successor starts — a drained row, another client's prompt — and with it
 	// the mask goes: its openings are nobody's cancel.
-	tm, _ = m.Update(eventMsg{agent.Event{Type: agent.EventTurn, Turn: &agent.TurnInfo{
+	tm, _ = m.Update(eventMsg{ev: agent.Event{Type: agent.EventTurn, Turn: &agent.TurnInfo{
 		ID: "turn-99", Phase: agent.TurnStarted, Text: "two", Origin: agent.TurnOriginDrain,
 	}}})
 	m = tm.(Model)

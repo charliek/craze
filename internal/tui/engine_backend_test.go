@@ -9,6 +9,8 @@ import (
 	"testing"
 	"time"
 
+	tea "github.com/charmbracelet/bubbletea"
+
 	"github.com/charliek/craze/internal/agent"
 	"github.com/charliek/craze/internal/backend"
 	"github.com/charliek/craze/internal/engine"
@@ -38,9 +40,14 @@ func engineOf(t testing.TB, m Model) *engine.Engine {
 
 // engineIn is engineOf for a helper with no test to fail: ok is false when the
 // model holds no backend, or one that is not the in-process engine — nor a
-// test's wrapper around it that names its engine (engineBehind).
+// test's wrapper around it that names its engine (engineBehind) — nor a socket
+// run's session, whose host engine the registry names (hostEngineOf, plan 027
+// §3.16).
 func engineIn(m Model) (*engine.Engine, bool) {
 	eng := engineBehind(m.eng)
+	if eng == nil {
+		eng = hostEngineOf(m.eng)
+	}
 	return eng, eng != nil
 }
 
@@ -105,7 +112,9 @@ func TestNextCmdReadsTheClientPerCommand(t *testing.T) {
 // eventMsg, whose handler re-arms it, and an ended stream into nothing — a
 // closed stream is not an event, and a zero event handed to applyEvent would be
 // a message about nothing, followed by another read of a stream that has
-// ended.
+// ended. The stream's own End is an endMsg (plan 027 PR 4, C27), after which
+// the reader is not armed again; a Ready is a readyMsg, and the event behind it
+// the next read's (PR 3's read-past rule was transitional, X33 4).
 func TestWaitEventStopsWhenTheStreamEnds(t *testing.T) {
 	stream := func(items ...any) *fakeBackend {
 		return &fakeBackend{read: func(context.Context) (backend.Item, error) {
@@ -124,31 +133,42 @@ func TestWaitEventStopsWhenTheStreamEnds(t *testing.T) {
 		}}
 	}
 	ev := agent.Event{Type: agent.EventText, Text: "hello"}
+	stopped := errors.New("session stopped")
 	for _, tc := range []struct {
 		name string
 		b    *fakeBackend
-		want any
+		// want is what each read answers, in order: nil for nothing.
+		want []tea.Msg
 	}{
-		{"an event", stream(backend.Item{Kind: backend.ItemEvent, Event: ev}), eventMsg{ev}},
-		{"a closed stream", stream(backend.ErrClosed), nil},
-		{"a failed read", stream(errors.New("the socket went away")), nil},
-		{"an end item", stream(backend.Item{Kind: backend.ItemEnd, Err: errors.New("session stopped")}), nil},
-		{"a ready item, then an event", stream(backend.Item{Kind: backend.ItemReady}, backend.Item{Kind: backend.ItemEvent, Event: ev}), eventMsg{ev}},
+		{"an event", stream(backend.Item{Kind: backend.ItemEvent, Event: ev}), []tea.Msg{eventMsg{ev: ev}}},
+		{"a closed stream", stream(backend.ErrClosed), []tea.Msg{nil}},
+		{"a failed read", stream(errors.New("the socket went away")), []tea.Msg{nil}},
+		{"an end item", stream(backend.Item{Kind: backend.ItemEnd, Err: stopped}), []tea.Msg{endMsg{err: stopped}}},
+		{"a ready item, then an event", stream(backend.Item{Kind: backend.ItemReady}, backend.Item{Kind: backend.ItemEvent, Event: ev}),
+			[]tea.Msg{readyMsg{}, eventMsg{ev: ev}}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			cmd := waitEvent(tc.b)
-			if cmd == nil {
-				t.Fatal("waitEvent made no reader for a backend")
-			}
-			got := cmd()
-			if tc.want == nil {
-				if got != nil {
-					t.Fatalf("the reader answered %#v, want nothing", got)
+			for i, want := range tc.want {
+				cmd := waitEvent(tc.b)
+				if cmd == nil {
+					t.Fatal("waitEvent made no reader for a backend")
 				}
+				if got := cmd(); !reflect.DeepEqual(got, want) {
+					t.Fatalf("read %d answered %#v, want %#v", i+1, got, want)
+				}
+			}
+			end, ok := tc.want[len(tc.want)-1].(endMsg)
+			if !ok {
 				return
 			}
-			if msg, ok := got.(eventMsg); !ok || msg.ev.Type != ev.Type || msg.ev.Text != ev.Text {
-				t.Fatalf("the reader answered %#v, want %#v", got, tc.want)
+			// The End applied, as the read that delivered it: the program
+			// quits, and the reader is not armed again.
+			m := sized(t)
+			m.reading = true
+			tm, cmd := m.Update(end)
+			if m = tm.(Model); !m.ended || m.reading || len(namedCmds(cmd, "waitEvent")) != 0 {
+				t.Fatalf("after the End: ended %v, reading %v, reads armed %d — want ended and no read",
+					m.ended, m.reading, len(namedCmds(cmd, "waitEvent")))
 			}
 		})
 	}

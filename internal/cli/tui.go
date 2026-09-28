@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -207,6 +208,17 @@ func runTUI(cmd *cobra.Command, f *tuiFlags, env hostEnv) error {
 			lipgloss.ColorProfile() != termenv.Ascii,
 	}
 	if err := resolveLoad(cmd, f, indexCWD, &cfg, build, rh.claims); err != nil {
+		var held *rundir.HeldError
+		if !f.cont || !errors.As(err, &held) {
+			return err
+		}
+		// SQ16 (plan 027 §3.9, PR 4): the session is open in another craze,
+		// and this --continue joins it there instead. Nothing was built,
+		// bound or claimed for it, so the teardown has nothing of this run's
+		// to release, and runs before the attach takes the terminal.
+		rh.close()
+		err = attachHeld(cmd, f, runEnv, held, err)
+		diag.flush(os.Stderr, false)
 		return err
 	}
 	if cfg.Session == nil && cfg.Resume == nil && resolved.Locked {
@@ -224,7 +236,7 @@ func runTUI(cmd *cobra.Command, f *tuiFlags, env hostEnv) error {
 	// the hub's goroutines start only for a run that reaches tui.Run, whose
 	// exit tail closes the hub before diag is flushed.
 	attachHost(&cfg, hosts, diag.craze())
-	failed, err := tui.Run(cfg)
+	res, err := tui.Run(cfg)
 	// The teardown runs here, before the flush, and not only in the defer
 	// (which stays for the returns above, and is a no-op after this): the
 	// socket, the registry entry and the claims are released even when stderr
@@ -234,7 +246,7 @@ func runTUI(cmd *cobra.Command, f *tuiFlags, env hostEnv) error {
 	// err != nil is also folded into Run's own bool, but the craze lane
 	// prints either way and a p.Run error is what makes runTUI see err at
 	// all, so it stays explicit here too (§3.7.3).
-	diag.flush(os.Stderr, err != nil || failed)
+	diag.flush(os.Stderr, err != nil || res.AgentDiag)
 	return err
 }
 
@@ -292,12 +304,18 @@ func sessionOptions(f *tuiFlags, ws, mode string, stderr, diag io.Writer, env []
 //
 // --continue claims its row before anything is built (plan 027 §3.9, SQ16):
 // the row is given its durable craze id under the index's lock, bounded, and
-// that id is claimed (sessionClaims.claimRow). A session another craze holds
-// is exit 1, `craze: that session is open in another craze (pid N)`; an index
-// held busy past the bound is exit 1 too, and so is a row with no craze id
-// that left the index since it was read (`craze: the session index changed —
-// try again`) — in every case build is never called, so no agent is spawned. --resume claims nothing here: its picker
-// claims the row it is given, through Config.ClaimSession.
+// that id is claimed (sessionClaims.claimRow) — before the spawn flags are
+// asked of a row that has its id already, so a held one is attached to
+// whatever they say, and after them for a legacy row, whose claim would mint
+// and write its id (plan 028 §3.5). A session another craze holds
+// is exit 1, `craze: that session is open in another craze (pid N)`, carrying
+// the *rundir.HeldError — which runTUI attaches through instead, when the
+// holder serves its session (SQ16, PR 4: attachHeld); an index held busy past
+// the bound is exit 1 too, and so is a row with no craze id that left the
+// index since it was read (`craze: the session index changed — try again`) —
+// in every case build is never called, so no agent is spawned. --resume claims
+// nothing here: its picker claims the row it is given, through
+// Config.ClaimSession.
 func resolveLoad(cmd *cobra.Command, f *tuiFlags, cwd string, cfg *tui.Config, build func(agent.Provider, sessions.Row) agent.Session, claims *sessionClaims) error {
 	if !f.cont && !f.resume {
 		return nil
@@ -345,17 +363,33 @@ func resolveLoad(cmd *cobra.Command, f *tuiFlags, cwd string, cfg *tui.Config, b
 	if err != nil {
 		return exitf(1, "craze: %v", err)
 	}
-	// Refused before the claim, whose EnsureCrazeID may write the index: a
-	// load the command line can never start leaves no trace (plan 028 §3.5,
-	// seam 6).
-	if err := refuseLoad(p); err != nil {
-		return err
+	// A legacy row (no craze id) is refused before the claim, whose
+	// EnsureCrazeID would mint its id and write the index: a load the command
+	// line can never start leaves no trace (plan 028 §3.5, seam 6).
+	legacy := row.CrazeID == ""
+	if legacy {
+		if err := refuseLoad(p); err != nil {
+			return err
+		}
 	}
 	// Claimed before build, which has no error return and would otherwise
 	// have to hand back a session that must never start.
-	crazeID, _, err := claims.claimRow(row)
+	crazeID, release, err := claims.claimRow(row)
 	if err != nil {
-		return exitf(1, "craze: %s", refusal(err))
+		// The refusal carries claimRow's error: a session another craze holds
+		// is attached to instead (runTUI, SQ16).
+		return &exitError{code: 1, msg: "craze: " + refusal(err), cause: err}
+	}
+	// A row with a craze id is claimed first (SQ16, PR 4): one another craze
+	// holds is attached to above whatever the spawn flags say — an attach
+	// takes none of them — and only one this run now holds is held to them.
+	// A refusal gives the claim back before it returns: the claim writes no
+	// index row for a row that has its id, and the lock is released.
+	if !legacy {
+		if err := refuseLoad(p); err != nil {
+			release()
+			return err
+		}
 	}
 	cfg.Provider = p
 	cfg.ProviderLocked = true
@@ -517,10 +551,14 @@ func resolveTheme(cmd *cobra.Command, flag string) string {
 	return tui.DefaultTheme
 }
 
-func stdoutIsTTY() bool {
-	st, err := os.Stdout.Stat()
-	if err != nil {
-		return false
+// stdoutIsTerminal is whether cmd's stdout is a terminal a TUI can take
+// (isTerminal): a character device that is not one — /dev/null — is refused
+// with every other non-terminal. A stdout that is not a file (a test's buffer)
+// is judged by the process's own. The root command and craze attach both ask
+// it.
+func stdoutIsTerminal(cmd *cobra.Command) bool {
+	if f, ok := cmd.OutOrStdout().(*os.File); ok {
+		return isTerminal(f)
 	}
-	return st.Mode()&os.ModeCharDevice != 0
+	return isTerminal(os.Stdout)
 }

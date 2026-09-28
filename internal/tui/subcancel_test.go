@@ -61,7 +61,7 @@ func stopModel(t *testing.T, p agent.Provider, subs ...agent.SubagentInfo) (Mode
 		if subagentTerminal(info) {
 			change = agent.SubagentChangeFinished
 		}
-		tm, _ = m.Update(eventMsg{agent.Event{Type: agent.EventSubagent, Subagent: &info, SubagentChange: change}})
+		tm, _ = m.Update(eventMsg{ev: agent.Event{Type: agent.EventSubagent, Subagent: &info, SubagentChange: change}})
 		m = tm.(Model)
 	}
 	return m, rec

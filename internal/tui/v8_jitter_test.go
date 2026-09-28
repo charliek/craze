@@ -64,6 +64,10 @@ type jitterBackend struct {
 
 func (b *jitterBackend) engine() *engine.Engine { return engineBehind(b.Backend) }
 
+// wrapped is the backend the jitter wraps: a socket run's session, for the
+// registry (hostEngineOf).
+func (b *jitterBackend) wrapped() backend.Backend { return b.Backend }
+
 func (b *jitterBackend) Start(ctx context.Context) error {
 	defer b.j.pause()
 	return b.Backend.Start(ctx)

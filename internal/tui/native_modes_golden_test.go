@@ -92,7 +92,7 @@ func writesThePlan(t *testing.T) func(fantasy.Call) {
 func nativeFrameSession(t *testing.T, ws, mode string, model *nativeScriptedModel) agent.Session {
 	t.Helper()
 	return agent.NewNative(
-		agent.Options{Workspace: ws, ContentHome: t.TempDir(), Mode: mode, Interactive: true},
+		agent.Options{Workspace: ws, ContentHome: t.TempDir(), Mode: mode, Interactive: true, NoPrimary: frameNoPrimary},
 		nativeSessionTweak(t.TempDir(), nativeOneModelTable(), model))
 }
 
@@ -159,6 +159,8 @@ func TestFrameGoldenNativePlanOffer(t *testing.T) {
 // dimmed under its label. An option with none draws the row it always has,
 // which is what keeps every ACP question's frame where it was.
 func TestFrameGoldenNativeQuestion(t *testing.T) {
+	// Frozen: under starvation the "Waiting for your answer" line can
+	// capture on a later spin frame than the golden's (spin frame 0, ✳).
 	got, _, err := runFrameModes(t, func() Config {
 		ws := frameWorkspace(t)
 		model := &nativeScriptedModel{provider: "test", wire: "wire-echo"}
@@ -176,7 +178,7 @@ func TestFrameGoldenNativeQuestion(t *testing.T) {
 			Workspace: ws,
 			Yolo:      true,
 		}
-	}, 100, 30, "<wait:idle>ask me<enter><wait:card>", FrameOpts{Timeout: 20 * time.Second})
+	}, 100, 30, "<wait:idle>ask me<enter><wait:card>", FrameOpts{Timeout: 20 * time.Second, Freeze: true})
 	if err != nil {
 		t.Fatalf("run frame script: %v", err)
 	}

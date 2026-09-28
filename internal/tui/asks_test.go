@@ -241,7 +241,7 @@ func TestAnEndingFromAnotherClientRemovesTheCardAndWritesTheRow(t *testing.T) {
 			if !m.cardOpen() {
 				t.Fatal("fixture: no card")
 			}
-			tm, _ := m.Update(eventMsg{agent.Event{Type: agent.EventAsk, Ask: tc.ask}})
+			tm, _ := m.Update(eventMsg{ev: agent.Event{Type: agent.EventAsk, Ask: tc.ask}})
 			m = tm.(Model)
 			if m.cardOpen() != !tc.gone {
 				t.Fatalf("card open = %v, want %v", m.cardOpen(), !tc.gone)
@@ -261,7 +261,7 @@ func TestAnEndingFromAnotherClientRemovesTheCardAndWritesTheRow(t *testing.T) {
 func TestAPlanEndingFromAnotherClientWritesItsVerb(t *testing.T) {
 	m, stub := sizedCards(t)
 	m = cardEvent(t, m, stub, agent.Event{Type: agent.EventPlan, Plan: stubPlanEvent()})
-	tm, _ := m.Update(eventMsg{agent.Event{Type: agent.EventAsk, Ask: &agent.AskUpdate{
+	tm, _ := m.Update(eventMsg{ev: agent.Event{Type: agent.EventAsk, Ask: &agent.AskUpdate{
 		ID: "plan-1", Kind: agent.AskPlan, Outcome: agent.AskAnswered, Accepted: true,
 	}}})
 	m = tm.(Model)
@@ -279,7 +279,7 @@ func TestAPermissionEndingWritesNoRow(t *testing.T) {
 	m, stub := sizedCards(t)
 	m.yolo = false
 	m = cardEvent(t, m, stub, agent.Event{Type: agent.EventPermission, Permission: stubPermissionEvent(true)})
-	tm, _ := m.Update(eventMsg{agent.Event{Type: agent.EventAsk, Ask: &agent.AskUpdate{
+	tm, _ := m.Update(eventMsg{ev: agent.Event{Type: agent.EventAsk, Ask: &agent.AskUpdate{
 		ID: "perm-1", Kind: agent.AskPermission, Outcome: agent.AskAnswered,
 		OptionID: "opt-once", Label: "Allow once",
 	}}})
@@ -303,7 +303,7 @@ func TestTheModelSkipsTheEndingOfItsOwnAnswer(t *testing.T) {
 	}
 	// The ending, with this model's own cause on it.
 	cause := m.askEchoes[0]
-	tm, _ := m.Update(eventMsg{agent.Event{Type: agent.EventAsk, Cause: cause, Ask: &agent.AskUpdate{
+	tm, _ := m.Update(eventMsg{ev: agent.Event{Type: agent.EventAsk, Cause: cause, Ask: &agent.AskUpdate{
 		ID: "ask-1", Kind: agent.AskQuestion, Outcome: agent.AskAnswered, Skip: true,
 	}}})
 	m = tm.(Model)
@@ -411,7 +411,7 @@ func TestAStubTurnEndingEndsItsOpenCard(t *testing.T) {
 	// opening and loses it on the ending.
 	raised := false
 	for _, ev := range evs {
-		tm, _ := m.Update(eventMsg{ev})
+		tm, _ := m.Update(eventMsg{ev: ev})
 		m = tm.(Model)
 		if ev.Type == agent.EventQuestion {
 			raised = m.cardOpen()
@@ -583,7 +583,7 @@ func TestAHiddenAnswerRefusedForRoomIsRetried(t *testing.T) {
 	stub.Emit(ev)
 	release := saturate(t, stub)
 
-	m = hiddenAnswered(t)(m.Update(eventMsg{ev}))
+	m = hiddenAnswered(t)(m.Update(eventMsg{ev: ev}))
 	if m.cardOpen() {
 		t.Fatalf("a hidden question raised a card: %+v", m.cards)
 	}
@@ -597,7 +597,7 @@ func TestAHiddenAnswerRefusedForRoomIsRetried(t *testing.T) {
 	// The backlog drains, and the next event the model applies carries the
 	// retry with it: no timer, and nothing to press.
 	release()
-	m = hiddenAnswered(t)(m.Update(eventMsg{agent.Event{Type: agent.EventText, Text: "the agent carries on"}}))
+	m = hiddenAnswered(t)(m.Update(eventMsg{ev: agent.Event{Type: agent.EventText, Text: "the agent carries on"}}))
 	if len(m.hiddenRetry) != 0 {
 		t.Fatalf("the retry is spent once taken: %+v", m.hiddenRetry)
 	}
@@ -627,7 +627,7 @@ func TestAHiddenAnswerRefusedForRoomIsRetriedByItsOwnBeat(t *testing.T) {
 	stub.Emit(ev)
 	release := saturate(t, stub)
 
-	m = hiddenAnswered(t)(m.Update(eventMsg{ev}))
+	m = hiddenAnswered(t)(m.Update(eventMsg{ev: ev}))
 	if len(m.hiddenRetry) != 1 || !m.hiddenRetryLive {
 		t.Fatalf("a refusal for room must keep the answer and arm its beat: %+v live=%v",
 			m.hiddenRetry, m.hiddenRetryLive)
@@ -694,7 +694,7 @@ func TestTheLoserOfAnAnswerRaceKeepsTheWinnersRow(t *testing.T) {
 	}
 
 	// The winner's ending, as the log published it.
-	tm, _ := m.Update(eventMsg{awaitStubEvent(t, stub, agent.EventAsk)})
+	tm, _ := m.Update(eventMsg{ev: awaitStubEvent(t, stub, agent.EventAsk)})
 	m = tm.(Model)
 	if m.cardOpen() {
 		t.Fatalf("the winner's ending removes the card: %+v", m.cards)
@@ -709,7 +709,7 @@ func TestTheLoserOfAnAnswerRaceKeepsTheWinnersRow(t *testing.T) {
 func TestAnEndingForNoCardWritesNothing(t *testing.T) {
 	m, _ := sizedCards(t)
 	before := plainView(m)
-	tm, _ := m.Update(eventMsg{agent.Event{Type: agent.EventAsk, Ask: &agent.AskUpdate{
+	tm, _ := m.Update(eventMsg{ev: agent.Event{Type: agent.EventAsk, Ask: &agent.AskUpdate{
 		ID: "ask-9", Kind: agent.AskQuestion, Outcome: agent.AskAnswered, Skip: true,
 		Body: &agent.AskBody{Question: stubQuestion()},
 	}}})

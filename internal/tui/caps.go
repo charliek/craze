@@ -9,7 +9,7 @@ import "github.com/charliek/craze/internal/agent"
 // builds a bare Model, and the provider picker before a session exists.
 func (m Model) caps() agent.Capabilities {
 	if m.eng != nil {
-		return m.eng.Info().Capabilities
+		return m.info().Capabilities
 	}
 	return m.snap.Provider.Capabilities()
 }

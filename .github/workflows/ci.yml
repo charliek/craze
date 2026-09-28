@@ -43,16 +43,24 @@ jobs:
     # deadlocked test — or a hung fake agent holding the job's stdout pipe open,
     # which Go's own -timeout cannot interrupt — burns runner minutes until
     # someone notices. The suite takes ~30s locally; hosted runners are slower
-    # and have fewer cores, and macos-latest (arm64) is the slower of the two,
-    # so 15 minutes started clipping it — 20 keeps the same generous-but-bounded
-    # intent for the new ceiling.
-    timeout-minutes: 20
+    # and have fewer cores, and macos-latest (arm64) is the slower of the two.
+    # The frame goldens now run three ways — gateSync, async, and over the
+    # socket (plan 027 C29) — and macos-latest's test job measured 16-17m
+    # against the old 20m ceiling, so 30 keeps the same generous-but-bounded
+    # intent for the new one.
+    timeout-minutes: 30
     # The native harness's grep and glob tools run ripgrep found on PATH
     # (plan 019 §3.9, D-41), and their tests skip when it is missing, so a
     # laptop without rg still passes. Here that skip would be a quiet pass on
     # a runner that lost rg; CRAZE_REQUIRE_RG turns it into a failure.
+    #
+    # CRAZE_GOLDEN_TRANSPORT pins the frame goldens to both transports — in
+    # process and over the control socket (plan 027 §3.16) — for both Go test
+    # steps below, the direct `go test` and `make test-race` (whose recipe
+    # pins it too), so no inherited value can narrow what CI runs.
     env:
       CRAZE_REQUIRE_RG: "1"
+      CRAZE_GOLDEN_TRANSPORT: both
     steps:
       # persist-credentials: false — actions/checkout otherwise leaves the job
       # token in .git/config, and the very next step runs `go test ./...`, i.e.

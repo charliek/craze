@@ -39,9 +39,11 @@ import (
 //     only when it names the client id asked for, with the token sent, on the
 //     host that minted it (endpoint.hostId, X18 2); anything else is a resume
 //     loss: the client's identity moves on, and every command that may have
-//     run under the old one resolves ErrOutcomeUnknown, reason resume_lost, at
-//     once: nothing that may have run is resent (command.go, "THE RESEND
-//     RULE").
+//     run under the old one — and every command bound to it, sent or not —
+//     resolves ErrOutcomeUnknown, reason resume_lost, at once: nothing that
+//     may have run is resent (command.go, "THE RESEND RULE"), and nothing
+//     bound to the old identity is sent under the new one ("BOUND TO AN
+//     IDENTITY").
 //  3. RE-ATTACH, before the connection is used for anything else: after
 //     resumed: true with the stream's cursor (a silent resume: the host answers
 //     from its ring or journal and the stream goes on with no item, no gap and
@@ -366,8 +368,20 @@ func (c *Client) adopt(ep *episode, w *wire, h protocol.HelloResult, resume *pro
 		c.identity++
 		c.hostID = h.Endpoint.HostID
 		c.unresumed = true
+		// Every wait on the client's state is told: a read bound to the
+		// identity just left, waiting for a connection (wireAs), answers
+		// backend.ErrStaleEpoch now — not once the re-attach is answered and
+		// the connection published, which a slow start can hold off, the
+		// episode's clock stopped. The other waiters (wireAs unbound,
+		// awaitNot) look again and wait on.
+		c.changedLocked()
 		for _, cmd := range c.cmds {
-			if cmd.want && cmd.ranUnder != 0 {
+			// Settled here, at once, and not when the re-attach is answered
+			// (which may wait out a slow start with the episode's clock
+			// stopped): a command that may have run, and every command bound
+			// to the identity just left, sent or not — no attempt could ever
+			// send it now (BOUND TO AN IDENTITY).
+			if cmd.want && (cmd.ranUnder != 0 || (cmd.pinned != 0 && cmd.pinned != c.identity)) {
 				c.resolveLocked(cmd, protocol.ReasonResumeLost)
 			}
 		}

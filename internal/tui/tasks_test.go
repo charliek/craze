@@ -30,7 +30,7 @@ func todoModel(t *testing.T) (Model, *Stub, *time.Time) {
 func sendTodos(t *testing.T, m Model, stub *Stub, todos []agent.Todo) Model {
 	t.Helper()
 	stub.SetTodos(todos)
-	tm, _ := m.Update(eventMsg{agent.Event{Type: agent.EventTodos, Todos: todos}})
+	tm, _ := m.Update(eventMsg{ev: agent.Event{Type: agent.EventTodos, Todos: todos}})
 	return tm.(Model)
 }
 

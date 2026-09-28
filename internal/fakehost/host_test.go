@@ -25,7 +25,8 @@ func TestStallWritesWakesOnQuit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	dir, err := os.MkdirTemp("", "czfh-quit-")
+	// Under /tmp itself, never $TMPDIR: sun_path on macOS.
+	dir, err := os.MkdirTemp("/tmp", "czfh-quit-")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -193,7 +194,8 @@ func serveTestHost(t *testing.T) (*Host, string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	dir, err := os.MkdirTemp("", "czfh-t-")
+	// Under /tmp itself, never $TMPDIR: sun_path on macOS.
+	dir, err := os.MkdirTemp("/tmp", "czfh-t-")
 	if err != nil {
 		t.Fatal(err)
 	}

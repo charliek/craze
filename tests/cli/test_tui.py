@@ -102,6 +102,7 @@ class PTYCraze:
         extra_args: list[str] | None = None,
         env_extra: dict[str, str] | None = None,
         setctty: bool = False,
+        command: list[str] | None = None,
     ) -> None:
         self.fake_agent_bin = fake_agent_bin
         self.buf = bytearray()
@@ -147,6 +148,11 @@ class PTYCraze:
             env["CRAZE_FAKE_STEP"] = step
         env.update(env_extra or {})
         argv = [str(craze_bin)]
+        if command is not None:
+            # A subcommand in a terminal of its own (craze attach): its own
+            # argv, none of the TUI's session flags, the workspace as the cwd.
+            argv += command
+            provider, fake_agent_bin = "", None
         if provider:
             # An empty provider leaves the flag off entirely, which is the
             # only way to exercise what an *implicit* provider does: an
@@ -158,9 +164,12 @@ class PTYCraze:
             # no binary to spawn, and --agent-bin with one is a usage error
             # (internal/cli/provider.go's refuseInProcess).
             argv += ["--agent-bin", str(fake_agent_bin)]
+        if command is None:
+            argv += [
+                "--workspace",
+                str(workspace),
+            ]
         argv += [
-            "--workspace",
-            str(workspace),
             "--theme",
             "tokyo-night",
         ]
@@ -1030,11 +1039,14 @@ def test_tui_control_socket_opt_out_still_claims_the_session(
     assert not _lock_is_held(lock)
 
 
-def test_tui_continue_twice_refuses_the_second(
+def test_tui_continue_twice_attaches_the_second(
     craze_bin: Path, fake_agent_bin: Path, tmp_path: Path
 ) -> None:
-    """SQ16 (plan 027 §3.9): a second `craze -c` of a session the first is
-    running exits 1 naming the first's pid, and spawns no agent.
+    """SQ16 (plan 027 §3.9; PR 2 refused it, PR 4 attaches as planned): a
+    second `craze -c` of a session the first is running joins it over the
+    first's control socket -- one stderr line naming the first's pid, before
+    the screen is taken, then the first's transcript -- and spawns no agent.
+    Its quit is a view close: exit 0, and the first runs on.
 
     The row is a legacy one (no crazeId): the first craze gives it one under
     the index lock before claiming it, and the second reads that same id.
@@ -1050,6 +1062,56 @@ def test_tui_continue_twice_refuses_the_second(
         extra_args=["--continue"],
     ) as first:
         first.wait_contains("restored")
+        # An attach goes only to an entry that names the claimed session: the
+        # first's, once its engine is ready.
+        (entry_path,) = _wait_glob(tmp_path / ".cache" / "craze" / "hosts", "*.json")
+        _wait_entry(entry_path, lambda e: e["ready"] and e["crazeSessionId"])
+        with PTYCraze(
+            craze_bin,
+            fake_agent_bin,
+            tmp_path,
+            script="load",
+            provider="",
+            extra_args=["--continue"],
+            env_extra={"CRAZE_FAKE_DUMP_ARGV": str(argv_dump)},
+        ) as second:
+            second.wait_contains(
+                f"craze: that session is open in another craze (pid {first.proc.pid}); attaching"
+            )
+            second.wait_contains("the workspace holds main.py and README.md")
+            second.write(b"\x04")
+            assert second.wait_exit(timeout=10) == 0, second.screen()[-3000:]
+            assert "session ended" not in _ANSI.sub("", second.screen())
+        assert not argv_dump.exists(), "the attaching craze spawned an agent"
+        assert first.proc.poll() is None, first.screen()[-3000:]
+        first.write(b"\x04")
+        assert first.wait_exit() == 0, first.screen()[-3000:]
+    _wait_fake_gone(fake_agent_bin)
+
+    row = json.loads(index.read_text(encoding="utf-8").splitlines()[0])
+    assert row["crazeId"], row
+    assert (tmp_path / ".cache" / "craze" / "locks" / f"{row['crazeId']}.lock").exists()
+
+
+def test_tui_continue_of_a_session_serving_no_socket_refuses(
+    craze_bin: Path, fake_agent_bin: Path, tmp_path: Path
+) -> None:
+    """SQ16 (plan 027 §3.9): a first craze that serves no control socket
+    (CRAZE_CONTROL_SOCKET=0) has nothing to attach through, so a second `craze
+    -c` of its session keeps PR 2's refusal -- exit 1 naming its pid -- and
+    says why; it spawns no agent."""
+    _seed_index(tmp_path, tmp_path, "sess-load-1", "cursor", "yesterday's thread")
+    argv_dump = tmp_path / "second-agent-argv"
+    with PTYCraze(
+        craze_bin,
+        fake_agent_bin,
+        tmp_path,
+        script="load",
+        provider="",
+        extra_args=["--continue"],
+        env_extra={"CRAZE_CONTROL_SOCKET": "0"},
+    ) as first:
+        first.wait_contains("restored")
         with PTYCraze(
             craze_bin,
             fake_agent_bin,
@@ -1061,16 +1123,15 @@ def test_tui_continue_twice_refuses_the_second(
         ) as second:
             assert second.wait_exit(timeout=10) == 1, second.screen()[-3000:]
             text = _ANSI.sub("", second.screen())
-            assert f"craze: that session is open in another craze (pid {first.proc.pid})" in text, text[-2000:]
+            want = (
+                f"craze: that session is open in another craze (pid {first.proc.pid})"
+                " — it serves no control socket"
+            )
+            assert want in text, text[-2000:]
         assert not argv_dump.exists(), "the refused craze spawned an agent"
-        assert _cmdline_pids(str(fake_agent_bin)) != []
         first.write(b"\x04")
         assert first.wait_exit() == 0, first.screen()[-3000:]
     _wait_fake_gone(fake_agent_bin)
-
-    row = json.loads(index.read_text(encoding="utf-8").splitlines()[0])
-    assert row["crazeId"], row
-    assert (tmp_path / ".cache" / "craze" / "locks" / f"{row['crazeId']}.lock").exists()
 
 
 def test_tui_native_one_turn_persists_provider_and_indexes(

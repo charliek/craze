@@ -808,6 +808,174 @@ func TestTurns(t *testing.T) {
 	}
 }
 
+// TestAFiredSendNowIsNotArmedInTheFold (SF-55): firing an armed send-now
+// publishes no delta of its own — only the started, with its send_now origin,
+// that says the send went (the engine's nextLocked) — so that started ends the
+// fold's arm, leaving the zero section a disarm delta carries, with its
+// truncation mark gone. A started of any other origin leaves an arm alone, and
+// an idle send_now start, with nothing armed, changes nothing. A snapshot cut
+// after the fire restores nothing armed, in process and through the codec.
+func TestAFiredSendNowIsNotArmedInTheFold(t *testing.T) {
+	armed := agent.SendNowState{Armed: true, Text: "now", Turn: "turn-1"}
+	arm := agent.Event{Type: agent.EventMeta, State: &agent.StateDelta{SendNow: &armed}, Cause: "c-2", At: at(2)}
+	started := func(id, origin string, sec int) agent.Event {
+		return agent.Event{Type: agent.EventTurn, Turn: &agent.TurnInfo{ID: id, Phase: agent.TurnStarted, Text: "t", Origin: origin}, At: at(sec)}
+	}
+	ended := agent.Event{Type: agent.EventTurn, Turn: &agent.TurnInfo{ID: "turn-1", Phase: agent.TurnEnded, StopReason: stopCancelled}, At: at(3)}
+
+	m := New(Options{})
+	foldAll(t, m, true, started("turn-1", agent.TurnOriginSubmit, 1), arm)
+	if got := m.State().Settings.SendNow; got != armed {
+		t.Fatalf("fixture: the arm folded as %+v", got)
+	}
+	// A started that is not the send's leaves the arm (none can come while
+	// the engine holds one, but the fold keys on the origin alone).
+	foldAll(t, m, true, started("turn-x", agent.TurnOriginDrain, 2), started("turn-y", agent.TurnOriginSubmit, 2))
+	if got := m.State().Settings.SendNow; got != armed {
+		t.Fatalf("a %s/%s started ended the arm: %+v", agent.TurnOriginDrain, agent.TurnOriginSubmit, got)
+	}
+	// The engine's order at a fire: the cancelled turn's ended, then the
+	// send's started, carrying the arming command's cause — and no delta.
+	foldAll(t, m, true, ended)
+	fire := started("turn-2", agent.TurnOriginSendNow, 4)
+	fire.Cause = "c-2"
+	ch := m.Fold(fire)
+	checkInvariants(t, m)
+	st := m.State()
+	if st.Settings.SendNow != (agent.SendNowState{}) || st.Settings.Truncated.SendNow {
+		t.Fatalf("the send fired and the fold holds %+v (truncated %v), want the zero section", st.Settings.SendNow, st.Settings.Truncated.SendNow)
+	}
+	if !ch.State || st.Turn.ID != "turn-2" || st.Turn.Origin != agent.TurnOriginSendNow {
+		t.Fatalf("the fire's started is the turn's: change %+v, turn %+v", ch, st.Turn)
+	}
+	if got := m.Mirror().Settings.SendNow; got.Armed {
+		t.Fatalf("the mirror projection still reads %+v", got)
+	}
+
+	t.Run("a snapshot after the fire restores nothing armed", func(t *testing.T) {
+		s, b := snapshotOf(t, m, 0)
+		if strings.Contains(string(b), `"sendNow"`) {
+			t.Fatalf("the snapshot's encoding carries a send-now section after the fire:\n%s", b)
+		}
+		r1, r2 := restoredBoth(t, s, b, Options{})
+		assertSameModel(t, "restored in process", m, r1)
+		assertSameModel(t, "restored through the codec", m, r2)
+		for i, r := range []*Model{r1, r2} {
+			if got := r.State().Settings.SendNow; got.Armed {
+				t.Fatalf("twin %d restored the send-now %+v", i, got)
+			}
+		}
+	})
+
+	t.Run("a snapshot's truncation mark goes with the fire", func(t *testing.T) {
+		long := armed
+		long.Text = strings.Repeat("x", ItemCap+10)
+		c := New(Options{})
+		foldAll(t, c, true, started("turn-1", agent.TurnOriginSubmit, 1),
+			agent.Event{Type: agent.EventMeta, State: &agent.StateDelta{SendNow: &long}, At: at(2)})
+		s, b := snapshotOf(t, c, 0)
+		_, r := restoredBoth(t, s, b, Options{})
+		if !r.State().Settings.Truncated.SendNow {
+			t.Fatal("fixture: the restored send-now is not marked truncated")
+		}
+		foldAll(t, r, true, ended, started("turn-2", agent.TurnOriginSendNow, 4))
+		if st := r.State().Settings; st.SendNow != (agent.SendNowState{}) || st.Truncated.SendNow {
+			t.Fatalf("after the fire the restored model holds %+v, truncated %v", st.SendNow, st.Truncated.SendNow)
+		}
+	})
+
+	t.Run("an idle send_now start has no arm to end", func(t *testing.T) {
+		c := New(Options{})
+		foldAll(t, c, true, started("turn-1", agent.TurnOriginSendNow, 1))
+		if got := c.State().Settings; got.SendNow != (agent.SendNowState{}) {
+			t.Fatalf("an idle send-now start armed %+v", got.SendNow)
+		}
+	})
+}
+
+// TestAChildsActivityIsFolded (SF-54): the live session sets a child's
+// Activity to the title of its most recent tool call, capped as the live
+// session caps it, with no roster event (agent's tools.go) — a todo tool's
+// title too — so the fold does the same on the child's tool events; a roster
+// event replaces the row whole, its Activity with it. A main-session tool, an
+// untitled tool, and a tool of a child the roster has no row for set nothing.
+// A snapshot cut mid-child restores the activity.
+func TestAChildsActivityIsFolded(t *testing.T) {
+	activity := func(m *Model, id string) string {
+		t.Helper()
+		for _, a := range m.State().Agents {
+			if a.ID == id {
+				return a.Activity
+			}
+		}
+		t.Fatalf("no roster row %q", id)
+		return ""
+	}
+	child := agent.SubagentInfo{ID: "c1", Status: agent.SubagentRunning, Description: "explore"}
+	m := New(Options{})
+	foldAll(t, m, true,
+		agent.Event{Type: agent.EventSubagent, Subagent: &child, SubagentChange: agent.SubagentChangeSpawned, At: at(1)},
+		agent.Event{Type: agent.EventTool, Tool: &agent.ToolEvent{ID: "m1", Title: "main's own", Status: "in_progress"}, At: at(2)},
+		// A child the roster has no row for: its transcript is made, no row.
+		agent.Event{Type: agent.EventTool, Agent: "ghost", Tool: &agent.ToolEvent{ID: "g1", Title: "ghostly", Status: "in_progress"}, At: at(2)},
+	)
+	if got := activity(m, "c1"); got != "" {
+		t.Fatalf("fixture: the spawned row's activity is %q", got)
+	}
+	if len(m.State().Agents) != 1 {
+		t.Fatalf("a tool of a child with no row made one: %+v", m.State().Agents)
+	}
+	ch := m.Fold(agent.Event{Type: agent.EventTool, Agent: "c1", Tool: &agent.ToolEvent{ID: "t1", Title: "read_file", Status: "in_progress"}, At: at(3)})
+	checkInvariants(t, m)
+	if got := activity(m, "c1"); got != "read_file" || !ch.State {
+		t.Fatalf("the child's activity is %q (state change %v), want its tool's title", got, ch.State)
+	}
+	// An untitled update keeps the last title's word.
+	foldAll(t, m, true, agent.Event{Type: agent.EventTool, Agent: "c1", Tool: &agent.ToolEvent{ID: "t1", Status: "completed"}, At: at(4)})
+	if got := activity(m, "c1"); got != "read_file" {
+		t.Fatalf("an untitled update moved the activity to %q", got)
+	}
+	// A todo tool's title is the live session's word too.
+	todo := agent.ToolEvent{ID: "t2", Title: "Update TODOs", ToolName: "updateTodos", Status: "in_progress"}
+	if !todo.IsTodoTool() {
+		t.Fatal("fixture: not a todo tool")
+	}
+	foldAll(t, m, true, agent.Event{Type: agent.EventTool, Agent: "c1", Tool: &todo, At: at(5)})
+	if got := activity(m, "c1"); got != "Update TODOs" {
+		t.Fatalf("a todo tool left the activity at %q", got)
+	}
+	// The live cap: agent.SubagentActivity's.
+	long := strings.Repeat("é", 200)
+	foldAll(t, m, true, agent.Event{Type: agent.EventTool, Agent: "c1", Tool: &agent.ToolEvent{ID: "t3", Title: long, Status: "in_progress"}, At: at(6)})
+	if got := activity(m, "c1"); got != agent.SubagentActivity(long) || len(got) > agent.SubagentActivityCap {
+		t.Fatalf("the activity is %d bytes, want the live cap's %d", len(got), len(agent.SubagentActivity(long)))
+	}
+
+	t.Run("a snapshot mid-child restores the activity", func(t *testing.T) {
+		s, b := snapshotOf(t, m, 0)
+		r1, r2 := restoredBoth(t, s, b, Options{})
+		assertSameModel(t, "restored in process", m, r1)
+		assertSameModel(t, "restored through the codec", m, r2)
+		for i, r := range []*Model{r1, r2} {
+			if got := activity(r, "c1"); got != agent.SubagentActivity(long) {
+				t.Fatalf("twin %d restored the activity %q", i, got)
+			}
+		}
+	})
+
+	// A roster event carries the row whole: its own Activity, "" included.
+	progressed := child
+	progressed.Activity = "thinking"
+	foldAll(t, m, true, agent.Event{Type: agent.EventSubagent, Subagent: &progressed, SubagentChange: agent.SubagentChangeProgress, At: at(7)})
+	if got := activity(m, "c1"); got != "thinking" {
+		t.Fatalf("the roster's row left the activity at %q", got)
+	}
+	foldAll(t, m, true, agent.Event{Type: agent.EventSubagent, Subagent: &child, SubagentChange: agent.SubagentChangeProgress, At: at(8)})
+	if got := activity(m, "c1"); got != "" {
+		t.Fatalf("a row carrying no activity left %q", got)
+	}
+}
+
 func TestChangeSaysWhatTheFoldTouched(t *testing.T) {
 	m := New(Options{})
 	c := m.Fold(agent.Event{Type: agent.EventThought, Text: "a", At: at(1), Seq: 1})

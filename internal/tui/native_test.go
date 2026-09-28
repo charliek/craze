@@ -135,7 +135,7 @@ func drainSessionEvents(t *testing.T, m *Model, sess agent.Session) {
 			if !ok {
 				return
 			}
-			tm, _ := m.Update(eventMsg{ev})
+			tm, _ := m.Update(eventMsg{ev: ev})
 			*m = tm.(Model)
 		default:
 			return
@@ -296,7 +296,7 @@ func TestNativeModelSwitchGainsTheEffortOption(t *testing.T) {
 					done = true
 					break
 				}
-				tm, _ := m.Update(eventMsg{ev})
+				tm, _ := m.Update(eventMsg{ev: ev})
 				m = tm.(Model)
 			case <-synced:
 				done = true

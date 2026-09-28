@@ -212,7 +212,7 @@ func frameSubagents(t *testing.T, ws string, echo, two *frameRouter, c *frameClo
 	t.Helper()
 	home := t.TempDir()
 	table := frameTable()
-	return agent.NewNative(agent.Options{Workspace: ws, ContentHome: t.TempDir()}, func(o *harness.Options) {
+	return agent.NewNative(agent.Options{Workspace: ws, ContentHome: t.TempDir(), NoPrimary: frameNoPrimary}, func(o *harness.Options) {
 		o.Home = home
 		o.Table = table
 		o.Getenv = func(k string) string {

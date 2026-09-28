@@ -66,7 +66,7 @@ func TestFrameGoldenNativeResume100x30(t *testing.T) {
 	// seam). The runner closes its engine, and with it the session and the
 	// transcript's lock, when the script ends.
 	build := func() Config {
-		sess := agent.NewNative(agent.Options{Workspace: ws, ContentHome: t.TempDir(), LoadSessionID: id, Title: "fix the notes"},
+		sess := agent.NewNative(agent.Options{Workspace: ws, ContentHome: t.TempDir(), LoadSessionID: id, Title: "fix the notes", NoPrimary: frameNoPrimary},
 			nativeSessionTweak(harnessHome, table, &nativeScriptedModel{provider: "test", wire: "wire-echo", steps: steps}))
 		return Config{Session: sess, Theme: "tokyo-night", Workspace: ws, Yolo: true, Loading: true}
 	}

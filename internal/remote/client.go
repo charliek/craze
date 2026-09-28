@@ -12,6 +12,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/charliek/craze/internal/backend"
 	"github.com/charliek/craze/internal/protocol"
 )
 
@@ -209,6 +210,21 @@ type hooks struct {
 	// connection's writer (post); postRan on the writer once it has run one.
 	posted  func()
 	postRan func()
+	// waiting runs on a call (Call, a Session read) once it waits for a
+	// connection: the client is reconnecting. answered runs on a call once
+	// its reply (or its connection's end) has reached it, before it is
+	// decoded.
+	waiting  func()
+	answered func(method string)
+	// entered runs on a Session command once it has taken its binding — the
+	// identity and client id it goes under — before the command is
+	// registered; attached on a Session's Attach once the client's attach
+	// has returned, before the Session holds the stream.
+	entered  func(commandID string)
+	attached func()
+	// broken runs on a Session's detach of a stream a decode failure ended,
+	// before the detach is made.
+	broken func()
 }
 
 // wire is one connection: its reader's framing, its writer's lock, and the
@@ -812,7 +828,15 @@ func (c *Client) changedLocked() {
 }
 
 // wire is the connection calls go to, waiting while the client reconnects.
-func (c *Client) wire(ctx context.Context) (*wire, error) {
+func (c *Client) wire(ctx context.Context) (*wire, error) { return c.wireAs(ctx, 0) }
+
+// wireAs is wire bound to identity ident (0: to none): once the client has
+// left ident it is backend.ErrStaleEpoch, and no connection — so a call bound
+// to an identity is only ever written on a connection of that identity (a
+// connection's identity is fixed for its life, and it is picked under the
+// same lock the identity is read under).
+func (c *Client) wireAs(ctx context.Context, ident uint64) (*wire, error) {
+	waited := false
 	for {
 		c.mu.Lock()
 		if c.err != nil {
@@ -820,12 +844,20 @@ func (c *Client) wire(ctx context.Context) (*wire, error) {
 			c.mu.Unlock()
 			return nil, err
 		}
+		if ident != 0 && ident != c.identity {
+			c.mu.Unlock()
+			return nil, backend.ErrStaleEpoch
+		}
 		if w := c.cur; w != nil {
 			c.mu.Unlock()
 			return w, nil
 		}
 		ch := c.changed
 		c.mu.Unlock()
+		if h := c.hooks.waiting; h != nil && !waited {
+			h()
+		}
+		waited = true
 		select {
 		case <-ch:
 		case <-ctx.Done():
@@ -844,6 +876,14 @@ func (c *Client) wire(ctx context.Context) (*wire, error) {
 // ids and resends are the client's), attaches through Attach, and hello is the
 // client's own.
 func (c *Client) Call(ctx context.Context, method string, params, result any) error {
+	return c.callAs(ctx, 0, method, params, result)
+}
+
+// callAs is Call bound to identity ident (0: to none): it is written only on a
+// connection of that identity, and once the client has left it — before the
+// call was written, or while it waited for a connection — it is
+// backend.ErrStaleEpoch, nothing sent (wireAs). remote.Session's reads.
+func (c *Client) callAs(ctx context.Context, ident uint64, method string, params, result any) error {
 	if info, ok := protocol.Method(method); ok && info.Mutating {
 		return fmt.Errorf("remote: %s is a command: use Command", method)
 	}
@@ -854,7 +894,7 @@ func (c *Client) Call(ctx context.Context, method string, params, result any) er
 		return fmt.Errorf("remote: %s is Attach's", method)
 	}
 	for {
-		w, err := c.wire(ctx)
+		w, err := c.wireAs(ctx, ident)
 		if err != nil {
 			return err
 		}
@@ -903,6 +943,9 @@ func (c *Client) callOn(ctx context.Context, w *wire, method string, params, res
 	}
 	select {
 	case r := <-ch:
+		if h := c.hooks.answered; h != nil {
+			h(method)
+		}
 		if r.err != nil {
 			return r.err
 		}
@@ -928,6 +971,27 @@ func (c *Client) ClientID() string {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.hello.ClientID
+}
+
+// Identity names the client identity the client holds now: 1 from the first
+// hello, moved on — before the reconnect re-attaches, and so before the
+// Restore its re-attach brings is queued — by every hello that did not resume
+// (a retired client, a replaced engine, a restarted host, a resume the client
+// cannot trust). A resumed hello keeps it. A command bound to one identity is
+// never sent under another (CommandOptions.Identity): it is remote.Session's
+// backend epoch.
+func (c *Client) Identity() uint64 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.identity
+}
+
+// binding is the identity the client holds now and the client id it holds
+// under it, read together: what a Session command binds itself to.
+func (c *Client) binding() (uint64, string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.identity, c.hello.ClientID
 }
 
 // ResumeState is what a caller persists so a new process can Dial from it

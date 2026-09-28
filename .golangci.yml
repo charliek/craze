@@ -206,13 +206,17 @@ linters:
             - pkg: github.com/charliek/craze/internal/protocol
               desc: "the TUI's seam onto a session is in engine/agent types, so a socket client can satisfy it without either side importing the other; the wire is one implementation's transport (plan 027 §3.12)"
         # The control socket's Go client (plan 027 §3.14): it speaks
-        # internal/protocol to a host over a socket and needs nothing else of
-        # craze — above all not the server it talks to (internal/control), and
-        # no client package (tui, cli: PR 4's remote.Session is what a client
-        # builds on it) or provider transport. Split in two as control's rule
-        # is: its tests run the real server in front of an engine over
-        # tui.Stub, so $test files answer to remote-test, which allows
-        # internal/control and internal/tui and still denies the rest.
+        # internal/protocol to a host over a socket. PR 4's remote.Session
+        # implements the TUI's Backend seam on it, so its non-test files may
+        # import that seam's own packages too — internal/backend, and the
+        # engine, agent and transcript types, codecs and sentinels a refusal
+        # or a stream item is reconstructed into — and nothing else of craze:
+        # above all not the server it talks to (internal/control), and no
+        # client package (tui, cli build on remote.Session) or provider
+        # transport. Split in two as control's rule is: its tests run the real
+        # server in front of an engine over tui.Stub, so $test files answer to
+        # remote-test, which allows internal/control and internal/tui and
+        # still denies the rest.
         remote:
           list-mode: lax
           files:

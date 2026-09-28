@@ -306,7 +306,7 @@ func TestCardInsideTheView(t *testing.T) {
 	m := agentModel(t, &now)
 	m = applyInFlight(t, m, []agent.ToolEvent{taskTool("task-1", "count lines", "in_progress")})
 	m = openView(t, m)
-	tm, _ := m.Update(eventMsg{agent.Event{
+	tm, _ := m.Update(eventMsg{ev: agent.Event{
 		Type:       agent.EventPermission,
 		Permission: &agent.PermissionEvent{ID: "perm-1", Tool: "bash"},
 	}})
@@ -335,7 +335,7 @@ func TestParentEventsWhileViewingDoNotMoveChildViewport(t *testing.T) {
 	if m.vp.AtBottom() {
 		t.Fatal("setup: child should be scrolled up")
 	}
-	tm, _ = m.Update(eventMsg{agent.Event{Type: agent.EventText, Text: "parent chunk"}})
+	tm, _ = m.Update(eventMsg{ev: agent.Event{Type: agent.EventText, Text: "parent chunk"}})
 	m = tm.(Model)
 	if m.vp.YOffset != offset {
 		t.Fatalf("a parent chunk moved the child viewport: %d -> %d", offset, m.vp.YOffset)
@@ -343,7 +343,7 @@ func TestParentEventsWhileViewingDoNotMoveChildViewport(t *testing.T) {
 	if m.main.streamOpen() == false {
 		t.Fatal("parent text should open the main stream")
 	}
-	tm, _ = m.Update(eventMsg{agent.Event{Type: agent.EventDone, StopReason: "end_turn"}})
+	tm, _ = m.Update(eventMsg{ev: agent.Event{Type: agent.EventDone, StopReason: "end_turn"}})
 	m = tm.(Model)
 	if m.main.streamOpen() {
 		t.Fatal("parent done must close the main stream")
@@ -365,17 +365,17 @@ func TestChildEventsWhileViewingMainDoNotTouchMainState(t *testing.T) {
 	offer, dead := m.planOfferSeq, m.planDeadSeq
 	// A child read with a path is the only event that could write pathDirs.
 	read := agent.ToolEvent{ID: "c-read", Kind: "read", Title: "read", Status: "completed", Locations: []string{"/ws/pkg/main.go"}}
-	tm, _ := m.Update(eventMsg{agent.Event{Type: agent.EventTool, Agent: "task-1", Tool: &read}})
+	tm, _ := m.Update(eventMsg{ev: agent.Event{Type: agent.EventTool, Agent: "task-1", Tool: &read}})
 	m = tm.(Model)
 	if m.planOfferSeq != offer || m.planDeadSeq != dead {
 		t.Fatal("child events must not touch the plan offer")
 	}
-	tm, _ = m.Update(eventMsg{agent.Event{Type: agent.EventThought, Agent: "task-1", Text: "thinking"}})
+	tm, _ = m.Update(eventMsg{ev: agent.Event{Type: agent.EventThought, Agent: "task-1", Text: "thinking"}})
 	m = tm.(Model)
 	if m.lastThought {
 		t.Fatal("child thought must not set lastThought")
 	}
-	tm, _ = m.Update(eventMsg{agent.Event{Type: agent.EventText, Agent: "task-1", Text: "child reply"}})
+	tm, _ = m.Update(eventMsg{ev: agent.Event{Type: agent.EventText, Agent: "task-1", Text: "child reply"}})
 	m = tm.(Model)
 	if m.sawAssistantSeq != 0 {
 		t.Fatal("child text must not set sawAssistantSeq")
@@ -515,7 +515,7 @@ func TestClearLeavesSubTranscriptsAlone(t *testing.T) {
 	now := time.Date(2026, 9, 12, 10, 0, 0, 0, time.UTC)
 	m := agentModel(t, &now)
 	m = applyInFlight(t, m, []agent.ToolEvent{taskTool("task-1", "count lines", "in_progress")})
-	tm, _ := m.Update(eventMsg{agent.Event{Type: agent.EventText, Agent: "task-1", Text: "child text"}})
+	tm, _ := m.Update(eventMsg{ev: agent.Event{Type: agent.EventText, Agent: "task-1", Text: "child text"}})
 	m = tm.(Model)
 	m.addUser("main user")
 	m.input.SetValue("/clear")
@@ -534,7 +534,7 @@ func TestSubagentByteBudgets(t *testing.T) {
 	m := agentModel(t, &now)
 	m = applyInFlight(t, m, []agent.ToolEvent{taskTool("task-1", "count lines", "in_progress")})
 	huge := strings.Repeat("a", 200*1024)
-	tm, _ := m.Update(eventMsg{agent.Event{Type: agent.EventText, Agent: "task-1", Text: huge}})
+	tm, _ := m.Update(eventMsg{ev: agent.Event{Type: agent.EventText, Agent: "task-1", Text: huge}})
 	m = tm.(Model)
 	tr := m.subs["task-1"]
 	if tr == nil || len(tr.entries()) == 0 {
@@ -551,7 +551,7 @@ func TestSubagentByteBudgets(t *testing.T) {
 	m = applyInFlight(t, m, []agent.ToolEvent{taskTool("task-1", "count lines", "in_progress")})
 	for i := 0; i < 2000; i++ {
 		tool := agent.ToolEvent{ID: fmt.Sprintf("c-%d", i), Kind: "read", Title: "f", Status: "completed"}
-		tm, _ = m.Update(eventMsg{agent.Event{Type: agent.EventTool, Agent: "task-1", Tool: &tool}})
+		tm, _ = m.Update(eventMsg{ev: agent.Event{Type: agent.EventTool, Agent: "task-1", Tool: &tool}})
 		m = tm.(Model)
 	}
 	tr = m.subs["task-1"]
@@ -576,7 +576,7 @@ func TestSubagentByteBudgets(t *testing.T) {
 		if i%2 == 1 {
 			kind = agent.EventThought
 		}
-		tm, _ = m.Update(eventMsg{agent.Event{Type: kind, Agent: "task-1", Text: chunk}})
+		tm, _ = m.Update(eventMsg{ev: agent.Event{Type: kind, Agent: "task-1", Text: chunk}})
 		m = tm.(Model)
 	}
 	tr = m.subs["task-1"]
@@ -681,9 +681,9 @@ func TestConsecutiveUserChunksMerge(t *testing.T) {
 	now := time.Date(2026, 9, 12, 10, 0, 0, 0, time.UTC)
 	m := agentModel(t, &now)
 	m = applyInFlight(t, m, []agent.ToolEvent{taskTool("task-1", "count lines", "in_progress")})
-	tm, _ := m.Update(eventMsg{agent.Event{Type: agent.EventUser, Agent: "task-1", Text: "List the files in the"}})
+	tm, _ := m.Update(eventMsg{ev: agent.Event{Type: agent.EventUser, Agent: "task-1", Text: "List the files in the"}})
 	m = tm.(Model)
-	tm, _ = m.Update(eventMsg{agent.Event{Type: agent.EventUser, Agent: "task-1", Text: " current directory."}})
+	tm, _ = m.Update(eventMsg{ev: agent.Event{Type: agent.EventUser, Agent: "task-1", Text: " current directory."}})
 	m = tm.(Model)
 	tr := m.subs["task-1"]
 	var users []string
@@ -706,7 +706,7 @@ func TestChildCommandLineLandsInTheChildTranscript(t *testing.T) {
 	now := time.Date(2026, 9, 12, 10, 0, 0, 0, time.UTC)
 	m := agentModel(t, &now)
 	m = applyInFlight(t, m, []agent.ToolEvent{taskTool("task-1", "count lines", "in_progress")})
-	tm, _ := m.Update(eventMsg{agent.Event{Type: agent.EventCommand, Agent: "task-1", Command: &agent.ExpandedCommand{
+	tm, _ := m.Update(eventMsg{ev: agent.Event{Type: agent.EventCommand, Agent: "task-1", Command: &agent.ExpandedCommand{
 		PluginCommand: agent.PluginCommand{
 			Plugin: "probe-plugin", Bare: "probe-echo",
 			Display: "probe-echo", Qualified: "probe-plugin:probe-echo",
@@ -736,14 +736,14 @@ func TestChildFinishedClosesChildStream(t *testing.T) {
 	now := time.Date(2026, 9, 12, 10, 0, 0, 0, time.UTC)
 	m := agentModel(t, &now)
 	m = applyInFlight(t, m, []agent.ToolEvent{taskTool("task-1", "count lines", "in_progress")})
-	tm, _ := m.Update(eventMsg{agent.Event{Type: agent.EventText, Agent: "task-1", Text: "partial"}})
+	tm, _ := m.Update(eventMsg{ev: agent.Event{Type: agent.EventText, Agent: "task-1", Text: "partial"}})
 	m = tm.(Model)
 	if !m.subs["task-1"].streamOpen() {
 		t.Fatal("expected an open child stream")
 	}
 	fin := subagentsFromTools([]agent.ToolEvent{finishedTaskTool("task-1", "count lines")})[0]
 	stubOf(t, m).SetSubagents([]agent.SubagentInfo{fin})
-	tm, _ = m.Update(eventMsg{agent.Event{
+	tm, _ = m.Update(eventMsg{ev: agent.Event{
 		Type:           agent.EventSubagent,
 		Subagent:       &fin,
 		SubagentChange: agent.SubagentChangeFinished,
@@ -763,7 +763,7 @@ func TestRespawnedAttemptResetsRowTiming(t *testing.T) {
 	m = applyInFlight(t, m, []agent.ToolEvent{taskTool("task-1", "count lines", "in_progress")})
 	fin := subagentsFromTools([]agent.ToolEvent{finishedTaskTool("task-1", "count lines")})[0]
 	stubOf(t, m).SetSubagents([]agent.SubagentInfo{fin})
-	tm, _ := m.Update(eventMsg{agent.Event{
+	tm, _ := m.Update(eventMsg{ev: agent.Event{
 		Type:           agent.EventSubagent,
 		Subagent:       &fin,
 		SubagentChange: agent.SubagentChangeFinished,
@@ -777,7 +777,7 @@ func TestRespawnedAttemptResetsRowTiming(t *testing.T) {
 	retry.Status = agent.SubagentRunning
 	retry.AttemptID = "at2"
 	stubOf(t, m).SetSubagents([]agent.SubagentInfo{retry})
-	tm, _ = m.Update(eventMsg{agent.Event{
+	tm, _ = m.Update(eventMsg{ev: agent.Event{
 		Type:           agent.EventSubagent,
 		Subagent:       &retry,
 		SubagentChange: agent.SubagentChangeSpawned,
@@ -802,7 +802,7 @@ func TestFinishOnlySightingLeavesNoStaleStamp(t *testing.T) {
 	m := agentModel(t, &now)
 	m = applyInFlight(t, m, []agent.ToolEvent{taskTool("task-1", "count lines", "in_progress")})
 	ghost := agent.SubagentInfo{ID: "ghost", Status: agent.SubagentCompleted, Description: "never spawned here"}
-	tm, _ := m.Update(eventMsg{agent.Event{Type: agent.EventSubagent, Subagent: &ghost, SubagentChange: agent.SubagentChangeFinished}})
+	tm, _ := m.Update(eventMsg{ev: agent.Event{Type: agent.EventSubagent, Subagent: &ghost, SubagentChange: agent.SubagentChangeFinished}})
 	m = tm.(Model)
 	if _, ok := liveInfo(m.snap.Subagents, "ghost"); !ok {
 		t.Fatal("the fold's roster holds the finish-only row the event carried")
@@ -830,7 +830,7 @@ func TestCursorFinishedWhileViewedGetsTheWarnBanner(t *testing.T) {
 	subs := subagentsFromTools([]agent.ToolEvent{finishedTaskTool("task-1", "count lines")})
 	subs[0].Status = agent.SubagentCompleted
 	stubOf(t, m).SetSubagents(subs)
-	tm, _ := m.Update(eventMsg{agent.Event{Type: agent.EventSubagent, Subagent: &subs[0], SubagentChange: agent.SubagentChangeFinished}})
+	tm, _ := m.Update(eventMsg{ev: agent.Event{Type: agent.EventSubagent, Subagent: &subs[0], SubagentChange: agent.SubagentChangeFinished}})
 	m = tm.(Model)
 	if m.viewing != "task-1" {
 		t.Fatal("finishing must not close the view")

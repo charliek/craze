@@ -40,13 +40,46 @@ import (
 // The reader keeps exactly one Read outstanding while a gate is open — the
 // session's primary must keep draining, since a command can wait on primary
 // room — and parks while held messages drain with no gate open, so the backlog
-// stays in the primary, as it does today (readOn).
+// stays in the primary, as it does today (readOn). What a socket's stream adds
+// to the events — a restore, a ready, the end (PR 4, restore.go) — is placed
+// exactly as an event is; a restore held behind the events of the stream it
+// replaces drops them as it is held (dropSuperseded).
 
 // ErrNoAnswer is a gated call that did not answer in time: its deadline passed
 // or the held queue reached its bound first. The outcome is unknown — the
 // command may have run — and each continuation says so honestly. It is a
 // client-side outcome and never travels on the wire.
 var ErrNoAnswer = errors.New("no answer from the session")
+
+// noAnswerFor is err as the gate hands it to a continuation: a backend's
+// outcome-unknown answer (backend.ErrOutcomeUnknown — a socket's resume loss,
+// its redials spent, a call for an identity it has left) is ErrNoAnswer, the
+// same "it may have run" every continuation already says honestly, so each
+// handles it as it handles the deadline's: the same notes, the same card kept
+// (plan 027 PR 4, C27). It is decided here, once, and never at the sites. The
+// error stays the backend's underneath — errors.Is finds either sentinel, and
+// the stale epoch a resume loss carries — and its text is ErrNoAnswer's, which
+// is what a site that words a failure shows (failureText). Anything else is
+// err, unchanged; in process nothing ever is outcome-unknown.
+func noAnswerFor(err error) error {
+	if err == nil || errors.Is(err, ErrNoAnswer) || !errors.Is(err, backend.ErrOutcomeUnknown) {
+		return err
+	}
+	return &unknownOutcome{err: err}
+}
+
+// unknownOutcome is an outcome-unknown error seen as ErrNoAnswer (noAnswerFor).
+type unknownOutcome struct{ err error }
+
+func (e *unknownOutcome) Error() string        { return ErrNoAnswer.Error() }
+func (e *unknownOutcome) Is(target error) bool { return target == ErrNoAnswer }
+func (e *unknownOutcome) Unwrap() error        { return e.err }
+
+// failureText is how a command's failure reads where the TUI words one
+// itself — a fire-and-forget command's (a cancel's) and a settings chain's
+// error row: its text, and ErrNoAnswer's for an outcome that is unknown
+// (noAnswerFor), exactly as a gated call's continuation hears it.
+func failureText(err error) string { return noAnswerFor(err).Error() }
 
 // gateDeadline is the deadline a gated call is given (§3.12): fifteen seconds —
 // long enough for the flock an index write can wait on, short enough that a
@@ -195,7 +228,7 @@ func (m Model) run(deadline time.Duration, call gateCall, cont gateCont) (Model,
 		// today's direct calls were given, which never ends. The deadline is
 		// the asynchronous gate's alone.
 		res, err := call(base, b)
-		return cont(m, gateReply{issued: iss, result: res, err: err})
+		return cont(m, gateReply{issued: iss, result: res, err: noAnswerFor(err)})
 	}
 	m.gateSeq++
 	g := &gate{id: m.gateSeq, cont: cont, deadline: deadline}
@@ -276,21 +309,24 @@ func (p callPanic) String() string { return fmt.Sprintf("%v\n\n%s", p.value, p.s
 // callGated runs call with ctx, which ends at the call's deadline, and answers
 // its reply. A call that gave up because that deadline passed did not answer:
 // that is ErrNoAnswer, the outcome the deadline promises, not the context's
-// own error. It is the asynchronous gate's: the baseline has no deadline.
+// own error; and so is one whose outcome the backend says is unknown
+// (noAnswerFor). The deadline is the asynchronous gate's: the baseline has
+// none.
 func callGated(ctx context.Context, b backend.Backend, id uint64, call gateCall) gateReply {
 	res, err := call(ctx, b)
 	return gateReply{id: id, result: res, err: unanswered(ctx, err)}
 }
 
 // unanswered is err, or ErrNoAnswer when it is ctx's own error once ctx has
-// ended: a call that gave up because its deadline passed did not answer. A
-// gated call that makes more than one backend call (clearPending's) judges
-// each outcome by it.
+// ended: a call that gave up because its deadline passed did not answer —
+// nor did one whose outcome the backend says is unknown (noAnswerFor). A gated
+// call that makes more than one backend call (clearPending's) judges each
+// outcome by it.
 func unanswered(ctx context.Context, err error) error {
 	if err != nil && ctx.Err() != nil && errors.Is(err, ctx.Err()) {
 		return ErrNoAnswer
 	}
-	return err
+	return noAnswerFor(err)
 }
 
 // gated is Update: the gate over handle and the Update wrapper.
@@ -313,9 +349,9 @@ func (m Model) gated(msg tea.Msg, handle handler) (tea.Model, tea.Cmd) {
 		return m.drain(handle)
 	case frameSyncMsg:
 		return m.syncFrame(msg)
-	case eventMsg:
+	case eventMsg, restoreMsg, readyMsg, endMsg:
 		// The one outstanding read is over; readOn decides whether another
-		// starts, once this event is placed.
+		// starts, once this item is placed.
 		m.reading = false
 	}
 	if m.gate != nil || len(m.held) > 0 {
@@ -354,18 +390,38 @@ func (m Model) apply(msg tea.Msg, handle handler, drained bool) (tea.Model, tea.
 	if opened {
 		next.noteGate(gateOpened)
 	}
-	if !isEvent && (opened || drained) {
+	if !isEvent && (opened || drained || fromStream(msg)) {
+		// A stream item the handler applied — a restore, a ready — ended the
+		// read that delivered it, as an event does (readOn).
 		read := next.readOn()
 		cmd = tea.Batch(cmd, read)
 	}
 	return next, cmd
 }
 
+// fromStream reports whether msg is an item of the backend's stream other than
+// an event — a restore, a ready or the end (waitEvent) — which the gate places
+// as it places an event: holding it in arrival order behind whatever is held,
+// and reconciling the reader once it is placed.
+func fromStream(msg tea.Msg) bool {
+	switch msg.(type) {
+	case restoreMsg, readyMsg, endMsg:
+		return true
+	}
+	return false
+}
+
 // hold appends msg to the held queue. While a gate is open that is watched,
 // and a queue that reaches either bound releases the gate with ErrNoAnswer; an
-// event that arrived is followed by the reader's next read only while a gate
-// is open (readOn).
+// event or another stream item that arrived is followed by the reader's next
+// read only while a gate is open (readOn). A restore drops, as it is held,
+// what is held of the streams it replaces (dropSuperseded).
 func (m Model) hold(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if r, ok := msg.(restoreMsg); ok {
+		// Everything held of the streams it replaces is inside its snapshot,
+		// or of a session that is gone: it is never applied (restore.go).
+		m.dropSuperseded(r.gen)
+	}
 	n := payloadBytes(msg)
 	m.pushHeld(heldMsg{msg: msg, bytes: n})
 	m.heldBytes += n
@@ -375,7 +431,7 @@ func (m Model) hold(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.release(gateReply{id: m.gate.id, err: ErrNoAnswer})
 		}
 	}
-	if _, ok := msg.(eventMsg); ok {
+	if _, ok := msg.(eventMsg); ok || fromStream(msg) {
 		read := m.readOn()
 		return m, read
 	}
@@ -512,7 +568,7 @@ func (m *Model) pushHeld(h heldMsg) {
 // ends, so an item Read takes is always delivered (backend.Backend.Read), and
 // every delivered event is applied or held.
 func (m *Model) readOn() tea.Cmd {
-	if m.reading || m.eng == nil || (m.gate == nil && len(m.held) > 0) {
+	if m.reading || m.eng == nil || m.ended || (m.gate == nil && len(m.held) > 0) {
 		return nil
 	}
 	m.reading = true
