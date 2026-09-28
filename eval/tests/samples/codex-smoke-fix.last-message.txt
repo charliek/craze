@@ -1,0 +1,7 @@
+Fixed and verified.
+
+- Root cause: `total()` used `range(len(lines) - 1)`, which skipped the final line, so `pears,4` was never counted.
+- Fix: changed it to `range(len(lines))` in `inventory.py:24`.
+- Added a regression test `test_total_sums_all_lines` in `tests/test_inventory.py` (also fixed the import to include `total`).
+
+`python -m pytest -q` → `4 passed`.

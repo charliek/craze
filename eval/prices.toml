@@ -1,0 +1,75 @@
+# Prices in US$ per 1M tokens, keyed by wire model id (the `model` a request names).
+# Plan 029 §2.7, researched 2026-09-27.
+#
+# input / cached_input / output are the LEDGER prices: conservative, and what counts
+# against the budget cap. list_* are the published prices, reported beside them.
+# zero_rated models (the Z.AI coding plan, a flat subscription) cost $0 against the
+# cap; their list_* are a list-equivalent (Fireworks GLM 5.3) that is reported only.
+# prior_run_cost is the pinned per-run estimate `crazeeval run` uses for a model with
+# no completed runs in the ledger yet (plan 029 §3.1.7).
+#
+# A wire model missing here is refused by the proxy.
+
+[models."muse-spark-1.3"]
+input = 1.25
+cached_input = 0.15
+output = 4.25
+list_input = 1.25
+list_cached_input = 0.15
+list_output = 4.25
+prior_run_cost = 0.90
+source = "mindstudio.ai, eesel.ai Muse Spark 1.3 pricing"
+
+[models."muse-spark-1.3-contributor"]
+# No cached price is published; the ledger charges cached input at the full rate.
+input = 0.10
+cached_input = 0.10
+output = 0.20
+list_input = 0.10
+list_cached_input = 0.10
+list_output = 0.20
+prior_run_cost = 0.08
+source = "mindstudio.ai, eesel.ai (contributor tier)"
+
+[models."glm-5.3"]
+zero_rated = true
+input = 0.0
+cached_input = 0.0
+output = 0.0
+list_input = 1.40
+list_cached_input = 0.26
+list_output = 4.40
+prior_run_cost = 0.0
+source = "Z.AI coding plan (flat rate); list-equivalent = Fireworks GLM 5.3"
+
+[models."glm-5.3-flash"]
+zero_rated = true
+input = 0.0
+cached_input = 0.0
+output = 0.0
+list_input = 1.40
+list_cached_input = 0.26
+list_output = 4.40
+prior_run_cost = 0.0
+source = "Z.AI coding plan (flat rate); list-equivalent = Fireworks GLM 5.3"
+
+[models."accounts/fireworks/models/kimi-k3"]
+# Ledger = the US serverless rate (x1.5 of list).
+input = 4.50
+cached_input = 0.45
+output = 22.50
+list_input = 3.00
+list_cached_input = 0.30
+list_output = 15.00
+prior_run_cost = 3.00
+source = "docs.fireworks.ai/serverless/pricing"
+
+[models."accounts/fireworks/models/deepseek-v4p1-flash"]
+input = 0.45
+cached_input = 0.009
+output = 1.80
+list_input = 0.30
+list_cached_input = 0.006
+list_output = 1.20
+prior_run_cost = 0.35
+source = "docs.fireworks.ai/serverless/pricing"
