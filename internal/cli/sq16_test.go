@@ -40,22 +40,31 @@ func anotherCraze(t *testing.T) *sessionClaims {
 
 // holdingCraze is another craze that holds sessions: its own claims under its
 // own host id and, when serving, a live registry entry under that id — the
-// entry its control socket's Bind writes (plan 027 §3.8). Nothing accepts on
-// the socket: an attach to it is the seam's (recordAttach).
-func holdingCraze(t *testing.T, ws string, serving bool) (*sessionClaims, string) {
+// entry its control socket's Bind writes (plan 027 §3.8). serve rewrites that
+// entry for the session its engine runs, as runHost.onEngine's rewrite does:
+// an attach goes only to an entry that names the session claimed. Nothing
+// accepts on the socket: an attach to it is the seam's (recordAttach).
+func holdingCraze(t *testing.T, ws string, serving bool) (claims *sessionClaims, hostID string, serve func(crazeID string)) {
 	t.Helper()
 	env := rundir.ProcessEnv()
-	hostID := rundir.NewHostID()
+	hostID = rundir.NewHostID()
+	serve = func(string) { t.Fatal("fixture: a holder with no socket serves nothing") }
 	if serving {
 		h, err := rundir.Bind(env, hostID, rundir.Entry{StartedAt: time.Now().UTC(), Workspace: ws})
 		if err != nil {
 			t.Fatalf("the holder's registry entry: %v", err)
 		}
 		t.Cleanup(func() { _ = h.Close() })
+		serve = func(crazeID string) {
+			t.Helper()
+			if err := h.Update(func(e *rundir.Entry) { e.CrazeSessionID, e.Ready = crazeID, true }); err != nil {
+				t.Fatalf("the holder's registry rewrite: %v", err)
+			}
+		}
 	}
-	c := newSessionClaims(env, hostID, io.Discard)
-	t.Cleanup(c.releaseAll)
-	return c, hostID
+	claims = newSessionClaims(env, hostID, io.Discard)
+	t.Cleanup(claims.releaseAll)
+	return claims, hostID, serve
 }
 
 // attachCall is one attach runTUI handed the seam.
@@ -112,11 +121,12 @@ func TestContinueOfAnOpenSessionAttaches(t *testing.T) {
 			ws := t.TempDir()
 			row := sessions.Row{SessionID: "s-1", Provider: "grok", CWD: ws, CrazeID: tc.id, Title: "open", TitleKind: sessions.TitleKindAgent}
 			seedRow(t, row, time.Minute)
-			holder, hostID := holdingCraze(t, ws, true)
+			holder, hostID, serve := holdingCraze(t, ws, true)
 			id, _, err := holder.claimRow(row)
 			if err != nil || id == "" {
 				t.Fatalf("the first craze's claim: %q, %v", id, err)
 			}
+			serve(id)
 			index, err := os.ReadFile(indexPath(t))
 			if err != nil {
 				t.Fatal(err)
@@ -155,6 +165,104 @@ func TestContinueOfAnOpenSessionAttaches(t *testing.T) {
 	}
 }
 
+// TestAHeldRowAttachesWhateverTheSpawnFlags (sol r66 4a): a row with a craze
+// id is claimed before the spawn flags are asked of its provider, so a native
+// session another craze holds is attached to under --agent-bin — which an
+// attach ignores, and its note says so — where the flag would refuse a load.
+// A native row no one holds is refused as ever, exit 2, and the claim this run
+// took for it is given back: another craze can claim it at once, nothing was
+// built, and the index is as it was.
+func TestAHeldRowAttachesWhateverTheSpawnFlags(t *testing.T) {
+	const binMsg = "craze: --agent-bin cannot be used with provider native, which runs inside craze"
+	row := func(ws, id string) sessions.Row {
+		return sessions.Row{SessionID: "native-1", Provider: "native", CWD: ws, CrazeID: id, Title: "a native thread", TitleKind: sessions.TitleKindAgent}
+	}
+
+	t.Run("held", func(t *testing.T) {
+		indexHome(t)
+		ws := t.TempDir()
+		seedRow(t, row(ws, "018f-native-held"), time.Minute)
+		holder, hostID, serve := holdingCraze(t, ws, true)
+		if _, err := holder.claimSession("018f-native-held"); err != nil {
+			t.Fatal(err)
+		}
+		serve("018f-native-held")
+		calls := recordAttach(t)
+		var stderr bytes.Buffer
+		if err := runContinue(t, ws, &stderr, "--agent-bin", "/bin/true"); err != nil {
+			t.Fatalf("a held native row under --agent-bin: %v", err)
+		}
+		want := "craze: that session is open in another craze (pid " + strconv.Itoa(os.Getpid()) + "); attaching (ignored: --agent-bin)\n"
+		if stderr.String() != want || len(*calls) != 1 || (*calls)[0].target.entry.HostID != hostID ||
+			(*calls)[0].target.sessionID != "018f-native-held" {
+			t.Fatalf("said %q, attached %+v; want %q and the holder's session", stderr.String(), *calls, want)
+		}
+	})
+
+	t.Run("free", func(t *testing.T) {
+		indexHome(t)
+		ws := t.TempDir()
+		seedRow(t, row(ws, "018f-native-free"), time.Minute)
+		before, err := os.ReadFile(indexPath(t))
+		if err != nil {
+			t.Fatal(err)
+		}
+		calls := recordAttach(t)
+		claims := testClaims(t, io.Discard)
+		cfg, built, err := runResolveLoadWith(t, ws, claims, "--continue", "--agent-bin", "/bin/true")
+		assertExit(t, err, 2, binMsg)
+		if len(built) != 0 || cfg.Session != nil || len(*calls) != 0 {
+			t.Fatalf("a refused load built %d sessions, attached %d times", len(built), len(*calls))
+		}
+		if _, err := anotherCraze(t).claimSession("018f-native-free"); err != nil {
+			t.Fatalf("the refused load kept its claim: %v", err)
+		}
+		if after, err := os.ReadFile(indexPath(t)); err != nil || !bytes.Equal(after, before) {
+			t.Fatalf("a refused load wrote the index (%v):\n%s\nwas\n%s", err, after, before)
+		}
+	})
+}
+
+// TestAHolderServingAnotherSessionIsNotAttachedTo (sol r66 4b): a holder
+// keeps every claim for its life while the engine it serves can be replaced,
+// so its host id alone does not say its socket serves the claimed session.
+// An entry that serves another is refused — exit 1, the pid, and why — and
+// the resume picker offers no --session that would select the other session;
+// an entry not yet rewritten for its engine serves nothing yet.
+func TestAHolderServingAnotherSessionIsNotAttachedTo(t *testing.T) {
+	for _, tc := range []struct {
+		name, serves, why string
+	}{
+		{"another session", "018f-another", " — it serves another session"},
+		{"no session yet", "", " — it serves no control socket"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			indexHome(t)
+			ws := t.TempDir()
+			row := sessions.Row{SessionID: "s-1", Provider: "grok", CWD: ws, CrazeID: "018f-claimed", Title: "claimed", UpdatedAt: time.Now(), TitleKind: sessions.TitleKindAgent}
+			seedRow(t, row, time.Minute)
+			holder, _, serve := holdingCraze(t, ws, true)
+			if _, err := holder.claimSession("018f-claimed"); err != nil {
+				t.Fatal(err)
+			}
+			if tc.serves != "" {
+				serve(tc.serves)
+			}
+			refused := "that session is open in another craze (pid " + strconv.Itoa(os.Getpid()) + ")"
+			calls := recordAttach(t)
+			var stderr bytes.Buffer
+			assertExit(t, runContinue(t, ws, &stderr), 1, "craze: "+refused+tc.why)
+			if len(*calls) != 0 || stderr.Len() != 0 {
+				t.Fatalf("attached %d times, said %q", len(*calls), stderr.String())
+			}
+			claims := testClaims(t, io.Discard)
+			if _, _, err := claims.pickerClaim(row); err == nil || err.Error() != refused+tc.why {
+				t.Fatalf("the picker's refusal %v, want %q", err, refused+tc.why)
+			}
+		})
+	}
+}
+
 // resolveThemeFor is the theme an attach's view takes from argv: --theme's
 // value, else the default (no config file under indexHome).
 func resolveThemeFor(t *testing.T, argv []string) string {
@@ -176,7 +284,7 @@ func TestContinueOfASessionWithNoSocketStillRefuses(t *testing.T) {
 	ws := t.TempDir()
 	row := sessions.Row{SessionID: "s-1", Provider: "grok", CWD: ws, CrazeID: "018f-quiet-host", TitleKind: sessions.TitleKindNone}
 	seedRow(t, row, time.Minute)
-	holder, _ := holdingCraze(t, ws, false)
+	holder, _, _ := holdingCraze(t, ws, false)
 	if _, _, err := holder.claimRow(row); err != nil {
 		t.Fatal(err)
 	}
@@ -581,9 +689,12 @@ func TestThePickerRefusalNamesTheAttach(t *testing.T) {
 			ws := t.TempDir()
 			rows := []sessions.Row{{SessionID: "s-1", Provider: "grok", CWD: ws, CrazeID: "018f-busy", Title: "open elsewhere", UpdatedAt: time.Now()}}
 			seedRow(t, rows[0], 0)
-			holder, hostID := holdingCraze(t, ws, serving)
+			holder, hostID, serve := holdingCraze(t, ws, serving)
 			if _, err := holder.claimSession("018f-busy"); err != nil {
 				t.Fatal(err)
+			}
+			if serving {
+				serve("018f-busy")
 			}
 			claims := testClaims(t, io.Discard)
 			refused := "that session is open in another craze (pid " + strconv.Itoa(os.Getpid()) + ")"

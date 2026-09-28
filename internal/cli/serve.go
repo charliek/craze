@@ -538,11 +538,12 @@ func (c *sessionClaims) pickerClaim(row sessions.Row) (string, func(), error) {
 // pickerRefusal is claimRow's refusal as the resume picker's error row says
 // it: refusal's words and, for a session another craze holds, where it can be
 // reached instead (plan 027 §3.9; X31 5: PR 4 adds the hint) — `— craze
-// attach --session <hostId>` when the holder serves it (holderEntry), `— it
-// serves no control socket` when the holder it names serves none, and nothing
-// more when its lock names no holder yet (pid ?). The picker itself still
-// builds nothing: turning a running picker's TUI into a client is not worth
-// its complexity (§3.9).
+// attach --session <hostId>` only when the holder's live entry serves that
+// very session (holderEntry), else why it cannot be (`— it serves no control
+// socket`, `— it serves another session`), and nothing more when its lock
+// names no holder yet (pid ?). The picker itself still builds nothing:
+// turning a running picker's TUI into a client is not worth its complexity
+// (§3.9).
 //
 // The hint names the holder's host id, which --session resolves exactly as it
 // does a craze session id: twelve characters, so the whole command sits on one
@@ -557,13 +558,11 @@ func (c *sessionClaims) pickerRefusal(err error) string {
 	if !errors.As(err, &held) {
 		return msg
 	}
-	if entry, ok := holderEntry(c.env, held); ok {
+	entry, serves := holderEntry(c.env, held)
+	if serves == holderServes {
 		return msg + " — craze attach --session " + entry.HostID
 	}
-	if held.Holder.HostID != "" {
-		return msg + noControlSocket
-	}
-	return msg
+	return msg + serves.refusalSuffix()
 }
 
 // refusal is claimRow's refusal as the user reads it: the session's holder,

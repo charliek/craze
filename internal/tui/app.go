@@ -1362,6 +1362,10 @@ type Result struct {
 	// quitting, and Ended stays false.
 	Ended  bool
 	EndErr error
+	// StartErr is the session's start failure, when it never came up. Run
+	// returns it as its error unless p.Run failed itself: a caller telling
+	// the program's own failure from the start's compares the two.
+	StartErr error
 }
 
 // Run returns how the run ended (Result) and the start failure, if any
@@ -1437,7 +1441,7 @@ func Run(cfg Config) (Result, error) {
 	// p.Run's own error is folded in here too: a recovered panic or another
 	// run failure is reason enough to show the agent's stderr, whatever
 	// finishRun made of the session close (§3.7.3).
-	res := Result{AgentDiag: showAgentDiag || err != nil}
+	res := Result{AgentDiag: showAgentDiag || err != nil, StartErr: startErr}
 	if fm, ok := final.(Model); ok {
 		// The End that quit the program, and why, as the final model holds
 		// them (endMsg).

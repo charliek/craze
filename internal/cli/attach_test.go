@@ -12,6 +12,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/creack/pty"
+
 	"github.com/charliek/craze/internal/remote"
 	"github.com/charliek/craze/internal/rundir"
 	"github.com/charliek/craze/internal/sessions"
@@ -250,10 +252,13 @@ func TestAttachWithNothingRunningSaysSo(t *testing.T) {
 // exits 0 with `craze: session ended` on stderr; an end carrying an error (the
 // transport gave up) is exit 1, `craze: lost the session: <err>`; a start
 // failure is the host TUI's — its own error — even when the host then quits;
-// a start the stream's end cut short is that end.
+// a start the stream's end cut short is that end; and the program's own
+// failure (tui.Run's error that is not the start's) is that error whatever
+// the stream did, never `session ended` over it.
 func TestAnAttachEndsAsItsSessionDid(t *testing.T) {
 	startFailed := &remote.StartError{Text: "agent auth failed"}
 	cutShort := fmt.Errorf("remote: the stream ended before the session was ready: %w", errors.New("the session ended"))
+	programFailed := errors.New("error reading input: read /dev/stdin: input/output error")
 	for _, tc := range []struct {
 		name    string
 		res     tui.Result
@@ -267,9 +272,15 @@ func TestAnAttachEndsAsItsSessionDid(t *testing.T) {
 		{name: "the host quit", res: tui.Result{Ended: true}, stderr: "craze: session ended\n"},
 		{name: "the transport gave up", res: tui.Result{Ended: true, EndErr: errors.New("redials spent\nafter 3")},
 			code: 1, msg: "craze: lost the session: redials spent after 3"},
-		{name: "a start failure", err: startFailed, sameErr: true},
-		{name: "a start failure, then the host quit", res: tui.Result{Ended: true}, err: startFailed, sameErr: true},
-		{name: "a start cut short by the end", res: tui.Result{Ended: true}, err: cutShort, stderr: "craze: session ended\n"},
+		{name: "a start failure", res: tui.Result{StartErr: startFailed}, err: startFailed, sameErr: true},
+		{name: "a start failure, then the host quit", res: tui.Result{Ended: true, StartErr: startFailed}, err: startFailed, sameErr: true},
+		{name: "a start cut short by the end", res: tui.Result{Ended: true, StartErr: cutShort}, err: cutShort, stderr: "craze: session ended\n"},
+		// The program's own failure beats the stream's end (sol r66): the End
+		// was applied, and then the terminal's input failed.
+		{name: "the program failed after the End", res: tui.Result{Ended: true}, err: programFailed, sameErr: true},
+		{name: "the program failed after an End with an error", res: tui.Result{Ended: true, EndErr: errors.New("redials spent")},
+			err: programFailed, sameErr: true},
+		{name: "the program failed over a start failure", res: tui.Result{StartErr: startFailed}, err: programFailed, sameErr: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var stderr bytes.Buffer
@@ -341,4 +352,49 @@ func TestAttachDialsTheEntry(t *testing.T) {
 		!strings.HasPrefix(ee.msg, "craze attach: session "+crazeID+" is unreachable: ") || strings.Contains(ee.msg, "\n") {
 		t.Fatalf("a dial to nothing: %v", err)
 	}
+}
+
+// TestTheTerminalCheckIsATerminalsOwn (sol r66): a TUI needs a terminal, not
+// any character device — /dev/null is one, and neither the host TUI nor craze
+// attach may start on it; a pty's end is a terminal. craze attach asks once
+// its target is resolved, so the refusal is the usage error, not a TUI no one
+// sees.
+func TestTheTerminalCheckIsATerminalsOwn(t *testing.T) {
+	null, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer null.Close()
+	if st, err := null.Stat(); err != nil || st.Mode()&os.ModeCharDevice == 0 {
+		t.Fatalf("fixture: %s is not a character device (%v)", os.DevNull, err)
+	}
+	if isTerminal(null) {
+		t.Fatalf("%s reads as a terminal", os.DevNull)
+	}
+	ptmx, tty, err := pty.Open()
+	if err != nil {
+		t.Skipf("no pty: %v", err)
+	}
+	defer ptmx.Close()
+	defer tty.Close()
+	if !isTerminal(tty) {
+		t.Fatal("a pty's end does not read as a terminal")
+	}
+
+	indexHome(t)
+	cmd := NewRootCmd()
+	cmd.SetOut(null)
+	cmd.SetErr(io.Discard)
+	cmd.SetArgs(nil)
+	assertExit(t, cmd.Execute(), 2, "craze: refusing to start TUI on a non-tty")
+
+	env := rundir.ProcessEnv()
+	rh, hostID := servingHost(t, env, io.Discard)
+	rh.onEngine(grokStubEngine(t))
+	waitEntry(t, entryPath(env, hostID), func(e rundir.Entry) bool { return e.CrazeSessionID != "" })
+	cmd = NewRootCmd()
+	cmd.SetOut(null)
+	cmd.SetErr(io.Discard)
+	cmd.SetArgs([]string{"attach", "--session", hostID})
+	assertExit(t, cmd.Execute(), 2, "craze attach: refusing to start TUI on a non-tty")
 }

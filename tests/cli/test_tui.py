@@ -1062,6 +1062,10 @@ def test_tui_continue_twice_attaches_the_second(
         extra_args=["--continue"],
     ) as first:
         first.wait_contains("restored")
+        # An attach goes only to an entry that names the claimed session: the
+        # first's, once its engine is ready.
+        (entry_path,) = _wait_glob(tmp_path / ".cache" / "craze" / "hosts", "*.json")
+        _wait_entry(entry_path, lambda e: e["ready"] and e["crazeSessionId"])
         with PTYCraze(
             craze_bin,
             fake_agent_bin,

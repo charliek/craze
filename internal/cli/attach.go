@@ -311,6 +311,9 @@ func attachConfig(target attachTarget, view attachView) (tui.Config, error) {
 
 // attachExit is how an attach TUI's run ends (§3.9):
 //
+//   - the program's own failure (Run's error when it is not the start's: a
+//     recovered panic, the terminal's input failing) is that error, exit 1 —
+//     never `session ended` over it, whatever the stream did meanwhile;
 //   - the session's own end (an End with no error: the host quit) is exit 0,
 //     `craze: session ended` on stderr;
 //   - an End carrying an error — the transport gave up, its redials spent —
@@ -323,6 +326,8 @@ func attachConfig(target attachTarget, view attachView) (tui.Config, error) {
 func attachExit(res tui.Result, err error, stderr io.Writer) error {
 	var start *remote.StartError
 	switch {
+	case err != nil && !errors.Is(err, res.StartErr):
+		return err
 	case res.Ended && !errors.As(err, &start):
 		if res.EndErr != nil {
 			return exitf(1, "craze: lost the session: %s", sanitizeLine(res.EndErr.Error()))
@@ -335,30 +340,67 @@ func attachExit(res tui.Result, err error, stderr io.Writer) error {
 	return nil
 }
 
-// noControlSocket ends a held session's refusal when its holder serves no
-// control socket to attach through (§3.9): its socket opted out, or its
-// registry entry not written yet.
-const noControlSocket = " — it serves no control socket"
+// holderSocket is what a held session's holder serves to attach through
+// (holderEntry).
+type holderSocket int
 
-// holderEntry is the live registry entry of the craze that holds a session:
-// the one whose host id the session's lock names (§3.9: "resolved through the
-// holder's hostId"). ok is false when the lock names no host yet (pid ?), when
-// no live entry has that id — the holder serves no control socket, or has not
-// written its entry yet — and when the registry cannot be read.
-func holderEntry(env rundir.Env, held *rundir.HeldError) (rundir.Entry, bool) {
+const (
+	// holderUnnamed: the session's lock names no host yet (pid ?) — nothing
+	// says where, or whether, its holder serves.
+	holderUnnamed holderSocket = iota
+	// holderNoSocket: no live registry entry has the holder's host id — its
+	// socket opted out, or its entry is not written yet — or its entry names
+	// no session yet, or the registry cannot be read.
+	holderNoSocket
+	// holderElsewhere: the holder's live entry serves another session. A
+	// holder keeps every claim for its life, and the engine it serves can be
+	// replaced, so the host id alone does not say the socket serves the
+	// session that was claimed.
+	holderElsewhere
+	// holderServes: the holder's live entry serves the claimed session.
+	holderServes
+)
+
+// refusalSuffix ends a held session's refusal with why it cannot be attached
+// to instead (§3.9): nothing for an unnamed holder, whose refusal stays PR
+// 2's as it was.
+func (h holderSocket) refusalSuffix() string {
+	switch h {
+	case holderNoSocket:
+		return " — it serves no control socket"
+	case holderElsewhere:
+		return " — it serves another session"
+	}
+	return ""
+}
+
+// holderEntry is the live registry entry that serves a held session: the one
+// whose host id the session's lock names (§3.9: "resolved through the holder's
+// hostId") AND whose crazeSessionId is the session claimed, and holderServes;
+// otherwise what there is instead (holderSocket). The entry is returned only
+// with holderServes.
+func holderEntry(env rundir.Env, held *rundir.HeldError) (rundir.Entry, holderSocket) {
 	if held.Holder.HostID == "" {
-		return rundir.Entry{}, false
+		return rundir.Entry{}, holderUnnamed
 	}
 	entries, err := rundir.Hosts(env)
 	if err != nil {
-		return rundir.Entry{}, false
+		return rundir.Entry{}, holderNoSocket
 	}
 	for _, e := range entries {
-		if e.HostID == held.Holder.HostID {
-			return e, true
+		switch {
+		case e.HostID != held.Holder.HostID:
+		case e.CrazeSessionID == held.CrazeID:
+			return e, holderServes
+		case e.CrazeSessionID == "":
+			// Serving, and not yet rewritten for its engine: not yet a
+			// socket for this session.
+			return rundir.Entry{}, holderNoSocket
+		default:
+			return rundir.Entry{}, holderElsewhere
 		}
 	}
-	return rundir.Entry{}, false
+	return rundir.Entry{}, holderNoSocket
 }
 
 // attachHeld is SQ16 for --continue in PR 4 (§3.9): the session resolveLoad
@@ -370,17 +412,19 @@ func holderEntry(env rundir.Env, held *rundir.HeldError) (rundir.Entry, bool) {
 // --provider) do not apply to an attach: they are ignored, and the line names
 // the ones given. Nothing is built, spawned, bound or claimed for it.
 //
-// A holder with no live registry entry keeps PR 2's refusal, exit 1 naming
-// the pid, plus `— it serves no control socket`; one whose lock names no
-// holder yet (pid ?) keeps PR 2's refusal as it was (refused), since nothing
-// says where, or whether, it serves.
+// A holder whose live registry entry does not serve that session keeps PR
+// 2's refusal, exit 1 naming the pid, plus why (holderSocket.refusalSuffix):
+// `— it serves no control socket`, or `— it serves another session`; one
+// whose lock names no holder yet (pid ?) keeps PR 2's refusal as it was
+// (refused).
 func attachHeld(cmd *cobra.Command, f *tuiFlags, env rundir.Env, held *rundir.HeldError, refused error) error {
-	entry, ok := holderEntry(env, held)
-	if !ok {
-		if held.Holder.HostID == "" {
-			return refused
-		}
-		return exitf(1, "craze: %s%s", refusal(held), noControlSocket)
+	entry, serves := holderEntry(env, held)
+	switch serves {
+	case holderUnnamed:
+		return refused
+	case holderServes:
+	default:
+		return exitf(1, "craze: %s%s", refusal(held), serves.refusalSuffix())
 	}
 	note := "craze: " + refusal(held) + "; attaching"
 	if ignored := ignoredForAttach(cmd, f); len(ignored) > 0 {
