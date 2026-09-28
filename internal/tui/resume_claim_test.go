@@ -216,6 +216,52 @@ func TestTheErrorRowNeverTakesTheLastListRow(t *testing.T) {
 	}
 }
 
+// TestALongRefusalWrapsInTheBox (plan 027 C28): a refusal that says where the
+// session can be reached — `craze attach --session <hostId>` — is wider than
+// the box, so it is word-wrapped onto rows of its own rather than cut to the
+// first; in a short box its rows go before the footer and never take the row
+// the cursor is on, and the box never outgrows its budget. The click path
+// plans at the box's own width, as the body does.
+func TestALongRefusalWrapsInTheBox(t *testing.T) {
+	m, _ := claimingPicker(t, (&fakeClaim{}).claim)
+	m.resumeErr = "that session is open in another craze (pid 1234567) — craze attach --session a1b2c3d4e5f6"
+	m.resumeCursor = 2
+	inner := dialogMaxWidth - dialogBorder
+	body := m.resumeDialogBody(inner, 1<<16)
+	joined := plain(strings.Join(body, "\n"))
+	if !strings.Contains(joined, "that session is open in another craze (pid 1234567)") ||
+		!strings.Contains(joined, "craze attach --session a1b2c3d4e5f6") {
+		t.Fatalf("the refusal is not whole in the box:\n%s", joined)
+	}
+	if got := m.resumeErrRows(inner, 1<<16); got != 2 {
+		t.Fatalf("the refusal takes %d rows, want 2", got)
+	}
+	for budget, want := range map[int]struct {
+		shown, errRows int
+		footer         bool
+	}{
+		2: {shown: 1},
+		3: {shown: 1, errRows: 1},
+		4: {shown: 1, errRows: 2},
+		5: {shown: 1, errRows: 2, footer: true},
+		6: {shown: 2, errRows: 2, footer: true},
+	} {
+		top, shown, footer := m.resumeDialogPlanAt(inner, budget)
+		if shown != want.shown || footer != want.footer || m.resumeErrRows(inner, budget) != want.errRows {
+			t.Fatalf("budget %d: shown %d footer %v error rows %d, want %+v", budget, shown, footer, m.resumeErrRows(inner, budget), want)
+		}
+		if m.resumeCursor < top || m.resumeCursor >= top+shown {
+			t.Fatalf("budget %d: the window [%d,%d) lost the cursor", budget, top, top+shown)
+		}
+		if body := m.resumeDialogBody(inner, budget); len(body) > budget {
+			t.Fatalf("budget %d: %d rows", budget, len(body))
+		}
+		if a, b, c := m.resumeDialogPlan(budget); a != top || b != shown || c != footer {
+			t.Fatalf("budget %d: the click path plans (%d,%d,%v), the body (%d,%d,%v)", budget, a, b, c, top, shown, footer)
+		}
+	}
+}
+
 // TestOnEngineSeesEveryInstalledEngine: the hook is handed each engine
 // setSession installs — New's, and the one a picker builds — after the owner
 // holds it, and never nil.

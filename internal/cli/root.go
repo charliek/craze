@@ -52,12 +52,7 @@ func NewRootCmd() *cobra.Command {
 				_, err := fmt.Fprintln(out, version.Version)
 				return err
 			}
-			if f, ok := out.(*os.File); ok {
-				st, err := f.Stat()
-				if err == nil && st.Mode()&os.ModeCharDevice == 0 {
-					return usagef("craze: refusing to start TUI on a non-tty")
-				}
-			} else if !stdoutIsTTY() {
+			if !stdoutIsTerminal(cmd) {
 				return usagef("craze: refusing to start TUI on a non-tty")
 			}
 			return runTUI(cmd, flags, processHostEnv())
@@ -75,6 +70,7 @@ func NewRootCmd() *cobra.Command {
 	cmd.AddCommand(newFrameCmd())
 	cmd.AddCommand(newImportCmd())
 	cmd.AddCommand(newBridgeCmd())
+	cmd.AddCommand(newAttachCmd())
 	return cmd
 }
 

@@ -781,3 +781,39 @@ func waitDone(t *testing.T, wg *sync.WaitGroup) {
 		t.Fatal("timed out waiting for the goroutines to finish")
 	}
 }
+
+// TestByCrazeIDIsTheNewestRowOfEachID (plan 027 C28): every row carrying a
+// craze id, by that id — any workspace, any provider, one this Store would not
+// offer included — the newest by UpdatedAt, a tie to the later line; a row
+// with no craze id is not listed. No home directory is no rows, and no error.
+func TestByCrazeIDIsTheNewestRowOfEachID(t *testing.T) {
+	path := setIndex(t)
+	row := func(sessionID, provider, cwd, title, crazeID, at string) string {
+		return `{"sessionId":"` + sessionID + `","provider":"` + provider + `","cwd":"` + cwd + `","title":"` + title +
+			`","pinned":false,"createdAt":"` + at + `","updatedAt":"` + at + `","crazeId":"` + crazeID + `"}`
+	}
+	body := strings.Join([]string{
+		row("s-1", "cursor", "/a", "older", "c-1", "2024-01-02T00:00:00Z"),
+		row("s-2", "grok", "/b", "newest", "c-1", "2024-01-03T00:00:00Z"),
+		row("s-3", "cursor", "/a", "an old tie", "c-2", "2024-01-01T00:00:00Z"),
+		row("s-4", "someday", "/c", "a later tie", "c-2", "2024-01-01T00:00:00Z"),
+		lineFor(t, "s-5", "cursor", "/a", "2024-01-04T00:00:00Z"),
+	}, "\n") + "\n"
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s := Store{KnownProvider: func(p string) bool { return p != "someday" }}
+	rows, err := s.ByCrazeID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 2 || rows["c-1"].Title != "newest" || rows["c-2"].Title != "a later tie" {
+		t.Fatalf("rows = %+v, want c-1 newest and c-2 the later tie", rows)
+	}
+
+	t.Setenv("HOME", "")
+	t.Setenv("CRAZE_HOME", "")
+	if rows, err := s.ByCrazeID(); rows != nil || err != nil {
+		t.Fatalf("no home directory: %+v, %v", rows, err)
+	}
+}

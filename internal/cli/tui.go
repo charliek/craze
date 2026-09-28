@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -207,6 +208,17 @@ func runTUI(cmd *cobra.Command, f *tuiFlags, env hostEnv) error {
 			lipgloss.ColorProfile() != termenv.Ascii,
 	}
 	if err := resolveLoad(cmd, f, indexCWD, &cfg, build, rh.claims); err != nil {
+		var held *rundir.HeldError
+		if !f.cont || !errors.As(err, &held) {
+			return err
+		}
+		// SQ16 (plan 027 §3.9, PR 4): the session is open in another craze,
+		// and this --continue joins it there instead. Nothing was built,
+		// bound or claimed for it, so the teardown has nothing of this run's
+		// to release, and runs before the attach takes the terminal.
+		rh.close()
+		err = attachHeld(cmd, f, runEnv, held, err)
+		diag.flush(os.Stderr, false)
 		return err
 	}
 	if cfg.Session == nil && cfg.Resume == nil && resolved.Locked {
@@ -224,7 +236,7 @@ func runTUI(cmd *cobra.Command, f *tuiFlags, env hostEnv) error {
 	// the hub's goroutines start only for a run that reaches tui.Run, whose
 	// exit tail closes the hub before diag is flushed.
 	attachHost(&cfg, hosts, diag.craze())
-	failed, err := tui.Run(cfg)
+	res, err := tui.Run(cfg)
 	// The teardown runs here, before the flush, and not only in the defer
 	// (which stays for the returns above, and is a no-op after this): the
 	// socket, the registry entry and the claims are released even when stderr
@@ -234,7 +246,7 @@ func runTUI(cmd *cobra.Command, f *tuiFlags, env hostEnv) error {
 	// err != nil is also folded into Run's own bool, but the craze lane
 	// prints either way and a p.Run error is what makes runTUI see err at
 	// all, so it stays explicit here too (§3.7.3).
-	diag.flush(os.Stderr, err != nil || failed)
+	diag.flush(os.Stderr, err != nil || res.AgentDiag)
 	return err
 }
 
@@ -293,11 +305,14 @@ func sessionOptions(f *tuiFlags, ws, mode string, stderr, diag io.Writer, env []
 // --continue claims its row before anything is built (plan 027 §3.9, SQ16):
 // the row is given its durable craze id under the index's lock, bounded, and
 // that id is claimed (sessionClaims.claimRow). A session another craze holds
-// is exit 1, `craze: that session is open in another craze (pid N)`; an index
-// held busy past the bound is exit 1 too, and so is a row with no craze id
-// that left the index since it was read (`craze: the session index changed —
-// try again`) — in every case build is never called, so no agent is spawned. --resume claims nothing here: its picker
-// claims the row it is given, through Config.ClaimSession.
+// is exit 1, `craze: that session is open in another craze (pid N)`, carrying
+// the *rundir.HeldError — which runTUI attaches through instead, when the
+// holder serves its session (SQ16, PR 4: attachHeld); an index held busy past
+// the bound is exit 1 too, and so is a row with no craze id that left the
+// index since it was read (`craze: the session index changed — try again`) —
+// in every case build is never called, so no agent is spawned. --resume claims
+// nothing here: its picker claims the row it is given, through
+// Config.ClaimSession.
 func resolveLoad(cmd *cobra.Command, f *tuiFlags, cwd string, cfg *tui.Config, build func(agent.Provider, sessions.Row) agent.Session, claims *sessionClaims) error {
 	if !f.cont && !f.resume {
 		return nil
@@ -355,7 +370,9 @@ func resolveLoad(cmd *cobra.Command, f *tuiFlags, cwd string, cfg *tui.Config, b
 	// have to hand back a session that must never start.
 	crazeID, _, err := claims.claimRow(row)
 	if err != nil {
-		return exitf(1, "craze: %s", refusal(err))
+		// The refusal carries claimRow's error: a session another craze holds
+		// is attached to instead (runTUI, SQ16).
+		return &exitError{code: 1, msg: "craze: " + refusal(err), cause: err}
 	}
 	cfg.Provider = p
 	cfg.ProviderLocked = true
@@ -515,6 +532,18 @@ func resolveTheme(cmd *cobra.Command, flag string) string {
 		return name
 	}
 	return tui.DefaultTheme
+}
+
+// stdoutIsTerminal is whether cmd's stdout is one a TUI can take: a file that
+// stats as no character device is not; one that cannot be statted is given the
+// benefit of the doubt; a stdout that is not a file (a test's buffer) is
+// judged by the process's own. The root command and craze attach both ask it.
+func stdoutIsTerminal(cmd *cobra.Command) bool {
+	if f, ok := cmd.OutOrStdout().(*os.File); ok {
+		st, err := f.Stat()
+		return err != nil || st.Mode()&os.ModeCharDevice != 0
+	}
+	return stdoutIsTTY()
 }
 
 func stdoutIsTTY() bool {

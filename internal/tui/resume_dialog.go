@@ -7,6 +7,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/charliek/craze/internal/agent"
 	"github.com/charliek/craze/internal/sessions"
@@ -267,16 +268,20 @@ func (m Model) handleResumeDialogKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 // resumeDialogPlan is providerDialogPlan for the resume list: the window onto
 // the rows and whether the footer survived, with the window following the
-// cursor so a short box never hides the row Enter would load.
-//
-// A refusal's error row goes under the list and above the footer, and a short
-// box keeps it over the footer but never over the last list row: it is about
-// the row the cursor is on. With no refusal the plan is exactly what it was.
+// cursor so a short box never hides the row Enter would load. It plans at the
+// box's own inner width (resumeDialogPlanAt).
 func (m Model) resumeDialogPlan(budget int) (top, shown int, footer bool) {
-	rows := budget - 1
-	if m.resumeErrShown(budget) {
-		rows--
-	}
+	return m.resumeDialogPlanAt(min(m.dialogMaxWidth(), m.width-dialogGutter)-dialogBorder, budget)
+}
+
+// resumeDialogPlanAt is the plan at inner width inner.
+//
+// A refusal's error rows go under the list and above the footer, and a short
+// box keeps them over the footer but never over the last list row: they are
+// about the row the cursor is on. With no refusal the plan is exactly what it
+// was, and so it is for a refusal that fits one row.
+func (m Model) resumeDialogPlanAt(inner, budget int) (top, shown int, footer bool) {
+	rows := budget - 1 - m.resumeErrRows(inner, budget)
 	footer = rows >= 2
 	if footer {
 		rows--
@@ -291,14 +296,36 @@ func (m Model) resumeErrShown(budget int) bool {
 	return m.resumeErr != "" && budget >= 3
 }
 
+// resumeErrLines is the refusal word-wrapped to the box's inner width: one
+// that says where the session can be reached instead (`craze attach --session
+// <id>`, plan 027 §3.9) is longer than one row of the box, and cut to one row
+// it would lose exactly that.
+func (m Model) resumeErrLines(inner int) []string {
+	text := sanitizeLine(m.resumeErr)
+	if inner <= 0 {
+		return []string{text}
+	}
+	return strings.Split(ansi.Hardwrap(ansi.Wordwrap(text, inner, ""), inner, true), "\n")
+}
+
+// resumeErrRows is how many rows the refusal takes at inner width within
+// budget: none when it is not shown (resumeErrShown), else as many as it wraps
+// to, less any the title and the one list row it never displaces need.
+func (m Model) resumeErrRows(inner, budget int) int {
+	if !m.resumeErrShown(budget) {
+		return 0
+	}
+	return min(len(m.resumeErrLines(inner)), budget-2)
+}
+
 func (m Model) resumeDialogBody(inner, budget int) []string {
-	top, shown, footer := m.resumeDialogPlan(budget)
+	top, shown, footer := m.resumeDialogPlanAt(inner, budget)
 	rows := []string{m.dialogTitle(resumeDialogTitle, inner)}
 	for i := top; i < top+shown; i++ {
 		rows = append(rows, m.dialogRow(m.resumeRowText(m.resume[i], inner), "", i == m.resumeCursor, true, inner))
 	}
-	if m.resumeErrShown(budget) {
-		rows = append(rows, styleFG(m.theme.Err).Render(clampWidth(sanitizeLine(m.resumeErr), inner)))
+	for _, line := range m.resumeErrLines(inner)[:m.resumeErrRows(inner, budget)] {
+		rows = append(rows, styleFG(m.theme.Err).Render(clampWidth(line, inner)))
 	}
 	if footer {
 		rows = append(rows, m.dialogFooter(resumeDialogHint, inner))

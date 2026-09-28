@@ -70,7 +70,20 @@ type Config struct {
 	// adds — a Ready, a Restore, an End — the model handles as the stream
 	// delivers it (restore.go). nil is the in-process path: every test
 	// Config, every golden and a plain craze.
-	Backend   backend.Backend
+	Backend backend.Backend
+	// Viewer says this TUI joins a session another craze hosts: `craze
+	// attach` (plan 027 §3.15). It is read only with a Backend, and turns off
+	// what belongs to the host alone (viewing): the provider and resume
+	// pickers and the session swaps they make (which a Backend never reaches
+	// anyway), provider persistence (PersistProvider), host status reporting
+	// (Host: the host TUI reports its own tab's), and index writes
+	// (SessionIndex, which only an engine this TUI built could write). The
+	// composer's shell mode runs locally, in the session's workspace as the
+	// backend's Info names it (shellDir). Nothing else changes: the keys are
+	// the host TUI's — the first Ctrl+C while a turn works acts on the shared
+	// session (owner, §3.19) — and every frame of the session is drawn as the
+	// host TUI over the same backend draws it.
+	Viewer    bool
 	Theme     string
 	Workspace string
 	Model     string
@@ -183,6 +196,25 @@ type Config struct {
 	// of the provider and runs inside Update, so it must not block. nil
 	// refuses nothing — every test Config and every picker golden.
 	RefuseLoad func(agent.Provider) error
+}
+
+// viewing is c as it runs: for a viewer (Config.Viewer with a Backend)
+// everything the host alone owns is cleared — the pickers' closures and rows,
+// the claim and engine hooks, provider persistence, the session index and the
+// host-status hub — so that no path of New or Run can reach it. Viewer without
+// a Backend means nothing and is cleared too; any other Config is returned as
+// it is. It is idempotent: Run applies it, and New again.
+func (c Config) viewing() Config {
+	if !c.Viewer || c.Backend == nil {
+		c.Viewer = false
+		return c
+	}
+	c.Session, c.NewSession, c.LoadSession, c.Resume = nil, nil, nil, nil
+	c.ClaimSession, c.RefuseLoad, c.OnEngine = nil, nil, nil
+	c.PersistProvider = false
+	c.SessionIndex = nil
+	c.Host = nil
+	return c
 }
 
 // SessionIndex is the write half of internal/sessions.Store, as the TUI needs
@@ -693,6 +725,11 @@ type Model struct {
 	// process no End ever comes.
 	ended  bool
 	endErr error
+	// viewer is Config.Viewer (with a Backend): this TUI joins a session
+	// another craze hosts. New has cleared what the host alone owns
+	// (Config.viewing); what is left for the model to decide is where the
+	// composer's shell runs (shellDir).
+	viewer bool
 	// infoPin is the facts the model reads in place of the backend's Info
 	// while a restore is being applied: the restore item's own (applyRestore),
 	// so every decision the restore makes reads the session it restores and
@@ -1189,6 +1226,7 @@ func (m *Model) nextCmds(n int) []engine.Command {
 }
 
 func New(cfg Config) Model {
+	cfg = cfg.viewing()
 	cwd := cfg.Workspace
 	if cwd == "" {
 		cwd, _ = os.Getwd()
@@ -1232,6 +1270,7 @@ func New(cfg Config) Model {
 		crazeID:         cfg.CrazeSessionID,
 		terminalTitle:   cfg.TerminalTitle,
 		host:            cfg.Host,
+		viewer:          cfg.Viewer,
 		sessProvider:    prov.Name(),
 		// Discard until Run says otherwise: a model built by a test, by
 		// `craze frame` or by any direct caller writes no OSC at all.
@@ -1299,10 +1338,24 @@ func New(cfg Config) Model {
 	return m
 }
 
-// Run returns whether the agent's own diagnostics should print after exit —
-// broader than just an agent exit, see finishRun — and the start failure, if
-// any (§3.7.3).
-func Run(cfg Config) (bool, error) {
+// Result is how a run ended, for the command line's last word (Run).
+type Result struct {
+	// AgentDiag says the agent's own diagnostics should print after exit:
+	// broader than just an agent exit, see finishRun (§3.7.3).
+	AgentDiag bool
+	// Ended says the backend's stream ended and that End is what quit the
+	// program: the session closed on its host, or the transport gave up
+	// (Config.Backend; in process no End ever comes). EndErr is why — nil for
+	// the session's own end. A view close ends nothing: it is this program
+	// quitting, and Ended stays false.
+	Ended  bool
+	EndErr error
+}
+
+// Run returns how the run ended (Result) and the start failure, if any
+// (§3.7.3), or p.Run's own error.
+func Run(cfg Config) (Result, error) {
+	cfg = cfg.viewing()
 	m := New(cfg)
 	// One writer for the whole session: bubbletea's frames and the OSC 52 copy
 	// are written from different goroutines, and a copy landing inside a frame
@@ -1372,14 +1425,19 @@ func Run(cfg Config) (bool, error) {
 	// p.Run's own error is folded in here too: a recovered panic or another
 	// run failure is reason enough to show the agent's stderr, whatever
 	// finishRun made of the session close (§3.7.3).
-	showAgentDiag = showAgentDiag || err != nil
+	res := Result{AgentDiag: showAgentDiag || err != nil}
+	if fm, ok := final.(Model); ok {
+		// The End that quit the program, and why, as the final model holds
+		// them (endMsg).
+		res.Ended, res.EndErr = fm.ended, fm.endErr
+	}
 	if err != nil {
-		return showAgentDiag, err
+		return res, err
 	}
 	// A quit is clean unless the session never started. Only startCmd's
 	// failure counts: an error mid-session leaves a usable craze, and quitting
 	// out of one is a normal exit.
-	return showAgentDiag, startErr
+	return res, startErr
 }
 
 // runErrAfterHangup is p.Run's error once a terminal hangup has ended the

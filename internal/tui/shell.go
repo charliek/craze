@@ -75,12 +75,27 @@ func (m Model) runShellDraft() (tea.Model, tea.Cmd) {
 	if script == "" {
 		return m, nil
 	}
-	gen, run := m.shell.start(script, m.cwd)
+	gen, run := m.shell.start(script, m.shellDir())
 	m.addShell(gen, script)
 	// The draft goes exactly as it does on a send: accepted, so it is gone.
 	m.input.SetValue("")
 	m.resetSlash()
 	return m, run
+}
+
+// shellDir is where the composer's shell runs: the session's workspace. In
+// process that is the workspace the TUI started its session in (m.cwd). A
+// viewer's session was started by its host, so it is the workspace the
+// backend's Info names — the registry entry's until the attach completes, then
+// the host's own (plan 027 §3.15) — and m.cwd only when Info names none. The
+// command runs here, in this terminal, whichever it is.
+func (m Model) shellDir() string {
+	if m.viewer && m.eng != nil {
+		if ws := m.info().Workspace; ws != "" {
+			return ws
+		}
+	}
+	return m.cwd
 }
 
 // killShell stops whatever the composer is running and returns at once. The row

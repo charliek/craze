@@ -411,6 +411,42 @@ func (s *Store) Recent(cwd, provider string, n int) ([]Row, error) {
 	return rows, nil
 }
 
+// ByCrazeID is every row that carries a durable craze session id, by that id:
+// what names a running session by its craze id reads its title from (craze
+// attach's listings, plan 027 §3.15). Every provider is read, known or not —
+// the row is only asked for its title — and every workspace. Two rows with one
+// id (one thread of work loaded into another agent session keeps its id,
+// SD-22) answer the newest, by UpdatedAt with ties to the later row in the
+// file, as Recent orders them. No home directory reads as no rows and no
+// error.
+func (s *Store) ByCrazeID() (map[string]Row, error) {
+	path := paths.SessionsPath()
+	if path == "" {
+		return nil, nil
+	}
+	records, err := readRecords(path)
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]Row)
+	pos := make(map[string]int)
+	for _, rec := range records {
+		id := rec.Row.CrazeID
+		if id == "" {
+			continue
+		}
+		if prev, ok := out[id]; ok {
+			newer := rec.Row.UpdatedAt.After(prev.UpdatedAt) ||
+				(rec.Row.UpdatedAt.Equal(prev.UpdatedAt) && rec.pos > pos[id])
+			if !newer {
+				continue
+			}
+		}
+		out[id], pos[id] = rec.Row, rec.pos
+	}
+	return out, nil
+}
+
 // readRecords decodes the index a line at a time. A blank line is skipped.
 // A missing file reads as zero rows, like config.go's readConfigAt. Any
 // other decode failure -- the line is not a JSON object, or lacks a

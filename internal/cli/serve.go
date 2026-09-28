@@ -525,18 +525,51 @@ func (c *sessionClaims) claimRow(row sessions.Row) (id string, release func(), e
 }
 
 // pickerClaim is tui.Config.ClaimSession: claimRow, run from the picker's
-// tea.Cmd, with each refusal worded for the picker's error row.
+// tea.Cmd, with each refusal worded for the picker's error row
+// (pickerRefusal).
 func (c *sessionClaims) pickerClaim(row sessions.Row) (string, func(), error) {
 	id, release, err := c.claimRow(row)
 	if err != nil {
-		return "", nil, errors.New(refusal(err))
+		return "", nil, errors.New(c.pickerRefusal(err))
 	}
 	return id, release, nil
 }
 
+// pickerRefusal is claimRow's refusal as the resume picker's error row says
+// it: refusal's words and, for a session another craze holds, where it can be
+// reached instead (plan 027 §3.9; X31 5: PR 4 adds the hint) — `— craze
+// attach --session <hostId>` when the holder serves it (holderEntry), `— it
+// serves no control socket` when the holder it names serves none, and nothing
+// more when its lock names no holder yet (pid ?). The picker itself still
+// builds nothing: turning a running picker's TUI into a client is not worth
+// its complexity (§3.9).
+//
+// The hint names the holder's host id, which --session resolves exactly as it
+// does a craze session id: twelve characters, so the whole command sits on one
+// row of the picker's box, where a craze id's thirty-six would be broken at
+// its hyphens across two.
+//
+// It reads the registry, so it runs where the claim does: in the picker's
+// tea.Cmd, never in Update.
+func (c *sessionClaims) pickerRefusal(err error) string {
+	msg := refusal(err)
+	var held *rundir.HeldError
+	if !errors.As(err, &held) {
+		return msg
+	}
+	if entry, ok := holderEntry(c.env, held); ok {
+		return msg + " — craze attach --session " + entry.HostID
+	}
+	if held.Holder.HostID != "" {
+		return msg + noControlSocket
+	}
+	return msg
+}
+
 // refusal is claimRow's refusal as the user reads it: the session's holder,
-// the busy index, or the index that changed under the load. PR 2 names no
-// `craze attach` — it does not exist until PR 4, which adds the hint.
+// the busy index, or the index that changed under the load. Where a held
+// session can be reached instead is its callers' to add: the picker's hint
+// (pickerRefusal), --continue's attach or its no-socket refusal (attachHeld).
 func refusal(err error) string {
 	var held *rundir.HeldError
 	switch {
