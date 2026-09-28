@@ -214,8 +214,10 @@ local run narrows the matrix only by running `go test` itself. A socket
 run's verdict also checks that no reset escaped it: a final `session.sync`
 barrier on the model's own connection, and the view close's `session.detach`
 answered, both read through the tap (`internal/tui/frame_socket_test.go:335-409`).
-No golden moved in PR 3 or PR 4. The execution amendments (X1–X55), C29a's
-and C29b's fix rounds, the review record, and the live smoke's findings and
+No golden file's bytes moved in PR 3 or PR 4 (`git diff --stat -- '*testdata*'`
+empty at every commit through `adac650`). The execution amendments
+(X1–X57), C29a through C29d's fix rounds, the review record, and the live
+smoke's findings and
 backlog are in `12` and `13`. **S3 (the shed lane) is next.**
 
 ### S3 — shed lane

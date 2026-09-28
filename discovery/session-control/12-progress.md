@@ -1964,7 +1964,7 @@ pins an exact common seq at a sync-token rendezvous;
 `TestAttachMidTurnOverTheSocketReproducesTheFirst`
 (`internal/engine/exactness_socket_test.go:184`) attaches over a real server
 at every cut of a 144-event recorded trace plus eight mid-turn cuts over the
-fake agent) with two fix rounds. **C29a** (`680d345`, astra r69): a
+fake agent) with four fix rounds. **C29a** (`680d345`, astra r69): a
 transport credit keyed by (test, frame digest) — none existed before this —
 plus a suite-level `TestMain` coverage check, `make test`/`test-race` and
 CI's `test` job pinning `CRAZE_GOLDEN_TRANSPORT=both`, and a socket run's
@@ -1994,9 +1994,49 @@ requiring the direct and matrix frames differ). Coverage is now counted per
 (`goldenCoverage`, `:355-403`), `-count=0` runs no check, and the one
 standing exemption — `native-tools-80x24` may go unasserted when `ripgrep`
 is missing, the same rule its own test skips by (`:386-388`) — still
-applies; C30 (`docs: S2 complete`, this commit).
+applies. **C29c** (`f9fdc40`, orchestrator starvation run at `0dbed9f`):
+under a 5% CPU quota the socket run's capture settle outlasted
+`grok-subagent-late`'s 400 ms child-finish timer and folded the finish
+first, so `TestFrameGoldenGrokSubagentLate80x24` could capture the child
+already gone; fixed with a new fake-agent mode, `grok-subagent-late-hold`,
+which ends the parent exactly as `grok-subagent-late` does but holds the
+child until the session closes (the golden's own bytes are unchanged — the
+frame shows the child running either way); every other user of
+`grok-subagent-late` keeps the old mode; the spinner-glyph race this golden
+still carries (X38) stays, unfrozen, since freezing it would move its glyph
+(the owner's call). **C29d** (`adac650`, orchestrator starvation run at
+`f9fdc40`): the same quota caught two more spinner races —
+`TestFrameGoldenPermissionNoForce100x30` (async in process vs `gateSync`)
+and `TestFrameGoldenNativeQuestion` (socket vs `gateSync`) captured the
+spinner a beat apart, since an unfrozen golden that shows the spinner races
+the 250 ms tick; fixed by freezing every golden whose frozen frame already
+draws `spinnerGlyphs[0]` (✳) — `ask-100x30`, `plan-100x30`,
+`permission-noforce-100x30`, `grok-ask-{100x30,80x24}` and
+`native-question-100x30` — which moves no byte, since that is the glyph
+each already holds; `grok-subagent-late-80x24` holds ✴ (frame 1) and stays
+unfrozen, freezing it would move its glyph (X38, the owner's). C30
+(`docs: S2 complete`, `d6daeaf`) through this commit.
 
-Proof: filled in at the PR tip.
+Proof: the gate passed at every commit, implementer and orchestrator, on
+the exported SHA. Pre-push `-cpu=1 -count=2` at `0dbed9f` on
+`internal/tui`, `internal/remote`, `internal/backend`, `internal/transcript`,
+`internal/cli` and `internal/engine`, and the mac-mini's own `-count=1` at
+`0dbed9f` — all ok. V1 `-race -count=20`: at `680d345`, `internal/backend`,
+`internal/engine` (835 s), `internal/agent` (1,220 s), `internal/transcript`
+(706 s), `internal/control` (832 s, plus its wire test), `internal/remote`
+(233 s), `internal/rundir`, `internal/protocol` and `internal/fakehost` —
+all ok, 0 DATA RACE, 1,230 s wall; at `0dbed9f`, `internal/tui`
+`-timeout 180m` — 4,833 s, ~242 s a pass — ok, 0 DATA RACE (the commits
+after `0dbed9f` are C29c, C29d and docs, test-only or docs). V2 at
+`2da9be2`: 102/103 SAME by bytes, `sigint-between-turns` byte-identical to
+PR 2's recorded race variant of the baseline's own → 103/103 SAME by
+content. V8 at `0dbed9f`, 20 seeds: 760 golden passes, 0 fail, 780
+jittered socket runs all matching the host's model. Starvation (5% CPU
+quota), every golden test, at `adac650`: 85/85 — two earlier runs at
+`0dbed9f` and `f9fdc40` found three fixture races, fixed in C29c and C29d,
+never retried. V4/V6/V9 live smoke at `2da9be2`
+(`smoke/RESULTS-pr4.md`): Linux cursor and grok, the mac-mini's grok and
+native, every leg PASS on all four, `check.py` PASS ×4. Reviews r61–r77.
 
 ### Deviations from the plan
 
@@ -2429,7 +2469,7 @@ reopens a pinned decision.
     both gate modes. `TestStopKeyStopsTheRunningChild` was rewritten, since it
     had encoded the synchronous call this commit removes.
 
-**PR 4's execution amendments X49–X55**, one paragraph each, mirrored here as
+**PR 4's execution amendments X49–X57**, one paragraph each, mirrored here as
 `12`'s own record; the full text and every failing schedule are in the plan
 (`~/.claude/plans/craze/027-session-control-s2-socket.md`, "Execution
 amendments — PR 4"). Review rounds: `reviews/dispositions-pr4.md`. None
@@ -2618,6 +2658,34 @@ reopens a pinned decision.
    must be asserted in all `N` iterations (`goldenCoverage`, `:355-403`).
    One minor: `-count=0` used to fail the coverage check though it runs
    nothing — fixed to run no check.
+8. **Plan 027 X56 (C29c `f9fdc40`)** — found by the orchestrator's own
+   starvation run (5% CPU quota) at `0dbed9f`: under that quota the socket
+   run's capture settle outlasted `grok-subagent-late`'s 400 ms wall-clock
+   child-finish timer, so `TestFrameGoldenGrokSubagentLate80x24`'s socket
+   run could capture the child already gone, where the in-process run still
+   caught it running. Fixed with a new fake-agent mode,
+   `grok-subagent-late-hold`: it ends the parent exactly as
+   `grok-subagent-late` does, but holds the child running until the session
+   closes, so the timer can never race the capture; the golden's own bytes
+   are unchanged, since the frame shows the child running either way. Every
+   other user of `grok-subagent-late` keeps the old, timed mode. The
+   spinner-glyph race this golden still carries (X38) is unchanged and
+   stays unfrozen: freezing it would move its glyph, which is the owner's
+   call, not this fix's.
+9. **Plan 027 X57 (C29d `adac650`)** — found by the orchestrator's next
+   starvation run at `f9fdc40`: the same 5% CPU quota caught two more
+   spinner races between frame-modes —
+   `TestFrameGoldenPermissionNoForce100x30` (async in process vs
+   `gateSync`) and `TestFrameGoldenNativeQuestion` (socket vs `gateSync`)
+   captured the 250 ms spinner tick a beat apart between their two runs,
+   since an unfrozen golden that shows the spinner races that tick. Fixed
+   by freezing every golden whose frame already draws `spinnerGlyphs[0]`
+   (✳) — `ask-100x30`, `plan-100x30`, `permission-noforce-100x30`,
+   `grok-ask-100x30`, `grok-ask-80x24` and `native-question-100x30` — which
+   moves no byte in any of them, since ✳ is what each already held; the
+   rest of the spinner goldens were frozen already. `grok-subagent-late-80x24`
+   holds ✴ (frame 1), not ✳, so freezing it would move its glyph; it stays
+   unfrozen (X38, the owner's).
 
 ### S2 — as shipped
 
@@ -2661,8 +2729,10 @@ detail in the plan's §7 acceptance table, A1–A25):
 - **SD-33's addition — the full TUI runs unchanged over the socket, goldens
   included** (A8, A9): every golden in `golden_manifest_test.go` runs under
   both transports, byte-identical, except the six picker frames (in process
-  only, since pickers exist only in the host TUI); no golden moved in PR 3 or
-  PR 4 (`git diff --stat -- '*testdata*'` empty at both tips). Coverage is
+  only, since pickers exist only in the host TUI); no golden file's bytes
+  moved in PR 3 or PR 4, C29c's and C29d's fixture and freezing fix rounds
+  included (`git diff --stat -- '*testdata*'` empty at every commit through
+  `adac650`). Coverage is
   enforced, not just recorded: `assertGolden` judges the frame it holds by
   the most recent production of those exact bytes in one global log, across
   the whole binary rather than scoped to the asserting test — a matrix
