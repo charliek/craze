@@ -81,18 +81,50 @@ type wireClient struct {
 	done       chan struct{}
 }
 
+// stepCtx bounds a single blocking step to budget, fresh off parent: a real
+// hang at that step still fails within budget regardless of how many steps a
+// loop around it has already run, and regardless of parent's own deadline
+// (which a whole loop must not share — that budget shrinks with every step
+// and times out steps that are each individually healthy).
+func stepCtx(parent context.Context, budget time.Duration) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(parent, budget)
+}
+
+// dialAttachBudget bounds dialWire's own dial and attach. This is not the
+// reset path: the test replaces the trace's one over-8-MiB event with a
+// short string before replay, and asserts exactly one restore at each
+// client's own cut — an omitted reset would fail that assertion. The
+// trace's remaining large payload is an edit tool report carrying eight
+// 64 KiB old/new diff pairs (exactness_test.go's fixture, published right
+// after the 80-chunk text run); the cut right after it can overlap that
+// event's fan-out to the clients already attached with the new attach's
+// own snapshot sizing and encoding — real wire and product costs, under
+// -race. Measured: ~10-18s for that one cut's dial+attach uncontended, and
+// ~57s under a quarter-core cgroup quota (`systemd-run --user --scope -p
+// CPUQuota=25%`) — far past a plain watchdog, though nothing is hung:
+// every other cut's dial+attach is sub-second. dialAttachBudget gives that
+// one cut room while still catching a real hang.
+const dialAttachBudget = 12 * watchdog
+
 // dialWire attaches a new client to the host at path — a snapshot attach,
-// once the session is ready — and starts its fold.
+// once the session is ready — and starts its fold. Each of the dial and the
+// attach gets its own fresh, dialAttachBudget-bounded step off ctx, not a
+// share of whatever budget ctx has left: dialWire is called once per cut of
+// a loop that can run well past a single watchdog window under load.
 func dialWire(t *testing.T, ctx context.Context, path string) *wireClient {
 	t.Helper()
-	s, err := remote.DialSession(ctx, path, remote.SessionOptions{
+	dialCtx, cancel := stepCtx(ctx, dialAttachBudget)
+	defer cancel()
+	s, err := remote.DialSession(dialCtx, path, remote.SessionOptions{
 		Client: remote.Options{Client: protocol.ClientInfo{Kind: "test", Name: "exactness"}, StreamBytes: 1 << 30},
 		Budget: &protocol.AttachBudget{MaxItems: wireBudget.MaxItems, MaxBytes: wireBudget.MaxBytes, SnapshotBytes: protocol.SnapshotBytesMax},
 	})
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
-	if err := s.Attach(ctx); err != nil {
+	attachCtx, cancel2 := stepCtx(ctx, dialAttachBudget)
+	defer cancel2()
+	if err := s.Attach(attachCtx); err != nil {
 		_ = s.Close()
 		t.Fatalf("attach: %v", err)
 	}
@@ -190,8 +222,16 @@ func TestAttachMidTurnOverTheSocketReproducesTheFirst(t *testing.T) {
 		}
 		trace[oversized-1].Text = "an oversized reply, cut to fit a record on the wire"
 
-		ctx, cancel := context.WithTimeout(context.Background(), 4*watchdog)
-		defer cancel()
+		// ctx carries no deadline of its own: the loop below is 145 cuts
+		// deep, each holding one more attached client folding the rest of
+		// the trace live, and under -race that whole loop can run well past
+		// a single watchdog window (measured: ~24s at full CPU under
+		// -race, ~47s at CPUQuota=50%). A single ctx sized for the whole
+		// loop times out later cuts even when each step is individually
+		// healthy. Every blocking step below instead gets its own
+		// watchdog-bounded stepCtx, fresh off ctx, so a real hang at any
+		// one step still fails within watchdog.
+		ctx := context.Background()
 		stub := tui.NewStubNoPrimary()
 		stub.Clock = traceClock()
 		e, err := engine.New(stub, engine.Options{})
@@ -199,7 +239,10 @@ func TestAttachMidTurnOverTheSocketReproducesTheFirst(t *testing.T) {
 			t.Fatal(err)
 		}
 		t.Cleanup(func() { _ = e.Close() })
-		if err := e.Start(ctx); err != nil {
+		startCtx, startCancel := stepCtx(ctx, watchdog)
+		err = e.Start(startCtx)
+		startCancel()
+		if err != nil {
 			t.Fatal(err)
 		}
 		path := serveWire(t, e)
@@ -210,13 +253,19 @@ func TestAttachMidTurnOverTheSocketReproducesTheFirst(t *testing.T) {
 			if k > 0 {
 				ev := trace[k-1]
 				ev.Seq = 0
-				if !stub.EventLog().Publish(ctx, nil, ev) {
+				pubCtx, pubCancel := stepCtx(ctx, watchdog)
+				ok := stub.EventLog().Publish(pubCtx, nil, ev)
+				pubCancel()
+				if !ok {
 					t.Fatalf("cut %d: the host did not publish the trace's event", k)
 				}
 			}
 			// The host holds exactly the trace's first k events: nothing
 			// of its own is published between them.
-			if head, err := e.SyncSeq(ctx); err != nil || head != uint64(k) {
+			syncCtx, syncCancel := stepCtx(ctx, watchdog)
+			head, err := e.SyncSeq(syncCtx)
+			syncCancel()
+			if err != nil || head != uint64(k) {
 				t.Fatalf("cut %d: the host's head is %d (%v)", k, head, err)
 			}
 			clients = append(clients, dialWire(t, ctx, path))
@@ -226,7 +275,9 @@ func TestAttachMidTurnOverTheSocketReproducesTheFirst(t *testing.T) {
 		for _, ev := range trace {
 			full.Fold(ev)
 		}
-		a, err := e.Attach(ctx, engine.AttachOptions{SnapshotBytes: 1 << 30})
+		attachCtx, attachCancel := stepCtx(ctx, watchdog)
+		a, err := e.Attach(attachCtx, engine.AttachOptions{SnapshotBytes: 1 << 30})
+		attachCancel()
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -263,9 +314,17 @@ func TestAttachMidTurnOverTheSocketReproducesTheFirst(t *testing.T) {
 
 	t.Run("eight cuts over the fake agent", func(t *testing.T) {
 		t.Setenv("HOME", t.TempDir())
-		ctx, cancel := context.WithTimeout(context.Background(), 4*watchdog)
-		defer cancel()
-		release := fakeAgentGate(t, ctx)
+		// Same shape as the trace loop above, checked: eight cuts sharing
+		// one ctx is milder (no O(n^2) fold matrix), but a whole-loop
+		// deadline still squeezes later cuts. ctx itself carries no
+		// deadline; gateCtx keeps fakeAgentGate's own watchdog-scale bound
+		// (its release() closure is created once and reused across all
+		// eight cuts, unlike the other steps below), and every other
+		// blocking step gets its own fresh stepCtx.
+		ctx := context.Background()
+		gateCtx, gateCancel := context.WithTimeout(ctx, 4*watchdog)
+		defer gateCancel()
+		release := fakeAgentGate(t, gateCtx)
 		sess := agent.New(agent.Options{
 			Binary: fakeAgentBin(t), ExtraArgs: []string{"-script=tasks"},
 			Workspace: t.TempDir(), Stderr: io.Discard,
@@ -276,7 +335,10 @@ func TestAttachMidTurnOverTheSocketReproducesTheFirst(t *testing.T) {
 		}
 		t.Cleanup(func() { _ = e.Close() })
 		first := readPrimary(t, e, true)
-		if err := e.Start(ctx); err != nil {
+		startCtx, startCancel := stepCtx(ctx, watchdog)
+		err = e.Start(startCtx)
+		startCancel()
+		if err != nil {
 			t.Fatal(err)
 		}
 		path := serveWire(t, e)
@@ -295,7 +357,9 @@ func TestAttachMidTurnOverTheSocketReproducesTheFirst(t *testing.T) {
 			release()
 			ended := first.waitFor(t, at, endedTurn(res.Turn))
 			from = ended + 1
-			n := cutoff(t, ctx, e)
+			cutoffCtx, cutoffCancel := stepCtx(ctx, watchdog)
+			n := cutoff(t, cutoffCtx, e)
+			cutoffCancel()
 			first.waitSeq(t, n)
 			second.foldThrough(t, n)
 
