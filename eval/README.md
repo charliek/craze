@@ -164,8 +164,9 @@ harness (in bwrap, its own netns) ──> 127.0.0.1:<port> ──relay──> pr
 - **Ledger:** `ledger.jsonl` in the plan folder (`--ledger` to move it) is append-only,
   fsync'd, reloaded at start, and guarded by an exclusive `fcntl` lock. Two processes never
   both think they have headroom.
-- **Reservation:** before forwarding, the proxy reserves `bytes/3` input tokens at the
-  uncached price plus the **largest** of `max_tokens`, `max_completion_tokens` and
+- **Reservation:** before forwarding, the proxy reserves the request's **byte count** as
+  input tokens (an upper bound: a byte-level tokenizer emits at most one token per byte) at
+  the uncached price plus the **largest** of `max_tokens`, `max_completion_tokens` and
   `max_output_tokens` at the output price. A request that names no limit is reserved at
   the **model's maximum output** -- the largest of every limit that applies: the owner's
   craze `max_output_tokens`, gx `max_completion_tokens` and the snapshot's models.dev
@@ -184,7 +185,10 @@ harness (in bwrap, its own netns) ──> 127.0.0.1:<port> ──relay──> pr
 - **Run ids:** the ledger's `run_id` is `<batch dir>:<harness>/<model>/<task>/rep<N>:a<attempt>`,
   unique per batch, so the per-run cap never mixes two batches that share a label.
 - **Stops:** admission refuses at **$95** committed plus reserved (`--budget-cap`), and
-  per run at **$3** (`--run-cap`, recorded as `budget-capped`).
+  per run at **$3** settled (`--run-cap`, recorded as `budget-capped`). A run may also
+  hold at most 4 open (unsettled) reservations at once; a fifth concurrent request is
+  refused, also as `budget-capped` -- this bounds a run's exposure before its first
+  settlement, while still admitting one worst-case reservation up front.
 - **Estimates:** `crazeeval run` refuses a batch whose estimate would pass the cap. The
   estimate is the median cost per run of each model so far, else `prices.toml`'s
   `prior_run_cost`.
@@ -219,7 +223,7 @@ The generated homes, per harness:
 | harness | home | notes |
 |---|---|---|
 | craze | `CRAZE_HOME` with `native/models.toml` and `native/providers.toml` (0600) | `[subagents] model` is the target; `default_effort` is the pinned effort |
-| gx | `GROK_HOME/config.toml` | Web search and fetch are off. Image and video tools are off (they would call api.x.ai). The title and image-description models are pinned to the target, since they default to grok-4.6. `turn_summary` and `title_refresh` are off: they replay the conversation and never reach the answer. Build tasks run `--always-approve`; plan tasks run `--permission-mode plan` alone (the two contradict, plan X8). Checked in C2 on T-P2 with glm-5.3-flash: gx starts in permission mode `plan`, calls `enter_plan_mode`, writes its `plan.md` in the session directory, calls `exit_plan_mode` and ends the turn with `end_turn`, workspace untouched -- so gx plans headless and no plan task runs prompt-only. `plan_mode` in `result.json` records what was asked. |
+| gx | `GROK_HOME/config.toml` | Web search and fetch are off. Image and video tools are off (they would call api.x.ai). The title and image-description models are pinned to the target, since they default to grok-4.6. `turn_summary` and `title_refresh` are off: they replay the conversation and never reach the answer. Every task -- build and plan -- runs `--always-approve` (plan X12): gx's headless plan mode cannot approve a sub-agent spawn (no `--allow` rule matches `spawn_subagent`, and `--always-approve` overrides `--permission-mode plan`, plan X8), so a delegating gx plan task was cancelled under plan mode alone (base-meta-spark T-P1). Plan tasks therefore run prompt-only: the task prompt asks for a plan and no changes, gx answers without entering plan mode, and the no-writes check still applies. `plan_mode` in `result.json` records `"prompt-only"` for these tasks; see `runners/gx.py`. |
 | opencode | `OPENCODE_CONFIG` plus XDG dirs under the home | Uses opencode's own `meta` (Responses), `zai-coding-plan` and `fireworks-ai` providers, with only `baseURL`/`apiKey` overridden. `model` and `small_model` are the target. `webfetch`/`websearch` are denied, which removes them from the offered tools. Model fetch, autoupdate and share are off. |
 | codex | `CODEX_HOME/config.toml` | A `wire_api = "responses"` provider with `env_key = "CRAZE_EVAL_DUMMY"`. `web_search = "disabled"`, analytics off, plugins off (exec would fetch them from GitHub). Runs with `--dangerously-bypass-approvals-and-sandbox`, since bwrap is the sandbox. See *codex model metadata* below. |
 

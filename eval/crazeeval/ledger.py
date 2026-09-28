@@ -36,6 +36,9 @@ from crazeeval.pricing import Usage
 
 DEFAULT_CAP = 95.0
 DEFAULT_RUN_CAP = 3.0
+# A run's bound on concurrent exposure, independent of the per-run cap above: at most this
+# many of its reservations may be open (unsettled) at once.
+MAX_OPEN_RESERVATIONS_PER_RUN = 4
 
 BUDGET_STOP = "budget-stop"
 BUDGET_CAPPED = "budget-capped"
@@ -157,9 +160,11 @@ class Ledger:
                 return e[part][name]
         return None
 
-    def _totals(self, run_id: str) -> tuple[float, float, float]:
-        """Charges so far: everyone's, ``run_id``'s, and ``run_id``'s settled (actually spent) part."""
+    def _totals(self, run_id: str) -> tuple[float, float, float, int]:
+        """Charges so far: everyone's, ``run_id``'s, ``run_id``'s settled (actually spent)
+        part, and ``run_id``'s count of open (unsettled) reservations."""
         total = run_total = run_settled = 0.0
+        run_open = 0
         for e in self._entries.values():
             c = self._charge(e)
             total += c
@@ -167,7 +172,9 @@ class Ledger:
                 run_total += c
                 if e["settle"] is not None:
                     run_settled += c
-        return total, run_total, run_settled
+                else:
+                    run_open += 1
+        return total, run_total, run_settled, run_open
 
     def totals(self) -> dict:
         with self._locked():
@@ -221,14 +228,20 @@ class Ledger:
         """Reserve ``amount`` under the lock, or refuse (budget-stop / budget-capped)."""
         with self._locked():
             self._sync()
-            total, run_total, run_settled = self._totals(run_id)
+            total, run_total, run_settled, run_open = self._totals(run_id)
             if total + amount > self.cap:
                 return Admission(False, BUDGET_STOP, None, total, run_total)
             # The per-run cap is a runaway guard on what a run has actually spent. It is not checked against this
             # request's reservation: a request with no output limit reserves the model's whole output ceiling
             # (about $6 on kimi-k3), which would cap a run that has spent almost nothing. The global cap above still
-            # counts every reservation, so the budget itself stays a hard bound.
+            # counts every reservation, at an upper bound on its actual cost under the providers' documented
+            # billing (input tokens <= request bytes, output tokens <= the reserved limit) -- not an estimate --
+            # so the global cap stays a hard bound on settled spend. A run's concurrent exposure while it has
+            # settled little is instead bounded by MAX_OPEN_RESERVATIONS_PER_RUN below: a single worst-case
+            # reservation is still admitted, but a run cannot stack many of them before any of them settle.
             if run_settled >= self.run_cap:
+                return Admission(False, BUDGET_CAPPED, None, total, run_total)
+            if run_open >= MAX_OPEN_RESERVATIONS_PER_RUN:
                 return Admission(False, BUDGET_CAPPED, None, total, run_total)
             res = Reservation(
                 id=uuid.uuid4().hex,

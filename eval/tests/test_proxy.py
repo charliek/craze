@@ -503,7 +503,7 @@ def test_missing_usage_keeps_the_reservation(tmp_path):
             await proxy.end_run(route)
             t = led.totals()
             body_len = len(json.dumps(chat("muse-spark-1.3", stream=False, no_usage=True, max_tokens=2000)))
-            expected = (body_len / 3 * 1.25 + 2000 * 4.25) / 1e6
+            expected = (body_len * 1.25 + 2000 * 4.25) / 1e6
             assert t["committed"] == pytest.approx(expected, abs=1e-6)
 
     run(go())

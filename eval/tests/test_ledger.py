@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import multiprocessing
+import os
 import threading
 
 import pytest
@@ -57,8 +58,11 @@ def test_concurrent_admission_never_passes_the_cap(tmp_path):
     admitted = []
 
     def worker():
-        for _ in range(20):
-            a = led.admit(run_id="r", harness="h", model="m", provider="p", amount=0.0625)
+        # A distinct run_id per request: this test is about the global cap's concurrency
+        # safety, not the per-run open-reservations cap, which a shared run_id would trip.
+        for i in range(20):
+            rid = f"r-{threading.get_ident()}-{i}"
+            a = led.admit(run_id=rid, harness="h", model="m", provider="p", amount=0.0625)
             if a.ok:
                 admitted.append(a.reservation.amount)
 
@@ -75,8 +79,10 @@ def test_concurrent_admission_never_passes_the_cap(tmp_path):
 def _proc_admit(path, n, amount, q):
     led = Ledger(path, cap=95.0, run_cap=1e9)
     ok = 0
-    for _ in range(n):
-        if led.admit(run_id="x", harness="h", model="m", provider="p", amount=amount).ok:
+    # A distinct run_id per request, for the same reason as the threaded test above.
+    for i in range(n):
+        rid = f"x-{os.getpid()}-{i}"
+        if led.admit(run_id=rid, harness="h", model="m", provider="p", amount=amount).ok:
             ok += 1
     led.close()
     q.put(ok)
@@ -102,14 +108,31 @@ def test_file_lock_keeps_two_processes_under_the_cap(tmp_path):
 def test_per_run_cap(tmp_path):
     led = Ledger(tmp_path / "l.jsonl", cap=95.0, run_cap=3.0)
     # The cap counts what the run has actually spent: open reservations, however large, do not cap it
-    # (a no-limit request reserves the model's whole output ceiling).
+    # (a no-limit request reserves the model's whole output ceiling). Two overlapping reservations are
+    # fine -- the open-reservations bound below only refuses at five.
     first = led.admit(run_id="a", harness="h", model="m", provider="p", amount=5.9)
     assert first.ok
     assert led.admit(run_id="a", harness="h", model="m", provider="p", amount=5.9).ok
     led.settle(first.reservation, Usage(input=10, output=1), 3.1, 3.1)  # this run has now spent $3.10
     a = led.admit(run_id="a", harness="h", model="m", provider="p", amount=0.6)
-    assert not a.ok and a.reason == BUDGET_CAPPED
+    assert not a.ok and a.reason == BUDGET_CAPPED  # settled spend >= the cap
     assert led.admit(run_id="b", harness="h", model="m", provider="p", amount=0.6).ok  # another run is fine
+    led.close()
+
+
+def test_open_reservations_cap_bounds_concurrent_exposure(tmp_path):
+    led = Ledger(tmp_path / "l.jsonl", cap=95.0, run_cap=1e9)
+    # A single worst-case reservation is still admitted while the run has spent nothing
+    # (craze on kimi-k3 reserves ~$6 for a request with no output limit).
+    assert led.admit(run_id="a", harness="h", model="m", provider="p", amount=6.0).ok
+    # Two overlapping reservations are fine.
+    assert led.admit(run_id="a", harness="h", model="m", provider="p", amount=6.0).ok
+    assert led.admit(run_id="a", harness="h", model="m", provider="p", amount=6.0).ok
+    assert led.admit(run_id="a", harness="h", model="m", provider="p", amount=6.0).ok
+    # A fifth concurrent (still-open) reservation is refused as budget-capped.
+    fifth = led.admit(run_id="a", harness="h", model="m", provider="p", amount=6.0)
+    assert not fifth.ok and fifth.reason == BUDGET_CAPPED
+    assert led.admit(run_id="b", harness="h", model="m", provider="p", amount=6.0).ok  # another run is fine
     led.close()
 
 
@@ -155,13 +178,25 @@ def test_cost_math_with_cached_tokens():
 
 def test_reservation_formula():
     p = load_prices()["muse-spark-1.3"]
-    assert reservation(p, 3000, 1000) == pytest.approx((1000 * 1.25 + 1000 * 4.25) / 1e6)
+    # Input tokens are reserved as the request's raw byte count -- an upper bound, since a
+    # byte-level tokenizer emits at most one token per byte -- not an estimate.
+    assert reservation(p, 3000, 1000) == pytest.approx((3000 * 1.25 + 1000 * 4.25) / 1e6)
     # No limit in the request: the model's maximum (review r2-c1 item 10).
     assert request_max_tokens({}) == MODEL_MAX_OUTPUT_DEFAULT == 131_072
     assert request_max_tokens({}, 65_536) == 65_536
     assert request_max_tokens({"max_tokens": 10, "max_output_tokens": 500}, 65_536) == 500
     assert request_max_tokens({"max_completion_tokens": 77}) == 77
     assert request_max_tokens({"max_output_tokens": 99}) == 99
+
+
+def test_reservation_never_exceeds_by_worst_case_settlement():
+    """For a request with a limit, a settlement at the maximum possible usage (every byte a
+    token, output at the limit) never exceeds the reservation computed for it."""
+    p = load_prices()["muse-spark-1.3"]
+    body_bytes, max_tokens = 4096, 2048
+    res = reservation(p, body_bytes, max_tokens)
+    worst_case = Usage(input=body_bytes, output=max_tokens)  # one token per byte, output at the limit
+    assert cost(p, worst_case) == pytest.approx(res)
 
 
 def test_usage_normalisation():

@@ -140,7 +140,7 @@ def test_no_output_limit_reserves_the_model_maximum_and_forwards_unchanged(tmp_p
             await proxy.end_run(route)
             assert up.seen[-1]["body"] == raw  # untouched: no limit added
             reserve = [json.loads(x) for x in (tmp_path / "ledger.jsonl").read_text().splitlines() if '"reserve"' in x][0]
-            assert reserve["reservation"] == pytest.approx((len(raw) / 3 * 1.25 + 50_000 * 4.25) / 1e6)
+            assert reserve["reservation"] == pytest.approx((len(raw) * 1.25 + 50_000 * 4.25) / 1e6)
 
     run(go())
 

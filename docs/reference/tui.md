@@ -157,8 +157,11 @@ place too; see [Compaction](#compaction).
 
 #### What the model is told
 
-Native's system prompt is craze's own text, not adapted from another agent's.
-After it come the resolved project and user instruction files, and the
+Native's system prompt is craze's own text: no sentence is reproduced whole
+from another agent's, though a few sentences are adapted from wording in the
+credited reference prompts (grok-build, opencode, and codex; see the
+`opencode` tool profile's NOTICE for the full list). After it come the
+resolved project and user instruction files, and the
 skills-and-commands catalog — the same one the [slash menu](#slash-commands)
 is built from. The prompt's last section is a session-start snapshot: today's
 local date, and — only when the workspace sits inside a git work tree — the

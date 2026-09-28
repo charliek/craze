@@ -10,7 +10,6 @@ from typing import Any, Mapping
 from crazeeval import paths
 
 PER_M = 1_000_000
-BYTES_PER_TOKEN = 3  # "input tokens ~ request bytes / 3" (§3.1.7)
 
 
 @dataclass(frozen=True)
@@ -151,12 +150,15 @@ def multi_completion(body: Mapping) -> str | None:
 
 
 def _estimate(body_bytes: int, max_tokens: int, input_rate: float, output_rate: float) -> float:
-    return (body_bytes / BYTES_PER_TOKEN * input_rate + max_tokens * output_rate) / PER_M
+    # body_bytes is a true upper bound on input tokens: a byte-level tokenizer emits at
+    # most one token per byte, so no tokenizer can produce more tokens than this.
+    return (body_bytes * input_rate + max_tokens * output_rate) / PER_M
 
 
 def reservation(price: Price, body_bytes: int, max_tokens: int) -> float:
-    """The conservative pre-forward estimate (§3.1.7): bytes/3 at the uncached
-    ledger price plus max_tokens (or 16k) at the output price."""
+    """The pre-forward upper bound (§3.1.7): the request's byte count -- an upper bound on
+    input tokens -- at the uncached ledger price, plus max_tokens (or the model's maximum)
+    at the output price."""
     return _estimate(body_bytes, max_tokens, price.input, price.output)
 
 
