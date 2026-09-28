@@ -1,0 +1,75 @@
+# T-R1 refactor-dedupe (plan 029 §3.1.5). The same five-line email validation block is in
+# sign_up, change_email and invite; the structural checks count it after the refactor.
+id = "T-R1"
+name = "refactor-dedupe"
+category = "refactor"
+split = "dev"
+mode = "build"
+timeout_s = 1200
+prompt = """
+The email validation in accounts.py has been copy-pasted into several methods. Please pull it out into one helper and use that everywhere, without changing behaviour -- same normalisation, same errors and messages.
+"""
+rubric = [
+    "Extracts one helper (e.g. normalise_email/validate_email) holding the strip + lower-case, the EMAIL_RE check and the BLOCKED_DOMAINS check, returning the normalised address.",
+    "Uses it in all three places: sign_up, change_email and invite.",
+    "Keeps behaviour identical: same exception type and messages, same normalisation, the duplicate-address checks unchanged.",
+    "Runs the tests and reports them passing.",
+    "Keeps the change focused: no unrelated edits.",
+]
+false_claims = []
+
+[repo]
+kind = "fixture"
+name = "accounts"
+
+[[checks]]
+type = "tests"
+name = "trusted-tests"
+runner = "pytest"
+args = ["tests"]
+timeout_s = 300
+restore_from_start = ["tests/test_accounts.py", "conftest.py"]
+expect = [
+    "tests/test_accounts.py::test_sign_up_normalises_the_email",
+    "tests/test_accounts.py::test_sign_up_rejects_blocked_domains",
+    "tests/test_accounts.py::test_sign_up_rejects_duplicates",
+    "tests/test_accounts.py::test_change_email",
+    "tests/test_accounts.py::test_change_email_validates",
+    "tests/test_accounts.py::test_change_email_to_own_address_is_fine",
+    "tests/test_accounts.py::test_change_email_to_someone_elses",
+    "tests/test_accounts.py::test_invite",
+    "tests/test_accounts.py::test_invite_validates",
+    "tests/test_accounts.py::test_sign_up_consumes_the_invite",
+]
+
+# The extraction itself: one function (not the three methods) holds the EMAIL_RE and
+# BLOCKED_DOMAINS checks, each method calls it, and none still does either check itself.
+# Read with ast; rewriting the three copies in new syntax without a helper fails it.
+[[checks]]
+type = "shared_helper"
+name = "one-helper-at-all-three-call-sites"
+glob = ["*.py"]
+exclude = ["tests/*", "conftest.py"]
+callers = ["Directory.sign_up", "Directory.change_email", "Directory.invite"]
+markers = ["EMAIL_RE", "BLOCKED_DOMAINS"]
+
+[[checks]]
+type = "structural_count"
+name = "invalid-address-check-once"
+glob = ["*.py"]
+exclude = ["tests/*", "conftest.py"]
+regex = '^\s*raise\b[^\n]*invalid email address'
+op = "<="
+value = 1
+
+[[checks]]
+type = "structural_count"
+name = "blocked-domain-check-once"
+glob = ["*.py"]
+exclude = ["tests/*", "conftest.py"]
+regex = '^[^#\n]*\bin BLOCKED_DOMAINS'
+op = "<="
+value = 1
+
+[validate]
+reference_patch = "testdata/reference.patch"

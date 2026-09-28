@@ -1,0 +1,73 @@
+# T-V1 verify-edge-case (plan 029 §3.1.5). parse_batch("") raises ValueError from
+# `header, *rows = text.splitlines()` although its docstring and its header-only test
+# suggest an empty export yields []. The answer's no must be correct and the capture must
+# show a code-running call.
+id = "T-V1"
+name = "verify-edge-case"
+category = "verify"
+split = "heldout"
+mode = "build"
+timeout_s = 1200
+prompt = """
+Does `parse_batch` in batch.py handle an empty export -- an empty string -- gracefully? The nightly job sometimes gets an empty file. I need a definite yes or no, and please verify it by actually running it rather than just reading the code. Don't change anything.
+"""
+rubric = [
+    "Answers no: parse_batch(\"\") raises ValueError: not enough values to unpack (expected at least 1, got 0).",
+    "Names the cause: `header, *rows = text.splitlines()` -- \"\".splitlines() is [] -- which fails before the header check; it is a plain ValueError, not the module's ExportError.",
+    "Verified by running it (shows the command and its output), not only by reading.",
+    "Distinguishes the related inputs: a header-only export returns [], and \"\\n\" raises ExportError (unexpected header ''); notes the docstring's claim is wrong for an empty string.",
+    "Changes no files.",
+]
+false_claims = [
+    "Yes, it returns an empty list (the `if` on rows or the docstring suggests so, but the unpacking fails first).",
+]
+
+[repo]
+kind = "fixture"
+name = "batchexport"
+
+[[checks]]
+type = "facts"
+name = "facts"
+min = 2
+
+[[checks.items]]
+id = "raises-valueerror"
+regex = '\bValueError\b'
+cite = "batch.py: header, *rows = text.splitlines()"
+
+[[checks.items]]
+id = "the-cause"
+regex = 'unpack|header,\s*\*rows|splitlines'
+cite = "batch.py: header, *rows = text.splitlines()"
+
+[[checks]]
+type = "executed_code"
+name = "ran-parse-batch-on-empty-input"
+# A shell call running Python whose result came back to the model, and which exercised
+# parse_batch on the empty input: the call itself, its output (the unpacking error), or a
+# script it ran that an earlier call wrote.
+patterns = ['\bpython[0-9.]*\b', '\bpytest\b', '\buv run\b']
+require_result = true
+evidence = [
+    'parse_batch\(\s*(""|\x27\x27|str\(\))\s*\)',
+    'not enough values to unpack',
+]
+
+[[checks]]
+type = "no_writes"
+name = "no-writes"
+
+[validate]
+reference_answer = "testdata/reference_answer.md"
+decoy_answer = "testdata/decoy_answer.md"
+synthetic_command = "python3 -c 'import batch; print(batch.parse_batch(\"\"))'"
+synthetic_result = """Traceback (most recent call last):
+  File "<string>", line 1, in <module>
+  File "/sandbox/work/batchexport/batch.py", line 32, in parse_batch
+    header, *rows = text.splitlines()
+ValueError: not enough values to unpack (expected at least 1, got 0)
+"""
+irrelevant_command = "python3 --version"
+irrelevant_result = "Python 3.12.3"
+planted_edit = { path = "batch.py", append = "\n# planted edit\n" }

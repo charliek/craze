@@ -1,0 +1,69 @@
+# T-E3 answer-native-cost (plan 029 §3.1.5). Facts written from craze at 3eabb31; each
+# rubric item cites file:line.
+id = "T-E3"
+name = "answer-native-cost"
+category = "answer"
+split = "heldout"
+mode = "build"
+timeout_s = 1200
+prompt = """
+How does craze work out the dollar figure in the status row for a native session? Does it include what sub-agents spend, and what compaction costs? And what does it show for a model that has no price configured? Please don't change anything.
+"""
+rubric = [
+    "Cost is computed locally from token usage times configured rates, never from a provider's billing or a cost field in the response: [models.\"<alias>\".cost] in models.toml with input, output, cache_read and cache_write in dollars per 1M tokens (internal/harness/modeltable/modeltable.go:162-181), looked up by provider and wire model via Table.Price (modeltable.go:1035-1039), converted to integer picodollars per token (modeltable.go:1117-1151).",
+    "Session.spend (internal/harness/spend.go:98-126) walks the transcript path root to leaf and prices each usage record by its own model: CostPicoUSD += Input*r.Input + Output*r.Output + CacheRead*r.CacheRead + CacheCreation*r.CacheWrite (spend.go:197); reasoning is inside output and not priced twice.",
+    "Assistant message entries and compaction entries carry usage (entryUsage, spend.go:134-148); user, reminder and other entries contribute nothing.",
+    "Sub-agents are included: a child's usage is attached to the parent's tool entry as SubagentUsage rows (turn.go:1113; toolbridge.go:521-558; store/entry.go:225-230) and priced at the child's own model (spend.go:144-146); background children arrive on the results entry (delivery.go:52-56); a child emits no Spent of its own, so nothing is counted twice (turn.go:297-299).",
+    "Compaction is included: every compaction entry's usage -- successes and failures, attempts summed -- counts (spend.go:136-139; compact.go:302, 427, 443-445).",
+    "Usage that could not be saved (a failed step save, an unwritten compaction) is added from s.unsaved for the live session (spend.go:51-67, 118-124); a resumed session starts without it.",
+    "The status row (internal/tui/status.go:138-152) shows \"<n>% ctx · <turn> / <session>\". It shows billed token counts instead of dollars exactly when the session's computed cost is zero and some of its usage had no price -- Session.CostPicoUSD == 0 && Session.Unpriced (status.go:146-148) -- e.g. \"12.3k / 1.21M tok\"; that includes a session whose priced usage all has zero rates.",
+    "Otherwise it shows dollars, and an amount that includes unpriced usage gets a \"+\" meaning at least that much (spendMoney, status.go:172-177), e.g. \"$0.04 / $1.20+\" (internal/tui/status_usage_test.go:33-45): so a \"+\" appears once the session's computed cost is nonzero, and the turn's part can then read \"$0.00+\".",
+    "The totals are recomputed by a full walk for each Spent event and on load (replay.go:96-107), never stored; display rounds to cents half up, with \"<$0.01\" for tiny amounts (formatUSD, status.go:186-195).",
+]
+false_claims = [
+    "The cost comes from the provider's billing API or a cost field in the response (it is tokens times models.toml rates, spend.go:197).",
+    "Sub-agent or compaction costs are not included (spend.go:136-146).",
+    "An unpriced model shows $0.00 or N/A (it shows token counts, or a + suffix once some cost exists, status.go:146-177).",
+]
+
+[repo]
+kind = "craze"
+
+[[checks]]
+type = "facts"
+name = "facts"
+min = 4
+
+[[checks.items]]
+id = "spend-go"
+regex = 'spend\.go|func \(s \*Session\) spend|Session\.spend'
+cite = "internal/harness/spend.go:98-126, 197"
+
+[[checks.items]]
+id = "configured-rates"
+regex = 'modeltable|models\.toml'
+cite = "internal/harness/modeltable/modeltable.go:162-181, 1035-1039"
+
+[[checks.items]]
+id = "subagent-rows"
+regex = 'SubagentUsage|subagent_usage'
+cite = "internal/harness/spend.go:144-146; turn.go:1113"
+
+[[checks.items]]
+id = "plus-suffix"
+regex = '\$\d+\.\d{2}\+|`\+`|"\+"|plus sign|\+ suffix|suffix \+|trailing \+'
+cite = "internal/tui/status.go:172-177"
+
+[[checks.items]]
+id = "token-fallback"
+regex = '\btok\b|token counts? instead|shows? (the )?tokens'
+cite = "internal/tui/status.go:146-148"
+
+[[checks]]
+type = "no_writes"
+name = "no-writes"
+
+[validate]
+reference_answer = "testdata/reference_answer.md"
+decoy_answer = "testdata/decoy_answer.md"
+planted_edit = { path = "internal/harness/spend.go", append = "\n// planted edit\n" }

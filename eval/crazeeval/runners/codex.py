@@ -49,6 +49,9 @@ class CodexRunner(Runner):
     name = "codex"
     tools = {"node"}
     supports_plan = False
+    # codex unpacks its bundled skills and keeps sqlite state (the WAL alone reaches
+    # megabytes); the capture and its session rollout are the evidence.
+    prune_paths = [".codex/skills", ".codex/*.sqlite", ".codex/*.sqlite-wal", ".codex/*.sqlite-shm"]
 
     def home(self, home, em, snap, base_url):
         return homes.codex_home(home, em, snap, base_url)

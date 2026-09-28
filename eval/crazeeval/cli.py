@@ -1,4 +1,5 @@
-"""``uv run crazeeval <command>``: run, validate, proxy, snapshot-config, probe, keyscan, ledger."""
+"""``uv run crazeeval <command>``: run, validate, proxy, snapshot-config, probe, keyscan, ledger,
+judge-pair, judge-batch, calibrate, judge-hash, report, captures."""
 
 from __future__ import annotations
 
@@ -347,6 +348,145 @@ def cmd_ledger(a) -> int:
     return 0
 
 
+# -- judge / report / captures ------------------------------------------------------------------
+
+
+def _seed(a) -> int:
+    return int(a.seed) if a.seed is not None else int(time.strftime("%Y%m%d"))
+
+
+def cmd_judge_hash(a) -> int:
+    from crazeeval.judge import judge_hash
+    from crazeeval.tasks import load_tasks
+
+    print(judge_hash(load_tasks()))
+    return 0
+
+
+def cmd_judge_pair(a) -> int:
+    """Judge two runs against each other (the judge smoke)."""
+    from crazeeval.judge import Judge, Pair, judge_hash, judge_pair
+    from crazeeval.packet import load_side
+    from crazeeval.tasks import load_tasks
+
+    tasks = load_tasks()
+    x, y = load_side(Path(a.a)), load_side(Path(a.b))
+    tid = a.task or x.result.get("task")
+    if tid not in tasks:
+        print(f"unknown task {tid!r}", file=sys.stderr)
+        return 2
+    task = tasks[tid]
+    if task.split == "heldout" and not a.unseal:
+        print(f"{tid} is a held-out task: its verdict is sealed; pass --unseal to judge it here", file=sys.stderr)
+        return 2
+    pair = Pair(task, x.result.get("model") or "?", x, y)
+    t0 = time.monotonic()
+    rec = asyncio.run(judge_pair(Judge(parallel=a.parallel), pair, a.judge, _seed(a), a.both_orders))
+    rec["judge_hash"] = judge_hash(tasks)
+    rec["wall_s_total"] = round(time.monotonic() - t0, 1)
+    text = json.dumps(rec, indent=2, default=str)
+    if a.out:
+        Path(a.out).write_text(text + "\n")
+    print(text)
+    return 0 if rec["result"] is not None else 1
+
+
+def cmd_judge_batch(a) -> int:
+    from crazeeval.judge import Judge, judge_hash
+    from crazeeval.judging import (
+        CALIBRATION_FILE,
+        CalibrationRefusal,
+        enforce_calibration,
+        find_runs,
+        judge_batch,
+        load_calibration,
+        make_pairs,
+    )
+    from crazeeval.tasks import load_tasks
+
+    tasks = load_tasks()
+    batch = Path(a.batch)
+    runs_x = find_runs(batch)
+    runs_y = find_runs(Path(a.batch_y)) if a.batch_y else runs_x
+    pairs = []
+    for hy in _csv(a.y):
+        pairs += make_pairs(runs_x, runs_y, a.x, hy, tasks, set(_csv(a.model)) or None, set(_csv(a.tasks)) or None)
+    out = Path(a.out) if a.out else batch / "judging"
+    mode = "success-bar" if a.success_bar else ("both" if a.both_orders else "single")
+    # The calibration decisions are enforced (review r1-c2 §7): luna needs its agreement
+    # gate, single-order judging needs the flip gate; an override is recorded.
+    cal_path = Path(a.calibration) if a.calibration else batch / "calibration" / CALIBRATION_FILE
+    cal = load_calibration(cal_path, judge_hash(tasks))
+    try:
+        mode, cal_record = enforce_calibration(a.judge, mode, cal, a.override_calibration)
+    except CalibrationRefusal as e:
+        print(f"refused: {e}", file=sys.stderr)
+        return 2
+    if cal_record["forced_both_orders"]:
+        print(f"calibration ({cal['status']}, flip gate {cal.get('flip_gate')}): judging both orders")
+    if a.override_calibration:
+        print(f"calibration overridden: {a.override_calibration}")
+    print(f"judge-batch: {len(pairs)} pairs ({mode}, judge {a.judge}) -> {out}")
+    counts = asyncio.run(judge_batch(pairs, tasks, out, Judge(parallel=a.parallel), a.judge, mode, _seed(a),
+                                     calibration=cal_record))
+    print(json.dumps(counts))
+    return 0 if not counts["no_verdict"] else 1
+
+
+def cmd_calibrate(a) -> int:
+    from crazeeval.judge import Judge
+    from crazeeval.judging import calibrate, find_runs, make_pairs
+    from crazeeval.tasks import load_tasks
+
+    tasks = load_tasks()
+    dev = {k: t for k, t in tasks.items() if t.split == "dev"}
+    runs = find_runs(Path(a.batch), include_heldout=False)
+    harnesses = sorted({r.harness for r in runs})
+    pairs = []
+    for i, hx in enumerate(harnesses):
+        for hy in harnesses[i + 1:]:
+            pairs += make_pairs(runs, runs, hx, hy, dev)
+    out = Path(a.out) if a.out else Path(a.batch) / "calibration"
+    summary = asyncio.run(calibrate(pairs, tasks, out, Judge(parallel=a.parallel), _seed(a), a.pairs, a.padding))
+    print(json.dumps(summary, indent=2))
+    return 0
+
+
+def cmd_report(a) -> int:
+    from crazeeval import report as rp
+    from crazeeval.tasks import load_tasks
+
+    tasks = load_tasks()
+    batches = [Path(b) for b in a.batch]
+    vfiles = rp.verdict_files([Path(v) for v in (a.verdicts or [])] or [b / "judging" for b in batches], a.unseal)
+    verdicts = rp.load_verdicts(vfiles, a.unseal)
+    # The best open harness is fixed from the baseline batch alone (§3.1.8): the first
+    # --batch unless --baseline names it.
+    baseline = Path(a.baseline) if a.baseline else batches[0]
+    inp = rp.ReportInput(runs=rp.load_runs(batches, a.unseal), verdicts=verdicts, tasks=tasks, unseal=a.unseal,
+                         batches=[str(b) for b in batches], verdict_sources=[str(v) for v in vfiles],
+                         judge_hashes=[v.get("judge_hash") for v in verdicts if v.get("judge_hash")],
+                         baseline_batch=baseline, baseline_runs=rp.load_runs([baseline], a.unseal))
+    if a.compare:
+        inp.compare_runs = rp.load_runs([Path(a.compare)], a.unseal)
+        inp.compare_verdicts = rp.load_verdicts([Path(v) for v in (a.compare_verdicts or [])], a.unseal)
+    rep = rp.build(inp)
+    out = Path(a.out) if a.out else batches[-1] / ("report-unsealed" if a.unseal else "report")
+    rp.write(rep, out)
+    print(f"report: {out / 'report.md'}")
+    for m, sb in rep["success_bar"].items():
+        print(f"  {m}: {sb['outcome']} ({sb.get('reason')})")
+    return 0
+
+
+def cmd_captures(a) -> int:
+    from crazeeval import captures
+
+    out = captures.write(Path(a.run), _opt_path(a.out), a.unseal)
+    print(f"captures: {out / 'captures.md'}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="crazeeval", description="craze native harness evaluation (plan 029)")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -410,6 +550,64 @@ def main(argv: list[str] | None = None) -> int:
     lg = sub.add_parser("ledger", help="print the ledger totals")
     lg.add_argument("--ledger")
     lg.set_defaults(fn=cmd_ledger)
+
+    jh = sub.add_parser("judge-hash", help="print the frozen judge fingerprint (instruction, schema, rubrics)")
+    jh.set_defaults(fn=cmd_judge_hash)
+
+    jp = sub.add_parser("judge-pair", help="judge two runs against each other (rep directories)")
+    jp.add_argument("--a", required=True, help="the first run's rep directory")
+    jp.add_argument("--b", required=True, help="the second run's rep directory")
+    jp.add_argument("--task", help="task id (default: the first run's)")
+    jp.add_argument("--judge", default="sol", help="sol, luna or astra (default sol)")
+    jp.add_argument("--both-orders", action="store_true")
+    jp.add_argument("--seed")
+    jp.add_argument("--parallel", type=int, default=4)
+    jp.add_argument("--unseal", action="store_true", help="allow a held-out task")
+    jp.add_argument("--out")
+    jp.set_defaults(fn=cmd_judge_pair)
+
+    jb = sub.add_parser("judge-batch", help="judge every run pair between harnesses (held-out verdicts sealed)")
+    jb.add_argument("--batch", required=True)
+    jb.add_argument("--batch-y", help="take the y runs from this batch (compare two builds)")
+    jb.add_argument("--x", default="craze", help="the x harness (default craze)")
+    jb.add_argument("--y", default="gx,opencode,codex", help="comma list of y harnesses")
+    jb.add_argument("--model", help="comma list of eval model keys (default: all)")
+    jb.add_argument("--tasks", help="comma list of task ids (default: all)")
+    jb.add_argument("--judge", default="sol")
+    jb.add_argument("--both-orders", action="store_true")
+    jb.add_argument("--success-bar", action="store_true", help="both orders by sol, astra on disagreement/low confidence")
+    jb.add_argument("--seed")
+    jb.add_argument("--parallel", type=int, default=4)
+    jb.add_argument("--out", help="verdict directory (default <batch>/judging)")
+    jb.add_argument("--calibration", help="the calibration decisions to enforce (default <batch>/calibration/calibration.json)")
+    jb.add_argument("--override-calibration", metavar="REASON",
+                    help="judge as asked despite the calibration decisions (the reason is recorded in every verdict)")
+    jb.set_defaults(fn=cmd_judge_batch)
+
+    ca = sub.add_parser("calibrate", help="judge calibration: flip rate, luna agreement, padding (§3.1.6)")
+    ca.add_argument("--batch", required=True)
+    ca.add_argument("--pairs", type=int, default=30)
+    ca.add_argument("--padding", type=int, default=10)
+    ca.add_argument("--seed")
+    ca.add_argument("--parallel", type=int, default=4)
+    ca.add_argument("--out")
+    ca.set_defaults(fn=cmd_calibrate)
+
+    rp_ = sub.add_parser("report", help="objective counts, win rates, the success bar (held-out sealed unless --unseal)")
+    rp_.add_argument("--batch", action="append", required=True, help="a batch directory (repeatable; later wins)")
+    rp_.add_argument("--verdicts", action="append", help="a verdict file or directory (repeatable; default <batch>/judging)")
+    rp_.add_argument("--unseal", action="store_true")
+    rp_.add_argument("--baseline", help="the baseline batch that fixes the best open harness (default: the first --batch)")
+    rp_.add_argument("--compare", help="an earlier batch: compare its craze build with this one")
+    rp_.add_argument("--compare-verdicts", action="append", help="verdicts of the new build vs the old (craze vs craze)")
+    rp_.add_argument("--out")
+    rp_.set_defaults(fn=cmd_report)
+
+    cp = sub.add_parser("captures", help="the wire-capture report (§3.1.10) and AC-A8 fidelity checks")
+    cp.add_argument("--run", required=True, help="a batch directory")
+    cp.add_argument("--out")
+    cp.add_argument("--unseal", action="store_true")
+    cp.set_defaults(fn=cmd_captures)
 
     a = p.parse_args(argv)
     return a.fn(a)

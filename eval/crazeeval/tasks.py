@@ -26,6 +26,7 @@ CHECK_TYPES = {
     "structural_count",
     "test_discrimination",
     "executed_code",
+    "shared_helper",
 }
 
 
@@ -54,6 +55,8 @@ class Task:
     ignore: list[str] = field(default_factory=list)
     goflags: str | None = None
     harnesses: list[str] | None = None
+    name: str = ""  # a short slug (e.g. explain-prompt-prefix) for reports
+    false_claims: list[str] = field(default_factory=list)  # claims the judge must treat as false
 
     @property
     def repo_name(self) -> str:
@@ -106,6 +109,14 @@ def load_task(d: Path) -> Task:
                 raise TaskError(f"{tid}: {c['name']}: use runner/args, not command")
             if c.get("runner") not in TEST_RUNNERS:
                 raise TaskError(f"{tid}: {c['name']}: runner must be one of {TEST_RUNNERS}")
+        if c["type"] == "structural_count" and c.get("target", "content") not in ("content", "path"):
+            raise TaskError(f"{tid}: {c['name']}: target must be content or path")
+        if c["type"] == "executed_code" and not c.get("evidence"):
+            # Without evidence any code-running call passes, `python --version` included
+            # (review r1-c2 §4).
+            raise TaskError(f"{tid}: {c['name']}: executed_code needs evidence regexes")
+        if c["type"] == "shared_helper" and not (c.get("callers") and c.get("markers")):
+            raise TaskError(f"{tid}: {c['name']}: shared_helper needs callers and markers")
         if c["type"] == "tests":
             expect = c.get("expect")
             if not isinstance(expect, list) or not expect or not all(isinstance(x, str) and x for x in expect):
@@ -130,6 +141,8 @@ def load_task(d: Path) -> Task:
         ignore=list(doc.get("ignore") or []),
         goflags=doc.get("goflags"),
         harnesses=doc.get("harnesses"),
+        name=str(doc.get("name") or ""),
+        false_claims=list(doc.get("false_claims") or []),
     )
     if setup:
         t.setup_patch = t.testdata(setup)

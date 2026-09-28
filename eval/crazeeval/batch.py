@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import fcntl
+import fnmatch
 import hashlib
 import json
 import shutil
@@ -441,7 +442,14 @@ class Batch:
         if scan["files_with_key"]:
             res["status"] = KEY_EXPOSURE
             res["objective_pass"] = False
-        res["pruned"] = await asyncio.to_thread(_prune, adir, [f"home/{p}" for p in runner.prune_paths] + ["gocache"])
+        # Keep per-run disk small (a baseline batch is ~250 runs): the Go cache, the
+        # harness's download and state caches, and -- for a craze-repo task -- the
+        # workspace itself (the repository with its history); diff.patch, the
+        # manifests, the capture, result.json and the logs stay.
+        prune = [f"home/{p}" for p in runner.prune_paths] + ["gocache"]
+        if task.repo_kind == "craze":
+            prune.append("ws")
+        res["pruned"] = await asyncio.to_thread(_prune, adir, prune)
         _json_write(adir / "result.json", res)
         return res
 
@@ -503,15 +511,34 @@ def _prune_scoring(d: Path) -> None:
             shutil.rmtree(p, ignore_errors=True)
 
 
+def _expand(adir: Path, rel: str) -> list[str]:
+    """``rel``, or -- when its last component is a glob -- the entries of its parent
+    directory matching it (listed without following a link: a planted symlink as the
+    parent lists nothing)."""
+    parent, _, name = rel.rpartition("/")
+    if not any(ch in name for ch in "*?["):
+        return [rel]
+    base = adir / parent if parent else adir
+    try:
+        # Top-level entries only: a second-level directory is neither yielded nor entered.
+        entries = [e.rel for e in safefs.walk(base, skip_dir=lambda r: "/" in r)
+                   if "/" not in e.rel and fnmatch.fnmatch(e.rel, name)]
+    except OSError:
+        return []
+    return [f"{parent}/{e}" if parent else e for e in sorted(entries)]
+
+
 def _prune(adir: Path, rels: list[str]) -> dict[str, int]:
     """Delete caches under the attempt directory; bytes freed per path. Every
     component is walked without following a link (a planted symlink anywhere on the
-    way means there is nothing of ours to delete). Review r1-c1 finding 3."""
+    way means there is nothing of ours to delete). Review r1-c1 finding 3. A last
+    component may be a glob (``.codex/*.sqlite``)."""
     out = {}
-    for rel in rels:
-        size = safefs.tree_size(adir, rel)
-        if safefs.remove(adir, rel):
-            out[rel] = size
+    for pattern in rels:
+        for rel in _expand(adir, pattern):
+            size = safefs.tree_size(adir, rel)
+            if safefs.remove(adir, rel):
+                out[rel] = size
     return out
 
 

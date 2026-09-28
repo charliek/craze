@@ -1,0 +1,46 @@
+# A scripted history for T-I1 (investigate-regression): eight commits after the initial one.
+# One of them changes how totals round; the task asks which. Patches apply in order.
+initial_message = "Invoice totals with discounts"
+initial_date = "2026-01-20T10:00:00+00:00"
+
+[[history]]
+patch = "history/01.patch"
+message = "Add CSV export of invoice lines"
+date = "2026-02-03T10:12:00+00:00"
+
+[[history]]
+patch = "history/02.patch"
+message = "Document discount rules in README"
+date = "2026-02-09T15:40:00+00:00"
+
+[[history]]
+patch = "history/03.patch"
+message = "Release 1.1"
+date = "2026-02-10T09:00:00+00:00"
+tag = "v1.1"
+
+[[history]]
+patch = "history/04.patch"
+message = "Support per-customer tax rates"
+date = "2026-03-02T11:25:00+00:00"
+
+[[history]]
+patch = "history/05.patch"
+message = "Share one money helper across invoice and export"
+date = "2026-03-05T16:05:00+00:00"
+
+[[history]]
+patch = "history/06.patch"
+message = "Fix typo in export header"
+date = "2026-03-06T08:30:00+00:00"
+
+[[history]]
+patch = "history/07.patch"
+message = "Add invoice numbering"
+date = "2026-03-18T13:50:00+00:00"
+
+[[history]]
+patch = "history/08.patch"
+message = "Release 1.3"
+date = "2026-03-20T09:00:00+00:00"
+tag = "v1.3"

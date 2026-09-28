@@ -167,9 +167,10 @@ harness (in bwrap, its own netns) ──> 127.0.0.1:<port> ──relay──> pr
 - **Reservation:** before forwarding, the proxy reserves `bytes/3` input tokens at the
   uncached price plus the **largest** of `max_tokens`, `max_completion_tokens` and
   `max_output_tokens` at the output price. A request that names no limit is reserved at
-  the **model's maximum output** -- the owner's craze `max_output_tokens` or gx
-  `max_completion_tokens` from the config snapshot, else 131072 -- and is forwarded
-  unchanged (the proxy never adds a limit). Only one completion per request is admitted.
+  the **model's maximum output** -- the largest of every limit that applies: the owner's
+  craze `max_output_tokens`, gx `max_completion_tokens` and the snapshot's models.dev
+  `limit.output` (deepseek-v4p1-flash lists 384000); 131072 when none is known -- and is
+  forwarded unchanged (the proxy never adds a limit). Only one completion per request is admitted.
   At Kimi K3's ledger price an unbounded request reserves about $2.95 of output, so a Kimi
   run needs `--run-cap` above the $3 default.
 - **Reconciliation:** after the request, the reservation is replaced by the reported usage.
@@ -218,9 +219,21 @@ The generated homes, per harness:
 | harness | home | notes |
 |---|---|---|
 | craze | `CRAZE_HOME` with `native/models.toml` and `native/providers.toml` (0600) | `[subagents] model` is the target; `default_effort` is the pinned effort |
-| gx | `GROK_HOME/config.toml` | Web search and fetch are off. Image and video tools are off (they would call api.x.ai). The title and image-description models are pinned to the target, since they default to grok-4.6. `turn_summary` and `title_refresh` are off: they replay the conversation and never reach the answer. Build tasks run `--always-approve`; plan tasks run `--permission-mode plan` alone (the two contradict; whether gx plans headless is plan X8, `plan_mode` in `result.json` records what was asked). |
+| gx | `GROK_HOME/config.toml` | Web search and fetch are off. Image and video tools are off (they would call api.x.ai). The title and image-description models are pinned to the target, since they default to grok-4.6. `turn_summary` and `title_refresh` are off: they replay the conversation and never reach the answer. Build tasks run `--always-approve`; plan tasks run `--permission-mode plan` alone (the two contradict, plan X8). Checked in C2 on T-P2 with glm-5.3-flash: gx starts in permission mode `plan`, calls `enter_plan_mode`, writes its `plan.md` in the session directory, calls `exit_plan_mode` and ends the turn with `end_turn`, workspace untouched -- so gx plans headless and no plan task runs prompt-only. `plan_mode` in `result.json` records what was asked. |
 | opencode | `OPENCODE_CONFIG` plus XDG dirs under the home | Uses opencode's own `meta` (Responses), `zai-coding-plan` and `fireworks-ai` providers, with only `baseURL`/`apiKey` overridden. `model` and `small_model` are the target. `webfetch`/`websearch` are denied, which removes them from the offered tools. Model fetch, autoupdate and share are off. |
-| codex | `CODEX_HOME/config.toml` | A `wire_api = "responses"` provider with `env_key = "CRAZE_EVAL_DUMMY"`. `web_search = "disabled"`, analytics off, plugins off (exec would fetch them from GitHub). Runs with `--dangerously-bypass-approvals-and-sandbox`, since bwrap is the sandbox. |
+| codex | `CODEX_HOME/config.toml` | A `wire_api = "responses"` provider with `env_key = "CRAZE_EVAL_DUMMY"`. `web_search = "disabled"`, analytics off, plugins off (exec would fetch them from GitHub). Runs with `--dangerously-bypass-approvals-and-sandbox`, since bwrap is the sandbox. See *codex model metadata* below. |
+
+**codex model metadata (a recorded limitation).** codex knows only its bundled OpenAI
+models, so for the four eval targets it warns "Unknown model … This will use fallback model
+metadata" and runs with the fallback: a 272k context, `exec_command` as its shell tool and no
+separate `apply_patch` tool (the models still run `apply_patch` through the shell -- the C1
+smoke captures show `apply_patch <<'EOF'` inside `exec_command`). codex 0.157.1 does accept
+a catalog (`model_catalog_json`, and a per-provider `model_catalog_url`), whose entries are
+its full `ModelInfo` records (shell and patch tool types, truncation policy, tool mode,
+Responses-lite, reasoning-summary support, instructions template…). Writing entries for
+Meta and Fireworks means choosing each of those wire-visible settings for providers they
+were never tested against, and proving it needs real runs; that is not cheap, so C2 leaves
+codex on its fallback. codex is a reference, never a bar.
 
 Every child also gets:
 
@@ -260,6 +273,25 @@ uv run crazeeval probe --craze-bin ../bin/craze
 
 uv run crazeeval keyscan <dir>
 uv run crazeeval ledger
+
+# The judge (see "The judge" below). The frozen fingerprint of the instruction, the schema
+# and every rubric:
+uv run crazeeval judge-hash
+# One pair (the judge smoke): two rep directories.
+uv run crazeeval judge-pair --a <rep-dir> --b <rep-dir> [--judge sol] [--both-orders] [--seed N]
+# Every pair of craze runs against the other harnesses' (held-out verdicts sealed):
+uv run crazeeval judge-batch --batch DIR [--x craze] [--y gx,opencode,codex] [--judge sol|luna] \
+    [--both-orders | --success-bar] [--seed N] [--parallel 4] [--out DIR] \
+    [--calibration FILE] [--override-calibration REASON]
+# A build against an earlier build of the same harness (a lever's before/after):
+uv run crazeeval judge-batch --batch NEW --batch-y OLD --x craze --y craze --both-orders --out DIR
+# Calibration before bulk judging: 30 dev pairs both orders by sol and by luna, 10 padding pairs.
+uv run crazeeval calibrate --batch DIR [--seed N]
+
+# The report (held-out sealed unless --unseal), and the wire-capture report.
+uv run crazeeval report --batch DIR [--batch LATER ...] [--baseline DIR] [--verdicts DIR ...] [--unseal] \
+    [--compare OLD --compare-verdicts DIR] [--out DIR]
+uv run crazeeval captures --run DIR [--out DIR] [--unseal]
 ```
 
 ## Tasks
@@ -298,22 +330,64 @@ The check types:
     there -- an agent's `__init__.py`, support module or extra test -- is removed, and the
     start version of every trusted file put back (for Go, only `_test.go` files: the
     package's other files are the implementation).
-- `diff_scope`
-- `structural_count`
+- `diff_scope`: every changed path matches `allow` and none matches `deny`.
+- `structural_count`: occurrences of a regex in the matching files (`glob`, minus
+  `exclude`), or with `target = "path"` the number of matching paths, against `value`.
+- `shared_helper`: the workspace's Python (`glob` minus `exclude`) read with `ast`, never
+  run: some function other than the `callers` references every `markers` name (itself or
+  through the functions it calls), every caller calls it, and no caller references a
+  marker itself -- an extraction, not three copies rewritten.
 - `test_discrimination` (`runner` as above): the agent's new or changed tests must fail
   on the original implementation and pass on the agent's.
-- `executed_code`: a code-running tool call appears in the capture.
+- `executed_code`: a shell call whose command matches `patterns`, whose result was sent
+  back to the model (`require_result`, on by default: an attempted call is no evidence),
+  and which shows one of the `evidence` regexes -- in its command, in its result, or in an
+  earlier call that wrote a file the command runs. `evidence` is required: without it
+  `python --version` would pass.
 
 The validators, per category, are run by `crazeeval validate` (§3.1.5):
 
 | category | the check must… |
 |---|---|
-| implementation | fail on the untouched workspace and pass with `reference.patch` (or pass on the base commit for a craze `setup.patch` task) |
+| implementation | fail on the untouched workspace and pass with `reference.patch` (for a craze `setup.patch` task, the planted tree with the patch reversed: 3eabb31's content); a refactor's tests pass on both, its structural and `shared_helper` checks carry the control; `diff_scope` passes the reference and fails it plus an edit to a denied file (`scope_denied_edit`) or outside the scope (`scope_outside_edit`) |
 | investigate | pass on a reference answer and fail on a decoy |
-| verify | pass on a synthetic code-running capture and fail without one |
+| verify | pass on a synthetic capture whose code-running call exercised the case and was answered (`synthetic_command`, `synthetic_result`); fail with none, with an irrelevant answered call (`python --version`), and with the right call never answered |
 | explain, answer, plan | pass on the reference answer and fail on the decoy; `no_writes` must also fail when an edit is planted |
 
-C1 ships two smoke tasks on the `smoke-py` fixture: `smoke-explain` and `smoke-fix`.
+C1 ships two smoke tasks on the `smoke-py` fixture: `smoke-explain` and `smoke-fix`. C2 adds
+the fifteen tasks of §3.1.5 (`name` is the task's slug; `false_claims` lists claims the
+judge must treat as false; a `structural_count` check may `exclude` globs or count paths
+with `target = "path"`):
+
+| id | name | category | split | repo | objective checks |
+|---|---|---|---|---|---|
+| T-E1 | explain-prompt-prefix | explain | dev | craze | facts (4 of 5), no writes |
+| T-E2 | explain-bad-tool-call | explain | dev | craze | facts (4 of 5), no writes |
+| T-E3 | answer-native-cost | answer | held-out | craze | facts (4 of 5), no writes |
+| T-I1 | investigate-regression | investigate | dev | `invoicing` (9 scripted commits, tags v1.1/v1.3) | the commit (46d165a) and the rounding mode, no writes |
+| T-I2 | investigate-flaky-test | investigate | held-out | `quota` (Go) | shared `Defaults`, the mutating test, order/shuffle; no writes |
+| T-B1 | fix-python-parser | bugfix | dev | `envfile` | 9 hidden + 10 trusted tests |
+| T-B2 | fix-go-cache | bugfix | held-out | `lrucache` (Go) | 6 hidden + 4 trusted tests |
+| T-B3 | fix-craze-redact | bugfix | held-out | craze + `setup.patch` (one orphan commit) | the package's original 10 tests; diff confined to its non-test files (with scope controls) |
+| T-F1 | feature-python-json-flag | feature | dev | `wordstat` | 4 hidden + 5 trusted tests; the agent's tests discriminate |
+| T-F2 | feature-go-humanize | feature | held-out | `humanize` (Go) | 4 hidden (incl. `math.MinInt64`) + 1 trusted test; the agent's tests discriminate |
+| T-R1 | refactor-dedupe | refactor | dev | `accounts` | trusted tests; one helper used at all three call sites (`shared_helper`); each check appears at most once |
+| T-M1 | multi-step-rename | multi-step | held-out | `kvstore` (Go + docs) | 3 hidden API tests + 3 hidden CLI tests (the built `kv`: `-namespace`, `list-namespaces`, messages); "bucket" in no file and no path |
+| T-V1 | verify-edge-case | verify | held-out | `batchexport` | ValueError and its cause; an answered Python call that exercised `parse_batch("")`; no writes |
+| T-P1 | plan-craze-feature | plan | dev | craze | facts (3 of 4), no writes |
+| T-P2 | plan-fixture-feature | plan | held-out | `pricing` | facts (4 of 5), no writes |
+
+The craze tasks' rubrics are written from the code at `3eabb31` and cite file:line; each
+explain/answer/plan rubric has 7–9 checkable items and three false claims. The regex fact
+checks are the subset of the rubric that is safe to match mechanically; the judge grades
+every rubric item. Validators added for C2's categories: a refactor's tests pass both
+untouched and with the reference (its structural checks carry the control), and a
+`test_discrimination` check passes with the reference patch's tests and fails untouched.
+
+Scoring time: each Go scoring invocation compiles with a cold, private Go cache and takes
+about 2 s (T-B2, T-F2, T-M1 on a fixture; T-B3's `go test ./internal/harness/redact/` in the
+craze tree); a pytest invocation about 0.1–0.2 s. `crazeeval validate` of all seventeen
+tasks takes about 25 s.
 
 **Contamination.** Tool calls that touch `eval/`, `reference.patch`, `eval-runs`,
 `.claude/plans`, the owner's `/home/*/.craze/native`, a GitHub URL of the craze
@@ -335,6 +409,12 @@ Each batch writes:
 - `summary.json`
 - `proxy-refusals.jsonl`
 
+Per-run disk stays small (a baseline batch is ~250 runs): after the key scan each attempt
+drops its Go cache, the harness's download and state caches (opencode's npm cache,
+workspace snapshot and XDG cache; gx's unpacked user guide; codex's bundled skills and
+sqlite state) and, for a craze-repo task, the workspace itself (the repository with its
+history); `diff.patch`, the manifests, the capture, `result.json` and the logs stay.
+
 Each run lives in `runs/<harness>/<model>/<task>/rep<N>/`. Held-out tasks go under the
 sealed `heldout/` instead, and their verdicts are not printed. Inside a run directory:
 
@@ -343,9 +423,9 @@ sealed `heldout/` instead, and their verdicts are not printed. Inside a run dire
   - `stdout.jsonl`, `stderr.txt`
   - `capture.jsonl.gz`
   - `start-manifest.json`, `final-manifest.json`, `diff.patch`, `gitpost/`
-  - `ws/` (the final workspace) and `home/` (the harness's state). The run's Go cache and
-    any download cache are deleted after the key scan (never through a planted link);
-    `result.json`'s `pruned` records what was removed.
+  - `ws/` (the final workspace; removed for craze-repo tasks) and `home/` (the harness's
+    state). The run's Go cache and the caches above are deleted after the key scan (never
+    through a planted link); `result.json`'s `pruned` records what was removed.
   - `scoring/*.stdout`, `scoring/*.out/` (JUnit reports)
 
 `result.json` holds:
@@ -368,3 +448,132 @@ sealed `heldout/` instead, and their verdicts are not printed. Inside a run dire
 - `proxy`: the route summary, including the refusal counters;
 - `sandbox`: quiescence and environ samples;
 - `key_scan`.
+
+## The judge
+
+`crazeeval/packet.py`, `judge.py` and `judging.py` (plan 029 §3.1.6).
+
+- **The packet** holds the task prompt, the rubric (with its known false claims) and, per
+  side between `<<<BEGIN/END UNTRUSTED CANDIDATE X>>>` markers: the final answer (for a plan
+  task, the plan the harness presented), the execution evidence (every tool call in order,
+  shown by its **kind** -- `shell`, `read`, `edit`, `write`, `search`, `list`, `todo`,
+  `delegate`... (`capture.TOOL_KINDS`, which maps every name the four harnesses use), with
+  argument names unified (`path=`, `pattern=`) and gx's `session_title` left out, since tool
+  names alone would tell the judge which harness a side is -- with its command or path, and
+  its result's exit status, first lines and, for a long result, last lines, since a test
+  summary is at the end; at most 12 KB, counted in UTF-8 bytes, then a marker),
+  the workspace changes (every file with its stats, then the diff up to 40 KB, then
+  `[diff truncated: N bytes in M files not shown]`; generated files and harness state paths
+  stripped) and the objective results, a timeout or crash included.
+- **Provenance is normalised, names are not scrubbed:** the sandbox workspace, home and
+  `/tmp/<x>` paths (and the host's run directory) become `<workspace>`, `<home>`, `<tmp>`
+  (`<run>`), and a harness's plan-file location becomes `<plan-file>`; task-subject words,
+  repository paths and harness names stay.
+- **The instruction** ranks correctness (against the rubric, the objective results and the
+  evidence; a "tests pass" with no such command in the evidence is unverified; a false
+  claim costs more than an omission), then completeness, evidence and clarity; length earns
+  nothing. The candidates' text is untrusted data whose instructions are ignored.
+- **The schema** (`--output-schema`, strict): `winner` (A/B/tie), `confidence`
+  (low/medium/high), `score_a`/`score_b` (1–10), `rubric_a`/`rubric_b` (every item graded
+  met/missed/false), `reasons`. Outputs are validated again before they count.
+- **The call** is exactly `codex exec --ephemeral --ignore-user-config --ignore-rules
+  --skip-git-repo-check -s read-only -C <empty temp dir> -m <model> -c
+  model_reasoning_effort=medium --output-schema <schema> -o <out> -` with the prompt on
+  stdin, under the judge's own `CODEX_HOME` (`~/.cache/crazeeval/judge-codex-home`: a
+  minimal `config.toml` and a **symlink** to `~/.codex/auth.json`, never a copy) and an
+  environment built from nothing but `HOME`, `PATH`, `CODEX_HOME` and locale. At most 4
+  calls at once. A failed call (non-zero exit, no output, an invalid output) is no
+  verdict, never a tie, and is re-run up to twice; a usage-limit exit pauses every call
+  and retries the same model (5 min, 10, 20, 30, then hourly, up to 12 h) -- it never
+  moves to another model.
+- **Order:** which run is "A" is decided by the recorded seed salted with the pair's
+  identity (so it does not depend on batching). Both-order mode judges both orders; a
+  disagreement is a tie; a missing order is no verdict. Success-bar pairs
+  (`--success-bar`) are both-order judged by sol, and an order disagreement or a
+  low-confidence verdict is re-judged by astra in both orders, whose result stands.
+- **Verdict files:** `judge-batch` appends one record per pair to `<out>/verdicts.jsonl`,
+  held-out pairs to the sealed `<out>/heldout/verdicts.jsonl` (never printed). Each record
+  holds the two judged runs' ids (`x_run_id`, `y_run_id`: batch, run key and attempt), both
+  orders' raw outputs, the mapped verdict, the seed, the judge model and effort, wall time,
+  attempts, rate-limit waits, the judge hash and the calibration decisions it was judged
+  under; a re-run skips pairs already judged under the same hash and mode.
+- **Calibration** (`calibrate`): 30 dev pairs spread over tasks and models, judged in both
+  orders by sol and again by luna, plus 10 padding pairs (a run's answer against itself
+  padded with a restatement of the task and a recap of its first paragraph -- same
+  evidence, diff and objective results). It writes the flip rate, luna's agreement with
+  sol, how often the padded side won, and each gate as pass, fail or **incomplete**: a gate
+  passes only when every requested pair has a verdict in both orders (one agreeing luna
+  verdict out of 30 is not 100% agreement), and incomplete fails it. Both orders for every
+  pair unless the flip gate passed (≤ 20% flip); luna for bulk pairs only when its gate
+  passed (≥ 80% agreement); the instruction is revised (before freezing) unless the
+  padding gate passed (the padded side won at most 2 of 10).
+- **Enforcement:** `judge-batch` reads the decisions (`--calibration`, default
+  `<batch>/calibration/calibration.json`) and obeys them: it refuses `--judge luna` unless
+  the luna gate passed, and turns single-order judging into both-order unless the flip gate
+  passed. A missing file, one from another judge hash, or an incomplete one counts as no
+  calibration: both orders, no luna. `--override-calibration REASON` judges as asked and
+  records the reason in every verdict. (For a lever's before/after, pass the baseline's
+  calibration file.)
+- **The frozen hash:** `crazeeval judge-hash` fingerprints the instruction, the schema and
+  every task's prompt, rubric and false claims; record it in `progress.md` and re-judge
+  every verdict used in a decision if it changes.
+
+The judge smoke (C2): craze vs gx on `smoke-fix` (deepseek-v4p1-flash, C1's last smoke),
+sol, one order: a schema-valid verdict in 11 s.
+
+## The report
+
+`crazeeval report` (`report.py`, §3.1.8) reads batches and verdict files and writes
+`report.md`, `report.json` and `length_vs_verdict.csv`:
+
+- objective pass counts per model × harness on dev, held-out and all tasks (a task with two
+  reps counts its mean pass);
+- the win-rate matrix per model and pooled, with Wilson 90% intervals (ties half);
+- **verdicts bound to runs:** a verdict counts only for the exact two runs it judged
+  (`x_run_id`/`y_run_id`), and only when both are scored runs the report selected -- one on
+  a replaced, unscored or older build's run counts for nothing. A pair judged several times
+  counts once, by its final verdict: astra's both-order re-judgement, else sol's
+  both-order verdict, else a single order (the later record on a tie); a failed final
+  verdict is a missing verdict, not replaced by a lesser one. The report prints how many
+  verdicts were loaded, bound and final;
+- the success bar per model: the **best open harness is fixed from the baseline batch**
+  (`--baseline`, default the first `--batch`) -- the higher objective count of gx and
+  opencode there, tiebreak their head-to-head win rate -- and, unsealed, recorded in
+  `<baseline>/best-open-harness.json` the first time; after that the record stands, so no
+  later rerun (a provider-drift check) can change it. Then (a) native's objective count ≥
+  its, (b) native's win rate ≥ 50%, (c) both again on the held-out tasks alone, (d) coverage
+  -- every task has a scored run on both sides and a bound verdict. The outcome is meets,
+  misses (with the gap) or inconclusive (coverage incomplete). A later `--batch` replaces an
+  earlier one's run with the same key, so a final craze batch is compared with the
+  baseline's reference runs;
+- metric medians (main requests, tool calls, tokens, cost, wall time, answer words);
+- verdicts against the log length ratio of the two answers (bins, the longer side's win
+  rate, the correlation);
+- task-level verdict tables (craze's W/L/T per task and harness; `l` marks low confidence);
+- `--compare OLD --compare-verdicts DIR`: the new craze build against the old, pooled and per
+  model, with the keep rule's readout (≥ 55% for a conditional lever, ≥ 45% for a
+  requested one, and no dev objective drop) as `keep`, `drop` or `inconclusive` -- the last
+  until every (task, model) both builds ran has a verdict bound to the two builds' runs, so
+  a comparison with no verdicts never reads keep.
+
+**Sealed:** without `--unseal` nothing under a batch's `heldout/` -- runs or verdicts -- is
+read; the success bar uses the dev tasks alone and reports `provisional-meets` or
+`provisional-misses`. Unseal only for the final.
+
+## The capture report
+
+`crazeeval captures --run <batch>` (`captures.py`, §3.1.10) writes `captures/captures.md`,
+`captures.json` and each harness's system prompt under `captures/prompts/<model>/`: per
+model and harness, the system prompt's bytes and sha256 (and how many distinct prompts its
+runs sent), where the environment text sits (workspace, date, git, OS, shell: system
+prompt or first user message), the offered tools with each description's bytes, every
+request parameter other than the conversation and the tools, the replayed assistant turns
+and how many of them carry their reasoning (counted per turn, over the requests after each
+run's first and for the last request; chat messages and Responses items alike), the last
+request's role sequence, and the served and requested model ids. Its fidelity block is
+AC-A8: effort parity across harnesses (each harness's effective reasoning control from its
+main requests), opencode's GLM `thinking` flag on every request, no web tool offered, one
+model per run -- every run requested only the target and was served only the target -- and
+no contamination hit in an accepted run. Every check needs main-request evidence from
+every run: a run with no main request makes it `no-evidence`, never true, and one failing
+run makes it false. Held-out runs are read only with `--unseal`.

@@ -1,0 +1,66 @@
+# T-M1 multi-step-rename (plan 029 §3.1.5). "bucket" is named in the package, its tests,
+# the kv command and the README; after the rename no file holds or is named for it.
+id = "T-M1"
+name = "multi-step-rename"
+category = "multi-step"
+split = "heldout"
+mode = "build"
+timeout_s = 1200
+prompt = """
+We're renaming the "bucket" concept in kvstore to "namespace" everywhere: the package API, its tests, the kv command (its `-bucket` flag becomes `-namespace`, `list-buckets` becomes `list-namespaces`, and its messages) and the README. So `Bucket` becomes `Namespace`, `CreateBucket` becomes `CreateNamespace`, `ErrNoBucket` becomes `ErrNoNamespace`, and so on. When you're done nothing should still say "bucket". Please make sure it builds and the tests pass.
+"""
+rubric = [
+    "Renames the whole exported API consistently: Namespace, CreateNamespace, Namespace(name), DeleteNamespace, Namespaces, ErrNoNamespace, ErrNamespaceExists.",
+    "Renames the unexported names and the file (bucket.go -> namespace.go), the store's field and comments.",
+    "Updates the tests to the new names.",
+    "Updates the kv command: the -namespace flag, the list-namespaces command, the usage and error messages, and its doc comment.",
+    "Updates the README.",
+    "Leaves no \"bucket\" anywhere, and runs go build/vet and go test and reports them passing.",
+]
+false_claims = []
+
+[repo]
+kind = "fixture"
+name = "kvstore"
+
+[[checks]]
+type = "tests"
+name = "hidden"
+runner = "go"
+args = ["./..."]
+timeout_s = 600
+# The agent's renamed tests stay (the start versions use the old names).
+trusted_dirs = []
+expect = [
+    "::TestHiddenCreateNamespace",
+    "::TestHiddenNamespaceLookupAndDelete",
+    "::TestHiddenNamespacesSortedAndSeparate",
+    "::TestHiddenKVNamespaceFlag",
+    "::TestHiddenKVListNamespaces",
+    "::TestHiddenKVMissingKeyMessage",
+]
+
+[checks.add]
+"namespace_hidden_test.go" = "testdata/hidden/namespace_hidden_test.go"
+# The kv command, built and run: the -namespace flag, list-namespaces, the messages.
+"cmd/kv/kv_cli_hidden_test.go" = "testdata/hidden/kv_cli_hidden_test.go"
+
+[[checks]]
+type = "structural_count"
+name = "old-name-absent-from-contents"
+glob = ["*.go", "*.md", "*.mod", "*.txt"]
+regex = '(?i)bucket'
+op = "=="
+value = 0
+
+[[checks]]
+type = "structural_count"
+name = "old-name-absent-from-paths"
+target = "path"
+glob = ["*"]
+regex = '(?i)bucket'
+op = "=="
+value = 0
+
+[validate]
+reference_patch = "testdata/reference.patch"

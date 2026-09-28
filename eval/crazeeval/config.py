@@ -70,28 +70,48 @@ class Snapshot:
         return self.dir / "opencode-models.json"
 
     def max_output(self, models) -> dict[str, int]:
-        """Each eval model's maximum output tokens by wire model: the owner's craze
-        ``max_output_tokens`` or gx ``max_completion_tokens`` from the snapshot, else
-        pricing.MODEL_MAX_OUTPUT_DEFAULT. What the proxy reserves for a request that
-        names no output limit (review r2-c1 item 10)."""
+        """Each eval model's maximum output tokens by wire model: the **largest** of every
+        limit that applies to it -- the owner's craze ``max_output_tokens``, gx
+        ``max_completion_tokens`` and the snapshot's models.dev ``limit.output``
+        (deepseek-v4p1-flash lists 384000) -- else pricing.MODEL_MAX_OUTPUT_DEFAULT. What
+        the proxy reserves for a request that names no output limit: whichever harness
+        sent it, the provider may generate up to the largest (review r2-c1 item 10,
+        r1-c2 §10)."""
         from crazeeval.pricing import MODEL_MAX_OUTPUT_DEFAULT
 
+        catalog = self._catalog()
         out = {}
         for em in models:
             try:
                 m = self.model(em.key)
             except KeyError:
                 m = {}
-            found = [v for v in ((m.get("craze") or {}).get("max_output_tokens"), (m.get("gx") or {}).get("max_completion_tokens"))
-                     if isinstance(v, int) and v > 0]
+            limits = [(m.get("craze") or {}).get("max_output_tokens"), (m.get("gx") or {}).get("max_completion_tokens"),
+                      catalog_max_output(catalog, em.opencode)]
+            found = [v for v in limits if isinstance(v, int) and v > 0]
             out[em.wire_model] = max(found) if found else MODEL_MAX_OUTPUT_DEFAULT
         return out
+
+    def _catalog(self) -> dict:
+        try:
+            return json.loads(self.opencode_models_path.read_bytes())
+        except (OSError, ValueError):
+            return {}
 
     def model(self, key: str) -> dict:
         try:
             return self.config["models"][key]
         except KeyError:
             raise KeyError(f"model {key!r} is not in config snapshot {self.dir.name}") from None
+
+
+def catalog_max_output(catalog: dict, opencode_id: str) -> int | None:
+    """A model's output limit in a models.dev catalog (``limit.output``), by its
+    opencode id ``<provider>/<model>``."""
+    pid, _, mid = (opencode_id or "").partition("/")
+    entry = ((catalog.get(pid) or {}).get("models") or {}).get(mid) or {}
+    v = (entry.get("limit") or {}).get("output")
+    return v if isinstance(v, int) and v > 0 else None
 
 
 def snapshot_hash(d: Path) -> str:

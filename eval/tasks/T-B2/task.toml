@@ -1,0 +1,50 @@
+# T-B2 fix-go-cache (plan 029 §3.1.5). Put's eviction deletes the key just added from the
+# map instead of the evicted entry's key.
+id = "T-B2"
+name = "fix-go-cache"
+category = "bugfix"
+split = "heldout"
+mode = "build"
+timeout_s = 1200
+prompt = """
+Our LRU cache in lru.go misbehaves once it's full. With capacity 2, after Put("a"), Put("b"), Put("c"), a Get("c") straight away misses, while Get("a") still returns a value even though "a" should have been evicted, and Len() looks wrong after that too. Can you fix it?
+"""
+rubric = [
+    "Identifies the cause: when Put evicts, it deletes the new key from the map (delete(c.items, key)) instead of the evicted entry's key, leaving a stale map entry for the evicted element and losing the new one.",
+    "Fixes it by deleting the evicted entry's key (oldest.Value.(*entry[V]).key); onEvict still gets the evicted entry.",
+    "Adds a regression test for eviction.",
+    "Runs go test and reports it passing.",
+]
+false_claims = [
+    "Get should not move entries to the front.",
+]
+
+[repo]
+kind = "fixture"
+name = "lrucache"
+
+[[checks]]
+type = "tests"
+name = "hidden-and-visible"
+runner = "go"
+args = ["./..."]
+timeout_s = 600
+restore_from_start = ["lru_test.go"]
+expect = [
+    "::TestHiddenNewKeySurvivesEviction",
+    "::TestHiddenEvictsLeastRecentlyUsed",
+    "::TestHiddenLenNeverExceedsCapacity",
+    "::TestHiddenOnEvictGetsTheEvictedEntry",
+    "::TestHiddenReplaceDoesNotEvict",
+    "::TestHiddenRemoveAfterEviction",
+    "::TestGetMissing",
+    "::TestPutThenGet",
+    "::TestPutReplaces",
+    "::TestRemove",
+]
+
+[checks.add]
+"lru_hidden_test.go" = "testdata/hidden/lru_hidden_test.go"
+
+[validate]
+reference_patch = "testdata/reference.patch"

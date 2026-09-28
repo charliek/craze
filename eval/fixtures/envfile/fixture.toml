@@ -1,0 +1,3 @@
+# T-B1 (fix-python-parser): an inline-comment rule that also cuts quoted values at "#".
+initial_message = "Add .env reader"
+initial_date = "2026-03-11T14:00:00+00:00"

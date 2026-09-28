@@ -1,0 +1,69 @@
+# T-E2 explain-bad-tool-call (plan 029 §3.1.5). Facts written from craze at 3eabb31 and
+# Fantasy v0.43.2 (charm.land/fantasy, go.mod:8); each rubric item cites file:line.
+id = "T-E2"
+name = "explain-bad-tool-call"
+category = "explain"
+split = "dev"
+mode = "build"
+timeout_s = 1200
+prompt = """
+In craze's native harness, what happens when the model calls a tool that doesn't exist, or sends tool arguments that aren't valid JSON or don't match the tool's schema? Does the turn end? Walk me through it -- no changes please.
+"""
+rubric = [
+    "Fantasy (charm.land/fantasy v0.43.2) validates each call before dispatch in validateToolCall: an exact tool-name match, a JSON parse, and required fields present (fantasy agent.go:1198-1245); it does not check types.",
+    "Malformed JSON is first repaired with jsonrepair.RepairJSON because no repair hook is configured (fantasy agent.go:1176-1184); craze sets no WithRepairToolCall (internal/harness/harness.go:381-386).",
+    "A call that still fails is marked Invalid with its ValidationError (fantasy agent.go:1187-1190) and is not run; Fantasy records an error result for it as a non-fatal failure (agent.go:809-817).",
+    "craze's tool bridge discards the dispatcher's prepared call for an invalid call (internal/harness/toolbridge.go:154-156) and gives the model Fantasy's validation text as an error tool result (IsError true, class invalid_input, toolbridge.go:252-268). An unknown tool reads \"tool not found: <name>. Available tools: ...\" (fantasy agent.go:1227; the dispatcher uses the same wording, internal/harness/tool/dispatch.go:164-168).",
+    "Valid JSON with a wrong type or value is caught by the tool's own Prepare (tool/opencode/args.go:17-19) and returned as \"The <tool> tool was called with invalid arguments: ... Please rewrite the input so it satisfies the expected schema.\" (dispatch.go:216-218).",
+    "The turn does not end: the error goes back as a tool result, the step loop continues (fantasy agent.go:1824) and the model can correct itself on the next step; TestUnknownToolIsAnErrorResult (internal/harness/turn_test.go:171-212) ends with end_turn after the model answers.",
+    "The dispatcher and bridge never return a Go error, because Fantasy treats a tool's error as fatal to the turn (dispatch.go:45-47; toolbridge.go:186, 799-802); a panicking tool becomes a tool_error result (dispatch.go:338-345).",
+    "Limits: the doom-loop detector refuses the 3rd identical consecutive call with a nudge and stops the turn at the 5th with max_turn_requests (doomloop.go:30-32, 92-93), counting invalid and unknown calls too (doomloop.go:17-21); the step cap is 200 (maxSteps, turn.go:53).",
+    "The user sees the call as a failed tool row (agent/native_tools.go:369-372), and the transcript keeps the error result paired with its call.",
+]
+false_claims = [
+    "An unknown tool or bad JSON aborts the turn with an error (Fantasy's result is non-fatal, agent.go:809-817; turn_test.go:171-212 ends with end_turn).",
+    "craze asks the model to retry through an extra system or user message, or a separate repair LLM call (the error is an ordinary tool result; no repair hook, harness.go:381-386).",
+    "maxRetries = 1 gives the model one chance to fix a bad call (it is the provider request retry budget, turn.go:44-48).",
+]
+
+[repo]
+kind = "craze"
+
+[[checks]]
+type = "facts"
+name = "facts"
+min = 4
+
+[[checks.items]]
+id = "tool-not-found"
+regex = 'tool not found'
+cite = "fantasy agent.go:1227; internal/harness/tool/dispatch.go:164-168"
+
+[[checks.items]]
+id = "jsonrepair"
+regex = 'jsonrepair|RepairJSON'
+cite = "fantasy agent.go:1176-1184"
+
+[[checks.items]]
+id = "dispatch-or-bridge"
+regex = 'dispatch\.go|toolbridge\.go'
+cite = "internal/harness/tool/dispatch.go:164-168, 216-218; toolbridge.go:154-156, 252-268"
+
+[[checks.items]]
+id = "turn-continues"
+regex = "(does not|doesn't|does n't|won't|will not|never) (end|abort|stop)|turn continues|loop continues|keeps going|not fatal|non-fatal"
+cite = "fantasy agent.go:809-817, 1824; internal/harness/turn_test.go:171-212"
+
+[[checks.items]]
+id = "limits"
+regex = 'doom|maxSteps|200 steps'
+cite = "internal/harness/doomloop.go:30-32; turn.go:53"
+
+[[checks]]
+type = "no_writes"
+name = "no-writes"
+
+[validate]
+reference_answer = "testdata/reference_answer.md"
+decoy_answer = "testdata/decoy_answer.md"
+planted_edit = { path = "internal/harness/tool/dispatch.go", append = "\n// planted edit\n" }

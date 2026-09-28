@@ -1,0 +1,13 @@
+diff --git a/internal/harness/redact/redact.go b/internal/harness/redact/redact.go
+index 0475b95..2ec1546 100644
+--- a/internal/harness/redact/redact.go
++++ b/internal/harness/redact/redact.go
+@@ -82,7 +82,7 @@ func New(keys ...string) *Replacer {
+ 	// Longest first, then bytewise, so the order and therefore every
+ 	// decision is the same whatever order the keys came in.
+ 	slices.SortFunc(r.keys, func(a, b string) int {
+-		return cmp.Or(cmp.Compare(len(b), len(a)), strings.Compare(a, b))
++		return cmp.Or(cmp.Compare(len(a), len(b)), strings.Compare(a, b))
+ 	})
+ 	r.keys = slices.Compact(r.keys)
+ 	for _, k := range r.keys {

@@ -1,0 +1,60 @@
+# T-B1 fix-python-parser (plan 029 §3.1.5). envfile.parse cuts every value at its first
+# "#" before it looks at quotes.
+id = "T-B1"
+name = "fix-python-parser"
+category = "bugfix"
+split = "dev"
+mode = "build"
+timeout_s = 1200
+prompt = """
+envfile chokes on values that contain a `#`. With `PASSWORD="hunter#2"` in our .env, `envfile.parse` raises `ParseError: line 1: unterminated quoted value`, and `ACCENT=#ff6600` comes back as an empty string. As the module docstring says, a `#` should only start a comment outside quotes and after whitespace, like `PORT=8080 # web`. Please fix it.
+"""
+rubric = [
+    "Identifies the cause: parse() cuts the value at the first \"#\" (value.index(\"#\")) before quotes are considered, so a quoted value loses its closing quote and an unquoted value starting with # becomes empty.",
+    "Fixes it so a # starts a comment only outside quotes and after whitespace: quoted values keep #, a quoted value may be followed by an inline comment, ACCENT=#ff6600 and URL fragments keep their #, and PORT=8080 # web still drops the comment.",
+    "Keeps the existing behaviour: escapes inside double quotes, the unterminated-quote error, export prefixes and trimming.",
+    "Adds tests for the reported cases.",
+    "Runs the test suite and reports the result.",
+]
+false_claims = [
+    "The fix is to stop supporting inline comments.",
+]
+
+[repo]
+kind = "fixture"
+name = "envfile"
+
+[[checks]]
+type = "tests"
+name = "hidden-and-visible"
+runner = "pytest"
+args = ["tests"]
+timeout_s = 300
+restore_from_start = ["tests/test_envfile.py", "conftest.py"]
+expect = [
+    "tests/test_hidden_envfile.py::test_hash_inside_double_quotes_is_kept",
+    "tests/test_hidden_envfile.py::test_hash_inside_single_quotes_is_kept",
+    "tests/test_hidden_envfile.py::test_quoted_value_then_inline_comment",
+    "tests/test_hidden_envfile.py::test_unquoted_value_starting_with_hash",
+    "tests/test_hidden_envfile.py::test_hash_without_whitespace_is_part_of_the_value",
+    "tests/test_hidden_envfile.py::test_inline_comment_after_whitespace_still_dropped",
+    "tests/test_hidden_envfile.py::test_escaped_quote_and_hash_inside_double_quotes",
+    "tests/test_hidden_envfile.py::test_unterminated_quote_is_still_an_error",
+    "tests/test_hidden_envfile.py::test_several_lines_with_hashes",
+    "tests/test_envfile.py::test_simple_pairs",
+    "tests/test_envfile.py::test_comments_and_blank_lines",
+    "tests/test_envfile.py::test_export_prefix",
+    "tests/test_envfile.py::test_whitespace_is_trimmed",
+    "tests/test_envfile.py::test_quotes_are_removed",
+    "tests/test_envfile.py::test_double_quote_escapes",
+    "tests/test_envfile.py::test_inline_comment_after_unquoted_value",
+    "tests/test_envfile.py::test_later_keys_win",
+    "tests/test_envfile.py::test_missing_equals_is_an_error",
+    "tests/test_envfile.py::test_bad_key_is_an_error",
+]
+
+[checks.add]
+"tests/test_hidden_envfile.py" = "testdata/hidden/test_hidden_envfile.py"
+
+[validate]
+reference_patch = "testdata/reference.patch"

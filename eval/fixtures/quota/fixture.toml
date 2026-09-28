@@ -1,0 +1,5 @@
+# T-I2 (investigate-flaky-test): a token bucket whose tests share a package-level
+# variable. TestConfigureOverrides changes quota.Defaults and never restores it, so
+# TestBurstAllowsTenRequests fails whenever -shuffle runs it later.
+initial_message = "Token-bucket rate limiter"
+initial_date = "2026-05-01T12:00:00+00:00"

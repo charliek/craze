@@ -5,9 +5,10 @@ no start file modified, deleted or changed in mode, no new file outside the igno
 list), ``tests`` (hidden tests added and trusted tests restored over the agent's
 copies, then a trusted runner -- ``pytest`` or ``go`` -- in a network-less sandbox on
 a scoring copy, which passes only when every expected test id reports a pass),
-``diff_scope``, ``structural_count``, ``test_discrimination`` (the agent's tests
-fail on the original implementation and pass on the agent's) and ``executed_code``
-(the capture shows a code-running tool call). A contamination scan runs over every
+``diff_scope``, ``structural_count``, ``shared_helper`` (one extracted helper used at
+every call site, read with ``ast``), ``test_discrimination`` (the agent's tests fail on
+the original implementation and pass on the agent's) and ``executed_code`` (the capture
+shows a completed code-running tool call that exercised the case). A contamination scan runs over every
 run's tool calls.
 
 Every host-side read, copy and restore of the agent's tree goes through safefs: no
@@ -16,11 +17,13 @@ link is followed, no special file opened, no write lands through a symlink.
 
 from __future__ import annotations
 
+import ast
 import fnmatch
 import json
 import re
 import shutil
 import xml.etree.ElementTree as ET
+from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -131,12 +134,24 @@ OPS = {
 
 
 def check_structural_count(check: dict, ws: Path) -> dict:
+    """Occurrences of ``regex`` in the contents of the files matching ``glob`` (minus
+    ``exclude``) -- or, with ``target = "path"``, the number of such files whose path
+    matches it -- compared with ``value`` by ``op``."""
     globs = _patterns(check.get("glob") or "**/*")
+    excludes = _patterns(check.get("exclude") or [])
     rx = re.compile(check["regex"], re.M)
+    by_path = check.get("target", "content") == "path"
     total = 0
     per_file = {}
     for rel, v in build_manifest(ws).items():
-        if v.startswith("f:") and any(fnmatch.fnmatch(rel, g) for g in globs):
+        if not any(fnmatch.fnmatch(rel, g) for g in globs) or any(fnmatch.fnmatch(rel, x) for x in excludes):
+            continue
+        if by_path:
+            if rx.search(rel):
+                per_file[rel] = 1
+                total += 1
+            continue
+        if v.startswith("f:"):
             text = safefs.read_text(ws, rel)
             if text is None:
                 continue
@@ -149,16 +164,159 @@ def check_structural_count(check: dict, ws: Path) -> dict:
     return result(check, OPS[op](total, value), count=total, op=op, value=value, files=per_file)
 
 
+def _python_functions(tree: ast.AST) -> list[tuple[str, ast.AST]]:
+    """(qualified name, node) for every function in a module: ``f``, ``Class.m``,
+    ``outer.inner``."""
+    out: list[tuple[str, ast.AST]] = []
+
+    def visit(node: ast.AST, prefix: str) -> None:
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                q = f"{prefix}{child.name}"
+                out.append((q, child))
+                visit(child, q + ".")
+            elif isinstance(child, ast.ClassDef):
+                visit(child, f"{prefix}{child.name}.")
+            else:
+                visit(child, prefix)
+
+    visit(tree, "")
+    return out
+
+
+def check_shared_helper(check: dict, ws: Path) -> dict:
+    """One helper holds the extracted code and every caller uses it (review r1-c2 §2).
+    The workspace's Python files (``glob`` minus ``exclude``) are parsed with ``ast`` --
+    never imported or run. It passes when some function other than the ``callers``
+    references every ``markers`` name (itself or through the functions it calls, by
+    name), every caller calls that function, and no caller references a marker itself.
+    Three copies rewritten in new syntax, with no shared helper, fail."""
+    globs = _patterns(check.get("glob") or ["*.py"])
+    excludes = _patterns(check.get("exclude") or [])
+    markers = set(check.get("markers") or [])
+    callers = list(check.get("callers") or [])
+    funcs: dict[str, list[ast.AST]] = defaultdict(list)
+    unparsable = []
+    for rel, v in build_manifest(ws).items():
+        if not v.startswith("f:") or not any(fnmatch.fnmatch(rel, g) for g in globs):
+            continue
+        if any(fnmatch.fnmatch(rel, x) for x in excludes):
+            continue
+        text = safefs.read_text(ws, rel)
+        try:
+            tree = ast.parse(text or "", filename=rel)
+        except (SyntaxError, ValueError):
+            unparsable.append(rel)
+            continue
+        for q, node in _python_functions(tree):
+            funcs[q].append(node)
+
+    def names_in(node: ast.AST) -> set[str]:
+        out = set()
+        for n in ast.walk(node):
+            if isinstance(n, ast.Name):
+                out.add(n.id)
+            elif isinstance(n, ast.Attribute):
+                out.add(n.attr)
+        return out
+
+    def calls_in(node: ast.AST) -> set[str]:
+        out = set()
+        for n in ast.walk(node):
+            if isinstance(n, ast.Call):
+                f = n.func
+                if isinstance(f, ast.Name):
+                    out.add(f.id)
+                elif isinstance(f, ast.Attribute):
+                    out.add(f.attr)
+        return out
+
+    by_short: dict[str, list[str]] = defaultdict(list)
+    for q in funcs:
+        by_short[q.rsplit(".", 1)[-1]].append(q)
+    direct = {q: set().union(*(names_in(n) for n in nodes)) & markers for q, nodes in funcs.items()}
+    calls = {q: set().union(*(calls_in(n) for n in nodes)) for q, nodes in funcs.items()}
+    memo: dict[str, set[str]] = {}
+
+    def reach(q: str, seen: frozenset = frozenset()) -> set[str]:
+        if q in memo:
+            return memo[q]
+        found = set(direct[q])
+        for short in calls[q]:
+            for other in by_short.get(short, []):
+                if other not in seen and other != q:
+                    found |= reach(other, seen | {q})
+        memo[q] = found
+        return found
+
+    missing = [c for c in callers if c not in funcs]
+    still_direct = {c: sorted(direct[c]) for c in callers if c in funcs and direct[c]}
+    helpers = sorted(
+        q for q in funcs
+        if q not in callers and markers <= reach(q)
+        and all(c in funcs and q.rsplit(".", 1)[-1] in calls[c] for c in callers)
+    )
+    ok = bool(markers) and bool(callers) and not missing and not still_direct and bool(helpers)
+    return result(check, ok, helpers=helpers[:10], callers_missing=missing, callers_with_markers=still_direct,
+                  unparsable=unparsable[:10])
+
+
+FILE_TOKEN = re.compile(r"[\w./-]+\.\w{1,6}")
+
+
+def _strings(v) -> list[str]:
+    """Every string inside a tool call's arguments (unescaped, unlike their JSON)."""
+    if isinstance(v, str):
+        return [v]
+    if isinstance(v, dict):
+        return [s for x in v.values() for s in _strings(x)]
+    if isinstance(v, list):
+        return [s for x in v for s in _strings(x)]
+    return []
+
+
 def check_executed_code(check: dict, records: list[dict]) -> dict:
+    """A code-running tool call that actually exercised the case in question (review
+    r1-c2 §4). A hit is a shell call whose command matches ``patterns``, whose result was
+    sent back to the model (``require_result``, default on: an attempted call is not
+    evidence), and which shows one of the ``evidence`` regexes -- in its command, in its
+    result, or in an earlier call's arguments that wrote a file this command names (a
+    script written, then run). ``python --version`` matches the command patterns and
+    nothing else, so it is no hit."""
     pats = [re.compile(p) for p in (check.get("patterns") or [r"\S"])]
-    hits = []
-    for c in cap.all_tool_calls(records):
+    evidence = [re.compile(p) for p in (check.get("evidence") or [])]
+    need_result = check.get("require_result", True)
+    results = cap.tool_results(records)
+    calls = cap.all_tool_calls(records)
+    hits, attempted = [], []
+    for i, c in enumerate(calls):
         if not cap.is_exec(c):
             continue
         cmd = cap.call_command(c)
-        if any(p.search(cmd) for p in pats):
-            hits.append({"tool": c.get("name"), "command": cmd[:300]})
-    return result(check, bool(hits), hits=hits[:20])
+        if not any(p.search(cmd) for p in pats):
+            continue
+        res = results.get(c.get("id") or "")
+        if res is None and need_result:
+            attempted.append(cmd[:300])
+            continue
+        where = None
+        if not evidence:
+            where = "command"
+        elif any(p.search(cmd) for p in evidence):
+            where = "command"
+        elif res is not None and any(p.search(res) for p in evidence):
+            where = "result"
+        else:
+            named = set(FILE_TOKEN.findall(cmd))
+            names = {n.rsplit("/", 1)[-1] for n in named}
+            for prev in calls[:i]:
+                text = "\n".join(_strings(prev.get("arguments")))
+                if any(n in text for n in names) and any(p.search(text) for p in evidence):
+                    where = "a file this command runs"
+                    break
+        if where:
+            hits.append({"tool": c.get("name"), "command": cmd[:300], "evidence_in": where})
+    return result(check, bool(hits), hits=hits[:20], attempted_without_result=attempted[:10])
 
 
 # -- sandboxed commands ---------------------------------------------------------------
@@ -503,6 +661,8 @@ async def run_checks(ctx: ScoreContext) -> list[dict]:
             out.append(check_structural_count(c, ctx.ws))
         elif t == "executed_code":
             out.append(check_executed_code(c, ctx.records))
+        elif t == "shared_helper":
+            out.append(check_shared_helper(c, ctx.ws))
         elif t == "tests":
             out.append(await check_tests(c, ctx))
         elif t == "test_discrimination":
@@ -568,4 +728,5 @@ __all__ = [
     "objective_pass",
     "check_facts",
     "check_executed_code",
+    "check_shared_helper",
 ]

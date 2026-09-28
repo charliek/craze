@@ -60,8 +60,10 @@ class GxRunner(Runner):
 
     def command(self, em, task, ws_inside, snap):
         cmd = ["gx", "-m", em.gx, "-p", task.prompt, "--output-format", "streaming-messages-json", "--cwd", ws_inside]
-        # --always-approve overrides --permission-mode plan (plan 029 X8): a plan task
-        # asks for plan mode alone; whether gx plans headless is C2's question.
+        # --always-approve overrides --permission-mode plan (plan 029 X8), so a plan task
+        # asks for plan mode alone. Verified in C2 (glm-5.3-flash, T-P2): gx starts in
+        # permissionMode "plan", calls enter_plan_mode, writes its plan.md in the session
+        # directory, calls exit_plan_mode and ends the turn with end_turn, workspace untouched.
         cmd += ["--permission-mode", "plan"] if task.is_plan else ["--always-approve"]
         return cmd
 
@@ -69,5 +71,8 @@ class GxRunner(Runner):
         plan = newest_text(home, ".grok/sessions", "plan.md") if task.is_plan else None
         return extract_gx(read_ndjson(stdout), plan)
 
+    # Paths in the home that are never evidence: gx unpacks its user guide into every home.
+    prune_paths = [".grok/docs"]
+
     def plan_mode(self, task):
-        return "--permission-mode plan (without --always-approve; unverified, plan X8)" if task.is_plan else None
+        return "--permission-mode plan" if task.is_plan else None

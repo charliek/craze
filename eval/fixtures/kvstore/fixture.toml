@@ -1,0 +1,4 @@
+# T-M1 (multi-step-rename): the "bucket" concept, named in the package, its tests,
+# the kv command and the README, becomes "namespace".
+initial_message = "kvstore: buckets of keys"
+initial_date = "2026-04-08T10:00:00+00:00"

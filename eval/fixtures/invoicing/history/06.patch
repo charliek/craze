@@ -1,0 +1,13 @@
+diff --git a/export.py b/export.py
+index 7f67a58..45a5ecf 100644
+--- a/export.py
++++ b/export.py
+@@ -9,7 +9,7 @@ from money import to_cents
+ def to_csv(lines: list[Line]) -> str:
+     out = io.StringIO()
+     writer = csv.writer(out, lineterminator="\n")
+-    writer.writerow(["sku", "quanity", "unit_price", "amount"])
++    writer.writerow(["sku", "quantity", "unit_price", "amount"])
+     for line in lines:
+         amount = to_cents(line.unit_price * line.quantity)
+         writer.writerow([line.sku, line.quantity, line.unit_price, amount])

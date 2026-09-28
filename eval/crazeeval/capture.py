@@ -508,6 +508,81 @@ def all_tool_calls(records: list[dict]) -> list[dict]:
     return out
 
 
+def content_text(c) -> str:
+    """A message's (or a tool result's) content as text: a string as is, a parts list
+    joined by lines."""
+    if isinstance(c, str):
+        return c
+    if isinstance(c, list):
+        parts = []
+        for p in c:
+            if isinstance(p, dict):
+                parts.append(str(p.get("text") or p.get("output") or p.get("content") or ""))
+            else:
+                parts.append(str(p))
+        return "\n".join(parts)
+    if c is None:
+        return ""
+    return json.dumps(c, ensure_ascii=False)
+
+
+def tool_results(records: list[dict]) -> dict[str, str]:
+    """call id -> the result text the harness sent back to the model (the first time):
+    a chat ``tool`` message or a Responses ``*_call_output`` item in a later request.
+    A call with no entry here never had its result sent -- it was only attempted."""
+    out: dict[str, str] = {}
+    for r in records:
+        req = r.get("request")
+        if not isinstance(req, dict):
+            continue
+        for m in req.get("messages") or []:
+            if isinstance(m, dict) and m.get("role") == "tool" and m.get("tool_call_id"):
+                out.setdefault(m["tool_call_id"], content_text(m.get("content")))
+        items = req.get("input")
+        if isinstance(items, list):
+            for it in items:
+                if isinstance(it, dict) and str(it.get("type", "")).endswith("_call_output") and it.get("call_id"):
+                    out.setdefault(it["call_id"], content_text(it.get("output")))
+    return out
+
+
+# -- tool kinds ---------------------------------------------------------------------------
+
+# Every tool name the four harnesses offer (read from the C1/C2 captures: craze's opencode
+# profile, gx, opencode, codex) and a few they may call, by kind. The judge's packet shows
+# the kind, never the name: the names alone would tell it which harness a side is
+# (review r1-c2 §5). An unknown name is "other".
+TOOL_KINDS: dict[str, tuple[str, ...]] = {
+    "shell": ("bash", "shell", "exec_command", "local_shell", "run_terminal_cmd", "run_terminal_command",
+              "run_command", "terminal", "exec", "execute_command", "unified_exec", "shell_command",
+              "run_shell_command"),
+    "shell-input": ("write_stdin",),
+    "read": ("read", "read_file", "view", "view_file", "open_file", "cat", "view_image"),
+    "edit": ("edit", "multiedit", "patch", "apply_patch", "search_replace", "str_replace", "str_replace_editor",
+             "str_replace_based_edit_tool", "edit_file", "file_edit", "replace", "insert", "notebook_edit"),
+    "write": ("write", "write_file", "create_file", "file_write"),
+    "search": ("grep", "glob", "search", "codesearch", "find", "find_files", "search_files", "ripgrep", "rg"),
+    "list": ("list", "ls", "list_dir", "list_directory", "list_files"),
+    "todo": ("todo_write", "todowrite", "todoread", "todo_read", "update_plan", "write_todos", "todo"),
+    "delegate": ("agent", "task", "spawn_subagent", "spawn_agent", "multi_agent_v1", "subagent", "send_input"),
+    "delegate-output": ("agent_output", "get_command_or_subagent_output", "wait", "kill_command_or_subagent"),
+    "plan": ("exit_plan_mode", "enter_plan_mode", "plan_exit", "plan_enter"),
+    "ask": ("ask_user_question", "question", "request_user_input"),
+    "skill": ("skill",),
+    "title": ("session_title",),
+    "goal": ("create_goal", "get_goal", "update_goal"),
+    "schedule": ("scheduler_create", "scheduler_delete", "scheduler_list", "monitor", "workflow"),
+    "tool-search": ("search_tool", "use_tool"),
+    "web": ("web_search", "websearch", "webfetch", "web_fetch", "fetch", "web_search_call"),
+}
+_KIND_OF = {name: kind for kind, names in TOOL_KINDS.items() for name in names}
+
+
+def tool_kind(name: str | None) -> str:
+    """The harness-neutral kind of a tool name (``other`` when unknown)."""
+    return _KIND_OF.get((name or "").lower(), "other")
+
+
 # -- metrics ---------------------------------------------------------------------
 
 

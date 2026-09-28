@@ -56,7 +56,9 @@ class OpencodeRunner(Runner):
     workspace_state: list[str] = []
     # The config dir's @opencode-ai/plugin comes read-only from the seed (no install,
     # no network); an npm cache is pruned should one appear anyway.
-    prune_paths = [".npm"]
+    # opencode also keeps a git snapshot of the whole workspace (large for craze tasks)
+    # and a cache under XDG; neither is evidence (the capture and diff.patch are).
+    prune_paths = [".npm", ".xdg/data/opencode/snapshot", ".xdg/cache"]
 
     def home(self, home, em, snap, base_url):
         return homes.opencode_home(home, em, snap, base_url)

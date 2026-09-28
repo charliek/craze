@@ -188,10 +188,12 @@ def test_facts_and_executed_code():
     assert check_facts(c, "It uses KESTREL-7 and returns None.")["passed"]
     r = check_facts(c, "It uses HERON-2.")
     assert not r["passed"] and r["details"]["satisfied"] == 0
-    e = {"type": "executed_code", "name": "e", "patterns": ["python|pytest"]}
-    assert check_executed_code(e, _synthetic_capture("python -m pytest -q"))["passed"]
+    e = {"type": "executed_code", "name": "e", "patterns": ["python|pytest"], "evidence": ["passed|failed"]}
+    assert check_executed_code(e, _synthetic_capture("python -m pytest -q", "3 passed"))["passed"]
+    assert not check_executed_code(e, _synthetic_capture("python -m pytest -q"))["passed"]  # never answered
     assert not check_executed_code(e, _synthetic_capture(None))["passed"]
-    assert not check_executed_code(e, _synthetic_capture("ls -la"))["passed"]
+    assert not check_executed_code(e, _synthetic_capture("ls -la", "a b"))["passed"]
+    assert not check_executed_code(e, _synthetic_capture("python --version", "Python 3.12.3"))["passed"]
 
 
 def _call(name, args):

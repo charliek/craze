@@ -1,0 +1,53 @@
+# T-I1 investigate-regression (plan 029 §3.1.5). The invoicing fixture's scripted history
+# (fixtures/invoicing/fixture.toml): commit 46d165a "Share one money helper across invoice
+# and export" replaces the ROUND_HALF_UP rounding with money.to_cents, whose quantize()
+# takes the context's default ROUND_HALF_EVEN. Fixed author and dates keep the hash stable.
+id = "T-I1"
+name = "investigate-regression"
+category = "investigate"
+split = "dev"
+mode = "build"
+timeout_s = 1200
+prompt = """
+Accounting says some of our invoice totals are off by a cent. It's not every invoice: for example 3 notebooks at 0.75 with a 10% discount came to 2.03 in v1.1, but on the current version (v1.3) we get 2.02. Can you find which commit caused this and explain why it happens? Please don't fix anything yet -- I just want to understand it.
+"""
+rubric = [
+    "Names commit 46d165a \"Share one money helper across invoice and export\" as the one that introduced the change.",
+    "Explains why: money.to_cents calls amount.quantize(CENT) without a rounding argument, so Decimal's default context rounding ROUND_HALF_EVEN applies, where invoice._round used ROUND_HALF_UP.",
+    "Explains that only exact half-cent amounts differ: 2.25 * 0.9 = 2.025 rounds to 2.02 half-even but 2.03 half-up.",
+    "Notes the CSV export's line amounts changed the same way (export.py switched to to_cents in the same commit).",
+    "Supports the conclusion with evidence from the repository: git log/show of the commit, or git bisect / running the example at v1.1, at the commit and at its parent.",
+    "Leaves the repository as it found it (no fix, no leftover bisect state).",
+]
+false_claims = [
+    "The per-customer tax commit (c856921 \"Support per-customer tax rates\") caused it (with tax 0 it rounds exactly as before).",
+    "It is floating-point error (the code uses Decimal throughout).",
+]
+
+[repo]
+kind = "fixture"
+name = "invoicing"
+
+[[checks]]
+type = "facts"
+name = "facts"
+min = 2
+
+[[checks.items]]
+id = "names-the-commit"
+regex = '46d165a|share one money helper'
+cite = "fixtures/invoicing/history/05.patch"
+
+[[checks.items]]
+id = "names-the-rounding"
+regex = 'half[-_ ]even|banker|half[-_ ]up'
+cite = "money.py to_cents: quantize(CENT) with the default ROUND_HALF_EVEN"
+
+[[checks]]
+type = "no_writes"
+name = "no-writes"
+
+[validate]
+reference_answer = "testdata/reference_answer.md"
+decoy_answer = "testdata/decoy_answer.md"
+planted_edit = { path = "money.py", append = "\n# planted edit\n" }
