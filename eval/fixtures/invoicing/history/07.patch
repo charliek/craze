@@ -1,0 +1,36 @@
+diff --git a/numbering.py b/numbering.py
+new file mode 100644
+index 0000000..8029b64
+--- /dev/null
++++ b/numbering.py
+@@ -0,0 +1,11 @@
++"""Invoice numbers: <prefix>-<year>-<sequence>."""
++
++
++def next_number(prefix: str, year: int, last: str | None) -> str:
++    """The number after ``last`` (or the first of the year)."""
++    seq = 1
++    if last:
++        p, y, s = last.rsplit("-", 2)
++        if p == prefix and int(y) == year:
++            seq = int(s) + 1
++    return f"{prefix}-{year}-{seq:05d}"
+diff --git a/tests/test_numbering.py b/tests/test_numbering.py
+new file mode 100644
+index 0000000..a645819
+--- /dev/null
++++ b/tests/test_numbering.py
+@@ -0,0 +1,13 @@
++from numbering import next_number
++
++
++def test_first_of_year():
++    assert next_number("INV", 2026, None) == "INV-2026-00001"
++
++
++def test_increments():
++    assert next_number("INV", 2026, "INV-2026-00041") == "INV-2026-00042"
++
++
++def test_new_year_restarts():
++    assert next_number("INV", 2026, "INV-2025-00900") == "INV-2026-00001"

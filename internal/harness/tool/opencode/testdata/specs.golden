@@ -1,5 +1,5 @@
 # The opencode profile's tools as a model is offered them (Profile.ToolsJSON).
-# tools_sha256: e884a137b2103f683a6181c41df673eab4cc3b88280e8138181deb42e953a7b1
+# tools_sha256: 7eaa3163960698b55f69d27ec9ddc8a16b9d0a8c4a411bdd38883204306a3e64
 
 === tool: bash
 --- description
@@ -267,6 +267,8 @@ Delegate work that is self-contained and would otherwise fill your context with 
 - Several agent calls in one message run in parallel. Start independent tasks together, in one message.
 - The sub-agent cannot see this conversation. Write a prompt that stands on its own: the goal, what you already know, the files and names that matter, whether to change code or only report, and what to return.
 - The result is the sub-agent's final message. Do not redo the work it did.
+- Check and use the result before you conclude: it is evidence for your answer, not the answer itself. If it leaves a question open, look into it or say so.
+- When the sub-agent is to change code, tell it how to verify its work, such as the test command to run, and ask it to report what it ran and the outcome.
 - Set `run_in_background` to go on working while the sub-agent runs, where the session supports it: its result is delivered to you when it finishes.
 - Leave `model` and `effort` out unless the task needs a different model or effort; the models you can choose are listed below.
 - Do not use it to read a single file or to run one search: the read, grep and glob tools do that directly, and faster.
@@ -336,9 +338,24 @@ Get the result of a sub-agent you started in the background with the agent tool 
 --- description
 Claude Code calls this tool `TodoWrite`.
 
-Create and manage a structured task list. The user sees this list live — it is your primary way to show progress.
+Create and update a structured task list for this session. The user sees the list live: it is your primary way to show progress on longer work, and it keeps you from losing track of steps.
 
-Use for any task with 3+ steps. Skip for trivial single-step work.
+When to use it:
+- The task needs three or more distinct steps, or touches several files or components.
+- The user gives you several things to do, or a numbered or comma-separated list.
+- New instructions or follow-up requests arrive while you work: add them as items straight away.
+- Before you start work you have planned out: record the steps first.
+
+When not to use it:
+- A single, straightforward step, or a question you can answer directly.
+- Purely conversational replies.
+
+How to keep it:
+- Give each item a short id and a clear, specific description. By default a call merges into the list by id, so send only the items you are adding or changing; to change a status, send just the id and the new status.
+- Keep exactly one item in_progress while work remains, and set it in_progress before you start it.
+- Mark an item completed only when it is actually done, including the verification it needs, such as its tests passing. Never mark an item completed on intent, while its tests fail, or while the work is partial.
+- If you are blocked on an item, leave it in_progress or pending and add an item for what would unblock it. Mark items that no longer apply as cancelled.
+- Update the list as soon as an item's status changes; do not save up several updates.
 --- parameters
 {
   "type": "object",

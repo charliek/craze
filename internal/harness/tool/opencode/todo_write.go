@@ -9,9 +9,11 @@ import (
 	"github.com/charliek/craze/internal/harness/tool"
 )
 
-// newTodoWrite builds todo_write (plan 023 §3.4). Its ids and description
-// are grok-build's — the reference for the three tools D-53 ports, ask mode
-// and the plan tool among them — never opencode's, whose own todowrite
+// newTodoWrite builds todo_write (plan 023 §3.4). Its ids are grok-build's,
+// and its description started as grok-build's before plan 029's lever L3
+// rewrote it in craze's own words (NOTICE) — grok-build being the reference
+// for the three tools D-53 ports, ask mode and the plan tool among them —
+// never opencode's, whose own todowrite
 // carries no id field at all in either direction: craze's schema and result
 // both do (below), since the model needs it back to update the right row.
 func newTodoWrite() (tool.Tool, error) {

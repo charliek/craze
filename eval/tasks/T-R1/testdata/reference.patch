@@ -1,0 +1,61 @@
+diff --git a/accounts.py b/accounts.py
+index 9c0a082..11b05ec 100644
+--- a/accounts.py
++++ b/accounts.py
+@@ -9,6 +9,17 @@ EMAIL_RE = re.compile(r"[a-z0-9._%+-]+@[a-z0-9-]+(\.[a-z0-9-]+)+")
+ BLOCKED_DOMAINS = {"mailinator.com", "example.invalid", "tempmail.dev"}
+ 
+ 
++def normalise_email(email: str) -> str:
++    """The canonical form of an address: stripped and lower-cased. Raises
++    ValueError when it is not a valid address or its domain is blocked."""
++    email = email.strip().lower()
++    if not EMAIL_RE.fullmatch(email):
++        raise ValueError(f"invalid email address: {email!r}")
++    if email.rsplit("@", 1)[1] in BLOCKED_DOMAINS:
++        raise ValueError(f"email domain not allowed: {email!r}")
++    return email
++
++
+ @dataclass
+ class User:
+     id: int
+@@ -26,11 +37,7 @@ class Directory:
+         return next((u for u in self.users.values() if u.email == email), None)
+ 
+     def sign_up(self, email: str, name: str) -> User:
+-        email = email.strip().lower()
+-        if not EMAIL_RE.fullmatch(email):
+-            raise ValueError(f"invalid email address: {email!r}")
+-        if email.rsplit("@", 1)[1] in BLOCKED_DOMAINS:
+-            raise ValueError(f"email domain not allowed: {email!r}")
++        email = normalise_email(email)
+         if self.by_email(email) is not None:
+             raise ValueError(f"{email} is already registered")
+         user = User(self._next_id, email, name.strip())
+@@ -41,11 +48,7 @@ class Directory:
+ 
+     def change_email(self, user_id: int, new_email: str) -> User:
+         user = self.users[user_id]
+-        new_email = new_email.strip().lower()
+-        if not EMAIL_RE.fullmatch(new_email):
+-            raise ValueError(f"invalid email address: {new_email!r}")
+-        if new_email.rsplit("@", 1)[1] in BLOCKED_DOMAINS:
+-            raise ValueError(f"email domain not allowed: {new_email!r}")
++        new_email = normalise_email(new_email)
+         other = self.by_email(new_email)
+         if other is not None and other.id != user_id:
+             raise ValueError(f"{new_email} is already registered")
+@@ -54,11 +57,7 @@ class Directory:
+ 
+     def invite(self, inviter_id: int, email: str) -> str:
+         inviter = self.users[inviter_id]
+-        email = email.strip().lower()
+-        if not EMAIL_RE.fullmatch(email):
+-            raise ValueError(f"invalid email address: {email!r}")
+-        if email.rsplit("@", 1)[1] in BLOCKED_DOMAINS:
+-            raise ValueError(f"email domain not allowed: {email!r}")
++        email = normalise_email(email)
+         if self.by_email(email) is not None:
+             raise ValueError(f"{email} is already registered")
+         self.invites[email] = inviter.email

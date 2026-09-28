@@ -1,0 +1,4 @@
+# T-V1 (verify-edge-case): parse_batch("") raises ValueError (unpacking an empty
+# list) although its docstring and its header-only test suggest it returns [].
+initial_message = "Batch export parser"
+initial_date = "2026-03-30T08:00:00+00:00"

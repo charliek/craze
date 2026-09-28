@@ -1,0 +1,408 @@
+diff --git a/README.md b/README.md
+index 99eb2b5..d159ff9 100644
+--- a/README.md
++++ b/README.md
+@@ -1,26 +1,26 @@
+ # kvstore
+ 
+-An in-memory key-value store. Keys live in **buckets**: each bucket is its own
+-keyspace, so two buckets can hold the same key with different values.
++An in-memory key-value store. Keys live in **namespaces**: each namespace is its own
++keyspace, so two namespaces can hold the same key with different values.
+ 
+ ```go
+ s := kvstore.New()
+-users, _ := s.CreateBucket("users")
++users, _ := s.CreateNamespace("users")
+ users.Put("ada", []byte(`{"role":"admin"}`))
+ 
+-b, err := s.Bucket("users")      // kvstore.ErrNoBucket if it does not exist
+-names := s.Buckets()              // sorted bucket names
+-err = s.DeleteBucket("users")     // drops the bucket and its keys
++b, err := s.Namespace("users")      // kvstore.ErrNoNamespace if it does not exist
++names := s.Namespaces()              // sorted namespace names
++err = s.DeleteNamespace("users")     // drops the namespace and its keys
+ ```
+ 
+ ## The kv command
+ 
+-`cmd/kv` keeps a store in a JSON file (bucket → key → value):
++`cmd/kv` keeps a store in a JSON file (namespace → key → value):
+ 
+ ```shell
+-go run ./cmd/kv -file data.json -bucket users put ada admin
+-go run ./cmd/kv -file data.json -bucket users get ada
+-go run ./cmd/kv -file data.json list-buckets
++go run ./cmd/kv -file data.json -namespace users put ada admin
++go run ./cmd/kv -file data.json -namespace users get ada
++go run ./cmd/kv -file data.json list-namespaces
+ ```
+ 
+-`-bucket` defaults to `default`; `put` creates the bucket if needed.
++`-namespace` defaults to `default`; `put` creates the namespace if needed.
+diff --git a/cmd/kv/main.go b/cmd/kv/main.go
+index 82176b2..498b649 100644
+--- a/cmd/kv/main.go
++++ b/cmd/kv/main.go
+@@ -1,9 +1,9 @@
+ // Command kv is a small demo of the store: it loads a JSON snapshot, runs one
+ // command against it, and writes the snapshot back.
+ //
+-//	kv -file data.json -bucket users put ada '{"role":"admin"}'
+-//	kv -file data.json -bucket users get ada
+-//	kv -file data.json list-buckets
++//	kv -file data.json -namespace users put ada '{"role":"admin"}'
++//	kv -file data.json -namespace users get ada
++//	kv -file data.json list-namespaces
+ package main
+ 
+ import (
+@@ -16,7 +16,7 @@ import (
+ 	"example.com/kvstore"
+ )
+ 
+-// snapshot is the file format: bucket name -> key -> value.
++// snapshot is the file format: namespace name -> key -> value.
+ type snapshot map[string]map[string]string
+ 
+ func load(path string) (*kvstore.Store, error) {
+@@ -33,7 +33,7 @@ func load(path string) (*kvstore.Store, error) {
+ 		return nil, err
+ 	}
+ 	for name, kv := range snap {
+-		b, err := s.CreateBucket(name)
++		b, err := s.CreateNamespace(name)
+ 		if err != nil {
+ 			return nil, err
+ 		}
+@@ -46,8 +46,8 @@ func load(path string) (*kvstore.Store, error) {
+ 
+ func save(path string, s *kvstore.Store) error {
+ 	snap := snapshot{}
+-	for _, name := range s.Buckets() {
+-		b, _ := s.Bucket(name)
++	for _, name := range s.Namespaces() {
++		b, _ := s.Namespace(name)
+ 		kv := map[string]string{}
+ 		for _, k := range b.Keys() {
+ 			v, _ := b.Get(k)
+@@ -64,25 +64,25 @@ func save(path string, s *kvstore.Store) error {
+ 
+ func main() {
+ 	file := flag.String("file", "kv.json", "the snapshot file")
+-	bucket := flag.String("bucket", "default", "the bucket to use")
++	namespace := flag.String("namespace", "default", "the namespace to use")
+ 	flag.Parse()
+-	if err := run(*file, *bucket, flag.Args()); err != nil {
++	if err := run(*file, *namespace, flag.Args()); err != nil {
+ 		fmt.Fprintln(os.Stderr, "kv:", err)
+ 		os.Exit(1)
+ 	}
+ }
+ 
+-func run(file, bucket string, args []string) error {
++func run(file, namespace string, args []string) error {
+ 	s, err := load(file)
+ 	if err != nil {
+ 		return err
+ 	}
+ 	if len(args) == 0 {
+-		return errors.New("usage: kv [-file f] [-bucket b] get <key> | put <key> <value> | list-buckets")
++		return errors.New("usage: kv [-file f] [-namespace b] get <key> | put <key> <value> | list-namespaces")
+ 	}
+ 	switch args[0] {
+-	case "list-buckets":
+-		for _, name := range s.Buckets() {
++	case "list-namespaces":
++		for _, name := range s.Namespaces() {
+ 			fmt.Println(name)
+ 		}
+ 		return nil
+@@ -90,13 +90,13 @@ func run(file, bucket string, args []string) error {
+ 		if len(args) != 2 {
+ 			return errors.New("get takes one key")
+ 		}
+-		b, err := s.Bucket(bucket)
++		b, err := s.Namespace(namespace)
+ 		if err != nil {
+ 			return err
+ 		}
+ 		v, ok := b.Get(args[1])
+ 		if !ok {
+-			return fmt.Errorf("%s: no such key in bucket %s", args[1], bucket)
++			return fmt.Errorf("%s: no such key in namespace %s", args[1], namespace)
+ 		}
+ 		fmt.Println(string(v))
+ 		return nil
+@@ -104,9 +104,9 @@ func run(file, bucket string, args []string) error {
+ 		if len(args) != 3 {
+ 			return errors.New("put takes a key and a value")
+ 		}
+-		b, err := s.Bucket(bucket)
+-		if errors.Is(err, kvstore.ErrNoBucket) {
+-			b, err = s.CreateBucket(bucket)
++		b, err := s.Namespace(namespace)
++		if errors.Is(err, kvstore.ErrNoNamespace) {
++			b, err = s.CreateNamespace(namespace)
+ 		}
+ 		if err != nil {
+ 			return err
+diff --git a/bucket.go b/namespace.go
+similarity index 52%
+rename from bucket.go
+rename to namespace.go
+index 86e9249..f7c4fee 100644
+--- a/bucket.go
++++ b/namespace.go
+@@ -5,44 +5,44 @@ import (
+ 	"sync"
+ )
+ 
+-// Bucket is one keyspace of a Store.
+-type Bucket struct {
++// Namespace is one keyspace of a Store.
++type Namespace struct {
+ 	name string
+ 	mu   sync.RWMutex
+ 	data map[string][]byte
+ }
+ 
+-func newBucket(name string) *Bucket {
+-	return &Bucket{name: name, data: make(map[string][]byte)}
++func newNamespace(name string) *Namespace {
++	return &Namespace{name: name, data: make(map[string][]byte)}
+ }
+ 
+-// Name returns the bucket's name.
+-func (b *Bucket) Name() string { return b.name }
++// Name returns the namespace's name.
++func (b *Namespace) Name() string { return b.name }
+ 
+ // Put stores a copy of value under key.
+-func (b *Bucket) Put(key string, value []byte) {
++func (b *Namespace) Put(key string, value []byte) {
+ 	b.mu.Lock()
+ 	defer b.mu.Unlock()
+ 	b.data[key] = slices.Clone(value)
+ }
+ 
+ // Get returns a copy of the value stored under key.
+-func (b *Bucket) Get(key string) ([]byte, bool) {
++func (b *Namespace) Get(key string) ([]byte, bool) {
+ 	b.mu.RLock()
+ 	defer b.mu.RUnlock()
+ 	v, ok := b.data[key]
+ 	return slices.Clone(v), ok
+ }
+ 
+-// Delete removes key from the bucket.
+-func (b *Bucket) Delete(key string) {
++// Delete removes key from the namespace.
++func (b *Namespace) Delete(key string) {
+ 	b.mu.Lock()
+ 	defer b.mu.Unlock()
+ 	delete(b.data, key)
+ }
+ 
+-// Keys returns the bucket's keys, sorted.
+-func (b *Bucket) Keys() []string {
++// Keys returns the namespace's keys, sorted.
++func (b *Namespace) Keys() []string {
+ 	b.mu.RLock()
+ 	defer b.mu.RUnlock()
+ 	keys := make([]string, 0, len(b.data))
+diff --git a/store.go b/store.go
+index fa8a33d..36998aa 100644
+--- a/store.go
++++ b/store.go
+@@ -1,5 +1,5 @@
+-// Package kvstore is an in-memory key-value store. Keys live in buckets: two
+-// buckets may hold the same key with different values.
++// Package kvstore is an in-memory key-value store. Keys live in namespaces: two
++// namespaces may hold the same key with different values.
+ package kvstore
+ 
+ import (
+@@ -9,63 +9,63 @@ import (
+ )
+ 
+ var (
+-	// ErrNoBucket is returned for a bucket that was never created or was deleted.
+-	ErrNoBucket = errors.New("kvstore: no such bucket")
+-	// ErrBucketExists is returned by CreateBucket for a name already in use.
+-	ErrBucketExists = errors.New("kvstore: bucket already exists")
++	// ErrNoNamespace is returned for a namespace that was never created or was deleted.
++	ErrNoNamespace = errors.New("kvstore: no such namespace")
++	// ErrNamespaceExists is returned by CreateNamespace for a name already in use.
++	ErrNamespaceExists = errors.New("kvstore: namespace already exists")
+ )
+ 
+-// Store holds the buckets. It is safe for concurrent use.
++// Store holds the namespaces. It is safe for concurrent use.
+ type Store struct {
+ 	mu      sync.RWMutex
+-	buckets map[string]*Bucket
++	namespaces map[string]*Namespace
+ }
+ 
+ // New returns an empty store.
+ func New() *Store {
+-	return &Store{buckets: make(map[string]*Bucket)}
++	return &Store{namespaces: make(map[string]*Namespace)}
+ }
+ 
+-// CreateBucket makes a new, empty bucket.
+-func (s *Store) CreateBucket(name string) (*Bucket, error) {
++// CreateNamespace makes a new, empty namespace.
++func (s *Store) CreateNamespace(name string) (*Namespace, error) {
+ 	s.mu.Lock()
+ 	defer s.mu.Unlock()
+-	if _, ok := s.buckets[name]; ok {
+-		return nil, ErrBucketExists
++	if _, ok := s.namespaces[name]; ok {
++		return nil, ErrNamespaceExists
+ 	}
+-	b := newBucket(name)
+-	s.buckets[name] = b
++	b := newNamespace(name)
++	s.namespaces[name] = b
+ 	return b, nil
+ }
+ 
+-// Bucket returns the bucket called name.
+-func (s *Store) Bucket(name string) (*Bucket, error) {
++// Namespace returns the namespace called name.
++func (s *Store) Namespace(name string) (*Namespace, error) {
+ 	s.mu.RLock()
+ 	defer s.mu.RUnlock()
+-	b, ok := s.buckets[name]
++	b, ok := s.namespaces[name]
+ 	if !ok {
+-		return nil, ErrNoBucket
++		return nil, ErrNoNamespace
+ 	}
+ 	return b, nil
+ }
+ 
+-// DeleteBucket removes a bucket and everything in it.
+-func (s *Store) DeleteBucket(name string) error {
++// DeleteNamespace removes a namespace and everything in it.
++func (s *Store) DeleteNamespace(name string) error {
+ 	s.mu.Lock()
+ 	defer s.mu.Unlock()
+-	if _, ok := s.buckets[name]; !ok {
+-		return ErrNoBucket
++	if _, ok := s.namespaces[name]; !ok {
++		return ErrNoNamespace
+ 	}
+-	delete(s.buckets, name)
++	delete(s.namespaces, name)
+ 	return nil
+ }
+ 
+-// Buckets returns the bucket names, sorted.
+-func (s *Store) Buckets() []string {
++// Namespaces returns the namespace names, sorted.
++func (s *Store) Namespaces() []string {
+ 	s.mu.RLock()
+ 	defer s.mu.RUnlock()
+-	names := make([]string, 0, len(s.buckets))
+-	for name := range s.buckets {
++	names := make([]string, 0, len(s.namespaces))
++	for name := range s.namespaces {
+ 		names = append(names, name)
+ 	}
+ 	slices.Sort(names)
+diff --git a/store_test.go b/store_test.go
+index 16778f9..73166ba 100644
+--- a/store_test.go
++++ b/store_test.go
+@@ -6,34 +6,34 @@ import (
+ 	"testing"
+ )
+ 
+-func TestCreateBucket(t *testing.T) {
++func TestCreateNamespace(t *testing.T) {
+ 	s := New()
+-	b, err := s.CreateBucket("users")
++	b, err := s.CreateNamespace("users")
+ 	if err != nil {
+ 		t.Fatal(err)
+ 	}
+ 	if b.Name() != "users" {
+ 		t.Fatalf("Name = %q", b.Name())
+ 	}
+-	if _, err := s.CreateBucket("users"); !errors.Is(err, ErrBucketExists) {
+-		t.Fatalf("second CreateBucket = %v, want ErrBucketExists", err)
++	if _, err := s.CreateNamespace("users"); !errors.Is(err, ErrNamespaceExists) {
++		t.Fatalf("second CreateNamespace = %v, want ErrNamespaceExists", err)
+ 	}
+ }
+ 
+-func TestMissingBucket(t *testing.T) {
++func TestMissingNamespace(t *testing.T) {
+ 	s := New()
+-	if _, err := s.Bucket("nope"); !errors.Is(err, ErrNoBucket) {
+-		t.Fatalf("Bucket(nope) = %v, want ErrNoBucket", err)
++	if _, err := s.Namespace("nope"); !errors.Is(err, ErrNoNamespace) {
++		t.Fatalf("Namespace(nope) = %v, want ErrNoNamespace", err)
+ 	}
+-	if err := s.DeleteBucket("nope"); !errors.Is(err, ErrNoBucket) {
+-		t.Fatalf("DeleteBucket(nope) = %v, want ErrNoBucket", err)
++	if err := s.DeleteNamespace("nope"); !errors.Is(err, ErrNoNamespace) {
++		t.Fatalf("DeleteNamespace(nope) = %v, want ErrNoNamespace", err)
+ 	}
+ }
+ 
+-func TestBucketsAreSeparate(t *testing.T) {
++func TestNamespacesAreSeparate(t *testing.T) {
+ 	s := New()
+-	a, _ := s.CreateBucket("a")
+-	b, _ := s.CreateBucket("b")
++	a, _ := s.CreateNamespace("a")
++	b, _ := s.CreateNamespace("b")
+ 	a.Put("k", []byte("1"))
+ 	b.Put("k", []byte("2"))
+ 	if v, _ := a.Get("k"); string(v) != "1" {
+@@ -44,30 +44,30 @@ func TestBucketsAreSeparate(t *testing.T) {
+ 	}
+ }
+ 
+-func TestDeleteBucket(t *testing.T) {
++func TestDeleteNamespace(t *testing.T) {
+ 	s := New()
+-	s.CreateBucket("tmp")
+-	if err := s.DeleteBucket("tmp"); err != nil {
++	s.CreateNamespace("tmp")
++	if err := s.DeleteNamespace("tmp"); err != nil {
+ 		t.Fatal(err)
+ 	}
+-	if got := s.Buckets(); len(got) != 0 {
+-		t.Fatalf("Buckets = %v after delete", got)
++	if got := s.Namespaces(); len(got) != 0 {
++		t.Fatalf("Namespaces = %v after delete", got)
+ 	}
+ }
+ 
+-func TestBucketsSorted(t *testing.T) {
++func TestNamespacesSorted(t *testing.T) {
+ 	s := New()
+ 	for _, n := range []string{"c", "a", "b"} {
+-		s.CreateBucket(n)
++		s.CreateNamespace(n)
+ 	}
+-	if got := s.Buckets(); !slices.Equal(got, []string{"a", "b", "c"}) {
+-		t.Fatalf("Buckets = %v", got)
++	if got := s.Namespaces(); !slices.Equal(got, []string{"a", "b", "c"}) {
++		t.Fatalf("Namespaces = %v", got)
+ 	}
+ }
+ 
+-func TestBucketKeysAndDelete(t *testing.T) {
++func TestNamespaceKeysAndDelete(t *testing.T) {
+ 	s := New()
+-	b, _ := s.CreateBucket("x")
++	b, _ := s.CreateNamespace("x")
+ 	b.Put("z", nil)
+ 	b.Put("y", []byte("v"))
+ 	b.Delete("z")

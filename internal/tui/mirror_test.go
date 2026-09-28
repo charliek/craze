@@ -325,13 +325,20 @@ func TestARestoredRowReappears(t *testing.T) {
 	if !r.m().queueHasID(row.ID) {
 		t.Fatalf("R was restored and the band draws %+v: the overlay kept it hidden past its restoring queued", r.m().queue)
 	}
-	// It reruns later as a turn of its own (X1 pin 4), not the Submit's.
-	r.stepEvents(evs[at+1:])
-	r.feedUntil(func(evs []agent.Event) bool {
+	// It reruns later as a turn of its own (X1 pin 4), not the Submit's. The
+	// rerun is the restore's paced recheck (the driver's tick, 10 ms after the
+	// restore), and until returns everything already on the stream, not only up
+	// to the restore: a run slower than the tick has the rerun's started in evs
+	// already, and a read that waited for it would wait for ever.
+	rerun := func(evs []agent.Event) bool {
 		return slices.ContainsFunc(evs, func(ev agent.Event) bool {
 			return ev.Type == agent.EventTurn && ev.Turn != nil && ev.Turn.Phase == agent.TurnStarted && ev.Turn.ID != submitTurn
 		})
-	})
+	}
+	r.stepEvents(evs[at+1:])
+	if !rerun(evs[at+1:]) {
+		r.feedUntil(rerun)
+	}
 	if id := r.m().turnID; id == submitTurn || id == "" {
 		t.Fatalf("the rerun's turn is %q, want a new one, not the Submit's %q", id, submitTurn)
 	}

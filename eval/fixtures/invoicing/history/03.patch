@@ -1,0 +1,23 @@
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+new file mode 100644
+index 0000000..a0554e2
+--- /dev/null
++++ b/CHANGELOG.md
+@@ -0,0 +1,10 @@
++# Changelog
++
++## 1.1.0
++
++- CSV export of invoice lines (`export.to_csv`).
++- Discount rules documented in the README.
++
++## 1.0.0
++
++- Invoice totals with discounts.
+diff --git a/VERSION b/VERSION
+index 3eefcb9..9084fa2 100644
+--- a/VERSION
++++ b/VERSION
+@@ -1 +1 @@
+-1.0.0
++1.1.0

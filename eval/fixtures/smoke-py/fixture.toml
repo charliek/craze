@@ -1,0 +1,4 @@
+# A tiny Python repo for the C1 smoke tasks (smoke-explain, smoke-fix).
+# total() has a planted off-by-one: it skips the last line.
+initial_message = "Inventory helpers"
+initial_date = "2026-01-01T12:00:00+00:00"

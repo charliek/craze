@@ -1,0 +1,24 @@
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index a0554e2..904c8c6 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -1,5 +1,12 @@
+ # Changelog
+ 
++## 1.3.0
++
++- Per-customer tax rates (`tax.rate_for`, `total(..., tax_percent=...)`).
++- Shared money helper for invoices and exports.
++- Invoice numbering (`numbering.next_number`).
++- Fixed the CSV export's header.
++
+ ## 1.1.0
+ 
+ - CSV export of invoice lines (`export.to_csv`).
+diff --git a/VERSION b/VERSION
+index 9084fa2..f0bb29e 100644
+--- a/VERSION
++++ b/VERSION
+@@ -1 +1 @@
+-1.1.0
++1.3.0

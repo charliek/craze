@@ -1,0 +1,54 @@
+# T-F1 feature-python-json-flag (plan 029 §3.1.5): hidden tests for the flag, and the
+# agent's own tests must discriminate (fail on the original, pass on theirs).
+id = "T-F1"
+name = "feature-python-json-flag"
+category = "feature"
+split = "dev"
+mode = "build"
+timeout_s = 1200
+prompt = """
+Please add a `--json` flag to wordstat that prints the counts as JSON instead of the table: a single object with `files`, a list of `{"path", "lines", "words", "chars"}` objects in the order the paths were given, and `total`, with `lines`, `words` and `chars` summed over all the files (present even when there's only one file). The table should stay the default. Add tests for the new flag, and mention it in the README.
+"""
+rubric = [
+    "Adds a --json option to the argparse parser; without it the table output is unchanged.",
+    "Prints exactly one JSON object: files in the given order with path, lines, words and chars, and total, present even for a single file.",
+    "Adds tests that exercise --json (one file and several files) and would fail without the feature.",
+    "Runs the test suite and reports the result.",
+    "Updates the docs (README or the module docstring) to mention the flag.",
+]
+false_claims = []
+
+[repo]
+kind = "fixture"
+name = "wordstat"
+
+[[checks]]
+type = "tests"
+name = "hidden-and-visible"
+runner = "pytest"
+args = ["tests"]
+timeout_s = 300
+restore_from_start = ["tests/test_wordstat.py", "conftest.py"]
+expect = [
+    "tests/test_hidden_wordstat_json.py::test_json_single_file",
+    "tests/test_hidden_wordstat_json.py::test_json_several_files_keep_their_order",
+    "tests/test_hidden_wordstat_json.py::test_json_flag_after_the_paths",
+    "tests/test_hidden_wordstat_json.py::test_table_is_still_the_default",
+    "tests/test_wordstat.py::test_count_text",
+    "tests/test_wordstat.py::test_empty_text",
+    "tests/test_wordstat.py::test_table_for_one_file",
+    "tests/test_wordstat.py::test_table_total_for_several_files",
+    "tests/test_wordstat.py::test_missing_file",
+]
+
+[checks.add]
+"tests/test_hidden_wordstat_json.py" = "testdata/hidden/test_hidden_wordstat_json.py"
+
+[[checks]]
+type = "test_discrimination"
+name = "agent-tests-discriminate"
+runner = "pytest"
+timeout_s = 300
+
+[validate]
+reference_patch = "testdata/reference.patch"

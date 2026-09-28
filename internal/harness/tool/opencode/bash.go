@@ -130,6 +130,14 @@ func pickShell(bash, sh string) string {
 	return sh
 }
 
+// Shell returns the path of the shell this host's bash tool runs commands
+// with: pickShell's choice between bashPath and shPath, the same one bash's
+// own description names (host.shell above). It is exported so the harness can
+// fill the system prompt's environment block (tool.SystemEnv.Shell) with the
+// identical value, rather than a second guess at which shell bash actually
+// runs.
+func Shell() string { return pickShell(bashPath, shPath) }
+
 type bashTool struct {
 	spec tool.Spec
 	host host

@@ -1,0 +1,40 @@
+diff --git a/export.py b/export.py
+new file mode 100644
+index 0000000..2e9bde4
+--- /dev/null
++++ b/export.py
+@@ -0,0 +1,17 @@
++"""CSV export of invoice lines."""
++
++import csv
++import io
++from decimal import ROUND_HALF_UP
++
++from invoice import CENT, Line
++
++
++def to_csv(lines: list[Line]) -> str:
++    out = io.StringIO()
++    writer = csv.writer(out, lineterminator="\n")
++    writer.writerow(["sku", "quanity", "unit_price", "amount"])
++    for line in lines:
++        amount = (line.unit_price * line.quantity).quantize(CENT, rounding=ROUND_HALF_UP)
++        writer.writerow([line.sku, line.quantity, line.unit_price, amount])
++    return out.getvalue()
+diff --git a/tests/test_export.py b/tests/test_export.py
+new file mode 100644
+index 0000000..7057806
+--- /dev/null
++++ b/tests/test_export.py
+@@ -0,0 +1,11 @@
++from decimal import Decimal
++
++from export import to_csv
++from invoice import Line
++
++
++def test_to_csv():
++    text = to_csv([Line("NB-A5", 2, Decimal("4.50"))])
++    rows = text.splitlines()
++    assert rows[1] == "NB-A5,2,4.50,9.00"
++    assert len(rows) == 2

@@ -41,7 +41,9 @@ func opencodeProfile(t *testing.T) tool.Profile {
 //
 //	go test ./internal/harness -run TestSystemPromptGolden -update
 func TestSystemPromptGolden(t *testing.T) {
-	got := systemPrompt(opencodeProfile(t), "/home/user/project", "linux")
+	// The shell is fixed, like the workspace and the OS above it, so the
+	// golden does not depend on which shell this machine has.
+	got := systemPrompt(opencodeProfile(t), "/home/user/project", "linux", "/bin/bash")
 	if *updateGolden {
 		if err := os.WriteFile(systemGolden, []byte(got), 0o644); err != nil {
 			t.Fatal(err)
@@ -61,19 +63,25 @@ func TestSystemPromptGolden(t *testing.T) {
 }
 
 // TestSystemPromptIsFrozen: two sessions on one workspace, opened at
-// different times, send byte-identical prompts — the profile's, which name
-// the workspace and this OS, and the caller's extras rendered after them; and
-// a turn's transcript header records the prompt's hash, craze's version, the
-// tool profile and the hash of the tools the requests carried. Both runs
-// matter: with extras it is A9's "the same prompt hash over the same inputs",
-// and the hash covering the extras is what puts them under the header with no
-// code of their own.
+// different times with identical Options, send byte-identical prompts — the
+// profile's, which name the workspace and this OS, and the caller's extras
+// rendered after them; and a turn's transcript header records the prompt's
+// hash, craze's version, the tool profile and the hash of the tools the
+// requests carried. The harness holds no clock, so the time between the two
+// Opens changes nothing: a prompt varies between sessions only through
+// Options.Snapshot, the session-start section rendered last (D-67, which
+// amends D-30; TestSessionStartIsTheOnlyVaryingTail), and these sessions
+// have none. Both runs matter: with extras it is A9's "the same prompt hash
+// over the same inputs", and the hash covering the extras is what puts them
+// under the header with no code of their own.
 func TestSystemPromptIsFrozen(t *testing.T) {
 	for _, extras := range []bool{false, true} {
 		t.Run(fmt.Sprintf("extras=%v", extras), func(t *testing.T) {
 			f := newFixture(t, "http://127.0.0.1:1/v1")
 			opts := f.options()
-			want := systemPrompt(opencodeProfile(t), f.workspace, runtime.GOOS)
+			// Open fills the shell from this host's own opencode.Shell(), the
+			// same value the bash tool uses, so the comparison must too.
+			want := systemPrompt(opencodeProfile(t), f.workspace, runtime.GOOS, opencode.Shell())
 			if extras {
 				opts.Prompt = testPromptExtras()
 				// The fixture's extras hold no provider key, so the session's
@@ -164,7 +172,7 @@ func testPromptExtras() PromptExtras {
 //
 //	go test ./internal/harness -run TestSystemPromptExtrasGolden -update
 func TestSystemPromptExtrasGolden(t *testing.T) {
-	base := systemPrompt(opencodeProfile(t), "/home/user/project", "linux")
+	base := systemPrompt(opencodeProfile(t), "/home/user/project", "linux", "/bin/bash")
 	got := mustPrompt(t, base, testPromptExtras(), redact.New())
 	if *updateGolden {
 		if err := os.WriteFile(extrasGolden, []byte(got), 0o644); err != nil {
@@ -199,7 +207,7 @@ func TestSystemPromptExtrasGolden(t *testing.T) {
 // content sends exactly what every session sent before H4 — and "nothing to
 // render" includes content every rule of the renderer throws away.
 func TestPromptExtrasKeepTheProfilesPrefix(t *testing.T) {
-	base := systemPrompt(opencodeProfile(t), "/home/user/project", "linux")
+	base := systemPrompt(opencodeProfile(t), "/home/user/project", "linux", "/bin/bash")
 	for name, x := range map[string]PromptExtras{
 		"the zero value":      {},
 		"empty slices":        {Instructions: []PromptDoc{}, Catalog: []CatalogRow{}},

@@ -1,0 +1,59 @@
+# T-I2 investigate-flaky-test (plan 029 §3.1.5). The quota fixture: TestConfigureOverrides
+# (limits_test.go) calls Configure, which overwrites the package-level Defaults (limits.go)
+# and never restores it; New() copies Defaults, so TestBurstAllowsTenRequests fails
+# whenever `go test -shuffle=on` (the Makefile's CI target) runs it afterwards.
+id = "T-I2"
+name = "investigate-flaky-test"
+category = "investigate"
+split = "heldout"
+mode = "build"
+timeout_s = 1200
+prompt = """
+TestBurstAllowsTenRequests fails sometimes in CI ("request 4 was refused, want allowed"), but I've never been able to make it fail locally with `go test ./...`. Can you figure out why it's flaky? Don't fix it yet, I want to understand the cause first.
+"""
+rubric = [
+    "Names the cause: TestConfigureOverrides (limits_test.go) calls Configure, which overwrites the package-level quota.Defaults (limits.go) and never restores it.",
+    "Explains the mechanism: New() copies Defaults, so a bucket made after that test has burst 3 and refuses request 4.",
+    "Explains why it is intermittent: CI runs `go test -race -shuffle=on` (Makefile), so the test order changes from run to run; without -shuffle the source order runs TestBurstAllowsTenRequests first, which is why it never fails locally.",
+    "Reproduces it and shows the command and output, e.g. `go test -shuffle=on` with a failing seed, `-run 'TestConfigureOverrides|TestBurstAllowsTenRequests'` in that order, or `-count=2`.",
+    "Rules out timing and races: Allow takes an explicit time and the test passes a fixed instant; -race reports nothing.",
+    "Suggests (without applying) a fix: restore Defaults with t.Cleanup in the test, or stop mutating global state (pass limits explicitly).",
+    "Changes no files.",
+]
+false_claims = [
+    "It is a timing problem with time.Now or a sleep (the test passes a fixed t0).",
+    "It is a data race in TestConcurrentAllow (the bucket is guarded by a mutex; -race is clean).",
+]
+
+[repo]
+kind = "fixture"
+name = "quota"
+
+[[checks]]
+type = "facts"
+name = "facts"
+min = 3
+
+[[checks.items]]
+id = "shared-state"
+regex = '\bDefaults\b'
+cite = "limits.go: var Defaults"
+
+[[checks.items]]
+id = "mutating-test"
+regex = 'Configure|TestConfigureOverrides'
+cite = "limits.go: Configure; limits_test.go: TestConfigureOverrides"
+
+[[checks.items]]
+id = "order"
+regex = 'shuffle|test order|order[- ]dependen|run order|execution order|ordering'
+cite = "Makefile: go test -race -shuffle=on -count=1 ./..."
+
+[[checks]]
+type = "no_writes"
+name = "no-writes"
+
+[validate]
+reference_answer = "testdata/reference_answer.md"
+decoy_answer = "testdata/decoy_answer.md"
+planted_edit = { path = "limits.go", append = "\n// planted edit\n" }

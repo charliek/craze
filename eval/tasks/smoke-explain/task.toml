@@ -1,0 +1,40 @@
+# C1 smoke task: answer a question that needs one file read; change nothing.
+id = "smoke-explain"
+category = "explain"
+split = "smoke"
+mode = "build"
+timeout_s = 900
+prompt = """
+Read `inventory.py` and answer two questions: which warehouse code does `parse_line` use when a line has no warehouse column, and what does `parse_line` return for comment lines and for blank lines? Do not change any files.
+"""
+rubric = [
+    "Names the default warehouse code KESTREL-7 (DEFAULT_WAREHOUSE, inventory.py:3).",
+    "Says parse_line returns None for comment lines (starting with '#') and blank lines (inventory.py:11-13).",
+]
+
+[repo]
+kind = "fixture"
+name = "smoke-py"
+
+[[checks]]
+type = "facts"
+name = "facts"
+
+[[checks.items]]
+id = "default-warehouse"
+regex = 'KESTREL-7'
+cite = "inventory.py:3"
+
+[[checks.items]]
+id = "returns-none"
+regex = '\bNone\b'
+cite = "inventory.py:11-13"
+
+[[checks]]
+type = "no_writes"
+name = "no-writes"
+
+[validate]
+reference_answer = "testdata/reference_answer.md"
+decoy_answer = "testdata/decoy_answer.md"
+planted_edit = { path = "inventory.py", append = "\n# planted edit\n" }

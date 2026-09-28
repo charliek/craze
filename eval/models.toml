@@ -1,0 +1,70 @@
+# The eval's target models and each harness's id for them (plan 029 §3.1.4).
+#
+# provider     craze provider name; it picks the proxy route (and the key).
+# wire_model   the `model` every request must name (the proxy's allowlist).
+# effort       the one pinned reasoning effort per model -- the default craze and gx
+#              already share from `craze import gx` (reasoning-effort parity).
+# craze / gx   the alias in each tool's model table (copied from the owner's tables
+#              by `crazeeval snapshot-config`).
+# opencode     <provider>/<model> in opencode's own ids (its built-in providers).
+# codex        the wire model, only where the provider serves the Responses API
+#              (Meta, Fireworks; Z.AI does not -- §2.6). Absent = codex does not run.
+# codex_provider  the provider id in the generated codex config.
+
+[models."muse-spark-1.3"]
+provider = "meta"
+wire_model = "muse-spark-1.3"
+effort = "high"
+craze = "muse-spark-1.3"
+gx = "muse-spark-1.3"
+opencode = "meta/muse-spark-1.3"
+codex = "muse-spark-1.3"
+codex_provider = "meta"
+
+[models."muse-spark-1.3-contributor"]
+provider = "meta"
+wire_model = "muse-spark-1.3-contributor"
+effort = "high"
+craze = "muse-spark-1.3-contributor"
+gx = "muse-spark-1.3-contributor"
+opencode = "meta/muse-spark-1.3-contributor"
+codex = "muse-spark-1.3-contributor"
+codex_provider = "meta"
+
+[models."glm-5.3"]
+provider = "zai-coding-plan"
+wire_model = "glm-5.3"
+effort = "max"
+craze = "glm-5.3"
+gx = "glm-5.3"
+opencode = "zai-coding-plan/glm-5.3"
+
+[models."glm-5.3-flash"]
+provider = "zai-coding-plan"
+wire_model = "glm-5.3-flash"
+effort = "high"
+craze = "glm-5.3-flash"
+gx = "glm-5.3-flash"
+opencode = "zai-coding-plan/glm-5.3-flash"
+
+[models."fireworks/kimi-k3"]
+provider = "fireworks"
+wire_model = "accounts/fireworks/models/kimi-k3"
+effort = "high"
+craze = "fireworks/kimi-k3"
+gx = "fireworks/kimi-k3"
+opencode = "fireworks-ai/accounts/fireworks/models/kimi-k3"
+codex = "accounts/fireworks/models/kimi-k3"
+codex_provider = "fireworks"
+# Dominates cost (plan 029 §9): one rep, last in each batch.
+last = true
+
+[models."fireworks/deepseek-v4p1-flash"]
+provider = "fireworks"
+wire_model = "accounts/fireworks/models/deepseek-v4p1-flash"
+effort = "high"
+craze = "fireworks/deepseek-v4p1-flash"
+gx = "fireworks/deepseek-v4p1-flash"
+opencode = "fireworks-ai/accounts/fireworks/models/deepseek-v4p1-flash"
+codex = "accounts/fireworks/models/deepseek-v4p1-flash"
+codex_provider = "fireworks"

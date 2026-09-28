@@ -1,0 +1,67 @@
+# T-P2 plan-fixture-feature (plan 029 §3.1.5, §3.1.11). The pricing fixture: every quote
+# costs two database reads; prices change rarely, through PriceAdmin on any one of several
+# processes (README).
+id = "T-P2"
+name = "plan-fixture-feature"
+category = "plan"
+split = "heldout"
+mode = "plan"
+timeout_s = 1200
+prompt = """
+Quotes are slow because every one of them goes to the catalog database twice. I'd like to add a cache layer to the pricing service. Please make a plan: where the cache should sit, how entries get invalidated when prices change, and how we'd test it. Just the plan for now -- don't change any code.
+"""
+rubric = [
+    "Puts the cache at the repository seam: ProductRepository.get and volume_tiers (e.g. a CachedProductRepository with the same interface, wired in app.build), not on PriceService.quote results (quantity-dependent, and caching them would hide tier changes).",
+    "Invalidates on writes: PriceAdmin.update_price and update_tiers (via set_list_price / replace_volume_tiers) evict or refresh that SKU's entries.",
+    "Addresses several processes: each process has its own build, so a local eviction only fixes the process that took the admin call; bounds staleness with a TTL or uses a shared cache / pub-sub invalidation, and states the trade-off.",
+    "Covers the details: keys per SKU for product and tiers, caching unknown SKUs (None) and empty tier lists deliberately, a bounded size since traffic is concentrated on a few hundred SKUs, and thread safety.",
+    "Tests: count FakeDB.queries to show hits, invalidation through PriceAdmin (test_price_update_is_seen_by_quotes and test_tier_update_is_seen_by_quotes must keep passing), TTL expiry with an injected clock.",
+    "Makes no changes.",
+]
+false_claims = [
+    "Wrap PriceService.quote in functools.lru_cache -- prices never change (they change through PriceAdmin, and lru_cache never expires).",
+    "Evicting in PriceAdmin keeps every process consistent (other processes keep their own caches).",
+]
+
+[repo]
+kind = "fixture"
+name = "pricing"
+
+[[checks]]
+type = "facts"
+name = "facts"
+min = 4
+
+[[checks.items]]
+id = "repository-seam"
+regex = 'ProductRepository'
+cite = "pricing/repository.py: ProductRepository.get, volume_tiers"
+
+[[checks.items]]
+id = "write-path"
+regex = 'update_price|set_list_price|update_tiers|replace_volume_tiers|PriceAdmin'
+cite = "pricing/admin.py: PriceAdmin"
+
+[[checks.items]]
+id = "invalidation"
+regex = 'invalidat|evict'
+cite = "pricing/admin.py"
+
+[[checks.items]]
+id = "ttl"
+regex = '\bTTL\b|expir|time[- ]to[- ]live'
+cite = "README.md: several processes"
+
+[[checks.items]]
+id = "processes"
+regex = 'process|replica|instances|stale'
+cite = "README.md: several processes behind a load balancer"
+
+[[checks]]
+type = "no_writes"
+name = "no-writes"
+
+[validate]
+reference_answer = "testdata/reference_plan.md"
+decoy_answer = "testdata/decoy_plan.md"
+planted_edit = { path = "pricing/service.py", append = "\n# planted edit\n" }

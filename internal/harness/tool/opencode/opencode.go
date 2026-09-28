@@ -77,11 +77,12 @@ func Profile() (tool.Profile, error) {
 //go:embed descriptions/*.txt
 var descriptions embed.FS
 
-// systemText is the profile's system prompt: opencode's
-// session/prompt/default.txt reduced to what is true of craze, with the
-// environment block H1's prompt had (NOTICE lists every edit). Its two
-// placeholders are the only things that vary, and neither varies within a
-// session, so every request in one starts with the same bytes (D-30).
+// systemText is the profile's system prompt: craze's own text, written for
+// this tool set (plan 029 §3.2 L1; NOTICE's "The system prompt" section
+// records which sentences are adapted from a reference and which are craze's
+// own). Its three placeholders are the only things that vary, and none of
+// them varies within a session, so every request in one starts with the same
+// bytes (D-30).
 //
 //go:embed system.txt
 var systemText string
@@ -92,7 +93,7 @@ var systemText string
 // renders for every session.
 func systemFunc() (func(tool.SystemEnv) string, error) {
 	vars := func(env tool.SystemEnv) map[string]string {
-		return map[string]string{"workspace": env.Workspace, "os": env.OS}
+		return map[string]string{"workspace": env.Workspace, "os": env.OS, "shell": env.Shell}
 	}
 	if _, err := tool.Render(systemText, vars(tool.SystemEnv{})); err != nil {
 		return nil, fmt.Errorf("system prompt: %w", err)

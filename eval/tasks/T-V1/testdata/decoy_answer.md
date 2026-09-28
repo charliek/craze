@@ -1,0 +1,1 @@
+Yes. The docstring says an export with no records yields an empty list, and there's a test for the header-only case (`test_header_only`) that returns `[]`. The loop over rows simply doesn't run for empty input, so `parse_batch("")` returns `[]` and the nightly job will just see no records.

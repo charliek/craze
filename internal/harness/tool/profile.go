@@ -34,11 +34,17 @@ type Profile struct {
 }
 
 // SystemEnv is what a profile's system prompt may depend on. It holds
-// nothing that changes between requests — no clock, no git state — so every
-// request in a session starts with the same bytes (plan 018 §3.7).
+// nothing that changes between requests or between sessions — no clock, no
+// git state — so a profile's text is identical for identical input, every
+// request in a session starts with the same bytes (plan 018 §3.7), and every
+// session on a workspace shares them as a prefix. The date and the git state
+// a session starts with are not the profile's: the harness renders them after
+// the profile's text and the extras, as the session-start section, the one
+// part of a prompt that varies between sessions (plan 029 §3.2 L2, D-67).
 type SystemEnv struct {
 	Workspace string // the session's working directory, absolute and cleaned
 	OS        string // runtime.GOOS
+	Shell     string // the shell path the bash tool runs commands with
 }
 
 // ModelRef is how a profile is chosen: the resolved model, and the optional

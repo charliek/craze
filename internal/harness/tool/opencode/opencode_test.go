@@ -205,49 +205,85 @@ func TestProfile(t *testing.T) {
 	}
 }
 
-// TestSystemPrompt: the profile's prompt is opencode's default.txt with
-// exactly the edits NOTICE lists — each removed passage gone, the sentence
-// or line on either side of it kept (the negative controls), "opencode"
-// renamed — and H1's environment block, filled with the session's two facts
-// and nothing else; a value that looks like a placeholder is inserted as it
-// is. (The whole text is pinned by internal/harness's system_prompt.golden.)
+// TestSystemPrompt: the profile's prompt is craze's own text, written for
+// this tool set (plan 029 §3.2 L1) — not opencode's default.txt, which it
+// replaced; NOTICE's "The system prompt" section records every sentence
+// that reads close to one of the three reference prompts the plan compared
+// it against. It ends in the environment block, filled with the session's
+// three facts and nothing else; a value that looks like a placeholder is
+// inserted as it is. (The whole text is pinned by internal/harness's
+// system_prompt.golden.)
 func TestSystemPrompt(t *testing.T) {
 	p, err := Profile()
 	if err != nil {
 		t.Fatal(err)
 	}
-	got := p.System(tool.SystemEnv{Workspace: "/home/user/project", OS: "linux"})
+	got := p.System(tool.SystemEnv{Workspace: "/home/user/project", OS: "linux", Shell: "/bin/bash"})
 	for _, gone := range []string{
 		"opencode", "OpenCode", "/help", "report the issue", "WebFetch", "use the ls tool", "npm run dev",
-		"AGENTS.md", "system-reminder", "Task tool", "TodoWrite", "${",
+		"AGENTS.md", "Task tool", "TodoWrite", "${",
+		// X9: craze's reminder, compaction and shell-context messages are
+		// described without their literal tag names, so the prompt never
+		// collides with reminderTag ("system-reminder") or the other tests'
+		// literal-tag checks across internal/harness (child_test.go,
+		// reminders_test.go, segment_test.go, wire_test.go, canary_test.go),
+		// none of which this profile's tests may change.
+		"system-reminder", "compacted_context", "shell_context",
 	} {
 		if strings.Contains(got, gone) {
 			t.Errorf("the prompt still says %q", gone)
 		}
 	}
 	for _, kept := range []string{
-		"You are craze, an interactive CLI tool that helps users with software engineering tasks.",
-		"IMPORTANT: You must NEVER generate or guess URLs",
-		"# Tone and style\n",
-		"user: what command should I run to list files in the current directory?\nassistant: ls\n</example>\n\n<example>\nuser: what files are in the directory src/?",
-		"# Proactiveness\n", "# Following conventions\n", "# Code style\n", "# Doing tasks\n",
-		"with Bash if they were provided to you to ensure your code is correct.\nNEVER commit changes unless the user explicitly asks you to.",
-		"otherwise the user will feel that you are being too proactive.\n\n# Tool usage policy\n- You have the capability to call multiple tools in a single response.",
-		"`file_path:line_number`",
+		"You are craze, a coding agent working in the user's terminal.",
+		"Never guess or invent URLs. Use URLs the user gave you or that appear in the project.",
+		"# How to work\n", "# Verify before you claim\n", "# Communicating with the user\n",
+		"# Using tools\n", "# Changing code\n", "# Messages from craze\n",
+		"Refer to code as `file_path:line_number` so the user can jump to it.",
+		// The tag names are described in words, not spelled out literally (X9).
+		"system reminder tags", "compacted context block", "shell context block",
 	} {
 		if !strings.Contains(got, kept) {
 			t.Errorf("the prompt lost %q", kept)
 		}
 	}
-	if !strings.HasSuffix(got, "</example>\n\nEnvironment:\n- Working directory: /home/user/project\n- Operating system: linux\n") {
+	if !strings.Contains(got, "come from craze, not from the user") {
+		t.Error("the prompt does not tell the model reminder messages come from craze")
+	}
+	if !strings.HasSuffix(got, "# Environment\n- Working directory: /home/user/project\n- Operating system: linux\n- Shell used by the bash tool: /bin/bash\n") {
 		t.Errorf("the prompt does not end in the environment block:\n%s", got[max(0, len(got)-300):])
 	}
-	if again := p.System(tool.SystemEnv{Workspace: "/home/user/project", OS: "linux"}); again != got {
+	if again := p.System(tool.SystemEnv{Workspace: "/home/user/project", OS: "linux", Shell: "/bin/bash"}); again != got {
 		t.Error("two calls built different prompts")
 	}
-	odd := p.System(tool.SystemEnv{Workspace: "/tmp/${os}", OS: "darwin"})
-	if !strings.Contains(odd, "- Working directory: /tmp/${os}\n- Operating system: darwin\n") {
-		t.Errorf("a workspace holding a placeholder was not inserted as it is:\n%s", odd[len(odd)-120:])
+	odd := p.System(tool.SystemEnv{Workspace: "/tmp/${os}", OS: "darwin", Shell: "/tmp/${shell}"})
+	if !strings.Contains(odd, "- Working directory: /tmp/${os}\n- Operating system: darwin\n- Shell used by the bash tool: /tmp/${shell}\n") {
+		t.Errorf("a workspace or shell holding a placeholder was not inserted as it is:\n%s", odd[len(odd)-200:])
+	}
+}
+
+// TestSystemPromptDoesNotMandateBrevity: L1 removed opencode's brevity
+// mandate — the owner's evidence (plan 029 §1) is that it made craze's
+// answers too thin against grok, opencode, codex and cursor on the same
+// models — and NOTICE's "The system prompt" section records the removal.
+// This is the negative control: none of the removed sentences, or their
+// characteristic phrases, survive the rewrite.
+func TestSystemPromptDoesNotMandateBrevity(t *testing.T) {
+	p, err := Profile()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := p.System(tool.SystemEnv{Workspace: "/home/user/project", OS: "linux", Shell: "/bin/bash"})
+	for _, gone := range []string{
+		"fewer than 4 lines",
+		"One word answers are best",
+		"minimize output tokens",
+		"just stop, rather than providing an explanation",
+		"DO NOT ADD ***ANY*** COMMENTS",
+	} {
+		if strings.Contains(got, gone) {
+			t.Errorf("the prompt still mandates brevity with %q", gone)
+		}
 	}
 }
 

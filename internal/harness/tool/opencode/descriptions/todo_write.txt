@@ -1,5 +1,20 @@
 Claude Code calls this tool `TodoWrite`.
 
-Create and manage a structured task list. The user sees this list live — it is your primary way to show progress.
+Create and update a structured task list for this session. The user sees the list live: it is your primary way to show progress on longer work, and it keeps you from losing track of steps.
 
-Use for any task with 3+ steps. Skip for trivial single-step work.
+When to use it:
+- The task needs three or more distinct steps, or touches several files or components.
+- The user gives you several things to do, or a numbered or comma-separated list.
+- New instructions or follow-up requests arrive while you work: add them as items straight away.
+- Before you start work you have planned out: record the steps first.
+
+When not to use it:
+- A single, straightforward step, or a question you can answer directly.
+- Purely conversational replies.
+
+How to keep it:
+- Give each item a short id and a clear, specific description. By default a call merges into the list by id, so send only the items you are adding or changing; to change a status, send just the id and the new status.
+- Keep exactly one item in_progress while work remains, and set it in_progress before you start it.
+- Mark an item completed only when it is actually done, including the verification it needs, such as its tests passing. Never mark an item completed on intent, while its tests fail, or while the work is partial.
+- If you are blocked on an item, leave it in_progress or pending and add an item for what would unblock it. Mark items that no longer apply as cancelled.
+- Update the list as soon as an item's status changes; do not save up several updates.

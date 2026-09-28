@@ -248,3 +248,20 @@ The suite is isolated from your machine: its own tmux socket (`-L`), its own
 configuration (`-f /dev/null`, so no `~/.tmux.conf` hook can reach the panes),
 its own `HOME`, and stub `wl-copy`/`xclip`/`xsel` on the pane's `PATH` so a copy
 never touches your real clipboard.
+
+## Evaluation harness (`eval/`)
+
+`eval/` is a separate evaluation harness for the native provider: sandboxed runs of native, gx,
+opencode and codex against the same tasks and models, scored objectively and judged blind by
+`codex exec`. It is not part of CI or the per-commit gate, and it spends real API money — do not
+run it as part of an ordinary change.
+
+Only the recording proxy inside `eval/` ever holds a real provider key; the sandboxed harnesses it
+drives see a dummy key and a proxy URL. Nothing under `~/.craze`, `~/.grok`, `~/.config/opencode`,
+`~/.local/share/opencode` or `~/.codex` is ever written by a run, only read.
+
+Changes to native's system prompt, tool descriptions or request parameters are measured against
+this harness before they ship (see `discovery/native-harness/08-decisions.md`, D-69).
+
+See `eval/README.md` for the commands (`crazeeval validate`, `run`, `judge-batch`, `report`, …) and
+the full shape of a run.

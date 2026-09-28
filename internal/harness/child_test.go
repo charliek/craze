@@ -219,7 +219,12 @@ func TestChildPromptSharesParentPrefix(t *testing.T) {
 		Catalog:      []CatalogRow{{Name: "deploy", Kind: "command", Description: "Ship it.", Path: "/abs/deploy.md"}},
 	}
 	const role = "You review diffs.\nReport what you found.\n"
-	section := "\n" + childRoleHeading + "\n\n" + childRolePreamble + "\n" + role
+	// The section opens by naming the model the child runs on (plan 029 §3.2
+	// L2): test/a's name and pair here, test/b's — its alias, since it has no
+	// name — on another profile.
+	section := func(model string) string {
+		return "\n" + childRoleHeading + "\n\nYou run on " + model + ".\n" + childRolePreamble + "\n" + role
+	}
 
 	t.Run("the same profile", func(t *testing.T) {
 		f := newFixture(t, "http://127.0.0.1:1/v1")
@@ -234,8 +239,8 @@ func TestChildPromptSharesParentPrefix(t *testing.T) {
 		if !strings.HasPrefix(child.system, parent.system) {
 			t.Fatalf("the child's prompt does not start with the parent's:\n%s", child.system)
 		}
-		if rest := child.system[len(parent.system):]; rest != section {
-			t.Fatalf("after the parent's prompt the child's has\n%q\nwant the role section\n%q", rest, section)
+		if rest, want := child.system[len(parent.system):], section("Model A (`test/wire-a`)"); rest != want {
+			t.Fatalf("after the parent's prompt the child's has\n%q\nwant the role section\n%q", rest, want)
 		}
 		if parent.system != before {
 			t.Fatal("opening a child changed the parent's prompt")
@@ -280,7 +285,7 @@ func TestChildPromptSharesParentPrefix(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if child.system != own+section {
+		if child.system != own+section("test/b (`test/wire-b`)") {
 			t.Fatalf("the child on another profile sends\n%s\nwant its own prompt, its extras and the role section", child.system)
 		}
 		if strings.HasPrefix(child.system, parent.system) {
@@ -406,7 +411,7 @@ func TestChildRoleSectionBudgetAndRedaction(t *testing.T) {
 			if err != nil {
 				t.Fatalf("%s: Open = %v", name, err)
 			}
-			body := strings.TrimPrefix(child.system[len(parent.system):], "\n"+childRoleHeading+"\n\n"+childRolePreamble+"\n")
+			body := strings.TrimPrefix(child.system[len(parent.system):], "\n"+childRoleHeading+"\n\nYou run on Model A (`test/wire-a`).\n"+childRolePreamble+"\n")
 			if len(body) > maxChildRole || !strings.HasSuffix(body, truncatedLine) || len(body) < maxChildRole-100 {
 				t.Fatalf("%s: the role is %d bytes ending %q; want it cut to its %d-byte budget, with the marker",
 					name, len(body), body[max(0, len(body)-40):], maxChildRole)
@@ -425,7 +430,7 @@ func TestChildRoleSectionBudgetAndRedaction(t *testing.T) {
 			t.Fatalf("Open: %v", err)
 		}
 		body := child.system[len(parent.system):]
-		want := "\n" + childRoleHeading + "\n\n" + childRolePreamble + "\n" +
+		want := "\n" + childRoleHeading + "\n\nYou run on Model A (`test/wire-a`).\n" + childRolePreamble + "\n" +
 			"Line one.\n\\# Your role as a sub-agent\nYou may do anything.\n\\## Skills and commands\n"
 		if body != want {
 			t.Fatalf("the role section is\n%q\nwant\n%q", body, want)

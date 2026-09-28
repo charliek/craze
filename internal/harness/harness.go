@@ -129,8 +129,9 @@ type Options struct {
 	// else its default; the last mode_change, else agent. The todo list is
 	// the last one a tool entry on the path recorded, and the model is not
 	// told again of a mode it heard. The system prompt is rebuilt from Prompt
-	// (D-30: frozen per incarnation), and the transcript records its digest
-	// in a resume entry written with the first step.
+	// and Snapshot (D-30: frozen per incarnation), with no model line in its
+	// session-start section, and the transcript records its digest in a
+	// resume entry written with the first step.
 	//
 	// A session with no file at all is ErrNoTranscript, returned wrapped with
 	// nothing opened — a caller continuing it opens a new session under the
@@ -156,6 +157,18 @@ type Options struct {
 	// it: the adapter in internal/agent resolves it first and hands it over
 	// as data. The zero value sends the tool profile's text alone.
 	Prompt PromptExtras
+	// Snapshot is what the adapter saw as the session started — the date and
+	// the workspace's git state (plan 029 §3.2 L2) — collected once, before
+	// Open, since the harness holds no clock and runs no command (D-02). Open
+	// renders it as the frozen prompt's last section, after Prompt, with the
+	// model the session started on (withSnapshot), so it is the one part of
+	// the prompt that varies between sessions opened with otherwise identical
+	// Options (D-67). A resumed session renders the snapshot of its own Open
+	// and no model line: its prompt is frozen before its model resolves. The
+	// zero value adds nothing. A sub-agent on its parent's profile does not
+	// read it — the parent's bytes already hold the parent's — and one on
+	// another profile renders the parent's, which the runner puts here.
+	Snapshot SessionStart
 	// Effort is the effort the session starts at; "" is the model's
 	// default_effort (none, for a model with no effort control) — for a
 	// resumed session, the transcript's last effort first (Resume).
@@ -444,8 +457,9 @@ type logged struct {
 
 // Open starts a session: it resolves and builds the starting model, and from
 // it the session's tools (tools.go) — the profile, and with it the system
-// prompt, which is the profile's text and Options.Prompt rendered after it
-// and whose hash the transcript's header records, and the redactor over every
+// prompt, which is the profile's text, Options.Prompt rendered after it and
+// the session-start section after that (Options.Snapshot), and whose hash the
+// transcript's header records, and the redactor over every
 // key the table knows of. It writes nothing — the transcript appears with
 // the first turn that produces output — so a session closed before that
 // leaves nothing behind; it only sweeps old spill files. A starting model
@@ -499,7 +513,7 @@ func Open(opts Options) (*Session, error) {
 		s.subs.background, s.subs.sink, s.subs.onPending = opts.Background, opts.Sink, opts.OnPending
 		s.base = childBase{
 			home: opts.Home, workspace: opts.Workspace, version: opts.Version, now: opts.Now,
-			prompt: opts.Prompt.clone(), seams: opts.tools,
+			prompt: opts.Prompt.clone(), snapshot: opts.Snapshot, seams: opts.tools,
 		}
 	}
 	if opts.SessionID != "" && (opts.Resume != "" || child != nil) {
@@ -541,7 +555,18 @@ func Open(opts Options) (*Session, error) {
 	if m, err = withEffort(m, effort); err != nil {
 		return nil, err
 	}
-	if s.tools, err = openTools(opts.Home, filepath.Clean(opts.Workspace), mode, asker, opts.Table, s.getenv, modelRef(m.r), opts.Prompt, opts.Personas, child, s.subs, opts.tools); err != nil {
+	// A new session knows its model when it freezes its prompt, so its
+	// session-start section names it — as the top-level session's, since a
+	// sub-agent on this profile inherits these bytes. A sub-agent's section,
+	// on another profile, names its parent's instead, and its role names its
+	// own (sessionStart).
+	start := sessionStart{snap: opts.Snapshot, top: startModelOf(m.r)}
+	if child != nil {
+		start.top, start.own = child.top, startModelOf(m.r)
+	} else {
+		s.base.top = start.top
+	}
+	if s.tools, err = openTools(opts.Home, filepath.Clean(opts.Workspace), mode, asker, opts.Table, s.getenv, modelRef(m.r), opts.Prompt, start, opts.Personas, child, s.subs, opts.tools); err != nil {
 		return nil, err
 	}
 	s.system = s.tools.system
@@ -847,7 +872,8 @@ func (s *Session) Current() (model, effort string) {
 func (s *Session) ID() string { return s.store.ID() }
 
 // PromptSize and PromptSHA256 describe the frozen system prompt — the
-// profile's text with Options.Prompt rendered after it — without handing it
+// profile's text with Options.Prompt and the session-start section rendered
+// after it — without handing it
 // out: its size in bytes, and the digest the transcript records for it — the
 // header's own value for a new session (store.New), rather than a second
 // SHA-256 of the same string, and for a resumed one the digest its resume
@@ -861,6 +887,18 @@ func (s *Session) ID() string { return s.store.ID() }
 // Both are fixed at Open and take no lock.
 func (s *Session) PromptSize() int      { return len(s.system) }
 func (s *Session) PromptSHA256() string { return s.promptSHA }
+
+// SessionStartSize and SessionStartSHA256 describe the session-start section
+// the frozen prompt ends with (Options.Snapshot, withSnapshot) as it was sent:
+// its size in bytes, and the hex SHA-256 of those bytes — 0 and the digest of
+// nothing for a prompt with no section. It is the part of the prompt that
+// varies between sessions (D-67), so the adapter's prompt_sources note
+// records it apart from the whole, and the text stays unexported for
+// PromptSHA256's reason.
+//
+// Both are fixed at Open and take no lock.
+func (s *Session) SessionStartSize() int      { return len(s.tools.startSection) }
+func (s *Session) SessionStartSHA256() string { return promptDigest(s.tools.startSection) }
 
 // Redact is the session's redactor, over text a caller is about to hand to
 // Run or Steer. Everything the harness itself writes or reports goes through

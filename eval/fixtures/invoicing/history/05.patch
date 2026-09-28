@@ -1,0 +1,87 @@
+diff --git a/export.py b/export.py
+index 2e9bde4..7f67a58 100644
+--- a/export.py
++++ b/export.py
+@@ -2,9 +2,8 @@
+ 
+ import csv
+ import io
+-from decimal import ROUND_HALF_UP
+-
+-from invoice import CENT, Line
++from invoice import Line
++from money import to_cents
+ 
+ 
+ def to_csv(lines: list[Line]) -> str:
+@@ -12,6 +11,6 @@ def to_csv(lines: list[Line]) -> str:
+     writer = csv.writer(out, lineterminator="\n")
+     writer.writerow(["sku", "quanity", "unit_price", "amount"])
+     for line in lines:
+-        amount = (line.unit_price * line.quantity).quantize(CENT, rounding=ROUND_HALF_UP)
++        amount = to_cents(line.unit_price * line.quantity)
+         writer.writerow([line.sku, line.quantity, line.unit_price, amount])
+     return out.getvalue()
+diff --git a/invoice.py b/invoice.py
+index dbc9910..b38208a 100644
+--- a/invoice.py
++++ b/invoice.py
+@@ -1,9 +1,9 @@
+ """Invoice totals."""
+ 
+ from dataclasses import dataclass
+-from decimal import ROUND_HALF_UP, Decimal
++from decimal import Decimal
+ 
+-CENT = Decimal("0.01")
++from money import to_cents
+ 
+ 
+ @dataclass(frozen=True)
+@@ -13,10 +13,6 @@ class Line:
+     unit_price: Decimal
+ 
+ 
+-def _round(amount: Decimal) -> Decimal:
+-    return amount.quantize(CENT, rounding=ROUND_HALF_UP)
+-
+-
+ def subtotal(lines: list[Line]) -> Decimal:
+     return sum((line.unit_price * line.quantity for line in lines), Decimal("0"))
+ 
+@@ -39,4 +35,4 @@ def total(
+     tax_percent: Decimal = Decimal("0"),
+ ) -> Decimal:
+     """The amount due, rounded to cents: discount first, then tax."""
+-    return _round(apply_tax(apply_discount(subtotal(lines), discount_percent), tax_percent))
++    return to_cents(apply_tax(apply_discount(subtotal(lines), discount_percent), tax_percent))
+diff --git a/money.py b/money.py
+new file mode 100644
+index 0000000..84970f3
+--- /dev/null
++++ b/money.py
+@@ -0,0 +1,10 @@
++"""Money helpers shared by invoices and exports."""
++
++from decimal import Decimal
++
++CENT = Decimal("0.01")
++
++
++def to_cents(amount: Decimal) -> Decimal:
++    """Round an amount to whole cents."""
++    return amount.quantize(CENT)
+diff --git a/tests/test_money.py b/tests/test_money.py
+new file mode 100644
+index 0000000..4fa7503
+--- /dev/null
++++ b/tests/test_money.py
+@@ -0,0 +1,8 @@
++from decimal import Decimal
++
++from money import to_cents
++
++
++def test_to_cents():
++    assert to_cents(Decimal("4.5")) == Decimal("4.50")
++    assert to_cents(Decimal("1.234")) == Decimal("1.23")

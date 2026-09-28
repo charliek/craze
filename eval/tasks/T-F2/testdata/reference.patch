@@ -1,0 +1,86 @@
+diff --git a/README.md b/README.md
+index 17c971a..ee4b658 100644
+--- a/README.md
++++ b/README.md
+@@ -5,5 +5,6 @@ Formats numbers for people.
+ | function | example |
+ |---|---|
+ | `Duration(d time.Duration) string` | `1h 5m`, `2m 3s`, `850ms` |
++| `Bytes(n int64) string` | `1023 B`, `1.5 KiB`, `2.3 GiB` |
+ 
+ `go test ./...` runs the tests.
+diff --git a/bytes.go b/bytes.go
+new file mode 100644
+index 0000000..18e2e33
+--- /dev/null
++++ b/bytes.go
+@@ -0,0 +1,39 @@
++package humanize
++
++import (
++	"math"
++	"strconv"
++	"strings"
++)
++
++var byteUnits = []string{"KiB", "MiB", "GiB", "TiB", "PiB", "EiB"}
++
++// Bytes formats a byte count with binary units: "0 B", "1023 B", "1 KiB",
++// "1.5 KiB", "2.3 GiB". Above 1023 bytes the value is shown in the largest unit
++// in which it is at least 1, rounded to one decimal (halves away from zero),
++// without a trailing ".0"; a value that rounds to 1024 of a unit moves to the
++// next. A negative count gets a leading minus.
++func Bytes(n int64) string {
++	if n < 0 {
++		if n == math.MinInt64 {
++			return "-8 EiB"
++		}
++		return "-" + Bytes(-n)
++	}
++	if n < 1024 {
++		return strconv.FormatInt(n, 10) + " B"
++	}
++	v := float64(n) / 1024
++	unit := 0
++	for v >= 1024 && unit < len(byteUnits)-1 {
++		v /= 1024
++		unit++
++	}
++	r := math.Round(v*10) / 10
++	if r >= 1024 && unit < len(byteUnits)-1 {
++		unit++
++		r = math.Round(r/1024*10) / 10
++	}
++	s := strconv.FormatFloat(r, 'f', 1, 64)
++	return strings.TrimSuffix(s, ".0") + " " + byteUnits[unit]
++}
+diff --git a/bytes_test.go b/bytes_test.go
+new file mode 100644
+index 0000000..7851d7d
+--- /dev/null
++++ b/bytes_test.go
+@@ -0,0 +1,24 @@
++package humanize
++
++import "testing"
++
++func TestBytes(t *testing.T) {
++	cases := []struct {
++		in   int64
++		want string
++	}{
++		{0, "0 B"},
++		{1023, "1023 B"},
++		{1024, "1 KiB"},
++		{1536, "1.5 KiB"},
++		{1 << 20, "1 MiB"},
++		{1048575, "1 MiB"},
++		{3 << 30, "3 GiB"},
++		{-1536, "-1.5 KiB"},
++	}
++	for _, c := range cases {
++		if got := Bytes(c.in); got != c.want {
++			t.Errorf("Bytes(%d) = %q, want %q", c.in, got, c.want)
++		}
++	}
++}

@@ -791,7 +791,11 @@ func TestACancelledRowSourcedRefusalIsNotRestored(t *testing.T) {
 			t.Fatalf("cancel: %v", err)
 		}
 		close(refusal.gate)
-		awaitTurn(t, returned, "turn-1")
+		// turn-1's continuation reports only after its goroutine has launched
+		// turn-2 (the drain of "behind it"), and turn-2 — an echo — can come
+		// back first when turn-1's goroutine is preempted in between (CI saw it
+		// under -race); either order is correct.
+		awaitTurns(t, returned, "turn-1", "turn-2")
 		wantCancelled(t, r.until(ended("turn-1")), "turn-1")
 		r.until(lastEnding)
 		r.wantShapes(r.seen,

@@ -1,0 +1,50 @@
+# T-F2 feature-go-humanize (plan 029 §3.1.5): hidden tests for Bytes, and the agent's
+# own tests must discriminate (fail on the original, pass on theirs).
+id = "T-F2"
+name = "feature-go-humanize"
+category = "feature"
+split = "heldout"
+mode = "build"
+timeout_s = 1200
+prompt = """
+Please add a `Bytes(n int64) string` function to the humanize package that formats byte counts for people. Below 1024 it's the plain count with a `B` (`"0 B"`, `"1023 B"`). From 1024 up, use the largest binary unit -- KiB, MiB, GiB, TiB, PiB, EiB -- in which the value is at least 1, rounded to one decimal place (halves away from zero) and without a trailing `.0`: 1024 is `"1 KiB"`, 1536 is `"1.5 KiB"`. If rounding reaches 1024 of a unit, use the next unit instead (1048575 is `"1 MiB"`). Negative counts get a leading minus (`-1536` is `"-1.5 KiB"`). Please add tests, and list it in the README's table.
+"""
+rubric = [
+    "Implements Bytes(n int64) string in the humanize package with the specified units, rounding (one decimal, halves away from zero, no trailing .0) and the unit bump when rounding reaches 1024.",
+    "Handles negatives (including math.MinInt64 without overflow or a panic) and the int64 maximum (8 EiB).",
+    "Adds table-driven tests covering B, KiB..EiB, the rounding bump and negatives.",
+    "Adds Bytes to the README's table.",
+    "Runs go test (and ideally go vet) and reports the result.",
+]
+false_claims = []
+
+[repo]
+kind = "fixture"
+name = "humanize"
+
+[[checks]]
+type = "tests"
+name = "hidden-and-visible"
+runner = "go"
+args = ["./..."]
+timeout_s = 600
+restore_from_start = ["duration_test.go"]
+expect = [
+    "::TestHiddenBytesBelowOneKiB",
+    "::TestHiddenBytesBinaryUnits",
+    "::TestHiddenBytesRoundingUpChangesUnit",
+    "::TestHiddenBytesNegative",
+    "::TestDuration",
+]
+
+[checks.add]
+"bytes_hidden_test.go" = "testdata/hidden/bytes_hidden_test.go"
+
+[[checks]]
+type = "test_discrimination"
+name = "agent-tests-discriminate"
+runner = "go"
+timeout_s = 600
+
+[validate]
+reference_patch = "testdata/reference.patch"

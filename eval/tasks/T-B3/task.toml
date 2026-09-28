@@ -1,0 +1,61 @@
+# T-B3 fix-craze-redact (plan 029 §3.1.5, X7). setup.patch flips the key sort in
+# redact.New (internal/harness/redact/redact.go:84-86) from longest-first to
+# shortest-first; the workspace is one parentless commit of the patched tree, so git
+# shows nothing of what was planted. The package's original tests at 3eabb31 catch it.
+id = "T-B3"
+name = "fix-craze-redact"
+category = "bugfix"
+split = "heldout"
+mode = "build"
+timeout_s = 1200
+prompt = """
+`go test ./internal/harness/redact/` fails on my checkout. For example TestWriterHoldsBackOnlyWhatItMust says "after one write, 172 bytes reached the writer, want 161", and TestWriterEverySplitPoint and a few others in that package fail too. Can you find the cause and fix it? The tests are right; please don't change them.
+"""
+rubric = [
+    "Identifies the cause: New sorts the keys shortest first -- its comparator compares len(a) with len(b) (internal/harness/redact/redact.go:84-86) although the comment says longest first -- so r.longest is the shortest key's length and byFirst tries short keys first.",
+    "Explains the effect: a Writer holds back only len(shortest key)-1 bytes (redact.go:196-197), so a longer key split across writes is emitted unredacted, and matchAt returns a shorter key where a longer one starts at the same byte.",
+    "Fixes the comparator to sort longest first (cmp.Compare(len(b), len(a))) without touching the tests.",
+    "Runs go test on the package and reports it passing.",
+]
+false_claims = [
+    "The bug is in Writer.Write's hold-back arithmetic (it is correct once longest is right).",
+    "The tests expect the wrong byte count and should be updated.",
+]
+
+[repo]
+kind = "craze"
+setup_patch = "testdata/setup.patch"
+
+[[checks]]
+type = "tests"
+name = "package-tests"
+runner = "go"
+args = ["./internal/harness/redact/"]
+timeout_s = 600
+# The package's original tests, restored from the start state (the agent may not weaken them).
+restore_from_start = ["internal/harness/redact/redact_test.go"]
+expect = [
+    "::TestString",
+    "::TestNilReplacerRedactsNothing",
+    "::TestWriterEverySplitPoint",
+    "::TestWriterHoldsBackOnlyWhatItMust",
+    "::TestWriterManySmallWrites",
+    "::TestWriterErrorIsSticky",
+    "::TestRandomSplitsMatchStringAndReference",
+    "::TestConcurrentWritersShareAReplacer",
+    "::TestMarkerOverlaps",
+    "::TestNoKeySurvivesUnlessItOverlapsTheMarker",
+]
+
+[[checks]]
+type = "diff_scope"
+name = "non-test-files-of-the-package"
+allow = ["internal/harness/redact/*.go"]
+deny = ["internal/harness/redact/*_test.go"]
+
+[validate]
+# No reference.patch: the reference is the base commit 3eabb31 (the tree without the plant).
+# diff_scope controls: the reference plus an edit to the package's test file, or plus an
+# edit outside the package, must fail the scope check.
+scope_denied_edit = "internal/harness/redact/redact_test.go"
+scope_outside_edit = "internal/harness/system.go"

@@ -55,6 +55,10 @@ type nativeSession struct {
 	// tweak edits the harness's options just before Open: the test seam
 	// NewNative exposes, nil in production.
 	tweak func(*harness.Options)
+	// gitRun runs the session-start snapshot's git commands
+	// (native_snapshot.go): nil is execGit, and a test in this package hands
+	// in a fake to see the argv and script the answers.
+	gitRun gitRunner
 
 	// log is where every event goes, as on the live session: emit publishes
 	// into it and Events is its primary. events is the same channel, kept as
@@ -802,6 +806,11 @@ func (s *nativeSession) loadClosed() error {
 // compacts it until H7 (R1). That is a diagnostic rather than a refusal — the
 // files are the user's own and craze is not the one to decide they are too
 // many — so the session starts either way.
+//
+// The session-start section (plan 029 §3.2 L2) is recorded apart, as
+// "<sha256> <bytes>" of the section as sent: it is the one part of the prompt
+// that differs between two sessions on the same files (D-67), so a reader
+// comparing two notes can tell a changed snapshot from a changed prompt.
 func (s *nativeSession) notePromptSources(hs *harness.Session, x harness.PromptExtras) {
 	size := hs.PromptSize()
 	if size > maxNativePromptBytes {
@@ -814,6 +823,7 @@ func (s *nativeSession) notePromptSources(hs *harness.Session, x harness.PromptE
 		"prompt_sha256": hs.PromptSHA256(),
 		"instructions":  instructions,
 		"catalog":       catalog,
+		"snapshot":      hs.Redact(fmt.Sprintf("%s %d", hs.SessionStartSHA256(), hs.SessionStartSize())),
 	}})
 }
 
@@ -1003,11 +1013,14 @@ func (s *nativeSession) open() (*harness.Session, *modeltable.Table, nativeLoad,
 	// through the memo above — the redactor Open builds for what it freezes.
 	keys := nativeTableKeys(table, hopts.Getenv)
 	red := redact.New(keys...)
+	// One lane for the content's diagnostics and the snapshot's below: built
+	// once, since building it is also where an ignored --plugin-dir is said.
+	warn := s.contentWarn(red)
 	content := loadNativeContent(
 		resolveNativeSources(hopts.Workspace, s.contentHome()),
 		s.opts.Compat,
 		keys,
-		s.contentWarn(red),
+		warn,
 	)
 	// Only where the seam left it alone, so that tweak keeps its last word on
 	// every field of harness.Options (NewNative). The assignment cannot simply
@@ -1020,6 +1033,16 @@ func (s *nativeSession) open() (*harness.Session, *modeltable.Table, nativeLoad,
 	}
 	// What the provenance note records is what was frozen, seam or no seam.
 	content.extras = hopts.Prompt
+	// The session-start snapshot (plan 029 §3.2 L2), collected here for the
+	// same reason as the content — the prompt it ends is frozen inside Open —
+	// and on the same terms: for the workspace the harness opens on, and only
+	// where the seam left it unset, so a test that hands in its own keeps it
+	// and runs no git. A resumed incarnation collects its own: the date and
+	// the repository are this Open's, whatever they were when the transcript
+	// began.
+	if hopts.Snapshot == (harness.SessionStart{}) {
+		hopts.Snapshot = s.sessionStart(hopts.Workspace, hopts.Now, table, warn)
+	}
 	// How the harness's two blocking tools reach a person: this session's own
 	// registry, behind tool.Asker (plan 023 §3.4). Left to the seam's last word
 	// like Prompt above, so a harness test that hands in an asker of its own

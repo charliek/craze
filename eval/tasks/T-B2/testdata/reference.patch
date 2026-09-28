@@ -1,0 +1,40 @@
+diff --git a/lru.go b/lru.go
+index ec97621..19f1b88 100644
+--- a/lru.go
++++ b/lru.go
+@@ -59,9 +59,9 @@ func (c *Cache[V]) Put(key string, value V) {
+ 	if c.ll.Len() > c.cap {
+ 		oldest := c.ll.Back()
+ 		c.ll.Remove(oldest)
+-		delete(c.items, key)
++		ev := oldest.Value.(*entry[V])
++		delete(c.items, ev.key)
+ 		if c.onEvict != nil {
+-			ev := oldest.Value.(*entry[V])
+ 			c.onEvict(ev.key, ev.value)
+ 		}
+ 	}
+diff --git a/lru_test.go b/lru_test.go
+index b672571..00593cf 100644
+--- a/lru_test.go
++++ b/lru_test.go
+@@ -33,6 +33,19 @@ func TestPutReplaces(t *testing.T) {
+ 	}
+ }
+ 
++func TestPutEvictsTheOldestEntry(t *testing.T) {
++	c := New[int](2, nil)
++	c.Put("a", 1)
++	c.Put("b", 2)
++	c.Put("c", 3)
++	if _, ok := c.Get("a"); ok {
++		t.Fatal("a should have been evicted")
++	}
++	if v, ok := c.Get("c"); !ok || v != 3 {
++		t.Fatalf("Get(c) = %d, %v; want 3, true", v, ok)
++	}
++}
++
+ func TestRemove(t *testing.T) {
+ 	c := New[int](2, nil)
+ 	c.Put("a", 1)

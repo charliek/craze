@@ -1,0 +1,14 @@
+diff --git a/inventory.py b/inventory.py
+--- a/inventory.py
++++ b/inventory.py
+@@ -20,8 +20,8 @@ def parse_line(line):
+ def total(lines):
+     """Total quantity over every parsed line."""
+     count = 0
+-    for i in range(len(lines) - 1):
+-        item = parse_line(lines[i])
++    for line in lines:
++        item = parse_line(line)
+         if item is not None:
+             count += item[1]
+     return count

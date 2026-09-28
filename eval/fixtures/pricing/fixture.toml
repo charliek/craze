@@ -1,0 +1,4 @@
+# T-P2 (plan-fixture-feature): a quote service whose repository reads hit the
+# database on every quote; the task asks for a plan to cache them.
+initial_message = "Price quote service"
+initial_date = "2026-05-12T09:00:00+00:00"

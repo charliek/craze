@@ -1,0 +1,62 @@
+# T-P1 plan-craze-feature (plan 029 §3.1.5, §3.1.11). Facts written from craze at
+# 3eabb31; each rubric item cites file:line.
+id = "T-P1"
+name = "plan-craze-feature"
+category = "plan"
+split = "dev"
+mode = "plan"
+timeout_s = 1200
+prompt = """
+I'd like native sessions to notice when the date changes -- say a session started late in the evening keeps going past midnight -- and tell the model the new date. Please plan how to add a date-rollover reminder to the native harness: where it fits in the existing code, how it's stored and replayed, and how you'd test it. Just the plan for now; don't make any changes.
+"""
+rubric = [
+    "Builds on the existing reminder machinery in internal/harness/reminders.go: a <system-reminder> user message (reminders.go:65, 663-665) composed at a step boundary by turn.remind via prepareStep (reminders.go:529-547; steer.go:213-239) -- not an edit of the frozen system prompt, which holds no date (D-30, 08-decisions.md:37; tool/profile.go:36-42).",
+    "Store: reminders are persisted as reminder entries carrying a variant, never their text (D-66, 08-decisions.md:73; store/entry.go:31-34, 349-352; checkVariant allows [a-z0-9_]{1,64}, entry.go:139-157), and the Renderer re-renders the variant byte for byte for every request (store/transcript.go:54-66, 531-545; harness.go:370-377).",
+    "So the date must be recoverable at replay without the live clock: e.g. encode it in the variant (date_2026_09_28 passes checkVariant) or give the renderer the entry (today it receives only the variant, transcript.go:59); the entry's Timestamp is UTC, stamped at append time (store/entry.go:176, 631; store.go:324-326, 535), so deriving a local date from it needs the offset. Rendering from time.Now() at replay would break the byte-identical history.",
+    "Where it fires: at a step boundary in remind/reminderFor (reminders.go:315-345, 529-547), comparing the session's local date from the injectable clock (Options.Now / s.now, harness.go:199-200, 321-323 -- not time.Now()) with the last date told; resume needs the last told date seeded too (resumedModes, reminders.go:232-236; readPath ignores reminder entries, resume.go:224-250).",
+    "Coexistence with mode reminders: reminderVariant requires a mode and only one reminder is pending per step (reminders.go:160-163, 545); restart reuse and lastReminderVariant assume mode reminders (reminders.go:383-405, 587-597), so the plan says how a date reminder and a plan/ask reminder share a step and keeps TestEveryReminderTextHasOneVariant (reminders_test.go:1044) true.",
+    "Persistence rule: a reminder is written only with a finished step's append (turn.go:1126-1136), never with an interrupted save (turn.go:1360-1364), so 'told' advances only when persisted.",
+    "Tests beside reminders_test.go and store/reminder_test.go with a fixed clock crossing midnight: fires once, not again the same day; replay renders the same bytes (TestReminderHistoryMatchesTheSentRequest, wire_test.go:540); prefix stability (TestReminderPrefixIsStable, wire_test.go:443); the store round-trip (TestReminderEntryRoundTrips, store/reminder_test.go:51); resume across midnight.",
+]
+false_claims = [
+    "Put today's date into the system prompt and update it at midnight (the prompt is frozen per session, D-30; SystemEnv has no date).",
+    "Store the reminder's rendered text in the transcript (only the variant is stored, D-66; checkVariant refuses text).",
+    "D-02 says the harness holds no clock (D-02 is the import rule; Options.Now exists, harness.go:199-200).",
+]
+
+[repo]
+kind = "craze"
+
+[[checks]]
+type = "facts"
+name = "facts"
+min = 3
+
+[[checks.items]]
+id = "reminders-go"
+regex = 'reminders\.go'
+cite = "internal/harness/reminders.go:65, 160-183, 529-547"
+
+[[checks.items]]
+id = "variant"
+regex = 'variant'
+cite = "discovery/native-harness/08-decisions.md:73 (D-66); store/entry.go:349-352"
+
+[[checks.items]]
+id = "store-entry"
+regex = 'TypeReminder|reminder entr|store entr|entry\.go|AppendStepLed|transcript entr'
+cite = "internal/harness/store/entry.go:31-34, 349-352; store.go:535"
+
+[[checks.items]]
+id = "replay"
+regex = 'replay|re-?render|Renderer|Timestamp'
+cite = "internal/harness/store/transcript.go:54-66, 531-545"
+
+[[checks]]
+type = "no_writes"
+name = "no-writes"
+
+[validate]
+reference_answer = "testdata/reference_plan.md"
+decoy_answer = "testdata/decoy_plan.md"
+planted_edit = { path = "internal/harness/reminders.go", append = "\n// planted edit\n" }

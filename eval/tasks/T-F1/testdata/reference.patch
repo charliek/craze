@@ -1,0 +1,90 @@
+diff --git a/README.md b/README.md
+index 3f635e8..0d9fa1d 100644
+--- a/README.md
++++ b/README.md
+@@ -6,4 +6,13 @@ Line, word and character counts for text files, like `wc` with a table.
+ python wordstat.py notes.md todo.txt
+ ```
+ 
+-A total row is printed when more than one file is given. Tests: `pytest`.
++A total row is printed when more than one file is given.
++
++`--json` prints the same counts as one JSON object instead of the table: `files` (a list of
++`{"path", "lines", "words", "chars"}` in the order given) and `total`, always present:
++
++```shell
++python wordstat.py --json notes.md todo.txt
++```
++
++Tests: `pytest`.
+diff --git a/tests/test_wordstat_json.py b/tests/test_wordstat_json.py
+new file mode 100644
+index 0000000..7c81f8b
+--- /dev/null
++++ b/tests/test_wordstat_json.py
+@@ -0,0 +1,23 @@
++import json
++
++from wordstat import main
++
++
++def test_json_output(tmp_path, capsys):
++    a, b = tmp_path / "a.txt", tmp_path / "b.txt"
++    a.write_text("x\n")
++    b.write_text("y z\nw\n")
++    assert main(["--json", str(a), str(b)]) == 0
++    doc = json.loads(capsys.readouterr().out)
++    assert doc["files"] == [
++        {"path": str(a), "lines": 1, "words": 1, "chars": 2},
++        {"path": str(b), "lines": 2, "words": 3, "chars": 6},
++    ]
++    assert doc["total"] == {"lines": 3, "words": 4, "chars": 8}
++
++
++def test_json_single_file_has_a_total(tmp_path, capsys):
++    a = tmp_path / "a.txt"
++    a.write_text("one two\n")
++    assert main([str(a), "--json"]) == 0
++    assert json.loads(capsys.readouterr().out)["total"] == {"lines": 1, "words": 2, "chars": 8}
+diff --git a/wordstat.py b/wordstat.py
+index aeffc89..0abe942 100644
+--- a/wordstat.py
++++ b/wordstat.py
+@@ -10,6 +10,7 @@
+ from __future__ import annotations
+ 
+ import argparse
++import json
+ import sys
+ from dataclasses import dataclass
+ 
+@@ -42,9 +43,19 @@ def format_table(rows: list[tuple[str, Counts]], total: Counts | None) -> str:
+     return "\n".join(out)
+ 
+ 
++def as_json(rows: list[tuple[str, Counts]]) -> str:
++    total = sum((c for _, c in rows), Counts())
++    doc = {
++        "files": [{"path": path, "lines": c.lines, "words": c.words, "chars": c.chars} for path, c in rows],
++        "total": {"lines": total.lines, "words": total.words, "chars": total.chars},
++    }
++    return json.dumps(doc, indent=2)
++
++
+ def build_parser() -> argparse.ArgumentParser:
+     p = argparse.ArgumentParser(prog="wordstat", description="Count lines, words and characters.")
+     p.add_argument("paths", nargs="+", help="files to count")
++    p.add_argument("--json", action="store_true", help="print the counts as JSON instead of a table")
+     return p
+ 
+ 
+@@ -57,6 +68,9 @@ def main(argv: list[str] | None = None) -> int:
+         except OSError as e:
+             print(f"wordstat: {path}: {e.strerror}", file=sys.stderr)
+             return 1
++    if args.json:
++        print(as_json(rows))
++        return 0
+     total = None
+     if len(rows) > 1:
+         total = sum((c for _, c in rows), Counts())

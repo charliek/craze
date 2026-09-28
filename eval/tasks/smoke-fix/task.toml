@@ -1,0 +1,42 @@
+# C1 smoke task: a one-line bug fix checked by one hidden test file.
+id = "smoke-fix"
+category = "bugfix"
+split = "smoke"
+mode = "build"
+timeout_s = 900
+prompt = """
+`total()` in `inventory.py` under-counts: for the lines `["apples,3", "pears,4"]` it returns 3 instead of 7. Fix the bug, then run the tests to check your fix.
+"""
+rubric = [
+    "Identifies that total() skips the last line (range(len(lines) - 1)).",
+    "Fixes the loop so every line is counted.",
+    "Runs the tests and reports the result.",
+]
+
+[repo]
+kind = "fixture"
+name = "smoke-py"
+
+[[checks]]
+type = "tests"
+name = "hidden"
+runner = "pytest"
+args = ["tests"]
+timeout_s = 300
+# The visible tests are trusted: restored from the start state before scoring.
+restore_from_start = ["tests/test_inventory.py", "conftest.py"]
+# Every one of these must run and pass (a runner exit status alone is not enough).
+expect = [
+    "tests/test_hidden_total.py::test_total_counts_every_line",
+    "tests/test_hidden_total.py::test_total_skips_comments_and_blanks",
+    "tests/test_hidden_total.py::test_total_single_line",
+    "tests/test_inventory.py::test_parse_line_basic",
+    "tests/test_inventory.py::test_parse_line_skips_comments_and_blanks",
+    "tests/test_inventory.py::test_parse_line_warehouse",
+]
+
+[checks.add]
+"tests/test_hidden_total.py" = "testdata/hidden/test_hidden_total.py"
+
+[validate]
+reference_patch = "testdata/reference.patch"

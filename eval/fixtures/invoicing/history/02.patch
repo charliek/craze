@@ -1,0 +1,15 @@
+diff --git a/README.md b/README.md
+index 69ae991..2f1af62 100644
+--- a/README.md
++++ b/README.md
+@@ -10,3 +10,10 @@ total([Line("NB-A5", 2, Decimal("4.50"))], discount_percent=Decimal("10"))  # De
+ ```
+ 
+ Run the tests with `pytest`.
++
++## Discounts
++
++- A discount is a percentage from 0 to 100, applied to the whole invoice, not per line.
++- The discounted total is rounded to whole cents once, at the end; halves round up
++  (0.625 becomes 0.63), which is what accounting expects.
++- Line amounts in the CSV export are rounded to cents the same way.

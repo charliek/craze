@@ -61,7 +61,12 @@ type toolset struct {
 	byID    map[string]tool.Spec
 	wire    []byte // the tools as the model is offered them (tool.SpecsJSON), for the header's hash; nil when there are none
 	system  string // the frozen system prompt
-	d       *tool.Dispatcher
+	// startSection is the session-start section as system ends with it
+	// (withSnapshot), "" when it has none. A sub-agent on its parent's profile
+	// leaves it "": its section is inside the parent's bytes, which it
+	// inherits whole. Fixed at Open.
+	startSection string
+	d            *tool.Dispatcher
 	// locks is Env.Locks: the session's own path-lock table, or, for a
 	// sub-agent, its parent's, so a parent's and its children's edits of one
 	// file serialize (plan 026 §3.2). Fixed at Open.
@@ -137,12 +142,17 @@ type toolset struct {
 // It also sweeps the spill directory of files older than seven days; a
 // sweep that fails is housekeeping undone, not a reason to refuse a session.
 //
+// start is what the prompt says of the session's start (sessionStart): the
+// snapshot and the model line withSnapshot renders after the extras, and a
+// sub-agent's own model, which its role section names.
+//
 // child is non-nil for a sub-agent (child.go, plan 026 §3.2), and changes
 // six things: a home whose path holds a key it knows is refused
 // (errChildHomeKey); the profile's tools are filtered before anything is
 // built from them (ChildOptions.keeps); the system prompt is the parent's
-// frozen string, or the child's own under another profile, with the role
-// section after it (withChildRole); the gate is a child's
+// frozen string, or the child's own under another profile with the parent's
+// session-start section, with the role section after it (withChildRole); the
+// gate is a child's
 // (tool.NewChildModeGate); the path-lock table is the parent's; and there is
 // no todo list and no sweep — the parent's Open swept, and a fan-out would
 // otherwise walk the directory once per child.
@@ -161,7 +171,7 @@ type toolset struct {
 // it may resume on (plan 028 §3.3). The mode only seeds the gate: a resumed
 // session learns its own from the transcript and sets it (newModes) before it
 // is handed out.
-func openTools(home, workspace, mode string, asker tool.Asker, table *modeltable.Table, getenv func(string) string, ref tool.ModelRef, prompt PromptExtras, personas []tool.Persona, child *ChildOptions, subs *subagents, seams toolSeams) (*toolset, error) {
+func openTools(home, workspace, mode string, asker tool.Asker, table *modeltable.Table, getenv func(string) string, ref tool.ModelRef, prompt PromptExtras, start sessionStart, personas []tool.Persona, child *ChildOptions, subs *subagents, seams toolSeams) (*toolset, error) {
 	keys, err := table.Keys(getenv)
 	if err != nil {
 		return nil, fmt.Errorf("harness: %w", err)
@@ -277,19 +287,34 @@ func openTools(home, workspace, mode string, asker tool.Asker, table *modeltable
 	// read this one field, and neither needed a line of its own for the
 	// extras.
 	//
+	// The session-start section goes last (withSnapshot, D-67): it is the one
+	// part that varies between sessions, so everything before it stays the
+	// prefix every session on the workspace shares. The same checks cover it —
+	// the scan for a key learned later reads ts.system, and the header hashes
+	// it.
+	//
 	// A sub-agent whose model resolves the profile its parent's prompt was
 	// written for is handed that prompt, frozen, and adds only its role: the
 	// parent's bytes are its prefix by construction, where re-rendering the
 	// extras under this child's redactor could differ from them if a key had
 	// appeared between the two Opens (plan 026 §3.2, panel GLM 12). One on
 	// another profile renders its own from the clone of the extras it was
-	// given, and adds its role to that.
+	// given and from its parent's snapshot, with its parent's model line —
+	// the runner hands it both (childOpenOptions) — and adds its role to that,
+	// so no child's prompt lacks the section its parent's has.
 	if child != nil && child.BaseSystem != "" && child.BaseProfile == p.Name {
-		ts.system, err = withChildRole(child.BaseSystem, child.Role, red)
+		ts.system, err = withChildRole(child.BaseSystem, child.Role, start.own, red)
 	} else {
-		ts.system, err = withPromptExtras(systemPrompt(p, workspace, runtime.GOOS), prompt, red)
+		var base string
+		base, err = withPromptExtras(systemPrompt(p, workspace, runtime.GOOS, opencode.Shell()), prompt, red)
+		if err == nil {
+			ts.system, err = withSnapshot(base, start.snap, start.top, red)
+		}
+		if err == nil && len(ts.system) > len(base) {
+			ts.startSection = ts.system[len(base)+1:] // after the blank line's newline
+		}
 		if err == nil && child != nil {
-			ts.system, err = withChildRole(ts.system, child.Role, red)
+			ts.system, err = withChildRole(ts.system, child.Role, start.own, red)
 		}
 	}
 	if err != nil {
@@ -398,9 +423,20 @@ var (
 
 	// errProfileKey is Open's refusal of a system prompt whose profile text a
 	// configured key is inside — wholly, or spanning the join with the extras
-	// rendered after it. withPromptExtras says why neither can be redacted.
+	// rendered after it, or with the session-start section after those.
+	// withPromptExtras and withSnapshot say why none of them can be redacted.
 	errProfileKey = errors.New("harness: a configured provider key is inside the system prompt's own text, or spans " +
-		"the join between it and the instructions rendered after it; change the key, or remove that provider from the model table")
+		"the join between it and the instructions or session-start section rendered after it; change the key, or remove that provider from the model table")
+
+	// errSnapshotKey is Open's refusal of a session-start section the final
+	// redaction would break: one where a key is spelled across craze's own
+	// framing — the heading, the sentence before the git block, a fence — so
+	// that redacting it would leave quoted git text outside its quotation, or
+	// where the markers of keys spelled across the joins between fields grow it
+	// past its bound with no status left to give back. withSnapshot says why
+	// neither can be redacted.
+	errSnapshotKey = errors.New("harness: a configured provider key spans the framing of the session-start section, " +
+		"or grows it past its bound when redacted; change the key, or remove that provider from the model table")
 
 	// errDigestKey is Open's refusal of a transcript header whose SHA-256 of
 	// the frozen prompt, or of the encoded tools, holds a configured key. The
@@ -618,6 +654,13 @@ func defaultProfiles() (*tool.Registry, error) {
 // modelRef is how ProfileFor sees a resolved model.
 func modelRef(r modeltable.Resolved) tool.ModelRef {
 	return tool.ModelRef{Provider: r.ProviderID, Alias: r.Alias, WireModel: r.WireModel, Profile: r.ToolProfile}
+}
+
+// startModelOf is how the prompt names a resolved model (startModel): the
+// table's name — Resolve's, which is the alias when the entry has none — and
+// the provider and wire model a request goes to.
+func startModelOf(r modeltable.Resolved) startModel {
+	return startModel{name: r.Name, provider: r.ProviderID, wire: r.WireModel}
 }
 
 // profileRef is how a resumed session's profile is chosen: by the name its

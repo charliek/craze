@@ -1,0 +1,69 @@
+# T-E1 explain-prompt-prefix (plan 029 §3.1.5). Facts written from craze at 3eabb31
+# (the worktree's internal/ is unchanged from it); each rubric item cites file:line.
+id = "T-E1"
+name = "explain-prompt-prefix"
+category = "explain"
+split = "dev"
+mode = "build"
+timeout_s = 1200
+prompt = """
+How does craze's native harness keep every model request's prefix byte-stable, so the provider's prompt cache keeps hitting? I'd like to understand where the system prompt is built, what (if anything) can differ between sessions or between requests, how sub-agents fit in, and what happens when a session is resumed. Please don't change anything, just explain.
+"""
+rubric = [
+    "The system prompt is rendered once from the tool profile's System func -- systemPrompt (internal/harness/system.go:42-44) over the opencode profile's embedded system.txt (internal/harness/tool/opencode/opencode.go:86-104) -- whose only inputs are tool.SystemEnv{Workspace, OS} (internal/harness/tool/profile.go:36-42): no clock, git state or model name.",
+    "withPromptExtras (system.go:176-200) appends the instruction files and the skills catalog after the profile text (budgets 32 KiB per doc, 96 KiB total, 24 KiB catalog, system.go:78-96); with nothing to render it returns the profile text unchanged (system.go:184-191), and it refuses output the profile text is not a prefix of (system.go:196-198).",
+    "The prompt is frozen once per session in openTools (ts.system, internal/harness/tools.go:287-294), copied to s.system (harness.go:547 for a new session, resume.go:79 for a resume), and every request -- turns and the compaction summarizer -- sends that same string (harness.go:381-386; compact.go:676, 706). This is decision D-30 (discovery/native-harness/08-decisions.md:37).",
+    "The tool specs are fixed at Open too (ts.specs/ts.wire, tools.go:60-62, built at tools.go:221-268, serialised deterministically by SpecsJSON, tool/profile.go:237-266) and offered in a fixed order that is part of the cache prefix (tool/profile.go:28-29).",
+    "What changes during a session goes into messages after the prefix, never into the system prompt: mode reminders are <system-reminder> user messages spliced after the prompt (reminders.go:65, 663-665; steer.go:270-302) and stored by variant so history re-renders byte for byte; compaction adds a <compacted_context> user message (summary.go:26, 59).",
+    "A same-profile sub-agent reuses the parent's frozen prompt bytes (BaseSystem: parent.system, subagents.go:816) and appends a role section (withChildRole, child.go:163-169; tools.go:287-288), so the parent's prompt is a byte prefix of the child's; an other-profile child renders its own prompt (tools.go:289-293). The child's tool list differs (childWithheld, child.go:89).",
+    "A model switch keeps the prompt: SetModel (harness.go:700-733) never touches s.system, and a model with a different tool profile is refused with ErrProfileMismatch (tools.go:630-639, errors.go:64-67).",
+    "On resume the prompt is re-rendered from the header's tool profile and this Open's extras (resume.go:68-82) and its SHA-256 recorded (promptDigest, resume.go:82, 197-202); the transcript stores only the hash, never the text (store/store.go:298-313, store/entry.go:589-590); a changed hash is recorded in the resume entry's contract, not refused or warned about (store/entry.go:320-323).",
+    "History is replayed from the transcript in path order, keeping reasoning only when the provider and wire model match (store/transcript.go:349-359), so between compactions each request extends the previous one. A successful compaction is the exception: from then on the history is its <compacted_context> summary, then the kept tail, then later entries (store/transcript.go:341-348), so the first request after it shares only the system prompt and tools with the one before.",
+]
+false_claims = [
+    "The system prompt includes today's date or time, the git status, or the model name (SystemEnv holds only Workspace and OS, tool/profile.go:39-42; system.txt's only placeholders are ${workspace} and ${os}, system.txt:83-84).",
+    "On resume craze compares the rebuilt prompt's hash with the stored one and refuses or warns when it differs (nothing compares it; store/entry.go:320-323).",
+    "Switching model, entering plan mode or compacting rewrites the system prompt (s.system is assigned only at harness.go:547 and resume.go:79).",
+]
+
+[repo]
+kind = "craze"
+
+[[checks]]
+type = "facts"
+name = "facts"
+min = 4
+
+[[checks.items]]
+id = "system-go"
+regex = 'system\.go'
+cite = "internal/harness/system.go:42-44, 176-200"
+
+[[checks.items]]
+id = "frozen-in-open-tools"
+regex = 'tools\.go|openTools'
+cite = "internal/harness/tools.go:287-294"
+
+[[checks.items]]
+id = "sub-agent-prefix"
+regex = 'child\.go|withChildRole|BaseSystem'
+cite = "internal/harness/child.go:163-169; subagents.go:816"
+
+[[checks.items]]
+id = "decision-d30"
+regex = 'D-30'
+cite = "discovery/native-harness/08-decisions.md:37"
+
+[[checks.items]]
+id = "resume-hash"
+regex = 'SHA-?256|\bhash|digest'
+cite = "internal/harness/resume.go:82, 197-202; store/entry.go:589-590"
+
+[[checks]]
+type = "no_writes"
+name = "no-writes"
+
+[validate]
+reference_answer = "testdata/reference_answer.md"
+decoy_answer = "testdata/decoy_answer.md"
+planted_edit = { path = "internal/harness/system.go", append = "\n// planted edit\n" }
