@@ -192,17 +192,21 @@ transports, six picker frames in process only,
 rounds (astra r69, r71). Every frame `RunFrameScript` produces — a golden
 matrix's (`runFrameModes`) or a direct call's — is logged in order
 (`frameProductions`, `:192-229`); `assertGolden` judges the frame it holds by
-the **most recent production of those exact bytes** in that test
+the **most recent production of those exact bytes in one global log**, across
+the whole test binary, not scoped to the asserting test itself
 (`judgeFrame`, `:243-264`, called through `checkGoldenTransports` at
-`internal/tui/frame_test.go:426`): an unspent matrix credit is spent, while a
-direct run, an already-spent credit, or no production at all is in process
-alone — so an identical-looking frame a later direct call produces can steal
-an earlier matrix run's unspent credit (`TestATransportCreditIsTheFramesOwn`,
-`:475-517`, pins both directions). `TestMain`'s `goldenCoverage` (`:355-403`)
-fails an unfiltered run — no `-run`/`-skip`/`-list`, and only once `-count`
-runs at least one iteration — if any manifest golden, except
-`native-tools-80x24` when `ripgrep` is missing (the same rule its own test
-skips by), was not asserted under every transport it lists, **in every one
+`internal/tui/frame_test.go:426`; the scan stops at the first byte match,
+whichever test produced it, which is also `13`'s SF-67 (a)): an unspent
+matrix credit belonging to the asserting test is spent, while a direct run,
+an already-spent credit, another test's credit, or no production at all is
+in process alone — so an identical-looking frame a later direct call
+produces can steal an earlier matrix run's unspent credit
+(`TestATransportCreditIsTheFramesOwn`, `:475-517`, pins both directions).
+`TestMain`'s `goldenCoverage` (`:355-403`) fails an unfiltered run — no
+`-run`/`-skip`/`-list`, `-update` off, and `-count` greater than 0 — if any
+manifest golden, except `native-tools-80x24` when `ripgrep` is missing (the
+same rule its own test skips by), was not asserted under every transport it
+lists, **in every one
 of the run's `-count` iterations** (coverage is counted per test-and-golden
 pair, per iteration, `:318-339`). `make test`/`test-race` and CI's `test` job
 pin `CRAZE_GOLDEN_TRANSPORT=both` (Makefile, `.github/workflows/ci.yml`); a

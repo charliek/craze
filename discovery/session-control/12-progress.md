@@ -1981,8 +1981,11 @@ frame's credit could be spent by an identical *direct*, in-process frame
 instead — fixed by logging every frame `RunFrameScript` produces, in
 production order (`frameProductions`, `internal/tui/golden_manifest_test.go:192-229`),
 and judging the frame an assertion holds by the **most recent production of
-its exact bytes** in that test (`judgeFrame`, `:243-264`): an unspent matrix
-credit is spent, while a direct run, an already-spent credit, or no
+its exact bytes in that one global log** — not scoped to the asserting test;
+the scan stops at the first byte match, whichever test produced it
+(`judgeFrame`, `:243-264`; `13`'s SF-67 (a) is what that residual costs): an
+unspent matrix credit belonging to the asserting test is spent, while a
+direct run, an already-spent credit, another test's credit, or no
 production at all is in process alone
 (`TestATransportCreditIsTheFramesOwn`, `:475-517`, a negative control
 requiring the direct and matrix frames differ). Coverage is now counted per
@@ -2598,12 +2601,16 @@ reopens a pinned decision.
    in-process frame instead — fixed by logging every frame `RunFrameScript`
    produces, in production order (`frameProductions`,
    `internal/tui/golden_manifest_test.go:192-229`), and judging the frame an
-   assertion holds by the **most recent production of its exact bytes** in
-   that test (`judgeFrame`, `:243-264`, spent through `checkGoldenTransports`
-   at `internal/tui/frame_test.go:426`): an unspent matrix credit is spent,
-   while a direct run, an already-spent credit, or no production at all is
-   in process alone (`TestATransportCreditIsTheFramesOwn`, `:475-517`, a
-   negative control requiring the direct and matrix frames differ). One
+   assertion holds by the **most recent production of its exact bytes in
+   that one global log** — the scan is not scoped to the asserting test and
+   stops at the first byte match, whichever test produced it (`judgeFrame`,
+   `:243-264`, spent through `checkGoldenTransports` at
+   `internal/tui/frame_test.go:426`; a residual of this shape is `13`'s
+   SF-67 (a)): an unspent matrix credit belonging to the asserting test is
+   spent, while a direct run, an already-spent credit, another test's
+   credit, or no production at all is in process alone
+   (`TestATransportCreditIsTheFramesOwn`, `:475-517`, a negative control
+   requiring the direct and matrix frames differ). One
    major, also fixed: with `-count=2` a golden covered in the first
    iteration hid a socket run skipped in the second, one persistent coverage
    entry per pair — fixed by counting coverage per (test, golden) pair, per
@@ -2657,15 +2664,18 @@ detail in the plan's §7 acceptance table, A1–A25):
   only, since pickers exist only in the host TUI); no golden moved in PR 3 or
   PR 4 (`git diff --stat -- '*testdata*'` empty at both tips). Coverage is
   enforced, not just recorded: `assertGolden` judges the frame it holds by
-  the most recent production of those exact bytes in that test — a matrix
+  the most recent production of those exact bytes in one global log, across
+  the whole binary rather than scoped to the asserting test — a matrix
   run's unspent credit, or in process alone (`judgeFrame`,
-  `internal/tui/golden_manifest_test.go:243-264`) — and `TestMain`'s
-  `goldenCoverage` (`:355-403`) fails an unfiltered run if any manifest
-  golden, except `native-tools-80x24` when `ripgrep` is missing, was not
-  asserted under its full transport set in every one of the run's `-count`
-  iterations (C29a `680d345`, C29b `0dbed9f`); `make test`/`test-race` and
-  CI's `test` job pin `CRAZE_GOLDEN_TRANSPORT=both`, so this coverage cannot
-  be silently narrowed there — only a direct `go test` invocation narrows
+  `internal/tui/golden_manifest_test.go:243-264`; `13`'s SF-67 (a) is that
+  scan's residual) — and `TestMain`'s `goldenCoverage` (`:355-403`) fails an
+  unfiltered run — no `-run`/`-skip`/`-list`, `-update` off, `-count` above
+  0 — if any manifest golden, except `native-tools-80x24` when `ripgrep` is
+  missing, was not asserted under its full transport set in every one of the
+  run's `-count` iterations (C29a `680d345`, C29b `0dbed9f`); `make
+  test`/`test-race` and CI's `test` job pin `CRAZE_GOLDEN_TRANSPORT=both`,
+  so this coverage cannot be silently narrowed there — only a direct
+  `go test` invocation narrows
   it.
 
 `craze attach` (PR 4) is the first full client the protocol has ever had
