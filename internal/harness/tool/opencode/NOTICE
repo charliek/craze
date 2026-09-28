@@ -65,16 +65,20 @@ below.
 Edits to the descriptions
 -------------------------
 
-The edits allowed are exactly these (plan 019 section 3.2): remove the two
+The edits allowed are exactly these (plan 019 section 3.2, and plan 029
+section 3.2 L3, which adds guidance sentences measured by craze's
+evaluation harness): remove the two
 false claims that edit and write refuse a file the model has not read;
 remove sentences naming tools craze does not have; replace "opencode" with
 "craze"; render ${...} placeholders; add the sentences the behavioural
-differences below require. Nothing else is reworded: the text is the tuned
+differences below require; add a guidance sentence plan 029 L3 names (each
+listed in the table below). Nothing else is reworded: the text is the tuned
 asset.
 
 | file      | original                                                                                                                  | now                                                                                                                                                           | why |
 |-----------|---------------------------------------------------------------------------------------------------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------|-----|
 | read.txt  | "- This tool can read image files and PDFs and return them as file attachments."                                          | "- This tool cannot read image files or PDFs yet."                                                                                                            | difference: images and PDFs are refused, not attached |
+| read.txt  | (none: a new bullet after "Avoid tiny repeated slices...")                                                                | "- When your answer depends on a file that is small enough, read the whole file rather than a slice, so that what you say about it is based on all of it."   | plan 029 L3, read small files whole |
 | write.txt | "This tool will fail if you did not read the file first." (end of the fifth line)                                         | removed; the instruction before it, to read the file first, stays                                                                                            | false: nothing enforces reading first (D-12, D-42) |
 | edit.txt  | "This tool will error if you attempt an edit without reading the file." (end of the fourth line, with its trailing space) | removed; the instruction before it, to read the file first, stays                                                                                            | false: nothing enforces reading first (D-12, D-42) |
 | grep.txt  | "- When you are doing an open-ended search that may require multiple rounds of globbing and grepping, use the Task tool instead" | removed                                                                                                                                                 | names the Task tool, which craze does not have |
@@ -334,7 +338,11 @@ Edits to those descriptions:
   - each opens with one sentence of craze's own naming the tool as Claude Code
     does ("Claude Code calls this tool `TodoWrite`."), so content written for
     Claude Code finds it (D-53);
-  - todo_write keeps the template's first two paragraphs;
+  - todo_write was rewritten in plan 029 (lever L3): it keeps the template's
+    idea that the list is the user's live view of progress and is for work
+    of three or more steps, in craze's own words, and adds when not to use
+    it, how to keep one item in progress, and when an item counts as
+    completed (only after its verification);
   - ask_user_question drops the sentence promising an automatic "Other"
     choice: craze's card offers the options and nothing else;
   - exit_plan_mode says "Present your plan to the user for approval" where
