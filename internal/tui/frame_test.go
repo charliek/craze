@@ -314,6 +314,7 @@ func runFrameModes(t *testing.T, build func() Config, cols, rows int, script str
 		o := opts
 		o.gateSync = run.sync
 		o.transport = run.transport
+		o.matrix = true
 		cfg := buildFor(run.transport, build)
 		plain, raw, err := RunFrameScript(cfg, cols, rows, script, o)
 		results = append(results, result{run, plain, raw, err})
@@ -422,7 +423,7 @@ func assertGolden(t *testing.T, name string, cols, rows int, got string) {
 	// The frame was produced under the transports the manifest lists for this
 	// golden (golden_manifest_test.go, plan 027 §3.16): its own credit, spent
 	// here.
-	ran := checkGoldenTransports(t, name, got)
+	checkGoldenTransports(t, name, got)
 	path := filepath.Join("testdata", name+".golden")
 	if *updateGoldens {
 		if err := os.MkdirAll("testdata", 0o755); err != nil {
@@ -440,7 +441,7 @@ func assertGolden(t *testing.T, name string, cols, rows int, got string) {
 	if string(want) != got {
 		t.Fatalf("golden %s mismatch\n--- want ---\n%s\n--- got ---\n%s", name, want, got)
 	}
-	noteGoldenAsserted(name, ran)
+	noteGoldenAsserted(t, name)
 }
 
 // assertFrameGolden is assertGolden plus the substrings a case names, so a

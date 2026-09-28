@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -25,17 +26,21 @@ import (
 //
 //   - TestTheGoldenManifestIsEveryGolden fails on a golden file the manifest
 //     does not list and on a listed one that does not exist;
-//   - assertGolden fails when the runs that produced the very frame it is
-//     handed are not the manifest's set for that golden
-//     (checkGoldenTransports): each frame runFrameModes returns carries a
-//     credit — the transports that produced it — which the assertion of that
-//     frame spends, so a frame made any other way (a direct RunFrameScript, a
-//     picker's direct Update, a second assertion of one frame) is in process
-//     alone as produced, and fails a golden the manifest runs under both;
+//   - assertGolden fails when the invocation that produced the very frame it
+//     is handed is not the manifest's set for that golden
+//     (checkGoldenTransports): every RunFrameScript is logged in order
+//     (frameProductions), and the frame is judged by the most recent
+//     production of its exact bytes — a matrix run's (runFrameModes) carries
+//     a credit, the transports that produced it, which the assertion of that
+//     frame spends; a direct RunFrameScript's, a picker's direct-Update frame
+//     (no production) and a second assertion of one frame are in process
+//     alone as produced, and fail a golden the manifest runs under both;
 //   - and a whole unnarrowed run of the package (goldenCoverage, from
 //     TestMain) fails unless every golden in the manifest was asserted under
-//     its whole set — so a golden whose socket run was skipped, or whose test
-//     was, is caught even though no assertion of it ever ran.
+//     its whole set, and every test that asserted a golden did in each of the
+//     run's -count iterations — so a golden whose socket run was skipped, or
+//     whose test was, in any iteration, is caught even though no assertion of
+//     it ran.
 
 // goldenRuns is a manifest entry: the transports a golden's frame runs under.
 type goldenRuns []frameTransport
@@ -168,49 +173,92 @@ var goldenManifest = map[string]goldenRuns{
 	"too-small-30x8":                         bothTransports,
 }
 
-// frameCredits is, per test, every frame runFrameModes returned that no
-// assertion has spent yet, oldest first, each with the transports that
-// produced it (astra r69 1): the credit belongs to the frame, not the test.
-var frameCredits = struct {
-	mu sync.Mutex
-	m  map[testing.TB][]frameCredit
-}{m: map[testing.TB][]frameCredit{}}
+// frameProductions is every frame RunFrameScript has produced in this test
+// binary, in the order it produced them (astra r71 1): the invocation that
+// produced a frame decides what made it, not the frame's bytes — identical
+// golden frames exist (composer-six-lines and composer-nine-lines-top, the
+// two selections, task and task-late), so a frame is judged by the most
+// recent production of its exact bytes (judgeFrame).
+//
+//   - A run of a test's golden matrix (FrameOpts.matrix) is accounted for by
+//     runFrameModes, once its runs agree: one production, the frame they all
+//     ended on, owned by the test and carrying the transports its runs used —
+//     a credit, spent by the one assertion of that frame, and gone when the
+//     test ends (creditFrame).
+//   - Every other RunFrameScript is a direct production, recorded by
+//     frameProducedHook with no test and no credit: its frame was made in
+//     process alone, and an assertion that finds it the most recent
+//     production of its bytes fails a golden the manifest runs under both.
+var frameProductions = struct {
+	mu  sync.Mutex
+	log []*frameProduction
+}{}
 
-// frameCredit is one frame's credit: the frame, by its digest, and the
-// transports whose runs all ended on it.
-type frameCredit struct {
+// frameProduction is one frame produced: its digest, and for a matrix's, the
+// test that owns it, its transports and whether an assertion has spent it.
+type frameProduction struct {
 	frame [sha256.Size]byte
+	t     testing.TB
 	ran   map[frameTransport]bool
+	spent bool
 }
 
-// creditFrame records that runFrameModes' runs over ran all ended on frame,
-// for t's assertion of it; what t leaves unspent goes when t ends.
-func creditFrame(t testing.TB, frame string, ran map[frameTransport]bool) {
-	frameCredits.mu.Lock()
-	defer frameCredits.mu.Unlock()
-	if _, ok := frameCredits.m[t]; !ok {
-		t.Cleanup(func() {
-			frameCredits.mu.Lock()
-			delete(frameCredits.m, t)
-			frameCredits.mu.Unlock()
-		})
-	}
-	frameCredits.m[t] = append(frameCredits.m[t], frameCredit{frame: sha256.Sum256([]byte(frame)), ran: ran})
-}
+// frameProductionsMax bounds the log: a direct production that old says what
+// a frame no production is found for says too (in process alone), and no
+// test produces a fraction as many frames.
+const frameProductionsMax = 1 << 16
 
-// spendFrame takes the oldest of t's credits for frame: the transports that
-// produced it, and false when no run of runFrameModes' returned it — a frame
-// made in process some other way.
-func spendFrame(t testing.TB, frame string) (map[frameTransport]bool, bool) {
-	sum := sha256.Sum256([]byte(frame))
-	frameCredits.mu.Lock()
-	defer frameCredits.mu.Unlock()
-	credits := frameCredits.m[t]
-	for i, c := range credits {
-		if c.frame == sum {
-			frameCredits.m[t] = append(credits[:i:i], credits[i+1:]...)
-			return c.ran, true
+// installFrameProductions records every direct production (TestMain); a
+// matrix's own runs are runFrameModes'.
+func installFrameProductions() {
+	frameProducedHook = func(opts FrameOpts, plain string) {
+		if !opts.matrix {
+			produced(&frameProduction{frame: sha256.Sum256([]byte(plain))})
 		}
+	}
+}
+
+// produced appends p to the log.
+func produced(p *frameProduction) {
+	frameProductions.mu.Lock()
+	defer frameProductions.mu.Unlock()
+	if len(frameProductions.log) >= frameProductionsMax {
+		frameProductions.log = slices.Delete(frameProductions.log, 0, len(frameProductions.log)/2)
+	}
+	frameProductions.log = append(frameProductions.log, p)
+}
+
+// creditFrame records the frame runFrameModes' runs over ran all ended on, as
+// t's production; the log lets go of it when t ends.
+func creditFrame(t testing.TB, frame string, ran map[frameTransport]bool) {
+	p := &frameProduction{frame: sha256.Sum256([]byte(frame)), t: t, ran: ran}
+	produced(p)
+	t.Cleanup(func() {
+		frameProductions.mu.Lock()
+		defer frameProductions.mu.Unlock()
+		frameProductions.log = slices.DeleteFunc(frameProductions.log, func(q *frameProduction) bool { return q == p })
+	})
+}
+
+// judgeFrame is what made the frame t asserts, by the most recent production
+// of its exact bytes: a matrix production of t's that no assertion has spent
+// yet is spent, and answers its transports; anything else — a direct
+// production, a matrix production already spent, none at all (a picker's
+// direct-Update frame) — is false: made in process alone.
+func judgeFrame(t testing.TB, frame string) (map[frameTransport]bool, bool) {
+	sum := sha256.Sum256([]byte(frame))
+	frameProductions.mu.Lock()
+	defer frameProductions.mu.Unlock()
+	for i := len(frameProductions.log) - 1; i >= 0; i-- {
+		p := frameProductions.log[i]
+		if p.frame != sum {
+			continue
+		}
+		if p.t != t || p.spent {
+			return nil, false
+		}
+		p.spent = true
+		return p.ran, true
 	}
 	return nil, false
 }
@@ -237,15 +285,15 @@ func expectedTransports(name string) (map[frameTransport]bool, error) {
 	return expect, nil
 }
 
-// frameTransportsErr spends frame's credit and says whether the runs that
-// produced it are exactly golden name's (expectedTransports): a frame with no
-// credit was made in process alone.
+// frameTransportsErr judges frame by its production (judgeFrame) and says
+// whether the runs that produced it are exactly golden name's
+// (expectedTransports): a frame with no credit was made in process alone.
 func frameTransportsErr(t testing.TB, name, frame string) (map[frameTransport]bool, error) {
 	expect, err := expectedTransports(name)
 	if err != nil {
 		return nil, err
 	}
-	ran, ok := spendFrame(t, frame)
+	ran, ok := judgeFrame(t, frame)
 	if !ok {
 		ran = map[frameTransport]bool{transportInproc: true}
 	}
@@ -267,37 +315,43 @@ func checkGoldenTransports(t *testing.T, name, frame string) map[frameTransport]
 	return ran
 }
 
-// goldensAsserted is every golden a passing assertion held a frame against in
-// this run, with the transports that produced its frames: what goldenCoverage
-// judges the run by.
-var goldensAsserted = struct {
+// goldenAssertions is, for each test and golden a passing assertion held a
+// frame against — its frame produced under the golden's whole set, as
+// checkGoldenTransports requires — the iterations that did: each *testing.T
+// is one iteration of its test under -count (astra r71, the major).
+var goldenAssertions = struct {
 	mu sync.Mutex
-	m  map[string]map[frameTransport]bool
-}{m: map[string]map[frameTransport]bool{}}
+	m  map[goldenPair]map[testing.TB]bool
+}{m: map[goldenPair]map[testing.TB]bool{}}
 
-// noteGoldenAsserted records that golden name's frame, produced under ran,
-// matched its file.
-func noteGoldenAsserted(name string, ran map[frameTransport]bool) {
-	goldensAsserted.mu.Lock()
-	defer goldensAsserted.mu.Unlock()
-	set := goldensAsserted.m[name]
-	if set == nil {
-		set = map[frameTransport]bool{}
-		goldensAsserted.m[name] = set
+// goldenPair is a test, by name — every iteration's the same — and a golden.
+type goldenPair struct{ test, golden string }
+
+// noteGoldenAsserted records that t's frame for golden name matched its file.
+func noteGoldenAsserted(t testing.TB, name string) {
+	goldenAssertions.mu.Lock()
+	defer goldenAssertions.mu.Unlock()
+	k := goldenPair{t.Name(), name}
+	if goldenAssertions.m[k] == nil {
+		goldenAssertions.m[k] = map[testing.TB]bool{}
 	}
-	for tr := range ran {
-		set[tr] = true
-	}
+	goldenAssertions.m[k][t] = true
 }
 
-// goldenCoverage is the suite-level check (astra r69 1), run by TestMain once
-// every test has passed: on a whole run of the package — no -run or -skip
-// narrowing it, no -list or -update — every golden in the manifest was
-// asserted, as its file, under every transport it runs under
-// (expectedTransports). A socket run skipped, or a golden's test skipped
-// outright, fails here though no assertion of it ever ran. The one golden a
-// run may lack is the one its test may skip by the repo's rule: native tools'
-// without ripgrep, where CI requires it (requireFrameRG).
+// goldenCoverage is the suite-level check (astra r69 1, r71), run by TestMain
+// once every test has passed. It is off unless the run is a whole run of the
+// package: no -run or -skip narrowing it, no -list, no -update, and a count
+// that runs anything (-count=0 runs nothing). Then:
+//
+//   - every golden in the manifest was asserted, as its file, under every
+//     transport it runs under (expectedTransports) — so a golden's socket run
+//     skipped, or its test skipped outright, fails here though no assertion
+//     of it ever ran; the one golden a run may lack is the one its test may
+//     skip by the repo's rule: native tools' without ripgrep, where CI
+//     requires it (requireFrameRG);
+//   - and every test that asserted a golden did in every one of the run's
+//     -count iterations — so a socket run skipped in a later iteration fails
+//     here too.
 func goldenCoverage() error {
 	for _, f := range []string{"test.run", "test.skip", "test.list"} {
 		if fl := flag.Lookup(f); fl != nil && fl.Value.String() != "" {
@@ -307,30 +361,44 @@ func goldenCoverage() error {
 	if *updateGoldens {
 		return nil
 	}
-	goldensAsserted.mu.Lock()
-	defer goldensAsserted.mu.Unlock()
+	n := 1
+	if fl := flag.Lookup("test.count"); fl != nil {
+		c, err := strconv.Atoi(fl.Value.String())
+		if err != nil {
+			return fmt.Errorf("golden coverage: -count=%q: %w", fl.Value.String(), err)
+		}
+		n = c
+	}
+	if n <= 0 {
+		return nil
+	}
+	goldenAssertions.mu.Lock()
+	defer goldenAssertions.mu.Unlock()
+	asserted := map[string]bool{}
 	var missing []string
+	for k, iterations := range goldenAssertions.m {
+		asserted[k.golden] = true
+		if len(iterations) != n {
+			missing = append(missing, fmt.Sprintf("%s: %s asserted in %d of %d iterations", k.golden, k.test, len(iterations), n))
+		}
+	}
 	for name := range goldenManifest {
 		if name == "native-tools-80x24" && frameRGMissing() != nil {
 			continue
 		}
-		expect, err := expectedTransports(name)
-		if err != nil {
-			return err
-		}
-		got := goldensAsserted.m[name]
-		for tr := range expect {
-			if !got[tr] {
-				missing = append(missing, fmt.Sprintf("%s (asserted under %s)", name, transportList(got)))
-				break
+		if !asserted[name] {
+			expect, err := expectedTransports(name)
+			if err != nil {
+				return err
 			}
+			missing = append(missing, fmt.Sprintf("%s: never asserted under %s", name, transportList(expect)))
 		}
 	}
 	if len(missing) == 0 {
 		return nil
 	}
 	slices.Sort(missing)
-	return fmt.Errorf("golden coverage (plan 027 §3.16, A8): %d goldens were not asserted under every transport the manifest runs them under — a test or a run was skipped:\n  %s",
+	return fmt.Errorf("golden coverage (plan 027 §3.16, A8): %d goldens were not asserted under every transport the manifest runs them under, in every iteration — a test or a run was skipped:\n  %s",
 		len(missing), strings.Join(missing, "\n  "))
 }
 
@@ -394,13 +462,16 @@ func TestTheGoldenManifestIsEveryGolden(t *testing.T) {
 	}
 }
 
-// TestATransportCreditIsTheFramesOwn (astra r69 1): the transports that made a
-// frame are that frame's, not its test's. After a matrix run in a test, a
-// second frame the same test ran directly in process carries no credit —
-// asserted against a golden that runs under both, it fails — while the matrix
-// frame's credit holds, once: its assertion spends it, and a second assertion
-// of the same frame has none left. The knob is pinned to both here, so the
-// check is the gate's.
+// TestATransportCreditIsTheFramesOwn (astra r69 1, r71 1): the transports
+// that made a frame are its producing invocation's, not its test's and not
+// its bytes'. After a matrix run in a test, a second frame the same test ran
+// directly in process carries no credit — asserted against a golden that runs
+// under both, it fails — while the matrix frame's credit holds, once: its
+// assertion spends it, and a second assertion of the same frame has none
+// left. And a matrix run left unasserted, then a direct run drawing the SAME
+// bytes: the direct run is the frame's most recent production, and its
+// assertion fails — the matrix run's unspent credit is not its to spend. The
+// knob is pinned to both here, so the check is the gate's.
 func TestATransportCreditIsTheFramesOwn(t *testing.T) {
 	t.Setenv("CRAZE_GOLDEN_TRANSPORT", "both")
 	isolateSkillsHome(t)
@@ -427,5 +498,20 @@ func TestATransportCreditIsTheFramesOwn(t *testing.T) {
 	}
 	if _, err := frameTransportsErr(t, name, matrix); err == nil {
 		t.Fatal("a frame's credit was spent twice")
+	}
+
+	unasserted, _, err := runFrameModes(t, build, 60, 24, "<wait:idle>", FrameOpts{Timeout: 10 * time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	same, _, err := RunFrameScript(build(), 60, 24, "<wait:idle>", FrameOpts{Timeout: 10 * time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if same != unasserted {
+		t.Fatal("fixture: the direct run did not draw the matrix run's bytes")
+	}
+	if ran, err := frameTransportsErr(t, name, same); err == nil {
+		t.Fatalf("a directly run frame identical to an unasserted matrix frame passed as made under %s: it spent the matrix run's credit", transportList(ran))
 	}
 }

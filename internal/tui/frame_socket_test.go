@@ -179,15 +179,16 @@ type socketHost struct {
 	hooks socketHostHookSet
 }
 
-// socketHostHooks, when a test sets them, run at the socket run's two last
-// points: afterMatch once the check has passed (still parked), afterBarrier
-// once the final barrier has returned. Each is handed the host. It is how
+// socketHostHooks, when a test sets them, are handed the host: built once it
+// is attached, before the program runs; afterMatch once the check has passed
+// (still parked); afterBarrier once the final barrier has returned. They are
+// how the reset tests reach the host's tap, and how
 // TestNoResetEscapesTheSocketRunsVerdict makes the host write a reset where
 // astra r69 5's schedule has it.
 var socketHostHooks socketHostHookSet
 
 type socketHostHookSet struct {
-	afterMatch, afterBarrier func(*socketHost)
+	built, afterMatch, afterBarrier func(*socketHost)
 }
 
 // buildSocketHost is frameSocketHook: steps 1–3 above around cfg, whose
@@ -265,6 +266,9 @@ func buildSocketHost(cfg Config) (*frameHost, error) {
 	}
 	h.unregister = registerSocketHost(h.sess, eng)
 	socketRuns.Add(1)
+	if h.hooks.built != nil {
+		h.hooks.built(h)
+	}
 	run := cfg
 	run.Session = nil
 	run.Backend = h.sess
@@ -432,6 +436,14 @@ func (w *wireTap) dial(ctx context.Context, path string) (net.Conn, error) {
 	w.conns = append(w.conns, tc)
 	w.mu.Unlock()
 	return tc, nil
+}
+
+// counts is what the tap saw of the stream's transport: the attaches the
+// client wrote and the resets it read, by reason.
+func (w *wireTap) counts() (attaches int, resets []string) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.attaches, slices.Clone(w.resets)
 }
 
 // holdReads makes the client's reader wait d before it reads another byte —
@@ -802,24 +814,60 @@ func TestSocketGoldensMatchTheEngine(t *testing.T) {
 // omitted one, for an event over the log's record bound, published once the
 // script has settled — fails the socket run, whatever its frame shows, and
 // so does the re-attach the client answers it with.
+//
+// How many of each the run sees is the protocol's, not this test's: a reset
+// {omitted} is answered by a re-attach without a cursor, and the first
+// re-attach's subscription can still meet the omitted record, so one omission
+// brings one or two omitted resets and one or two re-attaches — at most two
+// per omission (§3.4's table, X22). The run's error names what the tap saw
+// (the orchestrator's -race gate at 680d345 saw two of each: "attached 3
+// times", "[omitted omitted]").
 func TestASocketRunFailsOnAnyReset(t *testing.T) {
-	var host *Stub
-	build := func(stub *Stub) Config {
-		host = stub
-		return stubFrameConfig(t)(stub)
+	var stub *Stub
+	build := func(s *Stub) Config {
+		stub = s
+		return stubFrameConfig(t)(s)
 	}
+	var host *socketHost
+	prev := socketHostHooks
+	t.Cleanup(func() { socketHostHooks = prev })
+	socketHostHooks.built = func(h *socketHost) { host = h }
 	_, err := socketFrame(t, build, "<wait:idle>hi<enter><wait:text:echo: hi><wait:idle>", FrameOpts{
 		beforeQuit: func(func(tea.Msg), func() frameState) {
-			host.Emit(agent.Event{Type: agent.EventText, Text: strings.Repeat("O", 8<<20+1<<10)})
+			stub.Emit(agent.Event{Type: agent.EventText, Text: strings.Repeat("O", 8<<20+1<<10)})
 		},
 	})
-	if err == nil || !strings.Contains(err.Error(), "the host reset the stream: [omitted]") {
-		t.Fatalf("a run whose stream was reset passed: %v", err)
+	if host == nil {
+		t.Fatal("fixture: no socket host was built")
 	}
-	if !strings.Contains(err.Error(), "the client attached 2 times") {
+	assertOneOmission(t, host, err)
+	if !strings.Contains(err.Error(), "(a re-attach)") {
 		t.Fatalf("the re-attach the reset brought went unremarked: %v", err)
 	}
 	t.Logf("the run's error: %v", err)
+}
+
+// assertOneOmission fails t unless err is the run failing on the reset that
+// one omitted record brings, and the tap saw exactly what the protocol allows
+// for it (§3.4's table, X22): one or two resets, every one omitted, and one or
+// two re-attaches beside the first attach.
+func assertOneOmission(t *testing.T, h *socketHost, err error) {
+	t.Helper()
+	if err == nil || !strings.Contains(err.Error(), "the host reset the stream: [omitted") {
+		t.Fatalf("a run whose host reset its stream passed, or failed otherwise: %v", err)
+	}
+	attaches, resets := h.tap.counts()
+	if len(resets) < 1 || len(resets) > 2 {
+		t.Fatalf("one omission brought %d resets %v, want one or two", len(resets), resets)
+	}
+	for _, r := range resets {
+		if r != string(protocol.ResetOmitted) {
+			t.Fatalf("the host reset the stream for %q, want only omitted: %v", r, resets)
+		}
+	}
+	if re := attaches - 1; re < 1 || re > 2 {
+		t.Fatalf("one omission brought %d re-attaches, want one or two (at most two per omission)", re)
+	}
 }
 
 // TestASocketRunsHostIsReachedThroughItsSession (§3.16, "Test access to the
@@ -889,10 +937,13 @@ func TestNoResetEscapesTheSocketRunsVerdict(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		at   func(hooks *socketHostHookSet, f func(*socketHost))
-		want string
+		// omitted says the run must have read the reset (the barrier's arm);
+		// want is what the run's error must say otherwise.
+		omitted bool
+		want    string
 	}{
-		{"after the check", func(k *socketHostHookSet, f func(*socketHost)) { k.afterMatch = f }, "the host reset the stream: [omitted]"},
-		{"after the barrier", func(k *socketHostHookSet, f func(*socketHost)) { k.afterBarrier = f }, "the view close's detach went unanswered"},
+		{"after the check", func(k *socketHostHookSet, f func(*socketHost)) { k.afterMatch = f }, true, ""},
+		{"after the barrier", func(k *socketHostHookSet, f func(*socketHost)) { k.afterBarrier = f }, false, "the view close's detach went unanswered"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var stub *Stub
@@ -903,7 +954,9 @@ func TestNoResetEscapesTheSocketRunsVerdict(t *testing.T) {
 			prev := socketHostHooks
 			t.Cleanup(func() { socketHostHooks = prev })
 			published := false
+			var host *socketHost
 			tc.at(&socketHostHooks, func(h *socketHost) {
+				host = h
 				h.tap.holdReads(hold)
 				stub.Emit(agent.Event{Type: agent.EventText, Text: strings.Repeat("O", 8<<20+1<<10)})
 				// Written by the time the log has committed it: the forwarder
@@ -917,7 +970,10 @@ func TestNoResetEscapesTheSocketRunsVerdict(t *testing.T) {
 			if !published {
 				t.Fatal("fixture: the host never published the oversized event")
 			}
-			if err == nil || !strings.Contains(err.Error(), tc.want) {
+			if tc.omitted {
+				// One omission: one or two resets and re-attaches (X22).
+				assertOneOmission(t, host, err)
+			} else if err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("a run whose host wrote a reset passed, or failed otherwise: %v", err)
 			}
 			t.Logf("the run's error: %v", err)

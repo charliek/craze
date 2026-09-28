@@ -89,6 +89,10 @@ type FrameOpts struct {
 	// gateSync: the socket host is internal/tui's tests' alone, so the
 	// production package links no server for `craze frame`.
 	transport frameTransport
+	// matrix says the run is one of internal/tui's tests' golden matrix
+	// (runFrameModes), which accounts for the frame its runs agree on itself;
+	// frameProducedHook is told so. Unexported: only those tests set it.
+	matrix bool
 	// beforeBarrier, when a test sets it, runs in the runner after each
 	// token's sync message is sent and before its barrier is awaited, with the
 	// token and its number and the bus's newest frame; an error it returns
@@ -155,6 +159,13 @@ type frameHost struct {
 	// transport did that a golden may not depend on (a reset, a re-attach).
 	end func() error
 }
+
+// frameProducedHook, when a test sets it, is handed every frame RunFrameScript
+// returns, plain, with the options it ran with: the golden manifest's record
+// of which invocation produced which frame (golden_manifest_test.go, astra r71
+// 1). It is nil in production, like frameSocketHook, and changes nothing a
+// run does.
+var frameProducedHook func(opts FrameOpts, plain string)
 
 // frameSocketHook builds a socket run's host around cfg (FrameOpts.transport).
 // It is nil in production — no Config field or flag reaches it — and
@@ -1002,6 +1013,9 @@ func RunFrameScript(cfg Config, cols, rows int, script string, opts FrameOpts) (
 		} else {
 			scriptErr = fmt.Errorf("%w; %w", scriptErr, err)
 		}
+	}
+	if frameProducedHook != nil {
+		frameProducedHook(opts, final.plain)
 	}
 	return final.plain, final.view, scriptErr
 }

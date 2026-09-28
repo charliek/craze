@@ -293,6 +293,7 @@ func TestMain(m *testing.M) {
 	stubInstallOnStartDefault = true
 	installGateWatch()
 	installFrameSocketHost()
+	installFrameProductions()
 	// No test may shell out to xclip, overwrite the developer's clipboard or
 	// read it. The seam itself stays real so the OSC 52 bytes are still
 	// asserted; only the native tools are stubbed out, and the tests that care
