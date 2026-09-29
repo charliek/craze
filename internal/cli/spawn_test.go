@@ -1029,8 +1029,16 @@ func TestSpawnHostKeepsTheReadyPipeFromTheAgent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("spawnHost: %v", err)
 	}
-	if holds(ref.child.pid, pipeOf(1)) {
-		t.Fatal("a host that answered still holds its ready pipe")
+	// The host closes fd 3 right after writing its line, and the launcher
+	// returns as soon as it has read the line: the close can land an instant
+	// after spawnHost returns (seen under -race -count=20, V1), so wait for it,
+	// bounded.
+	deadline := time.Now().Add(10 * time.Second)
+	for holds(ref.child.pid, pipeOf(1)) {
+		if time.Now().After(deadline) {
+			t.Fatal("a host that answered still holds its ready pipe")
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 
