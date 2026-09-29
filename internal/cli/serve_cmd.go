@@ -101,8 +101,10 @@ type serveFlags struct {
 
 // serveStartJoin bounds how long a stopping host waits for its Start to
 // return, once the engine's close has closed the session under it. Past it the
-// process exits anyway, which ends the start with it.
-const serveStartJoin = 5 * time.Second
+// process exits anyway, which ends the start with it — and leaves its agents'
+// record for its spawner (serveHost.joinStart). A variable only so a test can
+// shorten it (never in parallel).
+var serveStartJoin = 5 * time.Second
 
 // serveBuilt is told the agent.Options each session craze serve builds is
 // built with: a seam for the option-parity tests, a no-op in production.
@@ -128,6 +130,13 @@ var serveClaimed = func() {}
 // engine is served on it: a seam for the test that stalls the registry's
 // rewrites (controlHost.update); a no-op in production.
 var serveBound = func(*controlHost) {}
+
+// serveAgentGroup is told each agent process group a spawned host records,
+// and what its record came to, on the session's start goroutine — after the
+// agent's spawn and before the session adopts it (agent.Options.AgentGroup):
+// a seam for the tests that hold a start there while the host stops, and that
+// see a record fail; a no-op in production.
+var serveAgentGroup = func(pgid int, err error) {}
 
 // serveAnnouncing is called on craze serve's own goroutine when its identity
 // has landed and the ready line is due, with the pipe; true means it has dealt
@@ -392,12 +401,16 @@ func serveSession(cmd *cobra.Command, f *serveFlags, env hostEnv, sigs <-chan os
 	opts.JournalDir = journal
 	opts.NoPrimary = true
 	// A spawned host records its agents' process groups for its spawner's
-	// last resort (plan 030 §3.4); one run by hand has no spawner to read
-	// them.
+	// last resort (plan 030 §3.4, X22), and an agent it cannot record does
+	// not run; one run by hand has no spawner to read them.
 	var groups *agentGroups
 	if f.ready != nil {
 		groups = newAgentGroups(runEnv, hostID, out)
-		opts.AgentGroup = groups.record
+		opts.AgentGroup = func(pgid int) error {
+			err := groups.record(pgid)
+			serveAgentGroup(pgid, err)
+			return err
+		}
 	}
 	serveBuilt(opts)
 	sess := agent.New(opts)
@@ -413,10 +426,9 @@ func serveSession(cmd *cobra.Command, f *serveFlags, env hostEnv, sigs <-chan os
 		hostID, eng.State().CrazeSessionID, p.Name(), indexCWD)
 	serveServing()
 
-	h := &serveHost{rh: rh, eng: eng, lc: lc, log: out, ready: f.ready, groups: groups}
-	started := make(chan struct{})
+	h := &serveHost{rh: rh, eng: eng, lc: lc, log: out, ready: f.ready, groups: groups, started: make(chan struct{})}
 	go func() {
-		defer close(started)
+		defer close(h.started)
 		h.start(persistsProvider(cmd, &f.tuiFlags, loading), resolvedProvider{Provider: p, Fallback: resolved.Fallback})
 	}()
 	if f.ready == nil {
@@ -424,11 +436,6 @@ func serveSession(cmd *cobra.Command, f *serveFlags, env hostEnv, sigs <-chan os
 	}
 	h.wait(sigs, published)
 	h.stop()
-	select {
-	case <-started:
-	case <-time.After(serveStartJoin):
-		fmt.Fprintln(out, "craze serve: the session's start had not returned when the host stopped")
-	}
 	return nil
 }
 
@@ -551,14 +558,17 @@ func loadWorkspace(cmd *cobra.Command, flag string, row sessions.Row) (string, e
 
 // serveHost is a running craze serve: its socket and claims (runHost), its
 // engine, its lifecycle coordinator and its log; for a spawned host, its
-// ready pipe and its agents' process-group record.
+// ready pipe and its agents' process-group record; and started, closed once
+// the session's start (serveHost.start, on a goroutine of its own) has
+// returned.
 type serveHost struct {
-	rh     *runHost
-	eng    *engine.Engine
-	lc     *hostLifecycle
-	log    io.Writer
-	ready  *readyPipe
-	groups *agentGroups
+	rh      *runHost
+	eng     *engine.Engine
+	lc      *hostLifecycle
+	log     io.Writer
+	ready   *readyPipe
+	groups  *agentGroups
+	started chan struct{}
 }
 
 // start starts the session, on a goroutine of its own. A failure is said once
@@ -659,11 +669,9 @@ func signalName(sig os.Signal) string {
 //     is written;
 //  3. S2's close order (controlHost.close): the flush wait, Server.Close, the
 //     registry entry, the socket, the host lock;
-//  4. last, the session claims (runHost.close).
-//
-// A spawned host's record of its agents' process groups goes with the
-// engine's close, which has ended every agent the session spawned: a host that
-// stops cleanly leaves its spawner nothing to kill.
+//  4. the session claims (runHost.close);
+//  5. last, the session's start joined, and then a spawned host's record of
+//     its agents' process groups removed (joinStart).
 //
 // Every request after the first has joined this one; runServe returns once it
 // is done, and the process exits 0.
@@ -672,7 +680,32 @@ func (h *serveHost) stop() {
 	_, _ = h.rh.ctl.server.FenceAttaches()
 	teardownStep("fenced")
 	_ = h.eng.Close()
-	h.groups.close()
 	teardownStep("engine closed")
 	h.rh.close()
+	h.joinStart()
+}
+
+// joinStart waits for the session's start to return, bounded by
+// serveStartJoin, and only then removes the agents' record (astra r5-c3 3).
+// The engine's close ends every agent the session has adopted, but a start
+// can be caught between spawning an agent — recorded already — and adopting
+// it (agent.Options.AgentGroup runs in that window): the close finds no agent
+// to end, and the start, finding the session closed, ends that one itself
+// before it returns. Until then the record is the one thing that still names
+// that agent, so it stays, and stays open: a spawn finishing meanwhile is
+// recorded too. A start that has not returned within the bound leaves the
+// record behind for good — this process exits anyway, and a spawner that sent
+// the SIGTERM this may be answering kills what it names once the host has
+// gone (hostChild.killAgents); a host with no spawner left has nobody to read
+// it, and the week-old sweep takes it.
+func (h *serveHost) joinStart() {
+	select {
+	case <-h.started:
+		h.groups.close()
+	case <-time.After(serveStartJoin):
+		fmt.Fprintln(h.log, "craze serve: the session's start had not returned when the host stopped")
+		if h.groups != nil {
+			fmt.Fprintln(h.log, "craze serve: its agents' process-group record is left for its launcher")
+		}
+	}
 }

@@ -11,6 +11,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/charliek/craze/internal/protocol"
+	"github.com/charliek/craze/internal/remote"
 	"github.com/charliek/craze/internal/rundir"
 	"github.com/charliek/craze/internal/sessions"
 	"github.com/charliek/craze/internal/version"
@@ -319,4 +321,241 @@ func TestServeKeepsAQuietHostsOldLog(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertHostGone(t, env, e)
+}
+
+// stubbornLine is what a stubborn fake agent (CRAZE_FAKE_STUBBORN) writes to
+// its stderr — the host's log — once it ignores every signal but SIGKILL
+// (CRAZE_FAKE_STDERR, written after the fake's signal.Ignore).
+const stubbornLine = "craze test: the agent ignores SIGTERM now"
+
+// stubbornAgent makes the tests' fake agents stubborn, and say so on their
+// stderr (stubbornLine).
+func stubbornAgent(t *testing.T) {
+	t.Helper()
+	t.Setenv("CRAZE_FAKE_STUBBORN", "1")
+	t.Setenv("CRAZE_FAKE_STDERR", stubbornLine)
+}
+
+// waitStubborn waits, within serveStep, for r's agent to have said it is
+// stubborn: from then on only its group's SIGKILL ends it before the fake's
+// own bound — a SIGTERM that came earlier would end it as it starts.
+func waitStubborn(t *testing.T, r *serveRun) {
+	t.Helper()
+	deadline := time.Now().Add(serveStep)
+	for !strings.Contains(r.stderr.String(), stubbornLine) {
+		if time.Now().After(deadline) {
+			t.Fatalf("the agent never said it was stubborn; stderr: %s", r.stderr)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// TestServeFailsAStartWhoseAgentCannotBeRecorded (astra r5-c3 2): a spawned
+// host that cannot write its agent's process group down — the record's name
+// taken by a directory, so its open fails — does not run that agent
+// unrecorded. The agent, one that outlives its pipes (the record's failure is
+// held until it is), is ended there and then, and the session's start fails,
+// reported as every start failure is: on the host's log, and to a client
+// reading the session's state, the record's failure in its words. The
+// handshake is ok all the same: it never waits for the provider.
+func TestServeFailsAStartWhoseAgentCannotBeRecorded(t *testing.T) {
+	env, ws := serveHome(t)
+	t.Setenv("CRAZE_FAKE_SCRIPT", "echo")
+	stubbornAgent(t)
+	dir, err := rundir.HostLogDir(env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hostID := rundir.NewHostID()
+	if err := os.Mkdir(filepath.Join(dir, agentGroupsName(hostID)), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	type record struct {
+		pgid int
+		err  error
+	}
+	recorded, proceed := make(chan record, 4), make(chan struct{})
+	var proceedOnce sync.Once
+	goOn := func() { proceedOnce.Do(func() { close(proceed) }) }
+	prev := serveAgentGroup
+	serveAgentGroup = func(pgid int, err error) {
+		recorded <- record{pgid, err}
+		<-proceed
+	}
+	t.Cleanup(func() { serveAgentGroup = prev })
+
+	r, rd := runServeReady(t, false, "--agent-bin", fakeAgentPath(t), "--workspace", ws, "--host-id", hostID)
+	// Before runServeReady's own cleanup: a failing test lets the start go.
+	t.Cleanup(goOn)
+	if line := readyFrom(t, rd); !line.OK {
+		t.Fatalf("the ready line: %+v", line)
+	}
+	var rec record
+	select {
+	case rec = <-recorded:
+	case <-time.After(serveStep):
+		t.Fatalf("no agent was spawned within %v; stderr: %s", serveStep, r.stderr)
+	}
+	if rec.err == nil || rec.pgid <= 0 {
+		t.Fatalf("the record of group %d: %v, want a failure", rec.pgid, rec.err)
+	}
+	waitStubborn(t, r)
+	goOn()
+	e, ok := hostEntry(env, hostID)
+	if !ok {
+		t.Fatal("the host is not in the registry")
+	}
+	c, err := remote.Dial(stepCtx(t), e.Socket, remote.Options{PeerCheck: rundir.DialCheck(os.Geteuid())})
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	t.Cleanup(func() { _ = c.Close() })
+	deadline := time.Now().Add(serveStep)
+	var st protocol.StateResult
+	for {
+		if err := c.Call(stepCtx(t), protocol.MethodSessionState, protocol.StateParams{SessionID: e.CrazeSessionID}, &st); err != nil {
+			t.Fatalf("session.state: %v", err)
+		}
+		if st.Activity != protocol.ActivityStarting {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the session is still starting after %v", serveStep)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	const want = "agent: the agent's process group could not be recorded: "
+	if !st.StartFailed || !strings.HasPrefix(st.Err, want) {
+		t.Fatalf("the session's state: activity %s, start failed %v, %q; want a failed start, %q…", st.Activity, st.StartFailed, st.Err, want)
+	}
+	waitGroupGone(t, rec.pgid)
+	if out := r.stderr.String(); !strings.Contains(out, "craze serve: the session did not start: "+want) {
+		t.Fatalf("the log: %s", out)
+	}
+	r.sigs <- syscall.SIGTERM
+	if err := r.result(t, serveStep); err != nil {
+		t.Fatal(err)
+	}
+	assertHostGone(t, env, e)
+}
+
+// TestServeKeepsItsAgentsRecordUntilItsStartHasJoined (astra r5-c3 3): a stop
+// that finds the session's start caught between spawning its agent — recorded
+// already — and adopting it (held there by the test) closes an engine with no
+// agent to end; the start ends that agent itself once it goes on. Until then
+// the record is the one thing naming the agent, and it stays: through the
+// engine's close, the socket's and the claims', to the start's join.
+//   - joined: let go, the start ends the agent (one that outlives its pipes),
+//     craze serve returns, and the record goes after it: nothing is left
+//     running, and nothing on disk;
+//   - the join times out: craze serve returns with the record left and says
+//     so, and the spawner's last resort (killAgents), acting on it as a
+//     spawner would once its host has gone, kills the agent.
+func TestServeKeepsItsAgentsRecordUntilItsStartHasJoined(t *testing.T) {
+	for _, joined := range []bool{true, false} {
+		name := "joined"
+		if !joined {
+			name = "the join times out"
+		}
+		t.Run(name, func(t *testing.T) {
+			env, ws := serveHome(t)
+			t.Setenv("CRAZE_FAKE_SCRIPT", "echo")
+			stubbornAgent(t)
+			if !joined {
+				prev := serveStartJoin
+				serveStartJoin = 100 * time.Millisecond
+				t.Cleanup(func() { serveStartJoin = prev })
+			}
+			held, release := make(chan int, 1), make(chan struct{})
+			var holdOnce, releaseOnce sync.Once
+			let := func() { releaseOnce.Do(func() { close(release) }) }
+			prevGroup := serveAgentGroup
+			serveAgentGroup = func(pgid int, err error) {
+				if err != nil {
+					return
+				}
+				holdOnce.Do(func() {
+					held <- pgid
+					<-release
+				})
+			}
+			t.Cleanup(func() { serveAgentGroup = prevGroup })
+			released := make(chan struct{})
+			var releasedOnce sync.Once
+			prevStep := teardownStep
+			teardownStep = func(s string) {
+				if s == "released" {
+					releasedOnce.Do(func() { close(released) })
+				}
+			}
+			t.Cleanup(func() { teardownStep = prevStep })
+
+			hostID := rundir.NewHostID()
+			record := filepath.Join(env.Home, ".cache", "craze", "host-logs", agentGroupsName(hostID))
+			r, rd := runServeReady(t, false, "--agent-bin", fakeAgentPath(t), "--workspace", ws, "--host-id", hostID)
+			// Before runServeReady's own cleanup: a failing test lets the
+			// start go, so the host can still stop.
+			t.Cleanup(let)
+			if line := readyFrom(t, rd); !line.OK {
+				t.Fatalf("the ready line: %+v", line)
+			}
+			var pgid int
+			select {
+			case pgid = <-held:
+			case <-time.After(serveStep):
+				t.Fatalf("no agent was recorded within %v; stderr: %s", serveStep, r.stderr)
+			}
+			if got := recordedGroups(t, record); len(got) != 1 || got[0] != pgid {
+				t.Fatalf("the record names %v, want the agent's group %d", got, pgid)
+			}
+
+			r.sigs <- syscall.SIGTERM
+			select {
+			case <-released:
+			case <-time.After(serveStep):
+				t.Fatalf("the stop sequence never released the claims; stderr: %s", r.stderr)
+			}
+			if !fileExists(record) {
+				t.Fatal("the stop removed the agents' record while the start still held an agent it had not adopted")
+			}
+			if err := syscall.Kill(-pgid, 0); err != nil {
+				t.Fatalf("the agent's group %d, which nothing has ended yet: %v", pgid, err)
+			}
+			waitStubborn(t, r)
+
+			if joined {
+				select {
+				case <-r.finished:
+					t.Fatal("craze serve returned before its start did")
+				default:
+				}
+				let()
+				if err := r.result(t, serveStep); err != nil {
+					t.Fatal(err)
+				}
+				waitGroupGone(t, pgid)
+				if fileExists(record) {
+					t.Fatal("a host whose start joined left its agents' record")
+				}
+				if out := r.stderr.String(); strings.Contains(out, "left for its launcher") {
+					t.Fatalf("the log: %s", out)
+				}
+				return
+			}
+			if err := r.result(t, serveStep); err != nil {
+				t.Fatal(err)
+			}
+			if !fileExists(record) {
+				t.Fatal("a host whose start did not join removed its agents' record")
+			}
+			if out := r.stderr.String(); !strings.Contains(out, "craze serve: its agents' process-group record is left for its launcher") {
+				t.Fatalf("the log: %s", out)
+			}
+			(&hostChild{groups: record}).killAgents()
+			waitGroupGone(t, pgid)
+			if fileExists(record) {
+				t.Fatal("the spawner left the record")
+			}
+		})
+	}
 }

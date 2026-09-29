@@ -5,9 +5,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 
@@ -58,7 +60,9 @@ const readyLineMax = 64 << 10
 // socket, its session's craze id and the craze that serves it (the host may be
 // a newer binary than its launcher, when craze was upgraded on disk between
 // the two). Not OK carries the host's refusal (Error) and, for a session
-// another host holds, Held.
+// another host holds, Held. The launcher takes a line only when it carries
+// everything its branch needs (readyLine.invalid, spawn.go), and ignores a
+// member it does not know.
 type readyLine struct {
 	OK             bool       `json:"ok"`
 	HostID         string     `json:"hostId,omitempty"`
@@ -146,7 +150,12 @@ func (p *readyPipe) fail(cmd *cobra.Command, err error) {
 	if p == nil || err == nil {
 		return
 	}
-	msg, _ := diagnose(cmd, err)
+	msg, code := diagnose(cmd, err)
+	if msg == "" {
+		// A not-ok line always says why (the launcher refuses one that does
+		// not, parseReady); an exit with nothing to print still has its code.
+		msg = fmt.Sprintf("craze serve: exit %d", code)
+	}
 	line := readyLine{Error: msg}
 	if held := heldBy(err); held != nil {
 		line.Held = &readyHeld{HostID: held.Holder.HostID, PID: held.Holder.PID, CrazeSessionID: held.CrazeID}
@@ -182,71 +191,160 @@ func (p *readyPipe) file() *os.File {
 // host logs' directory beside its log.
 func agentGroupsName(hostID string) string { return hostID + ".pgids" }
 
+// agentGroupsMax bounds how many records a spawner acts on: a host spawns one
+// agent per session start, so a file past it is not a host's.
+const agentGroupsMax = 1000
+
+// agentGroup is one agent in a host's record: the process group it leads —
+// an ACP agent is spawned leading one of its own (acp.Spawn's Setpgid), so
+// the group's id is the agent's pid — and that leader's start time
+// (rundir.ProcIdentity), which is what makes the number the agent's and
+// nobody else's (astra r5-c3 1). A pid, and the group id with it, is free for
+// the next process once its own has gone and been reaped; a start time
+// cannot be the next process's, which started later.
+type agentGroup struct {
+	pgid  int
+	start uint64
+}
+
+// line is g as its record's line: "<pgid> <start>\n", one write(2).
+func (g agentGroup) line() string {
+	return strconv.Itoa(g.pgid) + " " + strconv.FormatUint(g.start, 10) + "\n"
+}
+
+// parseAgentGroup reads one record line: two decimal fields, a group id a
+// pid_t can hold and a start time; false for anything else — a blank line,
+// or one written by anything but agentGroup.line.
+func parseAgentGroup(line string) (agentGroup, bool) {
+	f := strings.Fields(line)
+	if len(f) != 2 {
+		return agentGroup{}, false
+	}
+	pgid, err := strconv.Atoi(f[0])
+	if err != nil || pgid <= 0 || pgid > math.MaxInt32 {
+		return agentGroup{}, false
+	}
+	start, err := strconv.ParseUint(f[1], 10, 64)
+	if err != nil {
+		return agentGroup{}, false
+	}
+	return agentGroup{pgid: pgid, start: start}, true
+}
+
+// stale says why g may no longer be the agent's group, "" when it is: the
+// process with the group's number — its leader, the agent — must still exist
+// and have started when the agent did. A leader that has exited leaves a
+// group, if anything is left in it, whose number cannot be told from a
+// stranger's that has taken it since; a leader with another start time is a
+// stranger, its group whatever that stranger's is. Either is left alone. What
+// stays open is the instant between this read and the signal: the leader
+// would have to exit, be reaped and have its number taken by a new group
+// leader in it (plan 030 X22).
+func (g agentGroup) stale() string {
+	id, err := rundir.ProcessIdentity(g.pgid)
+	switch {
+	case errors.Is(err, rundir.ErrNoProcess):
+		return "its agent has exited, and a group whose leader has gone cannot be told from another's"
+	case err != nil:
+		return "its agent cannot be told: " + err.Error()
+	case id.Start != g.start:
+		return fmt.Sprintf("its number is another process's now (started at %d, the agent at %d)", id.Start, g.start)
+	}
+	return ""
+}
+
 // agentGroups is a spawned host's record of every agent process group its
-// session spawns (plan 030 §3.4, R2-2): <host-logs>/<hostId>.pgids, one
-// decimal pgid per line, appended as each agent is spawned
-// (agent.Options.AgentGroup) and removed when the host stops cleanly. An ACP
-// agent leads a process group of its own and may outlive its pipes closing;
-// the host's own stop sequence ends it, but a host its spawner has to kill
-// outright — one that never answered, or would not stop — cannot, and the
-// spawner kills each group recorded here after it (hostChild.killAgents).
+// session spawns (plan 030 §3.4, R2-2, X22): <host-logs>/<hostId>.pgids, one
+// agentGroup line per agent, appended as each agent is spawned
+// (agent.Options.AgentGroup) and removed once the host's stop sequence has
+// ended every agent its session spawned — the engine's close, and then the
+// session's start joined (serveHost.joinStart), since a start caught between
+// spawning an agent and adopting it ends that agent itself. An ACP agent
+// leads a process group of its own and may outlive its pipes closing; a host
+// its spawner has to kill outright — one that never answered, or would not
+// stop — cannot end it, and the spawner kills each group recorded here after
+// it (hostChild.killAgents), each only while its leader is the agent recorded.
 //
-// A record that cannot be written is one line on the log, once, and the
-// session runs on: the record is a last resort, not a condition of running.
-// The one agent it cannot cover is one whose host is killed in the instant
-// between the agent's spawn and its line's write.
+// A record that cannot be made fails the agent's start (record's error; the
+// agent is ended at once): an agent nothing wrote down is one nothing could
+// end after its host (astra r5-c3 2). The one agent the record cannot cover
+// is one whose host is killed outright in the instant between the agent's
+// fork and its line's write (accepted: plan 030 X22).
 type agentGroups struct {
 	path string
 	log  io.Writer
+	// err is why nothing can be recorded at all — the host logs' directory
+	// is unusable — which every record answers.
+	err error
 
 	mu     sync.Mutex
 	f      *os.File
-	warned bool
 	closed bool
 }
 
-// newAgentGroups is the record for host hostID in the host logs' directory,
-// or nil — recording nothing — when that directory cannot be used, which is
-// said on log.
+// newAgentGroups is the record for host hostID in the host logs' directory.
+// A directory that cannot be used is a record every agent's start fails on.
 func newAgentGroups(env rundir.Env, hostID string, log io.Writer) *agentGroups {
+	g := &agentGroups{log: log}
 	dir, err := rundir.HostLogDir(env)
 	if err != nil {
-		fmt.Fprintf(log, "craze serve: the agents' process groups will not be recorded: %v\n", err)
-		return nil
+		g.err = fmt.Errorf("the host logs' directory: %w", err)
+		return g
 	}
-	return &agentGroups{path: filepath.Join(dir, agentGroupsName(hostID)), log: log}
+	g.path = filepath.Join(dir, agentGroupsName(hostID))
+	return g
 }
 
-// record appends pgid, one write(2) for the line; it opens the file on the
-// first, 0600, never through a link. Nothing once closed.
-func (g *agentGroups) record(pgid int) {
+// record appends pgid's line — the group and its leader's start time — in one
+// write(2), opening the file on the first, 0600, never through a link. It is
+// agent.Options.AgentGroup: called on the session's start goroutine the
+// moment the agent is spawned, and an error fails that start.
+//
+// The leader is read here, the instant after its spawn, and is the agent only
+// while it is this host's own child: the ACP client reaps an agent that exits
+// at once, and its number is then anyone's. A leader gone already, or a
+// process with its number that is not this host's child, is an agent that has
+// exited: nothing is recorded — there is nothing left the spawner could prove
+// its own (agentGroup.stale) — and the start goes on to fail on its own. A
+// record after close is an error; nothing spawns after the stop sequence has
+// joined the start.
+func (g *agentGroups) record(pgid int) error {
 	if g == nil || pgid <= 0 {
-		return
+		return nil
+	}
+	if g.err != nil {
+		return g.err
+	}
+	id, err := rundir.ProcessIdentity(pgid)
+	if errors.Is(err, rundir.ErrNoProcess) || (err == nil && id.PPID != os.Getpid()) {
+		fmt.Fprintf(g.log, "craze serve: agent process group %d not recorded: its agent has exited already\n", pgid)
+		return nil
+	}
+	if err != nil {
+		return err
 	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	if g.closed {
-		return
+		return errors.New("the host has stopped")
 	}
-	var err error
 	if g.f == nil {
-		g.f, err = os.OpenFile(g.path, os.O_WRONLY|os.O_CREATE|os.O_APPEND|syscall.O_NOFOLLOW, 0o600)
+		f, err := os.OpenFile(g.path, os.O_WRONLY|os.O_CREATE|os.O_APPEND|syscall.O_NOFOLLOW, 0o600)
+		if err != nil {
+			return err
+		}
+		g.f = f
 	}
-	if err == nil {
-		_, err = g.f.WriteString(strconv.Itoa(pgid) + "\n")
-	}
-	if err != nil && !g.warned {
-		g.warned = true
-		fmt.Fprintf(g.log, "craze serve: agent process group %d not recorded: %v\n", pgid, err)
-	}
+	_, err = g.f.WriteString(agentGroup{pgid: pgid, start: id.Start}.line())
+	return err
 }
 
 // close ends the record and removes it: the host's stop sequence, once the
-// engine's close has ended every agent it spawned. A spawn after it records
-// nothing — a session closed while its agent spawned shuts that agent down
-// itself.
+// engine's close has ended every agent the session adopted and the start has
+// returned, having ended any it had not (serveHost.joinStart). Never called
+// when that join times out: the record is then the spawner's to act on.
 func (g *agentGroups) close() {
-	if g == nil {
+	if g == nil || g.err != nil {
 		return
 	}
 	g.mu.Lock()

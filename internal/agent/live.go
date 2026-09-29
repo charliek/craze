@@ -496,9 +496,20 @@ func (s *session) start(ctx context.Context) (teardown bool, _ error) {
 	}
 	// Told before anything else can happen to the child — a Close that ran
 	// while it spawned shuts it down just below — so a host that records it
-	// never misses a group that existed.
+	// never misses a group that existed. A group that cannot be recorded
+	// ends the agent here, exactly as a Close racing the spawn ends it, and
+	// fails the start as a spawn that failed does: an agent its host never
+	// wrote down is one the host's spawner could never end after the host.
+	// The one agent a record cannot cover is one whose host is killed
+	// outright (SIGKILL) between the fork above and this call — accepted
+	// (plan 030 X22): a spawner kills its host outright only after its
+	// SIGTERM has gone unanswered for a whole grace.
 	if g := s.opts.AgentGroup; g != nil {
-		g(client.ProcessGroup())
+		if err := g(client.ProcessGroup()); err != nil {
+			_ = client.Close()
+			s.unstart()
+			return false, fmt.Errorf("agent: the agent's process group could not be recorded: %w", err)
+		}
 	}
 	// Close may have run while we were spawning; adopt the child only if the
 	// session is still open, otherwise reap it here so it cannot be orphaned.

@@ -881,9 +881,12 @@ type Options struct {
 	// knows whether it will keep it. A detached host records it (plan 030
 	// §3.4): the agent leads a group of its own, which a host killed
 	// outright cannot take down with it, and the spawner's last-resort kill
-	// reaches it only through that record. It runs on Start's goroutine and
-	// must not block. A native session spawns no agent and never calls it.
-	AgentGroup func(pgid int)
+	// reaches it only through that record. An error is a group that could
+	// not be recorded, and fails the start: the agent is ended there and
+	// then, never left running where nothing could end it after its host
+	// (astra r5-c3 2). It runs on Start's goroutine and must not block. A
+	// native session spawns no agent and never calls it.
+	AgentGroup func(pgid int) error
 	// ContentHome is the home directory a native session reads the user's own
 	// Claude content under — commands, skills and the installed plugins
 	// (§3.1). "" is HomeDir(), which is what production wants and what every

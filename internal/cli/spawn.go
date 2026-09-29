@@ -8,10 +8,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -207,7 +207,7 @@ func spawnOnce(ctx context.Context, opts spawnOptions) (hostRef, *readyHeld, err
 	}
 	hostID := rundir.NewHostID()
 	logPath := filepath.Join(dir, hostID+".log")
-	child, r, err := startHostChild(serveArgv(&opts.flags, opts.load, hostID, logPath), filepath.Join(dir, agentGroupsName(hostID)))
+	child, r, err := startHostChild(serveArgv(&opts.flags, opts.load, hostID, logPath), filepath.Join(dir, agentGroupsName(hostID)), logPath)
 	if err != nil {
 		return hostRef{}, nil, &spawnError{kind: spawnStartFailed, msg: "craze: the session host cannot be started: " + err.Error(), err: err}
 	}
@@ -225,8 +225,9 @@ func spawnOnce(ctx context.Context, opts spawnOptions) (hostRef, *readyHeld, err
 		}
 		return hostRef{}, nil, &spawnError{kind: spawnNotReady, msg: line.Error, err: errors.New(line.Error)}
 	}
-	if line.HostID != hostID || line.CrazeSessionID == "" || !filepath.IsAbs(line.Socket) {
-		return hostRef{}, nil, child.fail(ctx, spawnMalformed, fmt.Sprintf("it names host %q, session %q, socket %q", line.HostID, line.CrazeSessionID, line.Socket), logPath)
+	// Its form is parseReady's; whose it is, this spawn's.
+	if line.HostID != hostID {
+		return hostRef{}, nil, child.fail(ctx, spawnMalformed, fmt.Sprintf("it names host %q, not %q", line.HostID, hostID), logPath)
 	}
 	entry := rundir.Entry{
 		Protocol:       protocol.ProtocolVersion,
@@ -315,13 +316,17 @@ type hostChild struct {
 	// groups is the host's record of its agents' process groups
 	// (agentGroups, ready.go).
 	groups string
-	done   chan struct{}
-	err    error // cmd.Wait's, once done is closed
+	// log is the host's log, where the spawner notes a recorded group it
+	// did not kill (note).
+	log  string
+	done chan struct{}
+	err  error // cmd.Wait's, once done is closed
 }
 
 // startHostChild starts `craze serve argv…` detached (the file's doc comment,
-// step 2) and answers it with the read end of its ready pipe.
-func startHostChild(argv []string, groups string) (*hostChild, *os.File, error) {
+// step 2) and answers it with the read end of its ready pipe. groups and log
+// are the host's record of its agents and its log.
+func startHostChild(argv []string, groups, log string) (*hostChild, *os.File, error) {
 	cmd, err := hostCommand(argv)
 	if err != nil {
 		return nil, nil, err
@@ -347,7 +352,7 @@ func startHostChild(argv []string, groups string) (*hostChild, *os.File, error) 
 		_ = r.Close()
 		return nil, nil, err
 	}
-	c := &hostChild{cmd: cmd, pid: cmd.Process.Pid, groups: groups, done: make(chan struct{})}
+	c := &hostChild{cmd: cmd, pid: cmd.Process.Pid, groups: groups, log: log, done: make(chan struct{})}
 	go func() {
 		c.err = cmd.Wait()
 		close(c.done)
@@ -411,10 +416,55 @@ func parseReady(r io.Reader) (readyLine, spawnFailure, string) {
 	if err := json.Unmarshal(bytes.TrimSuffix(buf, []byte("\n")), &line); err != nil {
 		return readyLine{}, spawnMalformed, err.Error()
 	}
-	if !line.OK && line.Error == "" && line.Held == nil {
-		return readyLine{}, spawnMalformed, "not ok, and no reason"
+	if why := line.invalid(); why != "" {
+		return readyLine{}, spawnMalformed, why
 	}
 	return line, 0, ""
+}
+
+// invalid says why a decoded line is not a ready line, "" when it is one
+// (astra r5-c3 4): each branch must carry everything its reader acts on, and
+// nothing of the other's. ok names the host in a host id's form, the socket
+// as an absolute path, the session by a craze id (a token: it names a lock),
+// and the craze serving it. Not ok says why, and a holder, when there is one,
+// names the session by its craze id — a held line naming none would have the
+// rendezvous match any registry entry that carries no session yet — and its
+// host by a host id's form, or by nothing at all with no pid either: a lock
+// that names nobody yet (plan 030 X19, X21: any live host serving the session
+// is then the holder). A member the line has that is not one of these is
+// ignored — a host may be a newer craze than its launcher.
+func (l readyLine) invalid() string {
+	if l.OK {
+		switch {
+		case l.Error != "" || l.Held != nil:
+			return "ok, and a refusal too"
+		case !rundir.ValidHostID(l.HostID):
+			return fmt.Sprintf("ok names no host id (%q)", l.HostID)
+		case !filepath.IsAbs(l.Socket):
+			return fmt.Sprintf("ok names no socket (%q)", l.Socket)
+		case !rundir.ValidToken(l.CrazeSessionID):
+			return fmt.Sprintf("ok names no session (%q)", l.CrazeSessionID)
+		case l.CrazeVersion == "":
+			return "ok names no craze version"
+		}
+		return ""
+	}
+	h := l.Held
+	switch {
+	case l.Error == "":
+		return "not ok, and no reason"
+	case h == nil:
+		return ""
+	case !rundir.ValidToken(h.CrazeSessionID):
+		return fmt.Sprintf("held names no session (%q)", h.CrazeSessionID)
+	case h.PID < 0 || h.PID > math.MaxInt32:
+		return fmt.Sprintf("held names pid %d", h.PID)
+	case h.HostID == "" && h.PID != 0:
+		return fmt.Sprintf("held names pid %d and no host", h.PID)
+	case h.HostID != "" && !rundir.ValidHostID(h.HostID):
+		return fmt.Sprintf("held names no host id (%q)", h.HostID)
+	}
+	return ""
 }
 
 // fail ends a host that gave no usable answer and says what happened, naming
@@ -488,10 +538,11 @@ func (c *hostChild) settle() {
 // whose process group is the agent's own — and spawnTermGrace for that; past
 // it, SIGKILL to the host's process group (setsid made it the leader of its
 // own), a second grace for the reaper, and then, whichever way the host went,
-// SIGKILL to every agent group it recorded (killAgents): an agent that
-// outlives its pipes is ended there. It returns once all of that is done;
-// the host is reaped unless it could not be killed within the second grace
-// (an uninterruptible wait), when the reaper still takes it whenever it goes.
+// SIGKILL to every agent group it recorded that its agent still leads
+// (killAgents): an agent that outlives its pipes is ended there. It returns
+// once all of that is done; the host is reaped unless it could not be killed
+// within the second grace (an uninterruptible wait), when the reaper still
+// takes it whenever it goes.
 func (c *hostChild) terminate() {
 	if !c.exited() {
 		// Signal on the Process, not the pid: once the reaper has waited for
@@ -509,29 +560,59 @@ func (c *hostChild) terminate() {
 
 // killAgents kills every agent process group the host recorded and removes
 // the record: nothing, for a host that stopped cleanly and removed it itself.
-// Only a group id that can be nobody's but an agent's is signalled: not 0 or
-// 1, never this process's own group, and at most a thousand of them. A group
-// is its agent's for as long as any of its members lives — and its members
-// are the agent and whatever it ran — so the one id that could have become
-// another's is a group that emptied since it was recorded and whose number a
-// new group leader was given, within the seconds a termination takes.
+// A group is signalled only while it is provably the agent's (plan 030 X22,
+// astra r5-c3 1): the process leading it — the agent, whose pid is the
+// group's id — still there, and started at the instant the host recorded
+// (agentGroup.stale). A number an agent had can be anyone's once the agent
+// has gone and been reaped, and this runs seconds after its host has, or
+// after a launcher slow to get here; a group whose leader has exited or is a
+// stranger is left alone, and the host's log says so (note). Never 0 or 1 or
+// this process's own group, and at most agentGroupsMax records.
 func (c *hostChild) killAgents() {
 	b, err := os.ReadFile(c.groups)
 	if err != nil {
 		return
 	}
 	own := syscall.Getpgrp()
-	for i, field := range strings.Fields(string(b)) {
-		if i >= 1000 {
-			break
-		}
-		pgid, err := strconv.Atoi(field)
-		if err != nil || pgid <= 1 || pgid == own {
+	n := 0
+	for _, line := range strings.Split(string(b), "\n") {
+		if strings.TrimSpace(line) == "" {
 			continue
 		}
-		_ = syscall.Kill(-pgid, syscall.SIGKILL)
+		if n++; n > agentGroupsMax {
+			c.note("agent process groups past the first %d in %s not killed", agentGroupsMax, c.groups)
+			break
+		}
+		g, ok := parseAgentGroup(line)
+		if !ok || g.pgid <= 1 || g.pgid == own {
+			if len(line) > 64 {
+				line = line[:64] + "…"
+			}
+			c.note("a record that names no agent's process group not acted on: %q", line)
+			continue
+		}
+		if why := g.stale(); why != "" {
+			c.note("agent process group %d not killed: %s", g.pgid, why)
+			continue
+		}
+		_ = syscall.Kill(-g.pgid, syscall.SIGKILL)
 	}
 	_ = os.Remove(c.groups)
+}
+
+// note appends one line to the host's log: what the spawner did after the
+// host, where whoever reads the host's log looks. Best effort — a log that
+// cannot be opened loses it — and never through a link.
+func (c *hostChild) note(format string, args ...any) {
+	if c.log == "" {
+		return
+	}
+	f, err := os.OpenFile(c.log, os.O_WRONLY|os.O_CREATE|os.O_APPEND|syscall.O_NOFOLLOW, 0o600)
+	if err != nil {
+		return
+	}
+	_, _ = fmt.Fprintf(f, "craze: "+format+"\n", args...)
+	_ = f.Close()
 }
 
 // errHolderGone is a held session's holder that exited, or released the
