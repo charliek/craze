@@ -1,0 +1,51 @@
+{
+  "batches": [
+    {
+      "batch": "base-fw-ds-20260927-230834",
+      "campaign": "029-native-harness-quality",
+      "flip": {
+        "complete": true,
+        "flips": 5,
+        "pairs": 30,
+        "rate": 0.16666666666666666,
+        "requested": 30
+      },
+      "gates": {
+        "both_orders_for_all_pairs": false,
+        "complete": true,
+        "flip_gate": "pass",
+        "luna_gate": "fail",
+        "luna_judges_bulk_pairs": false,
+        "padding_gate": "pass",
+        "padding_ok": true,
+        "thresholds": {
+          "flip_gate": 0.2,
+          "luna_agreement": 0.8,
+          "padding_max_preferred": 2
+        }
+      },
+      "judge_hash": "163ea21faf57888b10b162832f30c5997f12ab1785402f45b36f9c3270e0bdc9",
+      "judge_hash_current": true,
+      "luna_agreement": {
+        "agree": 20,
+        "complete": true,
+        "pairs": 30,
+        "rate": 0.6666666666666666,
+        "requested": 30
+      },
+      "padding": {
+        "complete": true,
+        "padded_preferred": 0,
+        "padded_preferred_single_orders": 0,
+        "pairs": 10,
+        "requested": 10
+      },
+      "requested": {
+        "available_pairs": 39,
+        "padding": 10,
+        "pairs": 30
+      },
+      "seed": 29
+    }
+  ]
+}
