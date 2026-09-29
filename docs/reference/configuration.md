@@ -246,9 +246,14 @@ socket's own path would be too long for `sun_path` — is not the opt-out and
 is not a privacy switch: it prints one line, `craze: control socket off:
 <why>`, embedding the underlying error's own text as is — in the ordinary
 case that is one stderr line, but nothing here promises the error text
-itself is free of a line break (a runtime path containing one, say). The run
-carries on exactly as it would with the opt-out set.
-`CRAZE_RUNTIME_DIR` (below) is the fix when the reason is length.
+itself is free of a line break (a runtime path containing one, say). On the
+in-process path (`CRAZE_DETACH=0`, `detach = false`) the run carries on
+exactly as it would with the opt-out set. A [detached](#detached-hosts)
+session cannot: its host exists to serve that socket, so `craze serve` fails
+to start and the TUI shows the failure (`craze: the session host could not
+start: …; CRAZE_DETACH=0 runs sessions inside craze instead`) and exits 1 when
+dismissed. `CRAZE_RUNTIME_DIR` (below) is the fix when the reason is length;
+`CRAZE_DETACH=0` runs the session inside craze meanwhile.
 
 ## Detached hosts
 
