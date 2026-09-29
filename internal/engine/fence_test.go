@@ -43,6 +43,9 @@ type fencedSession struct {
 	// background result): it starts the moment the fence comes down — the flag
 	// goes up and "wake" is recorded — as native's worker would.
 	wakePending bool
+	// owed is work the session owes outside any turn beside a pending wake: a
+	// background child whose result is not yet published (owe).
+	owed bool
 }
 
 func (s *fencedSession) FenceUp() {
@@ -79,6 +82,23 @@ func (s *fencedSession) pendWake() {
 	s.fmu.Lock()
 	defer s.fmu.Unlock()
 	s.wakePending = true
+}
+
+// OwesWork is agent.OwedWork, as native's is: a wake waiting for the fence to
+// come down owes its user the result it would deliver (plan 030 C5r), and so
+// does a child set running by owe — one whose roster row the snapshot may
+// already show finished.
+func (s *fencedSession) OwesWork() bool {
+	s.fmu.Lock()
+	defer s.fmu.Unlock()
+	return s.wakePending || s.owed
+}
+
+// owe sets what OwesWork reports beside a pending wake.
+func (s *fencedSession) owe(owed bool) {
+	s.fmu.Lock()
+	defer s.fmu.Unlock()
+	s.owed = owed
 }
 
 // onForeign sets afterForeign.
@@ -146,6 +166,7 @@ func (s *fencedSession) violations() []string {
 var (
 	_ agent.Session        = (*fencedSession)(nil)
 	_ agent.AdmissionFence = (*fencedSession)(nil)
+	_ agent.OwedWork       = (*fencedSession)(nil)
 )
 
 // fenceRig is an engine over a fencedSession, with the hooks a fence schedule

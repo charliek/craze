@@ -276,12 +276,26 @@ type Engine struct {
 	// the kick that asked for it is replayed when the last fence comes down.
 	// setRunning says the settings worker has taken a request out of the
 	// queue and not yet answered it: a settings command in progress.
+	// admitting counts the commands admitted whose work runs after e.mu is
+	// released — a rename's session call and index row, an interjection's
+	// call, a submit's first-prompt seed — from the section that admitted them
+	// (admitLocked) until that work is done: in flight to a close fence as a
+	// running Set is, so a verdict cannot come between a command's admission
+	// and what it does (plan 030 C5r, astra r8-c5 2).
 	closeFences int
 	passHeld    bool
 	setRunning  bool
+	admitting   int
 
 	obsMu     sync.Mutex
 	replaying bool
+	// replayRetired says the session's start failed (Started): a replay it
+	// opened will never close — a load that fails emits no end bracket
+	// (live.go's and native.go's load) — so the flag is cleared then and a
+	// start bracket is ignored from there on, and a failed load is not
+	// "replaying" for ever to a host's idle exit (plan 030 C5r, astra
+	// r8-c5 3).
+	replayRetired bool
 	// lastTurn is State.LastTurn (plan 030 §3.7): the ending of the last turn
 	// the observer saw end, nil once one has started since. The observer
 	// writes it, in commit order, from the stream's own turn events
@@ -551,9 +565,27 @@ func (e *Engine) Started(err error) {
 		e.activity = ActivityError
 		e.startFailed = true
 		e.err = err.Error()
+		e.retireReplay()
 		return
 	}
 	e.activity = ActivityIdle
+}
+
+// retireReplay is a failed start's end of any replay it opened (plan 030
+// C5r): a load that fails has published its start bracket and never publishes
+// the end — every provider's (live.go's loadSession, native.go's load) — so
+// the observer's flag would stay up, and a host's idle exit would read a
+// replay that is running for ever. It clears the flag and ignores a start
+// bracket from here on, in one e.obsMu section: a start is published inside
+// Start, before Started can run, but a bracket that did arrive later still
+// opens nothing. Every provider is covered here, and not in each load path,
+// because this is the one place that knows the start is over. e.mu is held
+// (e.mu → e.obsMu, as refusalLocked's read already is).
+func (e *Engine) retireReplay() {
+	e.obsMu.Lock()
+	e.replaying = false
+	e.replayRetired = true
+	e.obsMu.Unlock()
 }
 
 // Events is the session's primary subscription.
@@ -680,16 +712,20 @@ func (e *Engine) Answer(c Command, id string, a agent.AskAnswer) error {
 }
 
 // Interject merges text into the running turn. It is the session's own verb
-// and its own refusals: the engine adds nothing but the door.
+// and its own refusals: the engine adds nothing but the door — and the count
+// that keeps the call in flight to a close fence until it has returned
+// (admitLocked): the turn it was meant for can end while it is on its way, and
+// an agent may then take the text as a turn of its own (plan 030 C5r).
 func (e *Engine) Interject(ctx context.Context, c Command, text string) error {
 	hash := receiptHash("Interject", text)
 	return withBlockingReceiptErr(ctx, e.receipts, c, hash, func() error {
 		e.mu.Lock()
-		refused := e.refusalLocked()
+		done, refused := e.admitLocked()
 		e.mu.Unlock()
 		if refused != nil {
 			return refused
 		}
+		defer done()
 		return e.sess.Interject(ctx, text)
 	})
 }
@@ -836,7 +872,9 @@ func (e *Engine) observe(ev agent.Event) {
 			return
 		}
 		e.obsMu.Lock()
-		e.replaying = ev.Replay.Phase == agent.ReplayStart
+		// A failed start has retired every replay (retireReplay): a start
+		// bracket after it opens nothing.
+		e.replaying = ev.Replay.Phase == agent.ReplayStart && !e.replayRetired
 		e.obsMu.Unlock()
 		if ev.Replay.Phase == agent.ReplayEnd {
 			e.wake()
@@ -1106,6 +1144,16 @@ func (e *Engine) submit(c Command, text string, mode SubmitMode, fromRow string)
 	// armedTurn is the turn an arm asked to have cancelled, carried out of the
 	// locked section so the cancel itself is made with the lock released.
 	armedTurn, armedCause := "", ""
+	// admitted is the admission's count (admitLocked), given back once
+	// everything below is done: the turn is current or the row queued by
+	// then, both busy in their own right, and the first prompt's seed — the
+	// index write runOwn makes after the lock — is covered until it is over.
+	var admitted func()
+	defer func() {
+		if admitted != nil {
+			admitted()
+		}
+	}()
 	res, err := func() (SubmitResult, error) {
 		e.mu.Lock()
 		defer e.mu.Unlock()
@@ -1113,9 +1161,11 @@ func (e *Engine) submit(c Command, text string, mode SubmitMode, fromRow string)
 		// admission fence), and back to what the engine is on every way out.
 		defer e.syncFenceLocked()
 		e.raiseFenceLocked()
-		if err := e.refusalLocked(); err != nil {
+		done, err := e.admitLocked()
+		if err != nil {
 			return SubmitResult{}, err
 		}
+		admitted = done
 		if !e.log.OutboxRoom() {
 			return SubmitResult{}, ErrUnavailable
 		}

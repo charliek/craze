@@ -256,7 +256,8 @@ func TestAttachWithNothingRunningSaysSo(t *testing.T) {
 // failure (tui.Run's error that is not the start's) is that error whatever
 // the stream did, never `session ended` over it. The explicit quit's stop
 // (plan 030 §3.6): taken, it says nothing; refused by an older host, the note;
-// answered neither way, one line.
+// answered neither way, one line — and either note is the exit, whatever end
+// the stream came to meanwhile (C5r).
 func TestAnAttachEndsAsItsSessionDid(t *testing.T) {
 	startFailed := &remote.StartError{Text: "agent auth failed"}
 	cutShort := fmt.Errorf("remote: the stream ended before the session was ready: %w", errors.New("the session ended"))
@@ -296,6 +297,21 @@ func TestAnAttachEndsAsItsSessionDid(t *testing.T) {
 			stderr: "craze: the session may still be running: outcome unknown disconnected\n"},
 		{name: "a stop taken, the transport gave up", res: tui.Result{Ended: true, Stopped: true, EndErr: errors.New("redials spent")},
 			code: 1, msg: "craze: lost the session: redials spent"},
+		// The explicit quit's outcome wins over an end that came meanwhile
+		// (X36; plan 030 C5r, astra r8-c5 5): its note, exit 0, and nothing
+		// about the stream.
+		{name: "a stop answered neither way, the transport gave up", res: tui.Result{StopErr: errors.New("context deadline exceeded"),
+			Ended: true, EndErr: errors.New("redials spent")},
+			stderr: "craze: the session may still be running: context deadline exceeded\n"},
+		{name: "a stop answered neither way, the session ended", res: tui.Result{StopErr: errors.New("context deadline exceeded"),
+			Ended: true},
+			stderr: "craze: the session may still be running: context deadline exceeded\n"},
+		{name: "a stop an older host refused, the transport gave up", res: tui.Result{StopUnsupported: true,
+			Ended: true, EndErr: errors.New("redials spent")},
+			stderr: "craze: that session runs in an older craze; close it there\n"},
+		{name: "a stop answered neither way on a failed start", res: tui.Result{StopErr: errors.New("disconnected"),
+			Ended: true, EndErr: errors.New("redials spent"), StartErr: startFailed}, err: startFailed, sameErr: true,
+			stderr: "craze: the session may still be running: disconnected\n"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var stderr bytes.Buffer

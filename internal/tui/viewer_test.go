@@ -14,6 +14,7 @@ import (
 	"github.com/charliek/craze/internal/agent"
 	"github.com/charliek/craze/internal/backend"
 	"github.com/charliek/craze/internal/engine"
+	"github.com/charliek/craze/internal/remote"
 	"github.com/charliek/craze/internal/sessions"
 )
 
@@ -187,7 +188,13 @@ func TestAViewersShellRunsInTheSessionsWorkspace(t *testing.T) {
 // applied, frozen so no counter moves between two frames.
 func startedOverTheSocket(t *testing.T, h *attachHost, viewer bool, ws string) *gateRig {
 	t.Helper()
-	cfg, _ := withHostOwned(Config{Backend: attachSession(t, h, ""), Viewer: viewer, Theme: "tokyo-night",
+	return startedOver(t, attachSession(t, h, ""), viewer, ws)
+}
+
+// startedOver is startedOverTheSocket over a session the test dialled itself.
+func startedOver(t *testing.T, s *remote.Session, viewer bool, ws string) *gateRig {
+	t.Helper()
+	cfg, _ := withHostOwned(Config{Backend: s, Viewer: viewer, Theme: "tokyo-night",
 		Workspace: ws, Yolo: true}, ws)
 	m := New(cfg)
 	tm, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})

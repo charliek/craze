@@ -49,6 +49,12 @@ type fakeSession struct {
 	// interjectErr is what Interject answers with; unset, it is the
 	// ErrUnsupported of a session that has no interject verb (failInterjects).
 	interjectErr error
+	// interjectEntered, when set, is closed by the next Interject as it is
+	// entered, which then waits for interjectRelease: the barrier at the
+	// session's call, which the engine makes with e.mu released
+	// (holdNextInterject).
+	interjectEntered chan struct{}
+	interjectRelease chan struct{}
 	// titleEntered, when set, is closed by the next SetTitle as it is entered,
 	// which then waits for titleRelease: the barrier at the one synchronous
 	// command whose work is outside e.mu, and where C12 will put file I/O.
@@ -519,11 +525,34 @@ func (s *fakeSession) Close() error {
 // been written, in particular.
 func (s *fakeSession) Interject(context.Context, string) error {
 	s.mu.Lock()
+	entered, release := s.interjectEntered, s.interjectRelease
+	s.interjectEntered, s.interjectRelease = nil, nil
+	s.mu.Unlock()
+	if entered != nil {
+		close(entered)
+		select {
+		case <-release:
+		case <-s.done:
+		}
+	}
+	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.interjectErr != nil {
 		return s.interjectErr
 	}
 	return agent.ErrUnsupported
+}
+
+// holdNextInterject arms the barrier at Interject's entry: entered closes as
+// the next Interject is entered, and that Interject then waits for release —
+// an interjection the engine has admitted and not yet handed over.
+func (s *fakeSession) holdNextInterject() (entered <-chan struct{}, release func()) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	e, r := make(chan struct{}), make(chan struct{})
+	s.interjectEntered, s.interjectRelease = e, r
+	var once sync.Once
+	return e, func() { once.Do(func() { close(r) }) }
 }
 
 func (s *fakeSession) failInterjects(err error) {

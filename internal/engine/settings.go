@@ -644,11 +644,15 @@ func (e *Engine) SetTitle(c Command, title string) error {
 	hash := receiptHash("SetTitle", title)
 	return withSyncReceiptErr(e.receipts, c, hash, func() error {
 		e.mu.Lock()
-		refused := e.refusalLocked()
+		done, refused := e.admitLocked()
 		e.mu.Unlock()
 		if refused != nil {
 			return refused
 		}
+		// In flight to a close fence from the admission to the index row
+		// (admitLocked): a rename admitted before the host's idle verdict is
+		// work that verdict must see (plan 030 C5r).
+		defer done()
 		// Outside e.mu: the engine calls exactly three things on the seam with
 		// its own lock held (Begin, ForeignTurn and the admission fence,
 		// engine.go), and this needs to be none of them — it takes the session's

@@ -330,7 +330,16 @@ func (s *Session) Started(error) {}
 // close, and a host's refusal of the detach otherwise. Read answers
 // backend.ErrClosed afterwards, and every command ErrClosed (one still
 // waiting resolves as Client.Close says).
-func (s *Session) Close() error {
+func (s *Session) Close() error { return s.CloseWithin(context.Background()) }
+
+// CloseWithin is Close bounded by ctx as well as by closeBound (plan 030
+// C5r): the explicit quit's one deadline covers its stop, the wait for the
+// session's end and this close after them (tui's stopQuit), so the detach
+// waits only for what is left of it, and a ctx already done — the deadline
+// passed, or a second quit — detaches nothing: the transport is closed at
+// once, which ends the subscription on the host anyway. It is Close in every
+// other way, and shares its once: whichever is called first decides.
+func (s *Session) CloseWithin(ctx context.Context) error {
 	s.closeOnce.Do(func() {
 		s.mu.Lock()
 		s.closing = true
@@ -342,9 +351,9 @@ func (s *Session) Close() error {
 		}
 		s.mu.Unlock()
 		close(s.closed)
-		if st != nil {
-			ctx, cancel := context.WithTimeout(context.Background(), closeBound)
-			err := st.Close(ctx)
+		if st != nil && ctx.Err() == nil {
+			cctx, cancel := context.WithTimeout(ctx, closeBound)
+			err := st.Close(cctx)
 			cancel()
 			var e *Error
 			if errors.As(err, &e) {

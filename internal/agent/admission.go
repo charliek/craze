@@ -31,3 +31,24 @@ type AdmissionFence interface {
 	FenceUp()
 	FenceDown()
 }
+
+// OwedWork is a session that can owe its user work outside any turn — native's
+// background children (plan 026 §3.11): a child still running, or its result
+// published and waiting for the wake that delivers it. A host deciding whether
+// its session is idle (plan 030 §3.6) reads it beside the roster and the
+// agent's turn, which cannot say it: a background child's roster row is
+// finished before its result is published (the harness reports the child's
+// finish, then makes its result pending), and a pending result is no turn
+// until the wake claims it — which a host's close fence, keeping the
+// admission fence up, forbids (plan 030 C5r, astra r8-c5 1). Like
+// AdmissionFence it is optional and found by a type assertion; a session
+// without it owes nothing outside its turns.
+//
+// The contract: OwesWork takes only leaf locks and waits on nothing, and the
+// engine never calls it holding its own mutex. Read with the admission fence
+// up, its answer is a cut: nothing it counts can end without a turn — a
+// running child becomes pending, and a pending result is taken only by a turn,
+// which the fence keeps from starting.
+type OwedWork interface {
+	OwesWork() bool
+}

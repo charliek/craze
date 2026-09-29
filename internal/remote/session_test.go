@@ -1004,3 +1004,70 @@ func TestAStopIsAnsweredByTheSessionsEnd(t *testing.T) {
 		t.Fatalf("close after a stop sent %d detaches", n)
 	}
 }
+
+// TestCloseWithinBoundsItsDetach (plan 030 C5r, astra r8-c5 4): the explicit
+// quit's close shares the quit's deadline. With time left the detach is sent,
+// and a host that never answers it (the tap drops the reply) holds the close
+// only until the context ends — forced here by ending it once the detach is on
+// the wire — never for the client's own detach bound; with the context already
+// done (the deadline passed, or a second quit) nothing is detached at all and
+// the transport is closed at once.
+func TestCloseWithinBoundsItsDetach(t *testing.T) {
+	// bound is generous for a close whose context has ended, and short of the
+	// 3 s detach wait a close with no deadline of its own spends (closeBound).
+	const bound = 2 * time.Second
+	closing := func(s *remote.Session, ctx context.Context) <-chan error {
+		done := make(chan error, 1)
+		go func() { done <- s.CloseWithin(ctx) }()
+		return done
+	}
+	closed := func(t *testing.T, done <-chan error, what string) {
+		t.Helper()
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Fatalf("close: %v", err)
+			}
+		case <-time.After(bound):
+			t.Fatalf("%s: the close did not return within %v", what, bound)
+		}
+	}
+	withheld := func(tp *tap) {
+		tp.setRewriteIn(func(l wireLine) [][]byte {
+			if l.method == protocol.MethodSessionDetach && l.resp != nil {
+				return [][]byte{} // the host never answers the detach
+			}
+			return nil
+		})
+	}
+
+	t.Run("time left", func(t *testing.T) {
+		h := newHost(t)
+		tp := newTap(t)
+		withheld(tp)
+		s, _ := started(t, h, tp, remote.SessionOptions{})
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		done := closing(s, ctx)
+		tp.await(t, "the detach on the wire", func() bool { return len(tp.sent(protocol.MethodSessionDetach)) == 1 })
+		select {
+		case <-done:
+			t.Fatal("the close returned with its detach unanswered and its context live")
+		default:
+		}
+		cancel() // the quit's deadline
+		closed(t, done, "the context ended")
+	})
+	t.Run("none left", func(t *testing.T) {
+		h := newHost(t)
+		tp := newTap(t)
+		withheld(tp)
+		s, _ := started(t, h, tp, remote.SessionOptions{})
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		closed(t, closing(s, ctx), "no time left")
+		if n := len(tp.sent(protocol.MethodSessionDetach)); n != 0 {
+			t.Fatalf("%d detaches sent with no time left, want none", n)
+		}
+	})
+}

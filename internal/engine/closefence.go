@@ -23,7 +23,13 @@ import (
 // prompt, a send-now), the queue verbs (Queue, EditQueued, Unqueue,
 // ClearQueue), Disarm, Interject, Set (queued, and again in the worker's
 // claim) and SetTitle are refused, and so is GiveUpDrain's drain, which would
-// otherwise abandon the rows for good over a pause. A pass of the driver's —
+// otherwise abandon the rows for good over a pause. An admission that came
+// before the fence is in flight until its work is done: the queue verbs and
+// Disarm do theirs inside the section that admitted them; Set is queued, then
+// running; a turn is current; and the three whose work runs after e.mu is
+// released — SetTitle's rename and index row, Interject's call, Submit's
+// first-prompt seed — are counted from their admission until it is over
+// (admitLocked, plan 030 C5r). A pass of the driver's —
 // a settlement's successor, a drain — starts nothing either (canStartLocked
 // reads the same refusal), and one it held back is replayed when the fence
 // comes down (passHeld). What stops work goes on: Cancel, Stop, GiveUp,
@@ -41,13 +47,19 @@ import (
 // busy is anything in flight, read with the fence up so nothing new can join
 // it: the engine starting, replaying, working or closing; a turn of its own
 // current, a cancel on its way, a send-now armed; rows queued; a settings
-// command queued or running; the agent's own turn (a foreign turn); an ask
-// open (which pins a host indefinitely — the owner's rule); a sub-agent or a
-// background child running. The engine's own facts are read in the fenced
-// section; the ask registry and the session's roster after it, outside e.mu —
-// the registry's mutex is never nested with the engine's — which is still a
-// cut: an ask opens, and a child is spawned, only inside a turn, and with the
-// fence up none can start.
+// command queued or running; a command admitted whose work is not over
+// (admitLocked); the agent's own turn (a foreign turn); an ask open (which
+// pins a host indefinitely — the owner's rule); a sub-agent or a background
+// child running; and a background child's result owed outside any turn — its
+// child ended but its result not yet published, or published and waiting for
+// the wake the fence holds back (agent.OwedWork, plan 030 C5r). A start that
+// failed replays nothing (retireReplay): its load's open bracket is not a
+// replay running for ever. The engine's own facts are read in the fenced
+// section; the ask registry, the session's roster and its owed work after it,
+// outside e.mu — the registry's mutex is never nested with the engine's —
+// which is still a cut: an ask opens, and a child is spawned, only inside a
+// turn, a result owed is delivered only by one, and with the fence up none can
+// start.
 
 // FenceClose raises a close fence over the engine's admission and reports
 // whether anything is in flight (the file's doc comment). release lowers it,
@@ -59,7 +71,7 @@ import (
 func (e *Engine) FenceClose() (release func(), busy bool) {
 	busy = e.closeFenceUp()
 	if !busy {
-		busy = busyElsewhere(e.sess.Snapshot(), e.asks.Asks())
+		busy = busyElsewhere(e.sess.Snapshot(), e.asks.Asks()) || e.owesWork()
 	}
 	var once sync.Once
 	return func() { once.Do(e.releaseCloseFence) }, busy
@@ -68,15 +80,29 @@ func (e *Engine) FenceClose() (release func(), busy bool) {
 // Busy reports whether anything is in flight, by FenceClose's rule, with no
 // fence raised: a sample for a host's idle clock, which is not a cut — the
 // engine's facts are read under e.mu, and the session's foreign turn, its
-// roster and the asks outside it — and only FenceClose's verdict is one. It
-// waits on nothing.
+// roster, its owed work and the asks outside it — and only FenceClose's
+// verdict is one. It waits on nothing.
 func (e *Engine) Busy() bool {
 	snap := e.sess.Snapshot()
 	asks := e.asks.Asks()
 	e.mu.Lock()
 	busy := e.busyLocked()
 	e.mu.Unlock()
-	return busy || snap.ForeignTurn || busyElsewhere(snap, asks)
+	return busy || snap.ForeignTurn || busyElsewhere(snap, asks) || e.owesWork()
+}
+
+// owesWork is the session's own work outside any turn (agent.OwedWork):
+// native's background child still running, or its result pending for the wake
+// (plan 030 C5r, astra r8-c5 1). The roster cannot say it — a background
+// child's row is finished before its result is published — and the agent's
+// turn cannot either: a pending result is no turn until the wake claims it,
+// and under a close fence the wake cannot claim. So a verdict that read only
+// those would stop a host with a result it was about to deliver, and the
+// fence would be what kept it from being delivered. Read with e.mu released:
+// the session takes its own leaves.
+func (e *Engine) owesWork() bool {
+	w, ok := e.sess.(agent.OwedWork)
+	return ok && w.OwesWork()
 }
 
 // closeFenceUp is FenceClose's section: the session's admission fence first,
@@ -124,8 +150,36 @@ func (e *Engine) busyLocked() bool {
 		return true
 	case len(e.sets) > 0, e.setRunning:
 		return true
+	case e.admitting > 0:
+		return true
 	}
 	return false
+}
+
+// admitLocked is refusalLocked for a command whose work runs after e.mu is
+// released (plan 030 C5r, astra r8-c5 2): nil admits it and counts it in
+// flight (e.admitting, busyLocked) in the very section that judged it, and
+// done — which the caller calls once that work is over, the persistence
+// included, on every way out — takes it out again. So a close fence raised
+// after the admission reads it busy until it is over: without the count a
+// rename admitted before the fence ran after the fence had reported idle, and
+// renamed the session and wrote the index under the stop. Set needs none of
+// it: its request is queued, then running, in the same sections (e.sets,
+// setRunning). e.mu is held; done takes it.
+func (e *Engine) admitLocked() (done func(), err error) {
+	if err := e.refusalLocked(); err != nil {
+		return nil, err
+	}
+	e.admitting++
+	var once sync.Once
+	return func() { once.Do(e.admitted) }, nil
+}
+
+// admitted is one admission's work over (admitLocked).
+func (e *Engine) admitted() {
+	e.mu.Lock()
+	e.admitting--
+	e.mu.Unlock()
 }
 
 // busyElsewhere is the rest of the verdict, from outside the engine: an ask

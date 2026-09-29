@@ -53,6 +53,19 @@ func newAttachHost(t *testing.T, start bool) *attachHost {
 // closes the engine off the handler's goroutine.
 func newAttachHostStopping(t *testing.T, start, stops bool) *attachHost {
 	t.Helper()
+	if !stops {
+		return newAttachHostStop(t, start, nil)
+	}
+	var h *attachHost
+	h = newAttachHostStop(t, start, func(control.StopRequest) { go func() { _ = h.eng.Close() }() })
+	return h
+}
+
+// newAttachHostStop is newAttachHost whose server serves session.stop with
+// stop as its coordinator (nil: it serves none) — one that ends nothing, a
+// host whose stop hangs, included.
+func newAttachHostStop(t *testing.T, start bool, stop control.StopFunc) *attachHost {
+	t.Helper()
 	h := &attachHost{stub: NewStubNoPrimary()}
 	var err error
 	h.eng, err = engine.New(h.stub, engine.Options{})
@@ -71,11 +84,7 @@ func newAttachHostStopping(t *testing.T, start, stops bool) *attachHost {
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(dir) })
 	h.path = filepath.Join(dir, "s")
-	opts := control.Options{Workspace: "/work"}
-	if stops {
-		opts.Stop = func(control.StopRequest) { go func() { _ = h.eng.Close() }() }
-	}
-	srv := control.New(opts)
+	srv := control.New(control.Options{Workspace: "/work", Stop: stop})
 	srv.SetEngine(h.eng)
 	l, err := net.Listen("unix", h.path)
 	if err != nil {

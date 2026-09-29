@@ -83,7 +83,7 @@ func spawnAsChild(t *testing.T, extra func(n int) []string) *childCmds {
 		// -test.run matches nothing, so a child whose init fell through runs
 		// no test.
 		cmd := exec.Command(exe, "-test.run=^$")
-		cmd.Env = append(os.Environ(), cliChildEnv+"="+string(b))
+		cmd.Env = childEnv(b)
 		if extra != nil {
 			cmd.Env = append(cmd.Env, extra(i)...)
 		}

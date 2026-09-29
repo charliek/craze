@@ -251,6 +251,44 @@ func TestServeKeepsAFailedStartListedAndAttachable(t *testing.T) {
 	assertHostGone(t, env, e)
 }
 
+// TestServeExitsAfterAFailedLoad (plan 030 C5r, astra r8-c5 3): a --load
+// whose session/load the agent refuses (the fake's load-missing) has published
+// its replay's start bracket and never its end; the start fails, the host
+// stays listable, and with no client attached it exits once the startup grace
+// is over — the start-failed rule's limit 0 — rather than reading the failed
+// load's replay as in flight for ever.
+func TestServeExitsAfterAFailedLoad(t *testing.T) {
+	env, _ := serveHome(t)
+	t.Setenv("CRAZE_FAKE_SCRIPT", "load-missing")
+	ws := t.TempDir()
+	row := sessions.Row{SessionID: "gone-1", Provider: "cursor", CWD: absDir(ws), Title: "the missing one",
+		CrazeID: "0199aaaa-bbbb-7ccc-8ddd-000000000052"}
+	seedIndexRow(t, row)
+	d := driveIdle(t)
+	r := runServeIn(t, hostEnv{}, "--agent-bin", fakeAgentPath(t), "--load", row.CrazeID)
+	e := r.waitServing(t, env, false)
+	// The start's failure, polled over sessions.list — which attaches
+	// nothing — within serveStep: a failed start never marks the entry ready.
+	deadline := time.Now().Add(serveStep)
+	for got := listRow(t, e); got.Activity != protocol.ActivityError; got = listRow(t, e) {
+		if time.Now().After(deadline) {
+			t.Fatalf("the load has not failed after %v: %+v; stderr: %s", serveStep, got, r.stderr)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if l := d.look(t, r); l.Armed || l.Stop != "" {
+		t.Fatalf("within the grace: %+v", l)
+	}
+	d.advance(hostStartupGrace)
+	if l := d.look(t, r); !l.Fenced || !strings.Contains(l.Stop, "did not start") {
+		t.Fatalf("the grace over, no client attached: %+v, want the start-failed stop", l)
+	}
+	if err := r.result(t, serveStep); err != nil {
+		t.Fatalf("craze serve: %v", err)
+	}
+	assertHostGone(t, env, e)
+}
+
 // TestServeStopEndsEveryAttachedClient (AC3): two clients attached, and one
 // stops the session: its stop is taken, both see the session's end — its own
 // End answering the stop, the other's the end it did not ask for — and the
@@ -306,7 +344,7 @@ func TestAKilledClientProcessDoesNotPinTheHost(t *testing.T) {
 		t.Fatal(err)
 	}
 	cmd := exec.Command(exe, "-test.run=^$")
-	cmd.Env = append(os.Environ(), cliChildEnv+"="+string(argv))
+	cmd.Env = childEnv(argv)
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		t.Fatal(err)

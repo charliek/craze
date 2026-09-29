@@ -332,7 +332,11 @@ func attachConfig(target attachTarget, view attachView) (tui.Config, error) {
 //     this client asked for it (Result.Stopped); refused by a host that cannot
 //     stop it, the quit detached, and one line says where the session still
 //     runs (stopUnsupportedNote); a stop answered neither way is one line too,
-//     and exit 0: the quit happened, the session may not have ended;
+//     and exit 0: the quit happened, the session may not have ended. Either
+//     note is the whole of the exit (X36; plan 030 C5r): a stream's end that
+//     arrived meanwhile — the transport given up, or the session's own end —
+//     adds no second line and no exit 1, because the quit is what the user
+//     asked for, and its outcome is what they are told;
 //   - anything else — a view close: SIGTERM, a closed terminal — is exit 0
 //     and says nothing: the session goes on on its host.
 //
@@ -345,8 +349,10 @@ func attachExit(res tui.Result, err error, stderr io.Writer) error {
 		return err
 	case res.StopUnsupported:
 		fmt.Fprintln(stderr, stopUnsupportedNote)
+		return startOrNil(err, res)
 	case res.StopErr != nil:
 		fmt.Fprintf(stderr, "craze: the session may still be running: %s\n", sanitizeLine(res.StopErr.Error()))
+		return startOrNil(err, res)
 	}
 	switch {
 	case res.Ended && res.Stopped && res.EndErr == nil:

@@ -2439,6 +2439,21 @@ func (s *nativeSession) FenceDown() {
 	s.kickWake()
 }
 
+// OwesWork is OwedWork (plan 030 C5r): a background child still running, or its
+// result pending for the wake — the harness's BackgroundOwed, which a finished
+// roster row does not yet clear. hs is read under s.mu, released before the
+// harness's leaf lock is taken, as redactor does; before Start there is no
+// child, and after Close none is owed (the harness reported every result
+// undelivered).
+func (s *nativeSession) OwesWork() bool {
+	s.mu.Lock()
+	hs := s.hs
+	s.mu.Unlock()
+	return hs != nil && hs.BackgroundOwed()
+}
+
+var _ OwedWork = (*nativeSession)(nil)
+
 // Interject merges text into the running turn: the harness takes it up before
 // the turn's next step, the model reads it there, and the step that saw it
 // writes it to the transcript (plan 019 §3.10, D-34).

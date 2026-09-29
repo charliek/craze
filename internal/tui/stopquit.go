@@ -32,9 +32,11 @@ import (
 // on. An engine this TUI built itself (the in-process opt-out) is closed by
 // its quit exactly as before.
 
-// quitStopWait bounds the explicit quit's stop (plan 030 AC3): the receipt,
-// and then the session's end, both within it. A variable only so that a test
-// can shorten it.
+// quitStopWait bounds the explicit quit (plan 030 AC3; C5r): one deadline,
+// taken when the quit is asked for, across the stop's receipt, the wait for
+// the session's end and the backend's close after them (closeBackend) — and a
+// second quit ends the wait and closes at once. A variable only so that a
+// test can shorten it.
 var quitStopWait = 2 * time.Second
 
 // exitState is what the explicit quit came to (stopQuit), shared by every copy
@@ -48,19 +50,43 @@ type exitState struct {
 	stopping    bool
 	unsupported bool
 	err         error
+	// deadline is the quit's one bound (quitStopWait from the moment it was
+	// asked for), and again says a second quit came while the first still
+	// waited: the backend's close then waits for nothing (closeBackend), and
+	// the stop's own answer, which that close cuts short, is not recorded —
+	// the stop was on its way when the program ended.
+	deadline time.Time
+	again    bool
 }
 
-// begin records that the quit is asking for the stop.
-func (x *exitState) begin() {
+// begin records that the quit is asking for the stop, and starts its one
+// deadline.
+func (x *exitState) begin(now time.Time) time.Time {
 	x.mu.Lock()
+	defer x.mu.Unlock()
 	x.stopping = true
+	x.deadline = now.Add(quitStopWait)
+	return x.deadline
+}
+
+// quitAgain records a second quit while the first still waits.
+func (x *exitState) quitAgain() {
+	if x == nil {
+		return
+	}
+	x.mu.Lock()
+	x.again = true
 	x.mu.Unlock()
 }
 
-// answered records what the stop came to.
+// answered records what the stop came to — unless a second quit has ended
+// the wait for it (quitAgain).
 func (x *exitState) answered(err error) {
 	x.mu.Lock()
 	defer x.mu.Unlock()
+	if x.again {
+		return
+	}
 	switch {
 	case err == nil:
 	case errors.Is(err, backend.ErrStopUnsupported):
@@ -68,6 +94,43 @@ func (x *exitState) answered(err error) {
 	default:
 		x.err = err
 	}
+}
+
+// quitCloser is a backend whose close can be bounded by a context
+// (remote.Session.CloseWithin): the detach waits no longer than ctx allows,
+// and none at all once it is done.
+type quitCloser interface {
+	CloseWithin(ctx context.Context) error
+}
+
+// closeBackend is finishRun's close of the backend the program ended with.
+// After an explicit quit that asked its host to stop the session, the close
+// shares the quit's one deadline (plan 030 C5r, astra r8-c5 4): a detach —
+// after a stop the host refused, or one that failed — waits only for what is
+// left of it; none once it has passed, or once a second quit came; and then
+// the transport is closed. Without that, a host that withheld its stop's
+// receipt used the quit's two seconds and then a fresh detach wait of the
+// client's own. Every other exit closes as it always has.
+func (x *exitState) closeBackend(eng backend.Backend) error {
+	var deadline time.Time
+	again := false
+	if x != nil {
+		x.mu.Lock()
+		if x.stopping {
+			deadline, again = x.deadline, x.again
+		}
+		x.mu.Unlock()
+	}
+	c, ok := eng.(quitCloser)
+	if !ok || deadline.IsZero() {
+		return eng.Close()
+	}
+	ctx, cancel := context.WithDeadline(context.Background(), deadline)
+	defer cancel()
+	if again {
+		cancel()
+	}
+	return c.CloseWithin(ctx)
 }
 
 // outcome is Run's reading of it: stopped for a stop asked and not refused —
@@ -90,26 +153,36 @@ type ender interface {
 }
 
 // stopQuit is requestQuit for a backend served elsewhere (the file's doc
-// comment). Its command id is the model's next, like every command's. What
-// requestQuit does first for every quit — the composer's command ended, the
-// host-status hub released — it does here too, and then the stop, bounded by
-// quitStopWait with the session's end; the program quits once either is in.
-// A second quit while the first waits quits at once: the host may still be
-// closing, and that is fine.
+// comment). Its command id is the model's next, like every command's. Its one
+// deadline starts here, as the quit is asked for (exitState.begin), and bounds
+// the stop's receipt, the wait for the session's end, and the backend's close
+// once the program has ended (closeBackend): the stop is sent at once, on a
+// goroutine of its own, beside what requestQuit does first for every quit —
+// the composer's command ended, the host-status hub released — so neither
+// spends the stop's time (plan 030 C5r); the program quits once the session
+// has ended or the deadline has passed. The composer's command is the one
+// wait past it: nothing it started may outlive craze, and its shutdown has a
+// bound of its own (shellShutdownWait), spent only while a command runs. A
+// second quit while the first waits quits at once, and the close that
+// follows detaches nothing (quitAgain): the host may still be closing, and
+// that is fine.
 func (m Model) stopQuit() (tea.Model, tea.Cmd) {
 	if m.quitting {
+		m.exit.quitAgain()
 		return m, tea.Quit
 	}
 	m.quitting = true
 	eng, h, sh, x := m.eng, m.host, m.shell, m.exit
 	c := m.nextCmd()
-	x.begin()
+	deadline := x.begin(time.Now())
 	return m, func() tea.Msg {
+		ctx, cancel := context.WithDeadline(context.Background(), deadline)
+		defer cancel()
+		stopped := make(chan error, 1)
+		go func() { stopped <- eng.Stop(ctx, c) }()
 		sh.shutdown()
 		closeHost(h)
-		ctx, cancel := context.WithTimeout(context.Background(), quitStopWait)
-		defer cancel()
-		err := eng.Stop(ctx, c)
+		err := <-stopped
 		x.answered(err)
 		if e, ok := eng.(ender); ok && err == nil {
 			select {

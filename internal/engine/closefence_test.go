@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -365,6 +366,182 @@ func TestACloseFenceKeepsTheSessionsFenceUp(t *testing.T) {
 		t.Fatal("the wake did not start once the fence came down")
 	}
 	if busy := fr.e.Busy(); !busy {
+		t.Fatal("the wake's turn is not busy")
+	}
+}
+
+// TestAnAdmittedCommandIsBusyUntilItsWorkIsOver (plan 030 C5r, astra r8-c5
+// 2): a command admitted before the close fence whose work runs after e.mu is
+// released — a rename (its session call and index row), an interjection (its
+// session call), a submit's first-prompt seed — is in flight to the fence from
+// its admission until that work is over, so the verdict cannot come between
+// them. Each is paused right after its admission, at its own barrier; the
+// fence then reads busy (and so does the sample), the host stays and lowers
+// it, the work finishes, and only then is the engine idle.
+func TestAnAdmittedCommandIsBusyUntilItsWorkIsOver(t *testing.T) {
+	// paused runs cmd on a goroutine, waits for it to reach its barrier and
+	// for settled (when set: whatever else the command did to be over in its
+	// own right), and checks the verdict there and once cmd has returned;
+	// resume lets it go.
+	paused := func(t *testing.T, e *Engine, parked <-chan struct{}, settled, resume func(), what string, cmd func() error) {
+		t.Helper()
+		done := make(chan error, 1)
+		go func() { done <- cmd() }()
+		await(t, parked, what+" to be admitted and paused")
+		if settled != nil {
+			settled()
+		}
+		release, busy := fenced(t, e)
+		if !busy {
+			t.Fatalf("%s admitted before the close fence and not yet over: the fence reads idle", what)
+		}
+		release() // the host stays, as its watcher does on a busy verdict
+		if !e.Busy() {
+			t.Fatalf("%s admitted and not yet over: Busy is false", what)
+		}
+		resume()
+		select {
+		case err := <-done:
+			if err != nil && !errors.Is(err, agent.ErrUnsupported) {
+				t.Fatalf("%s: %v", what, err)
+			}
+		case <-time.After(watchdog):
+			t.Fatalf("%s never returned", what)
+		}
+		if e.Busy() {
+			t.Fatalf("%s over: still busy", what)
+		}
+		release, busy = fenced(t, e)
+		release()
+		if busy {
+			t.Fatalf("%s over: the fence reads busy", what)
+		}
+	}
+
+	t.Run("a rename", func(t *testing.T) {
+		r := newRig(t, Options{})
+		entered, release := r.s.holdNextTitle()
+		t.Cleanup(release)
+		paused(t, r.e, entered, nil, release, "a rename", func() error { return r.e.SetTitle(Command{}, "renamed") })
+		if st := r.e.State(); st.Title != "renamed" {
+			t.Fatalf("the rename: title %q", st.Title)
+		}
+	})
+	t.Run("an interjection", func(t *testing.T) {
+		r := newRig(t, Options{})
+		entered, release := r.s.holdNextInterject()
+		t.Cleanup(release)
+		paused(t, r.e, entered, nil, release, "an interjection", func() error {
+			return r.e.Interject(context.Background(), Command{}, "also")
+		})
+	})
+	t.Run("a submit's seed", func(t *testing.T) {
+		h := &hooks{}
+		parked, resume := make(chan struct{}), make(chan struct{})
+		var once sync.Once
+		h.beforeInlineSeed = func(string) {
+			once.Do(func() { close(parked) })
+			<-resume
+		}
+		r := newRigHooked(t, Options{}, agent.EventLogOptions{NoPrimary: true}, h)
+		var resumed sync.Once
+		let := func() { resumed.Do(func() { close(resume) }) }
+		t.Cleanup(let)
+		paused(t, r.e, parked, func() {
+			// The turn itself ends meanwhile, in its own right: only the seed
+			// the submit still owes is in flight.
+			r.until(lastEnding)
+			if st := r.e.State(); st.Turn != "" || len(st.Queue) != 0 {
+				t.Fatalf("the premise: %+v", st)
+			}
+		}, let, "a submit", func() error {
+			_, err := r.e.Submit(Command{}, "hello", SubmitQueue, "")
+			return err
+		})
+	})
+}
+
+// TestAFailedLoadIsNotReplayingForEver (plan 030 C5r, astra r8-c5 3): a load
+// publishes its replay's start bracket and, failing, never its end (every
+// provider's load); the start's failure (Started) retires it, so the engine is
+// not busy — the fence's verdict and the sample both — and a start bracket
+// arriving after the failure opens nothing.
+func TestAFailedLoadIsNotReplayingForEver(t *testing.T) {
+	s := newFake(t, agent.EventLogOptions{NoPrimary: true})
+	e, err := New(s, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = e.Close() })
+	s.emit(agent.Event{Type: agent.EventReplay, Replay: &agent.ReplayInfo{Phase: agent.ReplayStart}})
+	if !e.isReplaying() {
+		t.Fatal("the premise: the load's start bracket opened no replay")
+	}
+	e.Started(errors.New("agent: session/load: Session not found"))
+	if st := e.State(); !st.StartFailed || st.Activity != ActivityError {
+		t.Fatalf("the premise: %+v", st)
+	}
+	idle := func(what string) {
+		t.Helper()
+		if e.Busy() {
+			t.Fatalf("%s: Busy", what)
+		}
+		release, busy := e.FenceClose()
+		release()
+		if busy {
+			t.Fatalf("%s: the fence reads busy", what)
+		}
+	}
+	idle("a failed load")
+	s.emit(agent.Event{Type: agent.EventReplay, Replay: &agent.ReplayInfo{Phase: agent.ReplayStart}})
+	idle("a start bracket after the failure")
+}
+
+// TestWorkTheSessionOwesOutsideATurnIsBusy (plan 030 C5r, astra r8-c5 1): a
+// session's own work outside any turn (agent.OwedWork) is in flight to the
+// fence — a background child whose roster row already reads finished but whose
+// result is not yet published, and a published result whose wake the close
+// fence itself holds back — though the roster shows nothing running and the
+// agent runs no turn. With the fence released the wake starts, and its turn is
+// busy in its own right.
+func TestWorkTheSessionOwesOutsideATurnIsBusy(t *testing.T) {
+	fr := newFenceRig(t, ChainPolicy{})
+	fr.s.mu.Lock()
+	fr.s.snap.Subagents = []agent.SubagentInfo{{ID: "c-1", Status: agent.SubagentCompleted, Background: true}}
+	fr.s.mu.Unlock()
+
+	// Between the child's finish and its result's publication.
+	fr.fs.owe(true)
+	if !fr.e.Busy() {
+		t.Fatal("a finished child's unpublished result: Busy is false")
+	}
+	release, busy := fenced(t, fr.e)
+	release()
+	if !busy {
+		t.Fatal("a finished child's unpublished result: the fence reads idle")
+	}
+
+	// Published while a fence is up: its wake waits for the fence to come
+	// down, and a second verdict taken meanwhile must see it.
+	fr.fs.owe(false)
+	release, busy = fenced(t, fr.e)
+	if busy {
+		t.Fatal("the premise: nothing owed")
+	}
+	fr.fs.pendWake()
+	if !fr.e.Busy() {
+		t.Fatal("a result pending for a wake the fence holds back: Busy is false")
+	}
+	again, busy := fenced(t, fr.e)
+	again()
+	if !busy {
+		t.Fatal("a result pending for a wake the fence holds back: the fence reads idle")
+	}
+	release()
+	if !fr.fs.fakeSession.ForeignTurn() {
+		t.Fatal("the wake did not start once the fence came down")
+	}
+	if !fr.e.Busy() {
 		t.Fatal("the wake's turn is not busy")
 	}
 }

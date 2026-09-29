@@ -1603,10 +1603,13 @@ func finishRun(out io.Writer, final tea.Model, m Model, h Host) (bool, error) {
 	// Closing the engine closes its session — and stops its driver first, so
 	// nothing is left running behind the program — and answers with what the
 	// session's own Close said.
+	//
+	// After an explicit quit that stopped a session served elsewhere, the close
+	// shares that quit's one deadline (exitState.closeBackend, plan 030 C5r).
 	var agentExited bool
 	if m.owner != nil {
 		if eng := m.owner.current(); eng != nil {
-			agentExited = errors.Is(eng.Close(), agent.ErrAgentExited)
+			agentExited = errors.Is(m.exit.closeBackend(eng), agent.ErrAgentExited)
 		}
 	}
 	failed := startErr != nil || agentExited || !started
