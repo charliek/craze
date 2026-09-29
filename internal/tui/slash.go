@@ -91,6 +91,12 @@ func builtinSlash() []slashItem {
 	}
 }
 
+// sessionsBuiltin is /sessions (plan 030 §3.10): the session list, a
+// builtin only where there is one (Config.Sessions) — so without it the
+// catalog, the menu and /help are exactly what they always were, and
+// builtinNamed, which knows the fixed set alone, never names it.
+var sessionsBuiltin = slashItem{Name: "sessions", Desc: "Every session on this machine", Builtin: true}
+
 func builtinNamed(name string) bool {
 	want := strings.ToLower(name)
 	for _, b := range builtinSlash() {
@@ -135,6 +141,10 @@ func (m Model) slashCatalog() []slashItem {
 		case "tasks":
 			if !todos {
 				continue
+			}
+		case "exit":
+			if m.sessions != nil {
+				items = append(items, sessionsBuiltin)
 			}
 		}
 		items = append(items, it)
@@ -419,6 +429,9 @@ func (m Model) runBuiltin(name, args string) (tea.Model, tea.Cmd) {
 	case "help":
 		m.input.SetValue("")
 		return m.openHelp(), nil
+	case "sessions":
+		m.input.SetValue("")
+		return m.openSessions()
 	case "exit":
 		m.input.SetValue("")
 		return m.requestQuit()

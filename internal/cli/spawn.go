@@ -16,6 +16,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/charliek/craze/internal/engine"
 	"github.com/charliek/craze/internal/protocol"
 	"github.com/charliek/craze/internal/remote"
 	"github.com/charliek/craze/internal/rundir"
@@ -786,5 +787,33 @@ func stopHost(e rundir.Entry) error {
 	}
 	defer func() { _ = c.Close() }()
 	_, err = c.Command(ctx, protocol.MethodSessionStop, protocol.StopParams{SessionID: e.CrazeSessionID}, nil, remote.CommandOptions{})
+	return err
+}
+
+// cancelHost is the session list's ctrl+x on a working or asking row (plan
+// 030 §3.10): over a connection of its own, as stopHost's — it never
+// attaches — the queue of the session e names is cleared, and then its
+// running turn is cancelled, so the turn settles into an empty queue and
+// nothing starts behind it (in the other order the settlement would start
+// the queue's head in the same step). Both are the protocol's own commands;
+// the connection's client mints their ids. The whole is bounded by
+// spawnStopWait. A cancel the host refuses not_accepting found nothing left
+// to cancel — the turn ended on its own between the two — and is not an
+// error: the queue is cleared and nothing runs, which is what was asked.
+func cancelHost(e rundir.Entry) error {
+	ctx, cancel := context.WithTimeout(context.Background(), spawnStopWait)
+	defer cancel()
+	c, err := remote.Dial(ctx, e.Socket, remote.Options{PeerCheck: rundir.DialCheck(os.Geteuid())})
+	if err != nil {
+		return err
+	}
+	defer func() { _ = c.Close() }()
+	if _, err := c.Command(ctx, protocol.MethodQueueClear, protocol.QueueClearParams{SessionID: e.CrazeSessionID}, nil, remote.CommandOptions{}); err != nil {
+		return err
+	}
+	_, err = c.Command(ctx, protocol.MethodSessionCancel, protocol.CancelParams{SessionID: e.CrazeSessionID}, nil, remote.CommandOptions{})
+	if errors.Is(err, engine.ErrNotAccepting) {
+		return nil
+	}
 	return err
 }

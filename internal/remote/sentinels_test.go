@@ -638,6 +638,13 @@ var tuiSites = []tuiSite{
 	// The explicit quit's stop (plan 030 §3.6): a host that cannot stop its
 	// session refuses, stop_unsupported.
 	{"stopquit.go", "answered", "Is", "backend.ErrStopUnsupported", 1, proofStop},
+	// The session list's close of another session (plan 030 §3.10): its
+	// Sessions.Stop is session.stop over a connection of its own, whose
+	// refusal is the same reconstruction; and the roster's registry and
+	// index reads, the list's own (internal/roster), which no Backend call
+	// answers.
+	{"sessions_list.go", "sessActionDone", "Is", "backend.ErrStopUnsupported", 1, proofStop},
+	{"sessions_list.go", "sessLines", "Error", "err", 2, proofLocal},
 	{"theme.go", "noteAndSaveTheme", "Error", "err", 1, proofLocal},
 }
 

@@ -583,6 +583,13 @@ type Model struct {
 	spawnWaiting int
 	spawnFrom    dialogKind
 
+	// sessions is Config.Sessions, the session list's source (plan 030
+	// §3.9): nil is no list — no ← binding, no /sessions builtin, no help
+	// line, nothing of it on any frame. sessList is the list itself
+	// (sessions_list.go), a top-level mode while it is open.
+	sessions Sessions
+	sessList sessListState
+
 	todoPlanned int
 	todoDone    bool
 
@@ -1411,6 +1418,7 @@ func New(cfg Config) Model {
 		spawnNew:        cfg.NewBackend,
 		spawnLoad:       cfg.LoadBackend,
 		cont:            cfg.Continue,
+		sessions:        cfg.Sessions,
 		claimSession:    cfg.ClaimSession,
 		refuseLoad:      cfg.RefuseLoad,
 		onEngine:        cfg.OnEngine,
@@ -1814,6 +1822,25 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// A result issued for a session the model has since left (issued):
 		// nothing it says applies to this one.
 		return m, nil
+	}
+	// The session list's own messages, and the list ahead of everything
+	// else while it is open (plan 030 §3.10, sessions_list.go): its keys
+	// are handleKey's first rung; the mouse, and a paste with no input to
+	// land in, are dropped; the end of the session behind it marks its row
+	// and leaves craze running. Everything else — the session's stream, its
+	// command replies, the ticks — is applied as ever, behind the list.
+	if next, cmd, ok := m.applySessMsg(msg); ok {
+		return next, cmd
+	}
+	if m.sessList.open {
+		switch msg := msg.(type) {
+		case tea.MouseMsg, dblClickMsg, pasteMsg:
+			return m, nil
+		case endMsg:
+			m.ended, m.endErr = true, msg.err
+			m.sessionEnded()
+			return m, nil
+		}
 	}
 	switch msg := msg.(type) {
 	case restoreMsg:
@@ -2434,6 +2461,12 @@ func (m Model) dialogClick(row int) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// The session list is the first rung while it is open (plan 030 §3.10):
+	// ahead of Ctrl+D and Ctrl+C, a card, a dialog, the confirm line and the
+	// sub-agent view, none of which may take a key from it.
+	if m.sessList.open {
+		return m.handleSessionsKey(msg)
+	}
 	// The highlight is a mouse gesture: any key but the one that copies it
 	// means the user has moved on.
 	if msg.Type != tea.KeyCtrlY {
@@ -2639,6 +2672,15 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.focusQueue(0)
 			return m, nil
 		}
+	}
+	// ← on an empty composer opens the session list (plan 030 §3.10) — only
+	// where there is one, so without Config.Sessions the key reaches the
+	// textarea exactly as it always has. alt+← stays the composer's word
+	// motion. Everything that owns the keyboard — a card, a dialog, the
+	// confirm line, the sub-agent view, the focused bands — has had the key
+	// above; a queue edit holds its text in the composer, so it is not empty.
+	if msg.Type == tea.KeyLeft && !msg.Alt && m.sessions != nil && m.input.Value() == "" && m.queueEdit == "" {
+		return m.openSessions()
 	}
 	return m, m.updateComposer(msg)
 }
@@ -2864,12 +2906,14 @@ func (m Model) handleEnter() (tea.Model, tea.Cmd) {
 		return m.saveQueueEdit(linkDone)
 	}
 	name, args, ok := parseSlashLine(m.input.Value())
-	if ok && (name == "exit" || name == "rename") {
-		// The two builtins that run before the session is up. Quitting has
+	if ok && (name == "exit" || name == "rename" || (name == "sessions" && m.sessions != nil)) {
+		// The builtins that run before the session is up. Quitting has
 		// always had to; /rename joins it because the gate below refuses
 		// silently, and a rename typed at a session that is still restoring
-		// owes the user the reason rather than nothing at all (§3.6). Neither
-		// touches the wire, and neither is reachable while a card is up —
+		// owes the user the reason rather than nothing at all (§3.6); and
+		// /sessions, where there is a session list, opens it whatever the
+		// session behind it is doing, as ← does (plan 030 §3.10). None
+		// touches the wire, and none is reachable while a card is up —
 		// handleKey hands the keyboard to the card before Enter gets here.
 		return m.runBuiltin(name, args)
 	}
@@ -4431,6 +4475,11 @@ func (m Model) View() string {
 	if !m.ready || m.width <= 0 || m.height <= 0 {
 		// A degenerate size still owes the terminal exactly its own rows.
 		return blankFrame(m.width, m.height)
+	}
+	if m.sessList.open {
+		// The session list's own region set in place of the session's
+		// frame (sessions_list.go): the session is behind it, not under it.
+		return m.sessionsView()
 	}
 	lay := m.lay
 	if lay.Width != m.width || lay.Height != m.height {

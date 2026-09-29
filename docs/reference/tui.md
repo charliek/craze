@@ -224,6 +224,7 @@ off.
 | `Enter` while the queue band has the keyboard | edit that message in place — its text loads into the composer, `Enter` saves, `Esc` restores the draft |
 | `Backspace` / `Delete` on a queued row | cancel it |
 | `Ctrl+L` on a queued row | send it now instead of the running turn (it asks first) |
+| `←` on an empty composer, `/sessions` | open the [session list](#session-list) — only when sessions run in detached hosts (the default); under `CRAZE_DETACH=0` the key reaches the composer as it always has |
 | `Esc` or `←` inside the sub-agent view | return to the main transcript; entering or leaving cancels nothing |
 | `Tab` inside the sub-agent view | switch to the next sub-agent |
 | `PgUp` / `PgDn` | scroll the transcript, or page the `/help` box; page the slash menu instead when it is open — the menu takes priority over both |
@@ -477,6 +478,53 @@ as outside; `Ctrl+C` still cancels the main turn and the view stays open.
 Typing, pasting and the slash menu are inert inside the view, and a card
 still lands on top and owns the keyboard until it is answered.
 
+## Session list
+
+`←` on an empty composer, or `/sessions`, replaces the screen with every
+session of yours running on this machine, whatever its directory, and the
+saved ones that are not running. It exists only when sessions run in detached
+hosts (the default); under `CRAZE_DETACH=0`, `detach = false` or with the
+control socket off there is no list, no `/sessions` and no `←` binding. The
+session you came from stays attached behind the list — its turn keeps
+running, a card it raises waits for you — and the cursor starts on its row.
+
+```text
+ sessions  9 running                             ! 2 need you   ✳ 3 working   ✗ 1 failed   ○ 2 idle
+
+needs you 2 ─────────────────────────────────────────────────────────────────────
+  ! fix the roost tab rename      permission: cargo test -p roost-ipc    grok    roost            2m
+
+working 3 ───────────────────────────────────────────────────────────────────────
+❯ ✳ write the v0.1.0 release no…  Responding                             native  craze · here     1m
+```
+
+The header counts what needs you, what is working, what failed and what is
+idle, dropping counts from the right as the terminal narrows. Rows are grouped
+by state — **needs you** (an open permission, question or plan, with what it
+is about), **working** (what it is doing: the running tool, `Responding`,
+`Thinking`, or `Starting…`/`Loading…`/`Closing…`), **failed** (the error's
+first line), **idle** (the first line of its last reply, or `waiting for a
+prompt`), **unreachable** (`?`: its host is registered and not answering) —
+then `▸ saved · N not running`, collapsed. Within a group the row that
+changed state most recently is first. Each row reads: state glyph, title, what
+it wants, provider, directory (`· here` for the session you came from), and
+how long it has been in its state. A session run by an older craze is listed
+with what that craze reports, and its version on the row (`· craze 0.0.9`).
+A host that has not answered yet is drawn with the working rows, `Starting…`
+or `Connecting…`. With no other session the list says `No other sessions.`
+It needs 40×10; smaller, it says so.
+
+| Key | Action |
+|---|---|
+| `↑` `↓` | move the selection; it stays on its session however the rows reorder |
+| `Enter`, `→` | on the session you came from, go back to it; on `▸ saved`, expand or collapse the saved sessions |
+| `Esc`, `←` | back to the session you came from — unless it ended while the list was up, when the list stays and says `that session ended` |
+| `Ctrl+X` | on a working or asking session, stop its turn **and clear its queue**; on an idle or failed one, the first press arms a close (`ctrl+x again closes it`) and a second within two seconds ends the session on its host — any other key disarms it. Nothing on a saved row or a host that is not answering |
+| `Ctrl+S` | group by directory instead of by state, and back; the grouping is kept for the rest of the run |
+| `Ctrl+D`, `Ctrl+C` twice | quit craze; every session keeps running |
+
+The mouse does nothing in the list.
+
 ## Modes
 
 `Shift+Tab`, `/plan`, `/ask` and `/agent` cycle or set the ACP session mode.
@@ -699,6 +747,7 @@ skills carry no such restriction; they complete anywhere in the draft.
 | `/plan` | Set plan mode |
 | `/ask` | Set ask mode |
 | `/agent` | Set agent mode |
+| `/sessions` | The [session list](#session-list) — listed only when sessions run in detached hosts |
 | `/exit` | Quit craze |
 
 Matches are prefix hits first, then substring hits, each group kept in the

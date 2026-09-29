@@ -433,10 +433,17 @@ func blankFrame(width, height int) string {
 // the one thing this screen exists to say, and at 30 columns it does not fit
 // on one line.
 func tooSmallView(width, height int) string {
+	return tooSmallViewFor(width, height, minFrameCols, minFrameRows)
+}
+
+// tooSmallViewFor is tooSmallView for a screen whose minimum is its own:
+// the session list's is 40×10 (plan 030 §3.10), the session frame's
+// minFrameCols×minFrameRows.
+func tooSmallViewFor(width, height, minCols, minRows int) string {
 	if width <= 0 || height <= 0 {
 		return blankFrame(width, height)
 	}
-	msg := fmt.Sprintf("craze: terminal too small (need %d×%d)", minFrameCols, minFrameRows)
+	msg := fmt.Sprintf("craze: terminal too small (need %d×%d)", minCols, minRows)
 	lines := strings.Split(ansi.Hardwrap(ansi.Wordwrap(msg, width, ""), width, true), "\n")
 	if len(lines) > height {
 		lines = lines[:height]

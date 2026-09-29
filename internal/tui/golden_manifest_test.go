@@ -25,7 +25,11 @@ import (
 // client of a host its test built — its session's turn failed before the
 // attach, which the frame harness's socket host cannot make, since it
 // attaches its model before its engine starts — and which the runner makes as
-// a direct production, "in process" as the accounting reads it.
+// a direct production, "in process" as the accounting reads it; and the
+// session list's frames (plan 030 §3.10, §3.17, sessions-*), direct-Update
+// frames of the client's own screen against a fake Config.Sessions — the
+// list is drawn from the roster, never from the session's stream, so there
+// is no transport to vary.
 //
 // It is held four ways:
 //
@@ -153,6 +157,16 @@ var goldenManifest = map[string]goldenRuns{
 	"resume-picker-100x30":                   inprocOnly,
 	"resume-picker-short-100x12":             inprocOnly,
 	"select-reverse-100x30":                  bothTransports,
+	"sessions-100x30":                        inprocOnly,
+	"sessions-80x24":                         inprocOnly,
+	"sessions-armed-80x24":                   inprocOnly,
+	"sessions-dirs-100x30":                   inprocOnly,
+	"sessions-dirs-80x24":                    inprocOnly,
+	"sessions-empty-80x24":                   inprocOnly,
+	"sessions-older-host-100x30":             inprocOnly,
+	"sessions-saved-100x30":                  inprocOnly,
+	"sessions-saved-80x24":                   inprocOnly,
+	"sessions-unreachable-80x24":             inprocOnly,
 	"select-styled-row-100x30":               bothTransports,
 	"select-two-lines-100x30":                bothTransports,
 	"shell-composer-100x30":                  bothTransports,
@@ -434,8 +448,8 @@ func transportList(set map[frameTransport]bool) string {
 
 // TestTheGoldenManifestIsEveryGolden (astra 31): the manifest lists every
 // golden file in testdata/ and no file that is not there, with the counts A8
-// states — 113 goldens in process and over the socket, the six picker frames
-// and plan 030's restore-failed in process only.
+// states — 113 goldens in process and over the socket, the six picker frames,
+// plan 030's restore-failed and its ten session-list frames in process only.
 func TestTheGoldenManifestIsEveryGolden(t *testing.T) {
 	files, err := filepath.Glob(filepath.Join("testdata", "*.golden"))
 	if err != nil {
@@ -463,8 +477,8 @@ func TestTheGoldenManifestIsEveryGolden(t *testing.T) {
 			t.Errorf("the manifest runs %s under %v: a golden runs under both transports, or in process alone", name, runs)
 		}
 	}
-	if both != 113 || inprocAlone != 7 {
-		t.Errorf("the manifest lists %d goldens under both transports and %d in process alone, want 113 and 7 (A8)", both, inprocAlone)
+	if both != 113 || inprocAlone != 17 {
+		t.Errorf("the manifest lists %d goldens under both transports and %d in process alone, want 113 and 17 (A8)", both, inprocAlone)
 	}
 }
 

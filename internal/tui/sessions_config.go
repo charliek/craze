@@ -35,6 +35,15 @@ type Sessions interface {
 	// Stop stops ref's running session on its host (session.stop): the
 	// list's close of a session it is not showing.
 	Stop(ref roster.Ref) error
+	// Cancel is the list's ctrl+x on a working or asking row (plan 030
+	// §3.10): ref's queue cleared and then its running turn cancelled
+	// (session.queue.clear, then session.cancel), so the cancelled turn
+	// settles into an empty queue and nothing starts behind it — over a
+	// connection of its own that never attaches, as Stop's does. A cancel
+	// that found nothing left to cancel — the turn ended on its own first —
+	// is not an error: the queue is cleared and nothing runs. A saved
+	// session is an error.
+	Cancel(ref roster.Ref) error
 }
 
 // SessionRoster is a running session-list poller (*roster.Roster).

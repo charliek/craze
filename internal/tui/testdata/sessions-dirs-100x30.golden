@@ -1,0 +1,30 @@
+ sessions  9 running                             ! 2 need you   ✳ 3 working   ✗ 1 failed   ○ 2 idle 
+                                                                                                    
+~/projects/roost 1 ─────────────────────────────────────────────────────────────────────────────────
+  ! fix the roost tab rename      permission: cargo test -p roost-ipc                  grok       2m
+                                                                                                    
+~/projects/lumen 1 ─────────────────────────────────────────────────────────────────────────────────
+  ! add persistence to the read…  question: Which storage?                             native    14m
+                                                                                                    
+~/projects/shed 1 ──────────────────────────────────────────────────────────────────────────────────
+  ✳ new session                   Starting…                                            grok       3s
+                                                                                                    
+~/projects/craze 3 ─────────────────────────────────────────────────────────────────────────────────
+❯ ✳ write the v0.1.0 release no…  Responding                                           native     1m
+  ✳ move queue edits onto remot…  go test ./internal/remote/...                        cursor    12m
+  ○ triage the flaky pty test     Found it: os.NewFile(0) races the pty close in the…  grok       1h
+                                                                                                    
+~/projects/spendwise 1 ─────────────────────────────────────────────────────────────────────────────
+  ✗ bump the flutter deps         error: 402 Payment Required from openrouter          native     3h
+                                                                                                    
+~/projects/folio 1 ─────────────────────────────────────────────────────────────────────────────────
+  ○ port the docs site            waiting for a prompt · craze 0.0.9                   gx           
+                                                                                                    
+~/projects/prox 1 ──────────────────────────────────────────────────────────────────────────────────
+  ? spike the prox sweep          not answering                                        native    20m
+                                                                                                    
+  ▸ saved · 3 not running ──────────────────────────────────────────────────────────────────────────
+                                                                                                    
+                                                                                                    
+────────────────────────────────────────────────────────────────────────────────────────────────────
+ enter back to it · ctrl+x stop · ctrl+s by state · ← back                                          

@@ -7,6 +7,7 @@ import (
 
 	"github.com/charliek/craze/internal/engine"
 	"github.com/charliek/craze/internal/roster"
+	"github.com/charliek/craze/internal/sessions"
 	"github.com/charliek/craze/internal/tui"
 )
 
@@ -102,6 +103,78 @@ func TestTheSessionListListsOpensAndStopsAHost(t *testing.T) {
 		if err := cfg.Sessions.Stop(roster.SavedRef(s.Saved[0])); !errors.Is(err, errStopSaved) {
 			t.Fatalf("Stop of a saved session: %v", err)
 		}
+		return tui.Result{}, nil
+	})
+	if err := runTUI(nil, launchFlags(t, ws), hostEnv{}); err != nil {
+		t.Fatalf("runTUI: %v", err)
+	}
+	if !ran {
+		t.Fatal("the TUI never ran")
+	}
+	assertNoHosts(t, env)
+}
+
+// TestTheSessionListCancelsATurnAndClearsItsQueue is the list's ctrl+x on a
+// working row (plan 030 §3.10), production's Cancel end to end: a host whose
+// agent never finishes a prompt until it is cancelled (the fake's hang), one
+// turn running and one prompt queued behind it. Cancel clears the queue and
+// then cancels, over a connection of its own: the row settles idle, its last
+// turn cancelled — had the cancel gone first, the settlement would have
+// started the queued prompt, which hangs too, and the row would never be
+// idle — and nothing is left queued. A second Cancel, with nothing left to
+// cancel, is not an error; a saved session's is.
+func TestTheSessionListCancelsATurnAndClearsItsQueue(t *testing.T) {
+	env, ws, cmds := launchHome(t, nil)
+	t.Setenv("CRAZE_FAKE_SCRIPT", "hang")
+	ran := false
+	fakeRun(t, func(cfg tui.Config) (tui.Result, error) {
+		ran = true
+		b, err := cfg.NewBackend(cfg.Provider, false)
+		if err != nil {
+			t.Fatalf("NewBackend: %v", err)
+		}
+		started(t, b)
+		id := b.Info().CrazeSessionID
+		cmd := func(n string) engine.Command { return engine.Command{Client: b.ClientID(), ID: n} }
+		first, err := b.Submit(stepCtx(t), cmd("1"), "never ends", engine.SubmitQueue, "")
+		if err != nil || first.Turn == "" {
+			t.Fatalf("the first prompt: %+v, %v", first, err)
+		}
+		second, err := b.Submit(stepCtx(t), cmd("2"), "queued behind it", engine.SubmitQueue, "")
+		if err != nil || second.Queued == nil {
+			t.Fatalf("the second prompt was not queued: %+v, %v", second, err)
+		}
+		r := cfg.Sessions.Roster()
+		defer r.Close()
+		s := waitList(t, r, "the host listed, its turn working", func(s roster.Snapshot) bool {
+			row := runningRow(s, id)
+			return row != nil && row.Status == roster.Reachable && row.Session != nil &&
+				row.Session.Activity == engine.ActivityWorking
+		})
+		ref := runningRow(s, id).Ref()
+		if err := cfg.Sessions.Cancel(ref); err != nil {
+			t.Fatalf("Cancel: %v", err)
+		}
+		waitList(t, r, "the turn cancelled and nothing started behind it", func(s roster.Snapshot) bool {
+			row := runningRow(s, id)
+			return row != nil && row.Session != nil && row.Session.Activity == engine.ActivityIdle &&
+				row.Session.LastTurn != nil && row.Session.LastTurn.Outcome == engine.TurnCancelled
+		})
+		removed, err := b.ClearQueue(stepCtx(t), cmd("3"))
+		if err != nil || len(removed) != 0 {
+			t.Fatalf("the queue after Cancel: %d rows left, %v", len(removed), err)
+		}
+		if err := cfg.Sessions.Cancel(ref); err != nil {
+			t.Fatalf("a second Cancel, with nothing to cancel: %v", err)
+		}
+		if err := cfg.Sessions.Cancel(roster.SavedRef(sessions.Row{SessionID: "x", Provider: "cursor"})); !errors.Is(err, errStopSaved) {
+			t.Fatalf("Cancel of a saved session: %v", err)
+		}
+		_ = b.Close()
+		if err := cfg.Sessions.Stop(ref); err != nil {
+			t.Fatalf("Stop: %v", err)
+		}
+		waitReaped(t, cmds.pids()[0])
 		return tui.Result{}, nil
 	})
 	if err := runTUI(nil, launchFlags(t, ws), hostEnv{}); err != nil {

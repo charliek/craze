@@ -64,6 +64,16 @@ func (s sessionList) Stop(ref roster.Ref) error {
 	return stopHost(ref.Host.Entry())
 }
 
+// Cancel clears ref's queue and cancels its running turn on its host, over a
+// connection of its own (cancelHost): the list's ctrl+x on a working or
+// asking row (plan 030 §3.10).
+func (s sessionList) Cancel(ref roster.Ref) error {
+	if ref.Saved != nil {
+		return errStopSaved
+	}
+	return cancelHost(ref.Host.Entry())
+}
+
 // open dials the host e names as the TUI's client and attaches — as the
 // direct reattach does, so a host that is stopping (it answers hello and
 // refuses every attach closing) is an error here and never the TUI's failed

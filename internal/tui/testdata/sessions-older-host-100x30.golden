@@ -1,0 +1,30 @@
+ sessions  5 running                             ! 1 need you   ✳ 1 working   ✗ 1 failed   ○ 2 idle 
+                                                                                                    
+needs you 1 ────────────────────────────────────────────────────────────────────────────────────────
+  ! migrate the index             permission: Shell · craze 0.0.9        cursor  lumen              
+                                                                                                    
+working 1 ──────────────────────────────────────────────────────────────────────────────────────────
+  ✳ tidy the notes                Working · craze 0.0.9                  grok    notes              
+                                                                                                    
+failed 1 ───────────────────────────────────────────────────────────────────────────────────────────
+  ✗ bump the deps                 error · craze 0.0.9                    native  spendwise          
+                                                                                                    
+idle 2 ─────────────────────────────────────────────────────────────────────────────────────────────
+❯ ○ write the v0.1.0 release no…  waiting for a prompt                   native  craze · here     4m
+  ○ port the docs site            waiting for a prompt · craze 0.0.9     gx      folio              
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+────────────────────────────────────────────────────────────────────────────────────────────────────
+ enter back to it · ctrl+x close · ctrl+s by directory · ← back                                     
