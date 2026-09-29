@@ -47,9 +47,12 @@ uv run crazeeval snapshot-config
 uv run crazeeval run --harness craze,opencode --model glm-5.3-flash --tasks split:smoke --craze-bin ../bin/craze --label smoke
 ```
 
-Raw runs (answers, captures, diffs, logs, workspaces) stay in `eval-runs/` — never in the
-repo. What's worth keeping goes in the repo as a `crazeeval archive` under
-`eval/results/<campaign-or-label>/` (§5f).
+Raw runs (answers, captures, diffs, logs, workspaces) stay in `eval-runs/` — never
+published anywhere, local only (keep the current and previous campaign; older ones can be
+deleted, optionally after `crazeeval pack`). What's worth keeping goes two places: a
+compact rollup (`crazeeval summarize` + a README) in this repo under
+`eval/results/<campaign-or-label>/`, and the full `crazeeval archive` in the private repo
+`charliek/craze-evals` (§5f).
 
 One budget is enforced per campaign: `--budget-cap` (default $95 committed + reserved) and
 `--run-cap` (default $3 settled per run). `crazeeval ledger` prints the running totals.
@@ -323,27 +326,47 @@ on both sides) per model, on all fifteen tasks and again on the held-out eight a
 a provider-drift check (§3.1.8) — same served model id, judged against its own baseline —
 before trusting the final numbers on a provider that had an outage mid-campaign.
 
-**f. Archive.** Once the campaign is done, write a compact record into the repo:
+**f. Summarize and publish.** Once the campaign is done, three steps:
 
-```shell
-uv run crazeeval archive --batch <baseline-batch> --batch <lever-batch-1> ... --batch <final-batch> --all-runs --unseal --max-bytes <N> --out results/<campaign-name>/
-```
+1. **Summarize**, into this repo — a compact `summary.json` from the campaign's final
+   `report` output directories (one group per report), plus a hand-written `README.md`
+   (see `eval/results/2026-09-plan029/README.md` for the shape):
 
-(Run from `eval/`, like every other command in this doc — `--out results/<campaign-name>/`
-lands at `eval/results/<campaign-name>/` in the repo. `--out eval/results/<campaign-name>/`
-run from `eval/` lands one level too deep, at `eval/eval/results/...`.)
+   ```shell
+   uv run crazeeval summarize --report <final-report-dir-1> [--report <final-report-dir-2> ...] \
+     --campaign-name <campaign-name> --out results/<campaign-name>/summary.json
+   ```
 
-Use `--all-runs` for a whole campaign (every scored run of every batch, kept by `run_id`) —
-the *default* mode instead keeps only the report's current view (a later batch replaces an
-earlier one's run by run key), which silently drops one side of a craze-vs-craze lever
-comparison, since both batches reuse the same run keys. Plan 029's campaign archived with
-`--all-runs --unseal --max-bytes 12000000` over 36 batches (baseline, lever, final, final2,
-the drift check, the L7 A/B batches) into 876 runs and 1,156 verdicts at 2.9 MB — set
-`--max-bytes` generously for a campaign-sized archive; the 2 MB default is sized for a
-single final's current view. `archive.json`'s `reconciliation` line must say `ok: true`;
-the command also fails loudly if it finds a key or a home path anywhere in the output. Then
-write that directory's own `README.md` (see `eval/results/2026-09-plan029/README.md` for
-the shape) and commit both.
+   (Run from `eval/` — `--out results/<campaign-name>/summary.json` lands at
+   `eval/results/<campaign-name>/summary.json` in the repo.)
+
+2. **Archive**, into a local clone of the private `craze-evals` repository — the full,
+   uncompacted record (`runs.jsonl`, `verdicts.jsonl`, `batches.json`, `calibration.json`,
+   `archive.json`) of every batch in the campaign:
+
+   ```shell
+   git clone git@github.com:charliek/craze-evals.git ../../craze-evals   # once, next to the craze checkout
+   uv run crazeeval archive --batch <baseline-batch> --batch <lever-batch-1> ... --batch <final-batch> \
+     --all-runs --unseal --max-bytes <N> --out ../../craze-evals/campaigns/<campaign-name>
+   ```
+
+   Use `--all-runs` for a whole campaign (every scored run of every batch, kept by
+   `run_id`) — the *default* mode instead keeps only the report's current view (a later
+   batch replaces an earlier one's run by run key), which silently drops one side of a
+   craze-vs-craze lever comparison, since both batches reuse the same run keys. Plan 029's
+   campaign archived with `--all-runs --unseal --max-bytes 12000000` over 36 batches
+   (baseline, lever, final, final2, the drift check, the L7 A/B batches) into 876 runs and
+   1,156 verdicts at 2.9 MB — set `--max-bytes` generously for a campaign-sized archive;
+   the 2 MB default is sized for a single final's current view. `archive.json`'s
+   `reconciliation` line must say `ok: true`; the command also fails loudly if it finds a
+   key or a home path anywhere in the output. Then, in the `craze-evals` checkout, commit
+   and push `campaigns/<campaign-name>/` and add a row to that repository's own README
+   campaign table.
+
+3. **Raw runs stay local.** Never uploaded, anywhere. Keep the current and previous
+   campaign's `eval-runs/` directory; delete older ones. `crazeeval pack` can compact a
+   kept campaign into a local tarball first (still local, never a publish step) — see
+   "Where results go" in `eval/README.md`.
 
 ## 6. Held-out hygiene
 
@@ -393,7 +416,8 @@ held-out numbers as informational only, precisely because those tasks had alread
 ## 8. Plan 029 as a worked example
 
 Plan 029's own campaign (baseline → four levers → the final, plus the wrap-up's L7 A/B) is
-archived in the repo at `eval/results/2026-09-plan029/README.md`, alongside the raw
-`crazeeval archive` output. It's a concrete instance of every step above, with the actual
+summarized in the repo at `eval/results/2026-09-plan029/README.md` and `summary.json`; its
+full archive is in the private `craze-evals` repository at
+`campaigns/2026-09-plan029/`. It's a concrete instance of every step above, with the actual
 numbers, keep/reject decisions and spend — read it for what a full campaign's shape looks
 like end to end.

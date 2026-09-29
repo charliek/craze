@@ -354,6 +354,50 @@ uv run crazeeval captures --run DIR [--out DIR] [--unseal]
 uv run crazeeval archive --batch DIR [--batch LATER ...] --out DIR [--unseal] [--verdicts DIR ...] \
     [--all-runs] [--max-bytes N]
 
+# A campaign's compact summary.json for this repository (see "Where results go"), from
+# one or more `report` output directories (their report.json): one group per report, in
+# the order given. Per group: the models it covers (craze runs, or a best open harness
+# fixed; the report's other models are named in other_models and their rows left out);
+# per model the best open harness and why, the bar's outcome and each condition
+# (all_tasks, heldout, dev: objective counts, win rate, 90% CI, W/T/L, n) and coverage
+# gaps; objective pass counts and statuses per model/harness; the win-rate matrix per
+# split, per model and pooled; metric medians; the task tables; and the report's
+# provenance -- batch names (never paths), the judge hash(es), plan modes, verdict
+# counts, sealed. Everything but the provenance is the covered models' alone: pooled is
+# recomputed from their cells (never the report's pooled, which counts every model),
+# and the report-wide aggregates report.json cannot split by model are left out (the
+# length-bias digest, a --compare block). Left out too: verdict and loss lists,
+# verdict source paths, every absolute path. Sorted keys, no timestamp: the same
+# reports give the same bytes. A
+# sealed report is refused unless --allow-sealed. Before writing, the output gets the
+# archive's path checks (no absolute or local path in any string, no /home/ or owner's
+# home in the text); a hit writes nothing. --campaign-name defaults to the campaign
+# directory's name. Prints each group's outcomes and the file's size.
+uv run crazeeval summarize --report DIR [--report DIR ...] --out FILE [--campaign-name NAME] [--allow-sealed]
+
+# Optional and local: compact a campaign's raw runs into a tarball kept on the local disk
+# (see "Where results go"), without the harness homes and caches. An allowlist per batch:
+# batch.json, manifest.json, summary.json (and their .resume.json twins), results.jsonl,
+# validation.json, rescore.jsonl, best-open-harness.json; everything under judging/,
+# calibration/ and captures/ but the .lock files; per rep result.json (and
+# result.pre-rescore.json); per attempt result.json, stdout.jsonl, stderr.txt,
+# diff.patch, start-/final-manifest.json, capture.jsonl.gz (or capture.jsonl), gitpost/
+# and the scoring logs (scoring/*.stdout, *.stderr, *.out/ reports -- no scoring copy).
+# Held-out (heldout/ and judging/heldout/) only with --unseal. Never home/ (harness
+# state, binaries, caches: regenerable), ws/, Go caches or anything else. Only the
+# allowlisted directories are walked (lstat, no link followed); a symlink or special
+# file met there refuses the pack. Every selected file is key-scanned (the batch runner's
+# key ring and scan, gzip members decompressed to the end) before anything is written;
+# a hit writes nothing. A batch is named by its resolved directory; members are
+# <batch name>/<path>, each a plain relative path (no "..", no leading "/"). FILE.tar.gz
+# and a FILE.tar.gz.manifest.json sidecar (batch names, file count, bytes before
+# compression, the tarball's sha256) are staged together and published only when both
+# are written, never replacing a file; a failure leaves neither behind. The same
+# batches pack to the same bytes.
+# --dry-run selects and scans, prints files and bytes per batch and overall, and writes
+# nothing.
+uv run crazeeval pack --batch DIR [--batch DIR ...] --out FILE.tar.gz [--unseal] [--dry-run]
+
 # Recompute a finished batch's diff and its diff-derived checks (no_writes, diff_scope)
 # from each rep's final attempt's manifests with today's ignores (X15); every other
 # check stands, objective_pass is recomputed. Held-out runs only with --unseal; --dry-run
@@ -486,8 +530,19 @@ invalidate the run. craze's own `testdata/` directories and the sandbox home are
 Raw results never land in the repo. `--out` defaults to
 `<campaign>/eval-runs/<label>-<timestamp>/` (plan 029's batches are under
 `~/.claude/plans/craze/029-native-harness-quality/eval-runs/`, its scripts set
-`CRAZEEVAL_PLAN_DIR`). What is worth keeping in the repo is a `crazeeval archive` of
-them (see *The archive*).
+`CRAZEEVAL_PLAN_DIR`). A finished campaign `<name>` is published in two places:
+
+- **this repository**, `eval/results/<name>/`: a human `README.md` and the compact
+  `summary.json` that `crazeeval summarize` makes from the campaign's final reports;
+- **the private `craze-evals` repository**, `campaigns/<name>/`: the full
+  `crazeeval archive --all-runs` output of the campaign's batches -- a few MB, with no
+  answers or captures (see *The archive*).
+
+The raw runs stay local, in the campaign directory, and nowhere else. The retention
+rule: keep the current and the previous campaign's raw runs and delete older ones;
+optionally `crazeeval pack` a campaign first, to shrink it into a local tarball without
+the harness homes and caches (plan 029's 3.0 GB of batches select to 0.8 GB before
+compression).
 
 Each batch writes:
 
@@ -703,8 +758,9 @@ read; the success bar uses the dev tasks alone and reports `provisional-meets` o
 
 `crazeeval archive --batch DIR [--batch DIR ...] --out DIR [--unseal] [--max-bytes N]`
 (`archive.py`, plan 029 W2) writes a compact, diffable record of chosen batches -- what
-is worth keeping in the repo once the raw runs (captures, answers, workspaces) stay
-outside it. By default it selects runs and verdicts as the report does (a "current
+is worth keeping in version control once the raw runs (captures, answers, workspaces)
+stay outside it; a campaign's goes to the `craze-evals` repository (see *Where results
+go*). By default it selects runs and verdicts as the report does (a "current
 view"): a later `--batch` wins a run key (so give the baseline first), held-out runs and
 verdicts only with `--unseal`, verdicts bound to the scored runs, one final verdict per
 pair by the report's ranking. `--all-runs` keeps every scored run of every given batch

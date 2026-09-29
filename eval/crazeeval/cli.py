@@ -1,6 +1,6 @@
 """``uv run crazeeval [--campaign NAME] <command>``: run, validate, proxy, snapshot-config, probe,
 keyscan, ledger, judge-pair, judge-batch, calibrate, judge-hash, report, rescore, captures,
-archive.
+archive, summarize, pack.
 
 ``--campaign NAME`` (before or after the command) selects ``~/.craze-eval/<NAME>``: the
 campaign whose runs, ledger and config snapshots the command uses by default (see
@@ -588,6 +588,58 @@ def cmd_archive(a) -> int:
     return 0 if s["ok"] else 1
 
 
+def cmd_summarize(a) -> int:
+    from crazeeval import summary as sm
+
+    try:
+        campaign = paths.check_campaign_name(a.campaign_name) if a.campaign_name else paths.campaign_name()
+        s = sm.summarize([Path(r) for r in a.report], Path(a.out), campaign, allow_sealed=a.allow_sealed)
+    except (paths.CampaignError, sm.SummaryError) as e:
+        print(str(e), file=sys.stderr)
+        return 2
+    for g in s["groups"]:
+        print(f"  {g['report']}: " + ("; ".join(f"{m} {o}" for m, o in g["outcomes"].items()) or "no covered model"))
+    print(f"summary: {s['out']} ({s['bytes']} bytes; campaign {s['campaign']}, {len(s['groups'])} group(s))")
+    return 0
+
+
+def cmd_pack(a) -> int:
+    from crazeeval import keys as keymod
+    from crazeeval import pack as pk
+
+    # The key scan needs the keys it scans for: the batch runner's key ring.
+    try:
+        _, keyring = keymod.load_providers()
+    except (OSError, ValueError) as e:
+        print(f"cannot load the provider keys for the pack's key scan: {type(e).__name__}", file=sys.stderr)
+        return 2
+    if not keyring.secrets():
+        print("no provider key loaded: the pack's key scan cannot run", file=sys.stderr)
+        return 2
+    try:
+        s = pk.pack([Path(b) for b in a.batch], Path(a.out), keyring, unseal=a.unseal, dry_run=a.dry_run)
+    except pk.PackError as e:
+        print(str(e), file=sys.stderr)
+        return 2
+    for b in s["batches"]:
+        print(f"  {b['name']}: {b['files']} files, {b['bytes']} bytes")
+    print(f"selected: {s['files']} files, {s['bytes']} bytes in {len(s['batches'])} batch(es); held-out "
+          + ("included (--unseal)" if s["unsealed"] else "left out (sealed)"))
+    ks = s["key_scan"]
+    print(f"key scan: {ks['files_scanned']} files, {ks['keys_checked']} keys checked; files with a key: "
+          f"{ks['files_with_key'] or 'none'}")
+    for e in s["errors"]:
+        print(f"FAILED: {e}", file=sys.stderr)
+    if not s["ok"]:
+        return 1
+    if s["dry_run"]:
+        print("dry run: nothing written")
+        return 0
+    print(f"pack: {s['out']} ({s['compressed_bytes']} bytes compressed, {s['files']} files; sha256 {s['sha256']})")
+    print(f"manifest: {s['manifest']}")
+    return 0
+
+
 CAMPAIGN_HELP = ("the campaign: ~/.craze-eval/NAME holds its runs, ledger and config snapshots (default: "
                  "$CRAZEEVAL_CAMPAIGN_DIR, else $CRAZEEVAL_PLAN_DIR, else ~/.craze-eval/default)")
 
@@ -749,6 +801,26 @@ def main(argv: list[str] | None = None) -> int:
                          "run key -- for archiving a whole campaign rather than a current view")
     ar.add_argument("--max-bytes", type=int, default=2_000_000, help="fail over this many bytes in all (default 2000000)")
     ar.set_defaults(fn=cmd_archive)
+
+    sm = command("summarize", help="a campaign's compact summary.json from its final report(s): the bar, objective "
+                                   "counts, win rates, medians (no paths, deterministic)")
+    sm.add_argument("--report", action="append", required=True,
+                    help="a `crazeeval report` output directory (its report.json); repeatable, one group each")
+    sm.add_argument("--out", required=True, help="the summary file to write (e.g. eval/results/<campaign>/summary.json)")
+    sm.add_argument("--campaign-name", help="the campaign's name in the summary (default: the campaign's directory name)")
+    sm.add_argument("--allow-sealed", action="store_true",
+                    help="summarize a sealed report too (dev only, a provisional bar)")
+    sm.set_defaults(fn=cmd_summarize)
+
+    pk = command("pack", help="optional, local: compact batches' raw runs into a tarball on disk (allowlisted files, "
+                              "no harness homes or caches; key-scanned)")
+    pk.add_argument("--batch", action="append", required=True, help="a batch directory (repeatable)")
+    pk.add_argument("--out", required=True,
+                    help="the tarball to write (FILE.tar.gz, never replaced); FILE.tar.gz.manifest.json beside it")
+    pk.add_argument("--unseal", action="store_true", help="include the held-out runs, results and verdicts")
+    pk.add_argument("--dry-run", action="store_true",
+                    help="select and key-scan, print files and bytes per batch and overall; write nothing")
+    pk.set_defaults(fn=cmd_pack)
 
     a = p.parse_args(argv)
     try:

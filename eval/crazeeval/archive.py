@@ -371,7 +371,9 @@ def _count_lines(p: Path) -> int:
     return sum(1 for line in p.read_text(encoding="utf-8").splitlines() if line.strip())
 
 
-def _home_needles(home: str | None) -> list[bytes]:
+def home_needles(home: str | None) -> list[bytes]:
+    """What the home-path scan greps for: ``/home/`` and the owner's home (``home``,
+    default: this user's)."""
     needles = [b"/home/"]
     home = str(Path.home()) if home is None else home
     if home and home.rstrip("/") not in ("", "/"):
@@ -384,7 +386,7 @@ def safety_scan(out: Path, keyring: keymod.KeyRing, home: str | None = None) -> 
     (``keys.scan_tree``), and a grep for the owner's home path and ``/home/``. Counts and
     relative paths only."""
     ks = keymod.scan_tree(out, keyring)
-    needles = _home_needles(home)
+    needles = home_needles(home)
     home_hits = [str(p.relative_to(out)) for p in sorted(Path(out).rglob("*"))
                  if p.is_file() and not p.is_symlink() and any(n in p.read_bytes() for n in needles)]
     return {"keys_checked": ks["keys_checked"], "files_scanned": ks["files_scanned"],
@@ -395,7 +397,7 @@ def safety_scan(out: Path, keyring: keymod.KeyRing, home: str | None = None) -> 
 def data_scan(out: Path, names: list[str], keyring: keymod.KeyRing, home: str | None = None) -> dict:
     """The same checks over the archive's own data files only -- what archive.json
     records, so a rerun into the same directory writes the same bytes."""
-    needles = _home_needles(home)
+    needles = home_needles(home)
     data = {n: (Path(out) / n).read_bytes() for n in names}
     return {"keys_checked": len(keyring.secrets()), "files": sorted(names),
             "files_with_key": sorted(n for n, b in data.items() if keyring.contains_key(b)),
