@@ -1,0 +1,1918 @@
+{
+  "campaign": "2026-09-plan029",
+  "groups": [
+    {
+      "bar": {
+        "glm-5.3": {
+          "best_open_harness": {
+            "baseline_batch": "base-zai-20260927-230833",
+            "counts": {
+              "gx": 14.0,
+              "opencode": 14.0
+            },
+            "harness": "gx",
+            "reason": "tied counts; gx vs opencode win rate 0.79",
+            "source": "recorded in base-zai-20260927-230833/best-open-harness.json"
+          },
+          "conditions": {
+            "all_tasks": {
+              "objective_native": 15.0,
+              "objective_ok": true,
+              "objective_other": 15.0,
+              "win_ok": true,
+              "win_rate": {
+                "ci90": [
+                  0.3716,
+                  0.659
+                ],
+                "n": 30,
+                "rate": 0.5167,
+                "wtl": [
+                  13,
+                  5,
+                  12
+                ]
+              }
+            },
+            "dev": {
+              "objective_native": 7.0,
+              "objective_ok": true,
+              "objective_other": 7.0,
+              "win_ok": true,
+              "win_rate": {
+                "ci90": [
+                  0.3291,
+                  0.7307
+                ],
+                "n": 14,
+                "rate": 0.5357,
+                "wtl": [
+                  6,
+                  3,
+                  5
+                ]
+              }
+            },
+            "heldout": {
+              "objective_native": 8.0,
+              "objective_ok": true,
+              "objective_other": 8.0,
+              "win_ok": true,
+              "win_rate": {
+                "ci90": [
+                  0.3098,
+                  0.6902
+                ],
+                "n": 16,
+                "rate": 0.5,
+                "wtl": [
+                  7,
+                  2,
+                  7
+                ]
+              }
+            }
+          },
+          "coverage_complete": true,
+          "outcome": "meets",
+          "reason": "(a)-(d) hold"
+        },
+        "glm-5.3-flash": {
+          "best_open_harness": {
+            "baseline_batch": "base-zai-20260927-230833",
+            "counts": {
+              "gx": 14.0,
+              "opencode": 14.0
+            },
+            "harness": "gx",
+            "reason": "tied counts; gx vs opencode win rate 0.64",
+            "source": "recorded in base-zai-20260927-230833/best-open-harness.json"
+          },
+          "conditions": {
+            "all_tasks": {
+              "objective_native": 14.5,
+              "objective_ok": false,
+              "objective_other": 15.0,
+              "win_ok": true,
+              "win_rate": {
+                "ci90": [
+                  0.3871,
+                  0.6741
+                ],
+                "n": 30,
+                "rate": 0.5333,
+                "wtl": [
+                  14,
+                  4,
+                  12
+                ]
+              }
+            },
+            "dev": {
+              "objective_native": 7.0,
+              "objective_ok": true,
+              "objective_other": 7.0,
+              "win_ok": false,
+              "win_rate": {
+                "ci90": [
+                  0.2406,
+                  0.6396
+                ],
+                "n": 14,
+                "rate": 0.4286,
+                "wtl": [
+                  4,
+                  4,
+                  6
+                ]
+              }
+            },
+            "heldout": {
+              "objective_native": 7.5,
+              "objective_ok": false,
+              "objective_other": 8.0,
+              "win_ok": true,
+              "win_rate": {
+                "ci90": [
+                  0.4219,
+                  0.7919
+                ],
+                "n": 16,
+                "rate": 0.625,
+                "wtl": [
+                  10,
+                  0,
+                  6
+                ]
+              }
+            }
+          },
+          "coverage_complete": true,
+          "outcome": "misses",
+          "reason": "all fifteen: objective 14.5 < 15; held-out: objective 7.5 < 8"
+        }
+      },
+      "harnesses": [
+        "craze",
+        "gx",
+        "opencode"
+      ],
+      "metrics": {
+        "glm-5.3-flash/craze": {
+          "answer words": 288.5,
+          "cost $": 0.0,
+          "input tokens": 131157.5,
+          "main requests": 11.0,
+          "output tokens": 5127.0,
+          "tool calls": 14.0,
+          "wall s": 151.711
+        },
+        "glm-5.3-flash/gx": {
+          "answer words": 277.0,
+          "cost $": 0.0,
+          "input tokens": 153127.0,
+          "main requests": 8.0,
+          "output tokens": 4213.0,
+          "tool calls": 12.0,
+          "wall s": 137.595
+        },
+        "glm-5.3-flash/opencode": {
+          "answer words": 137.0,
+          "cost $": 0.0,
+          "input tokens": 92314.0,
+          "main requests": 8.0,
+          "output tokens": 2486.0,
+          "tool calls": 10.0,
+          "wall s": 84.982
+        },
+        "glm-5.3/craze": {
+          "answer words": 280.5,
+          "cost $": 0.0,
+          "input tokens": 147273.0,
+          "main requests": 11.0,
+          "output tokens": 5614.5,
+          "tool calls": 15.0,
+          "wall s": 123.8485
+        },
+        "glm-5.3/gx": {
+          "answer words": 265.0,
+          "cost $": 0.0,
+          "input tokens": 175245.0,
+          "main requests": 11.0,
+          "output tokens": 4990.0,
+          "tool calls": 16.0,
+          "wall s": 96.597
+        },
+        "glm-5.3/opencode": {
+          "answer words": 91.0,
+          "cost $": 0.0,
+          "input tokens": 76235.0,
+          "main requests": 7.0,
+          "output tokens": 2656.0,
+          "tool calls": 11.0,
+          "wall s": 51.535
+        }
+      },
+      "models": [
+        "glm-5.3",
+        "glm-5.3-flash"
+      ],
+      "objective": {
+        "glm-5.3-flash/craze": {
+          "all": 14.5,
+          "dev": 7.0,
+          "heldout": 7.5,
+          "tasks": {
+            "T-B1": 1.0,
+            "T-B2": 1.0,
+            "T-B3": 1.0,
+            "T-E1": 1.0,
+            "T-E2": 1.0,
+            "T-E3": 1.0,
+            "T-F1": 1.0,
+            "T-F2": 0.5,
+            "T-I1": 1.0,
+            "T-I2": 1.0,
+            "T-M1": 1.0,
+            "T-P1": 1.0,
+            "T-P2": 1.0,
+            "T-R1": 1.0,
+            "T-V1": 1.0,
+            "smoke-explain": 1.0,
+            "smoke-fix": 1.0
+          }
+        },
+        "glm-5.3-flash/gx": {
+          "all": 15.0,
+          "dev": 7.0,
+          "heldout": 8.0,
+          "tasks": {
+            "T-B1": 1.0,
+            "T-B2": 1.0,
+            "T-B3": 1.0,
+            "T-E1": 1.0,
+            "T-E2": 1.0,
+            "T-E3": 1.0,
+            "T-F1": 1.0,
+            "T-F2": 1.0,
+            "T-I1": 1.0,
+            "T-I2": 1.0,
+            "T-M1": 1.0,
+            "T-P1": 1.0,
+            "T-P2": 1.0,
+            "T-R1": 1.0,
+            "T-V1": 1.0,
+            "smoke-explain": 1.0,
+            "smoke-fix": 1.0
+          }
+        },
+        "glm-5.3-flash/opencode": {
+          "all": 14.0,
+          "dev": 7.0,
+          "heldout": 7.0,
+          "tasks": {
+            "T-B1": 1.0,
+            "T-B2": 1.0,
+            "T-B3": 1.0,
+            "T-E1": 1.0,
+            "T-E2": 1.0,
+            "T-E3": 1.0,
+            "T-F1": 1.0,
+            "T-F2": 0.0,
+            "T-I1": 1.0,
+            "T-I2": 1.0,
+            "T-M1": 1.0,
+            "T-P1": 1.0,
+            "T-P2": 1.0,
+            "T-R1": 1.0,
+            "T-V1": 1.0,
+            "smoke-explain": 1.0,
+            "smoke-fix": 1.0
+          }
+        },
+        "glm-5.3/craze": {
+          "all": 15.0,
+          "dev": 7.0,
+          "heldout": 8.0,
+          "tasks": {
+            "T-B1": 1.0,
+            "T-B2": 1.0,
+            "T-B3": 1.0,
+            "T-E1": 1.0,
+            "T-E2": 1.0,
+            "T-E3": 1.0,
+            "T-F1": 1.0,
+            "T-F2": 1.0,
+            "T-I1": 1.0,
+            "T-I2": 1.0,
+            "T-M1": 1.0,
+            "T-P1": 1.0,
+            "T-P2": 1.0,
+            "T-R1": 1.0,
+            "T-V1": 1.0,
+            "smoke-explain": 1.0,
+            "smoke-fix": 1.0
+          }
+        },
+        "glm-5.3/gx": {
+          "all": 15.0,
+          "dev": 7.0,
+          "heldout": 8.0,
+          "tasks": {
+            "T-B1": 1.0,
+            "T-B2": 1.0,
+            "T-B3": 1.0,
+            "T-E1": 1.0,
+            "T-E2": 1.0,
+            "T-E3": 1.0,
+            "T-F1": 1.0,
+            "T-F2": 1.0,
+            "T-I1": 1.0,
+            "T-I2": 1.0,
+            "T-M1": 1.0,
+            "T-P1": 1.0,
+            "T-P2": 1.0,
+            "T-R1": 1.0,
+            "T-V1": 1.0,
+            "smoke-explain": 1.0,
+            "smoke-fix": 1.0
+          }
+        },
+        "glm-5.3/opencode": {
+          "all": 14.0,
+          "dev": 7.0,
+          "heldout": 7.0,
+          "tasks": {
+            "T-B1": 1.0,
+            "T-B2": 1.0,
+            "T-B3": 1.0,
+            "T-E1": 1.0,
+            "T-E2": 1.0,
+            "T-E3": 1.0,
+            "T-F1": 1.0,
+            "T-F2": 0.0,
+            "T-I1": 1.0,
+            "T-I2": 1.0,
+            "T-M1": 1.0,
+            "T-P1": 1.0,
+            "T-P2": 1.0,
+            "T-R1": 1.0,
+            "T-V1": 1.0,
+            "smoke-explain": 1.0,
+            "smoke-fix": 1.0
+          }
+        }
+      },
+      "other_models": [
+        "fireworks/deepseek-v4p1-flash",
+        "muse-spark-1.3",
+        "muse-spark-1.3-contributor"
+      ],
+      "provenance": {
+        "baseline_batch": "base-zai-20260927-230833",
+        "batches": [
+          "base-zai-20260927-230833",
+          "base-gxplan-20260928-002942",
+          "final-zai-20260928-025303",
+          "final2-zai-20260928-105442"
+        ],
+        "judge_hash_now": null,
+        "judge_hashes": [
+          "163ea21faf57888b10b162832f30c5997f12ab1785402f45b36f9c3270e0bdc9"
+        ],
+        "plan_modes": [
+          "craze: --plan",
+          "gx: prompt-only",
+          "opencode: --agent plan"
+        ],
+        "sealed": false,
+        "task_judge_hashes": null,
+        "verdicts": {
+          "bound_to_scored_runs": 60,
+          "final": 60,
+          "loaded": 60,
+          "stale": null,
+          "unbound": 0
+        }
+      },
+      "report": "report-final-zai-x15",
+      "statuses": {
+        "glm-5.3-flash/craze": {
+          "ok": 32
+        },
+        "glm-5.3-flash/gx": {
+          "ok": 17
+        },
+        "glm-5.3-flash/opencode": {
+          "ok": 17
+        },
+        "glm-5.3/craze": {
+          "ok": 32
+        },
+        "glm-5.3/gx": {
+          "ok": 17
+        },
+        "glm-5.3/opencode": {
+          "ok": 17
+        }
+      },
+      "task_tables": {
+        "glm-5.3": {
+          "T-B1": {
+            "gx": "LL"
+          },
+          "T-B2": {
+            "gx": "LL"
+          },
+          "T-B3": {
+            "gx": "TL"
+          },
+          "T-E1": {
+            "gx": "WW"
+          },
+          "T-E2": {
+            "gx": "LW"
+          },
+          "T-E3": {
+            "gx": "WW"
+          },
+          "T-F1": {
+            "gx": "WW"
+          },
+          "T-F2": {
+            "gx": "LT"
+          },
+          "T-I1": {
+            "gx": "LL"
+          },
+          "T-I2": {
+            "gx": "LW"
+          },
+          "T-M1": {
+            "gx": "WW"
+          },
+          "T-P1": {
+            "gx": "TW"
+          },
+          "T-P2": {
+            "gx": "WW"
+          },
+          "T-R1": {
+            "gx": "TT"
+          },
+          "T-V1": {
+            "gx": "LL"
+          }
+        },
+        "glm-5.3-flash": {
+          "T-B1": {
+            "gx": "LW"
+          },
+          "T-B2": {
+            "gx": "WL"
+          },
+          "T-B3": {
+            "gx": "WW"
+          },
+          "T-E1": {
+            "gx": "LW"
+          },
+          "T-E2": {
+            "gx": "WW"
+          },
+          "T-E3": {
+            "gx": "WW"
+          },
+          "T-F1": {
+            "gx": "TL"
+          },
+          "T-F2": {
+            "gx": "LW"
+          },
+          "T-I1": {
+            "gx": "LL"
+          },
+          "T-I2": {
+            "gx": "WW"
+          },
+          "T-M1": {
+            "gx": "LL"
+          },
+          "T-P1": {
+            "gx": "TT"
+          },
+          "T-P2": {
+            "gx": "WW"
+          },
+          "T-R1": {
+            "gx": "LT"
+          },
+          "T-V1": {
+            "gx": "LL"
+          }
+        }
+      },
+      "win_rates": {
+        "dev": {
+          "glm-5.3": {
+            "craze vs gx": {
+              "ci90": [
+                0.3291,
+                0.7307
+              ],
+              "n": 14,
+              "rate": 0.5357,
+              "wtl": [
+                6,
+                3,
+                5
+              ]
+            },
+            "gx vs craze": {
+              "ci90": [
+                0.2693,
+                0.6709
+              ],
+              "n": 14,
+              "rate": 0.4643,
+              "wtl": [
+                5,
+                3,
+                6
+              ]
+            }
+          },
+          "glm-5.3-flash": {
+            "craze vs gx": {
+              "ci90": [
+                0.2406,
+                0.6396
+              ],
+              "n": 14,
+              "rate": 0.4286,
+              "wtl": [
+                4,
+                4,
+                6
+              ]
+            },
+            "gx vs craze": {
+              "ci90": [
+                0.3604,
+                0.7594
+              ],
+              "n": 14,
+              "rate": 0.5714,
+              "wtl": [
+                6,
+                4,
+                4
+              ]
+            }
+          },
+          "pooled": {
+            "craze vs gx": {
+              "ci90": [
+                0.3354,
+                0.632
+              ],
+              "n": 28,
+              "rate": 0.4821,
+              "wtl": [
+                10,
+                7,
+                11
+              ]
+            },
+            "gx vs craze": {
+              "ci90": [
+                0.368,
+                0.6646
+              ],
+              "n": 28,
+              "rate": 0.5179,
+              "wtl": [
+                11,
+                7,
+                10
+              ]
+            }
+          }
+        },
+        "heldout": {
+          "glm-5.3": {
+            "craze vs gx": {
+              "ci90": [
+                0.3098,
+                0.6902
+              ],
+              "n": 16,
+              "rate": 0.5,
+              "wtl": [
+                7,
+                2,
+                7
+              ]
+            },
+            "gx vs craze": {
+              "ci90": [
+                0.3098,
+                0.6902
+              ],
+              "n": 16,
+              "rate": 0.5,
+              "wtl": [
+                7,
+                2,
+                7
+              ]
+            }
+          },
+          "glm-5.3-flash": {
+            "craze vs gx": {
+              "ci90": [
+                0.4219,
+                0.7919
+              ],
+              "n": 16,
+              "rate": 0.625,
+              "wtl": [
+                10,
+                0,
+                6
+              ]
+            },
+            "gx vs craze": {
+              "ci90": [
+                0.2081,
+                0.5781
+              ],
+              "n": 16,
+              "rate": 0.375,
+              "wtl": [
+                6,
+                0,
+                10
+              ]
+            }
+          },
+          "pooled": {
+            "craze vs gx": {
+              "ci90": [
+                0.419,
+                0.6962
+              ],
+              "n": 32,
+              "rate": 0.5625,
+              "wtl": [
+                17,
+                2,
+                13
+              ]
+            },
+            "gx vs craze": {
+              "ci90": [
+                0.3038,
+                0.581
+              ],
+              "n": 32,
+              "rate": 0.4375,
+              "wtl": [
+                13,
+                2,
+                17
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "bar": {
+        "fireworks/deepseek-v4p1-flash": {
+          "best_open_harness": {
+            "baseline_batch": "base-fw-ds-20260927-230834",
+            "counts": {
+              "gx": 15.0,
+              "opencode": 15.0
+            },
+            "harness": "opencode",
+            "reason": "tied counts; gx vs opencode win rate 0.43",
+            "source": "recorded in base-fw-ds-20260927-230834/best-open-harness.json"
+          },
+          "conditions": {
+            "all_tasks": {
+              "objective_native": 14.5,
+              "objective_ok": false,
+              "objective_other": 15.0,
+              "win_ok": true,
+              "win_rate": {
+                "ci90": [
+                  0.6391,
+                  0.8807
+                ],
+                "n": 30,
+                "rate": 0.7833,
+                "wtl": [
+                  22,
+                  3,
+                  5
+                ]
+              }
+            },
+            "dev": {
+              "objective_native": 7.0,
+              "objective_ok": true,
+              "objective_other": 7.0,
+              "win_ok": true,
+              "win_rate": {
+                "ci90": [
+                  0.6894,
+                  0.969
+                ],
+                "n": 14,
+                "rate": 0.8929,
+                "wtl": [
+                  12,
+                  1,
+                  1
+                ]
+              }
+            },
+            "heldout": {
+              "objective_native": 7.5,
+              "objective_ok": false,
+              "objective_other": 8.0,
+              "win_ok": true,
+              "win_rate": {
+                "ci90": [
+                  0.482,
+                  0.8387
+                ],
+                "n": 16,
+                "rate": 0.6875,
+                "wtl": [
+                  10,
+                  2,
+                  4
+                ]
+              }
+            }
+          },
+          "coverage_complete": true,
+          "outcome": "misses",
+          "reason": "all fifteen: objective 14.5 < 15; held-out: objective 7.5 < 8"
+        }
+      },
+      "harnesses": [
+        "codex",
+        "craze",
+        "gx",
+        "opencode"
+      ],
+      "metrics": {
+        "fireworks/deepseek-v4p1-flash/codex": {
+          "answer words": 119.0,
+          "cost $": 0.0122,
+          "input tokens": 66871.0,
+          "main requests": 6.0,
+          "output tokens": 2830.0,
+          "tool calls": 6.0,
+          "wall s": 52.46
+        },
+        "fireworks/deepseek-v4p1-flash/craze": {
+          "answer words": 271.0,
+          "cost $": 0.0141,
+          "input tokens": 89490.0,
+          "main requests": 9.0,
+          "output tokens": 3802.5,
+          "tool calls": 13.0,
+          "wall s": 56.68
+        },
+        "fireworks/deepseek-v4p1-flash/gx": {
+          "answer words": 237.0,
+          "cost $": 0.0174,
+          "input tokens": 90369.0,
+          "main requests": 7.0,
+          "output tokens": 5215.0,
+          "tool calls": 13.0,
+          "wall s": 80.395
+        },
+        "fireworks/deepseek-v4p1-flash/opencode": {
+          "answer words": 53.0,
+          "cost $": 0.012,
+          "input tokens": 77001.0,
+          "main requests": 7.0,
+          "output tokens": 3269.0,
+          "tool calls": 10.0,
+          "wall s": 35.119
+        }
+      },
+      "models": [
+        "fireworks/deepseek-v4p1-flash"
+      ],
+      "objective": {
+        "fireworks/deepseek-v4p1-flash/codex": {
+          "all": 13.0,
+          "dev": 6.0,
+          "heldout": 7.0,
+          "tasks": {
+            "T-B1": 1.0,
+            "T-B2": 1.0,
+            "T-B3": 1.0,
+            "T-E1": 1.0,
+            "T-E2": 1.0,
+            "T-E3": 1.0,
+            "T-F1": 1.0,
+            "T-F2": 1.0,
+            "T-I1": 1.0,
+            "T-I2": 1.0,
+            "T-M1": 1.0,
+            "T-R1": 1.0,
+            "T-V1": 1.0,
+            "smoke-explain": 1.0,
+            "smoke-fix": 1.0
+          }
+        },
+        "fireworks/deepseek-v4p1-flash/craze": {
+          "all": 14.5,
+          "dev": 7.0,
+          "heldout": 7.5,
+          "tasks": {
+            "T-B1": 1.0,
+            "T-B2": 1.0,
+            "T-B3": 1.0,
+            "T-E1": 1.0,
+            "T-E2": 1.0,
+            "T-E3": 1.0,
+            "T-F1": 1.0,
+            "T-F2": 1.0,
+            "T-I1": 1.0,
+            "T-I2": 1.0,
+            "T-M1": 1.0,
+            "T-P1": 1.0,
+            "T-P2": 0.5,
+            "T-R1": 1.0,
+            "T-V1": 1.0,
+            "smoke-explain": 1.0,
+            "smoke-fix": 1.0
+          }
+        },
+        "fireworks/deepseek-v4p1-flash/gx": {
+          "all": 15.0,
+          "dev": 7.0,
+          "heldout": 8.0,
+          "tasks": {
+            "T-B1": 1.0,
+            "T-B2": 1.0,
+            "T-B3": 1.0,
+            "T-E1": 1.0,
+            "T-E2": 1.0,
+            "T-E3": 1.0,
+            "T-F1": 1.0,
+            "T-F2": 1.0,
+            "T-I1": 1.0,
+            "T-I2": 1.0,
+            "T-M1": 1.0,
+            "T-P1": 1.0,
+            "T-P2": 1.0,
+            "T-R1": 1.0,
+            "T-V1": 1.0,
+            "smoke-explain": 1.0,
+            "smoke-fix": 1.0
+          }
+        },
+        "fireworks/deepseek-v4p1-flash/opencode": {
+          "all": 15.0,
+          "dev": 7.0,
+          "heldout": 8.0,
+          "tasks": {
+            "T-B1": 1.0,
+            "T-B2": 1.0,
+            "T-B3": 1.0,
+            "T-E1": 1.0,
+            "T-E2": 1.0,
+            "T-E3": 1.0,
+            "T-F1": 1.0,
+            "T-F2": 1.0,
+            "T-I1": 1.0,
+            "T-I2": 1.0,
+            "T-M1": 1.0,
+            "T-P1": 1.0,
+            "T-P2": 1.0,
+            "T-R1": 1.0,
+            "T-V1": 1.0,
+            "smoke-explain": 1.0,
+            "smoke-fix": 1.0
+          }
+        }
+      },
+      "other_models": [
+        "glm-5.3",
+        "glm-5.3-flash",
+        "muse-spark-1.3",
+        "muse-spark-1.3-contributor"
+      ],
+      "provenance": {
+        "baseline_batch": "base-fw-ds-20260927-230834",
+        "batches": [
+          "base-fw-ds-20260927-230834",
+          "base-gxplan-20260928-002942",
+          "final-ds-20260928-025304",
+          "final2-ds-20260928-105443"
+        ],
+        "judge_hash_now": null,
+        "judge_hashes": [
+          "163ea21faf57888b10b162832f30c5997f12ab1785402f45b36f9c3270e0bdc9"
+        ],
+        "plan_modes": [
+          "craze: --plan",
+          "gx: prompt-only",
+          "opencode: --agent plan"
+        ],
+        "sealed": false,
+        "task_judge_hashes": null,
+        "verdicts": {
+          "bound_to_scored_runs": 30,
+          "final": 30,
+          "loaded": 30,
+          "stale": null,
+          "unbound": 0
+        }
+      },
+      "report": "report-final-ds-x15",
+      "statuses": {
+        "fireworks/deepseek-v4p1-flash/codex": {
+          "ok": 15
+        },
+        "fireworks/deepseek-v4p1-flash/craze": {
+          "crashed": 1,
+          "ok": 31
+        },
+        "fireworks/deepseek-v4p1-flash/gx": {
+          "ok": 17
+        },
+        "fireworks/deepseek-v4p1-flash/opencode": {
+          "ok": 17
+        }
+      },
+      "task_tables": {
+        "fireworks/deepseek-v4p1-flash": {
+          "T-B1": {
+            "opencode": "WW"
+          },
+          "T-B2": {
+            "opencode": "WW"
+          },
+          "T-B3": {
+            "opencode": "LT"
+          },
+          "T-E1": {
+            "opencode": "WW"
+          },
+          "T-E2": {
+            "opencode": "WW"
+          },
+          "T-E3": {
+            "opencode": "WW"
+          },
+          "T-F1": {
+            "opencode": "WW"
+          },
+          "T-F2": {
+            "opencode": "LT"
+          },
+          "T-I1": {
+            "opencode": "WW"
+          },
+          "T-I2": {
+            "opencode": "WL"
+          },
+          "T-M1": {
+            "opencode": "WW"
+          },
+          "T-P1": {
+            "opencode": "TL"
+          },
+          "T-P2": {
+            "opencode": "LW"
+          },
+          "T-R1": {
+            "opencode": "WW"
+          },
+          "T-V1": {
+            "opencode": "WW"
+          }
+        }
+      },
+      "win_rates": {
+        "dev": {
+          "fireworks/deepseek-v4p1-flash": {
+            "craze vs opencode": {
+              "ci90": [
+                0.6894,
+                0.969
+              ],
+              "n": 14,
+              "rate": 0.8929,
+              "wtl": [
+                12,
+                1,
+                1
+              ]
+            },
+            "opencode vs craze": {
+              "ci90": [
+                0.031,
+                0.3106
+              ],
+              "n": 14,
+              "rate": 0.1071,
+              "wtl": [
+                1,
+                1,
+                12
+              ]
+            }
+          },
+          "pooled": {
+            "craze vs opencode": {
+              "ci90": [
+                0.6894,
+                0.969
+              ],
+              "n": 14,
+              "rate": 0.8929,
+              "wtl": [
+                12,
+                1,
+                1
+              ]
+            },
+            "opencode vs craze": {
+              "ci90": [
+                0.031,
+                0.3106
+              ],
+              "n": 14,
+              "rate": 0.1071,
+              "wtl": [
+                1,
+                1,
+                12
+              ]
+            }
+          }
+        },
+        "heldout": {
+          "fireworks/deepseek-v4p1-flash": {
+            "craze vs opencode": {
+              "ci90": [
+                0.482,
+                0.8387
+              ],
+              "n": 16,
+              "rate": 0.6875,
+              "wtl": [
+                10,
+                2,
+                4
+              ]
+            },
+            "opencode vs craze": {
+              "ci90": [
+                0.1613,
+                0.518
+              ],
+              "n": 16,
+              "rate": 0.3125,
+              "wtl": [
+                4,
+                2,
+                10
+              ]
+            }
+          },
+          "pooled": {
+            "craze vs opencode": {
+              "ci90": [
+                0.482,
+                0.8387
+              ],
+              "n": 16,
+              "rate": 0.6875,
+              "wtl": [
+                10,
+                2,
+                4
+              ]
+            },
+            "opencode vs craze": {
+              "ci90": [
+                0.1613,
+                0.518
+              ],
+              "n": 16,
+              "rate": 0.3125,
+              "wtl": [
+                4,
+                2,
+                10
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "bar": {
+        "fireworks/kimi-k3": {
+          "best_open_harness": {
+            "baseline_batch": "base-fw-kimi-dev-20260927-234325",
+            "counts": {
+              "opencode": 7.0
+            },
+            "harness": "opencode",
+            "reason": "the only open harness with runs",
+            "source": "recorded in base-fw-kimi-dev-20260927-234325/best-open-harness.json"
+          },
+          "conditions": {
+            "all_tasks": {
+              "objective_native": 14.5,
+              "objective_ok": false,
+              "objective_other": 15.0,
+              "win_ok": true,
+              "win_rate": {
+                "ci90": [
+                  0.4345,
+                  0.7184
+                ],
+                "n": 30,
+                "rate": 0.5833,
+                "wtl": [
+                  14,
+                  7,
+                  9
+                ]
+              }
+            },
+            "dev": {
+              "objective_native": 7.0,
+              "objective_ok": true,
+              "objective_other": 7.0,
+              "win_ok": true,
+              "win_rate": {
+                "ci90": [
+                  0.3604,
+                  0.7594
+                ],
+                "n": 14,
+                "rate": 0.5714,
+                "wtl": [
+                  6,
+                  4,
+                  4
+                ]
+              }
+            },
+            "heldout": {
+              "objective_native": 7.5,
+              "objective_ok": false,
+              "objective_other": 8.0,
+              "win_ok": true,
+              "win_rate": {
+                "ci90": [
+                  0.3929,
+                  0.7675
+                ],
+                "n": 16,
+                "rate": 0.5938,
+                "wtl": [
+                  8,
+                  3,
+                  5
+                ]
+              }
+            }
+          },
+          "coverage_complete": true,
+          "outcome": "misses",
+          "reason": "all fifteen: objective 14.5 < 15; held-out: objective 7.5 < 8"
+        }
+      },
+      "harnesses": [
+        "craze",
+        "opencode"
+      ],
+      "metrics": {
+        "fireworks/kimi-k3/craze": {
+          "answer words": 224.5,
+          "cost $": 0.1339,
+          "input tokens": 69568.0,
+          "main requests": 7.0,
+          "output tokens": 2519.0,
+          "tool calls": 10.0,
+          "wall s": 73.6595
+        },
+        "fireworks/kimi-k3/opencode": {
+          "answer words": 227.0,
+          "cost $": 0.1379,
+          "input tokens": 75640.0,
+          "main requests": 7.0,
+          "output tokens": 2325.0,
+          "tool calls": 11.0,
+          "wall s": 66.906
+        }
+      },
+      "models": [
+        "fireworks/kimi-k3"
+      ],
+      "objective": {
+        "fireworks/kimi-k3/craze": {
+          "all": 14.5,
+          "dev": 7.0,
+          "heldout": 7.5,
+          "tasks": {
+            "T-B1": 1.0,
+            "T-B2": 1.0,
+            "T-B3": 1.0,
+            "T-E1": 1.0,
+            "T-E2": 1.0,
+            "T-E3": 1.0,
+            "T-F1": 1.0,
+            "T-F2": 0.5,
+            "T-I1": 1.0,
+            "T-I2": 1.0,
+            "T-M1": 1.0,
+            "T-P1": 1.0,
+            "T-P2": 1.0,
+            "T-R1": 1.0,
+            "T-V1": 1.0
+          }
+        },
+        "fireworks/kimi-k3/opencode": {
+          "all": 15.0,
+          "dev": 7.0,
+          "heldout": 8.0,
+          "tasks": {
+            "T-B1": 1.0,
+            "T-B2": 1.0,
+            "T-B3": 1.0,
+            "T-E1": 1.0,
+            "T-E2": 1.0,
+            "T-E3": 1.0,
+            "T-F1": 1.0,
+            "T-F2": 1.0,
+            "T-I1": 1.0,
+            "T-I2": 1.0,
+            "T-M1": 1.0,
+            "T-P1": 1.0,
+            "T-P2": 1.0,
+            "T-R1": 1.0,
+            "T-V1": 1.0
+          }
+        }
+      },
+      "other_models": [],
+      "provenance": {
+        "baseline_batch": "base-fw-kimi-dev-20260927-234325",
+        "batches": [
+          "base-fw-kimi-dev-20260927-234325",
+          "base-fw-kimi-ho-20260927-235445",
+          "final-kimi-20260928-030554",
+          "final2-kimi-20260928-110503"
+        ],
+        "judge_hash_now": null,
+        "judge_hashes": [
+          "163ea21faf57888b10b162832f30c5997f12ab1785402f45b36f9c3270e0bdc9"
+        ],
+        "plan_modes": [
+          "craze: --plan",
+          "opencode: --agent plan"
+        ],
+        "sealed": false,
+        "task_judge_hashes": null,
+        "verdicts": {
+          "bound_to_scored_runs": 30,
+          "final": 30,
+          "loaded": 30,
+          "stale": null,
+          "unbound": 0
+        }
+      },
+      "report": "report-final-kimi-x15",
+      "statuses": {
+        "fireworks/kimi-k3/craze": {
+          "ok": 30
+        },
+        "fireworks/kimi-k3/opencode": {
+          "ok": 15
+        }
+      },
+      "task_tables": {
+        "fireworks/kimi-k3": {
+          "T-B1": {
+            "opencode": "WT"
+          },
+          "T-B2": {
+            "opencode": "WW"
+          },
+          "T-B3": {
+            "opencode": "WW"
+          },
+          "T-E1": {
+            "opencode": "WW"
+          },
+          "T-E2": {
+            "opencode": "LW"
+          },
+          "T-E3": {
+            "opencode": "WW"
+          },
+          "T-F1": {
+            "opencode": "LL"
+          },
+          "T-F2": {
+            "opencode": "LW"
+          },
+          "T-I1": {
+            "opencode": "WW"
+          },
+          "T-I2": {
+            "opencode": "WT"
+          },
+          "T-M1": {
+            "opencode": "LT"
+          },
+          "T-P1": {
+            "opencode": "LT"
+          },
+          "T-P2": {
+            "opencode": "LL"
+          },
+          "T-R1": {
+            "opencode": "TT"
+          },
+          "T-V1": {
+            "opencode": "LT"
+          }
+        }
+      },
+      "win_rates": {
+        "dev": {
+          "fireworks/kimi-k3": {
+            "craze vs opencode": {
+              "ci90": [
+                0.3604,
+                0.7594
+              ],
+              "n": 14,
+              "rate": 0.5714,
+              "wtl": [
+                6,
+                4,
+                4
+              ]
+            },
+            "opencode vs craze": {
+              "ci90": [
+                0.2406,
+                0.6396
+              ],
+              "n": 14,
+              "rate": 0.4286,
+              "wtl": [
+                4,
+                4,
+                6
+              ]
+            }
+          },
+          "pooled": {
+            "craze vs opencode": {
+              "ci90": [
+                0.3604,
+                0.7594
+              ],
+              "n": 14,
+              "rate": 0.5714,
+              "wtl": [
+                6,
+                4,
+                4
+              ]
+            },
+            "opencode vs craze": {
+              "ci90": [
+                0.2406,
+                0.6396
+              ],
+              "n": 14,
+              "rate": 0.4286,
+              "wtl": [
+                4,
+                4,
+                6
+              ]
+            }
+          }
+        },
+        "heldout": {
+          "fireworks/kimi-k3": {
+            "craze vs opencode": {
+              "ci90": [
+                0.3929,
+                0.7675
+              ],
+              "n": 16,
+              "rate": 0.5938,
+              "wtl": [
+                8,
+                3,
+                5
+              ]
+            },
+            "opencode vs craze": {
+              "ci90": [
+                0.2325,
+                0.6071
+              ],
+              "n": 16,
+              "rate": 0.4062,
+              "wtl": [
+                5,
+                3,
+                8
+              ]
+            }
+          },
+          "pooled": {
+            "craze vs opencode": {
+              "ci90": [
+                0.3929,
+                0.7675
+              ],
+              "n": 16,
+              "rate": 0.5938,
+              "wtl": [
+                8,
+                3,
+                5
+              ]
+            },
+            "opencode vs craze": {
+              "ci90": [
+                0.2325,
+                0.6071
+              ],
+              "n": 16,
+              "rate": 0.4062,
+              "wtl": [
+                5,
+                3,
+                8
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "bar": {
+        "muse-spark-1.3-contributor": {
+          "best_open_harness": {
+            "baseline_batch": "base-meta-contrib-20260927-234455",
+            "counts": {
+              "gx": 15.0,
+              "opencode": 15.0
+            },
+            "harness": "opencode",
+            "reason": "tied counts; gx vs opencode win rate 0.29",
+            "source": "recorded in base-meta-contrib-20260927-234455/best-open-harness.json"
+          },
+          "conditions": {
+            "all_tasks": {
+              "objective_native": 15.0,
+              "objective_ok": true,
+              "objective_other": 15.0,
+              "win_ok": true,
+              "win_rate": {
+                "ci90": [
+                  0.3562,
+                  0.6438
+                ],
+                "n": 30,
+                "rate": 0.5,
+                "wtl": [
+                  10,
+                  10,
+                  10
+                ]
+              }
+            },
+            "dev": {
+              "objective_native": 7.0,
+              "objective_ok": true,
+              "objective_other": 7.0,
+              "win_ok": true,
+              "win_rate": {
+                "ci90": [
+                  0.3604,
+                  0.7594
+                ],
+                "n": 14,
+                "rate": 0.5714,
+                "wtl": [
+                  5,
+                  6,
+                  3
+                ]
+              }
+            },
+            "heldout": {
+              "objective_native": 8.0,
+              "objective_ok": true,
+              "objective_other": 8.0,
+              "win_ok": false,
+              "win_rate": {
+                "ci90": [
+                  0.2577,
+                  0.6354
+                ],
+                "n": 16,
+                "rate": 0.4375,
+                "wtl": [
+                  5,
+                  4,
+                  7
+                ]
+              }
+            }
+          },
+          "coverage_complete": true,
+          "outcome": "misses",
+          "reason": "held-out: win rate 0.4375 < 0.5"
+        }
+      },
+      "harnesses": [
+        "codex",
+        "craze",
+        "gx",
+        "opencode"
+      ],
+      "metrics": {
+        "muse-spark-1.3-contributor/codex": {
+          "answer words": 96.0,
+          "cost $": 0.0107,
+          "input tokens": 100891.0,
+          "main requests": 8.0,
+          "output tokens": 2236.0,
+          "tool calls": 7.0,
+          "wall s": 25.99
+        },
+        "muse-spark-1.3-contributor/craze": {
+          "answer words": 182.5,
+          "cost $": 0.0144,
+          "input tokens": 122013.0,
+          "main requests": 10.0,
+          "output tokens": 5818.5,
+          "tool calls": 13.0,
+          "wall s": 66.807
+        },
+        "muse-spark-1.3-contributor/gx": {
+          "answer words": 158.0,
+          "cost $": 0.0167,
+          "input tokens": 160235.0,
+          "main requests": 9.0,
+          "output tokens": 4956.0,
+          "tool calls": 12.0,
+          "wall s": 49.107
+        },
+        "muse-spark-1.3-contributor/opencode": {
+          "answer words": 95.0,
+          "cost $": 0.0122,
+          "input tokens": 117129.0,
+          "main requests": 9.0,
+          "output tokens": 2902.0,
+          "tool calls": 12.0,
+          "wall s": 35.517
+        }
+      },
+      "models": [
+        "muse-spark-1.3-contributor"
+      ],
+      "objective": {
+        "muse-spark-1.3-contributor/codex": {
+          "all": 13.0,
+          "dev": 6.0,
+          "heldout": 7.0,
+          "tasks": {
+            "T-B1": 1.0,
+            "T-B2": 1.0,
+            "T-B3": 1.0,
+            "T-E1": 1.0,
+            "T-E2": 1.0,
+            "T-E3": 1.0,
+            "T-F1": 1.0,
+            "T-F2": 1.0,
+            "T-I1": 1.0,
+            "T-I2": 1.0,
+            "T-M1": 1.0,
+            "T-R1": 1.0,
+            "T-V1": 1.0,
+            "smoke-explain": 1.0,
+            "smoke-fix": 1.0
+          }
+        },
+        "muse-spark-1.3-contributor/craze": {
+          "all": 15.0,
+          "dev": 7.0,
+          "heldout": 8.0,
+          "tasks": {
+            "T-B1": 1.0,
+            "T-B2": 1.0,
+            "T-B3": 1.0,
+            "T-E1": 1.0,
+            "T-E2": 1.0,
+            "T-E3": 1.0,
+            "T-F1": 1.0,
+            "T-F2": 1.0,
+            "T-I1": 1.0,
+            "T-I2": 1.0,
+            "T-M1": 1.0,
+            "T-P1": 1.0,
+            "T-P2": 1.0,
+            "T-R1": 1.0,
+            "T-V1": 1.0,
+            "smoke-explain": 1.0,
+            "smoke-fix": 1.0
+          }
+        },
+        "muse-spark-1.3-contributor/gx": {
+          "all": 14.0,
+          "dev": 7.0,
+          "heldout": 7.0,
+          "tasks": {
+            "T-B1": 1.0,
+            "T-B2": 1.0,
+            "T-B3": 1.0,
+            "T-E1": 1.0,
+            "T-E2": 1.0,
+            "T-E3": 1.0,
+            "T-F1": 1.0,
+            "T-F2": 1.0,
+            "T-I1": 1.0,
+            "T-I2": 1.0,
+            "T-M1": 1.0,
+            "T-P1": 1.0,
+            "T-P2": 0.0,
+            "T-R1": 1.0,
+            "T-V1": 1.0,
+            "smoke-explain": 1.0,
+            "smoke-fix": 1.0
+          }
+        },
+        "muse-spark-1.3-contributor/opencode": {
+          "all": 15.0,
+          "dev": 7.0,
+          "heldout": 8.0,
+          "tasks": {
+            "T-B1": 1.0,
+            "T-B2": 1.0,
+            "T-B3": 1.0,
+            "T-E1": 1.0,
+            "T-E2": 1.0,
+            "T-E3": 1.0,
+            "T-F1": 1.0,
+            "T-F2": 1.0,
+            "T-I1": 1.0,
+            "T-I2": 1.0,
+            "T-M1": 1.0,
+            "T-P1": 1.0,
+            "T-P2": 1.0,
+            "T-R1": 1.0,
+            "T-V1": 1.0,
+            "smoke-explain": 1.0,
+            "smoke-fix": 1.0
+          }
+        }
+      },
+      "other_models": [
+        "fireworks/deepseek-v4p1-flash",
+        "glm-5.3",
+        "glm-5.3-flash",
+        "muse-spark-1.3"
+      ],
+      "provenance": {
+        "baseline_batch": "base-meta-contrib-20260927-234455",
+        "batches": [
+          "base-meta-contrib-20260927-234455",
+          "base-gxplan-20260928-002942",
+          "final-meta-contrib-20260928-174132"
+        ],
+        "judge_hash_now": null,
+        "judge_hashes": [
+          "163ea21faf57888b10b162832f30c5997f12ab1785402f45b36f9c3270e0bdc9"
+        ],
+        "plan_modes": [
+          "craze: --plan",
+          "gx: prompt-only",
+          "opencode: --agent plan"
+        ],
+        "sealed": false,
+        "task_judge_hashes": null,
+        "verdicts": {
+          "bound_to_scored_runs": 30,
+          "final": 30,
+          "loaded": 30,
+          "stale": null,
+          "unbound": 0
+        }
+      },
+      "report": "report-final-contrib-x15",
+      "statuses": {
+        "muse-spark-1.3-contributor/codex": {
+          "ok": 15
+        },
+        "muse-spark-1.3-contributor/craze": {
+          "ok": 32
+        },
+        "muse-spark-1.3-contributor/gx": {
+          "crashed": 1,
+          "ok": 16
+        },
+        "muse-spark-1.3-contributor/opencode": {
+          "ok": 17
+        }
+      },
+      "task_tables": {
+        "muse-spark-1.3-contributor": {
+          "T-B1": {
+            "opencode": "LT"
+          },
+          "T-B2": {
+            "opencode": "WW"
+          },
+          "T-B3": {
+            "opencode": "WT"
+          },
+          "T-E1": {
+            "opencode": "LL"
+          },
+          "T-E2": {
+            "opencode": "WW"
+          },
+          "T-E3": {
+            "opencode": "LL"
+          },
+          "T-F1": {
+            "opencode": "TT"
+          },
+          "T-F2": {
+            "opencode": "LL"
+          },
+          "T-I1": {
+            "opencode": "TW"
+          },
+          "T-I2": {
+            "opencode": "WW"
+          },
+          "T-M1": {
+            "opencode": "TT"
+          },
+          "T-P1": {
+            "opencode": "WW"
+          },
+          "T-P2": {
+            "opencode": "TL"
+          },
+          "T-R1": {
+            "opencode": "TT"
+          },
+          "T-V1": {
+            "opencode": "LL"
+          }
+        }
+      },
+      "win_rates": {
+        "dev": {
+          "muse-spark-1.3-contributor": {
+            "craze vs opencode": {
+              "ci90": [
+                0.3604,
+                0.7594
+              ],
+              "n": 14,
+              "rate": 0.5714,
+              "wtl": [
+                5,
+                6,
+                3
+              ]
+            },
+            "opencode vs craze": {
+              "ci90": [
+                0.2406,
+                0.6396
+              ],
+              "n": 14,
+              "rate": 0.4286,
+              "wtl": [
+                3,
+                6,
+                5
+              ]
+            }
+          },
+          "pooled": {
+            "craze vs opencode": {
+              "ci90": [
+                0.3604,
+                0.7594
+              ],
+              "n": 14,
+              "rate": 0.5714,
+              "wtl": [
+                5,
+                6,
+                3
+              ]
+            },
+            "opencode vs craze": {
+              "ci90": [
+                0.2406,
+                0.6396
+              ],
+              "n": 14,
+              "rate": 0.4286,
+              "wtl": [
+                3,
+                6,
+                5
+              ]
+            }
+          }
+        },
+        "heldout": {
+          "muse-spark-1.3-contributor": {
+            "craze vs opencode": {
+              "ci90": [
+                0.2577,
+                0.6354
+              ],
+              "n": 16,
+              "rate": 0.4375,
+              "wtl": [
+                5,
+                4,
+                7
+              ]
+            },
+            "opencode vs craze": {
+              "ci90": [
+                0.3646,
+                0.7423
+              ],
+              "n": 16,
+              "rate": 0.5625,
+              "wtl": [
+                7,
+                4,
+                5
+              ]
+            }
+          },
+          "pooled": {
+            "craze vs opencode": {
+              "ci90": [
+                0.2577,
+                0.6354
+              ],
+              "n": 16,
+              "rate": 0.4375,
+              "wtl": [
+                5,
+                4,
+                7
+              ]
+            },
+            "opencode vs craze": {
+              "ci90": [
+                0.3646,
+                0.7423
+              ],
+              "n": 16,
+              "rate": 0.5625,
+              "wtl": [
+                7,
+                4,
+                5
+              ]
+            }
+          }
+        }
+      }
+    }
+  ],
+  "schema": 1
+}
