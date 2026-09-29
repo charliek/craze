@@ -39,16 +39,20 @@ import (
 //     its session from a tea.Cmd (tui.Config.NewBackend, LoadBackend;
 //     launcher): a new session of the provider known — or of the provider
 //     picker's choice — and --continue's row — or the resume picker's choice
-//     — with --load. A host that answers ok is dialled, and the TUI adopts
-//     it; one refused held is the holder's, found through the rendezvous and
-//     attached to (SQ16), whoever holds it.
+//     — with --load. A row a running host serves already is that host's,
+//     attached to without a spawn (hostServing). A host that answers ok is
+//     dialled, and the TUI adopts it; one refused held is the holder's,
+//     found through the rendezvous and attached to (SQ16), whoever holds it.
 //  3. The TUI's explicit quit — /exit, Ctrl+D, the second Ctrl+C — stops the
 //     session on its host (plan 030 §3.6: tui's stopQuit); a SIGTERM or a
 //     closed terminal is a view close, and the session goes on on its host.
 //     Then the launcher ends every spawn still in flight, and every host it
 //     spawned whose session never came up in the TUI — never taken, quit
 //     while starting, or failed to start: a quit before a session is up
-//     leaves nobody's session behind.
+//     leaves nobody's session behind. "Came up in the TUI" is the TUI's own
+//     word for it (launchedBackend.AckStarted), never the host's answer
+//     alone: a quit that wins against the TUI hearing its session is up
+//     leaves no host behind either (astra r7-c4 1).
 //
 // This process binds no socket and takes no claim: the host owns its claim,
 // its journal and its index writes, and persists the provider. craze's own
@@ -217,6 +221,15 @@ var errLaunchOver = errors.New("craze is exiting")
 // serves already: that one is attached to whatever they say, since an attach
 // takes none of them (SQ16), as the in-process path's claim-first order has
 // it. The host holds its own row to them again under its claim.
+//
+// The resume picker is handed no refusal to ask (Config.RefuseLoad nil,
+// astra r7-c4 3): its choice goes to the host's own claim-first order, as
+// --continue's row does when a host serves it — a session another host holds
+// is attached to whatever the flags say, and one nobody holds is refused by
+// the host that claims it, a *tui.Refusal the picker shows as its error row
+// (launchFailure). Asked in the picker, before the claim, the flags would
+// refuse a held row --continue attaches to (X25's parity). The in-process
+// path keeps asking it there (resolveLoad, tui.go): its picker claims.
 func (l *launcher) resolveLoad(cmd *cobra.Command, f *tuiFlags, cwd string, cfg *tui.Config) error {
 	if !f.cont && !f.resume {
 		return nil
@@ -234,6 +247,7 @@ func (l *launcher) resolveLoad(cmd *cobra.Command, f *tuiFlags, cwd string, cfg 
 			return exitf(1, "%s", noSessionMsg(cwd, filter))
 		}
 		cfg.Resume = rows
+		cfg.RefuseLoad = nil
 		return nil
 	}
 	row, err := continueRow(cwd, filter)
@@ -244,7 +258,7 @@ func (l *launcher) resolveLoad(cmd *cobra.Command, f *tuiFlags, cwd string, cfg 
 	if err != nil {
 		return exitf(1, "craze: %v", err)
 	}
-	if row.CrazeID == "" || !servedSession(l.env, row.CrazeID) {
+	if _, served := hostServing(l.env, row.CrazeID); !served {
 		if err := f.refuse(p); err != nil {
 			return err
 		}
@@ -257,19 +271,25 @@ func (l *launcher) resolveLoad(cmd *cobra.Command, f *tuiFlags, cwd string, cfg 
 	return nil
 }
 
-// servedSession reports whether a live host in the registry serves the
-// session crazeID.
-func servedSession(env rundir.Env, crazeID string) bool {
+// hostServing is the live host in the registry that serves the session
+// crazeID — its identity published, which a host writes once it is bound with
+// that session's engine, as the held rendezvous finds a holder — and whether
+// there is one. A row with no craze id (a legacy row) is served by nobody
+// anyone can name, and a registry that cannot be read lists nobody.
+func hostServing(env rundir.Env, crazeID string) (rundir.Entry, bool) {
+	if crazeID == "" {
+		return rundir.Entry{}, false
+	}
 	entries, err := rundir.Hosts(env)
 	if err != nil {
-		return false
+		return rundir.Entry{}, false
 	}
 	for _, e := range entries {
-		if e.CrazeSessionID == crazeID {
-			return true
+		if e.CrazeSessionID == crazeID && e.Socket != "" {
+			return e, true
 		}
 	}
-	return false
+	return rundir.Entry{}, false
 }
 
 // newBackend is tui.Config.NewBackend: a host spawned for a new session of p,
@@ -287,7 +307,7 @@ func (l *launcher) newBackend(p agent.Provider, explicit bool) (backend.Backend,
 	if !explicit && l.resolved.Fallback && p.Name() == l.resolved.Provider.Name() {
 		f.provider = ""
 	}
-	return l.spawn(spawnOptions{env: l.env, flags: f}, false)
+	return l.spawn(spawnOptions{env: l.env, flags: f}, "")
 }
 
 // loadBackend is tui.Config.LoadBackend: a host spawned to load row (--load,
@@ -296,18 +316,32 @@ func (l *launcher) newBackend(p agent.Provider, explicit bool) (backend.Backend,
 // provider, and runs in its own workspace (X13), so neither --workspace nor
 // the provider the picker was for is passed; an explicit --provider is, the
 // same filter --continue found the row by.
+//
+// A row whose session a running host serves already is attached to there
+// without a spawn (spawn's crazeID): the reattach after a closed terminal is
+// the ordinary way back to a session, and costs no process and no log.
 func (l *launcher) loadBackend(_ agent.Provider, row sessions.Row) (backend.Backend, error) {
 	f := l.flags
 	f.cont = false
 	f.workspace = ""
-	return l.spawn(spawnOptions{env: l.env, flags: f, load: loadArg(row)}, true)
+	return l.spawn(spawnOptions{env: l.env, flags: f, load: loadArg(row)}, row.CrazeID)
 }
 
-// spawn spawns a host for opts and dials it (spawnHost, dialHost), and
-// answers the backend the TUI adopts — recorded, so a backend the TUI never
-// took is ended at finish. A spawn after finish refuses at once. load says
-// the spawn is a load, whose session may be another host's (the held note).
-func (l *launcher) spawn(opts spawnOptions, load bool) (backend.Backend, error) {
+// spawn answers the backend the TUI adopts for opts — recorded, so a backend
+// the TUI never took up is ended at finish — and a spawn after finish refuses
+// at once.
+//
+// A load of a session with a craze id first looks for a host that serves it
+// already (hostServing) and attaches to it there, spawning nothing: no claim
+// is taken — the host holds it — and the flags of a new session are ignored,
+// with the note a held answer leaves (noteHeld). Found and not reachable — it
+// is stopping, or gone since — the spawn is the fallback, and so is a session
+// nobody serves and a legacy row, which has no id to look for. The spawn's
+// own held answer covers a host that took the session between the look and
+// the spawn: the rendezvous finds it, and it is attached to the same way.
+//
+// Otherwise a host is spawned for opts and dialled (spawnHost, dialHost).
+func (l *launcher) spawn(opts spawnOptions, crazeID string) (backend.Backend, error) {
 	l.mu.Lock()
 	if l.closed {
 		l.mu.Unlock()
@@ -317,10 +351,28 @@ func (l *launcher) spawn(opts spawnOptions, load bool) (backend.Backend, error) 
 	l.mu.Unlock()
 	defer l.inflight.Done()
 
+	if e, ok := hostServing(l.env, crazeID); ok {
+		b, err := l.dial(hostRef{entry: e, held: true})
+		if err == nil {
+			return b, nil
+		}
+		if l.ctx.Err() != nil {
+			// The TUI has quit meanwhile (finish): nothing is spawned for it.
+			return nil, err
+		}
+	}
 	ref, err := spawnHost(l.ctx, opts)
 	if err != nil {
 		return nil, launchFailure(err)
 	}
+	return l.dial(ref)
+}
+
+// dial dials the host ref names as the TUI's client (dialHost): a host this
+// launch started is ended when it cannot be, and a holder's is left alone.
+// The backend it answers is recorded, and a holder's names the flags its
+// attach ignored (noteHeld).
+func (l *launcher) dial(ref hostRef) (backend.Backend, error) {
 	ctx, cancel := context.WithTimeout(l.ctx, dialTimeout)
 	defer cancel()
 	s, err := dialHost(ctx, ref, remote.SessionOptions{
@@ -349,7 +401,7 @@ func (l *launcher) spawn(opts spawnOptions, load bool) (backend.Backend, error) 
 	l.mu.Lock()
 	l.launched = append(l.launched, b)
 	l.mu.Unlock()
-	if ref.held && load {
+	if ref.held {
 		l.noteHeld(ref)
 	}
 	return b, nil
@@ -376,9 +428,15 @@ func (l *launcher) noteHeld(ref hostRef) {
 // this launch spawned it, stopped (hostRef.abandon): one the TUI never took,
 // one it quit while it was starting, and one whose start failed. A session
 // nobody was shown, or that never ran, is not left running; a held session's
-// host is its holder's, and is left alone. A session that came up (its Start
-// answered nil) was closed by the TUI's own exit — a view close — and its
-// host goes on.
+// host is its holder's, and is left alone. A session that came up — the TUI
+// acknowledged its start (AckStarted) — was closed by the TUI's own exit, a
+// view close, and its host goes on.
+//
+// finish runs once tui.Run has returned, and an acknowledgement is made only
+// inside the program's Update: nothing can acknowledge after the reading here,
+// so a host is kept exactly when the TUI took its session as up, and a quit
+// that won against that — a SIGTERM or a hang-up whose quit the program acted
+// on first — stops it (astra r7-c4 1).
 func (l *launcher) finish() {
 	l.done.Do(func() {
 		l.mu.Lock()
@@ -390,7 +448,7 @@ func (l *launcher) finish() {
 		launched := l.launched
 		l.mu.Unlock()
 		for _, b := range launched {
-			if b.up.Load() {
+			if b.acked.Load() {
 				continue
 			}
 			_ = b.Close()
@@ -399,24 +457,36 @@ func (l *launcher) finish() {
 	})
 }
 
+// launchStarted is called when a launched backend's Start has answered nil —
+// the host's start is over — before that answer goes back to the TUI, whose
+// startedMsg it becomes: a seam for the test that holds the message there
+// until the TUI has quit; a no-op in production.
+var launchStarted = func() {}
+
 // launchedBackend is a launch's session: the socket to its host, which a
 // failed start names the log of.
 type launchedBackend struct {
 	*remote.Session
 	ref hostRef
-	// up says the session came up in the TUI: its Start — which the TUI
-	// calls on the backend it adopts, and on no other — answered nil.
-	up atomic.Bool
+	// acked says the session came up in the TUI: the TUI took its start's
+	// answer while it was not quitting (AckStarted). Start answering nil is
+	// not it — the TUI hears that answer later, if it is still there to.
+	acked atomic.Bool
 }
 
-// Start is the Session's, recording a session that came up, and a failure
-// of a host this launch spawned names that host's log, where the agent's own
-// stderr is — the in-process run printed it after the screen; a detached one
-// cannot.
+// AckStarted is the TUI's acknowledgement that the session came up there
+// (tui's startAcker): called from the program's Update, when the start's
+// answer (startedMsg) is applied and the program is not quitting. Only a
+// session acknowledged is kept at finish.
+func (b *launchedBackend) AckStarted() { b.acked.Store(true) }
+
+// Start is the Session's, and a failure of a host this launch spawned names
+// that host's log, where the agent's own stderr is — the in-process run
+// printed it after the screen; a detached one cannot.
 func (b *launchedBackend) Start(ctx context.Context) error {
 	err := b.Session.Start(ctx)
 	if err == nil {
-		b.up.Store(true)
+		launchStarted()
 		return nil
 	}
 	if b.ref.log != "" && !errors.Is(err, backend.ErrClosed) {
@@ -439,17 +509,20 @@ func (e *hostStartError) Error() string {
 func (e *hostStartError) Unwrap() error { return e.err }
 
 // launchFailure is how the TUI shows a spawn that found no host (plan 030
-// §3.5). The host's own refusal — not ready: a row it cannot load, a claim it
-// cannot take — and a held session whose holder cannot be attached to are
-// answers about what was chosen: a *tui.Refusal, which a picker shows as its
-// error row, in craze's own words ("craze serve: " is the host's name for
-// itself, not the user's). Anything else is the detached host failing to come
-// up — it exited, timed out, said nothing readable, could not be started — a
-// start failure naming its log and the opt-out, which runs the session inside
-// craze as before.
+// §3.5, X24). The host's refusal of what it was asked to run (spawnRefused:
+// no such session, a flag its provider cannot take, a claim to try again)
+// and a held session whose holder cannot be attached to are answers about
+// what was chosen: a *tui.Refusal, which a picker shows as its error row, in
+// craze's own words ("craze serve: " is the host's name for itself, not the
+// user's). Anything else is the detached host failing to come up — it
+// exited, timed out, said nothing readable, could not be started, or stopped
+// before it was ready for a reason of its own, its socket not bound among
+// them (spawnNotReady) — a start failure naming its log and the opt-out,
+// which runs the session inside craze as before, from a picker too: choosing
+// again would not change it (astra r7-c4 2).
 func launchFailure(err error) error {
 	var se *spawnError
-	if errors.As(err, &se) && (se.kind == spawnNotReady || se.kind == spawnHeld) {
+	if errors.As(err, &se) && (se.kind == spawnRefused || se.kind == spawnHeld) {
 		msg := se.msg
 		if rest, ok := strings.CutPrefix(msg, "craze serve: "); ok {
 			msg = "craze: " + rest

@@ -464,3 +464,65 @@ func TestAViewerSpawnsNothing(t *testing.T) {
 		t.Fatalf("a viewer spawned %d, used %d", len(rec.made()), used)
 	}
 }
+
+// ackCount is a backend that counts the model's acknowledgements of its start
+// (startAcker).
+type ackCount struct {
+	backend.Backend
+	acks atomic.Int32
+}
+
+func (a *ackCount) AckStarted() { a.acks.Add(1) }
+
+// TestTheStartIsAcknowledgedOnlyWhenApplied (astra r7-c4 1): a launch's
+// backend is told its session came up when — and only when — the model
+// applies its start's answer while it is not quitting. Start answering is not
+// it; a quit asked for before the answer is applied (the explicit one here:
+// bubbletea's own quit, a SIGTERM's or a hang-up's, applies nothing after it)
+// leaves the start unacknowledged, and so does an answer about another
+// backend.
+func TestTheStartIsAcknowledgedOnlyWhenApplied(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		quit  bool
+		stale bool
+		want  int32
+	}{
+		{"applied", false, false, 1},
+		{"quitting", true, false, 0},
+		{"another backend's", false, true, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ws := t.TempDir()
+			b := &ackCount{Backend: grokBackend(t, ws)}
+			rec := &spawnRec{answer: func() (backend.Backend, error) { return b, nil }}
+			used := 0
+			cfg := launchConfig(t, ws, rec, &used)
+			cfg.ProviderLocked = true
+			m := sizedModel(cfg)
+			tm, cmd := m.Update(spawnedBy(t, m.Init()))
+			m = tm.(Model)
+			started, ok := firstMsg(t, cmd).(startedMsg)
+			if !ok || started.eng != b {
+				t.Fatalf("the adopt's first command answered %T, want its backend's start", started)
+			}
+			if n := b.acks.Load(); n != 0 {
+				t.Fatalf("Start's answer alone acknowledged %d times", n)
+			}
+			if tc.quit {
+				tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyCtrlD})
+				m = tm.(Model)
+				if !m.quitting {
+					t.Fatal("the premise: Ctrl+D is quitting")
+				}
+			}
+			if tc.stale {
+				started.eng = grokBackend(t, ws)
+			}
+			m = deliver(t, m, started)
+			if n := b.acks.Load(); n != tc.want {
+				t.Fatalf("acknowledged %d times, want %d (started %v)", n, tc.want, m.started)
+			}
+		})
+	}
+}

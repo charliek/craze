@@ -139,14 +139,21 @@ type hostRef struct {
 	child *hostChild
 }
 
-// spawnFailure is how a spawn failed. A host that refused (notReady) and a
-// session another host holds that could not be reached (held) are the host's
-// answers; the rest are hosts the spawner ended.
+// spawnFailure is how a spawn failed. A host that refused what it was asked
+// to run (refused) and a session another host holds that could not be reached
+// (held) are answers about the choice; a host that answered not ok for any
+// other reason (notReady) could not come up, as the rest could not, which are
+// hosts the spawner ended.
 type spawnFailure int
 
 const (
-	// spawnNotReady: the host answered not ok, its refusal in the message.
+	// spawnNotReady: the host answered not ok — it could not come up, for a
+	// reason of its own, its socket not bound among them — its reason in the
+	// message, which names its log.
 	spawnNotReady spawnFailure = iota + 1
+	// spawnRefused: the host refused what it was asked to run
+	// (readyLine.Refused), its refusal word for word in the message.
+	spawnRefused
 	// spawnExited: EOF with no line — the host exited, or closed its pipe
 	// unwritten, before it was ready.
 	spawnExited
@@ -223,7 +230,13 @@ func spawnOnce(ctx context.Context, opts spawnOptions) (hostRef, *readyHeld, err
 		if line.Held != nil {
 			return hostRef{}, line.Held, nil
 		}
-		return hostRef{}, nil, &spawnError{kind: spawnNotReady, msg: line.Error, err: errors.New(line.Error)}
+		if line.Refused {
+			return hostRef{}, nil, &spawnError{kind: spawnRefused, msg: line.Error, err: errors.New(line.Error)}
+		}
+		// A host that could not come up says why in the host's own words,
+		// less its name for itself, and where its log is.
+		why := strings.TrimPrefix(strings.TrimPrefix(line.Error, "craze serve: "), "craze: ")
+		return hostRef{}, nil, &spawnError{kind: spawnNotReady, msg: "craze: the session host could not start: " + why + "; its log: " + logPath, err: errors.New(line.Error)}
 	}
 	// Its form is parseReady's; whose it is, this spawn's.
 	if line.HostID != hostID {
@@ -436,7 +449,7 @@ func parseReady(r io.Reader) (readyLine, spawnFailure, string) {
 func (l readyLine) invalid() string {
 	if l.OK {
 		switch {
-		case l.Error != "" || l.Held != nil:
+		case l.Error != "" || l.Held != nil || l.Refused:
 			return "ok, and a refusal too"
 		case !rundir.ValidHostID(l.HostID):
 			return fmt.Sprintf("ok names no host id (%q)", l.HostID)

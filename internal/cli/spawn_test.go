@@ -749,7 +749,7 @@ func TestSpawnHostReapsEveryChild(t *testing.T) {
 		}
 		ref, err := spawnNow(t, opts)
 		if i%5 != 0 {
-			if se := failure(t, err); se.kind != spawnNotReady || !strings.HasPrefix(se.msg, "craze serve: no session ") {
+			if se := failure(t, err); se.kind != spawnRefused || !strings.HasPrefix(se.msg, "craze serve: no session ") {
 				t.Fatalf("spawn %d: %v", i, err)
 			}
 			continue
@@ -1184,10 +1184,10 @@ func TestSpawnArgvCarriesEverySessionFlag(t *testing.T) {
 // is an exit, within a line a malformed one; a line past the bound is
 // oversized however it ends. And what makes a line a ready line (astra r5-c3
 // 4): ok needs its host id in a host id's form, an absolute socket, a craze
-// session id and a craze version, and no refusal; not ok needs a reason, and
-// its holder, when it names one, the session and a host id — or, a lock that
-// names nobody yet, no host and no pid. A member the spawner does not know is
-// ignored on either branch.
+// session id and a craze version, and no refusal — no reason, no holder, not
+// refused; not ok needs a reason, and its holder, when it names one, the
+// session and a host id — or, a lock that names nobody yet, no host and no
+// pid. A member the spawner does not know is ignored on either branch.
 func TestParseReadyLine(t *testing.T) {
 	ok := `{"ok":true,"hostId":"0123456789ab","socket":"/s","crazeSessionId":"c","crazeVersion":"v","future":1}`
 	okWithout := func(member, value string) string {
@@ -1232,6 +1232,8 @@ func TestParseReadyLine(t *testing.T) {
 		{"ok, no craze version", okWithout("crazeVersion", ""), spawnMalformed},
 		{"ok, and a refusal", okWithout("error", `"e"`), spawnMalformed},
 		{"ok, and a holder", okWithout("held", `{"hostId":"0123456789ab","crazeSessionId":"c"}`), spawnMalformed},
+		{"ok, and refused", okWithout("refused", `true`), spawnMalformed},
+		{"not ok, the choice refused", `{"ok":false,"error":"e","refused":true}` + "\n", 0},
 
 		{"held", notOK(`{"hostId":"0123456789ab","pid":12,"crazeSessionId":"c"}`), 0},
 		{"held by a lock that names nobody yet", notOK(`{"hostId":"","crazeSessionId":"c"}`), 0},

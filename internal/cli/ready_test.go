@@ -174,14 +174,32 @@ func TestServeAnnouncesOnlyOnceItsIdentityIsInTheRegistry(t *testing.T) {
 // ready answers not ok with its refusal, word for word as craze serve exits
 // with it, and closes the pipe. A session another craze holds adds who holds
 // it — its host id and pid, as the lock names them, and the session — which
-// the launcher's rendezvous needs; any other refusal names no holder.
+// the launcher's rendezvous needs; any other refusal names no holder. A
+// refusal of the session asked for — no such session, a spawn flag its
+// provider cannot take — says it is the choice's (refused); a host that could
+// not come up — its socket would not bind, a command line no launcher writes
+// — does not (astra r7-c4 2).
 func TestServeAnswersWhyItNeverServed(t *testing.T) {
 	t.Run("no such session", func(t *testing.T) {
 		serveHome(t)
 		r, rd := runServeReady(t, false, "--load", "0199aaaa-bbbb-7ccc-8ddd-0000000000e1")
 		line := readyFrom(t, rd)
 		code, msg := exitCode(t, r.result(t, serveStep))
-		if line.OK || line.Held != nil || line.Error != msg || code != 1 || msg != "craze serve: no session 0199aaaa-bbbb-7ccc-8ddd-0000000000e1" {
+		if line.OK || line.Held != nil || !line.Refused || line.Error != msg || code != 1 || msg != "craze serve: no session 0199aaaa-bbbb-7ccc-8ddd-0000000000e1" {
+			t.Fatalf("the line %+v; exit %d %q", line, code, msg)
+		}
+		assertPipeEnds(t, rd)
+	})
+	t.Run("a flag the session's provider cannot take", func(t *testing.T) {
+		serveHome(t)
+		ws := t.TempDir()
+		const id = "0199aaaa-bbbb-7ccc-8ddd-0000000000e3"
+		seedIndexRow(t, sessions.Row{SessionID: "n-1", Provider: "native", CWD: absDir(ws), CrazeID: id})
+		r, rd := runServeReady(t, false, "--load", id, "--agent-bin", fakeAgentPath(t))
+		line := readyFrom(t, rd)
+		code, msg := exitCode(t, r.result(t, serveStep))
+		if line.OK || line.Held != nil || !line.Refused || line.Error != msg || code != 2 ||
+			msg != "craze: --agent-bin cannot be used with provider native, which runs inside craze" {
 			t.Fatalf("the line %+v; exit %d %q", line, code, msg)
 		}
 		assertPipeEnds(t, rd)
@@ -191,8 +209,23 @@ func TestServeAnswersWhyItNeverServed(t *testing.T) {
 		r, rd := runServeReady(t, false, "--host-id", "NOT-AN-ID")
 		line := readyFrom(t, rd)
 		code, msg := exitCode(t, r.result(t, serveStep))
-		if line.OK || line.Error != msg || code != 2 || !strings.HasPrefix(msg, `craze serve: --host-id "NOT-AN-ID"`) {
+		if line.OK || line.Refused || line.Error != msg || code != 2 || !strings.HasPrefix(msg, `craze serve: --host-id "NOT-AN-ID"`) {
 			t.Fatalf("the line %+v; exit %d %q", line, code, msg)
+		}
+	})
+	t.Run("the socket cannot bind", func(t *testing.T) {
+		env, ws := serveHome(t)
+		t.Setenv("CRAZE_RUNTIME_DIR", unusableRuntimeDir(t))
+		r, rd := runServeReady(t, false, "--agent-bin", fakeAgentPath(t), "--workspace", ws)
+		line := readyFrom(t, rd)
+		code, msg := exitCode(t, r.result(t, serveStep))
+		if line.OK || line.Held != nil || line.Refused || line.Error != msg || code != 1 ||
+			!strings.HasPrefix(msg, "craze serve: the control socket: ") {
+			t.Fatalf("the line %+v; exit %d %q", line, code, msg)
+		}
+		assertPipeEnds(t, rd)
+		if entries, _ := rundir.Hosts(env); len(entries) != 0 {
+			t.Fatalf("a host that could not bind left %+v", entries)
 		}
 	})
 	t.Run("held", func(t *testing.T) {
@@ -210,7 +243,7 @@ func TestServeAnswersWhyItNeverServed(t *testing.T) {
 		line := readyFrom(t, rd)
 		code, msg := exitCode(t, r.result(t, serveStep))
 		want := readyHeld{HostID: holder, PID: os.Getpid(), CrazeSessionID: id}
-		if line.OK || line.Held == nil || *line.Held != want || line.Error != msg || code != 1 ||
+		if line.OK || line.Held == nil || *line.Held != want || line.Refused || line.Error != msg || code != 1 ||
 			!strings.HasPrefix(msg, "craze serve: that session is open in another craze (pid ") {
 			t.Fatalf("the line %+v (held %+v); exit %d %q", line, line.Held, code, msg)
 		}

@@ -48,7 +48,11 @@ import (
 //     so a refusal leaves no socket, no session and no journal. A session
 //     another craze holds is exit 1 naming its holder, carrying the
 //     *rundir.HeldError, which a spawned host's ready line answers held
-//     (ready.go).
+//     (ready.go); every other refusal of the session asked for — no such
+//     row, one that cannot run where it ran, a spawn flag its provider
+//     cannot take, a claim to try again — is marked the choice's
+//     (refusedChoice), which the ready line says, and anything else that
+//     stops the host before it is ready is a host that could not come up.
 //  4. The control socket binds — fatally: a failure leaves nothing behind —
 //     served with the lifecycle coordinator (hostLifecycle) as its stop seam.
 //  5. The session is built as the TUI builds one, sessionOptions and
@@ -353,7 +357,7 @@ func serveSession(cmd *cobra.Command, f *serveFlags, env hostEnv, sigs <-chan os
 			ws, err = loadWorkspace(cmd, f.workspace, row)
 		}
 		if err != nil {
-			return err
+			return refusedChoice(err)
 		}
 		serveRowRead(row)
 		p, row, err = claimLoad(row, f.refuse, rh.claims)
@@ -364,12 +368,14 @@ func serveSession(cmd *cobra.Command, f *serveFlags, env hostEnv, sigs <-chan os
 			return unclaimed.exit()
 		}
 		if err != nil {
-			return err
+			// The row's provider held to the spawn flags, or a claim to try
+			// again: claimLoad's every other refusal is about this row.
+			return refusedChoice(err)
 		}
 		serveClaimed()
 	} else {
 		if err := f.refuse(p); err != nil {
-			return err
+			return refusedChoice(err)
 		}
 		if ws, err = resolveWorkspace(f.workspace); err != nil {
 			return err
@@ -459,6 +465,28 @@ func serveSession(cmd *cobra.Command, f *serveFlags, env hostEnv, sigs <-chan os
 	h.wait(sigs, published)
 	h.stop()
 	return nil
+}
+
+// choiceRefusal is craze serve refusing the session it was asked to run, as
+// opposed to failing to come up (plan 030 X24, astra r7-c4 2): no such row,
+// one that cannot run where it ran, a spawn flag the row's provider cannot
+// take, a claim to try again. It carries the refusal whole — its exit code
+// and its words (diagnose finds the *exitError through it) — and marks it
+// for the ready line (readyLine.Refused), so the launcher shows a picker's
+// choice refused as that picker's error row, and a host that could not bind
+// its socket as the start failure it is.
+type choiceRefusal struct{ err error }
+
+func (r *choiceRefusal) Error() string { return r.err.Error() }
+func (r *choiceRefusal) Unwrap() error { return r.err }
+
+// refusedChoice marks err a refusal of the session asked for (choiceRefusal);
+// nil stays nil.
+func refusedChoice(err error) error {
+	if err == nil {
+		return nil
+	}
+	return &choiceRefusal{err: err}
 }
 
 // controlSocketRefusal is craze serve's answer to a control socket switched

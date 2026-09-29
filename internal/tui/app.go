@@ -222,7 +222,10 @@ type Config struct {
 	// *Refusal of a picker's choice, which brings that picker back with the
 	// refusal as its error row. A backend answered after the program has
 	// quit is never adopted, and is the caller's to close: Start is called
-	// on every backend the model adopts, and on no other. nil keeps the
+	// on every backend the model adopts, and on no other. A backend that has
+	// an AckStarted method (startAcker) is told when the model applies its
+	// start and is not quitting — the caller's one sign that its session
+	// came up in this TUI (Start's answer can lose to a quit). nil keeps the
 	// in-process path — every test Config, every golden, the frame runner
 	// and craze under the opt-out.
 	NewBackend  func(p agent.Provider, explicit bool) (backend.Backend, error)
@@ -1799,6 +1802,11 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if m.eng != nil {
 			m.eng.Started(nil)
+		}
+		// The launch flow's backend hears that its session came up here,
+		// and not while the program is on its way out (startAcker).
+		if a, ok := m.eng.(startAcker); ok && !m.quitting {
+			a.AckStarted()
 		}
 		m.started = true
 		m.branch = m.git.branch()

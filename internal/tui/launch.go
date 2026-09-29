@@ -41,6 +41,24 @@ type Refusal struct {
 func (r *Refusal) Error() string { return r.Err.Error() }
 func (r *Refusal) Unwrap() error { return r.Err }
 
+// startAcker is a backend told that its session came up in this TUI: the
+// launch flow's (internal/cli's), whose launcher keeps a host it spawned
+// running after the TUI has quit only when the TUI saw its session up — and
+// stops it otherwise (plan 030 X27, astra r7-c4 1). The host's Start
+// answering is not that: a SIGTERM or a hang-up can quit the program between
+// that answer and its startedMsg reaching Update, and a host nobody saw come
+// up would be left running.
+//
+// AckStarted is called from Update alone — where startedMsg is applied, and
+// only while the program is not quitting — so it is fenced against every
+// quit: the explicit one sets quitting in an Update before any later message
+// is applied, and bubbletea acts on a SIGTERM's or a hang-up's quit without
+// applying anything after it. Once Run has returned, no acknowledgement can
+// follow.
+type startAcker interface {
+	AckStarted()
+}
+
 // spawnedMsg is a spawn's answer: the backend to adopt, or why there is none.
 // attempt is the stamp spawn gave it, and from the picker whose choice it was
 // (dialogNone for Init's own).

@@ -31,7 +31,10 @@ import (
 //     has;
 //   - not ok, when serve returns before that: its refusal, word for word as its
 //     log has it, and — when the session's claim is another host's — who holds
-//     it (readyHeld), so the launcher attaches to the holder instead.
+//     it (readyHeld), so the launcher attaches to the holder instead. A
+//     refusal of what it was asked to run says so (refused), and the launcher
+//     shows it as the choice refused; any other is a host that could not come
+//     up (plan 030 X24, astra r7-c4 2).
 //
 // The descriptor is marked close-on-exec the moment serve starts
 // (takeReadyPipe): a descriptor passed in ExtraFiles is not, and an agent child
@@ -60,9 +63,16 @@ const readyLineMax = 64 << 10
 // socket, its session's craze id and the craze that serves it (the host may be
 // a newer binary than its launcher, when craze was upgraded on disk between
 // the two). Not OK carries the host's refusal (Error) and, for a session
-// another host holds, Held. The launcher takes a line only when it carries
-// everything its branch needs (readyLine.invalid, spawn.go), and ignores a
-// member it does not know.
+// another host holds, Held. Refused says the refusal is of what the host was
+// asked to run (refusedChoice) — no such session, a row that cannot run
+// where it ran, a flag its provider cannot take, a claim to try again —
+// which choosing again may change; without it, and without Held, the host
+// could not come up (its socket would not bind, its claim could not be taken
+// at all, …), and the launcher says so with the host's log and the opt-out.
+// Absent means false: a host that does not say is taken as one that could
+// not come up, which names its log. The launcher takes a line only when it
+// carries everything its branch needs (readyLine.invalid, spawn.go), and
+// ignores a member it does not know.
 type readyLine struct {
 	OK             bool       `json:"ok"`
 	HostID         string     `json:"hostId,omitempty"`
@@ -71,6 +81,7 @@ type readyLine struct {
 	CrazeVersion   string     `json:"crazeVersion,omitempty"`
 	Error          string     `json:"error,omitempty"`
 	Held           *readyHeld `json:"held,omitempty"`
+	Refused        bool       `json:"refused,omitempty"`
 }
 
 // readyHeld is who holds the session a host could not claim, as its lock
@@ -144,8 +155,9 @@ func (p *readyPipe) send(line readyLine) error {
 }
 
 // fail answers a host that returned err before it was ready: its refusal as
-// the log words it (diagnose), and who holds the session when that is why.
-// Nothing for a nil err, or once the pipe is done.
+// the log words it (diagnose), and who holds the session when that is why —
+// or, for any other refusal of what it was asked to run (refusedChoice), that
+// it was one. Nothing for a nil err, or once the pipe is done.
 func (p *readyPipe) fail(cmd *cobra.Command, err error) {
 	if p == nil || err == nil {
 		return
@@ -159,6 +171,9 @@ func (p *readyPipe) fail(cmd *cobra.Command, err error) {
 	line := readyLine{Error: msg}
 	if held := heldBy(err); held != nil {
 		line.Held = &readyHeld{HostID: held.Holder.HostID, PID: held.Holder.PID, CrazeSessionID: held.CrazeID}
+	} else {
+		var refused *choiceRefusal
+		line.Refused = errors.As(err, &refused)
 	}
 	_ = p.send(line)
 }

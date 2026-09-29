@@ -6,19 +6,23 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
 
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/creack/pty"
 
 	"github.com/charliek/craze/internal/agent"
 	"github.com/charliek/craze/internal/backend"
+	"github.com/charliek/craze/internal/engine"
 	"github.com/charliek/craze/internal/protocol"
 	"github.com/charliek/craze/internal/remote"
 	"github.com/charliek/craze/internal/rundir"
@@ -103,11 +107,18 @@ func hasArg(argv []string, arg string) bool {
 	})
 }
 
-// started is b started as the TUI starts the backend it adopts, within a step.
+// started is b started as the TUI starts the backend it adopts, within a
+// step, and its start's answer taken as the TUI takes it while not quitting:
+// acknowledged (AckStarted, which the model calls where it applies the
+// answer). A test standing in for the TUI that did not would be a TUI that
+// quit before it heard the answer, whose host finish stops.
 func started(t *testing.T, b backend.Backend) {
 	t.Helper()
 	if err := b.Start(stepCtx(t)); err != nil {
 		t.Fatalf("the adopted backend's start: %v", err)
+	}
+	if a, ok := b.(interface{ AckStarted() }); ok {
+		a.AckStarted()
 	}
 }
 
@@ -420,19 +431,41 @@ func TestContinueSpawnsALoadOfItsRow(t *testing.T) {
 }
 
 // TestContinueOfAHeldSessionAttaches (SQ16 over the launch): a --continue of a
-// session a running host holds spawns a host that is refused held, and the
-// TUI is given the holder, found through the rendezvous: its socket, its
-// session. The TUI's quit leaves the holder running, and the flags a new
-// session would have taken are named as ignored, once the screen is back.
+// session a host holds that no host serves yet when the launch looks — the
+// holder claimed it and is held there (cliChildGate), not yet in the registry
+// — spawns a host that is refused held, and the TUI is given the holder,
+// found through the rendezvous once it serves the session (let go at the
+// rendezvous's first look): its socket, its session. The held answer is what
+// covers a host taking the session between the launch's look and its spawn.
+// The TUI's quit leaves the holder running, and the flags a new session would
+// have taken are named as ignored, once the screen is back.
 func TestContinueOfAHeldSessionAttaches(t *testing.T) {
-	env, ws, cmds := launchHome(t, nil)
+	gate, release, letGo := gateFIFO(t)
+	env, ws, cmds := launchHome(t, func(n int) []string {
+		if n == 1 {
+			return []string{cliChildGate + "=" + gate}
+		}
+		return nil
+	})
 	t.Setenv("CRAZE_FAKE_SCRIPT", "load")
 	const id = "0199aaaa-bbbb-7ccc-8ddd-0000000000d2"
 	seedIndexRow(t, sessions.Row{SessionID: "held-2", Provider: "cursor", CWD: absDir(ws), CrazeID: id, UpdatedAt: time.Now()})
-	holder, err := spawnNow(t, spawnOptions{env: env, flags: tuiFlags{force: true, agentBin: fakeAgentPath(t)}, load: id})
-	if err != nil {
-		t.Fatalf("the holder's spawn: %v", err)
+	polled := pollSignal(t)
+	holding := goSpawn(t, context.Background(), spawnOptions{env: env, flags: tuiFlags{force: true, agentBin: fakeAgentPath(t)}, load: id})
+	// After goSpawn's cleanup, so it runs first: a failing test lets the
+	// holder go before waiting for its spawn.
+	t.Cleanup(letGo)
+	waitClaimed(t, env, id)
+	if _, ok := hostServing(env, id); ok {
+		t.Fatal("the premise: a host serves the session before its holder is let go")
 	}
+	go func() {
+		select {
+		case <-polled:
+			release()
+		case <-time.After(serveStep):
+		}
+	}()
 	stderr := captureStderr(t)
 	var socket string
 	fakeRun(t, func(cfg tui.Config) (tui.Result, error) {
@@ -457,6 +490,11 @@ func TestContinueOfAHeldSessionAttaches(t *testing.T) {
 	if err := runTUI(nil, f, hostEnv{}); err != nil {
 		t.Fatalf("runTUI: %v", err)
 	}
+	h := spawned(t, holding)
+	if h.err != nil {
+		t.Fatalf("the holder's spawn: %v", h.err)
+	}
+	holder := h.ref
 	switch {
 	case socket != holder.entry.Socket:
 		t.Fatalf("attached through %q, the holder serves %q", socket, holder.entry.Socket)
@@ -581,7 +619,8 @@ func TestALaunchFailureIsAStartFailure(t *testing.T) {
 // left running once it has quit. A host answered and dialled but never
 // adopted is stopped (session.stop); a spawn still waiting for its host's
 // answer is cancelled, and the host terminated — and runTUI returns only once
-// each is gone.
+// each is gone: the host is already reaped, and out of the registry, when
+// runTUI's answer is read (finish waits for both before it returns).
 func TestAQuitWhileStartingLeavesNoHost(t *testing.T) {
 	t.Run("answered, never adopted", func(t *testing.T) {
 		env, ws, cmds := launchHome(t, nil)
@@ -595,9 +634,10 @@ func TestAQuitWhileStartingLeavesNoHost(t *testing.T) {
 		if err := runTUI(nil, launchFlags(t, ws), hostEnv{}); err != nil {
 			t.Fatalf("runTUI: %v", err)
 		}
-		pid := cmds.pids()[0]
-		if processAlive(pid) && !reapedSoon(pid) {
-			t.Fatal("runTUI returned with the unadopted host still running")
+		// No wait: the stop's own (hostRef.abandon) was over before runTUI
+		// returned.
+		if pid := cmds.pids()[0]; processAlive(pid) {
+			t.Fatalf("runTUI returned with the unadopted host %d still there (%s)", pid, procState(pid))
 		}
 		assertNoHosts(t, env)
 		dir, _ := rundir.HostLogDir(env)
@@ -623,29 +663,24 @@ func TestAQuitWhileStartingLeavesNoHost(t *testing.T) {
 		if err := runTUI(nil, launchFlags(t, ws), hostEnv{}); err != nil {
 			t.Fatalf("runTUI: %v", err)
 		}
+		// The barrier is runTUI's return itself: finish waited for the spawn
+		// in flight, whose cancel terminated its host and waited for it to be
+		// reaped. So the host is gone now, with no wait — while the closure's
+		// own answer, sent after the spawn has let finish go, may still be on
+		// its way, and is read with a step's bound (astra r7-c4 4).
+		if pid := cmds.pids()[0]; processAlive(pid) {
+			t.Fatalf("runTUI returned with the host of the spawn in flight %d still there (%s)", pid, procState(pid))
+		}
+		assertNoHosts(t, env)
 		select {
 		case err := <-answered:
 			if !errors.Is(err, context.Canceled) {
 				t.Fatalf("the spawn in flight answered %v, want it cancelled", err)
 			}
-		default:
-			t.Fatal("runTUI returned before the spawn in flight had")
+		case <-time.After(serveStep):
+			t.Fatalf("the spawn in flight had not answered %v after runTUI returned", serveStep)
 		}
-		waitReaped(t, cmds.pids()[0])
-		assertNoHosts(t, env)
 	})
-}
-
-// reapedSoon waits a step for pid to be gone.
-func reapedSoon(pid int) bool {
-	deadline := time.Now().Add(serveStep)
-	for processAlive(pid) {
-		if time.Now().After(deadline) {
-			return false
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	return true
 }
 
 // assertNoHosts: nothing is left in env's registry.
@@ -737,9 +772,10 @@ func (r *ttyRun) hangUp(t *testing.T) error {
 // a pty (plan 030 AC2, AC3): craze starts a session in a host of its own, the
 // TUI its client; a prompt goes through it and its turn ends; the terminal
 // closes (SIGHUP) — a view close — and the host goes on serving the session,
-// which the host has indexed; a second craze -c finds the row, is refused held
-// and attaches to that host through the rendezvous, its screen the transcript
-// the first one left. Its /exit (Ctrl+D) is the explicit quit, in every client
+// which the host has indexed; a second craze -c finds the row and the host
+// serving it, and attaches to that host — no host spawned for it, no log
+// written — its screen the transcript the first one left. Its /exit (Ctrl+D) is
+// the explicit quit, in every client
 // (decision 11): the session's host is stopped — the TUI quits, saying nothing
 // about the end it asked for, the host goes, and the index row stays.
 func TestADetachedSessionOutlivesItsTUI(t *testing.T) {
@@ -783,10 +819,9 @@ func TestADetachedSessionOutlivesItsTUI(t *testing.T) {
 	if err := second.ctrlD(t); err != nil {
 		t.Fatalf("craze -c's /exit: %v", err)
 	}
-	if cmds.count() != 2 {
-		t.Fatalf("%d hosts spawned, want the first and the one refused held", cmds.count())
+	if n := cmds.count(); n != 1 || len(hostLogs(t, env)) != 1 {
+		t.Fatalf("%d hosts spawned, host logs %q: want the first alone, which craze -c attached to", n, hostLogs(t, env))
 	}
-	waitReaped(t, cmds.pids()[1])
 	waitReaped(t, cmds.pids()[0])
 	assertNoHosts(t, env)
 	if row := indexRowByID(t, e.CrazeSessionID); row.CWD != absDir(ws) {
@@ -849,3 +884,389 @@ func TestADetachedStartFailureStaysOnScreen(t *testing.T) {
 // statusElapsed is status row 1's last part once a session is up — its
 // elapsed time, 0m for a minute — which the starting row does not draw.
 const statusElapsed = " │ 0m"
+
+// hostLogs is every host log in env's host logs' directory.
+func hostLogs(t *testing.T, env rundir.Env) []string {
+	t.Helper()
+	dir, err := rundir.HostLogDir(env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	logs, _ := filepath.Glob(filepath.Join(dir, "*.log"))
+	return logs
+}
+
+// unusableRuntimeDir is a CRAZE_RUNTIME_DIR no host can bind its socket
+// under: a directory of the user's own whose mode is 0755. A socket base must
+// be 0700, and an explicit one is neither repaired nor fallen through
+// (rundir.socketDir), so a host's bind fails — and nothing a launcher does,
+// nor anything a host does before its bind, reads the runtime tree.
+func unusableRuntimeDir(t *testing.T) string {
+	t.Helper()
+	d := filepath.Join(shortRuntimeDir(t), "open")
+	if err := os.Mkdir(d, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(d, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return d
+}
+
+// holdStarted holds every launched backend's Start where it has answered nil
+// and the answer has not yet gone back to the TUI (launchStarted): held is
+// closed when the first gets there, and release lets each go — the test's
+// call, or its end's.
+func holdStarted(t *testing.T) (held <-chan struct{}, release func()) {
+	t.Helper()
+	h, r := make(chan struct{}), make(chan struct{})
+	var heldOnce, releaseOnce sync.Once
+	release = func() { releaseOnce.Do(func() { close(r) }) }
+	prev := launchStarted
+	launchStarted = func() {
+		heldOnce.Do(func() { close(h) })
+		<-r
+	}
+	t.Cleanup(func() {
+		release()
+		launchStarted = prev
+	})
+	return h, release
+}
+
+// TestAQuitBeforeTheTUIHeardItsStartStopsTheHost (astra r7-c4 1, X27), the
+// real TUI in a pty: the host's start has answered — the launched backend's
+// Start returned nil — and the TUI has not heard it: the answer, its
+// startedMsg, is held there (launchStarted) while a SIGTERM arrives or the
+// terminal hangs up, and the program quits on that first. The session never
+// came up in the TUI, so the host this launch spawned is stopped, and gone
+// before runTUI returns; the answer, let go once the program is over,
+// acknowledges nothing.
+func TestAQuitBeforeTheTUIHeardItsStartStopsTheHost(t *testing.T) {
+	for _, sig := range []syscall.Signal{syscall.SIGTERM, syscall.SIGHUP} {
+		t.Run(sig.String(), func(t *testing.T) {
+			env, ws, cmds := launchHome(t, nil)
+			t.Setenv("CRAZE_FAKE_SCRIPT", "echo")
+			held, release := holdStarted(t)
+			r := runInPTY(t, launchFlags(t, ws))
+			r.see(t, " craze ─")
+			select {
+			case <-held:
+			case <-time.After(serveStep):
+				t.Fatal("the host's start never answered")
+			}
+			if e := onlyHost(t, env); e.CrazeSessionID == "" {
+				t.Fatalf("the premise: the host serves no session: %+v", e)
+			}
+			if err := syscall.Kill(os.Getpid(), sig); err != nil {
+				t.Fatal(err)
+			}
+			select {
+			case err := <-r.done:
+				if err != nil {
+					t.Fatalf("runTUI after %v: %v", sig, err)
+				}
+			case <-time.After(serveStep):
+				t.Fatalf("craze did not quit after %v", sig)
+			}
+			// No wait: finish stopped the host (hostRef.abandon) before
+			// runTUI returned.
+			if pid := cmds.pids()[0]; processAlive(pid) {
+				t.Fatalf("after %v the host %d the TUI never saw come up is still there (%s)", sig, pid, procState(pid))
+			}
+			assertNoHosts(t, env)
+			release()
+		})
+	}
+}
+
+// TestAHostThatCannotBindIsAStartFailure (astra r7-c4 2, X24): a host that
+// cannot come up — here, one whose control socket cannot bind, under an
+// unusable CRAZE_RUNTIME_DIR — is a start failure wherever the spawn was
+// asked for: Init's for a provider known, and a choice on the provider picker
+// or the resume picker. Its words are the host's reason, its log and the
+// opt-out that runs the session inside craze (which binds no socket to
+// start); it is no *tui.Refusal, and no picker comes back for it — choosing
+// again would not change it. The host has gone, and its log says why.
+func TestAHostThatCannotBindIsAStartFailure(t *testing.T) {
+	for _, from := range []string{"a known provider", "the provider picker", "the resume picker"} {
+		t.Run(from, func(t *testing.T) {
+			env, ws, cmds := launchHome(t, nil)
+			t.Setenv("CRAZE_FAKE_SCRIPT", "echo")
+			const id = "0199aaaa-bbbb-7ccc-8ddd-0000000000d6"
+			seedIndexRow(t, sessions.Row{SessionID: "bind-1", Provider: "cursor", CWD: absDir(ws), CrazeID: id, UpdatedAt: time.Now()})
+			t.Setenv("CRAZE_RUNTIME_DIR", unusableRuntimeDir(t))
+			var spawnErr error
+			var view string
+			fakeRun(t, func(cfg tui.Config) (tui.Result, error) {
+				newB, loadB := cfg.NewBackend, cfg.LoadBackend
+				cfg.NewBackend = func(p agent.Provider, explicit bool) (backend.Backend, error) {
+					b, err := newB(p, explicit)
+					spawnErr = err
+					return b, err
+				}
+				cfg.LoadBackend = func(p agent.Provider, row sessions.Row) (backend.Backend, error) {
+					b, err := loadB(p, row)
+					spawnErr = err
+					return b, err
+				}
+				var m tea.Model = tui.New(cfg)
+				// Wide enough that the failure's row is not wrapped.
+				m, _ = m.Update(tea.WindowSizeMsg{Width: 400, Height: 30})
+				cmd := m.Init()
+				if from != "a known provider" {
+					if cmd != nil {
+						t.Fatal("the premise: a picker is up, and Init spawns nothing")
+					}
+					m, cmd = m.Update(enterKey)
+				}
+				m = feed(m, runCmd(t, cmd, serveStep))
+				view = ansi.Strip(m.View())
+				return tui.Result{StartErr: spawnErr}, spawnErr
+			})
+			argv := []string{"--workspace", ws, "--agent-bin", fakeAgentPath(t)}
+			switch from {
+			case "a known provider":
+				argv = append(argv, "--provider", "cursor")
+			case "the resume picker":
+				argv = append(argv, "--resume")
+			}
+			cmd, f := parseTUIFlags(t, argv...)
+			err := runTUI(cmd, f, hostEnv{})
+			var refused *tui.Refusal
+			switch {
+			case spawnErr == nil:
+				t.Fatal("a host that could not bind answered a backend")
+			case errors.As(spawnErr, &refused):
+				t.Fatalf("a host that could not bind is a refusal of the choice: %v", spawnErr)
+			case err == nil || err.Error() != spawnErr.Error():
+				t.Fatalf("runTUI: %v, want the start failure %v", err, spawnErr)
+			}
+			logs := hostLogs(t, env)
+			msg := spawnErr.Error()
+			switch {
+			case len(logs) != 1:
+				t.Fatalf("host logs %q, want the one host's", logs)
+			case !strings.HasPrefix(msg, "craze: the session host could not start: the control socket: "),
+				!strings.Contains(msg, "; its log: "+logs[0]+";"),
+				!strings.HasSuffix(msg, "; CRAZE_DETACH=0 runs sessions inside craze instead"):
+				t.Fatalf("the failure %q", msg)
+			case !strings.Contains(view, "CRAZE_DETACH=0 runs sessions inside craze instead"):
+				t.Fatalf("the start failure is not on screen:\n%s", view)
+			case strings.Contains(view, "enter starts") || strings.Contains(view, "enter loads"):
+				t.Fatalf("a picker came back for a host that could not come up:\n%s", view)
+			}
+			if code := exitOf(err); code != 1 {
+				t.Fatalf("exit %d, want 1", code)
+			}
+			waitLog(t, logs[0], "craze serve: the control socket: ")
+			waitReaped(t, cmds.pids()[0])
+			assertNoHosts(t, env)
+		})
+	}
+}
+
+// exitOf is the exit status err makes (diagnose).
+func exitOf(err error) int {
+	_, code := diagnose(nil, err)
+	return code
+}
+
+// TestAResumeChoiceIsHeldToItsFlagsByItsHost (astra r7-c4 3, X25): under
+// --agent-bin, which a native session cannot take, the launch's resume picker
+// does not refuse a native row itself — its Config carries no refusal to ask
+// — and Enter spawns a load of it; the host holds the row to the flags only
+// after its claim, as --continue's does:
+//   - held: a session another craze holds (a craze of this process, which has
+//     claimed it and serves it only once the rendezvous is looking, so the
+//     launch's look finds no host serving it) is attached to — the host is
+//     refused held, the flags go unasked — naming --agent-bin as ignored;
+//   - free: nobody holds it, and the host that claims it refuses --agent-bin:
+//     a refusal of the choice, which the picker shows as its error row, the
+//     picker up again; the claim is given back and nothing is left.
+func TestAResumeChoiceIsHeldToItsFlagsByItsHost(t *testing.T) {
+	const binRefusal = "--agent-bin cannot be used with provider native, which runs inside craze"
+	for _, held := range []bool{true, false} {
+		name := "free"
+		if held {
+			name = "held"
+		}
+		t.Run(name, func(t *testing.T) {
+			env, ws, cmds := launchHome(t, nil)
+			id := "0199aaaa-bbbb-7ccc-8ddd-0000000000d7"
+			if held {
+				id = "0199aaaa-bbbb-7ccc-8ddd-0000000000d8"
+			}
+			seedIndexRow(t, sessions.Row{SessionID: "native-1", Provider: "native", CWD: absDir(ws), CrazeID: id, UpdatedAt: time.Now()})
+			var holderID string
+			if held {
+				var rh *runHost
+				rh, holderID = servingHost(t, env, io.Discard)
+				if _, err := rh.claims.claimSession(id); err != nil {
+					t.Fatalf("the holder's claim: %v", err)
+				}
+				if _, ok := hostServing(env, id); ok {
+					t.Fatal("the premise: a host serves the session before the rendezvous looks")
+				}
+				eng := nativeStubEngine(t, id)
+				polled := pollSignal(t)
+				go func() {
+					select {
+					case <-polled:
+						rh.onEngine(eng)
+						_ = eng.Start(context.Background())
+					case <-time.After(serveStep):
+					}
+				}()
+			}
+			stderr := captureStderr(t)
+			var got backend.Backend
+			var gotErr error
+			var view string
+			fakeRun(t, func(cfg tui.Config) (tui.Result, error) {
+				if cfg.RefuseLoad != nil {
+					t.Error("the launch's resume picker is handed the flags to refuse a row with")
+				}
+				load := cfg.LoadBackend
+				cfg.LoadBackend = func(p agent.Provider, row sessions.Row) (backend.Backend, error) {
+					got, gotErr = load(p, row)
+					return got, gotErr
+				}
+				var m tea.Model = tui.New(cfg)
+				m, _ = m.Update(tea.WindowSizeMsg{Width: 200, Height: 30})
+				m, cmd := m.Update(enterKey)
+				if cmd == nil {
+					t.Fatal("Enter on the native row under --agent-bin spawned nothing")
+				}
+				msgs := runCmd(t, cmd, serveStep)
+				if held {
+					if got != nil {
+						started(t, got)
+						if gotID := got.Info().CrazeSessionID; gotID != id {
+							t.Errorf("attached to session %q, want %s", gotID, id)
+						}
+						_ = got.Close()
+					}
+					return tui.Result{}, nil
+				}
+				m = feed(m, msgs)
+				view = ansi.Strip(m.View())
+				return tui.Result{}, nil
+			})
+			cmd, f := parseTUIFlags(t, "--resume", "--workspace", ws, "--agent-bin", fakeAgentPath(t))
+			if err := runTUI(cmd, f, hostEnv{}); err != nil {
+				t.Fatalf("runTUI: %v", err)
+			}
+			if cmds.count() != 1 {
+				t.Fatalf("%d hosts spawned, want the row's", cmds.count())
+			}
+			waitReaped(t, cmds.pids()[0])
+			if held {
+				lb, ok := got.(*launchedBackend)
+				switch {
+				case gotErr != nil:
+					t.Fatalf("a held native row under --agent-bin: %v", gotErr)
+				case !ok || !lb.ref.held || lb.ref.entry.HostID != holderID:
+					t.Fatalf("the backend %T %+v, want the holder %s's", got, lb, holderID)
+				case !strings.Contains(stderr(), "; attached to it (ignored: --agent-bin)"):
+					t.Fatalf("stderr %q, want --agent-bin named as ignored", stderr())
+				}
+				return
+			}
+			// The picker's error row is the refusal less "craze: ", wrapped at
+			// the dialog's width: its first words are on one line.
+			var refused *tui.Refusal
+			switch {
+			case got != nil || !errors.As(gotErr, &refused) || gotErr.Error() != "craze: "+binRefusal:
+				t.Fatalf("a free native row under --agent-bin: %T %v, want the host's refusal", got, gotErr)
+			case !strings.Contains(view, "--agent-bin cannot be used with provider native") || !strings.Contains(view, "enter loads"):
+				t.Fatalf("the resume picker is not back with the refusal:\n%s", view)
+			case strings.Contains(view, "CRAZE_DETACH=0"):
+				t.Fatalf("a refusal of the choice names the opt-out:\n%s", view)
+			}
+			assertNoHosts(t, env)
+			if _, err := anotherCraze(t).claimSession(id); err != nil {
+				t.Fatalf("the refusing host kept its claim: %v", err)
+			}
+		})
+	}
+}
+
+// nativeStubEngine is an engine over a Stub whose provider is native, for the
+// session id: a native session another craze of this process holds.
+func nativeStubEngine(t *testing.T, id string) *engine.Engine {
+	t.Helper()
+	s := tui.NewStubNoPrimary()
+	s.SetProvider(agent.NativeProvider())
+	eng, err := engine.New(s, engine.Options{CrazeSessionID: id})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = eng.Close() })
+	return eng
+}
+
+// TestAReattachSpawnsNothing (plan 030 C4r): --continue, and a --resume
+// choice, of a session a running host serves attach to that host directly —
+// no host spawned, no host log written, nothing claimed — ignoring the flags
+// of a new session as a held answer does, and saying so. The host goes on
+// serving after the TUI's quit, a view close.
+func TestAReattachSpawnsNothing(t *testing.T) {
+	for _, via := range []string{"--continue", "--resume"} {
+		t.Run(via, func(t *testing.T) {
+			env, ws, cmds := launchHome(t, nil)
+			t.Setenv("CRAZE_FAKE_SCRIPT", "load")
+			const id = "0199aaaa-bbbb-7ccc-8ddd-0000000000d9"
+			seedIndexRow(t, sessions.Row{SessionID: "re-1", Provider: "cursor", CWD: absDir(ws), CrazeID: id, UpdatedAt: time.Now()})
+			holder, err := spawnNow(t, spawnOptions{env: env, flags: tuiFlags{force: true, agentBin: fakeAgentPath(t)}, load: id})
+			if err != nil {
+				t.Fatalf("the host's spawn: %v", err)
+			}
+			logs := hostLogs(t, env)
+			stderr := captureStderr(t)
+			fakeRun(t, func(cfg tui.Config) (tui.Result, error) {
+				row := cfg.Continue
+				if row == nil && len(cfg.Resume) > 0 {
+					row = &cfg.Resume[0]
+				}
+				if row == nil || row.CrazeID != id {
+					t.Fatalf("the row to load: %+v", row)
+				}
+				b, err := cfg.LoadBackend(cfg.Provider, *row)
+				if err != nil {
+					t.Fatalf("LoadBackend: %v", err)
+				}
+				lb, ok := b.(*launchedBackend)
+				if !ok || !lb.ref.held || lb.ref.child != nil || lb.ref.entry.HostID != holder.entry.HostID {
+					t.Fatalf("the backend %T %+v, want the host %s serving the session", b, lb, holder.entry.HostID)
+				}
+				started(t, b)
+				if got := b.Info().CrazeSessionID; got != id {
+					t.Fatalf("attached to session %q, want %s", got, id)
+				}
+				_ = b.Close()
+				return tui.Result{}, nil
+			})
+			f := launchFlags(t, ws)
+			f.model = "m-ignored"
+			f.cont, f.resume = via == "--continue", via == "--resume"
+			if err := runTUI(nil, f, hostEnv{}); err != nil {
+				t.Fatalf("runTUI: %v", err)
+			}
+			switch after := hostLogs(t, env); {
+			case cmds.count() != 1:
+				t.Fatalf("%d hosts spawned, want only the one serving the session", cmds.count())
+			case !slices.Equal(after, logs):
+				t.Fatalf("host logs %q after the reattach, were %q", after, logs)
+			case holder.child.exited():
+				t.Fatal("the TUI's quit ended the host")
+			case !strings.Contains(stderr(), "; attached to it (ignored: --model, --agent-bin)"):
+				t.Fatalf("stderr %q, want the ignored flags named", stderr())
+			}
+			if locks, _ := filepath.Glob(filepath.Join(env.Home, ".cache", "craze", "locks", "*.lock")); len(locks) != 1 {
+				t.Fatalf("locks %q, want the host's claim alone", locks)
+			}
+			stopEntry(t, onlyHost(t, env), holder.child.pid)
+		})
+	}
+}
