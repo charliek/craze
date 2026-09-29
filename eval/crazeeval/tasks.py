@@ -7,6 +7,7 @@ directory is ever reachable from inside a sandbox.
 
 from __future__ import annotations
 
+import re
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -31,6 +32,7 @@ CHECK_TYPES = {
 
 
 TEST_RUNNERS = ("pytest", "go")
+FULL_SHA = re.compile(r"^[0-9a-f]{40}$")
 
 
 class TaskError(ValueError):
@@ -57,10 +59,20 @@ class Task:
     harnesses: list[str] | None = None
     name: str = ""  # a short slug (e.g. explain-prompt-prefix) for reports
     false_claims: list[str] = field(default_factory=list)  # claims the judge must treat as false
+    # A craze-repo task's commit: ``[repo] commit`` when the task pins one, else
+    # paths.CRAZE_TEMPLATE_COMMIT (resolved at load). None for a fixture task.
+    commit: str | None = None
 
     @property
     def repo_name(self) -> str:
         return "craze" if self.repo_kind == "craze" else (self.fixture or "repo")
+
+    @property
+    def craze_commit(self) -> str | None:
+        """The craze commit this task materialises (None for a fixture task)."""
+        if self.repo_kind != "craze":
+            return None
+        return self.commit or paths.CRAZE_TEMPLATE_COMMIT
 
     @property
     def is_plan(self) -> bool:
@@ -98,6 +110,16 @@ def load_task(d: Path) -> Task:
         if not fixture or not (paths.FIXTURES_DIR / fixture).is_dir():
             raise TaskError(f"{tid}: fixture {fixture!r} not found under eval/fixtures")
     setup = repo.get("setup_patch")
+    commit = repo.get("commit")
+    if commit is not None:
+        # A full sha only: it keys the template cache and is what every isolation check
+        # verifies against, so an abbreviation or a ref name (which could move) is refused.
+        if kind != "craze":
+            raise TaskError(f"{tid}: repo.commit applies to a craze-repo task only")
+        if not isinstance(commit, str) or not FULL_SHA.match(commit):
+            raise TaskError(f"{tid}: repo.commit must be a full 40-character lowercase sha, got {commit!r}")
+    elif kind == "craze":
+        commit = paths.CRAZE_TEMPLATE_COMMIT
     checks = list(doc.get("checks") or [])
     seen_names: set[str] = set()
     for c in checks:
@@ -149,6 +171,7 @@ def load_task(d: Path) -> Task:
         harnesses=doc.get("harnesses"),
         name=str(doc.get("name") or ""),
         false_claims=list(doc.get("false_claims") or []),
+        commit=commit,
     )
     if setup:
         t.setup_patch = t.testdata(setup)

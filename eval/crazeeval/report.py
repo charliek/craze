@@ -12,7 +12,13 @@ verdict files, and writes a Markdown report and its JSON:
 - verdicts against the log length ratio of the two answers (length bias);
 - task-level verdict tables;
 - ``--compare``: a craze build against an earlier one (a lever's before/after,
-  pooled and per model).
+  pooled and per model);
+- ``--losses``: "Where craze lost" -- every final verdict a craze run lost, with the
+  rubric items it did not meet against the other side's and the judge's reasons.
+
+**Only verdicts that still stand count** (``current_verdicts``, plan 029 W2): a record's
+``task_judge_hash`` must equal its task's current one -- or, for a record from before
+per-task hashes, its global ``judge_hash`` today's. The report prints the hashes it used.
 
 **Held-out tasks stay sealed** unless ``--unseal``: nothing under a batch's
 ``heldout/`` (runs or verdicts) is read, and the success bar is evaluated on the dev
@@ -38,6 +44,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterator
 
+from crazeeval.judge import judge_hash, task_judge_hashes, verdict_current
 from crazeeval.tasks import Task
 
 Z90 = 1.6448536269514722
@@ -173,16 +180,47 @@ def verdict_files(paths_: list[Path], unseal: bool = False) -> list[Path]:
     return out
 
 
+def read_verdicts(paths_: list[Path], unseal: bool = False) -> list[dict]:
+    """Every pair record of the verdict files, in file order (held-out ones only when
+    unsealed)."""
+    return [v for f in verdict_files(paths_, unseal) for v in read_jsonl(f)
+            if unseal or v.get("split") != "heldout"]
+
+
+def dedupe_verdicts(records: list[dict]) -> list[dict]:
+    """A later record for the same pair, judge and mode replaces an earlier one."""
+    by: dict[tuple, dict] = {}
+    for v in records:
+        by[(v.get("pair"), v.get("judge_model"), v.get("both_orders"))] = v
+    return list(by.values())
+
+
 def load_verdicts(paths_: list[Path], unseal: bool = False) -> list[dict]:
     """Pair records (one line per judged pair). A later line for the same pair, judge
     and mode replaces an earlier one."""
-    by: dict[tuple, dict] = {}
-    for f in verdict_files(paths_, unseal):
-        for v in read_jsonl(f):
-            if not unseal and v.get("split") == "heldout":
-                continue
-            by[(v.get("pair"), v.get("judge_model"), v.get("both_orders"))] = v
-    return list(by.values())
+    return dedupe_verdicts(read_verdicts(paths_, unseal))
+
+
+def load_current_verdicts(paths_: list[Path], tasks: dict[str, Task], unseal: bool = False
+                          ) -> tuple[list[dict], list[dict]]:
+    """The records that still stand (current_verdicts), deduplicated as load_verdicts
+    does -- the judge-hash test first, so a newer record made under a since-reverted
+    rubric never hides an older one that stands -- and the stale records set aside."""
+    current, stale = current_verdicts(read_verdicts(paths_, unseal), tasks)
+    return dedupe_verdicts(current), stale
+
+
+def current_verdicts(verdicts: list[dict], tasks: dict[str, Task]) -> tuple[list[dict], list[dict]]:
+    """The verdict records that still stand under today's judge, and the stale rest
+    (plan 029 W2): a record stands when its ``task_judge_hash`` equals its task's current
+    one -- or, for an older record without one, when its global ``judge_hash`` equals
+    today's. So adding or changing one task never invalidates another task's verdicts;
+    a record from before per-task hashes stands only while nothing changed."""
+    th, jh = task_judge_hashes(tasks), judge_hash(tasks)
+    current, stale = [], []
+    for v in verdicts:
+        (current if verdict_current(v, th, jh) else stale).append(v)
+    return current, stale
 
 
 def run_id(r: dict) -> str | None:
@@ -208,13 +246,18 @@ def verdict_rank(v: dict) -> int:
     return 1 if jm == "sol" else 0
 
 
+def pair_key(v: dict) -> tuple[str, ...]:
+    """The judged pair of runs a verdict is about, in either orientation."""
+    return tuple(sorted((str(v.get("x_run_id") or v.get("x")), str(v.get("y_run_id") or v.get("y")))))
+
+
 def final_verdicts(verdicts: list[dict]) -> list[dict]:
     """One verdict per judged pair of runs: the highest-ranked, the later on a tie. A
     final verdict that failed stays a missing verdict (it is re-judged, never replaced by
     a lesser one)."""
     best: dict[tuple, tuple[int, int, dict]] = {}
     for i, v in enumerate(verdicts):
-        key = tuple(sorted((str(v.get("x_run_id") or v.get("x")), str(v.get("y_run_id") or v.get("y")))))
+        key = pair_key(v)
         cand = (verdict_rank(v), i, v)
         if key not in best or cand[:2] > best[key][:2]:
             best[key] = cand
@@ -502,6 +545,57 @@ def length_bias(verdicts: list[dict], runs: list[dict]) -> dict:
             "rows": [{"pair": v.get("pair"), "log_ratio": round(lr, 4), "x_outcome": o} for lr, o, v in points]}
 
 
+def _not_met(grades: list | None) -> list[dict]:
+    """The rubric items a side did not meet (``missed`` or ``false``), in item order."""
+    out = [{"item": g.get("item"), "grade": g.get("grade")} for g in grades or []
+           if isinstance(g, dict) and g.get("grade") != "met"]
+    return sorted(out, key=lambda g: (g["item"] is None, g["item"] or 0))
+
+
+def craze_losses(verdicts: list[dict], native: str = NATIVE) -> list[dict]:
+    """Every final verdict in which a craze run lost to another harness's run, craze on
+    either side (plan 029 W2, the tuning signal behind L7): the task, model, split, the
+    craze run, the scores, and per judged order the rubric items each side did not meet
+    and the judge's reasons (``orders[i].verdict``, already mapped to x/y)."""
+    out = []
+    for v in verdicts:
+        res = v.get("result")
+        hx, hy = v.get("hx"), v.get("hy")
+        if not res or (hx == native) == (hy == native):
+            continue
+        me, them = ("x", "y") if hx == native else ("y", "x")
+        if res.get("winner") != them:
+            continue
+        orders = []
+        for o in v.get("orders") or []:
+            ov = o.get("verdict")
+            if not isinstance(ov, dict):
+                continue
+            w = ov.get("winner")
+            orders.append({
+                "judge_model": o.get("judge_model"),
+                "craze_shown_as": None if o.get("x_is_a") is None else ("A" if (o["x_is_a"] == (me == "x")) else "B"),
+                "winner": "tie" if w == "tie" else ("craze" if w == me else "other"),
+                "confidence": ov.get("confidence"),
+                "craze_score": ov.get(f"score_{me}"),
+                "other_score": ov.get(f"score_{them}"),
+                "craze_not_met": _not_met(ov.get(f"rubric_{me}")),
+                "other_not_met": _not_met(ov.get(f"rubric_{them}")),
+                "reasons": ov.get("reasons"),
+            })
+        out.append({
+            "task": v.get("task"), "model": v.get("model"), "split": v.get("split"),
+            "craze_run_key": v.get(me), "craze_run_id": v.get(f"{me}_run_id"),
+            "other_harness": hx if me == "y" else hy, "other_run_key": v.get(them),
+            "judge_model": v.get("judge_model"), "both_orders": v.get("both_orders"),
+            "escalated": bool(v.get("escalated_from")), "confidence": res.get("confidence"),
+            "craze_score": res.get(f"score_{me}"), "other_score": res.get(f"score_{them}"),
+            "orders": orders,
+        })
+    return sorted(out, key=lambda r: (str(r["split"]), str(r["task"]), str(r["model"]), str(r["craze_run_key"]),
+                                      str(r["other_harness"])))
+
+
 def task_table(verdicts: list[dict], model: str, native: str = NATIVE) -> dict[str, dict[str, str]]:
     """task -> "<native> vs <other>" -> W/L/T (from native's side; several reps joined)."""
     table: dict[str, dict[str, list[str]]] = defaultdict(lambda: defaultdict(list))
@@ -590,13 +684,16 @@ class ReportInput:
     judge_hashes: list[str] = field(default_factory=list)
     baseline_batch: Path | None = None
     baseline_runs: list[dict] | None = None  # default: ``runs``
+    stale_verdicts: int = 0  # records current_verdicts set aside before ``verdicts``
+    judge_hash_now: str | None = None
+    losses: bool = False  # add "Where craze lost"
 
 
 def build(inp: ReportInput) -> dict:
     splits = {t.id: t.split for t in inp.tasks.values() if t.split in ("dev", "heldout")}
     counts = objective_counts(inp.runs, splits)
     models = sorted({r.get("model") for r in inp.runs if r.get("model")})
-    loaded = len(inp.verdicts)
+    loaded = len(inp.verdicts) + inp.stale_verdicts
     bound, unbound = bind_verdicts(inp.verdicts, inp.runs)
     verdicts = final_verdicts(bound)
     best = fixed_best_open_harness(inp.baseline_batch, inp.baseline_runs if inp.baseline_runs is not None else inp.runs,
@@ -615,9 +712,13 @@ def build(inp: ReportInput) -> dict:
         "batches": inp.batches,
         "verdict_sources": inp.verdict_sources,
         "judge_hashes": sorted(set(inp.judge_hashes)),
+        "judge_hash_now": inp.judge_hash_now,
+        # The per-task judge hashes the counted verdicts carry (records from before them
+        # carry none: they stood on the global hash).
+        "task_judge_hashes": {t: sorted(hs) for t, hs in sorted(_task_hashes(verdicts).items())},
         "baseline_batch": str(inp.baseline_batch) if inp.baseline_batch else None,
-        "verdicts_used": {"loaded": loaded, "bound_to_scored_runs": len(bound), "unbound": unbound,
-                          "final": len(verdicts)},
+        "verdicts_used": {"loaded": loaded, "stale": inp.stale_verdicts, "bound_to_scored_runs": len(bound),
+                          "unbound": unbound, "final": len(verdicts)},
         "models": models,
         "harnesses": harnesses,
         "objective": {f"{m}/{h}": c for (m, h), c in sorted(counts.items())},
@@ -631,6 +732,19 @@ def build(inp: ReportInput) -> dict:
     }
     if inp.compare_runs is not None:
         out["compare"] = compare(inp.runs, inp.compare_runs, inp.compare_verdicts or [], splits)
+    if inp.losses:
+        out["losses"] = craze_losses(verdicts)
+        # The rubric text of the tasks with a loss, to name the items craze missed.
+        out["rubrics"] = {t: list(inp.tasks[t].rubric) for t in sorted({x["task"] for x in out["losses"]})
+                          if t in inp.tasks}
+    return out
+
+
+def _task_hashes(verdicts: list[dict]) -> dict[str, set[str]]:
+    out: dict[str, set[str]] = defaultdict(set)
+    for v in verdicts:
+        if v.get("task_judge_hash"):
+            out[v.get("task")].add(v["task_judge_hash"])
     return out
 
 
@@ -649,9 +763,12 @@ def render_markdown(rep: dict) -> str:
     vu = rep.get("verdicts_used") or {}
     L += [f"Batches: {', '.join(rep['batches'])}", f"Baseline (fixes the best open harness): {rep.get('baseline_batch')}",
           f"Verdicts: {', '.join(rep['verdict_sources']) or 'none'} -- {vu.get('loaded', 0)} loaded, "
+          f"{vu.get('stale', 0)} set aside (judged under another judge hash), "
           f"{vu.get('bound_to_scored_runs', 0)} bound to the scored runs, {vu.get('final', 0)} final pairs "
-          f"({vu.get('unbound', 0)} unbound: stale or on unscored runs)",
-          f"Judge hash(es): {', '.join(rep['judge_hashes']) or '–'}", ""]
+          f"({vu.get('unbound', 0)} unbound: on replaced or unscored runs)",
+          f"Judge hash(es): {', '.join(rep['judge_hashes']) or '–'}"
+          + (f" (today's: {rep['judge_hash_now']})" if rep.get("judge_hash_now") else ""),
+          f"Per-task judge hashes: {_task_hash_line(rep.get('task_judge_hashes') or {})}", ""]
     L += ["## Objective pass counts", "", "| model | harness | dev | held-out | all |", "|---|---|---|---|---|"]
     for k, c in rep["objective"].items():
         m, h = k.rsplit("/", 1)  # model keys may hold a "/" (fireworks/kimi-k3); harness names never do
@@ -715,7 +832,48 @@ def render_markdown(rep: dict) -> str:
             L.append(f"- {m}: win rate {_fmt(p['win_rate_new_vs_old']['rate'])} (n={p['win_rate_new_vs_old']['n']}); "
                      f"dev objective {_fmt(p['objective_new']['dev'])} vs {_fmt(p['objective_old']['dev'])}"
                      + (" — **objective drop**" if p["objective_drop"] else ""))
+    if "losses" in rep:
+        L += [""] + render_losses(rep["losses"], rep.get("rubrics") or {})
     return "\n".join(L) + "\n"
+
+
+def _task_hash_line(th: dict[str, list[str]]) -> str:
+    if not th:
+        return "– (no counted verdict carries one)"
+    return "; ".join(f"{t} {','.join(h[:12] for h in hs)}" for t, hs in th.items())
+
+
+def _grades(items: list[dict]) -> str:
+    return ", ".join(f"{g['item']} ({g['grade']})" for g in items) or "none"
+
+
+def render_losses(losses: list[dict], rubrics: dict[str, list[str]]) -> list[str]:
+    """The "Where craze lost" section: each lost pair, the rubric items craze did not
+    meet against the other side's, and the judge's reasons per order."""
+    L = ["## Where craze lost", "",
+         f"{len(losses)} final verdict(s) in which a craze run lost (scores are craze's vs the other side's)." if losses
+         else "No final verdict in which a craze run lost.", ""]
+    for x in losses:
+        L.append(f"### {x['task']} · {x['model']} · {x['split']} — {x['craze_run_key']} vs {x['other_harness']}")
+        L.append("")
+        L.append(f"Scores {_fmt(x['craze_score'])} vs {_fmt(x['other_score'])}; judge {x['judge_model']}"
+                 f"{' (both orders)' if x.get('both_orders') else ''}{' after escalation' if x.get('escalated') else ''}, "
+                 f"confidence {x.get('confidence')}; other run {x['other_run_key']}")
+        rubric = rubrics.get(x["task"]) or []
+        for i, o in enumerate(x["orders"], 1):
+            L.append(f"- order {i} (craze shown as {o.get('craze_shown_as') or '?'}, {o.get('judge_model')}): "
+                     f"winner {o.get('winner')}, scores {_fmt(o.get('craze_score'))} vs {_fmt(o.get('other_score'))}")
+            L.append(f"  - craze did not meet: {_grades(o['craze_not_met'])}; "
+                     f"{x['other_harness']} did not meet: {_grades(o['other_not_met'])}")
+            theirs = {g["item"] for g in o["other_not_met"]}
+            for g in o["craze_not_met"]:
+                if g["item"] not in theirs and isinstance(g["item"], int) and 0 < g["item"] <= len(rubric):
+                    text = " ".join(rubric[g["item"] - 1].split())
+                    L.append(f"  - only craze {g['grade']} item {g['item']}: {text[:240]}{'…' if len(text) > 240 else ''}")
+            reasons = " ".join(str(o.get("reasons") or "").split())
+            L.append(f"  - reasons: {reasons or '–'}")
+        L.append("")
+    return L
 
 
 def length_csv(rep: dict) -> str:

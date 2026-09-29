@@ -120,7 +120,7 @@ def check_opencode_ids(models: dict[str, EvalModel], catalog: dict) -> dict:
 
 
 def write_snapshot(snap: dict, models_dev: bytes, root: Path | None = None) -> Path:
-    root = Path(root or paths.DEFAULT_CONFIG_ROOT)
+    root = Path(root or paths.config_root())
     root.mkdir(parents=True, exist_ok=True)
     body = json.dumps(snap, indent=2, sort_keys=True).encode() + b"\n"
     h = hashlib.sha256(body + models_dev).hexdigest()[:10]

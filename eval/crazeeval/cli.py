@@ -1,5 +1,10 @@
-"""``uv run crazeeval <command>``: run, validate, proxy, snapshot-config, probe, keyscan, ledger,
-judge-pair, judge-batch, calibrate, judge-hash, report, rescore, captures."""
+"""``uv run crazeeval [--campaign NAME] <command>``: run, validate, proxy, snapshot-config, probe,
+keyscan, ledger, judge-pair, judge-batch, calibrate, judge-hash, report, rescore, captures,
+archive.
+
+``--campaign NAME`` (before or after the command) selects ``~/.craze-eval/<NAME>``: the
+campaign whose runs, ledger and config snapshots the command uses by default (see
+paths.py for the resolution order when it is not given)."""
 
 from __future__ import annotations
 
@@ -28,7 +33,7 @@ def _opt_path(s: str | None) -> Path | None:
 
 
 def _ledger_path(a) -> Path:
-    return _opt_path(a.ledger) or paths.DEFAULT_LEDGER
+    return _opt_path(a.ledger) or paths.ledger_path()
 
 
 # -- run -------------------------------------------------------------------------------
@@ -94,7 +99,7 @@ def cmd_run(a) -> int:
                   file=sys.stderr)
             return 2
     label = a.label or "batch"
-    out = Path(a.out) if a.out else paths.DEFAULT_RUNS_DIR / f"{label}-{_stamp()}"
+    out = Path(a.out) if a.out else paths.runs_dir() / f"{label}-{_stamp()}"
     caps = {}
     if a.cap_zai is not None:
         caps["zai-coding-plan"] = a.cap_zai
@@ -133,6 +138,7 @@ def cmd_run(a) -> int:
         rep_desc = f"rep {a.first_rep}"
     else:
         rep_desc = f"reps {a.first_rep}-{a.first_rep + a.reps - 1}"
+    print(f"campaign {paths.campaign_name()} ({paths.campaign_source()}): {paths.campaign_dir()}")
     print(f"batch {label}: {len(harnesses)} harness(es) x {len(models)} model(s) x {len(tasks)} task(s) x {rep_desc} -> {out}")
     from crazeeval.batch import BatchDirError
 
@@ -194,7 +200,7 @@ def cmd_proxy(a) -> int:
         return 2
     providers, keyring = keymod.load_providers()
     prices = load_prices()
-    out = Path(a.out) if a.out else paths.DEFAULT_RUNS_DIR / f"proxy-{a.run_id}-{_stamp()}"
+    out = Path(a.out) if a.out else paths.runs_dir() / f"proxy-{a.run_id}-{_stamp()}"
     out.mkdir(parents=True, exist_ok=True)
     ledger = Ledger(_ledger_path(a), cap=a.budget_cap, run_cap=a.run_cap,
                     scrub=keyring.scrub)
@@ -318,7 +324,7 @@ def cmd_probe(a) -> int:
     snap = load_snapshot(_opt_path(a.config))
     em = load_models()[a.model]
     _, keyring = keymod.load_providers()
-    out = Path(a.out) if a.out else paths.DEFAULT_RUNS_DIR / f"probe-{_stamp()}"
+    out = Path(a.out) if a.out else paths.runs_dir() / f"probe-{_stamp()}"
     craze_bin = Path(a.craze_bin).resolve() if a.craze_bin else None
     r = asyncio.run(run_probe(out, Toolchains.resolve(), keyring, snap, em, craze_bin))
     inside = r.get("inside") or {}
@@ -367,15 +373,33 @@ def _seed(a) -> int:
 
 def cmd_judge_hash(a) -> int:
     from crazeeval.judge import judge_hash
+    from crazeeval.judging import StampError, stamp_task_hashes
     from crazeeval.tasks import load_tasks
 
-    print(judge_hash(load_tasks()))
-    return 0
+    if a.dry_run and not a.stamp:
+        print("--dry-run goes with --stamp", file=sys.stderr)
+        return 2
+    tasks = load_tasks()
+    print(judge_hash(tasks))
+    rc = 0
+    for f in a.stamp or []:
+        try:
+            c = stamp_task_hashes(Path(f), tasks, dry_run=a.dry_run)
+        except (OSError, StampError) as e:
+            print(f"{f}: not stamped: {e}", file=sys.stderr)
+            rc = 1
+            continue
+        print(f"{f}: {c['records']} records; {'would stamp' if a.dry_run else 'stamped'} {c['stamped']}; "
+              f"already stamped {c['already']}; left alone: another global hash {c['other_hash']}, no global hash "
+              f"{c['no_hash']}, task changed or unknown {c['task_changed_or_unknown']}; "
+              f"unparsed lines {c['unparsed']}"
+              + (f"; original kept as {c['original_kept']}" if c["original_kept"] else ""))
+    return rc
 
 
 def cmd_judge_pair(a) -> int:
     """Judge two runs against each other (the judge smoke)."""
-    from crazeeval.judge import Judge, Pair, judge_hash, judge_pair
+    from crazeeval.judge import Judge, Pair, judge_hash, judge_pair, task_judge_hash
     from crazeeval.packet import load_side
     from crazeeval.tasks import load_tasks
 
@@ -393,6 +417,7 @@ def cmd_judge_pair(a) -> int:
     t0 = time.monotonic()
     rec = asyncio.run(judge_pair(Judge(parallel=a.parallel), pair, a.judge, _seed(a), a.both_orders))
     rec["judge_hash"] = judge_hash(tasks)
+    rec["task_judge_hash"] = task_judge_hash(task)
     rec["wall_s_total"] = round(time.monotonic() - t0, 1)
     text = json.dumps(rec, indent=2, default=str)
     if a.out:
@@ -464,26 +489,33 @@ def cmd_calibrate(a) -> int:
 
 def cmd_report(a) -> int:
     from crazeeval import report as rp
+    from crazeeval.judge import judge_hash
     from crazeeval.tasks import load_tasks
 
     tasks = load_tasks()
     batches = [Path(b) for b in a.batch]
     vfiles = rp.verdict_files([Path(v) for v in (a.verdicts or [])] or [b / "judging" for b in batches], a.unseal)
-    verdicts = rp.load_verdicts(vfiles, a.unseal)
+    # Only verdicts that still stand under today's judge hashes count (plan 029 W2).
+    verdicts, stale = rp.load_current_verdicts(vfiles, tasks, a.unseal)
     # The best open harness is fixed from the baseline batch alone (§3.1.8): the first
     # --batch unless --baseline names it.
     baseline = Path(a.baseline) if a.baseline else batches[0]
     inp = rp.ReportInput(runs=rp.load_runs(batches, a.unseal), verdicts=verdicts, tasks=tasks, unseal=a.unseal,
                          batches=[str(b) for b in batches], verdict_sources=[str(v) for v in vfiles],
                          judge_hashes=[v.get("judge_hash") for v in verdicts if v.get("judge_hash")],
-                         baseline_batch=baseline, baseline_runs=rp.load_runs([baseline], a.unseal))
+                         baseline_batch=baseline, baseline_runs=rp.load_runs([baseline], a.unseal),
+                         stale_verdicts=len(stale), judge_hash_now=judge_hash(tasks), losses=a.losses)
     if a.compare:
         inp.compare_runs = rp.load_runs([Path(a.compare)], a.unseal)
-        inp.compare_verdicts = rp.load_verdicts([Path(v) for v in (a.compare_verdicts or [])], a.unseal)
+        cv, cstale = rp.load_current_verdicts([Path(v) for v in (a.compare_verdicts or [])], tasks, a.unseal)
+        inp.compare_verdicts = cv
+        stale += cstale
     rep = rp.build(inp)
     out = Path(a.out) if a.out else batches[-1] / ("report-unsealed" if a.unseal else "report")
     rp.write(rep, out)
     print(f"report: {out / 'report.md'}")
+    if stale:
+        print(f"  {len(stale)} verdict record(s) set aside: judged under another judge hash")
     for m, sb in rep["success_bar"].items():
         print(f"  {m}: {sb['outcome']} ({sb.get('reason')})")
     return 0
@@ -509,11 +541,67 @@ def cmd_captures(a) -> int:
     return 0
 
 
+def cmd_archive(a) -> int:
+    from crazeeval import archive as arch
+    from crazeeval import keys as keymod
+
+    if a.max_bytes <= 0:
+        print(f"--max-bytes must be positive, got {a.max_bytes}", file=sys.stderr)
+        return 2
+    batches = [Path(b) for b in a.batch]
+    for b in batches:
+        if not (b / "batch.json").is_file():
+            print(f"{b}: no batch.json (not a batch directory)", file=sys.stderr)
+            return 2
+    # The key scan needs the keys it scans for: the batch runner's key ring.
+    try:
+        _, keyring = keymod.load_providers()
+    except (OSError, ValueError) as e:
+        print(f"cannot load the provider keys for the archive's key scan: {type(e).__name__}", file=sys.stderr)
+        return 2
+    if not keyring.secrets():
+        print("no provider key loaded: the archive's key scan cannot run", file=sys.stderr)
+        return 2
+    try:
+        s = arch.archive(batches, Path(a.out), keyring, unseal=a.unseal, max_bytes=a.max_bytes,
+                         verdict_paths=[Path(v) for v in a.verdicts] if a.verdicts else None)
+    except arch.ArchiveError as e:
+        print(str(e), file=sys.stderr)
+        return 2
+    print(s["reconciliation"]["line"])
+    sc = s["scan"]
+    print(f"scan: {sc['files_scanned']} files, {sc['keys_checked']} keys checked; files with a key: "
+          f"{sc['files_with_key'] or 'none'}; home-path hits: {sc['home_path_hits'] or 'none'}")
+    print(f"size: {s['total_bytes']} bytes in --out (budget {s['max_bytes']}): "
+          + ", ".join(f"{n} {b}" for n, b in s["files"].items()))
+    print(f"free text: {s['paths_redacted']} absolute path(s) redacted")
+    v = s["verdicts"]
+    if v["final_not_current"] or v["task_judge_hash"]["null"]:
+        print(f"verdicts: {v['final_not_current']} final verdict(s) not current under today's judge hashes; "
+              f"{v['task_judge_hash']['null']} without a task judge hash ({arch.NOTE_UNSTAMPED})")
+    for e in s["errors"]:
+        print(f"FAILED: {e}", file=sys.stderr)
+    print(f"archive: {Path(a.out) / arch.ARCHIVE_FILE}" if s["ok"] else "archive: FAILED (nothing was deleted)")
+    return 0 if s["ok"] else 1
+
+
+CAMPAIGN_HELP = ("the campaign: ~/.craze-eval/NAME holds its runs, ledger and config snapshots (default: "
+                 "$CRAZEEVAL_CAMPAIGN_DIR, else $CRAZEEVAL_PLAN_DIR, else ~/.craze-eval/default)")
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="crazeeval", description="craze native harness evaluation (plan 029)")
+    p.add_argument("--campaign", metavar="NAME", default=None, help=CAMPAIGN_HELP)
+    # Also accepted after the command; SUPPRESS keeps a missing one from overwriting the
+    # value given before it.
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument("--campaign", metavar="NAME", default=argparse.SUPPRESS, help=CAMPAIGN_HELP)
     sub = p.add_subparsers(dest="cmd", required=True)
 
-    r = sub.add_parser("run", help="run a batch of sandboxed harness runs through the proxy")
+    def command(name: str, **kw) -> argparse.ArgumentParser:
+        return sub.add_parser(name, parents=[common], **kw)
+
+    r = command("run", help="run a batch of sandboxed harness runs through the proxy")
     r.add_argument("--harness", help="comma list of craze,gx,opencode,codex (default: all)")
     r.add_argument("--model", help="comma list of eval model keys (default: all)")
     r.add_argument("--tasks", help="comma list of task ids and/or split:<dev|heldout|smoke|all>")
@@ -525,8 +613,8 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("--parallel", type=int, default=4)
     r.add_argument("--cap-zai", type=int, default=None, help="concurrent runs on Z.AI (default 2)")
     r.add_argument("--cap-other", type=int, default=3, help="concurrent runs per other provider (default 3)")
-    r.add_argument("--out", help="batch directory (default: <plan>/eval-runs/<label>-<timestamp>)")
-    r.add_argument("--ledger", help=f"ledger path (default {paths.DEFAULT_LEDGER})")
+    r.add_argument("--out", help="batch directory (default: <campaign>/eval-runs/<label>-<timestamp>)")
+    r.add_argument("--ledger", help="ledger path (default: <campaign>/ledger.jsonl)")
     r.add_argument("--budget-cap", type=float, default=95.0)
     r.add_argument("--run-cap", type=float, default=3.0)
     r.add_argument("--timeout", type=int, default=None, help="per-run timeout in seconds (default: the task's, 20 min)")
@@ -535,13 +623,13 @@ def main(argv: list[str] | None = None) -> int:
                    help="reopen --out (its batch.json must match) and run only what has no final result")
     r.set_defaults(fn=cmd_run)
 
-    v = sub.add_parser("validate", help="run every task's category controls")
+    v = command("validate", help="run every task's category controls")
     v.add_argument("--tasks", help="comma list of task ids and/or split:<name> (default: all)")
     v.add_argument("--keep", help="keep the validation workspaces under this directory")
     v.add_argument("--json", help="also write the report here")
     v.set_defaults(fn=cmd_validate)
 
-    x = sub.add_parser("proxy", help="run the recording proxy standalone (for the live smoke)")
+    x = command("proxy", help="run the recording proxy standalone (for the live smoke)")
     x.add_argument("--port", type=int, default=0)
     x.add_argument("--model", required=True, help="comma list of eval model keys the route allows")
     x.add_argument("--run-id", default="live")
@@ -554,31 +642,36 @@ def main(argv: list[str] | None = None) -> int:
     x.add_argument("--config", help="config snapshot directory (default: CURRENT)")
     x.set_defaults(fn=cmd_proxy)
 
-    s = sub.add_parser("snapshot-config", help="copy the target definitions (no secrets) into a versioned snapshot")
-    s.add_argument("--root", help=f"snapshot root (default {paths.DEFAULT_CONFIG_ROOT})")
+    s = command("snapshot-config", help="copy the target definitions (no secrets) into a versioned snapshot")
+    s.add_argument("--root", help="snapshot root (default: <campaign>/eval-config)")
     s.add_argument("--models-dev", help="use this saved models.dev api.json instead of fetching")
     s.add_argument("--no-variants", action="store_true", help="skip asking opencode for its variants")
     s.set_defaults(fn=cmd_snapshot_config)
 
-    pr = sub.add_parser("probe", help="prove the sandbox hides the owner's files and every key")
+    pr = command("probe", help="prove the sandbox hides the owner's files and every key")
     pr.add_argument("--out")
     pr.add_argument("--craze-bin")
     pr.add_argument("--model", default="muse-spark-1.3-contributor")
     pr.add_argument("--config")
     pr.set_defaults(fn=cmd_probe)
 
-    k = sub.add_parser("keyscan", help="grep a directory for every loaded key (prints counts and paths only)")
+    k = command("keyscan", help="grep a directory for every loaded key (prints counts and paths only)")
     k.add_argument("dir")
     k.set_defaults(fn=cmd_keyscan)
 
-    lg = sub.add_parser("ledger", help="print the ledger totals")
+    lg = command("ledger", help="print the ledger totals")
     lg.add_argument("--ledger")
     lg.set_defaults(fn=cmd_ledger)
 
-    jh = sub.add_parser("judge-hash", help="print the frozen judge fingerprint (instruction, schema, rubrics)")
+    jh = command("judge-hash", help="print the frozen judge fingerprint (instruction, schema, rubrics)")
+    jh.add_argument("--stamp", nargs="+", metavar="FILE",
+                    help="give each record of these verdict/calibration JSONL files that lacks a task_judge_hash, "
+                         "and whose judge_hash is today's, its task's hash (the original kept as "
+                         "<name>.pre-stamp.jsonl)")
+    jh.add_argument("--dry-run", action="store_true", help="with --stamp: count, write nothing")
     jh.set_defaults(fn=cmd_judge_hash)
 
-    jp = sub.add_parser("judge-pair", help="judge two runs against each other (rep directories)")
+    jp = command("judge-pair", help="judge two runs against each other (rep directories)")
     jp.add_argument("--a", required=True, help="the first run's rep directory")
     jp.add_argument("--b", required=True, help="the second run's rep directory")
     jp.add_argument("--task", help="task id (default: the first run's)")
@@ -590,7 +683,7 @@ def main(argv: list[str] | None = None) -> int:
     jp.add_argument("--out")
     jp.set_defaults(fn=cmd_judge_pair)
 
-    jb = sub.add_parser("judge-batch", help="judge every run pair between harnesses (held-out verdicts sealed)")
+    jb = command("judge-batch", help="judge every run pair between harnesses (held-out verdicts sealed)")
     jb.add_argument("--batch", required=True)
     jb.add_argument("--batch-y", help="take the y runs from this batch (compare two builds)")
     jb.add_argument("--x", default="craze", help="the x harness (default craze)")
@@ -608,7 +701,7 @@ def main(argv: list[str] | None = None) -> int:
                     help="judge as asked despite the calibration decisions (the reason is recorded in every verdict)")
     jb.set_defaults(fn=cmd_judge_batch)
 
-    ca = sub.add_parser("calibrate", help="judge calibration: flip rate, luna agreement, padding (§3.1.6)")
+    ca = command("calibrate", help="judge calibration: flip rate, luna agreement, padding (§3.1.6)")
     ca.add_argument("--batch", required=True)
     ca.add_argument("--pairs", type=int, default=30)
     ca.add_argument("--padding", type=int, default=10)
@@ -617,29 +710,44 @@ def main(argv: list[str] | None = None) -> int:
     ca.add_argument("--out")
     ca.set_defaults(fn=cmd_calibrate)
 
-    rp_ = sub.add_parser("report", help="objective counts, win rates, the success bar (held-out sealed unless --unseal)")
+    rp_ = command("report", help="objective counts, win rates, the success bar (held-out sealed unless --unseal)")
     rp_.add_argument("--batch", action="append", required=True, help="a batch directory (repeatable; later wins)")
     rp_.add_argument("--verdicts", action="append", help="a verdict file or directory (repeatable; default <batch>/judging)")
     rp_.add_argument("--unseal", action="store_true")
     rp_.add_argument("--baseline", help="the baseline batch that fixes the best open harness (default: the first --batch)")
     rp_.add_argument("--compare", help="an earlier batch: compare its craze build with this one")
     rp_.add_argument("--compare-verdicts", action="append", help="verdicts of the new build vs the old (craze vs craze)")
+    rp_.add_argument("--losses", action="store_true",
+                     help="add 'Where craze lost': each lost pair's missed rubric items and the judge's reasons")
     rp_.add_argument("--out")
     rp_.set_defaults(fn=cmd_report)
 
-    rs = sub.add_parser("rescore", help="recompute a batch's diff and diff-derived checks from its manifests (X15)")
+    rs = command("rescore", help="recompute a batch's diff and diff-derived checks from its manifests (X15)")
     rs.add_argument("--batch", required=True, help="a batch directory")
     rs.add_argument("--unseal", action="store_true", help="also rescore the held-out runs")
     rs.add_argument("--dry-run", action="store_true", help="compute and print; write nothing")
     rs.set_defaults(fn=cmd_rescore)
 
-    cp = sub.add_parser("captures", help="the wire-capture report (§3.1.10) and AC-A8 fidelity checks")
+    cp = command("captures", help="the wire-capture report (§3.1.10) and AC-A8 fidelity checks")
     cp.add_argument("--run", required=True, help="a batch directory")
     cp.add_argument("--out")
     cp.add_argument("--unseal", action="store_true")
     cp.set_defaults(fn=cmd_captures)
 
+    ar = command("archive", help="a compact, diffable record of batches: runs, final verdicts, provenance")
+    ar.add_argument("--batch", action="append", required=True, help="a batch directory (repeatable; later wins)")
+    ar.add_argument("--out", required=True, help="the archive directory")
+    ar.add_argument("--unseal", action="store_true", help="include the held-out runs and verdicts")
+    ar.add_argument("--verdicts", action="append", help="a verdict file or directory (repeatable; default <batch>/judging)")
+    ar.add_argument("--max-bytes", type=int, default=2_000_000, help="fail over this many bytes in all (default 2000000)")
+    ar.set_defaults(fn=cmd_archive)
+
     a = p.parse_args(argv)
+    try:
+        paths.set_campaign(a.campaign)
+    except paths.CampaignError as e:
+        print(str(e), file=sys.stderr)
+        return 2
     return a.fn(a)
 
 

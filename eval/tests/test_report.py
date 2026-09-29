@@ -279,3 +279,51 @@ def test_task_table_marks():
           verdict("D2", "craze", "opencode", None)]
     t = rp.task_table(vs, M)
     assert t["D1"]["gx"] == "WLl" and t["D2"]["opencode"] == "·"
+
+
+def _order(x_is_a, winner, rubric_x, rubric_y, reasons, judge="sol"):
+    return {"judge_model": judge, "x_is_a": x_is_a, "verdict": {
+        "winner": winner, "confidence": "high", "score_x": 5, "score_y": 8, "reasons": reasons,
+        "rubric_x": [{"item": i, "grade": g} for i, g in enumerate(rubric_x, 1)],
+        "rubric_y": [{"item": i, "grade": g} for i, g in enumerate(rubric_y, 1)]}}
+
+
+def test_where_craze_lost_on_a_synthetic_record():
+    """The report's --losses section (plan 029 W2): a craze run that lost, on either
+    side, with the rubric items it did not meet against the other side's and the judge's
+    reasons per order; wins, ties and craze-vs-craze pairs are not losses."""
+    lost_as_y = verdict("D1", "opencode", "craze", "x")  # craze is y and lost
+    lost_as_y["orders"] = [
+        _order(True, "x", ["met", "met", "met"], ["met", "missed", "false"],
+               "opencode showed the traceback; craze item 3 false"),
+        _order(False, "x", ["met", "met", "missed"], ["met", "missed", "met"], "item 2 decided it"),
+    ]
+    lost_as_y["result"].update({"score_x": 8.5, "score_y": 5.5})
+    lost_as_x = verdict("D2", "craze", "gx", "y", conf="medium")
+    lost_as_x["orders"] = [_order(True, "y", ["missed", "met", "met"], ["met", "met", "met"], "gx covered item 1")]
+    others = [verdict("D3", "craze", "gx", "x"), verdict("D3", "craze", "opencode", "tie"),
+              verdict("D2", "craze", "craze", "y", xb="N", yb="O"), verdict("H1", "craze", "gx", None)]
+    losses = rp.craze_losses([lost_as_y, lost_as_x] + others)
+    assert [(x["task"], x["other_harness"]) for x in losses] == [("D1", "opencode"), ("D2", "gx")]
+    one = losses[0]
+    assert one["craze_run_key"] == f"craze/{M}/D1/rep1" and one["other_run_key"] == f"opencode/{M}/D1/rep1"
+    assert one["craze_score"] == 5.5 and one["other_score"] == 8.5 and one["split"] == "dev"
+    first = one["orders"][0]
+    assert first["craze_shown_as"] == "B" and first["winner"] == "other"  # craze is y; x was shown as A
+    assert first["craze_not_met"] == [{"item": 2, "grade": "missed"}, {"item": 3, "grade": "false"}]
+    assert first["other_not_met"] == [] and first["craze_score"] == 8 and first["other_score"] == 5
+    assert "traceback" in first["reasons"] and one["orders"][1]["craze_shown_as"] == "A"
+    assert losses[1]["orders"][0]["craze_not_met"] == [{"item": 1, "grade": "missed"}]
+
+    runs = [run(h, t) for h in ("craze", "gx", "opencode") for t in ("D1", "D2", "D3")]
+    tasks = _tasks()
+    tasks["D1"].rubric = ["uses X", "reads Y at a.go:10", "says Z"]
+    rep = rp.build(rp.ReportInput(runs=runs, verdicts=[lost_as_y, lost_as_x] + others[:2], tasks=tasks, unseal=False,
+                                  losses=True))
+    assert [x["task"] for x in rep["losses"]] == ["D1", "D2"] and rep["rubrics"]["D1"][1] == "reads Y at a.go:10"
+    md = rp.render_markdown(rep)
+    assert "## Where craze lost" in md and "2 final verdict(s) in which a craze run lost" in md
+    assert "craze did not meet: 2 (missed), 3 (false); opencode did not meet: none" in md
+    assert "only craze missed item 2: reads Y at a.go:10" in md and "reasons: opencode showed the traceback" in md
+    assert "## Where craze lost" not in rp.render_markdown(rp.build(rp.ReportInput(
+        runs=runs, verdicts=[lost_as_y], tasks=tasks, unseal=False)))

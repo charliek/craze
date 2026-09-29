@@ -125,7 +125,7 @@ def snapshot_hash(d: Path) -> str:
 
 
 def load_snapshot(d: Path | None = None, root: Path | None = None) -> Snapshot:
-    root = Path(root or paths.DEFAULT_CONFIG_ROOT)
+    root = Path(root or paths.config_root())
     if d is None:
         cur = root / "CURRENT"
         if not cur.exists():

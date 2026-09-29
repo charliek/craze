@@ -97,11 +97,18 @@ def build(
     with open(prices_path, "rb") as f:
         prices = tomllib.load(f)
     fixtures = sorted({t.fixture for t in tasks if t.repo_kind == "fixture"})
-    craze_tasks = [t for t in tasks if t.repo_kind == "craze"]
-    tmpl = None
-    if craze_tasks:
-        d = craze_template()
-        tmpl = {"commit": paths.CRAZE_TEMPLATE_COMMIT, "path": str(d), "isolation": template_check(d)}
+    # One template per craze commit the tasks use (``[repo] commit``, default 3eabb31).
+    by_commit: dict[str, list[str]] = {}
+    for t in tasks:
+        if t.repo_kind == "craze":
+            by_commit.setdefault(t.craze_commit, []).append(t.id)
+    templates = []
+    for commit, ids in sorted(by_commit.items()):
+        d = craze_template(commit)
+        templates.append({"commit": commit, "path": str(d), "isolation": template_check(d), "tasks": sorted(ids)})
+    # ``craze_template``: the one template when every craze task shares a commit (the
+    # field's shape before per-task commits); ``craze_templates`` lists them all.
+    tmpl = {k: templates[0][k] for k in ("commit", "path", "isolation")} if len(templates) == 1 else None
     return {
         "label": label,
         "executables": executables_info if executables_info is not None else executables(tc, craze_bin),
@@ -111,7 +118,9 @@ def build(
         "opencode_models": {m.key: _opencode_model(m, snap) for m in models},
         "fixtures": {name: fixture_hash(name) for name in fixtures},
         "craze_template": tmpl,
-        "tasks": {t.id: {"split": t.split, "category": t.category, "mode": t.mode} for t in tasks},
+        "craze_templates": templates,
+        "tasks": {t.id: {"split": t.split, "category": t.category, "mode": t.mode,
+                         **({"craze_commit": t.craze_commit} if t.repo_kind == "craze" else {})} for t in tasks},
         "prices": prices,
         "judge": None,
         "run_order": run_order,
