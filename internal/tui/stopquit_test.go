@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -15,6 +16,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/charliek/craze/internal/control"
+	"github.com/charliek/craze/internal/engine"
 	"github.com/charliek/craze/internal/host"
 	"github.com/charliek/craze/internal/protocol"
 	"github.com/charliek/craze/internal/remote"
@@ -235,6 +237,13 @@ func (r *gateRig) finish() {
 //     beside the host-status release, not after it — a release that waits
 //     for the stop to reach the host sees it arrive, where the stop used to
 //     be sent only once the release was over (up to its own second).
+//   - A host that stops reading (C5r2, astra r9-fix45 1): an outstanding
+//     command's line, longer than the socket holds, has filled it, its write
+//     never done, so the stop's request waits for the connection's write lock
+//     where its context never reaches it. The quit still ends at its
+//     deadline — it closes the transport, which ends both writes — and it
+//     has joined its stop when it returns: nothing of the quit is left
+//     running, where it used to wait on the stop for ever.
 func TestTheQuitIsBoundedByItsOneDeadline(t *testing.T) {
 	hang := func(control.StopRequest) {} // a stop that ends nothing
 
@@ -351,6 +360,229 @@ func TestTheQuitIsBoundedByItsOneDeadline(t *testing.T) {
 			t.Fatalf("the quit's stop: stopped %v, unsupported %v, %v; want on its way when the program ended", stopped, unsupported, err)
 		}
 	})
+
+	t.Run("a host that stops reading", func(t *testing.T) {
+		isolateSkillsHome(t)
+		shortQuit(t, 200*time.Millisecond)
+		h := newAttachHostStop(t, true, hang)
+		p := newStallProxy(t, h.path)
+		w := &writeWatch{began: make(chan struct{})}
+		s := dialWatched(t, p, w)
+		b := &stopJoined{Session: s, returned: make(chan struct{})}
+		r := startedOver(t, b, true, frameWorkspace(t))
+
+		// The host reads nothing more, and an outstanding command's line —
+		// a prompt longer than the socket holds — is being written: its
+		// write holds the connection's write lock and never finishes.
+		p.stall()
+		submitted := make(chan error, 1)
+		go func() {
+			c := engine.Command{Client: s.ClientID(), ID: "9001"}
+			_, err := s.Submit(context.Background(), c, strings.Repeat("x", longLine), engine.SubmitQueue, "")
+			submitted <- err
+		}()
+		select {
+		case <-w.began:
+		case <-time.After(pumpWatchdog):
+			t.Fatal("the outstanding command's write never began")
+		}
+
+		quits := namedCmds(r.ctrlD(), "stopQuit")
+		if len(quits) != 1 {
+			t.Fatalf("Ctrl+D asked %d stops, want one", len(quits))
+		}
+		if _, ok := within(t, "the quit", quits[0]).(tea.QuitMsg); !ok {
+			t.Fatal("the quit did not quit the program")
+		}
+		select {
+		case <-b.returned:
+		default:
+			t.Fatal("the quit returned with its stop still running")
+		}
+		if stopped, unsupported, err := r.m.exit.outcome(); stopped || unsupported || err == nil {
+			t.Fatalf("the quit's stop: stopped %v, unsupported %v, %v; want answered neither way", stopped, unsupported, err)
+		}
+		// The transport the quit closed ended the outstanding command's
+		// write too: neither write outlives the quit.
+		select {
+		case err := <-submitted:
+			if err == nil {
+				t.Fatal("the outstanding command was answered by a host that read none of it")
+			}
+		case <-time.After(quitStepBound):
+			t.Fatalf("the outstanding command's write still runs %v after the quit", quitStepBound)
+		}
+		r.finish()
+	})
+}
+
+// longLine is the outstanding command's prompt in "a host that stops
+// reading": far longer than a Unix socket's buffers hold (a few hundred KiB at
+// most, on Linux and macOS), well inside a host's inbound line limit.
+const longLine = 1 << 20
+
+// stallProxy is a Unix socket in front of a host's that passes every byte
+// both ways until stall: from then on it reads nothing more of what the
+// client writes — a host that has stopped reading, whose receive buffer the
+// client's next long line fills, so that the line's write blocks. What the
+// host writes still reaches the client.
+type stallProxy struct {
+	path    string
+	stalled chan struct{}
+	once    sync.Once
+}
+
+// newStallProxy serves a proxy to target until the test ends.
+func newStallProxy(t *testing.T, target string) *stallProxy {
+	t.Helper()
+	dir, err := os.MkdirTemp("/tmp", "czp-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	p := &stallProxy{path: filepath.Join(dir, "p"), stalled: make(chan struct{})}
+	l, err := net.Listen("unix", p.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// over ends a stalled pump at the test's end: it holds what it would
+	// have read until then.
+	over := make(chan struct{})
+	var mu sync.Mutex
+	var conns []net.Conn
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			c, err := l.Accept()
+			if err != nil {
+				return
+			}
+			up, err := net.Dial("unix", target)
+			if err != nil {
+				_ = c.Close()
+				continue
+			}
+			mu.Lock()
+			conns = append(conns, c, up)
+			mu.Unlock()
+			wg.Add(2)
+			go func() {
+				defer wg.Done()
+				p.inbound(c, up, over)
+			}()
+			go func() {
+				defer wg.Done()
+				defer func() { _ = up.Close(); _ = c.Close() }()
+				_, _ = io.Copy(c, up)
+			}()
+		}
+	}()
+	t.Cleanup(func() {
+		_ = l.Close()
+		close(over)
+		mu.Lock()
+		for _, c := range conns {
+			_ = c.Close()
+		}
+		mu.Unlock()
+		wg.Wait()
+	})
+	return p
+}
+
+// stall makes the proxy stop reading the client: at most the one read in
+// flight is taken, and never forwarded.
+func (p *stallProxy) stall() { p.once.Do(func() { close(p.stalled) }) }
+
+// inbound copies the client's bytes to the host until the proxy stalls, then
+// reads nothing more until over.
+func (p *stallProxy) inbound(src, dst net.Conn, over <-chan struct{}) {
+	defer func() { _ = src.Close(); _ = dst.Close() }()
+	buf := make([]byte, 4096)
+	for {
+		select {
+		case <-p.stalled:
+			<-over
+			return
+		default:
+		}
+		n, err := src.Read(buf)
+		if n > 0 {
+			select {
+			case <-p.stalled:
+				<-over
+				return
+			default:
+			}
+			if _, werr := dst.Write(buf[:n]); werr != nil {
+				return
+			}
+		}
+		if err != nil {
+			return
+		}
+	}
+}
+
+// writeWatch says when the client's write of a long line has begun (began,
+// closed once): the outstanding command holds its connection's write lock.
+type writeWatch struct {
+	began chan struct{}
+	once  sync.Once
+}
+
+// watchedConn is a client connection that tells its writeWatch of each long
+// line's write as it begins.
+type watchedConn struct {
+	net.Conn
+	w *writeWatch
+}
+
+func (c *watchedConn) Write(b []byte) (int, error) {
+	if len(b) >= longLine {
+		c.w.once.Do(func() { close(c.w.began) })
+	}
+	return c.Conn.Write(b)
+}
+
+// dialWatched is a remote.Session to a host through p whose connections
+// report to w, closed when the test ends.
+func dialWatched(t *testing.T, p *stallProxy, w *writeWatch) *remote.Session {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), pumpWatchdog)
+	defer cancel()
+	s, err := remote.DialSession(ctx, p.path, remote.SessionOptions{
+		Client: remote.Options{
+			Client: protocol.ClientInfo{Kind: "test", Name: "tui_test"},
+			Dial: func(ctx context.Context, path string) (net.Conn, error) {
+				var d net.Dialer
+				nc, err := d.DialContext(ctx, "unix", path)
+				if err != nil {
+					return nil, err
+				}
+				return &watchedConn{Conn: nc, w: w}, nil
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("dial through the proxy: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	return s
+}
+
+// stopJoined is a session whose Stop says when it has returned (returned): a
+// quit that returns after it has joined its stop.
+type stopJoined struct {
+	*remote.Session
+	returned chan struct{}
+}
+
+func (b *stopJoined) Stop(ctx context.Context, c engine.Command) error {
+	defer close(b.returned)
+	return b.Session.Stop(ctx, c)
 }
 
 // releaseHost is a host-status hub whose release (Close) waits, within its own

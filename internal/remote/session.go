@@ -337,8 +337,11 @@ func (s *Session) Close() error { return s.CloseWithin(context.Background()) }
 // session's end and this close after them (tui's stopQuit), so the detach
 // waits only for what is left of it, and a ctx already done — the deadline
 // passed, or a second quit — detaches nothing: the transport is closed at
-// once, which ends the subscription on the host anyway. It is Close in every
-// other way, and shares its once: whichever is called first decides.
+// once, which ends the subscription on the host anyway, and every write
+// blocked on it — a stop's behind a host that has stopped reading among them
+// (C5r2), which is why the quit closes through here at its deadline. It is
+// Close in every other way, and shares its once: whichever is called first
+// decides.
 func (s *Session) CloseWithin(ctx context.Context) error {
 	s.closeOnce.Do(func() {
 		s.mu.Lock()

@@ -39,6 +39,12 @@ import (
 // test can shorten it.
 var quitStopWait = 2 * time.Second
 
+// quitJoinWait bounds the wait for a stop the quit's deadline cut short
+// (awaitStop), once the backend's transport is closed: a stop over a socket
+// ends as soon as that close ends its write, so this only bites on a backend
+// whose stop does not end with its transport — the quit goes on without it.
+const quitJoinWait = time.Second
+
 // exitState is what the explicit quit came to (stopQuit), shared by every copy
 // of the model (Model.exit): written by the quit's own tea.Cmd, read by Run
 // once the program has ended.
@@ -160,12 +166,13 @@ type ender interface {
 // goroutine of its own, beside what requestQuit does first for every quit —
 // the composer's command ended, the host-status hub released — so neither
 // spends the stop's time (plan 030 C5r); the program quits once the session
-// has ended or the deadline has passed. The composer's command is the one
-// wait past it: nothing it started may outlive craze, and its shutdown has a
-// bound of its own (shellShutdownWait), spent only while a command runs. A
-// second quit while the first waits quits at once, and the close that
-// follows detaches nothing (quitAgain): the host may still be closing, and
-// that is fine.
+// has ended or the deadline has passed — the stop's answer included, which
+// the deadline ends whether or not the stop can see it (awaitStop). The
+// composer's command is the one wait past it: nothing it started may outlive
+// craze, and its shutdown has a bound of its own (shellShutdownWait), spent
+// only while a command runs. A second quit while the first waits quits at
+// once, and the close that follows detaches nothing (quitAgain): the host may
+// still be closing, and that is fine.
 func (m Model) stopQuit() (tea.Model, tea.Cmd) {
 	if m.quitting {
 		m.exit.quitAgain()
@@ -182,7 +189,7 @@ func (m Model) stopQuit() (tea.Model, tea.Cmd) {
 		go func() { stopped <- eng.Stop(ctx, c) }()
 		sh.shutdown()
 		closeHost(h)
-		err := <-stopped
+		err := awaitStop(ctx, eng, stopped)
 		x.answered(err)
 		if e, ok := eng.(ender); ok && err == nil {
 			select {
@@ -192,4 +199,44 @@ func (m Model) stopQuit() (tea.Model, tea.Cmd) {
 		}
 		return tea.Quit()
 	}
+}
+
+// awaitStop is the stop's answer (stopQuit), waited for no longer than the
+// quit's deadline, ctx's: an answer already there when the wait begins is
+// taken whatever the clock says, since the quit's own cleanup may have run
+// past the deadline while the stop was answered in time.
+//
+// A stop still out at the deadline is answered ctx.Err() — neither way, as a
+// withheld receipt is — and is not left running (plan 030 C5r2, astra
+// r9-fix45 1). The stop cannot be relied on to see its context: a host that
+// has stopped reading lets an outstanding command's line fill the socket, and
+// the stop's own request then waits for the connection's write lock, or in a
+// write of its own, where no context reaches it. So the transport is closed
+// — a close whose deadline has passed detaches nothing (quitCloser), the one
+// finishRun would make — which ends every write on it, and every command
+// waiting there with it; and the stop is joined, for at most quitJoinWait.
+// finishRun's close after it is then a no-op. A backend with no such close
+// has no transport of the TUI's to end: its stop is joined for the same
+// bound, and the quit goes on without it.
+func awaitStop(ctx context.Context, eng backend.Backend, stopped <-chan error) error {
+	select {
+	case err := <-stopped:
+		return err
+	default:
+	}
+	select {
+	case err := <-stopped:
+		return err
+	case <-ctx.Done():
+	}
+	if c, ok := eng.(quitCloser); ok {
+		_ = c.CloseWithin(ctx)
+	}
+	join := time.NewTimer(quitJoinWait)
+	defer join.Stop()
+	select {
+	case <-stopped:
+	case <-join.C:
+	}
+	return ctx.Err()
 }

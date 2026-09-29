@@ -14,7 +14,6 @@ import (
 	"github.com/charliek/craze/internal/agent"
 	"github.com/charliek/craze/internal/backend"
 	"github.com/charliek/craze/internal/engine"
-	"github.com/charliek/craze/internal/remote"
 	"github.com/charliek/craze/internal/sessions"
 )
 
@@ -194,8 +193,9 @@ func startedOverTheSocket(t *testing.T, h *attachHost, viewer bool, ws string) *
 	return startedOver(t, attachSession(t, h, ""), viewer, ws)
 }
 
-// startedOver is startedOverTheSocket over a session the test dialled itself.
-func startedOver(t *testing.T, s *remote.Session, viewer bool, ws string) *gateRig {
+// startedOver is startedOverTheSocket over a session the test dialled itself
+// (a remote.Session, or a test's backend wrapping one).
+func startedOver(t *testing.T, s backend.Backend, viewer bool, ws string) *gateRig {
 	t.Helper()
 	cfg, _ := withHostOwned(Config{Backend: s, Viewer: viewer, Theme: "tokyo-night",
 		Workspace: ws, Yolo: true}, ws)

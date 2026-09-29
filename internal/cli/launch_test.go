@@ -1270,3 +1270,98 @@ func TestAReattachSpawnsNothing(t *testing.T) {
 		})
 	}
 }
+
+// TestAReattachToAStoppingHostSpawnsInstead (plan 030 C5r2, astra r9-fix45
+// 2): the direct reattach takes a host only once its attach has succeeded. A
+// host serving the session that is stopping — its attach fence up, which
+// refuses every attach closing while hello is still answered — is not taken
+// on its hello, which would be the TUI's failed start: the candidate is
+// closed, and the launch falls back to a spawn of its own, whose host loads
+// the session once the stopping one has gone — here as that spawn begins, the
+// test's host command finishing the stop (its socket closed, its entry and
+// its claim given up) — and the TUI ends with a working session.
+func TestAReattachToAStoppingHostSpawnsInstead(t *testing.T) {
+	// finishStop is the stopping host's end, run as the first spawn begins
+	// (spawnAsChild's extra runs before the host command starts).
+	var finishStop func()
+	env, ws, cmds := launchHome(t, func(n int) []string {
+		if n == 1 && finishStop != nil {
+			finishStop()
+		}
+		return nil
+	})
+	t.Setenv("CRAZE_FAKE_SCRIPT", "load")
+	const id = "0199aaaa-bbbb-7ccc-8ddd-0000000000da"
+	seedIndexRow(t, sessions.Row{SessionID: "re-2", Provider: "cursor", CWD: absDir(ws), CrazeID: id, UpdatedAt: time.Now()})
+
+	// The stopping host: serving the session, started, its attach fence up.
+	rh, _ := servingHost(t, env, io.Discard)
+	if _, err := rh.claims.claimSession(id); err != nil {
+		t.Fatalf("the stopping host's claim: %v", err)
+	}
+	stub := tui.NewStubNoPrimary()
+	stub.SetProvider(agent.CursorProvider())
+	eng, err := engine.New(stub, engine.Options{CrazeSessionID: id})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = eng.Close() })
+	select {
+	case <-rh.publish(eng):
+	case <-time.After(serveStep):
+		t.Fatal("the stopping host never published its session")
+	}
+	if err := eng.Start(stepCtx(t)); err != nil {
+		t.Fatalf("the stopping host's start: %v", err)
+	}
+	_, release := rh.ctl.server.FenceAttaches()
+	t.Cleanup(release)
+	e, ok := hostServing(env, id)
+	if !ok {
+		t.Fatal("the premise: no host serves the session")
+	}
+	probe, err := remote.DialSession(stepCtx(t), e.Socket, remote.SessionOptions{SessionID: id, When: protocol.WhenNow})
+	if err != nil {
+		t.Fatalf("the premise: the stopping host does not answer hello: %v", err)
+	}
+	var refused *remote.Error
+	if err := probe.Attach(stepCtx(t)); !errors.As(err, &refused) || refused.Reason != protocol.ReasonClosing {
+		t.Fatalf("the premise: the stopping host's attach answered %v, want refused closing", err)
+	}
+	_ = probe.Close()
+	finishStop = rh.close
+
+	var spawned hostRef
+	fakeRun(t, func(cfg tui.Config) (tui.Result, error) {
+		if cfg.Continue == nil || cfg.Continue.CrazeID != id {
+			t.Fatalf("the row to load: %+v", cfg.Continue)
+		}
+		b, err := cfg.LoadBackend(cfg.Provider, *cfg.Continue)
+		if err != nil {
+			t.Fatalf("LoadBackend: %v", err)
+		}
+		started(t, b)
+		if got := b.Info().CrazeSessionID; got != id {
+			t.Fatalf("the session %q, want %s", got, id)
+		}
+		lb, ok := b.(*launchedBackend)
+		if !ok || lb.ref.held || lb.ref.child == nil {
+			t.Fatalf("the backend %T %+v, want a host this launch spawned, not the stopping one", b, lb)
+		}
+		spawned = lb.ref
+		_ = b.Close()
+		return tui.Result{}, nil
+	})
+	f := launchFlags(t, ws)
+	f.cont = true
+	if err := runTUI(nil, f, hostEnv{}); err != nil {
+		t.Fatalf("runTUI: %v", err)
+	}
+	if cmds.count() != 1 {
+		t.Fatalf("%d hosts spawned, want the fallback's one", cmds.count())
+	}
+	if spawned.child.exited() {
+		t.Fatal("the TUI's quit ended the session it came up with")
+	}
+	stopEntry(t, onlyHost(t, env), spawned.child.pid)
+}

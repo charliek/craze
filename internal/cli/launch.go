@@ -338,8 +338,11 @@ func (l *launcher) loadBackend(_ agent.Provider, row sessions.Row) (backend.Back
 // A load of a session with a craze id first looks for a host that serves it
 // already (hostServing) and attaches to it there, spawning nothing: no claim
 // is taken — the host holds it — and the flags of a new session are ignored,
-// with the note a held answer leaves (noteHeld). Found and not reachable — it
-// is stopping, or gone since — the spawn is the fallback, and so is a session
+// with the note a held answer leaves (noteHeld). The host is taken only once
+// its attach has succeeded (reattach): its hello alone says nothing of
+// whether it will take a client — a host that is stopping still answers
+// hello and refuses every attach closing. Found and not attached to — it is
+// stopping, or gone since — the spawn is the fallback, and so is a session
 // nobody serves and a legacy row, which has no id to look for. The spawn's
 // own held answer covers a host that took the session between the look and
 // the spawn: the rendezvous finds it, and it is attached to the same way.
@@ -356,7 +359,7 @@ func (l *launcher) spawn(opts spawnOptions, crazeID string) (backend.Backend, er
 	defer l.inflight.Done()
 
 	if e, ok := hostServing(l.env, crazeID); ok {
-		b, err := l.dial(hostRef{entry: e, held: true})
+		b, err := l.reattach(hostRef{entry: e, held: true})
 		if err == nil {
 			return b, nil
 		}
@@ -372,13 +375,49 @@ func (l *launcher) spawn(opts spawnOptions, crazeID string) (backend.Backend, er
 	return l.dial(ref)
 }
 
-// dial dials the host ref names as the TUI's client (dialHost): a host this
-// launch started is ended when it cannot be, and a holder's is left alone.
-// The backend it answers is recorded, and a holder's names the flags its
-// attach ignored (noteHeld).
+// dial dials the host ref names as the TUI's client (connect) and takes the
+// session (take): a host this launch started is ended when it cannot be
+// dialled, and a holder's is left alone.
 func (l *launcher) dial(ref hostRef) (backend.Backend, error) {
 	ctx, cancel := context.WithTimeout(l.ctx, dialTimeout)
 	defer cancel()
+	s, err := l.connect(ctx, ref)
+	if err != nil {
+		return nil, err
+	}
+	return l.take(s, ref), nil
+}
+
+// reattach is spawn's direct reattach to ref, the host a registry entry says
+// serves the session already (plan 030 C4r, X43): dialled, and attached —
+// the attach the TUI's Start would make, made here, so the host is taken only
+// once it has taken this client (C5r2, astra r9-fix45 2). A hello answered is
+// not enough: a host that is stopping (its attach fence up) still answers
+// hello, refuses the attach closing, and taken on its hello would be the
+// TUI's failed start where a spawn would have run the session. So any
+// failure — the dial's, or the attach's refusal — closes the candidate,
+// unrecorded and with no note, and answers the error: spawn falls back to a
+// spawn of its own. The dial and the attach share dialTimeout, and end with
+// the launch. An attached candidate is taken as dial takes one: the TUI's
+// Start finds it attached and waits for its readiness alone.
+func (l *launcher) reattach(ref hostRef) (backend.Backend, error) {
+	ctx, cancel := context.WithTimeout(l.ctx, dialTimeout)
+	defer cancel()
+	s, err := l.connect(ctx, ref)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.Attach(ctx); err != nil {
+		_ = s.Close()
+		return nil, err
+	}
+	return l.take(s, ref), nil
+}
+
+// connect dials the host ref names as the TUI's client (dialHost), the
+// session not yet attached: a host this launch started is ended when it
+// cannot be, and a holder's is left alone.
+func (l *launcher) connect(ctx context.Context, ref hostRef) (*remote.Session, error) {
 	s, err := dialHost(ctx, ref, remote.SessionOptions{
 		Client: remote.Options{
 			Client:    protocol.ClientInfo{Kind: "tui", Name: "craze", Version: version.Version},
@@ -401,6 +440,13 @@ func (l *launcher) dial(ref hostRef) (backend.Backend, error) {
 	if err != nil {
 		return nil, dialFailure(ref, err)
 	}
+	return s, nil
+}
+
+// take is s, dialled to the host ref names, as the backend the TUI adopts:
+// recorded, so finish ends it if its session never comes up in the TUI, and
+// — a holder's — naming the flags its attach ignored (noteHeld).
+func (l *launcher) take(s *remote.Session, ref hostRef) backend.Backend {
 	b := &launchedBackend{Session: s, ref: ref}
 	l.mu.Lock()
 	l.launched = append(l.launched, b)
@@ -408,7 +454,7 @@ func (l *launcher) dial(ref hostRef) (backend.Backend, error) {
 	if ref.held {
 		l.noteHeld(ref)
 	}
-	return b, nil
+	return b
 }
 
 // noteHeld is the line an attach to a held session leaves for after the
