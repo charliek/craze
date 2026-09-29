@@ -414,6 +414,11 @@ type sessionClaims struct {
 	index crazeIDIndex
 	// indexWait bounds the index lock EnsureCrazeID takes; a test shortens it.
 	indexWait time.Duration
+	// required makes every claim a condition of running (craze serve, plan
+	// 030 §3.3): a claim that cannot be taken is an *unclaimedError from
+	// claimRow and require, never the warning the TUI's X30 fallback gives
+	// (astra r3-c2 1). Set before the first claim, never after.
+	required bool
 
 	mu   sync.Mutex
 	held map[string]*rundir.Claim
@@ -504,6 +509,45 @@ func (c *sessionClaims) ensure(id string) {
 	}
 }
 
+// require claims id for a host that must hold it (required: craze serve's new
+// session, whose id the engine has just minted), or says why it cannot: an id
+// this process holds already — a load's, claimed before the build — answers
+// at once. It is claimSession with every failure an *unclaimedError, a
+// session another process holds included: a fresh UUIDv7 held elsewhere is
+// not a session to attach to.
+func (c *sessionClaims) require(id string) *unclaimedError {
+	if _, err := c.claimSession(id); err != nil {
+		return &unclaimedError{err: err}
+	}
+	return nil
+}
+
+// unclaimedError is a claim a host that must hold one could not take
+// (sessionClaims.required): the lock tree or the index it needs cannot be
+// used, and the host does not run.
+type unclaimedError struct{ err error }
+
+func (e *unclaimedError) Error() string {
+	return "the session cannot be claimed: " + e.err.Error()
+}
+
+func (e *unclaimedError) Unwrap() error { return e.err }
+
+// exit is craze serve's refusal for it: exit 1, in serve's own words — the
+// TUI never runs with required set, so no shared refusal says it.
+func (e *unclaimedError) exit() error {
+	return &exitError{code: 1, msg: "craze serve: " + e.Error(), cause: e}
+}
+
+// unclaimedBy is the *unclaimedError err carries, or nil.
+func unclaimedBy(err error) *unclaimedError {
+	var u *unclaimedError
+	if errors.As(err, &u) {
+		return u
+	}
+	return nil
+}
+
 // skip warns, once, that id's claim was not taken, and remembers it.
 func (c *sessionClaims) skip(id string, err error) {
 	c.mu.Lock()
@@ -534,12 +578,19 @@ func (c *sessionClaims) skip(id string, err error) {
 // it is a warning, and the load proceeds unclaimed with the row's own id
 // (X30). The lock protects against a second craze; it must not lock the user
 // out of their own session because of their filesystem.
+//
+// Unless the claims are required (craze serve): then a claim that could not
+// be attempted refuses too, an *unclaimedError, and so does a legacy row that
+// cannot be given its durable id — an id the engine minted instead would be
+// this host's alone, and a second host loading the row would claim another.
 func (c *sessionClaims) claimRow(row sessions.Row) (id string, release func(), err error) {
 	noop := func() {}
 	id, err = c.index.EnsureCrazeID(row, c.indexWait)
 	switch {
 	case errors.Is(err, atomicfile.ErrLockBusy), errors.Is(err, sessions.ErrNotInIndex):
 		return "", nil, err
+	case err != nil && row.CrazeID == "" && c.required:
+		return "", nil, &unclaimedError{err: err}
 	case err != nil && row.CrazeID == "":
 		// No durable id, and none can be written: nothing to claim. The engine
 		// mints one, which the row takes on its next write and onEngine claims.
@@ -555,6 +606,8 @@ func (c *sessionClaims) claimRow(row sessions.Row) (id string, release func(), e
 	switch {
 	case errors.As(err, &held), errors.Is(err, errClaimsClosed):
 		return "", nil, err
+	case err != nil && c.required:
+		return "", nil, &unclaimedError{err: err}
 	case err != nil:
 		c.skip(id, err)
 		return id, noop, nil

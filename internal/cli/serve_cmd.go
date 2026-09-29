@@ -33,8 +33,9 @@ import (
 //     command uses (sessionflags.go), so a refusal reads as the root's does;
 //     --load is parsed; a control socket switched off is a usage error, since a
 //     headless host is reachable through nothing else.
-//  2. The log opens (--log, else stderr: hostlog.go) and the host logs of hosts
-//     gone a week are swept.
+//  2. The host logs of hosts gone a week are swept, then the log opens
+//     (--log, else stderr: hostlog.go) — in that order, so the sweep can never
+//     take the log it is about to write.
 //  3. The provider resolves as the root's does. A new session's is held to the
 //     spawn flags; a load's row is found — --continue's the newest in the
 //     workspace, --load's the one its id names — and claimed before anything
@@ -47,8 +48,9 @@ import (
 //  5. The session is built as the TUI builds one, sessionOptions and
 //     engine.HostOptions, with agent.Options.NoPrimary: nothing reads a
 //     primary on a host with no client, and with one the 257th unread event
-//     would block the agent. The engine goes to the socket, a new session's
-//     id is claimed and the registry entry rewritten for it (runHost.onEngine).
+//     would block the agent. A new session's id is claimed, then the engine
+//     goes to the socket and the registry entry is rewritten for it
+//     (runHost.onEngine).
 //  6. Start runs on a goroutine of its own, so a remote client's Start only
 //     observes it. A start that failed leaves the host up and its failure
 //     travels the socket as start_failed (C5 decides when such a host exits);
@@ -58,6 +60,13 @@ import (
 //     caught and dropped — signal.Notify, never signal.Ignore, whose SIG_IGN
 //     an agent child would inherit across exec. The stop sequence runs once
 //     (serveHost.stop) and craze serve returns: exit 0.
+//
+// Every claim is a condition of running (sessionClaims.required): where the
+// root warns and runs unclaimed on a lock tree it cannot use (X30), craze
+// serve is exit 1 and leaves nothing behind (astra r3-c2 1). A headless host
+// is what a launcher spawns for a session — two of them loading one session
+// unclaimed would each drive the same provider session, and there is no
+// terminal for a warning to reach anyway.
 
 // serveFlags is craze serve's command line: the session flags the root takes
 // too (tuiFlags, whose TUI-only members serve never registers and leaves
@@ -80,6 +89,16 @@ const serveStartJoin = 5 * time.Second
 // serveBuilt is told the agent.Options each session craze serve builds is
 // built with: a seam for the option-parity tests, a no-op in production.
 var serveBuilt = func(agent.Options) {}
+
+// serveRowRead is told each load's row once it is read, before it is claimed:
+// a seam for the test that holds two loaders of one legacy row there, so that
+// both race its id's assignment and its claim; a no-op in production.
+var serveRowRead = func(sessions.Row) {}
+
+// serveServing is called on craze serve's own goroutine once the host serves
+// its session, before the session starts: a seam for the crash-output test,
+// whose child panics there; a no-op in production.
+var serveServing = func() {}
 
 func newServeCmd() *cobra.Command {
 	f := &serveFlags{tuiFlags: tuiFlags{force: true}}
@@ -127,7 +146,14 @@ func serveSignals() (<-chan os.Signal, func()) {
 // process's signals as serveSignals delivers them, or a test's own channel.
 // It returns once the host has stopped, nil for a stop however it was asked
 // for; an error is a host that never served.
-func runServe(cmd *cobra.Command, f *serveFlags, env hostEnv, sigs <-chan os.Signal) (err error) {
+//
+// The log is closed only here, on a clean return, and never deferred: a
+// panic on this goroutine runs every deferred call before the runtime prints
+// it, and a deferred close would hand the crash output back to stderr —
+// /dev/null for a spawned host — just before the one report its log must
+// keep (astra r3-c2 4). A panic leaves the log open and the crash output on
+// it, and the process ends.
+func runServe(cmd *cobra.Command, f *serveFlags, env hostEnv, sigs <-chan os.Signal) error {
 	if err := f.settle(); err != nil {
 		return err
 	}
@@ -148,23 +174,28 @@ func runServe(cmd *cobra.Command, f *serveFlags, env hostEnv, sigs <-chan os.Sig
 	if err != nil {
 		return err
 	}
-	defer func() {
-		// A host that never served says why in its log too: a spawned host's
-		// stderr is /dev/null.
-		if err != nil && f.log != "" {
-			line, _ := diagnose(cmd, err)
-			fmt.Fprintln(out, line)
-		}
-		closeLog()
-	}()
-	sweepHostLogs(runEnv, out)
+	err = serveSession(cmd, f, env, sigs, runEnv, load, out)
+	// A host that never served says why in its log too: a spawned host's
+	// stderr is /dev/null.
+	if err != nil && f.log != "" {
+		line, _ := diagnose(cmd, err)
+		fmt.Fprintln(out, line)
+	}
+	closeLog()
+	return err
+}
 
+// serveSession is runServe once its log is open, out: the session claimed,
+// bound, built, served and — once asked — stopped.
+func serveSession(cmd *cobra.Command, f *serveFlags, env hostEnv, sigs <-chan os.Signal, runEnv rundir.Env, load *loadID, out io.Writer) error {
 	// The host id first, as runTUI's: the session claims write it into their
 	// lock files. The teardown is deferred from here, so every return after it
 	// releases what was claimed — and, once the socket is bound, closes and
 	// unlinks it; the stop sequence runs it itself, and this is then a no-op.
 	hostID := rundir.NewHostID()
-	rh := &runHost{claims: newSessionClaims(runEnv, hostID, out)}
+	claims := newSessionClaims(runEnv, hostID, out)
+	claims.required = true
+	rh := &runHost{claims: claims}
 	defer rh.close()
 
 	loading := f.cont || load != nil
@@ -202,9 +233,13 @@ func runServe(cmd *cobra.Command, f *serveFlags, env hostEnv, sigs <-chan os.Sig
 		if err != nil {
 			return err
 		}
+		serveRowRead(row)
 		p, row, err = claimLoad(row, f.refuse, rh.claims)
 		if held := heldBy(err); held != nil {
 			return &exitError{code: 1, msg: "craze serve: " + rh.claims.pickerRefusal(held), cause: err}
+		}
+		if unclaimed := unclaimedBy(err); unclaimed != nil {
+			return unclaimed.exit()
 		}
 		if err != nil {
 			return err
@@ -246,9 +281,18 @@ func runServe(cmd *cobra.Command, f *serveFlags, env hostEnv, sigs <-chan os.Sig
 		_ = sess.Close()
 		return exitf(1, "craze serve: %v", err)
 	}
+	// A new session's id — the engine minted it — is claimed before any
+	// client can see the engine; a load's was claimed above, and this takes
+	// nothing. The agent spawns only at Start, so a refusal here has spawned
+	// nothing, and the engine's close closes the session unstarted.
+	if err := rh.claims.require(eng.State().CrazeSessionID); err != nil {
+		_ = eng.Close()
+		return err.exit()
+	}
 	rh.onEngine(eng)
 	fmt.Fprintf(out, "craze serve: host %s serving session %s (%s) in %s\n",
 		hostID, eng.State().CrazeSessionID, p.Name(), indexCWD)
+	serveServing()
 
 	h := &serveHost{rh: rh, eng: eng, lc: lc, log: out}
 	started := make(chan struct{})

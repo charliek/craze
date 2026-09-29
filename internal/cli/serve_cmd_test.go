@@ -426,19 +426,56 @@ func TestServeReplaysALongLoadWithNoClient(t *testing.T) {
 	}
 }
 
+// holdLoaders makes serveRowRead a barrier: every load that has read its row
+// waits there until release (idempotent) is called, and arrived yields each
+// row as its loader gets there.
+func holdLoaders(t *testing.T) (arrived <-chan sessions.Row, release func()) {
+	t.Helper()
+	ch := make(chan sessions.Row, 4)
+	rel := make(chan struct{})
+	var once sync.Once
+	prev := serveRowRead
+	serveRowRead = func(row sessions.Row) {
+		ch <- row
+		<-rel
+	}
+	t.Cleanup(func() { serveRowRead = prev })
+	return ch, func() { once.Do(func() { close(rel) }) }
+}
+
 // TestServeTwoLegacyLoadsAtOnceOneWins: two hosts asked to load one legacy row
 // at the same moment agree on the craze id it is given (EnsureCrazeID, under
 // the index's lock), and exactly one of them claims it: the other is exit 1,
 // carrying the *rundir.HeldError that names the session — the held answer C3's
 // ready line is made of — having bound nothing, and the winner serves the
 // session under that id.
+//
+// The moment is forced (astra r3-c2 6): both loaders are held once they have
+// read the row — each finding it with no craze id — and let go together, so
+// both race its id's assignment and then its claim; neither can have assigned
+// the id before the other read the row.
 func TestServeTwoLegacyLoadsAtOnceOneWins(t *testing.T) {
 	env, ws := serveHome(t)
 	t.Setenv("CRAZE_FAKE_SCRIPT", "load")
 	seedIndexRow(t, sessions.Row{SessionID: "legacy-1", Provider: "cursor", CWD: absDir(ws)})
 	fake := fakeAgentPath(t)
+	arrived, release := holdLoaders(t)
 	a := runServeIn(t, hostEnv{}, "--agent-bin", fake, "--load", "cursor:legacy-1")
 	b := runServeIn(t, hostEnv{}, "--agent-bin", fake, "--load", "cursor:legacy-1")
+	// Before runServeIn's own cleanups: a test that fails while a loader is
+	// held lets it go, so it can still return.
+	t.Cleanup(release)
+	for i := range 2 {
+		select {
+		case row := <-arrived:
+			if row.SessionID != "legacy-1" || row.CrazeID != "" {
+				t.Fatalf("a loader read %+v, want the legacy row with no craze id yet", row)
+			}
+		case <-time.After(serveStep):
+			t.Fatalf("%d of the two loaders read the row within %v", i, serveStep)
+		}
+	}
+	release()
 
 	var loser, winner *serveRun
 	select {
@@ -1111,5 +1148,256 @@ func TestServeInAProcessOfItsOwn(t *testing.T) {
 	}
 	if out := c.output.String(); out != "" {
 		t.Fatalf("with --log the host wrote to its stderr: %q", out)
+	}
+}
+
+// unusableLocks makes the session locks' directory one craze refuses — 0755,
+// where every leaf of the cache tree must be 0700 — while the registry beside
+// it stays usable: a claim cannot even be attempted, and a bind can.
+func unusableLocks(t *testing.T, env rundir.Env) {
+	t.Helper()
+	if _, err := rundir.HostLogDir(env); err != nil {
+		t.Fatal(err)
+	}
+	locks := filepath.Join(env.Home, ".cache", "craze", "locks")
+	if err := os.Mkdir(locks, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(locks, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if c, err := rundir.ClaimSession(env, "0199aaaa-bbbb-7ccc-8ddd-0000000000aa", rundir.NewHostID()); err == nil {
+		_ = c.Release()
+		t.Fatal("fixture: the locks directory is still usable")
+	}
+}
+
+// TestServeDoesNotRunUnclaimed (astra r3-c2 1): a session craze serve cannot
+// claim — here a locks directory craze refuses, with the registry beside it
+// usable — is exit 1 for serve, where the TUI warns and runs unclaimed (X30,
+// TestOnlyARequiredClaimRefusesAnUnusableLockTree): a new session, a load by
+// craze id, a legacy row and --continue alike. Nothing is left behind: no
+// registry entry, host lock or socket (a new session bound its socket before
+// its engine minted the id to claim), no load built, no new session started
+// (the index holds no row of it), and the refusal is in the log.
+func TestServeDoesNotRunUnclaimed(t *testing.T) {
+	const id = "0199aaaa-bbbb-7ccc-8ddd-000000000051"
+	for _, tc := range []struct {
+		name string
+		argv []string
+		rows []sessions.Row
+	}{
+		{name: "a new session", argv: []string{"--provider", "cursor"}},
+		{name: "--load a craze id", argv: []string{"--load", id},
+			rows: []sessions.Row{{SessionID: "u-1", Provider: "cursor", CrazeID: id}}},
+		{name: "--load a legacy row", argv: []string{"--load", "cursor:u-2"},
+			rows: []sessions.Row{{SessionID: "u-2", Provider: "cursor"}}},
+		{name: "--continue", argv: []string{"--continue"},
+			rows: []sessions.Row{{SessionID: "u-3", Provider: "cursor", CrazeID: id}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env, ws := serveHome(t)
+			t.Setenv("CRAZE_FAKE_SCRIPT", "echo")
+			for _, row := range tc.rows {
+				row.CWD = absDir(ws)
+				seedIndexRow(t, row)
+			}
+			unusableLocks(t, env)
+			built := recordBuilt(t)
+			logPath := filepath.Join(t.TempDir(), "host.log")
+			argv := append([]string{"--agent-bin", fakeAgentPath(t), "--workspace", ws, "--log", logPath}, tc.argv...)
+			r := runServeIn(t, hostEnv{}, argv...)
+			code, msg := exitCode(t, r.result(t, serveStep))
+			if code != 1 || !strings.HasPrefix(msg, "craze serve: the session cannot be claimed: ") {
+				t.Fatalf("exit %d %q, want exit 1, the session cannot be claimed", code, msg)
+			}
+			if left, _ := filepath.Glob(filepath.Join(env.Home, ".cache", "craze", "hosts", "*")); len(left) != 0 {
+				t.Fatalf("an unclaimed host left %q", left)
+			}
+			if left, _ := filepath.Glob(filepath.Join(os.Getenv("CRAZE_RUNTIME_DIR"), "*", "*.sock")); len(left) != 0 {
+				t.Fatalf("an unclaimed host left its socket: %q", left)
+			}
+			select {
+			case o := <-built:
+				if tc.rows != nil {
+					t.Fatalf("an unclaimed load built its session: %+v", o)
+				}
+			default:
+				if tc.rows == nil {
+					t.Fatal("a new session is claimed once its engine has minted its id: none was built")
+				}
+			}
+			if tc.rows == nil {
+				if _, ok, err := (&sessions.Store{}).Latest(absDir(ws), ""); ok || err != nil {
+					t.Fatalf("an unclaimed new session wrote an index row: %v, %v", ok, err)
+				}
+			}
+			if b, err := os.ReadFile(logPath); err != nil || !strings.Contains(string(b), msg) {
+				t.Fatalf("the log: %q, %v; want %q in it", b, err, msg)
+			}
+		})
+	}
+}
+
+// failingIndex is a session index that cannot give a row its craze id.
+type failingIndex struct{}
+
+func (failingIndex) EnsureCrazeID(sessions.Row, time.Duration) (string, error) {
+	return "", errors.New("the index is read-only")
+}
+
+// TestOnlyARequiredClaimRefusesAnUnusableLockTree: the claim a lock tree craze
+// refuses cannot take, and the legacy row an index that cannot be written
+// cannot give an id, are the TUI's warnings — it runs unclaimed (X30), as it
+// always has — and craze serve's refusals (sessionClaims.required): an
+// *unclaimedError, saying nothing on the log itself. A new session's id is
+// refused the same way (require).
+func TestOnlyARequiredClaimRefusesAnUnusableLockTree(t *testing.T) {
+	env, ws := serveHome(t)
+	unusableLocks(t, env)
+	withID := sessions.Row{SessionID: "r-1", Provider: "cursor", CWD: absDir(ws), CrazeID: "0199aaaa-bbbb-7ccc-8ddd-000000000061"}
+	legacy := sessions.Row{SessionID: "r-2", Provider: "cursor", CWD: absDir(ws)}
+	seedIndexRow(t, withID)
+	seedIndexRow(t, legacy)
+	claims := func(required bool, index crazeIDIndex) (*sessionClaims, *lockedBuffer) {
+		diag := &lockedBuffer{}
+		c := newSessionClaims(env, rundir.NewHostID(), diag)
+		c.required = required
+		if index != nil {
+			c.index = index
+		}
+		t.Cleanup(c.releaseAll)
+		return c, diag
+	}
+	for _, tc := range []struct {
+		name  string
+		row   sessions.Row
+		index crazeIDIndex
+		// rootID is the id the TUI loads the row under, unclaimed.
+		rootID string
+	}{
+		{"a row with its id", withID, nil, withID.CrazeID},
+		{"a legacy row given its id", legacy, nil, "(minted)"},
+		{"a legacy row the index cannot give one", legacy, failingIndex{}, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root, rootDiag := claims(false, tc.index)
+			id, release, err := root.claimRow(tc.row)
+			if err != nil || release == nil || (tc.rootID != "(minted)" && id != tc.rootID) || (tc.rootID == "(minted)" && id == "") {
+				t.Fatalf("the TUI's claim: %q, %v; want it to run unclaimed under %q", id, err, tc.rootID)
+			}
+			if !strings.HasPrefix(rootDiag.String(), "craze: session lock not taken: ") {
+				t.Fatalf("the TUI's claim said %q, want its warning", rootDiag)
+			}
+			serve, serveDiag := claims(true, tc.index)
+			if _, _, err := serve.claimRow(tc.row); unclaimedBy(err) == nil {
+				t.Fatalf("craze serve's claim: %v, want an *unclaimedError", err)
+			}
+			if serveDiag.String() != "" {
+				t.Fatalf("craze serve's refused claim warned too: %q", serveDiag)
+			}
+		})
+	}
+	serve, _ := claims(true, nil)
+	if err := serve.require("0199aaaa-bbbb-7ccc-8ddd-000000000062"); err == nil {
+		t.Fatal("craze serve's new session was claimed on a lock tree craze refuses")
+	}
+}
+
+// TestServeNeverSweepsItsOwnLog (astra r3-c2 3): a --log in the host logs'
+// directory that a gone host left a week and a day ago — a host id's name,
+// that host long dead — is the host's own log from its start: its own sweep,
+// which runs before the log opens, keeps it and the host appends to it; and
+// another host's sweep while it serves keeps it too (it is opened fresh:
+// TestHostLogIsOpenedFresh pins the instant before its first line). The
+// host's last line lands in that very file.
+func TestServeNeverSweepsItsOwnLog(t *testing.T) {
+	env, ws := serveHome(t)
+	dir, err := rundir.HostLogDir(env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reused := filepath.Join(dir, rundir.NewHostID()+".log")
+	if err := os.WriteFile(reused, []byte("a week and a day ago\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-8 * 24 * time.Hour)
+	if err := os.Chtimes(reused, old, old); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CRAZE_FAKE_SCRIPT", "echo")
+	r := runServeIn(t, hostEnv{}, "--agent-bin", fakeAgentPath(t), "--workspace", ws, "--log", reused)
+	e := r.waitServing(t, env, false)
+	if !fileExists(reused) {
+		t.Fatal("the host's start-up sweep removed its own log")
+	}
+	// Another host starting now sweeps as this one did.
+	if _, err := rundir.SweepHostLogs(env, time.Now(), hostLogKeep, ""); err != nil {
+		t.Fatal(err)
+	}
+	if !fileExists(reused) {
+		t.Fatal("another host's sweep removed a log in use")
+	}
+	r.sigs <- syscall.SIGTERM
+	if err := r.result(t, serveStep); err != nil {
+		t.Fatal(err)
+	}
+	assertHostGone(t, env, e)
+	b, err := os.ReadFile(reused)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(b); !strings.HasPrefix(got, "a week and a day ago\n") ||
+		!strings.Contains(got, "craze serve: host "+e.HostID+" serving session") ||
+		!strings.Contains(got, "craze serve: stopping: SIGTERM") {
+		t.Fatalf("the reused log holds %q", got)
+	}
+}
+
+// TestServeCrashOutputSurvivesAPanic (astra r3-c2 4): a panic on craze serve's
+// own goroutine — forced in a process of its own, once the host serves — is
+// printed into its log, which a spawned host's stderr (/dev/null) never is:
+// the log is not closed on a panic's way out, so the runtime's crash output is
+// still on it when the panic is printed. The same after a rotation, which
+// moves the crash output to the new log.
+func TestServeCrashOutputSurvivesAPanic(t *testing.T) {
+	const forced = "craze test: a forced panic"
+	for _, rotated := range []bool{false, true} {
+		name := "a fresh log"
+		if rotated {
+			name = "after a rotation"
+		}
+		t.Run(name, func(t *testing.T) {
+			env, ws := serveHome(t)
+			t.Setenv("CRAZE_FAKE_SCRIPT", "echo")
+			t.Setenv(cliChildPanic, forced)
+			dir, err := rundir.HostLogDir(env)
+			if err != nil {
+				t.Fatal(err)
+			}
+			logPath := filepath.Join(dir, "crash.log")
+			if rotated {
+				// A log holding a line already, and a cap its host's first line
+				// passes: that line rotates it.
+				t.Setenv(cliChildLogMax, "64")
+				if err := os.WriteFile(logPath, []byte("before the host\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			c := startCrazeChild(t, "serve", "--agent-bin", fakeAgentPath(t), "--workspace", ws, "--provider", "cursor", "--log", logPath)
+			if code := c.wait(t, serveStep); code != 2 {
+				t.Fatalf("exit %d, want 2 for a panic; output: %s", code, c.output)
+			}
+			if !strings.Contains(c.output.String(), "panic: "+forced) {
+				t.Fatalf("the panic is not on stderr either: %s", c.output)
+			}
+			got := readLog(t, logPath)
+			if !strings.Contains(got, "craze serve: host ") || !strings.Contains(got, "panic: "+forced) || !strings.Contains(got, "goroutine ") {
+				t.Fatalf("the log holds %q; want the host's line, then the panic and its goroutines", got)
+			}
+			if rotation := readLog(t, logPath+".1"); rotated != (rotation == "before the host\n") {
+				t.Fatalf("the rotation holds %q (rotated %v)", rotation, rotated)
+			}
+		})
 	}
 }

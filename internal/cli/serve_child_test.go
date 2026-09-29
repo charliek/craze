@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strconv"
 	"syscall"
 	"testing"
 	"time"
@@ -20,6 +21,16 @@ import (
 // cliChildEnv carries the child's argv (a JSON array, without "craze").
 const cliChildEnv = "CRAZE_CLI_TEST_CHILD"
 
+// The child's test hooks, each set in its environment by the test that wants
+// it, and read by init before the command runs:
+const (
+	// cliChildPanic makes craze serve panic with this message once it serves
+	// (serveServing), on its own goroutine: the crash-output test.
+	cliChildPanic = "CRAZE_CLI_TEST_PANIC"
+	// cliChildLogMax is the host log's rotation size in bytes (hostLogMax).
+	cliChildLogMax = "CRAZE_CLI_TEST_LOG_MAX"
+)
+
 func init() {
 	raw, ok := os.LookupEnv(cliChildEnv)
 	if !ok {
@@ -28,6 +39,19 @@ func init() {
 	// Not the agent's to inherit: the fake agent is another binary, but a
 	// grandchild of this one must never run as craze by accident.
 	_ = os.Unsetenv(cliChildEnv)
+	if msg, ok := os.LookupEnv(cliChildPanic); ok {
+		_ = os.Unsetenv(cliChildPanic)
+		serveServing = func() { panic(msg) }
+	}
+	if size, ok := os.LookupEnv(cliChildLogMax); ok {
+		_ = os.Unsetenv(cliChildLogMax)
+		n, err := strconv.ParseInt(size, 10, 64)
+		if err != nil || n <= 0 {
+			fmt.Fprintln(os.Stderr, "craze test child: bad", cliChildLogMax, size)
+			os.Exit(97)
+		}
+		hostLogMax = n
+	}
 	var argv []string
 	if err := json.Unmarshal([]byte(raw), &argv); err != nil {
 		fmt.Fprintln(os.Stderr, "craze test child:", err)

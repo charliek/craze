@@ -53,7 +53,7 @@ func TestHostLogDirIsMade0700InTheCacheTree(t *testing.T) {
 func TestSweepHostLogsRemovesOnlyAGoneHostsOldLogs(t *testing.T) {
 	env := testEnv(t)
 	now := time.Now()
-	if n, err := SweepHostLogs(env, now, time.Hour); n != 0 || err != nil {
+	if n, err := SweepHostLogs(env, now, time.Hour, ""); n != 0 || err != nil {
 		t.Fatalf("no directory: %d, %v", n, err)
 	}
 	if _, err := os.Lstat(filepath.Join(env.Home, ".cache")); !os.IsNotExist(err) {
@@ -94,7 +94,7 @@ func TestSweepHostLogsRemovesOnlyAGoneHostsOldLogs(t *testing.T) {
 	mkdir(t, sub, 0o700)
 	kept = append(kept, sub)
 
-	n, err := SweepHostLogs(env, now, time.Hour)
+	n, err := SweepHostLogs(env, now, time.Hour, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -124,5 +124,95 @@ func TestSweepHostLogsRemovesOnlyAGoneHostsOldLogs(t *testing.T) {
 	}
 	if !slices.Contains(names, live+".log") {
 		t.Fatalf("the live host's log went: %q", names)
+	}
+}
+
+// TestSweepHostLogsDecidesDeathByTheHostLock (astra r3-c2 2): whether a host is
+// gone is its own lock's answer, never the registry listing's. A live host
+// whose entry cannot be read, or is not JSON — both of which Hosts leaves out
+// — keeps every file while its lock is held; so does a host whose lock cannot
+// be opened, which cannot be told. A dead host whose lock is still there
+// (killed: nothing unlinked) and a host with no lock at all are gone, and
+// their files go; the dead host's lock, taken for the sweep, is let go again.
+// The name the sweeping host keeps (its own log, about to be opened) stays
+// whatever its age.
+func TestSweepHostLogsDecidesDeathByTheHostLock(t *testing.T) {
+	env := testEnv(t)
+	now := time.Now()
+	dir, err := HostLogDir(env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := now.Add(-2 * time.Hour)
+	aged := func(id string) []string {
+		t.Helper()
+		var ps []string
+		for _, suffix := range []string{".log", ".log.1", ".pgids"} {
+			p := filepath.Join(dir, id+suffix)
+			writeFile(t, p, "x")
+			if err := os.Chtimes(p, old, old); err != nil {
+				t.Fatal(err)
+			}
+			ps = append(ps, p)
+		}
+		return ps
+	}
+
+	// Two live hosts, their locks held, whose entries Hosts cannot list.
+	unreadable, malformed := bind(t, env), bind(t, env)
+	chmod(t, filepath.Join(hostsDir(env), unreadable.ID()+".json"), 0)
+	writeFile(t, filepath.Join(hostsDir(env), malformed.ID()+".json"), "{")
+	if listed, err := Hosts(env); err != nil || len(listed) != 0 {
+		t.Fatalf("Hosts lists %q, %v; the test wants both live hosts left out", entries(listed), err)
+	}
+	var kept, removed []string
+	kept = append(kept, aged(unreadable.ID())...)
+	kept = append(kept, aged(malformed.ID())...)
+
+	// A host killed: its lock and entry are still there, and nobody holds it.
+	killed := bind(t, env)
+	killed.die()
+	removed = append(removed, aged(killed.ID())...)
+	// A host with no lock at all.
+	removed = append(removed, aged(NewHostID())...)
+	// A host whose lock cannot be opened: not known to be gone.
+	if os.Geteuid() != 0 {
+		unknown := bind(t, env)
+		unknown.die()
+		chmod(t, filepath.Join(hostsDir(env), unknown.ID()+".lock"), 0)
+		kept = append(kept, aged(unknown.ID())...)
+	}
+	// The sweeping host's own log, reused: old, and its host has no lock.
+	own := NewHostID() + ".log"
+	kept = append(kept, filepath.Join(dir, own))
+	writeFile(t, kept[len(kept)-1], "x")
+	if err := os.Chtimes(kept[len(kept)-1], old, old); err != nil {
+		t.Fatal(err)
+	}
+
+	n, err := SweepHostLogs(env, now, time.Hour, own)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range removed {
+		if _, err := os.Lstat(p); !os.IsNotExist(err) {
+			t.Fatalf("%s survived the sweep: %v", filepath.Base(p), err)
+		}
+	}
+	for _, p := range kept {
+		if _, err := os.Lstat(p); err != nil {
+			t.Fatalf("%s was swept: %v", filepath.Base(p), err)
+		}
+	}
+	if n != len(removed) {
+		t.Fatalf("removed %d, want %d", n, len(removed))
+	}
+	lock, err := os.OpenFile(filepath.Join(hostsDir(env), killed.ID()+".lock"), os.O_RDWR, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Close()
+	if taken, err := tryLock(lock); err != nil || !taken {
+		t.Fatalf("the dead host's lock is still held after the sweep: %v, %v", taken, err)
 	}
 }
