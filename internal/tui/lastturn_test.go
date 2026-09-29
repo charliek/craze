@@ -3,9 +3,12 @@ package tui
 import (
 	"errors"
 	"slices"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/charliek/craze/internal/agent"
 	"github.com/charliek/craze/internal/backend"
@@ -128,6 +131,66 @@ func TestAFailedTurnShowsFailedAfterARestore(t *testing.T) {
 	if mark := r.m.windowTitle(); mark[:len(titleMarkError)] != titleMarkError {
 		t.Fatalf("the tab title %q is not marked failed", mark)
 	}
+}
+
+// TestAFailureOutlivesTheSessionComingUp (plan 030 §3.7; sol r10-c6 1): Init
+// runs the start and the stream's reader side by side, so over a socket the
+// attach's restore, the read of the last ending it sends, and the stream's
+// own events can all land before the start's answer does. A failure either
+// put on the model is the session's word about its last turn, and the
+// session coming up after it (sessionUp) leaves it standing: failed, with its
+// error, the tab title marked. Each schedule is forced: the start's answer is
+// held (restoredBeforeStart) and handed in last.
+func TestAFailureOutlivesTheSessionComingUp(t *testing.T) {
+	up := func(t *testing.T, r *gateRig, started tea.Msg) {
+		t.Helper()
+		if r.m.status != statusError || r.m.sessionReady() {
+			t.Fatalf("fixture: before the start's answer the model is %s (ready %v), want the failure and not up", r.m.status, r.m.sessionReady())
+		}
+		r.send(started)
+		if !r.m.sessionReady() || !r.m.upDone {
+			t.Fatalf("the start's answer did not bring the session up (ready %v, up %v)", r.m.sessionReady(), r.m.upDone)
+		}
+		if r.m.status != statusError || r.m.err != errTurnFailed.Error() {
+			t.Fatalf("the session coming up left the model %s (%q), want the failure %q", r.m.status, r.m.err, errTurnFailed)
+		}
+		if mark := r.m.windowTitle(); !strings.HasPrefix(mark, titleMarkError) {
+			t.Fatalf("the tab title %q is not marked failed", mark)
+		}
+	}
+
+	t.Run("the read after the restore", func(t *testing.T) {
+		h, _ := hostWithAFailedTurn(t, control.Options{Workspace: "/work"})
+		ws := frameWorkspace(t)
+		r, started := restoredBeforeStart(t, Config{Backend: dialHost(t, h, ws), Theme: "tokyo-night", Workspace: ws, Yolo: true}, nil)
+		msg := heldLastTurn(t, r)
+		if msg.last == nil || msg.last.Outcome != engine.TurnFailed {
+			t.Fatalf("fixture: the read answered %+v (%v), want the failed ending", msg.last, msg.err)
+		}
+		r.send(msg)
+		up(t, r, started)
+	})
+
+	t.Run("a turn's failure on the stream", func(t *testing.T) {
+		sess := &scriptedSession{Stub: NewStubNoPrimary(), cancels: make(chan struct{})}
+		h := newAttachHostWith(t, sess, sess.Stub, true, control.Options{Workspace: "/work"})
+		turn := scriptFailed(errTurnFailed).held()
+		t.Cleanup(turn.Release)
+		sess.Script(turn)
+		if _, err := h.eng.Submit(engine.Command{Client: h.eng.NewClientID(), ID: "1"}, "go", engine.SubmitQueue, ""); err != nil {
+			t.Fatalf("the host's turn: %v", err)
+		}
+		awaitBarrier(t, turn.opened, "the host's turn opening")
+		waitHost(t, "its turn running", func() bool { return h.eng.State().Turn != "" })
+		ws := frameWorkspace(t)
+		r, started := restoredBeforeStart(t, Config{Backend: dialHost(t, h, ws), Theme: "tokyo-night", Workspace: ws, Yolo: true}, nil)
+		if r.m.status != statusWorking || r.m.turnID == "" {
+			t.Fatalf("fixture: the restore left the model %s (turn %q), want the host's turn running", r.m.status, r.m.turnID)
+		}
+		turn.Release()
+		readUntilTurnEnded(t, r)
+		up(t, r, started)
+	})
 }
 
 // TestALaterEndingTakesTheFailureAway (§3.7): a model showing a failure a
@@ -275,7 +338,10 @@ func (b *movableEpoch) Epoch() uint64 { return b.Backend.Epoch() + b.by.Load() }
 // harness's socket host attaches its model before its engine starts, so no
 // turn can end before the attach there; this test's host is its own, served
 // on its own socket, and its model's backend is that socket
-// (golden_manifest_test.go lists it so).
+// (golden_manifest_test.go lists it so). That host is built before its run
+// starts, so it serves no StartedAt of its own: the restored model counts its
+// elapsed from its own run's start, as the live one does (frameStart) — one
+// rule for both frames, however long either run takes (sol r10-c6 2).
 func TestARestoreShowsTheFailedLastTurn(t *testing.T) {
 	isolateSkillsHome(t)
 	ws := frameWorkspace(t)
@@ -289,7 +355,7 @@ func TestARestoreShowsTheFailedLastTurn(t *testing.T) {
 		t.Fatalf("the live failure: %v", err)
 	}
 
-	h, _ := hostWithAFailedTurn(t, control.Options{Workspace: ws, PermissionMode: framePermissionMode(true), StartedAt: time.Now()})
+	h, _ := hostWithAFailedTurn(t, control.Options{Workspace: ws, PermissionMode: framePermissionMode(true)})
 	be := engineOnly{Backend: dialHost(t, h, ws), eng: h.eng}
 	got, _, err := RunFrameScript(Config{Backend: be, Theme: "tokyo-night", Workspace: ws, Model: "grok", Yolo: true},
 		80, 24, "<wait:text:"+errTurnFailed.Error()+">", opts)

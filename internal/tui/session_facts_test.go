@@ -49,6 +49,21 @@ func dialHost(t *testing.T, h *attachHost, ws string) *remote.Session {
 // is the model's clock from before its start.
 func upOverTheSocket(t *testing.T, cfg Config, clock func() time.Time) *gateRig {
 	t.Helper()
+	r, started := restoredBeforeStart(t, cfg, clock)
+	r.send(started)
+	if !r.m.sessionReady() || len(r.lastTurns) != 1 {
+		t.Fatalf("the session is not up (ready %v), or its restore sent %d reads of the last ending, want 1", r.m.sessionReady(), len(r.lastTurns))
+	}
+	return r
+}
+
+// restoredBeforeStart is upOverTheSocket short of its last step: the start
+// has answered, and that answer (a startedMsg) is handed back unapplied, so
+// the session is not up yet — the order Init's start and stream reader,
+// running side by side, can deliver them in. The attach's restore is applied
+// and the read of the last ending it sent is held (r.lastTurns).
+func restoredBeforeStart(t *testing.T, cfg Config, clock func() time.Time) (*gateRig, tea.Msg) {
+	t.Helper()
 	isolateSkillsHome(t)
 	tm, _ := New(cfg).Update(tea.WindowSizeMsg{Width: 80, Height: 24})
 	m := asyncGate(t, tm.(Model))
@@ -65,11 +80,10 @@ func upOverTheSocket(t *testing.T, cfg Config, clock func() time.Time) *gateRig 
 		t.Fatal("the stream's first item is not the attach's restore")
 	}
 	r.send(restore)
-	r.send(started)
-	if !r.m.sessionReady() || len(r.lastTurns) != 1 {
-		t.Fatalf("the session is not up (ready %v), or its restore sent %d reads of the last ending, want 1", r.m.sessionReady(), len(r.lastTurns))
+	if r.m.sessionReady() || len(r.lastTurns) != 1 {
+		t.Fatalf("the session is up before its start's answer (ready %v), or its restore sent %d reads of the last ending, want 1", r.m.sessionReady(), len(r.lastTurns))
 	}
-	return r
+	return r, started
 }
 
 // TestTheChipIsTheHostsPermissionMode (plan 030 §3.7, SF-60, AC7): over the
@@ -118,13 +132,15 @@ func TestTheChipIsTheHostsPermissionMode(t *testing.T) {
 
 // TestTheSocketHarnessServesThePlan030Facts: the socket goldens' host serves
 // the info document a plan 030 host does — the permission mode of the
-// builder's Config.Yolo, and its start — so every golden's chip and elapsed
+// builder's Config.Yolo, and its start: exactly the run's start it is
+// handed, the instant an in-process run counts from too
+// (TestTheElapsedIsTheSameByTransport) — so every golden's chip and elapsed
 // read over the socket from the host's word, byte-identical with the
 // in-process runs' own.
 func TestTheSocketHarnessServesThePlan030Facts(t *testing.T) {
+	start := time.Date(2026, 9, 29, 9, 0, 0, 0, time.UTC)
 	for _, yolo := range []bool{true, false} {
-		before := time.Now()
-		fh, err := buildSocketHost(Config{Session: NewStubNoPrimary(), Workspace: frameWorkspace(t), Yolo: yolo})
+		fh, err := buildSocketHost(Config{Session: NewStubNoPrimary(), Workspace: frameWorkspace(t), Yolo: yolo}, start)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -133,8 +149,8 @@ func TestTheSocketHarnessServesThePlan030Facts(t *testing.T) {
 		if yolo {
 			want = backend.PermissionBypass
 		}
-		if info.PermissionMode != want || info.StartedAt.Before(before.Add(-time.Second)) || info.StartedAt.After(time.Now()) {
-			t.Errorf("yolo %v: the harness host says %q, started %s; want %q, started just now", yolo, info.PermissionMode, info.StartedAt, want)
+		if info.PermissionMode != want || !info.StartedAt.Equal(start) {
+			t.Errorf("yolo %v: the harness host says %q, started %s; want %q, started %s", yolo, info.PermissionMode, info.StartedAt, want, start)
 		}
 		if err := fh.end(); err != nil {
 			t.Fatal(err)
@@ -174,6 +190,30 @@ func TestElapsedCountsFromTheHostsStart(t *testing.T) {
 				t.Fatalf("status row 1 %q does not end with the elapsed %q", row, tc.want)
 			}
 		})
+	}
+}
+
+// TestTheElapsedIsTheSameByTransport (plan 030 §3.7, SF-63; sol r10-c6 2): a
+// golden holds its socket run and its in-process runs to one frame, and the
+// elapsed on it is the host's word over the socket (its StartedAt) and the
+// model's own count in process — so both count from one instant, the frame
+// run's start, and read the same however long a run takes. Two instants a
+// moment apart differ on screen only when a minute boundary falls between
+// them, which no run can be made to meet on demand; so the shared start is
+// pinned an hour back (FrameOpts.sessionStart) and the difference is made to
+// show: every run reads 1h00m (for a matrix shorter than a minute), and a
+// transport counting from any other instant — a socket host's own clock, the
+// moment an in-process session came up — reads 0m, and the runs disagree.
+func TestTheElapsedIsTheSameByTransport(t *testing.T) {
+	isolateSkillsHome(t)
+	plain, _, err := runFrameModes(t, func() Config {
+		return Config{Session: frameStub(), Theme: "tokyo-night", Workspace: frameWorkspace(t), Model: "grok", Yolo: true}
+	}, 80, 24, "<wait:idle>", FrameOpts{Timeout: 10 * time.Second, sessionStart: time.Now().Add(-time.Hour)})
+	if err != nil {
+		t.Fatalf("the runs: %v", err)
+	}
+	if !strings.Contains(plain, "│ 1h00m") {
+		t.Fatalf("the frame's elapsed does not count from the pinned start (1h00m):\n%s", plain)
 	}
 }
 

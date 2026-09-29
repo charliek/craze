@@ -330,7 +330,8 @@ type Model struct {
 	// the model's (followWorkspace); branch is re-read when a turn ends.
 	git    gitInfo
 	branch string
-	// sessStart is when Start returned, which is what the status row's
+	// sessStart is when the session came up (sessionUp; a frame run's own
+	// start in a frame run, frameStart), which is what the status row's
 	// elapsed counts from when the session's host does not say when it
 	// started (hostStart).
 	sessStart time.Time
@@ -709,6 +710,14 @@ type Model struct {
 	// the clock still moves, so double-clicks, the Ctrl+C window and the
 	// lingers behave exactly as they do in a live session.
 	frozen bool
+	// frameStart is the frame runner's start (RunFrameScript), zero outside
+	// a frame run: the session's start its elapsed counts from when its host
+	// does not say (sessionUp), in place of the moment it came up — so an
+	// in-process run counts from the instant a socket run's host serves as
+	// its StartedAt, and a frame's elapsed is the same by transport however
+	// long its run takes (plan 030 §3.7, SF-63; sol r10-c6 2). Like frozen,
+	// the clock itself is left alone.
+	frameStart time.Time
 
 	// terminalTitle is Config.TerminalTitle: the off switch. false means the
 	// Update wrapper never computes or emits a title at all, which is what
@@ -4286,8 +4295,8 @@ func (m Model) modeSettled(gen int, value string, rev uint64) Model {
 func (m Model) sessionReady() bool { return m.started && !m.replaying }
 
 // sessionUp is the tail startedMsg used to run alone: the status goes idle —
-// unless a restore said a turn is running — the elapsed counter starts and the
-// skills are rescanned. It is called from both keys and does nothing until
+// unless the session already said otherwise — the elapsed counter starts and
+// the skills are rescanned. It is called from both keys and does nothing until
 // both have landed, and it runs once (upDone): however they are ordered, and
 // when a replay a socket's stream is still draining closes the gate again after
 // the session came up (the replay-start arm).
@@ -4300,15 +4309,27 @@ func (m *Model) sessionUp() {
 		return
 	}
 	m.upDone = true
-	// A restore that says a turn is running set the working status and the
-	// turn it names (restore.go): the session coming up does not end it. In
-	// process no turn can be running before the session is up — the engine
-	// admits nothing before its Start has returned — so this is idle there,
-	// as it always was.
-	if m.status != statusWorking || m.turnID == "" {
+	// What the session said before it came up stands: its coming up ends
+	// neither a turn running nor a failure. A restore that says a turn is
+	// running set the working status and the turn it names (restore.go). A
+	// failure set the error state — the last ending the read after a restore
+	// applied (lastturn.go), or a turn's failure the stream delivered: Init
+	// runs the start and the stream's reader side by side, so over a socket
+	// either can land before Start's answer does (plan 030 §3.7; sol r10-c6
+	// 1). In process no turn can be running or have failed before the
+	// session is up — the engine admits nothing before its Start has
+	// returned, and a start that failed never comes up (errMsg) — so this is
+	// idle there, as it always was.
+	if m.status != statusError && (m.status != statusWorking || m.turnID == "") {
 		m.status = statusIdle
 	}
+	// A frame run counts from its runner's own start (frameStart), the
+	// instant its socket host serves as its StartedAt, so the elapsed a
+	// frame shows is the same by transport.
 	m.sessStart = m.now()
+	if !m.frameStart.IsZero() {
+		m.sessStart = m.frameStart
+	}
 	m.rescanSkills()
 }
 

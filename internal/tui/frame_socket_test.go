@@ -192,8 +192,9 @@ type socketHostHookSet struct {
 }
 
 // buildSocketHost is frameSocketHook: steps 1–3 above around cfg, whose
-// session the builder made NoPrimary.
-func buildSocketHost(cfg Config) (*frameHost, error) {
+// session the builder made NoPrimary, its host serving startedAt — the run's
+// start — as the session's StartedAt.
+func buildSocketHost(cfg Config, startedAt time.Time) (*frameHost, error) {
 	sess := cfg.Session
 	if sess == nil {
 		return nil, errors.New("the socket run needs the session its builder made (Config.Session)")
@@ -235,15 +236,16 @@ func buildSocketHost(cfg Config) (*frameHost, error) {
 	path := filepath.Join(h.dir, "s")
 	// The info document says what a plan 030 host says (§3.7): the
 	// permission mode the builder's Config gives the in-process runs
-	// (Config.Yolo), and the host's start — now, as the in-process runs'
-	// elapsed counts from their own start a moment later — so every golden's
-	// chip and elapsed read the same over the socket, from the host's word,
-	// as in process from the model's own.
+	// (Config.Yolo), and the host's start — the run's start, the one instant
+	// an in-process run's elapsed counts from too (RunFrameScript,
+	// frameStart; sol r10-c6 2) — so every golden's chip and elapsed read the
+	// same over the socket, from the host's word, as in process from the
+	// model's own, however long a run takes.
 	h.srv = control.New(control.Options{
 		Workspace:      ws,
 		MaxBudget:      frameBudget,
 		PermissionMode: framePermissionMode(cfg.Yolo),
-		StartedAt:      time.Now(),
+		StartedAt:      startedAt,
 	})
 	h.srv.SetEngine(eng)
 	l, err := net.Listen("unix", path)
@@ -861,7 +863,7 @@ func TestASocketRunFailsOnAnyReset(t *testing.T) {
 	if host == nil {
 		t.Fatal("fixture: no socket host was built")
 	}
-	assertOneOmission(t, host, err)
+	assertOneOmission(t, host, err, 1)
 	if !strings.Contains(err.Error(), "(a re-attach)") {
 		t.Fatalf("the re-attach the reset brought went unremarked: %v", err)
 	}
@@ -870,9 +872,13 @@ func TestASocketRunFailsOnAnyReset(t *testing.T) {
 
 // assertOneOmission fails t unless err is the run failing on the reset that
 // one omitted record brings, and the tap saw exactly what the protocol allows
-// for it (§3.4's table, X22): one or two resets, every one omitted, and one or
-// two re-attaches beside the first attach.
-func assertOneOmission(t *testing.T, h *socketHost, err error) {
+// for it (§3.4's table, X22): one or two resets, every one omitted, and at
+// most two re-attaches beside the first attach — at least reattached of them.
+// The floor is the caller's: the client's re-attach is posted off its reader
+// (remote's resetLocked), so a run whose shutdown follows at once on the
+// reader's reading the reset can close the connection before the re-attach is
+// ever written (TestNoResetEscapesTheSocketRunsVerdict).
+func assertOneOmission(t *testing.T, h *socketHost, err error, reattached int) {
 	t.Helper()
 	if err == nil || !strings.Contains(err.Error(), "the host reset the stream: [omitted") {
 		t.Fatalf("a run whose host reset its stream passed, or failed otherwise: %v", err)
@@ -886,8 +892,8 @@ func assertOneOmission(t *testing.T, h *socketHost, err error) {
 			t.Fatalf("the host reset the stream for %q, want only omitted: %v", r, resets)
 		}
 	}
-	if re := attaches - 1; re < 1 || re > 2 {
-		t.Fatalf("one omission brought %d re-attaches, want one or two (at most two per omission)", re)
+	if re := attaches - 1; re < reattached || re > 2 {
+		t.Fatalf("one omission brought %d re-attaches, want %d to two (at most two per omission)", re, reattached)
 	}
 }
 
@@ -901,7 +907,7 @@ func assertOneOmission(t *testing.T, h *socketHost, err error) {
 func TestASocketRunsHostIsReachedThroughItsSession(t *testing.T) {
 	isolateSkillsHome(t)
 	stub := buildFor(transportSocket, frameStub)
-	host, err := buildSocketHost(Config{Session: stub, CrazeSessionID: "018f-the-row", Theme: "tokyo-night", Workspace: frameWorkspace(t), Yolo: true})
+	host, err := buildSocketHost(Config{Session: stub, CrazeSessionID: "018f-the-row", Theme: "tokyo-night", Workspace: frameWorkspace(t), Yolo: true}, time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -993,8 +999,16 @@ func TestNoResetEscapesTheSocketRunsVerdict(t *testing.T) {
 			}
 			switch {
 			case tc.omitted:
-				// One omission: one or two resets and re-attaches (X22).
-				assertOneOmission(t, host, err)
+				// One omission: one or two resets (X22), and the run fails
+				// on the one it read. Not a re-attach floor: the reader,
+				// released from its hold, reads the reset — which posts the
+				// re-attach, off the reader — and then the barrier's reply,
+				// and the run goes straight on to its view close, which can
+				// close the connection before the posted re-attach is
+				// written (the -race gate's run on C6r saw 0; a sleep
+				// before that send reproduces it every time). The same
+				// race the other arm already allows for.
+				assertOneOmission(t, host, err, 0)
 			case err != nil && strings.Contains(err.Error(), "the host reset the stream: [omitted"):
 				// Under load the reset can reach the tap before the barrier
 				// even in the "after the barrier" arm — and once the reader
