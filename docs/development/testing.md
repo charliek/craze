@@ -265,3 +265,7 @@ this harness before they ship (see `discovery/native-harness/08-decisions.md`, D
 
 See `eval/README.md` for the commands (`crazeeval validate`, `run`, `judge-batch`, `report`, …) and
 the full shape of a run.
+
+The procedure for running a full evaluation campaign — baseline, lever loop, final, archive — is
+`eval/RUNBOOK.md`. Each campaign's curated results (`crazeeval archive` output plus a summary) are
+committed under `eval/results/<campaign>/`; plan 029's are in `eval/results/2026-09-plan029/`.

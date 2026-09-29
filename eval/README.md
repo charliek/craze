@@ -5,6 +5,9 @@ harnesses on the same models and the same tasks: gx (the grok-build fork), openc
 codex. It records what each one sends on the wire and scores the results. It is not part
 of CI or the per-commit gate. It costs money, and its runs are not deterministic.
 
+See `eval/RUNBOOK.md` for the procedure -- a campaign end to end, and how to add a model or
+a task.
+
 It is a Python ≥ 3.11 `uv` project, package `crazeeval`. Run every command from this
 directory:
 
