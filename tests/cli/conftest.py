@@ -1,8 +1,13 @@
 from __future__ import annotations
 
+import json
 import os
 import shutil
+import signal
+import subprocess
+import sys
 import tempfile
+import time
 from collections.abc import Iterator, Mapping
 from pathlib import Path
 
@@ -82,12 +87,164 @@ def isolate_run_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator
     monkeypatch.delenv("CRAZE_CONTROL_SOCKET", raising=False)
     # The ordinary craze runs its session in a detached host (plan 030 §3.5);
     # these cases were written for the TUI that hosts its own, and keep testing
-    # it under the opt-out. C7 runs the core cases in both modes.
+    # it under the opt-out. The core cases (test_tui's basics, test_attach,
+    # test_bridge) take `both_modes` below and run in each; test_detach.py
+    # unsets the opt-out itself.
     monkeypatch.setenv("CRAZE_DETACH", "0")
     try:
         yield
     finally:
         shutil.rmtree(runtime_dir, ignore_errors=True)
+
+
+@pytest.fixture(params=["detached", "in-process"])
+def both_modes(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> str:
+    """Run a case once with the ordinary detached host and once under the
+    opt-out that hosts the session in the TUI (plan 030 §3.18, AC6).
+
+    It returns the mode's name, for the few assertions that differ by it
+    (whether a quit ends the session). isolate_run_env is autouse, so it has
+    already set CRAZE_DETACH=0 by the time this runs.
+    """
+    if request.param == "detached":
+        monkeypatch.delenv("CRAZE_DETACH", raising=False)
+    else:
+        monkeypatch.setenv("CRAZE_DETACH", "0")
+    return request.param
+
+
+def marker_pids() -> set[int]:
+    """The pids of the processes this test started, and nothing else.
+
+    Every process a test runs inherits its CRAZE_RUNTIME_DIR (isolate_run_env:
+    one fresh mkdtemp per test), and a detached host and its fake agent are no
+    exception -- they are spawned out of the TUI's environment. So that value
+    is the marker: a process carries it if and only if it descends from this
+    test's environment. A scan for a binary's name would also see every other
+    craze on the machine (parallel sessions, a developer's own), and neither
+    fail nor kill those. Without the variable set (tmux_smoke.py runs outside
+    pytest) the set is empty and callers fall back to their old, wider scan.
+
+    Linux reads /proc/<pid>/environ; macOS has no such file, and `ps -E`
+    appends each process's environment to its command instead.
+    """
+    base = os.environ.get("CRAZE_RUNTIME_DIR")
+    if not base:
+        return set()
+    me = os.getpid()
+    found: set[int] = set()
+    if sys.platform == "linux":
+        needle = b"CRAZE_RUNTIME_DIR=" + base.encode() + b"\0"
+        for path in Path("/proc").glob("[0-9]*/environ"):
+            try:
+                data = path.read_bytes()
+            except OSError:
+                continue  # gone, or not ours to read
+            if data.startswith(needle) or b"\0" + needle in data:
+                found.add(int(path.parent.name))
+    else:
+        out = subprocess.run(
+            ["ps", "-axwwE", "-o", "pid=,command="], capture_output=True, check=True
+        ).stdout
+        needle = b" CRAZE_RUNTIME_DIR=" + base.encode()
+        for line in out.splitlines():
+            pid_str, _, rest = line.strip().partition(b" ")
+            if pid_str.isdigit() and needle in rest:
+                found.add(int(pid_str))
+    found.discard(me)
+    return found
+
+
+def _argv(pid: int) -> list[str]:
+    try:
+        raw = Path(f"/proc/{pid}/cmdline").read_bytes()
+    except OSError:
+        return []
+    return [a.decode("utf-8", "replace") for a in raw.split(b"\0") if a]
+
+
+def _is_host_or_agent(pid: int, fake_agent: str | None) -> bool:
+    """A `craze serve` host, or the fake agent, by argv (Linux; elsewhere the
+    caller's marker set is itself the leftover list)."""
+    argv = _argv(pid)
+    if not argv:
+        return sys.platform != "linux"
+    if argv[1:2] == ["serve"]:
+        return True
+    return argv[0] == fake_agent
+
+
+def _registry_entries(root: Path) -> list[dict]:
+    """Every host registry entry under any HOME beneath root (a test's
+    tmp_path: HOME is either tmp_path itself or tmp_path/home)."""
+    entries = []
+    for path in root.glob("**/.cache/craze/hosts/*.json"):
+        try:
+            entries.append(json.loads(path.read_text(encoding="utf-8")))
+        except (OSError, ValueError):
+            continue
+    return entries
+
+
+def pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    # A zombie still answers signal 0; only its /proc state says it is gone.
+    try:
+        state = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0]
+    except (OSError, IndexError):
+        return True
+    return state != "Z"
+
+
+@pytest.fixture(autouse=True)
+def host_cleanup(isolate_run_env: None, tmp_path: Path, fake_agent_bin: Path) -> Iterator[None]:
+    """After every test, stop every host that test started and fail on what
+    will not go (plan 030 §3.18).
+
+    A detached host outlives the terminal that started it, so a test that
+    ends early -- a failed assertion, a hung-up pty on purpose -- would leave
+    one running past the suite. This is the guarantee the Go tests get from
+    their child watchdog (X49): each host registered under the test's HOME is
+    sent SIGTERM (the resumable stop), given a bounded wait, and whatever is
+    then left is SIGKILLed and reported. The leftovers checked are the
+    registry (an entry still there), and any `craze serve` or fake agent
+    carrying this test's marker (marker_pids) -- so a process another session
+    owns is never looked at, let alone killed.
+    """
+    yield
+    fake = str(fake_agent_bin)
+    mine = marker_pids()
+    hosts = {e["pid"] for e in _registry_entries(tmp_path) if isinstance(e.get("pid"), int)}
+    for pid in sorted(hosts & mine):
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+    deadline = time.monotonic() + 8.0
+    left: list[str] = []
+    while True:
+        left = []
+        live = {p for p in marker_pids() if pid_alive(p)}
+        left += [f"process {p}: {' '.join(_argv(p))[:200]}" for p in sorted(live) if _is_host_or_agent(p, fake)]
+        left += [
+            f"registry entry {e.get('hostId')} (pid {e.get('pid')})" for e in _registry_entries(tmp_path)
+        ]
+        if not left or time.monotonic() >= deadline:
+            break
+        time.sleep(0.05)
+    if left:
+        # Whatever the assertion below says, nothing is left running.
+        for p in marker_pids():
+            try:
+                os.kill(p, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        pytest.fail("a test left craze behind: " + "; ".join(left), pytrace=False)
 
 
 def without_seq(events: list[dict], subject: dict | list[dict]) -> dict | list[dict]:

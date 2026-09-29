@@ -20,7 +20,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
-from conftest import host_env_names, require_rg
+from conftest import both_modes, host_env_names, marker_pids, require_rg  # noqa: F401
 from sse_fixture import (
     CANARY,
     UNUSED_ENV_KEY,
@@ -58,6 +58,12 @@ def _cmdline_pids(needle: str) -> list[int]:
     check green.
     """
     encoded = needle.encode()
+    # Scoped to the processes this test started (conftest.marker_pids): a
+    # scan of the whole machine also finds every other craze's fake agent --
+    # a parallel session's, a developer's -- and fails on, or signals, what is
+    # not this test's. Outside pytest (tmux_smoke.py) there is no marker and
+    # the scan stays machine-wide.
+    scoped = bool(os.environ.get("CRAZE_RUNTIME_DIR"))
     if sys.platform != "linux":
         out = subprocess.run(
             ["ps", "-axww", "-o", "pid=,args="],
@@ -69,7 +75,7 @@ def _cmdline_pids(needle: str) -> list[int]:
             pid_str, _, args = line.strip().partition(b" ")
             if pid_str.isdigit() and args.split(b" ", 1)[0] == encoded:
                 pids.append(int(pid_str))
-        return pids
+        return _in_scope(pids, scoped)
     try:
         entries = Path("/proc").glob("[0-9]*/cmdline")
     except OSError:
@@ -82,7 +88,16 @@ def _cmdline_pids(needle: str) -> list[int]:
             continue
         if data.split(b"\0", 1)[0] == encoded:
             pids.append(int(path.parent.name))
-    return pids
+    return _in_scope(pids, scoped)
+
+
+def _in_scope(pids: list[int], scoped: bool) -> list[int]:
+    """pids narrowed to this test's own processes (only computed when there
+    is something to narrow: the marker scan reads every process's environment)."""
+    if not scoped or not pids:
+        return pids
+    mine = marker_pids()
+    return [pid for pid in pids if pid in mine]
 
 
 def _cmdline_has(needle: str) -> bool:
@@ -406,7 +421,7 @@ def _wait_output(tui: PTYCraze, needle: str, timeout: float = 5) -> str:
     raise AssertionError(f"timeout waiting for {needle!r}: {text[-3000:]!r}")
 
 
-def test_tui_echo_and_quit(craze_bin: Path, fake_agent_bin: Path, tmp_path: Path) -> None:
+def test_tui_echo_and_quit(craze_bin: Path, fake_agent_bin: Path, tmp_path: Path, both_modes: str) -> None:
     with PTYCraze(craze_bin, fake_agent_bin, tmp_path) as tui:
         tui.wait_contains("cursor")
         tui.write(b"hello\r")
@@ -417,7 +432,7 @@ def test_tui_echo_and_quit(craze_bin: Path, fake_agent_bin: Path, tmp_path: Path
     _wait_fake_gone(fake_agent_bin)
 
 
-def test_tui_help_esc_then_quit(craze_bin: Path, fake_agent_bin: Path, tmp_path: Path) -> None:
+def test_tui_help_esc_then_quit(craze_bin: Path, fake_agent_bin: Path, tmp_path: Path, both_modes: str) -> None:
     with PTYCraze(craze_bin, fake_agent_bin, tmp_path) as tui:
         tui.wait_contains("cursor")
         tui.write(b"/help\r")
@@ -443,7 +458,7 @@ def test_tui_help_esc_then_quit(craze_bin: Path, fake_agent_bin: Path, tmp_path:
 
 
 def test_tui_authfail_exits_nonzero(
-    craze_bin: Path, fake_agent_bin: Path, tmp_path: Path
+    craze_bin: Path, fake_agent_bin: Path, tmp_path: Path, both_modes: str
 ) -> None:
     """A session that never started must not exit 0.
 
@@ -451,10 +466,11 @@ def test_tui_authfail_exits_nonzero(
     login is the fix — but the process has to tell a script that nothing ran.
     """
     with PTYCraze(craze_bin, fake_agent_bin, tmp_path, script="authfail") as tui:
-        tui.wait_contains("authentication failed")
+        _wait_start_failure(tui, both_modes)
         tui.write(b"\x04")
         code = tui.wait_exit()
         assert code != 0, tui.screen()[-3000:]
+        _wait_output(tui, "authentication failed")
     _wait_fake_gone(fake_agent_bin)
 
 
@@ -605,6 +621,27 @@ def _assert_mode_switch(raw: str, enable: str) -> None:
     )
 
 
+def _wait_start_failure(tui: PTYCraze, mode: str, timeout: float = 10) -> None:
+    """Wait until the client shows that the session never started.
+
+    In process that is the error row, `authentication failed`. Over a detached
+    host the row is not a reliable signal: found by the plan 030 C7 starvation
+    runs (about 1 in 25 at a 2% CPU quota), the failure reaches the client and
+    is recorded -- the tab title turns to the failed mark, the exit code is 1
+    and the error is printed once the screen is restored -- but the row was
+    never painted. Its likely cause: Init runs the start and the stream's
+    reader side by side, and a restore applied after the start's error replaces
+    the transcript the row was added to (restore.go applyRestore), where the
+    status stays failed (X56) but the local row is gone. Until that is fixed,
+    a detached case waits for the failed title, which is what is stable, and
+    asserts the error text on the restored screen after exit.
+    """
+    if mode == "in-process":
+        tui.wait_contains("authentication failed", timeout=timeout)
+        return
+    _wait_raw(tui, "\x1b]2;\u2715 craze", 0, timeout=timeout)
+
+
 def _wait_raw(tui: PTYCraze, needle: str, mark: int, timeout: float = 10) -> str:
     """wait for a literal escape sequence, without stripping escapes."""
     deadline = time.monotonic() + timeout
@@ -619,7 +656,7 @@ def _wait_raw(tui: PTYCraze, needle: str, mark: int, timeout: float = 10) -> str
     raise AssertionError(f"timeout waiting for {needle!r}: {last[-2000:]!r}")
 
 
-def test_tui_queue_then_drain(craze_bin: Path, fake_agent_bin: Path, tmp_path: Path) -> None:
+def test_tui_queue_then_drain(craze_bin: Path, fake_agent_bin: Path, tmp_path: Path, both_modes: str) -> None:
     """Enter during a running turn queues; the queue drains one per turn.
 
     The first turn is slow enough to type into and the ones behind it finish

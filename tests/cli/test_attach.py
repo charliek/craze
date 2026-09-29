@@ -15,7 +15,7 @@ import subprocess
 import time
 from pathlib import Path
 
-from conftest import host_env_names
+from conftest import both_modes, host_env_names  # noqa: F401
 from test_bridge import _wait_running_entry
 from test_tui import _ANSI, PTYCraze, _wait_fake_gone, _wait_glob, _wait_output, quit_craze
 
@@ -58,14 +58,16 @@ def _run_attach(craze_bin: Path, cwd: Path, home: Path, args: list[str]) -> subp
     )
 
 
-def test_attach_joins_the_session_and_leaves_it_running(
-    craze_bin: Path, fake_agent_bin: Path, tmp_path: Path
+def test_attach_joins_the_session_and_its_quit_follows_the_host(
+    craze_bin: Path, fake_agent_bin: Path, tmp_path: Path, both_modes: str
 ) -> None:
-    """The attach TUI shows the host's transcript; a prompt typed in it
-    reaches the session and shows in both; quitting it (a view close) exits 0
-    and says nothing, and the host goes on taking prompts. A second attach
-    then sees the host quit: it exits 0 with `craze: session ended` once its
-    screen is restored (§3.9)."""
+    """The attach TUI shows the host's transcript and a prompt typed in it
+    reaches the session and shows in both. Quitting it then depends on the
+    host (plan 030 decision 11, §3.6): a detached host advertises `stop`, so
+    the quit ends the session -- both TUIs exit 0 and the host is gone. The
+    opt-out's TUI-hosted socket has no `stop`; there the quit is a view close
+    that says why (`that session runs in an older craze`) and the host goes on
+    taking prompts."""
     with _host(craze_bin, fake_agent_bin, tmp_path, tmp_path) as host:
         host.wait_contains("cursor")
         host.write(b"from the host\r")
@@ -80,18 +82,53 @@ def test_attach_joins_the_session_and_leaves_it_running(
             host.wait_contains_since("echo: from the viewer", host_mark)
             view.write(b"\x04")
             assert view.wait_exit() == 0, view.screen()[-3000:]
-            assert "session ended" not in _ANSI.sub("", view.screen())
+            text = _ANSI.sub("", view.screen())
+            assert "session ended" not in text
 
-        host_mark = host.mark()
-        host.write(b"after the viewer\r")
-        host.wait_contains_since("echo: after the viewer", host_mark)
+            if both_modes == "detached":
+                # The stop ended the session under the host's own TUI too.
+                assert host.wait_exit(timeout=WAIT) == 0, host.screen()[-3000:]
+                _wait_output(host, "craze: session ended")
+                assert "older craze" not in text, text[-3000:]
+                _wait_gone(tmp_path / ".cache" / "craze" / "hosts")
+            else:
+                assert "craze: that session runs in an older craze; close it there" in text, text[-3000:]
+                host_mark = host.mark()
+                host.write(b"after the viewer\r")
+                host.wait_contains_since("echo: after the viewer", host_mark)
+                quit_craze(host)
+    _wait_fake_gone(fake_agent_bin)
+
+
+def test_attach_sees_the_host_quit(
+    craze_bin: Path, fake_agent_bin: Path, tmp_path: Path, both_modes: str
+) -> None:
+    """Another attach then sees the host's quit: it exits 0 with
+    `craze: session ended` once its screen is restored (§3.9), in either mode
+    (a detached host's quit is a stop; the opt-out's TUI just closes)."""
+    with _host(craze_bin, fake_agent_bin, tmp_path, tmp_path) as host:
+        host.wait_contains("cursor")
+        host.write(b"before the view\r")
+        host.wait_contains("echo: before the view")
+        _wait_running_entry(tmp_path / ".cache" / "craze")
 
         with _attach(craze_bin, tmp_path, tmp_path) as view:
-            view.wait_contains("echo: after the viewer")
+            view.wait_contains("echo: before the view")
             quit_craze(host)
             assert view.wait_exit(timeout=WAIT) == 0, view.screen()[-3000:]
             _wait_output(view, "craze: session ended")
     _wait_fake_gone(fake_agent_bin)
+
+
+def _wait_gone(hosts: Path, timeout: float = 5.0) -> None:
+    """Every registry entry under hosts removed, within timeout (a stopped
+    detached host unlinks its own entry, §3.6a)."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if not list(hosts.glob("*.json")):
+            return
+        time.sleep(0.05)
+    raise AssertionError(f"the registry still holds {[p.name for p in hosts.glob('*.json')]}")
 
 
 def test_attach_refuses_the_flags_of_a_session(craze_bin: Path, tmp_path: Path) -> None:
@@ -113,7 +150,7 @@ def test_attach_refuses_the_flags_of_a_session(craze_bin: Path, tmp_path: Path) 
 
 
 def test_attach_lists_what_runs_when_it_cannot_choose(
-    craze_bin: Path, fake_agent_bin: Path, tmp_path: Path
+    craze_bin: Path, fake_agent_bin: Path, tmp_path: Path, both_modes: str
 ) -> None:
     """No session running anywhere: one line, exit 1. Two running in one
     directory: an attach from another directory is exit 1, naming the one it

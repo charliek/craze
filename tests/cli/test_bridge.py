@@ -17,7 +17,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from conftest import REMOVED_CONFIG_ENV, host_env_names
+from conftest import REMOVED_CONFIG_ENV, both_modes, host_env_names  # noqa: F401
 from test_tui import PTYCraze, _wait_entry, _wait_fake_gone, _wait_glob, quit_craze
 
 WAIT = 10.0
@@ -148,7 +148,9 @@ def _wait_running_entry(cache: Path, timeout: float = WAIT) -> dict:
     return _wait_entry(entry_path, lambda e: e["ready"], timeout=timeout)
 
 
-def test_bridge_hello_round_trip(craze_bin: Path, fake_agent_bin: Path, tmp_path: Path) -> None:
+def test_bridge_hello_round_trip(
+    craze_bin: Path, fake_agent_bin: Path, tmp_path: Path, both_modes: str
+) -> None:
     """A hello written to craze bridge's stdin reaches the host, and its
     result comes back on stdout verbatim (A18, the pytest half of
     TestARequestThenEOFStillGetsItsReply)."""
@@ -174,7 +176,7 @@ def test_bridge_hello_round_trip(craze_bin: Path, fake_agent_bin: Path, tmp_path
 
 
 def test_bridge_half_close_still_reads_every_reply(
-    craze_bin: Path, fake_agent_bin: Path, tmp_path: Path
+    craze_bin: Path, fake_agent_bin: Path, tmp_path: Path, both_modes: str
 ) -> None:
     """stdin's EOF only half-closes the socket's write side (CloseWrite):
     the bridge keeps relaying whatever the host still has to say, and exits 0
@@ -254,7 +256,7 @@ def test_bridge_stray_config_env_exits_one(craze_bin: Path, tmp_path: Path) -> N
 
 
 def test_bridge_resolves_by_provider_session_id_and_host_id(
-    craze_bin: Path, fake_agent_bin: Path, tmp_path: Path
+    craze_bin: Path, fake_agent_bin: Path, tmp_path: Path, both_modes: str
 ) -> None:
     """--session also matches the provider's own id and the host id, read
     straight off the registry entry (§3.10's resolution)."""
@@ -278,7 +280,7 @@ def test_bridge_resolves_by_provider_session_id_and_host_id(
 
 
 def test_bridge_stdout_write_failure_exits_one_not_a_signal(
-    craze_bin: Path, fake_agent_bin: Path, tmp_path: Path
+    craze_bin: Path, fake_agent_bin: Path, tmp_path: Path, both_modes: str
 ) -> None:
     """The SSH channel gone from under the bridge -- its stdout's only
     reader closed -- is a write failure mapped to exit 1, never SIGPIPE
