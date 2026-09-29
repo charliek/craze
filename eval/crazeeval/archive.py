@@ -463,7 +463,10 @@ def archive(batches: list[Path], out: Path, keyring: keymod.KeyRing, *, unseal: 
     global_now = judge_hash(tasks)
     th_now = task_judge_hashes(tasks)
 
-    runs = rp.load_all_runs(batches, unseal) if all_runs else rp.load_runs(batches, unseal)
+    try:
+        runs = rp.load_all_runs(batches, unseal) if all_runs else rp.load_runs(batches, unseal)
+    except rp.RunIdCollision as e:
+        raise ArchiveError(str(e)) from e
     # Provenance by resolved directory: batches of two campaigns may share a name.
     keys = list(dict.fromkeys(batch_key(b) for b in batches))
     info = {k: batch_info(Path(k)) for k in keys}

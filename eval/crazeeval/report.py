@@ -165,14 +165,25 @@ def load_runs(batches: list[Path], unseal: bool = False) -> list[dict]:
     return list(by_key.values())
 
 
+class RunIdCollision(RuntimeError):
+    """Two different batch directories produced the same ``run_id`` (``load_all_runs``):
+    a batch name was reused across campaigns, so the collision can't be resolved by
+    keeping one silently -- one of the two rows would just vanish."""
+
+
 def load_all_runs(batches: list[Path], unseal: bool = False) -> list[dict]:
     """Every scored-or-not run's final result under each batch's ``runs/`` -- and
     ``heldout/`` only when unsealed -- keyed by its ``run_id`` (which already carries the
     batch's name), so no batch replaces another's run that happens to share a run key
     (``crazeeval archive --all-runs``, a whole campaign kept whole). A batch passed more
-    than once is read once: batches are deduplicated by their resolved directory."""
+    than once is read once: batches are deduplicated by their resolved directory. Two
+    *different* resolved directories producing the same ``run_id`` (e.g. two campaigns
+    with a same-named batch and the same run key) is not a duplicate -- it's an ambiguous
+    identity, and raises ``RunIdCollision`` naming both directories rather than silently
+    dropping one side."""
     seen_batches: set[str] = set()
     by_id: dict[str, dict] = {}
+    origin: dict[str, str] = {}  # run_id -> the resolved batch directory it came from
     order: list[str] = []
     for b in batches:
         rb = str(Path(b).resolve())
@@ -186,9 +197,16 @@ def load_all_runs(batches: list[Path], unseal: bool = False) -> list[dict]:
                 h, _, t, rep = rep_dir.relative_to(root).parts
                 r.update({"harness": h, "task": t, "rep": int(rep[3:] or 0)})
             rid = r.get("run_id")
-            if rid not in by_id:
-                order.append(rid)
-                by_id[rid] = r
+            if rid in by_id:
+                if origin[rid] != rb:
+                    raise RunIdCollision(
+                        f"run_id {rid!r} was produced by two different batch directories: "
+                        f"{origin[rid]} and {rb} (same batch name and run key reused across "
+                        "campaigns?) -- can't tell which run this id should mean")
+                continue
+            order.append(rid)
+            by_id[rid] = r
+            origin[rid] = rb
     return [by_id[rid] for rid in order]
 
 

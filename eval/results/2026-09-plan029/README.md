@@ -195,8 +195,11 @@ campaign, alongside the plan document and its `progress.md` execution log.
 ## How it was produced
 
 ```shell
+# Run from eval/ (see eval/RUNBOOK.md) -- --out results/2026-09-plan029 lands here, at
+# eval/results/2026-09-plan029; --out eval/results/2026-09-plan029 from eval/ would land
+# one level too deep, at eval/eval/results/2026-09-plan029.
 crazeeval archive --all-runs --unseal --max-bytes 12000000 \
-  --out eval/results/2026-09-plan029 \
+  --out results/2026-09-plan029 \
   --batch <every base-, lever-, final-, final2-, drift- and l7- batch of the campaign>
   # 36 batches in eval-runs/, in full: base-fw-ds, base-fw-kimi-dev, base-fw-kimi-ho,
   # base-gxplan, base-meta-contrib, base-meta-craze, base-meta-spark, base-zai (the

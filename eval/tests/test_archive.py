@@ -495,6 +495,40 @@ def test_duplicate_batch_arguments_dont_duplicate_rows(tmp_path):
     assert len(_load(tmp_path / "dup-default", arch.BATCHES_FILE)["batches"]) == 1
 
 
+def test_all_runs_same_batch_name_two_campaigns_run_id_collision_raises(tmp_path):
+    """Two different campaigns whose batch directories share a name and a run key
+    produce the same run_id (``<batch.name>:<run_key>:a<n>``) -- not a duplicate (they
+    are two different directories, two different runs). Keeping one silently would drop
+    the other's row with no trace; --all-runs must raise instead, naming both
+    directories, rather than pick a winner."""
+    a = tmp_path / "camp-x" / "eval-runs" / "batch-a"
+    b = tmp_path / "camp-y" / "eval-runs" / "batch-a"
+    ra, rb = _run(a, "craze", "D1"), _run(b, "craze", "D1")
+    assert ra["run_id"] == rb["run_id"]  # same batch name + same run key -> same run_id
+    _write(a, [ra], [], _ident("batch-a", ["craze"], "camp-x", "aa" * 32))
+    _write(b, [rb], [], _ident("batch-a", ["craze"], "camp-y", "bb" * 32))
+
+    with pytest.raises(arch.ArchiveError) as ei:
+        arch.archive([a, b], tmp_path / "out", keyring(), tasks=_tasks(), all_runs=True)
+    msg = str(ei.value)
+    assert str(a.resolve()) in msg and str(b.resolve()) in msg and ra["run_id"] in msg
+
+
+def test_all_runs_same_dir_given_twice_still_deduplicated(tmp_path):
+    """A run_id collision is only raised across *different* resolved directories --
+    the same batch directory passed twice is still deduplicated as before (already
+    covered above by ``test_duplicate_batch_arguments_dont_duplicate_rows``), not
+    treated as a collision -- restated here directly against the new collision check."""
+    runs_dir = tmp_path / "camp-w" / "eval-runs"
+    a = runs_dir / "batch-a"
+    ra = _run(a, "craze", "D1")
+    _write(a, [ra], [], _ident("batch-a", ["craze"], None, "aa" * 32))
+
+    s = arch.archive([a, a], tmp_path / "same-dir-twice", keyring(), tasks=_tasks(), all_runs=True)
+    assert s["ok"], s["errors"]
+    assert len(_load(tmp_path / "same-dir-twice", arch.RUNS_FILE)) == 1
+
+
 def test_a_reconciliation_mismatch_fails(world, tmp_path, monkeypatch):
     monkeypatch.setattr(arch, "_count_lines", lambda p: 0)
     s = _archive(world, tmp_path / "arch", unseal=True)

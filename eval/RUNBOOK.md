@@ -23,12 +23,28 @@ It's chosen, first match wins:
 3. `CRAZEEVAL_PLAN_DIR` — the same thing under its old name;
 4. `~/.craze-eval/default`.
 
-Nothing defaults into a plan folder anymore. Start a new campaign by snapshotting config
-into it first — an unset campaign has no config and an empty ledger:
+Nothing defaults into a plan folder anymore. Pick the campaign once, at the start of the
+session, and every command below stays consistent with it automatically:
 
 ```shell
-uv run crazeeval --campaign 2026-10-glm snapshot-config
-uv run crazeeval --campaign 2026-10-glm run --harness craze,opencode --model glm-5.3-flash --tasks split:smoke --craze-bin ../bin/craze --label smoke
+export CRAZEEVAL_CAMPAIGN_DIR=~/.craze-eval/2026-10-glm
+```
+
+The alternative is passing `--campaign NAME` on every single command instead — a global
+flag, before or after the subcommand. The two aren't interchangeable per command: pick
+one for the whole session. This runbook uses the environment variable and omits
+`--campaign` from every command from here on; if you use `--campaign` instead, add it to
+every command below, including `snapshot-config`, `validate`, `probe`, every `run`,
+`calibrate`, `judge-batch`, `report`, `rescore`, `ledger` and `archive` call — a command
+that omits it silently falls back to `~/.craze-eval/default` and won't see this
+campaign's config snapshot or ledger.
+
+Start a new campaign by snapshotting config into it first — an unset campaign has no
+config and an empty ledger:
+
+```shell
+uv run crazeeval snapshot-config
+uv run crazeeval run --harness craze,opencode --model glm-5.3-flash --tasks split:smoke --craze-bin ../bin/craze --label smoke
 ```
 
 Raw runs (answers, captures, diffs, logs, workspaces) stay in `eval-runs/` — never in the
@@ -201,9 +217,16 @@ bound concurrency per provider; `--parallel` bounds it overall. `--resume` reope
 directory (its identity must match) and runs only what has no final result yet — safe to
 re-invoke after a crash or a provider outage.
 
-Then fix the baseline's best-open-harness record — first `report --baseline` on the
-batch does this once, and it's frozen from then on (a later re-run, e.g. a provider-drift
-check, can't move the bar underneath the final):
+Then run a first report against the baseline. Sealed like this (no `--unseal`), it only
+reads dev tasks, so it's a provisional best-open-harness choice per model for early
+sanity — it does **not** write `<baseline-batch>/best-open-harness.json` yet (see
+`report.py`'s `fixed_best_open_harness`). That record is written by the first
+**unsealed** `report --baseline <baseline-batch>` call that names this baseline — in
+practice the final's report (§5e) — chosen from the baseline batch alone on all fifteen
+tasks, and it's frozen from then on (a later re-run, e.g. a provider-drift check, reads
+the recorded choice and can't move the bar underneath the final). Don't unseal early to
+force the freeze sooner: an unsealed report reads the held-out results, so it must wait
+until tuning is over (§6):
 
 ```shell
 uv run crazeeval report --batch <baseline-batch> --baseline <baseline-batch> --out <baseline-batch>/report
@@ -233,11 +256,15 @@ uv run crazeeval report --batch <baseline-batch> --baseline <baseline-batch> --l
 ```
 
 **d. The lever loop**, one change at a time. Build the candidate from a **commit**, never
-a dirty tree (so the build is reproducible and its provenance is a real sha):
+a dirty tree (so the build is reproducible and its provenance is a real sha), to exactly
+the path the run command below names (`../bin/craze-L1`, relative to `eval/`), creating
+its directory first:
 
 ```shell
+REPO_ROOT=$(git rev-parse --show-toplevel)
+mkdir -p "$REPO_ROOT/bin"
 git archive --format=tar HEAD | (mkdir -p /tmp/build-L1 && tar -x -C /tmp/build-L1)
-(cd /tmp/build-L1 && go build -trimpath -o ../bins/craze-L1 ./cmd/craze)
+(cd /tmp/build-L1 && go build -trimpath -o "$REPO_ROOT/bin/craze-L1" ./cmd/craze)
 ```
 
 Run the dev tasks, 2 reps, on the tuning models (plan 029 used the free/cheap ones: the
@@ -285,6 +312,10 @@ uv run crazeeval judge-batch --batch <final-batch> --batch-y <baseline-batch> --
 uv run crazeeval report --batch <baseline-batch> --batch <final-batch> --verdicts <final-batch>/judging --verdicts <final-batch>/judging/heldout --baseline <baseline-batch> --unseal --out <final-batch>/report
 ```
 
+This `report` call is the first **unsealed** one naming `<baseline-batch>`, so this is
+where `<baseline-batch>/best-open-harness.json` actually gets written (§5a) — chosen from
+the baseline batch alone, on all fifteen tasks, and frozen from here on.
+
 The report's success-bar section reads as `meets`, `misses` (with the gap) or
 `inconclusive` (coverage incomplete — some task never got a scored run and a bound verdict
 on both sides) per model, on all fifteen tasks and again on the held-out eight alone. If
@@ -295,8 +326,12 @@ before trusting the final numbers on a provider that had an outage mid-campaign.
 **f. Archive.** Once the campaign is done, write a compact record into the repo:
 
 ```shell
-uv run crazeeval archive --batch <baseline-batch> --batch <lever-batch-1> ... --batch <final-batch> --all-runs --unseal --max-bytes <N> --out eval/results/<campaign-name>/
+uv run crazeeval archive --batch <baseline-batch> --batch <lever-batch-1> ... --batch <final-batch> --all-runs --unseal --max-bytes <N> --out results/<campaign-name>/
 ```
+
+(Run from `eval/`, like every other command in this doc — `--out results/<campaign-name>/`
+lands at `eval/results/<campaign-name>/` in the repo. `--out eval/results/<campaign-name>/`
+run from `eval/` lands one level too deep, at `eval/eval/results/...`.)
 
 Use `--all-runs` for a whole campaign (every scored run of every batch, kept by `run_id`) —
 the *default* mode instead keeps only the report's current view (a later batch replaces an
