@@ -212,7 +212,7 @@ E=~/.claude/plans/craze/029-native-harness-quality/eval-runs
 args=()
 for b in "$E"/base-* "$E"/lever-* "$E"/final-* "$E"/final2-* "$E"/drift-* "$E"/l7a-* "$E"/l7b-*; do args+=(--batch "$b"); done
 uv run crazeeval archive --all-runs --unseal --max-bytes 12000000 \
-  --out ../craze-evals/campaigns/2026-09-plan029 "${args[@]}"
+  --out ../../craze-evals/campaigns/2026-09-plan029 "${args[@]}"
 ```
 
 36 batches in eval-runs/ went into that archive, in full: base-fw-ds, base-fw-kimi-dev,

@@ -345,9 +345,9 @@ before trusting the final numbers on a provider that had an outage mid-campaign.
    `archive.json`) of every batch in the campaign:
 
    ```shell
-   git clone git@github.com:charliek/craze-evals.git ../craze-evals   # once, next to the craze checkout
+   git clone git@github.com:charliek/craze-evals.git ../../craze-evals   # once, next to the craze checkout
    uv run crazeeval archive --batch <baseline-batch> --batch <lever-batch-1> ... --batch <final-batch> \
-     --all-runs --unseal --max-bytes <N> --out ../craze-evals/campaigns/<campaign-name>
+     --all-runs --unseal --max-bytes <N> --out ../../craze-evals/campaigns/<campaign-name>
    ```
 
    Use `--all-runs` for a whole campaign (every scored run of every batch, kept by
