@@ -1,6 +1,7 @@
 package control
 
 import (
+	"encoding/json"
 	"sync"
 
 	"github.com/charliek/craze/internal/protocol"
@@ -27,27 +28,38 @@ import (
 //  1. a close fence of the stop's own goes up over attach reservations
 //     (FenceAttaches), never to be released: a stop is one way. From here a
 //     new session.attach is refused unavailable, reason closing;
-//  2. the request is handed to Options.Stop, the host's coordinator;
-//  3. the receipt {} is queued.
+//  2. the receipt {} is queued (conn.stopReceipt), outside the writer budget
+//     (outbox.admit): it never waits for room;
+//  3. the request is handed to Options.Stop, the host's coordinator.
 //
 // So the fence is up before the receipt can be read — a client that reads it
-// and attaches, on any connection, is refused closing, never half-attached —
-// and the coordinator has the stop before the receipt waits for room in an
-// outbox a stalled peer may be holding full: a wedged connection never holds a
-// stop back. The receipt still reaches its client before the connection closes
-// for the session's end: the request holds its admission slot until its reply
-// is written, and an ending connection closes only once nothing it admitted is
-// unwritten (conn.end).
+// and attaches, on any connection, is refused closing, never half-attached.
+// The receipt is queued before the coordinator hears of the stop, so it
+// precedes, on its connection, every line the stop goes on to cause there —
+// the closing records the engine's close commits, and reset{session_closed} —
+// and a client that ends its read at the session's end has read its receipt
+// by then (astra r2-c1 1). And it is queued without waiting — never refused
+// for room, taking nothing from the ordinary budget or the reset's reserve —
+// so a peer that has stopped reading, its outbox full, never holds the stop
+// back from the coordinator. The receipt reaches its client before the
+// connection closes for the session's end: the request holds its admission
+// slot until its reply is written, and an ending connection closes only once
+// nothing it admitted is unwritten (conn.end).
 //
 // Every later stop — the same client's, another's, the same commandId resent,
 // one arriving while the first is still being handed over (stopOnce waits for
-// it) — is answered {} and is otherwise nothing: it JOINS the first, whose
-// sequence the coordinator runs once. A stop makes no engine call, so it is in
-// no receipts table (a resend is answered {} again, never unknown_command),
-// takes no host-wide command slot, and waits for no reply barrier: its receipt
-// precedes, by design, every event the stop goes on to cause. Nor is it held
-// back when its client has since moved on to another connection (conn.command's
-// movedOn): the stop was that client's, and stopping twice is stopping once.
+// it) — is answered {} as an ordinary reply and is otherwise nothing: it
+// JOINS the first, whose sequence the coordinator runs once. A stop that
+// arrives once the session's end is already under way — a later one, or the
+// first after a signal or the idle exit set the end going — causes nothing,
+// and its receipt may follow closing traffic that end had already put on its
+// connection: a client whose stop is outstanding when the session ends has
+// its answer either way. A stop makes no engine call, so it is in no receipts
+// table (a resend is answered {} again, never unknown_command), takes no
+// host-wide command slot, and waits for no reply barrier: nothing it causes
+// is committed before its receipt is queued. Nor is it held back when its
+// client has since moved on to another connection (conn.command's movedOn):
+// the stop was that client's, and stopping twice is stopping once.
 //
 // # The close fence
 //
@@ -60,13 +72,16 @@ import (
 // no attach slips in between the fence and the count: one that checked before
 // the fence is in the count, and every one after is refused. While the fence
 // stays up the count can only fall. release lowers it; attaches are admitted
-// again once no fence is up.
+// again once no fence is up. TestAStopRacingANewAttach holds an attach
+// between its check and its install and proves a fence waits for it there
+// (TestHooks.FenceWaits).
 
 // StopFunc is the host's lifecycle coordinator as the server hands it a stop
 // (Options.Stop; plan 030 §3.6a). The server calls it at most once in its
 // life, for the first session.stop it accepts, on that request's handler
-// goroutine, once the stop's own close fence is up and before the receipt is
-// queued.
+// goroutine, once the stop's own close fence is up and its receipt is queued
+// — so everything the stop sequence causes on the stopping connection follows
+// the receipt.
 //
 // It must return promptly and do the stop's work elsewhere, on a goroutine of
 // its own: it must not wait on the engine, the stream or any connection, and
@@ -108,10 +123,7 @@ func (s *Server) serves(info protocol.MethodInfo) bool {
 // releases its fence. It waits on nothing but the attachment lock, which is
 // never held across anything that waits.
 func (s *Server) FenceAttaches() (attached int, release func()) {
-	if h := s.hooks.fencing; h != nil {
-		h()
-	}
-	s.attachMu.Lock()
+	s.lockAttachments(s.hooks.fenceWaits)
 	s.fences++
 	n := int(s.attached.Load())
 	s.attachMu.Unlock()
@@ -125,20 +137,66 @@ func (s *Server) FenceAttaches() (attached int, release func()) {
 	}
 }
 
+// lockAttachments takes the attachment lock. waits is a test's hook
+// (TestHooks.FenceWaits), nil in production: set, the lock is tried first, and
+// waits runs just before a wait for a lock found held — where a test learns
+// that the lock has excluded its caller.
+func (s *Server) lockAttachments(waits func()) {
+	if waits != nil {
+		if s.attachMu.TryLock() {
+			return
+		}
+		waits()
+	}
+	s.attachMu.Lock()
+}
+
 // sessionStop is session.stop on a server that serves it (dispatch refuses it
-// stop_unsupported on any other): the first accepted stop's fence and hand-off
-// (the package's "session.stop"), and for every stop the receipt, {}.
+// stop_unsupported on any other): the first accepted stop's fence, receipt and
+// hand-off, in that order (the package's "session.stop"); every later stop's
+// receipt, {}, as an ordinary reply.
 func (c *conn) sessionStop(b *bound, info protocol.MethodInfo, req *request) outcome {
 	var p protocol.StopParams
 	if perr := c.params(b, info, req, &p, nil); perr != nil {
 		return refusal(perr)
 	}
 	c.srv.connNote(c.id, map[string]any{"event": "stop", "clientId": b.client})
+	first := false
 	c.srv.stopOnce.Do(func() {
-		// Never released: a stop is one way. Up before the coordinator
-		// hears of the stop, and before the receipt is queued.
+		first = true
+		// Never released: a stop is one way. Up before the receipt is
+		// queued, and so before it can be read.
 		_, _ = c.srv.FenceAttaches()
+		if h := c.srv.hooks.beforeReply; h != nil {
+			h(req.method)
+		}
+		c.stopReceipt(req.id)
+		// Only now does the coordinator hear of the stop: whatever its
+		// sequence puts on this connection queues behind the receipt.
 		c.srv.opts.Stop(StopRequest{Client: b.client, CommandID: p.CommandID})
 	})
+	if first {
+		return replied()
+	}
 	return answer(protocol.Empty{})
+}
+
+// stopReceipt queues the first stop's receipt, {}, as the answer to id,
+// outside the writer budget (outbox.admit): at once, whatever the outbox
+// holds. It takes over the request's admission slot as every reply does:
+// given back once the line is written, or at once when it is refused — the
+// connection has closed, or its engine was replaced, and the receipt goes
+// nowhere, as any handler's reply then does.
+func (c *conn) stopReceipt(id json.RawMessage) {
+	resp := protocol.Response{JSONRPC: protocol.JSONRPCVersion, ID: id}
+	raw, err := rawJSON(protocol.Empty{})
+	if err != nil {
+		resp.Error = failed(err)
+	} else {
+		resp.Result = raw
+	}
+	line, _ := c.responseLine(resp)
+	if line == nil || c.out.admit(line, c.release) != nil {
+		c.release()
+	}
 }

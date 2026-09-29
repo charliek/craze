@@ -2,6 +2,10 @@ package control_test
 
 import (
 	"bytes"
+	"context"
+	"errors"
+	"fmt"
+	"io"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -203,6 +207,152 @@ func TestAStopDuringATurnIsAnsweredAtOnce(t *testing.T) {
 	}
 }
 
+// toTheEnd reads c's lines, in order, until the host closes the connection.
+func (c *client) toTheEnd() []msg {
+	c.t.Helper()
+	var out []msg
+	for {
+		m, err := c.tryNext()
+		if err != nil {
+			if !errors.Is(err, io.EOF) && !isReset(err) {
+				c.t.Fatalf("want the host to close the connection; read: %v", err)
+			}
+			return out
+		}
+		out = append(out, m)
+	}
+}
+
+// TestAStopsReceiptPrecedesTheSessionsEnd (§3.6a; astra r2-c1 1): the first
+// stop's receipt is on its connection ahead of everything the stop goes on to
+// put there — the running turn's closing ending and reset{session_closed} —
+// so a client that stops reading at the session's end has read its receipt.
+// The schedule is forced: a hook just before the receipt is queued lets the
+// coordinator's sequence run and, when the coordinator already has the stop,
+// holds the receipt until that sequence has closed the engine and queued the
+// stopping connection's reset. A server that handed the stop over before it
+// queued the receipt puts the session's end first, every time; this one has
+// set nothing going yet, so nothing can overtake the receipt.
+func TestAStopsReceiptPrecedesTheSessionsEnd(t *testing.T) {
+	co := newCoordinator()
+	resets := newSignal()
+	var ran, early atomic.Bool
+	h := newHost(t, withStop(co), withHooks(control.TestHooks{
+		BeforeReply: func(method string) {
+			if method != protocol.MethodSessionStop {
+				return
+			}
+			ran.Store(true)
+			co.open()
+			if !co.started.Load() {
+				return
+			}
+			// The coordinator has the stop already: the receipt is held
+			// while its sequence closes the engine and ends the stream.
+			early.Store(true)
+			select {
+			case <-resets:
+			case <-time.After(watchdog):
+			}
+		},
+		AckQueued: func(_, method string) {
+			if method == protocol.NotifyReset {
+				resets.fire(0)
+			}
+		},
+	}))
+	co.eng = h.eng
+	a := h.dial()
+	a.sayHello(nil)
+	a.attach(attachParams(h))
+	hangTurn(t, h, a)
+	turn := h.eng.State().Turn
+
+	stop := a.send(protocol.MethodSessionStop, protocol.StopParams{SessionID: sid(h), CommandID: a.cmd()})
+	receipt, ending, reset := -1, -1, -1
+	for i, m := range a.toTheEnd() {
+		switch {
+		case m.resp != nil && string(m.resp.ID) == stop:
+			ok[protocol.Empty](t, m.resp)
+			receipt = i
+		case m.note != nil && m.note.Method == protocol.NotifyReset:
+			if rp := paramsOf[protocol.ResetParams](t, m.note); rp.Reason != protocol.ResetSessionClosed {
+				t.Fatalf("the stream ended %s, want session_closed", rp.Reason)
+			}
+			reset = i
+		case m.note != nil && m.note.Method == protocol.NotifyEvent:
+			if _, ev := eventOf(t, m.note); ev.Type == agent.EventTurn && ev.Turn.Phase == agent.TurnEnded && ev.Turn.ID == turn {
+				ending = i
+			}
+		}
+	}
+	switch {
+	case !ran.Load():
+		t.Fatal("the stop's receipt was queued without passing its BeforeReply hook")
+	case receipt < 0 || ending < 0 || reset < 0:
+		t.Fatalf("the connection closed with the receipt at %d, %s's ending at %d, the reset at %d", receipt, turn, ending, reset)
+	case receipt > ending || receipt > reset:
+		t.Fatalf("the receipt is line %d, after %s's closing ending (%d) or the reset (%d): the stop's end overtook it", receipt, turn, ending, reset)
+	case early.Load():
+		t.Fatal("the coordinator was handed the stop before its receipt was queued")
+	}
+	co.next(t)
+}
+
+// TestAStalledClientsStopIsNotHeldBack (§3.6a; astra r2-c1 1): a client that
+// has stopped reading — its connection's writer queue full, its forwarder
+// blocked for room — stops the session, under a request id so long that its
+// receipt is larger than any room the queue has left. The receipt is queued at
+// once all the same, outside the budget: the handler never waits for room,
+// and the coordinator has the stop while the client has still read nothing.
+// When the client reads again, the receipt comes right after what was queued
+// before the stop — ahead of the record the forwarder was blocked on and of
+// every record the engine's close then delivers — and reset{session_closed}
+// ends the stream.
+func TestAStalledClientsStopIsNotHeldBack(t *testing.T) {
+	co := newCoordinator()
+	s := newStall(t, nil, withStop(co))
+	co.eng = s.h.eng
+	// The forwarder is blocked on a 1 MiB record: less than that is free,
+	// and the receipt, echoing a 2 MiB id, cannot fit in it.
+	stop := `"` + strings.Repeat("s", 2<<20) + `"`
+	line := requestLine(t, stop, protocol.MethodSessionStop, protocol.StopParams{SessionID: sid(s.h), CommandID: s.a.cmd()})
+	s.a.sendRaw(stop, protocol.MethodSessionStop, strings.TrimSuffix(string(line), "\n"))
+	co.next(t)
+	waitFor(t, "the stop's handler to return, its receipt queued without room", func() bool { return s.h.srv.Handlers() == 0 })
+	co.open()
+
+	next, receipt := s.r.After.Seq+1, false
+	for {
+		m := s.a.next()
+		if m.resp != nil {
+			if string(m.resp.ID) != stop {
+				t.Fatalf("a reply to %.40s…, want only the stop's", m.resp.ID)
+			}
+			ok[protocol.Empty](t, m.resp)
+			if next != s.blocked {
+				t.Fatalf("the receipt follows event %d; it was queued with the forwarder blocked on %d", next-1, s.blocked)
+			}
+			receipt = true
+			continue
+		}
+		if m.note.Method == protocol.NotifyReset {
+			if rp := paramsOf[protocol.ResetParams](t, m.note); rp.Reason != protocol.ResetSessionClosed {
+				t.Fatalf("the stream ended %s, want session_closed", rp.Reason)
+			}
+			break
+		}
+		if seq, _ := eventOf(t, m.note); seq != next {
+			t.Fatalf("event %d, want %d: a gap", seq, next)
+		}
+		next++
+	}
+	if !receipt {
+		t.Fatal("the stream ended without the stop's receipt")
+	}
+	s.a.expectClosed()
+}
+
 // holdOnce is a hook that parks the first call only, until release: arrived
 // hears it park.
 type holdOnce struct {
@@ -233,8 +383,10 @@ func (h *holdOnce) hold() {
 // stop's fence goes up, forced on either side of it and at the one point in
 // between — never half-attached: an attach that reserved before the fence is
 // counted by it and goes live; one that reaches its reservation after is
-// refused closing and holds nothing; and a fence going up while an attach is
-// between its check and its install waits for the install and counts it.
+// refused closing and holds nothing; and a fence raised while an attach is
+// between its check and its install cannot go up until the install is done —
+// it finds the attachment lock held and waits — and then counts it (astra
+// r2-c1 2: exclusion proven, not left to the scheduler).
 func TestAStopRacingANewAttach(t *testing.T) {
 	t.Run("an attach that reaches its reservation after the stop is refused closing", func(t *testing.T) {
 		gate := newHoldOnce()
@@ -283,14 +435,14 @@ func TestAStopRacingANewAttach(t *testing.T) {
 		b.untilReset(protocol.ResetSessionClosed)
 		b.expectClosed()
 	})
-	t.Run("a fence going up waits for an attach between its check and its install", func(t *testing.T) {
+	t.Run("a fence cannot go up while an attach is between its check and its install", func(t *testing.T) {
 		gate := newHoldOnce()
-		fencing := make(chan struct{}, 1)
+		waits := make(chan struct{}, 1)
 		h := newHost(t, withHooks(control.TestHooks{
 			Reserving: gate.hold,
-			Fencing: func() {
+			FenceWaits: func() {
 				select {
-				case fencing <- struct{}{}:
+				case waits <- struct{}{}:
 				default:
 				}
 			},
@@ -306,7 +458,18 @@ func TestAStopRacingANewAttach(t *testing.T) {
 			counted <- n
 			release()
 		}()
-		await(t, fencing, "the fence to be on its way up")
+		// The attach sits between its check and its install, holding the
+		// attachment lock: the fence must find that lock held and wait. A
+		// fence that goes up instead — the attach not yet installed, so
+		// neither counted nor refused — is the half-attach the lock exists
+		// to rule out.
+		select {
+		case <-waits:
+		case n := <-counted:
+			t.Fatalf("the fence went up, counting %d, while an attach sat between its fence check and its install", n)
+		case <-time.After(watchdog):
+			t.Fatalf("the fence neither waited for the attachment lock nor went up in %s", watchdog)
+		}
 		gate.release()
 		select {
 		case n := <-counted:
@@ -314,7 +477,7 @@ func TestAStopRacingANewAttach(t *testing.T) {
 				t.Fatalf("the fence counted %d attachments, want the one it waited for", n)
 			}
 		case <-time.After(watchdog):
-			t.Fatalf("the fence did not go up in %s", watchdog)
+			t.Fatalf("the fence did not go up in %s once the attach was installed", watchdog)
 		}
 		ok[protocol.AttachResult](t, b.reply(attach))
 	})
@@ -418,6 +581,157 @@ func TestTheFenceCountsAReservedAttach(t *testing.T) {
 	if got := h.srv.Attached(); got != 1 {
 		t.Fatalf("the live attachment is counted %d times", got)
 	}
+}
+
+// armedHold holds an attach right after its reservation (TestHooks.Reserved)
+// once armed, and only the first armed one: the attaches made before it is
+// armed — a bystander's — go through.
+type armedHold struct {
+	armed atomic.Bool
+	*holdOnce
+}
+
+func newArmedHold() *armedHold { return &armedHold{holdOnce: newHoldOnce()} }
+
+func (g *armedHold) reserved(string) {
+	if g.armed.Load() {
+		g.hold()
+	}
+}
+
+// heldAttach dials a connection, says hello and sends an attach that g holds
+// pending, reserved and counted; it returns the connection.
+func heldAttach(t *testing.T, h *host, g *armedHold) *client {
+	t.Helper()
+	b := h.dial()
+	b.sayHello(nil)
+	g.armed.Store(true)
+	b.send(protocol.MethodSessionAttach, attachParams(h))
+	await(t, g.arrived, "the attach to reserve")
+	return b
+}
+
+// attachedIs fails unless the server counts want attachments.
+func attachedIs(t *testing.T, h *host, want int, when string) {
+	t.Helper()
+	if n := h.srv.Attached(); n != want {
+		t.Fatalf("%s the server counts %d attachments, want %d", when, n, want)
+	}
+}
+
+// TestTheAttachmentCountFallsOnceOnEveryClose (§3.6: "Attached counts every
+// attachment the server holds in any state"; astra r2-c1 3): an attachment
+// leaves the count exactly once, by every route it can close by — besides a
+// detach and a failed write (TestTheCloseFenceIsReversible): an attach
+// abandoned while pending; one a replacement closed while pending and then
+// abandoned (once, not twice); a live one's terminal reset, slow_consumer or
+// session_closed; and the server's shutdown, live and pending alike. Each
+// route ends with the count back where it was before the attachment was made:
+// a missing decrement leaves the idle watcher (C5) seeing a client for ever,
+// and a second one lets it miss a real one.
+func TestTheAttachmentCountFallsOnceOnEveryClose(t *testing.T) {
+	t.Run("an attach abandoned while pending", func(t *testing.T) {
+		g := newArmedHold()
+		h := newHost(t, withHooks(control.TestHooks{Reserved: g.reserved}), withOnClose(g.release))
+		x := h.dial()
+		x.sayHello(nil)
+		x.attach(attachParams(h))
+		attachedIs(t, h, 1, "with a bystander attached")
+		b := heldAttach(t, h, g)
+		attachedIs(t, h, 2, "with an attach pending")
+		// Its client resumes on another connection: the pending attach's
+		// connection is closed under it (hello's transfer closes it before
+		// its answer), and the attach, let go, is abandoned.
+		b2 := h.dial()
+		b2.sayHello(b.resume())
+		attachedIs(t, h, 2, "with the pending attach's connection closed and its handler held")
+		g.release()
+		waitFor(t, "the abandoned attach's handler to return", func() bool { return h.srv.Handlers() == 0 })
+		attachedIs(t, h, 1, "after the abandon")
+	})
+	t.Run("a replacement closes a pending attach, and its abandon changes nothing", func(t *testing.T) {
+		g := newArmedHold()
+		h := newHost(t, withHooks(control.TestHooks{Reserved: g.reserved}), withOnClose(g.release))
+		x := h.dial()
+		x.sayHello(nil)
+		x.attach(attachParams(h))
+		heldAttach(t, h, g)
+		attachedIs(t, h, 2, "with a live attachment and a pending one")
+		h.srv.SetEngine(startedEngine(t))
+		// The live attachment ends reset{session_replaced}; the pending one
+		// was closed by the replacement itself.
+		x.untilReset(protocol.ResetSessionReplaced)
+		attachedIs(t, h, 0, "after the replacement")
+		g.release()
+		waitFor(t, "the replaced attach's handler to return", func() bool { return h.srv.Handlers() == 0 })
+		attachedIs(t, h, 0, "after the replaced attach was abandoned too")
+	})
+	t.Run("a live attachment reset slow_consumer", func(t *testing.T) {
+		gate := newForwardGate()
+		h := newHost(t, withOnClose(gate.open), withHooks(control.TestHooks{BeforeForward: gate.hook}))
+		a := h.dial()
+		a.sayHello(nil)
+		p := attachParams(h)
+		p.Budget = &protocol.AttachBudget{MaxItems: 1}
+		r := a.attach(p)
+		a.note(protocol.NotifySynchronized)
+		attachedIs(t, h, 1, "with the attachment live")
+		gate.arm(r.After.Seq)
+		for i := 0; h.dropped() == 0; i++ {
+			if i == 16 {
+				t.Fatal("the held subscription was never dropped")
+			}
+			h.publish(agent.Event{Type: agent.EventText, Text: fmt.Sprint(i)})
+		}
+		gate.open()
+		a.untilReset(protocol.ResetSlowConsumer)
+		attachedIs(t, h, 0, "after reset{slow_consumer}")
+	})
+	t.Run("live attachments reset session_closed", func(t *testing.T) {
+		h := newHost(t)
+		x, a := h.dial(), h.dial()
+		x.sayHello(nil)
+		a.sayHello(nil)
+		x.attach(attachParams(h))
+		a.attach(attachParams(h))
+		attachedIs(t, h, 2, "with two attachments live")
+		if err := h.eng.Close(); err != nil {
+			t.Fatal(err)
+		}
+		x.untilReset(protocol.ResetSessionClosed)
+		a.untilReset(protocol.ResetSessionClosed)
+		attachedIs(t, h, 0, "after both reset{session_closed}")
+		x.expectClosed()
+		a.expectClosed()
+	})
+	t.Run("the server's shutdown, a live attachment and a pending one", func(t *testing.T) {
+		g := newArmedHold()
+		h := newHost(t, withHooks(control.TestHooks{Reserved: g.reserved}), withOnClose(g.release))
+		x := h.dial()
+		x.sayHello(nil)
+		x.attach(attachParams(h))
+		heldAttach(t, h, g)
+		attachedIs(t, h, 2, "with a live attachment and a pending one")
+		closed := make(chan error, 1)
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), watchdog)
+			defer cancel()
+			closed <- h.srv.Close(ctx)
+		}()
+		// Every connection is closed under the pending attach before it is
+		// let go; the server's close then waits for its handler.
+		waitFor(t, "the server to close every connection", func() bool { return h.srv.OpenConns() == 0 })
+		g.release()
+		select {
+		case err := <-closed:
+			if err != nil {
+				t.Fatalf("server close: %v", err)
+			}
+		case <-time.After(watchdog):
+			t.Fatalf("the server did not close in %s", watchdog)
+		}
+		attachedIs(t, h, 0, "after the server's shutdown")
+	})
 }
 
 // TestTheInfoDocumentCarriesTheHostsFacts (§3.7, SF-60, SF-63): a host that

@@ -28,12 +28,13 @@
 //     pending, live, closing, then closed (attach.go); a connection holds at
 //     most one that is not closed.
 //  4. ONE WRITER (conn.write) draining a byte-counted FIFO (outbox) to the
-//     socket. Every outbound byte counts against WriterQueueBytes (32 MiB),
-//     ResetReserveBytes (1 KiB) of which only a final reset may use; a line
-//     that fits an empty queue always gets in; every wait on the queue ends
-//     when the connection closes. A writer that moves no byte for the stall
-//     bound (60 s, from the last byte that moved) closes the connection; the
-//     session is untouched.
+//     socket. Every outbound byte but the first session.stop's receipt
+//     (queued outside the budget, stop.go) counts against WriterQueueBytes
+//     (32 MiB), ResetReserveBytes (1 KiB) of which only a final reset may
+//     use; a line that fits an empty queue always gets in; every wait on the
+//     queue ends when the connection closes. A writer that moves no byte for
+//     the stall bound (60 s, from the last byte that moved) closes the
+//     connection; the session is untouched.
 //
 // A read-side EOF is half-close (astra 11): no more requests. Admitted
 // requests complete and their replies are written, a live subscription keeps
@@ -63,12 +64,14 @@
 //
 // # Stopping the session (stop.go)
 //
-// A server built with Options.Stop serves session.stop (plan 030 §3.6a): it
-// raises a close fence over attach reservations (a new attach is refused
-// closing), hands the first stop to the host's coordinator, and answers every
-// stop with a receipt, {}. It never stops anything itself: the coordinator
-// closes the engine — which ends every connection as above — and then the
-// server. A server without it refuses session.stop, stop_unsupported.
+// A server built with Options.Stop serves session.stop (plan 030 §3.6a): for
+// the first stop it raises a close fence over attach reservations (a new
+// attach is refused closing), queues the receipt, {}, and only then hands the
+// stop to the host's coordinator, so the receipt precedes everything the stop
+// puts on its connection; every later stop is answered {} and joins it. It
+// never stops anything itself: the coordinator closes the engine — which ends
+// every connection as above — and then the server. A server without it
+// refuses session.stop, stop_unsupported.
 //
 // # Client ids and the binding table (bind.go)
 //

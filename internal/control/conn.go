@@ -537,10 +537,13 @@ func (c *conn) close(reason string) {
 
 // outLine is one line queued for the writer, what it is to a replaced
 // connection, and what to do once it is on the socket (or never will be).
+// counted is how many of the budget's bytes it holds: len(b), or 0 for the
+// one line ever queued outside the budget (outbox.admit).
 type outLine struct {
-	b    []byte
-	kind lineKind
-	done func()
+	b       []byte
+	kind    lineKind
+	done    func()
+	counted int
 }
 
 // lineKind is what a queued line is to a replaced connection (plan 027 X25).
@@ -558,11 +561,12 @@ const (
 )
 
 // outbox is a connection's byte-counted FIFO (§3.7, astra 10). Every line
-// queued counts against WriterQueueBytes until the writer has written it;
-// ResetReserveBytes of that is held back for a final reset (offer with the
-// whole budget, forward.go's queueReset), so a reset always fits; a line that
-// fits an empty queue always gets in; and every wait ends when the connection
-// closes.
+// queued but one counts against WriterQueueBytes until the writer has written
+// it — the one is the first session.stop's receipt, queued outside the budget
+// (admit; plan 030 §3.6a); ResetReserveBytes of the budget is held back for a
+// final reset (offer with the whole budget, forward.go's queueReset), so a
+// reset always fits; a line that fits an empty queue always gets in; and every
+// wait ends when the connection closes.
 //
 // A REPLACED outbox (replace: its connection's engine was replaced, plan 027
 // §3.6, X25) is TERMINAL-ONLY. Every ordinary line it held was dropped then,
@@ -641,7 +645,7 @@ func (o *outbox) offer(b []byte, done func(), limit int, kind lineKind) (<-chan 
 	case o.bytes != 0 && o.bytes+len(b) > limit:
 		return o.room, errNoRoom
 	}
-	o.q = append(o.q, outLine{b: b, kind: kind, done: done})
+	o.q = append(o.q, outLine{b: b, kind: kind, done: done, counted: len(b)})
 	o.bytes += len(b)
 	o.high = max(o.high, o.bytes)
 	if kind == terminalLine {
@@ -682,7 +686,7 @@ func (o *outbox) replace() []outLine {
 			continue
 		}
 		dropped = append(dropped, ln)
-		o.bytes -= len(ln.b)
+		o.bytes -= ln.counted
 	}
 	o.q = kept
 	o.wakeLocked()
@@ -710,6 +714,36 @@ func (o *outbox) push(ctx context.Context, b []byte, done func()) error {
 			return err
 		}
 	}
+}
+
+// admit queues b, an ordinary line, OUTSIDE the budget: it never waits and is
+// never refused for room, and its bytes are not counted, so it takes nothing
+// from the ordinary budget or from the reset's reserve — the final reset
+// behind it still always fits. It is refused as offer refuses a line for
+// anything but room: the outbox closed, sealed, or replaced (an ordinary line
+// to a terminal-only outbox). One line in a server's life is queued so: the
+// first session.stop's receipt (stop.go), which must be queued before the
+// stop's coordinator hears of the stop, so that it precedes everything the
+// stop goes on to put on its connection, and must not wait for room a peer
+// that has stopped reading may never make. Its size is its request id's echo
+// and a few bytes more, bounded by the request's own line.
+func (o *outbox) admit(b []byte, done func()) error {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	switch {
+	case o.closed:
+		return errOutboxClosed
+	case o.sealed:
+		return errOutboxSealed
+	case o.terminalOnly:
+		return errOutboxReplaced
+	}
+	o.q = append(o.q, outLine{b: b, kind: ordinaryLine, done: done})
+	select {
+	case o.ready <- struct{}{}:
+	default:
+	}
+	return nil
 }
 
 // await waits, after an offer that found no room, until room is made (and the
@@ -779,7 +813,7 @@ func (o *outbox) next() (outLine, bool) {
 // the socket, or its write failed.
 func (o *outbox) written(ln outLine) {
 	o.mu.Lock()
-	o.bytes -= len(ln.b)
+	o.bytes -= ln.counted
 	if ln.kind == terminalLine {
 		o.terminals--
 	}

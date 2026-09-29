@@ -65,7 +65,8 @@ type TestHooks struct {
 	// the socket, and the writer with it.
 	BeforeWrite func(line []byte)
 	// BeforeReply runs on a handler just before it queues its reply (not
-	// attach's or detach's), with the method.
+	// attach's or detach's), with the method. For the first session.stop it
+	// runs with the stop's fence up and before its coordinator hears of it.
 	BeforeReply func(method string)
 	// Detaching runs on a detach once it has claimed the attachment's end and
 	// stopped its forwarder's pushes, before it waits for the forwarder.
@@ -83,9 +84,11 @@ type TestHooks struct {
 	// pending attachment is installed (plan 030 §3.6): a test that blocks in
 	// it holds an attach exactly where a fence going up must wait for it.
 	Reserving func()
-	// Fencing runs on FenceAttaches just before it takes the attachment
-	// lock: a test learns there that a fence is on its way up.
-	Fencing func()
+	// FenceWaits runs on FenceAttaches that found the attachment lock held,
+	// just before it waits for it: a test learns there that the fence is
+	// excluded — by an attach it holds between its check and its install
+	// (Reserving), say — and cannot return until the lock is let go.
+	FenceWaits func()
 }
 
 // NewForTest is New with hooks in place, and the stall bound and outbound line
@@ -114,7 +117,7 @@ func NewForTest(o Options, h TestHooks, stall time.Duration, maxLine int) *Serve
 		beforeReserve:  h.BeforeReserve,
 		reserved:       h.Reserved,
 		reserving:      h.Reserving,
-		fencing:        h.Fencing,
+		fenceWaits:     h.FenceWaits,
 	}
 	if stall > 0 {
 		s.stall = stall

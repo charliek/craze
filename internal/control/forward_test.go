@@ -204,7 +204,8 @@ func TestAReplyFollowsItsEvents(t *testing.T) {
 // next, until the forwarder was seen waiting for room. With a hold, the first
 // push that finds no room — the forwarder's — is held in its wait
 // (control.TestHooks.OutboxFull: past its first look at its stop channel, and
-// before the select on room and stop) until the hold is released.
+// before the select on room and stop) until the hold is released. extra are
+// further options for the host (withStop, say); none may set its hooks.
 type stall struct {
 	h *host
 	a *client
@@ -216,12 +217,12 @@ type stall struct {
 	n      int
 }
 
-func newStall(t *testing.T, held *hold) *stall {
+func newStall(t *testing.T, held *hold, extra ...hostOpt) *stall {
 	t.Helper()
 	var full atomic.Int32
 	var taken atomic.Uint64
 	s := &stall{resets: newSignal()}
-	var opts []hostOpt
+	opts := extra
 	if held != nil {
 		opts = append(opts, withOnClose(held.release))
 	}

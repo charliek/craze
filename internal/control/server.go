@@ -266,7 +266,9 @@ type hooks struct {
 	// just before it writes it.
 	beforeWrite func(line []byte)
 	// beforeReply runs on a handler just before it queues its reply (not
-	// attach's or detach's, which queue their own), with the method.
+	// attach's or detach's, which queue their own), with the method — the
+	// first session.stop's receipt included, which sessionStop queues itself
+	// (stop.go), with its fence up and before its coordinator hears of it.
 	beforeReply func(method string)
 	// detaching runs on a detach once it has claimed the attachment's end and
 	// stopped its forwarder's pushes, before it waits for the forwarder to
@@ -285,9 +287,10 @@ type hooks struct {
 	// installs its pending attachment: a test that blocks in it holds an
 	// attach between the two, where no fence can go up (plan 030 §3.6).
 	reserving func()
-	// fencing runs on FenceAttaches just before it takes the attachment
-	// lock.
-	fencing func()
+	// fenceWaits runs on FenceAttaches that found the attachment lock held,
+	// just before it waits for it (lockAttachments): the fence is excluded —
+	// by an attach between its fence check and its install, say.
+	fenceWaits func()
 }
 
 // New builds a server. It serves nothing until SetEngine and Serve.
