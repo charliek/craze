@@ -1034,9 +1034,10 @@ func TestServeSweepsOldHostLogsAtStart(t *testing.T) {
 	if err := os.WriteFile(kept, []byte("x"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	own := filepath.Join(dir, "own.log")
+	hostID := rundir.NewHostID()
+	own := filepath.Join(dir, hostID+".log")
 	t.Setenv("CRAZE_FAKE_SCRIPT", "echo")
-	r := runServeIn(t, hostEnv{}, "--agent-bin", fakeAgentPath(t), "--workspace", ws, "--log", own)
+	r := runServeIn(t, hostEnv{}, "--agent-bin", fakeAgentPath(t), "--workspace", ws, "--host-id", hostID, "--log", own)
 	e := r.waitServing(t, env, false)
 	for _, p := range stale {
 		if fileExists(p) {
@@ -1068,17 +1069,28 @@ func TestServeFlagsAreTheRootsSessionFlags(t *testing.T) {
 			t.Fatalf("--%s differs: root %+v, serve %+v", name, r, s)
 		}
 	}
-	for _, name := range []string{"theme", "no-mouse", "no-background", "no-host-status", "resume"} {
+	for _, name := range []string{"theme", "no-mouse", "no-background", "resume"} {
 		if serve.Flags().Lookup(name) == nil && root.Flags().Lookup(name) != nil {
 			continue
 		}
 		t.Fatalf("--%s: the TUI's own, and only the root's", name)
 	}
-	for _, name := range []string{"load", "log"} {
+	for _, name := range []string{"load", "log", "host-id"} {
 		if serve.Flags().Lookup(name) != nil && root.Flags().Lookup(name) == nil {
 			continue
 		}
 		t.Fatalf("--%s: craze serve's own, and only serve's", name)
+	}
+	// The spawner's (plan 030 C3): --host-id, and the launching TUI's
+	// --no-host-status passed through, hidden on serve; the root's own
+	// --no-host-status stays listed.
+	for _, name := range []string{"host-id", "no-host-status"} {
+		if fl := serve.Flags().Lookup(name); fl == nil || !fl.Hidden {
+			t.Fatalf("--%s: hidden on craze serve, got %+v", name, fl)
+		}
+	}
+	if r, s := root.Flags().Lookup("no-host-status"), serve.Flags().Lookup("no-host-status"); r == nil || r.Hidden || r.Value.Type() != s.Value.Type() || r.DefValue != s.DefValue {
+		t.Fatalf("--no-host-status: root %+v, serve %+v", r, s)
 	}
 }
 
@@ -1094,8 +1106,9 @@ func TestServeInAProcessOfItsOwn(t *testing.T) {
 	env, ws := serveHome(t)
 	t.Setenv("CRAZE_FAKE_SCRIPT", "echo")
 	t.Setenv("CRAZE_FAKE_STDERR", "fake-agent-says-hello")
-	logPath := filepath.Join(env.Home, ".cache", "craze", "host-logs", "fg.log")
-	c := startCrazeChild(t, "serve", "--agent-bin", fakeAgentPath(t), "--workspace", ws, "--log", logPath)
+	hostID := rundir.NewHostID()
+	logPath := filepath.Join(env.Home, ".cache", "craze", "host-logs", hostID+".log")
+	c := startCrazeChild(t, "serve", "--agent-bin", fakeAgentPath(t), "--workspace", ws, "--host-id", hostID, "--log", logPath)
 	gone := func() error {
 		if c.running() {
 			return nil
@@ -1103,6 +1116,9 @@ func TestServeInAProcessOfItsOwn(t *testing.T) {
 		return errors.New("the child exited")
 	}
 	e := waitServingEntry(t, env, true, gone, c.output)
+	if e.HostID != hostID {
+		t.Fatalf("the host serves as %s, not its --host-id %s", e.HostID, hostID)
+	}
 	logHas := func(want string) {
 		t.Helper()
 		deadline := time.Now().Add(serveStep)
@@ -1305,19 +1321,22 @@ func TestOnlyARequiredClaimRefusesAnUnusableLockTree(t *testing.T) {
 }
 
 // TestServeNeverSweepsItsOwnLog (astra r3-c2 3): a --log in the host logs'
-// directory that a gone host left a week and a day ago — a host id's name,
-// that host long dead — is the host's own log from its start: its own sweep,
-// which runs before the log opens, keeps it and the host appends to it; and
-// another host's sweep while it serves keeps it too (it is opened fresh:
-// TestHostLogIsOpenedFresh pins the instant before its first line). The
-// host's last line lands in that very file.
+// directory named for the host, as a spawner names it (hostLogNamed), that is
+// already there a week and a day old — its host's lock missing, as a gone
+// host's is — is the host's own log from its start: its own sweep, which runs
+// before the log opens and before the host binds, keeps it, and the host
+// appends to it; and another host's sweep while it serves keeps it too (it is
+// opened fresh — TestHostLogIsOpenedFresh pins the instant before its first
+// line — and, once the host is bound, held by its lock). The host's last line
+// lands in that very file.
 func TestServeNeverSweepsItsOwnLog(t *testing.T) {
 	env, ws := serveHome(t)
 	dir, err := rundir.HostLogDir(env)
 	if err != nil {
 		t.Fatal(err)
 	}
-	reused := filepath.Join(dir, rundir.NewHostID()+".log")
+	hostID := rundir.NewHostID()
+	reused := filepath.Join(dir, hostID+".log")
 	if err := os.WriteFile(reused, []byte("a week and a day ago\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -1326,7 +1345,7 @@ func TestServeNeverSweepsItsOwnLog(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("CRAZE_FAKE_SCRIPT", "echo")
-	r := runServeIn(t, hostEnv{}, "--agent-bin", fakeAgentPath(t), "--workspace", ws, "--log", reused)
+	r := runServeIn(t, hostEnv{}, "--agent-bin", fakeAgentPath(t), "--workspace", ws, "--host-id", hostID, "--log", reused)
 	e := r.waitServing(t, env, false)
 	if !fileExists(reused) {
 		t.Fatal("the host's start-up sweep removed its own log")
@@ -1375,7 +1394,8 @@ func TestServeCrashOutputSurvivesAPanic(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			logPath := filepath.Join(dir, "crash.log")
+			hostID := rundir.NewHostID()
+			logPath := filepath.Join(dir, hostID+".log")
 			if rotated {
 				// A log holding a line already, and a cap its host's first line
 				// passes: that line rotates it.
@@ -1384,7 +1404,7 @@ func TestServeCrashOutputSurvivesAPanic(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			c := startCrazeChild(t, "serve", "--agent-bin", fakeAgentPath(t), "--workspace", ws, "--provider", "cursor", "--log", logPath)
+			c := startCrazeChild(t, "serve", "--agent-bin", fakeAgentPath(t), "--workspace", ws, "--provider", "cursor", "--host-id", hostID, "--log", logPath)
 			if code := c.wait(t, serveStep); code != 2 {
 				t.Fatalf("exit %d, want 2 for a panic; output: %s", code, c.output)
 			}

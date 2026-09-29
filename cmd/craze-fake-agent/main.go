@@ -139,6 +139,10 @@ Environment:
                        dies of its own closed stdin however craze exits, so a
                        test cannot tell an agent craze shut down from one it
                        orphaned.
+  CRAZE_FAKE_STUBBORN=1  CRAZE_FAKE_LINGER for 90 s, and SIGTERM, SIGINT,
+                       SIGHUP and SIGPIPE are ignored: only SIGKILL ends the
+                       process before then, so a test can prove a detached
+                       host's spawner kills the agent's process group itself.
   CRAZE_FAKE_STDERR=<line>  every script except hang and hang-ack writes this
                        line to stderr once at startup and once per
                        session/prompt. hang and hang-ack stay silent, by the

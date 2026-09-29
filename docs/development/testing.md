@@ -220,6 +220,11 @@ does, however craze exits — killed outright included — so a check that the
 agent is gone could not tell an agent craze shut down from one it orphaned. The
 `SIGHUP` cases in `test_host_status.py` set it.
 
+`CRAZE_FAKE_STUBBORN=1` is that for 90 seconds, and the fake also ignores
+`SIGTERM`, `SIGINT`, `SIGHUP` and `SIGPIPE`, so only `SIGKILL` of its process
+group ends it sooner: an agent that outlives its host. The spawner's test that
+kills a detached host's recorded agent groups sets it.
+
 `CRAZE_FAKE_STDERR=<line>` makes every fake-agent script except `hang` and
 `hang-ack` write that line to stderr once at startup and once per
 session/prompt. `hang` and `hang-ack` stay silent, the same house rule that

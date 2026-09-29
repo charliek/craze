@@ -494,6 +494,12 @@ func (s *session) start(ctx context.Context) (teardown bool, _ error) {
 		s.unstart()
 		return false, err
 	}
+	// Told before anything else can happen to the child — a Close that ran
+	// while it spawned shuts it down just below — so a host that records it
+	// never misses a group that existed.
+	if g := s.opts.AgentGroup; g != nil {
+		g(client.ProcessGroup())
+	}
 	// Close may have run while we were spawning; adopt the child only if the
 	// session is still open, otherwise reap it here so it cannot be orphaned.
 	s.mu.Lock()

@@ -121,15 +121,23 @@ type runHost struct {
 // picker load claimed it before the build, and a second flock on another
 // descriptor would contend with ourselves; the registry entry is rewritten
 // for it, and again once it is ready (controlHost.track).
-func (r *runHost) onEngine(eng *engine.Engine) {
+func (r *runHost) onEngine(eng *engine.Engine) { r.publish(eng) }
+
+// publish is onEngine, answering a channel closed once the registry entry
+// first carries eng's identity — the first of its rewrites to land (every
+// rewrite writes the whole identity) — which is when a resolver reading the
+// registry can find the session by its craze id: craze serve's ready line
+// waits for it (plan 030 §3.4). nil, never closed, when no socket is served.
+func (r *runHost) publish(eng *engine.Engine) <-chan struct{} {
 	if r.ctl != nil {
 		r.ctl.server.SetEngine(eng)
 	}
 	st := eng.State()
 	r.claims.ensure(st.CrazeSessionID)
-	if r.ctl != nil {
-		r.ctl.track(eng, st)
+	if r.ctl == nil {
+		return nil
 	}
+	return r.ctl.track(eng, st)
 }
 
 // close is the run's teardown: the socket first (controlHost.close), then
@@ -170,11 +178,22 @@ type controlHost struct {
 	writerDone chan struct{}
 }
 
-// rewrite is one registry rewrite, for the engine it describes.
+// rewrite is one registry rewrite, for the engine it describes, and the
+// landing it reports to when it succeeds.
 type rewrite struct {
-	eng *engine.Engine
-	fn  func(*rundir.Entry)
+	eng    *engine.Engine
+	fn     func(*rundir.Entry)
+	landed *landing
 }
+
+// landing is the first successful rewrite of one engine's identity: ch is
+// closed when it lands, once, whichever of that engine's rewrites it is.
+type landing struct {
+	once sync.Once
+	ch   chan struct{}
+}
+
+func (l *landing) land() { l.once.Do(func() { close(l.ch) }) }
 
 // serveControl binds the control socket and serves it (plan 027 §3.8's
 // "Bind"): the host lock, the socket (0600 in its 0700 directory), the
@@ -259,16 +278,19 @@ func permissionMode(force bool) protocol.PermissionMode {
 // (identity), never a part of it: a rewrite that failed is made good by the
 // next that succeeds, so the entry is never ready under a stale or empty
 // identity. It queues and returns: the writes happen on the writer goroutine,
-// in order.
-func (h *controlHost) track(eng *engine.Engine, st engine.State) {
+// in order. The channel it answers is closed when the first of eng's
+// rewrites lands — a failed one is made good by the next (the ready rewrite)
+// — and never for an engine replaced first or a host closed first.
+func (h *controlHost) track(eng *engine.Engine, st engine.State) <-chan struct{} {
 	stop := make(chan struct{})
+	landed := &landing{ch: make(chan struct{})}
 	h.mu.Lock()
 	if h.engStop != nil {
 		close(h.engStop)
 	}
 	h.eng, h.engStop = eng, stop
 	h.mu.Unlock()
-	h.enqueue(eng, identity(st, false))
+	h.enqueue(eng, identity(st, false), landed)
 	go func() {
 		select {
 		case <-eng.Ready():
@@ -285,8 +307,9 @@ func (h *controlHost) track(eng *engine.Engine, st engine.State) {
 		if st.Activity == engine.ActivityClosing && !st.StartFailed {
 			return
 		}
-		h.enqueue(eng, identity(st, !st.StartFailed))
+		h.enqueue(eng, identity(st, !st.StartFailed), landed)
 	}()
+	return landed.ch
 }
 
 // identity is a rewrite of the registry entry to st, one engine's state at one
@@ -302,10 +325,11 @@ func identity(st engine.State, ready bool) func(*rundir.Entry) {
 	}
 }
 
-// enqueue queues a rewrite for the writer, without blocking.
-func (h *controlHost) enqueue(eng *engine.Engine, fn func(*rundir.Entry)) {
+// enqueue queues a rewrite for the writer, without blocking; landed, when
+// set, is told if it succeeds.
+func (h *controlHost) enqueue(eng *engine.Engine, fn func(*rundir.Entry), landed *landing) {
 	h.mu.Lock()
-	h.queue = append(h.queue, rewrite{eng: eng, fn: fn})
+	h.queue = append(h.queue, rewrite{eng: eng, fn: fn, landed: landed})
 	h.mu.Unlock()
 	select {
 	case h.wake <- struct{}{}:
@@ -343,6 +367,10 @@ func (h *controlHost) writeLoop() {
 					return
 				}
 				h.warnOnce(err)
+				continue
+			}
+			if r.landed != nil {
+				r.landed.land()
 			}
 		}
 	}

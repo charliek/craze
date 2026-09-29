@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"strconv"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -29,6 +30,17 @@ const (
 	cliChildPanic = "CRAZE_CLI_TEST_PANIC"
 	// cliChildLogMax is the host log's rotation size in bytes (hostLogMax).
 	cliChildLogMax = "CRAZE_CLI_TEST_LOG_MAX"
+	// cliChildReady is what a spawned craze serve does when its ready line is
+	// due (serveAnnouncing): "skip" writes nothing and serves on, its pipe
+	// open; "block" parks craze serve's goroutine for good, so a SIGTERM is
+	// never acted on; "malformed" writes a line that is not JSON;
+	// "oversized" writes one longer than readyLineMax. The spawn tests.
+	cliChildReady = "CRAZE_CLI_TEST_READY"
+	// cliChildGate is a FIFO a loading craze serve reads one byte from once
+	// its session is claimed, before its socket binds (serveClaimed): the
+	// held rendezvous's holder, held where it is claimed and not yet in the
+	// registry.
+	cliChildGate = "CRAZE_CLI_TEST_GATE"
 )
 
 func init() {
@@ -52,6 +64,20 @@ func init() {
 		}
 		hostLogMax = n
 	}
+	if mode, ok := os.LookupEnv(cliChildReady); ok {
+		_ = os.Unsetenv(cliChildReady)
+		serveAnnouncing = childAnnouncing(mode)
+	}
+	if fifo, ok := os.LookupEnv(cliChildGate); ok {
+		_ = os.Unsetenv(cliChildGate)
+		serveClaimed = func() {
+			f, err := os.Open(fifo)
+			if err == nil {
+				_, _ = f.Read(make([]byte, 1))
+				_ = f.Close()
+			}
+		}
+	}
 	var argv []string
 	if err := json.Unmarshal([]byte(raw), &argv); err != nil {
 		fmt.Fprintln(os.Stderr, "craze test child:", err)
@@ -68,6 +94,30 @@ func init() {
 		fmt.Fprintln(os.Stderr, line)
 	}
 	os.Exit(code)
+}
+
+// childAnnouncing is serveAnnouncing for cliChildReady's mode.
+func childAnnouncing(mode string) func(*readyPipe) bool {
+	return func(p *readyPipe) bool {
+		f := p.file()
+		switch mode {
+		case "skip":
+		case "block":
+			select {}
+		case "malformed":
+			_, _ = f.WriteString("this is not a ready line\n")
+			p.close()
+		case "oversized":
+			// Written whole or not at all: past what the spawner reads, the
+			// write blocks until the spawner closes its end, and fails.
+			_, _ = f.WriteString(`{"ok":true,"pad":"` + strings.Repeat("x", readyLineMax) + "\"}\n")
+			p.close()
+		default:
+			fmt.Fprintln(os.Stderr, "craze test child: bad", cliChildReady, mode)
+			os.Exit(97)
+		}
+		return true
+	}
 }
 
 // crazeChild is one craze run in a process of its own.

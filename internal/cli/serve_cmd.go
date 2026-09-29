@@ -18,6 +18,7 @@ import (
 	"github.com/charliek/craze/internal/engine"
 	"github.com/charliek/craze/internal/rundir"
 	"github.com/charliek/craze/internal/sessions"
+	"github.com/charliek/craze/internal/version"
 )
 
 // craze serve (plan 030 §3.3) is the headless host: one session, built exactly
@@ -33,16 +34,18 @@ import (
 //     command uses (sessionflags.go), so a refusal reads as the root's does;
 //     --load is parsed; a control socket switched off is a usage error, since a
 //     headless host is reachable through nothing else.
-//  2. The host logs of hosts gone a week are swept, then the log opens
-//     (--log, else stderr: hostlog.go) — in that order, so the sweep can never
-//     take the log it is about to write.
+//  2. The host's id is --host-id's, which a spawner minted (spawn.go), or a
+//     new one; a --log in the host logs' directory must be named for it
+//     (hostLogNamed). The host logs of hosts gone a week are swept, then the
+//     log opens (--log, else stderr: hostlog.go) — in that order, so the sweep
+//     can never take the log it is about to write.
 //  3. The provider resolves as the root's does. A new session's is held to the
 //     spawn flags; a load's row is found — --continue's the newest in the
 //     workspace, --load's the one its id names — and claimed before anything
 //     is built (claimLoad), a legacy row given its craze id under this host's
 //     own claim. A session another craze holds is exit 1 naming its holder,
-//     carrying the *rundir.HeldError (C3 turns it into the ready line's held
-//     answer).
+//     carrying the *rundir.HeldError, which a spawned host's ready line
+//     answers held (ready.go).
 //  4. The control socket binds — fatally: a failure leaves nothing behind —
 //     served with the lifecycle coordinator (hostLifecycle) as its stop seam.
 //  5. The session is built as the TUI builds one, sessionOptions and
@@ -60,6 +63,12 @@ import (
 //     caught and dropped — signal.Notify, never signal.Ignore, whose SIG_IGN
 //     an agent child would inherit across exec. The stop sequence runs once
 //     (serveHost.stop) and craze serve returns: exit 0.
+//
+// A host a launcher spawned (spawnHost) has a ready pipe (ready.go), taken
+// before anything else runs: once the registry entry carries the session's
+// identity it answers ok on it, and a host that returns before that answers
+// why; it also records its agents' process groups for its spawner's last
+// resort. A host run by hand has neither.
 //
 // Every claim is a condition of running (sessionClaims.required): where the
 // root warns and runs unclaimed on a lock tree it cannot use (X30), craze
@@ -79,6 +88,13 @@ type serveFlags struct {
 	// log is --log: the file the host's diagnostics and its agent's stderr go
 	// to, "" for stderr.
 	log string
+	// hostID is --host-id (hidden): the host id the spawner minted, which
+	// names this host's registry entry, lock and socket, its ready line, and
+	// its files in the host logs' directory (plan 030 §3.4). "" mints one.
+	hostID string
+	// ready is the spawner's ready pipe (CRAZE_READY_FD, ready.go), taken
+	// before anything else runs; nil for a host run by hand. Not a flag.
+	ready *readyPipe
 }
 
 // serveStartJoin bounds how long a stopping host waits for its Start to
@@ -100,6 +116,24 @@ var serveRowRead = func(sessions.Row) {}
 // whose child panics there; a no-op in production.
 var serveServing = func() {}
 
+// serveClaimed is called on craze serve's own goroutine once a load's session
+// is claimed, before the socket binds: a seam for the held rendezvous's tests,
+// whose holder is held there — claimed, and not yet in the registry; a no-op
+// in production.
+var serveClaimed = func() {}
+
+// serveBound is told the control host craze serve has just bound, before any
+// engine is served on it: a seam for the test that stalls the registry's
+// rewrites (controlHost.update); a no-op in production.
+var serveBound = func(*controlHost) {}
+
+// serveAnnouncing is called on craze serve's own goroutine when its identity
+// has landed and the ready line is due, with the pipe; true means it has dealt
+// with the pipe itself and the line is not written. A seam for the
+// handshake's tests — a host that never answers, blocks, or answers garbage —
+// false in production.
+var serveAnnouncing = func(*readyPipe) bool { return false }
+
 func newServeCmd() *cobra.Command {
 	f := &serveFlags{tuiFlags: tuiFlags{force: true}}
 	cmd := &cobra.Command{
@@ -111,6 +145,14 @@ func newServeCmd() *cobra.Command {
 			"the TUI takes, and --load to load a session by its id.",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			// First: the ready pipe is close-on-exec before anything could
+			// start a process, and the spawner's marks leave the environment
+			// before processHostEnv reads it for the agent.
+			ready, err := takeReadyPipe()
+			if err != nil {
+				return err
+			}
+			f.ready = ready
 			sigs, stop := serveSignals()
 			defer stop()
 			return runServe(cmd, f, processHostEnv(), sigs)
@@ -128,6 +170,16 @@ func registerServeFlags(cmd *cobra.Command, f *serveFlags) {
 		"load this session: its craze session id, or <provider>:<session id> for one craze has given none")
 	cmd.Flags().StringVar(&f.log, "log", "",
 		"write the host's diagnostics and the agent's stderr to this file, rotated at 4 MiB (default: stderr)")
+	// Hidden: the spawner's (spawnHost), not a user's. --host-id is the id it
+	// minted for the host; --no-host-status is the launching TUI's own flag,
+	// passed through because the agent's environment is settled here
+	// (agentEnv): a TUI that reports to no multiplexer must get a host that
+	// leaves the agent's hook gates whole, as its in-process session would.
+	cmd.Flags().StringVar(&f.hostID, "host-id", "", "the host's id, twelve lowercase hex digits (set by the spawner)")
+	cmd.Flags().BoolVar(&f.noHostStatus, "no-host-status", false,
+		"the launching TUI reports no session status: leave the agent's host hook gates in its environment (set by the spawner)")
+	_ = cmd.Flags().MarkHidden("host-id")
+	_ = cmd.Flags().MarkHidden("no-host-status")
 }
 
 // serveSignals is craze serve's signal set, registered for the command's
@@ -145,7 +197,18 @@ func serveSignals() (<-chan os.Signal, func()) {
 // command, and an injected one for a test, as runTUI's is. sigs is the
 // process's signals as serveSignals delivers them, or a test's own channel.
 // It returns once the host has stopped, nil for a stop however it was asked
-// for; an error is a host that never served.
+// for; an error is a host that never served, and a spawned host's ready line
+// says so (readyPipe.fail) — unless it was ready already, when the line was
+// ok and nothing more is written. A host that stopped before it was ready
+// closes the pipe unwritten.
+func runServe(cmd *cobra.Command, f *serveFlags, env hostEnv, sigs <-chan os.Signal) error {
+	err := serveBody(cmd, f, env, sigs)
+	f.ready.fail(cmd, err)
+	f.ready.close()
+	return err
+}
+
+// serveBody is runServe less the ready pipe's last word.
 //
 // The log is closed only here, on a clean return, and never deferred: a
 // panic on this goroutine runs every deferred call before the runtime prints
@@ -153,7 +216,7 @@ func serveSignals() (<-chan os.Signal, func()) {
 // /dev/null for a spawned host — just before the one report its log must
 // keep (astra r3-c2 4). A panic leaves the log open and the crash output on
 // it, and the process ends.
-func runServe(cmd *cobra.Command, f *serveFlags, env hostEnv, sigs <-chan os.Signal) error {
+func serveBody(cmd *cobra.Command, f *serveFlags, env hostEnv, sigs <-chan os.Signal) error {
 	if err := f.settle(); err != nil {
 		return err
 	}
@@ -164,17 +227,24 @@ func runServe(cmd *cobra.Command, f *serveFlags, env hostEnv, sigs <-chan os.Sig
 	if f.cont && load != nil {
 		return usagef("craze serve: --continue and --load are mutually exclusive")
 	}
+	hostID, err := f.hostIdentity()
+	if err != nil {
+		return err
+	}
 	var why bytes.Buffer
 	if !controlSocketOn(&why) {
 		return controlSocketRefusal(why.String())
 	}
 
 	runEnv := rundir.ProcessEnv()
+	if err := hostLogNamed(runEnv, f.log, hostID); err != nil {
+		return err
+	}
 	out, closeLog, err := openServeLog(runEnv, f.log, errWriter(cmd))
 	if err != nil {
 		return err
 	}
-	err = serveSession(cmd, f, env, sigs, runEnv, load, out)
+	err = serveSession(cmd, f, env, sigs, runEnv, hostID, load, out)
 	// A host that never served says why in its log too: a spawned host's
 	// stderr is /dev/null.
 	if err != nil && f.log != "" {
@@ -185,14 +255,42 @@ func runServe(cmd *cobra.Command, f *serveFlags, env hostEnv, sigs <-chan os.Sig
 	return err
 }
 
-// serveSession is runServe once its log is open, out: the session claimed,
+// hostIdentity is the host's id: --host-id's, which the spawner minted and
+// names the host's log after, or a new one for a host run without it. One
+// that is not a host id is a usage error.
+func (f *serveFlags) hostIdentity() (string, error) {
+	if f.hostID == "" {
+		return rundir.NewHostID(), nil
+	}
+	if !rundir.ValidHostID(f.hostID) {
+		return "", usagef("craze serve: --host-id %q is not twelve lowercase hex digits", f.hostID)
+	}
+	return f.hostID, nil
+}
+
+// hostLogNamed refuses a --log in the host logs' directory that is not named
+// for this host, <hostId>.log — a usage error, before anything is created.
+// The start-up sweep keeps a live host's files there only by that host's own
+// lock (rundir.SweepHostLogs), and finds the lock by the file's name: a log
+// named for any other id — a gone host's, reused — would be a live host's log
+// that another host's sweep could take from under it once it is a week old.
+// Named for its writer, a quiet host's log is kept however old it grows.
+// A --log anywhere else is the user's own file and is not swept.
+func hostLogNamed(env rundir.Env, path, hostID string) error {
+	name := activeHostLog(env, path)
+	if name == "" || name == hostID+".log" {
+		return nil
+	}
+	return usagef("craze serve: --log %s: a log in the host logs' directory is named for the host that writes it, %s.log", path, hostID)
+}
+
+// serveSession is serveBody once its log is open, out: the session claimed,
 // bound, built, served and — once asked — stopped.
-func serveSession(cmd *cobra.Command, f *serveFlags, env hostEnv, sigs <-chan os.Signal, runEnv rundir.Env, load *loadID, out io.Writer) error {
+func serveSession(cmd *cobra.Command, f *serveFlags, env hostEnv, sigs <-chan os.Signal, runEnv rundir.Env, hostID string, load *loadID, out io.Writer) error {
 	// The host id first, as runTUI's: the session claims write it into their
 	// lock files. The teardown is deferred from here, so every return after it
 	// releases what was claimed — and, once the socket is bound, closes and
 	// unlinks it; the stop sequence runs it itself, and this is then a no-op.
-	hostID := rundir.NewHostID()
 	claims := newSessionClaims(runEnv, hostID, out)
 	claims.required = true
 	rh := &runHost{claims: claims}
@@ -244,6 +342,7 @@ func serveSession(cmd *cobra.Command, f *serveFlags, env hostEnv, sigs <-chan os
 		if err != nil {
 			return err
 		}
+		serveClaimed()
 	} else {
 		if err := f.refuse(p); err != nil {
 			return err
@@ -265,6 +364,7 @@ func serveSession(cmd *cobra.Command, f *serveFlags, env hostEnv, sigs <-chan os
 		return exitf(1, "craze serve: the control socket: %v", err)
 	}
 	rh.ctl = ctl
+	serveBound(ctl)
 
 	// Built as the TUI builds its sessions (runTUI's build closure), less the
 	// primary: nothing reads one on a host with no client of its own, and
@@ -274,6 +374,14 @@ func serveSession(cmd *cobra.Command, f *serveFlags, env hostEnv, sigs <-chan os
 	opts := sessionOptions(&f.tuiFlags, ws, f.mode(), out, out, childEnv, p, row)
 	opts.JournalDir = journal
 	opts.NoPrimary = true
+	// A spawned host records its agents' process groups for its spawner's
+	// last resort (plan 030 §3.4); one run by hand has no spawner to read
+	// them.
+	var groups *agentGroups
+	if f.ready != nil {
+		groups = newAgentGroups(runEnv, hostID, out)
+		opts.AgentGroup = groups.record
+	}
 	serveBuilt(opts)
 	sess := agent.New(opts)
 	eng, err := engine.New(sess, engine.HostOptions(row.CrazeID, &sessions.Store{KnownProvider: knownProvider}, indexCWD, p.Name()))
@@ -289,18 +397,21 @@ func serveSession(cmd *cobra.Command, f *serveFlags, env hostEnv, sigs <-chan os
 		_ = eng.Close()
 		return err.exit()
 	}
-	rh.onEngine(eng)
+	published := rh.publish(eng)
 	fmt.Fprintf(out, "craze serve: host %s serving session %s (%s) in %s\n",
 		hostID, eng.State().CrazeSessionID, p.Name(), indexCWD)
 	serveServing()
 
-	h := &serveHost{rh: rh, eng: eng, lc: lc, log: out}
+	h := &serveHost{rh: rh, eng: eng, lc: lc, log: out, ready: f.ready, groups: groups}
 	started := make(chan struct{})
 	go func() {
 		defer close(started)
 		h.start(persistsProvider(cmd, &f.tuiFlags, loading), resolvedProvider{Provider: p, Fallback: resolved.Fallback})
 	}()
-	h.wait(sigs)
+	if f.ready == nil {
+		published = nil
+	}
+	h.wait(sigs, published)
 	h.stop()
 	select {
 	case <-started:
@@ -428,12 +539,15 @@ func loadWorkspace(cmd *cobra.Command, flag string, row sessions.Row) (string, e
 }
 
 // serveHost is a running craze serve: its socket and claims (runHost), its
-// engine, its lifecycle coordinator and its log.
+// engine, its lifecycle coordinator and its log; for a spawned host, its
+// ready pipe and its agents' process-group record.
 type serveHost struct {
-	rh  *runHost
-	eng *engine.Engine
-	lc  *hostLifecycle
-	log io.Writer
+	rh     *runHost
+	eng    *engine.Engine
+	lc     *hostLifecycle
+	log    io.Writer
+	ready  *readyPipe
+	groups *agentGroups
 }
 
 // start starts the session, on a goroutine of its own. A failure is said once
@@ -468,12 +582,17 @@ func (h *serveHost) start(persist bool, p resolvedProvider) {
 // session.stop the server took (hostLifecycle.stopFunc), or SIGINT or SIGTERM
 // on sigs, which it asks for itself. A SIGHUP is a line on the log and nothing
 // else: the terminal that started a foreground host has gone, and the session
-// runs on.
-func (h *serveHost) wait(sigs <-chan os.Signal) {
+// runs on. published is closed once the registry entry carries the session's
+// identity, when a spawned host announces itself (announce); nil for a host
+// run by hand, which has no one to tell.
+func (h *serveHost) wait(sigs <-chan os.Signal, published <-chan struct{}) {
 	for {
 		select {
 		case <-h.lc.stopping:
 			return
+		case <-published:
+			published = nil
+			h.announce()
 		case sig := <-sigs:
 			if sig == syscall.SIGHUP {
 				fmt.Fprintln(h.log, "craze serve: hangup ignored; the session runs on")
@@ -481,6 +600,28 @@ func (h *serveHost) wait(sigs <-chan os.Signal) {
 			}
 			h.lc.request(signalName(sig))
 		}
+	}
+}
+
+// announce writes the ready line (plan 030 §3.4): the host, its socket, its
+// session and the craze serving it, now that a resolver can find the session
+// by its craze id in the registry. A launcher that did not take it — gone, or
+// done waiting — has left a host nobody knows it spawned, which stops rather
+// than live on unattended.
+func (h *serveHost) announce() {
+	if serveAnnouncing(h.ready) {
+		return
+	}
+	err := h.ready.send(readyLine{
+		OK:             true,
+		HostID:         h.rh.ctl.host.ID(),
+		Socket:         h.rh.ctl.host.Socket(),
+		CrazeSessionID: h.eng.State().CrazeSessionID,
+		CrazeVersion:   version.Version,
+	})
+	if err != nil {
+		fmt.Fprintf(h.log, "craze serve: the launcher did not take the ready line: %v\n", err)
+		h.lc.request("its launcher went before it was ready")
 	}
 }
 
@@ -509,6 +650,10 @@ func signalName(sig os.Signal) string {
 //     registry entry, the socket, the host lock;
 //  4. last, the session claims (runHost.close).
 //
+// A spawned host's record of its agents' process groups goes with the
+// engine's close, which has ended every agent the session spawned: a host that
+// stops cleanly leaves its spawner nothing to kill.
+//
 // Every request after the first has joined this one; runServe returns once it
 // is done, and the process exits 0.
 func (h *serveHost) stop() {
@@ -516,6 +661,7 @@ func (h *serveHost) stop() {
 	_, _ = h.rh.ctl.server.FenceAttaches()
 	teardownStep("fenced")
 	_ = h.eng.Close()
+	h.groups.close()
 	teardownStep("engine closed")
 	h.rh.close()
 }
