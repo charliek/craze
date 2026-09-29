@@ -2956,46 +2956,48 @@ merged; the `*r` commits are review-fix rounds, and
 `030-session-control-s5-agent-view/reviews/dispositions-pr1.md` has every
 finding and its disposition):
 
-- C1 (`19d3f3f`) — the wire: `session.stop` behind the new `stop` capability
+- C1 (`16e8981`) — the wire: `session.stop` behind the new `stop` capability
   (`Backend.Stop`, `control.Options.Stop`), the attach fence
   (`FenceAttaches`) and the `closing` reason, the info document's
   `permissionMode` and `startedAt`, and `lastTurn` in `session.state` and a
   roster row; fixtures 14–16 (additions) and the published schema. C1r
-  (`9742a39`) makes a stop's receipt precede everything the stop puts on its
+  (`19a95ed`) makes a stop's receipt precede everything the stop puts on its
   connection.
-- C2 (`2534d05`) — `craze serve`: the headless host in the foreground (the
+- C2 (`8011307`) — `craze serve`: the headless host in the foreground (the
   session flags, `--load`, `--log`), built as the TUI builds a session,
   served over the socket with the lifecycle coordinator as its stop seam.
-  C2r (`b839b0e`) makes the claim a condition of running and reworks the
-  host-log sweep to decide a host's death by its own lock; C2r2 (`83fec7a`)
+  C2r (`5aa6fa5`) makes the claim a condition of running and reworks the
+  host-log sweep to decide a host's death by its own lock; C2r2 (`a9507ee`)
   holds one validated cache parent for the sweep and claims a new session's
   id before anything is built.
-- C3 (`3030b4d`) — the spawner: `spawnHost` (setsid, stdio on `/dev/null`, a
+- C3 (`412782b`) — the spawner: `spawnHost` (setsid, stdio on `/dev/null`, a
   ready pipe), the ready line (`ok`, `held`, error), the rendezvous with a
   holder, and the agent-group record the launcher's last-resort kill reads.
-  C3r (`eb95243`) makes the record prove whose group it is
+  C3r (`a9ff24c`) makes the record prove whose group it is
   (`rundir.ProcessIdentity`), required to run, and outlasting the start.
-- C4 (`c8080b1`) — the launch: the ordinary `craze` spawns a host and runs the
+- C4 (`614d9e9`) — the launch: the ordinary `craze` spawns a host and runs the
   TUI as its client (`internal/cli/launch.go`, `detachOn`), the spawn-failure
   UX, `-c`/`--resume` attaching to a held session, cleanup of a host the
-  launch spawned whose session never came up. C4r (`95ba491`) keeps a host only
+  launch spawned whose session never came up. C4r (`cb34190`) keeps a host only
   once the TUI took its start, separates a refusal from a host that could not
   come up, and attaches a reattach directly.
-- C5 (`0c7d081`) — lifetime: `/exit` (and Ctrl+D, the second Ctrl+C) stops the
+- C5 (`8f055b8`) — lifetime: `/exit` (and Ctrl+D, the second Ctrl+C) stops the
   session on its host (`stopQuit`), the idle watcher and `host_idle_exit`, the
   engine's close fence, `Engine.Busy`, socket-lost exit, `host_stop` journal
-  diag, a start-failed host stays attachable. C5r (`806d143`): owed background
+  diag, a start-failed host stays attachable. C5r (`5d3be17`): owed background
   work and admitted-but-unfinished commands keep a host, a failed start retires
-  replay, one quit deadline; C5r2 (`4518f8f`): the deadline ends a stop it
+  replay, one quit deadline; C5r2 (`37b073c`): the deadline ends a stop it
   cannot reach, and a direct reattach attaches before it commits.
-- C6 (`a751364`) — client gaps: the TUI shows the host's facts (permission
+- C6 (`be31640`) — client gaps: the TUI shows the host's facts (permission
   mode, start time, last turn), the workspace follows the session, SQ16's
-  wording. C6r (`8035095`): a failure reported before the session came up
+  wording. C6r (`9dbe89f`): a failure reported before the session came up
   stands; one frame run counts elapsed from one start on both transports.
-- C7 (`48305fe`) — `tests/cli`: the core cases run detached and in process,
-  `test_detach.py`. C7r (`f8a486c`): a start failure keeps its row through a
-  restore, and the test hosts' cleanup is exact.
-- C8 — docs: `craze serve`, the launch behaviour and `craze attach`'s quit in
+- C7 (`d9845f7`) — `tests/cli`: the core cases run detached and in process,
+  `test_detach.py`. C7r (`0a2e86d`): a start failure keeps its row through a
+  restore, and the test hosts' cleanup is exact. C7r2 (`ad0d2c6`): a start
+  failure belongs to its incarnation; the macOS process scan is bounded. C7r3
+  (`b7e3078`): a regression test for that scan.
+- C8 (`abd93de`, C8r `31448ef`) — docs: `craze serve`, the launch behaviour and `craze attach`'s quit in
   `docs/reference/cli.md`; `detach`, `CRAZE_DETACH`, `host_idle_exit` and the
   host logs in `docs/reference/configuration.md`; the host/client split in
   `docs/development/architecture.md`; this record; `13`'s SF-80..SF-87.
@@ -3004,7 +3006,7 @@ PRs 2–4 are recorded here as each lands.
 
 ### Deviations from the plan
 
-PR 1's execution amendments X1–X61, mirrored here as `12`'s own record (the
+PR 1's execution amendments X1–X62, mirrored here as `12`'s own record (the
 full text is in the plan, `~/.claude/plans/craze/030-session-control-s5-agent-view.md`,
 "Execution amendments"); review-fix rounds are grouped with the commit they
 amend. None reopens an owner decision. PRs 2–4 add theirs as they land.
@@ -3174,6 +3176,12 @@ amend. None reopens an owner decision. PRs 2–4 add theirs as they land.
     detached test cases seed `host_idle_exit = "30s"`, `marker_pids` matches
     the exact `CRAZE_RUNTIME_DIR` entry, and `host_cleanup` SIGTERMs registered
     and marked hosts and verifies its SIGKILL fallback. Residuals: SF-85.
+20. **Plan 030 X62 (C7r2; amends X60)** — a start failure is its incarnation's:
+    the model records the incarnation it held when the stream's Ready arrived;
+    a restore of another incarnation takes an old start failure away (no
+    redrawn row, no stale error at quit), and a failure arriving after such a
+    restore is not applied — the held session comes up as a late start does.
+    The macOS test-cleanup scan is bounded (`PS_TIMEOUT`) and fails closed.
 
 ### Live smoke
 
