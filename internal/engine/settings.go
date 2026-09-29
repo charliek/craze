@@ -370,9 +370,21 @@ func (e *Engine) takeSet() (*setReq, bool) {
 			r.reply <- setAnswer{err: notRun(err)}
 			continue
 		}
+		// In progress from here until the worker has answered it (setDone):
+		// neither queued nor done, it is still a settings command in flight
+		// to a close fence (busyLocked, plan 030 §3.6).
+		e.setRunning = true
 		return r, true
 	}
 	return nil, false
+}
+
+// setDone is the worker's request answered: no settings command is in
+// progress any more (takeSet, busyLocked).
+func (e *Engine) setDone() {
+	e.mu.Lock()
+	e.setRunning = false
+	e.mu.Unlock()
 }
 
 // setOutcomeUnknown is the answer a claimed request's caller gets when its own
@@ -420,6 +432,7 @@ func (e *Engine) serveSets() {
 				break
 			}
 			res, err := e.runSet(r)
+			e.setDone()
 			r.reply <- setAnswer{res: res, err: err}
 		}
 		select {

@@ -164,14 +164,16 @@ type launch struct {
 //   - ForeignTurn: foreignLocked, the one read, which notes a true answer for the
 //     section's sync (the owed-drain latch). It is called from canStartLocked
 //     (from submit's canSubmitLocked and nextLocked), submit's send-now gate,
-//     retryLocked, holdCancelLocked's validation, and owedDrainLocked, which
-//     raises the fence itself before it reads.
+//     retryLocked, holdCancelLocked's validation, closeFenceUp, and
+//     owedDrainLocked, which raises the fence itself before it reads.
 //   - Begin: claimLocked (from submit's reserveLocked and nextLocked) and
 //     retryLocked.
 //   - The sections: submit's, holdCancel's (Cancel and Stop; the send-now arm is
-//     inside submit's), and every one that runs passLocked or settleLocked —
-//     runTurn's, drive's, releaseHold's, GiveUp's and GiveUpDrain's. Close raises
-//     it for good. Started and every queue verb only sync it: they read neither,
+//     inside submit's), every one that runs passLocked or settleLocked —
+//     runTurn's, drive's, releaseHold's, GiveUp's and GiveUpDrain's — and the
+//     close fence's (closeFenceUp, plan 030 §3.6), which reads the flag for its
+//     busy verdict and keeps the fence up while a close fence stands. Close
+//     raises it for good. Started and every queue verb only sync it: they read neither,
 //     but change what the fence should be. The same test also holds, by parsing,
 //     that every method that changes an input of the fence — the queue, the
 //     activity, the current turn, the cancel count, stopped — syncs it or is
@@ -267,6 +269,16 @@ type Engine struct {
 	// paced recheck is owed: the driver's tick is armed for it (rearm), and the
 	// tick's pass is that recheck, whatever it finds. Only a tick clears it.
 	recheck bool
+	// closeFences is how many close fences are up (FenceClose, closefence.go):
+	// while it is not 0 every admission is refused ErrClosing and the
+	// session's admission fence stays up. passHeld says a pass — a settlement's
+	// successor, a drain — found nothing it could start while one was up, so
+	// the kick that asked for it is replayed when the last fence comes down.
+	// setRunning says the settings worker has taken a request out of the
+	// queue and not yet answered it: a settings command in progress.
+	closeFences int
+	passHeld    bool
+	setRunning  bool
 
 	obsMu     sync.Mutex
 	replaying bool
@@ -883,6 +895,9 @@ func (e *Engine) observed() (replaying bool, last *LastTurn) {
 }
 
 // refusalLocked is why the engine admits no command at all right now, or nil.
+// A close fence (FenceClose) is looked at last: an engine that would refuse
+// for good, or until its start or its replay is over, says so rather than
+// "try again once the host has decided".
 func (e *Engine) refusalLocked() error {
 	switch {
 	case e.closed, e.stopped:
@@ -891,6 +906,8 @@ func (e *Engine) refusalLocked() error {
 		return ErrNotAccepting
 	case e.isReplaying():
 		return ErrNotAccepting
+	case e.closeFences > 0:
+		return ErrClosing
 	}
 	return nil
 }
@@ -975,16 +992,19 @@ func (e *Engine) syncFenceLocked() {
 // idle. A turn of its own is current, a cancel it validated is still on its way
 // to the session, or a drain is owed; and a stopped or closed engine keeps it up
 // for good — nothing will be admitted again, GiveUpDrain's abandonment included,
-// and nothing may start behind a client that has been told so. An error state,
-// starting and replaying keep it up for none of these reasons, and lower it: a
-// failed turn owes nothing (astra's round-4 pin).
+// and nothing may start behind a client that has been told so. A close fence
+// keeps it up while it stands (FenceClose): the host is deciding whether to end
+// the session, and a turn the session started of its own in that moment would
+// be work the decision never saw. An error state, starting and replaying keep
+// it up for none of these reasons, and lower it: a failed turn owes nothing
+// (astra's round-4 pin).
 //
 // The owed drain is settled first and on every sync, whatever the other terms
 // say, because it is a latch: it has to be cleared by the sync that sees it
 // withdrawn, not merely outvoted while a turn is current.
 func (e *Engine) fenceWantLocked() bool {
 	owed := e.owedDrainLocked()
-	return e.closed || e.stopped || e.cur != nil || e.cancelsInFlight > 0 || owed
+	return e.closed || e.stopped || e.cur != nil || e.cancelsInFlight > 0 || e.closeFences > 0 || owed
 }
 
 // owedDrainLocked settles the owed-drain latch (drainOwed) and reports it. A
@@ -1601,6 +1621,13 @@ func (e *Engine) GiveUpDrain(c Command) (turn string, pending int, err error) {
 				ferr = ErrNotAccepting
 				return
 			}
+			if e.closeFences > 0 && e.cur == nil {
+				// A close fence refuses the drain for now, and giving up on
+				// it here would abandon it for good over a pause: the caller
+				// asks again once the host has decided (FenceClose).
+				ferr = ErrClosing
+				return
+			}
 			if e.cur == nil {
 				next = e.passLocked()
 			}
@@ -1667,6 +1694,13 @@ func (e *Engine) drainLocked() []launch {
 // own, nor while a cancel is on its way to the session.
 func (e *Engine) nextLocked(queueMayRun bool) (*launch, []agent.Event, []agent.Event) {
 	if e.activity != ActivityIdle || !e.canStartLocked() {
+		if e.closeFences > 0 {
+			// A close fence may be what held this pass back, and the kick
+			// that asked for it is spent: the last fence to come down replays
+			// it (releaseCloseFence), so a successor or a drain the fence
+			// deferred is not left for a kick that never comes.
+			e.passHeld = true
+		}
 		return nil, nil, nil
 	}
 	var before, disarm []agent.Event

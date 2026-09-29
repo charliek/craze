@@ -72,6 +72,10 @@ type session struct {
 
 	closeOnce sync.Once
 	closeDone chan struct{}
+	// logOnce closes the event log, once, after the teardown closeOnce runs:
+	// the last step of Close, and never of a failed start's teardown when
+	// the session was built with Options.KeepLogOnFailedStart.
+	logOnce sync.Once
 	// closeErr is client.Close()'s stored result: the sentinel wrapping
 	// agent.ErrAgentExited when the agent's exit had been reaped before this
 	// Close sampled it, nil otherwise. Every Close call after the first
@@ -422,7 +426,14 @@ func (s *session) Start(ctx context.Context) error {
 	}
 	s.log.noteStartFailed(err)
 	if teardown {
-		_ = s.Close()
+		if s.opts.KeepLogOnFailedStart {
+			// Everything the start built is torn down — the agent, its
+			// transport, the asks — and the log stays open for its host
+			// (Options.KeepLogOnFailedStart): the session's Close closes it.
+			s.teardown()
+		} else {
+			_ = s.Close()
+		}
 	}
 	return err
 }
@@ -2033,6 +2044,16 @@ func (s *session) writeCancel(ctx context.Context, client *acp.Client) (returned
 // refused by the log and reaches no subscriber. It is called with s.mu
 // released, as every publish is.
 func (s *session) Close() error {
+	s.teardown()
+	s.logOnce.Do(func() { s.log.Close(context.Background()) })
+	return s.closeErr
+}
+
+// teardown is Close less the event log's own close, once: everything that can
+// still emit is ended, and a later caller waits for the first to finish. A
+// failed start runs it alone for a session that keeps its log open for its
+// host (Options.KeepLogOnFailedStart); Close runs it, and then closes the log.
+func (s *session) teardown() {
 	s.closeOnce.Do(func() {
 		defer close(s.closeDone)
 		s.mu.Lock()
@@ -2057,12 +2078,11 @@ func (s *session) Close() error {
 		}
 		// The child's stderr copy has finished by now (Client.Close waits for
 		// it), so this is where its last unterminated line can be noted — and
-		// it has to be before the log, which is the note cutoff.
+		// it has to be before the log, which is the note cutoff (Close closes
+		// it once this has returned).
 		s.tee.Flush()
-		s.log.Close(context.Background())
 	})
 	<-s.closeDone
-	return s.closeErr
 }
 
 // The three blocking requests an agent can make all take the same path (plan

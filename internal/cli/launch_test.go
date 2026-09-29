@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -18,6 +19,7 @@ import (
 
 	"github.com/charliek/craze/internal/agent"
 	"github.com/charliek/craze/internal/backend"
+	"github.com/charliek/craze/internal/protocol"
 	"github.com/charliek/craze/internal/remote"
 	"github.com/charliek/craze/internal/rundir"
 	"github.com/charliek/craze/internal/sessions"
@@ -267,6 +269,15 @@ func TestALaunchIsItsHostsClient(t *testing.T) {
 func TestALaunchSpawnsOneHostTheTUIAdopts(t *testing.T) {
 	env, ws, cmds := launchHome(t, nil)
 	t.Setenv("CRAZE_FAKE_SCRIPT", "echo")
+	// The launch attaches now, while the host's start runs (plan 030 C5):
+	// a load's replay streams in (TestALoadReplaysProgressivelyToANowAttach).
+	var dialledWhen []protocol.When
+	prevDial := spawnDial
+	spawnDial = func(ctx context.Context, path string, o remote.SessionOptions) (*remote.Session, error) {
+		dialledWhen = append(dialledWhen, o.When)
+		return prevDial(ctx, path, o)
+	}
+	t.Cleanup(func() { spawnDial = prevDial })
 	var crazeID string
 	fakeRun(t, func(cfg tui.Config) (tui.Result, error) {
 		b, err := cfg.NewBackend(cfg.Provider, false)
@@ -295,6 +306,9 @@ func TestALaunchSpawnsOneHostTheTUIAdopts(t *testing.T) {
 	e := onlyHost(t, env)
 	if e.CrazeSessionID != crazeID || e.CrazeSessionID == "" {
 		t.Fatalf("the host serves %q, the TUI was given %q", e.CrazeSessionID, crazeID)
+	}
+	if len(dialledWhen) != 1 || dialledWhen[0] != protocol.WhenNow {
+		t.Fatalf("the launch dialled its host attaching %q, want now", dialledWhen)
 	}
 	stopEntry(t, e, cmds.pids()[0])
 }
@@ -701,13 +715,33 @@ func (r *ttyRun) ctrlD(t *testing.T) error {
 	}
 }
 
+// hangUp closes the TUI's terminal as far as the TUI can tell — the SIGHUP a
+// closed tab sends, to this process, which the running TUI has caught
+// (tui.Run) — and waits a step for runTUI's answer. The TUI registers for it
+// before its first frame, and a test calls this only once one is on screen.
+func (r *ttyRun) hangUp(t *testing.T) error {
+	t.Helper()
+	if err := syscall.Kill(os.Getpid(), syscall.SIGHUP); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-r.done:
+		return err
+	case <-time.After(serveStep):
+		t.Fatal("craze did not quit after its terminal hung up")
+		return nil
+	}
+}
+
 // TestADetachedSessionOutlivesItsTUI is the launch end to end, the real TUI in
-// a pty (plan 030 AC2): craze starts a session in a host of its own, the TUI
-// its client; a prompt goes through it and its turn ends; the TUI quits and
-// the host goes on serving the session, which the host has indexed; a second
-// craze -c finds the row, is refused held and attaches to that host through
-// the rendezvous, its screen the transcript the first one left; it quits too,
-// and the host still serves until its own stop.
+// a pty (plan 030 AC2, AC3): craze starts a session in a host of its own, the
+// TUI its client; a prompt goes through it and its turn ends; the terminal
+// closes (SIGHUP) — a view close — and the host goes on serving the session,
+// which the host has indexed; a second craze -c finds the row, is refused held
+// and attaches to that host through the rendezvous, its screen the transcript
+// the first one left. Its /exit (Ctrl+D) is the explicit quit, in every client
+// (decision 11): the session's host is stopped — the TUI quits, saying nothing
+// about the end it asked for, the host goes, and the index row stays.
 func TestADetachedSessionOutlivesItsTUI(t *testing.T) {
 	env, ws, cmds := launchHome(t, nil)
 	t.Setenv("CRAZE_FAKE_SCRIPT", "echo")
@@ -727,11 +761,11 @@ func TestADetachedSessionOutlivesItsTUI(t *testing.T) {
 	if lt := waitLastTurn(t, e); lt.TurnID == "" {
 		t.Fatalf("the turn ended %+v", lt)
 	}
-	if err := first.ctrlD(t); err != nil {
-		t.Fatalf("the first craze: %v", err)
+	if err := first.hangUp(t); err != nil {
+		t.Fatalf("the first craze, its terminal closed: %v", err)
 	}
 	if got := onlyHost(t, env); got.HostID != e.HostID || cmds.count() != 1 {
-		t.Fatalf("after the TUI quit: %+v (%d spawned), want the host %s still serving", got, cmds.count(), e.HostID)
+		t.Fatalf("after the terminal closed: %+v (%d spawned), want the host %s still serving", got, cmds.count(), e.HostID)
 	}
 	if row := indexRowByID(t, e.CrazeSessionID); row.CWD != absDir(ws) {
 		t.Fatalf("the host's index row %+v", row)
@@ -742,18 +776,53 @@ func TestADetachedSessionOutlivesItsTUI(t *testing.T) {
 	second := runInPTY(t, f)
 	second.see(t, " craze ─")
 	second.see(t, prompt)
+	second.see(t, statusElapsed)
+	// The quit's own bound (2 s) and the host's stop sequence's are the
+	// code's (tui.quitStopWait; flushWait, closeWait, serveStartJoin): each
+	// wait here is a step's, since this also runs starved.
 	if err := second.ctrlD(t); err != nil {
-		t.Fatalf("craze -c: %v", err)
+		t.Fatalf("craze -c's /exit: %v", err)
 	}
 	if cmds.count() != 2 {
 		t.Fatalf("%d hosts spawned, want the first and the one refused held", cmds.count())
 	}
 	waitReaped(t, cmds.pids()[1])
+	waitReaped(t, cmds.pids()[0])
+	assertNoHosts(t, env)
+	if row := indexRowByID(t, e.CrazeSessionID); row.CWD != absDir(ws) {
+		t.Fatalf("the index row after the stop: %+v", row)
+	}
+	if out := ansi.Strip(second.tail.text()); strings.Contains(out, "session ended") {
+		t.Fatalf("the client that stopped the session reported its end: %q", out)
+	}
+}
+
+// TestSIGTERMToAClientTUIDetaches (plan 030 §3.6): SIGTERM to the launching
+// TUI — caught by the running program, which quits through finishRun without
+// the explicit quit — is a view close: runTUI exits 0 and the session's host
+// goes on serving it.
+func TestSIGTERMToAClientTUIDetaches(t *testing.T) {
+	env, ws, cmds := launchHome(t, nil)
+	t.Setenv("CRAZE_FAKE_SCRIPT", "echo")
+	r := runInPTY(t, launchFlags(t, ws))
+	r.see(t, " craze ─")
+	e := waitServingEntry(t, env, true, func() error { return nil }, &lockedBuffer{})
+	r.see(t, statusElapsed)
+	if err := syscall.Kill(os.Getpid(), syscall.SIGTERM); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-r.done:
+		if err != nil {
+			t.Fatalf("runTUI after SIGTERM: %v", err)
+		}
+	case <-time.After(serveStep):
+		t.Fatal("craze did not quit after SIGTERM")
+	}
 	if got := onlyHost(t, env); got.HostID != e.HostID {
-		t.Fatalf("after craze -c quit: %+v, want the host %s still serving", got, e.HostID)
+		t.Fatalf("after SIGTERM to the TUI: %+v, want the host %s still serving", got, e.HostID)
 	}
 	stopEntry(t, e, cmds.pids()[0])
-	assertNoHosts(t, env)
 }
 
 // TestADetachedStartFailureStaysOnScreen, the real TUI in a pty: a detached

@@ -90,6 +90,9 @@ func classifyTable() []classifyCase {
 		{"agent.ErrAskUnavailable", agent.ErrAskUnavailable, "unavailable", "ask_unavailable", true},
 		{"agent.ErrSetUnavailable", agent.ErrSetUnavailable, "unavailable", "set_unavailable", true},
 		{"ErrUnavailable", ErrUnavailable, "unavailable", "log_backed_up", true},
+		// A close fence up (plan 030 §3.6): nothing ran, ask again once the
+		// host has decided; the protocol's own reason for the refused attach.
+		{"ErrClosing", ErrClosing, "unavailable", "closing", true},
 		// Attach outrun by the ring (attach.go): nothing registered, ask again.
 		{"ErrAttachRaced", fmt.Errorf("%w: 4 snapshots refused", ErrAttachRaced), "unavailable", "attach_raced", true},
 		{"ErrBadRequest", ErrBadRequest, "bad_request", "bad_request", false},
@@ -209,7 +212,7 @@ func TestEveryListedEngineReasonIsProduced(t *testing.T) {
 		"start_failed": true, "not_ready": true, "busy": true, "response_too_large": true,
 		"snapshot_too_large": true, "hello_required": true, "unknown_field": true, "line_too_long": true,
 		"protocol_version": true, "bad_token": true, "already_attached": true, "unknown_method": true,
-		"stop_unsupported": true, "roster_unsupported": true, "hub_only": true, "closing": true,
+		"stop_unsupported": true, "roster_unsupported": true, "hub_only": true,
 	}
 	produced := map[string]bool{}
 	for _, tc := range classifyTable() {
@@ -240,6 +243,7 @@ func engineSentinels() map[string]error {
 		"ErrStaleModel":        ErrStaleModel,
 		"ErrUnknownRow":        ErrUnknownRow,
 		"ErrUnavailable":       ErrUnavailable,
+		"ErrClosing":           ErrClosing,
 		"ErrBadRequest":        ErrBadRequest,
 		"ErrUnknownCommand":    ErrUnknownCommand,
 		"ErrCommandInProgress": ErrCommandInProgress,

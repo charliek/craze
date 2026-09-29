@@ -71,6 +71,11 @@ func sentinels(code protocol.Code, reason protocol.Reason) []error {
 		return []error{context.DeadlineExceeded}
 	case protocol.ReasonAttachRaced:
 		return []error{engine.ErrAttachRaced}
+	case protocol.ReasonClosing:
+		// The engine's close fence (plan 030 §3.6) and the server's attach
+		// fence answer one reason: an attach refused closing is the same
+		// "ask again once the host has decided" as a prompt refused it.
+		return []error{engine.ErrClosing}
 	// failed
 	case protocol.ReasonOptionGone:
 		return []error{agent.ErrOptionGone}

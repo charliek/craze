@@ -651,3 +651,66 @@ func TestPromptErrClassNamesEverySentinel(t *testing.T) {
 		})
 	}
 }
+
+// TestAFailedStartCanKeepItsLogOpen (plan 030 C5): a session built with
+// KeepLogOnFailedStart whose start fails — the agent refuses session/new — is
+// torn down as any failed start is, and its event log stays open: a
+// subscription made before the start is still going, and a barrier still
+// answers a seq, so a detached host can go on listing the session and telling
+// every client its start failed. The session's Close closes the log, and the
+// subscription ends there. Without the option the failed start ends it.
+func TestAFailedStartCanKeepItsLogOpen(t *testing.T) {
+	for _, keep := range []bool{true, false} {
+		s := newTestSession(t, Options{
+			Binary:               fakeAgentPath(t),
+			ExtraArgs:            []string{"-script=load"},
+			Workspace:            t.TempDir(),
+			Force:                true,
+			Stderr:               io.Discard,
+			NoPrimary:            true,
+			KeepLogOnFailedStart: keep,
+		})
+		sub, err := s.Subscribe(SubscribeOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := s.Start(t.Context()); err == nil {
+			t.Fatal("Start succeeded against an agent that refuses session/new")
+		}
+		s.mu.Lock()
+		torn := s.closed
+		s.mu.Unlock()
+		if !torn {
+			t.Fatalf("keep %v: a failed start was not torn down", keep)
+		}
+		ended := func() bool {
+			select {
+			case <-sub.Done():
+				return true
+			default:
+				return false
+			}
+		}
+		if !keep {
+			if !ended() {
+				t.Fatal("without the option, a failed start left its log open")
+			}
+			continue
+		}
+		if ended() {
+			t.Fatalf("with the option, the failed start ended the subscription: %v", sub.Err())
+		}
+		if _, err := s.log.FlushSeq(t.Context(), nil); err != nil {
+			t.Fatalf("with the option, the log answers no seq after the failed start: %v", err)
+		}
+		_ = s.Close()
+		select {
+		case <-sub.Done():
+		case <-time.After(10 * time.Second):
+			t.Fatal("Close did not close the log a failed start kept open")
+		}
+		if !errors.Is(sub.Err(), ErrClosed) {
+			t.Fatalf("the subscription ended %v, want ErrClosed", sub.Err())
+		}
+	}
+}

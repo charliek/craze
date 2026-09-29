@@ -133,7 +133,10 @@ const (
 	// session.stop has been accepted, or a close fence is up while the host
 	// judges its idle exit. Nothing ran; a client that still wants the
 	// session attaches again once it has seen the session end (its host
-	// gone) or stay (the attach goes through).
+	// gone) or stay (the attach goes through). It is the engine's reason
+	// too, from plan 030 C5: a command the engine's own close fence refused
+	// (engine.ErrClosing, the same decision's other half) is answered with
+	// it, and retried the same way.
 	ReasonClosing Reason = "closing"
 	// ReasonResponseTooLarge replaces a reply longer than OutboundLineMax
 	// (§3.2); nothing is ever truncated silently.
@@ -228,7 +231,7 @@ var reasons = []ReasonInfo{
 	{ReasonAttachRaced, CodeUnavailable, true, false},
 	{ReasonNotReady, CodeUnavailable, false, false},
 	{ReasonBusy, CodeUnavailable, false, false},
-	{ReasonClosing, CodeUnavailable, false, false},
+	{ReasonClosing, CodeUnavailable, true, false},
 
 	{ReasonOptionGone, CodeFailed, true, false},
 	{ReasonFailed, CodeFailed, true, false},

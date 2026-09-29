@@ -89,6 +89,10 @@ type Session struct {
 	// end: every Read after it is backend.ErrClosed.
 	gen  uint64
 	over bool
+	// stopped says a Stop of this Session's was answered — its receipt, or
+	// the session's end while it was outstanding: the session is ending, so
+	// Close has no stream to detach.
+	stopped bool
 }
 
 var _ backend.Backend = (*Session)(nil)
@@ -331,6 +335,11 @@ func (s *Session) Close() error {
 		s.mu.Lock()
 		s.closing = true
 		st := s.stream
+		if s.stopped {
+			// The session is ending on its host (Stop): a detach would only
+			// wait on a connection that admits nothing more.
+			st = nil
+		}
 		s.mu.Unlock()
 		close(s.closed)
 		if st != nil {
@@ -347,6 +356,12 @@ func (s *Session) Close() error {
 	})
 	return s.closeErr
 }
+
+// Ended is closed once the stream's last item is queued — the session's end
+// on its host, or the transport given up, or an item that could not be read —
+// whether or not Read has handed it up yet. It is what the TUI's explicit quit
+// waits on after its stop (plan 030 §3.6).
+func (s *Session) Ended() <-chan struct{} { return s.ended }
 
 // ClientID is the client id the host bound this client to last, read per call:
 // it changes when a reconnect's hello did not resume.
@@ -814,10 +829,66 @@ func (s *Session) Cancel(ctx context.Context, c engine.Command, turn string) (en
 // reason stop_unsupported, which is an *Error matching
 // backend.ErrStopUnsupported (sentinels.go): nothing was stopped, and the
 // caller detaches instead.
+//
+// The session's end while the stop is outstanding is its answer too (plan 030
+// C5, X3): a stop that joins one already running, or that arrives once a
+// signal or the idle exit has set the end going, may meet the session's end
+// before its receipt — the host's connection ends as the session does, and
+// admits nothing more — and that end is what the stop asked for, never an
+// outcome unknown. The session's own end (reset session_closed, an End with
+// no error) answers it; a transport given up does not, and the command's own
+// answer stands. A session that had ended before the call is answered at
+// once. The command's call is abandoned when the end answers: its context is
+// the call's own, cancelled then, so nothing is left waiting on a host that
+// has gone.
 func (s *Session) Stop(ctx context.Context, c engine.Command) error {
-	return s.command(ctx, c, protocol.MethodSessionStop, func(sid string) any {
-		return protocol.StopParams{SessionID: sid}
-	}, nil)
+	if s.endedClean() {
+		s.markStopped()
+		return nil
+	}
+	cctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		done <- s.command(cctx, c, protocol.MethodSessionStop, func(sid string) any {
+			return protocol.StopParams{SessionID: sid}
+		}, nil)
+	}()
+	var err error
+	select {
+	case err = <-done:
+	case <-s.ended:
+		if !s.endedClean() {
+			err = <-done
+			break
+		}
+		cancel()
+		<-done
+		err = nil
+	}
+	if err != nil && s.endedClean() && !errors.Is(err, backend.ErrStopUnsupported) {
+		// The end came as the call failed for it: the end is the answer.
+		err = nil
+	}
+	if err == nil {
+		s.markStopped()
+	}
+	return err
+}
+
+// endedClean reports that the stream has ended with the session's own end:
+// no error beside it.
+func (s *Session) endedClean() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.isEnded && s.endErr == nil
+}
+
+// markStopped records a stop answered (Session.stopped).
+func (s *Session) markStopped() {
+	s.mu.Lock()
+	s.stopped = true
+	s.mu.Unlock()
 }
 
 // CancelSubagent is session.subagent.cancel (Control.CancelSubagent).

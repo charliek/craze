@@ -121,6 +121,7 @@ func engineTwins(t *testing.T) []twin {
 		{"agent.ErrAskUnavailable", "", agent.ErrAskUnavailable},
 		{"agent.ErrSetUnavailable", "", agent.ErrSetUnavailable},
 		{"engine.ErrUnavailable", "", engine.ErrUnavailable},
+		{"engine.ErrClosing", "", engine.ErrClosing},
 		{"engine.ErrAttachRaced", "", fmt.Errorf("%w: 4 snapshots refused", engine.ErrAttachRaced)},
 		{"engine.ErrBadRequest", "", engine.ErrBadRequest},
 		{"engine.ErrUnknownCommand", "", engine.ErrUnknownCommand},
@@ -158,6 +159,7 @@ func matchSet() map[string]error {
 		"agent.ErrBadCatalog": agent.ErrBadCatalog, "context.Canceled": context.Canceled,
 		"context.DeadlineExceeded": context.DeadlineExceeded, "agent.ErrAskUnavailable": agent.ErrAskUnavailable,
 		"agent.ErrSetUnavailable": agent.ErrSetUnavailable, "engine.ErrUnavailable": engine.ErrUnavailable,
+		"engine.ErrClosing":     engine.ErrClosing,
 		"engine.ErrAttachRaced": engine.ErrAttachRaced, "engine.ErrBadRequest": engine.ErrBadRequest,
 		"engine.ErrUnknownClient": engine.ErrUnknownClient, "engine.ErrUnknownCommand": engine.ErrUnknownCommand,
 		"agent.ErrQueueFull": agent.ErrQueueFull, "agent.ErrQueueTextTooLong": agent.ErrQueueTextTooLong,
@@ -535,6 +537,11 @@ const (
 	// refusal ever is (checked here, over every twin; the client's own are
 	// TestOnlyTheClientsOwnOutcomesAreOutcomeUnknown's too).
 	proofOutcome = "outcome"
+	// proofStop: errors.Is of backend.ErrStopUnsupported, which a host's
+	// stop_unsupported refusal of session.stop reconstructs (plan 030 §3.6a;
+	// checked here) — the explicit quit's reading of a host that cannot stop
+	// its session.
+	proofStop = "stop"
 )
 
 // tuiSites is every error read in internal/tui's production files
@@ -566,6 +573,7 @@ var tuiSites = []tuiSite{
 	{"config.go", "ConfigJournal", "Is", "ErrConfigMalformed", 1, proofLocal},
 	{"config.go", "ConfigControlSocket", "Is", "ErrConfigMalformed", 1, proofLocal},
 	{"config.go", "ConfigDetach", "Is", "ErrConfigMalformed", 1, proofLocal},
+	{"config.go", "ConfigHostIdleExit", "Is", "ErrConfigMalformed", 1, proofLocal},
 	// The frame harness's capture boundary: in process only (engineBehind).
 	{"frame.go", "streamHead", "Is", "agent.ErrLogClosing", 1, proofLocal},
 	{"frame.go", "streamHead", "Is", "agent.ErrClosed", 1, proofLocal},
@@ -615,6 +623,9 @@ var tuiSites = []tuiSite{
 	{"slash.go", "applyModelEffort", "Is", "agent.ErrBadCatalog", 1, proofSentinel},
 	{"slash.go", "runModelEffort", "Is", "engine.ErrStaleModel", 1, proofSentinel},
 	{"slash.go", "runModelEffort", "Is", "agent.ErrOptionGone", 1, proofSentinel},
+	// The explicit quit's stop (plan 030 §3.6): a host that cannot stop its
+	// session refuses, stop_unsupported.
+	{"stopquit.go", "answered", "Is", "backend.ErrStopUnsupported", 1, proofStop},
 	{"theme.go", "noteAndSaveTheme", "Error", "err", 1, proofLocal},
 }
 
@@ -732,6 +743,12 @@ func TestEveryTUIErrorSiteWorksOverTheWire(t *testing.T) {
 				if errors.Is(reconstructed(t, tw.err), tui.ErrNoAnswer) {
 					t.Errorf("%s %s: the host's %s reconstructs the gate's ErrNoAnswer", s.file, s.fn, tw.sentinel)
 				}
+			}
+		case proofStop:
+			got := overTheWire(t, &protocol.Error{Code: protocol.RPCRefused, Message: "this host cannot stop its session",
+				Data: protocol.ErrorData{Code: protocol.CodeUnsupported, Reason: protocol.ReasonStopUnsupported}})
+			if !errors.Is(got, backend.ErrStopUnsupported) {
+				t.Errorf("%s %s: a host's stop_unsupported is not backend.ErrStopUnsupported over the wire (%v)", s.file, s.fn, got)
 			}
 		case proofOutcome:
 			for _, tw := range twins {

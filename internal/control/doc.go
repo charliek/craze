@@ -104,7 +104,11 @@
 //     it (FenceAttaches). It is a leaf above conn.mu — reserve takes
 //     attachMu and then conn.mu — and is taken under no other lock; the count
 //     of attachments it reads (Server.attached) rises only inside it and
-//     falls, atomically, wherever an attachment closes under conn.mu.
+//     falls wherever an attachment closes, or its connection reads EOF, under
+//     conn.mu.
+//   - Server.countMu guards that count and the OnAttachments callback: a
+//     leaf under attachMu and conn.mu, taken in the section that changes the
+//     count, so the callback hears every change in order.
 //   - conn.mu guards a connection's admission count, half-close and end
 //     state, and its attachment's lifecycle and position; the outbox has its
 //     own mutex. conn.mu → outbox.mu is the one edge between them: a line

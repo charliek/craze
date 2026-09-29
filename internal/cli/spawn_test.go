@@ -488,7 +488,9 @@ func TestSpawnHostEndsAHostItCannotDial(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			env, ws := serveHome(t)
 			t.Setenv("CRAZE_FAKE_SCRIPT", "echo")
-			spawnAsChild(t, nil)
+			// The host's own socket-lost stop (its idle watcher) would race
+			// the spawner's SIGTERM for a socket this test removes.
+			spawnAsChild(t, func(int) []string { return []string{cliChildNoIdle + "=1"} })
 			spawnBounds(t, serveStep, serveStep, serveStep)
 			ref, err := spawnNow(t, spawnFor(t, env, ws))
 			if err != nil {

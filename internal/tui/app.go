@@ -722,6 +722,16 @@ type Model struct {
 	// owner is the session the program holds, shared by every copy the way
 	// term is; see sessionOwner. Nil only in a zero Model a test built.
 	owner *sessionOwner
+	// exit is what the explicit quit came to over a backend served elsewhere
+	// (stopQuit): shared by every copy, as owner is, because the quit's
+	// tea.Cmd writes it after the Update that asked has returned, and Run
+	// reads it from the model it started with. Nil only in a zero Model.
+	exit *exitState
+	// remote says the backend is a session served elsewhere (setBackend: a
+	// Config.Backend, or the launch flow's), whose explicit quit stops it on
+	// its host (plan 030 §3.6); false for an engine this TUI built, whose
+	// quit closes it as ever.
+	remote bool
 
 	// host is Config.Host: nil means no host status is derived at all. The
 	// rest is what host.go reads into host.Input. lastHost is the last status
@@ -1155,6 +1165,7 @@ func (m *Model) setSession(s agent.Session, crazeID string) {
 	// The backend mints this model's client on the engine, once: the
 	// in-process client is never released (plan 027 §3.6).
 	m.adopt(newEngineBackend(eng, m.cwd))
+	m.remote = false
 	// After the owner holds it, so whatever the hook starts — a socket
 	// serving this engine — can never name an engine the exit tail would not
 	// close. The hook is handed the engine itself, not the backend: what it
@@ -1192,6 +1203,7 @@ func (m *Model) setBackend(b backend.Backend) {
 	m.dropSession()
 	if b != nil {
 		m.adopt(b)
+		m.remote = true
 	}
 }
 
@@ -1333,6 +1345,7 @@ func New(cfg Config) Model {
 		// `craze frame` or by any direct caller writes no OSC at all.
 		term:  newTerminalColors(io.Discard),
 		owner: &sessionOwner{},
+		exit:  &exitState{},
 		shell: newShellController(),
 		// Allocated here, not on first use, so every copy of this model holds
 		// the same panes from the start (see pane).
@@ -1417,6 +1430,18 @@ type Result struct {
 	// returns it as its error unless p.Run failed itself: a caller telling
 	// the program's own failure from the start's compares the two.
 	StartErr error
+	// Stopped says the explicit quit — /exit, Ctrl+D, the second Ctrl+C —
+	// asked the session's host to end it and the host took it (plan 030
+	// §3.6): the session's end that may have followed is this program's own
+	// doing, and nothing to report. StopUnsupported says the host cannot stop
+	// its session — an older craze, a TUI-hosted one — so the quit detached
+	// and the session runs on there. StopErr is a stop that was neither: sent,
+	// and answered by neither its receipt nor the session's end. All three
+	// are for a backend served elsewhere; an engine this program built is
+	// closed by its quit, as ever.
+	Stopped         bool
+	StopUnsupported bool
+	StopErr         error
 }
 
 // Run returns how the run ended (Result) and the start failure, if any
@@ -1493,6 +1518,7 @@ func Run(cfg Config) (Result, error) {
 	// run failure is reason enough to show the agent's stderr, whatever
 	// finishRun made of the session close (§3.7.3).
 	res := Result{AgentDiag: showAgentDiag || err != nil, StartErr: startErr}
+	res.Stopped, res.StopUnsupported, res.StopErr = m.exit.outcome()
 	if fm, ok := final.(Model); ok {
 		// The End that quit the program, and why, as the final model holds
 		// them (endMsg).
@@ -3431,6 +3457,9 @@ func (m *Model) applyForeignCancelled(msg foreignCancelledMsg) {
 // one — Engine.Close runs once and answers every later caller with the same
 // error — so it returns when the first does and cannot deadlock.
 func (m Model) requestQuit() (tea.Model, tea.Cmd) {
+	if m.remote && m.eng != nil {
+		return m.stopQuit()
+	}
 	m.quitting = true
 	eng := m.eng
 	h := m.host

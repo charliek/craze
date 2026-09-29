@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"syscall"
@@ -439,18 +440,21 @@ func TestServeFailsAStartWhoseAgentCannotBeRecorded(t *testing.T) {
 	assertHostGone(t, env, e)
 }
 
-// TestServeKeepsItsAgentsRecordUntilItsStartHasJoined (astra r5-c3 3): a stop
-// that finds the session's start caught between spawning its agent — recorded
-// already — and adopting it (held there by the test) closes an engine with no
-// agent to end; the start ends that agent itself once it goes on. Until then
-// the record is the one thing naming the agent, and it stays: through the
-// engine's close, the socket's and the claims', to the start's join.
+// TestServeKeepsItsAgentsRecordUntilItsStartHasJoined (astra r5-c3 3, r6-fix3):
+// a stop that finds the session's start caught between spawning its agent —
+// recorded already — and adopting it (held there by the test) closes an
+// engine with no agent to end; the start ends that agent itself once it goes
+// on. Until then the record is the one thing naming the agent, and it stays:
+// through the engine's close and the socket's, to the start's join — and the
+// session's claim is held across the join too, released only after it (a
+// start still running may hold what the claim stands for).
 //   - joined: let go, the start ends the agent (one that outlives its pipes),
-//     craze serve returns, and the record goes after it: nothing is left
-//     running, and nothing on disk;
-//   - the join times out: craze serve returns with the record left and says
-//     so, and the spawner's last resort (killAgents), acting on it as a
-//     spawner would once its host has gone, kills the agent.
+//     the claim is released, craze serve returns, and the record goes after
+//     it: nothing is left running, and nothing on disk;
+//   - the join times out: the host kills the agent it recorded itself —
+//     SIGTERM, which a stubborn agent ignores, the grace, SIGKILL — removes
+//     the record and returns, leaving the claim to its process's exit. With no
+//     test-side cleanup, nothing is left running.
 func TestServeKeepsItsAgentsRecordUntilItsStartHasJoined(t *testing.T) {
 	for _, joined := range []bool{true, false} {
 		name := "joined"
@@ -462,9 +466,9 @@ func TestServeKeepsItsAgentsRecordUntilItsStartHasJoined(t *testing.T) {
 			t.Setenv("CRAZE_FAKE_SCRIPT", "echo")
 			stubbornAgent(t)
 			if !joined {
-				prev := serveStartJoin
-				serveStartJoin = 100 * time.Millisecond
-				t.Cleanup(func() { serveStartJoin = prev })
+				prev, prevGrace := serveStartJoin, serveAgentTermGrace
+				serveStartJoin, serveAgentTermGrace = 100*time.Millisecond, 200*time.Millisecond
+				t.Cleanup(func() { serveStartJoin, serveAgentTermGrace = prev, prevGrace })
 			}
 			held, release := make(chan int, 1), make(chan struct{})
 			var holdOnce, releaseOnce sync.Once
@@ -480,12 +484,17 @@ func TestServeKeepsItsAgentsRecordUntilItsStartHasJoined(t *testing.T) {
 				})
 			}
 			t.Cleanup(func() { serveAgentGroup = prevGroup })
-			released := make(chan struct{})
-			var releasedOnce sync.Once
+			var stepMu sync.Mutex
+			var steps []string
+			joining := make(chan struct{})
+			var joiningOnce sync.Once
 			prevStep := teardownStep
 			teardownStep = func(s string) {
-				if s == "released" {
-					releasedOnce.Do(func() { close(released) })
+				stepMu.Lock()
+				steps = append(steps, s)
+				stepMu.Unlock()
+				if s == "joining" {
+					joiningOnce.Do(func() { close(joining) })
 				}
 			}
 			t.Cleanup(func() { teardownStep = prevStep })
@@ -496,7 +505,8 @@ func TestServeKeepsItsAgentsRecordUntilItsStartHasJoined(t *testing.T) {
 			// Before runServeReady's own cleanup: a failing test lets the
 			// start go, so the host can still stop.
 			t.Cleanup(let)
-			if line := readyFrom(t, rd); !line.OK {
+			line := readyFrom(t, rd)
+			if !line.OK {
 				t.Fatalf("the ready line: %+v", line)
 			}
 			var pgid int
@@ -511,9 +521,9 @@ func TestServeKeepsItsAgentsRecordUntilItsStartHasJoined(t *testing.T) {
 
 			r.sigs <- syscall.SIGTERM
 			select {
-			case <-released:
+			case <-joining:
 			case <-time.After(serveStep):
-				t.Fatalf("the stop sequence never released the claims; stderr: %s", r.stderr)
+				t.Fatalf("the stop sequence never came to the start's join; stderr: %s", r.stderr)
 			}
 			if !fileExists(record) {
 				t.Fatal("the stop removed the agents' record while the start still held an agent it had not adopted")
@@ -522,8 +532,22 @@ func TestServeKeepsItsAgentsRecordUntilItsStartHasJoined(t *testing.T) {
 				t.Fatalf("the agent's group %d, which nothing has ended yet: %v", pgid, err)
 			}
 			waitStubborn(t, r)
+			claimed := func() error {
+				_, err := anotherCraze(t).claimSession(line.CrazeSessionID)
+				return err
+			}
 
 			if joined {
+				// The join has not come, and the claim is still this host's: a
+				// second host loading the session now is refused it, held —
+				// the two-host schedule a claim released ahead of the join
+				// would let through to whatever the start still holds.
+				seedIndexRow(t, sessions.Row{SessionID: "fake-held", Provider: "cursor", CWD: absDir(ws), CrazeID: line.CrazeSessionID, Title: "held"})
+				second := runServeIn(t, hostEnv{}, "--agent-bin", fakeAgentPath(t), "--load", line.CrazeSessionID)
+				var h *rundir.HeldError
+				if err := second.result(t, serveStep); !errors.As(err, &h) {
+					t.Fatalf("a second host loading the session during the first's join: %v, want refused held", err)
+				}
 				select {
 				case <-r.finished:
 					t.Fatal("craze serve returned before its start did")
@@ -537,24 +561,40 @@ func TestServeKeepsItsAgentsRecordUntilItsStartHasJoined(t *testing.T) {
 				if fileExists(record) {
 					t.Fatal("a host whose start joined left its agents' record")
 				}
-				if out := r.stderr.String(); strings.Contains(out, "left for its launcher") {
-					t.Fatalf("the log: %s", out)
+				if err := claimed(); err != nil {
+					t.Fatalf("the session's claim once the host stopped: %v", err)
+				}
+				// The first host's claims went after its join (the second
+				// host's own teardown is in the record too, before it).
+				stepMu.Lock()
+				got := slices.Clone(steps)
+				stepMu.Unlock()
+				if j := slices.Index(got, "joined"); j < 0 || !slices.Contains(got[j:], "released") || got[len(got)-1] != "released" {
+					t.Fatalf("the steps are %q: the claims were not released after the start's join", got)
 				}
 				return
 			}
 			if err := r.result(t, serveStep); err != nil {
 				t.Fatal(err)
 			}
-			if !fileExists(record) {
-				t.Fatal("a host whose start did not join removed its agents' record")
-			}
-			if out := r.stderr.String(); !strings.Contains(out, "craze serve: its agents' process-group record is left for its launcher") {
-				t.Fatalf("the log: %s", out)
-			}
-			(&hostChild{groups: record}).killAgents()
+			// No test-side kill: the host's own last resort ended the agent
+			// and removed the record.
 			waitGroupGone(t, pgid)
 			if fileExists(record) {
-				t.Fatal("the spawner left the record")
+				t.Fatal("a host whose start did not join left its agents' record")
+			}
+			var h *rundir.HeldError
+			if err := claimed(); !errors.As(err, &h) {
+				t.Fatalf("a host whose start did not join released its claim before its exit: %v", err)
+			}
+			stepMu.Lock()
+			got := slices.Clone(steps)
+			stepMu.Unlock()
+			if want := []string{"joining", "join timed out", "claims left to the exit"}; !slices.Equal(got[len(got)-3:], want) {
+				t.Fatalf("the stop's last steps are %q, want %q", got, want)
+			}
+			if out := r.stderr.String(); !strings.Contains(out, "craze serve: the session's start had not returned when the host stopped") {
+				t.Fatalf("the log: %s", out)
 			}
 		})
 	}

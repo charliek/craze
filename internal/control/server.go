@@ -195,12 +195,24 @@ type Server struct {
 	// fences is how many close fences are up (FenceAttaches); while it is
 	// not 0 a new attach is refused closing. Guarded by attachMu.
 	fences int
-	// attached is how many attachments the server holds that are not yet
-	// closed — pending (reserved), live or closing (attach.go's lifecycle) —
-	// across every connection. It rises only in reserve, under attachMu, and
-	// falls where an attachment closes (conn.closedLocked, under conn.mu), so
-	// under attachMu with a fence up it can only fall.
-	attached atomic.Int64
+	// countMu guards attached and onAttach (plan 030 §3.6; attach.go's
+	// "Counting attachments"). It is a leaf, taken under attachMu and under
+	// conn.mu — every change to the count is made in the section that
+	// decides it — and nothing is taken under it but the OnAttachments
+	// callback, which takes no lock of the server's.
+	countMu sync.Mutex
+	// attached is how many attachments the server counts: every one it holds
+	// that is not yet closed — pending (reserved), live or closing (attach.go's
+	// lifecycle) — across every connection, less those whose connection's
+	// peer has half-closed (a read EOF: attach.go's "Counting attachments").
+	// It rises only in reserve, under attachMu, and falls where an attachment
+	// closes (conn.closedLocked) or its connection reads EOF (conn.eof), under
+	// conn.mu, so under attachMu with a fence up it can only fall.
+	attached int
+	// onAttach is OnAttachments' callback, nil for none: called with the new
+	// count, under countMu, on every change to it, so the calls are in the
+	// order of the changes.
+	onAttach func(n int)
 	// stopOnce hands the first session.stop to Options.Stop, and raises the
 	// stop's own fence, once for the server's life (stop.go).
 	stopOnce sync.Once
@@ -291,6 +303,10 @@ type hooks struct {
 	// just before it waits for it (lockAttachments): the fence is excluded —
 	// by an attach between its fence check and its install, say.
 	fenceWaits func()
+	// closeFenceStep runs on FenceClose between its steps: "attaches fenced"
+	// once the attach fence is up, before the engine's; "engine fenced" once
+	// both are, before it returns (plan 030 §3.6's forced races).
+	closeFenceStep func(step string)
 }
 
 // New builds a server. It serves nothing until SetEngine and Serve.
@@ -339,6 +355,43 @@ func New(o Options) *Server {
 
 // HostID is the host's id: hello's endpoint.hostId and sessions.list's epoch.
 func (s *Server) HostID() string { return s.hostID }
+
+// OnAttachments sets f to be called, in order, on every change in the number
+// of attached clients, with the new number (plan 030 §3.6; SF-64's hook): an
+// attachment counts from its reservation to its close — pending, live or
+// closing — unless its connection's peer has half-closed (attach.go,
+// "Counting attachments"). A connection that only calls hello or
+// sessions.list is not attached and moves nothing. f is called on the
+// goroutine that changed the count, under the server's own locks, one call at
+// a time: it must return promptly and must not call into the server, an
+// engine or a connection — a lifecycle goroutine records the number and acts
+// on it elsewhere. nil stops the calls. Set it before Serve, or any time: a
+// change made while it is being set is reported to the old f or the new.
+func (s *Server) OnAttachments(f func(n int)) {
+	s.countMu.Lock()
+	s.onAttach = f
+	s.countMu.Unlock()
+}
+
+// countAttachment moves the count of attachments by d and reports the new
+// count to OnAttachments' callback, in one countMu section, so the callback
+// sees every change in order. It is called only in the section that decides
+// the change: reserve (attachMu, conn.mu), closedLocked and eof (conn.mu).
+func (s *Server) countAttachment(d int) {
+	s.countMu.Lock()
+	defer s.countMu.Unlock()
+	s.attached += d
+	if f := s.onAttach; f != nil {
+		f(s.attached)
+	}
+}
+
+// attachedCount is the count now.
+func (s *Server) attachedCount() int {
+	s.countMu.Lock()
+	defer s.countMu.Unlock()
+	return s.attached
+}
 
 // MaxBudget is the largest subscription budget an attach may ask for.
 func (s *Server) MaxBudget() Budget { return s.maxBudget }

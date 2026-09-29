@@ -201,10 +201,15 @@ func (c *conn) release() {
 }
 
 // eof marks the read side done and closes the connection if nothing is in
-// flight.
+// flight. Its attachment, if it has one not yet closed, leaves the server's
+// count of attachments (attach.go, "Counting attachments") and is otherwise
+// untouched: a half-closed peer's subscription still delivers.
 func (c *conn) eof() {
 	c.mu.Lock()
 	c.readEOF = true
+	if a := c.att; a != nil && a.state != attClosed {
+		c.uncountLocked(a)
+	}
 	c.mu.Unlock()
 	c.settle()
 }

@@ -876,6 +876,17 @@ type Options struct {
 	// through a subscription instead. S1b uses it in tests; from S4 on a
 	// detached host is its user (SD-33).
 	NoPrimary bool
+	// KeepLogOnFailedStart keeps the session's event log open when its start
+	// fails, until Close (plan 030 C5). A failed start tears the session down
+	// — the agent, its transport, its asks — and by default closes its log
+	// with it, which ends every subscription: a client attached while the
+	// session started (attach "now") would read the stream's end before any
+	// word that the start failed, and a sessions.list could vouch for no seq.
+	// A detached host sets it: its failed session stays listable and
+	// attachable, each attach answered start_failed and each earlier one sent
+	// its failed ready, until the host's own stop closes the session. A
+	// native session never closes on a failed start and ignores it.
+	KeepLogOnFailedStart bool
 	// AgentGroup, when set, is told the process group of each agent child
 	// the session spawns, the moment it is spawned — before the session
 	// knows whether it will keep it. A detached host records it (plan 030

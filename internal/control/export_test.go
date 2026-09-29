@@ -89,6 +89,12 @@ type TestHooks struct {
 	// excluded — by an attach it holds between its check and its install
 	// (Reserving), say — and cannot return until the lock is let go.
 	FenceWaits func()
+	// CloseFenceStep runs on FenceClose between its steps, with the step:
+	// "attaches fenced" once the attach fence is up and before the engine's,
+	// "engine fenced" once both are and before it returns — where a test
+	// forces an attach, a prompt, a setting or the session's own work to
+	// arrive in each gap (plan 030 §3.6).
+	CloseFenceStep func(step string)
 }
 
 // NewForTest is New with hooks in place, and the stall bound and outbound line
@@ -118,6 +124,7 @@ func NewForTest(o Options, h TestHooks, stall time.Duration, maxLine int) *Serve
 		reserved:       h.Reserved,
 		reserving:      h.Reserving,
 		fenceWaits:     h.FenceWaits,
+		closeFenceStep: h.CloseFenceStep,
 	}
 	if stall > 0 {
 		s.stall = stall
@@ -183,10 +190,10 @@ func (s *Server) Handlers() int { return s.handlers.running() }
 // Commands is how many mutating commands are in their engine call.
 func (s *Server) Commands() int64 { return s.commands.Load() }
 
-// Attached is how many attachments the server holds that are not yet closed
-// — pending, live or closing — read with no fence raised: the count
-// FenceAttaches reads under its lock (plan 030 §3.6).
-func (s *Server) Attached() int { return int(s.attached.Load()) }
+// Attached is how many attachments the server counts — pending, live or
+// closing, on a connection whose peer has not half-closed — read with no
+// fence raised: the count FenceAttaches reads under its lock (plan 030 §3.6).
+func (s *Server) Attached() int { return s.attachedCount() }
 
 // SessionCapabilities is sessionCapabilities, for the capability mapping's
 // reflection test.

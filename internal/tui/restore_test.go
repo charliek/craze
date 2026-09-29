@@ -41,8 +41,17 @@ type attachHost struct {
 	path string
 }
 
-// newAttachHost is a host, its engine started when start says so.
+// newAttachHost is a host, its engine started when start says so. It serves
+// no session.stop — a TUI-hosted session's socket, or an older host's.
 func newAttachHost(t *testing.T, start bool) *attachHost {
+	t.Helper()
+	return newAttachHostStopping(t, start, false)
+}
+
+// newAttachHostStopping is newAttachHost whose server, with stops, serves
+// session.stop (plan 030 §3.6a) as craze serve does: the stop's sequence
+// closes the engine off the handler's goroutine.
+func newAttachHostStopping(t *testing.T, start, stops bool) *attachHost {
 	t.Helper()
 	h := &attachHost{stub: NewStubNoPrimary()}
 	var err error
@@ -62,7 +71,11 @@ func newAttachHost(t *testing.T, start bool) *attachHost {
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(dir) })
 	h.path = filepath.Join(dir, "s")
-	srv := control.New(control.Options{Workspace: "/work"})
+	opts := control.Options{Workspace: "/work"}
+	if stops {
+		opts.Stop = func(control.StopRequest) { go func() { _ = h.eng.Close() }() }
+	}
+	srv := control.New(opts)
 	srv.SetEngine(h.eng)
 	l, err := net.Listen("unix", h.path)
 	if err != nil {

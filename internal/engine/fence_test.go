@@ -575,7 +575,7 @@ type fenceMethod struct {
 // fenceInputs are what the fence reads, as selector spells them.
 var (
 	fenceQueueMutators = []string{"queue.Add", "queue.Take", "queue.Pop", "queue.PushFront", "queue.Clear", "queue.Restore", "queue.Edit", "queue.Remove"}
-	fenceFields        = []string{"activity", "cur", "cancelsInFlight", "stopped"}
+	fenceFields        = []string{"activity", "cur", "cancelsInFlight", "stopped", "closeFences"}
 )
 
 // parseEngineMethods parses the package's non-test files and returns every
@@ -668,9 +668,9 @@ func parseEngineMethods(t *testing.T) map[string]*fenceMethod {
 //     defer its sync, and they are exactly the doc's sections;
 //   - every method that takes e.mu and reaches a change to an input of the fence
 //     — a mutator of e.queue, or an assignment to e.activity, e.cur,
-//     e.cancelsInFlight, e.stopped or e.closed — must defer the sync; Close
-//     alone, by name, may raise it instead, because it sets e.closed and the
-//     fence never comes down again;
+//     e.cancelsInFlight, e.stopped, e.closeFences or e.closed — must defer the
+//     sync; Close alone, by name, may raise it instead, because it sets
+//     e.closed and the fence never comes down again;
 //   - and every method that changes such an input without taking e.mu is reached
 //     only from such sections: it has a caller in the package, and each caller
 //     is held to the same rules.
@@ -737,7 +737,7 @@ func TestEveryForeignReadAndClaimIsFenced(t *testing.T) {
 		}
 	}
 	slices.Sort(sections)
-	if want := []string{"GiveUp", "GiveUpDrain", "drive", "holdCancel", "releaseHold", "runTurn", "submit"}; !slices.Equal(sections, want) {
+	if want := []string{"GiveUp", "GiveUpDrain", "closeFenceUp", "drive", "holdCancel", "releaseHold", "runTurn", "submit"}; !slices.Equal(sections, want) {
 		t.Errorf("the fenced sections are %q, want the Engine doc's %q", sections, want)
 	}
 	var helpers []string

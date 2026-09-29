@@ -341,9 +341,22 @@ func (g *agentGroups) record(pgid int) error {
 
 // close ends the record and removes it: the host's stop sequence, once the
 // engine's close has ended every agent the session adopted and the start has
-// returned, having ended any it had not (serveHost.joinStart). Never called
-// when that join times out: the record is then the spawner's to act on.
+// returned, having ended any it had not (serveHost.stop). When that join
+// times out the host seals the record instead and kills what it names itself
+// (serveHost.killOwnAgents), which removes it.
 func (g *agentGroups) close() {
+	if g == nil || g.err != nil {
+		return
+	}
+	g.seal()
+	if err := os.Remove(g.path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		fmt.Fprintf(g.log, "craze serve: the agents' process-group record not removed: %v\n", err)
+	}
+}
+
+// seal ends the record without removing it: every record after it is
+// refused, which fails the start that spawned the agent and ends that agent.
+func (g *agentGroups) seal() {
 	if g == nil || g.err != nil {
 		return
 	}
@@ -356,8 +369,5 @@ func (g *agentGroups) close() {
 	if g.f != nil {
 		_ = g.f.Close()
 		g.f = nil
-	}
-	if err := os.Remove(g.path); err != nil && !errors.Is(err, os.ErrNotExist) {
-		fmt.Fprintf(g.log, "craze serve: the agents' process-group record not removed: %v\n", err)
 	}
 }

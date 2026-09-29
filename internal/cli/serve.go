@@ -116,7 +116,8 @@ type runHost struct {
 	claims *sessionClaims
 	ctl    *controlHost // nil when not serving
 
-	closeOnce sync.Once
+	socketOnce sync.Once
+	claimsOnce sync.Once
 }
 
 // onEngine is tui.Config.OnEngine: it runs inside Update when a picker
@@ -147,15 +148,38 @@ func (r *runHost) publish(eng *engine.Engine) <-chan struct{} {
 
 // close is the run's teardown: the socket first (controlHost.close), then
 // every session claim — last, so a session stays claimed until nothing of
-// this process can still act on it. It runs once; a later call is a no-op.
+// this process can still act on it. Each half runs once; a later call, or one
+// after craze serve's own stop sequence ran them (serveHost.stop), is a
+// no-op.
 func (r *runHost) close() {
-	r.closeOnce.Do(func() {
+	r.closeSocket()
+	r.releaseClaims()
+}
+
+// closeSocket is the socket's half of close, once: S2's close order
+// (controlHost.close), when there is a socket.
+func (r *runHost) closeSocket() {
+	r.socketOnce.Do(func() {
 		if r.ctl != nil {
 			r.ctl.close()
 		}
+	})
+}
+
+// releaseClaims is the claims' half of close, once.
+func (r *runHost) releaseClaims() {
+	r.claimsOnce.Do(func() {
 		r.claims.releaseAll()
 		teardownStep("released")
 	})
+}
+
+// keepClaims is craze serve's stop sequence leaving the claims to the
+// process's exit, which ends a start that did not join at the same moment
+// (serveHost.stop): release is a no-op from here. In a test's process, which
+// does not exit, they are held until the test ends.
+func (r *runHost) keepClaims() {
+	r.claimsOnce.Do(func() { teardownStep("claims left to the exit") })
 }
 
 // controlHost is a bound control socket and the server on it (plan 027 §3.7,
@@ -728,8 +752,8 @@ func (c *sessionClaims) releaseAll() {
 // through request — session.stop through the control server's seam
 // (control.Options.Stop, stopFunc: the server calls it at most once, its own
 // attach fence already up), SIGINT and SIGTERM through craze serve's signal
-// loop, and, from C5, the idle watcher once its close fence has found the host
-// eligible — and the first request IS the stop. craze serve's own goroutine,
+// loop, and the idle watcher (idle.go) once its close fence has found the host
+// eligible, or its socket lost — and the first request IS the stop. craze serve's own goroutine,
 // parked on stopping, then runs the stop sequence once (serveHost.stop): the
 // attach fence, the engine's close, S2's close order, the claims, and the exit.
 // Every later request joins it: answered — a session.stop's receipt is the

@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/BurntSushi/toml"
 	"github.com/charliek/craze/internal/agent"
@@ -208,6 +209,56 @@ func ConfigDetach() (on bool, why string) {
 		return false, "config.toml detach is not a bool"
 	}
 	return on, ""
+}
+
+// DefaultHostIdleExit is host_idle_exit's default (plan 030 §3.6, the owner's
+// decision 12): an hour, like Claude Code's.
+const DefaultHostIdleExit = time.Hour
+
+// HostIdleExit is `host_idle_exit`: how long a detached host whose session has
+// no client attached and nothing in flight waits before it exits (plan 030
+// §3.6), or Never.
+type HostIdleExit struct {
+	// Never says the host never exits for being idle ("never").
+	Never bool
+	// After is the wait: a Go duration, 0 exiting as soon as the host is
+	// eligible. Unset (Never) it is 0.
+	After time.Duration
+}
+
+// ConfigHostIdleExit reads `host_idle_exit` (plan 030 §3.6): a string holding
+// a Go duration ("1h", "90m", "2s"), "0" to exit as soon as the host is
+// eligible, or "never" — trimmed, "never" in any case. It fails safe: a
+// config.toml that cannot be read or parsed, a value that is not a string, a
+// duration Go cannot read or one below zero are the default, an hour, with a
+// line saying why for the host's log; an absent key is the default and
+// silent. The host is what reads it, once, as it starts.
+func ConfigHostIdleExit() (HostIdleExit, string) {
+	def := HostIdleExit{After: DefaultHostIdleExit}
+	cfg, err := readConfig()
+	switch {
+	case errors.Is(err, ErrConfigMalformed):
+		return def, "config.toml could not be parsed"
+	case err != nil:
+		return def, "config.toml could not be read"
+	}
+	v, ok := cfg["host_idle_exit"]
+	if !ok {
+		return def, ""
+	}
+	raw, ok := v.(string)
+	if !ok {
+		return def, "config.toml host_idle_exit is not a string"
+	}
+	raw = strings.TrimSpace(raw)
+	if strings.EqualFold(raw, "never") {
+		return HostIdleExit{Never: true}, ""
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil || d < 0 {
+		return def, fmt.Sprintf("config.toml host_idle_exit %q is neither a duration nor \"never\"", raw)
+	}
+	return HostIdleExit{After: d}, ""
 }
 
 // ConfigCompatClaude is the [compat.claude] table — which classes of Claude's

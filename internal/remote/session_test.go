@@ -959,3 +959,48 @@ func TestStopIsSessionStop(t *testing.T) {
 		}
 	})
 }
+
+// TestAStopIsAnsweredByTheSessionsEnd (plan 030 C5, X3): a stop that meets
+// the session's end before its receipt — a joined stop, or one arriving once a
+// signal or the idle exit set the end going, whose receipt the host's ending
+// connection never writes — is answered by that end: nil, never an outcome
+// unknown, forced here by the tap dropping the receipt while the stream's
+// reset{session_closed} goes through. A stop made once the session has ended
+// is answered at once, sending nothing. Either way the Session's close after
+// it detaches nothing.
+func TestAStopIsAnsweredByTheSessionsEnd(t *testing.T) {
+	var eng atomic.Pointer[engine.Engine]
+	h := newHost(t, withStop(func(control.StopRequest) {
+		go func() { _ = eng.Load().Close() }()
+	}))
+	eng.Store(h.eng)
+	tp := newTap(t)
+	tp.setRewriteIn(func(l wireLine) [][]byte {
+		if l.method == protocol.MethodSessionStop && l.resp != nil {
+			return [][]byte{} // the receipt never reaches the client
+		}
+		return nil
+	})
+	s, _ := started(t, h, tp, remote.SessionOptions{})
+	if err := s.Stop(tctx(t), engine.Command{Client: s.ClientID(), ID: "5"}); err != nil {
+		t.Fatalf("a stop whose receipt the session's end overtook: %v, want nil", err)
+	}
+	select {
+	case <-s.Ended():
+	default:
+		t.Fatal("Stop answered before the session's end")
+	}
+	sent := len(tp.sent(protocol.MethodSessionStop))
+	if err := s.Stop(tctx(t), engine.Command{Client: s.ClientID(), ID: "6"}); err != nil {
+		t.Fatalf("a stop after the session's end: %v, want nil", err)
+	}
+	if got := len(tp.sent(protocol.MethodSessionStop)); got != sent {
+		t.Fatalf("a stop after the session's end was sent: %d stops on the wire, want %d", got, sent)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatalf("close after a stop: %v", err)
+	}
+	if n := len(tp.sent(protocol.MethodSessionDetach)); n != 0 {
+		t.Fatalf("close after a stop sent %d detaches", n)
+	}
+}

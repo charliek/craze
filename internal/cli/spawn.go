@@ -559,28 +559,42 @@ func (c *hostChild) terminate() {
 }
 
 // killAgents kills every agent process group the host recorded and removes
-// the record: nothing, for a host that stopped cleanly and removed it itself.
-// A group is signalled only while it is provably the agent's (plan 030 X22,
-// astra r5-c3 1): the process leading it — the agent, whose pid is the
-// group's id — still there, and started at the instant the host recorded
-// (agentGroup.stale). A number an agent had can be anyone's once the agent
-// has gone and been reaped, and this runs seconds after its host has, or
-// after a launcher slow to get here; a group whose leader has exited or is a
-// stranger is left alone, and the host's log says so (note). Never 0 or 1 or
-// this process's own group, and at most agentGroupsMax records.
+// the record: nothing, for a host that stopped cleanly and removed it itself
+// (killRecordedAgents, at once: the host has gone, and so has any grace an
+// agent would have had from it). The host's log says what was left alone
+// (note).
 func (c *hostChild) killAgents() {
-	b, err := os.ReadFile(c.groups)
+	killRecordedAgents(c.groups, 0, c.note)
+}
+
+// killRecordedAgents kills every agent process group the record at path names
+// and removes the record. A group is signalled only while it is provably the
+// agent's (plan 030 X22, astra r5-c3 1): the process leading it — the agent,
+// whose pid is the group's id — still there, and started at the instant the
+// host recorded (agentGroup.stale). A number an agent had can be anyone's once
+// the agent has gone and been reaped; a group whose leader has exited or is a
+// stranger is left alone, and note says so. Never 0 or 1 or this process's
+// own group, and at most agentGroupsMax records.
+//
+// With a grace (a stopping host's own last resort, serveHost.killOwnAgents)
+// each group is sent SIGTERM first, and SIGKILL once the grace is over if its
+// leader is still the agent — checked again, since the agent may have exited
+// meanwhile and its number gone to another. Without one (the spawner, after
+// its host has gone) SIGKILL at once.
+func killRecordedAgents(path string, grace time.Duration, note func(format string, args ...any)) {
+	b, err := os.ReadFile(path)
 	if err != nil {
 		return
 	}
 	own := syscall.Getpgrp()
+	var ours []agentGroup
 	n := 0
 	for _, line := range strings.Split(string(b), "\n") {
 		if strings.TrimSpace(line) == "" {
 			continue
 		}
 		if n++; n > agentGroupsMax {
-			c.note("agent process groups past the first %d in %s not killed", agentGroupsMax, c.groups)
+			note("agent process groups past the first %d in %s not killed", agentGroupsMax, path)
 			break
 		}
 		g, ok := parseAgentGroup(line)
@@ -588,16 +602,47 @@ func (c *hostChild) killAgents() {
 			if len(line) > 64 {
 				line = line[:64] + "…"
 			}
-			c.note("a record that names no agent's process group not acted on: %q", line)
+			note("a record that names no agent's process group not acted on: %q", line)
 			continue
 		}
 		if why := g.stale(); why != "" {
-			c.note("agent process group %d not killed: %s", g.pgid, why)
+			note("agent process group %d not killed: %s", g.pgid, why)
+			continue
+		}
+		ours = append(ours, g)
+	}
+	if grace > 0 && len(ours) > 0 {
+		for _, g := range ours {
+			_ = syscall.Kill(-g.pgid, syscall.SIGTERM)
+		}
+		deadline := time.Now().Add(grace)
+		for time.Now().Before(deadline) && anyAgentLeft(ours) {
+			time.Sleep(agentExitPoll)
+		}
+	}
+	for _, g := range ours {
+		// Checked again after a grace: an agent that exited meanwhile, its
+		// number since another's, is not signalled.
+		if grace > 0 && g.stale() != "" {
 			continue
 		}
 		_ = syscall.Kill(-g.pgid, syscall.SIGKILL)
 	}
-	_ = os.Remove(c.groups)
+	_ = os.Remove(path)
+}
+
+// agentExitPoll is how often a grace looks for its agents to have gone.
+const agentExitPoll = 20 * time.Millisecond
+
+// anyAgentLeft reports whether any of gs still leads its group as the agent
+// recorded.
+func anyAgentLeft(gs []agentGroup) bool {
+	for _, g := range gs {
+		if g.stale() == "" {
+			return true
+		}
+	}
+	return false
 }
 
 // note appends one line to the host's log: what the spawner did after the

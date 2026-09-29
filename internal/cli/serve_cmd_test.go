@@ -612,7 +612,7 @@ func recordSteps(t *testing.T) (steps func() []string, atFence <-chan struct{}, 
 }
 
 // serveStopSteps is the stop sequence's steps, each exactly once, in order.
-var serveStopSteps = []string{"fenced", "engine closed", "flushing", "flushed", "server closed", "unlinked", "released"}
+var serveStopSteps = []string{"fenced", "engine closed", "flushing", "flushed", "server closed", "unlinked", "joining", "joined", "released"}
 
 // TestServeStopsOnceWhenAStopAndASignalRace is §3.6a's "a second stop joins
 // it", forced both ways round: the stop sequence is held at its first step

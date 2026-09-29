@@ -254,7 +254,9 @@ func TestAttachWithNothingRunningSaysSo(t *testing.T) {
 // failure is the host TUI's — its own error — even when the host then quits;
 // a start the stream's end cut short is that end; and the program's own
 // failure (tui.Run's error that is not the start's) is that error whatever
-// the stream did, never `session ended` over it.
+// the stream did, never `session ended` over it. The explicit quit's stop
+// (plan 030 §3.6): taken, it says nothing; refused by an older host, the note;
+// answered neither way, one line.
 func TestAnAttachEndsAsItsSessionDid(t *testing.T) {
 	startFailed := &remote.StartError{Text: "agent auth failed"}
 	cutShort := fmt.Errorf("remote: the stream ended before the session was ready: %w", errors.New("the session ended"))
@@ -281,6 +283,19 @@ func TestAnAttachEndsAsItsSessionDid(t *testing.T) {
 		{name: "the program failed after an End with an error", res: tui.Result{Ended: true, EndErr: errors.New("redials spent")},
 			err: programFailed, sameErr: true},
 		{name: "the program failed over a start failure", res: tui.Result{StartErr: startFailed}, err: programFailed, sameErr: true},
+		// The explicit quit (plan 030 §3.6): a stop taken says nothing of
+		// the end it asked for; one refused by a host that cannot stop is a
+		// detach, with its note; one answered neither way is a line, exit 0.
+		{name: "a stop taken, the session ended", res: tui.Result{Ended: true, Stopped: true}},
+		{name: "a stop taken, the quit before the end", res: tui.Result{Stopped: true}},
+		{name: "a stop taken on a failed start", res: tui.Result{Ended: true, Stopped: true, StartErr: startFailed},
+			err: startFailed, sameErr: true},
+		{name: "a stop an older host refused", res: tui.Result{StopUnsupported: true},
+			stderr: "craze: that session runs in an older craze; close it there\n"},
+		{name: "a stop answered neither way", res: tui.Result{StopErr: errors.New("outcome unknown\ndisconnected")},
+			stderr: "craze: the session may still be running: outcome unknown disconnected\n"},
+		{name: "a stop taken, the transport gave up", res: tui.Result{Ended: true, Stopped: true, EndErr: errors.New("redials spent")},
+			code: 1, msg: "craze: lost the session: redials spent"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var stderr bytes.Buffer

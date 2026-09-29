@@ -42,11 +42,13 @@ import (
 //     — with --load. A host that answers ok is dialled, and the TUI adopts
 //     it; one refused held is the holder's, found through the rendezvous and
 //     attached to (SQ16), whoever holds it.
-//  3. The TUI's quit is a view close (the session goes on on its host; C5
-//     gives /exit its stop). Then the launcher ends every spawn still in
-//     flight, and every host it spawned whose session never came up in the
-//     TUI — never taken, quit while starting, or failed to start: a quit
-//     before a session is up leaves nobody's session behind.
+//  3. The TUI's explicit quit — /exit, Ctrl+D, the second Ctrl+C — stops the
+//     session on its host (plan 030 §3.6: tui's stopQuit); a SIGTERM or a
+//     closed terminal is a view close, and the session goes on on its host.
+//     Then the launcher ends every spawn still in flight, and every host it
+//     spawned whose session never came up in the TUI — never taken, quit
+//     while starting, or failed to start: a quit before a session is up
+//     leaves nobody's session behind.
 //
 // This process binds no socket and takes no claim: the host owns its claim,
 // its journal and its index writes, and persists the provider. craze's own
@@ -327,16 +329,16 @@ func (l *launcher) spawn(opts spawnOptions, load bool) (backend.Backend, error) 
 			PeerCheck: rundir.DialCheck(os.Geteuid()),
 		},
 		SessionID: ref.entry.CrazeSessionID,
-		// Attached once the host's start is over, as craze attach attaches:
-		// a start that fails can take the session's log down with it (the
-		// agent session's own teardown), which would end a stream attached
-		// before it — an End ahead of any Ready, which quits the TUI as a
-		// session that ended rather than one that failed to start. Attached
-		// when ready, a failed start is the attach's refusal, start_failed,
-		// carrying the start's own error: Start answers it as the in-process
-		// Start does, and the TUI stays up with it. Until then the frame is
-		// the starting state; a load's transcript arrives whole.
-		When:      protocol.WhenReady,
+		// Attached now, while the host's start runs (plan 030 C5, undoing
+		// X23): a load's replay streams in as the agent sends it, as the
+		// in-process TUI shows it, instead of arriving whole once the start is
+		// over. A start that fails no longer takes the session's log down
+		// with it on a host (agent.Options.KeepLogOnFailedStart), so a stream
+		// attached before it is sent the failure — the ready notification's
+		// failed form — and never an End ahead of it: Start answers it as the
+		// in-process Start does, and the TUI stays up with it. An attach made
+		// once the start has failed is refused start_failed, the same answer.
+		When:      protocol.WhenNow,
 		Provider:  ref.entry.Provider,
 		Workspace: ref.entry.Workspace,
 	})

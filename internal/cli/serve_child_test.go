@@ -41,6 +41,10 @@ const (
 	// held rendezvous's holder, held where it is claimed and not yet in the
 	// registry.
 	cliChildGate = "CRAZE_CLI_TEST_GATE"
+	// cliChildNoIdle stops craze serve's idle watcher from ever looking
+	// (idleTicks): a test about what a spawner does to a host whose socket it
+	// removed must not race the host's own socket-lost stop.
+	cliChildNoIdle = "CRAZE_CLI_TEST_NO_IDLE"
 )
 
 func init() {
@@ -77,6 +81,10 @@ func init() {
 				_ = f.Close()
 			}
 		}
+	}
+	if _, ok := os.LookupEnv(cliChildNoIdle); ok {
+		_ = os.Unsetenv(cliChildNoIdle)
+		idleTicks = func() (<-chan time.Time, func() time.Time, func()) { return nil, time.Now, func() {} }
 	}
 	var argv []string
 	if err := json.Unmarshal([]byte(raw), &argv); err != nil {

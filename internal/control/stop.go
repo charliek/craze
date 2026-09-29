@@ -64,7 +64,8 @@ import (
 // # The close fence
 //
 // FenceAttaches is the primitive the coordinator's stop sequence starts with,
-// and C5's idle watcher reuses, reversibly (§3.6, "The decision is atomic"):
+// and the idle exit's FenceClose reuses, reversibly (§3.6, "The decision is
+// atomic"):
 // it goes up under the server's attachment lock (Server.attachMu), which an
 // attach holds from its fence check to the install of its pending attachment
 // (conn.reserve), and it reads the count of attachments the server holds in
@@ -114,18 +115,19 @@ func (s *Server) serves(info protocol.MethodInfo) bool {
 // FenceAttaches raises a close fence over the server's attach reservations
 // (plan 030 §3.6, §3.6a; the package's "The close fence"): from its return
 // until release, a new session.attach is refused unavailable, reason closing.
-// attached is how many attachments the server holds that are not yet closed —
-// pending (reserved, not yet answered), live or closing — read under the lock
-// the fence went up under, so every attach that reserved before the fence is
-// in it and none can reserve after; while the fence is up the count can only
-// fall. release lowers this fence, and is idempotent; attaches are admitted
+// attached is how many attachments the server counts — every one not yet
+// closed, pending (reserved, not yet answered), live or closing, whose
+// connection's peer has not half-closed (attach.go, "Counting attachments") —
+// read under the lock the fence went up under, so every attach that reserved
+// before the fence is in it and none can reserve after; while the fence is
+// up the count can only fall. release lowers this fence, and is idempotent; attaches are admitted
 // again once every fence raised has been released. The stop sequence never
 // releases its fence. It waits on nothing but the attachment lock, which is
 // never held across anything that waits.
 func (s *Server) FenceAttaches() (attached int, release func()) {
 	s.lockAttachments(s.hooks.fenceWaits)
 	s.fences++
-	n := int(s.attached.Load())
+	n := s.attachedCount()
 	s.attachMu.Unlock()
 	var once sync.Once
 	return n, func() {
@@ -133,6 +135,41 @@ func (s *Server) FenceAttaches() (attached int, release func()) {
 			s.attachMu.Lock()
 			s.fences--
 			s.attachMu.Unlock()
+		})
+	}
+}
+
+// FenceClose raises the host's whole close fence and reads what a detached
+// host's idle exit is decided on (plan 030 §3.6, R2-1): (1) the attach fence
+// (FenceAttaches), and the count of attachments read under it; then (2) the
+// engine's own close fence (engine.Engine.FenceClose), and whether anything is
+// in flight, read under it. With both up nothing can be admitted — no attach,
+// no prompt, no setting, no queue edit, no turn of the session's own where it
+// has an admission fence — so a caller that finds attached 0 and busy false
+// may stop the session with both left up, and the decision cannot be
+// overtaken. release lowers both, the engine's first: a client whose attach is
+// answered after the release finds the engine admitting (an attached client
+// never meets closing from the engine after its attach went through); one
+// refused closing by either tries again. release is idempotent. With no
+// engine served, busy is true: there is nothing to decide an idle exit on.
+func (s *Server) FenceClose() (attached int, busy bool, release func()) {
+	attached, releaseAttaches := s.FenceAttaches()
+	if h := s.hooks.closeFenceStep; h != nil {
+		h("attaches fenced")
+	}
+	releaseEngine := func() {}
+	busy = true
+	if eng, _ := s.engine(); eng != nil {
+		releaseEngine, busy = eng.FenceClose()
+	}
+	if h := s.hooks.closeFenceStep; h != nil {
+		h("engine fenced")
+	}
+	var once sync.Once
+	return attached, busy, func() {
+		once.Do(func() {
+			releaseEngine()
+			releaseAttaches()
 		})
 	}
 }

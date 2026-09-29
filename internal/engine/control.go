@@ -59,8 +59,9 @@ import (
 //     in flight. Unreachable in process, so the TUI has, and needs, no
 //     handling for it.
 //   - unavailable (ErrUnavailable and its sibling gate sentinels,
-//     agent.ErrSetUnavailable / agent.ErrAskUnavailable, and errNotRun for a
-//     Set answered without running because its own ctx was already dead) or
+//     agent.ErrSetUnavailable / agent.ErrAskUnavailable, ErrClosing while a
+//     close fence is up, and errNotRun for a Set answered without running
+//     because its own ctx was already dead) or
 //     not_accepting (ErrNotAccepting, and agent.ErrNotInTurn — an Interject
 //     with no turn to merge into): a GATE refusal — the engine simply not
 //     admitting anything at all right now, this command's own arguments
@@ -247,6 +248,14 @@ var (
 	// ErrUnavailable refuses a command before it mutates anything because the
 	// event log's outbox has no room for the events it would cause.
 	ErrUnavailable = errors.New("engine: the event log is backed up")
+	// ErrClosing refuses an admission — a prompt, a queue edit, a setting, a
+	// send-now, an interjection — while a close fence is up (FenceClose, plan
+	// 030 §3.6): the session's host is deciding whether to end it, or has
+	// decided to. Nothing ran, so it is a gate refusal like ErrUnavailable,
+	// code "unavailable" and NEVER STORED; its reason is "closing", the
+	// protocol's word for an attach the same decision refuses. A client
+	// tries again once it has seen the session end or stay.
+	ErrClosing = errors.New("engine: the session is closing, or its host is deciding whether to: try again once it has ended or stayed")
 	// ErrBadRequest refuses a malformed command, and a command id resent with
 	// a different payload: never a re-execution.
 	ErrBadRequest = errors.New("engine: bad request")
@@ -469,6 +478,13 @@ func classify(err error) classification {
 		return classification{code: "unavailable", reason: "set_unavailable"}
 	case errors.Is(err, ErrUnavailable):
 		return classification{code: "unavailable", reason: "log_backed_up"}
+	case errors.Is(err, ErrClosing):
+		// A close fence refused the admission (plan 030 §3.6): nothing ran,
+		// and the fence is either lowered — the host stays — or the session
+		// ends, so asking again is the answer, NEVER STORED. The reason is
+		// the protocol's own closing, the one an attach the same decision
+		// refuses is answered with.
+		return classification{code: "unavailable", reason: "closing"}
 	case errors.Is(err, ErrAttachRaced):
 		// An attach the log outran: every fresh snapshot's cursor refused
 		// because the ring moved past it. Nothing was registered and nothing
