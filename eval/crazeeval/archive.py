@@ -1,9 +1,15 @@
 """``crazeeval archive``: a compact, diffable record of chosen batches (plan 029 W2).
 
-It selects runs and verdicts exactly as ``crazeeval report`` does -- a later ``--batch``
-replaces an earlier one's run with the same key, held-out runs and verdicts only with
-``--unseal``, a verdict counts only for the two scored runs it judged, one final verdict
-per pair by the report's ranking -- and writes:
+By default it selects runs and verdicts exactly as ``crazeeval report`` does (a "current
+view"): a later ``--batch`` replaces an earlier one's run with the same key, held-out
+runs and verdicts only with ``--unseal``, a verdict counts only for the two scored runs
+it judged, one final verdict per pair by the report's ranking. ``--all-runs`` keeps
+**every** scored run of **every** given batch instead, identified by its ``run_id``
+(which already carries the batch's name) rather than replaced by run key -- for
+archiving a whole campaign (baseline, lever, final, A/B batches) so a craze-vs-craze
+comparison between two batches that reuse the same run keys keeps both sides' runs, and
+every verdict between them stays bound. Either way, giving the same batch directory
+twice reads it once, and it writes:
 
 - ``runs.jsonl``: one line per scored run -- its batch and campaign (names, never
   paths), run key and id, harness with its version and executable hash, the craze build
@@ -24,10 +30,11 @@ per pair by the report's ranking -- and writes:
   and its ``best-open-harness.json`` (paths reduced to batch names);
 - ``calibration.json`` (only when a batch has calibration): per such batch the
   calibration summary -- rates, gates, judge hash -- never the raw calibration records;
-- ``archive.json``: the reconciliation (scored runs selected against run rows written,
-  final verdicts against verdict rows written; either mismatch fails the command), the
-  verdict counts, how many paths were redacted, the file sizes, and the scan of the data
-  files. No timestamp: the same batches archive to the same bytes.
+- ``archive.json``: the selection mode (``"current-view"`` or ``"all-runs"``), the
+  reconciliation (scored runs selected against run rows written, final verdicts against
+  verdict rows written; either mismatch fails the command), the verdict counts, how many
+  paths were redacted, the file sizes, and the scan of the data files. No timestamp: the
+  same batches archive to the same bytes.
 
 Provenance is looked up by each batch's resolved directory, so two campaigns' batches
 that share a name keep their own campaign and build; only names are written.
@@ -73,6 +80,8 @@ NOTE_OTHER_HASH = "judged under another global judge hash: its task hash cannot 
 NOTE_TASK_CHANGED = ("its task is not what its batch ran, or its batch's task fingerprint is not found: "
                      "its task hash cannot be confirmed")
 NOTE_UNSTAMPED = "no task hash: another global judge hash, or a task that changed since its batch"
+CURRENT_VIEW = "current-view"
+ALL_RUNS = "all-runs"
 
 
 def _read_json(p: Path) -> dict:
@@ -426,21 +435,35 @@ def out_bytes(out: Path) -> int:
 
 def archive(batches: list[Path], out: Path, keyring: keymod.KeyRing, *, unseal: bool = False,
             max_bytes: int = DEFAULT_MAX_BYTES, tasks: dict[str, Task] | None = None,
-            verdict_paths: list[Path] | None = None, home: str | None = None) -> dict:
+            verdict_paths: list[Path] | None = None, home: str | None = None,
+            all_runs: bool = False) -> dict:
     """Write the archive of ``batches`` into ``out`` and check it; the summary (its
     ``ok`` is false, with ``errors``, when a reconciliation, the scan or the size fails).
-    ArchiveError when ``out`` is not a place an archive may be written (check_out)."""
+    ArchiveError when ``out`` is not a place an archive may be written (check_out).
+
+    ``all_runs`` (a whole campaign, every batch's verdicts bound): keep every scored run
+    of every batch, by its ``run_id`` -- no batch's run replaces another's that shares a
+    run key -- instead of the report's "current view" (a later ``--batch`` replaces an
+    earlier one's run with the same key). Either way a batch given more than once is
+    read once (deduplicated by its resolved directory)."""
     from crazeeval.tasks import load_tasks
 
     tasks = load_tasks() if tasks is None else tasks
-    batches = [Path(b) for b in batches]
+    seen: set[str] = set()
+    uniq: list[Path] = []
+    for b in (Path(x) for x in batches):
+        k = batch_key(b)
+        if k not in seen:
+            seen.add(k)
+            uniq.append(b)
+    batches = uniq  # a batch dir given more than once is read once
     out = Path(out)
     check_out(out, batches)
     out.mkdir(parents=True, exist_ok=True)
     global_now = judge_hash(tasks)
     th_now = task_judge_hashes(tasks)
 
-    runs = rp.load_runs(batches, unseal)
+    runs = rp.load_all_runs(batches, unseal) if all_runs else rp.load_runs(batches, unseal)
     # Provenance by resolved directory: batches of two campaigns may share a name.
     keys = list(dict.fromkeys(batch_key(b) for b in batches))
     info = {k: batch_info(Path(k)) for k in keys}
@@ -500,6 +523,7 @@ def archive(batches: list[Path], out: Path, keyring: keymod.KeyRing, *, unseal: 
     summary = _scrub({
         "batches": [info[k]["name"] for k in keys],
         "campaigns": sorted({i["campaign"] for i in info.values() if i.get("campaign")}),
+        "selection": ALL_RUNS if all_runs else CURRENT_VIEW,
         "unsealed": unseal,
         "judge_hash_now": global_now,
         "reconciliation": rec,

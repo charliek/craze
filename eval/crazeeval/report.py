@@ -165,6 +165,33 @@ def load_runs(batches: list[Path], unseal: bool = False) -> list[dict]:
     return list(by_key.values())
 
 
+def load_all_runs(batches: list[Path], unseal: bool = False) -> list[dict]:
+    """Every scored-or-not run's final result under each batch's ``runs/`` -- and
+    ``heldout/`` only when unsealed -- keyed by its ``run_id`` (which already carries the
+    batch's name), so no batch replaces another's run that happens to share a run key
+    (``crazeeval archive --all-runs``, a whole campaign kept whole). A batch passed more
+    than once is read once: batches are deduplicated by their resolved directory."""
+    seen_batches: set[str] = set()
+    by_id: dict[str, dict] = {}
+    order: list[str] = []
+    for b in batches:
+        rb = str(Path(b).resolve())
+        if rb in seen_batches:
+            continue
+        seen_batches.add(rb)
+        for root, rep_dir, r in iter_results(b, unseal):
+            r.setdefault("rep_dir", str(rep_dir))
+            r["batch"] = str(b)
+            if "harness" not in r:  # a result written before the attempt ran (budget stop)
+                h, _, t, rep = rep_dir.relative_to(root).parts
+                r.update({"harness": h, "task": t, "rep": int(rep[3:] or 0)})
+            rid = r.get("run_id")
+            if rid not in by_id:
+                order.append(rid)
+                by_id[rid] = r
+    return [by_id[rid] for rid in order]
+
+
 def verdict_files(paths_: list[Path], unseal: bool = False) -> list[Path]:
     out = []
     for p in paths_:

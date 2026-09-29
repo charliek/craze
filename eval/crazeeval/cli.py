@@ -564,10 +564,12 @@ def cmd_archive(a) -> int:
         return 2
     try:
         s = arch.archive(batches, Path(a.out), keyring, unseal=a.unseal, max_bytes=a.max_bytes,
-                         verdict_paths=[Path(v) for v in a.verdicts] if a.verdicts else None)
+                         verdict_paths=[Path(v) for v in a.verdicts] if a.verdicts else None,
+                         all_runs=a.all_runs)
     except arch.ArchiveError as e:
         print(str(e), file=sys.stderr)
         return 2
+    print(f"selection: {s['selection']}")
     print(s["reconciliation"]["line"])
     sc = s["scan"]
     print(f"scan: {sc['files_scanned']} files, {sc['keys_checked']} keys checked; files with a key: "
@@ -735,10 +737,14 @@ def main(argv: list[str] | None = None) -> int:
     cp.set_defaults(fn=cmd_captures)
 
     ar = command("archive", help="a compact, diffable record of batches: runs, final verdicts, provenance")
-    ar.add_argument("--batch", action="append", required=True, help="a batch directory (repeatable; later wins)")
+    ar.add_argument("--batch", action="append", required=True,
+                    help="a batch directory (repeatable; later wins a run key, unless --all-runs)")
     ar.add_argument("--out", required=True, help="the archive directory")
     ar.add_argument("--unseal", action="store_true", help="include the held-out runs and verdicts")
     ar.add_argument("--verdicts", action="append", help="a verdict file or directory (repeatable; default <batch>/judging)")
+    ar.add_argument("--all-runs", action="store_true",
+                    help="keep every scored run of every batch (by run_id), not a later batch's replacement by "
+                         "run key -- for archiving a whole campaign rather than a current view")
     ar.add_argument("--max-bytes", type=int, default=2_000_000, help="fail over this many bytes in all (default 2000000)")
     ar.set_defaults(fn=cmd_archive)
 

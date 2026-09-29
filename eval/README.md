@@ -349,7 +349,7 @@ uv run crazeeval captures --run DIR [--out DIR] [--unseal]
 # A compact, diffable record of batches (see "The archive"): runs, final verdicts,
 # provenance; reconciled, key- and home-path-scanned, 2 MB by default.
 uv run crazeeval archive --batch DIR [--batch LATER ...] --out DIR [--unseal] [--verdicts DIR ...] \
-    [--max-bytes N]
+    [--all-runs] [--max-bytes N]
 
 # Recompute a finished batch's diff and its diff-derived checks (no_writes, diff_scope)
 # from each rep's final attempt's manifests with today's ignores (X15); every other
@@ -701,9 +701,16 @@ read; the success bar uses the dev tasks alone and reports `provisional-meets` o
 `crazeeval archive --batch DIR [--batch DIR ...] --out DIR [--unseal] [--max-bytes N]`
 (`archive.py`, plan 029 W2) writes a compact, diffable record of chosen batches -- what
 is worth keeping in the repo once the raw runs (captures, answers, workspaces) stay
-outside it. It selects runs and verdicts as the report does: a later `--batch` wins a
-run key (so give the baseline first), held-out runs and verdicts only with `--unseal`,
-verdicts bound to the scored runs, one final verdict per pair by the report's ranking.
+outside it. By default it selects runs and verdicts as the report does (a "current
+view"): a later `--batch` wins a run key (so give the baseline first), held-out runs and
+verdicts only with `--unseal`, verdicts bound to the scored runs, one final verdict per
+pair by the report's ranking. `--all-runs` keeps every scored run of every given batch
+instead, by its `run_id` rather than replaced by run key -- use it to archive a whole
+campaign (baseline, lever, final, A/B batches) rather than a final view, since a
+craze-vs-craze comparison's two batches often reuse the same run keys and the default
+would drop one side's runs (and unbind its verdicts). `archive.json`'s `selection`
+records which mode wrote the archive. A batch directory given more than once is read
+once either way.
 
 - `runs.jsonl`: one line per scored run -- campaign and batch names, run key and id,
   harness with its version and executable hash (a sha256 prefix), the craze build for a
@@ -727,8 +734,9 @@ verdicts bound to the scored runs, one final verdict per pair by the report's ra
 - `calibration.json`, only when a batch has calibration: per such batch (name and
   campaign) its summary (seed, judge hash, flip rate, luna agreement, padding, gates),
   never the raw calibration records;
-- `archive.json`: the verdict counts, how many paths were redacted, the file sizes, the
-  scan of the data files and **the reconciliation**, also printed:
+- `archive.json`: the selection mode (`"current-view"` or `"all-runs"`), the verdict
+  counts, how many paths were redacted, the file sizes, the scan of the data files and
+  **the reconciliation**, also printed:
   `archive: N scored runs selected, N rows written; M final verdicts (K current), M rows
   written -- reconciled`. Either count differing fails the command.
 

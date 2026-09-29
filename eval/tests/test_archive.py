@@ -429,6 +429,72 @@ def test_two_campaigns_batches_that_share_a_name_keep_their_own_provenance(tmp_p
     assert s["campaigns"] == ["camp-a", "camp-b"]
 
 
+def test_all_runs_keeps_both_batches_run_key_and_binds_the_craze_vs_craze_verdict(tmp_path):
+    """Two batches with the same run key (a lever's craze-vs-craze pair): the default
+    keeps only the later batch's run and drops the verdict between them (its x side is
+    no longer a scored run); --all-runs keeps both runs -- by their distinct run_id --
+    and the verdict is bound and written. Reconciliation holds in both modes."""
+    runs_dir = tmp_path / "camp-x" / "eval-runs"
+    a, b = runs_dir / "batch-a", runs_dir / "batch-b"
+    ra, rb = _run(a, "craze", "D1"), _run(b, "craze", "D1")
+    assert ra["run_key"] == rb["run_key"] and ra["run_id"] != rb["run_id"]
+    v = _verdict(ra, rb, "x")  # craze (batch-a) vs craze (batch-b), same task and run key
+    _write(a, [ra], [], _ident("batch-a", ["craze"], None, "aa" * 32))
+    _write(b, [rb], [v], _ident("batch-b", ["craze"], None, "bb" * 32))
+
+    default = arch.archive([a, b], tmp_path / "default", keyring(), tasks=_tasks())
+    assert default["ok"] and "reconciled" in default["reconciliation"]["line"]
+    assert default["selection"] == arch.CURRENT_VIEW
+    rows = _load(tmp_path / "default", arch.RUNS_FILE)
+    assert [r["batch"] for r in rows] == ["batch-b"]  # the later batch wins the run key
+    assert _load(tmp_path / "default", arch.VERDICTS_FILE) == []  # unbound: batch-a's run is gone
+
+    allr = arch.archive([a, b], tmp_path / "all", keyring(), tasks=_tasks(), all_runs=True)
+    assert allr["ok"], allr["errors"]
+    assert "reconciled" in allr["reconciliation"]["line"]
+    assert allr["selection"] == arch.ALL_RUNS
+    rows = _load(tmp_path / "all", arch.RUNS_FILE)
+    assert {r["batch"] for r in rows} == {"batch-a", "batch-b"} and len(rows) == 2
+    verdicts = _load(tmp_path / "all", arch.VERDICTS_FILE)
+    assert len(verdicts) == 1 and verdicts[0]["winner"] == "x" and verdicts[0]["current"]
+    assert verdicts[0]["x_run_id"] == ra["run_id"] and verdicts[0]["y_run_id"] == rb["run_id"]
+
+
+def test_all_runs_verdict_judged_in_two_files_still_yields_one_final_verdict(tmp_path):
+    """The same pair judged in two verdict files (e.g. base and final batches' judging/)
+    still yields one final verdict per pair, ranked as the report ranks them."""
+    runs_dir = tmp_path / "camp-z" / "eval-runs"
+    a, b = runs_dir / "batch-a", runs_dir / "batch-b"
+    ra, rb = _run(a, "craze", "D1"), _run(b, "craze", "D1")
+    v1 = _verdict(ra, rb, "y", judge="sol")
+    v2 = _verdict(ra, rb, "x", judge="astra")  # a re-judgement: ranks above sol's
+    _write(a, [ra], [v1], _ident("batch-a", ["craze"], None, "aa" * 32))
+    _write(b, [rb], [v2], _ident("batch-b", ["craze"], None, "bb" * 32))
+    out = tmp_path / "arch"
+    s = arch.archive([a, b], out, keyring(), tasks=_tasks(), all_runs=True)
+    assert s["ok"], s["errors"]
+    verdicts = _load(out, arch.VERDICTS_FILE)
+    assert len(verdicts) == 1 and verdicts[0]["judge_model"] == "astra" and verdicts[0]["winner"] == "x"
+
+
+def test_duplicate_batch_arguments_dont_duplicate_rows(tmp_path):
+    """Passing the same batch directory more than once reads it once, in either mode."""
+    runs_dir = tmp_path / "camp-w" / "eval-runs"
+    a = runs_dir / "batch-a"
+    ra = _run(a, "craze", "D1")
+    _write(a, [ra], [], _ident("batch-a", ["craze"], None, "aa" * 32))
+
+    s = arch.archive([a, a, a], tmp_path / "dup-all", keyring(), tasks=_tasks(), all_runs=True)
+    assert s["ok"], s["errors"]
+    assert len(_load(tmp_path / "dup-all", arch.RUNS_FILE)) == 1
+    assert len(_load(tmp_path / "dup-all", arch.BATCHES_FILE)["batches"]) == 1
+
+    s2 = arch.archive([a, a], tmp_path / "dup-default", keyring(), tasks=_tasks())
+    assert s2["ok"], s2["errors"]
+    assert len(_load(tmp_path / "dup-default", arch.RUNS_FILE)) == 1
+    assert len(_load(tmp_path / "dup-default", arch.BATCHES_FILE)["batches"]) == 1
+
+
 def test_a_reconciliation_mismatch_fails(world, tmp_path, monkeypatch):
     monkeypatch.setattr(arch, "_count_lines", lambda p: 0)
     s = _archive(world, tmp_path / "arch", unseal=True)
