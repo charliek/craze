@@ -456,9 +456,11 @@ func TestOnlyTheClientsOwnOutcomesAreOutcomeUnknown(t *testing.T) {
 // agent.Capabilities field (found by reflection, so a field a later phase adds
 // fails here until it is mapped back) from exactly one wire field, and every
 // wire field but the four the protocol states for every host (cancel,
-// approvals, historyCursor, stop) to exactly one agent field.
+// approvals, historyCursor, stop) and the host's rowFacts (plan 030 §3.8: what
+// its sessions.list row carries, no concern of a session's client) to exactly
+// one agent field.
 func TestEveryWireCapabilityComesBack(t *testing.T) {
-	protocolOwn := map[string]bool{"Cancel": true, "Approvals": true, "HistoryCursor": true, "Stop": true}
+	protocolOwn := map[string]bool{"Cancel": true, "Approvals": true, "HistoryCursor": true, "Stop": true, "RowFacts": true}
 	wt := reflect.TypeFor[protocol.SessionCapabilities]()
 	at := reflect.TypeFor[agent.Capabilities]()
 	from := map[string]string{} // agent field → wire field

@@ -18,7 +18,9 @@ import (
 // a required property of the schema's session capability set
 // (info.json#/$defs/sessionCapabilities). The four the protocol states for
 // every host — cancel, approvals, historyCursor true, and stop false on a TUI
-// host — are set whatever the provider says.
+// host — are set whatever the provider says; rowFacts, the host's own too, is
+// omitted while false (plan 030 §3.8, TestARowCarriesTheRowFacts), so it is
+// not on the wire of a provider's set at all.
 func TestEveryCapabilityIsOnTheWire(t *testing.T) {
 	props, required := schemaCapabilities(t)
 	constant := map[string]bool{"cancel": true, "approvals": true, "historyCursor": true, "stop": false}

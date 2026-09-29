@@ -193,9 +193,9 @@ type launch struct {
 // The observer runs inside the log's publishing boundary and takes leaves
 // only, one after another and never one inside another: the transcript model's
 // own mutex, in its first statement (e.model.Fold); then e.obsMu, which guards
-// what it keeps (the replay flag, and the last turn's ending — plan 030 §3.7),
-// taken once per section and released before the next; then the index
-// writer's (idx.post). So the order is
+// what it keeps (the replay flag, the last turn's ending — plan 030 §3.7 — and
+// the row-state times, §3.10), taken once per section and released before the
+// next; then the index writer's (idx.post). So the order is
 // **the boundary → model.mu** (and the boundary → each of the other two), and
 // the other direction never happens: Snapshot takes model.mu with the boundary
 // never held and releases it before it returns — a snapshot is a value — so
@@ -228,6 +228,10 @@ type Engine struct {
 	// craze is the durable craze session id (SD-22), fixed at construction and
 	// never written again, so it needs no lock.
 	craze string
+	// bornAt is when the engine was built, on the session's clock: a starting
+	// or replaying session's row has been working since (rowfacts.go). Fixed
+	// in newEngine, so it needs no lock either.
+	bornAt time.Time
 	// idx is the session index: the bookkeeping, the command-driven writes and
 	// the worker the observer feeds (index.go). Its mutex is a LEAF and no
 	// write of its ever runs under e.mu.
@@ -235,7 +239,12 @@ type Engine struct {
 
 	mu       sync.Mutex
 	activity Activity
-	cur      *turn
+	// activityAt is when activity last changed, on the session's clock (e.now):
+	// a sessions.list row's Since reads it (rowfacts.go). A settlement that
+	// starts its successor in the same section never shows idle to anyone, so
+	// it keeps the working run's start (settleLocked).
+	activityAt time.Time
+	cur        *turn
 	// settled remembers what each recently settled turn's continuation returned,
 	// for the in-process client that has to hand a caller the failure itself and
 	// not a rendering of it (TurnErr). Only a failure is kept — a clean turn's
@@ -302,6 +311,14 @@ type Engine struct {
 	// (turnEnding), so it names the turns a client's fold names; it is
 	// replaced, never mutated, so State hands out the pointer it read.
 	lastTurn *LastTurn
+	// askEndedAt, foreignAt and replayEndedAt are the stream's own times of
+	// the three row-state changes the engine's activity does not see (plan
+	// 030 §3.10, rowfacts.go): the last ask ending, the last foreign turn's
+	// start, and the last replay's end — each the event's At, kept by the
+	// observer in commit order, replayed events ignored.
+	askEndedAt    time.Time
+	foreignAt     time.Time
+	replayEndedAt time.Time
 
 	// receipts is the command-id table (receipts.go): one table for the whole
 	// engine, shared by every client, with its own mutex — a LEAF. It is never
@@ -454,6 +471,10 @@ func newEngine(sess agent.Session, opts Options, h *hooks) (*Engine, error) {
 	if c, ok := sess.(agent.Clocked); ok {
 		e.now = c.Now
 	}
+	// Starting is the first activity, entered now; the driver is not running
+	// yet, so nothing reads either before this.
+	e.bornAt = e.now()
+	e.activityAt = e.bornAt
 	// The receipts table keeps a clock of its OWN (time.Now, or a test's
 	// through these hooks) rather than the session's: how long a command id
 	// stays answerable is real elapsed time, and the session's clock is an
@@ -561,6 +582,7 @@ func (e *Engine) Started(err error) {
 	if e.closed || e.activity != ActivityStarting {
 		return
 	}
+	e.activityAt = e.now()
 	if err != nil {
 		e.activity = ActivityError
 		e.startFailed = true
@@ -786,6 +808,7 @@ func (e *Engine) Close() error {
 		e.mu.Lock()
 		e.closed = true
 		e.activity = ActivityClosing
+		e.activityAt = e.now()
 		// Up for good: nothing is admitted again, and a session that could start a
 		// turn of its own must not start one under a closing engine either.
 		e.raiseFenceLocked()
@@ -866,6 +889,7 @@ func (e *Engine) observe(ev agent.Event) {
 		e.lastTurn = ended
 		e.obsMu.Unlock()
 	}
+	e.observeRowTimes(ev)
 	switch ev.Type {
 	case agent.EventReplay:
 		if ev.Replay == nil {
@@ -1309,6 +1333,9 @@ func (e *Engine) claimLocked(text, origin, cause string) launch {
 	e.turnSeq++
 	t := &turn{id: fmt.Sprintf("turn-%d", e.turnSeq), text: text, origin: origin, cause: cause}
 	e.cur = t
+	if e.activity != ActivityWorking {
+		e.activityAt = e.now()
+	}
 	e.activity = ActivityWorking
 	e.err = ""
 	e.cancelled = false
@@ -1905,6 +1932,8 @@ func (e *Engine) settleLocked(t *turn) []launch {
 	// What the chain policy makes of the queue behind the turn, and whether the
 	// queue may supply a successor at all.
 	chainClears := false
+	workingSince := e.activityAt
+	e.activityAt = e.now()
 	switch {
 	case failed:
 		e.activity = ActivityError
@@ -1941,6 +1970,12 @@ func (e *Engine) settleLocked(t *turn) []launch {
 		clear()
 	}
 
+	if l != nil {
+		// Its successor started in this same section, so the session was never
+		// seen idle: it is still the working run that began at workingSince
+		// (a sessions.list row's Since, rowfacts.go).
+		e.activityAt = workingSince
+	}
 	info.Pending = e.queue.Len()
 	batch = append(batch, e.stamp(agent.Event{Type: agent.EventTurn, Turn: info}, t.cause))
 	batch = append(batch, disarm...)
@@ -2023,6 +2058,7 @@ func (e *Engine) restoreLocked(t *turn, batch []agent.Event) []launch {
 	batch = append(batch, e.stamp(e.queue.Restore(*t.row).Event(), t.cause))
 	e.cur = nil
 	e.activity = ActivityIdle
+	e.activityAt = e.now()
 	e.cancelled = false
 	e.rememberErrLocked(t)
 	info := &agent.TurnInfo{

@@ -392,3 +392,36 @@ compatibility rules require: by capability, never by version.
   a newer client; new fixtures (`internal/fakehost/testdata/wire/14`–`16`)
   cover a stop-capable host with the new fields, a joined stop and a `closing`
   refusal, and `lastTurn`.
+
+## As shipped (S5, plan 030 PR 2): the row facts
+
+The session list (plan 030 §3.9–§3.10) polls every host's `sessions.list`
+and needs more of each row than S2 carried — what a session is doing, what it
+last said, since when — without attaching to anything. The new members are
+announced the same way, **by capability**:
+
+- **`rowFacts`** is a session capability, the host's own (not the
+  provider's), and omitted when false: `true` where the session's
+  `sessions.list` row carries the row facts — every craze from plan 030's
+  PR 2, detached or TUI-hosted. It is on the session and not the connection
+  because it describes the row, and a row travels on its own: a hub's roster
+  (S4b) carries rows of hosts of different builds, each saying what its own
+  row holds.
+- **The row facts**, each omitted when unset (so, on a `rowFacts` host, an
+  absent one is its zero): `headAsk.summary` (a permission's command or tool
+  title, a question's first question, a plan's name — never on
+  `session.state`); `doing` (the title of the most recently started tool of
+  the running turn still running, else `Responding` while the agent's text
+  streams, else `Thinking` — only while a turn, craze's or the agent's own,
+  is working); `lastReply` (the first line of the last completed assistant
+  message); `since` (when the row entered its state — needs you, failed,
+  working, idle, the first that holds — on the host's clock, UTC);
+  `startFailed` and `startErr` (the first line of a failed start's error);
+  `prompted`. Every string is one line — the first non-blank one, tabs
+  expanded — of at most 200 terminal cells. The engine computes them from its
+  own transcript model and ask registry when the row is asked for: a read,
+  like the rest of the row, not a cut through the stream.
+- **An older host** has no `rowFacts`: its row is listed with what S2's row
+  has (title, activity, pending asks, the head ask's label) and the craze
+  version its `hello` gave. The existing fixtures are that direction,
+  unchanged; fixture 17 (`17-row-facts`) is a `rowFacts` host through a turn.

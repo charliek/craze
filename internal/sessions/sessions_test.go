@@ -324,6 +324,43 @@ func TestRecentTiesBreakByFileOrder(t *testing.T) {
 	}
 }
 
+// TestAllIsEveryWorkspaceNewestFirst: All is every row of every workspace, in
+// Recent's order — ties to the later line — with the rows of a provider this
+// build does not know left out; no home directory is no rows.
+func TestAllIsEveryWorkspaceNewestFirst(t *testing.T) {
+	path := setIndex(t)
+	body := strings.Join([]string{
+		lineFor(t, "old", "cursor", "/a", "2024-01-01T00:00:00Z"),
+		lineFor(t, "tie-1", "grok", "/b", "2024-03-01T00:00:00Z"),
+		lineFor(t, "tie-2", "cursor", "/c", "2024-03-01T00:00:00Z"),
+		lineFor(t, "new", "native", "/a", "2024-05-01T00:00:00Z"),
+		lineFor(t, "gone", "someday", "/d", "2024-06-01T00:00:00Z"),
+	}, "\n") + "\n"
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s := Store{KnownProvider: func(p string) bool { return p != "someday" }}
+	rows, err := s.All()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, r := range rows {
+		got = append(got, r.SessionID)
+	}
+	if want := []string{"new", "tie-2", "tie-1", "old"}; strings.Join(got, " ") != strings.Join(want, " ") {
+		t.Fatalf("All = %v, want %v", got, want)
+	}
+	t.Setenv("CRAZE_HOME", "")
+	t.Setenv("HOME", "")
+	if rows, err := (&Store{}).All(); err != nil || len(rows) != 0 {
+		t.Fatalf("no home: %v, %v", rows, err)
+	}
+}
+
 func lineFor(t *testing.T, sessionID, provider, cwd, updatedAt string) string {
 	t.Helper()
 	return `{"sessionId":"` + sessionID + `","provider":"` + provider + `","cwd":"` + cwd + `","title":"t","pinned":false,"createdAt":"` + updatedAt + `","updatedAt":"` + updatedAt + `"}`

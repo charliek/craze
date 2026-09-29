@@ -166,6 +166,9 @@ func runLaunch(cmd *cobra.Command, f *tuiFlags, env hostEnv, diag *deferredStder
 	if err := l.resolveLoad(cmd, f, absDir(ws), &cfg); err != nil {
 		return err
 	}
+	// The session list (plan 030 §3.9): a launch's alone — sessions run
+	// detached here, so the TUI can leave one for another without ending it.
+	cfg.Sessions = sessionList{l}
 	// The launching TUI is its session's client, not a Viewer: it keeps the
 	// host-status hub and reports for the session it shows (plan 030 §3.7) —
 	// the host reports nothing. Only after resolveLoad, as runTUI's: nothing
@@ -349,14 +352,11 @@ func (l *launcher) loadBackend(_ agent.Provider, row sessions.Row) (backend.Back
 //
 // Otherwise a host is spawned for opts and dialled (spawnHost, dialHost).
 func (l *launcher) spawn(opts spawnOptions, crazeID string) (backend.Backend, error) {
-	l.mu.Lock()
-	if l.closed {
-		l.mu.Unlock()
-		return nil, errLaunchOver
+	done, err := l.begin()
+	if err != nil {
+		return nil, err
 	}
-	l.inflight.Add(1)
-	l.mu.Unlock()
-	defer l.inflight.Done()
+	defer done()
 
 	if e, ok := hostServing(l.env, crazeID); ok {
 		b, err := l.reattach(hostRef{entry: e, held: true})
@@ -418,7 +418,17 @@ func (l *launcher) reattach(ref hostRef) (backend.Backend, error) {
 // session not yet attached: a host this launch started is ended when it
 // cannot be, and a holder's is left alone.
 func (l *launcher) connect(ctx context.Context, ref hostRef) (*remote.Session, error) {
-	s, err := dialHost(ctx, ref, remote.SessionOptions{
+	s, err := dialHost(ctx, ref, l.sessionOptions(ref))
+	if err != nil {
+		return nil, dialFailure(ref, err)
+	}
+	return s, nil
+}
+
+// sessionOptions is how the TUI's client of the host ref names is dialled:
+// by its session, attached now.
+func (l *launcher) sessionOptions(ref hostRef) remote.SessionOptions {
+	return remote.SessionOptions{
 		Client: remote.Options{
 			Client:    protocol.ClientInfo{Kind: "tui", Name: "craze", Version: version.Version},
 			PeerCheck: rundir.DialCheck(os.Geteuid()),
@@ -436,11 +446,7 @@ func (l *launcher) connect(ctx context.Context, ref hostRef) (*remote.Session, e
 		When:      protocol.WhenNow,
 		Provider:  ref.entry.Provider,
 		Workspace: ref.entry.Workspace,
-	})
-	if err != nil {
-		return nil, dialFailure(ref, err)
 	}
-	return s, nil
 }
 
 // take is s, dialled to the host ref names, as the backend the TUI adopts:

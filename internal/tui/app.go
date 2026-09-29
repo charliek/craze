@@ -234,6 +234,11 @@ type Config struct {
 	// it — claiming nothing — and Init loads it (LoadBackend), with the
 	// provider locked to the row's and Loading set. nil for anything else.
 	Continue *sessions.Row
+	// Sessions is the session list's source (plan 030 §3.9, Sessions):
+	// internal/cli sets it on the launch path alone, where sessions run in
+	// detached hosts. nil — everything else — is no session list, and
+	// nothing of it on any frame.
+	Sessions Sessions
 }
 
 // viewing is c as it runs: for a viewer (Config.Viewer with a Backend)

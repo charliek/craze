@@ -210,6 +210,9 @@ func (c *conn) sessionsList(b *bound, info protocol.MethodInfo, req *request) ou
 		HeadAsk:     headAsk(st),
 		LastTurn:    lastTurn(st),
 	}
+	if c.srv.opts.RowFacts {
+		rowFacts(&row, b.eng, st)
+	}
 	return answer(protocol.SessionsListResult{Epoch: c.srv.hostID, Cursor: seq, Sessions: []protocol.SessionRow{row}})
 }
 
