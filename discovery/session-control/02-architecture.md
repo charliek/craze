@@ -6,7 +6,7 @@
 flowchart LR
   subgraph machine["one machine, one user"]
     subgraph hostA["session host (process)"]
-      engA["engine: session + journal + asks"] --- tuiA["TUI (in-process client through S3; a socket client from S4, SD-33)"]
+      engA["engine: session + journal + asks"] --- tuiA["TUI (in-process client through S2; a socket client from S4a, SD-33)"]
     end
     subgraph hostB["session host, headless"]
       engB["engine"]
@@ -15,7 +15,9 @@ flowchart LR
     hostA -- "registers" --> hub
     hostB -- "registers" --> hub
     bridge["craze bridge (stdio pump)"] --> hub
-    view["agent view (TUI as hub client)"] --> hub
+    view["agent view (TUI): the registry + each host's socket (S5); the hub's roster from S4b"] --> hostA
+    view --> hostB
+    view -. "S4b" .-> hub
   end
   phone["shed-mobile / shed desktop"] -- "SSH exec" --> bridge
   hub -. "S6: WebSocket + static bundle" .-> web["browser on tailnet"]
@@ -24,7 +26,7 @@ flowchart LR
 
 | piece | what it is | owns |
 |---|---|---|
-| **Session host** | One OS process per session. Today's `craze` is a host with a TUI attached in-process; `craze serve` (S4) is the same host with none. From S4 the host is born detached either way, and the interactive TUI attaches over its socket too (SD-33). | The `agent.Session`, the agent child process, the journal, pending asks, its own socket |
+| **Session host** | One OS process per session. Today's `craze` is a host with a TUI attached in-process; `craze serve` (S4a) is the same host with none. From S4a the host is born detached either way, and the interactive TUI attaches over its socket too (SD-33). | The `agent.Session`, the agent child process, the journal, pending asks, its own socket |
 | **Hub** | One small per-user process at a fixed socket path, auto-spawned, exits when idle. | A roster of hosts, routing of client connections to them, spawning headless hosts. **No sessions.** |
 | **Client** | Anything speaking the protocol (`05`): the TUI, `craze attach`, the agent view, `shed-craze`, a browser. | Its own view state and drafts only |
 | **Bridge** | `craze bridge`: stdin/stdout pumped to the right local socket. | Nothing. It is the stable entry point for SSH clients (SD-05). |
@@ -49,16 +51,17 @@ What the hub buys over bare per-session sockets: one roster subscription
 instead of N connections, one stable path, a place to spawn headless hosts,
 and, later, one outbound uplink per machine rather than per session.
 
-**Sequencing (SD-06):** per-session sockets ship first (S2); the hub arrives
-with headless hosts (S4) and speaks the identical protocol. `craze bridge`
-hides which of the two it dialed, so `shed-craze` never changes.
+**Sequencing (SD-06):** per-session sockets ship first (S2); headless hosts
+arrive in S4a and the hub in S4b (SD-34), speaking the identical protocol.
+`craze bridge` hides which of the two it dialed, so `shed-craze` never
+changes.
 
 The hub↔host leg is part of that promise: the hub **dials the host's own
 socket once per attached client and splices bytes** (SQ14). Hosts keep only a
 small registration connection to the hub for the roster. Session traffic is
 never multiplexed through a hub-side buffer, so the host's per-subscriber
 budget stays end to end, there is no head-of-line blocking across clients,
-and S4 reuses S2's socket server unchanged.
+and S4b reuses S2's socket server unchanged.
 
 A `sessionId` on every method is necessary and **not sufficient** for that
 promise (SD-28). S2's protocol must already separate connection-level from
@@ -74,12 +77,13 @@ through untouched.
 **Lifecycle separation comes before the hub, too (SD-28).** Today
 `requestQuit`, `finishRun`, and `SIGHUP` all close the owned session. S2
 defines transport close, closing an attached view, and explicitly stopping
-the session as three different things, keeping today's quit behavior through
-S3. **S4's hosts are born detached (SD-33): a `craze serve` host never holds
+the session as three different things, keeping today's quit behavior until
+S4a, whose explicit quit ends the session in every client while closing the
+terminal leaves it running (SD-35). **S4a's hosts are born detached (SD-33): a `craze serve` host never holds
 a terminal, so there is no shell for a running process to give back.** What
 `acp.Spawn` isolates today is only the child's process group; process-group
 preparation for a host that starts fully detached (`setsid`, stdio to
-`/dev/null`) is the prerequisite, and from S4 the TUI's own "detach" is
+`/dev/null`) is the prerequisite, and from S4a the TUI's own "detach" is
 simply closing its socket connection to a host that was never in-process,
 not turning a live TUI process into a daemon.
 
@@ -87,7 +91,7 @@ not turning a live TUI process into a daemon.
 
 ```
 <runtime dir>/                   0700, validated (below)
-  hub.sock                       0600   S4
+  hub.sock                       0600   S4b
   hub.lock                       lifetime flock, prox's and roost's pattern
   h/<short-id>.sock              0600   S2
   h/<short-id>.lock              lifetime flock held by the host

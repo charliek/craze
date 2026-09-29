@@ -1684,11 +1684,11 @@ What S2 inherits:
 
 | | |
 |---|---|
-| Status | planned (Plan 027, FINAL after panel review 2026-09-24); PR 1 merged; PR 2 merged; PR 3 merged; PR 4 — `feature/plan-027-s2-attach`, in review (the orchestrator updates this line at merge if timing allows). **S2 is complete at PR 4's merge.** |
+| Status | complete (Plan 027, FINAL after panel review 2026-09-24); all four PRs merged, PR 4 on 2026-09-28. |
 | Plan | `027-session-control-s2-socket` (outside the repo, `~/.claude/plans/craze/`, raw panel reviews in its `panel/` folder) |
 | Baseline | `origin/main` `5901e4a`: H6 PR 2 (#53, sub-agent stop), merged on top of S1c PR 2 `79eb082` (#52, which completes S1) |
 | Branch / PRs | four sequential PRs, each branched from a freshly fetched `origin/main` after the previous one merges: `feature/plan-027-s2-wire`, `feature/plan-027-s2-host`, `feature/plan-027-s2-tui-async`, `feature/plan-027-s2-attach` |
-| Merged | PR 1 — #55 `318fc76` (2026-09-25); PR 2 — #56 `2acd54a` (2026-09-26); PR 3 — #61 `3eabb31` (2026-09-27); PR 4 — — (filled in as it lands) |
+| Merged | PR 1 — #55 `318fc76` (2026-09-25); PR 2 — #56 `2acd54a` (2026-09-26); PR 3 — #61 `3eabb31` (2026-09-27); PR 4 — #63 `73ed5e0` (2026-09-28) |
 
 ### The PR cut
 
@@ -2488,7 +2488,7 @@ reopens a pinned decision.
     both gate modes. `TestStopKeyStopsTheRunningChild` was rewritten, since it
     had encoded the synchronous call this commit removes.
 
-**PR 4's execution amendments X49–X57**, one paragraph each, mirrored here as
+**PR 4's execution amendments X49–X58**, one paragraph each, mirrored here as
 `12`'s own record; the full text and every failing schedule are in the plan
 (`~/.claude/plans/craze/027-session-control-s2-socket.md`, "Execution
 amendments — PR 4"). Review rounds: `reviews/dispositions-pr4.md`. None
@@ -2705,6 +2705,22 @@ reopens a pinned decision.
    rest of the spinner goldens were frozen already. `grok-subagent-late-80x24`
    holds ✴ (frame 1), not ✳, so freezing it would move its glyph; it stays
    unfrozen (X38, the owner's).
+10. **Plan 027 X58 (C29e `21ca66d`, C29f `ff1badb`)** — CI's findings on #63,
+   all fixed test-side. The first push's `push` run failed two tests under
+   runner load (the `pull_request` run on the same SHA passed): PR 1's
+   `TestAReplyFollowsItsEvents/cancel` assumed a cancel commits nothing
+   before its reply barrier's door (its settlement is asynchronous), and
+   C29a's `TestNoResetEscapesTheSocketRunsVerdict/after_the_barrier`
+   expected one of two reset-caused failures; each now accepts the other
+   legitimate outcome (r80; the after-barrier arm's inability to prove its
+   own reset occurred on the unanswered-detach path is r71's documented
+   limitation). The second push's runs failed
+   `TestAttachMidTurnOverTheSocketReproducesTheFirst` under `-race`: one 40 s
+   budget over the 145-cut loop (about 24 s under `-race` at full CPU; it
+   fails at a 50% quota), so the budget is now per step (r82: a fold hung
+   under its client's mutex is not bounded by its watchdog, a pre-existing
+   test-only liveness edge; the slow cut follows the trace's ~1 MiB edit
+   report). Each diagnosed from its log or a measurement; none retried.
 
 ### S2 — as shipped
 
@@ -2773,3 +2789,176 @@ one attachment per connection (SQ14), the full TUI over the socket (SQ7), and
 `--continue` of an open session attaching (SQ16) rather than only refusing.
 What `13` still owes after S2 is closed out below and in `13` itself; nothing
 open blocks the exit clauses above.
+
+## S4a + S5 — detached hosts and the agent view
+
+| | |
+|---|---|
+| Status | planned (Plan 030, FINAL after panel rounds 1 and 2, 2026-09-28) |
+| Plan | `030-session-control-s5-agent-view` (outside the repo, `~/.claude/plans/craze/`; research, discovery reports, the mockup and the raw panel reviews in its folder) |
+| Baseline | `origin/main` `9606fc5` (#64, Plan 029's wrap-up), on top of S2's last PR #63 `73ed5e0` |
+| Branch / PRs | five sequential PRs, each branched from a freshly fetched `origin/main`: `docs/plan-030-roadmap`, `feature/plan-030-hosts`, `feature/plan-030-sessions-list`, `feature/plan-030-new-sessions`, `feature/plan-030-composer-at` |
+| Merged | — |
+
+### The PR cut
+
+| PR | branch | content |
+|---|---|---|
+| 0 | `docs/plan-030-roadmap` | the roadmap refactor: `07`'s order column and the S4a/S4b/S5 rewrite, SD-34, SD-35, `13`'s rows, S2's PR 4 record and X58 |
+| 1 | `feature/plan-030-hosts` | `craze serve`, spawning and the ready handshake, `session.stop`, lifetime (`/exit`, idle exit), the launch flow, the client gaps SF-57 (part), SF-60, SF-63 |
+| 2 | `feature/plan-030-sessions-list` | the list (`internal/roster`, row facts on the wire, the screen), `switchBackend` (opening a session in place), saved sessions |
+| 3 | `feature/plan-030-new-sessions` | the always-focused input, `@` directories, dispatch, `/provider` and `/model`, the completion component |
+| 4 | `feature/plan-030-composer-at` | `@` file and directory mentions in the session composer |
+
+PR 1 ships detached hosts with no list and is usable on its own (`craze -c`
+reattaches after closing a tab).
+
+### Owner decisions (2026-09-28)
+
+Taken with the owner in the planning session (`research/DECISIONS.md` in the
+plan folder has them in order); not for the panel to reopen.
+
+1. **Order.** The agent view is next, before the shed lane; S3 waits until
+   shed has made its first release of its own lane work. S4's detached host is
+   folded in as the plan's first code PR; the hub, `craze ps` and a combined
+   roster stay for later (SD-34).
+2. The roadmap in this folder is refactored for the new order and scope, as
+   part of the plan (PR 0).
+3. The list shows every running session of this user on this machine,
+   whatever its directory.
+4. One line per row, grouped by state by default; a key toggles grouping by
+   directory.
+5. Not in the MVP: a preview of the selected session; answering an ask from
+   the list (you open the session to answer); notices of other sessions inside
+   a session; git worktrees (wanted later).
+6. The UI generally follows Claude Code.
+7. New sessions start from an always-focused input on the list, with `@`
+   choosing the directory: recent directories where sessions ran plus a typed
+   location completed with `Tab`. Nothing is hard-coded: no projects folder,
+   no setting.
+8. The selected row sets the directory a new session runs in; `@` overrides it.
+9. `/provider` and `/model` in the list's input set what new sessions use.
+10. `@` file and directory mentions in the session composer are added in this
+    plan.
+11. `/exit` (one quit path with `ctrl+d` and the second `ctrl+c`) ends the
+    session you are in, in every client including `craze attach`. Closing the
+    terminal leaves the session running. `/exit` in the list's input quits
+    craze and leaves every session running (SD-35).
+12. Idle timeout: 1 hour, like Claude Code, configurable; a session with
+    nobody attached and nothing in flight (SD-35).
+13. The `detach = false` opt-out stays for now; revisit later (a `13` row).
+14. Decide, do not ask: the rest are the planner's, recapped at the end.
+
+### The planner's decisions
+
+Before the panel:
+
+- Phase IDs stay stable: S4 splits into S4a and S4b; order S4a + S5, S4b, S3,
+  S6/S7 (SD-34).
+- Five PRs (the cut above).
+- `craze serve` is the headless host, a real subcommand; the ordinary `craze`
+  spawns it and attaches. Pickers stay in the TUI. The host owns the claim,
+  journal and index writes. roost/herdr status is reported by the client TUI.
+- The list polls each host's socket (no hub). Opening a session swaps the
+  TUI's backend in place, with per-session composer drafts. `@dir` + `enter`
+  opens an unstarted session (spawned on the first prompt). Dispatched
+  sessions take the permission mode of the session you came from. ACP model
+  catalogs are cached for `/model`. One new completion component; `slash.go`'s
+  tokenizer is untouched. Composer `@` inserts `@path` as text. No blinking
+  and no mouse in the list.
+
+After the panel (UX-visible):
+
+- No `alt+←`/`alt+→` cycling: those are the composer's word motion, and macOS
+  Terminal sends `ESC b`/`ESC f`. The band keeps `← sessions`; you switch via
+  the list. A `13` row records cycling.
+- Grouping toggles with `ctrl+s` (Claude Code's key); `ctrl+g` is craze's
+  theme picker.
+- A viewed session that ends returns you to the list instead of quitting
+  craze.
+- The agent view exists only when sessions are detached (not under
+  `detach = false`, where closing a backend would close its engine).
+- A host that never received a prompt exits after 5 minutes idle (it has
+  nothing to resume); a host whose start failed exits as soon as no client is
+  attached, after the startup grace.
+- `/exit` on an older host that cannot stop detaches and says so.
+- `ctrl+x` on a working row cancels the turn and clears its queue (otherwise
+  the queue drains and the row stays working).
+- **The list is labelled "sessions"** (header ` sessions`, band `← sessions`,
+  builtin `/sessions`), not "agents" as in the mockup: craze already has
+  `/agent` (set agent mode) and says "agents" for sub-agents (`← n agents`).
+  Offered to the owner with the plan; reverting it is a text change.
+
+### Plan review — 2026-09-28
+
+| round | reviewer | result |
+|---|---|---|
+| 1 | Codex `gpt-6-astra`, GLM 5.3, CodeRabbit | 29 findings, all adopted, none declined; no reviewer disagreed with another; all three verified the plan's file:line claims |
+| 2 | Codex `gpt-6-astra` on the revision | 19 of round 1's 29 resolved, the rest partial; 1 blocker, 7 major, 4 minor, all adopted |
+
+Round 1's substance: a detached host must set `agent.Options.NoPrimary`;
+`session.stop` needed a real stop protocol (`Backend.Stop`, a lifecycle
+coordinator) because `Engine.Stop` does not close the engine; `switchBackend`
+needed a backend generation on every stream message and a fresh-session-state
+constructor; the spawn handshake (fd 3, close-on-exec, timeout kill, identity
+before ready); idle counted attached clients, not connections; capabilities
+`stop` and `rowFacts` announce the new wire behaviour (the schema is closed);
+`LastTurn` on state and rows only, not in the snapshot (a codec bump would
+break attach across versions); `alt+←/→` and `ctrl+g` conflicts; the goldens
+rule (new catalog entries only when a session list is configured).
+
+**Round 2's blocker: the idle decision's atomicity.** Marking a host
+"closing" refused attaches only, so an unattended prompt, a settings change or
+foreign work could race the exit, and pending or reserved attachments went
+uncounted. Fixed with a **close fence** over the server's attach reservations
+and the engine's admission (`Engine.FenceClose`): eligibility is checked under
+both, and the fence is reversible. The seven majors: killing the serve process
+group leaks the ACP child (graceful `SIGTERM` first, agent process groups
+recorded for the last-resort kill); a fast start failure could vanish before
+the launcher attached (startup grace, rendezvous on published identity);
+dispatch and the unstarted path's adoption split; `sessGen` and `gateSeq`
+monotonic across switches with stale gate replies rejected first; legacy saved
+rows have no craze id (`--load <provider>:<id>`); a post-restore `LastTurn`
+read could install an obsolete ending (`LastTurn.TurnID`); the roster's
+deadline must cover dial and hello, with a non-reconnecting client. The four
+minors fixed wording (`/sessions` and composer `@` against the golden rule),
+`StartErr` on the wire, `@` token submission semantics and the catalog cache's
+freshness race. Round 2's fixes were not re-reviewed as a plan; the executor's
+per-commit astra reviews of the lifecycle commits carry that check.
+
+### Roadmap wording this plan departs from
+
+- `07`'s S5 was "a TUI screen that is a hub client" that answers an ask from
+  the list and starts a new headless session. S5 now polls each host's socket
+  (no hub until S4b), does not answer from the list (you open the session),
+  and starts new sessions from an input with an `@` directory picker.
+- `07`'s S4 was one phase (headless hosts, the hub, `craze ps`). It splits:
+  S4a (detached hosts) is built here with S5; S4b (the hub, `craze ps`,
+  `session.create`) follows, before S3. S4's exit is split accordingly.
+- `07`'s S5 exit ("blocked on an ask and answered from the view") becomes
+  "opened and answered".
+- `SQ12`'s default ("a plain quit still ends the session, with a confirm when
+  a turn is working") is refined by SD-35: closing the terminal leaves the
+  session running, and an idle timeout ends unattended hosts.
+- `01`'s "the TUI as a client of a hub": the list reads the registry and polls
+  each host's socket until S4b's hub exists.
+
+### Outcome
+
+Filled in as each PR lands.
+
+### Deviations from the plan
+
+Filled in as each PR lands.
+
+### Live smoke
+
+Filled in as each PR lands.
+
+### Decisions and questions touched
+
+SD-34 and SD-35 (PR 0). Filled in further as each PR lands.
+
+### Handoff
+
+Filled in as each PR lands.
