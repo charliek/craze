@@ -141,8 +141,11 @@ func TestAViewerLeavesTheHostItsOwn(t *testing.T) {
 
 // TestAViewersShellRunsInTheSessionsWorkspace (§3.15): the composer's `!`
 // command runs locally, in the session's workspace as the backend's Info
-// names it — not the directory the TUI was configured with, which a host TUI
-// runs its own in.
+// names it — not the directory the TUI was configured with. Plan 030 §3.7
+// ("the workspace follows the session") makes that every backend's rule, not
+// a viewer's alone: the launch flow's TUI — a Backend client that is no
+// viewer — runs its command where its detached host runs the session too, and
+// its status row names that workspace.
 func TestAViewersShellRunsInTheSessionsWorkspace(t *testing.T) {
 	isolateSkillsHome(t)
 	configured, session := t.TempDir(), t.TempDir()
@@ -173,11 +176,11 @@ func TestAViewersShellRunsInTheSessionsWorkspace(t *testing.T) {
 			t.Fatalf("viewer=%v: Enter ran no command", viewer)
 		}
 		want, not := "session-marker", "configured-marker"
-		if !viewer {
-			want, not = not, want
-		}
 		if !strings.Contains(done.res.out, want) || strings.Contains(done.res.out, not) {
 			t.Fatalf("viewer=%v: the command ran where it listed %q, want %s's", viewer, done.res.out, want)
+		}
+		if m.cwd != session {
+			t.Fatalf("viewer=%v: the model's workspace is %q, want the session's %q", viewer, m.cwd, session)
 		}
 	}
 }
@@ -187,7 +190,14 @@ func TestAViewersShellRunsInTheSessionsWorkspace(t *testing.T) {
 // applied, frozen so no counter moves between two frames.
 func startedOverTheSocket(t *testing.T, h *attachHost, viewer bool, ws string) *gateRig {
 	t.Helper()
-	cfg, _ := withHostOwned(Config{Backend: attachSession(t, h, ""), Viewer: viewer, Theme: "tokyo-night",
+	return startedOver(t, attachSession(t, h, ""), viewer, ws)
+}
+
+// startedOver is startedOverTheSocket over a session the test dialled itself
+// (a remote.Session, or a test's backend wrapping one).
+func startedOver(t *testing.T, s backend.Backend, viewer bool, ws string) *gateRig {
+	t.Helper()
+	cfg, _ := withHostOwned(Config{Backend: s, Viewer: viewer, Theme: "tokyo-night",
 		Workspace: ws, Yolo: true}, ws)
 	m := New(cfg)
 	tm, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
@@ -270,25 +280,32 @@ func TestAViewerDrawsWhatTheHostTUIDraws(t *testing.T) {
 	same("the help")
 }
 
-// TestAViewersQuitLeavesTheSessionRunning (§3.9): a viewer's quit — Ctrl+D,
-// the key the host TUI quits with — is a view close: the program quits, its
-// socket detaches, and the session goes on on its host, which another client
-// then attaches to and drives.
+// TestAViewersQuitLeavesTheSessionRunning (§3.9, plan 030 §3.6): a viewer's
+// quit — Ctrl+D, the key the host TUI quits with — is the explicit quit, which
+// asks the host to stop the session. A host that cannot — this one serves no
+// session.stop, as a TUI-hosted session's socket or an older craze's does —
+// refuses it, stop_unsupported: the program quits all the same, its socket
+// detaches, the run says the stop was refused (Result.StopUnsupported, the
+// command line's note), and the session goes on on its host, which another
+// client then attaches to and drives.
 func TestAViewersQuitLeavesTheSessionRunning(t *testing.T) {
 	isolateSkillsHome(t)
 	h := newAttachHost(t, true)
 	r := startedOverTheSocket(t, h, true, frameWorkspace(t))
 	tm, cmd := r.m.gated(tea.KeyMsg{Type: tea.KeyCtrlD}, Model.update)
 	r.m = tm.(Model)
-	quits := namedCmds(cmd, "requestQuit")
+	quits := namedCmds(cmd, "stopQuit")
 	if len(quits) != 1 {
-		t.Fatalf("Ctrl+D asked %d quits, want one", len(quits))
+		t.Fatalf("Ctrl+D asked %d stops, want one", len(quits))
 	}
 	if _, ok := runWatched(t, quits[0]).(tea.QuitMsg); !ok {
 		t.Fatal("the viewer's quit did not quit the program")
 	}
+	if stopped, unsupported, err := r.m.exit.outcome(); stopped || !unsupported || err != nil {
+		t.Fatalf("the quit's stop: stopped %v, unsupported %v, %v; want refused stop_unsupported", stopped, unsupported, err)
+	}
 	if r.m.ended {
-		t.Fatal("a view close says the session ended")
+		t.Fatal("a refused stop says the session ended")
 	}
 	if st := h.eng.State(); st.Activity == engine.ActivityClosing {
 		t.Fatalf("the viewer's quit closed the host's session: %+v", st)
@@ -304,4 +321,57 @@ func TestAViewersQuitLeavesTheSessionRunning(t *testing.T) {
 		t.Fatalf("the session no longer takes a prompt: %v", err)
 	}
 	waitHost(t, "the prompt", func() bool { return len(h.stub.Prompts()) == 1 })
+}
+
+// TestAViewersQuitStopsASessionItsHostCanStop (plan 030 §3.6, decision 11):
+// over a host that serves session.stop, the viewer's Ctrl+D stops the session
+// — in every client, craze attach's included. The stop's receipt comes, the
+// quit waits for the session's end, and quits: the run says it stopped the
+// session (Result.Stopped), the host's engine has closed, and another client
+// attached meanwhile is sent the session's end.
+func TestAViewersQuitStopsASessionItsHostCanStop(t *testing.T) {
+	isolateSkillsHome(t)
+	h := newAttachHostStopping(t, true, true)
+	r := startedOverTheSocket(t, h, true, frameWorkspace(t))
+	other := attachSession(t, h, "")
+	ctx, cancel := context.WithTimeout(context.Background(), pumpWatchdog)
+	defer cancel()
+	if err := other.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	tm, cmd := r.m.gated(tea.KeyMsg{Type: tea.KeyCtrlD}, Model.update)
+	r.m = tm.(Model)
+	quits := namedCmds(cmd, "stopQuit")
+	if len(quits) != 1 {
+		t.Fatalf("Ctrl+D asked %d stops, want one", len(quits))
+	}
+	if _, ok := runWatched(t, quits[0]).(tea.QuitMsg); !ok {
+		t.Fatal("the viewer's quit did not quit the program")
+	}
+	if stopped, unsupported, err := r.m.exit.outcome(); !stopped || unsupported || err != nil {
+		t.Fatalf("the quit's stop: stopped %v, unsupported %v, %v; want taken", stopped, unsupported, err)
+	}
+	select {
+	case <-h.eng.Done():
+	case <-time.After(pumpWatchdog):
+		t.Fatal("the host's session did not end after the viewer's stop")
+	}
+	for {
+		it, err := other.Read(ctx)
+		if err != nil {
+			t.Fatalf("the other client's stream: %v", err)
+		}
+		if it.Kind == backend.ItemEnd {
+			if it.Err != nil {
+				t.Fatalf("the other client's end: %v", it.Err)
+			}
+			break
+		}
+	}
+	// A second quit while the first would still wait quits at once.
+	tm, cmd = r.m.gated(tea.KeyMsg{Type: tea.KeyCtrlD}, Model.update)
+	r.m = tm.(Model)
+	if len(namedCmds(cmd, "stopQuit")) != 0 {
+		t.Fatal("a second quit asked for a second stop")
+	}
 }

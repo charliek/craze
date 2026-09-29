@@ -207,7 +207,13 @@ func (m *Model) note(text string) {
 // that means queue-ONLY, and the TUI has no such action: its band edits and
 // removes rows, it never adds one without meaning to send it.
 
-// queueErrNote is a refused queue verb as one line. The two refusals it names
+// closingNote is a command the session's close fence refused (engine.ErrClosing,
+// plan 030 §3.6: its host is ending it, or deciding whether to), worded as the
+// TUI words its other refusals rather than as the engine's own text. Nothing
+// ran; the command can be sent again once the session has ended or stayed.
+const closingNote = "the session is closing"
+
+// queueErrNote is a refused queue verb as one line. The refusals it names
 // are matched by sentinel (plan 027 §3.13, "Errors by sentinel"), not by the
 // error's text: over the socket the error is the remote client's
 // reconstruction, whose Is answers for the sentinel whatever its text says.
@@ -219,6 +225,8 @@ func queueErrNote(err error) string {
 		return "queue full"
 	case errors.Is(err, agent.ErrQueueTextTooLong):
 		return "message too long"
+	case errors.Is(err, engine.ErrClosing):
+		return closingNote
 	default:
 		return sanitizeLine(err.Error())
 	}

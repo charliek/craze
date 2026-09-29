@@ -79,6 +79,66 @@ func TestTheOutboxHoldsItsBudgetAndItsReserve(t *testing.T) {
 	}
 }
 
+// TestAReceiptAdmittedOutsideTheBudgetTakesNothingFromIt (plan 030 §3.6a;
+// astra r2-c1 1; stop.go): admit — the first session.stop's receipt's way in
+// — queues a line beside an ordinary budget taken to its last byte, at once,
+// and counts none of it: the count and the high water do not move, the
+// reserve still takes a whole final reset behind it, and the writer giving the
+// line back takes nothing off the count. It is refused where any line is
+// refused for anything but room: by a replaced outbox (the receipt goes
+// nowhere, as every handler's reply then does), a sealed one and a closed one.
+func TestAReceiptAdmittedOutsideTheBudgetTakesNothingFromIt(t *testing.T) {
+	ctx := context.Background()
+	o := newOutbox(nil)
+	if err := o.push(ctx, make([]byte, ordinaryLimit), nil); err != nil {
+		t.Fatal(err)
+	}
+	// Larger than the reserve itself: it could fit nowhere in the budget.
+	receipt := make([]byte, 2*protocol.ResetReserveBytes)
+	if err := o.admit(receipt, nil); err != nil {
+		t.Fatalf("the receipt beside a full budget: %v", err)
+	}
+	if o.bytes != ordinaryLimit || o.highWater() != ordinaryLimit {
+		t.Fatalf("the budget counts %d (high water %d) with the receipt queued, want %d", o.bytes, o.highWater(), ordinaryLimit)
+	}
+	if _, err := o.offer(make([]byte, protocol.ResetReserveBytes), nil, protocol.WriterQueueBytes, ordinaryLine); err != nil {
+		t.Fatalf("a final reset behind the receipt found no room in the reserve: %v", err)
+	}
+	// The writer is handed the three in order; the receipt's write gives
+	// nothing back, since it took nothing.
+	for i, want := range []int{ordinaryLimit, len(receipt), protocol.ResetReserveBytes} {
+		ln, ok := o.next()
+		if !ok || len(ln.b) != want {
+			t.Fatalf("line %d: %d bytes, want %d", i, len(ln.b), want)
+		}
+		before := o.bytes
+		o.written(ln)
+		if gave := before - o.bytes; gave != ln.counted || (i == 1 && gave != 0) {
+			t.Fatalf("line %d's write gave back %d bytes", i, gave)
+		}
+	}
+	if o.bytes != 0 {
+		t.Fatalf("every line written, the budget counts %d", o.bytes)
+	}
+
+	replaced := newOutbox(nil)
+	replaced.replace()
+	if err := replaced.admit([]byte("{}"), nil); !errors.Is(err, errOutboxReplaced) {
+		t.Fatalf("a replaced outbox admitted the receipt: %v", err)
+	}
+	if _, err := replaced.offer([]byte("reset"), nil, protocol.WriterQueueBytes, terminalLine); err != nil {
+		t.Fatal(err)
+	}
+	if err := replaced.admit([]byte("{}"), nil); !errors.Is(err, errOutboxSealed) {
+		t.Fatalf("a sealed outbox admitted the receipt: %v", err)
+	}
+	closed := newOutbox(nil)
+	closed.close()
+	if err := closed.admit([]byte("{}"), nil); !errors.Is(err, errOutboxClosed) {
+		t.Fatalf("a closed outbox admitted the receipt: %v", err)
+	}
+}
+
 // TestAReplacedOutboxAdmitsOnlyItsTerminalLine (§3.6, plan 027 X25; astra r8
 // 7, sol r16): the outbox's own half of the terminal-only rule. When it is
 // replaced, every ordinary line it holds is dropped — handed back, in order,

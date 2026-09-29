@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"os"
@@ -80,7 +81,7 @@ func servingHost(t *testing.T, env rundir.Env, diag io.Writer) (*runHost, string
 	t.Helper()
 	hostID := rundir.NewHostID()
 	rh := &runHost{claims: newSessionClaims(env, hostID, diag)}
-	rh.ctl = serveControl(env, hostID, "/ws", diag)
+	rh.ctl = serveControl(env, hostID, "/ws", true, diag)
 	if rh.ctl == nil {
 		t.Fatalf("serveControl refused: %s", diag)
 	}
@@ -237,7 +238,7 @@ func TestAFailureToBindIsAWarning(t *testing.T) {
 	}
 	var diag lockedBuffer
 	hostID := rundir.NewHostID()
-	if h := serveControl(env, hostID, "/ws", &diag); h != nil {
+	if h := serveControl(env, hostID, "/ws", true, &diag); h != nil {
 		h.close()
 		t.Fatal("serveControl bound in a group-writable runtime directory")
 	}
@@ -571,6 +572,13 @@ func TestTheTeardownFlushesThenClosesThenUnlinks(t *testing.T) {
 		steps = append(steps, note)
 	}
 	t.Cleanup(func() { teardownStep = func(string) {} })
+	// The flush gets a step's bound, not production's 500 ms: a starved CPU
+	// (the 5% quota) writes this backlog slower than that, and the claim here
+	// is that the teardown waits for the flush, not how fast it is written.
+	// The wait still ends the moment the connection has closed itself.
+	prevFlush := flushWait
+	flushWait = serveStep
+	t.Cleanup(func() { flushWait = prevFlush })
 	rh.close()
 	want := []string{"flushing", "flushed", "server closed", "unlinked", "released"}
 	if strings.Join(steps, ", ") != strings.Join(want, ", ") {
@@ -633,8 +641,8 @@ func TestHeldRefusalWording(t *testing.T) {
 		pid  int
 		want string
 	}{
-		{4242, "that session is open in another craze (pid 4242)"},
-		{0, "that session is open in another craze (pid ?)"},
+		{4242, "that session is already running (pid 4242)"},
+		{0, "that session is already running (pid ?)"},
 	} {
 		err := error(&rundir.HeldError{CrazeID: "x", Holder: rundir.Holder{PID: tc.pid}})
 		if got := refusal(err); got != tc.want {
@@ -643,5 +651,60 @@ func TestHeldRefusalWording(t *testing.T) {
 	}
 	if got := refusal(errors.New("x: " + strconv.Quote("y"))); got != `x: "y"` {
 		t.Fatalf("refusal of another error = %q", got)
+	}
+}
+
+// TestTheTUIHostedSocketSaysWhatItIs (plan 030 §3.7, §3.6a): the socket a TUI
+// serves reports its permission mode — --force is bypass, --no-force prompt
+// — and its start, the registry entry's own instant; it says it cannot stop
+// its session (capabilities.stop false) and refuses session.stop,
+// stop_unsupported: a TUI-hosted session ends with its TUI.
+func TestTheTUIHostedSocketSaysWhatItIs(t *testing.T) {
+	for _, tc := range []struct {
+		force bool
+		want  protocol.PermissionMode
+	}{{true, protocol.PermissionBypass}, {false, protocol.PermissionPrompt}} {
+		t.Run(string(tc.want), func(t *testing.T) {
+			env := serveEnv(t)
+			hostID := rundir.NewHostID()
+			rh := &runHost{claims: newSessionClaims(env, hostID, io.Discard)}
+			if rh.ctl = serveControl(env, hostID, "/ws", tc.force, io.Discard); rh.ctl == nil {
+				t.Fatal("serveControl refused")
+			}
+			t.Cleanup(rh.close)
+			eng := grokStubEngine(t)
+			rh.onEngine(eng)
+			if err := eng.Start(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			entry := waitEntry(t, entryPath(env, hostID), func(e rundir.Entry) bool { return e.Ready })
+
+			c := dialRaw(t, entry.Socket)
+			c.send(t, `{"jsonrpc":"2.0","id":"1","method":"hello","params":{"protocols":[1],"client":{"kind":"test","name":"facts"}}}`)
+			c.reply(t, "1")
+			c.send(t, `{"jsonrpc":"2.0","id":"2","method":"sessions.list","params":{}}`)
+			rows, _ := c.reply(t, "2")["sessions"].([]any)
+			if len(rows) != 1 {
+				t.Fatalf("the roster holds %d rows", len(rows))
+			}
+			row := rows[0].(map[string]any)
+			if row["permissionMode"] != string(tc.want) {
+				t.Errorf("permissionMode %v, want %s", row["permissionMode"], tc.want)
+			}
+			if at, err := time.Parse(time.RFC3339Nano, fmt.Sprint(row["startedAt"])); err != nil || !at.Equal(entry.StartedAt) {
+				t.Errorf("startedAt %v, want the registry entry's %v", row["startedAt"], entry.StartedAt)
+			}
+			if caps, _ := row["capabilities"].(map[string]any); caps["stop"] != false {
+				t.Errorf("capabilities.stop %v on a TUI-hosted session", caps["stop"])
+			}
+			c.send(t, `{"jsonrpc":"2.0","id":"3","method":"session.stop","params":{"sessionId":"`+eng.State().CrazeSessionID+`","commandId":"1"}}`)
+			m, err := c.read(t)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if data, _ := m["error"].(map[string]any)["data"].(map[string]any); data["reason"] != string(protocol.ReasonStopUnsupported) {
+				t.Fatalf("session.stop answered %v, want stop_unsupported", m)
+			}
+		})
 	}
 }

@@ -20,7 +20,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
-from conftest import host_env_names, require_rg
+from conftest import PS_TIMEOUT, both_modes, host_env_names, marker_pids, require_rg  # noqa: F401
 from sse_fixture import (
     CANARY,
     UNUSED_ENV_KEY,
@@ -55,21 +55,29 @@ def _cmdline_pids(needle: str) -> list[int]:
     path's own first token is its argv[0] there too. check=True on purpose:
     a caller waiting for the list to empty reads [] as proof the child is
     gone, so a ps that failed must raise rather than quietly turn a leak
-    check green.
+    check green -- and one that stalls raises too, after conftest's
+    PS_TIMEOUT, rather than hang the test (sol r13-c7r).
     """
     encoded = needle.encode()
+    # Scoped to the processes this test started (conftest.marker_pids): a
+    # scan of the whole machine also finds every other craze's fake agent --
+    # a parallel session's, a developer's -- and fails on, or signals, what is
+    # not this test's. Outside pytest (tmux_smoke.py) there is no marker and
+    # the scan stays machine-wide.
+    scoped = bool(os.environ.get("CRAZE_RUNTIME_DIR"))
     if sys.platform != "linux":
         out = subprocess.run(
             ["ps", "-axww", "-o", "pid=,args="],
             capture_output=True,
             check=True,
+            timeout=PS_TIMEOUT,
         ).stdout
         pids = []
         for line in out.splitlines():
             pid_str, _, args = line.strip().partition(b" ")
             if pid_str.isdigit() and args.split(b" ", 1)[0] == encoded:
                 pids.append(int(pid_str))
-        return pids
+        return _in_scope(pids, scoped)
     try:
         entries = Path("/proc").glob("[0-9]*/cmdline")
     except OSError:
@@ -82,7 +90,16 @@ def _cmdline_pids(needle: str) -> list[int]:
             continue
         if data.split(b"\0", 1)[0] == encoded:
             pids.append(int(path.parent.name))
-    return pids
+    return _in_scope(pids, scoped)
+
+
+def _in_scope(pids: list[int], scoped: bool) -> list[int]:
+    """pids narrowed to this test's own processes (only computed when there
+    is something to narrow: the marker scan reads every process's environment)."""
+    if not scoped or not pids:
+        return pids
+    mine = marker_pids()
+    return [pid for pid in pids if pid in mine]
 
 
 def _cmdline_has(needle: str) -> bool:
@@ -390,23 +407,25 @@ def quit_craze(tui: PTYCraze, timeout: float = 5) -> None:
     assert code == 0, tui.screen()[-3000:]
 
 
-def _wait_output(tui: PTYCraze, needle: str, timeout: float = 5) -> str:
+def _wait_output(tui: PTYCraze, needle: str, timeout: float = 5, mark: int = 0) -> str:
     """wait_contains that expects craze to have exited already.
 
     Moved here from test_host_status.py (issue #23) for the same reason as
     quit_craze, with its own default timeout rather than that module's WAIT.
+    With mark, only what craze wrote after it counts: what it printed once the
+    screen was restored, not a row the frame already showed.
     """
     deadline = time.monotonic() + timeout
     text = ""
     while time.monotonic() < deadline:
-        text = _ANSI.sub("", tui.screen())
+        text = _ANSI.sub("", bytes(tui.buf[mark:]).decode("utf-8", "replace"))
         if needle in text:
             return text
         time.sleep(0.05)
     raise AssertionError(f"timeout waiting for {needle!r}: {text[-3000:]!r}")
 
 
-def test_tui_echo_and_quit(craze_bin: Path, fake_agent_bin: Path, tmp_path: Path) -> None:
+def test_tui_echo_and_quit(craze_bin: Path, fake_agent_bin: Path, tmp_path: Path, both_modes: str) -> None:
     with PTYCraze(craze_bin, fake_agent_bin, tmp_path) as tui:
         tui.wait_contains("cursor")
         tui.write(b"hello\r")
@@ -417,7 +436,7 @@ def test_tui_echo_and_quit(craze_bin: Path, fake_agent_bin: Path, tmp_path: Path
     _wait_fake_gone(fake_agent_bin)
 
 
-def test_tui_help_esc_then_quit(craze_bin: Path, fake_agent_bin: Path, tmp_path: Path) -> None:
+def test_tui_help_esc_then_quit(craze_bin: Path, fake_agent_bin: Path, tmp_path: Path, both_modes: str) -> None:
     with PTYCraze(craze_bin, fake_agent_bin, tmp_path) as tui:
         tui.wait_contains("cursor")
         tui.write(b"/help\r")
@@ -443,7 +462,7 @@ def test_tui_help_esc_then_quit(craze_bin: Path, fake_agent_bin: Path, tmp_path:
 
 
 def test_tui_authfail_exits_nonzero(
-    craze_bin: Path, fake_agent_bin: Path, tmp_path: Path
+    craze_bin: Path, fake_agent_bin: Path, tmp_path: Path, both_modes: str
 ) -> None:
     """A session that never started must not exit 0.
 
@@ -452,9 +471,12 @@ def test_tui_authfail_exits_nonzero(
     """
     with PTYCraze(craze_bin, fake_agent_bin, tmp_path, script="authfail") as tui:
         tui.wait_contains("authentication failed")
+        mark = tui.mark()
         tui.write(b"\x04")
         code = tui.wait_exit()
         assert code != 0, tui.screen()[-3000:]
+        # And printed once the screen is restored, for a script to read.
+        _wait_output(tui, "authentication failed", mark=mark)
     _wait_fake_gone(fake_agent_bin)
 
 
@@ -619,7 +641,7 @@ def _wait_raw(tui: PTYCraze, needle: str, mark: int, timeout: float = 10) -> str
     raise AssertionError(f"timeout waiting for {needle!r}: {last[-2000:]!r}")
 
 
-def test_tui_queue_then_drain(craze_bin: Path, fake_agent_bin: Path, tmp_path: Path) -> None:
+def test_tui_queue_then_drain(craze_bin: Path, fake_agent_bin: Path, tmp_path: Path, both_modes: str) -> None:
     """Enter during a running turn queues; the queue drains one per turn.
 
     The first turn is slow enough to type into and the ones behind it finish
@@ -1076,7 +1098,7 @@ def test_tui_continue_twice_attaches_the_second(
             env_extra={"CRAZE_FAKE_DUMP_ARGV": str(argv_dump)},
         ) as second:
             second.wait_contains(
-                f"craze: that session is open in another craze (pid {first.proc.pid}); attaching"
+                f"craze: that session is already running (pid {first.proc.pid}); attaching"
             )
             second.wait_contains("the workspace holds main.py and README.md")
             second.write(b"\x04")
@@ -1124,7 +1146,7 @@ def test_tui_continue_of_a_session_serving_no_socket_refuses(
             assert second.wait_exit(timeout=10) == 1, second.screen()[-3000:]
             text = _ANSI.sub("", second.screen())
             want = (
-                f"craze: that session is open in another craze (pid {first.proc.pid})"
+                f"craze: that session is already running (pid {first.proc.pid})"
                 " — it serves no control socket"
             )
             assert want in text, text[-2000:]

@@ -69,6 +69,27 @@ type Options struct {
 	// past the bound with, as engine.Options.ReceiptClock is the receipts
 	// table's; a test hands both the same clock.
 	Clock func() time.Time
+
+	// Stop is the host's lifecycle coordinator as session.stop reaches it
+	// (plan 030 §3.6a; stop.go): set, the server serves session.stop and its
+	// session info document says capabilities.stop: true; nil — a TUI-hosted
+	// session, the fake host by default — session.stop is refused
+	// unsupported, reason stop_unsupported, exactly as before plan 030. See
+	// StopFunc for what the server does before it calls it, and what it must
+	// not do.
+	Stop StopFunc
+	// PermissionMode is the info document's permissionMode (plan 030 §3.7,
+	// SF-60): bypass for a host that spawned its agent with --force, prompt
+	// for --no-force. "" leaves it out, which is an older host's document.
+	PermissionMode protocol.PermissionMode
+	// StartedAt is the info document's startedAt (plan 030 §3.7, SF-63):
+	// when the host started serving the session, which the host decides —
+	// the TUI-hosted path the moment it bound its socket, the one instant its
+	// registry entry's startedAt records too. It is fixed for the server's
+	// life: a TUI-hosted server's pickers may replace the engine, and the
+	// host's start is still when it started. It goes on the wire in UTC; the
+	// zero time leaves it out, which is an older host's document.
+	StartedAt time.Time
 }
 
 // Budget is a subscription budget: the event log's SubscribeOptions MaxItems
@@ -163,6 +184,38 @@ type Server struct {
 	commands atomic.Int64
 
 	tokenMu sync.Mutex
+
+	// attachMu is the server's attachment lock (plan 030 §3.6; stop.go): an
+	// attach holds it across its fence check and the install of its pending
+	// attachment (conn.reserve), and a close fence goes up under it
+	// (FenceAttaches), so no attach reserves between a fence going up and
+	// the count it reads. It is a leaf above conn.mu — reserve takes it and
+	// then conn.mu — and nothing under conn.mu, or any other lock, takes it.
+	attachMu sync.Mutex
+	// fences is how many close fences are up (FenceAttaches); while it is
+	// not 0 a new attach is refused closing. Guarded by attachMu.
+	fences int
+	// countMu guards attached and onAttach (plan 030 §3.6; attach.go's
+	// "Counting attachments"). It is a leaf, taken under attachMu and under
+	// conn.mu — every change to the count is made in the section that
+	// decides it — and nothing is taken under it but the OnAttachments
+	// callback, which takes no lock of the server's.
+	countMu sync.Mutex
+	// attached is how many attachments the server counts: every one it holds
+	// that is not yet closed — pending (reserved), live or closing (attach.go's
+	// lifecycle) — across every connection, less those whose connection's
+	// peer has half-closed (a read EOF: attach.go's "Counting attachments").
+	// It rises only in reserve, under attachMu, and falls where an attachment
+	// closes (conn.closedLocked) or its connection reads EOF (conn.eof), under
+	// conn.mu, so under attachMu with a fence up it can only fall.
+	attached int
+	// onAttach is OnAttachments' callback, nil for none: called with the new
+	// count, under countMu, on every change to it, so the calls are in the
+	// order of the changes.
+	onAttach func(n int)
+	// stopOnce hands the first session.stop to Options.Stop, and raises the
+	// stop's own fence, once for the server's life (stop.go).
+	stopOnce sync.Once
 }
 
 // hooks are test barriers, nil in production and set before Serve
@@ -225,7 +278,9 @@ type hooks struct {
 	// just before it writes it.
 	beforeWrite func(line []byte)
 	// beforeReply runs on a handler just before it queues its reply (not
-	// attach's or detach's, which queue their own), with the method.
+	// attach's or detach's, which queue their own), with the method — the
+	// first session.stop's receipt included, which sessionStop queues itself
+	// (stop.go), with its fence up and before its coordinator hears of it.
 	beforeReply func(method string)
 	// detaching runs on a detach once it has claimed the attachment's end and
 	// stopped its forwarder's pushes, before it waits for the forwarder to
@@ -239,6 +294,19 @@ type hooks struct {
 	// in it holds a pending attachment on the connection, past a
 	// replacement, with nothing yet done about it but reserve itself.
 	reserved func(sub string)
+	// reserving runs on an attach inside reserve, holding the server's
+	// attachment lock, once its fence check has passed and before it
+	// installs its pending attachment: a test that blocks in it holds an
+	// attach between the two, where no fence can go up (plan 030 §3.6).
+	reserving func()
+	// fenceWaits runs on FenceAttaches that found the attachment lock held,
+	// just before it waits for it (lockAttachments): the fence is excluded —
+	// by an attach between its fence check and its install, say.
+	fenceWaits func()
+	// closeFenceStep runs on FenceClose between its steps: "attaches fenced"
+	// once the attach fence is up, before the engine's; "engine fenced" once
+	// both are, before it returns (plan 030 §3.6's forced races).
+	closeFenceStep func(step string)
 }
 
 // New builds a server. It serves nothing until SetEngine and Serve.
@@ -287,6 +355,43 @@ func New(o Options) *Server {
 
 // HostID is the host's id: hello's endpoint.hostId and sessions.list's epoch.
 func (s *Server) HostID() string { return s.hostID }
+
+// OnAttachments sets f to be called, in order, on every change in the number
+// of attached clients, with the new number (plan 030 §3.6; SF-64's hook): an
+// attachment counts from its reservation to its close — pending, live or
+// closing — unless its connection's peer has half-closed (attach.go,
+// "Counting attachments"). A connection that only calls hello or
+// sessions.list is not attached and moves nothing. f is called on the
+// goroutine that changed the count, under the server's own locks, one call at
+// a time: it must return promptly and must not call into the server, an
+// engine or a connection — a lifecycle goroutine records the number and acts
+// on it elsewhere. nil stops the calls. Set it before Serve, or any time: a
+// change made while it is being set is reported to the old f or the new.
+func (s *Server) OnAttachments(f func(n int)) {
+	s.countMu.Lock()
+	s.onAttach = f
+	s.countMu.Unlock()
+}
+
+// countAttachment moves the count of attachments by d and reports the new
+// count to OnAttachments' callback, in one countMu section, so the callback
+// sees every change in order. It is called only in the section that decides
+// the change: reserve (attachMu, conn.mu), closedLocked and eof (conn.mu).
+func (s *Server) countAttachment(d int) {
+	s.countMu.Lock()
+	defer s.countMu.Unlock()
+	s.attached += d
+	if f := s.onAttach; f != nil {
+		f(s.attached)
+	}
+}
+
+// attachedCount is the count now.
+func (s *Server) attachedCount() int {
+	s.countMu.Lock()
+	defer s.countMu.Unlock()
+	return s.attached
+}
 
 // MaxBudget is the largest subscription budget an attach may ask for.
 func (s *Server) MaxBudget() Budget { return s.maxBudget }

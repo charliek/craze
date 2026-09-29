@@ -10,6 +10,7 @@ import (
 	"runtime"
 	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"testing"
@@ -414,4 +415,99 @@ func TestBindRefusesABadHostID(t *testing.T) {
 	if exists(t, filepath.Join(env.Home, cacheName)) {
 		t.Fatal("a refused host id built the cache tree")
 	}
+}
+
+// TestLostNamesAVanishedSocketOrEntry (plan 030 §3.3, SF-66): a bound host is
+// not lost; its socket removed, or replaced by another bound at its path, is;
+// so is its registry entry removed, written over by another file, or taken
+// away with its whole directory — looked up by path, whatever the descriptor
+// held since Bind still sees; a rewrite (Update) is the host's own and loses
+// nothing; and a closed host reports nothing.
+func TestLostNamesAVanishedSocketOrEntry(t *testing.T) {
+	t.Parallel()
+	fresh := func(t *testing.T) (*Host, string) {
+		env := testEnv(t)
+		h := bind(t, env)
+		if why := h.Lost(); why != "" {
+			t.Fatalf("a host just bound is lost: %s", why)
+		}
+		// Lost names the entry by its canonical path: on macOS the test's
+		// /tmp is /private/tmp, so the expectation is resolved the same way.
+		dir, err := filepath.EvalSymlinks(hostsDir(env))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return h, filepath.Join(dir, h.ID()+".json")
+	}
+	lost := func(t *testing.T, h *Host, want string) {
+		t.Helper()
+		if why := h.Lost(); !strings.Contains(why, want) {
+			t.Fatalf("Lost = %q, want it to say %q", why, want)
+		}
+	}
+	t.Run("a rewrite is the host's own", func(t *testing.T) {
+		h, _ := fresh(t)
+		if err := h.Update(func(e *Entry) { e.Ready = true }); err != nil {
+			t.Fatal(err)
+		}
+		if why := h.Lost(); why != "" {
+			t.Fatalf("a rewritten entry is lost: %s", why)
+		}
+	})
+	t.Run("the socket removed", func(t *testing.T) {
+		h, _ := fresh(t)
+		if err := os.Remove(h.Socket()); err != nil {
+			t.Fatal(err)
+		}
+		lost(t, h, "its control socket "+h.Socket()+" is gone")
+	})
+	t.Run("another socket at its path", func(t *testing.T) {
+		h, _ := fresh(t)
+		if err := os.Remove(h.Socket()); err != nil {
+			t.Fatal(err)
+		}
+		listenAt(t, h.Socket())
+		lost(t, h, "its control socket "+h.Socket()+" is another file now")
+	})
+	t.Run("the entry removed", func(t *testing.T) {
+		h, entry := fresh(t)
+		if err := os.Remove(entry); err != nil {
+			t.Fatal(err)
+		}
+		lost(t, h, "its registry entry "+entry+" is gone")
+	})
+	t.Run("the entry written over", func(t *testing.T) {
+		h, entry := fresh(t)
+		// Held open, so the replacement cannot reuse its inode (ext4).
+		held, err := os.Open(entry)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer held.Close()
+		if err := os.Remove(entry); err != nil {
+			t.Fatal(err)
+		}
+		writeFile(t, entry, "{}")
+		lost(t, h, "its registry entry "+entry+" is another file now")
+	})
+	t.Run("the registry moved away", func(t *testing.T) {
+		h, entry := fresh(t)
+		dir := filepath.Dir(entry)
+		if err := os.Rename(dir, dir+".moved"); err != nil {
+			t.Fatal(err)
+		}
+		lost(t, h, "its registry entry "+entry+" is gone")
+	})
+	t.Run("closed", func(t *testing.T) {
+		h, _ := fresh(t)
+		if err := os.Remove(h.Socket()); err != nil {
+			t.Fatal(err)
+		}
+		if err := h.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if why := h.Lost(); why != "" {
+			t.Fatalf("a closed host is lost: %s", why)
+		}
+	})
 }

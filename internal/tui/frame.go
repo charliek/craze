@@ -89,6 +89,11 @@ type FrameOpts struct {
 	// gateSync: the socket host is internal/tui's tests' alone, so the
 	// production package links no server for `craze frame`.
 	transport frameTransport
+	// sessionStart is the instant the run's session counts its elapsed from
+	// on either transport (RunFrameScript's start); zero — every run but a
+	// test's that pins it in the past — is the run's own start. Unexported:
+	// only internal/tui's tests pin it.
+	sessionStart time.Time
 	// matrix says the run is one of internal/tui's tests' golden matrix
 	// (runFrameModes), which accounts for the frame its runs agree on itself;
 	// frameProducedHook is told so. Unexported: only those tests set it.
@@ -167,11 +172,12 @@ type frameHost struct {
 // run does.
 var frameProducedHook func(opts FrameOpts, plain string)
 
-// frameSocketHook builds a socket run's host around cfg (FrameOpts.transport).
-// It is nil in production — no Config field or flag reaches it — and
-// internal/tui's tests install it (frame_socket_test.go), like
+// frameSocketHook builds a socket run's host around cfg (FrameOpts.transport),
+// serving startedAt — the run's start (RunFrameScript) — as the session's
+// StartedAt. It is nil in production — no Config field or flag reaches it —
+// and internal/tui's tests install it (frame_socket_test.go), like
 // sessionBackendHook.
-var frameSocketHook func(cfg Config) (*frameHost, error)
+var frameSocketHook func(cfg Config, startedAt time.Time) (*frameHost, error)
 
 type frameTokenKind int
 
@@ -840,6 +846,20 @@ func RunFrameScript(cfg Config, cols, rows int, script string, opts FrameOpts) (
 		}
 	}
 
+	// The session's start, which both transports count its elapsed from (plan
+	// 030 §3.7, SF-63; sol r10-c6 2): a socket run's host serves it as its
+	// StartedAt, and an in-process run's model counts from it rather than from
+	// the moment its session came up, a little later (frameStart) — so the
+	// elapsed a frame shows is the same by transport however long its run
+	// takes. The wall clock's reading alone (Round(0)): the host's StartedAt
+	// crosses the wire, which keeps no monotonic reading, and both must
+	// subtract alike.
+	start := opts.sessionStart
+	if start.IsZero() {
+		start = time.Now()
+	}
+	start = start.Round(0)
+
 	// A socket run's host is built here, inside the isolated HOME too, since
 	// the agent its engine starts inherits it: the session the Config names,
 	// served on a control socket, with the model's backend attached to it
@@ -861,7 +881,7 @@ func RunFrameScript(cfg Config, cols, rows int, script string, opts FrameOpts) (
 		if frameSocketHook == nil {
 			return "", "", errors.New("frame: the socket transport has no host: only internal/tui's tests build one")
 		}
-		host, err = frameSocketHook(cfg)
+		host, err = frameSocketHook(cfg, start)
 		if err != nil {
 			return "", "", fmt.Errorf("frame: the socket host: %w", err)
 		}
@@ -893,6 +913,7 @@ func RunFrameScript(cfg Config, cols, rows int, script string, opts FrameOpts) (
 
 	m := New(cfg)
 	m.frozen = opts.Freeze
+	m.frameStart = start
 	// Always set from the options, never left to New: a test binary's default
 	// is the baseline (gateSyncDefault), and a frame is asynchronous unless its
 	// caller asked for the baseline.

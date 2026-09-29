@@ -419,3 +419,71 @@ func TestConfigCompatClaudeAgents(t *testing.T) {
 		})
 	}
 }
+
+// TestConfigDetachTable is `detach`'s parsing rule (plan 030 §3.5): on by
+// default, off with no reason for an explicit false, and off with a reason
+// for a config craze cannot read or a value that is not a bool — the
+// in-process path is the safe side of a switch craze cannot read.
+func TestConfigDetachTable(t *testing.T) {
+	for _, tc := range []struct {
+		name, body string
+		want       bool
+		why        string
+	}{
+		{"missing key", "theme = \"dark\"\n", true, ""},
+		{"true", "detach = true\n", true, ""},
+		{"false", "detach = false\n", false, ""},
+		{"non-bool", "detach = \"no\"\n", false, "config.toml detach is not a bool"},
+		{"malformed file", "this is not toml [[[\n", false, "config.toml could not be parsed"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			writeConfigFile(t, tc.body)
+			if on, why := ConfigDetach(); on != tc.want || why != tc.why {
+				t.Fatalf("ConfigDetach() = %v, %q; want %v, %q", on, why, tc.want, tc.why)
+			}
+		})
+	}
+	t.Run("missing file", func(t *testing.T) {
+		t.Setenv("CRAZE_HOME", filepath.Join(t.TempDir(), "nothing"))
+		if on, why := ConfigDetach(); !on || why != "" {
+			t.Fatalf("no config file: %v, %q", on, why)
+		}
+	})
+}
+
+// TestConfigHostIdleExitTable is `host_idle_exit`'s parsing rule (plan 030
+// §3.6): a Go duration, "0", or "never" in any case; an absent key the
+// default hour, silently; and everything craze cannot read the default hour
+// with a line saying why — the host fails safe onto the owner's default.
+func TestConfigHostIdleExitTable(t *testing.T) {
+	hour := HostIdleExit{After: time.Hour}
+	for _, tc := range []struct {
+		name, body string
+		want       HostIdleExit
+		why        string
+	}{
+		{"missing key", "theme = \"dark\"\n", hour, ""},
+		{"a duration", "host_idle_exit = \"2s\"\n", HostIdleExit{After: 2 * time.Second}, ""},
+		{"minutes, spaced", "host_idle_exit = \" 90m \"\n", HostIdleExit{After: 90 * time.Minute}, ""},
+		{"zero", "host_idle_exit = \"0\"\n", HostIdleExit{}, ""},
+		{"never", "host_idle_exit = \"never\"\n", HostIdleExit{Never: true}, ""},
+		{"Never", "host_idle_exit = \"Never\"\n", HostIdleExit{Never: true}, ""},
+		{"an integer", "host_idle_exit = 0\n", hour, "config.toml host_idle_exit is not a string"},
+		{"no unit", "host_idle_exit = \"10\"\n", hour, "config.toml host_idle_exit \"10\" is neither a duration nor \"never\""},
+		{"negative", "host_idle_exit = \"-1m\"\n", hour, "config.toml host_idle_exit \"-1m\" is neither a duration nor \"never\""},
+		{"malformed file", "this is not toml [[[\n", hour, "config.toml could not be parsed"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			writeConfigFile(t, tc.body)
+			if got, why := ConfigHostIdleExit(); got != tc.want || why != tc.why {
+				t.Fatalf("ConfigHostIdleExit() = %+v, %q; want %+v, %q", got, why, tc.want, tc.why)
+			}
+		})
+	}
+	t.Run("missing file", func(t *testing.T) {
+		t.Setenv("CRAZE_HOME", filepath.Join(t.TempDir(), "nothing"))
+		if got, why := ConfigHostIdleExit(); got != hour || why != "" {
+			t.Fatalf("no config file: %+v, %q", got, why)
+		}
+	})
+}

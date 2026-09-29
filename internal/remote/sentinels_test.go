@@ -121,6 +121,7 @@ func engineTwins(t *testing.T) []twin {
 		{"agent.ErrAskUnavailable", "", agent.ErrAskUnavailable},
 		{"agent.ErrSetUnavailable", "", agent.ErrSetUnavailable},
 		{"engine.ErrUnavailable", "", engine.ErrUnavailable},
+		{"engine.ErrClosing", "", engine.ErrClosing},
 		{"engine.ErrAttachRaced", "", fmt.Errorf("%w: 4 snapshots refused", engine.ErrAttachRaced)},
 		{"engine.ErrBadRequest", "", engine.ErrBadRequest},
 		{"engine.ErrUnknownCommand", "", engine.ErrUnknownCommand},
@@ -158,6 +159,7 @@ func matchSet() map[string]error {
 		"agent.ErrBadCatalog": agent.ErrBadCatalog, "context.Canceled": context.Canceled,
 		"context.DeadlineExceeded": context.DeadlineExceeded, "agent.ErrAskUnavailable": agent.ErrAskUnavailable,
 		"agent.ErrSetUnavailable": agent.ErrSetUnavailable, "engine.ErrUnavailable": engine.ErrUnavailable,
+		"engine.ErrClosing":     engine.ErrClosing,
 		"engine.ErrAttachRaced": engine.ErrAttachRaced, "engine.ErrBadRequest": engine.ErrBadRequest,
 		"engine.ErrUnknownClient": engine.ErrUnknownClient, "engine.ErrUnknownCommand": engine.ErrUnknownCommand,
 		"agent.ErrQueueFull": agent.ErrQueueFull, "agent.ErrQueueTextTooLong": agent.ErrQueueTextTooLong,
@@ -165,7 +167,8 @@ func matchSet() map[string]error {
 		"agent.ErrPromptCancelled": agent.ErrPromptCancelled, "agent.ErrUnsupported": agent.ErrUnsupported,
 		"transcript.ErrSnapshotTooLarge": transcript.ErrSnapshotTooLarge,
 		"backend.ErrOutcomeUnknown":      backend.ErrOutcomeUnknown, "backend.ErrStaleEpoch": backend.ErrStaleEpoch,
-		"tui.ErrNoAnswer": tui.ErrNoAnswer,
+		"backend.ErrStopUnsupported": backend.ErrStopUnsupported,
+		"tui.ErrNoAnswer":            tui.ErrNoAnswer,
 	}
 }
 
@@ -373,13 +376,15 @@ func exprString(fset *token.FileSet, e ast.Expr) string {
 // TestTheProtocolsReasonsReconstructTheirSentinel (§3.2): a reason of the
 // protocol's own reconstructs the one sentinel an engine error stands behind —
 // start_failed is a gate refusal (engine.ErrNotAccepting, refusalLocked's for a
-// failed start), snapshot_too_large transcript.ErrSnapshotTooLarge — and every
-// other none; a reason sent under another code than the table's, or one this
+// failed start), snapshot_too_large transcript.ErrSnapshotTooLarge, and
+// stop_unsupported the backend's own backend.ErrStopUnsupported (plan 030
+// §3.6a) — and every other none; a reason sent under another code than the table's, or one this
 // build does not know, reconstructs nothing.
 func TestTheProtocolsReasonsReconstructTheirSentinel(t *testing.T) {
 	want := map[protocol.Reason][]string{
 		protocol.ReasonStartFailed:      {"engine.ErrNotAccepting"},
 		protocol.ReasonSnapshotTooLarge: {"transcript.ErrSnapshotTooLarge"},
+		protocol.ReasonStopUnsupported:  {"backend.ErrStopUnsupported"},
 	}
 	set := matchSet()
 	for _, info := range protocol.Reasons() {
@@ -532,6 +537,11 @@ const (
 	// refusal ever is (checked here, over every twin; the client's own are
 	// TestOnlyTheClientsOwnOutcomesAreOutcomeUnknown's too).
 	proofOutcome = "outcome"
+	// proofStop: errors.Is of backend.ErrStopUnsupported, which a host's
+	// stop_unsupported refusal of session.stop reconstructs (plan 030 §3.6a;
+	// checked here) — the explicit quit's reading of a host that cannot stop
+	// its session.
+	proofStop = "stop"
 )
 
 // tuiSites is every error read in internal/tui's production files
@@ -539,9 +549,15 @@ const (
 var tuiSites = []tuiSite{
 	{"app.go", "runErrAfterHangup", "Is", "tea.ErrProgramPanic", 1, proofLocal},
 	{"app.go", "finishRun", "Is", "agent.ErrAgentExited", 1, proofViewClose},
-	{"app.go", "update", "Error", "err", 1, proofLocal}, // SaveProvider's
+	// SaveProvider's, in the tail startedMsg's arm shares (plan 030 C7r2).
+	{"app.go", "comeUp", "Error", "err", 1, proofLocal},
 	// errMsg (Start's failure).
 	{"app.go", "update", "Error", "msg.err", 1, proofText},
+	// That failure's row drawn again after a restore (plan 030 C7r): the
+	// error errMsg recorded (startErr) — a *StartError's text over the
+	// socket. spawnFailed's own never meets a restore: it adopted no
+	// backend, so no stream follows it.
+	{"restore.go", "applyRestore", "Error", "m.startErr", 1, proofText},
 	{"app.go", "settlePending", "Is", "ErrNoAnswer", 1, proofGate},
 	{"app.go", "submitErrNote", "Is", "ErrNoAnswer", 1, proofGate},
 	{"app.go", "submitErrNote", "Is", "engine.ErrNotAccepting", 1, proofSentinel},
@@ -562,11 +578,20 @@ var tuiSites = []tuiSite{
 	{"config.go", "readConfigAt", "Is", "fs.ErrNotExist", 1, proofLocal},
 	{"config.go", "ConfigJournal", "Is", "ErrConfigMalformed", 1, proofLocal},
 	{"config.go", "ConfigControlSocket", "Is", "ErrConfigMalformed", 1, proofLocal},
+	{"config.go", "ConfigDetach", "Is", "ErrConfigMalformed", 1, proofLocal},
+	{"config.go", "ConfigHostIdleExit", "Is", "ErrConfigMalformed", 1, proofLocal},
 	// The frame harness's capture boundary: in process only (engineBehind).
 	{"frame.go", "streamHead", "Is", "agent.ErrLogClosing", 1, proofLocal},
 	{"frame.go", "streamHead", "Is", "agent.ErrClosed", 1, proofLocal},
 	{"frame.go", "streamHead", "Is", "agent.ErrFlushGaveUp", 1, proofLocal},
 	{"gate.go", "unanswered", "Is", "ctx.Err()", 1, proofDeadline},
+	// The launch flow's spawns (plan 030 §3.5): the answer of a Config
+	// closure (NewBackend, LoadBackend) — the launcher's own, about a host it
+	// spawned or found — which no Backend call answers.
+	{"launch.go", "Error", "Error", "r.Err", 1, proofLocal},
+	{"launch.go", "spawned", "As", "&refused", 1, proofLocal},
+	{"launch.go", "repick", "Error", "r", 1, proofLocal},
+	{"launch.go", "spawnFailed", "Error", "err", 1, proofLocal},
 	// A gated reply's error, and a command's or a chain's failure as the
 	// reducer words it (failureText): ErrNoAnswer for the client's own
 	// outcome-unknown answers, the host's error unchanged otherwise.
@@ -577,12 +602,16 @@ var tuiSites = []tuiSite{
 	// revertModelMsg (a Set's), modelApplyMsg (a step's), cancelFailedMsg (a
 	// Cancel's): the host's text, or ErrNoAnswer's for an outcome unknown.
 	{"gate.go", "failureText", "Error", "noAnswerFor(err)", 1, proofText},
+	// A command the close fence refused (plan 030 §3.6), worded as the
+	// TUI's own refusals are (closingNote, C6).
+	{"gate.go", "failureText", "Is", "engine.ErrClosing", 1, proofSentinel},
 	{"model_dialog.go", "runModelApply", "Is", "agent.ErrBadCatalog", 1, proofSentinel},
 	{"model_dialog.go", "runModelApply", "Is", "engine.ErrStaleModel", 1, proofSentinel},
 	{"model_dialog.go", "runModelApply", "Is", "agent.ErrOptionGone", 1, proofSentinel},
 	{"provider_dialog.go", "confirmProvider", "Error", "err", 1, proofLocal},
 	{"queue.go", "queueErrNote", "Is", "agent.ErrQueueFull", 1, proofSentinel},
 	{"queue.go", "queueErrNote", "Is", "agent.ErrQueueTextTooLong", 1, proofSentinel},
+	{"queue.go", "queueErrNote", "Is", "engine.ErrClosing", 1, proofSentinel},
 	{"queue.go", "queueErrNote", "Error", "err", 1, proofText},
 	{"queue.go", "interjectErrNote", "Is", "ErrNoAnswer", 1, proofGate},
 	{"queue.go", "interjectErrNote", "Is", "agent.ErrNotInTurn", 1, proofSentinel},
@@ -604,6 +633,9 @@ var tuiSites = []tuiSite{
 	{"slash.go", "applyModelEffort", "Is", "agent.ErrBadCatalog", 1, proofSentinel},
 	{"slash.go", "runModelEffort", "Is", "engine.ErrStaleModel", 1, proofSentinel},
 	{"slash.go", "runModelEffort", "Is", "agent.ErrOptionGone", 1, proofSentinel},
+	// The explicit quit's stop (plan 030 §3.6): a host that cannot stop its
+	// session refuses, stop_unsupported.
+	{"stopquit.go", "answered", "Is", "backend.ErrStopUnsupported", 1, proofStop},
 	{"theme.go", "noteAndSaveTheme", "Error", "err", 1, proofLocal},
 }
 
@@ -721,6 +753,12 @@ func TestEveryTUIErrorSiteWorksOverTheWire(t *testing.T) {
 				if errors.Is(reconstructed(t, tw.err), tui.ErrNoAnswer) {
 					t.Errorf("%s %s: the host's %s reconstructs the gate's ErrNoAnswer", s.file, s.fn, tw.sentinel)
 				}
+			}
+		case proofStop:
+			got := overTheWire(t, &protocol.Error{Code: protocol.RPCRefused, Message: "this host cannot stop its session",
+				Data: protocol.ErrorData{Code: protocol.CodeUnsupported, Reason: protocol.ReasonStopUnsupported}})
+			if !errors.Is(got, backend.ErrStopUnsupported) {
+				t.Errorf("%s %s: a host's stop_unsupported is not backend.ErrStopUnsupported over the wire (%v)", s.file, s.fn, got)
 			}
 		case proofOutcome:
 			for _, tw := range twins {

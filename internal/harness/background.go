@@ -417,6 +417,41 @@ func (r *subagents) hasPending() bool {
 // ends, since a result can become pending while one runs.
 func (s *Session) HasPending() bool { return s.subs.hasPending() }
 
+// owed reports whether a background child's result is still owed to the
+// parent's model outside any turn: running — its child not yet ended, or ended
+// and its result not yet published, however far its finish has been reported
+// (runToEnd reports SubagentFinished before publish makes the result pending)
+// — or pending. A reserved result is a running turn's or wake's, which says so
+// itself; a committed one is delivered; a suspended one waits for a person's
+// next turn and no wake takes it (no automatic retry loop, P44), so it owes
+// nothing that could happen alone; and one Close reported undelivered is over.
+func (r *subagents) owed() bool {
+	if r == nil {
+		return false
+	}
+	r.regMu.Lock()
+	defer r.regMu.Unlock()
+	for _, res := range r.results {
+		if res.reported {
+			continue
+		}
+		if res.state == resultRunning || res.state == resultPending {
+			return true
+		}
+	}
+	return false
+}
+
+// BackgroundOwed reports whether a background sub-agent still owes the parent
+// its result outside any turn (plan 030 C5r): a child running — whatever its
+// SubagentFinished has already said, since its result is published after it —
+// or a result pending, waiting for a wake or a turn to deliver it. It is the
+// session's half of a host's idle verdict (agent.OwedWork): from a child's
+// launch to its result's delivery it stays true but while a turn or a wake has
+// the result reserved, and that turn is busy in its own right. It takes one
+// leaf lock and never waits.
+func (s *Session) BackgroundOwed() bool { return s.subs.owed() }
+
 // runningChild is a background child still running, as a compaction's state
 // section names it (plan 028 §3.8, PD24): its id, its agent type and its
 // call's description, both redacted when it was launched.

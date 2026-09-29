@@ -2,6 +2,7 @@ package protocol_test
 
 import (
 	"maps"
+	"reflect"
 	"slices"
 	"testing"
 
@@ -38,7 +39,7 @@ func TestTheReasonTableIsExhaustive(t *testing.T) {
 	shared := map[protocol.Code][]protocol.Reason{
 		protocol.CodeNotAccepting: {"not_accepting", "not_in_turn", "start_failed"},
 		protocol.CodeAborted:      {"command_aborted", "set_outcome_unknown", "bad_catalog", "context"},
-		protocol.CodeUnavailable:  {"log_backed_up", "ask_unavailable", "set_unavailable", "not_run", "attach_raced", "not_ready", "busy"},
+		protocol.CodeUnavailable:  {"log_backed_up", "ask_unavailable", "set_unavailable", "not_run", "attach_raced", "not_ready", "busy", "closing"},
 		protocol.CodeFailed:       {"option_gone", "failed", "response_too_large", "snapshot_too_large"},
 		protocol.CodeBadRequest: {"bad_request", "bad_answer", "hello_required", "unknown_field", "line_too_long",
 			"protocol_version", "bad_token", "already_attached"},
@@ -186,6 +187,24 @@ func TestTheMethodTable(t *testing.T) {
 	}
 	if !maps.Equal(unsupported, wantUnsupported) {
 		t.Fatalf("host-unsupported %v, want %v", unsupported, wantUnsupported)
+	}
+	// The one a host serves where its session capability says so (plan 030
+	// §3.6a): session.stop, gated by stop — the capability's own wire name,
+	// SessionCapabilities.Stop's json tag. The hub's stay unconditional.
+	gated := map[string]string{}
+	for _, m := range protocol.Methods() {
+		if m.Capability != "" {
+			gated[m.Name] = m.Capability
+			if m.HostUnsupported == "" {
+				t.Errorf("%s: gated by %s, with no reason for a host that does not serve it", m.Name, m.Capability)
+			}
+		}
+	}
+	if want := map[string]string{"session.stop": protocol.CapabilityStop}; !maps.Equal(gated, want) {
+		t.Fatalf("capability-gated methods %v, want %v", gated, want)
+	}
+	if f, ok := reflect.TypeFor[protocol.SessionCapabilities]().FieldByName("Stop"); !ok || f.Tag.Get("json") != protocol.CapabilityStop {
+		t.Fatalf("SessionCapabilities.Stop's wire name is not %q", protocol.CapabilityStop)
 	}
 	if _, ok := protocol.Method("session.teleport"); ok {
 		t.Fatal("Method found a method protocol 1 does not name")

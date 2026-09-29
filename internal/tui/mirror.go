@@ -73,6 +73,9 @@ func (m *Model) recompute() {
 	armed := f.Settings.SendNow.Armed
 	m.ov.apply(&snap, &queue, &armed)
 	m.snap, m.queue, m.sendNowArmed = snap, queue, armed
+	// The host's word on its permission mode and its start (plan 030 §3.7),
+	// read with the rest of its facts, so the status rows move with them.
+	m.hostPerm, m.hostStart = info.PermissionMode, info.StartedAt
 
 	if m.snap.CurrentModel != "" {
 		m.model = m.snap.CurrentModel

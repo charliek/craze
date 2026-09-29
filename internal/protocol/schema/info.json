@@ -16,7 +16,9 @@
         "provider": {"$ref": "#/$defs/provider"},
         "catalogs": {"$ref": "#/$defs/catalogs"},
         "capabilities": {"$ref": "#/$defs/sessionCapabilities"},
-        "retryHorizon": {"$ref": "#/$defs/retryHorizon"}
+        "retryHorizon": {"$ref": "#/$defs/retryHorizon"},
+        "permissionMode": {"$ref": "#/$defs/permissionMode"},
+        "startedAt": {"$ref": "event.json#/$defs/time", "description": "When the host started serving the session, in UTC: what a client counts elapsed time from. Absent when the host does not say (an older host)."}
       },
       "required": ["sessionId", "providerSessionId", "incarnation", "hostId", "workspace", "provider", "catalogs", "capabilities", "retryHorizon"]
     },
@@ -33,7 +35,8 @@
         "activity": {"$ref": "#/$defs/activity"},
         "foreignTurn": {"type": "boolean", "description": "The agent is running a turn of its own; activity reads idle during one."},
         "pendingAsks": {"type": "integer", "minimum": 0},
-        "headAsk": {"$ref": "#/$defs/headAsk"}
+        "headAsk": {"$ref": "#/$defs/headAsk"},
+        "lastTurn": {"$ref": "#/$defs/lastTurn"}
       },
       "required": ["title", "activity", "foreignTurn", "pendingAsks"],
       "unevaluatedProperties": false
@@ -80,7 +83,7 @@
       "additionalProperties": false
     },
     "sessionCapabilities": {
-      "description": "The session's capability set: every provider capability in its wire name, and cancel, approvals, historyCursor (true for every protocol 1 host) and stop (false on a TUI-hosted session). A client hides what a capability says the session cannot do.",
+      "description": "The session's capability set: every provider capability in its wire name, and cancel, approvals, historyCursor (true for every protocol 1 host) and stop (the host's own: true where session.stop is served, every craze serve; false on a TUI-hosted session and an older host). A client hides what a capability says the session cannot do.",
       "type": "object",
       "properties": {
         "interject": {"type": "boolean"},
@@ -142,6 +145,28 @@
       "description": "What the engine is doing. An open ask and a foreign turn overlay any of these.",
       "type": "string",
       "enum": ["starting", "replaying", "idle", "working", "error", "closing"]
+    },
+    "permissionMode": {
+      "description": "How the host's agent handles permission requests: bypass (spawned with --force: it runs tools unasked) or prompt (--no-force: it asks, and a client answers). Absent when the host does not say (an older host).",
+      "type": "string",
+      "enum": ["bypass", "prompt"]
+    },
+    "lastTurn": {
+      "description": "How the session's last turn ended — a turn of craze's own or a foreign one. Absent while a turn runs (a turn starting supersedes it), before any has ended, and from an older host. Never in a snapshot.",
+      "type": "object",
+      "properties": {
+        "outcome": {"$ref": "#/$defs/turnOutcome"},
+        "err": {"type": "string", "description": "A failed turn's error text; absent for the other outcomes."},
+        "endedAt": {"$ref": "event.json#/$defs/time", "description": "The turn's ending event's time, in UTC."},
+        "turnId": {"type": "string", "description": "The ended turn's id as the stream names it: turn.id for a turn of craze's own, the foreign_turn bracket's id for the agent's own."}
+      },
+      "required": ["outcome", "endedAt", "turnId"],
+      "additionalProperties": false
+    },
+    "turnOutcome": {
+      "description": "done: ran to its end (a foreign turn's ending is always done); failed: its ending carried an error; cancelled: stopped before its end — a cancel, a prompt withdrawn before it was sent, or the session's close.",
+      "type": "string",
+      "enum": ["done", "failed", "cancelled"]
     }
   }
 }

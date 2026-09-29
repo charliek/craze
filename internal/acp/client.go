@@ -852,6 +852,18 @@ func (c *Client) PID() int {
 	return c.child.PID()
 }
 
+// ProcessGroup is the process group the agent child leads — Spawn puts it in
+// one of its own (Setpgid), so it is the group Shutdown signals — or 0 for an
+// in-process test client with no child. A detached host records it (plan 030
+// §3.4), because an agent in its own group can outlive a host killed outright,
+// and only the group reaches what the agent started.
+func (c *Client) ProcessGroup() int {
+	if c.child == nil {
+		return 0
+	}
+	return c.child.pgid
+}
+
 // Exited is closed once the reaper has recorded the agent's exit: the point
 // from which Close's probe reports ErrAgentExited. The OS losing the process
 // is not that point — cmd.Wait's own wait reaps it, and the reaper closes this

@@ -83,14 +83,17 @@ func (m Model) runShellDraft() (tea.Model, tea.Cmd) {
 	return m, run
 }
 
-// shellDir is where the composer's shell runs: the session's workspace. In
-// process that is the workspace the TUI started its session in (m.cwd). A
-// viewer's session was started by its host, so it is the workspace the
-// backend's Info names — the registry entry's until the attach completes, then
-// the host's own (plan 027 §3.15) — and m.cwd only when Info names none. The
-// command runs here, in this terminal, whichever it is.
+// shellDir is where the composer's shell runs: the session's workspace, as
+// the backend's Info names it (plan 030 §3.7, "the workspace follows the
+// session"). In process that is the workspace the TUI started its session in
+// (m.cwd, which the engine backend's Info names). A session served elsewhere —
+// a viewer's, and the launch flow's detached host's alike — was started by its
+// host, so it is the host's: the registry entry's until the attach completes,
+// then the host's own (plan 027 §3.15), which the model's m.cwd follows too
+// (followWorkspace); m.cwd when Info names none. The command runs here, in
+// this terminal, whichever it is.
 func (m Model) shellDir() string {
-	if m.viewer && m.eng != nil {
+	if m.eng != nil {
 		if ws := m.info().Workspace; ws != "" {
 			return ws
 		}

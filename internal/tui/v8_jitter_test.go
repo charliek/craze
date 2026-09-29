@@ -133,6 +133,11 @@ func (b *jitterBackend) CancelSubagent(ctx context.Context, c engine.Command, id
 	return b.Backend.CancelSubagent(ctx, c, id)
 }
 
+func (b *jitterBackend) Stop(ctx context.Context, c engine.Command) error {
+	defer b.j.pause()
+	return b.Backend.Stop(ctx, c)
+}
+
 func (b *jitterBackend) Ask(ctx context.Context, id string) (agent.AskRecord, bool, error) {
 	defer b.j.pause()
 	return b.Backend.Ask(ctx, id)

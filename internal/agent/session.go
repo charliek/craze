@@ -876,6 +876,28 @@ type Options struct {
 	// through a subscription instead. S1b uses it in tests; from S4 on a
 	// detached host is its user (SD-33).
 	NoPrimary bool
+	// KeepLogOnFailedStart keeps the session's event log open when its start
+	// fails, until Close (plan 030 C5). A failed start tears the session down
+	// — the agent, its transport, its asks — and by default closes its log
+	// with it, which ends every subscription: a client attached while the
+	// session started (attach "now") would read the stream's end before any
+	// word that the start failed, and a sessions.list could vouch for no seq.
+	// A detached host sets it: its failed session stays listable and
+	// attachable, each attach answered start_failed and each earlier one sent
+	// its failed ready, until the host's own stop closes the session. A
+	// native session never closes on a failed start and ignores it.
+	KeepLogOnFailedStart bool
+	// AgentGroup, when set, is told the process group of each agent child
+	// the session spawns, the moment it is spawned — before the session
+	// knows whether it will keep it. A detached host records it (plan 030
+	// §3.4): the agent leads a group of its own, which a host killed
+	// outright cannot take down with it, and the spawner's last-resort kill
+	// reaches it only through that record. An error is a group that could
+	// not be recorded, and fails the start: the agent is ended there and
+	// then, never left running where nothing could end it after its host
+	// (astra r5-c3 2). It runs on Start's goroutine and must not block. A
+	// native session spawns no agent and never calls it.
+	AgentGroup func(pgid int) error
 	// ContentHome is the home directory a native session reads the user's own
 	// Claude content under — commands, skills and the installed plugins
 	// (§3.1). "" is HomeDir(), which is what production wants and what every

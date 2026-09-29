@@ -876,3 +876,89 @@ func TestNativeHeadlessBackgroundIsForeground(t *testing.T) {
 		t.Fatalf("%d brackets in a headless session", n)
 	}
 }
+
+// TestNativeOwesABackgroundResultUntilItIsDelivered (plan 030 C5r, astra
+// r8-c5 1): the session owes its user a background child's result
+// (OwedWork) from the child's launch until a wake delivers it, across the two
+// gaps a host's idle verdict must not fall into — both forced here. The first:
+// the child's finished row is out (the roster shows nothing running) and its
+// result not yet published (nothing pending) — the sink's after hook holds the
+// child's worker between the two. The second: the result published and the
+// worker's recheck held at wakeSeam, before its claim (no turn running). A
+// fence raised there — a host's close fence keeps the admission fence up —
+// stands the wake down, and the result is still owed; the fence down, the wake
+// delivers it, and nothing is owed any more.
+func TestNativeOwesABackgroundResultUntilItIsDelivered(t *testing.T) {
+	seamHeld, seamRelease := make(chan struct{}), make(chan struct{})
+	var armed atomic.Bool
+	rig := newWakeRig(t, Options{}, func() {
+		if armed.CompareAndSwap(true, false) {
+			close(seamHeld)
+			<-seamRelease
+		}
+	})
+	// After the rig's, so it runs before the session's Close joins the worker.
+	t.Cleanup(func() { closeOnce(seamRelease) })
+	s := rig.s
+	if s.OwesWork() {
+		t.Fatal("a session with no child owes work")
+	}
+	child := newHeld(t)
+	id := rig.spawnOne(child, answer("delivered"))
+	if !s.OwesWork() {
+		t.Fatal("a background child running is not owed")
+	}
+	running := func() bool {
+		for _, row := range s.Snapshot().Subagents {
+			if row.Status == SubagentRunning {
+				return true
+			}
+		}
+		return false
+	}
+
+	// Gap 1: finished, not yet published.
+	hold := make(chan struct{})
+	t.Cleanup(func() { closeOnce(hold) })
+	rig.hookAfter(func(ev harness.Event) {
+		if fin, ok := ev.(harness.SubagentFinished); ok && fin.ID == id {
+			<-hold
+		}
+	})
+	await(t, child.reached, "the child's step")
+	close(child.release)
+	rig.w.wait("the child's finished row", func(ev Event) bool { return isRoster(ev, id, SubagentChangeFinished) })
+	if running() || s.hs.HasPending() || s.ForeignTurn() {
+		t.Fatalf("the premise: running %v, pending %v, foreign %v", running(), s.hs.HasPending(), s.ForeignTurn())
+	}
+	if !s.OwesWork() {
+		t.Fatal("a child whose row finished and whose result is not yet published is not owed")
+	}
+
+	// Gap 2: published, the wake not yet claimed.
+	armed.Store(true)
+	close(hold)
+	rig.awaitPending("child " + id)
+	await(t, seamHeld, "the wake's recheck, before its claim")
+	if !s.hs.HasPending() || s.ForeignTurn() {
+		t.Fatalf("the premise: pending %v, foreign %v", s.hs.HasPending(), s.ForeignTurn())
+	}
+	if !s.OwesWork() {
+		t.Fatal("a published result whose wake has not claimed is not owed")
+	}
+	s.FenceUp()
+	close(seamRelease)
+	rig.awaitDecided(false, "the fence up at the claim")
+	if s.ForeignTurn() || !s.OwesWork() {
+		t.Fatalf("under the fence: foreign %v, owed %v; want no wake and the result owed", s.ForeignTurn(), s.OwesWork())
+	}
+
+	s.FenceDown()
+	rig.awaitDecided(true, "the fence down")
+	rig.bracket(true, 1, "wake-1")
+	rig.bracket(false, 1, "wake-1")
+	rig.awaitDecided(false, "the wake's ending")
+	if s.OwesWork() {
+		t.Fatal("a delivered result is still owed")
+	}
+}

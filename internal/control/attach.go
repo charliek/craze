@@ -68,6 +68,29 @@ import (
 // start_failed: an attach reply has no field that could say so, and a client
 // learns that its session failed from the attach's answer or from a ready
 // notification, never only from a session.state read.
+//
+// # Counting attachments (plan 030 §3.6)
+//
+// A detached host's idle clock runs while no client is attached, and a close
+// fence reads the same count (FenceAttaches), so the server counts its
+// attachments — Server.attached, reported in order to OnAttachments. An
+// attachment counts from the section that reserves it until the one that
+// closes it: pending, live and closing alike, so an attach that has reserved
+// and not yet been answered keeps a host as surely as a live one.
+//
+// Except once its connection's peer has half-closed. A read EOF is S2's
+// half-close (plan 027 §3.7): the peer sends nothing more, and what it
+// admitted is still answered and its live subscription still delivered — none
+// of that changes. But a Unix read EOF cannot tell a half-close from a full
+// one, and a full close is noticed only when a write to it fails: a client
+// killed on an idle session is written nothing, and its attachment would
+// stay live, and counted, for ever — a host no client can reach that never
+// idles out. So a read EOF takes the connection's attachment out of the count
+// (conn.eof), and an attachment reserved after it is never counted: the peer
+// can no longer detach, prompt, answer or re-attach on that connection, and a
+// client that only reads the stream to its end does not keep a session from
+// ending — it is told of the end (reset{session_closed}) when it comes. The
+// attachment itself is untouched: counting is all the EOF changes.
 
 // attState is an attachment's place in its lifecycle.
 type attState uint8
@@ -118,6 +141,11 @@ type attachment struct {
 	// changed is closed and replaced whenever queued or state moves: what a
 	// reply barrier waits on.
 	changed chan struct{}
+	// counted says the attachment is in the server's count (Server.attached,
+	// "Counting attachments"): set by reserve on a connection whose peer has
+	// not half-closed, and cleared, once, where it leaves the count — its
+	// close (closedLocked) or its connection's read EOF (conn.eof).
+	counted bool
 }
 
 // readyNote is a ready notification and the seq it is queued behind: the
@@ -131,6 +159,29 @@ type readyNote struct {
 func (a *attachment) changedLocked() {
 	close(a.changed)
 	a.changed = make(chan struct{})
+}
+
+// closedLocked moves a to closed and wakes every wait on it; conn.mu is held.
+// An attachment still counted leaves the server's count of attachments here
+// (Server.attached, which reserve raised), once: a second close of one
+// already closed — an abandon after a replacement closed it pending — changes
+// nothing but the wake, and one its connection's EOF took out of the count
+// already (conn.eof) leaves it no second time.
+func (c *conn) closedLocked(a *attachment) {
+	if a.state != attClosed {
+		a.state = attClosed
+		c.uncountLocked(a)
+	}
+	a.changedLocked()
+}
+
+// uncountLocked takes a out of the server's count of attachments, if it is
+// in it, once; conn.mu is held ("Counting attachments").
+func (c *conn) uncountLocked(a *attachment) {
+	if a.counted {
+		a.counted = false
+		c.srv.countAttachment(-1)
+	}
 }
 
 // sessionAttach is session.attach (§3.3, §3.4): it reserves the connection's
@@ -176,13 +227,23 @@ func (c *conn) sessionAttach(b *bound, info protocol.MethodInfo, req *request) o
 // attachment and a zero outcome): the attach is not run, so no new pending
 // attachment is installed to hold the replaced connection open behind the
 // replacement's own terminal line (plan 027 X16 9, X22, X25).
+//
+// While a close fence is up (FenceAttaches: a session.stop accepted, or the
+// idle watcher deciding) an attach that would otherwise be reserved is
+// refused unavailable, reason closing (plan 030 §3.6). The check and the
+// install are one section of the server's attachment lock, which a fence goes
+// up under, so a fence either counts this attachment (Server.attached, raised
+// here) or refuses it — never neither.
 func (c *conn) reserve(eng *engine.Engine) (*attachment, outcome) {
-	// The context is made outside c.mu, which is held across no other lock.
+	// The context is made outside every lock.
 	ctx, cancel := context.WithCancel(c.ctx)
 	a := &attachment{
 		eng: eng, ctx: ctx, cancel: cancel,
 		stopped: make(chan struct{}), readyCh: make(chan readyNote, 1), changed: make(chan struct{}),
 	}
+	s := c.srv
+	s.attachMu.Lock()
+	defer s.attachMu.Unlock()
 	c.mu.Lock()
 	if c.replaced {
 		c.mu.Unlock()
@@ -195,9 +256,36 @@ func (c *conn) reserve(eng *engine.Engine) (*attachment, outcome) {
 		return nil, refusal(refused(protocol.CodeBadRequest, protocol.ReasonAlreadyAttached,
 			"this connection's attachment %s is not yet closed: detach it, or wait for its reset", old.id))
 	}
+	c.mu.Unlock()
+	if s.fences > 0 {
+		cancel()
+		return nil, refusal(refused(protocol.CodeUnavailable, protocol.ReasonClosing,
+			"the session is closing, or its host is deciding whether to: attach again once it has ended or stayed"))
+	}
+	if h := s.hooks.reserving; h != nil {
+		h()
+	}
+	c.mu.Lock()
+	// The connection's state is read again: no other attach can have
+	// reserved on it meanwhile — every reserve holds the attachment lock, as
+	// this one does — but a replacement may have landed while conn.mu was
+	// let go.
+	if c.replaced {
+		c.mu.Unlock()
+		cancel()
+		return nil, outcome{}
+	}
 	c.nextSub++
 	a.id = fmt.Sprintf("s-%d", c.nextSub)
 	c.att = a
+	// Counted unless the peer has half-closed already ("Counting
+	// attachments"): the request was read before its EOF, and the attach
+	// goes on, but nothing on this connection can end it but the session or
+	// a failed write.
+	if !c.readEOF {
+		a.counted = true
+		s.countAttachment(1)
+	}
 	c.mu.Unlock()
 	return a, outcome{}
 }
@@ -366,8 +454,7 @@ func (c *conn) abandon(a *attachment, sub *agent.Subscription) {
 		sub.Close()
 	}
 	c.mu.Lock()
-	a.state = attClosed
-	a.changedLocked()
+	c.closedLocked(a)
 	c.mu.Unlock()
 	close(a.stopped)
 	c.settle()
@@ -487,8 +574,7 @@ func (c *conn) sessionDetach(b *bound, info protocol.MethodInfo, req *request) o
 	// and one queued before the replacement is kept by it, while every
 	// ordinary line is dropped.
 	if line == nil || c.enqueue(c.ctx, nil, line, c.detachWritten, nil, func() {
-		a.state = attClosed
-		a.changedLocked()
+		c.closedLocked(a)
 		c.unwritten++
 	}, terminalLine) != nil {
 		c.markClosed(a)
@@ -532,8 +618,7 @@ func (c *conn) awaitClosed(a *attachment) bool {
 // connection is gone.
 func (c *conn) markClosed(a *attachment) {
 	c.mu.Lock()
-	a.state = attClosed
-	a.changedLocked()
+	c.closedLocked(a)
 	c.mu.Unlock()
 	c.settle()
 }

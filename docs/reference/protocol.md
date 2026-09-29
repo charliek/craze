@@ -12,7 +12,9 @@ authentication in protocol 1 — `hello`'s `auth` field is reserved for scopes,
 which arrive at S6 — and no encryption, because nothing crosses the machine
 boundary yet.
 
-Today the endpoint is always a **host**: one process serving one session.
+Today the endpoint is always a **host**: one process serving one session —
+by default a detached [`craze serve`](cli.md#craze-serve) the ordinary `craze`
+spawned, or, with detaching off, the TUI's own process.
 A future **hub** endpoint (S4) will multiplex several hosts behind one
 socket and splice a client through to the one it asks for
 ([The hub splice](#the-hub-splice)); protocol 1 already reserves the shapes
@@ -225,10 +227,33 @@ A row is the [session info document](#the-session-info-document) plus:
 | `foreignTurn` | the agent is running a turn of its own — grok's interjection fallback, or a native sub-agent's wake — during which `activity` reads `idle` |
 | `pendingAsks` | how many asks are open |
 | `headAsk` | `{id, kind, label}`, the first open ask (absent when none is) |
+| `lastTurn` | how the last turn ended — [below](#the-last-turn); absent while a turn runs, before any has ended, and from an older host |
 
 `activity`/`foreignTurn` answer "is it running"; `pendingAsks`/`headAsk`
 answer "is it blocked on me" — two independent signals, because an agent can
 be idle *and* waiting on a permission at the same time.
+
+### The last turn
+
+`lastTurn` — on a `sessions.list` row and in `session.state`, never in a
+snapshot, whose codec stays at version 1 — is `{outcome, err?, endedAt,
+turnId}`: how the session's most recent turn ended, whether it was craze's
+own or one the agent ran itself (a [foreign turn](#the-foreign-turn)).
+
+| field | |
+|---|---|
+| `outcome` | `done` (ran to its end — and every foreign turn, whose closing bracket carries no outcome), `failed` (its ending carried an error), or `cancelled` (a cancel, a prompt withdrawn before it was sent, or the session's close) |
+| `err` | a failed turn's error text; absent otherwise |
+| `endedAt` | the ending event's time, UTC |
+| `turnId` | the ended turn's id as the stream names it: `turn.id` on its `started`/`ended` events for a turn of craze's own, the `foreign_turn` bracket's `id` for the agent's own |
+
+It is kept from the stream's own turn events, in commit order, and **a turn
+starting supersedes it**: from a turn's `started` (or a foreign turn's
+running bracket) it is absent until that turn ends. So a `lastTurn` that is
+present always names the latest turn, with nothing run since — a list shows
+"failed" from it without asking whether a turn came after. A client that
+reads it after a restore (a reconnect's fresh snapshot carries no ending)
+applies it only if it has folded no later turn since, by `turnId`.
 
 `sessions.subscribe` and `session.connect` are `unsupported` on a host
 (reasons `roster_unsupported` and `hub_only`): both belong to the hub.
@@ -250,7 +275,7 @@ same `commandId` is how a client asks "did that happen?" — see
 | `session.connect` | | `sessionId` | — | `unsupported` on a host, reason `hub_only`; the hub's splice (below) |
 | `session.attach` | | `cursor?`, `when?`, `budget?` | `subscription`, `session`, `ready`, `after`, `snapshot?`, `reset?` | see [Attach, resume and snapshots](#attach-resume-and-snapshots) |
 | `session.detach` | | `subscription` | `{}` | ends this connection's attachment; the reply is its terminal acknowledgement |
-| `session.state` | | — | activity, `foreignTurn`, `turn`, `waiting`, `sendNow?`, `queue[]`, `pendingAsks`, `headAsk?`, `err`, `startFailed`, `prompted`, `cancelled`, `settings` | a read, not a cut of the stream |
+| `session.state` | | — | activity, `foreignTurn`, `turn`, `waiting`, `sendNow?`, `queue[]`, `pendingAsks`, `headAsk?`, `err`, `startFailed`, `prompted`, `cancelled`, `settings`, `lastTurn?` | a read, not a cut of the stream; `lastTurn` is [the last turn](#the-last-turn)'s ending |
 | `session.snapshot` | | `agentId?`, `budget?` | `snapshot` | one bounded snapshot, main or one child's, no subscription |
 | `session.sync` | | — | `seq` | the reply barrier with no command ([below](#the-reply-barrier)) |
 | `session.prompt` | ✓ | `text?`, `fromRow?`, `mode` (`queue`\|`send_now`\|`interject`) | `turn`+`text` \| `queued` \| `armed` \| `{}` | `mode: interject` with `fromRow` is refused `-32602`, reason `bad_request` — interject takes text alone |
@@ -263,7 +288,7 @@ same `commandId` is how a client asks "did that happen?" — see
 | `session.set` | ✓ | `setting{kind, id?, value, forModel?}` | `value`, `rev` | `rev` is the seq of the state delta that carried the change, `0` if it could not be learned |
 | `session.setTitle` | ✓ | `title` | `{}` | the delta, not the reply, is how a client learns the title took |
 | `session.subagent.cancel` | ✓ | `agentId` | `{}` | stops one running sub-agent; the rest of the turn goes on; its outcome is the child's `finished` row, as an event |
-| `session.stop` | ✓ | — | — | `unsupported` on every host in protocol 1 (capability `stop: false`); S4's headless hosts implement it |
+| `session.stop` | ✓ | — | `{}` | served where the session capability `stop` is `true` (every `craze serve`), from any client: a **receipt**, not the stop's completion — see [`session.stop`](#sessionstop); a host whose `stop` is `false` (a TUI-hosted session, an older host) answers `unsupported`, reason `stop_unsupported` |
 | `asks.list` | | — | `asks[]` (summaries: `id`, `kind`, `label`, `openedAt`) | |
 | `asks.get` | | `askId` | `ask` (the full record, body strings capped at 256 KiB) | |
 | `asks.answer` | ✓ | `askId`, `answer` | `{}` | the first valid answer wins; an invalid one is `bad_request`, reason `bad_answer`, and leaves the ask open |
@@ -303,6 +328,31 @@ differs by how the engine's turn at being "the session" ends:
   command instead resolves outcome-unknown (`resume_lost`), and the client
   re-reads state (`session.state`, the attach snapshot) to learn what
   actually happened (`internal/remote/reconnect.go:354-373`).
+
+### `session.stop`
+
+Ends the session and its host — distinct from closing a connection or
+detaching a view, neither of which ever stops a session. A host serves it
+where its session capability `stop` is `true`; a client that finds `stop:
+false` (or no answer but `stop_unsupported`) detaches instead, and the session
+runs on where it is.
+
+The reply `{}` is a **receipt**: the host has taken the stop, and the
+session's end follows on the stream — its closing records (a running turn's
+`ended`, stop reason `closing`; every open ask's `closing`) and then
+`reset{session_closed}`, after which the host closes the connection. Before
+the receipt is sent, the host has stopped admitting new attachments: from
+then on a `session.attach` on any connection is `unavailable`, reason
+`closing`, so a client that reads the receipt and attaches is never
+half-attached to a session on its way out; an attachment that was already
+made (pending, live or closing) goes on to the session's end like any other.
+
+Any client may stop the session, and a stop while one is under way — from
+another client, or the same `commandId` resent — is answered `{}` too and
+joins the first: the host runs its stop once. A stop runs no command of the
+engine's, so it is not in the receipts table: a resend is answered `{}`
+again, never `unknown_command`, and a client that lost the receipt need not
+resend it at all — it watches for the session's end.
 
 ### `session.snapshot`
 
@@ -547,6 +597,14 @@ reply](#the-reply)); `capabilities`' fields are documented in full under
 | `catalogs` | `{models[{id,name}], modes[{id,name,description}]}` — empty until the session is ready |
 | `capabilities` | the session's own capability set, below |
 | `retryHorizon` | `{commands, ageMs}` — the command-id table's size and age bound |
+| `permissionMode` | how the host's agent handles permission requests: `bypass` (spawned with `--force`: it runs tools unasked) or `prompt` (`--no-force`: it asks, and a client answers). Absent when the host does not say |
+| `startedAt` | when the host started serving the session, UTC — what a client counts the session's elapsed time from. Absent when the host does not say |
+
+`permissionMode` and `startedAt` are absent from the example above, as they
+are from every host that does not set them — an older one, or the fake host
+by default. Absent, a client falls back to what it knew without them: its own
+configuration's permission mode, and an elapsed time counted from its own
+attach (see [Versioning](#versioning)).
 
 ## Capabilities
 
@@ -559,7 +617,8 @@ alone — plus `snapshot` and `attachWhenNow`, both `true`.
 
 **Session** (the info document's `capabilities`): every field of the
 engine's own capability set, in its wire name, plus four the protocol states
-for every host of protocol 1:
+for every host of protocol 1 — three always `true`, and `stop`, which says
+what this host can do:
 
 | wire name | meaning |
 |---|---|
@@ -578,7 +637,7 @@ for every host of protocol 1:
 | `cancel` | `true` on every host in protocol 1 |
 | `approvals` | `true` on every host in protocol 1 |
 | `historyCursor` | `true` on every host in protocol 1 |
-| `stop` | `false` on every TUI-hosted session; S4's headless hosts set it `true` |
+| `stop` | the host's own, not the provider's: `true` where [`session.stop`](#sessionstop) is served (every `craze serve`), `false` on a TUI-hosted session and on a host from before it existed |
 
 A client hides — never merely disables — whatever a capability says this
 session cannot do. A capability the engine's own `agent.Capabilities` grows
@@ -599,7 +658,12 @@ can still forward it opaquely, but not interpret it.
 
 New behaviour is always announced as a **capability**, never inferred from a
 version number: a client checks `capabilities.foo`, never "am I talking to a
-build recent enough to have foo".
+build recent enough to have foo". A capability or a field that is **absent**
+means an older host: `capabilities.stop` is `false` there (and `session.stop`
+answers `stop_unsupported`), and the info document's `permissionMode` and
+`startedAt` and the state's and row's `lastTurn` are simply not there — a
+client falls back to what it did before each existed, and the schema, closed
+as it is, describes every one of them as optional.
 
 ## The foreign turn
 
@@ -801,7 +865,7 @@ group) are named here so a client never mistakes one for a host's own answer
 |---|---|
 | `not_accepting` | `not_accepting`, `not_in_turn`, `start_failed` |
 | `aborted` | `command_aborted`, `set_outcome_unknown`, `bad_catalog`, `context` |
-| `unavailable` | `log_backed_up`, `ask_unavailable`, `set_unavailable`, `not_run`, `attach_raced`, `not_ready`, `busy` |
+| `unavailable` | `log_backed_up`, `ask_unavailable`, `set_unavailable`, `not_run`, `attach_raced`, `not_ready`, `busy`, `closing` |
 | `failed` | `option_gone`, `failed`, `response_too_large`, `snapshot_too_large` |
 | `bad_request` | `bad_request`, `bad_answer`, `hello_required`, `unknown_field`, `line_too_long`, `protocol_version`, `bad_token`, `already_attached` |
 | `unsupported` | `unsupported`, `unknown_method`, `stop_unsupported`, `roster_unsupported`, `hub_only` |
@@ -855,8 +919,12 @@ craze's own codes directly and does not need this table.
 ## The gate table
 
 What each of `internal/engine`'s own gated commands answers in every state
-the engine can be in — the table's columns are its mutating methods (every
-one but `session.stop`, unsupported on every host in protocol 1). It is not
+the engine can be in — the table's columns are its mutating methods, every
+one but `session.stop`. That one is the host's, not the engine's: it is
+mutating and session-scoped, answered `{}` from any client in **every** state
+below — closing and closed included — by a host that serves it, and
+`stop_unsupported` in every state by one that does not; it is never stored,
+so never retried by id ([above](#sessionstop)). It is not
 every method protocol 1 defines: reads (`session.state`, `session.snapshot`,
 `sessions.list`, `asks.list`, `asks.get`), the attachment methods
 (`session.attach`, `session.detach`), `hello`, and the methods a host never
@@ -944,19 +1012,28 @@ embedded copy — e.g. [`hello.json`](protocol/schema/hello.json),
 
 ## Fixtures and the fake host
 
-`internal/fakehost/testdata/wire/*.ndjson` is thirteen scripted scenarios
+`internal/fakehost/testdata/wire/*.ndjson` is sixteen scripted scenarios
 against a real `internal/control` server over a real engine (wrapping the
 TUI's own `Stub`, never a fixture-only re-implementation) — hello and a fresh
 attach; a cursor resume and its replay; a foreign-incarnation cursor; a
 `slow_consumer` reset and cursor re-attach; an ask answered twice; an invalid
 answer; a cancel on idle; a resent `commandId`, replayed and then mismatched;
 two clients sharing one prompt; four kinds of refusal; a snapshot of the main
-transcript and a child's; an `omitted` reset; and a `hello` resume with a
-right token, a wrong one, and one aged past its bound. Every line is
+transcript and a child's; an `omitted` reset; a `hello` resume with a right
+token, a wrong one, and one aged past its bound; a host that serves
+`session.stop`, its info document carrying `permissionMode` and `startedAt`,
+answering a stop's receipt and then ending the session; a stop joined by
+another client's and by its own resend, with an attach refused `closing`;
+and `lastTurn` in `session.state` and a roster row, after a cancelled turn
+and a foreign one. Every line is
 `{"conn": N, "dir": "c2s"|"s2c", "msg": {...}}`, plus `{"dir": "op", "op":
 {...}}` lines that are not wire messages at all — they script the host
 directly (emitting text, opening an ask, restarting the engine into a fresh
-incarnation, stalling or dropping connections). `TestWireFixtures` replays
+incarnation, stalling or dropping connections, running a stop's sequence) —
+and, as a fixture's first line or not at all, `{"dir": "host", "host":
+{...}}`, which says how the host was built: `stop`, `permissionMode` and
+`startedAt` turn on what an older host does not have. The thirteen fixtures
+without one are, byte for byte, an older host to a newer client. `TestWireFixtures` replays
 every one of them byte for byte, validating every line against the schema
 above as it sends or reads it — except a c2s line fixture 10 marks
 `"invalid": true`: deliberately not a well-formed request of a method
@@ -977,7 +1054,7 @@ then reads the same NDJSON ops described above from stdin —
 `foreign_turn`, `stall_writes`, `resume_writes`, `drop_connections`,
 `restart` (a new incarnation of the same session), `quit`, plus a few the
 fixtures alone need (`spawn_subagent`, `oversized_event`, `advance_clock`,
-`hang_next`). Its clock, ids, host id, craze version, pid and token source
+`hang_next`, `run_stop`). Its clock, ids, host id, craze version, pid and token source
 are all deterministic by default, so a script against it produces the same
 wire traffic on every run and every machine.
 
@@ -1053,6 +1130,7 @@ general — so discovery does not depend on `CRAZE_HOME`, `XDG_RUNTIME_DIR` or
   hosts/<hostId>.json     the registry entry (see below)
   hosts/<hostId>.lock     the host's lifetime flock; holds "<pid> <hostId>"
   locks/<crazeSessionId>.lock   one lock per craze session (SQ16, below)
+  host-logs/<hostId>.log        a detached host's log; not part of discovery
 ```
 
 A registry entry, `hosts/<hostId>.json`, has exactly these members:
@@ -1071,7 +1149,7 @@ A registry entry, `hosts/<hostId>.json`, has exactly these members:
 | `workspace` | The session's working directory |
 | `ready` | Whether the engine has started |
 
-This set is a one-way door: a resolver — `craze bridge`, a future `craze
+This set is a one-way door: a resolver — `craze bridge`, `craze
 attach`, shed — reads these members and connects to nothing merely to find a
 session, so none of them is ever renamed or removed.
 
@@ -1128,9 +1206,9 @@ tracked in the project's own follow-up backlog as SF-49.)
 
 `locks/<crazeSessionId>.lock` is a second kind of lock, one per **craze
 session** rather than per host: the mechanism behind
-[`--continue`/`--resume` of a session already open elsewhere](cli.md#a-session-already-open-in-another-craze).
+[`--continue`/`--resume` of a session already open elsewhere](cli.md#a-session-already-running-in-another-craze).
 It holds `"<pid> <hostId>"`, is taken for the life of the process that loaded
-or started that session, and does not depend on the control socket at all —
+or started that session (a detached `craze serve`, or the TUI's own process when detaching is off), and does not depend on the control socket at all —
 it is taken even with `control_socket = false`.
 
 ## SSH exec: what a client may assume
@@ -1241,7 +1319,7 @@ authenticates getting to the machine at all.
 - **So each end also asks the kernel who the other runs as.** A host checks
   every accepted connection's effective uid before reading a byte of it
   (Linux `SO_PEERCRED`, macOS `LOCAL_PEERCRED`/`LOCAL_PEERPID`); `craze
-  bridge`, a future `craze attach`, and `internal/remote` check the uid of
+  bridge`, `craze attach`, and `internal/remote` check the uid of
   the host they dialed before writing a byte to it. A lookup failure is
   always a refusal, never an allow — a connection whose owner cannot be
   named is exactly the one not to trust. Any OS other than Linux or macOS

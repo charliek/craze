@@ -2,11 +2,13 @@ package tui
 
 import (
 	"errors"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/charliek/craze/internal/agent"
 	"github.com/charliek/craze/internal/engine"
@@ -162,7 +164,7 @@ func TestAStalePickerClaimIsReleased(t *testing.T) {
 // text in an error row, builds nothing, lets the next Enter try again, and a
 // cursor move clears the row.
 func TestAPickerRefusalShowsAnErrorRow(t *testing.T) {
-	f := &fakeClaim{err: errors.New("that session is open in another craze (pid 4242)")}
+	f := &fakeClaim{err: errors.New("that session is already running (pid 4242)")}
 	m, loaded := claimingPicker(t, f.claim)
 	m, cmd := pressEnter(t, m, loaded)
 	tm, _ := m.Update(runCmd(cmd))
@@ -171,7 +173,7 @@ func TestAPickerRefusalShowsAnErrorRow(t *testing.T) {
 		t.Fatal("a refusal closed the picker or built the row")
 	}
 	view := plainView(m)
-	if !strings.Contains(view, "that session is open in another craze (pid 4242)") {
+	if !strings.Contains(view, "that session is already running (pid 4242)") {
 		t.Fatalf("no error row:\n%s", view)
 	}
 	for _, want := range []string{"fix: the flaky pty test", "port the docs site", resumeDialogHint} {
@@ -224,18 +226,37 @@ func TestTheErrorRowNeverTakesTheLastListRow(t *testing.T) {
 // plans at the box's own width, as the body does.
 func TestALongRefusalWrapsInTheBox(t *testing.T) {
 	m, _ := claimingPicker(t, (&fakeClaim{}).claim)
-	m.resumeErr = "that session is open in another craze (pid 1234567) — craze attach --session a1b2c3d4e5f6"
+	m.resumeErr = "that session is already running (pid 1234567) — craze attach --session a1b2c3d4e5f6"
 	m.resumeCursor = 2
 	inner := dialogMaxWidth - dialogBorder
 	body := m.resumeDialogBody(inner, 1<<16)
 	joined := plain(strings.Join(body, "\n"))
-	if !strings.Contains(joined, "that session is open in another craze (pid 1234567)") ||
+	if !strings.Contains(joined, "that session is already running (pid 1234567)") ||
 		!strings.Contains(joined, "craze attach --session a1b2c3d4e5f6") {
 		t.Fatalf("the refusal is not whole in the box:\n%s", joined)
 	}
 	if got := m.resumeErrRows(inner, 1<<16); got != 2 {
 		t.Fatalf("the refusal takes %d rows, want 2", got)
 	}
+	// Whatever the holder's pid, the refusal and the command each sit whole on
+	// a row of the box: the command is never broken where the refusal's own
+	// length leaves the break (plan 030 §3.7).
+	for _, pid := range []string{"7", "4242", "42424", "303035", "1234567"} {
+		m.resumeErr = "that session is already running (pid " + pid + ") — craze attach --session a1b2c3d4e5f6"
+		lines := m.resumeErrLines(inner)
+		whole := func(s string) bool {
+			return slices.ContainsFunc(lines, func(l string) bool { return strings.Contains(l, s) })
+		}
+		if !whole("that session is already running (pid "+pid+")") || !whole("craze attach --session a1b2c3d4e5f6") {
+			t.Fatalf("pid %s: the refusal or the command is broken across rows: %q", pid, lines)
+		}
+		for _, l := range lines {
+			if w := ansi.StringWidth(l); w > inner {
+				t.Fatalf("pid %s: a row of %d cells in a box %d wide: %q", pid, w, inner, l)
+			}
+		}
+	}
+	m.resumeErr = "that session is already running (pid 1234567) — craze attach --session a1b2c3d4e5f6"
 	for budget, want := range map[int]struct {
 		shown, errRows int
 		footer         bool

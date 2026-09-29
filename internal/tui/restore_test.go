@@ -41,12 +41,44 @@ type attachHost struct {
 	path string
 }
 
-// newAttachHost is a host, its engine started when start says so.
+// newAttachHost is a host, its engine started when start says so. It serves
+// no session.stop — a TUI-hosted session's socket, or an older host's.
 func newAttachHost(t *testing.T, start bool) *attachHost {
 	t.Helper()
-	h := &attachHost{stub: NewStubNoPrimary()}
+	return newAttachHostStopping(t, start, false)
+}
+
+// newAttachHostStopping is newAttachHost whose server, with stops, serves
+// session.stop (plan 030 §3.6a) as craze serve does: the stop's sequence
+// closes the engine off the handler's goroutine.
+func newAttachHostStopping(t *testing.T, start, stops bool) *attachHost {
+	t.Helper()
+	if !stops {
+		return newAttachHostStop(t, start, nil)
+	}
+	var h *attachHost
+	h = newAttachHostStop(t, start, func(control.StopRequest) { go func() { _ = h.eng.Close() }() })
+	return h
+}
+
+// newAttachHostStop is newAttachHost whose server serves session.stop with
+// stop as its coordinator (nil: it serves none) — one that ends nothing, a
+// host whose stop hangs, included.
+func newAttachHostStop(t *testing.T, start bool, stop control.StopFunc) *attachHost {
+	t.Helper()
+	stub := NewStubNoPrimary()
+	return newAttachHostWith(t, stub, stub, start, control.Options{Workspace: "/work", Stop: stop})
+}
+
+// newAttachHostWith is newAttachHost over sess, a session with no primary
+// whose Stub is stub (sess itself, or the one a test's decorator wraps),
+// served with o: a plan 030 host's info document (o.PermissionMode,
+// o.StartedAt), or another workspace.
+func newAttachHostWith(t *testing.T, sess agent.Session, stub *Stub, start bool, o control.Options) *attachHost {
+	t.Helper()
+	h := &attachHost{stub: stub}
 	var err error
-	h.eng, err = engine.New(h.stub, engine.Options{})
+	h.eng, err = engine.New(sess, engine.Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -62,7 +94,7 @@ func newAttachHost(t *testing.T, start bool) *attachHost {
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(dir) })
 	h.path = filepath.Join(dir, "s")
-	srv := control.New(control.Options{Workspace: "/work"})
+	srv := control.New(o)
 	srv.SetEngine(h.eng)
 	l, err := net.Listen("unix", h.path)
 	if err != nil {
@@ -601,7 +633,9 @@ func TestARestoreFromAnotherIncarnationMovesTheGeneration(t *testing.T) {
 // session started — as the socket goldens attach, when: "now" — is handed the
 // first attach's snapshot of an empty session. Applying it changes no frame
 // and nothing a frame or the parity watch reads: the model after it is the
-// model that never restored, but for the incarnation its fold now knows.
+// model that never restored, but for the incarnation its fold now knows — and
+// the count of restores the read of the last ending after it is tagged with
+// (plan 030 §3.7, lastturn.go), which nothing draws.
 func TestTheFirstRestoreIsInvisible(t *testing.T) {
 	h := newAttachHost(t, false)
 	s := attachSession(t, h, protocol.WhenNow)
@@ -623,7 +657,7 @@ func TestTheFirstRestoreIsInvisible(t *testing.T) {
 	if a, b := plainView(control), plainView(restored); a != b {
 		t.Fatalf("the first restore moved the frame\n--- without\n%s\n--- with\n%s", a, b)
 	}
-	if got := digestModel(&control).diff(digestModel(&restored)); len(got) != 0 && !slices.Equal(got, []string{"shared"}) {
+	if got := digestModel(&control).diff(digestModel(&restored)); len(got) != 0 && !slices.Equal(got, []string{"restores", "shared"}) {
 		t.Fatalf("the first restore moved %v", got)
 	}
 	cs, rs := control.shared, restored.shared

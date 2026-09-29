@@ -441,8 +441,7 @@ func (f *forwarder) queueReset(reason protocol.ResetReason, endsSession bool) {
 	if !pushed {
 		c.unwritten--
 	}
-	a.state = attClosed
-	a.changedLocked()
+	c.closedLocked(a)
 	if endsSession && !replaced {
 		c.endLocked("session ended")
 	}

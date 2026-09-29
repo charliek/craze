@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"github.com/charliek/craze/internal/agent"
+	"github.com/charliek/craze/internal/backend"
 	"github.com/charliek/craze/internal/engine"
 	"github.com/charliek/craze/internal/protocol"
 	"github.com/charliek/craze/internal/transcript"
@@ -34,6 +35,9 @@ import (
 // exceptions: start_failed is a gate refusal of a session whose start failed,
 // which in process is engine.ErrNotAccepting (refusalLocked); and
 // snapshot_too_large is transcript.ErrSnapshotTooLarge, which the host wraps.
+// One more has a sentinel of the backend's own: stop_unsupported is
+// backend.ErrStopUnsupported (plan 030 §3.6a), so a caller of Stop tells an
+// older host from a failure.
 // A reason sent under another code than the table's, a reason this build does
 // not know, and the client-side reasons (never sent by a host) reconstruct
 // nothing: the error is then its code alone, as an unknown code is failed.
@@ -67,6 +71,11 @@ func sentinels(code protocol.Code, reason protocol.Reason) []error {
 		return []error{context.DeadlineExceeded}
 	case protocol.ReasonAttachRaced:
 		return []error{engine.ErrAttachRaced}
+	case protocol.ReasonClosing:
+		// The engine's close fence (plan 030 §3.6) and the server's attach
+		// fence answer one reason: an attach refused closing is the same
+		// "ask again once the host has decided" as a prompt refused it.
+		return []error{engine.ErrClosing}
 	// failed
 	case protocol.ReasonOptionGone:
 		return []error{agent.ErrOptionGone}
@@ -80,6 +89,11 @@ func sentinels(code protocol.Code, reason protocol.Reason) []error {
 	// unsupported
 	case protocol.ReasonUnsupported:
 		return []error{agent.ErrUnsupported}
+	case protocol.ReasonStopUnsupported:
+		// No engine error stands behind it: the host's own refusal of a
+		// method its capability stop says it does not serve (plan 030
+		// §3.6a), which Session.Stop's caller tells from any other failure.
+		return []error{backend.ErrStopUnsupported}
 	// every other code: the code itself, its one reason
 	case protocol.ReasonUnknownAsk:
 		return []error{agent.ErrUnknownAsk}

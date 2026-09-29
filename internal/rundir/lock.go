@@ -139,7 +139,7 @@ func (e *HeldError) Error() string {
 	if e.Holder.PID > 0 {
 		pid = strconv.Itoa(e.Holder.PID)
 	}
-	s := "rundir: session " + e.CrazeID + " is open in another craze (pid " + pid
+	s := "rundir: session " + e.CrazeID + " is already running (pid " + pid
 	if e.Holder.HostID != "" {
 		s += ", host " + e.Holder.HostID
 	}

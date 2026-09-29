@@ -48,8 +48,18 @@ type Options struct {
 	// so that one thread of work keeps one identity across every agent session
 	// it is loaded into (session control SD-22). Empty mints a fresh UUIDv7,
 	// which is what a new session and a row written before crazeId existed both
-	// want.
+	// want — unless MintedCrazeSessionID gives the fresh id to use.
 	CrazeSessionID string
+	// MintedCrazeSessionID is a NEW session's id, minted by the caller
+	// (NewCrazeSessionID) rather than by New, used only when CrazeSessionID is
+	// empty. It exists for a host that must claim a session before it builds
+	// anything (craze serve, plan 030 C2r2): New queues the journal's
+	// craze_session note, so an id New minted could only be claimed after a
+	// journal line was owed, and a refused claim would leave a journal of a
+	// session that never ran (astra r4-fix12 3). The id is the session's as a
+	// minted one is in every other way; the note records it loaded false,
+	// which CrazeSessionID's carried-in id would not.
+	MintedCrazeSessionID string
 	// ReceiptClock is the command-id table's clock (receipts.go): how long a
 	// result is answerable and how long a released client waits before it can
 	// be retired are measured on it. nil is time.Now, which is what every host
@@ -154,14 +164,16 @@ type launch struct {
 //   - ForeignTurn: foreignLocked, the one read, which notes a true answer for the
 //     section's sync (the owed-drain latch). It is called from canStartLocked
 //     (from submit's canSubmitLocked and nextLocked), submit's send-now gate,
-//     retryLocked, holdCancelLocked's validation, and owedDrainLocked, which
-//     raises the fence itself before it reads.
+//     retryLocked, holdCancelLocked's validation, closeFenceUp, and
+//     owedDrainLocked, which raises the fence itself before it reads.
 //   - Begin: claimLocked (from submit's reserveLocked and nextLocked) and
 //     retryLocked.
 //   - The sections: submit's, holdCancel's (Cancel and Stop; the send-now arm is
-//     inside submit's), and every one that runs passLocked or settleLocked —
-//     runTurn's, drive's, releaseHold's, GiveUp's and GiveUpDrain's. Close raises
-//     it for good. Started and every queue verb only sync it: they read neither,
+//     inside submit's), every one that runs passLocked or settleLocked —
+//     runTurn's, drive's, releaseHold's, GiveUp's and GiveUpDrain's — and the
+//     close fence's (closeFenceUp, plan 030 §3.6), which reads the flag for its
+//     busy verdict and keeps the fence up while a close fence stands. Close
+//     raises it for good. Started and every queue verb only sync it: they read neither,
 //     but change what the fence should be. The same test also holds, by parsing,
 //     that every method that changes an input of the fence — the queue, the
 //     activity, the current turn, the cancel count, stopped — syncs it or is
@@ -181,7 +193,9 @@ type launch struct {
 // The observer runs inside the log's publishing boundary and takes leaves
 // only, one after another and never one inside another: the transcript model's
 // own mutex, in its first statement (e.model.Fold); then e.obsMu, which guards
-// the two flags it keeps; then the index writer's (idx.post). So the order is
+// what it keeps (the replay flag, and the last turn's ending — plan 030 §3.7),
+// taken once per section and released before the next; then the index
+// writer's (idx.post). So the order is
 // **the boundary → model.mu** (and the boundary → each of the other two), and
 // the other direction never happens: Snapshot takes model.mu with the boundary
 // never held and releases it before it returns — a snapshot is a value — so
@@ -255,9 +269,39 @@ type Engine struct {
 	// paced recheck is owed: the driver's tick is armed for it (rearm), and the
 	// tick's pass is that recheck, whatever it finds. Only a tick clears it.
 	recheck bool
+	// closeFences is how many close fences are up (FenceClose, closefence.go):
+	// while it is not 0 every admission is refused ErrClosing and the
+	// session's admission fence stays up. passHeld says a pass — a settlement's
+	// successor, a drain — found nothing it could start while one was up, so
+	// the kick that asked for it is replayed when the last fence comes down.
+	// setRunning says the settings worker has taken a request out of the
+	// queue and not yet answered it: a settings command in progress.
+	// admitting counts the commands admitted whose work runs after e.mu is
+	// released — a rename's session call and index row, an interjection's
+	// call, a submit's first-prompt seed — from the section that admitted them
+	// (admitLocked) until that work is done: in flight to a close fence as a
+	// running Set is, so a verdict cannot come between a command's admission
+	// and what it does (plan 030 C5r, astra r8-c5 2).
+	closeFences int
+	passHeld    bool
+	setRunning  bool
+	admitting   int
 
 	obsMu     sync.Mutex
 	replaying bool
+	// replayRetired says the session's start failed (Started): a replay it
+	// opened will never close — a load that fails emits no end bracket
+	// (live.go's and native.go's load) — so the flag is cleared then and a
+	// start bracket is ignored from there on, and a failed load is not
+	// "replaying" for ever to a host's idle exit (plan 030 C5r, astra
+	// r8-c5 3).
+	replayRetired bool
+	// lastTurn is State.LastTurn (plan 030 §3.7): the ending of the last turn
+	// the observer saw end, nil once one has started since. The observer
+	// writes it, in commit order, from the stream's own turn events
+	// (turnEnding), so it names the turns a client's fold names; it is
+	// replaced, never mutated, so State hands out the pointer it read.
+	lastTurn *LastTurn
 
 	// receipts is the command-id table (receipts.go): one table for the whole
 	// engine, shared by every client, with its own mutex — a LEAF. It is never
@@ -377,7 +421,10 @@ func newEngine(sess agent.Session, opts Options, h *hooks) (*Engine, error) {
 	}
 	craze := opts.CrazeSessionID
 	if craze == "" {
-		craze = newCrazeSessionID()
+		craze = opts.MintedCrazeSessionID
+	}
+	if craze == "" {
+		craze = NewCrazeSessionID()
 	}
 	e := &Engine{
 		sess:     sess,
@@ -518,9 +565,27 @@ func (e *Engine) Started(err error) {
 		e.activity = ActivityError
 		e.startFailed = true
 		e.err = err.Error()
+		e.retireReplay()
 		return
 	}
 	e.activity = ActivityIdle
+}
+
+// retireReplay is a failed start's end of any replay it opened (plan 030
+// C5r): a load that fails has published its start bracket and never publishes
+// the end — every provider's (live.go's loadSession, native.go's load) — so
+// the observer's flag would stay up, and a host's idle exit would read a
+// replay that is running for ever. It clears the flag and ignores a start
+// bracket from here on, in one e.obsMu section: a start is published inside
+// Start, before Started can run, but a bracket that did arrive later still
+// opens nothing. Every provider is covered here, and not in each load path,
+// because this is the one place that knows the start is over. e.mu is held
+// (e.mu → e.obsMu, as refusalLocked's read already is).
+func (e *Engine) retireReplay() {
+	e.obsMu.Lock()
+	e.replaying = false
+	e.replayRetired = true
+	e.obsMu.Unlock()
 }
 
 // Events is the session's primary subscription.
@@ -647,16 +712,20 @@ func (e *Engine) Answer(c Command, id string, a agent.AskAnswer) error {
 }
 
 // Interject merges text into the running turn. It is the session's own verb
-// and its own refusals: the engine adds nothing but the door.
+// and its own refusals: the engine adds nothing but the door — and the count
+// that keeps the call in flight to a close fence until it has returned
+// (admitLocked): the turn it was meant for can end while it is on its way, and
+// an agent may then take the text as a turn of its own (plan 030 C5r).
 func (e *Engine) Interject(ctx context.Context, c Command, text string) error {
 	hash := receiptHash("Interject", text)
 	return withBlockingReceiptErr(ctx, e.receipts, c, hash, func() error {
 		e.mu.Lock()
-		refused := e.refusalLocked()
+		done, refused := e.admitLocked()
 		e.mu.Unlock()
 		if refused != nil {
 			return refused
 		}
+		defer done()
 		return e.sess.Interject(ctx, text)
 	})
 }
@@ -787,13 +856,25 @@ func (e *Engine) observe(ev agent.Event) {
 	if ev.Agent != "" || ev.Type == agent.EventSubagent {
 		return
 	}
+	// The last turn's ending (plan 030 §3.7): kept here, in commit order, and
+	// not where a settlement decides it under e.mu, because a foreign turn has
+	// no settlement — its brackets are the session's — and because this is
+	// the order a client folds: a TurnID read from State is one the fold has
+	// seen by the same seq.
+	if starts, ended := turnEnding(ev); starts || ended != nil {
+		e.obsMu.Lock()
+		e.lastTurn = ended
+		e.obsMu.Unlock()
+	}
 	switch ev.Type {
 	case agent.EventReplay:
 		if ev.Replay == nil {
 			return
 		}
 		e.obsMu.Lock()
-		e.replaying = ev.Replay.Phase == agent.ReplayStart
+		// A failed start has retired every replay (retireReplay): a start
+		// bracket after it opens nothing.
+		e.replaying = ev.Replay.Phase == agent.ReplayStart && !e.replayRetired
 		e.obsMu.Unlock()
 		if ev.Replay.Phase == agent.ReplayEnd {
 			e.wake()
@@ -843,7 +924,18 @@ func (e *Engine) isReplaying() bool {
 	return e.replaying
 }
 
+// observed is what the observer keeps, read in one e.obsMu section: whether a
+// replay is running, and the last turn's ending (State.LastTurn).
+func (e *Engine) observed() (replaying bool, last *LastTurn) {
+	e.obsMu.Lock()
+	defer e.obsMu.Unlock()
+	return e.replaying, e.lastTurn
+}
+
 // refusalLocked is why the engine admits no command at all right now, or nil.
+// A close fence (FenceClose) is looked at last: an engine that would refuse
+// for good, or until its start or its replay is over, says so rather than
+// "try again once the host has decided".
 func (e *Engine) refusalLocked() error {
 	switch {
 	case e.closed, e.stopped:
@@ -852,6 +944,8 @@ func (e *Engine) refusalLocked() error {
 		return ErrNotAccepting
 	case e.isReplaying():
 		return ErrNotAccepting
+	case e.closeFences > 0:
+		return ErrClosing
 	}
 	return nil
 }
@@ -936,16 +1030,19 @@ func (e *Engine) syncFenceLocked() {
 // idle. A turn of its own is current, a cancel it validated is still on its way
 // to the session, or a drain is owed; and a stopped or closed engine keeps it up
 // for good — nothing will be admitted again, GiveUpDrain's abandonment included,
-// and nothing may start behind a client that has been told so. An error state,
-// starting and replaying keep it up for none of these reasons, and lower it: a
-// failed turn owes nothing (astra's round-4 pin).
+// and nothing may start behind a client that has been told so. A close fence
+// keeps it up while it stands (FenceClose): the host is deciding whether to end
+// the session, and a turn the session started of its own in that moment would
+// be work the decision never saw. An error state, starting and replaying keep
+// it up for none of these reasons, and lower it: a failed turn owes nothing
+// (astra's round-4 pin).
 //
 // The owed drain is settled first and on every sync, whatever the other terms
 // say, because it is a latch: it has to be cleared by the sync that sees it
 // withdrawn, not merely outvoted while a turn is current.
 func (e *Engine) fenceWantLocked() bool {
 	owed := e.owedDrainLocked()
-	return e.closed || e.stopped || e.cur != nil || e.cancelsInFlight > 0 || owed
+	return e.closed || e.stopped || e.cur != nil || e.cancelsInFlight > 0 || e.closeFences > 0 || owed
 }
 
 // owedDrainLocked settles the owed-drain latch (drainOwed) and reports it. A
@@ -1047,6 +1144,16 @@ func (e *Engine) submit(c Command, text string, mode SubmitMode, fromRow string)
 	// armedTurn is the turn an arm asked to have cancelled, carried out of the
 	// locked section so the cancel itself is made with the lock released.
 	armedTurn, armedCause := "", ""
+	// admitted is the admission's count (admitLocked), given back once
+	// everything below is done: the turn is current or the row queued by
+	// then, both busy in their own right, and the first prompt's seed — the
+	// index write runOwn makes after the lock — is covered until it is over.
+	var admitted func()
+	defer func() {
+		if admitted != nil {
+			admitted()
+		}
+	}()
 	res, err := func() (SubmitResult, error) {
 		e.mu.Lock()
 		defer e.mu.Unlock()
@@ -1054,9 +1161,11 @@ func (e *Engine) submit(c Command, text string, mode SubmitMode, fromRow string)
 		// admission fence), and back to what the engine is on every way out.
 		defer e.syncFenceLocked()
 		e.raiseFenceLocked()
-		if err := e.refusalLocked(); err != nil {
+		done, err := e.admitLocked()
+		if err != nil {
 			return SubmitResult{}, err
 		}
+		admitted = done
 		if !e.log.OutboxRoom() {
 			return SubmitResult{}, ErrUnavailable
 		}
@@ -1562,6 +1671,13 @@ func (e *Engine) GiveUpDrain(c Command) (turn string, pending int, err error) {
 				ferr = ErrNotAccepting
 				return
 			}
+			if e.closeFences > 0 && e.cur == nil {
+				// A close fence refuses the drain for now, and giving up on
+				// it here would abandon it for good over a pause: the caller
+				// asks again once the host has decided (FenceClose).
+				ferr = ErrClosing
+				return
+			}
 			if e.cur == nil {
 				next = e.passLocked()
 			}
@@ -1628,6 +1744,13 @@ func (e *Engine) drainLocked() []launch {
 // own, nor while a cancel is on its way to the session.
 func (e *Engine) nextLocked(queueMayRun bool) (*launch, []agent.Event, []agent.Event) {
 	if e.activity != ActivityIdle || !e.canStartLocked() {
+		if e.closeFences > 0 {
+			// A close fence may be what held this pass back, and the kick
+			// that asked for it is spent: the last fence to come down replays
+			// it (releaseCloseFence), so a successor or a drain the fence
+			// deferred is not left for a kick that never comes.
+			e.passHeld = true
+		}
 		return nil, nil, nil
 	}
 	var before, disarm []agent.Event

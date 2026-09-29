@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://charliek.github.io/craze/reference/protocol/schema/session.stop.json",
   "title": "session.stop",
-  "description": "Ends the session and its host: distinct from closing a connection or a view, neither of which ever stops a session. A TUI-hosted session's host answers unsupported, reason stop_unsupported (session capability stop: false); S4's headless host implements it.",
+  "description": "Ends the session and its host: distinct from closing a connection or a view, neither of which ever stops a session. Served where the session capability stop is true (every craze serve), and answered {} at once: a receipt, not the stop's completion. New attaches are refused unavailable, reason closing, from before the receipt; the session's end follows on the stream (its closing records, then reset{session_closed}). A stop while one runs, from any client, is answered {} and joins it; a resent commandId is answered {} again. A host whose capability stop is false (a TUI-hosted session, an older host) answers unsupported, reason stop_unsupported.",
   "$defs": {
     "params": {
       "type": "object",

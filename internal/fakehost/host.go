@@ -13,6 +13,7 @@ import (
 	"github.com/charliek/craze/internal/agent"
 	"github.com/charliek/craze/internal/control"
 	"github.com/charliek/craze/internal/engine"
+	"github.com/charliek/craze/internal/protocol"
 	"github.com/charliek/craze/internal/tui"
 )
 
@@ -44,6 +45,26 @@ type Options struct {
 	CrazeSessionID string
 	// Log receives the server's own connection log lines; nil discards them.
 	Log func(string)
+
+	// The rest are plan 030's opt-ins (§3.6a, §3.7). Each is off by default,
+	// and off, the Host's wire is exactly an S2 host's — which is an older
+	// host's to a plan 030 client, so the fixtures from before plan 030 are
+	// that direction of §3.8's compatibility, unchanged (X1).
+	//
+	// Stop serves session.stop (capabilities.stop: true) through the
+	// fixtures' own coordinator: the server raises its stop fence and answers
+	// the receipt exactly as a real host's does, and the coordinator records
+	// the stop and does nothing more until the run_stop op (RunStop) runs its
+	// sequence — the engine's close — so a fixture places the session's end
+	// exactly, with a duplicate stop or a refused attach before it. Off,
+	// session.stop is refused unsupported, reason stop_unsupported.
+	Stop bool
+	// PermissionMode is the info document's permissionMode; "" leaves it
+	// out.
+	PermissionMode protocol.PermissionMode
+	// StartedAt puts the info document's startedAt in: the Host's pinned
+	// clock as New reads it (2026-01-01T00:00:00Z). Off leaves it out.
+	StartedAt bool
 }
 
 func (o Options) withDefaults() Options {
@@ -125,22 +146,39 @@ type Host struct {
 	mu   sync.Mutex
 	stub *tui.Stub
 	eng  *engine.Engine
+	// stops is how many session.stop requests the server handed the
+	// fixtures' coordinator (Options.Stop): at most one, the server's own
+	// rule. stopped says run_stop has run the sequence.
+	stops int
+	// stopHeard is closed on the first stop the server hands over, so
+	// RunStop can wait for it (stopHeardWait).
+	stopHeard     chan struct{}
+	stopHeardOnce sync.Once
+	stopped       bool
 }
 
 // New builds a Host and its first incarnation, started. Nothing is served
 // until Serve is called.
 func New(o Options) (*Host, error) {
 	o = o.withDefaults()
-	h := &Host{opts: o, clk: newClock()}
-	h.srv = control.New(control.Options{
-		Log:          o.Log,
-		HostID:       o.HostID,
-		CrazeVersion: o.CrazeVersion,
-		PID:          o.PID,
-		Workspace:    o.Workspace,
-		Tokens:       newDetTokens(),
-		Clock:        h.clk.now,
-	})
+	h := &Host{opts: o, clk: newClock(), stopHeard: make(chan struct{})}
+	co := control.Options{
+		Log:            o.Log,
+		HostID:         o.HostID,
+		CrazeVersion:   o.CrazeVersion,
+		PID:            o.PID,
+		Workspace:      o.Workspace,
+		Tokens:         newDetTokens(),
+		Clock:          h.clk.now,
+		PermissionMode: o.PermissionMode,
+	}
+	if o.Stop {
+		co.Stop = h.stopRequested
+	}
+	if o.StartedAt {
+		co.StartedAt = h.clk.now()
+	}
+	h.srv = control.New(co)
 	if err := h.newIncarnation(); err != nil {
 		return nil, err
 	}
@@ -278,7 +316,9 @@ func (h *Host) Incarnation() string { return h.currentEngine().State().Incarnati
 // StallWrites), spawn_subagent (fixture 11's child), oversized_event
 // (fixture 12's omitted record), advance_clock (fixture 13's retired
 // client, past the binding table's idle bound) and hang_next (fixture 9's
-// prompt, kept from racing its own reply: see HangNext). Do is what runs an
+// prompt, kept from racing its own reply: see HangNext). Plan 030 adds
+// run_stop (RunStop): the stop sequence of a Host built with Options.Stop,
+// run where a fixture's script says. Do is what runs an
 // op to completion — the op, then the log flushed (syncLog) — so a caller
 // that needs the script's seq order goes through Do, as both of those do.
 
@@ -519,6 +559,52 @@ func (h *Host) AdvanceClock(d time.Duration) { h.clk.advance(d) }
 // mean this.
 func (h *Host) Quit(ctx context.Context) error { return h.Close(ctx) }
 
+// stopRequested is the fixtures' coordinator (control.StopFunc, with
+// Options.Stop): it records the stop the server handed it — once, the
+// server's own rule — and returns, the sequence left to RunStop.
+func (h *Host) stopRequested(control.StopRequest) {
+	h.mu.Lock()
+	h.stops++
+	h.mu.Unlock()
+	h.stopHeardOnce.Do(func() { close(h.stopHeard) })
+}
+
+// stopHeardWait bounds how long RunStop waits for the server to hand the
+// coordinator its stop. Since plan 030 C1r the server queues a stop's {}
+// receipt before it calls the coordinator (X3), so a fixture that read the
+// receipt can reach run_stop an instant before the handler's call lands.
+const stopHeardWait = 10 * time.Second
+
+// RunStop is the run_stop op: the fixtures' coordinator runs the stop
+// sequence it was handed (plan 030 §3.6a) — here, the current engine's close,
+// which authors a running turn's ending and ends every attachment with its
+// closing records and reset{session_closed}, and every connection with them.
+// The server itself is closed by Close, as a fixture's runner does at its
+// end. It fails unless exactly one stop was handed over and the sequence has
+// not run yet: a fixture that says run_stop has proven the coordinator heard
+// its stop, once, however many were sent.
+func (h *Host) RunStop() error {
+	if h.opts.Stop {
+		select {
+		case <-h.stopHeard:
+		case <-time.After(stopHeardWait):
+		}
+	}
+	h.mu.Lock()
+	stops, stopped := h.stops, h.stopped
+	h.stopped = true
+	h.mu.Unlock()
+	switch {
+	case !h.opts.Stop:
+		return fmt.Errorf("fakehost: run_stop: this Host does not serve session.stop (Options.Stop)")
+	case stops != 1:
+		return fmt.Errorf("fakehost: run_stop: the coordinator was handed %d stops, want exactly 1", stops)
+	case stopped:
+		return fmt.Errorf("fakehost: run_stop: the stop sequence has already run")
+	}
+	return h.currentEngine().Close()
+}
+
 // opParams is one op's wire shape: {"name": "...", ...}, the union of every
 // op's own fields (Do). It is the same shape cmd/craze-fake-host reads from
 // stdin and a fixture's "op" lines carry.
@@ -593,7 +679,8 @@ func (h *Host) Do(raw json.RawMessage) error {
 	if err := h.do(p); err != nil {
 		return err
 	}
-	if p.Name == "quit" {
+	if p.Name == "quit" || p.Name == "run_stop" {
+		// The engine has closed: its log has nothing left to flush.
 		return nil
 	}
 	return syncLog(h.currentEngine())
@@ -647,6 +734,8 @@ func (h *Host) do(p opParams) error {
 		return h.Restart()
 	case "quit":
 		return h.Quit(context.Background())
+	case "run_stop":
+		return h.RunStop()
 	case "spawn_subagent":
 		h.SpawnSubagent(p.ID)
 	case "oversized_event":

@@ -14,6 +14,7 @@ import (
 	"github.com/charliek/craze/internal/atomicfile"
 	"github.com/charliek/craze/internal/control"
 	"github.com/charliek/craze/internal/engine"
+	"github.com/charliek/craze/internal/protocol"
 	"github.com/charliek/craze/internal/rundir"
 	"github.com/charliek/craze/internal/sessions"
 	"github.com/charliek/craze/internal/tui"
@@ -49,12 +50,17 @@ import (
 // 6).
 const controlSocketEnv = "CRAZE_CONTROL_SOCKET"
 
-// The teardown's bounds, and SQ16's.
+// flushWait is how long the server is given, once the engine has closed, to
+// write what its connections still owe — an attached client's final records
+// and reset{session_closed} (§3.7) — before it is closed. A variable only so
+// that the teardown-order test can lengthen it (never in parallel): that test
+// queues megabytes behind a full socket buffer, which a starved CPU cannot
+// write in 500 ms, and what it proves is that the teardown waits for the
+// flush — not how fast the flush is.
+var flushWait = 500 * time.Millisecond
+
+// The teardown's other bounds, and SQ16's.
 const (
-	// flushWait is how long the server is given, once the engine has closed,
-	// to write what its connections still owe — an attached client's final
-	// records and reset{session_closed} (§3.7) — before it is closed.
-	flushWait = 500 * time.Millisecond
 	// flushPoll is how often the flush wait looks at the open connections.
 	flushPoll = 10 * time.Millisecond
 	// closeWait bounds Server.Close: past it a handler parked where nothing
@@ -110,7 +116,8 @@ type runHost struct {
 	claims *sessionClaims
 	ctl    *controlHost // nil when not serving
 
-	closeOnce sync.Once
+	socketOnce sync.Once
+	claimsOnce sync.Once
 }
 
 // onEngine is tui.Config.OnEngine: it runs inside Update when a picker
@@ -120,28 +127,59 @@ type runHost struct {
 // picker load claimed it before the build, and a second flock on another
 // descriptor would contend with ourselves; the registry entry is rewritten
 // for it, and again once it is ready (controlHost.track).
-func (r *runHost) onEngine(eng *engine.Engine) {
+func (r *runHost) onEngine(eng *engine.Engine) { r.publish(eng) }
+
+// publish is onEngine, answering a channel closed once the registry entry
+// first carries eng's identity — the first of its rewrites to land (every
+// rewrite writes the whole identity) — which is when a resolver reading the
+// registry can find the session by its craze id: craze serve's ready line
+// waits for it (plan 030 §3.4). nil, never closed, when no socket is served.
+func (r *runHost) publish(eng *engine.Engine) <-chan struct{} {
 	if r.ctl != nil {
 		r.ctl.server.SetEngine(eng)
 	}
 	st := eng.State()
 	r.claims.ensure(st.CrazeSessionID)
-	if r.ctl != nil {
-		r.ctl.track(eng, st)
+	if r.ctl == nil {
+		return nil
 	}
+	return r.ctl.track(eng, st)
 }
 
 // close is the run's teardown: the socket first (controlHost.close), then
 // every session claim — last, so a session stays claimed until nothing of
-// this process can still act on it. It runs once; a later call is a no-op.
+// this process can still act on it. Each half runs once; a later call, or one
+// after craze serve's own stop sequence ran them (serveHost.stop), is a
+// no-op.
 func (r *runHost) close() {
-	r.closeOnce.Do(func() {
+	r.closeSocket()
+	r.releaseClaims()
+}
+
+// closeSocket is the socket's half of close, once: S2's close order
+// (controlHost.close), when there is a socket.
+func (r *runHost) closeSocket() {
+	r.socketOnce.Do(func() {
 		if r.ctl != nil {
 			r.ctl.close()
 		}
+	})
+}
+
+// releaseClaims is the claims' half of close, once.
+func (r *runHost) releaseClaims() {
+	r.claimsOnce.Do(func() {
 		r.claims.releaseAll()
 		teardownStep("released")
 	})
+}
+
+// keepClaims is craze serve's stop sequence leaving the claims to the
+// process's exit, which ends a start that did not join at the same moment
+// (serveHost.stop): release is a no-op from here. In a test's process, which
+// does not exit, they are held until the test ends.
+func (r *runHost) keepClaims() {
+	r.claimsOnce.Do(func() { teardownStep("claims left to the exit") })
 }
 
 // controlHost is a bound control socket and the server on it (plan 027 §3.7,
@@ -169,11 +207,22 @@ type controlHost struct {
 	writerDone chan struct{}
 }
 
-// rewrite is one registry rewrite, for the engine it describes.
+// rewrite is one registry rewrite, for the engine it describes, and the
+// landing it reports to when it succeeds.
 type rewrite struct {
-	eng *engine.Engine
-	fn  func(*rundir.Entry)
+	eng    *engine.Engine
+	fn     func(*rundir.Entry)
+	landed *landing
 }
+
+// landing is the first successful rewrite of one engine's identity: ch is
+// closed when it lands, once, whichever of that engine's rewrites it is.
+type landing struct {
+	once sync.Once
+	ch   chan struct{}
+}
+
+func (l *landing) land() { l.once.Do(func() { close(l.ch) }) }
 
 // serveControl binds the control socket and serves it (plan 027 §3.8's
 // "Bind"): the host lock, the socket (0600 in its 0700 directory), the
@@ -181,21 +230,49 @@ type rewrite struct {
 // byte. workspace is the absolute workspace. A failure is one line on diag —
 // `craze: control socket off: <why>` — and nil: the run continues exactly as
 // it would without a socket.
-func serveControl(env rundir.Env, hostID, workspace string, diag io.Writer) *controlHost {
-	host, err := rundir.Bind(env, hostID, rundir.Entry{StartedAt: time.Now().UTC(), Workspace: workspace})
+//
+// The info document tells a client what this host is (plan 030 §3.7): its
+// permission mode, from the run's --force/--no-force (force), and its start,
+// the one instant the registry entry's startedAt records too — for the
+// server's life, a picker replacing the engine included. The server is built
+// with no coordinator: a TUI-hosted session is stopped by its own TUI's quit,
+// and refuses session.stop, stop_unsupported (§3.6a).
+func serveControl(env rundir.Env, hostID, workspace string, force bool, diag io.Writer) *controlHost {
+	h, err := bindControl(env, hostID, workspace, force, nil, diag)
 	if err != nil {
 		fmt.Fprintf(diag, "craze: control socket off: %v\n", err)
 		return nil
+	}
+	return h
+}
+
+// bindControl is serveControl's bind and serve, answering a failure rather
+// than warning about it: for craze serve a socket it cannot bind is fatal
+// (plan 030 §3.3), since a headless host is reachable through nothing else.
+// A failure has bound nothing — rundir.Bind unwinds what it built — and
+// started no goroutine. stop is the host's lifecycle coordinator
+// (control.Options.Stop): set, the server serves session.stop and advertises
+// capabilities.stop; nil — the TUI-hosted path — it refuses it,
+// stop_unsupported.
+func bindControl(env rundir.Env, hostID, workspace string, force bool, stop control.StopFunc, diag io.Writer) (*controlHost, error) {
+	started := time.Now().UTC()
+	host, err := rundir.Bind(env, hostID, rundir.Entry{StartedAt: started, Workspace: workspace})
+	if err != nil {
+		return nil, err
 	}
 	h := &controlHost{
 		host: host,
 		// No Log: nothing may reach the terminal while the TUI owns it, and
 		// each connection's note reaches the session's journal through the
-		// engine (control_conn).
+		// engine (control_conn) — a headless host's too, whose log would
+		// only repeat it.
 		server: control.New(control.Options{
-			PeerCheck: rundir.PeerCheck(os.Geteuid()),
-			HostID:    hostID,
-			Workspace: workspace,
+			PeerCheck:      rundir.PeerCheck(os.Geteuid()),
+			HostID:         hostID,
+			Workspace:      workspace,
+			PermissionMode: permissionMode(force),
+			StartedAt:      started,
+			Stop:           stop,
 		}),
 		diag:       diag,
 		update:     host.Update,
@@ -211,7 +288,16 @@ func serveControl(env rundir.Env, hostID, workspace string, diag io.Writer) *con
 		}
 	}()
 	go h.writeLoop()
-	return h
+	return h, nil
+}
+
+// permissionMode is the info document's word for how a host spawned its
+// agent (plan 030 §3.7, SF-60): --force is bypass, --no-force prompt.
+func permissionMode(force bool) protocol.PermissionMode {
+	if force {
+		return protocol.PermissionBypass
+	}
+	return protocol.PermissionPrompt
 }
 
 // track rewrites the registry entry for eng, not ready, and once eng.Ready()
@@ -221,16 +307,19 @@ func serveControl(env rundir.Env, hostID, workspace string, diag io.Writer) *con
 // (identity), never a part of it: a rewrite that failed is made good by the
 // next that succeeds, so the entry is never ready under a stale or empty
 // identity. It queues and returns: the writes happen on the writer goroutine,
-// in order.
-func (h *controlHost) track(eng *engine.Engine, st engine.State) {
+// in order. The channel it answers is closed when the first of eng's
+// rewrites lands — a failed one is made good by the next (the ready rewrite)
+// — and never for an engine replaced first or a host closed first.
+func (h *controlHost) track(eng *engine.Engine, st engine.State) <-chan struct{} {
 	stop := make(chan struct{})
+	landed := &landing{ch: make(chan struct{})}
 	h.mu.Lock()
 	if h.engStop != nil {
 		close(h.engStop)
 	}
 	h.eng, h.engStop = eng, stop
 	h.mu.Unlock()
-	h.enqueue(eng, identity(st, false))
+	h.enqueue(eng, identity(st, false), landed)
 	go func() {
 		select {
 		case <-eng.Ready():
@@ -247,8 +336,9 @@ func (h *controlHost) track(eng *engine.Engine, st engine.State) {
 		if st.Activity == engine.ActivityClosing && !st.StartFailed {
 			return
 		}
-		h.enqueue(eng, identity(st, !st.StartFailed))
+		h.enqueue(eng, identity(st, !st.StartFailed), landed)
 	}()
+	return landed.ch
 }
 
 // identity is a rewrite of the registry entry to st, one engine's state at one
@@ -264,10 +354,11 @@ func identity(st engine.State, ready bool) func(*rundir.Entry) {
 	}
 }
 
-// enqueue queues a rewrite for the writer, without blocking.
-func (h *controlHost) enqueue(eng *engine.Engine, fn func(*rundir.Entry)) {
+// enqueue queues a rewrite for the writer, without blocking; landed, when
+// set, is told if it succeeds.
+func (h *controlHost) enqueue(eng *engine.Engine, fn func(*rundir.Entry), landed *landing) {
 	h.mu.Lock()
-	h.queue = append(h.queue, rewrite{eng: eng, fn: fn})
+	h.queue = append(h.queue, rewrite{eng: eng, fn: fn, landed: landed})
 	h.mu.Unlock()
 	select {
 	case h.wake <- struct{}{}:
@@ -305,6 +396,10 @@ func (h *controlHost) writeLoop() {
 					return
 				}
 				h.warnOnce(err)
+				continue
+			}
+			if r.landed != nil {
+				r.landed.land()
 			}
 		}
 	}
@@ -376,6 +471,11 @@ type sessionClaims struct {
 	index crazeIDIndex
 	// indexWait bounds the index lock EnsureCrazeID takes; a test shortens it.
 	indexWait time.Duration
+	// required makes every claim a condition of running (craze serve, plan
+	// 030 §3.3): a claim that cannot be taken is an *unclaimedError from
+	// claimRow and require, never the warning the TUI's X30 fallback gives
+	// (astra r3-c2 1). Set before the first claim, never after.
+	required bool
 
 	mu   sync.Mutex
 	held map[string]*rundir.Claim
@@ -466,6 +566,45 @@ func (c *sessionClaims) ensure(id string) {
 	}
 }
 
+// require claims id for a host that must hold it (required: craze serve's new
+// session, whose id it has just minted, before anything is built), or says
+// why it cannot; an id this process holds already answers at once. It is
+// claimSession with every failure an *unclaimedError, a session another
+// process holds included: a fresh UUIDv7 held elsewhere is not a session to
+// attach to.
+func (c *sessionClaims) require(id string) *unclaimedError {
+	if _, err := c.claimSession(id); err != nil {
+		return &unclaimedError{err: err}
+	}
+	return nil
+}
+
+// unclaimedError is a claim a host that must hold one could not take
+// (sessionClaims.required): the lock tree or the index it needs cannot be
+// used, and the host does not run.
+type unclaimedError struct{ err error }
+
+func (e *unclaimedError) Error() string {
+	return "the session cannot be claimed: " + e.err.Error()
+}
+
+func (e *unclaimedError) Unwrap() error { return e.err }
+
+// exit is craze serve's refusal for it: exit 1, in serve's own words — the
+// TUI never runs with required set, so no shared refusal says it.
+func (e *unclaimedError) exit() error {
+	return &exitError{code: 1, msg: "craze serve: " + e.Error(), cause: e}
+}
+
+// unclaimedBy is the *unclaimedError err carries, or nil.
+func unclaimedBy(err error) *unclaimedError {
+	var u *unclaimedError
+	if errors.As(err, &u) {
+		return u
+	}
+	return nil
+}
+
 // skip warns, once, that id's claim was not taken, and remembers it.
 func (c *sessionClaims) skip(id string, err error) {
 	c.mu.Lock()
@@ -496,12 +635,19 @@ func (c *sessionClaims) skip(id string, err error) {
 // it is a warning, and the load proceeds unclaimed with the row's own id
 // (X30). The lock protects against a second craze; it must not lock the user
 // out of their own session because of their filesystem.
+//
+// Unless the claims are required (craze serve): then a claim that could not
+// be attempted refuses too, an *unclaimedError, and so does a legacy row that
+// cannot be given its durable id — an id the engine minted instead would be
+// this host's alone, and a second host loading the row would claim another.
 func (c *sessionClaims) claimRow(row sessions.Row) (id string, release func(), err error) {
 	noop := func() {}
 	id, err = c.index.EnsureCrazeID(row, c.indexWait)
 	switch {
 	case errors.Is(err, atomicfile.ErrLockBusy), errors.Is(err, sessions.ErrNotInIndex):
 		return "", nil, err
+	case err != nil && row.CrazeID == "" && c.required:
+		return "", nil, &unclaimedError{err: err}
 	case err != nil && row.CrazeID == "":
 		// No durable id, and none can be written: nothing to claim. The engine
 		// mints one, which the row takes on its next write and onEngine claims.
@@ -517,6 +663,8 @@ func (c *sessionClaims) claimRow(row sessions.Row) (id string, release func(), e
 	switch {
 	case errors.As(err, &held), errors.Is(err, errClaimsClosed):
 		return "", nil, err
+	case err != nil && c.required:
+		return "", nil, &unclaimedError{err: err}
 	case err != nil:
 		c.skip(id, err)
 		return id, noop, nil
@@ -569,6 +717,11 @@ func (c *sessionClaims) pickerRefusal(err error) string {
 // the busy index, or the index that changed under the load. Where a held
 // session can be reached instead is its callers' to add: the picker's hint
 // (pickerRefusal), --continue's attach or its no-socket refusal (attachHeld).
+//
+// A held session is "already running" (plan 030 §3.7, SQ16's wording): its
+// holder is, from plan 030 on, most often a detached host (craze serve) with
+// no terminal of its own, not another craze someone has open — so the refusal
+// names what the session is doing, and the pid who holds it.
 func refusal(err error) string {
 	var held *rundir.HeldError
 	switch {
@@ -577,7 +730,7 @@ func refusal(err error) string {
 		if held.Holder.PID > 0 {
 			pid = strconv.Itoa(held.Holder.PID)
 		}
-		return "that session is open in another craze (pid " + pid + ")"
+		return "that session is already running (pid " + pid + ")"
 	case errors.Is(err, atomicfile.ErrLockBusy):
 		return "the session index is busy — try again"
 	case errors.Is(err, sessions.ErrNotInIndex):
@@ -597,4 +750,55 @@ func (c *sessionClaims) releaseAll() {
 	for _, claim := range held {
 		_ = claim.Release()
 	}
+}
+
+// hostLifecycle is a headless host's lifecycle coordinator (plan 030 §3.6a):
+// the one place its stop is decided. Every way a stop reaches the host asks it
+// through request — session.stop through the control server's seam
+// (control.Options.Stop, stopFunc: the server calls it at most once, its own
+// attach fence already up), SIGINT and SIGTERM through craze serve's signal
+// loop, and the idle watcher (idle.go) once its close fence has found the host
+// eligible, or its socket lost — and the first request IS the stop. craze serve's own goroutine,
+// parked on stopping, then runs the stop sequence once (serveHost.stop): the
+// attach fence, the engine's close, S2's close order, the claims, and the exit.
+// Every later request joins it: answered — a session.stop's receipt is the
+// server's — and otherwise nothing.
+//
+// request never blocks and never calls into the server or the engine: the
+// server calls it from a handler, which Server.Close waits for, so the work is
+// always the parked goroutine's.
+type hostLifecycle struct {
+	once     sync.Once
+	stopping chan struct{}
+
+	mu  sync.Mutex
+	why string
+}
+
+func newHostLifecycle() *hostLifecycle {
+	return &hostLifecycle{stopping: make(chan struct{})}
+}
+
+// request asks for the stop, saying why: the first request closes stopping,
+// and every later one joins it.
+func (l *hostLifecycle) request(why string) {
+	l.once.Do(func() {
+		l.mu.Lock()
+		l.why = why
+		l.mu.Unlock()
+		close(l.stopping)
+	})
+}
+
+// stopFunc is control.Options.Stop: a session.stop the server accepted.
+func (l *hostLifecycle) stopFunc(r control.StopRequest) {
+	l.request("session.stop from client " + r.Client)
+}
+
+// cause is why the host is stopping: the first request's words, "" before
+// any.
+func (l *hostLifecycle) cause() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.why
 }

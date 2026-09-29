@@ -29,11 +29,17 @@ import (
 // index writes are the host's alone. Nothing is spawned, nothing binds a
 // socket, no session claim is taken and no index row is written.
 //
-// Its quit is a view close (§3.9): /exit, Ctrl+D, Ctrl+C when idle and the
-// second Ctrl+C detach and exit 0, and the session goes on on its host. The
-// keys are the host TUI's (owner, §3.19): the first Ctrl+C while a turn works
-// acts on the shared session. The session's own end — the host TUI quit — is
-// exit 0 with `craze: session ended` on stderr once the screen is restored.
+// Its explicit quit — /exit, Ctrl+D, Ctrl+C when idle, the second Ctrl+C —
+// ends the session, as it does in every client (plan 030 §3.6, the owner's
+// decision 11): the host is asked to stop it (session.stop), and the run exits
+// 0 saying nothing more. A host that cannot stop its session — a TUI-hosted
+// one, or an older craze — refuses, and the quit detaches instead, exit 0,
+// with `craze: that session runs in an older craze; close it there` once the
+// screen is restored. SIGTERM and a closed terminal are a view close (§3.9):
+// the session goes on on its host. The keys are the host TUI's (owner, §3.19):
+// the first Ctrl+C while a turn works acts on the shared session. The
+// session's own end — another client's stop, the host's quit — is exit 0 with
+// `craze: session ended` on stderr once the screen is restored.
 //
 // A --continue whose session another craze holds runs the same path
 // (attachHeld, SQ16): the second `craze -c` becomes `craze attach --session
@@ -61,8 +67,8 @@ func newAttachCmd() *cobra.Command {
 		Use:   "attach",
 		Short: "Join a craze session running in another terminal",
 		Long: "craze attach runs the full TUI over a running craze session's control socket " +
-			"(plan 027 §3.15): the session in this directory, or --session's. Quitting it " +
-			"leaves the session running on its host.",
+			"(plan 027 §3.15): the session in this directory, or --session's. /exit ends the " +
+			"session; closing the terminal leaves it running on its host.",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return runAttach(cmd, f)
@@ -276,9 +282,12 @@ func attachTo(target attachTarget, view attachView, stderr io.Writer) error {
 // the registry entry's provider and workspace (GLM 11); Viewer on; the entry's
 // workspace; the command line's theme, mouse and background.
 //
-// Yolo is craze's own default (--force): the wire does not carry the host's
-// permission mode, so the chip reads what a host started without --no-force
-// runs with. A failed dial is exit 1, one `craze attach: …` line.
+// The permission chip reads the host's own word (the info document's
+// permissionMode, plan 030 §3.7, SF-60): what the host's --force or
+// --no-force spawned its agent with. Yolo is only what it shows for a host
+// that does not say — one from before plan 030 — and is craze's own default
+// (--force) there, as it always was: attach has no --force of its own. A
+// failed dial is exit 1, one `craze attach: …` line.
 func attachConfig(target attachTarget, view attachView) (tui.Config, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), dialTimeout)
 	defer cancel()
@@ -297,10 +306,11 @@ func attachConfig(target attachTarget, view attachView) (tui.Config, error) {
 			sanitizeLine(entryID(target.entry)), sanitizeLine(err.Error()))
 	}
 	return tui.Config{
-		Backend:       s,
-		Viewer:        true,
-		Theme:         view.theme,
-		Workspace:     target.entry.Workspace,
+		Backend:   s,
+		Viewer:    true,
+		Theme:     view.theme,
+		Workspace: target.entry.Workspace,
+		// The chip's fallback for a host that does not say (above).
 		Yolo:          true,
 		NoMouse:       view.noMouse,
 		TerminalTitle: tui.ConfigTerminalTitle(),
@@ -321,13 +331,36 @@ func attachConfig(target attachTarget, view attachView) (tui.Config, error) {
 //   - a start failure is the host TUI's: the error, exit 1. A start the
 //     stream's end cut short is that end, not a failure of the host's start
 //     (remote.StartError);
-//   - anything else — a view close, whichever key — is exit 0 and says
-//     nothing: the session goes on on its host.
+//   - the explicit quit (plan 030 §3.6, decision 11) stops the session on its
+//     host: taken, it says nothing about the session's end that follows —
+//     this client asked for it (Result.Stopped); refused by a host that cannot
+//     stop it, the quit detached, and one line says where the session still
+//     runs (stopUnsupportedNote); a stop answered neither way is one line too,
+//     and exit 0: the quit happened, the session may not have ended. Either
+//     note is the whole of the exit (X36; plan 030 C5r): a stream's end that
+//     arrived meanwhile — the transport given up, or the session's own end —
+//     adds no second line and no exit 1, because the quit is what the user
+//     asked for, and its outcome is what they are told;
+//   - anything else — a view close: SIGTERM, a closed terminal — is exit 0
+//     and says nothing: the session goes on on its host.
+//
+// The notes are written once the screen is restored: stderr is the caller's
+// after tui.Run has returned.
 func attachExit(res tui.Result, err error, stderr io.Writer) error {
 	var start *remote.StartError
 	switch {
 	case err != nil && !errors.Is(err, res.StartErr):
 		return err
+	case res.StopUnsupported:
+		fmt.Fprintln(stderr, stopUnsupportedNote)
+		return startOrNil(err, res)
+	case res.StopErr != nil:
+		fmt.Fprintf(stderr, "craze: the session may still be running: %s\n", sanitizeLine(res.StopErr.Error()))
+		return startOrNil(err, res)
+	}
+	switch {
+	case res.Ended && res.Stopped && res.EndErr == nil:
+		return startOrNil(err, res)
 	case res.Ended && !errors.As(err, &start):
 		if res.EndErr != nil {
 			return exitf(1, "craze: lost the session: %s", sanitizeLine(res.EndErr.Error()))
@@ -335,6 +368,20 @@ func attachExit(res tui.Result, err error, stderr io.Writer) error {
 		fmt.Fprintln(stderr, "craze: session ended")
 		return nil
 	case err != nil:
+		return err
+	}
+	return nil
+}
+
+// stopUnsupportedNote is the explicit quit's one line when the session's host
+// cannot stop it (plan 030 §3.6): the TUI detached, and the session runs on in
+// the craze that hosts it.
+const stopUnsupportedNote = "craze: that session runs in an older craze; close it there"
+
+// startOrNil is a stopped session's exit: its start failure, if it never
+// came up, and nothing otherwise.
+func startOrNil(err error, res tui.Result) error {
+	if err != nil && errors.Is(err, res.StartErr) {
 		return err
 	}
 	return nil
@@ -407,7 +454,7 @@ func holderEntry(env rundir.Env, held *rundir.HeldError) (rundir.Entry, holderSo
 // found held by another craze is attached to instead of refused — `craze -c`
 // becomes `craze attach --session <id>`, resolved through the holder's host
 // id — after one stderr line, printed before the TUI takes the screen:
-// `craze: that session is open in another craze (pid N); attaching`. The
+// `craze: that session is already running (pid N); attaching`. The
 // flags a new session would take (--model, --ask, --plan, --agent-bin,
 // --provider) do not apply to an attach: they are ignored, and the line names
 // the ones given. Nothing is built, spawned, bound or claimed for it.

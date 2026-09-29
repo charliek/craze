@@ -3,6 +3,7 @@ package backend
 import (
 	"context"
 	"errors"
+	"time"
 
 	"github.com/charliek/craze/internal/agent"
 	"github.com/charliek/craze/internal/engine"
@@ -39,6 +40,16 @@ var ErrStaleEpoch = errors.New("backend: the call was for a session this backend
 // in-process backend never answers it: the engine call it makes always
 // returns. Its match is errors.Is, never the text.
 var ErrOutcomeUnknown = errors.New("backend: the command's outcome is unknown: it may have run")
+
+// ErrStopUnsupported is Stop on a session whose host cannot stop it (plan 030
+// §3.6a): a host whose session capability stop is false — a TUI-hosted
+// session, or a host from before plan 030 — which answered session.stop
+// unsupported, reason stop_unsupported. Nothing was stopped and nothing ran;
+// the caller detaches instead and says the session runs on (§3.6). A socket
+// backend's refusal matches it by errors.Is, reconstructed from the wire's
+// reason (internal/remote's sentinel table); an in-process backend never
+// answers it.
+var ErrStopUnsupported = errors.New("backend: the session's host cannot stop it")
 
 // epochKey is WithEpoch's context key.
 type epochKey struct{}
@@ -90,6 +101,20 @@ type Backend interface {
 	// said (agent.ErrAgentExited included). It is idempotent, and it may
 	// block until the agent is reaped, so it is never called from Update.
 	Close() error
+	// Stop asks for the session itself to end — the explicit quit (plan 030
+	// §3.6a), as opposed to Close, which over the socket is a view close and
+	// never stops a session. c is the caller's own command, as for every
+	// other command: its id is the caller's to mint, so the ids a client
+	// sends stay one sequence whoever sends them. In process it is the
+	// engine's close — today's quit path, unchanged: it returns once the
+	// session has closed, and answers what the close said. Over the socket it
+	// is session.stop, answered once the host has taken the stop — a receipt;
+	// the session's end follows on the stream (its closing records, then the
+	// stream's end) — and it is ErrStopUnsupported on a host that cannot stop
+	// its session. It is fenced by the epoch ctx carries, like every command,
+	// and it may block — in process, until the agent is reaped — so it is
+	// never called from Update.
+	Stop(ctx context.Context, c engine.Command) error
 	// ClientID is this client's id on the session, the Client of every
 	// engine.Command it sends. It is read per command, never cached by the
 	// caller (§3.12): after a reconnect that could not resume, a remote
@@ -157,6 +182,15 @@ type Backend interface {
 	// State().Snapshot's; over the socket, session.state's settings. It is
 	// what the multi-Set chains judge their next step on.
 	Settings(ctx context.Context) (Settings, error)
+	// LastTurn is how the session's last turn ended (plan 030 §3.7, SF-57;
+	// engine.State.LastTurn): nil while a turn runs, before any has ended,
+	// and from a host that does not say (one from before plan 030). It is
+	// what a client reads once after a restore, since the snapshot a restore
+	// carries keeps no turn's ending (its codec stays at version 1). A
+	// blocking read, for tea.Cmds only, never Update: in process it is
+	// State()'s, over the socket session.state's lastTurn. It is fenced by
+	// the epoch ctx carries, like every read.
+	LastTurn(ctx context.Context) (*engine.LastTurn, error)
 }
 
 // Settings is the session's current settings (§3.12): the model, the mode and
@@ -247,4 +281,31 @@ type SessionInfo struct {
 	// RetryHorizon is the command-id table's bound: within it a resent
 	// command id is answered from the table and never re-executes.
 	RetryHorizon engine.RetryHorizon
+	// PermissionMode is how whatever serves the session spawned its agent
+	// (plan 030 §3.7, SF-60): the wire's permissionMode, the host's --force
+	// or --no-force. PermissionUnsaid is a host that does not say — one from
+	// before plan 030 — and the in-process backend, whose TUI's own config
+	// is the mode; a client then shows its own config's, as it always has.
+	PermissionMode PermissionMode
+	// StartedAt is when the host started serving the session, on its clock
+	// (plan 030 §3.7, SF-63): what a client counts the session's elapsed time
+	// from. Zero when the host does not say — one from before plan 030 — and
+	// in process, where the session's own start is this client's; a client
+	// then counts from its own start, as it always has.
+	StartedAt time.Time
 }
+
+// PermissionMode is how a session's agent handles permission requests (plan
+// 030 §3.7, SF-60): the wire's protocol.PermissionMode in the backend's
+// words.
+type PermissionMode string
+
+const (
+	// PermissionUnsaid is a session whose host does not say (see
+	// SessionInfo.PermissionMode).
+	PermissionUnsaid PermissionMode = ""
+	// PermissionBypass is --force: the agent runs its tools unasked.
+	PermissionBypass PermissionMode = "bypass"
+	// PermissionPrompt is --no-force: the agent asks, and a client answers.
+	PermissionPrompt PermissionMode = "prompt"
+)

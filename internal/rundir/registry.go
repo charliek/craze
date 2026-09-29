@@ -232,6 +232,48 @@ func (h *Host) Update(fn func(*Entry)) error {
 	return h.writeEntry(e)
 }
 
+// Lost reports why the host can no longer be found where it registered — its
+// socket gone from its path, or its registry entry from the registry — or ""
+// while both are the files it made (plan 030 §3.3, SF-66): each is compared
+// by (dev, ino) with what Bind and the last rewrite recorded, so a file put in
+// either place since — another socket bound at the path, an entry written
+// over it — is not the host's either. Both are looked up by path, the entry
+// in the registry directory as its path now names it, not through the
+// descriptor held since Bind: a registry directory moved away or removed has
+// lost the entry for every reader of the registry, whatever that descriptor
+// still sees. A stat that fails for any other reason than the file being gone
+// reports nothing: only a vanished or replaced file is lost. A closed host
+// reports nothing. It serialises with Update, so it never reads the entry
+// between a rewrite's rename and the identity it records.
+func (h *Host) Lost() string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.closed {
+		return ""
+	}
+	gone := func(what, path string, want fileID) string {
+		fi, err := os.Lstat(path)
+		switch {
+		case errors.Is(err, fs.ErrNotExist):
+			return what + " " + path + " is gone"
+		case err == nil && idOf(fi) != want:
+			return what + " " + path + " is another file now"
+		}
+		return ""
+	}
+	if h.hasSock {
+		if why := gone("its control socket", h.socket, h.sockID); why != "" {
+			return why
+		}
+	}
+	if h.hasEntry && h.hosts != nil {
+		if why := gone("its registry entry", h.hosts.join(h.entryName()), h.entryID); why != "" {
+			return why
+		}
+	}
+	return ""
+}
+
 // Close unregisters the host, and is idempotent: it closes the listener if
 // it is still open (which unlinks nothing); unlinks the registry entry and
 // then the socket, each only while its (dev, ino) is still what was

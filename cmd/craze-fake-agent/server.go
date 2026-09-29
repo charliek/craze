@@ -5,9 +5,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/signal"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/charliek/craze/internal/acp"
@@ -29,6 +32,11 @@ const fakeSpinnerBeat = 250 * time.Millisecond
 // lingerMax bounds CRAZE_FAKE_LINGER, so a test that crashes cannot leave a
 // lingering fake behind for long.
 const lingerMax = 30 * time.Second
+
+// stubbornMax bounds CRAZE_FAKE_STUBBORN the same way, longer than a test's
+// own step: a test that waits a step for the agent's group to be killed must
+// never see it end of its own accord instead.
+const stubbornMax = 90 * time.Second
 
 type server struct {
 	conn   *acp.Conn
@@ -180,12 +188,25 @@ func modelConfigOptions() []map[string]any {
 }
 
 func run(script string) error {
+	stubborn := os.Getenv("CRAZE_FAKE_STUBBORN") == "1"
+	if stubborn {
+		// An agent that outlives whatever ends its host: SIGTERM, SIGINT and
+		// SIGHUP do nothing, and neither does a write to a pipe its host no
+		// longer reads (SIGPIPE, which on stdout or stderr would otherwise
+		// end a Go program). Only SIGKILL of its process group ends it before
+		// stubbornMax — the detached host's spawner's last resort (plan 030
+		// §3.4), which is what a test with it proves.
+		signal.Ignore(syscall.SIGTERM, syscall.SIGINT, syscall.SIGHUP, syscall.SIGPIPE)
+	}
 	conn := acp.NewConn(os.Stdin, os.Stdout)
 	s := newServer(conn, script)
 	s.writeFakeStderr()
 	conn.Start()
 	<-conn.Done()
-	if os.Getenv("CRAZE_FAKE_LINGER") == "1" {
+	switch {
+	case stubborn:
+		time.Sleep(stubbornMax)
+	case os.Getenv("CRAZE_FAKE_LINGER") == "1":
 		// Stay alive past stdin's EOF until a signal's default action ends
 		// the process. Without this the fake dies of its own closed pipe on
 		// every exit route craze has, including being killed outright, so a
@@ -614,6 +635,8 @@ func (s *server) handlePrompt(msg *acp.Message) {
 		s.callOrder(msg.ID, text)
 	case "env":
 		s.envReport(msg.ID)
+	case "long-reply":
+		s.longReply(msg.ID)
 	case "turnfail":
 		// The session is up, so this is an error mid-session: the turn's
 		// ending is the error, with no stop reason at all.
@@ -693,6 +716,24 @@ func (s *server) echo(id json.RawMessage, text string) {
 		SessionUpdate: acp.UpdateAgentMessage,
 		Content:       &acp.ContentBlock{Type: "text", Text: text},
 	})
+	s.finishPrompt(id, acp.StopEndTurn)
+}
+
+// longReplyLines is how many chunks long-reply streams: far more than a
+// session's primary event channel holds (256), so a host with no primary and
+// no client proves it never waits on one (craze plan 030 §3.3).
+const longReplyLines = 600
+
+// longReply answers with longReplyLines message chunks, "line 1\n" to
+// "line 600\n", then ends the turn: session/load's load-long, as a live turn.
+func (s *server) longReply(id json.RawMessage) {
+	sid := s.mainID()
+	for i := 1; i <= longReplyLines; i++ {
+		s.update(sid, acp.SessionUpdate{
+			SessionUpdate: acp.UpdateAgentMessage,
+			Content:       &acp.ContentBlock{Type: "text", Text: "line " + strconv.Itoa(i) + "\n"},
+		})
+	}
 	s.finishPrompt(id, acp.StopEndTurn)
 }
 

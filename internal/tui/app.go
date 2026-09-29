@@ -196,14 +196,53 @@ type Config struct {
 	// of the provider and runs inside Update, so it must not block. nil
 	// refuses nothing — every test Config and every picker golden.
 	RefuseLoad func(agent.Provider) error
+
+	// NewBackend and LoadBackend are the launch flow (plan 030 §3.5): the
+	// backend twins of NewSession and LoadSession, for a craze whose sessions
+	// run in detached hosts (SD-33). Each spawns — or finds — the host of the
+	// session it is asked for and dials it, answering the backend the model
+	// adopts, as it adopts a Config.Backend (setBackend): its Start observes
+	// the host's own start. Either may take seconds, so the model calls it
+	// from a tea.Cmd, never from Update, and draws the session's starting
+	// state meanwhile — starting…, or restoring… for a load. NewBackend is a
+	// new session of p: Init's own when the provider is known
+	// (ProviderLocked), and otherwise the provider picker's choice, explicit
+	// when it was Enter on a row rather than the default Esc starts — the
+	// same distinction FallbackDefault's persistence draws, since the host is
+	// what persists the provider now. LoadBackend loads row: Continue's, which
+	// Init loads, and the resume picker's choice, which is not claimed here
+	// (ClaimSession is the in-process path's): the host claims it, and a
+	// session another host holds is that host's backend.
+	//
+	// Either set is the launch flow, and Session, NewSession, LoadSession,
+	// ClaimSession, OnEngine, SessionIndex and CrazeSessionID — the
+	// in-process path's — are not read: the host builds the engine and owns
+	// its claim, its index row and its provider's persistence. A failure is
+	// the session's start failing (startErr, exactly as Start's), except a
+	// *Refusal of a picker's choice, which brings that picker back with the
+	// refusal as its error row. A backend answered after the program has
+	// quit is never adopted, and is the caller's to close: Start is called
+	// on every backend the model adopts, and on no other. A backend that has
+	// an AckStarted method (startAcker) is told when the model applies its
+	// start and is not quitting — the caller's one sign that its session
+	// came up in this TUI (Start's answer can lose to a quit). nil keeps the
+	// in-process path — every test Config, every golden, the frame runner
+	// and craze under the opt-out.
+	NewBackend  func(p agent.Provider, explicit bool) (backend.Backend, error)
+	LoadBackend func(p agent.Provider, row sessions.Row) (backend.Backend, error)
+	// Continue is --continue's row in the launch flow: internal/cli resolved
+	// it — claiming nothing — and Init loads it (LoadBackend), with the
+	// provider locked to the row's and Loading set. nil for anything else.
+	Continue *sessions.Row
 }
 
 // viewing is c as it runs: for a viewer (Config.Viewer with a Backend)
 // everything the host alone owns is cleared — the pickers' closures and rows,
-// the claim and engine hooks, provider persistence, the session index and the
-// host-status hub — so that no path of New or Run can reach it. Viewer without
-// a Backend means nothing and is cleared too; any other Config is returned as
-// it is. It is idempotent: Run applies it, and New again.
+// the claim and engine hooks, the launch flow's spawns, provider persistence,
+// the session index and the host-status hub — so that no path of New or Run
+// can reach it. Viewer without a Backend means nothing and is cleared too;
+// any other Config is returned as it is. It is idempotent: Run applies it,
+// and New again.
 func (c Config) viewing() Config {
 	if !c.Viewer || c.Backend == nil {
 		c.Viewer = false
@@ -211,6 +250,7 @@ func (c Config) viewing() Config {
 	}
 	c.Session, c.NewSession, c.LoadSession, c.Resume = nil, nil, nil, nil
 	c.ClaimSession, c.RefuseLoad, c.OnEngine = nil, nil, nil
+	c.NewBackend, c.LoadBackend, c.Continue = nil, nil, nil
 	c.PersistProvider = false
 	c.SessionIndex = nil
 	c.Host = nil
@@ -276,19 +316,46 @@ type Model struct {
 	engErr error
 	cwd    string
 	model  string
+	// yolo is Config.Yolo: this craze's own --force, which the permission
+	// chip shows when the session's host does not say what it spawned its
+	// agent with (bypassing).
 	yolo   bool
 	status status
 	err    string
 	// startErr is the session that never came up. It is the only error that
 	// reaches craze's exit status: Run returns it once the program is over.
 	startErr error
+	// startInc is the incarnation a socket backend's start answered for
+	// (plan 030 C7r2): the one the model held when it applied the stream's
+	// Ready. A socket's stream hands up one Ready at most — the one its first
+	// attach was owed — after the restore of the incarnation it is about,
+	// and that Ready is the start's outcome: a remote.Session's Start answers
+	// with it. "" until one is applied, and always in process, where no
+	// Ready comes. startErr is that incarnation's failure: a restore of
+	// another takes it away, and a start that answers once the model has
+	// left it is not a failure of the session the model now holds
+	// (startLeft).
+	startInc string
 
-	// git is found once, at start; branch is re-read when a turn ends.
+	// git is found at start and again whenever the session's workspace moves
+	// the model's (followWorkspace); branch is re-read when a turn ends.
 	git    gitInfo
 	branch string
-	// sessStart is when Start returned, which is what the status row's
-	// elapsed counts from.
+	// sessStart is when the session came up (sessionUp; a frame run's own
+	// start in a frame run, frameStart), which is what the status row's
+	// elapsed counts from when the session's host does not say when it
+	// started (hostStart).
 	sessStart time.Time
+	// hostPerm and hostStart are the session's facts the status rows read
+	// (plan 030 §3.7): the permission mode its host spawned the agent with
+	// (SF-60) and when its host started serving it (SF-63), as the backend's
+	// Info said them at the last recompute — so they move where the rest of
+	// the mirror does, in the Update that applies a restore or a ready, and
+	// never under a frame. PermissionUnsaid and zero when the backend does
+	// not say (in process; an older host): the chip is then the config's
+	// (yolo), and the elapsed counts from sessStart, as they always have.
+	hostPerm  backend.PermissionMode
+	hostStart time.Time
 
 	// shared is the session's transcript as every client folding its events
 	// agrees on it (plan 024 §3.8): this client's own instance, folded from
@@ -499,6 +566,18 @@ type Model struct {
 	providers  []agent.Provider
 	newSession func(agent.Provider) agent.Session
 
+	// The launch flow (plan 030 §3.5, launch.go): spawnNew and spawnLoad are
+	// Config.NewBackend and Config.LoadBackend, and cont is Config.Continue.
+	// spawnSeq stamps each spawn the model starts, spawnWaiting is the one it
+	// is waiting for (0 for none), and spawnFrom is the picker whose choice it
+	// is — dialogNone for Init's own — which a refusal brings back.
+	spawnNew     func(agent.Provider, bool) (backend.Backend, error)
+	spawnLoad    func(agent.Provider, sessions.Row) (backend.Backend, error)
+	cont         *sessions.Row
+	spawnSeq     int
+	spawnWaiting int
+	spawnFrom    dialogKind
+
 	todoPlanned int
 	todoDone    bool
 
@@ -642,6 +721,14 @@ type Model struct {
 	// the clock still moves, so double-clicks, the Ctrl+C window and the
 	// lingers behave exactly as they do in a live session.
 	frozen bool
+	// frameStart is the frame runner's start (RunFrameScript), zero outside
+	// a frame run: the session's start its elapsed counts from when its host
+	// does not say (sessionUp), in place of the moment it came up — so an
+	// in-process run counts from the instant a socket run's host serves as
+	// its StartedAt, and a frame's elapsed is the same by transport however
+	// long its run takes (plan 030 §3.7, SF-63; sol r10-c6 2). Like frozen,
+	// the clock itself is left alone.
+	frameStart time.Time
 
 	// terminalTitle is Config.TerminalTitle: the off switch. false means the
 	// Update wrapper never computes or emits a title at all, which is what
@@ -673,6 +760,16 @@ type Model struct {
 	// owner is the session the program holds, shared by every copy the way
 	// term is; see sessionOwner. Nil only in a zero Model a test built.
 	owner *sessionOwner
+	// exit is what the explicit quit came to over a backend served elsewhere
+	// (stopQuit): shared by every copy, as owner is, because the quit's
+	// tea.Cmd writes it after the Update that asked has returned, and Run
+	// reads it from the model it started with. Nil only in a zero Model.
+	exit *exitState
+	// remote says the backend is a session served elsewhere (setBackend: a
+	// Config.Backend, or the launch flow's), whose explicit quit stops it on
+	// its host (plan 030 §3.6); false for an engine this TUI built, whose
+	// quit closes it as ever.
+	remote bool
 
 	// host is Config.Host: nil means no host status is derived at all. The
 	// rest is what host.go reads into host.Input. lastHost is the last status
@@ -733,8 +830,9 @@ type Model struct {
 	endErr error
 	// viewer is Config.Viewer (with a Backend): this TUI joins a session
 	// another craze hosts. New has cleared what the host alone owns
-	// (Config.viewing); what is left for the model to decide is where the
-	// composer's shell runs (shellDir).
+	// (Config.viewing), and nothing the model decides reads it any more:
+	// where the composer's shell runs was a viewer's own rule, and is every
+	// backend's since plan 030 §3.7 (shellDir, followWorkspace).
 	viewer bool
 	// infoPin is the facts the model reads in place of the backend's Info
 	// while a restore is being applied: the restore item's own (applyRestore),
@@ -746,6 +844,15 @@ type Model struct {
 	// whichever of its keys lands last and however often a replay closes the
 	// gate again.
 	upDone bool
+	// restores counts the restores this model has applied, and turnStarts
+	// the turns it has seen begin — its own and every other client's
+	// (beginTurn), and the agent's own (a foreign turn's running bracket).
+	// They are the tag the read after a restore carries (lastturn.go, plan
+	// 030 §3.7): its answer is applied only while both still stand where
+	// they stood when it was sent. Both only ever move forward, across every
+	// session this model holds, so no answer can find its tag again.
+	restores   uint64
+	turnStarts uint64
 }
 
 // info is the session's static facts as the model reads them (plan 027
@@ -1096,7 +1203,7 @@ func (m *Model) setSession(s agent.Session, crazeID string) {
 	if s == nil {
 		return
 	}
-	eng, err := engine.New(s, engineOptions(crazeID, m.sessionIndex, m.cwd, m.providerDefault.Name()))
+	eng, err := engine.New(s, engine.HostOptions(crazeID, m.sessionIndex, m.cwd, m.providerDefault.Name()))
 	if err != nil {
 		// m.eng stays the untyped nil it was set to above: a failure leaves no
 		// backend, never a nil *engineBackend that would read as one.
@@ -1106,43 +1213,13 @@ func (m *Model) setSession(s agent.Session, crazeID string) {
 	// The backend mints this model's client on the engine, once: the
 	// in-process client is never released (plan 027 §3.6).
 	m.adopt(newEngineBackend(eng, m.cwd))
+	m.remote = false
 	// After the owner holds it, so whatever the hook starts — a socket
 	// serving this engine — can never name an engine the exit tail would not
 	// close. The hook is handed the engine itself, not the backend: what it
 	// serves is the engine.
 	if m.onEngine != nil {
 		m.onEngine(eng)
-	}
-}
-
-// engineOptions is the engine.Options a session's engine is built with: the
-// one place they are spelled, for setSession and for the frame harness's
-// socket host (plan 027 §3.16), which builds its engine exactly as the TUI
-// would have. crazeID is the durable craze session id the session already has
-// ("" mints one), index the session index (nil persists nothing), cwd the
-// workspace as New resolved it (configWorkspace), and provider the resolved
-// default's name (configProvider).
-//
-// The zero ChainPolicy is the TUI's: Esc stops a turn and the queue behind it
-// carries on, and a prompt the session refuses is shown as the refusal it is
-// rather than waited out (engine.ChainPolicy).
-func engineOptions(crazeID string, index SessionIndex, cwd, provider string) engine.Options {
-	return engine.Options{
-		CrazeSessionID: crazeID,
-		Index: engine.IndexOptions{
-			Store: index,
-			CWD:   cwd,
-			// The provider a row is recorded under before the session has
-			// answered with one of its own: the resolved default it was
-			// started as.
-			Provider: provider,
-			// A provider craze cannot load again stays out of the index
-			// (plan 028 §3.5): unresumable, which is not the same question
-			// as hidden — before D-65 listed it, native was hidden and
-			// indexed.
-			Unindexed: unindexedProvider,
-			TitleLine: indexTitleLine,
-		},
 	}
 }
 
@@ -1174,11 +1251,13 @@ func (m *Model) setBackend(b backend.Backend) {
 	m.dropSession()
 	if b != nil {
 		m.adopt(b)
+		m.remote = true
 	}
 }
 
 // adopt makes b the model's backend, recorded in the owner too, with a
-// command order of its own (chains).
+// command order of its own (chains), and its session's workspace the model's
+// (followWorkspace).
 func (m *Model) adopt(b backend.Backend) {
 	m.eng = b
 	if sessionBackendHook != nil {
@@ -1188,6 +1267,28 @@ func (m *Model) adopt(b backend.Backend) {
 	// replaced orders nothing on this one.
 	m.chains = &chainLock{}
 	m.owner.set(m.eng)
+	m.followWorkspace(m.eng.Info().Workspace)
+}
+
+// followWorkspace makes ws — the session's own workspace, as its backend's
+// Info names it — the model's (plan 030 §3.7, "the workspace follows the
+// session"): m.cwd, which the status row names, the skills are scanned under
+// (rescanSkills) and the composer's shell runs in (shellDir), and the
+// repository the branch is read from, found again from there. It is called on
+// every adopt: a session served elsewhere runs where its host runs it — a
+// --continue row's directory, a session another craze started — which need
+// not be the directory this craze was started in, and a socket backend names
+// it before its first attach reply (the registry entry's workspace, which its
+// dialler passes: remote.SessionOptions.Workspace). In process the engine
+// backend's Info names m.cwd itself, so nothing moves; "" — a backend that
+// names none — changes nothing either.
+func (m *Model) followWorkspace(ws string) {
+	if ws == "" || ws == m.cwd {
+		return
+	}
+	m.cwd = ws
+	m.git = discoverGit(ws)
+	m.branch = m.git.branch()
 }
 
 // dropSession is the half of setSession and setBackend that lets go of the
@@ -1227,8 +1328,12 @@ func (m *Model) dropSession() {
 	m.clearOverlays()
 	m.modeRev, m.modelRev, m.configRev = 0, 0, 0
 	m.cmdSeq, m.chains = 0, nil
-	// A new session is a new start: its session-is-up tail is still to run.
+	// A new session is a new start: its session-is-up tail is still to run,
+	// and its backend's Ready is still to come.
 	m.upDone = false
+	m.startInc = ""
+	// Its host's facts are its own, read again from its backend (recompute).
+	m.hostPerm, m.hostStart = backend.PermissionUnsaid, time.Time{}
 	m.owner.set(nil)
 }
 
@@ -1271,7 +1376,7 @@ func (m *Model) nextCmds(n int) []engine.Command {
 }
 
 func New(cfg Config) Model {
-	cfg = cfg.viewing()
+	cfg = cfg.viewing().launching()
 	cwd := configWorkspace(cfg.Workspace)
 
 	vp := viewport.New(0, 0)
@@ -1298,6 +1403,9 @@ func New(cfg Config) Model {
 		providers:       pickerRows(cfg.Providers, prov),
 		newSession:      cfg.NewSession,
 		loadSession:     cfg.LoadSession,
+		spawnNew:        cfg.NewBackend,
+		spawnLoad:       cfg.LoadBackend,
+		cont:            cfg.Continue,
 		claimSession:    cfg.ClaimSession,
 		refuseLoad:      cfg.RefuseLoad,
 		onEngine:        cfg.OnEngine,
@@ -1312,6 +1420,7 @@ func New(cfg Config) Model {
 		// `craze frame` or by any direct caller writes no OSC at all.
 		term:  newTerminalColors(io.Discard),
 		owner: &sessionOwner{},
+		exit:  &exitState{},
 		shell: newShellController(),
 		// Allocated here, not on first use, so every copy of this model holds
 		// the same panes from the start (see pane).
@@ -1338,10 +1447,16 @@ func New(cfg Config) Model {
 		// question the answer overrides (§3.1).
 		m.pickingResume = true
 		m.dialog = dialogResume
-	case m.newSession != nil && !m.providerLocked:
+	case (m.newSession != nil || m.spawnNew != nil) && !m.providerLocked && m.cont == nil:
 		m.pickingProvider = true
 		m.dialog = dialogProvider
 		m.providerCursor = m.providerIndex(prov)
+	case m.launch():
+		// The launch flow with its session known: nothing is built here, and
+		// Init spawns it (plan 030 §3.5). New records the attempt Init's call
+		// is, since Init cannot — m.reading's rule, below.
+		m.spawnSeq++
+		m.spawnWaiting, m.spawnFrom = m.spawnSeq, dialogNone
 	default:
 		if sess == nil && m.newSession != nil {
 			sess = m.newSession(prov)
@@ -1390,6 +1505,18 @@ type Result struct {
 	// returns it as its error unless p.Run failed itself: a caller telling
 	// the program's own failure from the start's compares the two.
 	StartErr error
+	// Stopped says the explicit quit — /exit, Ctrl+D, the second Ctrl+C —
+	// asked the session's host to end it and the host took it (plan 030
+	// §3.6): the session's end that may have followed is this program's own
+	// doing, and nothing to report. StopUnsupported says the host cannot stop
+	// its session — an older craze, a TUI-hosted one — so the quit detached
+	// and the session runs on there. StopErr is a stop that was neither: sent,
+	// and answered by neither its receipt nor the session's end. All three
+	// are for a backend served elsewhere; an engine this program built is
+	// closed by its quit, as ever.
+	Stopped         bool
+	StopUnsupported bool
+	StopErr         error
 }
 
 // Run returns how the run ended (Result) and the start failure, if any
@@ -1466,6 +1593,7 @@ func Run(cfg Config) (Result, error) {
 	// run failure is reason enough to show the agent's stderr, whatever
 	// finishRun made of the session close (§3.7.3).
 	res := Result{AgentDiag: showAgentDiag || err != nil, StartErr: startErr}
+	res.Stopped, res.StopUnsupported, res.StopErr = m.exit.outcome()
 	if fm, ok := final.(Model); ok {
 		// The End that quit the program, and why, as the final model holds
 		// them (endMsg).
@@ -1547,10 +1675,13 @@ func finishRun(out io.Writer, final tea.Model, m Model, h Host) (bool, error) {
 	// Closing the engine closes its session — and stops its driver first, so
 	// nothing is left running behind the program — and answers with what the
 	// session's own Close said.
+	//
+	// After an explicit quit that stopped a session served elsewhere, the close
+	// shares that quit's one deadline (exitState.closeBackend, plan 030 C5r).
 	var agentExited bool
 	if m.owner != nil {
 		if eng := m.owner.current(); eng != nil {
-			agentExited = errors.Is(eng.Close(), agent.ErrAgentExited)
+			agentExited = errors.Is(m.exit.closeBackend(eng), agent.ErrAgentExited)
 		}
 	}
 	failed := startErr != nil || agentExited || !started
@@ -1574,6 +1705,11 @@ func finishRun(out io.Writer, final tea.Model, m Model, h Host) (bool, error) {
 func (m Model) Init() tea.Cmd {
 	if m.picking() {
 		return nil
+	}
+	if m.spawnWaiting != 0 {
+		// The launch flow's session is not here yet: Init spawns it, and its
+		// start and its reader are armed once it is adopted (launch.go).
+		return m.initSpawn()
 	}
 	return tea.Batch(m.startCmd(), waitEvent(m.eng))
 }
@@ -1677,14 +1813,26 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case restoreMsg:
 		// The backend's stream replaced what the model held (restore.go): the
-		// whole model is initialised from the snapshot and its facts.
-		m.applyRestore(msg)
+		// whole model is initialised from the snapshot and its facts, and the
+		// session's last ending, which no snapshot carries, is read once
+		// beside it (lastturn.go).
+		if !m.applyRestore(msg) {
+			return m, nil
+		}
+		return m, m.readLastTurn()
+
+	case lastTurnMsg:
+		m.applyLastTurn(msg)
 		return m, nil
 
 	case readyMsg:
 		// The host's start completed: the backend's Info already holds the
 		// facts it published (its catalogs above all), so the mirror is read
-		// again. A start that failed is answered by Start too, as errMsg.
+		// again. A start that failed is answered by Start too, as errMsg —
+		// which the incarnation this Ready arrived in tells about (startInc).
+		if m.startInc == "" {
+			m.startInc = m.incarnation()
+		}
 		m.recompute()
 		return m, nil
 
@@ -1723,6 +1871,9 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case resumeClaimMsg:
 		return m.resumeClaimed(msg)
 
+	case spawnedMsg:
+		return m.spawned(msg)
+
 	case startedMsg:
 		// Half of the gate: Start has returned. For a new session that is the
 		// whole of it, and sessionUp runs from here exactly as it always has;
@@ -1739,27 +1890,7 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.eng != nil {
 			m.eng.Started(nil)
 		}
-		m.started = true
-		m.branch = m.git.branch()
-		m.recompute()
-		if m.persistProvider && (!m.fallbackDefault || m.pickedExplicit) {
-			name := m.snap.Provider.Name
-			if name == "" {
-				name = agent.CursorProvider().Name()
-			}
-			// A hidden provider is never written as the default (plan 018
-			// §3.4): trying it once must not change what a plain craze
-			// starts. A session that has not reported its provider yet was
-			// started as the resolved default (as in writeIndex), so a hidden
-			// default is skipped too rather than saving the cursor fallback.
-			hidden := hiddenProvider(name) || (m.snap.Provider.Name == "" && m.providerDefault.Hidden())
-			if !hidden {
-				if err := SaveProvider(name); err != nil {
-					m.addError(err.Error())
-				}
-			}
-		}
-		m.sessionUp()
+		m.comeUp()
 		return m, nil
 
 	case errMsg:
@@ -1772,6 +1903,17 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if m.eng != nil {
 			m.eng.Started(msg.err)
+		}
+		if m.startLeft() {
+			// Over a socket, the start answered for an incarnation the model
+			// has since left — a restore of another has been applied after
+			// the Ready that failed (plan 030 C7r2): the failure is that
+			// session's, not this one's, and it draws nothing and fails
+			// nothing here. The start has answered all it will, so the
+			// session the model now holds comes up as a late startedMsg
+			// would bring it up.
+			m.comeUp()
+			return m, nil
 		}
 		m.status = statusError
 		m.err = msg.err.Error()
@@ -3015,6 +3157,9 @@ func (m *Model) beginTurn(id string) {
 	// offer is client-local UI — and turnID is the engine turn it names.
 	m.turnSeq++
 	m.turnID = id
+	// A turn this model has seen begin: the ending a read after a restore
+	// brings back is no longer the last one (lastturn.go).
+	m.turnStarts++
 }
 
 // maskCards drops the cards a cancel has answered and retires the plan offer:
@@ -3396,6 +3541,9 @@ func (m *Model) applyForeignCancelled(msg foreignCancelledMsg) {
 // one — Engine.Close runs once and answers every later caller with the same
 // error — so it returns when the first does and cannot deadlock.
 func (m Model) requestQuit() (tea.Model, tea.Cmd) {
+	if m.remote && m.eng != nil {
+		return m.stopQuit()
+	}
 	m.quitting = true
 	eng := m.eng
 	h := m.host
@@ -3549,6 +3697,9 @@ func (m *Model) reduceEvent(ev agent.Event) tea.Cmd {
 			// (a late answer for a previous episode cannot set it either,
 			// applyForeignCancelled).
 			m.cancelled = false
+			// And it is a turn begun, as beginTurn counts craze's own
+			// (lastturn.go).
+			m.turnStarts++
 		}
 		return nil
 	case agent.EventText:
@@ -4139,6 +4290,60 @@ func (m Model) modeSettled(gen int, value string, rev uint64) Model {
 	return m
 }
 
+// comeUp is the session coming up in this TUI once its backend's start has
+// answered: startedMsg's arm, after the engine is told — and, over a socket, a
+// start whose failure was an incarnation's the model has since left, which
+// leaves the session it holds as a start that answered leaves it (startLeft,
+// plan 030 C7r2). The launch flow's backend hears that its session came up
+// here, and not while the program is on its way out (startAcker); the
+// provider is persisted where this craze persists it; and the session-is-up
+// tail runs, once its other key has landed too (sessionUp).
+func (m *Model) comeUp() {
+	if a, ok := m.eng.(startAcker); ok && !m.quitting {
+		a.AckStarted()
+	}
+	m.started = true
+	m.branch = m.git.branch()
+	m.recompute()
+	if m.persistProvider && (!m.fallbackDefault || m.pickedExplicit) {
+		name := m.snap.Provider.Name
+		if name == "" {
+			name = agent.CursorProvider().Name()
+		}
+		// A hidden provider is never written as the default (plan 018
+		// §3.4): trying it once must not change what a plain craze starts.
+		// A session that has not reported its provider yet was started as
+		// the resolved default (as in writeIndex), so a hidden default is
+		// skipped too rather than saving the cursor fallback.
+		hidden := hiddenProvider(name) || (m.snap.Provider.Name == "" && m.providerDefault.Hidden())
+		if !hidden {
+			if err := SaveProvider(name); err != nil {
+				m.addError(err.Error())
+			}
+		}
+	}
+	m.sessionUp()
+}
+
+// startLeft reports that the backend's start answered for an incarnation the
+// model has left (startInc, plan 030 C7r2): the stream's Ready was applied in
+// one, and a restore of another has been applied since. Over a socket the
+// start's answer and the stream are read side by side, so the answer can land
+// after that restore; in process no Ready comes, and it is never so.
+func (m *Model) startLeft() bool {
+	return m.startInc != "" && m.startInc != m.incarnation()
+}
+
+// incarnation is the incarnation of the session the model holds, as its fold
+// knows it: the last restore's — "" before a socket backend's first, and in
+// process, where none comes.
+func (m *Model) incarnation() string {
+	if m.shared == nil {
+		return ""
+	}
+	return m.shared.Incarnation()
+}
+
 // sessionReady is the two-key gate of §3.5: Start has returned *and*, for a
 // loaded session, its replay has ended and the restored snapshot is installed.
 // tea.Batch orders neither of them, so both are latched and whichever lands
@@ -4147,8 +4352,8 @@ func (m Model) modeSettled(gen int, value string, rev uint64) Model {
 func (m Model) sessionReady() bool { return m.started && !m.replaying }
 
 // sessionUp is the tail startedMsg used to run alone: the status goes idle —
-// unless a restore said a turn is running — the elapsed counter starts and the
-// skills are rescanned. It is called from both keys and does nothing until
+// unless the session already said otherwise — the elapsed counter starts and
+// the skills are rescanned. It is called from both keys and does nothing until
 // both have landed, and it runs once (upDone): however they are ordered, and
 // when a replay a socket's stream is still draining closes the gate again after
 // the session came up (the replay-start arm).
@@ -4161,15 +4366,27 @@ func (m *Model) sessionUp() {
 		return
 	}
 	m.upDone = true
-	// A restore that says a turn is running set the working status and the
-	// turn it names (restore.go): the session coming up does not end it. In
-	// process no turn can be running before the session is up — the engine
-	// admits nothing before its Start has returned — so this is idle there,
-	// as it always was.
-	if m.status != statusWorking || m.turnID == "" {
+	// What the session said before it came up stands: its coming up ends
+	// neither a turn running nor a failure. A restore that says a turn is
+	// running set the working status and the turn it names (restore.go). A
+	// failure set the error state — the last ending the read after a restore
+	// applied (lastturn.go), or a turn's failure the stream delivered: Init
+	// runs the start and the stream's reader side by side, so over a socket
+	// either can land before Start's answer does (plan 030 §3.7; sol r10-c6
+	// 1). In process no turn can be running or have failed before the
+	// session is up — the engine admits nothing before its Start has
+	// returned, and a start that failed never comes up (errMsg) — so this is
+	// idle there, as it always was.
+	if m.status != statusError && (m.status != statusWorking || m.turnID == "") {
 		m.status = statusIdle
 	}
+	// A frame run counts from its runner's own start (frameStart), the
+	// instant its socket host serves as its StartedAt, so the elapsed a
+	// frame shows is the same by transport.
 	m.sessStart = m.now()
+	if !m.frameStart.IsZero() {
+		m.sessStart = m.frameStart
+	}
 	m.rescanSkills()
 }
 
@@ -4183,20 +4400,11 @@ func indexWriteText(err error) string {
 	return err.Error()
 }
 
-// titleRuneCap is how long a session title may be in the index. Runes, not
-// bytes: the cap exists so a picker row is a row, and a prompt is as likely to
-// open in Japanese as in ASCII.
-const titleRuneCap = 120
-
-// indexTitleLine folds a title onto the one line a session-index row holds and
-// caps it. It is what the engine writes every row's title through
-// (engine.IndexOptions.TitleLine), and what /rename normalises with before it
-// even asks: how a title is made safe to draw is a rendering rule, so it stays
-// here with the rest of them rather than being spelled a second time above the
-// provider seam.
-func indexTitleLine(title string) string {
-	return capRunes(sanitizeLine(title), titleRuneCap)
-}
+// titleRuneCap is how long a session title may be in the index, which /rename
+// caps a title at before it asks: engine.IndexTitleRunes, the cap every host
+// writes a row's title through (engine.IndexTitleLine), and a test holds the two
+// rules together.
+const titleRuneCap = engine.IndexTitleRunes
 
 func capRunes(s string, n int) string {
 	if n <= 0 {

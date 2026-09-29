@@ -93,7 +93,11 @@ func (c *conn) dispatch(line []byte) {
 	case c.bound == nil:
 		c.replyErr(req.id, refused(protocol.CodeBadRequest, protocol.ReasonHelloRequired,
 			"%s before hello: every method but hello needs one first", req.method))
-	case info.HostUnsupported != "":
+	case info.HostUnsupported != "" && !c.srv.serves(info):
+		// The hub's methods, and one this server does not serve because the
+		// capability that gates it is false (session.stop with no
+		// Options.Stop: plan 030 §3.6a) — answered exactly as every host
+		// before plan 030 answered it.
 		c.replyErr(req.id, refused(protocol.CodeUnsupported, info.HostUnsupported,
 			"%s is not served by a session host", req.method))
 	default:

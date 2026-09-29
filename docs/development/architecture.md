@@ -28,11 +28,11 @@ flowchart LR
 | `internal/backend` | The TUI's seam onto a session (plan 027 §3.12): the `Backend` interface, `Item`, `SessionInfo`, the epoch sentinels (`ErrStaleEpoch`, `ErrOutcomeUnknown`) both the in-process and socket implementations share |
 | `internal/tui` | Bubbletea screen: transcript, cards, composer, themes, slash, mouse; a command gate carries almost every engine call onto a `Backend` (in process, or over the socket for `craze attach`) — a hidden ask's answer and a sub-agent stop are the exceptions, fire-and-forget `tea.Cmd`s that are never gated |
 | `internal/protocol` | The control-socket wire, protocol 1 (plan 027 §3.2–§3.4): envelope, methods, notifications, codes, reasons, limits and the JSON Schema — the one place `internal/control`, `internal/remote` and `internal/fakehost` take their shapes from |
-| `internal/control` | The control socket's server (plan 027 §3.7): connections, `hello`, the binding table, command handlers, attach and forwarding, run by any process that serves a session (`craze`'s own TUI process today) |
+| `internal/control` | The control socket's server (plan 027 §3.7): connections, `hello`, the binding table, command handlers, attach and forwarding, run by any process that serves a session: a detached `craze serve` by default (plan 030), the TUI's own process when detaching is off |
 | `internal/remote` | The control socket's Go client (plan 027 §3.14): `remote.Session` implements `backend.Backend` over the wire — dial, resume, the reply barrier, reconnect and resend rules — for `craze attach` and `internal/tui`'s socket-transport frame goldens |
-| `internal/rundir` | Where a craze host puts what other processes must reach: the runtime namespace (the socket), and the registry, host locks and session locks under `~/.cache/craze/` |
+| `internal/rundir` | Where a craze host puts what other processes must reach: the runtime namespace (the socket), and the registry, host locks, session locks and host logs under `~/.cache/craze/` (plus the process identity the launcher's last-resort agent kill checks) |
 | `internal/fakehost` | The in-process twin of `cmd/craze-fake-host`: a scripted control-socket server for wire fixtures and tests |
-| `internal/cli` | Cobra: default TUI, `prompt`, `bridge`, `attach`, hidden `frame`, `version` |
+| `internal/cli` | Cobra: default TUI (the launcher), `prompt`, `bridge`, `attach`, `serve` (the detached host), hidden `frame`, `version` |
 | `internal/textdiff` | Diff hunks for edit tools |
 | `cmd/craze-fake-agent` | Scripted ACP stdio server (`echo`, `todos`, `diff`, `ask`, `plan`, …) |
 | `cmd/craze-fake-host` | Scripted control-socket server, driven by the same wire fixtures as `internal/fakehost` |
@@ -67,6 +67,69 @@ keeps the per-child state (tools, prompt, progress counters) behind one
 `SubagentInfo` list on the snapshot; the TUI keeps one transcript per child
 and shows it read-only in the sub-agent view. Cursor has no child stream —
 the session synthesizes the same records from `cursor/task` receipts.
+
+## Host and client
+
+The session does not live in the terminal's process (plan 030 §3.3–§3.6).
+`craze serve` is the **host**: it owns the engine, the agent process, the
+claim on the session, the journal and the session-index writes, and serves the
+session over the control socket. The ordinary `craze` is a **launcher** and
+its TUI a **socket client** — the same `remote.Session` a `craze attach` uses,
+behind `backend.Backend`, so the TUI cannot tell a host it spawned from one it
+found. Closing the terminal closes a client, not the session.
+
+```mermaid
+flowchart LR
+  launcher["craze (launcher + TUI)"] -->|"spawn: setsid, ready pipe"| host["craze serve"]
+  host -->|"ready line: ok / held / error"| launcher
+  launcher -->|"control socket"| host
+  attach["craze attach"] -->|"control socket"| host
+  host --> engine["engine + agent.Session"]
+  engine --> agentproc["cursor-agent / grok / native harness"]
+```
+
+**The spawn handshake.** The launcher mints a host id and starts `craze
+serve` with stdio on `/dev/null`, its own session (`setsid`), and a pipe on
+which the host writes one JSON line once its registry entry carries the
+session's identity: `ok` (host id, socket, craze session id, version), or not
+ok with an `error`, marked `refused` when the session *asked for* was the
+problem (no such row, a spawn flag the provider cannot take), or `held` (with
+the holder's id and pid) when another craze already has the session. The pipe
+is private to the two processes; it is not part of the control protocol. A
+`held` answer is followed to the holder — the launcher attaches to it — and a
+host that fails to answer is stopped or terminated, never left running unowned. Before spawning,
+the launcher looks for a live registry entry that already serves the session
+and attaches to it directly; an attach that succeeds is committed to, one that
+fails (a stopping host's `closing`, a start failure) falls back to the spawn.
+
+**The lifecycle coordinator.** A host has one stop sequence, run once on the
+host's own goroutine: a `host_stop` note in the journal (why it stopped), the
+attach fence, the engine's close, the control server's close order, the
+start's join (bounded), then the claims and the agent record are released.
+`session.stop`, SIGINT/SIGTERM and the idle watcher only *request* it. A host
+that cannot join its start in time kills the agents it recorded itself
+(each record is a process-group id plus the leader's start time, so a group
+whose leader had already been reused when checked is not signalled; a short
+race remains between that check and the signal — SF-81); the launcher does the same for a host it had to give
+up on.
+
+**The idle fence.** The idle watcher looks once a second; when its clock
+(`host_idle_exit`) has run out it raises two fences — the server's attach
+fence and the engine's admission fence — and only then counts attachments and
+whatever is in flight. Nothing: the stop, fences left up. Anything: both are
+released and the clock restarts. So a client that attaches, or a command that
+is admitted, at that instant is either counted or refused with `closing`
+(protocol code `unavailable`), never accepted into a session already ending.
+A native session's owed background work counts as in flight; an ACP agent has
+no admission fence and could start a turn of its own after the verdict (the
+stop's close ends it).
+
+**The opt-out.** `detach = false`, `CRAZE_DETACH=0`, or the control socket off
+keep the older path: `runTUI` builds the engine in the TUI's own process, binds
+its own socket when the control socket is enabled, and closes the session with the terminal. Both paths are kept
+under test (`tests/cli` runs its core cases detached and in process); the
+choice is `detachOn` in `internal/cli/launch.go`. See
+[Configuration](../reference/configuration.md#detached-hosts).
 
 ## Fake agent
 

@@ -8,11 +8,13 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/charliek/craze/internal/agent"
 	"github.com/charliek/craze/internal/backend"
+	"github.com/charliek/craze/internal/control"
 	"github.com/charliek/craze/internal/engine"
 	"github.com/charliek/craze/internal/protocol"
 	"github.com/charliek/craze/internal/remote"
@@ -654,6 +656,7 @@ func TestAStaleEpochIsNeverSent(t *testing.T) {
 		},
 		"Cancel":         func() error { _, err := s.Cancel(stale, c, ""); return err },
 		"CancelSubagent": func() error { return s.CancelSubagent(stale, c, "a-1") },
+		"Stop":           func() error { return s.Stop(stale, c) },
 	}
 	before := len(tp.linesFrom(0))
 	for name, call := range calls {
@@ -898,4 +901,245 @@ func TestTheCodecsMustBeThisBuilds(t *testing.T) {
 		t.Fatalf("a host with another event codec: %v", err)
 	}
 	h.logs.wait(t, "close client")
+}
+
+// TestStopIsSessionStop (plan 030 §3.6a): Stop sends session.stop under the
+// caller's own command id, bound as every command is, and returns the host's
+// receipt once its coordinator has the stop — the session's end follows on
+// the stream. On a host whose capability stop is false the refusal,
+// stop_unsupported, is backend.ErrStopUnsupported — a host's answer, never an
+// outcome unknown — and nothing was stopped.
+func TestStopIsSessionStop(t *testing.T) {
+	t.Run("a host that serves it", func(t *testing.T) {
+		heard := make(chan control.StopRequest, 1)
+		// The coordinator's sequence, off the handler: the engine's close.
+		var eng atomic.Pointer[engine.Engine]
+		h := newHost(t, withStop(func(r control.StopRequest) {
+			heard <- r
+			go func() { _ = eng.Load().Close() }()
+		}))
+		eng.Store(h.eng)
+		tp := newTap(t)
+		s, _ := started(t, h, tp, remote.SessionOptions{})
+		c := engine.Command{Client: s.ClientID(), ID: "7"}
+		if err := s.Stop(backend.WithEpoch(tctx(t), s.Epoch()), c); err != nil {
+			t.Fatalf("stop: %v", err)
+		}
+		select {
+		case r := <-heard:
+			if r.Client != c.Client || r.CommandID != c.ID {
+				t.Fatalf("the coordinator was handed %+v, want %s/%s", r, c.Client, c.ID)
+			}
+		case <-time.After(watchdog):
+			t.Fatalf("the coordinator was handed nothing in %s", watchdog)
+		}
+		if sent := tp.sent(protocol.MethodSessionStop); len(sent) != 1 || !strings.Contains(string(sent[0].params), `"commandId":"7"`) {
+			t.Fatalf("session.stop went out %d times: %+v", len(sent), sent)
+		}
+		// The session's end follows the receipt on the stream.
+		end := readUntil(t, s, itemKind(backend.ItemEnd))
+		if it := end[len(end)-1]; it.Err != nil {
+			t.Fatalf("the stream ended %v, want the session's own end", it.Err)
+		}
+	})
+	t.Run("an older host", func(t *testing.T) {
+		h := newHost(t)
+		tp := newTap(t)
+		s, _ := started(t, h, tp, remote.SessionOptions{})
+		err := s.Stop(tctx(t), engine.Command{Client: s.ClientID(), ID: "3"})
+		var e *remote.Error
+		if !errors.Is(err, backend.ErrStopUnsupported) || !errors.As(err, &e) || e.Reason != protocol.ReasonStopUnsupported {
+			t.Fatalf("stop on a host without it: %v, want backend.ErrStopUnsupported", err)
+		}
+		if errors.Is(err, backend.ErrOutcomeUnknown) {
+			t.Fatalf("a host's refusal is an outcome unknown: %v", err)
+		}
+		if st := h.eng.State(); st.Activity == engine.ActivityClosing {
+			t.Fatal("a refused stop closed the session")
+		}
+	})
+}
+
+// TestAStopIsAnsweredByTheSessionsEnd (plan 030 C5, X3): a stop that meets
+// the session's end before its receipt — a joined stop, or one arriving once a
+// signal or the idle exit set the end going, whose receipt the host's ending
+// connection never writes — is answered by that end: nil, never an outcome
+// unknown, forced here by the tap dropping the receipt while the stream's
+// reset{session_closed} goes through. A stop made once the session has ended
+// is answered at once, sending nothing. Either way the Session's close after
+// it detaches nothing.
+func TestAStopIsAnsweredByTheSessionsEnd(t *testing.T) {
+	var eng atomic.Pointer[engine.Engine]
+	h := newHost(t, withStop(func(control.StopRequest) {
+		go func() { _ = eng.Load().Close() }()
+	}))
+	eng.Store(h.eng)
+	tp := newTap(t)
+	tp.setRewriteIn(func(l wireLine) [][]byte {
+		if l.method == protocol.MethodSessionStop && l.resp != nil {
+			return [][]byte{} // the receipt never reaches the client
+		}
+		return nil
+	})
+	s, _ := started(t, h, tp, remote.SessionOptions{})
+	if err := s.Stop(tctx(t), engine.Command{Client: s.ClientID(), ID: "5"}); err != nil {
+		t.Fatalf("a stop whose receipt the session's end overtook: %v, want nil", err)
+	}
+	select {
+	case <-s.Ended():
+	default:
+		t.Fatal("Stop answered before the session's end")
+	}
+	sent := len(tp.sent(protocol.MethodSessionStop))
+	if err := s.Stop(tctx(t), engine.Command{Client: s.ClientID(), ID: "6"}); err != nil {
+		t.Fatalf("a stop after the session's end: %v, want nil", err)
+	}
+	if got := len(tp.sent(protocol.MethodSessionStop)); got != sent {
+		t.Fatalf("a stop after the session's end was sent: %d stops on the wire, want %d", got, sent)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatalf("close after a stop: %v", err)
+	}
+	if n := len(tp.sent(protocol.MethodSessionDetach)); n != 0 {
+		t.Fatalf("close after a stop sent %d detaches", n)
+	}
+}
+
+// TestCloseWithinBoundsItsDetach (plan 030 C5r, astra r8-c5 4): the explicit
+// quit's close shares the quit's deadline. With time left the detach is sent,
+// and a host that never answers it (the tap drops the reply) holds the close
+// only until the context ends — forced here by ending it once the detach is on
+// the wire — never for the client's own detach bound; with the context already
+// done (the deadline passed, or a second quit) nothing is detached at all and
+// the transport is closed at once.
+func TestCloseWithinBoundsItsDetach(t *testing.T) {
+	// bound is generous for a close whose context has ended, and short of the
+	// 3 s detach wait a close with no deadline of its own spends (closeBound).
+	const bound = 2 * time.Second
+	closing := func(s *remote.Session, ctx context.Context) <-chan error {
+		done := make(chan error, 1)
+		go func() { done <- s.CloseWithin(ctx) }()
+		return done
+	}
+	closed := func(t *testing.T, done <-chan error, what string) {
+		t.Helper()
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Fatalf("close: %v", err)
+			}
+		case <-time.After(bound):
+			t.Fatalf("%s: the close did not return within %v", what, bound)
+		}
+	}
+	withheld := func(tp *tap) {
+		tp.setRewriteIn(func(l wireLine) [][]byte {
+			if l.method == protocol.MethodSessionDetach && l.resp != nil {
+				return [][]byte{} // the host never answers the detach
+			}
+			return nil
+		})
+	}
+
+	t.Run("time left", func(t *testing.T) {
+		h := newHost(t)
+		tp := newTap(t)
+		withheld(tp)
+		s, _ := started(t, h, tp, remote.SessionOptions{})
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		done := closing(s, ctx)
+		tp.await(t, "the detach on the wire", func() bool { return len(tp.sent(protocol.MethodSessionDetach)) == 1 })
+		select {
+		case <-done:
+			t.Fatal("the close returned with its detach unanswered and its context live")
+		default:
+		}
+		cancel() // the quit's deadline
+		closed(t, done, "the context ended")
+	})
+	t.Run("none left", func(t *testing.T) {
+		h := newHost(t)
+		tp := newTap(t)
+		withheld(tp)
+		s, _ := started(t, h, tp, remote.SessionOptions{})
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		closed(t, closing(s, ctx), "no time left")
+		if n := len(tp.sent(protocol.MethodSessionDetach)); n != 0 {
+			t.Fatalf("%d detaches sent with no time left, want none", n)
+		}
+	})
+}
+
+// TestTheInfoCarriesAPlan030HostsFacts (plan 030 §3.7, SF-60, SF-63): the
+// info document's permissionMode and startedAt reach the Backend's Info as
+// the host sent them; a host that sends neither — one from before plan 030 —
+// leaves them unsaid, and so does the fallback before any attach reply.
+func TestTheInfoCarriesAPlan030HostsFacts(t *testing.T) {
+	t0 := time.Date(2026, 9, 29, 9, 0, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		name    string
+		opts    []hostOpt
+		perm    backend.PermissionMode
+		started time.Time
+	}{
+		{"a --force host", []hostOpt{withInfo(protocol.PermissionBypass, t0)}, backend.PermissionBypass, t0},
+		{"a --no-force host", []hostOpt{withInfo(protocol.PermissionPrompt, t0)}, backend.PermissionPrompt, t0},
+		{"an older host", nil, backend.PermissionUnsaid, time.Time{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHost(t, tc.opts...)
+			s := dialSession(t, h.path, newTap(t), remote.SessionOptions{})
+			if info := s.Info(); info.PermissionMode != backend.PermissionUnsaid || !info.StartedAt.IsZero() {
+				t.Fatalf("before the attach reply the Info says %q, started %s", info.PermissionMode, info.StartedAt)
+			}
+			if err := s.Start(tctx(t)); err != nil {
+				t.Fatalf("start: %v", err)
+			}
+			if info := s.Info(); info.PermissionMode != tc.perm || !info.StartedAt.Equal(tc.started) {
+				t.Fatalf("the Info says %q, started %s; want %q, started %s", info.PermissionMode, info.StartedAt, tc.perm, tc.started)
+			}
+		})
+	}
+}
+
+// TestLastTurnIsSessionStates (plan 030 §3.7, SF-57): LastTurn is
+// session.state's lastTurn in the engine's types — nil before any turn has
+// ended, the failed ending with its error and turn id once one has — bound
+// as every read is: a ctx whose epoch the client has left is
+// backend.ErrStaleEpoch, nothing sent.
+func TestLastTurnIsSessionStates(t *testing.T) {
+	h := newHost(t)
+	tp := newTap(t)
+	s, _ := started(t, h, tp, remote.SessionOptions{})
+	lt, err := s.LastTurn(backend.WithEpoch(tctx(t), s.Epoch()))
+	if err != nil || lt != nil {
+		t.Fatalf("before any turn: %+v, %v; want none", lt, err)
+	}
+	h.publish(
+		agent.Event{Type: agent.EventTurn, Turn: &agent.TurnInfo{Phase: agent.TurnStarted, ID: "turn-9", Text: "go"}},
+		agent.Event{Type: agent.EventTurn, Turn: &agent.TurnInfo{Phase: agent.TurnEnded, ID: "turn-9", Err: "boom"}},
+	)
+	var got *engine.LastTurn
+	deadline := time.Now().Add(watchdog)
+	for got == nil {
+		if time.Now().After(deadline) {
+			t.Fatal("the host's last turn never ended")
+		}
+		if got, err = s.LastTurn(tctx(t)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	want := h.eng.State().LastTurn
+	if got.Outcome != engine.TurnFailed || got.Err != "boom" || got.TurnID != "turn-9" || !got.EndedAt.Equal(want.EndedAt) {
+		t.Fatalf("LastTurn %+v, want the host's %+v", got, want)
+	}
+	before := len(tp.sent(protocol.MethodSessionState))
+	if _, err := s.LastTurn(backend.WithEpoch(tctx(t), s.Epoch()+1)); !errors.Is(err, backend.ErrStaleEpoch) {
+		t.Fatalf("a stale epoch's read: %v, want ErrStaleEpoch", err)
+	}
+	if after := len(tp.sent(protocol.MethodSessionState)); after != before {
+		t.Fatalf("a stale read went out: %d session.state requests, want %d", after, before)
+	}
 }

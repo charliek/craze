@@ -20,6 +20,10 @@ import (
 	"github.com/charliek/craze/internal/tui"
 )
 
+// tuiFlags is a session's command line: the root command's, and — its
+// TUI-only members never registered there and so zero — craze serve's
+// (serveFlags). The session flags both commands take are registered once, by
+// registerSessionFlags (sessionflags.go, plan 030 §3.3).
 type tuiFlags struct {
 	theme     string
 	workspace string
@@ -74,39 +78,46 @@ func (f *tuiFlags) refuse(p agent.Provider) error {
 // holds.
 const resumeRowLimit = 10
 
+// registerTUIFlags declares the root command's flags: the session flags craze
+// serve takes too (registerSessionFlags) and the TUI's own. cobra sorts them
+// for --help, so the order here is not what a user reads.
 func registerTUIFlags(cmd *cobra.Command, f *tuiFlags) {
 	// The default is empty so Changed("theme") can tell an explicit --theme
 	// from an unset one, which is what the config file loses to.
 	cmd.Flags().StringVar(&f.theme, "theme", "", themeFlagUsage)
-	cmd.Flags().StringVar(&f.workspace, "workspace", "", "existing workspace directory (default: current directory)")
-	cmd.Flags().StringVar(&f.model, "model", "", "ACP model id")
-	cmd.Flags().StringVar(&f.agentBin, "agent-bin", "", "path to cursor-agent / fake agent (or CRAZE_AGENT_BIN)")
-	registerPluginDirFlag(cmd, &f.pluginDirs)
-	cmd.Flags().BoolVar(&f.force, "force", true, "spawn the agent with --force (yolo)")
-	cmd.Flags().BoolVar(&f.noForce, "no-force", false, "disable yolo and handle permission requests")
+	registerSessionFlags(cmd, f)
 	cmd.Flags().BoolVar(&f.noMouse, "no-mouse", false, "disable mouse reporting (wheel scroll and clicks)")
 	cmd.Flags().BoolVar(&f.noBackground, "no-background", false, "keep the terminal's own background and text colours")
 	cmd.Flags().BoolVar(&f.noHostStatus, "no-host-status", false, "do not report session status to the terminal multiplexer (herdr, roost)")
-	cmd.Flags().BoolVar(&f.ask, "ask", false, "set session mode to ask after session/new")
-	cmd.Flags().BoolVar(&f.plan, "plan", false, "set session mode to plan after session/new")
-	cmd.Flags().BoolVarP(&f.cont, "continue", "c", false, "load the newest session in this workspace instead of starting a new one")
 	cmd.Flags().BoolVarP(&f.resume, "resume", "r", false, "pick one of the last 10 sessions in this workspace to load")
-	registerProviderFlag(cmd, &f.provider)
 }
 
 // runTUI runs the TUI. env is the environment host status is read from:
 // processHostEnv() for the real command, and an empty hostEnv for a test, which
 // must never report into the herdr pane or roost tab the test suite itself may
 // be running in.
+//
+// Its session runs in a detached host the TUI is a client of (runLaunch,
+// plan 030 §3.5), or — under the opt-out (detachOn) — in this process, the
+// path below, which is the whole of runTUI as it was before detached hosts.
 func runTUI(cmd *cobra.Command, f *tuiFlags, env hostEnv) error {
-	if f.ask && f.plan {
-		return usagef("craze: --ask and --plan are mutually exclusive")
+	if err := f.settle(); err != nil {
+		return err
 	}
 	if f.cont && f.resume {
 		return usagef("craze: --continue and --resume are mutually exclusive")
 	}
-	if f.noForce {
-		f.force = false
+	// The TUI owns the alt screen for the whole run, so nothing else may write
+	// to the terminal: a diagnostic from cursor-agent lands on top of a frame,
+	// takes none of the renderer's locks, and would garble it. The agent's
+	// stderr and craze's own warnings are held here and printed once the screen
+	// is back.
+	diag := &deferredStderr{}
+	// The session runs in a detached host, which this TUI is the client of
+	// (plan 030 §3.5, launch.go) — unless the opt-out says not to: then it
+	// runs in this process, exactly as it always has, below.
+	if detachOn(diag.craze()) {
+		return runLaunch(cmd, f, env, diag)
 	}
 	// The host id first: the session claims write it into their lock files,
 	// with a control socket or without one (plan 027 §3.9). Its teardown is
@@ -128,12 +139,6 @@ func runTUI(cmd *cobra.Command, f *tuiFlags, env hostEnv) error {
 		indexCWD = abs
 	}
 	mode := f.mode()
-	// The TUI owns the alt screen for the whole run, so nothing else may write
-	// to the terminal: a diagnostic from cursor-agent lands on top of a frame,
-	// takes none of the renderer's locks, and would garble it. The agent's
-	// stderr and craze's own warnings are held here and printed once the screen
-	// is back.
-	diag := &deferredStderr{}
 	rh := &runHost{claims: newSessionClaims(runEnv, hostID, diag.craze())}
 	defer rh.close()
 	// A loaded session takes its provider from the row it loads, so whatever
@@ -169,8 +174,7 @@ func runTUI(cmd *cobra.Command, f *tuiFlags, env hostEnv) error {
 	// closure: sessionOptions strips each active host's hook gate from the
 	// agent child's environment, and resolveLoad may build a session before
 	// tui.Run ever starts. The hub itself is built later (plan 015 §3.5).
-	hosts := resolveHosts(f, env)
-	childEnv := hosts.childEnv(env.list())
+	hosts, childEnv := agentEnv(f, env)
 	// The journal directory is settled once too, for the same reason: the
 	// picker may build several sessions, and a journal that is off because of
 	// a mistake says so once, on craze's own lane.
@@ -212,10 +216,10 @@ func runTUI(cmd *cobra.Command, f *tuiFlags, env hostEnv) error {
 		if !f.cont || !errors.As(err, &held) {
 			return err
 		}
-		// SQ16 (plan 027 §3.9, PR 4): the session is open in another craze,
-		// and this --continue joins it there instead. Nothing was built,
-		// bound or claimed for it, so the teardown has nothing of this run's
-		// to release, and runs before the attach takes the terminal.
+		// SQ16 (plan 027 §3.9, PR 4): the session is already running
+		// elsewhere, and this --continue joins it there instead. Nothing was
+		// built, bound or claimed for it, so the teardown has nothing of this
+		// run's to release, and runs before the attach takes the terminal.
 		rh.close()
 		err = attachHeld(cmd, f, runEnv, held, err)
 		diag.flush(os.Stderr, false)
@@ -228,7 +232,7 @@ func runTUI(cmd *cobra.Command, f *tuiFlags, env hostEnv) error {
 	// bound nothing. The claims above were taken either way: the session lock
 	// does not depend on the opt-out (plan 027 §3.8).
 	if controlSocketOn(diag.craze()) {
-		rh.ctl = serveControl(runEnv, hostID, indexCWD, diag.craze())
+		rh.ctl = serveControl(runEnv, hostID, indexCWD, f.force, diag.craze())
 	}
 	cfg.OnEngine = rh.onEngine
 	cfg.ClaimSession = rh.claims.pickerClaim
@@ -236,7 +240,7 @@ func runTUI(cmd *cobra.Command, f *tuiFlags, env hostEnv) error {
 	// the hub's goroutines start only for a run that reaches tui.Run, whose
 	// exit tail closes the hub before diag is flushed.
 	attachHost(&cfg, hosts, diag.craze())
-	res, err := tui.Run(cfg)
+	res, err := tuiRun(cfg)
 	// The teardown runs here, before the flush, and not only in the defer
 	// (which stays for the returns above, and is a no-op after this): the
 	// socket, the registry entry and the claims are released even when stderr
@@ -250,8 +254,9 @@ func runTUI(cmd *cobra.Command, f *tuiFlags, env hostEnv) error {
 	return err
 }
 
-// sessionOptions is the one description of a session the TUI starts: a new one
-// when row is the zero value, and a load of that row when it is not. The two
+// sessionOptions is the one description of a session the TUI starts — and
+// craze serve, which starts the very same session headless (plan 030 §3.3): a
+// new one when row is the zero value, and a load of that row when it is not. The two
 // differ in three fields and agree in every other, so they are spelled once —
 // --ask/--plan/--model apply to a loaded session exactly as they do to a fresh
 // one, because Start orders them after the session is set up either way (§3.1).
@@ -261,10 +266,12 @@ func runTUI(cmd *cobra.Command, f *tuiFlags, env hostEnv) error {
 //
 // stderr and diag are the two lanes deferredStderr splits (§3.7.1): stderr is
 // the agent child's own stderr, diag is where craze's own notes about the
-// session — discoverPlugins' warn closure — go instead.
+// session — discoverPlugins' warn closure — go instead. craze serve, which has
+// no alt screen to defer for, hands both its log.
 //
-// JournalDir is left to runTUI's build closure, which sets the directory it
-// resolved once for the whole run (journalDir).
+// JournalDir is left to the caller — runTUI's build closure, craze serve —
+// which sets the directory it resolved once for the whole run (journalDir);
+// so is NoPrimary, which only a headless host sets.
 func sessionOptions(f *tuiFlags, ws, mode string, stderr, diag io.Writer, env []string, p agent.Provider, row sessions.Row) agent.Options {
 	return agent.Options{
 		Binary:      f.agentBin,
@@ -308,7 +315,7 @@ func sessionOptions(f *tuiFlags, ws, mode string, stderr, diag io.Writer, env []
 // asked of a row that has its id already, so a held one is attached to
 // whatever they say, and after them for a legacy row, whose claim would mint
 // and write its id (plan 028 §3.5). A session another craze holds
-// is exit 1, `craze: that session is open in another craze (pid N)`, carrying
+// is exit 1, `craze: that session is already running (pid N)`, carrying
 // the *rundir.HeldError — which runTUI attaches through instead, when the
 // holder serves its session (SQ16, PR 4: attachHeld); an index held busy past
 // the bound is exit 1 too, and so is a row with no craze id that left the
@@ -326,12 +333,11 @@ func resolveLoad(cmd *cobra.Command, f *tuiFlags, cwd string, cfg *tui.Config, b
 	// asked to continue (§3.1). The same explicitness decides whether this
 	// run may still write the persisted default: continuing a grok thread is
 	// not a decision about tomorrow's default.
-	explicit := providerFlagExplicit(cmd, f.provider)
 	filter := ""
-	if explicit {
+	if providerFlagExplicit(cmd, f.provider) {
 		filter = cfg.Provider.Name()
 	}
-	cfg.PersistProvider = explicit
+	cfg.PersistProvider = persistsProvider(cmd, f, true)
 	refuseLoad := f.refuse
 
 	index := &sessions.Store{KnownProvider: knownProvider}
@@ -347,49 +353,17 @@ func resolveLoad(cmd *cobra.Command, f *tuiFlags, cwd string, cfg *tui.Config, b
 		cfg.RefuseLoad = refuseLoad
 		return nil
 	}
-	row, ok, err := index.Latest(cwd, filter)
+	row, err := continueRow(cwd, filter)
 	if err != nil {
-		return exitf(1, "%s: %v", noSessionMsg(cwd, filter), err)
+		return err
 	}
-	if !ok {
-		return exitf(1, "%s", noSessionMsg(cwd, filter))
-	}
-	// The row's provider wins: the index says which agent wrote this session
-	// and only that one is trusted to load it, whatever resolveProvider
-	// resolved. Reading the registry cannot fail here — the store filters out
-	// a provider this build does not know — but a row is user-editable JSON,
-	// so the refusal is spelled rather than assumed.
-	p, err := agent.ProviderByName(row.Provider)
+	// The row's provider, held to the spawn flags, and the row claimed, in the
+	// order claimLoad keeps (plan 028 §3.5, SQ16). Its refusal carries
+	// claimRow's error: a session another craze holds is attached to instead
+	// (runTUI, SQ16).
+	p, row, err := claimLoad(row, refuseLoad, claims)
 	if err != nil {
-		return exitf(1, "craze: %v", err)
-	}
-	// A legacy row (no craze id) is refused before the claim, whose
-	// EnsureCrazeID would mint its id and write the index: a load the command
-	// line can never start leaves no trace (plan 028 §3.5, seam 6).
-	legacy := row.CrazeID == ""
-	if legacy {
-		if err := refuseLoad(p); err != nil {
-			return err
-		}
-	}
-	// Claimed before build, which has no error return and would otherwise
-	// have to hand back a session that must never start.
-	crazeID, release, err := claims.claimRow(row)
-	if err != nil {
-		// The refusal carries claimRow's error: a session another craze holds
-		// is attached to instead (runTUI, SQ16).
-		return &exitError{code: 1, msg: "craze: " + refusal(err), cause: err}
-	}
-	// A row with a craze id is claimed first (SQ16, PR 4): one another craze
-	// holds is attached to above whatever the spawn flags say — an attach
-	// takes none of them — and only one this run now holds is held to them.
-	// A refusal gives the claim back before it returns: the claim writes no
-	// index row for a row that has its id, and the lock is released.
-	if !legacy {
-		if err := refuseLoad(p); err != nil {
-			release()
-			return err
-		}
+		return err
 	}
 	cfg.Provider = p
 	cfg.ProviderLocked = true
@@ -401,8 +375,7 @@ func resolveLoad(cmd *cobra.Command, f *tuiFlags, cwd string, cfg *tui.Config, b
 	// existed was given one first — so the claim and the engine agree. Only
 	// when no id could be written is it empty, and then the engine mints one
 	// that the row gains on its next write.
-	cfg.CrazeSessionID = crazeID
-	row.CrazeID = crazeID
+	cfg.CrazeSessionID = row.CrazeID
 	cfg.Session = build(p, row)
 	return nil
 }

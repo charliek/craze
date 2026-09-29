@@ -86,6 +86,10 @@ type gateRig struct {
 	// lingers are the waits for calls a gate stopped waiting for at their
 	// deadline (lingerOn), not run until a test runs one.
 	lingers []tea.Cmd
+	// lastTurns are the reads of the session's last ending a restore sent
+	// (readLastTurn, plan 030 §3.7), not run until a test runs one — so a
+	// test holds each answer exactly where its schedule says.
+	lastTurns []tea.Cmd
 }
 
 // newGateRig takes over m with the one read Init armed outstanding, as New
@@ -137,6 +141,8 @@ func (r *gateRig) sort(cmd tea.Cmd) {
 		r.calls = append(r.calls, cmd)
 	case strings.HasPrefix(name, tuiPkg+"lingerOn"):
 		r.lingers = append(r.lingers, cmd)
+	case strings.Contains(name, "readLastTurn"):
+		r.lastTurns = append(r.lastTurns, cmd)
 	}
 	// Anything else — a timer above all — is never run: the tests deliver
 	// their own ticks.

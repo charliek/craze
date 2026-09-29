@@ -207,17 +207,19 @@ when the config parsed and `journal` is absent or exactly `true`.
 
 ## The control socket
 
-Every craze TUI process binds a Unix-domain control socket and serves the
-session it runs over it — what [`craze bridge`](cli.md#craze-bridge) and a
-future `craze attach` dial into. See the
+Every host binds a Unix-domain control socket and serves its session over it
+— what [`craze bridge`](cli.md#craze-bridge) and [`craze
+attach`](cli.md#craze-attach) dial into. The host is the detached [`craze
+serve`](cli.md#craze-serve) the ordinary `craze` spawns (see [Detached
+hosts](#detached-hosts)), or, with detaching off, the TUI's own process. See the
 [protocol reference](protocol.md#reaching-a-host) for the runtime namespace,
 the registry, and where the socket itself lives; the registry and its locks
 sit under the bridge process's own `$HOME`, not `CRAZE_HOME` — an SSH login
 is **assumed** to share that `$HOME` with the tab that started the host,
 true for an ordinary SSH login as the same user, whatever the tab had set
 for the other variables. Binding
-happens only once a run is actually starting a TUI: a `--continue`
-[refused by SQ16](cli.md#a-session-already-open-in-another-craze) binds
+happens only once a run is actually starting a host or a TUI: a `--continue`
+[refused by SQ16](cli.md#a-session-already-running-in-another-craze) binds
 nothing.
 
 `control_socket = false` in `config.toml`, or `CRAZE_CONTROL_SOCKET=0` (or
@@ -244,9 +246,112 @@ socket's own path would be too long for `sun_path` — is not the opt-out and
 is not a privacy switch: it prints one line, `craze: control socket off:
 <why>`, embedding the underlying error's own text as is — in the ordinary
 case that is one stderr line, but nothing here promises the error text
-itself is free of a line break (a runtime path containing one, say). The run
-carries on exactly as it would with the opt-out set.
-`CRAZE_RUNTIME_DIR` (below) is the fix when the reason is length.
+itself is free of a line break (a runtime path containing one, say). On the
+in-process path (`CRAZE_DETACH=0`, `detach = false`) the run carries on
+exactly as it would with the opt-out set. A [detached](#detached-hosts)
+session cannot: its host exists to serve that socket, so `craze serve` fails
+to start and the TUI shows the failure (`craze: the session host could not
+start: …; CRAZE_DETACH=0 runs sessions inside craze instead`) and exits 1 when
+dismissed. `CRAZE_RUNTIME_DIR` (below) is the fix when the reason is length;
+`CRAZE_DETACH=0` runs the session inside craze meanwhile.
+
+## Detached hosts
+
+By default the ordinary `craze` runs the session in a detached host — [`craze
+serve`](cli.md#craze-serve), in a session of its own — and the TUI is that
+host's client, so [the session outlives the
+terminal](cli.md#sessions-outlive-their-terminal). Three switches turn that
+off and run the session inside the TUI's own process, as craze did before:
+
+- `detach = false` in `config.toml`.
+- `CRAZE_DETACH=0` (or `false`) for one run. It cannot turn detaching on
+  against `detach = false`.
+- `control_socket = false`, or `CRAZE_CONTROL_SOCKET=0`: a detached host is
+  reachable only through its socket, so with the socket off detaching is off
+  too, silently (the [control socket](#the-control-socket)'s own switches
+  speak for it).
+
+**The opt-out fails closed onto the in-process path**, like the other access
+switches on this page: anything craze cannot read as a plain `true` means
+*off* — a `config.toml` it cannot read or parse, a `detach` key that is not a
+bool, a `CRAZE_DETACH` that is not a bool. Each prints one line
+(`craze: detached sessions off: <why>`); an explicit `false` is your own
+choice and is silent. `CRAZE_DETACH` is read trimmed, and empty counts as
+unset.
+
+With detaching off, closing the terminal ends the session, and there is no
+agent view of it beyond the run's own control socket.
+
+### Host idle exit
+
+`host_idle_exit` in `config.toml` says how long a detached host may sit idle
+before it exits on its own, saving the session like any stop (it stays
+resumable with `craze -c`):
+
+```toml
+host_idle_exit = "1h"      # the default
+host_idle_exit = "20m"     # any Go duration: "90m", "2h30m", "45s"
+host_idle_exit = "0"       # exit as soon as the host is eligible
+host_idle_exit = "never"   # any case; never exit for being idle
+```
+
+The value is a string. An absent key is `"1h"`, silently; a file that cannot
+be read or parsed, a value that is not a string, or one that is neither a
+duration nor `never` (or is negative) is also `"1h"`, with one line in the
+host's log. The host reads it once, as it starts.
+
+**Idle** means both: no client attached, and nothing in flight. A client is
+one attached to the session (a `craze attach`, a TUI, a bridge); the session
+list's polling does not count, nor does a peer that has half-closed its
+connection. Something in flight is a turn, a queued prompt or setting, a
+send-now armed, an open ask (a permission or a question: **an ask pins its
+host until someone answers it or the session is stopped**), a sub-agent or a
+background child running, or a session still starting or replaying. Any of
+those, at any one-second look, restarts the clock, as does a turn that
+ended since the last look. The stop is decided atomically: the host refuses
+new work while it counts, so a client that attaches at that instant is either
+counted or refused, never half-attached.
+
+Three cases have their own limit:
+
+- **A startup grace.** The clock does not start until a client has attached
+  or 60 seconds have passed since the host started, so a host spawned for a
+  client that has not dialled yet is not reaped first.
+- **Never prompted: five minutes at most.** A session that has had no prompt
+  has nothing to resume, so its limit is the smaller of `host_idle_exit` and
+  five minutes — a loaded session nobody has prompted included.
+- **A failed start: none.** A host whose session could not start (an auth
+  failure, say) stays only long enough for its launcher to attach and be told
+  why; its limit is 0, even under `"never"`.
+
+Independently of the limit, a host whose socket file or registry entry has
+vanished (`/run/user` removed at the last logout, a registry swept by hand)
+stops at once, the ordinary way: it can no longer be reached, and stopping
+saves the session.
+
+### Host logs
+
+A detached host writes its own diagnostics, its crash output and its agent's
+stderr to `~/.cache/craze/host-logs/<hostId>.log` (under the process's own
+`$HOME`, beside the [registry](protocol.md#the-registry) — not `CRAZE_HOME`).
+The launcher names it whenever a host could not start. A spawned host's
+`--log` is always that file; `craze serve` run by hand logs to stderr unless
+`--log` says otherwise.
+
+- The log is **rotated once**: at 4 MiB the current file becomes
+  `<hostId>.log.1` (replacing an older one), and a new `<hostId>.log` starts.
+- Beside it, `<hostId>.pgids` records the process groups of the host's agents
+  while it runs, for its launcher's last-resort cleanup; it is removed when
+  the host stops cleanly.
+- Every host **sweeps the directory as it starts**: the files of a host that
+  is gone (decided by its own host lock, never by its registry entry) and that
+  nobody has touched for 7 days are removed. A live host's files are never
+  removed, whatever their age.
+- The directory is `0700`, and a `--log` inside it must be named for the host
+  that opens it.
+
+A host's log can hold what its agent printed to stderr; treat it like the
+[journal](#session-journal).
 
 ## Terminal tab title
 
@@ -480,6 +585,7 @@ has no concept of it, so import never touches this table, the same as
 | `CRAZE_PROVIDER` | Provider id when `--provider` is unset (`cursor`, `grok`, `gx`, or `native`) |
 | `CRAZE_JOURNAL` | Turns the [session journal](#session-journal) off for this run when it reads as false. It cannot turn one on against `journal = false`, and a value craze cannot read as a bool turns it off with one line saying so. Empty or unset leaves the decision to the config file |
 | `CRAZE_CONTROL_SOCKET` | Turns [the control socket](#the-control-socket) off for this run when it reads as false. It cannot turn one on against `control_socket = false`, and a value craze cannot read as a bool turns it off with one line saying so. Empty or unset leaves the decision to the config file |
+| `CRAZE_DETACH` | Turns [detached hosts](#detached-hosts) off for this run when it reads as false: the session runs inside the TUI's own process and ends with the terminal. It cannot turn detaching on against `detach = false`, and a value craze cannot read as a bool turns it off with one line saying so. Empty or unset leaves the decision to the config file |
 | `CRAZE_RUNTIME_DIR` | Overrides [the control socket's](#the-control-socket) runtime base (default: `$XDG_RUNTIME_DIR/craze`, then `/run/user/<uid>/craze` on Linux, then `/tmp/craze-<uid>`): an absolute path, short enough to leave room for `<ns>/<hostId>.sock` under `sun_path`'s limit. Meant for tests and unusual hosts; see [Protocol reference](protocol.md#reaching-a-host) |
 | `XAI_API_KEY` | Grok API key; used when initialize advertises `xai.api_key` |
 | `GROK_CODE_XAI_API_KEY` | Legacy alias for `XAI_API_KEY` |

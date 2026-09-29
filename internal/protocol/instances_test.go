@@ -67,6 +67,18 @@ func TestInstancesValidate(t *testing.T) {
 	}
 	stateNilQueue := state
 	stateNilQueue.Queue = nil
+	// Plan 030 §3.7's additions, each absent unless the host sets it (X1).
+	facts := info
+	facts.PermissionMode, facts.StartedAt = protocol.PermissionPrompt, instanceTime
+	failedTurn := &protocol.LastTurn{Outcome: protocol.TurnFailed, Err: "agent exited", EndedAt: instanceTime, TurnID: "turn-3"}
+	stateLastTurn := state
+	stateLastTurn.Activity, stateLastTurn.Turn, stateLastTurn.SendNow = protocol.ActivityError, "", nil
+	stateLastTurn.Err, stateLastTurn.LastTurn = "agent exited", failedTurn
+	rowLastTurn := protocol.SessionRow{SessionInfo: facts, Title: "fix it", Activity: protocol.ActivityIdle,
+		LastTurn: &protocol.LastTurn{Outcome: protocol.TurnDone, EndedAt: instanceTime, TurnID: "wake-1"}}
+	rosterLastTurn := func(row protocol.SessionRow) string {
+		return jsonOf(t, protocol.SessionsListResult{Epoch: "h", Sessions: []protocol.SessionRow{row}})
+	}
 	stateNoConfig := state
 	stateNoConfig.Settings.Config = json.RawMessage(`{}`)
 	hello := protocol.HelloResult{
@@ -161,6 +173,15 @@ func TestInstancesValidate(t *testing.T) {
 			strings.Replace(jsonOf(t, protocol.SessionsListResult{Epoch: "h", Sessions: []protocol.SessionRow{row}}), `"working"`, `"busy"`, 1), false},
 		{"a roster row with no hostId", "sessions.list.json", "result",
 			strings.Replace(jsonOf(t, protocol.SessionsListResult{Epoch: "h", Sessions: []protocol.SessionRow{row}}), `"hostId":"0190ab12cd34",`, ``, 1), false},
+		{"a roster row with the host's facts and the last turn", "sessions.list.json", "result", rosterLastTurn(rowLastTurn), true},
+		{"a roster row with a last turn of no outcome there is", "sessions.list.json", "result",
+			strings.Replace(rosterLastTurn(rowLastTurn), `"outcome":"done"`, `"outcome":"stopped"`, 1), false},
+		{"a roster row with a last turn naming no turn", "sessions.list.json", "result",
+			strings.Replace(rosterLastTurn(rowLastTurn), `,"turnId":"wake-1"`, ``, 1), false},
+		{"a roster row with a last turn carrying more", "sessions.list.json", "result",
+			strings.Replace(rosterLastTurn(rowLastTurn), `"turnId":"wake-1"`, `"turnId":"wake-1","seq":4`, 1), false},
+		{"a roster row with a permission mode there is none of", "sessions.list.json", "result",
+			strings.Replace(rosterLastTurn(rowLastTurn), `"permissionMode":"prompt"`, `"permissionMode":"yolo"`, 1), false},
 
 		{"sessions.subscribe", "sessions.subscribe.json", "params", `{}`, true},
 		{"sessions.subscribe has no result a host sends", "sessions.subscribe.json", "result", `{}`, false},
@@ -185,6 +206,15 @@ func TestInstancesValidate(t *testing.T) {
 			Session: info, After: protocol.Cursor{Incarnation: "inc-1"}, Snapshot: json.RawMessage(`{"version":2,"main":{}}`)}), false},
 		{"the attach reply with a bad reset", "session.attach.json", "result", jsonOf(t, protocol.AttachResult{Subscription: "s-1",
 			Session: info, After: protocol.Cursor{Incarnation: "inc-1"}, Reset: "gone"}), false},
+		{"the attach reply with the host's permission mode and start", "session.attach.json", "result",
+			jsonOf(t, protocol.AttachResult{Subscription: "s-1", Session: facts, Ready: true, After: protocol.Cursor{Incarnation: "inc-1", Seq: 7},
+				Snapshot: snapshotBody}), true},
+		{"the attach reply with a start that is not a time", "session.attach.json", "result",
+			strings.Replace(jsonOf(t, protocol.AttachResult{Subscription: "s-1", Session: facts, After: protocol.Cursor{Incarnation: "inc-1"}}),
+				`"startedAt":"2026-09-25T10:30:45.123456789Z"`, `"startedAt":1790000000`, 1), false},
+		{"the attach reply carrying the last turn, which only a read does", "session.attach.json", "result",
+			strings.Replace(jsonOf(t, protocol.AttachResult{Subscription: "s-1", Session: info, After: protocol.Cursor{Incarnation: "inc-1"}}),
+				`"retryHorizon"`, `"lastTurn":{"outcome":"done","endedAt":"2026-09-25T10:30:45Z","turnId":"turn-1"},"retryHorizon"`, 1), false},
 
 		{"session.detach", "session.detach.json", "params", jsonOf(t, protocol.DetachParams{SessionID: "s", Subscription: "s-1"}), true},
 		{"session.detach with no subscription", "session.detach.json", "params", `{"sessionId":"s"}`, false},
@@ -194,6 +224,9 @@ func TestInstancesValidate(t *testing.T) {
 		{"the state with its queue null", "session.state.json", "result", jsonOf(t, stateNilQueue), false},
 		{"the state with a bad activity", "session.state.json", "result", strings.Replace(jsonOf(t, state), `"working"`, `"sleeping"`, 1), false},
 		{"the state with a config that is not the codec's", "session.state.json", "result", strings.Replace(jsonOf(t, state), `{"options"`, `{"opts"`, 1), false},
+		{"the state after a failed turn", "session.state.json", "result", jsonOf(t, stateLastTurn), true},
+		{"the state with a last turn of no time", "session.state.json", "result",
+			strings.Replace(jsonOf(t, stateLastTurn), `"endedAt":"2026-09-25T10:30:45.123456789Z",`, ``, 1), false},
 
 		{"session.snapshot of a child", "session.snapshot.json", "params", jsonOf(t, protocol.SnapshotParams{SessionID: "s", AgentID: "sub-1",
 			Budget: &protocol.SnapshotBudget{SnapshotBytes: 65536}}), true},
@@ -252,6 +285,9 @@ func TestInstancesValidate(t *testing.T) {
 		{"session.setTitle", "session.setTitle.json", "params", jsonOf(t, protocol.SetTitleParams{SessionID: "s", CommandID: "10", Title: "fix it"}), true},
 		{"session.subagent.cancel", "session.subagent.cancel.json", "params", jsonOf(t, protocol.SubagentCancelParams{SessionID: "s", CommandID: "11", AgentID: "sub-1"}), true},
 		{"session.stop", "session.stop.json", "params", jsonOf(t, protocol.StopParams{SessionID: "s", CommandID: "12"}), true},
+		{"session.stop with no command id", "session.stop.json", "params", `{"sessionId":"s"}`, false},
+		{"session.stop's receipt", "session.stop.json", "result", jsonOf(t, protocol.Empty{}), true},
+		{"session.stop's receipt with something in it", "session.stop.json", "result", `{"stopped":true}`, false},
 
 		{"asks.list", "asks.list.json", "params", jsonOf(t, protocol.AsksListParams{SessionID: "s"}), true},
 		{"the open asks", "asks.list.json", "result", jsonOf(t, protocol.AsksListResult{Asks: []protocol.AskSummary{
@@ -325,6 +361,8 @@ func TestInstancesValidate(t *testing.T) {
 			`{"jsonrpc":"2.0","id":1,"error":{"code":-32603,"message":"x","data":{"code":"failed","reason":"failed"}}}`, false},
 		inst{"a client-side reason from a host", "envelope.json", "response", errResp(protocol.CodeAborted, protocol.ReasonResumeLost), false},
 		inst{"a reason under another code", "envelope.json", "response", errResp(protocol.CodeUnavailable, protocol.ReasonNotInTurn), false},
+		inst{"an attach refused while the host closes", "envelope.json", "response", errResp(protocol.CodeUnavailable, protocol.ReasonClosing), true},
+		inst{"closing under a code it is not", "envelope.json", "response", errResp(protocol.CodeNotAccepting, protocol.ReasonClosing), false},
 		inst{"a code outside the closed set", "envelope.json", "response", errResp("teapot", "teapot"), false},
 		inst{"a notification", "envelope.json", "notification", jsonOf(t, protocol.Notification{JSONRPC: protocol.JSONRPCVersion,
 			Method: protocol.NotifyReset, Params: json.RawMessage(`{"subscription":"s-1","reason":"session_closed"}`)}), true},

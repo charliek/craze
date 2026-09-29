@@ -89,6 +89,10 @@ type Session struct {
 	// end: every Read after it is backend.ErrClosed.
 	gen  uint64
 	over bool
+	// stopped says a Stop of this Session's was answered — its receipt, or
+	// the session's end while it was outstanding: the session is ending, so
+	// Close has no stream to detach.
+	stopped bool
 }
 
 var _ backend.Backend = (*Session)(nil)
@@ -326,16 +330,33 @@ func (s *Session) Started(error) {}
 // close, and a host's refusal of the detach otherwise. Read answers
 // backend.ErrClosed afterwards, and every command ErrClosed (one still
 // waiting resolves as Client.Close says).
-func (s *Session) Close() error {
+func (s *Session) Close() error { return s.CloseWithin(context.Background()) }
+
+// CloseWithin is Close bounded by ctx as well as by closeBound (plan 030
+// C5r): the explicit quit's one deadline covers its stop, the wait for the
+// session's end and this close after them (tui's stopQuit), so the detach
+// waits only for what is left of it, and a ctx already done — the deadline
+// passed, or a second quit — detaches nothing: the transport is closed at
+// once, which ends the subscription on the host anyway, and every write
+// blocked on it — a stop's behind a host that has stopped reading among them
+// (C5r2), which is why the quit closes through here at its deadline. It is
+// Close in every other way, and shares its once: whichever is called first
+// decides.
+func (s *Session) CloseWithin(ctx context.Context) error {
 	s.closeOnce.Do(func() {
 		s.mu.Lock()
 		s.closing = true
 		st := s.stream
+		if s.stopped {
+			// The session is ending on its host (Stop): a detach would only
+			// wait on a connection that admits nothing more.
+			st = nil
+		}
 		s.mu.Unlock()
 		close(s.closed)
-		if st != nil {
-			ctx, cancel := context.WithTimeout(context.Background(), closeBound)
-			err := st.Close(ctx)
+		if st != nil && ctx.Err() == nil {
+			cctx, cancel := context.WithTimeout(ctx, closeBound)
+			err := st.Close(cctx)
 			cancel()
 			var e *Error
 			if errors.As(err, &e) {
@@ -347,6 +368,12 @@ func (s *Session) Close() error {
 	})
 	return s.closeErr
 }
+
+// Ended is closed once the stream's last item is queued — the session's end
+// on its host, or the transport given up, or an item that could not be read —
+// whether or not Read has handed it up yet. It is what the TUI's explicit quit
+// waits on after its stop (plan 030 §3.6).
+func (s *Session) Ended() <-chan struct{} { return s.ended }
 
 // ClientID is the client id the host bound this client to last, read per call:
 // it changes when a reconnect's hello did not resume.
@@ -806,6 +833,76 @@ func (s *Session) Cancel(ctx context.Context, c engine.Command, turn string) (en
 	return engine.CancelResult{Outcome: engine.CancelOutcome(r.Outcome), Turn: r.Turn, Reported: r.Reported}, err
 }
 
+// Stop is session.stop (plan 030 §3.6a; backend.Backend.Stop): the
+// caller's own command id, bound as every command is. It returns once the
+// host has answered its receipt — the stop taken, not yet done: the
+// session's end follows on the stream, its closing records and then the
+// stream's End. A host whose capability stop is false answers unsupported,
+// reason stop_unsupported, which is an *Error matching
+// backend.ErrStopUnsupported (sentinels.go): nothing was stopped, and the
+// caller detaches instead.
+//
+// The session's end while the stop is outstanding is its answer too (plan 030
+// C5, X3): a stop that joins one already running, or that arrives once a
+// signal or the idle exit has set the end going, may meet the session's end
+// before its receipt — the host's connection ends as the session does, and
+// admits nothing more — and that end is what the stop asked for, never an
+// outcome unknown. The session's own end (reset session_closed, an End with
+// no error) answers it; a transport given up does not, and the command's own
+// answer stands. A session that had ended before the call is answered at
+// once. The command's call is abandoned when the end answers: its context is
+// the call's own, cancelled then, so nothing is left waiting on a host that
+// has gone.
+func (s *Session) Stop(ctx context.Context, c engine.Command) error {
+	if s.endedClean() {
+		s.markStopped()
+		return nil
+	}
+	cctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		done <- s.command(cctx, c, protocol.MethodSessionStop, func(sid string) any {
+			return protocol.StopParams{SessionID: sid}
+		}, nil)
+	}()
+	var err error
+	select {
+	case err = <-done:
+	case <-s.ended:
+		if !s.endedClean() {
+			err = <-done
+			break
+		}
+		cancel()
+		<-done
+		err = nil
+	}
+	if err != nil && s.endedClean() && !errors.Is(err, backend.ErrStopUnsupported) {
+		// The end came as the call failed for it: the end is the answer.
+		err = nil
+	}
+	if err == nil {
+		s.markStopped()
+	}
+	return err
+}
+
+// endedClean reports that the stream has ended with the session's own end:
+// no error beside it.
+func (s *Session) endedClean() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.isEnded && s.endErr == nil
+}
+
+// markStopped records a stop answered (Session.stopped).
+func (s *Session) markStopped() {
+	s.mu.Lock()
+	s.stopped = true
+	s.mu.Unlock()
+}
+
 // CancelSubagent is session.subagent.cancel (Control.CancelSubagent).
 func (s *Session) CancelSubagent(ctx context.Context, c engine.Command, id string) error {
 	return s.command(ctx, c, protocol.MethodSubagentCancel, func(sid string) any {
@@ -859,6 +956,25 @@ func (s *Session) Settings(ctx context.Context) (backend.Settings, error) {
 	return out, nil
 }
 
+// LastTurn is session.state's lastTurn (plan 030 §3.7, SF-57): how the
+// session's last turn ended, nil while a turn runs, before any has ended, and
+// from a host from before plan 030, which sends none. It is bound as every
+// read is (read): to the identity the client holds at entry, so an answer
+// from a session this client has since left is backend.ErrStaleEpoch, never
+// that session's ending. An outcome this build does not know is handed up as
+// it came: the caller acts on the three it knows and on nothing else.
+func (s *Session) LastTurn(ctx context.Context) (*engine.LastTurn, error) {
+	var r protocol.StateResult
+	err := s.read(ctx, protocol.MethodSessionState, func(sid string) any {
+		return protocol.StateParams{SessionID: sid}
+	}, &r)
+	if err != nil || r.LastTurn == nil {
+		return nil, err
+	}
+	lt := r.LastTurn
+	return &engine.LastTurn{Outcome: engine.TurnOutcome(lt.Outcome), Err: lt.Err, EndedAt: lt.EndedAt, TurnID: lt.TurnID}, nil
+}
+
 // replyError is a reply whose result this build could not read.
 func replyError(method string, err error) error {
 	return fmt.Errorf("remote: %s's reply: %w", method, err)
@@ -879,6 +995,8 @@ func sessionInfo(p *protocol.SessionInfo) backend.SessionInfo {
 		Label:             p.Provider.Label,
 		Capabilities:      capabilities(p.Capabilities),
 		RetryHorizon:      retryHorizon(p.RetryHorizon),
+		PermissionMode:    permissionMode(p.PermissionMode),
+		StartedAt:         p.StartedAt,
 	}
 	for _, m := range p.Catalogs.Models {
 		info.Models = append(info.Models, agent.ModelInfo{ID: m.ID, Name: m.Name})
@@ -887,6 +1005,20 @@ func sessionInfo(p *protocol.SessionInfo) backend.SessionInfo {
 		info.Modes = append(info.Modes, agent.ModeInfo{ID: m.ID, Name: m.Name, Description: m.Description})
 	}
 	return info
+}
+
+// permissionMode is the info document's permissionMode in the Backend's
+// words (plan 030 §3.7, SF-60): bypass or prompt, and anything else — absent,
+// from a host from before plan 030, or a mode this build does not know — the
+// host not saying, so the client shows its own config's.
+func permissionMode(m protocol.PermissionMode) backend.PermissionMode {
+	switch m {
+	case protocol.PermissionBypass:
+		return backend.PermissionBypass
+	case protocol.PermissionPrompt:
+		return backend.PermissionPrompt
+	}
+	return backend.PermissionUnsaid
 }
 
 // capabilities is the session capability set on the wire as agent's: every

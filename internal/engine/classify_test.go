@@ -90,6 +90,9 @@ func classifyTable() []classifyCase {
 		{"agent.ErrAskUnavailable", agent.ErrAskUnavailable, "unavailable", "ask_unavailable", true},
 		{"agent.ErrSetUnavailable", agent.ErrSetUnavailable, "unavailable", "set_unavailable", true},
 		{"ErrUnavailable", ErrUnavailable, "unavailable", "log_backed_up", true},
+		// A close fence up (plan 030 §3.6): nothing ran, ask again once the
+		// host has decided; the protocol's own reason for the refused attach.
+		{"ErrClosing", ErrClosing, "unavailable", "closing", true},
 		// Attach outrun by the ring (attach.go): nothing registered, ask again.
 		{"ErrAttachRaced", fmt.Errorf("%w: 4 snapshots refused", ErrAttachRaced), "unavailable", "attach_raced", true},
 		{"ErrBadRequest", ErrBadRequest, "bad_request", "bad_request", false},
@@ -115,7 +118,7 @@ func classifyTable() []classifyCase {
 var wireReasons = map[string][]string{
 	"not_accepting": {"not_accepting", "not_in_turn", "start_failed"},
 	"aborted":       {"command_aborted", "set_outcome_unknown", "bad_catalog", "context"},
-	"unavailable":   {"log_backed_up", "ask_unavailable", "set_unavailable", "not_run", "attach_raced", "not_ready", "busy"},
+	"unavailable":   {"log_backed_up", "ask_unavailable", "set_unavailable", "not_run", "attach_raced", "not_ready", "busy", "closing"},
 	"failed":        {"option_gone", "failed", "response_too_large", "snapshot_too_large"},
 	"bad_request": {"bad_request", "bad_answer", "hello_required", "unknown_field", "line_too_long",
 		"protocol_version", "bad_token", "already_attached"},
@@ -240,6 +243,7 @@ func engineSentinels() map[string]error {
 		"ErrStaleModel":        ErrStaleModel,
 		"ErrUnknownRow":        ErrUnknownRow,
 		"ErrUnavailable":       ErrUnavailable,
+		"ErrClosing":           ErrClosing,
 		"ErrBadRequest":        ErrBadRequest,
 		"ErrUnknownCommand":    ErrUnknownCommand,
 		"ErrCommandInProgress": ErrCommandInProgress,

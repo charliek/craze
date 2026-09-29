@@ -44,6 +44,11 @@ func TestMain(m *testing.M) {
 	_ = os.Setenv("CRAZE_RUNTIME_DIR", runtimeDir)
 	_ = os.Unsetenv("XDG_RUNTIME_DIR")
 	_ = os.Unsetenv(controlSocketEnv)
+	// The ordinary craze runs its session in a detached host (plan 030 §3.5).
+	// Every test in this package that drives runTUI was written for the TUI
+	// that hosts its own session, and keeps testing that path under the
+	// opt-out; a launch test turns it back on itself (launch_test.go).
+	_ = os.Setenv(detachEnv, "0")
 	code := m.Run()
 	_ = os.RemoveAll(runtimeDir)
 	if leaked := journaledBy(os.Getpid(), dirs, before); len(leaked) > 0 {

@@ -206,6 +206,12 @@ type RetryHorizon struct {
 // reply's session, a ready notification's session, and the first half of a
 // sessions.list row. Before the session is ready, its catalogs are empty and
 // its providerSessionId may be "".
+//
+// PermissionMode and StartedAt are plan 030 §3.7's (SF-60, SF-63), added
+// behind no capability of their own: each is absent when the host does not
+// set it (X1), and an absent one means an older host (§3.8) — a client then
+// falls back to what it did before (its own config's permission mode; an
+// elapsed time counted from its own attach).
 type SessionInfo struct {
 	// SessionID is the durable craze session id (SD-22): what every
 	// session-scoped method names at params.sessionId.
@@ -224,7 +230,29 @@ type SessionInfo struct {
 	Catalogs     Catalogs            `json:"catalogs"`
 	Capabilities SessionCapabilities `json:"capabilities"`
 	RetryHorizon RetryHorizon        `json:"retryHorizon"`
+	// PermissionMode is how the host's agent was spawned (`--force` or
+	// `--no-force`): bypass or prompt. Absent when the host does not say.
+	PermissionMode PermissionMode `json:"permissionMode,omitempty"`
+	// StartedAt is when the host started serving the session, in UTC, on
+	// the host's clock: what a client counts the session's elapsed time
+	// from. Absent when the host does not say.
+	StartedAt time.Time `json:"startedAt,omitzero"`
 }
+
+// PermissionMode is how a session's agent handles permission requests (plan
+// 030 §3.7, SF-60): the host's `--force` (bypass: the agent runs tools
+// unasked) or `--no-force` (prompt: it asks, and a client answers).
+type PermissionMode string
+
+const (
+	PermissionBypass PermissionMode = "bypass"
+	PermissionPrompt PermissionMode = "prompt"
+)
+
+var permissionModes = []PermissionMode{PermissionBypass, PermissionPrompt}
+
+// PermissionModes is every permission mode, bypass first.
+func PermissionModes() []PermissionMode { return slices.Clone(permissionModes) }
 
 // Provider is the session's provider: its id ("cursor", "grok", "gx",
 // "native") and the label a client shows.
@@ -258,7 +286,10 @@ type CatalogMode struct {
 // the struct is internal/control's, since this package imports no agent, and
 // TestEveryCapabilityIsOnTheWire (C6) holds it field for field — plus four
 // the protocol states for every host of protocol 1: cancel, approvals and
-// historyCursor true, and stop false on a TUI-hosted session (§3.9).
+// historyCursor true, and stop, which is the host's own and not the
+// provider's: true on a host that serves session.stop (every `craze serve`,
+// plan 030 §3.6a), false on a TUI-hosted session and on an older host, whose
+// session.stop is refused stop_unsupported (plan 027 §3.9).
 type SessionCapabilities struct {
 	Interject           bool `json:"interject"`
 	SubagentCancel      bool `json:"subagentCancel"`
@@ -294,7 +325,56 @@ type SessionRow struct {
 	// HeadAsk is the first open ask, the one a client would show; absent
 	// when none is open.
 	HeadAsk *HeadAsk `json:"headAsk,omitempty"`
+	// LastTurn is how the session's last turn ended (plan 030 §3.7, SF-57),
+	// StateResult.LastTurn's: absent while a turn runs, before any has ended,
+	// and from an older host.
+	LastTurn *LastTurn `json:"lastTurn,omitempty"`
 }
+
+// LastTurn is how the session's most recent turn ended (plan 030 §3.7, SF-57;
+// engine.LastTurn): a turn of craze's own or one the agent ran itself (a
+// foreign turn). A turn starting supersedes it — it is absent from then until
+// that turn ends — so a LastTurn that is present always names the latest turn
+// the session has had, and no turn is running since. It is on session.state
+// and on a sessions.list row only, never in a snapshot: the snapshot codec
+// stays at version 1, so a client and a host of different builds still
+// attach (a codec bump would refuse the attach).
+type LastTurn struct {
+	// Outcome is done, failed or cancelled.
+	Outcome TurnOutcome `json:"outcome"`
+	// Err is a failed turn's error text, absent for the other two.
+	Err string `json:"err,omitempty"`
+	// EndedAt is when the turn ended: its ending event's time, in UTC.
+	EndedAt time.Time `json:"endedAt"`
+	// TurnID is the ended turn's id as the stream names it — a turn of
+	// craze's own the engine's "turn-N" (the started and ended events'
+	// turn.id), a foreign turn the agent's own id for it (the foreign_turn
+	// bracket's id) — so a client that reads this after a restore can tell
+	// an ending older than a turn it has since folded (§3.7).
+	TurnID string `json:"turnId"`
+}
+
+// TurnOutcome is how a turn ended (engine.TurnOutcome).
+type TurnOutcome string
+
+const (
+	// TurnDone is a turn that ran to its end: the agent's own stop, whatever
+	// its reason, other than a cancel. A foreign turn's ending is always
+	// done: its closing bracket carries no outcome.
+	TurnDone TurnOutcome = "done"
+	// TurnFailed is a turn whose ending carried an error — the agent's, or a
+	// refusal the engine turned into the turn's ending.
+	TurnFailed TurnOutcome = "failed"
+	// TurnCancelled is a turn stopped before its end: a cancel the agent
+	// answered cancelled, a prompt withdrawn before it was sent, or the turn
+	// the session's close ended.
+	TurnCancelled TurnOutcome = "cancelled"
+)
+
+var turnOutcomes = []TurnOutcome{TurnDone, TurnFailed, TurnCancelled}
+
+// TurnOutcomes is every turn outcome, done first.
+func TurnOutcomes() []TurnOutcome { return slices.Clone(turnOutcomes) }
 
 // HeadAsk names the ask at the head of the open ones: its id, its kind
 // (permission, question or plan) and its label (agent.AskLabel: the text a
@@ -490,6 +570,11 @@ type StateResult struct {
 	Prompted  bool     `json:"prompted"`
 	Cancelled bool     `json:"cancelled"`
 	Settings  Settings `json:"settings"`
+	// LastTurn is how the last turn ended (plan 030 §3.7): absent while a
+	// turn runs, before any has ended, and from an older host. A client that
+	// reads it after a restore applies it only if it has folded no turn
+	// since (LastTurn.TurnID).
+	LastTurn *LastTurn `json:"lastTurn,omitempty"`
 }
 
 // ArmedSend is an armed send-now (engine.ArmedSend): its text, the queued row
@@ -740,9 +825,15 @@ type SubagentCancelParams struct {
 }
 
 // StopParams is session.stop's params, which end the session and its host
-// (plan 027 §3.9). A TUI-hosted
-// session's host answers unsupported, reason stop_unsupported (capability
-// stop: false); S4's headless host implements it, answering {}.
+// (plan 027 §3.9, plan 030 §3.6a). It is served where the session's
+// capability stop is true (every `craze serve`), and answered {} at once — a
+// receipt, not the stop's completion: new attaches are refused closing from
+// before the receipt, and the session's end follows on the stream (its
+// closing records, then reset{session_closed}). A stop while one runs, from
+// any client, is answered {} too and joins it; the same commandId resent is
+// answered {} again (a stop is not a stored command). A host whose capability
+// stop is false — a TUI-hosted session, an older host — answers unsupported,
+// reason stop_unsupported.
 type StopParams struct {
 	SessionID string `json:"sessionId"`
 	CommandID string `json:"commandId"`

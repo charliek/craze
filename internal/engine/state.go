@@ -1,6 +1,10 @@
 package engine
 
-import "github.com/charliek/craze/internal/agent"
+import (
+	"time"
+
+	"github.com/charliek/craze/internal/agent"
+)
 
 // Activity is what the engine is doing, in the words the protocol's gate table
 // uses. "Blocked on an ask" and "the agent is running a turn of its own" are
@@ -90,6 +94,100 @@ type State struct {
 	// resent command id is answered from the table and never re-executes;
 	// past it, ErrUnknownCommand.
 	RetryHorizon RetryHorizon
+	// LastTurn is how the session's most recent turn ended — craze's own or
+	// the agent's (a foreign turn) — and nil while a turn runs, before any
+	// has ended, and after a turn has started since (plan 030 §3.7, SF-57).
+	// It is the observer's, kept in commit order from the ending and
+	// starting events themselves (observe), so it agrees with what a client
+	// folding the stream has seen up to the same seq; like the snapshot and
+	// the asks, it is a read of its own and not a cut with the rest of State.
+	LastTurn *LastTurn
+}
+
+// LastTurn is how one turn ended (plan 030 §3.7): session.state's and a
+// sessions.list row's lastTurn. It is kept from the stream's own events —
+// never the snapshot, whose codec stays at version 1 — so the one field
+// about the previous ending survives a client's reconnect as a read.
+type LastTurn struct {
+	// Outcome is done, failed or cancelled (TurnOutcome).
+	Outcome TurnOutcome
+	// Err is a failed turn's error text, the ending's own (TurnInfo.Err); ""
+	// for the other outcomes.
+	Err string
+	// EndedAt is the ending event's time (Event.At, the session's clock for
+	// an ending the engine authored).
+	EndedAt time.Time
+	// TurnID is the ended turn's id as the stream names it: the engine's
+	// "turn-N" for a turn of craze's own — the id its started and ended
+	// events carry, which a client's fold sees too — and the agent's own id
+	// for a foreign turn (ForeignTurnInfo.ID, "" if the agent gave none).
+	TurnID string
+}
+
+// TurnOutcome is how a turn ended, in the protocol's words.
+type TurnOutcome string
+
+const (
+	// TurnDone is a turn that ran to its end with no error and no cancel —
+	// and every foreign turn: its closing bracket carries no outcome.
+	TurnDone TurnOutcome = "done"
+	// TurnFailed is a turn whose ending carried an error (TurnInfo.Err): the
+	// agent's failure, a refusal the engine turned into the ending, and the
+	// restoring refusal (SF-21) too, whose ending carries the refusal's
+	// error even though the engine is idle and the row is back in the queue
+	// — the same error row a client's fold draws for it.
+	TurnFailed TurnOutcome = "failed"
+	// TurnCancelled is a turn stopped before its end: the agent's own
+	// cancelled stop, a prompt withdrawn before it was sent (synthetic,
+	// cancelled), and the turn Close ended (synthetic, closing).
+	TurnCancelled TurnOutcome = "cancelled"
+)
+
+// turnEnding is what one main-transcript event says about the last turn:
+// starts when it starts a turn (craze's started, a foreign turn's running
+// bracket), which supersedes the last ending, and ended when it ends one, the
+// ending to keep. A replayed event is history, not this session's turn, and
+// says nothing; so does every other event.
+func turnEnding(ev agent.Event) (starts bool, ended *LastTurn) {
+	if ev.Replayed {
+		return false, nil
+	}
+	at := ev.At
+	if at.IsZero() {
+		// Every ending the engine authors is stamped (stamp), and every
+		// session stamps what it emits; this is for one that did not.
+		at = time.Now()
+	}
+	switch ev.Type {
+	case agent.EventTurn:
+		tu := ev.Turn
+		if tu == nil {
+			return false, nil
+		}
+		switch tu.Phase {
+		case agent.TurnStarted:
+			return true, nil
+		case agent.TurnEnded:
+			lt := &LastTurn{Outcome: TurnDone, EndedAt: at, TurnID: tu.ID}
+			switch {
+			case tu.Err != "":
+				lt.Outcome, lt.Err = TurnFailed, tu.Err
+			case tu.StopReason == stopCancelled, tu.StopReason == stopClosing:
+				lt.Outcome = TurnCancelled
+			}
+			return false, lt
+		}
+	case agent.EventForeignTurn:
+		ft := ev.ForeignTurn
+		if ft == nil {
+			return false, nil
+		}
+		if ft.Running {
+			return true, nil
+		}
+		return false, &LastTurn{Outcome: TurnDone, EndedAt: at, TurnID: ft.ID}
+	}
+	return false, nil
 }
 
 // HeadAsk is the ask at the head of the queue of open ones, as a status line
@@ -119,7 +217,8 @@ func (e *Engine) State() State {
 		st.PendingAsks = len(asks)
 		st.HeadAsk = HeadAsk{ID: asks[0].ID, Kind: asks[0].Kind, Label: asks[0].Label()}
 	}
-	replaying := e.isReplaying()
+	replaying, last := e.observed()
+	st.LastTurn = last
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	st.Queue = e.queue.List()

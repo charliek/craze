@@ -43,6 +43,9 @@ type fencedSession struct {
 	// background result): it starts the moment the fence comes down — the flag
 	// goes up and "wake" is recorded — as native's worker would.
 	wakePending bool
+	// owed is work the session owes outside any turn beside a pending wake: a
+	// background child whose result is not yet published (owe).
+	owed bool
 }
 
 func (s *fencedSession) FenceUp() {
@@ -79,6 +82,23 @@ func (s *fencedSession) pendWake() {
 	s.fmu.Lock()
 	defer s.fmu.Unlock()
 	s.wakePending = true
+}
+
+// OwesWork is agent.OwedWork, as native's is: a wake waiting for the fence to
+// come down owes its user the result it would deliver (plan 030 C5r), and so
+// does a child set running by owe — one whose roster row the snapshot may
+// already show finished.
+func (s *fencedSession) OwesWork() bool {
+	s.fmu.Lock()
+	defer s.fmu.Unlock()
+	return s.wakePending || s.owed
+}
+
+// owe sets what OwesWork reports beside a pending wake.
+func (s *fencedSession) owe(owed bool) {
+	s.fmu.Lock()
+	defer s.fmu.Unlock()
+	s.owed = owed
 }
 
 // onForeign sets afterForeign.
@@ -146,6 +166,7 @@ func (s *fencedSession) violations() []string {
 var (
 	_ agent.Session        = (*fencedSession)(nil)
 	_ agent.AdmissionFence = (*fencedSession)(nil)
+	_ agent.OwedWork       = (*fencedSession)(nil)
 )
 
 // fenceRig is an engine over a fencedSession, with the hooks a fence schedule
@@ -575,7 +596,7 @@ type fenceMethod struct {
 // fenceInputs are what the fence reads, as selector spells them.
 var (
 	fenceQueueMutators = []string{"queue.Add", "queue.Take", "queue.Pop", "queue.PushFront", "queue.Clear", "queue.Restore", "queue.Edit", "queue.Remove"}
-	fenceFields        = []string{"activity", "cur", "cancelsInFlight", "stopped"}
+	fenceFields        = []string{"activity", "cur", "cancelsInFlight", "stopped", "closeFences"}
 )
 
 // parseEngineMethods parses the package's non-test files and returns every
@@ -668,9 +689,9 @@ func parseEngineMethods(t *testing.T) map[string]*fenceMethod {
 //     defer its sync, and they are exactly the doc's sections;
 //   - every method that takes e.mu and reaches a change to an input of the fence
 //     — a mutator of e.queue, or an assignment to e.activity, e.cur,
-//     e.cancelsInFlight, e.stopped or e.closed — must defer the sync; Close
-//     alone, by name, may raise it instead, because it sets e.closed and the
-//     fence never comes down again;
+//     e.cancelsInFlight, e.stopped, e.closeFences or e.closed — must defer the
+//     sync; Close alone, by name, may raise it instead, because it sets
+//     e.closed and the fence never comes down again;
 //   - and every method that changes such an input without taking e.mu is reached
 //     only from such sections: it has a caller in the package, and each caller
 //     is held to the same rules.
@@ -737,7 +758,7 @@ func TestEveryForeignReadAndClaimIsFenced(t *testing.T) {
 		}
 	}
 	slices.Sort(sections)
-	if want := []string{"GiveUp", "GiveUpDrain", "drive", "holdCancel", "releaseHold", "runTurn", "submit"}; !slices.Equal(sections, want) {
+	if want := []string{"GiveUp", "GiveUpDrain", "closeFenceUp", "drive", "holdCancel", "releaseHold", "runTurn", "submit"}; !slices.Equal(sections, want) {
 		t.Errorf("the fenced sections are %q, want the Engine doc's %q", sections, want)
 	}
 	var helpers []string
