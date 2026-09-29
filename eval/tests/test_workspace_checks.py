@@ -208,14 +208,22 @@ def test_anchored_ignore_patterns():
     assert not is_ignored("x/.claude/settings.local.json", [".claude/settings.local.json"])
 
 
-def test_craze_repo_ignores_are_the_template_gitignore():
-    """CRAZE_REPO_IGNORES is the template commit's .gitignore, line for line (X15)."""
-    text = git(paths.REPO_ROOT, "show", f"{paths.CRAZE_TEMPLATE_COMMIT}:.gitignore", check=False)
-    if not text:
-        pytest.skip("the craze template commit is not in this checkout")
-    lines = [ln.strip() for ln in text.splitlines() if ln.strip() and not ln.strip().startswith("#")]
-    assert lines == CRAZE_REPO_IGNORES
-    assert not any(ln.startswith("!") for ln in lines)  # no negations to support
+def test_craze_repo_ignores_are_every_task_commits_gitignore():
+    """CRAZE_REPO_IGNORES is, line for line, the .gitignore at the template commit (X15)
+    and at every other commit a task under eval/tasks/ pins (plan 029 W2): a task pinned
+    to a commit whose .gitignore differs fails here until the list is updated."""
+    commits = sorted({paths.CRAZE_TEMPLATE_COMMIT} | {t.craze_commit for t in load_tasks().values()
+                                                      if t.repo_kind == "craze"})
+    shallow = git(paths.REPO_ROOT, "rev-parse", "--is-shallow-repository", check=False).strip() == "true"
+    for commit in commits:
+        text = git(paths.REPO_ROOT, "show", f"{commit}:.gitignore", check=False)
+        if not text:
+            if shallow:
+                pytest.skip(f"{commit} is not in this shallow checkout")
+            pytest.fail(f"no .gitignore at {commit}: is the commit in this repository?")
+        lines = [ln.strip() for ln in text.splitlines() if ln.strip() and not ln.strip().startswith("#")]
+        assert lines == CRAZE_REPO_IGNORES, f"the .gitignore at {commit} differs from workspace.CRAZE_REPO_IGNORES"
+        assert not any(ln.startswith("!") for ln in lines)  # no negations to support
 
 
 def test_ignores_for_adds_the_craze_repo_ignores_to_craze_tasks_only():

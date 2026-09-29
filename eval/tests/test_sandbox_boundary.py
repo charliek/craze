@@ -45,7 +45,8 @@ def test_sandbox_hides_home_and_the_eval(tmp_path, tc):
     ring = KeyRing({"p": "sk-FAKE-probe-9a8b7c6d5e4f"})
     spec = SandboxSpec(workspace=ws, ws_inside="/sandbox/work/ws", home=home, env={"CRAZE_HOME": "/sandbox/home/.craze"})
     targets = {"home": "/home", "owner": str(Path.home()), "tasks": str(paths.TASKS_DIR), "tmp_path": str(tmp_path),
-               "plan": str(paths.PLAN_DIR), "usr_local_craze": "/usr/local/bin/craze"}
+               "campaign": str(paths.campaign_dir()), "plans": str(Path.home() / ".claude/plans"),
+               "usr_local_craze": "/usr/local/bin/craze"}
     out, err = tmp_path / "out", tmp_path / "err"
     r = asyncio.run(run_sandboxed(spec, tc, ["python", "probe.py", json.dumps(targets)], stdout=out, stderr=err,
                                   timeout=60, keyring=ring))

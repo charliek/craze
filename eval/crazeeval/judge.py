@@ -19,7 +19,9 @@ Success-bar pairs are always both-order judged by sol, and an order disagreement
 low-confidence verdict is re-judged by astra in both orders, whose result stands.
 
 The instruction, the schema and every task's rubric are frozen at C2; ``judge_hash``
-fingerprints them, and every verdict records it.
+fingerprints them, and every verdict records it -- beside ``task_judge_hash``, the same
+for the verdict's own task alone, which is what decides whether a verdict still stands
+(``verdict_current``).
 """
 
 from __future__ import annotations
@@ -35,7 +37,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from crazeeval import paths
-from crazeeval.packet import Side, build_packet
+from crazeeval.packet import Side, build_packet, task_block
 from crazeeval.tasks import Task
 
 JUDGE_MODELS = {"sol": "gpt-6-sol", "luna": "gpt-6-luna", "astra": "gpt-6-astra"}
@@ -112,7 +114,8 @@ def schema() -> dict:
 
 
 def judge_hash(tasks: dict[str, Task]) -> str:
-    """The frozen fingerprint: the instruction, the schema and every rubric (§3.1.6)."""
+    """The frozen fingerprint: the instruction, the schema and every rubric (§3.1.6).
+    Any task's change -- adding one included -- changes it; see task_judge_hash."""
     h = hashlib.sha256()
     h.update(INSTRUCTION.encode() + b"\0")
     h.update(json.dumps(schema(), sort_keys=True).encode() + b"\0")
@@ -121,6 +124,40 @@ def judge_hash(tasks: dict[str, Task]) -> str:
         h.update(json.dumps({"id": tid, "prompt": t.prompt, "rubric": t.rubric, "false_claims": t.false_claims},
                             sort_keys=True).encode() + b"\0")
     return h.hexdigest()
+
+
+def task_judge_hash(task: Task) -> str:
+    """One task's judge fingerprint (plan 029 W2): the instruction, the schema and what
+    the judge is shown of that task that no run changes -- its prompt, the plan-task
+    note, its rubric and its known false claims, as the packet renders them
+    (``packet.task_block``). Adding, removing or changing another task leaves it alone."""
+    h = hashlib.sha256()
+    h.update(INSTRUCTION.encode() + b"\0")
+    h.update(json.dumps(schema(), sort_keys=True).encode() + b"\0")
+    h.update(task_block(task).encode() + b"\0")
+    return h.hexdigest()
+
+
+def task_judge_hashes(tasks: dict[str, Task]) -> dict[str, str]:
+    return {tid: task_judge_hash(t) for tid, t in tasks.items()}
+
+
+def verdict_current(v: dict, task_hashes: dict[str, str], global_hash: str) -> bool:
+    """Whether a verdict record still stands under today's judge (plan 029 W2): its
+    ``task_judge_hash`` equals its task's current one -- or, for an older record without
+    one, its global ``judge_hash`` equals today's global hash.
+
+    That legacy fallback has a blind spot: the global hash covers the instruction, the
+    schema and each task's id, prompt, rubric and false claims -- not the task's mode
+    (which adds the packet's plan note) nor anything else of the packet -- so an older
+    record judged before such a change still reads as current. It is kept as it is (a
+    change to it would orphan plan 029's verdicts). ``crazeeval judge-hash --stamp``
+    makes older records durable instead: it gives each its task hash only when the task
+    is still what its batch ran (``judging.stamp_task_hashes``)."""
+    th = v.get("task_judge_hash")
+    if th:
+        return th == task_hashes.get(v.get("task"))
+    return bool(v.get("judge_hash")) and v.get("judge_hash") == global_hash
 
 
 def prompt_text(task: Task, a: Side, b: Side, strip: list[str] | None = None,
@@ -425,6 +462,7 @@ async def judge_success_bar_pair(judge: Judge, pair: Pair, seed, strip=None) -> 
 
 
 __all__ = [
-    "INSTRUCTION", "schema", "judge_hash", "validate_verdict", "a_is_first", "mapped", "combine_orders",
+    "INSTRUCTION", "schema", "judge_hash", "task_judge_hash", "task_judge_hashes", "verdict_current",
+    "validate_verdict", "a_is_first", "mapped", "combine_orders",
     "judge_home", "judge_command", "Judge", "Pair", "judge_pair", "judge_success_bar_pair",
 ]

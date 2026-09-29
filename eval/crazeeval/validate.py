@@ -3,8 +3,9 @@
 - implementation tasks (bugfix, feature, refactor, multi-step): every ``tests`` and
   ``structural_count`` check fails on the untouched workspace and passes with
   ``reference.patch``; a craze task with a ``setup.patch`` and no reference patch
-  uses the base commit's content (3eabb31) as its reference instead -- the planted
-  workspace with ``setup.patch`` reversed. A refactor preserves
+  uses its base commit's content (the task's ``[repo] commit``, default 3eabb31) as
+  its reference instead -- the planted workspace with ``setup.patch`` reversed. A
+  refactor preserves
   behaviour, so its ``tests`` checks pass on both (its structural checks carry the
   control). A ``test_discrimination`` check passes with the reference (whose tests
   must fail on the original) and fails untouched (no tests added). A

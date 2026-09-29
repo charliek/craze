@@ -10,10 +10,16 @@ contaminated run once (plan 029 §3.1.5, §3.1.8).
 
 A batch directory is created exclusively and locked for the batch's life; nothing in
 it is ever deleted and re-made. ``--resume`` reopens one whose identity fingerprint
-matches (task definitions and testdata, fixtures, the config snapshot, effective model
-settings and prices, every executable's hash and version, execution settings, the
-evaluator's own code) and runs only what has no final result, in fresh attempt
-directories.
+matches (task definitions and testdata, each craze task's commit, fixtures, the config
+snapshot, effective model settings and prices, every executable's hash and version,
+execution settings, the evaluator's own code) and runs only what has no final result,
+in fresh attempt directories. ``batch.json`` also records the campaign the batch ran
+in, outside the fingerprint: a resumed batch settles against the CURRENT campaign's
+ledger (or an explicit ``--ledger``), so ``--resume`` refuses a saved campaign that
+differs from the current one unless ``--ledger`` was passed explicitly -- otherwise
+the batch could reserve and settle against a different, maybe empty, ledger and
+escape its original budget cap. A legacy batch.json with no recorded campaign is
+never checked.
 """
 
 from __future__ import annotations
@@ -96,13 +102,19 @@ class BatchConfig:
     parallel: int = 4
     caps: dict[str, int] = field(default_factory=dict)
     cap_other: int = DEFAULT_CAP_OTHER
-    ledger_path: Path = paths.DEFAULT_LEDGER
+    # The campaign's ledger, resolved when the config is made (never at import).
+    ledger_path: Path = field(default_factory=paths.ledger_path)
     budget_cap: float = 95.0
     run_cap: float = 3.0
     timeout_s: int | None = None
     cache: Path | None = None
     resume: bool = False
     opencode_seed: Path | None = None
+    # True when --ledger was passed explicitly (cli.py sets this from the raw CLI
+    # args, never inferred): lets --resume reopen a batch recorded under a different
+    # campaign, since the caller has deliberately picked which ledger it settles
+    # against. Never fingerprinted -- it only gates the campaign check below.
+    explicit_ledger: bool = False
 
 
 def size_check(ws: Path, file_limit: int = safefs.FILE_LIMIT, tree_limit: int = safefs.TREE_LIMIT) -> tuple[list[str], int]:
@@ -142,10 +154,33 @@ def tree_hash(root: Path) -> str:
     return h.hexdigest()
 
 
+# The craze commit every task fingerprint made before per-task commits implied (plan
+# 029's 3eabb31). A craze task whose commit is another -- pinned, or a later default --
+# has that commit folded into its fingerprint; a task on this one keeps its bare tree
+# hash, so every existing fingerprint (and rescore's check against it) is unchanged.
+FINGERPRINT_BASE_COMMIT = "3eabb316bb8032893b3f66329f649b33950c1a73"
+# batch.json fields outside the identity fingerprint: recorded, never compared.
+UNFINGERPRINTED = ("fingerprint", "campaign")
+
+
+def task_fingerprint(task: Task) -> str:
+    """A task's identity: its directory's tree hash (definition, testdata, patches) --
+    and, for a craze-repo task on a commit other than FINGERPRINT_BASE_COMMIT, that
+    commit, so a defaulted commit that moves changes the batch identity too (an explicit
+    ``[repo] commit`` is in task.toml, so in the tree hash, already)."""
+    th = tree_hash(task.dir)
+    commit = task.craze_commit
+    if commit is None or commit == FINGERPRINT_BASE_COMMIT:
+        return th
+    return hashlib.sha256(f"{th}\0craze-commit={commit}".encode()).hexdigest()
+
+
 def batch_identity(cfg: BatchConfig, executables: dict, prices: dict) -> dict:
     """Everything that makes two batches' results comparable, with its fingerprint
-    (review r2-c1 item 16). A resumed batch must match it exactly."""
+    (review r2-c1 item 16). A resumed batch must match it exactly. The campaign the batch
+    ran in is recorded beside it, outside the fingerprint (so resuming is unaffected)."""
     wires = sorted({m.wire_model for m in cfg.models})
+    commits = {t.id: t.craze_commit for t in cfg.tasks if t.repo_kind == "craze"}
     ident = {
         "label": cfg.label,
         "harnesses": sorted(cfg.harnesses),
@@ -159,7 +194,11 @@ def batch_identity(cfg: BatchConfig, executables: dict, prices: dict) -> dict:
         **({"first_rep": cfg.first_rep} if cfg.first_rep != 1 else {}),
         # Task definitions with their testdata (prompts, checks, hidden tests,
         # reference patches, setup patches, timeouts) and the fixtures they use.
-        "tasks": {t.id: tree_hash(t.dir) for t in cfg.tasks},
+        "tasks": {t.id: task_fingerprint(t) for t in cfg.tasks},
+        # Each craze task's resolved commit -- only when one is not 3eabb31, so a batch
+        # on the default commit has the identity fields it had before per-task commits.
+        **({"craze_commits": dict(sorted(commits.items()))}
+           if any(c != FINGERPRINT_BASE_COMMIT for c in commits.values()) else {}),
         "fixtures": {f: fixture_hash(f) for f in sorted({t.fixture for t in cfg.tasks if t.fixture})},
         "config_snapshot": cfg.snap.hash,
         # Effective model settings: the eval table's entry (ids, effort), the price the
@@ -183,13 +222,15 @@ def batch_identity(cfg: BatchConfig, executables: dict, prices: dict) -> dict:
     }
     body = json.dumps(ident, sort_keys=True, default=str).encode()
     ident["fingerprint"] = hashlib.sha256(body).hexdigest()
+    # The campaign directory this batch ran in (plan 029 W2): recorded, not fingerprinted.
+    ident["campaign"] = str(paths.campaign_dir())
     return ident
 
 
 def identity_diff(saved: dict, mine: dict) -> list[str]:
     out = []
     for k in sorted(set(saved) | set(mine)):
-        if k == "fingerprint" or saved.get(k) == mine.get(k):
+        if k in UNFINGERPRINTED or saved.get(k) == mine.get(k):
             continue
         a, b = saved.get(k), mine.get(k)
         if isinstance(a, dict) and isinstance(b, dict):
@@ -244,6 +285,20 @@ def open_batch_dir(cfg: BatchConfig, identity: dict):
             raise BatchDirError(f"--resume: {out} has no readable batch.json") from e
         if saved.get("fingerprint") != identity["fingerprint"]:
             raise BatchDirError(f"--resume: {out} was a different batch (differs in {identity_diff(saved, identity)})")
+        # The ledger a resumed batch reserves and settles against comes from the
+        # CURRENT campaign (cfg.ledger_path), not the one the batch originally ran
+        # in -- campaign is deliberately outside the fingerprint, so a mismatch would
+        # otherwise pass identity validation and let the batch escape its original
+        # budget cap against a different (maybe empty) ledger. Refuse unless the
+        # caller passed --ledger explicitly, which is a deliberate choice of ledger.
+        # A legacy batch.json with no recorded campaign is never checked.
+        saved_campaign = saved.get("campaign")
+        if saved_campaign is not None and saved_campaign != identity["campaign"] and not cfg.explicit_ledger:
+            raise BatchDirError(
+                f"--resume: {out} ran in campaign {saved_campaign!r}, but the current campaign is "
+                f"{identity['campaign']!r}; its ledger and budget cap would differ from the batch's "
+                "original ones. Pass --ledger explicitly to resume it against a specific ledger anyway."
+            )
     else:
         try:
             out.mkdir(parents=True, exist_ok=False)
@@ -443,6 +498,8 @@ class Batch:
                 "network": "netns + relay to the proxy socket",
             },
             "start_commit": start.commit,
+            # The craze commit a craze-repo task materialised (its [repo] commit or 3eabb31).
+            "craze_commit": task.craze_commit,
             "head": {k: post.get(k) for k in ("head", "moved", "tree_diff")},
             "diff_bytes": post.get("diff_bytes"),
             "gitpost": {k: post.get(k) for k in ("exit", "timed_out", "diff_rc", "add_rc", "add_errors")},

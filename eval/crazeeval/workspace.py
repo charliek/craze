@@ -1,14 +1,19 @@
 """Workspaces: the craze template, fixture materialisation, manifests (plan 029 §3.1.5).
 
 Every workspace has an independent object store with no remote and no alternates.
-craze's template is ``git init`` + ``git fetch --no-tags <repo> 3eabb31`` (only that
-commit's ancestry). A craze task with a ``setup.patch`` gets a *fresh* object store
-holding one parentless commit of the patched tree (plan 029 X7, review r2-c1 item 17):
-no history, so nothing in git shows what was planted or what it replaced. Fixtures are
-copied and committed with a fixed author and date.
-Host-side git runs only on trusted repositories (templates, fresh materialisations)
-and never reads the owner's git configuration; git on an agent's repository runs in a
-sandbox (gitpost.py).
+craze's template is ``git init`` + ``git fetch --no-tags <repo> <commit>`` (only that
+commit's ancestry), where the commit is the task's own (``[repo] commit``, default
+3eabb31); templates are cached per commit. A commit whose history ever held the eval
+itself (``eval/``: every task's hidden tests and reference answers) -- in its own tree
+or any ancestor's -- is never materialised with it: its template is a *fresh* object
+store holding one parentless commit of the tree without ``eval/``, and no history. A craze
+task with a ``setup.patch`` likewise gets a fresh object store holding one parentless
+commit of the patched tree (plan 029 X7, review r2-c1 item 17): no history, so nothing in
+git shows what was planted or what it replaced. Fixtures are copied and committed with a
+fixed author and date.
+Host-side git runs only on trusted repositories (templates, fresh materialisations, the
+craze repository they are made from) and never reads the owner's git configuration; git
+on an agent's repository runs in a sandbox (gitpost.py).
 """
 
 from __future__ import annotations
@@ -16,6 +21,7 @@ from __future__ import annotations
 import fcntl
 import fnmatch
 import hashlib
+import io
 import json
 import os
 import shutil
@@ -39,7 +45,10 @@ IMPORT_MESSAGE = "Import workspace"
 GENERATED_IGNORES = ["__pycache__/", "*.pyc", ".pytest_cache/", "*.test"]
 
 # The craze repository's own .gitignore at the template commit (paths.CRAZE_TEMPLATE_COMMIT),
-# one entry per line, comments and blank lines dropped (plan 029 X15). A craze-repo task's
+# one entry per line, comments and blank lines dropped (plan 029 X15). It stays this
+# hard-coded list: tests/test_workspace_checks.py checks that the .gitignore at every commit a
+# task under eval/tasks/ uses parses to exactly it, so a task pinned to a commit whose
+# .gitignore differs fails that test until this list is updated. A craze-repo task's
 # own ignored build outputs -- bin/craze from `make build`, tests/cli/.venv from `make
 # test-cli` -- are what verifying leaves behind, and git (so the run's diff.patch) never
 # shows them; they are no change. Each line already means here what it means to git: a
@@ -181,12 +190,45 @@ def _build_once(dest: Path, build: Callable[[Path], dict]) -> Path:
         lock.close()
 
 
+# Top-level paths of the craze repository a workspace never holds: the eval itself (every
+# task's hidden tests, trusted copies and reference answers). A commit with one anywhere
+# in its history -- its own tree, or any ancestor's, even if a later commit removed it --
+# gets a history-free template without it (hidden_paths, _orphan_template).
+HIDDEN_CRAZE_PATHS = ("eval",)
+
+
+def hidden_paths(commit: str, source_repo: Path | None = None) -> list[str]:
+    """The HIDDEN_CRAZE_PATHS that ``commit`` or any of its ancestors ever held: some
+    commit in its history touched the path (``git rev-list --full-history``, so a side
+    branch that added and removed it before a merge counts too). None for 3eabb31, whose
+    whole history predates eval/."""
+    source_repo = Path(source_repo or paths.REPO_ROOT)
+    git(source_repo, "cat-file", "-e", f"{commit}^{{commit}}")  # a missing commit fails loudly here
+    return [h for h in HIDDEN_CRAZE_PATHS
+            if git(source_repo, "rev-list", "-1", "--full-history", commit, "--", h).strip()]
+
+
+def hidden_absent(ws: Path, hidden: list[str]) -> bool:
+    """None of ``hidden`` is in the workspace's files or in its HEAD tree."""
+    return all(not os.path.lexists(ws / h) and not git(ws, "ls-tree", "--name-only", "HEAD", "--", h, check=False).strip()
+               for h in hidden)
+
+
 def craze_template(
     commit: str = paths.CRAZE_TEMPLATE_COMMIT,
     source_repo: Path | None = None,
     cache: Path | None = None,
 ) -> Path:
+    """The cached template for a craze commit (``<cache>/templates/craze-<sha12>``):
+    the commit and its ancestry -- or, for a commit whose history ever held ``eval/``,
+    one parentless commit of its tree without it (``craze-<sha12>-noeval``). The history
+    is checked on every call, so no template built with history is used for such a
+    commit."""
     source_repo = Path(source_repo or paths.REPO_ROOT)
+    root = Path(cache or paths.CACHE_DIR) / "templates"
+    hidden = hidden_paths(commit, source_repo)
+    if hidden:
+        return _orphan_template(commit, hidden, source_repo, root / f"craze-{commit[:12]}-no{'-'.join(hidden)}")
 
     def build(tmp: Path) -> dict:
         tmp.mkdir(parents=True)
@@ -202,7 +244,42 @@ def craze_template(
             raise WorkspaceError(f"craze template failed its isolation checks: {check}")
         return check
 
-    return _build_once(Path(cache or paths.CACHE_DIR) / "templates" / f"craze-{commit[:12]}", build)
+    return _build_once(root / f"craze-{commit[:12]}", build)
+
+
+def _orphan_template(commit: str, hidden: list[str], source_repo: Path, dest: Path) -> Path:
+    """``commit``'s tree without ``hidden``, as one parentless commit in a fresh object
+    store: neither the hidden paths nor any history (which holds them) is readable."""
+
+    def build(tmp: Path) -> dict:
+        tmp.mkdir(parents=True)
+        tar = subprocess.run(["git", "archive", "--format=tar", commit], cwd=source_repo, env=git_env(),
+                             capture_output=True, check=True).stdout
+        with tarfile.open(fileobj=io.BytesIO(tar)) as tf:
+            tf.extractall(tmp, filter="data")
+        for h in hidden:  # in the tree still, or only in the history
+            p = tmp / h
+            if p.is_dir() and not p.is_symlink():
+                shutil.rmtree(p)
+            elif os.path.lexists(p):
+                p.unlink()
+        git(tmp, "init", "-q", "-b", "main")
+        # Every extracted file was tracked at the commit: add it even where a
+        # .gitignore pattern matches it.
+        git(tmp, "add", "-A", "-f")
+        git(tmp, "commit", "-q", "-m", IMPORT_MESSAGE, date=FIXTURE_DATE)
+        git(tmp, "reflog", "expire", "--expire=now", "--all")
+        if git(tmp, "status", "--porcelain").strip():
+            raise WorkspaceError(f"craze {commit[:12]}: the import commit left a dirty tree")
+        check = verify_orphan_repo(tmp, commit, source_repo)
+        check["hidden"] = hidden
+        check["hidden_absent"] = hidden_absent(tmp, hidden)
+        check["ok"] = check["ok"] and check["hidden_absent"]
+        if not check["ok"]:
+            raise WorkspaceError(f"craze {commit[:12]}: the template failed its isolation checks: {check}")
+        return check
+
+    return _build_once(dest, build)
 
 
 def _mark_ready(dest: Path, check: dict | None = None) -> None:
@@ -255,20 +332,36 @@ def verify_orphan_repo(ws: Path, base: str, base_repo: Path) -> dict:
     return result
 
 
+def template_hidden(base: Path) -> list[str]:
+    """The paths a template was built without (a history-free ``eval/``-less template);
+    [] for a template with its commit's history."""
+    return list((template_check(base) or {}).get("hidden") or [])
+
+
+def _history_repo(base: Path, source_repo: Path | None) -> Path:
+    """Where to list a commit's ancestry for an isolation check: the template itself
+    when it holds that history, else the craze repository it was made from."""
+    return Path(source_repo or paths.REPO_ROOT) if template_hidden(base) else base
+
+
 def craze_task_template(task: Task, cache: Path | None = None, source_repo: Path | None = None) -> Path:
-    base = craze_template(cache=cache, source_repo=source_repo)
+    commit = task.craze_commit
+    base = craze_template(commit, cache=cache, source_repo=source_repo)
     if task.setup_patch is None:
         return base
     patch = task.setup_patch.read_bytes()
     h = hashlib.sha256(patch).hexdigest()[:12]
+    hidden = template_hidden(base)
 
     def build(tmp: Path) -> dict:
         # The base tree exactly as committed -- none of its history -- into a fresh
-        # repository, the plant applied, one parentless commit (plan 029 X7).
+        # repository, the plant applied, one parentless commit (plan 029 X7). The
+        # base's HEAD is the task's commit (or, for an eval/-less template, its one
+        # commit of that tree).
         tmp.mkdir(parents=True)
-        tar = subprocess.run(["git", "archive", "--format=tar", paths.CRAZE_TEMPLATE_COMMIT], cwd=base, env=git_env(),
+        tar = subprocess.run(["git", "archive", "--format=tar", "HEAD"], cwd=base, env=git_env(),
                              capture_output=True, check=True).stdout
-        with tarfile.open(fileobj=__import__("io").BytesIO(tar)) as tf:
+        with tarfile.open(fileobj=io.BytesIO(tar)) as tf:
             tf.extractall(tmp, filter="data")
         git(tmp, "init", "-q", "-b", "main")
         git(tmp, "apply", "--whitespace=nowarn", "-", input=patch)
@@ -277,7 +370,11 @@ def craze_task_template(task: Task, cache: Path | None = None, source_repo: Path
         git(tmp, "reflog", "expire", "--expire=now", "--all")
         if git(tmp, "status", "--porcelain").strip():
             raise WorkspaceError(f"{task.id}: import commit left a dirty tree")
-        check = verify_orphan_repo(tmp, paths.CRAZE_TEMPLATE_COMMIT, base)
+        check = verify_orphan_repo(tmp, commit, _history_repo(base, source_repo))
+        if hidden:
+            check["hidden"] = hidden
+            check["hidden_absent"] = hidden_absent(tmp, hidden)
+            check["ok"] = check["ok"] and check["hidden_absent"]
         if not check["ok"]:
             raise WorkspaceError(f"{task.id}: task template failed its isolation checks: {check}")
         return check
@@ -342,12 +439,20 @@ def materialise(task: Task, dest: Path, cache: Path | None = None) -> Start:
         raise WorkspaceError(f"{dest} already exists")
     isolation = None
     if task.repo_kind == "craze":
+        commit = task.craze_commit
         tmpl = craze_task_template(task, cache=cache)
         shutil.copytree(tmpl, dest, symlinks=True)
-        if task.setup_patch is not None:
-            isolation = verify_orphan_repo(dest, paths.CRAZE_TEMPLATE_COMMIT, craze_template(cache=cache))
+        base = craze_template(commit, cache=cache)
+        hidden = template_hidden(base)
+        if task.setup_patch is not None or hidden:
+            isolation = verify_orphan_repo(dest, commit, _history_repo(base, None))
         else:
-            isolation = verify_craze_repo(dest, paths.CRAZE_TEMPLATE_COMMIT, None)
+            isolation = verify_craze_repo(dest, commit, None)
+        if hidden:
+            isolation["hidden"] = hidden
+            isolation["hidden_absent"] = hidden_absent(dest, hidden)
+            isolation["ok"] = isolation["ok"] and isolation["hidden_absent"]
+        isolation["craze_commit"] = commit
         if not isolation["ok"]:
             raise WorkspaceError(f"{task.id}: workspace failed its isolation checks")
     else:

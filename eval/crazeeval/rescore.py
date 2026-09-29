@@ -20,7 +20,7 @@ import os
 from pathlib import Path
 from types import SimpleNamespace
 
-from crazeeval.batch import OVERSIZE, _json_write, _jsonl_append, run_objective_pass, tree_hash
+from crazeeval.batch import OVERSIZE, _json_write, _jsonl_append, run_objective_pass, task_fingerprint
 from crazeeval.checks import check_diff_scope, check_no_writes
 from crazeeval.report import iter_results
 from crazeeval.runners import RUNNERS
@@ -147,7 +147,7 @@ def _rescore_rep(rep_dir: Path, res: dict, tasks: dict[str, Task], task_hashes: 
     # The check definitions and ignores come from the task as it is now: it must be the
     # task the batch ran (its fingerprint in batch.json).
     if task.id not in task_hashes["now"]:
-        task_hashes["now"][task.id] = tree_hash(task.dir)
+        task_hashes["now"][task.id] = task_fingerprint(task)
     if task_hashes["batch"].get(task.id) != task_hashes["now"][task.id]:
         raise Skip("the task changed since the batch")
     runner = RUNNERS.get(res.get("harness"))

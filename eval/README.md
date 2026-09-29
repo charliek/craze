@@ -5,6 +5,9 @@ harnesses on the same models and the same tasks: gx (the grok-build fork), openc
 codex. It records what each one sends on the wire and scores the results. It is not part
 of CI or the per-commit gate. It costs money, and its runs are not deterministic.
 
+See `eval/RUNBOOK.md` for the procedure -- a campaign end to end, and how to add a model or
+a task.
+
 It is a Python ≥ 3.11 `uv` project, package `crazeeval`. Run every command from this
 directory:
 
@@ -17,6 +20,32 @@ uv run pytest            # the offline tests: no network, a few seconds (bubblew
 sources, hidden tests) out of the root module. So `go list ./... | grep -c /eval/` from the
 repo root prints 0, and `tests/test_sandbox_boundary.py` asserts it.
 
+## Campaigns
+
+A **campaign** is one directory holding a series of batches, their budget and their
+config: `eval-runs/` (every batch `run` makes without `--out`), `ledger.jsonl` (the
+budget ledger, so the $95 cap is per campaign) and `eval-config/` (the config snapshots
+and `CURRENT`). It is chosen, first match wins, by:
+
+1. `--campaign NAME`, a global option (before or after the command):
+   `~/.craze-eval/<NAME>` (letters, digits, `.`, `_`, `-`);
+2. `CRAZEEVAL_CAMPAIGN_DIR`: a full path;
+3. `CRAZEEVAL_PLAN_DIR`: the same, under its old name (plan 029's scripts set it to the
+   plan folder, so they keep working);
+4. `~/.craze-eval/default`.
+
+Nothing defaults into a plan folder. A new campaign starts with no config snapshot (run
+`snapshot-config` in it first) and an empty ledger. `run` prints the campaign it uses,
+and each batch's `batch.json` records it (`campaign`, outside the identity fingerprint,
+so `--resume` is unaffected). Caches shared by every campaign -- the craze templates, the
+opencode seed, the judge's `CODEX_HOME` -- stay under `~/.cache/crazeeval`
+(`CRAZEEVAL_CACHE_DIR`).
+
+```shell
+uv run crazeeval --campaign 2026-10-glm snapshot-config
+uv run crazeeval --campaign 2026-10-glm run --harness craze,opencode --model glm-5.3-flash ...
+```
+
 ## How a run works
 
 ```
@@ -26,12 +55,22 @@ harness (in bwrap, its own netns) ──> 127.0.0.1:<port> ──relay──> pr
 
 1. **Workspace.** The run's workspace is materialised into an independent object store:
    no remote, no alternates.
-   - craze tasks start from a template built once with `git init` and
-     `git fetch --no-tags <repo> 3eabb31` (only that commit's ancestry). A task with a
-     `setup.patch` instead gets a **fresh object store holding one parentless commit** of
-     the patched tree (plan X7): `git cat-file -e 3eabb31` fails, `git rev-list --all` is
-     one commit, every stored object is reachable from it -- nothing in git shows what was
-     planted or what it replaced.
+   - craze tasks start from a template built once per commit with `git init` and
+     `git fetch --no-tags <repo> <commit>` (only that commit's ancestry), cached as
+     `~/.cache/crazeeval/templates/craze-<sha12>`. The commit is the task's
+     `[repo] commit`, default `3eabb31`. A task with a `setup.patch` instead gets a
+     **fresh object store holding one parentless commit** of the patched tree (plan X7):
+     `git cat-file -e <commit>` fails, `git rev-list --all` is one commit, every stored
+     object is reachable from it -- nothing in git shows what was planted or what it
+     replaced.
+   - A commit whose history ever held `eval/` -- its own tree or any ancestor's, even if a
+     later commit removed it (`git rev-list --full-history <commit> -- eval` is not
+     empty: every commit since the eval landed) -- is never materialised with it: `eval/`
+     holds every task's hidden tests and reference answers. Its template
+     (`craze-<sha12>-noeval`) is one parentless commit of the tree without `eval/`, with
+     no history (the history holds `eval/`); the isolation check adds `hidden_absent`.
+     The history is checked on every materialisation. `3eabb31`'s whole history predates
+     `eval/`, so its tasks keep their history, exactly as before.
    - Fixture tasks copy `fixtures/<name>/files/` and commit it with a fixed author and date.
    - The start manifest is saved: every entry except `.git/`, classified by `lstat` --
      `f:<mode>:<sha256>` for a file (full permission bits, e.g. `0644`), `o:<mode>:<bytes>`
@@ -165,7 +204,7 @@ harness (in bwrap, its own netns) ──> 127.0.0.1:<port> ──relay──> pr
 
 ### Budget
 
-- **Ledger:** `ledger.jsonl` in the plan folder (`--ledger` to move it) is append-only,
+- **Ledger:** `ledger.jsonl` in the campaign directory (`--ledger` to move it) is append-only,
   fsync'd, reloaded at start, and guarded by an exclusive `fcntl` lock. Two processes never
   both think they have headroom.
 - **Reservation:** before forwarding, the proxy reserves the request's **byte count** as
@@ -208,7 +247,7 @@ harness (in bwrap, its own netns) ──> 127.0.0.1:<port> ──relay──> pr
 - `prices.toml`: see Budget.
 - **`crazeeval snapshot-config`:**
   - It copies the target definitions from the owner's craze and gx tables into
-    `<plan>/eval-config/<stamp>-<hash>/config.json` (and moves `CURRENT`). Only allowlisted
+    `<campaign>/eval-config/<stamp>-<hash>/config.json` (and moves `CURRENT`). Only allowlisted
     fields are copied: no key, env-key name, auth helper or header.
   - It saves a models.dev catalog for opencode (`OPENCODE_MODELS_PATH`), and records which
     `--variant`s opencode offers per model, asked of opencode itself in a sandbox.
@@ -252,8 +291,11 @@ Every child also gets:
 
 ## Commands
 
+Every command takes the global `--campaign NAME` (see *Campaigns*); without it the
+campaign comes from the environment or is `~/.craze-eval/default`.
+
 ```shell
-# Once, and again whenever the owner's model tables change:
+# Once per campaign, and again whenever the owner's model tables change:
 uv run crazeeval snapshot-config
 
 # Validators: every task's category controls must pass before the task may run.
@@ -284,9 +326,13 @@ uv run crazeeval probe --craze-bin ../bin/craze
 uv run crazeeval keyscan <dir>
 uv run crazeeval ledger
 
-# The judge (see "The judge" below). The frozen fingerprint of the instruction, the schema
-# and every rubric:
+# The judge (see "The judge" below). The global fingerprint of the instruction, the schema
+# and every rubric (each verdict also carries its own task's hash):
 uv run crazeeval judge-hash
+# Give older records (global hash only) their task hash while the global hash still
+# matches and the task is what its batch ran, so they keep standing once a task is
+# added (see "judge-hash --stamp" under "The judge"):
+uv run crazeeval judge-hash --stamp FILE [FILE ...] [--dry-run]
 # One pair (the judge smoke): two rep directories.
 uv run crazeeval judge-pair --a <rep-dir> --b <rep-dir> [--judge sol] [--both-orders] [--seed N]
 # Every pair of craze runs against the other harnesses' (held-out verdicts sealed):
@@ -300,8 +346,13 @@ uv run crazeeval calibrate --batch DIR [--seed N]
 
 # The report (held-out sealed unless --unseal), and the wire-capture report.
 uv run crazeeval report --batch DIR [--batch LATER ...] [--baseline DIR] [--verdicts DIR ...] [--unseal] \
-    [--compare OLD --compare-verdicts DIR] [--out DIR]
+    [--compare OLD --compare-verdicts DIR] [--losses] [--out DIR]
 uv run crazeeval captures --run DIR [--out DIR] [--unseal]
+
+# A compact, diffable record of batches (see "The archive"): runs, final verdicts,
+# provenance; reconciled, key- and home-path-scanned, 2 MB by default.
+uv run crazeeval archive --batch DIR [--batch LATER ...] --out DIR [--unseal] [--verdicts DIR ...] \
+    [--all-runs] [--max-bytes N]
 
 # Recompute a finished batch's diff and its diff-derived checks (no_writes, diff_scope)
 # from each rep's final attempt's manifests with today's ignores (X15); every other
@@ -320,7 +371,22 @@ inside a sandbox. The `task.toml` fields:
 - `id`, `category` (explain, answer, investigate, bugfix, feature, refactor, multi-step,
   verify, plan), `split` (dev, heldout, smoke), `mode` (build or plan), `prompt`,
   `timeout_s` and `rubric`;
-- `[repo]`: `kind = "craze"` (optional `setup_patch`) or `kind = "fixture"` plus `name`;
+- `[repo]`: `kind = "craze"` (optional `setup_patch`, optional `commit`) or
+  `kind = "fixture"` plus `name`;
+- `[repo] commit` (craze tasks only): the craze commit the task materialises, a full
+  40-character sha (an abbreviation or a ref name is refused). It defaults to `3eabb31`
+  (`paths.CRAZE_TEMPLATE_COMMIT`), so a task about newer craze code pins the commit its
+  rubric was written against. Everything that builds, caches, verifies or records the
+  workspace uses it: the template cache is per commit, the isolation checks verify
+  against it, validation and the scoring side's pristine copy materialise it,
+  `result.json` records `craze_commit`, and `manifest.json` lists `craze_templates` per
+  commit. A pinned commit is in `task.toml`, so in the task's fingerprint; a task on
+  another commit than `3eabb31` -- pinned, or because the default moved -- also has the
+  commit folded into its fingerprint, and the batch identity then lists `craze_commits`
+  (a task on `3eabb31` keeps the fingerprint it always had). `CRAZE_REPO_IGNORES` stays a
+  hard-coded list: `tests/test_workspace_checks.py` checks that the `.gitignore` at every
+  commit a task under `tasks/` uses parses to exactly it, so pinning a commit whose
+  `.gitignore` differs fails that test until the list is updated;
 - `[[checks]]`: the objective checks;
 - `[validate]`: the validator inputs.
 
@@ -330,7 +396,7 @@ The check types:
 - `no_writes`: final state only. It fails if a tracked file is modified or deleted, or if a
   new file exists outside the ignore list (`__pycache__/`, `*.pyc`, `.pytest_cache/`,
   `*.test`, the task's `ignore`, the harness's own workspace state and, for a craze-repo
-  task, the patterns of the craze repository's `.gitignore` at 3eabb31:
+  task, the patterns of the craze repository's `.gitignore` at the task's commit:
   `workspace.CRAZE_REPO_IGNORES`). `diff_scope` sees the same diff.
 - `tests`: hidden files are added (`add`), trusted files are restored over the agent's
   copies (`restore` from testdata, `restore_from_start`), then a **trusted runner** runs,
@@ -369,7 +435,7 @@ The validators, per category, are run by `crazeeval validate` (§3.1.5):
 
 | category | the check must… |
 |---|---|
-| implementation | fail on the untouched workspace and pass with `reference.patch` (for a craze `setup.patch` task, the planted tree with the patch reversed: 3eabb31's content); a refactor's tests pass on both, its structural and `shared_helper` checks carry the control; `diff_scope` passes the reference and fails it plus an edit to a denied file (`scope_denied_edit`) or outside the scope (`scope_outside_edit`) |
+| implementation | fail on the untouched workspace and pass with `reference.patch` (for a craze `setup.patch` task, the planted tree with the patch reversed: its commit's content); a refactor's tests pass on both, its structural and `shared_helper` checks carry the control; `diff_scope` passes the reference and fails it plus an edit to a denied file (`scope_denied_edit`) or outside the scope (`scope_outside_edit`) |
 | investigate | pass on a reference answer and fail on a decoy |
 | verify | pass on a synthetic capture whose code-running call exercised the case and was answered (`synthetic_command`, `synthetic_result`); fail with none, with an irrelevant answered call (`python --version`), and with the right call never answered |
 | explain, answer, plan | pass on the reference answer and fail on the decoy; `no_writes` must also fail when an edit is planted |
@@ -397,8 +463,9 @@ with `target = "path"`):
 | T-P1 | plan-craze-feature | plan | dev | craze | facts (3 of 4), no writes |
 | T-P2 | plan-fixture-feature | plan | held-out | `pricing` | facts (4 of 5), no writes |
 
-The craze tasks' rubrics are written from the code at `3eabb31` and cite file:line; each
-explain/answer/plan rubric has 7–9 checkable items and three false claims. The regex fact
+The craze tasks' rubrics are written from the code at their commit (`3eabb31` for all
+fifteen) and cite file:line; each explain/answer/plan rubric has 7–9 checkable items and
+three false claims. The regex fact
 checks are the subset of the rubric that is safe to match mechanically; the judge grades
 every rubric item. Validators added for C2's categories: a refactor's tests pass both
 untouched and with the reference (its structural checks carry the control), and a
@@ -416,14 +483,19 @@ invalidate the run. craze's own `testdata/` directories and the sandbox home are
 
 ## Where results go
 
-Results never land in the repo. `--out` defaults to
-`~/.claude/plans/craze/029-native-harness-quality/eval-runs/<label>-<timestamp>/`.
+Raw results never land in the repo. `--out` defaults to
+`<campaign>/eval-runs/<label>-<timestamp>/` (plan 029's batches are under
+`~/.claude/plans/craze/029-native-harness-quality/eval-runs/`, its scripts set
+`CRAZEEVAL_PLAN_DIR`). What is worth keeping in the repo is a `crazeeval archive` of
+them (see *The archive*).
 
 Each batch writes:
 
+- `batch.json`: the identity whose fingerprint `--resume` checks, plus the `campaign`
+  the batch ran in (recorded, not fingerprinted);
 - `manifest.json`: executables with versions and sha256; the generated configs; the
-  snapshot hash; fixture hashes; the craze template's isolation check; prices; the run
-  order; the route table (hosts only);
+  snapshot hash; fixture hashes; each craze template's commit, tasks and isolation check
+  (`craze_templates`); prices; the run order; the route table (hosts only);
 - `validation.json`
 - `results.jsonl`
 - `summary.json`
@@ -457,7 +529,8 @@ sealed `heldout/` instead, and their verdicts are not printed. Inside a run dire
 
 `result.json` holds:
 
-- the harness, model, wire model, effort, task, split, rep and attempt;
+- the harness, model, wire model, effort, task, split, rep and attempt; `craze_commit`
+  (the commit a craze-repo task materialised);
 - `exit`, `timed_out`, `wall_s`;
 - `answer`, `answer_words`, `notes`;
 - `status`: ok, crashed, timeout, infra, contaminated, key-exposure, budget-capped,
@@ -522,8 +595,9 @@ sealed `heldout/` instead, and their verdicts are not printed. Inside a run dire
   held-out pairs to the sealed `<out>/heldout/verdicts.jsonl` (never printed). Each record
   holds the two judged runs' ids (`x_run_id`, `y_run_id`: batch, run key and attempt), both
   orders' raw outputs, the mapped verdict, the seed, the judge model and effort, wall time,
-  attempts, rate-limit waits, the judge hash and the calibration decisions it was judged
-  under; a re-run skips pairs already judged under the same hash and mode.
+  attempts, rate-limit waits, the judge hashes (`judge_hash` and `task_judge_hash`, below)
+  and the calibration decisions it was judged under; a re-run skips a pair already judged
+  in the same mode by a verdict that still stands.
 - **Calibration** (`calibrate`): 30 dev pairs spread over tasks and models, judged in both
   orders by sol and again by luna, plus 10 padding pairs (a run's answer against itself
   padded with a restatement of the task and a recap of its first paragraph -- same
@@ -542,8 +616,38 @@ sealed `heldout/` instead, and their verdicts are not printed. Inside a run dire
   records the reason in every verdict. (For a lever's before/after, pass the baseline's
   calibration file.)
 - **The frozen hash:** `crazeeval judge-hash` fingerprints the instruction, the schema and
-  every task's prompt, rubric and false claims; record it in `progress.md` and re-judge
-  every verdict used in a decision if it changes.
+  every task's prompt, rubric and false claims (`judge_hash`); record it in `progress.md`.
+  Adding any task changes it, so it is not what decides whether a verdict stands.
+- **The per-task hash** (`task_judge_hash`, in every new verdict record beside
+  `judge_hash`): the instruction, the schema and what the judge is shown of that one
+  task that no run changes -- its prompt, the plan-task note, its rubric and its false
+  claims, as the packet renders them. **A verdict stands** when its `task_judge_hash`
+  equals its task's current one -- or, for an older record without one, when its global
+  `judge_hash` equals today's. `judge-batch`'s skip and the report's acceptance both use
+  this rule, so adding a task, or changing one task's rubric, never invalidates another
+  task's verdicts; changing a task's rubric re-judges only that task's pairs. Plan 029's
+  records carry only the global hash: they stand until the first task is added or
+  changed.
+- **The legacy fallback's blind spot:** the global hash covers each task's prompt, rubric
+  and false claims but not its mode (which adds the packet's plan note) nor anything else
+  of the packet, so an older record judged before such a change still reads as current.
+  The global hash is left as it is (changing it would orphan plan 029's verdicts);
+  stamping is how an older verdict is made durable.
+- **`crazeeval judge-hash --stamp FILE ...`**: in each verdict or calibration JSONL file,
+  a record without a `task_judge_hash` gets its task's current hash only when its
+  `judge_hash` is today's **and** its task's fingerprint now equals the one in the
+  `batch.json` of the batch that owns the file (the nearest of the file's three closest
+  ancestor directories holding one: `<batch>/judging/`, `<batch>/judging/heldout/`,
+  `<batch>/calibration/`). Records with another global hash, with none, or whose task
+  changed, is gone or has no batch fingerprint (`task changed or unknown`) are left alone
+  and counted; every other line keeps its bytes (read and written as UTF-8). The file as
+  it first was is kept once as `<name>.pre-stamp.jsonl` beside it, created exclusively
+  (`O_EXCL`) and never replaced; a second run changes nothing; `--dry-run` only counts
+  and takes no lock. **Locking:** every writer of a verdict or calibration file --
+  `judge-batch`'s appends, `calibrate` -- takes an exclusive `flock` on `<file>.lock`
+  beside it, and the stamper holds that lock across its read, compute and replace, so
+  an append made meanwhile waits and is never lost. Run it before adding or changing a
+  task; `crazeeval archive` applies the same rule to such records in its own output.
 
 The judge smoke (C2): craze vs gx on `smoke-fix` (deepseek-v4p1-flash, C1's last smoke),
 sol, one order: a schema-valid verdict in 11 s.
@@ -553,6 +657,9 @@ sol, one order: a schema-valid verdict in 11 s.
 `crazeeval report` (`report.py`, §3.1.8) reads batches and verdict files and writes
 `report.md`, `report.json` and `length_vs_verdict.csv`:
 
+- **verdicts that still stand:** a record judged under another judge hash (see *The
+  per-task hash*) is set aside before anything else, and the report prints how many, the
+  global hashes of the verdicts it counted (and today's) and their per-task hashes;
 - objective pass counts per model × harness on dev, held-out and all tasks (a task with two
   reps counts its mean pass);
 - the win-rate matrix per model and pooled, with Wilson 90% intervals (ties half);
@@ -581,11 +688,88 @@ sol, one order: a schema-valid verdict in 11 s.
   model, with the keep rule's readout (≥ 55% for a conditional lever, ≥ 45% for a
   requested one, and no dev objective drop) as `keep`, `drop` or `inconclusive` -- the last
   until every (task, model) both builds ran has a verdict bound to the two builds' runs, so
-  a comparison with no verdicts never reads keep.
+  a comparison with no verdicts never reads keep;
+- `--losses` adds **"Where craze lost"**: for each final verdict a craze run lost (craze on
+  either side), the task, model, split, the craze run key and the other run, the scores,
+  and per judged order the rubric items craze did not meet against the other side's
+  (each item only craze missed is quoted from the rubric) and the judge's reasons -- the
+  tuning signal behind a lever such as L7. Sealed, it covers the dev tasks only.
 
 **Sealed:** without `--unseal` nothing under a batch's `heldout/` -- runs or verdicts -- is
 read; the success bar uses the dev tasks alone and reports `provisional-meets` or
 `provisional-misses`. Unseal only for the final.
+
+## The archive
+
+`crazeeval archive --batch DIR [--batch DIR ...] --out DIR [--unseal] [--max-bytes N]`
+(`archive.py`, plan 029 W2) writes a compact, diffable record of chosen batches -- what
+is worth keeping in the repo once the raw runs (captures, answers, workspaces) stay
+outside it. By default it selects runs and verdicts as the report does (a "current
+view"): a later `--batch` wins a run key (so give the baseline first), held-out runs and
+verdicts only with `--unseal`, verdicts bound to the scored runs, one final verdict per
+pair by the report's ranking. `--all-runs` keeps every scored run of every given batch
+instead, by its `run_id` rather than replaced by run key -- use it to archive a whole
+campaign (baseline, lever, final, A/B batches) rather than a final view, since a
+craze-vs-craze comparison's two batches often reuse the same run keys and the default
+would drop one side's runs (and unbind its verdicts). `archive.json`'s `selection`
+records which mode wrote the archive. A batch directory given more than once is read
+once either way.
+
+- `runs.jsonl`: one line per scored run -- campaign and batch names, run key and id,
+  harness with its version and executable hash (a sha256 prefix), the craze build for a
+  craze run (binary basename, sha256 prefix, version, the source commit it was built
+  from), the model, wire model and served models, the task, split, category, mode, plan
+  mode, rep, status, objective pass and each check's result, answer words, tool calls,
+  main requests, wall time, cost, list cost and tokens;
+- `verdicts.jsonl`: one line per final verdict -- task, model, split, the two run ids and
+  harnesses, judge model and mode, winner, confidence, scores, each judged order's rubric
+  grades and reasons, a success-bar escalation's first result, `judge_hash` and
+  `task_judge_hash`. The verdicts that still stand come first (the report's own set);
+  a pair with none keeps its best older verdict, marked `"current": false`. A record from
+  before per-task hashes gets its task's hash stamped by `judge-hash --stamp`'s rule --
+  its global hash is today's and its task's fingerprint equals its batch's
+  (`task_judge_hash_source: "stamped"`); otherwise the field stays null and
+  `task_judge_hash_note` says why;
+- `batches.json`: per batch its name, campaign, label, harnesses, models, reps (and
+  `first_rep`), prices, task fingerprints (and `craze_commits` when a task is off
+  `3eabb31`), fixture, evaluator and config-snapshot hashes, executables, the craze build,
+  and a copy of its `best-open-harness.json` (paths reduced to batch names);
+- `calibration.json`, only when a batch has calibration: per such batch (name and
+  campaign) its summary (seed, judge hash, flip rate, luna agreement, padding, gates),
+  never the raw calibration records;
+- `archive.json`: the selection mode (`"current-view"` or `"all-runs"`), the verdict
+  counts, how many paths were redacted, the file sizes, the scan of the data files and
+  **the reconciliation**, also printed:
+  `archive: N scored runs selected, N rows written; M final verdicts (K current), M rows
+  written -- reconciled`. Either count differing fails the command.
+
+Provenance (campaign, build, executables) is looked up by each batch's resolved
+directory, so two campaigns' batches that share a name keep their own; only names are
+written.
+
+**Left out on purpose:** answers, captures, logs, diffs, command lines, judge prompts,
+raw calibration records, and every path (batches are named, never located).
+
+**Free text is kept without local paths:** the judge's reasons -- and every other string
+written -- have each local-machine filesystem path replaced by `<path>`: a path under
+`/home`, `/Users`, `/tmp`, `/private`, `/root`, `/sandbox`, `/var/folders`, `/run/user`
+or the owner's own home (the root alone too), with a trailing `:line[:col]` kept after
+it (`/tmp/foo.py:12` becomes `<path>:12`). Nothing else is touched: routes
+(`/api/v1/users`), fractions (`2 /3/4`, `7/10`), other slash-rooted text
+(`/usr/local/bin/craze`), repository-relative paths, `<workspace>/internal/...`, `~/...`
+and URLs stay. `archive.json` counts the redactions (`paths_redacted`); the scan below
+remains the backstop.
+
+**Safety, before it finishes** (the backstop): every file in `--out` is scanned with the
+batch runner's key ring and key scan (`keys.scan_tree`; the owner's providers are loaded
+for it, and the command refuses to run with no key loaded) and grepped for the owner's
+home path and `/home/`. Any hit fails the command, naming the file; nothing is deleted.
+A total over `--max-bytes` (default 2 000 000), counted over every file in `--out`, an
+earlier archive's extra files (a README) included, fails it too. The output has no
+timestamp: the same batches archive to the same bytes. `--out` must be new, empty, or an
+earlier archive (it holds `archive.json`; other files there are left alone) -- any other
+non-empty directory is refused, whatever it holds -- and never inside a batch, whose
+files are read-only inputs.
 
 ## The capture report
 

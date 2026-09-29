@@ -4,7 +4,12 @@
   another on the same task and model (one batch, or two batches' builds of the same
   harness for ``--compare``) and appends one record per pair to ``verdicts.jsonl`` --
   held-out pairs to the sealed ``heldout/verdicts.jsonl``, never printed. A pair
-  already judged with the same judge hash, judge model and mode is skipped.
+  already judged in the same mode, by a verdict that still stands
+  (``judge.verdict_current``: its task's judge hash, else for an older record the
+  global one), is skipped. ``judge-hash --stamp`` (``stamp_task_hashes``) gives older
+  records their task hash while the global one still matches and the task is what its
+  batch ran, so they keep standing. Every writer of a verdict or calibration file holds
+  its ``jsonl_lock``.
 - ``calibrate`` judges 30 dev pairs in both orders by sol and again by luna, plus 10
   padding pairs (one side is the other's answer with neutral padding), and writes the
   flip rate, luna's agreement, the padded side's win count and the gate decisions. A
@@ -19,12 +24,25 @@
 from __future__ import annotations
 
 import asyncio
+import fcntl
 import json
+import os
 import random
+import uuid
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
-from crazeeval.judge import Judge, Pair, judge_hash, judge_pair, judge_success_bar_pair
+from crazeeval.judge import (
+    Judge,
+    Pair,
+    judge_hash,
+    judge_pair,
+    judge_success_bar_pair,
+    task_judge_hash,
+    task_judge_hashes,
+    verdict_current,
+)
 from crazeeval.packet import Side, load_side
 from crazeeval.report import UNSCORED, iter_results, read_jsonl
 from crazeeval.runners import RUNNERS
@@ -98,16 +116,214 @@ def verdict_path(out: Path, split: str) -> Path:
     return out / ("heldout" if split == "heldout" else "") / "verdicts.jsonl"
 
 
-def done_pairs(out: Path, jhash: str) -> set[tuple]:
+def done_pairs(out: Path, tasks: dict[str, Task]) -> set[tuple]:
+    """The (pair, mode) already judged with a verdict that still stands
+    (``judge.verdict_current``: its task's judge hash is unchanged -- or, for a record
+    from before per-task hashes, the global hash is), so adding or changing one task
+    never re-judges another's pairs."""
+    th, jhash = task_judge_hashes(tasks), judge_hash(tasks)
     return {(v["pair"], v.get("judge_mode"))
             for p in (verdict_path(out, "dev"), verdict_path(out, "heldout"))
             for v in read_jsonl(p)
-            if v.get("judge_hash") == jhash and v.get("result") is not None}
+            if v.get("result") is not None and verdict_current(v, th, jhash)}
+
+
+LOCK_SUFFIX = ".lock"
+
+
+def lock_path(p: Path) -> Path:
+    """``verdicts.jsonl`` -> ``verdicts.jsonl.lock`` beside it."""
+    p = Path(p)
+    return p.with_name(p.name + LOCK_SUFFIX)
+
+
+@contextmanager
+def jsonl_lock(p: Path):
+    """An exclusive advisory ``flock`` on ``<file>.lock`` beside a verdict or calibration
+    JSONL file, taken by every writer of the file -- each append (``_append``), each
+    calibration write -- and held by the stamper across its read, compute and replace.
+    A sibling file, not the data file: the stamper's replace gives the data file a new
+    inode, which a lock on the file itself would not follow."""
+    p = Path(p)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(lock_path(p), os.O_WRONLY | os.O_CREAT, 0o644)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(fd)  # releases the lock
+
+
+PRE_STAMP_SUFFIX = ".pre-stamp.jsonl"
+TASK_CHANGED = "task_changed_or_unknown"
+
+
+class StampError(RuntimeError):
+    pass
+
+
+def pre_stamp_path(p: Path) -> Path:
+    """``verdicts.jsonl`` -> ``verdicts.pre-stamp.jsonl`` beside it."""
+    p = Path(p)
+    stem = p.name[: -len(".jsonl")] if p.name.endswith(".jsonl") else p.name
+    return p.with_name(stem + PRE_STAMP_SUFFIX)
+
+
+def owning_batch_tasks(path: Path) -> dict | None:
+    """The task fingerprints (``batch.json``'s ``tasks``) of the batch a verdict or
+    calibration file belongs to: the nearest of its three closest ancestor directories
+    holding a ``batch.json`` (``<batch>/judging/``, ``<batch>/judging/heldout/``,
+    ``<batch>/calibration/``). None when there is none, or it cannot be read."""
+    for d in list(Path(path).resolve().parents)[:3]:
+        bj = d / "batch.json"
+        if bj.is_file():
+            try:
+                tasks = json.loads(bj.read_text()).get("tasks")
+            except (OSError, ValueError, AttributeError):
+                return None
+            return tasks if isinstance(tasks, dict) else None
+    return None
+
+
+class TaskCheck:
+    """Whether a task is today what it was when a batch ran: its fingerprint now
+    (``batch.task_fingerprint``: task.toml, testdata and, off 3eabb31, its commit) equals
+    the one the batch recorded. Fingerprints are computed once per task."""
+
+    def __init__(self, tasks: dict[str, Task]):
+        self.tasks = tasks
+        self._now: dict[str, str] = {}
+
+    def unchanged(self, tid: object, batch_tasks: dict | None) -> bool:
+        """False for anything but a string task id (a malformed record's ``"task"``,
+        e.g. a list, is left alone -- counted as changed or unknown, same as an id this
+        run does not have -- never looked up, which would raise on an unhashable id)."""
+        from crazeeval.batch import task_fingerprint
+
+        if not isinstance(tid, str) or not batch_tasks or tid not in self.tasks or tid not in batch_tasks:
+            return False
+        if tid not in self._now:
+            self._now[tid] = task_fingerprint(self.tasks[tid])
+        return batch_tasks[tid] == self._now[tid]
+
+
+def _stamp_lines(text: str, tasks: dict[str, Task], batch_tasks: dict | None) -> tuple[dict, str]:
+    th, gh = task_judge_hashes(tasks), judge_hash(tasks)
+    check = TaskCheck(tasks)
+    counts = {"records": 0, "stamped": 0, "already": 0, "other_hash": 0, "no_hash": 0, TASK_CHANGED: 0,
+              "unparsed": 0, "written": False, "original_kept": None}
+    lines = text.split("\n")  # JSONL: "\n" only, so every other line is kept as it is
+    for i, line in enumerate(lines):
+        if not line.strip():
+            continue
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            rec = None
+        if not isinstance(rec, dict):
+            counts["unparsed"] += 1
+            continue
+        counts["records"] += 1
+        if rec.get("task_judge_hash"):
+            counts["already"] += 1
+        elif not rec.get("judge_hash"):
+            counts["no_hash"] += 1
+        elif rec["judge_hash"] != gh:
+            counts["other_hash"] += 1
+        elif not check.unchanged(rec.get("task"), batch_tasks):
+            counts[TASK_CHANGED] += 1
+        else:
+            rec["task_judge_hash"] = th[rec["task"]]
+            counts["stamped"] += 1
+            lines[i] = json.dumps(rec)
+    return counts, "\n".join(lines)
+
+
+def _keep_original(p: Path, raw: bytes) -> str | None:
+    """``<name>.pre-stamp.jsonl``, with the file's bytes before its first stamp,
+    written and fsynced to a unique temporary file first and only then published as
+    the final name by an exclusive hard link (``os.link``) -- so a crash mid-write
+    never leaves a partial backup under the final name: it is either absent or
+    complete. An existing final is kept, never replaced; the temp is removed on every
+    path, success or failure."""
+    pre = pre_stamp_path(p)
+    tmp = pre.with_name(f"{pre.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+    try:
+        try:
+            view = memoryview(raw)
+            while view:
+                view = view[os.write(fd, view):]
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        try:
+            os.link(tmp, pre)
+        except FileExistsError:
+            return None
+        return pre.name
+    finally:
+        os.unlink(tmp)
+
+
+def _replace_with(p: Path, data: bytes) -> None:
+    """The stamped file's bytes in place of the old, atomically."""
+    tmp = p.with_name(p.name + ".stamp.tmp")
+    tmp.write_bytes(data)
+    os.replace(tmp, p)
+
+
+def stamp_task_hashes(path: Path, tasks: dict[str, Task], dry_run: bool = False) -> dict:
+    """Give every record of a verdict or calibration JSONL file that has no
+    ``task_judge_hash`` its task's current ``task_judge_hash``, so the record keeps
+    standing (``judge.verdict_current``) after another task is added or changed -- but
+    only when both describe the judge the record saw: its global ``judge_hash`` is
+    today's, **and** its task's fingerprint now equals the one recorded in the
+    ``batch.json`` of the batch that owns the file (``owning_batch_tasks``). The global
+    hash alone would not do: it leaves out the task's mode (which changes the packet's
+    plan note) and everything else of the packet outside the prompt, rubric and false
+    claims. Records with another global hash, with none, or on a task that changed, is
+    unknown, or has no batch fingerprint to compare with are left alone and counted; a
+    line that does not parse is kept as it is.
+
+    Only stamped lines change: the rest keep their bytes (read and written as UTF-8). The
+    file as it first was is kept once, as ``<name>.pre-stamp.jsonl`` beside it, created
+    exclusively and never replaced. The whole read-compute-replace holds the file's
+    ``jsonl_lock``, which every appender takes, so no append is lost. Nothing is written
+    with ``dry_run`` (which takes no lock) or when nothing needs a stamp. Returns the
+    counts."""
+    p = Path(path)
+    if p.name.endswith(PRE_STAMP_SUFFIX):
+        raise StampError("a pre-stamp original is never stamped")
+    if p.is_symlink() or not p.is_file():
+        raise StampError("not a regular file")
+    batch_tasks = owning_batch_tasks(p)
+
+    def compute(raw: bytes) -> tuple[dict, str]:
+        try:
+            text = raw.decode("utf-8")
+        except UnicodeDecodeError as e:
+            raise StampError("not UTF-8") from e
+        return _stamp_lines(text, tasks, batch_tasks)
+
+    if dry_run:
+        return compute(p.read_bytes())[0]
+    with jsonl_lock(p):
+        raw = p.read_bytes()
+        counts, text = compute(raw)
+        if not counts["stamped"]:
+            return counts
+        counts["original_kept"] = _keep_original(p, raw)
+        if p.read_bytes() != raw:  # only a writer that ignores the lock gets here
+            raise StampError("the file changed while it was read; nothing stamped")
+        _replace_with(p, text.encode("utf-8"))
+        counts["written"] = True
+    return counts
 
 
 def _append(p: Path, rec: dict) -> None:
-    p.parent.mkdir(parents=True, exist_ok=True)
-    with open(p, "a") as f:
+    """One record appended to a verdict file, under the file's lock (``jsonl_lock``)."""
+    with jsonl_lock(p), open(p, "a", encoding="utf-8") as f:
         f.write(json.dumps(rec, default=str) + "\n")
 
 
@@ -117,7 +333,7 @@ async def judge_batch(pairs: list[tuple[RunRef, RunRef]], tasks: dict[str, Task]
     tie) or "success-bar" (both orders by sol, astra on disagreement or low confidence).
     ``calibration``: enforce_calibration's record, written into every verdict."""
     jhash = judge_hash(tasks)
-    done = done_pairs(out, jhash)
+    done = done_pairs(out, tasks)
     counts = {"judged": 0, "skipped": 0, "no_verdict": 0}
 
     async def one(x: RunRef, y: RunRef):
@@ -134,7 +350,8 @@ async def judge_batch(pairs: list[tuple[RunRef, RunRef]], tasks: dict[str, Task]
         else:
             rec = await judge_pair(judge, pair, judge_model, seed, mode == "both", strip)
         rec.update({"hx": x.harness, "hy": y.harness, "split": task.split, "x_batch": x.batch, "y_batch": y.batch,
-                    "judge_hash": jhash, "judge_mode": mode, "seed": seed, "calibration": calibration})
+                    "judge_hash": jhash, "task_judge_hash": task_judge_hash(task), "judge_mode": mode, "seed": seed,
+                    "calibration": calibration})
         _append(verdict_path(out, task.split), rec)
         if rec["result"] is None:
             counts["no_verdict"] += 1
@@ -282,14 +499,18 @@ async def calibrate(pairs: list[tuple[RunRef, RunRef]], tasks: dict[str, Task], 
                     n_pairs: int = 30, n_padding: int = 10, log=print) -> dict:
     """§3.1.6 calibration over dev pairs; writes ``calibration.json`` and the records."""
     out.mkdir(parents=True, exist_ok=True)
+    jhash = judge_hash(tasks)
     chosen = [to_pair(x, y, tasks) for x, y in pick_calibration_pairs(pairs, n_pairs, seed)]
 
     async def run(pairs_, model, label):
         recs = await asyncio.gather(*(judge_pair(judge, p, model, seed, True, strip_patterns(p.x.result.get("harness"),
                                                                                               p.y.result.get("harness")))
                                       for p in pairs_))
-        with open(out / f"{label}.jsonl", "w") as f:
+        path = out / f"{label}.jsonl"
+        with jsonl_lock(path), open(path, "w", encoding="utf-8") as f:
             for r in recs:
+                r["judge_hash"] = jhash
+                r["task_judge_hash"] = task_judge_hash(tasks[r["task"]])
                 f.write(json.dumps(r, default=str) + "\n")
         log(f"calibration {label}: {sum(1 for r in recs if r['result'])}/{len(recs)} verdicts")
         return recs
@@ -313,7 +534,7 @@ async def calibrate(pairs: list[tuple[RunRef, RunRef]], tasks: dict[str, Task], 
     pad = await run(padded_pairs, "sol", "padding")
     summary = {
         "seed": seed,
-        "judge_hash": judge_hash(tasks),
+        "judge_hash": jhash,
         "requested": {"pairs": n_pairs, "padding": n_padding, "available_pairs": len(pairs)},
         "flip": flip_rate(sol, n_pairs),
         "luna_agreement": agreement(sol, luna, n_pairs),
