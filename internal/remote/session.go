@@ -806,6 +806,20 @@ func (s *Session) Cancel(ctx context.Context, c engine.Command, turn string) (en
 	return engine.CancelResult{Outcome: engine.CancelOutcome(r.Outcome), Turn: r.Turn, Reported: r.Reported}, err
 }
 
+// Stop is session.stop (plan 030 §3.6a; backend.Backend.Stop): the
+// caller's own command id, bound as every command is. It returns once the
+// host has answered its receipt — the stop taken, not yet done: the
+// session's end follows on the stream, its closing records and then the
+// stream's End. A host whose capability stop is false answers unsupported,
+// reason stop_unsupported, which is an *Error matching
+// backend.ErrStopUnsupported (sentinels.go): nothing was stopped, and the
+// caller detaches instead.
+func (s *Session) Stop(ctx context.Context, c engine.Command) error {
+	return s.command(ctx, c, protocol.MethodSessionStop, func(sid string) any {
+		return protocol.StopParams{SessionID: sid}
+	}, nil)
+}
+
 // CancelSubagent is session.subagent.cancel (Control.CancelSubagent).
 func (s *Session) CancelSubagent(ctx context.Context, c engine.Command, id string) error {
 	return s.command(ctx, c, protocol.MethodSubagentCancel, func(sid string) any {

@@ -15,6 +15,12 @@
 // placeholder (INCARNATION-1, INCARNATION-2 after a restart, …) instead —
 // see wire_test.go's runner, which does the substitution both ways.
 //
+// By default the Host is an S2 host, which to a plan 030 client is an older
+// one: it refuses session.stop and leaves the info document's permissionMode
+// and startedAt out. Options turns each on (plan 030 §3.6a, §3.7; X1): Stop
+// serves session.stop through a coordinator whose sequence the run_stop op
+// runs, and a fixture asks for them in its first line ({"dir": "host", …}).
+//
 // depguard: this package may import internal/tui (for the Stub) and
 // internal/control (the server); it may not import internal/cli, internal/acp
 // or internal/harness (.golangci.yml's fakehost rule).

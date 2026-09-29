@@ -69,6 +69,27 @@ type Options struct {
 	// past the bound with, as engine.Options.ReceiptClock is the receipts
 	// table's; a test hands both the same clock.
 	Clock func() time.Time
+
+	// Stop is the host's lifecycle coordinator as session.stop reaches it
+	// (plan 030 §3.6a; stop.go): set, the server serves session.stop and its
+	// session info document says capabilities.stop: true; nil — a TUI-hosted
+	// session, the fake host by default — session.stop is refused
+	// unsupported, reason stop_unsupported, exactly as before plan 030. See
+	// StopFunc for what the server does before it calls it, and what it must
+	// not do.
+	Stop StopFunc
+	// PermissionMode is the info document's permissionMode (plan 030 §3.7,
+	// SF-60): bypass for a host that spawned its agent with --force, prompt
+	// for --no-force. "" leaves it out, which is an older host's document.
+	PermissionMode protocol.PermissionMode
+	// StartedAt is the info document's startedAt (plan 030 §3.7, SF-63):
+	// when the host started serving the session, which the host decides —
+	// the TUI-hosted path the moment it bound its socket, the one instant its
+	// registry entry's startedAt records too. It is fixed for the server's
+	// life: a TUI-hosted server's pickers may replace the engine, and the
+	// host's start is still when it started. It goes on the wire in UTC; the
+	// zero time leaves it out, which is an older host's document.
+	StartedAt time.Time
 }
 
 // Budget is a subscription budget: the event log's SubscribeOptions MaxItems
@@ -163,6 +184,26 @@ type Server struct {
 	commands atomic.Int64
 
 	tokenMu sync.Mutex
+
+	// attachMu is the server's attachment lock (plan 030 §3.6; stop.go): an
+	// attach holds it across its fence check and the install of its pending
+	// attachment (conn.reserve), and a close fence goes up under it
+	// (FenceAttaches), so no attach reserves between a fence going up and
+	// the count it reads. It is a leaf above conn.mu — reserve takes it and
+	// then conn.mu — and nothing under conn.mu, or any other lock, takes it.
+	attachMu sync.Mutex
+	// fences is how many close fences are up (FenceAttaches); while it is
+	// not 0 a new attach is refused closing. Guarded by attachMu.
+	fences int
+	// attached is how many attachments the server holds that are not yet
+	// closed — pending (reserved), live or closing (attach.go's lifecycle) —
+	// across every connection. It rises only in reserve, under attachMu, and
+	// falls where an attachment closes (conn.closedLocked, under conn.mu), so
+	// under attachMu with a fence up it can only fall.
+	attached atomic.Int64
+	// stopOnce hands the first session.stop to Options.Stop, and raises the
+	// stop's own fence, once for the server's life (stop.go).
+	stopOnce sync.Once
 }
 
 // hooks are test barriers, nil in production and set before Serve
@@ -239,6 +280,14 @@ type hooks struct {
 	// in it holds a pending attachment on the connection, past a
 	// replacement, with nothing yet done about it but reserve itself.
 	reserved func(sub string)
+	// reserving runs on an attach inside reserve, holding the server's
+	// attachment lock, once its fence check has passed and before it
+	// installs its pending attachment: a test that blocks in it holds an
+	// attach between the two, where no fence can go up (plan 030 §3.6).
+	reserving func()
+	// fencing runs on FenceAttaches just before it takes the attachment
+	// lock.
+	fencing func()
 }
 
 // New builds a server. It serves nothing until SetEngine and Serve.

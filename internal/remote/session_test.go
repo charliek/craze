@@ -8,11 +8,13 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/charliek/craze/internal/agent"
 	"github.com/charliek/craze/internal/backend"
+	"github.com/charliek/craze/internal/control"
 	"github.com/charliek/craze/internal/engine"
 	"github.com/charliek/craze/internal/protocol"
 	"github.com/charliek/craze/internal/remote"
@@ -654,6 +656,7 @@ func TestAStaleEpochIsNeverSent(t *testing.T) {
 		},
 		"Cancel":         func() error { _, err := s.Cancel(stale, c, ""); return err },
 		"CancelSubagent": func() error { return s.CancelSubagent(stale, c, "a-1") },
+		"Stop":           func() error { return s.Stop(stale, c) },
 	}
 	before := len(tp.linesFrom(0))
 	for name, call := range calls {
@@ -898,4 +901,61 @@ func TestTheCodecsMustBeThisBuilds(t *testing.T) {
 		t.Fatalf("a host with another event codec: %v", err)
 	}
 	h.logs.wait(t, "close client")
+}
+
+// TestStopIsSessionStop (plan 030 §3.6a): Stop sends session.stop under the
+// caller's own command id, bound as every command is, and returns the host's
+// receipt once its coordinator has the stop — the session's end follows on
+// the stream. On a host whose capability stop is false the refusal,
+// stop_unsupported, is backend.ErrStopUnsupported — a host's answer, never an
+// outcome unknown — and nothing was stopped.
+func TestStopIsSessionStop(t *testing.T) {
+	t.Run("a host that serves it", func(t *testing.T) {
+		heard := make(chan control.StopRequest, 1)
+		// The coordinator's sequence, off the handler: the engine's close.
+		var eng atomic.Pointer[engine.Engine]
+		h := newHost(t, withStop(func(r control.StopRequest) {
+			heard <- r
+			go func() { _ = eng.Load().Close() }()
+		}))
+		eng.Store(h.eng)
+		tp := newTap(t)
+		s, _ := started(t, h, tp, remote.SessionOptions{})
+		c := engine.Command{Client: s.ClientID(), ID: "7"}
+		if err := s.Stop(backend.WithEpoch(tctx(t), s.Epoch()), c); err != nil {
+			t.Fatalf("stop: %v", err)
+		}
+		select {
+		case r := <-heard:
+			if r.Client != c.Client || r.CommandID != c.ID {
+				t.Fatalf("the coordinator was handed %+v, want %s/%s", r, c.Client, c.ID)
+			}
+		case <-time.After(watchdog):
+			t.Fatalf("the coordinator was handed nothing in %s", watchdog)
+		}
+		if sent := tp.sent(protocol.MethodSessionStop); len(sent) != 1 || !strings.Contains(string(sent[0].params), `"commandId":"7"`) {
+			t.Fatalf("session.stop went out %d times: %+v", len(sent), sent)
+		}
+		// The session's end follows the receipt on the stream.
+		end := readUntil(t, s, itemKind(backend.ItemEnd))
+		if it := end[len(end)-1]; it.Err != nil {
+			t.Fatalf("the stream ended %v, want the session's own end", it.Err)
+		}
+	})
+	t.Run("an older host", func(t *testing.T) {
+		h := newHost(t)
+		tp := newTap(t)
+		s, _ := started(t, h, tp, remote.SessionOptions{})
+		err := s.Stop(tctx(t), engine.Command{Client: s.ClientID(), ID: "3"})
+		var e *remote.Error
+		if !errors.Is(err, backend.ErrStopUnsupported) || !errors.As(err, &e) || e.Reason != protocol.ReasonStopUnsupported {
+			t.Fatalf("stop on a host without it: %v, want backend.ErrStopUnsupported", err)
+		}
+		if errors.Is(err, backend.ErrOutcomeUnknown) {
+			t.Fatalf("a host's refusal is an outcome unknown: %v", err)
+		}
+		if st := h.eng.State(); st.Activity == engine.ActivityClosing {
+			t.Fatal("a refused stop closed the session")
+		}
+	})
 }

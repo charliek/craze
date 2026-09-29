@@ -15,8 +15,10 @@ import (
 
 // sessionCapabilities is the session capability set on the wire: every
 // agent.Capabilities field under its wire name, plus what every host of
-// protocol 1 states — cancel, approvals and historyCursor, and stop false on a
-// TUI-hosted session (§3.9). TestEveryCapabilityIsOnTheWire holds every
+// protocol 1 states — cancel, approvals and historyCursor, and stop false,
+// which is the provider's answer: stop is the host's own, and a server that
+// serves session.stop turns it on in the document it builds
+// (sessionInfoReady; plan 030 §3.6a). TestEveryCapabilityIsOnTheWire holds every
 // agent.Capabilities field to a wire name here and in the schema, so a field
 // added to the struct fails the gate until it is mapped.
 func sessionCapabilities(c agent.Capabilities) protocol.SessionCapabilities {
@@ -81,7 +83,13 @@ func (s *Server) sessionInfoReady(eng *engine.Engine) (protocol.SessionInfo, eng
 		Catalogs:          protocol.Catalogs{Models: []protocol.CatalogModel{}, Modes: []protocol.CatalogMode{}},
 		Capabilities:      sessionCapabilities(st.Provider.Capabilities()),
 		RetryHorizon:      retryHorizon(st.RetryHorizon),
+		// The host's, each left out when the host does not set it (plan 030
+		// X1): an older host's document, and the fake host's by default.
+		PermissionMode: s.opts.PermissionMode,
+		StartedAt:      s.opts.StartedAt.UTC(),
 	}
+	// stop is this server's: true where it serves session.stop (stop.go).
+	info.Capabilities.Stop = s.opts.Stop != nil
 	if ready {
 		for _, m := range st.Models {
 			info.Catalogs.Models = append(info.Catalogs.Models, protocol.CatalogModel{ID: m.ID, Name: m.Name})
@@ -136,7 +144,19 @@ func stateResult(st engine.State) (protocol.StateResult, error) {
 	if a := st.SendNow; a != nil {
 		r.SendNow = &protocol.ArmedSend{Text: a.Text, FromRow: a.FromRow, Turn: a.Turn, Cause: a.Cause}
 	}
+	r.LastTurn = lastTurn(st)
 	return r, nil
+}
+
+// lastTurn is State.LastTurn on the wire (plan 030 §3.7): session.state's and
+// a sessions.list row's, nil — no member at all — while a turn runs, before
+// any has ended, and so for every host that never had one.
+func lastTurn(st engine.State) *protocol.LastTurn {
+	lt := st.LastTurn
+	if lt == nil {
+		return nil
+	}
+	return &protocol.LastTurn{Outcome: protocol.TurnOutcome(lt.Outcome), Err: lt.Err, EndedAt: lt.EndedAt.UTC(), TurnID: lt.TurnID}
 }
 
 // queueRows is each row as the event codec writes a queue row.

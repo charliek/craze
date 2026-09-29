@@ -27,7 +27,8 @@
         "startFailed": {"type": "boolean"},
         "prompted": {"type": "boolean", "description": "A turn has been started at all."},
         "cancelled": {"type": "boolean", "description": "The last turn to settle ended cancelled."},
-        "settings": {"$ref": "#/$defs/settings"}
+        "settings": {"$ref": "#/$defs/settings"},
+        "lastTurn": {"$ref": "info.json#/$defs/lastTurn"}
       },
       "required": ["activity", "foreignTurn", "turn", "waiting", "queue", "pendingAsks", "err", "startFailed", "prompted", "cancelled", "settings"],
       "additionalProperties": false

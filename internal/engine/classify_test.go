@@ -115,7 +115,7 @@ func classifyTable() []classifyCase {
 var wireReasons = map[string][]string{
 	"not_accepting": {"not_accepting", "not_in_turn", "start_failed"},
 	"aborted":       {"command_aborted", "set_outcome_unknown", "bad_catalog", "context"},
-	"unavailable":   {"log_backed_up", "ask_unavailable", "set_unavailable", "not_run", "attach_raced", "not_ready", "busy"},
+	"unavailable":   {"log_backed_up", "ask_unavailable", "set_unavailable", "not_run", "attach_raced", "not_ready", "busy", "closing"},
 	"failed":        {"option_gone", "failed", "response_too_large", "snapshot_too_large"},
 	"bad_request": {"bad_request", "bad_answer", "hello_required", "unknown_field", "line_too_long",
 		"protocol_version", "bad_token", "already_attached"},
@@ -209,7 +209,7 @@ func TestEveryListedEngineReasonIsProduced(t *testing.T) {
 		"start_failed": true, "not_ready": true, "busy": true, "response_too_large": true,
 		"snapshot_too_large": true, "hello_required": true, "unknown_field": true, "line_too_long": true,
 		"protocol_version": true, "bad_token": true, "already_attached": true, "unknown_method": true,
-		"stop_unsupported": true, "roster_unsupported": true, "hub_only": true,
+		"stop_unsupported": true, "roster_unsupported": true, "hub_only": true, "closing": true,
 	}
 	produced := map[string]bool{}
 	for _, tc := range classifyTable() {

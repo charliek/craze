@@ -957,7 +957,7 @@ func TestAChainStopsAtABackendReplacement(t *testing.T) {
 // TestTheEngineBackendRefusesAStaleEpochBeforeCallingTheEngine: every command
 // and read of the in-process backend is fenced — a context carrying another
 // epoch is ErrStaleEpoch, whatever the engine would have said, and the engine
-// is never called: no prompt, no answer, no setting.
+// is never called: no prompt, no answer, no setting, no close.
 func TestTheEngineBackendRefusesAStaleEpochBeforeCallingTheEngine(t *testing.T) {
 	m, stub := questionCard(t)
 	b := m.eng.(*engineBackend)
@@ -981,6 +981,7 @@ func TestTheEngineBackendRefusesAStaleEpochBeforeCallingTheEngine(t *testing.T) 
 		},
 		"Cancel":         func() error { _, err := b.Cancel(stale, c, ""); return err },
 		"CancelSubagent": func() error { return b.CancelSubagent(stale, c, "sub") },
+		"Stop":           func() error { return b.Stop(stale, c) },
 		"Ask":            func() error { _, _, err := b.Ask(stale, "ask-1"); return err },
 		"Settings":       func() error { _, err := b.Settings(stale); return err },
 	}
@@ -1009,6 +1010,9 @@ func TestTheEngineBackendRefusesAStaleEpochBeforeCallingTheEngine(t *testing.T) 
 	}
 	if mode := stub.Snapshot().CurrentMode; mode == "plan" {
 		t.Fatal("a stale Set reached the session")
+	}
+	if st := engineBehind(b).State(); st.Activity == engine.ActivityClosing {
+		t.Fatal("a stale Stop closed the engine")
 	}
 	if err := b.Disarm(dispatchCtx(b), c); errors.Is(err, backend.ErrStaleEpoch) {
 		t.Fatal("the current epoch was refused")

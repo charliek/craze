@@ -128,6 +128,13 @@ const (
 	// ReasonBusy is a command past the host's cap of commands in flight
 	// (CommandsPerHost, §3.6): not run, never stored.
 	ReasonBusy Reason = "busy"
+	// ReasonClosing is a session.attach refused because the host is closing
+	// its session, or deciding whether to (plan 030 §3.6, §3.6a): a
+	// session.stop has been accepted, or a close fence is up while the host
+	// judges its idle exit. Nothing ran; a client that still wants the
+	// session attaches again once it has seen the session end (its host
+	// gone) or stay (the attach goes through).
+	ReasonClosing Reason = "closing"
 	// ReasonResponseTooLarge replaces a reply longer than OutboundLineMax
 	// (§3.2); nothing is ever truncated silently.
 	ReasonResponseTooLarge Reason = "response_too_large"
@@ -154,8 +161,9 @@ const (
 	ReasonAlreadyAttached Reason = "already_attached"
 	// ReasonUnknownMethod is a method the host does not know: -32601.
 	ReasonUnknownMethod Reason = "unknown_method"
-	// ReasonStopUnsupported is session.stop on a TUI-hosted session, whose
-	// capability says stop: false (§3.9).
+	// ReasonStopUnsupported is session.stop on a host whose session
+	// capability says stop: false — a TUI-hosted session, or a host from
+	// before plan 030 (§3.9; plan 030 §3.6a).
 	ReasonStopUnsupported Reason = "stop_unsupported"
 	// ReasonRosterUnsupported is sessions.subscribe on a host
 	// (rosterSubscribe: false); the hub defines it (S4).
@@ -220,6 +228,7 @@ var reasons = []ReasonInfo{
 	{ReasonAttachRaced, CodeUnavailable, true, false},
 	{ReasonNotReady, CodeUnavailable, false, false},
 	{ReasonBusy, CodeUnavailable, false, false},
+	{ReasonClosing, CodeUnavailable, false, false},
 
 	{ReasonOptionGone, CodeFailed, true, false},
 	{ReasonFailed, CodeFailed, true, false},

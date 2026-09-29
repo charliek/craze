@@ -93,6 +93,8 @@ func (c *conn) run(b *bound, info protocol.MethodInfo, req *request) outcome {
 		o = c.subagentCancel(b, info, req)
 	case protocol.MethodAsksAnswer:
 		o = c.asksAnswer(b, info, req)
+	case protocol.MethodSessionStop:
+		o = c.sessionStop(b, info, req)
 	default:
 		// Every method protocol.Method knows is answered above, or in
 		// dispatch (hello, and the ones a host does not serve).
@@ -206,6 +208,7 @@ func (c *conn) sessionsList(b *bound, info protocol.MethodInfo, req *request) ou
 		ForeignTurn: st.ForeignTurn,
 		PendingAsks: st.PendingAsks,
 		HeadAsk:     headAsk(st),
+		LastTurn:    lastTurn(st),
 	}
 	return answer(protocol.SessionsListResult{Epoch: c.srv.hostID, Cursor: seq, Sessions: []protocol.SessionRow{row}})
 }

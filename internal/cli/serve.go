@@ -14,6 +14,7 @@ import (
 	"github.com/charliek/craze/internal/atomicfile"
 	"github.com/charliek/craze/internal/control"
 	"github.com/charliek/craze/internal/engine"
+	"github.com/charliek/craze/internal/protocol"
 	"github.com/charliek/craze/internal/rundir"
 	"github.com/charliek/craze/internal/sessions"
 	"github.com/charliek/craze/internal/tui"
@@ -181,8 +182,16 @@ type rewrite struct {
 // byte. workspace is the absolute workspace. A failure is one line on diag —
 // `craze: control socket off: <why>` — and nil: the run continues exactly as
 // it would without a socket.
-func serveControl(env rundir.Env, hostID, workspace string, diag io.Writer) *controlHost {
-	host, err := rundir.Bind(env, hostID, rundir.Entry{StartedAt: time.Now().UTC(), Workspace: workspace})
+//
+// The info document tells a client what this host is (plan 030 §3.7): its
+// permission mode, from the run's --force/--no-force (force), and its start,
+// the one instant the registry entry's startedAt records too — for the
+// server's life, a picker replacing the engine included. The server is built
+// with no coordinator: a TUI-hosted session is stopped by its own TUI's quit,
+// and refuses session.stop, stop_unsupported (§3.6a).
+func serveControl(env rundir.Env, hostID, workspace string, force bool, diag io.Writer) *controlHost {
+	started := time.Now().UTC()
+	host, err := rundir.Bind(env, hostID, rundir.Entry{StartedAt: started, Workspace: workspace})
 	if err != nil {
 		fmt.Fprintf(diag, "craze: control socket off: %v\n", err)
 		return nil
@@ -193,9 +202,11 @@ func serveControl(env rundir.Env, hostID, workspace string, diag io.Writer) *con
 		// each connection's note reaches the session's journal through the
 		// engine (control_conn).
 		server: control.New(control.Options{
-			PeerCheck: rundir.PeerCheck(os.Geteuid()),
-			HostID:    hostID,
-			Workspace: workspace,
+			PeerCheck:      rundir.PeerCheck(os.Geteuid()),
+			HostID:         hostID,
+			Workspace:      workspace,
+			PermissionMode: permissionMode(force),
+			StartedAt:      started,
 		}),
 		diag:       diag,
 		update:     host.Update,
@@ -212,6 +223,15 @@ func serveControl(env rundir.Env, hostID, workspace string, diag io.Writer) *con
 	}()
 	go h.writeLoop()
 	return h
+}
+
+// permissionMode is the info document's word for how a host spawned its
+// agent (plan 030 §3.7, SF-60): --force is bypass, --no-force prompt.
+func permissionMode(force bool) protocol.PermissionMode {
+	if force {
+		return protocol.PermissionBypass
+	}
+	return protocol.PermissionPrompt
 }
 
 // track rewrites the registry entry for eng, not ready, and once eng.Ready()

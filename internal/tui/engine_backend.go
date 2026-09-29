@@ -90,6 +90,17 @@ func (b *engineBackend) Started(err error)               { b.eng.Started(err) }
 func (b *engineBackend) Close() error                    { return b.eng.Close() }
 func (b *engineBackend) ClientID() string                { return b.client }
 
+// Stop is the engine's close (plan 030 §3.6a): in process the explicit quit
+// and the close are one path, today's, unchanged — the session ends with this
+// client's program, whoever stops it. The command names nothing the close
+// needs: the engine's Close takes none. It is fenced like every command.
+func (b *engineBackend) Stop(ctx context.Context, _ engine.Command) error {
+	if err := b.fence(ctx); err != nil {
+		return err
+	}
+	return b.eng.Close()
+}
+
 // Read reads the engine's primary directly: the session's own stream, into
 // which the engine publishes too, so one read carries the agent's events and
 // the engine's alike. A closed primary is ErrClosed (the log never closes it

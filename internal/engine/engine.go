@@ -181,7 +181,9 @@ type launch struct {
 // The observer runs inside the log's publishing boundary and takes leaves
 // only, one after another and never one inside another: the transcript model's
 // own mutex, in its first statement (e.model.Fold); then e.obsMu, which guards
-// the two flags it keeps; then the index writer's (idx.post). So the order is
+// what it keeps (the replay flag, and the last turn's ending — plan 030 §3.7),
+// taken once per section and released before the next; then the index
+// writer's (idx.post). So the order is
 // **the boundary → model.mu** (and the boundary → each of the other two), and
 // the other direction never happens: Snapshot takes model.mu with the boundary
 // never held and releases it before it returns — a snapshot is a value — so
@@ -258,6 +260,12 @@ type Engine struct {
 
 	obsMu     sync.Mutex
 	replaying bool
+	// lastTurn is State.LastTurn (plan 030 §3.7): the ending of the last turn
+	// the observer saw end, nil once one has started since. The observer
+	// writes it, in commit order, from the stream's own turn events
+	// (turnEnding), so it names the turns a client's fold names; it is
+	// replaced, never mutated, so State hands out the pointer it read.
+	lastTurn *LastTurn
 
 	// receipts is the command-id table (receipts.go): one table for the whole
 	// engine, shared by every client, with its own mutex — a LEAF. It is never
@@ -787,6 +795,16 @@ func (e *Engine) observe(ev agent.Event) {
 	if ev.Agent != "" || ev.Type == agent.EventSubagent {
 		return
 	}
+	// The last turn's ending (plan 030 §3.7): kept here, in commit order, and
+	// not where a settlement decides it under e.mu, because a foreign turn has
+	// no settlement — its brackets are the session's — and because this is
+	// the order a client folds: a TurnID read from State is one the fold has
+	// seen by the same seq.
+	if starts, ended := turnEnding(ev); starts || ended != nil {
+		e.obsMu.Lock()
+		e.lastTurn = ended
+		e.obsMu.Unlock()
+	}
 	switch ev.Type {
 	case agent.EventReplay:
 		if ev.Replay == nil {
@@ -841,6 +859,14 @@ func (e *Engine) isReplaying() bool {
 	e.obsMu.Lock()
 	defer e.obsMu.Unlock()
 	return e.replaying
+}
+
+// observed is what the observer keeps, read in one e.obsMu section: whether a
+// replay is running, and the last turn's ending (State.LastTurn).
+func (e *Engine) observed() (replaying bool, last *LastTurn) {
+	e.obsMu.Lock()
+	defer e.obsMu.Unlock()
+	return e.replaying, e.lastTurn
 }
 
 // refusalLocked is why the engine admits no command at all right now, or nil.

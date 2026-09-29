@@ -49,7 +49,7 @@ and more.
 | `session.queue.*` | edit, remove, clear; mirrors `engine.Control`'s queue verbs (the queue left `agent.Session` in S1b) |
 | `asks.list` / `asks.get` / `asks.answer` | by id; answer carries the exact offered `optionId`, or question answers, or a plan outcome. First **valid** answer wins; an invalid one is `bad_request` and leaves the ask open. `asks.get` is `Control.Ask(id)`, waiting on nothing. An id whose opening was never published has the hidden spelling `perm-xN` / `ask-xN` / `plan-xN`, from a counter of its own, so it can never renumber a visible one: a refused open, a request the provider answered before any handler ran, an automatic PERMISSION resolution, and an automatic question/plan fallback that cannot publish (a bad or cancelling automatic answer). An automatic question/plan answer that itself publishes its `Auto` opening keeps a visible id |
 | `session.set` | model, mode, config go through `Control.Set` and are applied in the engine's order, answered and broadcast with the confirmed value and a revision: `{value, rev}`, where `rev` is the delta's own `seq` — the same number the broadcast `event` notification carries — and may be `0` when no committed revision is available: the change was made, but its delta could not be confirmed committed (a flush that gave up) or was never committed at all (a `Set` that lost the race to the session closing), so a client must not wait for a matching event. Title is a separate call, `Control.SetTitle`: it waits on nothing, bypasses the settings worker, and returns only an error — its delta, not its reply, is how a client learns the title |
-| `session.stop` | explicitly end the session and its host. Distinct from closing a connection or a view (SD-28); defined in S2 |
+| `session.stop` | explicitly end the session and its host. Distinct from closing a connection or a view (SD-28); defined in S2, refused `stop_unsupported` by every S2 host, and capability-gated from plan 030 PR 1 (below, "As shipped (S4a)") |
 | `session.create` | hub only (S4b): spawn a headless host |
 
 Notifications carry the subscription id they belong to: `event` (`seq` + the
@@ -350,3 +350,45 @@ since:**
   SD-33's exit addition), and `--continue` of an already-open session
   attaching instead of only refusing (SQ16) — see [`10`](10-open-questions.md)
   and `docs/reference/cli.md`'s "craze attach".
+
+## As shipped (S4a, plan 030 PR 1)
+
+Plan 030 turns `session.stop` from a refusal into a **capability-gated
+method** — not an additive change, so it is announced the way this file's
+compatibility rules require: by capability, never by version.
+
+- **`session.stop`** is served where the session capability `stop` is `true`
+  — every `craze serve` host (plan 030 §3.3), a server built with a lifecycle
+  coordinator (`control.Options.Stop`). A TUI-hosted session, and every host
+  from before plan 030, says `stop: false` and answers `unsupported`, reason
+  `stop_unsupported`, byte for byte as S2 did; a client then detaches and says
+  the session runs on in its older host (§3.6).
+- **The reply is a receipt, `{}`**: the host has taken the stop; the
+  session's end follows on the stream (its closing records, then
+  `reset{session_closed}`). The handler never waits for the stop or starts it
+  itself — the coordinator runs the stop once (new attaches refused, the
+  engine's close, S2's close order, the exit), however many ways a stop
+  reaches it. Any client may stop; a second stop, or the same `commandId`
+  resent, is answered `{}` and joins the first. A stop makes no engine call,
+  so it is in no receipts table: never `unknown_command`, never retried by id.
+- **`closing`** is a new reason under `unavailable`: a `session.attach`
+  refused because the host is closing its session or deciding whether to. The
+  host's attach fence goes up before a stop's receipt is sent, under the
+  server's attachment lock, so an attach either reserved before it (and is
+  counted, and ends with the session) or is refused — never half-attached. The
+  same fence is reversible, for the idle exit (plan 030 §3.6).
+- **Three optional fields**, each absent when the host does not set it — and
+  absent means an older host, whose client falls back to what it did before:
+  the info document's `permissionMode` (`bypass` | `prompt`, from `--force` /
+  `--no-force`) and `startedAt` (when the host started serving the session,
+  UTC), and `lastTurn` (`{outcome: done|failed|cancelled, err?, endedAt,
+  turnId}`) on `session.state` and a `sessions.list` row — **never in the
+  snapshot**, whose codec stays at version 1 so a client and a host of
+  different builds still attach. A turn starting supersedes `lastTurn`; its
+  `turnId` is the id the stream's own turn events carry, so a client that
+  reads it after a restore can refuse an ending older than a turn it has
+  folded since.
+- The existing wire fixtures are unchanged and so double as an older host to
+  a newer client; new fixtures (`internal/fakehost/testdata/wire/14`–`16`)
+  cover a stop-capable host with the new fields, a joined stop and a `closing`
+  refusal, and `lastTurn`.

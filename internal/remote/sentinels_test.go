@@ -165,7 +165,8 @@ func matchSet() map[string]error {
 		"agent.ErrPromptCancelled": agent.ErrPromptCancelled, "agent.ErrUnsupported": agent.ErrUnsupported,
 		"transcript.ErrSnapshotTooLarge": transcript.ErrSnapshotTooLarge,
 		"backend.ErrOutcomeUnknown":      backend.ErrOutcomeUnknown, "backend.ErrStaleEpoch": backend.ErrStaleEpoch,
-		"tui.ErrNoAnswer": tui.ErrNoAnswer,
+		"backend.ErrStopUnsupported": backend.ErrStopUnsupported,
+		"tui.ErrNoAnswer":            tui.ErrNoAnswer,
 	}
 }
 
@@ -373,13 +374,15 @@ func exprString(fset *token.FileSet, e ast.Expr) string {
 // TestTheProtocolsReasonsReconstructTheirSentinel (§3.2): a reason of the
 // protocol's own reconstructs the one sentinel an engine error stands behind —
 // start_failed is a gate refusal (engine.ErrNotAccepting, refusalLocked's for a
-// failed start), snapshot_too_large transcript.ErrSnapshotTooLarge — and every
-// other none; a reason sent under another code than the table's, or one this
+// failed start), snapshot_too_large transcript.ErrSnapshotTooLarge, and
+// stop_unsupported the backend's own backend.ErrStopUnsupported (plan 030
+// §3.6a) — and every other none; a reason sent under another code than the table's, or one this
 // build does not know, reconstructs nothing.
 func TestTheProtocolsReasonsReconstructTheirSentinel(t *testing.T) {
 	want := map[protocol.Reason][]string{
 		protocol.ReasonStartFailed:      {"engine.ErrNotAccepting"},
 		protocol.ReasonSnapshotTooLarge: {"transcript.ErrSnapshotTooLarge"},
+		protocol.ReasonStopUnsupported:  {"backend.ErrStopUnsupported"},
 	}
 	set := matchSet()
 	for _, info := range protocol.Reasons() {

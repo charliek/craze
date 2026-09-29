@@ -41,6 +41,12 @@ type fixtureLine struct {
 	Dir  string          `json:"dir"`
 	Msg  json.RawMessage `json:"msg,omitempty"`
 	Op   json.RawMessage `json:"op,omitempty"`
+	// Host is a fixture's first line when its Host is built with plan
+	// 030's opt-ins ({"dir": "host", "host": {…}}; fixtureHost): not a wire
+	// message, and not a step — how the Host itself was built. A fixture
+	// without one runs against Options{}, exactly as every fixture before
+	// plan 030 does (X1).
+	Host *fixtureHost `json:"host,omitempty"`
 	// Invalid marks a c2s line that is deliberately not a well-formed
 	// request of a method protocol 1 defines with today's params (fixture
 	// 10's "unknown method" and "unknown params" sub-cases): the runner
@@ -48,6 +54,22 @@ type fixtureLine struct {
 	// which such a line is designed never to pass. Every other line, c2s and
 	// s2c alike, is schema-checked.
 	Invalid bool `json:"invalid,omitempty"`
+}
+
+// fixtureHost is a fixture's host line: which of Options' plan 030 opt-ins
+// its Host is built with (Options.Stop, PermissionMode, StartedAt).
+type fixtureHost struct {
+	Stop           bool                    `json:"stop,omitempty"`
+	PermissionMode protocol.PermissionMode `json:"permissionMode,omitempty"`
+	StartedAt      bool                    `json:"startedAt,omitempty"`
+}
+
+// options is the Options a host line asks for; nil is the zero value.
+func (fh *fixtureHost) options() Options {
+	if fh == nil {
+		return Options{}
+	}
+	return Options{Stop: fh.Stop, PermissionMode: fh.PermissionMode, StartedAt: fh.StartedAt}
 }
 
 // rawFixtureLine is one line of the file, its own bytes kept beside its
@@ -425,9 +447,9 @@ type fixtureRunner struct {
 	inc    *incarnations
 }
 
-func newFixtureRunner(t *testing.T) *fixtureRunner {
+func newFixtureRunner(t *testing.T, o Options) *fixtureRunner {
 	t.Helper()
-	h, err := New(Options{})
+	h, err := New(o)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -478,6 +500,14 @@ func (r *fixtureRunner) run(lines []rawFixtureLine, update bool) []byte {
 	for i, rl := range lines {
 		fl := rl.parsed
 		switch fl.Dir {
+		case "host":
+			// Read before the Host was built (runFixture); only a first line
+			// may say how it was.
+			if i != 0 {
+				r.t.Fatalf("line %d: a host line is a fixture's first line or none", i+1)
+			}
+			out.Write(rl.raw)
+			out.WriteByte('\n')
 		case "op":
 			r.runOp(fl.Op)
 			out.Write(rl.raw)
@@ -553,7 +583,11 @@ func runFixture(t *testing.T, name string) {
 	t.Helper()
 	path := filepath.Join("testdata", "wire", name+".ndjson")
 	lines := readFixtureLines(t, path)
-	r := newFixtureRunner(t)
+	var host *fixtureHost
+	if len(lines) > 0 && lines[0].parsed.Dir == "host" {
+		host = lines[0].parsed.Host
+	}
+	r := newFixtureRunner(t, host.options())
 	out := r.run(lines, *update)
 	if *update {
 		if err := os.WriteFile(path, out, 0o644); err != nil {

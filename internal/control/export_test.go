@@ -78,6 +78,14 @@ type TestHooks struct {
 	// attachment's subscription id: a test that blocks in it holds a
 	// pending attachment on the connection, past a replacement.
 	Reserved func(sub string)
+	// Reserving runs on an attach inside reserve, holding the server's
+	// attachment lock, once its close-fence check has passed and before its
+	// pending attachment is installed (plan 030 §3.6): a test that blocks in
+	// it holds an attach exactly where a fence going up must wait for it.
+	Reserving func()
+	// Fencing runs on FenceAttaches just before it takes the attachment
+	// lock: a test learns there that a fence is on its way up.
+	Fencing func()
 }
 
 // NewForTest is New with hooks in place, and the stall bound and outbound line
@@ -105,6 +113,8 @@ func NewForTest(o Options, h TestHooks, stall time.Duration, maxLine int) *Serve
 		detaching:      h.Detaching,
 		beforeReserve:  h.BeforeReserve,
 		reserved:       h.Reserved,
+		reserving:      h.Reserving,
+		fencing:        h.Fencing,
 	}
 	if stall > 0 {
 		s.stall = stall
@@ -169,6 +179,11 @@ func (s *Server) Handlers() int { return s.handlers.running() }
 
 // Commands is how many mutating commands are in their engine call.
 func (s *Server) Commands() int64 { return s.commands.Load() }
+
+// Attached is how many attachments the server holds that are not yet closed
+// — pending, live or closing — read with no fence raised: the count
+// FenceAttaches reads under its lock (plan 030 §3.6).
+func (s *Server) Attached() int { return int(s.attached.Load()) }
 
 // SessionCapabilities is sessionCapabilities, for the capability mapping's
 // reflection test.

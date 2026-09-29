@@ -61,6 +61,15 @@
 // and so both may be written; the client accepts this by ignoring a reset
 // naming a subscription it never attached to.
 //
+// # Stopping the session (stop.go)
+//
+// A server built with Options.Stop serves session.stop (plan 030 §3.6a): it
+// raises a close fence over attach reservations (a new attach is refused
+// closing), hands the first stop to the host's coordinator, and answers every
+// stop with a receipt, {}. It never stops anything itself: the coordinator
+// closes the engine — which ends every connection as above — and then the
+// server. A server without it refuses session.stop, stop_unsupported.
+//
 // # Client ids and the binding table (bind.go)
 //
 // hello mints a client id per connection and binds it with a resume token;
@@ -86,6 +95,13 @@
 //     engine call that can block. bindMu → receipts.mu is the one edge.
 //   - Server.connMu guards the connection and listener sets and the closed
 //     flag; it is never held with bindMu, across I/O, or across a close.
+//   - Server.attachMu is the attachment lock (plan 030 §3.6; stop.go): an
+//     attach's close-fence check and the install of its pending attachment
+//     are one section of it (conn.reserve), and a close fence goes up under
+//     it (FenceAttaches). It is a leaf above conn.mu — reserve takes
+//     attachMu and then conn.mu — and is taken under no other lock; the count
+//     of attachments it reads (Server.attached) rises only inside it and
+//     falls, atomically, wherever an attachment closes under conn.mu.
 //   - conn.mu guards a connection's admission count, half-close and end
 //     state, and its attachment's lifecycle and position; the outbox has its
 //     own mutex. conn.mu → outbox.mu is the one edge between them: a line

@@ -133,6 +133,19 @@ func (a *attachment) changedLocked() {
 	a.changed = make(chan struct{})
 }
 
+// closedLocked moves a to closed and wakes every wait on it; conn.mu is held.
+// It is the one place an attachment leaves the server's count of attachments
+// (Server.attached, which reserve raised), once: a second close of one
+// already closed — an abandon after a replacement closed it pending — changes
+// nothing but the wake.
+func (c *conn) closedLocked(a *attachment) {
+	if a.state != attClosed {
+		a.state = attClosed
+		c.srv.attached.Add(-1)
+	}
+	a.changedLocked()
+}
+
 // sessionAttach is session.attach (§3.3, §3.4): it reserves the connection's
 // one attachment, waits for readiness when asked to, attaches, and queues its
 // own reply — then, and only then, starts the forwarder.
@@ -176,13 +189,23 @@ func (c *conn) sessionAttach(b *bound, info protocol.MethodInfo, req *request) o
 // attachment and a zero outcome): the attach is not run, so no new pending
 // attachment is installed to hold the replaced connection open behind the
 // replacement's own terminal line (plan 027 X16 9, X22, X25).
+//
+// While a close fence is up (FenceAttaches: a session.stop accepted, or the
+// idle watcher deciding) an attach that would otherwise be reserved is
+// refused unavailable, reason closing (plan 030 §3.6). The check and the
+// install are one section of the server's attachment lock, which a fence goes
+// up under, so a fence either counts this attachment (Server.attached, raised
+// here) or refuses it — never neither.
 func (c *conn) reserve(eng *engine.Engine) (*attachment, outcome) {
-	// The context is made outside c.mu, which is held across no other lock.
+	// The context is made outside every lock.
 	ctx, cancel := context.WithCancel(c.ctx)
 	a := &attachment{
 		eng: eng, ctx: ctx, cancel: cancel,
 		stopped: make(chan struct{}), readyCh: make(chan readyNote, 1), changed: make(chan struct{}),
 	}
+	s := c.srv
+	s.attachMu.Lock()
+	defer s.attachMu.Unlock()
 	c.mu.Lock()
 	if c.replaced {
 		c.mu.Unlock()
@@ -195,9 +218,29 @@ func (c *conn) reserve(eng *engine.Engine) (*attachment, outcome) {
 		return nil, refusal(refused(protocol.CodeBadRequest, protocol.ReasonAlreadyAttached,
 			"this connection's attachment %s is not yet closed: detach it, or wait for its reset", old.id))
 	}
+	c.mu.Unlock()
+	if s.fences > 0 {
+		cancel()
+		return nil, refusal(refused(protocol.CodeUnavailable, protocol.ReasonClosing,
+			"the session is closing, or its host is deciding whether to: attach again once it has ended or stayed"))
+	}
+	if h := s.hooks.reserving; h != nil {
+		h()
+	}
+	c.mu.Lock()
+	// The connection's state is read again: no other attach can have
+	// reserved on it meanwhile — every reserve holds the attachment lock, as
+	// this one does — but a replacement may have landed while conn.mu was
+	// let go.
+	if c.replaced {
+		c.mu.Unlock()
+		cancel()
+		return nil, outcome{}
+	}
 	c.nextSub++
 	a.id = fmt.Sprintf("s-%d", c.nextSub)
 	c.att = a
+	s.attached.Add(1)
 	c.mu.Unlock()
 	return a, outcome{}
 }
@@ -366,8 +409,7 @@ func (c *conn) abandon(a *attachment, sub *agent.Subscription) {
 		sub.Close()
 	}
 	c.mu.Lock()
-	a.state = attClosed
-	a.changedLocked()
+	c.closedLocked(a)
 	c.mu.Unlock()
 	close(a.stopped)
 	c.settle()
@@ -487,8 +529,7 @@ func (c *conn) sessionDetach(b *bound, info protocol.MethodInfo, req *request) o
 	// and one queued before the replacement is kept by it, while every
 	// ordinary line is dropped.
 	if line == nil || c.enqueue(c.ctx, nil, line, c.detachWritten, nil, func() {
-		a.state = attClosed
-		a.changedLocked()
+		c.closedLocked(a)
 		c.unwritten++
 	}, terminalLine) != nil {
 		c.markClosed(a)
@@ -532,8 +573,7 @@ func (c *conn) awaitClosed(a *attachment) bool {
 // connection is gone.
 func (c *conn) markClosed(a *attachment) {
 	c.mu.Lock()
-	a.state = attClosed
-	a.changedLocked()
+	c.closedLocked(a)
 	c.mu.Unlock()
 	c.settle()
 }

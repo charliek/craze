@@ -479,8 +479,9 @@ func asStrings[T ~string](vs []T) []string {
 // TestTheSchemaEnumsAreTheGoSets: every enum the schema pins is exactly the
 // Go set it describes — codes, reasons (and which code each goes with),
 // reset and cursor reasons, activities, when, the prompt modes, the setting
-// kinds, the cancel outcomes, the ask statuses, the JSON-RPC integers and the
-// endpoint kind — in the same order, so a value added on one side and not
+// kinds, the cancel outcomes, the ask statuses, the permission modes and turn
+// outcomes (plan 030 §3.7), the JSON-RPC integers and the endpoint kind — in
+// the same order, so a value added on one side and not
 // the other fails here.
 func TestTheSchemaEnumsAreTheGoSets(t *testing.T) {
 	var hostReasons []string
@@ -511,6 +512,8 @@ func TestTheSchemaEnumsAreTheGoSets(t *testing.T) {
 			asStrings([]protocol.CancelOutcome{protocol.CancelRequested, protocol.CancelSettled, protocol.CancelUnknown})},
 		{"ask statuses", "asks.get.json", "/$defs/record/properties/status/enum",
 			asStrings([]protocol.AskStatus{protocol.AskOpen, protocol.AskResolved})},
+		{"permission modes", "info.json", "/$defs/permissionMode/enum", asStrings(protocol.PermissionModes())},
+		{"turn outcomes", "info.json", "/$defs/turnOutcome/enum", asStrings(protocol.TurnOutcomes())},
 		{"JSON-RPC integers", "envelope.json", "/$defs/error/properties/code/enum", []string{"-32700", "-32600", "-32601", "-32602", "-32000"}},
 	} {
 		if got := schemaEnum(t, tc.file, tc.pointer); !slices.Equal(got, tc.want) {

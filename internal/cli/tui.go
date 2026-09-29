@@ -228,7 +228,7 @@ func runTUI(cmd *cobra.Command, f *tuiFlags, env hostEnv) error {
 	// bound nothing. The claims above were taken either way: the session lock
 	// does not depend on the opt-out (plan 027 §3.8).
 	if controlSocketOn(diag.craze()) {
-		rh.ctl = serveControl(runEnv, hostID, indexCWD, diag.craze())
+		rh.ctl = serveControl(runEnv, hostID, indexCWD, f.force, diag.craze())
 	}
 	cfg.OnEngine = rh.onEngine
 	cfg.ClaimSession = rh.claims.pickerClaim

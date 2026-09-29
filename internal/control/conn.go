@@ -267,8 +267,7 @@ func (c *conn) replace() {
 		switch a.state {
 		case attPending:
 			cancel = a.cancel
-			a.state = attClosed
-			a.changedLocked()
+			c.closedLocked(a)
 		case attLive, attClosing:
 			// Its terminal line is still to come: the forwarder's
 			// reset{session_replaced} (queueReset), or, if a detach has

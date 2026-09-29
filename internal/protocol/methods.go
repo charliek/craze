@@ -69,18 +69,30 @@ type MethodInfo struct {
 	// Tolerant says the host ignores params fields it does not know. Only
 	// hello is (§3.2); every other method refuses one, reason unknown_field.
 	Tolerant bool
-	// HostUnsupported is the reason a TUI-hosted session's host — every host
-	// in S2 — answers the method unsupported, whatever its params, and ""
-	// for a method it serves. The method is the hub's (sessions.subscribe,
+	// HostUnsupported is the reason a host that does not serve the method
+	// answers it unsupported, whatever its params, and "" for a method every
+	// host serves. The method is the hub's (sessions.subscribe,
 	// roster_unsupported: rosterSubscribe is false; session.connect and
-	// session.create, hub_only, X6) or S4's headless host's (session.stop,
-	// stop_unsupported: the session capability stop is false). Such a
-	// method's schema is protocol 1's all the same, session.create's aside.
+	// session.create, hub_only, X6) — which no host serves — or one a host
+	// serves only where Capability says so (session.stop, stop_unsupported).
+	// Such a method's schema is protocol 1's all the same, session.create's
+	// aside.
 	HostUnsupported Reason
+	// Capability, when set, is the session capability (its wire name) whose
+	// true says a host serves the method (plan 030 §3.6a): a host whose
+	// capability is false answers HostUnsupported, one whose capability is
+	// true serves it. session.stop's is stop — true on every `craze serve`,
+	// false on a TUI-hosted session and on an older host. "" for a method
+	// whose HostUnsupported, if any, holds on every host.
+	Capability string
 	// Reserved says protocol 1 names the method and defines nothing else of
 	// it — no params, no result, no schema: session.create, the hub's (S4).
 	Reserved bool
 }
+
+// CapabilityStop is the session capability that says a host serves
+// session.stop (MethodInfo.Capability; SessionCapabilities.Stop's wire name).
+const CapabilityStop = "stop"
 
 var methods = []MethodInfo{
 	{Name: MethodHello, Tolerant: true},
@@ -102,7 +114,7 @@ var methods = []MethodInfo{
 	{Name: MethodSessionSet, SessionScoped: true, Mutating: true},
 	{Name: MethodSessionSetTitle, SessionScoped: true, Mutating: true},
 	{Name: MethodSubagentCancel, SessionScoped: true, Mutating: true},
-	{Name: MethodSessionStop, SessionScoped: true, Mutating: true, HostUnsupported: ReasonStopUnsupported},
+	{Name: MethodSessionStop, SessionScoped: true, Mutating: true, HostUnsupported: ReasonStopUnsupported, Capability: CapabilityStop},
 	{Name: MethodAsksList, SessionScoped: true},
 	{Name: MethodAsksGet, SessionScoped: true},
 	{Name: MethodAsksAnswer, SessionScoped: true, Mutating: true},
