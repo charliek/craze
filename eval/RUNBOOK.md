@@ -8,6 +8,36 @@ from `eval/`); if the two ever disagree, trust `--help`.
 All commands run from `eval/` as `uv run crazeeval <command> ...`. This doc omits the `uv
 run` prefix after the first example.
 
+## 0. Starting the next campaign (checklist)
+
+Short and concrete; each item points at the section that explains it.
+
+- Pick a campaign name `YYYY-MM-<slug>` and `export CRAZEEVAL_CAMPAIGN_DIR=~/.craze-eval/<name>`
+  (§1). Set the budget cap (§1).
+- Update the reference harnesses (gx, opencode, codex) and note their versions — versions
+  are recorded automatically; see §2.
+- Update `eval/models.toml` and `eval/prices.toml` for the models to test: add new ones,
+  drop retired ones. For Muse use `muse-spark-1.3-contributor` (§3). Then run
+  `snapshot-config`, `validate` and `probe` (§2), and a smoke run per new model (§3).
+- **Rotate the held-out set before any tuning (§6).** Plan 029's eight held-out tasks
+  (T-E3, T-I2, T-B2, T-B3, T-F2, T-M1, T-V1, T-P2) are spent: move them to `split = "dev"`
+  and write about eight new held-out tasks. Validate the new tasks with `crazeeval
+  validate --tasks <ids>` (§4).
+- Build B0 from current `main`, from a commit, not a dirty tree (§5d shows how), and run
+  the baseline (§5a).
+- Compare against the previous campaign using `eval/results/2026-09-plan029/summary.json`
+  and its README. Plan 029's raw runs were deleted on 2026-09-28, so its full record is
+  the archive in the private `charliek/craze-evals` repo at `campaigns/2026-09-plan029/`,
+  not local batches.
+- Re-check the open items plan 029 left:
+  - L7 (the verification-evidence prompt bullet) was kept provisionally and needs
+    confirming on the fresh held-out set.
+  - The deepseek plan-mode runaway: see §7.
+  - T-F2's most-negative-size edge case recurred on three models.
+  - glm-5.3-flash's dev win rate was 43%.
+- At the end: summarize and publish (§5f), and keep only the current and previous
+  campaign's raw runs.
+
 ## 1. What a campaign is
 
 A campaign is one directory holding a series of batches, their budget and their config:
@@ -121,11 +151,15 @@ support the new model:
 uv run crazeeval run --harness craze,gx,opencode,codex --model <new-model> --tasks split:smoke --reps 1 --craze-bin ../bin/craze --label smoke-<new-model>
 ```
 
-Cost per run varies a lot by model; use plan 029's measured baseline medians as a rough
-guide when projecting a batch's cost (ledger prices, `progress.md`/X11): deepseek-v4p1-flash
-$0.03–0.08/run, muse-spark-1.3 $0.08–0.17/run depending on harness (craze ran ~$0.15/run),
-Kimi K3 roughly 10–50× deepseek's rate (its baseline needed a $6 run cap and was descoped
-to two harnesses on cost grounds alone — see §7). `crazeeval run` refuses to start a batch
+Cost per run varies a lot by model; ground a projection in plan 029's final-report medians
+(`eval/results/2026-09-plan029/summary.json`'s `metrics` rows, `cost $` field, and the
+results README's *Spend* section) rather than a guess: deepseek-v4p1-flash ran
+$0.012–0.017/run across harnesses (craze $0.014); muse-spark-1.3-contributor similarly
+$0.011–0.017/run (craze $0.014) — `prices.toml` prices the full muse-spark-1.3 tier
+roughly 12–20× higher per token, so budget around $0.15–0.18/run if you use that tier
+instead of the contributor one; Kimi K3 ran $0.13–0.14/run, roughly 10× deepseek's rate
+(its baseline needed a $6 run cap and was descoped to two harnesses on cost grounds alone
+— see §7). `crazeeval run` refuses to start a batch
 whose projected cost — the median cost per run of that model so far, or `prices.toml`'s
 `prior_run_cost` with none yet — would pass the budget cap, so a badly underpriced new
 model surfaces as a refusal before it burns money, not after.
@@ -388,10 +422,18 @@ held-out numbers as informational only, precisely because those tasks had alread
   `--dry-run` previews without writing. A corrected run keeps its original as
   `result.pre-rescore.json`, and any judged pair whose objective result flipped should be
   re-judged (the judge packet shows the objective result, so a stale one is misleading).
-- **Runaway generations** on some models (plan 029 saw it on deepseek's plan-category
-  tasks) can spin to `max_tokens` in a repetition loop — a model failure, objectively
-  scored as a crash, not a prompt problem; don't chase it as a lever candidate without
-  more than one sighting.
+- **Runaway generations.** craze on deepseek-v4p1-flash ran away on 5 of 25 plan-mode task
+  runs (20%): T-P1 twice, T-P2 three times, across builds with and without L7. Each
+  response spun to `max_tokens` at 66–82k output tokens and 9–14 minutes, and the run was
+  scored as crashed. craze had 0 runaways on 159 non-plan deepseek runs; gx had 0 of 4
+  plan runs and opencode 0 of 2 (samples too small to call either immune); codex has no
+  plan mode. craze sends no output-token ceiling for that model — `models.toml` has no
+  `max_output_tokens` entry for it, so the provider's own cap applied; opencode caps
+  output at min(model limit, 32k). This is an open item under discussion, not yet fixed:
+  possible fixes include a default output ceiling, resampling a response that hits
+  `max_tokens` without tool calls, and a client-side repetition detector. The next
+  campaign should check whether it persists — plan-mode tasks with 2+ reps on deepseek
+  would show it.
 - **The judge ranks correctness over length**, and calibration's padding control exists to
   catch a regression there — if a future padding gate fails, the instruction needs revising
   and calibration re-run before any bulk judging counts.

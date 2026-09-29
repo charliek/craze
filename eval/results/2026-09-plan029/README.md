@@ -136,9 +136,13 @@ change in any of them). The numbers throughout this README are post-correction.
 
 ## Recurring failure modes worth a lever next time
 
-- deepseek's runaway generation on plan-category tasks: four separate `max_tokens` crashes
-  across different builds — this reads as a model-side repetition problem, not a
-  prompt one; worth a repetition guard in the turn loop regardless of model.
+- deepseek's runaway generation on plan-category tasks: 5 of 25 craze deepseek plan-mode
+  runs (20%) crashed to `max_tokens` across different builds, observed only in craze's
+  plan-mode runs in this sample (0 of 159 non-plan deepseek runs, 0 of 4 gx plan runs, 0 of
+  2 opencode plan runs); whether it is purely model-side or triggered by something in
+  craze's plan mode is not yet known; worth a repetition guard in the turn loop either way.
+  See `eval/RUNBOOK.md` §7 for the
+  fix options under discussion.
 - T-F2's most-negative-size edge case tripped glm-5.3-flash, kimi-k3 and deepseek at
   different points.
 - Explanation tasks (T-E1/T-E3) lost single rubric items against opencode specifically on

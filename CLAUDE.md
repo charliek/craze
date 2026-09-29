@@ -44,6 +44,15 @@ Gotchas:
 1. Zensical **silently ignores unknown config keys** even under `--strict`.
 2. Emoji callables must be `zensical.extensions.emoji.*`, not `material.extensions.emoji.*`.
 
+## Evaluation (`eval/`)
+
+`eval/` is the native harness's evaluation (a Python uv project, `crazeeval`); it is not
+part of CI or the per-commit gate, and it spends real API money. The procedure is
+`eval/RUNBOOK.md` (start with its §0 checklist); the reference is `eval/README.md`. Each
+campaign's rollup is committed under `eval/results/<campaign>/` (`README.md` +
+`summary.json`); the full archives live in the private repo `charliek/craze-evals`. Raw
+runs stay local and are never uploaded.
+
 ## Plans
 
 Panel-reviewed plans live outside this repo and are not committed.
