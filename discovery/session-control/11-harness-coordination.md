@@ -229,6 +229,20 @@ wait for the drain rather than assert its order across back-to-back wakes.
 **Rule:** second lander rebases; both sessions announce opens and merges;
 each S2 PR branches from a freshly fetched `origin/main`.
 
+## Plan 030 (S4a + S5) / harness H8 (2026-09-28)
+
+Plan 030 (detached hosts and the agent view, five PRs) runs in
+`../craze-plan030` from `origin/main` `9606fc5`. Where it meets the harness
+track:
+
+| surface | Plan 030 | harness | rule |
+|---|---|---|---|
+| the session composer (`internal/tui/composer.go`, `app.go`'s key routing) | PR 4: `@` file and directory mentions (a completion popup, inserted `@path` text) | H8: image attachments in the composer | the two coordinate **before PR 4**: check for the other's branch first; the second to land rebases and re-runs the full gate |
+| session construction (`internal/tui`'s engine-options builder, `internal/agent` options) | PR 1 moves the builder from `internal/tui` to `internal/engine` (exported), and a detached host builds its session with `agent.Options.NoPrimary: true` | any harness change to `engine.New` options or to how a session is built | relevant to anyone touching session construction; read PR 1 first |
+
+**Rule:** second lander rebases; both sessions announce opens and merges;
+each Plan 030 PR branches from a freshly fetched `origin/main`.
+
 ## Practical notes
 
 - This folder is on `main` from `f943472` (2026-09-19); a harness worktree

@@ -1,5 +1,9 @@
 # 06 — shed lane (S3)
 
+**Order (SD-34):** S3 runs after S4b (the hub) and after shed has made its
+first release of its own lane work, so it starts with a hub roster and
+`session.create` (shed's `create` capability), both brought by S4b.
+
 How craze becomes the third full agent lane in shed and shed-mobile, after
 `opencode` and `gx`. The work is mostly **in the shed repo**; craze's side is
 S2's socket and `craze bridge`.
@@ -48,7 +52,7 @@ shed's feed-row sequences.
 | `send(mode)` | `session.prompt{mode}` |
 | `cancel` | `session.cancel`; idle refusal maps to `NotAccepting` (shed's correction 8) |
 | `approvals` / `answer` | `asks.list` / `asks.get` / `asks.answer` |
-| `create` | `session.create` (needs the hub, S4; capability false until then) |
+| `create` | `session.create` (needs the hub, S4b; capability false until then, and available when S3 starts) |
 
 Target capabilities: `interject` per provider, `cancel`, `approvals`, and
 **`history_cursor: true`**, the capability the phone rewards most (silent
@@ -67,7 +71,7 @@ reconnect, no reseed, no flicker after backgrounding).
 | Approvals and roster not resumable; re-fetch + tombstones per reconnect | Ask transitions are sequenced events and resume exactly; the roster has its own epoch and cursor |
 | Cancel is a fire-and-forget notification | Acknowledged request |
 | Transcript root-only; a session blocked on a child's approval shows no reason | Sub-agent events carry the agent id; child transcripts are attachable |
-| Lane exists only while a leader exists | Headless hosts (S4) |
+| Lane exists only while a leader exists | Detached hosts (S4a) |
 | Lane is a sibling observer of the leader | craze **is** the process driving the agent, which is the position shed's rule asks for: "drive the session's own server, never a sidecar" |
 
 ## Rules from shed that bind craze's design
@@ -87,8 +91,8 @@ reconnect, no reseed, no flicker after backgrounding).
   the exact offered id; a by-kind shortcut that is ambiguous is refused.
 - **One status authority per session.** For a tab-hosted session that is
   roost (SD-15). The lane adds transcript and control; it does not compete on
-  status. Headless sessions (S4) have no tab, so their roster comes from the
-  hub; how shed lists those is SQ8.
+  status. Headless sessions (S4a) have no tab, so their roster comes from the
+  hub (S4b); how shed lists those is SQ8.
 - **No pane scraping**, ever.
 
 ## Work on the shed side

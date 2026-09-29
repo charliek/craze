@@ -1,20 +1,25 @@
 # 07 — Roadmap
 
-Each phase is one panel-reviewed plan (outside the repo) and one to three
+Each phase is one panel-reviewed plan (outside the repo) and one to five
 PRs, gated per commit. S1–S5 are committed; S6 and S7 are directional and get
 decided after S1–S5 are in daily use (SD-12). Sizes are rough estimates of
 non-test source lines, from the reference reviews (`09`).
 
-| ID | status | one line |
-|---|---|---|
-| S0 | complete | Discovery: four codebases reviewed, topology / protocol / remote scope / journaling settled |
-| S1 | complete | Engine core: fan-out, sequenced journal, engine-owned asks and turn state, render-free transcript; TUI becomes the first client. **S1a complete (2026-09-19)**; **S1b complete (Plan 021, all three PRs merged, 2026-09-21)**; **S1c complete (Plan 024, PRs #50 and #52, 2026-09-24)** |
-| S2 | complete (Plan 027, 4 PRs: #55, #56, #61, PR 4) | Per-session Unix socket, published protocol spec + schema, fake host, `craze bridge`, `craze attach` |
-| S3 | not started | `shed-craze` lane adapter in shed; craze in shed-mobile's `LANE_KINDS` |
-| S4 | not started | Headless session hosts, per-machine hub, `craze serve` / `craze ps`, detach |
-| S5 | not started | Agent view in the TUI |
-| S6 | directional | `craze web`: hub serves WebSocket + a web bundle on loopback / tailnet |
-| S7 | directional | Outbound relay uplink and a hosted server; enrollment, scopes, TLS |
+| order | ID | status | one line |
+|---|---|---|---|
+| done | S0 | complete | Discovery: four codebases reviewed, topology / protocol / remote scope / journaling settled |
+| done | S1 | complete | Engine core: fan-out, sequenced journal, engine-owned asks and turn state, render-free transcript; TUI becomes the first client. **S1a complete (2026-09-19)**; **S1b complete (Plan 021, all three PRs merged, 2026-09-21)**; **S1c complete (Plan 024, PRs #50 and #52, 2026-09-24)** |
+| done | S2 | complete (Plan 027, 4 PRs: #55, #56, #61, #63) | Per-session Unix socket, published protocol spec + schema, fake host, `craze bridge`, `craze attach` |
+| 1 | S4a | in progress (Plan 030, with S5) | Detached hosts: `craze serve`, hosts born detached, `session.stop`, idle exit |
+| 1 | S5 | in progress (Plan 030, with S4a) | Agent view in the TUI: a session list of every running session on the machine, new sessions started from it, composer `@` mentions |
+| 2 | S4b | not started | The hub: `craze ps`, `hub.sock`, `sessions.subscribe` on the hub, `session.create`, remote-machine aggregation |
+| 3 | S3 | not started (after S4b, and after shed's first release of its own lane work) | `shed-craze` lane adapter in shed; craze in shed-mobile's `LANE_KINDS` |
+| 4 | S6 | directional | `craze web`: hub serves WebSocket + a web bundle on loopback / tailnet |
+| 4 | S7 | directional | Outbound relay uplink and a hosted server; enrollment, scopes, TLS |
+
+The order column is the order phases run in (SD-34); phase IDs are stable
+names, not positions. S4a and S5 are built together in Plan 030. S4b runs
+before S3 so that the shed lane starts with a hub roster and `create`.
 
 ## Phase detail
 
@@ -167,7 +172,7 @@ which is also the best test client), the fake host, published reference docs.
 sequential PRs from fresh `origin/main` — `feature/plan-027-s2-wire` (#55,
 `318fc76`), `feature/plan-027-s2-host` (#56, `2acd54a`),
 `feature/plan-027-s2-tui-async` (#61, `3eabb31`), `feature/plan-027-s2-attach`
-(PR 4; the orchestrator fills in its number and merge commit here). Every
+(#63, `73ed5e0`, merged 2026-09-28). Every
 exit clause met, each against a named test or live leg (the plan's §7
 acceptance table, A1–A25; `12`'s "S2 — as shipped" has the clause-by-clause
 proof): two TUIs on one live session show the same transcript
@@ -216,15 +221,19 @@ barrier on the model's own connection, and the view close's `session.detach`
 answered, both read through the tap (`internal/tui/frame_socket_test.go:335-409`).
 No golden file's bytes moved in PR 3 or PR 4 (`git diff --stat -- '*testdata*'`
 empty at every commit through `adac650`). The execution amendments
-(X1–X57), C29a through C29d's fix rounds, the review record, and the live
+(X1–X58), C29a through C29d's fix rounds, the review record, and the live
 smoke's findings and
-backlog are in `12` and `13`. **S3 (the shed lane) is next.**
+backlog are in `12` and `13`. **S4a + S5 is next (Plan 030; see SD-34), then
+S4b, then S3.**
 
 ### S3 — shed lane
 
 Detail in `06`. Work is in the shed and shed-mobile repos and follows their
 process ("mobile first").
 
+- **Order (SD-34):** S3 runs after S4b, and after shed has made its first
+  release of its own lane work. It starts with a hub roster and `create`,
+  both available from S4b.
 - Size: M, about 3k lines of Rust plus the lane-transport change in
   `shed-core`.
 - **Exit**: shed's own bar. craze started in a roost tab; from the Flutter
@@ -232,31 +241,60 @@ process ("mobile first").
   answer a permission and a question; background the phone for a minute and
   resume with no reseed.
 
-### S4 — headless hosts and the hub
+### S4a — detached hosts
 
-`craze serve` (a host with no TUI), detach from a running TUI without ending
-the session (SD-33), the hub at `run/hub.sock` with roster, routing, spawn,
-and stop; `craze ps`; `craze attach <id>`; `session.create` turns shed's
-`create` capability on.
+Split from the original S4 by SD-34 and built with S5 in Plan 030 (outside
+the repo). `craze serve` is the headless host, a real subcommand; the
+ordinary `craze` spawns it detached (`setsid`, stdio to `/dev/null`, a ready
+handshake on an inherited pipe), then runs the TUI as its client. Hosts are
+born detached (SD-33), so by default every TUI is a socket client (the
+`detach = false` opt-out below keeps the in-process path).
 
+- `session.stop` behind a `stop` capability. `/exit` (with `ctrl+d` and the
+  second `ctrl+c`) ends the session in every client, including `craze
+  attach`; closing the terminal leaves it running (SD-35).
+- The idle exit: a host with no client attached and nothing in flight exits
+  after an hour by default, configurable (`host_idle_exit`). The decision is
+  atomic against attaches and new work.
+- The `detach = false` opt-out (and `CRAZE_DETACH=0`) keeps today's
+  in-process path.
 - **Detach is not a key binding (SD-33).** The TUI process is a job of the
   terminal's shell; Go cannot fork without exec and a process-group leader
   cannot `setsid`; closing a roost or tmux tab, or a systemd login scope with
   `KillUserProcesses=yes`, kills it whatever it ignores. The robust shape,
   decided as SD-33, is **hosts born detached, with the TUI always a socket
   client**; what a host does when its last client leaves (stop, or keep
-  running) is then policy. Spawning from a bridge must fully detach
+  running) is then policy (SD-35). Spawning from a bridge must fully detach
   (`setsid`, stdio to `/dev/null`) or the SSH channel never closes. A
   headless host parks asks with zero clients (`03`), and on macOS cannot
   start `cursor-agent` from a plain SSH exec (locked login keychain).
-- Size: M, about 2k lines. prox's lesson: every hard bug here is a
-  **lifecycle** bug (leaked registrations, late close callbacks racing a
-  reconnect, shutdown order). Write generation-guarded registration and
-  "cancel workers, join, then deregister" teardown on day one.
-- Reuse from prox: flock'd pidfile singleton, auto-spawn by re-exec with an
-  env marker, health poll, exit-when-idle, stale sweep keyed on pid plus a
-  start token.
-- **Exit**: start two headless sessions, close every terminal, list them with
+- Size: an estimate of about 2k lines. prox's lifecycle lesson applies here
+  first: every hard bug in this area is a **lifecycle** bug (leaked
+  registrations, late close callbacks racing a reconnect, shutdown order).
+  Write generation-guarded registration and "cancel workers, join, then
+  deregister" teardown on day one.
+- Reuse from prox: auto-spawn by re-exec with an env marker. (The flock'd
+  singleton, health poll and stale sweep belong to S4b's hub.)
+- **Exit**: the lifetime half of S5's exit below. After a prompt, killing the
+  terminal leaves the host listed in the registry and `craze -c` reattaches
+  with the transcript; `/exit` ends the session and the host's registry entry
+  is gone within seconds; an unattended idle host exits after its timeout,
+  and one with a turn, an open ask, or an attached client does not.
+
+### S4b — the hub
+
+The per-machine hub at `run/hub.sock` with roster, routing, spawn, and stop;
+`craze ps`; `sessions.subscribe` on the hub; `session.create` turns shed's
+`create` capability on; remote-machine aggregation. The hub replaces the
+per-host polling that S5's session list does until it exists. Not started;
+runs after S4a + S5 and before S3.
+
+- Size: M, about 2k lines (the old S4's estimate, which covered the hub, the
+  detached host and `craze ps` together; S4a took the host part).
+- Reuse from prox: flock'd pidfile singleton, health poll, exit-when-idle,
+  stale sweep keyed on pid plus a start token; the auto-spawn by re-exec with
+  an env marker is already S4a's.
+- **Exit**: start two sessions, close every terminal, list them with
   `craze ps`, attach to one; kill the hub mid-turn and lose nothing, hosts
   re-register with the respawned hub; a host crash removes its row within a
   sweep; hub and host of different craze versions interoperate on the
@@ -264,14 +302,32 @@ and stop; `craze ps`; `craze attach <id>`; `session.create` turns shed's
 
 ### S5 — agent view
 
-A TUI screen that is a hub client: rows with provider, title, cwd, activity,
-pending ask count, last change; open a session in place; answer an ask from
-the list; start a new headless session. The existing sub-agent view is the
-UI precedent.
+Owner design (Plan 030, 2026-09-28), following Claude Code's agent view. A
+whole-screen session list opened with `←` on an empty composer (and
+`/sessions`): every running session of this user on this machine, whatever
+its directory, one line per row, grouped by state (needs you, working,
+failed, idle, then saved) with `ctrl+s` toggling grouping by directory.
+`enter` opens a session in place. New sessions start from an always-focused
+input on the list, with `@` choosing the directory (recent directories where
+sessions ran, plus a typed path completed with `Tab`; nothing is hard-coded);
+the selected row sets the directory; `/provider` and `/model` in that input
+set what new sessions use. Composer `@` file and directory mentions in the
+session composer ship with it.
 
-- Size: M, about 2–3k lines.
-- **Exit**: the `01` demonstration, second half: two headless sessions found
-  after reopening craze, one blocked on an ask and answered from the view.
+- **Not in the MVP:** a preview of the selected session; answering an ask
+  from the list (you open the session to answer); notices of other sessions
+  inside a session; git worktrees. Each is a row in `13`.
+- **Data:** the list polls each host's socket through the registry; there is
+  no hub until S4b, which replaces the polling.
+- Built on S4a: Plan 030, five PRs (roadmap docs, detached hosts, the list,
+  new sessions, composer `@`). The existing sub-agent view is the UI
+  precedent.
+- Size: an estimate of about 3k lines.
+- **Exit**: close every terminal, reopen craze, and `←` lists the sessions
+  still running; one blocked on an ask is opened and answered; a new session
+  is started in another directory from the list with `@`; `/exit` ends a
+  session and the list shows it saved; an unattended idle session exits after
+  the timeout.
 
 ### S6 — `craze web` (directional)
 

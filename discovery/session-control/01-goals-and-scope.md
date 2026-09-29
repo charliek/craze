@@ -29,7 +29,7 @@ are transports and frontends over one protocol (SD-01):
 | feature | is |
 |---|---|
 | shed lane | the protocol over a Unix socket, reached through `craze bridge` on an SSH exec |
-| agent view | the TUI as a client of a hub that lists session hosts |
+| agent view | the TUI as a client that lists session hosts: it reads the registry and polls each host's socket (S5), and S4b's hub replaces the polling |
 | web UI | the hub serving the protocol over WebSocket plus a static bundle |
 | remote relay | the hub dialing **out** and republishing the same protocol |
 
@@ -42,7 +42,8 @@ are transports and frontends over one protocol (SD-01):
 | Engine-owned asks, turn state, render-free transcript model | S1 |
 | Per-session Unix socket, protocol spec, fake server, `craze bridge` | S2 |
 | `shed-craze` lane adapter (in the shed repo) | S3 |
-| Headless session hosts, per-machine hub, `craze ps` / `craze attach` | S4 |
+| Detached session hosts, `craze serve`, idle exit | S4a |
+| Per-machine hub, `craze ps`, `session.create`, remote-machine listing | S4b |
 | Agent view in the TUI | S5 |
 | `craze web` on loopback / tailnet | S6 (directional) |
 | Outbound relay uplink and a hosted server | S7 (directional) |
@@ -69,4 +70,4 @@ checklist. Start craze in a roost tab on one machine; from the phone, read the
 transcript, send a prompt, cancel, and answer a permission and a question
 while the TUI shows every one of those happen. Then start two headless
 sessions, close the terminal, reopen craze, and find both in the agent view,
-one of them blocked on an ask that can be answered from there.
+one of them blocked on an ask that can be opened and answered from there.
