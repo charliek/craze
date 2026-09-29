@@ -117,13 +117,44 @@ class KeyRing:
         return False
 
 
-def scan_tree(root: Path, ring: KeyRing, max_bytes: int = 256 * 1024 * 1024) -> dict:
-    """Grep every file under ``root`` (gzip members decompressed) for every loaded key.
+SCAN_MAX_BYTES = 256 * 1024 * 1024  # a file (as stored) larger than this is not scanned: skipped
+GZ_CHUNK = 8 * 1024 * 1024  # decompressed bytes held per step of a gzip scan (read at call time)
+
+
+def data_has_key(name: str, data: bytes, ring: KeyRing) -> bool:
+    """Whether a file's bytes hold a loaded key -- the test ``scan_tree`` applies to each
+    file. A ``.gz`` file's raw bytes are scanned, then its members decompressed **to the
+    end**, ``GZ_CHUNK`` bytes at a time, each chunk scanned with the previous one's last
+    (longest key form - 1) bytes, so a key split across two chunks is still found. A
+    member that stops decompressing (corrupt or truncated) ends the scan there: what
+    decompressed before it was scanned, and so were the raw bytes."""
+    import io
+
+    if ring.contains_key(data):
+        return True
+    if not name.endswith(".gz"):
+        return False
+    keep = max((len(f) for f in ring.byte_forms()), default=1) - 1
+    tail = b""
+    try:
+        with gzip.GzipFile(fileobj=io.BytesIO(data)) as g:
+            while chunk := g.read(GZ_CHUNK):
+                buf = tail + chunk
+                if ring.contains_key(buf):
+                    return True
+                tail = buf[-keep:] if keep else b""
+    except (OSError, EOFError):
+        pass
+    return False
+
+
+def scan_tree(root: Path, ring: KeyRing, max_bytes: int = SCAN_MAX_BYTES) -> dict:
+    """Grep every file under ``root`` (gzip members decompressed to the end:
+    ``data_has_key``) for every loaded key. A file over ``max_bytes`` as stored is
+    skipped, and listed.
 
     Returns counts and the relative paths of files with a hit -- never a key.
     """
-    import io
-
     from crazeeval import safefs
 
     root = Path(root)
@@ -144,14 +175,8 @@ def scan_tree(root: Path, ring: KeyRing, max_bytes: int = 256 * 1024 * 1024) -> 
         except OSError:
             skipped.append(e.rel)
             continue
-        if e.rel.endswith(".gz"):
-            try:
-                with gzip.GzipFile(fileobj=io.BytesIO(data)) as g:
-                    data = g.read(max_bytes)
-            except (OSError, EOFError):
-                pass
         scanned += 1
-        if ring.contains_key(data):
+        if data_has_key(e.rel, data, ring):
             hits.append(e.rel)
     return {"files_scanned": scanned, "files_with_key": hits, "skipped": skipped, "keys_checked": len(ring.secrets())}
 
