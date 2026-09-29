@@ -14,7 +14,12 @@ matches (task definitions and testdata, each craze task's commit, fixtures, the 
 snapshot, effective model settings and prices, every executable's hash and version,
 execution settings, the evaluator's own code) and runs only what has no final result,
 in fresh attempt directories. ``batch.json`` also records the campaign the batch ran
-in, outside the fingerprint.
+in, outside the fingerprint: a resumed batch settles against the CURRENT campaign's
+ledger (or an explicit ``--ledger``), so ``--resume`` refuses a saved campaign that
+differs from the current one unless ``--ledger`` was passed explicitly -- otherwise
+the batch could reserve and settle against a different, maybe empty, ledger and
+escape its original budget cap. A legacy batch.json with no recorded campaign is
+never checked.
 """
 
 from __future__ import annotations
@@ -105,6 +110,11 @@ class BatchConfig:
     cache: Path | None = None
     resume: bool = False
     opencode_seed: Path | None = None
+    # True when --ledger was passed explicitly (cli.py sets this from the raw CLI
+    # args, never inferred): lets --resume reopen a batch recorded under a different
+    # campaign, since the caller has deliberately picked which ledger it settles
+    # against. Never fingerprinted -- it only gates the campaign check below.
+    explicit_ledger: bool = False
 
 
 def size_check(ws: Path, file_limit: int = safefs.FILE_LIMIT, tree_limit: int = safefs.TREE_LIMIT) -> tuple[list[str], int]:
@@ -275,6 +285,20 @@ def open_batch_dir(cfg: BatchConfig, identity: dict):
             raise BatchDirError(f"--resume: {out} has no readable batch.json") from e
         if saved.get("fingerprint") != identity["fingerprint"]:
             raise BatchDirError(f"--resume: {out} was a different batch (differs in {identity_diff(saved, identity)})")
+        # The ledger a resumed batch reserves and settles against comes from the
+        # CURRENT campaign (cfg.ledger_path), not the one the batch originally ran
+        # in -- campaign is deliberately outside the fingerprint, so a mismatch would
+        # otherwise pass identity validation and let the batch escape its original
+        # budget cap against a different (maybe empty) ledger. Refuse unless the
+        # caller passed --ledger explicitly, which is a deliberate choice of ledger.
+        # A legacy batch.json with no recorded campaign is never checked.
+        saved_campaign = saved.get("campaign")
+        if saved_campaign is not None and saved_campaign != identity["campaign"] and not cfg.explicit_ledger:
+            raise BatchDirError(
+                f"--resume: {out} ran in campaign {saved_campaign!r}, but the current campaign is "
+                f"{identity['campaign']!r}; its ledger and budget cap would differ from the batch's "
+                "original ones. Pass --ledger explicitly to resume it against a specific ledger anyway."
+            )
     else:
         try:
             out.mkdir(parents=True, exist_ok=False)

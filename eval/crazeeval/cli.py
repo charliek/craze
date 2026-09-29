@@ -131,6 +131,7 @@ def cmd_run(a) -> int:
         timeout_s=a.timeout,
         resume=a.resume,
         opencode_seed=seed,
+        explicit_ledger=a.ledger is not None,
     )
     if a.first_rep == 1:
         rep_desc = f"{a.reps} rep(s)"
@@ -616,7 +617,8 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("--cap-zai", type=int, default=None, help="concurrent runs on Z.AI (default 2)")
     r.add_argument("--cap-other", type=int, default=3, help="concurrent runs per other provider (default 3)")
     r.add_argument("--out", help="batch directory (default: <campaign>/eval-runs/<label>-<timestamp>)")
-    r.add_argument("--ledger", help="ledger path (default: <campaign>/ledger.jsonl)")
+    r.add_argument("--ledger", help="ledger path (default: <campaign>/ledger.jsonl); passing this explicitly also "
+                   "lets --resume reopen a batch recorded under a different campaign")
     r.add_argument("--budget-cap", type=float, default=95.0)
     r.add_argument("--run-cap", type=float, default=3.0)
     r.add_argument("--timeout", type=int, default=None, help="per-run timeout in seconds (default: the task's, 20 min)")

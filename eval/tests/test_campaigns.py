@@ -14,6 +14,7 @@ from crazeeval import paths
 from crazeeval.batch import (
     FINGERPRINT_BASE_COMMIT,
     BatchConfig,
+    BatchDirError,
     batch_identity,
     identity_diff,
     open_batch_dir,
@@ -103,9 +104,10 @@ def test_batch_json_records_the_campaign_outside_the_fingerprint(home, tmp_path)
     ms = load_models()
     tasks = [load_tasks()["smoke-explain"]]
 
-    def cfg(out):
+    def cfg(out, explicit_ledger=False):
         return BatchConfig(harnesses=["craze"], models=[ms["glm-5.3-flash"]], tasks=tasks, reps=1, out=out,
-                           label="t", snap=Snapshot(dir=tmp_path, config={}, hash="x"))
+                           label="t", snap=Snapshot(dir=tmp_path, config={}, hash="x"),
+                           explicit_ledger=explicit_ledger)
 
     paths.set_campaign("first")
     c = cfg(tmp_path / "b")
@@ -113,15 +115,57 @@ def test_batch_json_records_the_campaign_outside_the_fingerprint(home, tmp_path)
     open_batch_dir(c, ident).close()
     saved = json.loads((tmp_path / "b" / "batch.json").read_text())
     assert saved["campaign"] == str(home / ".craze-eval" / "first")
-    # Another campaign: the same fingerprint, so resuming is unaffected.
+    # Another campaign: the same fingerprint (campaign is outside it), but --resume
+    # refuses it -- its ledger would come from the new campaign, not "first" -- unless
+    # an explicit --ledger was given.
     paths.set_campaign("second")
     c2 = cfg(tmp_path / "b")
     c2.resume = True
     ident2 = batch_identity(c2, EXECS, load_prices())
     assert ident2["fingerprint"] == ident["fingerprint"] and ident2["campaign"] != ident["campaign"]
     assert identity_diff(saved, ident2) == []
-    open_batch_dir(c2, ident2).close()
+    with pytest.raises(BatchDirError, match="ran in campaign"):
+        open_batch_dir(c2, ident2)
+    # An explicit --ledger is a deliberate choice of ledger: the mismatch is allowed.
+    c3 = cfg(tmp_path / "b", explicit_ledger=True)
+    c3.resume = True
+    ident3 = batch_identity(c3, EXECS, load_prices())
+    open_batch_dir(c3, ident3).close()
     assert json.loads((tmp_path / "b" / "batch.json").read_text())["campaign"] == saved["campaign"]
+
+
+def test_resume_within_the_same_campaign_is_unaffected(home, tmp_path):
+    """The common case: --resume in the same campaign it ran in works exactly as
+    before the campaign check (no --ledger needed)."""
+    ms = load_models()
+    tasks = [load_tasks()["smoke-explain"]]
+    c = BatchConfig(harnesses=["craze"], models=[ms["glm-5.3-flash"]], tasks=tasks, reps=1, out=tmp_path / "b",
+                    label="t", snap=Snapshot(dir=tmp_path, config={}, hash="x"))
+    paths.set_campaign("only")
+    open_batch_dir(c, batch_identity(c, EXECS, load_prices())).close()
+    c2 = BatchConfig(harnesses=["craze"], models=[ms["glm-5.3-flash"]], tasks=tasks, reps=1, out=tmp_path / "b",
+                     label="t", snap=Snapshot(dir=tmp_path, config={}, hash="x"), resume=True)
+    open_batch_dir(c2, batch_identity(c2, EXECS, load_prices())).close()
+
+
+def test_resume_of_a_legacy_batch_without_a_recorded_campaign_is_unaffected(home, tmp_path):
+    """A batch.json written before campaigns were recorded has no ``campaign`` key:
+    --resume never checks it, in any campaign, with no --ledger needed."""
+    ms = load_models()
+    tasks = [load_tasks()["smoke-explain"]]
+    c = BatchConfig(harnesses=["craze"], models=[ms["glm-5.3-flash"]], tasks=tasks, reps=1, out=tmp_path / "b",
+                    label="t", snap=Snapshot(dir=tmp_path, config={}, hash="x"))
+    paths.set_campaign("first")
+    open_batch_dir(c, batch_identity(c, EXECS, load_prices())).close()
+    saved_path = tmp_path / "b" / "batch.json"
+    saved = json.loads(saved_path.read_text())
+    del saved["campaign"]
+    saved_path.write_text(json.dumps(saved))
+
+    paths.set_campaign("second")
+    c2 = BatchConfig(harnesses=["craze"], models=[ms["glm-5.3-flash"]], tasks=tasks, reps=1, out=tmp_path / "b",
+                     label="t", snap=Snapshot(dir=tmp_path, config={}, hash="x"), resume=True)
+    open_batch_dir(c2, batch_identity(c2, EXECS, load_prices())).close()
 
 
 # -- a craze-repo task's own commit -----------------------------------------------------------

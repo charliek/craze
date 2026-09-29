@@ -180,7 +180,17 @@ def load_all_runs(batches: list[Path], unseal: bool = False) -> list[dict]:
     *different* resolved directories producing the same ``run_id`` (e.g. two campaigns
     with a same-named batch and the same run key) is not a duplicate -- it's an ambiguous
     identity, and raises ``RunIdCollision`` naming both directories rather than silently
-    dropping one side."""
+    dropping one side.
+
+    A result written before any attempt ran (a budget stop or a launch error too early
+    to reach ``attempt()``, ``Batch.run``) carries no ``run_id`` at all -- so, keyed on
+    it directly, every such result across every batch would key as the same ``None``:
+    a false collision between two batches, or a silently dropped second one within the
+    same batch. These are keyed instead by the resolved batch directory plus the run
+    key (or the rep directory, if even that is missing), which is always unique per
+    result -- never by ``run_id``, so it never collides with a real one or another
+    batch's. They stay unscored (``UNSCORED``) and are filtered out before archiving or
+    counting, so nothing downstream depends on the key itself."""
     seen_batches: set[str] = set()
     by_id: dict[str, dict] = {}
     origin: dict[str, str] = {}  # run_id -> the resolved batch directory it came from
@@ -196,7 +206,7 @@ def load_all_runs(batches: list[Path], unseal: bool = False) -> list[dict]:
             if "harness" not in r:  # a result written before the attempt ran (budget stop)
                 h, _, t, rep = rep_dir.relative_to(root).parts
                 r.update({"harness": h, "task": t, "rep": int(rep[3:] or 0)})
-            rid = r.get("run_id")
+            rid = r.get("run_id") or f"{rb}:no-run-id:{r.get('run_key') or rep_dir}"
             if rid in by_id:
                 if origin[rid] != rb:
                     raise RunIdCollision(

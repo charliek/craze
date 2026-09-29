@@ -529,6 +529,42 @@ def test_all_runs_same_dir_given_twice_still_deduplicated(tmp_path):
     assert len(_load(tmp_path / "same-dir-twice", arch.RUNS_FILE)) == 1
 
 
+def _budget_stop(batch: Path, h: str, task: str, rep: int = 1) -> None:
+    """A rep-level result.json written before any attempt ran (``Batch.run``'s budget-
+    stop branch, or a launch error too early to reach ``attempt()``): only ``run_key``,
+    ``status`` and ``objective_pass`` -- no ``run_id`` at all, exactly as batch.py writes
+    it (``iter_results`` backfills harness/task/rep from the path, never ``run_id``)."""
+    key = f"{h}/{M}/{task}/rep{rep}"
+    d = batch / "runs" / h / M / task / f"rep{rep}"
+    d.mkdir(parents=True)
+    (d / "result.json").write_text(json.dumps(
+        {"run_key": key, "status": "budget-stop", "objective_pass": False, "attempts": [], "split": SPLITS[task]}))
+
+
+def test_all_runs_budget_stopped_results_with_no_run_id_dont_collide(tmp_path):
+    """A result with no run_id at all (a budget stop, or too-early launch error) must
+    not key ``load_all_runs`` by ``None``: across two batches that would be a false
+    ``RunIdCollision``, within one batch it would silently drop a second such result.
+    Two batches, each with one budget-stopped result alongside a real scored run,
+    archive fine with --all-runs and the scored rows still reconcile (the budget-stopped
+    ones are unscored and never written as rows)."""
+    runs_dir = tmp_path / "camp-bs" / "eval-runs"
+    a, b = runs_dir / "batch-a", runs_dir / "batch-b"
+    ra, rb = _run(a, "craze", "D1"), _run(b, "craze", "D2")
+    _write(a, [ra], [], _ident("batch-a", ["craze"], None, "aa" * 32))
+    _budget_stop(a, "gx", "D2")
+    _write(b, [rb], [], _ident("batch-b", ["craze"], None, "bb" * 32))
+    _budget_stop(b, "gx", "D1")
+
+    out = tmp_path / "arch"
+    s = arch.archive([a, b], out, keyring(), tasks=_tasks(), all_runs=True)
+    assert s["ok"], s["errors"]
+    assert "reconciled" in s["reconciliation"]["line"]
+    rows = _load(out, arch.RUNS_FILE)
+    assert {(r["batch"], r["task"]) for r in rows} == {("batch-a", "D1"), ("batch-b", "D2")}
+    assert len(rows) == s["reconciliation"]["scored_runs_selected"] == 2
+
+
 def test_a_reconciliation_mismatch_fails(world, tmp_path, monkeypatch):
     monkeypatch.setattr(arch, "_count_lines", lambda p: 0)
     s = _archive(world, tmp_path / "arch", unseal=True)

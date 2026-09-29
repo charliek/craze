@@ -194,21 +194,28 @@ campaign, alongside the plan document and its `progress.md` execution log.
 
 ## How it was produced
 
+36 batches in eval-runs/ went into the archive, in full: base-fw-ds, base-fw-kimi-dev,
+base-fw-kimi-ho, base-gxplan, base-meta-contrib, base-meta-craze, base-meta-spark,
+base-zai (the baseline); lever-B0r2-{ds,zai}, lever-L1d1-{ds,meta,zai},
+lever-L2-{ds,meta,zai}, lever-L2d2-{ds,zai}, lever-L3-{ds,zai}, lever-L3d2-{ds,zai} (the
+lever loop); final-{ds,kimi,meta-contrib,zai} and final2-{ds,kimi,zai} (the final, rep1
+and rep2); drift-meta-contrib (the provider-drift check); l7a-{contrib,ds,zai} and
+l7b-{contrib,ds,zai} (the wrap-up's L7 A/B). Run from `eval/` (see `eval/RUNBOOK.md`) --
+`--out results/2026-09-plan029` lands here, at `eval/results/2026-09-plan029`; `--out
+eval/results/2026-09-plan029` from `eval/` would land one level too deep, at
+`eval/eval/results/2026-09-plan029`.
+
 ```shell
-# Run from eval/ (see eval/RUNBOOK.md) -- --out results/2026-09-plan029 lands here, at
-# eval/results/2026-09-plan029; --out eval/results/2026-09-plan029 from eval/ would land
-# one level too deep, at eval/eval/results/2026-09-plan029.
-crazeeval archive --all-runs --unseal --max-bytes 12000000 \
-  --out results/2026-09-plan029 \
-  --batch <every base-, lever-, final-, final2-, drift- and l7- batch of the campaign>
-  # 36 batches in eval-runs/, in full: base-fw-ds, base-fw-kimi-dev, base-fw-kimi-ho,
-  # base-gxplan, base-meta-contrib, base-meta-craze, base-meta-spark, base-zai (the
-  # baseline); lever-B0r2-{ds,zai}, lever-L1d1-{ds,meta,zai}, lever-L2-{ds,meta,zai},
-  # lever-L2d2-{ds,zai}, lever-L3-{ds,zai}, lever-L3d2-{ds,zai} (the lever loop);
-  # final-{ds,kimi,meta-contrib,zai} and final2-{ds,kimi,zai} (the final, rep1 and rep2);
-  # drift-meta-contrib (the provider-drift check); l7a-{contrib,ds,zai} and
-  # l7b-{contrib,ds,zai} (the wrap-up's L7 A/B)
+E=~/.claude/plans/craze/029-native-harness-quality/eval-runs
+args=()
+for b in "$E"/base-* "$E"/lever-* "$E"/final-* "$E"/final2-* "$E"/drift-* "$E"/l7a-* "$E"/l7b-*; do args+=(--batch "$b"); done
+uv run crazeeval archive --all-runs --unseal --max-bytes 12000000 --out results/2026-09-plan029 "${args[@]}"
 ```
+
+The command actually used also filtered the glob to only the 36 batch directories that
+have a `batch.json` (a batch that never got that far, e.g. aborted or a debug probe, is
+not a batch to archive); the loop above passes every directory the glob matches, which
+for this campaign's `eval-runs/` happens to be exactly those same 36.
 
 `--all-runs` keeps every run of every batch by its `run_id`, rather than the default
 current-view selection (a later batch replacing an earlier one's run by run key) — needed
