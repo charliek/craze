@@ -411,6 +411,33 @@ func (s *Store) Recent(cwd, provider string, n int) ([]Row, error) {
 	return rows, nil
 }
 
+// Find is the row for (provider, sessionID) — the index's own key — in any
+// workspace, or ok=false when there is none: how a row with no craze id is
+// named from outside the index, which only the key can do (craze serve's
+// --load <provider>:<sessionId>, plan 030 §3.3). A provider this Store's
+// KnownProvider reports as unknown is not offered, exactly as Latest and
+// Recent do not offer it. No home directory reads as no row and no error.
+func (s *Store) Find(provider, sessionID string) (Row, bool, error) {
+	path := paths.SessionsPath()
+	if path == "" {
+		return Row{}, false, nil
+	}
+	records, err := readRecords(path)
+	if err != nil {
+		return Row{}, false, err
+	}
+	if s.KnownProvider != nil && !s.KnownProvider(provider) {
+		return Row{}, false, nil
+	}
+	k := key{provider: provider, sessionID: sessionID}
+	for _, rec := range records {
+		if rec.key() == k {
+			return rec.Row, true, nil
+		}
+	}
+	return Row{}, false, nil
+}
+
 // ByCrazeID is every row that carries a durable craze session id, by that id:
 // what names a running session by its craze id reads its title from (craze
 // attach's listings, plan 027 §3.15). Every provider is read, known or not —

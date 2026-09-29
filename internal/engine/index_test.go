@@ -2049,7 +2049,7 @@ func TestBothKindsOfWriteContendOnARealFileLock(t *testing.T) {
 // title: the first line of the prompt, with a shell-context block in front of
 // it stripped — a picker row reading "<shell_context>" would name every session
 // that opened with a command the same thing. Folding it onto one line and
-// capping it is the client's half (tui.indexTitleLine).
+// capping it is IndexTitleLine's, the rule every host writes a title through.
 func TestFallbackTitleIsTheFirstLine(t *testing.T) {
 	for _, tc := range []struct{ in, want string }{
 		{"one line", "one line"},

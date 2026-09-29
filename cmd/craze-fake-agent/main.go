@@ -79,6 +79,8 @@ Flags:
                       cancels, instead of racing session/cancel against
                       session/prompt on the wire
           authfail    initialize ok, authenticate error
+          long-reply  echo's session, but every prompt is answered with 600
+                      message chunks, "line 1" to "line 600", then end_turn
           turnfail    a normal session whose session/prompt fails with a
                       JSON-RPC error (-32000 "the turn failed")
           noauth      initialize with empty authMethods; reject authenticate
@@ -183,7 +185,7 @@ func main() {
 		"modellate", "preinstall", "permission", "ask", "plan",
 		"hang", "hang-ack", "authfail", "noauth", "todos", "todos-notify", "diff", "bigdiff",
 		"bash", "task", "task-late", "commands", "nocommands", "callorder", "markdown", "title", "planmode", "planmode-card",
-		"env", "turnfail",
+		"env", "turnfail", "long-reply",
 		"grok-echo", "grok-ask", "grok-plan", "grok-ask-wrapped",
 		"grok-subagent", "grok-subagent-fail", "grok-subagent-two", "grok-subagent-two-hold", "grok-subagent-nested",
 		"grok-subagent-late", "grok-subagent-late-hold", "grok-subagent-hold", "grok-subagent-cancel", "grok-subagent-cancel-early",

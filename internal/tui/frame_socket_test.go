@@ -39,7 +39,7 @@ import (
 //  1. The builder's session is built NoPrimary (frameNoPrimary, set while
 //     runFrameModes calls the builder for the socket run): nothing reads the
 //     host's primary, so nothing may be put on it.
-//  2. Its engine is built as setSession builds one (engineOptions) and served
+//  2. Its engine is built as setSession builds one (engine.HostOptions) and served
 //     by internal/control on a short /tmp/czg-* socket (t.TempDir() overflows
 //     sun_path on macOS), with the server's MaxBudget raised for the matrix.
 //  3. A remote.Session dials it and attaches with when: "now" BEFORE the
@@ -206,7 +206,7 @@ func buildSocketHost(cfg Config) (*frameHost, error) {
 	}
 	ws := configWorkspace(cfg.Workspace)
 	prov := configProvider(cfg.Provider)
-	eng, err := engine.New(sess, engineOptions(cfg.CrazeSessionID, cfg.SessionIndex, ws, prov.Name()))
+	eng, err := engine.New(sess, engine.HostOptions(cfg.CrazeSessionID, cfg.SessionIndex, ws, prov.Name()))
 	if err != nil {
 		return nil, err
 	}
@@ -875,7 +875,7 @@ func assertOneOmission(t *testing.T, h *socketHost, err error) {
 // model holds — through V8's jitter wrapper around it too — so engineOf and
 // stubOf reach the host's engine and its Stub exactly as they reach an
 // in-process model's; the host's engine is the one setSession would have
-// built (engineOptions: here, the durable craze id the Config names); and
+// built (engine.HostOptions: here, the durable craze id the Config names); and
 // once the host has ended nothing names it.
 func TestASocketRunsHostIsReachedThroughItsSession(t *testing.T) {
 	isolateSkillsHome(t)

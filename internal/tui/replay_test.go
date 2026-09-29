@@ -10,6 +10,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/charliek/craze/internal/agent"
+	"github.com/charliek/craze/internal/engine"
 	"github.com/charliek/craze/internal/sessions"
 )
 
@@ -531,7 +532,7 @@ func TestFirstSendWritesTheFallbackTitle(t *testing.T) {
 // a title is folded onto one row and capped. Taking the first line of a prompt
 // is the engine's half now (engine's TestFallbackTitleIsTheFirstLine).
 func TestIndexTitleIsCappedAt120Runes(t *testing.T) {
-	got := indexTitleLine(strings.Repeat("é", 200))
+	got := engine.IndexTitleLine(strings.Repeat("é", 200))
 	if n := len([]rune(got)); n != titleRuneCap {
 		t.Fatalf("title is %d runes, want %d", n, titleRuneCap)
 	}

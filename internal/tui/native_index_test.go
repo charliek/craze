@@ -16,7 +16,7 @@ import (
 
 // Native sessions are indexed (plan 028 §3.5): whether a provider's sessions
 // go into sessions.jsonl is Resumable's question, which the TUI hands the
-// engine as IndexOptions.Unindexed (unindexedProvider), and no longer
+// engine as IndexOptions.Unindexed (engine.UnindexedProvider), and no longer
 // Hidden's. Native is where the two part: hidden until it is listed (C19), and
 // resumable from H7's PR 1.
 
@@ -37,8 +37,8 @@ func TestNativeSessionIsIndexed(t *testing.T) {
 		Store:     idx,
 		CWD:       ws,
 		Provider:  agent.NativeProvider().Name(),
-		Unindexed: unindexedProvider,
-		TitleLine: indexTitleLine,
+		Unindexed: engine.UnindexedProvider,
+		TitleLine: engine.IndexTitleLine,
 	}})
 	if err != nil {
 		t.Fatal(err)
@@ -94,8 +94,8 @@ func TestResumableSplitsFromHidden(t *testing.T) {
 		if tc.p.Hidden() != tc.hidden || hiddenProvider(name) != tc.hidden {
 			t.Fatalf("%s: Hidden %v, hiddenProvider %v; want %v", name, tc.p.Hidden(), hiddenProvider(name), tc.hidden)
 		}
-		if tc.p.Resumable() != tc.resumable || unindexedProvider(name) == tc.resumable {
-			t.Fatalf("%s: Resumable %v, unindexedProvider %v; want resumable %v", name, tc.p.Resumable(), unindexedProvider(name), tc.resumable)
+		if tc.p.Resumable() != tc.resumable || engine.UnindexedProvider(name) == tc.resumable {
+			t.Fatalf("%s: Resumable %v, engine.UnindexedProvider %v; want resumable %v", name, tc.p.Resumable(), engine.UnindexedProvider(name), tc.resumable)
 		}
 	}
 

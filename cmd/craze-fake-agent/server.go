@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -614,6 +615,8 @@ func (s *server) handlePrompt(msg *acp.Message) {
 		s.callOrder(msg.ID, text)
 	case "env":
 		s.envReport(msg.ID)
+	case "long-reply":
+		s.longReply(msg.ID)
 	case "turnfail":
 		// The session is up, so this is an error mid-session: the turn's
 		// ending is the error, with no stop reason at all.
@@ -693,6 +696,24 @@ func (s *server) echo(id json.RawMessage, text string) {
 		SessionUpdate: acp.UpdateAgentMessage,
 		Content:       &acp.ContentBlock{Type: "text", Text: text},
 	})
+	s.finishPrompt(id, acp.StopEndTurn)
+}
+
+// longReplyLines is how many chunks long-reply streams: far more than a
+// session's primary event channel holds (256), so a host with no primary and
+// no client proves it never waits on one (craze plan 030 §3.3).
+const longReplyLines = 600
+
+// longReply answers with longReplyLines message chunks, "line 1\n" to
+// "line 600\n", then ends the turn: session/load's load-long, as a live turn.
+func (s *server) longReply(id json.RawMessage) {
+	sid := s.mainID()
+	for i := 1; i <= longReplyLines; i++ {
+		s.update(sid, acp.SessionUpdate{
+			SessionUpdate: acp.UpdateAgentMessage,
+			Content:       &acp.ContentBlock{Type: "text", Text: "line " + strconv.Itoa(i) + "\n"},
+		})
+	}
 	s.finishPrompt(id, acp.StopEndTurn)
 }
 

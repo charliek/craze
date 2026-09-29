@@ -172,6 +172,12 @@ func sanitizeLine(s string) string {
 	return strings.Join(strings.Fields(dropControls(stripANSI(s))), " ")
 }
 
+// SanitizeLine is sanitizeLine for the packages below the clients that fold a
+// string onto one line the TUI's way and may not import a terminal library to
+// do it either: internal/engine's IndexTitleLine (plan 030 §3.3), which every
+// host writes a session-index title through.
+func SanitizeLine(s string) string { return sanitizeLine(s) }
+
 // cleanLine reports whether s is printable ASCII with single inner spaces and
 // none at either end: a string sanitizeLine's full path returns unchanged,
 // since stripANSI prints every byte 0x20-0x7E in the ground state, nothing in

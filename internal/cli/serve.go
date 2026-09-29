@@ -190,23 +190,41 @@ type rewrite struct {
 // with no coordinator: a TUI-hosted session is stopped by its own TUI's quit,
 // and refuses session.stop, stop_unsupported (§3.6a).
 func serveControl(env rundir.Env, hostID, workspace string, force bool, diag io.Writer) *controlHost {
-	started := time.Now().UTC()
-	host, err := rundir.Bind(env, hostID, rundir.Entry{StartedAt: started, Workspace: workspace})
+	h, err := bindControl(env, hostID, workspace, force, nil, diag)
 	if err != nil {
 		fmt.Fprintf(diag, "craze: control socket off: %v\n", err)
 		return nil
+	}
+	return h
+}
+
+// bindControl is serveControl's bind and serve, answering a failure rather
+// than warning about it: for craze serve a socket it cannot bind is fatal
+// (plan 030 §3.3), since a headless host is reachable through nothing else.
+// A failure has bound nothing — rundir.Bind unwinds what it built — and
+// started no goroutine. stop is the host's lifecycle coordinator
+// (control.Options.Stop): set, the server serves session.stop and advertises
+// capabilities.stop; nil — the TUI-hosted path — it refuses it,
+// stop_unsupported.
+func bindControl(env rundir.Env, hostID, workspace string, force bool, stop control.StopFunc, diag io.Writer) (*controlHost, error) {
+	started := time.Now().UTC()
+	host, err := rundir.Bind(env, hostID, rundir.Entry{StartedAt: started, Workspace: workspace})
+	if err != nil {
+		return nil, err
 	}
 	h := &controlHost{
 		host: host,
 		// No Log: nothing may reach the terminal while the TUI owns it, and
 		// each connection's note reaches the session's journal through the
-		// engine (control_conn).
+		// engine (control_conn) — a headless host's too, whose log would
+		// only repeat it.
 		server: control.New(control.Options{
 			PeerCheck:      rundir.PeerCheck(os.Geteuid()),
 			HostID:         hostID,
 			Workspace:      workspace,
 			PermissionMode: permissionMode(force),
 			StartedAt:      started,
+			Stop:           stop,
 		}),
 		diag:       diag,
 		update:     host.Update,
@@ -222,7 +240,7 @@ func serveControl(env rundir.Env, hostID, workspace string, force bool, diag io.
 		}
 	}()
 	go h.writeLoop()
-	return h
+	return h, nil
 }
 
 // permissionMode is the info document's word for how a host spawned its
@@ -617,4 +635,55 @@ func (c *sessionClaims) releaseAll() {
 	for _, claim := range held {
 		_ = claim.Release()
 	}
+}
+
+// hostLifecycle is a headless host's lifecycle coordinator (plan 030 §3.6a):
+// the one place its stop is decided. Every way a stop reaches the host asks it
+// through request — session.stop through the control server's seam
+// (control.Options.Stop, stopFunc: the server calls it at most once, its own
+// attach fence already up), SIGINT and SIGTERM through craze serve's signal
+// loop, and, from C5, the idle watcher once its close fence has found the host
+// eligible — and the first request IS the stop. craze serve's own goroutine,
+// parked on stopping, then runs the stop sequence once (serveHost.stop): the
+// attach fence, the engine's close, S2's close order, the claims, and the exit.
+// Every later request joins it: answered — a session.stop's receipt is the
+// server's — and otherwise nothing.
+//
+// request never blocks and never calls into the server or the engine: the
+// server calls it from a handler, which Server.Close waits for, so the work is
+// always the parked goroutine's.
+type hostLifecycle struct {
+	once     sync.Once
+	stopping chan struct{}
+
+	mu  sync.Mutex
+	why string
+}
+
+func newHostLifecycle() *hostLifecycle {
+	return &hostLifecycle{stopping: make(chan struct{})}
+}
+
+// request asks for the stop, saying why: the first request closes stopping,
+// and every later one joins it.
+func (l *hostLifecycle) request(why string) {
+	l.once.Do(func() {
+		l.mu.Lock()
+		l.why = why
+		l.mu.Unlock()
+		close(l.stopping)
+	})
+}
+
+// stopFunc is control.Options.Stop: a session.stop the server accepted.
+func (l *hostLifecycle) stopFunc(r control.StopRequest) {
+	l.request("session.stop from client " + r.Client)
+}
+
+// cause is why the host is stopping: the first request's words, "" before
+// any.
+func (l *hostLifecycle) cause() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.why
 }

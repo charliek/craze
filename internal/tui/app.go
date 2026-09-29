@@ -1096,7 +1096,7 @@ func (m *Model) setSession(s agent.Session, crazeID string) {
 	if s == nil {
 		return
 	}
-	eng, err := engine.New(s, engineOptions(crazeID, m.sessionIndex, m.cwd, m.providerDefault.Name()))
+	eng, err := engine.New(s, engine.HostOptions(crazeID, m.sessionIndex, m.cwd, m.providerDefault.Name()))
 	if err != nil {
 		// m.eng stays the untyped nil it was set to above: a failure leaves no
 		// backend, never a nil *engineBackend that would read as one.
@@ -1112,37 +1112,6 @@ func (m *Model) setSession(s agent.Session, crazeID string) {
 	// serves is the engine.
 	if m.onEngine != nil {
 		m.onEngine(eng)
-	}
-}
-
-// engineOptions is the engine.Options a session's engine is built with: the
-// one place they are spelled, for setSession and for the frame harness's
-// socket host (plan 027 §3.16), which builds its engine exactly as the TUI
-// would have. crazeID is the durable craze session id the session already has
-// ("" mints one), index the session index (nil persists nothing), cwd the
-// workspace as New resolved it (configWorkspace), and provider the resolved
-// default's name (configProvider).
-//
-// The zero ChainPolicy is the TUI's: Esc stops a turn and the queue behind it
-// carries on, and a prompt the session refuses is shown as the refusal it is
-// rather than waited out (engine.ChainPolicy).
-func engineOptions(crazeID string, index SessionIndex, cwd, provider string) engine.Options {
-	return engine.Options{
-		CrazeSessionID: crazeID,
-		Index: engine.IndexOptions{
-			Store: index,
-			CWD:   cwd,
-			// The provider a row is recorded under before the session has
-			// answered with one of its own: the resolved default it was
-			// started as.
-			Provider: provider,
-			// A provider craze cannot load again stays out of the index
-			// (plan 028 §3.5): unresumable, which is not the same question
-			// as hidden — before D-65 listed it, native was hidden and
-			// indexed.
-			Unindexed: unindexedProvider,
-			TitleLine: indexTitleLine,
-		},
 	}
 }
 
@@ -4183,20 +4152,11 @@ func indexWriteText(err error) string {
 	return err.Error()
 }
 
-// titleRuneCap is how long a session title may be in the index. Runes, not
-// bytes: the cap exists so a picker row is a row, and a prompt is as likely to
-// open in Japanese as in ASCII.
-const titleRuneCap = 120
-
-// indexTitleLine folds a title onto the one line a session-index row holds and
-// caps it. It is what the engine writes every row's title through
-// (engine.IndexOptions.TitleLine), and what /rename normalises with before it
-// even asks: how a title is made safe to draw is a rendering rule, so it stays
-// here with the rest of them rather than being spelled a second time above the
-// provider seam.
-func indexTitleLine(title string) string {
-	return capRunes(sanitizeLine(title), titleRuneCap)
-}
+// titleRuneCap is how long a session title may be in the index, which /rename
+// caps a title at before it asks: engine.IndexTitleRunes, the cap every host
+// writes a row's title through (engine.IndexTitleLine), and a test holds the two
+// rules together.
+const titleRuneCap = engine.IndexTitleRunes
 
 func capRunes(s string, n int) string {
 	if n <= 0 {
