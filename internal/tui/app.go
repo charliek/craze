@@ -196,14 +196,50 @@ type Config struct {
 	// of the provider and runs inside Update, so it must not block. nil
 	// refuses nothing — every test Config and every picker golden.
 	RefuseLoad func(agent.Provider) error
+
+	// NewBackend and LoadBackend are the launch flow (plan 030 §3.5): the
+	// backend twins of NewSession and LoadSession, for a craze whose sessions
+	// run in detached hosts (SD-33). Each spawns — or finds — the host of the
+	// session it is asked for and dials it, answering the backend the model
+	// adopts, as it adopts a Config.Backend (setBackend): its Start observes
+	// the host's own start. Either may take seconds, so the model calls it
+	// from a tea.Cmd, never from Update, and draws the session's starting
+	// state meanwhile — starting…, or restoring… for a load. NewBackend is a
+	// new session of p: Init's own when the provider is known
+	// (ProviderLocked), and otherwise the provider picker's choice, explicit
+	// when it was Enter on a row rather than the default Esc starts — the
+	// same distinction FallbackDefault's persistence draws, since the host is
+	// what persists the provider now. LoadBackend loads row: Continue's, which
+	// Init loads, and the resume picker's choice, which is not claimed here
+	// (ClaimSession is the in-process path's): the host claims it, and a
+	// session another host holds is that host's backend.
+	//
+	// Either set is the launch flow, and Session, NewSession, LoadSession,
+	// ClaimSession, OnEngine, SessionIndex and CrazeSessionID — the
+	// in-process path's — are not read: the host builds the engine and owns
+	// its claim, its index row and its provider's persistence. A failure is
+	// the session's start failing (startErr, exactly as Start's), except a
+	// *Refusal of a picker's choice, which brings that picker back with the
+	// refusal as its error row. A backend answered after the program has
+	// quit is never adopted, and is the caller's to close: Start is called
+	// on every backend the model adopts, and on no other. nil keeps the
+	// in-process path — every test Config, every golden, the frame runner
+	// and craze under the opt-out.
+	NewBackend  func(p agent.Provider, explicit bool) (backend.Backend, error)
+	LoadBackend func(p agent.Provider, row sessions.Row) (backend.Backend, error)
+	// Continue is --continue's row in the launch flow: internal/cli resolved
+	// it — claiming nothing — and Init loads it (LoadBackend), with the
+	// provider locked to the row's and Loading set. nil for anything else.
+	Continue *sessions.Row
 }
 
 // viewing is c as it runs: for a viewer (Config.Viewer with a Backend)
 // everything the host alone owns is cleared — the pickers' closures and rows,
-// the claim and engine hooks, provider persistence, the session index and the
-// host-status hub — so that no path of New or Run can reach it. Viewer without
-// a Backend means nothing and is cleared too; any other Config is returned as
-// it is. It is idempotent: Run applies it, and New again.
+// the claim and engine hooks, the launch flow's spawns, provider persistence,
+// the session index and the host-status hub — so that no path of New or Run
+// can reach it. Viewer without a Backend means nothing and is cleared too;
+// any other Config is returned as it is. It is idempotent: Run applies it,
+// and New again.
 func (c Config) viewing() Config {
 	if !c.Viewer || c.Backend == nil {
 		c.Viewer = false
@@ -211,6 +247,7 @@ func (c Config) viewing() Config {
 	}
 	c.Session, c.NewSession, c.LoadSession, c.Resume = nil, nil, nil, nil
 	c.ClaimSession, c.RefuseLoad, c.OnEngine = nil, nil, nil
+	c.NewBackend, c.LoadBackend, c.Continue = nil, nil, nil
 	c.PersistProvider = false
 	c.SessionIndex = nil
 	c.Host = nil
@@ -498,6 +535,18 @@ type Model struct {
 	// rows Esc and Enter act on.
 	providers  []agent.Provider
 	newSession func(agent.Provider) agent.Session
+
+	// The launch flow (plan 030 §3.5, launch.go): spawnNew and spawnLoad are
+	// Config.NewBackend and Config.LoadBackend, and cont is Config.Continue.
+	// spawnSeq stamps each spawn the model starts, spawnWaiting is the one it
+	// is waiting for (0 for none), and spawnFrom is the picker whose choice it
+	// is — dialogNone for Init's own — which a refusal brings back.
+	spawnNew     func(agent.Provider, bool) (backend.Backend, error)
+	spawnLoad    func(agent.Provider, sessions.Row) (backend.Backend, error)
+	cont         *sessions.Row
+	spawnSeq     int
+	spawnWaiting int
+	spawnFrom    dialogKind
 
 	todoPlanned int
 	todoDone    bool
@@ -1240,7 +1289,7 @@ func (m *Model) nextCmds(n int) []engine.Command {
 }
 
 func New(cfg Config) Model {
-	cfg = cfg.viewing()
+	cfg = cfg.viewing().launching()
 	cwd := configWorkspace(cfg.Workspace)
 
 	vp := viewport.New(0, 0)
@@ -1267,6 +1316,9 @@ func New(cfg Config) Model {
 		providers:       pickerRows(cfg.Providers, prov),
 		newSession:      cfg.NewSession,
 		loadSession:     cfg.LoadSession,
+		spawnNew:        cfg.NewBackend,
+		spawnLoad:       cfg.LoadBackend,
+		cont:            cfg.Continue,
 		claimSession:    cfg.ClaimSession,
 		refuseLoad:      cfg.RefuseLoad,
 		onEngine:        cfg.OnEngine,
@@ -1307,10 +1359,16 @@ func New(cfg Config) Model {
 		// question the answer overrides (§3.1).
 		m.pickingResume = true
 		m.dialog = dialogResume
-	case m.newSession != nil && !m.providerLocked:
+	case (m.newSession != nil || m.spawnNew != nil) && !m.providerLocked && m.cont == nil:
 		m.pickingProvider = true
 		m.dialog = dialogProvider
 		m.providerCursor = m.providerIndex(prov)
+	case m.launch():
+		// The launch flow with its session known: nothing is built here, and
+		// Init spawns it (plan 030 §3.5). New records the attempt Init's call
+		// is, since Init cannot — m.reading's rule, below.
+		m.spawnSeq++
+		m.spawnWaiting, m.spawnFrom = m.spawnSeq, dialogNone
 	default:
 		if sess == nil && m.newSession != nil {
 			sess = m.newSession(prov)
@@ -1544,6 +1602,11 @@ func (m Model) Init() tea.Cmd {
 	if m.picking() {
 		return nil
 	}
+	if m.spawnWaiting != 0 {
+		// The launch flow's session is not here yet: Init spawns it, and its
+		// start and its reader are armed once it is adopted (launch.go).
+		return m.initSpawn()
+	}
 	return tea.Batch(m.startCmd(), waitEvent(m.eng))
 }
 
@@ -1691,6 +1754,9 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case resumeClaimMsg:
 		return m.resumeClaimed(msg)
+
+	case spawnedMsg:
+		return m.spawned(msg)
 
 	case startedMsg:
 		// Half of the gate: Start has returned. For a new session that is the

@@ -101,6 +101,12 @@ func (m Model) confirmProvider(p agent.Provider, explicit bool) (tea.Model, tea.
 	m.dialog = dialogNone
 	m.pickedExplicit = explicit
 	m.sessProvider = p.Name()
+	if m.spawnNew != nil {
+		// The launch flow (plan 030 §3.5): the choice is spawned, and the
+		// session it answers is adopted when it lands (launch.go). Nothing
+		// is running to close — a picker is up only before any session.
+		return m, m.spawn(dialogProvider, p, nil, explicit)
+	}
 	if m.newSession != nil {
 		// The ENGINE is closed, not just the session: closing the session alone
 		// would leave the old engine's driver running and its last events

@@ -80,6 +80,10 @@ def isolate_run_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator
     monkeypatch.setenv("CRAZE_RUNTIME_DIR", runtime_dir)
     monkeypatch.delenv("XDG_RUNTIME_DIR", raising=False)
     monkeypatch.delenv("CRAZE_CONTROL_SOCKET", raising=False)
+    # The ordinary craze runs its session in a detached host (plan 030 §3.5);
+    # these cases were written for the TUI that hosts its own, and keep testing
+    # it under the opt-out. C7 runs the core cases in both modes.
+    monkeypatch.setenv("CRAZE_DETACH", "0")
     try:
         yield
     finally:

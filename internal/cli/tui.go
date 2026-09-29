@@ -96,12 +96,28 @@ func registerTUIFlags(cmd *cobra.Command, f *tuiFlags) {
 // processHostEnv() for the real command, and an empty hostEnv for a test, which
 // must never report into the herdr pane or roost tab the test suite itself may
 // be running in.
+//
+// Its session runs in a detached host the TUI is a client of (runLaunch,
+// plan 030 §3.5), or — under the opt-out (detachOn) — in this process, the
+// path below, which is the whole of runTUI as it was before detached hosts.
 func runTUI(cmd *cobra.Command, f *tuiFlags, env hostEnv) error {
 	if err := f.settle(); err != nil {
 		return err
 	}
 	if f.cont && f.resume {
 		return usagef("craze: --continue and --resume are mutually exclusive")
+	}
+	// The TUI owns the alt screen for the whole run, so nothing else may write
+	// to the terminal: a diagnostic from cursor-agent lands on top of a frame,
+	// takes none of the renderer's locks, and would garble it. The agent's
+	// stderr and craze's own warnings are held here and printed once the screen
+	// is back.
+	diag := &deferredStderr{}
+	// The session runs in a detached host, which this TUI is the client of
+	// (plan 030 §3.5, launch.go) — unless the opt-out says not to: then it
+	// runs in this process, exactly as it always has, below.
+	if detachOn(diag.craze()) {
+		return runLaunch(cmd, f, env, diag)
 	}
 	// The host id first: the session claims write it into their lock files,
 	// with a control socket or without one (plan 027 §3.9). Its teardown is
@@ -123,12 +139,6 @@ func runTUI(cmd *cobra.Command, f *tuiFlags, env hostEnv) error {
 		indexCWD = abs
 	}
 	mode := f.mode()
-	// The TUI owns the alt screen for the whole run, so nothing else may write
-	// to the terminal: a diagnostic from cursor-agent lands on top of a frame,
-	// takes none of the renderer's locks, and would garble it. The agent's
-	// stderr and craze's own warnings are held here and printed once the screen
-	// is back.
-	diag := &deferredStderr{}
 	rh := &runHost{claims: newSessionClaims(runEnv, hostID, diag.craze())}
 	defer rh.close()
 	// A loaded session takes its provider from the row it loads, so whatever
@@ -230,7 +240,7 @@ func runTUI(cmd *cobra.Command, f *tuiFlags, env hostEnv) error {
 	// the hub's goroutines start only for a run that reaches tui.Run, whose
 	// exit tail closes the hub before diag is flushed.
 	attachHost(&cfg, hosts, diag.craze())
-	res, err := tui.Run(cfg)
+	res, err := tuiRun(cfg)
 	// The teardown runs here, before the flush, and not only in the defer
 	// (which stays for the returns above, and is a no-op after this): the
 	// socket, the registry entry and the claims are released even when stderr

@@ -182,6 +182,34 @@ func ConfigControlSocket() (on bool, why string) {
 	return on, ""
 }
 
+// ConfigDetach is whether craze may run its sessions in detached hosts (plan
+// 030 §3.5, SD-33) — `detach` — and why not when it may not. It is
+// ConfigControlSocket's rule: default on, and off, with a reason, for a
+// config.toml that cannot be read or parsed or a `detach` that is not a bool.
+// Off here means today's in-process path — the session runs inside the TUI,
+// as it did before detached hosts — which is the safe side for a switch whose
+// value craze cannot read: a detached host outlives its terminal, and a user
+// who meant to keep sessions tied to theirs must not get one from a typo. An
+// explicit `detach = false` is off with no reason given.
+func ConfigDetach() (on bool, why string) {
+	cfg, err := readConfig()
+	switch {
+	case errors.Is(err, ErrConfigMalformed):
+		return false, "config.toml could not be parsed"
+	case err != nil:
+		return false, "config.toml could not be read"
+	}
+	v, ok := cfg["detach"]
+	if !ok {
+		return true, ""
+	}
+	on, ok = v.(bool)
+	if !ok {
+		return false, "config.toml detach is not a bool"
+	}
+	return on, ""
+}
+
 // ConfigCompatClaude is the [compat.claude] table — which classes of Claude's
 // own content a native session reads (plan 022 §3.5) — and the lines to say
 // about it. Every key defaults to true, so an absent table, a partial one and

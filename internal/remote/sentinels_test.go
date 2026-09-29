@@ -565,11 +565,19 @@ var tuiSites = []tuiSite{
 	{"config.go", "readConfigAt", "Is", "fs.ErrNotExist", 1, proofLocal},
 	{"config.go", "ConfigJournal", "Is", "ErrConfigMalformed", 1, proofLocal},
 	{"config.go", "ConfigControlSocket", "Is", "ErrConfigMalformed", 1, proofLocal},
+	{"config.go", "ConfigDetach", "Is", "ErrConfigMalformed", 1, proofLocal},
 	// The frame harness's capture boundary: in process only (engineBehind).
 	{"frame.go", "streamHead", "Is", "agent.ErrLogClosing", 1, proofLocal},
 	{"frame.go", "streamHead", "Is", "agent.ErrClosed", 1, proofLocal},
 	{"frame.go", "streamHead", "Is", "agent.ErrFlushGaveUp", 1, proofLocal},
 	{"gate.go", "unanswered", "Is", "ctx.Err()", 1, proofDeadline},
+	// The launch flow's spawns (plan 030 §3.5): the answer of a Config
+	// closure (NewBackend, LoadBackend) — the launcher's own, about a host it
+	// spawned or found — which no Backend call answers.
+	{"launch.go", "Error", "Error", "r.Err", 1, proofLocal},
+	{"launch.go", "spawned", "As", "&refused", 1, proofLocal},
+	{"launch.go", "repick", "Error", "r", 1, proofLocal},
+	{"launch.go", "spawnFailed", "Error", "err", 1, proofLocal},
 	// A gated reply's error, and a command's or a chain's failure as the
 	// reducer words it (failureText): ErrNoAnswer for the client's own
 	// outcome-unknown answers, the host's error unchanged otherwise.

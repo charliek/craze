@@ -177,6 +177,8 @@ var gateDigestSkips = map[string]string{
 	"onEngine":     "a function",
 	"newSession":   "a function",
 	"loadSession":  "a function",
+	"spawnNew":     "a function",
+	"spawnLoad":    "a function",
 	"claimSession": "a function",
 	"refuseLoad":   "a function",
 	"foldIn":       "the fold's per-event scratch (the fold itself is shared's digest)",

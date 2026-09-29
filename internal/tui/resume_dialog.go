@@ -208,6 +208,12 @@ func (m Model) confirmResume(row sessions.Row) (tea.Model, tea.Cmd) {
 	// --continue: tea.Batch promises no ordering between startCmd and the
 	// first waitEvent, so EventReplay{start} cannot be what learns it (§3.5).
 	m.replaying = true
+	if m.spawnLoad != nil {
+		// The launch flow (plan 030 §3.5): the row is spawned — its host
+		// claims it, and a session another host holds is attached to there —
+		// and the session it answers is adopted when it lands (launch.go).
+		return m, m.spawn(dialogResume, p, &row, false)
+	}
 	if m.loadSession != nil {
 		// The engine, not the session: see confirmProvider.
 		if m.eng != nil {
