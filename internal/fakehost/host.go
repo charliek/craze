@@ -149,15 +149,19 @@ type Host struct {
 	// stops is how many session.stop requests the server handed the
 	// fixtures' coordinator (Options.Stop): at most one, the server's own
 	// rule. stopped says run_stop has run the sequence.
-	stops   int
-	stopped bool
+	stops int
+	// stopHeard is closed on the first stop the server hands over, so
+	// RunStop can wait for it (stopHeardWait).
+	stopHeard     chan struct{}
+	stopHeardOnce sync.Once
+	stopped       bool
 }
 
 // New builds a Host and its first incarnation, started. Nothing is served
 // until Serve is called.
 func New(o Options) (*Host, error) {
 	o = o.withDefaults()
-	h := &Host{opts: o, clk: newClock()}
+	h := &Host{opts: o, clk: newClock(), stopHeard: make(chan struct{})}
 	co := control.Options{
 		Log:            o.Log,
 		HostID:         o.HostID,
@@ -562,7 +566,14 @@ func (h *Host) stopRequested(control.StopRequest) {
 	h.mu.Lock()
 	h.stops++
 	h.mu.Unlock()
+	h.stopHeardOnce.Do(func() { close(h.stopHeard) })
 }
+
+// stopHeardWait bounds how long RunStop waits for the server to hand the
+// coordinator its stop. Since plan 030 C1r the server queues a stop's {}
+// receipt before it calls the coordinator (X3), so a fixture that read the
+// receipt can reach run_stop an instant before the handler's call lands.
+const stopHeardWait = 10 * time.Second
 
 // RunStop is the run_stop op: the fixtures' coordinator runs the stop
 // sequence it was handed (plan 030 §3.6a) — here, the current engine's close,
@@ -573,6 +584,12 @@ func (h *Host) stopRequested(control.StopRequest) {
 // not run yet: a fixture that says run_stop has proven the coordinator heard
 // its stop, once, however many were sent.
 func (h *Host) RunStop() error {
+	if h.opts.Stop {
+		select {
+		case <-h.stopHeard:
+		case <-time.After(stopHeardWait):
+		}
+	}
 	h.mu.Lock()
 	stops, stopped := h.stops, h.stopped
 	h.stopped = true
