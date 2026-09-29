@@ -102,7 +102,12 @@ looks like in the TUI.
 launching `craze` first attaches directly to a live host that serves the
 session, and otherwise spawns a host, which makes this same claim and answers
 `held` when another craze has it — the launcher then finds the holder and
-attaches to it. The words, the refusals and the ignored-flag note are the same.*
+attaches to it. The refusals are worded the same, but the detached launcher
+prints no line before the TUI for a plain reattach; only when the command line
+gave flags a new session would take does it print the ignored-flag note
+(`craze: that session is already running (pid N); attached to it (ignored:
+--model)`), after the TUI exits. The stderr line shown below is the in-process
+path's.*
 
 `--continue` claims the row it loads before anything is built: its own lock
 under `~/.cache/craze/locks/`, independent of `CRAZE_HOME` and the runtime
@@ -246,18 +251,21 @@ socket](protocol.md#reaching-a-host) (plan 030 §3.5). What follows:
   reaches the same host.
 - **`/exit` ends the session, everywhere.** `/exit`, <kbd>Ctrl+D</kbd> and
   the second <kbd>Ctrl+C</kbd> ask the host to stop the session
-  (`session.stop`): the agent is closed, the session is saved and resumable,
-  and every other client attached sees it end. The TUI waits at most two
+  (`session.stop`): the agent is closed, the session stays resumable if it
+  has an index row (it has one once it was prompted), and every other client
+  attached sees it end. The TUI waits at most two
   seconds for that, in total; a second quit ends the wait at once. A host
   that cannot stop its session (a TUI-hosted one, or one from an older
   craze) is detached from instead, with `craze: that session runs in an
   older craze; close it there`; any other failure prints `craze: the session
-  may still be running: <reason>`. Exit 0 either way.
+  may still be running: <reason>`. Exit 0 either way — except after a failed
+  start, which exits 1.
 - **An unattended host does not run for ever.** A host with no client
   attached and nothing in flight exits after
   [`host_idle_exit`](configuration.md#host-idle-exit) (an hour by default),
   saving the session like any stop. A host whose session was never prompted
-  goes after five minutes at most; one whose start failed, as soon as its
+  has its idle limit capped at five minutes (after the startup grace, and
+  only while nothing keeps it busy); one whose start failed, as soon as its
   launcher has been told.
 - **A quit before the session is up leaves nothing behind.** A host this
   launch spawned whose session never came up in the TUI (quit while starting,
@@ -627,9 +635,10 @@ craze attach: session <id> is unreachable: <reason>
 The pickers, provider persistence, session swaps, host status reporting
 (the herdr pane or roost tab belongs to the host) and session-index writes
 are all the host's; an attach does none of them. Shell mode (`!`) still runs
-locally, in the session's own workspace. The permission chip shows craze's
-own default (yolo) — the wire does not carry the host's `--force`/
-`--no-force` choice.
+locally, in the session's own workspace. The permission chip shows the
+host's permission mode (its `--force`/`--no-force`) when the host advertises
+it, and falls back to craze's own default (yolo) for an older host that does
+not.
 
 ### Keys
 
@@ -645,8 +654,9 @@ does in the host TUI. <kbd>Ctrl+C</kbd> when idle, a second <kbd>Ctrl+C</kbd>,
 Quitting `craze attach` is the same act as quitting the host's own TUI (plan
 030 §3.6): <kbd>Ctrl+C</kbd> when idle, a second <kbd>Ctrl+C</kbd>,
 <kbd>Ctrl+D</kbd> and `/exit` ask the host to **stop the session**
-(`session.stop`). It ends for every client attached and is saved and
-resumable; the attach exits 0 and prints nothing more. (The help dialog still
+(`session.stop`). It ends for every client attached and stays resumable if
+it has an index row; the attach exits 0 and prints nothing more (1 after a
+failed start). (The help dialog still
 words `/exit` "Quit craze" and <kbd>Ctrl+D</kbd> "quit"; that wording is
 unchanged.) Two things do not end it, and are **view closes** — the attach
 detaches, exits 0, and the session goes on running on its host: SIGTERM, and a

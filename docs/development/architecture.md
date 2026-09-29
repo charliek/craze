@@ -108,8 +108,9 @@ attach fence, the engine's close, the control server's close order, the
 start's join (bounded), then the claims and the agent record are released.
 `session.stop`, SIGINT/SIGTERM and the idle watcher only *request* it. A host
 that cannot join its start in time kills the agents it recorded itself
-(each record is a process-group id plus the leader's start time, so a reused
-pid is never signalled); the launcher does the same for a host it had to give
+(each record is a process-group id plus the leader's start time, so a group
+whose leader had already been reused when checked is not signalled; a short
+race remains between that check and the signal — SF-81); the launcher does the same for a host it had to give
 up on.
 
 **The idle fence.** The idle watcher looks once a second; when its clock
@@ -125,7 +126,7 @@ stop's close ends it).
 
 **The opt-out.** `detach = false`, `CRAZE_DETACH=0`, or the control socket off
 keep the older path: `runTUI` builds the engine in the TUI's own process, binds
-its own socket, and closes the session with the terminal. Both paths are kept
+its own socket when the control socket is enabled, and closes the session with the terminal. Both paths are kept
 under test (`tests/cli` runs its core cases detached and in process); the
 choice is `detachOn` in `internal/cli/launch.go`. See
 [Configuration](../reference/configuration.md#detached-hosts).
