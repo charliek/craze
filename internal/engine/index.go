@@ -151,10 +151,13 @@ type IndexOptions struct {
 	TitleLine func(string) string
 }
 
-// newCrazeSessionID mints a durable craze session id: a UUIDv7, as the host
+// NewCrazeSessionID mints a durable craze session id: a UUIDv7, as the host
 // incarnation is (agent.NewIncarnation). The uuid package is the standard
-// library's, so this adds no dependency.
-func newCrazeSessionID() string { return uuid.NewV7().String() }
+// library's, so this adds no dependency. New mints one for a session built
+// with neither Options.CrazeSessionID nor Options.MintedCrazeSessionID; a host
+// that must claim a new session before it builds anything mints it here and
+// passes it as the latter (craze serve, plan 030 C2r2).
+func NewCrazeSessionID() string { return uuid.NewV7().String() }
 
 // indexWork is what the worker owes, merged field by field. See the file's
 // doc comment for why it is a struct and not a row.

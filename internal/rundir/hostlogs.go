@@ -21,6 +21,12 @@ import (
 // hostLogsName is the host logs' directory under the cache tree.
 const hostLogsName = "host-logs"
 
+// hostLogsListed runs in SweepHostLogs once the host-logs directory is held
+// and listed, before the registry directory is opened: nothing in production,
+// and in a test (never in parallel) a writer of ~/.cache swapping a copy of
+// the craze tree in for the live one — the instant astra r4-fix12 2 named.
+var hostLogsListed = func() {}
+
 // HostLogDir is the host logs' directory, <Home>/.cache/craze/host-logs,
 // validated exactly as the rest of the cache tree is (cacheDir: every component
 // walked from "/" by descriptor, never through a link; the craze tree's leaves
@@ -52,6 +58,20 @@ func HostLogDir(env Env) (string, error) {
 // missing or can be taken here, and kept whenever it is held or cannot be
 // told (an open or a lock that fails).
 //
+// A lock decides only about the logs beside it: the host-logs directory and
+// the registry directory are both opened relative to one craze directory,
+// walked, validated and held once (crazeDir, subDir) — never each by its own
+// walk from the path. Two walks would each find whatever is at
+// ~/.cache/craze when they ran, and a writer of ~/.cache who renamed the tree
+// aside between them and put a copy of the victim's own in its place — its
+// hosts/<id>.lock a copy, another inode, which no live host holds — would
+// hand the sweep a lock it can take for a host still writing the logs it
+// already holds (astra r4-fix12 2). It is the rule S2's registry sweep keeps
+// for sockets (sweep): a lock is authority only over its own tree. Held
+// once, the two are siblings wherever the tree is moved; a copy swapped in
+// before the walk is swept against its own copied locks, and the live tree,
+// renamed aside, is not touched.
+//
 // A directory that does not exist yet is nothing to sweep and is not created;
 // one that fails validation, or a registry directory that does (so no host can
 // be known to be gone), is an error and nothing is removed — a registry
@@ -60,7 +80,15 @@ func HostLogDir(env Env) (string, error) {
 // is never followed: it is not a regular file. It answers how many files it
 // removed.
 func SweepHostLogs(env Env, now time.Time, maxAge time.Duration, keep string) (int, error) {
-	d, err := env.cacheDir(hostLogsName, false)
+	c, err := env.crazeDir(false)
+	if errors.Is(err, fs.ErrNotExist) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = c.close() }()
+	d, err := env.subDir(c, hostLogsName, false)
 	if errors.Is(err, fs.ErrNotExist) {
 		return 0, nil
 	}
@@ -72,7 +100,8 @@ func SweepHostLogs(env Env, now time.Time, maxAge time.Duration, keep string) (i
 	if err != nil {
 		return 0, err
 	}
-	hosts, err := env.cacheDir(hostsName, false)
+	hostLogsListed()
+	hosts, err := env.subDir(c, hostsName, false)
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
 		hosts = nil
@@ -120,7 +149,8 @@ func SweepHostLogs(env Env, now time.Time, maxAge time.Duration, keep string) (i
 }
 
 // hostGone reports whether the host id is gone, by its lock in the held
-// registry directory hosts (nil: there is none yet) — the lock a live host
+// registry directory hosts (nil: there is none yet), the host-logs
+// directory's sibling in one held craze directory — the lock a live host
 // holds from its Bind to its Close, and the one Hosts probes: missing, the host
 // never bound, has exited (its Close unlinks the lock) or was swept; taken
 // here, its holder is dead, and it is held — release lets it go — while the

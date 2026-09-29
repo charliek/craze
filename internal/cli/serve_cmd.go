@@ -40,20 +40,22 @@ import (
 //     log opens (--log, else stderr: hostlog.go) — in that order, so the sweep
 //     can never take the log it is about to write.
 //  3. The provider resolves as the root's does. A new session's is held to the
-//     spawn flags; a load's row is found — --continue's the newest in the
-//     workspace, --load's the one its id names — and claimed before anything
-//     is built (claimLoad), a legacy row given its craze id under this host's
-//     own claim. A session another craze holds is exit 1 naming its holder,
-//     carrying the *rundir.HeldError, which a spawned host's ready line
-//     answers held (ready.go).
+//     spawn flags, and its craze id is minted here and claimed; a load's row
+//     is found — --continue's the newest in the workspace, --load's the one
+//     its id names — and claimed (claimLoad), a legacy row given its craze id
+//     under this host's own claim. Either is claimed before anything is built,
+//     so a refusal leaves no socket, no session and no journal. A session
+//     another craze holds is exit 1 naming its holder, carrying the
+//     *rundir.HeldError, which a spawned host's ready line answers held
+//     (ready.go).
 //  4. The control socket binds — fatally: a failure leaves nothing behind —
 //     served with the lifecycle coordinator (hostLifecycle) as its stop seam.
 //  5. The session is built as the TUI builds one, sessionOptions and
 //     engine.HostOptions, with agent.Options.NoPrimary: nothing reads a
 //     primary on a host with no client, and with one the 257th unread event
-//     would block the agent. A new session's id is claimed, then the engine
-//     goes to the socket and the registry entry is rewritten for it
-//     (runHost.onEngine).
+//     would block the agent. A new session's engine takes the id claimed in
+//     step 3 (engine.Options.MintedCrazeSessionID), then the engine goes to
+//     the socket and the registry entry is rewritten for it (runHost.publish).
 //  6. Start runs on a goroutine of its own, so a remote client's Start only
 //     observes it. A start that failed leaves the host up and its failure
 //     travels the socket as start_failed (C5 decides when such a host exits);
@@ -313,6 +315,9 @@ func serveSession(cmd *cobra.Command, f *serveFlags, env hostEnv, sigs <-chan os
 		ws  string
 		row sessions.Row
 		p   = resolved.Provider
+		// minted is a new session's craze id, minted and claimed here
+		// before anything is built; "" for a load, whose id is its row's.
+		minted string
 	)
 	if loading {
 		resolved.Fallback = false
@@ -350,6 +355,18 @@ func serveSession(cmd *cobra.Command, f *serveFlags, env hostEnv, sigs <-chan os
 		if ws, err = resolveWorkspace(f.workspace); err != nil {
 			return err
 		}
+		// A new session's id is minted here and claimed as a load's is,
+		// before anything is built, and handed to the engine as minted
+		// (engine.Options.MintedCrazeSessionID). Claimed after engine.New
+		// minted it, a refusal would come with the engine's craze_session
+		// note already owed to the journal, and its close would write the
+		// journal of a session that never ran (astra r4-fix12 3). A fresh
+		// UUIDv7 held elsewhere is no session to attach to: require makes
+		// every failure a refusal.
+		minted = engine.NewCrazeSessionID()
+		if err := rh.claims.require(minted); err != nil {
+			return err.exit()
+		}
 	}
 	indexCWD := absDir(ws)
 	// Settled before anything is built, as runTUI settles them: the agent's
@@ -384,18 +401,12 @@ func serveSession(cmd *cobra.Command, f *serveFlags, env hostEnv, sigs <-chan os
 	}
 	serveBuilt(opts)
 	sess := agent.New(opts)
-	eng, err := engine.New(sess, engine.HostOptions(row.CrazeID, &sessions.Store{KnownProvider: knownProvider}, indexCWD, p.Name()))
+	engOpts := engine.HostOptions(row.CrazeID, &sessions.Store{KnownProvider: knownProvider}, indexCWD, p.Name())
+	engOpts.MintedCrazeSessionID = minted
+	eng, err := engine.New(sess, engOpts)
 	if err != nil {
 		_ = sess.Close()
 		return exitf(1, "craze serve: %v", err)
-	}
-	// A new session's id — the engine minted it — is claimed before any
-	// client can see the engine; a load's was claimed above, and this takes
-	// nothing. The agent spawns only at Start, so a refusal here has spawned
-	// nothing, and the engine's close closes the session unstarted.
-	if err := rh.claims.require(eng.State().CrazeSessionID); err != nil {
-		_ = eng.Close()
-		return err.exit()
 	}
 	published := rh.publish(eng)
 	fmt.Fprintf(out, "craze serve: host %s serving session %s (%s) in %s\n",

@@ -216,3 +216,107 @@ func TestSweepHostLogsDecidesDeathByTheHostLock(t *testing.T) {
 		t.Fatalf("the dead host's lock is still held after the sweep: %v, %v", taken, err)
 	}
 }
+
+// TestASweepOfACopiedRegistryLeavesTheLiveLogs is not parallel: it replaces
+// hostLogsListed. It is TestASweepOfACopiedRegistryLeavesTheLiveSocket's copy
+// attack on the host logs, at the instant astra r4-fix12 2 named: the sweep
+// holds the live tree's host-logs directory and has listed a live host's
+// week-old logs; before it opens the registry, a writer of ~/.cache renames
+// the live craze tree aside and a copy of the victim's own to its name — the
+// copy's hosts/<id>.lock another inode, which no live host holds. The registry
+// the sweep decides by is the live tree's, the sibling of the logs it holds,
+// so the live host's lock is held and its logs stay; a sweep that walked the
+// path again would take the copy's lock and delete them. A later sweep, which
+// walks to the copy, sweeps only the copy's own logs by its own copied locks,
+// and the live tree, renamed aside, is untouched.
+func TestASweepOfACopiedRegistryLeavesTheLiveLogs(t *testing.T) {
+	env := testEnv(t)
+	now := time.Now()
+	logs, err := HostLogDir(env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := bind(t, env)
+	old := now.Add(-2 * time.Hour)
+	files := []string{h.ID() + ".log", h.ID() + ".log.1", h.ID() + ".pgids"}
+	aged := func(dir string) {
+		t.Helper()
+		for _, n := range files {
+			p := filepath.Join(dir, n)
+			writeFile(t, p, "x")
+			if err := os.Chtimes(p, old, old); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	aged(logs)
+
+	// The copy: the victim's own, made 0700 all through as the cache tree
+	// is, its registry entry and host lock copied byte for byte (the lock a
+	// new, unlocked inode), and its host logs copies too.
+	cache := filepath.Join(env.Home, cacheName)
+	crazeDir := filepath.Join(cache, crazeName)
+	backup := filepath.Join(cache, "craze-backup")
+	for _, d := range []string{backup, filepath.Join(backup, hostsName), filepath.Join(backup, hostLogsName)} {
+		mkdir(t, d, 0o700)
+	}
+	for _, n := range []string{h.ID() + ".json", h.ID() + ".lock"} {
+		b, err := os.ReadFile(filepath.Join(crazeDir, hostsName, n))
+		if err != nil {
+			t.Fatal(err)
+		}
+		writeFile(t, filepath.Join(backup, hostsName, n), string(b))
+	}
+	aged(filepath.Join(backup, hostLogsName))
+	aside := filepath.Join(cache, "craze-live")
+
+	swapped := false
+	prev := hostLogsListed
+	t.Cleanup(func() { hostLogsListed = prev })
+	hostLogsListed = func() {
+		if swapped {
+			return
+		}
+		swapped = true
+		if err := os.Rename(crazeDir, aside); err != nil {
+			t.Error(err)
+		}
+		if err := os.Rename(backup, crazeDir); err != nil {
+			t.Error(err)
+		}
+	}
+	n, err := SweepHostLogs(env, now, time.Hour, "")
+	if !swapped {
+		t.Fatal("setup: the sweep never listed the host logs")
+	}
+	if err != nil {
+		t.Fatalf("the sweep: %v", err)
+	}
+	for _, f := range files {
+		if !exists(t, filepath.Join(aside, hostLogsName, f)) {
+			t.Errorf("a sweep whose tree was swapped for a copy removed the live host's %s", f)
+		}
+	}
+	if n != 0 {
+		t.Fatalf("the sweep removed %d files, want none: the live host's lock is held", n)
+	}
+	for _, f := range files {
+		if !exists(t, filepath.Join(crazeDir, hostLogsName, f)) {
+			t.Fatalf("the sweep reached into the copy swapped in after its walk: %s went", f)
+		}
+	}
+
+	// The next sweep walks to the copy: its copied lock is nobody's, and the
+	// copy's own week-old logs go; the live tree's stay.
+	if n, err := SweepHostLogs(env, now, time.Hour, ""); n != len(files) || err != nil {
+		t.Fatalf("a sweep of the copy removed %d, %v; want the copy's %d", n, err, len(files))
+	}
+	if left, err := os.ReadDir(filepath.Join(crazeDir, hostLogsName)); err != nil || len(left) != 0 {
+		t.Fatalf("the copy's host logs hold %v (%v); want them swept", left, err)
+	}
+	for _, f := range files {
+		if !exists(t, filepath.Join(aside, hostLogsName, f)) {
+			t.Errorf("a sweep of the copy removed the live host's %s", f)
+		}
+	}
+}

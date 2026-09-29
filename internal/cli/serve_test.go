@@ -572,6 +572,13 @@ func TestTheTeardownFlushesThenClosesThenUnlinks(t *testing.T) {
 		steps = append(steps, note)
 	}
 	t.Cleanup(func() { teardownStep = func(string) {} })
+	// The flush gets a step's bound, not production's 500 ms: a starved CPU
+	// (the 5% quota) writes this backlog slower than that, and the claim here
+	// is that the teardown waits for the flush, not how fast it is written.
+	// The wait still ends the moment the connection has closed itself.
+	prevFlush := flushWait
+	flushWait = serveStep
+	t.Cleanup(func() { flushWait = prevFlush })
 	rh.close()
 	want := []string{"flushing", "flushed", "server closed", "unlinked", "released"}
 	if strings.Join(steps, ", ") != strings.Join(want, ", ") {

@@ -342,7 +342,8 @@ func builtOptions(t *testing.T, ch <-chan agent.Options) agent.Options {
 // there), a client attaching afterwards is given the whole transcript, and
 // session.stop then ends the host: runServe returns nil (exit 0), the registry
 // entry, the socket and the host lock are gone, and the session's index row
-// stays.
+// stays. The new session runs under the id its host claimed before building
+// it: that id is held, by this host.
 func TestServeRunsALongTurnWithNoClient(t *testing.T) {
 	env, ws := serveHome(t)
 	t.Setenv("CRAZE_FAKE_SCRIPT", "long-reply")
@@ -350,6 +351,17 @@ func TestServeRunsALongTurnWithNoClient(t *testing.T) {
 	e := r.waitServing(t, env, true)
 	if !listRow(t, e).Capabilities.Stop {
 		t.Fatal("a craze serve host does not advertise stop")
+	}
+	// The id the new session runs under is the one the host minted and
+	// claimed before building it (engine.Options.MintedCrazeSessionID): the
+	// only session lock in this home is that id's, and the host holds it.
+	locks, _ := filepath.Glob(filepath.Join(env.Home, ".cache", "craze", "locks", "*.lock"))
+	if len(locks) != 1 || filepath.Base(locks[0]) != e.CrazeSessionID+".lock" {
+		t.Fatalf("the session locks are %q, want only the served session %s's", locks, e.CrazeSessionID)
+	}
+	var held *rundir.HeldError
+	if _, err := anotherCraze(t).claimSession(e.CrazeSessionID); !errors.As(err, &held) || held.Holder.HostID != e.HostID {
+		t.Fatalf("the served session's claim: %v (holder %+v); want it held by host %s", err, held, e.HostID)
 	}
 
 	promptUnattached(t, e, "go long")
@@ -1193,9 +1205,12 @@ func unusableLocks(t *testing.T, env rundir.Env) {
 // usable — is exit 1 for serve, where the TUI warns and runs unclaimed (X30,
 // TestOnlyARequiredClaimRefusesAnUnusableLockTree): a new session, a load by
 // craze id, a legacy row and --continue alike. Nothing is left behind: no
-// registry entry, host lock or socket (a new session bound its socket before
-// its engine minted the id to claim), no load built, no new session started
-// (the index holds no row of it), and the refusal is in the log.
+// registry entry, host lock or socket, no session built — a new session's id
+// is minted and claimed before anything is, as a load's is — no new session
+// started (the index holds no row of it), and the refusal is in the log. The
+// run is journaled (astra r4-fix12 3), and a refused session leaves no
+// journal: the engine's craze_session note, queued as it is built, would have
+// been written by its close had a new session been claimed after its build.
 func TestServeDoesNotRunUnclaimed(t *testing.T) {
 	const id = "0199aaaa-bbbb-7ccc-8ddd-000000000051"
 	for _, tc := range []struct {
@@ -1214,6 +1229,11 @@ func TestServeDoesNotRunUnclaimed(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			env, ws := serveHome(t)
 			t.Setenv("CRAZE_FAKE_SCRIPT", "echo")
+			t.Setenv("CRAZE_JOURNAL", "1")
+			journal := journalDir(io.Discard)
+			if journal == "" {
+				t.Fatal("fixture: the run is not journaled")
+			}
 			for _, row := range tc.rows {
 				row.CWD = absDir(ws)
 				seedIndexRow(t, row)
@@ -1233,15 +1253,20 @@ func TestServeDoesNotRunUnclaimed(t *testing.T) {
 			if left, _ := filepath.Glob(filepath.Join(os.Getenv("CRAZE_RUNTIME_DIR"), "*", "*.sock")); len(left) != 0 {
 				t.Fatalf("an unclaimed host left its socket: %q", left)
 			}
+			var journals []string
+			_ = filepath.WalkDir(journal, func(p string, d os.DirEntry, err error) error {
+				if err == nil && !d.IsDir() {
+					journals = append(journals, p)
+				}
+				return nil
+			})
+			if len(journals) != 0 {
+				t.Fatalf("an unclaimed session left a journal: %q", journals)
+			}
 			select {
 			case o := <-built:
-				if tc.rows != nil {
-					t.Fatalf("an unclaimed load built its session: %+v", o)
-				}
+				t.Fatalf("an unclaimed session was built: %+v", o)
 			default:
-				if tc.rows == nil {
-					t.Fatal("a new session is claimed once its engine has minted its id: none was built")
-				}
 			}
 			if tc.rows == nil {
 				if _, ok, err := (&sessions.Store{}).Latest(absDir(ws), ""); ok || err != nil {

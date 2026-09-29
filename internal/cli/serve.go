@@ -50,12 +50,17 @@ import (
 // 6).
 const controlSocketEnv = "CRAZE_CONTROL_SOCKET"
 
-// The teardown's bounds, and SQ16's.
+// flushWait is how long the server is given, once the engine has closed, to
+// write what its connections still owe — an attached client's final records
+// and reset{session_closed} (§3.7) — before it is closed. A variable only so
+// that the teardown-order test can lengthen it (never in parallel): that test
+// queues megabytes behind a full socket buffer, which a starved CPU cannot
+// write in 500 ms, and what it proves is that the teardown waits for the
+// flush — not how fast the flush is.
+var flushWait = 500 * time.Millisecond
+
+// The teardown's other bounds, and SQ16's.
 const (
-	// flushWait is how long the server is given, once the engine has closed,
-	// to write what its connections still owe — an attached client's final
-	// records and reset{session_closed} (§3.7) — before it is closed.
-	flushWait = 500 * time.Millisecond
 	// flushPoll is how often the flush wait looks at the open connections.
 	flushPoll = 10 * time.Millisecond
 	// closeWait bounds Server.Close: past it a handler parked where nothing
@@ -538,11 +543,11 @@ func (c *sessionClaims) ensure(id string) {
 }
 
 // require claims id for a host that must hold it (required: craze serve's new
-// session, whose id the engine has just minted), or says why it cannot: an id
-// this process holds already — a load's, claimed before the build — answers
-// at once. It is claimSession with every failure an *unclaimedError, a
-// session another process holds included: a fresh UUIDv7 held elsewhere is
-// not a session to attach to.
+// session, whose id it has just minted, before anything is built), or says
+// why it cannot; an id this process holds already answers at once. It is
+// claimSession with every failure an *unclaimedError, a session another
+// process holds included: a fresh UUIDv7 held elsewhere is not a session to
+// attach to.
 func (c *sessionClaims) require(id string) *unclaimedError {
 	if _, err := c.claimSession(id); err != nil {
 		return &unclaimedError{err: err}

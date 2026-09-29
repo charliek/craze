@@ -328,8 +328,47 @@ func TestCrazeSessionIDIsCarriedInOrMinted(t *testing.T) {
 
 // TestTheJournalRecordsOneCrazeSessionNote: the durable id is in the record
 // exactly once per incarnation, beside the header's incarnation and the
-// session note's provider id — the third of SD-22's three identities.
+// session note's provider id — the third of SD-22's three identities. It says
+// loaded only for an id carried in from a loaded row (CrazeSessionID): an id
+// New minted, and one its caller minted for a new session and passed as
+// MintedCrazeSessionID (craze serve, which claims it before it builds
+// anything — plan 030 C2r2), are both a new session's, and it is that id
+// the engine runs under.
 func TestTheJournalRecordsOneCrazeSessionNote(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		opts   Options
+		id     string // "" is any id New minted
+		loaded bool
+	}{
+		{"carried in", Options{CrazeSessionID: "018f-the-thread"}, "018f-the-thread", true},
+		{"minted by its caller", Options{MintedCrazeSessionID: "018f-minted"}, "018f-minted", false},
+		{"carried in over one minted", Options{CrazeSessionID: "018f-the-thread", MintedCrazeSessionID: "018f-minted"},
+			"018f-the-thread", true},
+		{"minted by New", Options{}, "", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fields := crazeSessionNote(t, tc.opts, func(id string) {
+				if tc.id != "" && id != tc.id {
+					t.Fatalf("the engine runs under %q, want %q", id, tc.id)
+				}
+			})
+			if got := fields["crazeSessionId"]; got == "" || (tc.id != "" && got != tc.id) {
+				t.Fatalf("the note records %v, want the session's durable id %q", got, tc.id)
+			}
+			if got := fields["loaded"]; got != tc.loaded {
+				t.Fatalf("the note says loaded=%v, want %v", got, tc.loaded)
+			}
+		})
+	}
+}
+
+// crazeSessionNote runs one turn on an engine built with opts over a journal
+// of its own, tells running the engine's craze id, and answers the fields of
+// the one craze_session note the journal holds — failing unless there is
+// exactly one, and unless it records that id.
+func crazeSessionNote(t *testing.T, opts Options, running func(string)) map[string]any {
+	t.Helper()
 	dir := filepath.Join(t.TempDir(), "journal")
 	w, err := journal.New(journal.Options{
 		Dir:         dir,
@@ -341,8 +380,9 @@ func TestTheJournalRecordsOneCrazeSessionNote(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	r := newRigOn(t, Options{CrazeSessionID: "018f-the-thread"},
-		agent.EventLogOptions{NoPrimary: true, Journal: w})
+	r := newRigOn(t, opts, agent.EventLogOptions{NoPrimary: true, Journal: w})
+	id := r.e.State().CrazeSessionID
+	running(id)
 	// Run a turn, so the note is not the only thing in the file and its
 	// once-ness is a claim about a session that did something.
 	r.submit("hello")
@@ -375,12 +415,10 @@ func TestTheJournalRecordsOneCrazeSessionNote(t *testing.T) {
 		t.Fatalf("%d craze_session notes, want exactly one:\n%s", len(notes), raw)
 	}
 	fields, _ := notes[0]["fields"].(map[string]any)
-	if got := fields["crazeSessionId"]; got != "018f-the-thread" {
-		t.Fatalf("the note records %v, want the session's durable id", got)
+	if got := fields["crazeSessionId"]; got != id {
+		t.Fatalf("the note records %v, the engine runs under %q", got, id)
 	}
-	if got := fields["loaded"]; got != true {
-		t.Fatalf("the note says loaded=%v for an id that was carried in", got)
-	}
+	return fields
 }
 
 // ------------------------------------------------------------------ the writes

@@ -48,8 +48,18 @@ type Options struct {
 	// so that one thread of work keeps one identity across every agent session
 	// it is loaded into (session control SD-22). Empty mints a fresh UUIDv7,
 	// which is what a new session and a row written before crazeId existed both
-	// want.
+	// want — unless MintedCrazeSessionID gives the fresh id to use.
 	CrazeSessionID string
+	// MintedCrazeSessionID is a NEW session's id, minted by the caller
+	// (NewCrazeSessionID) rather than by New, used only when CrazeSessionID is
+	// empty. It exists for a host that must claim a session before it builds
+	// anything (craze serve, plan 030 C2r2): New queues the journal's
+	// craze_session note, so an id New minted could only be claimed after a
+	// journal line was owed, and a refused claim would leave a journal of a
+	// session that never ran (astra r4-fix12 3). The id is the session's as a
+	// minted one is in every other way; the note records it loaded false,
+	// which CrazeSessionID's carried-in id would not.
+	MintedCrazeSessionID string
 	// ReceiptClock is the command-id table's clock (receipts.go): how long a
 	// result is answerable and how long a released client waits before it can
 	// be retired are measured on it. nil is time.Now, which is what every host
@@ -385,7 +395,10 @@ func newEngine(sess agent.Session, opts Options, h *hooks) (*Engine, error) {
 	}
 	craze := opts.CrazeSessionID
 	if craze == "" {
-		craze = newCrazeSessionID()
+		craze = opts.MintedCrazeSessionID
+	}
+	if craze == "" {
+		craze = NewCrazeSessionID()
 	}
 	e := &Engine{
 		sess:     sess,

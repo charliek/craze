@@ -27,14 +27,42 @@ const (
 )
 
 // cacheDir validates the cache tree down to <Home>/.cache/craze/<sub> and
-// returns that directory held (held.go); the caller closes it. <Home>/.cache
-// is created 0700 when it is missing (and create is set), in the home
-// directory walked and held. It is then canonicalised — a ~/.cache symlinked
-// to another disk is fine — only to learn where to walk: the canonical path
-// is walked from "/" by descriptor (walk), and craze and <sub> are opened as
-// leaves relative to it (leafAt). With create unset nothing is made, and a
-// missing directory is an error wrapping fs.ErrNotExist.
+// returns that directory held (held.go); the caller closes it. It is
+// crazeDir, then <sub> opened as a leaf relative to the craze directory it
+// holds (subDir). With create unset nothing is made, and a missing directory
+// is an error wrapping fs.ErrNotExist.
 func (env Env) cacheDir(sub string, create bool) (*dir, error) {
+	c, err := env.crazeDir(create)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = c.close() }()
+	return env.subDir(c, sub, create)
+}
+
+// subDir opens sub as a cache-tree leaf (leafAt) relative to the held craze
+// directory c — never by path, so it is the <sub> of the very craze
+// directory c validated, wherever that has been renamed to since. Two leaves
+// opened through one c are siblings however the tree above them moves: what
+// one of them decides about the other — the host-log sweep's host locks
+// about its logs (SweepHostLogs) — is about the same tree.
+func (env Env) subDir(c *dir, sub string, create bool) (*dir, error) {
+	d, err := env.leafAt(c, sub, create)
+	if err != nil {
+		return nil, fmt.Errorf("rundir: the cache tree: %w", err)
+	}
+	return d, nil
+}
+
+// crazeDir validates the cache tree down to <Home>/.cache/craze and returns
+// that directory held; the caller closes it. <Home>/.cache is created 0700
+// when it is missing (and create is set), in the home directory walked and
+// held. It is then canonicalised — a ~/.cache symlinked to another disk is
+// fine — only to learn where to walk: the canonical path is walked from "/"
+// by descriptor (walk), and craze is opened as a leaf relative to it
+// (leafAt). With create unset nothing is made, and a missing directory is an
+// error wrapping fs.ErrNotExist.
+func (env Env) crazeDir(create bool) (*dir, error) {
 	if env.Home == "" {
 		return nil, errors.New("rundir: no home directory for the craze cache tree")
 	}
@@ -58,15 +86,12 @@ func (env Env) cacheDir(sub string, create bool) (*dir, error) {
 	if err != nil {
 		return nil, fmt.Errorf("rundir: the cache directory: %w", err)
 	}
-	for _, name := range []string{crazeName, sub} {
-		leaf, err := env.leafAt(d, name, create)
-		_ = d.close()
-		if err != nil {
-			return nil, fmt.Errorf("rundir: the cache tree: %w", err)
-		}
-		d = leaf
+	defer func() { _ = d.close() }()
+	c, err := env.leafAt(d, crazeName, create)
+	if err != nil {
+		return nil, fmt.Errorf("rundir: the cache tree: %w", err)
 	}
-	return d, nil
+	return c, nil
 }
 
 // makeCache creates the missing <Home>/.cache (cache) 0700 in the canonical
