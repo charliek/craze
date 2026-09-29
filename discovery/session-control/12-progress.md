@@ -2794,7 +2794,7 @@ open blocks the exit clauses above.
 
 | | |
 |---|---|
-| Status | planned (Plan 030, FINAL after panel rounds 1 and 2, 2026-09-28) |
+| Status | PR 1 (`feature/plan-030-hosts`, C1–C8) implemented, awaiting its merge; PRs 2–4 planned (Plan 030, FINAL after panel rounds 1 and 2, 2026-09-28) |
 | Plan | `030-session-control-s5-agent-view` (outside the repo, `~/.claude/plans/craze/`; research, discovery reports, the mockup and the raw panel reviews in its folder) |
 | Baseline | `origin/main` `9606fc5` (#64, Plan 029's wrap-up), on top of S2's last PR #63 `73ed5e0` |
 | Branch / PRs | five sequential PRs, each branched from a freshly fetched `origin/main`: `docs/plan-030-roadmap`, `feature/plan-030-hosts`, `feature/plan-030-sessions-list`, `feature/plan-030-new-sessions`, `feature/plan-030-composer-at` |
@@ -2945,11 +2945,235 @@ per-commit astra reviews of the lifecycle commits carry that check.
 
 ### Outcome
 
-Filled in as each PR lands.
+Filled in as each PR lands. PR 1's status: implemented and reviewed (C1–C8);
+the host/client split, `/exit` ending a session everywhere, closing the
+terminal keeping it, and the idle exit are in; PR 4 writes the outcome.
+
+### What shipped per commit
+
+**PR 1 — `feature/plan-030-hosts`** (C1–C8 implemented 2026-09-28/29, not yet
+merged; the `*r` commits are review-fix rounds, and
+`030-session-control-s5-agent-view/reviews/dispositions-pr1.md` has every
+finding and its disposition):
+
+- C1 (`19d3f3f`) — the wire: `session.stop` behind the new `stop` capability
+  (`Backend.Stop`, `control.Options.Stop`), the attach fence
+  (`FenceAttaches`) and the `closing` reason, the info document's
+  `permissionMode` and `startedAt`, and `lastTurn` in `session.state` and a
+  roster row; fixtures 14–16 (additions) and the published schema. C1r
+  (`9742a39`) makes a stop's receipt precede everything the stop puts on its
+  connection.
+- C2 (`2534d05`) — `craze serve`: the headless host in the foreground (the
+  session flags, `--load`, `--log`), built as the TUI builds a session,
+  served over the socket with the lifecycle coordinator as its stop seam.
+  C2r (`b839b0e`) makes the claim a condition of running and reworks the
+  host-log sweep to decide a host's death by its own lock; C2r2 (`83fec7a`)
+  holds one validated cache parent for the sweep and claims a new session's
+  id before anything is built.
+- C3 (`3030b4d`) — the spawner: `spawnHost` (setsid, stdio on `/dev/null`, a
+  ready pipe), the ready line (`ok`, `held`, error), the rendezvous with a
+  holder, and the agent-group record the launcher's last-resort kill reads.
+  C3r (`eb95243`) makes the record prove whose group it is
+  (`rundir.ProcessIdentity`), required to run, and outlasting the start.
+- C4 (`c8080b1`) — the launch: the ordinary `craze` spawns a host and runs the
+  TUI as its client (`internal/cli/launch.go`, `detachOn`), the spawn-failure
+  UX, `-c`/`--resume` attaching to a held session, cleanup of a host the
+  launch spawned whose session never came up. C4r (`95ba491`) keeps a host only
+  once the TUI took its start, separates a refusal from a host that could not
+  come up, and attaches a reattach directly.
+- C5 (`0c7d081`) — lifetime: `/exit` (and Ctrl+D, the second Ctrl+C) stops the
+  session on its host (`stopQuit`), the idle watcher and `host_idle_exit`, the
+  engine's close fence, `Engine.Busy`, socket-lost exit, `host_stop` journal
+  diag, a start-failed host stays attachable. C5r (`806d143`): owed background
+  work and admitted-but-unfinished commands keep a host, a failed start retires
+  replay, one quit deadline; C5r2 (`4518f8f`): the deadline ends a stop it
+  cannot reach, and a direct reattach attaches before it commits.
+- C6 (`a751364`) — client gaps: the TUI shows the host's facts (permission
+  mode, start time, last turn), the workspace follows the session, SQ16's
+  wording. C6r (`8035095`): a failure reported before the session came up
+  stands; one frame run counts elapsed from one start on both transports.
+- C7 (`48305fe`) — `tests/cli`: the core cases run detached and in process,
+  `test_detach.py`. C7r (`f8a486c`): a start failure keeps its row through a
+  restore, and the test hosts' cleanup is exact.
+- C8 — docs: `craze serve`, the launch behaviour and `craze attach`'s quit in
+  `docs/reference/cli.md`; `detach`, `CRAZE_DETACH`, `host_idle_exit` and the
+  host logs in `docs/reference/configuration.md`; the host/client split in
+  `docs/development/architecture.md`; this record; `13`'s SF-80..SF-87.
+
+PRs 2–4 are recorded here as each lands.
 
 ### Deviations from the plan
 
-Filled in as each PR lands.
+PR 1's execution amendments X1–X61, mirrored here as `12`'s own record (the
+full text is in the plan, `~/.claude/plans/craze/030-session-control-s5-agent-view.md`,
+"Execution amendments"); review-fix rounds are grouped with the commit they
+amend. None reopens an owner decision. PRs 2–4 add theirs as they land.
+
+**PR 1** (C1–C8):
+
+1. **Plan 030 X1 (C1)** — the info document's `permissionMode`/`startedAt` and
+   `lastTurn` are `omitempty`, and the fake host leaves them unset by default
+   (an older host's document); an opt-in mode with a pinned clock sets them
+   for new fixtures. The 13 existing wire fixtures do not move, and double as
+   the old-host/new-client direction of §3.8.
+2. **Plan 030 X2, X3, X4, X5, X6, X7 (C1, C1r)** — the seams: `Backend.Stop(ctx,
+   c engine.Command)` (the caller's command id, not its own); the stop
+   coordinator is `control.Options.Stop`, called at most once, raising the
+   attach fence, then queueing the `{}` receipt outside the writer budget,
+   then stopping (a later stop joins and is answered `{}`; a client treats a
+   session end while its stop is outstanding as the answer); the fence is
+   `(*Server).FenceAttaches()`, stackable, held from check to install
+   (`reserve`'s refusal order: replaced, `already_attached`, `closing`);
+   `closing` is a new reason under `unavailable`; `StartedAt` is the host's
+   session start, fixed for the server's life; `LastTurn` is recorded in
+   commit order and cleared when any turn starts (failed = the ending carried
+   an error; cancelled = `cancelled` or the close; done = anything else,
+   foreign turns included).
+3. **Plan 030 X8, X9 (C1)** — `session.stop` is not a row of the engine's
+   generated gate table (a second `Engine.Close` cannot be driven in its
+   "closing" row): its entry is prose above the `gate-table` markers in
+   `docs/reference/protocol.md`. The fixtures' `README.md` stays at 13 (it is
+   under `testdata/`); fixtures 14–16 are documented in `protocol.md`,
+   `internal/fakehost/doc.go` and `wire_test.go`.
+4. **Plan 030 X10, X11, X12, X13, X14, X15 (C2)** — `craze serve` is listed in
+   `craze --help` (the root's Flags section is byte-identical); `serveFlags`
+   embeds `tuiFlags` (refusals read as the root's, `serve`'s own read `craze
+   serve: …`); the index-title rule uses `transcript.SanitizeLine` (exported);
+   `--load` runs in the row's own workspace (another `--workspace` is exit 2,
+   a gone directory exit 1); a held `serve` exits 1 with the picker's refusal
+   text, carrying `*rundir.HeldError`; the stop sequence runs on `runServe`'s
+   goroutine (`hostLifecycle` only records requests), `Start` runs with
+   `context.Background()`, and the join after a stop is bounded at 5 s.
+5. **Plan 030 X16, X17, X18 (C2, C2r, C2r2)** — the host log also takes crash
+   output (`debug.SetCrashOutput`) and fatal errors; `SweepHostLogs(keep)`
+   decides each host's death by its own host lock and removes nothing if the
+   registry directory fails validation; the fake agent gains a `long-reply`
+   script (600 chunks). `serve` requires its session claim (an unusable lock
+   tree or a legacy row that cannot be given its id is exit 1 with nothing
+   left behind; the root keeps its warn-and-run fallback), and a new
+   session's craze id is minted and claimed before anything is built
+   (`engine.Options.MintedCrazeSessionID`). `flushWait` became a package
+   variable (a pre-existing teardown-test flake under a 5 % CPU quota, fixed
+   test-side).
+6. **Plan 030 X19, X20, X21, X22 (C3, C3r)** — the ready line: not-ok carries
+   `held{hostId, pid, crazeSessionId}` (the pid added), unknown fields are
+   ignored, the parent mints the host id and passes the hidden `--host-id`,
+   `--log` is `host-logs/<hostId>.log` and a `--log` there not named for its
+   own host is exit 2; `--no-host-status` is hidden and passed through.
+   Agent groups are recorded by a spawned host only, and X22 replaces X20's
+   kill rule: each `<hostId>.pgids` line is `<pgid> <start>` from
+   `rundir.ProcessIdentity` (Linux `/proc/<pid>/stat` field 22, macOS
+   `kinfo_proc`), signalled only when a process with that pid and start time
+   exists; a record that cannot be made fails the start (`agent: the agent's
+   process group could not be recorded: …`). Handshake details: `ok` waits
+   for the first identity write that lands, an EPIPE stops the host,
+   `CRAZE_READY_FD`/`CRAZE_HOST_CHILD` leave `serve`'s environment, and EOF
+   with no line waits the 5 s grace. Ready lines are validated per branch.
+   Accepted residuals and the pre-existing `acp.Child.Shutdown` hazard are in
+   `13` (SF-80, SF-81).
+7. **Plan 030 X23, X35 (C4, C5)** — the launch first attached when the host
+   was ready, not "now" (a failed start closed the event log before any ready
+   notice and the TUI quit `craze: session ended`, exit 0); C5 fixed the root
+   cause (a start-failed host keeps answering) and the launch attaches `now`
+   again, so a load's replay streams in progressively.
+8. **Plan 030 X24, X25, X26, X27 (C4)** — spawn-failure UX: a host that could
+   not come up names its log and ends `; CRAZE_DETACH=0 runs sessions inside
+   craze instead`, exit 1; a host that refused the choice brings the picker
+   back with the refusal as its error row (for `-c`, a start failure without
+   the hint). `--resume`'s held row attaches as `-c` does. `NewBackend(p,
+   explicit bool)` and `Config.Continue *sessions.Row`: the launcher passes
+   `--provider` unless the choice is the fallback nobody picked; `-c`'s flag
+   refusals are checked before the TUI starts unless a live host serves the
+   session. Quitting stops any host this launch spawned whose session never
+   came up, never a held one; a held attach prints, after the TUI, `craze: …;
+   attached to it (ignored: …)` only when flags were ignored.
+9. **Plan 030 X28, X49 (C4, C5r)** — tests stay in process by default:
+   `internal/cli`'s `TestMain` and `tests/cli/conftest.py` set
+   `CRAZE_DETACH=0` (C7 runs the core cases in both modes); every
+   `CRAZE_CLI_TEST_CHILD` process watches `CRAZE_CLI_TEST_PARENT` and exits
+   when it is gone (SIGTERM, then 98 after 5 s; 30-minute cap).
+10. **Plan 030 X29, X30, X31 (C5)** — the idle fence: an attachment counts from
+    reservation to close, except that a read EOF takes it out of the count (a
+    half-closed bridge that only reads does not keep an idle host);
+    `Server.FenceClose` raises the attach fence, then the engine's, the
+    watcher decides on "attached 0 and not busy", a stay releases the engine
+    fence first; while fenced the engine refuses (`ErrClosing`, reason
+    `closing`, never stored) Submit, Queue, EditQueued, Unqueue, ClearQueue,
+    Disarm, Interject, Set, SetTitle and GiveUpDrain, and the driver starts
+    nothing (Cancel, Stop, GiveUp, CancelSubagent and Answer are not fenced).
+    `engine.Busy()` is the fence-less sample. Residual: SF-83.
+11. **Plan 030 X32, X33, X34 (C5)** — `host_idle_exit` (a Go duration ≥ 0, `"0"`
+    or `"never"`; absent → 1 h silently, bad → 1 h with one host-log line;
+    a 1 s tick, a 60 s grace from the host's start, never-prompted capped at
+    5 min, a start-failed host's limit 0 even under `"never"`); socket lost is
+    checked first every tick (`Host.Lost()` compares dev/ino) and is the
+    ordinary resumable stop; a start-failed `serve` host stays listable and
+    attachable (`agent.Options.KeepLogOnFailedStart`, `serve` only).
+12. **Plan 030 X36, X37, X38, X39 (C5)** — `/exit` → Stop, client side, only for
+    a backend served elsewhere, one 2 s budget for receipt and end, a second
+    quit exits at once; stop taken prints nothing, a host that cannot stop
+    prints the older-craze note (exit 0), any other failure prints `craze: the
+    session may still be running: <err>` (exit 0, a line the plan did not
+    pin); SIGTERM and SIGHUP stay view closes; only a clean session end (not a
+    transport loss) answers an outstanding stop. The help dialog's
+    golden-pinned wording is unchanged (SF-86). The stop order is `host_stop`
+    note, fence, engine close, S2's close order, join the start (5 s), release
+    claims, remove the record; on a join timeout the host seals the record and
+    kills its own recorded agents (SIGTERM, 2 s, identity re-check, SIGKILL).
+    Every stop journals its cause as a `host_stop` diag.
+13. **Plan 030 X40, X41, X42, X43 (C4r)** — retention keys on the TUI's
+    acknowledgement (`AckStarted()` on the launched backend; a signal that
+    beats `startedMsg` stops the host); the not-ok ready line gains optional
+    `"refused": true` (absent = could not come up; on an ok line, malformed),
+    so refusals of the chosen session keep the picker and everything else is a
+    start failure from pickers too (exit 1); the host checks a `--resume`'s
+    flags after its claim, so a held row attaches whatever they say; `-c` and
+    a `--resume` choice with a craze id attach directly to a live entry (no
+    spawn, log or claim), a failed dial falls back to the spawn, legacy rows
+    always spawn.
+14. **Plan 030 X44, X45, X46, X47, X48 (C5r)** — owed work keeps a host
+    (`agent.OwedWork`; native's `BackgroundOwed()`: a result running or
+    pending, not reserved, suspended or undelivered ones); `admitLocked`
+    counts an admitted command whose work runs after `e.mu` is released
+    (`SetTitle`, `Interject`, `Submit`'s first index write) until it ends; a
+    failed start retires replay; one quit deadline, taken when the quit is
+    asked for, closing through `remote.Session.CloseWithin`; the explicit
+    quit's outcome wins (no stream-end line after a stop note). Residual:
+    SF-84.
+15. **Plan 030 X54, X55 (C5r2)** — the quit's deadline ends a stop it cannot
+    reach (`awaitStop`; at the deadline it records `ctx.Err()`, closes the
+    transport with no detach and joins the stop for at most `quitJoinWait`,
+    1 s; `remote.Client.Command`'s write still does not honour its context);
+    a direct reattach dials and completes `Attach(now)` within `dialTimeout`
+    before taking the host, and any failure falls back to the spawn.
+    Residual: SF-82.
+16. **Plan 030 X50, X51, X52, X53 (C6)** — SQ16's wording is `that session is
+    already running (pid N)` (the plan's literal substitution read "open in a
+    running session"; `rundir.HeldError.Error()` too) and the resume picker
+    keeps the text after " — " whole on its row; the workspace follows on
+    adopt, not on restore, and a non-viewer's shell runs in the session's
+    workspace; the post-restore `LastTurn` read applies only if the epoch, the
+    session generation, the restore count and the turns begun are unchanged
+    (C11 adds `bgen`), a failed last turn sets the same error state a live
+    failure does, `LastTurn(ctx)` is a required `Backend` method; a new
+    golden `restore-failed-80x24` is in-process only (manifest: 113 both + 7
+    in-process) and `ErrClosing` reads "the session is closing".
+17. **Plan 030 X56, X57, X58 (C6r)** — a failure reported before the session
+    came up stands (`sessionUp` no longer idles an error state); a frame
+    run's elapsed counts from one wall-clock start on both transports
+    (`RunFrameScript`, `FrameOpts.sessionStart`); a pre-existing S2 flake
+    (`TestNoResetEscapesTheSocketRunsVerdict/after_the_check`) fixed
+    test-side: `assertOneOmission` takes its floor from the caller.
+18. **Plan 030 X59 (PR 1)** — V2 read 102/103: `sigint-between-turns` differed,
+    a pre-existing timing race, not a moved output (the scenario alone ×20
+    against `origin/main` `77f1cd3` DIFFs 15/20, against the PR 1 candidate
+    13/20), so `craze prompt --json` did not move. SF-87.
+19. **Plan 030 X60, X61 (C7r; amends X56)** — a start failure keeps its row
+    through a restore (`applyRestore` redraws `startErr`'s row at the tail
+    after every restore; C7's `_wait_start_failure` workaround is removed);
+    detached test cases seed `host_idle_exit = "30s"`, `marker_pids` matches
+    the exact `CRAZE_RUNTIME_DIR` entry, and `host_cleanup` SIGTERMs registered
+    and marked hosts and verifies its SIGKILL fallback. Residuals: SF-85.
 
 ### Live smoke
 

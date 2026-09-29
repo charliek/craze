@@ -5,6 +5,7 @@ craze [flags]
 craze prompt [text] [flags]
 craze bridge [flags]
 craze attach [flags]
+craze serve [flags]
 craze version
 ```
 
@@ -94,7 +95,14 @@ See [`/rename`](tui.md#slash-commands) and
 [Resuming a session](tui.md#resuming-a-session) for what a restored session
 looks like in the TUI.
 
-### A session already open in another craze
+### A session already running in another craze
+
+*Everything below describes the claim as the in-process path makes it. With
+[detached hosts](#sessions-outlive-their-terminal) (the default) the
+launching `craze` first attaches directly to a live host that serves the
+session, and otherwise spawns a host, which makes this same claim and answers
+`held` when another craze has it — the launcher then finds the holder and
+attaches to it. The words, the refusals and the ignored-flag note are the same.*
 
 `--continue` claims the row it loads before anything is built: its own lock
 under `~/.cache/craze/locks/`, independent of `CRAZE_HOME` and the runtime
@@ -105,7 +113,7 @@ that already has a craze id is claimed first, and a session another running
 through the holder's host id, after one line on stderr:
 
 ```text
-craze: that session is open in another craze (pid N); attaching
+craze: that session is already running (pid N); attaching
 ```
 
 The flags a *new* session would take (`--model`, `--ask`, `--plan`,
@@ -142,7 +150,7 @@ session`. A holder whose lock names no pid yet (`pid ?`, the instant after
 its `flock`) also keeps the plain refusal:
 
 ```text
-craze: that session is open in another craze (pid N)
+craze: that session is already running (pid N)
 ```
 
 exit 1, and no agent is spawned — nothing is built once the row's session is
@@ -207,7 +215,7 @@ it is still the same session, continuing from nothing, not a different one,
 so nothing is silently switched out from under you.
 
 A native transcript adds its own lock beneath [the claim
-above](#a-session-already-open-in-another-craze): a transcript another craze
+above](#a-session-already-running-in-another-craze): a transcript another craze
 process already has open refuses the load the same way. A transcript left
 with a torn or cut-off tail by a crash is trimmed back to its last complete
 step on open, and the dropped bytes are kept beside it in a
@@ -218,20 +226,113 @@ a newer craze build — one this version does not recognize — is never
 trimmed, and the load is refused instead, so nothing unrecognized is thrown
 away.
 
+### Sessions outlive their terminal
+
+The ordinary `craze` no longer runs the session inside the terminal's
+process. It spawns a detached host — [`craze serve`](#craze-serve), in a
+session of its own with no terminal — waits for the host to say it is ready,
+and runs the TUI as that host's client over the [control
+socket](protocol.md#reaching-a-host) (plan 030 §3.5). What follows:
+
+- **Closing the terminal keeps the session.** A closed terminal (SIGHUP), a
+  SIGTERM to `craze`, and a dropped ssh connection are all *view closes*:
+  the TUI goes, the host and its agent stay, and a turn already under way
+  keeps working.
+- **`craze -c` reattaches.** `--continue` (and a `--resume` choice) of a
+  session a live host serves attaches to that host directly: nothing is
+  spawned, and no note is printed unless the command line gave flags a new
+  session would take (`craze: that session is already running (pid N);
+  attached to it (ignored: --model)`). [`craze attach`](#craze-attach)
+  reaches the same host.
+- **`/exit` ends the session, everywhere.** `/exit`, <kbd>Ctrl+D</kbd> and
+  the second <kbd>Ctrl+C</kbd> ask the host to stop the session
+  (`session.stop`): the agent is closed, the session is saved and resumable,
+  and every other client attached sees it end. The TUI waits at most two
+  seconds for that, in total; a second quit ends the wait at once. A host
+  that cannot stop its session (a TUI-hosted one, or one from an older
+  craze) is detached from instead, with `craze: that session runs in an
+  older craze; close it there`; any other failure prints `craze: the session
+  may still be running: <reason>`. Exit 0 either way.
+- **An unattended host does not run for ever.** A host with no client
+  attached and nothing in flight exits after
+  [`host_idle_exit`](configuration.md#host-idle-exit) (an hour by default),
+  saving the session like any stop. A host whose session was never prompted
+  goes after five minutes at most; one whose start failed, as soon as its
+  launcher has been told.
+- **A quit before the session is up leaves nothing behind.** A host this
+  launch spawned whose session never came up in the TUI (quit while starting,
+  a failed start) is stopped; a host that was already running is never
+  stopped that way.
+- **A host that could not come up is a start failure.** The message names the
+  host's log (`~/.cache/craze/host-logs/<hostId>.log`, see
+  [Host logs](configuration.md#host-logs)) and ends `; CRAZE_DETACH=0 runs
+  sessions inside craze instead`; craze exits 1. A host that *refused* the
+  session asked for (no such session, a held one that cannot be attached)
+  shows the refusal as the in-process path does, from a picker as its error
+  row.
+
+The switches that turn this off (`detach = false`, `CRAZE_DETACH=0`, or the
+control socket switched off) run the session inside the TUI's own process, as
+before: closing the terminal ends it, and nothing outlives it. See
+[Configuration](configuration.md#detached-hosts).
+
 ### The control socket
 
-Every craze TUI process binds a control socket in the runtime namespace and
-serves the session it runs over it (see
+Every host binds a control socket in the runtime namespace and serves its
+session over it: the detached host [`craze serve`](#craze-serve) by default,
+or the TUI's own process when [detaching is off](configuration.md#detached-hosts)
+(see
 [Protocol reference](protocol.md#reaching-a-host)), which is what
 [`craze bridge`](#craze-bridge) and [`craze attach`](#craze-attach) reach.
-Binding happens only for a run that actually starts the TUI — a `--continue`
-that attaches instead (below) or refuses binds nothing and creates no socket
-of its own.
+A launching `craze` binds nothing of its own; the in-process path binds only
+for a run that actually starts the TUI — a `--continue` that attaches instead
+(above) or refuses binds nothing and creates no socket of its own.
 
 `control_socket = false` in `config.toml`, or `CRAZE_CONTROL_SOCKET=0` (or
 `false`) for one run, turns it off; see
 [Configuration](configuration.md#the-control-socket). The session lock above
 is still taken either way — it does not depend on the socket.
+
+## craze serve
+
+```bash
+craze serve [flags]
+craze serve --load <craze session id | provider:session id> [flags]
+```
+
+Hosts one session with no terminal, over its control socket, until a client
+ends it (`session.stop`), the process gets SIGTERM or SIGINT, or [it has been
+idle](configuration.md#host-idle-exit) for too long. It builds the session
+exactly as the TUI does: the engine, the claim on the session, the journal
+and the session-index writes are the host's, and [`craze
+attach`](#craze-attach) (or the ordinary `craze`, which is a client of it)
+joins it. **You rarely run it yourself:** the ordinary `craze` spawns one per
+session (its own session, stdio on `/dev/null`) and attaches to it. Run by hand
+it is the same host in the foreground, logging to stderr; SIGHUP is ignored.
+
+It takes the session flags the TUI takes — `--workspace`, `--model`,
+`--agent-bin`, `--provider`, `--force`/`--no-force`, `--ask`/`--plan`,
+`--plugin-dir`, `--continue`/`-c` — with the same refusals in the same words,
+and:
+
+| Flag | Description |
+|------|-------------|
+| `--load` | Load a session by id instead of starting one: a craze session id, or `<provider>:<session id>` for an index row that has no craze id yet. It runs in the row's own workspace: an explicit `--workspace` naming another directory is exit 2, a row whose directory is gone is exit 1, and no such row is exit 1. `--provider` filters as it does for `-c` |
+| `--log` | Write the host's diagnostics, its crash output and the agent's stderr to this file, rotated once at 4 MiB (default: stderr) |
+
+`--host-id` and `--no-host-status` also exist, hidden: the spawner passes them
+(the id it minted for the host, and the launching TUI's host-status choice).
+They are internal, not a user interface.
+
+A session another craze already holds is exit 1 — `craze serve: that session
+is already running (pid N)`. A control socket switched off is a usage error
+(exit 2): a headless host is reachable through nothing else. A session that
+cannot be claimed (an unusable lock tree) is exit 1 with nothing left behind.
+A host whose start failed (an auth failure, say) stays up, listed and
+attachable, so its client is told why, and goes as soon as it has none.
+
+The host's log and its retention are under
+[Host logs](configuration.md#host-logs).
 
 ## craze prompt
 
@@ -445,9 +546,11 @@ longer) running here, not that something else broke.
 
 Runs the full TUI over a running craze session's control socket (plan 027
 §3.15): the session another `craze` process in this directory is hosting, or
-`--session`'s. Quitting it leaves the session running on its host — nothing
-is spawned, nothing binds a socket, no session claim is taken, and no index
-row is written.
+`--session`'s. Nothing is spawned, nothing binds a socket, no session claim is
+taken, and no index row is written. Quitting it (`/exit`, <kbd>Ctrl+D</kbd>,
+<kbd>Ctrl+C</kbd> when idle) **ends the session** on a host that can stop it,
+as it does in every client; only a closed terminal or SIGTERM leaves it
+running (see [Quitting vs. the session ending](#quitting-vs-the-session-ending)).
 
 | Flag | Description |
 |------|-------------|
@@ -534,15 +637,39 @@ Identical to the host TUI's (plan 027 §3.19): the session — its queue and its
 turn — is shared, so the first <kbd>Ctrl+C</kbd> while a turn works cancels
 the turn and clears the queue for **every** attached client, exactly as it
 does in the host TUI. <kbd>Ctrl+C</kbd> when idle, a second <kbd>Ctrl+C</kbd>,
-<kbd>Ctrl+D</kbd> and `/exit` all close the view.
+<kbd>Ctrl+D</kbd> and `/exit` all quit, and quitting ends the session
+([below](#quitting-vs-the-session-ending)).
 
 ### Quitting vs. the session ending
 
-Every way of leaving `craze attach` — <kbd>Ctrl+C</kbd>, <kbd>Ctrl+D</kbd>,
-`/exit` — is a **view close**: it detaches and exits 0, and the session goes
-on running on its host. Only the **host** quitting ends the session; an
-attach TUI whose host quit prints one line on stderr once its own screen is
-restored, and exits 0:
+Quitting `craze attach` is the same act as quitting the host's own TUI (plan
+030 §3.6): <kbd>Ctrl+C</kbd> when idle, a second <kbd>Ctrl+C</kbd>,
+<kbd>Ctrl+D</kbd> and `/exit` ask the host to **stop the session**
+(`session.stop`). It ends for every client attached and is saved and
+resumable; the attach exits 0 and prints nothing more. (The help dialog still
+words `/exit` "Quit craze" and <kbd>Ctrl+D</kbd> "quit"; that wording is
+unchanged.) Two things do not end it, and are **view closes** — the attach
+detaches, exits 0, and the session goes on running on its host: SIGTERM, and a
+closed terminal (SIGHUP).
+
+A host that cannot stop its session — a TUI-hosted one (the in-process
+opt-out), or one from an older craze — is detached from instead, and one line
+on stderr says so:
+
+```text
+craze: that session runs in an older craze; close it there
+```
+
+A stop that went unanswered (the host stopped reading, or the two-second
+deadline passed) is exit 0 too, saying so:
+
+```text
+craze: the session may still be running: <reason>
+```
+
+An attach TUI whose session ended some other way — another client's stop, the
+host's own quit, the host's idle exit — prints one line on stderr once its own
+screen is restored, and exits 0:
 
 ```text
 craze: session ended
@@ -555,12 +682,12 @@ session may still be running, but this client lost it — is exit 1 instead:
 craze: lost the session: <reason>
 ```
 
-### `craze -c` of an open session
+### `craze -c` of a running session
 
-See [A session already open in another craze](#a-session-already-open-in-another-craze):
-from PR 4 on, `--continue`/`-c` (and the resume picker's hint) of a session
-already open in another `craze` attaches to it through this same command,
-rather than only refusing.
+See [A session already running in another craze](#a-session-already-running-in-another-craze):
+`--continue`/`-c` (and a `--resume` choice) of a session already running in
+another `craze` attaches to it through this same command, rather than
+refusing.
 
 ## craze version
 

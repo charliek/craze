@@ -12,7 +12,9 @@ authentication in protocol 1 — `hello`'s `auth` field is reserved for scopes,
 which arrive at S6 — and no encryption, because nothing crosses the machine
 boundary yet.
 
-Today the endpoint is always a **host**: one process serving one session.
+Today the endpoint is always a **host**: one process serving one session —
+by default a detached [`craze serve`](cli.md#craze-serve) the ordinary `craze`
+spawned, or, with detaching off, the TUI's own process.
 A future **hub** endpoint (S4) will multiplex several hosts behind one
 socket and splice a client through to the one it asks for
 ([The hub splice](#the-hub-splice)); protocol 1 already reserves the shapes
@@ -1128,6 +1130,7 @@ general — so discovery does not depend on `CRAZE_HOME`, `XDG_RUNTIME_DIR` or
   hosts/<hostId>.json     the registry entry (see below)
   hosts/<hostId>.lock     the host's lifetime flock; holds "<pid> <hostId>"
   locks/<crazeSessionId>.lock   one lock per craze session (SQ16, below)
+  host-logs/<hostId>.log        a detached host's log; not part of discovery
 ```
 
 A registry entry, `hosts/<hostId>.json`, has exactly these members:
@@ -1146,7 +1149,7 @@ A registry entry, `hosts/<hostId>.json`, has exactly these members:
 | `workspace` | The session's working directory |
 | `ready` | Whether the engine has started |
 
-This set is a one-way door: a resolver — `craze bridge`, a future `craze
+This set is a one-way door: a resolver — `craze bridge`, `craze
 attach`, shed — reads these members and connects to nothing merely to find a
 session, so none of them is ever renamed or removed.
 
@@ -1203,9 +1206,9 @@ tracked in the project's own follow-up backlog as SF-49.)
 
 `locks/<crazeSessionId>.lock` is a second kind of lock, one per **craze
 session** rather than per host: the mechanism behind
-[`--continue`/`--resume` of a session already open elsewhere](cli.md#a-session-already-open-in-another-craze).
+[`--continue`/`--resume` of a session already open elsewhere](cli.md#a-session-already-running-in-another-craze).
 It holds `"<pid> <hostId>"`, is taken for the life of the process that loaded
-or started that session, and does not depend on the control socket at all —
+or started that session (a detached `craze serve`, or the TUI's own process when detaching is off), and does not depend on the control socket at all —
 it is taken even with `control_socket = false`.
 
 ## SSH exec: what a client may assume
@@ -1316,7 +1319,7 @@ authenticates getting to the machine at all.
 - **So each end also asks the kernel who the other runs as.** A host checks
   every accepted connection's effective uid before reading a byte of it
   (Linux `SO_PEERCRED`, macOS `LOCAL_PEERCRED`/`LOCAL_PEERPID`); `craze
-  bridge`, a future `craze attach`, and `internal/remote` check the uid of
+  bridge`, `craze attach`, and `internal/remote` check the uid of
   the host they dialed before writing a byte to it. A lookup failure is
   always a refusal, never an allow — a connection whose owner cannot be
   named is exactly the one not to trust. Any OS other than Linux or macOS
