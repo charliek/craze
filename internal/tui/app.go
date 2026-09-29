@@ -325,6 +325,17 @@ type Model struct {
 	// startErr is the session that never came up. It is the only error that
 	// reaches craze's exit status: Run returns it once the program is over.
 	startErr error
+	// startInc is the incarnation a socket backend's start answered for
+	// (plan 030 C7r2): the one the model held when it applied the stream's
+	// Ready. A socket's stream hands up one Ready at most — the one its first
+	// attach was owed — after the restore of the incarnation it is about,
+	// and that Ready is the start's outcome: a remote.Session's Start answers
+	// with it. "" until one is applied, and always in process, where no
+	// Ready comes. startErr is that incarnation's failure: a restore of
+	// another takes it away, and a start that answers once the model has
+	// left it is not a failure of the session the model now holds
+	// (startLeft).
+	startInc string
 
 	// git is found at start and again whenever the session's workspace moves
 	// the model's (followWorkspace); branch is re-read when a turn ends.
@@ -1317,8 +1328,10 @@ func (m *Model) dropSession() {
 	m.clearOverlays()
 	m.modeRev, m.modelRev, m.configRev = 0, 0, 0
 	m.cmdSeq, m.chains = 0, nil
-	// A new session is a new start: its session-is-up tail is still to run.
+	// A new session is a new start: its session-is-up tail is still to run,
+	// and its backend's Ready is still to come.
 	m.upDone = false
+	m.startInc = ""
 	// Its host's facts are its own, read again from its backend (recompute).
 	m.hostPerm, m.hostStart = backend.PermissionUnsaid, time.Time{}
 	m.owner.set(nil)
@@ -1815,7 +1828,11 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case readyMsg:
 		// The host's start completed: the backend's Info already holds the
 		// facts it published (its catalogs above all), so the mirror is read
-		// again. A start that failed is answered by Start too, as errMsg.
+		// again. A start that failed is answered by Start too, as errMsg —
+		// which the incarnation this Ready arrived in tells about (startInc).
+		if m.startInc == "" {
+			m.startInc = m.incarnation()
+		}
 		m.recompute()
 		return m, nil
 
@@ -1873,32 +1890,7 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.eng != nil {
 			m.eng.Started(nil)
 		}
-		// The launch flow's backend hears that its session came up here,
-		// and not while the program is on its way out (startAcker).
-		if a, ok := m.eng.(startAcker); ok && !m.quitting {
-			a.AckStarted()
-		}
-		m.started = true
-		m.branch = m.git.branch()
-		m.recompute()
-		if m.persistProvider && (!m.fallbackDefault || m.pickedExplicit) {
-			name := m.snap.Provider.Name
-			if name == "" {
-				name = agent.CursorProvider().Name()
-			}
-			// A hidden provider is never written as the default (plan 018
-			// §3.4): trying it once must not change what a plain craze
-			// starts. A session that has not reported its provider yet was
-			// started as the resolved default (as in writeIndex), so a hidden
-			// default is skipped too rather than saving the cursor fallback.
-			hidden := hiddenProvider(name) || (m.snap.Provider.Name == "" && m.providerDefault.Hidden())
-			if !hidden {
-				if err := SaveProvider(name); err != nil {
-					m.addError(err.Error())
-				}
-			}
-		}
-		m.sessionUp()
+		m.comeUp()
 		return m, nil
 
 	case errMsg:
@@ -1911,6 +1903,17 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if m.eng != nil {
 			m.eng.Started(msg.err)
+		}
+		if m.startLeft() {
+			// Over a socket, the start answered for an incarnation the model
+			// has since left — a restore of another has been applied after
+			// the Ready that failed (plan 030 C7r2): the failure is that
+			// session's, not this one's, and it draws nothing and fails
+			// nothing here. The start has answered all it will, so the
+			// session the model now holds comes up as a late startedMsg
+			// would bring it up.
+			m.comeUp()
+			return m, nil
 		}
 		m.status = statusError
 		m.err = msg.err.Error()
@@ -4285,6 +4288,60 @@ func (m Model) modeSettled(gen int, value string, rev uint64) Model {
 	}
 	m.confirmMode(gen, value, rev)
 	return m
+}
+
+// comeUp is the session coming up in this TUI once its backend's start has
+// answered: startedMsg's arm, after the engine is told — and, over a socket, a
+// start whose failure was an incarnation's the model has since left, which
+// leaves the session it holds as a start that answered leaves it (startLeft,
+// plan 030 C7r2). The launch flow's backend hears that its session came up
+// here, and not while the program is on its way out (startAcker); the
+// provider is persisted where this craze persists it; and the session-is-up
+// tail runs, once its other key has landed too (sessionUp).
+func (m *Model) comeUp() {
+	if a, ok := m.eng.(startAcker); ok && !m.quitting {
+		a.AckStarted()
+	}
+	m.started = true
+	m.branch = m.git.branch()
+	m.recompute()
+	if m.persistProvider && (!m.fallbackDefault || m.pickedExplicit) {
+		name := m.snap.Provider.Name
+		if name == "" {
+			name = agent.CursorProvider().Name()
+		}
+		// A hidden provider is never written as the default (plan 018
+		// §3.4): trying it once must not change what a plain craze starts.
+		// A session that has not reported its provider yet was started as
+		// the resolved default (as in writeIndex), so a hidden default is
+		// skipped too rather than saving the cursor fallback.
+		hidden := hiddenProvider(name) || (m.snap.Provider.Name == "" && m.providerDefault.Hidden())
+		if !hidden {
+			if err := SaveProvider(name); err != nil {
+				m.addError(err.Error())
+			}
+		}
+	}
+	m.sessionUp()
+}
+
+// startLeft reports that the backend's start answered for an incarnation the
+// model has left (startInc, plan 030 C7r2): the stream's Ready was applied in
+// one, and a restore of another has been applied since. Over a socket the
+// start's answer and the stream are read side by side, so the answer can land
+// after that restore; in process no Ready comes, and it is never so.
+func (m *Model) startLeft() bool {
+	return m.startInc != "" && m.startInc != m.incarnation()
+}
+
+// incarnation is the incarnation of the session the model holds, as its fold
+// knows it: the last restore's — "" before a socket backend's first, and in
+// process, where none comes.
+func (m *Model) incarnation() string {
+	if m.shared == nil {
+		return ""
+	}
+	return m.shared.Incarnation()
 }
 
 // sessionReady is the two-key gate of §3.5: Start has returned *and*, for a

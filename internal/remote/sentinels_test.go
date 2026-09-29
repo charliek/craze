@@ -549,7 +549,8 @@ const (
 var tuiSites = []tuiSite{
 	{"app.go", "runErrAfterHangup", "Is", "tea.ErrProgramPanic", 1, proofLocal},
 	{"app.go", "finishRun", "Is", "agent.ErrAgentExited", 1, proofViewClose},
-	{"app.go", "update", "Error", "err", 1, proofLocal}, // SaveProvider's
+	// SaveProvider's, in the tail startedMsg's arm shares (plan 030 C7r2).
+	{"app.go", "comeUp", "Error", "err", 1, proofLocal},
 	// errMsg (Start's failure).
 	{"app.go", "update", "Error", "msg.err", 1, proofText},
 	// That failure's row drawn again after a restore (plan 030 C7r): the

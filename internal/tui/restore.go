@@ -71,8 +71,9 @@ const reloadedNote = "transcript reloaded"
 // attached before its session started, as the socket goldens attach, it
 // restores an empty session and leaves every frame as it was. Every later one
 // says so, in one local row (reloadedNote). A start failure the model already
-// holds (startErr) keeps its row through any restore: it is drawn again after
-// the rebuild (plan 030 C7r). A restore of another incarnation —
+// holds (startErr) keeps its row through any restore of the incarnation it
+// failed in: it is drawn again after the rebuild (plan 030 C7r); a restore of
+// another takes it away (C7r2). A restore of another incarnation —
 // the host restarted, the engine was replaced — is another session: the
 // session generation moves, so every result still in flight for the old one is
 // dropped where it lands (issued), and nothing keyed by the old incarnation's
@@ -92,10 +93,7 @@ func (m *Model) applyRestore(r restoreMsg) bool {
 	m.infoPin = &info
 	defer func() { m.infoPin = nil }()
 	m.restores++
-	held := ""
-	if m.shared != nil {
-		held = m.shared.Incarnation()
-	}
+	held := m.incarnation()
 	first := held == ""
 	moved := !first && r.snap.Incarnation != held
 	if moved {
@@ -195,11 +193,25 @@ func (m *Model) applyRestore(r restoreMsg) bool {
 	if !first {
 		m.addNote(reloadedNote)
 	}
-	if m.startErr != nil {
-		// A start failure outlives the restore (X56), and so does its row
-		// (plan 030 C7r). The row is local — errMsg's; spawnFailed's adopted
-		// no backend, so no restore follows it — and no snapshot holds it:
-		// the host's transcript records no start failure. Over a socket the
+	switch {
+	case m.startErr != nil && m.startLeft():
+		// The failure is the start of an incarnation this restore has left
+		// (startInc, plan 030 C7r2): another session's, whose error neither
+		// draws here nor reaches craze's exit status — and restoreTurn has
+		// already taken the error state it set, as it takes any of another
+		// incarnation's (moved: startInc is always an incarnation the model
+		// held). The start has answered all it will, so the session the
+		// model now holds comes up as a start that answered brings it up.
+		m.startErr = nil
+		m.comeUp()
+	case m.startErr != nil:
+		// A start failure outlives a restore of its own incarnation (X56),
+		// and so does its row (plan 030 C7r) — one the failure's Ready has
+		// not yet bound (startInc "") is this restore's or a later one's, as
+		// the stream puts a Ready after the restore of the incarnation it is
+		// about. The row is local — errMsg's; spawnFailed's adopted no
+		// backend, so no restore follows it — and no snapshot holds it: the
+		// host's transcript records no start failure. Over a socket the
 		// start's answer can land before the first restore (Init, spawned:
 		// the start and the reader run side by side, and a remote Start
 		// answers once its stream has queued the ready{startFailed}, read or

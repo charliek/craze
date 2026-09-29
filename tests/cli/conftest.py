@@ -146,6 +146,17 @@ def seed_host_idle_exit(home: Path) -> Path:
 
 MARKER_ENV = "CRAZE_RUNTIME_DIR"
 
+# How long one `ps` of the machine's processes may take (macOS; Linux reads
+# /proc). A scan that has not answered by then, or that failed, is a
+# ProcessScanError -- unknown, never an empty set -- so the cleanup reports it
+# instead of hanging on it, or reading it as "nothing left" (sol r13-c7r).
+PS_TIMEOUT = 5.0
+
+
+class ProcessScanError(RuntimeError):
+    """The machine's processes could not be listed or read: whether any of
+    this test's are still running is unknown."""
+
 
 def marker_pids() -> set[int]:
     """The pids of the processes this test started, and nothing else.
@@ -164,10 +175,17 @@ def marker_pids() -> set[int]:
     what `ps -E` prints, which runs the arguments and the environment together,
     so a process whose arguments merely mention the marker would be taken for
     this test's and signalled (sol r12-c7).
+
+    A scan that cannot be made -- macOS's `ps` failed or did not answer within
+    PS_TIMEOUT, or its kernel will not say how large a process's arguments can
+    be -- raises ProcessScanError (sol r13-c7r). One process whose environment
+    cannot be read (gone meanwhile, another user's) is not this test's.
     """
     base = os.environ.get(MARKER_ENV)
     if not base:
         return set()
+    if sys.platform == "darwin" and _darwin_argmax() is None:
+        raise ProcessScanError("sysctl KERN_ARGMAX failed: no process's environment can be read")
     want = f"{MARKER_ENV}={base}".encode()
     me = os.getpid()
     found: set[int] = set()
@@ -181,10 +199,17 @@ def marker_pids() -> set[int]:
 
 
 def _all_pids() -> list[int]:
-    """Every pid on the machine, as this user can list them."""
+    """Every pid on the machine, as this user can list them, or a
+    ProcessScanError when `ps` fails or does not answer within PS_TIMEOUT
+    (it is killed then)."""
     if sys.platform == "linux":
         return [int(p.name) for p in Path("/proc").iterdir() if p.name.isdigit()]
-    out = subprocess.run(["ps", "-axo", "pid="], capture_output=True, check=True).stdout
+    try:
+        out = subprocess.run(["ps", "-axo", "pid="], capture_output=True, check=True, timeout=PS_TIMEOUT).stdout
+    except subprocess.TimeoutExpired as e:
+        raise ProcessScanError(f"`ps` did not answer within {PS_TIMEOUT:g}s") from e
+    except (OSError, subprocess.CalledProcessError) as e:
+        raise ProcessScanError(f"`ps` failed: {e}") from e
     return [int(tok) for tok in out.split() if tok.isdigit()]
 
 
@@ -364,9 +389,28 @@ def host_cleanup(isolate_run_env: None, tmp_path: Path, fake_agent_bin: Path) ->
     (marker_pids) -- so a process another session owns is never looked at,
     let alone killed. (A pytest that is itself SIGKILLed runs none of this:
     TEST_HOST_IDLE_EXIT bounds what it leaves.)
+
+    A scan of the machine's processes that fails or does not answer
+    (ProcessScanError) ends the cleanup there, and the test fails with it and
+    the registry entries still present: what it could not check is unknown,
+    never "nothing left", and a pid it could not match to this test is never
+    signalled (sol r13-c7r). So each wait is bounded by its own limit plus at
+    most one scan (PS_TIMEOUT on macOS). TEST_HOST_IDLE_EXIT bounds what such
+    a cleanup leaves.
     """
     yield
-    fake = str(fake_agent_bin)
+    try:
+        why = _stop_hosts(tmp_path, str(fake_agent_bin))
+    except ProcessScanError as e:
+        left = "".join(f"; {_describe_entry(p)}" for p in _registry_files(tmp_path))
+        why = f"a test's cleanup could not check for craze left behind: {e}{left}"
+    if why:
+        pytest.fail(why, pytrace=False)
+
+
+def _stop_hosts(tmp_path: Path, fake: str) -> str | None:
+    """host_cleanup's stop and check: None when nothing of the test's is left,
+    and otherwise why the test fails. A failed scan raises ProcessScanError."""
     mine = marker_pids()
     registered = {pid for pid in map(_entry_pid, _registry_files(tmp_path)) if pid is not None}
     _signal((registered & mine) | {p for p in mine if _is_serve(p)}, signal.SIGTERM)
@@ -377,9 +421,9 @@ def host_cleanup(isolate_run_env: None, tmp_path: Path, fake_agent_bin: Path) ->
             break
         time.sleep(0.05)
     if not left:
-        return
-    # Whatever the assertion below says, nothing is left running -- and that
-    # is checked, not assumed.
+        return None
+    # Whatever the failure says, nothing is left running -- and that is
+    # checked, not assumed.
     _signal(marker_pids(), signal.SIGKILL)
     deadline = time.monotonic() + 5.0
     while (alive := _stray_processes(fake)) and time.monotonic() < deadline:
@@ -387,7 +431,7 @@ def host_cleanup(isolate_run_env: None, tmp_path: Path, fake_agent_bin: Path) ->
     why = "a test left craze behind: " + "; ".join(left)
     if alive:
         why += "; still running after SIGKILL: " + "; ".join(alive)
-    pytest.fail(why, pytrace=False)
+    return why
 
 
 def _signal(pids: set[int], sig: signal.Signals) -> None:

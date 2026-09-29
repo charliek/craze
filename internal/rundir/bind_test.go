@@ -431,7 +431,13 @@ func TestLostNamesAVanishedSocketOrEntry(t *testing.T) {
 		if why := h.Lost(); why != "" {
 			t.Fatalf("a host just bound is lost: %s", why)
 		}
-		return h, filepath.Join(hostsDir(env), h.ID()+".json")
+		// Lost names the entry by its canonical path: on macOS the test's
+		// /tmp is /private/tmp, so the expectation is resolved the same way.
+		dir, err := filepath.EvalSymlinks(hostsDir(env))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return h, filepath.Join(dir, h.ID()+".json")
 	}
 	lost := func(t *testing.T, h *Host, want string) {
 		t.Helper()

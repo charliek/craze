@@ -20,7 +20,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
-from conftest import both_modes, host_env_names, marker_pids, require_rg  # noqa: F401
+from conftest import PS_TIMEOUT, both_modes, host_env_names, marker_pids, require_rg  # noqa: F401
 from sse_fixture import (
     CANARY,
     UNUSED_ENV_KEY,
@@ -55,7 +55,8 @@ def _cmdline_pids(needle: str) -> list[int]:
     path's own first token is its argv[0] there too. check=True on purpose:
     a caller waiting for the list to empty reads [] as proof the child is
     gone, so a ps that failed must raise rather than quietly turn a leak
-    check green.
+    check green -- and one that stalls raises too, after conftest's
+    PS_TIMEOUT, rather than hang the test (sol r13-c7r).
     """
     encoded = needle.encode()
     # Scoped to the processes this test started (conftest.marker_pids): a
@@ -69,6 +70,7 @@ def _cmdline_pids(needle: str) -> list[int]:
             ["ps", "-axww", "-o", "pid=,args="],
             capture_output=True,
             check=True,
+            timeout=PS_TIMEOUT,
         ).stdout
         pids = []
         for line in out.splitlines():
