@@ -141,6 +141,10 @@ func runLaunch(cmd *cobra.Command, f *tuiFlags, env hostEnv, diag *deferredStder
 		Theme:     resolveTheme(cmd, f.theme),
 		Workspace: ws,
 		Model:     f.model,
+		// The permission chip's fallback alone: the host a launch spawns
+		// says what it spawned its agent with, and the chip reads that
+		// (plan 030 §3.7, SF-60) — a held session's host included, whose
+		// --force need not be this command line's.
 		Yolo:      f.force,
 		NoMouse:   f.noMouse,
 		Provider:  resolved.Provider,

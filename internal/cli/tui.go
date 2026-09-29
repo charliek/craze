@@ -216,10 +216,10 @@ func runTUI(cmd *cobra.Command, f *tuiFlags, env hostEnv) error {
 		if !f.cont || !errors.As(err, &held) {
 			return err
 		}
-		// SQ16 (plan 027 §3.9, PR 4): the session is open in another craze,
-		// and this --continue joins it there instead. Nothing was built,
-		// bound or claimed for it, so the teardown has nothing of this run's
-		// to release, and runs before the attach takes the terminal.
+		// SQ16 (plan 027 §3.9, PR 4): the session is already running
+		// elsewhere, and this --continue joins it there instead. Nothing was
+		// built, bound or claimed for it, so the teardown has nothing of this
+		// run's to release, and runs before the attach takes the terminal.
 		rh.close()
 		err = attachHeld(cmd, f, runEnv, held, err)
 		diag.flush(os.Stderr, false)
@@ -315,7 +315,7 @@ func sessionOptions(f *tuiFlags, ws, mode string, stderr, diag io.Writer, env []
 // asked of a row that has its id already, so a held one is attached to
 // whatever they say, and after them for a legacy row, whose claim would mint
 // and write its id (plan 028 §3.5). A session another craze holds
-// is exit 1, `craze: that session is open in another craze (pid N)`, carrying
+// is exit 1, `craze: that session is already running (pid N)`, carrying
 // the *rundir.HeldError — which runTUI attaches through instead, when the
 // holder serves its session (SQ16, PR 4: attachHeld); an index held busy past
 // the bound is exit 1 too, and so is a row with no craze id that left the

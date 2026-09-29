@@ -244,7 +244,7 @@ func TestServeAnswersWhyItNeverServed(t *testing.T) {
 		code, msg := exitCode(t, r.result(t, serveStep))
 		want := readyHeld{HostID: holder, PID: os.Getpid(), CrazeSessionID: id}
 		if line.OK || line.Held == nil || *line.Held != want || line.Refused || line.Error != msg || code != 1 ||
-			!strings.HasPrefix(msg, "craze serve: that session is open in another craze (pid ") {
+			!strings.HasPrefix(msg, "craze serve: that session is already running (pid ") {
 			t.Fatalf("the line %+v (held %+v); exit %d %q", line, line.Held, code, msg)
 		}
 		assertPipeEnds(t, rd)

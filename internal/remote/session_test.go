@@ -1071,3 +1071,75 @@ func TestCloseWithinBoundsItsDetach(t *testing.T) {
 		}
 	})
 }
+
+// TestTheInfoCarriesAPlan030HostsFacts (plan 030 §3.7, SF-60, SF-63): the
+// info document's permissionMode and startedAt reach the Backend's Info as
+// the host sent them; a host that sends neither — one from before plan 030 —
+// leaves them unsaid, and so does the fallback before any attach reply.
+func TestTheInfoCarriesAPlan030HostsFacts(t *testing.T) {
+	t0 := time.Date(2026, 9, 29, 9, 0, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		name    string
+		opts    []hostOpt
+		perm    backend.PermissionMode
+		started time.Time
+	}{
+		{"a --force host", []hostOpt{withInfo(protocol.PermissionBypass, t0)}, backend.PermissionBypass, t0},
+		{"a --no-force host", []hostOpt{withInfo(protocol.PermissionPrompt, t0)}, backend.PermissionPrompt, t0},
+		{"an older host", nil, backend.PermissionUnsaid, time.Time{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHost(t, tc.opts...)
+			s := dialSession(t, h.path, newTap(t), remote.SessionOptions{})
+			if info := s.Info(); info.PermissionMode != backend.PermissionUnsaid || !info.StartedAt.IsZero() {
+				t.Fatalf("before the attach reply the Info says %q, started %s", info.PermissionMode, info.StartedAt)
+			}
+			if err := s.Start(tctx(t)); err != nil {
+				t.Fatalf("start: %v", err)
+			}
+			if info := s.Info(); info.PermissionMode != tc.perm || !info.StartedAt.Equal(tc.started) {
+				t.Fatalf("the Info says %q, started %s; want %q, started %s", info.PermissionMode, info.StartedAt, tc.perm, tc.started)
+			}
+		})
+	}
+}
+
+// TestLastTurnIsSessionStates (plan 030 §3.7, SF-57): LastTurn is
+// session.state's lastTurn in the engine's types — nil before any turn has
+// ended, the failed ending with its error and turn id once one has — bound
+// as every read is: a ctx whose epoch the client has left is
+// backend.ErrStaleEpoch, nothing sent.
+func TestLastTurnIsSessionStates(t *testing.T) {
+	h := newHost(t)
+	tp := newTap(t)
+	s, _ := started(t, h, tp, remote.SessionOptions{})
+	lt, err := s.LastTurn(backend.WithEpoch(tctx(t), s.Epoch()))
+	if err != nil || lt != nil {
+		t.Fatalf("before any turn: %+v, %v; want none", lt, err)
+	}
+	h.publish(
+		agent.Event{Type: agent.EventTurn, Turn: &agent.TurnInfo{Phase: agent.TurnStarted, ID: "turn-9", Text: "go"}},
+		agent.Event{Type: agent.EventTurn, Turn: &agent.TurnInfo{Phase: agent.TurnEnded, ID: "turn-9", Err: "boom"}},
+	)
+	var got *engine.LastTurn
+	deadline := time.Now().Add(watchdog)
+	for got == nil {
+		if time.Now().After(deadline) {
+			t.Fatal("the host's last turn never ended")
+		}
+		if got, err = s.LastTurn(tctx(t)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	want := h.eng.State().LastTurn
+	if got.Outcome != engine.TurnFailed || got.Err != "boom" || got.TurnID != "turn-9" || !got.EndedAt.Equal(want.EndedAt) {
+		t.Fatalf("LastTurn %+v, want the host's %+v", got, want)
+	}
+	before := len(tp.sent(protocol.MethodSessionState))
+	if _, err := s.LastTurn(backend.WithEpoch(tctx(t), s.Epoch()+1)); !errors.Is(err, backend.ErrStaleEpoch) {
+		t.Fatalf("a stale epoch's read: %v, want ErrStaleEpoch", err)
+	}
+	if after := len(tp.sent(protocol.MethodSessionState)); after != before {
+		t.Fatalf("a stale read went out: %d session.state requests, want %d", after, before)
+	}
+}

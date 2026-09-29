@@ -316,6 +316,9 @@ type Model struct {
 	engErr error
 	cwd    string
 	model  string
+	// yolo is Config.Yolo: this craze's own --force, which the permission
+	// chip shows when the session's host does not say what it spawned its
+	// agent with (bypassing).
 	yolo   bool
 	status status
 	err    string
@@ -323,12 +326,24 @@ type Model struct {
 	// reaches craze's exit status: Run returns it once the program is over.
 	startErr error
 
-	// git is found once, at start; branch is re-read when a turn ends.
+	// git is found at start and again whenever the session's workspace moves
+	// the model's (followWorkspace); branch is re-read when a turn ends.
 	git    gitInfo
 	branch string
 	// sessStart is when Start returned, which is what the status row's
-	// elapsed counts from.
+	// elapsed counts from when the session's host does not say when it
+	// started (hostStart).
 	sessStart time.Time
+	// hostPerm and hostStart are the session's facts the status rows read
+	// (plan 030 §3.7): the permission mode its host spawned the agent with
+	// (SF-60) and when its host started serving it (SF-63), as the backend's
+	// Info said them at the last recompute — so they move where the rest of
+	// the mirror does, in the Update that applies a restore or a ready, and
+	// never under a frame. PermissionUnsaid and zero when the backend does
+	// not say (in process; an older host): the chip is then the config's
+	// (yolo), and the elapsed counts from sessStart, as they always have.
+	hostPerm  backend.PermissionMode
+	hostStart time.Time
 
 	// shared is the session's transcript as every client folding its events
 	// agrees on it (plan 024 §3.8): this client's own instance, folded from
@@ -795,8 +810,9 @@ type Model struct {
 	endErr error
 	// viewer is Config.Viewer (with a Backend): this TUI joins a session
 	// another craze hosts. New has cleared what the host alone owns
-	// (Config.viewing); what is left for the model to decide is where the
-	// composer's shell runs (shellDir).
+	// (Config.viewing), and nothing the model decides reads it any more:
+	// where the composer's shell runs was a viewer's own rule, and is every
+	// backend's since plan 030 §3.7 (shellDir, followWorkspace).
 	viewer bool
 	// infoPin is the facts the model reads in place of the backend's Info
 	// while a restore is being applied: the restore item's own (applyRestore),
@@ -808,6 +824,15 @@ type Model struct {
 	// whichever of its keys lands last and however often a replay closes the
 	// gate again.
 	upDone bool
+	// restores counts the restores this model has applied, and turnStarts
+	// the turns it has seen begin — its own and every other client's
+	// (beginTurn), and the agent's own (a foreign turn's running bracket).
+	// They are the tag the read after a restore carries (lastturn.go, plan
+	// 030 §3.7): its answer is applied only while both still stand where
+	// they stood when it was sent. Both only ever move forward, across every
+	// session this model holds, so no answer can find its tag again.
+	restores   uint64
+	turnStarts uint64
 }
 
 // info is the session's static facts as the model reads them (plan 027
@@ -1211,7 +1236,8 @@ func (m *Model) setBackend(b backend.Backend) {
 }
 
 // adopt makes b the model's backend, recorded in the owner too, with a
-// command order of its own (chains).
+// command order of its own (chains), and its session's workspace the model's
+// (followWorkspace).
 func (m *Model) adopt(b backend.Backend) {
 	m.eng = b
 	if sessionBackendHook != nil {
@@ -1221,6 +1247,28 @@ func (m *Model) adopt(b backend.Backend) {
 	// replaced orders nothing on this one.
 	m.chains = &chainLock{}
 	m.owner.set(m.eng)
+	m.followWorkspace(m.eng.Info().Workspace)
+}
+
+// followWorkspace makes ws — the session's own workspace, as its backend's
+// Info names it — the model's (plan 030 §3.7, "the workspace follows the
+// session"): m.cwd, which the status row names, the skills are scanned under
+// (rescanSkills) and the composer's shell runs in (shellDir), and the
+// repository the branch is read from, found again from there. It is called on
+// every adopt: a session served elsewhere runs where its host runs it — a
+// --continue row's directory, a session another craze started — which need
+// not be the directory this craze was started in, and a socket backend names
+// it before its first attach reply (the registry entry's workspace, which its
+// dialler passes: remote.SessionOptions.Workspace). In process the engine
+// backend's Info names m.cwd itself, so nothing moves; "" — a backend that
+// names none — changes nothing either.
+func (m *Model) followWorkspace(ws string) {
+	if ws == "" || ws == m.cwd {
+		return
+	}
+	m.cwd = ws
+	m.git = discoverGit(ws)
+	m.branch = m.git.branch()
 }
 
 // dropSession is the half of setSession and setBackend that lets go of the
@@ -1262,6 +1310,8 @@ func (m *Model) dropSession() {
 	m.cmdSeq, m.chains = 0, nil
 	// A new session is a new start: its session-is-up tail is still to run.
 	m.upDone = false
+	// Its host's facts are its own, read again from its backend (recompute).
+	m.hostPerm, m.hostStart = backend.PermissionUnsaid, time.Time{}
 	m.owner.set(nil)
 }
 
@@ -1741,8 +1791,16 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case restoreMsg:
 		// The backend's stream replaced what the model held (restore.go): the
-		// whole model is initialised from the snapshot and its facts.
-		m.applyRestore(msg)
+		// whole model is initialised from the snapshot and its facts, and the
+		// session's last ending, which no snapshot carries, is read once
+		// beside it (lastturn.go).
+		if !m.applyRestore(msg) {
+			return m, nil
+		}
+		return m, m.readLastTurn()
+
+	case lastTurnMsg:
+		m.applyLastTurn(msg)
 		return m, nil
 
 	case readyMsg:
@@ -3087,6 +3145,9 @@ func (m *Model) beginTurn(id string) {
 	// offer is client-local UI — and turnID is the engine turn it names.
 	m.turnSeq++
 	m.turnID = id
+	// A turn this model has seen begin: the ending a read after a restore
+	// brings back is no longer the last one (lastturn.go).
+	m.turnStarts++
 }
 
 // maskCards drops the cards a cancel has answered and retires the plan offer:
@@ -3624,6 +3685,9 @@ func (m *Model) reduceEvent(ev agent.Event) tea.Cmd {
 			// (a late answer for a previous episode cannot set it either,
 			// applyForeignCancelled).
 			m.cancelled = false
+			// And it is a turn begun, as beginTurn counts craze's own
+			// (lastturn.go).
+			m.turnStarts++
 		}
 		return nil
 	case agent.EventText:

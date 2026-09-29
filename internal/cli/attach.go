@@ -282,9 +282,12 @@ func attachTo(target attachTarget, view attachView, stderr io.Writer) error {
 // the registry entry's provider and workspace (GLM 11); Viewer on; the entry's
 // workspace; the command line's theme, mouse and background.
 //
-// Yolo is craze's own default (--force): the wire does not carry the host's
-// permission mode, so the chip reads what a host started without --no-force
-// runs with. A failed dial is exit 1, one `craze attach: …` line.
+// The permission chip reads the host's own word (the info document's
+// permissionMode, plan 030 §3.7, SF-60): what the host's --force or
+// --no-force spawned its agent with. Yolo is only what it shows for a host
+// that does not say — one from before plan 030 — and is craze's own default
+// (--force) there, as it always was: attach has no --force of its own. A
+// failed dial is exit 1, one `craze attach: …` line.
 func attachConfig(target attachTarget, view attachView) (tui.Config, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), dialTimeout)
 	defer cancel()
@@ -303,10 +306,11 @@ func attachConfig(target attachTarget, view attachView) (tui.Config, error) {
 			sanitizeLine(entryID(target.entry)), sanitizeLine(err.Error()))
 	}
 	return tui.Config{
-		Backend:       s,
-		Viewer:        true,
-		Theme:         view.theme,
-		Workspace:     target.entry.Workspace,
+		Backend:   s,
+		Viewer:    true,
+		Theme:     view.theme,
+		Workspace: target.entry.Workspace,
+		// The chip's fallback for a host that does not say (above).
 		Yolo:          true,
 		NoMouse:       view.noMouse,
 		TerminalTitle: tui.ConfigTerminalTitle(),
@@ -450,7 +454,7 @@ func holderEntry(env rundir.Env, held *rundir.HeldError) (rundir.Entry, holderSo
 // found held by another craze is attached to instead of refused — `craze -c`
 // becomes `craze attach --session <id>`, resolved through the holder's host
 // id — after one stderr line, printed before the TUI takes the screen:
-// `craze: that session is open in another craze (pid N); attaching`. The
+// `craze: that session is already running (pid N); attaching`. The
 // flags a new session would take (--model, --ask, --plan, --agent-bin,
 // --provider) do not apply to an attach: they are ignored, and the line names
 // the ones given. Nothing is built, spawned, bound or claimed for it.

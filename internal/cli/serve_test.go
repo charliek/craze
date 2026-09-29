@@ -641,8 +641,8 @@ func TestHeldRefusalWording(t *testing.T) {
 		pid  int
 		want string
 	}{
-		{4242, "that session is open in another craze (pid 4242)"},
-		{0, "that session is open in another craze (pid ?)"},
+		{4242, "that session is already running (pid 4242)"},
+		{0, "that session is already running (pid ?)"},
 	} {
 		err := error(&rundir.HeldError{CrazeID: "x", Holder: rundir.Holder{PID: tc.pid}})
 		if got := refusal(err); got != tc.want {

@@ -953,6 +953,25 @@ func (s *Session) Settings(ctx context.Context) (backend.Settings, error) {
 	return out, nil
 }
 
+// LastTurn is session.state's lastTurn (plan 030 §3.7, SF-57): how the
+// session's last turn ended, nil while a turn runs, before any has ended, and
+// from a host from before plan 030, which sends none. It is bound as every
+// read is (read): to the identity the client holds at entry, so an answer
+// from a session this client has since left is backend.ErrStaleEpoch, never
+// that session's ending. An outcome this build does not know is handed up as
+// it came: the caller acts on the three it knows and on nothing else.
+func (s *Session) LastTurn(ctx context.Context) (*engine.LastTurn, error) {
+	var r protocol.StateResult
+	err := s.read(ctx, protocol.MethodSessionState, func(sid string) any {
+		return protocol.StateParams{SessionID: sid}
+	}, &r)
+	if err != nil || r.LastTurn == nil {
+		return nil, err
+	}
+	lt := r.LastTurn
+	return &engine.LastTurn{Outcome: engine.TurnOutcome(lt.Outcome), Err: lt.Err, EndedAt: lt.EndedAt, TurnID: lt.TurnID}, nil
+}
+
 // replyError is a reply whose result this build could not read.
 func replyError(method string, err error) error {
 	return fmt.Errorf("remote: %s's reply: %w", method, err)
@@ -973,6 +992,8 @@ func sessionInfo(p *protocol.SessionInfo) backend.SessionInfo {
 		Label:             p.Provider.Label,
 		Capabilities:      capabilities(p.Capabilities),
 		RetryHorizon:      retryHorizon(p.RetryHorizon),
+		PermissionMode:    permissionMode(p.PermissionMode),
+		StartedAt:         p.StartedAt,
 	}
 	for _, m := range p.Catalogs.Models {
 		info.Models = append(info.Models, agent.ModelInfo{ID: m.ID, Name: m.Name})
@@ -981,6 +1002,20 @@ func sessionInfo(p *protocol.SessionInfo) backend.SessionInfo {
 		info.Modes = append(info.Modes, agent.ModeInfo{ID: m.ID, Name: m.Name, Description: m.Description})
 	}
 	return info
+}
+
+// permissionMode is the info document's permissionMode in the Backend's
+// words (plan 030 §3.7, SF-60): bypass or prompt, and anything else — absent,
+// from a host from before plan 030, or a mode this build does not know — the
+// host not saying, so the client shows its own config's.
+func permissionMode(m protocol.PermissionMode) backend.PermissionMode {
+	switch m {
+	case protocol.PermissionBypass:
+		return backend.PermissionBypass
+	case protocol.PermissionPrompt:
+		return backend.PermissionPrompt
+	}
+	return backend.PermissionUnsaid
 }
 
 // capabilities is the session capability set on the wire as agent's: every

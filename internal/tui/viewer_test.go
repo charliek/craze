@@ -142,8 +142,11 @@ func TestAViewerLeavesTheHostItsOwn(t *testing.T) {
 
 // TestAViewersShellRunsInTheSessionsWorkspace (§3.15): the composer's `!`
 // command runs locally, in the session's workspace as the backend's Info
-// names it — not the directory the TUI was configured with, which a host TUI
-// runs its own in.
+// names it — not the directory the TUI was configured with. Plan 030 §3.7
+// ("the workspace follows the session") makes that every backend's rule, not
+// a viewer's alone: the launch flow's TUI — a Backend client that is no
+// viewer — runs its command where its detached host runs the session too, and
+// its status row names that workspace.
 func TestAViewersShellRunsInTheSessionsWorkspace(t *testing.T) {
 	isolateSkillsHome(t)
 	configured, session := t.TempDir(), t.TempDir()
@@ -174,11 +177,11 @@ func TestAViewersShellRunsInTheSessionsWorkspace(t *testing.T) {
 			t.Fatalf("viewer=%v: Enter ran no command", viewer)
 		}
 		want, not := "session-marker", "configured-marker"
-		if !viewer {
-			want, not = not, want
-		}
 		if !strings.Contains(done.res.out, want) || strings.Contains(done.res.out, not) {
 			t.Fatalf("viewer=%v: the command ran where it listed %q, want %s's", viewer, done.res.out, want)
+		}
+		if m.cwd != session {
+			t.Fatalf("viewer=%v: the model's workspace is %q, want the session's %q", viewer, m.cwd, session)
 		}
 	}
 }

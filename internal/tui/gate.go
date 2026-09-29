@@ -12,6 +12,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/charliek/craze/internal/backend"
+	"github.com/charliek/craze/internal/engine"
 )
 
 // The command gate (plan 027 §3.12).
@@ -77,9 +78,16 @@ func (e *unknownOutcome) Unwrap() error        { return e.err }
 
 // failureText is how a command's failure reads where the TUI words one
 // itself — a fire-and-forget command's (a cancel's) and a settings chain's
-// error row: its text, and ErrNoAnswer's for an outcome that is unknown
-// (noAnswerFor), exactly as a gated call's continuation hears it.
-func failureText(err error) string { return noAnswerFor(err).Error() }
+// error row: its text, ErrNoAnswer's for an outcome that is unknown
+// (noAnswerFor), exactly as a gated call's continuation hears it, and
+// closingNote's for a command the session's close fence refused (plan 030
+// §3.6, engine.ErrClosing), as the composer's refusals say it.
+func failureText(err error) string {
+	if errors.Is(err, engine.ErrClosing) {
+		return closingNote
+	}
+	return noAnswerFor(err).Error()
+}
 
 // gateDeadline is the deadline a gated call is given (§3.12): fifteen seconds —
 // long enough for the flock an index write can wait on, short enough that a

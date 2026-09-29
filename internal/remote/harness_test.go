@@ -112,6 +112,10 @@ type hostConfig struct {
 	// stop is control.Options.Stop: the host serves session.stop through it
 	// (plan 030 §3.6a); nil refuses it, stop_unsupported.
 	stop control.StopFunc
+	// perm and startedAt are control.Options' PermissionMode and StartedAt:
+	// a plan 030 host's info document (§3.7); unset, an older host's.
+	perm      protocol.PermissionMode
+	startedAt time.Time
 }
 
 type hostOpt func(*hostConfig)
@@ -124,6 +128,12 @@ func withWorkspace(ws string) hostOpt { return func(c *hostConfig) { c.workspace
 
 // withStop serves session.stop, handing each accepted stop to stop.
 func withStop(stop control.StopFunc) hostOpt { return func(c *hostConfig) { c.stop = stop } }
+
+// withInfo is a plan 030 host's info document (§3.7): the permission mode it
+// spawned its agent with, and when it started.
+func withInfo(perm protocol.PermissionMode, startedAt time.Time) hostOpt {
+	return func(c *hostConfig) { c.perm, c.startedAt = perm, startedAt }
+}
 
 // host is a server on a socket in front of an engine over a Stub.
 type host struct {
@@ -173,7 +183,8 @@ func newHost(t *testing.T, opts ...hostOpt) *host {
 			t.Fatal(err)
 		}
 	}
-	h.srv = control.New(control.Options{Log: h.logs.log, Workspace: cfg.workspace, Clock: h.clock.now, Stop: cfg.stop})
+	h.srv = control.New(control.Options{Log: h.logs.log, Workspace: cfg.workspace, Clock: h.clock.now, Stop: cfg.stop,
+		PermissionMode: cfg.perm, StartedAt: cfg.startedAt})
 	h.srv.SetEngine(h.eng)
 	l, err := net.Listen("unix", h.path)
 	if err != nil {

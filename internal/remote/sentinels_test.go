@@ -596,12 +596,16 @@ var tuiSites = []tuiSite{
 	// revertModelMsg (a Set's), modelApplyMsg (a step's), cancelFailedMsg (a
 	// Cancel's): the host's text, or ErrNoAnswer's for an outcome unknown.
 	{"gate.go", "failureText", "Error", "noAnswerFor(err)", 1, proofText},
+	// A command the close fence refused (plan 030 §3.6), worded as the
+	// TUI's own refusals are (closingNote, C6).
+	{"gate.go", "failureText", "Is", "engine.ErrClosing", 1, proofSentinel},
 	{"model_dialog.go", "runModelApply", "Is", "agent.ErrBadCatalog", 1, proofSentinel},
 	{"model_dialog.go", "runModelApply", "Is", "engine.ErrStaleModel", 1, proofSentinel},
 	{"model_dialog.go", "runModelApply", "Is", "agent.ErrOptionGone", 1, proofSentinel},
 	{"provider_dialog.go", "confirmProvider", "Error", "err", 1, proofLocal},
 	{"queue.go", "queueErrNote", "Is", "agent.ErrQueueFull", 1, proofSentinel},
 	{"queue.go", "queueErrNote", "Is", "agent.ErrQueueTextTooLong", 1, proofSentinel},
+	{"queue.go", "queueErrNote", "Is", "engine.ErrClosing", 1, proofSentinel},
 	{"queue.go", "queueErrNote", "Error", "err", 1, proofText},
 	{"queue.go", "interjectErrNote", "Is", "ErrNoAnswer", 1, proofGate},
 	{"queue.go", "interjectErrNote", "Is", "agent.ErrNotInTurn", 1, proofSentinel},

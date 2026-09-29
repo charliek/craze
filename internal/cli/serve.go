@@ -717,6 +717,11 @@ func (c *sessionClaims) pickerRefusal(err error) string {
 // the busy index, or the index that changed under the load. Where a held
 // session can be reached instead is its callers' to add: the picker's hint
 // (pickerRefusal), --continue's attach or its no-socket refusal (attachHeld).
+//
+// A held session is "already running" (plan 030 §3.7, SQ16's wording): its
+// holder is, from plan 030 on, most often a detached host (craze serve) with
+// no terminal of its own, not another craze someone has open — so the refusal
+// names what the session is doing, and the pid who holds it.
 func refusal(err error) string {
 	var held *rundir.HeldError
 	switch {
@@ -725,7 +730,7 @@ func refusal(err error) string {
 		if held.Holder.PID > 0 {
 			pid = strconv.Itoa(held.Holder.PID)
 		}
-		return "that session is open in another craze (pid " + pid + ")"
+		return "that session is already running (pid " + pid + ")"
 	case errors.Is(err, atomicfile.ErrLockBusy):
 		return "the session index is busy — try again"
 	case errors.Is(err, sessions.ErrNotInIndex):

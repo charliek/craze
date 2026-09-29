@@ -1076,7 +1076,7 @@ def test_tui_continue_twice_attaches_the_second(
             env_extra={"CRAZE_FAKE_DUMP_ARGV": str(argv_dump)},
         ) as second:
             second.wait_contains(
-                f"craze: that session is open in another craze (pid {first.proc.pid}); attaching"
+                f"craze: that session is already running (pid {first.proc.pid}); attaching"
             )
             second.wait_contains("the workspace holds main.py and README.md")
             second.write(b"\x04")
@@ -1124,7 +1124,7 @@ def test_tui_continue_of_a_session_serving_no_socket_refuses(
             assert second.wait_exit(timeout=10) == 1, second.screen()[-3000:]
             text = _ANSI.sub("", second.screen())
             want = (
-                f"craze: that session is open in another craze (pid {first.proc.pid})"
+                f"craze: that session is already running (pid {first.proc.pid})"
                 " — it serves no control socket"
             )
             assert want in text, text[-2000:]

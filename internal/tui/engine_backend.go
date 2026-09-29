@@ -224,6 +224,16 @@ func (b *engineBackend) Settings(ctx context.Context) (backend.Settings, error) 
 	return backend.Settings{Model: snap.CurrentModel, Mode: snap.CurrentMode, Config: snap.Config}, nil
 }
 
+// LastTurn is State()'s (plan 030 §3.7): read directly, as every in-process
+// read is. In process no restore ever comes, so the model never asks it; it
+// is here because the socket's is (backend.Backend.LastTurn).
+func (b *engineBackend) LastTurn(ctx context.Context) (*engine.LastTurn, error) {
+	if err := b.fence(ctx); err != nil {
+		return nil, err
+	}
+	return b.eng.State().LastTurn, nil
+}
+
 // Info is the session's static facts (§3.13), read from State().Snapshot's
 // static fields and State's own (Incarnation, CrazeSessionID, RetryHorizon).
 // It waits on nothing: State() reads the session's snapshot outside the
@@ -232,7 +242,10 @@ func (b *engineBackend) Settings(ctx context.Context) (backend.Settings, error) 
 // every model-change chain step, so a call here is no new way to block. Before
 // Start it answers from the session's initial snapshot — the configured
 // provider, an empty ProviderSessionID and empty catalogs — as the TUI reads
-// it today (GLM 11).
+// it today (GLM 11). PermissionMode and StartedAt are left unsaid (plan 030
+// §3.7): the engine holds neither, and in process both are the TUI's own —
+// its config's --force, and its own start — which is what the model falls
+// back to for a host that does not say.
 func (b *engineBackend) Info() backend.SessionInfo {
 	st := b.eng.State()
 	return backend.SessionInfo{

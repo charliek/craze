@@ -78,13 +78,18 @@ const reloadedNote = "transcript reloaded"
 // the sub-agent rows' first sightings). One of the same incarnation — a
 // resumed client re-attached, a slow consumer reset — keeps the generation:
 // its results are about this session still.
-func (m *Model) applyRestore(r restoreMsg) {
+//
+// It reports whether the restore was applied: one with no snapshot is not.
+// Every one applied is counted (restores): the read of the session's last
+// ending that follows it is tagged with it (lastturn.go).
+func (m *Model) applyRestore(r restoreMsg) bool {
 	if r.snap == nil {
-		return
+		return false
 	}
 	info := r.info
 	m.infoPin = &info
 	defer func() { m.infoPin = nil }()
+	m.restores++
 	held := ""
 	if m.shared != nil {
 		held = m.shared.Incarnation()
@@ -188,6 +193,7 @@ func (m *Model) applyRestore(r restoreMsg) {
 	if !first {
 		m.addNote(reloadedNote)
 	}
+	return true
 }
 
 // rebuildPanes shows the restored model in every pane (pane.rebuild): the main

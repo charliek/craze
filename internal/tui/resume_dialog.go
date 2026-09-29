@@ -306,13 +306,44 @@ func (m Model) resumeErrShown(budget int) bool {
 // that says where the session can be reached instead (`craze attach --session
 // <id>`, plan 027 §3.9) is longer than one row of the box, and cut to one row
 // it would lose exactly that.
+//
+// What follows the refusal's " — " — that command, or why the session cannot
+// be reached — is kept whole on a row of its own when it does not fit beside
+// the refusal's last row, rather than broken wherever the refusal's own length
+// leaves the break (plan 030 §3.7): a command split across two rows is not one
+// a user can read off, or select, as one. Until plan 030's shorter wording of
+// a held session ("already running") that was a coincidence of lengths.
 func (m Model) resumeErrLines(inner int) []string {
 	text := sanitizeLine(m.resumeErr)
 	if inner <= 0 {
 		return []string{text}
 	}
-	return strings.Split(ansi.Hardwrap(ansi.Wordwrap(text, inner, ""), inner, true), "\n")
+	wrap := func(s string) []string {
+		return strings.Split(ansi.Hardwrap(ansi.Wordwrap(s, inner, ""), inner, true), "\n")
+	}
+	head, tail, ok := strings.Cut(text, refusalSep)
+	if !ok || head == "" || tail == "" {
+		return wrap(text)
+	}
+	lines := wrap(head)
+	last := lines[len(lines)-1]
+	switch {
+	case ansi.StringWidth(last+refusalSep+tail) <= inner:
+		// Beside the refusal's last row, whole.
+		lines[len(lines)-1] = last + refusalSep + tail
+		return lines
+	case ansi.StringWidth(last+refusalSep) <= inner:
+		// The dash closes the refusal's row; what follows starts its own.
+		lines[len(lines)-1] = last + strings.TrimRight(refusalSep, " ")
+		return append(lines, wrap(tail)...)
+	}
+	return append(lines, wrap(strings.TrimLeft(refusalSep, " ")+tail)...)
 }
+
+// refusalSep is what joins a refusal and what follows it: where the session
+// can be reached instead, or why it cannot be (internal/cli's pickerRefusal,
+// dialFailure).
+const refusalSep = " — "
 
 // resumeErrRows is how many rows the refusal takes at inner width within
 // budget: none when it is not shown (resumeErrShown), else as many as it wraps

@@ -503,7 +503,7 @@ func TestServeTwoLegacyLoadsAtOnceOneWins(t *testing.T) {
 		t.Fatalf("the loser's answer: %v", loser.err)
 	}
 	code, msg := exitCode(t, loser.err)
-	if code != 1 || !strings.HasPrefix(msg, "craze serve: that session is open in another craze (pid ") {
+	if code != 1 || !strings.HasPrefix(msg, "craze serve: that session is already running (pid ") {
 		t.Fatalf("the loser: exit %d %q", code, msg)
 	}
 	e := winner.waitServing(t, env, true)

@@ -280,7 +280,7 @@ func TestARefusedContinueBindsNothing(t *testing.T) {
 	}
 	cmd, f := parseTUIFlags(t, "--continue", "--workspace", ws)
 	code, msg := exitCode(t, runTUI(cmd, f, hostEnv{}))
-	if code != 1 || !strings.Contains(msg, "that session is open in another craze (pid ") {
+	if code != 1 || !strings.Contains(msg, "that session is already running (pid ") {
 		t.Fatalf("exit %d %q, want the refusal", code, msg)
 	}
 	if left, _ := os.ReadDir(runtimeDir); len(left) != 0 {

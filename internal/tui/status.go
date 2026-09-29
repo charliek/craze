@@ -8,6 +8,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/charliek/craze/internal/agent"
+	"github.com/charliek/craze/internal/backend"
 	"github.com/charliek/craze/internal/transcript"
 )
 
@@ -281,10 +282,26 @@ func (m Model) queueCount() string {
 // permissionChip is the pinned permission state: red bypass under --force,
 // amber prompting without it.
 func (m Model) permissionChip() (string, lipgloss.Style) {
-	if m.yolo {
+	if m.bypassing() {
 		return "▸▸ bypass permissions on", styleFG(m.theme.ChipBypass)
 	}
 	return "▸ prompting for permissions", styleFG(m.theme.ChipPrompt)
+}
+
+// bypassing is what the permission chip says: whether the session's agent
+// runs its tools unasked. The host's word when it says (Info's
+// PermissionMode, plan 030 §3.7, SF-60) — its own --force or --no-force,
+// whatever this craze's command line said — and otherwise this TUI's own
+// config (Config.Yolo): in process, where it spawned the agent itself, and
+// over a host from before plan 030, which does not say.
+func (m Model) bypassing() bool {
+	switch m.hostPerm {
+	case backend.PermissionBypass:
+		return true
+	case backend.PermissionPrompt:
+		return false
+	}
+	return m.yolo
 }
 
 // modelLabel is the advertised display name of the current model, plus what
@@ -359,12 +376,22 @@ func (m Model) agentCount() string {
 }
 
 // sessionElapsed is how long the session has been up, in the pinned coarse
-// form: whole minutes, then hours and minutes.
+// form: whole minutes, then hours and minutes. It counts from the session's
+// start as its host says it (Info's StartedAt, plan 030 §3.7, SF-63) — a
+// session running for an hour reads 1h00m in a client that has just
+// attached — and otherwise from this client's own start (sessStart): in
+// process, where the two are one, and over a host from before plan 030,
+// which does not say. A start on the host's clock that is ahead of this one
+// reads 0m (formatCoarse).
 func (m Model) sessionElapsed() string {
-	if m.sessStart.IsZero() {
+	start := m.sessStart
+	if !m.hostStart.IsZero() {
+		start = m.hostStart
+	}
+	if start.IsZero() {
 		return formatCoarse(0)
 	}
-	return formatCoarse(m.now().Sub(m.sessStart))
+	return formatCoarse(m.now().Sub(start))
 }
 
 func formatCoarse(d time.Duration) string {

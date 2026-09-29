@@ -233,7 +233,18 @@ func buildSocketHost(cfg Config) (*frameHost, error) {
 		return fail(err)
 	}
 	path := filepath.Join(h.dir, "s")
-	h.srv = control.New(control.Options{Workspace: ws, MaxBudget: frameBudget})
+	// The info document says what a plan 030 host says (§3.7): the
+	// permission mode the builder's Config gives the in-process runs
+	// (Config.Yolo), and the host's start — now, as the in-process runs'
+	// elapsed counts from their own start a moment later — so every golden's
+	// chip and elapsed read the same over the socket, from the host's word,
+	// as in process from the model's own.
+	h.srv = control.New(control.Options{
+		Workspace:      ws,
+		MaxBudget:      frameBudget,
+		PermissionMode: framePermissionMode(cfg.Yolo),
+		StartedAt:      time.Now(),
+	})
 	h.srv.SetEngine(eng)
 	l, err := net.Listen("unix", path)
 	if err != nil {
@@ -273,6 +284,16 @@ func buildSocketHost(cfg Config) (*frameHost, error) {
 	run.Session = nil
 	run.Backend = h.sess
 	return &frameHost{cfg: run, head: h.head, start: h.start, match: h.match, barrier: h.barrier, end: h.end}, nil
+}
+
+// framePermissionMode is the info document's permissionMode a socket run's
+// host serves for a Config whose Yolo is yolo (plan 030 §3.7, SF-60): --force
+// is bypass, --no-force prompt, as craze serve says it.
+func framePermissionMode(yolo bool) protocol.PermissionMode {
+	if yolo {
+		return protocol.PermissionBypass
+	}
+	return protocol.PermissionPrompt
 }
 
 // engineOnly names an engine to engineBehind and is nothing else: the host's

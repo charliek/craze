@@ -136,7 +136,7 @@ func TestContinueOfAnOpenSessionAttaches(t *testing.T) {
 			if err := runContinue(t, ws, &stderr, tc.argv...); err != nil {
 				t.Fatalf("the second --continue: %v", err)
 			}
-			want := "craze: that session is open in another craze (pid " + strconv.Itoa(os.Getpid()) + "); attaching" + tc.ignored + "\n"
+			want := "craze: that session is already running (pid " + strconv.Itoa(os.Getpid()) + "); attaching" + tc.ignored + "\n"
 			if stderr.String() != want {
 				t.Fatalf("said %q, want %q", stderr.String(), want)
 			}
@@ -192,7 +192,7 @@ func TestAHeldRowAttachesWhateverTheSpawnFlags(t *testing.T) {
 		if err := runContinue(t, ws, &stderr, "--agent-bin", "/bin/true"); err != nil {
 			t.Fatalf("a held native row under --agent-bin: %v", err)
 		}
-		want := "craze: that session is open in another craze (pid " + strconv.Itoa(os.Getpid()) + "); attaching (ignored: --agent-bin)\n"
+		want := "craze: that session is already running (pid " + strconv.Itoa(os.Getpid()) + "); attaching (ignored: --agent-bin)\n"
 		if stderr.String() != want || len(*calls) != 1 || (*calls)[0].target.entry.HostID != hostID ||
 			(*calls)[0].target.sessionID != "018f-native-held" {
 			t.Fatalf("said %q, attached %+v; want %q and the holder's session", stderr.String(), *calls, want)
@@ -248,7 +248,7 @@ func TestAHolderServingAnotherSessionIsNotAttachedTo(t *testing.T) {
 			if tc.serves != "" {
 				serve(tc.serves)
 			}
-			refused := "that session is open in another craze (pid " + strconv.Itoa(os.Getpid()) + ")"
+			refused := "that session is already running (pid " + strconv.Itoa(os.Getpid()) + ")"
 			calls := recordAttach(t)
 			var stderr bytes.Buffer
 			assertExit(t, runContinue(t, ws, &stderr), 1, "craze: "+refused+tc.why)
@@ -291,7 +291,7 @@ func TestContinueOfASessionWithNoSocketStillRefuses(t *testing.T) {
 	calls := recordAttach(t)
 	var stderr bytes.Buffer
 	err := runContinue(t, ws, &stderr)
-	assertExit(t, err, 1, "craze: that session is open in another craze (pid "+strconv.Itoa(os.Getpid())+") — it serves no control socket")
+	assertExit(t, err, 1, "craze: that session is already running (pid "+strconv.Itoa(os.Getpid())+") — it serves no control socket")
 	if len(*calls) != 0 || stderr.Len() != 0 {
 		t.Fatalf("attached %d times, said %q", len(*calls), stderr.String())
 	}
@@ -323,7 +323,7 @@ func TestContinueOfAnUnnamedHolderKeepsTheRefusal(t *testing.T) {
 	calls := recordAttach(t)
 	var stderr bytes.Buffer
 	err = runContinue(t, ws, &stderr)
-	assertExit(t, err, 1, "craze: that session is open in another craze (pid ?)")
+	assertExit(t, err, 1, "craze: that session is already running (pid ?)")
 	if len(*calls) != 0 || stderr.Len() != 0 {
 		t.Fatalf("attached %d times, said %q", len(*calls), stderr.String())
 	}
@@ -357,7 +357,7 @@ func TestContinueOfASessionWhoseHolderHasNotWrittenReadsPidUnknown(t *testing.T)
 	}
 	_, built, err := runResolveLoad(t, ws, "--continue")
 	code, msg := exitCode(t, err)
-	if code != 1 || msg != "craze: that session is open in another craze (pid ?)" || len(built) != 0 {
+	if code != 1 || msg != "craze: that session is already running (pid ?)" || len(built) != 0 {
 		t.Fatalf("exit %d %q, built %d", code, msg, len(built))
 	}
 }
@@ -659,7 +659,7 @@ func TestThePickerRefusesAnOpenSession(t *testing.T) {
 	m, cmd := m.Update(enterKey)
 	m = feed(m, runCmd(t, cmd, 5*time.Second))
 	view := ansi.Strip(m.View())
-	want := "that session is open in another craze (pid " + strconv.Itoa(os.Getpid()) + ")"
+	want := "that session is already running (pid " + strconv.Itoa(os.Getpid()) + ")"
 	if !strings.Contains(view, want) || !strings.Contains(view, "open elsewhere") {
 		t.Fatalf("the picker does not show the refusal %q:\n%s", want, view)
 	}
@@ -667,7 +667,7 @@ func TestThePickerRefusesAnOpenSession(t *testing.T) {
 		t.Fatalf("a refused row was built: %+v", *loaded)
 	}
 	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
-	if view := ansi.Strip(m.View()); strings.Contains(view, "open in another craze") {
+	if view := ansi.Strip(m.View()); strings.Contains(view, "already running (pid") {
 		t.Fatalf("moving the cursor kept the error row:\n%s", view)
 	}
 	// Our own run never took the refused session's lock.
@@ -697,7 +697,7 @@ func TestThePickerRefusalNamesTheAttach(t *testing.T) {
 				serve("018f-busy")
 			}
 			claims := testClaims(t, io.Discard)
-			refused := "that session is open in another craze (pid " + strconv.Itoa(os.Getpid()) + ")"
+			refused := "that session is already running (pid " + strconv.Itoa(os.Getpid()) + ")"
 			hint := " — it serves no control socket"
 			if serving {
 				hint = " — craze attach --session " + hostID
