@@ -552,6 +552,11 @@ var tuiSites = []tuiSite{
 	{"app.go", "update", "Error", "err", 1, proofLocal}, // SaveProvider's
 	// errMsg (Start's failure).
 	{"app.go", "update", "Error", "msg.err", 1, proofText},
+	// That failure's row drawn again after a restore (plan 030 C7r): the
+	// error errMsg recorded (startErr) — a *StartError's text over the
+	// socket. spawnFailed's own never meets a restore: it adopted no
+	// backend, so no stream follows it.
+	{"restore.go", "applyRestore", "Error", "m.startErr", 1, proofText},
 	{"app.go", "settlePending", "Is", "ErrNoAnswer", 1, proofGate},
 	{"app.go", "submitErrNote", "Is", "ErrNoAnswer", 1, proofGate},
 	{"app.go", "submitErrNote", "Is", "engine.ErrNotAccepting", 1, proofSentinel},

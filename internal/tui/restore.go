@@ -70,7 +70,9 @@ const reloadedNote = "transcript reloaded"
 // The first restore — the model held no incarnation — draws nothing of its own:
 // attached before its session started, as the socket goldens attach, it
 // restores an empty session and leaves every frame as it was. Every later one
-// says so, in one local row (reloadedNote). A restore of another incarnation —
+// says so, in one local row (reloadedNote). A start failure the model already
+// holds (startErr) keeps its row through any restore: it is drawn again after
+// the rebuild (plan 030 C7r). A restore of another incarnation —
 // the host restarted, the engine was replaced — is another session: the
 // session generation moves, so every result still in flight for the old one is
 // dropped where it lands (issued), and nothing keyed by the old incarnation's
@@ -192,6 +194,19 @@ func (m *Model) applyRestore(r restoreMsg) bool {
 	}
 	if !first {
 		m.addNote(reloadedNote)
+	}
+	if m.startErr != nil {
+		// A start failure outlives the restore (X56), and so does its row
+		// (plan 030 C7r). The row is local — errMsg's; spawnFailed's adopted
+		// no backend, so no restore follows it — and no snapshot holds it:
+		// the host's transcript records no start failure. Over a socket the
+		// start's answer can land before the first restore (Init, spawned:
+		// the start and the reader run side by side, and a remote Start
+		// answers once its stream has queued the ready{startFailed}, read or
+		// not), and the rebuild above took the row with every local one. It
+		// is drawn again at the tail, where the ordinary order — the restore
+		// first — draws it.
+		m.addError(m.startErr.Error())
 	}
 	return true
 }
