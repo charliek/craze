@@ -3,7 +3,7 @@
 ## Prerequisites
 
 1. Linux or macOS.
-2. Install the [Cursor CLI](https://cursor.com/cli), the
+2. For the ACP providers, install the [Cursor CLI](https://cursor.com/cli), the
    [Grok CLI](https://docs.x.ai/build/cli/headless-scripting) (`grok`), or
    [`gx`](https://github.com/charliek/grok-build) — a third-party fork of
    the Grok CLI that speaks the same ACP dialect as `grok`, so everything
@@ -12,6 +12,9 @@
    `agent`), or `grok login` / set `XAI_API_KEY`. `gx` currently shares
    grok's `~/.grok` home, so the same login covers it — that is the fork's
    current behaviour, not a craze guarantee.
+
+The native provider needs neither step: it runs inside craze and needs only an
+API key (see [Native provider](#native-provider) below).
 
 ## Install
 
@@ -104,7 +107,8 @@ is for tests; a live session uses `cursor-agent`, `grok`, or `gx` on `PATH` (or
 ```
 
 `--force` (yolo) is the default. `--no-force` turns on the permission line.
-`--model` picks an ACP model id, `--ask` / `--plan` set the session mode.
+`--model` picks the model to start on (an ACP model id, or a native model
+alias), `--ask` / `--plan` set the session mode.
 
 The screen is, top to bottom: the transcript, the pinned tasks panel, the
 spinner line, the composer, two status rows, and one row per in-flight
@@ -112,6 +116,59 @@ sub-agent. See the [TUI reference](../reference/tui.md) for keys and cards.
 
 craze refuses to start the TUI on a non-tty. For a scripted turn, use
 [`craze prompt`](../reference/cli.md#craze-prompt).
+
+## Native provider
+
+The native provider (`--provider native`) runs the agent inside craze itself,
+talking to a model provider's API: there is no agent CLI to install, only an
+API key to give it. craze ships a catalog of models from four providers and
+needs a key for at least one:
+
+| Provider | Id for `craze auth` | Or export |
+|----------|---------------------|-----------|
+| Fireworks | `fireworks` | `FIREWORKS_API_KEY` |
+| Meta | `meta` | `META_API_KEY` |
+| OpenRouter | `openrouter` | `OPENROUTER_API_KEY` |
+| Z.AI Coding Plan | `zai-coding-plan` | `ZHIPU_API_KEY` or `ZAI_API_KEY` |
+
+1. Give craze a key, one of two ways:
+
+    ```bash
+    craze auth login fireworks        # asks for the key; it is not shown as you type
+    export FIREWORKS_API_KEY=...      # or export the provider's variable
+    ```
+
+    `craze auth login` with no provider shows a numbered list to pick from.
+    When stdin is not a terminal it reads the key from stdin's first line, so
+    a script can pipe it in (`printf '%s\n' "$KEY" | craze auth login
+    fireworks`). The key is stored in `~/.craze/native/providers.toml` (or
+    under `$CRAZE_HOME`), readable only by you. An exported variable is used
+    before a stored key. craze does not check the key with the provider when
+    you store it: a wrong one shows as an error on first use.
+
+2. Check it: `craze auth list` shows each provider and how it is connected
+   (`env FIREWORKS_API_KEY`, `stored key`, or `not connected`).
+
+3. Start a native session:
+
+    ```bash
+    craze --provider native                    # the TUI
+    craze prompt --provider native "hello"     # one headless turn
+    ```
+
+    With no key for any provider, the session refuses to start and says how to
+    give it one. `/model` switches models; `--model <alias>` starts on one.
+
+`craze auth logout fireworks` removes a stored key. Keys, and the two files you
+can use to change or add models, are in [Native models and
+providers](../reference/configuration.md#native-models-and-providers); the
+commands are in the [CLI reference](../reference/cli.md#craze-auth).
+
+**Upgrades:** the model catalog is part of the craze binary, so upgrading craze
+(`brew upgrade`, `apt upgrade`, a new `go install`) is how new models arrive and
+retired ones go, with no edit on your side. Your own files hold only keys,
+changes to shipped models, and models you add, and an upgrade never rewrites
+them.
 
 ## Exit codes
 
@@ -123,6 +180,6 @@ craze, so quitting out of one is an ordinary exit 0.
 
 ## Next
 
-- [CLI](../reference/cli.md) — flags for `craze` and `craze prompt`
+- [CLI](../reference/cli.md) — flags for `craze` and `craze prompt`, and `craze auth`
 - [TUI](../reference/tui.md) — keys, cards, slash commands
 - [Configuration](../reference/configuration.md) — themes and `~/.craze/config.toml`

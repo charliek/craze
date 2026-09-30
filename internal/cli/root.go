@@ -71,6 +71,7 @@ func NewRootCmd() *cobra.Command {
 	cmd.AddCommand(newBridgeCmd())
 	cmd.AddCommand(newAttachCmd())
 	cmd.AddCommand(newServeCmd())
+	cmd.AddCommand(newAuthCmd())
 	return cmd
 }
 

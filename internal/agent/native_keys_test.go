@@ -557,6 +557,12 @@ func TestNativeRefusedWakeDoesNotLoop(t *testing.T) {
 	rig := newWakeRig(t, Options{}, nil)
 	child := newHeld(t)
 	id := rig.spawnOne(child)
+	// The child runs in the background, so its own request can reach the
+	// router after spawnOne returns; counted from before it, it would pass
+	// for the wake's (4 in 400 runs). reached closes inside the child's step,
+	// after the router recorded the request, so the count below is the
+	// wake's alone.
+	await(t, child.reached, "the child's step")
 
 	before := rig.a.requests()
 	storeInPlace(t, rig.f.dir, "nokey", rig.s.opts.Workspace)

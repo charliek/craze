@@ -235,6 +235,10 @@ that finish at once, which is what a frame of a *drained* queue needs.
 - `test_frame.py` — `craze frame` through the binary, for the same scripts the
   Go goldens cover
 - `test_tui.py` — a real PTY
+- `test_auth.py` — `craze auth login|logout|list` against a temp `CRAZE_HOME`:
+  the messages, the refusals that save nothing, and canaries proving a stored
+  key reaches the provider's wire and nothing else (the no-echo prompt is the
+  Go pty test's, `internal/cli/auth_test.go`)
 - `test_sessions.py` — the session list in real PTYs sharing one `HOME`, each
   in a directory of its own: groups, regrouping, `ctrl+x`, opening a session
   in place, quitting from the list, an unreachable host, resuming a saved

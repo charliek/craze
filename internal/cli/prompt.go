@@ -118,7 +118,7 @@ func newPromptCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&o.workspace, "workspace", "", "existing workspace directory (default: current directory)")
-	cmd.Flags().StringVar(&o.model, "model", "", "ACP model id (session/set_model after session/new)")
+	cmd.Flags().StringVar(&o.model, "model", "", "model to start on: an ACP model id (session/set_model after session/new), or a native model alias")
 	cmd.Flags().StringVar(&o.agentBin, "agent-bin", "", "path to cursor-agent / fake agent (or CRAZE_AGENT_BIN)")
 	cmd.Flags().StringArrayVar(&o.followUps, "follow-up", nil, "additional prompt on the same ACP session (repeatable)")
 	cmd.Flags().StringArrayVar(&o.decisions, "permission-decision", nil, "headless permission answer: allow-once or reject-once (repeatable)")

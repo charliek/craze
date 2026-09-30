@@ -573,17 +573,18 @@ Its models — aliases, wire model ids, context windows, efforts and costs — a
 its default model are in
 [`internal/harness/modeltable/catalog.toml`](https://github.com/charliek/craze/blob/main/internal/harness/modeltable/catalog.toml);
 a session's `/model` lists them. With the catalog, a machine needs only a key:
-export one of the variables above (or give one inline, below) and run `craze
---provider native`. With no key at all, a native session refuses to start and
-names the variables to set and the file an inline key goes in.
+store one with [`craze auth login`](#keys), or export one of the variables
+above, and run `craze --provider native`. With no key at all, a native session
+refuses to start and names `craze auth login`, the variables to set and the
+file an inline key goes in.
 
 ### Your two files
 
 Both files are optional, each on its own, and each starts with `version = 1`.
 
 - `providers.toml` holds keys and provider settings. It is the only place a
-  secret lives: keep it `0600` (craze tightens a looser one when it reads it)
-  and never paste it anywhere.
+  secret lives: keep it `0600` (craze tightens a looser one when it reads it,
+  and [`craze auth`](#keys) writes it so) and never paste it anywhere.
 - `models.toml` holds model settings and models you add, and no secrets.
 
 An entry for something the catalog ships changes only the keys it writes:
@@ -593,7 +594,7 @@ An entry for something the catalog ships changes only the keys it writes:
 version = 1
 
 [providers.fireworks]
-api_key = "fw_..."            # an inline key; an exported variable still wins
+api_key = "fw_..."            # an inline key (craze auth login writes this); an exported variable still wins
 ```
 
 ```toml
@@ -633,7 +634,8 @@ A model's other optional keys are documented below:
 [`max_output_tokens`](#native-output-ceiling), [`cost`](#native-cost),
 `vision` and `tool_profile`; `models.toml` also takes
 [`[compaction]`](#native-compaction) and
-[`[subagents]`](tui.md#sub-agent-models). craze never rewrites either file.
+[`[subagents]`](tui.md#sub-agent-models). craze never rewrites `models.toml`,
+and rewrites `providers.toml` only when you run [`craze auth`](#keys).
 
 ### How the files merge
 
@@ -686,12 +688,40 @@ skipped as though unset, with one line at session start naming the variable
 Every key craze knows, from every provider, is redacted from tool output. A
 provider with no usable key leaves its models unusable, not the others.
 
+[`craze auth login <provider>`](cli.md#craze-auth-login) stores a key as that
+provider's inline `api_key`, [`craze auth logout
+<provider>`](cli.md#craze-auth-logout) removes it, and [`craze auth
+list`](cli.md#craze-auth-list) shows how each provider is connected: by a
+variable, which always wins, by its stored key, or not at all. No key is
+checked with its provider when it is stored; a wrong one shows on first use.
+When they write, `login` and `logout`:
+
+- **Rewrite `providers.toml` whole**, at `0600` (a new directory is made
+  `0700`). Comments and layout are not kept — the header they write says so —
+  but every key of every entry is, `source` and an explicit `env_keys = []`
+  included.
+- **Change one provider's `api_key` and nothing else.** A key the rules above
+  refuse is not stored. Another provider's stored key that cannot be used is
+  kept exactly as it is and named in a note, so two broken keys can be fixed
+  one at a time (native sessions start again once both are).
+- **Remove only the key.** An entry left with nothing else in it goes; one
+  that sets a name, an endpoint or variables stays.
+- **Refuse a `providers.toml` that is a symlink** — edit its target by hand —
+  and never write `models.toml`.
+- **Take turns**: each holds a lock beside the file, `providers.toml.lock`,
+  while it reads and writes.
+
+They know the catalog's providers and your own in `providers.toml`; in a
+directory whose `models.toml` says [`catalog = false`](#isolated-setups-catalog-false),
+only your own.
+
 ### Keys stored while a session runs
 
 A running native session keeps the model table it started with. A provider
 you give a key to while it runs — an `api_key` written into `providers.toml`
-by hand, or by another craze — is offered by the next session, or by this
-conversation after `/exit` and `craze -c`, never by the running one.
+by `craze auth login`, by hand, or by another craze — is offered by the next
+session, or by this conversation after `/exit` and `craze -c`, never by the
+running one.
 
 The running session does watch that file, only so it can redact what it
 holds: at the start of every turn (a prompt, a `/compact`, or the delivery of

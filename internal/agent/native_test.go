@@ -593,11 +593,12 @@ func TestNativeStartRefusals(t *testing.T) {
 			want: []string{`mode "architecting"`, "agent, plan, ask"}, is: harness.ErrUnknownMode},
 		// An empty craze directory is the shipped catalog alone (plan 031
 		// §3.2): nothing is funded, since the fixture's environment holds none
-		// of the catalog's variables, and the error names each provider's
-		// first variable and the file an inline key goes in (§3.5).
+		// of the catalog's variables, and the error names craze auth login,
+		// each provider's first variable and the file an inline key goes in
+		// (§3.5).
 		{name: "an empty craze directory", setup: func(t *testing.T, f *nativeFixture) {
 			t.Setenv("CRAZE_HOME", t.TempDir())
-		}, want: []string{"native: no model provider has an API key — set one of FIREWORKS_API_KEY, META_API_KEY, OPENROUTER_API_KEY, ZHIPU_API_KEY, or add api_key to ",
+		}, want: []string{`native: no model provider has an API key — run "craze auth login", or set one of FIREWORKS_API_KEY, META_API_KEY, OPENROUTER_API_KEY, ZHIPU_API_KEY, or add api_key to `,
 			filepath.Join("native", "providers.toml")}, is: harness.ErrNoAPIKey},
 		{name: "no craze directory", setup: func(t *testing.T, f *nativeFixture) {
 			t.Setenv("CRAZE_HOME", "")
@@ -606,10 +607,11 @@ func TestNativeStartRefusals(t *testing.T) {
 		{name: "unknown model", opts: Options{Model: "nope"},
 			want: []string{`unknown model "nope"`, "nokey/d, other/c, test/a, test/b"}},
 		{name: "explicit model with no key", opts: Options{Model: "nokey/d"},
-			want: []string{`model "nokey/d" has no API key`, "NATIVE_NOKEY_KEY"}, is: harness.ErrNoAPIKey},
+			want: []string{`native: model "nokey/d" has no API key: its provider "nokey" has none; run "craze auth login nokey", set NATIVE_NOKEY_KEY, or add an api_key for it to providers.toml`},
+			is:   harness.ErrNoAPIKey},
 		{name: "no model has a key", setup: func(t *testing.T, f *nativeFixture) {
 			f.env = map[string]string{}
-		}, want: []string{"no model provider has an API key — set one of NATIVE_NOKEY_KEY, NATIVE_OTHER_KEY, NATIVE_TEST_KEY, or add api_key to ",
+		}, want: []string{`no model provider has an API key — run "craze auth login", or set one of NATIVE_NOKEY_KEY, NATIVE_OTHER_KEY, NATIVE_TEST_KEY, or add api_key to `,
 			filepath.Join("native", "providers.toml")}, is: harness.ErrNoAPIKey},
 		{name: "explicit default with no key does not fall back", setup: func(t *testing.T, f *nativeFixture) {
 			delete(f.env, "NATIVE_TEST_KEY")

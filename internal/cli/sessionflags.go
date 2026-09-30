@@ -34,7 +34,9 @@ import (
 // each flag's name, default and usage are spelled once.
 func registerSessionFlags(cmd *cobra.Command, f *tuiFlags) {
 	cmd.Flags().StringVar(&f.workspace, "workspace", "", "existing workspace directory (default: current directory)")
-	cmd.Flags().StringVar(&f.model, "model", "", "ACP model id")
+	// Worded without the provider's name: the root's help names native once,
+	// in --provider (TestRootHelpNamesNativeOnceAndNeverTheHarness).
+	cmd.Flags().StringVar(&f.model, "model", "", "model to start on: an ACP model id, or a model alias")
 	cmd.Flags().StringVar(&f.agentBin, "agent-bin", "", "path to cursor-agent / fake agent (or CRAZE_AGENT_BIN)")
 	registerPluginDirFlag(cmd, &f.pluginDirs)
 	cmd.Flags().BoolVar(&f.force, "force", true, "spawn the agent with --force (yolo)")

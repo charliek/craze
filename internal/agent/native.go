@@ -1265,9 +1265,9 @@ func (s *nativeSession) fundedModel(table *modeltable.Table, getenv func(string)
 }
 
 // nothingFundedText is the start error when no model's provider has a key
-// (plan 031 §3.5): the first env_keys name of each provider some model is on,
-// sorted, and the file an inline key goes in. It names variables and a path,
-// never a value.
+// (plan 031 §3.5): `craze auth login` first, then the first env_keys name of
+// each provider some model is on, sorted, and the file an inline key goes in.
+// It names a command, variables and a path, never a value.
 func nothingFundedText(table *modeltable.Table, dir string) string {
 	var names []string
 	for _, m := range table.Models {
@@ -1278,9 +1278,9 @@ func nothingFundedText(table *modeltable.Table, dir string) string {
 	slices.Sort(names)
 	file := filepath.Join(dir, modeltable.ProvidersFile)
 	if len(names) == 0 {
-		return fmt.Sprintf("native: no model provider has an API key — add api_key to %s", file)
+		return fmt.Sprintf(`native: no model provider has an API key — run "craze auth login", or add api_key to %s`, file)
 	}
-	return fmt.Sprintf("native: no model provider has an API key — set one of %s, or add api_key to %s",
+	return fmt.Sprintf(`native: no model provider has an API key — run "craze auth login", or set one of %s, or add api_key to %s`,
 		sanitizeLine(strings.Join(slices.Compact(names), ", ")), file)
 }
 
@@ -2798,14 +2798,17 @@ func phraseLoadError(err error, table *modeltable.Table, alias, id string) error
 	return &nativeError{msg: fmt.Sprintf("native: session %q cannot be resumed: %s", sanitizeLine(id), why), cause: err}
 }
 
-// noKeyText says that alias's provider has no key and how to give it one.
+// noKeyText says that alias's provider has no key and how to give it one:
+// `craze auth login <provider>` (plan 031 §3.5), its variables, or an inline
+// api_key.
 func noKeyText(table *modeltable.Table, alias string) string {
 	m := table.Models[alias]
-	how := "add an api_key for it to providers.toml"
+	how := "or add an api_key for it to providers.toml"
 	if envs := table.Providers[m.Provider].EnvKeys; len(envs) > 0 {
-		how = "set " + sanitizeLine(strings.Join(envs, " or ")) + ", or " + how
+		how = "set " + sanitizeLine(strings.Join(envs, " or ")) + ", " + how
 	}
-	return fmt.Sprintf("native: model %q has no API key: its provider %q has none; %s", alias, m.Provider, how)
+	return fmt.Sprintf(`native: model %q has no API key: its provider %q has none; run "craze auth login %s", %s`,
+		alias, m.Provider, sanitizeLine(m.Provider), how)
 }
 
 var (

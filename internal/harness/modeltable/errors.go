@@ -21,13 +21,15 @@ var (
 	// ErrKeyTooShort is Keys' error for an inline key under MinKeyLen bytes
 	// in a table built in memory; the wrapped message names the provider,
 	// never the value. Load reports a short inline key as a *FileError at
-	// its api_key, and an env value this short is skipped (EnvWarnings).
+	// its api_key, an env value this short is skipped (EnvWarnings), and
+	// SetKey refuses to store one with an error that unwraps to it.
 	ErrKeyTooShort = errors.New("modeltable: API key too short to be real")
 
 	// ErrKeyOverlapsMarker is Keys' error for an inline key the redaction
 	// marker could print back (redact.MarkerOverlaps) — "credential", say,
 	// which the marker contains. Like ErrKeyTooShort, Load reports an inline
-	// one as a *FileError at its api_key, and an env value is skipped.
+	// one as a *FileError at its api_key, an env value is skipped, and SetKey
+	// refuses to store one.
 	ErrKeyOverlapsMarker = errors.New("modeltable: API key overlaps craze's redaction marker")
 )
 

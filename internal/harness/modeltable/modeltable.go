@@ -12,8 +12,9 @@
 //
 // Load reads both and merges them over the catalog into one validated Table;
 // Resolve turns an alias into everything the llm factory needs, key included;
-// Save writes a Table back (test infrastructure: no product code writes these
-// files).
+// SetKey and RemoveKey change one provider's inline key in providers.toml for
+// `craze auth` (keys.go, plan 031 §3.7), the only product code that writes
+// either file; Save writes a whole Table back (test infrastructure).
 //
 // Both files are decoded strictly: a key the schema does not have is a load
 // error naming the file, the table and the key, because models.toml is edited
@@ -995,15 +996,9 @@ func outputCeiling(m Model) int {
 // and one unrelated short META_API_KEY must not fail every session (plan 031
 // §3.2) — and the error for a provider with none left says which were.
 func resolveKey(id string, p Provider, getenv func(string) string) (Secret, error) {
-	var unusable []string
-	for _, name := range p.EnvKeys {
-		k, err := envKey(getenv, name)
-		switch {
-		case err != nil:
-			unusable = append(unusable, name)
-		case k != "":
-			return k, nil
-		}
+	_, k, unusable := firstEnvKey(getenv, p.EnvKeys)
+	if k != "" {
+		return k, nil
 	}
 	if v := strings.TrimSpace(p.APIKey.Reveal()); v != "" {
 		return Secret(v), nil
@@ -1022,6 +1017,24 @@ func envKey(getenv func(string) string, name string) (Secret, error) {
 		return "", err
 	}
 	return Secret(v), nil
+}
+
+// firstEnvKey is the first of names whose variable holds a usable key
+// (envKey), and that key: the variable Resolve takes a provider's key from
+// ahead of its inline one, and the one Providers reports (plan 031 §3.7).
+// unusable is each name before it set to a value that cannot be a key. name
+// and k are "" when no variable holds one.
+func firstEnvKey(getenv func(string) string, names []string) (name string, k Secret, unusable []string) {
+	for _, n := range names {
+		v, err := envKey(getenv, n)
+		switch {
+		case err != nil:
+			unusable = append(unusable, n)
+		case v != "":
+			return n, v, unusable
+		}
+	}
+	return "", "", unusable
 }
 
 // envKeyNames is every env_keys name of providers, sorted and without
