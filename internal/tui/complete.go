@@ -199,10 +199,8 @@ func atTokenUnder(value string, cursor int) (atToken, bool) {
 // wrong (slashNameOK's reason) — or invalid UTF-8, which the sanitiser drops
 // too.
 func atTokenText(text string) (tok string, inner int, ok bool) {
-	for _, r := range text {
-		if unicode.IsControl(r) || r == utf8.RuneError {
-			return "", 0, false
-		}
+	if !atTextOK(text) {
+		return "", 0, false
 	}
 	if !atNeedsQuotes(text) {
 		return "@" + text, 1 + len(text), true
@@ -210,6 +208,19 @@ func atTokenText(text string) (tok string, inner int, ok bool) {
 	escaped := strings.ReplaceAll(text, `\`, `\\`)
 	escaped = strings.ReplaceAll(escaped, `"`, `\"`)
 	return `@"` + escaped + `"`, 2 + len(escaped), true
+}
+
+// atTextOK says text can be written as an `@` token at all (atTokenText): it
+// has no control character and is valid UTF-8 — a byte that is not decodes
+// as utf8.RuneError, which is refused with it. A source whose candidates come
+// from the disk (at_files.go) refuses by the same rule as it reads them.
+func atTextOK(text string) bool {
+	for _, r := range text {
+		if unicode.IsControl(r) || r == utf8.RuneError {
+			return false
+		}
+	}
+	return true
 }
 
 // atNeedsQuotes says text cannot be written as a bare `@text`: whitespace
@@ -348,6 +359,13 @@ type completeAnswer struct {
 	// searching while a load is out, and `nothing matches` after.
 	Note    string
 	NoteErr bool
+	// More counts the candidates the source matched and left out of Items:
+	// a source that ranks tens of thousands of candidates hands over only
+	// the best of them (the composer's files, at_files.go). The count line
+	// under the window counts them with the rows below it — `↓ N more` for
+	// as long as any are left out, which no key reaches: the user types on
+	// to narrow them.
+	More int
 	// Load is work the answer waits for, keyed: the popup runs it unless a
 	// load of that key has already come back in its life (Loaded) or is
 	// already running.
@@ -370,10 +388,17 @@ type completeLoad struct {
 // source then filters and orders for each query, or why there are none — and,
 // for a source that says how old its candidates are, when what the load read
 // was observed (the list's /model: a cached catalog's `last seen`; C16).
+//
+// Data is what the load read in the source's own form, for a source that
+// does not keep candidates but matches every query afresh over something
+// else: the composer's files keep their search index here (at_files.go),
+// which would be tens of thousands of candidates as Items. The popup keeps it
+// with the rest and never looks inside.
 type completeLoaded struct {
 	Items []completeItem
 	Err   error
 	At    time.Time
+	Data  any
 }
 
 // completeLoadedMsg is a load's result on its way to the popup that ran it,
@@ -902,7 +927,7 @@ func (p completePopup) shape(rows int) completeShape {
 		return s
 	}
 	s.shown = min(n, completeMaxRows)
-	s.more = n > s.shown
+	s.more = n > s.shown || p.ans.More > 0
 	if s.lines() <= rows {
 		return s
 	}
@@ -975,8 +1000,10 @@ func (p completePopup) view(th Theme, width, rows int) string {
 		out = append(out, padRow(completeRow(th, items[i], i == p.sel, width, nameW, detailW), width))
 	}
 	if s.more {
+		// The candidates the source left out (More) are below the last of
+		// Items: with any, the line counts down to the end.
 		line := fmt.Sprintf("  ↑ %d more", top)
-		if below := len(items) - top - s.shown; below > 0 {
+		if below := len(items) - top - s.shown + p.ans.More; below > 0 {
 			line = fmt.Sprintf("  ↓ %d more", below)
 		}
 		out = append(out, padRow(renderSegs(width, seg{line, styleFG(th.Dim)}), width))

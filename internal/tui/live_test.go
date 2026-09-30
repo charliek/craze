@@ -307,6 +307,12 @@ func TestMain(m *testing.M) {
 	swapClipboardSeams(io.Discard,
 		func(string) error { return nil },
 		func() (string, error) { return "", nil })
+	// The composer `@` search's fake rg and git, written before any test's
+	// goroutine can fork (installAtFakeTools says why).
+	if err := installAtFakeTools(); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
 	code := m.Run()
 	parity.report()
 	reportSocketRuns()
@@ -327,6 +333,7 @@ func TestMain(m *testing.M) {
 	if fakeAgentDir != "" {
 		_ = os.RemoveAll(fakeAgentDir)
 	}
+	_ = os.RemoveAll(atFakeBin)
 	os.Exit(code)
 }
 
