@@ -59,7 +59,6 @@ const (
 	sessEmptyNote   = "No other sessions."
 	sessEndedNote   = "that session ended"
 	sessUntitled    = "new session"
-	sessOpenLater   = "opening a saved session is not built yet"
 	sessUnreachNote = "that session is not answering"
 	sessOlderNote   = "that session runs in an older craze; close it there"
 )
@@ -118,14 +117,16 @@ type sessListState struct {
 	note     string
 	noteKind sessNoteKind
 	// dialSeq stamps each open this opening of the list asks for (enter on a
-	// running row, plan 030 §3.11), and dialing is the one it waits for (0
-	// for none), dialTitle that row's title for the hint line. An answer for
-	// any other — an earlier open the user replaced with a later one, an open
-	// from an opening of the list since left (gen) — is closed, never
-	// adopted (sessOpened).
+	// running row, plan 030 §3.11, or on a saved one, §3.12), and dialing is
+	// the one it waits for (0 for none), dialTitle that row's title for the
+	// hint line and dialSaved whether it is a saved session's resume. An
+	// answer for any other — an earlier open the user replaced with a later
+	// one, an open from an opening of the list since left (gen) — is closed,
+	// never adopted (sessOpened).
 	dialSeq   uint64
 	dialing   uint64
 	dialTitle string
+	dialSaved bool
 }
 
 // sessKey is a line's identity: a running session by its craze id and
@@ -235,10 +236,12 @@ type sessRedrawMsg struct{ gen uint64 }
 // sessOpenedMsg is an open's answer (Sessions.Open): the backend of the
 // session the row names, or why there is none. gen and seq are the opening
 // of the list and the open it was asked for under (sessListState.dialSeq);
-// title is the row's, for the note a failure leaves.
+// title is the row's, for the note a failure leaves; saved says the row was a
+// saved session's, whose backend loads it (plan 030 §3.12).
 type sessOpenedMsg struct {
 	gen, seq uint64
 	title    string
+	saved    bool
 	b        backend.Backend
 	err      error
 }
@@ -459,23 +462,32 @@ func (m Model) applySessMsg(msg tea.Msg) (Model, tea.Cmd, bool) {
 // waiting for, in the opening it was asked in, while craze is not quitting,
 // is acted on: an answer after the user has moved on — a later open asked
 // for, the list left (and perhaps opened again), a quit — is closed off the
-// Update and never adopted (retire). A failure is the hint line's; a backend
-// is switched to (switchBackend).
+// Update and never adopted (retire). A failure is the hint line's, in the
+// list's own words (`could not open …`, `could not resume …` for a saved
+// session — its workspace gone, its provider one this craze cannot run, its
+// host refusing the load): the launcher's "craze: " is dropped, as a picker's
+// error row drops it (repick). A backend is switched to (switchBackend) — a
+// saved session's as a load, restoring until its replay is over (§3.12).
 func (m Model) sessOpened(msg sessOpenedMsg) (Model, tea.Cmd) {
 	l := &m.sessList
 	if !l.open || msg.gen != l.gen || msg.seq != l.dialing || m.quitting {
 		return m, m.retire(msg.b)
 	}
-	l.dialing, l.dialTitle = 0, ""
+	l.dialing, l.dialTitle, l.dialSaved = 0, "", false
 	if msg.err != nil || msg.b == nil {
 		err := msg.err
 		if err == nil {
 			err = errors.New("no session")
 		}
-		m.sessNote("could not open "+msg.title+": "+sanitizeLine(failureText(err)), sessNoteErr)
+		verb := "could not open "
+		if msg.saved {
+			verb = "could not resume "
+		}
+		why := strings.TrimPrefix(sanitizeLine(failureText(err)), "craze: ")
+		m.sessNote(verb+msg.title+": "+why, sessNoteErr)
 		return m, m.retire(msg.b)
 	}
-	return m.switchBackend(msg.b)
+	return m.switchBackend(msg.b, msg.saved)
 }
 
 // sessActionDone is a ctrl+x's answer, on the hint line.
@@ -611,9 +623,10 @@ func (m Model) handleSessionsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // sessEnter is enter and → on the selected line: the saved group's line
 // expands or collapses it; the session the list was opened from is the
 // screen behind the list, so opening it is going back; any other running
-// session is opened in place (plan 030 §3.11: sessOpen). A host that does not
-// answer is said not to, without a dial; a saved session's resume is the
-// next commit's (§3.12), and the hint line says so until then.
+// session is opened in place (plan 030 §3.11: sessOpen), and so is a saved
+// one — resumed by a host loading it in its own workspace, or the host that
+// holds it already (§3.12: Sessions.Open of its saved ref). A host that does
+// not answer is said not to, without a dial.
 func (m Model) sessEnter() (tea.Model, tea.Cmd) {
 	if m.sessList.sel == sessSavedLine {
 		m.sessList.savedOpen = !m.sessList.savedOpen
@@ -626,9 +639,6 @@ func (m Model) sessEnter() (tea.Model, tea.Cmd) {
 		return m, nil
 	case r.here:
 		return m.leaveSessions()
-	case r.saved:
-		m.sessNote(sessOpenLater, sessNoteWarn)
-		return m, nil
 	case r.state == sessUnreachable:
 		m.sessNote(sessUnreachNote, sessNoteWarn)
 		return m, nil
@@ -637,18 +647,19 @@ func (m Model) sessEnter() (tea.Model, tea.Cmd) {
 }
 
 // sessOpen dials r's session off the Update (Sessions.Open may take seconds:
-// a dial and an attach) and waits for that open alone: a later one replaces
-// it, and leaving the list abandons it (sessOpened). The list stays up
-// meanwhile, the session behind it attached, and the hint line says what is
-// being opened.
+// a dial and an attach, and for a saved session a host spawned to load it)
+// and waits for that open alone: a later one replaces it, and leaving the
+// list abandons it (sessOpened). The list stays up meanwhile, the session
+// behind it attached, and the hint line says what is being opened — or
+// resumed.
 func (m Model) sessOpen(r sessRow) (tea.Model, tea.Cmd) {
 	l := &m.sessList
 	l.dialSeq++
-	l.dialing, l.dialTitle = l.dialSeq, r.title
-	s, ref, gen, seq, title := m.sessions, r.ref, l.gen, l.dialSeq, r.title
+	l.dialing, l.dialTitle, l.dialSaved = l.dialSeq, r.title, r.saved
+	s, ref, gen, seq, title, saved := m.sessions, r.ref, l.gen, l.dialSeq, r.title, r.saved
 	return m, func() tea.Msg {
 		b, err := s.Open(ref)
-		return sessOpenedMsg{gen: gen, seq: seq, title: title, b: b, err: err}
+		return sessOpenedMsg{gen: gen, seq: seq, title: title, saved: saved, b: b, err: err}
 	}
 }
 
@@ -1461,6 +1472,8 @@ func (m Model) sessHintRow(lines []sessLine) string {
 			st = styleFG(th.Err)
 		}
 		return renderSegs(m.width, lead, seg{l.note, st})
+	case l.dialing != 0 && l.dialSaved:
+		return renderSegs(m.width, lead, txt("resuming "+l.dialTitle+"…"))
 	case l.dialing != 0:
 		return renderSegs(m.width, lead, txt("opening "+l.dialTitle+"…"))
 	}

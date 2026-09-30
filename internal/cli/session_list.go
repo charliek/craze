@@ -3,6 +3,8 @@ package cli
 import (
 	"context"
 	"errors"
+	"fmt"
+	"os"
 
 	"github.com/charliek/craze/internal/agent"
 	"github.com/charliek/craze/internal/backend"
@@ -15,8 +17,8 @@ import (
 // sessionList is tui.Config.Sessions on the launch path (plan 030 §3.9): the
 // list's roster over this user's registry and this CRAZE_HOME's index; a
 // running session opened over its host's socket; a saved one loaded by a
-// host spawned for it (loadBackend, as the resume picker's choice is); a new
-// one spawned; and a stop sent over a connection of its own. Only a launch
+// host spawned for it (openSaved, as the resume picker's choice is loaded); a
+// new one spawned; and a stop sent over a connection of its own. Only a launch
 // has one: under the opt-out the TUI hosts its session in process, and
 // closing a backend there would close its engine, so there is no list.
 //
@@ -42,12 +44,12 @@ func (s sessionList) Roster() tui.SessionRoster {
 
 // Open is ref's session as a backend the TUI adopts: a running one's host
 // dialled and attached (open) — a host Spawn started stays this launch's to
-// decide (listHost) — a saved one's row loaded (loadBackend: the host serving
+// decide (listHost) — a saved one's row loaded (openSaved: the host serving
 // it already if there is one, else a spawn with --load in the row's own
 // workspace).
 func (s sessionList) Open(ref roster.Ref) (backend.Backend, error) {
 	if ref.Saved != nil {
-		return s.l.loadBackend(agent.Provider{}, *ref.Saved)
+		return s.l.openSaved(*ref.Saved)
 	}
 	return s.l.open(ref.Host.Entry())
 }
@@ -137,6 +139,63 @@ func (l *launcher) open(e rundir.Entry) (backend.Backend, error) {
 	}
 	l.openEnd(lh, b)
 	return b, nil
+}
+
+// openSaved resumes the saved session row names, the list's enter on a saved
+// row (plan 030 §3.12): the session is loaded by the host serving it already
+// — a row the list showed saved that has started running since is the
+// holder's: attached to directly, or through the held answer's rendezvous
+// (spawn) — or else by a host spawned for it with --load: the row's craze id,
+// or for a legacy row <provider>:<sessionId> (loadArg, R2-6; its host gives it
+// its craze id under its own claim, so two resumes of one legacy row end as
+// one host, the other attached to it held). Either way the backend is this
+// launch's as any launch's is (take): kept at quit once its session came up
+// in the TUI, its host stopped otherwise — a holder's never.
+//
+// The row decides where and as what the session runs (X13): its workspace,
+// its provider. The command line's session flags were for its own session,
+// not for every session the list resumes, so a resume passes only what any
+// spawn of this launch takes — the permission mode, the plugin directories,
+// the host-status switch, and --agent-bin, the launch's agent binary for
+// whichever ACP provider runs (as the provider picker's choice takes it), not
+// for one craze runs in process, which refuses it — and never --provider (a
+// filter on a load, which would refuse a row of another provider),
+// --workspace, --model, --ask or --plan; a held session attached to leaves
+// no note of flags ignored.
+//
+// A row this craze cannot run is refused before anything is spawned
+// (savedRunnable), a *tui.Refusal as the host's own refusal of it would be.
+func (l *launcher) openSaved(row sessions.Row) (backend.Backend, error) {
+	p, err := savedRunnable(row)
+	if err != nil {
+		return nil, err
+	}
+	f := l.flags
+	f.cont, f.resume = false, false
+	f.workspace, f.provider, f.model = "", "", ""
+	f.ask, f.plan = false, false
+	if p.InProcess() {
+		f.agentBin = ""
+	}
+	return l.spawn(spawnOptions{env: l.env, flags: f, load: loadArg(row)}, row.CrazeID, false)
+}
+
+// savedRunnable is the provider of a saved row this craze can resume, or the
+// refusal of one it cannot, in the host's own words for it (loadID,
+// loadWorkspace) — the list shows them on its hint line: a provider this
+// build does not know, or cannot load (the index is read with the resume
+// picker's filter, so the list offers none, but a row is held to it here
+// again), and a workspace that is no longer a directory, where the session's
+// agent could not load it again. An empty provider is cursor's, as ever.
+func savedRunnable(row sessions.Row) (agent.Provider, error) {
+	p, err := agent.ProviderByName(row.Provider)
+	if err != nil || !p.Resumable() {
+		return agent.Provider{}, &tui.Refusal{Err: fmt.Errorf("craze: that session's provider %q is not one this craze can resume", row.Provider)}
+	}
+	if st, err := os.Stat(row.CWD); err != nil || !st.IsDir() {
+		return agent.Provider{}, &tui.Refusal{Err: fmt.Errorf("craze: that session ran in %s, which is no longer a directory", row.CWD)}
+	}
+	return p, nil
 }
 
 // listHost is a host the session list's Spawn started, by host id in

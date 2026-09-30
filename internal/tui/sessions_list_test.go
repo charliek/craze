@@ -782,8 +782,8 @@ func TestSessionsListWhenTheSessionBehindItEnds(t *testing.T) {
 // TestSessionsEnterOpensTheSessionBehind: enter on the session the list came
 // from goes back to it; on another running session → opens it (plan 030
 // §3.11, C11): the list stays up while the open dials, and says what it is
-// opening; a host that does not answer is said not to, and a saved row's
-// resume is the next commit's.
+// opening; a host that does not answer is said not to. (A saved row's
+// resume is TestSessionsEnterResumesASavedSession's.)
 func TestSessionsEnterOpensTheSessionBehind(t *testing.T) {
 	m, fs, _ := sessModel(t, 100, 30)
 	m = richList(t, m)
@@ -799,17 +799,10 @@ func TestSessionsEnterOpensTheSessionBehind(t *testing.T) {
 	if got := fs.opened(); len(got) != 1 || got[0].Host.ID != "host-pty" {
 		t.Fatalf("Open was asked for %+v, want the pty session's host", got)
 	}
-	for key, note := range map[sessKey]string{runKey("prox"): sessUnreachNote, {id: "\x00saved:wrap"}: sessOpenLater} {
-		on := m
-		if key.id == "\x00saved:wrap" {
-			on = selectKey(t, on, sessSavedLine)
-			on, _ = press(on, enter())
-		}
-		on = selectKey(t, on, key)
-		on, cmd := press(on, enter())
-		if !on.sessList.open || on.sessList.note != note || on.sessList.dialing != 0 || cmd != nil {
-			t.Fatalf("enter on %+v: open %v, note %q, dialing %d", key, on.sessList.open, on.sessList.note, on.sessList.dialing)
-		}
+	on := selectKey(t, m, runKey("prox"))
+	on, cmd = press(on, enter())
+	if !on.sessList.open || on.sessList.note != sessUnreachNote || on.sessList.dialing != 0 || cmd != nil {
+		t.Fatalf("enter on the unreachable row: open %v, note %q, dialing %d", on.sessList.open, on.sessList.note, on.sessList.dialing)
 	}
 	back, _ := press(m, enter())
 	if back.sessList.open {

@@ -2794,11 +2794,11 @@ open blocks the exit clauses above.
 
 | | |
 |---|---|
-| Status | PR 1 (`feature/plan-030-hosts`, C1–C8) implemented, awaiting its merge; PRs 2–4 planned (Plan 030, FINAL after panel rounds 1 and 2, 2026-09-28) |
+| Status | PR 1 (`feature/plan-030-hosts`, C1–C8) merged; PR 2 (`feature/plan-030-sessions-list`, C9–C12) implemented, awaiting its merge; PRs 3–4 planned (Plan 030, FINAL after panel rounds 1 and 2, 2026-09-28) |
 | Plan | `030-session-control-s5-agent-view` (outside the repo, `~/.claude/plans/craze/`; research, discovery reports, the mockup and the raw panel reviews in its folder) |
 | Baseline | `origin/main` `9606fc5` (#64, Plan 029's wrap-up), on top of S2's last PR #63 `73ed5e0` |
 | Branch / PRs | five sequential PRs, each branched from a freshly fetched `origin/main`: `docs/plan-030-roadmap`, `feature/plan-030-hosts`, `feature/plan-030-sessions-list`, `feature/plan-030-new-sessions`, `feature/plan-030-composer-at` |
-| Merged | — |
+| Merged | PR 1: #68 → `6be2273` (2026-09-29) |
 
 ### The PR cut
 
@@ -3002,14 +3002,57 @@ finding and its disposition):
   host logs in `docs/reference/configuration.md`; the host/client split in
   `docs/development/architecture.md`; this record; `13`'s SF-80..SF-87.
 
-PRs 2–4 are recorded here as each lands.
+**PR 2 — `feature/plan-030-sessions-list`** (C9–C12 implemented 2026-09-29, not
+yet merged; the `*r` commits are review-fix rounds, and
+`030-session-control-s5-agent-view/reviews/dispositions-pr2.md` has every
+finding and its disposition):
+
+- C9 (`30014cc`) — the list's data: the engine's row facts (`Doing`,
+  `LastReply`, `Since`, the head ask's `Summary`, `StartFailed`/`StartErr`,
+  `Prompted`) on the `sessions.list` row behind the new `rowFacts` session
+  capability (fixture 17, an addition); `internal/roster`, a poller over the
+  registry — one kept, never-reconnecting connection per host, one attempt
+  budget, at most 8 in flight, a backoff, unreachable never saved — and over
+  the index for the saved rows; `tui.Config.Sessions` and the launch's
+  `sessionList`; a 50-host scale test. C9r (`dd0e739`): one deadline per
+  attempt, `Close` joins, a host the list's `Spawn` started is the launch's
+  until opened or left running.
+- C10 (`bff36d2`) — the list screen: `←` on an empty composer and
+  `/sessions` (only with a session list), routed ahead of every other key;
+  the header and its counts, the groups by state and by directory
+  (`ctrl+s`), the row mapping and columns, selection and an armed close held
+  by identity, `ctrl+x` (cancel with the queue cleared; a two-press close),
+  quitting from the list leaving every session running, the too-small and
+  empty states; goldens at 100×30 and 80×24 (additions). X92 (`af1d22a`): a
+  pre-existing composer hang (`alt+←` over blank text) found and fixed.
+  `b9a7e0b`: a pre-existing harness race (X93) fixed test-side. C10r
+  (`df5d03f`): the ended row outlives its host, "here" is an incarnation,
+  every exit closes the roster, `ctrl+x`'s clear-then-cancel proven on the
+  wire.
+- C11 (`94f12e9`) — opening a session in place: `switchBackend` (a backend
+  generation on every stream message, one per-session constructor shared with
+  `New`, stale replies rejected first), the dial as a `tea.Cmd` whose late
+  answer is closed, per-session drafts, the band (`title · provider · dir`,
+  `← sessions`), the sub-agent hint `↓ n agents`, and a viewed session's end
+  returning to the list; goldens of an opened session (additions).
+- C12 — saved sessions: `enter` on a saved row resumes it in place (a host
+  spawned with `--load` in the row's own workspace, or the holder when it
+  runs after all), a row this craze cannot run refused on the hint line;
+  `tests/cli/test_sessions.py` (the list in real terminals: groups,
+  regrouping, cancel, close, opening in place, quitting, an unreachable host,
+  a resume) and the fake agent's `CRAZE_FAKE_SESSION_ID`; the session list,
+  opening in place, the band and saved sessions in `docs/reference/tui.md`;
+  `internal/roster` in the architecture's package table; this record.
+
+PRs 3–4 are recorded here as each lands.
 
 ### Deviations from the plan
 
-PR 1's execution amendments X1–X62, mirrored here as `12`'s own record (the
-full text is in the plan, `~/.claude/plans/craze/030-session-control-s5-agent-view.md`,
-"Execution amendments"); review-fix rounds are grouped with the commit they
-amend. None reopens an owner decision. PRs 2–4 add theirs as they land.
+PR 1's execution amendments X1–X62 and PR 2's X63 onward, mirrored here as
+`12`'s own record (the full text is in the plan,
+`~/.claude/plans/craze/030-session-control-s5-agent-view.md`, "Execution
+amendments"); review-fix rounds are grouped with the commit they amend. None
+reopens an owner decision. PRs 3–4 add theirs as they land.
 
 **PR 1** (C1–C8):
 
@@ -3182,6 +3225,129 @@ amend. None reopens an owner decision. PRs 2–4 add theirs as they land.
     redrawn row, no stale error at quit), and a failure arriving after such a
     restore is not applied — the held session comes up as a late start does.
     The macOS test-cleanup scan is bounded (`PS_TIMEOUT`) and fails closed.
+
+**PR 2** (C9–C12):
+
+21. **Plan 030 X63, X64, X65 (C9)** — `rowFacts` is a session capability, the
+    host's own like `stop` (a hub in S4b will carry rows of hosts of different
+    builds); every craze host sets it, the fake host only in its opt-in mode,
+    so the 16 earlier fixtures are the older-host direction and fixture 17
+    covers it. A row's state has the precedence needs you > failed > working >
+    idle (failed also covers an activity error with no `lastTurn` and no
+    foreign turn), and `Since` is computed at read time as the latest time
+    that could have moved the row into its state, from times the engine and
+    its observer record — no poll-dependent memo, no new locks; a settlement
+    that starts the next queued turn keeps the first turn's start. `Doing`
+    scans back to the current turn's boundary and names a tool by title, else
+    name; `LastReply` is the last closed assistant entry (over 64 KiB, its
+    tail); `Summary` is a permission's tool title, a question's first
+    non-empty question, a plan's name; every string is its first non-blank
+    line, tabs expanded, control characters dropped, at most 200 cells.
+22. **Plan 030 X66, X67, X68, X69 (C9)** — the roster has its own
+    never-reconnecting client (synchronous, deadline-driven; a kept connection
+    found closed at an attempt's start is re-dialled once within the budget);
+    each host is asked at most once per tick, freed slots going to hosts not
+    yet asked; a third host status, `Connecting` (no answer yet, or no
+    session published); the list's types live in `internal/roster`, which
+    imports neither the TUI nor the CLI, and `sessions.Store` gains `All()`
+    for its `Index`.
+23. **Plan 030 X70, X71, X72 (C9)** — `tui.Sessions`: `Roster()`, `Open`
+    (a running session dialled and attached — a stopping host is `Open`'s
+    error, never a failed start; a saved one through the launcher's load),
+    `Spawn(SpawnSpec)`, `Stop`. The scale test runs 50 fake hosts in the parent
+    and the roster in a child process (CPU from `getrusage`; the 5 % bound not
+    asserted under `-race`): 0.8 % of a core, ≤ 11 goroutines above baseline.
+    Roster tests are an external package (`fakehost` imports `tui`).
+24. **Plan 030 X86, X87, X88, X89, X90, X91 (C9r)** — a host the list's
+    `Spawn` started is the launch's until `Open` takes it or the new
+    `LeaveRunning` releases it (`finish` stops the rest; a host `Spawn` did
+    not start is never stopped); one deadline per roster attempt, fixed as it
+    starts (an attempt lasts ≤ 1 s); `Close` joins the attempt goroutines; an
+    ask's ending moves `Since` only if the ask was open; the backoff test
+    counts attempt starts at the tick barrier and the scale window runs until
+    three full rounds with all 50 hosts reachable (0.9–1.7 % CPU, the same at
+    a 5 % quota).
+25. **Plan 030 X73, X74, X76, X79 (C10)** — rows the plan's table has no line
+    for: a host that has not answered yet is drawn with the working rows and
+    the spinner (`Starting…`, then `Connecting…`), counted as working,
+    `ctrl+x` doing nothing on it; unreachable rows are their own group after
+    idle and before saved, counted in `N running` but in none of the four
+    header counts, keeping their last answer's title and age. The columns are
+    the mockup's shares (mark 2, glyph 2, two gaps of 2, provider 8, age 5;
+    of the rest title 36 %, directory 18 %, "what it wants" the remainder);
+    an older host's `· craze <ver>` note keeps its cells; the age is one unit
+    (s/m/h/d), zero under `--freeze`, blank without a time. Grouped by
+    directory, directories are ordered by their most urgent row, `$HOME` is
+    `~`, and the grouping is kept for the run.
+26. **Plan 030 X75, X77, X78, X80, X81 (C10)** — `ctrl+x` on another session is
+    a new `Sessions.Cancel(ref)`: `session.queue.clear` then `session.cancel`
+    over a connection of its own that never attaches (`not_accepting` is
+    success; bounded at 2 s; no wire change). A replaced incarnation keeps the
+    selection (only an armed close drops); a vanished row leaves the
+    selection to the line now at its place. `No other sessions.` when nothing
+    runs besides yours and nothing is saved. `ctrl+d`, or `ctrl+c` twice within
+    1 s, is a view close (the first `ctrl+c` says so). Your session ending
+    while the list is up does not quit craze: its row reads `· ended` and
+    `esc`/`←`/`enter` on it stay on the list with `that session ended`.
+27. **Plan 030 X82, X83, X84, X85 (C10)** — `enter` on another row said
+    `opening another session in place is not built yet` until C11/C12;
+    `/sessions` runs before your session is up, and `/help` gains one `←` line,
+    both only with a session list; below 40×10 the list says `need 40×10`;
+    the hint line's words (`enter open`/`back to it`/`resume`, `ctrl+x
+    stop`/`close`, `ctrl+s by directory`/`by state`, `← back`, and the notes
+    `stopped: …`, `closed: …`, `could not stop|close …: <err>`, an older
+    host's `that session runs in an older craze; close it there`); `ctrl+x`
+    close is allowed on your own session.
+28. **Plan 030 X92, X93 (own commits)** — found by C10 and the gate: a
+    pre-existing bubbles v0.21.0 hang (`wordLeft` loops for ever when only
+    whitespace precedes the cursor, so `alt+←`, `alt+b` and macOS `ESC b` on
+    an empty composer froze craze; `updateComposer` drops the word-backward
+    keys in exactly that case); a pre-existing native-harness test race
+    (`TestSteerRacesTheTurnEnd`) fixed test-side — a gated batch waits for its
+    first accepted steer before releasing.
+29. **Plan 030 X94, X95, X96, X97, X98, X99 (C10r; amend X81, X86)** — the ended
+    row outlives its host (kept as last listed, or built from the model if it
+    was never listed; its age counts from the end); "here" is craze id +
+    incarnation, frozen once the session ends, another incarnation being an
+    ordinary row; every exit closes the list's roster (a set shared by every
+    copy of the model; `finishRun` closes what is left); a recording proxy
+    proves `ctrl+x`'s clear precedes its cancel; a spawned host's end is
+    decided per host (a failed `Open` stops it only if nothing else holds it);
+    `LeaveRunning(ref) error` is decided under `finish`'s lock.
+30. **Plan 030 X100, X101, X102 (C11)** — the backend generation `bgen` moves on
+    every adopt and is stamped on events, restores, readies, ends and both
+    start answers; `gated` drops a stale one before `reading` is touched.
+    Stale replies are rejected first: `gated` checks the session generation
+    before the gate id, and `release` no longer does (reversing plan 027
+    C17's order; its premise is unreachable now). The shared constructor is
+    `withSession`; a test classifies every `Model` field. Carried: the
+    monotonic counters (`bgen`, `sessGen`, `gateSeq`, and `restores` and
+    `turnStarts`, the post-restore read's tag), `expanded`, the held queue
+    filtered by `dropStaleHeld`, timers and terminal modes in flight, `exit`,
+    `quitting`; a launch spawn in flight at a switch is abandoned.
+31. **Plan 030 X103, X104, X105, X106, X107 (C11)** — while `Open` dials, the
+    list stays up with `opening <title>…`, the dial stamped per list opening
+    (a later enter replaces it; leaving, reopening or quitting abandons it;
+    an abandoned answer is closed); a failed dial says `could not open
+    <title>: <err>`. Retired backends close off the Update through a shared
+    set. Drafts are stashed by craze id through `draftKey` (PR 3's
+    temporary-id seam). The band is `─ <title · provider · workspace
+    basename> ─── ← sessions ─` (`new session` when untitled), the first
+    region, dropped at degradation's last step and first by `fitChrome`. A
+    viewed session's end opens the list with `that session ended` unless
+    this client's own quit asked for it; the launching TUI whose session an
+    attach client's `/exit` stopped now returns to its list (a
+    `test_attach.py` expectation updated).
+32. **Plan 030 X108, X109, X110 (C11)** — test plumbing: a socket frame run
+    whose owner no longer holds the host's session uses the owner's stream
+    head as its capture boundary; the gate digest skips `sessions`,
+    `sessRosters`, `retired`. A backend `Open` answered tells the launcher
+    once when it closes, so a failed later `Open` stops a spawned host only
+    when nothing holds it. Residuals: a let-go spawned host whose session
+    never came up is stopped only by `finish` or a later failed `Open`;
+    roost/herdr shows the previous session's status until the new one is
+    ready; quitting while viewing a session whose start failed makes that
+    failure craze's exit status.
 
 ### Live smoke
 

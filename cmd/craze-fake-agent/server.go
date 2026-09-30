@@ -16,7 +16,18 @@ import (
 	"github.com/charliek/craze/internal/acp"
 )
 
-const fakeSessionID = "fake-session-1"
+// fakeSessionID is the session id session/new answers, and the one every
+// script streams on until a load names another: "fake-session-1", or
+// CRAZE_FAKE_SESSION_ID when it is set — so two sessions of one test HOME
+// (plan 030's session list, several terminals in several directories) are
+// two rows of the session index, keyed by provider and this id, and not one
+// row the second overwrites.
+var fakeSessionID = func() string {
+	if id := strings.TrimSpace(os.Getenv("CRAZE_FAKE_SESSION_ID")); id != "" {
+		return id
+	}
+	return "fake-session-1"
+}()
 
 // taskRunFor is how long the sub-agent tool stays in_progress. A real
 // sub-agent runs for seconds; without a pause here the running row lives

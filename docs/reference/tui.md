@@ -51,7 +51,9 @@ it failed, `–` when it was cancelled, and `●` for the one being viewed; the
 label is the sub-agent type (`explore`, `general-purpose`; cursor's rows read
 `task`). While it runs the suffix counts up — `0s · 4.7k tok` — and once it
 finishes it reads the duration and model, `2.9s · grok-4.6`. Status row 2
-counts the running ones (`← 2 agents`); a lingering finished row is not counted.
+counts the running ones (`← 2 agents`; `↓ 2 agents` when sessions run in
+detached hosts, where `←` opens the [session list](#session-list) and `↓` is
+the key that reaches the rows); a lingering finished row is not counted.
 The keyboard starts in the composer; `↓` moves it to the rows, where the
 selected row carries the `❯` mark, and `↑` past the first row, `Esc` or any
 typed key move it back. Returning from the sub-agent view leaves it on the
@@ -484,13 +486,13 @@ still lands on top and owns the keyboard until it is answered.
 session of yours running on this machine, whatever its directory, and the
 saved ones that are not running. It exists only when sessions run in detached
 hosts (the default); under `CRAZE_DETACH=0`, `detach = false` or with the
-control socket off there is no list, no `/sessions` and no `←` binding. The
-session you came from stays attached behind the list — its turn keeps
-running, a card it raises waits for you — and the cursor starts on its row.
-If it ends while the list is up (another client's `/exit`, a close from the
-list, the idle timeout), craze stays on the list and its row stays, `· ended`,
-for as long as the list is up, even once its host has gone; a later run of
-the same session is a row of its own.
+control socket off there is no list, no `/sessions` and no `←` binding (and
+`/help` has no line for it). The session you came from stays attached behind
+the list — its turn keeps running, a card it raises waits for you — and the
+cursor starts on its row. If it ends while the list is up (another client's
+`/exit`, a close from the list, the idle timeout), craze stays on the list and
+its row stays, `· ended`, for as long as the list is up, even once its host
+has gone; a later run of the same session is a row of its own.
 
 ```text
  sessions  9 running                             ! 2 need you   ✳ 3 working   ✗ 1 failed   ○ 2 idle
@@ -521,13 +523,68 @@ It needs 40×10; smaller, it says so.
 | Key | Action |
 |---|---|
 | `↑` `↓` | move the selection; it stays on its session however the rows reorder |
-| `Enter`, `→` | on the session you came from, go back to it; on `▸ saved`, expand or collapse the saved sessions |
+| `Enter`, `→` | on another session, [open it here](#opening-a-session-in-place); on a saved one, [resume it here](#saved-sessions); on the session you came from, go back to it; on `▸ saved`, expand or collapse the saved sessions. A host that is not answering says `that session is not answering` |
 | `Esc`, `←` | back to the session you came from — unless it ended while the list was up, when the list stays and says `that session ended` |
 | `Ctrl+X` | on a working or asking session, stop its turn **and clear its queue**; on an idle or failed one, the first press arms a close (`ctrl+x again closes it`) and a second within two seconds ends the session on its host — any other key disarms it. Nothing on a saved row or a host that is not answering |
 | `Ctrl+S` | group by directory instead of by state, and back; the grouping is kept for the rest of the run |
 | `Ctrl+D`, `Ctrl+C` twice | quit craze; every session keeps running |
 
-The mouse does nothing in the list.
+The hint line under the list names what the selected row takes (`enter
+open`, `enter resume`, `enter back to it`, `ctrl+x stop` or `close`), and
+says what a key came to: `stopped: <title>`, `closed: <title>`, `could not
+stop <title>: …`. The mouse does nothing in the list.
+
+### Opening a session in place
+
+`Enter` on another session's row opens it in this terminal: the list stays up
+with `opening <title>…` on its hint line while its host is dialled, and then
+the screen is that session's — its transcript, its cards, its queue, the
+status row naming its directory and provider — as if you had started it here.
+The session you left is not stopped: this terminal detaches from it and it
+goes on on its host, where the list finds it again. A dial that fails leaves
+the list up with `could not open <title>: <why>`; `Enter` on another row
+before the first answers opens that one instead, and leaving the list
+abandons the open.
+
+Once the list has been opened, every session's screen starts with a band — the
+session's title, provider and directory, and `← sessions` on the right:
+
+```text
+─ fix the roost tab rename · grok · roost ─────────────────────── ← sessions ─
+```
+
+A terminal too short for it drops it. `←` on an empty composer goes back to
+the list, where the cursor starts on the session you now have open (`· here`).
+
+The composer's text belongs to the session it was typed in: a session that
+ends with a draft in the composer keeps it — it is in the composer again when
+you open that session again — and it never follows you to another session.
+
+When the session you are in ends — its host stopped by another terminal's
+`/exit`, a `ctrl+x` close from a list, the idle timeout, or its connection
+lost — craze goes back to the list, its row marked `· ended`, and the hint
+line says `that session ended` (with the connection's error when that is what
+ended it). Your own quit (`/exit`, `Ctrl+D`) still ends the session and quits
+craze.
+
+### Saved sessions
+
+`Enter` on `▸ saved · N not running` shows the saved sessions: every session
+in the session index that is not running, newest first, at most 50, each
+once — `·`, its title, provider and directory. `Enter` on one resumes it in
+this terminal: a session host is started in the directory the session ran in
+(not this terminal's) and loads it, the hint line saying `resuming <title>…`
+meanwhile, and the screen then shows it as [opening one in
+place](#opening-a-session-in-place) does, `restoring…` until its transcript
+is back. A saved session that another terminal has resumed meanwhile is
+opened where it runs. The command line's own session flags (`--provider`,
+`--model`, `--ask`, `--plan`) were for the session it started and are not
+applied to a resumed one; its permission mode, `--plugin-dir` and (for a
+provider craze does not run in process) `--agent-bin` are. A
+session whose directory is gone, or whose provider this craze cannot resume,
+is refused on the hint line (`could not resume <title>: that session ran in
+…, which is no longer a directory`) and nothing is started. `Ctrl+X` does
+nothing on a saved row: nothing runs to stop.
 
 ## Modes
 

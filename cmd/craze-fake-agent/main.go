@@ -153,6 +153,9 @@ Environment:
                        byte per turn to release it, so it can act while the
                        turn is known to be in progress. Unset, tasks runs
                        straight through.
+  CRAZE_FAKE_SESSION_ID=<id>  session/new answers this session id instead of
+                       fake-session-1, so several sessions in one test HOME
+                       are several rows of its session index.
 
 Unknown arguments (including acp, --force, agent, stdio, --always-approve,
 --yolo, --no-auto-update, --trust) are ignored so this binary can stand in

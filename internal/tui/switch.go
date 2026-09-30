@@ -56,7 +56,8 @@ type sessionSeed struct {
 	// host status names.
 	provider string
 	// loading says the session was built to load a transcript, and is
-	// replaying until its replay ends (Config.Loading).
+	// replaying until its replay ends (Config.Loading; a switch to a saved
+	// session, plan 030 §3.12).
 	loading bool
 }
 
@@ -184,7 +185,12 @@ func (m Model) withSession(seed sessionSeed) Model {
 // and read as Init starts and reads one, its own draft put back. The backend
 // it replaces is closed off the Update (retire): a view close, the session
 // going on on its host.
-func (m Model) switchBackend(b backend.Backend) (Model, tea.Cmd) {
+//
+// loading says b loads a saved session (§3.12): the model starts replaying,
+// as the resume picker's choice and Config.Loading start it — `restoring…`
+// until the replay's end, which a restore or the stream's replay event says
+// (a held session already up says so in its first restore).
+func (m Model) switchBackend(b backend.Backend, loading bool) (Model, tea.Cmd) {
 	old := m.eng
 	m.stashDraft()
 	roster := m.sessList.roster
@@ -195,7 +201,7 @@ func (m Model) switchBackend(b backend.Backend) (Model, tea.Cmd) {
 		// A backend that names no workspace changes none (followWorkspace).
 		ws = m.cwd
 	}
-	next := m.withSession(sessionSeed{workspace: ws, provider: info.Provider})
+	next := m.withSession(sessionSeed{workspace: ws, provider: info.Provider, loading: loading})
 	next.setBackend(b)
 	next.dropStaleHeld()
 	next.takeDraft()

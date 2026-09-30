@@ -320,7 +320,7 @@ func (l *launcher) newBackend(p agent.Provider, explicit bool) (backend.Backend,
 	if !explicit && l.resolved.Fallback && p.Name() == l.resolved.Provider.Name() {
 		f.provider = ""
 	}
-	return l.spawn(spawnOptions{env: l.env, flags: f}, "")
+	return l.spawn(spawnOptions{env: l.env, flags: f}, "", true)
 }
 
 // loadBackend is tui.Config.LoadBackend: a host spawned to load row (--load,
@@ -337,7 +337,7 @@ func (l *launcher) loadBackend(_ agent.Provider, row sessions.Row) (backend.Back
 	f := l.flags
 	f.cont = false
 	f.workspace = ""
-	return l.spawn(spawnOptions{env: l.env, flags: f, load: loadArg(row)}, row.CrazeID)
+	return l.spawn(spawnOptions{env: l.env, flags: f, load: loadArg(row)}, row.CrazeID, true)
 }
 
 // spawn answers the backend the TUI adopts for opts — recorded, so a backend
@@ -357,7 +357,12 @@ func (l *launcher) loadBackend(_ agent.Provider, row sessions.Row) (backend.Back
 // the spawn: the rendezvous finds it, and it is attached to the same way.
 //
 // Otherwise a host is spawned for opts and dialled (spawnHost, dialHost).
-func (l *launcher) spawn(opts spawnOptions, crazeID string) (backend.Backend, error) {
+//
+// note says a holder's backend leaves the ignored-flags note (noteHeld): a
+// spawn for the command line's own session does; the session list's resume
+// of a saved session (openSaved) passes none of the flags the note names, and
+// leaves none.
+func (l *launcher) spawn(opts spawnOptions, crazeID string, note bool) (backend.Backend, error) {
 	done, err := l.begin()
 	if err != nil {
 		return nil, err
@@ -365,7 +370,7 @@ func (l *launcher) spawn(opts spawnOptions, crazeID string) (backend.Backend, er
 	defer done()
 
 	if e, ok := hostServing(l.env, crazeID); ok {
-		b, err := l.reattach(hostRef{entry: e, held: true})
+		b, err := l.reattach(hostRef{entry: e, held: true}, note)
 		if err == nil {
 			return b, nil
 		}
@@ -378,20 +383,20 @@ func (l *launcher) spawn(opts spawnOptions, crazeID string) (backend.Backend, er
 	if err != nil {
 		return nil, launchFailure(err)
 	}
-	return l.dial(ref)
+	return l.dial(ref, note)
 }
 
 // dial dials the host ref names as the TUI's client (connect) and takes the
-// session (take): a host this launch started is ended when it cannot be
-// dialled, and a holder's is left alone.
-func (l *launcher) dial(ref hostRef) (backend.Backend, error) {
+// session (take, note its): a host this launch started is ended when it
+// cannot be dialled, and a holder's is left alone.
+func (l *launcher) dial(ref hostRef, note bool) (backend.Backend, error) {
 	ctx, cancel := context.WithTimeout(l.ctx, dialTimeout)
 	defer cancel()
 	s, err := l.connect(ctx, ref)
 	if err != nil {
 		return nil, err
 	}
-	return l.take(s, ref), nil
+	return l.take(s, ref, note), nil
 }
 
 // reattach is spawn's direct reattach to ref, the host a registry entry says
@@ -406,7 +411,7 @@ func (l *launcher) dial(ref hostRef) (backend.Backend, error) {
 // spawn of its own. The dial and the attach share dialTimeout, and end with
 // the launch. An attached candidate is taken as dial takes one: the TUI's
 // Start finds it attached and waits for its readiness alone.
-func (l *launcher) reattach(ref hostRef) (backend.Backend, error) {
+func (l *launcher) reattach(ref hostRef, note bool) (backend.Backend, error) {
 	ctx, cancel := context.WithTimeout(l.ctx, dialTimeout)
 	defer cancel()
 	s, err := l.connect(ctx, ref)
@@ -417,7 +422,7 @@ func (l *launcher) reattach(ref hostRef) (backend.Backend, error) {
 		_ = s.Close()
 		return nil, err
 	}
-	return l.take(s, ref), nil
+	return l.take(s, ref, note), nil
 }
 
 // connect dials the host ref names as the TUI's client (dialHost), the
@@ -457,13 +462,14 @@ func (l *launcher) sessionOptions(ref hostRef) remote.SessionOptions {
 
 // take is s, dialled to the host ref names, as the backend the TUI adopts:
 // recorded, so finish ends it if its session never comes up in the TUI, and
-// — a holder's — naming the flags its attach ignored (noteHeld).
-func (l *launcher) take(s *remote.Session, ref hostRef) backend.Backend {
+// — a holder's, when note says so — naming the flags its attach ignored
+// (noteHeld).
+func (l *launcher) take(s *remote.Session, ref hostRef, note bool) backend.Backend {
 	b := &launchedBackend{Session: s, ref: ref}
 	l.mu.Lock()
 	l.launched = append(l.launched, b)
 	l.mu.Unlock()
-	if ref.held {
+	if ref.held && note {
 		l.noteHeld(ref)
 	}
 	return b
