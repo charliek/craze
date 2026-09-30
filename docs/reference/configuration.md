@@ -527,9 +527,9 @@ max_output_tokens = 65536   # optional, >= 0; absent or 0 = the default below
 ```
 
 A model with no `max_output_tokens` gets **32,000** tokens, the same default
-opencode uses — or a quarter of the model's `context_window` when that is
-smaller (a window under 128,000 tokens), so a small model keeps room for its
-prompt. The default exists so a response that starts repeating itself stops
+opencode uses — or a quarter of the model's `context_window`, rounded down and
+never under one token, when that is smaller (a window under 128,000 tokens), so
+a small model keeps room for its prompt. The default exists so a response that starts repeating itself stops
 there instead of running to the provider's own cap. An explicit value always
 wins, even above 32,000: set one for a model whose answers or reasoning need
 more room, or lower for a provider that refuses 32,000. A negative value is

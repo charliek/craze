@@ -430,16 +430,17 @@ held-out numbers as informational only, precisely because those tasks had alread
   plan mode. During plan 029 craze sent no output-token ceiling for that model —
   `models.toml` had no `max_output_tokens` entry for it, so the provider's own cap
   applied; opencode caps output at min(model limit, 32k). **Since D-74 (2026-09-29)**
-  craze sends a default ceiling of 32,000 tokens (a quarter of the window on a model
-  under 128k) whenever `models.toml` sets none — see `docs/reference/configuration.md`,
-  *Native output ceiling*. That bounds a runaway, it does not prevent one: the response
-  now stops at 32k output tokens as a `max_tokens` stop, and the run still fails
-  (`craze prompt` exits 1 on any stop but `end_turn`), only sooner and cheaper. Still
-  open, for the next campaign to decide from evidence: resampling a response that hits
-  `max_tokens` without tool calls, and a client-side repetition detector. Check whether
-  the runaway persists — plan-mode tasks with 2+ reps on deepseek would show it, now as
-  runs ending `max_tokens` at about 32k output tokens — and look for the opposite
-  failure too: a legitimate long answer cut at 32k (a `max_tokens` stop with no
+  craze sends a default ceiling of 32,000 tokens (a quarter of the window, rounded
+  down, on a model under 128k) whenever `models.toml` sets none — see
+  `docs/reference/configuration.md`, *Native output ceiling*. That bounds a runaway, it
+  does not prevent one: the response can now run to at most 32k output tokens. A
+  provider that reports the cut as a `length` finish makes it a `max_tokens` stop, and
+  the run still fails (`craze prompt` exits 1 on any stop but `end_turn`), only sooner
+  and cheaper. Still open, for the next campaign to decide from evidence: resampling a
+  response that hits `max_tokens` without tool calls, and a client-side repetition
+  detector. Check whether the runaway persists — plan-mode tasks with 2+ reps on
+  deepseek would show it, now as runs stopping at about 32k output tokens (normally as
+  `max_tokens`) — and look for the opposite failure too: a legitimate long answer cut at 32k (a `max_tokens` stop with no
   repetition), which means that model needs its own `max_output_tokens`.
 - **The judge ranks correctness over length**, and calibration's padding control exists to
   catch a regression there — if a future padding gate fails, the instruction needs revising

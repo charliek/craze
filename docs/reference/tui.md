@@ -534,7 +534,7 @@ effort = ""   # optional default effort
 [subagents.tiers]   # optional: what a Claude tier name means here
 opus   = "fireworks/kimi-k3"
 sonnet = "glm-5.3"
-haiku  = "fireworks/deepseek-v4-flash"
+haiku  = "fireworks/deepseek-v4p1-flash"
 ```
 
 The `agent` tool runs at most four children at once; a fifth call waits for
