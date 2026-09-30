@@ -501,10 +501,20 @@ func wrapProse(s string, width int) string {
 const flagHyphen = '\ue000'
 
 // holdRune is a private-use rune s does not contain, or false when it holds
-// them all.
+// them all. One pass collects the ones s holds (usually none), so a passage
+// full of them costs no more than one scan.
 func holdRune(s string) (rune, bool) {
+	var held map[rune]bool
+	for _, r := range s {
+		if r >= flagHyphen && r <= '\uf8ff' {
+			if held == nil {
+				held = map[rune]bool{}
+			}
+			held[r] = true
+		}
+	}
 	for r := flagHyphen; r <= '\uf8ff'; r++ {
-		if !strings.ContainsRune(s, r) {
+		if !held[r] {
 			return r, true
 		}
 	}

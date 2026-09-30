@@ -86,7 +86,9 @@ There is no refresh between releases.
 - `TestShippedCatalogHistory` (part of `make test`, so of CI) enforces the
   retirement procedure: every alias in that history must still be a model or
   a `[[retired]]` alias, and every model must be in the history, so a model
-  removed without retiring it fails.
+  removed without retiring it fails. The history is **append-only**: a
+  catalog change that deletes a line from it is refused in review (the test
+  cannot catch a line deleted in the same commit as the model).
 - `TestShippedCatalog` (part of `make test`, so of CI) checks the file: it
   rejects a malformed catalog, a `default_model` that is not a model, two
   aliases sharing an identity, a retired alias that is still a model, and a

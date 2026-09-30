@@ -21,9 +21,10 @@ import (
 // /model picked, newest first, each with the effort last used on it, so that
 // the next session starts where the last one left off rather than on
 // default_model. It is one small file beside the two model files,
-// recent.json, which nothing but a switch made in a running session writes:
-// not --model, not `craze prompt`, not a resume, not a sub-agent, and not plan
-// 030's session list, each of which applies to one start only.
+// recent.json, which nothing but a model switch or an effort change made in a
+// running session writes: not --model, not `craze prompt`, not a resume, not a
+// sub-agent, and not plan 030's session list, each of which applies to one
+// start only.
 //
 // The file names each model by alias and by identity (provider, wire model),
 // both taken from the table of the session that made the switch (r2-5) —

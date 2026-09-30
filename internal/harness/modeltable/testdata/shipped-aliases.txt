@@ -1,6 +1,8 @@
 # Every model alias craze has shipped in catalog.toml (plan 031 §3.1;
 # RELEASING.md "Model catalog changes"). Adding a model adds a line here;
 # removing one from the catalog needs a [[retired]] row, and its line stays.
+# APPEND-ONLY: never delete a line (a reviewer checks this file's diff; a test
+# cannot, since the file and the catalog change in the same commit).
 # The [[retired]] aliases are not listed: they were rows in the owner's own
 # tables, never shipped by a craze release.
 fireworks/deepseek-v4p1-flash
