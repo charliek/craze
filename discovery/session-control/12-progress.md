@@ -3069,7 +3069,7 @@ finding and its disposition):
   refused, outcome unknown), the unstarted session (`@dir` alone: opened in
   place, spawned and adopted on its first prompt with the TUI's own command
   numbering, discarded by `←`), `/exit` in the input; goldens (additions).
-- C16 (this commit) — `/provider` and `/model` in the list's input: the `/`
+- C16 (`f3cce7b`) — `/provider` and `/model` in the list's input: the `/`
   popup, the providers the startup picker offers, the model reset to the
   provider's default (native's from its model table, through the seam Plan
   031 swaps), the catalog cache (`internal/modelcache`, written by `craze
@@ -3080,6 +3080,17 @@ finding and its disposition):
   input, `@`, dispatch, the unstarted session and `/provider` `/model` in
   `docs/reference/tui.md`, the catalog cache in
   `docs/reference/configuration.md`; this record.
+- C15r (`f266967`) — review fixes (astra on C15, sol on C16): the dispatch's
+  prompt waited for no longer than its deadline even when its write is
+  blocked; the exit closing a dispatch's connection at once; a list paste
+  landing only in the opening that asked for it; the unstarted session's
+  shutdown schedules proven in a pty; the agent's own default a row of its
+  own; a catalog with a bad model not recorded.
+- C15r2 (`4e586ec`) — review fixes (astra on C15r): a dispatch's answer read
+  by its error, not the clock; the exit cutting a dispatch's detach short.
+- C15r3 (`f096a27`) — tests (astra on C15r2): the two regression tests made
+  to fail on the parent's code, deterministically.
+- The record's commit (this commit) — X163–X176 below.
 
 PR 4 is recorded here as it lands.
 
@@ -3579,6 +3590,45 @@ with them):
     since the hosts a terminal's list spawns inherit its environment and
     their sessions otherwise shared its index row; `internal/modelcache`
     joins `make test-race`.
+53. **Plan 030 X163, X164 (C15r)** — the dispatch's prompt runs on a
+    goroutine and is waited for no longer than the command gate's deadline
+    (`awaitPrompt`; an answer there as it passes wins): still out, the
+    outcome is unknown — the host left running first, then the connection
+    closed at once, which ends a write blocked on a host that has stopped
+    reading (X54 reaches no context), the submission and drain joined within
+    1 s. The program's exit closes a dispatch's connection at once
+    (`dispatchConn`), so it never waits behind that write.
+54. **Plan 030 X165, X166 (C15r)** — a list paste carries the list opening
+    it was asked in (`pasteMsg.listGen`) and lands only there; the unstarted
+    session's shutdown schedules (a quit or SIGTERM while its spawn or Open
+    runs) are proven in a pty through the real `finish`.
+55. **Plan 030 X167, X168 (C15r)** — the agent's own default (no `--model`)
+    is always its own first row; a catalog model whose id is `default` is
+    another row (`--model=default`); typed `/model default` stays the
+    agent's own. A catalog with any bad model is not recorded (the cache
+    keeps what it had; one host-log line per unchanged refused catalog).
+56. **Plan 030 X169, X170 (C15r)** — the docs state that a new session
+    falls back to the launch's `--model` when the session it came from has
+    none (X145); `test_dispatch.py` waits on events, not a fixed sleep.
+57. **Plan 030 X171, X172 (C15r2)** — a dispatch's answer is read by its
+    error (`promptUnknown`: a context error or `ErrOutcomeUnknown` is
+    unknown), never by the clock — a refusal taken as the deadline passes
+    stops its host; a host's own bound on the prompt now reads unknown. The
+    program's exit cancels a dispatch's view close already detaching
+    (`dispatchConn` holds the context `CloseWithin` waits on), so `finishRun`
+    no longer waits the detach's 3 s bound inside `remote.Session`'s shared
+    close.
+58. **Plan 030 X173, X174 (C15r2)** — tests: the proof that an unstarted
+    session spawns nothing is the Go test, which runs every command the
+    opening returned (`test_dispatch.py` corroborates); the unknown-outcome
+    test holds its deadline instead of racing a real 50 ms one (a starved
+    run started the call after it — diagnosed, not retried).
+59. **Plan 030 X175, X176 (C15r3)** — tests: the refusal-at-the-deadline test
+    holds the dispatch before it waits (two hook steps, `dispatchAwaiting`
+    and `dispatchSubmitted`) until the refusal is sent and the deadline
+    passed, so it fails on the parent's classification; the exit's cut of a
+    dispatch's detach is proven with a fake whose close waits only for its
+    context (no clock); the real-socket test stays as the integration check.
 
 ### Live smoke
 
