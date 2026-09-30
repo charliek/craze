@@ -2,12 +2,14 @@ package tui
 
 import (
 	"errors"
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 
 	"github.com/charliek/craze/internal/agent"
 	"github.com/charliek/craze/internal/backend"
@@ -223,6 +225,181 @@ func TestACopyNoteNeverCrossesASwitch(t *testing.T) {
 	r.dropped("A's copy note", msg)
 	if r.m.copyNote != "" || !slices.Equal(rec.copies(), []string{"a's reply"}) {
 		t.Fatalf("B's status row says %q; copied %q", r.m.copyNote, rec.copies())
+	}
+}
+
+// launchLaneModel is the launch flow's TUI (plan 030 §3.5) with its session
+// known — a new grok session, which spawns lane a — and a session list whose
+// Open answers lanes, sized, its gated calls asynchronous: up with no backend,
+// its composer taking keys, and the spawn Init makes returned unrun, for the
+// test to deliver when it says.
+func launchLaneModel(t *testing.T, a *laneBackend, lanes map[string][]*laneBackend) (*switchRig, tea.Cmd) {
+	t.Helper()
+	isolateSkillsHome(t)
+	m := New(Config{
+		Theme: "tokyo-night", Workspace: a.info.Workspace, Yolo: true,
+		Provider: agent.GrokProvider(), ProviderLocked: true,
+		NewBackend: func(agent.Provider, bool) (backend.Backend, error) { return a, nil },
+		Sessions:   laneSessions(lanes),
+	})
+	tm, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	r := newSwitchRig(t, asyncGate(t, tm.(Model)))
+	if r.m.eng != nil || r.m.spawnWaiting == 0 || r.m.picking() {
+		t.Fatalf("fixture: before its spawn the launch holds %T (waiting %d, picking %v)", r.m.eng, r.m.spawnWaiting, r.m.picking())
+	}
+	return r, r.m.Init()
+}
+
+// transcriptWord is the screen cell of word's first letter in the transcript
+// the rig's model draws.
+func transcriptWord(r *switchRig, word string) (x, y int) {
+	r.t.Helper()
+	top := r.m.lay.Region(regionTranscript).Top
+	for i, line := range r.m.cur().transcriptPlain {
+		if c := strings.Index(line, word); c >= 0 {
+			return lipgloss.Width(line[:c]), top + i - r.m.vp.YOffset
+		}
+	}
+	r.t.Fatalf("the transcript draws no %q:\n%s", word, plainView(r.m))
+	return 0, 0
+}
+
+// TestWorkAskedBeforeTheFirstAdoptionIsThatSessions (C11r2, astra
+// r24-fix1112): a launch whose session is known is up before any backend —
+// the frame in its starting state, the composer taking keys while the spawn
+// runs — so ctrl+v, or a copy of a row it drew meanwhile (`/rename`'s "session
+// is still starting"), can be asked for before the session's backend is
+// adopted. What answers is that session's and no other's: applied once A,
+// the backend the spawn answered, is adopted and up; dropped once the user
+// has switched from A to B — delivered straight into B's Update, or held
+// across the switch behind the dial's answer — and dropped as well when the
+// switch to B was made before A was ever adopted (the launch's spawn, then
+// abandoned, is closed and never adopted).
+func TestWorkAskedBeforeTheFirstAdoptionIsThatSessions(t *testing.T) {
+	const pasted, copied = "from the launch's clipboard", `copied "starting"`
+	// askFor asks, before any backend, for kind's work, and answers its
+	// command unrun.
+	askFor := func(r *switchRig, kind string) tea.Cmd {
+		r.t.Helper()
+		rec := captureCopies(r.t)
+		if kind == "a paste" {
+			_ = rec.write(pasted)
+			r.send(tea.KeyMsg{Type: tea.KeyCtrlV})
+			return r.take(&r.pastes, "the startup paste")
+		}
+		typeRunes(r, "/rename early")
+		r.send(enter())
+		x, y := transcriptWord(r, "starting")
+		r.send(dblClickMsg{X: x, Y: y})
+		return r.take(&r.copies, "the startup copy")
+	}
+	// answered runs the work, bounded, and answers its message undelivered.
+	answered := func(t *testing.T, kind string, work tea.Cmd) tea.Msg {
+		t.Helper()
+		msg := runWatched(t, work)
+		switch m := msg.(type) {
+		case pasteMsg:
+			if kind == "a paste" && m.text == pasted {
+				return msg
+			}
+		case clipboardDoneMsg:
+			if kind == "a copy's note" && m.note == copied {
+				return msg
+			}
+		}
+		t.Fatalf("fixture: %s answered %#v", kind, msg)
+		return nil
+	}
+	// adoptA delivers the launch's spawn: A adopted, and up.
+	adoptA := func(r *switchRig, a *laneBackend, spawn tea.Cmd) {
+		r.t.Helper()
+		r.send(spawnedBy(r.t, spawn))
+		if r.m.eng != a {
+			r.t.Fatalf("fixture: the spawn's answer was not adopted (%T)", r.m.eng)
+		}
+		r.up(a)
+	}
+	// nothingOf fails the test if B's composer or status row holds anything
+	// of the work: its composer is its own draft, and it shows no note.
+	nothingOf := func(t *testing.T, r *switchRig, draft string) {
+		t.Helper()
+		if got := r.m.input.Value(); got != draft || r.m.copyNote != "" {
+			t.Fatalf("B's composer holds %q (want %q), its status row says %q", got, draft, r.m.copyNote)
+		}
+	}
+
+	for _, kind := range []string{"a paste", "a copy's note"} {
+		t.Run(kind+", delivered on A", func(t *testing.T) {
+			a := newLane(t, "a", "alpha")
+			r, spawn := launchLaneModel(t, a, map[string][]*laneBackend{})
+			work := askFor(r, kind)
+			adoptA(r, a, spawn)
+			r.send(answered(t, kind, work))
+			switch got := r.m.input.Value(); {
+			case kind == "a paste" && got != pasted:
+				t.Fatalf("A's composer holds %q, want the paste asked for before A was adopted", got)
+			case kind == "a copy's note" && r.m.copyNote != copied:
+				t.Fatalf("A's status row says %q, want the note of the copy asked for before A was adopted", r.m.copyNote)
+			}
+		})
+
+		t.Run(kind+", delivered after A→B", func(t *testing.T) {
+			a, b := newLane(t, "a", "alpha"), newLane(t, "b", "bravo")
+			r, spawn := launchLaneModel(t, a, map[string][]*laneBackend{"b": {b}})
+			work := askFor(r, kind)
+			adoptA(r, a, spawn)
+			r.switchTo(b, laneRow(a, "session a", time.Minute), laneRow(b, "session b", 2*time.Minute))
+			r.up(b)
+			typeRunes(r, "b's own")
+			r.dropped(kind+" asked for before A was adopted", answered(t, kind, work))
+			nothingOf(t, r, "b's own")
+		})
+
+		t.Run(kind+", held across A→B", func(t *testing.T) {
+			a, b := newLane(t, "a", "alpha"), newLane(t, "b", "bravo")
+			r, spawn := launchLaneModel(t, a, map[string][]*laneBackend{"b": {b}})
+			work := askFor(r, kind)
+			adoptA(r, a, spawn)
+			r.openList(laneRow(a, "session a", time.Minute), laneRow(b, "session b", 2*time.Minute))
+			r.enterOn(b)
+			release := r.openAGate()
+			r.send(r.pop(&r.opens, "dial"))
+			msg := answered(t, kind, work)
+			r.send(msg)
+			if got := heldKinds(r.m); !slices.Equal(got, []string{"tui.sessOpenedMsg", fmt.Sprintf("%T", msg)}) {
+				t.Fatalf("fixture: held %v", got)
+			}
+			close(release)
+			r.send(r.pop(&r.calls, "A's call"))
+			r.drainAll()
+			if r.m.eng != b || len(r.m.held) != 0 {
+				t.Fatalf("after the drain: switched to b %v, held %v", r.m.eng == b, heldKinds(r.m))
+			}
+			nothingOf(t, r, "")
+			r.up(b)
+			nothingOf(t, r, "")
+		})
+
+		t.Run(kind+", after a switch before A was adopted", func(t *testing.T) {
+			a, b := newLane(t, "a", "alpha"), newLane(t, "b", "bravo")
+			r, spawn := launchLaneModel(t, a, map[string][]*laneBackend{"b": {b}})
+			work := askFor(r, kind)
+			r.switchTo(b, laneRow(b, "session b", time.Minute))
+			r.up(b)
+			typeRunes(r, "b's own")
+			r.dropped(kind+" asked for before any backend", answered(t, kind, work))
+			nothingOf(t, r, "b's own")
+			// The launch's spawn, answering now, was abandoned by the switch:
+			// its backend is closed, never adopted.
+			r.send(spawnedBy(t, spawn))
+			if r.m.eng != b || r.last == nil {
+				t.Fatalf("the abandoned spawn's answer: the model holds %T, command %v", r.m.eng, r.last)
+			}
+			runWatched(t, r.last)
+			if a.closes.Load() != 1 {
+				t.Fatalf("the abandoned spawn's backend was closed %d times", a.closes.Load())
+			}
+		})
 	}
 }
 

@@ -3393,7 +3393,12 @@ reopens an owner decision. PRs 3–4 add theirs as they land.
     flags carry; `callPanicMsg`; the frame harness's tokens; quits — skills,
     git, dialogs and the title are synchronous). Residual (an SF row): until
     a command a switch killed has died (at most ~7 s), the next session's
-    Esc/Ctrl+C go to "kill the command" and `!` is refused.
+    Esc/Ctrl+C go to "kill the command" and `!` is refused. **Amended by X121
+    (C11r2, astra r24-fix1112):** the terminal's results are stamped with
+    `shownGen` — a counter only a switch moves, not the first adoption — so work
+    asked for before the first backend is adopted (a paste while the launch's
+    spawn runs) stays with that session and is dropped after any later switch;
+    `bgen` stamps only a backend's own messages.
 37. **Plan 030 X119, X120 (C11r; amend X106)** — the band's title is the
     row's: one rule, `sessTitle(own, index)` — the session's own title, else
     the index's, else `new session` — for a running row and the band,

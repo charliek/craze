@@ -1156,9 +1156,9 @@ var (
 		"host", "lastHost", "viewer", "sessionIndex", "crazeID", "resume", "loadSession", "claimSession",
 		"refuseLoad", "onEngine", "providerLocked", "persistProvider", "fallbackDefault", "pickedExplicit",
 		"providerDefault", "providers", "newSession", "spawnNew", "spawnLoad", "cont", "sessions", "sessList",
-		"sessRosters", "bandOn", "drafts", "retired", "sessGen", "bgen", "gateSeq", "resumeAttempt",
-		"spawnSeq", "restores", "turnStarts", "held", "heldBytes", "heldDrained", "syncAck", "syncPending",
-		"gateSync", "harnessQuit",
+		"sessRosters", "bandOn", "drafts", "retired", "sessGen", "bgen", "shownGen", "gateSeq",
+		"resumeAttempt", "spawnSeq", "restores", "turnStarts", "held", "heldBytes", "heldDrained", "syncAck",
+		"syncPending", "gateSync", "harnessQuit",
 	}
 	sessionFields = []string{
 		"eng", "cmdSeq", "chains", "engErr", "cwd", "model", "status", "err", "startErr", "startInc", "git",

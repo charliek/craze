@@ -34,17 +34,19 @@ import (
 //     backend's first restore is a first restore (restore.go) and nothing of
 //     the last session is drawn over the next. What is the TUI's stays: the
 //     theme, the size, the config, the list and its grouping, the drafts, and
-//     the monotonic counters — bgen, sessGen and gateSeq — so no generation or
-//     gate id is ever issued twice (R2-5).
+//     the monotonic counters — bgen, shownGen, sessGen and gateSeq — so no
+//     generation or gate id is ever issued twice (R2-5).
 //   - A command's reply or a gate's timeout issued for the old session is
 //     rejected by the gate before any of its bookkeeping (gated).
 //   - What this terminal was asked to do for the old session and answers
-//     after the switch carries the backend generation it was asked under
-//     too (C11r, astra r22-c11 1–2): a paste, which would otherwise land in
-//     the next session's composer, and a copy's note are dropped by the gate
-//     as the old stream's items are; the composer's shell's completion
-//     never writes its command and output into the next session's
-//     transcript (finishShell).
+//     after the switch carries the shown-session generation it was asked
+//     under (Model.shownGen; C11r, astra r22-c11 1–2), which only a switch
+//     moves — so work asked for before the old session's backend was even
+//     adopted is the old session's too (C11r2, astra r24-fix1112): a paste,
+//     which would otherwise land in the next session's composer, and a
+//     copy's note are dropped by the gate as the old stream's items are; the
+//     composer's shell's completion never writes its command and output into
+//     the next session's transcript (finishShell).
 //   - The dial is a tea.Cmd (Sessions.Open, from the list); an answer that
 //     lands after the user has moved on — another session opened, the list
 //     left, craze quitting — is closed and never adopted (sessOpened).
@@ -149,6 +151,7 @@ func (m Model) withSession(seed sessionSeed) Model {
 		// no generation, gate id, stamp, restore or turn count is reused.
 		sessGen:       m.sessGen,
 		bgen:          m.bgen,
+		shownGen:      m.shownGen,
 		gateSeq:       m.gateSeq,
 		resumeAttempt: m.resumeAttempt,
 		spawnSeq:      m.spawnSeq,
@@ -192,11 +195,11 @@ func (m Model) withSession(seed sessionSeed) Model {
 // §3.11): the list's enter, once its dial has answered (sessOpened). The
 // composer's draft is stashed under the session it was written for, the list
 // closes — its roster with it — and the model is made again around b by the
-// shared constructor (withSession): adopted as a Config.Backend is
-// (setBackend: a new session generation, a new backend generation), started
-// and read as Init starts and reads one, its own draft put back. The backend
-// it replaces is closed off the Update (retire): a view close, the session
-// going on on its host.
+// shared constructor (withSession): a new shown-session generation (shownGen),
+// adopted as a Config.Backend is (setBackend: a new session generation, a new
+// backend generation), started and read as Init starts and reads one, its own
+// draft put back. The backend it replaces is closed off the Update (retire): a
+// view close, the session going on on its host.
 //
 // loading says b loads a saved session (§3.12): the model starts replaying,
 // as the resume picker's choice and Config.Loading start it — `restoring…`
@@ -216,6 +219,12 @@ func (m Model) switchBackend(b backend.Backend, loading bool, indexTitle string)
 		ws = m.cwd
 	}
 	next := m.withSession(sessionSeed{workspace: ws, provider: info.Provider, loading: loading, indexTitle: indexTitle})
+	// Another session is shown from here (shownGen): what this terminal was
+	// asked to do for the last one — a paste, a copy's note, a command's
+	// completion — is the last one's, even when it was asked for before that
+	// session's backend was adopted, or when none ever was (a launch's spawn
+	// the switch abandons). Before dropStaleHeld, which judges by it.
+	next.shownGen++
 	next.setBackend(b)
 	next.dropStaleHeld()
 	next.takeDraft()
@@ -238,17 +247,17 @@ func (m Model) switchBackend(b backend.Backend, loading bool, indexTitle string)
 
 // dropStaleHeld takes out of the held queue every item of a stream the model
 // has left, every start's answer, and every paste and copy's note asked for
-// under the backend it left: a switch adopted a backend none of them is about,
-// and each would be dropped where it drained (staleBackend). Keys, ticks, the
-// frame harness's tokens, the list's messages and every other message stay,
-// in order; a result issued for the old session is dropped where it drains
-// (outdated), and so is a shell's completion (finishShell).
+// in the session it no longer shows: a switch adopted a backend none of them
+// is about, and each would be dropped where it drained (leftBehind). Keys,
+// ticks, the frame harness's tokens, the list's messages and every other
+// message stay, in order; a result issued for the old session is dropped
+// where it drains (outdated), and so is a shell's completion (finishShell).
 func (m *Model) dropStaleHeld() {
 	var kept []heldMsg
 	bytes := 0
 	dropped := false
 	for _, h := range m.held {
-		if m.staleBackend(h.msg) {
+		if m.leftBehind(h.msg) {
 			dropped = true
 			continue
 		}

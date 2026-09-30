@@ -384,7 +384,7 @@ func TestCtrlVPastesThroughTheSeam(t *testing.T) {
 	tm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlV})
 	m = tm.(Model)
 	msg := runCmd(cmd)
-	if got, want := msg, (pasteMsg{text: "pasted text", bgen: m.bgen}); got != want {
+	if got, want := msg, (pasteMsg{text: "pasted text", shownGen: m.shownGen}); got != want {
 		t.Fatalf("ctrl+v produced %#v, want %#v", got, want)
 	}
 	tm, _ = m.Update(msg)

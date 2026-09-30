@@ -321,6 +321,21 @@ type Model struct {
 	// 0 on a message is one a test built by hand, and means whichever
 	// backend the model holds, as the zero session stamp does (issued).
 	bgen uint64
+	// shownGen is the shown-session generation (plan 030 §3.11; C11r2, astra
+	// r24-fix1112): it moves when the TUI starts showing another session —
+	// a switch (switchBackend) — and on nothing else, and the results of this
+	// terminal's own work carry the one they were asked under: a paste
+	// (pasteMsg), a copy's note (clipboardDoneMsg), the composer's shell's
+	// completion (shellDoneMsg). It is not bgen, which the first adoption
+	// moves: the session a launch spawns, or a picker's choice spawns, is
+	// shown before its backend exists — its composer is up, and a paste can
+	// be asked for, while the spawn runs — so that adoption is the same
+	// session's and what was asked for before it is that session's; a switch
+	// is another session's, whether or not a backend had been adopted before
+	// it. New starts it at 1, so the zero stamp is only ever a message a test
+	// built by hand, and means whichever session is shown. Like bgen it only
+	// ever moves forward, across every session this TUI shows.
+	shownGen uint64
 	// cmdSeq numbers this model's commands from 1. Each command also names the
 	// backend's client id, read per command (nextCmd) and never cached, so
 	// every mutating command it sends names itself and the events it caused
@@ -982,22 +997,38 @@ type errMsg struct {
 // backendStamped is a message that carries the backend generation it was
 // produced under (Model.bgen), and is nothing to the model once that backend
 // is left: a backend's own — a stream item the reader handed up, the start's
-// answer — and a result of this terminal's own work that is only ever about
-// the session shown when it was asked for — a paste (pasteMsg), whose text is
-// that session's composer's, and a copy's note (clipboardDoneMsg), which that
-// session's status row shows (plan 030 C11r, astra r22-c11 2). The composer's
-// shell's completion carries the generation too, and is judged where it is
-// applied instead (finishShell): its row may still be on screen.
+// answer.
 type backendStamped interface{ backendGen() uint64 }
 
-func (m eventMsg) backendGen() uint64         { return m.bgen }
-func (m restoreMsg) backendGen() uint64       { return m.bgen }
-func (m readyMsg) backendGen() uint64         { return m.bgen }
-func (m endMsg) backendGen() uint64           { return m.bgen }
-func (m startedMsg) backendGen() uint64       { return m.bgen }
-func (m errMsg) backendGen() uint64           { return m.bgen }
-func (m pasteMsg) backendGen() uint64         { return m.bgen }
-func (m clipboardDoneMsg) backendGen() uint64 { return m.bgen }
+func (m eventMsg) backendGen() uint64   { return m.bgen }
+func (m restoreMsg) backendGen() uint64 { return m.bgen }
+func (m readyMsg) backendGen() uint64   { return m.bgen }
+func (m endMsg) backendGen() uint64     { return m.bgen }
+func (m startedMsg) backendGen() uint64 { return m.bgen }
+func (m errMsg) backendGen() uint64     { return m.bgen }
+
+// shownStamped is a result of this terminal's own work that is only ever
+// about the session shown when it was asked for, and carries the
+// shown-session generation it was asked under (Model.shownGen): a paste
+// (pasteMsg), whose text is that session's composer's, and a copy's note
+// (clipboardDoneMsg), which that session's status row shows (plan 030 C11r,
+// astra r22-c11 2) — asked for before that session's backend was adopted
+// too, which a switch leaves behind as it leaves any other (C11r2, astra
+// r24-fix1112). The composer's shell's completion carries the generation
+// too, and is judged where it is applied instead (finishShell): its row may
+// still be on screen.
+type shownStamped interface{ shownUnder() uint64 }
+
+func (m pasteMsg) shownUnder() uint64         { return m.shownGen }
+func (m clipboardDoneMsg) shownUnder() uint64 { return m.shownGen }
+
+// leftBehind reports that msg is something a switch left behind (plan 030
+// §3.11): a message of a backend the model has left (staleBackend), or the
+// result of this terminal's work for a session it no longer shows
+// (staleShown). The command gate drops one before it does anything else
+// (gated), the held queue's drain drops one found held (drain), and a switch
+// takes each out of the held queue as it is made (dropStaleHeld).
+func (m Model) leftBehind(msg tea.Msg) bool { return m.staleBackend(msg) || m.staleShown(msg) }
 
 // staleBackend reports that msg is a message of a backend the model has left
 // (plan 030 §3.11): produced under another backend generation (leftBackend).
@@ -1007,10 +1038,24 @@ func (m Model) staleBackend(msg tea.Msg) bool {
 }
 
 // leftBackend reports that g is a backend generation the model has left: the
-// model has adopted another backend since. The zero generation is a message a
-// test built by hand, or one asked for before the model held any backend —
-// whose first is then the one it is about — and is never left.
+// model has adopted another backend since. A backend's own messages are only
+// ever produced once it is adopted, so their generation is never the zero
+// one; the zero generation is a message a test built by hand — or a start
+// failure with no backend to name (startCmd) — and is never left.
 func (m Model) leftBackend(g uint64) bool { return g != 0 && g != m.bgen }
+
+// staleShown reports that msg is the result of this terminal's work for a
+// session the model no longer shows (C11r2): asked for under another
+// shown-session generation (leftShown).
+func (m Model) staleShown(msg tea.Msg) bool {
+	s, ok := msg.(shownStamped)
+	return ok && m.leftShown(s.shownUnder())
+}
+
+// leftShown reports that g is a shown-session generation the model has left:
+// it has switched to another session since. The zero generation is a
+// message a test built by hand, and is never left.
+func (m Model) leftShown(g uint64) bool { return g != 0 && g != m.shownGen }
 
 // actionErrMsg is a failure a command reports as an error row: a chain's
 // settings read or Set that failed. landed is `/model`'s model step when it
@@ -1525,6 +1570,10 @@ func New(cfg Config) Model {
 		sessRosters: &sessRosterSet{},
 		retired:     &backendSet{},
 		gateSync:    gateSyncDefault,
+		// The first session shown is shown from here, before any backend
+		// of it is adopted (shownGen): 1, so no message the program makes
+		// carries the zero stamp a test's hand-built one does.
+		shownGen: 1,
 	}.withSession(sessionSeed{workspace: cwd, model: cfg.Model, provider: prov.Name(), loading: cfg.Loading})
 	sess := cfg.Session
 	switch {
@@ -2172,8 +2221,9 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case pasteMsg:
 		// The read is asynchronous, so the composer may no longer be where the
 		// keyboard is by the time the text arrives. One asked for in a session
-		// the model has since left never gets here: the gate dropped it
-		// (staleBackend, pasteMsg).
+		// the model has since left — before that session's backend was
+		// adopted included (C11r2) — never gets here: the gate dropped it
+		// (staleShown, pasteMsg).
 		if msg.text == "" || m.composerCovered() {
 			return m, nil
 		}
@@ -2426,7 +2476,7 @@ func (m Model) copySelection() (tea.Model, tea.Cmd) {
 	if text == "" {
 		return m, nil
 	}
-	return m, copyRows(m.bgen, text)
+	return m, copyRows(m.shownGen, text)
 }
 
 // copySelectionOrLastReply is Ctrl+Y. Without a selection it copies the last
@@ -2439,7 +2489,7 @@ func (m Model) copySelectionOrLastReply() (tea.Model, tea.Cmd) {
 	rows := m.cur().rows
 	for i := len(rows) - 1; i >= 0; i-- {
 		if e := rows[i]; e.kind == entryAssistant && e.text != "" {
-			return m, copyText(m.bgen, e.text, "copied last reply")
+			return m, copyText(m.shownGen, e.text, "copied last reply")
 		}
 	}
 	return m, nil
@@ -2641,7 +2691,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.copySelectionOrLastReply()
 	}
 	if msg.Type == tea.KeyCtrlV {
-		return m, pasteFromClipboard(m.bgen)
+		return m, pasteFromClipboard(m.shownGen)
 	}
 	if msg.Type == tea.KeyCtrlO {
 		return m.toggleExpanded()

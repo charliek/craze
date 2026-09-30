@@ -341,17 +341,18 @@ func unanswered(ctx context.Context, err error) error {
 //
 // Two kinds of message are another session's, and each is dropped here before
 // the gate does anything with it (plan 030 §3.11; round-1 panel finding 3,
-// R2-5): a message of a backend the model has left (staleBackend) — a stream
-// item or a start's answer from before a switch, or a paste or a copy's note
-// asked for then (C11r) — before it can clear the reader's flag, which from
-// the switch on is the new backend's read, or be held and drained into the
-// session that replaced it; and a gated call's reply issued for a session the
-// model has left, before it can release a gate, acknowledge a sync token, owe
-// a drain or arm a read. A switch leaves no gate open (withSession) and gate
-// ids are never reused (gateSeq), so such a reply is never the open gate's
-// own; one that named it anyway would still release nothing.
+// R2-5): something a switch left behind (leftBehind) — a stream item or a
+// start's answer of the backend it left (staleBackend), or a paste or a
+// copy's note asked for in the session it no longer shows (staleShown; C11r,
+// C11r2) — before it can clear the reader's flag, which from the switch on is
+// the new backend's read, or be held and drained into the session that
+// replaced it; and a gated call's reply issued for a session the model has
+// left, before it can release a gate, acknowledge a sync token, owe a drain
+// or arm a read. A switch leaves no gate open (withSession) and gate ids are
+// never reused (gateSeq), so such a reply is never the open gate's own; one
+// that named it anyway would still release nothing.
 func (m Model) gated(msg tea.Msg, handle handler) (tea.Model, tea.Cmd) {
-	if m.staleBackend(msg) {
+	if m.leftBehind(msg) {
 		return m, nil
 	}
 	switch msg := msg.(type) {
@@ -530,11 +531,11 @@ func (m Model) drain(handle handler) (tea.Model, tea.Cmd) {
 		m.syncAck = s.n
 		cmd = m.readOn()
 		next = m
-	} else if m.staleBackend(h.msg) {
-		// Held under a backend the model has since left: another session's,
-		// never applied (plan 030 §3.11). A switch takes its old stream's
-		// items out of the queue as it is made (withSession); this is the
-		// rule held to wherever one is found.
+	} else if m.leftBehind(h.msg) {
+		// Held under a backend the model has since left, or asked for in a
+		// session it no longer shows: another session's, never applied (plan
+		// 030 §3.11). A switch takes each out of the queue as it is made
+		// (dropStaleHeld); this is the rule held to wherever one is found.
 		cmd = m.readOn()
 		next = m
 	} else {
