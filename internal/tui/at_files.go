@@ -38,10 +38,11 @@ import (
 //     runs on a goroutine of its own, handing what it keeps to the search,
 //     which builds the index as it comes and answers at atFilesTimeout, or
 //     at once when the popup stops awaiting it (it closed, its workspace or
-//     the session shown changed: X125), whatever the listing is doing; the
-//     listing stops at its next check, its tool killed and reaped. Only
-//     files are listed; the directories offered are derived from their
-//     paths, so an empty directory is never offered.
+//     the session shown changed: X125), whatever the listing is doing; its
+//     tool is killed then, and reaped on a goroutine of its own whatever the
+//     listing is inside, and the listing stops at its next check. Only files
+//     are listed; the directories offered are derived from their paths, so
+//     an empty directory is never offered.
 //   - The match: every keystroke, in the Update, over the listing — a
 //     case-insensitive subsequence of the path, scored with fzf's shape
 //     (segment starts, runs, gaps) and a bonus above every other for a last
@@ -247,25 +248,29 @@ func atFilesErrNote(err error) string {
 
 // atFileSearcher lists a workspace. Its seams are its fields: how a tool is
 // looked for on PATH, whether a directory is in a git work tree, the timer,
-// and how the walk opens a directory — each the real one in production
-// (newAtFileSearcher), and a test's own to force every fallback, fire the
-// timeout without waiting for it, and hold a directory's read as a stalled
-// disk would.
+// how the walk opens a directory, and how git's listing is checked on disk
+// (atListing.lstat) — each the real one in production (newAtFileSearcher),
+// and a test's own to force every fallback, fire the timeout without waiting
+// for it, and hold a directory's read or a stat of git's as a stalled disk
+// would.
 type atFileSearcher struct {
 	look    func(file string) (string, error)
 	gitTree func(root string) bool
 	after   func(d time.Duration, f func()) (stop func() bool)
 	timeout time.Duration
 	openDir func(name string) (atDir, error)
+	lstat   func(name string) (os.FileInfo, error)
 
 	// Test hooks, nil in production: started is told a tool's pid once it
 	// has started, read how many records it has read after each one, walked
 	// how many entries the walk has read after each batch — each on the
-	// listing's goroutine; built how many candidates the search has built
+	// listing's goroutine; reaped a tool's pid once it has been reaped, on
+	// its reaper's (tool); built how many candidates the search has built
 	// after each batch it took, on the search's; ended that the listing's
 	// goroutine has ended, its tool reaped.
 	started func(pid int)
 	read    func(records int)
+	reaped  func(pid int)
 	walked  func(entries int)
 	built   func(candidates int)
 	ended   func()
@@ -279,7 +284,7 @@ type atDir interface {
 
 // newAtFileSearcher is the searcher as craze runs it: tools found on PATH, a
 // work tree found by its `.git` (discoverGit, the status row's search), the
-// real clock, the disk's directories.
+// real clock, the disk's directories and its stats.
 func newAtFileSearcher() atFileSearcher {
 	return atFileSearcher{
 		look:    exec.LookPath,
@@ -296,6 +301,7 @@ func newAtFileSearcher() atFileSearcher {
 			}
 			return f, nil
 		},
+		lstat: os.Lstat,
 	}
 }
 
@@ -322,10 +328,12 @@ type atFilesRun struct {
 // that the disk holds up (a stalled network mount) does not hold the answer.
 // Between two batches it checks both, and at either offers what it had built
 // — the timeout's partial list — or nothing, cancelled. Its return cancels
-// the listing's context, and the listing stops at its next check: its tool
-// killed and reaped, its walk left. A call it is inside when that happens is
-// not interrupted — no goroutine can be stopped inside a system call — and
-// it ends when the call returns, holding nothing the popup waits on.
+// the listing's context: its tool is killed then and reaped at once, on a
+// goroutine of its own (tool), and the listing stops at its next check, its
+// walk left. A call the listing is inside when that happens is not
+// interrupted — no goroutine can be stopped inside a system call — and it
+// ends when the call returns, holding nothing the popup waits on, nor any
+// process.
 func (s atFileSearcher) search(ctx context.Context, root string) completeLoaded {
 	sctx, stop := context.WithCancelCause(ctx)
 	defer stop(nil)
@@ -402,22 +410,22 @@ func (s atFileSearcher) search(ctx context.Context, root string) completeLoaded 
 // owner (safe.directory), its index is broken — gives way to the walk, which
 // needs none of that; rg that fails is the answer, since it walks the same
 // directories the walk would. What each keeps goes to emit (atListing), and
-// git's is checked on disk as it is kept: rg and the walk list no symbolic
-// link, and git lists what it tracks, whatever it has become.
+// git's is checked on disk (s.lstat) as it is kept: rg and the walk list no
+// symbolic link, and git lists what it tracks, whatever it has become.
 func (s atFileSearcher) list(ctx context.Context, root string, emit func(batch []string) bool) atFilesRun {
 	if bin, err := s.look("rg"); err == nil {
-		return s.tool(newAtListing(ctx, root, emit, false), bin, atFilesRGArgs, true)
+		return s.tool(newAtListing(ctx, root, emit, nil), bin, atFilesRGArgs, true)
 	}
 	if s.gitTree(root) {
 		if bin, err := s.look("git"); err == nil {
-			l := newAtListing(ctx, root, emit, true)
+			l := newAtListing(ctx, root, emit, s.lstat)
 			run := s.tool(l, bin, atFilesGitArgs, false)
 			if run.err == nil || l.files > 0 || ctx.Err() != nil {
 				return run
 			}
 		}
 	}
-	return s.walk(newAtListing(ctx, root, emit, false))
+	return s.walk(newAtListing(ctx, root, emit, nil))
 }
 
 // tool runs bin with args in the listing's root and reads its NUL-separated
@@ -429,9 +437,22 @@ func (s atFileSearcher) list(ctx context.Context, root string, emit func(batch [
 // awaiting the load), or the listing reaching its cap or holding all it may
 // — kills the tool (exec's own cancel, SIGKILL: a listing has nothing to
 // flush) and closes craze's end of its stdout, so a read waiting on output
-// that will never come returns; then the tool is reaped (Wait), its pipes
-// bounded by atFilesWaitDelay. So tool returns promptly once its context
-// ends, and never leaves a process behind that it started.
+// that will never come returns.
+//
+// The tool is reaped (Wait) by a goroutine of its own, started with it, and
+// not by the listing's once its reading is done: the listing's goroutine may
+// be held in a call no context interrupts — git's check of a path (lstat) on
+// a stalled mount — and a tool killed meanwhile would be left a zombie for
+// as long as the call is stuck. So a tool that has ended, by itself or
+// killed, is reaped at once, whatever the listing is inside. Its stdout is
+// therefore a pipe of craze's own (os.Pipe), which Wait leaves alone, and not
+// exec's StdoutPipe, which Wait closes: a Wait running beside the reading
+// would take the rest of the listing from it. Its stderr is exec's, bounded
+// by atFilesWaitDelay once the tool has ended. tool takes the reaper's
+// answer before it returns, so a listing that ends — at the tool's end, a cap
+// or holding all it may — has its tool reaped before the search answers. So
+// tool returns promptly once its context ends, and never leaves a process
+// behind that it started.
 //
 // rg's exit 1 with nothing listed is no files, not a failure (rg's own
 // meaning); any other failure is its stderr's first line, or the exit.
@@ -439,21 +460,38 @@ func (s atFileSearcher) tool(l *atListing, bin string, args []string, rg bool) a
 	ctx := l.ctx
 	cctx, kill := context.WithCancel(ctx)
 	defer kill()
-	cmd := exec.CommandContext(cctx, bin, args...)
-	cmd.Dir = l.root
-	stderr := &atHead{max: atFilesStderrMax}
-	cmd.Stderr = stderr
-	cmd.WaitDelay = atFilesWaitDelay
-	out, err := cmd.StdoutPipe()
+	out, w, err := os.Pipe()
 	if err != nil {
 		return atFilesRun{err: err}
 	}
-	if err := cmd.Start(); err != nil {
+	defer func() { _ = out.Close() }()
+	cmd := exec.CommandContext(cctx, bin, args...)
+	cmd.Dir = l.root
+	cmd.Stdout = w
+	stderr := &atHead{max: atFilesStderrMax}
+	cmd.Stderr = stderr
+	cmd.WaitDelay = atFilesWaitDelay
+	err = cmd.Start()
+	// The tool has its own copy of the write end: with craze's closed, a read
+	// sees the listing's end once the tool's closes.
+	_ = w.Close()
+	if err != nil {
 		return atFilesRun{err: err}
 	}
+	pid := cmd.Process.Pid
 	if s.started != nil {
-		s.started(cmd.Process.Pid)
+		s.started(pid)
 	}
+	// The reaper. Its answer is buffered: a listing held for good never
+	// takes it, and the reaper ends all the same.
+	waited := make(chan error, 1)
+	go func() {
+		werr := cmd.Wait()
+		if s.reaped != nil {
+			s.reaped(pid)
+		}
+		waited <- werr
+	}()
 	// A read of the pipe returns once it is closed (the pipe is pollable),
 	// whether or not the kill reached whatever holds its other end.
 	unhook := context.AfterFunc(cctx, func() { _ = out.Close() })
@@ -464,7 +502,7 @@ func (s atFileSearcher) tool(l *atListing, bin string, args []string, rg bool) a
 	}
 	// What was kept since the last hand-over, before a wait for the tool.
 	l.flush()
-	werr := cmd.Wait()
+	werr := <-waited
 	unhook()
 
 	run := atFilesRun{capped: capped, full: l.full}
@@ -690,20 +728,21 @@ func (s atFileSearcher) walkDir(l *atListing, d atDir, rel string, entries *int,
 // directories, is counted against atFilesHoldMax and atFilesBytesMax: it is
 // full, and stops, where another path would take it past either.
 //
-// git's listing is checked on disk (check), so that it offers what rg and
-// the walk would — neither lists a symbolic link, nor anything reached
-// through one — and nothing that leads outside the workspace: git lists what
-// it tracks, whatever that has become, and a tracked link (or a tracked
-// directory since replaced by a link) passes every lexical test atFilePath
-// makes. A file is kept only if it is a regular file there (atIsFile; a
-// link, a submodule or a file since deleted is not), and a directory only if
-// it is a directory there (atIsDir; a link to one is not) — each directory
-// stat'ed once, the first time a file under it is kept.
+// git's listing is checked on disk (lstat, nil for rg's and the walk's), so
+// that it offers what rg and the walk would — neither lists a symbolic link,
+// nor anything reached through one — and nothing that leads outside the
+// workspace: git lists what it tracks, whatever that has become, and a
+// tracked link (or a tracked directory since replaced by a link) passes
+// every lexical test atFilePath makes. A file is kept only if it is a
+// regular file there (isFile; a link, a submodule or a file since deleted is
+// not), and a directory only if it is a directory there (isDir; a link to
+// one is not) — each directory stat'ed once, the first time a file under it
+// is kept.
 type atListing struct {
 	ctx   context.Context
 	root  string
 	emit  func(batch []string) bool
-	check bool
+	lstat func(name string) (os.FileInfo, error)
 
 	dirs  map[string]bool
 	batch []string
@@ -713,10 +752,10 @@ type atListing struct {
 	full  bool
 }
 
-// newAtListing is a listing of root, into emit, under ctx; check says it is
-// git's.
-func newAtListing(ctx context.Context, root string, emit func(batch []string) bool, check bool) *atListing {
-	return &atListing{ctx: ctx, root: root, emit: emit, check: check, dirs: map[string]bool{}}
+// newAtListing is a listing of root, into emit, under ctx; lstat, when it is
+// git's, is how its paths are checked on disk (os.Lstat in production).
+func newAtListing(ctx context.Context, root string, emit func(batch []string) bool, lstat func(name string) (os.FileInfo, error)) *atListing {
+	return &atListing{ctx: ctx, root: root, emit: emit, lstat: lstat, dirs: map[string]bool{}}
 }
 
 // add keeps the file at p — a clean relative path — with every directory
@@ -738,7 +777,7 @@ func (l *atListing) add(p string) bool {
 	if l.ctx.Err() != nil {
 		return false
 	}
-	if l.check && !atIsFile(filepath.Join(l.root, p)) {
+	if l.lstat != nil && !l.isFile(p) {
 		return true
 	}
 	// The directories above p not yet met, deepest first: once one is met,
@@ -762,13 +801,13 @@ func (l *atListing) add(p string) bool {
 	if l.held+held > atFilesHoldMax || l.bytes+bytes > atFilesBytesMax {
 		return l.overflow(p)
 	}
-	if l.check {
+	if l.lstat != nil {
 		// Top down, each directory not yet met: the first that is not a
 		// directory here refuses p, and is held refused with every one under
 		// it on p's path. Those above it are real, and wait for a file of
 		// their own to bring them: none is offered with no file under it.
 		for j := top; j >= 0 && j < len(p); j = atNextSlash(p, j) {
-			if atIsDir(filepath.Join(l.root, p[:j+1])) {
+			if l.isDir(p[:j+1]) {
 				continue
 			}
 			for ; j >= 0; j = atNextSlash(p, j) {
@@ -828,16 +867,16 @@ func atNextSlash(p string, j int) int {
 	return -1
 }
 
-// atIsFile and atIsDir say what name is on disk, itself — a symbolic link
-// is neither, whatever it points at (os.Lstat): a regular file, and a
-// directory. Anything that cannot be stat'ed is neither.
-func atIsFile(name string) bool {
-	fi, err := os.Lstat(name)
+// isFile and isDir say what the path p under the root is on disk, itself — a
+// symbolic link is neither, whatever it points at (lstat): a regular file,
+// and a directory. Anything that cannot be stat'ed is neither.
+func (l *atListing) isFile(p string) bool {
+	fi, err := l.lstat(filepath.Join(l.root, p))
 	return err == nil && fi.Mode().IsRegular()
 }
 
-func atIsDir(name string) bool {
-	fi, err := os.Lstat(name)
+func (l *atListing) isDir(p string) bool {
+	fi, err := l.lstat(filepath.Join(l.root, p))
 	return err == nil && fi.IsDir()
 }
 

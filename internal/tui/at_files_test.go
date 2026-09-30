@@ -257,11 +257,12 @@ func (h atHooks) joined(t *testing.T) {
 	atAwait(t, h.ends, "the listing's end")
 }
 
-// atHeldDirs is the walk's directories (openDir) with one read held: the
-// at'th ReadDir of the walk, counted over every directory, closes stuck and
-// waits for release before it reads — a directory read a stalled disk holds
-// up. Only the listing's goroutine reads directories, so n needs no lock.
-type atHeldDirs struct {
+// atHeldDisk is the listing's calls to the disk with one held: the at'th —
+// counted over every directory read of the walk (open, its ReadDir), or
+// every stat of git's check (lstat) — closes stuck and waits for release
+// before it runs, as a call a stalled disk holds up would. Only the listing's
+// goroutine makes those calls, so n needs no lock.
+type atHeldDisk struct {
 	at      int
 	n       int
 	stuck   chan struct{}
@@ -269,17 +270,25 @@ type atHeldDirs struct {
 	once    sync.Once
 }
 
-func newAtHeldDirs(t *testing.T, at int) *atHeldDirs {
-	h := &atHeldDirs{at: at, stuck: make(chan struct{}), release: make(chan struct{})}
-	// A test that fails before its release must not leave the walk held.
+func newAtHeldDisk(t *testing.T, at int) *atHeldDisk {
+	h := &atHeldDisk{at: at, stuck: make(chan struct{}), release: make(chan struct{})}
+	// A test that fails before its release must not leave the listing held.
 	t.Cleanup(h.free)
 	return h
 }
 
-// free releases the held read.
-func (h *atHeldDirs) free() { h.once.Do(func() { close(h.release) }) }
+// free releases the held call.
+func (h *atHeldDisk) free() { h.once.Do(func() { close(h.release) }) }
 
-func (h *atHeldDirs) open(name string) (atDir, error) {
+// wait is one call's turn: the at'th is held until the release.
+func (h *atHeldDisk) wait() {
+	if h.n++; h.n == h.at {
+		close(h.stuck)
+		<-h.release
+	}
+}
+
+func (h *atHeldDisk) open(name string) (atDir, error) {
 	f, err := os.Open(name)
 	if err != nil {
 		return nil, err
@@ -287,16 +296,18 @@ func (h *atHeldDirs) open(name string) (atDir, error) {
 	return atHeldDir{File: f, h: h}, nil
 }
 
+func (h *atHeldDisk) lstat(name string) (os.FileInfo, error) {
+	h.wait()
+	return os.Lstat(name)
+}
+
 type atHeldDir struct {
 	*os.File
-	h *atHeldDirs
+	h *atHeldDisk
 }
 
 func (d atHeldDir) ReadDir(n int) ([]os.DirEntry, error) {
-	if d.h.n++; d.h.n == d.h.at {
-		close(d.h.stuck)
-		<-d.h.release
-	}
+	d.h.wait()
 	return d.File.ReadDir(n)
 }
 
@@ -354,7 +365,7 @@ func atTree(t *testing.T, names ...string) string {
 // goroutine, for a test or a benchmark with a listing of its own.
 func newAtFileIndex(paths []string, title string) *atFileIndex {
 	var b atBuild
-	l := newAtListing(context.Background(), "", func(batch []string) bool { b.add(batch); return true }, false)
+	l := newAtListing(context.Background(), "", func(batch []string) bool { b.add(batch); return true }, nil)
 	for _, p := range paths {
 		if !l.add(p) {
 			break
@@ -422,7 +433,7 @@ func TestAtFilesReadsNULSeparatedPaths(t *testing.T) {
 	var counts []int
 	s := atFileSearcher{read: func(n int) { counts = append(counts, n) }}
 	var kept atKept
-	l := newAtListing(context.Background(), "", kept.emit, false)
+	l := newAtListing(context.Background(), "", kept.emit, nil)
 	capped, err := s.readPaths(&in, l)
 	l.flush()
 	// Each file after the directories it brought.
@@ -1154,7 +1165,7 @@ func TestAtFilesTimeoutStopsTheSearch(t *testing.T) {
 		root := atFlatTree(t, 3*atFilesWalkBatch)
 		clock := newAtClock()
 		s := atSearcherFor(clock, nil, false)
-		held := newAtHeldDirs(t, 2)
+		held := newAtHeldDisk(t, 2)
 		s.openDir = held.open
 		armed, ends := false, make(chan struct{}, 1)
 		s.built = func(n int) {
@@ -1222,7 +1233,7 @@ func TestAtFilesCancelKillsTheSearch(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 		s := atSearcherFor(newAtClock(), nil, false)
-		held := newAtHeldDirs(t, 2)
+		held := newAtHeldDisk(t, 2)
 		s.openDir = held.open
 		cancelled, ends := false, make(chan struct{}, 1)
 		s.built = func(n int) {
@@ -1249,7 +1260,7 @@ func TestAtFilesAnswersWhileTheWalkIsStuck(t *testing.T) {
 	root := atFlatTree(t, 10)
 	clock := newAtClock()
 	s := atSearcherFor(clock, nil, false)
-	held := newAtHeldDirs(t, 1)
+	held := newAtHeldDisk(t, 1)
 	s.openDir = held.open
 	var walked []int
 	ends := make(chan struct{}, 1)
@@ -1271,6 +1282,47 @@ func TestAtFilesAnswersWhileTheWalkIsStuck(t *testing.T) {
 	if !slices.Equal(walked, []int{10}) {
 		t.Fatalf("the walk read %v after its release", walked)
 	}
+}
+
+// A git check held on disk — git's stat of a path, which a stalled mount
+// holds up and no goroutine can be stopped inside (C17r2) — holds no process:
+// at the deadline the search answers (here nothing built, so the red note),
+// the tool is killed, and its own goroutine reaps it at once, while the check
+// is still held — not a zombie until the check returns. Let go, the listing
+// ends, joined here. (The fake git stalls with its output open: only the kill
+// ends it.)
+func TestAtFilesReapsTheToolWhileAGitCheckIsStuck(t *testing.T) {
+	root := atTree(t, "a.go", "b.go")
+	fakes := atFakes(t, map[string]string{"git": atPrintPaths("a.go", "b.go") + "\n" + atStall})
+	clock := newAtClock()
+	s := atSearcherFor(clock, fakes.tools, true)
+	held := newAtHeldDisk(t, 1)
+	s.lstat = held.lstat
+	pids, reaped, hooks := make(chan int, 1), make(chan int, 1), newAtHooks()
+	s.started = func(pid int) { pids <- pid }
+	s.reaped = func(pid int) { reaped <- pid }
+	hooks.hook(&s)
+	ch := make(chan completeLoaded, 1)
+	go func() { ch <- s.search(context.Background(), root) }()
+	pid := atAwait(t, pids, "the tool's start")
+	atAwait(t, held.stuck, "git's first check, held")
+	if !clock.fire() {
+		t.Fatal("the search never armed its timer")
+	}
+	if l := atAwait(t, ch, "the search's answer at its deadline, the check held"); !errors.Is(l.Err, errAtFilesTimeout) {
+		t.Fatalf("answered %v, %T", l.Err, l.Data)
+	}
+	if got := atAwait(t, reaped, "the tool's reaping, the check held"); got != pid {
+		t.Fatalf("reaped pid %d, want %d", got, pid)
+	}
+	atReaped(t, pid)
+	select {
+	case <-hooks.ends:
+		t.Fatal("the listing ended while its check was held")
+	default:
+	}
+	held.free()
+	hooks.joined(t)
 }
 
 // One search per popup opening (§3.16, X122): the listing the first `@`
@@ -1483,7 +1535,7 @@ func BenchmarkAtFilesIndex(b *testing.B) {
 	})
 	b.Run("order at the cap", func(b *testing.B) {
 		var built atBuild
-		l := newAtListing(context.Background(), "", func(batch []string) bool { built.add(batch); return true }, false)
+		l := newAtListing(context.Background(), "", func(batch []string) bool { built.add(batch); return true }, nil)
 		for _, p := range atBenchPaths(atFilesMax, 45000) {
 			if !l.add(p) {
 				break
@@ -1500,7 +1552,7 @@ func BenchmarkAtFilesIndex(b *testing.B) {
 // BenchmarkAtFilesGitChecks is what checking git's listing on disk costs
 // (C17r): atFilesMax files of the benchmark's shape written under a directory,
 // then listed as git's listing is, with each file and each directory stat'ed
-// (atIsFile, atIsDir), and as rg's is, without.
+// (isFile, isDir), and as rg's is, without.
 func BenchmarkAtFilesGitChecks(b *testing.B) {
 	paths := atBenchPaths(atFilesMax, 4000)
 	root := b.TempDir()
@@ -1514,9 +1566,13 @@ func BenchmarkAtFilesGitChecks(b *testing.B) {
 		}
 	}
 	for _, check := range []bool{false, true} {
+		var lstat func(string) (os.FileInfo, error)
+		if check {
+			lstat = os.Lstat
+		}
 		b.Run(fmt.Sprintf("checked=%v", check), func(b *testing.B) {
 			for b.Loop() {
-				l := newAtListing(context.Background(), root, func([]string) bool { return true }, check)
+				l := newAtListing(context.Background(), root, func([]string) bool { return true }, lstat)
 				for _, p := range paths {
 					l.add(p)
 				}
