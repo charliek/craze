@@ -405,9 +405,12 @@ one space: `@internal/tui/app.go `. A path with a space in it is quoted, with
 agent receives: craze expands nothing and attaches nothing — the file's
 contents are not sent with the message.
 
-<!-- PLACEHOLDER (plan 030 C18): what each provider does with `@path`, filled from the live smoke. -->
-What each provider does with the mention: grok reads `@path` and inlines the
-file; cursor and native see the mention and read the file with their tools.
+What happens next is the provider's. **grok** reads the `@path` in the message
+itself and attaches the whole file to what it sends its model — the message
+unchanged, the file's contents beside it — so no tool row appears. **cursor**
+and **native** receive only the text and read the file with their read tool:
+a `✓ read  README.md` row before the reply (native sometimes searches for the
+file first).
 
 ### Where the list comes from
 
@@ -867,6 +870,11 @@ Typed in full, `/provider grok`, `/model gpt-6-sol` and `/model default` (the
 provider's own — a catalog model whose id is `default` is picked from the
 popup) do the same without the popup; a provider the picker does not offer is
 refused on the hint line.
+
+A session started from the list is saved as the last provider started, as any
+launch is (see [Configuration](configuration.md)), so the next `craze` without
+`--provider` preselects its provider in the provider dialog. The list's own
+choice still lasts only until craze quits.
 
 ## Modes
 
