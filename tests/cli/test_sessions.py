@@ -27,12 +27,12 @@ from pathlib import Path
 import pytest
 from conftest import pid_alive, seed_host_idle_exit
 from test_detach import _entries
-from test_tui import PTYCraze
+from test_tui import _ANSI, PTYCraze
 
 WAIT = 10.0
 
 LEFT, UP, DOWN = b"\x1b[D", b"\x1b[A", b"\x1b[B"
-ENTER, CTRL_D, CTRL_S, CTRL_X = b"\r", b"\x04", b"\x13", b"\x18"
+ENTER, ESC, CTRL_D, CTRL_S, CTRL_X = b"\r", b"\x1b", b"\x04", b"\x13", b"\x18"
 
 # The list's state glyphs (§3.10): idle, saved (and ended), unreachable; a
 # working row's is the spinner's current frame.
@@ -356,6 +356,27 @@ def _seed_saved(home: Path, workspace: Path, title: str) -> None:
         f.write(json.dumps(row) + "\n")
 
 
+def _index_row(home: Path, craze_id: str, timeout: float = WAIT) -> dict:
+    """HOME's session index row for the session craze_id names, once there is
+    one, within timeout. A session's first prompt writes it, and the turn's
+    reply can reach the terminal before that write is done. The index is
+    rewritten whole and renamed into place, so a read never sees half of it."""
+    index = home / ".craze" / "sessions.jsonl"
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            lines = index.read_text(encoding="utf-8").splitlines()
+        except FileNotFoundError:
+            lines = []
+        for line in lines:
+            row = json.loads(line)
+            if row.get("crazeId") == craze_id:
+                return row
+        if time.monotonic() >= deadline:
+            raise AssertionError(f"no row for {craze_id} in {index} after {timeout}s: {lines}")
+        time.sleep(0.05)
+
+
 def _open_list(tui: PTYCraze, screen: Screen, what: str, pred: Callable[[list[str]], bool]) -> list[str]:
     """← on the empty composer, and the list once it shows what pred wants."""
     tui.write(LEFT)
@@ -382,7 +403,8 @@ def test_the_list_groups_regroups_cancels_and_closes(craze_bin: Path, fake_agent
     idle one (this terminal's, `· here`) with `○` and its last reply, and
     `▸ saved · 1 not running`; `ctrl+s` groups them by directory and back;
     `ctrl+x` on the working row cancels its turn and clears its queue, so it
-    settles idle and the queued prompt never runs; `ctrl+x` twice on that idle
+    settles idle and the queued prompt can never run -- the next prompt that
+    session is sent is the next its agent reads; `ctrl+x` twice on that idle
     row closes it -- its host exits, its terminal goes back to its own list,
     and its row moves to saved."""
     home = tmp_path
@@ -451,13 +473,28 @@ def test_the_list_groups_regroups_cancels_and_closes(craze_bin: Path, fake_agent
         _wait_screen(
             sb, "bravo's queue cleared", lambda rows: "queued" not in rows[-1] and "cancelled" in "\n".join(rows)
         )
-        # Settled, and staying so: the queue's prompt would have started a
-        # turn that runs until cancelled -- working again, "ack: bravo second"
-        # on its terminal. Past a roster tick and a drain, neither happened.
-        time.sleep(1.5)
-        rows = sa.rows()
-        assert _group(rows, "working") is None, sa.dump()
-        assert "ack: bravo second" not in "\n".join(sb.rows()), sb.dump()
+        # The queued prompt can never start, proven by the agent rather than
+        # by a pause (sol r23-c12 2). Bravo's terminal shows its queue empty,
+        # so the host has said the prompt left it: cleared, or taken -- and a
+        # queued prompt is taken only in the step that starts its turn, a
+        # turn hang-ack never ends. So the next prompt bravo is sent reaches
+        # its agent only if the queued one was cleared: behind a turn of
+        # "bravo second" it would wait, unread, for ever.
+        mark = b.mark()
+        b.write(b"bravo third" + ENTER)
+        b.wait_contains_since("ack: bravo third", mark, timeout=WAIT)
+        assert "ack: bravo second" not in _ANSI.sub("", b.screen()), sb.dump()
+        # That turn cancelled on bravo's own terminal (esc), and bravo idle
+        # again for the close below: its row's last reply is the new turn's.
+        b.write(ESC)
+        _wait_screen(
+            sa,
+            "bravo idle again, after its third prompt",
+            lambda rows: (
+                _group(rows, "working") is None
+                and any("ack: bravo third" in r for r in _group(rows, "idle") or [])
+            ),
+        )
 
         # ctrl+x twice on it, now idle: closed on its host. (The selection
         # stayed on its row as it moved group: it is held by identity.)
@@ -553,6 +590,12 @@ def test_an_unreachable_host_shows_a_question_mark(craze_bin: Path, fake_agent_b
         _prompt(a, "alpha one")
         _prompt(b, "bravo one")
         bravo = _entry(home, home / "bravo")
+        # Bravo's index row before it stops answering (sol r23-c12 3): with
+        # it, a session the list could not reach would be listed saved were
+        # unreachable taken for not running, so "never saved" below is a
+        # claim about the list and not about a row not written yet.
+        indexed = _index_row(home, bravo["crazeSessionId"])
+        assert Path(indexed["cwd"]).resolve() == (home / "bravo").resolve(), indexed
 
         sa = Screen(a)
         with _stopped(bravo["pid"]):

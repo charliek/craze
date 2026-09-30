@@ -3034,8 +3034,11 @@ finding and its disposition):
   `New`, stale replies rejected first), the dial as a `tea.Cmd` whose late
   answer is closed, per-session drafts, the band (`title · provider · dir`,
   `← sessions`), the sub-agent hint `↓ n agents`, and a viewed session's end
-  returning to the list; goldens of an opened session (additions).
-- C12 — saved sessions: `enter` on a saved row resumes it in place (a host
+  returning to the list; goldens of an opened session (additions). C11r
+  (`178b7c2`): a paste, a copy's note or a `!` result never crosses a switch
+  (with an audit of every message kind that reaches `Update`), and the band's
+  title is the row's.
+- C12 (`65388e6`) — saved sessions: `enter` on a saved row resumes it in place (a host
   spawned with `--load` in the row's own workspace, or the holder when it
   runs after all), a row this craze cannot run refused on the hint line;
   `tests/cli/test_sessions.py` (the list in real terminals: groups,
@@ -3253,7 +3256,8 @@ reopens an owner decision. PRs 3–4 add theirs as they land.
     for its `Index`.
 23. **Plan 030 X70, X71, X72 (C9)** — `tui.Sessions`: `Roster()`, `Open`
     (a running session dialled and attached — a stopping host is `Open`'s
-    error, never a failed start; a saved one through the launcher's load),
+    error, never a failed start; a saved one loaded by a host spawned for it,
+    through `openSaved` since C12 and not the launcher's own load, X111),
     `Spawn(SpawnSpec)`, `Stop`. The scale test runs 50 fake hosts in the parent
     and the roster in a child process (CPU from `getrusage`; the 5 % bound not
     asserted under `-race`): 0.8 % of a core, ≤ 11 goroutines above baseline.
@@ -3348,6 +3352,58 @@ reopens an owner decision. PRs 3–4 add theirs as they land.
     roost/herdr shows the previous session's status until the new one is
     ready; quitting while viewing a session whose start failed makes that
     failure craze's exit status.
+33. **Plan 030 X111, X112 (C12; amend X70)** — a resume from the list is not
+    the launcher's load: `Open` of a saved row goes through `openSaved`, not
+    `loadBackend`, whose `--provider` is a filter on a load (it would refuse
+    another provider's row) and whose `--model`, `--ask` and `--plan` are the
+    launch's own; a resume passes the permission mode, `--plugin-dir`,
+    `--no-host-status` and `--agent-bin` (dropped for an in-process
+    provider), and a held row attached to prints no ignored-flags note. A
+    saved row craze cannot run — an unknown or non-resumable provider, a
+    workspace no longer a directory — is refused before any spawn, a
+    `*tui.Refusal` in the host's own words, leaving no host and no log.
+    Residual: a row whose host started serving it meanwhile is refused too
+    if its directory is gone.
+34. **Plan 030 X113, X114 (C12; amend X103)** — the hint line says `resuming
+    <title>…` and `could not resume <title>: <why>`, and drops the
+    launcher's leading `craze: ` from every open failure's note; a switch to
+    a saved session is a load: the status row says `restoring…` until the
+    replay ends, as the resume picker's does, and a held session already up
+    comes up at its first restore.
+35. **Plan 030 X115, X116 (C12)** — test support: the fake agent's
+    `CRAZE_FAKE_SESSION_ID` gives a run its own session id (every fake
+    session was `fake-session-1`, so two sessions in one test HOME were one
+    index row). `test_sessions.py` is four cases reading whole bubbletea
+    frames replayed into a grid (`Screen`); the wait after `SIGCONT` is
+    bounded at the step's bound plus 30 s, the roster's backoff cap; one
+    failure at a 5 % CPU quota (a `Connecting…` row satisfied a "working
+    group" check) was diagnosed and fixed test-side. Residual (an SF row with
+    PR 4's docs): a resume abandoned mid-dial keeps its spawned host until
+    craze quits, when `finish` stops it.
+36. **Plan 030 X117, X118 (C11r)** — the terminal's own results carry the
+    backend generation: a paste, a copy's note and the `!` completion are
+    stamped with `bgen` where they are asked for; a stale paste or note is
+    dropped by the gate, taken out of the held queue at a switch and dropped
+    where it drains; a stale shell completion settles only its own row while
+    the pane it was opened in is shown (plan 022's rule) and is never written
+    as a new row. The stamp is `bgen`, not `sessGen`: a restore of another
+    incarnation moves `sessGen` but keeps the composer and the shell. The
+    audit: every message kind that reaches `Update` is stamped and rejected
+    after a switch, or harmless (the tick and hidden-retry beats, whose live
+    flags carry; `callPanicMsg`; the frame harness's tokens; quits — skills,
+    git, dialogs and the title are synchronous). Residual (an SF row): until
+    a command a switch killed has died (at most ~7 s), the next session's
+    Esc/Ctrl+C go to "kill the command" and `!` is refused.
+37. **Plan 030 X119, X120 (C11r; amend X106)** — the band's title is the
+    row's: one rule, `sessTitle(own, index)` — the session's own title, else
+    the index's, else `new session` — for a running row and the band,
+    `Model.indexTitle` seeded by the row a switch opens it from, refreshed
+    while the list is up and carried by an ended row never listed. Residual:
+    as fresh as the list's last listing (fresher would be a wire change).
+    The switch tests hold each of A's own messages (11 kinds, the start's
+    answers from the real `startCmd` over a held `Start`) through A→B→A and
+    deliver each after A2 is adopted, each dropped; a generation reused on
+    return fails the new test.
 
 ### Live smoke
 

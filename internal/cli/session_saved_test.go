@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -20,12 +21,12 @@ import (
 // end to end: Sessions.Open of a saved ref spawns a host that loads the row —
 // by its craze id, or a legacy row by <provider>:<sessionId> — in the row's
 // own workspace, and the backend it answers is the launch's as any launch's
-// is; two resumes of one legacy row at once end as one host, the other
-// attached to it held; a saved row that is running after all is the
-// holder's, attached to without a spawn; and a row this craze cannot run is
-// refused before anything is spawned. Every host is this test binary run as
-// craze serve with the fake agent, and every wait is bounded on its own
-// (serveStep).
+// is; two resumes of one legacy row at once — forced, both hosts held where
+// they have read the row — end as one host, the other attached to it held; a
+// saved row that is running after all is the holder's, attached to without a
+// spawn; and a row this craze cannot run is refused before anything is
+// spawned. Every host is this test binary run as craze serve with the fake
+// agent, and every wait is bounded on its own (serveStep).
 
 // resumeFlags is launchFlags with the session flags a command line gives its
 // own session — a provider filter, a model — none of which a resume from the
@@ -109,6 +110,41 @@ func TestTheSessionListResumesASavedSession(t *testing.T) {
 	}
 }
 
+// rowGate is a FIFO for cliChildRowGate, gateFIFO's release and letGo with
+// it: the spawned host given it is held there once it has read its load's
+// row, before it gives the row a craze id or claims it.
+type rowGate struct {
+	path           string
+	release, letGo func()
+}
+
+func newRowGate(t *testing.T) rowGate {
+	t.Helper()
+	path, release, letGo := gateFIFO(t)
+	return rowGate{path: path, release: release, letGo: letGo}
+}
+
+// arrived is the row the host held at g read, once it is held there (the
+// row it writes as it gets there), within serveStep.
+func (g rowGate) arrived(t *testing.T) sessions.Row {
+	t.Helper()
+	deadline := time.Now().Add(serveStep)
+	for {
+		b, err := os.ReadFile(g.path + ".row")
+		if err == nil {
+			var row sessions.Row
+			if err := json.Unmarshal(b, &row); err != nil {
+				t.Fatalf("the row a held host read: %v (%q)", err, b)
+			}
+			return row
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("no host was held at %s after %v", g.path, serveStep)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 // TestTheSessionListResumesALegacyRowTwiceAtOnce (§3.18 PR 2: "including two
 // at once"): two Opens of one legacy saved row at the same moment — a legacy
 // row has no craze id for either to find a host by, so both spawn — end as
@@ -116,12 +152,33 @@ func TestTheSessionListResumesASavedSession(t *testing.T) {
 // the row, and the other's host is answered held and exits, its Open attached
 // to the first through the rendezvous. Both backends serve that one session,
 // and the quit keeps it running.
+//
+// The moment is forced (sol r23-c12 1), as
+// TestServeTwoLegacyLoadsAtOnceOneWins forces it in process: each Open's host
+// is held once it has read the row (cliChildRowGate) — each finding it with
+// no craze id — until the other's is held too, and both are let go together,
+// so both race the id's assignment and then the claim. Neither Open can
+// answer before both hosts have read the row: two Opens made one after the
+// other never get past the first's hold.
 func TestTheSessionListResumesALegacyRowTwiceAtOnce(t *testing.T) {
-	env, ws, cmds := launchHome(t, nil)
+	gates := []rowGate{newRowGate(t), newRowGate(t)}
+	env, ws, cmds := launchHome(t, func(n int) []string {
+		if n <= len(gates) {
+			return []string{cliChildRowGate + "=" + gates[n-1].path}
+		}
+		return nil
+	})
 	t.Setenv("CRAZE_FAKE_SCRIPT", "load")
 	row := sessions.Row{SessionID: "legacy-2", Provider: "cursor", CWD: absDir(t.TempDir()), Title: "a legacy one", UpdatedAt: time.Now()}
 	seedIndexRow(t, row)
 	fakeRun(t, func(cfg tui.Config) (tui.Result, error) {
+		// A failing test lets a host still held go before the launch's
+		// finish waits for the Opens.
+		defer func() {
+			for _, g := range gates {
+				g.letGo()
+			}
+		}()
 		type opened struct {
 			b   backend.Backend
 			err error
@@ -132,6 +189,14 @@ func TestTheSessionListResumesALegacyRowTwiceAtOnce(t *testing.T) {
 				b, err := cfg.Sessions.Open(roster.SavedRef(row))
 				results <- opened{b, err}
 			}()
+		}
+		for i, g := range gates {
+			if got := g.arrived(t); got.SessionID != "legacy-2" || got.CrazeID != "" {
+				t.Fatalf("host %d read %+v, want the legacy row with no craze id yet", i+1, got)
+			}
+		}
+		for _, g := range gates {
+			g.release()
 		}
 		var bs []*launchedBackend
 		for range 2 {
