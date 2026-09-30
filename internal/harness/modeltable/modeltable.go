@@ -14,7 +14,10 @@
 // Resolve turns an alias into everything the llm factory needs, key included;
 // SetKey and RemoveKey change one provider's inline key in providers.toml for
 // `craze auth` (keys.go, plan 031 §3.7), the only product code that writes
-// either file; Save writes a whole Table back (test infrastructure).
+// either file; Save writes a whole Table back (test infrastructure). Beside
+// them, recent.json is the model memory (recent.go, plan 031 §3.4): Remember
+// records a switch a session made, and StartModel picks a new session's model
+// and effort from what ReadRecent reads.
 //
 // Both files are decoded strictly: a key the schema does not have is a load
 // error naming the file, the table and the key, because models.toml is edited

@@ -162,6 +162,60 @@ def test_native_prompt_model_flag_resolves_alias(
     assert without_seq(events, events[-1]) == {"type": "done", "stopReason": "end_turn"}
 
 
+def test_native_prompt_reads_the_model_memory_and_never_writes_it(
+    craze_bin: Path, tmp_path: Path, fixture_server: SSEFixture
+) -> None:
+    """Plan 031 §3.4-§3.5, A1: `craze prompt` with no --model starts where a
+    new TUI session would -- on the newest remembered model, at its
+    remembered effort -- and `craze prompt --model X` runs X, at the effort
+    remembered for X when X offers it (P6). Neither run writes recent.json:
+    only a switch made inside a session does."""
+    fixture_server.set_ok(text_parts=["ok"])
+    craze_home = tmp_path / "craze-home"
+    native = craze_home / "native"
+    write_native_config(native, fixture_server.base_url)
+    # A second model on the fixture's provider, with effort control.
+    with (native / "models.toml").open("a", encoding="utf-8") as f:
+        f.write(
+            '\n[models."fixture-effort"]\n'
+            'provider = "fixture"\n'
+            'wire_model = "fixture-effort-wire"\n'
+            'efforts = ["low", "high"]\n'
+            'default_effort = "low"\n'
+        )
+    recent = native / "recent.json"
+    recent.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "recent": [
+                    {
+                        "model": "fixture-effort",
+                        "provider": "fixture",
+                        "wire_model": "fixture-effort-wire",
+                        "effort": "high",
+                        "at": "2026-09-30T10:12:00Z",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    before = recent.read_bytes()
+
+    for args, wire, effort in [
+        ((), "fixture-effort-wire", "high"),  # the memory's model and effort
+        (("--model", "fixture-model"), "fixture-wire-model", None),  # the flag's model, no effort control
+        (("--model", "fixture-effort"), "fixture-effort-wire", "high"),  # the flag's model, the memory's effort
+    ]:
+        proc = run_native(craze_bin, craze_home, tmp_path, *args, "hi")
+        assert proc.returncode == 0, proc.stderr
+        body = fixture_server.requests[-1].body
+        assert body.get("model") == wire, (args, body.get("model"))
+        assert body.get("reasoning_effort") == effort, (args, body.get("reasoning_effort"))
+        assert recent.read_bytes() == before, args
+
+
 def user_contents(request) -> list[str]:
     """Every user message of a recorded request, as text.
 

@@ -23,7 +23,7 @@ flags; see [craze prompt](#craze-prompt).
 | Flag | Description |
 |------|-------------|
 | `--workspace` | Existing workspace directory (default: current directory) |
-| `--model` | Model to start on: an ACP model id, or on `native` a model alias. Native resolves it against every model it knows — shipped or yours, connected or not — and a model whose provider has no key refuses to start, saying how to give it one. It applies to this start only, and is never remembered as a default |
+| `--model` | Model to start on: an ACP model id, or on `native` a model alias. Native resolves it against every model it knows — shipped or yours, connected or not — and a model whose provider has no key refuses to start, saying how to give it one. It applies to this start only, and is never remembered as a default; a new native session takes the effort last picked for that model in a session's `/model`, when the model still offers it ([Model memory](configuration.md#model-memory-recentjson)) |
 | `--agent-bin` | Path to the agent binary (or `CRAZE_AGENT_BIN`) |
 | `--provider` | Provider: `cursor`, `grok`, `gx` (ACP agents) or `native` (runs inside craze). Empty is unset. Unknown id exits 2 |
 | `--force` | Spawn the agent with `--force` / `--always-approve` (yolo). Default: on |
@@ -359,7 +359,7 @@ echo "hello" | ./bin/craze prompt --json
 | Flag | Description |
 |------|-------------|
 | `--workspace` | Existing workspace directory (default: current directory) |
-| `--model` | Model to start on: an ACP model id (`session/set_model` after `session/new`), or a native model alias, resolved as the TUI's `--model` is. Never remembered |
+| `--model` | Model to start on: an ACP model id (`session/set_model` after `session/new`), or a native model alias, resolved as the TUI's `--model` is, at the effort remembered for it. Never remembered. Without it a native run starts where a new TUI session would, on the remembered model ([Model memory](configuration.md#model-memory-recentjson)) |
 | `--agent-bin` | Path to the agent binary (or `CRAZE_AGENT_BIN`) |
 | `--provider` | Provider: `cursor`, `grok`, `gx` (ACP agents) or `native` (runs inside craze) |
 | `--follow-up` | Additional prompt on the same ACP session (repeatable) — the headless queue, see below |

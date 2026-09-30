@@ -600,7 +600,7 @@ api_key = "fw_..."            # an inline key (craze auth login writes this); an
 ```toml
 # models.toml
 version = 1
-default_model = "muse-spark-1.3-contributor"   # optional: the model a session starts on
+default_model = "muse-spark-1.3-contributor"   # optional: where a new session starts when it remembers nothing
 
 [models."fireworks/kimi-k3"]
 default_effort = "max"        # everything else stays as shipped
@@ -743,6 +743,79 @@ The redaction starts at the next turn, so there is a window: a key stored
 during a turn is learned when the next one starts, and a shell command or a
 sub-agent already running keeps the redaction it started with. A sub-agent
 started after the key was learned redacts it.
+
+### Model memory: `recent.json`
+
+A model or effort you pick in a native session's `/model` is remembered for
+the next session, in `recent.json` beside the two files
+(`~/.craze/native/recent.json`, or `$CRAZE_HOME/native/`):
+
+```json
+{
+  "version": 1,
+  "recent": [
+    {
+      "model": "muse-spark-1.3-contributor",
+      "provider": "meta",
+      "wire_model": "muse-spark-1.3-contributor",
+      "effort": "xhigh",
+      "at": "2026-09-30T10:12:00Z"
+    }
+  ]
+}
+```
+
+The list is newest first, one entry per model, and keeps at most 10. Each
+entry names the model by alias and by its provider and wire model, with the
+effort last used on it (`""` for a model with no effort control) and when it
+was picked (`at`, in UTC, for people reading the file). The file is `0600`.
+Deleting it forgets everything.
+
+**Who writes it.** Only a switch made inside a running session — `/model`, the
+model dialog, or an attached client's switch — once the switch has taken,
+recording the model and the effort the session is then on. `--model`, `craze
+prompt`, a resume and a sub-agent's model never write it. A session reads it
+once, when it starts: a switch changes where the next session starts, not the
+running one.
+
+**Two sessions at once.** Every write reads, changes and replaces the file
+under a lock beside it, `recent.json.lock`, so two sessions switching at the
+same moment both keep their choice. A switch waits at most 2 seconds for
+another craze's lock. When the choice cannot be saved — the lock stayed busy,
+the file cannot be read or written, or a newer craze wrote it — the session
+says so in one note (`not saving the model choice: …`) and the switch itself
+stands.
+
+**Reading never stops a session.** A missing file, one craze cannot read, and
+one that is not a `recent.json` (not JSON, or a version craze does not know)
+are no memory at all. The next switch replaces a file that is not a
+`recent.json`, and leaves alone one it cannot read or one a newer craze wrote.
+
+**Where a new session starts.** With no `--model`, a new native session starts
+on the first of:
+
+1. the newest remembered model whose provider has a key, at its remembered
+   effort when the model still offers it (its `default_effort` otherwise);
+2. `default_model`;
+3. when `default_model`'s provider has no key, the first model, by alias, whose
+   provider has one — with a note saying so.
+
+A remembered model is found by its alias while that alias still names the
+same provider and wire model, and otherwise by its provider and wire model,
+under whatever alias has them now: a release that renames a model keeps your
+choice, and an alias pointed at a different model does not inherit it. An
+entry no model matches, or whose provider has no key, is passed over and left
+in the file.
+
+- `--model <alias>` (the TUI's and `craze prompt`'s) starts on that model at the
+  effort remembered for it, when the model still offers it, and writes
+  nothing.
+- `craze prompt` without `--model` starts where a new TUI session would.
+- A resume (`craze -c`, `--resume`) keeps its transcript's model and effort,
+  and an explicit `--model` on a resume picks the model with the transcript's
+  effort carried over: the memory never applies to a resume. A resumed session
+  that turns out to have no transcript at all opens as a new one, and starts as
+  above.
 
 ### Isolated setups: `catalog = false`
 

@@ -157,6 +157,24 @@ The title is kept, and — native sessions being indexed now —
 provider's. A session that compacted at some point replays those notes in
 place too; see [Compaction](#compaction).
 
+#### Which model a session starts on
+
+A **new** native session starts where you left off: a model or effort picked
+in any native session's [`/model`](#model-dialog) is remembered, and the next
+session with no `--model` starts on the newest remembered model whose provider
+has a key, at the effort last used on it. With no remembered model it can use,
+it starts on the model table's default, and if that has no key, on the first
+model that has one, with a note. `--model` picks the model for one start — at
+the effort remembered for that model — and is never remembered itself. A
+resume is never moved by the memory: it keeps its transcript's model and
+effort, as above.
+
+The memory is read once, when the session starts, so a switch changes where
+the *next* session starts, not what the running one offers. It lives in
+`recent.json` beside the model files; see [Model
+memory](configuration.md#model-memory-recentjson) for the file, who writes it,
+and what happens when two sessions switch at once.
+
 #### What the model is told
 
 Native's system prompt is craze's own text: no sentence is reproduced whole
