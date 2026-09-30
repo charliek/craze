@@ -110,26 +110,33 @@ func TestTextFormSummarizerCarriesTheDefaultCeiling(t *testing.T) {
 
 // The reserves are computed from the ceiling that is sent: a table model with
 // no max_output_tokens reserves the default (held to a quarter of a small
-// window), and an explicit one is reserved as it is.
+// window), and an explicit one is reserved as it is. The turn's own request
+// carries the same number the threshold and the text-form budget subtract.
 func TestReservesFollowTheDefaultCeiling(t *testing.T) {
 	for _, tc := range []struct {
 		name           string
 		window, maxOut int
+		ceiling        int64 // sent, and reserved
 		threshold      int64 // at 85%
 		textBudget     int64
 	}{
-		{"100k window, none: a quarter", 100_000, 0, 75_000, 70_000 - 25_000},
-		{"1M window, none: 85% unchanged", 1_048_576, 0, 1_048_576 * 85 / 100, 1_048_576*70/100 - 32_000},
-		{"1M window, explicit 4096", 1_048_576, 4096, 1_048_576 * 85 / 100, 1_048_576*70/100 - 4096},
-		{"100k window, explicit 4096", 100_000, 4096, 85_000, 70_000 - 4096},
+		{"100k window, none: a quarter", 100_000, 0, 25_000, 75_000, 70_000 - 25_000},
+		{"1M window, none: 85% unchanged", 1_048_576, 0, 32_000, 1_048_576 * 85 / 100, 1_048_576*70/100 - 32_000},
+		{"1M window, explicit 4096", 1_048_576, 4096, 4096, 1_048_576 * 85 / 100, 1_048_576*70/100 - 4096},
+		{"100k window, explicit 4096", 100_000, 4096, 4096, 85_000, 70_000 - 4096},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newFixture(t, "http://unused")
 			windowed(f, "test/a", tc.window, tc.maxOut)
-			r, err := f.table.Resolve("test/a", f.getenv)
-			if err != nil {
-				t.Fatal(err)
+			s := f.open(f.options())
+			a := f.models["test/a"]
+			a.push(answerWith("ok"))
+			run(t, s, "hi")
+			call := a.requests()[0]
+			if call.MaxOutputTokens == nil || *call.MaxOutputTokens != tc.ceiling {
+				t.Errorf("the turn's ceiling = %v, want %d", call.MaxOutputTokens, tc.ceiling)
 			}
+			r := s.cur.r
 			if got := compactionThreshold(r, 85); got != tc.threshold {
 				t.Errorf("compactionThreshold = %d, want %d", got, tc.threshold)
 			}

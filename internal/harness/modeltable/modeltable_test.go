@@ -1124,6 +1124,7 @@ func TestResolveOutputCeiling(t *testing.T) {
 		{"none, 1M window", 1048576, 0, 32000},
 		{"none, 128k window", 128000, 0, 32000},
 		{"none, 64k window", 64000, 0, 16000},
+		{"none, a window too small for a quarter", 3, 0, 1},
 		{"explicit", 0, 4096, 4096},
 		{"explicit above the default", 0, 131072, 131072},
 		{"explicit on a small window", 8000, 6000, 6000},
@@ -1148,8 +1149,9 @@ func TestResolveOutputCeiling(t *testing.T) {
 	}
 }
 
-// The default is never written to models.toml: a load, resolve and save of an
-// entry with no max_output_tokens leaves the key out.
+// The default is never written to models.toml: saving a table whose entry has
+// no max_output_tokens, after a Resolve of it, leaves the key out, and the
+// entry loads back without one.
 func TestDefaultCeilingNeverReachesTheFile(t *testing.T) {
 	tbl := validTable()
 	setModel(tbl, "fireworks/kimi-k3", func(m *Model) { m.MaxOutputTokens = 0 })

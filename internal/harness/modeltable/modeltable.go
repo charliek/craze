@@ -973,13 +973,14 @@ const DefaultMaxOutputTokens = 32000
 // request, and would turn off automatic compaction, which compactionThreshold
 // skips when the ceiling takes the window. A quarter keeps that threshold at
 // 75% on a small window and leaves every window of 128,000 tokens or more at
-// the full default.
+// the full default. It is never under 1, so every request names a ceiling,
+// even on a window too small for a quarter of it to be a whole token.
 func outputCeiling(m Model) int {
 	if m.MaxOutputTokens > 0 {
 		return m.MaxOutputTokens
 	}
 	if m.ContextWindow > 0 {
-		return min(DefaultMaxOutputTokens, m.ContextWindow/4)
+		return max(min(DefaultMaxOutputTokens, m.ContextWindow/4), 1)
 	}
 	return DefaultMaxOutputTokens
 }

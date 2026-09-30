@@ -35,7 +35,10 @@ func windowed(f *fixture, alias string, window, maxOut int) {
 // setWindow gives the model s's next turn runs on a context window and an
 // output ceiling, as a table entry would: for a test that sizes the window
 // by the session's own system prompt and tools, which it knows only once the
-// session is open.
+// session is open. It edits the resolved model directly, so a maxOut of 0 is
+// a synthetic model with no ceiling at all, which Resolve never produces
+// since D-74 (it supplies a default): the tests that pass 0 are about the
+// threshold rule, not the default.
 func setWindow(s *Session, window, maxOut int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
