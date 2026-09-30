@@ -912,6 +912,9 @@ func RunFrameScript(cfg Config, cols, rows int, script string, opts FrameOpts) (
 	bus := newFrameBus(print)
 
 	m := New(cfg)
+	// The backend the run starts over: a socket run's session to its host,
+	// until a switch to another session (plan 030 §3.11) replaces it.
+	served := m.owner.current()
 	m.frozen = opts.Freeze
 	m.frameStart = start
 	// Always set from the options, never left to New: a test binary's default
@@ -961,6 +964,11 @@ func RunFrameScript(cfg Config, cols, rows int, script string, opts FrameOpts) (
 		if eng := m.owner.current(); eng != nil {
 			_ = eng.Close()
 		}
+		// A backend a switch let go of whose close the program stopped
+		// before it ran, and a list's roster left open, as finishRun closes
+		// them (plan 030 §3.11).
+		m.retired.closeAll()
+		m.sessRosters.closeAll()
 	}
 	shutdown := func() error {
 		bus.finish()
@@ -1003,16 +1011,20 @@ func RunFrameScript(cfg Config, cols, rows int, script string, opts FrameOpts) (
 		//
 		// Over the socket the boundary is the host's engine's head: the model's
 		// backend is a remote session, with no engine behind it in this
-		// process.
+		// process — while it is: a script that opened another session in
+		// place (plan 030 §3.11) left the host's session for a backend of
+		// its own (an in-process one, in the tests' session list), whose head
+		// is the boundary, and whose fold is no longer the host's to check.
+		onHost := host != nil && m.owner.current() == served
 		head := func() (uint64, error) { return streamHead(m.owner, timeout) }
-		if host != nil {
+		if onHost {
 			head = func() (uint64, error) { return host.head(timeout) }
 		}
 		scriptErr = r.settleAt(head)
 		if scriptErr == nil && opts.beforeQuit != nil {
 			opts.beforeQuit(p.Send, bus.last)
 		}
-		if scriptErr == nil && host != nil {
+		if scriptErr == nil && onHost {
 			scriptErr = r.captureThenMatch(host)
 		}
 	}

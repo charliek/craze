@@ -240,7 +240,7 @@ func (m Model) confirmResume(row sessions.Row) (tea.Model, tea.Cmd) {
 	// Init's batch, as confirmProvider returns it; the read it arms is the one
 	// the command gate's reader rule counts (readOn).
 	m.reading = m.eng != nil
-	return m, tea.Batch(m.startCmd(), waitEvent(m.eng))
+	return m, tea.Batch(m.startCmd(), waitEvent(m.eng, m.bgen))
 }
 
 func (m Model) handleResumeDialogKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {

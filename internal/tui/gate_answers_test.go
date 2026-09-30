@@ -831,38 +831,60 @@ func TestAStaleSettingsReplyIsDroppedAfterARestore(t *testing.T) {
 	}
 }
 
-// TestAGateReplyFromAnotherSessionRunsNoContinuation: a gated call's reply
-// carries the generation too. One for a session the model has since left —
-// PR 4's restore from another incarnation, which moves the generation while a
-// gate may be open; in process a session changes only in a picker's Update —
-// releases its gate without running the continuation, and what the gate held
-// drains as ever.
-func TestAGateReplyFromAnotherSessionRunsNoContinuation(t *testing.T) {
+// TestAGateReplyFromAnotherSessionIsRejectedFirst (plan 030 §3.11, R2-5): a
+// gated call's reply carries the session generation it was issued under, and
+// the gate turns one for a session the model has left away before any of its
+// bookkeeping — even one naming the gate that is open: it releases nothing,
+// runs no continuation, acknowledges no pending sync token and owes no drain.
+// (Before C11 such a reply released the open gate without its continuation,
+// on the premise that a restore from another incarnation could move the
+// generation under an open gate. A restore is held behind the gate (C27), a
+// switch leaves no gate open and gate ids are never reused, so nothing moves
+// the generation while a gate is open; the order is fixed so that a stale
+// reply can never be the one that releases a session's gate.) The open gate's
+// own, current reply then releases it, and what it held drains.
+func TestAGateReplyFromAnotherSessionIsRejectedFirst(t *testing.T) {
 	m, _ := gatedModel(t)
 	r := newGateRig(t, m)
 	release := make(chan struct{})
 	r.send(gateOpMsg{call: blockedCall(release, "stale"), cont: noteCont("continued")})
 	g := r.m.gate
-	// A restore changes the model while the gate is open — what PR 4's does
-	// to the gate is C27's; here the invisibility watch is told to expect it.
 	broke := gateWatch.expectBreak(g)
 	t.Cleanup(func() { gateWatch.forget(g) })
+	r.send(frameSyncMsg{n: 9})
 	r.send(runeKey('x'))
-	// A restore from another incarnation, standing in for PR 4's.
+	if r.m.syncPending != 9 || len(r.m.held) != 1 {
+		t.Fatalf("fixture: pending token %d, %d held", r.m.syncPending, len(r.m.held))
+	}
+	// The session generation moves under the open gate: standing in for the
+	// session the call was issued for having been left.
 	r.m.sessGen++
 	close(release)
-	rep := r.answer()
+	if len(r.calls) != 1 {
+		t.Fatalf("%d gated calls outstanding, want the one", len(r.calls))
+	}
+	rep, ok := runWatched(t, r.calls[0]).(gateReply)
+	r.calls = r.calls[1:]
+	if !ok || rep.id != g.id || rep.issuedUnder() == r.m.sessGen {
+		t.Fatalf("fixture: the reply %+v is not the open gate's, issued under the old generation", rep)
+	}
+	r.send(rep)
+	switch {
+	case r.m.gate != g:
+		t.Fatal("a reply issued for another session released the open gate")
+	case slices.ContainsFunc(texts(r.m, entryNote), func(n string) bool { return strings.HasPrefix(n, "continued") }):
+		t.Fatalf("a reply issued for another session ran its continuation: notes %q", texts(r.m, entryNote))
+	case r.drains != 0 || r.m.syncAck == 9 || r.m.syncPending != 9 || len(r.m.held) != 1:
+		t.Fatalf("a reply issued for another session moved the gate's bookkeeping: %d drains, ack %d, pending %d, %d held",
+			r.drains, r.m.syncAck, r.m.syncPending, len(r.m.held))
+	}
+	// The open gate's own reply, issued for the session the model holds.
+	r.send(gateReply{issued: r.m.issue(), id: g.id, result: "current"})
+	if r.m.gate != nil || !slices.Contains(texts(r.m, entryNote), "continued: current <nil>") || r.m.syncAck != 9 {
+		t.Fatalf("the current reply: gate %v, notes %q, ack %d", r.m.gate, texts(r.m, entryNote), r.m.syncAck)
+	}
 	if !slices.Equal(broke.fields, []string{"sessGen"}) {
 		t.Fatalf("the watch saw %v move, want the generation alone", broke.fields)
-	}
-	if rep.issuedUnder() == r.m.sessGen {
-		t.Fatal("the reply carries the new generation")
-	}
-	if r.m.gate != nil {
-		t.Fatal("a stale reply left its gate open")
-	}
-	if slices.ContainsFunc(texts(r.m, entryNote), func(n string) bool { return strings.HasPrefix(n, "continued") }) {
-		t.Fatalf("a stale reply ran its continuation: notes %q", texts(r.m, entryNote))
 	}
 	r.drainAll()
 	if r.m.input.Value() != "x" || len(r.m.held) != 0 {

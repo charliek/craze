@@ -64,10 +64,13 @@ def test_attach_joins_the_session_and_its_quit_follows_the_host(
     """The attach TUI shows the host's transcript and a prompt typed in it
     reaches the session and shows in both. Quitting it then depends on the
     host (plan 030 decision 11, §3.6): a detached host advertises `stop`, so
-    the quit ends the session -- both TUIs exit 0 and the host is gone. The
-    opt-out's TUI-hosted socket has no `stop`; there the quit is a view close
-    that says why (`that session runs in an older craze`) and the host goes on
-    taking prompts."""
+    the quit ends the session and the host is gone -- the attach exits 0, and
+    the launching TUI, which has a session list, goes back to it saying the
+    session ended (§3.10: a viewed session that ends returns to the list), and
+    quits from there, exit 0, with `craze: session ended`. The opt-out's
+    TUI-hosted socket has no `stop`; there the quit is a view close that says
+    why (`that session runs in an older craze`) and the host goes on taking
+    prompts."""
     with _host(craze_bin, fake_agent_bin, tmp_path, tmp_path) as host:
         host.wait_contains("cursor")
         host.write(b"from the host\r")
@@ -86,11 +89,14 @@ def test_attach_joins_the_session_and_its_quit_follows_the_host(
             assert "session ended" not in text
 
             if both_modes == "detached":
-                # The stop ended the session under the host's own TUI too.
-                assert host.wait_exit(timeout=WAIT) == 0, host.screen()[-3000:]
-                _wait_output(host, "craze: session ended")
+                # The stop ended the session under the launching TUI too: it
+                # goes back to its session list, and craze keeps running.
+                host.wait_contains_since("that session ended", host_mark, timeout=WAIT)
+                assert host.proc.poll() is None, host.screen()[-3000:]
                 assert "older craze" not in text, text[-3000:]
                 _wait_gone(tmp_path / ".cache" / "craze" / "hosts")
+                quit_craze(host)
+                _wait_output(host, "craze: session ended")
             else:
                 assert "craze: that session runs in an older craze; close it there" in text, text[-3000:]
                 host_mark = host.mark()

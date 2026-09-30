@@ -29,7 +29,9 @@ import (
 // session list's frames (plan 030 §3.10, §3.17, sessions-*), direct-Update
 // frames of the client's own screen against a fake Config.Sessions — the
 // list is drawn from the roster, never from the session's stream, so there
-// is no transport to vary.
+// is no transport to vary. A session opened from the list in place
+// (sessions-opened-*, §3.11) runs under both: its script starts on either
+// transport, and the session it opens is the fake list's own.
 //
 // It is held four ways:
 //
@@ -164,6 +166,8 @@ var goldenManifest = map[string]goldenRuns{
 	"sessions-dirs-80x24":                    inprocOnly,
 	"sessions-empty-80x24":                   inprocOnly,
 	"sessions-older-host-100x30":             inprocOnly,
+	"sessions-opened-100x30":                 bothTransports,
+	"sessions-opened-80x24":                  bothTransports,
 	"sessions-saved-100x30":                  inprocOnly,
 	"sessions-saved-80x24":                   inprocOnly,
 	"sessions-unreachable-80x24":             inprocOnly,
@@ -448,8 +452,9 @@ func transportList(set map[frameTransport]bool) string {
 
 // TestTheGoldenManifestIsEveryGolden (astra 31): the manifest lists every
 // golden file in testdata/ and no file that is not there, with the counts A8
-// states — 113 goldens in process and over the socket, the six picker frames,
-// plan 030's restore-failed and its ten session-list frames in process only.
+// states — 115 goldens in process and over the socket (plan 030's two opened
+// sessions among them), the six picker frames, plan 030's restore-failed and
+// its ten session-list frames in process only.
 func TestTheGoldenManifestIsEveryGolden(t *testing.T) {
 	files, err := filepath.Glob(filepath.Join("testdata", "*.golden"))
 	if err != nil {
@@ -477,8 +482,8 @@ func TestTheGoldenManifestIsEveryGolden(t *testing.T) {
 			t.Errorf("the manifest runs %s under %v: a golden runs under both transports, or in process alone", name, runs)
 		}
 	}
-	if both != 113 || inprocAlone != 17 {
-		t.Errorf("the manifest lists %d goldens under both transports and %d in process alone, want 113 and 17 (A8)", both, inprocAlone)
+	if both != 115 || inprocAlone != 17 {
+		t.Errorf("the manifest lists %d goldens under both transports and %d in process alone, want 115 and 17 (A8)", both, inprocAlone)
 	}
 }
 

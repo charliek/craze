@@ -36,11 +36,13 @@ import (
 // restoreMsg is the stream's Restore (backend.ItemRestore): the snapshot the
 // model is initialised from, the session's facts as the attach reply carried
 // them (the backend's Info already holds them), and the stream generation it
-// opens.
+// opens. bgen, on it and on readyMsg and endMsg alike, is the backend
+// generation it was read under (Model.bgen, staleBackend).
 type restoreMsg struct {
 	info backend.SessionInfo
 	snap *transcript.Snapshot
 	gen  uint64
+	bgen uint64
 }
 
 // readyMsg is the stream's Ready (backend.ItemReady): the host's start has
@@ -49,12 +51,16 @@ type restoreMsg struct {
 type readyMsg struct {
 	info backend.SessionInfo
 	err  error
+	bgen uint64
 }
 
 // endMsg is the stream's End (backend.ItemEnd): nothing more will come. err is
 // why — nil for the session's own end on its host, the transport's failure
 // otherwise.
-type endMsg struct{ err error }
+type endMsg struct {
+	err  error
+	bgen uint64
+}
 
 // reloadedNote is the one local row a restore draws, after every restore but
 // the first: what the screen showed was replaced by the session's own account.

@@ -31,14 +31,17 @@ import (
 // behind the list ending without quitting craze.
 
 // fakeSessions is Config.Sessions for a test: each Roster is a fakeRoster the
-// test feeds, and Cancel and Stop record what they were asked.
+// test feeds, and Open, Cancel and Stop record what they were asked. Open
+// answers what open says — an error when the test gives it none.
 type fakeSessions struct {
 	mu        sync.Mutex
 	rosters   []*fakeRoster
+	opens     []roster.Ref
 	cancels   []roster.Ref
 	stops     []roster.Ref
 	cancelErr error
 	stopErr   error
+	open      func(roster.Ref) (backend.Backend, error)
 }
 
 var _ Sessions = (*fakeSessions)(nil)
@@ -51,8 +54,22 @@ func (f *fakeSessions) Roster() SessionRoster {
 	return r
 }
 
-func (f *fakeSessions) Open(roster.Ref) (backend.Backend, error) {
-	return nil, errors.New("fakeSessions: Open is C11's")
+func (f *fakeSessions) Open(ref roster.Ref) (backend.Backend, error) {
+	f.mu.Lock()
+	f.opens = append(f.opens, ref)
+	open := f.open
+	f.mu.Unlock()
+	if open == nil {
+		return nil, errors.New("fakeSessions: no session to open")
+	}
+	return open(ref)
+}
+
+// opened is the refs Open was asked for, in order.
+func (f *fakeSessions) opened() []roster.Ref {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return slices.Clone(f.opens)
 }
 
 func (f *fakeSessions) Spawn(SpawnSpec) (roster.Ref, error) {
@@ -763,14 +780,36 @@ func TestSessionsListWhenTheSessionBehindItEnds(t *testing.T) {
 }
 
 // TestSessionsEnterOpensTheSessionBehind: enter on the session the list came
-// from goes back to it; on another the note says C11's switch is to come.
+// from goes back to it; on another running session → opens it (plan 030
+// §3.11, C11): the list stays up while the open dials, and says what it is
+// opening; a host that does not answer is said not to, and a saved row's
+// resume is the next commit's.
 func TestSessionsEnterOpensTheSessionBehind(t *testing.T) {
-	m, _, _ := sessModel(t, 100, 30)
+	m, fs, _ := sessModel(t, 100, 30)
 	m = richList(t, m)
 	other := selectKey(t, m, runKey("pty"))
-	other, _ = press(other, tea.KeyMsg{Type: tea.KeyRight})
-	if !other.sessList.open || !strings.Contains(plainView(other), sessOpenLater) {
+	other, cmd := press(other, tea.KeyMsg{Type: tea.KeyRight})
+	if !other.sessList.open || other.sessList.dialing == 0 || !strings.Contains(plainView(other), "opening triage the flaky pty test…") {
 		t.Fatalf("→ on another session:\n%s", plainView(other))
+	}
+	if len(namedCmds(cmd, "sessOpen")) != 1 {
+		t.Fatal("→ on another session asked for no open")
+	}
+	runCmd(cmd)
+	if got := fs.opened(); len(got) != 1 || got[0].Host.ID != "host-pty" {
+		t.Fatalf("Open was asked for %+v, want the pty session's host", got)
+	}
+	for key, note := range map[sessKey]string{runKey("prox"): sessUnreachNote, {id: "\x00saved:wrap"}: sessOpenLater} {
+		on := m
+		if key.id == "\x00saved:wrap" {
+			on = selectKey(t, on, sessSavedLine)
+			on, _ = press(on, enter())
+		}
+		on = selectKey(t, on, key)
+		on, cmd := press(on, enter())
+		if !on.sessList.open || on.sessList.note != note || on.sessList.dialing != 0 || cmd != nil {
+			t.Fatalf("enter on %+v: open %v, note %q, dialing %d", key, on.sessList.open, on.sessList.note, on.sessList.dialing)
+		}
 	}
 	back, _ := press(m, enter())
 	if back.sessList.open {
@@ -933,8 +972,8 @@ func TestSessionsEndedRowOutlivesItsHost(t *testing.T) {
 // list is its craze id and incarnation, never the id alone. Another
 // incarnation of the same craze id — listed beside it, or once it has ended
 // and its host has gone — is an ordinary row: not "here", not ended, and
-// enter on it is another session's (C11 opens it in place), never the way
-// back to the session behind the list; the ended row stays that session's.
+// enter on it opens it as another session (C11), never the way back to the
+// session behind the list; the ended row stays that session's.
 // A list opened before its session was named takes the name from the next
 // snapshot.
 func TestSessionsHereIsAnIncarnation(t *testing.T) {
@@ -957,8 +996,9 @@ func TestSessionsHereIsAnIncarnation(t *testing.T) {
 	}
 	onOther := selectKey(t, m, other)
 	onOther, _ = press(onOther, enter())
-	if !onOther.sessList.open || onOther.sessList.note != sessOpenLater {
-		t.Fatalf("enter on another incarnation: open %v, note %q", onOther.sessList.open, onOther.sessList.note)
+	if !onOther.sessList.open || onOther.sessList.dialing == 0 || onOther.sessList.dialTitle != "write the release notes" {
+		t.Fatalf("enter on another incarnation: open %v, dialing %d (%q) — want it opened as another session",
+			onOther.sessList.open, onOther.sessList.dialing, onOther.sessList.dialTitle)
 	}
 
 	m = applyMsg(t, m, endMsg{})
@@ -974,8 +1014,8 @@ func TestSessionsHereIsAnIncarnation(t *testing.T) {
 		t.Fatalf("the hint on another incarnation: %q", hint)
 	}
 	onOther, _ = press(onOther, enter())
-	if onOther.sessList.note != sessOpenLater {
-		t.Fatalf("enter on another incarnation after the end: note %q", onOther.sessList.note)
+	if onOther.sessList.dialing == 0 || onOther.sessList.note == sessEndedNote {
+		t.Fatalf("enter on another incarnation after the end: dialing %d, note %q", onOther.sessList.dialing, onOther.sessList.note)
 	}
 	onEnded := selectKey(t, m, here)
 	onEnded, _ = press(onEnded, enter())

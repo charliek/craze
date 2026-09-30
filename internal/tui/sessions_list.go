@@ -59,7 +59,7 @@ const (
 	sessEmptyNote   = "No other sessions."
 	sessEndedNote   = "that session ended"
 	sessUntitled    = "new session"
-	sessOpenLater   = "opening another session in place is not built yet"
+	sessOpenLater   = "opening a saved session is not built yet"
 	sessUnreachNote = "that session is not answering"
 	sessOlderNote   = "that session runs in an older craze; close it there"
 )
@@ -117,6 +117,15 @@ type sessListState struct {
 	// session behind having ended — until the next key.
 	note     string
 	noteKind sessNoteKind
+	// dialSeq stamps each open this opening of the list asks for (enter on a
+	// running row, plan 030 §3.11), and dialing is the one it waits for (0
+	// for none), dialTitle that row's title for the hint line. An answer for
+	// any other — an earlier open the user replaced with a later one, an open
+	// from an opening of the list since left (gen) — is closed, never
+	// adopted (sessOpened).
+	dialSeq   uint64
+	dialing   uint64
+	dialTitle string
 }
 
 // sessKey is a line's identity: a running session by its craze id and
@@ -223,6 +232,17 @@ type sessDisarmMsg struct {
 // Ctrl+C window that has closed.
 type sessRedrawMsg struct{ gen uint64 }
 
+// sessOpenedMsg is an open's answer (Sessions.Open): the backend of the
+// session the row names, or why there is none. gen and seq are the opening
+// of the list and the open it was asked for under (sessListState.dialSeq);
+// title is the row's, for the note a failure leaves.
+type sessOpenedMsg struct {
+	gen, seq uint64
+	title    string
+	b        backend.Backend
+	err      error
+}
+
 // ------------------------------------------------------------ open & close
 
 // openSessions opens the list (plan 030 §3.10): the roster starts polling,
@@ -237,6 +257,9 @@ func (m Model) openSessions() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	m.sessRosters.add(r)
+	// From here on every session's frame carries the band — which session it
+	// is and the way back to the list (band.go, plan 030 §3.11).
+	m.bandOn = true
 	here := m.hereKey()
 	home, _ := os.UserHomeDir()
 	m.sessList = sessListState{
@@ -268,7 +291,8 @@ func (m Model) hereKey() sessKey {
 // leaveSessions is esc and ← (and enter on the session's own row): back to
 // the session behind the list, whose roster is closed on the way. A session
 // that ended while the list was up has nothing to go back to: the list
-// stays, and says so.
+// stays, and says so. An open still dialling is abandoned: its answer is
+// closed when it lands (sessOpened).
 func (m Model) leaveSessions() (tea.Model, tea.Cmd) {
 	if m.sessList.hereEnded {
 		m.sessNote(sessEndedNote, sessNoteWarn)
@@ -278,6 +302,28 @@ func (m Model) leaveSessions() (tea.Model, tea.Cmd) {
 	m.sessList = sessListState{gen: m.sessList.gen, byDir: m.sessList.byDir}
 	m.ctrlCDeadline = time.Time{}
 	return m, m.sessRosters.closeCmd(r)
+}
+
+// endedToList is the session the model shows ending while the list is not
+// up (plan 030 §3.10, "a viewed session that ends"): the TUI goes back to the
+// list rather than to the shell, the session's row marked ended — as one
+// that ends behind the list is (sessionEnded) — and the hint line says so,
+// with the transport's failure when that is what ended it. false when no
+// list can be opened (a Sessions with no roster): the caller quits, as
+// without a list.
+func (m Model) endedToList(err error) (Model, tea.Cmd, bool) {
+	tm, cmd := m.openSessions()
+	next := tm.(Model)
+	if !next.sessList.open {
+		return m, nil, false
+	}
+	next.sessionEnded()
+	note := sessEndedNote
+	if err != nil {
+		note += ": " + sanitizeLine(failureText(err))
+	}
+	next.sessNote(note, sessNoteWarn)
+	return next, cmd, true
 }
 
 // sessQuit is Ctrl+D, or the second Ctrl+C, on the list: craze quits and
@@ -402,8 +448,34 @@ func (m Model) applySessMsg(msg tea.Msg) (Model, tea.Cmd, bool) {
 		return m, nil, true
 	case sessRedrawMsg:
 		return m, nil, true
+	case sessOpenedMsg:
+		next, cmd := m.sessOpened(msg)
+		return next, cmd, true
 	}
 	return m, nil, false
+}
+
+// sessOpened is an open's answer (plan 030 §3.11). Only the open the list is
+// waiting for, in the opening it was asked in, while craze is not quitting,
+// is acted on: an answer after the user has moved on — a later open asked
+// for, the list left (and perhaps opened again), a quit — is closed off the
+// Update and never adopted (retire). A failure is the hint line's; a backend
+// is switched to (switchBackend).
+func (m Model) sessOpened(msg sessOpenedMsg) (Model, tea.Cmd) {
+	l := &m.sessList
+	if !l.open || msg.gen != l.gen || msg.seq != l.dialing || m.quitting {
+		return m, m.retire(msg.b)
+	}
+	l.dialing, l.dialTitle = 0, ""
+	if msg.err != nil || msg.b == nil {
+		err := msg.err
+		if err == nil {
+			err = errors.New("no session")
+		}
+		m.sessNote("could not open "+msg.title+": "+sanitizeLine(failureText(err)), sessNoteErr)
+		return m, m.retire(msg.b)
+	}
+	return m.switchBackend(msg.b)
 }
 
 // sessActionDone is a ctrl+x's answer, on the hint line.
@@ -538,9 +610,10 @@ func (m Model) handleSessionsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 // sessEnter is enter and → on the selected line: the saved group's line
 // expands or collapses it; the session the list was opened from is the
-// screen behind the list, so opening it is going back; any other session
-// is opened in place — plan 030 §3.11's switch, which the next commit
-// builds (C11); until then the hint line says so.
+// screen behind the list, so opening it is going back; any other running
+// session is opened in place (plan 030 §3.11: sessOpen). A host that does not
+// answer is said not to, without a dial; a saved session's resume is the
+// next commit's (§3.12), and the hint line says so until then.
 func (m Model) sessEnter() (tea.Model, tea.Cmd) {
 	if m.sessList.sel == sessSavedLine {
 		m.sessList.savedOpen = !m.sessList.savedOpen
@@ -548,14 +621,35 @@ func (m Model) sessEnter() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	r, ok := m.sessSelected()
-	if !ok {
+	switch {
+	case !ok:
+		return m, nil
+	case r.here:
+		return m.leaveSessions()
+	case r.saved:
+		m.sessNote(sessOpenLater, sessNoteWarn)
+		return m, nil
+	case r.state == sessUnreachable:
+		m.sessNote(sessUnreachNote, sessNoteWarn)
 		return m, nil
 	}
-	if r.here {
-		return m.leaveSessions()
+	return m.sessOpen(r)
+}
+
+// sessOpen dials r's session off the Update (Sessions.Open may take seconds:
+// a dial and an attach) and waits for that open alone: a later one replaces
+// it, and leaving the list abandons it (sessOpened). The list stays up
+// meanwhile, the session behind it attached, and the hint line says what is
+// being opened.
+func (m Model) sessOpen(r sessRow) (tea.Model, tea.Cmd) {
+	l := &m.sessList
+	l.dialSeq++
+	l.dialing, l.dialTitle = l.dialSeq, r.title
+	s, ref, gen, seq, title := m.sessions, r.ref, l.gen, l.dialSeq, r.title
+	return m, func() tea.Msg {
+		b, err := s.Open(ref)
+		return sessOpenedMsg{gen: gen, seq: seq, title: title, b: b, err: err}
 	}
-	m.sessNote(sessOpenLater, sessNoteWarn)
-	return m, nil
 }
 
 // sessCtrlX is ctrl+x on the selected row (plan 030 §3.10): on a working or
@@ -1367,6 +1461,8 @@ func (m Model) sessHintRow(lines []sessLine) string {
 			st = styleFG(th.Err)
 		}
 		return renderSegs(m.width, lead, seg{l.note, st})
+	case l.dialing != 0:
+		return renderSegs(m.width, lead, txt("opening "+l.dialTitle+"…"))
 	}
 	grouping := " by directory · "
 	if l.byDir {

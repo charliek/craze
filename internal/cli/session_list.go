@@ -99,9 +99,12 @@ func (s sessionList) Cancel(ref roster.Ref) error {
 // stays the launch's to decide (listHost): stopped at finish unless a session
 // opened on it came up in the TUI or the list left it running, and stopped at
 // once if it cannot be opened — nobody else would ever stop it (dialHost's
-// rule) — but only when no other open of it is in flight or has opened it,
-// so a caller that failed never stops a session another opened (sol r20-c9r
-// 1). Any other host is never this launch's to stop.
+// rule) — but only when no other open of it is in flight or holds it open
+// still, and no session on it came up in the TUI, so a caller that failed
+// never stops a session another opened (sol r20-c9r 1). A backend it answered
+// tells the launcher when it is closed (launchedBackend.release), so one the
+// TUI has let go of holds nothing (sol r21-c10r 1). Any other host is never
+// this launch's to stop.
 func (l *launcher) open(e rundir.Entry) (backend.Backend, error) {
 	done, err := l.begin()
 	if err != nil {
@@ -129,6 +132,9 @@ func (l *launcher) open(e rundir.Entry) (backend.Backend, error) {
 		return nil, &launchError{msg: "craze: that session cannot be reached: " + sanitizeLine(err.Error()), err: err}
 	}
 	b := &launchedBackend{Session: s, ref: ref}
+	if lh != nil {
+		b.released = func() { l.openClosed(lh) }
+	}
 	l.openEnd(lh, b)
 	return b, nil
 }
@@ -140,15 +146,18 @@ func (l *launcher) open(e rundir.Entry) (backend.Backend, error) {
 // field is read and written under the launcher's lock.
 //
 //   - An open that cannot reach it stops it at once, since nobody else would
-//     (openEnd) — only when no other open of it is in flight, none has opened
-//     it, and it was not left running.
+//     (openEnd) — only when no other open of it is in flight, none that
+//     attached is still open (a backend the TUI closed — a switch away from
+//     it, a dial it no longer wanted — holds nothing: openClosed), no session
+//     on it came up in the TUI, and it was not left running.
 //   - finish stops it unless it was left running, or a session opened on it
 //     came up in the TUI (acknowledged): the launch's own rule, by host.
 //   - LeaveRunning keeps it, unless finish has decided or it was stopped.
 type listHost struct {
 	ref hostRef
 	// opening counts the opens of it in flight, opened the ones that
-	// attached (their backends are the launch's launched).
+	// attached whose backends are not closed yet (their backends are the
+	// launch's launched; each tells openClosed when it is closed).
 	opening, opened int
 	// left: LeaveRunning kept it. stopped: an open that could not reach it
 	// stopped it (openEnd), and nothing opens it again.
@@ -180,7 +189,7 @@ func (l *launcher) openStart(hostID string) (*listHost, error) {
 // could not. The backend is recorded for finish; a host Spawn started that
 // this open could not reach is stopped — decided under the lock, done outside
 // it — when nothing else holds it: no open of it in flight, none that
-// attached, not left running.
+// attached still open, no session on it come up in the TUI, not left running.
 func (l *launcher) openEnd(lh *listHost, b *launchedBackend) {
 	l.mu.Lock()
 	if b != nil {
@@ -192,7 +201,7 @@ func (l *launcher) openEnd(lh *listHost, b *launchedBackend) {
 		switch {
 		case b != nil:
 			lh.opened++
-		case lh.opening == 0 && lh.opened == 0 && !lh.left:
+		case lh.opening == 0 && lh.opened == 0 && !lh.left && !l.cameUpLocked(lh.ref.entry.HostID):
 			lh.stopped, stop = true, true
 		}
 	}
@@ -200,6 +209,28 @@ func (l *launcher) openEnd(lh *listHost, b *launchedBackend) {
 	if stop {
 		lh.ref.abandon()
 	}
+}
+
+// openClosed is a backend open answered for lh's host being closed (sol
+// r21-c10r 1): it holds the host no more. Nothing is stopped here — a host
+// the TUI let go of is finish's to decide, or a later open's that cannot
+// reach it (openEnd).
+func (l *launcher) openClosed(lh *listHost) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	lh.opened--
+}
+
+// cameUpLocked says a session came up in the TUI on the host hostID names —
+// on any backend of it the launch answered (finish's rule): such a host is
+// the user's, and no failed open stops it. l.mu is held.
+func (l *launcher) cameUpLocked(hostID string) bool {
+	for _, b := range l.launched {
+		if b.ref.entry.HostID == hostID && b.acked.Load() {
+			return true
+		}
+	}
+	return false
 }
 
 // spawnFor spawns a host for spec's new session (plan 030 §3.13): the

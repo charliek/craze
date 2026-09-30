@@ -1149,7 +1149,7 @@ func TestPumpSkipsTheTickChainAndTheEventReader(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = eng.Close() })
-	reader := waitEvent(newEngineBackend(eng, ""))
+	reader := waitEvent(newEngineBackend(eng, ""), 0)
 	if reader == nil {
 		t.Fatal("waitEvent must return a command for a live session")
 	}

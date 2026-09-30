@@ -546,6 +546,85 @@ func TestAFailedOpenStopsNoSessionAnotherOpened(t *testing.T) {
 	stopEntry(t, e, cmds.pids()[0])
 }
 
+// TestAFailedOpenStopsAHostItsOpenersLetGo (sol r21-c10r 1), a forced
+// schedule: the host the list's Spawn started is opened, and that backend is
+// closed — the TUI let it go: a switch away from it, a dial it no longer
+// wanted (plan 030 §3.11) — and then an Open of it fails (every dial after
+// the first does). Closed before its session came up in the TUI, nothing
+// holds the host any more, and the failed Open stops it before answering, as
+// one with no opener ever does. Closed after it came up, the host is the
+// user's — a session came up on it — and the failed Open leaves it, and so
+// does the quit. Every call is bounded by a step.
+func TestAFailedOpenStopsAHostItsOpenersLetGo(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		cameUp  bool
+		stopped bool
+	}{
+		{name: "closed before it came up", stopped: true},
+		{name: "closed after it came up", cameUp: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env, ws, cmds := launchHome(t, nil)
+			t.Setenv("CRAZE_FAKE_SCRIPT", "echo")
+			var dials atomic.Int32
+			prev := spawnDial
+			spawnDial = func(ctx context.Context, socket string, opts remote.SessionOptions) (*remote.Session, error) {
+				if dials.Add(1) > 1 {
+					return nil, errors.New("the test's later dials fail")
+				}
+				return prev(ctx, socket, opts)
+			}
+			t.Cleanup(func() { spawnDial = prev })
+			var spawned roster.Ref
+			fakeRun(t, func(cfg tui.Config) (tui.Result, error) {
+				ref, err := cfg.Sessions.Spawn(tui.SpawnSpec{Workspace: ws, Provider: cfg.Provider})
+				if err != nil {
+					t.Fatalf("Spawn: %v", err)
+				}
+				spawned = ref
+				pid := cmds.pids()[0]
+				var b backend.Backend
+				if err := withinStep(t, "the first Open", func() (err error) {
+					b, err = cfg.Sessions.Open(ref)
+					return err
+				}); err != nil {
+					t.Fatalf("the first Open: %v", err)
+				}
+				if tc.cameUp {
+					started(t, b)
+				}
+				if err := withinStep(t, "the close", b.Close); err != nil {
+					t.Fatalf("the close: %v", err)
+				}
+				if err := withinStep(t, "the failing Open", func() error {
+					_, err := cfg.Sessions.Open(ref)
+					return err
+				}); err == nil {
+					t.Fatal("the second Open answered with its dial failing")
+				}
+				// No wait: an Open that stops the host does so before it answers.
+				if alive := processAlive(pid); alive == tc.stopped {
+					t.Fatalf("after the failed Open the host %d is alive %v, want %v (%s)", pid, alive, !tc.stopped, procState(pid))
+				}
+				return tui.Result{}, nil
+			})
+			if err := runTUI(nil, launchFlags(t, ws), hostEnv{}); err != nil {
+				t.Fatalf("runTUI: %v", err)
+			}
+			if tc.stopped {
+				assertNoHosts(t, env)
+				return
+			}
+			e := onlyHost(t, env)
+			if e.HostID != spawned.Host.ID {
+				t.Fatalf("after the quit %+v, want Spawn's host %s still serving", e, spawned.Host.ID)
+			}
+			stopEntry(t, e, cmds.pids()[0])
+		})
+	}
+}
+
 // TestLeaveRunningAfterTheQuitSaysSo (sol r20-c9r 2): keep-or-stop is one
 // decision under the launcher's lock. A LeaveRunning that comes once the
 // quit has decided — finish has stopped the host Spawn started, which

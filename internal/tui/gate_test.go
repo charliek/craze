@@ -98,7 +98,7 @@ func newGateRig(t *testing.T, m Model) *gateRig {
 	t.Helper()
 	r := &gateRig{t: t, m: m, handle: withGateOps}
 	if m.reading {
-		r.reads = append(r.reads, waitEvent(m.eng))
+		r.reads = append(r.reads, waitEvent(m.eng, m.bgen))
 		r.maxReads = 1
 	}
 	return r

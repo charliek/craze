@@ -753,7 +753,7 @@ func TestTheReaderDeliversEveryItem(t *testing.T) {
 				}
 				return tc.item.(backend.Item), nil
 			}}
-			if got := waitEvent(b)(); !reflect.DeepEqual(got, tc.want) {
+			if got := waitEvent(b, 0)(); !reflect.DeepEqual(got, tc.want) {
 				t.Fatalf("the reader answered %#v, want %#v", got, tc.want)
 			}
 		})

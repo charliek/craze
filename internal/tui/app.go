@@ -302,7 +302,25 @@ type Model struct {
 	// and every session-dependent asynchronous result carries the generation
 	// it was issued under (issued), so one that lands after a replacement is
 	// dropped rather than writing the old session's facts into the new one.
+	//
+	// It is the TUI's, never the session's: a switch to another session
+	// (switchBackend, plan 030 §3.11) keeps counting from where the last one
+	// left it, so no generation is ever issued twice (R2-5).
 	sessGen uint64
+	// bgen is the backend generation (plan 030 §3.11; round-1 panel finding
+	// 3, R2-5): it moves on every backend the model adopts (adopt), and every
+	// message a backend's own closures produce — each stream item the reader
+	// hands up (waitEvent: an event, a restore, a ready, the end) and the
+	// start's answer (startCmd) — carries the one it was read or started
+	// under. The command gate drops a message of any other generation before
+	// it does anything else (gated, staleBackend): a stream a switch left
+	// behind can neither clear the reader's flag, which is the new backend's
+	// read, nor quit the program with its End, nor start or fail the session
+	// that replaced it. Like sessGen and gateSeq it only ever moves forward,
+	// across every session this TUI shows, so a generation is never reused.
+	// 0 on a message is one a test built by hand, and means whichever
+	// backend the model holds, as the zero session stamp does (issued).
+	bgen uint64
 	// cmdSeq numbers this model's commands from 1. Each command also names the
 	// backend's client id, read per command (nextCmd) and never cached, so
 	// every mutating command it sends names itself and the events it caused
@@ -592,6 +610,22 @@ type Model struct {
 	sessions    Sessions
 	sessList    sessListState
 	sessRosters *sessRosterSet
+	// bandOn says the session list has been opened in this TUI: from then on
+	// every session's frame carries the band — which session it is, and the
+	// way back to the list (band.go, plan 030 §3.11). Until then the band has
+	// no rows, so no frame of a TUI that never opened the list moves.
+	bandOn bool
+	// drafts is the composer's text of each session this TUI has left, by
+	// its craze id (draftKey): stashed as a switch leaves a session and put
+	// back when a switch returns to it, so a draft never follows the user to
+	// another session (plan 030 §3.11). Copied on write, as askEchoes is.
+	drafts map[string]string
+	// retired is every backend a switch let go of, and every one a dial
+	// answered after the user had moved on, until its close — a view close,
+	// made off the Update — has run (switch.go). Shared by every copy, as
+	// sessRosters is, so every exit path closes one whose close never ran
+	// (finishRun).
+	retired *backendSet
 
 	todoPlanned int
 	todoDone    bool
@@ -901,10 +935,13 @@ func (m Model) now() time.Time {
 // generation it came from (backend.Item.Gen): 0 in process, where the stream
 // is never replaced; over the socket the attachment it was read on, which a
 // restore replaces — so a restore held behind it can tell an event its
-// snapshot already holds (restore.go, dropSuperseded).
+// snapshot already holds (restore.go, dropSuperseded). bgen is the backend
+// generation it was read under (Model.bgen): the stream generation is the
+// backend's own count, and says nothing across a switch to another backend.
 type eventMsg struct {
-	ev  agent.Event
-	gen uint64
+	ev   agent.Event
+	gen  uint64
+	bgen uint64
 }
 
 // startedMsg says the session is up: the start command's Start has returned.
@@ -918,15 +955,44 @@ type eventMsg struct {
 // startedMsg would open the new engine's gate before its own Start had
 // returned, and a stale errMsg would fail a session that is starting perfectly
 // well. A nil eng means "whichever backend the model holds", which is what a
-// test injecting either message by hand intends.
+// test injecting either message by hand intends. bgen is the backend
+// generation the start was dispatched under (startCmd), which the command gate
+// judges first (staleBackend): a start answering after a switch is dropped
+// there, whatever the backend's identity would say.
 type startedMsg struct {
 	issued
-	eng backend.Backend
+	eng  backend.Backend
+	bgen uint64
 }
 type errMsg struct {
 	issued
-	err error
-	eng backend.Backend
+	err  error
+	eng  backend.Backend
+	bgen uint64
+}
+
+// fromBackend is a message a backend's own closure produced — a stream item
+// the reader handed up, or the start's answer — which carries the backend
+// generation it was produced under (Model.bgen).
+type fromBackend interface{ backendGen() uint64 }
+
+func (m eventMsg) backendGen() uint64   { return m.bgen }
+func (m restoreMsg) backendGen() uint64 { return m.bgen }
+func (m readyMsg) backendGen() uint64   { return m.bgen }
+func (m endMsg) backendGen() uint64     { return m.bgen }
+func (m startedMsg) backendGen() uint64 { return m.bgen }
+func (m errMsg) backendGen() uint64     { return m.bgen }
+
+// staleBackend reports that msg is a message of a backend the model has left
+// (plan 030 §3.11): produced under another backend generation. The zero
+// generation is a message a test built by hand, and is never stale.
+func (m Model) staleBackend(msg tea.Msg) bool {
+	s, ok := msg.(fromBackend)
+	if !ok {
+		return false
+	}
+	g := s.backendGen()
+	return g != 0 && g != m.bgen
 }
 
 // actionErrMsg is a failure a command reports as an error row: a chain's
@@ -1272,8 +1338,10 @@ func (m *Model) setBackend(b backend.Backend) {
 
 // adopt makes b the model's backend, recorded in the owner too, with a
 // command order of its own (chains), and its session's workspace the model's
-// (followWorkspace).
+// (followWorkspace). It is a new backend generation (bgen): whatever the
+// backend it replaces still hands up is another backend's from here on.
 func (m *Model) adopt(b backend.Backend) {
+	m.bgen++
 	m.eng = b
 	if sessionBackendHook != nil {
 		m.eng = sessionBackendHook(m.eng)
@@ -1402,13 +1470,13 @@ func New(cfg Config) Model {
 
 	th := Preset(cfg.Theme)
 	prov := configProvider(cfg.Provider)
+	// The TUI's half, from the Config; the session's half is the one
+	// constructor every session's state is made by, a switch's included
+	// (withSession, plan 030 §3.11).
 	m := Model{
 		theme:           th,
-		queueHov:        noHover(),
 		vp:              vp,
 		input:           newComposer(th),
-		cwd:             cwd,
-		model:           cfg.Model,
 		yolo:            cfg.Yolo,
 		mouseEnabled:    !cfg.NoMouse,
 		providerLocked:  cfg.ProviderLocked,
@@ -1431,7 +1499,6 @@ func New(cfg Config) Model {
 		terminalTitle:   cfg.TerminalTitle,
 		host:            cfg.Host,
 		viewer:          cfg.Viewer,
-		sessProvider:    prov.Name(),
 		// Discard until Run says otherwise: a model built by a test, by
 		// `craze frame` or by any direct caller writes no OSC at all.
 		term:        newTerminalColors(io.Discard),
@@ -1439,19 +1506,9 @@ func New(cfg Config) Model {
 		exit:        &exitState{},
 		shell:       newShellController(),
 		sessRosters: &sessRosterSet{},
-		// Allocated here, not on first use, so every copy of this model holds
-		// the same panes from the start (see pane).
-		main: &pane{},
-		subs: make(map[string]*pane),
-		// A load is replaying before its first event: see Model.replaying.
-		replaying: cfg.Loading,
-		// Turn 1 is the session before the first prompt: every event has an
-		// identity from the start, and no engine turn carries it.
-		turnSeq:  1,
-		gateSync: gateSyncDefault,
-	}
-	m.git = discoverGit(cwd)
-	m.branch = m.git.branch()
+		retired:     &backendSet{},
+		gateSync:    gateSyncDefault,
+	}.withSession(sessionSeed{workspace: cwd, model: cfg.Model, provider: prov.Name(), loading: cfg.Loading})
 	sess := cfg.Session
 	switch {
 	case cfg.Backend != nil:
@@ -1640,8 +1697,9 @@ func runErrAfterHangup(err error, hungUp bool) error {
 
 // finishRun is Run's exit tail, in the order plan 015 §3.2 pins: the tab title
 // is cleared, the terminal's colours are reset, the host hub releases, and the
-// session closes — a session list's roster still open closed just before it
-// (plan 030). p.Run returns on /exit, on SIGINT/SIGTERM, on SIGHUP (Run's
+// session closes — a session list's roster still open, and any backend a
+// switch retired whose close has not run, closed just before it (plan 030).
+// p.Run returns on /exit, on SIGINT/SIGTERM, on SIGHUP (Run's
 // own handler) and on a recovered panic, and every one of them lands here.
 //
 // final is whatever p.Run handed back, which on a recovered Update or View
@@ -1693,6 +1751,10 @@ func finishRun(out io.Writer, final tea.Model, m Model, h Host) (bool, error) {
 	// shared by every copy, so m reaches what the final model had open even
 	// when final is nil. Bounded: Close cancels every attempt in flight.
 	m.sessRosters.closeAll()
+	// And a backend a switch let go of, or a dial answered after the user
+	// had moved on, whose close — a command — the program stopped before it
+	// ran (plan 030 §3.11): a view close each, bounded, side by side.
+	m.retired.closeAll()
 	// The owner and not m.eng: m is the model Run started with, and a session
 	// a picker built after it lives only in later copies — which a recovered
 	// panic does not hand back. Every copy shares the owner, so it names the
@@ -1736,11 +1798,12 @@ func (m Model) Init() tea.Cmd {
 		// start and its reader are armed once it is adopted (launch.go).
 		return m.initSpawn()
 	}
-	return tea.Batch(m.startCmd(), waitEvent(m.eng))
+	return tea.Batch(m.startCmd(), waitEvent(m.eng, m.bgen))
 }
 
 // startCmd starts the session through the engine, whose gate opens on it: until
-// it has returned the engine admits no command at all.
+// it has returned the engine admits no command at all. Its answer carries the
+// backend generation it was dispatched under (bgen, staleBackend).
 func (m Model) startCmd() tea.Cmd {
 	// Neither of these names an engine: there is none to name, and the failure is
 	// this model's however its copies move on.
@@ -1753,12 +1816,12 @@ func (m Model) startCmd() tea.Cmd {
 			return errMsg{err: fmt.Errorf("craze: no session")}
 		}
 	}
-	iss := m.issue()
+	iss, bgen := m.issue(), m.bgen
 	return func() tea.Msg {
 		if err := eng.Start(context.Background()); err != nil {
-			return errMsg{issued: iss, err: err, eng: eng}
+			return errMsg{issued: iss, err: err, eng: eng, bgen: bgen}
 		}
-		return startedMsg{issued: iss, eng: eng}
+		return startedMsg{issued: iss, eng: eng, bgen: bgen}
 	}
 }
 
@@ -1882,9 +1945,19 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case endMsg:
 		// The stream ended: the session closed on its host, or the transport
-		// gave up. Nothing more will come, so the program quits, and the final
-		// model says why (ended, endErr) for the command line's last word.
+		// gave up. Nothing more will come. With a session list the TUI goes
+		// back to it, where every other session still is (plan 030 §3.10: a
+		// viewed session that ends — another client's /exit, the list's
+		// ctrl+x, an idle exit); without one — the opt-out, craze attach —
+		// or on the way out after this client's own quit asked for the end,
+		// the program quits, and the final model says why (ended, endErr) for
+		// the command line's last word.
 		m.ended, m.endErr = true, msg.err
+		if m.sessions != nil && !m.quitting {
+			if next, cmd, ok := m.endedToList(msg.err); ok {
+				return next, cmd
+			}
+		}
 		m.quitting = true
 		return m, tea.Quit
 
@@ -4563,7 +4636,13 @@ func workspaceName(cwd string) string {
 // The read's context never ends. Read returns every item it takes, a context
 // cancelled meanwhile or not (backend.Backend.Read), and a read that is never
 // cancelled is never abandoned either: nothing this reader takes is dropped.
-func waitEvent(b backend.Backend) tea.Cmd {
+//
+// Every message is stamped with bgen, the backend generation the read was
+// armed under (Model.bgen; plan 030 §3.11): a read a switch left in flight on
+// the backend it replaced ends when that backend's close ends its stream —
+// nothing, as any ended stream — or with an item it had already taken, whose
+// message the command gate then drops as another backend's (staleBackend).
+func waitEvent(b backend.Backend, bgen uint64) tea.Cmd {
 	if b == nil {
 		return nil
 	}
@@ -4575,13 +4654,13 @@ func waitEvent(b backend.Backend) tea.Cmd {
 			}
 			switch it.Kind {
 			case backend.ItemEvent:
-				return eventMsg{ev: it.Event, gen: it.Gen}
+				return eventMsg{ev: it.Event, gen: it.Gen, bgen: bgen}
 			case backend.ItemRestore:
-				return restoreMsg{info: it.Info, snap: it.Snapshot, gen: it.Gen}
+				return restoreMsg{info: it.Info, snap: it.Snapshot, gen: it.Gen, bgen: bgen}
 			case backend.ItemReady:
-				return readyMsg{info: it.Info, err: it.Err}
+				return readyMsg{info: it.Info, err: it.Err, bgen: bgen}
 			case backend.ItemEnd:
-				return endMsg{err: it.Err}
+				return endMsg{err: it.Err, bgen: bgen}
 			}
 			// A kind this build does not know carries nothing to apply: it
 			// is read past, as the stream's own unknown items are.

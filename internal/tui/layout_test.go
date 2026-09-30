@@ -348,6 +348,7 @@ func TestEveryDrawnRegionOwnsItsRows(t *testing.T) {
 		dialog  bool
 		slash   bool
 		queue   bool
+		band    bool
 		needles map[regionID]string
 	}{
 		{
@@ -377,6 +378,18 @@ func TestEveryDrawnRegionOwnsItsRows(t *testing.T) {
 				// this test is about which rows a band owns. The row itself is
 				// owned by the slash goldens.
 				regionOverlay: "Keybindings and commands",
+			},
+		},
+		{
+			// The session band has rows only once a session list has been
+			// opened in this TUI (plan 030 §3.11), so it needs a frame of its
+			// own; every band under it keeps its rows.
+			name: "session band",
+			band: true,
+			needles: map[regionID]string{
+				regionBand:     bandBack,
+				regionComposer: "───",
+				regionStatus:   chipYolo,
 			},
 		},
 		{
@@ -416,6 +429,9 @@ func TestEveryDrawnRegionOwnsItsRows(t *testing.T) {
 			if tc.queue {
 				enqueueRow(t, m, "PINEAPPLE")
 				m = applyPending(t, m)
+			}
+			if tc.band {
+				m.sessions, m.bandOn = &fakeSessions{}, true
 			}
 			tm, _ := m.Update(refreshSnapMsg{})
 			m = tm.(Model)

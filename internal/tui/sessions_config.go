@@ -33,7 +33,9 @@ type Sessions interface {
 	// then dials (PR 3's dispatch). The host is this craze's to stop: when
 	// craze quits it goes on only if a session opened on it (Open) came up in
 	// the TUI, as a launch's does, or it was left running (LeaveRunning); an
-	// Open that cannot reach it stops it at once unless another Open holds it.
+	// Open that cannot reach it stops it at once unless another Open holds it
+	// (a backend the TUI has closed holds nothing) or a session on it came up
+	// in the TUI.
 	Spawn(spec SpawnSpec) (roster.Ref, error)
 	// LeaveRunning keeps ref's host, which Spawn started, running when craze
 	// quits (PR 3's background dispatch, its prompt accepted), opened or not.

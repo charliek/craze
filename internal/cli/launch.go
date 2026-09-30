@@ -557,6 +557,34 @@ type launchedBackend struct {
 	// answer while it was not quitting (AckStarted). Start answering nil is
 	// not it — the TUI hears that answer later, if it is still there to.
 	acked atomic.Bool
+	// released is told, once, that this backend is closed — whoever closes
+	// it: the TUI letting it go (a switch, a dial answered after the user
+	// moved on, plan 030 §3.11), its exit, or finish: the launcher's count of
+	// the live openers of a host the session list's Spawn started
+	// (openClosed). nil for any other host's backend.
+	released    func()
+	releaseOnce sync.Once
+}
+
+// Close is the Session's view close, the launcher told first that this
+// opener has gone (release), so a host nobody holds any more is decided as
+// one (openEnd) even while the detach is still on its way.
+func (b *launchedBackend) Close() error {
+	b.release()
+	return b.Session.Close()
+}
+
+// CloseWithin is Close within ctx (the explicit quit's deadline, tui's
+// quitCloser), the launcher told first as Close tells it.
+func (b *launchedBackend) CloseWithin(ctx context.Context) error {
+	b.release()
+	return b.Session.CloseWithin(ctx)
+}
+
+func (b *launchedBackend) release() {
+	if b.released != nil {
+		b.releaseOnce.Do(b.released)
+	}
 }
 
 // AckStarted is the TUI's acknowledgement that the session came up there
