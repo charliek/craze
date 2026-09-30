@@ -743,10 +743,17 @@ nothing.
   one in use marked `current`. Choosing one **resets the model** to that
   provider's default: for cursor, grok and gx, the agent's own (`default`: no
   model is passed); for native, the model a native session started with no
-  `--model` would use — the model table's `default_model`, or, when that
-  model's provider has no API key, the first model (alphabetically) whose key
-  resolves.
-- **`/model`** lists the provider's models. Native's are its model table's.
+  `--model` would use ([which model a session starts
+  on](#which-model-a-session-starts-on)) — the newest remembered model whose
+  provider has a key, else the model table's `default_model`, else the first
+  model (alphabetically) whose key resolves. With no provider funded it says
+  so (`no model provider has an API key — run craze auth login, …`) and leaves
+  the model to the agent's own.
+- **`/model`** lists the provider's models. Native's are its model table's,
+  only those whose provider has a key, the recently used ones first in the
+  order they were last picked and the rest by name, with no label — the same
+  order a native session's own `/model` lists. The list reads the memory and
+  never writes it: only a switch made inside a native session does.
   cursor, grok and gx name their models only once a session has started, so
   craze lists **the catalog the last session of that provider installed** —
   every detached host records it in the [model catalog
