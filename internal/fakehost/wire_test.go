@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/charliek/craze/internal/agent"
 	"github.com/charliek/craze/internal/control/wiretest"
 	"github.com/charliek/craze/internal/protocol"
 )
@@ -57,12 +58,16 @@ type fixtureLine struct {
 }
 
 // fixtureHost is a fixture's host line: which of Options' plan 030 opt-ins
-// its Host is built with (Options.Stop, PermissionMode, StartedAt, RowFacts).
+// its Host is built with (Options.Stop, PermissionMode, StartedAt, RowFacts),
+// and plan 031's model catalog (Options.Models).
 type fixtureHost struct {
 	Stop           bool                    `json:"stop,omitempty"`
 	PermissionMode protocol.PermissionMode `json:"permissionMode,omitempty"`
 	StartedAt      bool                    `json:"startedAt,omitempty"`
 	RowFacts       bool                    `json:"rowFacts,omitempty"`
+	// Models is written as the catalog's own models are: id, name and, for
+	// a remembered one, recent.
+	Models []protocol.CatalogModel `json:"models,omitempty"`
 }
 
 // options is the Options a host line asks for; nil is the zero value.
@@ -70,7 +75,11 @@ func (fh *fixtureHost) options() Options {
 	if fh == nil {
 		return Options{}
 	}
-	return Options{Stop: fh.Stop, PermissionMode: fh.PermissionMode, StartedAt: fh.StartedAt, RowFacts: fh.RowFacts}
+	var models []agent.ModelInfo
+	for _, m := range fh.Models {
+		models = append(models, agent.ModelInfo{ID: m.ID, Name: m.Name, Recent: m.Recent})
+	}
+	return Options{Stop: fh.Stop, PermissionMode: fh.PermissionMode, StartedAt: fh.StartedAt, RowFacts: fh.RowFacts, Models: models}
 }
 
 // rawFixtureLine is one line of the file, its own bytes kept beside its

@@ -1,0 +1,20 @@
+# Every model alias craze has shipped in catalog.toml (plan 031 §3.1;
+# RELEASING.md "Model catalog changes"). Adding a model adds a line here;
+# removing one from the catalog needs a [[retired]] row, and its line stays.
+# APPEND-ONLY: never delete a line (a reviewer checks this file's diff; a test
+# cannot, since the file and the catalog change in the same commit).
+# The [[retired]] aliases are not listed: they were rows in the owner's own
+# tables, never shipped by a craze release.
+fireworks/deepseek-v4p1-flash
+fireworks/kimi-k3
+fireworks/qwen3p8-max
+glm-5.3
+glm-5.3-flash
+muse-spark-1.3
+muse-spark-1.3-contributor
+openrouter/gemini-3.8-flash
+openrouter/glm-5.3-flash
+openrouter/gpt-6-astra
+openrouter/gpt-6-luna
+openrouter/gpt-6-sol
+openrouter/minimax-m3

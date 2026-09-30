@@ -321,11 +321,12 @@ const AbortedText = "Tool execution aborted"
 
 // ChildEnviron returns environ (os.Environ's form, NAME=value) without the
 // variables that carry craze's own provider keys: every name in keyNames —
-// the env_keys of every provider in providers.toml — and every OPENAI_*
-// variable, which the OpenAI SDK reads (plan 019 §3.8). Everything else
-// stays, other credentials included: gh, git push and cloud CLIs are the
-// point of a shell. Names match exactly, as the environment does. It returns
-// a new slice and leaves environ alone.
+// every variable the model table knows holds a key (modeltable's
+// CredentialEnvNames), whether or not a provider still takes its key from it
+// (plan 031 C2r2) — and every OPENAI_* variable, which the OpenAI SDK reads
+// (plan 019 §3.8). Everything else stays, other credentials included: gh, git
+// push and cloud CLIs are the point of a shell. Names match exactly, as the
+// environment does. It returns a new slice and leaves environ alone.
 func ChildEnviron(environ, keyNames []string) []string {
 	drop := make(map[string]bool, len(keyNames))
 	for _, n := range keyNames {

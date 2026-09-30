@@ -7,7 +7,6 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/charmbracelet/bubbles/cursor"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -88,6 +87,13 @@ type modelDialog struct {
 	// undoing a change nobody in this dialog asked to undo (plan 025 X10 (f),
 	// panel astra 8).
 	touched map[string]bool
+	// gen is this opening's number (Model.connSeq), which the answer about
+	// the connect row carries back (connectRowMsg); connect says the list
+	// ends with that row (plan 031 §3.6) — native's alone, and only once the
+	// answer has said some provider has no key. Neither is ever set on an
+	// ACP session's dialog, whose rows are what they always were.
+	gen     uint64
+	connect bool
 }
 
 // tabRole is what a tab is to the rest of craze. Effort and fast have a
@@ -452,21 +458,21 @@ func optionNotAppliedNote(label, model, value string, why notAppliedReason) stri
 
 func (m Model) openModelDialog() Model {
 	m = m.closeDialog(true)
-	ti := textinput.New()
-	ti.Prompt = modelFilterPrompt
-	ti.Placeholder = ""
+	ti := m.dialogInput()
 	ti.CharLimit = 64
-	ti.PromptStyle = styleFG(m.theme.Accent)
-	ti.TextStyle = styleFG(m.theme.FG)
-	// A static cursor keeps the box from starting a blink timer nothing in
-	// craze routes back to the input, and keeps a frame deterministic.
-	ti.Cursor.SetMode(cursor.CursorStatic)
-	ti.Focus()
 	// Every tab starts on its option's current value: repaired seeds a tab
 	// that has none, and at open that is all of them.
-	m.mdlg = modelDialog{filter: ti}.repaired(m.modelDialogTabs())
+	m.connSeq++
+	m.mdlg = modelDialog{filter: ti, gen: m.connSeq}.repaired(m.modelDialogTabs())
 	m.dialog = dialogModel
 	return m
+}
+
+// showModelDialog is `/model` and the status row's click: the dialog, and on
+// a native session the question whether its list ends with the connect row,
+// asked off the Update (askConnectRow, plan 031 §3.6).
+func (m Model) showModelDialog() (tea.Model, tea.Cmd) {
+	return m.openModelDialog().askConnectRow()
 }
 
 // currentOrFirst is the option's current value, or its first advertised one
@@ -498,6 +504,13 @@ func (m Model) closeDialog(revert bool) Model {
 	case dialogModel:
 		m.dialog = dialogNone
 		m.mdlg = modelDialog{}
+	case dialogConnect:
+		// Every way out of /connect lands here or in leaveKeyStep — Esc, a
+		// save, a click outside, a card, another dialog opening — and the
+		// key field goes with the state, so no key typed or pasted into it
+		// outlives the dialog (plan 031 §3.9, astra 15).
+		m.dialog = dialogNone
+		m.cdlg = connectDialog{}
 	case dialogHelp:
 		m.dialog = dialogNone
 		m.helpTop = 0
@@ -532,6 +545,16 @@ func (m Model) dialogModelList() []agent.ModelInfo {
 	return out
 }
 
+// modelListRows is how many rows the dialog's list has over the filtered
+// models: one each, and the connect row after them when the dialog has one
+// (modelDialog.connect). A selection past the last model is that row.
+func (m Model) modelListRows(list []agent.ModelInfo) int {
+	if m.mdlg.connect {
+		return len(list) + 1
+	}
+	return len(list)
+}
+
 // modelDialogFocuses is the Tab order: the list, then every tab the catalog
 // advertises, in its order.
 func modelDialogFocuses(tabs []modelTab) []dialogFocus {
@@ -560,7 +583,7 @@ func (m Model) handleModelDialogKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.mdlg.focus = cycleFocus(modelDialogFocuses(tabs), m.mdlg.focus, -1)
 		return m, nil
 	case tea.KeyUp, tea.KeyDown:
-		n := len(m.dialogModelList())
+		n := m.modelListRows(m.dialogModelList())
 		if n == 0 {
 			return m, nil
 		}
@@ -581,7 +604,7 @@ func (m Model) handleModelDialogKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// "type to filter" and the toggle rows have no text of their own.
 	var cmd tea.Cmd
 	m.mdlg.filter, cmd = m.mdlg.filter.Update(msg)
-	if n := len(m.dialogModelList()); m.mdlg.sel >= n {
+	if n := m.modelListRows(m.dialogModelList()); m.mdlg.sel >= n {
 		m.mdlg.sel = max(n-1, 0)
 	}
 	return m, cmd
@@ -637,6 +660,12 @@ func (m Model) moveDialogValue(tabs []modelTab, delta int) Model {
 // session must follow this chain's installs.
 func (m Model) applyModelDialog() (tea.Model, tea.Cmd) {
 	list := m.dialogModelList()
+	if m.mdlg.connect && m.mdlg.sel == len(list) {
+		// The connect row (plan 031 §3.6) opens /connect, busy refusal and
+		// all, and applies nothing: a tab moved on the way is dropped, as
+		// Esc drops it.
+		return m.openConnect()
+	}
 	tabs := m.modelDialogTabs()
 	d := m.mdlg.repaired(tabs)
 	m = m.closeDialog(false)
@@ -1155,9 +1184,13 @@ func fitModelDialog(budget, list, tabs int) modelDialogRows {
 // one the catalog advertises, of which rows.tabs are drawn. The renderer and
 // the hit-tester both take it, so a click can never land on a row that was not
 // drawn.
+//
+// n is the list's rows (modelListRows): the models, and the connect row after
+// them when the dialog has one, which the window scrolls to like any row.
 type modelDialogPlan struct {
 	rows       modelDialogRows
 	list       []agent.ModelInfo
+	n          int
 	top, shown int
 	tabs       []modelTab
 }
@@ -1165,9 +1198,10 @@ type modelDialogPlan struct {
 func (m Model) modelDialogPlan(budget int) modelDialogPlan {
 	list := m.dialogModelList()
 	tabs := m.modelDialogTabs()
-	rows := fitModelDialog(budget, min(len(list), dialogListMax), len(tabs))
-	top, shown := dialogListWindow(len(list), m.mdlg.sel, rows.list)
-	return modelDialogPlan{rows: rows, list: list, top: top, shown: shown, tabs: tabs}
+	n := m.modelListRows(list)
+	rows := fitModelDialog(budget, min(n, dialogListMax), len(tabs))
+	top, shown := dialogListWindow(n, m.mdlg.sel, rows.list)
+	return modelDialogPlan{rows: rows, list: list, n: n, top: top, shown: shown, tabs: tabs}
 }
 
 // modelDialogHintText is the list's footer: what Tab reaches, named by the
@@ -1223,19 +1257,20 @@ func (m Model) modelDialogBody(inner, budget int) []string {
 	d := m.mdlg.repaired(p.tabs)
 	rows := []string{m.dialogTitle(modelDialogTitle, inner)}
 	if p.rows.filter {
-		f := m.mdlg.filter
-		// The prompt and the one cell the cursor always draws come out of the
-		// width bubbles pads the value to, or the row overflows the box.
-		f.Width = max(1, inner-lipgloss.Width(modelFilterPrompt)-1)
-		rows = append(rows, f.View())
+		rows = append(rows, dialogInputView(m.mdlg.filter, inner))
 	}
+	// A row is the model's name and nothing else: no "current" tag, and no
+	// "recent" one on native's remembered models (plan 031 §3.6, owner
+	// decision Q4) — the order says which model is current (first, and the
+	// row the dialog opens on) and which were picked lately (right after it,
+	// newest first: agent.OrderModels). The tag slot is the scroll marks'.
 	for i := 0; i < p.shown; i++ {
-		md := p.list[p.top+i]
-		tag := dialogScrollTag(i, p.top, p.shown, len(p.list))
-		if md.ID == m.snap.CurrentModel {
-			tag = strings.TrimSpace("current " + tag)
+		tag := dialogScrollTag(i, p.top, p.shown, p.n)
+		text := connectRowText
+		if p.top+i < len(p.list) {
+			text = modelRowText(p.list[p.top+i])
 		}
-		rows = append(rows, m.dialogRow(modelRowText(md), tag, p.top+i == d.sel, d.focus == focusList, inner))
+		rows = append(rows, m.dialogRow(text, tag, p.top+i == d.sel, d.focus == focusList, inner))
 	}
 	for _, t := range p.tabs[:p.rows.tabs] {
 		rows = append(rows, m.dialogValueRow(t.label, &t.opt, d.chosen[t.opt.ID], d.focus == t.focus(), inner, t.valueName()))

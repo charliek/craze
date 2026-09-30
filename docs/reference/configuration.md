@@ -547,6 +547,335 @@ choice overwrites a stale unknown id; `Esc` on the fallback default does not).
 `--agent-bin` / `$CRAZE_AGENT_BIN` override the **binary**. They do not select
 the dialect.
 
+## Native models and providers
+
+The native provider (`--provider native`) knows a set of models before you
+write anything: craze ships a **model catalog** inside the binary, and an
+upgrade of craze is how that catalog changes. Your own two files in
+`~/.craze/native/` (or `$CRAZE_HOME/native/`) are laid over it — they hold
+keys, changes to shipped entries, and models you add, never a copy of the
+catalog — so a release that adds, renames or retires a model reaches every
+machine with no edit.
+
+### The shipped catalog
+
+The catalog's providers, and the environment variables each takes its key
+from, tried in order:
+
+| Provider id | Name | Key variables |
+|-------------|------|---------------|
+| `fireworks` | Fireworks | `FIREWORKS_API_KEY` |
+| `meta` | Meta | `META_API_KEY` |
+| `openrouter` | OpenRouter | `OPENROUTER_API_KEY` |
+| `zai-coding-plan` | Z.AI Coding Plan | `ZHIPU_API_KEY`, `ZAI_API_KEY` |
+
+Its models — aliases, wire model ids, context windows, efforts and costs — and
+its default model are in
+[`internal/harness/modeltable/catalog.toml`](https://github.com/charliek/craze/blob/main/internal/harness/modeltable/catalog.toml);
+a session's `/model` lists those whose provider has a key ([which models, in
+what order](tui.md#model-dialog)). With the catalog, a machine needs only a key:
+store one with [`craze auth login`](#keys), or export one of the variables
+above, and run `craze --provider native`. With no key at all, a native session
+refuses to start and names `craze auth login`, the variables to set and the
+file an inline key goes in.
+
+### Your two files
+
+Both files are optional, each on its own, and each starts with `version = 1`.
+
+- `providers.toml` holds keys and provider settings. It is the only place a
+  secret lives: keep it `0600` (craze tightens a looser one when it reads it,
+  and [`craze auth`](#keys) writes it so) and never paste it anywhere.
+- `models.toml` holds model settings and models you add, and no secrets.
+
+An entry for something the catalog ships changes only the keys it writes:
+
+```toml
+# providers.toml
+version = 1
+
+[providers.fireworks]
+api_key = "fw_..."            # an inline key (craze auth login writes this); an exported variable still wins
+```
+
+```toml
+# models.toml
+version = 1
+default_model = "muse-spark-1.3-contributor"   # optional: where a new session starts when it remembers nothing
+
+[models."fireworks/kimi-k3"]
+default_effort = "max"        # everything else stays as shipped
+```
+
+An entry for anything else is yours, and must be complete: a provider needs
+`driver` (`openai-compat`, with a `base_url`, or `openrouter`, without one),
+and a model needs `provider` and `wire_model`:
+
+```toml
+# providers.toml
+[providers.local]
+name     = "Local"                          # optional display name
+driver   = "openai-compat"
+base_url = "http://127.0.0.1:8080/v1"
+env_keys = ["LOCAL_API_KEY"]                # optional, tried in order
+```
+
+```toml
+# models.toml
+[models."local/qwen"]
+provider   = "local"
+wire_model = "qwen3-coder"
+name       = "Qwen3 Coder (local)"          # optional, as is every key below
+context_window = 131072
+efforts        = ["low", "high"]
+default_effort = "high"
+```
+
+A model's other optional keys are documented below:
+[`max_output_tokens`](#native-output-ceiling), [`cost`](#native-cost),
+`vision` and `tool_profile`; `models.toml` also takes
+[`[compaction]`](#native-compaction) and
+[`[subagents]`](tui.md#sub-agent-models). craze never rewrites `models.toml`,
+and rewrites `providers.toml` only when you run [`craze auth`](#keys) or
+store a key with [`/connect`](tui.md#connect).
+
+### How the files merge
+
+- **Field by field.** A key your entry writes replaces the shipped value; a key
+  it leaves out keeps it. A list (`efforts`, `env_keys`) replaces the shipped
+  list whole, and an explicit empty one means empty: `efforts = []` is a model
+  with no effort control, `env_keys = []` a provider with no variables. A
+  key written with an empty value (`name = ""`, `default_effort = ""`) is that
+  value, not "unset".
+- **Cost, rate by rate.** Each `[cost]` rate you write replaces the shipped
+  rate on its own; one you leave out keeps it. An inherited rate cannot be
+  cleared.
+- **Efforts and the default effort.** An `efforts` list without a
+  `default_effort` keeps the shipped default if the new list has it, and
+  otherwise the model has none.
+- **Driver and base URL.** A `driver` that differs from the shipped one drops
+  the shipped `base_url` (so `driver = "openrouter"` alone is a valid
+  override). An entry that changes the endpoint — `driver` or `base_url` —
+  without writing `env_keys` does **not** inherit the shipped variables: the
+  shipped `FIREWORKS_API_KEY` belongs to Fireworks' own endpoint and never
+  pays for yours. craze still treats it as a key, though: exported, it is
+  kept out of the commands a native session runs and redacted from what they
+  print, as every key is ([Keys](#keys)), so it does not reach your endpoint
+  that way either.
+- **`default_model`** is yours when it names a model, the catalog's
+  otherwise.
+
+**A release never breaks a load.** What a file gets wrong on its own still
+stops a native session, naming the file, the table and the key: TOML syntax,
+a key craze does not know, a `version` other than 1, an inline key that
+cannot be one (below), or a value no entry could hold (an unknown driver, a
+negative window, an effort listed twice, a `default_effort` outside the
+`efforts` the same entry lists, a cost out of range). What an entry gets wrong
+only against the catalog is dropped with a warning at session start, naming
+the file, the table and the key, and the session carries on: a model whose
+provider no longer exists, a `default_effort` the model no longer offers, a
+partial entry for a model craze no longer ships, a `default_model` or
+`[subagents]` target that is not a model. Dropping your entry for a shipped
+model restores the shipped entry, so the catalog's default model always
+survives.
+
+An entry for a shipped model or provider that repeats every value it writes
+is legal, but it pins those values: a later catalog's change to them will not
+reach you. Delete it to follow craze's updates.
+
+### Keys
+
+For each provider, craze takes the first of its `env_keys` variables that is
+set to a usable key, and otherwise its inline `api_key`. A value that cannot
+be a key — shorter than 8 bytes, or overlapping craze's redaction marker — is
+skipped as though unset, with one line at session start naming the variable
+(never the value); an inline `api_key` like that is a load error instead.
+Every key craze knows, from every provider, is redacted from tool output, and
+the commands a native session runs are started without the variables that hold
+one. That covers every variable the shipped catalog or your `providers.toml`
+names as a key variable, even one no provider takes its key from any more —
+a shipped provider's after you point it at your own endpoint or give it
+`env_keys` of your own: it no longer funds anything, but its value is still a
+credential. A provider with no usable key leaves its models unusable, not the
+others.
+
+[`craze auth login <provider>`](cli.md#craze-auth-login) stores a key as that
+provider's inline `api_key`, [`craze auth logout
+<provider>`](cli.md#craze-auth-logout) removes it, and [`craze auth
+list`](cli.md#craze-auth-list) shows how each provider is connected: by a
+variable, which always wins, by its stored key, or not at all. In a native
+session, [`/connect`](tui.md#connect) stores a key the same way `login` does.
+No key is checked with its provider when it is stored; a wrong one shows on
+first use. When they write, `login`, `logout` and `/connect`:
+
+- **Rewrite `providers.toml` whole**, at `0600` (a new directory is made
+  `0700`). Comments and layout are not kept — the header they write says so —
+  but every key of every entry is, `source` and an explicit `env_keys = []`
+  included.
+- **Change one provider's `api_key` and nothing else.** A key the rules above
+  refuse is not stored. Another provider's stored key that cannot be used is
+  kept exactly as it is and named in a note, so two broken keys can be fixed
+  one at a time (native sessions start again once both are).
+- **Remove only the key.** An entry left with nothing else in it goes; one
+  that sets a name, an endpoint or variables stays.
+- **Refuse a `providers.toml` that is a symlink** — edit its target by hand —
+  and never write `models.toml`.
+- **Take turns**: each holds a lock beside the file, `providers.toml.lock`,
+  while it reads and writes.
+
+They know the catalog's providers and your own in `providers.toml`; in a
+directory whose `models.toml` says [`catalog = false`](#isolated-setups-catalog-false),
+only your own.
+
+### Keys stored while a session runs
+
+A running native session keeps the model table it started with. A provider
+you give a key to while it runs — an `api_key` written into `providers.toml`
+by `craze auth login`, `/connect`, by hand, or by another craze — is offered
+by the next session, or by this conversation after `/exit` and `craze -c`,
+never by the running one.
+
+The running session does watch that file, only so it can redact what it
+holds: at the start of every turn (a prompt, a `/compact`, or the delivery of
+a background sub-agent's result) it checks the `providers.toml` of the craze
+directory it started with, and when the file has changed it learns each
+inline key it did not know and redacts it from then on, as it redacts every
+key it knows — tool output and spill files included. A value that cannot be a
+key (shorter than 8 bytes, or overlapping the redaction marker) is ignored
+with one line naming the provider, never the value; a file that no longer
+parses is one line too, and nothing in it is learned until it is fixed.
+
+If a newly stored key turns out to be inside what the session sends with every
+request — its system prompt (which names the working directory), its tool
+definitions, or its plan file's path — none of that can be taken back, so the
+session refuses every later turn with `a newly stored API key appears in this
+session's frozen prompt; start a new session`.
+
+The redaction starts at the next turn, so there is a window: a key stored
+during a turn is learned when the next one starts, and a shell command or a
+sub-agent already running keeps the redaction it started with. A sub-agent
+started after the key was learned redacts it.
+
+### Model memory: `recent.json`
+
+A model or effort you pick in a native session's `/model` is remembered for
+the next session, in `recent.json` beside the two files
+(`~/.craze/native/recent.json`, or `$CRAZE_HOME/native/`):
+
+```json
+{
+  "version": 1,
+  "recent": [
+    {
+      "model": "muse-spark-1.3-contributor",
+      "provider": "meta",
+      "wire_model": "muse-spark-1.3-contributor",
+      "effort": "xhigh",
+      "at": "2026-09-30T10:12:00Z"
+    }
+  ]
+}
+```
+
+The list is newest first, one entry per model, and keeps at most 10. Each
+entry names the model by alias and by its provider and wire model, with the
+effort last used on it (`""` for a model with no effort control) and when it
+was picked (`at`, in UTC, for people reading the file). The file is `0600`.
+Deleting it forgets everything.
+
+**Who writes it.** Only a change made inside a running session — a model
+switch (`/model`, the model dialog, or an attached client's switch) or an
+effort change on the current model (which makes that model the newest, even if
+`/model` was never used) — once it has taken, recording the model and the
+effort the session is then on. `--model`, `craze
+prompt`, a resume and a sub-agent's model never write it. A session reads it
+once, when it starts: a switch changes where the next session starts, and the
+order the next session's `/model` lists models in — the remembered ones right
+after the current one, newest first — not the running one's.
+
+**Two sessions at once.** Every write reads, changes and replaces the file
+under a lock beside it, `recent.json.lock`, so two sessions switching at the
+same moment both keep their choice. A switch waits at most 2 seconds for
+another craze's lock. When the choice cannot be saved — the lock stayed busy,
+the file cannot be read or written, or a newer craze wrote it — the session
+says so in one note (`not saving the model choice: …`) and the switch itself
+stands.
+
+**Reading is bounded.** The read never waits on a FIFO and stops after 64 KiB,
+though a stalled filesystem can still delay an ordinary read. A missing file, one craze cannot read, one
+that is not a regular file (a FIFO, say) or is larger than 64 KiB, and one
+that is not a `recent.json` (not JSON, or a version craze does not know) are
+no memory at all. The next switch replaces a file that is not a
+`recent.json`, and leaves alone one it cannot read, one that is not a regular file or is over
+64 KiB, or one a newer craze wrote.
+
+**Where a new session starts.** With no `--model`, a new native session starts
+on the first of:
+
+1. the newest remembered model whose provider has a key, at its remembered
+   effort when the model still offers it (its `default_effort` otherwise);
+2. `default_model`;
+3. when `default_model`'s provider has no key, the first model, by alias, whose
+   provider has one — with a note saying so.
+
+A remembered model is found by its alias while that alias still names the
+same provider and wire model, and otherwise by its provider and wire model,
+under whatever alias has them now: a release that renames a model keeps your
+choice, and an alias pointed at a different model does not inherit it. An
+entry no model matches, or whose provider has no key, is passed over and left
+in the file.
+
+- `--model <alias>` (the TUI's and `craze prompt`'s) starts on that model at the
+  effort remembered for it, when the model still offers it, and writes
+  nothing.
+- `craze prompt` without `--model` starts where a new TUI session would.
+- A resume (`craze -c`, `--resume`) keeps its transcript's model and effort,
+  and an explicit `--model` on a resume picks the model with the transcript's
+  effort carried over: the memory never applies to a resume. A resumed session
+  that turns out to have no transcript at all opens as a new one, and starts as
+  above.
+
+### Isolated setups: `catalog = false`
+
+A `models.toml` with `catalog = false` at the top turns the catalog off for
+its directory: the two files are then the whole table, as before the catalog
+existed — both are needed, `default_model` is required, and every entry is
+complete. It is meant for sandboxes such as the evaluation harness's homes,
+where no model beyond the ones written may appear.
+
+### Files from an older craze
+
+craze once imported its entries from gx, marking each `source = "gx"`. Such
+files still load and are never rewritten, but their entries yield to the
+catalog: a model entry marked `source = "gx"` is ignored when craze ships (or
+has retired) its alias, and a provider entry marked `source = "gx"` for a
+provider craze ships contributes only its `api_key` and any `env_keys`
+variable the catalog lacks. Any other entry — `source = "manual"`, or none —
+is your own, as above. A hand-copied entry that repeats the shipped one is a
+no-op.
+
+### Retired models
+
+When a release retires a model (or renames one, retiring the old alias), the
+catalog records the alias and every *dead* wire model id it pointed at; an
+alias whose wire id still answers is retired by alias alone, with no wire ids
+listed, so an entry of yours pointing at that id is not dropped. A retired
+alias disappears from an untouched directory with no warning: a `source =
+"gx"` entry for it is ignored, a `default_model` naming it falls back to the
+catalog's, and a `[subagents]` model or tier naming it falls back to its
+default (the parent's model). Any model entry of yours, under any alias,
+whose provider and wire model are a retired pair is dropped silently too — a
+dead wire id is dead whoever wrote it. An entry of yours for a retired alias
+that points at a live wire id is your own model and stays.
+
+### Sub-agent settings
+
+`[subagents]` (see [Sub-agent models](tui.md#sub-agent-models)) never stops a
+session for what the catalog changed: a `model` or tier target that is not a
+model is dropped — silently for a retired alias, with a warning otherwise —
+and falls through to the defaults, and an `effort` the kept `model` does not
+offer is dropped with a warning.
+
 ## Native output ceiling
 
 On the native provider (`--provider native`), every request to a model names
@@ -577,9 +906,8 @@ about 213,000 tokens, the default therefore moves that trigger below 85% of the
 window (to 75% under 128,000 tokens), where before it sat at 85%; a session
 resumed after upgrading that is already past the new trigger compacts before
 its next turn. A smaller `max_output_tokens` moves the trigger back up.
-`craze import gx` writes gx's `max_completion_tokens` here
-when gx has one; to keep a hand-set value across a reimport, set the entry's
-`source = "manual"`.
+The value is your own entry in `models.toml`; craze
+never rewrites it.
 
 ## Native compaction
 
@@ -598,12 +926,9 @@ tail_tokens       = 20000   # optional, >= 0: the most, in tokens, of a
 ```
 
 Every key is optional and applies to every model — a per-model override is a
-follow-up. `craze import gx` keeps the values of an existing `[compaction]`
-section — gx has no concept of it, so import never touches them — and a save
-keeps every value already set. Neither keeps the section byte for byte or
-whole: a save re-encodes the whole `models.toml` in its own canonical layout,
-so hand-written comments and formatting are not preserved, and a section left
-with none of these keys is dropped (omitted) rather than written out empty.
+follow-up. The section is your own entry in `models.toml`: craze reads it and
+never rewrites the file. If a tool of yours does re-encode the file, a section
+left with none of these keys is dropped rather than written out empty.
 
 ## Native cost
 
@@ -621,7 +946,9 @@ cache_write = 0.0
 ```
 
 Every key is optional and independent; a model with no `[cost]` table saves
-exactly as it did before this section existed. Each rate is dollars per
+exactly as it did before this section existed. Shipped models may carry a
+cost of their own; a rate you write for one replaces that rate alone (see
+[How the files merge](#how-the-files-merge)). Each rate is dollars per
 1,000,000 tokens, from 0 up to $10,000 — a rate outside that range, or one
 that is not a finite number (`nan`, `inf`), is refused at load. There are no
 tiers yet: a tier is per request, and a sub-agent's usage row already sums
@@ -639,9 +966,9 @@ identity that set a *different* `cost` still load, with a warning naming
 both and saying which one's price is used. An identity with no priced alias
 is simply unpriced — its usage is still counted in tokens, but adds no cost.
 
-`craze import gx` keeps an existing entry's `cost` across a reimport — gx
-has no concept of it, so import never touches this table, the same as
-[`[compaction]`](#native-compaction) above.
+The `cost` table is your own entry in `models.toml`, the same as
+[`[compaction]`](#native-compaction) above: craze reads it and never rewrites
+it.
 
 ## Environment
 
@@ -654,6 +981,7 @@ has no concept of it, so import never touches this table, the same as
 | `CRAZE_CONTROL_SOCKET` | Turns [the control socket](#the-control-socket) off for this run when it reads as false. It cannot turn one on against `control_socket = false`, and a value craze cannot read as a bool turns it off with one line saying so. Empty or unset leaves the decision to the config file |
 | `CRAZE_DETACH` | Turns [detached hosts](#detached-hosts) off for this run when it reads as false: the session runs inside the TUI's own process and ends with the terminal. It cannot turn detaching on against `detach = false`, and a value craze cannot read as a bool turns it off with one line saying so. Empty or unset leaves the decision to the config file |
 | `CRAZE_RUNTIME_DIR` | Overrides [the control socket's](#the-control-socket) runtime base (default: `$XDG_RUNTIME_DIR/craze`, then `/run/user/<uid>/craze` on Linux, then `/tmp/craze-<uid>`): an absolute path, short enough to leave room for `<ns>/<hostId>.sock` under `sun_path`'s limit. Meant for tests and unusual hosts; see [Protocol reference](protocol.md#reaching-a-host) |
+| `FIREWORKS_API_KEY`, `META_API_KEY`, `OPENROUTER_API_KEY`, `ZHIPU_API_KEY` / `ZAI_API_KEY` | API keys for the native provider's [shipped providers](#the-shipped-catalog), tried before any inline `api_key`; a value under 8 bytes is skipped with a warning |
 | `XAI_API_KEY` | Grok API key; used when initialize advertises `xai.api_key` |
 | `GROK_CODE_XAI_API_KEY` | Legacy alias for `XAI_API_KEY` |
 | `HERDR_ENV`, `HERDR_SOCKET_PATH`, `HERDR_PANE_ID` | Read, never set. `HERDR_ENV=1` with the other two set means craze is in a herdr pane and reports [host status](#host-status) to it; `HERDR_ENV` is then removed from the agent's environment |

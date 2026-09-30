@@ -499,14 +499,16 @@ func TestNativeResolvesTheKeysOnce(t *testing.T) {
 // TestNativeLearnsAKeyExportedAfterStart is the other half of that seal, and
 // the capability it must not cost: the memo covers the startup window and is
 // released when open() returns, so the harness reads the environment again
-// from then on. A switch to a provider whose key the environment gained since
-// Open resolves it and the session's redactor grows to cover it
-// (toolset.resolve) — which a memo held for the session's life would have
-// turned into a permanent failure.
+// from then on. A switch resolves every provider's key again
+// (toolset.resolve), so a key the environment gained since Open is learned at
+// the next switch and the session's redactor grows to cover it — which a memo
+// held for the session's life would have answered "" for, for good.
 //
-// The control is the same switch before the key exists: it fails, so the
-// success below is the export being seen and not the model having been
-// funded all along.
+// The provider that key funds is still not offered to this session: its
+// picker was judged at start (plan 031 §3.6, P8), so a switch to its model is
+// a switch to an unknown model, after the export as before it. The control is
+// the redactor between the export and the switch: it does not cover the value
+// yet, so the covering below is the switch's own reading of the export.
 func TestNativeLearnsAKeyExportedAfterStart(t *testing.T) {
 	const exported = "sk-exported-after-start-not-a-secret"
 	f := newNativeFixture(t)
@@ -524,20 +526,20 @@ func TestNativeLearnsAKeyExportedAfterStart(t *testing.T) {
 	}
 	s := startContent(t, f, Options{}, nil, nil)
 
-	if _, err := s.SetModel(context.Background(), "", "nokey/d"); err == nil {
-		t.Fatal("control: a switch to the unfunded provider succeeded before its key existed")
-	}
 	live.Store(true)
-	if _, err := s.SetModel(context.Background(), "", "nokey/d"); err != nil {
-		t.Fatalf("a switch to a provider whose key was exported after Open: %v", err)
+	if got := s.hs.Redact("before " + exported + " after"); !strings.Contains(got, exported) {
+		t.Fatalf("control: the session covered the key before anything read it: %q", got)
 	}
-	if got := s.Snapshot().CurrentModel; got != "nokey/d" {
-		t.Fatalf("the session is on %q, want the model it switched to", got)
+	if _, err := s.SetModel(context.Background(), "", "nokey/d"); err == nil || !strings.Contains(err.Error(), `unknown model "nokey/d"`) {
+		t.Fatalf("a switch to a provider funded only since start = %v, want an unknown model (plan 031 §3.6)", err)
 	}
-	// And the session's redactor grew to cover the key it learned, which is
-	// what reading the environment again is for.
+	if _, err := s.SetModel(context.Background(), "", "test/b"); err != nil {
+		t.Fatalf("a switch to an offered model: %v", err)
+	}
+	// And the session's redactor grew to cover the key the switch read,
+	// which is what reading the environment again is for.
 	if got := s.hs.Redact("before " + exported + " after"); strings.Contains(got, exported) {
-		t.Fatalf("the session did not learn the key it switched to: %q", got)
+		t.Fatalf("the session did not learn the key the switch read: %q", got)
 	}
 }
 

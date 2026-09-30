@@ -211,6 +211,14 @@ func digestModel(m *Model) gateDigest {
 			w.walk(reflect.ValueOf(m.mdlg.focus))
 			w.walk(reflect.ValueOf(m.mdlg.chosen))
 			w.walk(reflect.ValueOf(m.mdlg.touched))
+			w.walk(reflect.ValueOf(m.mdlg.gen))
+			w.walk(reflect.ValueOf(m.mdlg.connect))
+		case "cdlg":
+			// The key field by its length and cursor, never its text: the
+			// rest of the dialog by reflection, the field opaque (plan 031
+			// §3.9).
+			w.buf = fmt.Appendf(w.buf, "%d %d %v ", len(m.cdlg.key.Value()), m.cdlg.key.Position(), m.cdlg.key.Focused())
+			w.walk(reflect.ValueOf(m.cdlg))
 		case "shared":
 			digestShared(w, m)
 		default:

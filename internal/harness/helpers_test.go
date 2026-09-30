@@ -30,7 +30,9 @@ const (
 
 // The test model table: two models on one provider with different effort
 // lists, a model with no effort control on a second provider, and a model
-// whose provider has no key.
+// whose provider has no key. models.toml says `catalog = false` (plan 031
+// §3.13): these files are the whole table, so TestModels sees exactly these
+// four models and no shipped one.
 const (
 	providersTOML = `version = 1
 
@@ -50,6 +52,7 @@ base_url = "%[1]s"
 env_keys = ["NOKEY_API_KEY"]
 `
 	modelsTOML = `version = 1
+catalog = false
 default_model = "test/a"
 
 [models."test/a"]

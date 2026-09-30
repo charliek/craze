@@ -461,6 +461,13 @@ const (
 type ModelInfo struct {
 	ID   string
 	Name string
+	// Recent is the model's rank in native's model memory (plan 031 §3.6,
+	// P9): 1 for the most recently picked model the session offers, 2 for
+	// the one before, and so on; 0 for a model not remembered — and for
+	// every model of an ACP provider, which has no memory. OrderModels puts
+	// the remembered models after the current one, by rank. On the wire it is
+	// the catalog model's "recent", absent for 0.
+	Recent int
 }
 
 type ModeInfo struct {

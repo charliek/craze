@@ -215,9 +215,12 @@ func TestPriceLooksUpByIdentity(t *testing.T) {
 
 // TestConflictingPricesWarn: two aliases of one identity with different cost
 // load with a table warning naming both, and Price still answers — the
-// first alias in sorted order's rate.
+// first alias in sorted order's rate. The fixtures here say `catalog = false`:
+// fireworks/kimi-k3 is a shipped alias with a cost of its own, which the
+// merge would carry into these rates (merge_test.go covers that on purpose).
 func TestConflictingPricesWarn(t *testing.T) {
 	const models = `version = 1
+catalog = false
 default_model = "fireworks/kimi-k3"
 
 [models."fireworks/kimi-k3"]
@@ -251,6 +254,7 @@ input = 0.80
 
 	// Equal cost, no conflict: no warning.
 	const agree = `version = 1
+catalog = false
 default_model = "fireworks/kimi-k3"
 
 [models."fireworks/kimi-k3"]
@@ -289,6 +293,7 @@ func TestConflictingConfiguredPricesWarnEvenWhenTheyRoundAlike(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			models := `version = 1
+catalog = false
 default_model = "fireworks/kimi-k3"
 
 [models."fireworks/kimi-k3"]

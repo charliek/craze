@@ -89,6 +89,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -464,9 +465,10 @@ type logged struct {
 // the first turn that produces output — so a session closed before that
 // leaves nothing behind; it only sweeps old spill files. A starting model
 // whose provider has no key is ErrNoAPIKey; the caller decides whether to
-// fall back to another model (plan 018 §3.8). A key anywhere in the table,
-// used or not, that is too short to redact from tool output fails it
-// (modeltable.ErrKeyTooShort, plan 019 §3.8).
+// fall back to another model (plan 018 §3.8). An inline key anywhere in the
+// table, used or not, that is too short to redact from tool output fails it
+// (modeltable.ErrKeyTooShort, plan 019 §3.8); such a value in the environment
+// is not a key at all, and is skipped (plan 031 §3.2).
 //
 // With Options.Child set it opens a sub-agent (child.go, plan 026 §3.2): the
 // runner's id, the parent's links in the header, a filtered toolset, the
@@ -931,6 +933,60 @@ func (s *Session) SessionStartSHA256() string { return promptDigest(s.tools.star
 // text (subagents.childKeys). One replacer over them all, never two in turn
 // (subagents.union says why).
 func (s *Session) Redact(text string) string { return s.redactor().String(text) }
+
+// LearnKeys teaches the session keys stored in providers.toml since it opened
+// (plan 031 §3.8, P8), so that it can redact them. The session's table, its
+// models and its tools' environment stay what they were at Open: a stored key
+// is never one it sends, only one it may meet — in a file a tool reads, in
+// what a command prints, in a prompt the user pastes it into. The adapter
+// calls it at the start of every turn it runs (a prompt, /compact, a wake),
+// with every inline key the file holds when it has changed.
+//
+// Each value is trimmed and held to modeltable.KeyProblem (r2-3): one that
+// cannot be a key — shorter than modeltable.MinKeyLen, or overlapping the
+// redaction marker — is skipped, and skipped[i] says why keys[i] was, as
+// modeltable.ErrKeyTooShort or modeltable.ErrKeyOverlapsMarker, never quoting
+// it; skipped is nil when none was. It is not a credential this session could
+// ever send, so, like an environment value of that kind (§3.2), it is not one
+// to redact either. A blank value is no key, and is neither learned nor
+// skipped.
+//
+// The others join the session's keys exactly as a switch's resolve adds them
+// (toolset.learn): Redact covers them at once, and the next turn adopts the
+// redactor over them as it begins, so a turn already running keeps the one it
+// began with (R1). They are only ever added. A sub-agent opened from then on
+// starts with them (r2-1); one already running keeps what it has, and what it
+// reports through the runner is redacted with them anyway (union).
+//
+// A new key inside what the session sends unredacted with every request — its
+// system prompt, its encoded tools or its plan file's path — is learned all the
+// same, and puts the session in the refusal state: every Run, Compact and Wake
+// from then on is ErrStoredKeyFrozen, until Close (r2-2). LearnKeys returns
+// ErrStoredKeyFrozen from the call that found one; nil otherwise, including
+// from a later call on a session already refusing.
+//
+// It is safe from any goroutine, a closed session included, and takes only the
+// toolset's lock, a leaf: learning is serialized there.
+func (s *Session) LearnKeys(keys []modeltable.Secret) (skipped []error, err error) {
+	vals := make([]string, 0, len(keys))
+	for i, k := range keys {
+		v := strings.TrimSpace(k.Reveal())
+		if problem := modeltable.KeyProblem(v); problem != nil {
+			if skipped == nil {
+				skipped = make([]error, len(keys))
+			}
+			skipped[i] = problem
+			continue
+		}
+		if v != "" {
+			vals = append(vals, v)
+		}
+	}
+	if len(vals) > 0 && s.tools.learn(vals) {
+		err = ErrStoredKeyFrozen
+	}
+	return skipped, err
+}
 
 // Redactor is Redact taken once: a function over the keys Redact covers now,
 // which takes no lock when it is applied. A caller that redacts inside a lock

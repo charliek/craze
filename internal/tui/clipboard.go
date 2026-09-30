@@ -223,6 +223,11 @@ func lineCount(s string) int {
 // C11r, astra r22-c11 2): one asked for while a launch's session was still
 // being spawned included, which is that session's and no other's (C11r2,
 // astra r24-fix1112).
+//
+// key is the /connect key field the paste was asked for in
+// (pasteFromClipboard, plan 031 §3.9), the zero value for the composer's: a
+// paste for a key field goes into that field while it is the one open, and is
+// dropped otherwise — never into the composer (Model.pasteIntoKey).
 type pasteMsg struct {
 	text     string
 	shownGen uint64
@@ -234,6 +239,7 @@ type pasteMsg struct {
 	// later opening's input over the same session, whose shown generation is
 	// the same (C15r, astra r30-c15 2).
 	listGen uint64
+	key     keyField
 }
 
 // pasteFromClipboard is Ctrl+V. bubbles' own binding calls clipboard.ReadAll
@@ -244,15 +250,28 @@ type pasteMsg struct {
 // session list whose input it is for, 0 for the composer (pasteMsg).
 func pasteFromClipboard(shown, listGen uint64) tea.Cmd {
 	read := clipboardRead
-	return func() tea.Msg {
-		// A box with no clipboard tool pastes nothing, quietly: an error line
-		// for a keystroke that had nothing to insert is noise.
-		text, err := read()
-		if err != nil {
-			return pasteMsg{shownGen: shown, listGen: listGen}
-		}
-		return pasteMsg{text: text, shownGen: shown, listGen: listGen}
+	return func() tea.Msg { return readPaste(read, pasteMsg{shownGen: shown, listGen: listGen}) }
+}
+
+// pasteFromClipboardForKey is Ctrl+V in /connect's key field (plan 031 §3.9,
+// CR 23): key is that field, so the answer lands there or nowhere — never in
+// a field opened since, and never in the composer (pasteMsg.key). Its own
+// closure, like pasteFromClipboard's, so a command is named for what it reads.
+func pasteFromClipboardForKey(shown uint64, key keyField) tea.Cmd {
+	read := clipboardRead
+	return func() tea.Msg { return readPaste(read, pasteMsg{shownGen: shown, key: key}) }
+}
+
+// readPaste reads the clipboard into msg, which says where the text is for.
+func readPaste(read func() (string, error), msg pasteMsg) tea.Msg {
+	// A box with no clipboard tool pastes nothing, quietly: an error line for
+	// a keystroke that had nothing to insert is noise.
+	text, err := read()
+	if err != nil {
+		return msg
 	}
+	msg.text = text
+	return msg
 }
 
 // capClipboard cuts text to clipboardMax bytes on a rune boundary, so a

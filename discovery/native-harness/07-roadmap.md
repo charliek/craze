@@ -62,7 +62,7 @@ are qualified (D-24). Nothing blocks H1.
 
 - `internal/harness`: `CRAZE_HOME` (single env var, replaces
   `CRAZE_CONFIG`, D-27); two-file config, `providers.toml` + `models.toml`,
-  populated once by `craze import gx` (D-28); Fantasy provider factory
+  populated once by `craze import gx` (D-28; *superseded 2026-09-30 by D-75: the import is gone, the files overlay a shipped catalog*); Fantasy provider factory
   (OpenRouter via `openaicompat`, not `providers/openrouter`, D-35); the
   finish-normalizing `LanguageModel` wrapper with its fixtures, including the
   `refusal` stop reason (D-21, D-25, D-36); store with
@@ -119,7 +119,7 @@ Live smoke, Linux (2026-09-19), one TUI turn per imported alias:
 | `openrouter/gpt-5.6-terra` | clean, no reasoning text streamed |
 | `openrouter/gpt-5.6-sol` | clean, no reasoning text streamed |
 
-macOS (mac-mini, cross-compiled darwin/arm64): `craze import gx` produced the
+macOS (mac-mini, cross-compiled darwin/arm64; `craze import gx` has since been removed, D-75): `craze import gx` produced the
 same 4 providers and 15 models; one TUI turn each on `fireworks/kimi-k3`
 (thinking shown), `glm-5.3`, and `muse-spark-1.3` all answered clean.
 

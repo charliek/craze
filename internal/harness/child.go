@@ -30,7 +30,9 @@ import (
 //
 // Everything else — home, workspace, table, model client, environment, clock,
 // version — arrives through the ordinary Options, the parent's own values,
-// and the redaction keys are computed from the table as for any session.
+// and the redaction keys are computed from the table as for any session, with
+// the stored keys the parent has learned added to them (ChildOptions.learned,
+// plan 031 §3.8).
 
 // ChildOptions opens a session as a sub-agent of another. Set only by the
 // runner (subagents.go); a session with Child set is a child for its whole
@@ -73,6 +75,16 @@ type ChildOptions struct {
 	// on another profile renders, which is the parent's section rendered again
 	// (sessionStart). Set by the runner alone, from the parent's childBase.
 	top startModel
+	// learned are the stored keys the parent had learned when the child was
+	// opened (LearnKeys, plan 031 §3.8, r2-1): no table or environment holds
+	// them, so the child's own Keys would not find them, and it starts with
+	// them instead — its redactor, and every refusal Open makes of a key in
+	// its home or its prompt, cover them from before anything is built. A
+	// child already running when the parent learns one keeps the keys it
+	// opened with (R1); what it reports reaches the parent through the
+	// runner's union, which reads the parent's keys at each use. Set by the
+	// runner alone.
+	learned []string
 	// Mode is the parent's mode when the child opens; Options.Mode is not
 	// read for a child. SetMode on a child is ErrChildMode (§3.5).
 	Mode string

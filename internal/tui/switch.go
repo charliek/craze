@@ -149,6 +149,11 @@ func (m Model) withSession(seed sessionSeed) Model {
 		drafts:          m.drafts,
 		retired:         m.retired,
 		completeLoads:   m.completeLoads,
+		// Where /connect and the connect row read and write (plan 031
+		// §3.9): the TUI's own native directory and environment, whichever
+		// session it shows.
+		nativeDir: m.nativeDir,
+		nativeEnv: m.nativeEnv,
 		// The counters that only ever move forward, across every session:
 		// no generation, gate id, stamp, restore or turn count is reused.
 		sessGen:       m.sessGen,
@@ -158,6 +163,7 @@ func (m Model) withSession(seed sessionSeed) Model {
 		resumeAttempt: m.resumeAttempt,
 		spawnSeq:      m.spawnSeq,
 		unstartedSeq:  m.unstartedSeq,
+		connSeq:       m.connSeq,
 		restores:      m.restores,
 		turnStarts:    m.turnStarts,
 		// The gate's queue holds the TUI's messages as well as the session's

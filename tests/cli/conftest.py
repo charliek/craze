@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import tomllib
 from collections.abc import Iterator, Mapping
 from pathlib import Path
 
@@ -22,6 +23,25 @@ ROOT = Path(__file__).resolve().parents[2]
 # every file outside that package, so a test still isolating itself with it
 # fails CI instead of reaching the developer's real ~/.craze.
 REMOVED_CONFIG_ENV = "CRAZE_" + "CONFIG"
+
+# The model catalog craze ships (plan 031 §3.1), compiled into the binary.
+SHIPPED_CATALOG = ROOT / "internal" / "harness" / "modeltable" / "catalog.toml"
+
+
+@functools.cache
+def catalog_env_names() -> tuple[str, ...]:
+    """Every environment variable a shipped provider takes a key from, sorted.
+
+    Read from the catalog itself, so a catalog change needs no edit here -- the
+    Go twin is modeltable.CatalogEnvNames. An empty list means the file moved
+    or changed shape, and fails loudly rather than scrubbing nothing.
+    """
+    with SHIPPED_CATALOG.open("rb") as f:
+        doc = tomllib.load(f)
+    names = sorted({n for p in doc.get("providers", {}).values() for n in p.get("env_keys", [])})
+    if not names:
+        pytest.fail(f"{SHIPPED_CATALOG} names no env_keys to scrub")
+    return tuple(names)
 
 
 def _bin(env_name: str, *parts: str) -> Path:
@@ -67,6 +87,12 @@ def isolate_run_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator
     # written -- or, unparseable, print a diagnostic into a run whose stderr a
     # case reads. A case that wants it sets it itself.
     monkeypatch.delenv("CRAZE_JOURNAL", raising=False)
+    # The shipped model catalog brings its providers' variable names into
+    # every native table (plan 031 §3.13): a key exported in the developer's
+    # shell would fund a test's native session, change its model list and be
+    # redacted in its output. Every one goes; a case that wants one sets it.
+    for name in catalog_env_names():
+        monkeypatch.delenv(name, raising=False)
     # craze reports its status to the terminal multiplexer it runs in (herdr,
     # roost) whenever that host's variables say so -- and this suite is often
     # run from inside one. Inherited, they would point a test craze at the

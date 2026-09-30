@@ -415,17 +415,26 @@ func (r *subagents) hasPending() bool {
 // delivers it. It takes one leaf lock and never waits, so Options.OnPending's
 // handler may call it; a caller that delivers checks it again whenever a turn
 // ends, since a result can become pending while one runs.
-func (s *Session) HasPending() bool { return s.subs.hasPending() }
+//
+// A session in the refusal state (ErrStoredKeyFrozen, plan 031 §3.8) has none:
+// no turn and no wake of its can take a result any more, and a caller that
+// woke on a pending one would be refused, find it still pending, and wake
+// again, for ever. Its flag is an atomic, so this takes no lock beyond the
+// registry's.
+func (s *Session) HasPending() bool { return !s.tools.refusing.Load() && s.subs.hasPending() }
 
 // owed reports whether a background child's result is still owed to the
 // parent's model outside any turn: running — its child not yet ended, or ended
 // and its result not yet published, however far its finish has been reported
 // (runToEnd reports SubagentFinished before publish makes the result pending)
-// — or pending. A reserved result is a running turn's or wake's, which says so
-// itself; a committed one is delivered; a suspended one waits for a person's
-// next turn and no wake takes it (no automatic retry loop, P44), so it owes
-// nothing that could happen alone; and one Close reported undelivered is over.
-func (r *subagents) owed() bool {
+// — or pending, unless undeliverable. A reserved result is a running turn's or
+// wake's, which says so itself; a committed one is delivered; a suspended one
+// waits for a person's next turn and no wake takes it (no automatic retry
+// loop, P44), so it owes nothing that could happen alone; and one Close
+// reported undelivered is over. undeliverable is the parent's refusal state
+// (plan 031 §3.8): no turn will ever take a pending result then, so one is no
+// more owed than a suspended one, and only a child still running is.
+func (r *subagents) owed(undeliverable bool) bool {
 	if r == nil {
 		return false
 	}
@@ -435,7 +444,7 @@ func (r *subagents) owed() bool {
 		if res.reported {
 			continue
 		}
-		if res.state == resultRunning || res.state == resultPending {
+		if res.state == resultRunning || (res.state == resultPending && !undeliverable) {
 			return true
 		}
 	}
@@ -448,9 +457,12 @@ func (r *subagents) owed() bool {
 // or a result pending, waiting for a wake or a turn to deliver it. It is the
 // session's half of a host's idle verdict (agent.OwedWork): from a child's
 // launch to its result's delivery it stays true but while a turn or a wake has
-// the result reserved, and that turn is busy in its own right. It takes one
-// leaf lock and never waits.
-func (s *Session) BackgroundOwed() bool { return s.subs.owed() }
+// the result reserved, and that turn is busy in its own right. In the refusal
+// state (ErrStoredKeyFrozen, plan 031 §3.8) a pending result is owed no more
+// — nothing will deliver it, and a host that waited on it would never go idle
+// — and Close reports it undelivered as it would any other. It takes one leaf
+// lock and never waits.
+func (s *Session) BackgroundOwed() bool { return s.subs.owed(s.tools.refusing.Load()) }
 
 // runningChild is a background child still running, as a compaction's state
 // section names it (plan 028 §3.8, PD24): its id, its agent type and its

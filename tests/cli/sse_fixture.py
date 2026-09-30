@@ -570,7 +570,9 @@ def write_native_config(
 ) -> None:
     """Write providers.toml (0600) and models.toml (0644) in the version-1
     schema internal/harness/modeltable reads (modeltable.go's providerEntry
-    and modelEntry), pointed at a fixture server.
+    and modelEntry), pointed at a fixture server. models.toml says
+    ``catalog = false``, so the two files are the whole table and the shipped
+    catalog's models never join it (plan 031 §3.13).
 
     env_keys names UNUSED_ENV_KEY -- never set in this process's environment
     -- so the inline api_key is what actually resolves (modeltable.Resolve
@@ -602,6 +604,9 @@ def write_native_config(
 
     model_lines = [
         "version = 1\n",
+        # The whole table (plan 031 P10): no shipped model merged in, so every
+        # case sees exactly this one model and provider.
+        "catalog = false\n",
         f'default_model = "{alias}"\n',
         "\n",
         f"[models.{alias}]\n",

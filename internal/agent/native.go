@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -41,10 +42,6 @@ const (
 	// mode a session with no Options.Mode opens in (plan 023 §3.6).
 	nativeAgentMode = "agent"
 )
-
-// errNoModels is Start's answer when the harness has never been set up: the
-// one thing to do about it is import the model table.
-var errNoModels = errors.New(`native: no models configured — run "craze import gx"`)
 
 // nativeSession is the native adapter. Its turn state mirrors the live
 // session's: claimed from Begin until the continuation returns, inPrompt
@@ -151,8 +148,15 @@ type nativeSession struct {
 	closed  bool
 	hs      *harness.Session
 	// table is the model table the harness was opened with, kept to phrase a
-	// switch's missing key the way Start phrases one.
+	// switch's missing key the way Start phrases one, and to name a model the
+	// memory records by its identity in this table (plan 031 r2-5).
 	table *modeltable.Table
+	// home is the Home the harness was opened with (open(), after the seam),
+	// set with table: the directory whose recent.json a switch made in this
+	// session is remembered in (remember, plan 031 §3.4) — never
+	// paths.NativeDir() read again later, which an environment or a seam
+	// could answer differently by then (panel astra 12).
+	home string
 	// efforts are the effort levels each alias offers, from the harness's
 	// model list at Start; the effort option is rebuilt from them whenever
 	// the current model or effort changes.
@@ -263,6 +267,21 @@ type nativeSession struct {
 	// primary send and a closed done are a random choice, so that window
 	// cannot be pinned from inside the publish.
 	loadEndSeam func()
+
+	// keys is the session's look at the providers.toml of the Home it opened
+	// the harness with, made at every turn's start so the session learns the
+	// keys stored there since, for redaction only (native_keys.go, plan 031
+	// §3.8). Its lock is its own: taken with no lock of the adapter's held and
+	// never under one, and held across nothing but the file's reading, the
+	// harness's LearnKeys and Redact — whose locks are the harness's leaves —
+	// and a note.
+	keys storedKeys
+	// keysSeam runs inside a look, between the reading of providers.toml and
+	// the recording of the stamp taken before it, with keys.mu held. **A test
+	// seam: nil in production**, set only by a test in this package before
+	// the first turn. It exists so a test can write the file in exactly the
+	// window that decides which stamp a look must record.
+	keysSeam func()
 }
 
 // steerText is one interjection in both of its spellings: sent is what went
@@ -462,7 +481,7 @@ func (s *nativeSession) start(context.Context) error {
 	if load {
 		s.openReplay()
 	}
-	hs, table, content, err := s.open()
+	hs, opened, content, err := s.open()
 	if err != nil {
 		// Nothing has been assigned yet — the content below is assigned only
 		// once Open has succeeded — so a session whose harness would not open
@@ -485,12 +504,20 @@ func (s *nativeSession) start(context.Context) error {
 		}
 		return err
 	}
+	// The effort levels of every model in the table, for the effort option
+	// of whichever model the session is on (refreshCurrentLocked).
 	models := hs.Models()
 	efforts := make(map[string][]string, len(models))
-	infos := make([]ModelInfo, 0, len(models))
 	for _, m := range models {
 		efforts[m.Alias] = m.Efforts
-		infos = append(infos, ModelInfo{ID: m.Alias, Name: sanitizeLine(m.Name)})
+	}
+	// The models the session offers — the ones whose provider has a key,
+	// and the one it runs on — in the picker's order, each with its rank in
+	// the model memory (plan 031 §3.6; nativeOpened.choices). The name is
+	// sanitized here: it is text from a file the owner edits by hand.
+	infos := make([]ModelInfo, 0, len(opened.choices))
+	for _, c := range opened.choices {
+		infos = append(infos, ModelInfo{ID: c.Alias, Name: sanitizeLine(c.Name), Recent: c.Recent})
 	}
 	// The scan and the instruction loader ran inside open(), before the
 	// harness was opened, because the prompt they feed is frozen there (§3.4)
@@ -526,7 +553,7 @@ func (s *nativeSession) start(context.Context) error {
 		return fmt.Errorf("agent: session closed")
 	}
 	s.hs = hs
-	s.table = table
+	s.table, s.home = opened.table, opened.home
 	s.efforts = efforts
 	s.plugins = entries
 	s.snap.Plugins = rows
@@ -909,8 +936,9 @@ func visibleNativeRows(entries []PluginEntry, rows []PluginCommand) []PluginComm
 }
 
 // open resolves everything Start needs and opens the harness, returning it
-// with the model table it was opened on and the content it read for it. Its
-// errors are already phrased for the user.
+// with the model table it was opened on and the directory that was read from
+// (nativeOpened), and the content it read for it. Its errors are already
+// phrased for the user.
 //
 // The directory is paths.NativeDir(), and the table is loaded from it after
 // tweak has run, so a test's tweak can point Home somewhere else or hand in a
@@ -931,9 +959,11 @@ func visibleNativeRows(entries []PluginEntry, rows []PluginCommand) []PluginComm
 // A load (Options.LoadSessionID) opens the stored session instead
 // (harness.Options.Resume, plan 028 §3.3): the same reading, the same seams,
 // and "unspecified" left unspecified — no --model is no model, which the
-// harness reads as the transcript's own (fundedModel is a new session's
-// default only, P8), and no --plan/--ask is no mode, the transcript's last.
-func (s *nativeSession) open() (*harness.Session, *modeltable.Table, nativeLoad, error) {
+// harness reads as the transcript's own (startModel is a new session's
+// default only, P8), no effort is the transcript's effort (the model memory
+// never reaches a resume, plan 031 §3.5), and no --plan/--ask is no mode, the
+// transcript's last.
+func (s *nativeSession) open() (*harness.Session, nativeOpened, nativeLoad, error) {
 	var none nativeLoad
 	// The mode the session starts in, resolved before anything is opened: an
 	// unknown one must refuse Start rather than be silently ignored, and it is
@@ -941,11 +971,11 @@ func (s *nativeSession) open() (*harness.Session, *modeltable.Table, nativeLoad,
 	// arriving as the harness's own ErrUnknownMode (plan 023 §3.6).
 	mode, err := nativeMode(s.opts.Mode)
 	if err != nil {
-		return nil, nil, none, err
+		return nil, nativeOpened{}, none, err
 	}
 	ws, err := nativeWorkspace(s.opts.Workspace)
 	if err != nil {
-		return nil, nil, none, err
+		return nil, nativeOpened{}, none, err
 	}
 	hopts := harness.Options{
 		Home:      paths.NativeDir(),
@@ -968,15 +998,22 @@ func (s *nativeSession) open() (*harness.Session, *modeltable.Table, nativeLoad,
 	defer release()
 	hopts.Getenv = getenv
 	if hopts.Home == "" {
-		return nil, nil, none, errors.New("native: there is no craze directory to read the model table from (set HOME or CRAZE_HOME)")
+		return nil, nativeOpened{}, none, errors.New("native: there is no craze directory to read the model table from (set HOME or CRAZE_HOME)")
 	}
+	// The directory whose providers.toml every turn looks at for keys stored
+	// since (native_keys.go, plan 031 §3.8): the Home the harness opens with,
+	// after the seam, and never paths.NativeDir() read again later — an
+	// environment or a seam could answer differently then, and a session
+	// would learn another directory's keys, or miss its own (panel astra 12).
+	s.keys.watch(hopts.Home)
 	if hopts.Table == nil {
+		// The shipped catalog with the user's files merged over it (plan 031
+		// §3.2): both files are optional, so an empty directory is the
+		// catalog alone, and a machine with nothing funded is startModel's
+		// to explain.
 		table, err := modeltable.Load(hopts.Home)
-		if errors.Is(err, modeltable.ErrNotConfigured) {
-			return nil, nil, none, errNoModels
-		}
 		if err != nil {
-			return nil, nil, none, fmt.Errorf("native: %w", err)
+			return nil, nativeOpened{}, none, fmt.Errorf("native: %w", err)
 		}
 		hopts.Table = table
 	}
@@ -984,27 +1021,38 @@ func (s *nativeSession) open() (*harness.Session, *modeltable.Table, nativeLoad,
 	for _, w := range table.Warnings {
 		s.note(w)
 	}
+	// A variable a provider's key comes from, set to a value that cannot be
+	// one, is skipped by every reader of keys (plan 031 §3.2); the session
+	// says so once, by name, never the value.
+	for _, w := range table.EnvWarnings(hopts.Getenv) {
+		s.note(w)
+	}
 
-	switch {
-	case strings.TrimSpace(s.opts.Model) != "":
+	// The model memory (plan 031 §3.4), read once, from the Home the harness
+	// opens with: what a new session starts on, and at what effort. Reading
+	// it never fails — a missing or broken recent.json is no memory — and a
+	// load reads it only for openEmpty, whose session is a new one.
+	recent := modeltable.ReadRecent(hopts.Home)
+	if strings.TrimSpace(s.opts.Model) != "" {
 		// Resolved the way every provider's --model is (MatchModel's
 		// normalisation), so an alias typed with spaces or capitals, or a
 		// model's display name, still finds it.
 		alias, err := MatchModel(Snapshot{Models: tableModels(table)}, s.opts.Model)
 		if err != nil {
-			return nil, nil, none, fmt.Errorf("native: %v (models.toml has %s)", err, strings.Join(table.Aliases(), ", "))
+			return nil, nativeOpened{}, none, fmt.Errorf("native: %v (the model table has %s)", err, strings.Join(table.Aliases(), ", "))
 		}
 		hopts.Model = alias
-	case hopts.Model == "" && hopts.Resume == "":
-		// A new session's default. A resumed one leaves Model "" — unspecified,
-		// which the harness resolves from the transcript's own model before
-		// the table's default (plan 028 §3.3, P8); choosing a funded alias here
-		// would make it explicit and switch the conversation's model.
-		alias, err := s.fundedModel(table, hopts.Getenv)
-		if err != nil {
-			return nil, nil, none, err
+	}
+	// A new session's model and effort. A resumed one leaves Model ""
+	// unspecified, which the harness resolves from the transcript's own model
+	// before the table's default (plan 028 §3.3, P8) — choosing a funded alias
+	// here would make it explicit and switch the conversation's model — and an
+	// explicit model keeps the transcript's effort, carried as it always was
+	// (r2-8).
+	if hopts.Resume == "" {
+		if err := s.newSessionModel(&hopts, recent); err != nil {
+			return nil, nativeOpened{}, none, err
 		}
-		hopts.Model = alias
 	}
 
 	// One resolution of the keys, for all three of the things that need them:
@@ -1096,23 +1144,51 @@ func (s *nativeSession) open() (*harness.Session, *modeltable.Table, nativeLoad,
 	closed := s.closed
 	s.mu.Unlock()
 	if closed {
-		return nil, nil, none, fmt.Errorf("agent: session closed")
+		return nil, nativeOpened{}, none, fmt.Errorf("agent: session closed")
 	}
 
 	hs, err := harness.Open(hopts)
 	switch {
 	case err == nil:
 	case hopts.Resume != "" && errors.Is(err, harness.ErrNoTranscript):
-		if hs, err = s.openEmpty(hopts); err != nil {
-			return nil, nil, none, err
+		if hs, err = s.openEmpty(hopts, recent); err != nil {
+			return nil, nativeOpened{}, none, err
 		}
 	case hopts.Resume != "":
-		return nil, nil, none, phraseLoadError(err, table, hopts.Model, hopts.Resume)
+		return nil, nativeOpened{}, none, phraseLoadError(err, table, hopts.Model, hopts.Resume)
 	default:
-		return nil, nil, none, phraseSetupError(err, table, hopts.Model)
+		return nil, nativeOpened{}, none, phraseSetupError(err, table, hopts.Model)
 	}
 	opened.Store(hs)
-	return hs, table, content, nil
+	// The models this session offers (plan 031 §3.6), judged now, before
+	// the seal is released: with the same reading of the environment the
+	// harness resolved its keys from, so every model offered is one whose
+	// key the session's redactor already covers — and with the model the
+	// harness actually opened on as the current one, which for a resume is
+	// the transcript's.
+	current, _ := hs.Current()
+	return hs, nativeOpened{table: table, home: hopts.Home, choices: table.Choices(recent, getenv, current)}, content, nil
+}
+
+// nativeOpened is what open() resolved beside the harness and the content:
+// the model table the harness was opened on, and the Home it was read from —
+// hopts.Home after the seam, the directory the session's model memory is
+// written in (plan 031 §3.4) — and the models the session offers.
+type nativeOpened struct {
+	table *modeltable.Table
+	home  string
+	// choices is the advertised list (plan 031 §3.6, owner decision Q4):
+	// the table's models whose provider has a key, plus the model the
+	// session runs on (P7), the remembered ones first, by rank, then the
+	// rest by name (modeltable.Table.Choices). It is computed once, at
+	// start, from the memory read at start (§3.4): a switch made in this
+	// session reorders the next session's picker, not this one's, and a
+	// provider connected while it runs is offered only by a new session or
+	// after /exit and craze -c (P8). A model it leaves out is one this
+	// session's SetModel does not know (MatchModel over the snapshot), as
+	// an unknown alias always was; --model still resolves against the whole
+	// table (tableModels).
+	choices []modeltable.Choice
 }
 
 // diagResumeEmpty is the journal diag a load that opened empty is noted as
@@ -1135,18 +1211,15 @@ const diagResumeEmpty = "resume_empty"
 // craze's) is open()'s error, as it has always been.
 //
 // With no file there is no transcript's model, effort or mode to resume on,
-// so they are a new session's: an explicit --model, else the funded default
-// (fundedModel), and --plan/--ask or agent. Nothing is replayed; the load still
-// opens and closes its bracket and installs its state (load).
-func (s *nativeSession) openEmpty(hopts harness.Options) (*harness.Session, error) {
+// so they are a new session's: an explicit --model at its remembered effort,
+// else the model memory's start model at its effort (startModel), and
+// --plan/--ask or agent (plan 031 §3.5, astra 9). Nothing is replayed; the
+// load still opens and closes its bracket and installs its state (load).
+func (s *nativeSession) openEmpty(hopts harness.Options, recent []modeltable.RecentEntry) (*harness.Session, error) {
 	id := hopts.Resume
 	hopts.Resume, hopts.SessionID = "", id
-	if hopts.Model == "" {
-		alias, err := s.fundedModel(hopts.Table, hopts.Getenv)
-		if err != nil {
-			return nil, err
-		}
-		hopts.Model = alias
+	if err := s.newSessionModel(&hopts, recent); err != nil {
+		return nil, err
 	}
 	hs, err := harness.Open(hopts)
 	if err != nil {
@@ -1154,6 +1227,28 @@ func (s *nativeSession) openEmpty(hopts harness.Options) (*harness.Session, erro
 	}
 	s.log.Note(journal.DiagNote{Kind: diagResumeEmpty, Fields: map[string]any{"session": hs.ID()}})
 	return hs, nil
+}
+
+// newSessionModel fills in a new session's model and effort from the model
+// memory (plan 031 §3.5), for open() and openEmpty alike: with no model, the
+// memory's start model at its effort (startModel); with one — --model — the
+// effort the memory remembers for it, the flag picking the model and the
+// memory still picking its effort (P6). The seam keeps its last word, as on
+// every field: an effort it set is left alone. A resume never comes here.
+func (s *nativeSession) newSessionModel(hopts *harness.Options, recent []modeltable.RecentEntry) error {
+	if hopts.Model == "" {
+		alias, effort, err := s.startModel(hopts.Table, recent, hopts.Getenv, hopts.Home)
+		if err != nil {
+			return err
+		}
+		hopts.Model = alias
+		hopts.Effort = cmp.Or(hopts.Effort, effort)
+		return nil
+	}
+	if hopts.Effort == "" {
+		hopts.Effort = hopts.Table.RememberedEffort(recent, hopts.Model)
+	}
+	return nil
 }
 
 // sealedGetenv is getenv sealed for the startup window: until release is
@@ -1176,14 +1271,17 @@ func (s *nativeSession) openEmpty(hopts harness.Options) (*harness.Session, erro
 //
 // The release is what the rest of the session needs, and it is not a detail.
 // The harness keeps this function as its own getenv for the session's whole
-// life and calls it on every switch (toolset.resolve), where reading the
-// environment again is the documented point: a session learns a key when a
-// switch makes current a model whose provider's key the environment gained
-// since Open, and the redactor grows to cover it from the next turn. A memo
-// held past startup would silently take that away — a switch that used to
-// work would fail for the rest of the session — in exchange for closing a
-// window between two calls microseconds apart. So the seal covers exactly the
-// window it was for, and nothing after it.
+// life and calls it on every switch (toolset.resolve, which reads every
+// provider's key) and for every sub-agent's model, where reading the
+// environment again is the documented point: a key the environment gained
+// since Open is learned at the next switch, and the redactor grows to cover
+// it from the next turn; a sub-agent can run on a provider whose key was
+// exported since. A memo held past startup would silently take that away —
+// a child that could have run would fail for the rest of the session — in
+// exchange for closing a window between two calls microseconds apart. So the
+// seal covers exactly the window it was for, and nothing after it. (A switch
+// of the session's own model is to a model its picker offers, which were
+// judged funded at start: plan 031 §3.6, nativeOpened.choices.)
 //
 // The harness calls it from its own goroutines, so both halves are guarded.
 func sealedGetenv(getenv func(string) string) (read func(string) string, release func()) {
@@ -1216,28 +1314,46 @@ func sealedGetenv(getenv func(string) string) (read func(string) string, release
 	return read, release
 }
 
-// fundedModel is the model a session with no --model starts on: the table's
-// default, unless its provider has no key, and then the lexicographically
-// first alias whose key resolves — one unfunded provider must not lock the
-// owner out of the others (plan 018 §3.8). getenv is the harness's, so the
-// fallback judges keys exactly as Open will. A default that fails for any
-// other reason is left for Open to report.
-func (s *nativeSession) fundedModel(table *modeltable.Table, getenv func(string) string) (string, error) {
-	def := table.DefaultModel
-	_, err := table.Resolve(def, getenv)
-	if !errors.Is(err, modeltable.ErrNoAPIKey) {
-		return def, nil
+// startModel is the model and effort a new session with no --model starts
+// on: the table's rule over the model memory (Table.StartModel, plan 031
+// §3.5) — the newest remembered model whose provider has a key, at its
+// remembered effort; else the default; else the first funded alias — with
+// getenv the harness's, so keys are judged exactly as Open will judge them.
+// Starting on a fallback alias rather than on the default or a remembered
+// model is noted, as it always was (plan 018 §3.8): a remembered model is the
+// owner's own choice, and needs no word. With nothing funded — a fresh
+// machine, with the shipped catalog and no key — the error says how to give
+// craze one (nothingFundedText); dir is the directory the table was read
+// from.
+func (s *nativeSession) startModel(table *modeltable.Table, recent []modeltable.RecentEntry, getenv func(string) string, dir string) (alias, effort string, err error) {
+	alias, effort, err = table.StartModel(recent, getenv)
+	if err != nil {
+		return "", "", &nativeError{msg: nothingFundedText(table, dir), cause: err}
 	}
-	for _, alias := range table.Aliases() {
-		if _, rerr := table.Resolve(alias, getenv); rerr == nil {
-			s.note(fmt.Sprintf("the default model %q has no API key; starting on %q", def, alias))
-			return alias, nil
+	if alias != table.DefaultModel && !slices.ContainsFunc(table.Recent(recent), func(e modeltable.RecentEntry) bool { return e.Alias == alias }) {
+		s.note(fmt.Sprintf("the default model %q has no API key; starting on %q", table.DefaultModel, alias))
+	}
+	return alias, effort, nil
+}
+
+// nothingFundedText is the start error when no model's provider has a key
+// (plan 031 §3.5): `craze auth login` first, then the first env_keys name of
+// each provider some model is on, sorted, and the file an inline key goes in.
+// It names a command, variables and a path, never a value.
+func nothingFundedText(table *modeltable.Table, dir string) string {
+	var names []string
+	for _, m := range table.Models {
+		if envKeys := table.Providers[m.Provider].EnvKeys; len(envKeys) > 0 {
+			names = append(names, envKeys[0])
 		}
 	}
-	return "", &nativeError{
-		msg:   "native: no configured model has an API key; " + strings.TrimPrefix(noKeyText(table, def), "native: "),
-		cause: err,
+	slices.Sort(names)
+	file := filepath.Join(dir, modeltable.ProvidersFile)
+	if len(names) == 0 {
+		return fmt.Sprintf(`native: no model provider has an API key — run "craze auth login", or add api_key to %s`, file)
 	}
+	return fmt.Sprintf(`native: no model provider has an API key — run "craze auth login", or set one of %s, or add api_key to %s`,
+		sanitizeLine(strings.Join(slices.Compact(names), ", ")), file)
 }
 
 // nativeWorkspace is the session's workspace as the harness needs it:
@@ -1578,6 +1694,13 @@ func (s *nativeSession) prompt(ctx context.Context, text string, rel chan struct
 	if behindAWake {
 		_ = s.log.Flush(context.Background(), s.done)
 	}
+	// The keys stored in providers.toml since this session started are learned
+	// before anything of this turn is redacted — the command bodies a prompt
+	// expands and a /compact's focus, both through hs.Redact below — or sent
+	// (native_keys.go, plan 031 §3.8). A key found inside the frozen prompt
+	// puts the harness in its refusal state, and the Run or Compact below is
+	// refused with nothing sent.
+	s.learnStoredKeys(hs)
 
 	var (
 		res harness.Result
@@ -2122,10 +2245,10 @@ func (s *nativeSession) Close() error {
 // new model's client now, so an unknown alias or a missing key fails here
 // and leaves the current model in place. A switch that took is announced
 // (announceCurrent), because the new model can bring or take away the effort
-// option.
+// option, and then remembered for the next session (remember, plan 031 §3.4).
 func (s *nativeSession) SetModel(_ context.Context, cause, modelID string) (SetOutcome, error) {
 	s.mu.Lock()
-	hs, table := s.hs, s.table
+	hs, table, home := s.hs, s.table, s.home
 	models := s.snap.Models
 	loading := s.loading
 	s.mu.Unlock()
@@ -2147,11 +2270,42 @@ func (s *nativeSession) SetModel(_ context.Context, cause, modelID string) (SetO
 	// took it: MatchModel resolves an alias — a prefix, a display name — to a
 	// canonical id, so the value that was asked for and the value the delta
 	// carries are not always the same string (SetOutcome).
-	model, _, t, err := s.announceCurrent(cause)
+	model, effort, t, err := s.announceCurrent(cause)
 	if err != nil {
 		return SetOutcome{}, err
 	}
+	s.remember(hs, table, home, model, effort)
 	return SetOutcome{Value: model, Ticket: t}, nil
+}
+
+// remember records a model or effort switch this session made, as the newest
+// entry of its model memory (plan 031 §3.4): alias and effort are the values
+// announceCurrent confirmed — the model the harness is now on and the effort
+// it now has — and the entry names the model by its identity in table, the
+// session's own (r2-5). It is written in home, the directory the harness was
+// opened with, never paths.NativeDir() read again.
+//
+// It runs after the announcement and outside s.mu: the file is locked and
+// written (modeltable.Remember), and another craze holding the lock can keep
+// it waiting for up to modeltable.RecentLockWait, which the engine's settings
+// worker then waits too. Nothing here can undo the switch, which has already
+// taken and been announced: a failure is one note naming the file and the
+// reason, never a key, redacted and sanitized as every native note is.
+//
+// Only the two setters call it: a switch a person made (the TUI's /model, a
+// client's set, which come here through the engine). --model, `craze prompt`,
+// a resume and a sub-agent's model never do.
+func (s *nativeSession) remember(hs *harness.Session, table *modeltable.Table, home, alias, effort string) {
+	m, ok := table.Models[alias]
+	if home == "" || !ok {
+		// Neither happens to a session Start opened: its Home is checked
+		// there, and the harness switches only to an alias of this table.
+		return
+	}
+	e := modeltable.RecentEntry{Alias: alias, Provider: m.Provider, WireModel: m.WireModel, Effort: effort}
+	if err := modeltable.Remember(home, e, s.Now()); err != nil {
+		s.note(nativeSafe{red: hs.Redact}.line("not saving the model choice: " + err.Error()))
+	}
 }
 
 // announceCurrent republishes the current model and its effort option after a
@@ -2304,7 +2458,7 @@ func phraseModeError(err error, id string) error {
 
 // SetConfig sets the effort, the one option the native session advertises;
 // any other id is unsupported. Like SetModel it is allowed during a turn, and
-// a change that took is announced the same way.
+// a change that took is announced and remembered the same way.
 //
 // forModel is checked against the model read in the same section as the
 // effort levels (Session): on this session only SetModel moves the model, and
@@ -2316,7 +2470,7 @@ func (s *nativeSession) SetConfig(_ context.Context, cause, id, value, forModel 
 		return SetOutcome{}, ErrUnsupported
 	}
 	s.mu.Lock()
-	hs, table := s.hs, s.table
+	hs, table, home := s.hs, s.table, s.home
 	alias := s.snap.CurrentModel
 	levels := s.efforts[alias]
 	loading := s.loading
@@ -2340,11 +2494,13 @@ func (s *nativeSession) SetConfig(_ context.Context, cause, id, value, forModel 
 	}
 	// The confirmed effort, not the one asked for: "" means the model's own
 	// default, and what the harness resolved it to is what the delta carries
-	// (SetOutcome, r23 finding 4).
-	_, effort, t, err := s.announceCurrent(cause)
+	// (SetOutcome, r23 finding 4) — and what the memory records, with the
+	// model it was set on.
+	model, effort, t, err := s.announceCurrent(cause)
 	if err != nil {
 		return SetOutcome{}, err
 	}
+	s.remember(hs, table, home, model, effort)
 	return SetOutcome{Value: effort, Ticket: t}, nil
 }
 
@@ -2677,6 +2833,11 @@ func phraseTurnError(err error) error {
 	if errors.Is(err, harness.ErrClosed) {
 		return phrase("agent: session closed")
 	}
+	if errors.Is(err, harness.ErrStoredKeyFrozen) {
+		// The refusal state (plan 031 §3.8, r2-2): fixed text, no key, no
+		// surface.
+		return phrase("native: a newly stored API key appears in this session's frozen prompt; start a new session")
+	}
 	var pe *harness.ProviderError
 	if !errors.As(err, &pe) {
 		return phrase("native: the turn failed: " + sanitizeLine(err.Error()))
@@ -2742,14 +2903,17 @@ func phraseLoadError(err error, table *modeltable.Table, alias, id string) error
 	return &nativeError{msg: fmt.Sprintf("native: session %q cannot be resumed: %s", sanitizeLine(id), why), cause: err}
 }
 
-// noKeyText says that alias's provider has no key and how to give it one.
+// noKeyText says that alias's provider has no key and how to give it one:
+// `craze auth login <provider>` (plan 031 §3.5), its variables, or an inline
+// api_key.
 func noKeyText(table *modeltable.Table, alias string) string {
 	m := table.Models[alias]
-	how := "add an api_key for it to providers.toml"
+	how := "or add an api_key for it to providers.toml"
 	if envs := table.Providers[m.Provider].EnvKeys; len(envs) > 0 {
-		how = "set " + sanitizeLine(strings.Join(envs, " or ")) + ", or " + how
+		how = "set " + sanitizeLine(strings.Join(envs, " or ")) + ", " + how
 	}
-	return fmt.Sprintf("native: model %q has no API key: its provider %q has none; %s", alias, m.Provider, how)
+	return fmt.Sprintf(`native: model %q has no API key: its provider %q has none; run "craze auth login %s", %s`,
+		alias, m.Provider, sanitizeLine(m.Provider), how)
 }
 
 var (

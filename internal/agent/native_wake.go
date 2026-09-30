@@ -174,13 +174,19 @@ func (s *nativeSession) recheckPending() {
 
 // wakeTurn runs the wake's turn and recovers a panic from it as a failure of
 // the turn, so the worker — which nothing above recovers for — ends the wake
-// and releases the claim whatever happened inside.
+// and releases the claim whatever happened inside. Like a prompt's turn it
+// first learns the keys stored since the session started (native_keys.go,
+// plan 031 §3.8): the results it delivers are redacted as it reserves them,
+// with the session's keys as they are then. A key it finds inside the frozen
+// prompt refuses this wake, and HasPending answers false from then on, so no
+// other wake follows it.
 func (s *nativeSession) wakeTurn(hs *harness.Session, ctx context.Context) (res harness.Result, err error) {
 	defer func() {
 		if v := recover(); v != nil {
 			err = fmt.Errorf("native: the wake panicked: %v", v)
 		}
 	}()
+	s.learnStoredKeys(hs)
 	return hs.Wake(ctx, s.sink)
 }
 

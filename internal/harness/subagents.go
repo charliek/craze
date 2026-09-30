@@ -653,8 +653,11 @@ func (r *subagents) register(id string, cancel context.CancelCauseFunc) (*childH
 // retire removes a child from the registry once its call is done with it,
 // and keeps its keys for the rest of the running turn (childKeys). They are
 // read before regMu is taken: a child's key lock is a leaf, never taken under
-// the registry's, and a child's keys are those of its Open — nothing switches
-// a child's model, which is the only way a session learns one.
+// the registry's, and a child's keys are those of its Open — its table's and
+// the stored keys its parent had learned (ChildOptions.learned): nothing
+// switches a child's model, and nothing hands it a stored key after it opened
+// (LearnKeys is the adapter's, on the top-level session), which are the only
+// two ways a session learns one.
 //
 // Before regMu it latches the child's end, for a child that never ran — its
 // Open failed, or its attach was refused — and so never reached the runner's
@@ -815,6 +818,7 @@ func (r *subagents) openChild(h *childHandle, call tool.SubagentCall, persona to
 		AllTools: all, Tools: ids,
 		BaseSystem: parent.system, BaseProfile: parent.tools.profile, top: parent.base.top,
 		Mode: mode, Strictness: &h.strictness, Locks: parent.tools.locks,
+		learned: parent.tools.learnedKeys(),
 	}))
 }
 
@@ -942,7 +946,9 @@ func (r *subagents) runChild(ctx, childCtx context.Context, link *turnLink, call
 // nil child, one that never opened, adds none.
 //
 // It is built at each use and never kept (review r4). The parent learns a key
-// whenever its SetModel resolves one, and a child runs as long as it runs: a
+// whenever its SetModel resolves one, or the adapter hands it one stored in
+// providers.toml at a turn's start (LearnKeys, plan 031 §3.8) — while a
+// background child runs on, say — and a child runs as long as it runs: a
 // replacer kept from the child's Open would miss a key the parent learned
 // meanwhile and let it through everything the runner reports after — the
 // child's answer, which the parent's own dispatcher then redacts with the

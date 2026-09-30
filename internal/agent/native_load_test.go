@@ -758,7 +758,7 @@ func TestNativeLoadSeedsTitleAndPin(t *testing.T) {
 // TestNativeLoadModelPrecedence (A5, the adapter's half; plan 028 §3.3, P8):
 // through NewNative, a load leaves an unspecified model unspecified — the
 // session resumes on the transcript's own model and effort, not on the
-// default fundedModel would pick for a new session — while an explicit
+// default startModel would pick for a new session — while an explicit
 // --model wins and one with no key refuses; a model the table no longer names
 // falls back to the default with a resume warning on the diagnostics and in
 // the journal; and with neither the transcript's model nor the default funded
@@ -786,13 +786,6 @@ func TestNativeLoadModelPrecedence(t *testing.T) {
 		}
 		return f, ws, id
 	}
-	effortOf := func(snap Snapshot) string {
-		if o := EffortOption(snap); o != nil {
-			return o.Current
-		}
-		return ""
-	}
-
 	t.Run("unspecified is the transcript's", func(t *testing.T) {
 		f, ws, id := stored(t)
 		s := f.session(Options{Workspace: ws, LoadSessionID: id})
@@ -855,7 +848,7 @@ func TestNativeLoadModelPrecedence(t *testing.T) {
 		f, ws, id := stored(t)
 		delete(f.env, "NATIVE_TEST_KEY")
 		// A new session would start on other/c, the first funded alias
-		// (fundedModel); a load does not.
+		// (startModel); a load does not.
 		s := f.session(Options{Workspace: ws, LoadSessionID: id})
 		_, err := startLoad(t, s)
 		if !errors.Is(err, harness.ErrResumeModel) || !strings.Contains(err.Error(), `native: session "`+id+`" cannot be resumed`) {

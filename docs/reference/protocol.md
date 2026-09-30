@@ -619,7 +619,7 @@ reply](#the-reply)); `capabilities`' fields are documented in full under
 | `hostId` | the host serving this session |
 | `workspace` | the session's working directory |
 | `provider` | `{name, label}` — `name` is the provider id (`cursor`, `grok` or `gx` for the ACP agents, `native` for the one that runs inside craze), `label` what a client shows |
-| `catalogs` | `{models[{id,name}], modes[{id,name,description}]}` — empty until the session is ready |
+| `catalogs` | `{models[{id,name,recent?}], modes[{id,name,description}]}` — empty until the session is ready. A model's `recent` is its rank in the native provider's model memory: `1` for the model most recently picked in a native session's `/model` that this session offers, then `2`, `3`…; absent for a model not remembered, for every ACP provider's model, and on an older host. A native session's `models` are only those whose provider has a key, plus the one it runs on, judged once when it starts; a client lists the current model first, then the ranked ones by rank, and shows no label for either |
 | `capabilities` | the session's own capability set, below |
 | `retryHorizon` | `{commands, ageMs}` — the command-id table's size and age bound |
 | `permissionMode` | how the host's agent handles permission requests: `bypass` (spawned with `--force`: it runs tools unasked) or `prompt` (`--no-force`: it asks, and a client answers). Absent when the host does not say |
@@ -630,6 +630,13 @@ are from every host that does not set them — an older one, or the fake host
 by default. Absent, a client falls back to what it knew without them: its own
 configuration's permission mode, and an elapsed time counted from its own
 attach (see [Versioning](#versioning)).
+
+A native session's catalog carries the ranks (from the fake host's
+`18-model-ranks` fixture, which gives its stub a native catalog):
+
+```json
+"catalogs":{"models":[{"id":"muse-spark-1.3-contributor","name":"Muse Spark 1.3 Contributor (Meta)","recent":1},{"id":"fireworks/kimi-k3","name":"Kimi K3 (Fireworks)","recent":2},{"id":"fireworks/deepseek-v4p1-flash","name":"DeepSeek V4.1 Flash (Fireworks)"}],"modes":[…]}
+```
 
 ## Capabilities
 
@@ -690,7 +697,11 @@ answers `stop_unsupported`), `capabilities.rowFacts` is absent (and so are
 the row facts), and the info document's `permissionMode` and `startedAt` and
 the state's and row's `lastTurn` are simply not there — a
 client falls back to what it did before each existed, and the schema, closed
-as it is, describes every one of them as optional.
+as it is, describes every one of them as optional. A catalog model's `recent`
+is optional the same way, except that its absence is ordinary on any host —
+the model is not remembered — so a catalog with no ranks at all, an ACP
+provider's or an older host's, is listed after the current model in the
+client's own order.
 
 ## The foreign turn
 

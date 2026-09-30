@@ -112,8 +112,15 @@ var goldenManifest = map[string]goldenRuns{
 	"model-dialog-four-tabs-100x30":          bothTransports,
 	"model-dialog-thinking-100x30":           bothTransports,
 	"native-compaction-100x30":               bothTransports,
+	"native-connect-100x30":                  bothTransports,
+	"native-connect-80x24":                   bothTransports,
+	"native-connect-busy-80x24":              bothTransports,
+	"native-connect-key-100x30":              bothTransports,
+	"native-connect-key-80x24":               bothTransports,
 	"native-echo-80x24":                      bothTransports,
 	"native-menu-100x30":                     bothTransports,
+	"native-model-dialog-100x30":             bothTransports,
+	"native-model-dialog-connected-100x30":   bothTransports,
 	"native-mode-100x30":                     bothTransports,
 	"native-plan-denied-100x30":              bothTransports,
 	"native-plan-offer-100x30":               bothTransports,
@@ -467,8 +474,9 @@ func transportList(set map[frameTransport]bool) string {
 
 // TestTheGoldenManifestIsEveryGolden (astra 31): the manifest lists every
 // golden file in testdata/ and no file that is not there, with the counts A8
-// states — 115 goldens in process and over the socket (plan 030's two opened
-// sessions among them), the six picker frames, plan 030's restore-failed, its
+// states — 122 goldens in process and over the socket (plan 030's two opened
+// sessions among them, and plan 031's two native model dialogs and five
+// /connect frames), the six picker frames, plan 030's restore-failed, its
 // ten session-list frames, the nine of the list's input (C14), the two of
 // the unstarted session (C15) and the four of the input's `/` popup (C16) in
 // process only.
@@ -499,8 +507,8 @@ func TestTheGoldenManifestIsEveryGolden(t *testing.T) {
 			t.Errorf("the manifest runs %s under %v: a golden runs under both transports, or in process alone", name, runs)
 		}
 	}
-	if both != 115 || inprocAlone != 32 {
-		t.Errorf("the manifest lists %d goldens under both transports and %d in process alone, want 115 and 32 (A8)", both, inprocAlone)
+	if both != 122 || inprocAlone != 32 {
+		t.Errorf("the manifest lists %d goldens under both transports and %d in process alone, want 122 and 32 (A8)", both, inprocAlone)
 	}
 }
 

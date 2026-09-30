@@ -162,6 +162,60 @@ def test_native_prompt_model_flag_resolves_alias(
     assert without_seq(events, events[-1]) == {"type": "done", "stopReason": "end_turn"}
 
 
+def test_native_prompt_reads_the_model_memory_and_never_writes_it(
+    craze_bin: Path, tmp_path: Path, fixture_server: SSEFixture
+) -> None:
+    """Plan 031 §3.4-§3.5, A1: `craze prompt` with no --model starts where a
+    new TUI session would -- on the newest remembered model, at its
+    remembered effort -- and `craze prompt --model X` runs X, at the effort
+    remembered for X when X offers it (P6). Neither run writes recent.json:
+    only a switch made inside a session does."""
+    fixture_server.set_ok(text_parts=["ok"])
+    craze_home = tmp_path / "craze-home"
+    native = craze_home / "native"
+    write_native_config(native, fixture_server.base_url)
+    # A second model on the fixture's provider, with effort control.
+    with (native / "models.toml").open("a", encoding="utf-8") as f:
+        f.write(
+            '\n[models."fixture-effort"]\n'
+            'provider = "fixture"\n'
+            'wire_model = "fixture-effort-wire"\n'
+            'efforts = ["low", "high"]\n'
+            'default_effort = "low"\n'
+        )
+    recent = native / "recent.json"
+    recent.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "recent": [
+                    {
+                        "model": "fixture-effort",
+                        "provider": "fixture",
+                        "wire_model": "fixture-effort-wire",
+                        "effort": "high",
+                        "at": "2026-09-30T10:12:00Z",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    before = recent.read_bytes()
+
+    for args, wire, effort in [
+        ((), "fixture-effort-wire", "high"),  # the memory's model and effort
+        (("--model", "fixture-model"), "fixture-wire-model", None),  # the flag's model, no effort control
+        (("--model", "fixture-effort"), "fixture-effort-wire", "high"),  # the flag's model, the memory's effort
+    ]:
+        proc = run_native(craze_bin, craze_home, tmp_path, *args, "hi")
+        assert proc.returncode == 0, proc.stderr
+        body = fixture_server.requests[-1].body
+        assert body.get("model") == wire, (args, body.get("model"))
+        assert body.get("reasoning_effort") == effort, (args, body.get("reasoning_effort"))
+        assert recent.read_bytes() == before, args
+
+
 def user_contents(request) -> list[str]:
     """Every user message of a recorded request, as text.
 
@@ -1658,6 +1712,49 @@ def _entries_of(path: Path) -> list[dict]:
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
 
 
+def _journal_lines(craze_home: Path) -> list[dict]:
+    """Every journal line under craze_home, file by file. A last line that does
+    not decode is skipped, as the journal's own reader skips it: a craze whose
+    bounded close gave up on a stalled writer can leave its file torn there."""
+    out: list[dict] = []
+    for jf in sorted((craze_home / "journal").glob("*/*.jsonl")):
+        raw = jf.read_text(encoding="utf-8").splitlines()
+        for i, line in enumerate(raw):
+            try:
+                out.append(json.loads(line))
+            except json.JSONDecodeError:
+                if i != len(raw) - 1:
+                    raise
+    return out
+
+
+def _resume_empties(craze_home: Path) -> list[dict]:
+    return [
+        ln
+        for ln in _journal_lines(craze_home)
+        if ln.get("type") == "diag" and ln.get("kind") == "resume_empty"
+    ]
+
+
+def _wait_resume_empty(craze_home: Path, timeout: float = 10) -> None:
+    """Wait, while craze still runs, for the resume_empty diag to reach the
+    journal file. The writer puts buffered lines on disk every 250 ms
+    (journal.defaultFlushInterval); a quit only waits 500 ms for it
+    (defaultCloseWait), so a -c run as short as this one, quit under load,
+    can exit before its first line is written. Reading the journal only after
+    the quit would test that race, not the diag."""
+    deadline = time.monotonic() + timeout
+    while not _resume_empties(craze_home):
+        if time.monotonic() > deadline:
+            raise AssertionError(f"no resume_empty diag reached the journal: {_journal_lines(craze_home)}")
+        time.sleep(0.05)
+
+
+def _listing(root: Path) -> list[tuple[str, int]]:
+    """Every file under root with its size: failure context for the index."""
+    return sorted((str(p.relative_to(root)), p.stat().st_size) for p in root.rglob("*") if p.is_file())
+
+
 def test_native_resume_round_trip(
     craze_bin: Path, tmp_path: Path, fixture_server: SSEFixture
 ) -> None:
@@ -1840,7 +1937,7 @@ def test_native_resume_of_an_empty_session(
 
     index = craze_home / "sessions.jsonl"
     rows = [json.loads(line) for line in index.read_text(encoding="utf-8").splitlines()]
-    assert len(rows) == 1, rows
+    assert len(rows) == 1, (rows, _listing(craze_home))
     session_id = rows[0]["sessionId"]
     assert rows[0]["provider"] == "native", rows[0]
 
@@ -1861,22 +1958,18 @@ def test_native_resume_of_an_empty_session(
         tui.wait_contains("restored", timeout=30)
         tui.write(b"try again\r")
         tui.wait_contains("fresh after empty resume", timeout=30)
+        _wait_resume_empty(craze_home)
         quit_craze(tui)
 
     rows2 = [json.loads(line) for line in index.read_text(encoding="utf-8").splitlines()]
-    assert len(rows2) == 1, rows2
+    assert len(rows2) == 1, (rows2, _listing(craze_home))
     assert rows2[0]["sessionId"] == session_id, rows2
 
     after = _transcripts_of(craze_home, session_id)
     assert len(after) == 1, after
 
-    journal_lines: list[dict] = []
-    for jf in sorted((craze_home / "journal").glob("*/*.jsonl")):
-        journal_lines += _entries_of(jf)
-    resume_empties = [
-        ln for ln in journal_lines if ln.get("type") == "diag" and ln.get("kind") == "resume_empty"
-    ]
-    assert len(resume_empties) == 1, journal_lines
+    resume_empties = _resume_empties(craze_home)
+    assert len(resume_empties) == 1, _journal_lines(craze_home)
     assert resume_empties[0]["fields"]["session"] == session_id, resume_empties[0]
 
 

@@ -21,7 +21,10 @@
 // each on (plan 030 §3.6a, §3.7, §3.8; X1): Stop serves session.stop through
 // a coordinator whose sequence the run_stop op runs, RowFacts puts the row
 // facts on the row, and a fixture asks for them in its first line ({"dir":
-// "host", …}).
+// "host", …}). The same line's models (Options.Models, plan 031 §3.6) gives
+// the Stub the catalog a native session advertises — remembered models with
+// their rank, the catalogs' "recent" — in place of its own; the Stub's
+// provider stays its own, since only the catalog is on trial.
 //
 // depguard: this package may import internal/tui (for the Stub) and
 // internal/control (the server); it may not import internal/cli, internal/acp

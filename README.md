@@ -2,11 +2,13 @@
 
 A Linux and macOS terminal UI that talks ACP to **Cursor** (`cursor-agent acp`),
 **Grok** (`grok agent stdio`), or **gx** — a third-party fork of the Grok
-CLI. You own the chrome; the provider still runs the agent.
+CLI. You own the chrome; the provider still runs the agent. Its **native**
+provider runs the agent inside craze instead, against a model provider's API
+(see [Native provider](#native-provider)).
 
 ## Install
 
-Either way, you also need the [Cursor CLI](https://cursor.com/cli), the
+Either way, for the ACP providers you also need the [Cursor CLI](https://cursor.com/cli), the
 [Grok CLI](https://docs.x.ai/build/cli/headless-scripting) (`grok`), or
 [`gx`](https://github.com/charliek/grok-build) installed and logged in:
 `cursor-agent login` (also installed as `agent`), or `grok login` / set
@@ -14,7 +16,8 @@ Either way, you also need the [Cursor CLI](https://cursor.com/cli), the
 same ACP dialect as `grok`, so everything here about Grok's behaviour
 applies to it too; it currently shares grok's `~/.grok` home (config, auth,
 sessions, skills) — that is the fork's current behaviour, not a craze
-guarantee.
+guarantee. The native provider needs none of them, only an API key (see
+[Native provider](#native-provider)).
 
 ### Homebrew (macOS, Apple Silicon and Linux amd64/arm64) — available from v0.0.1
 
@@ -116,7 +119,8 @@ resolves, and fails at spawn if it's missing. The last **successful** Start
 is saved and used next time.
 
 `--force` (yolo) is the default. `--no-force` turns on the permission line.
-`--model` picks an ACP model id, `--ask` / `--plan` set the session mode, and
+`--model` picks the model to start on (an ACP model id, or a native model
+alias), `--ask` / `--plan` set the session mode, and
 `--agent-bin` (or `CRAZE_AGENT_BIN`) overrides the binary. Cursor looks up
 `cursor-agent` then `agent`; Grok looks up `grok` only; gx looks up `gx`
 only.
@@ -130,6 +134,31 @@ or `grok login`), or an agent that would not come up. It still draws the TUI
 and puts the error in the transcript, because that is where you can read it,
 but the process tells a script that nothing ran. An error *during* a session
 leaves a usable craze, so quitting out of one is an ordinary exit 0.
+
+### Native provider
+
+`--provider native` needs no agent CLI, only an API key for one of the model
+providers craze ships a catalog for: Fireworks (`fireworks`, or export
+`FIREWORKS_API_KEY`), Meta (`meta`, `META_API_KEY`), OpenRouter (`openrouter`,
+`OPENROUTER_API_KEY`) or Z.AI Coding Plan (`zai-coding-plan`, `ZHIPU_API_KEY`
+or `ZAI_API_KEY`).
+
+```shell
+./bin/craze auth login fireworks   # asks for the key without echoing it; or export FIREWORKS_API_KEY
+./bin/craze auth list              # how each provider is connected
+./bin/craze --provider native
+```
+
+`craze auth login` with no provider shows a list to pick from, and reads the
+key from stdin's first line when stdin is not a terminal. The key is stored in
+`~/.craze/native/providers.toml` (0600); an exported variable is used before
+it; craze never checks a key with the provider when you store it, so a wrong
+one shows on first use. `craze auth logout <provider>` removes it.
+
+The model catalog is part of the binary: upgrading craze is how new models
+arrive and retired ones go, with no edit on your side. See [Native
+provider](docs/getting-started/quick-start.md#native-provider) and [Native
+models and providers](docs/reference/configuration.md#native-models-and-providers).
 
 ## Keys
 

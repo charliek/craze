@@ -102,6 +102,32 @@ live. A Go test that reads or writes either also sets `CRAZE_HOME` — to a temp
 directory, or to `""` so the craze directory follows the isolated `HOME` —
 and the Python fixture sets it to `<tmp>/craze-home`.
 
+Neither isolates the native provider's keys. craze ships a [model
+catalog](../reference/configuration.md#native-models-and-providers), so every
+native model table carries the catalog's providers and the environment
+variables they take a key from (`FIREWORKS_API_KEY`, `META_API_KEY`, …): a key
+exported in your shell would fund a test's session, change its model list and
+be redacted in its output. The suites unset every one of those variables
+before any test runs — the `TestMain` of `internal/agent`, `internal/cli` and
+`internal/tui` (the last before it captures `pristineEnv`) through
+`modeltable.CatalogEnvNames()`, and `isolate_run_env` by reading
+`internal/harness/modeltable/catalog.toml` itself — so a catalog change needs
+no edit to either. A test that wants one of them sets it itself. Tests that
+write their own model files keep exactly their own table: `modeltable.Save`
+writes `catalog = false` for a `Table` whose `NoCatalog` is set, raw fixtures
+(`tests/cli/sse_fixture.py`'s `write_native_config`, `internal/harness`'s)
+write the key themselves, and `modeltable.LoadWith(dir, nil)` loads with no
+catalog at all.
+
+To check the isolation holds, run the suites with every catalog variable
+exported to a dummy value:
+
+```bash
+env FIREWORKS_API_KEY=dummy-key-0001 META_API_KEY=dummy-key-0002 \
+    OPENROUTER_API_KEY=dummy-key-0003 ZHIPU_API_KEY=dummy-key-0004 \
+    ZAI_API_KEY=dummy-key-0005 make test test-cli
+```
+
 To drive a plugin command through the JSON interface:
 
 ```bash
@@ -209,6 +235,10 @@ that finish at once, which is what a frame of a *drained* queue needs.
 - `test_frame.py` — `craze frame` through the binary, for the same scripts the
   Go goldens cover
 - `test_tui.py` — a real PTY
+- `test_auth.py` — `craze auth login|logout|list` against a temp `CRAZE_HOME`:
+  the messages, the refusals that save nothing, and canaries proving a stored
+  key reaches the provider's wire and nothing else (the no-echo prompt is the
+  Go pty test's, `internal/cli/auth_test.go`)
 - `test_sessions.py` — the session list in real PTYs sharing one `HOME`, each
   in a directory of its own: groups, regrouping, `ctrl+x`, opening a session
   in place, quitting from the list, an unreachable host, resuming a saved

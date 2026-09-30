@@ -138,3 +138,33 @@ func TestPluginDirFlagOnEveryEntryPoint(t *testing.T) {
 		}
 	}
 }
+
+// TestRootHelpNamesNativeOnceAndNeverTheHarness pins what the root --help says
+// about the native provider (plan 028 §3.16/D-65, superseding plan 018 §3.4's
+// "hidden"): it legitimately names native, once, as one of the --provider
+// flag's choices — that is the one place a reader learns the provider exists —
+// but "harness" is an implementation word the command never needed and still
+// must not leak.
+func TestRootHelpNamesNativeOnceAndNeverTheHarness(t *testing.T) {
+	rootHelp := runHelp(t, "--help")
+	if strings.Contains(rootHelp, "harness") {
+		t.Fatalf("craze --help mentions \"harness\":\n%s", rootHelp)
+	}
+	if got := strings.Count(rootHelp, "native"); got != 1 {
+		t.Fatalf("craze --help names \"native\" %d times, want exactly 1 (the --provider flag):\n%s", got, rootHelp)
+	}
+}
+
+// runHelp runs craze with argv and returns its combined stdout and stderr.
+func runHelp(t *testing.T, argv ...string) string {
+	t.Helper()
+	var stdout bytes.Buffer
+	cmd := NewRootCmd()
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stdout)
+	cmd.SetArgs(argv)
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("%q: %v", argv, err)
+	}
+	return stdout.String()
+}

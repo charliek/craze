@@ -312,6 +312,18 @@ func (s *Stub) SetSubagents(subs []agent.SubagentInfo) {
 	s.snap.Subagents = cloneStubSubagents(subs)
 }
 
+// SetModels replaces Snapshot.Models, ranks and all (agent.ModelInfo.Recent,
+// plan 031 §3.6), so a test outside this package — the fake host's fixtures,
+// a remote client's — can advertise the catalog a native session does. Like
+// SetTools it is a fixture-only snapshot writer and publishes nothing: no
+// delta carries the model list, which a session fixes when it starts, and the
+// info document reads it off the snapshot.
+func (s *Stub) SetModels(models []agent.ModelInfo) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.snap.Models = append([]agent.ModelInfo(nil), models...)
+}
+
 // SetTodos replaces Snapshot.Todos. It publishes nothing (plan 027 §3.13):
 // every test that sets a list sends the EventTodos carrying it afterwards
 // (sendTodos), and a second event of its own would note the list twice.

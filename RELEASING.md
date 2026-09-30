@@ -68,6 +68,32 @@ NOT bumped:
 - `tests/cli/pyproject.toml` — the pytest CLI harness's manifest; it
   tracks the test tooling, not the shipped binary.
 
+## Model catalog changes
+
+The native harness's model catalog (`internal/harness/modeltable/catalog.toml`)
+is embedded in the binary, so a catalog change is a release: an ordinary gated
+commit, shipped by the next tag (a patch release when nothing else changed).
+There is no refresh between releases.
+
+- **Rename** a model: add the new alias and retire the old one.
+- **Retire** a model: remove it from `[models]` and add its alias to
+  `[[retired]]`, listing every wire id that alias has pointed at (an alias
+  retired because its wire id still answers carries no `wire_models`, so a
+  user's own entry for that id is not dropped).
+- **Add** a model: add its alias to
+  `internal/harness/modeltable/testdata/shipped-aliases.txt`, the history of
+  every alias craze has shipped.
+- `TestShippedCatalogHistory` (part of `make test`, so of CI) enforces the
+  retirement procedure: every alias in that history must still be a model or
+  a `[[retired]]` alias, and every model must be in the history, so a model
+  removed without retiring it fails. The history is **append-only**: a
+  catalog change that deletes a line from it is refused in review (the test
+  cannot catch a line deleted in the same commit as the model).
+- `TestShippedCatalog` (part of `make test`, so of CI) checks the file: it
+  rejects a malformed catalog, a `default_model` that is not a model, two
+  aliases sharing an identity, a retired alias that is still a model, and a
+  shipped model whose identity is retired.
+
 ## Snapshot / dev versioning
 
 Not used. Main between releases shows the last released version in

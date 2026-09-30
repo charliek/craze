@@ -366,6 +366,9 @@ func (m *Model) relayout(stick bool) {
 	}
 	m.pruneSubs()
 	m.lay = m.computeLayout()
+	// A box's text field scrolls by the width it is drawn at, so it gets that
+	// width here, where the box is measured (fitDialogFields).
+	m.fitDialogFields()
 	// The queue selection is re-found against the rows this frame will draw,
 	// for the same reason the sub-agent one is: the cap is only settled here.
 	m.syncQueue()

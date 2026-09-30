@@ -88,24 +88,42 @@ type toolset struct {
 	// planPath is the session's plan file, which every plan-mode reminder
 	// hands the model verbatim (reminders.go). It is held here for one reason:
 	// it is a third text this session sends unredacted, beside the system
-	// prompt and the tools, so resolve scans it for a key learned later
-	// (errFrozenKey) as it scans those. Fixed by adoptPlanPath in Open, before
-	// the session is handed out, and read under mu like the keys it is
-	// compared against.
+	// prompt and the tools, so resolve and learn scan it for a key learned
+	// later (errFrozenKey, ErrStoredKeyFrozen) as they scan those. Fixed by
+	// adoptPlanPath in Open, before the session is handed out, and read under
+	// mu like the keys it is compared against.
 	planPath string
 
 	// keys are every provider key the session knows, sorted, and red is the
 	// redactor over them, which the turn and the dispatcher read. A session
-	// learns a key when a switch to another provider's model resolves one
-	// the environment did not have at Open; resolve then prepares the
-	// replacer over the larger set and the next turn adopts it, so one turn
-	// always uses one redactor and nothing can see the toolset's pointer and
-	// the dispatcher's disagree. A key is only ever added, and a Replacer is
-	// immutable: they are swapped, never changed.
-	mu      sync.Mutex // guards keys and pending
+	// learns a key in two ways: when a switch to another provider's model
+	// resolves one the environment did not have at Open (resolve), and when
+	// the adapter hands it one stored in providers.toml since Open (learn,
+	// plan 031 §3.8). Either prepares the replacer over the larger set and
+	// the next turn adopts it, so one turn always uses one redactor and
+	// nothing can see the toolset's pointer and the dispatcher's disagree. A
+	// key is only ever added, and a Replacer is immutable: they are swapped,
+	// never changed.
+	mu      sync.Mutex // guards keys, pending, learned, and refusing's writes
 	keys    []string
 	pending *redact.Replacer // resolved, waiting for the next turn (adopt)
 	red     atomic.Pointer[redact.Replacer]
+
+	// learned is every stored key learn has accepted, in the order it first
+	// did, each once — the ones the session already knew included, since a
+	// key it knew from the environment is not one a sub-agent opened later
+	// would find there again. A child the runner opens from here on starts
+	// with them (ChildOptions.learned, r2-1); nothing else reads them.
+	learned []string
+	// refusing is the refusal state learn puts the session in (r2-2,
+	// ErrStoredKeyFrozen): set, under mu, in the one section that found a
+	// stored key inside a frozen surface, and never cleared. begin reads it
+	// under mu, in the section that adopts the redactor, so a turn either
+	// began before the key was learned — and runs as a turn already running
+	// does (R1) — or is refused. HasPending and BackgroundOwed read it
+	// without the lock: an atomic, so neither takes a lock the adapter's
+	// wake worker does not already take under its own.
+	refusing atomic.Bool
 
 	// closing is Env.Closing: closed by Close, so a command already
 	// cancelled for another reason is killed at once rather than after its
@@ -117,8 +135,10 @@ type toolset struct {
 // openTools builds a session's tools for r, its starting model:
 //
 //   - the redactor, over every key the table knows of — every provider's,
-//     used or not, from the environment and inline (Table.Keys) — so a key
-//     too short to redact, or one the marker could print back, fails Open;
+//     used or not, from the environment and inline (Table.Keys) — so an
+//     inline key too short to redact, or one the marker could print back,
+//     fails Open (an env value like that is no key, and skipped: plan 031
+//     §3.2);
 //   - the profile ProfileFor picks for r, its specs, its tools array and its
 //     system prompt for workspace, with prompt — the caller's instruction
 //     documents and catalog — rendered after it (system.go, plan 022 §3.4);
@@ -135,9 +155,11 @@ type toolset struct {
 //   - the dispatcher, with the mode's gate over the session's own (plan 023
 //     §3.1) and with the session's Env: the workspace and home, the
 //     redactor, a path-lock table, the closing channel, and the environment
-//     a command gets — the user's, less every env_keys variable of every
-//     provider and every OPENAI_* (never nil: bash refuses to run on a nil
-//     one rather than fall back to craze's own).
+//     a command gets — the user's, less every variable the table knows holds
+//     a key (CredentialEnvNames: every provider's env_keys, and a shipped
+//     name no provider takes its key from any more, plan 031 C2r2) and every
+//     OPENAI_* (never nil: bash refuses to run on a nil one rather than fall
+//     back to craze's own).
 //
 // It also sweeps the spill directory of files older than seven days; a
 // sweep that fails is housekeeping undone, not a reason to refuse a session.
@@ -179,6 +201,20 @@ func openTools(home, workspace, mode string, asker tool.Asker, table *modeltable
 	vals := make([]string, len(keys))
 	for i, k := range keys {
 		vals[i] = k.Reveal()
+	}
+	// A sub-agent opened after its parent learned stored keys starts with
+	// them (plan 031 §3.8, r2-1): they are in no table and no environment, so
+	// the child's own Keys cannot find them, and everything below — the
+	// redactor its prompt, tools, header and spill files go through, and the
+	// refusals of a key its home or its prompt holds — is built from vals.
+	// The runner took them valid (learn) and never kept one the parent had
+	// not judged.
+	if child != nil {
+		for _, k := range child.learned {
+			if !slices.Contains(vals, k) {
+				vals = append(vals, k)
+			}
+		}
 	}
 	ts := &toolset{keys: vals, closing: make(chan struct{})}
 	if child == nil {
@@ -321,10 +357,7 @@ func openTools(home, workspace, mode string, asker tool.Asker, table *modeltable
 		return nil, err
 	}
 
-	var keyNames []string
-	for _, prov := range table.Providers {
-		keyNames = append(keyNames, prov.EnvKeys...)
-	}
+	keyNames := table.CredentialEnvNames()
 	// The session's mode wraps the gate it would otherwise use — the test
 	// seam's, or AllowAll — rather than replacing it: a call the mode allows
 	// is still the inner gate's to judge, which is how H3's evaluator will
@@ -539,8 +572,9 @@ func (ts *toolset) knownKeys() []string {
 // gained since Open; until a session uses it, a value in the environment is
 // not craze's credential.
 //
-// It prepares nothing and refuses when a key cannot be redacted at all
-// (modeltable.Keys' floor), and when a new one turns out to be inside what
+// It prepares nothing and refuses when an inline key cannot be redacted at
+// all (modeltable.Keys' floor; an env value that fails it is skipped, plan
+// 031 §3.2), and when a new one turns out to be inside what
 // this session sends unredacted — the system prompt, the working directory it
 // names among it, anywhere in the encoded tools, or the plan file's path,
 // which every plan-mode reminder hands the model — none of which it can
@@ -569,40 +603,114 @@ func (ts *toolset) resolve(table *modeltable.Table, getenv func(string) string) 
 	if len(added) == 0 {
 		return nil
 	}
-	// The whole tools payload, not the descriptions alone: a tool's name, a
-	// parameter's name and a schema's own strings all go out with it. The plan
-	// path is the third: it reaches the model verbatim in every plan-mode
-	// reminder and cannot be redacted without becoming a path that opens
-	// nothing, so a key found inside it refuses the switch exactly as one
-	// inside the working directory does — that one through the prompt, which
-	// names it (plan 023 §3.3).
-	if holdsAKey(ts.system, added) || holdsAKey(string(ts.wire), added) || holdsAKey(ts.planPath, added) {
+	if ts.frozenHolds(added) {
 		return errFrozenKey
 	}
-	ts.keys = append(ts.keys, added...)
-	slices.Sort(ts.keys)
-	ts.pending = redact.New(ts.keys...)
+	ts.extend(added)
 	return nil
 }
 
-// adopt installs a redactor resolve prepared, in the toolset and in the
-// dispatcher, and reports whether it installed one. Run calls it as a turn
-// begins — before the turn's first request, and with no turn running, since
-// the session admits one at a time — so a turn uses exactly one redactor
+// frozenHolds reports whether one of keys is inside what this session sends
+// unredacted with every request and cannot rewrite: the system prompt, the
+// whole tools payload — not the descriptions alone: a tool's name, a
+// parameter's name and a schema's own strings all go out with it — and the
+// plan path, the third: it reaches the model verbatim in every plan-mode
+// reminder and cannot be redacted without becoming a path that opens nothing,
+// so a key found inside it counts exactly as one inside the working directory
+// does — that one through the prompt, which names it (plan 023 §3.3). resolve
+// refuses a switch on it (errFrozenKey); learn enters the refusal state
+// (ErrStoredKeyFrozen, plan 031 §3.8). Under ts.mu, which the plan path is
+// read under.
+func (ts *toolset) frozenHolds(keys []string) bool {
+	return holdsAKey(ts.system, keys) || holdsAKey(string(ts.wire), keys) || holdsAKey(ts.planPath, keys)
+}
+
+// extend adds keys new to the session — added, which resolve or learn found
+// in none of ts.keys — and prepares the redactor over all of them for the
+// next turn to adopt; it never installs one. Under ts.mu.
+func (ts *toolset) extend(added []string) {
+	ts.keys = append(ts.keys, added...)
+	slices.Sort(ts.keys)
+	ts.pending = redact.New(ts.keys...)
+}
+
+// learn adds stored keys to the session's (plan 031 §3.8): vals, each already
+// trimmed and held to modeltable.KeyProblem by LearnKeys. It is resolve for a
+// key no table resolves — prepared for the next turn to adopt, never
+// installed, only ever added — with one difference, which is the refusal
+// (r2-2). A switch that would bring a key inside what this session sends
+// unredacted can be refused, and nothing is learned; a stored key cannot be
+// refused — it is stored, and the tools can show it — so it is learned all the
+// same, for everything the session still redacts, and the session enters the
+// refusal state instead (refusing): the surfaces are frozen, every later
+// request would carry them, and begin refuses every turn from here on. It
+// reports whether this call found such a key.
+//
+// One section under mu, which is what serializes learning: two calls — or a
+// call and a switch's resolve — each extend the set the other left, never a
+// copy of it from before, and the check, the keys and the flag are one fact to
+// begin, which reads the flag in its own section under the same lock (adopt).
+// A key the session already knew is only recorded for its children (learned):
+// it passed the same checks when it first became known.
+func (ts *toolset) learn(vals []string) (frozen bool) {
+	ts.mu.Lock()
+	defer ts.mu.Unlock()
+	var added []string
+	for _, v := range vals {
+		if !slices.Contains(ts.learned, v) {
+			ts.learned = append(ts.learned, v)
+		}
+		if !slices.Contains(ts.keys, v) && !slices.Contains(added, v) {
+			added = append(added, v)
+		}
+	}
+	if len(added) == 0 {
+		return false
+	}
+	// The surfaces resolve refuses a switch on, but the key is learned all
+	// the same.
+	if ts.frozenHolds(added) {
+		ts.refusing.Store(true)
+		frozen = true
+	}
+	ts.extend(added)
+	return frozen
+}
+
+// learnedKeys are the stored keys learn has accepted (toolset.learned), as a
+// copy the caller owns: what the runner hands a child it opens.
+func (ts *toolset) learnedKeys() []string {
+	ts.mu.Lock()
+	defer ts.mu.Unlock()
+	return slices.Clone(ts.learned)
+}
+
+// adopt installs a redactor resolve or learn prepared, if there is one, in the
+// toolset and in the dispatcher. Run calls it as a turn begins — before the
+// turn's first request, and with no turn running, since the session admits
+// one at a time — so a turn uses exactly one redactor
 // from its first step to its last, and the two pointers are never seen
 // disagreeing. A call still running from an earlier turn keeps the Env it
 // was given (Dispatcher.SetRedactor).
-func (ts *toolset) adopt() bool {
+//
+// In the refusal state (learn) it installs nothing and returns
+// ErrStoredKeyFrozen, which begin refuses the turn with: the check and the
+// adoption are one section, so no turn can adopt a redactor learn prepared
+// after it found a frozen key and then go on to send the prompt that holds it.
+func (ts *toolset) adopt() error {
 	ts.mu.Lock()
 	defer ts.mu.Unlock()
+	if ts.refusing.Load() {
+		return ErrStoredKeyFrozen
+	}
 	if ts.pending == nil {
-		return false
+		return nil
 	}
 	red := ts.pending
 	ts.pending = nil
 	ts.red.Store(red)
 	ts.d.SetRedactor(red)
-	return true
+	return nil
 }
 
 // redactedError is err with a redacted message. It unwraps to err, so

@@ -9,30 +9,35 @@ import (
 )
 
 var (
-	// ErrNotConfigured is Load's error when the directory holds neither file:
-	// the harness has never been set up, and the caller's actionable answer is
-	// to run `craze import gx`. The error also matches fs.ErrNotExist.
-	ErrNotConfigured = errors.New("modeltable: no models configured")
-
 	// ErrUnknownModel is Resolve's error for an alias the table does not have.
 	ErrUnknownModel = errors.New("modeltable: unknown model")
 
 	// ErrNoAPIKey is Resolve's error when a provider has no usable key: none
-	// of its env_keys is set to a non-empty value and it has no inline
-	// api_key. The wrapped message names the provider and the variable names
-	// it tried, never a value.
+	// of its env_keys is set to a usable key and it has no inline api_key.
+	// The wrapped message names the provider and the variable names it tried,
+	// never a value.
 	ErrNoAPIKey = errors.New("modeltable: no API key")
 
-	// ErrKeyTooShort is Keys' error for a key under MinKeyLen bytes. The
-	// wrapped message names the provider and the variable, never the value.
-	// Load reports a short inline key as a *FileError at its api_key.
+	// ErrNothingFunded is StartModel's error when not one model of the table
+	// resolves — no provider any model is on has a usable key (plan 031 §3.5).
+	// StartModel's error also unwraps to the default model's ErrNoAPIKey, so a
+	// caller that asks errors.Is(err, ErrNoAPIKey) is answered as before. The
+	// adapter phrases it for the person: the command, the variables and the
+	// file that would give craze a key.
+	ErrNothingFunded = errors.New("modeltable: no model provider has an API key")
+
+	// ErrKeyTooShort is Keys' error for an inline key under MinKeyLen bytes
+	// in a table built in memory; the wrapped message names the provider,
+	// never the value. Load reports a short inline key as a *FileError at
+	// its api_key, an env value this short is skipped (EnvWarnings), and
+	// SetKey refuses to store one with an error that unwraps to it.
 	ErrKeyTooShort = errors.New("modeltable: API key too short to be real")
 
-	// ErrKeyOverlapsMarker is Keys' error for a key the redaction marker
-	// could print back (redact.MarkerOverlaps) — "credential", say, which
-	// the marker contains. Like ErrKeyTooShort, its wrapped message names the
-	// provider and the variable, and Load reports an inline one as a
-	// *FileError at its api_key.
+	// ErrKeyOverlapsMarker is Keys' error for an inline key the redaction
+	// marker could print back (redact.MarkerOverlaps) — "credential", say,
+	// which the marker contains. Like ErrKeyTooShort, Load reports an inline
+	// one as a *FileError at its api_key, an env value is skipped, and SetKey
+	// refuses to store one.
 	ErrKeyOverlapsMarker = errors.New("modeltable: API key overlaps craze's redaction marker")
 )
 
@@ -91,11 +96,16 @@ func unknownKey(path string, k toml.Key) error {
 	return &FileError{File: path, Table: table, Key: toml.Key{k[len(k)-1]}.String(), Reason: "unknown key"}
 }
 
-// noAPIKey is ErrNoAPIKey for one provider, naming the variables it tried.
-func noAPIKey(provider string, envKeys []string) error {
+// noAPIKey is ErrNoAPIKey for one provider, naming the variables it tried and
+// those among them set to a value that cannot be a key.
+func noAPIKey(provider string, envKeys, unusable []string) error {
 	if len(envKeys) == 0 {
 		return fmt.Errorf("%w for provider %q: it names no env_keys and has no api_key in %s",
 			ErrNoAPIKey, provider, ProvidersFile)
+	}
+	if len(unusable) > 0 {
+		return fmt.Errorf("%w for provider %q: none of %s holds a usable key (set, but too short or overlapping the redaction marker: %s), and it has no api_key in %s",
+			ErrNoAPIKey, provider, strings.Join(envKeys, ", "), strings.Join(unusable, ", "), ProvidersFile)
 	}
 	return fmt.Errorf("%w for provider %q: none of %s is set, and it has no api_key in %s",
 		ErrNoAPIKey, provider, strings.Join(envKeys, ", "), ProvidersFile)

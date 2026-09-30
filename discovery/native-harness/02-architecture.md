@@ -54,6 +54,8 @@ internal/cli/import.go        `craze import gx`
 | `internal/agent/native.go`, `internal/agent/provider.go` | the adapter: `Provider` constructor for `native` (hidden, in-process), `Session` implementation that maps harness callbacks onto `Event`/`Snapshot` | — |
 | `internal/cli/import.go` | the `craze import gx` subcommand entry, flag plumbing only (`--provider native`) | — |
 
+*2026-09-30 (Plan 031, D-75): `gximport/`, `internal/cli/import.go` and `craze import gx` are removed; `modeltable` now embeds a shipped catalog that the two user files override, and gains the key store behind `craze auth` (D-77) and the model memory `recent.json` (D-76).*
+
 A **depguard** rule enforces the `internal/harness` import list in `make
 lint`, extending the boundary check that already exists for `internal/tui`
 and `internal/cli` against `internal/acp`. The harness receives its

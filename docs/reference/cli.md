@@ -6,6 +6,9 @@ craze prompt [text] [flags]
 craze bridge [flags]
 craze attach [flags]
 craze serve [flags]
+craze auth login [provider]
+craze auth logout <provider>
+craze auth list
 craze version
 ```
 
@@ -20,7 +23,7 @@ flags; see [craze prompt](#craze-prompt).
 | Flag | Description |
 |------|-------------|
 | `--workspace` | Existing workspace directory (default: current directory) |
-| `--model` | ACP model id |
+| `--model` | Model to start on: an ACP model id, or on `native` a model alias. Native resolves it against every model it knows — shipped or yours, connected or not — and a model whose provider has no key refuses to start, saying how to give it one. It applies to this start only, and is never remembered as a default; a new native session takes the effort last picked for that model in a session's `/model`, when the model still offers it ([Model memory](configuration.md#model-memory-recentjson)) |
 | `--agent-bin` | Path to the agent binary (or `CRAZE_AGENT_BIN`) |
 | `--provider` | Provider: `cursor`, `grok`, `gx` (ACP agents) or `native` (runs inside craze). Empty is unset. Unknown id exits 2 |
 | `--force` | Spawn the agent with `--force` / `--always-approve` (yolo). Default: on |
@@ -356,7 +359,7 @@ echo "hello" | ./bin/craze prompt --json
 | Flag | Description |
 |------|-------------|
 | `--workspace` | Existing workspace directory (default: current directory) |
-| `--model` | ACP model id (`session/set_model` after `session/new`) |
+| `--model` | Model to start on: an ACP model id (`session/set_model` after `session/new`), or a native model alias, resolved as the TUI's `--model` is, at the effort remembered for it. Never remembered. Without it a native run starts where a new TUI session would, on the remembered model ([Model memory](configuration.md#model-memory-recentjson)) |
 | `--agent-bin` | Path to the agent binary (or `CRAZE_AGENT_BIN`) |
 | `--provider` | Provider: `cursor`, `grok`, `gx` (ACP agents) or `native` (runs inside craze) |
 | `--follow-up` | Additional prompt on the same ACP session (repeatable) — the headless queue, see below |
@@ -698,6 +701,98 @@ See [A session already running in another craze](#a-session-already-running-in-a
 `--continue`/`-c` (and a `--resume` choice) of a session already running in
 another `craze` attaches to it through this same command, rather than
 refusing.
+
+## craze auth
+
+```bash
+craze auth login [provider]
+craze auth logout <provider>
+craze auth list
+```
+
+Manages the API keys of the [native provider](configuration.md#native-models-and-providers)'s
+model providers. A key is stored as its provider's `api_key` in
+`native/providers.toml` in the craze directory (`~/.craze`, or `$CRAZE_HOME`),
+written at `0600`; a provider's environment variable, when it holds a usable
+key, is used before the stored one. **No key is checked with its provider**
+when it is stored — a wrong one shows on first use — and none of the three
+commands makes a network request. What they do to the file is under
+[Keys](configuration.md#keys).
+
+A provider is named by its id or its display name, in any case: `fireworks`,
+`Fireworks`, `"z.ai coding plan"`. The providers are the
+[catalog's](configuration.md#the-shipped-catalog) and any of your own in
+`providers.toml` (a directory whose `models.toml` says
+[`catalog = false`](configuration.md#isolated-setups-catalog-false) has only
+its own). All three exit 1 when there is no craze directory (neither `HOME`
+nor `CRAZE_HOME` is set). An argument too many, or a flag a command does not
+take, is exit 2, and what was typed is not repeated back: it may be a key.
+
+### craze auth login
+
+Stores a provider's key. On a terminal, craze asks for it with a prompt that
+does not echo (`Fireworks API key: `) — after a numbered list of the providers
+to pick from when none is named, the connected ones marked `(connected)`. The
+echo is off from before the first prompt is drawn until the key is read, so
+nothing typed at either prompt shows, however quickly it comes: at the list,
+only a number on it is written back, so a key pasted there by mistake is never
+displayed. Ctrl-C at either prompt leaves the terminal's echo on. When stdin
+is not a terminal, the key is stdin's first line (at most 8 KiB), so a script
+can pipe it in. Surrounding whitespace is trimmed.
+
+```bash
+craze auth login fireworks        # prompts; the key is not shown as you type
+craze auth login                  # pick from the list, then the prompt
+printf '%s\n' "$FIREWORKS_KEY" | craze auth login fireworks
+```
+
+```text
+Saved the Fireworks key in /home/you/.craze/native/providers.toml.
+FIREWORKS_API_KEY is set in this environment; craze uses it before the stored key.
+```
+
+The second line only when that variable is set. Nothing is saved, and craze
+exits 1, when the key is empty, shorter than 8 bytes, or overlaps craze's
+redaction marker — the error names the rule, never the key. No provider named
+without a terminal, or a name that matches none, is exit 2; the name is not
+repeated back, in case what was typed there was the key. Another provider's
+stored key that cannot be used is kept as it is and named in a note on
+stderr, so it can be replaced or removed next.
+
+### craze auth logout
+
+Removes a provider's stored key, and only the key: whatever else its entry
+sets stays. Exit 0 whether or not there was one.
+
+```text
+Removed the stored Fireworks key.
+Fireworks is still connected through FIREWORKS_API_KEY.
+```
+
+With nothing stored the first line is `No stored Fireworks key.`; the second
+is there only while a variable still funds the provider. No provider named is
+exit 2.
+
+### craze auth list
+
+One row per provider, by display name: its name, its id, and how it is
+connected — `env <VAR>`, `stored key` or `not connected`, in the order a
+session tries them.
+
+```text
+Fireworks         fireworks        env FIREWORKS_API_KEY
+Meta              meta             stored key
+OpenRouter        openrouter       not connected
+Z.AI Coding Plan  zai-coding-plan  not connected
+```
+
+Then notes, on stderr, each starting `note: `: a stored key that cannot be
+used, an entry of yours that [repeats what craze
+ships](configuration.md#how-the-files-merge) (delete it to follow craze's
+updates), the warnings a native session prints when it starts, and — when the
+model table does not load, a broken `models.toml` say — why. The rows need
+only `providers.toml` and the catalog, so they are listed either way. No key,
+nor any part of one, is ever printed.
 
 ## craze version
 

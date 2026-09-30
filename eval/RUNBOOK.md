@@ -101,7 +101,9 @@ at startup and never writes or forwards them anywhere else. Nothing under `~/.cr
 written by the eval; a campaign only ever reads them.
 
 ```shell
-# Once per campaign, and again whenever the owner's model tables change:
+# Once per campaign, and again whenever the owner's model tables change. It reads
+# allowlisted fields of the owner's native models.toml, so trimming that file to
+# overrides needs follow-up SF-a (a merged view; craze plan 031 §9 R4) first:
 uv run crazeeval snapshot-config
 
 # Every task's category controls must pass before the task may run:
@@ -116,11 +118,16 @@ uv run crazeeval probe --craze-bin ../bin/craze
 ## 3. Adding a model
 
 Edit `eval/models.toml` (the target's provider, wire model, one pinned reasoning effort,
-and each harness's id for it) and `eval/prices.toml` (ledger and list prices per wire
+and each harness's id for it; the `craze` and `gx` aliases are kept in step by hand, since
+craze no longer imports gx's table) and `eval/prices.toml` (ledger and list prices per wire
 model, keyed the same way — a wire model missing from `prices.toml` is refused by the
 proxy). Both files are commented inline with what each field means; copy an existing
 entry and adjust it. Re-run `snapshot-config` afterwards so the new model's provider
 config is in the current snapshot.
+
+The generated craze homes carry `catalog = false` in `models.toml` (craze plan 031): craze ships
+its own model catalog, and without that line every shipped model would join the run and the
+agent tool's description. With it, the run's two generated files are the whole table.
 
 Per-harness support limits to know about before adding a model:
 

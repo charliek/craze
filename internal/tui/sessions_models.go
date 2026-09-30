@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"strings"
 	"time"
 	"unicode"
@@ -13,7 +12,6 @@ import (
 
 	"github.com/charliek/craze/internal/agent"
 	"github.com/charliek/craze/internal/harness/modeltable"
-	"github.com/charliek/craze/internal/paths"
 )
 
 // `/provider` and `/model` in the session list's input (plan 030 §3.14, owner
@@ -113,73 +111,79 @@ type sessNativeDefaultMsg struct {
 
 // ------------------------------------------------------------ Plan 031's seam
 
-// nativeModelChoices is the ordered list /model offers for native (plan 030
-// §3.14): the models of native's model table — its aliases, sorted, each named
-// by its table name, as a native session's own model list is (agent's
-// tableModels). It reads the disk, and is called off the Update (the popup's
-// load).
+// nativeModelChoices is the ordered list /model offers for native (plan 031
+// §3.6, switched from plan 030 §3.14's own): the models a native session's own
+// picker offers with no current model — the merged table's models (its files
+// over the shipped catalog) whose provider has a usable key, the recently
+// used ones first in recent order (Recent 1, 2, 3…, the rows' order and no
+// label), then the rest by name — each named by its table name, as a native
+// session's own model list is. dir and getenv are the TUI's own seams
+// (Model.nativeDir, Model.nativeEnv: Config.NativeDir, Config.Getenv). It
+// reads the disk, and is called off the Update (the popup's load); it never
+// writes recent.json — only a native session's switch does (plan 031 §3.4).
 //
 // This and nativeDefaultModel are the one seam through which the list learns
-// what native's models are (agreed with Plan 031, 2026-09-30): Plan 031 —
-// recent models first, a compiled catalog under models.toml, unfunded
-// providers hidden — swaps both bodies for modeltable.Load(paths.NativeDir()),
-// ReadRecent, Table.Choices (no current model) and Table.StartModel, in its
-// own commit; nothing else here reads the table.
-func nativeModelChoices() ([]agent.ModelInfo, error) {
-	table, err := modeltable.Load(paths.NativeDir())
+// what native's models are (agreed with Plan 031, 2026-09-30); nothing else
+// here reads the table. With no model funded there is nothing to offer, and
+// that is an error the popup says, as it is for nativeDefaultModel.
+func nativeModelChoices(dir string, getenv func(string) string) ([]agent.ModelInfo, error) {
+	table, err := modeltable.Load(dir)
 	if err != nil {
 		return nil, err
 	}
-	out := make([]agent.ModelInfo, 0, len(table.Models))
-	for _, alias := range table.Aliases() {
-		out = append(out, nativeModelInfo(table, alias))
+	choices := table.Choices(modeltable.ReadRecent(dir), getenv, "")
+	if len(choices) == 0 {
+		return nil, errNativeNothingFunded
+	}
+	out := make([]agent.ModelInfo, 0, len(choices))
+	for _, c := range choices {
+		out = append(out, agent.ModelInfo{ID: c.Alias, Name: nativeModelName(c.Name, c.Alias), Recent: c.Recent})
 	}
 	return out, nil
 }
 
 // nativeDefaultModel is the model /provider native resets the list's model
-// to (§3.14): the one a native session with no --model starts on — the
-// table's default_model, unless its provider has no API key, and then the
-// first alias, sorted, whose key resolves (native's fundedModel, plan 018
-// §3.8), judged against this process's environment, which the host a
+// to (plan 031 §3.5): the one a new native session with no --model starts on
+// (Table.StartModel) — the newest remembered model that is still funded, else
+// the table's default_model, else the first funded alias, sorted — judged
+// against getenv, which is this process's environment, which the host a
 // dispatch spawns inherits. Nothing funded is an error, as it is at a
-// session's start. It reads the disk, and is called off the Update. Plan 031
-// swaps its body (nativeModelChoices).
-func nativeDefaultModel() (agent.ModelInfo, error) {
-	table, err := modeltable.Load(paths.NativeDir())
+// session's start. It reads the disk, and is called off the Update.
+func nativeDefaultModel(dir string, getenv func(string) string) (agent.ModelInfo, error) {
+	table, err := modeltable.Load(dir)
 	if err != nil {
 		return agent.ModelInfo{}, err
 	}
-	alias := table.DefaultModel
-	if _, err := table.Resolve(alias, os.Getenv); errors.Is(err, modeltable.ErrNoAPIKey) {
-		alias = ""
-		for _, a := range table.Aliases() {
-			if _, err := table.Resolve(a, os.Getenv); err == nil {
-				alias = a
-				break
-			}
-		}
-		if alias == "" {
-			return agent.ModelInfo{}, errors.New("no configured model has an API key")
-		}
+	alias, _, err := table.StartModel(modeltable.ReadRecent(dir), getenv)
+	if errors.Is(err, modeltable.ErrNothingFunded) {
+		return agent.ModelInfo{}, errNativeNothingFunded
 	}
-	return nativeModelInfo(table, alias), nil
+	if err != nil {
+		return agent.ModelInfo{}, err
+	}
+	return agent.ModelInfo{ID: alias, Name: nativeModelName(table.Models[alias].Name, alias)}, nil
 }
 
-// nativeModelInfo is alias as a native session's model list names it.
-func nativeModelInfo(table *modeltable.Table, alias string) agent.ModelInfo {
-	name := sanitizeLine(table.Models[alias].Name)
-	if name == "" {
-		name = alias
+// errNativeNothingFunded is what the list says when not one native model's
+// provider has an API key: the popup's note (`native has no models: …`) and
+// /provider native's warning (`its model table: …`) both carry it.
+var errNativeNothingFunded = errors.New("no model provider has an API key — run craze auth login, or set its API key variable")
+
+// nativeModelName is a native model as the list names it: its table name,
+// cleaned for the terminal, else its alias.
+func nativeModelName(name, alias string) string {
+	if name = sanitizeLine(name); name != "" {
+		return name
 	}
-	return agent.ModelInfo{ID: alias, Name: name}
+	return alias
 }
 
 // readNativeDefault reads native's default model off the Update, for the
-// /provider choice seq made in the list's opening gen.
-func readNativeDefault(seq, gen uint64) tea.Cmd {
+// /provider choice seq made in the list's opening gen, from dir and getenv
+// (Model.nativeDir, Model.nativeEnv).
+func readNativeDefault(seq, gen uint64, dir string, getenv func(string) string) tea.Cmd {
 	return func() tea.Msg {
-		md, err := nativeDefaultModel()
+		md, err := nativeDefaultModel(dir, getenv)
 		return sessNativeDefaultMsg{seq: seq, gen: gen, model: md, err: err}
 	}
 }
@@ -297,6 +301,8 @@ type sessCmdSource struct {
 	model      string
 	modelLabel string
 	starter    SessionStarter
+	nativeDir  string
+	nativeEnv  func(string) string
 	now        time.Time
 	frozen     bool
 }
@@ -431,7 +437,7 @@ func (s sessCmdSource) modelValues(q completeQuery, arg string) completeAnswer {
 // as rows — the model's name, its id beside it when they differ — with the
 // time the catalog was seen.
 func (s sessCmdSource) loadModels(p agent.Provider) func(context.Context) completeLoaded {
-	starter := s.starter
+	starter, nativeDir, nativeEnv := s.starter, s.nativeDir, s.nativeEnv
 	return func(context.Context) completeLoaded {
 		var (
 			models []agent.ModelInfo
@@ -439,7 +445,7 @@ func (s sessCmdSource) loadModels(p agent.Provider) func(context.Context) comple
 		)
 		if isNative(p) {
 			var err error
-			if models, err = nativeModelChoices(); err != nil {
+			if models, err = nativeModelChoices(nativeDir, nativeEnv); err != nil {
 				return completeLoaded{Err: err}
 			}
 		} else if starter != nil {
@@ -474,7 +480,7 @@ func (m Model) sessCmdSourceNow() sessCmdSource {
 	st, _ := m.sessions.(SessionStarter)
 	return sessCmdSource{
 		providers: m.providers, provider: p, provOK: ok, provLabel: m.sessNewProvider(),
-		model: m.sessNewModelID(), modelLabel: m.sessNewModel(), starter: st, now: m.now(), frozen: m.frozen,
+		model: m.sessNewModelID(), modelLabel: m.sessNewModel(), starter: st, nativeDir: m.nativeDir, nativeEnv: m.nativeEnv, now: m.now(), frozen: m.frozen,
 	}
 }
 
@@ -566,7 +572,7 @@ func (m Model) sessPickProvider(p agent.Provider) (Model, tea.Cmd) {
 	if isNative(p) {
 		m.sessPick.resolving = true
 		m.sessNote(sessUseNotePrefix+m.sessNewProvider()+" · …", sessNoteOK)
-		read = readNativeDefault(seq, m.sessList.gen)
+		read = readNativeDefault(seq, m.sessList.gen, m.nativeDir, m.nativeEnv)
 	} else {
 		m.sessNote(sessUseNotePrefix+m.sessNewProvider()+" · "+m.sessNewModel(), sessNoteOK)
 	}

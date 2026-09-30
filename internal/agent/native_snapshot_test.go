@@ -21,6 +21,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/charliek/craze/internal/harness"
+	"github.com/charliek/craze/internal/harness/modeltable"
 	"github.com/charliek/craze/internal/harness/redact"
 	"github.com/charliek/craze/internal/journal"
 )
@@ -637,6 +638,44 @@ func TestSessionStartGitHasNoProviderKeys(t *testing.T) {
 		if strings.HasPrefix(line, "NATIVE_TEST_KEY=") || strings.HasPrefix(line, "OPENAI_API_KEY=") ||
 			strings.Contains(line, nativeCanary) {
 			t.Fatalf("a provider key reached git's environment: %q", line)
+		}
+	}
+}
+
+// TestSessionStartGitHasAMovedEndpointsShippedKey (plan 031 §3.2, C2r2): a
+// shipped provider the user pointed at their own endpoint — base_url written,
+// env_keys not — no longer takes its key from the shipped variable, but the
+// variable still holds a credential, so git, and whatever git starts, is not
+// handed it either: gitEnviron leaves out every name the table knows holds a
+// key (CredentialEnvNames), not only the ones a provider is funded from.
+func TestSessionStartGitHasAMovedEndpointsShippedKey(t *testing.T) {
+	cat := &modeltable.Catalog{
+		DefaultModel: "acme/a",
+		Providers: map[string]modeltable.Provider{"acme": {Name: "Acme", Driver: modeltable.DriverOpenAICompat,
+			BaseURL: "https://api.acme.example/v1", EnvKeys: []string{"ACME_SHIPPED_KEY"}}},
+		Models: map[string]modeltable.Model{"acme/a": {Provider: "acme", WireModel: "acme-a"}},
+	}
+	dir := t.TempDir()
+	entry := "version = 1\n\n[providers.acme]\nbase_url = \"http://127.0.0.1:9/v1\"\napi_key = \"sk-stored-proxy-0011\"\n"
+	if err := os.WriteFile(filepath.Join(dir, modeltable.ProvidersFile), []byte(entry), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	table, err := modeltable.LoadWith(dir, cat)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if envKeys := table.Providers["acme"].EnvKeys; len(envKeys) != 0 {
+		t.Fatalf("control: the moved endpoint still takes its key from %q", envKeys)
+	}
+	t.Setenv("ACME_SHIPPED_KEY", "sk-shipped-in-the-parent-0012")
+	t.Setenv("CRAZE_SNAPSHOT_KEPT", "kept")
+	env := gitEnviron(table)
+	if !slices.Contains(env, "CRAZE_SNAPSHOT_KEPT=kept") {
+		t.Fatal("control: git's environment lacks an ordinary variable")
+	}
+	for _, kv := range env {
+		if strings.HasPrefix(kv, "ACME_SHIPPED_KEY=") {
+			t.Fatal("the moved endpoint's shipped variable reached git's environment")
 		}
 	}
 }

@@ -124,6 +124,18 @@ var (
 	// ErrClosed is every call that would change the session after Close.
 	ErrClosed = errors.New("harness: session closed")
 
+	// ErrStoredKeyFrozen is the refusal state a session enters when a key
+	// it learned as stored after it opened (LearnKeys, plan 031 §3.8, r2-2)
+	// turns out to be inside what it sends unredacted with every request —
+	// the system prompt, the encoded tools or the plan file's path. None of
+	// those can be rewritten, and every later request would carry the key
+	// again, so from then on every Run, Compact and Wake is refused with it,
+	// having sent and written nothing, until Close (after which they are
+	// ErrClosed). LearnKeys returns it too, from the call that found the
+	// key. The key is learned all the same, for everything the session
+	// still redacts. The text names no key and no surface.
+	ErrStoredKeyFrozen = errors.New("harness: a newly stored API key appears in this session's frozen prompt; start a new session")
+
 	// ErrEmptyPrompt is Run's refusal of a prompt with nothing but
 	// whitespace in it: no provider has anything to answer.
 	ErrEmptyPrompt = errors.New("harness: empty prompt")

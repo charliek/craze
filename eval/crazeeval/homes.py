@@ -2,7 +2,9 @@
 
 Every file here is built from field allowlists out of the config snapshot, names only
 the run's target model, points at the proxy route and holds only the dummy key. None
-of the owner's files is read or written.
+of the owner's files is read or written. A craze home's models.toml says
+``catalog = false`` (craze plan 031 P10): craze ships a model catalog and merges it
+under the user's files, which would otherwise add every shipped model to the run.
 """
 
 from __future__ import annotations
@@ -39,6 +41,9 @@ def _craze_provider(m: dict, base_url: str) -> dict:
 
 
 def _write_craze_native(crazedir: Path, models: dict, providers: dict) -> None:
+    # The whole table (craze plan 031 P10): no model craze ships joins it, so the agent
+    # tool's description names only the run's models and the prompt stays frozen.
+    models = {**models, "catalog": False}
     native = crazedir / "native"
     native.mkdir(parents=True, exist_ok=True)
     os.chmod(crazedir, 0o700)

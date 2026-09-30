@@ -157,6 +157,24 @@ The title is kept, and — native sessions being indexed now —
 provider's. A session that compacted at some point replays those notes in
 place too; see [Compaction](#compaction).
 
+#### Which model a session starts on
+
+A **new** native session starts where you left off: a model or effort picked
+in any native session's [`/model`](#model-dialog) is remembered, and the next
+session with no `--model` starts on the newest remembered model whose provider
+has a key, at the effort last used on it. With no remembered model it can use,
+it starts on the model table's default, and if that has no key, on the first
+model that has one, with a note. `--model` picks the model for one start — at
+the effort remembered for that model — and is never remembered itself. A
+resume is never moved by the memory: it keeps its transcript's model and
+effort, as above.
+
+The memory is read once, when the session starts, so a switch changes where
+the *next* session starts, not what the running one offers. It lives in
+`recent.json` beside the model files; see [Model
+memory](configuration.md#model-memory-recentjson) for the file, who writes it,
+and what happens when two sessions switch at once.
+
 #### What the model is told
 
 Native's system prompt is craze's own text: no sentence is reproduced whole
@@ -725,10 +743,17 @@ nothing.
   one in use marked `current`. Choosing one **resets the model** to that
   provider's default: for cursor, grok and gx, the agent's own (`default`: no
   model is passed); for native, the model a native session started with no
-  `--model` would use — the model table's `default_model`, or, when that
-  model's provider has no API key, the first model (alphabetically) whose key
-  resolves.
-- **`/model`** lists the provider's models. Native's are its model table's.
+  `--model` would use ([which model a session starts
+  on](#which-model-a-session-starts-on)) — the newest remembered model whose
+  provider has a key, else the model table's `default_model`, else the first
+  model (alphabetically) whose key resolves. With no provider funded it says
+  so (`no model provider has an API key — run craze auth login, …`) and leaves
+  the model to the agent's own.
+- **`/model`** lists the provider's models. Native's are its model table's,
+  only those whose provider has a key, the recently used ones first in the
+  order they were last picked and the rest by name, with no label — the same
+  order a native session's own `/model` lists. The list reads the memory and
+  never writes it: only a switch made inside a native session does.
   cursor, grok and gx name their models only once a session has started, so
   craze lists **the catalog the last session of that provider installed** —
   every detached host records it in the [model catalog
@@ -796,9 +821,12 @@ and `model` (on the call, a persona, or `[subagents]`) may also be `inherit`,
 which always means the parent's model. A tier name with no entry in
 `[subagents.tiers]` means the parent's model too, so a persona that says
 `model: opus` still works with no tier map configured at all. Every alias
-named in `[subagents]` or `[subagents.tiers]` must already be a model in the
-same `models.toml`; `inherit` itself is refused as a tier key, since a tier
-mapping to `inherit` could never be reached. For example:
+named in `[subagents]` or `[subagents.tiers]` should be a model — one craze
+ships or one in `models.toml`; one that is not falls back to the default,
+never stopping the session: silently for a model a release retired, with a
+warning for any other unknown name (see [Sub-agent settings](configuration.md#sub-agent-settings)). `inherit`
+itself is refused as a tier key, since a tier mapping to `inherit` could never
+be reached. For example:
 
 ```toml
 [subagents]
@@ -965,6 +993,7 @@ skills carry no such restriction; they complete anywhere in the draft.
 |---------|--------|
 | `/help` | Keybindings and commands |
 | `/model` | Switch model |
+| `/connect` | Store a model provider's API key — [native sessions only](#connect) |
 | `/clear` | Clear transcript |
 | `/tasks` | Tasks panel: compact, expanded, hidden |
 | `/theme` | Theme picker, or `/theme <name>` |
@@ -1093,14 +1122,85 @@ token scan reads the whole prompt line the way cursor's own regex does, a
 stray `/watch-pr` in the middle of a sentence ("see /watch-pr for context")
 expands exactly as if it had been typed at the start.
 
+### `/connect`
+
+`/connect` gives one of the native provider's model providers an API key
+without leaving the TUI — the dialog twin of [`craze auth
+login`](cli.md#craze-auth-login), storing the key the same way, as that
+provider's `api_key` in `providers.toml` (see
+[Keys](configuration.md#keys)). Like `craze auth login` it never checks the
+key with the provider: a wrong one shows as an error on first use. It exists
+in native sessions only: in a cursor, grok or gx session it is not in the menu,
+and a typed `/connect` goes to the agent as ordinary text. It is also what the
+last row of native's [`/model`](#model-dialog) opens, while some provider has
+no key.
+
+- **Step one, `Connect a provider`**, lists every provider craze knows — the
+  shipped ones and any in your own `providers.toml` — by name, a `✓` beside each
+  one that has a usable key, from its variable or stored; connecting one that
+  already has a key replaces its stored key. A provider whose stored key cannot
+  be used (shorter than 8 bytes, or overlapping the redaction marker) is marked
+  `stored key unusable`. The box opens on the first provider with no key.
+  `↑`/`↓` move, `Enter` or a click picks, `Esc` closes.
+- **Step two, `<Name> API key`**, is a masked field: what you type or paste is
+  drawn as `•`, never as text. Under it, where the key is stored — `Stored in
+  ~/.craze/native/providers.toml.`, or wherever this TUI's `CRAZE_HOME` puts it —
+  and, when one of the provider's variables is set in this TUI's environment,
+  `<VAR> is set in this environment; craze uses it before the stored key.`
+  A terminal paste and `Ctrl+V` both land in the field and nowhere else: a
+  clipboard paste that answers after you have left the field, or opened another
+  one, is dropped — never put in the composer. `Esc` goes back to step one and
+  empties the field.
+- **`Enter` stores the key.** An empty key, one shorter than 8 bytes, one that
+  overlaps the redaction marker, or one over 8 KiB is refused in the field —
+  `Not saved: …`, naming the rule, never the key — the field is emptied, and
+  nothing is written. Otherwise the box closes and the transcript says
+  `Connected <Name>. New sessions offer its models; to use them in this
+  conversation, /exit and run craze -c.` Another provider's stored key that
+  cannot be used is kept as it was, and named in a note after it. A store that
+  refuses — `providers.toml` a symlink, a file that no longer parses, a lock that
+  cannot be taken — is an error row naming the problem, never the key.
+- **The key is never shown**: not in the transcript, a note or an error row, the
+  composer, the session's journal, or anything sent to the model. The field is
+  emptied on every way out of the dialog — a save, `Esc`, a refusal, a card
+  arriving, another dialog opening, switching to another session, quitting
+  craze, or the session ending or this terminal losing its connection to it
+  (the box closes before craze goes back to the session list).
+
+**Refused while work runs.** While a turn is running — yours, another
+client's, or the agent's own — or a sub-agent is still running in the
+background, `/connect` writes `Finish or stop the running work first, then
+/connect.` and opens nothing; work that starts while the box is open refuses
+the save in the field instead, keeping the key for another `Enter`. A running
+session learns a newly stored key, to redact it, only when its next turn starts
+(see [Keys stored while a session
+runs](configuration.md#keys-stored-while-a-session-runs)), so a shell command
+or a sub-agent already running would not know it. The TUI's view of the
+session can lag its host by a moment, and another client attached to the same
+session can start work while the box is open, so the refusal narrows that
+window rather than closing it.
+
+**The running session keeps its models.** A provider connected here is offered
+by every new session, and by this conversation once you `/exit` and resume it
+with `craze -c`; the running one keeps the model table it started with, and a
+key you replace reaches it only after the same `/exit` and `craze -c`.
+
+**Where it writes.** `/connect` writes to the `providers.toml` of *this* TUI's
+craze directory (`CRAZE_HOME`, or `~/.craze`). A session attached with `craze
+attach` from a shell with another `CRAZE_HOME` reads its host's directory, not
+this one — which is why step two names the file.
+
+It is no way in on a machine with no key at all: a native session with nothing
+funded does not start, and its error names `craze auth login`, which is.
+
 ## Model dialog
 
 `/model`, or a click on the model name in status row 1, opens a centred box
 over the transcript: a filter (`❯ `, type to narrow by name or id), the model
-list (current model first, then the agent's own order, `current` tagged,
-`▲`/`▼` when it scrolls), and one tab below it per select option the
-**current model's** catalog advertises, other than `mode` and `model`
-(semantic category first, then id, in the agent's own order). `effort`
+list (`▲`/`▼` when it scrolls; which models, in what order, is below), and
+one tab below it per select option the **current model's** catalog
+advertises, other than `mode` and `model` (semantic category first, then id,
+in the agent's own order). `effort`
 (`low medium high xhigh`, the picked one bracketed) and `fast` (`on`/`off`)
 are drawn exactly as they always were, whichever id or name the agent files
 them under; any other option the model offers — `context` or `thinking` on
@@ -1111,6 +1211,34 @@ provider's effort/fast bits gate only the status-row chips and the
 `/model <effort>` shorthand, never a control the model itself advertises).
 Composer-2.5 shows `fast` alone; claude-opus-5 shows `effort`, `fast`,
 `context` and `thinking`; grok shows `effort` alone, never `fast`.
+
+**Which models, in what order.** The current model is always the first row,
+and the row the dialog opens on. A row is the model's name and nothing else —
+no `current` or `recent` tag: the order says it. After the current model come,
+on native, the models you picked most recently in any native session's
+`/model`, newest first (the [model
+memory](configuration.md#model-memory-recentjson)); then any model whose id
+or name contains `grok`; then the rest, each group by name. An ACP provider
+(cursor, grok, gx) has no model memory, so its list starts at the `grok`
+group.
+
+A native session lists only the models of providers that have a key — an
+exported variable or a stored one ([Keys](configuration.md#keys)) — plus the
+model it is running on, and says nothing about the providers that have none,
+except one row: while some provider has no key, the list ends with
+`Connect a provider…`, which `↑`/`↓` and a click reach like any row and which
+opens [`/connect`](#connect) — applying nothing else, as `Esc` would not. It is
+judged when the dialog opens, against the providers this TUI's craze directory
+and environment know (the file `/connect` writes), so it goes once every
+provider has a key, even though the running session's own list does not change
+until `/exit` and `craze -c`. An ACP provider's dialog never has it.
+It judges both when it starts: a model you pick in this session moves up in
+the *next* session's list, not this one's, and a provider you connect while
+the session runs appears in a new session, or in this conversation after
+`/exit` and `craze -c`. A typed `/model <alias>` naming a model the list
+leaves out fails as an unknown model does; `--model <alias>` at start still
+resolves against every model craze knows, and refuses one whose provider has
+no key, saying how to give it one.
 
 The dialog does not rebuild itself for the model under the cursor: the tabs
 on screen are the current model's, and highlighting another model in the list

@@ -403,8 +403,11 @@ def test_frame_model_dialog_turns_fast_on(
         keys="<wait:idle>/model<enter>",
     )
     text = "\n".join(frame_lines(opened, 100, 30))
-    for want in ("> Default", "current", "effort  low  [medium]  high", "fast  [off]  on"):
+    for want in ("> Default", "effort  low  [medium]  high", "fast  [off]  on"):
         assert want in text, f"missing {want!r}:\n{text}"
+    # The current model is the first row and the one the dialog opens on, and
+    # carries no tag (plan 031 §3.6, owner decision Q4).
+    assert "current" not in text, f"the current model is tagged:\n{text}"
 
     applied = frame(
         craze_bin,

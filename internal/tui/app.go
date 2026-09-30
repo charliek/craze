@@ -239,6 +239,20 @@ type Config struct {
 	// detached hosts. nil — everything else — is no session list, and
 	// nothing of it on any frame.
 	Sessions Sessions
+
+	// NativeDir and Getenv are the only way the TUI's own native-provider
+	// surfaces reach the native directory and the environment (plan 031
+	// §3.6, §3.9, §3.13; panel astra 13): `/connect` lists the providers,
+	// judges which have a key and stores one there, and native's `/model`
+	// ends with its connect row by the same judgement. They are the TUI's —
+	// the key goes to this TUI's CRAZE_HOME, which the dialog shows by path,
+	// even when the session is served by a host started elsewhere (R2).
+	// Empty and nil are paths.NativeDir() and os.Getenv, read once by New:
+	// every production caller. A test or golden sets both to a fixture
+	// directory and environment, never the shipped catalog's variables or
+	// the developer's ~/.craze.
+	NativeDir string
+	Getenv    func(string) string
 }
 
 // viewing is c as it runs: for a viewer (Config.Viewer with a Backend)
@@ -543,6 +557,19 @@ type Model struct {
 	dialog  dialogKind
 	mdlg    modelDialog
 	helpTop int
+	// cdlg is the /connect dialog's own state (connect_dialog.go, plan 031
+	// §3.9), the session's like every dialog's, so a switch clears it and its
+	// key field with it. connSeq numbers every opening of that dialog, of its
+	// key field and of the model dialog, whose answers carry the number back
+	// (connectAnswer, keyField); it only ever moves forward, across every
+	// session, so no number is issued twice. nativeDir and nativeEnv are
+	// Config.NativeDir and Config.Getenv, defaults applied: the one way the
+	// dialog and the model dialog's connect row reach files and the
+	// environment.
+	cdlg      connectDialog
+	connSeq   uint64
+	nativeDir string
+	nativeEnv func(string) string
 	// applyGen counts this client's model changes: the model dialog's applies
 	// and `/model`'s. The box closes optimistically, so a second change can be
 	// under way before the first one answers; each answer carries its own, and
@@ -1592,6 +1619,8 @@ func New(cfg Config) Model {
 		retired:       &backendSet{},
 		completeLoads: &completeLoadSet{},
 		gateSync:      gateSyncDefault,
+		nativeDir:     configNativeDir(cfg.NativeDir),
+		nativeEnv:     configGetenv(cfg.Getenv),
 		// The first session shown is shown from here, before any backend
 		// of it is adopted (shownGen): 1, so no message the program makes
 		// carries the zero stamp a test's hand-built one does.
@@ -2013,7 +2042,10 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// included (C15r); one asked for in the composer before the list
 			// opened in the composer's draft, which is where the user finds it
 			// on going back.
-			if msg.text == "" {
+			if msg.text == "" || msg.key != (keyField{}) {
+				// One asked for in /connect's key field (plan 031 §3.9) lands
+				// in that field while it is open, or nowhere: never in the
+				// composer's draft the list covers.
 				return m, nil
 			}
 			if msg.listGen != 0 {
@@ -2072,7 +2104,11 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// opens it again: endedToList); without one — the opt-out, craze
 		// attach — or on the way out after this client's own quit asked for
 		// the end, the program quits, and the final model says why (ended,
-		// endErr) for the command line's last word.
+		// endErr) for the command line's last word. /connect goes with the
+		// session it was opened in, its key field emptied, whichever way
+		// this goes (plan 031 §3.9, dropConnect): the list covers the box,
+		// and nothing would reach it or its field again.
+		m = m.dropConnect()
 		if f := m.first; f != nil && !m.quitting {
 			// The session an unstarted session's first prompt spawned ended
 			// before it came up: the same as its start failing (§3.13).
@@ -2307,6 +2343,11 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.copyUntil = m.now().Add(copyNoteLinger)
 		return m, nil
 
+	case connectAnswer:
+		// /connect's reads and its save, and the model dialog's connect row
+		// (connect_dialog.go, plan 031 §3.9).
+		return m.applyConnect(msg)
+
 	case pasteMsg:
 		// The read is asynchronous, so the composer may no longer be where the
 		// keyboard is by the time the text arrives. One asked for in a session
@@ -2314,6 +2355,12 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// adopted included (C11r2) — never gets here: the gate dropped it
 		// (staleShown, pasteMsg). One asked for in the session list's input,
 		// which has closed since, had only that input to land in.
+		if msg.key != (keyField{}) {
+			// Asked for in /connect's key field (plan 031 §3.9): it goes into
+			// that field while it is still the one open, and nowhere else —
+			// never the composer, whatever is on screen now.
+			return m.pasteIntoKey(msg), nil
+		}
 		if msg.text == "" || msg.listGen != 0 || m.composerCovered() {
 			return m, nil
 		}
@@ -2669,7 +2716,7 @@ func (m Model) clickStatus(x, row int, lay frameLayout) (tea.Model, tea.Cmd) {
 	case 0:
 		_, spans := m.statusRow1()
 		if spanAt(spans, x) == spanModel {
-			return m.openModelDialog(), nil
+			return m.showModelDialog()
 		}
 	case 1:
 		if m.viewing != "" {
@@ -2700,6 +2747,8 @@ func (m Model) dialogClick(row int) (tea.Model, tea.Cmd) {
 		return m.providerDialogClick(i)
 	case dialogResume:
 		return m.resumeDialogClick(i)
+	case dialogConnect:
+		return m.connectDialogClick(i)
 	}
 	return m, nil
 }
@@ -2752,6 +2801,8 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleProviderDialogKey(msg)
 	case dialogResume:
 		return m.handleResumeDialogKey(msg)
+	case dialogConnect:
+		return m.handleConnectDialogKey(msg)
 	}
 
 	// The confirm line is a question with two answers: Enter confirms, Esc
@@ -3198,6 +3249,13 @@ func (m Model) handleEnter() (tea.Model, tea.Cmd) {
 	// user's own shell and it needs nothing of the session but its workspace.
 	if m.shellMode() {
 		return m.runShellDraft()
+	}
+	// /connect is a builtin of native sessions alone (plan 031 §3.9, CR 9):
+	// anywhere else nothing claims it, and it goes to the agent below as the
+	// text it is, as it always did. It is refused while work runs — with a
+	// line, not the silence below — and never queued.
+	if ok && name == connectBuiltin.Name && m.connectOffered() {
+		return m.runBuiltin(name, args)
 	}
 	// A builtin never queues: it is craze's own, it does not need the agent,
 	// and holding it until the turn ends would be surprising. The ones that
@@ -3852,6 +3910,10 @@ func (m *Model) applyForeignCancelled(msg foreignCancelledMsg) {
 // one — Engine.Close runs once and answers every later caller with the same
 // error — so it returns when the first does and cannot deadlock.
 func (m Model) requestQuit() (tea.Model, tea.Cmd) {
+	// /connect's key field does not outlive the quit, local or served: the
+	// model it is in waits out the stop and is the program's last (plan 031
+	// §3.9, dropConnect).
+	m = m.dropConnect()
 	if m.remote && m.eng != nil {
 		return m.stopQuit()
 	}

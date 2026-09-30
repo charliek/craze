@@ -242,13 +242,19 @@ harness (in bwrap, its own netns) ──> 127.0.0.1:<port> ──relay──> pr
 ## Config
 
 - `models.toml`: the six eval models. Each entry has its provider, its wire model, its one
-  pinned reasoning effort, and each harness's id for it. codex runs only where the provider
+  pinned reasoning effort, and each harness's id for it. The `craze` and `gx` aliases are
+  kept in step by hand: craze no longer imports gx's table (`craze import gx` is removed),
+  so a renamed or retired alias has to be changed in both places. codex runs only where the provider
   serves `/responses` (Meta, Fireworks).
 - `prices.toml`: see Budget.
 - **`crazeeval snapshot-config`:**
   - It copies the target definitions from the owner's craze and gx tables into
     `<campaign>/eval-config/<stamp>-<hash>/config.json` (and moves `CURRENT`). Only allowlisted
-    fields are copied: no key, env-key name, auth helper or header.
+    fields are copied: no key, env-key name, auth helper or header. It reads the alias
+    entries of the owner's `~/.craze/native/models.toml` (and gx's config). craze ships its
+    own model catalog and the owner's `models.toml` may shrink to overrides, which would
+    leave an alias this reads missing: trimming that file needs follow-up SF-a first (the
+    snapshot reading the merged view, craze plan 031 §9 R4).
   - It saves a models.dev catalog for opencode (`OPENCODE_MODELS_PATH`), and records which
     `--variant`s opencode offers per model, asked of opencode itself in a sandbox.
   - Every run uses the snapshot and records its hash; runs never read the owner's live files.
@@ -265,7 +271,7 @@ The generated homes, per harness:
 
 | harness | home | notes |
 |---|---|---|
-| craze | `CRAZE_HOME` with `native/models.toml` and `native/providers.toml` (0600) | `[subagents] model` is the target; `default_effort` is the pinned effort |
+| craze | `CRAZE_HOME` with `native/models.toml` and `native/providers.toml` (0600) | `[subagents] model` is the target; `default_effort` is the pinned effort. `models.toml` says `catalog = false` (craze plan 031 P10): craze ships a model catalog and merges it under the user's files, which would add every shipped model — funded by the proxy provider's dummy key — to the run and to the agent tool's description, changing the frozen prompt; with it off the two files are the whole table. `crazeeval proxy --craze-home` writes it too. |
 | gx | `GROK_HOME/config.toml` | Web search and fetch are off. Image and video tools are off (they would call api.x.ai). The title and image-description models are pinned to the target, since they default to grok-4.6. `turn_summary` and `title_refresh` are off: they replay the conversation and never reach the answer. Every task -- build and plan -- runs `--always-approve` (plan X12): gx's headless plan mode cannot approve a sub-agent spawn (no `--allow` rule matches `spawn_subagent`, and `--always-approve` overrides `--permission-mode plan`, plan X8), so a delegating gx plan task was cancelled under plan mode alone (base-meta-spark T-P1). Plan tasks therefore run prompt-only: the task prompt asks for a plan and no changes, gx answers without entering plan mode, and the no-writes check still applies. `plan_mode` in `result.json` records `"prompt-only"` for these tasks; see `runners/gx.py`. |
 | opencode | `OPENCODE_CONFIG` plus XDG dirs under the home | Uses opencode's own `meta` (Responses), `zai-coding-plan` and `fireworks-ai` providers, with only `baseURL`/`apiKey` overridden. `model` and `small_model` are the target. `webfetch`/`websearch` are denied, which removes them from the offered tools. Model fetch, autoupdate and share are off. |
 | codex | `CODEX_HOME/config.toml` | A `wire_api = "responses"` provider with `env_key = "CRAZE_EVAL_DUMMY"`. `web_search = "disabled"`, analytics off, plugins off (exec would fetch them from GitHub). Runs with `--dangerously-bypass-approvals-and-sandbox`, since bwrap is the sandbox. See *codex model metadata* below. |

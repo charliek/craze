@@ -15,6 +15,7 @@ conclusions; `11` records both.
 3. **Catwalk `v0.52.43`: not embedded.** The catalog is a small craze-owned
    model table seeded from gx's configuration; Catwalk is a reference to
    consult when adding a model (D-22). Nothing blocks H1.
+   *(2026-09-30, D-75: the table is now seeded from a catalog embedded in the binary, not from gx's configuration.)*
 4. **The harness owns credentials, short aliases, owner-selected defaults,
    Meta direct, and narrowly documented provider overrides through its own
    two-file config, not a live overlay of gx's TOML.** `craze import gx
@@ -38,6 +39,8 @@ conclusions; `11` records both.
    adds entries whose `source = "gx"`, keeps every entry with any other
    `source` (e.g. `"manual"`) untouched, and keeps-and-reports as `stale` a
    gx-sourced entry gx no longer has; nothing is ever deleted.
+
+   *2026-09-30 (Plan 031): superseded by D-75. `craze import gx` is removed; the catalog ships in the binary and the two files are overlays on it (an old `source = "gx"` entry yields to the catalog when craze ships that alias or provider). Keys are set with `craze auth` or `/connect` (D-77); pickers list connected providers only (D-78).*
 
 Fantasy remains Apache-2.0 with its NOTICE; Catwalk is MIT. H0 added neither
 module to craze's root dependencies.

@@ -4,5 +4,9 @@ package cli
 
 import "golang.org/x/sys/unix"
 
-// getTermios is the ioctl that reads a terminal's attributes (isTerminal).
-const getTermios = unix.TCGETS
+// getTermios is the ioctl that reads a terminal's attributes (isTerminal);
+// setTermios writes them at once (echoOff, plan 031 §3.7).
+const (
+	getTermios = unix.TCGETS
+	setTermios = unix.TCSETS
+)

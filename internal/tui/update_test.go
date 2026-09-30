@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"reflect"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -1042,6 +1043,73 @@ func TestWrapProseHardWrapsAtTinyWidths(t *testing.T) {
 	}
 }
 
+// TestWrapProseKeepsAFlagWhole (plan 031 C7r, verification V3): a word that
+// begins with a hyphen — a flag, a negative number — is never broken after
+// that hyphen, at any width it fits in, styled or not: ansi.Wordwrap breaks at
+// every hyphen, and at a full row's end it left the hyphen alone on a row of
+// its own (`craze` / ` -` / `c.` at 110 columns). Everything else wraps
+// exactly as ansi.Wordwrap and ansi.Hardwrap wrap it: a hyphen inside a word,
+// a lone dash between spaces, and a text that already holds the stand-in
+// rune.
+func TestWrapProseKeepsAFlagWhole(t *testing.T) {
+	notice := "Connected Meta. New sessions offer its models; to use them in this conversation, /exit and run craze -c."
+	if got, want := wrapProse(notice, 110), notice[:len(notice)-4]+"\n-c."; got != want {
+		t.Fatalf("the notice at 110 columns wraps as %q, want %q", got, want)
+	}
+
+	// Every word, a flag included, ends up whole on one row at every width it
+	// fits in, the hyphen of a flag written back.
+	flags := "run craze -c. then craze --model fireworks/glm -rf now at -5 degrees; or \x1b[1m-x\x1b[0m styled"
+	for width := 16; width <= 100; width++ {
+		got := wrapProse(flags, width)
+		if strings.ContainsRune(got, flagHyphen) {
+			t.Fatalf("width %d: the stand-in was left in %q", width, got)
+		}
+		var words []string
+		for _, ln := range strings.Split(got, "\n") {
+			words = append(words, strings.Fields(ansi.Strip(ln))...)
+		}
+		if want := strings.Fields(ansi.Strip(flags)); !slices.Equal(words, want) {
+			t.Fatalf("width %d: a word was broken:\n%s", width, got)
+		}
+	}
+
+	// What begins no word wraps as it always did.
+	plainWrap := func(s string, width int) string {
+		w := proseWidth(width)
+		return ansi.Hardwrap(ansi.Wordwrap(s, w, ""), w, true)
+	}
+	for _, s := range []string{
+		"a well-known text - with a lone dash, mid-word hy-phens and a trailing one -",
+	} {
+		for width := 8; width <= 90; width++ {
+			if got, want := wrapProse(s, width), plainWrap(s, width); got != want {
+				t.Fatalf("width %d: %q wraps as %q, want %q", width, s, got, want)
+			}
+		}
+	}
+}
+
+// A text that already holds the stand-in rune is still held: another
+// private-use rune is chosen, the literal one is left in place, and a flag at
+// a wrap boundary stays whole (plan 031 r5).
+func TestWrapProseKeepsAFlagWholeBesideTheStandIn(t *testing.T) {
+	notice := "Connected \ue000eta. New sessions offer its models; to use them in this conversation, /exit and run craze -c."
+	got := wrapProse(notice, 110)
+	rows := strings.Split(got, "\n")
+	if last := rows[len(rows)-1]; last != "-c." {
+		t.Fatalf("the flag was not kept whole after a literal stand-in: %q", got)
+	}
+	if !strings.Contains(got, "\ue000eta.") {
+		t.Fatalf("the literal private-use rune was lost: %q", got)
+	}
+	// Both stand-ins in use: the third is chosen.
+	both := "\ue000\ue001 run craze -c."
+	if s, r, ok := holdFlagHyphens(both); !ok || r != '\ue002' || strings.Count(s, "\ue002") != 1 {
+		t.Fatalf("holdFlagHyphens(%q) = %q, %U, %v", both, s, r, ok)
+	}
+}
+
 func TestToolRowsStayOneRow(t *testing.T) {
 	m := sized(t)
 	tm, _ := m.Update(eventMsg{ev: agent.Event{Type: agent.EventTool, Tool: &agent.ToolEvent{
@@ -1100,9 +1168,11 @@ func TestModelDialogCurrentFirstAndFilters(t *testing.T) {
 	if m.dialog != dialogModel {
 		t.Fatal("expected the model dialog")
 	}
+	// First, and the row the dialog opens on — and untagged: the order says
+	// which model is current (plan 031 §3.6, owner decision Q4).
 	view := plainView(m)
-	if !strings.Contains(view, "> Fast") || !strings.Contains(view, "current") {
-		t.Fatalf("the current model should be first and tagged:\n%s", view)
+	if !strings.Contains(view, "> Fast") || strings.Contains(view, "current") {
+		t.Fatalf("the current model should be first, selected and untagged:\n%s", view)
 	}
 	// The filter matches the display name or the id, case-insensitively.
 	m = typeInto(t, m, "GRO")

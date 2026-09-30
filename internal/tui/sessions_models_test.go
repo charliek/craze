@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"os"
@@ -125,7 +126,10 @@ source = "manual"
 	if def == "" {
 		def = "beta"
 	}
+	// catalog = false (plan 031 C2): these two files are the whole table, as
+	// they were before craze shipped a catalog to merge them over.
 	models := fmt.Sprintf(`version = 1
+catalog = false
 default_model = %q
 
 [models.alpha]
@@ -254,7 +258,7 @@ func TestTheProvidersAreThePickersProviders(t *testing.T) {
 // choice since replaced is dropped.
 func TestChoosingAProviderResetsTheModel(t *testing.T) {
 	m, _ := cmdList(t, 100, 30, map[string]ModelCatalog{"cursor": cursorCatalog})
-	nativeHome(t, "") // after cmdList, whose HOME clears CRAZE_HOME
+	m.nativeDir, m.nativeEnv = nativeHome(t, ""), os.Getenv // after cmdList, whose HOME clears CRAZE_HOME
 	m = modelsLoaded(t, m, "/model comp")
 	m, _ = press(m, enter())
 	if r := ruleOf(t, m); !strings.HasSuffix(r, " · cursor · Composer 2.5") {
@@ -555,45 +559,175 @@ func TestThePickLasts(t *testing.T) {
 }
 
 // TestTheNativeSeam: nativeModelChoices and nativeDefaultModel (the seam Plan
-// 031 swaps): native's table's aliases, sorted and named; its default — the
-// table's, or the first funded alias when that has no key, or an error when
-// nothing is funded; and no table, an error either way.
+// 031 switched to its rules, §3.5/§3.6): only funded models, the remembered
+// ones first in recent order with their rank and the rest by name; the
+// default is StartModel's — the newest funded remembered model, else the
+// table's, else the first funded alias — and an error when nothing is funded;
+// with no files, the shipped catalog, unfunded. Neither reads or writes
+// anything but the directory and environment it is given, and neither writes
+// recent.json (§3.4).
 func TestTheNativeSeam(t *testing.T) {
 	t.Setenv("CRAZE_HOME", t.TempDir())
-	if _, err := nativeModelChoices(); !errors.Is(err, modeltable.ErrNotConfigured) {
-		t.Fatalf("no table, the choices: %v", err)
+	// No files (plan 031 C2): the shipped catalog is the table, and with no key
+	// anywhere — the package's TestMain scrubs the catalog's variables —
+	// nothing in it is funded.
+	empty := t.TempDir()
+	if got, err := nativeModelChoices(empty, os.Getenv); err == nil {
+		t.Fatalf("no files, the choices: %v; want an error, nothing is funded", got)
 	}
-	if _, err := nativeDefaultModel(); !errors.Is(err, modeltable.ErrNotConfigured) {
-		t.Fatalf("no table, the default: %v", err)
+	if md, err := nativeDefaultModel(empty, os.Getenv); err == nil {
+		t.Fatalf("no files, the default: %+v; want an error, nothing is funded", md)
 	}
 
-	nativeHome(t, "")
-	got, err := nativeModelChoices()
-	if want := []agent.ModelInfo{{ID: "alpha", Name: "Alpha One"}, {ID: "beta", Name: "Beta"}}; err != nil || !slices.Equal(got, want) {
+	dir := nativeHome(t, "")
+	// Only alpha's provider has a key: beta, unfunded, is not offered.
+	got, err := nativeModelChoices(dir, os.Getenv)
+	if want := []agent.ModelInfo{{ID: "alpha", Name: "Alpha One"}}; err != nil || !slices.Equal(got, want) {
 		t.Fatalf("the choices %v, %v; want %v", got, err, want)
 	}
-	if md, err := nativeDefaultModel(); err != nil || md != (agent.ModelInfo{ID: "alpha", Name: "Alpha One"}) {
+	if md, err := nativeDefaultModel(dir, os.Getenv); err != nil || md != (agent.ModelInfo{ID: "alpha", Name: "Alpha One"}) {
 		t.Fatalf("an unfunded default: %+v, %v; want alpha, the first funded", md, err)
 	}
-	t.Setenv("CRAZE_C16_TEST_KEY", "sk-c16-env-0123456789abcdef")
-	if md, err := nativeDefaultModel(); err != nil || md.ID != "beta" {
+	// The seam's environment is the one it is given, not the process's.
+	funded := func(k string) string {
+		if k == "CRAZE_C16_TEST_KEY" {
+			return "sk-c16-env-0123456789abcdef"
+		}
+		return ""
+	}
+	got, err = nativeModelChoices(dir, funded)
+	if want := []agent.ModelInfo{{ID: "alpha", Name: "Alpha One"}, {ID: "beta", Name: "Beta"}}; err != nil || !slices.Equal(got, want) {
+		t.Fatalf("both funded, the choices %v, %v; want %v", got, err, want)
+	}
+	if md, err := nativeDefaultModel(dir, funded); err != nil || md.ID != "beta" {
 		t.Fatalf("a funded default: %+v, %v; want beta", md, err)
 	}
-
-	nativeHome(t, "alpha")
-	if md, err := nativeDefaultModel(); err != nil || md.ID != "alpha" {
-		t.Fatalf("the default alpha: %+v, %v", md, err)
+	if md, err := nativeDefaultModel(dir, os.Getenv); err != nil || md.ID != "alpha" {
+		t.Fatalf("the process environment leaked into the seam's: %+v, %v", md, err)
 	}
 
-	dir := nativeHome(t, "beta")
+	// The memory: beta remembered puts it first, ranked, and makes it the
+	// start model while funded; unfunded, it is neither offered nor started.
+	if _, err := os.Stat(filepath.Join(dir, modeltable.RecentFile)); !os.IsNotExist(err) {
+		t.Fatalf("recent.json exists before anything wrote it: %v", err)
+	}
+	rem := modeltable.RecentEntry{Alias: "beta", Provider: "unfunded", WireModel: "beta-wire"}
+	if err := modeltable.Remember(dir, rem, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, modeltable.RecentFile)
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err = nativeModelChoices(dir, funded)
+	if want := []agent.ModelInfo{{ID: "beta", Name: "Beta", Recent: 1}, {ID: "alpha", Name: "Alpha One"}}; err != nil || !slices.Equal(got, want) {
+		t.Fatalf("remembered, the choices %v, %v; want %v", got, err, want)
+	}
+	if md, err := nativeDefaultModel(dir, funded); err != nil || md != (agent.ModelInfo{ID: "beta", Name: "Beta"}) {
+		t.Fatalf("remembered and funded, the default: %+v, %v; want beta", md, err)
+	}
+	got, err = nativeModelChoices(dir, os.Getenv)
+	if want := []agent.ModelInfo{{ID: "alpha", Name: "Alpha One"}}; err != nil || !slices.Equal(got, want) {
+		t.Fatalf("remembered but unfunded, the choices %v, %v; want %v (no gap in the ranks)", got, err, want)
+	}
+	if md, err := nativeDefaultModel(dir, os.Getenv); err != nil || md.ID != "alpha" {
+		t.Fatalf("remembered but unfunded, the default: %+v, %v; want alpha", md, err)
+	}
+	after, err := os.ReadFile(path)
+	if err != nil || !bytes.Equal(before, after) {
+		t.Fatalf("the seam changed recent.json: %v\n%s\n%s", err, before, after)
+	}
+	entries, _ := os.ReadDir(dir)
+	for _, e := range entries {
+		if strings.Contains(e.Name(), "recent") && e.Name() != modeltable.RecentFile && e.Name() != modeltable.RecentFile+".lock" {
+			t.Fatalf("the seam left %s", e.Name())
+		}
+	}
+
+	dir = nativeHome(t, "alpha")
+	if md, err := nativeDefaultModel(dir, os.Getenv); err != nil || md.ID != "alpha" {
+		t.Fatalf("the default alpha: %+v, %v", md, err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, modeltable.RecentFile)); !os.IsNotExist(err) {
+		t.Fatalf("the seam wrote recent.json: %v", err)
+	}
+
+	dir = nativeHome(t, "beta")
 	providers := filepath.Join(dir, modeltable.ProvidersFile)
 	raw, _ := os.ReadFile(providers)
 	unfunded := strings.Replace(string(raw), `api_key = "sk-c16-test-0123456789abcdef"`+"\n", "", 1)
 	if err := os.WriteFile(providers, []byte(unfunded), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := nativeDefaultModel(); err == nil || !strings.Contains(err.Error(), "no configured model has an API key") {
-		t.Fatalf("nothing funded: %v", err)
+	if _, err := nativeDefaultModel(dir, os.Getenv); !errors.Is(err, errNativeNothingFunded) {
+		t.Fatalf("nothing funded, the default: %v", err)
+	}
+	if got, err := nativeModelChoices(dir, os.Getenv); !errors.Is(err, errNativeNothingFunded) {
+		t.Fatalf("nothing funded, the choices: %v, %v", got, err)
+	}
+}
+
+// TestTheListsNativeModelFollowsTheMemory (plan 031 §3.4-§3.6, §3.12): through
+// the Model's own seams (Config.NativeDir, Config.Getenv as m.nativeDir and
+// m.nativeEnv), the list's native /model offers only funded models, the
+// remembered one first, with no label; /provider native resets to the start
+// model — the remembered one when funded — and says so when nothing is
+// funded; and the list never writes recent.json.
+func TestTheListsNativeModelFollowsTheMemory(t *testing.T) {
+	m, _ := cmdList(t, 100, 30, nil)
+	dir := nativeHome(t, "")
+	env := map[string]string{}
+	m.nativeDir, m.nativeEnv = dir, func(k string) string { return env[k] }
+	list := func(m Model) []string {
+		m, _ = typeList(t, m, "/provider native")
+		m, _ = press(m, enter())
+		m = modelsLoaded(t, m, "/model ")
+		return cmdItems(m)
+	}
+	if got := list(m); !slices.Equal(got, []string{"Alpha One"}) {
+		t.Fatalf("beta has no key; /model lists %v, want only Alpha One", got)
+	}
+	env["CRAZE_C16_TEST_KEY"] = "sk-c16-env-0123456789abcdef"
+	if got := list(m); !slices.Equal(got, []string{"Alpha One", "Beta"}) {
+		t.Fatalf("nothing remembered; /model lists %v", got)
+	}
+	if err := modeltable.Remember(dir, modeltable.RecentEntry{Alias: "beta", Provider: "unfunded", WireModel: "beta-wire"}, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	before, _ := os.ReadFile(filepath.Join(dir, modeltable.RecentFile))
+	if got := list(m); !slices.Equal(got, []string{"Beta", "Alpha One"}) {
+		t.Fatalf("beta remembered; /model lists %v, want Beta first", got)
+	}
+	// /provider native resets to the start model: the remembered one.
+	m, _ = typeList(t, m, "/provider native")
+	m, cmd := press(m, enter())
+	tm, _ := m.Update(runWatched(t, mustCmd(t, cmd, "readNativeDefault")))
+	m = tm.(Model)
+	if spec, _ := m.sessNewSpec("/somewhere"); spec.Model != "beta" {
+		t.Fatalf("the remembered, funded model is the start model: %+v", spec)
+	}
+	// Nothing funded: /provider native says why and leaves no --model.
+	env["CRAZE_C16_TEST_KEY"] = ""
+	providers := filepath.Join(dir, modeltable.ProvidersFile)
+	raw, _ := os.ReadFile(providers)
+	if err := os.WriteFile(providers, []byte(strings.Replace(string(raw), `api_key = "sk-c16-test-0123456789abcdef"`+"\n", "", 1)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	m, _ = typeList(t, m, "/provider native")
+	m, cmd = press(m, enter())
+	tm, _ = m.Update(runWatched(t, mustCmd(t, cmd, "readNativeDefault")))
+	m = tm.(Model)
+	if h := sessHint(m); !strings.Contains(h, "no model provider has an API key") || m.sessList.noteKind != sessNoteWarn {
+		t.Fatalf("nothing funded: the hint %q (%v)", h, m.sessList.noteKind)
+	}
+	m = modelsLoaded(t, m, "/model ")
+	if n := m.sessList.in.cmd.ans.Note; !strings.Contains(n, "native has no models: no model provider has an API key") {
+		t.Fatalf("nothing funded, /model says %q", n)
+	}
+	after, _ := os.ReadFile(filepath.Join(dir, modeltable.RecentFile))
+	if !bytes.Equal(before, after) {
+		t.Fatalf("the list wrote recent.json:\n%s\n%s", before, after)
 	}
 }
 

@@ -127,7 +127,11 @@ driver = "openrouter"
 env_keys = ["OR_API_KEY"]
 `
 
+// driverModelsTOML says `catalog = false` (plan 031 §3.13): driverOptions'
+// getter funds every variable name, so a shipped provider merged in would be
+// funded too.
 const driverModelsTOML = `version = 1
+catalog = false
 default_model = "test/a"
 
 [models."test/a"]

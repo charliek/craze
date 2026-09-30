@@ -146,20 +146,3 @@ func TestValidateCompactionBounds(t *testing.T) {
 	tbl.Compaction = Compaction{TailTokensSet: ptr(-20000)}
 	wantFileError(t, tbl.Validate(), ModelsFile, "compaction", "tail_tokens")
 }
-
-// TestCompactionCloneOwnsItsValues: a clone's settings are its own, so a
-// table merged from another (craze import gx) never writes through to it.
-func TestCompactionCloneOwnsItsValues(t *testing.T) {
-	c := Compaction{AutoSet: ptr(false), ThresholdPercentSet: ptr(70), TailTokensSet: ptr(100)}
-	d := c.Clone()
-	if !reflect.DeepEqual(c, d) {
-		t.Fatalf("Clone = %+v, want %+v", d, c)
-	}
-	*d.AutoSet, *d.ThresholdPercentSet, *d.TailTokensSet = true, 90, 7
-	if *c.AutoSet || *c.ThresholdPercentSet != 70 || *c.TailTokensSet != 100 {
-		t.Fatalf("changing the clone changed the original: %+v", c)
-	}
-	if !reflect.DeepEqual(Compaction{}.Clone(), Compaction{}) {
-		t.Fatal("the zero section's clone is not the zero section")
-	}
-}
