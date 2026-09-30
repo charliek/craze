@@ -891,47 +891,58 @@ func TestAnOpenAnsweredAfterTheUserMovedOnIsClosed(t *testing.T) {
 // ------------------------------------------------------- a session's end
 
 // TestAViewedSessionEndingReturnsToTheList (§3.10, AC9): the session the TUI
-// shows ends — its host stopped by another client, the list's ctrl+x, an idle
-// exit, or its transport lost — and the TUI goes back to the list, not the
-// shell: the row marked ended, the hint line saying so, craze still running;
-// esc stays on the list. Without a session list it quits as it always has,
-// and so it does when this client's own quit asked for the end.
+// shows ends on its host — stopped by another client, the list's ctrl+x, an
+// idle exit — and the TUI goes back to the list, not the shell: the row
+// marked ended, the hint line saying so, craze still running. The row stays
+// ended while its host is still listed (as it closes) and once it has left
+// the registry (X94): esc stays on the list and says so, enter on the row
+// opens nothing, ctrl+x on it does nothing. Without a session list it quits
+// as it always has, and so it does when this client's own quit asked for the
+// end. (Its connection lost is not its end:
+// TestALostConnectionLeavesTheRowToTheRoster.)
 func TestAViewedSessionEndingReturnsToTheList(t *testing.T) {
-	for _, tc := range []struct {
-		name string
-		err  error
-		note string
-	}{
-		{"the session's own end", nil, sessEndedNote},
-		{"the transport lost", errors.New("the socket went away"), sessEndedNote + ": the socket went away"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			a, b := newLane(t, "a", "alpha"), newLane(t, "b", "bravo")
-			r, fs := laneModel(t, a, map[string][]*laneBackend{"b": {b}})
-			r.switchTo(b, laneRow(b, "session b", time.Minute))
-			r.up(b)
-			rosters, _, _ := fs.calls()
-			r.stream(b, backend.Item{Kind: backend.ItemEnd, Err: tc.err})
-			if r.m.quitting || !r.m.ended || !r.m.sessList.open || !r.m.sessList.hereEnded {
-				t.Fatalf("the end: quitting %v, ended %v, list open %v, marked %v", r.m.quitting, r.m.ended, r.m.sessList.open, r.m.sessList.hereEnded)
-			}
-			if n, _, _ := fs.calls(); n != rosters+1 {
-				t.Fatalf("the list opened on no roster of its own (%d rosters, was %d)", n, rosters)
-			}
-			if r.m.sessList.note != tc.note {
-				t.Fatalf("the hint line says %q, want %q", r.m.sessList.note, tc.note)
-			}
-			r.send(sessSnapMsg{gen: r.m.sessList.gen, snap: roster.Snapshot{}})
+	t.Run("the session's own end", func(t *testing.T) {
+		a, b := newLane(t, "a", "alpha"), newLane(t, "b", "bravo")
+		r, fs := laneModel(t, a, map[string][]*laneBackend{"b": {b}})
+		bRow := laneRow(b, "session b", time.Minute)
+		r.switchTo(b, bRow)
+		r.up(b)
+		rosters, _, _ := fs.calls()
+		r.stream(b, backend.Item{Kind: backend.ItemEnd})
+		if r.m.quitting || !r.m.ended || !r.m.sessList.open || !r.m.sessList.hereEnded || r.m.sessList.hereLost {
+			t.Fatalf("the end: quitting %v, ended %v, list open %v, marked %v, lost %v",
+				r.m.quitting, r.m.ended, r.m.sessList.open, r.m.sessList.hereEnded, r.m.sessList.hereLost)
+		}
+		if n, _, _ := fs.calls(); n != rosters+1 {
+			t.Fatalf("the list opened on no roster of its own (%d rosters, was %d)", n, rosters)
+		}
+		if r.m.sessList.note != sessEndedNote {
+			t.Fatalf("the hint line says %q, want %q", r.m.sessList.note, sessEndedNote)
+		}
+		for _, snap := range []roster.Snapshot{{Running: []roster.Row{bRow}}, {}} {
+			r.send(sessSnapMsg{gen: r.m.sessList.gen, snap: snap})
 			row, ok := sessFind(r.m.sessLines(), r.m.sessList.here)
-			if !ok || !row.ended || row.key.id != "b" {
-				t.Fatalf("the ended session's row: %+v (listed %v)", row, ok)
+			if !ok || !row.ended || !row.here || row.key.id != "b" || row.closable() || row.cancellable() {
+				t.Fatalf("the ended session's row, its host listed %v: %+v (listed %v)", len(snap.Running) > 0, row, ok)
 			}
-			r.send(tea.KeyMsg{Type: tea.KeyEsc})
-			if !r.m.sessList.open || r.m.sessList.note != sessEndedNote {
-				t.Fatalf("esc after the end: open %v, note %q", r.m.sessList.open, r.m.sessList.note)
+			for _, k := range []tea.KeyMsg{{Type: tea.KeyEsc}, {Type: tea.KeyLeft}, enter(), {Type: tea.KeyCtrlX}} {
+				r.send(k)
+				if !r.m.sessList.open || len(r.opens) != 0 || !r.m.sessList.armed.zero() {
+					t.Fatalf("%v on the ended row: open %v, %d opens asked for, armed %+v",
+						k, r.m.sessList.open, len(r.opens), r.m.sessList.armed)
+				}
+				if k.Type != tea.KeyCtrlX && r.m.sessList.note != sessEndedNote {
+					t.Fatalf("%v on the ended row: the hint line says %q", k, r.m.sessList.note)
+				}
 			}
-		})
-	}
+		}
+		if got := fs.opened(); len(got) != 1 {
+			t.Fatalf("Open was asked for %+v after the end, want only the switch to B", got)
+		}
+		if _, cancels, stops := fs.calls(); cancels != 0 || stops != 0 {
+			t.Fatalf("ctrl+x on the ended row: %d cancels, %d stops", cancels, stops)
+		}
+	})
 
 	t.Run("without a session list", func(t *testing.T) {
 		m := sized(t)
@@ -950,6 +961,132 @@ func TestAViewedSessionEndingReturnsToTheList(t *testing.T) {
 			t.Fatal("the end a quit asked for went back to the list")
 		}
 	})
+}
+
+// TestALostConnectionLeavesTheRowToTheRoster (C12r2, r27-pr2 1): the stream
+// of the session the TUI shows ends for its transport — its re-attaches
+// spent, say — while its host serves the session still. The TUI goes back to
+// the list as for the session's own end, the cursor on its row, but only the
+// connection has ended: the hint line says it was lost, and why; nothing is
+// behind the list any more (esc and ← stay on it and say so); and the row is
+// the roster's like any other's, never `· ended` and no longer `· here`: idle
+// while its host answers idle (ctrl+x arms a close, a second sends it),
+// working while it works (ctrl+x stops its turn), unreachable while it does
+// not answer (enter says so, without a dial) — and enter on it, answering
+// again, opens it afresh (Sessions.Open): a new backend adopted as any switch
+// adopts one, the lost one closed, the draft left in the composer back in it.
+// The same when the connection is lost behind the list.
+func TestALostConnectionLeavesTheRowToTheRoster(t *testing.T) {
+	lost := errors.New("the socket went away")
+	for _, behind := range []bool{false, true} {
+		name := "the session shown"
+		if behind {
+			name = "the session behind the list"
+		}
+		t.Run(name, func(t *testing.T) {
+			a, a2 := newLane(t, "a", "alpha"), newLane(t, "a", "alpha")
+			r, fs := laneModel(t, a, map[string][]*laneBackend{"a": {a2}})
+			r.m.clock = func() time.Time { return sessNow }
+			key := sessKey{id: "a", inc: "inc-a"}
+			row := func(status roster.Status, activity engine.Activity) roster.Row {
+				rw := answeredInc("a", "inc-a", "session a", "grok", a.info.Workspace, time.Minute, func(s *roster.Session) {
+					s.Activity = activity
+					if activity == engine.ActivityWorking {
+						s.Doing = engine.DoingThinking
+					}
+				})
+				rw.Status = status
+				return rw
+			}
+			draft := ""
+			if behind {
+				r.openList(row(roster.Reachable, engine.ActivityIdle))
+			} else {
+				draft = "half a thought"
+				typeRunes(r, draft)
+			}
+			r.stream(a, backend.Item{Kind: backend.ItemEnd, Err: lost})
+			l := r.m.sessList
+			if r.m.quitting || !r.m.ended || !l.open || !l.hereLost || l.hereEnded || !l.here.zero() || l.sel != key {
+				t.Fatalf("the loss: quitting %v, ended %v, list open %v, lost %v, marked ended %v, here %+v, selected %+v",
+					r.m.quitting, r.m.ended, l.open, l.hereLost, l.hereEnded, l.here, l.sel)
+			}
+			if want := sessLostNote + ": the socket went away"; l.note != want {
+				t.Fatalf("the hint line says %q, want %q", l.note, want)
+			}
+
+			// Idle on its host: an ordinary idle row, closed by ctrl+x twice.
+			r.send(sessSnapMsg{gen: r.m.sessList.gen, snap: roster.Snapshot{Running: []roster.Row{row(roster.Reachable, engine.ActivityIdle)}}})
+			got, ok := sessFind(r.m.sessLines(), key)
+			if !ok || got.ended || got.here || got.state != sessIdle || !got.closable() {
+				t.Fatalf("the row of the session whose connection was lost: %+v (listed %v)", got, ok)
+			}
+			// The note lasts until a key: ↓ (one row, so it stays selected)
+			// shows what the row takes.
+			r.send(tea.KeyMsg{Type: tea.KeyDown})
+			view := plainView(r.m)
+			if hint := plain(r.m.sessHintRow(r.m.sessLines())); r.m.sessList.sel != key || !strings.Contains(hint, "enter open") ||
+				!strings.Contains(hint, "ctrl+x close") || strings.Contains(view, "ended") || strings.Contains(view, "· here") ||
+				strings.Contains(view, sessEmptyNote) {
+				t.Fatalf("the list after the loss (hint %q):\n%s", hint, view)
+			}
+			for _, k := range []tea.KeyMsg{{Type: tea.KeyEsc}, {Type: tea.KeyLeft}} {
+				r.send(k)
+				if !r.m.sessList.open || r.m.sessList.note != sessLostNote || len(r.opens) != 0 {
+					t.Fatalf("%v after the loss: open %v, note %q, %d opens", k, r.m.sessList.open, r.m.sessList.note, len(r.opens))
+				}
+			}
+			r.send(tea.KeyMsg{Type: tea.KeyCtrlX})
+			if r.m.sessList.armed != key {
+				t.Fatalf("ctrl+x on the idle row armed %+v", r.m.sessList.armed)
+			}
+			r.send(tea.KeyMsg{Type: tea.KeyCtrlX})
+			calls := namedCmds(r.last, "sessAction")
+			if len(calls) != 1 {
+				t.Fatal("the second ctrl+x sent no close")
+			}
+			r.send(runWatched(t, calls[0]))
+			if _, _, stops := fs.calls(); stops != 1 || fs.stops[0].Host.ID != "host-a" || r.m.sessList.note != "closed: session a" {
+				t.Fatalf("the close: %d stops (%+v), note %q", stops, fs.stops, r.m.sessList.note)
+			}
+
+			// Working on its host: ctrl+x stops its turn.
+			r.send(sessSnapMsg{gen: r.m.sessList.gen, snap: roster.Snapshot{Running: []roster.Row{row(roster.Reachable, engine.ActivityWorking)}}})
+			r.send(tea.KeyMsg{Type: tea.KeyCtrlX})
+			calls = namedCmds(r.last, "sessAction")
+			if len(calls) != 1 {
+				t.Fatal("ctrl+x on the working row sent nothing")
+			}
+			r.send(runWatched(t, calls[0]))
+			if _, cancels, _ := fs.calls(); cancels != 1 || fs.cancels[0].Host.ID != "host-a" || r.m.sessList.note != "stopped: session a" {
+				t.Fatalf("the cancel: %d cancels (%+v), note %q", cancels, fs.cancels, r.m.sessList.note)
+			}
+
+			// Not answering: said so, and not dialled.
+			r.send(sessSnapMsg{gen: r.m.sessList.gen, snap: roster.Snapshot{Running: []roster.Row{row(roster.Unreachable, engine.ActivityIdle)}}})
+			r.send(enter())
+			if r.m.sessList.note != sessUnreachNote || len(r.opens) != 0 {
+				t.Fatalf("enter on the unreachable row: note %q, %d opens", r.m.sessList.note, len(r.opens))
+			}
+
+			// Answering again: enter opens it afresh.
+			r.send(sessSnapMsg{gen: r.m.sessList.gen, snap: roster.Snapshot{Running: []roster.Row{row(roster.Reachable, engine.ActivityIdle)}}})
+			r.enterOn(a2)
+			r.send(r.pop(&r.opens, "dial"))
+			if r.m.eng != a2 || r.m.sessList.open || r.m.ended || r.m.input.Value() != draft {
+				t.Fatalf("enter on the row: shows a2 %v, list open %v, ended %v, composer %q (want %q)",
+					r.m.eng == a2, r.m.sessList.open, r.m.ended, r.m.input.Value(), draft)
+			}
+			if got := fs.opened(); len(got) != 1 || got[0].Host.ID != "host-a" {
+				t.Fatalf("Open was asked for %+v, want the lost session's host once", got)
+			}
+			runWatched(t, r.take(&r.retires, "the lost backend's close"))
+			if a.closes.Load() != 1 {
+				t.Fatalf("the lost backend was closed %d times, want once", a.closes.Load())
+			}
+			r.up(a2)
+		})
+	}
 }
 
 // ------------------------------------------------------------- the drafts

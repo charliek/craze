@@ -319,7 +319,8 @@ type Index interface {
 
 // Open starts a roster over env's registry — running hosts are this user's,
 // per HOME — and index, this CRAZE_HOME's session index (nil: no saved rows),
-// whose file is paths.SessionsPath's. The first tick is at once.
+// whose file is paths.SessionsPath's. The first tick is at once, and its
+// Snapshot is published whatever it holds — an empty one too.
 func Open(env rundir.Env, index Index) *Roster {
 	return open(index, defaults(env))
 }
@@ -327,7 +328,11 @@ func Open(env rundir.Env, index Index) *Roster {
 func open(index Index, o options) *Roster {
 	ctx, stop := context.WithCancel(context.Background())
 	r := &Roster{o: o, index: index, ctx: ctx, stop: stop, out: make(chan Snapshot, 1), done: make(chan struct{})}
-	p := &poller{r: r, o: o, hosts: map[string]*hostState{}, results: make(chan result, o.maxInFlight)}
+	// Dirty from the start: the first tick publishes what it found, however
+	// little. An empty registry and an empty index change nothing, and a list
+	// that waited for a change to draw would draw nothing — not even that
+	// nothing runs — until one came (C12r2, r27-pr2 2).
+	p := &poller{r: r, o: o, hosts: map[string]*hostState{}, results: make(chan result, o.maxInFlight), dirty: true}
 	go p.run()
 	return r
 }

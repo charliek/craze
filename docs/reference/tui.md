@@ -524,7 +524,7 @@ It needs 40×10; smaller, it says so.
 |---|---|
 | `↑` `↓` | move the selection; it stays on its session however the rows reorder |
 | `Enter`, `→` | on another session, [open it here](#opening-a-session-in-place); on a saved one, [resume it here](#saved-sessions); on the session you came from, go back to it; on `▸ saved`, expand or collapse the saved sessions. A host that is not answering says `that session is not answering` |
-| `Esc`, `←` | back to the session you came from — unless it ended while the list was up, when the list stays and says `that session ended` |
+| `Esc`, `←` | back to the session you came from — unless it ended while the list was up, when the list stays and says `that session ended`, or this terminal lost its connection to it, when the list stays and says `lost the connection to that session` |
 | `Ctrl+X` | on a working or asking session, stop its turn **and clear its queue**; on an idle or failed one, the first press arms a close (`ctrl+x again closes it`) and a second within two seconds ends the session on its host — any other key disarms it. Nothing on a saved row or a host that is not answering |
 | `Ctrl+S` | group by directory instead of by state, and back; the grouping is kept for the rest of the run |
 | `Ctrl+D`, `Ctrl+C` twice | quit craze; every session keeps running |
@@ -561,11 +561,17 @@ ends with a draft in the composer keeps it — it is in the composer again when
 you open that session again — and it never follows you to another session.
 
 When the session you are in ends — its host stopped by another terminal's
-`/exit`, a `ctrl+x` close from a list, the idle timeout, or its connection
-lost — craze goes back to the list, its row marked `· ended`, and the hint
-line says `that session ended` (with the connection's error when that is what
-ended it). Your own quit (`/exit`, `Ctrl+D`) still ends the session and quits
+`/exit`, a `ctrl+x` close from a list, or the idle timeout — craze goes back
+to the list, its row marked `· ended`, and the hint line says `that session
+ended`. Your own quit (`/exit`, `Ctrl+D`) still ends the session and quits
 craze.
+
+When this terminal loses its connection to the session instead — its host
+stopped answering for longer than craze keeps reconnecting — craze goes back
+to the list too, and the hint line says `lost the connection to that session`
+and why. The session may still be running: its row is listed as its host
+reports it — or `?` while the host does not answer — and `Enter` on it opens
+it again, `Ctrl+X` stops or closes it, as on any other row.
 
 ### Saved sessions
 

@@ -214,6 +214,33 @@ func (rg *rig) waitApplied(n int) []applied {
 	return out
 }
 
+// waitEach waits for a result from each host of ids, and fails on any
+// result that is a failure: taken one at a time, each wait bounded on its
+// own. A host that answers again before the others have answered once —
+// asked a tick later over the connection it kept, which is quicker than
+// another host's dial — is counted once: the wait is for every host by
+// name, never for a number of results (C12r2).
+func (rg *rig) waitEach(ids []string) {
+	rg.t.Helper()
+	left := map[string]bool{}
+	for _, id := range ids {
+		left[id] = true
+	}
+	var taken []string
+	for len(left) > 0 {
+		select {
+		case a := <-rg.applied:
+			if a.err != nil {
+				rg.t.Fatalf("host %s: %v", a.hostID, a.err)
+			}
+			taken = append(taken, a.hostID)
+			delete(left, a.hostID)
+		case <-time.After(step):
+			rg.t.Fatalf("%d hosts never answered; the results taken: %v", len(left), taken)
+		}
+	}
+}
+
 // until waits for a Snapshot pred holds for: the last one taken, or the
 // next ones published.
 func (rg *rig) until(what string, pred func(roster.Snapshot) bool) roster.Snapshot {
@@ -695,6 +722,10 @@ func TestTheIndexIsReadOnlyWhenItChanges(t *testing.T) {
 // connection at once; the next tick's attempt finds each kept connection
 // closed and dials a fresh one within its own budget — no row goes
 // unreachable — and each host then holds exactly one connection again.
+// Two ticks run back to back, so a host that has redialled may be asked
+// again over its new connection while another's redial is still in flight:
+// the test waits for every host by name (waitEach), not for ten results,
+// which such second answers can fill first (C12r2: 1 in 100 at a 5 % quota).
 func TestSimultaneousDisconnectsAreDialledPast(t *testing.T) {
 	g := newRegistry(t)
 	const n = 10
@@ -705,7 +736,15 @@ func TestSimultaneousDisconnectsAreDialledPast(t *testing.T) {
 		hosts = append(hosts, h)
 		ids = append(ids, e.HostID)
 	}
-	rg := newRig(t, g, nil, nil)
+	// This test is about redialling past dropped connections, not about the
+	// attempt budget (TestAHostThatStopsAnsweringSpendsOneAttemptsBudget and
+	// TestAStaleRedialSpendsWhatIsLeftOfTheAttempt pin that): generous
+	// budgets, because under -race at a 5% CPU quota ten hosts' fresh dials,
+	// hellos and lists can outrun the real 500 ms (seen 4/100, C12r2).
+	rg := newRig(t, g, nil, func(o *roster.TestOptions) {
+		o.DialBudget = 10 * time.Second
+		o.ListBudget = 10 * time.Second
+	})
 	rg.waitApplied(n) // every host answered once: eight at a time, in one tick
 	rg.until("all reachable", status(roster.Reachable, ids...))
 	var wg sync.WaitGroup
@@ -721,11 +760,7 @@ func TestSimultaneousDisconnectsAreDialledPast(t *testing.T) {
 	rg.tick()
 	rg.clk.advance(roster.TickEvery)
 	rg.tick()
-	for _, a := range rg.waitApplied(n) {
-		if a.err != nil {
-			t.Fatalf("host %s after the drop: %v", a.hostID, a.err)
-		}
-	}
+	rg.waitEach(ids)
 	s := rg.until("all reachable", status(roster.Reachable, ids...))
 	for i, h := range hosts {
 		if c := h.OpenConns(); c != 1 {
@@ -775,6 +810,58 @@ func TestAHostWithNoSessionYetIsNotAsked(t *testing.T) {
 	if r := row(s, hostID(3)); r.Status != roster.Connecting || dials.Load() != 0 {
 		t.Fatalf("status %s after %d dials", r.Status, dials.Load())
 	}
+}
+
+// TestAnEmptyRosterPublishesItsFirstSnapshot (C12r2, r27-pr2 2): a registry
+// that lists nothing and an index that holds nothing — a fresh home, or one
+// whose only session has just ended and left the registry — change nothing
+// at the first tick, and it publishes anyway: an empty Snapshot, so the list
+// can draw that nothing runs rather than nothing at all. Once: a tick that
+// changes nothing still publishes nothing. So it goes with no index and with
+// an empty one, and through the real registry of a fresh home.
+func TestAnEmptyRosterPublishesItsFirstSnapshot(t *testing.T) {
+	empty := func(t *testing.T, s roster.Snapshot, ok bool) {
+		t.Helper()
+		if !ok || len(s.Running) != 0 || len(s.Saved) != 0 || s.RegistryErr != nil || s.IndexErr != nil {
+			t.Fatalf("the first snapshot: %s, registry %v, index %v (slot open %v)", describe(s), s.RegistryErr, s.IndexErr, ok)
+		}
+	}
+	for _, tc := range []struct {
+		name  string
+		index roster.Index
+	}{
+		{"no index", nil},
+		{"an empty index", &memIndex{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rg := newRig(t, newRegistry(t), tc.index, nil)
+			// newRig has waited for the first tick, whose publish comes before
+			// its barrier: the slot holds its Snapshot now, or never will.
+			select {
+			case s, ok := <-rg.r.Updates():
+				empty(t, s, ok)
+			default:
+				t.Fatal("the first tick over an empty registry published nothing")
+			}
+			rg.clk.advance(roster.TickEvery)
+			rg.tick()
+			select {
+			case s, ok := <-rg.r.Updates():
+				t.Fatalf("a tick that changed nothing published %s (slot open %v)", describe(s), ok)
+			default:
+			}
+		})
+	}
+	t.Run("the real registry of a fresh home", func(t *testing.T) {
+		r := roster.Open(testEnv(t), nil)
+		t.Cleanup(r.Close)
+		select {
+		case s, ok := <-r.Updates():
+			empty(t, s, ok)
+		case <-time.After(step):
+			t.Fatal("no snapshot over an empty registry")
+		}
+	})
 }
 
 // deadlineConn is a connection whose deadlines the test sees: each one set

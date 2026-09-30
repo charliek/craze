@@ -32,7 +32,8 @@ import (
 // behind it stays attached: its stream is read and folded as ever, a card it
 // raises is drawn when the list is left and takes no key meanwhile, and its
 // end does not quit craze while the list is up — its row is marked ended,
-// and `esc`/`←` stay on the list and say so.
+// and `esc`/`←` stay on the list and say so. The loss of its connection is
+// not its end: its row is left to the roster, and opens it again.
 //
 // The rows are the roster's (internal/roster, through Config.Sessions): a
 // poller opened with the list and closed with it, whose latest Snapshot
@@ -58,6 +59,7 @@ const (
 const (
 	sessEmptyNote   = "No other sessions."
 	sessEndedNote   = "that session ended"
+	sessLostNote    = "lost the connection to that session"
 	sessUntitled    = "new session"
 	sessUnreachNote = "that session is not answering"
 	sessOlderNote   = "that session runs in an older craze; close it there"
@@ -100,6 +102,16 @@ type sessListState struct {
 	hereEnded   bool
 	hereEndedAt time.Time
 	hereRow     *roster.Row
+	// hereLost says the backend the list was opened from is gone but not
+	// its session: its stream ended for the transport — re-attaches spent, a
+	// hole, a refused re-attach — not for the session's own end on its host
+	// (endMsg's nil), so the session may well run on (C12r2, r27-pr2 1). The
+	// list has nothing behind it to go back to, and here is cleared: the
+	// session's row is the roster's like any other — live while its host
+	// answers, unreachable while it does not, gone with its registry entry —
+	// and enter opens it afresh (Sessions.Open), ctrl+x stops or closes it.
+	// Only the session's own end is drawn `· ended` (hereEnded).
+	hereLost bool
 	// home is $HOME when the list opened: directory headers abbreviate it.
 	home string
 	// sel is the selected line, by identity; selIdx its place among the
@@ -301,12 +313,17 @@ func (m Model) hereKey() sessKey {
 
 // leaveSessions is esc and ← (and enter on the session's own row): back to
 // the session behind the list, whose roster is closed on the way. A session
-// that ended while the list was up has nothing to go back to: the list
-// stays, and says so. An open still dialling is abandoned: its answer is
-// closed when it lands (sessOpened).
+// that ended while the list was up has nothing to go back to, and nor has
+// one whose connection was lost (hereLost — its row, if its host still
+// lists it, opens it afresh): the list stays, and says so. An open still
+// dialling is abandoned: its answer is closed when it lands (sessOpened).
 func (m Model) leaveSessions() (tea.Model, tea.Cmd) {
-	if m.sessList.hereEnded {
+	switch {
+	case m.sessList.hereEnded:
 		m.sessNote(sessEndedNote, sessNoteWarn)
+		return m, nil
+	case m.sessList.hereLost:
+		m.sessNote(sessLostNote, sessNoteWarn)
 		return m, nil
 	}
 	r := m.sessList.roster
@@ -315,25 +332,26 @@ func (m Model) leaveSessions() (tea.Model, tea.Cmd) {
 	return m, m.sessRosters.closeCmd(r)
 }
 
-// endedToList is the session the model shows ending while the list is not
-// up (plan 030 §3.10, "a viewed session that ends"): the TUI goes back to the
-// list rather than to the shell, the session's row marked ended — as one
-// that ends behind the list is (sessionEnded) — and the hint line says so,
-// with the transport's failure when that is what ended it. false when no
-// list can be opened (a Sessions with no roster): the caller quits, as
-// without a list.
+// endedToList is the stream of the session the model shows ending while the
+// list is not up (plan 030 §3.10, "a viewed session that ends"): the TUI goes
+// back to the list rather than to the shell, the cursor on the session's row,
+// and the stream's end is taken as one behind the list is (sessionEnded). err
+// is why, as endMsg carries it: nil for the session's own end, its row marked
+// ended and the hint line saying `that session ended`; the transport's
+// failure otherwise — the connection lost, the session perhaps still running
+// (C12r2) — its row left to the roster and the hint line saying the
+// connection was lost, and why (sessionEnded's note). false when no list can
+// be opened (a Sessions with no roster): the caller quits, as without a list.
 func (m Model) endedToList(err error) (Model, tea.Cmd, bool) {
 	tm, cmd := m.openSessions()
 	next := tm.(Model)
 	if !next.sessList.open {
 		return m, nil, false
 	}
-	next.sessionEnded()
-	note := sessEndedNote
-	if err != nil {
-		note += ": " + sanitizeLine(failureText(err))
+	next.sessionEnded(err)
+	if err == nil {
+		next.sessNote(sessEndedNote, sessNoteWarn)
 	}
-	next.sessNote(note, sessNoteWarn)
 	return next, cmd, true
 }
 
@@ -519,15 +537,26 @@ func (m *Model) sessNote(text string, kind sessNoteKind) {
 	m.sessList.note, m.sessList.noteKind = text, kind
 }
 
-// sessionEnded is the session behind the list reaching its end while the
-// list is up (plan 030 §3.10): craze does not quit — the list is where the
-// user is — and the session's row is marked ended, and stays, drawn from its
-// last listing, once its host has left the registry (sol r19-c10 1). A
-// session that ended before the roster ever listed it gets its row from
-// what the model knows of it.
-func (m *Model) sessionEnded() {
-	m.trackHere()
+// sessionEnded is the stream of the session behind the list ending while
+// the list is up (plan 030 §3.10): craze does not quit — the list is where
+// the user is. err is why, as endMsg carries it. The session's own end (nil)
+// marks its row ended, and the row stays, drawn from its last listing, once
+// its host has left the registry (sol r19-c10 1); a session that ended before
+// the roster ever listed it gets its row from what the model knows of it. A
+// transport's failure ended only this client's connection (C12r2, r27-pr2
+// 1): the session is no longer behind the list (hereLost), and its row is
+// whatever the roster lists — never marked ended, since the host may serve it
+// still, and opened again as any other row is. Nothing on the row says so,
+// so the hint line does: the connection lost, and why.
+func (m *Model) sessionEnded(err error) {
 	l := &m.sessList
+	if err != nil {
+		l.hereLost, l.here, l.hereRow = true, sessKey{}, nil
+		m.syncSessList()
+		m.sessNote(sessLostNote+": "+sanitizeLine(failureText(err)), sessNoteWarn)
+		return
+	}
+	m.trackHere()
 	l.hereEnded, l.hereEndedAt = true, m.now()
 	if l.hereRow == nil && !l.here.zero() {
 		row := m.hereAsRow()
@@ -540,10 +569,12 @@ func (m *Model) sessionEnded() {
 // model while it has not ended (hereKey — the session a host named after
 // the list opened is found), and its row whenever the roster lists that
 // identity, kept for when its host has gone — and, while it runs, the index's
-// title that row carries (Model.indexTitle).
+// title that row carries (Model.indexTitle). Once its connection is lost
+// nothing is behind the list (hereLost): the model's identity, the lost
+// backend's, is not taken again.
 func (m *Model) trackHere() {
 	l := &m.sessList
-	if !l.hereEnded {
+	if !l.hereEnded && !l.hereLost {
 		if k := m.hereKey(); !k.zero() {
 			l.here = k
 		}
@@ -638,10 +669,11 @@ func (m Model) handleSessionsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // sessEnter is enter and → on the selected line: the saved group's line
 // expands or collapses it; the session the list was opened from is the
 // screen behind the list, so opening it is going back; any other running
-// session is opened in place (plan 030 §3.11: sessOpen), and so is a saved
-// one — resumed by a host loading it in its own workspace, or the host that
-// holds it already (§3.12: Sessions.Open of its saved ref). A host that does
-// not answer is said not to, without a dial.
+// session is opened in place (plan 030 §3.11: sessOpen), the one whose
+// connection was lost among them (no longer behind the list: hereLost), and
+// so is a saved one — resumed by a host loading it in its own workspace, or
+// the host that holds it already (§3.12: Sessions.Open of its saved ref). A
+// host that does not answer is said not to, without a dial.
 func (m Model) sessEnter() (tea.Model, tea.Cmd) {
 	if m.sessList.sel == sessSavedLine {
 		m.sessList.savedOpen = !m.sessList.savedOpen

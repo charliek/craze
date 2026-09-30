@@ -1967,8 +1967,9 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// The session list's own messages, and the list ahead of everything
 	// else while it is open (plan 030 §3.10, sessions_list.go): its keys
 	// are handleKey's first rung; the mouse, and a paste with no input to
-	// land in, are dropped; the end of the session behind it marks its row
-	// and leaves craze running. Everything else — the session's stream, its
+	// land in, are dropped; the end of the session behind it — or of its
+	// connection — leaves craze running, its row marked ended or left to the
+	// roster (sessionEnded). Everything else — the session's stream, its
 	// command replies, the ticks — is applied as ever, behind the list.
 	if next, cmd, ok := m.applySessMsg(msg); ok {
 		return next, cmd
@@ -1979,7 +1980,7 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		case endMsg:
 			m.ended, m.endErr = true, msg.err
-			m.sessionEnded()
+			m.sessionEnded(msg.err)
 			return m, nil
 		}
 	}
@@ -2014,10 +2015,11 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// gave up. Nothing more will come. With a session list the TUI goes
 		// back to it, where every other session still is (plan 030 §3.10: a
 		// viewed session that ends — another client's /exit, the list's
-		// ctrl+x, an idle exit); without one — the opt-out, craze attach —
-		// or on the way out after this client's own quit asked for the end,
-		// the program quits, and the final model says why (ended, endErr) for
-		// the command line's last word.
+		// ctrl+x, an idle exit — or whose connection is lost, when its row
+		// opens it again: endedToList); without one — the opt-out, craze
+		// attach — or on the way out after this client's own quit asked for
+		// the end, the program quits, and the final model says why (ended,
+		// endErr) for the command line's last word.
 		m.ended, m.endErr = true, msg.err
 		if m.sessions != nil && !m.quitting {
 			if next, cmd, ok := m.endedToList(msg.err); ok {
