@@ -24,6 +24,7 @@ from conftest import _argv, seed_host_idle_exit
 from sse_fixture import SSEFixture, write_native_config
 from test_detach import _entries
 from test_sessions import (
+    DOWN,
     ENTER,
     WAIT,
     Screen,
@@ -86,8 +87,14 @@ def _wait_hint(screen: Screen, what: str, text: str, timeout: float = WAIT) -> l
     return _wait_screen(screen, what, lambda rows: text in _hint(rows), timeout=timeout)
 
 
-def _no_host_in(home: Path, workspace: Path) -> bool:
-    return all(Path(e.get("workspace", "")).resolve() != workspace.resolve() for e in _entries(home))
+def _hosts_in(home: Path, workspace: Path) -> list[dict]:
+    return [e for e in _entries(home) if Path(e.get("workspace", "")).resolve() == workspace.resolve()]
+
+
+def _host_logs(home: Path) -> list[Path]:
+    """Every host log: each spawn leaves one, whether or not its host came
+    up."""
+    return sorted((home / ".cache" / "craze" / "host-logs").glob("*.log"))
 
 
 def test_a_prompt_starts_a_session_in_another_workspace(craze_bin: Path, fake_agent_bin: Path, tmp_path: Path) -> None:
@@ -150,13 +157,16 @@ def test_an_at_directory_alone_opens_an_unstarted_session(
             "the pick written and bound",
             lambda rows: _input(rows).startswith("❯ @~/bravo") and "new session → ~/bravo · cursor" in _rule(rows),
         )
+        # One spawn so far -- this terminal's own session's -- and one log.
+        logs = _host_logs(home)
+        assert len(logs) == 1, logs
         a.write(ENTER)
+        # The band drawn: the TUI has handled the enter, and nothing is
+        # spawned for the session in its handling.
         _wait_screen(
             sa, "the unstarted session in place", lambda rows: rows[0].startswith("─ new session · cursor · ~/bravo ")
         )
-        # Nothing spawned for it: a moment is far past a spawn's first write.
-        time.sleep(0.5)
-        assert _no_host_in(home, bravo), _entries(home)
+        assert not _hosts_in(home, bravo), _entries(home)
 
         mark = a.mark()
         a.write(b"first words" + ENTER)
@@ -165,18 +175,26 @@ def test_an_at_directory_alone_opens_an_unstarted_session(
         _wait_screen(sa, "the session up in bravo", lambda rows: "· cursor · bravo " in rows[0])
         row = _index_row(home, entry["crazeSessionId"])
         assert Path(row["cwd"]).resolve() == bravo.resolve(), row
+        # And nothing else was spawned for it, then or since -- the bound is
+        # the first prompt's own spawn having come up, not a moment's wait: a
+        # host the opening had spawned would have left a log of its own, and,
+        # running, a second registry entry in bravo.
+        assert len(_host_logs(home)) == 2, _host_logs(home)
+        assert [e["hostId"] for e in _hosts_in(home, bravo)] == [entry["hostId"]], _entries(home)
 
 
 def test_provider_and_model_change_the_next_dispatch(craze_bin: Path, fake_agent_bin: Path, tmp_path: Path) -> None:
     """AC11: the host of this terminal's cursor session records the catalog
     its agent installed (the catalog cache); `/model` lists it, its age in
-    the title, and a model chosen from it is the next dispatch's --model.
+    the title, and a model chosen from it is the next dispatch's --model --
+    the catalog's own `default` model included (--model=default), which is
+    not the agent's own default listed above it (no --model at all).
     `/provider native` resets the model to native's default from its model
     table, and the next dispatch runs native on it -- no agent binary."""
     home = tmp_path
-    bravo, charlie = home / "bravo", home / "charlie"
-    bravo.mkdir()
-    charlie.mkdir()
+    bravo, charlie, delta, echo = home / "bravo", home / "charlie", home / "delta", home / "echo"
+    for d in (bravo, charlie, delta, echo):
+        d.mkdir()
     fixture = SSEFixture().start()
     try:
         write_native_config(home / ".craze" / "native", fixture.base_url)
@@ -212,6 +230,44 @@ def test_provider_and_model_change_the_next_dispatch(craze_bin: Path, fake_agent
             _wait_hint(sa, "the first dispatch's outcome", "started in ~/bravo", timeout=SPAWN)
             argv = _argv(_entry(home, bravo, timeout=SPAWN)["pid"])
             assert "--provider=cursor" in argv and "--model=composer" in argv, argv
+
+            # The fake agent's catalog has a model whose id is `default`: it
+            # is listed as itself, under the agent's own default (C15r).
+            _type(
+                a,
+                sa,
+                "/model defa",
+                lambda rows: (
+                    any(r.startswith("❯ default") and "the agent's own choice" in r for r in rows[:-4])
+                    and any(r.startswith("  Default") for r in rows[:-4])
+                ),
+            )
+            a.write(DOWN)
+            _wait_screen(
+                sa, "the catalog's default highlighted", lambda rows: any(r.startswith("❯ Default") for r in rows[:-4])
+            )
+            a.write(ENTER)
+            _wait_hint(sa, "the catalog's default chosen", "new sessions use cursor · Default")
+            _type(a, sa, "@~/delta on the catalog's default")
+            a.write(ENTER)
+            _wait_hint(sa, "the catalog's default dispatch", "started in ~/delta", timeout=SPAWN)
+            argv = _argv(_entry(home, delta, timeout=SPAWN)["pid"])
+            assert "--model=default" in argv, argv
+
+            _type(
+                a,
+                sa,
+                "/model defa",
+                lambda rows: any(r.startswith("❯ default") and "the agent's own choice" in r for r in rows[:-4]),
+            )
+            a.write(ENTER)
+            rows = _wait_hint(sa, "the agent's own default chosen", "new sessions use cursor · default")
+            assert "· cursor · default ─" in _rule(rows), sa.dump()
+            _type(a, sa, "@~/echo on the agent's own")
+            a.write(ENTER)
+            _wait_hint(sa, "the agent's own default dispatch", "started in ~/echo", timeout=SPAWN)
+            argv = _argv(_entry(home, echo, timeout=SPAWN)["pid"])
+            assert not any(arg.startswith("--model") for arg in argv), argv
 
             _type(a, sa, "/provider native", lambda rows: any(r.startswith("❯ native") for r in rows[:-4]))
             a.write(ENTER)

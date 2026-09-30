@@ -637,13 +637,15 @@ The new session runs:
   else the directory of the session you came from. With none of them the
   rule says `no directory to start in: pick one with @`.
 - **as** the rule says: the provider and model chosen with [`/provider` and
-  `/model`](#provider-and-model), else those of the session you came from
-  (its current model, else the provider's default).
+  `/model`](#provider-and-model), else those of the session you came from —
+  its current model; when its host has not said which model it is on, the
+  launch's own `--model`; else the provider's default.
 - with the **permission mode** of the session you came from (`--force` or
   `--no-force`, as its host reports it), the launch's `--plugin-dir`, and —
   for a provider craze does not run in process — its `--agent-bin`. The
-  command line's own `--ask`, `--plan`, `--model` and `--provider` were for the
-  session it started and are not applied.
+  command line's own `--ask`, `--plan` and `--provider` were for the session
+  it started and are not applied, and its `--model` only in the one case
+  above.
 
 All of it is decided when `Enter` is pressed: moving the selection while the
 session starts changes nothing.
@@ -732,7 +734,10 @@ nothing.
   every detached host records it in the [model catalog
   cache](configuration.md#model-catalog-cache) — titled with its age (`cursor
   models for new sessions · last seen 3h ago`), the agent's own `default`
-  first. A catalog can be stale: it is a list of choices, nothing more. With
+  first — always offered, and no model is passed with it; a model of the
+  catalog whose id happens to be `default` is a row of its own, and passes
+  `--model default`. A catalog can be stale: it is a list of choices, nothing
+  more. With
   no catalog recorded yet the popup says `no cursor catalog seen yet · enter
   uses the id as typed`: `/model <id>` then takes the id as typed, as `craze
   --model <id>` would, and so does `Enter` on an id no listed model matches. A
@@ -741,8 +746,9 @@ nothing.
   over a session of another provider still starts that provider on it.
 
 Typed in full, `/provider grok`, `/model gpt-6-sol` and `/model default` (the
-provider's own) do the same without the popup; a provider the picker does not
-offer is refused on the hint line.
+provider's own — a catalog model whose id is `default` is picked from the
+popup) do the same without the popup; a provider the picker does not offer is
+refused on the hint line.
 
 ## Modes
 

@@ -354,7 +354,7 @@ func TestTheInputTakesTheKeys(t *testing.T) {
 		t.Fatal("ctrl+s did not regroup")
 	}
 	// A paste asked for in the input lands there, folded onto one line.
-	pasted, _ := m.Update(pasteMsg{text: " two\nlines", shownGen: m.shownGen, list: true})
+	pasted, _ := m.Update(pasteMsg{text: " two\nlines", shownGen: m.shownGen, listGen: m.sessList.gen})
 	if v, _ := inputOf(pasted.(Model)); v != "jk  two linesq" {
 		t.Fatalf("pasted into %q", v)
 	}
@@ -1043,7 +1043,8 @@ func TestAPasteLandsWhereItWasAskedFor(t *testing.T) {
 	if v, _ := inputOf(m); v != "" || m.input.Value() != "a draft" {
 		t.Fatalf("the composer's paste: input %q, composer %q", v, m.input.Value())
 	}
-	tm, _ = m.Update(pasteMsg{text: "a prompt", shownGen: m.shownGen, list: true})
+	asked := m.sessList.gen
+	tm, _ = m.Update(pasteMsg{text: "a prompt", shownGen: m.shownGen, listGen: asked})
 	m = tm.(Model)
 	if v, _ := inputOf(m); v != "a prompt" || m.input.Value() != "a draft" {
 		t.Fatalf("the list's paste: input %q, composer %q", v, m.input.Value())
@@ -1053,8 +1054,54 @@ func TestAPasteLandsWhereItWasAskedFor(t *testing.T) {
 	if m.sessList.open || m.input.Value() != "a draft" {
 		t.Fatalf("back in the session: list open %v, composer %q", m.sessList.open, m.input.Value())
 	}
-	tm, _ = m.Update(pasteMsg{text: " late", shownGen: m.shownGen, list: true})
+	tm, _ = m.Update(pasteMsg{text: " late", shownGen: m.shownGen, listGen: asked})
 	if got := tm.(Model).input.Value(); got != "a draft" {
 		t.Fatalf("a paste for the closed list's input reached the composer: %q", got)
+	}
+}
+
+// TestAListPasteHeldAcrossAReopeningIsDropped (C15r, astra r30-c15 2), a
+// forced schedule: ctrl+v in the list's input, its clipboard read held while
+// the list is closed and opened again over the same session — the shown
+// generation unchanged, a list open with an input — and then answered. The
+// paste was for the input of an opening since closed: it is dropped, and the
+// new opening's input and the composer stay empty. A paste asked for in the
+// new opening lands there.
+func TestAListPasteHeldAcrossAReopeningIsDropped(t *testing.T) {
+	prev := clipboardRead
+	clipboardRead = func() (string, error) { return "late text", nil }
+	t.Cleanup(func() { clipboardRead = prev })
+	m, fs, _ := newSessModel(t, 100, 30)
+	m = newList(t, m, fs)
+	shown, first := m.shownGen, m.sessList.gen
+	m, cmd := press(m, tea.KeyMsg{Type: tea.KeyCtrlV})
+	held := mustCmd(t, cmd, "pasteFromClipboard")
+
+	// The read still out: esc on the empty input leaves the list, and ← on
+	// the empty composer opens it again.
+	m, _ = press(m, tea.KeyMsg{Type: tea.KeyEsc})
+	if m.sessList.open {
+		t.Fatal("esc on the empty input did not leave the list")
+	}
+	m = newList(t, m, fs)
+	if m.shownGen != shown || m.sessList.gen == first || !m.sessList.in.on {
+		t.Fatalf("the premise: shown %d→%d, opening %d→%d, input %v", shown, m.shownGen, first, m.sessList.gen, m.sessList.in.on)
+	}
+
+	msg := runWatched(t, held)
+	if p, ok := msg.(pasteMsg); !ok || p.text != "late text" || p.listGen != first {
+		t.Fatalf("the held read answered %#v, want the text stamped with the first opening %d", msg, first)
+	}
+	tm, _ := m.Update(msg)
+	m = tm.(Model)
+	if v, _ := inputOf(m); v != "" || m.input.Value() != "" {
+		t.Fatalf("a paste for an opening since closed landed: input %q, composer %q", v, m.input.Value())
+	}
+
+	// This opening's own paste lands in its input.
+	m, cmd = press(m, tea.KeyMsg{Type: tea.KeyCtrlV})
+	tm, _ = m.Update(runWatched(t, mustCmd(t, cmd, "pasteFromClipboard")))
+	if v, _ := inputOf(tm.(Model)); v != "late text" {
+		t.Fatalf("the new opening's own paste: input %q", v)
 	}
 }

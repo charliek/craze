@@ -17,6 +17,7 @@ import (
 	"github.com/charliek/craze/internal/agent"
 	"github.com/charliek/craze/internal/backend"
 	"github.com/charliek/craze/internal/engine"
+	"github.com/charliek/craze/internal/remote"
 	"github.com/charliek/craze/internal/roster"
 )
 
@@ -606,6 +607,213 @@ func TestAQuitRacingADispatch(t *testing.T) {
 			tm, cmd2 := m.Update(msg)
 			if !tm.(Model).quitting || findCmd(cmd2, "sessDispatch") != nil || findCmd(cmd2, "enterUnstarted") != nil {
 				t.Fatal("the late outcome started something")
+			}
+		})
+	}
+}
+
+// joinedSession is a dispatch's connection over a real socket that says which
+// of its calls still run: the prompt's Submit (returned, closed as it
+// returns) and the drain's Reads (reading, the count in flight).
+type joinedSession struct {
+	*remote.Session
+	returned chan struct{}
+	reading  atomic.Int32
+}
+
+func (b *joinedSession) Submit(ctx context.Context, c engine.Command, text string, mode engine.SubmitMode, fromRow string) (engine.SubmitResult, error) {
+	defer close(b.returned)
+	return b.Session.Submit(ctx, c, text, mode, fromRow)
+}
+
+func (b *joinedSession) Read(ctx context.Context) (backend.Item, error) {
+	b.reading.Add(1)
+	defer b.reading.Add(-1)
+	return b.Session.Read(ctx)
+}
+
+// heldDeadline is a dispatch's prompt deadline (dispatchPromptContext) that
+// passes when the test says (pass): until then it never does, and from then
+// on it is a deadline exceeded — so a test forces the order of the deadline
+// and the prompt's write instead of racing a clock against it.
+type heldDeadline struct {
+	done chan struct{}
+	once sync.Once
+}
+
+func (d *heldDeadline) Deadline() (time.Time, bool) { return time.Time{}, false }
+func (d *heldDeadline) Done() <-chan struct{}       { return d.done }
+func (d *heldDeadline) Value(any) any               { return nil }
+
+func (d *heldDeadline) Err() error {
+	select {
+	case <-d.done:
+		return context.DeadlineExceeded
+	default:
+		return nil
+	}
+}
+
+func (d *heldDeadline) pass() { d.once.Do(func() { close(d.done) }) }
+
+// holdPromptDeadline makes every dispatch's prompt deadline, for one test, a
+// heldDeadline the test passes.
+func holdPromptDeadline(t *testing.T) *heldDeadline {
+	t.Helper()
+	d := &heldDeadline{done: make(chan struct{})}
+	prev := dispatchPromptContext
+	dispatchPromptContext = func() (context.Context, context.CancelFunc) { return d, func() {} }
+	t.Cleanup(func() {
+		dispatchPromptContext = prev
+		d.pass()
+	})
+	return d
+}
+
+// setHeld is how many backends s holds to close.
+func setHeld(s *backendSet) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.open)
+}
+
+// stalledDispatch is a dispatch asked for on dispatchModel's list — its
+// command not yet run — whose session is a real host behind a stall proxy
+// (newStallProxy): the host starts, and at the dispatch's dispatchStarted
+// step the proxy stops reading, so the prompt, longer than the socket holds
+// (longLine), blocks in its write, holding the connection's write lock,
+// where no context reaches it (X54). w says when that write has begun.
+func stalledDispatch(t *testing.T) (Model, tea.Cmd, *startSessions, *callLog, *joinedSession, *writeWatch) {
+	t.Helper()
+	m, fs, _, log := dispatchModel(t, 100, 30)
+	h := newAttachHost(t, true)
+	p := newStallProxy(t, h.path)
+	w := &writeWatch{began: make(chan struct{})}
+	conn := &joinedSession{Session: dialWatched(t, p, w), returned: make(chan struct{})}
+	fs.open = func(roster.Ref) (backend.Backend, error) { return conn, nil }
+	dispatchHook = func(step dispatchStep) {
+		if step == dispatchStarted {
+			p.stall()
+		}
+	}
+	t.Cleanup(func() { dispatchHook = nil })
+	spec, err := m.sessNewSpec(homePath("projects/lumen"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, cmd := m.sessDispatch(spec, strings.Repeat("x", longLine))
+	return m, cmd, fs, log, conn, w
+}
+
+// assertDispatchJoined: once the dispatch has answered, nothing of it runs or
+// is held — its prompt's Submit has returned, its drain reads nothing, its
+// connection is closed and out of the program's set — and its host was left
+// running, never stopped.
+func assertDispatchJoined(t *testing.T, m Model, fs *startSessions, log *callLog, conn *joinedSession) {
+	t.Helper()
+	select {
+	case <-conn.returned:
+	default:
+		t.Fatal("the dispatch answered with its prompt's Submit still running")
+	}
+	if n := conn.reading.Load(); n != 0 {
+		t.Fatalf("the dispatch answered with %d reads of its drain still running", n)
+	}
+	if _, err := conn.Session.Read(context.Background()); !errors.Is(err, backend.ErrClosed) {
+		t.Fatalf("the dispatch's connection after it answered: a read answered %v, want it closed", err)
+	}
+	if n := setHeld(m.retired); n != 0 {
+		t.Fatalf("the program still holds %d of the dispatch's backends to close", n)
+	}
+	if got, want := log.seen(), []string{"spawn", "open", "leave"}; !slices.Equal(got, want) {
+		t.Fatalf("the dispatch ran %v, want %v", got, want)
+	}
+	if !slices.Equal(fs.leaves, []roster.Ref{hostRef("new")}) || len(fs.stops) != 0 {
+		t.Fatalf("left %v, stopped %v: want the host left running", fs.leaves, fs.stops)
+	}
+}
+
+// TestADispatchWhoseHostStopsReadingSettlesAtItsDeadline (C15r, astra
+// r30-c15 1), a forced schedule over a real socket: the new session's host
+// starts and then reads nothing more, so the prompt blocks in its write,
+// where the call's context never reaches it (stalledDispatch). The dispatch
+// still settles at the prompt's deadline — it used to wait on that write for
+// ever, the input saying starting… and the connection and its drain held —
+// with the outcome unknown and the host left running; before it answers, the
+// connection is closed at once (which ends the write: no detach waits behind
+// it) and the submission and the drain are joined. The input then says the
+// session may have started.
+func TestADispatchWhoseHostStopsReadingSettlesAtItsDeadline(t *testing.T) {
+	deadline := holdPromptDeadline(t)
+	m, cmd, fs, log, conn, w := stalledDispatch(t)
+	answered := make(chan tea.Msg, 1)
+	go func() { answered <- cmd() }()
+	awaitStep(t, w.began, "the prompt's write")
+	// The write blocked, the prompt's time runs out.
+	deadline.pass()
+	var msg sessDispatchedMsg
+	select {
+	case got := <-answered:
+		msg = got.(sessDispatchedMsg)
+	case <-time.After(quitStepBound):
+		t.Fatalf("the dispatch did not settle within %v of its prompt's deadline", quitStepBound)
+	}
+	if msg.out != dispatchUnknown || !errors.Is(msg.err, context.DeadlineExceeded) {
+		t.Fatalf("the outcome %v: %v; want unknown at the prompt's deadline", msg.out, msg.err)
+	}
+	assertDispatchJoined(t, m, fs, log, conn)
+	tm, _ := m.Update(msg)
+	m = tm.(Model)
+	if m.sessList.in.dispatching != 0 || sessHint(m) != dispatchUnknownNote {
+		t.Fatalf("after the outcome: dispatching %d, hint %q", m.sessList.in.dispatching, sessHint(m))
+	}
+}
+
+// TestAQuitDuringADispatchsSubmission (C15r, astra r30-c15 3), a forced
+// schedule over a real socket: craze quits — ctrl+d on the list, or a signal
+// (finishRun without it, as Run reaches it on SIGTERM) — while the dispatch's
+// prompt is blocked in its write to a host that has stopped reading
+// (stalledDispatch), the prompt's own deadline held off (holdPromptDeadline). The run's exit tail
+// closes the dispatch's connection at once — no detach, which would wait
+// behind that write for the client's whole close bound — so the exit is not
+// held up, and the close ends the write: the dispatch settles, the outcome
+// unknown (its connection closed under the call), its host left running,
+// every goroutine of it joined. The outcome lands on a program that has quit
+// and changes nothing.
+func TestAQuitDuringADispatchsSubmission(t *testing.T) {
+	for _, quit := range []string{"ctrl+d", "a signal"} {
+		t.Run(quit, func(t *testing.T) {
+			holdPromptDeadline(t)
+			m, cmd, fs, log, conn, w := stalledDispatch(t)
+			answered := make(chan tea.Msg, 1)
+			go func() { answered <- cmd() }()
+			awaitStep(t, w.began, "the prompt's write")
+			if quit == "ctrl+d" {
+				m, _ = press(m, tea.KeyMsg{Type: tea.KeyCtrlD})
+				if !m.quitting {
+					t.Fatal("ctrl+d on the list did not quit")
+				}
+			}
+			within(t, "the run's exit tail (finishRun)", func() bool {
+				_, _ = finishRun(io.Discard, m, m, nil)
+				return true
+			})
+			var msg sessDispatchedMsg
+			select {
+			case got := <-answered:
+				msg = got.(sessDispatchedMsg)
+			case <-time.After(quitStepBound):
+				t.Fatalf("the dispatch did not settle within %v of the exit's close", quitStepBound)
+			}
+			if msg.out != dispatchUnknown || !errors.Is(msg.err, backend.ErrOutcomeUnknown) {
+				t.Fatalf("the outcome %v: %v; want unknown, its connection closed under the call", msg.out, msg.err)
+			}
+			assertDispatchJoined(t, m, fs, log, conn)
+			if quit == "ctrl+d" {
+				tm, cmd2 := m.Update(msg)
+				if !tm.(Model).quitting || findCmd(cmd2, "sessDispatch") != nil || findCmd(cmd2, "enterUnstarted") != nil {
+					t.Fatal("the late outcome started something")
+				}
 			}
 		})
 	}

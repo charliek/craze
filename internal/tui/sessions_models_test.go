@@ -373,6 +373,67 @@ func TestModelListsTheCachedCatalog(t *testing.T) {
 	}
 }
 
+// TestTheAgentsOwnDefaultIsNotACatalogModel (C15r, sol r31-c16 1): a cached
+// catalog with a model whose id is `default` — the fake agent's has one — is
+// listed as that model, and the agent's own default is still offered beside
+// it, first, where it used to be hidden by it. Each is its own choice: the
+// agent's own starts new sessions with no model (no --model), the catalog's
+// with the model `default` (--model=default) — the one then marked current.
+func TestTheAgentsOwnDefaultIsNotACatalogModel(t *testing.T) {
+	catalog := ModelCatalog{
+		Models:     []agent.ModelInfo{{ID: "default", Name: "Default"}, {ID: "composer", Name: "Composer"}},
+		ObservedAt: sessNow.Add(-time.Hour),
+	}
+	m, fs := cmdList(t, 100, 30, map[string]ModelCatalog{"cursor": catalog})
+	m = modelsLoaded(t, m, "/model defa")
+	if got, want := cmdItems(m), []string{sessDefaultModel, "Default"}; !slices.Equal(got, want) {
+		t.Fatalf("/model defa lists %v, want the agent's own default and the catalog's", got)
+	}
+	own, cat := cmdItem(t, m, sessDefaultModel), cmdItem(t, m, "Default")
+	if own.Value != "model:" || own.Detail != sessDefaultDetail || cat.Value != "model:default" || cat.Detail != "default" {
+		t.Fatalf("the agent's own %+v, the catalog's %+v", own, cat)
+	}
+
+	// The agent's own (the first row): no model.
+	mine, _ := press(m, enter())
+	if spec, _ := mine.sessNewSpec("/x"); spec.Model != "" || spec.Provider.Name() != "cursor" {
+		t.Fatalf("the agent's own default chosen: %+v, want no model", spec)
+	}
+	if r := ruleOf(t, mine); !strings.HasSuffix(r, " · cursor · default") {
+		t.Fatalf("the rule %q", r)
+	}
+
+	// The catalog's `default` (the row under it): the model `default`.
+	m, _ = press(m, tea.KeyMsg{Type: tea.KeyDown})
+	m, _ = press(m, enter())
+	if spec, _ := m.sessNewSpec("/x"); spec.Model != "default" {
+		t.Fatalf("the catalog's default chosen: %+v, want the model default", spec)
+	}
+	m = modelsLoaded(t, m, "/model ")
+	if it := cmdItem(t, m, "Default"); it.Note != sessCurrentNote {
+		t.Fatalf("the catalog's default chosen is not marked: %+v", it)
+	}
+	if it := cmdItem(t, m, sessDefaultModel); it.Note != "" || it.Value != "model:" {
+		t.Fatalf("the agent's own beside it: %+v", it)
+	}
+	m = clearInput(t, m)
+
+	// And a dispatch spawns it by that id.
+	hb := newHostBackend("new", homePath("projects/lumen"), &callLog{})
+	fs.spawn = func(SpawnSpec) (roster.Ref, error) { return hostRef("new"), nil }
+	fs.open = func(roster.Ref) (backend.Backend, error) { return hb, nil }
+	m, _ = typeList(t, m, "@lu")
+	m, _ = press(m, enter())
+	m, _ = typeList(t, m, "go")
+	_, cmd := press(m, enter())
+	if msg := dispatched(t, mustCmd(t, cmd, "sessDispatch")); msg.out != dispatchAccepted {
+		t.Fatalf("the dispatch: %v, %v", msg.out, msg.err)
+	}
+	if len(fs.spawns) != 1 || fs.spawns[0].Model != "default" {
+		t.Fatalf("spawned %+v", fs.spawns)
+	}
+}
+
 // TestAModelIsTakenAsTypedWithoutACatalog (§3.14): with no catalog cached —
 // or none of its models matching — /model says so, and enter takes what is
 // typed as the model id, which the next start applies as --model would.

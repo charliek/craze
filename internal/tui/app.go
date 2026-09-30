@@ -2007,14 +2007,17 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		case pasteMsg:
 			// A paste lands where it was asked for (X140, C15): one asked for
-			// in the list's input there, where there is one; one asked for in
-			// the composer before the list opened in the composer's draft,
-			// which is where the user finds it on going back.
+			// in the list's input there, where there is one, and only in the
+			// opening of the list it was asked in — one from an opening since
+			// closed is dropped, the list opened again over the same session
+			// included (C15r); one asked for in the composer before the list
+			// opened in the composer's draft, which is where the user finds it
+			// on going back.
 			if msg.text == "" {
 				return m, nil
 			}
-			if msg.list {
-				if m.sessList.in.on {
+			if msg.listGen != 0 {
+				if m.sessList.in.on && msg.listGen == m.sessList.gen {
 					return m.sessInputPaste(msg.text)
 				}
 				return m, nil
@@ -2303,7 +2306,7 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// adopted included (C11r2) — never gets here: the gate dropped it
 		// (staleShown, pasteMsg). One asked for in the session list's input,
 		// which has closed since, had only that input to land in.
-		if msg.text == "" || msg.list || m.composerCovered() {
+		if msg.text == "" || msg.listGen != 0 || m.composerCovered() {
 			return m, nil
 		}
 		// One bracketed paste, the way a terminal delivers it: the textarea
@@ -2770,7 +2773,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.copySelectionOrLastReply()
 	}
 	if msg.Type == tea.KeyCtrlV {
-		return m, pasteFromClipboard(m.shownGen, false)
+		return m, pasteFromClipboard(m.shownGen, 0)
 	}
 	if msg.Type == tea.KeyCtrlO {
 		return m.toggleExpanded()

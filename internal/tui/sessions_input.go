@@ -338,7 +338,7 @@ func (m Model) sessInputKey(msg tea.KeyMsg) (Model, tea.Cmd, bool) {
 		// Nothing to complete: tab never submits (§3.15).
 		return m, nil, true
 	case tea.KeyCtrlV:
-		return m, pasteFromClipboard(m.shownGen, true), true
+		return m, pasteFromClipboard(m.shownGen, m.sessList.gen), true
 	}
 	before, pos := in.ti.Value(), in.ti.Position()
 	var cmd tea.Cmd

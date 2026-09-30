@@ -35,8 +35,9 @@ import (
 //     The outcome is the hint line's: started in ~/projects/lumen (the input
 //     cleared); the host's refusal of the prompt (the input kept, the host
 //     stopped); may have started — check the list, when the connection went
-//     after the prompt was sent (the input kept, the host kept); or why no
-//     session came up (the input kept).
+//     after the prompt was sent, or no answer came in the prompt's time (the
+//     input kept, the host kept); or why no session came up (the input
+//     kept).
 //   - A leading `@dir` alone — the unstarted session: opened in place, in the
 //     foreground, with nothing spawned (openUnstarted). Its band says `new
 //     session · <provider> · ~/projects/lumen`; its first enter spawns a host
@@ -58,6 +59,24 @@ var dispatchStartWait = 60 * time.Second
 // with: the first of the connection it opened for itself, whose client id is
 // that connection's own (R2-4) — no id of the TUI's is spent on it.
 const dispatchCommandID = "1"
+
+// dispatchPromptContext is the time a background dispatch's prompt has: the
+// command gate's deadline (gateDeadline). A variable only so a test can say
+// when that time is up — once the prompt's write has begun — rather than race
+// a clock against the write (whose start a starved CPU can put past a short
+// deadline).
+var dispatchPromptContext = func() (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.Background(), gateDeadline)
+}
+
+// dispatchJoinWait bounds each wait of a background dispatch for a goroutine
+// of its own once its connection is closed: the prompt's submission its
+// deadline cut short, and the drain of the connection's stream. Over a socket
+// both end as soon as that close does — the close ends the write a host that
+// stopped reading left blocked, and every read — so this only bites on a
+// backend whose calls do not end with it, and the dispatch goes on without
+// them (as the quit's quitJoinWait does).
+const dispatchJoinWait = time.Second
 
 // dispatchOutcome is what a background dispatch came to.
 type dispatchOutcome int
@@ -180,7 +199,9 @@ func (m Model) sessDispatched(msg sessDispatchedMsg) (Model, tea.Cmd) {
 //  4. Start waits for readiness. A failed start — the agent's, the bound's,
 //     or the connection closed under it by the program's exit — stops the
 //     host: nothing was sent to it.
-//  5. The prompt goes with the connection's own first command id.
+//  5. The prompt goes with the connection's own first command id, and is
+//     waited for no longer than the command gate's deadline, whether or not
+//     the call can see it (awaitPrompt).
 //  6. The session took the prompt: its host is left running
 //     (Sessions.LeaveRunning) — unless craze's exit has decided otherwise
 //     meanwhile (X99), which says so. No answer came: the prompt may have been
@@ -188,8 +209,9 @@ func (m Model) sessDispatched(msg sessDispatchedMsg) (Model, tea.Cmd) {
 //     decided while the connection still holds the host open, so the host is
 //     at no moment neither held nor left — the moment an Open of it by the
 //     list that could not reach it would stop it (X98, X110).
-//  7. The connection is closed — a view close — and the drain joined. A
-//     refused prompt's host is stopped after.
+//  7. The connection is closed — a view close, or at once when the prompt's
+//     deadline cut it short — and the drain joined, bounded. A refused
+//     prompt's host is stopped after.
 func runDispatch(s Sessions, spec SpawnSpec, prompt string, set *backendSet) (dispatchOutcome, error) {
 	ref, err := s.Spawn(spec)
 	if err != nil {
@@ -202,7 +224,10 @@ func runDispatch(s Sessions, spec SpawnSpec, prompt string, set *backendSet) (di
 	if err != nil {
 		return dispatchFailed, err
 	}
-	set.add(b)
+	// Recorded for the program's exit as a connection it closes at once
+	// (dispatchConn): nothing it could detach is worth the wait.
+	conn := &dispatchConn{Backend: b}
+	set.add(conn)
 	ctx, cancel := context.WithCancel(context.Background())
 	drained := make(chan struct{})
 	go func() {
@@ -213,10 +238,14 @@ func runDispatch(s Sessions, spec SpawnSpec, prompt string, set *backendSet) (di
 			}
 		}
 	}()
+	// closeIt closes the connection — a view close, the stream detached —
+	// takes it out of the program's set (whose close of it is then a no-op:
+	// Close is idempotent), and joins the drain, bounded.
 	closeIt := func() {
-		set.close(b)
+		_ = b.Close()
+		set.close(conn)
 		cancel()
-		<-drained
+		joinWithin(drained, dispatchJoinWait)
 	}
 
 	sctx, scancel := context.WithTimeout(context.Background(), dispatchStartWait)
@@ -234,14 +263,34 @@ func runDispatch(s Sessions, spec SpawnSpec, prompt string, set *backendSet) (di
 		return dispatchFailed, err
 	}
 
-	pctx, pcancel := context.WithTimeout(context.Background(), gateDeadline)
-	_, err = b.Submit(pctx, engine.Command{Client: b.ClientID(), ID: dispatchCommandID}, prompt, engine.SubmitQueue, "")
+	pctx, pcancel := dispatchPromptContext()
+	defer pcancel()
+	submitted := make(chan error, 1)
+	go func() {
+		_, err := b.Submit(pctx, engine.Command{Client: b.ClientID(), ID: dispatchCommandID}, prompt, engine.SubmitQueue, "")
+		submitted <- err
+	}()
+	answered, err := awaitPrompt(pctx, submitted)
+	if !answered {
+		// The deadline passed with the prompt still out — its write, it may
+		// be, blocked on a host that has stopped reading, where no context
+		// reaches it (X54). The outcome is unknown: the host is left running
+		// first, as for any unknown outcome, and then the connection is
+		// closed at once — no detach, which could only wait behind that
+		// write — which ends the write; the submission and the drain are
+		// joined, each bounded.
+		_ = s.LeaveRunning(ref)
+		set.close(conn)
+		joinWithin(submitted, dispatchJoinWait)
+		cancel()
+		joinWithin(drained, dispatchJoinWait)
+		return dispatchUnknown, err
+	}
 	// No answer: the call's own time ran out, or the client could not learn
 	// the outcome — its connection went after the prompt was sent, or it was
 	// closed under the call (the program's exit) — which it says as
 	// backend.ErrOutcomeUnknown. Anything else is the session's answer.
 	unknown := err != nil && (pctx.Err() != nil || errors.Is(err, backend.ErrOutcomeUnknown))
-	pcancel()
 	if dispatchHook != nil {
 		dispatchHook(dispatchPrompted)
 	}
@@ -264,6 +313,62 @@ func runDispatch(s Sessions, spec SpawnSpec, prompt string, set *backendSet) (di
 	closeIt()
 	_ = s.Stop(ref)
 	return dispatchRefused, err
+}
+
+// awaitPrompt is the prompt's answer (runDispatch), waited for no longer than
+// its deadline, ctx's: answered says one came — one there as the deadline
+// passes included — and err is then the call's; otherwise err is ctx.Err(),
+// and the call is still out (plan 030 C15r, astra r30-c15 1). The call cannot
+// be relied on to see its context: remote.Client.Command's write does not
+// honour it (X54), and a host that has stopped reading leaves a prompt longer
+// than the socket holds blocked in that write for ever — the dispatch, its
+// connection and its drain with it, and the list's input saying starting…
+func awaitPrompt(ctx context.Context, submitted <-chan error) (answered bool, err error) {
+	select {
+	case err := <-submitted:
+		return true, err
+	case <-ctx.Done():
+	}
+	select {
+	case err := <-submitted:
+		return true, err
+	default:
+		return false, ctx.Err()
+	}
+}
+
+// joinWithin waits for done to close, or d to pass.
+func joinWithin[T any](done <-chan T, d time.Duration) {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-done:
+	case <-t.C:
+	}
+}
+
+// dispatchConn is a background dispatch's connection as the program's set of
+// backends to close holds it (Model.retired): closed there at once, detaching
+// nothing (closeNow). The program is exiting — a detach says nothing the
+// connection's end does not (the host counts an attachment out at its EOF,
+// X29) — and a host that has stopped reading would keep the detach waiting
+// behind the prompt's blocked write for the client's whole close bound. The
+// dispatch's own ordinary close is a view close of the backend (closeIt).
+type dispatchConn struct{ backend.Backend }
+
+func (c *dispatchConn) Close() error { return closeNow(c.Backend) }
+
+// closeNow closes b at once: over a socket, the transport closed with no
+// detach (a quitCloser handed a context already done), which ends every write
+// blocked on it; any other backend closes as it does.
+func closeNow(b backend.Backend) error {
+	c, ok := b.(quitCloser)
+	if !ok {
+		return b.Close()
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	return c.CloseWithin(ctx)
 }
 
 // dispatchStep names a place in runDispatch a test holds it at.

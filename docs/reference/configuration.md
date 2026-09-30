@@ -373,7 +373,11 @@ models are its model table and are never cached.
   `<provider>.lock` (an `flock`), reads the file's `observedAt`, and replaces
   the file — atomically — only when its own observation is newer, so of two
   hosts writing at once the older can never win by finishing last. A host
-  writes only when the catalog differs from the one it last recorded.
+  writes only when the catalog differs from the one it last recorded, and
+  never a catalog with a model the file cannot hold (no id, a name or id that
+  is not one line): the whole observation is left out — the file keeps what it
+  had — and the host's log names the model, rather than recording the rest as
+  though it were the whole catalog.
 - A file larger than 256 KiB, or one craze did not write (another version,
   another provider's, no models, text that is not one line), is ignored as if
   there were none, and the next write replaces it.

@@ -206,6 +206,63 @@ func TestTheRecorderWritesEachNewCatalog(t *testing.T) {
 	}
 }
 
+// TestTheRecorderRefusesACatalogWithABadModel (C15r, sol r31-c16 2): a
+// catalog with one model the cache cannot hold — a name that is not one line
+// — is not recorded at all, where it used to be cached without that model
+// (its good models alone) and then offered as though whole. The catalog recorded before it stays, its
+// time too; the host's log says which model, once — the same catalog again
+// says nothing more; and a catalog whose models are all good is recorded
+// again. Each kick is held where the recorder has read its snapshot
+// (recorderClock).
+func TestTheRecorderRefusesACatalogWithABadModel(t *testing.T) {
+	env := catalogEnv(t)
+	fc := &fakeCatalog{}
+	var log lockedBuffer
+	r := newCatalogRecorder(env, agent.CursorProvider(), fc.snapshot, &log)
+	clock := stepRecorder(t, r)
+	t1 := time.Date(2026, 9, 1, 10, 0, 0, 0, time.UTC)
+	at := func(n int) time.Time { return t1.Add(time.Duration(n) * time.Minute) }
+	good := agent.ModelInfo{ID: "composer", Name: "Composer"}
+	bad := agent.ModelInfo{ID: "two-lines", Name: "Two\nLines"}
+
+	fc.set(good)
+	r.changed()
+	clock.reading()
+	clock.at(at(0))
+	cached(t, env, "cursor", "composer")
+
+	// A bad model beside two good ones (one new): nothing written — not
+	// the good two alone. The next kick's reading proves that one done.
+	fc.set(good, agent.ModelInfo{ID: "grok-4.6", Name: "Grok 4.6"}, bad)
+	r.changed()
+	clock.reading()
+	clock.at(at(1))
+	r.changed()
+	clock.reading()
+	if got := cached(t, env, "cursor", "composer"); !got.ObservedAt.Equal(at(0)) {
+		t.Fatalf("a catalog with a bad model was recorded: the cache was written at %v", got.ObservedAt)
+	}
+	want := "craze serve: the model catalog cache: not recorded: model 3 of 3 (id \"two-lines\", name \"Two\\nLines\") cannot be cached\n"
+	if log.String() != want {
+		t.Fatalf("the log after the bad catalog: %q, want %q", log.String(), want)
+	}
+	// The same bad catalog again (the kick just read): nothing more said.
+	clock.at(at(2))
+
+	// All good again: recorded.
+	fc.set(good, agent.ModelInfo{ID: "two-lines", Name: "Two Lines"})
+	r.changed()
+	clock.reading()
+	clock.at(at(3))
+	if got := cached(t, env, "cursor", "composer", "two-lines"); !got.ObservedAt.Equal(at(3)) {
+		t.Fatalf("the good catalog was recorded at %v", got.ObservedAt)
+	}
+	r.close()
+	if log.String() != want {
+		t.Fatalf("the log at the end: %q, want the one line", log.String())
+	}
+}
+
 // TestTheRecorderIsOnlyAnACPProviders: native's models are its table — no
 // recorder — and a nil recorder's methods do nothing.
 func TestTheRecorderIsOnlyAnACPProviders(t *testing.T) {

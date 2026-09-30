@@ -368,6 +368,13 @@ func (s sessCmdSource) providerValues(arg string) completeAnswer {
 // a substring of a model's name or id, case folded. The model new sessions
 // start on is marked `current`; an ACP provider's list begins with its
 // agent's own default, and its title says how old the catalog is.
+//
+// The agent's own default is a row of the list's own, never one of the
+// catalog's: its id is "" — no --model at all — which no cached model has
+// (modelcache keeps none without an id), and it is offered whatever the
+// catalog holds. A catalog model whose id is `default` is another row, and
+// chosen it starts the session with --model=default (plan 030 C15r, sol
+// r31-c16 1: it used to stand in for the agent's own row, which it hid).
 func (s sessCmdSource) modelValues(q completeQuery, arg string) completeAnswer {
 	if !s.provOK {
 		return completeAnswer{Note: "no provider to list models for", NoteErr: true}
@@ -396,13 +403,7 @@ func (s sessCmdSource) modelValues(q completeQuery, arg string) completeAnswer {
 		if len(items) == 0 {
 			return completeAnswer{Title: ans.Title, Note: "no " + name + sessNoCatalogNote}
 		}
-		hasDefault := false
-		for _, it := range items {
-			hasDefault = hasDefault || it.Value == sessDefaultModel
-		}
-		if !hasDefault {
-			items = append([]completeItem{{Name: sessDefaultModel, Detail: sessDefaultDetail}}, items...)
-		}
+		items = append([]completeItem{{Name: sessDefaultModel, Detail: sessDefaultDetail}}, items...)
 	}
 	fold := strings.ToLower(arg)
 	for _, it := range items {
@@ -448,6 +449,11 @@ func (s sessCmdSource) loadModels(p agent.Provider) func(context.Context) comple
 		}
 		items := make([]completeItem, 0, len(models))
 		for _, md := range models {
+			if md.ID == "" {
+				// No id: nothing --model could name, and "" is the agent's
+				// own default's row (modelValues).
+				continue
+			}
 			name := sanitizeLine(md.Name)
 			if name == "" {
 				name = sanitizeLine(md.ID)

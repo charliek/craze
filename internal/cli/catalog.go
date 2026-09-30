@@ -43,8 +43,12 @@ type catalogRecorder struct {
 	once sync.Once
 
 	// last is the catalog this host last recorded: written, or found no
-	// newer than the file already there. The goroutine's alone.
-	last []modelcache.Model
+	// newer than the file already there. refused is the last catalog it
+	// would not record (record), so an install that leaves it as it was says
+	// so again on the log no more than it writes a catalog again. Both the
+	// goroutine's alone.
+	last    []modelcache.Model
+	refused []modelcache.Model
 }
 
 // newCatalogRecorder starts p's recorder, reading the session's catalog
@@ -105,22 +109,38 @@ func (r *catalogRecorder) run() {
 }
 
 // record reads the session's catalog and writes it to the cache when it has
-// models and they are not the ones last recorded. A model modelcache would not
-// write — no id, text that is not one line — is left out of it. A failure is
-// one line on the host's log, and the next install tries again.
+// models and they are not the ones last recorded. A catalog with any model
+// modelcache would not write — no id, text that is not one line — is not
+// recorded at all (plan 030 C15r, sol r31-c16 2): with that model left out,
+// the list's /model would later offer the rest as though it were the whole
+// catalog, so the cache keeps what it had, and one line on the host's log
+// says which model it was (once for a catalog unchanged since). A write that
+// fails is one line on the log too, and the next install tries again.
 func (r *catalogRecorder) record() {
 	snap := r.snapshot()
 	at := r.now()
-	var models []modelcache.Model
-	for _, m := range agent.CatalogModels(snap) {
+	all := agent.CatalogModels(snap)
+	models := make([]modelcache.Model, 0, len(all))
+	bad := -1
+	for i, m := range all {
 		mc := modelcache.Model{ID: m.ID}
 		if m.Name != m.ID {
 			mc.Name = m.Name
 		}
-		if mc.Valid() {
-			models = append(models, mc)
+		if bad < 0 && !mc.Valid() {
+			bad = i
 		}
+		models = append(models, mc)
 	}
+	if bad >= 0 {
+		if !slices.Equal(models, r.refused) {
+			r.refused = models
+			fmt.Fprintf(r.log, "craze serve: the model catalog cache: not recorded: model %d of %d (id %q, name %q) cannot be cached\n",
+				bad+1, len(models), logClip(models[bad].ID), logClip(models[bad].Name))
+		}
+		return
+	}
+	r.refused = nil
 	if len(models) == 0 || slices.Equal(models, r.last) {
 		return
 	}
@@ -133,4 +153,16 @@ func (r *catalogRecorder) record() {
 		return
 	}
 	r.last = models
+}
+
+// logClipMax bounds an agent's own text quoted on a line of the host's log.
+const logClipMax = 80
+
+// logClip is s cut to logClipMax bytes, for the host's log: an agent's text
+// is its own, and any length.
+func logClip(s string) string {
+	if len(s) <= logClipMax {
+		return s
+	}
+	return s[:logClipMax] + "…"
 }

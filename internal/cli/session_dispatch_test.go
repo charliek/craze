@@ -2,13 +2,21 @@ package cli
 
 import (
 	"context"
+	"errors"
+	"os"
 	"strings"
+	"sync"
+	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
 	"github.com/charliek/craze/internal/agent"
 	"github.com/charliek/craze/internal/backend"
 	"github.com/charliek/craze/internal/engine"
+	"github.com/charliek/craze/internal/remote"
+	"github.com/charliek/craze/internal/roster"
+	"github.com/charliek/craze/internal/rundir"
 	"github.com/charliek/craze/internal/sessions"
 	"github.com/charliek/craze/internal/tui"
 )
@@ -148,4 +156,246 @@ func TestANewNativeSessionFromTheListTakesNoAgentBinary(t *testing.T) {
 	}
 	// Neither opened nor left running: the quit stopped it.
 	assertNoHosts(t, env)
+}
+
+// openWatch is the launch's session list as the TUI is handed it, recording
+// its Open's answer (answer, once; opened closed as it is recorded) — the
+// test's view of a backend the TUI never hears of.
+type openWatch struct {
+	tui.SessionStarter
+	mu     *sync.Mutex
+	answer *openAnswer
+	opened chan struct{}
+}
+
+type openAnswer struct {
+	b   backend.Backend
+	err error
+}
+
+func (w openWatch) Open(ref roster.Ref) (backend.Backend, error) {
+	b, err := w.SessionStarter.Open(ref)
+	w.mu.Lock()
+	if w.answer.b == nil && w.answer.err == nil {
+		*w.answer = openAnswer{b: b, err: err}
+		close(w.opened)
+	}
+	w.mu.Unlock()
+	return b, err
+}
+
+// typeInto writes keys to r's terminal.
+func typeInto(t *testing.T, r *ttyRun, keys string) {
+	t.Helper()
+	if _, err := r.ptmx.Write([]byte(keys)); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// waitServing waits a step for n hosts in env's registry, each serving a
+// session.
+func waitServing(t *testing.T, env rundir.Env, n int) {
+	t.Helper()
+	deadline := time.Now().Add(serveStep)
+	for {
+		entries, err := rundir.Hosts(env)
+		serving := 0
+		for _, e := range entries {
+			if e.CrazeSessionID != "" {
+				serving++
+			}
+		}
+		if err == nil && serving == n {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("not %d serving hosts after %v: %+v, %v", n, serveStep, entries, err)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// TestAnUnstartedSessionsSpawnAtTheQuitLeavesNoHost (C15r, astra r30-c15 3):
+// the real TUI in a pty and the launch's own cleanup (finish). The list's
+// input opens an unstarted session in the launch's directory (`@`, its here
+// row, enter), and its first prompt's spawn — Spawn, then Open — is running
+// when craze quits. The program is over before the spawn answers, so its
+// answer never reaches the TUI's Update, and nothing of the TUI's closes what
+// it holds: the launch's finish does. Forced at each place:
+//
+//   - the spawn held (its host never answers ready), and ctrl+d: finish
+//     cancels it, and its host is terminated; Open is never called;
+//   - Open held after its dial and attach, and ctrl+d: released by finish's
+//     own cancel — finish has begun, and waits for it — Open answers the
+//     backend;
+//   - Open held likewise, and SIGTERM: released once the program is over and
+//     its exit tail (finishRun) has swept what the TUI held, before finish
+//     begins — Open answers the backend then.
+//
+// Each time runTUI returns with the spawned host gone — reaped, out of the
+// registry — and any backend Open answered closed; the launch's own session,
+// which the unstarted session's opening let go of (a view close), goes on.
+func TestAnUnstartedSessionsSpawnAtTheQuitLeavesNoHost(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// held is what the spawn is held at: "spawn", or Open, released
+		// "after finish began" or "before finish".
+		held string
+		sig  syscall.Signal // 0: ctrl+d
+	}{
+		{name: "the spawn held, ctrl+d", held: "spawn"},
+		{name: "Open held, answering after finish began, ctrl+d", held: "after finish began"},
+		{name: "Open held, answering before finish, SIGTERM", held: "before finish", sig: syscall.SIGTERM},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env, ws, cmds := launchHome(t, func(n int) []string {
+				if n == 2 && tc.held == "spawn" {
+					return []string{cliChildReady + "=skip"}
+				}
+				return nil
+			})
+			t.Setenv("CRAZE_FAKE_SCRIPT", "echo")
+
+			// The unstarted session's Open, once armed: dialled and attached
+			// on a context of the test's own — all the launch's cancel reaches
+			// is the hold — then held.
+			var armed atomic.Bool
+			dialled, release := make(chan struct{}), make(chan struct{})
+			cause := make(chan error, 1)
+			prevDial := spawnDial
+			spawnDial = func(ctx context.Context, socket string, opts remote.SessionOptions) (*remote.Session, error) {
+				if !armed.Load() {
+					return prevDial(ctx, socket, opts)
+				}
+				dctx, cancel := context.WithTimeout(context.Background(), serveStep)
+				defer cancel()
+				s, err := prevDial(dctx, socket, opts)
+				if err == nil {
+					if err = s.Attach(dctx); err != nil {
+						_ = s.Close()
+					}
+				}
+				if err != nil {
+					return nil, err
+				}
+				close(dialled)
+				if tc.held == "after finish began" {
+					<-ctx.Done()
+					cause <- ctx.Err()
+					return s, nil
+				}
+				select {
+				case <-release:
+				case <-time.After(serveStep):
+				}
+				return s, nil
+			}
+			t.Cleanup(func() { spawnDial = prevDial })
+
+			var mu sync.Mutex
+			var answer openAnswer
+			opened := make(chan struct{})
+			prevRun := tuiRun
+			tuiRun = func(cfg tui.Config) (tui.Result, error) {
+				cfg.Sessions = openWatch{SessionStarter: cfg.Sessions.(tui.SessionStarter), mu: &mu, answer: &answer, opened: opened}
+				res, err := prevRun(cfg)
+				if tc.held == "before finish" {
+					// The program is over and finishRun has run; finish has
+					// not begun (it follows this return).
+					close(release)
+					select {
+					case <-opened:
+					case <-time.After(serveStep):
+						t.Errorf("Open did not answer within %v of its release", serveStep)
+					}
+				}
+				return res, err
+			}
+			t.Cleanup(func() { tuiRun = prevRun })
+
+			r := runInPTY(t, launchFlags(t, ws))
+			r.see(t, " craze ─")
+			first := onlyHost(t, env)
+			r.see(t, statusElapsed)
+			armed.Store(true)
+			// ← on the empty composer: the list, its input under the rows.
+			typeInto(t, r, "\x1b[D")
+			r.see(t, " sessions")
+			typeInto(t, r, "@")
+			r.see(t, "where should it run?")
+			// enter picks the first row — here, the launch's own directory —
+			// and enter on that token alone opens the unstarted session.
+			typeInto(t, r, "\r\r")
+			r.see(t, "type the first prompt to start this session")
+			typeInto(t, r, "hi\r")
+			if tc.held == "spawn" {
+				waitServing(t, env, 2)
+			} else {
+				select {
+				case <-dialled:
+				case <-time.After(serveStep):
+					t.Fatal("the unstarted session's Open never dialled")
+				}
+			}
+
+			if tc.sig != 0 {
+				if err := syscall.Kill(os.Getpid(), tc.sig); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				typeInto(t, r, "\x04")
+			}
+			select {
+			case err := <-r.done:
+				if err != nil {
+					t.Fatalf("runTUI: %v", err)
+				}
+			case <-time.After(serveStep):
+				t.Fatal("craze did not quit")
+			}
+
+			// No wait: finish stopped the spawned host before runTUI
+			// returned.
+			pids := cmds.pids()
+			if len(pids) != 2 {
+				t.Fatalf("%d hosts spawned, want the launch's and the unstarted session's", len(pids))
+			}
+			if processAlive(pids[1]) {
+				t.Fatalf("runTUI returned with the unstarted session's host %d still there (%s)", pids[1], procState(pids[1]))
+			}
+			if entries, err := rundir.Hosts(env); err != nil || len(entries) != 1 || entries[0].HostID != first.HostID {
+				t.Fatalf("the registry after the quit: %+v, %v; want the launch's own host %s alone", entries, err, first.HostID)
+			}
+			select {
+			case <-opened:
+			default:
+				if tc.held != "spawn" {
+					t.Fatal("runTUI returned before the held Open answered")
+				}
+			}
+			mu.Lock()
+			got := answer
+			mu.Unlock()
+			switch {
+			case tc.held == "spawn":
+				if got.b != nil || got.err != nil {
+					t.Fatalf("Open was called for a spawn the quit cancelled: %+v", got)
+				}
+			case got.err != nil || got.b == nil:
+				t.Fatalf("the held Open answered %v, want the backend", got.err)
+			default:
+				ctx, cancel := context.WithTimeout(context.Background(), serveStep)
+				defer cancel()
+				if _, err := got.b.Read(ctx); !errors.Is(err, backend.ErrClosed) {
+					t.Fatalf("the backend Open answered after the program ended: a read answered %v, want it closed", err)
+				}
+			}
+			if tc.held == "after finish began" {
+				if err := <-cause; !errors.Is(err, context.Canceled) {
+					t.Fatalf("the hold ended with %v, want finish's cancel", err)
+				}
+			}
+			stopEntry(t, first, pids[0])
+		})
+	}
 }
