@@ -1102,11 +1102,77 @@ func TestResolveFields(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if or.Name != "openrouter/minimax-m3" || or.BaseURL != "" || or.Efforts != nil || or.MaxOutputTokens != 0 {
+	if or.Name != "openrouter/minimax-m3" || or.BaseURL != "" || or.Efforts != nil || or.MaxOutputTokens != DefaultMaxOutputTokens {
 		t.Fatalf("Resolve(openrouter/minimax-m3) = %+v", or)
 	}
 
 	if _, err := tbl.Resolve("nope", env); !errors.Is(err, ErrUnknownModel) {
 		t.Fatalf("err = %v, want ErrUnknownModel", err)
+	}
+}
+
+// Resolve supplies the default output ceiling (D-74) and nothing else does:
+// an explicit max_output_tokens wins whatever its size, and the default is
+// held to a quarter of a known window.
+func TestResolveOutputCeiling(t *testing.T) {
+	cases := []struct {
+		name        string
+		window, out int
+		want        int
+	}{
+		{"none, no window", 0, 0, 32000},
+		{"none, 1M window", 1048576, 0, 32000},
+		{"none, 128k window", 128000, 0, 32000},
+		{"none, 64k window", 64000, 0, 16000},
+		{"explicit", 0, 4096, 4096},
+		{"explicit above the default", 0, 131072, 131072},
+		{"explicit on a small window", 8000, 6000, 6000},
+		{"explicit above the window", 8000, 9000, 9000},
+	}
+	env := fakeEnv(map[string]string{"FIREWORKS_API_KEY": "key-fw"})
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tbl := validTable()
+			setModel(tbl, "fireworks/kimi-k3", func(m *Model) { m.ContextWindow, m.MaxOutputTokens = tc.window, tc.out })
+			r, err := tbl.Resolve("fireworks/kimi-k3", env)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if r.MaxOutputTokens != tc.want {
+				t.Fatalf("Resolve ceiling = %d, want %d", r.MaxOutputTokens, tc.want)
+			}
+			if got := tbl.Models["fireworks/kimi-k3"].MaxOutputTokens; got != tc.out {
+				t.Fatalf("Resolve changed the table's own max_output_tokens to %d, want %d", got, tc.out)
+			}
+		})
+	}
+}
+
+// The default is never written to models.toml: a load, resolve and save of an
+// entry with no max_output_tokens leaves the key out.
+func TestDefaultCeilingNeverReachesTheFile(t *testing.T) {
+	tbl := validTable()
+	setModel(tbl, "fireworks/kimi-k3", func(m *Model) { m.MaxOutputTokens = 0 })
+	env := fakeEnv(map[string]string{"FIREWORKS_API_KEY": "key-fw"})
+	if _, err := tbl.Resolve("fireworks/kimi-k3", env); err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	if err := Save(filepath.Join(dir, "native"), tbl); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(filepath.Join(dir, "native", ModelsFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "max_output_tokens") {
+		t.Fatalf("the saved models.toml carries max_output_tokens:\n%s", raw)
+	}
+	back, err := Load(filepath.Join(dir, "native"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := back.Models["fireworks/kimi-k3"].MaxOutputTokens; got != 0 {
+		t.Fatalf("reloaded max_output_tokens = %d, want 0", got)
 	}
 }
