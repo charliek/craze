@@ -390,32 +390,50 @@ func TestADispatchTheSessionRefusesStopsItsHost(t *testing.T) {
 }
 
 // TestADispatchRefusedAsItsDeadlinePassesStopsItsHost (C15r2, astra r32-c15r
-// 1), a forced schedule: the session refuses the prompt, and the prompt's
-// deadline — held off until the dispatch has taken that answer
-// (dispatchPrompted), and passed there — has passed by the time the answer is
-// read. The refusal is still the session's answer: the outcome is refused,
-// the host stopped and never left running, and the input says why. It used to
-// be unknown — the deadline's expired context read over the answer — and the
-// refused host left running. That awaitPrompt takes an answer there as the
-// deadline passes is TestAwaitPromptTakesAnAnswerThereAtItsDeadline.
+// 1; C15r3, astra r33-c15r2 1), a forced schedule: the session refuses the
+// prompt, and its answer is there — the submission has sent it
+// (dispatchSubmitted) — while the dispatch is held before it waits for one
+// (dispatchAwaiting); there the prompt's deadline passes, and then the
+// dispatch waits. So the deadline has passed before anything of the answer is
+// taken or read, and both of awaitPrompt's selects find the answer there,
+// whichever case the first picks. The refusal is still the session's answer:
+// the outcome is refused, the host stopped and never left running, and the
+// input says why. It used to be unknown — the deadline's expired context read
+// over the answer, as soon as the answer was taken — and the refused host left
+// running. (The deadline passed at dispatchPrompted, as this test had it
+// first, is past that read, and did not catch it.) That awaitPrompt takes an
+// answer there as the deadline passes is
+// TestAwaitPromptTakesAnAnswerThereAtItsDeadline.
 func TestADispatchRefusedAsItsDeadlinePassesStopsItsHost(t *testing.T) {
 	deadline := holdPromptDeadline(t)
 	m, fs, hb, log := dispatchModel(t, 100, 30)
 	hb.submit = func(context.Context, string) (engine.SubmitResult, error) {
 		return engine.SubmitResult{}, fmt.Errorf("the host: %w", engine.ErrClosing)
 	}
+	sent, awaiting, release := make(chan struct{}), make(chan struct{}), make(chan struct{})
 	dispatchHook = func(step dispatchStep) {
-		if step == dispatchPrompted {
-			deadline.pass()
+		switch step {
+		case dispatchSubmitted:
+			close(sent)
+		case dispatchAwaiting:
+			close(awaiting)
+			<-release
 		}
 	}
 	t.Cleanup(func() { dispatchHook = nil })
 	m = selectKey(t, m, runKey("lumen"))
 	m, _ = typeList(t, m, "go")
 	m, cmd := press(m, enter())
-	msg := dispatched(t, mustCmd(t, cmd, "sessDispatch"))
-	if !errors.Is(deadline.Err(), context.DeadlineExceeded) {
-		t.Fatal("fixture: the prompt's deadline had not passed when the answer was read")
+	wait := later(t, mustCmd(t, cmd, "sessDispatch"))
+	awaitStep(t, awaiting, "the dispatch before its wait for the answer")
+	awaitStep(t, sent, "the refusal sent by the submission")
+	// The answer there, the dispatch not yet waiting for it: the deadline
+	// passes, and then the dispatch goes on.
+	deadline.pass()
+	close(release)
+	msg, ok := wait().(sessDispatchedMsg)
+	if !ok {
+		t.Fatal("the dispatch answered no outcome")
 	}
 	if msg.out != dispatchRefused || !errors.Is(msg.err, engine.ErrClosing) {
 		t.Fatalf("the outcome %v: %v; want the session's refusal", msg.out, msg.err)
@@ -919,17 +937,22 @@ func TestAQuitDuringADispatchsSubmission(t *testing.T) {
 	}
 }
 
-// TestAQuitCutsADispatchsDetachShort (C15r2, astra r32-c15r 2), a forced
-// schedule over a real socket: the session takes the prompt, and the
+// TestAQuitCutsADispatchsDetachShort (C15r2, astra r32-c15r 2; C15r3), the
+// integration check over a real socket: the session takes the prompt, and the
 // dispatch's own close — a view close — has begun its detach, which the host
 // never answers (the proxy in front of it stops reading as the host is left
 // running, so the detach never reaches it), when craze quits — ctrl+d on the
 // list, or a signal (finishRun without it). The run's exit tail closes the
-// dispatch's connection and returns at once: its close cancels the view
-// close's context first, which ends the detach's wait. It used to wait inside
-// remote.Session's one close — which the view close held — for the detach's
-// whole bound (3 s, past quitStepBound). The dispatch settles accepted, its
-// host left running, every goroutine of it joined.
+// dispatch's connection and returns within its step: a real remote.Session's
+// view close under way ends when the exit's close cancels its context, and
+// the exit's own close then finds the one close done. The dispatch settles
+// accepted, its host left running, every goroutine of it joined.
+//
+// It is not the regression proof (astra r33-c15r2 2): the detach's bound
+// (closeBound, 3 s) runs from its write, which the test observes, and a
+// scheduling delay before finishRun can let a close that waits that bound out
+// finish inside quitStepBound. That proof, with no clock in it, is
+// TestAQuitEndsADispatchsDetachByItsContext.
 func TestAQuitCutsADispatchsDetachShort(t *testing.T) {
 	for _, quit := range []string{"ctrl+d", "a signal"} {
 		t.Run(quit, func(t *testing.T) {
@@ -973,6 +996,96 @@ func TestAQuitCutsADispatchsDetachShort(t *testing.T) {
 				t.Fatalf("the outcome %v: %v; want accepted, the prompt taken before the quit", msg.out, msg.err)
 			}
 			assertDispatchJoined(t, m, fs, log, conn)
+		})
+	}
+}
+
+// onceClosed is a host backend that closes as remote.Session does, with the
+// clock taken out (plan 030 C15r3, astra r33-c15r2 2): every close shares one
+// once, so a second close waits for the first to finish; the first ends the
+// stream (Read answers closed) and then, handed a context not yet done,
+// detaches — a wait that ends only when that context does, with no bound of
+// its own (remote.Session's closeBound) to end it; handed one already done, it
+// detaches nothing. Close is CloseWithin with a context that never ends.
+// detaching is closed as a first close begins its detach.
+type onceClosed struct {
+	*hostBackend
+	once      sync.Once
+	detaching chan struct{}
+}
+
+var _ quitCloser = (*onceClosed)(nil)
+
+func (b *onceClosed) Close() error { return b.CloseWithin(context.Background()) }
+
+func (b *onceClosed) CloseWithin(ctx context.Context) error {
+	b.once.Do(func() {
+		_ = b.hostBackend.Close()
+		if ctx.Err() == nil {
+			close(b.detaching)
+			<-ctx.Done()
+		}
+	})
+	return nil
+}
+
+// TestAQuitEndsADispatchsDetachByItsContext (C15r3, astra r33-c15r2 2), a
+// forced schedule with no clock in it: the session takes the prompt, and the
+// dispatch's own close — a view close — is waiting in its detach when craze
+// quits — ctrl+d on the list, or a signal (finishRun without it). The
+// connection closes as remote.Session does, its bound taken out
+// (onceClosed): nothing but its context ends the detach, and a second close
+// waits for the first. The run's exit tail returns within its step: its close
+// of the dispatch's connection (dispatchConn.Close) cancels the view close's
+// context first, which ends the detach, and its own close then finds the one
+// close done. It used to wait there for ever — here; for the detach's whole
+// bound (3 s) over a real socket: the view close a plain Close, with no
+// context the exit could cancel, and the exit's close waiting behind it in
+// the one close. The dispatch settles accepted, its host left running and
+// never stopped, its connection closed and out of the program's set. The same
+// schedule over a real socket is TestAQuitCutsADispatchsDetachShort.
+func TestAQuitEndsADispatchsDetachByItsContext(t *testing.T) {
+	for _, quit := range []string{"ctrl+d", "a signal"} {
+		t.Run(quit, func(t *testing.T) {
+			m, fs, hb, log := dispatchModel(t, 100, 30)
+			conn := &onceClosed{hostBackend: hb, detaching: make(chan struct{})}
+			fs.open = func(roster.Ref) (backend.Backend, error) { return conn, nil }
+			m = selectKey(t, m, runKey("lumen"))
+			m, _ = typeList(t, m, "go")
+			m, cmd := press(m, enter())
+			disp := mustCmd(t, cmd, "sessDispatch")
+			answered := make(chan tea.Msg, 1)
+			go func() { answered <- disp() }()
+			awaitStep(t, conn.detaching, "the dispatch's detach")
+			if quit == "ctrl+d" {
+				m, _ = press(m, tea.KeyMsg{Type: tea.KeyCtrlD})
+				if !m.quitting {
+					t.Fatal("ctrl+d on the list did not quit")
+				}
+			}
+			within(t, "the run's exit tail (finishRun) with the dispatch's detach waiting", func() bool {
+				_, _ = finishRun(io.Discard, m, m, nil)
+				return true
+			})
+			var msg sessDispatchedMsg
+			select {
+			case got := <-answered:
+				msg = got.(sessDispatchedMsg)
+			case <-time.After(quitStepBound):
+				t.Fatalf("the dispatch did not settle within %v of the exit's close", quitStepBound)
+			}
+			if msg.out != dispatchAccepted || msg.err != nil {
+				t.Fatalf("the outcome %v: %v; want accepted, the prompt taken before the quit", msg.out, msg.err)
+			}
+			if got, want := log.seen(), []string{"spawn", "open", "start", "submit", "leave", "close"}; !slices.Equal(got, want) {
+				t.Fatalf("the dispatch ran %v, want %v", got, want)
+			}
+			if !slices.Equal(fs.leaves, []roster.Ref{hostRef("new")}) || len(fs.stops) != 0 {
+				t.Fatalf("left %v, stopped %v: want the host left running", fs.leaves, fs.stops)
+			}
+			if n := setHeld(m.retired); !hb.isClosed() || n != 0 {
+				t.Fatalf("the connection closed %v; the program still holds %d of the dispatch's backends", hb.isClosed(), n)
+			}
 		})
 	}
 }

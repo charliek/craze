@@ -268,10 +268,20 @@ func runDispatch(s Sessions, spec SpawnSpec, prompt string, set *backendSet) (di
 	pctx, pcancel := dispatchPromptContext()
 	defer pcancel()
 	submitted := make(chan error, 1)
+	// The submission's hook is read here, as it begins: the goroutine can
+	// outlive the dispatch — past its send, or past a join that gave up on
+	// it — and must not read dispatchHook after a test has put it back.
+	hook := dispatchHook
 	go func() {
 		_, err := b.Submit(pctx, engine.Command{Client: b.ClientID(), ID: dispatchCommandID}, prompt, engine.SubmitQueue, "")
 		submitted <- err
+		if hook != nil {
+			hook(dispatchSubmitted)
+		}
 	}()
+	if dispatchHook != nil {
+		dispatchHook(dispatchAwaiting)
+	}
 	answered, err := awaitPrompt(pctx, submitted)
 	if !answered {
 		// The deadline passed with the prompt still out — its write, it may
@@ -426,6 +436,12 @@ type dispatchStep int
 const (
 	// dispatchStarted: Start has answered.
 	dispatchStarted dispatchStep = iota + 1
+	// dispatchAwaiting: the prompt's Submit is under way, and the dispatch
+	// is about to wait for its answer (awaitPrompt).
+	dispatchAwaiting
+	// dispatchSubmitted, on the submission's goroutine: the prompt's Submit
+	// has answered, and the answer is there for awaitPrompt to take.
+	dispatchSubmitted
 	// dispatchPrompted: the prompt's Submit has answered in its time, and
 	// the answer is about to be read.
 	dispatchPrompted
@@ -434,9 +450,12 @@ const (
 )
 
 // dispatchHook, when a test sets it, is called at each dispatchStep on the
-// dispatch's goroutine: a test holds a dispatch there to force a schedule (a
-// quit landing between the prompt and the host being left running). nil in
-// production, like gateHook.
+// dispatch's goroutine — dispatchSubmitted on its submission's, with the hook
+// as it was when that submission began, so a hook can be called from both at
+// once: a test holds a dispatch there to force a schedule (a quit landing
+// between the prompt and the host being left running; a refusal there before
+// the dispatch waits, and the deadline passed). nil in production, like
+// gateHook.
 var dispatchHook func(dispatchStep)
 
 // ------------------------------------------------------- the unstarted session
