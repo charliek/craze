@@ -693,9 +693,10 @@ provider with no usable key leaves its models unusable, not the others.
 provider's inline `api_key`, [`craze auth logout
 <provider>`](cli.md#craze-auth-logout) removes it, and [`craze auth
 list`](cli.md#craze-auth-list) shows how each provider is connected: by a
-variable, which always wins, by its stored key, or not at all. No key is
-checked with its provider when it is stored; a wrong one shows on first use.
-When they write, `login` and `logout`:
+variable, which always wins, by its stored key, or not at all. In a native
+session, [`/connect`](tui.md#connect) stores a key the same way `login` does.
+No key is checked with its provider when it is stored; a wrong one shows on
+first use. When they write, `login`, `logout` and `/connect`:
 
 - **Rewrite `providers.toml` whole**, at `0600` (a new directory is made
   `0700`). Comments and layout are not kept — the header they write says so —
@@ -720,9 +721,9 @@ only your own.
 
 A running native session keeps the model table it started with. A provider
 you give a key to while it runs — an `api_key` written into `providers.toml`
-by `craze auth login`, by hand, or by another craze — is offered by the next
-session, or by this conversation after `/exit` and `craze -c`, never by the
-running one.
+by `craze auth login`, `/connect`, by hand, or by another craze — is offered
+by the next session, or by this conversation after `/exit` and `craze -c`,
+never by the running one.
 
 The running session does watch that file, only so it can redact what it
 holds: at the start of every turn (a prompt, a `/compact`, or the delivery of

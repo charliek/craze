@@ -986,6 +986,7 @@ skills carry no such restriction; they complete anywhere in the draft.
 |---------|--------|
 | `/help` | Keybindings and commands |
 | `/model` | Switch model |
+| `/connect` | Store a model provider's API key — [native sessions only](#connect) |
 | `/clear` | Clear transcript |
 | `/tasks` | Tasks panel: compact, expanded, hidden |
 | `/theme` | Theme picker, or `/theme <name>` |
@@ -1114,6 +1115,75 @@ token scan reads the whole prompt line the way cursor's own regex does, a
 stray `/watch-pr` in the middle of a sentence ("see /watch-pr for context")
 expands exactly as if it had been typed at the start.
 
+### `/connect`
+
+`/connect` gives one of the native provider's model providers an API key
+without leaving the TUI — the dialog twin of [`craze auth
+login`](cli.md#craze-auth-login), storing the key the same way, as that
+provider's `api_key` in `providers.toml` (see
+[Keys](configuration.md#keys)). Like `craze auth login` it never checks the
+key with the provider: a wrong one shows as an error on first use. It exists
+in native sessions only: in a cursor, grok or gx session it is not in the menu,
+and a typed `/connect` goes to the agent as ordinary text. It is also what the
+last row of native's [`/model`](#model-dialog) opens, while some provider has
+no key.
+
+- **Step one, `Connect a provider`**, lists every provider craze knows — the
+  shipped ones and any in your own `providers.toml` — by name, a `✓` beside each
+  one that has a usable key, from its variable or stored; connecting one that
+  already has a key replaces its stored key. A provider whose stored key cannot
+  be used (shorter than 8 bytes, or overlapping the redaction marker) is marked
+  `stored key unusable`. The box opens on the first provider with no key.
+  `↑`/`↓` move, `Enter` or a click picks, `Esc` closes.
+- **Step two, `<Name> API key`**, is a masked field: what you type or paste is
+  drawn as `•`, never as text. Under it, where the key is stored — `Stored in
+  ~/.craze/native/providers.toml.`, or wherever this TUI's `CRAZE_HOME` puts it —
+  and, when one of the provider's variables is set in this TUI's environment,
+  `<VAR> is set in this environment; craze uses it before the stored key.`
+  A terminal paste and `Ctrl+V` both land in the field and nowhere else: a
+  clipboard paste that answers after you have left the field, or opened another
+  one, is dropped — never put in the composer. `Esc` goes back to step one and
+  empties the field.
+- **`Enter` stores the key.** An empty key, one shorter than 8 bytes, one that
+  overlaps the redaction marker, or one over 8 KiB is refused in the field —
+  `Not saved: …`, naming the rule, never the key — the field is emptied, and
+  nothing is written. Otherwise the box closes and the transcript says
+  `Connected <Name>. New sessions offer its models; to use them in this
+  conversation, /exit and run craze -c.` Another provider's stored key that
+  cannot be used is kept as it was, and named in a note after it. A store that
+  refuses — `providers.toml` a symlink, a file that no longer parses, a lock that
+  cannot be taken — is an error row naming the problem, never the key.
+- **The key is never shown**: not in the transcript, a note or an error row, the
+  composer, the session's journal, or anything sent to the model. The field is
+  emptied on every way out of the dialog — a save, `Esc`, a refusal, a card
+  arriving, another dialog opening, or switching to another session.
+
+**Refused while work runs.** While a turn is running — yours, another
+client's, or the agent's own — or a sub-agent is still running in the
+background, `/connect` writes `Finish or stop the running work first, then
+/connect.` and opens nothing; work that starts while the box is open refuses
+the save in the field instead, keeping the key for another `Enter`. A running
+session learns a newly stored key, to redact it, only when its next turn starts
+(see [Keys stored while a session
+runs](configuration.md#keys-stored-while-a-session-runs)), so a shell command
+or a sub-agent already running would not know it. The TUI's view of the
+session can lag its host by a moment, and another client attached to the same
+session can start work while the box is open, so the refusal narrows that
+window rather than closing it.
+
+**The running session keeps its models.** A provider connected here is offered
+by every new session, and by this conversation once you `/exit` and resume it
+with `craze -c`; the running one keeps the model table it started with, and a
+key you replace reaches it only after the same `/exit` and `craze -c`.
+
+**Where it writes.** `/connect` writes to the `providers.toml` of *this* TUI's
+craze directory (`CRAZE_HOME`, or `~/.craze`). A session attached with `craze
+attach` from a shell with another `CRAZE_HOME` reads its host's directory, not
+this one — which is why step two names the file.
+
+It is no way in on a machine with no key at all: a native session with nothing
+funded does not start, and its error names `craze auth login`, which is.
+
 ## Model dialog
 
 `/model`, or a click on the model name in status row 1, opens a centred box
@@ -1145,7 +1215,14 @@ group.
 
 A native session lists only the models of providers that have a key — an
 exported variable or a stored one ([Keys](configuration.md#keys)) — plus the
-model it is running on, and says nothing about the providers that have none.
+model it is running on, and says nothing about the providers that have none,
+except one row: while some provider has no key, the list ends with
+`Connect a provider…`, which `↑`/`↓` and a click reach like any row and which
+opens [`/connect`](#connect) — applying nothing else, as `Esc` would not. It is
+judged when the dialog opens, against the providers this TUI's craze directory
+and environment know (the file `/connect` writes), so it goes once every
+provider has a key, even though the running session's own list does not change
+until `/exit` and `craze -c`. An ACP provider's dialog never has it.
 It judges both when it starts: a model you pick in this session moves up in
 the *next* session's list, not this one's, and a provider you connect while
 the session runs appears in a new session, or in this conversation after

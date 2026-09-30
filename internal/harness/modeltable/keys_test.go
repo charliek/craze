@@ -251,7 +251,7 @@ func TestSetKeyRoundTripsEveryEntry(t *testing.T) {
 	}
 	body := string(raw)
 	for _, line := range []string{
-		"# craze native harness: API keys and provider overrides.\n# craze rewrites this file for \"craze auth\": comments are not kept. Keep it 0600; never paste it.\n",
+		"# craze native harness: API keys and provider overrides.\n# craze rewrites this file for \"craze auth\" and /connect: comments are not kept. Keep it 0600; never paste it.\n",
 		"env_keys = []\n",
 		"name = \"\"\n",
 		"api_key = \"  zq9-w7 \"\n",

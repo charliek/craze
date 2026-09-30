@@ -114,10 +114,10 @@ func KeyProblem(k string) error { return keyProblem(strings.TrimSpace(k)) }
 // (§3.7).
 
 // keyFileHeader is written above the providers.toml SetKey and RemoveKey
-// write. Every earlier comment is gone by then, so it says so. (Plan 031 C7
-// adds the TUI's /connect to the commands it names.)
+// write. Every earlier comment is gone by then, so it says so, and names the
+// two things that write it: craze auth and the TUI's /connect (plan 031 §3.7).
 const keyFileHeader = `# craze native harness: API keys and provider overrides.
-# craze rewrites this file for "craze auth": comments are not kept. Keep it 0600; never paste it.
+# craze rewrites this file for "craze auth" and /connect: comments are not kept. Keep it 0600; never paste it.
 
 `
 

@@ -5,17 +5,17 @@
                                                                                                     
                                                                                                     
                                                                                                     
+                                                                                                    
                        ╭────────────────────────────────────────────────────╮                       
-                       │model                                               │                       
-                       │❯                                                   │                       
-                       │> Alpha One                                         │                       
-                       │  Beta Slow                                         │                       
-                       │  Alpha Two                                         │                       
-                       │  Beta Fast                                         │                       
-                       │  Connect a provider…                               │                       
-                       │  effort  low  [high]                               │                       
-                       │type to filter · ↑↓ · tab effort · enter · esc      │                       
+                       │Beta API key                                        │                       
+                       │❯ •••••••••••••••••••••••••••                       │                       
+                       │Stored in ~/.craze/native/providers.toml.           │                       
+                       │PICKER_BETA_KEY is set in this environment; craze   │                       
+                       │uses it before the stored key.                      │                       
+                       │enter saves · esc back                              │                       
                        ╰────────────────────────────────────────────────────╯                       
+                                                                                                    
+                                                                                                    
                                                                                                     
                                                                                                     
                                                                                                     

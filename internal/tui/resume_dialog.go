@@ -318,14 +318,11 @@ func (m Model) resumeErrLines(inner int) []string {
 	if inner <= 0 {
 		return []string{text}
 	}
-	wrap := func(s string) []string {
-		return strings.Split(ansi.Hardwrap(ansi.Wordwrap(s, inner, ""), inner, true), "\n")
-	}
 	head, tail, ok := strings.Cut(text, refusalSep)
 	if !ok || head == "" || tail == "" {
-		return wrap(text)
+		return dialogWrap(text, inner)
 	}
-	lines := wrap(head)
+	lines := dialogWrap(head, inner)
 	last := lines[len(lines)-1]
 	switch {
 	case ansi.StringWidth(last+refusalSep+tail) <= inner:
@@ -335,9 +332,9 @@ func (m Model) resumeErrLines(inner int) []string {
 	case ansi.StringWidth(last+refusalSep) <= inner:
 		// The dash closes the refusal's row; what follows starts its own.
 		lines[len(lines)-1] = last + strings.TrimRight(refusalSep, " ")
-		return append(lines, wrap(tail)...)
+		return append(lines, dialogWrap(tail, inner)...)
 	}
-	return append(lines, wrap(strings.TrimLeft(refusalSep, " ")+tail)...)
+	return append(lines, dialogWrap(strings.TrimLeft(refusalSep, " ")+tail, inner)...)
 }
 
 // refusalSep is what joins a refusal and what follows it: where the session

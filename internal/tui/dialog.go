@@ -3,6 +3,8 @@ package tui
 import (
 	"strings"
 
+	"github.com/charmbracelet/bubbles/cursor"
+	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 )
@@ -42,6 +44,8 @@ const (
 	dialogHelp
 	dialogProvider
 	dialogResume
+	// dialogConnect is /connect (connect_dialog.go, plan 031 §3.9).
+	dialogConnect
 )
 
 // rect is the modal layer's box in screen cells: the outer rectangle, borders
@@ -119,6 +123,8 @@ func (m Model) dialogBody(inner, budget int) []string {
 		return m.providerDialogBody(inner, budget)
 	case dialogResume:
 		return m.resumeDialogBody(inner, budget)
+	case dialogConnect:
+		return m.connectDialogBody(inner, budget)
 	}
 	return nil
 }
@@ -197,6 +203,38 @@ func dialogListWindow(n, sel, rows int) (top, shown int) {
 		top = n - shown
 	}
 	return max(top, 0), shown
+}
+
+// dialogWrap is s word-wrapped to the box's inner width, a word longer than
+// the width — a path, a command — broken where it must be.
+func dialogWrap(s string, inner int) []string {
+	if inner <= 0 {
+		return []string{s}
+	}
+	return strings.Split(ansi.Hardwrap(ansi.Wordwrap(s, inner, ""), inner, true), "\n")
+}
+
+// dialogInput is a dialog's one-line field — the model dialog's filter,
+// /connect's key field — focused, with the filter's prompt. A static cursor
+// keeps the box from starting a blink timer nothing in craze routes back to
+// the input, and keeps a frame deterministic. Each caller adds its own
+// limits.
+func (m Model) dialogInput() textinput.Model {
+	ti := textinput.New()
+	ti.Prompt = modelFilterPrompt
+	ti.PromptStyle = styleFG(m.theme.Accent)
+	ti.TextStyle = styleFG(m.theme.FG)
+	ti.Cursor.SetMode(cursor.CursorStatic)
+	ti.Focus()
+	return ti
+}
+
+// dialogInputView is a dialogInput drawn on a body row inner cells wide. The
+// prompt and the one cell the cursor always draws come out of the width
+// bubbles pads the value to, or the row overflows the box.
+func dialogInputView(f textinput.Model, inner int) string {
+	f.Width = max(1, inner-lipgloss.Width(modelFilterPrompt)-1)
+	return f.View()
 }
 
 // dialogScrollTag is the ▲/▼ marker for a clipped list.

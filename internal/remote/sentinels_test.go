@@ -583,6 +583,12 @@ var tuiSites = []tuiSite{
 	{"config.go", "ConfigControlSocket", "Is", "ErrConfigMalformed", 1, proofLocal},
 	{"config.go", "ConfigDetach", "Is", "ErrConfigMalformed", 1, proofLocal},
 	{"config.go", "ConfigHostIdleExit", "Is", "ErrConfigMalformed", 1, proofLocal},
+	// /connect's (plan 031 §3.9): the TUI's own key store, read and written
+	// in this process through Config.NativeDir — never a Backend call's
+	// answer — and the rule a key is judged by before it is stored.
+	{"connect_dialog.go", "storeErrText", "Error", "err", 1, proofLocal},
+	{"connect_dialog.go", "storedProblemText", "Is", "modeltable.ErrKeyTooShort", 1, proofLocal},
+	{"connect_dialog.go", "connectKeyRule", "Is", "modeltable.ErrKeyTooShort", 1, proofLocal},
 	// The frame harness's capture boundary: in process only (engineBehind).
 	{"frame.go", "streamHead", "Is", "agent.ErrLogClosing", 1, proofLocal},
 	{"frame.go", "streamHead", "Is", "agent.ErrClosed", 1, proofLocal},

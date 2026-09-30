@@ -81,30 +81,64 @@ func nativePickerSession(t *testing.T, ws string) agent.Session {
 		})
 }
 
+// nativePickerConfig is the TUI over nativePickerSession, its own seams
+// (Config.NativeDir, Config.Getenv) on connectFixture's directory and
+// environment with the keys given stored: what /connect and the connect row
+// read, never the shipped catalog or the developer's environment (plan 031
+// §3.13).
+func nativePickerConfig(t *testing.T, stored map[string]string) Config {
+	t.Helper()
+	ws := frameWorkspace(t)
+	dir, getenv := connectFixture(t, stored)
+	return Config{Session: nativePickerSession(t, ws), Theme: "tokyo-night", Workspace: ws, Yolo: true, NativeDir: dir, Getenv: getenv}
+}
+
 // TestFrameGoldenNativeModelDialog is the dialog as it opens: Alpha One, the
 // model the session runs on, first and pre-selected; Beta Slow and Alpha Two,
 // the remembered ones, newest first; Beta Fast after them; and nothing of
-// gamma's, remembered or not. The list's rows are the models' names alone.
+// gamma's, remembered or not. The list's rows are the models' names alone, and
+// it ends with "Connect a provider…": gamma has no key in the TUI's table
+// either (plan 031 §3.6).
 func TestFrameGoldenNativeModelDialog(t *testing.T) {
 	isolateSkillsHome(t)
 	got, _, err := runFrameModes(t, func() Config {
-		ws := frameWorkspace(t)
-		return Config{Session: nativePickerSession(t, ws), Theme: "tokyo-night", Workspace: ws, Yolo: true}
+		return nativePickerConfig(t, nil)
 	}, 100, 30, "<wait:idle>/model<enter><wait:text:Beta Fast>", FrameOpts{Timeout: 20 * time.Second})
 	if err != nil {
 		t.Fatalf("run frame script: %v", err)
 	}
 	assertFrameGolden(t, "native-model-dialog-100x30", 100, 30, got,
-		[]string{"> Alpha One", "Beta Slow", "Alpha Two", "Beta Fast"},
+		[]string{"> Alpha One", "Beta Slow", "Alpha Two", "Beta Fast", connectRowText},
 		[]string{"Gamma", "current", "recent"})
 	rest := got
-	for _, row := range []string{"Alpha One", "Beta Slow", "Alpha Two", "Beta Fast"} {
+	for _, row := range []string{"Alpha One", "Beta Slow", "Alpha Two", "Beta Fast", connectRowText} {
 		i := strings.Index(rest, row)
 		if i < 0 {
 			t.Fatalf("the rows are not in the memory's order; %q is not after the ones before it:\n%s", row, got)
 		}
 		rest = rest[i+len(row):]
 	}
+}
+
+// TestFrameGoldenNativeModelDialogAllConnected: once gamma's key is stored in
+// the TUI's directory — as /connect or craze auth login would store it — no
+// provider is left without one, and the list has no connect row. The running
+// session still does not offer gamma's model: it keeps the table it started
+// with (P8), which is what the notice after /connect says.
+//
+// The answer that decides the row is read in a gated call (connectCall), so no
+// frame before it lands satisfies a wait: the frame here is the one after it.
+func TestFrameGoldenNativeModelDialogAllConnected(t *testing.T) {
+	isolateSkillsHome(t)
+	got, _, err := runFrameModes(t, func() Config {
+		return nativePickerConfig(t, map[string]string{"gamma": "sk-picker-gamma-dummy"})
+	}, 100, 30, "<wait:idle>/model<enter><wait:text:Beta Fast>", FrameOpts{Timeout: 20 * time.Second})
+	if err != nil {
+		t.Fatalf("run frame script: %v", err)
+	}
+	assertFrameGolden(t, "native-model-dialog-connected-100x30", 100, 30, got,
+		[]string{"> Alpha One", "Beta Slow", "Alpha Two", "Beta Fast"},
+		[]string{"Connect a provider", "Gamma", "sk-picker-gamma-dummy"})
 }
 
 // TestNativeHiddenModelIsUnknownToTheTUI (§3.6): the TUI's own list is the

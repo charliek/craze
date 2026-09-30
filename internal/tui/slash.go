@@ -128,9 +128,10 @@ func (m Model) slashCatalog() []slashItem {
 	modes, todos := m.showModes(), m.showTodos()
 	builtins := builtinSlash()
 	// An upper bound on the whole catalog: every loop below can only drop
-	// rows. It sizes the row slice and the dedupe map, which holds one key per
-	// row that survives and so grows to the same shape.
-	size := len(builtins) + len(m.snap.Commands) + len(m.snap.Plugins) + len(m.skills)
+	// rows, bar the two builtins a session may add (/sessions, /connect). It
+	// sizes the row slice and the dedupe map, which holds one key per row
+	// that survives and so grows to the same shape.
+	size := len(builtins) + 2 + len(m.snap.Commands) + len(m.snap.Plugins) + len(m.skills)
 	items := make([]slashItem, 0, size)
 	for _, it := range builtins {
 		switch it.Name {
@@ -148,6 +149,11 @@ func (m Model) slashCatalog() []slashItem {
 			}
 		}
 		items = append(items, it)
+		if it.Name == "model" && m.connectOffered() {
+			// Right after /model, on native alone (plan 031 §3.9): an ACP
+			// session's catalog, menu and /help are what they always were.
+			items = append(items, connectBuiltin)
+		}
 	}
 	seen := make(map[string]struct{}, size)
 	for _, it := range items {
@@ -432,6 +438,10 @@ func (m Model) runBuiltin(name, args string) (tea.Model, tea.Cmd) {
 	case "sessions":
 		m.input.SetValue("")
 		return m.openSessions()
+	case "connect":
+		// Reached on a native session alone (handleEnter; plan 031 §3.9).
+		m.input.SetValue("")
+		return m.openConnect()
 	case "exit":
 		m.input.SetValue("")
 		return m.requestQuit()
@@ -516,7 +526,7 @@ func (m Model) runBuiltin(name, args string) (tea.Model, tea.Cmd) {
 	case "model":
 		if args == "" {
 			m.input.SetValue("")
-			return m.openModelDialog(), nil
+			return m.showModelDialog()
 		}
 		id, effortArg, err := resolveModelArgs(m.snap, args, m.effortShorthand())
 		if err != nil {
