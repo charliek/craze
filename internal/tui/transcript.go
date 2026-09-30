@@ -481,35 +481,51 @@ func wrapProse(s string, width int) string {
 		return s
 	}
 	w := proseWidth(width)
-	s, held := holdFlagHyphens(s)
+	s, stand, held := holdFlagHyphens(s)
 	out := ansi.Hardwrap(ansi.Wordwrap(s, w, ""), w, true)
 	if held {
-		out = strings.ReplaceAll(out, string(flagHyphen), "-")
+		out = strings.ReplaceAll(out, string(stand), "-")
 	}
 	return out
 }
 
-// flagHyphen stands in, while prose is wrapped, for a hyphen that begins a
-// word (holdFlagHyphens). ansi.Wordwrap takes every hyphen as a place to
-// break, and at the end of a full row it writes the space before one and the
-// hyphen itself past the width, so the hard wrap after it leaves the hyphen
-// alone on a row of its own and the word's rest on the next: `run craze` /
-// ` -` / `c.` at 110 columns (plan 031 C7r, verification V3). A private-use
-// rune is one cell wide, as the hyphen is, and is word text to the wrap; it
-// is put back once the text is wrapped.
-const flagHyphen = ''
+// flagHyphen is the private-use rune that stands in, while prose is wrapped,
+// for a hyphen that begins a word (holdFlagHyphens), unless the text holds it
+// already, when the next one it does not hold is used. ansi.Wordwrap takes
+// every hyphen as a place to break, and at the end of a full row it writes the
+// space before one and the hyphen itself past the width, so the hard wrap
+// after it leaves the hyphen alone on a row of its own and the word's rest on
+// the next: `run craze` / ` -` / `c.` at 110 columns (plan 031 C7r,
+// verification V3). A private-use rune is one cell wide, as the hyphen is, and
+// is word text to the wrap; it is put back once the text is wrapped.
+const flagHyphen = '\ue000'
+
+// holdRune is a private-use rune s does not contain, or false when it holds
+// them all.
+func holdRune(s string) (rune, bool) {
+	for r := flagHyphen; r <= '\uf8ff'; r++ {
+		if !strings.ContainsRune(s, r) {
+			return r, true
+		}
+	}
+	return 0, false
+}
 
 // holdFlagHyphens is s with each hyphen that begins a word — the dash of a
-// flag, `-c`, `--model`, or of a negative number — swapped for flagHyphen, and
-// whether any was. A word begins at the text's start or after a space or a
-// line break; an escape sequence between is no text, so a styled `-c` begins
-// one too. A hyphen, or a run of them, begins a word only when text follows
-// it: a lone dash between spaces stays a place to break. Nothing is swapped in
-// a text that already holds flagHyphen, which could not be told apart from it
-// afterwards.
-func holdFlagHyphens(s string) (string, bool) {
-	if !strings.Contains(s, "-") || strings.ContainsRune(s, flagHyphen) {
-		return s, false
+// flag, `-c`, `--model`, or of a negative number — swapped for a stand-in
+// rune (flagHyphen, or another private-use rune when s holds that one, so a
+// literal one in the text is never mistaken for a swap), that rune, and
+// whether any was swapped. A word begins at the text's start or after a space
+// or a line break; an escape sequence between is no text, so a styled `-c`
+// begins one too. A hyphen, or a run of them, begins a word only when text
+// follows it: a lone dash between spaces stays a place to break.
+func holdFlagHyphens(s string) (string, rune, bool) {
+	if !strings.Contains(s, "-") {
+		return s, 0, false
+	}
+	stand, ok := holdRune(s)
+	if !ok {
+		return s, 0, false
 	}
 	// The text's graphemes and escape sequences, in order.
 	var parts []string
@@ -517,7 +533,7 @@ func holdFlagHyphens(s string) (string, bool) {
 	for rest := s; rest != ""; {
 		seq, _, n, next := ansi.DecodeSequence(rest, state, nil)
 		if n <= 0 {
-			return s, false
+			return s, 0, false
 		}
 		parts = append(parts, seq)
 		rest, state = rest[n:], next
@@ -551,7 +567,7 @@ func holdFlagHyphens(s string) (string, bool) {
 		hold := j < len(parts) && !space(parts[j])
 		for _, q := range parts[i:j] {
 			if hold && q == "-" {
-				b.WriteRune(flagHyphen)
+				b.WriteRune(stand)
 				held = true
 				continue
 			}
@@ -560,9 +576,9 @@ func holdFlagHyphens(s string) (string, bool) {
 		wordStart, i = false, j
 	}
 	if !held {
-		return s, false
+		return s, 0, false
 	}
-	return b.String(), true
+	return b.String(), stand, true
 }
 
 func proseWidth(width int) int {

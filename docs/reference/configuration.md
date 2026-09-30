@@ -783,9 +783,11 @@ effort last used on it (`""` for a model with no effort control) and when it
 was picked (`at`, in UTC, for people reading the file). The file is `0600`.
 Deleting it forgets everything.
 
-**Who writes it.** Only a switch made inside a running session — `/model`, the
-model dialog, or an attached client's switch — once the switch has taken,
-recording the model and the effort the session is then on. `--model`, `craze
+**Who writes it.** Only a change made inside a running session — a model
+switch (`/model`, the model dialog, or an attached client's switch) or an
+effort change on the current model (which makes that model the newest, even if
+`/model` was never used) — once it has taken, recording the model and the
+effort the session is then on. `--model`, `craze
 prompt`, a resume and a sub-agent's model never write it. A session reads it
 once, when it starts: a switch changes where the next session starts, and the
 order the next session's `/model` lists models in — the remembered ones right
@@ -799,7 +801,8 @@ the file cannot be read or written, or a newer craze wrote it — the session
 says so in one note (`not saving the model choice: …`) and the switch itself
 stands.
 
-**Reading never stops a session.** A missing file, one craze cannot read, one
+**Reading is bounded.** The read never waits on a FIFO and stops after 64 KiB,
+though a stalled filesystem can still delay an ordinary read. A missing file, one craze cannot read, one
 that is not a regular file (a FIFO, say) or is larger than 64 KiB, and one
 that is not a `recent.json` (not JSON, or a version craze does not know) are
 no memory at all. The next switch replaces a file that is not a
@@ -854,7 +857,9 @@ no-op.
 ### Retired models
 
 When a release retires a model (or renames one, retiring the old alias), the
-catalog records the alias and every wire model id it pointed at. A retired
+catalog records the alias and every *dead* wire model id it pointed at; an
+alias whose wire id still answers is retired by alias alone, with no wire ids
+listed, so an entry of yours pointing at that id is not dropped. A retired
 alias disappears from an untouched directory with no warning: a `source =
 "gx"` entry for it is ignored, a `default_model` naming it falls back to the
 catalog's, and a `[subagents]` model or tier naming it falls back to its

@@ -148,10 +148,12 @@ func readRecent(path string) ([]RecentEntry, error) {
 	return out, nil
 }
 
-// readRecentBytes is recent.json's bytes, or nil for a missing file. It never
-// blocks and never reads without bound: the file is opened O_NONBLOCK (so a
+// readRecentBytes is recent.json's bytes, or nil for a missing file. The read
+// is bounded and does not wait on a FIFO: the file is opened O_NONBLOCK (so a
 // FIFO opens at once, and a symlink to one is no different) and refused unless
-// the opened file is a regular one, and at most RecentMaxBytes are read. A file
+// the opened file is a regular one, and at most RecentMaxBytes are read. That
+// bounds the bytes, not the time: a stalled filesystem can still delay a
+// regular read. A file
 // that is neither regular nor within the cap is an error, which Remember
 // treats like an unreadable file (left as it is) and ReadRecent as no memory.
 func readRecentBytes(path string) ([]byte, error) {

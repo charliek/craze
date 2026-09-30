@@ -80,7 +80,14 @@ There is no refresh between releases.
   `[[retired]]`, listing every wire id that alias has pointed at (an alias
   retired because its wire id still answers carries no `wire_models`, so a
   user's own entry for that id is not dropped).
-- `TestShippedCatalog` (part of `make test`, so of CI) is the check: it
+- **Add** a model: add its alias to
+  `internal/harness/modeltable/testdata/shipped-aliases.txt`, the history of
+  every alias craze has shipped.
+- `TestShippedCatalogHistory` (part of `make test`, so of CI) enforces the
+  retirement procedure: every alias in that history must still be a model or
+  a `[[retired]]` alias, and every model must be in the history, so a model
+  removed without retiring it fails.
+- `TestShippedCatalog` (part of `make test`, so of CI) checks the file: it
   rejects a malformed catalog, a `default_model` that is not a model, two
   aliases sharing an identity, a retired alias that is still a model, and a
   shipped model whose identity is retired.

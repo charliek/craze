@@ -1081,13 +1081,32 @@ func TestWrapProseKeepsAFlagWhole(t *testing.T) {
 	}
 	for _, s := range []string{
 		"a well-known text - with a lone dash, mid-word hy-phens and a trailing one -",
-		"a text that already holds the stand-in \ue000 -c keeps it: -c is left alone",
 	} {
 		for width := 8; width <= 90; width++ {
 			if got, want := wrapProse(s, width), plainWrap(s, width); got != want {
 				t.Fatalf("width %d: %q wraps as %q, want %q", width, s, got, want)
 			}
 		}
+	}
+}
+
+// A text that already holds the stand-in rune is still held: another
+// private-use rune is chosen, the literal one is left in place, and a flag at
+// a wrap boundary stays whole (plan 031 r5).
+func TestWrapProseKeepsAFlagWholeBesideTheStandIn(t *testing.T) {
+	notice := "Connected \ue000eta. New sessions offer its models; to use them in this conversation, /exit and run craze -c."
+	got := wrapProse(notice, 110)
+	rows := strings.Split(got, "\n")
+	if last := rows[len(rows)-1]; last != "-c." {
+		t.Fatalf("the flag was not kept whole after a literal stand-in: %q", got)
+	}
+	if !strings.Contains(got, "\ue000eta.") {
+		t.Fatalf("the literal private-use rune was lost: %q", got)
+	}
+	// Both stand-ins in use: the third is chosen.
+	both := "\ue000\ue001 run craze -c."
+	if s, r, ok := holdFlagHyphens(both); !ok || r != '\ue002' || strings.Count(s, "\ue002") != 1 {
+		t.Fatalf("holdFlagHyphens(%q) = %q, %U, %v", both, s, r, ok)
 	}
 }
 

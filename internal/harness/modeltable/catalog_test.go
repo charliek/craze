@@ -3,6 +3,7 @@ package modeltable
 import (
 	"errors"
 	"maps"
+	"os"
 	"reflect"
 	"slices"
 	"strings"
@@ -63,6 +64,82 @@ func TestShippedCatalog(t *testing.T) {
 	}
 	if err := tbl.Validate(); err != nil {
 		t.Fatalf("the catalog alone is not a valid Table: %v", err)
+	}
+}
+
+// shippedAliasHistory reads testdata/shipped-aliases.txt: one alias a line,
+// blank lines and # comments skipped.
+func shippedAliasHistory(t *testing.T) []string {
+	t.Helper()
+	b, err := os.ReadFile("testdata/shipped-aliases.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out []string
+	for _, ln := range strings.Split(string(b), "\n") {
+		if ln = strings.TrimSpace(ln); ln != "" && !strings.HasPrefix(ln, "#") {
+			out = append(out, ln)
+		}
+	}
+	return out
+}
+
+// checkAliasHistory is the retirement procedure as a rule (plan 031 §3.1;
+// RELEASING.md): every alias craze has shipped is still a model or a retired
+// alias, and every model is in the history. It returns each break.
+func checkAliasHistory(c *Catalog, history []string) []string {
+	var bad []string
+	retired := map[string]bool{}
+	for _, r := range c.Retired {
+		retired[r.Alias] = true
+	}
+	inHistory := map[string]bool{}
+	for _, a := range history {
+		inHistory[a] = true
+		if _, ok := c.Models[a]; !ok && !retired[a] {
+			bad = append(bad, a+" was shipped and is neither a model nor a [[retired]] alias")
+		}
+	}
+	for a := range c.Models {
+		if !inHistory[a] {
+			bad = append(bad, a+" is a model missing from testdata/shipped-aliases.txt")
+		}
+	}
+	slices.Sort(bad)
+	return bad
+}
+
+// TestShippedCatalogHistory makes retirement a test failure, not a memory
+// (plan 031 review r5): removing a model from catalog.toml without a
+// [[retired]] row, or adding one without recording it in the history, breaks
+// `make test`.
+func TestShippedCatalogHistory(t *testing.T) {
+	c, err := ShippedCatalog()
+	if err != nil {
+		t.Fatal(err)
+	}
+	history := shippedAliasHistory(t)
+	for _, b := range checkAliasHistory(c, history) {
+		t.Error(b)
+	}
+	// Negative controls: a model deleted from a copy without retiring it, and
+	// a model added without a history line, are each a break.
+	dropped := *c
+	dropped.Models = maps.Clone(c.Models)
+	delete(dropped.Models, "glm-5.3")
+	if bad := checkAliasHistory(&dropped, history); len(bad) != 1 || !strings.HasPrefix(bad[0], "glm-5.3 was shipped") {
+		t.Errorf("a model removed without retiring it reports %q", bad)
+	}
+	added := *c
+	added.Models = maps.Clone(c.Models)
+	added.Models["brand-new"] = c.Models["glm-5.3"]
+	if bad := checkAliasHistory(&added, history); len(bad) != 1 || !strings.HasPrefix(bad[0], "brand-new is a model missing") {
+		t.Errorf("a model added without a history line reports %q", bad)
+	}
+	// Retiring it instead is fine.
+	dropped.Retired = append(slices.Clone(c.Retired), Retired{Alias: "glm-5.3", Provider: "zai-coding-plan"})
+	if bad := checkAliasHistory(&dropped, history); len(bad) != 0 {
+		t.Errorf("a retired model reports %q", bad)
 	}
 }
 
