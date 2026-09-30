@@ -333,10 +333,14 @@ type providersDoc struct {
 }
 
 type providerEntry struct {
-	Name    string   `toml:"name,omitempty"`
-	Driver  string   `toml:"driver"`
-	BaseURL string   `toml:"base_url,omitempty"`
-	EnvKeys []string `toml:"env_keys,omitempty"`
+	Name    string `toml:"name,omitempty"`
+	Driver  string `toml:"driver"`
+	BaseURL string `toml:"base_url,omitempty"`
+	// EnvKeys and Efforts carry no omitempty: a nil list is left out by the
+	// encoder, a non-nil empty one is written as `[]`, and encodeProviders and
+	// encodeModels make the second from an empty list over a shipped non-empty
+	// one, so the explicit empty override survives a reload (plan 031 §3.2).
+	EnvKeys []string `toml:"env_keys"`
 	APIKey  string   `toml:"api_key,omitempty"`
 	Source  string   `toml:"source,omitempty"`
 }
@@ -380,7 +384,7 @@ type modelEntry struct {
 	Name            string   `toml:"name,omitempty"`
 	ContextWindow   int      `toml:"context_window,omitzero"`
 	MaxOutputTokens int      `toml:"max_output_tokens,omitzero"`
-	Efforts         []string `toml:"efforts,omitempty"`
+	Efforts         []string `toml:"efforts"`
 	DefaultEffort   string   `toml:"default_effort,omitempty"`
 	Vision          bool     `toml:"vision,omitempty"`
 	ToolProfile     string   `toml:"tool_profile,omitempty"`
@@ -527,17 +531,37 @@ func Save(dir string, t *Table) error {
 
 func (t *Table) encodeProviders() ([]byte, error) {
 	entries := make(map[string]providerEntry, len(t.Providers))
+	cat := t.saveCatalog()
 	for id, p := range t.Providers {
+		envKeys := p.EnvKeys
+		if len(envKeys) == 0 && cat != nil && len(cat.Providers[id].EnvKeys) > 0 {
+			envKeys = []string{} // an explicit `env_keys = []` over the shipped names
+		}
 		entries[id] = providerEntry{
 			Name:    p.Name,
 			Driver:  p.Driver,
 			BaseURL: p.BaseURL,
-			EnvKeys: p.EnvKeys,
+			EnvKeys: envKeys,
 			APIKey:  p.APIKey.Reveal(), // the one place a key is written: its own file
 			Source:  p.Source,
 		}
 	}
 	return encodeFile(providersHeader, &providersDoc{Version: Version}, "providers", entries)
+}
+
+// saveCatalog is the shipped catalog when the table saved merges over it, nil
+// for a `catalog = false` table (whose files are the whole table, so an empty
+// list needs no marking). A list the table has empty where the catalog's is
+// not is an explicit override, and Save must write it as `[]`.
+func (t *Table) saveCatalog() *Catalog {
+	if t.NoCatalog {
+		return nil
+	}
+	cat, err := shippedCatalog()
+	if err != nil {
+		return nil
+	}
+	return cat
 }
 
 // encodeModels does not use encodeFile: an entry's Cost, when set, is written
@@ -547,10 +571,15 @@ func (t *Table) encodeProviders() ([]byte, error) {
 // a child of the alias's table).
 func (t *Table) encodeModels() ([]byte, error) {
 	entries := make(map[string]modelEntry, len(t.Models))
+	cat := t.saveCatalog()
 	for alias, m := range t.Models {
 		// A conversion, so a field added to Model and not to modelEntry (or
 		// the reverse) is a compile error rather than a field Save drops.
-		entries[alias] = modelEntry(m)
+		e := modelEntry(m)
+		if len(e.Efforts) == 0 && cat != nil && len(cat.Models[alias].Efforts) > 0 {
+			e.Efforts = []string{} // an explicit `efforts = []` over the shipped list
+		}
+		entries[alias] = e
 	}
 	top := &modelsDoc{Version: Version, DefaultModel: t.DefaultModel, Subagents: subagentsToDoc(t.Subagents),
 		Compaction: compactionToDoc(t.Compaction)}

@@ -1209,3 +1209,49 @@ func TestDefaultCeilingNeverReachesTheFile(t *testing.T) {
 		t.Fatalf("reloaded max_output_tokens = %d, want 0", got)
 	}
 }
+
+// TestSaveKeepsExplicitEmptyOverridesOnACatalogTable pins plan 031 §3.2's
+// "Save writes exactly the Table": an explicit `env_keys = []` and
+// `efforts = []` over the shipped catalog load as nil lists, and a save that
+// left them out would let the reload restore the shipped names and efforts,
+// so an exported FIREWORKS_API_KEY would fund a provider the file excluded it
+// from. The round trips elsewhere use NoCatalog, which cannot see this.
+func TestSaveKeepsExplicitEmptyOverridesOnACatalogTable(t *testing.T) {
+	cat, err := ShippedCatalog()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cat.Providers["fireworks"].EnvKeys) == 0 || len(cat.Models["fireworks/kimi-k3"].Efforts) == 0 {
+		t.Skip("the shipped catalog no longer has the entries this test overrides")
+	}
+	dir := writeFiles(t,
+		"version = 1\n\n[providers.fireworks]\nenv_keys = []\n",
+		"version = 1\n\n[models.\"fireworks/kimi-k3\"]\nefforts = []\n")
+	first, err := Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(first.Providers["fireworks"].EnvKeys) != 0 || len(first.Models["fireworks/kimi-k3"].Efforts) != 0 {
+		t.Fatalf("precondition: explicit empties did not load empty: %+v %+v",
+			first.Providers["fireworks"], first.Models["fireworks/kimi-k3"])
+	}
+	out := filepath.Join(t.TempDir(), "native")
+	if err := Save(out, first); err != nil {
+		t.Fatal(err)
+	}
+	second, err := Load(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := second.Providers["fireworks"].EnvKeys; len(got) != 0 {
+		t.Errorf("fireworks env_keys after a round trip = %v, want none", got)
+	}
+	m := second.Models["fireworks/kimi-k3"]
+	if len(m.Efforts) != 0 || m.DefaultEffort != "" {
+		t.Errorf("kimi-k3 efforts/default after a round trip = %v/%q, want none", m.Efforts, m.DefaultEffort)
+	}
+	// An untouched shipped entry still loads as it shipped.
+	if got, want := second.Providers["openrouter"].EnvKeys, cat.Providers["openrouter"].EnvKeys; !reflect.DeepEqual(got, want) {
+		t.Errorf("openrouter env_keys = %v, want %v", got, want)
+	}
+}
