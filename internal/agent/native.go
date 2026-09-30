@@ -259,6 +259,21 @@ type nativeSession struct {
 	// primary send and a closed done are a random choice, so that window
 	// cannot be pinned from inside the publish.
 	loadEndSeam func()
+
+	// keys is the session's look at the providers.toml of the Home it opened
+	// the harness with, made at every turn's start so the session learns the
+	// keys stored there since, for redaction only (native_keys.go, plan 031
+	// §3.8). Its lock is its own: taken with no lock of the adapter's held and
+	// never under one, and held across nothing but the file's reading, the
+	// harness's LearnKeys and Redact — whose locks are the harness's leaves —
+	// and a note.
+	keys storedKeys
+	// keysSeam runs inside a look, between the reading of providers.toml and
+	// the recording of the stamp taken before it, with keys.mu held. **A test
+	// seam: nil in production**, set only by a test in this package before
+	// the first turn. It exists so a test can write the file in exactly the
+	// window that decides which stamp a look must record.
+	keysSeam func()
 }
 
 // steerText is one interjection in both of its spellings: sent is what went
@@ -966,6 +981,12 @@ func (s *nativeSession) open() (*harness.Session, *modeltable.Table, nativeLoad,
 	if hopts.Home == "" {
 		return nil, nil, none, errors.New("native: there is no craze directory to read the model table from (set HOME or CRAZE_HOME)")
 	}
+	// The directory whose providers.toml every turn looks at for keys stored
+	// since (native_keys.go, plan 031 §3.8): the Home the harness opens with,
+	// after the seam, and never paths.NativeDir() read again later — an
+	// environment or a seam could answer differently then, and a session
+	// would learn another directory's keys, or miss its own (panel astra 12).
+	s.keys.watch(hopts.Home)
 	if hopts.Table == nil {
 		// The shipped catalog with the user's files merged over it (plan 031
 		// §3.2): both files are optional, so an empty directory is the
@@ -1601,6 +1622,13 @@ func (s *nativeSession) prompt(ctx context.Context, text string, rel chan struct
 	if behindAWake {
 		_ = s.log.Flush(context.Background(), s.done)
 	}
+	// The keys stored in providers.toml since this session started are learned
+	// before anything of this turn is redacted — the command bodies a prompt
+	// expands and a /compact's focus, both through hs.Redact below — or sent
+	// (native_keys.go, plan 031 §3.8). A key found inside the frozen prompt
+	// puts the harness in its refusal state, and the Run or Compact below is
+	// refused with nothing sent.
+	s.learnStoredKeys(hs)
 
 	var (
 		res harness.Result
@@ -2699,6 +2727,11 @@ func phraseTurnError(err error) error {
 	}
 	if errors.Is(err, harness.ErrClosed) {
 		return phrase("agent: session closed")
+	}
+	if errors.Is(err, harness.ErrStoredKeyFrozen) {
+		// The refusal state (plan 031 §3.8, r2-2): fixed text, no key, no
+		// surface.
+		return phrase("native: a newly stored API key appears in this session's frozen prompt; start a new session")
 	}
 	var pe *harness.ProviderError
 	if !errors.As(err, &pe) {

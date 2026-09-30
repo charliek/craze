@@ -686,6 +686,34 @@ skipped as though unset, with one line at session start naming the variable
 Every key craze knows, from every provider, is redacted from tool output. A
 provider with no usable key leaves its models unusable, not the others.
 
+### Keys stored while a session runs
+
+A running native session keeps the model table it started with. A provider
+you give a key to while it runs — an `api_key` written into `providers.toml`
+by hand, or by another craze — is offered by the next session, or by this
+conversation after `/exit` and `craze -c`, never by the running one.
+
+The running session does watch that file, only so it can redact what it
+holds: at the start of every turn (a prompt, a `/compact`, or the delivery of
+a background sub-agent's result) it checks the `providers.toml` of the craze
+directory it started with, and when the file has changed it learns each
+inline key it did not know and redacts it from then on, as it redacts every
+key it knows — tool output and spill files included. A value that cannot be a
+key (shorter than 8 bytes, or overlapping the redaction marker) is ignored
+with one line naming the provider, never the value; a file that no longer
+parses is one line too, and nothing in it is learned until it is fixed.
+
+If a newly stored key turns out to be inside what the session sends with every
+request — its system prompt (which names the working directory), its tool
+definitions, or its plan file's path — none of that can be taken back, so the
+session refuses every later turn with `a newly stored API key appears in this
+session's frozen prompt; start a new session`.
+
+The redaction starts at the next turn, so there is a window: a key stored
+during a turn is learned when the next one starts, and a shell command or a
+sub-agent already running keeps the redaction it started with. A sub-agent
+started after the key was learned redacts it.
+
 ### Isolated setups: `catalog = false`
 
 A `models.toml` with `catalog = false` at the top turns the catalog off for

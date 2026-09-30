@@ -471,14 +471,15 @@ func (s *Session) rebuildHistory(t *turn) []fantasy.Message {
 	return history
 }
 
-// begin claims the session for one turn: it refuses when closed or busy,
-// fixes the model the turn runs on — and the redactor, taking up one a
-// switch resolved while the turn before it ran (toolset.adopt), so a turn
-// redacts everything it reports and persists with the same one — works out
-// which switches the transcript has not been told about, numbers the turn
-// (its tool calls' ids start with it), and registers the turn's cancel func
-// before the lock is released, so a Close from then on finds it (crush's
-// order). A Run's turn has begun from here, so a Replay is too late; a
+// begin claims the session for one turn: it refuses when closed or busy, or
+// in the refusal state a stored key inside the frozen prompt put it in
+// (ErrStoredKeyFrozen), fixes the model the turn runs on — and the redactor,
+// taking up one a switch resolved or LearnKeys prepared while the turn before
+// it ran (toolset.adopt), so a turn redacts everything it reports and persists
+// with the same one — works out which switches the transcript has not been
+// told about, numbers the turn (its tool calls' ids start with it), and
+// registers the turn's cancel func before the lock is released, so a Close
+// from then on finds it (crush's order). A Run's turn has begun from here, so a Replay is too late; a
 // wake's only once it has found results to take (run).
 func (s *Session) begin(ctx context.Context, wake bool) (model, []func(*store.Store) error, context.Context, int, error) {
 	s.mu.Lock()
@@ -488,6 +489,14 @@ func (s *Session) begin(ctx context.Context, wake bool) (model, []func(*store.St
 		return model{}, nil, nil, 0, ErrClosed
 	case s.running:
 		return model{}, nil, nil, 0, ErrInTurn
+	}
+	// No turn is running here, so this is the one point at which changing the
+	// session's redactor cannot cut across a step. It is also where a session
+	// that learned a stored key inside its frozen prompt refuses (plan 031
+	// §3.8, r2-2): before the turn is numbered or claimed, so a refused Run,
+	// Compact or Wake sends, writes and emits nothing.
+	if err := s.tools.adopt(); err != nil {
+		return model{}, nil, nil, 0, err
 	}
 	m := s.cur
 	// A switch and a switch back before this turn leave nothing to record;
@@ -501,10 +510,6 @@ func (s *Session) begin(ctx context.Context, wake bool) (model, []func(*store.St
 	if effort := m.effort; effort != s.logged.effort {
 		changes = append(changes, func(st *store.Store) error { return st.AppendEffortChange(effort) })
 	}
-
-	// No turn is running here, so this is the one point at which changing the
-	// session's redactor cannot cut across a step.
-	s.tools.adopt()
 
 	// A cancel cause, so Close can tell a tool the session is closing
 	// (tool.ErrClosing) rather than that the user stopped the turn.
