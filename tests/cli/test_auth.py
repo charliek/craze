@@ -10,7 +10,11 @@ no-echo prompt on a terminal is the Go pty test's
 
 Canary checks (A7): the key never appears in stdout or stderr, in any error,
 in the journal of a native session it funds, or in any file but
-providers.toml.
+providers.toml. A failing check never prints it either (review r2): it fails
+through no_canary -- which command, which stream, where, and the text with the
+key masked -- without a traceback, whose frames would show the arguments that
+hold it; and the parametrized cases name the key by the placeholder KEY, so no
+case's parameters hold it.
 """
 
 from __future__ import annotations
@@ -40,6 +44,31 @@ def fixture_server():
         server.close()
 
 
+# KEY stands for the key in a case's parameters (with_key puts it in).
+KEY = "<CANARY>"
+
+
+def with_key(args: list[str]) -> list[str]:
+    return [a.replace(KEY, CANARY) for a in args]
+
+
+def masked(text: str) -> str:
+    """text with the key replaced by KEY: what a failure may print."""
+    return text.replace(CANARY, KEY)
+
+
+def no_canary(what: str, where: str, text: str) -> None:
+    """Fail when text holds the key, saying which command (what) and which
+    stream or file (where) and where in it, the text shown masked -- and with
+    no traceback, whose frames would print the arguments holding the key."""
+    at = text.find(CANARY)
+    if at >= 0:
+        pytest.fail(
+            f"{masked(what)}: the key leaked into {where} at index {at}; with it masked it reads:\n{masked(text)}",
+            pytrace=False,
+        )
+
+
 def craze_home() -> Path:
     return Path(os.environ["CRAZE_HOME"])
 
@@ -62,8 +91,9 @@ def run_craze(
         timeout=timeout,
         check=False,
     )
-    assert CANARY not in proc.stdout, proc.stdout
-    assert CANARY not in proc.stderr, proc.stderr
+    what = " ".join(["craze", *args])
+    no_canary(what, "stdout", proc.stdout)
+    no_canary(what, "stderr", proc.stderr)
     return proc
 
 
@@ -91,7 +121,8 @@ def test_login_list_logout(craze_bin: Path) -> None:
     assert proc.stderr == ""
     assert providers_toml().stat().st_mode & 0o777 == 0o600
     assert (craze_home() / "native").stat().st_mode & 0o777 == 0o700
-    assert CANARY in providers_toml().read_text(encoding="utf-8")
+    if CANARY not in providers_toml().read_text(encoding="utf-8"):
+        pytest.fail("craze auth login fireworks: the key is not in providers.toml", pytrace=False)
     assert not (craze_home() / "native" / "models.toml").exists()
 
     proc = run_craze(craze_bin, "auth", "list")
@@ -109,7 +140,7 @@ def test_login_list_logout(craze_bin: Path) -> None:
     proc = run_craze(craze_bin, "auth", "logout", "fireworks", env=exported)
     assert proc.returncode == 0, proc.stderr
     assert proc.stdout == "Removed the stored Fireworks key.\nFireworks is still connected through FIREWORKS_API_KEY.\n"
-    assert CANARY not in providers_toml().read_text(encoding="utf-8")
+    no_canary("craze auth logout fireworks", str(providers_toml()), providers_toml().read_text(encoding="utf-8"))
     proc = run_craze(craze_bin, "auth", "logout", "fireworks")
     assert (proc.returncode, proc.stdout) == (0, "No stored Fireworks key.\n")
     proc = run_craze(craze_bin, "auth", "list")
@@ -119,21 +150,43 @@ def test_login_list_logout(craze_bin: Path) -> None:
 @pytest.mark.parametrize(
     ("args", "stdin", "code", "says"),
     [
-        (["login", "nosuch"], CANARY + "\n", 2, "no such provider; craze has fireworks, meta, openrouter, zai-coding-plan"),
-        (["login", CANARY], CANARY + "\n", 2, "no such provider"),
+        (["login", "nosuch"], KEY + "\n", 2, "no such provider; craze has fireworks, meta, openrouter, zai-coding-plan"),
+        (["login", KEY], KEY + "\n", 2, "no such provider"),
         (["login", "fireworks"], "", 1, "no key given; nothing was saved"),
         (["login", "fireworks"], "abc\n", 1, "was not saved: shorter than 8 bytes"),
-        (["login"], CANARY + "\n", 2, "name a provider"),
+        (["login"], KEY + "\n", 2, "name a provider"),
         (["logout"], "", 2, "name the provider whose stored key to remove"),
     ],
     ids=["unknown provider", "key as the provider", "empty stdin", "3-byte key", "no provider", "logout of nothing"],
 )
 def test_failures_save_nothing(craze_bin: Path, args: list[str], stdin: str, code: int, says: str) -> None:
-    proc = run_craze(craze_bin, "auth", *args, stdin=stdin)
+    proc = run_craze(craze_bin, "auth", *with_key(args), stdin=stdin.replace(KEY, CANARY))
     assert proc.returncode == code, proc.stdout + proc.stderr
     assert says in proc.stderr, proc.stderr
     assert proc.stdout == ""
     assert "abc" not in proc.stderr
+    assert not (craze_home() / "native").exists()
+
+
+@pytest.mark.parametrize(
+    ("args", "says"),
+    [
+        (["list", KEY], "craze auth list: takes no arguments"),
+        (["login", "fireworks", KEY], "craze auth login: takes one argument at most, the provider"),
+        (["logout", "fireworks", KEY], "craze auth logout: takes one argument, the provider"),
+        (["login", f"--{KEY}", "fireworks"], "craze auth login: unknown or malformed flag; see craze auth login --help"),
+        (["list", f"-{KEY}"], "craze auth list: unknown or malformed flag; see craze auth list --help"),
+        (["logout", f"--help={KEY}", "fireworks"], "craze auth logout: unknown or malformed flag; see craze auth logout --help"),
+    ],
+    ids=["list with a key", "login with a key too", "logout with a key too", "key as a flag", "key as short flags", "key as a flag value"],
+)
+def test_surplus_arguments_and_bad_flags_are_not_quoted(craze_bin: Path, args: list[str], says: str) -> None:
+    """X29, review r2: an argument too many, or a flag the command does not
+    take, is exit 2 with a line that says what the command takes -- never
+    what it was given, which cobra's own errors quote. Nothing is saved."""
+    proc = run_craze(craze_bin, "auth", *with_key(args), stdin=CANARY + "\n")
+    assert (proc.returncode, proc.stderr) == (2, says + "\n")
+    assert proc.stdout == ""
     assert not (craze_home() / "native").exists()
 
 
@@ -148,7 +201,7 @@ def test_symlinked_providers_toml_is_refused(craze_bin: Path, tmp_path: Path) ->
     assert proc.returncode == 1, proc.stdout
     assert "edit its target by hand" in proc.stderr, proc.stderr
     assert providers_toml().is_symlink()
-    assert CANARY not in target.read_text(encoding="utf-8")
+    no_canary("craze auth login meta", "the symlink's target", target.read_text(encoding="utf-8"))
     # Listing still works through the link.
     proc = run_craze(craze_bin, "auth", "list")
     assert list_rows(proc.stdout)[1] == ["Meta (mine)", "meta", "not connected"]
@@ -199,9 +252,16 @@ def test_stored_key_funds_a_native_session(craze_bin: Path, tmp_path: Path, fixt
     )
     assert proc.returncode == 0, proc.stderr
     assert "funded by the stored key" in proc.stdout
-    assert any(CANARY in r.authorization for r in fixture_server.requests), fixture_server.requests
+    if not any(CANARY in r.authorization for r in fixture_server.requests):
+        pytest.fail(f"none of the {len(fixture_server.requests)} requests carried the stored key", pytrace=False)
 
     journals = sorted((craze_home() / "journal").glob("*/*.jsonl"))
     assert journals, "the native session journaled nothing, so the check below would prove nothing"
-    assert files_holding(craze_home(), CANARY.encode()) == [providers_toml()]
-    assert files_holding(Path(os.environ["HOME"]), CANARY.encode()) == []
+    # Compared outside an assert: pytest's rewriting would print the key the
+    # call was given.
+    holding = files_holding(craze_home(), CANARY.encode())
+    if holding != [providers_toml()]:
+        pytest.fail(f"the key is in {holding}; want it in {providers_toml()} alone", pytrace=False)
+    holding = files_holding(Path(os.environ["HOME"]), CANARY.encode())
+    if holding:
+        pytest.fail(f"the key is in {holding} under HOME", pytrace=False)

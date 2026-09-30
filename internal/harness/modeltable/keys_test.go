@@ -178,22 +178,44 @@ func readDoc(t *testing.T, dir string) providersOverlay {
 }
 
 // noKeyIn fails when any of texts holds any of keys, or a fragment of one
-// long enough to be a real leak.
+// long enough to be a real leak (keyFrags). The failure never prints a key
+// (review r2): it says which text and where in it, and shows that text with
+// every key and fragment masked.
 func noKeyIn(t *testing.T, keys []string, texts ...string) {
 	t.Helper()
-	for _, k := range keys {
-		frags := []string{k}
-		if len(k) > 12 {
-			frags = append(frags, k[3:12])
-		}
-		for _, text := range texts {
-			for _, f := range frags {
-				if strings.Contains(text, f) {
-					t.Fatalf("a key leaked into %q", text)
+	for i, text := range texts {
+		for _, k := range keys {
+			for _, f := range keyFrags(k) {
+				if at := strings.Index(text, f); at >= 0 {
+					t.Fatalf("a key leaked into text %d of %d at byte %d; with every key masked it reads: %q",
+						i+1, len(texts), at, maskKeys(text, keys))
 				}
 			}
 		}
 	}
+}
+
+// keyFrags is k and, when it is long enough, the part of it that is a leak
+// on its own.
+func keyFrags(k string) []string {
+	if len(k) > 12 {
+		return []string{k, k[3:12]}
+	}
+	return []string{k}
+}
+
+// maskKeys is text with each of keys, and each fragment of one, replaced by
+// <CANARY>: what a failure may print.
+func maskKeys(text string, keys []string) string {
+	for _, k := range keys {
+		text = strings.ReplaceAll(text, k, "<CANARY>")
+	}
+	for _, k := range keys {
+		for _, f := range keyFrags(k)[1:] {
+			text = strings.ReplaceAll(text, f, "<CANARY>")
+		}
+	}
+	return text
 }
 
 // TestSetKeyRoundTripsEveryEntry: storing one provider's key rewrites the
@@ -324,10 +346,13 @@ func TestSetKeyNeedsAKnownProvider(t *testing.T) {
 	dir := writeFiles(t, keyFileBody, "")
 	before, _ := os.ReadFile(filepath.Join(dir, ProvidersFile))
 	err := setKeyWith(dir, "nosuch", "sk-nosuch-0005", cat)
+	if err == nil {
+		t.Fatal("SetKey of an unknown provider succeeded")
+	}
+	noKeyIn(t, []string{"sk-nosuch-0005"}, err.Error())
 	if !errors.Is(err, ErrUnknownProvider) || !strings.Contains(err.Error(), `"nosuch"`) {
 		t.Fatalf("SetKey of an unknown provider = %v; want ErrUnknownProvider naming it", err)
 	}
-	noKeyIn(t, []string{"sk-nosuch-0005"}, err.Error())
 	if after, _ := os.ReadFile(filepath.Join(dir, ProvidersFile)); string(after) != string(before) {
 		t.Fatal("a refused SetKey changed the file")
 	}
@@ -670,10 +695,13 @@ func TestProvidersStructuralErrorsNameNoValue(t *testing.T) {
 			serr := setKeyWith(dir, "acme", "sk-acme-new-0020", cat)
 			_, rerr := removeKeyWith(dir, "acme", cat)
 			for _, err := range []error{perr, serr, rerr} {
-				if err == nil || !strings.Contains(err.Error(), ProvidersFile) {
-					t.Fatalf("got %v; want the file refused, by name", err)
+				if err == nil {
+					t.Fatal("got no error; want the file refused, by name")
 				}
 				noKeyIn(t, []string{key, "sk-acme-new-0020"}, err.Error())
+				if !strings.Contains(err.Error(), ProvidersFile) {
+					t.Fatalf("got %v; want the file refused, by name", err)
+				}
 			}
 			if got, _ := os.ReadFile(filepath.Join(dir, ProvidersFile)); string(got) != body {
 				t.Fatal("a file that does not decode was rewritten")

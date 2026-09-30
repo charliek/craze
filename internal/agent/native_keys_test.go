@@ -175,6 +175,51 @@ func TestNativeLearnsAKeyStoredWhileRunning(t *testing.T) {
 	}
 }
 
+// TestNativeLearnsAKeySavedBySetKey (§7 A7, review r2): the store's own write
+// — what `craze auth login` does, in another process — while the session
+// runs: modeltable.SetKey saves a dummy key into the session's Home, and the
+// next turn's tool output, its events and its transcript lines have it
+// redacted. The control is the turn before the save, which read it raw. A
+// failure prints the key masked.
+func TestNativeLearnsAKeySavedBySetKey(t *testing.T) {
+	const saved = "sk-saved-by-set-key-0114"
+	mask := func(s string) string { return strings.ReplaceAll(s, saved, "<CANARY>") }
+	f := newNativeFixture(t)
+	ws := nativeWorkspaceWith(t, map[string]string{"key.txt": "saved " + saved + "\n"})
+	a := f.models["test/a"]
+	a.push(readStep("c1", "key.txt"), answer("one"), readStep("c2", "key.txt"), answer("two"))
+	var diag lockedDiag
+	s := f.started(Options{Workspace: ws, Diag: &diag})
+
+	if _, err := s.Prompt(context.Background(), "read key.txt"); err != nil {
+		t.Fatal(err)
+	}
+	if content := readOf(t, drained(s), "t1.1.1"); !strings.Contains(content, "saved "+saved) {
+		t.Fatalf("control: the first turn's read = %q; it did not show the value raw, so its redaction later proves nothing", mask(content))
+	}
+	turnOne := len(transcriptOf(t, f))
+
+	if err := modeltable.SetKey(f.dir, "nokey", saved); err != nil {
+		t.Fatalf("SetKey into the session's Home: %v", err)
+	}
+	if _, err := s.Prompt(context.Background(), "read it again"); err != nil {
+		t.Fatal(err)
+	}
+	second := drained(s)
+	if content := readOf(t, second, "t2.1.1"); strings.Contains(content, saved) || !strings.Contains(content, "saved "+redact.Marker) {
+		t.Fatalf("the next turn's read row = %q; want the saved key redacted", mask(content))
+	}
+	if found := nativeLeaks(second, saved); len(found) > 0 {
+		t.Fatalf("the saved key reached an event of the next turn at %v", found)
+	}
+	if lines := transcriptOf(t, f); strings.Contains(strings.Join(lines[turnOne:], "\n"), saved) {
+		t.Fatal("the saved key is in the next turn's transcript lines")
+	}
+	if d := diag.String(); strings.Contains(d, saved) || strings.Contains(d, modeltable.ProvidersFile) {
+		t.Fatalf("Diag = %q; want nothing said about the file SetKey wrote, and never the key", mask(d))
+	}
+}
+
 // TestNativeStoredKeyInTheFrozenPromptRefuses (r2-2, A7): a stored key that
 // is inside the session's frozen system prompt — which names the working
 // directory — refuses every later turn with one fixed sentence, a prompt and

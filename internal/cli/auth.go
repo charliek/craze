@@ -6,15 +6,12 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/signal"
 	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
-	"syscall"
 	"text/tabwriter"
 
-	"github.com/charmbracelet/x/term"
 	"github.com/spf13/cobra"
 
 	"github.com/charliek/craze/internal/harness/modeltable"
@@ -31,9 +28,11 @@ import (
 //
 // A key is read from stdin when stdin is not a terminal — its first line, at
 // most maxKeyLine bytes, trimmed — and otherwise from a prompt that does not
-// echo. No key, and no part of one, is ever printed, logged or put in an
-// error: an argument that names no provider is not quoted back either, since
-// a key typed where the provider goes is the likeliest mistake.
+// echo (echoOff). No key, and no part of one, is ever printed, logged or put
+// in an error: an argument that names no provider is not quoted back either,
+// since a key typed where the provider goes is the likeliest mistake — nor is
+// a surplus argument or a flag the commands do not take (authArgs,
+// authFlagError), which cobra's own errors would quote.
 //
 // Output: what the command did goes to stdout; prompts, the provider menu and
 // notes go to stderr.
@@ -75,8 +74,32 @@ checked with its provider when it is stored: a wrong one shows on first use.`,
 			return usagef("%s: unknown command; want login, logout or list", cmd.CommandPath())
 		},
 	}
+	// The group's subcommands inherit it (cobra's FlagErrorFunc).
+	cmd.SetFlagErrorFunc(authFlagError)
 	cmd.AddCommand(newAuthLoginCmd(), newAuthLogoutCmd(), newAuthListCmd())
 	return cmd
+}
+
+// authArgs is an auth subcommand's argument check: at most max arguments.
+// More is a usage error that says what the command takes and never what it
+// was given (plan 031 X29; review r2) — cobra's own checks quote the
+// arguments (NoArgs) and exit 1, and a key pasted onto the command line is
+// the likeliest surplus.
+func authArgs(max int, takes string) cobra.PositionalArgs {
+	return func(cmd *cobra.Command, args []string) error {
+		if len(args) > max {
+			return usagef("%s: %s", cmd.CommandPath(), takes)
+		}
+		return nil
+	}
+}
+
+// authFlagError is the auth commands' error for a flag that does not parse —
+// an unknown one, or a value its flag cannot take: a usage error that names
+// the command and where its flags are listed, never the flag, which pflag's
+// own message quotes and which may be a key (`--sk-…`, review r2).
+func authFlagError(cmd *cobra.Command, _ error) error {
+	return usagef("%s: unknown or malformed flag; see %s --help", cmd.CommandPath(), cmd.CommandPath())
 }
 
 func newAuthLoginCmd() *cobra.Command {
@@ -88,7 +111,7 @@ func newAuthLoginCmd() *cobra.Command {
 The provider is its id or its display name, in any case. With none given on a
 terminal, craze shows a numbered list to pick from. The key is read without
 echo on a terminal, and otherwise from the first line of stdin.`,
-		Args: cobra.MaximumNArgs(1),
+		Args: authArgs(1, "takes one argument at most, the provider"),
 		RunE: authRunE((*authRun).login),
 	}
 }
@@ -97,9 +120,9 @@ func newAuthLogoutCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "logout <provider>",
 		Short: "Remove a provider's stored API key",
-		// One argument, checked in RunE: cobra's own check would run before
-		// the root's PersistentPreRunE, and its error is not a usage exit.
-		Args: cobra.MaximumNArgs(1),
+		// None is refused in RunE, whose message lists the providers; the
+		// check here runs before the root's PersistentPreRunE.
+		Args: authArgs(1, "takes one argument, the provider"),
 		RunE: authRunE((*authRun).logout),
 	}
 }
@@ -108,7 +131,7 @@ func newAuthListCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "list",
 		Short: "List the providers and how each is connected",
-		Args:  cobra.NoArgs,
+		Args:  authArgs(0, "takes no arguments"),
 		RunE:  authRunE(func(a *authRun, _ string) error { return a.list() }),
 	}
 }
@@ -156,23 +179,25 @@ func (a *authRun) login(arg string) error {
 		return err
 	}
 	var p modeltable.ProviderInfo
+	named := strings.TrimSpace(arg) != ""
 	switch {
-	case strings.TrimSpace(arg) != "":
+	case named:
 		if p, err = a.match(infos, arg); err != nil {
 			return err
 		}
 	case a.tty == nil:
 		return usagef("%s: name a provider (%s); craze shows a list to pick from only on a terminal", a.name, keyProviderIDs(infos))
-	default:
-		if p, err = a.choose(infos); err != nil {
-			return err
-		}
 	}
-	name := sanitizeLine(p.Name)
-	key, err := a.readKey(name)
+	var key string
+	if a.tty == nil {
+		key, err = a.readKeyLine()
+	} else {
+		p, key, err = a.ask(infos, p, named)
+	}
 	if err != nil {
 		return err
 	}
+	name := sanitizeLine(p.Name)
 	if key == "" {
 		return exitf(1, "%s: no key given; nothing was saved", a.name)
 	}
@@ -323,10 +348,35 @@ func keyProviderIDs(infos []modeltable.ProviderInfo) string {
 	return sanitizeLine(strings.Join(ids, ", "))
 }
 
-// choose shows the numbered menu on the terminal and reads the choice: a
-// number, or an id or display name as login's argument takes. Connected
-// providers are marked. The answer is never quoted back — a key pasted at the
-// wrong prompt is the mistake this guards.
+// ask is login's conversation on the terminal: the menu when no provider was
+// named, then the key's prompt — the terminal's echo off from before the
+// first prompt is drawn until the key is read (echoOff), so nothing typed at
+// either shows as it is typed, however soon after its prompt it comes.
+func (a *authRun) ask(infos []modeltable.ProviderInfo, p modeltable.ProviderInfo, named bool) (modeltable.ProviderInfo, string, error) {
+	q, err := quiet(a.tty)
+	if err != nil {
+		return p, "", exitf(1, "%s: turning the terminal's echo off: %v; nothing was saved", a.name, err)
+	}
+	defer q.restore()
+	if !named {
+		if p, err = a.choose(infos); err != nil {
+			return p, "", err
+		}
+	}
+	key, err := a.promptKey(sanitizeLine(p.Name))
+	return p, key, err
+}
+
+// maxMenuLine is the longest menu answer choose keeps; the rest of a longer
+// line is read and dropped.
+const maxMenuLine = 256
+
+// choose shows the numbered menu on the terminal and reads the choice, the
+// echo off (ask): a number, or an id or display name as login's argument
+// takes. Connected providers are marked. Only a number on the list is written
+// back after the prompt, to look as if it was echoed; any other answer never
+// is — nor quoted in an error — since a key pasted at the wrong prompt is the
+// mistake this guards.
 func (a *authRun) choose(infos []modeltable.ProviderInfo) (modeltable.ProviderInfo, error) {
 	if len(infos) == 0 {
 		return modeltable.ProviderInfo{}, exitf(1, "%s: there is no provider to connect", a.name)
@@ -340,11 +390,30 @@ func (a *authRun) choose(infos []modeltable.ProviderInfo) (modeltable.ProviderIn
 		fmt.Fprintf(a.errw, "  %d. %s%s\n", i+1, sanitizeLine(p.Name), mark)
 	}
 	fmt.Fprintf(a.errw, "Provider [1-%d]: ", len(infos))
-	line, err := readLine(a.tty, 256)
+	line, long, err := readTTYLine(a.tty, maxMenuLine)
+	if n, ok := menuNumber(line, len(infos)); ok && !long {
+		fmt.Fprintf(a.errw, "%d\n", n)
+	} else {
+		fmt.Fprintln(a.errw) // the Enter that ended the answer was not echoed
+	}
 	if err != nil && !errors.Is(err, io.EOF) {
 		return modeltable.ProviderInfo{}, exitf(1, "%s: reading the choice: %v", a.name, err)
 	}
+	if long {
+		return modeltable.ProviderInfo{}, errNotOnTheList(a.name)
+	}
 	return a.pick(infos, line)
+}
+
+// menuNumber is the menu entry answer names by number, 1 to n.
+func menuNumber(answer string, n int) (int, bool) {
+	i, err := strconv.Atoi(strings.TrimSpace(answer))
+	return i, err == nil && i >= 1 && i <= n
+}
+
+// errNotOnTheList is login's refusal of a menu answer, which it never quotes.
+func errNotOnTheList(name string) error {
+	return usagef("%s: that is not a provider on the list; nothing was saved", name)
 }
 
 // pick is the provider a menu answer names; see choose.
@@ -353,36 +422,38 @@ func (a *authRun) pick(infos []modeltable.ProviderInfo, answer string) (modeltab
 	if answer == "" {
 		return modeltable.ProviderInfo{}, exitf(1, "%s: no provider chosen; nothing was saved", a.name)
 	}
-	if n, err := strconv.Atoi(answer); err == nil && n >= 1 && n <= len(infos) {
+	if n, ok := menuNumber(answer, len(infos)); ok {
 		return infos[n-1], nil
 	}
 	if p, n := matchProvider(infos, answer); n == 1 {
 		return p, nil
 	}
-	return modeltable.ProviderInfo{}, usagef("%s: that is not a provider on the list; nothing was saved", a.name)
+	return modeltable.ProviderInfo{}, errNotOnTheList(a.name)
 }
 
-// readKey is the key: from a prompt that does not echo when stdin is a
-// terminal, else stdin's first line. Either way it is at most maxKeyLine
-// bytes and trimmed; "" is no key.
-func (a *authRun) readKey(name string) (string, error) {
-	if a.tty == nil {
-		line, err := readKeyLine(a.in)
-		if err != nil {
-			return "", exitf(1, "%s: %v; nothing was saved", a.name, err)
-		}
-		return line, nil
+// readKeyLine is the key from stdin, not a terminal: its first line, at
+// most maxKeyLine bytes, trimmed; "" is no key.
+func (a *authRun) readKeyLine() (string, error) {
+	line, err := readKeyLine(a.in)
+	if err != nil {
+		return "", exitf(1, "%s: %v; nothing was saved", a.name, err)
 	}
+	return line, nil
+}
+
+// promptKey is the key from its prompt on the terminal, the echo already off
+// (ask): at most maxKeyLine bytes, trimmed; "" is no key.
+func (a *authRun) promptKey(name string) (string, error) {
 	fmt.Fprintf(a.errw, "%s API key: ", name)
-	b, err := readSecret(a.tty)
+	line, long, err := readTTYLine(a.tty, maxKeyLine)
 	fmt.Fprintln(a.errw) // the Enter that ended the key was not echoed
 	if err != nil && !errors.Is(err, io.EOF) {
 		return "", exitf(1, "%s: reading the key: %v; nothing was saved", a.name, err)
 	}
-	if len(b) > maxKeyLine {
+	if long {
 		return "", exitf(1, "%s: %v; nothing was saved", a.name, errKeyLineTooLong)
 	}
-	return strings.TrimSpace(string(b)), nil
+	return strings.TrimSpace(line), nil
 }
 
 var errKeyLineTooLong = fmt.Errorf("the key is longer than %d KiB", maxKeyLine>>10)
@@ -404,55 +475,39 @@ func readKeyLine(r io.Reader) (string, error) {
 	return strings.TrimSpace(line), nil
 }
 
-// readLine reads one line from f a byte at a time, so nothing after it is
-// taken from the terminal — the key prompt that follows reads the same
-// descriptor. The newline is not included; max bounds the line.
-func readLine(f *os.File, max int) (string, error) {
+// readTTYLine reads one line from the terminal f a byte at a time, so
+// nothing after it is taken — the key prompt that follows the menu reads the
+// same descriptor — and all of it, so no part of a long one is left for the
+// shell to read once craze exits. It keeps at most max bytes and says whether
+// there were more (long); the newline is not included, a carriage return is
+// dropped and a backspace takes back the byte before it, as x/term's
+// ReadPassword reads a line.
+func readTTYLine(f *os.File, max int) (line string, long bool, err error) {
 	var buf []byte
 	b := make([]byte, 1)
-	for len(buf) < max {
-		n, err := f.Read(b)
+	for {
+		n, rerr := f.Read(b)
 		if n == 1 {
-			if b[0] == '\n' {
-				return string(buf), nil
+			switch b[0] {
+			case '\n':
+				return string(buf), long, nil
+			case '\r':
+			case '\b':
+				if len(buf) > 0 && !long {
+					buf = buf[:len(buf)-1]
+				}
+			default:
+				if len(buf) < max {
+					buf = append(buf, b[0])
+				} else {
+					long = true
+				}
 			}
-			buf = append(buf, b[0])
 		}
-		if err != nil {
-			return string(buf), err
+		if rerr != nil {
+			return string(buf), long, rerr
 		}
 	}
-	return string(buf), nil
-}
-
-// readSecret reads one line from the terminal f without echo. A signal that
-// arrives meanwhile — Ctrl-C at the prompt — would otherwise end craze with
-// the terminal's echo still off, so the terminal is put back first and craze
-// then exits as the signal asked.
-func readSecret(f *os.File) ([]byte, error) {
-	fd := f.Fd()
-	state, err := term.GetState(fd)
-	if err != nil {
-		return nil, err
-	}
-	sigs := make(chan os.Signal, 1)
-	signal.Notify(sigs, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
-	defer signal.Stop(sigs)
-	done := make(chan struct{})
-	defer close(done)
-	go func() {
-		select {
-		case sig := <-sigs:
-			_ = term.Restore(fd, state)
-			code := 128 + int(syscall.SIGINT)
-			if s, ok := sig.(syscall.Signal); ok {
-				code = 128 + int(s)
-			}
-			os.Exit(code)
-		case <-done:
-		}
-	}()
-	return term.ReadPassword(fd)
 }
 
 // brokenKeyNotes are the notes for the stored keys, other than except's,

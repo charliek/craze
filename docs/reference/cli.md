@@ -725,15 +725,20 @@ A provider is named by its id or its display name, in any case: `fireworks`,
 `providers.toml` (a directory whose `models.toml` says
 [`catalog = false`](configuration.md#isolated-setups-catalog-false) has only
 its own). All three exit 1 when there is no craze directory (neither `HOME`
-nor `CRAZE_HOME` is set).
+nor `CRAZE_HOME` is set). An argument too many, or a flag a command does not
+take, is exit 2, and what was typed is not repeated back: it may be a key.
 
 ### craze auth login
 
 Stores a provider's key. On a terminal, craze asks for it with a prompt that
 does not echo (`Fireworks API key: `) — after a numbered list of the providers
-to pick from when none is named, the connected ones marked `(connected)`.
-When stdin is not a terminal, the key is stdin's first line (at most 8 KiB),
-so a script can pipe it in. Surrounding whitespace is trimmed.
+to pick from when none is named, the connected ones marked `(connected)`. The
+echo is off from before the first prompt is drawn until the key is read, so
+nothing typed at either prompt shows, however quickly it comes: at the list,
+only a number on it is written back, so a key pasted there by mistake is never
+displayed. Ctrl-C at either prompt leaves the terminal's echo on. When stdin
+is not a terminal, the key is stdin's first line (at most 8 KiB), so a script
+can pipe it in. Surrounding whitespace is trimmed.
 
 ```bash
 craze auth login fireworks        # prompts; the key is not shown as you type

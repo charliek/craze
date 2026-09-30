@@ -168,6 +168,10 @@ func init() {
 		_ = os.Unsetenv(cliChildNoIdle)
 		idleTicks = func() (<-chan time.Time, func() time.Time, func()) { return nil, time.Now, func() {} }
 	}
+	if _, ok := os.LookupEnv(authEchoRaceEnv); ok {
+		_ = os.Unsetenv(authEchoRaceEnv)
+		childEchoRace()
+	}
 	var argv []string
 	if err := json.Unmarshal([]byte(raw), &argv); err != nil {
 		fmt.Fprintln(os.Stderr, "craze test child:", err)
