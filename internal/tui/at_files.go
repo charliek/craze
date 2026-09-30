@@ -1110,36 +1110,41 @@ func (x *atFileIndex) match(query string, k int) (items []completeItem, more int
 	return items, total - len(items)
 }
 
-// atFileName is a path as its row draws it (plan 030 X200): one line of
+// atFileName is a path as its row draws it (plan 030 X200, X201): one line of
 // display text, as the popup asks of every source (sanitizeLine, as
-// at_dirs.go's rows are), with every Unicode format character (Cf) shown as
-// `<U+XXXX>`. A path a token can carry has no control character (atTextOK),
-// but it can hold a format character — a bidi override or isolate
-// (U+202A–U+202E, U+2066–U+2069), a zero-width space or mark (U+200B–U+200F),
-// U+FEFF — which a terminal draws as nothing, or by reordering what follows,
-// so a row could read as another path than the one an accept writes. Shown,
-// the row says what is there. It is the file source's own rule, not
-// sanitizeLine's: the transcript draws emoji, whose joiner (U+200D) is a
-// format character. Only the row's text changes — the candidate writes, and
-// is matched and ranked by, its path — and a path of printable ASCII, most
-// of them, is its own display form.
+// at_dirs.go's rows are), with every default-ignorable or format character
+// (atIsIgnorable) shown as `<U+XXXX>`. A path a token can carry has no
+// control character (atTextOK), but it can hold a character a terminal draws
+// as nothing, as a blank, or by reordering what follows — a bidi override or
+// isolate (U+202A–U+202E, U+2066–U+2069), a zero-width space, joiner or mark
+// (U+200B–U+200F), U+FEFF, the combining grapheme joiner U+034F, a variation
+// selector, a Hangul filler — so a row could read as another path than the
+// one an accept writes: `report` U+034F `.md` draws as `report.md`, and
+// `a` U+3164 `b` as `a  b` with no space in it. Shown, the row says what is
+// there. A visible combining mark is not escaped: `e` and U+0301 draw as `é`,
+// which is what the name holds. It is the file source's own rule, not
+// sanitizeLine's: the transcript draws emoji, whose joiner (U+200D) and
+// presentation selector (U+FE0F) are default-ignorable. Only the row's text
+// changes — the candidate writes, and is matched and ranked by, its path —
+// and a path of printable ASCII, most of them, is its own display form.
 func atFileName(p string) string {
 	for i := 0; i < len(p); i++ {
 		if c := p[i]; c <= ' ' || c >= utf8.RuneSelf {
-			return atShowFormat(sanitizeLine(p))
+			return atShowIgnorable(sanitizeLine(p))
 		}
 	}
 	return p
 }
 
-// atShowFormat is s with every format character (Cf) written as `<U+XXXX>`.
-func atShowFormat(s string) string {
-	if strings.IndexFunc(s, atIsFormat) < 0 {
+// atShowIgnorable is s with every rune atIsIgnorable reports written as
+// `<U+XXXX>` (uppercase hex, at least four digits).
+func atShowIgnorable(s string) string {
+	if strings.IndexFunc(s, atIsIgnorable) < 0 {
 		return s
 	}
 	var b strings.Builder
 	for _, r := range s {
-		if atIsFormat(r) {
+		if atIsIgnorable(r) {
 			fmt.Fprintf(&b, "<U+%04X>", r)
 			continue
 		}
@@ -1148,7 +1153,35 @@ func atShowFormat(s string) string {
 	return b.String()
 }
 
-func atIsFormat(r rune) bool { return unicode.Is(unicode.Cf, r) }
+// atIsIgnorable says r is a default-ignorable code point — one with no glyph
+// of its own, which a renderer that does not act on it draws as nothing — or
+// one of the format characters Unicode keeps out of that set (plan 030 X201).
+// UAX #44 derives Default_Ignorable_Code_Point as
+// Other_Default_Ignorable_Code_Point + Cf + Variation_Selector, minus
+// White_Space, the interlinear annotation characters U+FFF9–U+FFFB, the
+// Egyptian hieroglyph format controls U+13430–U+1343F and the prepended
+// concatenation marks (U+0600–U+0605, U+06DD, U+070F, …). This is the sum
+// without the subtractions — Default_Ignorable_Code_Point and every Cf — on
+// purpose:
+//
+//   - No White_Space rune is in any of the three tables (Go's Unicode 17),
+//     and sanitizeLine has already made each one a path can hold a space.
+//   - The rest are all Cf, which atFileName has shown since X200: the
+//     interlinear annotation characters and the Egyptian format controls
+//     take no cell in the popup's own width (x/ansi) — they draw as nothing
+//     — and a prepended concatenation mark is meant to be drawn across the
+//     digits that follow it, which a terminal does not do. Unicode takes
+//     them out of the set so that they are seen; `<U+XXXX>` is seen.
+//
+// The soft hyphen U+00AD is Cf and default-ignorable: it draws as nothing or
+// as a hyphen, and either way not as what the name holds. The Hangul fillers
+// (U+115F, U+1160, U+3164, U+FFA0) are letters that draw as blank cells.
+// Other_Default_Ignorable_Code_Point also reserves code points not yet
+// assigned (U+2065, U+FFF0–U+FFF8, most of U+E0000–U+E0FFF) so that a
+// renderer older than them draws nothing; they are shown too.
+func atIsIgnorable(r rune) bool {
+	return unicode.In(r, unicode.Cf, unicode.Variation_Selector, unicode.Other_Default_Ignorable_Code_Point)
+}
 
 // atMatcher is a query compiled for matching: its fold, its runes as the
 // byte strings they are in the fold, and room for three alignments' positions

@@ -15,6 +15,7 @@ import (
 	"syscall"
 	"testing"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -752,18 +753,54 @@ func TestAtFilesCandidatesWriteTheirPath(t *testing.T) {
 	}
 }
 
+// atShownPaths are paths whose rows must not read as another path (X200,
+// X201), each with its display form, a query that ranks it first among them
+// and the token a pick writes — the path as it is. The default-ignorable
+// runes are shown as `<U+XXXX>`: a right-to-left override, a zero-width space,
+// the combining grapheme joiner that draws `report` U+034F `.md` as
+// `report.md`, an emoji's presentation selector, an ideographic variation
+// selector, and a Hangul filler, a letter drawn as a blank. A visible
+// combining accent stays as it is, and a run of spaces is drawn as one
+// (sanitizeLine) and written as it is.
+var atShownPaths = []struct{ path, name, typed, token string }{
+	{"notes/\u202Egpj.exe", "notes/<U+202E>gpj.exe", "@gpj", "@notes/\u202Egpj.exe "},
+	{"zero\u200Bwidth.go", "zero<U+200B>width.go", "@zero", "@zero\u200Bwidth.go "},
+	{"two  spaces.md", "two spaces.md", "@two", `@"two  spaces.md" `},
+	{"report\u034F.md", "report<U+034F>.md", "@report", "@report\u034F.md "},
+	{"heart\u2764\uFE0F.md", "heart\u2764<U+FE0F>.md", "@heart", "@heart\u2764\uFE0F.md "},
+	{"ideo\u8FBA\U000E0100.md", "ideo\u8FBA<U+E0100>.md", "@ideo", "@ideo\u8FBA\U000E0100.md "},
+	{"hangul\u3164filler.md", "hangul<U+3164>filler.md", "@hangul", "@hangul\u3164filler.md "},
+	{"cafe\u0301.md", "cafe\u0301.md", "@cafe", "@cafe\u0301.md "},
+}
+
+// atIgnorableAt fails t if s holds a rune atIsIgnorable reports: one drawn
+// raw.
+func atIgnorableAt(t *testing.T, what, s string) {
+	t.Helper()
+	if i := strings.IndexFunc(s, atIsIgnorable); i >= 0 {
+		r, _ := utf8.DecodeRuneInString(s[i:])
+		t.Fatalf("%s draws %U raw:\n%s", what, r, plain(s))
+	}
+}
+
 // A candidate's row draws its path's display form and an accept writes the
-// path as it is (X200): a format character — the override that draws
-// `\u202Egpj.exe` as `exe.jpg`, a zero-width space, a byte order mark, an
-// isolate, a tag, an emoji's joiner — is shown as `<U+XXXX>`, so no drawn row
-// holds one; a run of spaces is drawn as one (sanitizeLine) and written as
-// it is. The match is the path's: a query finds a path by what it holds,
+// path as it is (X200, X201): a default-ignorable character — the override
+// that draws `\u202Egpj.exe` as `exe.jpg`, a zero-width space, a byte order
+// mark, an isolate, a tag, an emoji's joiner and presentation selector, the
+// combining grapheme joiner, a variation selector (Mongolian, emoji,
+// ideographic), a Hangul filler, a Khmer inherent vowel, the soft hyphen, a
+// code point reserved as ignorable though not yet assigned — is shown as
+// `<U+XXXX>`, and so are the format characters UAX #44 keeps out of that set
+// (atIsIgnorable), so no drawn row holds one. A visible combining accent is
+// drawn as it is; a run of spaces is drawn as one (sanitizeLine) and written
+// as it is. The match is the path's: a query finds a path by what it holds,
 // never by its display form.
 func TestAtFilesRowsShowWhatAPathHolds(t *testing.T) {
 	for _, tc := range []struct{ path, name string }{
 		{"plain.go", "plain.go"},
 		{"notes/my plan.txt", "notes/my plan.txt"},
 		{"ünï/Cödé.go", "ünï/Cödé.go"},
+		{"cafe\u0301.md", "cafe\u0301.md"},
 		{"\u202Egpj.exe", "<U+202E>gpj.exe"},
 		{"zero\u200Bwidth.go", "zero<U+200B>width.go"},
 		{"two  spaces.md", "two spaces.md"},
@@ -771,24 +808,38 @@ func TestAtFilesRowsShowWhatAPathHolds(t *testing.T) {
 		{"tag\U000E0001.md", "tag<U+E0001>.md"},
 		{"👩\u200D💻.md", "👩<U+200D>💻.md"},
 		{"d\u200B/", "d<U+200B>/"},
+		{"report\u034F.md", "report<U+034F>.md"},
+		{"heart\u2764\uFE0F.md", "heart\u2764<U+FE0F>.md"},
+		{"ideo\u8FBA\U000E0100.md", "ideo\u8FBA<U+E0100>.md"},
+		{"mongol\u180B.md", "mongol<U+180B>.md"},
+		{"hangul\u3164filler.md", "hangul<U+3164>filler.md"},
+		{"\u115F\u1160\uFFA0.md", "<U+115F><U+1160><U+FFA0>.md"},
+		{"khmer\u17B4.md", "khmer<U+17B4>.md"},
+		{"soft\u00ADhyphen.md", "soft<U+00AD>hyphen.md"},
+		{"later\u2065.md", "later<U+2065>.md"},
+		// The format characters UAX #44 takes out of the default-ignorable
+		// set: interlinear annotation, a prepended concatenation mark, an
+		// Egyptian hieroglyph format control.
+		{"\uFFF9note\uFFFB.md", "<U+FFF9>note<U+FFFB>.md"},
+		{"\u0600123.md", "<U+0600>123.md"},
+		{"glyph\U00013430.md", "glyph<U+13430>.md"},
 	} {
 		if got := atFileName(tc.path); got != tc.name {
 			t.Errorf("atFileName(%q) = %q, want %q", tc.path, got, tc.name)
 		}
 	}
 
-	rlo, zwsp, spaces := "notes/\u202Egpj.exe", "zero\u200Bwidth.go", "two  spaces.md"
-	x := newAtFileIndex([]string{rlo, zwsp, spaces}, "")
+	paths := make([]string, len(atShownPaths))
+	want := []completeItem{{Name: "notes/", Value: "notes/", Insert: "notes/", Openable: true}}
+	for i, tc := range atShownPaths {
+		paths[i] = tc.path
+		want = append(want, completeItem{Name: tc.name, Value: tc.path, Insert: tc.path})
+	}
+	x := newAtFileIndex(paths, "")
 	items, more := x.match("", 100)
 	got := make(map[string]completeItem, len(items))
 	for _, it := range items {
 		got[it.Value] = it
-	}
-	want := []completeItem{
-		{Name: "notes/", Value: "notes/", Insert: "notes/", Openable: true},
-		{Name: "notes/<U+202E>gpj.exe", Value: rlo, Insert: rlo},
-		{Name: "zero<U+200B>width.go", Value: zwsp, Insert: zwsp},
-		{Name: "two spaces.md", Value: spaces, Insert: spaces},
 	}
 	if len(items) != len(want) || more != 0 {
 		t.Fatalf("offered %+v (more %d), want %d candidates", items, more, len(want))
@@ -805,8 +856,10 @@ func TestAtFilesRowsShowWhatAPathHolds(t *testing.T) {
 		t.Errorf("U+ offers %q: a query matched a display form", names)
 	}
 
-	// Through the popup: no drawn row holds a format character, every row
-	// reads as its display form, and an accept writes the path.
+	// Through the popup: no drawn row holds a default-ignorable rune, and a
+	// query's selected row reads as its display form and writes its path.
+	// The popup draws at most completeMaxRows candidates, so each is found by
+	// a query of its own.
 	src := atFileSource{search: func(context.Context, string) completeLoaded { return completeLoaded{Data: x} }}
 	env := completeEnv{Workspace: "/w", Shown: 1}
 	open := func(typed string) completePopup {
@@ -815,25 +868,56 @@ func TestAtFilesRowsShowWhatAPathHolds(t *testing.T) {
 		return p
 	}
 	p := open("@")
-	view := p.view(Preset("dark"), 60, 12)
-	if i := strings.IndexFunc(view, atIsFormat); i >= 0 {
-		r, _ := utf8.DecodeRuneInString(view[i:])
-		t.Fatalf("the popup draws %U raw:\n%s", r, plain(view))
-	}
-	drawn := strings.Join(trimmed(popupText(p, 60, 12)), "\n")
-	for _, w := range want {
-		if !strings.Contains(drawn, w.Name) {
-			t.Errorf("no row reads %q:\n%s", w.Name, drawn)
+	atIgnorableAt(t, "the popup", p.view(Preset("dark"), 60, 12))
+	for _, tc := range atShownPaths {
+		p := open(tc.typed)
+		atIgnorableAt(t, "the popup for "+tc.typed, p.view(Preset("dark"), 60, 12))
+		if rows := trimmed(popupText(p, 60, 12)); !slices.Contains(rows, agentGutterMark+tc.name) {
+			t.Errorf("%s: no selected row reads %q:\n%s", tc.typed, tc.name, strings.Join(rows, "\n"))
+		}
+		if c, _ := popKey(&p, keyOf(tea.KeyEnter)); c.value != tc.token {
+			t.Errorf("accepting %s wrote %q, want %q", tc.typed, c.value, tc.token)
 		}
 	}
-	for typed, token := range map[string]string{
-		"@gpj":  "@" + rlo + " ",
-		"@zero": "@" + zwsp + " ",
-		"@two":  `@"two  spaces.md" `,
-	} {
-		p := open(typed)
-		if c, _ := popKey(&p, keyOf(tea.KeyEnter)); c.value != token {
-			t.Errorf("accepting %s wrote %q, want %q", typed, c.value, token)
+}
+
+// A row shows every default-ignorable code point (X201): each rune in
+// Default_Ignorable_Code_Point, derived as UAX #44 derives it, is one
+// atIsIgnorable reports, and anything else it reports is a format character
+// UAX #44 takes out of that set — never a visible mark, such as an accent.
+func TestAtFilesShowEveryDefaultIgnorable(t *testing.T) {
+	// UAX #44's subtractions from Other_Default_Ignorable_Code_Point + Cf +
+	// Variation_Selector.
+	out := func(r rune) bool {
+		return unicode.Is(unicode.White_Space, r) || (r >= 0xFFF9 && r <= 0xFFFB) ||
+			(r >= 0x13430 && r <= 0x1343F) || unicode.Is(unicode.Prepended_Concatenation_Mark, r)
+	}
+	ignorable, format := 0, 0
+	for r := rune(0); r <= unicode.MaxRune; r++ {
+		dicp := unicode.In(r, unicode.Other_Default_Ignorable_Code_Point, unicode.Cf, unicode.Variation_Selector) && !out(r)
+		takenOut := unicode.Is(unicode.Cf, r) && out(r)
+		shown := atIsIgnorable(r)
+		switch {
+		case shown && unicode.Is(unicode.White_Space, r):
+			t.Errorf("%U is shown and is White_Space, which sanitizeLine draws as a space", r)
+		case dicp && !shown:
+			t.Errorf("%U is default-ignorable and not shown", r)
+		case shown && !dicp && !takenOut:
+			t.Errorf("%U is shown and is neither default-ignorable nor a format character UAX #44 takes out", r)
+		case dicp:
+			ignorable++
+		case shown:
+			format++
+		}
+	}
+	if ignorable == 0 || format == 0 {
+		t.Fatalf("shown %d default-ignorable and %d other format characters: the sweep saw none", ignorable, format)
+	}
+	// A letter, a combining accent, an enclosing keycap, a skin tone and the
+	// spaces draw as what they are.
+	for _, r := range []rune{'e', '\u0301', '\u20E3', '\U0001F3FB', ' ', '\u00A0'} {
+		if atIsIgnorable(r) {
+			t.Errorf("%U is shown as a code point, though it draws as what it is", r)
 		}
 	}
 }

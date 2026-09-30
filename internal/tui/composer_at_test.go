@@ -292,37 +292,33 @@ func TestAComposerAtPickWritesExactlyItsPath(t *testing.T) {
 	}
 }
 
-// TestAComposerAtRowShowsWhatItsPathHolds (§3.16, X200): the frame draws a
-// path's format characters as `<U+XXXX>` — none raw, so no row reads as
-// another path — and a pick writes the path as it is: its format characters,
-// and a run of spaces its row draws as one.
+// TestAComposerAtRowShowsWhatItsPathHolds (§3.16, X200, X201): the frame
+// draws a path's default-ignorable characters as `<U+XXXX>` — none raw, so no
+// row reads as another path — and a visible combining accent as it is; a pick
+// writes the path as it is: its ignorable characters, and a run of spaces its
+// row draws as one (atShownPaths).
 func TestAComposerAtRowShowsWhatItsPathHolds(t *testing.T) {
-	rlo, zwsp, spaces := "notes/\u202Egpj.exe", "zero\u200Bwidth.go", "two  spaces.md"
-	listing := atFixedListing(rlo, zwsp, spaces)
+	paths := make([]string, len(atShownPaths))
+	for i, tc := range atShownPaths {
+		paths[i] = tc.path
+	}
+	listing := atFixedListing(paths...)
 
 	m, _ := atModel(t, 100, 30, listing)
 	m = atOpen(t, m, "@")
-	if frame := m.View(); strings.IndexFunc(frame, atIsFormat) >= 0 {
-		t.Fatalf("the frame draws a format character raw:\n%q", plain(frame))
-	}
-	frame := plainView(m)
-	for _, row := range []string{"notes/<U+202E>gpj.exe", "zero<U+200B>width.go", "two spaces.md"} {
-		if !strings.Contains(frame, row) {
-			t.Fatalf("no row reads %q:\n%s", row, frame)
-		}
-	}
+	atIgnorableAt(t, "the frame", m.View())
 
-	for typed, draft := range map[string]string{
-		"@gpj":  "@" + rlo + " ",
-		"@zero": "@" + zwsp + " ",
-		"@two":  `@"two  spaces.md" `,
-	} {
+	for _, tc := range atShownPaths {
 		// A model of its own for each: a textarea's copies share its lines.
 		m, _ := atModel(t, 100, 30, listing)
-		m = atOpen(t, m, typed)
+		m = atOpen(t, m, tc.typed)
+		atIgnorableAt(t, "the frame for "+tc.typed, m.View())
+		if frame := plainView(m); !strings.Contains(frame, agentGutterMark+tc.name) {
+			t.Fatalf("%s: no selected row reads %q:\n%s", tc.typed, tc.name, frame)
+		}
 		m, _ = atKey(t, m, enter())
-		if v, cur := draftOf(m); v != draft || cur != len(draft) {
-			t.Errorf("picking %s left %q, cursor %d; want %q, cursor %d", typed, v, cur, draft, len(draft))
+		if v, cur := draftOf(m); v != tc.token || cur != len(tc.token) {
+			t.Errorf("picking %s left %q, cursor %d; want %q, cursor %d", tc.typed, v, cur, tc.token, len(tc.token))
 		}
 	}
 }

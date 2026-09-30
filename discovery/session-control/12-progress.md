@@ -3223,13 +3223,15 @@ finding and its disposition):
   list dispatch's saved provider in `docs/reference/tui.md`.
 - C19r (`dc0a764`) — review fixes to the record (sol): the ranges reach X199 and
   SF-102, and the long-replay test's comment calls its stall a measured bound.
-- C18r2 (this commit) — CodeRabbit on PR 4: a composer `@` row shows a path's
+- C18r2 (`c01bfb9`) — CodeRabbit on PR 4: a composer `@` row shows a path's
   Unicode format characters as `<U+XXXX>` (X200); SF-97 reworded; SF-103.
+- C18r3 (this commit) — review fix (sol on C18r2): the row escapes Unicode's
+  whole default-ignorable set, not only format characters (X201).
 
 ### Deviations from the plan
 
 PR 1's execution amendments X1–X62, PR 2's X63–X121 (with C12r2's
-X142–X144), PR 3's X122–X141 and X145–X177, and PR 4's X178–X200 (X192
+X142–X144), PR 3's X122–X141 and X145–X177, and PR 4's X178–X201 (X192
 among them, found by PR 3's V1), mirrored here as `12`'s own record (the full
 text is in the plan, `~/.claude/plans/craze/030-session-control-s5-agent-view.md`,
 "Execution amendments"); review-fix rounds are grouped with the commit they
@@ -3911,6 +3913,16 @@ with them):
     (an emoji's U+200D is `Cf`). Residuals: the display is not reversible;
     an emoji's joiner shows escaped in the popup; runs of spaces draw as one;
     the draft and the transcript draw a picked path's `Cf` runes raw (SF-103).
+75. **Plan 030 X201 (C18r3, sol on C18r2)** — the row escapes Unicode's
+    Default_Ignorable_Code_Point set with every `Cf` rune (Go's `Cf`,
+    `Variation_Selector` and `Other_Default_Ignorable_Code_Point` tables):
+    the combining grapheme joiner, variation selectors and Hangul fillers,
+    which drew as nothing, now show as `<U+XXXX>`; visible combining marks
+    are kept. UAX #44's subtractions from the set (interlinear annotation,
+    Egyptian format controls, prepended concatenation marks) are `Cf` and
+    stay escaped. A test sweeps every code point against UAX #44's
+    derivation. Residual: a non-ASCII space (U+00A0, U+3000) draws as an
+    ASCII space in the row (`sanitizeLine`) while the pick writes it.
 
 ### Live smoke
 
