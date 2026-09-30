@@ -2752,6 +2752,19 @@ func (m *Model) updateComposer(msg tea.KeyMsg) tea.Cmd {
 	if !m.input.Focused() {
 		_ = m.input.Focus()
 	}
+	// bubbles' word-left (textarea v0.21.0's wordLeft, on its WordBackward
+	// keys: alt+←, alt+b, and macOS Terminal's ESC b, which arrives as alt+b)
+	// never returns when nothing but whitespace is before the cursor — an
+	// empty composer among them: it steps left looking for a word's end, and
+	// at the start of the text a step left no longer moves, so it steps for
+	// ever and craze hangs. Wherever it does return with only whitespace
+	// before the cursor (the cursor at the very start, a word under it), it
+	// has not moved the cursor, so the key is dropped there: the same result,
+	// without the hang. The forward motions and the word deletions stop at
+	// the end of the text on their own (TestWordMotionOverBlankTextReturns).
+	if key.Matches(msg, m.input.KeyMap.WordBackward) && strings.TrimSpace(m.input.Value()[:m.composerCursorOffset()]) == "" {
+		return nil
+	}
 	prev := m.input.Value()
 	// bubbles repositions its own viewport inside Update (textarea.go:1087),
 	// against the height in force *before* the key, and never rewinds slack
