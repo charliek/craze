@@ -88,9 +88,12 @@ func TestFrameGoldenRename(t *testing.T) {
 // goes on folding, so it never does. A fixed bound cannot tell the two apart,
 // because the one wait here is the whole replay — 0.5 s a run unloaded, 7 s
 // under -race, 37–58 s under -race at a 25 % CPU quota and 275–320 s at 5 %
-// (2026-09-30) — and the 20 s it had flaked on a loaded machine. The longest a
-// fold waited on the one before it was 2.2 s, at 5 % under -race; the cap is
-// twice the longest wait, 270 s.
+// (2026-09-30) — and the 20 s it had flaked on a loaded machine. The stall is
+// a measured test bound, not a proof: the longest gap between two folds was
+// 2.2 s, at 5 % under -race, so 30 s leaves a wide margin, and progress is
+// sampled when a frame is published (a wait that finds its frame is not failed
+// for a stall it was itself too slow to see). The cap, 10 minutes, is about
+// twice the longest run measured (320 s).
 //
 // The load's own deadline (acp's 90 s) is lifted to the cap for the same
 // reason: in process, session/load answers only once the model has folded all

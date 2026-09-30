@@ -3218,7 +3218,7 @@ finding and its disposition):
   a plugin frame test's wait needle no wrap can split (X199).
 - C19 (this commit) — the phase record: `07`'s exit results for S4a and S5
   and its table, this section's outcome, PR 4's deviations, the live smoke,
-  the decisions and the handoff; `13`'s SF-88–SF-101 and the rows Plan 030
+  the decisions and the handoff; `13`'s SF-88–SF-102 and the rows Plan 030
   closed; the README's status; what each provider does with `@path` and a
   list dispatch's saved provider in `docs/reference/tui.md`.
 
