@@ -473,13 +473,96 @@ func hangingRowsStyled(text string, first, cont string, width int, firstSt, cont
 }
 
 // wrapProse word-wraps and then hard-wraps, so an unbroken token longer than
-// the terminal is broken instead of being cut by the viewport.
+// the terminal is broken instead of being cut by the viewport. A hyphen that
+// begins a word is held out of the word wrap (holdFlagHyphens), so a flag
+// stays whole: `craze -c.` moves to the next row as one word.
 func wrapProse(s string, width int) string {
 	if width <= 0 {
 		return s
 	}
 	w := proseWidth(width)
-	return ansi.Hardwrap(ansi.Wordwrap(s, w, ""), w, true)
+	s, held := holdFlagHyphens(s)
+	out := ansi.Hardwrap(ansi.Wordwrap(s, w, ""), w, true)
+	if held {
+		out = strings.ReplaceAll(out, string(flagHyphen), "-")
+	}
+	return out
+}
+
+// flagHyphen stands in, while prose is wrapped, for a hyphen that begins a
+// word (holdFlagHyphens). ansi.Wordwrap takes every hyphen as a place to
+// break, and at the end of a full row it writes the space before one and the
+// hyphen itself past the width, so the hard wrap after it leaves the hyphen
+// alone on a row of its own and the word's rest on the next: `run craze` /
+// ` -` / `c.` at 110 columns (plan 031 C7r, verification V3). A private-use
+// rune is one cell wide, as the hyphen is, and is word text to the wrap; it
+// is put back once the text is wrapped.
+const flagHyphen = ''
+
+// holdFlagHyphens is s with each hyphen that begins a word — the dash of a
+// flag, `-c`, `--model`, or of a negative number — swapped for flagHyphen, and
+// whether any was. A word begins at the text's start or after a space or a
+// line break; an escape sequence between is no text, so a styled `-c` begins
+// one too. A hyphen, or a run of them, begins a word only when text follows
+// it: a lone dash between spaces stays a place to break. Nothing is swapped in
+// a text that already holds flagHyphen, which could not be told apart from it
+// afterwards.
+func holdFlagHyphens(s string) (string, bool) {
+	if !strings.Contains(s, "-") || strings.ContainsRune(s, flagHyphen) {
+		return s, false
+	}
+	// The text's graphemes and escape sequences, in order.
+	var parts []string
+	var state byte
+	for rest := s; rest != ""; {
+		seq, _, n, next := ansi.DecodeSequence(rest, state, nil)
+		if n <= 0 {
+			return s, false
+		}
+		parts = append(parts, seq)
+		rest, state = rest[n:], next
+	}
+	escape := func(p string) bool { return p[0] == ansi.ESC }
+	space := func(p string) bool {
+		r, _ := utf8.DecodeRuneInString(p)
+		return r != ' ' && unicode.IsSpace(r)
+	}
+	var b strings.Builder
+	b.Grow(len(s) + 8)
+	held, wordStart := false, true
+	for i := 0; i < len(parts); {
+		p := parts[i]
+		switch {
+		case escape(p):
+			b.WriteString(p)
+			i++
+			continue
+		case p != "-" || !wordStart:
+			b.WriteString(p)
+			wordStart = space(p)
+			i++
+			continue
+		}
+		// A run of hyphens at a word's start, and the escapes among them.
+		j := i
+		for j < len(parts) && (parts[j] == "-" || escape(parts[j])) {
+			j++
+		}
+		hold := j < len(parts) && !space(parts[j])
+		for _, q := range parts[i:j] {
+			if hold && q == "-" {
+				b.WriteRune(flagHyphen)
+				held = true
+				continue
+			}
+			b.WriteString(q)
+		}
+		wordStart, i = false, j
+	}
+	if !held {
+		return s, false
+	}
+	return b.String(), true
 }
 
 func proseWidth(width int) int {

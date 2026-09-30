@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"reflect"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -1039,6 +1040,54 @@ func TestWrapProseHardWrapsAtTinyWidths(t *testing.T) {
 	}
 	if got := wrapProse("unchanged", 0); got != "unchanged" {
 		t.Fatalf("wrap before the first resize should pass through, got %q", got)
+	}
+}
+
+// TestWrapProseKeepsAFlagWhole (plan 031 C7r, verification V3): a word that
+// begins with a hyphen — a flag, a negative number — is never broken after
+// that hyphen, at any width it fits in, styled or not: ansi.Wordwrap breaks at
+// every hyphen, and at a full row's end it left the hyphen alone on a row of
+// its own (`craze` / ` -` / `c.` at 110 columns). Everything else wraps
+// exactly as ansi.Wordwrap and ansi.Hardwrap wrap it: a hyphen inside a word,
+// a lone dash between spaces, and a text that already holds the stand-in
+// rune.
+func TestWrapProseKeepsAFlagWhole(t *testing.T) {
+	notice := "Connected Meta. New sessions offer its models; to use them in this conversation, /exit and run craze -c."
+	if got, want := wrapProse(notice, 110), notice[:len(notice)-4]+"\n-c."; got != want {
+		t.Fatalf("the notice at 110 columns wraps as %q, want %q", got, want)
+	}
+
+	// Every word, a flag included, ends up whole on one row at every width it
+	// fits in, the hyphen of a flag written back.
+	flags := "run craze -c. then craze --model fireworks/glm -rf now at -5 degrees; or \x1b[1m-x\x1b[0m styled"
+	for width := 16; width <= 100; width++ {
+		got := wrapProse(flags, width)
+		if strings.ContainsRune(got, flagHyphen) {
+			t.Fatalf("width %d: the stand-in was left in %q", width, got)
+		}
+		var words []string
+		for _, ln := range strings.Split(got, "\n") {
+			words = append(words, strings.Fields(ansi.Strip(ln))...)
+		}
+		if want := strings.Fields(ansi.Strip(flags)); !slices.Equal(words, want) {
+			t.Fatalf("width %d: a word was broken:\n%s", width, got)
+		}
+	}
+
+	// What begins no word wraps as it always did.
+	plainWrap := func(s string, width int) string {
+		w := proseWidth(width)
+		return ansi.Hardwrap(ansi.Wordwrap(s, w, ""), w, true)
+	}
+	for _, s := range []string{
+		"a well-known text - with a lone dash, mid-word hy-phens and a trailing one -",
+		"a text that already holds the stand-in \ue000 -c keeps it: -c is left alone",
+	} {
+		for width := 8; width <= 90; width++ {
+			if got, want := wrapProse(s, width), plainWrap(s, width); got != want {
+				t.Fatalf("width %d: %q wraps as %q, want %q", width, s, got, want)
+			}
+		}
 	}
 }
 

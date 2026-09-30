@@ -2104,7 +2104,11 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// opens it again: endedToList); without one — the opt-out, craze
 		// attach — or on the way out after this client's own quit asked for
 		// the end, the program quits, and the final model says why (ended,
-		// endErr) for the command line's last word.
+		// endErr) for the command line's last word. /connect goes with the
+		// session it was opened in, its key field emptied, whichever way
+		// this goes (plan 031 §3.9, dropConnect): the list covers the box,
+		// and nothing would reach it or its field again.
+		m = m.dropConnect()
 		if f := m.first; f != nil && !m.quitting {
 			// The session an unstarted session's first prompt spawned ended
 			// before it came up: the same as its start failing (§3.13).
@@ -3906,6 +3910,10 @@ func (m *Model) applyForeignCancelled(msg foreignCancelledMsg) {
 // one — Engine.Close runs once and answers every later caller with the same
 // error — so it returns when the first does and cannot deadlock.
 func (m Model) requestQuit() (tea.Model, tea.Cmd) {
+	// /connect's key field does not outlive the quit, local or served: the
+	// model it is in waits out the stop and is the program's last (plan 031
+	// §3.9, dropConnect).
+	m = m.dropConnect()
 	if m.remote && m.eng != nil {
 		return m.stopQuit()
 	}

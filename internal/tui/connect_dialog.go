@@ -60,10 +60,11 @@ import (
 // in (keyField: the dialog's number and the field's), and lands only in that
 // field while it is open (pasteIntoKey), never in the composer. The field is
 // emptied on every way out — a save, Esc, a card or another dialog
-// (closeDialog), a session switch (withSession makes the dialog afresh) — and
-// when the key in it is refused; only a save refused because work started
-// keeps it, for the next Enter. Its text is never written to the transcript,
-// an error, a note or the composer.
+// (closeDialog), a session switch (withSession makes the dialog afresh), a
+// quit and the session's end (dropConnect) — and when the key in it is
+// refused; only a save refused because work started keeps it, for the next
+// Enter. Its text is never written to the transcript, an error, a note or the
+// composer.
 
 const (
 	connectDialogTitle = "Connect a provider"
@@ -192,6 +193,24 @@ func (d connectDialog) provider() (modeltable.ProviderInfo, bool) {
 func (d connectDialog) leaveKeyStep() connectDialog {
 	d.step, d.field, d.key, d.keyErr = connectPick, 0, textinput.Model{}, ""
 	return d
+}
+
+// dropConnect is /connect gone whatever is on screen: the dialog closed, if
+// it is up, and its state — the key field with it — emptied (plan 031 §3.9,
+// astra r4 1). It is the way out of the exits that are not the dialog's own,
+// where the model, and a key typed or pasted into its field, would otherwise
+// live on: a quit (requestQuit — Ctrl+D, the idle or second Ctrl+C, /exit, a
+// served session's stopQuit — whose model waits out the session's stop and
+// is the program's last), and the end of the session the dialog belongs to
+// (endMsg — its own end or its connection lost — whether craze goes back to
+// the session list, where nothing reaches the field behind it again, or
+// quits).
+func (m Model) dropConnect() Model {
+	if m.dialog == dialogConnect {
+		return m.closeDialog(false)
+	}
+	m.cdlg = connectDialog{}
+	return m
 }
 
 // openConnect is /connect and the model dialog's connect row: any open

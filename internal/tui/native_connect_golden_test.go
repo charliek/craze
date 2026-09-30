@@ -15,17 +15,38 @@ import (
 // call (connectCall), so a wait for a provider's name is a wait for the read.
 
 // runConnectFrame runs keys over nativePickerConfig at cols x rows, in every
-// transport and gate mode, and answers the frame they agree on.
-func runConnectFrame(t *testing.T, cols, rows int, keys string) string {
+// transport and gate mode, and answers the frame they agree on — each run's
+// frame and error screened for secrets first (connectScreen), so none is
+// compared, printed or held against a golden before it has passed.
+func runConnectFrame(t *testing.T, cols, rows int, keys string, secrets ...string) string {
 	t.Helper()
 	isolateSkillsHome(t)
-	got, _, err := runFrameModes(t, func() Config {
+	got, _, err := runFrameModesScreened(t, func() Config {
 		return nativePickerConfig(t, nil)
-	}, cols, rows, keys, FrameOpts{Timeout: 20 * time.Second})
+	}, cols, rows, keys, FrameOpts{Timeout: 20 * time.Second}, connectScreen(t, secrets...))
 	if err != nil {
 		t.Fatalf("run frame script: %v", err)
 	}
 	return got
+}
+
+// connectScreen is a frameScreen that fails the test when a run's frame,
+// plain or raw, or its error shows connectCanary or one of keys, whole or in
+// a piece (connectShown), naming the run and never the key (astra r4 2): it is
+// told each run as it ends, before the runs are compared or a golden is
+// compared or written, -update included.
+func connectScreen(t *testing.T, keys ...string) frameScreen {
+	return func(run, plain, raw string, err error) {
+		t.Helper()
+		places := []struct{ where, text string }{{"frame", plain}, {"raw frame", raw}, {"error", fmt.Sprint(err)}}
+		for _, key := range append([]string{connectCanary}, keys...) {
+			for _, p := range places {
+				if connectShown(p.text, key) {
+					t.Fatalf("the %s run's %s shows the key (<CANARY>)", run, p.where)
+				}
+			}
+		}
+	}
 }
 
 // TestFrameGoldenNativeConnect is step one: every provider of the TUI's table
@@ -61,10 +82,9 @@ func TestFrameGoldenNativeConnectKey(t *testing.T) {
 			[]string{"Gamma API key", "Stored in ~/.craze/native/providers.toml.", connectKeyHint},
 			[]string{"is set in this environment"}},
 	} {
-		got := runConnectFrame(t, tc.cols, tc.rows, tc.keys)
+		got := runConnectFrame(t, tc.cols, tc.rows, tc.keys, key)
 		assertFrameGolden(t, tc.name, tc.cols, tc.rows, got,
-			append(tc.want, "❯ "+strings.Repeat(string(connectMask), len(key))),
-			append(tc.not, key, "dummy"))
+			append(tc.want, "❯ "+strings.Repeat(string(connectMask), len(key))), tc.not)
 	}
 }
 
@@ -102,18 +122,18 @@ func TestFrameNativeConnectSaves(t *testing.T) {
 	isolateSkillsHome(t)
 	const key = "sk-connect-frame-save-key"
 	var dirs []string
-	got, _, err := runFrameModes(t, func() Config {
+	got, _, err := runFrameModesScreened(t, func() Config {
 		cfg := nativePickerConfig(t, nil)
 		dirs = append(dirs, cfg.NativeDir)
 		return cfg
 	}, 100, 30, "<wait:idle>/connect<enter><wait:text:Gamma><enter><wait:text:Gamma API key><paste:"+key+"><enter>"+
-		"<wait:text:Connected Gamma.>", FrameOpts{Timeout: 20 * time.Second})
+		"<wait:text:Connected Gamma.>", FrameOpts{Timeout: 20 * time.Second}, connectScreen(t, key))
 	if err != nil {
 		t.Fatalf("run frame script: %v", err)
 	}
 	assertFrameGolden(t, "", 100, 30, got,
 		[]string{"Connected Gamma. New sessions offer its models; to use them in this conversation, /exit and run", "craze -c."},
-		[]string{key, "Connect a provider", "Gamma API key"})
+		[]string{"Connect a provider", "Gamma API key"})
 	if len(dirs) == 0 {
 		t.Fatal("no run built its Config")
 	}

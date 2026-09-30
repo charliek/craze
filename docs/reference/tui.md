@@ -1156,7 +1156,9 @@ no key.
 - **The key is never shown**: not in the transcript, a note or an error row, the
   composer, the session's journal, or anything sent to the model. The field is
   emptied on every way out of the dialog — a save, `Esc`, a refusal, a card
-  arriving, another dialog opening, or switching to another session.
+  arriving, another dialog opening, switching to another session, quitting
+  craze, or the session ending or this terminal losing its connection to it
+  (the box closes before craze goes back to the session list).
 
 **Refused while work runs.** While a turn is running — yours, another
 client's, or the agent's own — or a sub-agent is still running in the

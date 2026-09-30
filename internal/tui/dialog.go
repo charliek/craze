@@ -229,12 +229,62 @@ func (m Model) dialogInput() textinput.Model {
 	return ti
 }
 
-// dialogInputView is a dialogInput drawn on a body row inner cells wide. The
-// prompt and the one cell the cursor always draws come out of the width
-// bubbles pads the value to, or the row overflows the box.
+// dialogInputView is a dialogInput drawn on a body row inner cells wide: at
+// the width the row gives it (fitDialogField), which relayout has already
+// given the field itself whenever the box is laid out, so this draws it as it
+// is (plan 031 C7r, astra r4 3).
 func dialogInputView(f textinput.Model, inner int) string {
-	f.Width = max(1, inner-lipgloss.Width(modelFilterPrompt)-1)
+	fitDialogField(&f, inner)
 	return f.View()
+}
+
+// dialogFieldWidth is the width a dialogInput's text gets on a body row inner
+// cells wide: the prompt and the one cell the cursor always draws come out of
+// it, or the row overflows the box.
+func dialogFieldWidth(inner int) int {
+	return max(1, inner-lipgloss.Width(modelFilterPrompt)-1)
+}
+
+// fitDialogField gives f the width of a body row inner cells wide. bubbles
+// scrolls a field wider than its width as its cursor moves — in Update, by
+// the width the field holds then — and draws the window it last scrolled to,
+// so a field that took its keys at another width, or at none (a paste into a
+// field never laid out), would draw a window the cursor is not in, and the
+// box would clip the cursor off the row. So a change of width puts the window
+// back around the cursor: from the start when the cursor is in the first
+// width of the text, else ending at the cursor. The same width again changes
+// nothing, which leaves bubbles' own scrolling alone between two layouts.
+func fitDialogField(f *textinput.Model, inner int) {
+	w := dialogFieldWidth(inner)
+	if f.Width == w {
+		return
+	}
+	f.Width = w
+	pos := f.Position()
+	// SetCursor re-derives the window only once the cursor leaves it: the
+	// end moves its right edge to the end, the start its left edge to the
+	// start, and the cursor's own position then leaves it or moves it
+	// there.
+	f.CursorEnd()
+	f.CursorStart()
+	f.SetCursor(pos)
+}
+
+// fitDialogFields gives the open box's text field — the model dialog's
+// filter, /connect's key field — the width of its body row as the box is
+// laid out (relayout): on the Update that opened it, and again on every
+// resize, so bubbles scrolls it by the width it is drawn at.
+func (m *Model) fitDialogFields() {
+	r := m.lay.Dialog
+	if r.Empty() {
+		return
+	}
+	switch inner := r.W - dialogBorder; {
+	case m.dialog == dialogModel:
+		fitDialogField(&m.mdlg.filter, inner)
+	case m.dialog == dialogConnect && m.cdlg.step == connectKey:
+		fitDialogField(&m.cdlg.key, inner)
+	}
 }
 
 // dialogScrollTag is the ▲/▼ marker for a clipped list.

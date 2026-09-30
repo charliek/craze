@@ -297,6 +297,21 @@ func goldenTransportSet() (inproc, socket bool, err error) {
 // is delayed.
 func runFrameModes(t *testing.T, build func() Config, cols, rows int, script string, opts FrameOpts) (string, string, error) {
 	t.Helper()
+	return runFrameModesScreened(t, build, cols, rows, script, opts, nil)
+}
+
+// frameScreen is told each run's frame, plain and raw, and its error, as the
+// run ends (runFrameModesScreened).
+type frameScreen func(run, plain, raw string, err error)
+
+// runFrameModesScreened is runFrameModes with screen told every run's frame
+// and error the moment the run ends — before the runs are compared, printed,
+// credited or handed back to be held against a golden or written as one: a
+// script whose frames must never show a value (a key, plan 031 §3.14) fails
+// in screen's own words, which name no value, rather than in a disagreement or
+// a golden mismatch that prints the frame (astra r4 2). nil screens nothing.
+func runFrameModesScreened(t *testing.T, build func() Config, cols, rows int, script string, opts FrameOpts, screen frameScreen) (string, string, error) {
+	t.Helper()
 	inproc, socket := goldenTransports(t)
 	type result struct {
 		run        frameRun
@@ -317,6 +332,9 @@ func runFrameModes(t *testing.T, build func() Config, cols, rows int, script str
 		o.matrix = true
 		cfg := buildFor(run.transport, build)
 		plain, raw, err := RunFrameScript(cfg, cols, rows, script, o)
+		if screen != nil {
+			screen(run.name, plain, raw, err)
+		}
 		results = append(results, result{run, plain, raw, err})
 	}
 	base := results[0]
@@ -450,17 +468,19 @@ func assertGolden(t *testing.T, name string, cols, rows int, got string) {
 // machine-specific and can only be asserted on in fragments.
 func assertFrameGolden(t *testing.T, name string, cols, rows int, got string, want, absent []string) {
 	t.Helper()
+	// What must not be there is checked first, so a frame that holds it is
+	// never compared with the golden, nor written as one under -update.
+	for _, no := range absent {
+		if strings.Contains(got, no) {
+			t.Fatalf("frame should not contain %q:\n%s", no, got)
+		}
+	}
 	if name != "" {
 		assertGolden(t, name, cols, rows, got)
 	}
 	for _, w := range want {
 		if !strings.Contains(got, w) {
 			t.Fatalf("frame is missing %q:\n%s", w, got)
-		}
-	}
-	for _, no := range absent {
-		if strings.Contains(got, no) {
-			t.Fatalf("frame should not contain %q:\n%s", no, got)
 		}
 	}
 }
