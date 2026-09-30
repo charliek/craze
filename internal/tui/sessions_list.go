@@ -112,6 +112,12 @@ type sessListState struct {
 	// and enter opens it afresh (Sessions.Open), ctrl+x stops or closes it.
 	// Only the session's own end is drawn `· ended` (hereEnded).
 	hereLost bool
+	// none says nothing at all is behind the list: it was opened over an
+	// unstarted session (plan 030 §3.13), which the opening discarded — `←`
+	// before a prompt leaves nothing — so the model holds no session, and
+	// `esc`/`←` stay on the list and say so. The cursor starts on the row that
+	// session was opened from.
+	none bool
 	// home is $HOME when the list opened: directory headers abbreviate it.
 	home string
 	// sel is the selected line, by identity; selIdx its place among the
@@ -139,6 +145,9 @@ type sessListState struct {
 	dialing   uint64
 	dialTitle string
 	dialSaved bool
+	// dispatchSeq stamps each background dispatch this opening of the list
+	// starts (dispatch.go); the input waits for the latest (in.dispatching).
+	dispatchSeq uint64
 	// in is the input under the rows (sessions_input.go, plan 030 §3.13):
 	// only when Config.Sessions can start sessions (SessionStarter); in.on
 	// false is PR 2's list, which has none.
@@ -161,6 +170,8 @@ type sessNoteKind int
 const (
 	sessNoteWarn sessNoteKind = iota
 	sessNoteErr
+	// sessNoteOK: something asked for happened (a session started).
+	sessNoteOK
 )
 
 // sessState is a row's state (plan 030 §3.10's table), in the order the
@@ -283,6 +294,14 @@ func (m Model) openSessions() (tea.Model, tea.Cmd) {
 	if r == nil {
 		return m, nil
 	}
+	// An unstarted session the list is opened over is discarded (plan 030
+	// §3.13): nothing is behind the list, and the cursor starts where that
+	// session was opened from.
+	none, from := false, sessKey{}
+	if u := m.unstarted; u != nil {
+		none, from = true, u.from
+		m = m.discardUnstarted()
+	}
 	m.sessRosters.add(r)
 	// From here on every session's frame carries the band — which session it
 	// is and the way back to the list (band.go, plan 030 §3.11).
@@ -297,6 +316,10 @@ func (m Model) openSessions() (tea.Model, tea.Cmd) {
 		here:   here,
 		home:   home,
 		sel:    here,
+		none:   none,
+	}
+	if none {
+		m.sessList.sel = from
 	}
 	m.ctrlCDeadline = time.Time{}
 	read := readSessSnap(r, m.sessList.gen)
@@ -306,7 +329,7 @@ func (m Model) openSessions() (tea.Model, tea.Cmd) {
 	}
 	// The input under the rows, and the recent directories its `@` offers
 	// (plan 030 §3.13, §3.15), read once for this opening.
-	m.sessList.in = newSessInput()
+	m.sessList.in = newSessInput(m.completeLoads)
 	sync := m.syncSessInput()
 	return m, tea.Batch(read, readRecents(st, m.sessList.gen), sync)
 }
@@ -337,6 +360,9 @@ func (m Model) leaveSessions() (tea.Model, tea.Cmd) {
 		return m, nil
 	case m.sessList.hereLost:
 		m.sessNote(sessLostNote, sessNoteWarn)
+		return m, nil
+	case m.sessList.none:
+		m.sessNote(sessNothingNote, sessNoteWarn)
 		return m, nil
 	}
 	r := m.sessList.roster
@@ -371,12 +397,15 @@ func (m Model) endedToList(err error) (Model, tea.Cmd, bool) {
 	return next, cmd, true
 }
 
-// sessQuit is Ctrl+D, or the second Ctrl+C, on the list: craze quits and
-// every session keeps running (plan 030 §3.10). It is not requestQuit, the
-// explicit quit that stops the session a client shows (decision 11): the
-// session behind the list is closed as a view close is (finishRun's close,
-// a detach), and the roster is closed with the program.
+// sessQuit is Ctrl+D, or the second Ctrl+C, on the list — and `/exit` in its
+// input (§3.13): craze quits and every session keeps running (plan 030
+// §3.10). It is not requestQuit, the explicit quit that stops the session a
+// client shows (decision 11): the session behind the list is closed as a view
+// close is (finishRun's close, a detach), and the roster is closed with the
+// program. The input's popup is closed first, so a directory listing it waits
+// for stops now rather than running on past the program (sol r28-c14 2).
 func (m Model) sessQuit() (tea.Model, tea.Cmd) {
+	m.sessList.in.at.close()
 	if m.quitting {
 		return m, tea.Quit
 	}
@@ -518,6 +547,9 @@ func (m Model) applySessMsg(msg tea.Msg) (Model, tea.Cmd, bool) {
 		return m, nil, true
 	case sessRedrawMsg:
 		return m, nil, true
+	case sessDispatchedMsg:
+		next, cmd := m.sessDispatched(msg)
+		return next, cmd, true
 	case sessOpenedMsg:
 		next, cmd := m.sessOpened(msg)
 		return next, cmd, true
@@ -1600,8 +1632,11 @@ func (m Model) sessHintRow(lines []sessLine) string {
 			seg{" again closes it; the transcript stays resumable", styleFG(th.Err)})
 	case l.note != "":
 		st := styleFG(th.Warn)
-		if l.noteKind == sessNoteErr {
+		switch l.noteKind {
+		case sessNoteErr:
 			st = styleFG(th.Err)
+		case sessNoteOK:
+			st = styleFG(th.OK)
 		}
 		return renderSegs(m.width, lead, seg{l.note, st})
 	case l.dialing != 0 && l.dialSaved:

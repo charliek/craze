@@ -147,6 +147,7 @@ func (m Model) withSession(seed sessionSeed) Model {
 		bandOn:          m.bandOn,
 		drafts:          m.drafts,
 		retired:         m.retired,
+		completeLoads:   m.completeLoads,
 		// The counters that only ever move forward, across every session:
 		// no generation, gate id, stamp, restore or turn count is reused.
 		sessGen:       m.sessGen,
@@ -155,6 +156,7 @@ func (m Model) withSession(seed sessionSeed) Model {
 		gateSeq:       m.gateSeq,
 		resumeAttempt: m.resumeAttempt,
 		spawnSeq:      m.spawnSeq,
+		unstartedSeq:  m.unstartedSeq,
 		restores:      m.restores,
 		turnStarts:    m.turnStarts,
 		// The gate's queue holds the TUI's messages as well as the session's
@@ -276,14 +278,32 @@ func (m *Model) dropStaleHeld() {
 // ------------------------------------------------------------------- drafts
 
 // draftKey is the stash key of the session the model shows: its craze id,
-// "" while its host has not named it. PR 3's unstarted session (§3.13) keys
-// its draft by a temporary id of its own until its host answers, and moves
-// the stash to the real id then: this is where that key is decided.
+// "" while its host has not named it. An unstarted session (§3.13,
+// dispatch.go) keys its draft by a temporary id of its own until its host
+// answers, and the stash moves to the real id then (moveDraft,
+// adoptUnstarted): this is where that key is decided.
 func (m Model) draftKey() string {
+	if u := m.unstarted; u != nil {
+		return u.draft
+	}
 	if m.eng == nil {
 		return ""
 	}
 	return m.info().CrazeSessionID
+}
+
+// moveDraft moves a draft stashed under from to to: an unstarted session's,
+// from its temporary id to the craze id its host answered with. Nothing
+// stashed under from moves nothing.
+func (m *Model) moveDraft(from, to string) {
+	text, ok := m.drafts[from]
+	if !ok || from == to {
+		return
+	}
+	d := maps.Clone(m.drafts)
+	delete(d, from)
+	d[to] = text
+	m.drafts = d
 }
 
 // stashDraft puts the composer's text away under the session it was written

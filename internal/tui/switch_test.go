@@ -1295,7 +1295,7 @@ var (
 		"providerDefault", "providers", "newSession", "spawnNew", "spawnLoad", "cont", "sessions", "sessList",
 		"sessRosters", "bandOn", "drafts", "retired", "sessGen", "bgen", "shownGen", "gateSeq",
 		"resumeAttempt", "spawnSeq", "restores", "turnStarts", "held", "heldBytes", "heldDrained", "syncAck",
-		"syncPending", "gateSync", "harnessQuit",
+		"syncPending", "gateSync", "harnessQuit", "completeLoads", "unstartedSeq",
 	}
 	sessionFields = []string{
 		"eng", "cmdSeq", "chains", "engErr", "cwd", "model", "status", "err", "startErr", "startInc", "git",
@@ -1312,7 +1312,7 @@ var (
 		"planOfferSeq", "planDeadSeq", "offerGen", "turnID", "ownTurn", "nextTurn", "armedDraft", "disarmed",
 		"turnStart", "lastThought", "ctrlCDeadline", "shellCtx", "remote", "cancelled", "prompted",
 		"sessProvider", "foreignEnded", "foreignNoted", "gate", "reading", "ended", "endErr", "infoPin",
-		"upDone", "indexTitle",
+		"upDone", "indexTitle", "unstarted", "first",
 	}
 )
 

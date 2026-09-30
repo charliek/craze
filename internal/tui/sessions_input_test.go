@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"slices"
@@ -341,8 +342,8 @@ func TestTheInputTakesTheKeys(t *testing.T) {
 	if g, _ := press(m, tea.KeyMsg{Type: tea.KeyCtrlS}); !g.sessList.byDir {
 		t.Fatal("ctrl+s did not regroup")
 	}
-	// A paste lands in the input, folded onto one line.
-	pasted, _ := m.Update(pasteMsg{text: " two\nlines", shownGen: m.shownGen})
+	// A paste asked for in the input lands there, folded onto one line.
+	pasted, _ := m.Update(pasteMsg{text: " two\nlines", shownGen: m.shownGen, list: true})
 	if v, _ := inputOf(pasted.(Model)); v != "jk  two linesq" {
 		t.Fatalf("pasted into %q", v)
 	}
@@ -927,5 +928,122 @@ func TestALongLineShowsAroundItsCursor(t *testing.T) {
 	rule := plain(m.sessTargetRule(60))
 	if !strings.HasPrefix(rule, "─ new session → …") || !strings.Contains(rule, "/for/lumen · cursor · Grok ─") || lipgloss.Width(rule) != 60 {
 		t.Fatalf("a long directory's rule: %q", rule)
+	}
+}
+
+// A directory listing the list's popup waits for is cancelled on every exit
+// (sol r28-c14 2): the list's own quit (ctrl+d, /exit) closes the popup, and a
+// quit the list never saw — a signal ending the program — reaches finishRun,
+// which cancels what is left. Either way the listing, run after, ends with
+// its context's cancellation.
+func TestTheListsListingIsCancelledOnEveryExit(t *testing.T) {
+	for _, exit := range []string{"ctrl+d", "finishRun"} {
+		t.Run(exit, func(t *testing.T) {
+			m, fs, _ := newSessModel(t, 100, 30)
+			m = newList(t, m, fs)
+			m, cmd := typeList(t, m, "@~/projects/")
+			if cmd == nil || !m.sessList.in.at.pending() {
+				t.Fatal("fixture: no listing awaited")
+			}
+			switch exit {
+			case "ctrl+d":
+				m, _ = press(m, tea.KeyMsg{Type: tea.KeyCtrlD})
+				if !m.quitting || m.sessList.in.at.pending() {
+					t.Fatalf("ctrl+d: quitting %v, the popup still waits %v", m.quitting, m.sessList.in.at.pending())
+				}
+			case "finishRun":
+				finishRun(io.Discard, m, m, nil)
+			}
+			if lm := listLoad(t, cmd); !errors.Is(lm.res.Err, context.Canceled) {
+				t.Fatalf("the listing after the exit answered %v items, err %v", len(lm.res.Items), lm.res.Err)
+			}
+			if n := len(m.completeLoads.open); n != 0 {
+				t.Fatalf("%d loads left in the set", n)
+			}
+		})
+	}
+}
+
+// The browse listing's bounds (X137, sol r28-c14 3): it reads a directory
+// sessBrowseBatch entries at a time and stops at the first batch boundary
+// after its context is cancelled — forced there by the batch hook — and it
+// reads no more than sessBrowseReadMax entries of a directory holding more.
+func TestTheListingIsReadInBoundedBatches(t *testing.T) {
+	mkdirs := func(t *testing.T, n int) string {
+		t.Helper()
+		dir := t.TempDir()
+		for i := range n {
+			if err := os.Mkdir(filepath.Join(dir, fmt.Sprintf("d%05d", i)), 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return dir
+	}
+	var reads []int
+	sessListBatchHook = func(read int) { reads = append(reads, read) }
+	t.Cleanup(func() { sessListBatchHook = nil })
+
+	t.Run("cancelled between batches", func(t *testing.T) {
+		dir := mkdirs(t, 3*sessBrowseBatch)
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		reads = nil
+		sessListBatchHook = func(read int) {
+			reads = append(reads, read)
+			if len(reads) == 1 {
+				cancel()
+			}
+		}
+		res := sessListDirs(ctx, dir)
+		if !errors.Is(res.Err, context.Canceled) || !slices.Equal(reads, []int{sessBrowseBatch}) {
+			t.Fatalf("cancelled after the first batch: err %v, batches read to %v", res.Err, reads)
+		}
+	})
+	t.Run("the cap holds", func(t *testing.T) {
+		dir := mkdirs(t, sessBrowseReadMax+50)
+		reads = nil
+		sessListBatchHook = func(read int) { reads = append(reads, read) }
+		res := sessListDirs(context.Background(), dir)
+		if res.Err != nil || len(reads) == 0 || reads[len(reads)-1] != sessBrowseReadMax || len(res.Items) != sessBrowseReadMax {
+			last := 0
+			if len(reads) > 0 {
+				last = reads[len(reads)-1]
+			}
+			t.Fatalf("a directory of %d: read %d entries in %d batches, listed %d (err %v)",
+				sessBrowseReadMax+50, last, len(reads), len(res.Items), res.Err)
+		}
+		for i, r := range reads[:len(reads)-1] {
+			if r != (i+1)*sessBrowseBatch {
+				t.Fatalf("batch %d ended at %d: not %d at a time", i, r, sessBrowseBatch)
+			}
+		}
+	})
+}
+
+// A paste lands where it was asked for (X140, C15): one asked for in the
+// composer that arrives after the list opened lands in the composer's draft —
+// there when the user goes back — not the list's input; one asked for in the
+// list's input lands there, and not once the list has closed.
+func TestAPasteLandsWhereItWasAskedFor(t *testing.T) {
+	m, fs, _ := newSessModel(t, 100, 30)
+	m = newList(t, m, fs)
+	tm, _ := m.Update(pasteMsg{text: "a draft", shownGen: m.shownGen})
+	m = tm.(Model)
+	if v, _ := inputOf(m); v != "" || m.input.Value() != "a draft" {
+		t.Fatalf("the composer's paste: input %q, composer %q", v, m.input.Value())
+	}
+	tm, _ = m.Update(pasteMsg{text: "a prompt", shownGen: m.shownGen, list: true})
+	m = tm.(Model)
+	if v, _ := inputOf(m); v != "a prompt" || m.input.Value() != "a draft" {
+		t.Fatalf("the list's paste: input %q, composer %q", v, m.input.Value())
+	}
+	m, _ = press(m, tea.KeyMsg{Type: tea.KeyEsc})
+	m, _ = press(m, tea.KeyMsg{Type: tea.KeyEsc})
+	if m.sessList.open || m.input.Value() != "a draft" {
+		t.Fatalf("back in the session: list open %v, composer %q", m.sessList.open, m.input.Value())
+	}
+	tm, _ = m.Update(pasteMsg{text: " late", shownGen: m.shownGen, list: true})
+	if got := tm.(Model).input.Value(); got != "a draft" {
+		t.Fatalf("a paste for the closed list's input reached the composer: %q", got)
 	}
 }

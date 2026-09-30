@@ -656,6 +656,13 @@ var tuiSites = []tuiSite{
 	{"at_dirs.go", "sessListDirs", "Is", "io.EOF", 1, proofLocal},
 	{"sessions_input.go", "sessTargetRule", "Error", "t.err", 1, proofLocal},
 	{"sessions_input.go", "sessInputEnter", "Error", "err", 1, proofLocal},
+	// A background dispatch (plan 030 §3.13, C15): its prompt's answer read
+	// as the session's own — accepted or refused — unless the client could not
+	// learn the outcome (its connection went after sending, or closed under
+	// it), which it says itself and no host's refusal ever is; and its start
+	// given up at its own bound, the dispatch's context.
+	{"dispatch.go", "runDispatch", "Is", "backend.ErrOutcomeUnknown", 1, proofOutcome},
+	{"dispatch.go", "runDispatch", "Is", "context.DeadlineExceeded", 1, proofLocal},
 	{"theme.go", "noteAndSaveTheme", "Error", "err", 1, proofLocal},
 }
 

@@ -1171,3 +1171,67 @@ type funcSource struct {
 
 func (s *funcSource) completeID() string                      { return s.id }
 func (s *funcSource) complete(q completeQuery) completeAnswer { return s.answer(q) }
+
+// A dismissed token that is deleted takes its dismissal with it (sol r28-c14
+// 1): the same token pasted back in one action — ctrl+u, then `@foo` — is
+// another token, and the popup shows. Only the cursor leaving it — the token
+// still there — keeps it hidden, however far the cursor went.
+func TestADeletedTokenTakesItsDismissalWithIt(t *testing.T) {
+	src := &listSource{id: "list", items: named("foo", "food")}
+	env := completeEnv{Workspace: "/w"}
+	p := newCompletePopup(src, atGrammar)
+	synced(&p, "@foo", env)
+	popKey(&p, keyOf(tea.KeyEsc))
+	// The cursor leaves the token, the token still there: hidden, and hidden
+	// again once the cursor is back in it.
+	p.sync("@foo bar", len("@foo bar"), env)
+	if p.sync("@foo bar", 2, env); p.visible() {
+		t.Fatal("a dismissed token the cursor only left came back")
+	}
+	// Deleted (ctrl+u), then pasted back whole in one action: shown.
+	p.sync("", 0, env)
+	if synced(&p, "@foo", env); !p.visible() || !slices.Equal(popupNames(p), []string{"foo", "food"}) {
+		t.Fatalf("the token pasted back after its deletion: visible %v, %v", p.visible(), popupNames(p))
+	}
+	// Moved, not deleted — the same text at another place — is another token
+	// too.
+	popKey(&p, keyOf(tea.KeyEsc))
+	p.sync("x @foo", 0, env)
+	if synced(&p, "x @foo", env); !p.visible() {
+		t.Fatal("the token moved to another place stayed hidden")
+	}
+}
+
+// A popup's load is recorded in the model's set while it is awaited, and out
+// of it once it is not — taken, replaced, or the popup closed — so the set
+// finishRun cancels holds exactly the work still running (sol r28-c14 2).
+func TestAPopupsAwaitedLoadIsInTheModelsSet(t *testing.T) {
+	src := newTreeSource()
+	set := &completeLoadSet{}
+	p := newCompletePopup(src, atGrammar)
+	p.trackIn(set)
+	cmd := synced(&p, "@~/", completeEnv{Workspace: "/w"})
+	if cmd == nil || len(set.open) != 1 {
+		t.Fatalf("a load started: %v, the set holds %d", cmd != nil, len(set.open))
+	}
+	p.close()
+	if len(set.open) != 0 {
+		t.Fatalf("closed, the set still holds %d", len(set.open))
+	}
+	// One left running when the program ends is cancelled by the set.
+	var got context.Context
+	fsrc := &funcSource{id: "f", answer: func(q completeQuery) completeAnswer {
+		return completeAnswer{Load: &completeLoad{Key: "k", Run: func(ctx context.Context) completeLoaded {
+			got = ctx
+			return completeLoaded{}
+		}}}
+	}}
+	p = newCompletePopup(fsrc, atGrammar)
+	p.trackIn(set)
+	cmd = synced(&p, "@", completeEnv{})
+	set.cancelAll()
+	cmd()
+	if !errors.Is(got.Err(), context.Canceled) || len(set.open) != 0 {
+		t.Fatalf("after cancelAll the load's context is %v, the set holds %d", got.Err(), len(set.open))
+	}
+}

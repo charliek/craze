@@ -39,7 +39,8 @@ type Sessions interface {
 	// in the TUI.
 	Spawn(spec SpawnSpec) (roster.Ref, error)
 	// LeaveRunning keeps ref's host, which Spawn started, running when craze
-	// quits (PR 3's background dispatch, its prompt accepted), opened or not.
+	// quits (PR 3's background dispatch, its prompt accepted — or sent with
+	// no answer, when it may have been), opened or not.
 	// Its error says it cannot: craze is already exiting and has decided, or
 	// the host was stopped because an Open could not reach it. A ref Spawn
 	// did not answer is not craze's to stop, and is left as it is (nil). It

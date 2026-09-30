@@ -96,6 +96,17 @@ func (m Model) statusRow1() (string, []segSpan) {
 	if m.picking() {
 		return fitStatus([]statusPart{ws}, statusSep, dim, m.width)
 	}
+	if u := m.unstarted; u != nil && u.pending == 0 {
+		// A new session not spawned yet (plan 030 §3.13): nothing is
+		// starting until its first prompt, so the row says what it will run —
+		// its provider and model, as it was opened with them.
+		return fitStatus([]statusPart{
+			ws,
+			{text: m.branch, style: dim, drop: 2},
+			{text: m.snap.Provider.Label(), style: styleFG(m.theme.Provider), drop: 4},
+			{text: m.modelLabel(), style: styleFG(m.theme.FG), drop: 5, id: spanModel},
+		}, statusSep, dim, m.width)
+	}
 	if !m.sessionReady() && m.status != statusError {
 		// A loaded session is doing something more specific than starting: it
 		// is reading back a transcript, which is what the row says until the

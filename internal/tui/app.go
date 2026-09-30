@@ -647,8 +647,24 @@ type Model struct {
 	// answered after the user had moved on, until its close — a view close,
 	// made off the Update — has run (switch.go). Shared by every copy, as
 	// sessRosters is, so every exit path closes one whose close never ran
-	// (finishRun).
+	// (finishRun). A background dispatch's connection is here while it runs
+	// (dispatch.go), for the same reason.
 	retired *backendSet
+	// completeLoads is every completion popup's load still awaited (the
+	// list's `@` listing of a directory, complete.go), shared by every copy as
+	// retired is: a popup cancels its own as it closes, and finishRun cancels
+	// whatever a quit the popup never saw left running (sol r28-c14 2).
+	completeLoads *completeLoadSet
+	// unstarted is the session shown when it is a new one opened in place by
+	// the list's input with a leading `@dir` alone, not yet spawned (plan 030
+	// §3.13, dispatch.go): the model has no backend while it is set, and its
+	// first prompt spawns one. first is that prompt while the session its
+	// spawn adopted comes up: sent once it is up, or — the start failing —
+	// the session is unstarted again. unstartedSeq numbers the unstarted
+	// sessions' temporary draft ids and their spawns, for the TUI's life.
+	unstarted    *unstartedSession
+	first        *firstPrompt
+	unstartedSeq uint64
 
 	todoPlanned int
 	todoDone    bool
@@ -1563,13 +1579,14 @@ func New(cfg Config) Model {
 		viewer:          cfg.Viewer,
 		// Discard until Run says otherwise: a model built by a test, by
 		// `craze frame` or by any direct caller writes no OSC at all.
-		term:        newTerminalColors(io.Discard),
-		owner:       &sessionOwner{},
-		exit:        &exitState{},
-		shell:       newShellController(),
-		sessRosters: &sessRosterSet{},
-		retired:     &backendSet{},
-		gateSync:    gateSyncDefault,
+		term:          newTerminalColors(io.Discard),
+		owner:         &sessionOwner{},
+		exit:          &exitState{},
+		shell:         newShellController(),
+		sessRosters:   &sessRosterSet{},
+		retired:       &backendSet{},
+		completeLoads: &completeLoadSet{},
+		gateSync:      gateSyncDefault,
 		// The first session shown is shown from here, before any backend
 		// of it is adopted (shownGen): 1, so no message the program makes
 		// carries the zero stamp a test's hand-built one does.
@@ -1817,6 +1834,10 @@ func finishRun(out io.Writer, final tea.Model, m Model, h Host) (bool, error) {
 	// shared by every copy, so m reaches what the final model had open even
 	// when final is nil. Bounded: Close cancels every attempt in flight.
 	m.sessRosters.closeAll()
+	// A completion popup's load still running — the list's listing of a
+	// directory, a quit the popup never saw having ended the program (sol
+	// r28-c14 2) — is cancelled with it.
+	m.completeLoads.cancelAll()
 	// And a backend a switch let go of, or a dial answered after the user
 	// had moved on, whose close — a command — the program stopped before it
 	// ran (plan 030 §3.11): a view close each, bounded, side by side.
@@ -1980,12 +2001,20 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case tea.MouseMsg, dblClickMsg:
 			return m, nil
 		case pasteMsg:
-			// A paste lands in the list's input, where there is one (plan 030
-			// §3.13); without one it has nowhere to land.
-			if m.sessList.in.on && msg.text != "" {
-				return m.sessInputPaste(msg.text)
+			// A paste lands where it was asked for (X140, C15): one asked for
+			// in the list's input there, where there is one; one asked for in
+			// the composer before the list opened in the composer's draft,
+			// which is where the user finds it on going back.
+			if msg.text == "" {
+				return m, nil
 			}
-			return m, nil
+			if msg.list {
+				if m.sessList.in.on {
+					return m.sessInputPaste(msg.text)
+				}
+				return m, nil
+			}
+			return m, m.updateComposer(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(msg.text), Paste: true})
 		case endMsg:
 			m.ended, m.endErr = true, msg.err
 			m.sessionEnded(msg.err)
@@ -2028,6 +2057,15 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// attach — or on the way out after this client's own quit asked for
 		// the end, the program quits, and the final model says why (ended,
 		// endErr) for the command line's last word.
+		if f := m.first; f != nil && !m.quitting {
+			// The session an unstarted session's first prompt spawned ended
+			// before it came up: the same as its start failing (§3.13).
+			err := msg.err
+			if err == nil {
+				err = errors.New("the session ended before it started")
+			}
+			return m.backToUnstarted(*f, err)
+		}
 		m.ended, m.endErr = true, msg.err
 		if m.sessions != nil && !m.quitting {
 			if next, cmd, ok := m.endedToList(msg.err); ok {
@@ -2067,6 +2105,9 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case spawnedMsg:
 		return m.spawned(msg)
 
+	case unstartedSpawnedMsg:
+		return m.unstartedSpawned(msg)
+
 	case startedMsg:
 		// Half of the gate: Start has returned. For a new session that is the
 		// whole of it, and sessionUp runs from here exactly as it always has;
@@ -2084,6 +2125,12 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.eng.Started(nil)
 		}
 		m.comeUp()
+		if m.first != nil {
+			// An unstarted session's first prompt, now that the session its
+			// spawn adopted is up (plan 030 §3.13): through the ordinary
+			// submit path, with this TUI's own command numbering.
+			return m.sendFirst()
+		}
 		return m, nil
 
 	case errMsg:
@@ -2106,7 +2153,23 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// session the model now holds comes up as a late startedMsg
 			// would bring it up.
 			m.comeUp()
+			if m.first != nil {
+				return m.sendFirst()
+			}
 			return m, nil
+		}
+		if f := m.first; f != nil {
+			// The session an unstarted session's first prompt spawned did not
+			// come up: it is that unstarted session again, the error drawn
+			// and the prompt still in the composer (plan 030 §3.13). Not the
+			// session's start failure: nothing of it was up, and craze goes
+			// on. With the list up over it (its composer emptied and ← pressed
+			// meanwhile) the failure is the session's, as any start's is, and
+			// its prompt is dropped.
+			m.first = nil
+			if !m.sessList.open {
+				return m.backToUnstarted(*f, msg.err)
+			}
 		}
 		m.status = statusError
 		m.err = msg.err.Error()
@@ -2233,8 +2296,9 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// keyboard is by the time the text arrives. One asked for in a session
 		// the model has since left — before that session's backend was
 		// adopted included (C11r2) — never gets here: the gate dropped it
-		// (staleShown, pasteMsg).
-		if msg.text == "" || m.composerCovered() {
+		// (staleShown, pasteMsg). One asked for in the session list's input,
+		// which has closed since, had only that input to land in.
+		if msg.text == "" || msg.list || m.composerCovered() {
 			return m, nil
 		}
 		// One bracketed paste, the way a terminal delivers it: the textarea
@@ -2701,7 +2765,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.copySelectionOrLastReply()
 	}
 	if msg.Type == tea.KeyCtrlV {
-		return m, pasteFromClipboard(m.shownGen)
+		return m, pasteFromClipboard(m.shownGen, false)
 	}
 	if msg.Type == tea.KeyCtrlO {
 		return m.toggleExpanded()
@@ -3093,6 +3157,11 @@ func (m Model) handleEnter() (tea.Model, tea.Cmd) {
 		// touches the wire, and none is reachable while a card is up —
 		// handleKey hands the keyboard to the card before Enter gets here.
 		return m.runBuiltin(name, args)
+	}
+	if m.unstarted != nil {
+		// A new session not spawned yet (plan 030 §3.13): its first prompt
+		// spawns it. A builtin or a shell command needs a session to run in.
+		return m.enterUnstarted(ok && name != "" && builtinNamed(name))
 	}
 	// The offer outranks the sub-agent rows: an empty composer under a live
 	// offer means "build it", and the rows stay reachable for an empty

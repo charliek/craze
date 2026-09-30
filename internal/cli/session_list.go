@@ -301,11 +301,23 @@ func (l *launcher) cameUpLocked(hostID string) bool {
 	return false
 }
 
-// spawnFor spawns a host for spec's new session (plan 030 §3.13): the
-// launch's session flags, with spec's workspace, provider and model, and its
-// permission mode where it has one. It answers the host's ref as the roster
-// names it, which Open dials; a spawn that failed is a start failure or a
-// refusal as a launch's is (launchFailure).
+// spawnFor spawns a host for spec's new session (plan 030 §3.13): spec's
+// workspace, provider and model, and its permission mode where it has one —
+// the session the list was opened from's (Claude Code's rule), else the
+// launch's --force/--no-force. It answers the host's ref as the roster names
+// it, which Open dials; a spawn that failed is a start failure or a refusal
+// as a launch's is (launchFailure).
+//
+// Of the command line's own session flags a new session from the list takes
+// only what every spawn of this launch takes, as a resume from the list does
+// (openSaved, X111): the plugin directories, the host-status switch, and
+// --agent-bin, the launch's agent binary for whichever ACP provider runs —
+// the provider picker's choice takes it the same way, and CRAZE_AGENT_BIN,
+// which every host inherits, is read for any ACP provider too — but not for a
+// provider craze runs in process, which refuses it. Never --ask or --plan:
+// they were the command line's own session's mode, not every session the
+// list starts (plan 030 C15; per-dispatch modes are not built, as effort is
+// not).
 func (l *launcher) spawnFor(spec tui.SpawnSpec) (roster.Ref, error) {
 	done, err := l.begin()
 	if err != nil {
@@ -315,6 +327,10 @@ func (l *launcher) spawnFor(spec tui.SpawnSpec) (roster.Ref, error) {
 	f := l.flags
 	f.cont, f.resume = false, false
 	f.workspace, f.provider, f.model = spec.Workspace, spec.Provider.Name(), spec.Model
+	f.ask, f.plan = false, false
+	if spec.Provider.InProcess() {
+		f.agentBin = ""
+	}
 	switch spec.PermissionMode {
 	case backend.PermissionBypass:
 		f.force, f.noForce = true, false

@@ -239,6 +239,12 @@ func sessErrText(err error) string {
 	return sanitizeLine(err.Error())
 }
 
+// sessListBatchHook, when a test sets it, is called after each batch
+// sessListDirs reads, with the entries read so far: a test cancels a listing
+// between two batches there, and counts what a listing read. nil in
+// production.
+var sessListBatchHook func(read int)
+
 // sessListDirs is dir's subdirectories by name, sorted (case folded, then
 // byte order): a symbolic link to a directory is one. It reads at most
 // sessBrowseReadMax entries, sessBrowseBatch at a time, and gives up — with
@@ -262,6 +268,9 @@ func sessListDirs(ctx context.Context, dir string) completeLoaded {
 		}
 		ents, err := f.ReadDir(min(sessBrowseBatch, sessBrowseReadMax-read))
 		read += len(ents)
+		if sessListBatchHook != nil {
+			sessListBatchHook(read)
+		}
 		for _, e := range ents {
 			switch {
 			case e.IsDir():
@@ -339,7 +348,7 @@ func (m Model) sessDirCands() []sessDirCand {
 		seen[dir] = true
 		out = append(out, sessDirCand{dir: dir, note: note, tone: tone})
 	}
-	if here := m.sessHereDir(); here != "" {
+	if here := m.sessCameFrom(); here != "" {
 		note := "here"
 		if n := count[here]; n > 0 {
 			note = fmt.Sprintf("here · %d running", n)
@@ -356,13 +365,28 @@ func (m Model) sessDirCands() []sessDirCand {
 }
 
 // sessHereDir is the workspace of the session the list came from, cleaned:
-// here, the `@` picker's first row, the directory relative paths start from,
-// and the target when nothing else names one.
+// the directory relative paths start from, and — while that session is
+// behind the list (sessCameFrom) — here, the `@` picker's first row, and the
+// target when nothing else names one.
 func (m Model) sessHereDir() string {
 	if m.cwd == "" {
 		return ""
 	}
 	return filepath.Clean(m.cwd)
+}
+
+// sessCameFrom is here — the workspace of the session behind the list — or
+// "" when nothing is behind it (X142's note, C15): its connection was lost
+// (hereLost), whatever its host still does, or the list was opened over an
+// unstarted session and discarded it (none). Then the `@` picker offers no
+// here row, and a target no token names is the selected row's alone. Relative
+// paths still start from the TUI's last workspace (sessHereDir): `@.` there
+// is where the status row last said this terminal was.
+func (m Model) sessCameFrom() string {
+	if m.sessList.hereLost || m.sessList.none {
+		return ""
+	}
+	return m.sessHereDir()
 }
 
 // sessAtSource is the source as the list stands now.

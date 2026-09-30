@@ -21,7 +21,7 @@ import (
 // The session list's input (plan 030 §3.13's first two bullets, §3.15, owner
 // decisions 7–8, R2-11): one line under the rows, always focused, where a new
 // session is started — a prompt typed and `enter`, in a directory an `@`
-// picks (C15 sends it).
+// picks (dispatch.go starts it).
 //
 // It exists only when Config.Sessions can start sessions (SessionStarter,
 // checked as the list opens): without that the list is PR 2's, frame for
@@ -42,6 +42,10 @@ import (
 //     directory, and it alone opens the `@` popup (at_dirs.go); any later
 //     `@…` is prompt text the agent reads. Text typed before it makes it
 //     prompt text too, and the rule falls back to the row, live.
+//   - `enter` starts what the input holds (C15, dispatch.go): a prompt in
+//     the background — the input says starting… and takes nothing more until
+//     that answers — or, on a leading `@dir` alone, an unstarted session in
+//     place. `/exit` alone quits craze, every session left running.
 //   - Picking a candidate binds the token to that directory: the rule shows
 //     it whatever the list does meanwhile. Editing the token, or deleting it,
 //     drops the binding for good; `enter` then resolves the token afresh — a
@@ -56,8 +60,6 @@ const (
 	sessInputPlaceholder = "type a prompt to start a session · @ picks a directory"
 	sessEmptyNoteInput   = "No other sessions. Type a prompt below to start one."
 	sessNewRuleLead      = "new session → "
-	// sessNotBuiltNote is enter's word until C15 sends what the input holds.
-	sessNotBuiltNote = "starting a session from the list is not built yet"
 )
 
 // sessInputRows is the footer with an input: the rule naming the target, the
@@ -95,6 +97,11 @@ type sessInput struct {
 	statText string
 	statDir  string
 	statOK   bool
+	// dispatching is the background dispatch the input waits for
+	// (sessListState.dispatchSeq; 0 for none): while it runs the input says
+	// starting…, keeps what was typed for an outcome that gives it back, and
+	// takes no key of its own — a second enter among them.
+	dispatching uint64
 }
 
 // sessRecentsMsg is the index's recent directories, read for the list's
@@ -105,8 +112,9 @@ type sessRecentsMsg struct {
 	err  error
 }
 
-// newSessInput is an empty, focused input.
-func newSessInput() sessInput {
+// newSessInput is an empty, focused input, its popup's loads recorded in
+// loads (Model.completeLoads).
+func newSessInput(loads *completeLoadSet) sessInput {
 	ti := textinput.New()
 	ti.Prompt = ""
 	// A static cursor starts no blink timer nothing would route back, and
@@ -117,7 +125,9 @@ func newSessInput() sessInput {
 	// knows, which the list never hands it.
 	ti.KeyMap.Paste = key.NewBinding(key.WithDisabled())
 	ti.Focus()
-	return sessInput{on: true, ti: ti, at: newCompletePopup(sessDirSource{}, sessLeadGrammar)}
+	at := newCompletePopup(sessDirSource{}, sessLeadGrammar)
+	at.trackIn(loads)
+	return sessInput{on: true, ti: ti, at: at}
 }
 
 // readRecents reads the index's recent directories off the Update, for the
@@ -180,6 +190,12 @@ func (m *Model) syncSessInput() tea.Cmd {
 	if !in.on {
 		return nil
 	}
+	if in.dispatching != 0 {
+		// Starting: the input is not edited, and no popup opens over it
+		// until the dispatch answers (dispatch.go).
+		in.at.close()
+		return nil
+	}
 	v := in.ti.Value()
 	lead, hasLead := sessLeadToken(v)
 	if in.boundTok != "" && (!hasLead || v[lead.start:lead.end] != in.boundTok) {
@@ -224,6 +240,16 @@ func (in *sessInput) set(value string, cur int) {
 // ctrl+s, ctrl+x, ↑/↓, and esc, ←, → and enter while nothing is typed.
 func (m Model) sessInputKey(msg tea.KeyMsg) (Model, tea.Cmd, bool) {
 	in := &m.sessList.in
+	if in.dispatching != 0 {
+		// Starting: the list's own keys are the list's — esc and ← leave it,
+		// the dispatch going on without it — and every other key, enter's
+		// second press among them, does nothing (§3.13).
+		switch msg.Type {
+		case tea.KeyCtrlD, tea.KeyCtrlC, tea.KeyCtrlS, tea.KeyCtrlX, tea.KeyUp, tea.KeyDown, tea.KeyEsc, tea.KeyLeft:
+			return m, nil, false
+		}
+		return m, nil, true
+	}
 	if in.at.visible() {
 		choice, handled := in.at.key(msg)
 		if handled {
@@ -266,7 +292,7 @@ func (m Model) sessInputKey(msg tea.KeyMsg) (Model, tea.Cmd, bool) {
 		// Nothing to complete: tab never submits (§3.15).
 		return m, nil, true
 	case tea.KeyCtrlV:
-		return m, pasteFromClipboard(m.shownGen), true
+		return m, pasteFromClipboard(m.shownGen, true), true
 	}
 	before, pos := in.ti.Value(), in.ti.Position()
 	var cmd tea.Cmd
@@ -283,22 +309,47 @@ func (m Model) sessInputKey(msg tea.KeyMsg) (Model, tea.Cmd, bool) {
 // to spaces.
 func (m Model) sessInputPaste(text string) (Model, tea.Cmd) {
 	in := &m.sessList.in
+	if in.dispatching != 0 {
+		// Starting: the input is not edited until the dispatch answers.
+		return m, nil
+	}
 	var cmd tea.Cmd
 	in.ti, cmd = in.ti.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(text), Paste: true})
 	sync := m.syncSessInput()
 	return m, tea.Batch(cmd, sync)
 }
 
-// sessInputEnter is enter with something typed and no popup taking it: what
-// the input holds is resolved (sessSubmit) — an `@` token that names no
-// directory, or more than one, says so and nothing happens — and sent (C15).
+// sessInputEnter is enter with something typed and no popup taking it
+// (§3.13): `/exit` alone quits craze, every session left running (decision
+// 11); anything else is resolved (sessSubmit) — an `@` token that names no
+// directory, or more than one, and a list with no directory to fall back to,
+// say so and nothing starts — and started, with the target, provider, model
+// and permission mode captured now (sessNewSpec): a prompt in the background
+// (sessDispatch), a leading `@dir` alone as an unstarted session in place
+// (openUnstarted).
 func (m Model) sessInputEnter() (Model, tea.Cmd, bool) {
-	if _, err := m.sessSubmit(); err != nil {
+	if name, args, ok := parseSlashLine(m.sessList.in.ti.Value()); ok && name == "exit" && args == "" {
+		tm, cmd := m.sessQuit()
+		return tm.(Model), cmd, true
+	}
+	sub, err := m.sessSubmit()
+	if err == nil && sub.Dir == "" {
+		err = errors.New(sessNoTargetNote)
+	}
+	var spec SpawnSpec
+	if err == nil {
+		spec, err = m.sessNewSpec(sub.Dir)
+	}
+	if err != nil {
 		m.sessNote(err.Error(), sessNoteErr)
 		return m, nil, true
 	}
-	m.sessNote(sessNotBuiltNote, sessNoteWarn)
-	return m, nil, true
+	if sub.Prompt == "" {
+		next, cmd := m.openUnstarted(spec)
+		return next, cmd, true
+	}
+	next, cmd := m.sessDispatch(spec, sub.Prompt)
+	return next, cmd, true
 }
 
 // ------------------------------------------------------------ the target
@@ -351,12 +402,18 @@ func (m Model) sessTargetNow() sessTarget {
 
 // sessFallback is the target no token names (owner decision 8): the selected
 // row's workspace — running or saved — else the workspace of the session the
-// list came from.
+// list came from, when there is one behind the list (sessCameFrom): after
+// its connection was lost, or once an unstarted session was discarded, there
+// is none (X142), and with no row selected either there is nowhere to start
+// — the rule says so, and enter starts nothing.
 func (m Model) sessFallback() sessTarget {
 	if r, ok := m.sessSelected(); ok && r.workspace != "" {
 		return sessTarget{dir: r.workspace, kind: sessTargetRow}
 	}
-	return sessTarget{dir: m.sessHereDir(), kind: sessTargetHere}
+	if dir := m.sessCameFrom(); dir != "" {
+		return sessTarget{dir: dir, kind: sessTargetHere}
+	}
+	return sessTarget{err: errors.New(sessNoTargetNote)}
 }
 
 // sessResolveName is a name token's directory: the one candidate whose
@@ -380,10 +437,10 @@ func (m Model) sessResolveName(name string) sessTarget {
 // sessNoDir is a path token that names no directory.
 func sessNoDir(text string) error { return errors.New("no directory " + sanitizeLine(text)) }
 
-// sessSubmission is what enter on the list's input starts (C15 dispatches it,
-// §3.13): the directory it runs in, and the prompt — the input without its
-// leading `@` token, which only chose the directory (R2-11). An empty
-// prompt is enter on the token alone: C15's unstarted session there.
+// sessSubmission is what enter on the list's input starts (§3.13,
+// dispatch.go): the directory it runs in, and the prompt — the input without
+// its leading `@` token, which only chose the directory (R2-11). An empty
+// prompt is enter on the token alone: the unstarted session there.
 type sessSubmission struct {
 	Dir    string
 	Prompt string
@@ -400,6 +457,9 @@ func (m Model) sessSubmit() (sessSubmission, error) {
 	lead, ok := sessLeadToken(v)
 	if !ok {
 		t := m.sessFallback()
+		if t.err != nil {
+			return sessSubmission{}, t.err
+		}
 		return sessSubmission{Dir: t.dir, Prompt: strings.TrimSpace(v)}, nil
 	}
 	sub := sessSubmission{Prompt: strings.TrimSpace(v[lead.end:])}
@@ -500,6 +560,10 @@ func (m Model) sessInputRow(width int) string {
 	prompt := seg{sessInputPrompt, styleFG(th.Accent)}
 	cur := lipgloss.NewStyle().Reverse(true)
 	v := in.ti.Value()
+	if in.dispatching != 0 {
+		// What was typed is kept, not shown: the session it starts is.
+		return renderSegs(width, prompt, seg{dispatchStartingText, styleFG(th.Dim)})
+	}
 	if v == "" {
 		ph := []rune(sessInputPlaceholder)
 		return renderSegs(width, prompt, seg{string(ph[:1]), cur.Foreground(th.Dim)}, seg{string(ph[1:]), styleFG(th.Dim)})
@@ -593,6 +657,9 @@ func (m Model) sessInputHint(key, txt func(string) seg) []seg {
 	in := m.sessList.in
 	if !in.on {
 		return nil
+	}
+	if in.dispatching != 0 {
+		return []seg{txt("starting it in the background · "), key("esc"), txt(" back")}
 	}
 	v := in.ti.Value()
 	lead, hasLead := sessLeadToken(v)

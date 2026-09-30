@@ -226,23 +226,29 @@ func lineCount(s string) int {
 type pasteMsg struct {
 	text     string
 	shownGen uint64
+	// list says it was asked for in the session list's input (plan 030
+	// §3.13), not the composer: each lands where it was asked for (X140) —
+	// the composer's paste in the composer's draft even once the list has
+	// opened over it, the list's in its input only while the list is up.
+	list bool
 }
 
 // pasteFromClipboard is Ctrl+V. bubbles' own binding calls clipboard.ReadAll
 // from inside the textarea (textarea.go:1391), which would run xclip under a
 // test or a frame script, so craze binds the key itself and reads through the
 // seam. Like copyText, the seam is read on the Update goroutine; shown is the
-// shown-session generation the paste is for (pasteMsg).
-func pasteFromClipboard(shown uint64) tea.Cmd {
+// shown-session generation the paste is for, and list says it is for the
+// session list's input rather than the composer (pasteMsg).
+func pasteFromClipboard(shown uint64, list bool) tea.Cmd {
 	read := clipboardRead
 	return func() tea.Msg {
 		// A box with no clipboard tool pastes nothing, quietly: an error line
 		// for a keystroke that had nothing to insert is noise.
 		text, err := read()
 		if err != nil {
-			return pasteMsg{shownGen: shown}
+			return pasteMsg{shownGen: shown, list: list}
 		}
-		return pasteMsg{text: text, shownGen: shown}
+		return pasteMsg{text: text, shownGen: shown, list: list}
 	}
 }
 

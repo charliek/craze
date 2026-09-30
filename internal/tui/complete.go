@@ -6,6 +6,7 @@ import (
 	"maps"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"unicode"
 	"unicode/utf8"
@@ -415,11 +416,61 @@ type completeWait struct {
 	cancel context.CancelFunc
 }
 
+// completeLoadSet is every popup load still awaited, by its number, with the
+// cancel of the context its work runs under: shared by every copy of the model
+// (Model.completeLoads), as the roster set is, so a quit the popup never saw —
+// a signal, a program error — cancels what it left running (finishRun; sol
+// r28-c14 2). A popup adds a load as it starts it and takes it out as it stops
+// awaiting it (cancelWait). Nil — a popup a test built on its own — holds
+// nothing, and every method allows it.
+type completeLoadSet struct {
+	mu   sync.Mutex
+	open map[uint64]context.CancelFunc
+}
+
+func (s *completeLoadSet) add(seq uint64, cancel context.CancelFunc) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.open == nil {
+		s.open = map[uint64]context.CancelFunc{}
+	}
+	s.open[seq] = cancel
+}
+
+func (s *completeLoadSet) done(seq uint64) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.open, seq)
+}
+
+// cancelAll cancels every load still awaited: finishRun's, on every exit path.
+func (s *completeLoadSet) cancelAll() {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	open := s.open
+	s.open = nil
+	s.mu.Unlock()
+	for _, cancel := range open {
+		cancel()
+	}
+}
+
 // completePopup is one popup: the token it is open on, what its source last
 // answered, the selection and the window, and its loads.
 type completePopup struct {
 	src     completeSource
 	grammar completeGrammar
+	// loadSet is the model's set of awaited loads (Model.completeLoads) this
+	// popup's are recorded in, kept across its openings; nil records nothing.
+	loadSet *completeLoadSet
 
 	// open says the popup is up, gen names this opening (completeSeq), env
 	// is where it opened.
@@ -460,6 +511,9 @@ func newCompletePopup(src completeSource, g completeGrammar) completePopup {
 	return completePopup{src: src, grammar: g}
 }
 
+// trackIn records the popup's loads in set (Model.completeLoads) from now on.
+func (p *completePopup) trackIn(set *completeLoadSet) { p.loadSet = set }
+
 // setSource hands the popup its source as it stands now, for an owner whose
 // candidates move under the popup — the session list's `@` directories
 // follow the rows it lists (at_dirs.go) — before it syncs the popup or hands
@@ -480,6 +534,12 @@ func (p completePopup) visible() bool { return p.open }
 func (p *completePopup) sync(value string, cursor int, env completeEnv) tea.Cmd {
 	tok, ok := p.grammar.under(value, cursor)
 	if !ok {
+		if p.hideKey != "" && !p.hiddenIn(value) {
+			// The token esc hid is gone from the input — deleted, not only
+			// left by the cursor: the dismissal was that token's, and one
+			// typed or pasted in its place is another (sol r28-c14 1).
+			p.hideKey, p.hideEnv = "", completeEnv{}
+		}
 		p.close()
 		return nil
 	}
@@ -506,6 +566,23 @@ func (p *completePopup) sync(value string, cursor int, env completeEnv) tea.Cmd 
 	}
 	p.value, p.cursor, p.tok, p.tokKey = value, cursor, tok, key
 	return p.ask(fresh)
+}
+
+// hiddenIn says the token esc hid is still in value, where it was: the same
+// text at the same place, and still a whole token there.
+func (p completePopup) hiddenIn(value string) bool {
+	i := strings.IndexByte(p.hideKey, ':')
+	if i < 0 {
+		return false
+	}
+	start, err := strconv.Atoi(p.hideKey[:i])
+	text := p.hideKey[i+1:]
+	end := start + len(text)
+	if err != nil || start < 0 || end > len(value) || value[start:end] != text {
+		return false
+	}
+	tok, ok := p.grammar.under(value, end)
+	return ok && tok.start == start && tok.end == end
 }
 
 // ask puts the token's query to the source and installs the answer — fresh
@@ -540,6 +617,7 @@ func (p *completePopup) startLoad(l completeLoad) tea.Cmd {
 	ctx, cancel := context.WithCancel(context.Background())
 	seq := completeSeq.Add(1)
 	p.wait, p.waiting = completeWait{key: l.Key, seq: seq, cancel: cancel}, true
+	p.loadSet.add(seq, cancel)
 	stamp := completeLoadedMsg{
 		source: p.src.completeID(), workspace: p.env.Workspace, gen: p.gen, shownGen: p.env.Shown,
 		query: p.tok.text, key: l.Key, seq: seq,
@@ -556,6 +634,9 @@ func (p *completePopup) startLoad(l completeLoad) tea.Cmd {
 func (p *completePopup) cancelWait() {
 	if p.waiting && p.wait.cancel != nil {
 		p.wait.cancel()
+	}
+	if p.waiting {
+		p.loadSet.done(p.wait.seq)
 	}
 	p.wait, p.waiting = completeWait{}, false
 }
@@ -590,7 +671,7 @@ func (p *completePopup) loaded(msg completeLoadedMsg) (tea.Cmd, bool) {
 func (p *completePopup) close() {
 	p.cancelWait()
 	hide, hideEnv := p.hideKey, p.hideEnv
-	*p = completePopup{src: p.src, grammar: p.grammar, hideKey: hide, hideEnv: hideEnv}
+	*p = completePopup{src: p.src, grammar: p.grammar, loadSet: p.loadSet, hideKey: hide, hideEnv: hideEnv}
 }
 
 // install makes ans the popup's answer. Candidates whose text the grammar

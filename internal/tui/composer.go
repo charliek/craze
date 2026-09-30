@@ -268,6 +268,11 @@ func (m Model) composerHint() string {
 	if p := m.planPlaceholder(); p != "" {
 		return p
 	}
+	if u := m.unstarted; u != nil && u.pending == 0 && m.input.Value() == "" {
+		// A new session not spawned yet (plan 030 §3.13): its first prompt is
+		// what starts it.
+		return clampWidth(unstartedHint, m.composerInner())
+	}
 	// A card owns the keyboard, so neither verb is available under one.
 	if m.status != statusWorking || m.cardOpen() || m.input.Value() != "" {
 		return ""

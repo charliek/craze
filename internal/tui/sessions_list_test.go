@@ -42,6 +42,15 @@ type fakeSessions struct {
 	cancelErr error
 	stopErr   error
 	open      func(roster.Ref) (backend.Backend, error)
+	// spawn answers Spawn (C15's dispatch and unstarted session); nil keeps
+	// PR 2's refusal. spawns and leaves are what Spawn and LeaveRunning were
+	// asked, leave LeaveRunning's answer (nil: kept), and note, when set, is
+	// told each call in order ("spawn", "open", "leave", "stop").
+	spawn  func(SpawnSpec) (roster.Ref, error)
+	spawns []SpawnSpec
+	leaves []roster.Ref
+	leave  func(roster.Ref) error
+	note   func(string)
 }
 
 var _ Sessions = (*fakeSessions)(nil)
@@ -59,6 +68,7 @@ func (f *fakeSessions) Open(ref roster.Ref) (backend.Backend, error) {
 	f.opens = append(f.opens, ref)
 	open := f.open
 	f.mu.Unlock()
+	f.told("open")
 	if open == nil {
 		return nil, errors.New("fakeSessions: no session to open")
 	}
@@ -72,17 +82,47 @@ func (f *fakeSessions) opened() []roster.Ref {
 	return slices.Clone(f.opens)
 }
 
-func (f *fakeSessions) Spawn(SpawnSpec) (roster.Ref, error) {
-	return roster.Ref{}, errors.New("fakeSessions: Spawn is PR 3's")
+func (f *fakeSessions) Spawn(spec SpawnSpec) (roster.Ref, error) {
+	f.mu.Lock()
+	f.spawns = append(f.spawns, spec)
+	spawn := f.spawn
+	f.mu.Unlock()
+	f.told("spawn")
+	if spawn == nil {
+		return roster.Ref{}, errors.New("fakeSessions: Spawn is PR 3's")
+	}
+	return spawn(spec)
 }
 
-func (f *fakeSessions) LeaveRunning(roster.Ref) error { return nil }
+func (f *fakeSessions) LeaveRunning(ref roster.Ref) error {
+	f.mu.Lock()
+	f.leaves = append(f.leaves, ref)
+	leave := f.leave
+	f.mu.Unlock()
+	f.told("leave")
+	if leave == nil {
+		return nil
+	}
+	return leave(ref)
+}
 
 func (f *fakeSessions) Stop(ref roster.Ref) error {
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	f.stops = append(f.stops, ref)
-	return f.stopErr
+	err := f.stopErr
+	f.mu.Unlock()
+	f.told("stop")
+	return err
+}
+
+// told tells note, when there is one, what was called.
+func (f *fakeSessions) told(what string) {
+	f.mu.Lock()
+	note := f.note
+	f.mu.Unlock()
+	if note != nil {
+		note(what)
+	}
 }
 
 func (f *fakeSessions) Cancel(ref roster.Ref) error {
