@@ -216,6 +216,102 @@ func atReaped(t *testing.T, pid int) {
 	}
 }
 
+// atHooks is a searcher's hooks as a test awaits them: the candidates the
+// search has built after each batch it took (built, told on the search's
+// goroutine), and the listing's goroutine's end (ended) — which a test awaits
+// before it says the tool was reaped, or reads what a hook on the listing's
+// goroutine wrote, whenever the search may have answered without waiting for
+// its listing (its deadline, its cancel).
+type atHooks struct {
+	builds chan int
+	ends   chan struct{}
+}
+
+// hook sets s's built and ended hooks to h's.
+func (h atHooks) hook(s *atFileSearcher) {
+	s.built = func(n int) { h.builds <- n }
+	s.ended = func() { h.ends <- struct{}{} }
+}
+
+func newAtHooks() atHooks {
+	return atHooks{builds: make(chan int, 64), ends: make(chan struct{}, 1)}
+}
+
+// builtTo waits until the search has built n candidates.
+func (h atHooks) builtTo(t *testing.T, n int) {
+	t.Helper()
+	for {
+		got := atAwait(t, h.builds, fmt.Sprintf("the search building %d candidates", n))
+		if got == n {
+			return
+		}
+		if got > n {
+			t.Fatalf("the search built %d candidates, past %d", got, n)
+		}
+	}
+}
+
+// joined waits for the listing's goroutine to end.
+func (h atHooks) joined(t *testing.T) {
+	t.Helper()
+	atAwait(t, h.ends, "the listing's end")
+}
+
+// atHeldDirs is the walk's directories (openDir) with one read held: the
+// at'th ReadDir of the walk, counted over every directory, closes stuck and
+// waits for release before it reads — a directory read a stalled disk holds
+// up. Only the listing's goroutine reads directories, so n needs no lock.
+type atHeldDirs struct {
+	at      int
+	n       int
+	stuck   chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func newAtHeldDirs(t *testing.T, at int) *atHeldDirs {
+	h := &atHeldDirs{at: at, stuck: make(chan struct{}), release: make(chan struct{})}
+	// A test that fails before its release must not leave the walk held.
+	t.Cleanup(h.free)
+	return h
+}
+
+// free releases the held read.
+func (h *atHeldDirs) free() { h.once.Do(func() { close(h.release) }) }
+
+func (h *atHeldDirs) open(name string) (atDir, error) {
+	f, err := os.Open(name)
+	if err != nil {
+		return nil, err
+	}
+	return atHeldDir{File: f, h: h}, nil
+}
+
+type atHeldDir struct {
+	*os.File
+	h *atHeldDirs
+}
+
+func (d atHeldDir) ReadDir(n int) ([]os.DirEntry, error) {
+	if d.h.n++; d.h.n == d.h.at {
+		close(d.h.stuck)
+		<-d.h.release
+	}
+	return d.File.ReadDir(n)
+}
+
+// atFlatTree is a root holding n empty files and nothing else.
+func atFlatTree(t *testing.T, n int) string {
+	t.Helper()
+	root := t.TempDir()
+	for i := range n {
+		if err := os.WriteFile(filepath.Join(root, fmt.Sprintf("f%04d", i)), nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return root
+}
+
 // atAwait is the next value on ch, within one step.
 func atAwait[T any](t *testing.T, ch <-chan T, what string) T {
 	t.Helper()
@@ -252,6 +348,45 @@ func atTree(t *testing.T, names ...string) string {
 	return root
 }
 
+// newAtFileIndex is the index of the files at paths as a search builds it —
+// each kept by a listing (atListing: its directories derived, its caps held
+// to), built as the listing hands it over (atBuild), then ordered — in one
+// goroutine, for a test or a benchmark with a listing of its own.
+func newAtFileIndex(paths []string, title string) *atFileIndex {
+	var b atBuild
+	l := newAtListing(context.Background(), "", func(batch []string) bool { b.add(batch); return true }, false)
+	for _, p := range paths {
+		if !l.add(p) {
+			break
+		}
+	}
+	l.flush()
+	x, _ := b.index()
+	x.title = title
+	return x
+}
+
+// atKept is a listing whose every batch is kept, in the order handed over:
+// what a listing hands the search, for a test that plays the search.
+type atKept struct {
+	mu      sync.Mutex
+	batches [][]string
+}
+
+func (k *atKept) emit(batch []string) bool {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	k.batches = append(k.batches, batch)
+	return true
+}
+
+// all is every candidate handed over, in order.
+func (k *atKept) all() []string {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	return slices.Concat(k.batches...)
+}
+
 // matchNames is the names the index offers for query, best first, and how
 // many more matched.
 func matchNames(x *atFileIndex, query string, k int) ([]string, int) {
@@ -286,10 +421,14 @@ func TestAtFilesReadsNULSeparatedPaths(t *testing.T) {
 	}
 	var counts []int
 	s := atFileSearcher{read: func(n int) { counts = append(counts, n) }}
-	paths, capped, err := s.readPaths(&in)
-	want := []string{"a.go", "sp ace.txt", "ünï/cödé.go", "dot/x.go", "after/long.go", "last-without-nul"}
-	if err != nil || capped || !slices.Equal(paths, want) {
-		t.Fatalf("read %q (capped %v, err %v), want %q", paths, capped, err, want)
+	var kept atKept
+	l := newAtListing(context.Background(), "", kept.emit, false)
+	capped, err := s.readPaths(&in, l)
+	l.flush()
+	// Each file after the directories it brought.
+	want := []string{"a.go", "sp ace.txt", "ünï/", "ünï/cödé.go", "dot/", "dot/x.go", "after/", "after/long.go", "last-without-nul"}
+	if got := kept.all(); err != nil || capped || !slices.Equal(got, want) {
+		t.Fatalf("read %q (capped %v, err %v), want %q", got, capped, err, want)
 	}
 	// Every non-empty record counts toward the cap, offered or not — the
 	// long one too.
@@ -670,9 +809,10 @@ func TestAtFilesListsWithRipgrep(t *testing.T) {
 }
 
 // Without rg, a git work tree is listed by git ls-files (§3.16): its command
-// line exactly, run in the workspace.
+// line exactly, run in the workspace. (What it lists is checked on disk:
+// TestAtFilesGitOffersOnlyWhatIsThere.)
 func TestAtFilesFallsBackToGitLsFiles(t *testing.T) {
-	root := t.TempDir()
+	root := atTree(t, "tracked.go", "untracked/new.go")
 	fakes := atFakes(t, map[string]string{"git": atPrintPaths("tracked.go", "untracked/new.go", "tracked.go")})
 	x := atIndexOf(t, atSearch(t, atSearcherFor(newAtClock(), fakes.tools, true), context.Background(), root))
 	if want := []string{"tracked.go", "untracked/", "untracked/new.go"}; !slices.Equal(x.names, want) {
@@ -684,6 +824,40 @@ func TestAtFilesFallsBackToGitLsFiles(t *testing.T) {
 	wantCwd, _ := filepath.EvalSymlinks(root)
 	if got := strings.TrimSpace(fakes.record(t, "git", "cwd")); got != wantCwd {
 		t.Fatalf("git ran in %q, want %q", got, wantCwd)
+	}
+}
+
+// git lists what it tracks, whatever it has since become; its listing is
+// checked on disk (C17r), so that it offers what rg and the walk would —
+// neither lists a symbolic link or anything reached through one — and nothing
+// that leads outside the workspace. Refused: a tracked link to a file inside
+// or outside; a tracked file under a directory since replaced by a link to
+// one outside (and that link, which git lists as untracked); a file since
+// deleted; a submodule (a directory git lists as one entry). A directory
+// holding only a refused file is not offered: no file of its own brought it.
+func TestAtFilesGitOffersOnlyWhatIsThere(t *testing.T) {
+	outside := atTree(t, "o.go", "f.go")
+	root := atTree(t, "a.go", "real/x.go", "only/keep.txt", "sub/inner.go")
+	for link, target := range map[string]string{
+		"link.go":    filepath.Join(root, "a.go"),
+		"out.go":     filepath.Join(outside, "o.go"),
+		"moved":      outside,
+		"real/ln.go": filepath.Join(root, "a.go"),
+		"only/ln.go": filepath.Join(outside, "o.go"),
+	} {
+		if err := os.Symlink(target, filepath.Join(root, link)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Remove(filepath.Join(root, "only/keep.txt")); err != nil {
+		t.Fatal(err)
+	}
+	fakes := atFakes(t, map[string]string{"git": atPrintPaths(
+		"a.go", "link.go", "out.go", "moved/f.go", "moved", "real/x.go", "real/ln.go", "gone.go", "sub", "only/ln.go",
+	)})
+	x := atIndexOf(t, atSearch(t, atSearcherFor(newAtClock(), fakes.tools, true), context.Background(), root))
+	if want := []string{"a.go", "real/", "real/x.go"}; !slices.Equal(x.names, want) || x.title != "" {
+		t.Fatalf("offered %q (title %q), want %q", x.names, x.title, want)
 	}
 }
 
@@ -841,23 +1015,100 @@ func TestAtFilesWalkStopsAtItsCap(t *testing.T) {
 	}
 }
 
-// The timeout (§3.16), fired by the test once the tool has printed and
-// stalled: the tool is killed and reaped, and what it printed is offered as
-// a partial list; a tool that printed nothing by then is the red note. The
-// walk stops at it between batches the same way.
+// What a listing holds is bounded however its paths are shaped (C17r): its
+// candidates — the files and every directory derived from them — at
+// atFilesHoldMax, and their bytes at atFilesBytesMax. A path that would take
+// it past either stops the listing there, as the paths' cap does: the tool
+// killed and reaped, what was kept offered, titled with the files it holds.
+func TestAtFilesCapsWhatTheListingHolds(t *testing.T) {
+	// search lists paths with a fake rg — which then stalls, its output open,
+	// when stall says so: only a cap ends that listing.
+	search := func(t *testing.T, paths []string, stall bool) (*atFileIndex, int) {
+		t.Helper()
+		body := atPrintPaths(paths...)
+		if stall {
+			body += "\n" + atStall
+		}
+		fakes := atFakes(t, map[string]string{"rg": body})
+		s := atSearcherFor(newAtClock(), fakes.tools, false)
+		pids := make(chan int, 1)
+		s.started = func(pid int) { pids <- pid }
+		x := atIndexOf(t, atSearch(t, s, context.Background(), t.TempDir()))
+		atReaped(t, atAwait(t, pids, "the tool's pid"))
+		files := 0
+		for _, n := range x.names {
+			if !strings.HasSuffix(n, "/") {
+				files++
+			}
+		}
+		return x, files
+	}
+	// The directories: each file three deep brings three of its own, four
+	// candidates a file — the listing is full at 25,000 files, far short of
+	// the paths' cap.
+	t.Run("directories", func(t *testing.T) {
+		var paths []string
+		for i := range atFilesHoldMax/4 + 50 {
+			paths = append(paths, fmt.Sprintf("p%05d/a/b/f", i))
+		}
+		x, files := search(t, paths, true)
+		if len(x.names) != atFilesHoldMax || files != atFilesHoldMax/4 || x.title != "only the first 25,000 files" {
+			t.Fatalf("held %d candidates, %d files (title %q)", len(x.names), files, x.title)
+		}
+		if last := x.names[len(x.names)-1]; last != "p24999/a/b/f" {
+			t.Fatalf("the last file kept is %q", last)
+		}
+	})
+	// The bytes: each file 30 directories deep, the directories' names the
+	// most of its bytes — 4,096 a file, its 31 candidates together, so the
+	// listing is full at 2,048 files, short of both other caps.
+	t.Run("bytes", func(t *testing.T) {
+		seg, name := strings.Repeat("s", 7)+"/", strings.Repeat("f", 198)
+		var paths []string
+		for i := range atFilesBytesMax/4096 + 50 {
+			paths = append(paths, fmt.Sprintf("d%04d/", i)+strings.Repeat(seg, 29)+name)
+		}
+		// The premise: a file and its directories are 4,096 bytes.
+		cost := len(paths[0])
+		for i := strings.IndexByte(paths[0], '/'); i >= 0; i = atNextSlash(paths[0], i) {
+			cost += i + 1
+		}
+		if cost != 4096 {
+			t.Fatalf("the premise: a path costs %d bytes", cost)
+		}
+		x, files := search(t, paths, true)
+		if files != atFilesBytesMax/4096 || len(x.names) != files*31 || x.title != "only the first 2,048 files" {
+			t.Fatalf("held %d candidates, %d files (title %q)", len(x.names), files, x.title)
+		}
+	})
+	// A path no listing could hold — 4,000 directories deep, their names
+	// some 16 MB together — is dropped as a record too long is, and the
+	// listing goes on without it, whole.
+	t.Run("a path too deep for any listing", func(t *testing.T) {
+		x, _ := search(t, []string{"x.go", strings.Repeat("a/", 4000) + "f", "y/z.go"}, false)
+		if !slices.Equal(x.names, []string{"y/", "x.go", "y/z.go"}) || x.title != "" {
+			t.Fatalf("offered %q (title %q)", x.names, x.title)
+		}
+	})
+}
+
+// The timeout (§3.16), fired by the test once the search has built what the
+// tool printed before it stalled: the tool is killed and reaped, and what was
+// built is offered as a partial list; a tool that printed nothing by then is
+// the red note.
 func TestAtFilesTimeoutStopsTheSearch(t *testing.T) {
 	t.Run("rg printed some", func(t *testing.T) {
 		fakes := atFakes(t, map[string]string{"rg": atPrintPaths("a.go", "b/c.go") + "\n" + atStall})
 		clock := newAtClock()
 		s := atSearcherFor(clock, fakes.tools, false)
-		pids, reads := make(chan int, 1), make(chan int, 4)
+		pids, hooks := make(chan int, 1), newAtHooks()
 		s.started = func(pid int) { pids <- pid }
-		s.read = func(n int) { reads <- n }
+		hooks.hook(&s)
 		ch := make(chan completeLoaded, 1)
 		go func() { ch <- s.search(context.Background(), t.TempDir()) }()
 		pid := atAwait(t, pids, "the tool's start")
-		atAwait(t, reads, "the first path")
-		atAwait(t, reads, "the second path")
+		// a.go, and b/c.go with the b/ it brought: all the tool printed.
+		hooks.builtTo(t, 3)
 		if !clock.fire() {
 			t.Fatal("the search never armed its timer")
 		}
@@ -865,14 +1116,16 @@ func TestAtFilesTimeoutStopsTheSearch(t *testing.T) {
 		if !slices.Equal(x.names, []string{"b/", "a.go", "b/c.go"}) || x.title != "listing stopped after 3s" {
 			t.Fatalf("offered %q (title %q)", x.names, x.title)
 		}
+		hooks.joined(t)
 		atReaped(t, pid)
 	})
 	t.Run("rg printed nothing", func(t *testing.T) {
 		fakes := atFakes(t, map[string]string{"rg": atStall})
 		clock := newAtClock()
 		s := atSearcherFor(clock, fakes.tools, false)
-		pids := make(chan int, 1)
+		pids, hooks := make(chan int, 1), newAtHooks()
 		s.started = func(pid int) { pids <- pid }
+		hooks.hook(&s)
 		ch := make(chan completeLoaded, 1)
 		root := t.TempDir()
 		go func() { ch <- s.search(context.Background(), root) }()
@@ -884,6 +1137,7 @@ func TestAtFilesTimeoutStopsTheSearch(t *testing.T) {
 		if !errors.Is(l.Err, errAtFilesTimeout) {
 			t.Fatalf("answered %v, %T", l.Err, l.Data)
 		}
+		hooks.joined(t)
 		atReaped(t, pid)
 		a := atFileSource{search: func(context.Context, string) completeLoaded { return l }}.complete(
 			completeQuery{Workspace: root, loads: map[string]completeLoaded{root: l}})
@@ -891,57 +1145,63 @@ func TestAtFilesTimeoutStopsTheSearch(t *testing.T) {
 			t.Fatalf("the answer: %+v", a)
 		}
 	})
-	t.Run("the walk", func(t *testing.T) {
-		root := t.TempDir()
-		for i := range 3 * atFilesWalkBatch {
-			if err := os.WriteFile(filepath.Join(root, fmt.Sprintf("f%04d", i)), nil, 0o600); err != nil {
-				t.Fatal(err)
-			}
-		}
+	// The deadline landing mid-build (C17r): fired by the search's own hook
+	// once it has built the walk's first batch, while the walk is held in its
+	// next directory read. The search stops at its next check — before any
+	// further batch — and answers what it built, partial; it does not wait
+	// for the walk, which ends once its read is let go.
+	t.Run("the walk, mid-build", func(t *testing.T) {
+		root := atFlatTree(t, 3*atFilesWalkBatch)
 		clock := newAtClock()
 		s := atSearcherFor(clock, nil, false)
-		var walked []int
-		armed := false
-		s.walked = func(n int) {
-			walked = append(walked, n)
-			if len(walked) == 1 {
+		held := newAtHeldDirs(t, 2)
+		s.openDir = held.open
+		armed, ends := false, make(chan struct{}, 1)
+		s.built = func(n int) {
+			if n == atFilesWalkBatch {
 				armed = clock.fire()
 			}
 		}
+		s.ended = func() { ends <- struct{}{} }
 		x := atIndexOf(t, atSearch(t, s, context.Background(), root))
-		if !armed || !slices.Equal(walked, []int{atFilesWalkBatch}) || len(x.names) != atFilesWalkBatch || x.title != "listing stopped after 3s" {
-			t.Fatalf("armed %v, batches %v, offered %d (title %q)", armed, walked, len(x.names), x.title)
+		if !armed || len(x.names) != atFilesWalkBatch || x.title != "listing stopped after 3s" {
+			t.Fatalf("armed %v, offered %d (title %q)", armed, len(x.names), x.title)
 		}
+		atAwait(t, held.stuck, "the walk's held read")
+		held.free()
+		atAwait(t, ends, "the walk's end once its read was let go")
 	})
 }
 
 // A search the popup no longer awaits is cancelled (X122, X125): a running
 // tool is killed and reaped and the search returns at once, its answer
-// dropped by the popup; a walk stops between two batches.
+// dropped by the popup; a walk is not waited for.
 func TestAtFilesCancelKillsTheSearch(t *testing.T) {
 	t.Run("the context", func(t *testing.T) {
 		fakes := atFakes(t, map[string]string{"rg": atPrintPaths("a.go") + "\n" + atStall})
 		s := atSearcherFor(newAtClock(), fakes.tools, false)
-		pids, reads := make(chan int, 1), make(chan int, 1)
+		pids, hooks := make(chan int, 1), newAtHooks()
 		s.started = func(pid int) { pids <- pid }
-		s.read = func(n int) { reads <- n }
+		hooks.hook(&s)
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 		ch := make(chan completeLoaded, 1)
 		go func() { ch <- s.search(ctx, t.TempDir()) }()
 		pid := atAwait(t, pids, "the tool's start")
-		atAwait(t, reads, "the first path")
+		hooks.builtTo(t, 1)
 		cancel()
 		if l := atAwait(t, ch, "the search's end after its cancel"); !errors.Is(l.Err, context.Canceled) || l.Data != nil {
 			t.Fatalf("a cancelled search answered %v, %v", l.Err, l.Data)
 		}
+		hooks.joined(t)
 		atReaped(t, pid)
 	})
 	t.Run("the popup closing", func(t *testing.T) {
 		fakes := atFakes(t, map[string]string{"rg": atStall})
 		s := atSearcherFor(newAtClock(), fakes.tools, false)
-		pids := make(chan int, 1)
+		pids, hooks := make(chan int, 1), newAtHooks()
 		s.started = func(pid int) { pids <- pid }
+		hooks.hook(&s)
 		p := newCompletePopup(atFileSource{search: s.search}, atGrammar)
 		ch := runLoad(t, synced(&p, "@a", completeEnv{Workspace: t.TempDir(), Shown: 1}))
 		pid := atAwait(t, pids, "the tool's start")
@@ -950,29 +1210,67 @@ func TestAtFilesCancelKillsTheSearch(t *testing.T) {
 		if _, taken := p.loaded(msg); taken {
 			t.Fatal("the closed popup took the cancelled search's answer")
 		}
+		hooks.joined(t)
 		atReaped(t, pid)
 	})
-	t.Run("the walk", func(t *testing.T) {
-		root := t.TempDir()
-		for i := range 3 * atFilesWalkBatch {
-			if err := os.WriteFile(filepath.Join(root, fmt.Sprintf("f%04d", i)), nil, 0o600); err != nil {
-				t.Fatal(err)
-			}
-		}
+	// A cancel landing mid-build (C17r): from the search's own hook once it
+	// has built the walk's first batch, while the walk is held in its next
+	// directory read. The search answers the cancel at once, without waiting
+	// for the walk, which ends once its read is let go.
+	t.Run("the walk, mid-build", func(t *testing.T) {
+		root := atFlatTree(t, 3*atFilesWalkBatch)
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 		s := atSearcherFor(newAtClock(), nil, false)
-		var walked []int
-		s.walked = func(n int) {
-			walked = append(walked, n)
-			if len(walked) == 1 {
+		held := newAtHeldDirs(t, 2)
+		s.openDir = held.open
+		cancelled, ends := false, make(chan struct{}, 1)
+		s.built = func(n int) {
+			if n == atFilesWalkBatch {
 				cancel()
+				cancelled = true
 			}
 		}
-		if l := atSearch(t, s, ctx, root); !errors.Is(l.Err, context.Canceled) || !slices.Equal(walked, []int{atFilesWalkBatch}) {
-			t.Fatalf("answered %v after batches %v", l.Err, walked)
+		s.ended = func() { ends <- struct{}{} }
+		if l := atSearch(t, s, ctx, root); !errors.Is(l.Err, context.Canceled) || l.Data != nil || !cancelled {
+			t.Fatalf("answered %v, %v (cancelled mid-build: %v)", l.Err, l.Data, cancelled)
 		}
+		atAwait(t, held.stuck, "the walk's held read")
+		held.free()
+		atAwait(t, ends, "the walk's end once its read was let go")
 	})
+}
+
+// A walk held in a directory read — a stalled disk, which no goroutine can be
+// stopped inside (C17r) — does not hold the search: at the deadline it
+// answers what it had built (here nothing, so the red note), and the walk
+// ends once the read returns, joined here.
+func TestAtFilesAnswersWhileTheWalkIsStuck(t *testing.T) {
+	root := atFlatTree(t, 10)
+	clock := newAtClock()
+	s := atSearcherFor(clock, nil, false)
+	held := newAtHeldDirs(t, 1)
+	s.openDir = held.open
+	var walked []int
+	ends := make(chan struct{}, 1)
+	s.walked = func(n int) { walked = append(walked, n) }
+	s.ended = func() { ends <- struct{}{} }
+	ch := make(chan completeLoaded, 1)
+	go func() { ch <- s.search(context.Background(), root) }()
+	atAwait(t, held.stuck, "the walk's first read, held")
+	if !clock.fire() {
+		t.Fatal("the search never armed its timer")
+	}
+	l := atAwait(t, ch, "the search's answer at its deadline, the walk still held")
+	if !errors.Is(l.Err, errAtFilesTimeout) {
+		t.Fatalf("answered %v, %T", l.Err, l.Data)
+	}
+	held.free()
+	atAwait(t, ends, "the walk's end once its read was let go")
+	// It read the root's ten once let go, and stopped: its context had ended.
+	if !slices.Equal(walked, []int{10}) {
+		t.Fatalf("the walk read %v after its release", walked)
+	}
 }
 
 // One search per popup opening (§3.16, X122): the listing the first `@`
@@ -1017,18 +1315,34 @@ func TestAtFilesSearchesOncePerOpening(t *testing.T) {
 // The real tools, where the machine has them: rg honours .gitignore in a
 // work tree, shows dotfiles, never lists .git's; git lists tracked and
 // untracked files but not ignored ones. (The fakes above prove the command
-// lines; these prove the command lines mean what the fakes assume.)
+// lines; these prove the command lines mean what the fakes assume.) And the
+// two offer the same (C17r): rg lists no symbolic link — to a file, or to a
+// directory outside — and git's listing of the links it tracks, and of a
+// tracked file whose directory has since become a link outside, is refused.
 func TestAtFilesWithTheRealTools(t *testing.T) {
 	names := []string{
 		"a.go", ".hidden/h.txt", "ignored.log", "sub/deep/b.go", "sp ace.txt", "ünï.go", "empty/",
 	}
 	want := []string{"a.go", "sub/", ".hidden/", "ünï.go", "sub/deep/", ".gitignore", "sp ace.txt", ".hidden/h.txt", "sub/deep/b.go"}
+	// links makes ln.go, a link to a.go, and linkdir, a link to a directory
+	// outside the root holding f.go.
+	links := func(t *testing.T, root string) string {
+		t.Helper()
+		outside := atTree(t, "f.go")
+		for link, target := range map[string]string{"ln.go": filepath.Join(root, "a.go"), "linkdir": outside} {
+			if err := os.Symlink(target, filepath.Join(root, link)); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return outside
+	}
 	t.Run("rg", func(t *testing.T) {
 		requireFrameRG(t)
 		root := atTree(t, append(names, ".git/HEAD", ".git/objects/o")...)
 		if err := os.WriteFile(filepath.Join(root, ".gitignore"), []byte("*.log\n"), 0o600); err != nil {
 			t.Fatal(err)
 		}
+		links(t, root)
 		s := newAtFileSearcher()
 		asked := false
 		s.gitTree = func(string) bool { asked = true; return false }
@@ -1042,16 +1356,25 @@ func TestAtFilesWithTheRealTools(t *testing.T) {
 		if err != nil {
 			t.Skipf("git is not on PATH: %v", err)
 		}
-		root := atTree(t, names...)
+		root := atTree(t, append(names, "moved/f.go")...)
 		if err := os.WriteFile(filepath.Join(root, ".gitignore"), []byte("*.log\n"), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		for _, args := range [][]string{{"init", "-q"}, {"add", "a.go", ".gitignore"}} {
+		outside := links(t, root)
+		for _, args := range [][]string{{"init", "-q"}, {"add", "a.go", ".gitignore", "ln.go", "linkdir", "moved/f.go"}} {
 			cmd := exec.Command(gitBin, args...)
 			cmd.Dir = root
 			if out, err := cmd.CombinedOutput(); err != nil {
 				t.Fatalf("git %v: %v\n%s", args, err, out)
 			}
+		}
+		// moved/f.go stays tracked; moved becomes a link outside, where an
+		// f.go is too.
+		if err := os.RemoveAll(filepath.Join(root, "moved")); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(outside, filepath.Join(root, "moved")); err != nil {
+			t.Fatal(err)
 		}
 		s := newAtFileSearcher()
 		s.look = func(name string) (string, error) {
@@ -1121,7 +1444,7 @@ func atBenchPaths(n, dirs int) []string {
 //
 // Two trees of atFilesMax files: a repository's shape (4,000 directories)
 // and a pathological one with a directory for nearly every file, where the
-// candidates double.
+// candidates double — past atFilesHoldMax, where the listing is cut (C17r).
 func BenchmarkAtFilesMatch(b *testing.B) {
 	for _, tree := range []struct {
 		name string
@@ -1145,11 +1468,62 @@ func benchQueries(b *testing.B, x *atFileIndex) {
 	}
 }
 
-// BenchmarkAtFilesIndex is building the index of atFilesMax paths: off the
-// Update, once per popup opening.
+// BenchmarkAtFilesIndex is building the index of atFilesMax paths as a search
+// does — off the Update, once per popup opening — in one goroutine
+// (newAtFileIndex): the listing's directories derived, each candidate built,
+// then their order. And that order alone at the listing's cap on candidates
+// (the pathological tree, cut there): the one piece of the build left after
+// a search stops taking batches (atBuild.index).
 func BenchmarkAtFilesIndex(b *testing.B) {
 	paths := atBenchPaths(atFilesMax, 4000)
-	for b.Loop() {
-		newAtFileIndex(paths, "")
+	b.Run("build", func(b *testing.B) {
+		for b.Loop() {
+			newAtFileIndex(paths, "")
+		}
+	})
+	b.Run("order at the cap", func(b *testing.B) {
+		var built atBuild
+		l := newAtListing(context.Background(), "", func(batch []string) bool { built.add(batch); return true }, false)
+		for _, p := range atBenchPaths(atFilesMax, 45000) {
+			if !l.add(p) {
+				break
+			}
+		}
+		l.flush()
+		b.Logf("%d candidates (full: %v)", built.size(), l.full)
+		for b.Loop() {
+			built.index()
+		}
+	})
+}
+
+// BenchmarkAtFilesGitChecks is what checking git's listing on disk costs
+// (C17r): atFilesMax files of the benchmark's shape written under a directory,
+// then listed as git's listing is, with each file and each directory stat'ed
+// (atIsFile, atIsDir), and as rg's is, without.
+func BenchmarkAtFilesGitChecks(b *testing.B) {
+	paths := atBenchPaths(atFilesMax, 4000)
+	root := b.TempDir()
+	for _, p := range paths {
+		name := filepath.Join(root, p)
+		if err := os.MkdirAll(filepath.Dir(name), 0o755); err != nil {
+			b.Fatal(err)
+		}
+		if err := os.WriteFile(name, nil, 0o600); err != nil {
+			b.Fatal(err)
+		}
+	}
+	for _, check := range []bool{false, true} {
+		b.Run(fmt.Sprintf("checked=%v", check), func(b *testing.B) {
+			for b.Loop() {
+				l := newAtListing(context.Background(), root, func([]string) bool { return true }, check)
+				for _, p := range paths {
+					l.add(p)
+				}
+				if l.files != len(paths) {
+					b.Fatalf("kept %d of %d files", l.files, len(paths))
+				}
+			}
+		})
 	}
 }

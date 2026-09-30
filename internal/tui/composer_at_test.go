@@ -34,9 +34,9 @@ var atComposerPaths = []string{
 	".github/workflows/ci.yml",
 }
 
-// atListing is a search that lists paths wherever it is asked: no tool, no
+// atFixedListing is a search that lists paths wherever it is asked: no tool, no
 // disk, the same answer every time.
-func atListing(paths ...string) func(context.Context, string) completeLoaded {
+func atFixedListing(paths ...string) func(context.Context, string) completeLoaded {
 	return func(context.Context, string) completeLoaded {
 		return completeLoaded{Data: newAtFileIndex(slices.Clone(paths), "")}
 	}
@@ -189,7 +189,7 @@ func keyType(k tea.KeyType) tea.KeyMsg { return tea.KeyMsg{Type: k} }
 func TestFrameGoldenComposerAt(t *testing.T) {
 	for _, size := range []struct{ cols, rows int }{{100, 30}, {80, 24}} {
 		suffix := fmt.Sprintf("-%dx%d", size.cols, size.rows)
-		m, _ := atModel(t, size.cols, size.rows, atListing(atComposerPaths...))
+		m, _ := atModel(t, size.cols, size.rows, atFixedListing(atComposerPaths...))
 
 		files := atOpen(t, m, "explain @co")
 		assertFrameGolden(t, "composer-at-files"+suffix, size.cols, size.rows, plainView(files),
@@ -197,7 +197,7 @@ func TestFrameGoldenComposerAt(t *testing.T) {
 
 		// A model of its own: a textarea's copies share its lines, so a draft
 		// typed into one copy is not a clean start for another.
-		dir, _ := atModel(t, size.cols, size.rows, atListing(atComposerPaths...))
+		dir, _ := atModel(t, size.cols, size.rows, atFixedListing(atComposerPaths...))
 		dir = atOpen(t, dir, "@int")
 		if names := atNames(dir); len(names) == 0 || names[0] != "internal/" {
 			t.Fatalf("@int offers %q, want internal/ first", names)
@@ -262,7 +262,7 @@ func TestAComposerAtPickWritesExactlyItsPath(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			m, stub := atModel(t, 100, 30, atListing(atComposerPaths...))
+			m, stub := atModel(t, 100, 30, atFixedListing(atComposerPaths...))
 			m, load := typeAt(t, m, tc.typed)
 			if load != nil {
 				m = atSearched(t, m, load)
@@ -316,7 +316,7 @@ func TestTheComposerAtPopupOpensOnATokenStart(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			m, _ := atModel(t, 100, 30, atListing(atComposerPaths...))
+			m, _ := atModel(t, 100, 30, atFixedListing(atComposerPaths...))
 			if tc.prep != nil {
 				m = tc.prep(m)
 			}
@@ -339,7 +339,7 @@ func TestTheComposerAtPopupOpensOnATokenStart(t *testing.T) {
 // detached craze's (a session list) alike — and its root is the session's
 // workspace.
 func TestTheComposerAtPopupIsTheComposersInEveryMode(t *testing.T) {
-	optOut, _ := atModel(t, 100, 30, atListing(atComposerPaths...))
+	optOut, _ := atModel(t, 100, 30, atFixedListing(atComposerPaths...))
 	if optOut.sessions != nil {
 		t.Fatal("fixture: the opt-out's model has a session list")
 	}
@@ -421,7 +421,7 @@ func TestTheComposerAtPopupClosesUnderACardOrADialog(t *testing.T) {
 // typed.
 func TestComposerAtEnterAcceptsOnlyWithACandidate(t *testing.T) {
 	t.Run("nothing matches", func(t *testing.T) {
-		m, _ := atModel(t, 100, 30, atListing(atComposerPaths...))
+		m, _ := atModel(t, 100, 30, atFixedListing(atComposerPaths...))
 		m = atOpen(t, m, "look at @zzz")
 		if !m.composerAt.visible() || len(m.composerAt.ans.Items) != 0 || !strings.Contains(plainView(m), completeEmptyNote) {
 			t.Fatalf("fixture: @zzz should be up with nothing to offer:\n%s", plainView(m))
@@ -450,7 +450,7 @@ func TestComposerAtEnterAcceptsOnlyWithACandidate(t *testing.T) {
 		awaitLoaded(t, ch)
 	})
 	t.Run("a candidate", func(t *testing.T) {
-		m, stub := atModel(t, 100, 30, atListing(atComposerPaths...))
+		m, stub := atModel(t, 100, 30, atFixedListing(atComposerPaths...))
 		m = atOpen(t, m, "@comp")
 		m, _ = press(m, enter())
 		if v, _ := draftOf(m); v != "@internal/tui/complete.go " || m.status == statusWorking || len(stub.Prompts()) != 0 {
@@ -468,7 +468,7 @@ func TestComposerAtEnterAcceptsOnlyWithACandidate(t *testing.T) {
 // popup and leaves the draft; the same token keeps it hidden, the cursor
 // moving within it included, and typing into it brings it back.
 func TestComposerAtEscHidesUntilTheTokenChanges(t *testing.T) {
-	m, _ := atModel(t, 100, 30, atListing(atComposerPaths...))
+	m, _ := atModel(t, 100, 30, atFixedListing(atComposerPaths...))
 	m = atOpen(t, m, "@comp")
 	m, _ = press(m, keyType(tea.KeyEsc))
 	if v, _ := draftOf(m); v != "@comp" || m.composerAt.visible() || strings.Contains(plainView(m), "files in ") {
@@ -505,7 +505,7 @@ func TestComposerAtEscHidesUntilTheTokenChanges(t *testing.T) {
 // nothing else, the second cancels the running turn.
 func TestComposerAtEscUnderARunningTurnHidesThenCancels(t *testing.T) {
 	m, _ := queueWorking(t)
-	m.composerAt.setSource(atFileSource{search: atListing(atComposerPaths...)})
+	m.composerAt.setSource(atFileSource{search: atFixedListing(atComposerPaths...)})
 	m = atOpen(t, m, "see @comp")
 	if !m.composerAtActive() {
 		t.Fatal("fixture: the popup should be up mid-message")
@@ -537,7 +537,7 @@ func atSlashModel(t *testing.T, cols, rows int) Model {
 	setStubCommands(stub, "commit", "review")
 	m := startStub(t, stub, frameWorkspace(t), cols, rows)
 	m.frozen = true
-	m.composerAt.setSource(atFileSource{search: atListing(atComposerPaths...)})
+	m.composerAt.setSource(atFileSource{search: atFixedListing(atComposerPaths...)})
 	return m
 }
 
@@ -638,7 +638,7 @@ func TestComposerAtSlashOverlapEscHidesThenCancels(t *testing.T) {
 	// queueWorking's agent advertises one command (the Stub's research),
 	// which a bare `/` offers.
 	m, _ := queueWorking(t)
-	m.composerAt.setSource(atFileSource{search: atListing(atComposerPaths...)})
+	m.composerAt.setSource(atFileSource{search: atFixedListing(atComposerPaths...)})
 	m = atSlashOverlap(t, m)
 	m, _ = press(m, keyType(tea.KeyEsc))
 	if m.composerAt.visible() || m.cardMask != "" || m.status != statusWorking {
@@ -664,7 +664,7 @@ func TestComposerAtSlashOverlapEscHidesThenCancels(t *testing.T) {
 // though the popup, the composer no longer having the keyboard, is closed.
 func TestComposerAtSlashOverlapStaysOutWhileTheQueueHasTheKeys(t *testing.T) {
 	m, _ := queueWorking(t)
-	m.composerAt.setSource(atFileSource{search: atListing(atComposerPaths...)})
+	m.composerAt.setSource(atFileSource{search: atFixedListing(atComposerPaths...)})
 	m = typeEnter(t, m, "queued first")
 	if len(queueTexts(m)) != 1 {
 		t.Fatalf("fixture: nothing queued: %q", queueTexts(m))
@@ -714,7 +714,7 @@ func TestComposerAtSlashMenuOutsideAnAtToken(t *testing.T) {
 func TestComposerAtKeysShadowTheComposersOnlyWhileUp(t *testing.T) {
 	m, _ := queueWorking(t)
 	m.frozen = true
-	m.composerAt.setSource(atFileSource{search: atListing(atComposerPaths...)})
+	m.composerAt.setSource(atFileSource{search: atFixedListing(atComposerPaths...)})
 	m = typeEnter(t, m, "queued first")
 	if len(queueTexts(m)) != 1 {
 		t.Fatalf("fixture: nothing queued: %q", queueTexts(m))
