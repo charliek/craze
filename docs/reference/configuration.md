@@ -514,6 +514,35 @@ choice overwrites a stale unknown id; `Esc` on the fallback default does not).
 `--agent-bin` / `$CRAZE_AGENT_BIN` override the **binary**. They do not select
 the dialect.
 
+## Native output ceiling
+
+On the native provider (`--provider native`), every request to a model names
+an output-token ceiling: the most tokens one response may generate, reasoning
+included. A model's optional `max_output_tokens` in `~/.craze/native/models.toml`
+(or `$CRAZE_HOME/native/`) sets it:
+
+```toml
+[models."fireworks/deepseek-v4p1-flash"]
+max_output_tokens = 65536   # optional, >= 0; absent or 0 = the default below
+```
+
+A model with no `max_output_tokens` gets **32,000** tokens, the same default
+opencode uses — or a quarter of the model's `context_window` when that is
+smaller (a window under 128,000 tokens), so a small model keeps room for its
+prompt. The default exists so a response that starts repeating itself stops
+there instead of running to the provider's own cap. An explicit value always
+wins, even above 32,000: set one for a model whose answers or reasoning need
+more room, or lower for a provider that refuses 32,000. A negative value is
+refused at load.
+
+On the wire the ceiling is `max_tokens`, except for a wire model id that
+contains `gpt-5` (among a few OpenAI reasoning-model names), which gets
+`max_completion_tokens` instead. The same ceiling sizes
+[compaction](tui.md#compaction): the automatic trigger never passes the window
+less the ceiling. `craze import gx` writes gx's `max_completion_tokens` here
+when gx has one; to keep a hand-set value across a reimport, set the entry's
+`source = "manual"`.
+
 ## Native compaction
 
 On the native provider (`--provider native`), `~/.craze/native/models.toml`

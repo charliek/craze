@@ -545,7 +545,7 @@ a slot to free.
 On the native provider (`--provider native`), a long session
 summarizes its own context rather than growing it forever. Once the context
 reaches 85% of the model's context window — capped at the window less its
-output ceiling, when `models.toml` sets one — craze summarizes the
+[output ceiling](configuration.md#native-output-ceiling) — craze summarizes the
 conversation so far and carries on from the summary in place of it. The
 check runs before a turn's first request and again after every step that
 called a tool, so a turn that crosses the line partway through splits into
