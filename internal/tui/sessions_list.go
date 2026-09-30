@@ -139,6 +139,10 @@ type sessListState struct {
 	dialing   uint64
 	dialTitle string
 	dialSaved bool
+	// in is the input under the rows (sessions_input.go, plan 030 §3.13):
+	// only when Config.Sessions can start sessions (SessionStarter); in.on
+	// false is PR 2's list, which has none.
+	in sessInput
 }
 
 // sessKey is a line's identity: a running session by its craze id and
@@ -295,7 +299,16 @@ func (m Model) openSessions() (tea.Model, tea.Cmd) {
 		sel:    here,
 	}
 	m.ctrlCDeadline = time.Time{}
-	return m, readSessSnap(r, m.sessList.gen)
+	read := readSessSnap(r, m.sessList.gen)
+	st, ok := m.sessions.(SessionStarter)
+	if !ok {
+		return m, read
+	}
+	// The input under the rows, and the recent directories its `@` offers
+	// (plan 030 §3.13, §3.15), read once for this opening.
+	m.sessList.in = newSessInput()
+	sync := m.syncSessInput()
+	return m, tea.Batch(read, readRecents(st, m.sessList.gen), sync)
 }
 
 // hereKey is the session the model holds, as its row is keyed: zero with
@@ -327,6 +340,9 @@ func (m Model) leaveSessions() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	r := m.sessList.roster
+	// The input's popup is dropped with the list: a load it is waiting for
+	// is cancelled, and its answer would find nothing to take it.
+	m.sessList.in.at.close()
 	m.sessList = sessListState{gen: m.sessList.gen, byDir: m.sessList.byDir}
 	m.ctrlCDeadline = time.Time{}
 	return m, m.sessRosters.closeCmd(r)
@@ -463,7 +479,32 @@ func (m Model) applySessMsg(msg tea.Msg) (Model, tea.Cmd, bool) {
 		l.snap, l.have = msg.snap, true
 		m.trackHere()
 		m.syncSessList()
-		return m, readSessSnap(l.roster, l.gen), true
+		// The rows are the `@` picker's candidates too.
+		sync := m.syncSessInput()
+		return m, tea.Batch(readSessSnap(l.roster, l.gen), sync), true
+	case sessRecentsMsg:
+		if !l.open || msg.gen != l.gen || !l.in.on {
+			return m, nil, true
+		}
+		// A failed read offers no recent directories: the list says the
+		// index could not be read on its own (IndexErr).
+		l.in.recents = msg.dirs
+		sync := m.syncSessInput()
+		return m, sync, true
+	case completeLoadedMsg:
+		// The `@` popup's listing of a directory: the popup takes it only if
+		// it still awaits it (completePopup.loaded) — a later listing asked
+		// for, the popup closed, the list left or opened again, a switch.
+		// Another source's result is not the list's.
+		if msg.source != sessDirSourceID {
+			return m, nil, false
+		}
+		if !l.open || !l.in.on {
+			return m, nil, true
+		}
+		l.in.at.setSource(m.sessAtSource())
+		cmd, _ := l.in.at.loaded(msg)
+		return m, cmd, true
 	case sessActionMsg:
 		if !l.open || msg.gen != l.gen {
 			return m, nil, true
@@ -618,8 +659,9 @@ func (m Model) hereAsRow() roster.Row {
 // handleSessionsKey is every key while the list is open (plan 030 §3.10).
 // The note on the hint line lasts until the next key; a close armed by
 // ctrl+x is disarmed by any other key; the Ctrl+C window by any key but
-// Ctrl+C. PR 2 has no input under the list, so every other key does
-// nothing.
+// Ctrl+C. With an input under the list (§3.13) the input has every key first
+// — its popup's, what is typed — and leaves the list's own to it
+// (sessInputKey); without one, every other key does nothing.
 func (m Model) handleSessionsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	l := &m.sessList
 	if msg.Type != tea.KeyCtrlC {
@@ -629,6 +671,11 @@ func (m Model) handleSessionsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		l.armed = sessKey{}
 	}
 	l.note = ""
+	if l.in.on {
+		if next, cmd, ok := m.sessInputKey(msg); ok {
+			return next, cmd
+		}
+	}
 	switch msg.Type {
 	case tea.KeyCtrlD:
 		return m.sessQuit()
@@ -1140,7 +1187,12 @@ func (m Model) sessLines() []sessLine {
 		if len(out) > 0 {
 			out = append(out, sessLine{kind: sessLineBlank})
 		}
-		out = append(out, sessLine{kind: sessLineNote, row: sessRow{want: sessEmptyNote}})
+		note := sessEmptyNote
+		if l.in.on {
+			// The list with an input points at it (§3.10: PR 3 names it).
+			note = sessEmptyNoteInput
+		}
+		out = append(out, sessLine{kind: sessLineNote, row: sessRow{want: note}})
 	}
 	if err := l.snap.RegistryErr; err != nil {
 		out = append(out, sessLine{kind: sessLineNote, noteErr: true,
@@ -1260,17 +1312,37 @@ func sessColumns(width int, showDir bool) (title, want, dir int) {
 
 // sessionsView is the list's whole screen: its own region set — the header
 // and a spacer, the list, the footer rule and the hint line — exactly
-// width × height, or the too-small message below 40×10.
+// width × height, or the too-small message below 40×10. With an input
+// (§3.13) the footer is the input's: the rule naming where a new session
+// would run, the input, the rule and the hint line, and the `@` popup, while
+// it is up, sits between the list and that rule, the list keeping at least
+// sessBodyMinRows.
 func (m Model) sessionsView() string {
 	w, h := m.width, m.height
 	if w < sessMinCols || h < sessMinRows {
 		return tooSmallViewFor(w, h, sessMinCols, sessMinRows)
 	}
 	lines := m.sessLines()
+	in := m.sessList.in
+	footer := sessFooterRows
+	if in.on {
+		footer = sessInputRows
+	}
+	avail := h - sessHeaderRows - footer
+	pop := 0
+	if in.on {
+		pop = in.at.height(max(0, avail-sessBodyMinRows))
+	}
 	rows := make([]string, 0, h)
 	rows = append(rows, padRow(m.sessHeaderRow(lines), w), padRow("", w))
-	for _, ln := range m.sessBody(lines, h-sessHeaderRows-sessFooterRows) {
+	for _, ln := range m.sessBody(lines, avail-pop) {
 		rows = append(rows, padRow(ln, w))
+	}
+	if pop > 0 {
+		rows = append(rows, in.at.view(m.theme, w, pop))
+	}
+	if in.on {
+		rows = append(rows, padRow(m.sessTargetRule(w), w), padRow(m.sessInputRow(w), w))
 	}
 	rows = append(rows, padRow(styleFG(m.theme.Rule).Render(strings.Repeat("─", w)), w))
 	rows = append(rows, padRow(m.sessHintRow(lines), w))
@@ -1512,8 +1584,8 @@ func rightCells(s string, w int) string {
 }
 
 // sessHintRow is the hint line: a Ctrl+C window's, an armed close's, the
-// note, or the keys the selected line takes. PR 2 has no input under the
-// list, so it names nothing of one.
+// note, the `@` popup's keys while it is up, the input's while something is
+// typed (sessInputHint), or the keys the selected line takes.
 func (m Model) sessHintRow(lines []sessLine) string {
 	th := m.theme
 	key := func(k string) seg { return seg{k, styleFG(th.Accent)} }
@@ -1536,6 +1608,9 @@ func (m Model) sessHintRow(lines []sessLine) string {
 		return renderSegs(m.width, lead, txt("resuming "+l.dialTitle+"…"))
 	case l.dialing != 0:
 		return renderSegs(m.width, lead, txt("opening "+l.dialTitle+"…"))
+	}
+	if hint := m.sessInputHint(key, txt); hint != nil {
+		return renderSegs(m.width, append([]seg{lead}, hint...)...)
 	}
 	grouping := " by directory · "
 	if l.byDir {

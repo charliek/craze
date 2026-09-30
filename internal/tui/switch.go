@@ -211,6 +211,9 @@ func (m Model) switchBackend(b backend.Backend, loading bool, indexTitle string)
 	old := m.eng
 	m.stashDraft()
 	roster := m.sessList.roster
+	// The list's input goes with the list: its popup's load, if one runs, is
+	// cancelled (its answer is left behind by shownGen as well).
+	m.sessList.in.at.close()
 	m.sessList = sessListState{gen: m.sessList.gen, byDir: m.sessList.byDir}
 	info := b.Info()
 	ws := info.Workspace

@@ -1,0 +1,30 @@
+ sessions  9 running                             ! 2 need you   ✳ 3 working   ✗ 1 failed   ○ 2 idle 
+                                                                                                    
+needs you 2 ────────────────────────────────────────────────────────────────────────────────────────
+  ! fix the roost tab rename      permission: cargo test -p roost-ipc    grok    roost            2m
+❯ ! add persistence to the read…  question: Which storage?               native  lumen           14m
+                                                                                                    
+working 3 ──────────────────────────────────────────────────────────────────────────────────────────
+  ✳ new session                   Starting…                              grok    shed             3s
+  ✳ write the v0.1.0 release no…  Responding                             native  craze · here     1m
+  ✳ move queue edits onto remot…  go test ./internal/remote/...          cursor  craze           12m
+                                                                                                    
+failed 1 ───────────────────────────────────────────────────────────────────────────────────────────
+  ✗ bump the flutter deps         error: 402 Payment Required from ope…  native  spendwise        3h
+                                                                                                    
+idle 2 ─────────────────────────────────────────────────────────────────────────────────────────────
+  ○ triage the flaky pty test     Found it: os.NewFile(0) races the pt…  grok    craze            1h
+  ○ port the docs site            waiting for a prompt · craze 0.0.9     gx      folio              
+                                                                                                    
+unreachable 1 ──────────────────────────────────────────────────────────────────────────────────────
+  ? spike the prox sweep          not answering                          native  prox            20m
+                                                                                                    
+  ▸ saved · 3 not running ──────────────────────────────────────────────────────────────────────────
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+─────────────────────────────────────────────────── new session → ~/projects/lumen · cursor · Grok ─
+❯ tidy the changelog                                                                                
+────────────────────────────────────────────────────────────────────────────────────────────────────
+ enter starts it in the background · esc clear                                                      

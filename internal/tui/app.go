@@ -1966,17 +1966,25 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 	// The session list's own messages, and the list ahead of everything
 	// else while it is open (plan 030 §3.10, sessions_list.go): its keys
-	// are handleKey's first rung; the mouse, and a paste with no input to
-	// land in, are dropped; the end of the session behind it — or of its
-	// connection — leaves craze running, its row marked ended or left to the
-	// roster (sessionEnded). Everything else — the session's stream, its
-	// command replies, the ticks — is applied as ever, behind the list.
+	// are handleKey's first rung; the mouse is dropped, and a paste lands in
+	// the list's input (§3.13) or, with none, is dropped; the end of the
+	// session behind it — or of its connection — leaves craze running, its row
+	// marked ended or left to the roster (sessionEnded). Everything else — the
+	// session's stream, its command replies, the ticks — is applied as ever,
+	// behind the list.
 	if next, cmd, ok := m.applySessMsg(msg); ok {
 		return next, cmd
 	}
 	if m.sessList.open {
 		switch msg := msg.(type) {
-		case tea.MouseMsg, dblClickMsg, pasteMsg:
+		case tea.MouseMsg, dblClickMsg:
+			return m, nil
+		case pasteMsg:
+			// A paste lands in the list's input, where there is one (plan 030
+			// §3.13); without one it has nowhere to land.
+			if m.sessList.in.on && msg.text != "" {
+				return m.sessInputPaste(msg.text)
+			}
 			return m, nil
 		case endMsg:
 			m.ended, m.endErr = true, msg.err

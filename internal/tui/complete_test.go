@@ -552,6 +552,61 @@ func TestEscHidesThePopupUntilTheTokenChanges(t *testing.T) {
 	}
 }
 
+// Esc's dismissal is the environment's it was made in (sol r26-c13 1): the
+// same text at the same place in another session shown, or another
+// workspace, is another token, and the popup shows there. A dismissal made
+// again stays for as long as the environment does.
+func TestEscHidesOnlyInTheEnvironmentItWasPressedIn(t *testing.T) {
+	src := &listSource{id: "list", items: named("lumen", "luna")}
+	a := completeEnv{Workspace: "/w", Shown: 1}
+	p := newCompletePopup(src, atGrammar)
+	synced(&p, "@lu", a)
+	popKey(&p, keyOf(tea.KeyEsc))
+	if synced(&p, "@lu", a); p.visible() {
+		t.Fatal("fixture: the dismissed token came back in its own session")
+	}
+	// A switch: another session shown, the same token.
+	b := completeEnv{Workspace: "/w", Shown: 2}
+	if synced(&p, "@lu", b); !p.visible() || !slices.Equal(popupNames(p), []string{"lumen", "luna"}) {
+		t.Fatalf("after a switch the popup is visible %v with %v", p.visible(), popupNames(p))
+	}
+	// Dismissed there, it stays dismissed there — through a sync with no
+	// token under the cursor, too.
+	popKey(&p, keyOf(tea.KeyEsc))
+	for _, cur := range []int{0, 3} {
+		if p.sync("@lu", cur, b); p.visible() {
+			t.Fatalf("the token dismissed in the second session came back with the cursor at %d", cur)
+		}
+	}
+	// Another workspace in the same session shown is another environment.
+	if synced(&p, "@lu", completeEnv{Workspace: "/v", Shown: 2}); !p.visible() {
+		t.Fatal("the dismissal carried into another workspace")
+	}
+}
+
+// A source's title and note are drawn one row each whatever they hold (sol
+// r26-c13 2): a newline is folded, an escape sequence and control characters
+// dropped — height and view agree.
+func TestATitleAndANoteAreOneLineEach(t *testing.T) {
+	src := &funcSource{id: "f", answer: func(completeQuery) completeAnswer {
+		return completeAnswer{Title: "folders in ~/a\nb\x1b[31m", Note: "no directory ~/x\ny\x1b]0;pwned\x07", NoteErr: true}
+	}}
+	p := newCompletePopup(src, atGrammar)
+	synced(&p, "@x", completeEnv{})
+	v := p.view(Preset("dark"), 40, 10)
+	lines := strings.Split(v, "\n")
+	if h := p.height(10); h != 2 || len(lines) != h {
+		t.Fatalf("height %d, drawn %d lines:\n%s", h, len(lines), plain(v))
+	}
+	if strings.Contains(v, "pwned") || strings.Contains(v, "\x1b]") || strings.Contains(v, "\x07") {
+		t.Fatalf("an escape sequence reached the frame: %q", v)
+	}
+	got := trimmed(popupText(p, 40, 10))
+	if !strings.Contains(got[0], "folders in ~/a b") || got[1] != "  no directory ~/x y" {
+		t.Fatalf("drawn %q", got)
+	}
+}
+
 func TestTabDescendsIntoADirectoryAndStaysOpen(t *testing.T) {
 	src := &listSource{id: "list", items: []completeItem{
 		{Name: "projects/", Value: "/h/projects", Insert: "~/projects", Openable: true},

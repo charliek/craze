@@ -645,6 +645,17 @@ var tuiSites = []tuiSite{
 	// answers.
 	{"sessions_list.go", "sessActionDone", "Is", "backend.ErrStopUnsupported", 1, proofStop},
 	{"sessions_list.go", "sessLines", "Error", "err", 2, proofLocal},
+	// The list's input (plan 030 §3.13, §3.15): the `@` picker's listing of a
+	// directory, read off the Update from the disk, and the leading token's
+	// resolution — a name among the list's candidates, a path stat'ed —
+	// worded by the list itself; no Backend call answers any of them.
+	{"at_dirs.go", "browse", "Is", "fs.ErrNotExist", 1, proofLocal},
+	{"at_dirs.go", "browse", "Is", "errNotADirectory", 1, proofLocal},
+	{"at_dirs.go", "sessErrText", "As", "&pe", 1, proofLocal},
+	{"at_dirs.go", "sessErrText", "Error", "err", 1, proofLocal},
+	{"at_dirs.go", "sessListDirs", "Is", "io.EOF", 1, proofLocal},
+	{"sessions_input.go", "sessTargetRule", "Error", "t.err", 1, proofLocal},
+	{"sessions_input.go", "sessInputEnter", "Error", "err", 1, proofLocal},
 	{"theme.go", "noteAndSaveTheme", "Error", "err", 1, proofLocal},
 }
 

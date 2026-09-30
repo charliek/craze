@@ -46,8 +46,9 @@ import (
 //   - It draws (view) up to eight rows, and `↓ N more` under them when there
 //     are more, as a block the owner places above the input it serves.
 //
-// Nothing is wired to a screen here (C13): the list's input takes it in C14,
-// its `/` commands in C16, and the composer in PR 4.
+// The session list's input holds one for its leading `@` token (C14:
+// sessions_input.go, its source at_dirs.go); its `/` commands take one in
+// C16, and the composer in PR 4.
 
 // completeMaxRows is the most candidate rows the popup draws: grok-build's
 // window, which the slash menu already copied (slashMaxRows), and every
@@ -429,12 +430,16 @@ type completePopup struct {
 	// token under the cursor there, and tokKey that token's identity — where it
 	// starts and what it holds — which esc records in hideKey: the popup
 	// stays hidden while the token under the cursor is that one, and comes
-	// back the moment it is another (slashTokenKey's rule).
+	// back the moment it is another (slashTokenKey's rule). hideEnv is the
+	// environment the hide was made in: it is that environment's alone, so a
+	// token of the same text at the same place in another workspace or
+	// another session shown is another token (sol r26-c13 1).
 	value   string
 	cursor  int
 	tok     completeToken
 	tokKey  string
 	hideKey string
+	hideEnv completeEnv
 
 	// ans is the source's last answer, its candidates cut to what can be
 	// written. sel is the highlighted candidate, selID its identity, top the
@@ -455,6 +460,14 @@ func newCompletePopup(src completeSource, g completeGrammar) completePopup {
 	return completePopup{src: src, grammar: g}
 }
 
+// setSource hands the popup its source as it stands now, for an owner whose
+// candidates move under the popup — the session list's `@` directories
+// follow the rows it lists (at_dirs.go) — before it syncs the popup or hands
+// it a load's result. It is the same source, answering to the same
+// completeID: a load's result is stamped with that id, and one from another
+// source is never taken.
+func (p *completePopup) setSource(src completeSource) { p.src = src }
+
 // visible says the popup is up: on screen, and the keyboard's while it is.
 // An open popup always draws something — its candidates, or a note saying
 // why there are none.
@@ -471,12 +484,17 @@ func (p *completePopup) sync(value string, cursor int, env completeEnv) tea.Cmd 
 		return nil
 	}
 	key := strconv.Itoa(tok.start) + ":" + value[tok.start:tok.end]
+	if p.hideKey != "" && env != p.hideEnv {
+		// The hide was made in another workspace or for another session
+		// shown: whatever token this is, it is not the one esc dismissed.
+		p.hideKey, p.hideEnv = "", completeEnv{}
+	}
 	if key == p.hideKey {
 		p.close()
 		return nil
 	}
 	// Another token: the hide was for the one before it.
-	p.hideKey = ""
+	p.hideKey, p.hideEnv = "", completeEnv{}
 	if p.open && (tok.start != p.tok.start || env != p.env) {
 		// Another token, another workspace or another session shown: the
 		// loads and whatever is still running were for what is gone.
@@ -567,19 +585,26 @@ func (p *completePopup) loaded(msg completeLoadedMsg) (tea.Cmd, bool) {
 
 // close takes the popup down: whatever it was waiting for is cancelled, and
 // what it held is dropped with it. The next opening is a new one. The hide
-// esc recorded is not the opening's, and stays.
+// esc recorded is not the opening's, and stays — with the environment it was
+// made in, outside which it hides nothing (sync).
 func (p *completePopup) close() {
 	p.cancelWait()
-	hide := p.hideKey
-	*p = completePopup{src: p.src, grammar: p.grammar, hideKey: hide}
+	hide, hideEnv := p.hideKey, p.hideEnv
+	*p = completePopup{src: p.src, grammar: p.grammar, hideKey: hide, hideEnv: hideEnv}
 }
 
 // install makes ans the popup's answer. Candidates whose text the grammar
 // cannot write are left out, so every row on screen can be completed. The
+// answer's title and note are folded onto one line each (sanitizeLine), as
+// every candidate's display text already is by its source: each is drawn in
+// one row that height counts, and a newline in either — a directory's name in
+// `folders in …` or `no directory …` — would draw more rows than it says, and
+// an escape sequence in one would reach the terminal (sol r26-c13 2). The
 // selection starts from the top for a fresh query, and otherwise holds on to
 // the candidate it was on (by id) while that one is still offered, as the
 // session list holds its rows.
 func (p *completePopup) install(ans completeAnswer, fresh bool) {
+	ans.Title, ans.Note = sanitizeLine(ans.Title), sanitizeLine(ans.Note)
 	items := make([]completeItem, 0, len(ans.Items))
 	for _, it := range ans.Items {
 		if !p.writable(it) {
@@ -717,7 +742,7 @@ func (p *completePopup) key(msg tea.KeyMsg) (choice completeChoice, handled bool
 		}
 		return p.choose(completeAccepted, it), true
 	case tea.KeyEsc:
-		p.hideKey = p.tokKey
+		p.hideKey, p.hideEnv = p.tokKey, p.env
 		p.close()
 		return completeChoice{}, true
 	}

@@ -4,6 +4,7 @@ import (
 	"github.com/charliek/craze/internal/agent"
 	"github.com/charliek/craze/internal/backend"
 	"github.com/charliek/craze/internal/roster"
+	"github.com/charliek/craze/internal/sessions"
 )
 
 // Sessions is the session list's source (plan 030 §3.9): Config.Sessions.
@@ -56,6 +57,27 @@ type Sessions interface {
 	// is not an error: the queue is cleared and nothing runs. A saved
 	// session is an error.
 	Cancel(ref roster.Ref) error
+}
+
+// SessionStarter is what a Sessions has when new sessions can be started
+// from the list (plan 030 §3.13, PR 3): the list's input, under the rows, and
+// everything it brings — the `@` directory picker, the rule naming where a
+// new session would run, the empty list's wording that points at the input —
+// exists only when Config.Sessions has it (openSessions asks, by a type
+// assertion). Production's has it (internal/cli's sessionList). A Sessions
+// without it draws the list exactly as PR 2 drew it, which is how the list's
+// merged frames — made against a fake without it — stay what they were
+// (§3.17).
+//
+// Its methods may read the disk and are called from a tea.Cmd, never from
+// Update.
+type SessionStarter interface {
+	Sessions
+	// RecentDirs is up to n directories sessions have run in, newest first,
+	// that are still directories (sessions.Store.RecentDirs): the `@`
+	// picker's recent places, after the session the list came from and the
+	// directories with a running session.
+	RecentDirs(n int) ([]sessions.RecentDir, error)
 }
 
 // SessionRoster is a running session-list poller (*roster.Roster).

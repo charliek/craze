@@ -33,13 +33,22 @@ import (
 // 1–2).
 type sessionList struct{ l *launcher }
 
-var _ tui.Sessions = sessionList{}
+// It starts new sessions from the list (plan 030 §3.13): the list's input is
+// drawn under the rows.
+var _ tui.SessionStarter = sessionList{}
 
 // Roster opens the list's poller: the registry of this user (the launcher's
 // env, the process's), the index of this CRAZE_HOME, and only the providers
 // this build knows offered as saved.
 func (s sessionList) Roster() tui.SessionRoster {
 	return roster.Open(s.l.env, &sessions.Store{KnownProvider: knownProvider})
+}
+
+// RecentDirs is the `@` picker's recent directories (plan 030 §3.15): up to
+// n workspaces of this CRAZE_HOME's index, newest first, that are still
+// directories (sessions.Store.RecentDirs).
+func (s sessionList) RecentDirs(n int) ([]sessions.RecentDir, error) {
+	return (&sessions.Store{KnownProvider: knownProvider}).RecentDirs(n)
 }
 
 // Open is ref's session as a backend the TUI adopts: a running one's host
