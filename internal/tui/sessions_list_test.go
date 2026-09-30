@@ -58,6 +58,8 @@ func (f *fakeSessions) Spawn(SpawnSpec) (roster.Ref, error) {
 	return roster.Ref{}, errors.New("fakeSessions: Spawn is PR 3's")
 }
 
+func (f *fakeSessions) LeaveRunning(roster.Ref) {}
+
 func (f *fakeSessions) Stop(ref roster.Ref) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()

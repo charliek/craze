@@ -331,6 +331,54 @@ func TestRowFactsSinceIsWhenTheRowEnteredItsState(t *testing.T) {
 	}
 }
 
+// TestRowFactsSinceIgnoresAsksThatWereNeverOpen (sol r17-c9 4): an ask that
+// never made the row needs you ends without moving Since — a permission
+// craze's policy answered (the bypass mode's every permission), a plan the
+// policy decided under an Auto opening of its own, an ask refused as it
+// opened: a working row stays working since its turn started, and an idle one
+// idle since its turn ended. An ask that was open does move it when it ends
+// (TestRowFactsSinceIsWhenTheRowEnteredItsState).
+func TestRowFactsSinceIgnoresAsksThatWereNeverOpen(t *testing.T) {
+	clk := newRowClock()
+	r := newRowRig(t, clk, nil)
+	working := clk.step()
+	sc := r.s.script(held())
+	res := r.submit("fix it")
+	await(t, sc.opened, "the turn to open")
+	r.wantRow("working", RowWorking, working)
+
+	token := r.s.asks.BeginTurn()
+	clk.step()
+	if rec := r.s.asks.Automatic(token, askRequest(), agent.AskAnswer{OptionID: "allow-once"}); rec.Outcome != agent.AskAutomatic {
+		t.Fatalf("the policy's permission ended %s", rec.Outcome)
+	}
+	r.wantRow("a permission the policy answered", RowWorking, working)
+	clk.step()
+	plan := agent.AskRequest{Kind: agent.AskPlan, Body: agent.AskBody{Plan: &agent.PlanEvent{Name: "Migrate the index"}}}
+	if rec := r.s.asks.Automatic(token, plan, agent.AskAnswer{Accept: true}); rec.Outcome != agent.AskAutomatic {
+		t.Fatalf("the policy's plan ended %s", rec.Outcome)
+	}
+	r.wantRow("a plan the policy accepted", RowWorking, working)
+	r.s.asks.EndTurn(token)
+	clk.step()
+	refused, err := r.s.asks.Open(context.Background(), token, askRequest())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec, ok := r.s.asks.Record(refused.ID()); !ok || rec.Outcome != agent.AskTurnEnded {
+		t.Fatalf("an ask opened after its turn ended: %+v", rec)
+	}
+	r.wantRow("an ask refused as it opened", RowWorking, working)
+
+	settled := clk.step()
+	sc.release()
+	r.until(ended(res.Turn))
+	r.wantRow("idle", RowIdle, settled)
+	clk.step()
+	r.s.asks.Automatic(agent.TurnToken{}, askRequest(), agent.AskAnswer{OptionID: "allow-once"})
+	r.wantRow("a permission the policy answered between turns", RowIdle, settled)
+}
+
 // TestRowFactsSinceOfALoad: a load's replay is part of the session coming up
 // — working since the engine was built, however long the replay runs — and
 // the row is idle from the replay's end.

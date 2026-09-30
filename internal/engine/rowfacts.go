@@ -145,16 +145,20 @@ func (e *Engine) RowFacts(st State) RowFacts {
 //     waiting).
 //   - failed: a failed start's time (the activity's), else the failed turn's
 //     ending, else — the error state read before the observer saw its
-//     ending — the activity's; or an ask ending after it.
+//     ending — the activity's; or an open ask's ending after it.
 //   - working: since the engine was built while it starts or replays (a load
 //     replays as part of coming up); the activity's for a turn of craze's own
 //     — a queued turn that follows another in one settlement keeps the first
 //     one's (settleLocked) — the foreign turn's start for the agent's own, the
-//     activity's while closing; or an ask ending after it, which moved the row
-//     back from needs you.
+//     activity's while closing; or an open ask's ending after it, which moved
+//     the row back from needs you.
 //   - idle: the latest of the activity's change (a turn settling, the start),
 //     the last turn's ending (a foreign turn's leaves the activity alone), a
-//     replay's end, and an ask's.
+//     replay's end, and an open ask's ending.
+//
+// An ask that was never open — craze's policy answered it, or it ended as it
+// opened — never made the row needs you, so its ending is no change of state
+// and is not one of these (askWasOpen).
 func (e *Engine) rowSince(st State, head agent.AskRecord, haveHead bool) time.Time {
 	e.mu.Lock()
 	activityAt := e.activityAt
@@ -206,9 +210,9 @@ func latest(ts ...time.Time) time.Time {
 }
 
 // observeRowTimes keeps the stream's times of the row-state changes the
-// engine's activity does not see (rowSince): an ask's ending, a foreign turn's
-// start and a replay's end, each the event's own At. A replayed event is
-// history and changes nothing now. It runs inside the observer (e.obsMu, a
+// engine's activity does not see (rowSince): an open ask's ending, a foreign
+// turn's start and a replay's end, each the event's own At. A replayed event
+// is history and changes nothing now. It runs inside the observer (e.obsMu, a
 // leaf, once).
 func (e *Engine) observeRowTimes(ev agent.Event) {
 	if ev.Replayed || ev.At.IsZero() {
@@ -216,7 +220,7 @@ func (e *Engine) observeRowTimes(ev agent.Event) {
 	}
 	var at *time.Time
 	switch {
-	case ev.Type == agent.EventAsk && ev.Ask != nil:
+	case ev.Type == agent.EventAsk && ev.Ask != nil && askWasOpen(ev.Ask):
 		at = &e.askEndedAt
 	case ev.Type == agent.EventForeignTurn && ev.ForeignTurn != nil && ev.ForeignTurn.Running:
 		at = &e.foreignAt
@@ -228,6 +232,19 @@ func (e *Engine) observeRowTimes(ev agent.Event) {
 	e.obsMu.Lock()
 	*at = ev.At
 	e.obsMu.Unlock()
+}
+
+// askWasOpen says the ask an ending ended had been open — parked in the
+// registry with its opening published, so counted in PendingAsks, the row
+// needs you while it was — and so that its ending moved the row out of needs
+// you (sol r17-c9 4). One that ended as it opened carries its own body (a
+// refused Open, a request the provider answered before any handler ran, a
+// permission craze's policy answered); one craze's policy answered with an
+// opening of its own is marked Auto there and ends automatic (a question or a
+// plan the policy decided). Neither was ever open: a working row's Since does
+// not move for a permission answered on its own mid-turn.
+func askWasOpen(u *agent.AskUpdate) bool {
+	return u.Body == nil && u.Outcome != agent.AskAutomatic
 }
 
 // askSummary is what an open ask is about (RowFacts.Summary), before rowLine:

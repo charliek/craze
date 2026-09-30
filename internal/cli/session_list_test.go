@@ -1,11 +1,13 @@
 package cli
 
 import (
+	"context"
 	"errors"
 	"testing"
 	"time"
 
 	"github.com/charliek/craze/internal/engine"
+	"github.com/charliek/craze/internal/remote"
 	"github.com/charliek/craze/internal/roster"
 	"github.com/charliek/craze/internal/sessions"
 	"github.com/charliek/craze/internal/tui"
@@ -184,4 +186,94 @@ func TestTheSessionListCancelsATurnAndClearsItsQueue(t *testing.T) {
 		t.Fatal("the TUI never ran")
 	}
 	assertNoHosts(t, env)
+}
+
+// TestASpawnTheTUINeverTookIsStoppedAtQuit (sol r17-c9 1): a host the
+// list's Spawn started is this launch's until the TUI takes it, so a TUI
+// that quits first leaves none behind. Never opened, or opened and never
+// come up, it is stopped before runTUI returns (finish), as a launch's own
+// spawn nobody adopted is; one Open cannot reach is stopped before Open
+// answers — nobody else would stop it. One whose session came up in the TUI
+// (its start acknowledged), or one the list left running (PR 3's background
+// dispatch), goes on.
+func TestASpawnTheTUINeverTookIsStoppedAtQuit(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// dialFails makes every dial of the launch's fail: Open's.
+		dialFails bool
+		take      func(t *testing.T, cfg tui.Config, ref roster.Ref, pid int)
+		kept      bool
+	}{
+		{name: "never opened", take: func(*testing.T, tui.Config, roster.Ref, int) {}},
+		{name: "opened, never come up", take: func(t *testing.T, cfg tui.Config, ref roster.Ref, _ int) {
+			if _, err := cfg.Sessions.Open(ref); err != nil {
+				t.Fatalf("Open: %v", err)
+			}
+		}},
+		{name: "opened, unreachable", dialFails: true, take: func(t *testing.T, cfg tui.Config, ref roster.Ref, pid int) {
+			if _, err := cfg.Sessions.Open(ref); err == nil {
+				t.Fatal("Open answered with every dial failing")
+			}
+			// No wait: Open stopped it (hostRef.abandon) before it answered.
+			if processAlive(pid) {
+				t.Fatalf("Open failed with the host %d it could not reach still there (%s)", pid, procState(pid))
+			}
+		}},
+		{name: "opened and come up", kept: true, take: func(t *testing.T, cfg tui.Config, ref roster.Ref, _ int) {
+			b, err := cfg.Sessions.Open(ref)
+			if err != nil {
+				t.Fatalf("Open: %v", err)
+			}
+			started(t, b)
+			_ = b.Close()
+		}},
+		{name: "left running", kept: true, take: func(t *testing.T, cfg tui.Config, ref roster.Ref, _ int) {
+			cfg.Sessions.LeaveRunning(ref)
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env, ws, cmds := launchHome(t, nil)
+			t.Setenv("CRAZE_FAKE_SCRIPT", "echo")
+			if tc.dialFails {
+				prev := spawnDial
+				spawnDial = func(context.Context, string, remote.SessionOptions) (*remote.Session, error) {
+					return nil, errors.New("the test's dial fails")
+				}
+				t.Cleanup(func() { spawnDial = prev })
+			}
+			var spawned roster.Ref
+			fakeRun(t, func(cfg tui.Config) (tui.Result, error) {
+				ref, err := cfg.Sessions.Spawn(tui.SpawnSpec{Workspace: ws, Provider: cfg.Provider})
+				if err != nil {
+					t.Fatalf("Spawn: %v", err)
+				}
+				if ref.Host.ID == "" || ref.Host.Socket == "" || ref.Saved != nil {
+					t.Fatalf("Spawn's ref %+v", ref)
+				}
+				spawned = ref
+				tc.take(t, cfg, ref, cmds.pids()[0])
+				return tui.Result{}, nil
+			})
+			if err := runTUI(nil, launchFlags(t, ws), hostEnv{}); err != nil {
+				t.Fatalf("runTUI: %v", err)
+			}
+			if n := cmds.count(); n != 1 {
+				t.Fatalf("%d hosts spawned, want Spawn's one", n)
+			}
+			pid := cmds.pids()[0]
+			if !tc.kept {
+				// No wait: finish stopped it before runTUI returned.
+				if processAlive(pid) {
+					t.Fatalf("runTUI returned with the host %d the TUI never took still there (%s)", pid, procState(pid))
+				}
+				assertNoHosts(t, env)
+				return
+			}
+			e := onlyHost(t, env)
+			if e.HostID != spawned.Host.ID || e.CrazeSessionID == "" {
+				t.Fatalf("after the quit %+v, want Spawn's host %s still serving", e, spawned.Host.ID)
+			}
+			stopEntry(t, e, pid)
+		})
+	}
 }

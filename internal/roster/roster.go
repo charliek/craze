@@ -232,7 +232,11 @@ const (
 	// tickEvery is how often the registry is read and each host asked.
 	tickEvery = time.Second
 	// dialBudget bounds a new connection's dial and hello together, and
-	// listBudget its sessions.list: one attempt's budget.
+	// listBudget its sessions.list: one attempt's budget is the two
+	// together, from its start — each share bounded by its own too, and a
+	// kept connection's attempt, which dials nothing, spending listBudget of
+	// it. A kept connection found closed spends the rest on its one redial
+	// (attempt), never a fresh budget.
 	dialBudget = 500 * time.Millisecond
 	listBudget = 500 * time.Millisecond
 	// maxInFlight is how many attempts run at once, whatever the number of
@@ -267,11 +271,16 @@ type options struct {
 	check func(*net.UnixConn) error
 	// indexPath is the index file whose modification says it changed.
 	indexPath func() string
-	// The tests' barriers, nil in production: attempting runs on an
-	// attempt's own goroutine as it begins, with its host's id; ticked on the
+	// The tests' barriers, nil in production: attempting runs on the poller
+	// as an attempt is started, with its host's id — after its budget's clock
+	// has started, and before its goroutine exists, so a tick's barrier
+	// (ticked) has counted every attempt the tick started; attempted runs on
+	// the attempt's own goroutine after it has sent its result, the last thing
+	// the goroutine does before Close's join counts it done; ticked on the
 	// poller once a tick has started what was due; applied on the poller once
 	// it has taken an attempt's result.
 	attempting func(hostID string)
+	attempted  func(hostID string)
 	ticked     func()
 	applied    func(hostID string, err error)
 }
@@ -331,7 +340,8 @@ func (r *Roster) Updates() <-chan Snapshot { return r.out }
 
 // Close stops the roster: every attempt in flight is cancelled and joined,
 // every connection closed, and Updates closed. It returns once every
-// goroutine the roster started has returned, and is idempotent.
+// goroutine the roster started has finished — each attempt's goroutine
+// joined as a goroutine, not only its result taken — and is idempotent.
 func (r *Roster) Close() {
 	r.once.Do(r.stop)
 	<-r.done
@@ -380,6 +390,10 @@ type poller struct {
 	hosts    map[string]*hostState
 	results  chan result
 	inFlight int
+	// attempts counts the attempts' goroutines until each has finished,
+	// which shutdown joins: a result taken says the attempt is over, not
+	// that its goroutine is (sol r17-c9 3).
+	attempts sync.WaitGroup
 	// round counts the ticks.
 	round uint64
 
@@ -513,27 +527,42 @@ func (p *poller) launch() {
 	}
 }
 
-// start hands h's kept connection, if any, to an attempt of its own.
+// start hands h's kept connection, if any, to an attempt of its own, on a
+// goroutine shutdown joins. The attempt's budget starts here: its one
+// deadline, dialBudget and listBudget from now, is fixed before the goroutine
+// exists and carried through everything the attempt does.
 func (p *poller) start(h *hostState) {
 	h.busy, h.round = true, p.round
 	p.inFlight++
 	conn, e := h.conn, h.entry
 	h.conn = nil
-	go func() { p.results <- p.attempt(e, conn) }()
+	deadline := time.Now().Add(p.o.dialBudget + p.o.listBudget)
+	if f := p.o.attempting; f != nil {
+		f(e.HostID)
+	}
+	p.attempts.Add(1)
+	go func() {
+		defer p.attempts.Done()
+		if f := p.o.attempted; f != nil {
+			defer f(e.HostID)
+		}
+		p.results <- p.attempt(e, conn, deadline)
+	}()
 }
 
-// attempt is one host's poll within its budget: sessions.list on the kept
-// connection, or — with none, or one the host had closed meanwhile — a new
-// connection's dial and hello first. A connection that fails is closed; one
-// that answered is the result's, to keep.
-func (p *poller) attempt(e rundir.Entry, c *client) result {
-	if h := p.o.attempting; h != nil {
-		h(e.HostID)
-	}
+// attempt is one host's poll within its budget, which ends at deadline:
+// sessions.list on the kept connection, or — with none, or one the host had
+// closed meanwhile — a new connection's dial and hello first. Each share is
+// bounded by its own budget and by deadline both (share), so a kept
+// connection the host closed late in its list leaves its redial only what is
+// left of the one budget (sol r17-c9 2): an attempt never outlasts
+// dialBudget + listBudget, however its host behaves. A connection that fails
+// is closed; one that answered is the result's, to keep.
+func (p *poller) attempt(e rundir.Entry, c *client, deadline time.Time) result {
 	res := result{hostID: e.HostID}
 	ctx := p.r.ctx
 	if c != nil {
-		rows, err := c.list(ctx, p.o.listBudget)
+		rows, err := c.list(ctx, share(p.o.listBudget, deadline))
 		if err == nil {
 			return answered(res, c, rows, e)
 		}
@@ -543,18 +572,27 @@ func (p *poller) attempt(e rundir.Entry, c *client) result {
 			return res
 		}
 	}
-	c, err := dialHello(ctx, p.o.dial, p.o.check, e.Socket, p.o.dialBudget)
+	c, err := dialHello(ctx, p.o.dial, p.o.check, e.Socket, share(p.o.dialBudget, deadline))
 	if err != nil {
 		res.err = err
 		return res
 	}
-	rows, err := c.list(ctx, p.o.listBudget)
+	rows, err := c.list(ctx, share(p.o.listBudget, deadline))
 	if err != nil {
 		c.close()
 		res.err = err
 		return res
 	}
 	return answered(res, c, rows, e)
+}
+
+// share is the deadline of one share of an attempt that starts now: budget
+// from now, and never past the attempt's own deadline.
+func share(budget time.Duration, deadline time.Time) time.Time {
+	if d := time.Now().Add(budget); d.Before(deadline) {
+		return d
+	}
+	return deadline
 }
 
 // answered is res for rows, c's answer: c kept with the row of the session e
@@ -668,13 +706,16 @@ func (p *poller) snapshot() Snapshot {
 
 // shutdown ends the poll: the roster's context has ended, which closes the
 // connection of every attempt in flight, so each comes back at once; their
-// connections and every kept one are closed.
+// connections and every kept one are closed, and every attempt's goroutine is
+// joined — a result sent is not a goroutine finished, and Close answers for
+// the goroutines.
 func (p *poller) shutdown() {
 	for p.inFlight > 0 {
 		res := <-p.results
 		p.inFlight--
 		res.conn.close()
 	}
+	p.attempts.Wait()
 	for id, h := range p.hosts {
 		h.conn.close()
 		delete(p.hosts, id)

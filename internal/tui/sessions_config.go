@@ -17,8 +17,8 @@ import (
 // no session list: no ← binding, no /sessions builtin, no new help line,
 // every existing frame unchanged (§3.17).
 //
-// Every method but Roster may take seconds and is called from a tea.Cmd,
-// never from Update.
+// Every method but Roster and LeaveRunning may take seconds and is called
+// from a tea.Cmd, never from Update.
 type Sessions interface {
 	// Roster starts the list's poller as the list opens; the list closes it
 	// (SessionRoster.Close) as it closes.
@@ -30,8 +30,16 @@ type Sessions interface {
 	// for it. It is the caller's to Close.
 	Open(ref roster.Ref) (backend.Backend, error)
 	// Spawn starts a new session as spec says and answers its ref, which Open
-	// then dials (PR 3's dispatch).
+	// then dials (PR 3's dispatch). The host is this craze's until it is
+	// taken — opened (Open: then it goes on at quit exactly when its session
+	// came up in the TUI, as a launch's does) or left running (LeaveRunning)
+	// — and one still not taken when craze quits is stopped.
 	Spawn(spec SpawnSpec) (roster.Ref, error)
+	// LeaveRunning takes ref's host, which Spawn started, without opening it:
+	// it goes on when craze quits (PR 3's background dispatch, its prompt
+	// accepted). A ref Spawn did not answer, or one already taken, is left
+	// as it is. It returns at once.
+	LeaveRunning(ref roster.Ref)
 	// Stop stops ref's running session on its host (session.stop): the
 	// list's close of a session it is not showing.
 	Stop(ref roster.Ref) error

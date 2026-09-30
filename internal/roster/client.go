@@ -49,14 +49,14 @@ func dialUnix(ctx context.Context, path string) (net.Conn, error) {
 	return d.DialContext(ctx, "unix", path)
 }
 
-// dialHello opens a connection to socket and says hello, within budget (the
-// attempt's "dial + hello" share) and until ctx ends — the roster's life,
-// whose end closes the connection mid-exchange. check, when not nil, is run
-// on the connection before a byte is written (rundir.DialCheck: the host runs
-// as this user). A hello refused, or answered by anything but a host that
-// speaks a protocol this build does, is an error.
-func dialHello(ctx context.Context, dial dialFunc, check func(*net.UnixConn) error, socket string, budget time.Duration) (*client, error) {
-	deadline := time.Now().Add(budget)
+// dialHello opens a connection to socket and says hello, by deadline (the
+// end of the attempt's "dial + hello" share) and until ctx ends — the
+// roster's life, whose end closes the connection mid-exchange. check, when
+// not nil, is run on the connection before a byte is written
+// (rundir.DialCheck: the host runs as this user). A hello refused, or
+// answered by anything but a host that speaks a protocol this build does, is
+// an error.
+func dialHello(ctx context.Context, dial dialFunc, check func(*net.UnixConn) error, socket string, deadline time.Time) (*client, error) {
 	dctx, cancel := context.WithDeadline(ctx, deadline)
 	defer cancel()
 	nc, err := dial(dctx, socket)
@@ -96,13 +96,13 @@ func dialHello(ctx context.Context, dial dialFunc, check func(*net.UnixConn) err
 	return c, nil
 }
 
-// list asks the host's sessions.list within budget (the attempt's share) and
-// until ctx ends. Any failure — a refusal included, and a reply that does not
-// decode — leaves the connection in no state to be asked again: the caller
-// closes it.
-func (c *client) list(ctx context.Context, budget time.Duration) (protocol.SessionsListResult, error) {
+// list asks the host's sessions.list by deadline (the end of the attempt's
+// share) and until ctx ends. Any failure — a refusal included, and a reply
+// that does not decode — leaves the connection in no state to be asked again:
+// the caller closes it.
+func (c *client) list(ctx context.Context, deadline time.Time) (protocol.SessionsListResult, error) {
 	var res protocol.SessionsListResult
-	err := c.exchange(ctx, time.Now().Add(budget), func() error {
+	err := c.exchange(ctx, deadline, func() error {
 		return c.call(protocol.MethodSessionsList, protocol.SessionsListParams{}, &res)
 	})
 	return res, err
@@ -120,16 +120,30 @@ func (c *client) close() {
 // at deadline and ctx's end closing it, which ends a read or write in flight.
 // It is ctx's error once ctx has ended, and leaves the connection with no
 // deadline: a kept connection waits for the next poll with none.
+//
+// The close ctx's end makes runs on a goroutine of the context package's; an
+// exchange that ctx ended waits for it to be over before it returns, so an
+// attempt that has returned has nothing of its own still running, and
+// Close's join of the attempts is a join of that close too (sol r17-c9 3).
 func (c *client) exchange(ctx context.Context, deadline time.Time, fn func() error) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	stop := context.AfterFunc(ctx, func() { _ = c.nc.Close() })
+	closed := make(chan struct{})
+	stop := context.AfterFunc(ctx, func() {
+		defer close(closed)
+		_ = c.nc.Close()
+	})
 	_ = c.nc.SetDeadline(deadline)
 	err := fn()
 	stopped := stop()
 	_ = c.nc.SetDeadline(time.Time{})
-	if !stopped || (err != nil && ctx.Err() != nil) {
+	if !stopped {
+		// ctx ended, and the close has been started: it is waited for.
+		<-closed
+		return ctx.Err()
+	}
+	if err != nil && ctx.Err() != nil {
 		return ctx.Err()
 	}
 	return err
@@ -201,8 +215,8 @@ func (e *refusedError) Error() string {
 // stale says err is a kept connection found closed at the start of an
 // attempt — the host dropped it while nobody was asking (an end of file, a
 // reset, a broken pipe) — rather than a host that did not answer in time: the
-// one failure the attempt dials past, once, with a fresh connection of its
-// own budget.
+// one failure the attempt dials past, once, with a fresh connection, inside
+// what is left of the attempt's own budget.
 func stale(err error) bool {
 	var ne net.Error
 	if errors.As(err, &ne) && ne.Timeout() {

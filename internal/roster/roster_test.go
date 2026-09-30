@@ -1,14 +1,14 @@
 package roster_test
 
 import (
-	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
-	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -25,11 +25,13 @@ import (
 )
 
 // The roster (plan 030 §3.9, R2-8; §3.18 PR 2): the poll's budgets — a
-// stalled dial, a stalled hello, a stalled sessions.list — the cap on
-// attempts in flight and one per host, the backoff, unreachable against
-// saved, simultaneous disconnects, and a Close that joins everything. Hosts
-// are internal/fakehost's, in process, each on a socket of its own; the
-// registry is a list the test keeps (TestOptions.Hosts) — the one test of the
+// stalled dial, a stalled hello, a stalled sessions.list, a kept connection
+// ended late and redialled inside the one budget — the cap on attempts in
+// flight and one per host, the backoff, unreachable against saved,
+// simultaneous disconnects, and a Close that joins everything. Hosts are
+// internal/fakehost's — or a socket the test answers by hand, where a host
+// must misbehave — in process, each on a socket of its own; the registry is
+// a list the test keeps (TestOptions.Hosts) — the one test of the
 // real registry is TestTheRosterReadsTheRegistry — and the tick and the clock
 // are the test's own, so every schedule is the test's. Every wait is bounded
 // on its own (step).
@@ -265,52 +267,6 @@ func describe(s roster.Snapshot) string {
 	}
 	fmt.Fprintf(&b, "saved:%d", len(s.Saved))
 	return b.String()
-}
-
-// rosterGoroutines is how many goroutines the roster's own code started and
-// still runs — the poller and its attempts — found by the "created by" line of
-// every goroutine's stack; the test's own goroutines, the fake hosts' and the
-// runtime's are not counted.
-func rosterGoroutines() int {
-	buf := make([]byte, 1<<20)
-	for {
-		n := runtime.Stack(buf, true)
-		if n < len(buf) {
-			buf = buf[:n]
-			break
-		}
-		buf = make([]byte, 2*len(buf))
-	}
-	count := 0
-	for _, g := range bytes.Split(buf, []byte("\n\n")) {
-		i := bytes.Index(g, []byte("\ncreated by "))
-		if i < 0 {
-			continue
-		}
-		creator := g[i:]
-		if bytes.Contains(creator, []byte("internal/roster.")) && !bytes.Contains(creator, []byte("_test.go")) {
-			count++
-		}
-	}
-	return count
-}
-
-// noRosterGoroutines waits, within a step, for the roster's goroutines to be
-// gone: Close has joined them, and one that has handed back its result may
-// still be returning.
-func noRosterGoroutines(t *testing.T) {
-	t.Helper()
-	deadline := time.Now().Add(step)
-	for {
-		n := rosterGoroutines()
-		if n == 0 {
-			return
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("%d of the roster's goroutines are left after Close", n)
-		}
-		time.Sleep(time.Millisecond)
-	}
 }
 
 // memIndex is an index in memory that counts its reads.
@@ -585,12 +541,20 @@ func TestAttemptsAreCappedAndNeverTwoForAHost(t *testing.T) {
 // TestAFailingHostBacksOffToThirtySeconds: after each failure the next
 // attempt waits 1 s, 2 s, 4 s … at most 30 s, the ticks between asking
 // nothing; the row stays unreachable throughout; an answer ends the backoff.
+//
+// "Asking nothing" is counted where it cannot be missed (sol r17-c9 5): an
+// attempt is counted on the poller as it starts (Attempting), before the
+// tick's own barrier (ticked), so once rg.tick has returned every attempt
+// that tick started is in the count — however late its goroutine would run
+// or report.
 func TestAFailingHostBacksOffToThirtySeconds(t *testing.T) {
 	g := newRegistry(t)
 	_, e := g.add(1, true)
 	var mu sync.Mutex
 	failing := true
+	var starts atomic.Int32
 	rg := newRig(t, g, nil, func(o *roster.TestOptions) {
+		o.Attempting = func(string) { starts.Add(1) }
 		o.Dial = func(ctx context.Context, path string) (net.Conn, error) {
 			mu.Lock()
 			f := failing
@@ -603,18 +567,27 @@ func TestAFailingHostBacksOffToThirtySeconds(t *testing.T) {
 	})
 	rg.waitApplied(1)
 	rg.until("unreachable", status(roster.Unreachable, e.HostID))
+	if n := starts.Load(); n != 1 {
+		t.Fatalf("%d attempts started by the first tick, want 1", n)
+	}
+	// ticks runs one tick at the clock's now and answers how many attempts
+	// it started: exact, at the tick's barrier.
+	ticks := func() int32 {
+		before := starts.Load()
+		rg.tick()
+		return starts.Load() - before
+	}
 	waits := []time.Duration{time.Second, 2 * time.Second, 4 * time.Second, 8 * time.Second, 16 * time.Second, 30 * time.Second, 30 * time.Second}
 	for _, wait := range waits {
 		// Just short of the wait: nothing is asked.
 		rg.clk.advance(wait - time.Millisecond)
-		rg.tick()
-		select {
-		case a := <-rg.applied:
-			t.Fatalf("asked %s into a %s backoff: %+v", wait-time.Millisecond, wait, a)
-		default:
+		if n := ticks(); n != 0 {
+			t.Fatalf("%d attempts started %s into a %s backoff", n, wait-time.Millisecond, wait)
 		}
 		rg.clk.advance(time.Millisecond)
-		rg.tick()
+		if n := ticks(); n != 1 {
+			t.Fatalf("%d attempts started as a %s backoff ended, want 1", n, wait)
+		}
 		if a := rg.waitApplied(1)[0]; a.err == nil {
 			t.Fatalf("the attempt after %s answered", wait)
 		}
@@ -626,13 +599,17 @@ func TestAFailingHostBacksOffToThirtySeconds(t *testing.T) {
 	failing = false
 	mu.Unlock()
 	rg.clk.advance(30 * time.Second)
-	rg.tick()
+	if n := ticks(); n != 1 {
+		t.Fatalf("%d attempts started after the last backoff, want 1", n)
+	}
 	if a := rg.waitApplied(1)[0]; a.err != nil {
 		t.Fatalf("the host answering: %v", a.err)
 	}
 	rg.until("reachable", status(roster.Reachable, e.HostID))
 	rg.clk.advance(roster.TickEvery)
-	rg.tick()
+	if n := ticks(); n != 1 {
+		t.Fatalf("%d attempts started a tick after the answer, want 1", n)
+	}
 	if a := rg.waitApplied(1)[0]; a.err != nil {
 		t.Fatalf("the next tick's attempt, the backoff over: %v", a.err)
 	}
@@ -800,46 +777,345 @@ func TestAHostWithNoSessionYetIsNotAsked(t *testing.T) {
 	}
 }
 
-// TestCloseJoinsEverything: with connections kept and attempts in flight,
-// Close cancels and joins every attempt, closes every connection and the
-// slot, and leaves none of the roster's goroutines.
+// deadlineConn is a connection whose deadlines the test sees: each one set
+// (not the zero that clears it) is noted as it is set.
+type deadlineConn struct {
+	net.Conn
+	note func(at time.Time)
+}
+
+func (c *deadlineConn) SetDeadline(t time.Time) error {
+	if !t.IsZero() {
+		c.note(t)
+	}
+	return c.Conn.SetDeadline(t)
+}
+
+// scriptedHost serves socket by hand: hello and sessions.list answered as a
+// host answers them, for the session id, except where serve's caller says
+// otherwise — lists, when it answers false for a connection's n-th list
+// (from 1), ends that connection there instead.
+func scriptedHost(t *testing.T, socket, id string, lists func(conn, n int) bool) {
+	t.Helper()
+	l, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = l.Close() })
+	hello, err := json.Marshal(protocol.HelloResult{Protocol: 1, Endpoint: protocol.Endpoint{Kind: protocol.EndpointHost, HostID: "000000000001", CrazeVersion: "0.0.1"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	row, err := json.Marshal(protocol.SessionsListResult{Sessions: []protocol.SessionRow{{SessionInfo: protocol.SessionInfo{SessionID: id}, Activity: "idle"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	serve := func(c net.Conn, conn int) {
+		defer c.Close()
+		lr := protocol.NewLineReader(c, 0)
+		listed := 0
+		for {
+			line, err := lr.ReadLine()
+			if err != nil {
+				return
+			}
+			var req protocol.Request
+			if err := json.Unmarshal(line, &req); err != nil {
+				t.Errorf("the roster wrote %q: %v", line, err)
+				return
+			}
+			result := hello
+			if req.Method == protocol.MethodSessionsList {
+				listed++
+				if !lists(conn, listed) {
+					return
+				}
+				result = row
+			}
+			out, err := protocol.MarshalLine(protocol.Response{JSONRPC: protocol.JSONRPCVersion, ID: req.ID, Result: result})
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			if _, err := c.Write(out); err != nil {
+				return
+			}
+		}
+	}
+	go func() {
+		for conn := 1; ; conn++ {
+			c, err := l.Accept()
+			if err != nil {
+				return
+			}
+			go serve(c, conn)
+		}
+	}()
+}
+
+// TestAStaleRedialSpendsWhatIsLeftOfTheAttempt (sol r17-c9 2): a kept
+// connection that its host ends late in a sessions.list — a second before the
+// list's deadline — is redialled within what is left of the attempt's one
+// budget, dialBudget + listBudget from the attempt's start, never with fresh
+// budgets of its own: every deadline the attempt sets, its dial's and each
+// exchange's, lies inside that one budget, so the attempt ends within it
+// whatever the host does. The redial is answered, so the row stays
+// reachable (X66). Given fresh budgets, the redial's list would have run
+// until at least a second past the budget's end: the host ends the list with
+// resetLead of its own share left, and the fresh list share is longer than
+// what remains after that by dialBudget.
+func TestAStaleRedialSpendsWhatIsLeftOfTheAttempt(t *testing.T) {
+	const (
+		dialBudget = time.Second
+		listBudget = 4 * time.Second
+		// resetLead is how long before the kept list's deadline its host ends
+		// the connection: the slack a starved scheduler has to run the host's
+		// end before the roster's own deadline would.
+		resetLead = 2 * time.Second
+	)
+	g := newRegistry(t)
+	e := rundir.Entry{Protocol: 1, HostID: hostID(1), Socket: filepath.Join(g.dir, "resets"), CrazeSessionID: sessionID(1)}
+
+	// marks is every attempt's start and every deadline it set, in order.
+	type mark struct {
+		start bool
+		at    time.Time
+		what  string
+	}
+	var mu sync.Mutex
+	var marks []mark
+	note := func(m mark) {
+		mu.Lock()
+		defer mu.Unlock()
+		marks = append(marks, m)
+	}
+	lastDeadline := func() time.Time {
+		mu.Lock()
+		defer mu.Unlock()
+		for i := len(marks) - 1; i >= 0; i-- {
+			if !marks[i].start && marks[i].what != "dial" {
+				return marks[i].at
+			}
+		}
+		return time.Time{}
+	}
+	scriptedHost(t, e.Socket, e.CrazeSessionID, func(conn, n int) bool {
+		if conn == 1 && n == 2 {
+			// The kept connection's second list, the attempt under test: ended
+			// resetLead before the deadline the roster set for it.
+			time.Sleep(time.Until(lastDeadline().Add(-resetLead)))
+			return false
+		}
+		return true
+	})
+	g.list(e)
+	var dials atomic.Int32
+	rg := newRig(t, g, nil, func(o *roster.TestOptions) {
+		o.DialBudget, o.ListBudget = dialBudget, listBudget
+		o.Attempting = func(string) { note(mark{start: true, at: time.Now()}) }
+		o.Dial = func(ctx context.Context, path string) (net.Conn, error) {
+			dials.Add(1)
+			dl, ok := ctx.Deadline()
+			if !ok {
+				t.Error("a dial with no deadline")
+			}
+			note(mark{at: dl, what: "dial"})
+			c, err := roster.DialUnix(ctx, path)
+			if err != nil {
+				return nil, err
+			}
+			return &deadlineConn{Conn: c, note: func(at time.Time) { note(mark{at: at, what: "exchange"}) }}, nil
+		}
+	})
+	if a := rg.waitApplied(1)[0]; a.err != nil {
+		t.Fatalf("the first attempt: %v", a.err)
+	}
+	rg.until("reachable", status(roster.Reachable, e.HostID))
+	rg.clk.advance(roster.TickEvery)
+	rg.tick()
+	if a := rg.waitApplied(1)[0]; a.err != nil {
+		t.Fatalf("the attempt whose kept connection the host ended: %v", a.err)
+	}
+	if r := row(rg.until("still reachable", status(roster.Reachable, e.HostID)), e.HostID); r.Session == nil {
+		t.Fatalf("the row %+v", r)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	attempts, dialled := 0, 0
+	var start time.Time
+	for _, m := range marks {
+		if m.start {
+			attempts++
+			start = m.at
+			continue
+		}
+		if m.what == "dial" {
+			dialled++
+		}
+		if end := start.Add(dialBudget + listBudget); m.at.After(end) {
+			t.Errorf("attempt %d set a %s deadline %s past the end of its one budget (%s from its start)", attempts, m.what, m.at.Sub(end), dialBudget+listBudget)
+		}
+	}
+	if attempts != 2 || dialled != 2 || dials.Load() != 2 {
+		t.Fatalf("%d attempts, %d dials: want the second attempt to have redialled its ended connection once", attempts, dialled)
+	}
+}
+
+// holdingConn is a connection whose first Close is held, once the connection
+// is closed, until release is closed: counted in held while it is, and
+// announced on holds. The first call is claimed before the connection is
+// closed, so no later one — the attempt's own, once the close has ended its
+// read — can be the one held.
+type holdingConn struct {
+	net.Conn
+	held    *atomic.Int32
+	holds   chan<- string
+	release <-chan struct{}
+	once    atomic.Bool
+}
+
+func (c *holdingConn) Close() error {
+	if !c.once.CompareAndSwap(false, true) {
+		return c.Conn.Close()
+	}
+	c.held.Add(1)
+	defer c.held.Add(-1)
+	err := c.Conn.Close()
+	c.holds <- "the close of a stalled hello's connection"
+	<-c.release
+	return err
+}
+
+// closeGrace is how long TestCloseJoinsEverything gives a Close that does not
+// join to return while what it should join is held: a Close that waited for
+// results alone returns within it at once, and one that joins never does
+// until the hold is released.
+const closeGrace = 500 * time.Millisecond
+
+// TestCloseJoinsEverything (sol r17-c9 3): with connections kept and
+// attempts in flight, Close cancels and joins every attempt, closes every
+// connection and the slot.
+//
+// Joined is asserted where a Close that did not join would be caught, one
+// thing held at a time — each alone is then all that can keep Close from
+// returning: attempts whose dials hang, each held at its goroutine's last
+// statement (Attempted), after it has sent its result — where a Close that
+// waits for results alone returns — and an attempt whose hello is never
+// answered, its connection held inside the close the roster's context makes
+// of it — where an exchange that leaves that close running lets its attempt
+// return. Close must not return until what is held is released, and at its
+// return — read there, not polled for — no attempt and no close of theirs is
+// still running.
 func TestCloseJoinsEverything(t *testing.T) {
+	t.Run("attempts held after their results", func(t *testing.T) { closeJoins(t, false) })
+	t.Run("a close mid-exchange held", func(t *testing.T) { closeJoins(t, true) })
+}
+
+// closeJoins is TestCloseJoinsEverything with three live hosts, their
+// connections kept, and in flight either three attempts whose dials hang or
+// — midExchange — one whose hello is never answered.
+func closeJoins(t *testing.T, midExchange bool) {
 	g := newRegistry(t)
 	var hosts []*fakehost.Host
 	for i := 1; i <= 3; i++ {
 		h, _ := g.add(i, true)
 		hosts = append(hosts, h)
 	}
-	for i := 4; i <= 6; i++ {
-		g.list(rundir.Entry{Protocol: 1, HostID: hostID(i), Socket: filepath.Join(g.dir, "hang"), CrazeSessionID: sessionID(i)})
+	hangs := map[string]bool{}
+	inFlight := make(chan struct{}, 8)
+	want := 3
+	if midExchange {
+		want = 1
+		stalled := rundir.Entry{Protocol: 1, HostID: hostID(7), Socket: filepath.Join(g.dir, "stalled"), CrazeSessionID: sessionID(7)}
+		l, err := net.Listen("unix", stalled.Socket)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = l.Close() })
+		go func() {
+			c, err := l.Accept()
+			if err != nil {
+				return
+			}
+			defer c.Close()
+			if _, err := protocol.NewLineReader(c, 0).ReadLine(); err == nil {
+				inFlight <- struct{}{}
+			}
+			// Never answered: the roster's close is what ends it.
+			_, _ = io.Copy(io.Discard, c)
+		}()
+		g.list(stalled)
+	} else {
+		for i := 4; i <= 6; i++ {
+			g.list(rundir.Entry{Protocol: 1, HostID: hostID(i), Socket: filepath.Join(g.dir, "hang"), CrazeSessionID: sessionID(i)})
+			hangs[hostID(i)] = true
+		}
 	}
-	hanging := make(chan struct{}, 8)
+
+	// running counts the attempts between their start and their last
+	// statement; closing, the stalled hello's close while it is held.
+	var running, closing atomic.Int32
+	holds := make(chan string, 16)
+	release := make(chan struct{})
 	rg := newRig(t, g, nil, func(o *roster.TestOptions) {
 		o.DialBudget = time.Hour
+		o.Attempting = func(string) { running.Add(1) }
+		o.Attempted = func(id string) {
+			defer running.Add(-1)
+			if hangs[id] {
+				holds <- "hanging attempt " + id
+				<-release
+			}
+		}
 		o.Dial = func(ctx context.Context, path string) (net.Conn, error) {
-			if filepath.Base(path) == "hang" {
-				hanging <- struct{}{}
+			switch filepath.Base(path) {
+			case "hang":
+				inFlight <- struct{}{}
 				<-ctx.Done()
 				return nil, ctx.Err()
+			case "stalled":
+				c, err := roster.DialUnix(ctx, path)
+				if err != nil {
+					return nil, err
+				}
+				return &holdingConn{Conn: c, held: &closing, holds: holds, release: release}, nil
 			}
 			return roster.DialUnix(ctx, path)
 		}
 	})
 	rg.until("the live hosts reachable", status(roster.Reachable, hostID(1), hostID(2), hostID(3)))
-	for range 3 {
+	for range want {
 		select {
-		case <-hanging:
+		case <-inFlight:
 		case <-time.After(step):
-			t.Fatal("the hanging attempts never started")
+			t.Fatal("the attempts to hold never got in flight")
 		}
 	}
-	if n := rosterGoroutines(); n < 4 {
-		t.Fatalf("%d roster goroutines with three attempts in flight: the count sees nothing", n)
+
+	type atReturn struct{ running, closing int32 }
+	closed := make(chan atReturn, 1)
+	go func() {
+		rg.r.Close()
+		closed <- atReturn{running.Load(), closing.Load()}
+	}()
+	for range want {
+		select {
+		case <-holds:
+		case <-time.After(step):
+			t.Fatal("Close did not end the attempts in flight")
+		}
 	}
-	done := make(chan struct{})
-	go func() { rg.r.Close(); close(done) }()
 	select {
-	case <-done:
+	case got := <-closed:
+		t.Fatalf("Close returned with %d attempts and %d closes of theirs still running", got.running, got.closing)
+	case <-time.After(closeGrace):
+	}
+	close(release)
+	select {
+	case got := <-closed:
+		if got != (atReturn{}) {
+			t.Fatalf("Close returned with %d attempts and %d closes of theirs still running", got.running, got.closing)
+		}
 	case <-time.After(step):
 		t.Fatal("Close never returned")
 	}
@@ -850,7 +1126,6 @@ func TestCloseJoinsEverything(t *testing.T) {
 			t.Fatal("the slot is still open after Close")
 		}
 	}
-	noRosterGoroutines(t)
 	for _, h := range hosts {
 		waitConns(t, h, 0)
 	}
