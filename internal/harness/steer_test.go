@@ -589,8 +589,17 @@ func TestSteerRacesTheTurnEnd(t *testing.T) {
 	// next interleave. A batch with no gate is launched into a turn already on
 	// its way out: those steers race the close itself, and each is accepted or
 	// refused, never half of either.
+	//
+	// A gated batch lets the turn go on only once one of its steers has been
+	// accepted: the turn is held at that gate, so one is always accepted, and
+	// the rest still race the step the gate releases. Releasing at once let a
+	// loaded machine run the whole step, and end the turn, before any of the
+	// batch's goroutines ran, so the control below failed with nothing wrong
+	// (plan 030's gate, once, under the full -race run's load).
 	var wg sync.WaitGroup
 	storm := func(batch string, g *gate) {
+		first := make(chan struct{})
+		var once sync.Once
 		for i := range steerers {
 			wg.Add(1)
 			go func() {
@@ -601,6 +610,7 @@ func TestSteerRacesTheTurnEnd(t *testing.T) {
 					mu.Lock()
 					accepted = append(accepted, text)
 					mu.Unlock()
+					once.Do(func() { close(first) })
 				case errors.Is(err, ErrNotInTurn):
 				default:
 					t.Errorf("Steer(%q) = %v, want nil or ErrNotInTurn", text, err)
@@ -608,6 +618,7 @@ func TestSteerRacesTheTurnEnd(t *testing.T) {
 			}()
 		}
 		if g != nil {
+			await(t, first, "batch "+batch+"'s first accepted steer")
 			close(g.release)
 		}
 	}
