@@ -999,7 +999,7 @@ func sessionInfo(p *protocol.SessionInfo) backend.SessionInfo {
 		StartedAt:         p.StartedAt,
 	}
 	for _, m := range p.Catalogs.Models {
-		info.Models = append(info.Models, agent.ModelInfo{ID: m.ID, Name: m.Name})
+		info.Models = append(info.Models, agent.ModelInfo{ID: m.ID, Name: m.Name, Recent: m.Recent})
 	}
 	for _, m := range p.Catalogs.Modes {
 		info.Modes = append(info.Modes, agent.ModeInfo{ID: m.ID, Name: m.Name, Description: m.Description})

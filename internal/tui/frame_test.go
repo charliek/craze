@@ -1302,7 +1302,7 @@ func TestFrameGoldenModelDialog(t *testing.T) {
 		want       []string
 	}{
 		{"model-dialog-100x30", 100, 30, "<wait:idle>/model<enter>gro",
-			[]string{"\u276f gro", "> Grok", "current", "effort", "fast", "esc"}},
+			[]string{"\u276f gro", "> Grok", "effort", "fast", "esc"}},
 		// Tab twice reaches the fast row, one right turns it on, and Enter
 		// applies just that step: the note and status row 1 are the proof the
 		// advertised value went out and came back.

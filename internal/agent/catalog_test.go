@@ -326,6 +326,34 @@ func TestOrderModels(t *testing.T) {
 	}
 }
 
+// TestOrderModelsPutsTheRememberedAfterTheCurrent (plan 031 §3.6): a native
+// session's remembered models come right after the current one, by rank —
+// whatever their names, and ahead of the grok bucket — and the current model
+// stays first even when it is remembered too. The rest keep today's order.
+// ACP models carry no rank, which is TestOrderModels above, unchanged.
+func TestOrderModelsPutsTheRememberedAfterTheCurrent(t *testing.T) {
+	snap := Snapshot{
+		CurrentModel: "cur",
+		Models: []ModelInfo{
+			{ID: "zed", Name: "Zed"},
+			{ID: "old", Name: "Aaa", Recent: 3},
+			{ID: "grok", Name: "Grok"},
+			{ID: "cur", Name: "Current", Recent: 2},
+			{ID: "new", Name: "Zzz", Recent: 1},
+			{ID: "abc", Name: "Abc"},
+		},
+	}
+	if got := modelIDs(OrderModels(snap)); got != "cur,new,old,grok,abc,zed" {
+		t.Fatalf("current, then remembered by rank, then grok, then the rest: %s", got)
+	}
+	// A tie in rank, which no session sends, falls back to name then id, so
+	// the order never depends on the input's.
+	tied := Snapshot{Models: []ModelInfo{{ID: "b", Name: "Same", Recent: 1}, {ID: "a", Name: "Same", Recent: 1}}}
+	if got := modelIDs(OrderModels(tied)); got != "a,b" {
+		t.Fatalf("rank tie-break: %s", got)
+	}
+}
+
 func TestEffortOptionPreference(t *testing.T) {
 	vals := []SelectValue{
 		{Value: "low", Name: "Low"},

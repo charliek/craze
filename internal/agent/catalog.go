@@ -416,18 +416,27 @@ func sortModelBucket(ms []ModelInfo) {
 }
 
 // OrderModels returns advertised models with the current model first, then
-// any id/name matching grok, then the rest by display name and id.
+// the remembered ones by rank (ModelInfo.Recent, newest first: plan 031
+// §3.6), then any id/name matching grok, then the rest by display name and
+// id. Only a native session's models carry a rank — an ACP provider's never
+// do — so an ACP picker's order is what it always was. Nothing is labelled:
+// the order, and the current model being the pre-selected row, say it all
+// (owner, Q4).
 func OrderModels(snap Snapshot) []ModelInfo {
 	models := snapshotModels(snap)
 	if len(models) == 0 {
 		return nil
 	}
-	var cur, grok, rest []ModelInfo
+	var cur, recent, grok, rest []ModelInfo
 	seenCurrent := false
 	for _, m := range models {
 		if !seenCurrent && snap.CurrentModel != "" && m.ID == snap.CurrentModel {
 			cur = append(cur, m)
 			seenCurrent = true
+			continue
+		}
+		if m.Recent > 0 {
+			recent = append(recent, m)
 			continue
 		}
 		if isGrokModel(m) {
@@ -436,10 +445,16 @@ func OrderModels(snap Snapshot) []ModelInfo {
 		}
 		rest = append(rest, m)
 	}
+	// By rank, and a tie — which no session advertises — as the other
+	// buckets break theirs, so the order never depends on the input's: the
+	// bucket order first, then a stable sort by rank that keeps it.
+	sortModelBucket(recent)
+	sort.SliceStable(recent, func(i, j int) bool { return recent[i].Recent < recent[j].Recent })
 	sortModelBucket(grok)
 	sortModelBucket(rest)
 	out := make([]ModelInfo, 0, len(models))
 	out = append(out, cur...)
+	out = append(out, recent...)
 	out = append(out, grok...)
 	out = append(out, rest...)
 	return out

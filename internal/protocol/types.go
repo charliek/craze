@@ -272,6 +272,12 @@ type Catalogs struct {
 type CatalogModel struct {
 	ID   string `json:"id"`
 	Name string `json:"name"`
+	// Recent is the model's rank in native's model memory (plan 031 §3.6,
+	// P9): 1 for the most recently picked model the session offers, then 2,
+	// 3…; absent for a model not remembered, for every ACP provider's, and
+	// on an older host's. A client lists the remembered models right after
+	// the current one, by rank.
+	Recent int `json:"recent,omitempty"`
 }
 
 // CatalogMode is one mode a session.set of kind mode can name.

@@ -70,6 +70,13 @@ type Options struct {
 	// server's, from the engine over the Stub, every time on the Host's
 	// pinned clock. Off, the row is S2's.
 	RowFacts bool
+
+	// Models, when non-empty, is the Stub's model catalog in place of its own
+	// (grok, fast): plan 031's opt-in, so a fixture can advertise what a
+	// native session does — remembered models carrying their rank, which the
+	// catalogs' "recent" says (§3.6, P9). Every incarnation gets it. Empty,
+	// the catalog is the Stub's, and the wire is exactly what it was.
+	Models []agent.ModelInfo
 }
 
 func (o Options) withDefaults() Options {
@@ -200,6 +207,9 @@ func (h *Host) newIncarnation() error {
 	stub := tui.NewStubNoPrimary()
 	stub.Clock = h.clk.now
 	stub.InstallOnStart = true
+	if len(h.opts.Models) > 0 {
+		stub.SetModels(h.opts.Models)
+	}
 	eng, err := engine.New(stub, engine.Options{
 		CrazeSessionID: h.opts.CrazeSessionID,
 		ReceiptClock:   h.clk.now,

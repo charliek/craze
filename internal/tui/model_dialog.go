@@ -1229,12 +1229,14 @@ func (m Model) modelDialogBody(inner, budget int) []string {
 		f.Width = max(1, inner-lipgloss.Width(modelFilterPrompt)-1)
 		rows = append(rows, f.View())
 	}
+	// A row is the model's name and nothing else: no "current" tag, and no
+	// "recent" one on native's remembered models (plan 031 §3.6, owner
+	// decision Q4) — the order says which model is current (first, and the
+	// row the dialog opens on) and which were picked lately (right after it,
+	// newest first: agent.OrderModels). The tag slot is the scroll marks'.
 	for i := 0; i < p.shown; i++ {
 		md := p.list[p.top+i]
 		tag := dialogScrollTag(i, p.top, p.shown, len(p.list))
-		if md.ID == m.snap.CurrentModel {
-			tag = strings.TrimSpace("current " + tag)
-		}
 		rows = append(rows, m.dialogRow(modelRowText(md), tag, p.top+i == d.sel, d.focus == focusList, inner))
 	}
 	for _, t := range p.tabs[:p.rows.tabs] {

@@ -503,16 +503,19 @@ func TestNewBranchesOnInProcess(t *testing.T) {
 
 func ptr[T any](v T) *T { return &v }
 
-// TestNativeStart: the first snapshot carries the table's models by alias
-// (names sanitized), the current model, the harness's session id, the
-// native provider and an effort option EffortOption finds, and no title
-// until a prompt gives it one.
+// TestNativeStart: the first snapshot carries the models the session offers
+// by alias (names sanitized) — every model whose provider has a key, so not
+// nokey/d (plan 031 §3.6) — the current model, the harness's session id, the
+// native provider and an effort option EffortOption finds, and no title until
+// a prompt gives it one. With no memory the models are in the table's name
+// order, which is the name as the table spells it: test/b's, which starts with
+// an escape before it is sanitized, sorts first (the dialog orders by what it
+// draws, agent.OrderModels).
 func TestNativeStart(t *testing.T) {
 	f := newNativeFixture(t)
 	s := f.started(Options{})
 	snap := s.Snapshot()
-	want := []ModelInfo{{ID: "nokey/d", Name: "nokey/d"}, {ID: "other/c", Name: "other/c"},
-		{ID: "test/a", Name: "Model A"}, {ID: "test/b", Name: "Model B"}}
+	want := []ModelInfo{{ID: "test/b", Name: "Model B"}, {ID: "test/a", Name: "Model A"}, {ID: "other/c", Name: "other/c"}}
 	if !reflect.DeepEqual(snap.Models, want) {
 		t.Fatalf("Models = %+v, want %+v", snap.Models, want)
 	}
@@ -1312,8 +1315,10 @@ func TestNativeSetModelDuringATurn(t *testing.T) {
 	if snap := s.Snapshot(); snap.CurrentModel != "other/c" || EffortOption(snap) != nil || snap.Config != nil {
 		t.Fatalf("a model with no efforts: current %q, config %+v", snap.CurrentModel, snap.Config)
 	}
+	// A model whose provider has no key is not offered, so a switch to it is
+	// a switch to an unknown model (plan 031 §3.6; TestNativeHiddenModels).
 	_, err := s.SetModel(context.Background(), "", "nokey/d")
-	if err == nil || !errors.Is(err, harness.ErrNoAPIKey) || !strings.Contains(err.Error(), "NATIVE_NOKEY_KEY") {
+	if err == nil || !strings.Contains(err.Error(), `unknown model "nokey/d"`) {
 		t.Fatalf("SetModel to an unfunded model = %v", err)
 	}
 	if got := s.Snapshot().CurrentModel; got != "other/c" {

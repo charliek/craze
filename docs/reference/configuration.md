@@ -572,7 +572,8 @@ from, tried in order:
 Its models — aliases, wire model ids, context windows, efforts and costs — and
 its default model are in
 [`internal/harness/modeltable/catalog.toml`](https://github.com/charliek/craze/blob/main/internal/harness/modeltable/catalog.toml);
-a session's `/model` lists them. With the catalog, a machine needs only a key:
+a session's `/model` lists those whose provider has a key ([which models, in
+what order](tui.md#model-dialog)). With the catalog, a machine needs only a key:
 store one with [`craze auth login`](#keys), or export one of the variables
 above, and run `craze --provider native`. With no key at all, a native session
 refuses to start and names `craze auth login`, the variables to set and the
@@ -775,8 +776,9 @@ Deleting it forgets everything.
 model dialog, or an attached client's switch — once the switch has taken,
 recording the model and the effort the session is then on. `--model`, `craze
 prompt`, a resume and a sub-agent's model never write it. A session reads it
-once, when it starts: a switch changes where the next session starts, not the
-running one.
+once, when it starts: a switch changes where the next session starts, and the
+order the next session's `/model` lists models in — the remembered ones right
+after the current one, newest first — not the running one's.
 
 **Two sessions at once.** Every write reads, changes and replaces the file
 under a lock beside it, `recent.json.lock`, so two sessions switching at the

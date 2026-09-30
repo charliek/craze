@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -1101,6 +1102,27 @@ func TestTheInfoCarriesAPlan030HostsFacts(t *testing.T) {
 				t.Fatalf("the Info says %q, started %s; want %q, started %s", info.PermissionMode, info.StartedAt, tc.perm, tc.started)
 			}
 		})
+	}
+}
+
+// TestTheInfoCarriesTheModelsRanks (plan 031 §3.6, P9): a native host's
+// remembered models reach the Backend's Info with their rank — catalogs'
+// "recent" — so a picker attached over the socket orders them as one in
+// process does; a model with no rank stays at 0.
+func TestTheInfoCarriesTheModelsRanks(t *testing.T) {
+	h := newHost(t)
+	models := []agent.ModelInfo{
+		{ID: "fireworks/kimi-k3", Name: "Kimi K3 (Fireworks)", Recent: 2},
+		{ID: "muse-spark-1.3-contributor", Name: "Muse Spark 1.3 Contributor (Meta)", Recent: 1},
+		{ID: "fireworks/deepseek-v4p1-flash", Name: "DeepSeek V4.1 Flash (Fireworks)"},
+	}
+	h.stub.SetModels(models)
+	s := dialSession(t, h.path, newTap(t), remote.SessionOptions{})
+	if err := s.Start(tctx(t)); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	if got := s.Info().Models; !reflect.DeepEqual(got, models) {
+		t.Fatalf("the Info's models are %+v, want the host's %+v", got, models)
 	}
 }
 

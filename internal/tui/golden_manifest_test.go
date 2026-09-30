@@ -114,6 +114,7 @@ var goldenManifest = map[string]goldenRuns{
 	"native-compaction-100x30":               bothTransports,
 	"native-echo-80x24":                      bothTransports,
 	"native-menu-100x30":                     bothTransports,
+	"native-model-dialog-100x30":             bothTransports,
 	"native-mode-100x30":                     bothTransports,
 	"native-plan-denied-100x30":              bothTransports,
 	"native-plan-offer-100x30":               bothTransports,
@@ -499,8 +500,8 @@ func TestTheGoldenManifestIsEveryGolden(t *testing.T) {
 			t.Errorf("the manifest runs %s under %v: a golden runs under both transports, or in process alone", name, runs)
 		}
 	}
-	if both != 115 || inprocAlone != 32 {
-		t.Errorf("the manifest lists %d goldens under both transports and %d in process alone, want 115 and 32 (A8)", both, inprocAlone)
+	if both != 116 || inprocAlone != 32 {
+		t.Errorf("the manifest lists %d goldens under both transports and %d in process alone, want 116 and 32 (A8)", both, inprocAlone)
 	}
 }
 

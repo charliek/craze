@@ -320,10 +320,24 @@ class PTYCraze:
         os.write(self.master, data)
 
     def wait_exit(self, timeout: float = 5) -> int:
+        """Wait for craze to exit and for the reader to take what it wrote.
+
+        Reaping craze is not the same as having read its output: a craze that
+        prints one line and exits at once -- a refusal -- can be reaped before
+        the reader thread has been scheduled to read that line, and a screen()
+        taken right after would be missing it (seen as an empty screen under a
+        loaded full run). Once nothing holds the terminal's other end any
+        more, reading the master drains what is buffered and then fails (EIO
+        on Linux, EOF on macOS), which ends the reader; a child that still
+        holds it is waited for at most two seconds, and the reader then goes
+        on as before.
+        """
         try:
-            return self.proc.wait(timeout=timeout)
+            code = self.proc.wait(timeout=timeout)
         except subprocess.TimeoutExpired as err:
             raise AssertionError(f"craze did not exit: {self.screen()[-3000:]}") from err
+        self._reader.join(timeout=2)
+        return code
 
     def hangup(self, timeout: float = 5) -> int:
         """Close the terminal under craze, the way a closed tab does, and

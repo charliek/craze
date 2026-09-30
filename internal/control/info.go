@@ -96,7 +96,7 @@ func (s *Server) sessionInfoReady(eng *engine.Engine) (protocol.SessionInfo, eng
 	info.Capabilities.RowFacts = s.opts.RowFacts
 	if ready {
 		for _, m := range st.Models {
-			info.Catalogs.Models = append(info.Catalogs.Models, protocol.CatalogModel{ID: m.ID, Name: m.Name})
+			info.Catalogs.Models = append(info.Catalogs.Models, protocol.CatalogModel{ID: m.ID, Name: m.Name, Recent: m.Recent})
 		}
 		for _, m := range st.Modes {
 			info.Catalogs.Modes = append(info.Catalogs.Modes, protocol.CatalogMode{ID: m.ID, Name: m.Name, Description: m.Description})

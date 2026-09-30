@@ -93,7 +93,9 @@ func TestNativeSwitchesAreRemembered(t *testing.T) {
 	if got.Provider != "test" || got.WireModel != "wire-b" {
 		t.Fatalf("the newest entry names %s/%s; want test's wire-b, from the session's table", got.Provider, got.WireModel)
 	}
-	// A switch the harness refuses is not remembered.
+	// A switch that fails is not remembered: here to a model the session does
+	// not offer (plan 031 §3.6); TestNativeHiddenModels has one the harness
+	// refuses.
 	if _, err := s.SetModel(context.Background(), "", "nokey/d"); err == nil {
 		t.Fatal("a switch to an unfunded model succeeded")
 	}

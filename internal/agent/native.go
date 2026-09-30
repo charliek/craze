@@ -504,12 +504,20 @@ func (s *nativeSession) start(context.Context) error {
 		}
 		return err
 	}
+	// The effort levels of every model in the table, for the effort option
+	// of whichever model the session is on (refreshCurrentLocked).
 	models := hs.Models()
 	efforts := make(map[string][]string, len(models))
-	infos := make([]ModelInfo, 0, len(models))
 	for _, m := range models {
 		efforts[m.Alias] = m.Efforts
-		infos = append(infos, ModelInfo{ID: m.Alias, Name: sanitizeLine(m.Name)})
+	}
+	// The models the session offers — the ones whose provider has a key,
+	// and the one it runs on — in the picker's order, each with its rank in
+	// the model memory (plan 031 §3.6; nativeOpened.choices). The name is
+	// sanitized here: it is text from a file the owner edits by hand.
+	infos := make([]ModelInfo, 0, len(opened.choices))
+	for _, c := range opened.choices {
+		infos = append(infos, ModelInfo{ID: c.Alias, Name: sanitizeLine(c.Name), Recent: c.Recent})
 	}
 	// The scan and the instruction loader ran inside open(), before the
 	// harness was opened, because the prompt they feed is frozen there (§3.4)
@@ -1152,16 +1160,35 @@ func (s *nativeSession) open() (*harness.Session, nativeOpened, nativeLoad, erro
 		return nil, nativeOpened{}, none, phraseSetupError(err, table, hopts.Model)
 	}
 	opened.Store(hs)
-	return hs, nativeOpened{table: table, home: hopts.Home}, content, nil
+	// The models this session offers (plan 031 §3.6), judged now, before
+	// the seal is released: with the same reading of the environment the
+	// harness resolved its keys from, so every model offered is one whose
+	// key the session's redactor already covers — and with the model the
+	// harness actually opened on as the current one, which for a resume is
+	// the transcript's.
+	current, _ := hs.Current()
+	return hs, nativeOpened{table: table, home: hopts.Home, choices: table.Choices(recent, getenv, current)}, content, nil
 }
 
 // nativeOpened is what open() resolved beside the harness and the content:
 // the model table the harness was opened on, and the Home it was read from —
 // hopts.Home after the seam, the directory the session's model memory is
-// written in (plan 031 §3.4).
+// written in (plan 031 §3.4) — and the models the session offers.
 type nativeOpened struct {
 	table *modeltable.Table
 	home  string
+	// choices is the advertised list (plan 031 §3.6, owner decision Q4):
+	// the table's models whose provider has a key, plus the model the
+	// session runs on (P7), the remembered ones first, by rank, then the
+	// rest by name (modeltable.Table.Choices). It is computed once, at
+	// start, from the memory read at start (§3.4): a switch made in this
+	// session reorders the next session's picker, not this one's, and a
+	// provider connected while it runs is offered only by a new session or
+	// after /exit and craze -c (P8). A model it leaves out is one this
+	// session's SetModel does not know (MatchModel over the snapshot), as
+	// an unknown alias always was; --model still resolves against the whole
+	// table (tableModels).
+	choices []modeltable.Choice
 }
 
 // diagResumeEmpty is the journal diag a load that opened empty is noted as
@@ -1244,14 +1271,17 @@ func (s *nativeSession) newSessionModel(hopts *harness.Options, recent []modelta
 //
 // The release is what the rest of the session needs, and it is not a detail.
 // The harness keeps this function as its own getenv for the session's whole
-// life and calls it on every switch (toolset.resolve), where reading the
-// environment again is the documented point: a session learns a key when a
-// switch makes current a model whose provider's key the environment gained
-// since Open, and the redactor grows to cover it from the next turn. A memo
-// held past startup would silently take that away — a switch that used to
-// work would fail for the rest of the session — in exchange for closing a
-// window between two calls microseconds apart. So the seal covers exactly the
-// window it was for, and nothing after it.
+// life and calls it on every switch (toolset.resolve, which reads every
+// provider's key) and for every sub-agent's model, where reading the
+// environment again is the documented point: a key the environment gained
+// since Open is learned at the next switch, and the redactor grows to cover
+// it from the next turn; a sub-agent can run on a provider whose key was
+// exported since. A memo held past startup would silently take that away —
+// a child that could have run would fail for the rest of the session — in
+// exchange for closing a window between two calls microseconds apart. So the
+// seal covers exactly the window it was for, and nothing after it. (A switch
+// of the session's own model is to a model its picker offers, which were
+// judged funded at start: plan 031 §3.6, nativeOpened.choices.)
 //
 // The harness calls it from its own goroutines, so both halves are guarded.
 func sealedGetenv(getenv func(string) string) (read func(string) string, release func()) {

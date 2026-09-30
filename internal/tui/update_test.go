@@ -1100,9 +1100,11 @@ func TestModelDialogCurrentFirstAndFilters(t *testing.T) {
 	if m.dialog != dialogModel {
 		t.Fatal("expected the model dialog")
 	}
+	// First, and the row the dialog opens on — and untagged: the order says
+	// which model is current (plan 031 §3.6, owner decision Q4).
 	view := plainView(m)
-	if !strings.Contains(view, "> Fast") || !strings.Contains(view, "current") {
-		t.Fatalf("the current model should be first and tagged:\n%s", view)
+	if !strings.Contains(view, "> Fast") || strings.Contains(view, "current") {
+		t.Fatalf("the current model should be first, selected and untagged:\n%s", view)
 	}
 	// The filter matches the display name or the id, case-insensitively.
 	m = typeInto(t, m, "GRO")

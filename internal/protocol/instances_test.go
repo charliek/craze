@@ -93,6 +93,19 @@ func TestInstancesValidate(t *testing.T) {
 		Since: instanceTime, StartFailed: true, StartErr: "cursor-agent: not logged in"}
 	stateNoConfig := state
 	stateNoConfig.Settings.Config = json.RawMessage(`{}`)
+	// Plan 031 §3.6's rank (P9): a native session's remembered models carry
+	// "recent", every other model none — omitted, so a catalog without a
+	// remembered model is byte for byte what it was.
+	remembered := info
+	remembered.Provider = protocol.Provider{Name: "native", Label: "Native"}
+	remembered.Catalogs.Models = []protocol.CatalogModel{
+		{ID: "muse-spark-1.3-contributor", Name: "Muse Spark 1.3 Contributor (Meta)", Recent: 1},
+		{ID: "fireworks/kimi-k3", Name: "Kimi K3 (Fireworks)", Recent: 2},
+		{ID: "fireworks/deepseek-v4p1-flash", Name: "DeepSeek V4.1 Flash (Fireworks)"},
+	}
+	attachRemembered := func() string {
+		return jsonOf(t, protocol.AttachResult{Subscription: "s-1", Session: remembered, After: protocol.Cursor{Incarnation: "inc-1"}})
+	}
 	hello := protocol.HelloResult{
 		Protocol: protocol.ProtocolVersion,
 		Endpoint: protocol.Endpoint{Kind: protocol.EndpointHost, HostID: "0190ab12cd34", CrazeVersion: "0.1.0", PID: 4242},
@@ -236,6 +249,13 @@ func TestInstancesValidate(t *testing.T) {
 		{"the attach reply with a start that is not a time", "session.attach.json", "result",
 			strings.Replace(jsonOf(t, protocol.AttachResult{Subscription: "s-1", Session: facts, After: protocol.Cursor{Incarnation: "inc-1"}}),
 				`"startedAt":"2026-09-25T10:30:45.123456789Z"`, `"startedAt":1790000000`, 1), false},
+		{"the attach reply with remembered models", "session.attach.json", "result", attachRemembered(), true},
+		{"a roster row with remembered models", "sessions.list.json", "result",
+			jsonOf(t, protocol.SessionsListResult{Epoch: "h", Sessions: []protocol.SessionRow{{SessionInfo: remembered, Activity: protocol.ActivityIdle}}}), true},
+		{"a model ranked 0, which is never sent", "session.attach.json", "result",
+			strings.Replace(attachRemembered(), `"recent":2`, `"recent":0`, 1), false},
+		{"a model rank that is not a number", "session.attach.json", "result",
+			strings.Replace(attachRemembered(), `"recent":1`, `"recent":"1"`, 1), false},
 		{"the attach reply carrying the last turn, which only a read does", "session.attach.json", "result",
 			strings.Replace(jsonOf(t, protocol.AttachResult{Subscription: "s-1", Session: info, After: protocol.Cursor{Incarnation: "inc-1"}}),
 				`"retryHorizon"`, `"lastTurn":{"outcome":"done","endedAt":"2026-09-25T10:30:45Z","turnId":"turn-1"},"retryHorizon"`, 1), false},

@@ -72,7 +72,8 @@
       "type": "object",
       "properties": {
         "id": {"type": "string"},
-        "name": {"type": "string"}
+        "name": {"type": "string"},
+        "recent": {"type": "integer", "minimum": 1, "description": "The model's rank in the native provider's model memory: 1 for the most recently picked model the session offers, then 2, 3 and so on. Absent for a model not remembered, for every ACP provider's model, and on an older host. A client lists the remembered models right after the current one, by rank."}
       },
       "required": ["id", "name"],
       "additionalProperties": false

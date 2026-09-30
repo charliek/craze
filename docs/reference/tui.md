@@ -1118,10 +1118,10 @@ expands exactly as if it had been typed at the start.
 
 `/model`, or a click on the model name in status row 1, opens a centred box
 over the transcript: a filter (`❯ `, type to narrow by name or id), the model
-list (current model first, then the agent's own order, `current` tagged,
-`▲`/`▼` when it scrolls), and one tab below it per select option the
-**current model's** catalog advertises, other than `mode` and `model`
-(semantic category first, then id, in the agent's own order). `effort`
+list (`▲`/`▼` when it scrolls; which models, in what order, is below), and
+one tab below it per select option the **current model's** catalog
+advertises, other than `mode` and `model` (semantic category first, then id,
+in the agent's own order). `effort`
 (`low medium high xhigh`, the picked one bracketed) and `fast` (`on`/`off`)
 are drawn exactly as they always were, whichever id or name the agent files
 them under; any other option the model offers — `context` or `thinking` on
@@ -1132,6 +1132,27 @@ provider's effort/fast bits gate only the status-row chips and the
 `/model <effort>` shorthand, never a control the model itself advertises).
 Composer-2.5 shows `fast` alone; claude-opus-5 shows `effort`, `fast`,
 `context` and `thinking`; grok shows `effort` alone, never `fast`.
+
+**Which models, in what order.** The current model is always the first row,
+and the row the dialog opens on. A row is the model's name and nothing else —
+no `current` or `recent` tag: the order says it. After the current model come,
+on native, the models you picked most recently in any native session's
+`/model`, newest first (the [model
+memory](configuration.md#model-memory-recentjson)); then any model whose id
+or name contains `grok`; then the rest, each group by name. An ACP provider
+(cursor, grok, gx) has no model memory, so its list starts at the `grok`
+group.
+
+A native session lists only the models of providers that have a key — an
+exported variable or a stored one ([Keys](configuration.md#keys)) — plus the
+model it is running on, and says nothing about the providers that have none.
+It judges both when it starts: a model you pick in this session moves up in
+the *next* session's list, not this one's, and a provider you connect while
+the session runs appears in a new session, or in this conversation after
+`/exit` and `craze -c`. A typed `/model <alias>` naming a model the list
+leaves out fails as an unknown model does; `--model <alias>` at start still
+resolves against every model craze knows, and refuses one whose provider has
+no key, saying how to give it one.
 
 The dialog does not rebuild itself for the model under the cursor: the tabs
 on screen are the current model's, and highlighting another model in the list
