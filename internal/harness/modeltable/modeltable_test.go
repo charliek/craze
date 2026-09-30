@@ -153,7 +153,7 @@ func TestLoadValidFiles(t *testing.T) {
 
 // TestSaveRoundTripsThroughLoad also pins the modes and the headers: the key
 // file private, the model file shareable, the directory private, each file
-// saying it is machine-rewritten and how to keep a hand edit.
+// saying craze wrote it and that comments are not kept.
 func TestSaveRoundTripsThroughLoad(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "craze", "native") // Save creates it
 	want := validTable()

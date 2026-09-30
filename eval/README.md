@@ -242,13 +242,19 @@ harness (in bwrap, its own netns) ──> 127.0.0.1:<port> ──relay──> pr
 ## Config
 
 - `models.toml`: the six eval models. Each entry has its provider, its wire model, its one
-  pinned reasoning effort, and each harness's id for it. codex runs only where the provider
+  pinned reasoning effort, and each harness's id for it. The `craze` and `gx` aliases are
+  kept in step by hand: craze no longer imports gx's table (`craze import gx` is removed),
+  so a renamed or retired alias has to be changed in both places. codex runs only where the provider
   serves `/responses` (Meta, Fireworks).
 - `prices.toml`: see Budget.
 - **`crazeeval snapshot-config`:**
   - It copies the target definitions from the owner's craze and gx tables into
     `<campaign>/eval-config/<stamp>-<hash>/config.json` (and moves `CURRENT`). Only allowlisted
-    fields are copied: no key, env-key name, auth helper or header.
+    fields are copied: no key, env-key name, auth helper or header. It reads the alias
+    entries of the owner's `~/.craze/native/models.toml` (and gx's config). craze ships its
+    own model catalog and the owner's `models.toml` may shrink to overrides, which would
+    leave an alias this reads missing: trimming that file needs follow-up SF-a first (the
+    snapshot reading the merged view, craze plan 031 §9 R4).
   - It saves a models.dev catalog for opencode (`OPENCODE_MODELS_PATH`), and records which
     `--variant`s opencode offers per model, asked of opencode itself in a sandbox.
   - Every run uses the snapshot and records its hash; runs never read the owner's live files.

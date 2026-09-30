@@ -132,7 +132,7 @@ parallel, each in its own session and worktree. Where they meet (plan
 | surface | this plan (S1b) | H4 | rule |
 |---|---|---|---|
 | `internal/harness/**` | one comment in `steer.go` (C6) | owns it | no conflict |
-| `internal/agent/{catalog,skills,plugins,expand}.go`, `internal/cli/import.go` (file removed in plan 031: `craze import gx` is gone) | untouched | likely owns | no conflict |
+| `internal/agent/{catalog,skills,plugins,expand}.go`, `internal/cli/import.go` (file removed in plan 031, D-75: `craze import gx` is gone) | untouched | likely owns | no conflict |
 | `internal/agent/native.go` | prompt path, the queue, `Cancel`, `announceCurrent` and the setters, `Answer*` | `Start` / system-prompt assembly, the catalog it reports | H4 stayed out of the ranges this plan named. **`announceCurrent` did not end up a shared site**: native's `snap.Plugins` is set once in `Start` and never changes, so C10 announces nothing for it and waits for nothing (plan X3). What did overlap: H4's PR 3 added about ten lines to `native.go`'s `prompt()` and a new `emitCtx`, merged into the S1b branch as one gated merge commit (X21) |
 | `agent.Session`, `agent.Event`, `agent.Snapshot` | narrowed and extended (§3) | should not change them | an H4 need here is raised with the owner first |
 | `internal/tui/slash.go` | `/rename`, `/model`, mode paths only | menu population | second lander rebases |
