@@ -3228,13 +3228,15 @@ finding and its disposition):
   Unicode format characters as `<U+XXXX>` (X200); SF-97 reworded; SF-103.
 - C18r3 (`4bcc119`) — review fix (sol on C18r2): the row escapes Unicode's
   whole default-ignorable set, not only format characters (X201).
-- C19r2 (this commit) — PR 4 rebased onto Plan 031 (#73, `0f82531`), which
+- C19r2 (`a1103fd`) — PR 4 rebased onto Plan 031 (#73, `0f82531`), which
   landed first: the record's commit ids and the re-run V2.
+- This commit — wire fixture 16's flake, found by CI's `-race` run on PR 4:
+  the fake host's `end` waits for the turn it cancels to open (X202).
 
 ### Deviations from the plan
 
 PR 1's execution amendments X1–X62, PR 2's X63–X121 (with C12r2's
-X142–X144), PR 3's X122–X141 and X145–X177, and PR 4's X178–X201 (X192
+X142–X144), PR 3's X122–X141 and X145–X177, and PR 4's X178–X202 (X192
 among them, found by PR 3's V1), mirrored here as `12`'s own record (the full
 text is in the plan, `~/.claude/plans/craze/030-session-control-s5-agent-view.md`,
 "Execution amendments"); review-fix rounds are grouped with the commit they
@@ -3926,6 +3928,18 @@ with them):
     stay escaped. A test sweeps every code point against UAX #44's
     derivation. Residual: a non-ASCII space (U+00A0, U+3000) draws as an
     ASCII space in the row (`sanitizeLine`) while the pick writes it.
+76. **Plan 030 X202 (CI on PR 4; test-only)** — `TestWireFixtures/16-last-turn`
+    failed once under `-race` on a loaded runner: `sessions.list` said
+    `cursor` 3 where the fixture says 4. The engine claims a prompt under its
+    lock, but the stub opens the turn later, on the continuation's goroutine,
+    which the `session.prompt` reply does not wait for; `end`'s cancel landed
+    first, the hung prompt was withdrawn (no `done`, a synthetic ended event)
+    and one event fewer was counted. Fixtures 9 and 17 (also `hang_next` then
+    `end`) had the same latent race. The fake host's `end` now waits, bounded
+    at 10 s, until the stub is in the turn or none is current. A seamed test
+    holds the continuation and reproduces CI's exact line before the fix; a
+    CPU quota alone never reproduced it (it throttles every thread at once).
+    No fixture bytes, production code or wire change.
 
 ### Live smoke
 

@@ -11,12 +11,15 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/charliek/craze/internal/agent"
 	"github.com/charliek/craze/internal/control/wiretest"
 	"github.com/charliek/craze/internal/protocol"
+	"github.com/charliek/craze/internal/tui"
 )
 
 // update re-records every fixture's s2c lines from its scripted c2s and op
@@ -459,7 +462,14 @@ type fixtureRunner struct {
 
 func newFixtureRunner(t *testing.T, o Options) *fixtureRunner {
 	t.Helper()
-	h, err := New(o)
+	return newHookedFixtureRunner(t, o, hostHooks{})
+}
+
+// newHookedFixtureRunner is newFixtureRunner over a Host built with a test's
+// seams (hostHooks).
+func newHookedFixtureRunner(t *testing.T, o Options, hooks hostHooks) *fixtureRunner {
+	t.Helper()
+	h, err := newHost(o, hooks)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -588,16 +598,25 @@ func (r *fixtureRunner) runOp(raw json.RawMessage) {
 	}
 }
 
-// runFixture runs one fixture file by name (testdata/wire/<name>.ndjson).
-func runFixture(t *testing.T, name string) {
-	t.Helper()
-	path := filepath.Join("testdata", "wire", name+".ndjson")
-	lines := readFixtureLines(t, path)
+// fixturePath is a fixture file's path by name (testdata/wire/<name>.ndjson).
+func fixturePath(name string) string { return filepath.Join("testdata", "wire", name+".ndjson") }
+
+// fixtureOptions is the Options a fixture's host line asks for (Options{}
+// without one).
+func fixtureOptions(lines []rawFixtureLine) Options {
 	var host *fixtureHost
 	if len(lines) > 0 && lines[0].parsed.Dir == "host" {
 		host = lines[0].parsed.Host
 	}
-	r := newFixtureRunner(t, host.options())
+	return host.options()
+}
+
+// runFixture runs one fixture file by name (testdata/wire/<name>.ndjson).
+func runFixture(t *testing.T, name string) {
+	t.Helper()
+	path := fixturePath(name)
+	lines := readFixtureLines(t, path)
+	r := newFixtureRunner(t, fixtureOptions(lines))
 	out := r.run(lines, *update)
 	if *update {
 		if err := os.WriteFile(path, out, 0o644); err != nil {
@@ -628,5 +647,73 @@ func TestWireFixtures(t *testing.T) {
 	}
 	for _, name := range names {
 		t.Run(name, func(t *testing.T) { runFixture(t, name) })
+	}
+}
+
+// heldStub is the Stub as a test's engine drives it (hostHooks.session), with
+// every prompt's continuation held back: every method is the Stub's own — the
+// optional interfaces engine.New looks for included, promoted through the
+// embedded pointer — but Begin, whose continuation runs hold before the Stub's
+// own run, so before the Stub opens the turn. The claim is still the Stub's, on
+// the engine's goroutine under its lock: the engine has the turn current and
+// its started published, and the Stub has not opened it — the window a loaded
+// scheduler leaves between the two (WF16), held open for as long as the test
+// likes.
+type heldStub struct {
+	*tui.Stub
+	hold func()
+}
+
+func (s heldStub) Begin(text string) func(context.Context) (agent.Result, error) {
+	run := s.Stub.Begin(text)
+	return func(ctx context.Context) (agent.Result, error) {
+		s.hold()
+		return run(ctx)
+	}
+}
+
+// TestWireFixturesWaitForTheHungTurnToOpen replays every fixture that hangs a
+// prompt (hang_next: 9, 16 and 17) with that prompt's continuation held back
+// until the end op has to wait for it (hostHooks.turnOpening) — through every
+// line between, fixture 17's tool, text and permission ops included, far
+// longer than any scheduler holds one — and each still replays byte for byte
+// (WF16). CI's -race run caught fixture 16 once with the end op's cancel
+// landing before the Stub had opened the hung turn: the prompt withdrew
+// instead — no done, a synthetic ending — and sessions.list's cursor said 3
+// where the script says 4. The end op's cancel releases the hold too, so an end
+// that no longer waits reproduces exactly that failure rather than a hang.
+func TestWireFixturesWaitForTheHungTurnToOpen(t *testing.T) {
+	for _, name := range []string{"09-prompt-seen-by-both", "16-last-turn", "17-row-facts"} {
+		t.Run(name, func(t *testing.T) {
+			release := make(chan struct{})
+			var once sync.Once
+			open := func() { once.Do(func() { close(release) }) }
+			var waited atomic.Bool
+			hooks := hostHooks{
+				session: func(s *tui.Stub) agent.Session {
+					return heldStub{Stub: s, hold: func() {
+						select {
+						case <-release:
+						case <-time.After(fixtureTimeout):
+						}
+					}}
+				},
+				turnOpening: func() {
+					waited.Store(true)
+					open()
+				},
+				cancelled: open,
+			}
+			lines := readFixtureLines(t, fixturePath(name))
+			r := newHookedFixtureRunner(t, fixtureOptions(lines), hooks)
+			// Registered after the runner's own cleanup, so it runs first: a
+			// replay that fails with the continuation still held never leaves
+			// the Host's close waiting out the hold.
+			t.Cleanup(open)
+			r.run(lines, false)
+			if !waited.Load() {
+				t.Fatal("the end op never waited for the held turn to open: the replay never met the window it guards")
+			}
+		})
 	}
 }

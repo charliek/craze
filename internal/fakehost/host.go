@@ -140,6 +140,25 @@ type dropHooks struct {
 	closed, drained func()
 }
 
+// hostHooks are a Host's test seams (wire_test.go), fixed when the Host is
+// built (newHost): the first incarnation is built there too, and the engine's
+// goroutines read them from then on, so they are never written again and need
+// no lock. The zero value is none, which is what New builds with.
+type hostHooks struct {
+	// session is what each incarnation's engine drives in place of its Stub —
+	// a test's decorator of it (wire_test.go's heldStub, which holds a
+	// prompt's continuation back before the Stub opens its turn). nil is the
+	// Stub itself.
+	session func(*tui.Stub) agent.Session
+	// turnOpening runs when the end op finds the engine's current turn claimed
+	// and not yet open in the Stub, once, before it waits for the opening
+	// (waitForTurnOpen).
+	turnOpening func()
+	// cancelled runs when the end op's cancel has returned, before the op
+	// waits for the turn to settle.
+	cancelled func()
+}
+
 // Host is the fake host (plan 027 §3.11): the real control.Server serving the
 // real engine over a tui.Stub, on one caller-supplied listener. Restart
 // replaces the engine with a fresh incarnation of the same durable session,
@@ -154,6 +173,8 @@ type Host struct {
 
 	// drop is DropConnections' test seams (host_test.go).
 	drop dropHooks
+	// hooks are the seams a test builds the Host with (newHost).
+	hooks hostHooks
 
 	mu   sync.Mutex
 	stub *tui.Stub
@@ -171,9 +192,12 @@ type Host struct {
 
 // New builds a Host and its first incarnation, started. Nothing is served
 // until Serve is called.
-func New(o Options) (*Host, error) {
+func New(o Options) (*Host, error) { return newHost(o, hostHooks{}) }
+
+// newHost is New with a test's seams (hostHooks).
+func newHost(o Options, hooks hostHooks) (*Host, error) {
 	o = o.withDefaults()
-	h := &Host{opts: o, clk: newClock(), stopHeard: make(chan struct{})}
+	h := &Host{opts: o, clk: newClock(), hooks: hooks, stopHeard: make(chan struct{})}
 	co := control.Options{
 		Log:            o.Log,
 		HostID:         o.HostID,
@@ -210,7 +234,11 @@ func (h *Host) newIncarnation() error {
 	if len(h.opts.Models) > 0 {
 		stub.SetModels(h.opts.Models)
 	}
-	eng, err := engine.New(stub, engine.Options{
+	var sess agent.Session = stub
+	if f := h.hooks.session; f != nil {
+		sess = f(stub)
+	}
+	eng, err := engine.New(sess, engine.Options{
 		CrazeSessionID: h.opts.CrazeSessionID,
 		ReceiptClock:   h.clk.now,
 	})
@@ -341,7 +369,9 @@ func (h *Host) Incarnation() string { return h.currentEngine().State().Incarnati
 // run_stop (RunStop): the stop sequence of a Host built with Options.Stop,
 // run where a fixture's script says. Do is what runs an
 // op to completion — the op, then the log flushed (syncLog) — so a caller
-// that needs the script's seq order goes through Do, as both of those do.
+// that needs the script's seq order goes through Do, as both of those do; the
+// "end" op also waits there, before it cancels, for the Stub to have opened
+// the turn (waitForTurnOpen).
 
 // Text emits an EventText, agent "" for the main session.
 func (h *Host) Text(agentID, text string) {
@@ -414,7 +444,10 @@ func (h *Host) Plan(id, name, overview, planText string, todos []agent.Todo) {
 // settles the turn — clearing the engine's current turn and enqueuing the
 // ending — on its own schedule, not this one. EndTurn itself stays a plain
 // mirror of Cancel; the "end" op (do, below) is what waits for that
-// settlement before the flush a caller of Do relies on.
+// settlement before the flush a caller of Do relies on — and, before it
+// cancels, for the Stub to have opened the turn at all (waitForTurnOpen): a
+// Cancel that lands on a prompt claimed and not yet open withdraws it
+// instead, with no EventDone.
 func (h *Host) EndTurn() {
 	_, _ = h.currentStub().Cancel(context.Background())
 }
@@ -445,6 +478,53 @@ func waitForTurnSettled(eng *engine.Engine, wait time.Duration) error {
 		}
 		time.Sleep(time.Millisecond)
 	}
+}
+
+// turnOpenWait bounds the "end" op's wait for the Stub to open the turn it
+// cancels (waitForTurnOpen): generous next to how long the continuation takes
+// to get there (microseconds — a goroutine the engine has already launched),
+// the same class of budget as turnSettleWait, so hitting it at all means
+// something is wedged, and it is reported as an error rather than a hang.
+const turnOpenWait = 10 * time.Second
+
+// waitForTurnOpen blocks until the turn eng has current is open in stub
+// (tui.Stub.InTurn, the Stub's own barrier for what a cancel will do), or until
+// no turn is current. The engine claims a prompt (Stub.Begin) and enqueues its
+// started under its own lock, but the Stub opens the turn later, on the
+// continuation's goroutine — which the session.prompt reply does not wait for,
+// and which a loaded scheduler can run after a script's next several lines
+// (WF16: CI's -race run of fixture 16). A cancel landing in between finds a
+// claim with no turn open and withdraws the prompt: no EventDone, and a
+// synthetic ending in place of the turn's own — one event short of what the
+// script recorded. So "end" waits here before it cancels (do), and the turn it
+// ends is always the open one the script means. Nothing current — an idle
+// session, or a withdrawn prompt already settled — is nothing to wait for.
+// opening, when set, runs once the wait is known to be needed
+// (hostHooks.turnOpening). Bounded like every other host op's wait: an error
+// at the deadline instead of a hang.
+func waitForTurnOpen(eng *engine.Engine, stub *tui.Stub, wait time.Duration, opening func()) error {
+	deadline := time.Now().Add(wait)
+	for {
+		if eng.State().Turn == "" || stub.InTurn() {
+			return nil
+		}
+		if opening != nil {
+			opening()
+			opening = nil
+		}
+		if !time.Now().Before(deadline) {
+			return fmt.Errorf("fakehost: end: the current turn still not open after %s", wait)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// awaitTurnOpen is waitForTurnOpen on the current incarnation.
+func (h *Host) awaitTurnOpen() error {
+	h.mu.Lock()
+	stub, eng := h.stub, h.eng
+	h.mu.Unlock()
+	return waitForTurnOpen(eng, stub, turnOpenWait, h.hooks.turnOpening)
 }
 
 // ForeignTurn brackets a foreign turn (agent.EventForeignTurn): running true
@@ -560,7 +640,10 @@ func (h *Host) Restart() error { return h.newIncarnation() }
 // continuation to finish, so nothing about their relative order on the wire
 // is guaranteed. Hung instead, nothing follows the turn's started event on
 // any subscription until this script says so (EndTurn) — armed before the
-// prompt is sent, so it is in effect before the engine can claim it.
+// prompt is sent, so it is in effect before the engine can claim it. The turn
+// is open only once the prompt's continuation has run, which the prompt's
+// reply does not wait for: the "end" op waits for that itself
+// (waitForTurnOpen).
 func (h *Host) HangNext() { h.currentStub().HangNext() }
 
 // SpawnSubagent registers a running child (fixture 11).
@@ -743,7 +826,13 @@ func (h *Host) do(p opParams) error {
 	case "plan":
 		h.Plan(p.ID, p.PlanName, p.Overview, p.Plan, p.Todos)
 	case "end":
+		if err := h.awaitTurnOpen(); err != nil {
+			return err
+		}
 		h.EndTurn()
+		if f := h.hooks.cancelled; f != nil {
+			f()
+		}
 		return waitForTurnSettled(h.currentEngine(), turnSettleWait)
 	case "hang_next":
 		h.HangNext()
