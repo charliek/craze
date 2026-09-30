@@ -11,6 +11,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -512,5 +513,69 @@ func TestRememberedEffort(t *testing.T) {
 		if got := table.RememberedEffort(recent, alias); got != want {
 			t.Errorf("RememberedEffort(%q) = %q, want %q", alias, got, want)
 		}
+	}
+}
+
+// abnormalRecent makes recent.json in dir something other than a small regular
+// file: a FIFO (skipped where the platform has none) or one past
+// RecentMaxBytes.
+func abnormalRecent(t *testing.T, kind string) string {
+	t.Helper()
+	dir := t.TempDir()
+	path := filepath.Join(dir, RecentFile)
+	switch kind {
+	case "fifo":
+		if err := syscall.Mkfifo(path, 0o600); err != nil {
+			t.Skipf("no FIFOs here: %v", err)
+		}
+	case "oversized":
+		big := `{"version": 1, "recent": [], "pad": "` + strings.Repeat("x", RecentMaxBytes) + `"}`
+		writeRecent(big)(t, path)
+	}
+	return path
+}
+
+// within fails the test, rather than hang it, when f does not return by the
+// deadline; the goroutine of a blocked f is abandoned.
+func within(t *testing.T, f func()) {
+	t.Helper()
+	done := make(chan struct{})
+	go func() { defer close(done); f() }()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("blocked: recent.json read did not return")
+	}
+}
+
+// TestAbnormalRecentNeverBlocksOrGrows: a recent.json that is a FIFO or is
+// larger than RecentMaxBytes reads as no memory and is refused by Remember
+// (never replaced), without blocking (plan 031 X33, review r3).
+func TestAbnormalRecentNeverBlocksOrGrows(t *testing.T) {
+	for _, kind := range []string{"fifo", "oversized"} {
+		t.Run(kind, func(t *testing.T) {
+			path := abnormalRecent(t, kind)
+			dir := filepath.Dir(path)
+			within(t, func() {
+				if got := ReadRecent(dir); len(got) != 0 {
+					t.Errorf("ReadRecent = %v; want none", got)
+				}
+			})
+			var err error
+			within(t, func() { err = Remember(dir, entry(t, "q/plain", ""), time.Now()) })
+			if err == nil {
+				t.Fatal("Remember over an abnormal recent.json succeeded")
+			}
+			fi, serr := os.Lstat(path)
+			if serr != nil {
+				t.Fatal(serr)
+			}
+			if kind == "fifo" && fi.Mode()&os.ModeNamedPipe == 0 {
+				t.Fatalf("the FIFO was replaced: %v", fi.Mode())
+			}
+			if kind == "oversized" && fi.Size() <= RecentMaxBytes {
+				t.Fatalf("the oversized file was replaced (%d bytes)", fi.Size())
+			}
+		})
 	}
 }

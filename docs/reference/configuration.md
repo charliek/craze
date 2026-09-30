@@ -789,10 +789,12 @@ the file cannot be read or written, or a newer craze wrote it — the session
 says so in one note (`not saving the model choice: …`) and the switch itself
 stands.
 
-**Reading never stops a session.** A missing file, one craze cannot read, and
-one that is not a `recent.json` (not JSON, or a version craze does not know)
-are no memory at all. The next switch replaces a file that is not a
-`recent.json`, and leaves alone one it cannot read or one a newer craze wrote.
+**Reading never stops a session.** A missing file, one craze cannot read, one
+that is not a regular file (a FIFO, say) or is larger than 64 KiB, and one
+that is not a `recent.json` (not JSON, or a version craze does not know) are
+no memory at all. The next switch replaces a file that is not a
+`recent.json`, and leaves alone one it cannot read, one that is not a regular file or is over
+64 KiB, or one a newer craze wrote.
 
 **Where a new session starts.** With no `--model`, a new native session starts
 on the first of:

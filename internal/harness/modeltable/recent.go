@@ -5,10 +5,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/charliek/craze/internal/atomicfile"
@@ -45,6 +48,12 @@ const RecentCap = 10
 // models waits at most this long before it gives up saving the choice — the
 // switch itself has already happened.
 const RecentLockWait = 2 * time.Second
+
+// RecentMaxBytes is the most of recent.json craze will read: ten entries are a
+// few hundred bytes, so 64 KiB is far past any file craze wrote. A larger file
+// is not one (plan 031 X33): ReadRecent takes it as no memory and Remember
+// refuses to overwrite it, rather than spend unbounded time and memory on it.
+const RecentMaxBytes = 64 << 10
 
 // recentPerm is recent.json's mode: it names nothing secret, but it is a
 // record of what the owner has been using, so it is kept as private as the
@@ -106,8 +115,8 @@ func ReadRecent(dir string) []RecentEntry {
 // there is nothing in it any craze can read back, so the next write replaces
 // it.
 func readRecent(path string) ([]RecentEntry, error) {
-	b, has, err := readIfPresent(path)
-	if err != nil || !has {
+	b, err := readRecentBytes(path)
+	if err != nil || b == nil {
 		return nil, err
 	}
 	var head struct {
@@ -137,6 +146,39 @@ func readRecent(path string) ([]RecentEntry, error) {
 		out = append(out, e)
 	}
 	return out, nil
+}
+
+// readRecentBytes is recent.json's bytes, or nil for a missing file. It never
+// blocks and never reads without bound: the file is opened O_NONBLOCK (so a
+// FIFO opens at once, and a symlink to one is no different) and refused unless
+// the opened file is a regular one, and at most RecentMaxBytes are read. A file
+// that is neither regular nor within the cap is an error, which Remember
+// treats like an unreadable file (left as it is) and ReadRecent as no memory.
+func readRecentBytes(path string) ([]byte, error) {
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("modeltable: %w", err)
+	}
+	defer f.Close()
+	if fi, err := f.Stat(); err != nil {
+		return nil, fmt.Errorf("modeltable: %w", err)
+	} else if !fi.Mode().IsRegular() {
+		return nil, fmt.Errorf("modeltable: %s is not a regular file, so it is left as it is", path)
+	}
+	b, err := io.ReadAll(io.LimitReader(f, RecentMaxBytes+1))
+	if err != nil {
+		return nil, fmt.Errorf("modeltable: %w", err)
+	}
+	if len(b) > RecentMaxBytes {
+		return nil, fmt.Errorf("modeltable: %s is larger than %d bytes, so it is left as it is", path, RecentMaxBytes)
+	}
+	if b == nil {
+		b = []byte{}
+	}
+	return b, nil
 }
 
 // Remember records e as the newest entry of dir's model memory: any earlier
