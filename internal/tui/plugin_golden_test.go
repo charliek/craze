@@ -131,10 +131,15 @@ func TestFrameGoldenPluginSent(t *testing.T) {
 // is the draft, a line break, and then the block craze appended. The path in
 // that block is machine-specific, so this asserts on what it says rather than
 // on the cells it occupies.
+//
+// The path's length moves where the echo wraps, so neither the wait nor an
+// assertion may span a space the wrap could fall on: `PROBE-COMMAND-EXPANDED
+// args=[banana]` as one needle failed in a checkout whose path put the wrap
+// between its two words (plan 030, found fixing X192).
 func TestFramePluginBlockReachesTheAgent(t *testing.T) {
 	got := runFakeFramePlugins(t, "commands", 100, 30,
 		"<wait:idle>"+slashCatalogLanded+"<backspace>/probe-echo banana<enter>"+
-			"<wait:text:PROBE-COMMAND-EXPANDED args=[banana]><wait:idle>", pluginFixtureDirs(t)...)
+			"<wait:text:args=[banana]><wait:idle>", pluginFixtureDirs(t)...)
 	// The transcript wraps the echo as prose, so the assertions are fragments
 	// short enough to survive the wrap rather than whole lines of the block.
 	assertFrameGolden(t, "", 100, 30, got, []string{
@@ -143,7 +148,8 @@ func TestFramePluginBlockReachesTheAgent(t *testing.T) {
 		"echo: /probe-echo banana",
 		`The user invoked /probe-echo banana`,
 		`args="banana">`,
-		"PROBE-COMMAND-EXPANDED args=[banana]",
+		"PROBE-COMMAND-EXPANDED",
+		"args=[banana]",
 		"</command>",
 	}, nil)
 }

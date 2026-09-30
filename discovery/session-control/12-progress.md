@@ -2794,11 +2794,11 @@ open blocks the exit clauses above.
 
 | | |
 |---|---|
-| Status | PR 1 (`feature/plan-030-hosts`, C1–C8) merged; PR 2 (`feature/plan-030-sessions-list`, C9–C12) implemented, awaiting its merge; PRs 3–4 planned (Plan 030, FINAL after panel rounds 1 and 2, 2026-09-28) |
-| Plan | `030-session-control-s5-agent-view` (outside the repo, `~/.claude/plans/craze/`; research, discovery reports, the mockup and the raw panel reviews in its folder) |
+| Status | complete (Plan 030, FINAL after panel rounds 1 and 2, 2026-09-28); all five PRs done, PR 4 carrying this record |
+| Plan | `030-session-control-s5-agent-view` (outside the repo, `~/.claude/plans/craze/`; research, discovery reports, the mockup, the raw panel reviews, every review round's disposition and the V1–V5 artifacts in its folder) |
 | Baseline | `origin/main` `9606fc5` (#64, Plan 029's wrap-up), on top of S2's last PR #63 `73ed5e0` |
 | Branch / PRs | five sequential PRs, each branched from a freshly fetched `origin/main`: `docs/plan-030-roadmap`, `feature/plan-030-hosts`, `feature/plan-030-sessions-list`, `feature/plan-030-new-sessions`, `feature/plan-030-composer-at` |
-| Merged | PR 1: #68 → `6be2273` (2026-09-29) |
+| Merged | PR 0 — #66 `77f1cd3` (2026-09-28); PR 1 — #68 `6be2273` (2026-09-29); PR 2 — #70 `b8aa5bb` (2026-09-30); PR 3 — #71 `b401fec` (2026-09-30); PR 4 — `feature/plan-030-composer-at`, rebased on `b401fec` |
 
 ### The PR cut
 
@@ -2945,14 +2945,92 @@ per-commit astra reviews of the lifecycle commits carry that check.
 
 ### Outcome
 
-Filled in as each PR lands. PR 1's status: implemented and reviewed (C1–C8);
-the host/client split, `/exit` ending a session everywhere, closing the
-terminal keeping it, and the idle exit are in; PR 4 writes the outcome.
+Shipped in five PRs, each gated per commit. PR 0 refactored this roadmap for
+the new order (SD-34, SD-35). **S4a (PR 1):** every craze session runs in a
+detached host that outlives its terminal — `craze serve`, which the ordinary
+`craze` spawns (`setsid`, stdio on `/dev/null`, a ready line on an inherited
+pipe written after the identity-bearing registry write) and then attaches to
+as a socket client. `session.stop`, behind a new `stop` capability, makes
+`/exit` (with `ctrl+d` and the second `ctrl+c`) end the session in every
+client, `craze attach` included; closing the terminal leaves it running; an
+unattended host exits after `host_idle_exit` (1 h by default, 5 minutes for a
+session never prompted), a decision made atomic by a close fence over the
+server's attach reservations and the engine's admission
+(`Engine.FenceClose`). Every client now shows the host's permission mode,
+start time and last turn (SF-60, SF-63, SF-57 in part). **S5 (PRs 2–4):** `←`
+on an empty composer, or `/sessions`, opens a list of every running session of
+this user on the machine, polled host by host (`internal/roster`), grouped by
+state (`ctrl+s`: by directory); `enter` opens a session in place
+(`switchBackend`, a backend generation on every stream message) or resumes a
+saved one, and `ctrl+x` cancels a turn or closes a session. The list's input
+starts a new session in the background, a leading `@` token choosing its
+directory, or opens an unstarted one in place; `/provider` and `/model` choose
+what new sessions run, ACP catalogs coming from a new cache
+(`internal/modelcache`) that each host writes. Composer `@` completes the
+workspace's files and folders into `@path` text. The `detach = false` /
+`CRAZE_DETACH=0` / `control_socket = false` opt-out keeps the in-process path,
+with no list. No wire change beyond what the plan pinned (§3.6a, §3.8:
+`session.stop`, the `stop` and `rowFacts` capabilities, the info document's
+`permissionMode` and `startedAt`, `lastTurn`, the row facts, the `closing`
+reason; fixtures 14–17, additions).
+
+**The roadmap's S4a and S5 exits** (`07`):
+
+| criterion | result | evidence |
+|---|---|---|
+| S4a: after a prompt, killing the terminal leaves the host listed and `craze -c` reattaches with the transcript | pass | V4 leg 2 (`tmux kill-session` of three sessions: every host alive, answering `hello`), leg 3 (cosmic-term quit); V5 leg 10 (an ssh logout; the next login's `craze -c` attached to the same host, nothing spawned); `test_hangup_leaves_the_host_and_dash_c_reattaches` |
+| S4a: `/exit` ends the session and the host's registry entry is gone within seconds | pass | V4 leg 5 (client, host and entry gone at the first 0.1 s poll); V5 leg 5 (host and entry within 0.01 s, the client at 0.15 s); the index row kept both times; `test_quit_ends_the_session` |
+| S4a, S5: an unattended idle host exits after its timeout; one with a turn, an open ask or an attached client does not | pass | V4 leg 9 (`host_idle_exit = "2s"`: gone 2.74 s after the detach), V5 leg 9 (2.76 s); the never-prompted 5-minute cap, V4 leg 3 (5 m 0.8 s); `TestEachInFlightConditionKeepsTheHost`, `TestAnAttachArrivingAtExpiryKeepsTheHost`, `TestAListPollerDoesNotKeepAHost` (`internal/cli/idle_test.go`); `test_idle_host_exits_and_keeps_its_row` |
+| S5: close every terminal, reopen craze, and `←` lists the sessions still running | pass | V4 and V5 leg 2 (listed under idle, each opened in place with its transcript); `test_enter_opens_a_session_in_place_and_ctrl_d_leaves_them_running` |
+| S5: one blocked on an ask is opened and answered | pass, with a caveat | V4 and V5 leg 4 (`question: Which colour do you prefer?` under "needs you"; opened; answered). A card up blocks `←` and `/sessions`, so on Linux the list was reached from a second terminal (SF-99) |
+| S5: a new session is started in another directory from the list with `@` | pass | V4 and V5 leg 6 (`started in …`; `@proj-b` alone opened an unstarted session that spawned nothing until its first prompt); `test_a_prompt_starts_a_session_in_another_workspace`, `test_an_at_directory_alone_opens_an_unstarted_session` |
+| S5: `/exit` ends a session and the list shows it saved | pass | V4 and V5 leg 5 (the row under saved; `enter` resumed it in place, `restored`); `test_a_saved_session_resumes_in_place` |
+
+**The proof.** Every commit was gated — the full gate (`make lint && make
+test && make test-race && make build && make test-cli`), by its implementer
+and again on the committed tree (a few small follow-up commits by the next
+tip's run) — green throughout (about 445–517 s; `tests/cli` 178 → 208
+tests), and every commit was reviewed: gpt-6-astra (45-minute cap) for the
+lifecycle commits (C1–C5, C11, C15) and their fix rounds, gpt-6-sol (20-minute
+cap) for the rest, 39 rounds (r1–r39), plus whole-PR astra reviews of #68 and
+#70 and CodeRabbit on #66 and #71. One blocker in all (C3: a stale recorded
+pgid could be signalled; now identity-checked, X22); every finding and its
+disposition is in the plan folder's `reviews/dispositions-pr1.md` …
+`dispositions-pr4.md`, and each PR's accepted risks are `13` rows. Every new
+lifecycle test ran under a 5 % CPU quota as it was written; the lifecycle
+schedules are forced with seams, not left to repetition. The verification
+plan (plan §8):
+
+- **V1** (`-race -count=20` on the changed packages, per PR): PR 1 no data
+  race, two test-side flakes fixed on the branch (`cb0d184`, `ec21fad`);
+  PR 2 all green, `DATA_RACE=0`; PR 3 all green, `DATA_RACE=0`, except
+  `TestFrameGoldenLoadLongReplayDoesNotDeadlock` once in 20 — a pre-existing
+  wall-clock bound (it fails 7/7 at a 25 % quota under `-race` on `main`
+  `b8aa5bb`, before PR 3, as on PR 3's tip), fixed in PR 4 (X192). PR 4's run goes with its CI.
+- **V2** (`craze prompt --json` parity, 103 scenarios): PR 1 102/103, PR 2
+  103/103, PR 3 103/103 at `4e586ec` and 102/103 at its tip, PR 4 102/103 at
+  `4bcc119` (rebased onto Plan 031) and at `202928d` before the rebase. The one
+  DIFF is `sigint-between-turns`, a pre-existing race (X59, SF-87: 15/20 DIFF
+  on a `main` with no Plan 030 code) — PR 4's two runs fell one each way (the
+  baseline's SIGINT late in one, the candidate's in the other); the output did
+  not move.
+- **V3** (launch cost, the fake agent, 20 interleaved runs): time to the first
+  answer in process p50 48 / p95 59 ms, detached p50 56 / p95 77 ms — **+7 ms
+  p50, +18 ms p95**, against a 150 / 300 ms budget.
+- **V4, V5** (live smoke, Linux and the mac-mini): every leg run passed; one
+  leg not run on each platform (below, "Live smoke").
+- **V6** (goldens): `git diff --name-status origin/main -- '*testdata*'` showed
+  only `A` at every commit — 32 new frame goldens (1 in PR 1, 12 in PR 2, 15
+  in PR 3, 4 in PR 4; the manifest from 113 under both transports + 6 in
+  process to 115 + 36) and wire fixtures 14–17. No existing golden or fixture
+  moved.
+- **V7** (CI, ubuntu and macOS): green at every pushed tip of PRs 0–3; PR 4's
+  with its push.
 
 ### What shipped per commit
 
-**PR 1 — `feature/plan-030-hosts`** (C1–C8 implemented 2026-09-28/29, not yet
-merged; the `*r` commits are review-fix rounds, and
+**PR 1 — `feature/plan-030-hosts`** (#68, merged 2026-09-29 as `6be2273`;
+the `*r` commits are review-fix rounds, and
 `030-session-control-s5-agent-view/reviews/dispositions-pr1.md` has every
 finding and its disposition):
 
@@ -3001,9 +3079,14 @@ finding and its disposition):
   `docs/reference/cli.md`; `detach`, `CRAZE_DETACH`, `host_idle_exit` and the
   host logs in `docs/reference/configuration.md`; the host/client split in
   `docs/development/architecture.md`; this record; `13`'s SF-80..SF-87.
+- C8r2 (`d5f069f`) — this record after the rebase onto #67. On the pushed
+  branch: `e659bb0` (astra's whole-PR review, r16: a detached session cannot
+  run without its socket, in the docs) and V1's two test-side flake fixes,
+  `cb0d184` (fixture 14's `run_stop` waits for the coordinator's stop) and
+  `ec21fad` (the test waits for a host to close its ready pipe).
 
-**PR 2 — `feature/plan-030-sessions-list`** (C9–C12 implemented 2026-09-29, not
-yet merged; the `*r` commits are review-fix rounds, and
+**PR 2 — `feature/plan-030-sessions-list`** (#70, merged 2026-09-30 as
+`b8aa5bb`; the `*r` commits are review-fix rounds, and
 `030-session-control-s5-agent-view/reviews/dispositions-pr2.md` has every
 finding and its disposition):
 
@@ -3046,9 +3129,15 @@ finding and its disposition):
   a resume) and the fake agent's `CRAZE_FAKE_SESSION_ID`; the session list,
   opening in place, the band and saved sessions in `docs/reference/tui.md`;
   `internal/roster` in the architecture's package table; this record.
+- C12r (`0fcb40e`) — tests (sol on C12): two resumes truly at once, the
+  cleared queue proven, this record current. C11r2 (`1fc9468`, astra on C11r
+  and C12r): a paste asked for before the first adoption stays with that
+  session (X121). `ebcd90b` merged `main` (#69, `d8c3276`) into the branch.
+  C12r2 (`25deb26`, astra's whole-PR review, r27): a lost connection is not
+  the session's end; the roster's first tick publishes (X142–X144).
 
-**PR 3 — `feature/plan-030-new-sessions`** (C13–C16 implemented 2026-09-29/30,
-not yet merged; review-fix rounds, if any, are added with their commits, and
+**PR 3 — `feature/plan-030-new-sessions`** (#71, merged 2026-09-30 as
+`b401fec`; the `*r` commits are review-fix rounds, and
 `030-session-control-s5-agent-view/reviews/dispositions-pr3.md` has every
 finding and its disposition):
 
@@ -3091,18 +3180,67 @@ finding and its disposition):
 - C15r3 (`f096a27`) — tests (astra on C15r2): the two regression tests made
   to fail on the parent's code, deterministically.
 - The record's commit (`885b43c`) — X163–X176 below.
-- C15r4 (this commit) — CodeRabbit on #71: an unstarted session's first
+- C15r4 (`ef8116a`) — CodeRabbit on #71: an unstarted session's first
   prompt dropped when its session ends behind the list (X177).
 
-PR 4 is recorded here as it lands.
+**PR 4 — `feature/plan-030-composer-at`** (C17–C19 implemented 2026-09-30,
+rebased onto `b401fec`; the `*r` commits are review-fix rounds, and
+`030-session-control-s5-agent-view/reviews/dispositions-pr4.md` has every
+finding and its disposition):
+
+- C17 (`37e3436`) — the composer `@` search and match
+  (`internal/tui/at_files.go`): `rg --no-config --files --hidden -g '!.git'
+  -0` when `rg` is on the `PATH`, else `git ls-files -co --exclude-standard
+  -z` in a work tree, else a breadth-first walk; one 3 s budget, 50,000 paths
+  (20,000 entries for the walk), a partial list offered and titled; clean
+  relative paths only, folders derived from the files; a simplified fzf score
+  over the relative path, a `/` narrowing to a folder; the best 100 handed to
+  the popup and the rest counted (`completeAnswer.More`, new — with it zero,
+  every existing golden is unchanged).
+- C18 (`f05d59d`) — the popup and the insertion (`internal/tui/composer_at.go`):
+  `Model.composerAt`, open only while the composer has the keyboard, drawn
+  where the slash menu draws, its keys ahead of the composer's, titled
+  `files in <workspace>`; the audit of every existing frame script (no `@` at
+  a word start in the session composer, X185); four goldens (additions);
+  `test_tui_composer_at_mentions_a_file` in both modes; `## File mentions` in
+  `docs/reference/tui.md`.
+- C18r (`ca0e3d6`) — review fix (sol on C18): the slash menu stays out of an
+  `@` token (X193).
+- C17r (`9ade2ba`) — review fixes (sol on C17): what a listing holds is
+  capped (100,000 candidates, 8 MiB), the listing runs on its own goroutine
+  so the popup never waits on a stuck call, and git's paths are checked on
+  disk (X194–X197).
+- C17r2 (`c421309`) — review fix (sol on C17r and C18r): the tool is reaped
+  on a goroutine of its own, whatever the listing is inside (X198). Its
+  re-review's one finding (a pipe's read end closed twice on cancel) was
+  accepted: `os.File.Close` guards the second close.
+- `92dc1db` — the long-replay golden's wall-clock bound, found by PR 3's V1
+  (X192): its wait fails on a stall in progress rather than a fixed 20 s; and
+  a plugin frame test's wait needle no wrap can split (X199).
+- C19 (`b5c54df`) — the phase record: `07`'s exit results for S4a and S5
+  and its table, this section's outcome, PR 4's deviations, the live smoke,
+  the decisions and the handoff; `13`'s SF-88–SF-103 and the rows Plan 030
+  closed; the README's status; what each provider does with `@path` and a
+  list dispatch's saved provider in `docs/reference/tui.md`.
+- C19r (`156de97`) — review fixes to the record (sol): the ranges reach X199 and
+  SF-102, and the long-replay test's comment calls its stall a measured bound.
+- C18r2 (`befb3e0`) — CodeRabbit on PR 4: a composer `@` row shows a path's
+  Unicode format characters as `<U+XXXX>` (X200); SF-97 reworded; SF-103.
+- C18r3 (`4bcc119`) — review fix (sol on C18r2): the row escapes Unicode's
+  whole default-ignorable set, not only format characters (X201).
+- C19r2 (`a1103fd`) — PR 4 rebased onto Plan 031 (#73, `0f82531`), which
+  landed first: the record's commit ids and the re-run V2.
+- This commit — wire fixture 16's flake, found by CI's `-race` run on PR 4:
+  the fake host's `end` waits for the turn it cancels to open (X202).
 
 ### Deviations from the plan
 
-PR 1's execution amendments X1–X62, PR 2's X63–X121 and PR 3's X122 onward
-(C12r2's X142–X144 among them), mirrored here as `12`'s own record (the full
+PR 1's execution amendments X1–X62, PR 2's X63–X121 (with C12r2's
+X142–X144), PR 3's X122–X141 and X145–X177, and PR 4's X178–X202 (X192
+among them, found by PR 3's V1), mirrored here as `12`'s own record (the full
 text is in the plan, `~/.claude/plans/craze/030-session-control-s5-agent-view.md`,
 "Execution amendments"); review-fix rounds are grouped with the commit they
-amend. None reopens an owner decision. PR 4 adds its own as it lands.
+amend. None reopens an owner decision.
 
 **PR 1** (C1–C8):
 
@@ -3636,14 +3774,356 @@ with them):
     `endMsg` arm clears it, as the `errMsg` arm does): a `startedMsg`
     delivered after that end no longer submits it to the ended session.
 
+**PR 4** (C17–C18r, C17r, C17r2):
+
+61. **Plan 030 X178 (C17; one deviation)** — the search: `rg` if
+    `exec.LookPath` finds it, else `git ls-files -co --exclude-standard -z` in
+    a git work tree, else the walk. `rg` runs as `rg --no-config --files
+    --hidden -g '!.git' -0`: `--no-config` is the deviation (as
+    `internal/harness`'s grep and glob), so a user's `RIPGREP_CONFIG_PATH`
+    cannot narrow the list. One 3 s budget covers the tool and any fallback
+    walk; the tool runs with no shell, stdin `/dev/null`, SIGKILL on cancel,
+    stderr kept to 4 KiB; the cap reads the 50,001st record to know it was
+    cut, then kills the tool. git failing with nothing listed gives way to the
+    walk; `rg` failing with nothing is the answer (exit 1 with nothing is "no
+    files"); a failure after paths leaves them standing. The walk:
+    breadth-first, ≤ 20,000 entries read 256 at a time, regular files only
+    (symbolic links neither followed nor listed), never `.git` or
+    `node_modules`, unreadable subdirectories skipped.
+62. **Plan 030 X179, X180 (C17)** — what a search offers: what was read, even
+    cut short, titled `only the first 50,000 files`, `only the first 20,000
+    entries` or `listing stopped after 3s`; the notes `listing files took over
+    3s`, `could not list files: <why>`, `no files here`, `no workspace to
+    search`. Paths: NUL-separated, a leading `./` removed, control characters,
+    invalid UTF-8 and anything not a clean relative path refused (`atTextOK`,
+    X126's rule factored out), records over 64 KiB dropped; folders derived
+    from the files (empty ones never appear), git's conflict-stage duplicates
+    merged. Residuals: SF-95.
+63. **Plan 030 X181, X182, X183 (C17)** — the match: a case-insensitive
+    subsequence over the relative path with a simplified fzf score (segment
+    starts, case changes and adjacent runs rewarded, gaps penalised, +1000
+    when the last segment starts with the query, the best of three
+    alignments), ties to the shorter name, then bytes; a `/` in the query makes
+    what precedes its last `/` a folder prefix, and `/…`, `~/`, `../` offer
+    nothing. Candidates are `Name = Value = Insert` = the relative path,
+    folders ending in `/` and openable; at most 100 are ranked and handed over,
+    `completeAnswer.More` (new) counting the rest into the count line — with it
+    zero every existing golden is byte-identical. Speed: a per-path byte mask
+    and a 100-slot heap (proven equal to a full sort); 2.75 ms per keystroke on
+    a repository-shaped 50,000-file tree, 3.84 ms on a pathological one; the
+    index built off the Update in ~20–27 ms. Residual: SF-96.
+64. **Plan 030 X184 (C17)** — tests: the fake `rg` and `git` written once in
+    `TestMain` (a script run right after it is written can fail with
+    `ETXTBSY`, go.dev/issue/22315); the 3 s timeout forced through a held
+    clock; reaping checked by signal 0; 190/190 at a 5 % quota with and
+    without `-race`.
+65. **Plan 030 X185 (C18)** — the audit plan §3.16 asked for: no existing
+    frame script (every `internal/tui` test feeding keys or text,
+    `internal/cli/session_dispatch_test.go`, `tests/cli`) types an `@` at a
+    word start into the session composer; every `@` found is the list's
+    input, a component test, an expected string or a digest marker. None
+    did, so no owner decision was needed and the popup shipped.
+66. **Plan 030 X186, X187 (C18; X187 amends X127 for the composer)** — the
+    popup is the TUI's (`Model.composerAt`, carried by `withSession`), synced
+    with the draft before the layout; `switchBackend` and `openUnstarted`
+    close it and cancel its search, the first adoption keeps it (X121). It
+    opens only while the composer has the keyboard — no list, no card,
+    dialog or sub-agent view over it, no confirm line, no queue or sub-agent
+    focus, not shell mode, a workspace — and its keys apply only while the
+    layout gives the band a row. It works in the unstarted session and in
+    `craze attach` (the search runs on this machine, in the session's
+    workspace); a restored draft ending inside an `@` token reopens it. Keys:
+    `esc` at the slash menu's rung (after a running `!`'s kill, shell mode's
+    clear and a queue edit's cancel; the first `esc` hides, the second
+    cancels a running turn); `↑`/`↓`/`ctrl+p`/`ctrl+n`/`tab` ahead of the
+    composer's; `enter` only with a candidate; `PgUp`/`PgDn`, `ctrl+l`,
+    `alt+enter`, `shift+tab` stay the composer's; no mouse.
+67. **Plan 030 X188, X189 (C18)** — drawn in `regionOverlay` through
+    `layout.go`'s `overlayBandRows`/`overlayBandView`, where the slash menu
+    draws (`slash.go` untouched), outranking it for a quoted `@"a /b"`, at
+    most 10 rows; titled `files in <workspace name>` on every answer (the
+    height never jumps while searching), a partial list's reason after ` · `;
+    `searching…` and `nothing matches`. No help-dialog line.
+68. **Plan 030 X190, X191 (C18)** — four in-process goldens over a fixed
+    listing (`composer-at-files`, `composer-at-dir`, 100×30 and 80×24;
+    manifest 115 + 36); the exact inserted text (plain, `tab`, spaces,
+    Unicode, a folder, descend then accept, a token mid-draft, only the token
+    under the cursor); `test_tui_composer_at_mentions_a_file` in both modes.
+    A test trap found: copies of a bubbles `textarea.Model` share line
+    storage, so goldens build a fresh model per frame. The docs are
+    `docs/reference/tui.md`'s `## File mentions`, what each provider does
+    filled in from V4/V5 by this commit.
+69. **Plan 030 X193 (C18r, sol r37-c18)** — the slash menu stays out of an `@`
+    token: a quoted `@"a /` has a `/` after a space that `slash.go`'s
+    tokenizer reads as a slash token, so the composer refuses the menu while
+    it completes `@` and the cursor is inside an `@` token — whether the popup
+    is up, hidden by `esc`, or closed because the keyboard is elsewhere (a
+    token's kind is the draft's, not the focus's). While it holds, `PgUp`/
+    `PgDn` and the wheel scroll the transcript, `enter` with no file
+    candidate sends the draft as typed, the second `esc` cancels a running
+    turn. `slash.go` untouched (§3.15). Residuals: SF-98.
+70. **Plan 030 X194, X195, X196, X197 (C17r, sol r36-c17)** — what a listing
+    holds is capped: candidates (files and the folders met) at 100,000 and
+    their bytes at 8 MiB, a path that would pass either stopping the listing
+    like the path cap (a real 49,980-file tree is 59,142 candidates, 3.7
+    MiB). The whole listing — `rg`, git and its checks, or the walk — runs on
+    its own goroutine (a deviation: the review asked for the walk only),
+    handing over batches of ≤ 1,024 candidates; the search checks its
+    deadline and the popup's cancel between batches and answers at either
+    without waiting for the listing. git's paths are kept only if `Lstat`
+    says a regular file, each new folder stat'ed once top down, so tracked
+    links, files under a folder since made a link, deleted files and
+    submodules are not offered — as `rg` and the walk offer none (settles
+    X180's residual; ~61 ms at 50,000 paths). Tests
+    `TestAtFilesCapsWhatTheListingHolds`, `TestAtFilesGitOffersOnlyWhatIsThere`,
+    `TestAtFilesAnswersWhileTheWalkIsStuck`; 210/210 at 5 % with and without
+    `-race`. Residual: SF-97.
+71. **Plan 030 X198 (C17r2, sol r38-c17r-c18r)** — the tool is reaped on a
+    goroutine of its own, started right after `Start`, so a tool killed at the
+    deadline or the popup's cancel is reaped at once whatever the listing
+    goroutine is inside (git's `Lstat` on a stalled mount held a killed tool
+    as a zombie until the stat returned). Stdout is craze's own `os.Pipe`,
+    which `Wait` never closes; the normal, cap and full paths still reap
+    before the answer. `TestAtFilesReapsTheToolWhileAGitCheckIsStuck`
+    (reverted, the tool sits `Z`); 220/220 at 5 % with and without `-race`.
+    Residuals: SF-97.
+72. **Plan 030 X192 (found by PR 3's V1; pre-existing)** — V1 at `885b43c`
+    failed `TestFrameGoldenLoadLongReplayDoesNotDeadlock` once in 20: the
+    asynchronous run's frame script timed out at 20 s at line 570 of 600 on a
+    heavily loaded machine. Not a regression — at a 25 % quota with `-race` it
+    fails 7/7 on `main` `b8aa5bb` (no PR 3 code) and 7/7 on PR 3's tip, with
+    the same durations; PR 3 merged on that diagnosis. The bound is fixed in
+    PR 4 (`92dc1db`, X199).
+73. **Plan 030 X199 (`92dc1db`)** — the long-replay golden's one wait is the
+    whole 600-event replay (0.5 s unloaded, 7 s under `-race`, 37–58 s under
+    `-race` at a 25 % quota, 275–320 s at 5 %) against a fixed 20 s; the two
+    gate modes fold the same messages. `FrameOpts` gains an opt-in stall: a
+    wait fails once no frame has folded a new event for it (progress is the
+    fold's seq, not the frame text), the timeout only the overall cap. This
+    test sets a 30 s stall (the longest gap measured is 2.2 s, at 5 % under
+    `-race`) and a 10-minute cap, raises acp's session/load deadline to the
+    cap (in process the load answers only after the fold), and pins the
+    session start ahead so the golden's `0m` holds. Passed ×10 at 5 % under
+    `-race` on both transports; a reader armed too late and a load that never
+    answers each fail within the stall. `TestFramePluginBlockReachesTheAgent`'s
+    wait needle spanned a space the echo's wrap could fall on (the checkout
+    path's length moves the wrap); it now waits on fragments no wrap can
+    split. Found, not fixed: SF-102.
+74. **Plan 030 X200 (C18r2, CodeRabbit on PR 4)** — a composer `@` row's
+    name is the path's display form (`atFileName`): `sanitizeLine`, then every
+    Unicode format character (`Cf`: bidi overrides and isolates, zero-width
+    characters, tags) written as `<U+XXXX>`, so a row cannot read as a
+    different path than the one a pick writes; `Value` and `Insert` stay the
+    exact path, and matching stays on it. `sanitizeLine` itself is unchanged
+    (an emoji's U+200D is `Cf`). Residuals: the display is not reversible;
+    an emoji's joiner shows escaped in the popup; runs of spaces draw as one;
+    the draft and the transcript draw a picked path's `Cf` runes raw (SF-103).
+75. **Plan 030 X201 (C18r3, sol on C18r2)** — the row escapes Unicode's
+    Default_Ignorable_Code_Point set with every `Cf` rune (Go's `Cf`,
+    `Variation_Selector` and `Other_Default_Ignorable_Code_Point` tables):
+    the combining grapheme joiner, variation selectors and Hangul fillers,
+    which drew as nothing, now show as `<U+XXXX>`; visible combining marks
+    are kept. UAX #44's subtractions from the set (interlinear annotation,
+    Egyptian format controls, prepended concatenation marks) are `Cf` and
+    stay escaped. A test sweeps every code point against UAX #44's
+    derivation. Residual: a non-ASCII space (U+00A0, U+3000) draws as an
+    ASCII space in the row (`sanitizeLine`) while the pick writes it.
+76. **Plan 030 X202 (CI on PR 4; test-only)** — `TestWireFixtures/16-last-turn`
+    failed once under `-race` on a loaded runner: `sessions.list` said
+    `cursor` 3 where the fixture says 4. The engine claims a prompt under its
+    lock, but the stub opens the turn later, on the continuation's goroutine,
+    which the `session.prompt` reply does not wait for; `end`'s cancel landed
+    first, the hung prompt was withdrawn (no `done`, a synthetic ended event)
+    and one event fewer was counted. Fixtures 9 and 17 (also `hang_next` then
+    `end`) had the same latent race. The fake host's `end` now waits, bounded
+    at 10 s, until the stub is in the turn or none is current. A seamed test
+    holds the continuation and reproduces CI's exact line before the fix; a
+    CPU quota alone never reproduced it (it throttles every thread at once).
+    No fixture bytes, production code or wire change.
+
 ### Live smoke
 
-Filled in as each PR lands.
+Two runs on 2026-09-30 against one build (`28dfc7d`, before PR 4's rebase onto
+Plan 031 — C17r, with C15r4's
+`app.go`; `--version` 0.0.1), driven in tmux with bracketed paste; notes and
+captures in the plan folder's `v4/NOTES.md` and `v5/NOTES.md`. **V4, Linux**:
+COSMIC on Wayland, tmux 3.4 and cosmic-term 1.8.0; cursor-agent 2026.09.28,
+grok 1.0.44, native on `fireworks/deepseek-v4p1-flash`. **V5, the mac-mini**
+over ssh: macOS 26.5.1 arm64; grok 1.0.30, native on
+`muse-spark-1.3-contributor` (DeepSeek V4.1 Flash in legs 7–8); cursor
+skipped, the login keychain over ssh, as every earlier phase found.
+
+| # | leg | V4 Linux (cursor, grok, native) | V5 mac-mini (grok, native) |
+|---|---|---|---|
+| 1 | launch each provider, one prompt | PASS — one detached `craze serve` per launch, its own session leader with the agent in a group of its own; registry entry `ready` | PASS |
+| 2 | close the tab; reopen; `←`; `enter` | PASS — three `tmux kill-session`s; every host alive and answering `hello`; the list showed them idle, each opened in place with its band and transcript | PASS — the hosts reparented to pid 1 |
+| 3 | quit the terminal application | PASS — cosmic-term (SIGTERM) gone with its TUI; the host lived on in the application's scope, which stayed active until the host's never-prompted idle exit (5 m 0.8 s), then was collected | not run (no GUI over ssh) |
+| 4 | a session blocked on a question, answered from the list | PASS, with a caveat — `question: Which colour do you prefer?` under "needs you"; opened; `2` → Green, shown in a second client attached to it too; the card blocked `←` and `/sessions`, so the list came from a second terminal | PASS — `←` pressed before the question arrived; `2` → Blue |
+| 5 | `/exit` one | PASS — client, host and registry entry gone at the first 0.1 s poll; the row under saved; `enter` resumed it (`--load`) with `restored` | PASS — host and entry within 0.01 s, the client at 0.15 s |
+| 6 | dispatch into another directory with `@`; `@dir` alone | PASS — `started in /tmp/craze030-v4/proj-b` after 3.1 s (cursor); the unstarted session spawned nothing until its first prompt | PASS — through a browsed `@/tmp/craze030-v5/`; `started in …` within 0.3 s |
+| 7 | `/provider`, `/model` | PASS — `grok models for new sessions · last seen 7m ago`; Grok 4.7 Fast → the host's `--provider=grok --model=grok-4.7-build-fast`; `/provider native` reset the model to the table's default | PASS — the same, `last seen 4m ago` |
+| 8 | composer `@` a file | PASS — every provider received `What is the first line of @README.md` verbatim (the journal's `prompt` record); grok attached the file itself, no tool row; cursor and native read it with their read tool | PASS — grok's own history holds the message plus an attached-files block with the file; native read it (DeepSeek searched for it first) |
+| 9 | idle exit at 2 s | PASS — gone 2.74 s after the detach; `craze -c` resumed it | PASS — 2.76 s |
+| 10 | ssh logout and login | not run (no sshd on the box) | PASS — `login`, the shell and the TUI gone; the host and its agent survived; the next login's `craze -c` attached to that host |
+
+Both runs ended with every host they started stopped, and no `craze serve`,
+agent process or `.pgids` record left.
+
+- **Cgroups and scopes** (plan §9, SF-79): `setsid` moves a host's session,
+  not its cgroup. A host spawned in a tmux pane's first instant stayed in the
+  tmux server's own scope, later ones in the pane's `tmux-spawn-<uuid>.scope`
+  (probably tmux's asynchronous move racing the spawn; not verified); neither
+  is stopped by `kill-session`. cosmic-term's
+  `app-…-cosmic-term-<pid>.scope` outlived its main process for as long as
+  the host ran. The systemd risk did not occur on either terminal; COSMIC's
+  own launcher scope and a full logout were not tried. macOS has no logind.
+- **Timings:** `/exit` ≤ 0.11 s on Linux, ≤ 0.15 s on the mac, for the client,
+  the host and its entry together. Dispatch to `started in …`: cursor 3.1 s,
+  grok ≤ 0.26 s, native ≤ 0.21 s on Linux, < 0.3 s on the mac; opening a row
+  about 1 s or less. Never-prompted hosts exited 5 m 0.03–0.8 s after their
+  last detach under the default 1 h; `"2s"` hosts 2.74–2.94 s.
+- **What each provider does with `@path`:** the text arrives exactly as
+  inserted (the pick's trailing space trimmed on send). grok attaches the
+  whole file itself (its own `chat_history.jsonl` holds the message, then an
+  attached-files block with the file's contents); cursor
+  (`Read README.md (1 - 5)`) and native (`read`, sometimes after a `glob`)
+  read it with their tools. This commit puts it in `docs/reference/tui.md`.
+- **The ssh leg** (V5 leg 10): killing the local `ssh -tt` ended `login`, the
+  shell and the TUI; the host (parent now pid 1) and its grok agent kept
+  running, the host log showing no stop; a new login's `craze -c` attached to
+  that same host (no `craze serve` spawned, no `--load`).
+- cursor's catalog has a model whose id is `default` (`Auto`), so X167's
+  case is real. A bare `craze` with a provider in `config.toml` shows the
+  provider dialog with it preselected (V5) — the documented picker, older
+  than Plan 030.
+
+Surprises that became rows: a card blocking the way to the list (SF-99); the
+list's last-reply column showing raw Markdown (SF-100); a list dispatch saving
+its provider as the last one started (SF-101 — kept, and documented in
+`docs/reference/tui.md` by this commit); a resumed native session's replay
+leaving out the question's answer row (V5, added to SF-61).
+
+**The V5 incident (the environment, not craze).** The run's first `tmux
+new-session` went to the owner's long-running default tmux server on the mac
+(up 14 days, its working directory on the external volume
+`/Volumes/miniext`), which hung in the kernel opening its own working
+directory to spawn the pane — a macOS privacy check
+(`kTCCServiceSystemPolicyAllFiles`, the responsible app Ghostty) that never
+completes over ssh — and every later command against that server hung too.
+Nothing of craze ran under it. The run left that server untouched and used a
+private server (`tmux -L v5`) for every leg; the owner's server needs a
+restart from a directory on the internal disk, and later mac smokes use a
+private tmux server.
 
 ### Decisions and questions touched
 
-SD-34 and SD-35 (PR 0). Filled in further as each PR lands.
+**SD-34** (the order: S4a + S5, then S4b, then S3, then S6/S7; S4 split in
+two) and **SD-35** (the lifetime rules for detached hosts), both written in
+PR 0 from the owner's decisions; SQ12's default is refined by SD-35 (`10`,
+PR 0). No other `SD-nn` added or superseded; no `SQ` resolved.
+
+Decided during execution without the owner (decide, do not ask), each an
+amendment above; not every amendment is here.
+
+Architecture:
+
+- **Wire additions never move a fixture** (X1, X63): the new info-document
+  fields and the row facts are omitted when unset, and the fake host sets
+  them only in an opt-in mode, so the existing wire fixtures stand for the
+  older host; `rowFacts` is a session capability, the host's own, since S4b's
+  hub will carry rows of hosts of different builds.
+- **An agent group is identified by its leader's start time** (X22): a
+  recorded group is signalled only while a process with that pid and start
+  time exists (`rundir.ProcessIdentity`), and a record that cannot be made
+  fails the start.
+- **Attachments are counted until EOF** (X29): a read EOF takes a connection
+  out of the idle count, so a half-closed bridge cannot pin a host; the close
+  fence refuses admissions while it is up and is reversible (X30).
+- **The quit's deadline closes a transport whose write is blocked** (X54):
+  `remote.Client.Command`'s write does not honour its context, so the quit
+  closes under it instead.
+- **The switch's stamps** (X100, X117, X121): `bgen` on every message of a
+  backend, `shownGen` on the terminal's own results (a paste, a copy's note,
+  a `!` completion), each checked before the gate's bookkeeping; stale
+  replies rejected first.
+- **The list's input needs a `SessionStarter`** (X130), so PR 2's list
+  goldens stayed byte-identical.
+- **A lost connection is not the session's end** (X142): only a clean end
+  marks a row `· ended`.
+- **The dispatch's order** (X146): Spawn, its own connection, Start, the
+  prompt as that connection's command `1`, then `LeaveRunning` **before** the
+  connection closes; an unknown outcome keeps the host, a refusal or a failed
+  start stops it. Its answer is read by its error, never the clock (X171).
+- **Only `craze serve` writes the catalog cache** (X155), off every lock,
+  replacing only a strictly older observation under a per-provider lock
+  (X156).
+- **`rg --no-config`** for composer `@` (X178), so a user's ripgrep config
+  cannot narrow the list; the whole listing on its own goroutine and its tool
+  reaped by another (X195, X198).
+
+UX:
+
+- **The list's groups, glyphs and words** (X73–X85): `Starting…` and
+  `Connecting…` rows drawn with the working ones; an unreachable group after
+  idle, counted only in `N running`; the columns and one-unit ages; `ctrl+x`
+  clearing a session's queue before it cancels its turn, twice to close;
+  `ctrl+d` (or `ctrl+c` twice) from the list a view close; an ended
+  session's row kept; the hint line's words.
+- **Opening in place** (X103, X106, X107): the list stays up with `opening
+  <title>…` while the dial runs; the band `─ <title · provider · dir> ─── ←
+  sessions ─`; a viewed session's end returns to the list with `that session
+  ended`. Resuming a saved one says `resuming <title>…` and `restoring…`
+  (X113, X114).
+- **New sessions' pending and unstarted states** (X147–X152): `❯ starting…`
+  with only the list's keys passing; the unstarted session's band `new
+  session · <provider> · <dir>`, its builtins and `!` inert, `←` discarding
+  it; with nothing behind the list, `no directory to start in: pick one with
+  @`; only exactly `/exit` quits from the input.
+- **`/provider` and `/model`** (X157–X160): the `/` popup lists `/provider`,
+  `/model` and `/exit` and opens only for a prefix of them (any other `/…`
+  line is a prompt); a provider resets the model to its default; a model
+  pins the provider it was listed for; the choice lasts across openings and
+  switches until craze quits. **The agent's own default is always its own
+  first row** (X167); a catalog model whose id is `default` is another row.
+- **Composer `@`** (X185–X189): after the audit found no frame script at
+  risk, the popup ships in every mode, the opt-out and `craze attach`
+  included; `esc` at the slash menu's rung (the first hides, the second
+  cancels a turn); `enter` only with a candidate; no mouse and no help-dialog
+  line; titled `files in <workspace>`. **The slash menu stays out of an `@`
+  token** (X193).
+- **A list dispatch saves its provider as the last started** (found by V4):
+  kept as the launch's ordinary rule and documented in
+  `docs/reference/tui.md`; SF-101 asks the owner whether list sessions should
+  not persist.
 
 ### Handoff
 
-Filled in as each PR lands.
+**S4b (the hub) is next** (SD-34), then S3. What it inherits:
+
+- **The roster and its one client.** `sessions.list` rows carry the row facts
+  behind `rowFacts` (`05`, "As shipped (S5)"; fixture 17). `internal/roster`
+  polls every registry entry — one kept, never-reconnecting connection per
+  host, one deadline per attempt covering dial, hello and list, at most 8 in
+  flight, a backoff, unreachable never shown as saved — and the index for the
+  saved rows. The TUI reads the list only through `tui.Sessions` (`Roster`,
+  `Open`, `Spawn`, `LeaveRunning`, `Stop`, `Cancel`) and `SessionStarter`
+  (`RecentDirs`, `ModelCatalog`), `internal/tui/sessions_config.go` — the
+  seam at which the hub's `sessions.subscribe` would replace the per-host
+  polling (SF-76).
+- **Spawning and lifetime.** `spawnHost` (`setsid`, the ready line on fd 3,
+  the recorded agent groups, the held rendezvous), `craze serve --host-id`
+  and `LeaveRunning` are what `session.create` will spawn through;
+  `session.stop` behind `stop`, the close fence and `host_idle_exit` are
+  what a hub's stop and roster sit on. A host's registry entry, lock, log and
+  `.pgids` record live under `~/.cache/craze/` (`rundir`).
+- **The model catalog cache** (`internal/modelcache`, `rundir.CatalogDir`),
+  written by every `craze serve`.
+- **The rows that matter most** (`13`): SF-76 (the hub), SF-70 (notices of
+  other sessions, which a subscription makes cheap), SF-99 (a card blocks the
+  way to the list), SF-78 (an open ask pins a host), SF-79 (a terminal that
+  stops its scope, not seen yet), SF-61 (ask-outcome rows on a snapshot
+  attach or a resume), and the owner's SF-77 (the opt-out), SF-86 (the help
+  dialog's quit wording) and SF-101 (list sessions saving their provider).
+- **The Plan 031 seam is on `main`** (#71): `nativeModelChoices()` and
+  `nativeDefaultModel()` in `internal/tui/sessions_models.go` are the TUI's
+  only readers of native's model table (X161); Plan 031 swaps their bodies.

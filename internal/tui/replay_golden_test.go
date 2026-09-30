@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/charliek/craze/internal/acp"
 	"github.com/charliek/craze/internal/agent"
 )
 
@@ -80,19 +81,54 @@ func TestFrameGoldenRename(t *testing.T) {
 // session's 256-slot channel fills, emitCtx blocks the ACP read loop, the load
 // result is never read, Start never returns and even <start> times out. With it
 // armed by Init the frame completes and ends on the `restored` note.
+//
+// Nothing in it may depend on how long a run takes. Its waits end on a stall,
+// not on a timeout (FrameOpts.stall): a wait fails once nothing has folded for
+// longReplayStall. The deadlock folds nothing, so it fails there; a slow run
+// goes on folding, so it never does. A fixed bound cannot tell the two apart,
+// because the one wait here is the whole replay — 0.5 s a run unloaded, 7 s
+// under -race, 37–58 s under -race at a 25 % CPU quota and 275–320 s at 5 %
+// (2026-09-30) — and the 20 s it had flaked on a loaded machine. The stall is
+// a measured test bound, not a proof: the longest gap between two folds was
+// 2.2 s, at 5 % under -race, so 30 s leaves a wide margin, and progress is
+// sampled when a frame is published (a wait that finds its frame is not failed
+// for a stall it was itself too slow to see). The cap, 10 minutes, is about
+// twice the longest run measured (320 s).
+//
+// The load's own deadline (acp's 90 s) is lifted to the cap for the same
+// reason: in process, session/load answers only once the model has folded all
+// but the channel's last 256 events, so on a slow machine it is the fold's wall
+// time too — 91 s at 5 % under -race, which failed the start on its own. And
+// the golden's status row says the session has been up 0m, which a run that
+// takes a minute or more would not: the session's start is pinned ahead of the
+// clock, which reads 0m however long the run takes (formatCoarse), on either
+// transport.
 func TestFrameGoldenLoadLongReplayDoesNotDeadlock(t *testing.T) {
-	got := runLoadFrame(t, "load-long", 100, 30, "<wait:text:restored><wait:idle>")
+	t.Cleanup(acp.SetLoadSessionTimeout(longReplayCap))
+	got := runLoadFrame(t, "load-long", 100, 30, "<wait:text:restored><wait:idle>", FrameOpts{
+		Timeout:      longReplayCap,
+		stall:        longReplayStall,
+		sessionStart: time.Now().Add(24 * time.Hour),
+	})
 	assertFrameGolden(t, "load-long-100x30", 100, 30, got,
 		[]string{"line 600", "restored"},
 		[]string{"restoring", "starting"})
 }
+
+// longReplayStall and longReplayCap bound the long replay's waits: a wait
+// fails once nothing has folded for longReplayStall, and none takes longer than
+// longReplayCap (TestFrameGoldenLoadLongReplayDoesNotDeadlock).
+const (
+	longReplayStall = 30 * time.Second
+	longReplayCap   = 10 * time.Minute
+)
 
 // TestFrameLoadReplaysTheWholeTranscript is the same path on cursor's own
 // replay shape: a two-chunk user prompt the session coalesces into one block, a
 // thought, a tool call completed by a second update, and the answer. No golden —
 // the point is the content, and the frame is one more place for it to drift.
 func TestFrameLoadReplaysTheWholeTranscript(t *testing.T) {
-	got := runLoadFrame(t, "load", 100, 30, "<wait:text:restored><wait:idle>")
+	got := runLoadFrame(t, "load", 100, 30, "<wait:text:restored><wait:idle>", FrameOpts{Timeout: 20 * time.Second})
 	for _, want := range []string{
 		"List the files in the current working directory in one line.",
 		"+ Thought", "✓ read  List Directory", "the workspace holds main.py and README.md",
@@ -111,7 +147,7 @@ func TestFrameLoadReplaysTheWholeTranscript(t *testing.T) {
 // protocol-to-transcript path a --continue takes, without the CLI flags that
 // reach it (those are C5's). agent.Options.LoadSessionID and Config.Loading are
 // exactly what runTUI will set.
-func runLoadFrame(t *testing.T, script string, cols, rows int, keys string) string {
+func runLoadFrame(t *testing.T, script string, cols, rows int, keys string, opts FrameOpts) string {
 	t.Helper()
 	bin := buildFakeAgent(t)
 	isolateSkillsHome(t)
@@ -137,7 +173,7 @@ func runLoadFrame(t *testing.T, script string, cols, rows int, keys string) stri
 			ProviderLocked: true,
 			Loading:        true,
 		}
-	}, cols, rows, keys, FrameOpts{Timeout: 20 * time.Second})
+	}, cols, rows, keys, opts)
 	if err != nil {
 		t.Fatalf("run %s frame: %v", script, err)
 	}

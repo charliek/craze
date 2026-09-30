@@ -1296,7 +1296,7 @@ var (
 		"sessRosters", "bandOn", "drafts", "retired", "sessGen", "bgen", "shownGen", "gateSeq",
 		"resumeAttempt", "spawnSeq", "restores", "turnStarts", "held", "heldBytes", "heldDrained", "syncAck",
 		"syncPending", "gateSync", "harnessQuit", "completeLoads", "unstartedSeq", "sessPick",
-		"connSeq", "nativeDir", "nativeEnv",
+		"connSeq", "nativeDir", "nativeEnv", "composerAt",
 	}
 	sessionFields = []string{
 		"eng", "cmdSeq", "chains", "engErr", "cwd", "model", "status", "err", "startErr", "startInc", "git",

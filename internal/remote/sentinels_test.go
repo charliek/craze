@@ -663,6 +663,14 @@ var tuiSites = []tuiSite{
 	{"at_dirs.go", "sessListDirs", "Is", "io.EOF", 1, proofLocal},
 	{"sessions_input.go", "sessTargetRule", "Error", "t.err", 1, proofLocal},
 	{"sessions_input.go", "sessInputEnter", "Error", "err", 1, proofLocal},
+	// The composer's `@` file search (plan 030 §3.16, C17): a listing of the
+	// workspace read off the Update from rg, git or a walk — its records,
+	// the tool's exit, and its own timeout, worded for the popup's note; no
+	// Backend call answers any of them.
+	{"at_files.go", "atFilesErrNote", "Is", "errAtFilesTimeout", 1, proofLocal},
+	{"at_files.go", "atExitCode", "As", "&ee", 1, proofLocal},
+	{"at_files.go", "readPaths", "Is", "bufio.ErrBufferFull", 1, proofLocal},
+	{"at_files.go", "readPaths", "Is", "io.EOF", 1, proofLocal},
 	// A background dispatch (plan 030 §3.13, C15): its start given up at its
 	// own bound, the dispatch's context.
 	{"dispatch.go", "runDispatch", "Is", "context.DeadlineExceeded", 1, proofLocal},

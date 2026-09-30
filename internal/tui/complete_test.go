@@ -830,6 +830,54 @@ func TestTheWindowShowsEightRowsAndCountsTheRest(t *testing.T) {
 	check("eight", 20, rowsOf(0, 0, 8))
 }
 
+// moreSource hands over its candidates and says it left more out
+// (completeAnswer.More), as a source that ranks many does (at_files.go).
+type moreSource struct {
+	items []completeItem
+	more  int
+}
+
+func (s moreSource) completeID() string { return "more" }
+
+func (s moreSource) complete(completeQuery) completeAnswer {
+	return completeAnswer{Items: s.items, More: s.more}
+}
+
+// The candidates a source left out are counted under the window with those
+// below it: the count line is there even when every candidate handed over
+// fits, and at the last of them it still counts down (↓) to what was left
+// out — which no key reaches. None left out draws as before.
+func TestTheCountLineCountsWhatTheSourceLeftOut(t *testing.T) {
+	check := func(label string, p completePopup, rows int, want []string) {
+		t.Helper()
+		if got := trimmed(popupText(p, 40, rows)); !slices.Equal(got, want) {
+			t.Fatalf("%s:\n%s\nwant:\n%s", label, strings.Join(got, "\n"), strings.Join(want, "\n"))
+		}
+		if h := p.height(rows); h != len(want) {
+			t.Fatalf("%s: height %d, want %d", label, h, len(want))
+		}
+	}
+	p := newCompletePopup(moreSource{items: named("a", "b", "c"), more: 5}, atGrammar)
+	synced(&p, "@", completeEnv{})
+	check("three handed, five left out", p, 20, []string{"❯ a", "  b", "  c", "  ↓ 5 more"})
+	popKey(&p, keyOf(tea.KeyUp))
+	check("at the last handed", p, 20, []string{"  a", "  b", "❯ c", "  ↓ 5 more"})
+	check("squeezed to two rows", p, 2, []string{"❯ c", "  ↓ 5 more"})
+
+	p = newCompletePopup(moreSource{items: numbered(12), more: 30}, atGrammar)
+	synced(&p, "@", completeEnv{})
+	for range 11 {
+		popKey(&p, keyOf(tea.KeyDown))
+	}
+	if got := trimmed(popupText(p, 40, 20)); got[len(got)-1] != "  ↓ 30 more" {
+		t.Fatalf("at the last of twelve handed: %q", got[len(got)-1])
+	}
+
+	p = newCompletePopup(moreSource{items: named("a", "b")}, atGrammar)
+	synced(&p, "@", completeEnv{})
+	check("none left out", p, 20, []string{"❯ a", "  b"})
+}
+
 func TestAPopupWithNothingToOfferSaysWhy(t *testing.T) {
 	src := &listSource{id: "list", items: named("lumen")}
 	p := newCompletePopup(src, atGrammar)

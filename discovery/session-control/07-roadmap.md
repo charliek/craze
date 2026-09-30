@@ -10,15 +10,15 @@ non-test source lines, from the reference reviews (`09`).
 | done | S0 | complete | Discovery: four codebases reviewed, topology / protocol / remote scope / journaling settled |
 | done | S1 | complete | Engine core: fan-out, sequenced journal, engine-owned asks and turn state, render-free transcript; TUI becomes the first client. **S1a complete (2026-09-19)**; **S1b complete (Plan 021, all three PRs merged, 2026-09-21)**; **S1c complete (Plan 024, PRs #50 and #52, 2026-09-24)** |
 | done | S2 | complete (Plan 027, 4 PRs: #55, #56, #61, #63) | Per-session Unix socket, published protocol spec + schema, fake host, `craze bridge`, `craze attach` |
-| 1 | S4a | in progress (Plan 030, with S5) | Detached hosts: `craze serve`, hosts born detached, `session.stop`, idle exit |
-| 1 | S5 | in progress (Plan 030, with S4a) | Agent view in the TUI: a session list of every running session on the machine, new sessions started from it, composer `@` mentions |
-| 2 | S4b | not started | The hub: `craze ps`, `hub.sock`, `sessions.subscribe` on the hub, `session.create`, remote-machine aggregation |
-| 3 | S3 | not started (after S4b, and after shed's first release of its own lane work) | `shed-craze` lane adapter in shed; craze in shed-mobile's `LANE_KINDS` |
-| 4 | S6 | directional | `craze web`: hub serves WebSocket + a web bundle on loopback / tailnet |
-| 4 | S7 | directional | Outbound relay uplink and a hosted server; enrollment, scopes, TLS |
+| done | S4a | complete (Plan 030, with S5; 5 PRs: #66, #68, #70, #71, PR 4) | Detached hosts: `craze serve`, hosts born detached, `session.stop`, idle exit |
+| done | S5 | complete (Plan 030, with S4a) | Agent view in the TUI: a session list of every running session on the machine, new sessions started from it, composer `@` mentions |
+| 1 | S4b | not started (next) | The hub: `craze ps`, `hub.sock`, `sessions.subscribe` on the hub, `session.create`, remote-machine aggregation |
+| 2 | S3 | not started (after S4b, and after shed's first release of its own lane work) | `shed-craze` lane adapter in shed; craze in shed-mobile's `LANE_KINDS` |
+| 3 | S6 | directional | `craze web`: hub serves WebSocket + a web bundle on loopback / tailnet |
+| 3 | S7 | directional | Outbound relay uplink and a hosted server; enrollment, scopes, TLS |
 
 The order column is the order phases run in (SD-34); phase IDs are stable
-names, not positions. S4a and S5 are built together in Plan 030. S4b runs
+names, not positions. S4a and S5 were built together in Plan 030. S4b runs
 before S3 so that the shed lane starts with a hub roster and `create`.
 
 ## Phase detail
@@ -281,13 +281,45 @@ born detached (SD-33), so by default every TUI is a socket client (the
   is gone within seconds; an unattended idle host exits after its timeout,
   and one with a turn, an open ask, or an attached client does not.
 
+**Exit result (S4a):** complete 2026-09-30, plan
+`030-session-control-s5-agent-view`, built with S5 in five sequential PRs
+from fresh `origin/main` — `docs/plan-030-roadmap` (#66, `77f1cd3`),
+`feature/plan-030-hosts` (#68, `6be2273`, which is S4a itself),
+`feature/plan-030-sessions-list` (#70, `b8aa5bb`),
+`feature/plan-030-new-sessions` (#71, `b401fec`) and PR 4
+(`feature/plan-030-composer-at`). Every exit clause met, each against a named
+test and the live smoke (V4 on Linux, V5 on the mac-mini; the legs are in
+`12`): after a prompt, killing the terminal left the host running, listed and
+answering `hello` — `tmux kill-session` of three sessions (V4 leg 2), quitting
+cosmic-term (V4 leg 3), and an ssh logout on macOS, after which a new login's
+`craze -c` reattached to that same host with its transcript and spawned
+nothing (V5 leg 10; `test_hangup_leaves_the_host_and_dash_c_reattaches`,
+`tests/cli/test_detach.py`); `/exit` ended the session with the client, the
+host and its registry entry all gone at the first 0.1 s poll (V4 leg 5; on the
+mac the host and its entry within 0.01 s, the client at 0.15 s), the index row
+kept; with `host_idle_exit = "2s"` an unattended host exited 2.74 s after its
+last client left (V4 leg 9; V5 2.76 s), and a never-prompted one at its
+5-minute cap (V4 leg 3: 5 m 0.8 s), while a running turn, an open ask, a
+replay, a queued prompt or an attached client keeps a host and the list's
+polling does not (`TestEachInFlightConditionKeepsTheHost`,
+`TestAnAttachArrivingAtExpiryKeepsTheHost`, `TestAListPollerDoesNotKeepAHost`,
+`internal/cli/idle_test.go`). Plan 030 §9's systemd risk did not occur on the
+two terminals tried: hosts started in tmux sit in tmux's scopes and survive
+`kill-session`, and cosmic-term's app scope was not torn down when the
+application quit — it stayed until its host's idle exit, then was collected
+— so the `systemd-run --user --scope` spawn was not built (`13`, SF-79, kept
+open for a terminal that stops its scope on exit). Detaching costs +7 ms p50
+and +18 ms p95 to the first answer (V3, against a 150/300 ms budget). S4a's
+execution amendments are PR 1's, X1–X62; they, the review record and the
+live smoke are in `12`, and what it left is in `13`.
+
 ### S4b — the hub
 
 The per-machine hub at `run/hub.sock` with roster, routing, spawn, and stop;
 `craze ps`; `sessions.subscribe` on the hub; `session.create` turns shed's
 `create` capability on; remote-machine aggregation. The hub replaces the
 per-host polling that S5's session list does until it exists. Not started;
-runs after S4a + S5 and before S3.
+next now that S4a + S5 are complete, and before S3.
 
 - Size: M, about 2k lines (the old S4's estimate, which covered the hub, the
   detached host and `craze ps` together; S4a took the host part).
@@ -328,6 +360,36 @@ session composer ship with it.
   is started in another directory from the list with `@`; `/exit` ends a
   session and the list shows it saved; an unattended idle session exits after
   the timeout.
+
+**Exit result (S5):** complete 2026-09-30, the same plan and PRs as S4a —
+the list in #70, new sessions from it in #71, composer `@` in PR 4
+(`feature/plan-030-composer-at`). Every exit clause met live on Linux
+(cursor, grok, native) and the mac-mini (grok, native; cursor skipped there,
+the login keychain over ssh, as every earlier phase found too): with every
+terminal closed, a new craze's `←` listed the sessions still running and
+`enter` opened each in place with its transcript (V4 and V5 leg 2); a session
+blocked on a question was listed under "needs you" (`question: Which colour
+do you prefer?`), opened and answered (V4 and V5 leg 4; on Linux the answer
+also reached a second client attached to it); a prompt behind a leading
+`@proj-b` started a session in the other directory in the background
+(`started in …` after 3.1 s for cursor, under 0.3 s on the mac), and
+`@proj-b` alone opened an unstarted session that spawned nothing until its
+first prompt (V4 and V5 leg 6); `/exit` ended a session, the list showed it
+under saved, and `enter` resumed it in place (V4 and V5 leg 5); an unattended
+idle session exited after the timeout (S4a's result above). Beyond the
+clauses, `/provider` and `/model` set the next dispatch's `--provider` and
+`--model` (V4 and V5 leg 7), and composer `@` sent `@README.md` verbatim to
+every provider tried (V4 and V5 leg 8: grok attaches the file itself, cursor
+and native read it with their read tool). One clause holds with a caveat:
+`←` and `/sessions` cannot leave a session whose card is up (the card owns the
+keyboard), so on Linux the blocked session's list was reached from a second
+terminal, and on the mac `←` was pressed before the question arrived (`13`,
+SF-99). Automated: `tests/cli/test_sessions.py`, `test_dispatch.py` and
+`test_tui_composer_at_mentions_a_file` in real terminals, and 31 new frame
+goldens across PRs 2–4, with no existing golden or fixture moved (V6).
+Everything S4a and S5 found and did not do is in `13`, SF-68–SF-103 (the
+plan's own rows, PR 1's, and those of PRs 2–4 and the live smoke). **S4b (the
+hub) is next, then S3.**
 
 ### S6 — `craze web` (directional)
 

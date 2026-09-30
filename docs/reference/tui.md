@@ -227,10 +227,10 @@ off.
 
 | Key | Action |
 |---|---|
-| `Enter` | with the slash menu open on a token that is not already typed out in full, accept the highlighted row; on a draft that starts with `!`, run it in your own shell (see [Shell mode](#shell-mode)); otherwise send the draft, or **queue** it while a turn is running (see [Queued messages](#queued-messages)) |
+| `Enter` | with the [`@` file popup](#file-mentions) open on a candidate, pick it; with the slash menu open on a token that is not already typed out in full, accept the highlighted row; on a draft that starts with `!`, run it in your own shell (see [Shell mode](#shell-mode)); otherwise send the draft, or **queue** it while a turn is running (see [Queued messages](#queued-messages)) |
 | `Ctrl+L` | the strong send: on Grok, add the draft to the running turn without cancelling it; on Cursor, cancel the running turn and send (it asks first). On an idle session it is a plain send |
 | `Alt+Enter`, `Ctrl+J` | newline (see below) |
-| `Esc` | answer the card on top; close a dialog (`/help` included); leave the sub-agent view; kill a running `!` command; clear a `!` draft; hide the slash menu for the token under the cursor — a second `Esc` then cancels the running turn; otherwise cancel the running turn (the transcript says `cancelled`). An Esc pressed immediately after Enter cancels that turn; craze never writes the cancel ahead of the prompt |
+| `Esc` | answer the card on top; close a dialog (`/help` included); leave the sub-agent view; kill a running `!` command; clear a `!` draft; hide the slash menu or the [`@` file popup](#file-mentions) for the token under the cursor — a second `Esc` then cancels the running turn; otherwise cancel the running turn (the transcript says `cancelled`). An Esc pressed immediately after Enter cancels that turn; craze never writes the cancel ahead of the prompt |
 | `Ctrl+C` | kill a running `!` command, and nothing else — it is the only way to stop one while a card has the keyboard. With none running: cancel the running turn **and everything queued behind it** — the queue, a confirm on screen, a send-now waiting to fire; a second press within one second quits; quits outright when idle or after an error. Inside the sub-agent view it still cancels the **main** turn, and the view stays open |
 | `Ctrl+D` | quit, always |
 | `Shift+Tab` | cycle the ACP mode (agent / plan / ask); inside the sub-agent view, switch to the previous sub-agent instead |
@@ -238,7 +238,7 @@ off.
 | `Ctrl+G`, `/theme` | theme picker |
 | `Ctrl+O` | expand / collapse transcript detail (diff hunks, command output, thoughts) — works inside the sub-agent view too |
 | `Ctrl+Y` | copy the mouse selection, or the last reply when there is none (works with `--no-mouse`); inside the sub-agent view, copy from it |
-| `↑` `↓` | move the keyboard out of the composer (draft or not) and then between rows: the selected row carries a `❯` gutter mark and the composer loses its cursor. `↑` reaches the queue band first and the sub-agent rows when nothing is queued; `↓` reaches the sub-agent rows first and the queue band when there are none. `↑` past the first row, `Esc`, or typing anything returns to the composer; inside the sub-agent view, scroll it; with the slash menu open, move its highlighted row instead, wrapping at either end; in a dialog, move its selection (in `/help`, scroll the box) |
+| `↑` `↓` | move the keyboard out of the composer (draft or not) and then between rows: the selected row carries a `❯` gutter mark and the composer loses its cursor. `↑` reaches the queue band first and the sub-agent rows when nothing is queued; `↓` reaches the sub-agent rows first and the queue band when there are none. `↑` past the first row, `Esc`, or typing anything returns to the composer; inside the sub-agent view, scroll it; with the slash menu or the [`@` file popup](#file-mentions) open, move its highlighted row instead, wrapping at either end; in a dialog, move its selection (in `/help`, scroll the box) |
 | `Enter` while the sub-agent rows have the keyboard | open it in the main area, read-only (see [Sub-agent view](#sub-agent-view)) |
 | `Backspace` / `Delete` on a focused **running** sub-agent row, or inside a running sub-agent's view | stop that one sub-agent (native only); on any other row or provider the key falls through as if unhandled |
 | `Enter` while the queue band has the keyboard | edit that message in place — its text loads into the composer, `Enter` saves, `Esc` restores the draft |
@@ -249,7 +249,7 @@ off.
 | `Tab` inside the sub-agent view | switch to the next sub-agent |
 | `PgUp` / `PgDn` | scroll the transcript, or page the `/help` box; page the slash menu instead when it is open — the menu takes priority over both |
 | wheel | scroll the transcript three lines a notch; over an open slash menu, move its selection one row a notch instead — it selects, it does not page (see [Mouse](#mouse)) |
-| `Tab` | with the slash menu open, accept the highlighted row (see [Slash commands](#slash-commands)); elsewhere a no-op |
+| `Tab` | with the slash menu open, accept the highlighted row (see [Slash commands](#slash-commands)); with the [`@` file popup](#file-mentions) open, open the highlighted folder or pick the highlighted file; elsewhere a no-op |
 
 `/help` lists the same keys plus every slash command — see
 [Help dialog](#help-dialog). `/exit` quits; there are no bare `q` or `?`
@@ -346,6 +346,108 @@ ending from the fallback's.
 !!! note
     `Ctrl+G` is BEL. Some terminals flash or beep when it is pressed. `/theme`
     opens the same picker without the BEL.
+
+## File mentions
+
+`@` at the start of a word in the composer — the start of the draft, or after
+a space or a newline — opens a popup of the session's workspace, its files and
+folders, in the band above the composer where the slash menu opens:
+
+```text
+───────────────────────────────────────────────────────── files in craze ─
+❯ internal/config/
+  internal/tui/colors.go
+  internal/tui/complete.go
+  internal/tui/composer.go
+  internal/config/config.go
+  internal/tui/composer_at.go
+  internal/tui/complete_test.go
+  internal/tui/composer_test.go
+  ↓ 3 more
+───────────────────────────────────────────────────────────────── craze ─
+❯ explain @co
+```
+
+Typing narrows it. What you type after the `@` matches a path when its
+letters appear in it in order, anywhere, ignoring case; a file or folder whose
+**name starts with it** comes first, then matches at the start of a path
+segment and in unbroken runs, and on a tie the shorter path. A `/` in it
+narrows to that folder: `@internal/tui/` lists what is inside `internal/tui/`,
+and anything typed after the last `/` matches inside it. The popup lists the
+workspace alone — `@/`, `@~/` and `@../` offer nothing. Folders end in `/`.
+
+| Key | Action |
+|---|---|
+| `↑` `↓`, `Ctrl+P` `Ctrl+N` | move the highlight, wrapping at either end |
+| `Tab` | on a folder, open it — `@internal/` is written with no space after it, and the popup stays open on what is inside; on a file, pick it. It never sends |
+| `Enter` | pick the highlighted entry. With nothing to pick — nothing matches, or the list is still loading — `Enter` is the composer's and sends the draft as typed |
+| `Esc` | hide the popup for this word; the draft is left alone, and a second `Esc` cancels a running turn. Moving the cursor, within the word or away and back, keeps it hidden; typing into the word, or starting another, brings it back. Editing a [queued message](#queued-messages), `Esc` still cancels the edit |
+
+While it is open the popup takes those keys from the composer — `↑`/`↓` do
+not move the keyboard to the queue or the sub-agent rows, and `Ctrl+P`/`Ctrl+N`
+do not move between the draft's lines. Everything else is the composer's:
+`Alt+Enter` starts a new line (which ends the word, and closes the popup),
+`Ctrl+L` is the strong send, `PgUp`/`PgDn` scroll the transcript. It has no
+mouse: a click on it does nothing. Only the `@` word the cursor is in is
+completed; a draft can mention any number of files. An `@` inside a word
+(`user@example.com`) opens nothing, and neither does a draft in [shell
+mode](#shell-mode), a card, a dialog or the sub-agent view. It works the same
+however the session runs — a detached host, `CRAZE_DETACH=0`, `craze attach`
+— and the list is always read on this machine, in the session's workspace.
+`/help` does not list it.
+
+### What is inserted
+
+A pick replaces the word with `@`, the path relative to the workspace, and
+one space: `@internal/tui/app.go `. A path with a space in it is quoted, with
+`\"` and `\\` escaped inside the quotes — `@"docs/guide/getting started.md" `
+— and a folder ends in `/`: `@internal/tui/ `. That text is exactly what the
+agent receives: craze expands nothing and attaches nothing — the file's
+contents are not sent with the message. In the popup's row, a path's Unicode
+default-ignorable and format characters — a right-to-left override, a
+zero-width space, a variation selector, a Hangul filler: characters a terminal
+draws as nothing, as a blank, or by reordering what follows — are shown as
+their code points (`<U+202E>`), and a run of spaces as one; the rest of the
+name, an accent included, is drawn as it is. The pick writes the name exactly
+as it is.
+
+What happens next is the provider's. **grok** reads the `@path` in the message
+itself and attaches the whole file to what it sends its model — the message
+unchanged, the file's contents beside it — so no tool row appears. **cursor**
+and **native** receive only the text and read the file with their read tool:
+a `✓ read  README.md` row before the reply (native sometimes searches for the
+file first).
+
+### Where the list comes from
+
+The first `@` of a popup lists the workspace once, in the background, and
+every keystroke after it matches against that list while the popup stays
+open:
+
+1. `rg --files --hidden -g '!.git'` when `rg` is on your `PATH` — the files
+   ripgrep would search: `.gitignore`, `.ignore` and git's excludes honoured,
+   dotfiles shown, `.git` never, and your `RIPGREP_CONFIG_PATH` not read
+   (`--no-config`);
+2. otherwise, in a git work tree, `git ls-files -co --exclude-standard` —
+   tracked files, and untracked ones git would not ignore;
+3. otherwise a walk of the folder, which skips `.git` and `node_modules` and
+   neither follows nor lists a symbolic link.
+
+Folders are derived from the files' paths, so an **empty folder is never
+listed** — nor, under `rg` or `git`, a folder whose every file is ignored. A
+path with a control character or invalid UTF-8 in it is left out: it could
+not be written into a mention.
+
+| Bound | Value | When it is reached |
+|---|---|---|
+| Paths read from `rg` or `git` | 50,000 | the rest are not listed, and the title says `only the first 50,000 files` |
+| Entries the walk reads | 20,000 | the title says `only the first 20,000 entries` |
+| Time | 3 s for the whole listing | what was read is offered, the title saying `listing stopped after 3s`; with nothing read, the popup says `listing files took over 3s` |
+| Matches handed to the popup | the best 100 | the rest are counted in `↓ N more`: type more to narrow |
+
+The popup says `searching…` while the list is read, `nothing matches` when
+nothing does, `no files here` in an empty workspace, and `could not list
+files: <why>` when the listing failed.
 
 ## Shell mode
 
@@ -774,6 +876,11 @@ Typed in full, `/provider grok`, `/model gpt-6-sol` and `/model default` (the
 provider's own — a catalog model whose id is `default` is picked from the
 popup) do the same without the popup; a provider the picker does not offer is
 refused on the hint line.
+
+A session started from the list is saved as the last provider started, as any
+launch is (see [Configuration](configuration.md)), so the next `craze` without
+`--provider` preselects its provider in the provider dialog. The list's own
+choice still lasts only until craze quits.
 
 ## Modes
 

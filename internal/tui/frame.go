@@ -43,9 +43,15 @@ type WaitTimeoutError struct {
 	Wait      string
 	Timeout   time.Duration
 	LastFrame string
+	// stalled says the wait ended on a stall (FrameOpts.stall): the model had
+	// folded nothing for Timeout. `craze frame` never sets a stall.
+	stalled bool
 }
 
 func (e *WaitTimeoutError) Error() string {
+	if e.stalled {
+		return fmt.Sprintf("frame script: stalled waiting for %s: no event folded for %s", e.Wait, e.Timeout)
+	}
 	return fmt.Sprintf("frame script: timed out after %s waiting for %s", e.Timeout, e.Wait)
 }
 
@@ -98,6 +104,17 @@ type FrameOpts struct {
 	// (runFrameModes), which accounts for the frame its runs agree on itself;
 	// frameProducedHook is told so. Unexported: only those tests set it.
 	matrix bool
+	// stall, when a test sets it, bounds each wait on the model — <start>,
+	// each wait token and barrier, the settle and the capture — by progress
+	// rather than by wall time: a wait fails once no frame has folded a new
+	// event for stall, and Timeout is only its overall cap. It is for a
+	// script whose waits sit on the session's stream — a replay as long as
+	// load-long's — where one fixed Timeout is either too short for a slow
+	// machine or too long to report a deadlock in: a deadlock folds nothing,
+	// and a slow run goes on folding. Progress is the fold's seq and not the
+	// frame's text, which a spinner or an elapsed counter moves on its own.
+	// Unexported: only internal/tui's tests set it.
+	stall time.Duration
 	// beforeBarrier, when a test sets it, runs in the runner after each
 	// token's sync message is sent and before its barrier is awaited, with the
 	// token and its number and the bus's newest frame; an error it returns
@@ -522,6 +539,12 @@ type frameBus struct {
 	// captured is the first final frame published, if any (have it).
 	captured     frameState
 	haveCaptured bool
+	// stall is the run's FrameOpts.stall, set before the program starts and
+	// never after: when positive, a wait also ends once stall has passed since
+	// moved, the last time a published frame had folded a different event
+	// from the frame before it (or the run's start).
+	stall time.Duration
+	moved time.Time
 }
 
 func newFrameBus(print io.Writer) *frameBus {
@@ -572,6 +595,9 @@ func (b *frameBus) publish(s frameState) {
 	b.mu.Lock()
 	b.n++
 	n := b.n
+	if s.folded != b.latest.folded {
+		b.moved = time.Now()
+	}
 	b.latest = s
 	b.have = true
 	if s.final && !b.haveCaptured {
@@ -612,6 +638,32 @@ func (b *frameBus) capture() frameState {
 	return b.latest
 }
 
+// left is how long a wait ending at deadline may still block: until deadline
+// or, when the run bounds its waits by progress (stall), until stall has
+// passed since a frame last folded a new event, whichever is sooner.
+func (b *frameBus) left(deadline time.Time) time.Duration {
+	wait := time.Until(deadline)
+	if b.stall > 0 {
+		b.mu.Lock()
+		moved := b.moved
+		b.mu.Unlock()
+		wait = min(wait, time.Until(moved.Add(b.stall)))
+	}
+	return wait
+}
+
+// stalled says the run bounds its waits by progress and no frame has folded a
+// new event for stall: what a wait that ended unmatched ended on, if not its
+// deadline.
+func (b *frameBus) stalled() bool {
+	if b.stall <= 0 {
+		return false
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return time.Since(b.moved) >= b.stall
+}
+
 // awaitLatest is await on the newest frame alone: it returns once the newest
 // published frame satisfies pred, never an older queued one (C17c, astra
 // C17b 3), or false at the deadline or once stop is closed.
@@ -624,7 +676,7 @@ func (b *frameBus) awaitLatest(pred func(frameState) bool, timeout time.Duration
 		if have && pred(last) {
 			return last, true
 		}
-		wait := time.Until(deadline)
+		wait := b.left(deadline)
 		if wait <= 0 {
 			return last, false
 		}
@@ -639,7 +691,11 @@ func (b *frameBus) awaitLatest(pred func(frameState) bool, timeout time.Duration
 			b.mu.Unlock()
 			return last, have && pred(last)
 		case <-timer.C:
-			return last, false
+			if b.stall <= 0 {
+				return last, false
+			}
+			// A fold since the timer was set moved the stall's end: left
+			// decides.
 		}
 	}
 }
@@ -679,7 +735,7 @@ func (b *frameBus) await(pred func(frameState) bool, timeout time.Duration, stop
 		if stopped {
 			return last, false
 		}
-		wait := time.Until(deadline)
+		wait := b.left(deadline)
 		if wait <= 0 {
 			return last, false
 		}
@@ -691,7 +747,10 @@ func (b *frameBus) await(pred func(frameState) bool, timeout time.Duration, stop
 			timer.Stop()
 			stopped = true
 		case <-timer.C:
-			return last, false
+			if b.stall <= 0 {
+				return last, false
+			}
+			// As in awaitLatest: left decides.
 		}
 	}
 }
@@ -910,6 +969,7 @@ func RunFrameScript(cfg Config, cols, rows int, script string, opts FrameOpts) (
 		}
 	}
 	bus := newFrameBus(print)
+	bus.stall, bus.moved = opts.stall, time.Now()
 
 	m := New(cfg)
 	// The backend the run starts over: a socket run's session to its host,
@@ -1104,6 +1164,16 @@ func (r *frameRunner) await(pred func(frameState) bool, what string) error {
 	if _, ok := r.bus.await(pred, r.timeout, r.finished); ok {
 		return nil
 	}
+	return r.timedOut(what)
+}
+
+// timedOut is the error of a wait on the model that did not match: a stall's
+// when the run bounds its waits by progress and nothing had folded for its
+// stall (FrameOpts.stall), the timeout's otherwise.
+func (r *frameRunner) timedOut(what string) *WaitTimeoutError {
+	if r.bus.stalled() {
+		return &WaitTimeoutError{Wait: what, Timeout: r.bus.stall, stalled: true}
+	}
 	return &WaitTimeoutError{Wait: what, Timeout: r.timeout}
 }
 
@@ -1128,7 +1198,7 @@ func (r *frameRunner) settle(head uint64) error {
 	if _, ok := r.bus.awaitLatest(pred, r.timeout, r.finished); ok || r.done() {
 		return nil
 	}
-	return &WaitTimeoutError{Wait: "<settle>", Timeout: r.timeout}
+	return r.timedOut("<settle>")
 }
 
 // streamHead is the seq the session's stream has reached: every event the
@@ -1182,7 +1252,7 @@ func (r *frameRunner) captureThenMatch(host *frameHost) error {
 			// (frameBus.capture), and no fold is left to check.
 			return errors.New("frame: the program ended before its capture: a socket run's fold cannot be checked")
 		}
-		return &WaitTimeoutError{Wait: "<capture>", Timeout: r.timeout}
+		return r.timedOut("<capture>")
 	}
 	deadline := time.Now().Add(r.timeout)
 	for {
@@ -1215,7 +1285,7 @@ func (r *frameRunner) captureThenMatch(host *frameHost) error {
 		case !ok && r.done():
 			return errors.New("frame: the program ended before the host's model could be checked")
 		case !ok:
-			return &WaitTimeoutError{Wait: "<match> (frame sync)", Timeout: r.timeout}
+			return r.timedOut("<match> (frame sync)")
 		case err != nil:
 			return err
 		case same:
@@ -1269,7 +1339,7 @@ func (r *frameRunner) barrier(n int, what string) error {
 	if r.done() {
 		return nil
 	}
-	return &WaitTimeoutError{Wait: what + " (frame sync)", Timeout: r.timeout}
+	return r.timedOut(what + " (frame sync)")
 }
 
 // frameHomeMu serialises the process-wide HOME swap: two overlapping runs would

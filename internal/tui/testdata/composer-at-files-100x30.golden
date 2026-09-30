@@ -1,0 +1,30 @@
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+────────────────────────────────────────────────────────────────────────────────────── files in ws ─
+❯ internal/config/                                                                                  
+  internal/tui/colors.go                                                                            
+  internal/tui/complete.go                                                                          
+  internal/tui/composer.go                                                                          
+  internal/config/config.go                                                                         
+  internal/tui/composer_at.go                                                                       
+  internal/tui/complete_test.go                                                                     
+  internal/tui/composer_test.go                                                                     
+  ↓ 3 more                                                                                          
+──────────────────────────────────────────────────────────────────────────────────────────── craze ─
+❯ explain @co                                                                                       
+────────────────────────────────────────────────────────────────────────────────────────────────────
+ws │ cursor │ Grok (medium) │ 0m                                                                    
+◆ agent · shift+tab · ▸▸ bypass permissions on                                                      
