@@ -539,7 +539,12 @@ On the wire the ceiling is `max_tokens`, except for a wire model id that
 contains `gpt-5` (among a few OpenAI reasoning-model names), which gets
 `max_completion_tokens` instead. The same ceiling sizes
 [compaction](tui.md#compaction): the automatic trigger never passes the window
-less the ceiling. `craze import gx` writes gx's `max_completion_tokens` here
+less the ceiling. On a model with no `max_output_tokens` and a window under
+about 213,000 tokens, the default therefore moves that trigger below 85% of the
+window (to 75% under 128,000 tokens), where before it sat at 85%; a session
+resumed after upgrading that is already past the new trigger compacts before
+its next turn. A smaller `max_output_tokens` moves the trigger back up.
+`craze import gx` writes gx's `max_completion_tokens` here
 when gx has one; to keep a hand-set value across a reimport, set the entry's
 `source = "manual"`.
 
