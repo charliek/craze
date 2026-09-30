@@ -216,6 +216,26 @@ func findCmd(cmd tea.Cmd, part string) tea.Cmd {
 	return nil
 }
 
+// runWork runs every command among cmd and the batches it holds that does
+// work, each within a step (runWatched), and the batches those answer — every
+// one but a timer, which does nothing but hand its message back once its time
+// is up.
+func runWork(t *testing.T, cmd tea.Cmd) {
+	t.Helper()
+	if cmd == nil {
+		return
+	}
+	name := cmdFuncName(cmd)
+	if strings.HasPrefix(name, teaPkg+"Tick") || strings.HasPrefix(name, teaPkg+"Every") {
+		return
+	}
+	if b, ok := runWatched(t, cmd).(tea.BatchMsg); ok {
+		for _, c := range b {
+			runWork(t, c)
+		}
+	}
+}
+
 // mustCmd is findCmd, or the test fails.
 func mustCmd(t *testing.T, cmd tea.Cmd, part string) tea.Cmd {
 	t.Helper()
@@ -369,29 +389,109 @@ func TestADispatchTheSessionRefusesStopsItsHost(t *testing.T) {
 	}
 }
 
+// TestADispatchRefusedAsItsDeadlinePassesStopsItsHost (C15r2, astra r32-c15r
+// 1), a forced schedule: the session refuses the prompt, and the prompt's
+// deadline — held off until the dispatch has taken that answer
+// (dispatchPrompted), and passed there — has passed by the time the answer is
+// read. The refusal is still the session's answer: the outcome is refused,
+// the host stopped and never left running, and the input says why. It used to
+// be unknown — the deadline's expired context read over the answer — and the
+// refused host left running. That awaitPrompt takes an answer there as the
+// deadline passes is TestAwaitPromptTakesAnAnswerThereAtItsDeadline.
+func TestADispatchRefusedAsItsDeadlinePassesStopsItsHost(t *testing.T) {
+	deadline := holdPromptDeadline(t)
+	m, fs, hb, log := dispatchModel(t, 100, 30)
+	hb.submit = func(context.Context, string) (engine.SubmitResult, error) {
+		return engine.SubmitResult{}, fmt.Errorf("the host: %w", engine.ErrClosing)
+	}
+	dispatchHook = func(step dispatchStep) {
+		if step == dispatchPrompted {
+			deadline.pass()
+		}
+	}
+	t.Cleanup(func() { dispatchHook = nil })
+	m = selectKey(t, m, runKey("lumen"))
+	m, _ = typeList(t, m, "go")
+	m, cmd := press(m, enter())
+	msg := dispatched(t, mustCmd(t, cmd, "sessDispatch"))
+	if !errors.Is(deadline.Err(), context.DeadlineExceeded) {
+		t.Fatal("fixture: the prompt's deadline had not passed when the answer was read")
+	}
+	if msg.out != dispatchRefused || !errors.Is(msg.err, engine.ErrClosing) {
+		t.Fatalf("the outcome %v: %v; want the session's refusal", msg.out, msg.err)
+	}
+	if got, want := log.seen(), []string{"spawn", "open", "start", "submit", "close", "stop"}; !slices.Equal(got, want) {
+		t.Fatalf("the dispatch ran %v, want %v", got, want)
+	}
+	if len(fs.leaves) != 0 || !slices.Equal(fs.stops, []roster.Ref{hostRef("new")}) {
+		t.Fatalf("left %v, stopped %v: want the refused host stopped, never left running", fs.leaves, fs.stops)
+	}
+	tm, _ := m.Update(msg)
+	m = tm.(Model)
+	if v, _ := inputOf(m); v != "go" || sessHint(m) != "could not start a session in ~/projects/lumen: "+closingNote {
+		t.Fatalf("refused: input %q, hint %q", v, sessHint(m))
+	}
+}
+
+// TestAwaitPromptTakesAnAnswerThereAtItsDeadline (C15r, astra r30-c15 1;
+// C15r2): an answer there when the prompt's deadline has passed is the
+// answer — a refusal as well as an acceptance — whichever of the two ready
+// cases the wait takes; a deadline passed with none there is no answer, and
+// the deadline's error.
+func TestAwaitPromptTakesAnAnswerThereAtItsDeadline(t *testing.T) {
+	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancel()
+	refusal := fmt.Errorf("the host: %w", engine.ErrClosing)
+	for _, answer := range []error{refusal, nil} {
+		submitted := make(chan error, 1)
+		submitted <- answer
+		if answered, err := awaitPrompt(ctx, submitted); !answered || !errors.Is(err, answer) {
+			t.Fatalf("an answer %v there at the deadline: answered %v, %v", answer, answered, err)
+		}
+	}
+	if answered, err := awaitPrompt(ctx, make(chan error, 1)); answered || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("no answer at the deadline: answered %v, %v", answered, err)
+	}
+}
+
 // TestADispatchWhoseOutcomeIsUnknownKeepsItsHost (§3.13): the prompt sent and
 // no answer — the connection lost after sending (the outcome unknown), or the
 // call's deadline passing — keeps the input, says the session may have
-// started, and leaves the host running for the list to show.
+// started, and leaves the host running for the list to show. The call's own
+// answer says which (C15r2, astra r32-c15r 1): one that says its time ran
+// out, or was cancelled — as remote.Client.Command answers its context's
+// error — is no answer, the prompt's deadline never having passed.
+//
+// The prompt's deadline is held off (holdPromptDeadline) and passes only
+// where a case passes it — with the call under way, for the deadline passing
+// — never on a clock (C15r2): on a short real deadline a starved scheduler
+// could start the prompt's Submit only after the deadline had passed, and the
+// dispatch settled before the call began.
 func TestADispatchWhoseOutcomeIsUnknownKeepsItsHost(t *testing.T) {
 	for _, tc := range []struct {
-		name   string
-		submit func(ctx context.Context, _ string) (engine.SubmitResult, error)
+		name string
+		// submit answers the prompt; d is its deadline.
+		submit func(ctx context.Context, d *heldDeadline) (engine.SubmitResult, error)
 	}{
-		{"the connection lost", func(context.Context, string) (engine.SubmitResult, error) {
+		{"the connection lost", func(context.Context, *heldDeadline) (engine.SubmitResult, error) {
 			return engine.SubmitResult{}, fmt.Errorf("remote: session.prompt: %w", backend.ErrOutcomeUnknown)
 		}},
-		{"no answer in time", func(ctx context.Context, _ string) (engine.SubmitResult, error) {
+		{"no answer in time", func(ctx context.Context, d *heldDeadline) (engine.SubmitResult, error) {
+			d.pass()
 			<-ctx.Done()
 			return engine.SubmitResult{}, ctx.Err()
 		}},
+		{"the call says its time ran out", func(context.Context, *heldDeadline) (engine.SubmitResult, error) {
+			return engine.SubmitResult{}, fmt.Errorf("remote: session.prompt: %w", context.DeadlineExceeded)
+		}},
+		{"the call says it was cancelled", func(context.Context, *heldDeadline) (engine.SubmitResult, error) {
+			return engine.SubmitResult{}, fmt.Errorf("remote: session.prompt: %w", context.Canceled)
+		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			prev := gateDeadline
-			gateDeadline = 50 * time.Millisecond
-			t.Cleanup(func() { gateDeadline = prev })
+			d := holdPromptDeadline(t)
 			m, fs, hb, log := dispatchModel(t, 100, 30)
-			hb.submit = tc.submit
+			hb.submit = func(ctx context.Context, _ string) (engine.SubmitResult, error) { return tc.submit(ctx, d) }
 			m = selectKey(t, m, runKey("lumen"))
 			m, _ = typeList(t, m, "try this")
 			m, cmd := press(m, enter())
@@ -819,6 +919,64 @@ func TestAQuitDuringADispatchsSubmission(t *testing.T) {
 	}
 }
 
+// TestAQuitCutsADispatchsDetachShort (C15r2, astra r32-c15r 2), a forced
+// schedule over a real socket: the session takes the prompt, and the
+// dispatch's own close — a view close — has begun its detach, which the host
+// never answers (the proxy in front of it stops reading as the host is left
+// running, so the detach never reaches it), when craze quits — ctrl+d on the
+// list, or a signal (finishRun without it). The run's exit tail closes the
+// dispatch's connection and returns at once: its close cancels the view
+// close's context first, which ends the detach's wait. It used to wait inside
+// remote.Session's one close — which the view close held — for the detach's
+// whole bound (3 s, past quitStepBound). The dispatch settles accepted, its
+// host left running, every goroutine of it joined.
+func TestAQuitCutsADispatchsDetachShort(t *testing.T) {
+	for _, quit := range []string{"ctrl+d", "a signal"} {
+		t.Run(quit, func(t *testing.T) {
+			m, fs, _, log := dispatchModel(t, 100, 30)
+			h := newAttachHost(t, true)
+			p := newStallProxy(t, h.path)
+			w := &writeWatch{began: make(chan struct{}), detach: make(chan struct{})}
+			conn := &joinedSession{Session: dialWatched(t, p, w), returned: make(chan struct{})}
+			fs.open = func(roster.Ref) (backend.Backend, error) { return conn, nil }
+			dispatchHook = func(step dispatchStep) {
+				if step == dispatchLeaving {
+					p.stall()
+				}
+			}
+			t.Cleanup(func() { dispatchHook = nil })
+			m = selectKey(t, m, runKey("lumen"))
+			m, _ = typeList(t, m, "go")
+			m, cmd := press(m, enter())
+			disp := mustCmd(t, cmd, "sessDispatch")
+			answered := make(chan tea.Msg, 1)
+			go func() { answered <- disp() }()
+			awaitStep(t, w.detach, "the dispatch's detach")
+			if quit == "ctrl+d" {
+				m, _ = press(m, tea.KeyMsg{Type: tea.KeyCtrlD})
+				if !m.quitting {
+					t.Fatal("ctrl+d on the list did not quit")
+				}
+			}
+			within(t, "the run's exit tail (finishRun) with the dispatch's detach held", func() bool {
+				_, _ = finishRun(io.Discard, m, m, nil)
+				return true
+			})
+			var msg sessDispatchedMsg
+			select {
+			case got := <-answered:
+				msg = got.(sessDispatchedMsg)
+			case <-time.After(quitStepBound):
+				t.Fatalf("the dispatch did not settle within %v of the exit's close", quitStepBound)
+			}
+			if msg.out != dispatchAccepted || msg.err != nil {
+				t.Fatalf("the outcome %v: %v; want accepted, the prompt taken before the quit", msg.out, msg.err)
+			}
+			assertDispatchJoined(t, m, fs, log, conn)
+		})
+	}
+}
+
 // TestADispatchLeftBehindIsDropped: the list left while a dispatch runs, its
 // outcome — the host decided by the dispatch itself — changes nothing, and a
 // list opened again does not take it either.
@@ -932,6 +1090,12 @@ func typeComposer(t *testing.T, m Model, text string) Model {
 // the session it came from let go of (a view close), the band naming the new
 // one and its directory, the status row what it will run, the composer
 // empty — and spawns nothing. Its draft is keyed by a temporary id.
+//
+// It is the deterministic proof that the opening spawns nothing (C15r2,
+// astra r32-c15r 3): no Spawn or Open is asked in the enter's handling, nor
+// by any command it handed back, each run to its end (runWork) — the only
+// way the TUI does work off the Update. tests/cli/test_dispatch.py's
+// unstarted-session test corroborates it end to end.
 func TestAnUnstartedSessionOpensInPlaceWithNothingSpawned(t *testing.T) {
 	m, fs, _ := newSessModel(t, 100, 30)
 	m = newList(t, m, fs)
@@ -954,6 +1118,12 @@ func TestAnUnstartedSessionOpensInPlaceWithNothingSpawned(t *testing.T) {
 	}
 	if findCmd(cmd, "retire") == nil {
 		t.Fatal("the session the list came from was not let go of")
+	}
+	// Every command the opening handed back, run to its end: none spawned or
+	// opened anything either.
+	runWork(t, cmd)
+	if len(fs.spawns) != 0 || len(fs.opened()) != 0 {
+		t.Fatalf("the opening's commands spawned %d and opened %d", len(fs.spawns), len(fs.opened()))
 	}
 	view := plainView(m)
 	for _, want := range []string{"new session · " + provider + " · ~/projects/lumen", "← sessions", unstartedHint, "lumen │"} {

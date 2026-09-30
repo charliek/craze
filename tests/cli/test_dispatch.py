@@ -175,10 +175,16 @@ def test_an_at_directory_alone_opens_an_unstarted_session(
         _wait_screen(sa, "the session up in bravo", lambda rows: "· cursor · bravo " in rows[0])
         row = _index_row(home, entry["crazeSessionId"])
         assert Path(row["cwd"]).resolve() == bravo.resolve(), row
-        # And nothing else was spawned for it, then or since -- the bound is
-        # the first prompt's own spawn having come up, not a moment's wait: a
-        # host the opening had spawned would have left a log of its own, and,
-        # running, a second registry entry in bravo.
+        # And nothing else was spawned for it. This is the end-to-end
+        # corroboration, not the proof: nothing here joins a spawn the
+        # opening might have scheduled late, so a delayed one could still
+        # slip past it. The deterministic proof that opening spawns nothing is
+        # the Go test TestAnUnstartedSessionOpensInPlaceWithNothingSpawned
+        # (internal/tui/dispatch_test.go): no Spawn or Open asked in the
+        # enter's handling, nor by any command it handed back, each run to
+        # its end. Here: a host the opening had spawned by the time the first
+        # prompt's came up would have left a log of its own and, running, a
+        # second registry entry in bravo.
         assert len(_host_logs(home)) == 2, _host_logs(home)
         assert [e["hostId"] for e in _hosts_in(home, bravo)] == [entry["hostId"]], _entries(home)
 

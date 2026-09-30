@@ -209,9 +209,10 @@ func (m Model) sessDispatched(msg sessDispatchedMsg) (Model, tea.Cmd) {
 //     decided while the connection still holds the host open, so the host is
 //     at no moment neither held nor left — the moment an Open of it by the
 //     list that could not reach it would stop it (X98, X110).
-//  7. The connection is closed — a view close, or at once when the prompt's
-//     deadline cut it short — and the drain joined, bounded. A refused
-//     prompt's host is stopped after.
+//  7. The connection is closed — a view close, which the program's exit cuts
+//     short (dispatchConn), or at once when the prompt's deadline cut it
+//     short — and the drain joined, bounded. A refused prompt's host is
+//     stopped after.
 func runDispatch(s Sessions, spec SpawnSpec, prompt string, set *backendSet) (dispatchOutcome, error) {
 	ref, err := s.Spawn(spec)
 	if err != nil {
@@ -226,7 +227,7 @@ func runDispatch(s Sessions, spec SpawnSpec, prompt string, set *backendSet) (di
 	}
 	// Recorded for the program's exit as a connection it closes at once
 	// (dispatchConn): nothing it could detach is worth the wait.
-	conn := &dispatchConn{Backend: b}
+	conn := newDispatchConn(b)
 	set.add(conn)
 	ctx, cancel := context.WithCancel(context.Background())
 	drained := make(chan struct{})
@@ -238,11 +239,12 @@ func runDispatch(s Sessions, spec SpawnSpec, prompt string, set *backendSet) (di
 			}
 		}
 	}()
-	// closeIt closes the connection — a view close, the stream detached —
-	// takes it out of the program's set (whose close of it is then a no-op:
-	// Close is idempotent), and joins the drain, bounded.
+	// closeIt closes the connection — a view close, the stream detached,
+	// which the program's exit cuts short (dispatchConn.closeView) — takes it
+	// out of the program's set (whose close of it is then a no-op: Close is
+	// idempotent), and joins the drain, bounded.
 	closeIt := func() {
-		_ = b.Close()
+		_ = conn.closeView()
 		set.close(conn)
 		cancel()
 		joinWithin(drained, dispatchJoinWait)
@@ -286,11 +288,6 @@ func runDispatch(s Sessions, spec SpawnSpec, prompt string, set *backendSet) (di
 		joinWithin(drained, dispatchJoinWait)
 		return dispatchUnknown, err
 	}
-	// No answer: the call's own time ran out, or the client could not learn
-	// the outcome — its connection went after the prompt was sent, or it was
-	// closed under the call (the program's exit) — which it says as
-	// backend.ErrOutcomeUnknown. Anything else is the session's answer.
-	unknown := err != nil && (pctx.Err() != nil || errors.Is(err, backend.ErrOutcomeUnknown))
 	if dispatchHook != nil {
 		dispatchHook(dispatchPrompted)
 	}
@@ -305,7 +302,7 @@ func runDispatch(s Sessions, spec SpawnSpec, prompt string, set *backendSet) (di
 			return dispatchFailed, fmt.Errorf("it was not kept running: %w", lerr)
 		}
 		return dispatchAccepted, nil
-	case unknown:
+	case promptUnknown(err):
 		_ = s.LeaveRunning(ref)
 		closeIt()
 		return dispatchUnknown, err
@@ -313,6 +310,23 @@ func runDispatch(s Sessions, spec SpawnSpec, prompt string, set *backendSet) (di
 	closeIt()
 	_ = s.Stop(ref)
 	return dispatchRefused, err
+}
+
+// promptUnknown says a background dispatch's prompt, answered err, got no
+// answer (runDispatch): the call's time ran out — remote.Client.Command
+// answers its context's own error when that ends (context.DeadlineExceeded,
+// or context.Canceled, which no host's reply carries), and a host that ran
+// the prompt and gave up on its own bound answers the deadline too — or the
+// client could not learn the outcome — its connection went after the prompt
+// was sent, or it was closed under the call (the program's exit) — which it
+// says as backend.ErrOutcomeUnknown. Anything else is the session's answer,
+// and stands whatever the clock says by the time it is read: an answer
+// awaitPrompt takes as the deadline passes is still the session's — a
+// refusal among them, whose host is stopped (plan 030 C15r2, astra r32-c15r
+// 1). So the call's error is read, never the deadline's context.
+func promptUnknown(err error) bool {
+	return errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) ||
+		errors.Is(err, backend.ErrOutcomeUnknown)
 }
 
 // awaitPrompt is the prompt's answer (runDispatch), waited for no longer than
@@ -352,11 +366,46 @@ func joinWithin[T any](done <-chan T, d time.Duration) {
 // nothing (closeNow). The program is exiting — a detach says nothing the
 // connection's end does not (the host counts an attachment out at its EOF,
 // X29) — and a host that has stopped reading would keep the detach waiting
-// behind the prompt's blocked write for the client's whole close bound. The
-// dispatch's own ordinary close is a view close of the backend (closeIt).
-type dispatchConn struct{ backend.Backend }
+// behind the prompt's blocked write for the client's whole close bound.
+//
+// The dispatch's own ordinary close is a view close of the backend
+// (closeView, closeIt), and that exit close cuts it short: a view close
+// already under way when the program exits would otherwise hold the exit's
+// close for its detach's whole bound (3 s) — remote.Session's close runs
+// once, and a second close waits for the first to finish (plan 030 C15r2,
+// astra r32-c15r 2). So the view close is bounded by ctx, made with the
+// connection, and the exit's close cancels ctx before it closes.
+type dispatchConn struct {
+	backend.Backend
+	ctx    context.Context
+	cancel context.CancelFunc
+}
 
-func (c *dispatchConn) Close() error { return closeNow(c.Backend) }
+func newDispatchConn(b backend.Backend) *dispatchConn {
+	ctx, cancel := context.WithCancel(context.Background())
+	return &dispatchConn{Backend: b, ctx: ctx, cancel: cancel}
+}
+
+// Close is the program's exit's close (and closeIt's second, a no-op): a view
+// close under way is cut short, and the connection closed at once.
+func (c *dispatchConn) Close() error {
+	c.cancel()
+	return closeNow(c.Backend)
+}
+
+// closeView is the dispatch's ordinary close: a view close, the stream
+// detached — through CloseWithin(ctx) for a backend that has it, whose detach
+// waits only while ctx allows, so that Close's cancel ends the wait.
+// remote.Session's close never waits in a write of its own (X54 does not
+// reach it): its detach is posted to the connection's writer, every wait for
+// it ends with ctx, and the transport closed after it ends any write still
+// blocked. Any other backend closes as it does: it has no detach to cut short.
+func (c *dispatchConn) closeView() error {
+	if q, ok := c.Backend.(quitCloser); ok {
+		return q.CloseWithin(c.ctx)
+	}
+	return c.Backend.Close()
+}
 
 // closeNow closes b at once: over a socket, the transport closed with no
 // detach (a quitCloser handed a context already done), which ends every write
@@ -377,7 +426,8 @@ type dispatchStep int
 const (
 	// dispatchStarted: Start has answered.
 	dispatchStarted dispatchStep = iota + 1
-	// dispatchPrompted: the prompt's Submit has answered.
+	// dispatchPrompted: the prompt's Submit has answered in its time, and
+	// the answer is about to be read.
 	dispatchPrompted
 	// dispatchLeaving: the prompt taken, its host about to be left running.
 	dispatchLeaving
