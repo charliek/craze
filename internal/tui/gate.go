@@ -342,13 +342,14 @@ func unanswered(ctx context.Context, err error) error {
 // Two kinds of message are another session's, and each is dropped here before
 // the gate does anything with it (plan 030 §3.11; round-1 panel finding 3,
 // R2-5): a message of a backend the model has left (staleBackend) — a stream
-// item or a start's answer from before a switch — before it can clear the
-// reader's flag, which from the switch on is the new backend's read; and a
-// gated call's reply issued for a session the model has left, before it can
-// release a gate, acknowledge a sync token, owe a drain or arm a read. A
-// switch leaves no gate open (withSession) and gate ids are never reused
-// (gateSeq), so such a reply is never the open gate's own; one that named it
-// anyway would still release nothing.
+// item or a start's answer from before a switch, or a paste or a copy's note
+// asked for then (C11r) — before it can clear the reader's flag, which from
+// the switch on is the new backend's read, or be held and drained into the
+// session that replaced it; and a gated call's reply issued for a session the
+// model has left, before it can release a gate, acknowledge a sync token, owe
+// a drain or arm a read. A switch leaves no gate open (withSession) and gate
+// ids are never reused (gateSeq), so such a reply is never the open gate's
+// own; one that named it anyway would still release nothing.
 func (m Model) gated(msg tea.Msg, handle handler) (tea.Model, tea.Cmd) {
 	if m.staleBackend(msg) {
 		return m, nil

@@ -35,9 +35,9 @@ import (
 
 // laneBackend is a session served elsewhere as these tests drive it: a
 // backend whose stream is a lane the test fills item by item (push), whose
-// Start answers at once, and whose Close ends the lane — a view close, the
-// session going on "on its host". A method the tests do not expect panics
-// (the nil embedded interface).
+// Start answers at once — or, with startWith, when the test says — and whose
+// Close ends the lane — a view close, the session going on "on its host". A
+// method the tests do not expect panics (the nil embedded interface).
 type laneBackend struct {
 	backend.Backend
 	info   backend.SessionInfo
@@ -45,6 +45,9 @@ type laneBackend struct {
 	closed chan struct{}
 	once   sync.Once
 	closes atomic.Int32
+	// startWith, when set, is Start's answer, handed over by the test: until
+	// it is, Start waits — a host whose start is still running.
+	startWith chan error
 	// answer is Submit's answer, handed over by the test: until it is, the
 	// call waits, whatever its context says — a call that outlives its gate.
 	answer   chan engine.SubmitResult
@@ -75,12 +78,23 @@ func laneWorkspace(t *testing.T, name string) string {
 	return ws
 }
 
-func (b *laneBackend) push(it backend.Item)            { b.items <- it }
-func (b *laneBackend) Info() backend.SessionInfo       { return b.info }
-func (b *laneBackend) ClientID() string                { return "client-" + b.info.CrazeSessionID }
-func (b *laneBackend) Epoch() uint64                   { return 1 }
-func (b *laneBackend) Start(ctx context.Context) error { return nil }
-func (b *laneBackend) Started(error)                   {}
+func (b *laneBackend) push(it backend.Item)      { b.items <- it }
+func (b *laneBackend) Info() backend.SessionInfo { return b.info }
+func (b *laneBackend) ClientID() string          { return "client-" + b.info.CrazeSessionID }
+func (b *laneBackend) Epoch() uint64             { return 1 }
+func (b *laneBackend) Started(error)             {}
+
+func (b *laneBackend) Start(ctx context.Context) error {
+	if b.startWith == nil {
+		return nil
+	}
+	select {
+	case err := <-b.startWith:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
 
 func (b *laneBackend) Close() error {
 	b.once.Do(func() { close(b.closed) })
@@ -138,10 +152,12 @@ type armedRead struct {
 // per Update, with every command the model hands back sorted by what it is
 // and none run until the test says: the stream reads (under the generation
 // each was armed under), the gated calls, the starts, the dials, the retired
-// backends' closes, the reads after a restore, the waits for a lingering call
-// and the drains. So each schedule is exactly the one written down. The rig
-// fails the test the moment two reads are armed under the model's current
-// backend generation: exactly one ever may be (§3.12), a switch or not.
+// backends' closes, the reads after a restore, the waits for a lingering call,
+// the drains, and the terminal's own work — the composer's shell's runs, the
+// pastes and the copies (C11r). So each schedule is exactly the one written
+// down. The rig fails the test the moment two reads are armed under the
+// model's current backend generation: exactly one ever may be (§3.12), a
+// switch or not.
 type switchRig struct {
 	t         *testing.T
 	m         Model
@@ -152,6 +168,9 @@ type switchRig struct {
 	retires   []tea.Cmd
 	lastTurns []tea.Cmd
 	lingers   []tea.Cmd
+	shells    []tea.Cmd
+	pastes    []tea.Cmd
+	copies    []tea.Cmd
 	drains    int
 	// last is the command the latest Update answered, whole.
 	last tea.Cmd
@@ -213,19 +232,59 @@ func (r *switchRig) sort(cmd tea.Cmd) {
 		r.opens = append(r.opens, cmd)
 	case strings.Contains(name, "Model.retire"):
 		r.retires = append(r.retires, cmd)
+	case strings.Contains(name, "shellController).start"):
+		r.shells = append(r.shells, cmd)
+	case strings.Contains(name, "pasteFromClipboard"):
+		r.pastes = append(r.pastes, cmd)
+	case strings.Contains(name, "sendCopy"):
+		r.copies = append(r.copies, cmd)
 	}
 	// Anything else — a timer, a roster's read or close — is never run.
 }
 
+// drainAll applies the owed drains, one Update each, until none is owed.
+func (r *switchRig) drainAll() {
+	r.t.Helper()
+	for r.drains > 0 {
+		r.drains--
+		r.send(drainMsg{})
+	}
+}
+
+// later runs cmd on a goroutine of its own now — a command the program has
+// started and that has not answered — and answers a wait for its message,
+// bounded, for when the test delivers it.
+func later(t *testing.T, cmd tea.Cmd) func() tea.Msg {
+	t.Helper()
+	out := make(chan tea.Msg, 1)
+	go func() { out <- cmd() }()
+	return func() tea.Msg {
+		t.Helper()
+		select {
+		case msg := <-out:
+			return msg
+		case <-time.After(pumpWatchdog):
+			t.Fatalf("a command did not answer in %s", pumpWatchdog)
+			return nil
+		}
+	}
+}
+
 // pop takes the oldest command of cmds and runs it, bounded.
 func (r *switchRig) pop(cmds *[]tea.Cmd, what string) tea.Msg {
+	r.t.Helper()
+	return runWatched(r.t, r.take(cmds, what))
+}
+
+// take takes the oldest command of cmds, unrun.
+func (r *switchRig) take(cmds *[]tea.Cmd, what string) tea.Cmd {
 	r.t.Helper()
 	if len(*cmds) == 0 {
 		r.t.Fatalf("no %s is waiting", what)
 	}
 	cmd := (*cmds)[0]
 	*cmds = (*cmds)[1:]
-	return runWatched(r.t, cmd)
+	return cmd
 }
 
 // readOf runs the read armed under backend generation bgen, bounded, and
@@ -379,21 +438,6 @@ func (r *switchRig) unapplied(what string, msg tea.Msg) {
 // nothing. And back on A — a new backend for the same session — the first
 // restore is a first restore, and B's own late item is dropped as A's was.
 func TestASwitchDropsTheStreamItLeft(t *testing.T) {
-	item := map[string]func(t *testing.T, b *laneBackend) backend.Item{
-		"an event": func(t *testing.T, b *laneBackend) backend.Item {
-			return backend.Item{Kind: backend.ItemEvent, Gen: 1,
-				Event: seqd(1, agent.Event{Type: agent.EventText, Text: "late words from " + b.info.CrazeSessionID})[0]}
-		},
-		"a restore": func(t *testing.T, b *laneBackend) backend.Item {
-			return b.restoreItem(t, 2, seqd(1, agent.Event{Type: agent.EventText, Text: "a late snapshot"})...)
-		},
-		"a ready": func(t *testing.T, b *laneBackend) backend.Item {
-			return backend.Item{Kind: backend.ItemReady, Info: b.info, Err: errors.New("a late start failure")}
-		},
-		"the end": func(t *testing.T, b *laneBackend) backend.Item {
-			return backend.Item{Kind: backend.ItemEnd}
-		},
-	}
 	for _, kind := range []string{"an event", "a restore", "a ready", "the end"} {
 		t.Run(kind, func(t *testing.T) {
 			a, b, a2 := newLane(t, "a", "alpha"), newLane(t, "b", "bravo"), newLane(t, "a", "alpha")
@@ -410,7 +454,7 @@ func TestASwitchDropsTheStreamItLeft(t *testing.T) {
 			gB := r.m.bgen
 
 			// A's item, taken by the read armed before the switch.
-			a.push(item[kind](t, a))
+			a.push(laneItem(t, kind, a))
 			r.dropped(kind+" of A, after A→B", r.readOf(gA))
 
 			// B → A: a new backend for the same session, whose first restore
@@ -422,7 +466,7 @@ func TestASwitchDropsTheStreamItLeft(t *testing.T) {
 				t.Fatalf("back on A the first restore was not a first restore: notes %q", texts(r.m, entryNote))
 			}
 			// B's item, taken by the read armed before the switch back.
-			b.push(item[kind](t, b))
+			b.push(laneItem(t, kind, b))
 			r.dropped(kind+" of B, after B→A", r.readOf(gB))
 
 			// Each backend left behind is closed off the Update; its lane
@@ -449,23 +493,22 @@ func TestASwitchDropsTheStreamItLeft(t *testing.T) {
 // TestASwitchDropsTheOldStartsAnswer: the start's answer of the backend a
 // switch left — its success or its failure, answering after the switch —
 // carries the backend generation it was dispatched under, and is dropped: it
-// neither brings up the session that replaced it nor fails it.
+// neither brings up the session that replaced it nor fails it. The answer is
+// the real start command's (startCmd), over a Start its host has not answered
+// when the user switches (astra r22-c11 3): a start command that forgot its
+// stamp is caught here, not written into a hand-built message.
 func TestASwitchDropsTheOldStartsAnswer(t *testing.T) {
 	for _, failed := range []bool{false, true} {
 		a, b := newLane(t, "a", "alpha"), newLane(t, "b", "bravo")
-		isolateSkillsHome(t)
-		m := New(Config{Backend: a, Theme: "tokyo-night", Workspace: a.info.Workspace, Yolo: true,
-			Sessions: laneSessions(map[string][]*laneBackend{"b": {b}})})
-		tm, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
-		r := newSwitchRig(t, asyncGate(t, tm.(Model)))
-		// A's start is in flight, unanswered, when the user switches.
-		var answer tea.Msg = startedMsg{issued: r.m.issue(), eng: a, bgen: r.m.bgen}
-		if failed {
-			answer = errMsg{issued: r.m.issue(), err: errors.New("a failed to start"), eng: a, bgen: r.m.bgen}
-		}
+		a.startWith = make(chan error, 1)
+		r := startingLaneModel(t, a, map[string][]*laneBackend{"b": {b}})
+		// A's start is in flight, its host not yet answering, when the user
+		// switches.
+		answer := later(t, r.take(&r.starts, "A's start"))
 		r.stream(a, a.restoreItem(t, 1))
 		r.switchTo(b, laneRow(b, "session b", time.Minute))
-		r.dropped("A's start answer", answer)
+		msg := startAnswer(t, a, answer, failed)
+		r.dropped("A's start answer", msg)
 		if r.m.started || r.m.startErr != nil || r.m.status == statusError {
 			t.Fatalf("A's start answered for B: started %v, startErr %v, status %s", r.m.started, r.m.startErr, r.m.status)
 		}
@@ -474,6 +517,45 @@ func TestASwitchDropsTheOldStartsAnswer(t *testing.T) {
 			t.Fatalf("B came up %s (%v)", r.m.status, r.m.startErr)
 		}
 	}
+}
+
+// startingLaneModel is laneModel with a's start left in flight: sized, its
+// gated calls asynchronous, its start command waiting in the rig (r.starts),
+// nothing of its stream read.
+func startingLaneModel(t *testing.T, a *laneBackend, lanes map[string][]*laneBackend) *switchRig {
+	t.Helper()
+	isolateSkillsHome(t)
+	m := New(Config{Backend: a, Theme: "tokyo-night", Workspace: a.info.Workspace, Yolo: true, Sessions: laneSessions(lanes)})
+	tm, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	r := newSwitchRig(t, asyncGate(t, tm.(Model)))
+	r.starts = append(r.starts, r.m.startCmd())
+	return r
+}
+
+// startAnswer has lane a's host answer the start it was holding — a failure,
+// or a success — and answers the message the start command then produced,
+// undelivered.
+func startAnswer(t *testing.T, a *laneBackend, answer func() tea.Msg, failed bool) tea.Msg {
+	t.Helper()
+	if failed {
+		a.startWith <- errors.New("a failed to start")
+	} else {
+		a.startWith <- nil
+	}
+	msg := answer()
+	switch msg.(type) {
+	case errMsg:
+		if !failed {
+			t.Fatalf("fixture: A's start failed: %#v", msg)
+		}
+	case startedMsg:
+		if failed {
+			t.Fatalf("fixture: A's start succeeded: %#v", msg)
+		}
+	default:
+		t.Fatalf("fixture: A's start answered %#v", msg)
+	}
+	return msg
 }
 
 // TestASwitchFromTheHeldQueueTakesTheOldStreamOut (§3.11, §3.12): the dial's
@@ -550,39 +632,13 @@ func TestASwitchRejectsTheOldSessionsRepliesFirst(t *testing.T) {
 		answer bool
 	}{{"a late reply", true}, {"a late timeout", false}} {
 		t.Run(tc.name, func(t *testing.T) {
-			prev := gateDeadline
-			t.Cleanup(func() { gateDeadline = prev })
 			a, b := newLane(t, "a", "alpha"), newLane(t, "b", "bravo")
 			r, _ := laneModel(t, a, map[string][]*laneBackend{"b": {b}})
 
 			// A's gated call: a prompt, whose Submit waits for the test — and,
-			// for the timeout, whose gate gives up at once once it is run.
-			if !tc.answer {
-				gateDeadline = time.Millisecond
-			}
-			typeRunes(r, "to a")
-			r.send(enter())
-			gateDeadline = prev
-			gA := r.m.gate
-			if gA == nil || len(r.calls) != 1 {
-				t.Fatalf("fixture: A's prompt opened no gate (%d calls)", len(r.calls))
-			}
-			callA := r.calls[0]
-			r.calls = nil
-			// A burst holds the queue to its bound: the gate is released with
-			// no answer, A's call still out, and the switch can be made.
-			r.send(hiddenRefusedMsg{issued: issued{sessGen: r.m.sessGen + 1000}, h: hiddenAnswer{id: strings.Repeat("x", heldMaxBytes)}})
-			if r.m.gate != nil || r.m.copyNote != noAnswerSubmitNote {
-				t.Fatalf("fixture: the bound left gate %v, note %q", r.m.gate, r.m.copyNote)
-			}
-			for r.drains > 0 {
-				r.drains--
-				r.send(drainMsg{})
-			}
-			// The draft an unanswered prompt keeps is taken away: ← opens the
-			// list on an empty composer.
-			r.m.input.SetValue("")
-			sessA := r.m.sessGen
+			// for the timeout, whose gate gives up at once once it is run —
+			// its gate released without it, so the switch can be made.
+			callA, gA, sessA := r.unansweredPrompt("to a", !tc.answer)
 			r.switchTo(b, laneRow(b, "session b", time.Minute))
 			r.up(b)
 
@@ -590,8 +646,8 @@ func TestASwitchRejectsTheOldSessionsRepliesFirst(t *testing.T) {
 			typeRunes(r, "to b")
 			r.send(enter())
 			gB := r.m.gate
-			if gB == nil || gB.id <= gA.id || len(r.calls) != 1 {
-				t.Fatalf("B's gate %v after A's %d: gate ids must keep counting across a switch", gB, gA.id)
+			if gB == nil || gB.id <= gA || len(r.calls) != 1 {
+				t.Fatalf("B's gate %v after A's %d: gate ids must keep counting across a switch", gB, gA)
 			}
 			r.send(frameSyncMsg{n: 41})
 			if r.m.syncPending != 41 {
@@ -603,7 +659,7 @@ func TestASwitchRejectsTheOldSessionsRepliesFirst(t *testing.T) {
 				a.answer <- engine.SubmitResult{Turn: "turn-9", Text: "to a"}
 			}
 			rep, ok := runWatched(t, callA).(gateReply)
-			if !ok || rep.id != gA.id || rep.issuedUnder() != sessA {
+			if !ok || rep.id != gA || rep.issuedUnder() != sessA {
 				t.Fatalf("fixture: A's call answered %+v", rep)
 			}
 			if tc.answer == (rep.err != nil) || (!tc.answer && rep.linger == nil) {
@@ -643,6 +699,41 @@ func typeRunes(r *switchRig, s string) {
 	for _, c := range s {
 		r.send(runeKey(c))
 	}
+}
+
+// unansweredPrompt sends text as a prompt from the session the rig shows and
+// leaves its gated call out, unrun and unanswered — its Submit waits for the
+// test (laneBackend.answer) — with its gate released by the held queue's
+// bound, so a switch can be made, and the draft an unanswered prompt keeps
+// taken away, so ← opens the list on an empty composer. With timeout the
+// call's gate gives up at once once it is run: its reply is a timeout, the
+// call lingering past it. It answers the call, its gate's id and the session
+// generation it was issued under.
+func (r *switchRig) unansweredPrompt(text string, timeout bool) (call tea.Cmd, gate, sessGen uint64) {
+	r.t.Helper()
+	prev := gateDeadline
+	r.t.Cleanup(func() { gateDeadline = prev })
+	if timeout {
+		gateDeadline = time.Millisecond
+	}
+	typeRunes(r, text)
+	r.send(enter())
+	gateDeadline = prev
+	g := r.m.gate
+	if g == nil || len(r.calls) != 1 {
+		r.t.Fatalf("fixture: the prompt opened no gate (%d calls)", len(r.calls))
+	}
+	call = r.calls[0]
+	r.calls = nil
+	// A burst holds the queue to its bound: the gate is released with no
+	// answer, the call still out.
+	r.send(hiddenRefusedMsg{issued: issued{sessGen: r.m.sessGen + 1000}, h: hiddenAnswer{id: strings.Repeat("x", heldMaxBytes)}})
+	if r.m.gate != nil || r.m.copyNote != noAnswerSubmitNote {
+		r.t.Fatalf("fixture: the bound left gate %v, note %q", r.m.gate, r.m.copyNote)
+	}
+	r.drainAll()
+	r.m.input.SetValue("")
+	return call, g.id, r.m.sessGen
 }
 
 // ------------------------------------------------ the read after a restore
@@ -1084,7 +1175,7 @@ var (
 		"planOfferSeq", "planDeadSeq", "offerGen", "turnID", "ownTurn", "nextTurn", "armedDraft", "disarmed",
 		"turnStart", "lastThought", "ctrlCDeadline", "shellCtx", "remote", "cancelled", "prompted",
 		"sessProvider", "foreignEnded", "foreignNoted", "gate", "reading", "ended", "endErr", "infoPin",
-		"upDone",
+		"upDone", "indexTitle",
 	}
 )
 

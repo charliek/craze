@@ -177,8 +177,13 @@ type sessRow struct {
 	// title, want (what it wants — §3.10's fourth column) and note (an
 	// older host's craze version) are one line each, sanitised.
 	title, want, note string
-	provider          string
-	workspace         string
+	// indexTitle is the session index's title for the row's session (a
+	// running row's roster.Row.IndexTitle, a saved row's own), sanitised:
+	// what the band names the session by once it is opened, while the
+	// session names none of its own (sessTitle).
+	indexTitle string
+	provider   string
+	workspace  string
 	// since is when the row entered its state (a saved row: its last use).
 	since time.Time
 	ref   roster.Ref
@@ -236,14 +241,17 @@ type sessRedrawMsg struct{ gen uint64 }
 // sessOpenedMsg is an open's answer (Sessions.Open): the backend of the
 // session the row names, or why there is none. gen and seq are the opening
 // of the list and the open it was asked for under (sessListState.dialSeq);
-// title is the row's, for the note a failure leaves; saved says the row was a
-// saved session's, whose backend loads it (plan 030 §3.12).
+// title is the row's, for the note a failure leaves, and indexTitle the
+// index's title the row had, which the band names the session by while it
+// names none of its own (sessTitle); saved says the row was a saved
+// session's, whose backend loads it (plan 030 §3.12).
 type sessOpenedMsg struct {
-	gen, seq uint64
-	title    string
-	saved    bool
-	b        backend.Backend
-	err      error
+	gen, seq   uint64
+	title      string
+	indexTitle string
+	saved      bool
+	b          backend.Backend
+	err        error
 }
 
 // ------------------------------------------------------------ open & close
@@ -487,7 +495,7 @@ func (m Model) sessOpened(msg sessOpenedMsg) (Model, tea.Cmd) {
 		m.sessNote(verb+msg.title+": "+why, sessNoteErr)
 		return m, m.retire(msg.b)
 	}
-	return m.switchBackend(msg.b, msg.saved)
+	return m.switchBackend(msg.b, msg.saved, msg.indexTitle)
 }
 
 // sessActionDone is a ctrl+x's answer, on the hint line.
@@ -531,7 +539,8 @@ func (m *Model) sessionEnded() {
 // trackHere follows the session behind the list: its identity from the
 // model while it has not ended (hereKey — the session a host named after
 // the list opened is found), and its row whenever the roster lists that
-// identity, kept for when its host has gone.
+// identity, kept for when its host has gone — and, while it runs, the index's
+// title that row carries (Model.indexTitle).
 func (m *Model) trackHere() {
 	l := &m.sessList
 	if !l.hereEnded {
@@ -545,6 +554,11 @@ func (m *Model) trackHere() {
 	for _, r := range l.snap.Running {
 		if sessRowKey(r) == l.here {
 			l.hereRow = &r
+			if !l.hereEnded {
+				// The index's title as the row reads it, which the band names
+				// the session by while it names none of its own (sessTitle).
+				m.indexTitle = sanitizeLine(r.IndexTitle)
+			}
 			return
 		}
 	}
@@ -564,6 +578,7 @@ func (m Model) hereAsRow() roster.Row {
 		Status: roster.Reachable,
 		Session: &roster.Session{ID: here.id, Incarnation: here.inc,
 			Provider: info.Provider, Workspace: info.Workspace, Title: m.snap.Title, RowFacts: true},
+		IndexTitle: m.indexTitle,
 	}
 }
 
@@ -656,10 +671,10 @@ func (m Model) sessOpen(r sessRow) (tea.Model, tea.Cmd) {
 	l := &m.sessList
 	l.dialSeq++
 	l.dialing, l.dialTitle, l.dialSaved = l.dialSeq, r.title, r.saved
-	s, ref, gen, seq, title, saved := m.sessions, r.ref, l.gen, l.dialSeq, r.title, r.saved
+	s, ref, gen, seq, title, index, saved := m.sessions, r.ref, l.gen, l.dialSeq, r.title, r.indexTitle, r.saved
 	return m, func() tea.Msg {
 		b, err := s.Open(ref)
-		return sessOpenedMsg{gen: gen, seq: seq, title: title, saved: saved, b: b, err: err}
+		return sessOpenedMsg{gen: gen, seq: seq, title: title, indexTitle: index, saved: saved, b: b, err: err}
 	}
 }
 
@@ -819,6 +834,21 @@ func sessRowKey(r roster.Row) sessKey {
 	return sessKey{id: id, inc: inc}
 }
 
+// sessTitle is a running session's title as its list row and its band both
+// name it (plan 030 §3.10–§3.11): its own — the agent's, or a rename — else
+// the session index's (the first prompt's line the index titles it by until
+// either names it), else sessUntitled. One rule, so the band over a session
+// opened from its row reads what the row read (C11r, found by C12).
+func sessTitle(own, index string) string {
+	if t := sanitizeLine(own); t != "" {
+		return t
+	}
+	if t := sanitizeLine(index); t != "" {
+		return t
+	}
+	return sessUntitled
+}
+
 // sessRunningRow is one running session's row (plan 030 §3.10's table).
 // The host's own answer (Session) wins over what its registry entry and
 // the index say; a host with none yet is Connecting (X68), drawn with the
@@ -828,12 +858,13 @@ func sessRowKey(r roster.Row) sessKey {
 func sessRunningRow(r roster.Row, here sessKey) sessRow {
 	h, s := r.Host, r.Session
 	row := sessRow{
-		ref:       r.Ref(),
-		provider:  h.Provider,
-		workspace: h.Workspace,
-		title:     sanitizeLine(r.IndexTitle),
-		key:       sessRowKey(r),
+		ref:        r.Ref(),
+		provider:   h.Provider,
+		workspace:  h.Workspace,
+		indexTitle: sanitizeLine(r.IndexTitle),
+		key:        sessRowKey(r),
 	}
+	own := ""
 	if s != nil {
 		if s.Provider != "" {
 			row.provider = s.Provider
@@ -841,18 +872,14 @@ func sessRunningRow(r roster.Row, here sessKey) sessRow {
 		if s.Workspace != "" {
 			row.workspace = s.Workspace
 		}
-		if t := sanitizeLine(s.Title); t != "" {
-			row.title = t
-		}
+		own = s.Title
 		if !s.RowFacts && r.Version != "" {
 			// An older host (no rowFacts, §3.8): listed with what S2's row
 			// has, and its craze version in the row's note.
 			row.note = "craze " + sanitizeLine(r.Version)
 		}
 	}
-	if row.title == "" {
-		row.title = sessUntitled
-	}
+	row.title = sessTitle(own, row.indexTitle)
 	row.here = !here.zero() && row.key == here
 	switch {
 	case r.Status == roster.Unreachable:
@@ -953,7 +980,8 @@ func sessSavedRow(r sessions.Row) sessRow {
 	}
 	return sessRow{
 		key: sessKey{id: id}, state: sessSaved, saved: true,
-		title: title, provider: r.Provider, workspace: r.CWD, since: r.UpdatedAt,
+		title: title, indexTitle: sanitizeLine(r.Title),
+		provider: r.Provider, workspace: r.CWD, since: r.UpdatedAt,
 		ref: roster.SavedRef(r),
 	}
 }

@@ -37,14 +37,11 @@ func (m Model) bandRows() int {
 }
 
 // bandChip is the session as the band names it: `title · provider · dir` —
-// its title (`new session` until it has one, as its list row says), the
+// its title by its list row's own rule (sessTitle: the session's own title,
+// else the index's as the list last listed it, else `new session`), the
 // provider it runs as the status row names it, and its workspace's name.
 func (m Model) bandChip() string {
-	title := sanitizeLine(m.snap.Title)
-	if title == "" {
-		title = sessUntitled
-	}
-	parts := []string{title}
+	parts := []string{sessTitle(m.snap.Title, m.indexTitle)}
 	if p := sanitizeLine(m.snap.Provider.Label()); p != "" {
 		parts = append(parts, p)
 	}

@@ -75,7 +75,7 @@ func (m Model) runShellDraft() (tea.Model, tea.Cmd) {
 	if script == "" {
 		return m, nil
 	}
-	gen, run := m.shell.start(script, m.shellDir())
+	gen, run := m.shell.start(script, m.shellDir(), m.bgen)
 	m.addShell(gen, script)
 	// The draft goes exactly as it does on a send: accepted, so it is gone.
 	m.input.SetValue("")
@@ -113,6 +113,16 @@ func (m Model) killShell() { m.shell.cancel() }
 // settled — it is in the transcript the user watched it open in — but what it
 // printed is not context for a message to some other agent, in some other
 // workspace (shellController.disown).
+//
+// And a run started under a backend the model has since left (its bgen: a
+// session change, which disowned it too) is drawn only into the row it
+// opened, while the pane it opened it in is still the one shown — a picker's
+// session change keeps the pane (setSession) — and never written again as a
+// row of its own: a switch to another session in place (plan 030 §3.11) made
+// that session's pane, which holds no row of this run's, and the last
+// session's command and output are not the next one's transcript (C11r, astra
+// r22-c11 1). Over a restore the backend is the same, and a result whose row
+// the restore took is written again as ever.
 func (m *Model) finishShell(msg shellDoneMsg) {
 	if m.shell.keepsContext(msg.gen) {
 		m.keepShellResult(msg.cmd, msg.res)
@@ -130,6 +140,10 @@ func (m *Model) finishShell(msg shellDoneMsg) {
 		e.shell.start = msg.res.start
 		e.dirty = true
 		t.dirty = true
+		return
+	}
+	if m.leftBackend(msg.bgen) {
+		// Another session's run, with no row of it here: nothing to settle.
 		return
 	}
 	// The row is gone — /clear took it, or the entry cap trimmed it — and the

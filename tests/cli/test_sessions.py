@@ -485,8 +485,9 @@ def test_enter_opens_a_session_in_place_and_ctrl_d_leaves_them_running(
 ) -> None:
     """AC8-AC9: `enter` on another session's row opens it in this terminal, in
     place -- the band names it (`title · provider · directory`, `← sessions`;
-    the title is the agent's, and the fake agent sets none), the status row
-    names its directory, its transcript is on screen, and a prompt typed here
+    the title is the row's: the agent's, else the index's -- the fake agent
+    sets none, so its first prompt's), the status row names its directory, its
+    transcript is on screen, and a prompt typed here
     reaches it (its own terminal shows the reply too). Back on the list the
     cursor starts on it, the session here. `ctrl+d` on the list quits craze
     and stops nothing: both hosts stay registered and alive, and the other
@@ -507,7 +508,7 @@ def test_enter_opens_a_session_in_place_and_ctrl_d_leaves_them_running(
         _select(a, sa, "bravo's row", lambda r: "bravo one" in r)
         a.write(ENTER)
         rows = _wait_screen(
-            sa, "bravo's session opened here", lambda rows: rows[0].startswith("─ new session · cursor · bravo ")
+            sa, "bravo's session opened here", lambda rows: rows[0].startswith("─ bravo one · cursor · bravo ")
         )
         assert rows[0].endswith("← sessions ─"), sa.dump()
         # Its transcript comes with its first restore, and the status row

@@ -42,7 +42,7 @@ func swapClipboard(t *testing.T) (*bytes.Buffer, *[]string) {
 func TestCopyWritesBareOSC52(t *testing.T) {
 	buf, native := swapClipboard(t)
 	const text = "alpha bravo"
-	msg := copyText(text, "copied")()
+	msg := copyText(0, text, "copied")()
 	if got, want := msg, (clipboardDoneMsg{note: "copied"}); got != want {
 		t.Fatalf("msg %+v, want %+v", got, want)
 	}
@@ -74,7 +74,7 @@ func TestCopySurvivesAFailedWrite(t *testing.T) {
 	})
 	clipboardWrite = systemCopy
 
-	msg := copyText("alpha", "copied \"alpha\"")()
+	msg := copyText(0, "alpha", "copied \"alpha\"")()
 	done, ok := msg.(clipboardDoneMsg)
 	if !ok {
 		t.Fatalf("got %T, want clipboardDoneMsg", msg)
@@ -94,7 +94,7 @@ func TestCopyCapsAtSixtyFourKiB(t *testing.T) {
 	rec := captureCopies(t)
 	// A three-byte rune repeated, so the cap lands mid-rune.
 	text := strings.Repeat("日", clipboardMax)
-	msg := copyText(text, "copied 1 lines")()
+	msg := copyText(0, text, "copied 1 lines")()
 	done := msg.(clipboardDoneMsg)
 	if !strings.HasSuffix(done.note, clipboardTruncated) {
 		t.Fatalf("note %q should end with the truncation marker", done.note)
@@ -114,7 +114,7 @@ func TestCopyCapsAtSixtyFourKiB(t *testing.T) {
 		t.Fatal("the payload was cut inside a rune")
 	}
 	// Under the cap nothing is cut and nothing is said.
-	short := copyText("alpha", "copied")().(clipboardDoneMsg)
+	short := copyText(0, "alpha", "copied")().(clipboardDoneMsg)
 	if short.note != "copied" {
 		t.Fatalf("note %q", short.note)
 	}
@@ -384,7 +384,7 @@ func TestCtrlVPastesThroughTheSeam(t *testing.T) {
 	tm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlV})
 	m = tm.(Model)
 	msg := runCmd(cmd)
-	if got, want := msg, (pasteMsg{text: "pasted text"}); got != want {
+	if got, want := msg, (pasteMsg{text: "pasted text", bgen: m.bgen}); got != want {
 		t.Fatalf("ctrl+v produced %#v, want %#v", got, want)
 	}
 	tm, _ = m.Update(msg)

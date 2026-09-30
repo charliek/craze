@@ -148,26 +148,36 @@ func systemPaste() (string, error) {
 // clipboardDoneMsg carries the note back into Update, where the status row can
 // show it — and, because it is a message, the frame bus sees a state change and
 // `<wait:copied>` has something to match.
-type clipboardDoneMsg struct{ note string }
+//
+// bgen is the backend generation the copy was asked under (Model.bgen): the
+// note is the status row of the session it was copied from — a copy's note is
+// the session's, which a switch clears (withSession) — so one that lands once
+// the model shows another session is dropped by the command gate
+// (staleBackend; plan 030 C11r).
+type clipboardDoneMsg struct {
+	note string
+	bgen uint64
+}
 
 // copyText caps the payload and hands it to the seam, with a note that does not
-// depend on how much of it survived the cap.
-func copyText(text, note string) tea.Cmd {
+// depend on how much of it survived the cap. bgen is the backend generation
+// the note is for (clipboardDoneMsg).
+func copyText(bgen uint64, text, note string) tea.Cmd {
 	sent, cut := capClipboard(text)
-	return sendCopy(sent, cut, note)
+	return sendCopy(bgen, sent, cut, note)
 }
 
 // copyRows is the selection's copy. Its note counts the rows that actually
 // went, not the rows that were selected: 1,000 rows capped at 64 KiB are about
 // 655 rows on the clipboard, and a note saying 1,000 would be a lie.
-func copyRows(text string) tea.Cmd {
+func copyRows(bgen uint64, text string) tea.Cmd {
 	sent, cut := capClipboard(text)
-	return sendCopy(sent, cut, copyNote(sent, lineCount(sent)))
+	return sendCopy(bgen, sent, cut, copyNote(sent, lineCount(sent)))
 }
 
 // sendCopy is the command both copies return. The note is decided here rather
 // than in the goroutine so it describes what was actually sent.
-func sendCopy(sent string, cut bool, note string) tea.Cmd {
+func sendCopy(bgen uint64, sent string, cut bool, note string) tea.Cmd {
 	if cut {
 		note += " " + clipboardTruncated
 	}
@@ -180,7 +190,7 @@ func sendCopy(sent string, cut bool, note string) tea.Cmd {
 		// A clipboard that refused the write is not worth an error line: the
 		// note still says what craze tried to copy.
 		_ = write(sent)
-		return clipboardDoneMsg{note: note}
+		return clipboardDoneMsg{note: note, bgen: bgen}
 	}
 }
 
@@ -202,22 +212,33 @@ func lineCount(s string) int {
 
 // pasteMsg carries the clipboard's text back into Update, where it is inserted
 // as one bracketed paste.
-type pasteMsg struct{ text string }
+//
+// bgen is the backend generation the paste was asked under (Model.bgen): the
+// text is for the composer of the session Ctrl+V was pressed in, and the
+// composer holds another session's draft once a switch has been made (plan
+// 030 §3.11, drafts). A read of the clipboard answering after one — a slow
+// clipboard tool — is dropped by the command gate (staleBackend), wherever it
+// lands, and never enters that draft (plan 030 C11r, astra r22-c11 2).
+type pasteMsg struct {
+	text string
+	bgen uint64
+}
 
 // pasteFromClipboard is Ctrl+V. bubbles' own binding calls clipboard.ReadAll
 // from inside the textarea (textarea.go:1391), which would run xclip under a
 // test or a frame script, so craze binds the key itself and reads through the
-// seam. Like copyText, the seam is read on the Update goroutine.
-func pasteFromClipboard() tea.Cmd {
+// seam. Like copyText, the seam is read on the Update goroutine; bgen is the
+// backend generation the paste is for (pasteMsg).
+func pasteFromClipboard(bgen uint64) tea.Cmd {
 	read := clipboardRead
 	return func() tea.Msg {
 		// A box with no clipboard tool pastes nothing, quietly: an error line
 		// for a keystroke that had nothing to insert is noise.
 		text, err := read()
 		if err != nil {
-			return pasteMsg{}
+			return pasteMsg{bgen: bgen}
 		}
-		return pasteMsg{text: text}
+		return pasteMsg{text: text, bgen: bgen}
 	}
 }
 

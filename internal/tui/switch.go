@@ -38,6 +38,13 @@ import (
 //     gate id is ever issued twice (R2-5).
 //   - A command's reply or a gate's timeout issued for the old session is
 //     rejected by the gate before any of its bookkeeping (gated).
+//   - What this terminal was asked to do for the old session and answers
+//     after the switch carries the backend generation it was asked under
+//     too (C11r, astra r22-c11 1–2): a paste, which would otherwise land in
+//     the next session's composer, and a copy's note are dropped by the gate
+//     as the old stream's items are; the composer's shell's completion
+//     never writes its command and output into the next session's
+//     transcript (finishShell).
 //   - The dial is a tea.Cmd (Sessions.Open, from the list); an answer that
 //     lands after the user has moved on — another session opened, the list
 //     left, craze quitting — is closed and never adopted (sessOpened).
@@ -59,6 +66,10 @@ type sessionSeed struct {
 	// replaying until its replay ends (Config.Loading; a switch to a saved
 	// session, plan 030 §3.12).
 	loading bool
+	// indexTitle is the session index's title for the session, as the list's
+	// row it was opened from had it (Model.indexTitle): a switch's alone —
+	// New's session is named by the list once it lists it (trackHere).
+	indexTitle string
 }
 
 // withSession is the one constructor of a session's state (plan 030 §3.11),
@@ -160,6 +171,7 @@ func (m Model) withSession(seed sessionSeed) Model {
 		cwd:          seed.workspace,
 		model:        seed.model,
 		sessProvider: seed.provider,
+		indexTitle:   seed.indexTitle,
 		// A load is replaying before its first event: see Model.replaying.
 		replaying: seed.loading,
 		queueHov:  noHover(),
@@ -189,8 +201,10 @@ func (m Model) withSession(seed sessionSeed) Model {
 // loading says b loads a saved session (§3.12): the model starts replaying,
 // as the resume picker's choice and Config.Loading start it — `restoring…`
 // until the replay's end, which a restore or the stream's replay event says
-// (a held session already up says so in its first restore).
-func (m Model) switchBackend(b backend.Backend, loading bool) (Model, tea.Cmd) {
+// (a held session already up says so in its first restore). indexTitle is
+// the index's title the list's row had for it, which the band names it by
+// while it names none of its own (sessTitle).
+func (m Model) switchBackend(b backend.Backend, loading bool, indexTitle string) (Model, tea.Cmd) {
 	old := m.eng
 	m.stashDraft()
 	roster := m.sessList.roster
@@ -201,7 +215,7 @@ func (m Model) switchBackend(b backend.Backend, loading bool) (Model, tea.Cmd) {
 		// A backend that names no workspace changes none (followWorkspace).
 		ws = m.cwd
 	}
-	next := m.withSession(sessionSeed{workspace: ws, provider: info.Provider, loading: loading})
+	next := m.withSession(sessionSeed{workspace: ws, provider: info.Provider, loading: loading, indexTitle: indexTitle})
 	next.setBackend(b)
 	next.dropStaleHeld()
 	next.takeDraft()
@@ -223,17 +237,18 @@ func (m Model) switchBackend(b backend.Backend, loading bool) (Model, tea.Cmd) {
 }
 
 // dropStaleHeld takes out of the held queue every item of a stream the model
-// has left, and every start's answer: a switch adopted a backend none of them
-// is about, and each would be dropped where it drained (staleBackend). Keys,
-// ticks, the frame harness's tokens, the list's messages and every other
-// message stay, in order; a result issued for the old session is dropped
-// where it drains (outdated).
+// has left, every start's answer, and every paste and copy's note asked for
+// under the backend it left: a switch adopted a backend none of them is about,
+// and each would be dropped where it drained (staleBackend). Keys, ticks, the
+// frame harness's tokens, the list's messages and every other message stay,
+// in order; a result issued for the old session is dropped where it drains
+// (outdated), and so is a shell's completion (finishShell).
 func (m *Model) dropStaleHeld() {
 	var kept []heldMsg
 	bytes := 0
 	dropped := false
 	for _, h := range m.held {
-		if _, ok := h.msg.(fromBackend); ok && m.staleBackend(h.msg) {
+		if m.staleBackend(h.msg) {
 			dropped = true
 			continue
 		}

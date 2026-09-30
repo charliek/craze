@@ -101,6 +101,11 @@ type shellDoneMsg struct {
 	// it, the entry cap trimmed it — can still be drawn in full.
 	cmd string
 	res shellResult
+	// bgen is the backend generation the command was started under
+	// (Model.bgen): a completion that lands once the model has adopted another
+	// backend is the last session's, and draws nothing into the next one's
+	// transcript (finishShell; plan 030 C11r, astra r22-c11 1).
+	bgen uint64
 }
 
 // shellController owns the command the composer is running. Every copy of the
@@ -136,8 +141,9 @@ func (c *shellController) running() bool {
 
 // start mints a run and returns it with the tea.Cmd that carries it out. The
 // work happens on bubbletea's own command goroutine, so Update never blocks on
-// a command: what comes back is one shellDoneMsg.
-func (c *shellController) start(script, dir string) (int, tea.Cmd) {
+// a command: what comes back is one shellDoneMsg, stamped with bgen, the
+// backend generation of the session the command was run from.
+func (c *shellController) start(script, dir string, bgen uint64) (int, tea.Cmd) {
 	c.mu.Lock()
 	c.gen++
 	gen := c.gen
@@ -149,7 +155,7 @@ func (c *shellController) start(script, dir string) (int, tea.Cmd) {
 		res := runShellCommand(ctx, script, dir)
 		cancel() // the context outlives nothing; releasing it here keeps vet quiet and the timer freed
 		c.finish(gen, done)
-		return shellDoneMsg{gen: gen, cmd: script, res: res}
+		return shellDoneMsg{gen: gen, cmd: script, res: res, bgen: bgen}
 	}
 }
 

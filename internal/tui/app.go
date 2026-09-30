@@ -615,6 +615,14 @@ type Model struct {
 	// way back to the list (band.go, plan 030 §3.11). Until then the band has
 	// no rows, so no frame of a TUI that never opened the list moves.
 	bandOn bool
+	// indexTitle is the session index's title for the session the model
+	// shows, as the session list last listed it (roster.Row.IndexTitle: the
+	// row a switch opened it from, then its own row while the list is up —
+	// trackHere): what the band names the session by while it names none of
+	// its own, as its list row does (sessTitle; plan 030 C11r). The session's
+	// own, made afresh with it (withSession); "" until the list has listed
+	// it, and after that it is as fresh as the list's last listing.
+	indexTitle string
 	// drafts is the composer's text of each session this TUI has left, by
 	// its craze id (draftKey): stashed as a switch leaves a session and put
 	// back when a switch returns to it, so a draft never follows the user to
@@ -971,29 +979,38 @@ type errMsg struct {
 	bgen uint64
 }
 
-// fromBackend is a message a backend's own closure produced — a stream item
-// the reader handed up, or the start's answer — which carries the backend
-// generation it was produced under (Model.bgen).
-type fromBackend interface{ backendGen() uint64 }
+// backendStamped is a message that carries the backend generation it was
+// produced under (Model.bgen), and is nothing to the model once that backend
+// is left: a backend's own — a stream item the reader handed up, the start's
+// answer — and a result of this terminal's own work that is only ever about
+// the session shown when it was asked for — a paste (pasteMsg), whose text is
+// that session's composer's, and a copy's note (clipboardDoneMsg), which that
+// session's status row shows (plan 030 C11r, astra r22-c11 2). The composer's
+// shell's completion carries the generation too, and is judged where it is
+// applied instead (finishShell): its row may still be on screen.
+type backendStamped interface{ backendGen() uint64 }
 
-func (m eventMsg) backendGen() uint64   { return m.bgen }
-func (m restoreMsg) backendGen() uint64 { return m.bgen }
-func (m readyMsg) backendGen() uint64   { return m.bgen }
-func (m endMsg) backendGen() uint64     { return m.bgen }
-func (m startedMsg) backendGen() uint64 { return m.bgen }
-func (m errMsg) backendGen() uint64     { return m.bgen }
+func (m eventMsg) backendGen() uint64         { return m.bgen }
+func (m restoreMsg) backendGen() uint64       { return m.bgen }
+func (m readyMsg) backendGen() uint64         { return m.bgen }
+func (m endMsg) backendGen() uint64           { return m.bgen }
+func (m startedMsg) backendGen() uint64       { return m.bgen }
+func (m errMsg) backendGen() uint64           { return m.bgen }
+func (m pasteMsg) backendGen() uint64         { return m.bgen }
+func (m clipboardDoneMsg) backendGen() uint64 { return m.bgen }
 
 // staleBackend reports that msg is a message of a backend the model has left
-// (plan 030 §3.11): produced under another backend generation. The zero
-// generation is a message a test built by hand, and is never stale.
+// (plan 030 §3.11): produced under another backend generation (leftBackend).
 func (m Model) staleBackend(msg tea.Msg) bool {
-	s, ok := msg.(fromBackend)
-	if !ok {
-		return false
-	}
-	g := s.backendGen()
-	return g != 0 && g != m.bgen
+	s, ok := msg.(backendStamped)
+	return ok && m.leftBackend(s.backendGen())
 }
+
+// leftBackend reports that g is a backend generation the model has left: the
+// model has adopted another backend since. The zero generation is a message a
+// test built by hand, or one asked for before the model held any backend —
+// whose first is then the one it is about — and is never left.
+func (m Model) leftBackend(g uint64) bool { return g != 0 && g != m.bgen }
 
 // actionErrMsg is a failure a command reports as an error row: a chain's
 // settings read or Set that failed. landed is `/model`'s model step when it
@@ -2154,7 +2171,9 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case pasteMsg:
 		// The read is asynchronous, so the composer may no longer be where the
-		// keyboard is by the time the text arrives.
+		// keyboard is by the time the text arrives. One asked for in a session
+		// the model has since left never gets here: the gate dropped it
+		// (staleBackend, pasteMsg).
 		if msg.text == "" || m.composerCovered() {
 			return m, nil
 		}
@@ -2407,7 +2426,7 @@ func (m Model) copySelection() (tea.Model, tea.Cmd) {
 	if text == "" {
 		return m, nil
 	}
-	return m, copyRows(text)
+	return m, copyRows(m.bgen, text)
 }
 
 // copySelectionOrLastReply is Ctrl+Y. Without a selection it copies the last
@@ -2420,7 +2439,7 @@ func (m Model) copySelectionOrLastReply() (tea.Model, tea.Cmd) {
 	rows := m.cur().rows
 	for i := len(rows) - 1; i >= 0; i-- {
 		if e := rows[i]; e.kind == entryAssistant && e.text != "" {
-			return m, copyText(e.text, "copied last reply")
+			return m, copyText(m.bgen, e.text, "copied last reply")
 		}
 	}
 	return m, nil
@@ -2622,7 +2641,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.copySelectionOrLastReply()
 	}
 	if msg.Type == tea.KeyCtrlV {
-		return m, pasteFromClipboard()
+		return m, pasteFromClipboard(m.bgen)
 	}
 	if msg.Type == tea.KeyCtrlO {
 		return m.toggleExpanded()
