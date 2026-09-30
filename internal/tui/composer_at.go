@@ -39,6 +39,11 @@ import (
 //     (complete.go's view): the title rule `files in <workspace>`, up to
 //     eight rows and `↓ N more`. It adds no line to /help (§3.16): the help
 //     goldens stay as they are; docs/reference/tui.md documents it.
+//   - A token is an `@` token or a slash token, never both: while the
+//     cursor is inside an `@` token (composerAtHolds) the slash menu is not
+//     drawn and takes no key — the popup up, hidden by esc, or closed while
+//     the keyboard is elsewhere alike — though a quoted `@"a /b"` has a `/`
+//     that slash.go's tokenizer, left as it is (§3.15), reads as one.
 //
 // The popup is the TUI's, as the composer's textarea is (withSession carries
 // it): it follows the draft, and the Update wrapper syncs it with the draft
@@ -62,25 +67,68 @@ func newComposerAt(src completeSource, loads *completeLoadSet) completePopup {
 	return p
 }
 
-// composerAtOn says the composer may have its `@` popup now: the composer has
-// the keyboard — no list over it, no card, dialog or sub-agent view covering
-// it (composerCovered), no confirm line in its place, no band holding the
-// keyboard — the draft is not a shell command (a `!ls @x` is the shell's to
+// composerAtCompletes says the composer completes `@` tokens at all: it has
+// the popup, the draft is not a shell command (a `!ls @x` is the shell's to
 // read), and there is a workspace to search. A popup with no source is a
 // model a test built by hand, which has none.
+func (m Model) composerAtCompletes() bool {
+	return m.composerAt.src != nil && !m.shellMode() && m.sessHereDir() != ""
+}
+
+// composerAtOn says the composer may have its `@` popup now: it completes
+// `@` tokens (composerAtCompletes), and it has the keyboard — no list over
+// it, no card, dialog or sub-agent view covering it (composerCovered), no
+// confirm line in its place, no band holding the keyboard.
 func (m Model) composerAtOn() bool {
 	switch {
-	case m.composerAt.src == nil:
+	case !m.composerAtCompletes():
 		return false
 	case m.sessList.open, m.composerCovered(), m.confirm != nil:
 		return false
 	case m.agentFocus, m.queueFocus:
 		return false
-	case m.shellMode():
+	}
+	return true
+}
+
+// composerAtHolds says the cursor is inside an `@` token the popup completes
+// (atGrammar's: atTokenUnder), whether the popup is up over it, esc has
+// hidden it, or it is closed while the keyboard is elsewhere (composerAtOn).
+// Such a token is not a slash token, whatever slash.go's tokenizer reads in
+// it: an unfinished `@"a /` — or a whole `@"a /b"` with the cursor after
+// `/b` — has a `/` after a space, and slashToken, which walks back to the
+// nearest whitespace, finds a command token there. slash.go stays as it is
+// (plan 030 §3.15), so the composer is where the menu is refused
+// (slashBandRows, overlayBandRows): a menu nobody sees taking PgUp/PgDn from
+// the transcript, turning an enter the popup has no candidate for into a
+// command, or taking the second esc meant to cancel a turn (sol r37-c18).
+//
+// It asks what the popup would complete, not whether the popup is up: the
+// kind of a token is the draft's, so ↑ into the queue with the cursor in
+// `@"a /` does not bring the slash menu up under it, and the band never
+// flips from one to the other while the draft stands still.
+func (m Model) composerAtHolds() bool {
+	if !m.composerAtCompletes() {
 		return false
 	}
-	return m.sessHereDir() != ""
+	_, ok := atTokenUnder(m.input.Value(), m.composerCursorOffset())
+	return ok
 }
+
+// slashBandRows is the slash menu's rows as the composer has them
+// (slashRows): none while the cursor is inside an `@` token
+// (composerAtHolds), which is the popup's to complete. Every key and gesture
+// the menu takes reads it or slashBandActive, and overlayBandRows draws by the
+// same rule, so the band and the keys cannot disagree.
+func (m Model) slashBandRows() int {
+	if m.composerAtHolds() {
+		return 0
+	}
+	return m.slashRows()
+}
+
+// slashBandActive is slashActive as the composer has it (slashBandRows).
+func (m Model) slashBandActive() bool { return m.slashBandRows() > 0 }
 
 // composerAtShown says the popup is up: open, and the composer is where it
 // may be.
@@ -155,18 +203,26 @@ func (m Model) composerAtLoaded(msg completeLoadedMsg) (Model, tea.Cmd) {
 // up, the slash menu's otherwise. The two never share it — a token is an `@`
 // token or a slash token — and the popup outranks the menu for the one draft
 // that could open both (a quoted `@"a /b"` with the cursor after `/b`), as
-// its keys do.
+// its keys do: while the cursor is inside an `@` token (composerAtHolds) the
+// band is the popup's or empty, esc's hide included, never the menu's.
 func (m Model) overlayBandRows() int {
 	if m.composerAtShown() {
 		return m.composerAt.height(composerAtRows)
 	}
+	if m.composerAtHolds() {
+		return 0
+	}
 	return m.overlayRows()
 }
 
-// overlayBandView draws the band in the rows the layout granted it.
+// overlayBandView draws the band in the rows the layout granted it, by
+// overlayBandRows' rule.
 func (m Model) overlayBandView(lay frameLayout) string {
 	if m.composerAtShown() {
 		return m.composerAt.view(m.theme, m.width, lay.Region(regionOverlay).Height())
+	}
+	if m.composerAtHolds() {
+		return ""
 	}
 	return m.overlayView(lay)
 }

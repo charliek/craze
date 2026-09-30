@@ -523,6 +523,189 @@ func TestComposerAtEscUnderARunningTurnHidesThenCancels(t *testing.T) {
 	}
 }
 
+// atSlashDraft is an unfinished quoted `@` token with a `/` after its space:
+// the popup completes it, and slash.go's tokenizer, walking back from the
+// cursor to the nearest space, reads its `/` as a bare slash token too.
+const atSlashDraft = `@"a /`
+
+// atSlashModel is atModel with an agent advertising commit and review — set
+// before the start, which folds them into the catalog (slashModel's way).
+func atSlashModel(t *testing.T, cols, rows int) Model {
+	t.Helper()
+	isolateSkillsHome(t)
+	stub := NewStub()
+	setStubCommands(stub, "commit", "review")
+	m := startStub(t, stub, frameWorkspace(t), cols, rows)
+	m.frozen = true
+	m.composerAt.setSource(atFileSource{search: atListing(atComposerPaths...)})
+	return m
+}
+
+// atSlashOverlap types atSlashDraft into m, whose agent advertises a command,
+// and delivers the popup's search: the popup up with nothing to offer (no
+// path lies under `a /`), and slash.go's own gate (slashActive) reading a
+// menu under it — the overlap sol r37-c18 found, so a test built on it bites
+// wherever the composer's gate (composerAtHolds) is missing.
+func atSlashOverlap(t *testing.T, m Model) Model {
+	t.Helper()
+	m = atOpen(t, m, atSlashDraft)
+	if !m.composerAtActive() || len(m.composerAt.ans.Items) != 0 {
+		t.Fatalf("fixture: %s should have the popup up with nothing to offer (%q):\n%s", atSlashDraft, atNames(m), plainView(m))
+	}
+	if !m.slashActive() {
+		t.Fatalf("fixture: slash.go should read a menu inside the `@` token:\n%s", plainView(m))
+	}
+	return m
+}
+
+// assertNoSlashBand says the band draws no slash menu and the menu has no
+// key: none of the rows slash.go reads is in the frame, and the composer
+// grants the menu nothing.
+func assertNoSlashBand(t *testing.T, m Model, when string) {
+	t.Helper()
+	frame := plainView(m)
+	items := m.filteredSlash()
+	if len(items) == 0 {
+		t.Fatalf("%s: fixture: slash.go reads no menu to keep out", when)
+	}
+	for _, it := range items {
+		if strings.Contains(frame, it.Desc) {
+			t.Fatalf("%s: the slash menu's %s is drawn inside the `@` token:\n%s", when, it.Name, frame)
+		}
+	}
+	if m.slashBandActive() {
+		t.Fatalf("%s: the slash menu has the keys inside the `@` token", when)
+	}
+}
+
+// TestComposerAtSlashOverlapLeavesPagingToTheTranscript (§3.16, X187; sol
+// r37-c18): inside a quoted `@"a /`, PgUp/PgDn and the wheel over the popup
+// scroll the transcript — the slash menu slash.go reads at the `/` is not
+// drawn and takes none of them.
+func TestComposerAtSlashOverlapLeavesPagingToTheTranscript(t *testing.T) {
+	m := atSlashModel(t, 100, 30)
+	var b strings.Builder
+	for i := range 60 {
+		fmt.Fprintf(&b, "line %02d\n\n", i)
+	}
+	tm, _ := m.Update(eventMsg{ev: agent.Event{Type: agent.EventText, Text: b.String()}})
+	m = atSlashOverlap(t, tm.(Model))
+	assertNoSlashBand(t, m, "the popup up")
+	bottom := m.vp.YOffset
+	if !m.vp.AtBottom() || bottom < 2*wheelLines {
+		t.Fatalf("fixture: the transcript should be at its bottom with scrollback (offset %d)", bottom)
+	}
+
+	m, _ = press(m, keyType(tea.KeyPgUp))
+	if m.vp.YOffset >= bottom || m.slashSel != 0 {
+		t.Fatalf("PgUp: transcript at %d (was %d), slash selection %d", m.vp.YOffset, bottom, m.slashSel)
+	}
+	m, _ = press(m, keyType(tea.KeyPgDown))
+	if m.vp.YOffset != bottom || m.slashSel != 0 {
+		t.Fatalf("PgDn: transcript at %d, want %d; slash selection %d", m.vp.YOffset, bottom, m.slashSel)
+	}
+	y := m.lay.Region(regionOverlay).Top
+	if !m.composerAtShown() || !m.lay.Region(regionOverlay).Contains(y) {
+		t.Fatalf("fixture: the popup should still be drawn in the band:\n%s", plainView(m))
+	}
+	m = mouse(t, m, tea.MouseMsg{Action: tea.MouseActionPress, Button: tea.MouseButtonWheelUp, X: 1, Y: y})
+	if m.vp.YOffset != bottom-wheelLines || m.slashSel != 0 {
+		t.Fatalf("the wheel over the popup: transcript at %d, want %d; slash selection %d", m.vp.YOffset, bottom-wheelLines, m.slashSel)
+	}
+	if v, _ := draftOf(m); v != atSlashDraft {
+		t.Fatalf("the draft moved: %q", v)
+	}
+}
+
+// TestComposerAtSlashOverlapEnterSendsTheDraft (§3.16, X127; sol r37-c18):
+// inside a quoted `@"a /` with no file to offer, enter is the composer's and
+// the draft goes as typed — the slash menu slash.go reads at the `/` does not
+// write a command into it.
+func TestComposerAtSlashOverlapEnterSendsTheDraft(t *testing.T) {
+	m := atSlashOverlap(t, atSlashModel(t, 100, 30))
+	m, _ = press(m, enter())
+	if got := texts(m, entryUser); m.status != statusWorking || !slices.Equal(got, []string{atSlashDraft}) {
+		v, _ := draftOf(m)
+		t.Fatalf("enter with no candidate: status %v, sent %q, draft %q", m.status, got, v)
+	}
+}
+
+// TestComposerAtSlashOverlapEscHidesThenCancels (§3.16, X187; sol r37-c18):
+// inside a quoted `@"a /` under a running turn, the first esc hides the popup
+// and brings no slash menu up in its place, and the second esc cancels the
+// turn.
+func TestComposerAtSlashOverlapEscHidesThenCancels(t *testing.T) {
+	// queueWorking's agent advertises one command (the Stub's research),
+	// which a bare `/` offers.
+	m, _ := queueWorking(t)
+	m.composerAt.setSource(atFileSource{search: atListing(atComposerPaths...)})
+	m = atSlashOverlap(t, m)
+	m, _ = press(m, keyType(tea.KeyEsc))
+	if m.composerAt.visible() || m.cardMask != "" || m.status != statusWorking {
+		t.Fatalf("the first esc: popup up %v, cancel mask %q, status %v", m.composerAt.visible(), m.cardMask, m.status)
+	}
+	assertNoSlashBand(t, m, "the popup hidden")
+	if h := m.lay.Region(regionOverlay).Height(); h != 0 {
+		t.Fatalf("the band kept %d rows with the popup hidden:\n%s", h, plainView(m))
+	}
+	m, _ = press(m, keyType(tea.KeyEsc))
+	if m.cardMask == "" {
+		t.Fatalf("the second esc did not cancel the turn:\n%s", plainView(m))
+	}
+	if v, _ := draftOf(m); v != atSlashDraft {
+		t.Fatalf("the draft moved: %q", v)
+	}
+}
+
+// TestComposerAtSlashOverlapStaysOutWhileTheQueueHasTheKeys (§3.16; sol
+// r37-c18): the kind of a token is the draft's, not the focus's — with the
+// popup hidden in a quoted `@"a /`, ↑ takes the keyboard to the queue (no
+// menu to take it), and the slash menu does not come up under the queue
+// though the popup, the composer no longer having the keyboard, is closed.
+func TestComposerAtSlashOverlapStaysOutWhileTheQueueHasTheKeys(t *testing.T) {
+	m, _ := queueWorking(t)
+	m.composerAt.setSource(atFileSource{search: atListing(atComposerPaths...)})
+	m = typeEnter(t, m, "queued first")
+	if len(queueTexts(m)) != 1 {
+		t.Fatalf("fixture: nothing queued: %q", queueTexts(m))
+	}
+	m = atSlashOverlap(t, m)
+	m, _ = press(m, keyType(tea.KeyEsc))
+	m, _ = press(m, keyType(tea.KeyUp))
+	if !m.queueFocus || m.composerAtOn() {
+		t.Fatalf("↑ with the popup hidden did not reach the queue (focus %v):\n%s", m.queueFocus, plainView(m))
+	}
+	assertNoSlashBand(t, m, "the queue focused")
+	if v, _ := draftOf(m); v != atSlashDraft {
+		t.Fatalf("the draft moved: %q", v)
+	}
+}
+
+// TestComposerAtSlashMenuOutsideAnAtToken (§3.16; sol r37-c18): the slash
+// menu is refused only inside an `@` token — a draft `/co`, and `x @a /co`
+// with the cursor after `/co`, past the `@a` token, still draw it and tab
+// still accepts from it, the composer's popup and all.
+func TestComposerAtSlashMenuOutsideAnAtToken(t *testing.T) {
+	for _, tc := range []struct{ typed, want string }{
+		{"/co", "/commit "},
+		{"x @a /co", "x @a /commit "},
+	} {
+		t.Run(tc.typed, func(t *testing.T) {
+			m, _ := typeAt(t, atSlashModel(t, 100, 30), tc.typed)
+			if m.composerAtShown() {
+				t.Fatalf("fixture: the cursor should be outside any `@` token:\n%s", plainView(m))
+			}
+			if !m.slashBandActive() || m.lay.Region(regionOverlay).Height() == 0 || !strings.Contains(plainView(m), "advertised commit") {
+				t.Fatalf("no slash menu for %q:\n%s", tc.typed, plainView(m))
+			}
+			m, _ = press(m, keyType(tea.KeyTab))
+			if v, cur := draftOf(m); v != tc.want || cur != len(tc.want) {
+				t.Fatalf("tab: draft %q, cursor %d; want %q at its end", v, cur, tc.want)
+			}
+		})
+	}
+}
+
 // TestComposerAtKeysShadowTheComposersOnlyWhileUp (§3.16): while the popup is
 // up ↑/↓ choose in it rather than moving the keyboard to the queue, ctrl+n
 // and ctrl+p rather than moving between the draft's lines; alt+enter is still

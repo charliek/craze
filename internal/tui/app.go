@@ -2489,14 +2489,17 @@ func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	case tea.MouseActionPress:
 		switch msg.Button {
 		case tea.MouseButtonWheelUp:
-			if m.slashActive() && m.lay.Region(regionOverlay).Contains(msg.Y) {
+			// slashBandActive, not slashActive: over the composer's `@`
+			// popup the wheel is the transcript's (plan 030 X187), even
+			// for a quoted `@"a /` whose `/` the menu would read.
+			if m.slashBandActive() && m.lay.Region(regionOverlay).Contains(msg.Y) {
 				return m.slashWheel(-1), nil
 			}
 			// The selection is in transcript rows, not screen rows, so it
 			// scrolls with the text it holds and survives the wheel.
 			m.vp.ScrollUp(wheelLines)
 		case tea.MouseButtonWheelDown:
-			if m.slashActive() && m.lay.Region(regionOverlay).Contains(msg.Y) {
+			if m.slashBandActive() && m.lay.Region(regionOverlay).Contains(msg.Y) {
 				return m.slashWheel(1), nil
 			}
 			m.vp.ScrollDown(wheelLines)
@@ -2920,11 +2923,13 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// The composer's `@` popup takes Esc where the slash menu does, and
 		// for the same thing (plan 030 §3.16, X127): it hides for the token
 		// under the cursor, until that token changes, and the draft is
-		// untouched — a second Esc then cancels a running turn.
+		// untouched — a second Esc then cancels a running turn, no slash
+		// menu taking it on the way for a `/` inside the hidden token
+		// (slashBandActive).
 		if next, ok := m.composerAtKey(msg); ok {
 			return next, nil
 		}
-		if m.slashActive() {
+		if m.slashBandActive() {
 			// Esc hides this token's menu and nothing else; the draft is
 			// untouched (pinned). Recording the token rather than setting a
 			// flag is what reopens the menu as soon as the token changes or
@@ -2973,7 +2978,8 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// The composer's `@` popup is the same kind of band (plan 030 §3.16,
 	// X127): ↑/↓, ctrl+p/ctrl+n and tab are its while it is up — ahead of the
 	// arrows that leave the composer and of the textarea's own line keys —
-	// and PgUp/PgDn stay the transcript's. Enter is handleEnter's.
+	// and PgUp/PgDn stay the transcript's, the slash menu having no rows
+	// inside an `@` token (slashBandRows). Enter is handleEnter's.
 	switch msg.Type {
 	case tea.KeyTab, tea.KeyUp, tea.KeyDown, tea.KeyCtrlP, tea.KeyCtrlN:
 		if next, ok := m.composerAtKey(msg); ok {
@@ -2982,7 +2988,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 	switch msg.Type {
 	case tea.KeyTab, tea.KeyUp, tea.KeyDown, tea.KeyPgUp, tea.KeyPgDown:
-		if rows := m.slashRows(); rows > 0 {
+		if rows := m.slashBandRows(); rows > 0 {
 			return m.handleSlashKey(msg.Type, rows), nil
 		}
 	}
@@ -3258,7 +3264,8 @@ func (m Model) handleEnter() (tea.Model, tea.Cmd) {
 	// (plan 030 §3.16, X127), ahead of the queue edit's save as the slash
 	// menu is: the pick completes the text being edited. With none — still
 	// searching, or nothing matches — Enter is the composer's, and the draft
-	// goes as it is typed.
+	// goes as it is typed: not to a slash menu over a `/` inside the token
+	// (slashBandActive), which would write a command into it.
 	if next, ok := m.composerAtKey(tea.KeyMsg{Type: tea.KeyEnter}); ok {
 		return next, nil
 	}
@@ -3267,7 +3274,7 @@ func (m Model) handleEnter() (tea.Model, tea.Cmd) {
 	// the next Enter saves it. A token that already spells the highlighted row
 	// falls through, so a fully typed /help still runs on the first press and a
 	// fully typed /gauntlet still sends.
-	if m.slashActive() && !m.slashExactlyTyped() {
+	if m.slashBandActive() && !m.slashExactlyTyped() {
 		return m.acceptSlash(m.slashSel), nil
 	}
 	if m.queueEdit != "" {
