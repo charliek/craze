@@ -165,10 +165,25 @@ var goldenManifest = map[string]goldenRuns{
 	"sessions-dirs-100x30":                   inprocOnly,
 	"sessions-dirs-80x24":                    inprocOnly,
 	"sessions-empty-80x24":                   inprocOnly,
+	"sessions-new-100x30":                    inprocOnly,
+	"sessions-new-80x24":                     inprocOnly,
+	"sessions-new-at-100x30":                 inprocOnly,
+	"sessions-new-at-80x24":                  inprocOnly,
+	"sessions-new-bound-100x30":              inprocOnly,
+	"sessions-new-bound-80x24":               inprocOnly,
+	"sessions-new-browse-100x30":             inprocOnly,
+	"sessions-new-browse-80x24":              inprocOnly,
+	"sessions-new-empty-80x24":               inprocOnly,
+	"sessions-new-model-100x30":              inprocOnly,
+	"sessions-new-model-80x24":               inprocOnly,
+	"sessions-new-slash-100x30":              inprocOnly,
+	"sessions-new-slash-80x24":               inprocOnly,
 	"sessions-older-host-100x30":             inprocOnly,
 	"sessions-opened-100x30":                 bothTransports,
 	"sessions-opened-80x24":                  bothTransports,
 	"sessions-saved-100x30":                  inprocOnly,
+	"sessions-unstarted-100x30":              inprocOnly,
+	"sessions-unstarted-80x24":               inprocOnly,
 	"sessions-saved-80x24":                   inprocOnly,
 	"sessions-unreachable-80x24":             inprocOnly,
 	"select-styled-row-100x30":               bothTransports,
@@ -453,8 +468,10 @@ func transportList(set map[frameTransport]bool) string {
 // TestTheGoldenManifestIsEveryGolden (astra 31): the manifest lists every
 // golden file in testdata/ and no file that is not there, with the counts A8
 // states — 115 goldens in process and over the socket (plan 030's two opened
-// sessions among them), the six picker frames, plan 030's restore-failed and
-// its ten session-list frames in process only.
+// sessions among them), the six picker frames, plan 030's restore-failed, its
+// ten session-list frames, the nine of the list's input (C14), the two of
+// the unstarted session (C15) and the four of the input's `/` popup (C16) in
+// process only.
 func TestTheGoldenManifestIsEveryGolden(t *testing.T) {
 	files, err := filepath.Glob(filepath.Join("testdata", "*.golden"))
 	if err != nil {
@@ -482,8 +499,8 @@ func TestTheGoldenManifestIsEveryGolden(t *testing.T) {
 			t.Errorf("the manifest runs %s under %v: a golden runs under both transports, or in process alone", name, runs)
 		}
 	}
-	if both != 115 || inprocAlone != 17 {
-		t.Errorf("the manifest lists %d goldens under both transports and %d in process alone, want 115 and 17 (A8)", both, inprocAlone)
+	if both != 115 || inprocAlone != 32 {
+		t.Errorf("the manifest lists %d goldens under both transports and %d in process alone, want 115 and 32 (A8)", both, inprocAlone)
 	}
 }
 

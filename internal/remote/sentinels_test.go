@@ -518,9 +518,10 @@ const (
 	// reaches: the cause's text (checked here).
 	proofCause = "cause"
 	// proofDeadline: errors.Is(err, ctx.Err()) once the gate's ctx is past its
-	// deadline: context.DeadlineExceeded, which a remote command answers
-	// itself when that ctx ends, and which the host's bound's reasons
-	// reconstruct (checked here).
+	// deadline — or errors.Is(err, context.DeadlineExceeded), a dispatch's
+	// prompt's (plan 030 C15r2): context.DeadlineExceeded, which a remote
+	// command answers itself when that ctx ends, and which the host's bound's
+	// reasons reconstruct (checked here).
 	proofDeadline = "deadline"
 	// proofGate: tui.ErrNoAnswer, the gate's own, which no reconstructed
 	// error ever is (checked here, over every twin).
@@ -645,6 +646,37 @@ var tuiSites = []tuiSite{
 	// answers.
 	{"sessions_list.go", "sessActionDone", "Is", "backend.ErrStopUnsupported", 1, proofStop},
 	{"sessions_list.go", "sessLines", "Error", "err", 2, proofLocal},
+	// The list's input (plan 030 §3.13, §3.15): the `@` picker's listing of a
+	// directory, read off the Update from the disk, and the leading token's
+	// resolution — a name among the list's candidates, a path stat'ed —
+	// worded by the list itself; no Backend call answers any of them.
+	{"at_dirs.go", "browse", "Is", "fs.ErrNotExist", 1, proofLocal},
+	{"at_dirs.go", "browse", "Is", "errNotADirectory", 1, proofLocal},
+	{"at_dirs.go", "sessErrText", "As", "&pe", 1, proofLocal},
+	{"at_dirs.go", "sessErrText", "Error", "err", 1, proofLocal},
+	{"at_dirs.go", "sessListDirs", "Is", "io.EOF", 1, proofLocal},
+	{"sessions_input.go", "sessTargetRule", "Error", "t.err", 1, proofLocal},
+	{"sessions_input.go", "sessInputEnter", "Error", "err", 1, proofLocal},
+	// A background dispatch (plan 030 §3.13, C15): its start given up at its
+	// own bound, the dispatch's context.
+	{"dispatch.go", "runDispatch", "Is", "context.DeadlineExceeded", 1, proofLocal},
+	// Its prompt's answer read as the session's own — accepted or refused —
+	// unless it is no answer (promptUnknown, C15r2): the call's time ran out —
+	// the deadline, which a remote command answers itself when its ctx ends
+	// and a host's own bound's reasons reconstruct; context.Canceled, only
+	// ever the dispatch's own ctx's, which no host's reply carries
+	// (neverOnTheWire) — or the client could not learn the outcome (its
+	// connection went after sending, or closed under it), which it says
+	// itself and no host's refusal ever is.
+	{"dispatch.go", "promptUnknown", "Is", "context.DeadlineExceeded", 1, proofDeadline},
+	{"dispatch.go", "promptUnknown", "Is", "context.Canceled", 1, proofLocal},
+	{"dispatch.go", "promptUnknown", "Is", "backend.ErrOutcomeUnknown", 1, proofOutcome},
+	// /provider and /model (plan 030 §3.14, C16): native's default model read
+	// from its model table off the Update — its key judged against this
+	// process's environment — and the hint line's word for one that could not
+	// be read; the disk's answers, never a Backend's.
+	{"sessions_models.go", "nativeDefaultModel", "Is", "modeltable.ErrNoAPIKey", 1, proofLocal},
+	{"sessions_models.go", "sessNativeDefault", "Error", "msg.err", 1, proofLocal},
 	{"theme.go", "noteAndSaveTheme", "Error", "err", 1, proofLocal},
 }
 

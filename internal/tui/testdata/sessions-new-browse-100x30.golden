@@ -1,0 +1,30 @@
+ sessions  9 running                             ! 2 need you   ✳ 3 working   ✗ 1 failed   ○ 2 idle 
+                                                                                                    
+needs you 2 ────────────────────────────────────────────────────────────────────────────────────────
+  ! fix the roost tab rename      permission: cargo test -p roost-ipc    grok    roost            2m
+  ! add persistence to the read…  question: Which storage?               native  lumen           14m
+                                                                                                    
+working 3 ──────────────────────────────────────────────────────────────────────────────────────────
+  ✳ new session                   Starting…                              grok    shed             3s
+❯ ✳ write the v0.1.0 release no…  Responding                             native  craze · here     1m
+  ✳ move queue edits onto remot…  go test ./internal/remote/...          cursor  craze           12m
+                                                                                                    
+failed 1 ───────────────────────────────────────────────────────────────────────────────────────────
+  ✗ bump the flutter deps         error: 402 Payment Required from ope…  native  spendwise        3h
+                                                                                                    
+idle 2 ─────────────────────────────────────────────────────────────────────────────────────────────
+    ↓ more below                                                                                    
+──────────────────────────────────────────────────────────────────────────── folders in ~/projects ─
+❯ craze/      ~/projects/craze                                                                      
+  folio/      ~/projects/folio                                                                      
+  lumen/      ~/projects/lumen                                                                      
+  pharos/     ~/projects/pharos                                                                     
+  prox/       ~/projects/prox                                                                       
+  roost/      ~/projects/roost                                                                      
+  shed/       ~/projects/shed                                                                       
+  spendwise/  ~/projects/spendwise                                                                  
+  ↓ 1 more                                                                                          
+─────────────────────────────────────────────────── new session → ~/projects/craze · cursor · Grok ─
+❯ @~/projects/                                                                                      
+────────────────────────────────────────────────────────────────────────────────────────────────────
+ ↑↓ choose · tab open folder · enter use it · esc close                                             

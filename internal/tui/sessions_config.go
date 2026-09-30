@@ -1,9 +1,12 @@
 package tui
 
 import (
+	"time"
+
 	"github.com/charliek/craze/internal/agent"
 	"github.com/charliek/craze/internal/backend"
 	"github.com/charliek/craze/internal/roster"
+	"github.com/charliek/craze/internal/sessions"
 )
 
 // Sessions is the session list's source (plan 030 §3.9): Config.Sessions.
@@ -38,7 +41,8 @@ type Sessions interface {
 	// in the TUI.
 	Spawn(spec SpawnSpec) (roster.Ref, error)
 	// LeaveRunning keeps ref's host, which Spawn started, running when craze
-	// quits (PR 3's background dispatch, its prompt accepted), opened or not.
+	// quits (PR 3's background dispatch, its prompt accepted — or sent with
+	// no answer, when it may have been), opened or not.
 	// Its error says it cannot: craze is already exiting and has decided, or
 	// the host was stopped because an Open could not reach it. A ref Spawn
 	// did not answer is not craze's to stop, and is left as it is (nil). It
@@ -56,6 +60,43 @@ type Sessions interface {
 	// is not an error: the queue is cleared and nothing runs. A saved
 	// session is an error.
 	Cancel(ref roster.Ref) error
+}
+
+// SessionStarter is what a Sessions has when new sessions can be started
+// from the list (plan 030 §3.13, PR 3): the list's input, under the rows, and
+// everything it brings — the `@` directory picker, the rule naming where a
+// new session would run, the empty list's wording that points at the input —
+// exists only when Config.Sessions has it (openSessions asks, by a type
+// assertion). Production's has it (internal/cli's sessionList). A Sessions
+// without it draws the list exactly as PR 2 drew it, which is how the list's
+// merged frames — made against a fake without it — stay what they were
+// (§3.17).
+//
+// Its methods may read the disk and are called from a tea.Cmd, never from
+// Update.
+type SessionStarter interface {
+	Sessions
+	// RecentDirs is up to n directories sessions have run in, newest first,
+	// that are still directories (sessions.Store.RecentDirs): the `@`
+	// picker's recent places, after the session the list came from and the
+	// directories with a running session.
+	RecentDirs(n int) ([]sessions.RecentDir, error)
+	// ModelCatalog is the model catalog a host of provider — an ACP
+	// provider, whose catalog exists only once a session of it has started —
+	// last installed (plan 030 §3.14's catalog cache, which craze serve
+	// writes), and false when there is none to offer: none recorded yet, or a
+	// file craze did not write, which is ignored. It is what the list's
+	// /model offers for that provider. Native's models are its model table
+	// (nativeModelChoices), never this.
+	ModelCatalog(provider string) (ModelCatalog, bool)
+}
+
+// ModelCatalog is a provider's cached model catalog: its models in the
+// agent's own order, and when a host saw them — the `last seen` /model
+// shows beside them, since a catalog can have changed since.
+type ModelCatalog struct {
+	Models     []agent.ModelInfo
+	ObservedAt time.Time
 }
 
 // SessionRoster is a running session-list poller (*roster.Roster).

@@ -361,6 +361,147 @@ func TestAllIsEveryWorkspaceNewestFirst(t *testing.T) {
 	}
 }
 
+// TestRecentDirsIsEachWorkspaceOnceNewestFirst (plan 030 §3.15): distinct
+// workspaces, newest first by their newest row — ties to the later row in the
+// file — each at that row's time; a directory removed, or never one, is left
+// out; a row of a provider this build does not know still names its
+// workspace; one path written two ways is one directory; n caps the answer.
+func TestRecentDirsIsEachWorkspaceOnceNewestFirst(t *testing.T) {
+	path := setIndex(t)
+	root := t.TempDir()
+	dir := func(name string) string {
+		d := filepath.Join(root, name)
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		return d
+	}
+	a, b, c, d, e := dir("a"), dir("b"), dir("c"), dir("d"), dir("e")
+	gone := dir("gone")
+	file := filepath.Join(root, "file")
+	if err := os.WriteFile(file, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	body := strings.Join([]string{
+		lineFor(t, "a-old", "cursor", a, "2024-01-01T00:00:00Z"),
+		lineFor(t, "b", "grok", b+"/", "2024-02-01T00:00:00Z"),
+		lineFor(t, "tie-c", "cursor", c, "2024-03-01T00:00:00Z"),
+		lineFor(t, "tie-d", "native", d, "2024-03-01T00:00:00Z"),
+		lineFor(t, "gone", "cursor", gone, "2024-04-01T00:00:00Z"),
+		lineFor(t, "file", "cursor", file, "2024-04-02T00:00:00Z"),
+		lineFor(t, "a-new", "native", a, "2024-05-01T00:00:00Z"),
+		lineFor(t, "e", "someday", e, "2024-01-15T00:00:00Z"),
+		lineFor(t, "b-again", "cursor", filepath.Join(root, "x", "..", "b"), "2024-01-20T00:00:00Z"),
+	}, "\n") + "\n"
+	writeRaw(t, path, body)
+	if err := os.Remove(gone); err != nil {
+		t.Fatal(err)
+	}
+	s := Store{KnownProvider: func(p string) bool { return p != "someday" }}
+	check := func(n int, want []RecentDir) {
+		t.Helper()
+		got, err := s.RecentDirs(n)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(got) != len(want) {
+			t.Fatalf("RecentDirs(%d) = %+v, want %+v", n, got, want)
+		}
+		for i := range want {
+			if got[i].Dir != want[i].Dir || !got[i].UsedAt.Equal(want[i].UsedAt) {
+				t.Fatalf("RecentDirs(%d)[%d] = %+v, want %+v (all: %+v)", n, i, got[i], want[i], got)
+			}
+		}
+	}
+	at := func(s string) time.Time {
+		tm, err := time.Parse(time.RFC3339, s)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return tm
+	}
+	all := []RecentDir{
+		{a, at("2024-05-01T00:00:00Z")},
+		{d, at("2024-03-01T00:00:00Z")},
+		{c, at("2024-03-01T00:00:00Z")},
+		{b, at("2024-02-01T00:00:00Z")},
+		{e, at("2024-01-15T00:00:00Z")},
+	}
+	check(0, all)
+	check(-1, all)
+	check(2, all[:2])
+	check(10, all)
+
+	t.Setenv("CRAZE_HOME", "")
+	t.Setenv("HOME", "")
+	if dirs, err := (&Store{}).RecentDirs(10); err != nil || len(dirs) != 0 {
+		t.Fatalf("no home: %v, %v", dirs, err)
+	}
+}
+
+// TestRecentDirsOverAFullIndex: an index at its 500-row cap, its rows spread
+// over 25 directories with two of them removed, answers the ten newest that
+// are still there; a row past the cap evicts the oldest, and a directory only
+// that row named is recent no longer.
+func TestRecentDirsOverAFullIndex(t *testing.T) {
+	path := setIndex(t)
+	root := t.TempDir()
+	name := func(i int) string { return filepath.Join(root, "d"+strconv.Itoa(i)) }
+	for i := range 25 {
+		if err := os.MkdirAll(name(i), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	only := filepath.Join(root, "only")
+	if err := os.MkdirAll(only, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	base := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+	lines := []string{lineFor(t, "s0", "cursor", only, base.Format(time.RFC3339))}
+	for i := 1; i < 500; i++ {
+		lines = append(lines, lineFor(t, "s"+strconv.Itoa(i), "cursor", name(i%25), base.Add(time.Duration(i)*time.Minute).Format(time.RFC3339)))
+	}
+	writeRaw(t, path, strings.Join(lines, "\n")+"\n")
+	for _, i := range []int{23, 20} {
+		if err := os.Remove(name(i)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var s Store
+	got, err := s.RecentDirs(10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for _, r := range got {
+		names = append(names, filepath.Base(r.Dir))
+	}
+	// Row 499 is d24's, 498 d23's (removed), … — newest first.
+	if want := "d24 d22 d21 d19 d18 d17 d16 d15 d14 d13"; strings.Join(names, " ") != want {
+		t.Fatalf("RecentDirs(10) = %v, want %s", names, want)
+	}
+	if every, _ := s.RecentDirs(0); len(every) != 24 || every[len(every)-1].Dir != only {
+		t.Fatalf("RecentDirs(0) has %d directories, the last %+v; want 24, the last %s", len(every), every[len(every)-1], only)
+	}
+	fresh := filepath.Join(root, "fresh")
+	if err := os.MkdirAll(fresh, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	mustUpsert(t, &s, Row{SessionID: "s500", Provider: "cursor", CWD: fresh})
+	every, err := s.RecentDirs(0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(every) != 24 || every[0].Dir != fresh {
+		t.Fatalf("after the 501st row: %d directories, the first %+v; want 24, the first %s", len(every), every[0], fresh)
+	}
+	for _, r := range every {
+		if r.Dir == only {
+			t.Fatal("the directory only the evicted row named is still recent")
+		}
+	}
+}
+
 func lineFor(t *testing.T, sessionID, provider, cwd, updatedAt string) string {
 	t.Helper()
 	return `{"sessionId":"` + sessionID + `","provider":"` + provider + `","cwd":"` + cwd + `","title":"t","pinned":false,"createdAt":"` + updatedAt + `","updatedAt":"` + updatedAt + `"}`

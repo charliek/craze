@@ -3047,15 +3047,62 @@ finding and its disposition):
   opening in place, the band and saved sessions in `docs/reference/tui.md`;
   `internal/roster` in the architecture's package table; this record.
 
-PRs 3–4 are recorded here as each lands.
+**PR 3 — `feature/plan-030-new-sessions`** (C13–C16 implemented 2026-09-29/30,
+not yet merged; review-fix rounds, if any, are added with their commits, and
+`030-session-control-s5-agent-view/reviews/dispositions-pr3.md` has every
+finding and its disposition):
+
+- C13 (`3f51bfe`) — the completion popup (`internal/tui/complete.go`): one
+  component for every input that completes a token — a source answers at
+  once or names a keyed load run off the Update, stamped and dropped once no
+  longer awaited; `↑`/`↓`, `tab` (descend into a directory), `enter`, `esc`;
+  up to eight rows and a `↓ N more` line; the `@` token's grammar (`@name`,
+  `@"a path"`).
+- C14 (`88d672a`) — the list's input (only with a `tui.SessionStarter`, so
+  PR 2's frames stay byte-identical): the rule naming the target, the leading
+  `@` token and its binding, the `@` directory source (here, running
+  directories, `sessions.Store.RecentDirs`; paths browsed a level at a time),
+  its error words; goldens (additions).
+- C15 (`8d13fa9`) — starting a session from the list: the background
+  dispatch (`Spawn` → its own connection, drained → `Start` → the prompt with
+  that connection's first command id → `LeaveRunning` → close; accepted,
+  refused, outcome unknown), the unstarted session (`@dir` alone: opened in
+  place, spawned and adopted on its first prompt with the TUI's own command
+  numbering, discarded by `←`), `/exit` in the input; goldens (additions).
+- C16 (`f3cce7b`) — `/provider` and `/model` in the list's input: the `/`
+  popup, the providers the startup picker offers, the model reset to the
+  provider's default (native's from its model table, through the seam Plan
+  031 swaps), the catalog cache (`internal/modelcache`, written by `craze
+  serve` after each catalog install through the engine's new
+  `Options.CatalogChanged`, `rundir.CatalogDir`); `tests/cli/test_dispatch.py`
+  (a prompt dispatched into another workspace, the unstarted session, and
+  `/provider` `/model` changing the next dispatch, in real terminals); the
+  input, `@`, dispatch, the unstarted session and `/provider` `/model` in
+  `docs/reference/tui.md`, the catalog cache in
+  `docs/reference/configuration.md`; this record.
+- C15r (`f266967`) — review fixes (astra on C15, sol on C16): the dispatch's
+  prompt waited for no longer than its deadline even when its write is
+  blocked; the exit closing a dispatch's connection at once; a list paste
+  landing only in the opening that asked for it; the unstarted session's
+  shutdown schedules proven in a pty; the agent's own default a row of its
+  own; a catalog with a bad model not recorded.
+- C15r2 (`4e586ec`) — review fixes (astra on C15r): a dispatch's answer read
+  by its error, not the clock; the exit cutting a dispatch's detach short.
+- C15r3 (`f096a27`) — tests (astra on C15r2): the two regression tests made
+  to fail on the parent's code, deterministically.
+- The record's commit (`885b43c`) — X163–X176 below.
+- C15r4 (this commit) — CodeRabbit on #71: an unstarted session's first
+  prompt dropped when its session ends behind the list (X177).
+
+PR 4 is recorded here as it lands.
 
 ### Deviations from the plan
 
-PR 1's execution amendments X1–X62 and PR 2's X63 onward, mirrored here as
-`12`'s own record (the full text is in the plan,
-`~/.claude/plans/craze/030-session-control-s5-agent-view.md`, "Execution
-amendments"); review-fix rounds are grouped with the commit they amend. None
-reopens an owner decision. PRs 3–4 add theirs as they land.
+PR 1's execution amendments X1–X62, PR 2's X63–X121 and PR 3's X122 onward
+(C12r2's X142–X144 among them), mirrored here as `12`'s own record (the full
+text is in the plan, `~/.claude/plans/craze/030-session-control-s5-agent-view.md`,
+"Execution amendments"); review-fix rounds are grouped with the commit they
+amend. None reopens an owner decision. PR 4 adds its own as it lands.
 
 **PR 1** (C1–C8):
 
@@ -3409,6 +3456,185 @@ reopens an owner decision. PRs 3–4 add theirs as they land.
     answers from the real `startCmd` over a held `Start`) through A→B→A and
     deliver each after A2 is adopted, each dropped; a generation reused on
     return fails the new test.
+
+**PR 3** (C13–C16; X142–X144 are C12r2's, PR 2's last commit, recorded
+with them):
+
+38. **Plan 030 X122, X123, X124, X125 (C13)** — a completion source answers at
+    once or names a keyed load, run as a `tea.Cmd`, its result kept by key
+    for the popup's life, at most one running, one the query moved away from
+    cancelled; a result is dropped unless it is the load awaited (same key and
+    number) — the query is recorded, not compared, so a listing asked for
+    `~/p` serves `~/pr`; one process-wide counter numbers openings and loads
+    (the popup is a value its owner rebuilds); a load's result is
+    shown-stamped (dropped after a switch, X121), and a popup synced with
+    another session shown or workspace closes and cancels its load.
+39. **Plan 030 X126, X127, X128, X129 (C13)** — the grammar: inside the token
+    is start < cursor ≤ end; quoted only when the text has whitespace or
+    starts with `"`; a newline ends any token; text with control characters
+    or invalid UTF-8 cannot be written, so is never offered. The keys wrap,
+    take ↑ ↓ ctrl+p ctrl+n tab esc even with no candidate, and `enter` only
+    with one; accepting adds one space, descending none. The count line is
+    `↓ N more`, or `↑ N more` once the window reaches the bottom (the mockup's
+    `· type to narrow` suffix left out); the drawing measures columns over
+    every candidate, marks the selected row with the accent `❯`.
+40. **Plan 030 X130, X131, X132, X133 (C14)** — the list's input exists only
+    with a `tui.SessionStarter` (PR 2's goldens unmoved); the leading token is
+    the `@` token at the input's first non-space rune; the rule shows what
+    `enter` would do (a bound token's directory, a finished unbound token
+    resolved live, else the row's, else here); a binding is held by the
+    token's exact text and dropped for good the first time it differs.
+41. **Plan 030 X134–X141 (C14)** — the error words (`no directory named @x`,
+    `@x names N directories; pick one with @`, `no directory ~/x`); the `@`
+    name mode (here, running directories by recency, recents; basename
+    prefix, then path substring; a pick writes the basename, or the `~/` path
+    on a collision); browsing (a path token with no `/` names the directory
+    itself, ≤ 20,000 entries read 256 at a time, links to directories
+    included, 200 shown); `RecentDirs` (every provider's rows, cleaned, stat'ed
+    until n); the layout (target rule, input, rule, hint line; the popup above
+    the rule, the list keeping ≥ 2 rows); the input's keys (`←`/`→` move the
+    cursor when there is text, `tab` alone does nothing, `ctrl+v` pastes
+    folded to one line); `setSource` hands the popup the candidates as they
+    stand.
+42. **Plan 030 X142, X143, X144 (C12r2)** — a lost connection is not the
+    session's end: only a clean end (or a re-attach refused `not_accepting`)
+    marks the row `· ended`; a transport loss leaves nothing behind the list
+    (`lost the connection to that session: <err>`) and the row is the
+    roster's, `enter` reopening it. The roster's first tick always publishes
+    (an empty registry shows the empty list). A roster test waits for each
+    host's first answer after a drop by id, with generous budgets (4/100
+    failures under `-race` at 5 %, 100/100 after).
+43. **Plan 030 X145, X146, X147 (C15)** — a new session from the list takes
+    the launch's `--plugin-dir`, `--no-host-status` and (not for native)
+    `--agent-bin`, never its `--ask`, `--plan`, `--model` or `--provider`; its
+    model is the session the list came from's, else the launch's `--model`,
+    else the provider's default. The dispatch leaves the host running
+    **before** it closes its connection (no instant it is neither held nor
+    left); an unknown outcome leaves the host running; a refusal or a failed
+    start closes, then stops. While it starts the input says `❯ starting…`,
+    only the list's own keys pass, and `esc`/`←` leave the list with the
+    dispatch carrying on.
+44. **Plan 030 X148, X149, X150, X151 (C15)** — the unstarted session is a
+    switch to a session with no backend (its band `new session · <provider>
+    · ~/projects/lumen`, builtins and `!` inert); its first prompt's host is
+    adopted by its own function under X121's first-adoption rule, the draft
+    key moving from a temporary id to the craze id, the prompt sent with the
+    TUI's own command `"1"` once up; a failed start returns it to unstarted
+    with the prompt kept; `←`/`/sessions` discards it. With nothing behind the
+    list, the `@` picker has no `here` and the target is the selected row's
+    alone (`no directory to start in: pick one with @`).
+45. **Plan 030 X152, X153, X154 (C15)** — only exactly `/exit` quits from the
+    input (`/exit now` is a prompt); a dismissed popup clears when its token
+    disappears; awaited listings are cancelled by every exit; a paste lands
+    where it was asked for (the composer's draft, or dropped after the list
+    closed). Residual: a dispatch's outcome is invisible once the list has
+    been left (its row still appears).
+46. **Plan 030 X155 (C16)** — the catalog cache's writer is `craze serve`
+    alone: the engine's new `Options.CatalogChanged`, called by the observer
+    for a Config section that was not replayed and for a replay's end (a
+    load's install is inside its replay), kicks a one-slot worker
+    (`catalogRecorder`) that reads the session's snapshot off every lock,
+    takes the observation time at that read, and writes
+    `agent.CatalogModels` (the models block, else the model option's values)
+    when it differs from the last it recorded; a pending kick is recorded as
+    the host stops. The opt-out's TUI host, `craze prompt` and the frame
+    harness write nothing. No wire change.
+47. **Plan 030 X156 (C16)** — the cache file (`internal/modelcache`,
+    `rundir.CatalogDir`): `{"version":1,"observedAt","provider","models":[{"id","name"}]}`,
+    0600, under `<HOME>/.cache/craze/catalogs` (HOME, never CRAZE_HOME);
+    `Write` holds `<provider>.lock` (`atomicfile.LockWithin`, 2 s) across
+    reading the file and replacing it, and replaces only a strictly older
+    observation; `Read` ignores another version or provider, no time, no
+    models, a model with no id, a control character, trailing data, more
+    than 256 KiB, anything but a regular file; a catalog `Write` would not
+    read back is not written. The older-writer-finishes-last race is forced
+    in both orders.
+48. **Plan 030 X157 (C16)** — the `/` popup lists `/provider`, `/model` and
+    `/exit` (`/exit` is the input's already; without it `/ex` would say
+    nothing matches); it opens only while the first word is a prefix of one of
+    them, or is `provider`/`model` and a space — any other `/…` line is a
+    prompt and opens nothing (the mockup's `unknown command` is not drawn).
+    `enter` on `/provider` or `/model` writes it with the space that lists its
+    values; a value is used by `tab` and `enter` alike; `/exit` quits on
+    `enter` and is only written by `tab`. The placeholder reads `… · /
+    provider and model` (the mockup's `/ sets provider and model` is 84
+    cells with the prompt).
+49. **Plan 030 X158, X159 (C16)** — `/provider` lists the startup picker's
+    rows (`Model.providers`), narrowed by id or name prefix, `current`
+    marked, with the mockup's one-line descriptions; choosing one resets the
+    model — an ACP provider's to its agent's own (no `--model`, drawn
+    `default`), native's to `nativeDefaultModel()`, read off the Update, a
+    read for a choice since replaced dropped. `/model` lists native's
+    `nativeModelChoices()` or an ACP provider's cached catalog
+    (`SessionStarter.ModelCatalog`, a new method; one read per popup
+    opening), titled `<provider> models for new sessions · last seen <age>
+    ago`, `default` (the agent's own) first unless the catalog has that id,
+    narrowed by a substring of name or id; with no catalog, or nothing
+    matching, `enter` takes the typed id as `--model`. The live catalog of the
+    session the list came from is not consulted: its host wrote it to the
+    cache.
+50. **Plan 030 X160 (C16)** — the pick is `Model.sessPick`, the TUI's (carried
+    by `withSession`), lasting across openings and switches until changed; a
+    model chosen pins the provider it was listed for, so one provider's model
+    id never reaches another's session; the hint line then says `new sessions
+    use <provider> · <model>`. Typed `/provider x` (id or name, any case) and
+    `/model x` work without the popup; an unknown provider, or either command
+    with nothing after it, is the hint line's error.
+51. **Plan 030 X161 (C16)** — the seam agreed with Plan 031:
+    `nativeModelChoices()` and `nativeDefaultModel()` in
+    `internal/tui/sessions_models.go` are the only readers of native's model
+    table in the TUI; today's bodies are `modeltable.Load(paths.NativeDir())`
+    with the aliases sorted and named as native's own list names them, and
+    the table's default unless its key does not resolve, then the first
+    sorted alias that does. Plan 031 swaps both bodies.
+52. **Plan 030 X162 (C16)** — test support: the fake agent's
+    `CRAZE_FAKE_SESSION_ID` expands `{dir}` to its working directory's name,
+    since the hosts a terminal's list spawns inherit its environment and
+    their sessions otherwise shared its index row; `internal/modelcache`
+    joins `make test-race`.
+53. **Plan 030 X163, X164 (C15r)** — the dispatch's prompt runs on a
+    goroutine and is waited for no longer than the command gate's deadline
+    (`awaitPrompt`; an answer there as it passes wins): still out, the
+    outcome is unknown — the host left running first, then the connection
+    closed at once, which ends a write blocked on a host that has stopped
+    reading (X54 reaches no context), the submission and drain joined within
+    1 s. The program's exit closes a dispatch's connection at once
+    (`dispatchConn`), so it never waits behind that write.
+54. **Plan 030 X165, X166 (C15r)** — a list paste carries the list opening
+    it was asked in (`pasteMsg.listGen`) and lands only there; the unstarted
+    session's shutdown schedules (a quit or SIGTERM while its spawn or Open
+    runs) are proven in a pty through the real `finish`.
+55. **Plan 030 X167, X168 (C15r)** — the agent's own default (no `--model`)
+    is always its own first row; a catalog model whose id is `default` is
+    another row (`--model=default`); typed `/model default` stays the
+    agent's own. A catalog with any bad model is not recorded (the cache
+    keeps what it had; one host-log line per unchanged refused catalog).
+56. **Plan 030 X169, X170 (C15r)** — the docs state that a new session
+    falls back to the launch's `--model` when the session it came from has
+    none (X145); `test_dispatch.py` waits on events, not a fixed sleep.
+57. **Plan 030 X171, X172 (C15r2)** — a dispatch's answer is read by its
+    error (`promptUnknown`: a context error or `ErrOutcomeUnknown` is
+    unknown), never by the clock — a refusal taken as the deadline passes
+    stops its host; a host's own bound on the prompt now reads unknown. The
+    program's exit cancels a dispatch's view close already detaching
+    (`dispatchConn` holds the context `CloseWithin` waits on), so `finishRun`
+    no longer waits the detach's 3 s bound inside `remote.Session`'s shared
+    close.
+58. **Plan 030 X173, X174 (C15r2)** — tests: the proof that an unstarted
+    session spawns nothing is the Go test, which runs every command the
+    opening returned (`test_dispatch.py` corroborates); the unknown-outcome
+    test holds its deadline instead of racing a real 50 ms one (a starved
+    run started the call after it — diagnosed, not retried).
+59. **Plan 030 X175, X176 (C15r3)** — tests: the refusal-at-the-deadline test
+    holds the dispatch before it waits (two hook steps, `dispatchAwaiting`
+    and `dispatchSubmitted`) until the refusal is sent and the deadline
+    passed, so it fails on the parent's classification; the exit's cut of a
+    dispatch's detach is proven with a fake whose close waits only for its
+    context (no clock); the real-socket test stays as the integration check.
+60. **Plan 030 X177 (C15r4)** — an unstarted session's first prompt whose
+    session ends while the list is open over it is dropped (the list-open
+    `endMsg` arm clears it, as the `errMsg` arm does): a `startedMsg`
+    delivered after that end no longer submits it to the ended session.
 
 ### Live smoke
 

@@ -67,6 +67,19 @@ type Options struct {
 	// table's age bound with, instead of waiting ten minutes — the socket
 	// server's client-lifecycle tests (plan 027 §3.6, A12).
 	ReceiptClock func() time.Time
+	// CatalogChanged, when set, is told that the session may have installed
+	// a model catalog: a committed event of the main session carrying a
+	// Config section — session/new's install, a config_option_update, a
+	// settings reply — that was not replayed, and a replay's end, which is
+	// where a load's own install stands (the replayed updates before it are
+	// history the install overrules). It is craze serve's catalog cache (plan
+	// 030 §3.14): the host reads the session's snapshot on a goroutine of its
+	// own and records the catalog there, off every lock of the engine's and
+	// the session's. It is called by the observer, inside the log's
+	// publishing boundary, so it must return at once: no blocking, no I/O,
+	// and no call into the engine, the log or the session. nil — every host
+	// but craze serve, every test — is told nothing.
+	CatalogChanged func()
 }
 
 // foreignRetryTick is how often a turn held by ChainPolicy.RetryForeignTurn
@@ -890,6 +903,7 @@ func (e *Engine) observe(ev agent.Event) {
 		e.obsMu.Unlock()
 	}
 	e.observeRowTimes(ev)
+	e.observeCatalog(ev)
 	switch ev.Type {
 	case agent.EventReplay:
 		if ev.Replay == nil {
@@ -931,6 +945,23 @@ func (e *Engine) observe(ev agent.Event) {
 		if ev.Text != "" {
 			e.idx.post(indexWork{title: ev.Text})
 		}
+	}
+}
+
+// observeCatalog tells Options.CatalogChanged about an event that may have
+// installed a model catalog (plan 030 §3.14): a Config section the agent sent
+// now, or a replay's end — a load's install is committed inside its replay,
+// and so is every replayed update it overrules, so the end is where the
+// catalog it restored stands. It runs inside the observer, and the hook's
+// contract is the observer's: it returns at once.
+func (e *Engine) observeCatalog(ev agent.Event) {
+	if e.opts.CatalogChanged == nil {
+		return
+	}
+	config := ev.State != nil && ev.State.Config != nil && !ev.Replayed
+	replayEnd := ev.Type == agent.EventReplay && ev.Replay != nil && ev.Replay.Phase == agent.ReplayEnd
+	if config || replayEnd {
+		e.opts.CatalogChanged()
 	}
 }
 

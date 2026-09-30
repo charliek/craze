@@ -2,6 +2,7 @@ package tui
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
@@ -528,13 +529,18 @@ func (p *stallProxy) inbound(src, dst net.Conn, over <-chan struct{}) {
 
 // writeWatch says when the client's write of a long line has begun (began,
 // closed once): the outstanding command holds its connection's write lock.
+// With detach set, it also says when the client's first session.detach
+// request's write begins (closed once): a view close has begun its detach,
+// and holds the Session's one close while it waits for the answer.
 type writeWatch struct {
-	began chan struct{}
-	once  sync.Once
+	began  chan struct{}
+	once   sync.Once
+	detach chan struct{}
+	donce  sync.Once
 }
 
 // watchedConn is a client connection that tells its writeWatch of each long
-// line's write as it begins.
+// line's write, and of a detach's, as it begins.
 type watchedConn struct {
 	net.Conn
 	w *writeWatch
@@ -543,6 +549,9 @@ type watchedConn struct {
 func (c *watchedConn) Write(b []byte) (int, error) {
 	if len(b) >= longLine {
 		c.w.once.Do(func() { close(c.w.began) })
+	}
+	if c.w.detach != nil && bytes.Contains(b, []byte(`"method":"`+protocol.MethodSessionDetach+`"`)) {
+		c.w.donce.Do(func() { close(c.w.detach) })
 	}
 	return c.Conn.Write(b)
 }

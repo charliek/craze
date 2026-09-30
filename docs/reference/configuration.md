@@ -353,6 +353,39 @@ The launcher names it whenever a host could not start. A spawned host's
 A host's log can hold what its agent printed to stderr; treat it like the
 [journal](#session-journal).
 
+### Model catalog cache
+
+cursor, grok and gx name the models they offer only once a session has
+started. So that the session list's [`/model`](tui.md#provider-and-model) can
+offer them before one has, every detached host records the model catalog its
+agent installs — at `session/new`, when a loaded session's replay ends, and
+whenever the agent changes it — in `~/.cache/craze/catalogs/<provider>.json`
+(under the process's own `$HOME`, beside the host logs — not `CRAZE_HOME`: the
+catalog is your account's, whichever craze directory is in use). Native's
+models are its model table and are never cached.
+
+```json
+{"version":1,"observedAt":"2026-09-30T12:00:00Z","provider":"cursor",
+ "models":[{"id":"composer-2.5","name":"Composer 2.5"}, …]}
+```
+
+- Each provider's file keeps **the newest observation**: a host takes
+  `<provider>.lock` (an `flock`), reads the file's `observedAt`, and replaces
+  the file — atomically — only when its own observation is newer, so of two
+  hosts writing at once the older can never win by finishing last. A host
+  writes only when the catalog differs from the one it last recorded, and
+  never a catalog with a model the file cannot hold (no id, a name or id that
+  is not one line): the whole observation is left out — the file keeps what it
+  had — and the host's log names the model, rather than recording the rest as
+  though it were the whole catalog.
+- A file larger than 256 KiB, or one craze did not write (another version,
+  another provider's, no models, text that is not one line), is ignored as if
+  there were none, and the next write replaces it.
+- The directory is `0700` and validated like the rest of `~/.cache/craze`; a
+  failed write is one line in the host's log and never stops the session.
+- It is only a list of choices, labelled with its age: deleting the directory
+  is safe, and the next session of each provider writes it again.
+
 ## Terminal tab title
 
 `terminal_title = false` in `config.toml` turns off every terminal tab-title

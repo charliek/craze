@@ -386,6 +386,13 @@ func snapshotModels(snap Snapshot) []ModelInfo {
 	return nil
 }
 
+// CatalogModels is the model catalog snap advertises, in the agent's own
+// order: its models block, else its model option's values — the list the
+// model dialog orders (OrderModels) before it puts the current model first. A
+// detached host records it in the catalog cache (plan 030 §3.14), which the
+// session list's /model reads before any session of that provider exists.
+func CatalogModels(snap Snapshot) []ModelInfo { return snapshotModels(snap) }
+
 func modelDisplayName(m ModelInfo) string {
 	if m.Name != "" {
 		return m.Name

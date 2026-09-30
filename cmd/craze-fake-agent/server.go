@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -21,12 +22,20 @@ import (
 // CRAZE_FAKE_SESSION_ID when it is set — so two sessions of one test HOME
 // (plan 030's session list, several terminals in several directories) are
 // two rows of the session index, keyed by provider and this id, and not one
-// row the second overwrites.
+// row the second overwrites. "{dir}" in it is the base name of this process's
+// working directory, which craze spawns an agent in: the session's workspace.
+// The hosts one terminal starts from its list (plan 030 C16's tests) inherit
+// that terminal's environment, and are told apart by where they run.
 var fakeSessionID = func() string {
-	if id := strings.TrimSpace(os.Getenv("CRAZE_FAKE_SESSION_ID")); id != "" {
-		return id
+	id := strings.TrimSpace(os.Getenv("CRAZE_FAKE_SESSION_ID"))
+	if id == "" {
+		return "fake-session-1"
 	}
-	return "fake-session-1"
+	if strings.Contains(id, "{dir}") {
+		wd, _ := os.Getwd()
+		id = strings.ReplaceAll(id, "{dir}", filepath.Base(wd))
+	}
+	return id
 }()
 
 // taskRunFor is how long the sub-agent tool stays in_progress. A real

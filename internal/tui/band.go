@@ -39,13 +39,19 @@ func (m Model) bandRows() int {
 // bandChip is the session as the band names it: `title · provider · dir` —
 // its title by its list row's own rule (sessTitle: the session's own title,
 // else the index's as the list last listed it, else `new session`), the
-// provider it runs as the status row names it, and its workspace's name.
+// provider it runs as the status row names it, and its workspace's name. An
+// unstarted session (plan 030 §3.13) names its directory whole, `~` for
+// $HOME — `new session · native · ~/projects/lumen` — since where it will run
+// is the one thing it is yet, and a basename alone would not say it.
 func (m Model) bandChip() string {
 	parts := []string{sessTitle(m.snap.Title, m.indexTitle)}
 	if p := sanitizeLine(m.snap.Provider.Label()); p != "" {
 		parts = append(parts, p)
 	}
-	if m.cwd != "" {
+	switch {
+	case m.unstarted != nil && m.cwd != "":
+		parts = append(parts, sanitizeLine(sessTilde(m.unstarted.home, m.cwd)))
+	case m.cwd != "":
 		parts = append(parts, sanitizeLine(workspaceName(m.cwd)))
 	}
 	return strings.Join(parts, " · ")

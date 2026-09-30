@@ -447,6 +447,58 @@ func (s *Store) All() ([]Row, error) {
 	return rowsOf(filtered), nil
 }
 
+// RecentDir is a directory sessions have run in, and when one last did: the
+// newest UpdatedAt of the rows whose workspace it is.
+type RecentDir struct {
+	Dir    string
+	UsedAt time.Time
+}
+
+// RecentDirs is up to n of the distinct workspaces the index's rows ran in,
+// newest first — each at its newest row's UpdatedAt, in Recent's order (ties
+// to the later row in the file) — that are still directories: what the
+// session list's `@` offers as recent places to start a session (plan 030
+// §3.15). n <= 0 means no cap.
+//
+// Every row is read, whatever its provider: a workspace is a place a session
+// ran, not a session to resume, so a row of a provider this build does not
+// know still names one (KnownProvider is the resume paths' filter). Two rows
+// name one workspace when their cwd is the same once cleaned; the cleaned
+// path is the one answered. A workspace no longer there, or no longer a
+// directory, is skipped — stat'ed in order, and only until n are found, so
+// the cost is bounded by the index's own cap (maxRows) whatever n is. No home
+// directory reads as zero directories and no error.
+func (s *Store) RecentDirs(n int) ([]RecentDir, error) {
+	path := paths.SessionsPath()
+	if path == "" {
+		return nil, nil
+	}
+	records, err := readRecords(path)
+	if err != nil {
+		return nil, err
+	}
+	newestFirst(records)
+	var out []RecentDir
+	seen := make(map[string]bool, len(records))
+	for _, rec := range records {
+		if n > 0 && len(out) >= n {
+			break
+		}
+		dir := filepath.Clean(rec.Row.CWD)
+		if seen[dir] {
+			continue
+		}
+		// Seen whether or not it is still there: a newer row found it gone,
+		// and an older row of the same directory is no more there.
+		seen[dir] = true
+		if st, err := os.Stat(dir); err != nil || !st.IsDir() {
+			continue
+		}
+		out = append(out, RecentDir{Dir: dir, UsedAt: rec.Row.UpdatedAt})
+	}
+	return out, nil
+}
+
 // Find is the row for (provider, sessionID) — the index's own key — in any
 // workspace, or ok=false when there is none: how a row with no craze id is
 // named from outside the index, which only the key can do (craze serve's
