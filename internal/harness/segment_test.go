@@ -33,9 +33,10 @@ func toolStep(n int, input int64) step {
 	return reply(bareCall(fmt.Sprintf("c%d", n), "nope", fmt.Sprintf(`{"n":%d}`, n)), finishUsing(fantasy.FinishReasonToolCalls, input))
 }
 
-// The window every session here runs on: a threshold of 85,000 tokens, which
-// a step reporting over (90,000) reaches and one reporting under (1,000) does
-// not.
+// The window every session here runs on: 100,000 tokens, whose default output
+// ceiling (a quarter of a window this small, D-74) puts the threshold at
+// 75,000, which a step reporting over (90,000) reaches and one reporting under
+// (1,000) does not.
 const (
 	testWindow = 100000
 	over       = 90000

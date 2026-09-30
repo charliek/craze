@@ -145,7 +145,7 @@ type Model struct {
 	WireModel       string // the model id the provider's API expects
 	Name            string // display name; "" shows the alias
 	ContextWindow   int    // tokens; 0 = unknown
-	MaxOutputTokens int    // 0 = absent: no output ceiling is sent
+	MaxOutputTokens int    // 0 = absent: Resolve supplies DefaultMaxOutputTokens, or less on a small window
 	// Efforts are the reasoning-effort levels the model accepts, in display
 	// order. Empty means the model has no effort control: none is shown or
 	// sent.
@@ -296,7 +296,7 @@ type Resolved struct {
 	WireModel       string
 	Name            string // the model's name, or its alias when it has none
 	ContextWindow   int
-	MaxOutputTokens int
+	MaxOutputTokens int // the ceiling every request sends: the file's value, else the default (outputCeiling)
 	Efforts         []string
 	DefaultEffort   string
 	Vision          bool
@@ -943,12 +943,46 @@ func (t *Table) Resolve(alias string, getenv func(string) string) (Resolved, err
 		WireModel:       m.WireModel,
 		Name:            name,
 		ContextWindow:   m.ContextWindow,
-		MaxOutputTokens: m.MaxOutputTokens,
+		MaxOutputTokens: outputCeiling(m),
 		Efforts:         slices.Clone(m.Efforts),
 		DefaultEffort:   m.DefaultEffort,
 		Vision:          m.Vision,
 		ToolProfile:     m.ToolProfile,
 	}, nil
+}
+
+// DefaultMaxOutputTokens is the output ceiling a model with no
+// max_output_tokens gets (D-74, discovery/native-harness/08-decisions.md). The
+// plan 029 eval saw craze on fireworks/deepseek-v4p1-flash run away on 5 of 25
+// plan-mode runs: one response repeated itself up to the provider's own cap,
+// 66-82k output tokens and 9-14 minutes. 32,000 is opencode's own default
+// ceiling (min(model output limit, 32k), opencode
+// packages/opencode/src/provider/transform.ts). An explicit max_output_tokens
+// always wins, even above it.
+const DefaultMaxOutputTokens = 32000
+
+// outputCeiling is the output ceiling Resolve reports for m: the file's
+// max_output_tokens when set, whatever its size (an explicit value wins even
+// above the default, even at or above the window; that is the owner's own
+// choice); otherwise DefaultMaxOutputTokens, held to a quarter of a known
+// window. craze knows no model's own output limit apart from max_output_tokens
+// itself (the table carries no separate one; craze import gx already writes
+// gx's max_completion_tokens there), so the window is all a default can be
+// checked against: one that took most of a small window would make a strict
+// server (vLLM refuses prompt + max_tokens above the context length) fail every
+// request, and would turn off automatic compaction, which compactionThreshold
+// skips when the ceiling takes the window. A quarter keeps that threshold at
+// 75% on a small window and leaves every window of 128,000 tokens or more at
+// the full default. It is never under 1, so every request names a ceiling,
+// even on a window too small for a quarter of it to be a whole token.
+func outputCeiling(m Model) int {
+	if m.MaxOutputTokens > 0 {
+		return m.MaxOutputTokens
+	}
+	if m.ContextWindow > 0 {
+		return max(min(DefaultMaxOutputTokens, m.ContextWindow/4), 1)
+	}
+	return DefaultMaxOutputTokens
 }
 
 func resolveKey(id string, p Provider, getenv func(string) string) (Secret, error) {
