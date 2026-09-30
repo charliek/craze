@@ -3009,10 +3009,11 @@ plan (plan §8):
   `b8aa5bb`, before PR 3, as on PR 3's tip), fixed in PR 4 (X192). PR 4's run goes with its CI.
 - **V2** (`craze prompt --json` parity, 103 scenarios): PR 1 102/103, PR 2
   103/103, PR 3 103/103 at `4e586ec` and 102/103 at its tip, PR 4 102/103 at
-  `202928d`. The one DIFF is `sigint-between-turns`, a pre-existing race (X59,
-  SF-87: 15/20 DIFF on a `main` with no Plan 030 code) — in PR 4's run it was
-  the baseline whose SIGINT landed late, after the third prompt was sent; the
-  output did not move.
+  `4bcc119` (rebased onto Plan 031) and at `202928d` before the rebase. The one
+  DIFF is `sigint-between-turns`, a pre-existing race (X59, SF-87: 15/20 DIFF
+  on a `main` with no Plan 030 code) — PR 4's two runs fell one each way (the
+  baseline's SIGINT late in one, the candidate's in the other); the output did
+  not move.
 - **V3** (launch cost, the fake agent, 20 interleaved runs): time to the first
   answer in process p50 48 / p95 59 ms, detached p50 56 / p95 77 ms — **+7 ms
   p50, +18 ms p95**, against a 150 / 300 ms budget.
@@ -3187,7 +3188,7 @@ rebased onto `b401fec`; the `*r` commits are review-fix rounds, and
 `030-session-control-s5-agent-view/reviews/dispositions-pr4.md` has every
 finding and its disposition):
 
-- C17 (`ab8dcc9`) — the composer `@` search and match
+- C17 (`37e3436`) — the composer `@` search and match
   (`internal/tui/at_files.go`): `rg --no-config --files --hidden -g '!.git'
   -0` when `rg` is on the `PATH`, else `git ls-files -co --exclude-standard
   -z` in a work tree, else a breadth-first walk; one 3 s budget, 50,000 paths
@@ -3196,37 +3197,39 @@ finding and its disposition):
   over the relative path, a `/` narrowing to a folder; the best 100 handed to
   the popup and the rest counted (`completeAnswer.More`, new — with it zero,
   every existing golden is unchanged).
-- C18 (`0c14708`) — the popup and the insertion (`internal/tui/composer_at.go`):
+- C18 (`f05d59d`) — the popup and the insertion (`internal/tui/composer_at.go`):
   `Model.composerAt`, open only while the composer has the keyboard, drawn
   where the slash menu draws, its keys ahead of the composer's, titled
   `files in <workspace>`; the audit of every existing frame script (no `@` at
   a word start in the session composer, X185); four goldens (additions);
   `test_tui_composer_at_mentions_a_file` in both modes; `## File mentions` in
   `docs/reference/tui.md`.
-- C18r (`c033c5d`) — review fix (sol on C18): the slash menu stays out of an
+- C18r (`ca0e3d6`) — review fix (sol on C18): the slash menu stays out of an
   `@` token (X193).
-- C17r (`63aba2e`) — review fixes (sol on C17): what a listing holds is
+- C17r (`9ade2ba`) — review fixes (sol on C17): what a listing holds is
   capped (100,000 candidates, 8 MiB), the listing runs on its own goroutine
   so the popup never waits on a stuck call, and git's paths are checked on
   disk (X194–X197).
-- C17r2 (`03ba3c0`) — review fix (sol on C17r and C18r): the tool is reaped
+- C17r2 (`c421309`) — review fix (sol on C17r and C18r): the tool is reaped
   on a goroutine of its own, whatever the listing is inside (X198). Its
   re-review's one finding (a pipe's read end closed twice on cancel) was
   accepted: `os.File.Close` guards the second close.
-- `202928d` — the long-replay golden's wall-clock bound, found by PR 3's V1
+- `92dc1db` — the long-replay golden's wall-clock bound, found by PR 3's V1
   (X192): its wait fails on a stall in progress rather than a fixed 20 s; and
   a plugin frame test's wait needle no wrap can split (X199).
-- C19 (`fa91c12`) — the phase record: `07`'s exit results for S4a and S5
+- C19 (`b5c54df`) — the phase record: `07`'s exit results for S4a and S5
   and its table, this section's outcome, PR 4's deviations, the live smoke,
   the decisions and the handoff; `13`'s SF-88–SF-103 and the rows Plan 030
   closed; the README's status; what each provider does with `@path` and a
   list dispatch's saved provider in `docs/reference/tui.md`.
-- C19r (`dc0a764`) — review fixes to the record (sol): the ranges reach X199 and
+- C19r (`156de97`) — review fixes to the record (sol): the ranges reach X199 and
   SF-102, and the long-replay test's comment calls its stall a measured bound.
-- C18r2 (`c01bfb9`) — CodeRabbit on PR 4: a composer `@` row shows a path's
+- C18r2 (`befb3e0`) — CodeRabbit on PR 4: a composer `@` row shows a path's
   Unicode format characters as `<U+XXXX>` (X200); SF-97 reworded; SF-103.
-- C18r3 (this commit) — review fix (sol on C18r2): the row escapes Unicode's
+- C18r3 (`4bcc119`) — review fix (sol on C18r2): the row escapes Unicode's
   whole default-ignorable set, not only format characters (X201).
+- C19r2 (this commit) — PR 4 rebased onto Plan 031 (#73, `0f82531`), which
+  landed first: the record's commit ids and the re-run V2.
 
 ### Deviations from the plan
 
@@ -3888,8 +3891,8 @@ with them):
     heavily loaded machine. Not a regression — at a 25 % quota with `-race` it
     fails 7/7 on `main` `b8aa5bb` (no PR 3 code) and 7/7 on PR 3's tip, with
     the same durations; PR 3 merged on that diagnosis. The bound is fixed in
-    PR 4 (`202928d`, X199).
-73. **Plan 030 X199 (`202928d`)** — the long-replay golden's one wait is the
+    PR 4 (`92dc1db`, X199).
+73. **Plan 030 X199 (`92dc1db`)** — the long-replay golden's one wait is the
     whole 600-event replay (0.5 s unloaded, 7 s under `-race`, 37–58 s under
     `-race` at a 25 % quota, 275–320 s at 5 %) against a fixed 20 s; the two
     gate modes fold the same messages. `FrameOpts` gains an opt-in stall: a
@@ -3926,7 +3929,8 @@ with them):
 
 ### Live smoke
 
-Two runs on 2026-09-30 against one build (`28dfc7d`, C17r, with C15r4's
+Two runs on 2026-09-30 against one build (`28dfc7d`, before PR 4's rebase onto
+Plan 031 — C17r, with C15r4's
 `app.go`; `--version` 0.0.1), driven in tmux with bracketed paste; notes and
 captures in the plan folder's `v4/NOTES.md` and `v5/NOTES.md`. **V4, Linux**:
 COSMIC on Wayland, tmux 3.4 and cosmic-term 1.8.0; cursor-agent 2026.09.28,
