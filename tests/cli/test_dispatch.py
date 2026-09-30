@@ -211,6 +211,7 @@ def test_provider_and_model_change_the_next_dispatch(craze_bin: Path, fake_agent
             deadline = time.monotonic() + WAIT
             while not catalog.exists() and time.monotonic() < deadline:
                 time.sleep(0.05)
+            assert catalog.exists(), f"no catalog cache at {catalog} after {WAIT}s"
             cached = json.loads(catalog.read_text(encoding="utf-8"))
             assert cached["provider"] == "cursor" and [m["id"] for m in cached["models"]] == ["default", "composer"], (
                 cached

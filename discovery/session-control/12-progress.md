@@ -3090,7 +3090,9 @@ finding and its disposition):
   by its error, not the clock; the exit cutting a dispatch's detach short.
 - C15r3 (`f096a27`) — tests (astra on C15r2): the two regression tests made
   to fail on the parent's code, deterministically.
-- The record's commit (this commit) — X163–X176 below.
+- The record's commit (`885b43c`) — X163–X176 below.
+- C15r4 (this commit) — CodeRabbit on #71: an unstarted session's first
+  prompt dropped when its session ends behind the list (X177).
 
 PR 4 is recorded here as it lands.
 
@@ -3629,6 +3631,10 @@ with them):
     passed, so it fails on the parent's classification; the exit's cut of a
     dispatch's detach is proven with a fake whose close waits only for its
     context (no clock); the real-socket test stays as the integration check.
+60. **Plan 030 X177 (C15r4)** — an unstarted session's first prompt whose
+    session ends while the list is open over it is dropped (the list-open
+    `endMsg` arm clears it, as the `errMsg` arm does): a `startedMsg`
+    delivered after that end no longer submits it to the ended session.
 
 ### Live smoke
 

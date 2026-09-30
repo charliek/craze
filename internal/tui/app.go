@@ -2024,6 +2024,14 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, m.updateComposer(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(msg.text), Paste: true})
 		case endMsg:
+			// An unstarted session's first prompt (§3.13) whose session ended
+			// with the list up over it — its composer emptied and ← pressed
+			// before it came up — is dropped, as a start failing there drops
+			// it (the errMsg arm, X154): the end is the session's, as any
+			// session's is behind the list, and a start answering after it
+			// sends nothing to a session that has ended (plan 030 C15r4,
+			// CodeRabbit on #71).
+			m.first = nil
 			m.ended, m.endErr = true, msg.err
 			m.sessionEnded(msg.err)
 			return m, nil

@@ -1378,6 +1378,63 @@ func TestAnUnstartedSessionThatFailsToStartIsUnstartedAgain(t *testing.T) {
 	}
 }
 
+// TestAnUnstartedSessionsFirstPromptIsDroppedWhenItEndsBehindTheList
+// (§3.13, X154; plan 030 C15r4, CodeRabbit on #71): the session a first
+// prompt spawned, adopted but not yet up, with the list opened over it — its
+// composer emptied and ← pressed — ends there, and its start answers after
+// that end. The end is the session's, as any session's is behind the list:
+// its row is marked ended, craze goes on, and the prompt is dropped, as a
+// start failing there drops it. The late start sends nothing: no Submit
+// reaches the ended session, and the row is the ended row still. The
+// schedule is forced — the start's answer held while the end is delivered —
+// never left to the clock.
+func TestAnUnstartedSessionsFirstPromptIsDroppedWhenItEndsBehindTheList(t *testing.T) {
+	m, _, hb, log := openedUnstarted(t, 100, 30)
+	m = typeComposer(t, m, "go")
+	m, cmd := press(m, enter())
+	tm, cmd := m.Update(runWatched(t, mustCmd(t, cmd, "enterUnstarted")))
+	m = tm.(Model)
+	if m.eng != hb || m.first == nil {
+		t.Fatalf("adopted %v, first %v", m.eng, m.first)
+	}
+	// The start runs to its answer, held: it is delivered after the end.
+	started, ok := runWatched(t, mustCmd(t, cmd, "startCmd")).(startedMsg)
+	if !ok {
+		t.Fatal("the adopted backend's start answered no startedMsg")
+	}
+	m, _ = press(m, tea.KeyMsg{Type: tea.KeyBackspace})
+	m, _ = press(m, tea.KeyMsg{Type: tea.KeyBackspace})
+	m, _ = press(m, tea.KeyMsg{Type: tea.KeyLeft})
+	if !m.sessList.open || m.sessList.none || m.sessList.here != m.hereKey() || m.sessList.here.zero() {
+		t.Fatalf("← over the adopted session: list %v, none %v, here %+v", m.sessList.open, m.sessList.none, m.sessList.here)
+	}
+	// The roster has not listed the new session yet: its row is what the
+	// model knows of it.
+	m = listSnap(t, m, roster.Snapshot{})
+	tm, _ = m.Update(endMsg{bgen: m.bgen})
+	m = tm.(Model)
+	ended, ok := sessFind(m.sessLines(), m.sessList.here)
+	switch {
+	case m.quitting || !m.ended || !m.sessList.open || !m.sessList.hereEnded:
+		t.Fatalf("the end behind the list: quitting %v, ended %v, list open %v, marked %v",
+			m.quitting, m.ended, m.sessList.open, m.sessList.hereEnded)
+	case !ok || !ended.ended || ended.want != "ended":
+		t.Fatalf("the session's row after its end: %+v (listed %v)", ended, ok)
+	}
+	tm, _ = m.Update(started)
+	m = tm.(Model)
+	if cmds, texts := hb.sent(); len(cmds) != 0 || slices.Contains(log.seen(), "submit") {
+		t.Fatalf("the late start sent the first prompt to the ended session: %v with %q (%v)", cmds, texts, log.seen())
+	}
+	row, ok := sessFind(m.sessLines(), m.sessList.here)
+	switch {
+	case m.quitting || !m.sessList.open || !m.sessList.hereEnded:
+		t.Fatalf("after the late start: quitting %v, list open %v, marked %v", m.quitting, m.sessList.open, m.sessList.hereEnded)
+	case !ok || !row.ended || row.want != "ended" || row.key != ended.key:
+		t.Fatalf("the session's row after the late start: %+v (listed %v), want the ended %+v", row, ok, ended)
+	}
+}
+
 // TestAnUnstartedSessionAbandonedLeavesNothing (§3.13, AC10): `←` before a
 // prompt discards it — nothing spawned, no draft under its temporary id, and
 // the list opened over it has nothing behind it: esc and ← stay and say so,
