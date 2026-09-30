@@ -292,6 +292,41 @@ func TestAComposerAtPickWritesExactlyItsPath(t *testing.T) {
 	}
 }
 
+// TestAComposerAtRowShowsWhatItsPathHolds (§3.16, X200): the frame draws a
+// path's format characters as `<U+XXXX>` — none raw, so no row reads as
+// another path — and a pick writes the path as it is: its format characters,
+// and a run of spaces its row draws as one.
+func TestAComposerAtRowShowsWhatItsPathHolds(t *testing.T) {
+	rlo, zwsp, spaces := "notes/\u202Egpj.exe", "zero\u200Bwidth.go", "two  spaces.md"
+	listing := atFixedListing(rlo, zwsp, spaces)
+
+	m, _ := atModel(t, 100, 30, listing)
+	m = atOpen(t, m, "@")
+	if frame := m.View(); strings.IndexFunc(frame, atIsFormat) >= 0 {
+		t.Fatalf("the frame draws a format character raw:\n%q", plain(frame))
+	}
+	frame := plainView(m)
+	for _, row := range []string{"notes/<U+202E>gpj.exe", "zero<U+200B>width.go", "two spaces.md"} {
+		if !strings.Contains(frame, row) {
+			t.Fatalf("no row reads %q:\n%s", row, frame)
+		}
+	}
+
+	for typed, draft := range map[string]string{
+		"@gpj":  "@" + rlo + " ",
+		"@zero": "@" + zwsp + " ",
+		"@two":  `@"two  spaces.md" `,
+	} {
+		// A model of its own for each: a textarea's copies share its lines.
+		m, _ := atModel(t, 100, 30, listing)
+		m = atOpen(t, m, typed)
+		m, _ = atKey(t, m, enter())
+		if v, cur := draftOf(m); v != draft || cur != len(draft) {
+			t.Errorf("picking %s left %q, cursor %d; want %q, cursor %d", typed, v, cur, draft, len(draft))
+		}
+	}
+}
+
 // TestTheComposerAtPopupOpensOnATokenStart (§3.16): the popup is up while the
 // cursor is inside an `@` token that starts a word — at the draft's start,
 // after a space or a newline — and not for an `@` inside a word, not with the

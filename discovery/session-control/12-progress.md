@@ -3216,16 +3216,20 @@ finding and its disposition):
 - `202928d` — the long-replay golden's wall-clock bound, found by PR 3's V1
   (X192): its wait fails on a stall in progress rather than a fixed 20 s; and
   a plugin frame test's wait needle no wrap can split (X199).
-- C19 (this commit) — the phase record: `07`'s exit results for S4a and S5
+- C19 (`fa91c12`) — the phase record: `07`'s exit results for S4a and S5
   and its table, this section's outcome, PR 4's deviations, the live smoke,
-  the decisions and the handoff; `13`'s SF-88–SF-102 and the rows Plan 030
+  the decisions and the handoff; `13`'s SF-88–SF-103 and the rows Plan 030
   closed; the README's status; what each provider does with `@path` and a
   list dispatch's saved provider in `docs/reference/tui.md`.
+- C19r (`dc0a764`) — review fixes to the record (sol): the ranges reach X199 and
+  SF-102, and the long-replay test's comment calls its stall a measured bound.
+- C18r2 (this commit) — CodeRabbit on PR 4: a composer `@` row shows a path's
+  Unicode format characters as `<U+XXXX>` (X200); SF-97 reworded; SF-103.
 
 ### Deviations from the plan
 
 PR 1's execution amendments X1–X62, PR 2's X63–X121 (with C12r2's
-X142–X144), PR 3's X122–X141 and X145–X177, and PR 4's X178–X199 (X192
+X142–X144), PR 3's X122–X141 and X145–X177, and PR 4's X178–X200 (X192
 among them, found by PR 3's V1), mirrored here as `12`'s own record (the full
 text is in the plan, `~/.claude/plans/craze/030-session-control-s5-agent-view.md`,
 "Execution amendments"); review-fix rounds are grouped with the commit they
@@ -3898,6 +3902,15 @@ with them):
     wait needle spanned a space the echo's wrap could fall on (the checkout
     path's length moves the wrap); it now waits on fragments no wrap can
     split. Found, not fixed: SF-102.
+74. **Plan 030 X200 (C18r2, CodeRabbit on PR 4)** — a composer `@` row's
+    name is the path's display form (`atFileName`): `sanitizeLine`, then every
+    Unicode format character (`Cf`: bidi overrides and isolates, zero-width
+    characters, tags) written as `<U+XXXX>`, so a row cannot read as a
+    different path than the one a pick writes; `Value` and `Insert` stay the
+    exact path, and matching stays on it. `sanitizeLine` itself is unchanged
+    (an emoji's U+200D is `Cf`). Residuals: the display is not reversible;
+    an emoji's joiner shows escaped in the popup; runs of spaces draw as one;
+    the draft and the transcript draw a picked path's `Cf` runes raw (SF-103).
 
 ### Live smoke
 

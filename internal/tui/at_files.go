@@ -1052,7 +1052,9 @@ const (
 // starts with and is longer than (the directory itself is not in it), the
 // rest matched within what follows the prefix. An empty rest matches
 // everything, all scored alike: the base order alone, the shortest — the
-// nearest the root — first.
+// nearest the root — first. A candidate stands for and writes its path
+// exactly (Value, Insert); its row draws the path's display form (atFileName)
+// — the matching and the ranking are the path's.
 func (x *atFileIndex) match(query string, k int) (items []completeItem, more int) {
 	q := query
 	for strings.HasPrefix(q, "./") {
@@ -1103,10 +1105,50 @@ func (x *atFileIndex) match(query string, k int) (items []completeItem, more int
 	items = make([]completeItem, len(ranked))
 	for i, r := range ranked {
 		n := x.names[r.idx]
-		items[i] = completeItem{Name: n, Value: n, Insert: n, Openable: strings.HasSuffix(n, "/")}
+		items[i] = completeItem{Name: atFileName(n), Value: n, Insert: n, Openable: strings.HasSuffix(n, "/")}
 	}
 	return items, total - len(items)
 }
+
+// atFileName is a path as its row draws it (plan 030 X200): one line of
+// display text, as the popup asks of every source (sanitizeLine, as
+// at_dirs.go's rows are), with every Unicode format character (Cf) shown as
+// `<U+XXXX>`. A path a token can carry has no control character (atTextOK),
+// but it can hold a format character — a bidi override or isolate
+// (U+202A–U+202E, U+2066–U+2069), a zero-width space or mark (U+200B–U+200F),
+// U+FEFF — which a terminal draws as nothing, or by reordering what follows,
+// so a row could read as another path than the one an accept writes. Shown,
+// the row says what is there. It is the file source's own rule, not
+// sanitizeLine's: the transcript draws emoji, whose joiner (U+200D) is a
+// format character. Only the row's text changes — the candidate writes, and
+// is matched and ranked by, its path — and a path of printable ASCII, most
+// of them, is its own display form.
+func atFileName(p string) string {
+	for i := 0; i < len(p); i++ {
+		if c := p[i]; c <= ' ' || c >= utf8.RuneSelf {
+			return atShowFormat(sanitizeLine(p))
+		}
+	}
+	return p
+}
+
+// atShowFormat is s with every format character (Cf) written as `<U+XXXX>`.
+func atShowFormat(s string) string {
+	if strings.IndexFunc(s, atIsFormat) < 0 {
+		return s
+	}
+	var b strings.Builder
+	for _, r := range s {
+		if atIsFormat(r) {
+			fmt.Fprintf(&b, "<U+%04X>", r)
+			continue
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
+}
+
+func atIsFormat(r rune) bool { return unicode.Is(unicode.Cf, r) }
 
 // atMatcher is a query compiled for matching: its fold, its runes as the
 // byte strings they are in the fold, and room for three alignments' positions

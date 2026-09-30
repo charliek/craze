@@ -403,7 +403,10 @@ one space: `@internal/tui/app.go `. A path with a space in it is quoted, with
 `\"` and `\\` escaped inside the quotes — `@"docs/guide/getting started.md" `
 — and a folder ends in `/`: `@internal/tui/ `. That text is exactly what the
 agent receives: craze expands nothing and attaches nothing — the file's
-contents are not sent with the message.
+contents are not sent with the message. The popup's row shows a path's
+invisible Unicode format characters — a right-to-left override, a zero-width
+space — as their code points (`<U+202E>`), and a run of spaces as one, so a row
+reads as what the name holds; the pick writes the name exactly as it is.
 
 What happens next is the provider's. **grok** reads the `@path` in the message
 itself and attaches the whole file to what it sends its model — the message

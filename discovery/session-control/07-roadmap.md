@@ -387,7 +387,7 @@ terminal, and on the mac `←` was pressed before the question arrived (`13`,
 SF-99). Automated: `tests/cli/test_sessions.py`, `test_dispatch.py` and
 `test_tui_composer_at_mentions_a_file` in real terminals, and 31 new frame
 goldens across PRs 2–4, with no existing golden or fixture moved (V6).
-Everything S4a and S5 found and did not do is in `13`, SF-68–SF-102 (the
+Everything S4a and S5 found and did not do is in `13`, SF-68–SF-103 (the
 plan's own rows, PR 1's, and those of PRs 2–4 and the live smoke). **S4b (the
 hub) is next, then S3.**
 

@@ -15,6 +15,7 @@ import (
 	"syscall"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
@@ -748,6 +749,92 @@ func TestAtFilesCandidatesWriteTheirPath(t *testing.T) {
 	c, _ = popKey(&p, keyOf(tea.KeyEnter))
 	if c.value != "@internal/tui/app.go " {
 		t.Fatalf("accepting inside wrote %q", c.value)
+	}
+}
+
+// A candidate's row draws its path's display form and an accept writes the
+// path as it is (X200): a format character — the override that draws
+// `\u202Egpj.exe` as `exe.jpg`, a zero-width space, a byte order mark, an
+// isolate, a tag, an emoji's joiner — is shown as `<U+XXXX>`, so no drawn row
+// holds one; a run of spaces is drawn as one (sanitizeLine) and written as
+// it is. The match is the path's: a query finds a path by what it holds,
+// never by its display form.
+func TestAtFilesRowsShowWhatAPathHolds(t *testing.T) {
+	for _, tc := range []struct{ path, name string }{
+		{"plain.go", "plain.go"},
+		{"notes/my plan.txt", "notes/my plan.txt"},
+		{"ünï/Cödé.go", "ünï/Cödé.go"},
+		{"\u202Egpj.exe", "<U+202E>gpj.exe"},
+		{"zero\u200Bwidth.go", "zero<U+200B>width.go"},
+		{"two  spaces.md", "two spaces.md"},
+		{"\uFEFFbom \u2066x\u2069.txt", "<U+FEFF>bom <U+2066>x<U+2069>.txt"},
+		{"tag\U000E0001.md", "tag<U+E0001>.md"},
+		{"👩\u200D💻.md", "👩<U+200D>💻.md"},
+		{"d\u200B/", "d<U+200B>/"},
+	} {
+		if got := atFileName(tc.path); got != tc.name {
+			t.Errorf("atFileName(%q) = %q, want %q", tc.path, got, tc.name)
+		}
+	}
+
+	rlo, zwsp, spaces := "notes/\u202Egpj.exe", "zero\u200Bwidth.go", "two  spaces.md"
+	x := newAtFileIndex([]string{rlo, zwsp, spaces}, "")
+	items, more := x.match("", 100)
+	got := make(map[string]completeItem, len(items))
+	for _, it := range items {
+		got[it.Value] = it
+	}
+	want := []completeItem{
+		{Name: "notes/", Value: "notes/", Insert: "notes/", Openable: true},
+		{Name: "notes/<U+202E>gpj.exe", Value: rlo, Insert: rlo},
+		{Name: "zero<U+200B>width.go", Value: zwsp, Insert: zwsp},
+		{Name: "two spaces.md", Value: spaces, Insert: spaces},
+	}
+	if len(items) != len(want) || more != 0 {
+		t.Fatalf("offered %+v (more %d), want %d candidates", items, more, len(want))
+	}
+	for _, w := range want {
+		if got[w.Value] != w {
+			t.Errorf("the candidate for %q: %+v, want %+v", w.Value, got[w.Value], w)
+		}
+	}
+	if names, _ := matchNames(x, "gpj", 100); !slices.Equal(names, []string{"notes/<U+202E>gpj.exe"}) {
+		t.Errorf("gpj offers %q, want the path it is in", names)
+	}
+	if names, _ := matchNames(x, "U+", 100); len(names) != 0 {
+		t.Errorf("U+ offers %q: a query matched a display form", names)
+	}
+
+	// Through the popup: no drawn row holds a format character, every row
+	// reads as its display form, and an accept writes the path.
+	src := atFileSource{search: func(context.Context, string) completeLoaded { return completeLoaded{Data: x} }}
+	env := completeEnv{Workspace: "/w", Shown: 1}
+	open := func(typed string) completePopup {
+		p := newCompletePopup(src, atGrammar)
+		p.loaded(awaitLoaded(t, runLoad(t, synced(&p, typed, env))))
+		return p
+	}
+	p := open("@")
+	view := p.view(Preset("dark"), 60, 12)
+	if i := strings.IndexFunc(view, atIsFormat); i >= 0 {
+		r, _ := utf8.DecodeRuneInString(view[i:])
+		t.Fatalf("the popup draws %U raw:\n%s", r, plain(view))
+	}
+	drawn := strings.Join(trimmed(popupText(p, 60, 12)), "\n")
+	for _, w := range want {
+		if !strings.Contains(drawn, w.Name) {
+			t.Errorf("no row reads %q:\n%s", w.Name, drawn)
+		}
+	}
+	for typed, token := range map[string]string{
+		"@gpj":  "@" + rlo + " ",
+		"@zero": "@" + zwsp + " ",
+		"@two":  `@"two  spaces.md" `,
+	} {
+		p := open(typed)
+		if c, _ := popKey(&p, keyOf(tea.KeyEnter)); c.value != token {
+			t.Errorf("accepting %s wrote %q, want %q", typed, c.value, token)
+		}
 	}
 }
 
