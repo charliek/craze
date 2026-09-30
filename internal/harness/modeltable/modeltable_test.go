@@ -60,7 +60,7 @@ func validTable() *Table {
 				Driver:  DriverOpenAICompat,
 				BaseURL: "https://api.fireworks.example/inference/v1",
 				EnvKeys: []string{"FIREWORKS_API_KEY"},
-				Source:  SourceGX,
+				Source:  "gx", // an older craze wrote this; it still loads
 			},
 			"openrouter": {
 				Driver:  DriverOpenRouter,
@@ -79,7 +79,7 @@ func validTable() *Table {
 				Efforts:         []string{"low", "high", "max"},
 				DefaultEffort:   "high",
 				Vision:          true,
-				Source:          SourceGX,
+				Source:          "gx",
 			},
 			"openrouter/minimax-m3": {
 				Provider:  "openrouter",
@@ -184,7 +184,7 @@ func TestSaveRoundTripsThroughLoad(t *testing.T) {
 		if !strings.HasPrefix(body, "# craze native harness") {
 			t.Errorf("%s does not start with its header comment:\n%s", name, body)
 		}
-		for _, phrase := range []string{"machine-rewritten by `craze import gx`", "comments and key order", `source = "manual"`} {
+		for _, phrase := range []string{"was written by craze", "comments and key order"} {
 			if !strings.Contains(body, phrase) {
 				t.Errorf("%s header lacks %q", name, phrase)
 			}
@@ -205,7 +205,7 @@ func TestSaveRoundTripsThroughLoad(t *testing.T) {
 // TestSaveWritesStableReadableFiles pins the body models.toml is written
 // with: one blank-line-separated section per alias in sorted order, absent
 // optional fields left out rather than written as zero. Saving the same table
-// twice gives the same bytes, so an import that changed nothing shows no diff.
+// twice gives the same bytes, so a save that changed nothing shows no diff.
 func TestSaveWritesStableReadableFiles(t *testing.T) {
 	const wantBody = `version = 1
 default_model = "fireworks/kimi-k3"
@@ -315,73 +315,6 @@ func TestLoadMissingFiles(t *testing.T) {
 		if err := Save("", validTable()); err == nil {
 			t.Fatal("Save(\"\") succeeded")
 		}
-	})
-}
-
-// TestLoadForImport covers the one case it differs from Load in: a lone file,
-// which an interrupted first Save (providers.toml first) leaves behind. Load
-// refuses it; LoadForImport reads it for the import to merge into, still
-// strictly, and skips only the checks that need the missing file.
-func TestLoadForImport(t *testing.T) {
-	t.Run("neither file: nothing to merge into", func(t *testing.T) {
-		got, err := LoadForImport(t.TempDir())
-		if err != nil || got != nil {
-			t.Fatalf("LoadForImport = %v, %v; want nil, nil", got, err)
-		}
-	})
-	t.Run("providers.toml alone, after an interrupted first save", func(t *testing.T) {
-		dir := t.TempDir()
-		if err := Save(dir, validTable()); err != nil {
-			t.Fatal(err)
-		}
-		mpath := filepath.Join(dir, ModelsFile)
-		if err := os.Remove(mpath); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := Load(dir); err == nil || errors.Is(err, ErrNotConfigured) {
-			t.Fatalf("Load = %v, want the lone-file error, unchanged", err)
-		}
-		got, err := LoadForImport(dir)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if !reflect.DeepEqual(got.Providers, validTable().Providers) || len(got.Models) != 0 || got.DefaultModel != "" {
-			t.Fatalf("LoadForImport = %+v, want the providers and nothing else", got)
-		}
-		if len(got.Warnings) != 1 || !strings.Contains(got.Warnings[0], mpath+" is missing") {
-			t.Fatalf("Warnings = %q, want one naming %s", got.Warnings, mpath)
-		}
-	})
-	t.Run("models.toml alone: its providers are not checked", func(t *testing.T) {
-		got, err := LoadForImport(writeFiles(t, "", validModels))
-		if err != nil {
-			t.Fatal(err)
-		}
-		if !reflect.DeepEqual(got.Models, validTable().Models) || len(got.Providers) != 0 || got.DefaultModel != "fireworks/kimi-k3" {
-			t.Fatalf("LoadForImport = %+v, want the models and default", got)
-		}
-	})
-	t.Run("the lone file is still strict and valid on its own", func(t *testing.T) {
-		cases := []struct {
-			name, providers, models, file, table, key string
-		}{
-			{"unknown key", validProviders + "bse_url = \"x\"\n", "", ProvidersFile, "providers.openrouter", "bse_url"},
-			{"provider rule", strings.Replace(validProviders, `driver = "openrouter"`, `driver = "bogus"`, 1), "", ProvidersFile, "providers.openrouter", "driver"},
-			{"default_model still names a model", "", strings.Replace(validModels, `default_model = "fireworks/kimi-k3"`, `default_model = "nope"`, 1), ModelsFile, "", "default_model"},
-			{"model rule", "", strings.Replace(validModels, `default_effort = "high"`, `default_effort = "medium"`, 1), ModelsFile, `models."fireworks/kimi-k3"`, "default_effort"},
-		}
-		for _, tc := range cases {
-			t.Run(tc.name, func(t *testing.T) {
-				dir := writeFiles(t, tc.providers, tc.models)
-				_, err := LoadForImport(dir)
-				wantFileError(t, err, filepath.Join(dir, tc.file), tc.table, tc.key)
-			})
-		}
-	})
-	t.Run("both files: exactly Load, cross-file checks included", func(t *testing.T) {
-		dir := writeFiles(t, validProviders, strings.Replace(validModels, `provider = "openrouter"`, `provider = "nope"`, 1))
-		_, err := LoadForImport(dir)
-		wantFileError(t, err, filepath.Join(dir, ModelsFile), `models."openrouter/minimax-m3"`, "provider")
 	})
 }
 

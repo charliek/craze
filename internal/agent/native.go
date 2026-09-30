@@ -43,8 +43,9 @@ const (
 )
 
 // errNoModels is Start's answer when the harness has never been set up: the
-// one thing to do about it is import the model table.
-var errNoModels = errors.New(`native: no models configured — run "craze import gx"`)
+// one thing to do about it is write the two model files, so the returned error
+// wraps this and names the directory to write them in (plan 031 §3.5).
+var errNoModels = errors.New("native: no models configured")
 
 // nativeSession is the native adapter. Its turn state mirrors the live
 // session's: claimed from Begin until the continuation returns, inPrompt
@@ -973,7 +974,8 @@ func (s *nativeSession) open() (*harness.Session, *modeltable.Table, nativeLoad,
 	if hopts.Table == nil {
 		table, err := modeltable.Load(hopts.Home)
 		if errors.Is(err, modeltable.ErrNotConfigured) {
-			return nil, nil, none, errNoModels
+			return nil, nil, none, fmt.Errorf("%w — write %s and %s in %s (see the configuration reference)",
+				errNoModels, modeltable.ProvidersFile, modeltable.ModelsFile, hopts.Home)
 		}
 		if err != nil {
 			return nil, nil, none, fmt.Errorf("native: %w", err)

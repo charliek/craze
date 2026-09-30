@@ -7,8 +7,8 @@
 // §3.2, §3.3).
 //
 // Load reads and validates both into one Table; Resolve turns an alias into
-// everything the llm factory needs, key included; Save writes a Table back,
-// which is what `craze import gx` does after merging (package gximport).
+// everything the llm factory needs, key included; Save writes a Table back
+// (test infrastructure: no product code writes these files).
 //
 // Both files are decoded strictly: a key the schema does not have is a load
 // error naming the file, the table and the key, because models.toml is edited
@@ -54,11 +54,9 @@ const (
 	DriverOpenAICompat = "openai-compat"
 	DriverOpenRouter   = "openrouter"
 
-	// SourceGX marks an entry `craze import gx` owns: a re-import replaces it
-	// wholesale. SourceManual marks one the owner does; an entry with no
-	// source loads as manual. Any other source is accepted verbatim and, like
-	// manual, never touched by an import — the safe reading of a typo.
-	SourceGX     = "gx"
+	// SourceManual is the source of an entry the owner wrote; an entry with no
+	// source loads as manual. Any other source string is accepted verbatim, so
+	// a file an older craze wrote (source = "gx") still loads.
 	SourceManual = "manual"
 
 	// MinKeyLen is the shortest API key craze accepts, in bytes, after
@@ -75,8 +73,8 @@ const (
 // toolProfiles are the names a model's tool_profile may give, the default
 // first. The native harness registers the profiles themselves (package
 // internal/harness/tool/opencode); the catalog keeps its own copy of their
-// names, so loading models.toml — which `craze import gx` does too — links no
-// tool code. A test pins the copy to the profiles.
+// names, so loading models.toml links no tool code. A test pins the copy to
+// the profiles.
 var toolProfiles = []string{"opencode"}
 
 // ToolProfiles returns the names a model's tool_profile may give, the
@@ -154,9 +152,7 @@ type Model struct {
 	Vision        bool
 	// ToolProfile names the tool profile — tools and system prompt — a
 	// session started on this model gets (plan 019 §3.1, Seam 2). "" is the
-	// default. Load refuses a name not in ToolProfiles. An import never
-	// writes it, so on a gx-sourced model it lasts only until the next
-	// import; source = "manual" keeps it.
+	// default. Load refuses a name not in ToolProfiles.
 	ToolProfile string
 	Source      string
 	// Cost is [models."<alias>".cost] (plan 028 §3.14): nil when the file's
@@ -187,9 +183,8 @@ type Cost struct {
 const MaxCostPerMillion = 10000.0
 
 // Clone is c with pointers of its own, nil when c is nil: changing the
-// clone's rates through its pointers never changes c's (mirrors
-// Compaction.Clone, for the same reason — a merge that carries c forward
-// must not alias the table it carries it from).
+// clone's rates through its pointers never changes c's (a merge that carries c
+// forward must not alias the table it carries it from).
 func (c *Cost) Clone() *Cost {
 	if c == nil {
 		return nil
@@ -229,10 +224,9 @@ const (
 // Compaction is one Table's [compaction] section (plan 028 §3.6). Each field
 // is nil when the file leaves its key out, which is its default, so a table
 // saves exactly the keys its file wrote — none, and no section, for a file
-// with none — and an import keeps the section as the owner wrote it. Read the
-// settings through Auto, ThresholdPercent and TailTokens, which apply the
-// defaults. The section applies to every model; a per-model override is a
-// follow-up.
+// with none. Read the settings through Auto, ThresholdPercent and TailTokens,
+// which apply the defaults. The section applies to every model; a per-model
+// override is a follow-up.
 type Compaction struct {
 	// AutoSet is `auto`: whether a session compacts on its own — before a
 	// turn and between its steps — when its context reaches the threshold.
@@ -270,13 +264,6 @@ func (c Compaction) TailTokens() int {
 		return DefaultTailTokens
 	}
 	return *c.TailTokensSet
-}
-
-// Clone is c with values of its own: changing one of the copy's settings
-// through its pointer never changes c's.
-func (c Compaction) Clone() Compaction {
-	return Compaction{AutoSet: clonePtr(c.AutoSet), ThresholdPercentSet: clonePtr(c.ThresholdPercentSet),
-		TailTokensSet: clonePtr(c.TailTokensSet)}
 }
 
 func clonePtr[T any](p *T) *T {
@@ -375,24 +362,21 @@ type modelEntry struct {
 func (d *providersDoc) version() int { return d.Version }
 func (d *modelsDoc) version() int    { return d.Version }
 
-// Headers written above each file's body. Both files are machine-rewritten on
-// every import, so a comment added by hand would be lost; the header says so
-// and names the one rule that does keep a hand edit.
+// Headers written above each file's body. Save rewrites both files whole, so
+// a comment added by hand would be lost; the header says so.
 const (
 	providersHeader = `# craze native harness: provider endpoints and API keys.
 #
-# This file is machine-rewritten by ` + "`craze import gx`" + `: comments and key order
-# are not preserved. An import replaces every entry whose source is "gx"; to
-# keep a hand edit, set that entry's source = "manual". API keys live only
-# here: keep this file 0600 and never paste it anywhere.
+# This file was written by craze: comments and key order are not preserved if
+# craze rewrites it. API keys live only here: keep this file 0600 and never
+# paste it anywhere.
 
 `
 	modelsHeader = `# craze native harness: model aliases, wire ids, limits and efforts.
 #
-# This file is machine-rewritten by ` + "`craze import gx`" + `: comments and key order
-# are not preserved. An import replaces every entry whose source is "gx"; to
-# keep a hand edit, set that entry's source = "manual". No secrets live here
-# (API keys are in providers.toml), so it is safe to share.
+# This file was written by craze: comments and key order are not preserved if
+# craze rewrites it. No secrets live here (API keys are in providers.toml), so
+# it is safe to share.
 
 `
 )
@@ -400,33 +384,12 @@ const (
 // Load reads providers.toml and models.toml from dir and returns one
 // validated Table. When dir holds neither file the error matches both
 // ErrNotConfigured and fs.ErrNotExist; when it holds only one, the error
-// names the missing one and matches fs.ErrNotExist alone, because running an
-// import over the survivor would drop its hand-made entries.
+// names the missing one and matches fs.ErrNotExist alone: the two files are
+// read together.
 //
 // A providers.toml readable by group or others is tightened to 0600 before it
 // is read, and the fix is reported in Table.Warnings.
 func Load(dir string) (*Table, error) {
-	return load(dir, false)
-}
-
-// LoadForImport is Load for `craze import gx`, the one caller that merges into
-// what is on disk and then rewrites both files. It differs from Load in one
-// case: when exactly one file exists — which an interrupted first Save leaves
-// behind — the missing one reads as empty instead of failing, so the import
-// can merge into the survivor, keep its hand-made entries, and write a
-// complete pair. The survivor is still decoded strictly and validated on its
-// own; only the checks that need the missing file (a model's provider, or
-// default_model) are skipped, and a warning names the missing file. The table
-// it returns can then be invalid on its own, which is fine for its one use:
-// the merge's result is validated in full before it is saved.
-//
-// When neither file exists it returns nil and no error: there is nothing to
-// merge into. When both exist it is exactly Load.
-func LoadForImport(dir string) (*Table, error) {
-	return load(dir, true)
-}
-
-func load(dir string, forImport bool) (*Table, error) {
 	if dir == "" {
 		// paths.NativeDir is "" when there is no home directory; joining ""
 		// would read providers.toml from the working directory instead.
@@ -443,15 +406,9 @@ func load(dir string, forImport bool) (*Table, error) {
 	mb, merr := os.ReadFile(mpath)
 	pMissing, mMissing := errors.Is(perr, fs.ErrNotExist), errors.Is(merr, fs.ErrNotExist)
 	switch {
-	case pMissing && mMissing && forImport:
-		return nil, nil
 	case pMissing && mMissing:
 		return nil, fmt.Errorf("%w: %s holds neither %s nor %s (%w)",
 			ErrNotConfigured, dir, ProvidersFile, ModelsFile, fs.ErrNotExist)
-	case pMissing && forImport:
-		warnings = append(warnings, fmt.Sprintf("modeltable: %s is missing; importing as if it were empty", ppath))
-	case mMissing && forImport:
-		warnings = append(warnings, fmt.Sprintf("modeltable: %s is missing; importing as if it were empty", mpath))
 	case pMissing:
 		return nil, fmt.Errorf("modeltable: %s is missing although %s exists (%w)", ppath, ModelsFile, fs.ErrNotExist)
 	case mMissing:
@@ -500,7 +457,7 @@ func load(dir string, forImport bool) (*Table, error) {
 		m.Source = sourceOrManual(m.Source)
 		t.Models[alias] = m
 	}
-	if err := validate(t, ppath, mpath, crossFile{providers: !pMissing, models: !mMissing}); err != nil {
+	if err := validate(t, ppath, mpath); err != nil {
 		return nil, err
 	}
 	_, priceWarnings := pricedIdentities(t.Models)
@@ -564,11 +521,9 @@ func tighten(path string) (warning string) {
 // anything is written.
 //
 // providers.toml is written first, because it is the order whose
-// interruption leaves something loadable. An import never deletes a
-// provider, so if the second write never happens the old models.toml still
-// names only providers the new providers.toml has. On a first import there
-// is no old models.toml, and the lone providers.toml is what LoadForImport
-// reads so that re-running the import completes the pair.
+// interruption leaves something loadable: a save never deletes a provider, so
+// if the second write never happens the old models.toml still names only
+// providers the new providers.toml has.
 //
 // Each file is replaced by renaming a temporary file over its path, so a
 // providers.toml that is a symlink is replaced by a regular 0600 file; the
@@ -723,30 +678,19 @@ func encodeFile[E any](header string, top any, table string, entries map[string]
 // file is named by its base name: an in-memory table has no directory. Save
 // calls it, so an invalid table is never written.
 func (t *Table) Validate() error {
-	return validate(t, ProvidersFile, ModelsFile, crossFile{providers: true, models: true})
+	return validate(t, ProvidersFile, ModelsFile)
 }
 
-// crossFile says which files were read, and so which checks can hold. A
-// model's provider can only be checked when providers.toml was read, and
-// default_model only when models.toml was. Every caller but LoadForImport
-// reading a lone file has both.
-type crossFile struct {
-	providers, models bool
-}
-
-func validate(t *Table, pfile, mfile string, read crossFile) error {
+func validate(t *Table, pfile, mfile string) error {
 	for _, id := range slices.Sorted(maps.Keys(t.Providers)) {
 		if err := validateProvider(pfile, id, t.Providers[id]); err != nil {
 			return err
 		}
 	}
 	for _, alias := range slices.Sorted(maps.Keys(t.Models)) {
-		if err := validateModel(mfile, alias, t.Models[alias], t.Providers, read.providers); err != nil {
+		if err := validateModel(mfile, alias, t.Models[alias], t.Providers); err != nil {
 			return err
 		}
-	}
-	if !read.models {
-		return nil
 	}
 	if t.DefaultModel == "" {
 		return &FileError{File: mfile, Key: "default_model", Reason: "missing: name the alias a session starts on"}
@@ -826,7 +770,7 @@ func keyReason(err error) string {
 	return "overlaps craze's redaction marker, which would print the key back in its own place"
 }
 
-func validateModel(file, alias string, m Model, providers map[string]Provider, checkProvider bool) error {
+func validateModel(file, alias string, m Model, providers map[string]Provider) error {
 	at := func(key, reason string) error {
 		return &FileError{File: file, Table: toml.Key{"models", alias}.String(), Key: key, Reason: reason}
 	}
@@ -836,7 +780,7 @@ func validateModel(file, alias string, m Model, providers map[string]Provider, c
 	if m.Provider == "" {
 		return at("provider", "missing: name a provider in "+ProvidersFile)
 	}
-	if _, ok := providers[m.Provider]; checkProvider && !ok {
+	if _, ok := providers[m.Provider]; !ok {
 		return at("provider", fmt.Sprintf("%q is not a provider in %s", m.Provider, ProvidersFile))
 	}
 	if strings.TrimSpace(m.WireModel) == "" {
@@ -966,9 +910,8 @@ const DefaultMaxOutputTokens = 32000
 // above the default, even at or above the window; that is the owner's own
 // choice); otherwise DefaultMaxOutputTokens, held to a quarter of a known
 // window. craze knows no model's own output limit apart from max_output_tokens
-// itself (the table carries no separate one; craze import gx already writes
-// gx's max_completion_tokens there), so the window is all a default can be
-// checked against: one that took most of a small window would make a strict
+// itself (the table carries no separate one), so the window is all a default
+// can be checked against: one that took most of a small window would make a strict
 // server (vLLM refuses prompt + max_tokens above the context length) fail every
 // request, and would turn off automatic compaction, which compactionThreshold
 // skips when the ceiling takes the window. A quarter keeps that threshold at
@@ -1008,9 +951,8 @@ func resolveKey(id string, p Provider, getenv func(string) string) (Secret, erro
 // variable, never the value: under MinKeyLen bytes is ErrKeyTooShort, and
 // one that overlaps the redaction marker is ErrKeyOverlapsMarker. Load
 // already refuses such an inline key, but it reads no environment — a table
-// loads the same whatever is exported, and `craze import gx` never depends
-// on it — so one in an env var is caught here, when a session opens, for
-// every provider.
+// loads the same whatever is exported — so one in an env var is caught here,
+// when a session opens, for every provider.
 func (t *Table) Keys(getenv func(string) string) ([]Secret, error) {
 	if getenv == nil {
 		getenv = os.Getenv

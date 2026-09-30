@@ -590,7 +590,7 @@ func TestNativeStartRefusals(t *testing.T) {
 			want: []string{`mode "architecting"`, "agent, plan, ask"}, is: harness.ErrUnknownMode},
 		{name: "no model table", setup: func(t *testing.T, f *nativeFixture) {
 			t.Setenv("CRAZE_HOME", t.TempDir())
-		}, want: []string{`native: no models configured — run "craze import gx"`}, is: errNoModels},
+		}, want: []string{"native: no models configured — write providers.toml and models.toml in ", "(see the configuration reference)"}, is: errNoModels},
 		{name: "no craze directory", setup: func(t *testing.T, f *nativeFixture) {
 			t.Setenv("CRAZE_HOME", "")
 			t.Setenv("HOME", "")

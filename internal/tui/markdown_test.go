@@ -279,7 +279,7 @@ func TestMarkdownTableDoesNotCollapseIntoAParagraph(t *testing.T) {
 		"| --- | --- |",
 		"| `craze prompt --json` | Headless path. Same session events, written as JSON lines. |",
 		"| `craze frame` | Hidden. Runs the real TUI model with no terminal, feeds a key script, prints the final frame. Used for golden tests. |",
-		"| `craze import gx` | Copies gx model and provider settings into craze's config. |",
+		"| `craze attach` | Connects to a running session. |",
 		"| `craze bridge` | Byte pump between stdin/stdout and a running session's control socket, for an SSH client. It does not speak the protocol. |",
 		"| `craze version` | Prints the version. **make build** reports `dev`. |",
 		"",
@@ -305,7 +305,7 @@ func TestMarkdownTableDoesNotCollapseIntoAParagraph(t *testing.T) {
 		}
 	}
 	assertTableBarsLineUp(t, table)
-	for _, cmd := range []string{"craze prompt --json", "craze frame", "craze import gx", "craze bridge", "craze version"} {
+	for _, cmd := range []string{"craze prompt --json", "craze frame", "craze attach", "craze bridge", "craze version"} {
 		if !rowHasPrefix(table, cmd) {
 			t.Fatalf("no row opens with %q:\n%s", cmd, joined)
 		}

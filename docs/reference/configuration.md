@@ -547,6 +547,41 @@ choice overwrites a stale unknown id; `Esc` on the fallback default does not).
 `--agent-bin` / `$CRAZE_AGENT_BIN` override the **binary**. They do not select
 the dialect.
 
+## Native model files
+
+The native provider reads two files from `~/.craze/native/` (or
+`$CRAZE_HOME/native/`), and you write both by hand. `providers.toml` holds the
+endpoints and where each key comes from (an environment variable named in
+`env_keys`, or an inline `api_key`; keep the file `0600`). `models.toml` holds
+the aliases, wire model ids, limits and efforts, and no secrets. Both start
+with `version = 1`, and a session needs both. For example:
+
+```toml
+# providers.toml
+version = 1
+
+[providers.fireworks]
+driver   = "openai-compat"
+base_url = "https://api.fireworks.ai/inference/v1"
+env_keys = ["FIREWORKS_API_KEY"]
+```
+
+```toml
+# models.toml
+version = 1
+default_model = "fireworks/deepseek-v4p1-flash"
+
+[models."fireworks/deepseek-v4p1-flash"]
+provider   = "fireworks"
+wire_model = "accounts/fireworks/models/deepseek-v4p1-flash"
+```
+
+Every other key of a model is optional and is documented in the sections
+below: [`max_output_tokens`](#native-output-ceiling),
+[`[compaction]`](#native-compaction) and [`cost`](#native-cost). A key craze
+does not know is a load error that names the file and the key. Until both files
+exist, a native session refuses to start and says where to write them.
+
 ## Native output ceiling
 
 On the native provider (`--provider native`), every request to a model names
@@ -577,9 +612,8 @@ about 213,000 tokens, the default therefore moves that trigger below 85% of the
 window (to 75% under 128,000 tokens), where before it sat at 85%; a session
 resumed after upgrading that is already past the new trigger compacts before
 its next turn. A smaller `max_output_tokens` moves the trigger back up.
-`craze import gx` writes gx's `max_completion_tokens` here
-when gx has one; to keep a hand-set value across a reimport, set the entry's
-`source = "manual"`.
+The value is your own entry in `models.toml`; craze
+never rewrites it.
 
 ## Native compaction
 
@@ -598,12 +632,9 @@ tail_tokens       = 20000   # optional, >= 0: the most, in tokens, of a
 ```
 
 Every key is optional and applies to every model — a per-model override is a
-follow-up. `craze import gx` keeps the values of an existing `[compaction]`
-section — gx has no concept of it, so import never touches them — and a save
-keeps every value already set. Neither keeps the section byte for byte or
-whole: a save re-encodes the whole `models.toml` in its own canonical layout,
-so hand-written comments and formatting are not preserved, and a section left
-with none of these keys is dropped (omitted) rather than written out empty.
+follow-up. The section is your own entry in `models.toml`: craze reads it and
+never rewrites the file. If a tool of yours does re-encode the file, a section
+left with none of these keys is dropped rather than written out empty.
 
 ## Native cost
 
@@ -639,9 +670,9 @@ identity that set a *different* `cost` still load, with a warning naming
 both and saying which one's price is used. An identity with no priced alias
 is simply unpriced — its usage is still counted in tokens, but adds no cost.
 
-`craze import gx` keeps an existing entry's `cost` across a reimport — gx
-has no concept of it, so import never touches this table, the same as
-[`[compaction]`](#native-compaction) above.
+The `cost` table is your own entry in `models.toml`, the same as
+[`[compaction]`](#native-compaction) above: craze reads it and never rewrites
+it.
 
 ## Environment
 

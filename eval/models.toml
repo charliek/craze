@@ -3,7 +3,7 @@
 # provider     craze provider name; it picks the proxy route (and the key).
 # wire_model   the `model` every request must name (the proxy's allowlist).
 # effort       the one pinned reasoning effort per model -- the default craze and gx
-#              already share from `craze import gx` (reasoning-effort parity).
+#              already share (reasoning-effort parity).
 # craze / gx   the alias in each tool's model table (copied from the owner's tables
 #              by `crazeeval snapshot-config`).
 # opencode     <provider>/<model> in opencode's own ids (its built-in providers).

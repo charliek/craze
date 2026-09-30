@@ -11,7 +11,7 @@ import (
 var (
 	// ErrNotConfigured is Load's error when the directory holds neither file:
 	// the harness has never been set up, and the caller's actionable answer is
-	// to run `craze import gx`. The error also matches fs.ErrNotExist.
+	// to write the two files. The error also matches fs.ErrNotExist.
 	ErrNotConfigured = errors.New("modeltable: no models configured")
 
 	// ErrUnknownModel is Resolve's error for an alias the table does not have.
