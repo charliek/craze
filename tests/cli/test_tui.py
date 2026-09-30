@@ -450,6 +450,34 @@ def test_tui_echo_and_quit(craze_bin: Path, fake_agent_bin: Path, tmp_path: Path
     _wait_fake_gone(fake_agent_bin)
 
 
+def test_tui_composer_at_mentions_a_file(
+    craze_bin: Path, fake_agent_bin: Path, tmp_path: Path, both_modes: str
+) -> None:
+    """Plan 030 §3.16: `@` and part of a file's name in the composer opens the
+    file popup over the workspace -- listed by whatever this machine has, rg,
+    git or the walk -- `Enter` picks the file, and the text the agent receives
+    is exactly the `@relative/path` mention the pick wrote, nothing expanded:
+    the fake agent's echo is the proof. In both modes: it is a composer
+    feature, the opt-out's too.
+    """
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "zyqx-notes.md").write_text("never sent\n", encoding="utf-8")
+    with PTYCraze(craze_bin, fake_agent_bin, tmp_path) as tui:
+        # Up: the status row counts the session's elapsed time.
+        tui.wait_contains("│ 0m")
+        tui.write(b"see @zyqx")
+        # The typed token is `@zyqx`; only the popup's row names the path.
+        tui.wait_contains("src/zyqx-notes.md")
+        mark = tui.mark()
+        tui.write(b"\r")
+        tui.wait_contains_since("see @src/zyqx-notes.md", mark)
+        tui.write(b"now\r")
+        tui.wait_contains("echo: see @src/zyqx-notes.md now")
+        assert "never sent" not in _ANSI.sub("", tui.screen()), tui.screen()[-3000:]
+        quit_craze(tui)
+    _wait_fake_gone(fake_agent_bin)
+
+
 def test_tui_help_esc_then_quit(craze_bin: Path, fake_agent_bin: Path, tmp_path: Path, both_modes: str) -> None:
     with PTYCraze(craze_bin, fake_agent_bin, tmp_path) as tui:
         tui.wait_contains("cursor")

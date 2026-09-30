@@ -154,6 +154,11 @@ func (m Model) withSession(seed sessionSeed) Model {
 		// session it shows.
 		nativeDir: m.nativeDir,
 		nativeEnv: m.nativeEnv,
+		// The composer's `@` popup follows the draft, which is the TUI's
+		// (input): a switch to another session closes it first
+		// (switchBackend, openUnstarted), and the first adoption of the
+		// session shown keeps it open over the same draft (X121).
+		composerAt: m.composerAt,
 		// The counters that only ever move forward, across every session:
 		// no generation, gate id, stamp, restore or turn count is reused.
 		sessGen:       m.sessGen,
@@ -221,8 +226,10 @@ func (m Model) switchBackend(b backend.Backend, loading bool, indexTitle string)
 	m.stashDraft()
 	roster := m.sessList.roster
 	// The list's input goes with the list: its popup's load, if one runs, is
-	// cancelled (its answer is left behind by shownGen as well).
+	// cancelled (its answer is left behind by shownGen as well). So does the
+	// composer's `@` popup, which was the session left's (plan 030 §3.16).
 	m.sessList.in.closePopups()
+	m.composerAt.close()
 	m.sessList = sessListState{gen: m.sessList.gen, byDir: m.sessList.byDir}
 	info := b.Info()
 	ws := info.Workspace

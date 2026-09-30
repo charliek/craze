@@ -56,7 +56,7 @@ type regionID int
 const (
 	regionBand       regionID = iota // the session band (band.go), once the list has opened
 	regionTranscript                 // scrollback viewport
-	regionOverlay                    // help or the slash menu
+	regionOverlay                    // the slash menu, or the composer's `@` popup
 	regionTasks                      // pinned tasks panel
 	regionQueue                      // queued messages, above the spinner
 	regionSpinner                    // spinner line
@@ -90,7 +90,7 @@ var frameRegions = [regionCount]frameRegion{
 	},
 	regionOverlay: {
 		rows: func(s frameSizes) int { return s.overlay },
-		view: func(m Model, lay frameLayout) string { return m.overlayView(lay) },
+		view: func(m Model, lay frameLayout) string { return m.overlayBandView(lay) },
 	},
 	regionTasks: {
 		rows: frameSizes.tasks,
@@ -330,7 +330,7 @@ func (m *Model) computeLayout() frameLayout {
 	// opens, so a key handled before the next layout can still tell a band
 	// that will be drawn from one the screen has no room for.
 	lay.OverlayCap = max(0, rest-minTranscriptRows)
-	s.overlay = min(m.overlayRows(), lay.OverlayCap)
+	s.overlay = min(m.overlayBandRows(), lay.OverlayCap)
 	s.transcript = rest - s.overlay
 
 	y := 0

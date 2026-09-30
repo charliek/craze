@@ -31,7 +31,11 @@ import (
 // list is drawn from the roster, never from the session's stream, so there
 // is no transport to vary. A session opened from the list in place
 // (sessions-opened-*, §3.11) runs under both: its script starts on either
-// transport, and the session it opens is the fake list's own.
+// transport, and the session it opens is the fake list's own. The composer's
+// `@` popup (plan 030 §3.16, §3.17, composer-at-*) is in process alone too:
+// direct-Update frames over a fixed listing, since a frame script's model
+// searches the disk (rg, git or a walk) and a golden may not — the popup
+// reads nothing of the session's stream, only the draft and the workspace.
 //
 // It is held four ways:
 //
@@ -66,6 +70,10 @@ var goldenManifest = map[string]goldenRuns{
 	"ask-100x30":                             bothTransports,
 	"bash-80x24":                             bothTransports,
 	"composer-five-lines-80x24":              bothTransports,
+	"composer-at-dir-100x30":                 inprocOnly,
+	"composer-at-dir-80x24":                  inprocOnly,
+	"composer-at-files-100x30":               inprocOnly,
+	"composer-at-files-80x24":                inprocOnly,
 	"composer-full-line-100x30":              bothTransports,
 	"composer-long-line-100x30":              bothTransports,
 	"composer-nine-lines-100x30":             bothTransports,
@@ -478,8 +486,8 @@ func transportList(set map[frameTransport]bool) string {
 // sessions among them, and plan 031's two native model dialogs and five
 // /connect frames), the six picker frames, plan 030's restore-failed, its
 // ten session-list frames, the nine of the list's input (C14), the two of
-// the unstarted session (C15) and the four of the input's `/` popup (C16) in
-// process only.
+// the unstarted session (C15), the four of the input's `/` popup (C16) and
+// the four of the composer's `@` popup (C18) in process only.
 func TestTheGoldenManifestIsEveryGolden(t *testing.T) {
 	files, err := filepath.Glob(filepath.Join("testdata", "*.golden"))
 	if err != nil {
@@ -507,8 +515,8 @@ func TestTheGoldenManifestIsEveryGolden(t *testing.T) {
 			t.Errorf("the manifest runs %s under %v: a golden runs under both transports, or in process alone", name, runs)
 		}
 	}
-	if both != 122 || inprocAlone != 32 {
-		t.Errorf("the manifest lists %d goldens under both transports and %d in process alone, want 122 and 32 (A8)", both, inprocAlone)
+	if both != 122 || inprocAlone != 36 {
+		t.Errorf("the manifest lists %d goldens under both transports and %d in process alone, want 122 and 36 (A8)", both, inprocAlone)
 	}
 }
 

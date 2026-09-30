@@ -524,6 +524,7 @@ func (m Model) openUnstarted(spec SpawnSpec) (Model, tea.Cmd) {
 	}
 	u := &unstartedSession{spec: spec, models: m.sessNewModels(), home: m.sessList.home, from: from}
 	m.sessList.in.closePopups()
+	m.composerAt.close()
 	m.sessList = sessListState{gen: m.sessList.gen, byDir: m.sessList.byDir}
 	next := m.withSession(sessionSeed{workspace: spec.Workspace, provider: spec.Provider.Name()})
 	next.shownGen++

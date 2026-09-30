@@ -22,8 +22,8 @@ import (
 // files and directories under the shown session's workspace, for a mention
 // written into the prompt as `@relative/path` — the text every provider
 // receives, nothing expanded or attached (§3.16; attaching contents is a
-// follow-up). It is completePopup's source (complete.go); the composer wires
-// it in C18.
+// follow-up). It is completePopup's source (complete.go), for the composer's
+// `@` popup (composer_at.go).
 //
 // Two halves:
 //
@@ -106,17 +106,35 @@ var errAtFilesTimeout = errors.New("the file search timed out")
 const (
 	atFilesNoneNote   = "no files here"
 	atFilesNoRootNote = "no workspace to search"
+	// atFilesTitleLead leads the popup's title: `files in craze` — the
+	// workspace by the name the status row gives it (workspaceName).
+	atFilesTitleLead = "files in "
 )
 
-// atFilesCapTitle, atFilesWalkCapTitle and atFilesTimeoutTitle are the title
-// of a list that is not the workspace's whole: drawn in the rule above the
-// candidates, so that a file the list does not hold is not taken for one the
-// workspace does not.
+// atFilesCapTitle, atFilesWalkCapTitle and atFilesTimeoutTitle are what the
+// title says of a list that is not the workspace's whole (atFilesTitle):
+// drawn in the rule above the candidates, so that a file the list does not
+// hold is not taken for one the workspace does not.
 var (
 	atFilesCapTitle     = "only the first " + atGroupDigits(atFilesMax) + " files"
 	atFilesWalkCapTitle = "only the first " + atGroupDigits(atFilesWalkMax) + " entries"
 	atFilesTimeoutTitle = "listing stopped after " + atFilesTimeout.String()
 )
+
+// atFilesTitle is the popup's title rule: whose files these are — the
+// workspace, by its status-row name — and, when the list is not the
+// workspace's whole, why (partial: atFilesCapTitle, atFilesWalkCapTitle or
+// atFilesTimeoutTitle), after a `·`.
+// Every answer has it, the search still running and a failure's note
+// included, so the popup does not change height as the listing arrives, and
+// its rows are never taken for the transcript's above them.
+func atFilesTitle(root, partial string) string {
+	t := atFilesTitleLead + workspaceName(root)
+	if partial != "" {
+		t += " · " + partial
+	}
+	return t
+}
 
 // atGroupDigits is n written with a comma between each group of three
 // digits: 50,000.
@@ -142,33 +160,34 @@ func (s atFileSource) completeID() string { return atFilesSourceID }
 // complete answers a query from the workspace's listing — started, keyed by
 // the workspace, the first time it is asked, and matched over from then on.
 // A search that read nothing because it failed or ran out of time is a red
-// note; one that read something is offered, with a title when it is partial.
+// note; one that read something is offered, its title saying so when it is
+// partial (atFilesTitle).
 func (s atFileSource) complete(q completeQuery) completeAnswer {
 	root := q.Workspace
 	if root == "" {
 		// The composer offers no `@` popup without a workspace (§3.16).
 		return completeAnswer{Note: atFilesNoRootNote}
 	}
+	title := atFilesTitle(root, "")
 	l, back := q.Loaded(root)
 	if !back {
 		search := s.search
-		return completeAnswer{Load: &completeLoad{Key: root, Run: func(ctx context.Context) completeLoaded {
+		return completeAnswer{Title: title, Load: &completeLoad{Key: root, Run: func(ctx context.Context) completeLoaded {
 			return search(ctx, root)
 		}}}
 	}
 	if l.Err != nil {
-		return completeAnswer{Note: atFilesErrNote(l.Err), NoteErr: true}
+		return completeAnswer{Title: title, Note: atFilesErrNote(l.Err), NoteErr: true}
 	}
 	x, _ := l.Data.(*atFileIndex)
+	if x != nil {
+		title = atFilesTitle(root, x.title)
+	}
 	if x == nil || len(x.names) == 0 {
-		ans := completeAnswer{Note: atFilesNoneNote}
-		if x != nil {
-			ans.Title = x.title
-		}
-		return ans
+		return completeAnswer{Title: title, Note: atFilesNoneNote}
 	}
 	items, more := x.match(q.Text, atFilesRankMax)
-	return completeAnswer{Title: x.title, Items: items, More: more}
+	return completeAnswer{Title: title, Items: items, More: more}
 }
 
 // atFilesErrNote is the note for a search that offered nothing: it ran out of

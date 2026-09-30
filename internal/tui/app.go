@@ -687,6 +687,13 @@ type Model struct {
 	// retired is: a popup cancels its own as it closes, and finishRun cancels
 	// whatever a quit the popup never saw left running (sol r28-c14 2).
 	completeLoads *completeLoadSet
+	// composerAt is the composer's `@` popup (plan 030 §3.16,
+	// composer_at.go): the files of the shown session's workspace, completed
+	// into an `@` token of the draft. The TUI's, as input is — it follows the
+	// draft, synced with it after every applied message (finish) — and closed
+	// where another session is shown (switchBackend, openUnstarted), its
+	// search cancelled.
+	composerAt completePopup
 	// unstarted is the session shown when it is a new one opened in place by
 	// the list's input with a leading `@dir` alone, not yet spawned (plan 030
 	// §3.13, dispatch.go): the model has no backend while it is set, and its
@@ -1580,6 +1587,7 @@ func New(cfg Config) Model {
 
 	th := Preset(cfg.Theme)
 	prov := configProvider(cfg.Provider)
+	loads := &completeLoadSet{}
 	// The TUI's half, from the Config; the session's half is the one
 	// constructor every session's state is made by, a switch's included
 	// (withSession, plan 030 §3.11).
@@ -1617,10 +1625,14 @@ func New(cfg Config) Model {
 		shell:         newShellController(),
 		sessRosters:   &sessRosterSet{},
 		retired:       &backendSet{},
-		completeLoads: &completeLoadSet{},
-		gateSync:      gateSyncDefault,
-		nativeDir:     configNativeDir(cfg.NativeDir),
-		nativeEnv:     configGetenv(cfg.Getenv),
+		completeLoads: loads,
+		// The composer's `@` popup searches the disk: rg, git or a walk of
+		// the workspace (at_files.go). A test hands it a listing of its own
+		// (setSource).
+		composerAt: newComposerAt(atFileSource{search: newAtFileSearcher().search}, loads),
+		gateSync:   gateSyncDefault,
+		nativeDir:  configNativeDir(cfg.NativeDir),
+		nativeEnv:  configGetenv(cfg.Getenv),
 		// The first session shown is shown from here, before any backend
 		// of it is adopted (shownGen): 1, so no message the program makes
 		// carries the zero stamp a test's hand-built one does.
@@ -1973,6 +1985,13 @@ func (m Model) finish(cmd tea.Cmd) (Model, tea.Cmd) {
 	// background transcript (U3b) never moves m.vp.
 	if next.cur().dirty {
 		next.refreshViewport()
+	}
+	// The composer's `@` popup follows the draft the handler left (plan 030
+	// §3.16): synced here, where every change to the draft passes, and before
+	// the layout that gives it its rows. Its search, when an opening starts
+	// one, runs off the Update.
+	if at := next.syncComposerAt(); at != nil {
+		cmd = tea.Batch(cmd, at)
 	}
 	// The handler has already decided where the transcript sits: sticking now
 	// only follows it down when the chrome above it changed shape.
@@ -2368,6 +2387,15 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// inserts the whole thing as text instead of reading it as keys.
 		return m, m.updateComposer(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(msg.text), Paste: true})
 
+	case completeLoadedMsg:
+		// The composer `@` popup's search (plan 030 §3.16): the list's own
+		// results were applySessMsg's. One asked for in a session the model
+		// has since left never gets here (staleShown, X125).
+		if msg.source != atFilesSourceID {
+			return m, nil
+		}
+		return m.composerAtLoaded(msg)
+
 	case dblClickMsg:
 		// The frame runner's deterministic double-click: two real presses would
 		// make a golden depend on the clock. The state machine itself is
@@ -2675,6 +2703,12 @@ func (m Model) handleClick(x, y int) (tea.Model, tea.Cmd) {
 	}
 	switch {
 	case lay.Region(regionOverlay).Contains(y):
+		if m.composerAtShown() {
+			// The composer's `@` popup is the keyboard's alone (plan 030
+			// §3.16): a click on it does nothing, and never reaches a slash
+			// token inside a quoted `@"…"` the band is not drawing.
+			return m, nil
+		}
 		// slashTop is the top syncSlash settled for the frame just drawn, so
 		// a click after scrolling lands on the row that was actually on
 		// screen, not row 0 of the whole catalog. acceptSlash no-ops past
@@ -2883,6 +2917,13 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.cancelQueueEdit()
 			return m, nil
 		}
+		// The composer's `@` popup takes Esc where the slash menu does, and
+		// for the same thing (plan 030 §3.16, X127): it hides for the token
+		// under the cursor, until that token changes, and the draft is
+		// untouched — a second Esc then cancels a running turn.
+		if next, ok := m.composerAtKey(msg); ok {
+			return next, nil
+		}
 		if m.slashActive() {
 			// Esc hides this token's menu and nothing else; the draft is
 			// untouched (pinned). Recording the token rather than setting a
@@ -2928,6 +2969,17 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// key type is tested first because slashRows() costs a catalog build.
 	// Esc is deliberately not here: its precedence is per-key (a queue edit
 	// outranks it), not per-band, so it stays in the ladder above.
+	//
+	// The composer's `@` popup is the same kind of band (plan 030 §3.16,
+	// X127): ↑/↓, ctrl+p/ctrl+n and tab are its while it is up — ahead of the
+	// arrows that leave the composer and of the textarea's own line keys —
+	// and PgUp/PgDn stay the transcript's. Enter is handleEnter's.
+	switch msg.Type {
+	case tea.KeyTab, tea.KeyUp, tea.KeyDown, tea.KeyCtrlP, tea.KeyCtrlN:
+		if next, ok := m.composerAtKey(msg); ok {
+			return next, nil
+		}
+	}
 	switch msg.Type {
 	case tea.KeyTab, tea.KeyUp, tea.KeyDown, tea.KeyPgUp, tea.KeyPgDown:
 		if rows := m.slashRows(); rows > 0 {
@@ -3201,6 +3253,14 @@ func (m *Model) settlePending(dc, cc engine.Command, ans clearAnswer) {
 func (m Model) handleEnter() (tea.Model, tea.Cmd) {
 	if m.confirm != nil {
 		return m.confirmStrongSend()
+	}
+	// The composer's `@` popup owns Enter while it has a candidate to accept
+	// (plan 030 §3.16, X127), ahead of the queue edit's save as the slash
+	// menu is: the pick completes the text being edited. With none — still
+	// searching, or nothing matches — Enter is the composer's, and the draft
+	// goes as it is typed.
+	if next, ok := m.composerAtKey(tea.KeyMsg{Type: tea.KeyEnter}); ok {
+		return next, nil
 	}
 	// The menu owns Enter while it is up, and it owns it before the queue edit
 	// saves: a row accepted inside an edit completes the text being edited, and

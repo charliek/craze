@@ -49,8 +49,9 @@ import (
 //     are more, as a block the owner places above the input it serves.
 //
 // The session list's input holds one for its leading `@` token (C14:
-// sessions_input.go, its source at_dirs.go); its `/` commands take one in
-// C16, and the composer in PR 4.
+// sessions_input.go, its source at_dirs.go) and one for its `/` commands
+// (C16: sessions_models.go); the composer holds one for its `@` tokens (PR 4:
+// composer_at.go, its source at_files.go).
 
 // completeMaxRows is the most candidate rows the popup draws: grok-build's
 // window, which the slash menu already copied (slashMaxRows), and every
