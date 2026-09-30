@@ -99,26 +99,23 @@ const (
 // ---------------------------------------------------------------- the spec
 
 // sessNewSpec is the new session enter on the list's input starts, in dir:
-// the provider and model of the session the list was opened from — as the
-// status row names them, the model its current one, or none ("" — the
-// provider's default) when it has not said one — and that session's
+// the provider and model /provider and /model chose (sessPick,
+// sessions_models.go, C16), else those of the session the list was opened
+// from — as the status row names them, the model its current one, or none
+// ("" — the provider's default) when it has not said one — and that session's
 // permission mode (§3.13, Claude Code's rule; PermissionUnsaid, from an older
 // host, is the launch's own flags). A provider this craze does not know
 // starts nothing.
 func (m Model) sessNewSpec(dir string) (SpawnSpec, error) {
-	name := m.snap.Provider.Name
-	if name == "" {
-		name = m.sessProvider
+	p, ok := m.sessNewProviderOf()
+	if !ok {
+		name := m.snap.Provider.Name
+		if name == "" {
+			name = m.sessProvider
+		}
+		return SpawnSpec{}, errNoProvider(name)
 	}
-	p, err := agent.ProviderByName(name)
-	if err != nil {
-		return SpawnSpec{}, fmt.Errorf("a new session cannot run provider %q", sanitizeLine(name))
-	}
-	model := m.snap.CurrentModel
-	if model == "" && m.model != "default" {
-		model = m.model
-	}
-	return SpawnSpec{Workspace: dir, Provider: p, Model: model, PermissionMode: m.hostPerm}, nil
+	return SpawnSpec{Workspace: dir, Provider: p, Model: m.sessNewModelID(), PermissionMode: m.hostPerm}, nil
 }
 
 // ------------------------------------------------------- background dispatch
@@ -133,7 +130,7 @@ func (m Model) sessDispatch(spec SpawnSpec, prompt string) (Model, tea.Cmd) {
 	l.dispatchSeq++
 	l.in.dispatching = l.dispatchSeq
 	// No popup while it starts: the input is not edited meanwhile.
-	l.in.at.close()
+	l.in.closePopups()
 	s, set, gen, seq := m.sessions, m.retired, l.gen, l.dispatchSeq
 	return m, func() tea.Msg {
 		out, err := runDispatch(s, spec, prompt, set)
@@ -299,8 +296,8 @@ type unstartedSession struct {
 	// the session's craze id (§3.11: the stash moves to the real id then).
 	draft string
 	// spec is where and as what it runs, captured at the enter that opened
-	// it; models the catalog of the session the list was opened from, which
-	// names spec's model on the status row.
+	// it; models the catalog that names spec's model on the status row: the
+	// session the list was opened from's, or /model's choice (sessNewModels).
 	spec   SpawnSpec
 	models []agent.ModelInfo
 	// home is $HOME as the list read it: the band's `~`.
@@ -351,8 +348,8 @@ func (m Model) openUnstarted(spec SpawnSpec) (Model, tea.Cmd) {
 	if from.zero() {
 		from = m.sessList.sel
 	}
-	u := &unstartedSession{spec: spec, models: m.snap.Models, home: m.sessList.home, from: from}
-	m.sessList.in.at.close()
+	u := &unstartedSession{spec: spec, models: m.sessNewModels(), home: m.sessList.home, from: from}
+	m.sessList.in.closePopups()
 	m.sessList = sessListState{gen: m.sessList.gen, byDir: m.sessList.byDir}
 	next := m.withSession(sessionSeed{workspace: spec.Workspace, provider: spec.Provider.Name()})
 	next.shownGen++

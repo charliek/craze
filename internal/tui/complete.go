@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 	"unicode"
 	"unicode/utf8"
 
@@ -366,10 +367,13 @@ type completeLoad struct {
 }
 
 // completeLoaded is what a load brought back: its candidates, which the
-// source then filters and orders for each query, or why there are none.
+// source then filters and orders for each query, or why there are none — and,
+// for a source that says how old its candidates are, when what the load read
+// was observed (the list's /model: a cached catalog's `last seen`; C16).
 type completeLoaded struct {
 	Items []completeItem
 	Err   error
+	At    time.Time
 }
 
 // completeLoadedMsg is a load's result on its way to the popup that ran it,

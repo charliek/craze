@@ -155,7 +155,10 @@ Environment:
                        straight through.
   CRAZE_FAKE_SESSION_ID=<id>  session/new answers this session id instead of
                        fake-session-1, so several sessions in one test HOME
-                       are several rows of its session index.
+                       are several rows of its session index. {dir} in it is
+                       the name of the agent's working directory -- the
+                       session's workspace -- for the hosts one terminal
+                       starts, which inherit its environment.
 
 Unknown arguments (including acp, --force, agent, stdio, --always-approve,
 --yolo, --no-auto-update, --trust) are ignored so this binary can stand in

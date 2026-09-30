@@ -1,6 +1,8 @@
 package tui
 
 import (
+	"time"
+
 	"github.com/charliek/craze/internal/agent"
 	"github.com/charliek/craze/internal/backend"
 	"github.com/charliek/craze/internal/roster"
@@ -79,6 +81,22 @@ type SessionStarter interface {
 	// picker's recent places, after the session the list came from and the
 	// directories with a running session.
 	RecentDirs(n int) ([]sessions.RecentDir, error)
+	// ModelCatalog is the model catalog a host of provider — an ACP
+	// provider, whose catalog exists only once a session of it has started —
+	// last installed (plan 030 §3.14's catalog cache, which craze serve
+	// writes), and false when there is none to offer: none recorded yet, or a
+	// file craze did not write, which is ignored. It is what the list's
+	// /model offers for that provider. Native's models are its model table
+	// (nativeModelChoices), never this.
+	ModelCatalog(provider string) (ModelCatalog, bool)
+}
+
+// ModelCatalog is a provider's cached model catalog: its models in the
+// agent's own order, and when a host saw them — the `last seen` /model
+// shows beside them, since a catalog can have changed since.
+type ModelCatalog struct {
+	Models     []agent.ModelInfo
+	ObservedAt time.Time
 }
 
 // SessionRoster is a running session-list poller (*roster.Roster).

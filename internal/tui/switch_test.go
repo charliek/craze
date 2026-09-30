@@ -1295,7 +1295,7 @@ var (
 		"providerDefault", "providers", "newSession", "spawnNew", "spawnLoad", "cont", "sessions", "sessList",
 		"sessRosters", "bandOn", "drafts", "retired", "sessGen", "bgen", "shownGen", "gateSeq",
 		"resumeAttempt", "spawnSeq", "restores", "turnStarts", "held", "heldBytes", "heldDrained", "syncAck",
-		"syncPending", "gateSync", "harnessQuit", "completeLoads", "unstartedSeq",
+		"syncPending", "gateSync", "harnessQuit", "completeLoads", "unstartedSeq", "sessPick",
 	}
 	sessionFields = []string{
 		"eng", "cmdSeq", "chains", "engErr", "cwd", "model", "status", "err", "startErr", "startInc", "git",

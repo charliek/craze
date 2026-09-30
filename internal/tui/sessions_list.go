@@ -368,7 +368,7 @@ func (m Model) leaveSessions() (tea.Model, tea.Cmd) {
 	r := m.sessList.roster
 	// The input's popup is dropped with the list: a load it is waiting for
 	// is cancelled, and its answer would find nothing to take it.
-	m.sessList.in.at.close()
+	m.sessList.in.closePopups()
 	m.sessList = sessListState{gen: m.sessList.gen, byDir: m.sessList.byDir}
 	m.ctrlCDeadline = time.Time{}
 	return m, m.sessRosters.closeCmd(r)
@@ -405,7 +405,7 @@ func (m Model) endedToList(err error) (Model, tea.Cmd, bool) {
 // program. The input's popup is closed first, so a directory listing it waits
 // for stops now rather than running on past the program (sol r28-c14 2).
 func (m Model) sessQuit() (tea.Model, tea.Cmd) {
-	m.sessList.in.at.close()
+	m.sessList.in.closePopups()
 	if m.quitting {
 		return m, tea.Quit
 	}
@@ -521,19 +521,31 @@ func (m Model) applySessMsg(msg tea.Msg) (Model, tea.Cmd, bool) {
 		sync := m.syncSessInput()
 		return m, sync, true
 	case completeLoadedMsg:
-		// The `@` popup's listing of a directory: the popup takes it only if
-		// it still awaits it (completePopup.loaded) — a later listing asked
-		// for, the popup closed, the list left or opened again, a switch.
-		// Another source's result is not the list's.
-		if msg.source != sessDirSourceID {
+		// The `@` popup's listing of a directory, or the `/` popup's models
+		// (C16): the popup takes it only if it still awaits it
+		// (completePopup.loaded) — a later listing asked for, the popup
+		// closed, the list left or opened again, a switch. Another source's
+		// result is not the list's.
+		if msg.source != sessDirSourceID && msg.source != sessCmdSourceID {
 			return m, nil, false
 		}
 		if !l.open || !l.in.on {
 			return m, nil, true
 		}
+		if msg.source == sessCmdSourceID {
+			l.in.cmd.setSource(m.sessCmdSourceNow())
+			cmd, _ := l.in.cmd.loaded(msg)
+			return m, cmd, true
+		}
 		l.in.at.setSource(m.sessAtSource())
 		cmd, _ := l.in.at.loaded(msg)
 		return m, cmd, true
+	case sessNativeDefaultMsg:
+		// /provider native's default model, read off the Update (C16): the
+		// pick is the TUI's, so it is taken whether the list is up or not.
+		next := m.sessNativeDefault(msg)
+		sync := next.syncSessInput()
+		return next, sync, true
 	case sessActionMsg:
 		if !l.open || msg.gen != l.gen {
 			return m, nil, true
@@ -1288,6 +1300,11 @@ func (m Model) sessAge(since time.Time) string {
 	if d < 0 || m.frozen {
 		d = 0
 	}
+	return sessAgeText(d)
+}
+
+// sessAgeText is an age in its one largest unit: `42s`, `5m`, `3h`, `6d`.
+func sessAgeText(d time.Duration) string {
 	switch {
 	case d < time.Minute:
 		return fmt.Sprintf("%ds", int(d/time.Second))
@@ -1346,9 +1363,9 @@ func sessColumns(width int, showDir bool) (title, want, dir int) {
 // and a spacer, the list, the footer rule and the hint line — exactly
 // width × height, or the too-small message below 40×10. With an input
 // (§3.13) the footer is the input's: the rule naming where a new session
-// would run, the input, the rule and the hint line, and the `@` popup, while
-// it is up, sits between the list and that rule, the list keeping at least
-// sessBodyMinRows.
+// would run, the input, the rule and the hint line, and the input's popup —
+// the `@` one or the `/` one — while it is up, sits between the list and that
+// rule, the list keeping at least sessBodyMinRows.
 func (m Model) sessionsView() string {
 	w, h := m.width, m.height
 	if w < sessMinCols || h < sessMinRows {
@@ -1362,8 +1379,9 @@ func (m Model) sessionsView() string {
 	}
 	avail := h - sessHeaderRows - footer
 	pop := 0
-	if in.on {
-		pop = in.at.height(max(0, avail-sessBodyMinRows))
+	popup, up := in.popup()
+	if in.on && up {
+		pop = popup.height(max(0, avail-sessBodyMinRows))
 	}
 	rows := make([]string, 0, h)
 	rows = append(rows, padRow(m.sessHeaderRow(lines), w), padRow("", w))
@@ -1371,7 +1389,7 @@ func (m Model) sessionsView() string {
 		rows = append(rows, padRow(ln, w))
 	}
 	if pop > 0 {
-		rows = append(rows, in.at.view(m.theme, w, pop))
+		rows = append(rows, popup.view(m.theme, w, pop))
 	}
 	if in.on {
 		rows = append(rows, padRow(m.sessTargetRule(w), w), padRow(m.sessInputRow(w), w))

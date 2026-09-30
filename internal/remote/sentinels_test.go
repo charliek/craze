@@ -663,6 +663,12 @@ var tuiSites = []tuiSite{
 	// given up at its own bound, the dispatch's context.
 	{"dispatch.go", "runDispatch", "Is", "backend.ErrOutcomeUnknown", 1, proofOutcome},
 	{"dispatch.go", "runDispatch", "Is", "context.DeadlineExceeded", 1, proofLocal},
+	// /provider and /model (plan 030 §3.14, C16): native's default model read
+	// from its model table off the Update — its key judged against this
+	// process's environment — and the hint line's word for one that could not
+	// be read; the disk's answers, never a Backend's.
+	{"sessions_models.go", "nativeDefaultModel", "Is", "modeltable.ErrNoAPIKey", 1, proofLocal},
+	{"sessions_models.go", "sessNativeDefault", "Error", "msg.err", 1, proofLocal},
 	{"theme.go", "noteAndSaveTheme", "Error", "err", 1, proofLocal},
 }
 

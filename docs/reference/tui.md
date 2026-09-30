@@ -517,17 +517,32 @@ it wants, provider, directory (`· here` for the session you came from), and
 how long it has been in its state. A session run by an older craze is listed
 with what that craze reports, and its version on the row (`· craze 0.0.9`).
 A host that has not answered yet is drawn with the working rows, `Starting…`
-or `Connecting…`. With no other session the list says `No other sessions.`
-It needs 40×10; smaller, it says so.
+or `Connecting…`. With no other session the list says `No other sessions.
+Type a prompt below to start one.` It needs 40×10; smaller, it says so.
+
+Under the rows is an input, always focused, where a new session is started
+([Starting a session from the list](#starting-a-session-from-the-list)): a
+prompt typed there and `Enter` starts one, `@` picks the directory it runs in,
+and `/provider` and `/model` choose what it runs. The rule above the input
+names where and as what the next one would start:
+
+```text
+─────────────────────────── new session → ~/projects/lumen · cursor · Composer 2.5 ─
+❯ type a prompt to start a session · @ picks a directory · / provider and model
+```
 
 | Key | Action |
 |---|---|
-| `↑` `↓` | move the selection; it stays on its session however the rows reorder |
-| `Enter`, `→` | on another session, [open it here](#opening-a-session-in-place); on a saved one, [resume it here](#saved-sessions); on the session you came from, go back to it; on `▸ saved`, expand or collapse the saved sessions. A host that is not answering says `that session is not answering` |
-| `Esc`, `←` | back to the session you came from — unless it ended while the list was up, when the list stays and says `that session ended`, or this terminal lost its connection to it, when the list stays and says `lost the connection to that session` |
+| typing | goes to the input under the list: a prompt, an `@` directory, a `/` command |
+| `↑` `↓` | move the selection; it stays on its session however the rows reorder (with a popup up over the input, they move its selection instead) |
+| `Enter` with something typed | start it: see [Starting a session from the list](#starting-a-session-from-the-list) |
+| `Enter`, `→` with nothing typed | on another session, [open it here](#opening-a-session-in-place); on a saved one, [resume it here](#saved-sessions); on the session you came from, go back to it; on `▸ saved`, expand or collapse the saved sessions. A host that is not answering says `that session is not answering` |
+| `Esc` with something typed | hide the input's popup, then clear the input |
+| `←` `→` with something typed | move the input's cursor (`Alt+←`/`Alt+→` by word) |
+| `Esc`, `←` with nothing typed | back to the session you came from — unless it ended while the list was up, when the list stays and says `that session ended`, or this terminal lost its connection to it, when the list stays and says `lost the connection to that session` |
 | `Ctrl+X` | on a working or asking session, stop its turn **and clear its queue**; on an idle or failed one, the first press arms a close (`ctrl+x again closes it`) and a second within two seconds ends the session on its host — any other key disarms it. Nothing on a saved row or a host that is not answering |
 | `Ctrl+S` | group by directory instead of by state, and back; the grouping is kept for the rest of the run |
-| `Ctrl+D`, `Ctrl+C` twice | quit craze; every session keeps running |
+| `Ctrl+D`, `Ctrl+C` twice, `/exit` in the input | quit craze; every session keeps running |
 
 The hint line under the list names what the selected row takes (`enter
 open`, `enter resume`, `enter back to it`, `ctrl+x stop` or `close`), and
@@ -591,6 +606,143 @@ session whose directory is gone, or whose provider this craze cannot resume,
 is refused on the hint line (`could not resume <title>: that session ran in
 …, which is no longer a directory`) and nothing is started. `Ctrl+X` does
 nothing on a saved row: nothing runs to stop.
+
+### Starting a session from the list
+
+What is typed in the input under the list is the first prompt of a new
+session. `Enter` starts it **in the background**: the list stays up, the input
+says `starting…` and takes nothing more until the session has answered (a
+second `Enter` does nothing), and a session host is spawned in the target
+directory, started, and given the prompt. The hint line then says what came
+of it:
+
+- `started in ~/projects/lumen` — the session took the prompt; the input is
+  cleared, and its row appears with the list's next refresh. It runs on its
+  host like any other session, and `Enter` on its row opens it here.
+- `could not start a session in ~/projects/lumen: <why>` — no session came up
+  (the host could not start, the agent refused the model, …) or the session
+  refused the prompt; the input keeps what was typed, and a host that was
+  spawned is stopped.
+- `may have started — check the list` — the connection went after the prompt
+  was sent, so the session may have taken it; the host is left running and
+  the input keeps the prompt.
+
+`Esc` or `←` while it starts leaves the list; the start carries on, and its
+row is listed as any other.
+
+The new session runs:
+
+- **where** the rule says: the directory a leading `@` token names (below);
+  else the selected row's directory — a running session's or a saved one's;
+  else the directory of the session you came from. With none of them the
+  rule says `no directory to start in: pick one with @`.
+- **as** the rule says: the provider and model chosen with [`/provider` and
+  `/model`](#provider-and-model), else those of the session you came from
+  (its current model, else the provider's default).
+- with the **permission mode** of the session you came from (`--force` or
+  `--no-force`, as its host reports it), the launch's `--plugin-dir`, and —
+  for a provider craze does not run in process — its `--agent-bin`. The
+  command line's own `--ask`, `--plan`, `--model` and `--provider` were for the
+  session it started and are not applied.
+
+All of it is decided when `Enter` is pressed: moving the selection while the
+session starts changes nothing.
+
+**`@dir` alone opens an unstarted session.** `Enter` on a leading `@` token
+with nothing after it opens a new session in that directory in place, and
+spawns nothing yet: the band says `new session · <provider> · ~/projects/lumen`,
+the status row names its directory, provider and model, and the composer says
+`type the first prompt to start this session`. Its first prompt spawns its
+host there and it comes up in this terminal like any session opened in place,
+the prompt sent as your first turn. If it cannot start, the session is
+unstarted again with the error on screen (`could not start the session: …`)
+and the prompt still in the composer. Slash commands and `!` do nothing
+until the session exists. `←` or `/sessions` before its first prompt discards it:
+nothing was spawned and nothing is left.
+
+`/exit`, alone, in the list's input quits craze and leaves every session
+running; `/exit` with anything after it is a prompt like any other.
+
+#### Choosing the directory: `@`
+
+Only an `@` token that is the **first thing** in the input picks the
+directory, and it is taken out of the prompt the agent receives (`@lumen tidy
+the changelog` sends `tidy the changelog`). An `@…` later in the input is
+ordinary prompt text, and text typed before a token makes it ordinary text
+too — the rule then falls back to the selected row, live.
+
+While the cursor is in the leading token a popup above the input offers:
+
+- **by name** — the directory of the session you came from (`here · 2
+  running`), then every directory a session is running in, the most recently
+  active first (`1 running`), then the ten most recent directories in the
+  [session index](configuration.md#session-index) that still exist (`used 3h
+  ago`). Typing narrows them: a name that starts with what is typed first,
+  then a path that contains it. Nothing is hard-coded: there is no projects
+  folder and no setting.
+- **by path** — a token that starts with `~`, `/` or `.` browses: `@~/`
+  lists the subdirectories of your home directory (`folders in ~`), those
+  whose names start with what follows the last `/`, sorted, at most 200.
+  Dot-directories are listed only once what is typed starts with `.`. `Tab`
+  descends into the highlighted one and stays open; `Enter` picks it. A
+  directory that is not there says `no directory ~/x`.
+
+`↑` `↓` (or `Ctrl+P` `Ctrl+N`) choose, `Tab` completes (it never starts
+anything), `Enter` picks, `Esc` hides the popup until the token changes.
+Picking writes the directory's name (`@lumen `) — its path when two
+candidates share a name, and `@"~/my dir" ` quoted when it has a space — and
+**binds** the token to that directory, whatever the list does meanwhile.
+Editing or deleting the token drops the binding; `Enter` then reads the token
+afresh — a name that is exactly one candidate's, or a path that is a
+directory — and one that names none, or more than one, is an error on the
+rule and the hint line (`no directory named @x`, `@x names 2 directories;
+pick one with @`), and nothing starts.
+
+### Provider and model
+
+`/` as the first thing in the list's input opens its commands:
+
+```text
+───────────────────────────────────────────────────────── commands ─
+❯ /provider  provider for new sessions             cursor
+  /model     model for new sessions                Composer 2.5
+  /exit      quit; sessions keep running
+```
+
+`/provider` and `/model` set what every session started from the list runs,
+until you change them or craze quits — across every opening of the list and
+whichever session you came from. The rule over the input names them, and the
+hint line says `new sessions use cursor · Composer 2.5` when one is chosen.
+Choosing a command lists its values; `↑` `↓` choose, typing narrows,
+`Tab` or `Enter` uses the highlighted one, `Esc` hides the popup. A `/` word no
+command starts with is a prompt (an agent's own slash command), and opens
+nothing.
+
+- **`/provider`** lists the providers the startup [provider
+  dialog](#tui-reference) offers — `gx` only where its binary resolves — the
+  one in use marked `current`. Choosing one **resets the model** to that
+  provider's default: for cursor, grok and gx, the agent's own (`default`: no
+  model is passed); for native, the model a native session started with no
+  `--model` would use — the model table's `default_model`, or, when that
+  model's provider has no API key, the first model (alphabetically) whose key
+  resolves.
+- **`/model`** lists the provider's models. Native's are its model table's.
+  cursor, grok and gx name their models only once a session has started, so
+  craze lists **the catalog the last session of that provider installed** —
+  every detached host records it in the [model catalog
+  cache](configuration.md#model-catalog-cache) — titled with its age (`cursor
+  models for new sessions · last seen 3h ago`), the agent's own `default`
+  first. A catalog can be stale: it is a list of choices, nothing more. With
+  no catalog recorded yet the popup says `no cursor catalog seen yet · enter
+  uses the id as typed`: `/model <id>` then takes the id as typed, as `craze
+  --model <id>` would, and so does `Enter` on an id no listed model matches. A
+  bad id fails that session's start the way `--model` does, on the hint line.
+  A model is chosen for the provider it was listed for: a list opened later
+  over a session of another provider still starts that provider on it.
+
+Typed in full, `/provider grok`, `/model gpt-6-sol` and `/model default` (the
+provider's own) do the same without the popup; a provider the picker does not
+offer is refused on the hint line.
 
 ## Modes
 

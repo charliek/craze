@@ -19,6 +19,6 @@ idle 1 ────────────────────────�
                                                                                 
                                                                                 
 ─────────────────────────────── new session → ~/projects/craze · cursor · Grok ─
-❯ type a prompt to start a session · @ picks a directory                        
+❯ type a prompt to start a session · @ picks a directory · / provider and model 
 ────────────────────────────────────────────────────────────────────────────────
  enter back to it · ctrl+x close · ctrl+s by directory · ← back                 

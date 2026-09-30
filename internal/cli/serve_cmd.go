@@ -438,6 +438,15 @@ func serveSession(cmd *cobra.Command, f *serveFlags, env hostEnv, sigs <-chan os
 	sess := agent.New(opts)
 	engOpts := engine.HostOptions(row.CrazeID, &sessions.Store{KnownProvider: knownProvider}, indexCWD, p.Name())
 	engOpts.MintedCrazeSessionID = minted
+	// The model catalog cache (plan 030 §3.14): each catalog the agent
+	// installs is recorded for the session list's /model, off the engine's
+	// locks (catalogRecorder). Closed when this returns, after the stop
+	// sequence, so a catalog installed just before it is still recorded.
+	catalogs := newCatalogRecorder(runEnv, p, sess.Snapshot, out)
+	defer catalogs.close()
+	if catalogs != nil {
+		engOpts.CatalogChanged = catalogs.changed
+	}
 	eng, err := engine.New(sess, engOpts)
 	if err != nil {
 		_ = sess.Close()

@@ -8,6 +8,7 @@ import (
 
 	"github.com/charliek/craze/internal/agent"
 	"github.com/charliek/craze/internal/backend"
+	"github.com/charliek/craze/internal/modelcache"
 	"github.com/charliek/craze/internal/roster"
 	"github.com/charliek/craze/internal/rundir"
 	"github.com/charliek/craze/internal/sessions"
@@ -49,6 +50,32 @@ func (s sessionList) Roster() tui.SessionRoster {
 // directories (sessions.Store.RecentDirs).
 func (s sessionList) RecentDirs(n int) ([]sessions.RecentDir, error) {
 	return (&sessions.Store{KnownProvider: knownProvider}).RecentDirs(n)
+}
+
+// ModelCatalog is the list's /model for an ACP provider (plan 030 §3.14): the
+// catalog a detached host of provider last recorded in this user's cache tree
+// (catalogRecorder, internal/modelcache) — HOME's, whatever CRAZE_HOME says,
+// as the registry is — and false with none: no cache yet, a tree that fails
+// validation, a file craze did not write. A model with no name of its own is
+// named by its id.
+func (s sessionList) ModelCatalog(provider string) (tui.ModelCatalog, bool) {
+	dir, err := rundir.CatalogDir(s.l.env, false)
+	if err != nil {
+		return tui.ModelCatalog{}, false
+	}
+	c, err := modelcache.Read(dir, provider)
+	if err != nil {
+		return tui.ModelCatalog{}, false
+	}
+	out := tui.ModelCatalog{ObservedAt: c.ObservedAt, Models: make([]agent.ModelInfo, 0, len(c.Models))}
+	for _, m := range c.Models {
+		name := m.Name
+		if name == "" {
+			name = m.ID
+		}
+		out.Models = append(out.Models, agent.ModelInfo{ID: m.ID, Name: name})
+	}
+	return out, true
 }
 
 // Open is ref's session as a backend the TUI adopts: a running one's host

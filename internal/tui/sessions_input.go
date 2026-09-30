@@ -53,11 +53,14 @@ import (
 //     and an ambiguous or missing one is an error on the hint line, and
 //     nothing starts (sessSubmit).
 //   - The token only chooses: the prompt sent is the rest (sessSubmit).
+//   - `/` first opens the list's commands in a popup of their own —
+//     /provider and /model, which set what new sessions run, and /exit
+//     (sessions_models.go, C16).
 
 // The input's words.
 const (
 	sessInputPrompt      = "❯ "
-	sessInputPlaceholder = "type a prompt to start a session · @ picks a directory"
+	sessInputPlaceholder = "type a prompt to start a session · @ picks a directory · / provider and model"
 	sessEmptyNoteInput   = "No other sessions. Type a prompt below to start one."
 	sessNewRuleLead      = "new session → "
 )
@@ -80,8 +83,11 @@ type sessInput struct {
 	// ti is the line: bubbles' textinput as the editing engine alone — its
 	// keys, its cursor — drawn by sessInputRow, which colours the token.
 	ti textinput.Model
-	// at is the `@` popup (complete.go) over the leading token.
-	at completePopup
+	// at is the `@` popup (complete.go) over the leading token, and cmd the
+	// `/` popup over a line of the list's commands (sessions_models.go):
+	// never both up, since the input begins with one or the other.
+	at  completePopup
+	cmd completePopup
 	// bound is the directory a pick bound the leading token to, and boundTok
 	// the token as the pick wrote it — `@lumen`, `@"~/my dir"` — which the
 	// leading token must still be, character for character, for the binding
@@ -127,7 +133,27 @@ func newSessInput(loads *completeLoadSet) sessInput {
 	ti.Focus()
 	at := newCompletePopup(sessDirSource{}, sessLeadGrammar)
 	at.trackIn(loads)
-	return sessInput{on: true, ti: ti, at: at}
+	cmd := newCompletePopup(sessCmdSource{}, sessCmdGrammar)
+	cmd.trackIn(loads)
+	return sessInput{on: true, ti: ti, at: at, cmd: cmd}
+}
+
+// closePopups takes down whichever popup is up, cancelling what it awaits:
+// the list closing, a dispatch starting, a switch.
+func (in *sessInput) closePopups() {
+	in.at.close()
+	in.cmd.close()
+}
+
+// popup is the popup that is up — the `@` one or the `/` one — if either is.
+func (in sessInput) popup() (completePopup, bool) {
+	switch {
+	case in.at.visible():
+		return in.at, true
+	case in.cmd.visible():
+		return in.cmd, true
+	}
+	return completePopup{}, false
 }
 
 // readRecents reads the index's recent directories off the Update, for the
@@ -193,7 +219,7 @@ func (m *Model) syncSessInput() tea.Cmd {
 	if in.dispatching != 0 {
 		// Starting: the input is not edited, and no popup opens over it
 		// until the dispatch answers (dispatch.go).
-		in.at.close()
+		in.closePopups()
 		return nil
 	}
 	v := in.ti.Value()
@@ -209,8 +235,12 @@ func (m *Model) syncSessInput() tea.Cmd {
 	} else {
 		in.statText, in.statDir, in.statOK = "", "", false
 	}
+	env := completeEnv{Workspace: m.sessHereDir(), Shown: m.shownGen}
+	cur := sessByteCursor(v, in.ti.Position())
 	in.at.setSource(m.sessAtSource())
-	return in.at.sync(v, sessByteCursor(v, in.ti.Position()), completeEnv{Workspace: m.sessHereDir(), Shown: m.shownGen})
+	at := in.at.sync(v, cur, env)
+	in.cmd.setSource(m.sessCmdSourceNow())
+	return tea.Batch(at, in.cmd.sync(v, cur, env))
 }
 
 // sessStatDir is a path token's directory, if it names one that is there.
@@ -264,6 +294,22 @@ func (m Model) sessInputKey(msg tea.KeyMsg) (Model, tea.Cmd, bool) {
 					in.bound, in.boundTok = choice.item.Value, choice.value[lead.start:lead.end]
 				}
 			}
+			sync := m.syncSessInput()
+			return m, sync, true
+		}
+	}
+	if in.cmd.visible() {
+		choice, handled := in.cmd.key(msg)
+		if handled {
+			if choice.verb == 0 {
+				return m, nil, true
+			}
+			// A value is applied, /exit quits (sessCmdChosen); anything
+			// else is written, as the `@` popup's choices are.
+			if next, cmd, ok := m.sessCmdChosen(msg.Type, choice.item); ok {
+				return next, cmd, true
+			}
+			in.set(choice.value, choice.cursor)
 			sync := m.syncSessInput()
 			return m, sync, true
 		}
@@ -331,6 +377,10 @@ func (m Model) sessInputEnter() (Model, tea.Cmd, bool) {
 	if name, args, ok := parseSlashLine(m.sessList.in.ti.Value()); ok && name == "exit" && args == "" {
 		tm, cmd := m.sessQuit()
 		return tm.(Model), cmd, true
+	}
+	// `/provider <id>` and `/model <id>` set what new sessions run (C16).
+	if next, cmd, ok := m.sessCmdTyped(m.sessList.in.ti.Value()); ok {
+		return next, cmd, true
 	}
 	sub, err := m.sessSubmit()
 	if err == nil && sub.Dir == "" {
@@ -482,10 +532,14 @@ func (m Model) sessSubmit() (sessSubmission, error) {
 	return sub, nil
 }
 
-// sessNewProvider and sessNewModel are what a new session from the list runs:
-// the session the list came from's provider, as the status row names it, and
-// its model (C16's /provider and /model set them for the list).
+// sessNewProvider and sessNewModel are what a new session from the list runs,
+// as the rule names them: /provider's and /model's choice (sessPick,
+// sessions_models.go), else the session the list came from's provider, as
+// the status row names it, and its model.
 func (m Model) sessNewProvider() string {
+	if m.sessPick.provSet {
+		return sanitizeLine(m.sessPick.prov.DisplayName())
+	}
 	if p := sanitizeLine(m.snap.Provider.Label()); p != "" {
 		return p
 	}
@@ -493,6 +547,9 @@ func (m Model) sessNewProvider() string {
 }
 
 func (m Model) sessNewModel() string {
+	if m.sessPick.modelSet {
+		return sessModelLabel(m.sessPick)
+	}
 	id := m.snap.CurrentModel
 	if id == "" {
 		id = m.model
@@ -663,6 +720,14 @@ func (m Model) sessInputHint(key, txt func(string) seg) []seg {
 	}
 	v := in.ti.Value()
 	lead, hasLead := sessLeadToken(v)
+	if in.cmd.visible() {
+		if p, ok := in.popup(); ok && len(p.ans.Items) == 0 && !p.pending() && !p.ans.NoteErr {
+			// Nothing listed to choose — no catalog, nothing matching — so
+			// enter takes what is typed.
+			return []seg{txt("type the model id · "), key("enter"), txt(" uses it · "), key("esc"), txt(" close")}
+		}
+		return []seg{key("↑↓"), txt(" choose · type to narrow · "), key("tab/enter"), txt(" use it · "), key("esc"), txt(" close")}
+	}
 	if in.at.visible() {
 		if hasLead && sessPathLike(lead.text) {
 			return []seg{key("↑↓"), txt(" choose · "), key("tab"), txt(" open folder · "), key("enter"), txt(" use it · "),
@@ -673,6 +738,9 @@ func (m Model) sessInputHint(key, txt func(string) seg) []seg {
 	}
 	if strings.TrimSpace(v) == "" {
 		return nil
+	}
+	if h := sessCmdLineHint(v, key, txt); h != nil {
+		return h
 	}
 	if hasLead && strings.TrimSpace(v[lead.end:]) == "" {
 		return []seg{txt("type the prompt · "), key("enter"), txt(" opens an empty session there · "), key("esc"), txt(" clear")}

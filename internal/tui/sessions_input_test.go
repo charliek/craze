@@ -30,12 +30,15 @@ import (
 // behind.
 
 // startSessions is a fakeSessions that can start sessions: the list it
-// configures has its input. RecentDirs answers recent.
+// configures has its input. RecentDirs answers recent, ModelCatalog catalogs
+// (C16: the catalog cache, by provider id; none by default).
 type startSessions struct {
 	*fakeSessions
-	mu      sync.Mutex
-	recent  []sessions.RecentDir
-	recents int
+	mu       sync.Mutex
+	recent   []sessions.RecentDir
+	recents  int
+	catalogs map[string]ModelCatalog
+	catReads []string
 }
 
 var _ SessionStarter = (*startSessions)(nil)
@@ -48,6 +51,14 @@ func (f *startSessions) RecentDirs(n int) ([]sessions.RecentDir, error) {
 		return slices.Clone(f.recent[:n]), nil
 	}
 	return slices.Clone(f.recent), nil
+}
+
+func (f *startSessions) ModelCatalog(provider string) (ModelCatalog, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.catReads = append(f.catReads, provider)
+	c, ok := f.catalogs[provider]
+	return c, ok
 }
 
 func (f *startSessions) recentCalls() int {

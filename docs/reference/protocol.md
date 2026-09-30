@@ -1159,6 +1159,7 @@ general — so discovery does not depend on `CRAZE_HOME`, `XDG_RUNTIME_DIR` or
   hosts/<hostId>.lock     the host's lifetime flock; holds "<pid> <hostId>"
   locks/<crazeSessionId>.lock   one lock per craze session (SQ16, below)
   host-logs/<hostId>.log        a detached host's log; not part of discovery
+  catalogs/<provider>.json      the model catalog cache; not part of discovery
 ```
 
 A registry entry, `hosts/<hostId>.json`, has exactly these members:
