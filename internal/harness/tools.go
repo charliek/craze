@@ -117,8 +117,10 @@ type toolset struct {
 // openTools builds a session's tools for r, its starting model:
 //
 //   - the redactor, over every key the table knows of — every provider's,
-//     used or not, from the environment and inline (Table.Keys) — so a key
-//     too short to redact, or one the marker could print back, fails Open;
+//     used or not, from the environment and inline (Table.Keys) — so an
+//     inline key too short to redact, or one the marker could print back,
+//     fails Open (an env value like that is no key, and skipped: plan 031
+//     §3.2);
 //   - the profile ProfileFor picks for r, its specs, its tools array and its
 //     system prompt for workspace, with prompt — the caller's instruction
 //     documents and catalog — rendered after it (system.go, plan 022 §3.4);
@@ -539,8 +541,9 @@ func (ts *toolset) knownKeys() []string {
 // gained since Open; until a session uses it, a value in the environment is
 // not craze's credential.
 //
-// It prepares nothing and refuses when a key cannot be redacted at all
-// (modeltable.Keys' floor), and when a new one turns out to be inside what
+// It prepares nothing and refuses when an inline key cannot be redacted at
+// all (modeltable.Keys' floor; an env value that fails it is skipped, plan
+// 031 §3.2), and when a new one turns out to be inside what
 // this session sends unredacted — the system prompt, the working directory it
 // names among it, anywhere in the encoded tools, or the plan file's path,
 // which every plan-mode reminder hands the model — none of which it can

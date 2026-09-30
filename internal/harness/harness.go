@@ -464,9 +464,10 @@ type logged struct {
 // the first turn that produces output — so a session closed before that
 // leaves nothing behind; it only sweeps old spill files. A starting model
 // whose provider has no key is ErrNoAPIKey; the caller decides whether to
-// fall back to another model (plan 018 §3.8). A key anywhere in the table,
-// used or not, that is too short to redact from tool output fails it
-// (modeltable.ErrKeyTooShort, plan 019 §3.8).
+// fall back to another model (plan 018 §3.8). An inline key anywhere in the
+// table, used or not, that is too short to redact from tool output fails it
+// (modeltable.ErrKeyTooShort, plan 019 §3.8); such a value in the environment
+// is not a key at all, and is skipped (plan 031 §3.2).
 //
 // With Options.Child set it opens a sub-agent (child.go, plan 026 §3.2): the
 // runner's id, the parent's links in the header, a filtered toolset, the

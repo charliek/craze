@@ -796,9 +796,12 @@ and `model` (on the call, a persona, or `[subagents]`) may also be `inherit`,
 which always means the parent's model. A tier name with no entry in
 `[subagents.tiers]` means the parent's model too, so a persona that says
 `model: opus` still works with no tier map configured at all. Every alias
-named in `[subagents]` or `[subagents.tiers]` must already be a model in the
-same `models.toml`; `inherit` itself is refused as a tier key, since a tier
-mapping to `inherit` could never be reached. For example:
+named in `[subagents]` or `[subagents.tiers]` should be a model — one craze
+ships or one in `models.toml`; one that is not (a model a release retired,
+say) falls back to the default with a warning, never stopping the session
+(see [Sub-agent settings](configuration.md#sub-agent-settings)). `inherit`
+itself is refused as a tier key, since a tier mapping to `inherit` could never
+be reached. For example:
 
 ```toml
 [subagents]

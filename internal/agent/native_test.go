@@ -46,9 +46,12 @@ const nativeWait = 10 * time.Second
 // one provider with different effort lists (and a name that needs
 // sanitizing), a model with no effort control on a second provider, and a
 // model whose provider has no key. baseURL is only validated; scripted models
-// never dial it.
+// never dial it. It is the whole table — NoCatalog, so a Save of it writes
+// `catalog = false` and the Load Start does is exactly this, never the shipped
+// catalog merged in (plan 031 §3.13).
 func nativeTestTable(baseURL string) *modeltable.Table {
 	return &modeltable.Table{
+		NoCatalog:    true,
 		DefaultModel: "test/a",
 		Providers: map[string]modeltable.Provider{
 			"test":  {Driver: modeltable.DriverOpenAICompat, BaseURL: baseURL, EnvKeys: []string{"NATIVE_TEST_KEY"}},
@@ -588,9 +591,14 @@ func TestNativeStartRefusals(t *testing.T) {
 		// plan mode and was given agent mode would edit the workspace.
 		{name: "an unknown mode", opts: Options{Mode: "architecting"},
 			want: []string{`mode "architecting"`, "agent, plan, ask"}, is: harness.ErrUnknownMode},
-		{name: "no model table", setup: func(t *testing.T, f *nativeFixture) {
+		// An empty craze directory is the shipped catalog alone (plan 031
+		// §3.2): nothing is funded, since the fixture's environment holds none
+		// of the catalog's variables, and the error names each provider's
+		// first variable and the file an inline key goes in (§3.5).
+		{name: "an empty craze directory", setup: func(t *testing.T, f *nativeFixture) {
 			t.Setenv("CRAZE_HOME", t.TempDir())
-		}, want: []string{"native: no models configured — write providers.toml and models.toml in ", "(see the configuration reference)"}, is: errNoModels},
+		}, want: []string{"native: no model provider has an API key — set one of FIREWORKS_API_KEY, META_API_KEY, OPENROUTER_API_KEY, ZHIPU_API_KEY, or add api_key to ",
+			filepath.Join("native", "providers.toml")}, is: harness.ErrNoAPIKey},
 		{name: "no craze directory", setup: func(t *testing.T, f *nativeFixture) {
 			t.Setenv("CRAZE_HOME", "")
 			t.Setenv("HOME", "")
@@ -601,7 +609,8 @@ func TestNativeStartRefusals(t *testing.T) {
 			want: []string{`model "nokey/d" has no API key`, "NATIVE_NOKEY_KEY"}, is: harness.ErrNoAPIKey},
 		{name: "no model has a key", setup: func(t *testing.T, f *nativeFixture) {
 			f.env = map[string]string{}
-		}, want: []string{"no configured model has an API key", `"test/a"`, "NATIVE_TEST_KEY"}, is: harness.ErrNoAPIKey},
+		}, want: []string{"no model provider has an API key — set one of NATIVE_NOKEY_KEY, NATIVE_OTHER_KEY, NATIVE_TEST_KEY, or add api_key to ",
+			filepath.Join("native", "providers.toml")}, is: harness.ErrNoAPIKey},
 		{name: "explicit default with no key does not fall back", setup: func(t *testing.T, f *nativeFixture) {
 			delete(f.env, "NATIVE_TEST_KEY")
 		}, opts: Options{Model: "test/a"}, want: []string{`model "test/a" has no API key`}, is: harness.ErrNoAPIKey},
@@ -1799,6 +1808,7 @@ func wireSession(t *testing.T, replies ...http.HandlerFunc) Session {
 	home := t.TempDir()
 	t.Setenv("CRAZE_HOME", home)
 	table := &modeltable.Table{
+		NoCatalog:    true, // the whole table: no shipped model merged in
 		DefaultModel: "wire/m",
 		Providers: map[string]modeltable.Provider{
 			"wire": {Driver: modeltable.DriverOpenAICompat, BaseURL: srv.URL + "/v1",

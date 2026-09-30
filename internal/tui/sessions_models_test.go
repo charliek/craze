@@ -1,7 +1,6 @@
 package tui
 
 import (
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -125,7 +124,10 @@ source = "manual"
 	if def == "" {
 		def = "beta"
 	}
+	// catalog = false (plan 031 C2): these two files are the whole table, as
+	// they were before craze shipped a catalog to merge them over.
 	models := fmt.Sprintf(`version = 1
+catalog = false
 default_model = %q
 
 [models.alpha]
@@ -557,14 +559,17 @@ func TestThePickLasts(t *testing.T) {
 // TestTheNativeSeam: nativeModelChoices and nativeDefaultModel (the seam Plan
 // 031 swaps): native's table's aliases, sorted and named; its default — the
 // table's, or the first funded alias when that has no key, or an error when
-// nothing is funded; and no table, an error either way.
+// nothing is funded; and with no files, the shipped catalog, unfunded.
 func TestTheNativeSeam(t *testing.T) {
 	t.Setenv("CRAZE_HOME", t.TempDir())
-	if _, err := nativeModelChoices(); !errors.Is(err, modeltable.ErrNotConfigured) {
-		t.Fatalf("no table, the choices: %v", err)
+	// No files (plan 031 C2): the shipped catalog is the table, and with no key
+	// anywhere — the package's TestMain scrubs the catalog's variables —
+	// nothing in it is funded.
+	if got, err := nativeModelChoices(); err != nil || len(got) == 0 {
+		t.Fatalf("no files, the choices: %v, %v; want the shipped catalog's", got, err)
 	}
-	if _, err := nativeDefaultModel(); !errors.Is(err, modeltable.ErrNotConfigured) {
-		t.Fatalf("no table, the default: %v", err)
+	if md, err := nativeDefaultModel(); err == nil {
+		t.Fatalf("no files, the default: %+v; want an error, nothing is funded", md)
 	}
 
 	nativeHome(t, "")

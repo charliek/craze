@@ -404,7 +404,8 @@ func redactNativeRows(rows []PluginCommand, redact func(string) string) []Plugin
 // whose path holds one has to be dropped before the prompt is frozen, and
 // after Open the prompt cannot be changed.
 //
-// A table whose keys Open will refuse (one too short to redact) comes back
+// A table whose keys Open will refuse (an inline one too short to redact, in a
+// table built in memory) comes back
 // empty rather than as an error: Open is called within a few lines and reports
 // it properly, and a second phrasing of the same refusal here would be one
 // more place for it to be phrased differently.

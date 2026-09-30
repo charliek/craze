@@ -9,6 +9,7 @@ import (
 	"slices"
 	"testing"
 
+	"github.com/charliek/craze/internal/harness/modeltable"
 	"github.com/charliek/craze/internal/paths"
 )
 
@@ -49,6 +50,19 @@ func TestMain(m *testing.M) {
 	// that hosts its own session, and keeps testing that path under the
 	// opt-out; a launch test turns it back on itself (launch_test.go).
 	_ = os.Setenv(detachEnv, "0")
+	// The shipped model catalog brings its providers' variable names into
+	// every native table (plan 031 §3.13): a key exported in the developer's
+	// shell would fund — and change the model list of — a session a test here
+	// builds from the process environment. None of them is set for the
+	// package; a test that wants one sets it itself.
+	names := modeltable.CatalogEnvNames()
+	if len(names) == 0 {
+		fmt.Fprintln(os.Stderr, "FAIL: the shipped model catalog names no variables to unset")
+		os.Exit(1)
+	}
+	for _, name := range names {
+		_ = os.Unsetenv(name)
+	}
 	code := m.Run()
 	_ = os.RemoveAll(runtimeDir)
 	if leaked := journaledBy(os.Getpid(), dirs, before); len(leaked) > 0 {

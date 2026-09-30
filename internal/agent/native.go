@@ -42,11 +42,6 @@ const (
 	nativeAgentMode = "agent"
 )
 
-// errNoModels is Start's answer when the harness has never been set up: the
-// one thing to do about it is write the two model files, so the returned error
-// wraps this and names the directory to write them in (plan 031 §3.5).
-var errNoModels = errors.New("native: no models configured")
-
 // nativeSession is the native adapter. Its turn state mirrors the live
 // session's: claimed from Begin until the continuation returns, inPrompt
 // while the harness runs the turn, cancelling from a Cancel until the claim
@@ -972,11 +967,11 @@ func (s *nativeSession) open() (*harness.Session, *modeltable.Table, nativeLoad,
 		return nil, nil, none, errors.New("native: there is no craze directory to read the model table from (set HOME or CRAZE_HOME)")
 	}
 	if hopts.Table == nil {
+		// The shipped catalog with the user's files merged over it (plan 031
+		// §3.2): both files are optional, so an empty directory is the
+		// catalog alone, and a machine with nothing funded is fundedModel's
+		// to explain.
 		table, err := modeltable.Load(hopts.Home)
-		if errors.Is(err, modeltable.ErrNotConfigured) {
-			return nil, nil, none, fmt.Errorf("%w — write %s and %s in %s (see the configuration reference)",
-				errNoModels, modeltable.ProvidersFile, modeltable.ModelsFile, hopts.Home)
-		}
 		if err != nil {
 			return nil, nil, none, fmt.Errorf("native: %w", err)
 		}
@@ -984,6 +979,12 @@ func (s *nativeSession) open() (*harness.Session, *modeltable.Table, nativeLoad,
 	}
 	table := hopts.Table
 	for _, w := range table.Warnings {
+		s.note(w)
+	}
+	// A variable a provider's key comes from, set to a value that cannot be
+	// one, is skipped by every reader of keys (plan 031 §3.2); the session
+	// says so once, by name, never the value.
+	for _, w := range table.EnvWarnings(hopts.Getenv) {
 		s.note(w)
 	}
 
@@ -994,7 +995,7 @@ func (s *nativeSession) open() (*harness.Session, *modeltable.Table, nativeLoad,
 		// model's display name, still finds it.
 		alias, err := MatchModel(Snapshot{Models: tableModels(table)}, s.opts.Model)
 		if err != nil {
-			return nil, nil, none, fmt.Errorf("native: %v (models.toml has %s)", err, strings.Join(table.Aliases(), ", "))
+			return nil, nil, none, fmt.Errorf("native: %v (the model table has %s)", err, strings.Join(table.Aliases(), ", "))
 		}
 		hopts.Model = alias
 	case hopts.Model == "" && hopts.Resume == "":
@@ -1002,7 +1003,7 @@ func (s *nativeSession) open() (*harness.Session, *modeltable.Table, nativeLoad,
 		// which the harness resolves from the transcript's own model before
 		// the table's default (plan 028 §3.3, P8); choosing a funded alias here
 		// would make it explicit and switch the conversation's model.
-		alias, err := s.fundedModel(table, hopts.Getenv)
+		alias, err := s.fundedModel(table, hopts.Getenv, hopts.Home)
 		if err != nil {
 			return nil, nil, none, err
 		}
@@ -1144,7 +1145,7 @@ func (s *nativeSession) openEmpty(hopts harness.Options) (*harness.Session, erro
 	id := hopts.Resume
 	hopts.Resume, hopts.SessionID = "", id
 	if hopts.Model == "" {
-		alias, err := s.fundedModel(hopts.Table, hopts.Getenv)
+		alias, err := s.fundedModel(hopts.Table, hopts.Getenv, hopts.Home)
 		if err != nil {
 			return nil, err
 		}
@@ -1223,8 +1224,11 @@ func sealedGetenv(getenv func(string) string) (read func(string) string, release
 // first alias whose key resolves — one unfunded provider must not lock the
 // owner out of the others (plan 018 §3.8). getenv is the harness's, so the
 // fallback judges keys exactly as Open will. A default that fails for any
-// other reason is left for Open to report.
-func (s *nativeSession) fundedModel(table *modeltable.Table, getenv func(string) string) (string, error) {
+// other reason is left for Open to report. With nothing funded — a fresh
+// machine, with the shipped catalog and no key — the error says how to give
+// craze one (nothingFundedText); dir is the directory the table was read
+// from.
+func (s *nativeSession) fundedModel(table *modeltable.Table, getenv func(string) string, dir string) (string, error) {
 	def := table.DefaultModel
 	_, err := table.Resolve(def, getenv)
 	if !errors.Is(err, modeltable.ErrNoAPIKey) {
@@ -1236,10 +1240,27 @@ func (s *nativeSession) fundedModel(table *modeltable.Table, getenv func(string)
 			return alias, nil
 		}
 	}
-	return "", &nativeError{
-		msg:   "native: no configured model has an API key; " + strings.TrimPrefix(noKeyText(table, def), "native: "),
-		cause: err,
+	return "", &nativeError{msg: nothingFundedText(table, dir), cause: err}
+}
+
+// nothingFundedText is the start error when no model's provider has a key
+// (plan 031 §3.5): the first env_keys name of each provider some model is on,
+// sorted, and the file an inline key goes in. It names variables and a path,
+// never a value.
+func nothingFundedText(table *modeltable.Table, dir string) string {
+	var names []string
+	for _, m := range table.Models {
+		if envKeys := table.Providers[m.Provider].EnvKeys; len(envKeys) > 0 {
+			names = append(names, envKeys[0])
+		}
 	}
+	slices.Sort(names)
+	file := filepath.Join(dir, modeltable.ProvidersFile)
+	if len(names) == 0 {
+		return fmt.Sprintf("native: no model provider has an API key — add api_key to %s", file)
+	}
+	return fmt.Sprintf("native: no model provider has an API key — set one of %s, or add api_key to %s",
+		sanitizeLine(strings.Join(slices.Compact(names), ", ")), file)
 }
 
 // nativeWorkspace is the session's workspace as the harness needs it:

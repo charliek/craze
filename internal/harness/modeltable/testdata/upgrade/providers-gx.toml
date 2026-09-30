@@ -1,0 +1,33 @@
+# providers.toml as the former gx importer left it, every entry source = "gx",
+# with dummy keys in place of real ones (plan 031 §3.14): never a real key here.
+# meta carries a second variable name the catalog does not ship
+# (MODEL_API_KEY), so the legacy rule's extra names are exercised.
+
+version = 1
+
+[providers.fireworks]
+driver = "openai-compat"
+base_url = "https://api.fireworks.ai/inference/v1"
+env_keys = ["FIREWORKS_API_KEY"]
+api_key = "fw-dummy-key-00000001"
+source = "gx"
+
+[providers.meta]
+driver = "openai-compat"
+base_url = "https://api.meta.ai/v1"
+env_keys = ["META_API_KEY", "MODEL_API_KEY"]
+api_key = "meta-dummy-key-00000002"
+source = "gx"
+
+[providers.openrouter]
+driver = "openrouter"
+env_keys = ["OPENROUTER_API_KEY"]
+api_key = "or-dummy-key-00000003"
+source = "gx"
+
+[providers.zai-coding-plan]
+driver = "openai-compat"
+base_url = "https://api.z.ai/api/coding/paas/v4"
+env_keys = ["ZHIPU_API_KEY", "ZAI_API_KEY"]
+api_key = "zai-dummy-key-00000004"
+source = "gx"

@@ -1,14 +1,19 @@
-// Package modeltable is the native harness's model catalog: two small TOML
-// files in the harness's directory. providers.toml holds endpoints, the names
-// of the environment variables that carry keys, and optional inline keys — it
-// is the only place a secret lives, and it is kept 0600. models.toml holds
-// aliases, wire model ids, limits and efforts — nothing secret, 0644, safe to
-// paste. The split keeps the file the owner edits most free of keys (plan 018
-// §3.2, §3.3).
+// Package modeltable is the native harness's model table: the catalog craze
+// ships (catalog.toml, compiled into the binary, plan 031 §3.1) with the
+// user's two small TOML files in the harness's directory merged over it (plan
+// 031 §3.2). providers.toml holds keys and provider overrides — endpoints, the
+// names of the environment variables that carry keys, and optional inline keys
+// — and is the only place a secret lives, kept 0600. models.toml holds model
+// overrides and models the user adds — aliases, wire model ids, limits and
+// efforts — nothing secret, 0644, safe to paste. The split keeps the file the
+// owner edits most free of keys (plan 018 §3.2, §3.3). Both files are
+// optional; `catalog = false` in models.toml makes them the whole table, as
+// they were before the catalog existed (P10).
 //
-// Load reads and validates both into one Table; Resolve turns an alias into
-// everything the llm factory needs, key included; Save writes a Table back
-// (test infrastructure: no product code writes these files).
+// Load reads both and merges them over the catalog into one validated Table;
+// Resolve turns an alias into everything the llm factory needs, key included;
+// Save writes a Table back (test infrastructure: no product code writes these
+// files).
 //
 // Both files are decoded strictly: a key the schema does not have is a load
 // error naming the file, the table and the key, because models.toml is edited
@@ -56,7 +61,8 @@ const (
 
 	// SourceManual is the source of an entry the owner wrote; an entry with no
 	// source loads as manual. Any other source string is accepted verbatim, so
-	// a file an older craze wrote (source = "gx") still loads.
+	// a file an older craze wrote (source = "gx") still loads — and such an
+	// entry yields to the catalog (legacySource, plan 031 §3.3).
 	SourceManual = "manual"
 
 	// MinKeyLen is the shortest API key craze accepts, in bytes, after
@@ -66,7 +72,9 @@ const (
 	// shred ordinary text (plan 019 §3.8). Load refuses an inline one, Keys
 	// one from the environment, and the llm factory any it is handed. The
 	// same two places refuse a key the redaction marker could print back
-	// (ErrKeyOverlapsMarker).
+	// (ErrKeyOverlapsMarker). A value in the environment that fails either
+	// rule is not a key at all: Resolve and Keys skip it, and EnvWarnings says
+	// so (plan 031 §3.2).
 	MinKeyLen = 8
 )
 
@@ -98,10 +106,12 @@ const (
 	modelsPerm    os.FileMode = 0o644
 )
 
-// Table is the whole catalog: both files, decoded and validated.
+// Table is the whole model table: the shipped catalog with both files merged
+// over it, validated.
 type Table struct {
-	// DefaultModel is the alias a session starts on when none is asked for.
-	// It is required because TOML tables decode into Go maps, which have no
+	// DefaultModel is the alias a session starts on when none is asked for:
+	// the user's default_model when it names a model, else the catalog's. It
+	// is required because TOML tables decode into Go maps, which have no
 	// order to take "the first model" from.
 	DefaultModel string
 	// Providers is keyed by provider id, Models by alias (the key users
@@ -119,14 +129,33 @@ type Table struct {
 	// and how much of it a compaction keeps verbatim. Its zero value is "no
 	// section": every setting at its default.
 	Compaction Compaction
-	// Warnings are problems Load fixed on its own, for the caller to print:
-	// today only a providers.toml found readable by others and tightened. A
-	// warning names a path and a mode, never file contents. Save ignores it.
+	// Warnings are problems Load fixed on its own, for the caller to print: a
+	// providers.toml found readable by others and tightened, two priced
+	// aliases of one identity that disagree, and each key or entry of the
+	// user's files dropped because it could not stand against the merged
+	// catalog (plan 031 §3.2). A warning names a path, a table, a key and a
+	// reason, never a key's value. Save ignores it.
 	Warnings []string
+	// NoCatalog is models.toml's `catalog = false` (plan 031 P10): the
+	// directory's two files are the whole table, under the rules that held
+	// before the catalog existed. Save writes it back.
+	NoCatalog bool
+
+	// Where each merged entry came from (plan 031 §3.2), kept beside the
+	// entries rather than in them, so Model(e) stays a plain conversion; nil
+	// for a table loaded without a catalog or built in memory, whose entries
+	// are all the user's. Read through ModelOrigin and ProviderOrigin.
+	modelOrigins, providerOrigins map[string]Origin
+	// redundant are RedundantOverrides' lines.
+	redundant []string
 }
 
-// Provider is one entry of providers.toml.
+// Provider is one provider: shipped, overridden in providers.toml, or the
+// user's own.
 type Provider struct {
+	// Name is the display name ("Fireworks"), "" to show the id. Every
+	// shipped provider has one; providers.toml may set or override it.
+	Name    string
 	Driver  string
 	BaseURL string // required for openai-compat, absent for openrouter
 	// EnvKeys are environment variable names, tried in order; the first one
@@ -137,7 +166,7 @@ type Provider struct {
 	Source string
 }
 
-// Model is one entry of models.toml.
+// Model is one model: shipped, overridden in models.toml, or the user's own.
 type Model struct {
 	Provider        string // a key of Table.Providers
 	WireModel       string // the model id the provider's API expects
@@ -290,18 +319,21 @@ type Resolved struct {
 	ToolProfile     string // "" is the default profile
 }
 
-// The on-disk shapes. They are separate from the public types so the key is a
-// plain string only here, at the file boundary, and a Secret everywhere else;
-// encoding a Secret would write "[redacted]" into providers.toml.
+// The on-disk shapes Save writes. They are separate from the public types so
+// the key is a plain string only here, at the file boundary, and a Secret
+// everywhere else; encoding a Secret would write "[redacted]" into
+// providers.toml. Load reads the same keys through the overlay shapes
+// (overlay.go), whose fields are pointers.
 //
 // The map fields are omitempty only so encodeFile can encode a doc with a nil
-// map as the file's top-level keys; decoding ignores the option.
+// map as the file's top-level keys.
 type providersDoc struct {
 	Version   int                      `toml:"version"`
 	Providers map[string]providerEntry `toml:"providers,omitempty"`
 }
 
 type providerEntry struct {
+	Name    string   `toml:"name,omitempty"`
 	Driver  string   `toml:"driver"`
 	BaseURL string   `toml:"base_url,omitempty"`
 	EnvKeys []string `toml:"env_keys,omitempty"`
@@ -310,7 +342,10 @@ type providerEntry struct {
 }
 
 type modelsDoc struct {
-	Version      int    `toml:"version"`
+	Version int `toml:"version"`
+	// Catalog is written only as `catalog = false`, for a Table whose
+	// NoCatalog is set; nil otherwise, so a table saves as it always did.
+	Catalog      *bool  `toml:"catalog,omitempty"`
 	DefaultModel string `toml:"default_model"`
 	// Subagents is nil whenever Table.Subagents is its zero value, so a
 	// table with no sub-agent configuration saves byte-identically to a
@@ -354,13 +389,10 @@ type modelEntry struct {
 	// [models."<alias>".cost] table: encoding it here, nested inside this
 	// struct's own standalone Encode call, would print an unqualified
 	// [cost] header instead (BurntSushi has no notion of the enclosing
-	// manual header at that point). It is still decoded normally: strict
-	// decoding needs no such split, since the whole file is one document.
+	// manual header at that point). Load reads the same key through
+	// modelOverlay, whose Cost is this type too.
 	Cost *Cost `toml:"cost,omitempty"`
 }
-
-func (d *providersDoc) version() int { return d.Version }
-func (d *modelsDoc) version() int    { return d.Version }
 
 // Headers written above each file's body. Save rewrites both files whole, so
 // a comment added by hand would be lost; the header says so.
@@ -381,88 +413,21 @@ const (
 `
 )
 
-// Load reads providers.toml and models.toml from dir and returns one
-// validated Table. When dir holds neither file the error matches both
-// ErrNotConfigured and fs.ErrNotExist; when it holds only one, the error
-// names the missing one and matches fs.ErrNotExist alone: the two files are
-// read together.
+// Load reads providers.toml and models.toml from dir and merges them over the
+// catalog compiled into this binary (plan 031 §3.2). Either file may be
+// missing, or both: an empty directory is the shipped catalog alone. A
+// models.toml that says `catalog = false` is the exception, and needs both
+// (LoadWith).
 //
 // A providers.toml readable by group or others is tightened to 0600 before it
-// is read, and the fix is reported in Table.Warnings.
+// is read, and the fix is reported in Table.Warnings, as is every key or entry
+// of the user's files dropped because it could not stand against the catalog.
 func Load(dir string) (*Table, error) {
-	if dir == "" {
-		// paths.NativeDir is "" when there is no home directory; joining ""
-		// would read providers.toml from the working directory instead.
-		return nil, errors.New("modeltable: no directory to load from")
+	cat, err := shippedCatalog()
+	if err != nil {
+		return nil, fmt.Errorf("modeltable: the shipped catalog: %w", err)
 	}
-	ppath := filepath.Join(dir, ProvidersFile)
-	mpath := filepath.Join(dir, ModelsFile)
-
-	var warnings []string
-	if w := tighten(ppath); w != "" {
-		warnings = append(warnings, w)
-	}
-	pb, perr := os.ReadFile(ppath)
-	mb, merr := os.ReadFile(mpath)
-	pMissing, mMissing := errors.Is(perr, fs.ErrNotExist), errors.Is(merr, fs.ErrNotExist)
-	switch {
-	case pMissing && mMissing:
-		return nil, fmt.Errorf("%w: %s holds neither %s nor %s (%w)",
-			ErrNotConfigured, dir, ProvidersFile, ModelsFile, fs.ErrNotExist)
-	case pMissing:
-		return nil, fmt.Errorf("modeltable: %s is missing although %s exists (%w)", ppath, ModelsFile, fs.ErrNotExist)
-	case mMissing:
-		return nil, fmt.Errorf("modeltable: %s is missing although %s exists (%w)", mpath, ProvidersFile, fs.ErrNotExist)
-	}
-	if perr != nil && !pMissing {
-		return nil, fmt.Errorf("modeltable: %w", perr)
-	}
-	if merr != nil && !mMissing {
-		return nil, fmt.Errorf("modeltable: %w", merr)
-	}
-
-	var pd providersDoc
-	if !pMissing {
-		if err := decodeStrict(ppath, pb, &pd); err != nil {
-			return nil, err
-		}
-	}
-	var md modelsDoc
-	if !mMissing {
-		if err := decodeStrict(mpath, mb, &md); err != nil {
-			return nil, err
-		}
-	}
-
-	t := &Table{
-		DefaultModel: md.DefaultModel,
-		Providers:    make(map[string]Provider, len(pd.Providers)),
-		Models:       make(map[string]Model, len(md.Models)),
-		Subagents:    subagentsFromDoc(md.Subagents),
-		Compaction:   compactionFromDoc(md.Compaction),
-		Warnings:     warnings,
-	}
-	for id, e := range pd.Providers {
-		t.Providers[id] = Provider{
-			Driver:  e.Driver,
-			BaseURL: e.BaseURL,
-			EnvKeys: nilIfEmpty(e.EnvKeys),
-			APIKey:  Secret(e.APIKey),
-			Source:  sourceOrManual(e.Source),
-		}
-	}
-	for alias, e := range md.Models {
-		m := Model(e) // see encodeModels
-		m.Efforts = nilIfEmpty(m.Efforts)
-		m.Source = sourceOrManual(m.Source)
-		t.Models[alias] = m
-	}
-	if err := validate(t, ppath, mpath); err != nil {
-		return nil, err
-	}
-	_, priceWarnings := pricedIdentities(t.Models)
-	t.Warnings = append(t.Warnings, priceWarnings...)
-	return t, nil
+	return LoadWith(dir, cat)
 }
 
 // decodeStrict decodes one file into doc, then checks, in this order, that it
@@ -564,6 +529,7 @@ func (t *Table) encodeProviders() ([]byte, error) {
 	entries := make(map[string]providerEntry, len(t.Providers))
 	for id, p := range t.Providers {
 		entries[id] = providerEntry{
+			Name:    p.Name,
 			Driver:  p.Driver,
 			BaseURL: p.BaseURL,
 			EnvKeys: p.EnvKeys,
@@ -588,6 +554,9 @@ func (t *Table) encodeModels() ([]byte, error) {
 	}
 	top := &modelsDoc{Version: Version, DefaultModel: t.DefaultModel, Subagents: subagentsToDoc(t.Subagents),
 		Compaction: compactionToDoc(t.Compaction)}
+	if t.NoCatalog {
+		top.Catalog = new(bool)
+	}
 
 	var buf bytes.Buffer
 	buf.WriteString(modelsHeader)
@@ -705,35 +674,29 @@ func validate(t *Table, pfile, mfile string) error {
 	return validateCompaction(mfile, t.Compaction)
 }
 
+// providerTable and modelTable are an entry's TOML table path, as a
+// FileError names it: providers.fireworks, models."fireworks/kimi-k3".
+func providerTable(id string) string { return toml.Key{"providers", id}.String() }
+func modelTable(alias string) string { return toml.Key{"models", alias}.String() }
+
 func validateProvider(file, id string, p Provider) error {
 	at := func(key, reason string) error {
-		return &FileError{File: file, Table: toml.Key{"providers", id}.String(), Key: key, Reason: reason}
+		return &FileError{File: file, Table: providerTable(id), Key: key, Reason: reason}
 	}
 	if strings.TrimSpace(id) == "" {
 		return at("", "a provider id must not be empty")
 	}
-	switch p.Driver {
-	case DriverOpenAICompat:
-		if p.BaseURL == "" {
-			return at("base_url", `missing: driver "openai-compat" needs the endpoint's base URL`)
-		}
-		// The value is not echoed: a base URL can carry a key in its query.
-		if !httpURL(p.BaseURL) {
-			return at("base_url", "not an absolute http or https URL")
-		}
-	case DriverOpenRouter:
-		if p.BaseURL != "" {
-			return at("base_url", `must be absent for driver "openrouter", whose endpoint is fixed`)
-		}
-	case "":
-		return at("driver", `missing: want "openai-compat" or "openrouter"`)
-	default:
-		return at("driver", fmt.Sprintf(`unknown driver %q: want "openai-compat" or "openrouter"`, p.Driver))
+	if r := driverProblem(p.Driver); r != "" {
+		return at("driver", r)
 	}
-	for i, name := range p.EnvKeys {
-		if strings.TrimSpace(name) == "" {
-			return at("env_keys", fmt.Sprintf("entry %d is empty", i+1))
-		}
+	if r := baseURLProblem(p.BaseURL); r != "" {
+		return at("base_url", r)
+	}
+	if r := endpointProblem(p.Driver, p.BaseURL); r != "" {
+		return at("base_url", r)
+	}
+	if r := envKeysProblem(p.EnvKeys); r != "" {
+		return at("env_keys", r)
 	}
 	// Every provider's key is checked, not only the ones a session uses:
 	// the redactor covers every loaded key, and one it cannot redact could
@@ -743,6 +706,86 @@ func validateProvider(file, id string, p Provider) error {
 		return at("api_key", keyReason(err))
 	}
 	return nil
+}
+
+// driverProblem is why driver is not one craze has, "" when it is.
+func driverProblem(driver string) string {
+	switch driver {
+	case DriverOpenAICompat, DriverOpenRouter:
+		return ""
+	case "":
+		return `missing: want "openai-compat" or "openrouter"`
+	}
+	return fmt.Sprintf(`unknown driver %q: want "openai-compat" or "openrouter"`, driver)
+}
+
+// baseURLProblem is why a base URL is not one, "" when it is (or is ""). The
+// value is not echoed: a base URL can carry a key in its query.
+func baseURLProblem(baseURL string) string {
+	if baseURL != "" && !httpURL(baseURL) {
+		return "not an absolute http or https URL"
+	}
+	return ""
+}
+
+// endpointProblem is why a known driver and a base URL do not go together,
+// "" when they do: openai-compat needs one, openrouter's is fixed.
+func endpointProblem(driver, baseURL string) string {
+	switch {
+	case driver == DriverOpenAICompat && baseURL == "":
+		return `missing: driver "openai-compat" needs the endpoint's base URL`
+	case driver == DriverOpenRouter && baseURL != "":
+		return `must be absent for driver "openrouter", whose endpoint is fixed`
+	}
+	return ""
+}
+
+// envKeysProblem is why an env_keys list is not one, "" when it is.
+func envKeysProblem(names []string) string {
+	for i, name := range names {
+		if strings.TrimSpace(name) == "" {
+			return fmt.Sprintf("entry %d is empty", i+1)
+		}
+	}
+	return ""
+}
+
+// effortsProblem is why an efforts list is not one, "" when it is.
+func effortsProblem(efforts []string) string {
+	seen := make(map[string]bool, len(efforts))
+	for i, e := range efforts {
+		if strings.TrimSpace(e) == "" {
+			return fmt.Sprintf("entry %d is empty", i+1)
+		}
+		if seen[e] {
+			return fmt.Sprintf("%q is listed twice", e)
+		}
+		seen[e] = true
+	}
+	return ""
+}
+
+// defaultEffortProblem is why def is not a default effort for efforts, ""
+// when it is (or is "", no default).
+func defaultEffortProblem(efforts []string, def string) string {
+	if def != "" && !slices.Contains(efforts, def) {
+		return fmt.Sprintf("%q is not one of efforts", def)
+	}
+	return ""
+}
+
+// toolProfileProblem is why a tool_profile is not one craze has, "" when it
+// is ("" itself is the default).
+func toolProfileProblem(profile string) string {
+	if profile == "" || slices.Contains(toolProfiles, profile) {
+		return ""
+	}
+	names := make([]string, len(toolProfiles))
+	for i, p := range toolProfiles {
+		names[i] = strconv.Quote(p)
+	}
+	return fmt.Sprintf("unknown tool profile %q: want one of %s, or leave it out for the default",
+		profile, strings.Join(names, ", "))
 }
 
 // keyProblem says why k, already trimmed, cannot be a key craze redacts —
@@ -772,7 +815,7 @@ func keyReason(err error) string {
 
 func validateModel(file, alias string, m Model, providers map[string]Provider) error {
 	at := func(key, reason string) error {
-		return &FileError{File: file, Table: toml.Key{"models", alias}.String(), Key: key, Reason: reason}
+		return &FileError{File: file, Table: modelTable(alias), Key: key, Reason: reason}
 	}
 	if strings.TrimSpace(alias) == "" {
 		return at("", "a model alias must not be empty")
@@ -792,26 +835,14 @@ func validateModel(file, alias string, m Model, providers map[string]Provider) e
 	if m.MaxOutputTokens < 0 {
 		return at("max_output_tokens", "must not be negative")
 	}
-	seen := make(map[string]bool, len(m.Efforts))
-	for i, e := range m.Efforts {
-		if strings.TrimSpace(e) == "" {
-			return at("efforts", fmt.Sprintf("entry %d is empty", i+1))
-		}
-		if seen[e] {
-			return at("efforts", fmt.Sprintf("%q is listed twice", e))
-		}
-		seen[e] = true
+	if r := effortsProblem(m.Efforts); r != "" {
+		return at("efforts", r)
 	}
-	if m.DefaultEffort != "" && !seen[m.DefaultEffort] {
-		return at("default_effort", fmt.Sprintf("%q is not one of efforts", m.DefaultEffort))
+	if r := defaultEffortProblem(m.Efforts, m.DefaultEffort); r != "" {
+		return at("default_effort", r)
 	}
-	if m.ToolProfile != "" && !slices.Contains(toolProfiles, m.ToolProfile) {
-		names := make([]string, len(toolProfiles))
-		for i, p := range toolProfiles {
-			names[i] = strconv.Quote(p)
-		}
-		return at("tool_profile", fmt.Sprintf("unknown tool profile %q: want one of %s, or leave it out for the default",
-			m.ToolProfile, strings.Join(names, ", ")))
+	if r := toolProfileProblem(m.ToolProfile); r != "" {
+		return at("tool_profile", r)
 	}
 	return validateCost(file, alias, m.Cost)
 }
@@ -850,10 +881,12 @@ func httpURL(s string) bool {
 }
 
 // Resolve returns everything needed to build alias's client. The key is the
-// first of the provider's env_keys that getenv reports non-empty (surrounding
-// whitespace trimmed), else the inline api_key, else ErrNoAPIKey naming the
-// provider and the variable names tried. A nil getenv is os.Getenv; the
-// harness injects its own so tests never read the real environment.
+// first of the provider's env_keys that getenv reports set to a usable key
+// (surrounding whitespace trimmed; a value that fails MinKeyLen or overlaps
+// the redaction marker is skipped, plan 031 §3.2), else the inline api_key,
+// else ErrNoAPIKey naming the provider and the variable names tried. A nil
+// getenv is os.Getenv; the harness injects its own so tests never read the
+// real environment.
 //
 // A missing key fails only the models that need it: Load accepts a provider
 // with no key at all, so one unfunded provider never hides the others.
@@ -928,31 +961,65 @@ func outputCeiling(m Model) int {
 	return DefaultMaxOutputTokens
 }
 
+// resolveKey is Resolve's key for provider id: see Resolve. An env value that
+// cannot be a key is skipped as though unset — it is not craze's credential,
+// and one unrelated short META_API_KEY must not fail every session (plan 031
+// §3.2) — and the error for a provider with none left says which were.
 func resolveKey(id string, p Provider, getenv func(string) string) (Secret, error) {
+	var unusable []string
 	for _, name := range p.EnvKeys {
-		if v := strings.TrimSpace(getenv(name)); v != "" {
-			return Secret(v), nil
+		k, err := envKey(getenv, name)
+		switch {
+		case err != nil:
+			unusable = append(unusable, name)
+		case k != "":
+			return k, nil
 		}
 	}
 	if v := strings.TrimSpace(p.APIKey.Reveal()); v != "" {
 		return Secret(v), nil
 	}
-	return "", noAPIKey(id, p.EnvKeys)
+	return "", noAPIKey(id, p.EnvKeys, unusable)
+}
+
+// envKey is the one rule every reader of a key variable follows (plan 031
+// §3.2), so "funded" means the same to Resolve, Keys and EnvWarnings: name's
+// value through getenv, surrounding whitespace trimmed — "" when it is unset
+// or blank, and keyProblem's error, with no value, when it is set to one that
+// cannot be a key, which every reader skips.
+func envKey(getenv func(string) string, name string) (Secret, error) {
+	v := strings.TrimSpace(getenv(name))
+	if err := keyProblem(v); err != nil {
+		return "", err
+	}
+	return Secret(v), nil
+}
+
+// envKeyNames is every env_keys name of providers, sorted and without
+// repeats.
+func envKeyNames(providers map[string]Provider) []string {
+	var names []string
+	for _, p := range providers {
+		names = append(names, p.EnvKeys...)
+	}
+	slices.Sort(names)
+	return slices.Compact(names)
 }
 
 // Keys returns every key the table knows of, for the redactor that keeps
 // them out of tool output (plan 019 §3.8): for every provider, used or not,
-// the value of each of its env_keys variables that getenv reports set — all
-// of them, not only the first, which is the one Resolve picks — and its
-// inline api_key, each with surrounding whitespace trimmed. A nil getenv is
-// os.Getenv.
+// the value of each of its env_keys variables that getenv reports set to a
+// usable key — all of them, not only the first, which is the one Resolve
+// picks — and its inline api_key, each with surrounding whitespace trimmed. A
+// nil getenv is os.Getenv.
 //
-// A value the redactor cannot handle fails, naming the provider and the
-// variable, never the value: under MinKeyLen bytes is ErrKeyTooShort, and
-// one that overlaps the redaction marker is ErrKeyOverlapsMarker. Load
-// already refuses such an inline key, but it reads no environment — a table
-// loads the same whatever is exported — so one in an env var is caught here,
-// when a session opens, for every provider.
+// An env value that cannot be a key — under MinKeyLen bytes, or overlapping
+// the redaction marker — is skipped, exactly as Resolve skips it, so "funded"
+// means the same everywhere (plan 031 §3.2): it is never sent to a provider,
+// so it is not a credential to redact, and EnvWarnings names the variable for
+// the session to say so. An inline key that fails either rule still fails,
+// naming the provider, never the value: Load refuses one, so only a table
+// built in memory can hold it.
 func (t *Table) Keys(getenv func(string) string) ([]Secret, error) {
 	if getenv == nil {
 		getenv = os.Getenv
@@ -961,12 +1028,8 @@ func (t *Table) Keys(getenv func(string) string) ([]Secret, error) {
 	for _, id := range slices.Sorted(maps.Keys(t.Providers)) {
 		p := t.Providers[id]
 		for _, name := range p.EnvKeys {
-			v := strings.TrimSpace(getenv(name))
-			if err := keyProblem(v); err != nil {
-				return nil, fmt.Errorf("%w: provider %q: the value of %s", err, id, name)
-			}
-			if v != "" {
-				keys = append(keys, Secret(v))
+			if k, err := envKey(getenv, name); err == nil && k != "" {
+				keys = append(keys, k)
 			}
 		}
 		v := strings.TrimSpace(p.APIKey.Reveal())
@@ -978,6 +1041,28 @@ func (t *Table) Keys(getenv func(string) string) ([]Secret, error) {
 		}
 	}
 	return keys, nil
+}
+
+// EnvWarnings is one line for each variable a provider takes its key from
+// that getenv reports set to a value that cannot be a key (plan 031 §3.2):
+// Resolve and Keys skip it, and the session says so, naming the variable and
+// the rule, never the value. Each variable is named once, in sorted order. A
+// nil getenv is os.Getenv.
+func (t *Table) EnvWarnings(getenv func(string) string) []string {
+	if getenv == nil {
+		getenv = os.Getenv
+	}
+	var out []string
+	for _, name := range envKeyNames(t.Providers) {
+		_, err := envKey(getenv, name)
+		switch {
+		case errors.Is(err, ErrKeyTooShort):
+			out = append(out, fmt.Sprintf("modeltable: %s is set to a value shorter than %d bytes, which cannot be an API key; it is ignored", name, MinKeyLen))
+		case err != nil:
+			out = append(out, fmt.Sprintf("modeltable: %s is set to a value that overlaps craze's redaction marker, which would print the key back in its own place; it is ignored", name))
+		}
+	}
+	return out
 }
 
 // Aliases returns every model alias, sorted.
@@ -1194,6 +1279,23 @@ func validateSubagents(file string, s Subagents, models map[string]Model) error 
 			return at("effort", fmt.Sprintf("%q is not offered by %q", s.Effort, s.Model))
 		}
 	}
+	if err := validateTierNames(file, s); err != nil {
+		return err
+	}
+	for _, tier := range slices.Sorted(maps.Keys(s.Tiers)) {
+		if _, ok := models[s.Tiers[tier]]; !ok {
+			return &FileError{File: file, Table: "subagents.tiers", Key: tier,
+				Reason: fmt.Sprintf("%q is not a model in %s", s.Tiers[tier], ModelsFile)}
+		}
+	}
+	return nil
+}
+
+// validateTierNames checks what [subagents.tiers] says on its own, whatever
+// the table holds: each key matches tierKeyPattern and is not "inherit", and
+// no value is empty. Which models the values name is validateSubagents' (or,
+// over a catalog, the merge's) to check.
+func validateTierNames(file string, s Subagents) error {
 	for _, tier := range slices.Sorted(maps.Keys(s.Tiers)) {
 		tierAt := func(reason string) error {
 			return &FileError{File: file, Table: "subagents.tiers", Key: tier, Reason: reason}
@@ -1209,12 +1311,8 @@ func validateSubagents(file string, s Subagents, models map[string]Model) error 
 		if !tierKeyPattern.MatchString(tier) {
 			return tierAt("a tier name must match [a-z0-9-]+")
 		}
-		alias := s.Tiers[tier]
-		if strings.TrimSpace(alias) == "" {
+		if strings.TrimSpace(s.Tiers[tier]) == "" {
 			return tierAt("missing: name an alias in " + ModelsFile)
-		}
-		if _, ok := models[alias]; !ok {
-			return tierAt(fmt.Sprintf("%q is not a model in %s", alias, ModelsFile))
 		}
 	}
 	return nil

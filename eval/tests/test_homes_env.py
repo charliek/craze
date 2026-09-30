@@ -100,6 +100,8 @@ def test_no_generated_home_holds_a_key(tmp_path):
                      {"meta": "http://x/meta", "zai-coding-plan": "http://x/zai", "fireworks": "http://x/fw"})
     for p in generated_files(tmp_path / "multi"):
         assert not ring.contains_key(p.read_bytes())
+    multi = tomllib.loads((tmp_path / "multi" / ".craze" / "native" / "models.toml").read_text())
+    assert multi["catalog"] is False  # craze plan 031 P10: no shipped model joins the live smoke's home
 
 
 def test_generated_configs_name_only_the_target_model(tmp_path):
@@ -109,6 +111,9 @@ def test_generated_configs_name_only_the_target_model(tmp_path):
     HOMES["craze"](home / "craze", em, snap, "http://p/r/t/api.z.ai/api/coding/paas/v4")
     doc = tomllib.loads((home / "craze/.craze/native/models.toml").read_text())
     assert list(doc["models"]) == ["glm-5.3-flash"] and doc["subagents"]["model"] == "glm-5.3-flash"
+    # craze's shipped catalog stays out of the eval (craze plan 031 P10): the home's two
+    # files are the whole table.
+    assert doc["catalog"] is False
     assert doc["models"]["glm-5.3-flash"]["default_effort"] == "high"  # the pinned effort, not the owner's
     prov = home / "craze/.craze/native/providers.toml"
     assert oct(prov.stat().st_mode & 0o777) == "0o600"

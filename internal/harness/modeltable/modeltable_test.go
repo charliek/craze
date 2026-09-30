@@ -32,7 +32,12 @@ env_keys = ["OPENROUTER_API_KEY"]
 api_key = "sk-canary-not-a-secret"
 `
 
+// validModels says `catalog = false` (plan 031 P10): the fixture reuses
+// shipped ids (fireworks, openrouter, fireworks/kimi-k3), and the tests that
+// use it pin the rules of a directory whose files are the whole table. The
+// merge over a catalog has its own tests (merge_test.go).
 const validModels = `version = 1
+catalog = false
 default_model = "fireworks/kimi-k3"
 
 [models."fireworks/kimi-k3"]
@@ -54,6 +59,7 @@ wire_model = "minimax/minimax-m3"
 // validTable is the Table validProviders and validModels load as.
 func validTable() *Table {
 	return &Table{
+		NoCatalog:    true,
 		DefaultModel: "fireworks/kimi-k3",
 		Providers: map[string]Provider{
 			"fireworks": {
@@ -208,6 +214,7 @@ func TestSaveRoundTripsThroughLoad(t *testing.T) {
 // twice gives the same bytes, so a save that changed nothing shows no diff.
 func TestSaveWritesStableReadableFiles(t *testing.T) {
 	const wantBody = `version = 1
+catalog = false
 default_model = "fireworks/kimi-k3"
 
 [models."fireworks/kimi-k3"]
@@ -282,26 +289,64 @@ func TestSaveRefusesAnInvalidTable(t *testing.T) {
 	}
 }
 
+// TestLoadMissingFiles: over the catalog both files are optional, each on its
+// own (plan 031 §3.2) — an empty directory is the shipped catalog alone. With
+// no catalog (LoadWith's nil, or `catalog = false`) the rules before plan 031
+// hold: both files, a missing one named, matching fs.ErrNotExist.
 func TestLoadMissingFiles(t *testing.T) {
-	t.Run("neither", func(t *testing.T) {
-		_, err := Load(t.TempDir())
-		if !errors.Is(err, ErrNotConfigured) || !errors.Is(err, fs.ErrNotExist) {
-			t.Fatalf("err = %v, want ErrNotConfigured and fs.ErrNotExist", err)
+	shipped, err := ShippedCatalog()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Run("neither, over the catalog", func(t *testing.T) {
+		got, err := Load(t.TempDir())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.DefaultModel != shipped.DefaultModel || len(got.Models) != len(shipped.Models) ||
+			len(got.Providers) != len(shipped.Providers) || len(got.Warnings) != 0 {
+			t.Fatalf("an empty directory = default %q, %d models, %d providers, warnings %q; want the catalog alone",
+				got.DefaultModel, len(got.Models), len(got.Providers), got.Warnings)
 		}
 	})
-	t.Run("only providers", func(t *testing.T) {
-		_, err := Load(writeFiles(t, validProviders, ""))
-		if !errors.Is(err, fs.ErrNotExist) || errors.Is(err, ErrNotConfigured) {
-			t.Fatalf("err = %v, want fs.ErrNotExist without ErrNotConfigured", err)
+	t.Run("only providers, over the catalog", func(t *testing.T) {
+		got, err := Load(writeFiles(t, validProviders, ""))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Providers["openrouter"].APIKey != canary {
+			t.Fatalf("providers.toml's inline key did not reach the merged table")
+		}
+	})
+	t.Run("only models, over the catalog", func(t *testing.T) {
+		models := strings.Replace(validModels, "catalog = false\n", "", 1)
+		got, err := Load(writeFiles(t, "", models))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, ok := got.Models["openrouter/minimax-m3"]; !ok {
+			t.Fatalf("models.toml's entry did not reach the merged table")
+		}
+	})
+	t.Run("neither, no catalog", func(t *testing.T) {
+		_, err := LoadWith(t.TempDir(), nil)
+		if !errors.Is(err, fs.ErrNotExist) || !strings.Contains(err.Error(), "holds neither") {
+			t.Fatalf("err = %v, want fs.ErrNotExist naming both files", err)
+		}
+	})
+	t.Run("only providers, no catalog", func(t *testing.T) {
+		_, err := LoadWith(writeFiles(t, validProviders, ""), nil)
+		if !errors.Is(err, fs.ErrNotExist) {
+			t.Fatalf("err = %v, want fs.ErrNotExist", err)
 		}
 		if !strings.Contains(err.Error(), ModelsFile+" is missing") {
 			t.Fatalf("err = %v, want it to name %s", err, ModelsFile)
 		}
 	})
-	t.Run("only models", func(t *testing.T) {
+	t.Run("only models, catalog = false", func(t *testing.T) {
 		_, err := Load(writeFiles(t, "", validModels))
-		if !errors.Is(err, fs.ErrNotExist) || errors.Is(err, ErrNotConfigured) {
-			t.Fatalf("err = %v, want fs.ErrNotExist without ErrNotConfigured", err)
+		if !errors.Is(err, fs.ErrNotExist) {
+			t.Fatalf("err = %v, want fs.ErrNotExist", err)
 		}
 		if !strings.Contains(err.Error(), ProvidersFile+" is missing") {
 			t.Fatalf("err = %v, want it to name %s", err, ProvidersFile)
@@ -640,11 +685,13 @@ func TestLoadRefusesAShortKeyOnAnUnusedProvider(t *testing.T) {
 	}
 }
 
-// TestKeysCoversEveryProviderAndRefusesShortOnes: the redactor's key list is
-// every provider's inline key and every set env_keys variable, used or not;
-// an env value under 8 bytes, which Load cannot see, fails here naming the
-// provider and the variable only.
-func TestKeysCoversEveryProviderAndRefusesShortOnes(t *testing.T) {
+// TestKeysCoversEveryProviderAndSkipsShortOnes: the redactor's key list is
+// every provider's inline key and every set env_keys variable, used or not.
+// An env value under 8 bytes, which Load cannot see, is not a key (plan 031
+// §3.2): until plan 031 it failed the whole list — and so every native
+// session, for one unrelated short META_API_KEY — and now it is skipped by
+// Keys and Resolve alike, with an EnvWarnings line naming the variable only.
+func TestKeysCoversEveryProviderAndSkipsShortOnes(t *testing.T) {
 	tbl := validTable() // fireworks: env FIREWORKS_API_KEY; openrouter: env OPENROUTER_API_KEY + inline canary
 	setProvider(tbl, "fireworks", func(p *Provider) { p.EnvKeys = []string{"FIREWORKS_API_KEY", "FW_KEY"} })
 	env := map[string]string{
@@ -664,28 +711,66 @@ func TestKeysCoversEveryProviderAndRefusesShortOnes(t *testing.T) {
 		t.Fatalf("Keys = %q, want %q", got, want)
 	}
 
-	// An unused provider's short env value fails the whole list.
+	if w := tbl.EnvWarnings(fakeEnv(env)); len(w) != 0 {
+		t.Fatalf("EnvWarnings = %q for usable values", w)
+	}
+
+	// An unused provider's short env value is skipped, not a failure: the
+	// list is the one above, and the variable is named, never its value.
 	env["OPENROUTER_API_KEY"] = "zq-1234"
-	_, err = tbl.Keys(fakeEnv(env))
-	if !errors.Is(err, ErrKeyTooShort) {
-		t.Fatalf("err = %v, want ErrKeyTooShort", err)
+	keys, err = tbl.Keys(fakeEnv(env))
+	if err != nil {
+		t.Fatalf("a short env value failed Keys: %v", err)
 	}
-	if msg := err.Error(); strings.Contains(msg, "zq-1234") || !strings.Contains(msg, `"openrouter"`) || !strings.Contains(msg, "OPENROUTER_API_KEY") {
-		t.Fatalf("err = %q must name the provider and the variable, and not the value", msg)
+	if len(keys) != 3 {
+		t.Fatalf("Keys = %d keys, want the three usable ones", len(keys))
 	}
-	// The negative control: eight bytes pass.
+	w := tbl.EnvWarnings(fakeEnv(env))
+	if len(w) != 1 || !strings.Contains(w[0], "OPENROUTER_API_KEY") || !strings.Contains(w[0], "8 bytes") || strings.Contains(w[0], "zq-1234") {
+		t.Fatalf("EnvWarnings = %q, want one line naming OPENROUTER_API_KEY and the floor, not the value", w)
+	}
+	// Resolve skips it as Keys does: the inline key funds openrouter.
+	r, err := tbl.Resolve("openrouter/minimax-m3", fakeEnv(env))
+	if err != nil || r.APIKey.Reveal() != canary {
+		t.Fatalf("Resolve past a short env value = %v; want the inline key", err)
+	}
+	// With no inline key behind it, the provider is unfunded, and the error
+	// says the variable is set but unusable — naming it, not its value.
+	setProvider(tbl, "openrouter", func(p *Provider) { p.APIKey = "" })
+	_, err = tbl.Resolve("openrouter/minimax-m3", fakeEnv(env))
+	if !errors.Is(err, ErrNoAPIKey) || !strings.Contains(err.Error(), "usable") || strings.Contains(err.Error(), "zq-1234") {
+		t.Fatalf("Resolve = %v; want ErrNoAPIKey saying OPENROUTER_API_KEY is unusable", err)
+	}
+	// The negative control: eight bytes pass, and are a key.
 	env["OPENROUTER_API_KEY"] = "zq-12345"
-	if _, err := tbl.Keys(fakeEnv(env)); err != nil {
+	if r, err := tbl.Resolve("openrouter/minimax-m3", fakeEnv(env)); err != nil || r.APIKey.Reveal() != "zq-12345" {
 		t.Fatalf("an 8-byte env key: %v", err)
+	}
+	if w := tbl.EnvWarnings(fakeEnv(env)); len(w) != 0 {
+		t.Fatalf("EnvWarnings = %q for an 8-byte value", w)
+	}
+}
+
+// TestKeysStillRefusesAnInMemoryInlineKey: Load refuses a short inline key, so
+// only a table built in memory can hold one, and Keys still fails on it —
+// naming the provider, never the value — because an inline key is always
+// sent, never skipped.
+func TestKeysStillRefusesAnInMemoryInlineKey(t *testing.T) {
+	tbl := validTable()
+	setProvider(tbl, "openrouter", func(p *Provider) { p.APIKey = "zq-1234" })
+	_, err := tbl.Keys(fakeEnv(nil))
+	if !errors.Is(err, ErrKeyTooShort) || strings.Contains(err.Error(), "zq-1234") || !strings.Contains(err.Error(), `"openrouter"`) {
+		t.Fatalf("Keys = %v; want ErrKeyTooShort naming openrouter and not the key", err)
 	}
 }
 
 // TestKeysTheMarkerPrintsBackAreRefused: a key inside the redaction marker
 // ("credential"), holding it, or overlapping either end of it would come
-// back out of the redactor verbatim, so Load refuses one inline and Keys one
-// from the environment, naming the place and not the value. The negative
-// controls: the redactor really does print such a key back, and an ordinary
-// key of the same length passes both.
+// back out of the redactor verbatim, so Load refuses one inline, and Keys and
+// Resolve skip one from the environment (plan 031 §3.2), EnvWarnings naming
+// the variable and not the value. The negative controls: the redactor really
+// does print such a key back, and an ordinary key of the same length passes
+// both.
 func TestKeysTheMarkerPrintsBackAreRefused(t *testing.T) {
 	if out := redact.New("credential").String("pw=credential"); !strings.Contains(out, "credential") {
 		t.Fatalf("redacting %q gave %q: the marker no longer contains it, so this test proves nothing", "credential", out)
@@ -702,12 +787,22 @@ func TestKeysTheMarkerPrintsBackAreRefused(t *testing.T) {
 		}
 
 		tbl := validTable()
-		_, err = tbl.Keys(fakeEnv(map[string]string{"OPENROUTER_API_KEY": key}))
-		if !errors.Is(err, ErrKeyOverlapsMarker) {
-			t.Fatalf("Keys with %q in the environment = %v, want ErrKeyOverlapsMarker", key, err)
+		env := fakeEnv(map[string]string{"OPENROUTER_API_KEY": key})
+		keys, err := tbl.Keys(env)
+		if err != nil {
+			t.Fatalf("Keys with %q in the environment = %v, want it skipped", key, err)
 		}
-		if msg := err.Error(); strings.Contains(msg, key) || !strings.Contains(msg, "OPENROUTER_API_KEY") || !strings.Contains(msg, `"openrouter"`) {
-			t.Fatalf("Keys error %q must name the provider and the variable, and not the value", msg)
+		for _, k := range keys {
+			if k.Reveal() == key {
+				t.Fatalf("Keys kept %q from the environment", key)
+			}
+		}
+		if r, err := tbl.Resolve("openrouter/minimax-m3", env); err != nil || r.APIKey.Reveal() != canary {
+			t.Fatalf("Resolve with %q in the environment = %v; want the inline key past it", key, err)
+		}
+		w := tbl.EnvWarnings(env)
+		if len(w) != 1 || strings.Contains(w[0], key) || !strings.Contains(w[0], "OPENROUTER_API_KEY") || !strings.Contains(w[0], "redaction marker") {
+			t.Fatalf("EnvWarnings = %q must name the variable and the marker rule, and not the value", w)
 		}
 	}
 	// Holding a piece of the marker is not overlapping it: redacting this key
@@ -918,16 +1013,16 @@ func TestValidateSubagentsFailures(t *testing.T) {
 	}
 }
 
-func setProvider(t *Table, id string, f func(*Provider)) {
-	p := t.Providers[id]
-	f(&p)
-	t.Providers[id] = p
-}
+func setProvider(t *Table, id string, f func(*Provider)) { setEntry(t.Providers, id, f) }
 
-func setModel(t *Table, alias string, f func(*Model)) {
-	m := t.Models[alias]
-	f(&m)
-	t.Models[alias] = m
+func setModel(t *Table, alias string, f func(*Model)) { setEntry(t.Models, alias, f) }
+
+// setEntry changes the entry at key through f: a map of values, not pointers,
+// is changed by writing the entry back.
+func setEntry[V any](m map[string]V, key string, f func(*V)) {
+	v := m[key]
+	f(&v)
+	m[key] = v
 }
 
 // fakeEnv is a getenv over a fixed map, so no test reads the real
@@ -944,13 +1039,16 @@ func TestResolveKeyOrder(t *testing.T) {
 		env     map[string]string
 		want    string
 	}{
-		{"first env var wins", []string{"A", "B"}, "", map[string]string{"A": "key-a", "B": "key-b"}, "key-a"},
-		{"an empty env var is skipped", []string{"A", "B"}, "", map[string]string{"A": "", "B": "key-b"}, "key-b"},
-		{"a blank env var is skipped", []string{"A", "B"}, "", map[string]string{"A": " \t", "B": "key-b"}, "key-b"},
-		{"env beats inline", []string{"A"}, "key-inline", map[string]string{"A": "key-a"}, "key-a"},
+		{"first env var wins", []string{"A", "B"}, "", map[string]string{"A": "key-a-0001", "B": "key-b-0001"}, "key-a-0001"},
+		{"an empty env var is skipped", []string{"A", "B"}, "", map[string]string{"A": "", "B": "key-b-0001"}, "key-b-0001"},
+		{"a blank env var is skipped", []string{"A", "B"}, "", map[string]string{"A": " \t", "B": "key-b-0001"}, "key-b-0001"},
+		// Plan 031 §3.2: a value that cannot be a key is not one.
+		{"a too-short env var is skipped", []string{"A", "B"}, "", map[string]string{"A": "zq-1234", "B": "key-b-0001"}, "key-b-0001"},
+		{"a too-short env var falls to inline", []string{"A"}, "key-inline", map[string]string{"A": "zq-1234"}, "key-inline"},
+		{"env beats inline", []string{"A"}, "key-inline", map[string]string{"A": "key-a-0001"}, "key-a-0001"},
 		{"inline when no env var is set", []string{"A", "B"}, "key-inline", nil, "key-inline"},
 		{"inline with no env_keys at all", nil, "key-inline", nil, "key-inline"},
-		{"surrounding whitespace is trimmed", []string{"A"}, "", map[string]string{"A": " key-a\n"}, "key-a"},
+		{"surrounding whitespace is trimmed", []string{"A"}, "", map[string]string{"A": " key-a-0001\n"}, "key-a-0001"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1002,7 +1100,7 @@ func TestResolveNoAPIKeyNamesOnlyVariableNames(t *testing.T) {
 
 func TestResolveFields(t *testing.T) {
 	tbl := validTable()
-	env := fakeEnv(map[string]string{"FIREWORKS_API_KEY": "key-fw"})
+	env := fakeEnv(map[string]string{"FIREWORKS_API_KEY": "key-fw-0001"})
 	got, err := tbl.Resolve("fireworks/kimi-k3", env)
 	if err != nil {
 		t.Fatal(err)
@@ -1012,7 +1110,7 @@ func TestResolveFields(t *testing.T) {
 		ProviderID:      "fireworks",
 		Driver:          DriverOpenAICompat,
 		BaseURL:         "https://api.fireworks.example/inference/v1",
-		APIKey:          "key-fw",
+		APIKey:          "key-fw-0001",
 		WireModel:       "accounts/fireworks/models/kimi-k3",
 		Name:            "Kimi K3 (Fireworks)",
 		ContextWindow:   262144,
@@ -1063,7 +1161,7 @@ func TestResolveOutputCeiling(t *testing.T) {
 		{"explicit on a small window", 8000, 6000, 6000},
 		{"explicit above the window", 8000, 9000, 9000},
 	}
-	env := fakeEnv(map[string]string{"FIREWORKS_API_KEY": "key-fw"})
+	env := fakeEnv(map[string]string{"FIREWORKS_API_KEY": "key-fw-0001"})
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			tbl := validTable()
@@ -1088,7 +1186,7 @@ func TestResolveOutputCeiling(t *testing.T) {
 func TestDefaultCeilingNeverReachesTheFile(t *testing.T) {
 	tbl := validTable()
 	setModel(tbl, "fireworks/kimi-k3", func(m *Model) { m.MaxOutputTokens = 0 })
-	env := fakeEnv(map[string]string{"FIREWORKS_API_KEY": "key-fw"})
+	env := fakeEnv(map[string]string{"FIREWORKS_API_KEY": "key-fw-0001"})
 	if _, err := tbl.Resolve("fireworks/kimi-k3", env); err != nil {
 		t.Fatal(err)
 	}

@@ -90,6 +90,7 @@ func openNative(t *testing.T) contractSession {
 	home := t.TempDir()
 	t.Setenv("CRAZE_HOME", home)
 	table := &modeltable.Table{
+		NoCatalog:    true, // the whole table: no shipped model merged in (plan 031 §3.13)
 		DefaultModel: "echo",
 		Providers: map[string]modeltable.Provider{
 			"echo": {Driver: modeltable.DriverOpenAICompat, BaseURL: "http://127.0.0.1:9/v1",

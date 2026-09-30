@@ -18,6 +18,7 @@ import (
 	"github.com/muesli/termenv"
 
 	"github.com/charliek/craze/internal/agent"
+	"github.com/charliek/craze/internal/harness/modeltable"
 )
 
 func TestWiredFakeAgentStreamFollowUpQuit(t *testing.T) {
@@ -286,6 +287,11 @@ func TestWiredModelChangeGoesThroughTheModelOption(t *testing.T) {
 // packages' Stubs, and production's, keep today's Start; a test here that
 // needs it says so by setting InstallOnStart false on its Stub.
 func TestMain(m *testing.M) {
+	// The shipped model catalog brings its providers' variable names into
+	// every native table (plan 031 §3.13, astra 13): a key exported in the
+	// developer's shell would otherwise reach every session and every frame
+	// built from pristineEnv, so they are unset before it is captured.
+	unsetCatalogEnv()
 	pristineEnv = os.Environ()
 	lipgloss.SetColorProfile(termenv.TrueColor)
 	installParityWatch()
@@ -322,6 +328,20 @@ func TestMain(m *testing.M) {
 		_ = os.RemoveAll(fakeAgentDir)
 	}
 	os.Exit(code)
+}
+
+// unsetCatalogEnv unsets every variable the shipped model catalog takes a key
+// from (plan 031 §3.13), and stops the run if there are none to unset — a
+// catalog that names none is broken, and the scrub would silently do nothing.
+func unsetCatalogEnv() {
+	names := modeltable.CatalogEnvNames()
+	if len(names) == 0 {
+		fmt.Fprintln(os.Stderr, "FAIL: the shipped model catalog names no variables to unset")
+		os.Exit(1)
+	}
+	for _, name := range names {
+		_ = os.Unsetenv(name)
+	}
 }
 
 var (

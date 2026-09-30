@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 
@@ -496,9 +497,11 @@ func TestSwitchLearnsAKeyForTheNextTurn(t *testing.T) {
 		t.Errorf("the key is in the transcript's third turn:\n%s", strings.Join(lines[8:], "\n"))
 	}
 
-	// A key that cannot be redacted, one inside the prompt, and one inside
-	// the tools — a schema's own bytes, which no description holds — each
-	// refuses the switch and leaves the model where it was.
+	// A key inside the prompt, and one inside the tools — a schema's own
+	// bytes, which no description holds — each refuses the switch and leaves
+	// the model where it was. A value that cannot be a key at all is not one
+	// (plan 031 §3.2): the switch goes ahead, and the value never joins the
+	// redactor — until plan 031 it refused the switch.
 	for what, key := range map[string]string{
 		"unredactable":  "k3y-x7",
 		"in the prompt": f.workspace, // the prompt names the working directory
@@ -520,8 +523,11 @@ func TestSwitchLearnsAKeyForTheNextTurn(t *testing.T) {
 		err := s.SetModel("test/a")
 		switch {
 		case what == "unredactable":
-			if !errors.Is(err, modeltable.ErrKeyTooShort) {
-				t.Errorf("a switch with an %s key = %v, want the floor's refusal", what, err)
+			if err != nil {
+				t.Errorf("a switch with an %s value = %v, want it skipped and the switch allowed", what, err)
+			}
+			if slices.Contains(s.tools.knownKeys(), key) {
+				t.Errorf("the %s value joined the redactor", what)
 			}
 		case what == "nowhere in either": // the control: this one is allowed
 			if err != nil {
@@ -689,44 +695,66 @@ func TestStoreErrorsAreRedacted(t *testing.T) {
 	}
 }
 
-// TestKeyFloor (§7.8): a key the redactor cannot handle fails Open, for any
-// provider, used or not — here the one no session of this table can even
-// use, NOKEY_API_KEY's. The control: a key of a usable length opens.
+// TestKeyFloor (§7.8): a value the redactor cannot handle is never a key. In
+// the environment — for any provider, used or not, here NOKEY_API_KEY, which
+// no session of this table can even use — it is skipped (plan 031 §3.2):
+// Open succeeds, the provider stays unfunded, and the value is not among the
+// keys redacted, since it is never sent. Until plan 031 it failed Open, and
+// so every native session, for one unrelated short variable. Inline, in a
+// table built in memory (Load refuses one in a file), it still fails Open,
+// naming the rule and never the key. The control: a key of a usable length
+// opens and is redacted.
 func TestKeyFloor(t *testing.T) {
 	cases := []struct {
-		name string
-		key  string
-		want error // nil: opens
+		name   string
+		key    string
+		inline bool  // an inline api_key instead of the environment
+		want   error // nil: opens
 	}{
-		{"under eight bytes", "k3y-x7", modeltable.ErrKeyTooShort},
-		{"overlapping the marker", "credential", modeltable.ErrKeyOverlapsMarker},
+		{"under eight bytes", "k3y-x7", false, nil},
+		{"overlapping the marker", "credential", false, nil},
+		{"inline under eight bytes", "k3y-x7", true, modeltable.ErrKeyTooShort},
+		{"inline overlapping the marker", "credential", true, modeltable.ErrKeyOverlapsMarker},
 		// The name must not be the key: a test's temporary directory carries
 		// it, and a workspace path holding a key refuses to open.
-		{"usable", "sk-long-enough-0001", nil},
+		{"usable", "sk-long-enough-0001", false, nil},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newFixture(t, "http://127.0.0.1:1/v1")
 			opts := f.options()
-			opts.Getenv = func(name string) string {
-				if name == "NOKEY_API_KEY" {
-					return tc.key
+			if tc.inline {
+				p := opts.Table.Providers["nokey"]
+				p.APIKey = modeltable.Secret(tc.key)
+				opts.Table.Providers["nokey"] = p
+			} else {
+				opts.Getenv = func(name string) string {
+					if name == "NOKEY_API_KEY" {
+						return tc.key
+					}
+					return testEnv[name]
 				}
-				return testEnv[name]
 			}
 			s, err := Open(opts)
-			if tc.want == nil {
-				if err != nil {
-					t.Fatalf("Open = %v", err)
+			if tc.want != nil {
+				if !errors.Is(err, tc.want) {
+					t.Fatalf("Open = %v, want %v", err, tc.want)
 				}
-				s.Close()
+				if strings.Contains(err.Error(), tc.key) {
+					t.Fatalf("the error names the key: %v", err)
+				}
 				return
 			}
-			if !errors.Is(err, tc.want) {
-				t.Fatalf("Open = %v, want %v", err, tc.want)
+			if err != nil {
+				t.Fatalf("Open = %v", err)
 			}
-			if strings.Contains(err.Error(), tc.key) {
-				t.Fatalf("the error names the key: %v", err)
+			defer s.Close()
+			usable := tc.key == "sk-long-enough-0001"
+			if got := slices.Contains(s.tools.knownKeys(), tc.key); got != usable {
+				t.Fatalf("the value is among the redacted keys = %v, want %v", got, usable)
+			}
+			if _, err := opts.Table.Resolve("nokey/d", opts.Getenv); usable != (err == nil) {
+				t.Fatalf("Resolve(nokey/d) = %v; funded should be %v", err, usable)
 			}
 		})
 	}
