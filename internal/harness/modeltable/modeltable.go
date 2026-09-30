@@ -152,6 +152,15 @@ type Table struct {
 	modelOrigins, providerOrigins map[string]Origin
 	// redundant are RedundantOverrides' lines.
 	redundant []string
+	// credentialEnv is every variable name the merge saw declared as holding
+	// a key — each env_keys name of the catalog's providers and of every
+	// entry the user's providers.toml writes, an old import's lent names and
+	// an entry the merge dropped included — sorted and without repeats,
+	// whether or not a merged provider still takes a key from it (plan 031
+	// §3.2, C2r2). Read through CredentialEnvNames; nil for a table loaded
+	// without a catalog or built in memory, whose providers' names are all
+	// there is.
+	credentialEnv []string
 }
 
 // Provider is one provider: shipped, overridden in providers.toml, or the
@@ -1051,20 +1060,46 @@ func envKeyNames(providers map[string]Provider) []string {
 	return slices.Compact(names)
 }
 
+// CredentialEnvNames is every environment variable name the table knows holds
+// an API key, sorted and without repeats (plan 031 §3.2; whole-branch review
+// r6): each provider's env_keys and, for a table merged over a catalog, every
+// name the catalog's providers or the user's providers.toml declare, whether
+// or not a provider still takes its key from it. An override that moves a
+// shipped provider's endpoint without writing env_keys, or that writes
+// env_keys of its own, drops the shipped variable as a funding source — an
+// exported FIREWORKS_API_KEY must never pay for the user's own endpoint — but
+// the variable still holds a credential, and a model that runs `printenv`
+// must see neither it nor its value. So this is the set a command the session
+// runs is started without (tool.ChildEnviron), and the set Keys reads values
+// from for the redactor.
+//
+// Funding is never decided here: Resolve, Choices, StartModel, Providers and
+// EnvWarnings read the providers' own env_keys, and nothing else. The caller
+// owns the slice.
+func (t *Table) CredentialEnvNames() []string {
+	names := append(envKeyNames(t.Providers), t.credentialEnv...)
+	slices.Sort(names)
+	return slices.Compact(names)
+}
+
 // Keys returns every key the table knows of, for the redactor that keeps
 // them out of tool output (plan 019 §3.8): for every provider, used or not,
 // the value of each of its env_keys variables that getenv reports set to a
 // usable key — all of them, not only the first, which is the one Resolve
-// picks — and its inline api_key, each with surrounding whitespace trimmed. A
-// nil getenv is os.Getenv.
+// picks — and its inline api_key; then the value of every other variable
+// CredentialEnvNames lists (C2r2), which funds nothing but is a credential
+// all the same; each with surrounding whitespace trimmed. A nil getenv is
+// os.Getenv.
 //
 // An env value that cannot be a key — under MinKeyLen bytes, or overlapping
 // the redaction marker — is skipped, exactly as Resolve skips it, so "funded"
 // means the same everywhere (plan 031 §3.2): it is never sent to a provider,
 // so it is not a credential to redact, and EnvWarnings names the variable for
-// the session to say so. An inline key that fails either rule still fails,
-// naming the provider, never the value: Load refuses one, so only a table
-// built in memory can hold it.
+// the session to say so when a provider takes its key from it (one that funds
+// nothing is skipped without a word: there is nothing it could have paid
+// for). An inline key that fails either rule still fails, naming the
+// provider, never the value: Load refuses one, so only a table built in
+// memory can hold it.
 func (t *Table) Keys(getenv func(string) string) ([]Secret, error) {
 	if getenv == nil {
 		getenv = os.Getenv
@@ -1083,6 +1118,15 @@ func (t *Table) Keys(getenv func(string) string) ([]Secret, error) {
 		}
 		if v != "" {
 			keys = append(keys, Secret(v))
+		}
+	}
+	funding := envKeyNames(t.Providers)
+	for _, name := range t.credentialEnv {
+		if _, read := slices.BinarySearch(funding, name); read {
+			continue
+		}
+		if k, err := envKey(getenv, name); err == nil && k != "" {
+			keys = append(keys, k)
 		}
 	}
 	return keys, nil

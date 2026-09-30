@@ -165,6 +165,204 @@ func TestSecretsCanaries(t *testing.T) {
 	}
 }
 
+// movedEndpoint rewrites f's files as a directory over cat — nil is the
+// shipped catalog — in which the user pointed provider id at their own
+// endpoint, writing base_url and not env_keys, and stored a key for it as
+// `craze auth login` stores one; it loads f.table from them and scripts a
+// model for each of its aliases. The provider then takes its key from no
+// variable (plan 031 §3.2): its shipped one funds nothing.
+func (f *fixture) movedEndpoint(cat *modeltable.Catalog, id, stored string) {
+	f.t.Helper()
+	if err := os.Remove(filepath.Join(f.home, modeltable.ModelsFile)); err != nil { // no `catalog = false`
+		f.t.Fatal(err)
+	}
+	entry := fmt.Sprintf("version = 1\n\n[providers.%q]\nbase_url = \"http://127.0.0.1:1/v1\"\n", id)
+	if err := os.WriteFile(filepath.Join(f.home, modeltable.ProvidersFile), []byte(entry), 0o600); err != nil {
+		f.t.Fatal(err)
+	}
+	if err := modeltable.SetKey(f.home, id, stored); err != nil {
+		f.t.Fatalf("storing the endpoint's key: %v", err)
+	}
+	if cat == nil {
+		f.table = f.load()
+	} else {
+		table, err := modeltable.LoadWith(f.home, cat)
+		if err != nil {
+			f.t.Fatalf("loading over the test catalog: %v", err)
+		}
+		f.table = table
+	}
+	if envKeys := f.table.Providers[id].EnvKeys; len(envKeys) != 0 {
+		f.t.Fatalf("control: the moved endpoint still takes its key from %q", envKeys)
+	}
+	f.models = map[string]*scripted{}
+	for alias, m := range f.table.Models {
+		f.models[alias] = &scripted{provider: m.Provider, wire: m.WireModel}
+	}
+}
+
+// TestSecretsCanaryOverAMovedEndpoint (plan 031 §3.2, whole-branch review r6
+// finding 1): the user points a shipped provider at their own endpoint —
+// base_url written, env_keys not — and stores a key for it. The shipped
+// variable no longer funds the provider, and must not: it belongs to the
+// shipped endpoint. But exported, it still holds a credential, which the
+// session must neither hand to a command the model runs nor let through when a
+// copy of it is printed. The model runs `env` and prints a copy long enough to
+// spill; an instruction file holds the value too. The value reaches no event,
+// the transcript, a spill file, or any request — the next one, which carries
+// the commands' results back, included — and funding is unchanged: the stored
+// key is the one the session runs on.
+//
+// Before the fix the table knew only the merged providers' variables, so the
+// shipped one was left in the commands' environment and out of the redactor.
+func TestSecretsCanaryOverAMovedEndpoint(t *testing.T) {
+	const (
+		exported = "sk-shipped-canary-0006"
+		stored   = "sk-stored-canary-0007"
+	)
+	cat, err := modeltable.ShippedCatalog()
+	if err != nil {
+		t.Fatal(err)
+	}
+	alias := cat.DefaultModel
+	id := cat.Models[alias].Provider
+	shippedVar := cat.Providers[id].EnvKeys[0]
+	// The process environment is what a command inherits, so the test sets it
+	// rather than a Getenv of its own: nothing from the developer's shell,
+	// then the one shipped variable, and a copy under a name no provider
+	// declares, which is what `env` then finds.
+	for _, name := range modeltable.CatalogEnvNames() {
+		t.Setenv(name, "")
+		_ = os.Unsetenv(name)
+	}
+	t.Setenv(shippedVar, exported)
+	t.Setenv("CRAZE_CANARY_COPY", exported)
+
+	f := newFixture(t, "http://127.0.0.1:1/v1")
+	f.movedEndpoint(nil, id, stored)
+	if r, err := f.table.Resolve(alias, os.Getenv); err != nil || r.APIKey.Reveal() != stored {
+		t.Fatalf("control: %s does not run on the stored key (%v)", alias, err)
+	}
+	opts := f.options()
+	opts.Getenv = os.Getenv
+	opts.Model = alias
+	opts.Prompt = PromptExtras{Instructions: []PromptDoc{{Path: "/w/AGENTS.md", Text: "The old deploy key: " + exported + ".\n"}}}
+	s := f.open(opts)
+	if !strings.Contains(s.system, "The old deploy key: "+redact.Marker) {
+		t.Error("the instruction file's copy of the exported key was not redacted out of the prompt")
+	}
+
+	bash := func(cmd string) string { return input(t, map[string]any{"command": cmd}) }
+	f.models[alias].push(
+		callStep(
+			callParts("c0", "bash", bash("env")),
+			callParts("c1", "bash", bash(`for i in $(seq 3000); do echo "$i $CRAZE_CANARY_COPY"; done`)),
+		),
+		answerWith("done"),
+	)
+	var ev events
+	if res, err := s.Run(context.Background(), "look around", ev.sink); err != nil || res.StopReason != StopEndTurn {
+		t.Fatalf("Run = %+v, %v", res, err)
+	}
+	evs := ev.list()
+	fin := of[ToolFinished](evs)
+	if len(fin) != 2 {
+		t.Fatalf("%d calls finished, want 2: %v", len(fin), seq(evs))
+	}
+	// Value-free from here on: a failure names the place, never the text.
+	envOut := fin[0].Result.Text
+	if strings.Contains(envOut, shippedVar+"=") {
+		t.Errorf("the command's environment kept %s", shippedVar)
+	}
+	if !strings.Contains(envOut, "CRAZE_CANARY_COPY="+redact.Marker) {
+		t.Error("control: env's output does not show the copy, redacted")
+	}
+	spill := fin[1].Result.Trunc.Spill
+	if spill == "" {
+		t.Fatal("control: the long output did not spill, so the spill file is not checked")
+	}
+	requests := f.models[alias].requests()
+	if len(requests) != 2 {
+		t.Fatalf("%d requests, want the first and the one carrying the results", len(requests))
+	}
+	for label, key := range map[string]string{"the exported shipped key": exported, "the stored key": stored} {
+		if found := leaks(evs, key); len(found) > 0 {
+			t.Errorf("%s reached an event at %v", label, found)
+		}
+		if b, err := os.ReadFile(s.store.Path()); err != nil {
+			t.Fatal(err)
+		} else if bytes.Contains(b, []byte(key)) {
+			t.Errorf("%s is in the transcript", label)
+		}
+		if b, err := os.ReadFile(spill); err != nil {
+			t.Fatal(err)
+		} else if bytes.Contains(b, []byte(key)) {
+			t.Errorf("%s is in the spill file", label)
+		}
+		for i, c := range requests {
+			if strings.Contains(requestText(c, false), key) {
+				t.Errorf("request %d sent the model %s", i+1, label)
+			}
+		}
+	}
+}
+
+// TestMovedEndpointsShippedKeyInTheFrozenPrompt (plan 031 §3.2, C2r2): the
+// shipped variable of a provider the user pointed at their own endpoint is a
+// key the session redacts though it funds nothing, so a value of it that
+// appears in the environment after Open, and is sitting unredacted in an
+// instruction file, refuses a switch exactly as a funding key does
+// (errFrozenKey, TestFrozenInstructionKeyRefusesASwitch): the frozen prompt
+// cannot be rewritten, and every request would go on carrying the key. The
+// control is a value the prompt does not hold: the switch goes ahead, the
+// value joins the session's keys, and the model still runs on the stored key.
+func TestMovedEndpointsShippedKeyInTheFrozenPrompt(t *testing.T) {
+	const (
+		later  = "sk-exported-later-0008"
+		stored = "sk-stored-proxy-0009"
+		other  = "sk-not-in-the-prompt-0010"
+	)
+	cat := &modeltable.Catalog{
+		DefaultModel: "acme/a",
+		Providers: map[string]modeltable.Provider{"acme": {Name: "Acme", Driver: modeltable.DriverOpenAICompat,
+			BaseURL: "https://api.acme.example/v1", EnvKeys: []string{"ACME_API_KEY"}}},
+		Models: map[string]modeltable.Model{
+			"acme/a": {Provider: "acme", WireModel: "acme-a"},
+			"acme/b": {Provider: "acme", WireModel: "acme-b"},
+		},
+	}
+	f := newFixture(t, "http://127.0.0.1:1/v1")
+	f.movedEndpoint(cat, "acme", stored)
+	env := map[string]string{} // ACME_API_KEY is not exported yet
+	opts := f.options()
+	opts.Getenv = func(name string) string { return env[name] }
+	opts.Model = "acme/a"
+	opts.Prompt = PromptExtras{Instructions: []PromptDoc{{Path: "/w/CLAUDE.md", Text: "Old deploy: ACME_API_KEY=" + later + ".\n"}}}
+	s := f.open(opts)
+	if !strings.Contains(s.system, later) {
+		t.Fatal("control: the value was not in the frozen prompt, so refusing the switch proves nothing")
+	}
+
+	env["ACME_API_KEY"] = later
+	if err := s.SetModel("acme/b"); !errors.Is(err, errFrozenKey) {
+		t.Errorf("a switch while the moved endpoint's shipped variable holds a key the prompt holds = %v, want errFrozenKey", err)
+	}
+	if alias, _ := s.Current(); alias != "acme/a" {
+		t.Errorf("the refused switch left the session on %q", alias)
+	}
+
+	env["ACME_API_KEY"] = other
+	if err := s.SetModel("acme/b"); err != nil {
+		t.Fatalf("control: a switch with a value the prompt does not hold = %v", err)
+	}
+	if !slices.Contains(s.tools.knownKeys(), other) {
+		t.Error("the switch did not add the shipped variable's value to the session's keys")
+	}
+	if r, err := f.table.Resolve("acme/b", opts.Getenv); err != nil || r.APIKey.Reveal() != stored {
+		t.Errorf("acme/b does not run on the stored key (%v)", err)
+	}
+}
+
 // TestWorkspaceWithAKeyIsRefused: the system prompt names the working
 // directory and the header records it, both frozen, and a path cannot be
 // redacted and still be a path — so a workspace whose path holds a provider

@@ -155,9 +155,11 @@ type toolset struct {
 //   - the dispatcher, with the mode's gate over the session's own (plan 023
 //     §3.1) and with the session's Env: the workspace and home, the
 //     redactor, a path-lock table, the closing channel, and the environment
-//     a command gets — the user's, less every env_keys variable of every
-//     provider and every OPENAI_* (never nil: bash refuses to run on a nil
-//     one rather than fall back to craze's own).
+//     a command gets — the user's, less every variable the table knows holds
+//     a key (CredentialEnvNames: every provider's env_keys, and a shipped
+//     name no provider takes its key from any more, plan 031 C2r2) and every
+//     OPENAI_* (never nil: bash refuses to run on a nil one rather than fall
+//     back to craze's own).
 //
 // It also sweeps the spill directory of files older than seven days; a
 // sweep that fails is housekeeping undone, not a reason to refuse a session.
@@ -355,10 +357,7 @@ func openTools(home, workspace, mode string, asker tool.Asker, table *modeltable
 		return nil, err
 	}
 
-	var keyNames []string
-	for _, prov := range table.Providers {
-		keyNames = append(keyNames, prov.EnvKeys...)
-	}
+	keyNames := table.CredentialEnvNames()
 	// The session's mode wraps the gate it would otherwise use — the test
 	// seam's, or AllowAll — rather than replacing it: a call the mode allows
 	// is still the inner gate's to judge, which is how H3's evaluator will

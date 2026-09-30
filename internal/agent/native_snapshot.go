@@ -208,7 +208,7 @@ func collectSessionStart(workspace string, now func() time.Time, run gitRunner, 
 // The date is read from now — harness.Options.Now, the clock the transcript
 // is stamped with, which a test fixes — or the wall clock when it is nil, and
 // the commands go through the session's gitRun, else execGit in the
-// environment table's providers leave a command (gitEnviron).
+// environment table leaves a command (gitEnviron).
 func (s *nativeSession) sessionStart(workspace string, now func() time.Time, table *modeltable.Table, warn func(string)) harness.SessionStart {
 	if now == nil {
 		now = time.Now
@@ -264,17 +264,14 @@ var (
 
 // gitEnviron is the environment the snapshot's git runs in: the one the
 // harness's bash tool gives every command it runs (openTools), by the same
-// call — craze's own environment less every variable named in any provider's
-// env_keys and every OPENAI_* (tool.ChildEnviron) — and less gitSelection
-// too. git needs no provider key, and whatever it starts in turn — a hook, a
-// helper, an alias — should not be handed one either. Everything else stays:
-// HOME and XDG_CONFIG_HOME, which say where the user's own git config is,
-// PATH, the locale.
+// call — craze's own environment less every variable the table knows holds a
+// key (CredentialEnvNames, plan 031 C2r2) and every OPENAI_*
+// (tool.ChildEnviron) — and less gitSelection too. git needs no provider key,
+// and whatever it starts in turn — a hook, a helper, an alias — should not be
+// handed one either. Everything else stays: HOME and XDG_CONFIG_HOME, which
+// say where the user's own git config is, PATH, the locale.
 func gitEnviron(table *modeltable.Table) []string {
-	names := slices.Clone(gitSelection)
-	for _, prov := range table.Providers {
-		names = append(names, prov.EnvKeys...)
-	}
+	names := append(slices.Clone(gitSelection), table.CredentialEnvNames()...)
 	return slices.DeleteFunc(tool.ChildEnviron(os.Environ(), names), func(kv string) bool {
 		return slices.ContainsFunc(gitSelectionPrefixes, func(p string) bool { return strings.HasPrefix(kv, p) })
 	})

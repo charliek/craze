@@ -636,7 +636,8 @@ A model's other optional keys are documented below:
 `vision` and `tool_profile`; `models.toml` also takes
 [`[compaction]`](#native-compaction) and
 [`[subagents]`](tui.md#sub-agent-models). craze never rewrites `models.toml`,
-and rewrites `providers.toml` only when you run [`craze auth`](#keys).
+and rewrites `providers.toml` only when you run [`craze auth`](#keys) or
+store a key with [`/connect`](tui.md#connect).
 
 ### How the files merge
 
@@ -657,7 +658,10 @@ and rewrites `providers.toml` only when you run [`craze auth`](#keys).
   override). An entry that changes the endpoint — `driver` or `base_url` —
   without writing `env_keys` does **not** inherit the shipped variables: the
   shipped `FIREWORKS_API_KEY` belongs to Fireworks' own endpoint and never
-  reaches yours.
+  pays for yours. craze still treats it as a key, though: exported, it is
+  kept out of the commands a native session runs and redacted from what they
+  print, as every key is ([Keys](#keys)), so it does not reach your endpoint
+  that way either.
 - **`default_model`** is yours when it names a model, the catalog's
   otherwise.
 
@@ -686,8 +690,14 @@ set to a usable key, and otherwise its inline `api_key`. A value that cannot
 be a key — shorter than 8 bytes, or overlapping craze's redaction marker — is
 skipped as though unset, with one line at session start naming the variable
 (never the value); an inline `api_key` like that is a load error instead.
-Every key craze knows, from every provider, is redacted from tool output. A
-provider with no usable key leaves its models unusable, not the others.
+Every key craze knows, from every provider, is redacted from tool output, and
+the commands a native session runs are started without the variables that hold
+one. That covers every variable the shipped catalog or your `providers.toml`
+names as a key variable, even one no provider takes its key from any more —
+a shipped provider's after you point it at your own endpoint or give it
+`env_keys` of your own: it no longer funds anything, but its value is still a
+credential. A provider with no usable key leaves its models unusable, not the
+others.
 
 [`craze auth login <provider>`](cli.md#craze-auth-login) stores a key as that
 provider's inline `api_key`, [`craze auth logout

@@ -134,8 +134,10 @@ func (o modelOverlay) complete() Model { return overlayModel(Model{}, o) }
 // alone drops it), and an entry that changes the endpoint — driver or base_url
 // — without writing env_keys does not inherit the shipped env_keys, because
 // the shipped variable belongs to the shipped endpoint and an exported
-// FIREWORKS_API_KEY must never reach the user's own. An explicit empty list is
-// "no variables".
+// FIREWORKS_API_KEY must never fund the user's own. An explicit empty list is
+// "no variables". This decides funding only: the table still knows the
+// shipped names hold keys (Table.CredentialEnvNames, C2r2), so an exported
+// one is kept from the commands a session runs and redacted all the same.
 func overlayProvider(base Provider, o providerOverlay) Provider {
 	p := base
 	p.EnvKeys = slices.Clone(base.EnvKeys)
@@ -466,7 +468,26 @@ func merge(cat *Catalog, ppath, mpath string, pd *providersOverlay, md *modelsOv
 	}
 	m.defaultModel(md.DefaultModel)
 	m.subagents(subagentsFromDoc(md.Subagents))
+	m.t.credentialEnv = credentialNames(cat, pd)
 	return m.t
+}
+
+// credentialNames is every variable name cat's providers and the user's
+// providers.toml declare as holding a key, sorted and without repeats: what a
+// merged table keeps apart from funding (Table.CredentialEnvNames, C2r2). The
+// merge decides which of them a provider takes its key from — an entry that
+// moves a shipped endpoint drops the shipped ones, an env_keys override
+// replaces them, an entry that cannot stand is dropped whole — and none of
+// that makes a name's value any less a credential. Every merged provider's
+// names are among these, an old import's lent ones included, since each comes
+// from the catalog or the file.
+func credentialNames(cat *Catalog, pd *providersOverlay) []string {
+	names := envKeyNames(cat.Providers)
+	for _, o := range pd.Providers {
+		names = append(names, deref(o.EnvKeys)...)
+	}
+	slices.Sort(names)
+	return slices.Compact(names)
 }
 
 func (m *merger) provider(id string, o providerOverlay) {

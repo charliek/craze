@@ -728,6 +728,141 @@ func TestEnvValueSkippedOverTheCatalog(t *testing.T) {
 	}
 }
 
+// TestCredentialEnvOutlivesFunding (plan 031 §3.2, C2r2): an override that
+// moves a shipped provider's endpoint drops the shipped variable as a funding
+// source, and one that writes its own env_keys replaces the shipped list —
+// but the shipped variables still hold credentials, and so does the variable
+// of a user entry the merge dropped. The table keeps every name it knows holds
+// a key, apart from funding: CredentialEnvNames lists them for the tool
+// environment's filter, and Keys hands the redactor each usable value. Funding
+// is untouched: Resolve, Choices, StartModel and Providers still take a key
+// from the merged providers' env_keys alone. With `catalog = false` the
+// catalog's names are not the table's.
+func TestCredentialEnvOutlivesFunding(t *testing.T) {
+	const (
+		stored   = "stored-proxy-key-01"
+		exported = "exported-acme-0001" // the shipped variable of the endpoint the user moved
+		replaced = "exported-router-01" // the shipped variable the user's env_keys replaced
+		dropped  = "exported-broken-01" // the variable of an entry the merge dropped
+	)
+	cat := testCatalog(t, testCatalogV1)
+	tbl, dir := loadOver(t, cat, `version = 1
+
+[providers.acme]
+base_url = "https://proxy.example/v1"
+api_key = "`+stored+`"
+
+[providers.router]
+env_keys = ["MY_ROUTER_KEY"]
+
+[providers.broken]
+name = "Broken"
+env_keys = ["BROKEN_API_KEY"]
+`, "")
+	wantWarnings(t, tbl, []string{"providers.broken", "ignored"})
+
+	want := []string{"ACME_API_KEY", "BROKEN_API_KEY", "MY_ROUTER_KEY", "ROUTER_API_KEY"}
+	if got := tbl.CredentialEnvNames(); !slices.Equal(got, want) {
+		t.Errorf("CredentialEnvNames = %q, want %q", got, want)
+	}
+	env := map[string]string{"ACME_API_KEY": exported, "ROUTER_API_KEY": replaced, "BROKEN_API_KEY": dropped}
+	keys, err := tbl.Keys(fakeEnv(env))
+	if err != nil {
+		t.Fatalf("Keys = %v", err)
+	}
+	var got []string
+	for _, k := range keys {
+		got = append(got, k.Reveal())
+	}
+	for label, v := range map[string]string{"the stored key": stored, "the moved endpoint's shipped variable": exported,
+		"the replaced shipped variable": replaced, "the dropped entry's variable": dropped} {
+		if !slices.Contains(got, v) {
+			t.Errorf("Keys lacks %s's value", label) // never the value: a failure names what is missing
+		}
+	}
+
+	// Funding is the merged providers' alone (§3.2): the shipped variable
+	// funds neither the moved endpoint nor the one whose list was replaced.
+	if p := tbl.Providers["acme"]; len(p.EnvKeys) != 0 {
+		t.Fatalf("acme takes a key from %q, want no variable", p.EnvKeys)
+	}
+	if r, err := tbl.Resolve("acme/big", fakeEnv(env)); err != nil || r.APIKey.Reveal() != stored {
+		t.Fatalf("Resolve(acme/big) = %v; want the stored key, not the exported one", err)
+	}
+	if _, err := tbl.Resolve("router/m", fakeEnv(env)); !errors.Is(err, ErrNoAPIKey) {
+		t.Fatalf("Resolve(router/m) = %v; want ErrNoAPIKey: ROUTER_API_KEY no longer funds router", err)
+	}
+	var offered []string
+	for _, c := range tbl.Choices(nil, fakeEnv(env), "") {
+		offered = append(offered, c.Alias)
+	}
+	if want := []string{"acme/big", "acme/fast"}; !slices.Equal(slices.Sorted(slices.Values(offered)), want) {
+		t.Fatalf("Choices = %q, want %q", offered, want)
+	}
+	if alias, _, err := tbl.StartModel(nil, fakeEnv(env)); err != nil || alias != "acme/fast" {
+		t.Fatalf("StartModel = %q, %v", alias, err)
+	}
+	infos, err := providersWith(dir, fakeEnv(env), cat)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, info := range infos {
+		switch info.ID {
+		case "acme":
+			if info.Via != KeyStored || info.EnvVar != "" {
+				t.Errorf("Providers: acme via %v %q, want the stored key", info.Via, info.EnvVar)
+			}
+		case "router":
+			if info.Via != KeyNone {
+				t.Errorf("Providers: router via %v %q, want not connected", info.Via, info.EnvVar)
+			}
+		}
+	}
+	// A value that cannot be a key is skipped as Resolve skips one, and the
+	// variable funds nothing, so there is nothing to warn about: EnvWarnings
+	// names only variables a provider takes its key from.
+	env["ACME_API_KEY"] = "zq-12"
+	keys, err = tbl.Keys(fakeEnv(env))
+	if err != nil || len(keys) != 3 {
+		t.Fatalf("Keys with a short value in ACME_API_KEY = %d keys, %v; want the other three", len(keys), err)
+	}
+	if w := tbl.EnvWarnings(fakeEnv(env)); len(w) != 0 {
+		t.Fatalf("EnvWarnings = %q, want none for a variable no provider takes its key from", w)
+	}
+
+	// `catalog = false`: the directory's files are the whole table, and the
+	// catalog's names are not among its credentials.
+	alone, _ := loadOver(t, cat, `version = 1
+
+[providers.acme]
+driver = "openai-compat"
+base_url = "https://proxy.example/v1"
+api_key = "`+stored+`"
+`, `version = 1
+catalog = false
+default_model = "acme/x"
+
+[models."acme/x"]
+provider = "acme"
+wire_model = "x"
+`)
+	if got := alone.CredentialEnvNames(); len(got) != 0 {
+		t.Fatalf("catalog = false: CredentialEnvNames = %q, want none", got)
+	}
+	// A table built in memory knows its providers' names, as they are now.
+	mem := validTable()
+	setProvider(mem, "fireworks", func(p *Provider) { p.EnvKeys = append(p.EnvKeys, "FW_EXTRA_KEY") })
+	if got, want := mem.CredentialEnvNames(), envKeyNames(mem.Providers); !slices.Equal(got, want) || !slices.Contains(got, "FW_EXTRA_KEY") {
+		t.Fatalf("in memory: CredentialEnvNames = %q, want %q", got, want)
+	}
+	if got := tbl.CredentialEnvNames(); len(got) > 0 {
+		got[0] = "changed"
+		if tbl.CredentialEnvNames()[0] == "changed" {
+			t.Fatal("CredentialEnvNames returned the table's own storage")
+		}
+	}
+}
+
 // TestReleaseTransition (plan 031 A4, r2-6): a directory nobody edits, loaded
 // over catalog v1 and then over v2 — which adds a model, renames one (the old
 // alias retired, its wire id carried by the new one), retires another with
