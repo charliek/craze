@@ -171,7 +171,7 @@ func (m Model) spawned(msg spawnedMsg) (tea.Model, tea.Cmd) {
 	// Init's batch, for the backend Init could not start: the read it arms is
 	// the one the command gate's reader rule counts (readOn).
 	m.reading = true
-	return m, tea.Batch(m.startCmd(), waitEvent(m.eng))
+	return m, tea.Batch(m.startCmd(), waitEvent(m.eng, m.bgen))
 }
 
 // repick brings back the picker a refused choice came from, with the refusal

@@ -16,10 +16,12 @@
 // see wire_test.go's runner, which does the substitution both ways.
 //
 // By default the Host is an S2 host, which to a plan 030 client is an older
-// one: it refuses session.stop and leaves the info document's permissionMode
-// and startedAt out. Options turns each on (plan 030 §3.6a, §3.7; X1): Stop
-// serves session.stop through a coordinator whose sequence the run_stop op
-// runs, and a fixture asks for them in its first line ({"dir": "host", …}).
+// one: it refuses session.stop, leaves the info document's permissionMode
+// and startedAt out, and answers sessions.list with S2's row. Options turns
+// each on (plan 030 §3.6a, §3.7, §3.8; X1): Stop serves session.stop through
+// a coordinator whose sequence the run_stop op runs, RowFacts puts the row
+// facts on the row, and a fixture asks for them in its first line ({"dir":
+// "host", …}).
 //
 // depguard: this package may import internal/tui (for the Stub) and
 // internal/control (the server); it may not import internal/cli, internal/acp

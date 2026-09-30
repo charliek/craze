@@ -90,6 +90,14 @@ type Options struct {
 	// host's start is still when it started. It goes on the wire in UTC; the
 	// zero time leaves it out, which is an older host's document.
 	StartedAt time.Time
+	// RowFacts puts the row facts on sessions.list's row (plan 030 §3.8) —
+	// the head ask's summary, what a working session is doing, its last
+	// reply, when it entered its row state, a failed start and its error,
+	// whether it was ever prompted (engine.RowFacts) — and says so in the
+	// info document's capabilities.rowFacts. Every craze host sets it,
+	// detached or TUI-hosted; false — the fake host by default — answers the
+	// row S2 answered, which is an older host's (X1).
+	RowFacts bool
 }
 
 // Budget is a subscription budget: the event log's SubscribeOptions MaxItems

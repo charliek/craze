@@ -1,9 +1,12 @@
 package tui
 
 import (
+	"io"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/textarea"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -294,5 +297,170 @@ func TestComposerBandKeepsItsBottomRule(t *testing.T) {
 	}
 	if !strings.HasPrefix(ansi.Strip(got[4]), "─") {
 		t.Fatalf("last band row is %q, want the bottom rule", got[4])
+	}
+}
+
+// keyBound bounds one key's Update in TestWordMotionOverBlankTextReturns: a
+// key takes microseconds, so reaching it means the key never returns.
+const keyBound = 5 * time.Second
+
+// updateWithin is m.Update(k) on a goroutine of its own, bounded by
+// keyBound: a key that never returns fails the test there instead of hanging
+// the suite (its goroutine is left spinning; the test has failed).
+func updateWithin(t *testing.T, m Model, k tea.KeyMsg) Model {
+	t.Helper()
+	done := make(chan Model, 1)
+	go func() {
+		tm, _ := m.Update(k)
+		done <- tm.(Model)
+	}()
+	select {
+	case got := <-done:
+		return got
+	case <-time.After(keyBound):
+		t.Fatalf("%s never returned: the update hangs", k)
+		return m
+	}
+}
+
+// parsedKey is the one key bubbletea reads from the terminal bytes in: what
+// a real terminal's sequence arrives as.
+func parsedKey(t *testing.T, in string) tea.KeyMsg {
+	t.Helper()
+	r := &keyRecorder{}
+	p := tea.NewProgram(r, tea.WithInput(strings.NewReader(in)), tea.WithOutput(io.Discard),
+		tea.WithoutRenderer(), tea.WithoutSignalHandler())
+	done := make(chan struct{})
+	go func() {
+		_, _ = p.Run()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(keyBound):
+		p.Kill()
+		<-done
+	}
+	if len(r.keys) != 1 {
+		t.Fatalf("%q was read as %v, want one key", in, r.keys)
+	}
+	return r.keys[0]
+}
+
+// keyRecorder is a program that keeps the first key it is sent, and quits.
+type keyRecorder struct{ keys []tea.KeyMsg }
+
+func (r *keyRecorder) Init() tea.Cmd { return nil }
+
+func (r *keyRecorder) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if k, ok := msg.(tea.KeyMsg); ok {
+		r.keys = append(r.keys, k)
+		return r, tea.Quit
+	}
+	return r, nil
+}
+
+func (r *keyRecorder) View() string { return "" }
+
+// TestWordMotionOverBlankTextReturns (plan 030 C9r, found by C10): bubbles'
+// word-left never returned with nothing but whitespace before the cursor, so
+// alt+←, alt+b and macOS Terminal's ESC b (read as alt+b) hung craze on an
+// empty composer — with a session list or without one. Every such key now
+// returns and leaves the text and the cursor where they were, which is what
+// word-left does wherever it returns there; with a word before the cursor it
+// still moves to that word's start. ctrl+← is no word motion (it moves
+// nothing). The forward motions, the word case changes and the word
+// deletions return over blank text too — bubbles' own, unguarded.
+func TestWordMotionOverBlankTextReturns(t *testing.T) {
+	escB := parsedKey(t, "\x1bb")
+	if !key.Matches(escB, textarea.DefaultKeyMap.WordBackward) {
+		t.Fatalf("ESC b was read as %s, not a word-left key", escB)
+	}
+	back := []struct {
+		name string
+		k    tea.KeyMsg
+		word bool // a word-left key
+	}{
+		{"alt+←", tea.KeyMsg{Type: tea.KeyLeft, Alt: true}, true},
+		{"alt+b", tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'b'}, Alt: true}, true},
+		{"ESC b", escB, true},
+		{"ctrl+←", tea.KeyMsg{Type: tea.KeyCtrlLeft}, false},
+	}
+	texts := []struct {
+		name, text string
+		at         int // the cursor's byte offset
+		wordAt     int // where word-left leaves it
+	}{
+		{"an empty composer", "", 0, 0},
+		{"blanks before the cursor", "   ", 3, 3},
+		{"blank lines before the cursor", "\n  \n", 4, 4},
+		{"blanks before a word, the cursor at it", "  word", 2, 2},
+		{"the cursor at the start of a word", "word", 0, 0},
+		{"a word before the cursor", "fix the flake", 13, 8},
+	}
+	models := []struct {
+		name string
+		make func(t *testing.T) Model
+	}{
+		{"no session list", sized},
+		{"a session list", func(t *testing.T) Model { m, _, _ := sessModel(t, 80, 24); return m }},
+	}
+	for _, mc := range models {
+		for _, tc := range texts {
+			for _, kc := range back {
+				t.Run(mc.name+"/"+tc.name+"/"+kc.name, func(t *testing.T) {
+					m := mc.make(t)
+					m.input.SetValue(tc.text)
+					m.setComposerCursor(tc.text, tc.at)
+					if got := m.composerCursorOffset(); got != tc.at {
+						t.Fatalf("the premise: the cursor at %d, want %d", got, tc.at)
+					}
+					m = updateWithin(t, m, kc.k)
+					want := tc.at
+					if kc.word {
+						want = tc.wordAt
+					}
+					switch {
+					case m.input.Value() != tc.text:
+						t.Fatalf("the text became %q", m.input.Value())
+					case m.composerCursorOffset() != want:
+						t.Fatalf("the cursor at %d, want %d", m.composerCursorOffset(), want)
+					case m.sessList.open:
+						t.Fatal("the key opened the session list")
+					}
+				})
+			}
+		}
+	}
+
+	forward := []tea.KeyMsg{
+		{Type: tea.KeyRight, Alt: true},
+		{Type: tea.KeyRunes, Runes: []rune{'f'}, Alt: true},
+		{Type: tea.KeyRunes, Runes: []rune{'u'}, Alt: true},
+		{Type: tea.KeyRunes, Runes: []rune{'l'}, Alt: true},
+		{Type: tea.KeyRunes, Runes: []rune{'c'}, Alt: true},
+		{Type: tea.KeyRunes, Runes: []rune{'d'}, Alt: true},
+		{Type: tea.KeyDelete, Alt: true},
+		{Type: tea.KeyBackspace, Alt: true},
+		{Type: tea.KeyCtrlW},
+		{Type: tea.KeyCtrlRight},
+	}
+	for _, tc := range []struct {
+		name, text string
+		at         int
+	}{
+		{"an empty composer", "", 0},
+		{"blanks after the cursor", "   ", 0},
+		{"blank lines after the cursor", "  \n \n", 0},
+		{"blanks after a word", "word  ", 4},
+	} {
+		for _, k := range forward {
+			t.Run("forward/"+tc.name+"/"+k.String(), func(t *testing.T) {
+				m := sized(t)
+				m.input.SetValue(tc.text)
+				m.setComposerCursor(tc.text, tc.at)
+				updateWithin(t, m, k)
+			})
+		}
 	}
 }

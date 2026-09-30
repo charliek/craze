@@ -338,15 +338,32 @@ func unanswered(ctx context.Context, err error) error {
 }
 
 // gated is Update: the gate over handle and the Update wrapper.
+//
+// Two kinds of message are another session's, and each is dropped here before
+// the gate does anything with it (plan 030 §3.11; round-1 panel finding 3,
+// R2-5): something a switch left behind (leftBehind) — a stream item or a
+// start's answer of the backend it left (staleBackend), or a paste or a
+// copy's note asked for in the session it no longer shows (staleShown; C11r,
+// C11r2) — before it can clear the reader's flag, which from the switch on is
+// the new backend's read, or be held and drained into the session that
+// replaced it; and a gated call's reply issued for a session the model has
+// left, before it can release a gate, acknowledge a sync token, owe a drain
+// or arm a read. A switch leaves no gate open (withSession) and gate ids are
+// never reused (gateSeq), so such a reply is never the open gate's own; one
+// that named it anyway would still release nothing.
 func (m Model) gated(msg tea.Msg, handle handler) (tea.Model, tea.Cmd) {
+	if m.leftBehind(msg) {
+		return m, nil
+	}
 	switch msg := msg.(type) {
 	case callPanicMsg:
 		panic(msg.p)
 	case gateReply:
-		if m.gate == nil || msg.id != m.gate.id {
-			// Late: its gate was released without it (the held queue's
-			// bound). A call still running past its deadline is still
-			// waited for, where its panic would be recovered.
+		if m.outdated(msg) || m.gate == nil || msg.id != m.gate.id {
+			// Another session's (issued), or late: its gate was released
+			// without it (the held queue's bound, its deadline). A call
+			// still running past its deadline is still waited for, where its
+			// panic would be recovered — that is no bookkeeping of the gate's.
 			if msg.linger != nil {
 				return m, lingerOn(msg.linger)
 			}
@@ -453,19 +470,17 @@ func (m Model) hold(msg tea.Msg) (tea.Model, tea.Cmd) {
 // while the gate was open is acknowledged here, once no gate is open: the
 // token's barrier sees the continuation's frame, or a chain's end, as it would
 // have seen the blocked Update's. Then the drain starts if anything is held.
+//
+// Every reply that reaches it is the open gate's own and current: gated has
+// already turned away one issued for a session the model has left, before
+// any of this bookkeeping (plan 030 §3.11, R2-5) — the session generation
+// never moves while a gate is open, since whatever moves it (a restore, a
+// session replaced or switched) is held behind the gate or leaves none open.
 func (m Model) release(r gateReply) (tea.Model, tea.Cmd) {
 	g := m.gate
 	m.noteGate(gateReleasing)
 	m.gate = nil
-	next, cmd := m, tea.Cmd(nil)
-	if !m.outdated(r) {
-		next, cmd = g.cont(m, r)
-	}
-	// else: the reply is for a session the model has since left (issued) —
-	// PR 4's restore from another incarnation; in process a session changes
-	// only in a picker's Update, which no gate is ever open across. Nothing it
-	// says applies to this session, so no continuation runs, and the gate is
-	// released without it: nothing else would release it.
+	next, cmd := g.cont(m, r)
 	next, cmd = next.finish(cmd)
 	if next.gate != nil {
 		next.noteGate(gateOpened)
@@ -514,6 +529,13 @@ func (m Model) drain(handle handler) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 	if s, ok := h.msg.(frameSyncMsg); ok {
 		m.syncAck = s.n
+		cmd = m.readOn()
+		next = m
+	} else if m.leftBehind(h.msg) {
+		// Held under a backend the model has since left, or asked for in a
+		// session it no longer shows: another session's, never applied (plan
+		// 030 §3.11). A switch takes each out of the queue as it is made
+		// (dropStaleHeld); this is the rule held to wherever one is found.
 		cmd = m.readOn()
 		next = m
 	} else {
@@ -580,7 +602,7 @@ func (m *Model) readOn() tea.Cmd {
 		return nil
 	}
 	m.reading = true
-	return waitEvent(m.eng)
+	return waitEvent(m.eng, m.bgen)
 }
 
 // errValueBytes is what an error value inside a held message is charged: its

@@ -36,7 +36,13 @@
         "foreignTurn": {"type": "boolean", "description": "The agent is running a turn of its own; activity reads idle during one."},
         "pendingAsks": {"type": "integer", "minimum": 0},
         "headAsk": {"$ref": "#/$defs/headAsk"},
-        "lastTurn": {"$ref": "#/$defs/lastTurn"}
+        "lastTurn": {"$ref": "#/$defs/lastTurn"},
+        "doing": {"$ref": "#/$defs/rowText", "description": "A row fact (capabilities.rowFacts): what a working session is doing — the title of the most recently started tool of the running turn still running, else Responding while the agent's text streams, else Thinking. Present only while a turn (craze's own or a foreign one) is working."},
+        "lastReply": {"$ref": "#/$defs/rowText", "description": "A row fact: the first line of the last completed assistant message; absent when there is none."},
+        "since": {"$ref": "event.json#/$defs/time", "description": "A row fact: when the row entered its current state — the first of needs you (pendingAsks > 0), failed (startFailed, or lastTurn.outcome failed, or activity error with neither lastTurn nor foreignTurn: a failure whose ending is still on its way), working (activity starting, replaying, working or closing, or foreignTurn), idle — on the host's clock, in UTC."},
+        "startFailed": {"type": "boolean", "description": "A row fact: the session's start failed. Absent is false on a rowFacts host."},
+        "startErr": {"$ref": "#/$defs/rowText", "description": "A row fact: the first line of a failed start's error."},
+        "prompted": {"type": "boolean", "description": "A row fact: a turn has been started at all. Absent is false on a rowFacts host."}
       },
       "required": ["title", "activity", "foreignTurn", "pendingAsks"],
       "unevaluatedProperties": false
@@ -83,7 +89,7 @@
       "additionalProperties": false
     },
     "sessionCapabilities": {
-      "description": "The session's capability set: every provider capability in its wire name, and cancel, approvals, historyCursor (true for every protocol 1 host) and stop (the host's own: true where session.stop is served, every craze serve; false on a TUI-hosted session and an older host). A client hides what a capability says the session cannot do.",
+      "description": "The session's capability set: every provider capability in its wire name, and cancel, approvals, historyCursor (true for every protocol 1 host), stop (the host's own: true where session.stop is served, every craze serve; false on a TUI-hosted session and an older host) and rowFacts (the host's own, omitted when false: the row carries the row facts). A client hides what a capability says the session cannot do.",
       "type": "object",
       "properties": {
         "interject": {"type": "boolean"},
@@ -101,7 +107,8 @@
         "cancel": {"type": "boolean"},
         "approvals": {"type": "boolean"},
         "historyCursor": {"type": "boolean"},
-        "stop": {"type": "boolean"}
+        "stop": {"type": "boolean"},
+        "rowFacts": {"type": "boolean", "description": "The host's own: the session's sessions.list row carries the row facts (headAsk.summary, doing, lastReply, since, startFailed, startErr, prompted). Absent — false — on an older host, whose row is read as it was."}
       },
       "required": ["interject", "subagentCancel", "subagentBackground", "modes", "effort", "fastToggle", "subagentRows", "subagentTranscript", "todos", "askCards", "planCards", "parameterizedPicker", "cancel", "approvals", "historyCursor", "stop"],
       "additionalProperties": false
@@ -131,15 +138,20 @@
       "additionalProperties": false
     },
     "headAsk": {
-      "description": "The first open ask: its id, kind (permission, question or plan) and the label a card draws.",
+      "description": "The first open ask: its id, kind (permission, question or plan) and the label a card draws — and, on a sessions.list row of a rowFacts host, its summary.",
       "type": "object",
       "properties": {
         "id": {"type": "string"},
         "kind": {"type": "string"},
-        "label": {"type": "string"}
+        "label": {"type": "string"},
+        "summary": {"$ref": "#/$defs/rowText", "description": "A row fact: what the ask is about — a permission's command or tool title, a question's first question, a plan's name. Absent when there is none, and never on session.state."}
       },
       "required": ["id", "kind", "label"],
       "additionalProperties": false
+    },
+    "rowText": {
+      "description": "A row fact's text: one line — the first non-blank one, tabs expanded — of at most 200 terminal cells, an ellipsis ending one that was cut.",
+      "type": "string"
     },
     "activity": {
       "description": "What the engine is doing. An open ask and a foreign turn overlay any of these.",

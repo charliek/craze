@@ -57,11 +57,12 @@ type fixtureLine struct {
 }
 
 // fixtureHost is a fixture's host line: which of Options' plan 030 opt-ins
-// its Host is built with (Options.Stop, PermissionMode, StartedAt).
+// its Host is built with (Options.Stop, PermissionMode, StartedAt, RowFacts).
 type fixtureHost struct {
 	Stop           bool                    `json:"stop,omitempty"`
 	PermissionMode protocol.PermissionMode `json:"permissionMode,omitempty"`
 	StartedAt      bool                    `json:"startedAt,omitempty"`
+	RowFacts       bool                    `json:"rowFacts,omitempty"`
 }
 
 // options is the Options a host line asks for; nil is the zero value.
@@ -69,7 +70,7 @@ func (fh *fixtureHost) options() Options {
 	if fh == nil {
 		return Options{}
 	}
-	return Options{Stop: fh.Stop, PermissionMode: fh.PermissionMode, StartedAt: fh.StartedAt}
+	return Options{Stop: fh.Stop, PermissionMode: fh.PermissionMode, StartedAt: fh.StartedAt, RowFacts: fh.RowFacts}
 }
 
 // rawFixtureLine is one line of the file, its own bytes kept beside its

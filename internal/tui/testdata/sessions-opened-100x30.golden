@@ -1,0 +1,30 @@
+─ triage the flaky pty test · cursor · flaky ────────────────────────────────────────── ← sessions ─
+❯ Why does the pty test flake under load?                                                           
+os.NewFile(0) races the pty close in the test helper.                                               
+restored                                                                                            
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+──────────────────────────────────────────────────────────────────────── triage the flaky pty test ─
+❯ message  / for commands                                                                           
+────────────────────────────────────────────────────────────────────────────────────────────────────
+flaky │ cursor │ Grok (medium) │ 0m                                                                 
+◆ agent · shift+tab · ▸▸ bypass permissions on                                                      

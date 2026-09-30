@@ -28,11 +28,12 @@ import (
 //
 // The read is a round trip, and a turn can begin and end while it is on its
 // way, so its answer is tagged (lastTurnTag) with what it was sent under — the
-// backend's epoch, the restore it follows and the turns the model had seen
-// begin — and applied only while all three still stand. An answer that finds
-// the backend bound to another session (its epoch moved: a reconnect that
-// could not resume), another restore applied, or any turn begun since, is
-// dropped: the stream has said, or is about to say, more than it can, and a
+// backend generation, the backend's epoch, the restore it follows and the
+// turns the model had seen begin — and applied only while all four still
+// stand. An answer that finds another backend adopted (a switch, plan 030
+// §3.11), the backend bound to another session (its epoch moved: a reconnect
+// that could not resume), another restore applied, or any turn begun since,
+// is dropped: the stream has said, or is about to say, more than it can, and a
 // delayed answer never puts back an ending the session has moved past. "Any
 // turn begun since" is how the answer's TurnID is held against the fold's
 // turns: those ids are not ordered — craze's own are "turn-N", the agent's
@@ -54,6 +55,11 @@ var lastTurnDeadline = 10 * time.Second
 
 // lastTurnTag is what a read after a restore was sent under (see above).
 type lastTurnTag struct {
+	// bgen is the backend generation (Model.bgen, plan 030 §3.11; X52): a
+	// read of a backend a switch has left answers for a session the model
+	// no longer shows, whatever its epoch — two backends' epochs are two
+	// counts, and can meet.
+	bgen uint64
 	// epoch is the backend's Epoch when the read was sent.
 	epoch uint64
 	// restore is the restore it follows (Model.restores).
@@ -82,7 +88,7 @@ func (m *Model) readLastTurn() tea.Cmd {
 		return nil
 	}
 	iss := m.issue()
-	tag := lastTurnTag{epoch: b.Epoch(), restore: m.restores, starts: m.turnStarts}
+	tag := lastTurnTag{bgen: m.bgen, epoch: b.Epoch(), restore: m.restores, starts: m.turnStarts}
 	ctx := dispatchCtx(b)
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(ctx, lastTurnDeadline)
@@ -103,7 +109,7 @@ func (m *Model) applyLastTurn(msg lastTurnMsg) {
 	switch {
 	case msg.err != nil, lt == nil, m.eng == nil:
 		return
-	case msg.tag.epoch != m.eng.Epoch(), msg.tag.restore != m.restores, msg.tag.starts != m.turnStarts:
+	case msg.tag.bgen != m.bgen, msg.tag.epoch != m.eng.Epoch(), msg.tag.restore != m.restores, msg.tag.starts != m.turnStarts:
 		return
 	case m.startErr != nil, m.status == statusWorking:
 		return

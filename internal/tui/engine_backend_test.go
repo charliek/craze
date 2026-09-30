@@ -149,7 +149,7 @@ func TestWaitEventStopsWhenTheStreamEnds(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			for i, want := range tc.want {
-				cmd := waitEvent(tc.b)
+				cmd := waitEvent(tc.b, 0)
 				if cmd == nil {
 					t.Fatal("waitEvent made no reader for a backend")
 				}
@@ -172,7 +172,7 @@ func TestWaitEventStopsWhenTheStreamEnds(t *testing.T) {
 			}
 		})
 	}
-	if waitEvent(nil) != nil {
+	if waitEvent(nil, 0) != nil {
 		t.Fatal("waitEvent made a reader for no backend")
 	}
 }

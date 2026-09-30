@@ -12,6 +12,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/charliek/craze/internal/sessions"
 )
 
 // The test binary as craze itself (plan 030 C2): a test that needs a host in
@@ -43,6 +45,13 @@ const (
 	// held rendezvous's holder, held where it is claimed and not yet in the
 	// registry.
 	cliChildGate = "CRAZE_CLI_TEST_GATE"
+	// cliChildRowGate is a FIFO a loading craze serve reads one byte from
+	// once it has read its row, before it gives the row an id or claims it
+	// (serveRowRead, the barrier holdLoaders makes of it in process), having
+	// first written the row it read, as JSON, to <FIFO>.row: the session
+	// list's two resumes of one legacy row at once, each host held there
+	// until both are (rowGate).
+	cliChildRowGate = "CRAZE_CLI_TEST_ROW_GATE"
 	// cliChildNoIdle stops craze serve's idle watcher from ever looking
 	// (idleTicks): a test about what a spawner does to a host whose socket it
 	// removed must not race the host's own socket-lost stop.
@@ -55,7 +64,7 @@ const (
 
 // The child's watchdog (plan 030 C5r): a child of the test binary can park —
 // "block" never returns from its ready line and never acts on SIGTERM, the
-// gate waits on a FIFO nobody may write, no-idle and skip serve on for good —
+// gates wait on FIFOs nobody may write, no-idle and skip serve on for good —
 // and its own test ends it only if that test lives to run its cleanup. A test
 // binary that dies first (its -timeout's panic, a kill) left one such host
 // running for hours, reparented to init. So every child watches its parent:
@@ -134,6 +143,20 @@ func init() {
 	if fifo, ok := os.LookupEnv(cliChildGate); ok {
 		_ = os.Unsetenv(cliChildGate)
 		serveClaimed = func() {
+			f, err := os.Open(fifo)
+			if err == nil {
+				_, _ = f.Read(make([]byte, 1))
+				_ = f.Close()
+			}
+		}
+	}
+	if fifo, ok := os.LookupEnv(cliChildRowGate); ok {
+		_ = os.Unsetenv(cliChildRowGate)
+		serveRowRead = func(row sessions.Row) {
+			// Renamed into place, so the test never reads half of it.
+			if b, err := json.Marshal(row); err == nil && os.WriteFile(fifo+".tmp", b, 0o600) == nil {
+				_ = os.Rename(fifo+".tmp", fifo+".row")
+			}
 			f, err := os.Open(fifo)
 			if err == nil {
 				_, _ = f.Read(make([]byte, 1))

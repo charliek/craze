@@ -394,21 +394,57 @@ func (s *Store) Recent(cwd, provider string, n int) ([]Row, error) {
 		}
 		filtered = append(filtered, rec)
 	}
-	sort.SliceStable(filtered, func(i, j int) bool {
-		ui, uj := filtered[i].Row.UpdatedAt, filtered[j].Row.UpdatedAt
-		if !ui.Equal(uj) {
-			return ui.After(uj)
-		}
-		return filtered[i].pos > filtered[j].pos
-	})
+	newestFirst(filtered)
 	if n > 0 && len(filtered) > n {
 		filtered = filtered[:n]
 	}
-	rows := make([]Row, len(filtered))
-	for i, rec := range filtered {
+	return rowsOf(filtered), nil
+}
+
+// newestFirst sorts records by UpdatedAt descending, ties broken by file
+// order — the later row in the file wins the tie and sorts first.
+func newestFirst(records []record) {
+	sort.SliceStable(records, func(i, j int) bool {
+		ui, uj := records[i].Row.UpdatedAt, records[j].Row.UpdatedAt
+		if !ui.Equal(uj) {
+			return ui.After(uj)
+		}
+		return records[i].pos > records[j].pos
+	})
+}
+
+// rowsOf is records' rows, in order.
+func rowsOf(records []record) []Row {
+	rows := make([]Row, len(records))
+	for i, rec := range records {
 		rows[i] = rec.Row
 	}
-	return rows, nil
+	return rows
+}
+
+// All is every row of every workspace, newest first, in Recent's order
+// (UpdatedAt descending, ties to the later row in the file): what the session
+// list's saved rows are chosen from (plan 030 §3.9). A provider this Store's
+// KnownProvider reports as unknown is filtered out, as Recent filters it. No
+// home directory reads as zero rows and no error.
+func (s *Store) All() ([]Row, error) {
+	path := paths.SessionsPath()
+	if path == "" {
+		return nil, nil
+	}
+	records, err := readRecords(path)
+	if err != nil {
+		return nil, err
+	}
+	filtered := make([]record, 0, len(records))
+	for _, rec := range records {
+		if s.KnownProvider != nil && !s.KnownProvider(rec.Row.Provider) {
+			continue
+		}
+		filtered = append(filtered, rec)
+	}
+	newestFirst(filtered)
+	return rowsOf(filtered), nil
 }
 
 // Find is the row for (provider, sessionID) — the index's own key — in any

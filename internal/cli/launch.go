@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"strconv"
 	"strings"
@@ -166,6 +167,9 @@ func runLaunch(cmd *cobra.Command, f *tuiFlags, env hostEnv, diag *deferredStder
 	if err := l.resolveLoad(cmd, f, absDir(ws), &cfg); err != nil {
 		return err
 	}
+	// The session list (plan 030 §3.9): a launch's alone — sessions run
+	// detached here, so the TUI can leave one for another without ending it.
+	cfg.Sessions = sessionList{l}
 	// The launching TUI is its session's client, not a Viewer: it keeps the
 	// host-status hub and reports for the session it shows (plan 030 §3.7) —
 	// the host reports nothing. Only after resolveLoad, as runTUI's: nothing
@@ -202,12 +206,17 @@ type launcher struct {
 	closed   bool
 	inflight sync.WaitGroup
 	launched []*launchedBackend
-	done     sync.Once
+	// spawned is every host the session list's Spawn started, by host id,
+	// for the launcher's life: whose each is to stop is decided per host
+	// (listHost) — at an open that could not reach it, or at finish.
+	spawned map[string]*listHost
+	done    sync.Once
 }
 
 func newLauncher(cmd *cobra.Command, f *tuiFlags, resolved resolvedProvider, diag io.Writer) *launcher {
 	ctx, cancel := context.WithCancel(context.Background())
-	return &launcher{cmd: cmd, env: rundir.ProcessEnv(), flags: *f, resolved: resolved, diag: diag, ctx: ctx, cancel: cancel}
+	return &launcher{cmd: cmd, env: rundir.ProcessEnv(), flags: *f, resolved: resolved, diag: diag, ctx: ctx, cancel: cancel,
+		spawned: map[string]*listHost{}}
 }
 
 // errLaunchOver is a spawn asked for after the TUI has quit.
@@ -311,7 +320,7 @@ func (l *launcher) newBackend(p agent.Provider, explicit bool) (backend.Backend,
 	if !explicit && l.resolved.Fallback && p.Name() == l.resolved.Provider.Name() {
 		f.provider = ""
 	}
-	return l.spawn(spawnOptions{env: l.env, flags: f}, "")
+	return l.spawn(spawnOptions{env: l.env, flags: f}, "", true)
 }
 
 // loadBackend is tui.Config.LoadBackend: a host spawned to load row (--load,
@@ -328,7 +337,7 @@ func (l *launcher) loadBackend(_ agent.Provider, row sessions.Row) (backend.Back
 	f := l.flags
 	f.cont = false
 	f.workspace = ""
-	return l.spawn(spawnOptions{env: l.env, flags: f, load: loadArg(row)}, row.CrazeID)
+	return l.spawn(spawnOptions{env: l.env, flags: f, load: loadArg(row)}, row.CrazeID, true)
 }
 
 // spawn answers the backend the TUI adopts for opts — recorded, so a backend
@@ -348,18 +357,20 @@ func (l *launcher) loadBackend(_ agent.Provider, row sessions.Row) (backend.Back
 // the spawn: the rendezvous finds it, and it is attached to the same way.
 //
 // Otherwise a host is spawned for opts and dialled (spawnHost, dialHost).
-func (l *launcher) spawn(opts spawnOptions, crazeID string) (backend.Backend, error) {
-	l.mu.Lock()
-	if l.closed {
-		l.mu.Unlock()
-		return nil, errLaunchOver
+//
+// note says a holder's backend leaves the ignored-flags note (noteHeld): a
+// spawn for the command line's own session does; the session list's resume
+// of a saved session (openSaved) passes none of the flags the note names, and
+// leaves none.
+func (l *launcher) spawn(opts spawnOptions, crazeID string, note bool) (backend.Backend, error) {
+	done, err := l.begin()
+	if err != nil {
+		return nil, err
 	}
-	l.inflight.Add(1)
-	l.mu.Unlock()
-	defer l.inflight.Done()
+	defer done()
 
 	if e, ok := hostServing(l.env, crazeID); ok {
-		b, err := l.reattach(hostRef{entry: e, held: true})
+		b, err := l.reattach(hostRef{entry: e, held: true}, note)
 		if err == nil {
 			return b, nil
 		}
@@ -372,20 +383,20 @@ func (l *launcher) spawn(opts spawnOptions, crazeID string) (backend.Backend, er
 	if err != nil {
 		return nil, launchFailure(err)
 	}
-	return l.dial(ref)
+	return l.dial(ref, note)
 }
 
 // dial dials the host ref names as the TUI's client (connect) and takes the
-// session (take): a host this launch started is ended when it cannot be
-// dialled, and a holder's is left alone.
-func (l *launcher) dial(ref hostRef) (backend.Backend, error) {
+// session (take, note its): a host this launch started is ended when it
+// cannot be dialled, and a holder's is left alone.
+func (l *launcher) dial(ref hostRef, note bool) (backend.Backend, error) {
 	ctx, cancel := context.WithTimeout(l.ctx, dialTimeout)
 	defer cancel()
 	s, err := l.connect(ctx, ref)
 	if err != nil {
 		return nil, err
 	}
-	return l.take(s, ref), nil
+	return l.take(s, ref, note), nil
 }
 
 // reattach is spawn's direct reattach to ref, the host a registry entry says
@@ -400,7 +411,7 @@ func (l *launcher) dial(ref hostRef) (backend.Backend, error) {
 // spawn of its own. The dial and the attach share dialTimeout, and end with
 // the launch. An attached candidate is taken as dial takes one: the TUI's
 // Start finds it attached and waits for its readiness alone.
-func (l *launcher) reattach(ref hostRef) (backend.Backend, error) {
+func (l *launcher) reattach(ref hostRef, note bool) (backend.Backend, error) {
 	ctx, cancel := context.WithTimeout(l.ctx, dialTimeout)
 	defer cancel()
 	s, err := l.connect(ctx, ref)
@@ -411,14 +422,24 @@ func (l *launcher) reattach(ref hostRef) (backend.Backend, error) {
 		_ = s.Close()
 		return nil, err
 	}
-	return l.take(s, ref), nil
+	return l.take(s, ref, note), nil
 }
 
 // connect dials the host ref names as the TUI's client (dialHost), the
 // session not yet attached: a host this launch started is ended when it
 // cannot be, and a holder's is left alone.
 func (l *launcher) connect(ctx context.Context, ref hostRef) (*remote.Session, error) {
-	s, err := dialHost(ctx, ref, remote.SessionOptions{
+	s, err := dialHost(ctx, ref, l.sessionOptions(ref))
+	if err != nil {
+		return nil, dialFailure(ref, err)
+	}
+	return s, nil
+}
+
+// sessionOptions is how the TUI's client of the host ref names is dialled:
+// by its session, attached now.
+func (l *launcher) sessionOptions(ref hostRef) remote.SessionOptions {
+	return remote.SessionOptions{
 		Client: remote.Options{
 			Client:    protocol.ClientInfo{Kind: "tui", Name: "craze", Version: version.Version},
 			PeerCheck: rundir.DialCheck(os.Geteuid()),
@@ -436,22 +457,19 @@ func (l *launcher) connect(ctx context.Context, ref hostRef) (*remote.Session, e
 		When:      protocol.WhenNow,
 		Provider:  ref.entry.Provider,
 		Workspace: ref.entry.Workspace,
-	})
-	if err != nil {
-		return nil, dialFailure(ref, err)
 	}
-	return s, nil
 }
 
 // take is s, dialled to the host ref names, as the backend the TUI adopts:
 // recorded, so finish ends it if its session never comes up in the TUI, and
-// — a holder's — naming the flags its attach ignored (noteHeld).
-func (l *launcher) take(s *remote.Session, ref hostRef) backend.Backend {
+// — a holder's, when note says so — naming the flags its attach ignored
+// (noteHeld).
+func (l *launcher) take(s *remote.Session, ref hostRef, note bool) backend.Backend {
 	b := &launchedBackend{Session: s, ref: ref}
 	l.mu.Lock()
 	l.launched = append(l.launched, b)
 	l.mu.Unlock()
-	if ref.held {
+	if ref.held && note {
 		l.noteHeld(ref)
 	}
 	return b
@@ -476,11 +494,14 @@ func (l *launcher) noteHeld(ref hostRef) {
 // one ready and not yet dialled is stopped (spawnHost, dialHost) — and every
 // backend whose session never came up in the TUI is closed and its host, when
 // this launch spawned it, stopped (hostRef.abandon): one the TUI never took,
-// one it quit while it was starting, and one whose start failed. A session
-// nobody was shown, or that never ran, is not left running; a held session's
-// host is its holder's, and is left alone. A session that came up — the TUI
-// acknowledged its start (AckStarted) — was closed by the TUI's own exit, a
-// view close, and its host goes on.
+// one it quit while it was starting, and one whose start failed. So is every
+// host the session list's Spawn started on which no session came up in the
+// TUI and that the list did not leave running (sol r17-c9 1; listHost). A
+// session nobody was shown, or that never ran, is not left running; a held
+// session's host is its holder's, and is left alone. A session that came up —
+// the TUI acknowledged its start (AckStarted) — was closed by the TUI's own
+// exit, a view close, and its host goes on, whatever another backend of the
+// same host came to (sol r20-c9r 1), as does one the list left running.
 //
 // finish runs once tui.Run has returned, and an acknowledgement is made only
 // inside the program's Update: nothing can acknowledge after the reading here,
@@ -494,15 +515,35 @@ func (l *launcher) finish() {
 		l.mu.Unlock()
 		l.cancel()
 		l.inflight.Wait()
+		// Read under the lock leaveRunning decides under: closed is already
+		// set, so from here nothing changes a listHost.
 		l.mu.Lock()
 		launched := l.launched
+		spawned := maps.Clone(l.spawned)
 		l.mu.Unlock()
+		// The hosts a session came up on, whichever backend it came up in.
+		came := map[string]bool{}
+		for _, b := range launched {
+			if b.acked.Load() {
+				came[b.ref.entry.HostID] = true
+			}
+		}
 		for _, b := range launched {
 			if b.acked.Load() {
 				continue
 			}
 			_ = b.Close()
+			// A host the list's Spawn started is decided below, once.
+			if id := b.ref.entry.HostID; came[id] || spawned[id] != nil {
+				continue
+			}
 			b.ref.abandon()
+		}
+		for id, lh := range spawned {
+			if lh.left || lh.stopped || came[id] {
+				continue
+			}
+			lh.ref.abandon()
 		}
 	})
 }
@@ -522,6 +563,34 @@ type launchedBackend struct {
 	// answer while it was not quitting (AckStarted). Start answering nil is
 	// not it — the TUI hears that answer later, if it is still there to.
 	acked atomic.Bool
+	// released is told, once, that this backend is closed — whoever closes
+	// it: the TUI letting it go (a switch, a dial answered after the user
+	// moved on, plan 030 §3.11), its exit, or finish: the launcher's count of
+	// the live openers of a host the session list's Spawn started
+	// (openClosed). nil for any other host's backend.
+	released    func()
+	releaseOnce sync.Once
+}
+
+// Close is the Session's view close, the launcher told first that this
+// opener has gone (release), so a host nobody holds any more is decided as
+// one (openEnd) even while the detach is still on its way.
+func (b *launchedBackend) Close() error {
+	b.release()
+	return b.Session.Close()
+}
+
+// CloseWithin is Close within ctx (the explicit quit's deadline, tui's
+// quitCloser), the launcher told first as Close tells it.
+func (b *launchedBackend) CloseWithin(ctx context.Context) error {
+	b.release()
+	return b.Session.CloseWithin(ctx)
+}
+
+func (b *launchedBackend) release() {
+	if b.released != nil {
+		b.releaseOnce.Do(b.released)
+	}
 }
 
 // AckStarted is the TUI's acknowledgement that the session came up there

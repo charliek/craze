@@ -18,9 +18,10 @@ import (
 // protocol 1 states — cancel, approvals and historyCursor, and stop false,
 // which is the provider's answer: stop is the host's own, and a server that
 // serves session.stop turns it on in the document it builds
-// (sessionInfoReady; plan 030 §3.6a). TestEveryCapabilityIsOnTheWire holds every
-// agent.Capabilities field to a wire name here and in the schema, so a field
-// added to the struct fails the gate until it is mapped.
+// (sessionInfoReady; plan 030 §3.6a), as a server with the row facts turns on
+// rowFacts (§3.8), which is omitted while false. TestEveryCapabilityIsOnTheWire
+// holds every agent.Capabilities field to a wire name here and in the schema,
+// so a field added to the struct fails the gate until it is mapped.
 func sessionCapabilities(c agent.Capabilities) protocol.SessionCapabilities {
 	return protocol.SessionCapabilities{
 		Interject:           c.Interject,
@@ -90,6 +91,9 @@ func (s *Server) sessionInfoReady(eng *engine.Engine) (protocol.SessionInfo, eng
 	}
 	// stop is this server's: true where it serves session.stop (stop.go).
 	info.Capabilities.Stop = s.opts.Stop != nil
+	// rowFacts is too: its sessions.list row carries the row facts (rowFacts,
+	// plan 030 §3.8), and a document of a server without them leaves it out.
+	info.Capabilities.RowFacts = s.opts.RowFacts
 	if ready {
 		for _, m := range st.Models {
 			info.Catalogs.Models = append(info.Catalogs.Models, protocol.CatalogModel{ID: m.ID, Name: m.Name})
@@ -107,6 +111,23 @@ func headAsk(st engine.State) *protocol.HeadAsk {
 		return nil
 	}
 	return &protocol.HeadAsk{ID: st.HeadAsk.ID, Kind: string(st.HeadAsk.Kind), Label: st.HeadAsk.Label}
+}
+
+// rowFacts puts the row facts on row (plan 030 §3.8, §3.10): the engine's,
+// computed now from st — the State the row was built from, so the facts
+// describe the row they go on — each left out when unset. Since goes on the
+// wire in UTC, as startedAt does.
+func rowFacts(row *protocol.SessionRow, eng *engine.Engine, st engine.State) {
+	f := eng.RowFacts(st)
+	if row.HeadAsk != nil {
+		row.HeadAsk.Summary = f.Summary
+	}
+	row.Doing, row.LastReply = f.Doing, f.LastReply
+	if !f.Since.IsZero() {
+		row.Since = f.Since.UTC()
+	}
+	row.StartFailed, row.StartErr = st.StartFailed, f.StartErr
+	row.Prompted = st.Prompted
 }
 
 // stateResult is session.state's result: State's projection and the host's

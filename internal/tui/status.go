@@ -358,7 +358,10 @@ func (m Model) inFlightCounts() string {
 	return strings.Join(out, ", ")
 }
 
-// agentCount is the `← n agents` marker pointing at the rows below.
+// agentCount is the `← n agents` marker pointing at the rows below. With a
+// session list ← is the list's key, and the marker names the key that
+// reaches the rows, `↓ n agents` (plan 030 §3.11); without one it reads as it
+// always has.
 func (m Model) agentCount() string {
 	if !m.showSubagents() {
 		return ""
@@ -372,7 +375,11 @@ func (m Model) agentCount() string {
 	if n == 0 {
 		return ""
 	}
-	return fmt.Sprintf("← %d agent%s", n, plural(n))
+	arrow := "←"
+	if m.sessions != nil {
+		arrow = "↓"
+	}
+	return fmt.Sprintf("%s %d agent%s", arrow, n, plural(n))
 }
 
 // sessionElapsed is how long the session has been up, in the pinned coarse

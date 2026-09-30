@@ -226,12 +226,37 @@ A row is the [session info document](#the-session-info-document) plus:
 | `activity` | `starting`, `replaying`, `idle`, `working`, `error` or `closing` |
 | `foreignTurn` | the agent is running a turn of its own — grok's interjection fallback, or a native sub-agent's wake — during which `activity` reads `idle` |
 | `pendingAsks` | how many asks are open |
-| `headAsk` | `{id, kind, label}`, the first open ask (absent when none is) |
+| `headAsk` | `{id, kind, label, summary?}`, the first open ask (absent when none is); `summary` is a [row fact](#the-row-facts) |
 | `lastTurn` | how the last turn ended — [below](#the-last-turn); absent while a turn runs, before any has ended, and from an older host |
+| `doing`, `lastReply`, `since`, `startFailed`, `startErr`, `prompted` | the [row facts](#the-row-facts), where the session capability `rowFacts` is `true` |
 
 `activity`/`foreignTurn` answer "is it running"; `pendingAsks`/`headAsk`
 answer "is it blocked on me" — two independent signals, because an agent can
 be idle *and* waiting on a permission at the same time.
+
+### The row facts
+
+A host whose session capability `rowFacts` is `true` — every craze from plan
+030's session list on, detached or TUI-hosted — puts on its row what a list of
+every session needs to say what each one wants without attaching to any. Each
+is omitted when unset, so on such a host an absent one is its zero (`""`,
+`false`); on a host without `rowFacts` (an older one) none is there and a
+client reads the row as it was.
+
+| field | |
+|---|---|
+| `headAsk.summary` | what the head ask is about: a permission's command or tool title, a question's first question (its title when it asks none), a plan's name. Never on `session.state`'s head ask |
+| `doing` | what a working session is doing: the title of the most recently started tool of the running turn that is still running (pending or in progress; its name when it has no title), else `Responding` while the agent's text streams, else `Thinking`. Present only while a turn — craze's own or a [foreign](#the-foreign-turn) one — is working |
+| `lastReply` | the first line of the last completed assistant message |
+| `since` | when the row entered its current state, on the host's clock, UTC — the first of these that holds: **needs you** (`pendingAsks` > 0), **failed** (`startFailed`, or `lastTurn.outcome` failed — or `activity` error with neither `lastTurn` nor `foreignTurn`: a failure whose ending is still on its way), **working** (`activity` starting, replaying, working or closing, or `foreignTurn`), **idle**. A turn that follows another from the queue in the same settlement keeps the first one's |
+| `startFailed`, `startErr` | the session's start failed, and the first line of its error |
+| `prompted` | a turn has been started at all |
+
+Every string is one line — the first non-blank one, trimmed, tabs expanded,
+control characters dropped — of at most 200 terminal cells, an ellipsis
+ending one that was cut. The host computes them from its engine's own
+transcript model and ask registry when the row is asked for: like the rest
+of the row, a read, not a cut through the stream.
 
 ### The last turn
 
@@ -618,7 +643,7 @@ alone — plus `snapshot` and `attachWhenNow`, both `true`.
 **Session** (the info document's `capabilities`): every field of the
 engine's own capability set, in its wire name, plus four the protocol states
 for every host of protocol 1 — three always `true`, and `stop`, which says
-what this host can do:
+what this host can do — and `rowFacts`, the host's too:
 
 | wire name | meaning |
 |---|---|
@@ -638,6 +663,7 @@ what this host can do:
 | `approvals` | `true` on every host in protocol 1 |
 | `historyCursor` | `true` on every host in protocol 1 |
 | `stop` | the host's own, not the provider's: `true` where [`session.stop`](#sessionstop) is served (every `craze serve`), `false` on a TUI-hosted session and on a host from before it existed |
+| `rowFacts` | the host's own too, and omitted when `false`: the session's `sessions.list` row carries the [row facts](#the-row-facts). It is a session capability, not a connection one, because it describes the row, and a hub's roster carries rows of hosts of different builds |
 
 A client hides — never merely disables — whatever a capability says this
 session cannot do. A capability the engine's own `agent.Capabilities` grows
@@ -660,8 +686,9 @@ New behaviour is always announced as a **capability**, never inferred from a
 version number: a client checks `capabilities.foo`, never "am I talking to a
 build recent enough to have foo". A capability or a field that is **absent**
 means an older host: `capabilities.stop` is `false` there (and `session.stop`
-answers `stop_unsupported`), and the info document's `permissionMode` and
-`startedAt` and the state's and row's `lastTurn` are simply not there — a
+answers `stop_unsupported`), `capabilities.rowFacts` is absent (and so are
+the row facts), and the info document's `permissionMode` and `startedAt` and
+the state's and row's `lastTurn` are simply not there — a
 client falls back to what it did before each existed, and the schema, closed
 as it is, describes every one of them as optional.
 
@@ -1012,7 +1039,7 @@ embedded copy — e.g. [`hello.json`](protocol/schema/hello.json),
 
 ## Fixtures and the fake host
 
-`internal/fakehost/testdata/wire/*.ndjson` is sixteen scripted scenarios
+`internal/fakehost/testdata/wire/*.ndjson` is seventeen scripted scenarios
 against a real `internal/control` server over a real engine (wrapping the
 TUI's own `Stub`, never a fixture-only re-implementation) — hello and a fresh
 attach; a cursor resume and its replay; a foreign-incarnation cursor; a
@@ -1025,14 +1052,15 @@ token, a wrong one, and one aged past its bound; a host that serves
 answering a stop's receipt and then ending the session; a stop joined by
 another client's and by its own resend, with an attach refused `closing`;
 and `lastTurn` in `session.state` and a roster row, after a cancelled turn
-and a foreign one. Every line is
+and a foreign one; and a host with the row facts through a turn — a running
+tool, streaming text, an ask, the ending. Every line is
 `{"conn": N, "dir": "c2s"|"s2c", "msg": {...}}`, plus `{"dir": "op", "op":
 {...}}` lines that are not wire messages at all — they script the host
 directly (emitting text, opening an ask, restarting the engine into a fresh
 incarnation, stalling or dropping connections, running a stop's sequence) —
 and, as a fixture's first line or not at all, `{"dir": "host", "host":
-{...}}`, which says how the host was built: `stop`, `permissionMode` and
-`startedAt` turn on what an older host does not have. The thirteen fixtures
+{...}}`, which says how the host was built: `stop`, `permissionMode`,
+`startedAt` and `rowFacts` turn on what an older host does not have. The thirteen fixtures
 without one are, byte for byte, an older host to a newer client. `TestWireFixtures` replays
 every one of them byte for byte, validating every line against the schema
 above as it sends or reads it — except a c2s line fixture 10 marks

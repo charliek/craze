@@ -290,6 +290,17 @@ type CatalogMode struct {
 // provider's: true on a host that serves session.stop (every `craze serve`,
 // plan 030 §3.6a), false on a TUI-hosted session and on an older host, whose
 // session.stop is refused stop_unsupported (plan 027 §3.9).
+//
+// RowFacts is the host's own too (plan 030 §3.8): true where the session's
+// sessions.list row carries the row facts — HeadAsk.Summary, Doing,
+// LastReply, Since, StartFailed, StartErr and Prompted (SessionRow) — every
+// craze from plan 030's PR 2 on, whether it runs detached or in its TUI. It
+// is a session capability and not a connection one because it describes the
+// row, and a row travels on its own: a hub's roster (S4b) carries rows of
+// hosts of different builds, each saying what its own row holds. It is
+// omitted when false — which is every older host's document, and the fake
+// host's by default (X1), so no fixture from before it moves — and so absent
+// means an older host: a client then reads the row as S2's.
 type SessionCapabilities struct {
 	Interject           bool `json:"interject"`
 	SubagentCancel      bool `json:"subagentCancel"`
@@ -307,6 +318,7 @@ type SessionCapabilities struct {
 	Approvals           bool `json:"approvals"`
 	HistoryCursor       bool `json:"historyCursor"`
 	Stop                bool `json:"stop"`
+	RowFacts            bool `json:"rowFacts,omitempty"`
 }
 
 // SessionRow is one sessions.list row (plan 027 §3.3): the info document
@@ -329,7 +341,49 @@ type SessionRow struct {
 	// StateResult.LastTurn's: absent while a turn runs, before any has ended,
 	// and from an older host.
 	LastTurn *LastTurn `json:"lastTurn,omitempty"`
+
+	// The row facts (plan 030 §3.8, §3.10), carried where the session
+	// capability rowFacts is true and absent from an older host's row. Each is
+	// omitted when unset, so on a host that has them an absent one is its zero
+	// — "" or false — and on one that does not, unknown. The engine computes
+	// them from its own transcript model and ask registry when the request is
+	// answered: a read, like the rest of the row, not a cut through the
+	// stream. Every string is one line — the first non-blank one, tabs
+	// expanded — at most RowTextCells cells, an ellipsis ending one that was
+	// cut. HeadAsk.Summary is the head ask's.
+	//
+	// Doing is what a working session is doing: the title of the most
+	// recently started tool of the running turn still running, else
+	// "Responding" while the agent's text streams, else "Thinking". It is set
+	// only while a turn — craze's own or a foreign one — is working.
+	Doing string `json:"doing,omitempty"`
+	// LastReply is the first line of the last completed assistant message.
+	LastReply string `json:"lastReply,omitempty"`
+	// Since is when the row entered its current state, on the host's clock,
+	// in UTC. The states are the list's groups, the first that holds: needs
+	// you (pendingAsks > 0); failed (startFailed, or lastTurn.outcome failed
+	// — or activity error with neither lastTurn nor foreignTurn, a failure
+	// whose ending is still on its way); working (activity starting,
+	// replaying, working or closing, or foreignTurn); idle.
+	Since time.Time `json:"since,omitzero"`
+	// StartFailed says the session's start failed; StartErr is the first
+	// line of its error.
+	StartFailed bool   `json:"startFailed,omitempty"`
+	StartErr    string `json:"startErr,omitempty"`
+	// Prompted says a turn has been started at all (StateResult.Prompted): a
+	// session that never was has nothing to resume.
+	Prompted bool `json:"prompted,omitempty"`
 }
+
+// RowTextCells is the widest a row fact's string is, in terminal cells (plan
+// 030 §3.10): an ellipsis ends one that was cut to it.
+const RowTextCells = 200
+
+// The row facts' Doing words when no tool is running (plan 030 §3.10).
+const (
+	DoingResponding = "Responding"
+	DoingThinking   = "Thinking"
+)
 
 // LastTurn is how the session's most recent turn ended (plan 030 §3.7, SF-57;
 // engine.LastTurn): a turn of craze's own or one the agent ran itself (a
@@ -379,10 +433,17 @@ func TurnOutcomes() []TurnOutcome { return slices.Clone(turnOutcomes) }
 // HeadAsk names the ask at the head of the open ones: its id, its kind
 // (permission, question or plan) and its label (agent.AskLabel: the text a
 // card draws — "permission <tool>", "question", "plan <name>").
+//
+// Summary is a row fact (plan 030 §3.8): on a sessions.list row of a session
+// whose capability rowFacts is true, what the ask is about — a permission's
+// command or tool title, a question's first question, a plan's name — one
+// line of at most RowTextCells cells, and absent when there is none. It is
+// never on session.state's head ask.
 type HeadAsk struct {
-	ID    string `json:"id"`
-	Kind  string `json:"kind"`
-	Label string `json:"label"`
+	ID      string `json:"id"`
+	Kind    string `json:"kind"`
+	Label   string `json:"label"`
+	Summary string `json:"summary,omitempty"`
 }
 
 // Activity is what the engine is doing, in the gate table's words

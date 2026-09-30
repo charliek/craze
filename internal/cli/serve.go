@@ -234,9 +234,10 @@ func (l *landing) land() { l.once.Do(func() { close(l.ch) }) }
 // The info document tells a client what this host is (plan 030 §3.7): its
 // permission mode, from the run's --force/--no-force (force), and its start,
 // the one instant the registry entry's startedAt records too — for the
-// server's life, a picker replacing the engine included. The server is built
-// with no coordinator: a TUI-hosted session is stopped by its own TUI's quit,
-// and refuses session.stop, stop_unsupported (§3.6a).
+// server's life, a picker replacing the engine included — and that its
+// sessions.list row carries the row facts (§3.8). The server is built with no
+// coordinator: a TUI-hosted session is stopped by its own TUI's quit, and
+// refuses session.stop, stop_unsupported (§3.6a).
 func serveControl(env rundir.Env, hostID, workspace string, force bool, diag io.Writer) *controlHost {
 	h, err := bindControl(env, hostID, workspace, force, nil, diag)
 	if err != nil {
@@ -273,6 +274,10 @@ func bindControl(env rundir.Env, hostID, workspace string, force bool, stop cont
 			PermissionMode: permissionMode(force),
 			StartedAt:      started,
 			Stop:           stop,
+			// Every craze host's row carries the row facts (plan 030 §3.8),
+			// a TUI-hosted one's too: another craze's session list reads
+			// them the same way.
+			RowFacts: true,
 		}),
 		diag:       diag,
 		update:     host.Update,

@@ -54,7 +54,8 @@ func (r yRange) Row(y int) int {
 type regionID int
 
 const (
-	regionTranscript regionID = iota // scrollback viewport
+	regionBand       regionID = iota // the session band (band.go), once the list has opened
+	regionTranscript                 // scrollback viewport
 	regionOverlay                    // help or the slash menu
 	regionTasks                      // pinned tasks panel
 	regionQueue                      // queued messages, above the spinner
@@ -79,6 +80,10 @@ type frameRegion struct {
 // hit-tests against and the rows that were printed cannot drift apart. Adding
 // a region means adding one entry here and nothing else.
 var frameRegions = [regionCount]frameRegion{
+	regionBand: {
+		rows: func(s frameSizes) int { return s.band },
+		view: func(m Model, _ frameLayout) string { return m.bandView() },
+	},
 	regionTranscript: {
 		rows: func(s frameSizes) int { return s.transcript },
 		view: func(m Model, _ frameLayout) string { return m.transcriptView() },
@@ -161,6 +166,7 @@ func (l frameLayout) Region(id regionID) yRange {
 
 // frameSizes is the height of every region before degradation.
 type frameSizes struct {
+	band       int // the session band: 0 until the list has opened (bandRows)
 	transcript int // filled in after degradation, from what is left over
 	overlay    int
 	tasksOpen  bool
@@ -201,7 +207,7 @@ func (s frameSizes) agentRows() int { return min(s.agentsAll, s.agentsCap) }
 // chrome is every region except the transcript and the overlay, which take
 // what the others leave.
 func (s frameSizes) chrome() int {
-	return s.tasks() + s.queue() + s.spinner + s.composer() + s.agents() + s.modal + s.status
+	return s.band + s.tasks() + s.queue() + s.spinner + s.composer() + s.agents() + s.modal + s.status
 }
 
 // degrade applies the first n steps of the pinned degradation order. It is
@@ -232,6 +238,13 @@ func degrade(s frameSizes, n int) frameSizes {
 	if n >= 8 && s.modal > 1 {
 		s.modal = 1
 	}
+	if n >= 8 {
+		// The band says which session this is, which the status row's
+		// workspace half says too: it goes at the last step, with the card
+		// band's own shrink (plan 030 §3.11). Before the list has opened it
+		// has no row to give up, and no frame moves.
+		s.band = 0
+	}
 	return s
 }
 
@@ -241,6 +254,10 @@ func degrade(s frameSizes, n int) frameSizes {
 func fitChrome(s frameSizes, limit int) frameSizes {
 	for s.chrome() > limit {
 		switch {
+		case s.band > 0:
+			// Ahead of everything a session's work is drawn in: the band
+			// only says which session this is (plan 030 §3.11).
+			s.band = 0
 		case s.agentsCap > 0:
 			s.agentsCap = 0
 		case s.queueCap > 0:
@@ -277,6 +294,7 @@ func (m *Model) computeLayout() frameLayout {
 	}
 
 	base := frameSizes{
+		band:      m.bandRows(),
 		tasksOpen: m.tasksPanelVisible(),
 		tasksBody: m.tasksBodyRows(),
 		// The band caps what is shown; composerRows is the whole draft.
@@ -433,10 +451,17 @@ func blankFrame(width, height int) string {
 // the one thing this screen exists to say, and at 30 columns it does not fit
 // on one line.
 func tooSmallView(width, height int) string {
+	return tooSmallViewFor(width, height, minFrameCols, minFrameRows)
+}
+
+// tooSmallViewFor is tooSmallView for a screen whose minimum is its own:
+// the session list's is 40×10 (plan 030 §3.10), the session frame's
+// minFrameCols×minFrameRows.
+func tooSmallViewFor(width, height, minCols, minRows int) string {
 	if width <= 0 || height <= 0 {
 		return blankFrame(width, height)
 	}
-	msg := fmt.Sprintf("craze: terminal too small (need %d×%d)", minFrameCols, minFrameRows)
+	msg := fmt.Sprintf("craze: terminal too small (need %d×%d)", minCols, minRows)
 	lines := strings.Split(ansi.Hardwrap(ansi.Wordwrap(msg, width, ""), width, true), "\n")
 	if len(lines) > height {
 		lines = lines[:height]

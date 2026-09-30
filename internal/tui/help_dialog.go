@@ -69,6 +69,11 @@ func (m Model) helpKeyLines() []helpLine {
 		helpLine{key: "pgup pgdn", desc: "on the slash menu, page it — ahead of scrolling the transcript"},
 		helpLine{desc: "panels and views"},
 	)
+	if m.sessions != nil {
+		// Only where there is a session list (plan 030 §3.10): without one
+		// the box is line for line what it always was.
+		out = append(out, helpLine{key: "←", desc: "every session on this machine, from an empty composer"})
+	}
 	if m.showTodos() {
 		out = append(out, helpLine{key: "ctrl+t", desc: "tasks panel: compact, expanded, hidden"})
 	}

@@ -134,7 +134,7 @@ func (m Model) confirmProvider(p agent.Provider, explicit bool) (tea.Model, tea.
 	// loop while Start is still running (§3.5). The read it arms is the one the
 	// command gate's reader rule counts (readOn).
 	m.reading = m.eng != nil
-	return m, tea.Batch(m.startCmd(), waitEvent(m.eng))
+	return m, tea.Batch(m.startCmd(), waitEvent(m.eng, m.bgen))
 }
 
 func (m Model) handleProviderDialogKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {

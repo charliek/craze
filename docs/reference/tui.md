@@ -51,7 +51,9 @@ it failed, `–` when it was cancelled, and `●` for the one being viewed; the
 label is the sub-agent type (`explore`, `general-purpose`; cursor's rows read
 `task`). While it runs the suffix counts up — `0s · 4.7k tok` — and once it
 finishes it reads the duration and model, `2.9s · grok-4.6`. Status row 2
-counts the running ones (`← 2 agents`); a lingering finished row is not counted.
+counts the running ones (`← 2 agents`; `↓ 2 agents` when sessions run in
+detached hosts, where `←` opens the [session list](#session-list) and `↓` is
+the key that reaches the rows); a lingering finished row is not counted.
 The keyboard starts in the composer; `↓` moves it to the rows, where the
 selected row carries the `❯` mark, and `↑` past the first row, `Esc` or any
 typed key move it back. Returning from the sub-agent view leaves it on the
@@ -224,6 +226,7 @@ off.
 | `Enter` while the queue band has the keyboard | edit that message in place — its text loads into the composer, `Enter` saves, `Esc` restores the draft |
 | `Backspace` / `Delete` on a queued row | cancel it |
 | `Ctrl+L` on a queued row | send it now instead of the running turn (it asks first) |
+| `←` on an empty composer, `/sessions` | open the [session list](#session-list) — only when sessions run in detached hosts (the default); under `CRAZE_DETACH=0` the key reaches the composer as it always has |
 | `Esc` or `←` inside the sub-agent view | return to the main transcript; entering or leaving cancels nothing |
 | `Tab` inside the sub-agent view | switch to the next sub-agent |
 | `PgUp` / `PgDn` | scroll the transcript, or page the `/help` box; page the slash menu instead when it is open — the menu takes priority over both |
@@ -477,6 +480,118 @@ as outside; `Ctrl+C` still cancels the main turn and the view stays open.
 Typing, pasting and the slash menu are inert inside the view, and a card
 still lands on top and owns the keyboard until it is answered.
 
+## Session list
+
+`←` on an empty composer, or `/sessions`, replaces the screen with every
+session of yours running on this machine, whatever its directory, and the
+saved ones that are not running. It exists only when sessions run in detached
+hosts (the default); under `CRAZE_DETACH=0`, `detach = false` or with the
+control socket off there is no list, no `/sessions` and no `←` binding (and
+`/help` has no line for it). The session you came from stays attached behind
+the list — its turn keeps running, a card it raises waits for you — and the
+cursor starts on its row. If it ends while the list is up (another client's
+`/exit`, a close from the list, the idle timeout), craze stays on the list and
+its row stays, `· ended`, for as long as the list is up, even once its host
+has gone; a later run of the same session is a row of its own.
+
+```text
+ sessions  9 running                             ! 2 need you   ✳ 3 working   ✗ 1 failed   ○ 2 idle
+
+needs you 2 ─────────────────────────────────────────────────────────────────────
+  ! fix the roost tab rename      permission: cargo test -p roost-ipc    grok    roost            2m
+
+working 3 ───────────────────────────────────────────────────────────────────────
+❯ ✳ write the v0.1.0 release no…  Responding                             native  craze · here     1m
+```
+
+The header counts what needs you, what is working, what failed and what is
+idle, dropping counts from the right as the terminal narrows. Rows are grouped
+by state — **needs you** (an open permission, question or plan, with what it
+is about), **working** (what it is doing: the running tool, `Responding`,
+`Thinking`, or `Starting…`/`Loading…`/`Closing…`), **failed** (the error's
+first line), **idle** (the first line of its last reply, or `waiting for a
+prompt`), **unreachable** (`?`: its host is registered and not answering) —
+then `▸ saved · N not running`, collapsed. Within a group the row that
+changed state most recently is first. Each row reads: state glyph, title, what
+it wants, provider, directory (`· here` for the session you came from), and
+how long it has been in its state. A session run by an older craze is listed
+with what that craze reports, and its version on the row (`· craze 0.0.9`).
+A host that has not answered yet is drawn with the working rows, `Starting…`
+or `Connecting…`. With no other session the list says `No other sessions.`
+It needs 40×10; smaller, it says so.
+
+| Key | Action |
+|---|---|
+| `↑` `↓` | move the selection; it stays on its session however the rows reorder |
+| `Enter`, `→` | on another session, [open it here](#opening-a-session-in-place); on a saved one, [resume it here](#saved-sessions); on the session you came from, go back to it; on `▸ saved`, expand or collapse the saved sessions. A host that is not answering says `that session is not answering` |
+| `Esc`, `←` | back to the session you came from — unless it ended while the list was up, when the list stays and says `that session ended`, or this terminal lost its connection to it, when the list stays and says `lost the connection to that session` |
+| `Ctrl+X` | on a working or asking session, stop its turn **and clear its queue**; on an idle or failed one, the first press arms a close (`ctrl+x again closes it`) and a second within two seconds ends the session on its host — any other key disarms it. Nothing on a saved row or a host that is not answering |
+| `Ctrl+S` | group by directory instead of by state, and back; the grouping is kept for the rest of the run |
+| `Ctrl+D`, `Ctrl+C` twice | quit craze; every session keeps running |
+
+The hint line under the list names what the selected row takes (`enter
+open`, `enter resume`, `enter back to it`, `ctrl+x stop` or `close`), and
+says what a key came to: `stopped: <title>`, `closed: <title>`, `could not
+stop <title>: …`. The mouse does nothing in the list.
+
+### Opening a session in place
+
+`Enter` on another session's row opens it in this terminal: the list stays up
+with `opening <title>…` on its hint line while its host is dialled, and then
+the screen is that session's — its transcript, its cards, its queue, the
+status row naming its directory and provider — as if you had started it here.
+The session you left is not stopped: this terminal detaches from it and it
+goes on on its host, where the list finds it again. A dial that fails leaves
+the list up with `could not open <title>: <why>`; `Enter` on another row
+before the first answers opens that one instead, and leaving the list
+abandons the open.
+
+Once the list has been opened, every session's screen starts with a band — the
+session's title, provider and directory, and `← sessions` on the right:
+
+```text
+─ fix the roost tab rename · grok · roost ─────────────────────── ← sessions ─
+```
+
+A terminal too short for it drops it. `←` on an empty composer goes back to
+the list, where the cursor starts on the session you now have open (`· here`).
+
+The composer's text belongs to the session it was typed in: a session that
+ends with a draft in the composer keeps it — it is in the composer again when
+you open that session again — and it never follows you to another session.
+
+When the session you are in ends — its host stopped by another terminal's
+`/exit`, a `ctrl+x` close from a list, or the idle timeout — craze goes back
+to the list, its row marked `· ended`, and the hint line says `that session
+ended`. Your own quit (`/exit`, `Ctrl+D`) still ends the session and quits
+craze.
+
+When this terminal loses its connection to the session instead — its host
+stopped answering for longer than craze keeps reconnecting — craze goes back
+to the list too, and the hint line says `lost the connection to that session`
+and why. The session may still be running: its row is listed as its host
+reports it — or `?` while the host does not answer — and `Enter` on it opens
+it again, `Ctrl+X` stops or closes it, as on any other row.
+
+### Saved sessions
+
+`Enter` on `▸ saved · N not running` shows the saved sessions: every session
+in the session index that is not running, newest first, at most 50, each
+once — `·`, its title, provider and directory. `Enter` on one resumes it in
+this terminal: a session host is started in the directory the session ran in
+(not this terminal's) and loads it, the hint line saying `resuming <title>…`
+meanwhile, and the screen then shows it as [opening one in
+place](#opening-a-session-in-place) does, `restoring…` until its transcript
+is back. A saved session that another terminal has resumed meanwhile is
+opened where it runs. The command line's own session flags (`--provider`,
+`--model`, `--ask`, `--plan`) were for the session it started and are not
+applied to a resumed one; its permission mode, `--plugin-dir` and (for a
+provider craze does not run in process) `--agent-bin` are. A
+session whose directory is gone, or whose provider this craze cannot resume,
+is refused on the hint line (`could not resume <title>: that session ran in
+…, which is no longer a directory`) and nothing is started. `Ctrl+X` does
+nothing on a saved row: nothing runs to stop.
+
 ## Modes
 
 `Shift+Tab`, `/plan`, `/ask` and `/agent` cycle or set the ACP session mode.
@@ -699,6 +814,7 @@ skills carry no such restriction; they complete anywhere in the draft.
 | `/plan` | Set plan mode |
 | `/ask` | Set ask mode |
 | `/agent` | Set agent mode |
+| `/sessions` | The [session list](#session-list) — listed only when sessions run in detached hosts |
 | `/exit` | Quit craze |
 
 Matches are prefix hits first, then substring hits, each group kept in the

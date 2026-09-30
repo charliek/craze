@@ -209,6 +209,12 @@ that finish at once, which is what a frame of a *drained* queue needs.
 - `test_frame.py` — `craze frame` through the binary, for the same scripts the
   Go goldens cover
 - `test_tui.py` — a real PTY
+- `test_sessions.py` — the session list in real PTYs sharing one `HOME`, each
+  in a directory of its own: groups, regrouping, `ctrl+x`, opening a session
+  in place, quitting from the list, an unreachable host, resuming a saved
+  session. Its `Screen` plays craze's output, one whole frame at a time, into
+  an 80×24 grid, so a case reads the screen as it stands rather than the
+  bytes that went past
 
 ```bash
 make test-cli
@@ -231,6 +237,11 @@ session/prompt. `hang` and `hang-ack` stay silent, the same house rule that
 keeps their behaviour otherwise unchanged. It is the canary the
 `test_tui.py` cases for issue #23 use to prove the agent's own stderr is
 gated on the run having failed.
+
+`CRAZE_FAKE_SESSION_ID=<id>` makes `session/new` answer that session id
+instead of `fake-session-1`. The session index keys a row by provider and
+that id, so two sessions of one test `HOME` under the default would be one
+row; `test_sessions.py` names each after its workspace.
 
 ## tmux smoke
 

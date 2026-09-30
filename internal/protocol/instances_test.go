@@ -79,6 +79,18 @@ func TestInstancesValidate(t *testing.T) {
 	rosterLastTurn := func(row protocol.SessionRow) string {
 		return jsonOf(t, protocol.SessionsListResult{Epoch: "h", Sessions: []protocol.SessionRow{row}})
 	}
+	// Plan 030 §3.8's row facts, on a row whose capabilities say rowFacts:
+	// each fact omitted when unset (X1's rule), so an S2 row is unchanged.
+	withFacts := facts
+	withFacts.Capabilities.RowFacts = true
+	rowFacts := protocol.SessionRow{SessionInfo: withFacts, Title: "fix it", Activity: protocol.ActivityWorking, PendingAsks: 1,
+		HeadAsk:   &protocol.HeadAsk{ID: "perm-1", Kind: "permission", Label: "permission Shell", Summary: "Run `go test ./...`"},
+		Doing:     "Run `go test ./...`",
+		LastReply: "I found the failing assertion.",
+		Since:     instanceTime,
+		Prompted:  true}
+	rowStartFailed := protocol.SessionRow{SessionInfo: withFacts, Activity: protocol.ActivityError,
+		Since: instanceTime, StartFailed: true, StartErr: "cursor-agent: not logged in"}
 	stateNoConfig := state
 	stateNoConfig.Settings.Config = json.RawMessage(`{}`)
 	hello := protocol.HelloResult{
@@ -182,6 +194,18 @@ func TestInstancesValidate(t *testing.T) {
 			strings.Replace(rosterLastTurn(rowLastTurn), `"turnId":"wake-1"`, `"turnId":"wake-1","seq":4`, 1), false},
 		{"a roster row with a permission mode there is none of", "sessions.list.json", "result",
 			strings.Replace(rosterLastTurn(rowLastTurn), `"permissionMode":"prompt"`, `"permissionMode":"yolo"`, 1), false},
+		{"a roster row with the row facts", "sessions.list.json", "result", rosterLastTurn(rowFacts), true},
+		{"a roster row of a start that failed", "sessions.list.json", "result", rosterLastTurn(rowStartFailed), true},
+		{"a roster row whose since is not a time", "sessions.list.json", "result",
+			strings.Replace(rosterLastTurn(rowFacts), `"since":"2026-09-25T10:30:45.123456789Z"`, `"since":1790000000`, 1), false},
+		{"a roster row whose doing is not text", "sessions.list.json", "result",
+			strings.Replace(rosterLastTurn(rowFacts), `"doing":"Run `+"`go test ./...`"+`"`, `"doing":{"tool":"t-1"}`, 1), false},
+		{"a roster row whose rowFacts is not a boolean", "sessions.list.json", "result",
+			strings.Replace(rosterLastTurn(rowFacts), `"rowFacts":true`, `"rowFacts":"yes"`, 1), false},
+		{"a roster row with a fact no host sends", "sessions.list.json", "result",
+			strings.Replace(rosterLastTurn(rowFacts), `"prompted":true`, `"prompted":true,"preview":"…"`, 1), false},
+		{"a head ask whose summary is not text", "sessions.list.json", "result",
+			strings.Replace(rosterLastTurn(rowFacts), `"summary":"Run `+"`go test ./...`"+`"`, `"summary":["Run"]`, 1), false},
 
 		{"sessions.subscribe", "sessions.subscribe.json", "params", `{}`, true},
 		{"sessions.subscribe has no result a host sends", "sessions.subscribe.json", "result", `{}`, false},

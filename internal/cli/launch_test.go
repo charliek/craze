@@ -197,7 +197,7 @@ func TestDetachOnFollowsItsSwitches(t *testing.T) {
 // CRAZE_DETACH=0, `detach = false`, `control_socket = false` and
 // CRAZE_CONTROL_SOCKET=0 — keeps the in-process path: the TUI is handed the
 // session it hosts (Config.Session, the engine hook, the claims), no launch
-// closure, and no host is spawned.
+// closure and no session list (plan 030 §3.5, §3.9), and no host is spawned.
 func TestTheOptOutRunsTheSessionInProcess(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -222,6 +222,8 @@ func TestTheOptOutRunsTheSessionInProcess(t *testing.T) {
 					t.Errorf("the opt-out's Config is not the in-process path's: %+v", cfg)
 				case cfg.NewBackend != nil || cfg.LoadBackend != nil || cfg.Continue != nil:
 					t.Error("the opt-out's Config launches")
+				case cfg.Sessions != nil:
+					t.Error("the opt-out's Config has a session list: closing a backend there closes its engine")
 				}
 				return tui.Result{}, nil
 			})
@@ -237,16 +239,19 @@ func TestTheOptOutRunsTheSessionInProcess(t *testing.T) {
 
 // TestALaunchIsItsHostsClient: by default the TUI is handed no session and
 // nothing of the in-process path — no engine hook, no claim, no index, no
-// provider persistence (the host's) — but the launch closures; it is its
-// session's client and not a Viewer, so the host-status hub stays its own and
-// reports for the session it shows (plan 030 §3.7). Building it spawns
-// nothing, binds nothing and claims nothing: the TUI spawns when it runs.
+// provider persistence (the host's) — but the launch closures and the session
+// list (§3.9); it is its session's client and not a Viewer, so the
+// host-status hub stays its own and reports for the session it shows (plan
+// 030 §3.7). Building it spawns nothing, binds nothing and claims nothing:
+// the TUI spawns when it runs.
 func TestALaunchIsItsHostsClient(t *testing.T) {
 	env, ws, cmds := launchHome(t, nil)
 	fakeRun(t, func(cfg tui.Config) (tui.Result, error) {
 		switch {
 		case cfg.NewBackend == nil || cfg.LoadBackend == nil:
 			t.Error("the launch has no spawn closures")
+		case cfg.Sessions == nil:
+			t.Error("the launch has no session list")
 		case cfg.Session != nil || cfg.NewSession != nil || cfg.LoadSession != nil || cfg.OnEngine != nil ||
 			cfg.ClaimSession != nil || cfg.SessionIndex != nil || cfg.Backend != nil || cfg.Continue != nil:
 			t.Errorf("the launch carries the in-process path: %+v", cfg)

@@ -182,6 +182,9 @@ var gateDigestSkips = map[string]string{
 	"claimSession": "a function",
 	"refuseLoad":   "a function",
 	"foldIn":       "the fold's per-event scratch (the fold itself is shared's digest)",
+	"retired":      "the backends a switch let go of (their own goroutines, and a lock)",
+	"sessions":     "the session list's source (its dials and rosters run on their own goroutines)",
+	"sessRosters":  "the list's open rosters (their pollers' own goroutines, and a lock)",
 }
 
 // digestModel is m's state digest. Most fields are walked by reflection; a few

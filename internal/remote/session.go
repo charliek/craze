@@ -1025,7 +1025,8 @@ func permissionMode(m protocol.PermissionMode) backend.PermissionMode {
 // agent.Capabilities field from its wire name (the server's sessionCapabilities
 // inverted; TestEveryWireCapabilityComesBack holds the two to a bijection).
 // cancel, approvals, historyCursor and stop are the protocol's own, stated for
-// every host, with no agent field.
+// every host, and rowFacts the host's (what its sessions.list row carries,
+// plan 030 §3.8), each with no agent field.
 func capabilities(c protocol.SessionCapabilities) agent.Capabilities {
 	return agent.Capabilities{
 		Interject:           c.Interject,

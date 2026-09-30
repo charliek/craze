@@ -65,6 +65,11 @@ type Options struct {
 	// StartedAt puts the info document's startedAt in: the Host's pinned
 	// clock as New reads it (2026-01-01T00:00:00Z). Off leaves it out.
 	StartedAt bool
+	// RowFacts puts the row facts on the sessions.list row and
+	// capabilities.rowFacts in the info document (plan 030 §3.8): the real
+	// server's, from the engine over the Stub, every time on the Host's
+	// pinned clock. Off, the row is S2's.
+	RowFacts bool
 }
 
 func (o Options) withDefaults() Options {
@@ -171,6 +176,7 @@ func New(o Options) (*Host, error) {
 		Tokens:         newDetTokens(),
 		Clock:          h.clk.now,
 		PermissionMode: o.PermissionMode,
+		RowFacts:       o.RowFacts,
 	}
 	if o.Stop {
 		co.Stop = h.stopRequested
@@ -297,6 +303,11 @@ func (h *Host) Close(ctx context.Context) error {
 // HostID is the server's hostId, as pinned by Options (or its default).
 func (h *Host) HostID() string { return h.srv.HostID() }
 
+// OpenConns is how many connections the server holds open now
+// (control.Server.OpenConns): what a client's test counts its own by — a
+// poller that keeps one per host, and closes them all when it stops.
+func (h *Host) OpenConns() int { return h.srv.OpenConns() }
+
 // SessionID is the durable craze session id every incarnation shares.
 func (h *Host) SessionID() string { return h.opts.CrazeSessionID }
 
@@ -334,8 +345,12 @@ func (h *Host) Thought(agentID, text string) {
 
 // Tool emits an EventTool with the given id, name and status, agentID "" for
 // the main session.
-func (h *Host) Tool(agentID, id, name, status string) {
-	h.currentStub().Emit(agent.Event{Type: agent.EventTool, Agent: agentID, Tool: &agent.ToolEvent{ID: id, Name: name, Status: status}})
+func (h *Host) Tool(agentID, id, name, status string) { h.ToolTitled(agentID, id, name, "", status) }
+
+// ToolTitled is Tool with the call's title — what a row's doing names a
+// running tool by (plan 030 §3.10) — "" for none, which is Tool.
+func (h *Host) ToolTitled(agentID, id, name, title, status string) {
+	h.currentStub().Emit(agent.Event{Type: agent.EventTool, Agent: agentID, Tool: &agent.ToolEvent{ID: id, Name: name, Title: title, Status: status}})
 }
 
 // PermOption is one option a Permission call offers.
@@ -625,7 +640,7 @@ type opParams struct {
 	Tool    string         `json:"tool,omitempty"`
 	Options []opPermOption `json:"options,omitempty"`
 
-	// question
+	// question, and tool: the call's title
 	Title     string       `json:"title,omitempty"`
 	Questions []opQuestion `json:"questions,omitempty"`
 
@@ -698,7 +713,7 @@ func (h *Host) do(p opParams) error {
 	case "thought":
 		h.Thought(p.Agent, p.Text)
 	case "tool":
-		h.Tool(p.Agent, p.ID, p.ToolName, p.Status)
+		h.ToolTitled(p.Agent, p.ID, p.ToolName, p.Title, p.Status)
 	case "permission":
 		opts := make([]PermOption, len(p.Options))
 		for i, o := range p.Options {
