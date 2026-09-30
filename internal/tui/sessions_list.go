@@ -7,6 +7,7 @@ import (
 	"os"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -86,10 +87,20 @@ type sessListState struct {
 	byDir bool
 	// savedOpen says the saved group is expanded (enter on its line).
 	savedOpen bool
-	// here is the craze id of the session the list was opened from, and
-	// hereEnded that it ended while the list was up.
-	here      string
-	hereEnded bool
+	// here is the session the list was opened from — the one the model
+	// holds — by craze id and incarnation, never the id alone (sol r19-c10
+	// 2): a later incarnation of the same craze id is another session's row.
+	// It is taken as the list opens and again with each snapshot while that
+	// session runs (so one its host names after the list opened is found),
+	// and kept as it was once it has ended. hereEnded says it ended while the
+	// list was up, and hereEndedAt when — the ended row's age. hereRow is its
+	// row as the roster last listed it (or, never listed, as the model knows
+	// it): once the session has ended and its host has left the registry,
+	// that copy is its row, drawn ended until the list closes (sol r19-c10 1).
+	here        sessKey
+	hereEnded   bool
+	hereEndedAt time.Time
+	hereRow     *roster.Row
 	// home is $HOME when the list opened: directory headers abbreviate it.
 	home string
 	// sel is the selected line, by identity; selIdx its place among the
@@ -225,6 +236,7 @@ func (m Model) openSessions() (tea.Model, tea.Cmd) {
 	if r == nil {
 		return m, nil
 	}
+	m.sessRosters.add(r)
 	here := m.hereKey()
 	home, _ := os.UserHomeDir()
 	m.sessList = sessListState{
@@ -232,7 +244,7 @@ func (m Model) openSessions() (tea.Model, tea.Cmd) {
 		gen:    m.sessList.gen + 1,
 		roster: r,
 		byDir:  m.sessList.byDir,
-		here:   here.id,
+		here:   here,
 		home:   home,
 		sel:    here,
 	}
@@ -265,7 +277,7 @@ func (m Model) leaveSessions() (tea.Model, tea.Cmd) {
 	r := m.sessList.roster
 	m.sessList = sessListState{gen: m.sessList.gen, byDir: m.sessList.byDir}
 	m.ctrlCDeadline = time.Time{}
-	return m, closeRoster(r)
+	return m, m.sessRosters.closeCmd(r)
 }
 
 // sessQuit is Ctrl+D, or the second Ctrl+C, on the list: craze quits and
@@ -278,13 +290,11 @@ func (m Model) sessQuit() (tea.Model, tea.Cmd) {
 		return m, tea.Quit
 	}
 	m.quitting = true
-	r, h, sh := m.sessList.roster, m.host, m.shell
+	r, h, sh, set := m.sessList.roster, m.host, m.shell, m.sessRosters
 	return m, func() tea.Msg {
 		sh.shutdown()
 		closeHost(h)
-		if r != nil {
-			r.Close()
-		}
+		set.close(r)
 		return tea.Quit()
 	}
 }
@@ -300,15 +310,67 @@ func readSessSnap(r SessionRoster, gen uint64) tea.Cmd {
 	}
 }
 
-// closeRoster closes r off the Update: Close joins the poller, which can
-// wait out an attempt's budget.
-func closeRoster(r SessionRoster) tea.Cmd {
+// sessRosterSet is every roster the list has opened and not yet closed,
+// shared by every copy of the model as owner and shell are (sol r19-c10 3).
+// The list closes its own roster as it closes — a leave's command, a quit
+// from the list — but a quit it never saw (SIGTERM, SIGHUP, a program error,
+// a recovered panic) reaches finishRun with a final model that may be nil, and
+// a leave's close is a command the program may stop before running: finishRun
+// closes whatever is still here (closeAll), so no poller outlives the program.
+// Nil only in a zero Model a test built, which every method allows.
+type sessRosterSet struct {
+	mu   sync.Mutex
+	open []SessionRoster
+}
+
+func (s *sessRosterSet) add(r SessionRoster) {
+	if s == nil || r == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.open = append(s.open, r)
+}
+
+// close closes r (Close joins its poller) and forgets it. The lock is not
+// held across Close, which can wait out an attempt's budget.
+func (s *sessRosterSet) close(r SessionRoster) {
+	if r == nil {
+		return
+	}
+	r.Close()
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.open = slices.DeleteFunc(s.open, func(o SessionRoster) bool { return o == r })
+}
+
+// closeCmd is close off the Update: Close joins the poller.
+func (s *sessRosterSet) closeCmd(r SessionRoster) tea.Cmd {
 	if r == nil {
 		return nil
 	}
 	return func() tea.Msg {
-		r.Close()
+		s.close(r)
 		return nil
+	}
+}
+
+// closeAll closes every roster still open: finishRun's, on every exit path.
+// Close is idempotent, so one a leave's command is closing at the same time
+// is closed once.
+func (s *sessRosterSet) closeAll() {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	open := s.open
+	s.open = nil
+	s.mu.Unlock()
+	for _, r := range open {
+		r.Close()
 	}
 }
 
@@ -324,6 +386,7 @@ func (m Model) applySessMsg(msg tea.Msg) (Model, tea.Cmd, bool) {
 			return m, nil, true
 		}
 		l.snap, l.have = msg.snap, true
+		m.trackHere()
 		m.syncSessList()
 		return m, readSessSnap(l.roster, l.gen), true
 	case sessActionMsg:
@@ -366,10 +429,58 @@ func (m *Model) sessNote(text string, kind sessNoteKind) {
 
 // sessionEnded is the session behind the list reaching its end while the
 // list is up (plan 030 §3.10): craze does not quit — the list is where the
-// user is — and the session's row is marked ended.
+// user is — and the session's row is marked ended, and stays, drawn from its
+// last listing, once its host has left the registry (sol r19-c10 1). A
+// session that ended before the roster ever listed it gets its row from
+// what the model knows of it.
 func (m *Model) sessionEnded() {
-	m.sessList.hereEnded = true
+	m.trackHere()
+	l := &m.sessList
+	l.hereEnded, l.hereEndedAt = true, m.now()
+	if l.hereRow == nil && !l.here.zero() {
+		row := m.hereAsRow()
+		l.hereRow = &row
+	}
 	m.syncSessList()
+}
+
+// trackHere follows the session behind the list: its identity from the
+// model while it has not ended (hereKey — the session a host named after
+// the list opened is found), and its row whenever the roster lists that
+// identity, kept for when its host has gone.
+func (m *Model) trackHere() {
+	l := &m.sessList
+	if !l.hereEnded {
+		if k := m.hereKey(); !k.zero() {
+			l.here = k
+		}
+	}
+	if l.here.zero() {
+		return
+	}
+	for _, r := range l.snap.Running {
+		if sessRowKey(r) == l.here {
+			l.hereRow = &r
+			return
+		}
+	}
+}
+
+// hereAsRow is the session behind the list as a roster row, from what the
+// model knows of it: its identity, provider, directory and title.
+func (m Model) hereAsRow() roster.Row {
+	here := m.sessList.here
+	var info backend.SessionInfo
+	if m.eng != nil {
+		info = m.info()
+	}
+	return roster.Row{
+		Host: roster.Host{CrazeSessionID: here.id, Incarnation: here.inc,
+			Provider: info.Provider, Workspace: info.Workspace, Ready: true},
+		Status: roster.Reachable,
+		Session: &roster.Session{ID: here.id, Incarnation: here.inc,
+			Provider: info.Provider, Workspace: info.Workspace, Title: m.snap.Title, RowFacts: true},
+	}
 }
 
 // -------------------------------------------------------------------- keys
@@ -558,37 +669,67 @@ func (m Model) sessSelected() (sessRow, bool) {
 
 // ------------------------------------------------------------------- rows
 
-// sessRunningRows is every running session the snapshot lists, as rows.
+// sessRunningRows is every running session the snapshot lists, as rows,
+// and the session behind the list once it has ended: marked ended while its
+// host is still listed, and from its kept row (hereRow) once the host has
+// left the registry (sol r19-c10 1). An ended row's age counts from its end.
 func (m Model) sessRunningRows() []sessRow {
 	l := m.sessList
-	rows := make([]sessRow, 0, len(l.snap.Running))
+	rows := make([]sessRow, 0, len(l.snap.Running)+1)
+	ended := func(row sessRow) sessRow {
+		if row.here && l.hereEnded {
+			row.state, row.ended, row.want, row.connecting = sessIdle, true, "ended", false
+			row.since = l.hereEndedAt
+		}
+		return row
+	}
+	listed := false
 	for _, r := range l.snap.Running {
-		rows = append(rows, sessRunningRow(r, l.here, l.hereEnded))
+		row := ended(sessRunningRow(r, l.here))
+		listed = listed || row.here
+		rows = append(rows, row)
+	}
+	if l.hereEnded && !listed && l.hereRow != nil {
+		rows = append(rows, ended(sessRunningRow(*l.hereRow, l.here)))
 	}
 	return rows
 }
 
-// sessRunningRow is one running session's row (plan 030 §3.10's table).
-// The host's own answer (Session) wins over what its registry entry and
-// the index say; a host with none yet is Connecting (X68), drawn with the
-// working rows: Starting… while it has not published a ready session,
-// Connecting… until its first answer.
-func sessRunningRow(r roster.Row, here string, hereEnded bool) sessRow {
-	h, s := r.Host, r.Session
-	row := sessRow{
-		ref:       r.Ref(),
-		provider:  h.Provider,
-		workspace: h.Workspace,
-		title:     sanitizeLine(r.IndexTitle),
-	}
-	id, inc := h.CrazeSessionID, h.Incarnation
-	if s != nil {
+// sessRowKey is a running row's identity: the craze id and incarnation its
+// host answered, else its registry entry's; a host that has named no session
+// yet by its host id.
+func sessRowKey(r roster.Row) sessKey {
+	id, inc := r.Host.CrazeSessionID, r.Host.Incarnation
+	if s := r.Session; s != nil {
 		if s.ID != "" {
 			id = s.ID
 		}
 		if s.Incarnation != "" {
 			inc = s.Incarnation
 		}
+	}
+	if id == "" {
+		return sessKey{id: "\x00host:" + r.Host.ID}
+	}
+	return sessKey{id: id, inc: inc}
+}
+
+// sessRunningRow is one running session's row (plan 030 §3.10's table).
+// The host's own answer (Session) wins over what its registry entry and
+// the index say; a host with none yet is Connecting (X68), drawn with the
+// working rows: Starting… while it has not published a ready session,
+// Connecting… until its first answer. It is the session behind the list
+// (here) only under that session's own identity — craze id and incarnation.
+func sessRunningRow(r roster.Row, here sessKey) sessRow {
+	h, s := r.Host, r.Session
+	row := sessRow{
+		ref:       r.Ref(),
+		provider:  h.Provider,
+		workspace: h.Workspace,
+		title:     sanitizeLine(r.IndexTitle),
+		key:       sessRowKey(r),
+	}
+	if s != nil {
 		if s.Provider != "" {
 			row.provider = s.Provider
 		}
@@ -607,11 +748,7 @@ func sessRunningRow(r roster.Row, here string, hereEnded bool) sessRow {
 	if row.title == "" {
 		row.title = sessUntitled
 	}
-	row.key = sessKey{id: id, inc: inc}
-	if id == "" {
-		row.key = sessKey{id: "\x00host:" + h.ID}
-	}
-	row.here = here != "" && id == here
+	row.here = !here.zero() && row.key == here
 	switch {
 	case r.Status == roster.Unreachable:
 		row.state, row.want = sessUnreachable, "not answering"
@@ -628,9 +765,6 @@ func sessRunningRow(r roster.Row, here string, hereEnded bool) sessRow {
 	default:
 		row.state, row.want = sessStateOf(s)
 		row.since = s.Since
-	}
-	if row.here && hereEnded {
-		row.state, row.ended, row.want, row.connecting = sessIdle, true, "ended", false
 	}
 	return row
 }

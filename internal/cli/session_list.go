@@ -23,10 +23,12 @@ import (
 // It lives as long as its launcher: nothing starts after finish, whatever is
 // in flight then is cancelled, and a backend it answered whose session never
 // came up in the TUI is closed there (finish) — a running one's host, never
-// this launch's, is left alone. A host it spawned is this launch's until the
-// TUI takes it — opened, or left running (LeaveRunning) — and finish stops
-// one still not taken, as it stops a launch's spawn nobody adopted (sol
-// r17-c9 1).
+// this launch's, is left alone. A host it spawned is this launch's to stop
+// (listHost): finish stops it unless a session opened on it came up in the
+// TUI or the list left it running (LeaveRunning), as it stops a launch's
+// spawn nobody adopted (sol r17-c9 1); whose it is is decided per host, under
+// the launcher's lock, never by whichever caller got there first (sol r20-c9r
+// 1–2).
 type sessionList struct{ l *launcher }
 
 var _ tui.Sessions = sessionList{}
@@ -39,9 +41,10 @@ func (s sessionList) Roster() tui.SessionRoster {
 }
 
 // Open is ref's session as a backend the TUI adopts: a running one's host
-// dialled and attached (open) — a host Spawn started taken as this launch's
-// own — a saved one's row loaded (loadBackend: the host serving it already
-// if there is one, else a spawn with --load in the row's own workspace).
+// dialled and attached (open) — a host Spawn started stays this launch's to
+// decide (listHost) — a saved one's row loaded (loadBackend: the host serving
+// it already if there is one, else a spawn with --load in the row's own
+// workspace).
 func (s sessionList) Open(ref roster.Ref) (backend.Backend, error) {
 	if ref.Saved != nil {
 		return s.l.loadBackend(agent.Provider{}, *ref.Saved)
@@ -50,15 +53,18 @@ func (s sessionList) Open(ref roster.Ref) (backend.Backend, error) {
 }
 
 // Spawn starts a host for spec's new session and answers its ref, for Open
-// (spawnFor): the host is recorded as this launch's until it is taken.
+// (spawnFor): the host is recorded as this launch's to stop (listHost).
 func (s sessionList) Spawn(spec tui.SpawnSpec) (roster.Ref, error) { return s.l.spawnFor(spec) }
 
-// LeaveRunning takes the host ref names, which Spawn started, as one that
-// goes on at quit: finish no longer stops it (leaveRunning).
-func (s sessionList) LeaveRunning(ref roster.Ref) {
-	if ref.Saved == nil {
-		s.l.leaveRunning(ref.Host.ID)
+// LeaveRunning keeps the host ref names, which Spawn started, running at
+// quit: finish no longer stops it (leaveRunning). Its error says it cannot —
+// craze is exiting and finish has decided, or the host was stopped because
+// it could not be reached.
+func (s sessionList) LeaveRunning(ref roster.Ref) error {
+	if ref.Saved != nil {
+		return nil
 	}
+	return s.l.leaveRunning(ref.Host.ID)
 }
 
 // errStopSaved is Stop of a saved session: nothing runs to stop.
@@ -89,20 +95,26 @@ func (s sessionList) Cancel(ref roster.Ref) error {
 // direct reattach does, so a host that is stopping (it answers hello and
 // refuses every attach closing) is an error here and never the TUI's failed
 // start (X55) — within dialTimeout, and records it for finish: closed if its
-// session never comes up in the TUI. A host this launch's Spawn started is
-// taken here (adopt) as the launch's own spawn is — stopped at finish unless
-// the TUI acknowledged its start, and stopped at once if it cannot be opened,
-// since nobody else would ever stop it (dialHost's rule); any other is never
-// this launch's host to stop.
+// session never comes up in the TUI. A host this launch's Spawn started
+// stays the launch's to decide (listHost): stopped at finish unless a session
+// opened on it came up in the TUI or the list left it running, and stopped at
+// once if it cannot be opened — nobody else would ever stop it (dialHost's
+// rule) — but only when no other open of it is in flight or has opened it,
+// so a caller that failed never stops a session another opened (sol r20-c9r
+// 1). Any other host is never this launch's to stop.
 func (l *launcher) open(e rundir.Entry) (backend.Backend, error) {
 	done, err := l.begin()
 	if err != nil {
 		return nil, err
 	}
 	defer done()
-	ref, ok := l.adopt(e.HostID)
-	if !ok {
-		ref = hostRef{entry: e, held: true}
+	lh, err := l.openStart(e.HostID)
+	if err != nil {
+		return nil, &launchError{msg: "craze: that session cannot be reached: " + err.Error(), err: err}
+	}
+	ref := hostRef{entry: e, held: true}
+	if lh != nil {
+		ref = lh.ref
 	}
 	ctx, cancel := context.WithTimeout(l.ctx, dialTimeout)
 	defer cancel()
@@ -113,14 +125,81 @@ func (l *launcher) open(e rundir.Entry) (backend.Backend, error) {
 		}
 	}
 	if err != nil {
-		ref.abandon()
+		l.openEnd(lh, nil)
 		return nil, &launchError{msg: "craze: that session cannot be reached: " + sanitizeLine(err.Error()), err: err}
 	}
 	b := &launchedBackend{Session: s, ref: ref}
-	l.mu.Lock()
-	l.launched = append(l.launched, b)
-	l.mu.Unlock()
+	l.openEnd(lh, b)
 	return b, nil
+}
+
+// listHost is a host the session list's Spawn started, by host id in
+// launcher.spawned for the launcher's life: the launch's to stop, decided per
+// host and never per caller — the TUI may open it more than once, at the same
+// time too, leave it running, and quit while it does (sol r20-c9r 1–2). Every
+// field is read and written under the launcher's lock.
+//
+//   - An open that cannot reach it stops it at once, since nobody else would
+//     (openEnd) — only when no other open of it is in flight, none has opened
+//     it, and it was not left running.
+//   - finish stops it unless it was left running, or a session opened on it
+//     came up in the TUI (acknowledged): the launch's own rule, by host.
+//   - LeaveRunning keeps it, unless finish has decided or it was stopped.
+type listHost struct {
+	ref hostRef
+	// opening counts the opens of it in flight, opened the ones that
+	// attached (their backends are the launch's launched).
+	opening, opened int
+	// left: LeaveRunning kept it. stopped: an open that could not reach it
+	// stopped it (openEnd), and nothing opens it again.
+	left, stopped bool
+}
+
+// errSpawnStopped is an open or a LeaveRunning of a host Spawn started that
+// an earlier open could not reach, and so stopped.
+var errSpawnStopped = errors.New("its host did not answer, and was stopped")
+
+// openStart counts an open of the host hostID names in flight, answering its
+// listHost when Spawn started it (nil for any other host): from here to
+// openEnd no other caller can stop it.
+func (l *launcher) openStart(hostID string) (*listHost, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	lh := l.spawned[hostID]
+	switch {
+	case lh == nil:
+		return nil, nil
+	case lh.stopped:
+		return nil, errSpawnStopped
+	}
+	lh.opening++
+	return lh, nil
+}
+
+// openEnd is an open's outcome: b the backend it attached, nil when it
+// could not. The backend is recorded for finish; a host Spawn started that
+// this open could not reach is stopped — decided under the lock, done outside
+// it — when nothing else holds it: no open of it in flight, none that
+// attached, not left running.
+func (l *launcher) openEnd(lh *listHost, b *launchedBackend) {
+	l.mu.Lock()
+	if b != nil {
+		l.launched = append(l.launched, b)
+	}
+	stop := false
+	if lh != nil {
+		lh.opening--
+		switch {
+		case b != nil:
+			lh.opened++
+		case lh.opening == 0 && lh.opened == 0 && !lh.left:
+			lh.stopped, stop = true, true
+		}
+	}
+	l.mu.Unlock()
+	if stop {
+		lh.ref.abandon()
+	}
 }
 
 // spawnFor spawns a host for spec's new session (plan 030 §3.13): the
@@ -151,29 +230,33 @@ func (l *launcher) spawnFor(spec tui.SpawnSpec) (roster.Ref, error) {
 		// Recorded before the call is done, so finish — which waits for it
 		// — finds it.
 		l.mu.Lock()
-		l.spawned[ref.entry.HostID] = ref
+		l.spawned[ref.entry.HostID] = &listHost{ref: ref}
 		l.mu.Unlock()
 	}
 	return roster.Ref{Host: roster.HostOf(ref.entry)}, nil
 }
 
-// adopt takes the host hostID names out of the spawned — Spawn started it
-// and nobody has taken it — and answers it: the caller now owns its end.
-func (l *launcher) adopt(hostID string) (hostRef, bool) {
+// leaveRunning keeps the host hostID names, which Spawn started, running
+// at quit: one decision under the launcher's lock, the lock finish takes to
+// decide, so either finish finds it left or this finds finish has begun and
+// says so (errLaunchOver) — never a nil answer for a host finish then stops
+// (sol r20-c9r 2). A host an open could not reach was stopped then
+// (errSpawnStopped). Nothing for a host Spawn did not start: it is not the
+// launch's to stop.
+func (l *launcher) leaveRunning(hostID string) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	ref, ok := l.spawned[hostID]
-	delete(l.spawned, hostID)
-	return ref, ok
-}
-
-// leaveRunning takes the host hostID names out of the spawned without
-// opening it: finish leaves it running. Nothing for a host Spawn did not
-// start, or one already taken.
-func (l *launcher) leaveRunning(hostID string) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	delete(l.spawned, hostID)
+	lh := l.spawned[hostID]
+	switch {
+	case lh == nil, lh.left:
+		return nil
+	case lh.stopped:
+		return errSpawnStopped
+	case l.closed:
+		return errLaunchOver
+	}
+	lh.left = true
+	return nil
 }
 
 // begin counts one call of the launcher's in flight, which finish waits for,

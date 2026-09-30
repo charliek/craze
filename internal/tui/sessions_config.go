@@ -30,16 +30,18 @@ type Sessions interface {
 	// for it. It is the caller's to Close.
 	Open(ref roster.Ref) (backend.Backend, error)
 	// Spawn starts a new session as spec says and answers its ref, which Open
-	// then dials (PR 3's dispatch). The host is this craze's until it is
-	// taken — opened (Open: then it goes on at quit exactly when its session
-	// came up in the TUI, as a launch's does) or left running (LeaveRunning)
-	// — and one still not taken when craze quits is stopped.
+	// then dials (PR 3's dispatch). The host is this craze's to stop: when
+	// craze quits it goes on only if a session opened on it (Open) came up in
+	// the TUI, as a launch's does, or it was left running (LeaveRunning); an
+	// Open that cannot reach it stops it at once unless another Open holds it.
 	Spawn(spec SpawnSpec) (roster.Ref, error)
-	// LeaveRunning takes ref's host, which Spawn started, without opening it:
-	// it goes on when craze quits (PR 3's background dispatch, its prompt
-	// accepted). A ref Spawn did not answer, or one already taken, is left
-	// as it is. It returns at once.
-	LeaveRunning(ref roster.Ref)
+	// LeaveRunning keeps ref's host, which Spawn started, running when craze
+	// quits (PR 3's background dispatch, its prompt accepted), opened or not.
+	// Its error says it cannot: craze is already exiting and has decided, or
+	// the host was stopped because an Open could not reach it. A ref Spawn
+	// did not answer is not craze's to stop, and is left as it is (nil). It
+	// returns at once.
+	LeaveRunning(ref roster.Ref) error
 	// Stop stops ref's running session on its host (session.stop): the
 	// list's close of a session it is not showing.
 	Stop(ref roster.Ref) error

@@ -2,6 +2,7 @@ package tui
 
 import (
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"slices"
@@ -58,7 +59,7 @@ func (f *fakeSessions) Spawn(SpawnSpec) (roster.Ref, error) {
 	return roster.Ref{}, errors.New("fakeSessions: Spawn is PR 3's")
 }
 
-func (f *fakeSessions) LeaveRunning(roster.Ref) {}
+func (f *fakeSessions) LeaveRunning(roster.Ref) error { return nil }
 
 func (f *fakeSessions) Stop(ref roster.Ref) error {
 	f.mu.Lock()
@@ -856,17 +857,175 @@ func TestSessionsRowMapping(t *testing.T) {
 			s.LastTurn, s.LastReply = &engine.LastTurn{Outcome: engine.TurnDone}, "ok"
 		}), sessIdle, "ok"},
 	} {
-		got := sessRunningRow(c.row, "", false)
+		got := sessRunningRow(c.row, sessKey{})
 		if got.state != c.state || got.want != c.want {
 			t.Errorf("%s: state %d want %q; expected %d %q", c.name, got.state, got.want, c.state, c.want)
 		}
 	}
-	conn := sessRunningRow(roster.Row{Host: roster.Host{ID: "h", CrazeSessionID: "x", Ready: true}, Status: roster.Connecting, IndexTitle: "from the index"}, "", false)
+	conn := sessRunningRow(roster.Row{Host: roster.Host{ID: "h", CrazeSessionID: "x", Ready: true}, Status: roster.Connecting, IndexTitle: "from the index"}, sessKey{})
 	if conn.state != sessWorking || !conn.connecting || conn.want != "Connecting…" || conn.title != "from the index" || conn.key != (sessKey{id: "x"}) {
 		t.Errorf("a ready host not answered yet: %+v", conn)
 	}
-	untitled := sessRunningRow(roster.Row{Host: roster.Host{ID: "h"}, Status: roster.Connecting}, "", false)
+	untitled := sessRunningRow(roster.Row{Host: roster.Host{ID: "h"}, Status: roster.Connecting}, sessKey{})
 	if untitled.want != "Starting…" || untitled.title != sessUntitled || untitled.key != (sessKey{id: "\x00host:h"}) {
 		t.Errorf("a host with no session yet: %+v", untitled)
+	}
+}
+
+// withoutRow is s without the running row keyed key: its host has left the
+// registry.
+func withoutRow(s roster.Snapshot, key sessKey) roster.Snapshot {
+	s.Running = slices.DeleteFunc(slices.Clone(s.Running), func(r roster.Row) bool { return sessRowKey(r) == key })
+	return s
+}
+
+// TestSessionsEndedRowOutlivesItsHost (sol r19-c10 1): the session behind
+// the list ends, and the snapshots after it no longer list its host — a
+// stopped host leaves the registry. Its row stays, ended — `·`, "ended", the
+// title and directory of its last listing, aged from its end — and esc, ←
+// and enter on it still say so, snapshot after snapshot. A session that
+// ended before the roster ever listed it gets its row from what the model
+// knows of it.
+func TestSessionsEndedRowOutlivesItsHost(t *testing.T) {
+	m, _, _ := sessModel(t, 100, 30)
+	m = richList(t, m)
+	here := m.hereKey()
+	snap := richSnapshot(os.Getenv("HOME"), here)
+	m = applyMsg(t, m, endMsg{})
+	m.clock = func() time.Time { return sessNow.Add(90 * time.Second) }
+	ws := filepath.Join(os.Getenv("HOME"), "projects", "craze")
+	for i := range 2 {
+		m = listSnap(t, m, withoutRow(snap, here))
+		r, ok := sessFind(m.sessLines(), here)
+		if !ok || !r.ended || !r.here || r.want != "ended" || r.title != "write the v0.1.0 release notes" || r.workspace != ws {
+			t.Fatalf("snapshot %d without its host: the ended row %+v (listed %v)", i+1, r, ok)
+		}
+		if age := m.sessAge(r.since); age != "1m" {
+			t.Fatalf("the ended row's age is %q, want 1m since its end", age)
+		}
+	}
+	view := plainView(m)
+	for _, want := range []string{"· write the v0.1.0 release no", "ended", "craze · here"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("the list after the host left lacks %q:\n%s", want, view)
+		}
+	}
+	for _, k := range []tea.KeyMsg{{Type: tea.KeyEsc}, {Type: tea.KeyLeft}, {Type: tea.KeyEnter}} {
+		m = selectKey(t, m, here)
+		m, _ = press(m, k)
+		if !m.sessList.open || !strings.Contains(plainView(m), sessEndedNote) {
+			t.Fatalf("%v on the ended row:\n%s", k, plainView(m))
+		}
+	}
+
+	never, _, _ := sessModel(t, 100, 30)
+	never = openList(t, never)
+	here = never.hereKey()
+	never = applyMsg(t, never, endMsg{})
+	never = listSnap(t, never, roster.Snapshot{Running: []roster.Row{answered("pty", "triage the flaky pty test", "grok", ws, time.Hour, nil)}})
+	r, ok := sessFind(never.sessLines(), here)
+	if !ok || !r.ended || !r.here || r.want != "ended" || r.provider != never.info().Provider || r.workspace != never.info().Workspace {
+		t.Fatalf("a session that ended before it was listed: its row %+v (listed %v)", r, ok)
+	}
+}
+
+// TestSessionsHereIsAnIncarnation (sol r19-c10 2): the session behind the
+// list is its craze id and incarnation, never the id alone. Another
+// incarnation of the same craze id — listed beside it, or once it has ended
+// and its host has gone — is an ordinary row: not "here", not ended, and
+// enter on it is another session's (C11 opens it in place), never the way
+// back to the session behind the list; the ended row stays that session's.
+// A list opened before its session was named takes the name from the next
+// snapshot.
+func TestSessionsHereIsAnIncarnation(t *testing.T) {
+	m, _, _ := sessModel(t, 100, 30)
+	m = openList(t, m)
+	here := m.hereKey()
+	ws := filepath.Join(os.Getenv("HOME"), "projects", "craze")
+	a := answeredInc(here.id, here.inc, "write the release notes", "native", ws, 4*time.Minute, nil)
+	other := sessKey{id: here.id, inc: here.inc + "-next"}
+	b := answeredInc(other.id, other.inc, "write the release notes", "native", ws, time.Minute, func(s *roster.Session) {
+		s.Activity, s.Doing = engine.ActivityWorking, engine.DoingThinking
+	})
+	b.Host.ID = "host-next"
+	m = listSnap(t, m, roster.Snapshot{Running: []roster.Row{a, b}})
+	if r, _ := sessFind(m.sessLines(), other); r.here || r.ended {
+		t.Fatalf("another incarnation of the session behind the list: %+v", r)
+	}
+	if r, _ := sessFind(m.sessLines(), here); !r.here {
+		t.Fatalf("the session behind the list: %+v", r)
+	}
+	onOther := selectKey(t, m, other)
+	onOther, _ = press(onOther, enter())
+	if !onOther.sessList.open || onOther.sessList.note != sessOpenLater {
+		t.Fatalf("enter on another incarnation: open %v, note %q", onOther.sessList.open, onOther.sessList.note)
+	}
+
+	m = applyMsg(t, m, endMsg{})
+	m = listSnap(t, m, roster.Snapshot{Running: []roster.Row{b}})
+	if r, ok := sessFind(m.sessLines(), other); !ok || r.here || r.ended || r.state != sessWorking || r.want != engine.DoingThinking {
+		t.Fatalf("another incarnation, once the session behind the list ended: %+v (listed %v)", r, ok)
+	}
+	if r, ok := sessFind(m.sessLines(), here); !ok || !r.here || !r.ended {
+		t.Fatalf("the ended row: %+v (listed %v)", r, ok)
+	}
+	onOther = selectKey(t, m, other)
+	if hint := plain(onOther.sessHintRow(onOther.sessLines())); !strings.Contains(hint, "enter open") || !strings.Contains(hint, "ctrl+x stop") {
+		t.Fatalf("the hint on another incarnation: %q", hint)
+	}
+	onOther, _ = press(onOther, enter())
+	if onOther.sessList.note != sessOpenLater {
+		t.Fatalf("enter on another incarnation after the end: note %q", onOther.sessList.note)
+	}
+	onEnded := selectKey(t, m, here)
+	onEnded, _ = press(onEnded, enter())
+	if onEnded.sessList.note != sessEndedNote {
+		t.Fatalf("enter on the ended row: note %q", onEnded.sessList.note)
+	}
+
+	// Opened before the model knew its session (a launch whose host has not
+	// named it yet, stood in for by an empty pinned info).
+	late, _, _ := sessModel(t, 100, 30)
+	named := late.hereKey()
+	late.infoPin = &backend.SessionInfo{}
+	late = openList(t, late)
+	if !late.sessList.here.zero() {
+		t.Fatalf("a session not yet named is %+v behind the list", late.sessList.here)
+	}
+	late.infoPin = nil
+	late = listSnap(t, late, roster.Snapshot{Running: []roster.Row{answeredInc(named.id, named.inc, "t", "native", ws, 0, nil)}})
+	if r, _ := sessFind(late.sessLines(), named); !r.here {
+		t.Fatalf("once named, the session behind the list: %+v", r)
+	}
+}
+
+// TestFinishRunClosesTheSessionList (sol r19-c10 3): an exit the list never
+// saw reaches finishRun with the list up — a signal's quit hands back the
+// final model with it open, a recovered panic hands back none — and a
+// leave's close is a command the program may stop before running. Each way
+// the roster is closed there, through the set every copy of the model shares.
+func TestFinishRunClosesTheSessionList(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		final func(open Model) tea.Model
+	}{
+		{"the final model has the list up", func(open Model) tea.Model { return open }},
+		{"no final model (a recovered panic)", func(Model) tea.Model { return nil }},
+		{"the list left, its close never run", func(open Model) tea.Model {
+			left, _ := press(open, tea.KeyMsg{Type: tea.KeyEsc})
+			return left
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			initial, fs, _ := sessModel(t, 80, 24)
+			final := tc.final(openList(t, initial))
+			if fs.rosters[0].closed.Load() {
+				t.Fatal("fixture: the roster closed before finishRun")
+			}
+			_, _ = finishRun(io.Discard, final, initial, nil)
+			if !fs.rosters[0].closed.Load() {
+				t.Fatal("finishRun left the list's roster open")
+			}
+		})
 	}
 }

@@ -487,6 +487,10 @@ hosts (the default); under `CRAZE_DETACH=0`, `detach = false` or with the
 control socket off there is no list, no `/sessions` and no `←` binding. The
 session you came from stays attached behind the list — its turn keeps
 running, a card it raises waits for you — and the cursor starts on its row.
+If it ends while the list is up (another client's `/exit`, a close from the
+list, the idle timeout), craze stays on the list and its row stays, `· ended`,
+for as long as the list is up, even once its host has gone; a later run of
+the same session is a row of its own.
 
 ```text
  sessions  9 running                             ! 2 need you   ✳ 3 working   ✗ 1 failed   ○ 2 idle

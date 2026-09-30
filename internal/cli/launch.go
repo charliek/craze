@@ -7,7 +7,6 @@ import (
 	"io"
 	"maps"
 	"os"
-	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -207,17 +206,17 @@ type launcher struct {
 	closed   bool
 	inflight sync.WaitGroup
 	launched []*launchedBackend
-	// spawned is every host the session list's Spawn started that nobody has
-	// taken yet — opened (open's adopt) or left running (leaveRunning) — by
-	// host id: finish stops each one left.
-	spawned map[string]hostRef
+	// spawned is every host the session list's Spawn started, by host id,
+	// for the launcher's life: whose each is to stop is decided per host
+	// (listHost) — at an open that could not reach it, or at finish.
+	spawned map[string]*listHost
 	done    sync.Once
 }
 
 func newLauncher(cmd *cobra.Command, f *tuiFlags, resolved resolvedProvider, diag io.Writer) *launcher {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &launcher{cmd: cmd, env: rundir.ProcessEnv(), flags: *f, resolved: resolved, diag: diag, ctx: ctx, cancel: cancel,
-		spawned: map[string]hostRef{}}
+		spawned: map[string]*listHost{}}
 }
 
 // errLaunchOver is a spawn asked for after the TUI has quit.
@@ -490,12 +489,13 @@ func (l *launcher) noteHeld(ref hostRef) {
 // backend whose session never came up in the TUI is closed and its host, when
 // this launch spawned it, stopped (hostRef.abandon): one the TUI never took,
 // one it quit while it was starting, and one whose start failed. So is every
-// host the session list's Spawn started that the TUI never took — neither
-// opened nor left running (sol r17-c9 1). A session nobody was shown, or that
-// never ran, is not left running; a held session's host is its holder's, and
-// is left alone. A session that came up — the TUI acknowledged its start
-// (AckStarted) — was closed by the TUI's own exit, a view close, and its host
-// goes on, as does one the list left running.
+// host the session list's Spawn started on which no session came up in the
+// TUI and that the list did not leave running (sol r17-c9 1; listHost). A
+// session nobody was shown, or that never ran, is not left running; a held
+// session's host is its holder's, and is left alone. A session that came up —
+// the TUI acknowledged its start (AckStarted) — was closed by the TUI's own
+// exit, a view close, and its host goes on, whatever another backend of the
+// same host came to (sol r20-c9r 1), as does one the list left running.
 //
 // finish runs once tui.Run has returned, and an acknowledgement is made only
 // inside the program's Update: nothing can acknowledge after the reading here,
@@ -509,20 +509,35 @@ func (l *launcher) finish() {
 		l.mu.Unlock()
 		l.cancel()
 		l.inflight.Wait()
+		// Read under the lock leaveRunning decides under: closed is already
+		// set, so from here nothing changes a listHost.
 		l.mu.Lock()
 		launched := l.launched
-		spawned := slices.Collect(maps.Values(l.spawned))
-		clear(l.spawned)
+		spawned := maps.Clone(l.spawned)
 		l.mu.Unlock()
+		// The hosts a session came up on, whichever backend it came up in.
+		came := map[string]bool{}
+		for _, b := range launched {
+			if b.acked.Load() {
+				came[b.ref.entry.HostID] = true
+			}
+		}
 		for _, b := range launched {
 			if b.acked.Load() {
 				continue
 			}
 			_ = b.Close()
+			// A host the list's Spawn started is decided below, once.
+			if id := b.ref.entry.HostID; came[id] || spawned[id] != nil {
+				continue
+			}
 			b.ref.abandon()
 		}
-		for _, ref := range spawned {
-			ref.abandon()
+		for id, lh := range spawned {
+			if lh.left || lh.stopped || came[id] {
+				continue
+			}
+			lh.ref.abandon()
 		}
 	})
 }

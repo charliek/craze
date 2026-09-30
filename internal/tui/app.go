@@ -586,9 +586,12 @@ type Model struct {
 	// sessions is Config.Sessions, the session list's source (plan 030
 	// §3.9): nil is no list — no ← binding, no /sessions builtin, no help
 	// line, nothing of it on any frame. sessList is the list itself
-	// (sessions_list.go), a top-level mode while it is open.
-	sessions Sessions
-	sessList sessListState
+	// (sessions_list.go), a top-level mode while it is open. sessRosters is
+	// every roster the list opened and has not closed, shared by every copy
+	// as owner is, so every exit path closes one left open (finishRun).
+	sessions    Sessions
+	sessList    sessListState
+	sessRosters *sessRosterSet
 
 	todoPlanned int
 	todoDone    bool
@@ -1431,10 +1434,11 @@ func New(cfg Config) Model {
 		sessProvider:    prov.Name(),
 		// Discard until Run says otherwise: a model built by a test, by
 		// `craze frame` or by any direct caller writes no OSC at all.
-		term:  newTerminalColors(io.Discard),
-		owner: &sessionOwner{},
-		exit:  &exitState{},
-		shell: newShellController(),
+		term:        newTerminalColors(io.Discard),
+		owner:       &sessionOwner{},
+		exit:        &exitState{},
+		shell:       newShellController(),
+		sessRosters: &sessRosterSet{},
 		// Allocated here, not on first use, so every copy of this model holds
 		// the same panes from the start (see pane).
 		main: &pane{},
@@ -1636,7 +1640,8 @@ func runErrAfterHangup(err error, hungUp bool) error {
 
 // finishRun is Run's exit tail, in the order plan 015 §3.2 pins: the tab title
 // is cleared, the terminal's colours are reset, the host hub releases, and the
-// session closes. p.Run returns on /exit, on SIGINT/SIGTERM, on SIGHUP (Run's
+// session closes — a session list's roster still open closed just before it
+// (plan 030). p.Run returns on /exit, on SIGINT/SIGTERM, on SIGHUP (Run's
 // own handler) and on a recovered panic, and every one of them lands here.
 //
 // final is whatever p.Run handed back, which on a recovered Update or View
@@ -1681,6 +1686,13 @@ func finishRun(out io.Writer, final tea.Model, m Model, h Host) (bool, error) {
 	// already done both in this order and the hub's Close is idempotent; on
 	// SIGTERM, SIGHUP or a recovered panic this is the first and only release.
 	closeHost(h)
+	// A session list's roster left open: the list closes its own as it
+	// closes and on its own quit, but a signal, a program error or a
+	// recovered panic quits with the list up, and a leave's close is a command
+	// the program may have stopped before running (sol r19-c10 3). The set is
+	// shared by every copy, so m reaches what the final model had open even
+	// when final is nil. Bounded: Close cancels every attempt in flight.
+	m.sessRosters.closeAll()
 	// The owner and not m.eng: m is the model Run started with, and a session
 	// a picker built after it lives only in later copies — which a recovered
 	// panic does not hand back. Every copy shares the owner, so it names the
