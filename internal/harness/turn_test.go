@@ -8,6 +8,7 @@ import (
 
 	"charm.land/fantasy"
 	"github.com/charliek/craze/internal/harness/llm"
+	"github.com/charliek/craze/internal/harness/modeltable"
 	"github.com/charliek/craze/internal/harness/store"
 	"github.com/charliek/craze/internal/harness/tool"
 )
@@ -70,8 +71,9 @@ func TestTurnsCarryHistory(t *testing.T) {
 	}
 }
 
-// A model with no output ceiling and no effort control sends neither.
-func TestNoCeilingNoEffort(t *testing.T) {
+// A model with no max_output_tokens sends the default ceiling (D-74), and,
+// with no effort control, no provider options.
+func TestDefaultCeilingNoEffort(t *testing.T) {
 	f := newFixture(t, "http://127.0.0.1:1/v1")
 	opts := f.options()
 	opts.Model = "other/c"
@@ -79,8 +81,8 @@ func TestNoCeilingNoEffort(t *testing.T) {
 	f.models["other/c"].push(answerWith("ok"))
 	run(t, s, "hi")
 	call := f.models["other/c"].requests()[0]
-	if call.MaxOutputTokens != nil || len(call.ProviderOptions) != 0 {
-		t.Fatalf("request carried a ceiling %v and provider options %v; want neither", call.MaxOutputTokens, call.ProviderOptions)
+	if call.MaxOutputTokens == nil || *call.MaxOutputTokens != modeltable.DefaultMaxOutputTokens || len(call.ProviderOptions) != 0 {
+		t.Fatalf("request carried a ceiling %v and provider options %v; want %d and none", call.MaxOutputTokens, call.ProviderOptions, modeltable.DefaultMaxOutputTokens)
 	}
 }
 
