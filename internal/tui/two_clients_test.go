@@ -229,3 +229,64 @@ func TestAnAskAnsweredInOneClosesInTheOther(t *testing.T) {
 		}
 	})
 }
+
+// TestAnAnsweredAsksRowIsEveryClients (plan 032 C4, SF-61): the row an
+// answered ask earns is the session's, not the answering client's. A question
+// answered in A — its second question left with nothing picked — and a plan
+// accepted in B draw the same rows in both, each the same shared entry; and a
+// client that attaches afterwards, as a list open or `craze attach` does,
+// restores them from the host's snapshot. Before, each was a row of the
+// answering client's own (and of a client that had the card), and a restore
+// dropped it.
+func TestAnAnsweredAsksRowIsEveryClients(t *testing.T) {
+	isolateSkillsHome(t)
+	h := servedHost(t, NewStubNoPrimary())
+	a, b := remoteClient(t, h, true), remoteClient(t, h, true)
+	const one, many, plan = "? Pick one → B", "? Pick any → nothing", "plan Fake Plan → accepted"
+	closed := func(want ...string) func(Model) bool {
+		return func(m Model) bool {
+			if m.cardOpen() {
+				return false
+			}
+			for _, w := range want {
+				if !viewHas(w)(m) {
+					return false
+				}
+			}
+			return true
+		}
+	}
+
+	h.stub.Emit(agent.Event{Type: agent.EventQuestion, Question: stubQuestion()})
+	a = pumpUntil(t, a, Model.cardOpen)
+	b = pumpUntil(t, b, Model.cardOpen)
+	for _, k := range []tea.KeyMsg{runeKey('2'), enter()} {
+		a = pumpKey(t, a, k)
+	}
+	a = pumpUntil(t, a, closed(one, many))
+	b = pumpUntil(t, b, closed(one, many))
+
+	h.stub.Emit(agent.Event{Type: agent.EventPlan, Plan: stubPlanEvent()})
+	a = pumpUntil(t, a, Model.cardOpen)
+	b = pumpUntil(t, b, Model.cardOpen)
+	b = pumpKey(t, b, runeKey('a'))
+	b = pumpUntil(t, b, closed(plan))
+	a = pumpUntil(t, a, closed(plan))
+	a, b = pumpDrained(t, a), pumpDrained(t, b)
+
+	// Attached after every ask ended: everything it shows is the snapshot's.
+	c := pumpDrained(t, remoteClient(t, h, true))
+	for name, m := range map[string]Model{"A": a, "B": b, "C": c} {
+		for _, note := range []string{one, many, plan} {
+			if n := strings.Count(plainView(m), note); n != 1 {
+				t.Fatalf("client %s shows %q %d times, want once:\n%s", name, note, n, plainView(m))
+			}
+			r, ra := noteRow(t, m, note), noteRow(t, a, note)
+			if r.local || r.id.IsZero() || r.id != ra.id {
+				t.Fatalf("client %s draws %q as local=%v entry %v; A's is entry %v — want one shared entry", name, note, r.local, r.id, ra.id)
+			}
+		}
+	}
+	sameTranscripts(t, a, b)
+	sameTranscripts(t, a, c)
+}

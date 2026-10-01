@@ -1302,7 +1302,7 @@ var (
 		"eng", "cmdSeq", "chains", "engErr", "cwd", "model", "status", "err", "startErr", "startInc", "git",
 		"branch", "sessStart", "hostPerm", "hostStart", "shared", "foldIn", "main", "subs", "viewing",
 		"tombstone", "started", "replaying", "sel", "pressed", "clickPos", "clickAt", "clicks", "copyNote",
-		"copyUntil", "cards", "cardMask", "cardMasking", "askEchoes", "hiddenRetry", "snap", "queue",
+		"copyUntil", "cards", "cardMask", "cardMasking", "hiddenRetry", "snap", "queue",
 		"sendNowArmed", "ov", "modeInFlight", "modeGen", "modeRev", "modelRev", "configRev", "dialog", "mdlg",
 		"helpTop", "applyGen", "themeSel", "themeNames", "themePrev", "slashSel", "slashTop", "slashKey",
 		"slashHideKey", "skills", "pickingProvider", "pickingResume", "resumeCursor", "resumeWaiting",

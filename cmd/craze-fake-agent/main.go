@@ -16,6 +16,11 @@ Flags:
         Scripted behavior (default "echo"):
           echo        initialize, authenticate, session/new; echo prompt text
           followup    first prompt and second prompt return different replies
+          sigint-hold echo for the first prompt; every later prompt waits for
+                      session/cancel (answered cancelled) or, with
+                      CRAZE_FAKE_GATE set, one byte from that FIFO (answered
+                      as echo): a signal sent between turns always finds the
+                      second turn in flight
           tool        emit a tool_call update then a text chunk
           tasks       emit two tool_calls with updates, then text "done tasks"
           todos       cursor/update_todos requests (replace then merge)
@@ -152,7 +157,8 @@ Environment:
                        read one byte from <path>, a FIFO: the test writes one
                        byte per turn to release it, so it can act while the
                        turn is known to be in progress. Unset, tasks runs
-                       straight through.
+                       straight through. sigint-hold's held prompts also end
+                       on that byte, answered as echo.
   CRAZE_FAKE_SESSION_ID=<id>  session/new answers this session id instead of
                        fake-session-1, so several sessions in one test HOME
                        are several rows of its session index. {dir} in it is
@@ -193,7 +199,7 @@ func main() {
 	switch script {
 	case "echo", "followup", "tool", "tasks", "effort", "modelconfig", "modelconfig-refuse",
 		"modellate", "preinstall", "permission", "ask", "plan",
-		"hang", "hang-ack", "authfail", "noauth", "todos", "todos-notify", "diff", "bigdiff",
+		"hang", "hang-ack", "sigint-hold", "authfail", "noauth", "todos", "todos-notify", "diff", "bigdiff",
 		"bash", "task", "task-late", "commands", "nocommands", "callorder", "markdown", "title", "planmode", "planmode-card",
 		"env", "turnfail", "long-reply",
 		"grok-echo", "grok-ask", "grok-plan", "grok-ask-wrapped",

@@ -12,8 +12,9 @@ non-test source lines, from the reference reviews (`09`).
 | done | S2 | complete (Plan 027, 4 PRs: #55, #56, #61, #63) | Per-session Unix socket, published protocol spec + schema, fake host, `craze bridge`, `craze attach` |
 | done | S4a | complete (Plan 030, with S5; 5 PRs: #66, #68, #70, #71, PR 4) | Detached hosts: `craze serve`, hosts born detached, `session.stop`, idle exit |
 | done | S5 | complete (Plan 030, with S4a) | Agent view in the TUI: a session list of every running session on the machine, new sessions started from it, composer `@` mentions |
-| 1 | S4b | not started (next) | The hub: `craze ps`, `hub.sock`, `sessions.subscribe` on the hub, `session.create`, remote-machine aggregation |
+| 1 | S4b | in progress (Plan 032) | The hub (local machine only): `craze ps`, `hub.sock`, `sessions.subscribe` on the hub, `session.create` |
 | 2 | S3 | not started (after S4b, and after shed's first release of its own lane work) | `shed-craze` lane adapter in shed; craze in shed-mobile's `LANE_KINDS` |
+| 3 | S4c | directional | Remote-machine listing: the hub roster across machines (SD-38) |
 | 3 | S6 | directional | `craze web`: hub serves WebSocket + a web bundle on loopback / tailnet |
 | 3 | S7 | directional | Outbound relay uplink and a hosted server; enrollment, scopes, TLS |
 
@@ -317,9 +318,11 @@ live smoke are in `12`, and what it left is in `13`.
 
 The per-machine hub at `run/hub.sock` with roster, routing, spawn, and stop;
 `craze ps`; `sessions.subscribe` on the hub; `session.create` turns shed's
-`create` capability on; remote-machine aggregation. The hub replaces the
-per-host polling that S5's session list does until it exists. Not started;
-next now that S4a + S5 are complete, and before S3.
+`create` capability on. Local machine only (SD-38): listing other machines'
+sessions is S4c. The hub learns its hosts from the registry and polls them
+(SD-37); hosts do not register with it. It replaces the per-host polling that
+S5's session list does until it exists. In progress (Plan 032), after S4a + S5
+and before S3.
 
 - Size: M, about 2k lines (the old S4's estimate, which covered the hub, the
   detached host and `craze ps` together; S4a took the host part).
@@ -327,10 +330,20 @@ next now that S4a + S5 are complete, and before S3.
   stale sweep keyed on pid plus a start token; the auto-spawn by re-exec with
   an env marker is already S4a's.
 - **Exit**: start two sessions, close every terminal, list them with
-  `craze ps`, attach to one; kill the hub mid-turn and lose nothing, hosts
-  re-register with the respawned hub; a host crash removes its row within a
-  sweep; hub and host of different craze versions interoperate on the
+  `craze ps`, attach to one; kill the hub mid-turn and lose nothing, a
+  respawned hub lists the same sessions, rebuilt from the registry; a host
+  crash removes its row within a sweep; hub and host of different craze versions interoperate on the
   protocol integer.
+
+### S4c — remote-machine listing (directional)
+
+The hub roster across machines: one list of sessions on every machine the user
+works on. Split out of S4b by SD-38 (local only). It may instead be shed's job
+through S3, or its own later phase; not designed here.
+
+- Size: unestimated.
+- Needs S4b's roster and a way to reach another machine's hub (`craze bridge`
+  over ssh is the existing entry point, SD-05) with the trust rules of `02`.
 
 ### S5 — agent view
 

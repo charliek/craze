@@ -765,3 +765,54 @@ func TestHelpAndTheOtherDialogsAreExclusive(t *testing.T) {
 		t.Fatalf("help over /model left dialog=%v filter=%q", back.dialog, back.mdlg.filter.Value())
 	}
 }
+
+// TestHelpDialogDescriptionsFitTheirColumn: at 80x24 no help row description
+// is clamped (clampWidth swaps its tail for "…") at any scroll position the box
+// can reach, with and without a session list. What is checked is what is drawn,
+// not a column computed here: helpRow gives up two cells for the ▲/▼ marker on
+// the row that carries one, so a description that fits the bare column can
+// still clamp at the scroll positions that put a marker beside it.
+func TestHelpDialogDescriptionsFitTheirColumn(t *testing.T) {
+	// Rows that clamp at some position at 80x24. All predate this test and keep
+	// their text (help strings move goldens), so a new long row fails here
+	// instead of passing unnoticed. The C2 rows (ctrl+c, ctrl+d, /exit) are
+	// deliberately not in it. "ctrl+l" and "alt+enter, ctrl+j" fit the bare
+	// column and clamp only where a ▲ marker sits beside them; "←" (the sessions
+	// line) is too long for the column outright.
+	known := map[string]bool{
+		"↑ ↓": true, "pgup pgdn": true,
+		"ctrl+l": true, "alt+enter, ctrl+j": true, "←": true,
+	}
+	check := func(t *testing.T, m Model) {
+		t.Helper()
+		inner := m.lay.Dialog.W - dialogBorder
+		budget := m.lay.Dialog.H - dialogBorder
+		lines := m.helpLines()
+		last := max(0, len(lines)-m.helpShown())
+		for top := 0; top <= last; top++ {
+			m.helpTop = top
+			body := m.helpDialogBody(inner, budget)
+			_, shown, _ := m.helpDialogPlan(budget)
+			for i := 0; i < shown; i++ {
+				l := lines[top+i]
+				if l.heading() || known[l.key] {
+					continue
+				}
+				if row := ansi.Strip(body[1+i]); !strings.Contains(row, l.desc) {
+					t.Errorf("top=%d: %q is clamped: row %q, want %q", top, l.key, row, l.desc)
+				}
+			}
+		}
+	}
+	t.Run("plain", func(t *testing.T) { check(t, helpModel(t, 80, 24)) })
+	t.Run("sessions", func(t *testing.T) {
+		m, _, _ := newSessModel(t, 80, 24)
+		m.input.SetValue("/help")
+		tm, _ := m.Update(enter())
+		m = tm.(Model)
+		if m.dialog != dialogHelp || m.sessions == nil {
+			t.Fatalf("dialog=%v sessions=%v", m.dialog, m.sessions != nil)
+		}
+		check(t, m)
+	})
+}

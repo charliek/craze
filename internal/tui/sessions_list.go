@@ -21,7 +21,8 @@ import (
 
 // The session list (plan 030 §3.10): every session of this user on this
 // machine, one row each, grouped by what it needs — the screen `←` on an
-// empty composer and /sessions open, only when Config.Sessions is set.
+// empty composer, `←` over a card (SF-99) and /sessions open, only when
+// Config.Sessions is set.
 //
 // It is a top-level mode of the model, not a dialog and not a region of the
 // session's frame: while it is open (sessList.open) it is routed first —

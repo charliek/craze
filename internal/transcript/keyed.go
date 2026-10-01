@@ -34,6 +34,16 @@ func (l *keyedList[T]) has(k string) bool {
 	return ok
 }
 
+// get is the item under k, and whether there is one.
+func (l *keyedList[T]) get(k string) (T, bool) {
+	i, ok := l.pos[k]
+	if !ok {
+		var zero T
+		return zero, false
+	}
+	return l.items[i], true
+}
+
 // upsert replaces the item under v's key where it stands, or appends v. A
 // value with no key is not kept.
 func (l *keyedList[T]) upsert(v T) {

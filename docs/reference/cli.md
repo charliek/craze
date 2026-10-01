@@ -649,7 +649,7 @@ Identical to the host TUI's (plan 027 §3.19): the session — its queue and its
 turn — is shared, so the first <kbd>Ctrl+C</kbd> while a turn works cancels
 the turn and clears the queue for **every** attached client, exactly as it
 does in the host TUI. <kbd>Ctrl+C</kbd> when idle, a second <kbd>Ctrl+C</kbd>,
-<kbd>Ctrl+D</kbd> and `/exit` all quit, and quitting ends the session
+<kbd>Ctrl+D</kbd> and `/exit` all end the session
 ([below](#quitting-vs-the-session-ending)).
 
 ### Quitting vs. the session ending
@@ -659,9 +659,7 @@ Quitting `craze attach` is the same act as quitting the host's own TUI (plan
 <kbd>Ctrl+D</kbd> and `/exit` ask the host to **stop the session**
 (`session.stop`). It ends for every client attached and stays resumable if
 it has an index row; the attach exits 0 and prints nothing more (1 after a
-failed start). (The help dialog still
-words `/exit` "Quit craze" and <kbd>Ctrl+D</kbd> "quit"; that wording is
-unchanged.) Two things do not end it, and are **view closes** — the attach
+failed start). Two things do not end it, and are **view closes** — the attach
 detaches, exits 0, and the session goes on running on its host: SIGTERM, and a
 closed terminal (SIGHUP).
 

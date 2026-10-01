@@ -21,7 +21,7 @@
   /plan             Set plan mode                                                                   
   /ask              Set ask mode                                                                    
   /agent            Set agent mode                                                                  
-  /exit             Quit craze                                                                      
+  /exit             End this session                                                                
 ❯ /alpha-review     Review the working tree and report the findings worth acting on before the ne… ▼
 ──────────────────────────────────────────────────────────────────────────────────────────── craze ─
 ❯ /                                                                                                 

@@ -401,7 +401,7 @@ func (m *Model) planRows(p *agent.PlanEvent, key renderKey) []string {
 	}
 	rows := []string{renderSegs(key.width,
 		seg{"PLAN ", styleFG(m.theme.Accent).Bold(true)},
-		seg{planName(p), styleFG(m.theme.Bright).Bold(true)},
+		seg{transcript.PlanName(p), styleFG(m.theme.Bright).Bold(true)},
 	)}
 	if strings.TrimSpace(p.Overview) != "" {
 		rows = append(rows, hangingRows(p.Overview, "", "", key.width, styleFG(m.theme.Dim))...)

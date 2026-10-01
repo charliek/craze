@@ -99,15 +99,19 @@ type parityRec struct {
 	// replay is what the shadow's fold is handed: the sample the TUI's fold
 	// was handed for the same event.
 	replay paritySample
+	// hidden is the ask kinds the TUI's model treats as hidden, which every
+	// model the watch folds for it is given too (plan 032 C4).
+	hidden transcript.HiddenAsks
 	events []paritySample
 	folds  int
 	panes  map[*pane]*paneWant
 }
 
 // replayOptions is sharedOptions over a sample the caller keeps current: a
-// model folded with it is handed, for each event, what the TUI's fold was.
-func replayOptions(s *paritySample) transcript.Options {
-	return sharedOptions(func() time.Time { return s.at }, func(error) string { return s.errText })
+// model folded with it is handed, for each event, what the TUI's fold was, and
+// treats as hidden the asks the TUI's model does.
+func replayOptions(s *paritySample, hidden transcript.HiddenAsks) transcript.Options {
+	return sharedOptions(func() time.Time { return s.at }, func(error) string { return s.errText }, hidden)
 }
 
 var parity = &parityWatch{recs: map[weak.Pointer[transcript.Model]]*parityRec{}}
@@ -178,10 +182,10 @@ func (w *parityWatch) rec(m *transcript.Model) *parityRec {
 // (restoreHook). The caller holds mu.
 func (w *parityWatch) newRec(m *transcript.Model, base *transcript.Snapshot) *parityRec {
 	key := weak.Make(m)
-	r := &parityRec{panes: map[*pane]*paneWant{}, base: base}
-	r.shadow = transcript.New(replayOptions(&r.replay))
+	r := &parityRec{panes: map[*pane]*paneWant{}, base: base, hidden: m.Hidden()}
+	r.shadow = transcript.New(replayOptions(&r.replay, r.hidden))
 	if base != nil {
-		r.shadow = transcript.Restore(base, replayOptions(&r.replay))
+		r.shadow = transcript.Restore(base, replayOptions(&r.replay, r.hidden))
 	}
 	w.recs[key] = r
 	w.stats.models++
@@ -731,9 +735,9 @@ func (w *parityWatch) whole(m *Model, r *parityRec, ev agent.Event, live map[str
 func (w *parityWatch) fresh(m *Model, r *parityRec, ev agent.Event) {
 	w.stats.fresh++
 	var cur paritySample
-	f := transcript.New(replayOptions(&cur))
+	f := transcript.New(replayOptions(&cur, r.hidden))
 	if r.base != nil {
-		f = transcript.Restore(r.base, replayOptions(&cur))
+		f = transcript.Restore(r.base, replayOptions(&cur, r.hidden))
 	}
 	for _, s := range r.events {
 		cur = s
@@ -1348,7 +1352,7 @@ func TestTheParityWatchCountsEveryDrop(t *testing.T) {
 		}})
 	}
 	opts := func(b transcript.Bounds) transcript.Options {
-		o := sharedOptions(time.Now, func(err error) string { return err.Error() })
+		o := sharedOptions(time.Now, func(err error) string { return err.Error() }, transcript.HiddenAsks{})
 		o.Bounds = b
 		return o
 	}

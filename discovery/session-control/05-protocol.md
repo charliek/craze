@@ -305,8 +305,9 @@ since:**
 
 - The snapshot travels **in the attach reply** (`session.attach`'s `snapshot`
   field), not as a separate `snapshot` notification.
-- `hello` gains `protocols` (the tolerant list), `token`/`resume`, and `via`
-  (`hub` or `host`), beyond this sketch.
+- `hello` gains `protocols` (the tolerant list), `token`/`resume`, `auth` and
+  `via`, beyond this sketch; `auth` and `via` are reserved and must be absent
+  or null (see "`via` and `endpoint.kind`" below).
 - `reset{reason}` is the plan's §3.4 list (`slow_consumer`,
   `session_replaced`, `session_closed`, …), not this file's.
 - "A session whose `session/load` failed never reaches `synchronized`"
@@ -425,3 +426,20 @@ announced the same way, **by capability**:
   has (title, activity, pending asks, the head ask's label) and the craze
   version its `hello` gave. The existing fixtures are that direction,
   unchanged; fixture 17 (`17-row-facts`) is a `rowFacts` host through a turn.
+
+## `via`, `endpoint.kind` and `session.connect` (S4b)
+
+`via` and `endpoint.kind` are different things. `via` is a field of the
+client's `hello`, reserved for a hub or relay that originates a connection to a
+host itself: it must be absent or null, and every shipped host refuses anything
+else (`bad_request`, "params.via is reserved and must be absent or null in
+protocol 1"). `endpoint.kind` is in the **reply**: `host` or `hub`, naming what
+answered. A hub is a distinct endpoint, not a `via` hop; it never sends a host
+a `via`.
+
+A hub routes by handing the connection over, not by multiplexing.
+`session.connect{sessionId}` must be the first request after `hello`; the hub
+answers `{}`, then copies bytes between the client and the host's own socket.
+The client then says its own `hello` to the host through the splice, so the
+host's identity, capabilities and incarnation reach it untouched (SQ14).
+`session.connect` is hub-only: a host refuses it `unsupported/hub_only`.

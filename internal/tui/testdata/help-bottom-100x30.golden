@@ -18,7 +18,7 @@
               │  /plan             Set plan mode                                     │              
               │  /ask              Set ask mode                                      │              
               │  /agent            Set agent mode                                    │              
-              │  /exit             Quit craze                                        │              
+              │  /exit             End this session                                  │              
               │this session's commands                                               │              
               │  /research         Agent-advertised command                          │              
               │↑↓ · pgup/pgdn · esc closes                                           │              

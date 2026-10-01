@@ -36,7 +36,10 @@ func priorEvents() []agent.Event {
 		{Type: agent.EventQueue, Queue: &agent.QueuedPrompt{ID: "q1", Text: "first"}, QueueChange: agent.QueueQueued, QueuePos: 0, At: at(7)},
 		{Type: agent.EventQueue, Queue: &agent.QueuedPrompt{ID: "q2", Text: "second"}, QueueChange: agent.QueueQueued, QueuePos: 1, At: at(8)},
 		{Type: agent.EventPermission, Permission: &agent.PermissionEvent{ID: "perm-1", Tool: "Shell"}, At: at(9)},
-		{Type: agent.EventQuestion, Question: &agent.QuestionEvent{ID: "ask-1", Title: "Q"}, At: at(10)},
+		{Type: agent.EventPlan, Plan: &agent.PlanEvent{ID: "plan-0", Name: "Ship", Plan: "steps"}, At: at(10)},
+		{Type: agent.EventQuestion, Question: &agent.QuestionEvent{ID: "ask-1", Title: "Q", Questions: []agent.Question{
+			{ID: "q1", Prompt: "Which?", Options: []agent.Option{{ID: "a", Label: "A"}, {ID: "b", Label: "B"}}},
+		}}, At: at(10)},
 		{Type: agent.EventThought, Text: "weighing", At: at(11)},
 	})
 }
@@ -58,12 +61,19 @@ func capPrior() []agent.Event {
 // re-application appends history by design (TestHistoryIsAppendOnly) — a
 // note, a plan entry, a user or an error row — which the test checks against
 // what the fold reports.
+//
+// firstAppends is an ask ending's: its first application draws the outcome
+// note (plan 032 C4) and its re-application does not, since the note is worded
+// from the open ask the ending removes — so a re-ended id never doubles it,
+// which appends false pins. The test checks every ask ending's first
+// application against it.
 type convergenceFixture struct {
-	name    string
-	prior   []agent.Event
-	bounds  Bounds
-	ev      agent.Event
-	appends bool
+	name         string
+	prior        []agent.Event
+	bounds       Bounds
+	ev           agent.Event
+	appends      bool
+	firstAppends bool
 }
 
 // A retention is where a fixture's prior leaves the transcripts: inside the
@@ -132,6 +142,13 @@ func convergenceFixtures() []convergenceFixture {
 		{name: "auto plan", ev: ev(agent.Event{Type: agent.EventPlan, Plan: &agent.PlanEvent{ID: "plan-2", Auto: true}})},
 		{name: "ask ended", ev: ev(agent.Event{Type: agent.EventAsk, Ask: &agent.AskUpdate{ID: "perm-1", Kind: agent.AskPermission, Outcome: agent.AskAnswered, By: agent.AskByClient}})},
 		{name: "unknown ask ended", ev: ev(agent.Event{Type: agent.EventAsk, Ask: &agent.AskUpdate{ID: "perm-9", Kind: agent.AskPermission, Outcome: agent.AskAutomatic, By: agent.AskByPolicy}})},
+		{name: "question answered", ev: ev(agent.Event{Type: agent.EventAsk, Ask: &agent.AskUpdate{ID: "ask-1", Kind: agent.AskQuestion, Outcome: agent.AskAnswered, By: agent.AskByClient,
+			Answers: map[string][]string{"q1": {"b"}}}}), firstAppends: true},
+		{name: "question skipped", ev: ev(agent.Event{Type: agent.EventAsk, Ask: &agent.AskUpdate{ID: "ask-1", Kind: agent.AskQuestion, Outcome: agent.AskAnswered, By: agent.AskByClient, Skip: true}}), firstAppends: true},
+		{name: "question cancelled", ev: ev(agent.Event{Type: agent.EventAsk, Ask: &agent.AskUpdate{ID: "ask-1", Kind: agent.AskQuestion, Outcome: agent.AskCancelled, By: agent.AskByCancel}})},
+		{name: "plan accepted", ev: ev(agent.Event{Type: agent.EventAsk, Ask: &agent.AskUpdate{ID: "plan-0", Kind: agent.AskPlan, Outcome: agent.AskAnswered, By: agent.AskByClient, Accepted: true}}), firstAppends: true},
+		{name: "plan rejected", ev: ev(agent.Event{Type: agent.EventAsk, Ask: &agent.AskUpdate{ID: "plan-0", Kind: agent.AskPlan, Outcome: agent.AskAnswered, By: agent.AskByClient}}), firstAppends: true},
+		{name: "plan ended with its turn", ev: ev(agent.Event{Type: agent.EventAsk, Ask: &agent.AskUpdate{ID: "plan-0", Kind: agent.AskPlan, Outcome: agent.AskTurnEnded, By: agent.AskByTurn}})},
 		{name: "done", ev: ev(agent.Event{Type: agent.EventDone, StopReason: "end_turn"})},
 		{name: "done cancelled", ev: ev(agent.Event{Type: agent.EventDone, StopReason: "cancelled"}), appends: true},
 		{name: "title", ev: meta(agent.StateDelta{Title: strp("renamed")})},
@@ -244,7 +261,10 @@ func TestStateCarryingKindsConvergeUnderReapplication(t *testing.T) {
 				}
 				e := fx.ev
 				e.Seq = uint64(len(r.prior) + 1)
-				once, _ := fold(e)
+				once, c1 := fold(e)
+				if appended := !c1.AppendedFrom.IsZero(); e.Type == agent.EventAsk && appended != fx.firstAppends {
+					t.Fatalf("the ending's first application appended=%v, but the fixture says firstAppends=%v: %+v", appended, fx.firstAppends, c1)
+				}
 				twice, c2 := fold(e)
 				if assertConverged(t, fx, "re-applying", once, twice, c2, c2.Dropped) {
 					displaced++

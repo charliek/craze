@@ -87,7 +87,7 @@ func builtinSlash() []slashItem {
 		{Name: "plan", Desc: "Set plan mode", Builtin: true},
 		{Name: "ask", Desc: "Set ask mode", Builtin: true},
 		{Name: "agent", Desc: "Set agent mode", Builtin: true},
-		{Name: "exit", Desc: "Quit craze", Builtin: true},
+		{Name: "exit", Desc: "End this session", Builtin: true},
 	}
 }
 

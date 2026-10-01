@@ -168,8 +168,8 @@ models and providers](docs/reference/configuration.md#native-models-and-provider
 | `Ctrl+L` | the strong send: on Grok, add the draft to the running turn without cancelling it; on Cursor, cancel the running turn and send (it asks first) |
 | `Alt+Enter`, `Ctrl+J` | newline (see below) |
 | `Esc` | answer the card on top; close a dialog (`/help` included); leave the sub-agent view; close the slash menu; otherwise cancel the running turn (the transcript says `cancelled`) |
-| `Ctrl+C` | cancel the running turn and everything queued behind it; a second press within one second quits; quits outright when idle or after an error. Inside the sub-agent view it still cancels the **main** turn, and the view stays open |
-| `Ctrl+D` | quit, always |
+| `Ctrl+C` | cancel the running turn and everything queued behind it; a second press within one second ends the session; it ends it outright when idle or after an error. Inside the sub-agent view it still cancels the **main** turn, and the view stays open |
+| `Ctrl+D` | ends the session, always |
 | `Shift+Tab` | cycle the ACP mode (agent / plan / ask); inside the sub-agent view, switch to the previous sub-agent instead |
 | `Ctrl+T`, `/tasks` | tasks panel: compact → expanded → hidden |
 | `Ctrl+G`, `/theme` | theme picker |
@@ -186,7 +186,7 @@ models and providers](docs/reference/configuration.md#native-models-and-provider
 | `Esc` on the slash menu | hide it for that token only; a second `Esc` cancels a running turn as usual |
 
 `/help` opens a centred, scrollable box listing the same keys — grouped, one
-per row — plus every slash command. `/exit` quits; there are no bare `q` or `?`
+per row — plus every slash command. `/exit` ends the session; there are no bare `q` or `?`
 bindings, so a message that starts with either is just a message.
 
 **Shift+Enter is unreliable under bubbletea v1.** Most terminals send a bare

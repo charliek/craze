@@ -506,8 +506,16 @@ func newEngine(sess agent.Session, opts Options, h *hooks) (*Engine, error) {
 	}
 	e.receipts = newReceiptTable(rh)
 	// Before the observer is installed, which is what folds it: every committed
-	// event from the first reaches it.
-	e.model = transcript.New(transcript.Options{Incarnation: e.log.Incarnation()})
+	// event from the first reaches it. The asks it treats as hidden are the
+	// provider's capabilities' — the set the session info document advertises
+	// (control's sessionCapabilities, from State's provider, which is this
+	// snapshot's) — so the engine and every client draw the same outcome notes
+	// (plan 032 C4). A session's provider is settled when it is built, before
+	// Start (agent.New, agent.NewNative).
+	e.model = transcript.New(transcript.Options{
+		Incarnation: e.log.Incarnation(),
+		Hidden:      transcript.HiddenBy(sess.Snapshot().Provider.Capabilities()),
+	})
 	if err := e.log.Observe(e.observe); err != nil {
 		return nil, fmt.Errorf("engine: %w", err)
 	}
@@ -727,8 +735,8 @@ func (e *Engine) Ask(id string) (agent.AskRecord, bool) { return e.asks.Record(i
 // The engine adds no gate of its own. An ask may be answered while the agent is
 // running a turn of its own, while a cancel is in flight, while the engine is
 // replaying — whenever the agent is waiting on one, which is the only condition
-// that matters — and the command's cause travels onto the ending, so the client
-// that answered can skip its own echo.
+// that matters — and the command's cause travels onto the ending, so a client
+// can tell its own answer's ending from another's.
 //
 // It waits on nothing: one registry section and an enqueue, both of which are
 // bounded, so a client may call it from the primary's own reader.

@@ -495,17 +495,12 @@ type Model struct {
 	// — clears it too. A cancel with no turn of craze's own keys it to the empty
 	// turn id, and then the next beginTurn is what clears it.
 	//
-	// askEchoes are the causes of answers this model sent whose endings it has
-	// not seen yet: their effect was applied in the Update that asked for them,
-	// so the events are its own echoes (applyAskEnded).
-	//
 	// hiddenRetry are answers to asks the config shows no card for that the
 	// engine refused for want of room (answerHidden), and hiddenRetryLive says
 	// the one beat they are waiting on is in flight (armHiddenRetry).
 	cards           []card
 	cardMask        string
 	cardMasking     bool
-	askEchoes       []string
 	hiddenRetry     []hiddenAnswer
 	hiddenRetryLive bool
 	// snap is the session's state as the TUI draws it, and queue the message
@@ -673,7 +668,7 @@ type Model struct {
 	// drafts is the composer's text of each session this TUI has left, by
 	// its craze id (draftKey): stashed as a switch leaves a session and put
 	// back when a switch returns to it, so a draft never follows the user to
-	// another session (plan 030 §3.11). Copied on write, as askEchoes is.
+	// another session (plan 030 §3.11). Copied on write, as cards is.
 	drafts map[string]string
 	// retired is every backend a switch let go of, and every one a dial
 	// answered after the user had moved on, until its close — a view close,
@@ -1463,6 +1458,10 @@ func (m *Model) adopt(b backend.Backend) {
 	if sessionBackendHook != nil {
 		m.eng = sessionBackendHook(m.eng)
 	}
+	// The shared model again, now that its session's capabilities can be read
+	// from the backend (newShared): dropSession made one before there was a
+	// backend, and nothing has been folded into it since.
+	m.newShared()
 	// A new client, so a new order: a chain still running on the backend this
 	// replaced orders nothing on this one.
 	m.chains = &chainLock{}
@@ -2822,8 +2821,17 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	// A card owns the keyboard: everything below this, Ctrl+T / Ctrl+G /
 	// Ctrl+O and the agent-row arrows included, is out of reach until it is
-	// answered.
+	// answered. The one exception is an unmodified ← where there is a session
+	// list (SF-99, plan 032 §3.2 C3): it leaves the session for the list with
+	// the card unanswered. The ask stays open on the host, the list shows the
+	// session under "needs you", and the card — its progress, the draft under
+	// it and the sub-agent view it is over — is all still here on the way
+	// back (leaveSessions touches none of them). No card binds ←, and Alt+←
+	// stays the card's (swallowed): only the bare key passes through.
 	if m.cardOpen() {
+		if msg.Type == tea.KeyLeft && !msg.Alt && m.sessions != nil {
+			return m.openSessions()
+		}
 		return m.handleCardKey(msg)
 	}
 
@@ -4169,12 +4177,13 @@ func (m *Model) reduceEvent(ev agent.Event) tea.Cmd {
 			}
 			// The config hides questions: it is skipped where it stands, with
 			// no card and — as it always has — no row. Its ending finds no
-			// card to remove, and writes nothing (applyAskEnded).
+			// card to remove, and the fold, given the same capabilities,
+			// draws no note for it (transcript.Options.Hidden).
 			return m.answerHidden(ev.Question.ID, agent.AskAnswer{Skip: true})
 		}
 	case agent.EventAsk:
 		if ev.Ask != nil {
-			m.applyAskEnded(ev.Cause, ev.Ask)
+			m.applyAskEnded(ev.Ask)
 		}
 	case agent.EventPlan:
 		if ev.Plan != nil && !ev.Plan.Auto {
@@ -4289,9 +4298,11 @@ type hiddenAnswer struct {
 // nothing after it needs its result in the Update that sent it. The command's
 // one message is the refusal for room (hiddenRefusedMsg), which puts the
 // answer back on the retry list, stamped with the session generation and
-// fenced by the backend epoch like any other result. No echo is noted: an
-// echo only matters for a card, and this ask's ending finds none to remove, so
-// it writes nothing either way (applyAskEnded).
+// fenced by the backend epoch like any other result. Its ending finds no card
+// to remove (applyAskEnded), and draws no note: the shared model is built
+// with the asks the session's capabilities hide, as every folder of the
+// session is, so the skip or reject sent here is never drawn as the user's
+// (transcript.Options.Hidden, plan 032 C4).
 func (m *Model) answerHidden(id string, a agent.AskAnswer) tea.Cmd {
 	if m.eng == nil {
 		return nil
@@ -4369,78 +4380,31 @@ func (m *Model) handleHiddenRetry() tea.Cmd {
 	return m.retryHidden()
 }
 
-// noteAskEcho records that the ending caused by cause is this model's own: its
-// effect was applied in the Update that asked for it, so the event is an echo.
-// The slice is copied rather than written through, because every Model copy
-// shares it.
-func (m *Model) noteAskEcho(cause string) {
-	if cause == "" {
-		return
-	}
-	m.askEchoes = append(append([]string(nil), m.askEchoes...), cause)
-}
-
-// takeAskEcho reports whether cause is one of this model's own answers, and
-// takes it off the list if it is. One entry per answer, removed by the one
-// ending that answer causes: a cause that matched can never match twice.
-func (m *Model) takeAskEcho(cause string) bool {
-	if cause == "" {
-		return false
-	}
-	for i, c := range m.askEchoes {
-		if c != cause {
-			continue
-		}
-		next := append([]string(nil), m.askEchoes[:i]...)
-		m.askEchoes = append(next, m.askEchoes[i+1:]...)
-		return true
-	}
-	return false
-}
-
 // applyAskEnded is one ask's ending. Every way an ask can end carries one now,
-// so this is where a card the model did not answer itself goes away — another
-// client's answer, a cancel, the turn it belonged to ending underneath it, the
-// session closing — and where the row that answer earned is written.
+// so this is where a card goes away — another client's answer, a cancel, the
+// turn it belonged to ending underneath it, the session closing — whichever
+// card the queue still holds for it: none for this client's own answer, whose
+// card it popped before it sent the answer.
 //
-// What it writes is exactly what the local path writes for the same outcome, so
-// a question answered from a phone reads in this transcript as one answered
-// here: the question notes for an answer, the skipped note for a skip, the
-// verb for a plan. And exactly as little: nothing for a permission (a permission
-// answer has never written a row), nothing for a cancel, a turn's end, a close
-// or an automatic resolution, and nothing for an ask this model never raised a
-// card for — the hidden paths, a card the cancel mask dropped, and an ending
-// that carries its own Body, which by definition never had an opening.
-func (m *Model) applyAskEnded(cause string, u *agent.AskUpdate) {
+// It writes no row. The outcome note an answer earns — the question notes, the
+// skipped note, the plan's verb — is the shared transcript's, which the fold
+// has already drawn from this event, for this client's own answer and
+// another's alike, and is there again after a restore or for a client that
+// attaches later (plan 032 §3.2 C4, SF-61). The fold's eligibility is the rule
+// this function used to apply: nothing for a permission, a cancel, a turn's
+// end, a close, an automatic resolution, a hidden ask, or an ending whose
+// opening it never saw.
+func (m *Model) applyAskEnded(u *agent.AskUpdate) {
 	m.notePlanApproved(u)
-	if m.takeAskEcho(cause) {
-		// This model's own answer, applied in the Update that sent it.
-		return
-	}
-	c, ok := m.removeCard(u.ID)
-	if !ok || u.Outcome != agent.AskAnswered {
-		return
-	}
-	// The notes are client-local — written only by a client that had the card,
-	// like the ones this client writes when it answers (commitQuestion,
-	// skipQuestion, answerPlan) — so they keep this client's clock rather than
-	// taking the ending's At (plan 024 §3.3).
-	switch {
-	case c.kind == cardQuestion && u.Skip:
-		m.addNote(skipNote(c.ask))
-	case c.kind == cardQuestion:
-		m.addAnswerNotes(c.ask, u.Answers)
-	case c.kind == cardPlan:
-		m.addNote(planNote(c.plan, u.Accepted))
-	}
+	m.removeCard(u.ID)
 }
 
 // notePlanApproved records the turn an accepted plan belongs to, so a turn that
 // left a plan behind and said nothing in words still earns the implement offer
 // (planEarnsOffer, plan 023 correction 2). It is the first thing applyAskEnded
-// does, ahead of the echo check, because the two routes to an accepted plan —
-// this model answering the card itself, whose ending comes back as its own echo
-// and is skipped, and an accept from anywhere else — must both land here.
+// does, ahead of anything about a card, because the two routes to an accepted
+// plan — this model answering the card itself, whose ending finds no card,
+// and an accept from anywhere else — must both land here.
 //
 // Only an answered acceptance counts. An automatic one (Auto) is craze's own
 // headless policy, where nothing draws a card: the plan is never written to the

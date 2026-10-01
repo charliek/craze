@@ -143,9 +143,11 @@ func otherTheme(t *testing.T, m Model) string {
 //     local row, before the started the engine publishes for that Enter
 //     arrives. The started is this client's echo, so it draws nothing: the
 //     optimistic row stays the display, above the local row that followed it.
-//   - An answer, a chunk, then the answer's own ending: the card answered
-//     here writes its notes at once, the reply carries on under them, and the
-//     ending the answer caused — this client's echo — adds nothing.
+//   - An answer, a chunk, then the answer's own ending: no longer an echo
+//     (plan 032 C4). The card answered here writes nothing of its own; the
+//     ending the answer caused draws its notes as shared rows, where the log
+//     put the ending — under the chunk the agent sent before it — and the rows
+//     above them stay where they were.
 func TestEchoHidingLeavesTheFrameUnchanged(t *testing.T) {
 	t.Run("a reply, the user's Enter, a local row, then the started", func(t *testing.T) {
 		m := sized(t)
@@ -182,37 +184,34 @@ func TestEchoHidingLeavesTheFrameUnchanged(t *testing.T) {
 	})
 
 	t.Run("an answer, a chunk, then the answer's own ending", func(t *testing.T) {
-		m, _ := questionCard(t)
+		m, stub := questionCard(t)
 		m, _ = press(m, runeKey('1'))
 		m, _ = press(m, runeKey('1'))
 		m, _ = press(m, enter())
-		if len(m.askEchoes) != 1 {
-			t.Fatalf("fixture: the answer is not awaiting its echo: %v", m.askEchoes)
+		if m.cardOpen() || len(stub.Calls()) != 1 {
+			t.Fatalf("fixture: the answer was not taken: card %v, calls %+v", m.cardOpen(), stub.Calls())
 		}
-		cause := m.askEchoes[0]
+		end := awaitStubEvent(t, stub, agent.EventAsk)
 		m = feed(t, m, agent.Event{Type: agent.EventText, Text: "carrying on"})
-		want := []shownRow{
-			{kind: "note", text: "? Pick one → A", local: true},
-			{kind: "note", text: "? Pick any → X", local: true},
-			{kind: "assistant", text: "carrying on"},
-		}
-		if got := shownRows(m.main); !slices.Equal(got, want) {
-			t.Fatalf("before the echo the rows are %v, want %v", got, want)
+		before := []shownRow{{kind: "assistant", text: "carrying on"}}
+		if got := shownRows(m.main); !slices.Equal(got, before) {
+			t.Fatalf("before the ending the rows are %v, want %v: the answer wrote a row of its own", got, before)
 		}
 		frame := slices.Clone(m.main.transcriptPlain)
 
-		m = feed(t, m, agent.Event{Type: agent.EventAsk, Cause: cause, Ask: &agent.AskUpdate{
-			ID: "ask-1", Kind: agent.AskQuestion, Outcome: agent.AskAnswered,
-			Answers: map[string][]string{"q1": {"opt-a"}, "q2": {"opt-x"}},
-		}})
+		m = feed(t, m, end)
+		want := append(slices.Clone(before),
+			shownRow{kind: "note", text: "? Pick one → A"},
+			shownRow{kind: "note", text: "? Pick any → X"},
+		)
 		if got := shownRows(m.main); !slices.Equal(got, want) {
-			t.Fatalf("the ending echo changed the rows to %v, want %v", got, want)
+			t.Fatalf("after the ending the rows are %v, want %v", got, want)
 		}
-		if got := m.main.transcriptPlain; !slices.Equal(got, frame) {
-			t.Fatalf("the ending echo changed the frame:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(frame, "\n"))
+		if got := m.main.transcriptPlain; len(got) < len(frame) || !slices.Equal(got[:len(frame)], frame) {
+			t.Fatalf("the ending moved the rows above it:\n%s\nwant a frame starting:\n%s", strings.Join(got, "\n"), strings.Join(frame, "\n"))
 		}
-		if view := plainView(m); !inOrder(view, "? Pick one → A", "? Pick any → X", "carrying on") {
-			t.Fatalf("the frame does not show the three rows in the order they were written:\n%s", view)
+		if view := plainView(m); !inOrder(view, "carrying on", "? Pick one → A", "? Pick any → X") {
+			t.Fatalf("the frame does not show the three rows in the order the log put them:\n%s", view)
 		}
 	})
 }
@@ -292,6 +291,14 @@ func TestClientLocalRowsLiveInThePane(t *testing.T) {
 	slash := func(line string) func(*testing.T, Model) Model {
 		return func(t *testing.T, m Model) Model { return runSlash(t, m, line) }
 	}
+	// answered presses the keys that answer the card, then delivers the ending
+	// the answer caused, which is what draws its row (plan 032 C4).
+	answered := func(ks ...tea.KeyMsg) func(*testing.T, Model) Model {
+		return func(t *testing.T, m Model) Model {
+			m = keys(ks...)(t, m)
+			return feed(t, m, awaitStubEvent(t, stubOf(t, m), agent.EventAsk))
+		}
+	}
 	withQuestion := func(t *testing.T) Model { m, _ := questionCard(t); return m }
 	withPlan := func(t *testing.T) Model { m, _ := planCard(t); return m }
 	withChild := func(t *testing.T) Model {
@@ -330,15 +337,6 @@ func TestClientLocalRowsLiveInThePane(t *testing.T) {
 		{name: "the optimistic user row", local: true, act: func(t *testing.T, m Model) Model {
 			return startTurn(t, m, "typed here")
 		}},
-		{name: "an answer's notes", local: true, build: withQuestion,
-			act: keys(runeKey('1'), runeKey('1'), enter())},
-		{name: "a skip's note", local: true, build: withQuestion, act: keys(tea.KeyMsg{Type: tea.KeyEsc})},
-		{name: "a plan's verb", local: true, build: withPlan, act: keys(runeKey('a'))},
-		{name: "another client's answer to its card", local: true, build: withQuestion,
-			act: events(agent.Event{Type: agent.EventAsk, Ask: &agent.AskUpdate{
-				ID: "ask-1", Kind: agent.AskQuestion, Outcome: agent.AskAnswered,
-				Answers: map[string][]string{"q1": {"opt-b"}},
-			}})},
 		{name: "a theme note", local: true, act: func(t *testing.T, m Model) Model {
 			return runSlash(t, m, "/theme "+otherTheme(t, m))
 		}},
@@ -364,7 +362,17 @@ func TestClientLocalRowsLiveInThePane(t *testing.T) {
 		{name: "a receipt-mode sub-agent's rebuilt rows", local: true, build: withChild, on: "task-1",
 			act: func(t *testing.T, m Model) Model { return openView(t, m) }},
 
-		// §2.4's second list: what an event drew.
+		// §2.4's second list: what an event drew. An ask's outcome notes moved
+		// here from the first list (plan 032 C4): the ending draws them, for
+		// this client's own answer and another's alike.
+		{name: "an answer's notes", build: withQuestion, act: answered(runeKey('1'), runeKey('1'), enter())},
+		{name: "a skip's note", build: withQuestion, act: answered(tea.KeyMsg{Type: tea.KeyEsc})},
+		{name: "a plan's verb", build: withPlan, act: answered(runeKey('a'))},
+		{name: "another client's answer to its card", build: withQuestion,
+			act: events(agent.Event{Type: agent.EventAsk, Ask: &agent.AskUpdate{
+				ID: "ask-1", Kind: agent.AskQuestion, Outcome: agent.AskAnswered,
+				Answers: map[string][]string{"q1": {"opt-b"}},
+			}})},
 		{name: "a reply", act: events(agent.Event{Type: agent.EventText, Text: "a reply"})},
 		{name: "a thought", act: events(agent.Event{Type: agent.EventThought, Text: "weighing"})},
 		{name: "a tool", act: events(agent.Event{Type: agent.EventTool, Tool: &agent.ToolEvent{

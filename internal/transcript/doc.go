@@ -61,7 +61,7 @@
 // # What is not here
 //
 // Rows a client writes for a message of its own (a usage error, the
-// optimistic user row at Enter, an ask's answer notes), how anything renders,
+// optimistic user row at Enter, a setting it changed), how anything renders,
 // and the basename-ambiguity map a tool row's label is drawn with (pathDirs)
 // are the client's. The trim note is drawn by the client from Trimmed.
 package transcript

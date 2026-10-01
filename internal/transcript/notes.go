@@ -126,6 +126,163 @@ func noteForForeignTurn(reason string) string {
 	return NoteForeignTurn
 }
 
+// The outcome notes an answered ask's ending draws (foldAsk, plan 032 §3.2
+// C4), with the TUI's wording as its cards.go wrote them when they were each
+// client's own rows: `? <prompt> → <labels>` per question answered, `? <title>
+// → skipped` for a skipped question, and `plan <name> → accepted|rejected`.
+// noteOutcome words each from the ask as a snapshot carries it (capAsk) and
+// bounds it at outcomeNoteCap (capNote).
+
+// outcomeNoteCap bounds an outcome note's whole text, in bytes (capNote). The
+// note is the newest entry of the main transcript when it is drawn, and a
+// snapshot must carry its newest entry beside the mandatory sections in a
+// budget of DefaultSnapshotBytes (4 MiB) by default (ErrSnapshotTooLarge):
+// 4 KiB is a thousandth of that, and some fifty lines of an 80-column
+// terminal for what is a one-line row. Without it, an answer that picks one
+// long label many times — the agent's validator checks that each pick is
+// offered, not that it is new — makes a note that many times the label's size
+// (plan 032 C4 review r3, finding 2). The count of notes needs no cap of its
+// own: an ending draws at most one per question of its opening, so their
+// number is bounded by the opening's own size — an event the fold already
+// holds whole as the open ask — each costs at most this cap to build, Bounds
+// trims their retention like every entry's after each append, and a snapshot
+// needs only the newest of them.
+const outcomeNoteCap = 4 << 10
+
+// capNote is an outcome note bounded at outcomeNoteCap bytes: s itself when it
+// fits, else its head cut back to a rune boundary (headOf) and closed by the
+// ellipsis, outcomeNoteCap bytes at most with it. It reads no byte of s past
+// outcomeNoteCap, so a note built only until it is longer than that (answerNote)
+// caps to exactly what the whole note would.
+func capNote(s string) string {
+	if len(s) <= outcomeNoteCap {
+		return s
+	}
+	h, _ := headOf(s, outcomeNoteCap-len(ellipsis))
+	return h + ellipsis
+}
+
+// answerNotes is one note per question of q, naming what answers picked for
+// it (answerNote). A question that asks nothing draws none.
+func answerNotes(q *agent.QuestionEvent, answers map[string][]string) []string {
+	out := make([]string, 0, len(q.Questions))
+	for _, qq := range q.Questions {
+		out = append(out, answerNote(qq, answers[qq.ID]))
+	}
+	return out
+}
+
+// answerNote is one question's note: `? <prompt> → ` and what each of ids
+// picks names (pickName), in their order, comma-separated. A pick that names
+// nothing is left out, and nothing named reads "nothing".
+//
+// It stops naming once the note is longer than outcomeNoteCap: capNote keeps
+// none of what would follow, and one long label picked over and over cannot
+// first build a note an answer's length times its size.
+func answerNote(qq agent.Question, ids []string) string {
+	var b strings.Builder
+	b.WriteString("? ")
+	b.WriteString(sanitizeLine(qq.Prompt))
+	b.WriteString(" → ")
+	named := 0
+	for _, id := range ids {
+		if b.Len() > outcomeNoteCap {
+			break
+		}
+		name, ok := pickName(qq.Options, id)
+		if !ok {
+			continue
+		}
+		if named > 0 {
+			b.WriteString(", ")
+		}
+		b.WriteString(name)
+		named++
+	}
+	if named == 0 {
+		b.WriteString("nothing")
+	}
+	return b.String()
+}
+
+// pickName is what a pick of id names among opts, which are a question's
+// options as a snapshot carries them (noteOutcome): id is matched after the
+// cap a snapshot puts on every option id (capper.str, as capQuestion applies
+// it), and
+//
+//   - one option whose capped id it is: its label, folded onto one line — an
+//     id cut at ItemCap still finds the option it picked, since the agent's
+//     validator matched the whole id against the offered ones;
+//   - none: nothing (false) — an id the question does not offer;
+//   - two or more: the ellipsis — the pick is ambiguous, since ids that share
+//     their first ItemCap bytes cap to one, and the capped form cannot tell
+//     which of them was picked (plan 032 C4 review r4, finding 2). It names
+//     none of them: the first would word the wrong option's label for a
+//     pick of the second, while the provider got the second.
+//
+// Every rule reads only the capped form, so the engine, every live client and
+// every restored one name a pick alike.
+func pickName(opts []agent.Option, id string) (string, bool) {
+	var c capper
+	id = c.str(id)
+	label, n := "", 0
+	for _, o := range opts {
+		if o.ID != id {
+			continue
+		}
+		if n++; n > 1 {
+			return ellipsis, true
+		}
+		label = o.Label
+	}
+	if n == 0 {
+		return "", false
+	}
+	return sanitizeLine(label), true
+}
+
+// skipNote is what a skipped question draws.
+func skipNote(q *agent.QuestionEvent) string {
+	return "? " + questionTitle(q) + " → skipped"
+}
+
+// questionTitle names a question request: its title, else its first
+// question's prompt, else "question".
+func questionTitle(q *agent.QuestionEvent) string {
+	if q == nil {
+		return ""
+	}
+	if t := sanitizeLine(q.Title); t != "" {
+		return t
+	}
+	if len(q.Questions) > 0 {
+		return sanitizeLine(q.Questions[0].Prompt)
+	}
+	return "question"
+}
+
+// planNote is what an answered plan draws.
+func planNote(p *agent.PlanEvent, accepted bool) string {
+	verb := "rejected"
+	if accepted {
+		verb = "accepted"
+	}
+	return "plan " + PlanName(p) + " → " + verb
+}
+
+// PlanName is a plan as craze names it anywhere it is drawn — its outcome
+// note here, and the TUI's plan card and plan entry: its name folded onto one
+// line, else "plan"; "" for none.
+func PlanName(p *agent.PlanEvent) string {
+	if p == nil {
+		return ""
+	}
+	if n := sanitizeLine(p.Name); n != "" {
+		return n
+	}
+	return "plan"
+}
+
 // ellipsis leads a streamed entry's text once the stream cap dropped its
 // beginning (capText).
 const ellipsis = "…"

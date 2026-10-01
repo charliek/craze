@@ -6,8 +6,8 @@
     │  alt+enter, ctrl+j newline (shift+enter where the terminal sends it) │    
     │  ctrl+v            paste                                             │    
     │  esc               cancel the turn, or close what is open            │    
-    │  ctrl+c            cancel the turn and everything queued, then quit  │    
-    │  ctrl+d            quit                                              │    
+    │  ctrl+c            cancel the turn and the queue; again ends it      │    
+    │  ctrl+d            end this session                                  │    
     │queued messages                                                       │    
     │  ↑                 select a queued message                           │    
     │  enter on a row    edit it in place                                  │    

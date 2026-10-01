@@ -231,8 +231,8 @@ off.
 | `Ctrl+L` | the strong send: on Grok, add the draft to the running turn without cancelling it; on Cursor, cancel the running turn and send (it asks first). On an idle session it is a plain send |
 | `Alt+Enter`, `Ctrl+J` | newline (see below) |
 | `Esc` | answer the card on top; close a dialog (`/help` included); leave the sub-agent view; kill a running `!` command; clear a `!` draft; hide the slash menu or the [`@` file popup](#file-mentions) for the token under the cursor — a second `Esc` then cancels the running turn; otherwise cancel the running turn (the transcript says `cancelled`). An Esc pressed immediately after Enter cancels that turn; craze never writes the cancel ahead of the prompt |
-| `Ctrl+C` | kill a running `!` command, and nothing else — it is the only way to stop one while a card has the keyboard. With none running: cancel the running turn **and everything queued behind it** — the queue, a confirm on screen, a send-now waiting to fire; a second press within one second quits; quits outright when idle or after an error. Inside the sub-agent view it still cancels the **main** turn, and the view stays open |
-| `Ctrl+D` | quit, always |
+| `Ctrl+C` | kill a running `!` command, and nothing else — it is the only way to stop one while a card has the keyboard. With none running: cancel the running turn **and everything queued behind it** — the queue, a confirm on screen, a send-now waiting to fire; a second press within one second ends the session; it ends it outright when idle or after an error. Inside the sub-agent view it still cancels the **main** turn, and the view stays open |
+| `Ctrl+D` | ends the session, always |
 | `Shift+Tab` | cycle the ACP mode (agent / plan / ask); inside the sub-agent view, switch to the previous sub-agent instead |
 | `Ctrl+T`, `/tasks` | tasks panel: compact → expanded → hidden |
 | `Ctrl+G`, `/theme` | theme picker |
@@ -245,6 +245,7 @@ off.
 | `Backspace` / `Delete` on a queued row | cancel it |
 | `Ctrl+L` on a queued row | send it now instead of the running turn (it asks first) |
 | `←` on an empty composer, `/sessions` | open the [session list](#session-list) — only when sessions run in detached hosts (the default); under `CRAZE_DETACH=0` the key reaches the composer as it always has |
+| `←` with a [card](#cards) up | open the session list with the card left unanswered: the ask stays open, and the card is there again when you come back. A card lets this key through only where there is a list; `Alt+←` stays the card's |
 | `Esc` or `←` inside the sub-agent view | return to the main transcript; entering or leaving cancels nothing |
 | `Tab` inside the sub-agent view | switch to the next sub-agent |
 | `PgUp` / `PgDn` | scroll the transcript, or page the `/help` box; page the slash menu instead when it is open — the menu takes priority over both |
@@ -252,7 +253,7 @@ off.
 | `Tab` | with the slash menu open, accept the highlighted row (see [Slash commands](#slash-commands)); with the [`@` file popup](#file-mentions) open, open the highlighted folder or pick the highlighted file; elsewhere a no-op |
 
 `/help` lists the same keys plus every slash command — see
-[Help dialog](#help-dialog). `/exit` quits; there are no bare `q` or `?`
+[Help dialog](#help-dialog). `/exit` ends the session; there are no bare `q` or `?`
 bindings, so a message that starts with either is just a message.
 
 !!! note
@@ -598,18 +599,21 @@ Keys inside the view: `Esc` and `←` return; `↑`/`↓` scroll it a line,
 unreachable here); `Ctrl+O` toggles detail and `Ctrl+Y` copies from it, both
 as outside; `Ctrl+C` still cancels the main turn and the view stays open.
 Typing, pasting and the slash menu are inert inside the view, and a card
-still lands on top and owns the keyboard until it is answered.
+still lands on top and owns the keyboard until it is answered — `←` aside,
+which opens the [session list](#session-list) and comes back to the view
+and its card (see [Cards](#cards)).
 
 ## Session list
 
-`←` on an empty composer, or `/sessions`, replaces the screen with every
-session of yours running on this machine, whatever its directory, and the
-saved ones that are not running. It exists only when sessions run in detached
-hosts (the default); under `CRAZE_DETACH=0`, `detach = false` or with the
-control socket off there is no list, no `/sessions` and no `←` binding (and
-`/help` has no line for it). The session you came from stays attached behind
-the list — its turn keeps running, a card it raises waits for you — and the
-cursor starts on its row. If it ends while the list is up (another client's
+`←` on an empty composer (or with a [card](#cards) up), or `/sessions`,
+replaces the screen with every session of yours running on this machine,
+whatever its directory, and the saved ones that are not running. It exists
+only when sessions run in detached hosts (the default); under
+`CRAZE_DETACH=0`, `detach = false` or with the control socket off there is no
+list, no `/sessions` and no `←` binding (and `/help` has no line for it). The
+session you came from stays attached behind the list — its turn keeps running,
+a card it raises (or the one you left it with) waits for you — and the cursor
+starts on its row. If it ends while the list is up (another client's
 `/exit`, a close from the list, the idle timeout), craze stays on the list and
 its row stays, `· ended`, for as long as the list is up, even once its host
 has gone; a later run of the same session is a row of its own.
@@ -1065,6 +1069,21 @@ the mouse while it is up: `Ctrl+T`, `Ctrl+G`, `Ctrl+O`, the arrows and the wheel
 all do nothing until it is answered. `Ctrl+C` and `Ctrl+D` still work. Cards
 queue, and only the one on top is drawn.
 
+`←` is the one exception among those keys (`Alt+←` is not), and only where
+there is a [session list](#session-list): it opens the list and leaves the card
+unanswered. The ask stays open on the session's host, and the list shows the
+session under **needs you**. `Esc` or `←` from the list comes back to the same
+card — the question you were on and what you had picked — with your draft
+still under it, and inside the [sub-agent view](#sub-agent-view) if that is
+where you were. Opening the session again later, from another one, shows the
+card again (a question card starts again from its first question).
+
+The [tab title](#tab-title) and a herdr pane or roost tab report the session
+on screen. While the list is up over the session they still report its card
+(the tab's `⚠`, herdr's `blocked`, roost's `needs input`); once you open
+another session they report that one instead, and the ask you left open is
+reported again only when you come back to it.
+
 | Card | Keys |
 |---|---|
 | permission line — `permission <tool>  [a]llow once  [A]lways  [n] reject` | `a` allow once, **`A` allow always**, `n` reject. Only the options the request actually offered are drawn and bound. `Esc` cancels the turn. |
@@ -1078,6 +1097,27 @@ line under the label.
 agent is told you declined to answer and the turn carries on. On a plan or a
 permission it cancels the turn, because cancelling is the only way those two
 reach the agent as anything other than an accept or a reject.
+
+An answered question or plan leaves a row in the transcript saying how it was
+answered:
+
+```text
+? Pick one → B
+? Pick any → X, Z
+? Question → skipped
+plan Ship the widget → accepted
+```
+
+A question draws one row per question it asked, naming the options picked
+(`nothing` when none was); a skipped question one `→ skipped` row under its
+title; a plan its name and `accepted` or `rejected`. The rows are part of the
+session's own transcript, not this terminal's: every client attached to the
+session draws them, whichever one answered — this terminal, another, or a
+`craze attach` — and they are still there when the session is opened again from
+the [list](#opening-a-session-in-place) or with `craze attach`. A permission's
+answer, a cancel, a turn ending under a card, and a request answered without a
+card (one the provider never shows, or one craze answered headlessly) leave no
+row.
 
 ## Slash commands
 
@@ -1109,7 +1149,7 @@ skills carry no such restriction; they complete anywhere in the draft.
 | `/ask` | Set ask mode |
 | `/agent` | Set agent mode |
 | `/sessions` | The [session list](#session-list) — listed only when sessions run in detached hosts |
-| `/exit` | Quit craze |
+| `/exit` | End this session |
 
 Matches are prefix hits first, then substring hits, each group kept in the
 catalog's own order, case-insensitive — no fuzzy matching. The band shows up
