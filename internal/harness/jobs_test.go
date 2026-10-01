@@ -16,6 +16,7 @@ import (
 
 	"charm.land/fantasy"
 	"github.com/charliek/craze/internal/harness/tool"
+	"github.com/charliek/craze/internal/harness/tool/opencode"
 )
 
 // Background jobs (plan 033 §3.7–§3.8, §7 A11–A14). Most tests here drive a
@@ -228,7 +229,7 @@ func TestJobResultDelivered(t *testing.T) {
 		}
 		own := b.own.list()
 		st, fin := of[JobStarted](own), of[JobFinished](own)
-		if len(st) != 1 || st[0] != (JobStarted{ID: "t9.1.1", CallID: "t9.1.1", Command: "npm test", Workdir: "/work", Limit: time.Hour, At: testNow()}) {
+		if len(st) != 1 || st[0] != (JobStarted{ID: "t9.1.1", CallID: "t9.1.1", Command: "npm test", Workdir: "/work", Limit: time.Hour, At: testNow(), Began: jobBegan}) {
 			t.Fatalf("JobStarted = %+v", st)
 		}
 		if len(fin) != 1 || fin[0] != (JobFinished{ID: "t9.1.1", Status: tool.JobExited, Error: "exit code 1", ExitCode: 1,
@@ -1162,7 +1163,7 @@ func TestJobLifetimeEndToEnd(t *testing.T) {
 		}
 		evs := ev.list()
 		r := callResult(t, evs, "t2.1.1")
-		if id, ok := tool.ParseJobMarker(r.Text); r.IsError || !ok || id != "t2.1.1" || !strings.HasPrefix(r.Text, "before\n\n\n<shell_metadata>\nThe command did not finish within its timeout of 300 ms. It was not stopped: it was moved to the background as job `t2.1.1`") ||
+		if id, ok := tool.ParseJobMarker(r.Text); r.IsError || !ok || id != "t2.1.1" || !strings.HasPrefix(r.Text, "before\n\n<shell_metadata>\nThe command did not finish within its timeout of 300 ms. It was not stopped: it was moved to the background as job `t2.1.1`") ||
 			!strings.Contains(r.Text, "all of it is saved to: "+spill(b, "t2.1.1")+". ") {
 			t.Fatalf("the promotion receipt = %q", r.Text)
 		}
@@ -1350,4 +1351,191 @@ func TestJobListedInTheCompactionState(t *testing.T) {
 	if got := section(); !strings.HasSuffix(got, none) {
 		t.Fatalf("with every job ended the section ends %q", got)
 	}
+}
+
+// promotingBash stands in for the bash tool: its every call is a command that
+// reached its timeout with "before\n" printed and was promoted — a job whose
+// body the test drives, handed over as opencode's promote hands one (Seen
+// the bytes its receipt showed), and the receipt returned.
+type promotingBash struct{ bodies chan *fakeBody }
+
+func (promotingBash) Spec() tool.Spec {
+	return tool.Spec{ID: tool.BashTool, Description: "Runs a command, which reaches its timeout and is promoted.",
+		Parameters: map[string]any{"command": map[string]any{"type": "string"}}, Required: []string{"command"},
+		Kind: tool.KindExecute, Truncate: tool.None}
+}
+
+func (p promotingBash) Prepare(_ tool.Env, c tool.Call) (tool.Prepared, error) {
+	return promotingCall{bodies: p.bodies, id: c.ID}, nil
+}
+
+type promotingCall struct {
+	bodies chan *fakeBody
+	id     string
+}
+
+func (c promotingCall) Request() tool.Request { return tool.Request{Title: "promoted"} }
+
+func (c promotingCall) Run(_ context.Context, env tool.Env) tool.Result {
+	body := &fakeBody{closing: env.Closing, end: make(chan tool.JobEnd, 1), waiting: make(chan struct{}), out: "before\n"}
+	slot, err := env.Jobs.Reserve(c.id)
+	if err != nil {
+		return tool.Result{Text: err.Error(), IsError: true, Class: tool.ClassToolError}
+	}
+	slot.Start(tool.JobSpec{ID: c.id, Command: "make", Workdir: env.Workspace, Limit: time.Hour, Promoted: true,
+		Began: jobBegan, Seen: int64(len(body.out))}, body)
+	c.bodies <- body
+	return tool.Result{Text: "before\n\n<shell_metadata>\nMoved to the background.\n</shell_metadata>\n" + tool.JobMarker(c.id)}
+}
+
+// promotingProfile is opencode's profile with its bash replaced by
+// promotingBash.
+func promotingProfile(bodies chan *fakeBody) func() (*tool.Registry, error) {
+	return func() (*tool.Registry, error) {
+		p, err := opencode.Profile()
+		if err != nil {
+			return nil, err
+		}
+		for i, tl := range p.Tools {
+			if tl.Spec().ID == tool.BashTool {
+				p.Tools[i] = promotingBash{bodies: bodies}
+			}
+		}
+		var reg tool.Registry
+		return &reg, reg.Register(p)
+	}
+}
+
+// TestPromotionReceiptOwnsItsRead (plan 033 C10r, review r7 finding 3): the
+// output a promotion's receipt showed is a read the bash call made, as a
+// bash_output's is. The append that writes the receipt commits it — the next
+// bash_output shows only what came after — and one that fails gives it back:
+// the receipt is not in the transcript, so the model was never shown that
+// output for good, and the next bash_output shows it. Before the fix the
+// cursor started past the receipt's output whatever became of the receipt,
+// and the failed case read "No new output". The written receipt is the
+// control.
+func TestPromotionReceiptOwnsItsRead(t *testing.T) {
+	const after = "Job `t2.1.1` is still running (4m12s)."
+	for _, tc := range []struct {
+		name     string
+		fail     bool
+		read     int64  // the committed cursor after the promotion's turn
+		nextRead string // the next bash_output's answer
+	}{
+		{"the receipt written", false, int64(len("before\n")), after + jobNoNewOutput},
+		{"the receipt's append failed", true, 0, after + jobNewOutput + "before\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w := &toggledWrites{}
+			bodies := make(chan *fakeBody, 1)
+			b := openJobs(t, func(o *Options) {
+				o.storeOpenFile = w.open
+				o.tools.profiles = promotingProfile(bodies)
+			})
+			a := b.routers["test/a"]
+			promote := callStep(callParts("c1", "bash", input(t, map[string]any{"command": "make"})))
+			if tc.fail {
+				a.route("go", func(ctx context.Context, yield func(fantasy.StreamPart) bool) {
+					w.fail.Store(true) // the step's append, once its stream ends, fails
+					promote(ctx, yield)
+				})
+				if _, err := b.s.Run(context.Background(), "next", nil); err == nil {
+					t.Fatal("the turn whose append failed did not fail")
+				}
+				w.fail.Store(false)
+			} else {
+				a.route("go", promote, answerWith("moved on"))
+				if _, err := b.s.Run(context.Background(), "next", nil); err != nil {
+					t.Fatal(err)
+				}
+			}
+			await(t, bodies, "the promoted job")
+			// Its row counts from the command's start, the foreground phase
+			// included (V3 F4), not from the promotion.
+			if st := of[JobStarted](b.own.list()); len(st) != 1 || !st[0].Began.Equal(jobBegan) || !st[0].Promoted {
+				t.Fatalf("JobStarted = %+v; want the command's start, %v", st, jobBegan)
+			}
+			if _, j := jobResultOf(t, b.s, "t2.1.1"); j.read != tc.read || len(j.reads) != 0 {
+				t.Fatalf("after the promotion's turn the cursor is %d with %d reads open; want %d, none", j.read, len(j.reads), tc.read)
+			}
+			var ev events
+			a.route("go", callStep(bashOutput(t, "o", "t2.1.1", 0)), answerWith("ok"))
+			if _, err := b.s.Run(context.Background(), "again", ev.sink); err != nil {
+				t.Fatal(err)
+			}
+			if got := of[ToolFinished](ev.list())[0].Result.Text; got != tc.nextRead {
+				t.Fatalf("the next read = %q; want %q", got, tc.nextRead)
+			}
+		})
+	}
+}
+
+// TestBashStopNeverQueuesBehindWaits (plan 033 C10r, review r7 finding 5): a
+// step of five bash_output calls each waiting up to 600 s on a running job of
+// its own — five ids, so the doom-loop guard sees no repeat — and a bash_stop
+// of a sixth job, in either order. Fantasy runs a step's Parallel calls in
+// five slots (agent.go:1671), so the five waits would hold them all and the
+// stop would wait for one to end. Because the step stops a job, its waits are
+// snapshots that say so: the stop's job ends at once, its block is the stop's
+// answer, and the step — the turn — completes within the test's bound, far
+// short of 600 s; nothing in it was observed. Before the fix it hung there.
+// TestJobFinishesDuringAnOutputWait is the control: a step with no stop waits.
+func TestBashStopNeverQueuesBehindWaits(t *testing.T) {
+	for _, stopFirst := range []bool{false, true} {
+		t.Run(fmt.Sprintf("the stop first %v", stopFirst), func(t *testing.T) {
+			b := openJobs(t)
+			for i := 1; i <= 6; i++ {
+				fakeJob(t, b.s, fmt.Sprintf("t9.1.%d", i), "serve")
+			}
+			var parts [][]fantasy.StreamPart
+			for i := 1; i <= 5; i++ {
+				parts = append(parts, bashOutput(t, fmt.Sprintf("o%d", i), fmt.Sprintf("t9.1.%d", i), 600000))
+			}
+			stop := bashStop(t, "s", "t9.1.6")
+			stopID, firstOutput := "t2.1.6", 1
+			if stopFirst {
+				parts, stopID, firstOutput = append([][]fantasy.StreamPart{stop}, parts...), "t2.1.1", 2
+			} else {
+				parts = append(parts, stop)
+			}
+			b.routers["test/a"].route("go", callStep(parts...), answerWith("done"))
+			var ev events
+			got := await(t, start(context.Background(), b.s, "next", ev.sink), "the step with five waits and a stop")
+			if got.err != nil || got.res.StopReason != StopEndTurn {
+				t.Fatalf("Run = %+v, %v", got.res, got.err)
+			}
+			evs := ev.list()
+			if r, want := callResult(t, evs, stopID), jobBlockOf("t9.1.6", `status="stopped" by="you" duration="4m12s"`, "serve", ""); r.Text != want {
+				t.Fatalf("bash_stop = %q\nwant %q", r.Text, want)
+			}
+			for i := range 5 {
+				id := fmt.Sprintf("t2.1.%d", firstOutput+i)
+				want := fmt.Sprintf(jobStillRunning, fmt.Sprintf("t9.1.%d", i+1), "4m12s") + stopStepNoWait + jobNoNewOutput
+				if r := callResult(t, evs, id); r.Text != want || r.Observed || r.IsError {
+					t.Fatalf("bash_output %s = %+v\nwant %q, not observed", id, r, want)
+				}
+			}
+		})
+	}
+}
+
+// TestAgentOutputDoesNotWaitInAStopStep: agent_output, whose waits share
+// Fantasy's slots with bash_stop too, does the same — in a step that stops a
+// job it answers at once, not observed, and says why; in another step of the
+// same turn it waits (the control: its wait runs out, observed).
+func TestAgentOutputDoesNotWaitInAStopStep(t *testing.T) {
+	b := openBG(t)
+	_, ids := b.spawn(t, "child one")
+	b.s.subs.turn.Store(&turnLink{number: 9})
+	defer b.s.subs.turn.Store(nil)
+	b.s.subs.stopAnnounced(9, 1)
+	r := b.s.subs.output(context.Background(), tool.OutputCall{CallID: "t9.1.2", ID: ids[0], Wait: tool.AgentOutputMaxWait})
+	if want := fmt.Sprintf(outputStillRunning, ids[0]) + stopStepNoWait; r.Text != want || r.Observed {
+		t.Fatalf("agent_output in a stop step = %+v; want %q at once, not observed", r, want)
+	}
+	if r := b.s.subs.output(context.Background(), tool.OutputCall{CallID: "t9.2.1", ID: ids[0], Wait: time.Millisecond}); r.Text != fmt.Sprintf(outputStillRunning, ids[0]) || !r.Observed {
+		t.Fatalf("control: agent_output in another step = %+v; want its wait run out, observed", r)
+	}
+	b.s.subs.restoreTurn(9)
 }

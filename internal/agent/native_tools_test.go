@@ -626,3 +626,37 @@ func TestNativeSnapshotHasNoToolsBeforeACall(t *testing.T) {
 		t.Fatalf("a turn that called nothing published %+v", evs)
 	}
 }
+
+// TestNativeBashRowWithoutAnExitCode (plan 033 C10r, V3 F3): a bash call whose
+// command has no exit code — promoted to a background job and still running,
+// or stopped at its timeout — shows none on its row, rather than "exit -1";
+// its output is kept, and its status says whether the call failed. The
+// control is a command that exited 3, whose row keeps its code.
+func TestNativeBashRowWithoutAnExitCode(t *testing.T) {
+	s := newNative(Options{}, nil)
+	closeAtCleanup(t, s)
+	call := func(id string, res tool.Result) {
+		s.sink(harness.ToolStarted{ID: id, Step: 1, Tool: "bash", Kind: tool.KindExecute})
+		s.sink(harness.ToolCalled{ID: id, CallID: "c" + id, Request: harness.ToolRequest{
+			Tool: "bash", Kind: tool.KindExecute, Title: "make", Input: `{"command":"make"}`}})
+		s.sink(harness.ToolFinished{ID: id, Result: res})
+	}
+	call("t1.1.1", tool.Result{Text: "tick 4\n\n<shell_metadata>\n…\n</shell_metadata>\n" + tool.JobMarker("t1.1.1"),
+		Output: &tool.ExecOutput{ExitCode: -1, Output: "tick 4\n"}})
+	call("t1.1.2", tool.Result{Text: "tick\n", IsError: true, Class: tool.ClassTimeout,
+		Output: &tool.ExecOutput{ExitCode: -1, Output: "tick\n"}})
+	call("t1.1.3", tool.Result{Text: "boom\n", Output: &tool.ExecOutput{ExitCode: 3, Output: "boom\n"}})
+	rows := s.Snapshot().Tools
+	for _, tc := range []struct {
+		id     string
+		status string
+	}{{"t1.1.1", toolCompleted}, {"t1.1.2", toolFailed}} {
+		r := rowByID(t, rows, tc.id)
+		if r.Status != tc.status || r.Output == nil || r.Output.ExitCode != nil || r.Output.Stdout == "" {
+			t.Fatalf("row %s = status %q output %+v; want %q, its output and no exit code", tc.id, r.Status, r.Output, tc.status)
+		}
+	}
+	if r := rowByID(t, rows, "t1.1.3"); r.Output == nil || r.Output.ExitCode == nil || *r.Output.ExitCode != 3 {
+		t.Fatalf("control: a command that exited 3 shows %+v", r.Output)
+	}
+}

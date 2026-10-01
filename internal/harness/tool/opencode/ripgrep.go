@@ -173,7 +173,7 @@ func (r *ripgrep) run(ctx context.Context, env tool.Env, bin, dir string, args [
 		close(output)
 	}()
 
-	why, reaped := g.supervise(runCtx, env.Closing, r.timeout, output, nil)
+	why, reaped := g.supervise(runCtx, env.Closing, r.timeout, nil, output, nil)
 	// As bash does: read what is already in the pipes, then close them, since
 	// something that left the group could hold them open for ever.
 	if !tool.SessionClosing(ctx, env.Closing) {

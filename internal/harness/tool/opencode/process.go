@@ -239,14 +239,21 @@ func (g *group) terminate() {
 // it would have: its own timeout (the job's limit), its context's cancel (a
 // stop) or the session's close, and D-38's kill of whatever is left in the
 // group once the leader has exited.
-func (g *group) supervise(ctx context.Context, closing <-chan struct{}, timeout time.Duration, output <-chan struct{}, promote *promotion) (why ending, reaped bool) {
+//
+// fire, a test seam, stands in for the timeout's timer: the timeout passes
+// when it fires, whatever timeout says (bashCall's ops.expire). nil in
+// production.
+func (g *group) supervise(ctx context.Context, closing <-chan struct{}, timeout time.Duration, fire <-chan time.Time, output <-chan struct{}, promote *promotion) (why ending, reaped bool) {
 	expiry := time.NewTimer(timeout + timeoutSlack)
 	defer expiry.Stop()
+	if fire == nil {
+		fire = expiry.C
+	}
 	var (
 		exited = g.exited
 		done   = ctx.Done()
 		closed = closing
-		expire = expiry.C
+		expire = fire
 		grace  <-chan time.Time // SIGTERM sent: SIGKILL when it fires
 		limit  <-chan time.Time // the shutdown's deadline: stop waiting, whatever the state, when it fires
 		end    time.Time        // when limit fires

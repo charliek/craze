@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/charliek/craze/internal/harness/redact"
 )
 
 // Background jobs (plan 033 §3.7–§3.8, owner decisions 2 and 3). An
@@ -72,6 +74,55 @@ const (
 	JobFailed   = "failed"
 )
 
+// JobUnknown is the status a resumed session's notice gives a job its last
+// incarnation started and never delivered (plan 033 C10r, V3 F1): the session
+// closed before the job's result came through, so whether the command had
+// finished by then, and how, is not known — it may have exited, its result
+// waiting (P14's suspended results among them), or been killed by the close.
+// It is no ending a running job reports.
+const JobUnknown = "unknown"
+
+// The words of the receipts (§3.7) around the spill file's path, which the
+// bash tool writes and a resumed session reads the path back from
+// (JobSpillPath), to name the file in its notice. A start receipt begins with
+// JobStartedHead and names the file after JobSavedTo, the path ending its
+// line; a promotion receipt names it in its metadata, after the output so
+// far, after JobSavedTo too, the path followed by JobPromotedSavedEnd.
+// Neither has JobSavedTo when the file could not be opened.
+const (
+	JobStartedHead      = "Started the command in the background as job `"
+	JobSavedTo          = "saved to: "
+	JobPromotedSavedEnd = ". Its result is delivered to you when it finishes"
+)
+
+// JobSpillPath is the spill file a receipt names — a start receipt's, or a
+// promotion receipt's — or "" when it names none. A promotion receipt's path
+// is read from its last <shell_metadata> block only, which follows the
+// command's output: what the command printed cannot name it.
+func JobSpillPath(receipt string) string {
+	if strings.HasPrefix(receipt, JobStartedHead) {
+		_, rest, ok := strings.Cut(receipt, JobSavedTo)
+		if !ok {
+			return ""
+		}
+		path, _, _ := strings.Cut(rest, "\n")
+		return path
+	}
+	i := strings.LastIndex(receipt, "<shell_metadata>\n")
+	if i < 0 {
+		return ""
+	}
+	_, rest, ok := strings.Cut(receipt[i:], JobSavedTo)
+	if !ok {
+		return ""
+	}
+	path, _, ok := strings.Cut(rest, JobPromotedSavedEnd)
+	if !ok || strings.Contains(path, "\n") {
+		return ""
+	}
+	return path
+}
+
 // Who stopped a job, as the delivered result's by attribute says it (§3.7):
 // the model reading the result is "you".
 const (
@@ -109,9 +160,11 @@ type JobSpec struct {
 	// included: what the job's duration counts from.
 	Began time.Time
 	// Seen is how many bytes of output the call's own result covered — a
-	// promotion's shows the output so far — and so where the job's read
-	// cursor starts: bash_output reads what came after it. 0 for a
-	// run_in_background call.
+	// promotion's shows the output so far — and so where the job's reads go
+	// on from once that result is written: the harness counts it a read the
+	// bash call made, committed with the receipt, and forgotten when no
+	// append writes it, as a bash_output read is. 0 for a run_in_background
+	// call.
 	Seen int64
 }
 
@@ -203,6 +256,26 @@ type Jobs interface {
 	// through as it is produced (P19), since the call's own redactor was
 	// fixed when its turn began.
 	Redact(text string) string
+	// Track registers a command's output stream for as long as it runs, so
+	// that its redaction learns every key the session learns meanwhile (plan
+	// 033 C10r, review r7 finding 9): Track widens s to the session's widest
+	// key set at once, and again each time that set grows — a stored key at a
+	// turn's start, a provider's on a model switch, a token as it is minted —
+	// until untrack is called. The bash tool tracks every command of a
+	// session that runs jobs from the moment its output is read (any of them
+	// may become a job: promotion), and untracks it once the stream is done
+	// with; untrack may be called more than once. A command's text decided
+	// before a key was learned stays as it was (redact.Writer.Widen).
+	Track(s KeyedStream) (untrack func())
+}
+
+// KeyedStream is a command's output stream as Jobs.Track holds it: one whose
+// redaction can be widened while it runs. Widen is called from the session's
+// goroutines, concurrently with the stream's own writes, and must take r's
+// keys up between two writes — for every stage of the stream at once — and
+// never write, drop or reorder a byte (opencode's modelStream).
+type KeyedStream interface {
+	Widen(r *redact.Replacer)
 }
 
 // JobOutputCall is one bash_output call as the tool prepared it.

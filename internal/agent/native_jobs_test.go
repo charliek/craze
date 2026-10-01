@@ -484,3 +484,32 @@ func TestNativeJobEndsWithTheSession(t *testing.T) {
 		t.Fatalf("%d brackets: a job the close killed woke the session", n)
 	}
 }
+
+// TestNativeJobRowStartsAtItsCommand (plan 033 C10r, V3 F4): a promoted job's
+// roster row starts when its command did (JobStarted.Began), its foreground
+// phase included — the time its finished row's duration counts from — not at
+// the promotion that spawned it; a harness that names no start leaves the
+// hand-over (At), the control.
+func TestNativeJobRowStartsAtItsCommand(t *testing.T) {
+	at := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
+	began := at.Add(-10 * time.Second)
+	for _, c := range []struct {
+		name  string
+		began time.Time
+		want  time.Time
+	}{
+		{"promoted", began, began},
+		{"no start named", time.Time{}, at},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			s, w := taskSink(t, nil)
+			s.sink(harness.JobStarted{ID: "t1.1.1", CallID: "t1.1.1", Command: "make", Limit: 30 * time.Minute, Promoted: true, At: at, Began: c.began})
+			w.wait("the job's spawned row", func(ev Event) bool { return isRoster(ev, "t1.1.1", SubagentChangeSpawned) })
+			evs := w.events()
+			row := evs[indexWhere(evs, 0, func(ev Event) bool { return isRoster(ev, "t1.1.1", SubagentChangeSpawned) })].Subagent
+			if !row.StartedAt.Equal(c.want) {
+				t.Fatalf("the row starts %v; want %v", row.StartedAt, c.want)
+			}
+		})
+	}
+}

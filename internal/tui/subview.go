@@ -182,7 +182,7 @@ func (m *Model) applySubagentEvent(ev agent.Event) {
 		if m.agentStart == nil {
 			m.agentStart = make(map[string]time.Time)
 		}
-		m.agentStart[id] = m.now()
+		m.agentStart[id] = m.spawnStart(info)
 		delete(m.agentDone, id)
 	case agent.SubagentChangeFinished:
 		// The child's run is closed by the fold, at the event's At.
@@ -429,6 +429,20 @@ func (m Model) subagentSpinnerView() string {
 		seg{m.spinnerGlyph() + " ", styleFG(m.theme.Accent)},
 		seg{text, styleFG(m.theme.Dim)},
 	)
+}
+
+// spawnStart is where a row's running counter starts, as its spawned event
+// arrives: this sighting — but for a bash job's row, its command's own start
+// (StartedAt), which for a promoted command lies before the promotion that
+// spawned the row, so the counter runs on to the duration the row ends with
+// rather than jumping to it (plan 033 C10r, V3 F4). A StartedAt that is zero,
+// or later than this clock's now, is not used.
+func (m Model) spawnStart(info agent.SubagentInfo) time.Time {
+	now := m.now()
+	if bashJobRow(info) && !info.StartedAt.IsZero() && info.StartedAt.Before(now) {
+		return info.StartedAt
+	}
+	return now
 }
 
 func (m Model) subElapsed(info agent.SubagentInfo) string {

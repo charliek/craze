@@ -396,7 +396,10 @@ type SubagentUndelivered struct {
 // (Promoted) — its limit counted from now. It goes to the session's sink
 // (Options.Sink), as a background child's own events do, before every
 // JobOutput and the JobFinished of the job, which come from the job's own
-// goroutine. Command and Workdir are redacted. At is the session's clock.
+// goroutine. Command and Workdir are redacted. At is the session's clock;
+// Began is when the command itself started — a promoted job's foreground
+// phase included, so the time JobFinished's Duration counts from — and what a
+// row's running counter counts from too (plan 033 C10r, V3 F4).
 //
 // The adapter maps a job onto the roster's rows (P12: the type "bash job", no
 // model, background) without stamping the call's row, which keeps the
@@ -406,13 +409,15 @@ type JobStarted struct {
 	Command, Workdir string
 	Limit            time.Duration
 	Promoted         bool
-	At               time.Time
+	At, Began        time.Time
 }
 
 // JobOutput is a snapshot of a running job's output — the whole of what its
 // row should show now, as a ToolProgress is — lossy, at most every 100 ms and
-// only when it changed. Output is the command's output as its call's redactor
-// redacted it, stripped of escape sequences (plan 033 §3.6).
+// only when it changed. Output is the command's output stripped of escape
+// sequences (plan 033 §3.6), redacted as the stream went — with the session's
+// key set as it grew while the job ran — and again, whole, with the session's
+// widest redaction as the snapshot went out (plan 033 C10r).
 type JobOutput struct {
 	ID, Output string
 }

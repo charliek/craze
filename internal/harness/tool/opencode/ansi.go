@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"io"
+	"sync"
 	"unicode/utf8"
 
 	"github.com/charmbracelet/x/ansi/parser"
@@ -270,7 +271,30 @@ func (s *ansiStripper) put(b []byte) error {
 // at most three bytes), so the progress snapshots and a background job's
 // reads lag the command's output by that much. Close writes it all out, stage
 // by stage, in order.
+//
+// # Keys learned while it runs (plan 033 C10r, review r7 finding 9)
+//
+// A background job's stream outlives the turn whose redactor it started with,
+// for up to two hours, and the session learns keys meanwhile — a stored key
+// at a turn's start (LearnKeys), a provider's key on a model switch, and a
+// ChatGPT token as it is minted (AddSecrets, plan 033 §3.12). A stream that
+// kept its first redactor would hand each of those to the output, its spill
+// file and every bash_output read in pieces no later whole-text pass can
+// match. So in a session that runs jobs every bash command's stream is
+// registered with the session (tool.Jobs.Track, from attach) and widened as
+// the session's key set grows (Widen), before anything downstream — the
+// output, its tail, bash_output's cursor, the spill file — sees a byte.
+//
+// mu makes a widening one step for the stream as a whole: both redaction
+// stages take the wider set between two writes, never one stage before the
+// other. Either half alone leaks — the first stage alone misses a key an
+// escape sequence split (`sk-…\x1b[0m…`), the second alone one an escape
+// sequence ate the first byte of (`\x1b` before `sk-…`) — and a write that
+// passed between the two would be redacted by neither. mu is held for one
+// write through the three stages into output, which is memory work only
+// (output.go's invariant): a Widen waits for at most that.
 type modelStream struct {
+	mu    sync.Mutex
 	raw   *redact.Writer // keys as the command wrote them
 	strip *ansiStripper
 	keys  *redact.Writer // keys the stripping joined
@@ -282,12 +306,29 @@ func newModelStream(r *redact.Replacer, out io.Writer) *modelStream {
 	return &modelStream{raw: r.NewWriter(strip), strip: strip, keys: keys}
 }
 
-func (m *modelStream) Write(p []byte) (int, error) { return m.raw.Write(p) }
+func (m *modelStream) Write(p []byte) (int, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.raw.Write(p)
+}
+
+// Widen makes both redaction stages redact r's keys too, from the next byte
+// they decide on: what each holds back now included, nothing written or
+// dropped (redact.Writer.Widen). It is tool.KeyedStream's, and safe from any
+// goroutine; after Close it does nothing that matters.
+func (m *modelStream) Widen(r *redact.Replacer) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.raw.Widen(r)
+	m.keys.Widen(r)
+}
 
 // Close writes out what each stage holds back, the first stage's into the
 // second before the second's own, and returns the first error. It does not
 // close out.
 func (m *modelStream) Close() error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	err := m.raw.Close()
 	if e := m.strip.Close(); err == nil {
 		err = e

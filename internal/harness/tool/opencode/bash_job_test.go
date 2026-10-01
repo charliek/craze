@@ -38,6 +38,9 @@ type fakeJobs struct {
 	specs    []tool.JobSpec
 	bodies   []tool.JobBody
 	started  chan tool.JobBody // each started body, as it is handed over
+	// tracked are the streams Track was handed, in order, each nil once it
+	// is untracked.
+	tracked []tool.KeyedStream
 }
 
 func newFakeJobs() *fakeJobs { return &fakeJobs{started: make(chan tool.JobBody, 4)} }
@@ -60,6 +63,51 @@ func (f *fakeJobs) Redact(text string) string {
 		return text
 	}
 	return f.red.String(text)
+}
+
+// Track holds s until it is untracked, widened to red as the session's would
+// be to its key set.
+func (f *fakeJobs) Track(s tool.KeyedStream) (untrack func()) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.red != nil {
+		s.Widen(f.red)
+	}
+	i := len(f.tracked)
+	f.tracked = append(f.tracked, s)
+	return func() {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		f.tracked[i] = nil
+	}
+}
+
+// widen widens every stream Track holds now, as the session does when it
+// learns a key (toolset.extend), and reports how many it reached.
+func (f *fakeJobs) widen(r *redact.Replacer) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	n := 0
+	for _, s := range f.tracked {
+		if s != nil {
+			s.Widen(r)
+			n++
+		}
+	}
+	return n
+}
+
+// trackedNow is how many streams Track holds now, and how many it was ever
+// handed.
+func (f *fakeJobs) trackedNow() (now, ever int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, s := range f.tracked {
+		if s != nil {
+			now++
+		}
+	}
+	return now, len(f.tracked)
 }
 
 func (f *fakeJobs) reservations() []string {
@@ -200,10 +248,74 @@ func groups(c *bashCall) <-chan *group {
 	return gs
 }
 
+// longTimeout is the foreground timeout, in ms, of every test here that
+// reaches it: the most a call may give, so launch's own real-time bound is
+// never what a slow machine meets. The tests fire the timeout themselves
+// (timedOut).
+const longTimeout = 600000
+
+// timedOut arranges for c's foreground timeout to pass only once its command
+// has started and its output so far holds want (review r7 finding 10): the
+// test fires the timer (ops.expire), watching the output through env's
+// Progress, so no test of the timeout depends on how fast a loaded machine
+// starts a shell and runs its first echo. It is called before the call runs,
+// which must give longTimeout. fire, once the call runs, waits for the
+// command's start — its pid, which it returns — and its output, each wait
+// bounded, failing the test rather than hanging it when the call returns
+// first (a launch that failed), and then fires the timeout.
+func timedOut(t *testing.T, c *bashCall, env *tool.Env, want string) (fire func(r *bashRun) int) {
+	t.Helper()
+	expire := make(chan time.Time, 1)
+	c.ops.expire = expire
+	pids := startedPIDs(c)
+	arrived := make(chan struct{})
+	var once sync.Once
+	env.Progress = func(snapshot string) {
+		if strings.Contains(snapshot, want) {
+			once.Do(func() { close(arrived) })
+		}
+	}
+	return func(r *bashRun) int {
+		t.Helper()
+		pid := startedPID(t, r, pids)
+		select {
+		case <-arrived:
+		case res := <-r.res:
+			t.Fatalf("the call returned before its output %q arrived: %+v", want, res)
+		case <-time.After(30 * time.Second):
+			t.Fatalf("timed out waiting for the command's output %q", want)
+		}
+		expire <- time.Now()
+		return pid
+	}
+}
+
+// startedPID is the pid startedPIDs sends for r's command, within 30 s; a
+// call that returns first — its command never started — fails the test with
+// its result instead of hanging it.
+func startedPID(t *testing.T, r *bashRun, pids <-chan int) int {
+	t.Helper()
+	select {
+	case pid := <-pids:
+		return pid
+	case res := <-r.res:
+		t.Fatalf("the call returned before its command started: %+v", res)
+	case <-time.After(30 * time.Second):
+		t.Fatal("timed out waiting for the command to start")
+	}
+	panic("unreachable")
+}
+
+// timeoutLine is the metadata line of a command the foreground timeout of ms
+// stopped.
+func timeoutLine(ms int) string {
+	return fmt.Sprintf("shell tool terminated command after exceeding timeout %d ms. If this command is expected to take longer and is not waiting for interactive input, retry with a larger timeout value in milliseconds.", ms)
+}
+
 // promotionText is §3.7's promotion receipt for job id, after the output so
-// far, spelled out.
+// far, spelled out: one blank line between the two (V3 F5).
 func promotionText(out string, timeoutMs int, id, path string) string {
-	return out + "\n\n<shell_metadata>\n" +
+	return strings.TrimSuffix(out, "\n") + "\n\n<shell_metadata>\n" +
 		fmt.Sprintf("The command did not finish within its timeout of %d ms. It was not stopped: it was moved to the background as "+
 			"job `%s` and is still running, for at most 30 more minutes. Its output so far is above; all of it is saved to: "+
 			"%s. Its result is delivered to you when it finishes; do not poll it or sleep waiting for it. "+
@@ -239,12 +351,15 @@ func TestBashPromotion(t *testing.T) {
 	jobs := newFakeJobs()
 	env := jobEnv(t, jobs)
 	gate := fifo(t, env, "gate")
-	c := prepareBash(t, env, map[string]any{"command": "echo before; read line < gate; echo after $line", "timeout": 300})
-	res := startBash(t, c, env).await(t, 30*time.Second)
+	c := prepareBash(t, env, map[string]any{"command": "echo before; read line < gate; echo after $line", "timeout": longTimeout})
+	fire := timedOut(t, c, &env, "before\n")
+	r := startBash(t, c, env)
+	fire(r)
+	res := r.await(t, 30*time.Second)
 	body := adopt(t, jobs)
 	path := spillOf(env, c)
-	if res.IsError || res.Text != promotionText("before\n", 300, c.id, path) {
-		t.Fatalf("result = %+v\nwant the promotion receipt:\n%s", res, promotionText("before\n", 300, c.id, path))
+	if res.IsError || res.Text != promotionText("before\n", longTimeout, c.id, path) {
+		t.Fatalf("result = %+v\nwant the promotion receipt:\n%s", res, promotionText("before\n", longTimeout, c.id, path))
 	}
 	spec := jobs.spec(t)
 	if spec.ID != c.id || spec.Command != c.command || spec.Workdir != env.Workspace || spec.Limit != 30*time.Minute ||
@@ -279,21 +394,28 @@ func TestBashPromotion(t *testing.T) {
 // instant with nothing landing promotes.
 func TestBashPromotionRaces(t *testing.T) {
 	t.Parallel()
-	timeoutLine := "shell tool terminated command after exceeding timeout 300 ms. If this command is expected to take longer and is not waiting for interactive input, retry with a larger timeout value in milliseconds."
+	stoppedAt := timeoutLine(longTimeout)
 
 	t.Run("a cancel at the timeout", func(t *testing.T) {
 		t.Parallel()
 		jobs := newFakeJobs()
 		env := jobEnv(t, jobs)
-		c := prepareBash(t, env, map[string]any{"command": "echo before; sleep 621", "timeout": 300})
-		pids := startedPIDs(c)
+		c := prepareBash(t, env, map[string]any{"command": "echo before; sleep 621", "timeout": longTimeout})
+		fire := timedOut(t, c, &env, "before\n")
 		runs := make(chan *bashRun, 1)
-		c.ops.expiring = func() { (<-runs).cancel(nil) }
+		c.ops.expiring = func() {
+			select {
+			case r := <-runs:
+				r.cancel(nil)
+			case <-time.After(30 * time.Second):
+				t.Error("the timeout fired before the test handed over the run")
+			}
+		}
 		r := startBash(t, c, env)
 		runs <- r
-		pid := <-pids
+		pid := fire(r)
 		res := r.await(t, 30*time.Second)
-		failed(t, res, tool.ClassTimeout, "before\n"+meta(timeoutLine))
+		failed(t, res, tool.ClassTimeout, "before\n"+meta(stoppedAt))
 		if got := jobs.reservations(); len(got) != 0 {
 			t.Fatalf("a cancelled call asked for a slot: %v", got)
 		}
@@ -304,13 +426,13 @@ func TestBashPromotionRaces(t *testing.T) {
 		t.Parallel()
 		jobs := newFakeJobs()
 		env, closeSession := withClosing(jobEnv(t, jobs))
-		c := prepareBash(t, env, map[string]any{"command": "echo before; sleep 622", "timeout": 300})
-		pids := startedPIDs(c)
+		c := prepareBash(t, env, map[string]any{"command": "echo before; sleep 622", "timeout": longTimeout})
+		fire := timedOut(t, c, &env, "before\n")
 		c.ops.expiring = closeSession
 		r := startBash(t, c, env)
-		pid := <-pids
+		pid := fire(r)
 		res := r.await(t, 30*time.Second)
-		failed(t, res, tool.ClassTimeout, "before\n"+meta(timeoutLine))
+		failed(t, res, tool.ClassTimeout, "before\n"+meta(stoppedAt))
 		if got := jobs.reservations(); len(got) != 0 {
 			t.Fatalf("a closing session's call asked for a slot: %v", got)
 		}
@@ -322,14 +444,27 @@ func TestBashPromotionRaces(t *testing.T) {
 		jobs := newFakeJobs()
 		env := jobEnv(t, jobs)
 		gate := fifo(t, env, "gate")
-		c := prepareBash(t, env, map[string]any{"command": "echo before; read line < gate; echo done", "timeout": 300})
+		c := prepareBash(t, env, map[string]any{"command": "echo before; read line < gate; echo done", "timeout": longTimeout})
 		gs := groups(c)
+		fire := timedOut(t, c, &env, "before\n")
 		c.ops.expiring = func() {
-			g := <-gs
+			var g *group
+			select {
+			case g = <-gs:
+			case <-time.After(30 * time.Second):
+				t.Error("the timeout fired with no group started")
+				return
+			}
 			release(t, gate)
-			<-g.exited // the leader has exited by the time the timeout is read
+			select {
+			case <-g.exited: // the leader has exited by the time the timeout is read
+			case <-time.After(30 * time.Second):
+				t.Error("the leader did not exit once released")
+			}
 		}
-		res := startBash(t, c, env).await(t, 30*time.Second)
+		r := startBash(t, c, env)
+		fire(r)
+		res := r.await(t, 30*time.Second)
 		if res.IsError || res.Text != "before\ndone\n" || res.Output.ExitCode != 0 {
 			t.Fatalf("result = %+v; want the command's exit, read as one", res)
 		}
@@ -343,12 +478,12 @@ func TestBashPromotionRaces(t *testing.T) {
 		jobs := newFakeJobs()
 		jobs.refuse = tool.JobsFull{Max: 8}
 		env := jobEnv(t, jobs)
-		c := prepareBash(t, env, map[string]any{"command": "echo before; sleep 623", "timeout": 300})
-		pids := startedPIDs(c)
+		c := prepareBash(t, env, map[string]any{"command": "echo before; sleep 623", "timeout": longTimeout})
+		fire := timedOut(t, c, &env, "before\n")
 		r := startBash(t, c, env)
-		pid := <-pids
+		pid := fire(r)
 		res := r.await(t, 30*time.Second)
-		failed(t, res, tool.ClassTimeout, "before\n"+meta(timeoutLine, "8 background jobs are already running; stop one with bash_stop first."))
+		failed(t, res, tool.ClassTimeout, "before\n"+meta(stoppedAt, "8 background jobs are already running; stop one with bash_stop first."))
 		if got := jobs.reservations(); !slices.Equal(got, []string{c.id}) {
 			t.Fatalf("reservations %v; want the one refused", got)
 		}
@@ -360,12 +495,12 @@ func TestBashPromotionRaces(t *testing.T) {
 		jobs := newFakeJobs()
 		jobs.refuse = fmt.Errorf("harness: %w", tool.ErrClosing)
 		env := jobEnv(t, jobs)
-		c := prepareBash(t, env, map[string]any{"command": "echo before; sleep 624", "timeout": 300})
-		pids := startedPIDs(c)
+		c := prepareBash(t, env, map[string]any{"command": "echo before; sleep 624", "timeout": longTimeout})
+		fire := timedOut(t, c, &env, "before\n")
 		r := startBash(t, c, env)
-		pid := <-pids
+		pid := fire(r)
 		res := r.await(t, 30*time.Second)
-		failed(t, res, tool.ClassTimeout, "before\n"+meta(timeoutLine, closingRefusal))
+		failed(t, res, tool.ClassTimeout, "before\n"+meta(stoppedAt, closingRefusal))
 		gone(t, pid, "sleep 624")
 	})
 }
@@ -488,7 +623,12 @@ func TestBashRunInBackground(t *testing.T) {
 		start := c.ops.start
 		c.ops.start = func(cmd *exec.Cmd) (*group, error) {
 			g, err := start(cmd)
-			(<-runs).cancel(nil) // the command has started; the call is cancelled before it is handed over
+			select {
+			case r := <-runs:
+				r.cancel(nil) // the command has started; the call is cancelled before it is handed over
+			case <-time.After(30 * time.Second):
+				t.Error("the command started before the test handed over the run")
+			}
 			return g, err
 		}
 		r := startBash(t, c, env)
@@ -519,12 +659,20 @@ func TestBashReceiptsRedacted(t *testing.T) {
 			if err := os.MkdirAll(env.Home, 0o700); err != nil {
 				t.Fatal(err)
 			}
-			in := map[string]any{"command": "echo before; sleep 627", "timeout": 300}
+			in := map[string]any{"command": "echo before; sleep 627", "timeout": longTimeout}
 			if background {
 				in["run_in_background"] = true
 			}
 			c := prepareBash(t, env, in)
-			res := startBash(t, c, env).await(t, 30*time.Second)
+			var fire func(*bashRun) int
+			if !background {
+				fire = timedOut(t, c, &env, "before\n") // promoted at its timeout
+			}
+			r := startBash(t, c, env)
+			if fire != nil {
+				fire(r)
+			}
+			res := r.await(t, 30*time.Second)
 			adopt(t, jobs)
 			if strings.Contains(res.Text, keyA) || !strings.Contains(res.Text, redact.Marker) || !strings.Contains(res.Text, "<background_job id=") {
 				t.Fatalf("receipt = %q; want the key redacted by the session's redaction", res.Text)
@@ -547,9 +695,12 @@ func TestBashBackgroundWithoutJobs(t *testing.T) {
 	if res := runBash(t, env, map[string]any{"command": "echo hi"}); res.Text != "hi\n" {
 		t.Fatalf("control: result = %+v", res)
 	}
-	c := prepareBash(t, env, map[string]any{"command": "echo before; sleep 628", "run_in_background": true, "timeout": 300})
-	failed(t, startBash(t, c, env).await(t, 30*time.Second), tool.ClassTimeout, "before\n"+meta(note,
-		"shell tool terminated command after exceeding timeout 300 ms. If this command is expected to take longer and is not waiting for interactive input, retry with a larger timeout value in milliseconds."))
+	c := prepareBash(t, env, map[string]any{"command": "echo before; sleep 628", "run_in_background": true, "timeout": longTimeout})
+	timed := env
+	fire := timedOut(t, c, &timed, "before\n")
+	r := startBash(t, c, timed)
+	fire(r)
+	failed(t, r.await(t, 30*time.Second), tool.ClassTimeout, "before\n"+meta(note, timeoutLine(longTimeout)))
 	// The foreground's clamp, not a job's: 30 minutes is reduced to 10.
 	if c := prepareBash(t, env, map[string]any{"command": "true", "run_in_background": true, "timeout": 1800000}); c.timeout != maxTimeout || c.requested != 1800000 || c.background {
 		t.Fatalf("timeout %v requested %d background %v; want the foreground's cap", c.timeout, c.requested, c.background)
@@ -577,8 +728,10 @@ func TestJobBodyEnds(t *testing.T) {
 		env := jobEnv(t, jobs)
 		c := prepareBash(t, env, map[string]any{"command": command, "run_in_background": true})
 		pids := startedPIDs(c)
-		startBash(t, c, env).await(t, 30*time.Second)
-		return adopt(t, jobs), <-pids, c, env
+		if res := startBash(t, c, env).await(t, 30*time.Second); res.IsError {
+			t.Fatalf("the job did not start: %+v", res)
+		}
+		return adopt(t, jobs), await(t, pids, "the command's pid"), c, env
 	}
 	t.Run("stopped", func(t *testing.T) {
 		t.Parallel()
@@ -647,5 +800,158 @@ func TestOutputKeepsAJobsSpillFile(t *testing.T) {
 	}
 	if _, _, _, _, spill := plain.finish(); spill != nil {
 		t.Fatal("control: a short output nobody asked to save has a spill file")
+	}
+}
+
+// TestBashTracksItsStream (plan 033 C10r): in a session that runs jobs every
+// command's output stream is tracked (Jobs.Track) from its start until it is
+// done with — by the call, for a command that ended in the foreground; by the
+// job's Wait, for one handed over — and never after, so the session widens
+// exactly the streams still running. A session with no jobs has nothing to
+// track with.
+func TestBashTracksItsStream(t *testing.T) {
+	t.Parallel()
+	t.Run("a foreground command", func(t *testing.T) {
+		t.Parallel()
+		jobs := newFakeJobs()
+		env := jobEnv(t, jobs)
+		if res := runBash(t, env, map[string]any{"command": "echo hi"}); res.Text != "hi\n" {
+			t.Fatalf("result = %+v", res)
+		}
+		if now, ever := jobs.trackedNow(); now != 0 || ever != 1 {
+			t.Fatalf("tracked %d now of %d; want the one stream, untracked once the call returned", now, ever)
+		}
+	})
+	for _, promoted := range []bool{false, true} {
+		t.Run(fmt.Sprintf("a job, promoted %v", promoted), func(t *testing.T) {
+			t.Parallel()
+			jobs := newFakeJobs()
+			env := jobEnv(t, jobs)
+			gate := fifo(t, env, "gate")
+			in := map[string]any{"command": "echo before; read line < gate", "run_in_background": true}
+			if promoted {
+				in = map[string]any{"command": "echo before; read line < gate", "timeout": longTimeout}
+			}
+			c := prepareBash(t, env, in)
+			var fire func(*bashRun) int
+			if promoted {
+				fire = timedOut(t, c, &env, "before\n")
+			}
+			r := startBash(t, c, env)
+			if fire != nil {
+				fire(r)
+			}
+			r.await(t, 30*time.Second)
+			body := adopt(t, jobs)
+			if now, ever := jobs.trackedNow(); now != 1 || ever != 1 {
+				t.Fatalf("after the hand-over %d tracked of %d; want the job's stream, still tracked", now, ever)
+			}
+			release(t, gate)
+			body.wait(context.Background(), time.Hour)
+			if now, _ := jobs.trackedNow(); now != 0 {
+				t.Fatal("the job's stream is still tracked after its Wait")
+			}
+		})
+	}
+}
+
+// TestJobStreamLearnsKeys (plan 033 C10r, review r7 finding 9; bash's half —
+// the harness's is TestJobStreamLearnsSessionKeys): a key the session learns
+// after a job started, which the job then prints split across two writes, with
+// a read of its output between them, reaches neither read, nor the spill
+// file, in any piece that makes up the key: the stream, widened, holds back
+// the key's first half and redacts it whole. The control is the same schedule
+// with nothing learned: the two reads carry the key's halves, the spill file
+// the key whole — the schedule really splits it.
+func TestJobStreamLearnsKeys(t *testing.T) {
+	t.Parallel()
+	const learned = "zq-learned-mid-job-0042"
+	half := len(learned) / 2
+	run := func(t *testing.T, learn bool) (reads [2]string, spill string) {
+		jobs := newFakeJobs()
+		env := jobEnv(t, jobs)
+		g1, g2, g3 := fifo(t, env, "g1"), fifo(t, env, "g2"), fifo(t, env, "g3")
+		put := func(name, text string) {
+			if err := os.WriteFile(filepath.Join(env.Workspace, name), []byte(text), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		// One file, one write: what cat prints of each lands in one read of
+		// the pipe, so seeing its visible part is seeing the rest of it.
+		put("h1", "token: "+learned[:half])
+		put("h2", learned[half:]+"\ndone\n")
+		c := prepareBash(t, env, map[string]any{"run_in_background": true,
+			"command": "read x < g1; cat h1; read x < g2; cat h2; read x < g3"})
+		r := startBash(t, c, env)
+		if res := r.await(t, 30*time.Second); res.IsError {
+			t.Fatalf("the job did not start: %+v", res)
+		}
+		body := adopt(t, jobs)
+		if learn && jobs.widen(redact.New(learned)) != 1 {
+			t.Fatal("the job's stream was not tracked to be widened")
+		}
+		read := func(from int64, gate, visible string) tool.JobOutput {
+			release(t, gate)
+			if !waitFor(15*time.Second, func() bool { return strings.Contains(body.Output(from).Text, visible) }) {
+				t.Fatalf("the job's output never showed %q", visible)
+			}
+			return body.Output(from)
+		}
+		first := read(0, g1, "token: ")
+		second := read(first.Total, g2, "done\n")
+		release(t, g3)
+		if end := body.wait(context.Background(), time.Hour); end.Status != tool.JobExited {
+			t.Fatalf("the job ended %+v", end)
+		}
+		return [2]string{first.Text, second.Text}, load(t, spillOf(env, c))
+	}
+	pieces := func(reads [2]string) []string {
+		var found []string
+		for i, r := range reads {
+			for _, p := range []string{learned[:half], learned[half:]} {
+				if strings.Contains(r, p) {
+					found = append(found, fmt.Sprintf("read %d holds %q", i+1, p))
+				}
+			}
+		}
+		if strings.Contains(reads[0]+reads[1], learned) {
+			found = append(found, "the reads together hold the key")
+		}
+		return found
+	}
+
+	reads, spill := run(t, true)
+	if found := pieces(reads); len(found) > 0 || strings.Contains(spill, learned) {
+		t.Fatalf("learned before it was printed, the key reached the model: %v; the spill file %q", found, spill)
+	}
+	if want := "token: " + redact.Marker + "\ndone\n"; reads[0]+reads[1] != want || spill != want {
+		t.Fatalf("reads %q and spill file %q; want %q in both", reads, spill, want)
+	}
+
+	// The control: nothing learned, the same schedule splits the key.
+	reads, spill = run(t, false)
+	if len(pieces(reads)) < 3 || !strings.Contains(spill, learned) {
+		t.Fatalf("control: with nothing learned the reads %q and spill %q do not carry the key's halves and the key", reads, spill)
+	}
+}
+
+// TestPromotionReceiptSpacing (plan 033 C10r, V3 F5): one blank line, never
+// two, between the output so far and the receipt's metadata — whether the
+// output ends its last line or not, and for no output at all. The control is
+// a foreground result's spacing, two blank lines after a tail that ends in a
+// newline, which the receipt used to share.
+func TestPromotionReceiptSpacing(t *testing.T) {
+	c := &bashCall{id: "t1.1.1", timeout: 10 * time.Second}
+	for kept, want := range map[string]string{
+		"tick 4\n": "tick 4\n\n<shell_metadata>\n",
+		"tick 4":   "tick 4\n\n<shell_metadata>\n",
+		"":         "(no output)\n\n<shell_metadata>\n",
+	} {
+		if got := c.promotionReceipt(kept, false, "/p"); !strings.HasPrefix(got, want) {
+			t.Errorf("after %q the receipt begins %q; want %q", kept, got[:min(len(got), len(want)+4)], want)
+		}
+	}
+	if got := c.result(outcome{why: endTimeout, kept: "tick 4\n"}).Text; !strings.HasPrefix(got, "tick 4\n\n\n<shell_metadata>") {
+		t.Fatalf("control: a foreground result begins %q", got)
 	}
 }

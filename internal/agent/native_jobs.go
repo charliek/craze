@@ -2,6 +2,7 @@ package agent
 
 import (
 	"strings"
+	"time"
 
 	"github.com/charliek/craze/internal/harness"
 	"github.com/charliek/craze/internal/harness/tool"
@@ -89,7 +90,7 @@ func (s *nativeSession) jobStarted(e harness.JobStarted) {
 		SubagentType: BashJobType,
 		Status:       SubagentRunning,
 		Prompt:       cmd,
-		StartedAt:    wallClock(e.At, s.Now),
+		StartedAt:    wallClock(jobBegan(e), s.Now),
 		Transcript:   true,
 		Background:   true,
 	}
@@ -118,6 +119,18 @@ func (s *nativeSession) jobStarted(e harness.JobStarted) {
 	s.toolCalled(e.ID, harness.ToolCalled{ID: e.ID, At: e.At, Request: harness.ToolRequest{
 		Tool: tool.BashTool, Kind: tool.KindExecute, Title: cmd, Command: cmd, Workdir: safe.text(e.Workdir),
 	}})
+}
+
+// jobBegan is when a job's row says it started: its command's own start — a
+// promoted command's foreground phase included, the time its final duration
+// counts from, so a client's running counter (from StartedAt) and the
+// duration it ends on agree (plan 033 C10r, V3 F4) — or, from a harness that
+// did not say, the hand-over.
+func jobBegan(e harness.JobStarted) time.Time {
+	if !e.Began.IsZero() {
+		return e.Began
+	}
+	return e.At
 }
 
 // jobProgress is a snapshot of a running job's output on its execute row:

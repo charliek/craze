@@ -453,3 +453,206 @@ func TestNoKeySurvivesUnlessItOverlapsTheMarker(t *testing.T) {
 		t.Fatal("no overlapping key ever came back out: the draw does not exercise the rule")
 	}
 }
+
+// TestUnion: a Union redacts every key of either side; it builds nothing when
+// one side holds the other's keys — it hands back the side that does — and
+// its order does not matter, so two widenings that cross on their way to one
+// stream end on the same set (plan 033 C10r).
+func TestUnion(t *testing.T) {
+	a, b, ab := New(keyA), New(keyB), New(keyB, keyA)
+	text := "a=" + keyA + " b=" + keyB
+	for _, tc := range []struct {
+		name string
+		got  *Replacer
+		same *Replacer // the Replacer it must be, nil for a new one
+	}{
+		{"nil and nil", (*Replacer)(nil).Union(nil), nil},
+		{"r with nil", a.Union(nil), a},
+		{"nil with o", (*Replacer)(nil).Union(a), a},
+		{"empty with o", New().Union(a), a},
+		{"r with a subset", ab.Union(a), ab},
+		{"r with a superset", a.Union(ab), ab},
+		{"the same keys", a.Union(New(keyA)), a},
+		{"disjoint", a.Union(b), nil},
+	} {
+		if tc.same != nil && tc.got != tc.same {
+			t.Errorf("%s: built a new Replacer; want the side that holds every key", tc.name)
+		}
+	}
+	for _, u := range []*Replacer{a.Union(b), b.Union(a), a.Union(b).Union(a), b.Union(ab)} {
+		if got, want := u.String(text), ab.String(text); got != want {
+			t.Fatalf("a union redacts %q; want %q", got, want)
+		}
+	}
+	if got := (*Replacer)(nil).Union(nil).String(text); got != text {
+		t.Fatalf("the union of none redacts %q", got)
+	}
+}
+
+// widenAt writes parts to a Writer over r, widens it to o after the first
+// widenAfter parts, writes the rest, and returns what reached the underlying
+// writer after Close, and what had before the Widen.
+func widenAt(t *testing.T, r, o *Replacer, widenAfter int, parts ...string) (out, before string) {
+	t.Helper()
+	var buf bytes.Buffer
+	w := r.NewWriter(&buf)
+	for i, p := range parts {
+		if i == widenAfter {
+			before = buf.String()
+			w.Widen(o)
+		}
+		if _, err := w.Write([]byte(p)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if widenAfter >= len(parts) {
+		before = buf.String()
+		w.Widen(o)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return buf.String(), before
+}
+
+// TestWriterWidenKeepsWhatItHolds (plan 033 C10r, review r7 finding 9): a
+// Writer widened while it runs redacts the new key in everything it had not
+// yet decided — a key printed whole after the Widen, one split across two
+// writes after it, and one whose first bytes it was holding back as the start
+// of a key it already knew when the Widen came — and drops, repeats or
+// reorders nothing. What it had passed on before the Widen stays passed on.
+//
+// The negative controls: a Writer never widened leaks each of them, and one
+// "widened" by writing out what it holds and starting over — the obvious way
+// to swap a Replacer — leaks the held prefix of the last one.
+func TestWriterWidenKeepsWhatItHolds(t *testing.T) {
+	const learned = "sk-canary-learned-0042" // shares "sk-canary-" with keyA, a key the Writer knew
+	old, wide := New(keyA), New(keyA, learned)
+	half := len(learned) / 2
+	cases := []struct {
+		name   string
+		before []string // written before the Widen
+		after  []string // written after it
+	}{
+		{"whole, after", []string{"start\n"}, []string{"k=" + learned + "\n"}},
+		{"split across two writes, after", []string{"start\n"}, []string{"k=" + learned[:half], learned[half:] + "\n"}},
+		{"its start held as keyA's when the Widen came", []string{"k=sk-canary-"}, []string{"learned-0042\n"}},
+		{"the Widen before any write", nil, []string{learned[:3], learned[3:]}},
+		{"a key it knew, split around the Widen", []string{"k=" + keyA[:7]}, []string{keyA[7:] + "\n"}},
+	}
+	for _, tc := range cases {
+		parts := append(slices.Clone(tc.before), tc.after...)
+		text := strings.Join(parts, "")
+		out, before := widenAt(t, old, wide, len(tc.before), parts...)
+		if strings.Contains(out, learned) || strings.Contains(out, keyA) {
+			t.Fatalf("%s: %q holds a key", tc.name, out)
+		}
+		if want := wide.String(text); out != want {
+			t.Fatalf("%s: the stream came out %q; want %q, the whole text under the wider set", tc.name, out, want)
+		}
+		if !strings.HasPrefix(out, before) {
+			t.Fatalf("%s: %q does not begin with what was written before the Widen, %q", tc.name, out, before)
+		}
+		// The control: never widened, the new key leaks.
+		if never, _ := widenAt(t, old, nil, len(tc.before), parts...); strings.Contains(old.String(text), learned) && !strings.Contains(never, learned) {
+			t.Fatalf("%s: control: a Writer never widened did not leak (%q), so the Widen proves nothing", tc.name, never)
+		}
+	}
+
+	// The control for keeping what it holds: write it out, then widen — the
+	// held "sk-canary-" goes out on its own, and the key's rest after it.
+	var buf bytes.Buffer
+	w := old.NewWriter(&buf)
+	_, _ = w.Write([]byte("k=sk-canary-"))
+	w.emit(len(w.buf)) // what a swap that starts the stream over would do
+	w.Widen(wide)
+	_, _ = w.Write([]byte("learned-0042\n"))
+	_ = w.Close()
+	if !strings.Contains(buf.String(), learned) {
+		t.Fatalf("control: writing out the held bytes before widening did not leak (%q): the held case proves nothing", buf.String())
+	}
+
+	// A Widen after Close changes nothing and breaks nothing.
+	var closed bytes.Buffer
+	cw := old.NewWriter(&closed)
+	_ = cw.Close()
+	cw.Widen(wide)
+	if _, err := cw.Write([]byte("x")); !errors.Is(err, ErrClosed) {
+		t.Fatalf("Write after Close and Widen = %v, want ErrClosed", err)
+	}
+}
+
+// TestWriterWidenAtEverySplitPoint: for texts holding the old key and a new
+// one, cut into three writes at every pair of points and widened between any
+// two of them, the stream comes out as String under the wider set whenever
+// every byte of the new key's occurrences came after the Widen — the case a
+// key learned before the command printed it is — and holds no key then.
+// Small alphabets would make overlaps common; these texts put the keys
+// against, inside and across each other on purpose.
+func TestWriterWidenAtEverySplitPoint(t *testing.T) {
+	const learned = "sk-canary-learned-0042"
+	old, wide := New(keyA), New(keyA, learned)
+	texts := []string{
+		"x" + learned + "y",
+		keyA + learned,
+		learned + keyA,
+		"sk-canary-" + learned, // a false start of both, then the new key
+		"sk-canary-alpha-00" + learned,
+		learned[:10] + keyA + learned,
+	}
+	checked := 0
+	for _, text := range texts {
+		first := strings.Index(text, learned) // the earliest occurrence of the new key
+		want := wide.String(text)
+		for i := 0; i <= len(text); i++ {
+			for j := i; j <= len(text); j++ {
+				parts := []string{text[:i], text[i:j], text[j:]}
+				for at, cut := range []int{0, i, j, len(text)} {
+					if cut > first {
+						continue // a byte of the new key came before the Widen: out of the claim
+					}
+					out, _ := widenAt(t, old, wide, at, parts...)
+					if out != want {
+						t.Fatalf("%q cut at %d,%d, widened after %d bytes: %q, want %q", text, i, j, cut, out, want)
+					}
+					checked++
+				}
+			}
+		}
+	}
+	if checked == 0 {
+		t.Fatal("no case was checked")
+	}
+}
+
+// TestWidenRacesWithWriteUnderALock is the Writer's half of how a bash job's
+// stream is widened from the session's goroutine (opencode's modelStream): a
+// caller that serializes Widen with Write under its own lock may widen while
+// another goroutine writes. Run under -race.
+func TestWidenRacesWithWriteUnderALock(t *testing.T) {
+	var (
+		mu  sync.Mutex
+		buf bytes.Buffer
+	)
+	w := New(keyA).NewWriter(&buf)
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		for range 200 {
+			mu.Lock()
+			_, _ = w.Write([]byte("out " + keyA + "\n"))
+			mu.Unlock()
+		}
+	})
+	wg.Go(func() {
+		for i := range 50 {
+			mu.Lock()
+			w.Widen(New(fmt.Sprintf("zq-learned-key-%04d", i)))
+			mu.Unlock()
+		}
+	})
+	wg.Wait()
+	_ = w.Close()
+	if strings.Contains(buf.String(), keyA) {
+		t.Fatal("a key survived")
+	}
+}

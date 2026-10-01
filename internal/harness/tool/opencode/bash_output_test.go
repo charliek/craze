@@ -28,8 +28,9 @@ type recordingJobs struct {
 	stops   []tool.JobStopCall
 }
 
-func (r *recordingJobs) Reserve(string) (tool.JobSlot, error) { return nil, tool.JobsFull{Max: 0} }
-func (r *recordingJobs) Redact(text string) string            { return text }
+func (r *recordingJobs) Reserve(string) (tool.JobSlot, error)    { return nil, tool.JobsFull{Max: 0} }
+func (r *recordingJobs) Redact(text string) string               { return text }
+func (r *recordingJobs) Track(tool.KeyedStream) (untrack func()) { return func() {} }
 
 func (r *recordingJobs) Output(_ context.Context, c tool.JobOutputCall) tool.Result {
 	r.mu.Lock()

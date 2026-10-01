@@ -204,3 +204,31 @@ func TestAMirrorDoesNotRaceTheModel(t *testing.T) {
 	close(stop)
 	<-done
 }
+
+// TestABashJobsToolsAreNotTheTurns (plan 033 C10r, V3 F2): a background bash
+// job's scope — its roster row background, of type agent.BashJobType — keeps
+// its running execute row in its own transcript, for its view, but out of the
+// ordered tools (Mirror's and Tools'), which a client counts the session's
+// in-flight work from and names its working line from. A background
+// sub-agent's running tool, beside it, is still in them: the control.
+func TestABashJobsToolsAreNotTheTurns(t *testing.T) {
+	m := New(Options{})
+	for _, ev := range sequenced([]agent.Event{
+		{Type: agent.EventSubagent, SubagentChange: agent.SubagentChangeSpawned, Subagent: &agent.SubagentInfo{ID: "t1.1.1",
+			Status: agent.SubagentRunning, SubagentType: agent.BashJobType, Background: true, Transcript: true}},
+		{Type: agent.EventTool, Agent: "t1.1.1", Tool: &agent.ToolEvent{ID: "t1.1.1", Kind: "execute", Status: "in_progress", Title: "sleep 900"}},
+		{Type: agent.EventSubagent, SubagentChange: agent.SubagentChangeSpawned, Subagent: &agent.SubagentInfo{ID: "kid",
+			Status: agent.SubagentRunning, SubagentType: "explore", Background: true}},
+		{Type: agent.EventTool, Agent: "kid", Tool: &agent.ToolEvent{ID: "k1", Kind: "execute", Status: "in_progress", Title: "go test"}},
+	}) {
+		m.Fold(ev)
+	}
+	for name, tools := range map[string][]agent.ToolEvent{"Mirror": m.Mirror().Tools, "Tools": m.Tools()} {
+		if len(tools) != 1 || tools[0].ID != "k1" {
+			t.Fatalf("%s holds %+v; want the sub-agent's tool alone, not the job's", name, tools)
+		}
+	}
+	if sub := m.Sub("t1.1.1"); sub == nil || len(sub.Entries()) == 0 {
+		t.Fatal("the job's own transcript lost its row: its view would be empty")
+	}
+}

@@ -101,10 +101,11 @@ foreground command that outlives its timeout (120 s unless the model asked
 for more, at most 10 minutes) is **promoted** to a job instead of being
 killed. The model reads a job's output with `bash_output {id, wait_ms?}`
 (a snapshot of what is new, or a wait of up to 10 minutes for the end) and
-stops one with `bash_stop {id}`. A job runs until it exits, until it is
-stopped, or for its limit — 30 minutes by default, 2 hours at most, counted
-from the promotion for a promoted command — and a session holds at most 8
-running jobs. When the cap is full, or the session is closing, a command
+stops one with `bash_stop {id}`; in a step that also stops a job, the reads
+do not wait, so a stop never queues behind them. A job runs until it exits,
+until it is stopped, or for its limit — 30 minutes by default, 2 hours at
+most, counted from the promotion for a promoted command — and a session holds
+at most 8 running jobs. When the cap is full, or the session is closing, a command
 that would have been promoted is killed at its timeout as before, and the
 result says why.
 
@@ -113,8 +114,12 @@ first line of its command as the description, and `bg` first in its suffix;
 `Enter` on it opens its output in the read-only view. `Delete`/`Backspace`
 on a running job's row, or inside its view, stops it, like a sub-agent. A job
 never keeps the working spinner on and never blocks `/connect`, so a dev
-server running for an hour leaves the session idle. (The `← n agents` count
-on status row 2 still includes job rows.)
+server running for an hour leaves the session idle; nor is its command counted
+in status row 2's running tools, or named by the working line of a turn that
+runs beside it. (The `← n agents` count on status row 2 still includes job
+rows.) A job's row counts its running time from its command's own start —
+for a promoted command, from before the promotion — and the bash call's own
+row shows no exit code for a command that was promoted.
 
 A finished job's result is delivered to the model like a background
 sub-agent's: at the next step of a running turn, through `bash_output`, or,
@@ -124,9 +129,11 @@ row carry job results while no turn of yours has started; after that, results
 wait and arrive with your next prompt. Quitting or closing the session
 stops every running job without delivering anything. `--resume` does not
 reattach jobs: the model is told, at the first turn after the resume, that the
-commands that were running have stopped. Headless `craze prompt` and
-sub-agent children run no jobs — `run_in_background` there runs in the
-foreground and the result says so.
+session closed before each such command's result was delivered, that it is not
+running now — it may have finished first — and where its output was saved, so
+it can read that file rather than run the command again. Headless
+`craze prompt` and sub-agent children run no jobs — `run_in_background` there
+runs in the foreground and the result says so.
 
 ## Resuming a session
 

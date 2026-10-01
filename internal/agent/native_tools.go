@@ -390,8 +390,15 @@ func (s *nativeSession) toolFinished(owner string, e harness.ToolFinished) {
 		}
 		if o := res.Output; o != nil {
 			setStdout(&out, o.Output)
-			code := o.ExitCode
-			out.ExitCode = &code
+			// -1 is the bash tool's "no exit code": a command
+			// stopped at its timeout or by a cancel, or one promoted to a
+			// background job and still running (plan 033 C10r, V3 F3). The
+			// row shows no code for it rather than "exit -1"; its status says
+			// whether the call failed.
+			if o.ExitCode >= 0 {
+				code := o.ExitCode
+				out.ExitCode = &code
+			}
 		}
 		if res.Content != "" {
 			setContent(&out, res.Content)

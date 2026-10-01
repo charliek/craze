@@ -2293,7 +2293,7 @@ func TestSuperviseShutdownHasOneDeadline(t *testing.T) {
 				close(g.reaped)
 			})
 			began := time.Now()
-			why, _ := g.supervise(ctx, closing, time.Hour, make(chan struct{}), nil)
+			why, _ := g.supervise(ctx, closing, time.Hour, nil, make(chan struct{}), nil)
 			took := time.Since(began)
 			if why != endAbort {
 				t.Fatalf("supervise ended with %v, want the abort", why)

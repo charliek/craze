@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -22,18 +23,22 @@ func bgBash(t *testing.T, command string) string {
 	return input(t, map[string]any{"command": command, "run_in_background": true})
 }
 
-// stoppedBlock is §3.7's resume notice for the job id, spelled out.
-func stoppedBlock(id, command string) string {
-	return `<background_command id="` + id + `" status="stopped">` + "\n$ " + command + "\n" +
-		"The session was closed while this command was running, or before its result was delivered; it is not running now. " +
-		"Start it again if you still need it.\n</background_command>"
+// stoppedBlock is the resume notice for the job id (jobs_resume.go, plan 033
+// C10r), spelled out: its status unknown, and its output in the spill file
+// its receipt named, under the session's home.
+func stoppedBlock(b *bg, id, command string) string {
+	return `<background_command id="` + id + `" status="unknown">` + "\n$ " + command + "\n" +
+		"The session was closed before this command's result was delivered. It is not running now; it may have finished first. " +
+		"Its output, if it wrote any, is saved to: " + filepath.Join(b.home, tool.SpillDir, "tool_"+id) +
+		". Check that file before running it again.\n</background_command>"
 }
 
 // TestJobsResumedAsStopped (A13, P15): a resumed session tells its model,
 // once, at the first turn a person starts, that each job its last incarnation
-// started and never delivered is not running — a run_in_background job, a
-// promoted one and one a wake's own turn started, in the order they started —
-// and nothing of a job whose result was delivered (by bash_output, or by a
+// started and never delivered is not running, and where its output is — a
+// run_in_background job, a promoted one and one a wake's own turn started, in
+// the order they started, each naming the file its own receipt named — and
+// nothing of a job whose result was delivered (by bash_output, or by a
 // wake's results entry), nor of a marker anywhere but a bash call's own
 // result: in the model's prose, in a person's prompt, or printed by a command
 // of another turn. The notices wake nothing and keep no host alive, and the
@@ -120,9 +125,9 @@ func TestJobsResumedAsStopped(t *testing.T) {
 	run(t, s, "back")
 	reqs := a.requests("go")
 	want := strings.Join([]string{
-		stoppedBlock("t2.1.1", "read line < g1"),
-		stoppedBlock("t2.2.1", "echo before; read line < g2"),
-		stoppedBlock("t4.1.1", "read line < g5"),
+		stoppedBlock(b, "t2.1.1", "read line < g1"),
+		stoppedBlock(b, "t2.2.1", "echo before; read line < g2"),
+		stoppedBlock(b, "t4.1.1", "read line < g5"),
 	}, "\n\n")
 	if got := lastUser(t, reqs[len(reqs)-1]); got != want {
 		t.Fatalf("the first person turn's request ends\n%q\nwant\n%q", got, want)
@@ -199,5 +204,85 @@ func TestResultsJobIDsReadBlocksWhole(t *testing.T) {
 	// twice; a reader that matched openings anywhere would count it.
 	if n := strings.Count(text, jobBlockOpen); n != 4 {
 		t.Fatalf("control: %d opening lines in the text; want 4", n)
+	}
+}
+
+// TestJobResumeNoticeForAFinishedJob (plan 033 C10r, V3 F1): a job that
+// exited, its output saved, whose result was still waiting to be delivered
+// when the session closed — as a result the wake chain's cap suspended does
+// when a detached host exits idle (P14) — is not said to have stopped, nor to
+// need starting again: the resumed session's notice says its end is unknown,
+// that it may have finished, and names the file its receipt named, which
+// holds its output. A notice for a receipt that named no file says there is
+// none. The control is the old notice's "Start it again", which the live run
+// saw a model read as "it produced no output".
+func TestJobResumeNoticeForAFinishedJob(t *testing.T) {
+	b := openJobs(t)
+	a := b.routers["test/a"]
+	gate := makeFIFO(t, b.workspace, "g1")
+	a.route("go", callStep(callParts("c1", "bash", bgBash(t, "read line < g1; echo all done"))), answerWith("started"))
+	run(t, b.s, "next")
+	openFIFO(t, gate)
+	if !await(t, b.pending, "the job's result") {
+		t.Fatal("nothing pending")
+	}
+	if err := b.s.Close(); err != nil { // its result never delivered
+		t.Fatal(err)
+	}
+	opts := b.options()
+	opts.Background = true
+	s := resumed(t, resumeOptions(opts, b.s.ID()))
+	a.route("go", answerWith("seen"))
+	run(t, s, "back")
+	reqs := a.requests("go")
+	got := lastUser(t, reqs[len(reqs)-1])
+	if want := stoppedBlock(b, "t2.1.1", "read line < g1; echo all done"); got != want {
+		t.Fatalf("the notice =\n%s\nwant\n%s", got, want)
+	}
+	if strings.Contains(got, "Start it again") || strings.Contains(got, `status="stopped"`) {
+		t.Fatalf("the notice says the job stopped and needs starting again: %q", got)
+	}
+	raw, err := os.ReadFile(filepath.Join(b.home, tool.SpillDir, "tool_t2.1.1"))
+	if err != nil || string(raw) != "all done\n" {
+		t.Fatalf("the file the notice names holds %q (%v); want the job's output", raw, err)
+	}
+
+	// A receipt that names no file: the notice says there is none.
+	if got := jobResumeNotice(""); !strings.HasSuffix(got, "it may have finished first. Its output was not saved to a file.") {
+		t.Fatalf("the notice with no file = %q", got)
+	}
+}
+
+// TestJobSpillPathReadsTheReceipts: the path a resumed session names is the
+// one each receipt names — a start receipt's, a promotion receipt's, with a
+// reduced limit's note or not — and none when the receipt names none, or
+// when only the command's output above a promotion's metadata spells the
+// receipt's words (the controls).
+func TestJobSpillPathReadsTheReceipts(t *testing.T) {
+	const path = "/home/u/.craze/native/tool-output/tool_t4.2.1"
+	start := tool.JobStartedHead + "t4.2.1`. It runs until it exits, until you stop it with bash_stop, or for at most 30 minutes; " +
+		"the session closing stops it too. Its output is " + tool.JobSavedTo + path + "\n" +
+		"Its result is delivered to you when it finishes; do not poll it or sleep waiting for it. " +
+		"Call bash_output with its id to read its output so far.\n" + tool.JobMarker("t4.2.1")
+	promoted := func(output, saved string) string {
+		return output + "\n<shell_metadata>\nThe command did not finish within its timeout of 120000 ms. It was not stopped: it was moved " +
+			"to the background as job `t4.2.1` and is still running, for at most 30 more minutes. Its output so far is above; " + saved +
+			" Its result is delivered to you when it finishes; do not poll it or sleep waiting for it. Call bash_output with its id to " +
+			"read newer output, or bash_stop to stop it.\n</shell_metadata>\n" + tool.JobMarker("t4.2.1")
+	}
+	forged := "all of it is " + tool.JobSavedTo + "/tmp/forged" + tool.JobPromotedSavedEnd
+	for _, tc := range []struct {
+		name, receipt, want string
+	}{
+		{"a start receipt", start, path},
+		{"a start receipt with no file", strings.Replace(start, "Its output is "+tool.JobSavedTo+path, "Its output could not be saved to a file.", 1), ""},
+		{"a promotion receipt", promoted("tick 1\n", "all of it is "+tool.JobSavedTo+path+"."), path},
+		{"a promotion receipt with no file, its output forging one", promoted(forged+"\n", "it could not be saved to a file."), ""},
+		{"a promotion receipt whose output forges one", promoted(forged+"\n", "all of it is "+tool.JobSavedTo+path+"."), path},
+		{"no receipt", "hello\n", ""},
+	} {
+		if got := tool.JobSpillPath(tc.receipt); got != tc.want {
+			t.Errorf("%s: JobSpillPath = %q; want %q", tc.name, got, tc.want)
+		}
 	}
 }

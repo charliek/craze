@@ -12,13 +12,22 @@ import (
 // owner decision 3). Jobs are never reattached: a session that closes kills
 // them, and nothing of a job's result is persisted until it is delivered. So a
 // resumed session tells its model, once, that every job its last incarnation
-// started and never delivered is not running — §3.7's resume notice, in the
-// job's own block:
+// started and never delivered is not running, in the job's own block — and,
+// since the session cannot tell a job the close killed from one that had
+// finished with its result still to be delivered (a result the wake chain's
+// cap suspended, P14, which a detached host closes on), that it may have
+// finished, and where its output is (plan 033 C10r, V3 F1, superseding §3.7's
+// "Start it again if you still need it", which a model read as "it produced
+// nothing" of a job that had exited 0):
 //
-//	<background_command id="t4.2.1" status="stopped">
+//	<background_command id="t4.2.1" status="unknown">
 //	$ npm run dev
-//	The session was closed while this command was running, or before its result was delivered; it is not running now. Start it again if you still need it.
+//	The session was closed before this command's result was delivered. It is not running now; it may have finished first. Its output, if it wrote any, is saved to: /…/tool-output/tool_t4.2.1. Check that file before running it again.
 //	</background_command>
+//
+// The file is the one the job's receipt named (tool.JobSpillPath), which the
+// job wrote from its first byte to its end; a receipt that named none — the
+// file could not be opened — gives a notice that says so.
 //
 // set aside as a suspended result (restoreJobs): it wakes nothing and keeps no
 // host alive, and the first turn a person starts takes it at its step 0, as it
@@ -50,9 +59,16 @@ import (
 // a job it never started stopped — the cost of P15's one-line rule, and a
 // harmless one.
 
-// jobResumeNotice is §3.7's resume notice, exact: the body of a stopped job's
-// block after its command's line.
-const jobResumeNotice = "The session was closed while this command was running, or before its result was delivered; it is not running now. Start it again if you still need it."
+// jobResumeNotice is the resume notice (the file's comment): the body of a
+// job's block after its command's line, naming spill, the file its receipt
+// named, or saying there is none.
+func jobResumeNotice(spill string) string {
+	const head = "The session was closed before this command's result was delivered. It is not running now; it may have finished first. "
+	if spill == "" {
+		return head + "Its output was not saved to a file."
+	}
+	return head + "Its output, if it wrote any, is saved to: " + spill + ". Check that file before running it again."
+}
 
 // The delimiters of the result blocks a results entry holds: a job's
 // (jobBlock) and a sub-agent's (resultBlock). Each block's own closing tag
@@ -66,8 +82,9 @@ const (
 )
 
 // stoppedJob is a job a resumed session's last incarnation started and never
-// delivered: its id and its command, as the call that started it gave it.
-type stoppedJob struct{ id, cmd string }
+// delivered: its id, its command, as the call that started it gave it, and
+// its spill file, as its receipt named it ("" for none).
+type stoppedJob struct{ id, cmd, spill string }
 
 // jobScan reads a transcript's path, entry by entry, for the jobs it started
 // and the ones it delivered (the file's comment). It is handed each entry's
@@ -111,7 +128,7 @@ func (j *jobScan) result(callID, text string, isErr bool, turn int) {
 	switch c.name {
 	case tool.BashTool:
 		if id, ok := tool.ParseJobMarker(text); ok && !isErr && jobTurn(id) == turn {
-			j.started = append(j.started, stoppedJob{id: id, cmd: commandArg(c.input)})
+			j.started = append(j.started, stoppedJob{id: id, cmd: commandArg(c.input), spill: tool.JobSpillPath(text)})
 		}
 	default: // bash_output, bash_stop: the block, when the answer is one
 		if id, ok := blockID(text, jobBlockOpen); ok {
@@ -208,11 +225,12 @@ func resultsJobIDs(text string) []string {
 
 // restoreJobs sets aside, in a resumed session, one result per job its last
 // incarnation started and never delivered (the file's comment): suspended, in
-// stopped's order, its done closed and no handle, its block §3.7's resume
-// notice — the command redacted with the session's widest redaction as it is
-// now (union, P19), and the text again as deliver makes the block. An id the
-// registry holds already is left alone (it cannot be: a resumed session
-// numbers its turns on from the path's). A nil runner has none.
+// stopped's order, its done closed and no handle, its status unknown and its
+// block the resume notice — the command redacted with the session's widest
+// redaction as it is now (union, P19), and the text again as deliver makes
+// the block. An id the registry holds already is left alone (it cannot be: a
+// resumed session numbers its turns on from the path's). A nil runner has
+// none.
 func (r *subagents) restoreJobs(stopped []stoppedJob) {
 	if r == nil || len(stopped) == 0 {
 		return
@@ -229,7 +247,7 @@ func (r *subagents) restoreJobs(stopped []stoppedJob) {
 		close(done)
 		r.finished++
 		r.results[sj.id] = &bgResult{kind: kindJob, id: sj.id, typ: tool.JobType, desc: commandLine(cmd), callID: sj.id,
-			state: resultSuspended, status: tool.JobStopped, text: red.String(jobText(cmd, jobResumeNotice)),
+			state: resultSuspended, status: tool.JobUnknown, text: red.String(jobText(cmd, jobResumeNotice(sj.spill))),
 			seq: r.finished, done: done, job: &jobState{cmd: cmd, attrs: jobAttrs{exit: -1}}}
 		r.order = append(r.order, sj.id)
 	}

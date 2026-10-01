@@ -28,9 +28,10 @@ import (
 //
 // It happens exactly once, in JobSlot.Start, and nothing before it can fail:
 // from that call on the job's goroutine owns the pipe's read end, the reader
-// and its stages, the output and its spill writer, the group — its signals,
-// its reaping and its release channel — and the progress; the call closes,
-// stops or signals none of them again, and returns its receipt. Before it the
+// and its stages — and their tracking by the session (Jobs.Track) — the
+// output and its spill writer, the group — its signals, its reaping and its
+// release channel — and the progress; the call closes, stops or signals none
+// of them again, and returns its receipt. Before it the
 // call owns them all, and a promotion whose slot it took but never handed
 // over gives the slot back and kills the command (supervised's deferred
 // clean-up). The job's own Wait is the foreground's end, under the job's
@@ -57,6 +58,11 @@ type bashJob struct {
 	copyErr error // the reader's, set before copied closes
 	began   time.Time
 	closing <-chan struct{} // the session's (Env.Closing)
+	// untrack ends the session's tracking of stream (tool.Jobs.Track, from
+	// attach), once, as the command is done with: by the call that never
+	// handed it over (supervised), else by the job's Wait. A no-op where the
+	// session runs no jobs.
+	untrack func()
 }
 
 // Output is tool.JobBody's: the output after byte from (output.since).
@@ -68,8 +74,9 @@ func (j *bashJob) Output(from int64) tool.JobOutput { return j.out.since(from) }
 // context and limit (see the file's comment), and keeps its bounds: a stop
 // returns within 6.7 s, a close within 2.7 s.
 func (j *bashJob) Wait(ctx context.Context, limit time.Duration, progress tool.Progress) tool.JobEnd {
+	defer j.untrack() // however Wait returns: a panic the harness recovers included
 	stopProgress := j.out.report(progress)
-	why, reaped := j.g.supervise(ctx, j.closing, limit, j.copied, nil)
+	why, reaped := j.g.supervise(ctx, j.closing, limit, nil, j.copied, nil)
 	returned, complete := collect(j.r, j.copied, &j.copyErr)
 	stopProgress()
 	if returned {
@@ -194,11 +201,11 @@ const (
 // values), with the note of a reduced limit, as metadata, before the marker.
 // path is the spill file, "" when it could not be opened in time.
 func (c *bashCall) startReceipt(path string) string {
-	saved := "Its output is saved to: " + path
+	saved := "Its output is " + tool.JobSavedTo + path
 	if path == "" {
 		saved = "Its output could not be saved to a file."
 	}
-	text := "Started the command in the background as job `" + c.id + "`. It runs until it exits, until you stop it with bash_stop, " +
+	text := tool.JobStartedHead + c.id + "`. It runs until it exits, until you stop it with bash_stop, " +
 		"or for at most " + tool.JobLimit(c.timeout) + "; the session closing stops it too. " + saved + "\n" +
 		"Its result is delivered to you when it finishes; do not poll it or sleep waiting for it. " +
 		"Call bash_output with its id to read its output so far."
@@ -211,8 +218,10 @@ func (c *bashCall) startReceipt(path string) string {
 // promotionReceipt is a promoted command's result (§3.7, exact modulo
 // values): the output so far — the tail a finished command's result would
 // show, "(no output)" when there is none, the truncation notice when it is cut
-// — then the metadata, the note of a reduced timeout first when there was
-// one, and the marker.
+// — then, after one blank line, the metadata, the note of a reduced timeout
+// first when there was one, and the marker. One blank line whether or not the
+// output so far ends its last line (plan 033 C10r, V3 F5: a foreground
+// result's "\n\n" after a tail ending in a newline left two).
 func (c *bashCall) promotionReceipt(kept string, cut bool, path string) string {
 	text := kept
 	if text == "" {
@@ -221,7 +230,7 @@ func (c *bashCall) promotionReceipt(kept string, cut bool, path string) string {
 	if cut {
 		text = "...output truncated...\n\n" + text
 	}
-	saved := "all of it is saved to: " + path + "."
+	saved := "all of it is " + tool.JobSavedTo + path + "."
 	if path == "" {
 		saved = "it could not be saved to a file."
 	}
@@ -231,10 +240,10 @@ func (c *bashCall) promotionReceipt(kept string, cut bool, path string) string {
 	}
 	meta = append(meta, fmt.Sprintf("The command did not finish within its timeout of %d ms. It was not stopped: it was moved to the background as "+
 		"job `%s` and is still running, for at most %s. Its output so far is above; %s "+
-		"Its result is delivered to you when it finishes; do not poll it or sleep waiting for it. "+
+		strings.TrimPrefix(tool.JobPromotedSavedEnd, ". ")+"; do not poll it or sleep waiting for it. "+
 		"Call bash_output with its id to read newer output, or bash_stop to stop it.",
 		c.timeout.Milliseconds(), c.id, strings.Replace(tool.JobLimit(tool.JobPromotedLimit), " ", " more ", 1), saved))
-	return text + "\n\n<shell_metadata>\n" + strings.Join(meta, "\n") + "\n</shell_metadata>\n" + tool.JobMarker(c.id)
+	return strings.TrimSuffix(text, "\n") + "\n\n<shell_metadata>\n" + strings.Join(meta, "\n") + "\n</shell_metadata>\n" + tool.JobMarker(c.id)
 }
 
 // reducedText is the note of a timeout the model asked for above the most it

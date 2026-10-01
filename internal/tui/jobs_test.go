@@ -105,3 +105,63 @@ func TestStopKeyOnAJobRow(t *testing.T) {
 		t.Fatalf("after the stop: focused %v on %q; want the job's row kept", m.agentFocus, m.agentID)
 	}
 }
+
+// TestBashJobRowCountsFromItsCommand (plan 033 C10r, V3 F4): a job's running
+// counter counts from its command's own start (StartedAt) — for a promoted
+// command, minutes before the promotion that spawned its row — so it runs on
+// to the duration the row ends with instead of starting at the promotion and
+// jumping. The controls: a background sub-agent's row counts from its
+// sighting, as it always has, and a job whose StartedAt lies ahead of the
+// TUI's clock does too.
+func TestBashJobRowCountsFromItsCommand(t *testing.T) {
+	now := time.Date(2026, 9, 24, 10, 0, 0, 0, time.UTC) // stopModel's clock
+	promoted := jobRow("t1.1.1", "for i in $(seq 1 40); do echo tick $i; sleep 3; done", agent.SubagentRunning)
+	promoted.StartedAt = now.Add(-10 * time.Second) // its foreground phase: the 10 s timeout
+	ahead := jobRow("t1.1.2", "make", agent.SubagentRunning)
+	ahead.StartedAt = now.Add(time.Hour)
+	kid := stopKid("kid-1", "scan", agent.SubagentRunning)
+	kid.Background, kid.StartedAt = true, now.Add(-10*time.Second)
+	for _, c := range []struct {
+		name string
+		row  agent.SubagentInfo
+		want time.Duration
+	}{
+		{"a promoted job", promoted, 10 * time.Second},
+		{"a job whose start is ahead of the clock", ahead, 0},
+		{"a background sub-agent", kid, 0},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			m, _ := stopModel(t, agent.NativeProvider(), c.row)
+			if got, want := m.agentSuffix(c.row), "bg · "+formatElapsed(c.want); got != want {
+				t.Fatalf("the row's suffix at its spawn is %q; want %q", got, want)
+			}
+		})
+	}
+}
+
+// TestBashJobsToolsAreNotCounted (plan 033 C10r, V3 F2): a running job's
+// command, folded as its own scope's execute row, is neither counted in status
+// row 2's in-flight work nor named by the working line, during a turn that is
+// working; a background sub-agent's running command beside it is both, the
+// control. Both read the fold's ordered tools (transcript's jobScope).
+func TestBashJobsToolsAreNotCounted(t *testing.T) {
+	kid := stopKid("kid-1", "scan", agent.SubagentRunning)
+	kid.Background = true
+	m, _ := stopModel(t, agent.NativeProvider(), jobRow("t1.1.1", "sleep 900", agent.SubagentRunning), kid)
+	for _, ev := range []agent.Event{
+		{Type: agent.EventTool, Agent: "t1.1.1", Tool: &agent.ToolEvent{ID: "t1.1.1", Kind: "execute", Status: "in_progress",
+			Title: "sleep 900", RawInput: "sleep 900"}},
+		{Type: agent.EventTool, Agent: "kid-1", Tool: &agent.ToolEvent{ID: "k1", Kind: "execute", Status: "in_progress",
+			Title: "go test ./...", RawInput: "go test ./..."}},
+	} {
+		tm, _ := m.Update(eventMsg{ev: ev})
+		m = tm.(Model)
+	}
+	m.status = statusWorking
+	if got := m.inFlightCounts(); got != "1 shell" {
+		t.Fatalf("in flight %q; want the sub-agent's one shell, not the job's", got)
+	}
+	if got := m.spinnerActivity(); strings.Contains(got, "sleep 900") || !strings.Contains(got, "go test") {
+		t.Fatalf("the working line reads %q; want the sub-agent's command, never the job's", got)
+	}
+}

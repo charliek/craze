@@ -63,22 +63,28 @@ import (
 //
 // # Reads
 //
-// bash_output reads a running job's output since a cursor: where the call's
-// own result left the model — 0 for a started job, the output a promotion's
-// result showed for a promoted one — and moved on by every read whose result
-// an append writes. A read records how far it read, owned by its call; the
+// bash_output reads a running job's output since a cursor: where the model's
+// own reads have taken it — from 0 — moved on by every read whose result an
+// append writes. A read records how far it read, owned by its call; the
 // append that writes the call's result commits it (commitCalls), and a turn
 // that ends without writing it forgets it (restoreTurn), so the next read
-// shows the same output again. Reads of one job are serialized (readMu), so
-// two reads in one step show consecutive output, the second from where the
-// first stopped.
+// shows the same output again. A promotion's receipt is the first such read,
+// owned by the bash call that returned it (promotionRead): the output so far
+// counts as seen only once the receipt is written (review r7 finding 3).
+// Reads of one job are serialized (readMu), so two reads in one step show
+// consecutive output, the second from where the first stopped.
 //
 // # Texts
 //
-// Every text a job gives the model — its result block, bash_output's and
-// bash_stop's answers — is redacted as it is made with the session's widest
-// redaction (union, P19): the command's live stream and its spill file keep
-// the redactor of the call that started it.
+// Every text a job gives the model — its receipts, its JobOutput snapshots,
+// its result block, bash_output's and bash_stop's answers — is redacted as it
+// is made with the session's widest redaction (union, P19). The command's
+// live stream, and so its output, its spill file and every read of it, is
+// redacted with the session's key set as it grows (Jobs.Track; plan 033 C10r,
+// superseding §3.7's "a running job's stream and spill file keep their
+// call-time Replacer"): a key learned while the job runs is caught in it
+// whole however the command splits it across its writes and the model's
+// reads.
 
 // maxJobs is how many jobs one session runs at once (P14).
 const maxJobs = 8
@@ -201,6 +207,10 @@ func (j jobs) Reserve(id string) (tool.JobSlot, error) {
 // Redact is tool.Jobs': the session's widest redaction (P19).
 func (j jobs) Redact(text string) string { return j.r.union(nil).String(text) }
 
+// Track is tool.Jobs': the stream kept widened to the session's key set while
+// it runs (toolset.track, plan 033 C10r).
+func (j jobs) Track(s tool.KeyedStream) (untrack func()) { return j.r.s.tools.track(s) }
+
 // jobSlot is one reserved slot (tool.JobSlot): Start or Release, once.
 type jobSlot struct {
 	r    *subagents
@@ -235,8 +245,8 @@ func (s *jobSlot) Start(spec tool.JobSpec, body tool.JobBody) {
 	cmd := red.String(spec.Command)
 	res := &bgResult{kind: kindJob, id: s.id, typ: tool.JobType, desc: commandLine(cmd), callID: s.id,
 		state: resultRunning, done: make(chan struct{}),
-		job: &jobState{h: &jobHandle{cancel: cancel}, body: body, cmd: cmd, began: spec.Began, read: spec.Seen,
-			attrs: jobAttrs{exit: -1}}}
+		job: &jobState{h: &jobHandle{cancel: cancel}, body: body, cmd: cmd, began: spec.Began,
+			reads: promotionRead(r.turn.Load(), s.id, spec.Seen), attrs: jobAttrs{exit: -1}}}
 	r.regMu.Lock()
 	r.results[s.id] = res
 	r.order = append(r.order, s.id)
@@ -247,7 +257,24 @@ func (s *jobSlot) Start(spec tool.JobSpec, body tool.JobBody) {
 	// goroutine counted at the reservation always runs to its end.
 	defer close(gate)
 	r.emit(JobStarted{ID: s.id, CallID: s.id, Command: cmd, Workdir: red.String(spec.Workdir), Limit: spec.Limit,
-		Promoted: spec.Promoted, At: r.s.now()})
+		Promoted: spec.Promoted, At: r.s.now(), Began: spec.Began})
+}
+
+// promotionRead is where a job's reads start (plan 033 C10r, review r7
+// finding 3): a promoted command's receipt shows the output so far — seen
+// bytes of it — and that is a read like any bash_output's, owned by the bash
+// call that returned the receipt, in the turn link names. The append that
+// writes the call's result commits it (commitCalls: the bash call is among a
+// tool entry's output calls), and a turn that ends without one forgets it
+// (restoreTurn), so a receipt the transcript never got leaves the cursor at 0
+// and the next bash_output shows that output again. A started job's receipt
+// shows none: nothing to read. With no turn — a bash call runs only in one —
+// there is no append to wait for either, and nothing is taken as read.
+func promotionRead(link *turnLink, id string, seen int64) []jobRead {
+	if seen <= 0 || link == nil {
+		return nil
+	}
+	return []jobRead{{own: owner{turn: link.number, step: stepOfCall(id), call: id, wake: link.wake}, to: seen}}
 }
 
 // commandLine is a job's command as a compaction's running-tasks list names
@@ -292,10 +319,16 @@ func (r *subagents) runJob(res *bgResult, ctx context.Context, limit time.Durati
 	<-gate
 	// The body's progress goes out as JobOutput until the body has returned,
 	// and never after: a snapshot being delivered as it returns is let finish
-	// first (progressMu), so every JobOutput precedes the JobFinished.
+	// first (progressMu), so every JobOutput precedes the JobFinished. Each is
+	// redacted as it goes with the session's widest redaction (union, P19),
+	// as every text a job gives the model is: the stream redacts what the
+	// command prints after the session learns a key, and this catches one
+	// it printed before, which the snapshot — the output's tail, not a read
+	// from a cursor — holds whole (plan 033 C10r, review r7 finding 9).
 	var progressMu sync.Mutex
 	ended := false
 	progress := func(snapshot string) {
+		snapshot = r.union(nil).String(snapshot) // before progressMu: union takes the toolset's and the registry's locks
 		progressMu.Lock()
 		defer progressMu.Unlock()
 		if !ended {
@@ -430,7 +463,8 @@ const (
 //     holding no lock, and stopping nothing — for the job to end, for the
 //     wait, its own cancel or the session's close, and then judges again: a
 //     wait that ran out is a read the doom-loop guard counts as observed
-//     (P13).
+//     (P13). In a step that also stops a job it does not wait, and says so
+//     (stopAnnounced).
 func (j jobs) Output(ctx context.Context, call tool.JobOutputCall) tool.Result {
 	res := j.r.jobOutput(ctx, call)
 	res.Text = j.r.union(nil).String(res.Text)
@@ -446,6 +480,12 @@ func (r *subagents) jobOutput(ctx context.Context, call tool.JobOutputCall) tool
 		return tool.Result{Text: jobsNoTurn, IsError: true, Class: tool.ClassToolError}
 	}
 	own := owner{turn: link.number, step: stepOfCall(call.CallID), call: call.CallID, wake: link.wake}
+	// A step that stops a job waits for nothing (stopAnnounced): its stop
+	// must not queue behind this call in Fantasy's slots.
+	skipped := call.Wait > 0 && r.stopping(own)
+	if skipped {
+		call.Wait = 0
+	}
 	closing := r.s.tools.closing
 	var timeout <-chan time.Time
 	waited := false
@@ -455,7 +495,7 @@ func (r *subagents) jobOutput(ctx context.Context, call tool.JobOutputCall) tool
 			return answer
 		}
 		if call.Wait <= 0 || waited {
-			if read, ok := r.readJob(res, own, waited); ok {
+			if read, ok := r.readJob(res, own, waited, skipped); ok {
 				return read
 			}
 			continue // it ended as it was read: its result is the answer
@@ -513,11 +553,12 @@ func (r *subagents) jobAnswer(id string, own owner) (res *bgResult, answer tool.
 // readJob is a read of the running job res for own: the output after the
 // cursor — the committed one, or the furthest this turn's reads have taken it
 // — recorded as own's read, and the answer, observed when the call waited out
-// its wait. ok is false, and nothing recorded, when the job has ended since
-// it was found running: its result is then the answer. Reads of one job are
-// serialized (readMu, then regMu inside it), and the output is read with
+// its wait, and saying so when a stop in its step skipped the wait it asked
+// for (skipped). ok is false, and nothing recorded, when the job has ended
+// since it was found running: its result is then the answer. Reads of one job
+// are serialized (readMu, then regMu inside it), and the output is read with
 // neither of the registry's locks held but the job's own.
-func (r *subagents) readJob(res *bgResult, own owner, waited bool) (tool.Result, bool) {
+func (r *subagents) readJob(res *bgResult, own owner, waited, skipped bool) (tool.Result, bool) {
 	j := res.job
 	j.readMu.Lock()
 	defer j.readMu.Unlock()
@@ -540,6 +581,9 @@ func (r *subagents) readJob(res *bgResult, own owner, waited bool) (tool.Result,
 		return tool.Result{}, false
 	}
 	text := fmt.Sprintf(jobStillRunning, res.id, tool.JobDuration(r.s.now().Sub(j.began)))
+	if skipped {
+		text += stopStepNoWait
+	}
 	switch {
 	case out.Total <= from:
 		text += jobNoNewOutput
@@ -617,6 +661,49 @@ func (r *subagents) jobStop(ctx context.Context, call tool.JobStopCall) tool.Res
 		return answer
 	}
 	return tool.Result{Text: fmt.Sprintf(jobStopNotEnded, res.id)}
+}
+
+// stepRef names one step of one turn: a call's, by its harness id
+// ("t<turn>.<step>.<n>").
+type stepRef struct{ turn, step int }
+
+// stopStepNoWait follows the head of an agent_output or bash_output answer
+// that would have waited, in a step that also stops a job (stopAnnounced).
+const stopStepNoWait = " It was not waited for, because this step also stops a job (bash_stop)."
+
+// stopAnnounced records that step of turn has announced a bash_stop (plan 033
+// C10r, review r7 finding 5), which the turn does as the call is announced
+// (toolCall): Fantasy announces every call of a step before it runs any
+// (agent.go:1755-1782), so by the time one of the step's calls runs, the
+// mark is in place for all of them.
+//
+// What it buys is that a stop never queues behind a wait. Fantasy runs a
+// step's Parallel calls — agent_output, bash_output and bash_stop all are —
+// in five slots, in the order the model placed them (agent.go:1671): five
+// waits of up to 600 s placed before a bash_stop would hold every slot, and
+// the stop — its 7 s bound not yet started — would wait for one of them to
+// end. So in a step that stops a job, agent_output and bash_output answer at
+// once, as their wait 0 does (stopping), and say so: the slots they take are
+// free again at once, and the stop runs. The mark is the step's, whatever its
+// stop turns out to do — a gate or the doom-loop guard may still refuse it —
+// and a stop is never begun here, before its call is gated; a retried attempt
+// of the step keeps it, which costs that attempt's waits a snapshot, never a
+// stop. A nil runner (a sub-agent's, which has neither tool) records nothing.
+func (r *subagents) stopAnnounced(turn, step int) {
+	if r == nil {
+		return
+	}
+	r.regMu.Lock()
+	r.stopStep = stepRef{turn: turn, step: step}
+	r.regMu.Unlock()
+}
+
+// stopping reports whether own's step announced a bash_stop (stopAnnounced):
+// an output call of that step does not wait.
+func (r *subagents) stopping(own owner) bool {
+	r.regMu.Lock()
+	defer r.regMu.Unlock()
+	return own.step > 0 && r.stopStep == stepRef{turn: own.turn, step: own.step}
 }
 
 // unknownJob refuses a job tool's id that names no job of this session,

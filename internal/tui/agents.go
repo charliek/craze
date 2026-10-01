@@ -29,6 +29,8 @@ func subagentTerminal(s agent.SubagentInfo) bool {
 	return s.Status == agent.SubagentCompleted || s.Status == agent.SubagentFailed || s.Status == agent.SubagentCancelled
 }
 
+// noteAgentStart stamps the row id's running counter on its first sighting:
+// now, or for a bash job's row its command's own start (spawnStart).
 func (m *Model) noteAgentStart(id string) {
 	if id == "" {
 		return
@@ -37,7 +39,11 @@ func (m *Model) noteAgentStart(id string) {
 		m.agentStart = make(map[string]time.Time)
 	}
 	if _, ok := m.agentStart[id]; !ok {
-		m.agentStart[id] = m.now()
+		start := m.now()
+		if info, found := m.subagentByID(id); found {
+			start = m.spawnStart(info)
+		}
+		m.agentStart[id] = start
 	}
 }
 

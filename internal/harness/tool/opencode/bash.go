@@ -290,6 +290,13 @@ type ops struct {
 	// expiring is a test seam: promotion.expiring, run as the foreground
 	// timeout fires in a session that runs jobs. nil in production.
 	expiring func()
+	// expire is a test seam: the foreground timeout's timer (supervise's
+	// fire), which a test fires once the command has started and its output
+	// so far has arrived, so that no test of what happens at the timeout
+	// depends on how fast a loaded machine starts a shell (review r7 finding
+	// 10). Such a test gives a timeout long enough that launch's own bound,
+	// which is real time, is never what it meets. nil in production.
+	expire <-chan time.Time
 }
 
 var realOps = ops{stat: os.Stat, ensureTmp: ensureTmp, start: startGroup, openSpill: openSpill}
@@ -378,6 +385,7 @@ func (c *bashCall) supervised(ctx context.Context, env tool.Env, j *bashJob, dea
 			slot.Release()
 		}
 		_ = j.r.Close()
+		j.untrack()
 	}()
 	stopProgress := j.out.report(env.Progress)
 	var promote *promotion
@@ -393,7 +401,7 @@ func (c *bashCall) supervised(ctx context.Context, env tool.Env, j *bashJob, dea
 		}}
 	}
 
-	why, reaped := j.g.supervise(ctx, env.Closing, time.Until(deadline), j.copied, promote)
+	why, reaped := j.g.supervise(ctx, env.Closing, time.Until(deadline), c.ops.expire, j.copied, promote)
 	if why == endPromote {
 		stopProgress()
 		return c.promote(env, j, slot, &handed)
@@ -434,10 +442,22 @@ func (c *bashCall) supervised(ctx context.Context, env tool.Env, j *bashJob, dea
 // stripper carries an escape sequence the same way. Nothing the reader writes
 // to waits on a file: the spill file is written by a goroutine of its own
 // (spiller), so the reader always empties the pipe.
+//
+// In a session that runs jobs the stream is tracked from here until the
+// command is done with (tool.Jobs.Track; bashJob.untrack): any command there
+// may become a job and outlive its turn's redactor, so its redaction is
+// widened with every key the session learns while it runs, and the output,
+// its spill file and every bash_output read hold none of them (plan 033
+// C10r).
 func (c *bashCall) attach(env tool.Env, g *group, r *os.File, began time.Time) *bashJob {
 	out := &output{home: env.Home, id: c.id, open: c.ops.openSpill, cap: c.spillCap}
 	j := &bashJob{c: c, g: g, r: r, out: out, stream: newModelStream(env.Redactor, out),
-		copied: make(chan struct{}), began: began, closing: env.Closing}
+		copied: make(chan struct{}), began: began, closing: env.Closing, untrack: func() {}}
+	if env.Jobs != nil {
+		// Before the reader starts, so the stream decides no byte before it
+		// knows every key the session does.
+		j.untrack = env.Jobs.Track(j.stream)
+	}
 	go func() {
 		defer close(j.copied)
 		_, j.copyErr = io.Copy(j.stream, r)

@@ -710,7 +710,8 @@ func (r *subagents) restoreTurn(turn int) (gave bool) {
 //   - running: the call waits — holding no lock, and never cancelling the
 //     child — for it to end, for call.Wait, for its own cancel or for the
 //     session's closing, and then judges again; a child still running when
-//     the wait runs out is not an error.
+//     the wait runs out is not an error. In a step that also stops a job it
+//     does not wait, and says so (stopAnnounced, plan 033 C10r).
 //
 // Whatever it answers — the result, a fixed reply, a refusal or aborted — is
 // redacted last with a replacer built as it returns (union), over the keys
@@ -747,6 +748,12 @@ func (r *subagents) output(ctx context.Context, call tool.OutputCall) tool.Resul
 		return tool.Result{Text: subagentNoTurn, IsError: true, Class: tool.ClassToolError}
 	}
 	own := owner{turn: link.number, step: stepOfCall(call.CallID), call: call.CallID, wake: link.wake}
+	// A step that stops a job waits for nothing (stopAnnounced, plan 033
+	// C10r): its bash_stop must not queue behind this call in Fantasy's slots.
+	skipped := call.Wait > 0 && r.stopping(own)
+	if skipped {
+		call.Wait = 0
+	}
 	closing := parent.tools.closing
 	var timeout <-chan time.Time
 	for {
@@ -775,6 +782,9 @@ func (r *subagents) output(ctx context.Context, call tool.OutputCall) tool.Resul
 		done := res.done
 		r.regMu.Unlock()
 		still := tool.Result{Text: fmt.Sprintf(outputStillRunning, call.ID)}
+		if skipped {
+			still.Text += stopStepNoWait
+		}
 		if call.Wait <= 0 {
 			return still
 		}

@@ -219,6 +219,10 @@ type subagents struct {
 	// them; at maxJobWakes a job result that becomes ready is suspended.
 	jobsHeld  int
 	wakeChain int
+	// stopStep is the latest step whose announced calls include a bash_stop
+	// (stopAnnounced, plan 033 C10r): that step's agent_output and
+	// bash_output calls do not wait. Zero is none.
+	stopStep stepRef
 
 	// seams are the runner's test seams, set before the first turn; zero is
 	// production.

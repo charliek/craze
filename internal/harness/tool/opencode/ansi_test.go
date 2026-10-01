@@ -3,8 +3,10 @@ package opencode
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"math/rand/v2"
 	"strings"
+	"sync"
 	"testing"
 	"unicode/utf8"
 
@@ -345,4 +347,82 @@ func FuzzModelStream(f *testing.F) {
 			t.Fatalf("the output holds a key: %q", whole)
 		}
 	})
+}
+
+// TestModelStreamWidensBothStages (plan 033 C10r, review r7 finding 9): a
+// stream widened as it runs — a bash job's, when the session learns a key —
+// redacts the new key after the Widen as if it had known it from the start:
+// split by an escape sequence (the second redactor's case), with a sequence
+// eating its first byte (the first one's), and split across writes. The
+// controls widen one stage only, and each leaks one of the cases: both stages
+// must take the key, together.
+func TestModelStreamWidensBothStages(t *testing.T) {
+	texts := []string{
+		"before sk-canary-\x1b[0malpha-0001 after\n", // joined by the stripper: the second stage's
+		"x\x1b" + keyA + "\n",                        // its "s" eaten with the escape: the first stage's
+		"k=" + keyA + "\n",
+	}
+	run := func(text string, widen func(*modelStream, *redact.Replacer)) string {
+		var out bytes.Buffer
+		m := newModelStream(redact.New(), &out) // knew no key when it started
+		if _, err := m.Write([]byte("started\n")); err != nil {
+			t.Fatal(err)
+		}
+		widen(m, redact.New(keyA))
+		for _, cut := range []string{text[:len(text)/2], text[len(text)/2:]} {
+			if _, err := m.Write([]byte(cut)); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := m.Close(); err != nil {
+			t.Fatal(err)
+		}
+		return out.String()
+	}
+	leaks := func(out string) bool { return strings.Contains(out, keyA[1:]) || strings.Contains(out, "canary") }
+	for _, text := range texts {
+		got := run(text, (*modelStream).Widen)
+		if leaks(got) || got != "started\n"+streamed(t, redact.New(keyA), text, []int{len(text)}) {
+			t.Fatalf("%q after a Widen: %q; want it as a stream that knew the key", text, got)
+		}
+	}
+	rawOnly := func(m *modelStream, r *redact.Replacer) { m.raw.Widen(r) }
+	keysOnly := func(m *modelStream, r *redact.Replacer) { m.keys.Widen(r) }
+	if got := run(texts[0], rawOnly); !leaks(got) {
+		t.Fatalf("control: widening the first stage alone caught a key the stripper joined: %q", got)
+	}
+	if got := run(texts[1], keysOnly); !leaks(got) {
+		t.Fatalf("control: widening the second stage alone caught a key an escape ate the start of: %q", got)
+	}
+}
+
+// TestModelStreamWidenDuringWrites: Widen comes from the session's goroutines
+// while the reader writes; under -race this is the proof that the stream's
+// lock covers both. Every key widened in before a write began is redacted in
+// it.
+func TestModelStreamWidenDuringWrites(t *testing.T) {
+	var out bytes.Buffer // written under the stream's lock, read once it is closed
+	m := newModelStream(redact.New(), &out)
+	m.Widen(redact.New(keyA))
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		for range 300 {
+			if _, err := m.Write([]byte("tick sk-canary-\x1b[0malpha-0001\n")); err != nil {
+				t.Error(err)
+				return
+			}
+		}
+	})
+	wg.Go(func() {
+		for i := range 100 {
+			m.Widen(redact.New(keyA, fmt.Sprintf("zq-learned-key-%04d", i)))
+		}
+	})
+	wg.Wait()
+	if err := m.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(out.String(), "canary") {
+		t.Fatal("a key known before every write survived")
+	}
 }

@@ -38,7 +38,8 @@ type Mirror struct {
 	// one is running.
 	Turn Turn
 	// Tools is Tools(): every retained tool's last state in entry order, main
-	// first and then each child's in creation order.
+	// first and then each child's in creation order — a bash job's left out
+	// (jobScope).
 	Tools []agent.ToolEvent
 }
 
@@ -80,9 +81,26 @@ func (m *Model) Mirror() Mirror {
 	}
 	mr.Tools = appendTools(mr.Tools, m.Main.live())
 	for _, id := range m.subOrder {
+		if jobScope(m.agents[id].info) {
+			continue
+		}
 		mr.Tools = appendTools(mr.Tools, m.subs[id].live())
 	}
 	return mr
+}
+
+// jobScope reports whether the scope of the roster row info is a native
+// session's background bash job's (plan 033 P12: background, of type
+// agent.BashJobType, which no sub-agent's type can be): its one execute row
+// stays in its own transcript, for its view, and out of the ordered tools a
+// client reads what is working from (plan 033 C10r, V3 F2). A job is no work
+// of the turn's — a dev server runs for hours — so its running command is
+// neither counted in the session's in-flight tools ("· 2 shells") nor named
+// by the working line ("Running sleep 900"), as its roster row is neither
+// the spinner's nor /connect's (internal/tui's bashJobRow). A scope with no
+// row is a child's.
+func jobScope(info agent.SubagentInfo) bool {
+	return info.Background && info.SubagentType == agent.BashJobType
 }
 
 // cloneOptions is a config catalog the caller owns: each option, and each
