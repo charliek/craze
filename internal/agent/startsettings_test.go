@@ -287,32 +287,90 @@ func TestStartSettingsFollowTheModel(t *testing.T) {
 // --effort's set (-32602) is journalled start_setting_refused and said on
 // Diag, the session starts at its own effort, and --fast after it is still
 // applied. The negative control is a set that is never answered: that is no
-// refusal, and the start fails with its context.
+// refusal, and the start fails (TestAnUnansweredStartSettingFailsTheStart).
 func TestARefusedStartSettingIsNotedAndTheSessionStarts(t *testing.T) {
-	t.Run("refused", func(t *testing.T) {
-		t.Setenv("CRAZE_FAKE_SET_REFUSE", "effort")
-		s, diag := startSettingsSession(t, "effort", Options{Effort: "low", Fast: boolPtr(true)})
-		snap := s.Snapshot()
-		if optCurrent(snap, "effort") != "medium" || optCurrent(snap, "fast") != "true" {
-			t.Fatalf("the session starts at %s", cfgString(snap.Config))
-		}
-		if !strings.Contains(diag.String(), "craze: --effort low was refused, and the session starts without it:") {
-			t.Fatalf("Diag: %q", diag.String())
-		}
-		w := journalOf(t, s.log)
-		closeJournaled(t, s, w)
-		notes := diags(fileLines(t, w), diagSettingRefused)
-		if len(notes) != 1 || notes[0]["setting"] != "effort" || notes[0]["option"] != "effort" || notes[0]["value"] != "low" ||
-			!strings.Contains(notes[0]["error"].(string), "Invalid params") {
-			t.Fatalf("the start_setting_refused notes: %v", notes)
-		}
-	})
-	t.Run("unanswered", func(t *testing.T) {
-		fifo := filepath.Join(t.TempDir(), "gate")
-		if err := syscall.Mkfifo(fifo, 0o600); err != nil {
-			t.Fatal(err)
-		}
-		t.Setenv("CRAZE_FAKE_SET_GATE", fifo)
+	t.Setenv("CRAZE_FAKE_SET_REFUSE", "effort")
+	s, diag := startSettingsSession(t, "effort", Options{Effort: "low", Fast: boolPtr(true)})
+	snap := s.Snapshot()
+	if optCurrent(snap, "effort") != "medium" || optCurrent(snap, "fast") != "true" {
+		t.Fatalf("the session starts at %s", cfgString(snap.Config))
+	}
+	if !strings.Contains(diag.String(), "craze: --effort low was refused, and the session starts without it:") {
+		t.Fatalf("Diag: %q", diag.String())
+	}
+	w := journalOf(t, s.log)
+	closeJournaled(t, s, w)
+	notes := diags(fileLines(t, w), diagSettingRefused)
+	if len(notes) != 1 || notes[0]["setting"] != "effort" || notes[0]["option"] != "effort" || notes[0]["value"] != "low" ||
+		!strings.Contains(notes[0]["error"].(string), "Invalid params") {
+		t.Fatalf("the start_setting_refused notes: %v", notes)
+	}
+}
+
+// gateSets holds every set_config_option the fake agent is sent unanswered
+// (CRAZE_FAKE_SET_GATE): nothing ever writes the FIFO.
+func gateSets(t *testing.T) {
+	t.Helper()
+	fifo := filepath.Join(t.TempDir(), "gate")
+	if err := syscall.Mkfifo(fifo, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CRAZE_FAKE_SET_GATE", fifo)
+}
+
+// TestAnUnansweredStartSettingFailsTheStart (plan 032 X47): a set the agent
+// never answers fails the start once startSettingWait has passed, naming the
+// flag — on a new session and on a load, for --effort and for --fast — under
+// a caller's context that never ends, context.Background(), as the TUI's
+// start and a detached host's have it. The caller's own cancellation is still
+// its own error, not reworded as the bound's.
+func TestAnUnansweredStartSettingFailsTheStart(t *testing.T) {
+	for _, tc := range []struct {
+		name, script string
+		load         bool
+		set          func(*Options)
+		sent, flag   string
+	}{
+		{"new, --effort", "effort", false, func(o *Options) { o.Effort = "low" }, "effort=low", "--effort low"},
+		{"new, --fast", "effort", false, func(o *Options) { o.Fast = boolPtr(true) }, "fast=true", "--fast"},
+		{"load, --effort", "permodel", true, func(o *Options) { o.Effort = "low" }, "effort=low", "--effort low"},
+		{"load, --no-fast", "permodel", true, func(o *Options) { o.Fast = boolPtr(false) }, "fast=false", "--no-fast"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			prev := startSettingWait
+			startSettingWait = 200 * time.Millisecond
+			t.Cleanup(func() { startSettingWait = prev })
+			gateSets(t)
+			calls := dumpCalls(t)
+			var s *session
+			if tc.load {
+				s = newLoadSession(t, tc.script, tc.set)
+			} else {
+				opts := Options{
+					Binary: fakeAgentPath(t), ExtraArgs: []string{"-script=" + tc.script},
+					Workspace: t.TempDir(), Stderr: &bytes.Buffer{},
+				}
+				tc.set(&opts)
+				s = newTestSession(t, opts)
+			}
+			done := make(chan error, 1)
+			go func() { done <- s.Start(context.Background()) }()
+			select {
+			case err := <-done:
+				want := "agent: " + tc.flag + ": the agent did not answer its set within 200ms"
+				if err == nil || err.Error() != want {
+					t.Fatalf("Start with its set unanswered: %v, want %q", err, want)
+				}
+			case <-time.After(10 * time.Second):
+				t.Fatal("Start did not fail with its set unanswered")
+			}
+			if got := calls(); !slices.Contains(got, "session/set_config_option "+tc.sent) {
+				t.Fatalf("the calls: %q", got)
+			}
+		})
+	}
+	t.Run("the caller's cancellation", func(t *testing.T) {
+		gateSets(t)
 		calls := dumpCalls(t)
 		s := newTestSession(t, Options{
 			Binary: fakeAgentPath(t), ExtraArgs: []string{"-script=effort"},
@@ -326,7 +384,7 @@ func TestARefusedStartSettingIsNotedAndTheSessionStarts(t *testing.T) {
 		cancel()
 		select {
 		case err := <-done:
-			if err == nil || refusedByAgent(err) {
+			if !errors.Is(err, context.Canceled) {
 				t.Fatalf("Start with its set unanswered: %v, want its context's end", err)
 			}
 		case <-time.After(10 * time.Second):

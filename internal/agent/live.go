@@ -789,7 +789,8 @@ func (s *session) start(ctx context.Context) (teardown bool, _ error) {
 // skipped and noted; one the agent refuses — it answered the call with an
 // error — is noted and the start goes on. Any other failure (the context
 // ended, the agent went away, a reply that could not be read) fails the start,
-// as the --mode/--model tails' do.
+// as the --mode/--model tails' do — and so does a set the agent leaves
+// unanswered for startSettingWait (startSet).
 func (s *session) startSettings(ctx context.Context, client *acp.Client, loading bool, snap *Snapshot) error {
 	effort := strings.TrimSpace(s.opts.Effort)
 	if effort == "" && s.opts.Fast == nil {
@@ -805,7 +806,7 @@ func (s *session) startSettings(ctx context.Context, client *acp.Client, loading
 		value, why := effortValue(opt, effort)
 		if why != "" {
 			notes.effortUnmatched(effort, why, opt)
-		} else if err := s.startSet(ctx, client, loading, snap, opt, value); err != nil {
+		} else if err := s.startSet(ctx, client, loading, snap, opt, value, "--effort "+effort); err != nil {
 			if !refusedByAgent(err) {
 				return err
 			}
@@ -817,7 +818,7 @@ func (s *session) startSettings(ctx context.Context, client *acp.Client, loading
 		opt := s.startOption(loading, snap, FastOption)
 		if value, ok := fastValue(opt, on); !ok {
 			notes.fastUnmatched(on)
-		} else if err := s.startSet(ctx, client, loading, snap, opt, value); err != nil {
+		} else if err := s.startSet(ctx, client, loading, snap, opt, value, fastFlag(on)); err != nil {
 			if !refusedByAgent(err) {
 				return err
 			}
@@ -849,30 +850,37 @@ func (s *session) startOption(loading bool, snap *Snapshot, find func(Snapshot) 
 	return find(Snapshot{Provider: s.provider().Info(), Config: s.snap.Config})
 }
 
-// startSet sets opt to value for startSettings. A new session's result is
-// copied back into Start's local snap, which the install publishes — the
-// catalog and the model as the read loop left them, the --model tail's own
-// copy-back. A load's goes through SetConfig, whose delta announces it; an
-// option the answered catalog no longer lists (ErrOptionGone) was still set.
-func (s *session) startSet(ctx context.Context, client *acp.Client, loading bool, snap *Snapshot, opt *ConfigOption, value string) error {
+// startSet sets opt to value for startSettings; flag is the setting as the
+// user asked for it. A new session's result is copied back into Start's local
+// snap, which the install publishes — the catalog and the model as the read
+// loop left them, the --model tail's own copy-back. A load's goes through
+// SetConfig, whose delta announces it; an option the answered catalog no
+// longer lists (ErrOptionGone) was still set.
+//
+// The set is bounded by startSettingWait (plan 032 X47): an agent that has
+// not answered it by then fails the start, naming flag. A refusal is an
+// answer, and the caller's own context ending is returned as it is.
+func (s *session) startSet(ctx context.Context, client *acp.Client, loading bool, snap *Snapshot, opt *ConfigOption, value, flag string) error {
 	if opt.Current == value {
 		return nil
 	}
+	setCtx, cancel := context.WithTimeout(ctx, startSettingWait)
+	defer cancel()
+	var err error
 	if loading {
-		_, err := s.SetConfig(ctx, "", opt.ID, value, "")
-		if errors.Is(err, ErrOptionGone) {
-			return nil
+		if _, err = s.SetConfig(setCtx, "", opt.ID, value, ""); errors.Is(err, ErrOptionGone) {
+			err = nil
 		}
-		return err
+	} else if _, err = client.SetConfig(setCtx, opt.ID, value); err == nil {
+		s.mu.Lock()
+		snap.Config = cloneConfig(s.snap.Config)
+		snap.CurrentModel = s.snap.CurrentModel
+		s.mu.Unlock()
 	}
-	if _, err := client.SetConfig(ctx, opt.ID, value); err != nil {
-		return err
+	if err != nil && ctx.Err() == nil && errors.Is(err, context.DeadlineExceeded) {
+		return fmt.Errorf("agent: %s: the agent did not answer its set within %s", flag, startSettingWait)
 	}
-	s.mu.Lock()
-	snap.Config = cloneConfig(s.snap.Config)
-	snap.CurrentModel = s.snap.CurrentModel
-	s.mu.Unlock()
-	return nil
+	return err
 }
 
 // refusedByAgent reports whether err is the agent's own answer refusing a
@@ -1197,6 +1205,14 @@ func (s *session) unstart() {
 // expanded is not held hostage to one. It is a var only so the tests can
 // shorten it; nothing in craze writes it.
 var catalogWait = 5 * time.Second
+
+// startSettingWait bounds each start setting's set (startSet; plan 032 X47).
+// The TUI's start and a detached host's both run Start under
+// context.Background(), so without it an agent that advertises effort or fast
+// and never answers the set would hold the start for ever: the engine never
+// admits, and the host's idle cleanup waits on its readiness. It is a var only
+// so the tests can shorten it; nothing in craze writes it.
+var startSettingWait = 15 * time.Second
 
 // awaitCatalog holds a prompt back, once and briefly, for the agent's first
 // available_commands_update. Until that update is applied every plugin row

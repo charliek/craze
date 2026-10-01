@@ -50,7 +50,8 @@ and `--continue` and `--resume` (exit 2).
 another client — reaches the agent before them; that holds whether the
 session runs in a [detached host](#sessions-outlive-their-terminal) or, under
 `detach = false`, in the TUI's own process. A setting the agent refuses is a
-line on stderr, and the session starts without it. Each one that is skipped or
+line on stderr, and the session starts without it; one the agent does not
+answer within 15 s fails the start. Each one that is skipped or
 refused is also a `diag` line in the session's
 [journal](configuration.md#session-journal) (`effort_unmatched`,
 `fast_unmatched`, `start_setting_refused`).
