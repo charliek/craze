@@ -16,9 +16,10 @@ type rowSpan struct {
 }
 
 // rowIndex is the rows one paint of a pane drew (plan 032 §3.3 C5): each
-// entry's own rendered slice, never copied, and the row it starts at. Nothing
-// joins them: the viewport, the hit test and the highlight read a row through
-// the starts, and only the rows they ask for.
+// entry's own rendered slice, never copied, and the row it starts at; a row is
+// one screen line (physicalLines). Nothing joins them: the viewport, the hit
+// test and the highlight read a row through the starts, and only the rows they
+// ask for.
 //
 // An index is immutable once a paint has made it. The pane keeps the latest
 // (pane.drawn) and the viewport of every Model copy keeps the one it was given,
@@ -122,6 +123,52 @@ func sameRows(a, b []string) bool {
 	return len(a) == len(b) && (len(a) == 0 || &a[0] == &b[0])
 }
 
+// physicalLines is an entry's rendered rows as the screen lines they draw: a
+// row holding a line break is the lines it breaks into. It is bubbles'
+// SetContent (v0.21.0) — "\r\n" made "\n", then split at every "\n" — applied
+// row by row, which is what that split of the joined transcript came to, so
+// the viewport, the hit test, the highlight and the copy all count the lines
+// bubbles' viewport counted. Nothing a renderer draws should hold a line
+// break, but a value an agent sent can carry one through to a row: a tool's
+// location "/tmp/a\nb" survives sanitizeText and toolRow draws it inside one
+// row, which bubbles showed as two lines.
+//
+// The selection now reads those same lines. Before C5 it read the logical
+// rows while the viewport showed the physical ones, so in this case the line a
+// press landed on and the line it copied could differ; reading the physical
+// lines is a deliberate fix of that, and changes no drawn byte.
+//
+// What the per-row split does not reproduce is a row ending in a lone "\r":
+// joined to the next row it made "\r\n", which bubbles cut back to "\n". No row
+// holds one — sanitizeText and sanitizeShellOutput drop "\r", and the tests'
+// paint watch refuses any "\r" left in a drawn row.
+//
+// rows comes back untouched when no row holds a "\n" (one byte scan per row,
+// no allocation); otherwise the lines are a new slice, so a rendered slice is
+// never written to (rowIndex).
+func physicalLines(rows []string) []string {
+	first := -1
+	for i, r := range rows {
+		if strings.IndexByte(r, '\n') >= 0 {
+			first = i
+			break
+		}
+	}
+	if first < 0 {
+		return rows
+	}
+	out := make([]string, first, len(rows)+1)
+	copy(out, rows[:first])
+	for _, r := range rows[first:] {
+		if strings.IndexByte(r, '\n') < 0 {
+			out = append(out, r)
+			continue
+		}
+		out = append(out, strings.Split(strings.ReplaceAll(r, "\r\n", "\n"), "\n")...)
+	}
+	return out
+}
+
 // needsRender says whether e has to be rendered again before it is drawn under
 // key: its content changed, the key did, or it is a `!` row still running —
 // that one draws the spinner, and the cache is keyed on things that do not
@@ -147,6 +194,8 @@ func (m *Model) paint(tr *pane) *rowIndex {
 	prev := tr.drawn
 	var note string
 	if tr.trimmed {
+		// One physical line as it stands: the note is a constant with no line
+		// break, so it needs no physicalLines.
 		note = renderSegs(m.width, seg{trimmedNote, styleFG(m.theme.Dim)})
 	}
 	full := prev == nil || tr.reshaped || prev.key != key || prev.trimmed != tr.trimmed ||
@@ -193,7 +242,10 @@ func (m *Model) paint(tr *pane) *rowIndex {
 	}
 	for _, e := range tr.rows[from:] {
 		if e.needsRender(key) {
-			e.rendered = m.renderEntry(tr, e, key)
+			// Split here and nowhere earlier: a streaming reply's markdown
+			// checkpoint keeps the renderer's own rows (mdCheckpoint.out), and
+			// a resumed render goes on from those, not from these.
+			e.rendered = physicalLines(m.renderEntry(tr, e, key))
 			e.plain = nil
 			e.renderedFor = key
 			e.dirty = false

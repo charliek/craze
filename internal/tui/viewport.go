@@ -12,7 +12,9 @@ import (
 // C5). It replaces bubbles' viewport (v0.21.0), whose SetContent was handed
 // every row joined into one string and then split it apart again and measured
 // the width of every line, on every paint. This one is handed the paint's
-// rowIndex and reads, on View, the rows it shows and no others.
+// rowIndex and reads, on View, the rows it shows and no others. Its rows are
+// already the lines that split made — an entry's rows are split where it is
+// rendered (physicalLines) — so a row is one line here as it was there.
 //
 // It has every call craze made of bubbles' viewport, with bubbles' clamps, and
 // View is bubbles' own lipgloss call; TestViewportMatchesBubbles drives the two

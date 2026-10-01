@@ -639,8 +639,10 @@ func TestWordAt(t *testing.T) {
 
 // fakeRows replaces the canonical rows with exactly these. It is the only way
 // to put a row of precisely the terminal's width in the transcript: the
-// renderer wraps before it fills the last cell.
+// renderer wraps before it fills the last cell. A row holding a line break is
+// the lines it draws, as an entry's rendered rows are (physicalLines).
 func fakeRows(m Model, rows ...string) Model {
+	rows = physicalLines(rows)
 	m.main.drawn = &rowIndex{tail: []rowSpan{{rows: rows}}, total: len(rows)}
 	m.vp.setRows(m.main.drawn)
 	m.vp.GotoTop()

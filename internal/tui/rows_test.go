@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"encoding/json"
 	"fmt"
 	"math/rand"
 	"runtime/debug"
@@ -8,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/charmbracelet/bubbles/key"
 	bubblesvp "github.com/charmbracelet/bubbles/viewport"
@@ -44,8 +46,12 @@ func (t *pane) plainRows() []string {
 // note, then every entry's rendered rows in the list's order, each span
 // starting where the one before it ended; every entry must be clean under the
 // key; and no row the paint assembled may hold a line break or a carriage
-// return, which bubbles' viewport split into lines of their own and craze's
-// viewport, holding rows, does not.
+// return. bubbles' viewport split a row holding a "\n" (after making "\r\n"
+// "\n") into lines of their own; craze's viewport shows a row as one line, so
+// the paint splits an entry's rows into their lines (physicalLines) and the
+// watch holds it to that: a line break left in a row is a line the viewport
+// would lose. A lone "\r" is refused too, since nothing craze draws holds one
+// (physicalLines has why that matters).
 var paints paintWatch
 
 type paintWatch struct {
@@ -134,13 +140,16 @@ func crazeKeyMap() bubblesvp.KeyMap {
 // parityRow is one random row of the kinds a transcript draws, and a few it
 // should not: plain words, styled runs, wide and combining graphemes, flags,
 // tabs (which lipgloss widens past the width it was measured at), trailing
-// blanks, and rows far wider than any viewport here. Never a line break: a
-// row never holds one (the paint watch).
+// blanks, rows far wider than any viewport here, and line breaks — a styled
+// run of two lines, which lipgloss pads to one width, and a bare "\n" or
+// "\r\n" between runs — as a value an agent sent can put inside a row (a
+// tool's location). It is a row as rendered, before physicalLines splits it.
+// Never a lone "\r": nothing craze draws holds one (physicalLines).
 func parityRow(rng *rand.Rand) string {
 	if rng.Intn(8) == 0 {
 		return ""
 	}
-	bits := []string{"word", "a", "longer-word", " ", "  ", "\t", "日本語", "🙂", "é", "🇯🇵", "x", "│", "…", "tail   "}
+	bits := []string{"word", "a", "longer-word", " ", "  ", "\t", "日本語", "🙂", "é", "🇯🇵", "x", "│", "…", "tail   ", "two\nlines"}
 	styles := []lipgloss.Style{
 		lipgloss.NewStyle(),
 		lipgloss.NewStyle().Foreground(lipgloss.Color("#ff8800")),
@@ -149,30 +158,40 @@ func parityRow(rng *rand.Rand) string {
 	}
 	var b strings.Builder
 	for n := rng.Intn(14); n >= 0; n-- {
+		if rng.Intn(12) == 0 {
+			b.WriteString([]string{"\n", "\r\n"}[rng.Intn(2)])
+		}
 		b.WriteString(styles[rng.Intn(len(styles))].Render(bits[rng.Intn(len(bits))]))
 	}
 	return b.String()
 }
 
-// parityIndex lays rows out the way a paint might have: spans of random
-// lengths, empty ones among them, split between base and tail at random.
+// parityIndex lays rows out the way a paint might have: entries of random
+// lengths, empty ones among them, each entry's rows split into their lines
+// (physicalLines, as paint stores them), and the spans split between base and
+// tail at random.
 func parityIndex(rng *rand.Rand, rows []string) *rowIndex {
 	var spans []rowSpan
+	start := 0
 	for i := 0; i < len(rows); {
 		n := min(rng.Intn(5), len(rows)-i)
-		spans = append(spans, rowSpan{rows: rows[i : i+n], start: i})
+		lines := physicalLines(rows[i : i+n])
+		spans = append(spans, rowSpan{rows: lines, start: start})
 		i += n
+		start += len(lines)
 	}
 	cut := 0
 	if len(spans) > 0 {
 		cut = rng.Intn(len(spans) + 1)
 	}
-	return &rowIndex{base: spans[:cut:cut], tail: spans[cut:], total: len(rows)}
+	return &rowIndex{base: spans[:cut:cut], tail: spans[cut:], total: start}
 }
 
 // TestViewportMatchesBubbles is the viewport's parity (plan 032 §3.3 C5): the
 // craze viewport and bubbles' v0.21.0, configured as craze configured it, are
-// driven through the same seeded operations — content changes, resizes,
+// driven through the same seeded operations — content changes (bubbles is
+// handed the rows joined, as craze handed them before C5, and craze the index
+// of their lines; some rows hold a "\n" or a "\r\n"), resizes,
 // scrolls, page keys (with and without alt), goto top and bottom, offsets set
 // in and out of range — from a viewport never given content, and after every
 // operation they draw the same View and stand at the same offset.
@@ -317,11 +336,20 @@ func (s *paneScript) step() string {
 		}
 		kinds := []string{"read", "edit", "execute", "search"}
 		dirs := []string{"a", "b", "c"}
+		// A path holding a line break, as a location or as rawInput's decoded
+		// path, is drawn inside one rendered row (toolRow); the paint splits
+		// it into the lines bubbles showed (physicalLines).
+		names := []string{"main.go", "main.go", "main.go", "ma\nin.go", "lf\r\ncr.go"}
 		status := []string{"pending", "in_progress", "completed", "failed"}[rng.Intn(4)]
-		s.feed(agent.Event{Type: agent.EventTool, Tool: &agent.ToolEvent{
+		tool := &agent.ToolEvent{
 			ID: id, Kind: kinds[rng.Intn(len(kinds))], Status: status, Title: "tool " + id,
-			Locations: []string{dirs[rng.Intn(len(dirs))] + "/main.go"},
-		}})
+			Locations: []string{dirs[rng.Intn(len(dirs))] + "/" + names[rng.Intn(len(names))]},
+		}
+		if rng.Intn(4) == 0 {
+			raw, _ := json.Marshal(map[string]string{"path": tool.Locations[0]})
+			tool.Locations, tool.RawInput = nil, string(raw)
+		}
+		s.feed(agent.Event{Type: agent.EventTool, Tool: tool})
 		return "tool " + id + " " + status
 	case 7:
 		s.feed(agent.Event{Type: agent.EventUser, Text: "a question\tfrom the user"})
@@ -404,13 +432,37 @@ func fullRebuild(m *Model, tr *pane) []string {
 	return full.appendRows(nil, 0, full.total)
 }
 
+// logicalRows is what the paint before C5 joined and handed bubbles'
+// SetContent: the trim note, then every entry's rows rendered afresh and not
+// split into lines. Each entry is rendered from a copy with no markdown
+// checkpoint, and the pane's work counters are put back, so the oracle shares
+// no cache with the paint it checks: a cached render gone stale shows up as a
+// View bubbles would not draw.
+func logicalRows(m *Model, tr *pane) []string {
+	var rows []string
+	if tr.trimmed {
+		rows = append(rows, renderSegs(m.width, seg{trimmedNote, styleFG(m.theme.Dim)}))
+	}
+	key, work := m.renderKey(), tr.work
+	for _, e := range tr.rows {
+		c := *e
+		c.md = nil
+		rows = append(rows, m.renderEntry(tr, &c, key)...)
+	}
+	tr.work = work
+	return rows
+}
+
 // TestIncrementalAssemblyMatchesAFullRebuild is incremental assembly's
 // equivalence (plan 032 §3.3 C5): after every step of seeded pane scripts —
 // chunks, thoughts, tool rows and their updates, local rows, `!` rows running
 // and settling, removals, the cap's front trim, /clear, resizes, themes, Ctrl+O
 // and page keys — the rows the paint assembled from its first changed span
 // are the rows a paint from nothing makes; the viewport over them draws what
-// bubbles' viewport draws over the joined rows; and the index the paint before
+// bubbles' viewport draws over the entries rendered afresh and joined
+// (logicalRows: some tool rows hold a path with a "\n" or a "\r\n" in it,
+// which bubbles split and the paint must have split the same way); and the
+// index the paint before
 // it made still reads exactly what it read (no paint writes over an index a
 // Model copy may still hold).
 func TestIncrementalAssemblyMatchesAFullRebuild(t *testing.T) {
@@ -438,7 +490,7 @@ func TestIncrementalAssemblyMatchesAFullRebuild(t *testing.T) {
 			// bubbles at the same offset — set, not scrolled to: a viewport made
 			// taller while scrolled up stands past its bottom, as bubbles' did.
 			bv := bubblesvp.New(m.vp.Width, m.vp.Height)
-			bv.SetContent(strings.Join(got, "\n"))
+			bv.SetContent(strings.Join(logicalRows(m, tr), "\n"))
 			bv.YOffset = m.vp.YOffset
 			if bv.AtBottom() != m.vp.AtBottom() || bv.View() != m.vp.View() {
 				t.Fatalf("seed %d step %d (%s): at offset %d the viewport draws\n%q\nbubbles over the same rows draws\n%q", seed, i, did, m.vp.YOffset, m.vp.View(), bv.View())
@@ -521,5 +573,131 @@ func TestPaintWatchCatchesAWrongIndex(t *testing.T) {
 	tr.drawn = &rowIndex{tail: []rowSpan{spans[0], {e: e, rows: broken, start: spans[1].start}}, total: spans[1].start + 1, key: good.key}
 	if err := checkPaint(&m, tr); err == nil || !strings.Contains(err.Error(), "line break") {
 		t.Fatalf("a row holding a line break: the watch said %v", err)
+	}
+}
+
+// ------------------------------------------------------ rows with line breaks
+
+// TestALineBreakInARowIsALineOfItsOwn: a value an agent sent can put a line
+// break inside one rendered row — a read tool's location "/tmp/a\nb" survives
+// sanitizeText, and toolRow draws "a\nb" as the target of one row — and
+// bubbles' viewport, handed every row joined, split it into two lines. So must
+// craze's: three notes and that tool at a height of three, stuck to the
+// bottom, stand at offset 2 and show note2, the tool's head and "b", which is
+// what bubbles draws over the same rows joined. The same holds for a path
+// decoded from rawInput with a "\r\n" in it.
+func TestALineBreakInARowIsALineOfItsOwn(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		tool agent.ToolEvent
+	}{
+		{"a location holding \\n", agent.ToolEvent{
+			ID: "r1", Kind: "read", Status: "completed", Title: "Read", Locations: []string{"/tmp/a\nb"},
+		}},
+		{"a rawInput path holding \\r\\n", agent.ToolEvent{
+			ID: "r1", Kind: "read", Status: "completed", Title: "Read", RawInput: `{"path":"/tmp/a\r\nb"}`,
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := sized(t)
+			for i := range 3 {
+				m.addNote(fmt.Sprintf("note%d", i))
+			}
+			tool := tc.tool
+			tm, _ := m.Update(eventMsg{ev: agent.Event{Type: agent.EventTool, Tool: &tool}})
+			m = tm.(Model)
+			m.vp.Height = 3
+			m.refreshViewport()
+			m.vp.GotoBottom()
+
+			var view []string
+			for _, ln := range strings.Split(plain(m.vp.View()), "\n") {
+				view = append(view, strings.TrimRight(ln, " "))
+			}
+			if want := []string{"note2", "✓ read  a", "b"}; m.vp.YOffset != 2 || !m.vp.AtBottom() || !slices.Equal(view, want) {
+				t.Fatalf("at offset %d (bottom %v) the viewport shows %q, want offset 2 and %q", m.vp.YOffset, m.vp.AtBottom(), view, want)
+			}
+			if n := m.main.drawnLen(); n != 5 {
+				t.Fatalf("the transcript is %d lines, want 5 (three notes, and the tool's two): %q", n, m.main.plainRows())
+			}
+			bv := bubblesvp.New(m.vp.Width, m.vp.Height)
+			bv.SetContent(strings.Join(logicalRows(&m, m.main), "\n"))
+			bv.GotoBottom()
+			if bv.YOffset != m.vp.YOffset || bv.View() != m.vp.View() {
+				t.Fatalf("bubbles over the same rows stands at %d and draws\n%q\ncraze stands at %d and draws\n%q", bv.YOffset, bv.View(), m.vp.YOffset, m.vp.View())
+			}
+		})
+	}
+}
+
+// TestPhysicalLinesAreBubblesLines is physicalLines against the split it
+// stands in for: rows holding "\n", "\r\n", a break at either end and nothing
+// but a break, laid out as two entries, draw in craze's viewport what bubbles
+// draws over the rows joined, at every offset; and rows with no break come
+// back as the same slice, with nothing allocated.
+func TestPhysicalLinesAreBubblesLines(t *testing.T) {
+	first := []string{"plain", "a\r\nb", "c\nd\n", "\r\n"}
+	second := []string{"", "\ne\n\nf", "x\r\n\r\ny", "tail"}
+	lines1, lines2 := physicalLines(first), physicalLines(second)
+	idx := &rowIndex{
+		base:  []rowSpan{{rows: lines1}},
+		tail:  []rowSpan{{rows: lines2, start: len(lines1)}},
+		total: len(lines1) + len(lines2),
+	}
+	bv := bubblesvp.New(12, 3)
+	bv.SetContent(strings.Join(slices.Concat(first, second), "\n"))
+	cv := viewport{Width: 12, Height: 3}
+	cv.setRows(idx)
+	bv.GotoBottom()
+	cv.GotoBottom()
+	if bv.YOffset != cv.YOffset {
+		t.Fatalf("at the bottom bubbles stands at %d, craze at %d", bv.YOffset, cv.YOffset)
+	}
+	for off := 0; off <= bv.YOffset; off++ {
+		bv.SetYOffset(off)
+		cv.SetYOffset(off)
+		if want, got := bv.View(), cv.View(); got != want {
+			t.Fatalf("at offset %d bubbles draws %q, craze %q", off, want, got)
+		}
+	}
+	for _, row := range slices.Concat(lines1, lines2) {
+		if strings.ContainsAny(row, "\r\n") {
+			t.Fatalf("a line still holds a break: %q", row)
+		}
+	}
+
+	clean := []string{"one", "two \x1b[1mthree\x1b[0m", ""}
+	if got := physicalLines(clean); !sameRows(got, clean) {
+		t.Fatalf("rows with no break came back as another slice: %q", got)
+	}
+	if n := testing.AllocsPerRun(100, func() { _ = physicalLines(clean) }); n != 0 {
+		t.Fatalf("rows with no break cost %v allocations, want 0", n)
+	}
+}
+
+// TestSelectingARowWithALineBreakCopiesItsLines: the selection reads the lines
+// the viewport shows. A drag from the start of the tool's head down onto the
+// "b" its location broke onto copies the two lines; before C5 the selection
+// read the rows (the tool's one row) while the viewport showed the lines, so
+// the press and the copy could disagree.
+func TestSelectingARowWithALineBreakCopiesItsLines(t *testing.T) {
+	now := time.Date(2026, 9, 12, 10, 0, 0, 0, time.UTC)
+	rec := captureCopies(t)
+	m := selModel(t, &now, "filler")
+	tool := agent.ToolEvent{ID: "r1", Kind: "read", Status: "completed", Title: "Read", Locations: []string{"/tmp/a\nb"}}
+	tm, _ := m.Update(eventMsg{ev: agent.Event{Type: agent.EventTool, Tool: &tool}})
+	m = tm.(Model)
+
+	rows := m.main.plainRows()
+	at := slices.IndexFunc(rows, func(r string) bool { return strings.HasPrefix(r, "✓ read") })
+	if at < 0 {
+		t.Fatalf("no tool row: %q", rows)
+	}
+	y := m.lay.Region(regionTranscript).Top + at - m.vp.YOffset
+	m = drag(t, m, 0, y, 0, y+1)
+
+	const want = "✓ read  a\nb"
+	if copies := rec.copies(); len(copies) != 1 || copies[0] != want {
+		t.Fatalf("clipboard got %q, want [%q]", copies, want)
 	}
 }

@@ -108,8 +108,10 @@ type entry struct {
 	gen uint64
 	md  *mdCheckpoint
 
-	// rendered is never written to once it is set: a render makes a new
-	// slice, which is what lets a paint's rowIndex hold it rather than copy it.
+	// rendered is the entry's physical lines (physicalLines: a row holding a
+	// line break is split into the lines it draws), and is never written to
+	// once it is set: a render makes a new slice, which is what lets a paint's
+	// rowIndex hold it rather than copy it.
 	rendered    []string
 	renderedFor renderKey
 	// dirty marks content that changed under an unchanged key.
