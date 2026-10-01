@@ -405,7 +405,13 @@ def test_new_starts_sessions_that_ps_lists(craze_bin: Path, fake_agent_bin: Path
     entry = _created_entry(first)
     assert entry["ready"] is True and entry["workspace"] == str(work), entry
     assert entry["requestId"].startswith("new-") and entry["requestHash"].startswith("sha256:"), entry
-    assert re.search(r'(?m)^provider = "cursor"$', (craze_home / "config.toml").read_text(encoding="utf-8"))
+    # The host saves its provider just after its start publishes readiness,
+    # which is what craze new's answer waits for: the save can follow it
+    # (SF-117), so it is awaited, within 10 s.
+    deadline = time.monotonic() + 10.0
+    while not re.search(r'(?m)^provider = "cursor"$', (craze_home / "config.toml").read_text(encoding="utf-8")):
+        assert time.monotonic() < deadline, "the created session did not persist its provider within 10s"
+        time.sleep(0.05)
 
     second = _started(_new(craze_bin, "-C", str(work), "--provider", "cursor"), work)
     assert second != first and _created_entry(second)["ready"] is True

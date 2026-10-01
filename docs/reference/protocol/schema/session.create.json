@@ -22,7 +22,7 @@
     "result": {
       "type": "object",
       "properties": {
-        "session": {"$ref": "info.json#/$defs/rosterRow"},
+        "session": {"$ref": "info.json#/$defs/rosterRow", "description": "The session's roster row, its row read fresh from its host after the create let go of it: approximate false. When that read fails the create is a success all the same — the session exists, and its id must reach the client — and this is the row the hub builds from the registry, row absent and approximate true."},
         "prompt": {"type": "string", "enum": ["none", "accepted", "unknown", "refused"], "description": "What became of the first prompt: none was sent; the session took it; it was sent and its answer lost (the session may be working on it; a create joined after a hub restart says unknown too); the session refused it, and runs on, idle."},
         "promptError": {"type": "string", "minLength": 1, "description": "Beside refused, the session's refusal; beside unknown, why the answer was lost."}
       },

@@ -49,7 +49,11 @@ const (
 //   - "notok": it answers a ready line that is not ok.
 //
 // Each serves session.stop and ends on it; a mode with the suffix ",nostop"
-// refuses it (stop_unsupported), and ends only on SIGTERM.
+// refuses it (stop_unsupported), and ends only on SIGTERM. One with the
+// suffix ",agent" first starts an agent of its own — a `sleep`, leading a
+// process group of its own as an ACP agent does — and records it in its
+// agents' record (<host-logs>/<hostId>.pgids) as craze serve records its
+// agent, for the hub to end once the host has gone.
 const failCause = "the agent could not start: fake agent missing"
 
 func init() {
@@ -69,7 +73,14 @@ func init() {
 		os.Exit(97)
 	}
 	a := fakehost.ParseSpawnArgs(argv)
+	mode, agent := strings.CutSuffix(mode, ",agent")
 	mode, nostop := strings.CutSuffix(mode, ",nostop")
+	if agent {
+		if err := startRecordedAgent(a.HostID); err != nil {
+			fmt.Fprintln(os.Stderr, "created host child: its agent:", err)
+			os.Exit(97)
+		}
+	}
 	o := fakehost.Options{Stop: !nostop}
 	switch {
 	case mode == "ok":
@@ -111,6 +122,32 @@ func init() {
 		os.Exit(1)
 	}
 	os.Exit(0)
+}
+
+// startRecordedAgent starts a `sleep` leading a process group of its own and
+// appends it to host hostID's agents' record, as craze serve records the
+// agent it spawns (hostspawn.AgentGroup).
+func startRecordedAgent(hostID string) error {
+	cmd := exec.Command("sleep", "600")
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	id, err := rundir.ProcessIdentity(cmd.Process.Pid)
+	if err != nil {
+		return err
+	}
+	dir, err := rundir.HostLogDir(rundir.ProcessEnv())
+	if err != nil {
+		return err
+	}
+	f, err := os.OpenFile(filepath.Join(dir, hostspawn.AgentGroupsName(hostID)), os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	_, err = f.WriteString(hostspawn.AgentGroup{PGID: cmd.Process.Pid, Start: id.Start}.Line())
+	return err
 }
 
 // spawned is every created-host child a test's hub started (hostsAsChildren).
@@ -191,9 +228,25 @@ func hostsAsChildren(t *testing.T, env rundir.Env, mode func(n int) string) *spa
 // configured default provider ("" for none), and the providers it knows are
 // cursor and grok.
 func creates(def string) *Creates {
+	c, _ := mutableCreates(def)
+	return c
+}
+
+// mutableCreates is creates whose configured default provider set changes
+// for the creates that follow — a config file edited meanwhile.
+func mutableCreates(def string) (*Creates, func(string)) {
+	var mu sync.Mutex
 	return &Creates{
-		DefaultProvider: func() string { return def },
-		KnownProvider:   func(p string) bool { return p == "cursor" || p == "grok" },
+		DefaultProvider: func() string {
+			mu.Lock()
+			defer mu.Unlock()
+			return def
+		},
+		KnownProvider: func(p string) bool { return p == "cursor" || p == "grok" },
+	}, func(v string) {
+		mu.Lock()
+		defer mu.Unlock()
+		def = v
 	}
 }
 

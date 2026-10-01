@@ -532,13 +532,19 @@ above: "spawn a headless host"); the published spec is
 - **Params** `{cwd, prompt?, provider?, model?, effort?, fast?,
   permissionMode?, requestId?}`; never an agent binary (SD-16). The provider
   defaults to the hub's configured one, read at each create, else
-  `bad_request`.
+  `bad_request`; the permission mode to a plain launch's, `bypass`
+  (`--force`'s default: `config.toml` has no permission setting). The
+  directory and the provider are checked only for a create that will start a
+  session, after the `requestId` is looked up (plan 032 C15r).
 - **Success means started:** the hub spawns `craze serve` (its environment
   contract's environment, `--no-host-status`, the session's directory as its
   working directory, `--request-id`/`--request-hash` written into the host's
   registry entry), waits for the start (60 s), sends the first prompt as the
   list's dispatch does, and answers `{session: rosterRow, prompt:
-  none|accepted|unknown|refused, promptError?}`, the row read fresh.
+  none|accepted|unknown|refused, promptError?}`, the row read fresh on a
+  connection of its own. X49 (C15r): a row that cannot be read leaves the
+  create a success, `session` the registry's row with `approximate: true` —
+  no new member, no shape change.
 - **Failures** reuse the reason table: `bad_request/bad_request`,
   `/request_conflict`; `unavailable/spawn_failed`, `/busy` (over 16 in
   flight), `/closing`; `not_accepting/start_failed` with `data.cause`, the
@@ -546,5 +552,10 @@ above: "spawn a headless host"); the published spec is
 - **Idempotency across a hub restart:** the registry entry's `requestId` and
   `requestHash` let a hub with no memory of a create join its live host —
   readiness first, so a session started long ago answers at once; a start
-  still running is waited for 60 s from the join.
+  still running is waited for 60 s from the join. Only hosts of the hub's own
+  namespace are candidates, and an incomplete registry read (unreadable, or a
+  live host's unreadable entry) refuses the create
+  `unavailable/host_unreachable` rather than spawn a second session (C15r).
+  The hub ends the recorded agents of every host it spawned once that host
+  has gone, for as long as the hub runs.
 - `craze new` is its CLI.

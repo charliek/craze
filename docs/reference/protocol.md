@@ -553,8 +553,9 @@ is a provider id; absent, it is the hub's configured default — `provider` in
 the hub's `config.toml`, read at each create (the provider the last session
 to start persisted) — and with none configured the create is `bad_request`.
 `model`, `effort` and `fast` are the session's start settings, each absent
-for the provider's own default; `permissionMode` is `bypass` when absent, as
-a plain launch's is. No params member names an agent binary: the host finds
+for the provider's own default. `permissionMode`, absent, is a plain
+launch's: `bypass`, `--force`'s default — `config.toml` has no permission
+setting. No params member names an agent binary: the host finds
 its own (`[agents]`, then `PATH`), and the hub hands it neither a launch's
 `--agent-bin` nor `CRAZE_AGENT_BIN`. `requestId` (1–64 of `[A-Za-z0-9._-]`)
 makes the create idempotent (below).
@@ -565,20 +566,29 @@ launch's or one terminal's (the environment contract: `CRAZE_HOME` absolute;
 no `CRAZE_PROVIDER`, `CRAZE_AGENT_BIN`, `TMUX`, `HERDR_*`, …), reads its ready
 line, attaches with `when: "ready"` and waits for the session's start —
 at most 60 s — sends `prompt` when there is one (queued, as the session list's
-background dispatch sends one, its answer waited for at most 15 s), reads the
-session's own row, and detaches. The session runs on in its host, listed in
-the roster like any other; its host persists its provider as the next plain
-launch's default, as every new session does.
+background dispatch sends one, its answer waited for at most 15 s), and lets
+go of that connection: a detach after a prompt the session answered, a close
+at once after one whose answer was lost or whose deadline passed. Then it
+reads the session's own row on a connection of its own, bounded (2 s). The
+session runs on in its host, listed in the roster like any other; its host
+persists its provider as the next plain launch's default just after its
+start, as every new session does — so the create's answer can precede that
+save by an instant.
 
 **The result.** `session` is the session's roster row, read fresh from its
-host (`approximate: false`). `prompt` says what became of the first prompt:
+host after the create let go of it (`approximate: false`). When that read
+fails the create is still a success — the session exists, and its id must
+reach the client — and `session` is the row the hub builds from the
+registry, `row` absent and `approximate: true`. `prompt` says what became of the first prompt:
 `none` (there was none), `accepted`, `unknown` (it was sent and its answer
 lost — the session exists, and may be working on it; `promptError` says why
 it was lost) or `refused` (the session's refusal, in `promptError`; the
 session runs on, idle).
 
 **Refusals.** Bad params are `bad_request` (`unknown_field` for a member the
-schema does not define). A host that fails to spawn, or to become ready, is
+schema does not define). A `cwd` that is no existing directory and a provider
+this craze cannot start are `bad_request` too, checked only for a create that
+will start a session: a repeat (below) is answered without them. A host that fails to spawn, or to become ready, is
 `unavailable`, reason `spawn_failed` — the hub has ended it. A session whose
 start fails — its agent binary missing, a locked keychain — or does not end
 within 60 s is `not_accepting`, reason `start_failed`, `data.cause` the
@@ -593,9 +603,18 @@ normalized params — in the hub's memory (an answer kept 10 minutes, at most
 [registry entry](#the-registry) (`requestId`, `requestHash`). A repeat with
 the same params is answered the first create's answer — its failure too —
 or joins it while it runs; with other params it is `bad_request`, reason
-`request_conflict`. A waiter that disconnects does not cancel the create. A
-hub that does not remember the id — it restarted since — finds the live host
-whose entry carries it and **joins it under the same contract**: a session
+`request_conflict`. A repeat is answered before the directory and the
+provider are checked again: a create answered once stays answered, whatever
+the configuration or the file system has become. A waiter that disconnects
+does not cancel the create. A hub that does not remember the id — it
+restarted since — looks among the live hosts of its own namespace (its
+`CRAZE_HOME`: a host whose socket is in the hub's own runtime directory; a
+create under the same id in another `CRAZE_HOME` is that hub's, and neither
+joined nor in conflict). It must prove the id unused before it starts a
+session: a registry it cannot read, or a live host whose entry it cannot
+read, refuses the create `unavailable`, reason `host_unreachable` — try again
+— rather than risk a second session. One whose entry carries the id is
+**joined under the same contract**: a session
 already started is answered at once (its row, `prompt: "unknown"`: this hub
 never saw the prompt's answer, nor sent one); a start still running is
 waited for, at most 60 s from the join; a start that failed is answered

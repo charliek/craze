@@ -11,6 +11,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/charliek/craze/internal/protocol"
 	"github.com/charliek/craze/internal/rundir"
@@ -119,9 +120,19 @@ func TestNewThroughAHubFromAnotherDirectory(t *testing.T) {
 		raw, err := os.ReadFile(filepath.Join(crazeA, "sessions.jsonl"))
 		return err == nil && strings.Contains(string(raw), created.CrazeSessionID)
 	})
-	cfg, err := os.ReadFile(filepath.Join(crazeA, "config.toml"))
-	if err != nil || !regexp.MustCompile(`(?m)^provider = "cursor"$`).Match(cfg) {
-		t.Fatalf("the created session did not persist its provider: %q (%v)", cfg, err)
+	// The host persists its provider just after its start publishes
+	// readiness, which is what the create's answer waits for: the save can
+	// follow the answer (r32 8, SF-117), so it is awaited, within 10 s.
+	persisted := regexp.MustCompile(`(?m)^provider = "cursor"$`)
+	var cfg []byte
+	for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+		cfg, err = os.ReadFile(filepath.Join(crazeA, "config.toml"))
+		if err == nil && persisted.Match(cfg) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the created session did not persist its provider within 10s: %q (%v)", cfg, err)
+		}
 	}
 	if runtime.GOOS == "linux" {
 		environ, err := os.ReadFile(fmt.Sprintf("/proc/%d/environ", created.PID))

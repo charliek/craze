@@ -379,3 +379,53 @@ func TestBindRefusesASymlinkedHostLock(t *testing.T) {
 		t.Fatal("the unwind removed a lock file Bind never held")
 	}
 }
+
+// TestHostsScanReportsAnUnreadableLiveEntry (plan 032 §3.10): HostsScan lists
+// what Hosts lists and, beside it, a live host whose entry cannot be read —
+// garbage, or naming another host — which Hosts skips; a dead host's
+// unreadable entry is swept and in neither list, and so is an entry whose
+// lock is gone (mid-exit). Hosts' own answer is unchanged.
+func TestHostsScanReportsAnUnreadableLiveEntry(t *testing.T) {
+	t.Parallel()
+	env := testEnv(t)
+	live := bind(t, env)
+	garbage := bind(t, env)
+	writeFile(t, filepath.Join(hostsDir(env), garbage.ID()+".json"), "{not json")
+	other := bind(t, env)
+	e := live.Entry()
+	b, err := json.Marshal(e)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(hostsDir(env), other.ID()+".json"), string(b))
+	dead := bind(t, env)
+	dead.die()
+	writeFile(t, filepath.Join(hostsDir(env), dead.ID()+".json"), "{not json")
+	exiting := bind(t, env)
+	exiting.die()
+	if err := unlinkFile(filepath.Join(hostsDir(env), exiting.ID()+".lock")); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(hostsDir(env), exiting.ID()+".json"), "{not json")
+
+	got, unreadable, err := HostsScan(env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ids := entries(got); !slices.Equal(ids, []string{live.ID()}) {
+		t.Fatalf("HostsScan lists %v, want only the live %s", ids, live.ID())
+	}
+	want := []string{garbage.ID(), other.ID()}
+	slices.Sort(want)
+	slices.Sort(unreadable)
+	if !slices.Equal(unreadable, want) {
+		t.Fatalf("HostsScan's unreadable %v, want %v", unreadable, want)
+	}
+	if exists(t, filepath.Join(hostsDir(env), dead.ID()+".json")) {
+		t.Fatal("the dead host's unreadable entry was not swept")
+	}
+	hosts, err := Hosts(env)
+	if err != nil || !slices.Equal(entries(hosts), []string{live.ID()}) {
+		t.Fatalf("Hosts = %v, %v; want only the live %s", entries(hosts), err, live.ID())
+	}
+}

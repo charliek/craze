@@ -6,10 +6,12 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -590,7 +592,6 @@ func TestBeginCreateRefusesOnceClosing(t *testing.T) {
 type fakeCreated struct {
 	start  func(context.Context) error
 	submit func(context.Context) error
-	row    json.RawMessage
 
 	mu sync.Mutex
 	// closes is each close's context, as live (true) or done when it came.
@@ -600,7 +601,7 @@ type fakeCreated struct {
 
 func newFakeCreated() *fakeCreated {
 	return &fakeCreated{start: func(context.Context) error { return nil }, submit: func(context.Context) error { return nil },
-		row: json.RawMessage(`{ "sessionId": "s-1" }`), closed: make(chan struct{})}
+		closed: make(chan struct{})}
 }
 
 func (f *fakeCreated) Start(ctx context.Context) error { return f.start(ctx) }
@@ -629,9 +630,6 @@ func (f *fakeCreated) CloseWithin(ctx context.Context) error {
 	return nil
 }
 func (f *fakeCreated) hostVersion() string { return "9.9.9" }
-func (f *fakeCreated) sessionRow(context.Context) (json.RawMessage, error) {
-	return f.row, nil
-}
 
 // detached says the one close was a detach: its context still live.
 func (f *fakeCreated) detached(t *testing.T) bool {
@@ -644,13 +642,15 @@ func (f *fakeCreated) detached(t *testing.T) bool {
 	return f.closes[0]
 }
 
-// TestAttendPromptOutcomes (§3.10): the first prompt's outcome as the list's
-// dispatch reads it — taken is accepted; refused is the session's words, the
-// session left running and detached from; an answer lost after the send
-// (ErrOutcomeUnknown) or a call still out at the deadline is unknown, the
-// latter closed at once (no detach, which could only wait behind the write);
-// and with no prompt, none. The row is the host's, compacted; the version
-// its hello's.
+// TestAttendPromptOutcomes (§3.10, r32 2): the first prompt's outcome as the
+// list's dispatch reads it — taken is accepted and refused the session's
+// words, each detached from (the session left running); with no prompt,
+// none, detached from too. Every other outcome is unknown and closes the
+// connection at once — no detach, which would queue behind a write still out
+// on it: an answer lost after the send (ErrOutcomeUnknown), a Submit that
+// returned its own deadline or a cancellation — a resend may still be blocked
+// on that connection — and a call still out at the deadline. The version is
+// the hello's.
 func TestAttendPromptOutcomes(t *testing.T) {
 	h := &hub{}
 	far := func() time.Time { return time.Now().Add(step) }
@@ -670,7 +670,13 @@ func TestAttendPromptOutcomes(t *testing.T) {
 		}, step, protocol.CreatePromptRefused, "the queue is full", true},
 		{"its answer lost", "hi", func(context.Context) error {
 			return fmt.Errorf("the connection went: %w", backend.ErrOutcomeUnknown)
-		}, step, protocol.CreatePromptUnknown, "the connection went: backend: the command's outcome is unknown: it may have run", true},
+		}, step, protocol.CreatePromptUnknown, "the connection went: backend: the command's outcome is unknown: it may have run", false},
+		{"the Submit returned its deadline", "hi", func(context.Context) error {
+			return fmt.Errorf("remote: %w", context.DeadlineExceeded)
+		}, step, protocol.CreatePromptUnknown, "remote: context deadline exceeded", false},
+		{"the Submit returned a cancellation", "hi", func(context.Context) error {
+			return context.Canceled
+		}, step, protocol.CreatePromptUnknown, "context canceled", false},
 		{"no answer by the deadline", "hi", func(context.Context) error {
 			select {} // a write blocked where no context reaches it
 		}, 200 * time.Millisecond, protocol.CreatePromptUnknown, "no answer to the prompt within 200ms", false},
@@ -688,8 +694,8 @@ func TestAttendPromptOutcomes(t *testing.T) {
 			if got := f.detached(t); got != tc.wantClean {
 				t.Fatalf("detached %v, want %v", got, tc.wantClean)
 			}
-			if tc.wantClean && (string(at.row) != `{"sessionId":"s-1"}` || at.readAt.IsZero() || at.version != "9.9.9") {
-				t.Fatalf("the row %s read at %v, version %q", at.row, at.readAt, at.version)
+			if at.version != "9.9.9" {
+				t.Fatalf("the version %q, want the hello's", at.version)
 			}
 		})
 	}
@@ -795,5 +801,377 @@ func TestCreateClient(t *testing.T) {
 	_, err = Create(ctx, path, who, protocol.CreateParams{Cwd: "/"})
 	if !errors.Is(err, ErrUnanswered) || errors.As(err, &perr) {
 		t.Fatalf("Create on a connection that ends unanswered = %v", err)
+	}
+}
+
+// ------------------------------------------------ the r32 review's fixes
+
+// TestACreatedHostsAgentsAreEndedWhenItDies (r32 1, P11): a host the hub
+// spawned is the hub's to clean up after even once its create has answered:
+// SIGKILLed later — its stop sequence never run — its recorded agent (a
+// `sleep` leading a group of its own, as an ACP agent does) is ended by the
+// hub, and the record removed.
+func TestACreatedHostsAgentsAreEndedWhenItDies(t *testing.T) {
+	env := testEnv(t)
+	_, s, sock := creating(t, env, nil, always("ok,agent"))
+	c := dial(t, sock)
+	c.hello(t)
+	res := result(t, createOn(t, c, map[string]any{"cwd": t.TempDir()}))
+	dir, err := rundir.HostLogDir(env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := filepath.Join(dir, hostspawn.AgentGroupsName(res.Session.HostID))
+	b, err := os.ReadFile(record)
+	g, ok := hostspawn.ParseAgentGroup(strings.TrimSpace(string(b)))
+	if err != nil || !ok {
+		t.Fatalf("the host's agents' record %q (%v)", b, err)
+	}
+	t.Cleanup(func() { _ = syscall.Kill(-g.PGID, syscall.SIGKILL) })
+	if !alive(g.PGID) {
+		t.Fatalf("the host's agent %d is not running", g.PGID)
+	}
+	cmd, _ := s.cmd(0)
+	if err := cmd.Process.Kill(); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "the dead host's agent ended", func() bool { return !alive(g.PGID) })
+	waitFor(t, "the dead host's agents' record removed", func() bool {
+		_, err := os.Stat(record)
+		return errors.Is(err, os.ErrNotExist)
+	})
+}
+
+// stalledPrompt is a created host's connection whose first prompt's call
+// has come back with its deadline while — the review's schedule (r32 2) — a
+// resend of it is blocked on a host that stopped reading: from then on any
+// use of the connection but closing it at once (a detach, a read) waits
+// behind that write, for good (until release, the test's end). A connection
+// that sent no prompt is the real one.
+type stalledPrompt struct {
+	createdSession
+	prompted *atomic.Bool
+	release  chan struct{}
+}
+
+func (s stalledPrompt) Submit(context.Context, engine.Command, string, engine.SubmitMode, string) (engine.SubmitResult, error) {
+	s.prompted.Store(true)
+	return engine.SubmitResult{}, fmt.Errorf("remote: session.prompt: %w", context.DeadlineExceeded)
+}
+
+func (s stalledPrompt) CloseWithin(ctx context.Context) error {
+	if s.prompted.Load() && ctx.Err() == nil {
+		<-s.release
+	}
+	return s.createdSession.CloseWithin(ctx)
+}
+
+// TestAStalledPromptConnectionFreesItsSlot (r32 2): a create whose prompt's
+// call came back with its deadline while its connection stays blocked
+// answers within its bounds — the connection closed at once, the row read on
+// a connection of its own, fresh — and frees its slot: with one create
+// allowed in flight, the next is taken, not refused busy.
+func TestAStalledPromptConnectionFreesItsSlot(t *testing.T) {
+	setVar(t, &createsMax, 1)
+	env := testEnv(t)
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+	var prompted atomic.Bool
+	setVar(t, &createDial, func(ctx context.Context, socket, sid string) (createdSession, error) {
+		sess, err := dialCreated(ctx, socket, sid)
+		if err != nil {
+			return nil, err
+		}
+		return stalledPrompt{createdSession: sess, prompted: &prompted, release: release}, nil
+	})
+	_, s, sock := creating(t, env, nil, always("ok"))
+	c := dial(t, sock)
+	c.hello(t)
+	work := t.TempDir()
+	res := result(t, createOn(t, c, map[string]any{"cwd": work, "prompt": "hi"}))
+	if res.Prompt != protocol.CreatePromptUnknown || res.Session.Approximate || len(res.Session.Row) == 0 {
+		t.Fatalf("the stalled prompt's create answered %+v", res)
+	}
+	prompted.Store(false)
+	res2 := result(t, createOn(t, c, map[string]any{"cwd": work}))
+	if res2.Session.HostID == res.Session.HostID || s.count() != 2 {
+		t.Fatalf("the create after it answered %+v after %d spawns", res2, s.count())
+	}
+}
+
+// TestAFreshRowReadIsBoundedByClosingItsConnection (r32 2): the row's read
+// on a connection of its own against a host that never answers returns, an
+// error, once its bound has passed — never later.
+func TestAFreshRowReadIsBoundedByClosingItsConnection(t *testing.T) {
+	setVar(t, &createReadWait, 200*time.Millisecond)
+	path := filepath.Join(shortDir(t, "czr"), "h.sock")
+	ln, err := net.Listen("unix", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	var held []net.Conn
+	var mu sync.Mutex
+	go func() {
+		for {
+			nc, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			mu.Lock()
+			held = append(held, nc) // never read, never answered
+			mu.Unlock()
+		}
+	}()
+	t.Cleanup(func() {
+		mu.Lock()
+		defer mu.Unlock()
+		for _, nc := range held {
+			_ = nc.Close()
+		}
+	})
+	done := make(chan error, 1)
+	go func() {
+		_, _, _, err := freshRow(context.Background(), path, "s")
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("a host that never answered gave a row")
+		}
+	case <-time.After(step):
+		t.Fatalf("the row read was still waiting %v after its 200ms bound", step)
+	}
+}
+
+// TestRecoveryProvesAbsenceBeforeItSpawns (r32 3a): a requestId the memory
+// does not hold is spawned for only once the registry has shown no live host
+// of this namespace carries it — a registry that cannot be read, and a live
+// host whose entry cannot be, refuse the create unavailable, reason
+// host_unreachable, spawning nothing; a dead host's unreadable entry is
+// swept and does not stand in the way.
+func TestRecoveryProvesAbsenceBeforeItSpawns(t *testing.T) {
+	t.Run("the registry cannot be read", func(t *testing.T) {
+		env := testEnv(t)
+		_, s, sock := creating(t, env, nil, always("ok"))
+		setVar(t, &hostsScan, func(rundir.Env) ([]rundir.Entry, []string, error) {
+			return nil, nil, errors.New("the registry is unreadable")
+		})
+		c := dial(t, sock)
+		c.hello(t)
+		e := refusedAs(t, createOn(t, c, map[string]any{"cwd": t.TempDir(), "requestId": "r-a"}),
+			protocol.CodeUnavailable, protocol.ReasonHostUnreachable)
+		if !strings.Contains(e.Message, "registry of session hosts cannot be read") || s.count() != 0 {
+			t.Fatalf("refused %q after %d spawns", e.Message, s.count())
+		}
+	})
+	t.Run("a live host's entry cannot be read", func(t *testing.T) {
+		env := testEnv(t)
+		_, s, sock := creating(t, env, nil, always("ok"))
+		live, err := rundir.Bind(env, rundir.NewHostID(), rundir.Entry{CrazeSessionID: "s-live"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = live.Close() })
+		writeEntry(t, env, live.ID(), "{not json")
+		c := dial(t, sock)
+		c.hello(t)
+		e := refusedAs(t, createOn(t, c, map[string]any{"cwd": t.TempDir(), "requestId": "r-b"}),
+			protocol.CodeUnavailable, protocol.ReasonHostUnreachable)
+		if !strings.Contains(e.Message, "entry of a live session host cannot be read") || s.count() != 0 {
+			t.Fatalf("refused %q after %d spawns", e.Message, s.count())
+		}
+	})
+	t.Run("a dead host's unreadable entry", func(t *testing.T) {
+		env := testEnv(t)
+		_, s, sock := creating(t, env, nil, always("ok"))
+		gone, err := rundir.Bind(env, rundir.NewHostID(), rundir.Entry{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := gone.Close(); err != nil {
+			t.Fatal(err)
+		}
+		dead := rundir.NewHostID()
+		writeEntry(t, env, dead, "{not json")
+		writeFile(t, filepath.Join(env.Home, ".cache", "craze", "hosts", dead+".lock"))
+		c := dial(t, sock)
+		c.hello(t)
+		if res := result(t, createOn(t, c, map[string]any{"cwd": t.TempDir(), "requestId": "r-c"})); res.Session.HostID == "" || s.count() != 1 {
+			t.Fatalf("the create answered %+v after %d spawns", res, s.count())
+		}
+	})
+}
+
+// writeEntry writes body as host id's registry entry in env.
+func writeEntry(t *testing.T, env rundir.Env, id, body string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(env.Home, ".cache", "craze", "hosts", id+".json"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestARepeatIsAnsweredBeforeTheWorldIsChecked (r32 3b): a create's
+// directory and provider are checked only for a create that will spawn: a
+// repeat of one whose answer is kept — a success, or a failure — and one a
+// restarted hub joins are answered as before after the configured default
+// provider has gone and the directory been removed, while a new create is
+// refused for them (the check itself still holds).
+func TestARepeatIsAnsweredBeforeTheWorldIsChecked(t *testing.T) {
+	env := testEnv(t)
+	cfg, setDefault := mutableCreates("cursor")
+	s := hostsAsChildren(t, env, func(n int) string {
+		if n == 1 {
+			return "fail"
+		}
+		return "ok"
+	})
+	rn := runWith(t, env, nil, cfg)
+	c := dial(t, rn.line(t).Socket)
+	c.hello(t)
+	work := filepath.Join(t.TempDir(), "work")
+	if err := os.Mkdir(work, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	ok := map[string]any{"cwd": work, "prompt": "hi", "requestId": "r-ok"}
+	failing := map[string]any{"cwd": work, "requestId": "r-fail"}
+	first := createOn(t, c, ok)
+	res := result(t, first)
+	firstFail := refusedAs(t, createOn(t, c, failing), protocol.CodeNotAccepting, protocol.ReasonStartFailed)
+
+	setDefault("")
+	if err := os.RemoveAll(work); err != nil {
+		t.Fatal(err)
+	}
+	refusedAs(t, createOn(t, c, map[string]any{"cwd": work, "requestId": "r-new"}), protocol.CodeBadRequest, protocol.ReasonBadRequest)
+	if again := createOn(t, c, ok); string(again.Result) != string(first.Result) {
+		t.Fatalf("the repeat answered %+v (%s), the first %s", again.Error, again.Result, first.Result)
+	}
+	if again := refusedAs(t, createOn(t, c, failing), protocol.CodeNotAccepting, protocol.ReasonStartFailed); again.Message != firstFail.Message {
+		t.Fatalf("the failure's repeat says %q, the first %q", again.Message, firstFail.Message)
+	}
+
+	rn.sigs <- syscall.SIGTERM
+	if err := rn.stopped(t); err != nil {
+		t.Fatal(err)
+	}
+	rn2 := runWith(t, env, nil, cfg)
+	c2 := dial(t, rn2.line(t).Socket)
+	c2.hello(t)
+	joined := result(t, createOn(t, c2, ok))
+	if joined.Session.HostID != res.Session.HostID || joined.Prompt != protocol.CreatePromptUnknown || s.count() != 2 {
+		t.Fatalf("the restarted hub's repeat answered %+v (first %+v) after %d spawns", joined, res, s.count())
+	}
+}
+
+// TestRecoveryStaysInItsNamespace (r32 3c): two hubs of one HOME and two
+// CRAZE_HOMEs: hub B, asked for hub A's requestId with the same params,
+// creates its own session — a host of A's namespace is A's, never B's to join
+// — and with other params under an id A used, creates too: no conflict across
+// namespaces.
+func TestRecoveryStaysInItsNamespace(t *testing.T) {
+	a := testEnv(t)
+	b := a
+	b.CrazeDir = filepath.Join(a.Home, ".craze-b")
+	work := t.TempDir()
+	same := map[string]any{"cwd": work, "prompt": "hi", "requestId": "r-ns"}
+	sa := hostsAsChildren(t, a, always("ok"))
+	rnA := runWith(t, a, nil, creates("cursor"))
+	ca := dial(t, rnA.line(t).Socket)
+	ca.hello(t)
+	resA := result(t, createOn(t, ca, same))
+	result(t, createOn(t, ca, map[string]any{"cwd": work, "requestId": "r-other"}))
+
+	sb := hostsAsChildren(t, b, always("ok"))
+	rnB := runWith(t, b, nil, creates("cursor"))
+	cb := dial(t, rnB.line(t).Socket)
+	cb.hello(t)
+	resB := result(t, createOn(t, cb, same))
+	if resB.Session.HostID == resA.Session.HostID || resB.Prompt != protocol.CreatePromptAccepted || sb.count() != 1 {
+		t.Fatalf("hub B answered %+v (A's %+v) after %d spawns of its own", resB, resA, sb.count())
+	}
+	resB2 := result(t, createOn(t, cb, map[string]any{"cwd": work, "prompt": "other", "requestId": "r-other"}))
+	if resB2.Session.HostID == "" || sb.count() != 2 || sa.count() != 2 {
+		t.Fatalf("hub B's create under A's other id answered %+v; spawns A %d, B %d", resB2, sa.count(), sb.count())
+	}
+}
+
+// TestKeptAnswersAreCappedAsTheyArePublished (r32 5): the cap on kept
+// answers holds as each one is kept, not only at the next admission; a create
+// in flight is never what makes room.
+func TestKeptAnswersAreCappedAsTheyArePublished(t *testing.T) {
+	setVar(t, &createKeepMax, 2)
+	h := &hub{}
+	h.life.init()
+	cr := newCreator(h, *creates("cursor"))
+	cr.calls["flight"] = &createCall{id: "flight", done: make(chan struct{})}
+	for i := range 3 {
+		if perr := h.life.beginCreate(); perr != nil {
+			t.Fatal(perr)
+		}
+		cr.mu.Lock()
+		c := cr.newCallLocked(fmt.Sprintf("r-%d", i), "h")
+		cr.mu.Unlock()
+		cr.run(c, func(context.Context) createAnswer { return createAnswer{err: closingErr()} })
+	}
+	var ids []string
+	for id := range cr.calls {
+		ids = append(ids, id)
+	}
+	slices.Sort(ids)
+	if want := []string{"flight", "r-1", "r-2"}; !slices.Equal(ids, want) {
+		t.Fatalf("kept %v, want %v", ids, want)
+	}
+}
+
+// TestAnUnreadableRowIsAnApproximateSuccess (r32 6a, X49): a create whose
+// session started is a success even when its row cannot then be read: the
+// session's ids from the registry and its ready line, the row absent, and
+// approximate true.
+func TestAnUnreadableRowIsAnApproximateSuccess(t *testing.T) {
+	env := testEnv(t)
+	setVar(t, &createRowRead, func(context.Context, string, string) (json.RawMessage, string, time.Time, error) {
+		return nil, "", time.Time{}, errors.New("the host does not answer")
+	})
+	_, _, sock := creating(t, env, nil, always("ok"))
+	c := dial(t, sock)
+	c.hello(t)
+	res := result(t, createOn(t, c, map[string]any{"cwd": t.TempDir()}))
+	e, listed := listedEntry(t, env, res.Session.HostID)
+	if !listed || res.Session.SessionID != e.CrazeSessionID || !res.Session.Approximate || len(res.Session.Row) != 0 ||
+		!res.Session.Host.Ready || res.Session.Host.PID != e.PID {
+		t.Fatalf("a create whose row could not be read answered %+v (its entry %+v)", res.Session, e)
+	}
+}
+
+// slowDetach is a created host's connection whose detach takes its whole
+// bound (createDetachWait): a host slow to answer it.
+type slowDetach struct{ createdSession }
+
+func (s slowDetach) CloseWithin(ctx context.Context) error {
+	<-ctx.Done()
+	return s.createdSession.CloseWithin(ctx)
+}
+
+// TestTheRowIsFreshAfterASlowDetach (r32 6a): the row is read after the
+// create has let go of its connection, and judged fresh at that read: a
+// detach that takes longer than a row stays fresh (3 s) cannot age it.
+func TestTheRowIsFreshAfterASlowDetach(t *testing.T) {
+	setVar(t, &createDetachWait, 3500*time.Millisecond)
+	setVar(t, &createDial, func(ctx context.Context, socket, sid string) (createdSession, error) {
+		sess, err := dialCreated(ctx, socket, sid)
+		if err != nil {
+			return nil, err
+		}
+		return slowDetach{sess}, nil
+	})
+	env := testEnv(t)
+	_, _, sock := creating(t, env, nil, always("ok"))
+	c := dial(t, sock)
+	c.hello(t)
+	res := result(t, createOn(t, c, map[string]any{"cwd": t.TempDir()}))
+	if res.Session.Approximate || len(res.Session.Row) == 0 {
+		t.Fatalf("the row after a slow detach: %+v", res.Session)
 	}
 }

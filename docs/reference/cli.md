@@ -839,7 +839,7 @@ list (`←`) and `craze ps` find it — until its host's idle exit.
 | `--model <id>` | The model to start on |
 | `--effort <value>` | The effort to start at, where the model offers one (as the [session flag](#flags)) |
 | `--fast` / `--no-fast` | The fast setting to start with, where the model offers one |
-| `--no-force` | The session's agent asks for permission, and a client answers (the default is `--force`'s bypass) |
+| `--no-force` | The session's agent asks for permission, and a client answers (the default is a plain launch's: `--force`'s bypass — `config.toml` has no permission setting) |
 | `--json` | Print the hub's answer (`session.create`'s result: the session as the roster lists it, and the prompt's outcome) on one line |
 
 The session's host finds its agent binary as a session the list starts for

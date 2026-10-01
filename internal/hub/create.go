@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -36,12 +37,18 @@ import (
 // # Params
 //
 // cwd (absolute, an existing directory), and optionally prompt, provider,
-// model, effort, fast, permissionMode and requestId (parseCreate). The
-// provider is the configured default when absent (Creates.DefaultProvider,
-// read at this create), and none is bad_request; the permission mode is a
-// plain launch's, bypass. Never an agent binary (SD-16): the host finds its
-// own — CRAZE_AGENT_BIN is not in its environment (ChildEnv), so it is
-// `[agents]` or PATH.
+// model, effort, fast, permissionMode and requestId. They are checked in two
+// steps (C15r, r32 3b): their form first (creator.parse — the shape, an
+// absolute cwd, cleaned, the requestId's syntax, the enums, the prompt's
+// rules), which is all a repeat of a create needs before it is answered; and
+// the world as it is now (creator.check — the cwd an existing directory, the
+// provider known, the configured default read) only for a create that will
+// spawn. The provider is the configured default when absent
+// (Creates.DefaultProvider, read at this create), and none is bad_request.
+// The permission mode is a plain launch's: bypass, `--force`'s default —
+// config.toml has no permission setting. Never an agent binary (SD-16): the
+// host finds its own — CRAZE_AGENT_BIN is not in its environment (ChildEnv),
+// so it is `[agents]` or PATH.
 //
 // # A create, in order (hub.create)
 //
@@ -66,12 +73,26 @@ import (
 //     createPromptWait. Taken is accepted; no answer — the deadline, or the
 //     connection lost after it was sent — is unknown; anything else is the
 //     session's refusal, refused, and the session runs on, idle.
-//  4. The session's row is read from its host (sessions.list), so the
-//     result's roster row is fresh — approximate false — and the hub
-//     detaches. The created host runs on, as any detached host does: its
-//     own idle exit is its end. It persists its provider as the next plain
-//     launch's default itself, as every new session's host does (owner
-//     decision 1, craze serve's start).
+//  4. The hub lets go of the connection — a detach, bounded, after a prompt
+//     the session answered; closed at once after one whose answer was lost
+//     or whose deadline passed (C15r, r32 2: a resend blocked behind a host
+//     that stopped reading holds that connection's writer, which nothing
+//     else must wait behind). Then the session's row is read from its host
+//     on a connection of its own (freshRow), bounded by closing it, and the
+//     result's roster row is judged fresh at that read — approximate false.
+//     A row that cannot be read leaves the result a success all the same,
+//     its row built from the registry and approximate (X49): the session
+//     exists, and its id must reach the client. The created host runs on, as
+//     any detached host does: its own idle exit is its end. It persists its
+//     provider as the next plain launch's default itself, just after its
+//     start, as every new session's host does (owner decision 1, craze
+//     serve's start) — so a create's answer can precede it (SF-117).
+//
+// A host the hub spawned is the hub's to clean up after (P11): its recorded
+// agents are ended once it has gone (ownedHost), whether the create gave up
+// on it or it died after the create answered — exactly once, for as long as
+// the hub runs. A host a restarted hub joins is not its child, and gets no
+// such watch.
 //
 // # Idempotency
 //
@@ -81,14 +102,20 @@ import (
 // host's registry entry. A request with the id of one in memory and the same
 // hash joins it — its answer, whether it is done or not; another hash is
 // bad_request, reason request_conflict. One the memory does not hold — this
-// hub restarted since, or forgot it — is looked for in the registry: a live
-// host whose entry carries the id and has a session is joined under the same
-// contract (hub.join) — its start waited for at most createStartWait from
-// the join, which answers at once for a session already started (R3-2): its
-// row, its prompt unknown (this hub never saw the answer); a start that
-// failed, or that does not end in time, is start_failed, and the hub stops
-// that host. Another hash there is request_conflict too. A retry after the
-// created session has ended finds nothing, and creates another.
+// hub restarted since, or forgot it — is looked for in the registry
+// (creator.registered), among the hosts of this hub's own namespace alone (a
+// socket directly in its runtime directory: another CRAZE_HOME's hub's
+// creates are its own, C15r, r32 3c): a live host whose entry carries the id
+// and has a session is joined under the same contract (hub.join) — its start
+// waited for at most createStartWait from the join, which answers at once
+// for a session already started (R3-2): its row, its prompt unknown (this hub
+// never saw the answer); a start that failed, or that does not end in time,
+// is start_failed, and the hub stops that host. Another hash there is
+// request_conflict too. The lookup must prove the absence it acts on (r32
+// 3a): a registry that cannot be read, or a live host whose entry cannot be,
+// refuses the create unavailable, reason host_unreachable, rather than spawn
+// a second session. A retry after the created session has ended finds
+// nothing, and creates another.
 //
 // A create runs on a goroutine of its own (creator.run): a waiter that goes
 // away does not cancel it. A create in flight keeps the hub from its idle
@@ -265,11 +292,12 @@ type createReq struct {
 // createMembers is every member session.create's params may carry.
 var createMembers = []string{"cwd", "prompt", "provider", "model", "effort", "fast", "permissionMode", "requestId"}
 
-// parse holds raw to session.create's params (the schema's rules, and the
-// hub's own: cwd an existing directory, the provider one this build knows,
-// no control character in a value that becomes an argument) and resolves the
-// provider: bad_request otherwise, reason unknown_field for a member it does
-// not define.
+// parse holds raw to session.create's params' form — the schema's rules, and
+// the hub's own: a prompt that is not blank, no control character in a value
+// that becomes an argument — and normalizes them (the cwd cleaned, the
+// permission mode settled) and hashes them: bad_request otherwise, reason
+// unknown_field for a member it does not define. It reads nothing of the
+// world: check does, for a create that will spawn.
 func (cr *creator) parse(raw json.RawMessage) (createReq, *protocol.Error) {
 	b := bytes.TrimSpace(raw)
 	if len(b) == 0 || string(b) == "null" {
@@ -359,26 +387,36 @@ func (cr *creator) parse(raw json.RawMessage) (createReq, *protocol.Error) {
 			return createReq{}, badParams("params.%s holds a control character", f.key)
 		}
 	}
+	return createReq{p: q, hash: createHash(q)}, nil
+}
+
+// check holds a create that will spawn to the world as it is now (the file's
+// comment, "Params"): its cwd an existing directory, its provider one this
+// build can start — the configured default, read now, when it names none —
+// which it resolves into p. bad_request otherwise.
+func (cr *creator) check(p *createReq) *protocol.Error {
+	q := p.p
 	if st, err := os.Stat(q.Cwd); err != nil || !st.IsDir() {
 		why := "is not a directory"
 		if errors.Is(err, fs.ErrNotExist) {
 			why = "does not exist"
 		}
-		return createReq{}, badParams("params.cwd %s %s", q.Cwd, why)
+		return badParams("params.cwd %s %s", q.Cwd, why)
 	}
 	provider := q.Provider
 	if provider == "" {
 		provider = strings.TrimSpace(cr.o.DefaultProvider())
 		if provider == "" {
-			return createReq{}, badParams("params.provider is required: this hub has no default provider (config.toml's provider)")
+			return badParams("params.provider is required: this hub has no default provider (config.toml's provider)")
 		}
 		if !cr.o.KnownProvider(provider) {
-			return createReq{}, badParams("the default provider %q (config.toml's provider) is not one this craze can start", provider)
+			return badParams("the default provider %q (config.toml's provider) is not one this craze can start", provider)
 		}
 	} else if !cr.o.KnownProvider(provider) {
-		return createReq{}, badParams("params.provider %q is not a provider this craze can start", provider)
+		return badParams("params.provider %q is not a provider this craze can start", provider)
 	}
-	return createReq{p: q, provider: provider, hash: createHash(q)}, nil
+	p.provider = provider
+	return nil
 }
 
 // createHash is a create's identity for its requestId: a hash of its
@@ -403,9 +441,13 @@ func createHash(q protocol.CreateParams) string {
 // --------------------------------------------------------------- the table
 
 // admit finds p's create or starts it (the file's comment, "Idempotency"):
-// the call to wait on, or the refusal — request_conflict, busy, closing. A
-// new create — or a join of a host a previous hub created — is counted in
-// flight (lifecycle.beginCreate) and run on a goroutine of its own.
+// the call to wait on, or the refusal — request_conflict, busy, closing, a
+// registry that cannot prove the id unused, or a new create's check. The id is
+// looked up first — the memory, then the registry — so a repeat is answered
+// whatever the world has become since (r32 3b); only a genuinely new create
+// is checked against it (check). A new create — or a join of a host a
+// previous hub created — is counted in flight (lifecycle.beginCreate) and run
+// on a goroutine of its own.
 func (cr *creator) admit(p createReq) (*createCall, *protocol.Error) {
 	cr.mu.Lock()
 	defer cr.mu.Unlock()
@@ -419,7 +461,11 @@ func (cr *creator) admit(p createReq) (*createCall, *protocol.Error) {
 			cr.h.logf("session.create %s: joined the create in flight or done", id)
 			return c, nil
 		}
-		if e, ok := cr.registered(id); ok {
+		e, ok, perr := cr.registered(id)
+		if perr != nil {
+			return nil, perr
+		}
+		if ok {
 			if e.RequestHash != p.hash {
 				return nil, conflict(id)
 			}
@@ -431,6 +477,9 @@ func (cr *creator) admit(p createReq) (*createCall, *protocol.Error) {
 			go cr.run(c, func(ctx context.Context) createAnswer { return cr.h.join(ctx, id, e) })
 			return c, nil
 		}
+	}
+	if perr := cr.check(&p); perr != nil {
+		return nil, perr
 	}
 	if perr := cr.h.life.beginCreate(); perr != nil {
 		return nil, perr
@@ -447,29 +496,40 @@ func conflict(id string) *protocol.Error {
 }
 
 // registered is the live host a create of requestId id started, from the
-// registry (rundir.Hosts, which sweeps the dead): one whose entry carries the
-// id and names its session — a host that names none yet is between its bind
-// and its identity, and its spawner gone (this hub's memory has no create of
-// that id), it stops itself at its ready line. The newest when, against
-// every spawner's rule, there are several. A registry that cannot be read
-// has none.
-func (cr *creator) registered(id string) (rundir.Entry, bool) {
-	entries, err := hostsRead(cr.h.o.Env)
+// registry (hostsScan: rundir.HostsScan, which sweeps the dead and names the
+// live hosts whose entries it cannot read): one of this hub's own namespace —
+// its socket directly in the hub's runtime directory, where every host of
+// this CRAZE_HOME binds (r32 3c) — whose entry carries the id and names its
+// session; a host that names none yet is between its bind and its identity,
+// and its spawner gone (this hub's memory has no create of that id), it stops
+// itself at its ready line. The newest when, against every spawner's rule,
+// there are several. Its absence must be proven (r32 3a): a registry that
+// cannot be read, or a live host whose entry cannot be — which may be the
+// one — refuses the create unavailable, reason host_unreachable.
+func (cr *creator) registered(id string) (rundir.Entry, bool, *protocol.Error) {
+	entries, unreadable, err := hostsScan(cr.h.o.Env)
 	if err != nil {
-		cr.h.logf("session.create %s: the registry cannot be read (%v); creating", id, err)
-		return rundir.Entry{}, false
+		cr.h.logf("session.create %s: the registry cannot be read (%v): refused", id, err)
+		return rundir.Entry{}, false, refused(protocol.CodeUnavailable, protocol.ReasonHostUnreachable,
+			"the registry of session hosts cannot be read, so whether a create of requestId %s started a session already cannot be known: try again", id)
 	}
+	if len(unreadable) > 0 {
+		cr.h.logf("session.create %s: the registry entries of live hosts %v cannot be read: refused", id, unreadable)
+		return rundir.Entry{}, false, refused(protocol.CodeUnavailable, protocol.ReasonHostUnreachable,
+			"the registry entry of a live session host cannot be read, so whether a create of requestId %s started a session already cannot be known: try again", id)
+	}
+	own := filepath.Dir(cr.h.sock)
 	var found rundir.Entry
 	ok := false
 	for _, e := range entries {
-		if e.RequestID != id || e.CrazeSessionID == "" {
+		if e.RequestID != id || e.CrazeSessionID == "" || filepath.Dir(e.Socket) != own {
 			continue
 		}
 		if !ok || e.StartedAt.After(found.StartedAt) {
 			found, ok = e, true
 		}
 	}
-	return found, ok
+	return found, ok, nil
 }
 
 // newCallLocked is a create in flight, kept under its requestId when it has
@@ -512,6 +572,9 @@ func (cr *creator) run(c *createCall, fn func(context.Context) createAnswer) {
 	c.ans = ans
 	cr.mu.Lock()
 	c.at, c.finished = time.Now(), true
+	// The cap holds as each answer is kept, not only at the next admission
+	// (r32 5): sixteen finishing together never leave more than it.
+	cr.evictLocked(c.at)
 	cr.mu.Unlock()
 	cr.h.life.endCreate()
 	close(c.done)
@@ -556,32 +619,33 @@ func (h *hub) create(ctx context.Context, p createReq) createAnswer {
 		h.logf("%s: start the session host: %v", tag, err)
 		return createRefusal(spawnFailed("the session host cannot be started"))
 	}
+	host := h.cr.own(child)
 	h.logf("%s: host %s (pid %d) started for a %s session in %s; its log: %s", tag, hostID, child.PID(), p.provider, q.Cwd, logPath)
 	line, failure, why := hostspawn.ReadReady(ctx, r)
 	_ = r.Close()
 	if failure != 0 {
-		return h.notReady(tag, child, failure, why)
+		return h.notReady(tag, host, failure, why)
 	}
 	if !line.OK {
 		// The host said why itself and is exiting: the grace to, and ended if
 		// it takes longer. A new session is never another host's (held).
-		child.Settle()
+		host.settle()
 		why := strings.TrimPrefix(strings.TrimPrefix(line.Error, "craze serve: "), "craze: ")
 		h.logf("%s: host %s could not start: %s", tag, hostID, line.Error)
 		return createRefusal(spawnFailed("the session host could not start: %s", firstLine(why)))
 	}
 	if line.HostID != hostID {
-		child.Terminate()
+		host.terminate()
 		h.logf("%s: host %s's ready line names host %q", tag, hostID, line.HostID)
 		return createRefusal(spawnFailed("the session host answered for another host"))
 	}
-	sess, err := dialCreated(ctx, line.Socket, line.CrazeSessionID)
+	sess, err := createDial(ctx, line.Socket, line.CrazeSessionID)
 	if err != nil {
 		h.logf("%s: host %s cannot be dialled: %v", tag, hostID, err)
 		if ctx.Err() != nil {
 			return createRefusal(closingErr())
 		}
-		h.abandonHost(child, line.Socket, line.CrazeSessionID)
+		h.abandonHost(host, line.Socket, line.CrazeSessionID)
 		return createRefusal(spawnFailed("the session host cannot be reached"))
 	}
 	at := h.attend(ctx, sess, q.Prompt, time.Now().Add(createStartWait))
@@ -590,14 +654,14 @@ func (h *hub) create(ctx context.Context, p createReq) createAnswer {
 		return createRefusal(closingErr())
 	case attendStartFailed, attendStartTimeout:
 		h.logf("%s: host %s: the session did not start: %s; stopping it", tag, hostID, at.cause)
-		h.abandonHost(child, line.Socket, line.CrazeSessionID)
+		h.abandonHost(host, line.Socket, line.CrazeSessionID)
 		return createRefusal(startFailed(at.cause))
 	case attendLost:
 		h.logf("%s: host %s went before its session started: %v; stopping it", tag, hostID, at.err)
-		h.abandonHost(child, line.Socket, line.CrazeSessionID)
+		h.abandonHost(host, line.Socket, line.CrazeSessionID)
 		return createRefusal(spawnFailed("the session host went before its session started"))
 	}
-	row := h.createdRow(hostID, line, child.PID(), at)
+	row := h.createdRow(ctx, tag, hostID, line, child.PID(), at.version)
 	h.logf("%s: host %s serving session %s, started; prompt %s", tag, hostID, line.CrazeSessionID, at.prompt)
 	return createAnswer{res: &protocol.CreateResult{Session: row, Prompt: at.prompt, PromptError: at.promptErr}}
 }
@@ -610,7 +674,7 @@ func (h *hub) create(ctx context.Context, p createReq) createAnswer {
 // host: session.stop — it is not this hub's child, so nothing more.
 func (h *hub) join(ctx context.Context, id string, e rundir.Entry) createAnswer {
 	tag := "session.create " + id
-	sess, err := dialCreated(ctx, e.Socket, e.CrazeSessionID)
+	sess, err := createDial(ctx, e.Socket, e.CrazeSessionID)
 	if err != nil {
 		h.logf("%s: host %s cannot be dialled: %v", tag, e.HostID, err)
 		if ctx.Err() != nil {
@@ -635,7 +699,7 @@ func (h *hub) join(ctx context.Context, id string, e rundir.Entry) createAnswer 
 			"the session a create of requestId %s started went before it started", id))
 	}
 	line := hostspawn.ReadyLine{OK: true, HostID: e.HostID, Socket: e.Socket, CrazeSessionID: e.CrazeSessionID}
-	row := h.createdRow(e.HostID, line, e.PID, at)
+	row := h.createdRow(ctx, tag, e.HostID, line, e.PID, at.version)
 	h.logf("%s: host %s serving session %s, started; joined", tag, e.HostID, e.CrazeSessionID)
 	return createAnswer{res: &protocol.CreateResult{Session: row, Prompt: protocol.CreatePromptUnknown,
 		PromptError: "the create was answered by another hub, which this one never heard from"}}
@@ -644,30 +708,79 @@ func (h *hub) join(ctx context.Context, id string, e rundir.Entry) createAnswer 
 // notReady is a spawned host that gave no usable ready line (failure, why):
 // ended, and a refusal — closing for a create the teardown cut, whose host is
 // left to stop itself (its ready line has nobody to take it).
-func (h *hub) notReady(tag string, child *hostspawn.Child, failure hostspawn.Failure, why string) createAnswer {
+func (h *hub) notReady(tag string, host *ownedHost, failure hostspawn.Failure, why string) createAnswer {
 	var msg string
+	child := host.child
 	switch failure {
 	case hostspawn.Cancelled:
 		h.logf("%s: host pid %d: cut by the teardown before it was ready", tag, child.PID())
 		return createRefusal(closingErr())
 	case hostspawn.Exited:
-		child.Settle()
+		host.settle()
 		msg = "the session host exited before it was ready"
 		if err := child.Err(); err != nil {
 			msg += " (" + err.Error() + ")"
 		}
 	case hostspawn.TimedOut:
-		child.Terminate()
+		host.terminate()
 		msg = "the session host was not ready within " + hostspawn.ReadyWait.String()
 	case hostspawn.Oversized:
-		child.Terminate()
+		host.terminate()
 		msg = fmt.Sprintf("the session host's ready line is longer than %d bytes", hostspawn.ReadyLineMax)
 	default:
-		child.Terminate()
+		host.terminate()
 		msg = "the session host's ready line cannot be read: " + why
 	}
 	h.logf("%s: host pid %d: %s", tag, child.PID(), msg)
 	return createRefusal(spawnFailed("%s", msg))
+}
+
+// ownedHost is a host this hub spawned (P11: the hub ends only agents of
+// hosts it spawned): once it has gone, the agents it recorded are the hub's
+// to end (hostspawn.Child.KillAgents) — an ACP agent can outlive its host's
+// pipes closing — exactly once, whichever gets there first: the watch on its
+// exit that own starts for the hub's life (r32 1), or the create's own giving
+// up on it (abandonHost, settle, terminate). A host a restarted hub joins is
+// not its child and is never owned.
+type ownedHost struct {
+	child *hostspawn.Child
+	once  sync.Once
+}
+
+// own starts watching child, a host this hub just spawned: when it exits —
+// whenever, the create answered or not — its recorded agents are ended
+// (killAgents). The watch ends with the hub (the teardown's cut): a hub that
+// has gone leaves its started hosts running, and one of them that dies later
+// is the orphan's lot (SF-80's reaper, C19).
+func (cr *creator) own(child *hostspawn.Child) *ownedHost {
+	o := &ownedHost{child: child}
+	go func() {
+		select {
+		case <-child.Done():
+			o.killAgents()
+		case <-cr.ctx.Done():
+		}
+	}()
+	return o
+}
+
+// killAgents ends the host's recorded agents, once.
+func (o *ownedHost) killAgents() { o.once.Do(o.child.KillAgents) }
+
+// terminate is hostspawn.Child.Terminate, its agents' cleanup run once.
+func (o *ownedHost) terminate() {
+	o.child.End(hostspawn.TermGrace)
+	o.killAgents()
+}
+
+// settle is hostspawn.Child.Settle, its agents' cleanup run once: a host
+// exiting of its own accord is given the grace to, and terminated past it.
+func (o *ownedHost) settle() {
+	if !o.child.WaitExit(hostspawn.TermGrace) {
+		o.terminate()
+		return
+	}
+	o.killAgents()
 }
 
 // hostCommand is a created host's command (HostCommand's rule).
@@ -682,7 +795,7 @@ func hostCommand(argv []string) (*exec.Cmd, error) {
 }
 
 // createdSession is what a create uses of its connection to a created host
-// (attend): remote.Session's methods, and two reads of its own — behind an
+// (attend): remote.Session's methods, and its hello's version — behind an
 // interface only so that attend's every outcome can be driven over a session
 // a test holds.
 type createdSession interface {
@@ -693,9 +806,6 @@ type createdSession interface {
 	CloseWithin(context.Context) error
 	// hostVersion is the host's craze version, from its hello.
 	hostVersion() string
-	// sessionRow is the session's own sessions.list row, as its host wrote
-	// it.
-	sessionRow(context.Context) (json.RawMessage, error)
 }
 
 // remoteCreated is a created host's connection: a remote.Session.
@@ -703,29 +813,13 @@ type remoteCreated struct{ *remote.Session }
 
 func (r remoteCreated) hostVersion() string { return r.Client().Hello().Endpoint.CrazeVersion }
 
-// sessionRow is the host's sessions.list row naming the session — its one
-// row, when none names it.
-func (r remoteCreated) sessionRow(ctx context.Context) (json.RawMessage, error) {
-	var list struct {
-		Sessions []json.RawMessage `json:"sessions"`
-	}
-	if err := r.Client().Call(ctx, protocol.MethodSessionsList, protocol.SessionsListParams{}, &list); err != nil {
-		return nil, err
-	}
-	sid := r.Info().CrazeSessionID
-	for _, raw := range list.Sessions {
-		var probe struct {
-			SessionID string `json:"sessionId"`
-		}
-		if json.Unmarshal(raw, &probe) == nil && probe.SessionID == sid {
-			return raw, nil
-		}
-	}
-	if len(list.Sessions) == 1 {
-		return list.Sessions[0], nil
-	}
-	return nil, fmt.Errorf("the host lists no row of session %s", sid)
-}
+// The create's seams over its connections, each its real function in
+// production: a test replaces one (never in parallel) to force a schedule —
+// a connection that stops being usable, a row that cannot be read.
+var (
+	createDial    = dialCreated
+	createRowRead = freshRow
+)
 
 // dialCreated dials the host at socket as the hub's own client of session
 // sid, its first attach with when: ready, within createDialWait.
@@ -749,16 +843,16 @@ func dialCreated(ctx context.Context, socket, sid string) (createdSession, error
 // hostspawn.TermGrace for the host's stop sequence; a stop that cannot be
 // sent, or a host still there after the grace, is terminated. It returns once
 // the host is gone and reaped.
-func (h *hub) abandonHost(child *hostspawn.Child, socket, sid string) {
-	if child.Exited() {
-		child.KillAgents()
+func (h *hub) abandonHost(host *ownedHost, socket, sid string) {
+	if host.child.Exited() {
+		host.killAgents()
 		return
 	}
-	if stopCreated(socket, sid) == nil && child.WaitExit(hostspawn.TermGrace) {
-		child.KillAgents()
+	if stopCreated(socket, sid) == nil && host.child.WaitExit(hostspawn.TermGrace) {
+		host.killAgents()
 		return
 	}
-	child.Terminate()
+	host.terminate()
 }
 
 // stopCreated sends session.stop for session sid to the host at socket, over
@@ -805,21 +899,24 @@ type attendance struct {
 	// prompt and promptErr are the first prompt's outcome.
 	prompt    protocol.CreatePrompt
 	promptErr string
-	// row is the session's sessions.list row as its host wrote it
-	// (compacted), nil when it could not be read; readAt when it was;
-	// version the host's craze, from its hello.
-	row     json.RawMessage
-	readAt  time.Time
+	// version is the host's craze, from its hello.
 	version string
 }
 
 // attend is a create's life on its host, over sess — the hub's own
-// connection, which it closes — once the host is up (the file's comment,
-// steps 2–4): the start waited for until deadline; then the prompt, when
-// there is one; then the session's row read; then the detach. The stream is
-// drained throughout, as the list's dispatch drains it: a start that
-// publishes more than the stream's queue holds before its ready would
-// otherwise wait for a reader.
+// connection, which it closes before it returns — once the host is up (the
+// file's comment, steps 2–4): the start waited for until deadline; then the
+// prompt, when there is one; then the connection let go of: detached,
+// bounded, after a prompt the session answered (accepted, refused) or none;
+// closed at once after any other outcome — a deadline, a cancellation, an
+// answer lost — whether or not the Submit call itself has returned (r32 2):
+// its connection may hold a resend blocked behind a host that stopped
+// reading, and a close is the one thing that ends that, where a detach, or
+// any other call, would queue behind it. The stream is drained throughout, as
+// the list's dispatch drains it: a start that publishes more than the
+// stream's queue holds before its ready would otherwise wait for a reader.
+// The session's row is not read here: on a connection of its own, after this
+// (freshRow).
 func (h *hub) attend(ctx context.Context, sess createdSession, prompt string, deadline time.Time) attendance {
 	dctx, stopDrain := context.WithCancel(context.Background())
 	drained := make(chan struct{})
@@ -861,20 +958,14 @@ func (h *hub) attend(ctx context.Context, sess createdSession, prompt string, de
 		}
 		return attendance{kind: attendLost, err: err}
 	}
-	at := attendance{kind: attendStarted, prompt: protocol.CreatePromptNone}
+	at := attendance{kind: attendStarted, prompt: protocol.CreatePromptNone, version: sess.hostVersion()}
 	if prompt != "" {
-		var answered bool
-		at.prompt, at.promptErr, answered = sendPrompt(ctx, sess, prompt)
-		if !answered {
-			// Its write may be blocked on a host that stopped reading, where
-			// no context reaches it: the connection closed at once ends it.
-			at.version = sess.hostVersion()
-			closeNow()
-			return at
-		}
+		at.prompt, at.promptErr = sendPrompt(ctx, sess, prompt)
 	}
-	at.version = sess.hostVersion()
-	at.row, at.readAt = readRow(ctx, sess)
+	if at.prompt == protocol.CreatePromptUnknown {
+		closeNow()
+		return at
+	}
 	cctx, ccancel := context.WithTimeout(ctx, createDetachWait)
 	closeWith(cctx)
 	ccancel()
@@ -884,9 +975,10 @@ func (h *hub) attend(ctx context.Context, sess createdSession, prompt string, de
 // sendPrompt sends prompt as the list's dispatch does (internal/tui's
 // runDispatch): queued, with the connection's first command id, its answer
 // waited for at most createPromptWait whether or not the call itself can see
-// that deadline (X54: its write does not). answered is false when no answer
-// came in time — the call is still out, and the caller closes the connection.
-func sendPrompt(ctx context.Context, sess createdSession, prompt string) (protocol.CreatePrompt, string, bool) {
+// that deadline (X54: its write does not). No answer in time — the call still
+// out — and an answer that is the deadline's, a cancellation's or a lost
+// connection's are all unknown, which attend closes the connection on.
+func sendPrompt(ctx context.Context, sess createdSession, prompt string) (protocol.CreatePrompt, string) {
 	pctx, cancel := context.WithTimeout(ctx, createPromptWait)
 	defer cancel()
 	submitted := make(chan error, 1)
@@ -901,41 +993,128 @@ func sendPrompt(ctx context.Context, sess createdSession, prompt string) (protoc
 		select {
 		case err = <-submitted:
 		default:
-			return protocol.CreatePromptUnknown, fmt.Sprintf("no answer to the prompt within %s", createPromptWait), false
+			return protocol.CreatePromptUnknown, fmt.Sprintf("no answer to the prompt within %s", createPromptWait)
 		}
 	}
 	switch {
 	case err == nil:
-		return protocol.CreatePromptAccepted, "", true
+		return protocol.CreatePromptAccepted, ""
 	case errors.Is(err, context.DeadlineExceeded), errors.Is(err, context.Canceled), errors.Is(err, backend.ErrOutcomeUnknown):
-		return protocol.CreatePromptUnknown, firstLine(err.Error()), true
+		return protocol.CreatePromptUnknown, firstLine(err.Error())
 	}
-	return protocol.CreatePromptRefused, firstLine(err.Error()), true
+	return protocol.CreatePromptRefused, firstLine(err.Error())
 }
 
-// readRow is the session's own sessions.list row, read over sess within
-// createReadWait, compacted, and when it was read; nil when it could not be.
-func readRow(ctx context.Context, sess createdSession) (json.RawMessage, time.Time) {
-	rctx, cancel := context.WithTimeout(ctx, createReadWait)
+// freshRow reads session sid's own sessions.list row from the host at socket
+// on a connection of its own (r32 2, 6a): dialled, peer-checked, said hello
+// to, asked — every step within createReadWait, a bound enforced by closing
+// the connection when it passes (a timer, beside the connection's own
+// deadline), so no blocked write or read, and no lock behind one, outlives
+// it. It answers the row as the host wrote it, compacted (its one row when
+// none names the session), the host's craze version from that hello, and
+// when it was read; or why it could not be.
+func freshRow(ctx context.Context, socket, sid string) (json.RawMessage, string, time.Time, error) {
+	deadline := time.Now().Add(createReadWait)
+	dctx, cancel := context.WithDeadline(ctx, deadline)
 	defer cancel()
-	raw, err := sess.sessionRow(rctx)
+	var d net.Dialer
+	nc, err := d.DialContext(dctx, "unix", socket)
 	if err != nil {
-		return nil, time.Time{}
+		return nil, "", time.Time{}, err
+	}
+	defer nc.Close()
+	closer := time.AfterFunc(time.Until(deadline), func() { _ = nc.Close() })
+	defer closer.Stop()
+	stop := context.AfterFunc(ctx, func() { _ = nc.Close() })
+	defer stop()
+	_ = nc.SetDeadline(deadline)
+	uc, ok := nc.(*net.UnixConn)
+	if !ok {
+		return nil, "", time.Time{}, errors.New("not a unix socket connection")
+	}
+	if err := rundir.DialCheck(os.Geteuid())(uc); err != nil {
+		return nil, "", time.Time{}, err
+	}
+	lr := protocol.NewLineReader(nc, protocol.OutboundLineMax)
+	call := func(id, method string, params, result any) error {
+		raw, err := json.Marshal(params)
+		if err != nil {
+			return err
+		}
+		if err := protocol.WriteLine(nc, protocol.Request{JSONRPC: protocol.JSONRPCVersion, ID: json.RawMessage(id),
+			Method: method, Params: raw}); err != nil {
+			return err
+		}
+		line, err := lr.ReadLine()
+		if err != nil {
+			return err
+		}
+		var resp protocol.Response
+		if err := json.Unmarshal(line, &resp); err != nil {
+			return err
+		}
+		if string(resp.ID) != id {
+			return fmt.Errorf("%s was answered by a line that is not its reply", method)
+		}
+		if resp.Error != nil {
+			return resp.Error
+		}
+		return json.Unmarshal(resp.Result, result)
+	}
+	var hello protocol.HelloResult
+	if err := call("1", protocol.MethodHello, protocol.HelloParams{Protocols: protocol.SupportedProtocols(), Client: createClient}, &hello); err != nil {
+		return nil, "", time.Time{}, err
+	}
+	if hello.Endpoint.Kind != protocol.EndpointHost {
+		return nil, "", time.Time{}, fmt.Errorf("an endpoint of kind %q answered at the host's socket", hello.Endpoint.Kind)
+	}
+	var list struct {
+		Sessions []json.RawMessage `json:"sessions"`
+	}
+	if err := call("2", protocol.MethodSessionsList, protocol.SessionsListParams{}, &list); err != nil {
+		return nil, "", time.Time{}, err
 	}
 	at := time.Now()
-	var out bytes.Buffer
-	if json.Compact(&out, raw) != nil {
-		return nil, time.Time{}
+	var pick json.RawMessage
+	for _, raw := range list.Sessions {
+		var probe struct {
+			SessionID string `json:"sessionId"`
+		}
+		if json.Unmarshal(raw, &probe) == nil && probe.SessionID == sid {
+			pick = raw
+			break
+		}
 	}
-	return out.Bytes(), at
+	if pick == nil && len(list.Sessions) == 1 {
+		pick = list.Sessions[0]
+	}
+	if pick == nil {
+		return nil, "", time.Time{}, fmt.Errorf("the host lists no row of session %s", sid)
+	}
+	var out bytes.Buffer
+	if err := json.Compact(&out, pick); err != nil {
+		return nil, "", time.Time{}, err
+	}
+	return out.Bytes(), hello.Endpoint.CrazeVersion, at, nil
 }
 
-// createdRow is a created session's roster row, as the hub's roster would
-// list it read now (RosterRow): its host as the registry names it — or, not
-// listed (yet), as its ready line did — ready, since its session has
-// started; reachable; its row the one just read. A row that could not be read
-// leaves it approximate.
-func (h *hub) createdRow(hostID string, line hostspawn.ReadyLine, pid int, at attendance) protocol.RosterRow {
+// createdRow is a created session's roster row (RosterRow), its session's
+// own row read now on a connection of its own (createRowRead: freshRow) —
+// after the create has let go of its connection — and judged fresh at that
+// read, so nothing after it can age it: approximate false. Its host is as the
+// registry names it — or, not listed (yet), as its ready line did — ready,
+// since its session has started; reachable. A row that cannot be read leaves
+// the answer a success all the same (X49): the session exists, and its id must
+// reach the client; its roster row is then the registry's alone, approximate.
+// version is the host's craze from the create's own hello, the read's when it
+// has one.
+func (h *hub) createdRow(ctx context.Context, tag, hostID string, line hostspawn.ReadyLine, pid int, version string) protocol.RosterRow {
+	raw, v, readAt, err := createRowRead(ctx, line.Socket, line.CrazeSessionID)
+	if err != nil {
+		h.logf("%s: host %s: its row cannot be read (%v): answered approximate", tag, hostID, err)
+	} else if v != "" {
+		version = v
+	}
 	e := rundir.Entry{Protocol: protocol.ProtocolVersion, HostID: hostID, PID: pid, Socket: line.Socket,
 		CrazeSessionID: line.CrazeSessionID}
 	if entries, err := hostsRead(h.o.Env); err == nil {
@@ -951,9 +1130,12 @@ func (h *hub) createdRow(hostID string, line hostspawn.ReadyLine, pid int, at at
 	if host.CrazeSessionID == "" {
 		host.CrazeSessionID = line.CrazeSessionID
 	}
-	now := time.Now()
-	in := roster.Row{Host: host, Status: roster.Reachable, Version: at.version, Raw: at.row, ReadAt: at.readAt, Polled: true}
-	row, ok := RosterRow(in, now)
+	in := roster.Row{Host: host, Status: roster.Reachable, Version: version, Raw: raw, ReadAt: readAt, Polled: true}
+	judged := readAt
+	if err != nil {
+		judged = time.Now()
+	}
+	row, ok := RosterRow(in, judged)
 	if !ok {
 		// A host listed in a form the roster omits (its ids out of shape):
 		// its ids as they stand, nothing more.

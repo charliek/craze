@@ -130,6 +130,7 @@ var (
 // one (never in parallel) to force a schedule.
 var (
 	hostsRead    = rundir.Hosts
+	hostsScan    = rundir.HostsScan
 	sweepOrphans = rundir.SweepOrphans
 )
 
