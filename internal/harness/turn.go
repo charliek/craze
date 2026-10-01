@@ -154,11 +154,64 @@ type Result struct {
 // steer. A result a step took up and did not write is given back when the
 // turn ends, before Run returns; Options.OnPending is then called if one went
 // back to waiting.
+//
+// Run is RunWith with no images.
 func (s *Session) Run(ctx context.Context, text string, sink func(Event)) (Result, error) {
+	return s.RunWith(ctx, text, nil, sink)
+}
+
+// Image is one image a person attached to a prompt (plan 033 §3.5): the
+// absolute path of the processed copy it was read from, its media type, and
+// its bytes. RunWith sends each as a fantasy.FilePart — Filename the path,
+// MediaType the type, Data the bytes — and the transcript keeps the bytes
+// inline (P4), so a resume, a fork or a replay never depends on the
+// attachments directory still holding the file. It is the harness's own type
+// rather than Fantasy's so that the adapter reading the attachments
+// (internal/agent, where no file imports Fantasy) gains no Fantasy coupling of
+// its own (owner decision 14).
+type Image struct {
+	Path      string
+	MediaType string
+	Data      []byte
+}
+
+// fileParts is images as the user message's file parts, in order; none is
+// nil.
+func fileParts(images []Image) []fantasy.FilePart {
+	if len(images) == 0 {
+		return nil
+	}
+	out := make([]fantasy.FilePart, len(images))
+	for i, im := range images {
+		out[i] = fantasy.FilePart{Filename: im.Path, MediaType: im.MediaType, Data: im.Data}
+	}
+	return out
+}
+
+// RunWith is Run with images attached to the prompt (plan 033 §3.5). The
+// turn's user message is text followed by one file part per image, in order —
+// fantasy.NewUserMessage(text, files...), the message Fantasy itself builds
+// from a Prompt and its Files — and that is what the transcript keeps,
+// whatever the model.
+//
+// What a request sends of it is the vision strip's (stripImages): the message
+// as it is to a model that accepts images (modeltable.Resolved.Vision), and to
+// one that does not, the text followed by a placeholder part per image naming
+// its file — on this turn and on every later one, replayed from the
+// transcript. The message as this turn sends it is therefore byte for byte
+// the message the next request on the same model replays, so a provider's
+// prefix cache stays aligned across the two (cache equality, CR R5); and since
+// the transcript keeps the images, a later switch to a model that accepts
+// them sends them after all.
+//
+// The text must not be blank, images or not (ErrEmptyPrompt): Fantasy refuses
+// files with an empty prompt (agent.go:1260-1265), and a person's message
+// always carries its chips, [Image #N], in its text (P28).
+func (s *Session) RunWith(ctx context.Context, text string, images []Image, sink func(Event)) (Result, error) {
 	if strings.TrimSpace(text) == "" {
 		return Result{}, ErrEmptyPrompt
 	}
-	return s.run(ctx, text, false, sink)
+	return s.run(ctx, text, fileParts(images), false, sink)
 }
 
 // Wake runs a turn of the session's own (plan 026 §3.11): Run with no prompt
@@ -180,12 +233,12 @@ func (s *Session) Run(ctx context.Context, text string, sink func(Event)) (Resul
 // Options.OnPending has said a result is waiting and no turn of its own is
 // running or about to start.
 func (s *Session) Wake(ctx context.Context, sink func(Event)) (Result, error) {
-	return s.run(ctx, "", true, sink)
+	return s.run(ctx, "", nil, true, sink)
 }
 
-// run is Run and Wake, one implementation (see both). For a wake text is
-// empty until the results it takes are known.
-func (s *Session) run(ctx context.Context, text string, wake bool, sink func(Event)) (Result, error) {
+// run is RunWith and Wake, one implementation (see both). For a wake text is
+// empty until the results it takes are known, and it has no files.
+func (s *Session) run(ctx context.Context, text string, files []fantasy.FilePart, wake bool, sink func(Event)) (Result, error) {
 	if sink == nil {
 		sink = func(Event) {}
 	}
@@ -259,14 +312,22 @@ func (s *Session) run(ctx context.Context, text string, wake bool, sink func(Eve
 	// the history — every other turn of every other session — it changes
 	// nothing at all, however many keys it covers, so the request's bytes,
 	// and the provider's prefix cache, are what they would have been.
+	//
+	// Then the vision strip (plan 033 §3.5, P8): to a model that does not
+	// accept images, every image the history holds — a person's attached one,
+	// a tool's image result — goes as a placeholder, the same bytes on every
+	// request to it; to one that does, the history is as it was.
 	msgs, results := s.store.ContextWithResults(m.id())
-	history := redactHistory(s.redactor(), msgs, results)
+	history := stripImages(redactHistory(s.redactor(), msgs, results), m.r.Vision, m.r.Name)
 	// A prompt still held is an earlier turn's that produced nothing. It is
 	// not in history, so this turn's request never sent it; written ahead of
 	// this turn's answer, it would put in the transcript what the model never
 	// saw.
 	s.store.DiscardHeldUsers()
-	user.Message = fantasy.NewUserMessage(text) // byte for byte what Fantasy sends for Prompt
+	// Byte for byte the message Fantasy builds from a Prompt and its Files;
+	// the files are kept whatever the model, and the strip decides what is
+	// sent of them (RunWith, call).
+	user.Message = fantasy.NewUserMessage(text, files...)
 	if err := s.store.AppendUser(user); err != nil {
 		return Result{}, fmt.Errorf("harness: %w", s.tools.redactErr(err))
 	}
@@ -330,8 +391,11 @@ func (s *Session) run(ctx context.Context, text string, wake bool, sink func(Eve
 	// summary or to a summarizer failure (compactedBeforeFirst, which
 	// preTurnCompaction sets). The compaction is written ahead of the held
 	// prompt, which goes out with the first step after it, and after a
-	// summary the history is the store's again, from the summary on.
-	compacted, err := s.preTurnCompaction(t, user.Message)
+	// summary the history is the store's again, from the summary on. The
+	// prompt is weighed as it will be sent: its images estimated by their
+	// size (messageTokens, P9), or their placeholders on a model that does
+	// not accept them.
+	compacted, err := s.preTurnCompaction(t, stripImages([]fantasy.Message{user.Message}, m.r.Vision, m.r.Name)[0])
 	if err != nil {
 		return t.stopBeforeRequest(err)
 	}
@@ -372,10 +436,15 @@ func (s *Session) run(ctx context.Context, text string, wake bool, sink func(Eve
 	// turn with ErrContextTooLarge; a cancel during the compaction ends it
 	// cancelled, and one that cannot be written stops it (P5), as between
 	// any two segments.
-	prompt := text
+	//
+	// The prompt's images (plan 033 §3.5) go wherever its text goes: sent
+	// again with it after an overflow, and after a restart — whose prompt is
+	// "" — never, since the stored history holds the message, files and all,
+	// and the strip sends it as the first request did.
+	prompt, promptFiles := text, files
 	recovered := false
 	for {
-		res, err := agent.Stream(turnCtx, t.call(prompt, history))
+		res, err := agent.Stream(turnCtx, t.call(prompt, promptFiles, history))
 		switch {
 		case t.restartDue(err):
 			// Between requests: the completed step's call state is retired and
@@ -385,7 +454,7 @@ func (s *Session) run(ctx context.Context, text string, wake bool, sink func(Eve
 			if err := s.midTurnCompaction(t); err != nil {
 				return t.stopBeforeRequest(err)
 			}
-			prompt = ""
+			prompt, promptFiles = "", nil
 		case !recovered && s.overflowRecovers(t, err):
 			recovered = true
 			held, sent := t.failedRequest()
@@ -400,9 +469,9 @@ func (s *Session) run(ctx context.Context, text string, wake bool, sink func(Eve
 				// persisted.
 				return t.finish(res, err)
 			}
-			prompt = ""
+			prompt, promptFiles = "", nil
 			if held {
-				prompt = text
+				prompt, promptFiles = text, files
 			}
 		default:
 			return t.finish(res, err)
@@ -455,15 +524,17 @@ func (s *Session) overflowCompaction(t *turn, sent int64) error {
 }
 
 // rebuildHistory is the history the next request replays, rebuilt from the
-// store — after a compaction, from its summary on — redacted as run's first
-// build is (see there). It also fixes, for the segment about to start, what
+// store — after a compaction, from its summary on — redacted and stripped of
+// images for the turn's model as run's first build is (see there): a prompt's
+// images come back from the store here after a restart, and go out as the
+// first request sent them. It also fixes, for the segment about to start, what
 // the retained history says the model was last reminded of (retainedReminder,
 // plan 028 §3.11 table): the variant of the last reminder entry among the
 // context's steps, which a restart's first request decides its own reminder
 // by. It holds no lock of the turn's; the turn is between requests.
 func (s *Session) rebuildHistory(t *turn) []fantasy.Message {
 	msgs, results := s.store.ContextWithResults(t.model.id())
-	history := redactHistory(s.redactor(), msgs, results)
+	history := stripImages(redactHistory(s.redactor(), msgs, results), t.model.r.Vision, t.model.r.Name)
 	retained := lastReminderVariant(s.store.Steps(t.model.id()))
 	t.mu.Lock()
 	t.retainedReminder = retained
@@ -748,7 +819,23 @@ func (t *turn) emitLocked(ev Event) {
 
 // call is the turn's request. MaxOutputTokens, effort and retries are per
 // call; the system prompt and the tools are the agent's.
-func (t *turn) call(text string, history []fantasy.Message) fantasy.AgentStreamCall {
+//
+// A prompt with files (RunWith, plan 033 §3.5) is not handed over as Prompt
+// and Files: its message — the one the transcript keeps — goes at the end of
+// Messages as the vision strip leaves it for the turn's model, with Prompt ""
+// (Fantasy then appends nothing, and allows that after a user message,
+// agent.go:1247-1275). To a model that does not accept images the message
+// sent is its text and a placeholder part per image, which Prompt and Files
+// cannot express; and one path for every model keeps what goes out the strip
+// of what is stored, byte for byte, so the next request's replay of it is the
+// same bytes (cache equality). The list Fantasy builds — system, history,
+// prompt — and so every index prepareStep places a steer, a reminder or a
+// result at, is the same either way.
+func (t *turn) call(text string, files []fantasy.FilePart, history []fantasy.Message) fantasy.AgentStreamCall {
+	if len(files) > 0 {
+		user := stripImages([]fantasy.Message{fantasy.NewUserMessage(text, files...)}, t.model.r.Vision, t.model.r.Name)[0]
+		text, history = "", append(slices.Clip(history), user)
+	}
 	c := fantasy.AgentStreamCall{
 		Prompt:          text,
 		Messages:        history,
@@ -1523,6 +1610,15 @@ func redactResults(red *redact.Replacer, m fantasy.Message) fantasy.Message {
 				return r, true
 			}
 		}
+		// An image result's text (plan 033 §3.5): a tool wrote it, as it
+		// wrote any result's; its image is left as it is.
+		if o, ok := fantasy.AsToolResultOutputType[fantasy.ToolResultOutputContentMedia](r.Output); ok {
+			if s := red.String(o.Text); s != o.Text {
+				o.Text = s
+				r.Output = o
+				return r, true
+			}
+		}
 		return p, false
 	})
 }
@@ -1549,6 +1645,111 @@ func redactHistory(red *redact.Replacer, msgs []fantasy.Message, results []bool)
 	}
 	return out
 }
+
+// stripImages is msgs as a request to a model sends them (plan 033 §3.5, P8):
+// msgs itself when the model accepts images (vision, modeltable.Resolved's),
+// and otherwise msgs with every image left out (omitImages), the placeholder
+// saying "<model> does not accept images" — model is the executing model's
+// name as the person sees it (Resolved.Name: its display name, or its alias
+// when it has none), the name the composer's note gives it too. The
+// transcript keeps the images (P4); this is the one place a request's history,
+// its prompt and the context's estimate are cut down for a model, so a
+// provider that refuses images anywhere (GLM, 09-references.md:103) is never
+// sent one, and every request to such a model replays the same placeholder
+// bytes for the same image.
+//
+// It applies to the turn's history (run, rebuildHistory), the turn's own
+// prompt (call, and preTurnCompaction's weighing), the context's estimate
+// (contextTokensOn) and the aligned summarizer's history (compactRun), which
+// summarizeAligned then strips of whatever is left, whatever the model.
+// Nothing else sends a message the store holds: a steer, background results
+// and a reminder are text, and a step's own tool results reach only the model
+// that ran them, whose tools return images only when it accepts them (the
+// per-turn tool.Env.Vision, plan 033 §3.5).
+func stripImages(msgs []fantasy.Message, vision bool, model string) []fantasy.Message {
+	if vision {
+		return msgs
+	}
+	return omitImages(msgs, model+" does not accept images")
+}
+
+// summarizerOmits is why the summarizer's request carries no image (plan 033
+// §3.5): it is sent none, whatever the model it runs on — a summary is text,
+// and pixels would only cost.
+const summarizerOmits = "images are not sent to the summarizer"
+
+// omitImages is msgs with every image replaced by text saying it was left
+// out and why:
+//
+//   - an attached image, a fantasy.FilePart of an image/* type, becomes the
+//     text part [Image omitted: <why>. File: <path>], the path being the part's
+//     Filename (the attachment's), so the model can still say where it was;
+//   - an image a tool returned, a fantasy.ToolResultOutputContentMedia of an
+//     image/* type, becomes a text result — still a result of the same call,
+//     which every provider takes — of its text, if any, then a line
+//     [Image omitted: <why>].
+//
+// Every other part, and every message holding no image, is carried over as it
+// is; msgs itself, which the caller may share with the store, is never
+// written to, and comes back as it is when nothing was left out.
+func omitImages(msgs []fantasy.Message, why string) []fantasy.Message {
+	var out []fantasy.Message
+	for i, m := range msgs {
+		changed := false
+		n := mapParts(m, func(p fantasy.MessagePart) (fantasy.MessagePart, bool) {
+			q, omitted := omitImage(p, why)
+			changed = changed || omitted
+			return q, omitted
+		})
+		if !changed {
+			continue
+		}
+		if out == nil {
+			out = slices.Clone(msgs)
+		}
+		out[i] = n
+	}
+	if out == nil {
+		return msgs
+	}
+	return out
+}
+
+// omitImage is omitImages for one part: its replacement, and whether p was an
+// image.
+func omitImage(p fantasy.MessagePart, why string) (fantasy.MessagePart, bool) {
+	if f, ok := fantasy.AsMessagePart[fantasy.FilePart](p); ok && isImage(f.MediaType) {
+		return fantasy.TextPart{Text: imageOmitted(why, f.Filename)}, true
+	}
+	r, ok := fantasy.AsMessagePart[fantasy.ToolResultPart](p)
+	if !ok {
+		return p, false
+	}
+	o, ok := fantasy.AsToolResultOutputType[fantasy.ToolResultOutputContentMedia](r.Output)
+	if !ok || !isImage(o.MediaType) {
+		return p, false
+	}
+	text := imageOmitted(why, "")
+	if o.Text != "" {
+		text = o.Text + "\n" + text
+	}
+	r.Output = fantasy.ToolResultOutputContentText{Text: text}
+	return r, true
+}
+
+// imageOmitted is an image's placeholder: [Image omitted: <why>. File: <path>],
+// or without the file when there is no path to give.
+func imageOmitted(why, path string) string {
+	if path == "" {
+		return "[Image omitted: " + why + "]"
+	}
+	return "[Image omitted: " + why + ". File: " + path + "]"
+}
+
+// isImage reports whether a part's media type is an image's: the test
+// openaicompat itself makes before it sends a file part as an image_url
+// (language_model_hooks.go:293).
+func isImage(mediaType string) bool { return strings.HasPrefix(mediaType, "image/") }
 
 // redactText is m with every provider key redacted from its text parts; m
 // itself when they hold none.

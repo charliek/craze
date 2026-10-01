@@ -21,8 +21,8 @@ import (
 // Images on the ACP prompt path (plan 033 §3.4, C3): promptBlocks' order and
 // shapes, the capability and dialect decision, the -32602 path-text resend,
 // host-read refusals as path text, and interjections as text on both sessions
-// (P7) — with native's interim, which sends no envelope to the model until it
-// sends the images themselves (C5).
+// (P7). Native's prompts send their images as file parts
+// (native_images_test.go).
 
 // imageHome points CRAZE_HOME at a fresh directory, so paths.AttachmentsDir is
 // this test's own.
@@ -472,39 +472,7 @@ func TestHostReadRefusalsReachTheAgentAsPathText(t *testing.T) {
 	}
 }
 
-// --- interjections and native's interim ----------------------------------
-
-// TestNativePromptSendsNoEnvelope is native's interim until it sends images
-// itself (plan 033 C5): the model is sent the visible text with the image as
-// [Image #1: <path>] text, never the envelope, and the session is titled from
-// the words.
-func TestNativePromptSendsNoEnvelope(t *testing.T) {
-	f := newNativeFixture(t)
-	s := f.started(Options{})
-	m := f.models["test/a"]
-	m.push(answer("ok"))
-	ref := AttachmentRef{N: 1, Path: "/h/attachments/0123456789abcdef.png", MIME: "image/png"}
-	if _, err := s.Prompt(context.Background(), AttachmentBlock([]AttachmentRef{ref})+"look at [Image #1]"); err != nil {
-		t.Fatal(err)
-	}
-	calls := m.requests()
-	if len(calls) != 1 {
-		t.Fatalf("%d requests", len(calls))
-	}
-	if got := firstUserText(t, calls[0]); got != "[Image #1: /h/attachments/0123456789abcdef.png]\nlook at [Image #1]" {
-		t.Fatalf("the model was sent %q", got)
-	}
-	for _, msg := range calls[0].Prompt {
-		for _, p := range msg.Content {
-			if tp, ok := fantasy.AsMessagePart[fantasy.TextPart](p); ok && strings.Contains(tp.Text, "craze_attachments") {
-				t.Fatalf("the envelope reached the model: %q", tp.Text)
-			}
-		}
-	}
-	if title := s.Snapshot().Title; title != "look at [Image #1]" {
-		t.Fatalf("title %q", title)
-	}
-}
+// --- interjections ---------------------------------------------------------
 
 // TestNativeInterjectSendsPathText (P7 on native): an interjection carrying an
 // envelope reaches the model as [Image #1: <path>] text, and its echo says the

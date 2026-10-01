@@ -86,7 +86,7 @@ func (s *Session) stepSpent(turn int, m model, d StepDone) Spent {
 // session's, and the context the next request sends to next's model — its
 // size (§3.7) and that model's window.
 func (s *Session) spent(turn int, next modeltable.Resolved) Spent {
-	tokens, _ := s.contextTokensOn(idOf(next))
+	tokens, _ := s.contextTokensOn(next)
 	inTurn, session := s.spend(turn)
 	return Spent{ContextTokens: tokens, ContextWindow: int64(next.ContextWindow), Turn: inTurn, Session: session}
 }

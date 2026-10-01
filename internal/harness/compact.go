@@ -222,7 +222,11 @@ func (s *Session) compactRun(ctx context.Context, m model, fit modeltable.Resolv
 		return CompactResult{}, store.ErrNothingToCompact
 	}
 	red := s.redactor()
-	history := redactHistory(red, msgs, marks)
+	// The history as a request to m sends it: redacted, and stripped of
+	// images when m does not accept them (stripImages, plan 033 §3.5) — what
+	// before weighs, and what the aligned summarizer replays, so its prefix
+	// is the turns' own on such a model.
+	history := stripImages(redactHistory(red, msgs, marks), m.r.Vision, m.r.Name)
 	before := s.estimateContext(history)
 
 	steps := s.store.Steps(m.id())
@@ -672,12 +676,20 @@ func observeUsage(into *store.Usage) func(fantasy.Usage, fantasy.FinishReason, f
 // summary on" line (item 1, item 2, item 3). Its agent's own retries are off
 // (newSummarizerAgent, review r1-c9 "three attempts means three requests"):
 // compact's outer attempts are the whole retry budget.
+//
+// The summarizer is never sent an image (plan 033 §3.5, P8), whatever the
+// model: history is the request's as a turn on m sends it — already stripped
+// of images when m does not accept them, which keeps it aligned with the
+// turns' — and whatever images are left, on a model that does accept them,
+// go as placeholders saying the summarizer is not sent them (summarizerOmits)
+// rather than that the model cannot see them, which it can, and which the
+// summary would otherwise carry into the turns after it.
 func (s *Session) summarizeAligned(ctx context.Context, m model, history []fantasy.Message, focus string, red *redact.Replacer) (string, store.Usage, error) {
 	agent := s.newSummarizerAgent(m.lm, s.system, s.inertTools())
 	var observed store.Usage
 	call := fantasy.AgentStreamCall{
 		Prompt:          s.compactionPromptText(focus, red),
-		Messages:        history,
+		Messages:        omitImages(history, summarizerOmits),
 		ProviderOptions: m.effortOpts,
 		StopWhen:        []fantasy.StopCondition{fantasy.StepCountIs(1)},
 		OnStreamFinish:  observeUsage(&observed),
@@ -949,15 +961,12 @@ func textLines(msgs []fantasy.Message, limit int) string {
 	return b.String()
 }
 
-// resultText is a tool result part's text: its output, or its error's.
+// resultText is a tool result part's text: its output, its error's, or an
+// image result's text (outputText) — never the image, so the text form, like
+// the aligned one, sends the summarizer no pixels (plan 033 §3.5).
 func resultText(r fantasy.ToolResultPart) string {
-	if o, ok := fantasy.AsToolResultOutputType[fantasy.ToolResultOutputContentText](r.Output); ok {
-		return o.Text
-	}
-	if o, ok := fantasy.AsToolResultOutputType[fantasy.ToolResultOutputContentError](r.Output); ok && o.Error != nil {
-		return o.Error.Error()
-	}
-	return ""
+	text, _ := outputText(r.Output)
+	return text
 }
 
 // capText is s cut to at most limit runes — not bytes (review r1-c9 finding

@@ -3,6 +3,7 @@ package harness
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -616,11 +617,28 @@ func badIDsResult(t *turn, name string) tool.Result {
 // harness id in its client metadata, as a bridged run's has.
 func resultPart(callID, id string, res tool.Result) fantasy.ToolResultPart {
 	r := toResponse(res, id)
-	var out fantasy.ToolResultOutputContent = fantasy.ToolResultOutputContentText{Text: r.Content}
-	if r.IsError {
-		out = fantasy.ToolResultOutputContentError{Error: errors.New(r.Content)}
+	return fantasy.ToolResultPart{ToolCallID: callID, Output: outputOf(r), ClientMetadata: r.Metadata}
+}
+
+// outputOf is r as the output Fantasy records for a run tool's response
+// (agent.go:859-875), for the parts the harness writes itself — a synthetic
+// or a partial step's (resultPart): an error's text as an error; an image or
+// other media response as a media output — base64 of its bytes, its type, and
+// its text (plan 033 §3.5) — so an image a tool returned is never flattened to
+// text on those paths, and the vision strip and the request decide what is
+// sent of it, as they do for a run step's; anything else as text.
+func outputOf(r fantasy.ToolResponse) fantasy.ToolResultOutputContent {
+	switch {
+	case r.IsError:
+		return fantasy.ToolResultOutputContentError{Error: errors.New(r.Content)}
+	case r.Type == "image" || r.Type == "media":
+		return fantasy.ToolResultOutputContentMedia{
+			Data:      base64.StdEncoding.EncodeToString(r.Data),
+			MediaType: r.MediaType,
+			Text:      r.Content,
+		}
 	}
-	return fantasy.ToolResultPart{ToolCallID: callID, Output: out, ClientMetadata: r.Metadata}
+	return fantasy.ToolResultOutputContentText{Text: r.Content}
 }
 
 // toResponse is res as Fantasy takes it. An error result must carry text:

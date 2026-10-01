@@ -1714,15 +1714,16 @@ func (s *nativeSession) prompt(ctx context.Context, text string, rel chan struct
 		res, err = hs.Compact(turnCtx, hs.Redact(focus), hs.Redact(command), s.sink)
 	} else {
 		// One string, not content blocks: the harness takes the whole user
-		// message at once (turn.go). Redacted with the session's own
-		// redactor, because Run persists and sends it unchanged.
+		// message's text at once (turn.go). Redacted with the session's own
+		// redactor, because RunWith persists and sends it unchanged.
 		//
-		// The attachment envelope never reaches the model (plan 033 C3's
-		// interim, until native sends the images themselves, §3.5): its images
-		// go as [Image #N: <path>] lines after any shell block, as an
-		// interjection's do. The title and the references above read the
-		// envelope as nothing (SplitShellContext).
-		body, problems := AttachmentsAsPathText(text)
+		// The attachment envelope never reaches the model (plan 033 §3.5): it
+		// comes off here, and its images go to the turn as file parts after
+		// the text — the model's vision decides what of them is sent, in the
+		// harness — or, for any the host would not read, as path text with
+		// the reason (nativeImages). The title and the references above read
+		// the envelope as nothing (SplitShellContext).
+		body, images, problems := nativeImages(text)
 		noteAttachments(s.log, "native", problems)
 		sent, expanded := nativePrompt(body, refs, sessionID, hs.Redact)
 		for _, cmd := range expanded {
@@ -1735,7 +1736,7 @@ func (s *nativeSession) prompt(ctx context.Context, text string, rel chan struct
 				break
 			}
 		}
-		res, err = hs.Run(turnCtx, sent, s.sink)
+		res, err = hs.RunWith(turnCtx, sent, images, s.sink)
 	}
 	// Translated the moment Run hands it over, and before anything reads it:
 	// what a turn could not answer comes back in the spelling craze sent, and
