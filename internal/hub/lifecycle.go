@@ -203,6 +203,13 @@ type hooks struct {
 	// subscribed runs between a subscription's registration and its reply's
 	// write.
 	subscribed func()
+	// rosterLocking is told, on c's own goroutine (a sessions.list, what
+	// "list") or a subscription's flusher ("flush"), as it is about to take
+	// c's write lock for a line of the roster's; rosterTaken once it holds
+	// it and has taken that line's roster — the list's snapshot, the
+	// flusher's notification — before the line is written.
+	rosterLocking func(c *conn, what string)
+	rosterTaken   func(c *conn, what string)
 
 	// session.connect's (splice.go): connectDial replaces its dial, and
 	// connectCheck its peer check (rundir.DialCheck); handedOff is told each

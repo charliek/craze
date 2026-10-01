@@ -76,6 +76,17 @@ import (
 // reset{slow_consumer} follow it, and the connection stays, for a new
 // subscription. The teardown ends every subscription with
 // reset{hub_closing}, its writes capped at resetWait.
+//
+// truncated is a reply's alone: a roster notification has no such member. So
+// a change that takes the roster over RosterRowsMax rows, or back to them,
+// ends every subscription with reset{omitted} — the roster's completeness
+// changed — and each subscriber subscribes again, its reply saying which.
+//
+// On one connection the lines that carry the cursor — a sessions.list reply
+// and its subscription's notifications — are written in the order their
+// roster was taken: each takes the connection's write lock before the
+// roster's, and holds it from its snapshot (list) or its take (take) through
+// its write (server.go's conn.list and conn.flush).
 
 // The roster's periods and bounds: variables only so a test can shorten them
 // (never in parallel).
@@ -278,17 +289,44 @@ func (rs *rosterState) apply(snap roster.Snapshot) {
 		rs.touchLocked(id)
 		members = true
 	}
+	reset, truncated := 0, false
 	if members {
+		was := len(rs.order) > protocol.RosterRowsMax
 		rs.reorderLocked()
+		if truncated = len(rs.order) > protocol.RosterRowsMax; truncated != was {
+			reset = rs.resetAllLocked(protocol.ResetOmitted)
+		}
 	}
 	rs.seenRun, rs.complete = snap.Run, complete
 	close(rs.changed)
 	rs.changed = make(chan struct{})
 	rs.wakeLocked()
 	rs.mu.Unlock()
+	if reset > 0 {
+		state := "whole again"
+		if truncated {
+			state = fmt.Sprintf("over %d rows, truncated", protocol.RosterRowsMax)
+		}
+		rs.h.logf("the roster is %s: %d roster subscription(s) reset omitted", state, reset)
+	}
 	if rs.applied != nil {
 		rs.applied(snap)
 	}
+}
+
+// resetAllLocked ends every subscription for why — its reset written by its
+// flusher (subscription.final) — and answers how many there were. The
+// roster's completeness (truncated) is the reply's alone, which a roster
+// notification cannot carry: a subscriber holding a roster whose truncated
+// has flipped is told to subscribe again, its new reply saying which (r19 3).
+func (rs *rosterState) resetAllLocked(why protocol.ResetReason) int {
+	n := 0
+	for s := range rs.subs {
+		if rs.endLocked(s, why) {
+			n++
+		}
+	}
+	return n
 }
 
 // settleLocked brings e's listed row to now: a new row, or one whose content
@@ -583,15 +621,18 @@ func (rs *rosterState) reason(s *subscription) protocol.ResetReason {
 // told. False when it had ended already.
 func (rs *rosterState) end(s *subscription, why protocol.ResetReason) bool {
 	rs.mu.Lock()
+	defer rs.mu.Unlock()
+	return rs.endLocked(s, why)
+}
+
+func (rs *rosterState) endLocked(s *subscription, why protocol.ResetReason) bool {
 	if s.ended {
-		rs.mu.Unlock()
 		return false
 	}
 	s.ended, s.why = true, why
 	s.pending = nil
 	delete(rs.subs, s)
 	rs.releaseLocked()
-	rs.mu.Unlock()
 	close(s.stop)
 	return true
 }
@@ -675,11 +716,7 @@ func (s *subscription) run() {
 			}
 		}
 		last = time.Now()
-		p, ok := s.rs.take(s)
-		if !ok {
-			continue
-		}
-		if !s.c.notify(s, p) {
+		if !s.c.flush(s) {
 			return
 		}
 	}
@@ -693,12 +730,15 @@ func (s *subscription) timer(d time.Duration) (<-chan time.Time, func()) {
 	return t.C, func() { t.Stop() }
 }
 
-// final writes the teardown's reset{hub_closing} as the flusher returns, for
-// a subscription the teardown ended; a slow consumer's reset is written with
-// the line it cut (conn.notify), and a closed connection's is nobody's.
+// final writes the subscription's reset as the flusher returns — after its
+// reply and any notification in flight — for a subscription the teardown
+// ended (hub_closing) or the roster's completeness did (omitted); a slow
+// consumer's reset is written with the line it cut (conn.notifyLocked), and a
+// closed connection's is nobody's.
 func (s *subscription) final() {
-	if s.rs.reason(s) == protocol.ResetHubClosing {
-		s.c.writeReset(s.id, protocol.ResetHubClosing)
+	switch why := s.rs.reason(s); why {
+	case protocol.ResetHubClosing, protocol.ResetOmitted:
+		s.c.writeReset(s.id, why)
 	}
 }
 

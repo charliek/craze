@@ -33,10 +33,14 @@ import (
 // that serves it.
 //
 // Writes: one line at a time (wmu), each bounded — a reply by writeWait, a
-// roster notification by slowWait (conn.notify) — and every deadline capped
-// by the teardown's (capWrites), so its last word to a subscriber is bounded
-// whatever a write in flight was given. A line cut part way leaves the
-// connection broken: nothing more is written on it, and it closes.
+// roster notification by slowWait (conn.notifyLocked) — and every deadline
+// capped by the teardown's (capWrites), so its last word to a subscriber is
+// bounded whatever a write in flight was given. A line cut part way leaves the
+// connection broken: nothing more is written on it, and it closes. A line
+// that carries the roster's cursor — a sessions.list reply, a roster
+// notification — takes its roster and is written in one section under wmu
+// (conn.list, conn.flush): the lock order is wmu, then the roster's, and
+// nothing waits for wmu holding the roster's.
 
 // The server's bounds: variables only so a test can shorten them (never in
 // parallel).
@@ -382,20 +386,33 @@ func (c *conn) hello(req *request) bool {
 }
 
 // list answers sessions.list (roster.go): once the open run has polled every
-// host — at most listWait — the roster as it stands.
+// host — at most listWait — the roster as it stands. Its snapshot and its
+// write are one section under the connection's write lock, taken before the
+// roster's (the flusher's order, conn.flush): on a connection that holds a
+// subscription the reply is never written behind a notification of a later
+// cursor, nor a notification behind it of an earlier one (r19 1). The
+// roster's lock is not held across the write.
 func (c *conn) list(req *request) bool {
 	if perr := emptyParams(req.params); perr != nil {
 		return c.replyErr(req.id, perr)
 	}
 	rs := c.s.h.rs
 	rs.await(rs.acquire())
+	if f := c.s.h.hk.rosterLocking; f != nil {
+		f(c, "list")
+	}
+	c.wmu.Lock()
+	defer c.wmu.Unlock()
 	res, ok := rs.list()
 	rs.release()
 	if !ok {
-		c.replyErr(req.id, refused(protocol.CodeUnavailable, protocol.ReasonClosing, "the hub is closing"))
+		c.writeLocked(errorLine(req.id, refused(protocol.CodeUnavailable, protocol.ReasonClosing, "the hub is closing")))
 		return false
 	}
-	return c.reply(req.id, res)
+	if f := c.s.h.hk.rosterTaken; f != nil {
+		f(c, "list")
+	}
+	return c.writeLocked(replyLine(req.id, res))
 }
 
 // subscribe answers sessions.subscribe (roster.go): one per connection; once
@@ -464,39 +481,60 @@ func emptyParams(raw json.RawMessage) *protocol.Error {
 	return nil
 }
 
-// reply writes result as the answer to id: false when the write failed, which
-// ends the connection. A reply over the outbound line limit is replaced by
-// failed, reason response_too_large — a roster stays under it for a request id
-// within RosterRequestIDBytesMax (limits.go).
+// reply writes result as the answer to id (replyLine): false when the write
+// failed, which ends the connection.
 func (c *conn) reply(id json.RawMessage, result any) bool {
-	// MarshalLine's encoding (HTML not escaped), without its newline.
-	raw, err := protocol.MarshalLine(result)
-	if err != nil {
-		return c.replyErr(id, refused(protocol.CodeFailed, protocol.ReasonFailed, "%v", err))
-	}
-	resp := protocol.Response{JSONRPC: protocol.JSONRPCVersion, ID: id, Result: bytes.TrimSuffix(raw, []byte{'\n'})}
-	if len(`{"jsonrpc":"2.0","id":,"result":}`)+len(id)+len(raw)-1 > protocol.OutboundLineMax {
-		return c.replyErr(id, refused(protocol.CodeFailed, protocol.ReasonResponseTooLarge,
-			"the reply would be over the %d-byte line limit", protocol.OutboundLineMax))
-	}
-	return c.write(resp)
+	line := replyLine(id, result)
+	c.wmu.Lock()
+	defer c.wmu.Unlock()
+	return c.writeLocked(line)
 }
 
 // replyErr writes e as the answer to id (nil: null), as reply does.
 func (c *conn) replyErr(id json.RawMessage, e *protocol.Error) bool {
-	return c.write(protocol.Response{JSONRPC: protocol.JSONRPCVersion, ID: id, Error: e})
-}
-
-// write writes one line, bounded by writeWait: a peer that does not read it
-// in that time is a connection that ends.
-func (c *conn) write(v any) bool {
-	line, err := protocol.MarshalLine(v)
-	if err != nil {
-		return false
-	}
+	line := errorLine(id, e)
 	c.wmu.Lock()
 	defer c.wmu.Unlock()
-	if c.broken {
+	return c.writeLocked(line)
+}
+
+// replyLine is the line answering id with result, in MarshalLine's encoding
+// (HTML not escaped). A result that does not encode is answered failed, and
+// one whose line would be over the outbound line limit failed, reason
+// response_too_large — a roster stays under it for a request id within
+// RosterRequestIDBytesMax (limits.go). Nil only when not even that encodes.
+func replyLine(id json.RawMessage, result any) []byte {
+	raw, err := protocol.MarshalLine(result)
+	if err != nil {
+		return errorLine(id, refused(protocol.CodeFailed, protocol.ReasonFailed, "%v", err))
+	}
+	if len(`{"jsonrpc":"2.0","id":,"result":}`)+len(id)+len(raw)-1 > protocol.OutboundLineMax {
+		return errorLine(id, refused(protocol.CodeFailed, protocol.ReasonResponseTooLarge,
+			"the reply would be over the %d-byte line limit", protocol.OutboundLineMax))
+	}
+	line, err := protocol.MarshalLine(protocol.Response{JSONRPC: protocol.JSONRPCVersion, ID: id,
+		Result: bytes.TrimSuffix(raw, []byte{'\n'})})
+	if err != nil {
+		return nil
+	}
+	return line
+}
+
+// errorLine is the line answering id (nil: null) with e; nil when it does not
+// encode.
+func errorLine(id json.RawMessage, e *protocol.Error) []byte {
+	line, err := protocol.MarshalLine(protocol.Response{JSONRPC: protocol.JSONRPCVersion, ID: id, Error: e})
+	if err != nil {
+		return nil
+	}
+	return line
+}
+
+// writeLocked writes one line (nil: none, a failure), wmu held, bounded by
+// writeWait: a peer that does not read it in that time is a connection that
+// ends.
+func (c *conn) writeLocked(line []byte) bool {
+	if line == nil || c.broken {
 		return false
 	}
 	_ = c.setWriteDeadline(time.Now().Add(writeWait))
@@ -509,22 +547,43 @@ func (c *conn) write(v any) bool {
 	return err == nil
 }
 
-// notify writes p, s's roster notification, bounded by slowWait: false ends
-// the flusher. A write that blocks that long ends the subscription — unless
-// it has ended meanwhile, the teardown's cap having cut the write — with the
-// rest of the line and a reset{slow_consumer} written after it, bounded by
-// writeWait; the connection stays for a new subscription. A write that fails
-// otherwise, or the rest that cannot be written, ends the connection.
-func (c *conn) notify(s *subscription, p protocol.RosterParams) bool {
-	line, err := notificationLine(protocol.NotifyRoster, p)
-	if err != nil {
-		c.s.h.logf("roster subscription %s: %v", s.id, err)
-		c.close()
-		return false
+// flush writes s's next notification, if it has one: false ends the flusher.
+// Its take and its write are one section under the connection's write lock,
+// taken before the roster's — a sessions.list's snapshot and its write are
+// the same (conn.list) — so the lines one connection is written carry
+// cursors that never go back; a write that blocks holds the write lock, never
+// the roster's.
+func (c *conn) flush(s *subscription) bool {
+	if f := c.s.h.hk.rosterLocking; f != nil {
+		f(c, "flush")
 	}
 	c.wmu.Lock()
 	defer c.wmu.Unlock()
 	if c.broken {
+		return false
+	}
+	p, ok := s.rs.take(s)
+	if !ok {
+		return true
+	}
+	if f := c.s.h.hk.rosterTaken; f != nil {
+		f(c, "flush")
+	}
+	return c.notifyLocked(s, p)
+}
+
+// notifyLocked writes p, s's roster notification, wmu held, bounded by
+// slowWait: false ends the flusher. A write that blocks that long ends the
+// subscription — unless it has ended meanwhile, the teardown's cap having cut
+// the write — with the rest of the line and a reset{slow_consumer} written
+// after it, bounded by writeWait; the connection stays for a new
+// subscription. A write that fails otherwise, or the rest that cannot be
+// written, ends the connection.
+func (c *conn) notifyLocked(s *subscription, p protocol.RosterParams) bool {
+	line, err := notificationLine(protocol.NotifyRoster, p)
+	if err != nil {
+		c.s.h.logf("roster subscription %s: %v", s.id, err)
+		c.close()
 		return false
 	}
 	_ = c.setWriteDeadline(time.Now().Add(slowWait))
@@ -541,7 +600,14 @@ func (c *conn) notify(s *subscription, p protocol.RosterParams) bool {
 		return false
 	}
 	if !s.rs.end(s, protocol.ResetSlowConsumer) {
-		c.broken = c.broken || n > 0
+		// It ended meanwhile: the teardown's cap cut the write, the
+		// connection closed, or the roster's completeness changed (omitted,
+		// whose reset the flusher writes next). A line cut part way leaves
+		// nothing more to write, and the connection closes.
+		if n > 0 {
+			c.broken = true
+			c.close()
+		}
 		return false
 	}
 	c.s.h.logf("roster subscription %s: a notification's write blocked for %v; reset slow_consumer", s.id, slowWait)
@@ -564,7 +630,8 @@ func (c *conn) notify(s *subscription, p protocol.RosterParams) bool {
 }
 
 // writeReset writes reset{why} for subscription sub, bounded by writeWait and
-// the teardown's cap.
+// the teardown's cap. A reset that cannot be written closes the connection: a
+// subscriber is never left holding a subscription that is over.
 func (c *conn) writeReset(sub string, why protocol.ResetReason) {
 	line, err := notificationLine(protocol.NotifyReset, protocol.ResetParams{Subscription: sub, Reason: why})
 	if err != nil {
@@ -579,8 +646,9 @@ func (c *conn) writeReset(sub string, why protocol.ResetReason) {
 	c.writing.Store(true)
 	n, err := c.uc.Write(line)
 	c.writing.Store(false)
-	if err != nil && n > 0 {
-		c.broken = true
+	if err != nil {
+		c.broken = c.broken || n > 0
+		c.close()
 	}
 }
 

@@ -390,11 +390,19 @@ host-id order within each list:
 
 A subscription ends with the connection, or with a `reset` on the
 subscription: `slow_consumer` — a notification's write blocked for 10 s; the
-rest of that line is written, then the reset, and the connection stays — or
-`hub_closing` — the hub is shutting down: it writes the reset within 5 s and
-closes the connection. Either way the client subscribes again: after
-`slow_consumer` it may on the same connection; after `hub_closing`, on a new
-one, the new hub's `epoch` reseeding it.
+rest of that line is written, then the reset, and the connection stays —
+`omitted` — the roster's completeness changed: it went over 512 rows, or
+back to 512 or fewer, which a `roster` notification cannot say (`truncated`
+is the reply's alone); the connection stays — or `hub_closing` — the hub is
+shutting down: it writes the reset within 5 s and closes the connection. A
+reset the subscriber does not read within 10 s closes the connection. In
+each case the client subscribes again: after `slow_consumer` or `omitted` it
+may on the same connection, and reads `truncated` from the new reply; after
+`hub_closing`, on a new one, the new hub's `epoch` reseeding it.
+
+On one connection, the lines that carry the roster's cursor — `roster`
+notifications and `sessions.list` replies — are written in the order their
+roster was taken: a cursor never goes back from one line to the next.
 
 On the hub, every session-scoped method but `session.connect` is
 `unsupported`, reason `host_only`: a session's methods are its host's,
@@ -542,7 +550,9 @@ reason and what a client does about it:
 | `hub_closing` | the hub is shutting down — a roster subscription's reset, never an attachment's | the connection closes; reconnect (a hub is started on demand) and subscribe again: the new hub's `epoch` reseeds the roster |
 
 A roster subscription can also end `slow_consumer` (the subscriber fell 10 s
-behind); the client subscribes again.
+behind) or `omitted` (the roster's completeness changed: it crossed 512 rows,
+either way); the client subscribes again and reads `truncated` from the
+reply.
 
 ## Attach, resume, and snapshots
 
@@ -1288,8 +1298,11 @@ the runner's process — so one script speaks to both. What the hub writes
 carries three values no fixture can pin, named by placeholder as the
 incarnation is: the hub's id (its `hello`'s `endpoint.hostId` and its
 roster's `epoch`) is `HUB-ID`, its craze version `HUB-VERSION`, and the
-runner's own pid — the hub's, and the one the host's registry entry carries
-— `4242`, the fake host's own.
+runner's own pid — where the hub's `hello` carries it as `endpoint.pid`, and
+where a roster row carries it as `host.pid`, the pid the host's registry
+entry carries — `999999999`, which no process can have (it is above every
+`pid_max`). A pid anywhere else, the fake host's own `4242` in its `hello`
+through the splice included, is compared as written.
 
 `cmd/craze-fake-host` is the same host as a standalone binary, for anyone
 scripting against protocol 1 without Go: `craze-fake-host --socket PATH`

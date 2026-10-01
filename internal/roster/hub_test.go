@@ -397,3 +397,208 @@ func TestAPausedPollStartsNothing(t *testing.T) {
 	rg.r.Resume(2)
 	waitFor("the ninth host asked in the next run", func() bool { return startedNow()[last] == 1 })
 }
+
+// queuedHost serves socket by hand as host id: hello at once, and each
+// sessions.list answered with the next sessions the test sends (raw JSON, a
+// list) — held until it does.
+func queuedHost(t *testing.T, socket, id string) chan<- string {
+	t.Helper()
+	answers := make(chan string)
+	done := make(chan struct{})
+	t.Cleanup(func() { close(done) })
+	l, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = l.Close() })
+	hello, err := json.Marshal(protocol.HelloResult{Protocol: 1, Endpoint: protocol.Endpoint{Kind: protocol.EndpointHost, HostID: id, CrazeVersion: "9.9.9-queued"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	serve := func(c net.Conn) {
+		defer c.Close()
+		lr := protocol.NewLineReader(c, 0)
+		for {
+			line, err := lr.ReadLine()
+			if err != nil {
+				return
+			}
+			var req protocol.Request
+			if err := json.Unmarshal(line, &req); err != nil {
+				return
+			}
+			result := string(hello)
+			if req.Method == protocol.MethodSessionsList {
+				select {
+				case sessions := <-answers:
+					result = `{"epoch":"` + id + `","cursor":1,"sessions":` + sessions + `}`
+				case <-done:
+					return
+				}
+			}
+			if _, err := c.Write([]byte(`{"jsonrpc":"2.0","id":` + string(req.ID) + `,"result":` + result + "}\n")); err != nil {
+				return
+			}
+		}
+	}
+	go func() {
+		for {
+			c, err := l.Accept()
+			if err != nil {
+				return
+			}
+			go serve(c)
+		}
+	}()
+	return answers
+}
+
+// sessionRows is a sessions.list's sessions: one row, session's, titled title.
+func sessionRows(session, title string) string {
+	return `[{"sessionId":"` + session + `","activity":"idle","title":"` + title + `"}]`
+}
+
+// polledAs is a predicate: id polled in run 1 and reachable, its entry
+// naming session.
+func polledAs(id, session string) func(roster.Snapshot) bool {
+	return func(s roster.Snapshot) bool {
+		r := row(s, id)
+		return polledIn(1, id)(s) && r.Host.CrazeSessionID == session
+	}
+}
+
+// send hands the host its next answer, within step.
+func send(t *testing.T, answers chan<- string, sessions string) {
+	t.Helper()
+	select {
+	case answers <- sessions:
+	case <-time.After(step):
+		t.Fatal("the host was not asked for its row")
+	}
+}
+
+// TestAHostWhoseSessionChangesIsConnectingUntilRead (r19 2): a host whose
+// registry entry comes to name another craze session is published
+// Connecting, with no row, no read and not polled — not its last session's
+// row under the new session's id — until an attempt for the new session
+// comes back, which reads that session's row. The negative control is the
+// read before the change: the same host, the same connection, reachable with
+// its row.
+func TestAHostWhoseSessionChangesIsConnectingUntilRead(t *testing.T) {
+	g := newRegistry(t)
+	id := hostID(1)
+	sock := filepath.Join(g.dir, "queued")
+	answers := queuedHost(t, sock, id)
+	e := rundir.Entry{Protocol: 1, HostID: id, Socket: sock, CrazeSessionID: sessionID(1), Ready: true}
+	g.list(e)
+	rg := newHubRigWith(t, g, func(o *roster.HubOptions) { o.Budget = step })
+	rg.r.Resume(1)
+	send(t, answers, sessionRows(sessionID(1), "one"))
+	s, _ := rg.until("the first session read", polledIn(1, id))
+	if r := row(s, id); r.Session == nil || r.Session.ID != sessionID(1) || !strings.Contains(string(r.Raw), sessionID(1)) || r.ReadAt.IsZero() {
+		t.Fatalf("the control: the first session's row: %+v (raw %s)", r, r.Raw)
+	}
+
+	e.CrazeSessionID = sessionID(2)
+	g.unlist(id)
+	g.list(e)
+	from := len(rg.published())
+	rg.clk.advance(time.Second)
+	rg.tick()
+	s, _ = rg.until("the new session's entry read", func(s roster.Snapshot) bool {
+		r := row(s, id)
+		return r != nil && r.Host.CrazeSessionID == sessionID(2)
+	})
+	if r := row(s, id); r.Status != roster.Connecting || r.Raw != nil || r.Session != nil || !r.ReadAt.IsZero() || r.Polled {
+		t.Fatalf("a host whose session changed, before its read: status %s, raw %s, session %+v, read at %v, polled %v; "+
+			"want connecting, no row, no read, not polled", r.Status, r.Raw, r.Session, r.ReadAt, r.Polled)
+	}
+
+	send(t, answers, sessionRows(sessionID(2), "two"))
+	s, _ = rg.until("the new session read", polledAs(id, sessionID(2)))
+	if r := row(s, id); r.Session == nil || r.Session.ID != sessionID(2) || !strings.Contains(string(r.Raw), sessionID(2)) || !r.ReadAt.Equal(rg.clk.now()) {
+		t.Fatalf("the new session's row: %+v (raw %s)", r, r.Raw)
+	}
+	for _, s := range rg.published()[from:] {
+		if r := row(s, id); r.Host.CrazeSessionID == sessionID(2) && strings.Contains(string(r.Raw), sessionID(1)) {
+			t.Fatalf("a Snapshot carried the last session's row under the new one's id: %s", r.Raw)
+		}
+	}
+}
+
+// TestAnAnswerForTheLastSessionIsNotTaken (r19 2): an attempt in flight as
+// the host's entry comes to name another session — made for the last one —
+// is not taken when it comes back: the host stays Connecting with no row, is
+// asked again at once over the connection the attempt kept, and that answer,
+// the new session's, is taken. The negative control is that late answer's
+// content: the last session's row, which a roster that took it would publish
+// as the new session's, reachable and fresh.
+func TestAnAnswerForTheLastSessionIsNotTaken(t *testing.T) {
+	g := newRegistry(t)
+	id := hostID(1)
+	sock := filepath.Join(g.dir, "queued")
+	answers := queuedHost(t, sock, id)
+	e := rundir.Entry{Protocol: 1, HostID: id, Socket: sock, CrazeSessionID: sessionID(1), Ready: true}
+	g.list(e)
+	attempts := make(chan string, 16)
+	rg := newHubRigWith(t, g, func(o *roster.HubOptions) {
+		o.Budget = step
+		o.Attempting = func(id string) { attempts <- id }
+	})
+	attempted := func(what string) {
+		t.Helper()
+		select {
+		case <-attempts:
+		case <-time.After(step):
+			t.Fatalf("%s: no attempt started within %v", what, step)
+		}
+	}
+	rg.r.Resume(1)
+	attempted("the first round")
+	send(t, answers, sessionRows(sessionID(1), "one"))
+	rg.until("the first session read", polledIn(1, id))
+
+	// A round's attempt is in flight, held at the host, when the next round
+	// reads the entry naming another session.
+	rg.clk.advance(time.Second)
+	rg.tick()
+	attempted("the second round")
+	e.CrazeSessionID = sessionID(2)
+	g.unlist(id)
+	g.list(e)
+	from := len(rg.published())
+	rg.clk.advance(time.Second)
+	rg.tick()
+	s, _ := rg.until("the new session's entry read", func(s roster.Snapshot) bool {
+		r := row(s, id)
+		return r != nil && r.Host.CrazeSessionID == sessionID(2)
+	})
+	if r := row(s, id); r.Status != roster.Connecting || r.Raw != nil || r.Session != nil {
+		t.Fatalf("before any answer for the new session: %+v (raw %s)", r, r.Raw)
+	}
+
+	// The held attempt answers, with the last session's row.
+	send(t, answers, sessionRows(sessionID(1), "one, late"))
+	attempted("the host asked again for the new session")
+	send(t, answers, sessionRows(sessionID(2), "two"))
+	s, _ = rg.until("the new session read", func(s roster.Snapshot) bool {
+		r := row(s, id)
+		return polledAs(id, sessionID(2))(s) && r.Session != nil && r.Session.Title == "two"
+	})
+	if r := row(s, id); r.Session.ID != sessionID(2) || !strings.Contains(string(r.Raw), `"title":"two"`) {
+		t.Fatalf("the new session's row: %+v (raw %s)", r, r.Raw)
+	}
+	// Every Snapshot before that read — published in order — held no row.
+	for _, s := range rg.published()[from:] {
+		r := row(s, id)
+		if r.Session != nil && r.Session.Title == "two" {
+			break
+		}
+		if r.Status != roster.Connecting || r.Raw != nil || r.Session != nil {
+			t.Fatalf("the late answer for the last session was taken: status %s, raw %s", r.Status, r.Raw)
+		}
+	}
+	if n := rg.dials.Load(); n != 1 {
+		t.Fatalf("%d dials: the late answer's connection was not kept", n)
+	}
+}

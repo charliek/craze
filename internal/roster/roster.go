@@ -51,9 +51,10 @@ type Snapshot struct {
 type Status int
 
 const (
-	// Connecting: no attempt of the roster's has finished yet — or the host
-	// has not published its session yet (its registry entry names none), so
-	// there is nothing to ask it for.
+	// Connecting: no attempt of the roster's has finished yet — none since
+	// the host's registry entry last named another session included — or the
+	// host has not published its session yet (its registry entry names
+	// none), so there is nothing to ask it for.
 	Connecting Status = iota
 	// Reachable: its last attempt was answered.
 	Reachable
@@ -85,7 +86,8 @@ type Row struct {
 	// an older host shows.
 	Version string
 	// Session is the host's last sessions.list row, nil until the first
-	// answer, and kept as it was while the host does not answer.
+	// answer of the session its entry names, and kept as it was while the
+	// host does not answer.
 	Session *Session
 	// IndexTitle is the index's title for the session — its newest row with
 	// the host's craze id — "" when there is none: what a row shows before
@@ -95,12 +97,13 @@ type Row struct {
 	// Raw is the host's last sessions.list row as the JSON value it sent,
 	// compacted — every member kept, those this build does not know
 	// included, at any depth — beside Session, its decoding; nil until the
-	// first answer, kept as it was while the host does not answer, and nil
-	// for a row that is not an object. Only a roster OpenHub opened keeps it
-	// (plan 032 §3.6, P4).
+	// first answer of the session its entry names, kept as it was while the
+	// host does not answer, and nil for a row that is not an object. Only a
+	// roster OpenHub opened keeps it (plan 032 §3.6, P4).
 	Raw json.RawMessage
 	// ReadAt is when the host's row was last read — its last answered
-	// attempt, by the roster's clock — zero before the first.
+	// attempt, by the roster's clock — zero before the first of the session
+	// its entry names.
 	ReadAt time.Time
 	// Polled says the row is this run's (Snapshot.Run): the host's last
 	// attempt to finish started in it, or the host is waiting out the
@@ -529,10 +532,21 @@ type hostState struct {
 	startRun, doneRun uint64
 }
 
+// forget drops what h said of its last session — its row, its read, its
+// status and backoff, and whether it was polled — for a host whose entry now
+// names another: it is Connecting again, due at once. Its connection and its
+// version, the host process's, are kept.
+func (h *hostState) forget() {
+	h.status, h.session, h.raw, h.readAt = Connecting, nil, nil, time.Time{}
+	h.failures, h.next, h.doneRun = 0, time.Time{}, 0
+}
+
 // result is one attempt's end: the connection to keep (nil on a failure,
-// which has closed it), the host's row and hello's version, or why not.
+// which has closed it), the host's row and hello's version, or why not; and
+// the craze session the attempt asked for (its entry's).
 type result struct {
 	hostID  string
+	session string
 	conn    *client
 	row     protocol.SessionRow
 	raw     json.RawMessage
@@ -659,7 +673,10 @@ func (p *poller) tick() {
 // reconcile brings the hosts to the registry's list: a new host is
 // Connecting, a changed entry is taken, and a host gone from the registry has
 // its connection closed — or, while an attempt holds it, closed by that
-// attempt's result.
+// attempt's result. An entry that names another craze session than before is
+// a host whose row is not yet read: what it said of the last session is
+// dropped, and it is Connecting until an attempt made for the new one comes
+// back (r19 2).
 func (p *poller) reconcile(entries []rundir.Entry) {
 	listed := make(map[string]bool, len(entries))
 	for _, e := range entries {
@@ -670,6 +687,9 @@ func (p *poller) reconcile(entries []rundir.Entry) {
 			p.hosts[e.HostID] = &hostState{entry: e}
 			p.dirty = true
 		case h.gone || h.entry != e:
+			if h.entry.CrazeSessionID != e.CrazeSessionID {
+				h.forget()
+			}
 			h.gone, h.entry = false, e
 			p.dirty = true
 		}
@@ -750,7 +770,7 @@ func (p *poller) start(h *hostState) {
 // dialBudget + listBudget, however its host behaves. A connection that fails
 // is closed; one that answered is the result's, to keep.
 func (p *poller) attempt(e rundir.Entry, c *client, deadline time.Time) result {
-	res := result{hostID: e.HostID}
+	res := result{hostID: e.HostID, session: e.CrazeSessionID}
 	ctx := p.r.ctx
 	if c != nil {
 		rows, raws, err := c.list(ctx, share(p.o.listBudget, deadline), p.o.hub)
@@ -819,7 +839,9 @@ func pick(rows protocol.SessionsListResult, e rundir.Entry) int {
 }
 
 // apply takes one attempt's result: an answer keeps its connection and
-// resets the backoff; a failure marks the host unreachable and doubles it.
+// resets the backoff; a failure marks the host unreachable and doubles it;
+// either, made for a session the host's entry no longer names, is not
+// taken.
 func (p *poller) apply(res result) {
 	if h := p.o.applied; h != nil {
 		defer h(res.hostID, res.err)
@@ -834,6 +856,15 @@ func (p *poller) apply(res result) {
 		return
 	}
 	h.busy = false
+	if res.session != h.entry.CrazeSessionID {
+		// Made for the session the host's entry named before it changed
+		// (reconcile): what it read is the last session's, and is not taken.
+		// Its connection, if it answered, is kept, and the host is asked
+		// again at once — launch, after this: the attempt started a round
+		// before the one whose registry read named the new session.
+		h.conn = res.conn
+		return
+	}
 	if p.o.hub && h.doneRun != h.startRun {
 		// Row.Polled may have moved.
 		p.dirty = true

@@ -1,5 +1,5 @@
 {"conn":1,"sock":"hub","dir":"c2s","msg":{"jsonrpc":"2.0","id":"1","method":"hello","params":{"protocols":[1],"client":{"kind":"test","name":"fakehost-wire"}}}}
-{"conn":1,"sock":"hub","dir":"s2c","msg":{"jsonrpc":"2.0","id":"1","result":{"protocol":1,"endpoint":{"kind":"hub","hostId":"HUB-ID","crazeVersion":"HUB-VERSION","pid":4242},"capabilities":{"rosterSubscribe":true,"sessionCreate":false,"multiplex":false,"connect":true,"snapshot":false,"attachWhenNow":false},"codecs":{"event":1,"snapshot":1},"limits":{"inboundLine":4194304,"outboundLine":16777216}}}}
+{"conn":1,"sock":"hub","dir":"s2c","msg":{"jsonrpc":"2.0","id":"1","result":{"protocol":1,"endpoint":{"kind":"hub","hostId":"HUB-ID","crazeVersion":"HUB-VERSION","pid":999999999},"capabilities":{"rosterSubscribe":true,"sessionCreate":false,"multiplex":false,"connect":true,"snapshot":false,"attachWhenNow":false},"codecs":{"event":1,"snapshot":1},"limits":{"inboundLine":4194304,"outboundLine":16777216}}}}
 {"conn":1,"dir":"c2s","msg":{"jsonrpc":"2.0","id":"2","method":"session.connect","params":{"sessionId":"session-fake-1"}}}
 {"conn":1,"dir":"c2s","msg":{"jsonrpc":"2.0","id":"3","method":"hello","params":{"protocols":[1],"client":{"kind":"test","name":"fakehost-wire"}}}}
 {"conn":1,"dir":"s2c","msg":{"jsonrpc":"2.0","id":"2","result":{}}}
@@ -10,7 +10,7 @@
 {"dir":"op","op":{"name":"text","text":"through the splice"}}
 {"conn":1,"dir":"s2c","msg":{"jsonrpc":"2.0","method":"event","params":{"subscription":"s-1","seq":2,"event":{"type":"text","text":"through the splice","at":"2026-01-01T00:00:00Z"}}}}
 {"conn":2,"sock":"hub","dir":"c2s","msg":{"jsonrpc":"2.0","id":"1","method":"hello","params":{"protocols":[1],"client":{"kind":"test","name":"fakehost-wire"}}}}
-{"conn":2,"sock":"hub","dir":"s2c","msg":{"jsonrpc":"2.0","id":"1","result":{"protocol":1,"endpoint":{"kind":"hub","hostId":"HUB-ID","crazeVersion":"HUB-VERSION","pid":4242},"capabilities":{"rosterSubscribe":true,"sessionCreate":false,"multiplex":false,"connect":true,"snapshot":false,"attachWhenNow":false},"codecs":{"event":1,"snapshot":1},"limits":{"inboundLine":4194304,"outboundLine":16777216}}}}
+{"conn":2,"sock":"hub","dir":"s2c","msg":{"jsonrpc":"2.0","id":"1","result":{"protocol":1,"endpoint":{"kind":"hub","hostId":"HUB-ID","crazeVersion":"HUB-VERSION","pid":999999999},"capabilities":{"rosterSubscribe":true,"sessionCreate":false,"multiplex":false,"connect":true,"snapshot":false,"attachWhenNow":false},"codecs":{"event":1,"snapshot":1},"limits":{"inboundLine":4194304,"outboundLine":16777216}}}}
 {"conn":2,"dir":"c2s","msg":{"jsonrpc":"2.0","id":"2","method":"session.connect","params":{"sessionId":"session-nobody"}}}
 {"conn":2,"dir":"s2c","msg":{"jsonrpc":"2.0","id":"2","error":{"code":-32000,"message":"no session session-nobody","data":{"code":"unknown_session","reason":"unknown_session"}}}}
 {"conn":2,"dir":"c2s","msg":{"jsonrpc":"2.0","id":"3","method":"session.connect","params":{"sessionId":"session-fake-1"}}}

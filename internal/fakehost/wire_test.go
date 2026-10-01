@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -228,6 +229,13 @@ func rewriteIncarnations(b []byte, sub func([]byte) []byte) ([]byte, error) {
 // at any depth, and what it returns is written in their place (raw itself
 // leaves them); every other byte is copied verbatim.
 func rewriteMembers(b []byte, sub func(key string, raw []byte) []byte) ([]byte, error) {
+	return rewritePaths(b, func(path []string, raw []byte) []byte { return sub(path[len(path)-1], raw) })
+}
+
+// rewritePaths is rewriteMembers with each member's whole path in place of
+// its name: the member names from the outermost object in, an array's
+// element "[]" — {"a":[{"b":1}]}'s b is [a [] b]. sub must not keep path.
+func rewritePaths(b []byte, sub func(path []string, raw []byte) []byte) ([]byte, error) {
 	w := &jsonWalker{b: b, sub: sub}
 	if err := w.parseValue(); err != nil {
 		return nil, err
@@ -239,18 +247,20 @@ func rewriteMembers(b []byte, sub func(key string, raw []byte) []byte) ([]byte, 
 	return w.out.Bytes(), nil
 }
 
-// jsonWalker is rewriteMembers' one recursive-descent pass over b: it copies
+// jsonWalker is rewritePaths' one recursive-descent pass over b: it copies
 // every byte to out as it goes, except that object's method writes each
-// member's scalar value through sub instead of copying it. It does not interpret JSON otherwise — a string's
+// member's scalar value through sub instead of copying it, path the way to
+// it. It does not interpret JSON otherwise — a string's
 // content is never unescaped, only scanned for its own closing quote (so an
 // escaped backslash or quote is skipped two bytes at a time, correctly,
 // without decoding it) — since every byte not itself substituted must come
 // back exactly as it went in.
 type jsonWalker struct {
-	b   []byte
-	i   int
-	out bytes.Buffer
-	sub func(key string, raw []byte) []byte
+	b    []byte
+	i    int
+	out  bytes.Buffer
+	sub  func(path []string, raw []byte) []byte
+	path []string
 }
 
 func (w *jsonWalker) skipWS() {
@@ -358,9 +368,11 @@ func (w *jsonWalker) parseArray() error {
 		return nil
 	}
 	for {
+		w.path = append(w.path, "[]")
 		if err := w.parseValue(); err != nil {
 			return err
 		}
+		w.path = w.path[:len(w.path)-1]
 		w.skipWS()
 		if w.i >= len(w.b) {
 			return errors.New("unterminated array")
@@ -409,24 +421,26 @@ func (w *jsonWalker) parseObject() error {
 		w.out.WriteByte(':')
 		w.i++
 		w.skipWS()
+		w.path = append(w.path, key)
 		switch {
 		case w.i < len(w.b) && w.b[w.i] == '"':
 			raw, err := w.scanString()
 			if err != nil {
 				return err
 			}
-			w.out.Write(w.sub(key, raw))
+			w.out.Write(w.sub(w.path, raw))
 		case w.i < len(w.b) && w.b[w.i] != '{' && w.b[w.i] != '[':
 			raw, err := w.scanScalar()
 			if err != nil {
 				return err
 			}
-			w.out.Write(w.sub(key, raw))
+			w.out.Write(w.sub(w.path, raw))
 		default:
 			if err := w.parseValue(); err != nil {
 				return err
 			}
 		}
+		w.path = w.path[:len(w.path)-1]
 		w.skipWS()
 		if w.i >= len(w.b) {
 			return errors.New("unterminated object")
@@ -555,28 +569,43 @@ const (
 	// hubVersionPlaceholder is the hub's craze version (version.Version),
 	// which moves with every release.
 	hubVersionPlaceholder = `"HUB-VERSION"`
-	// pidPlaceholder is this test process's pid wherever a hub line carries
-	// it — the in-process hub's own, and the pid the fixture Host's registry
-	// entry carries, which every listed host's does: 4242, the fake host's
-	// own (Options.PID's default).
-	pidPlaceholder = `4242`
+	// pidPlaceholder is this test process's pid where a hub line carries it:
+	// the in-process hub's hello's endpoint.pid, and a roster row's host.pid
+	// — the pid of the fixture Host's registry entry, which the Host was
+	// bound by. It is no pid at all — above any pid_max (Linux's is at most
+	// 2^22, macOS's 99998) — so no value the hub wrote can be mistaken for
+	// it, the way HUB-ID can be no host id.
+	pidPlaceholder = `999999999`
 )
 
-// hubToWire names by placeholder, in a line the hub wrote, the values a
+// hubToWire names by placeholder, in a line the hub wrote — method being the
+// method it answers or notifies (fixtureConn.methodFor) — the values a
 // fixture cannot pin: every member named hostId or epoch whose value is the
-// hub's id, crazeVersion whose value is version.Version, and pid whose value
-// is this process's pid — exact values the run itself knows, never a guess at
-// their shape, as the incarnation's rewrite is. Every other byte is the
-// hub's.
-func (r *fixtureRunner) hubToWire(b []byte) []byte {
+// hub's id, crazeVersion whose value is version.Version, and, where this
+// process's pid is the value, the hub's hello's endpoint.pid (endpoint.kind
+// hub) and a roster row's host.pid (hubPIDAt) — exact values the run itself
+// knows, never a guess at their shape, as the incarnation's rewrite is. Every
+// other byte is the hub's: a pid anywhere else — a host's hello through a
+// splice, a member of a forwarded row — is compared as it stands.
+func (r *fixtureRunner) hubToWire(b []byte, method string) []byte {
 	id, ver, pid := `"`+r.hubID+`"`, strconv.Quote(version.Version), strconv.Itoa(os.Getpid())
-	out, err := rewriteMembers(b, func(key string, raw []byte) []byte {
-		switch v := string(raw); {
+	var probe struct {
+		Result *struct {
+			Endpoint *struct {
+				Kind string `json:"kind"`
+			} `json:"endpoint"`
+		} `json:"result"`
+	}
+	_ = json.Unmarshal(b, &probe) // a line it does not fit names no endpoint
+	hubHello := method == protocol.MethodHello && probe.Result != nil && probe.Result.Endpoint != nil &&
+		probe.Result.Endpoint.Kind == protocol.EndpointHub
+	out, err := rewritePaths(b, func(path []string, raw []byte) []byte {
+		switch key, v := path[len(path)-1], string(raw); {
 		case (key == "hostId" || key == "epoch") && r.hubID != "" && v == id:
 			return []byte(hubIDPlaceholder)
 		case key == "crazeVersion" && v == ver:
 			return []byte(hubVersionPlaceholder)
-		case key == "pid" && v == pid:
+		case v == pid && hubPIDAt(path, method, hubHello):
 			return []byte(pidPlaceholder)
 		}
 		return raw
@@ -585,6 +614,22 @@ func (r *fixtureRunner) hubToWire(b []byte) []byte {
 		panic(fmt.Sprintf("fakehost: rewriting the hub's values: %v", err))
 	}
 	return out
+}
+
+// hubPIDAt says path is one of the two places a hub line carries a pid of
+// the hub's run: its hello's endpoint.pid, and a roster row's host.pid in a
+// sessions.list or sessions.subscribe reply or a roster notification's
+// upserts.
+func hubPIDAt(path []string, method string, hubHello bool) bool {
+	switch p := strings.Join(path, "."); method {
+	case protocol.MethodHello:
+		return hubHello && p == "result.endpoint.pid"
+	case protocol.MethodSessionsList, protocol.MethodSessionsSubscribe:
+		return p == "result.sessions.[].host.pid"
+	case protocol.NotifyRoster:
+		return p == "params.upserts.[].host.pid"
+	}
+	return false
 }
 
 // fixtureNeedsHub reports whether any line of a fixture is to the hub's
@@ -776,7 +821,7 @@ func (r *fixtureRunner) run(lines []rawFixtureLine, update bool) []byte {
 			got := c.readLine(r.t)
 			got = r.inc.toWire(got)
 			if c.sock == sockHub {
-				got = r.hubToWire(got)
+				got = r.hubToWire(got, c.methodFor(got))
 			}
 			if err := wiretest.Default().Server(c.methodFor(got), got); err != nil {
 				r.t.Fatalf("line %d: s2c off the schema: %v (%s)", i+1, err, got)
@@ -954,5 +999,67 @@ func TestWireFixturesWaitForTheHungTurnToOpen(t *testing.T) {
 				t.Fatal("the end op never waited for the held turn to open: the replay never met the window it guards")
 			}
 		})
+	}
+}
+
+// TestHubToWireNamesOnlyTheHubsPIDs (r19 7): the pid placeholder can be no
+// pid — above any pid_max — and hubToWire writes it only where this
+// process's pid stands in the hub's hello's endpoint.pid or a roster row's
+// host.pid: a pid that is not this process's there is kept, so a hub that
+// put another pid in either is a fixture mismatch, and this process's pid
+// anywhere else — a host's hello through a splice, a forwarded row's own
+// member — is kept as well. The negative controls are the lines kept
+// byte for byte.
+func TestHubToWireNamesOnlyTheHubsPIDs(t *testing.T) {
+	ph, err := strconv.Atoi(pidPlaceholder)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Linux's PID_MAX_LIMIT (2^22) bounds every pid_max; macOS's pids stop at
+	// 99998.
+	if ph <= 1<<22 || ph == os.Getpid() {
+		t.Fatalf("the pid placeholder %d could be a real pid", ph)
+	}
+	if b, err := os.ReadFile("/proc/sys/kernel/pid_max"); err == nil {
+		if max, err := strconv.Atoi(strings.TrimSpace(string(b))); err != nil || ph <= max {
+			t.Fatalf("the pid placeholder %d is not above this kernel's pid_max %q", ph, b)
+		}
+	}
+	r := &fixtureRunner{t: t, hubID: "0a1b2c3d4e5f"}
+	pid := strconv.Itoa(os.Getpid())
+	hostRow := `{"hostId":"0123456789ab","sessionId":"s","host":{"pid":` + pid + `,"crazeVersion":"0.0.0-fakehost","protocol":1},` +
+		`"status":"reachable","approximate":false,"row":{"sessionId":"s","pid":` + pid + `,"host":{"pid":` + pid + `}}}`
+	named := strings.Replace(hostRow, `"host":{"pid":`+pid, `"host":{"pid":`+pidPlaceholder, 1)
+	for _, tc := range []struct {
+		name, method, line, want string
+	}{
+		{"the hub's hello", protocol.MethodHello,
+			`{"jsonrpc":"2.0","id":"1","result":{"protocol":1,"endpoint":{"kind":"hub","hostId":"0a1b2c3d4e5f","crazeVersion":"x","pid":` + pid + `}}}`,
+			`{"jsonrpc":"2.0","id":"1","result":{"protocol":1,"endpoint":{"kind":"hub","hostId":"HUB-ID","crazeVersion":"x","pid":` + pidPlaceholder + `}}}`},
+		{"the hub's hello with another pid", protocol.MethodHello,
+			`{"jsonrpc":"2.0","id":"1","result":{"endpoint":{"kind":"hub","pid":4242}}}`,
+			`{"jsonrpc":"2.0","id":"1","result":{"endpoint":{"kind":"hub","pid":4242}}}`},
+		{"a host's hello through a splice", protocol.MethodHello,
+			`{"jsonrpc":"2.0","id":"3","result":{"endpoint":{"kind":"host","pid":` + pid + `}}}`,
+			`{"jsonrpc":"2.0","id":"3","result":{"endpoint":{"kind":"host","pid":` + pid + `}}}`},
+		{"a list's rows", protocol.MethodSessionsList,
+			`{"jsonrpc":"2.0","id":"2","result":{"epoch":"e","cursor":1,"sessions":[` + hostRow + `]}}`,
+			`{"jsonrpc":"2.0","id":"2","result":{"epoch":"e","cursor":1,"sessions":[` + named + `]}}`},
+		{"a subscription's rows", protocol.MethodSessionsSubscribe,
+			`{"jsonrpc":"2.0","id":"2","result":{"subscription":"r-1","sessions":[` + hostRow + `]}}`,
+			`{"jsonrpc":"2.0","id":"2","result":{"subscription":"r-1","sessions":[` + named + `]}}`},
+		{"a notification's upserts", protocol.NotifyRoster,
+			`{"jsonrpc":"2.0","method":"roster","params":{"upserts":[` + hostRow + `],"removes":[]}}`,
+			`{"jsonrpc":"2.0","method":"roster","params":{"upserts":[` + named + `],"removes":[]}}`},
+		{"a row's host pid copied from hello", protocol.MethodSessionsList,
+			`{"jsonrpc":"2.0","id":"2","result":{"sessions":[{"host":{"pid":4242}}]}}`,
+			`{"jsonrpc":"2.0","id":"2","result":{"sessions":[{"host":{"pid":4242}}]}}`},
+		{"a host's own list through a splice", protocol.MethodSessionsList,
+			`{"jsonrpc":"2.0","id":"5","result":{"sessions":[{"sessionId":"s","pid":` + pid + `}]}}`,
+			`{"jsonrpc":"2.0","id":"5","result":{"sessions":[{"sessionId":"s","pid":` + pid + `}]}}`},
+	} {
+		if got := string(r.hubToWire([]byte(tc.line), tc.method)); got != tc.want {
+			t.Errorf("%s:\n got  %s\n want %s", tc.name, got, tc.want)
+		}
 	}
 }

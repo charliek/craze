@@ -1026,3 +1026,364 @@ func TestAListWaitsForItsRound(t *testing.T) {
 		t.Fatalf("after its answer: %+v", rowOf(l.Sessions, b))
 	}
 }
+
+// cursorOf is the roster cursor a line carries — a roster notification's, or
+// the sessions.list reply's to listID — and whether it carries one.
+func cursorOf(t *testing.T, m msg, listID string) (uint64, bool) {
+	t.Helper()
+	switch {
+	case m.Method == protocol.NotifyRoster:
+		var n protocol.RosterParams
+		if err := json.Unmarshal(m.Params, &n); err != nil {
+			t.Fatal(err)
+		}
+		return n.Cursor, true
+	case m.Method == "" && string(m.ID) == listID && m.Error == nil:
+		var l protocol.HubSessionsListResult
+		if err := json.Unmarshal(m.Result, &l); err != nil {
+			t.Fatal(err)
+		}
+		return l.Cursor, true
+	}
+	return 0, false
+}
+
+// readThrough reads the connection's lines, after those read already, until
+// the reply to listID: every line in the order written.
+func readThrough(p *peer, read []msg, listID string) []msg {
+	p.t.Helper()
+	for _, m := range read {
+		if string(m.ID) == listID {
+			return read
+		}
+	}
+	for {
+		m := p.read()
+		read = append(read, m)
+		if string(m.ID) == listID {
+			return read
+		}
+	}
+}
+
+// inOrder holds lines, in the order one connection was written them, to the
+// roster's order: no line carries a cursor below one written before it. It
+// answers the list reply and the notifications written before it.
+func inOrder(t *testing.T, lines []msg, listID string) (protocol.HubSessionsListResult, []protocol.RosterParams) {
+	t.Helper()
+	var last uint64
+	var lastRaw []byte
+	var list *protocol.HubSessionsListResult
+	var before []protocol.RosterParams
+	for _, m := range lines {
+		cur, ok := cursorOf(t, m, listID)
+		if !ok {
+			t.Fatalf("an unexpected line: %s", clip(m.raw))
+		}
+		if cur < last {
+			t.Fatalf("a line at cursor %d was written after one at cursor %d:\n  %s\nthen\n  %s", cur, last, clip(lastRaw), clip(m.raw))
+		}
+		last, lastRaw = cur, m.raw
+		switch {
+		case list != nil:
+		case m.Method == protocol.NotifyRoster:
+			var n protocol.RosterParams
+			_ = json.Unmarshal(m.Params, &n)
+			before = append(before, n)
+		default:
+			list = &protocol.HubSessionsListResult{}
+			_ = json.Unmarshal(m.Result, list)
+		}
+	}
+	if list == nil {
+		t.Fatal("no list reply")
+	}
+	return *list, before
+}
+
+// TestAListIsWrittenInItsSnapshotsOrder (r19 1): on a connection that holds a
+// subscription, a change the roster takes — and its subscription's flush —
+// between a sessions.list's snapshot and that reply's write is written after
+// the reply, never before it: the reply's cursor is never below a
+// notification the connection was written first, and its rows hold every
+// change such a notification carried. The flusher, woken for the change,
+// waits at the connection's write lock, which the list holds from its
+// snapshot through its write. The negative control: the reply holds the row
+// as it was before the change, at a lower cursor — had the notification gone
+// first, the client would have been taken back.
+func TestAListIsWrittenInItsSnapshotsOrder(t *testing.T) {
+	m := newMemHosts(t)
+	a := m.add(1, memRow(1, "one"))
+	var armed atomic.Bool
+	snapped, resume, locking := make(chan *conn, 1), make(chan struct{}), make(chan struct{}, 8)
+	rg := newRosterRig(t, testEnv(t), rigOpts{clock: true, gate: true, hk: func(hk *hooks) {
+		installMem(t, hk, m)
+		hk.rosterTaken = func(c *conn, what string) {
+			if what == "list" && armed.Load() {
+				snapped <- c
+				<-resume
+			}
+		}
+		hk.rosterLocking = func(_ *conn, what string) {
+			if what == "flush" && armed.Load() {
+				locking <- struct{}{}
+			}
+		}
+	}})
+	p := dialPeer(t, rg.sock)
+	sub := p.subscribe()
+	armed.Store(true)
+	listID := p.send(protocol.MethodSessionsList, nil)
+	var c *conn
+	select {
+	case c = <-snapped:
+	case <-time.After(step):
+		t.Fatal("the list took no snapshot")
+	}
+
+	// Between the list's snapshot and its write: a change, and its flush.
+	m.setRow(a, memRow(1, "changed"))
+	rg.clk.advance(time.Second)
+	from := rg.snaps.mark()
+	rg.tick()
+	rg.applied("the change taken", from, titled(a, "changed"))
+	select {
+	case <-locking:
+	case <-time.After(step):
+		close(resume)
+		t.Fatal("the flusher was not woken for the change")
+	}
+	var lines []msg
+	if c.wmu.TryLock() {
+		// The list does not hold the write lock: nothing keeps the
+		// notification from going first, and it does.
+		c.wmu.Unlock()
+		lines = append(lines, p.read())
+	}
+	close(resume)
+
+	lines = readThrough(p, lines, listID)
+	l, before := inOrder(t, lines, listID)
+	for _, n := range before {
+		for _, u := range n.Upserts {
+			if r := rowOf(l.Sessions, u.HostID); r == nil || string(r.Row) != string(u.Row) {
+				t.Fatalf("the list misses a change written to the connection before it: %s's row %s", u.HostID, u.Row)
+			}
+		}
+	}
+	if len(before) == 0 {
+		// The control: the reply is the roster as it was snapshotted.
+		if r := rowOf(l.Sessions, a); r == nil || string(r.Row) != memRow(1, "one") || l.Cursor != sub.Cursor {
+			t.Fatalf("the reply: cursor %d (subscribed at %d), row %+v; want the row before the change", l.Cursor, sub.Cursor, r)
+		}
+		n := p.roster()
+		if n.Cursor <= l.Cursor || len(n.Upserts) != 1 || string(n.Upserts[0].Row) != memRow(1, "changed") {
+			t.Fatalf("the change after the reply: %+v, want it at a cursor past %d", n, l.Cursor)
+		}
+	}
+}
+
+// TestANotificationIsWrittenInItsTakesOrder (r19 1): the flusher's take and
+// its write are one section under the connection's write lock too, so a
+// sessions.list on that connection — after a change the take did not see —
+// is written after the notification, never before it with a later cursor.
+// The negative control: the list's reply holds the change the notification
+// does not, at a higher cursor — written first, the client would have taken
+// the notification's older row over it.
+func TestANotificationIsWrittenInItsTakesOrder(t *testing.T) {
+	m := newMemHosts(t)
+	a := m.add(1, memRow(1, "one"))
+	var armed atomic.Bool
+	took, resume, locking := make(chan *conn, 1), make(chan struct{}), make(chan struct{}, 8)
+	rg := newRosterRig(t, testEnv(t), rigOpts{clock: true, gate: true, hk: func(hk *hooks) {
+		installMem(t, hk, m)
+		hk.rosterTaken = func(c *conn, what string) {
+			if what == "flush" && armed.Load() {
+				took <- c
+				<-resume
+			}
+		}
+		hk.rosterLocking = func(_ *conn, what string) {
+			if what == "list" && armed.Load() {
+				locking <- struct{}{}
+			}
+		}
+	}})
+	p := dialPeer(t, rg.sock)
+	p.subscribe()
+	armed.Store(true)
+
+	// The first change is taken by the flusher, held before its write.
+	m.setRow(a, memRow(1, "first"))
+	rg.clk.advance(time.Second)
+	from := rg.snaps.mark()
+	rg.tick()
+	rg.applied("the first change taken", from, titled(a, "first"))
+	var c *conn
+	select {
+	case c = <-took:
+	case <-time.After(step):
+		t.Fatal("the flusher took no notification")
+	}
+	// A second change, and a list, while the notification is unwritten.
+	m.setRow(a, memRow(1, "second"))
+	rg.clk.advance(time.Second)
+	from = rg.snaps.mark()
+	rg.tick()
+	rg.applied("the second change taken", from, titled(a, "second"))
+	listID := p.send(protocol.MethodSessionsList, nil)
+	select {
+	case <-locking:
+	case <-time.After(step):
+		close(resume)
+		t.Fatal("the list never came to the write lock")
+	}
+	var lines []msg
+	if c.wmu.TryLock() {
+		// The flusher does not hold the write lock: nothing keeps the list
+		// from going first, and it does.
+		c.wmu.Unlock()
+		lines = append(lines, p.read())
+	}
+	close(resume)
+	if len(lines) > 0 {
+		lines = append(lines, p.read()) // the held notification
+	}
+
+	l, before := inOrder(t, readThrough(p, lines, listID), listID)
+	if len(before) != 1 || len(before[0].Upserts) != 1 || string(before[0].Upserts[0].Row) != memRow(1, "first") {
+		t.Fatalf("written before the list: %+v, want the first change's notification", before)
+	}
+	if r := rowOf(l.Sessions, a); r == nil || string(r.Row) != memRow(1, "second") || l.Cursor <= before[0].Cursor {
+		t.Fatalf("the list: cursor %d, row %+v; want the second change past cursor %d", l.Cursor, r, before[0].Cursor)
+	}
+}
+
+// TestARosterCrossingItsRowLimitResetsItsSubscriptions (r19 3): truncated is
+// a reply's alone — a roster notification has no such member — so a host
+// that takes a whole roster of RosterRowsMax rows over the limit ends every
+// subscription with reset{omitted}, though its row is not in the view; the
+// subscriber subscribes again and is told truncated. Back to RosterRowsMax
+// rows, another reset, and the new reply says whole. The negative control: a
+// host added to a roster truncated already changes nothing a subscriber
+// holds, and it is told nothing.
+func TestARosterCrossingItsRowLimitResetsItsSubscriptions(t *testing.T) {
+	m := newMemHosts(t)
+	var all []string
+	for n := 100; n < 100+protocol.RosterRowsMax; n++ {
+		all = append(all, m.add(n, memRow(n, "h")))
+	}
+	setVar(t, &listWait, step)
+	rg := newRosterRig(t, testEnv(t), rigOpts{clock: true, gate: true, hk: func(hk *hooks) { installMem(t, hk, m) }})
+	p := dialPeer(t, rg.sock)
+	if sub := p.subscribe(); sub.Truncated || !slices.Equal(ids(sub.Sessions), all) {
+		t.Fatalf("a whole roster: truncated %v, %d rows", sub.Truncated, len(sub.Sessions))
+	}
+	// reset reads the subscriber's lines up to its reset, which must be
+	// reset{sub, omitted}.
+	reset := func(what, sub string) {
+		t.Helper()
+		var last msg
+		for last = p.read(); last.Method == protocol.NotifyRoster; last = p.read() {
+		}
+		var rp protocol.ResetParams
+		if last.Method != protocol.NotifyReset || json.Unmarshal(last.Params, &rp) != nil ||
+			rp != (protocol.ResetParams{Subscription: sub, Reason: protocol.ResetOmitted}) {
+			t.Fatalf("%s: the subscriber read %s, want reset{%s, omitted}", what, clip(last.raw), sub)
+		}
+	}
+	round := func(what string, pred func(roster.Snapshot) bool) {
+		t.Helper()
+		rg.clk.advance(time.Second)
+		from := rg.snaps.mark()
+		rg.tick()
+		rg.applied(what, from, pred)
+	}
+	count := func(n int) func(roster.Snapshot) bool {
+		return func(s roster.Snapshot) bool { return len(s.Running) == n }
+	}
+
+	over := m.add(100+protocol.RosterRowsMax, memRow(100+protocol.RosterRowsMax, "h"))
+	round("one host over the limit", count(protocol.RosterRowsMax+1))
+	reset("over the limit", "r-1")
+	again := p.subscribe()
+	if again.Subscription != "r-2" || !again.Truncated || !slices.Equal(ids(again.Sessions), all) {
+		t.Fatalf("subscribed again: %s, truncated %v, %d rows", again.Subscription, again.Truncated, len(again.Sessions))
+	}
+
+	// The negative control: truncated already, one more host is no news.
+	further := m.add(101+protocol.RosterRowsMax, memRow(101+protocol.RosterRowsMax, "h"))
+	round("two hosts over the limit", count(protocol.RosterRowsMax+2))
+	p.nothing("a host added to a truncated roster")
+
+	m.remove(over)
+	m.remove(further)
+	round("back at the limit", count(protocol.RosterRowsMax))
+	reset("back at the limit", "r-2")
+	if whole := p.subscribe(); whole.Subscription != "r-3" || whole.Truncated || !slices.Equal(ids(whole.Sessions), all) {
+		t.Fatalf("subscribed again at the limit: %s, truncated %v, %d rows", whole.Subscription, whole.Truncated, len(whole.Sessions))
+	}
+}
+
+// TestAResetThatCannotBeWrittenClosesTheConnection: a subscription's reset
+// that its subscriber does not read within writeWait — reset{omitted} ends a
+// subscription on a connection that otherwise stays — closes the connection,
+// so the subscriber is never left holding a subscription that is over, nor a
+// line cut part way. The negative control is the subscriber's read before
+// the reset: the connection open, the bytes written so far all there.
+func TestAResetThatCannotBeWrittenClosesTheConnection(t *testing.T) {
+	setVar(t, &writeWait, 200*time.Millisecond)
+	dir, err := os.MkdirTemp("/tmp", "czhr-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	ln, err := net.ListenUnix("unix", &net.UnixAddr{Name: filepath.Join(dir, "s"), Net: "unix"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	peer, err := net.DialTimeout("unix", ln.Addr().String(), step)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer peer.Close()
+	uc, err := ln.AcceptUnix()
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := &conn{uc: uc}
+	defer c.close()
+
+	// The subscriber reads nothing: the socket's buffers fill.
+	_ = uc.SetWriteBuffer(1)
+	filled, chunk := 0, make([]byte, 4096)
+	for {
+		_ = uc.SetWriteDeadline(time.Now().Add(50 * time.Millisecond))
+		n, err := uc.Write(chunk)
+		filled += n
+		if err != nil {
+			break
+		}
+	}
+	c.writeReset("r-1", protocol.ResetOmitted)
+
+	// Negative control: the connection was open — everything written before
+	// the reset is there to read.
+	got := 0
+	buf := make([]byte, 64<<10)
+	for {
+		_ = peer.SetReadDeadline(time.Now().Add(step))
+		n, err := peer.Read(buf)
+		got += n
+		if err != nil {
+			if isTimeout(err) {
+				t.Fatalf("the connection was left open after its reset could not be written (%d of %d bytes read)", got, filled)
+			}
+			break
+		}
+	}
+	if got < filled {
+		t.Fatalf("read %d bytes, %d were written before the reset", got, filled)
+	}
+}

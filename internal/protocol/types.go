@@ -1198,7 +1198,10 @@ const (
 	// cursor.
 	ResetSlowConsumer ResetReason = "slow_consumer"
 	// ResetOmitted: a record no client can fold (over the record limit). It
-	// re-attaches with no cursor.
+	// re-attaches with no cursor. On a hub's roster subscription: the
+	// roster's completeness changed — it crossed RosterRowsMax rows, either
+	// way, which a roster notification cannot say — and the client
+	// subscribes again, the reply's truncated saying which.
 	ResetOmitted ResetReason = "omitted"
 	// ResetReplayFailed: the journal leg of a cursor replay failed; the
 	// client discards what it folded since the cursor and re-attaches with
