@@ -39,6 +39,9 @@ type bashStopTool struct{ spec tool.Spec }
 
 func (t *bashStopTool) Spec() tool.Spec { return t.spec }
 
+// WithoutJobs is nothing, as bash_output's is (plan 033 X101).
+func (t *bashStopTool) WithoutJobs() tool.Tool { return nil }
+
 // Prepare reads the id, as bash_output does.
 func (t *bashStopTool) Prepare(_ tool.Env, c tool.Call) (tool.Prepared, error) {
 	a, err := parseArgs(c.Input)

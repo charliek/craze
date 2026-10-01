@@ -84,6 +84,9 @@ func (r *Registry) Register(p Profile) error {
 	if _, err := validateTools(p.Tools); err != nil {
 		return fmt.Errorf("tool: profile %q: %w", p.Name, err)
 	}
+	if err := validateVariants(p.Tools); err != nil {
+		return fmt.Errorf("tool: profile %q: %w", p.Name, err)
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if _, dup := r.profiles[p.Name]; dup {
@@ -140,6 +143,33 @@ func validateTools(tools []Tool) ([]Spec, error) {
 		specs = append(specs, s)
 	}
 	return specs, nil
+}
+
+// validateVariants checks what a session without background jobs is offered
+// in each JobsAware tool's place (plan 033 X101): nothing, or a variant held
+// to validateTools' rules — a typed nil among them, which the harness would
+// otherwise offer — that keeps the tool's id, so the order and the names the
+// model is offered are the same in either kind of session, less the tools
+// that have no variant.
+func validateVariants(tools []Tool) error {
+	for _, t := range tools {
+		j, ok := t.(JobsAware)
+		if !ok {
+			continue
+		}
+		v := j.WithoutJobs()
+		if v == nil {
+			continue
+		}
+		vs, err := validateTools([]Tool{v})
+		if err != nil {
+			return fmt.Errorf("tool %q without jobs: %w", t.Spec().ID, err)
+		}
+		if id := t.Spec().ID; vs[0].ID != id {
+			return fmt.Errorf("tool %q without jobs is %q: a variant keeps its tool's id", id, vs[0].ID)
+		}
+	}
+	return nil
 }
 
 // specOf returns t's Spec, or an error when t is nil — an untyped nil, or a

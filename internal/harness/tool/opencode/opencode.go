@@ -13,6 +13,7 @@ package opencode
 import (
 	"embed"
 	"fmt"
+	"strings"
 
 	"github.com/charliek/craze/internal/harness/tool"
 )
@@ -109,16 +110,76 @@ func systemFunc() (func(tool.SystemEnv) string, error) {
 	}, nil
 }
 
-// description returns the named tool's description, rendered with vars. The
-// file's text is kept exactly, final newline included, as opencode sends it.
+// description returns the named tool's description, rendered with vars, as a
+// session that runs background jobs is offered it: its jobs blocks kept, their
+// marks gone (withJobs). The file's text is otherwise kept exactly, final
+// newline included, as opencode sends it.
 func description(name string, vars map[string]string) (string, error) {
+	return renderDescription(name, vars, true)
+}
+
+// descriptionWithoutJobs is description as a session that runs no background
+// jobs is offered it — headless, or a sub-agent's (plan 033 X101): its jobs
+// blocks cut. The one file is the source of both, so the two cannot drift.
+func descriptionWithoutJobs(name string, vars map[string]string) (string, error) {
+	return renderDescription(name, vars, false)
+}
+
+func renderDescription(name string, vars map[string]string, jobs bool) (string, error) {
 	b, err := descriptions.ReadFile("descriptions/" + name + ".txt")
 	if err != nil {
 		return "", fmt.Errorf("description %q: %w", name, err)
 	}
-	s, err := tool.Render(string(b), vars)
+	text, err := withJobs(string(b), jobs)
+	if err != nil {
+		return "", fmt.Errorf("description %q: %w", name, err)
+	}
+	s, err := tool.Render(text, vars)
 	if err != nil {
 		return "", fmt.Errorf("description %q: %w", name, err)
 	}
 	return s, nil
+}
+
+// The marks around a description's text that only a session running
+// background jobs is offered (plan 033 X101): bash's background, promotion and
+// job sentences, which a headless session's or a sub-agent's bash leaves out
+// (C8's description, byte for byte). A block runs from just after one sentence
+// to just before the next text both variants share, so cutting it leaves no
+// blank line and no doubled space. Neither mark is in any description's text
+// otherwise; tool.Render would leave one as it is.
+const (
+	jobsOpen  = "{{jobs}}"
+	jobsClose = "{{/jobs}}"
+)
+
+// withJobs returns text with its jobs blocks kept (jobs) or cut, and the
+// marks removed either way. A mark out of place — a close before any open, an
+// open inside a block, a block never closed — is an error: a bug in the
+// file, which the profile's build reports before any session offers it.
+func withJobs(text string, jobs bool) (string, error) {
+	var b strings.Builder
+	for rest := text; ; {
+		i := strings.Index(rest, jobsOpen)
+		if c := strings.Index(rest, jobsClose); c >= 0 && (i < 0 || c < i) {
+			return "", fmt.Errorf("a %s with no %s before it", jobsClose, jobsOpen)
+		}
+		if i < 0 {
+			b.WriteString(rest)
+			return b.String(), nil
+		}
+		b.WriteString(rest[:i])
+		rest = rest[i+len(jobsOpen):]
+		j := strings.Index(rest, jobsClose)
+		switch {
+		case j < 0:
+			return "", fmt.Errorf("a %s that is never closed", jobsOpen)
+		case strings.Contains(rest[:j], jobsOpen):
+			return "", fmt.Errorf("a %s inside a jobs block", jobsOpen)
+		}
+		if jobs {
+			b.WriteString(rest[:j])
+		}
+		rest = rest[j+len(jobsClose):]
+	}
 }

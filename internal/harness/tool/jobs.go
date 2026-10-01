@@ -37,6 +37,27 @@ const (
 	BashStopTool   = "bash_stop"
 )
 
+// JobsAware is a tool whose offer depends on whether the session runs
+// background jobs (plan 033 X101). A session that runs none — headless `craze
+// prompt`, and every sub-agent, whose Env.Jobs is nil — is offered
+// WithoutJobs() in the tool's place, or nothing when that is nil: bash
+// without run_in_background or a word of jobs in its description, and no
+// bash_output or bash_stop. Draft 1 offered every session the whole surface,
+// each background line qualified "when the session supports it", and headless
+// models asked for the background all the same — a dev server then ran in the
+// foreground until its timeout killed it (the D-69 A/B, verify/v3-ab).
+//
+// The choice is the harness's, made once at Open from whether the session runs
+// jobs, and never changes within the session: the specs are part of every
+// request's prefix (D-30). A variant keeps the tool's id and is held to the
+// same rules: Registry.Register validates it as it does the tool. What the
+// variant's Prepare and Run do with a field its spec no longer offers is the
+// tool's own defence — bash still reads run_in_background, and runs the
+// command in the foreground and says so.
+type JobsAware interface {
+	WithoutJobs() Tool
+}
+
 // JobType is a job's agent type wherever a background child's would be: the
 // row a client draws for it (P12: "bash job" — persona names are slugs, so no
 // agent type can be spelled with a space), and the running-tasks list of a
@@ -235,7 +256,8 @@ type JobSlot interface {
 
 // Jobs is a session's background jobs, behind Env.Jobs (plan 033 §3.8). nil
 // in a session that runs none — headless `craze prompt`, and a sub-agent's
-// session (P11, D-59) — where run_in_background runs in the foreground and a
+// session (P11, D-59) — which is offered no jobs surface (JobsAware, X101): a
+// run_in_background its model sends anyway runs in the foreground, and a
 // timeout kills.
 type Jobs interface {
 	// Reserve takes a job slot for the bash call id before anything is

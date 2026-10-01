@@ -52,6 +52,11 @@ type bashOutputTool struct{ spec tool.Spec }
 
 func (t *bashOutputTool) Spec() tool.Spec { return t.spec }
 
+// WithoutJobs is nothing (tool.JobsAware, plan 033 X101): a session that runs
+// no background jobs — headless, or a sub-agent's — is not offered
+// bash_output, so its model never reads of a job it cannot start.
+func (t *bashOutputTool) WithoutJobs() tool.Tool { return nil }
+
 // Prepare reads the id — required, a string, trimmed and not blank — and
 // wait_ms, an integer: absent or null is 0, a negative is 0 and one past the
 // maximum is the maximum, as agent_output reads its own. What the id names
@@ -109,7 +114,8 @@ func (c *bashOutputCall) Run(ctx context.Context, env tool.Env) tool.Result {
 
 // noJobs answers a job tool's call in a session that runs no background jobs
 // (Env.Jobs nil): headless, or a sub-agent's, neither of which is offered the
-// tools — a defence, not a path. A cancelled call is aborted.
+// tools (WithoutJobs, X101) — a defence, not a path. A cancelled call is
+// aborted.
 func noJobs(ctx context.Context) tool.Result {
 	if ctx.Err() != nil {
 		return aborted()

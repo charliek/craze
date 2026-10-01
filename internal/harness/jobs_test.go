@@ -1089,6 +1089,77 @@ func TestJobsOnlyInInteractiveTopLevelSessions(t *testing.T) {
 	}
 }
 
+// TestJobsSurfaceOnlyWhereJobsRun (plan 033 X101): a session that runs no
+// background jobs is offered no jobs surface — headless (Options.Background
+// false), and a child of an interactive session, even one opened with
+// Background set, which a child does not read: no bash_output or bash_stop,
+// and a bash with no run_in_background parameter and no word of jobs in its
+// description — in its specs, in the tools its header hashes, and on the
+// wire. The headless dispatcher answers a bash_stop as a tool it does not
+// know, and the run_in_background its model sends all the same runs in the
+// foreground and says so (C9's defence). The interactive session is the
+// control: it is offered every one of them.
+func TestJobsSurfaceOnlyWhereJobsRun(t *testing.T) {
+	b := openBG(t)
+	headless := b.open(b.options())
+	co := childOf(b.fixture, b.s, ChildOptions{ID: "child-jobs", ParentCall: "t1.1.1", Type: "general-purpose", AllTools: true, Mode: "agent"})
+	co.Background = true
+	child := b.open(co)
+
+	for _, tc := range []struct {
+		name string
+		s    *Session
+		jobs bool
+	}{{"interactive", b.s, true}, {"headless", headless, false}, {"a child of the interactive session", child, false}} {
+		ids := specIDs(tc.s)
+		bash, ok := tc.s.tools.byID[tool.BashTool]
+		if !ok || !slices.Contains(ids, tool.BashTool) {
+			t.Fatalf("%s: no bash in %v", tc.name, ids)
+		}
+		_, param := bash.Parameters["run_in_background"]
+		wire := string(tc.s.tools.wire)
+		for what, got := range map[string]bool{
+			"bash_output offered":               slices.Contains(ids, tool.BashOutputTool),
+			"bash_stop offered":                 slices.Contains(ids, tool.BashStopTool),
+			"bash's run_in_background":          param,
+			"bash's description of jobs":        strings.Contains(bash.Description, "run_in_background") || strings.Contains(bash.Description, "bash_stop"),
+			"the job tools in the hashed tools": strings.Contains(wire, `"name":"bash_output"`) || strings.Contains(wire, `"name":"bash_stop"`),
+		} {
+			if got != tc.jobs {
+				t.Errorf("%s: %s = %v; want %v", tc.name, what, got, tc.jobs)
+			}
+		}
+	}
+
+	note := "This session does not run background jobs: run_in_background was ignored, and the command ran in the foreground with the foreground's timeout."
+	a := b.routers["test/a"]
+	a.route("headless go", callStep(
+		callParts("c1", "bash", input(t, map[string]any{"command": "echo hi", "run_in_background": true})),
+		callParts("c2", "bash_stop", input(t, map[string]any{"id": "t1.1.1"})),
+	), answerWith("done"))
+	var ev events
+	if _, err := headless.Run(context.Background(), "headless go", ev.sink); err != nil {
+		t.Fatal(err)
+	}
+	if names := wireNames(a.requests("headless go")[0]); !slices.Contains(names, "bash") || slices.Contains(names, "bash_output") || slices.Contains(names, "bash_stop") {
+		t.Fatalf("the headless request offered %v; want bash, and neither job tool", names)
+	}
+	if r := callResult(t, ev.list(), "t1.1.1"); r.Text != "hi\n\n\n<shell_metadata>\n"+note+"\n</shell_metadata>" {
+		t.Fatalf("headless run_in_background: %q; want the command run in the foreground, and the note", r.Text)
+	}
+	if r := callResult(t, ev.list(), "t1.1.2"); !strings.HasPrefix(r.Text, "tool not found: bash_stop.") || r.Class != tool.ClassInvalidInput {
+		t.Fatalf("headless bash_stop: %+v; want the dispatcher not to know it", r)
+	}
+
+	a.route("go", answerWith("hello"))
+	if _, err := b.s.Run(context.Background(), "go", nil); err != nil {
+		t.Fatal(err)
+	}
+	if names := wireNames(a.requests("go")[0]); !slices.Contains(names, "bash_output") || !slices.Contains(names, "bash_stop") {
+		t.Fatalf("control: the interactive request offered %v; want both job tools", names)
+	}
+}
+
 // TestJobLifetimeEndToEnd (A11, A12, §3.8's table): real commands through the
 // real bash tool and the session's jobs. run_in_background starts a job and
 // returns §3.7's receipt, whose result a wake delivers when it exits; a

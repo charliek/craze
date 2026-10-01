@@ -332,8 +332,9 @@ type Env struct {
 	// Jobs is the session's background jobs (plan 033 §3.8, jobs.go): what
 	// bash hands a command that outlives its call to, and what bash_output
 	// and bash_stop read and stop. nil in a session that runs none — headless
-	// `craze prompt`, and a sub-agent's session (P11, D-59) — where
-	// run_in_background runs in the foreground and the timeout kills.
+	// `craze prompt`, and a sub-agent's session (P11, D-59) — which is offered
+	// none of them (JobsAware, X101): a run_in_background its model sends
+	// anyway runs in the foreground, and the timeout kills.
 	Jobs Jobs
 	// Vision says whether the model the call runs for accepts images
 	// (modeltable's vision flag, plan 033 §3.5): a tool returns an image

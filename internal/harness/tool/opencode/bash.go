@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -49,7 +50,9 @@ const (
 	partialText = "The output may be incomplete: something the command started still held its output open when the call ended, and what it wrote after that was not read."
 	// foregroundText says a call that asked for the background ran in the
 	// foreground: the session runs no background jobs — headless `craze
-	// prompt`, or a sub-agent's session (plan 033 §3.7, P11).
+	// prompt`, or a sub-agent's session (plan 033 §3.7, P11). Such a session's
+	// bash does not offer run_in_background (X101), so this answers a model
+	// that sends it all the same: a defence, not a path.
 	foregroundText = "This session does not run background jobs: run_in_background was ignored, and the command ran in the foreground with the foreground's timeout."
 )
 
@@ -145,6 +148,9 @@ func Shell() string { return pickShell(bashPath, shPath) }
 type bashTool struct {
 	spec tool.Spec
 	host host
+	// plain is the bash a session that runs no background jobs is offered in
+	// this one's place (WithoutJobs, plan 033 X101); nil on plain itself.
+	plain *bashTool
 }
 
 func newBash() (tool.Tool, error) {
@@ -154,36 +160,34 @@ func newBash() (tool.Tool, error) {
 	}
 	// The values opencode's ShellPrompt.render puts in for a bash shell
 	// (shell/prompt.ts:273-291); NOTICE says how the rest were rendered.
-	desc, err := description("bash", map[string]string{
+	vars := map[string]string{
 		"os":               h.os,
 		"shell":            filepath.Base(h.shell),
 		"tmp":              h.tmp,
 		"defaultTimeoutMs": strconv.FormatInt(defaultTimeout.Milliseconds(), 10),
 		"maxLines":         strconv.Itoa(tool.MaxLines),
 		"maxBytes":         strconv.Itoa(tool.MaxBytes),
-	})
+	}
+	desc, err := description("bash", vars)
+	if err != nil {
+		return nil, err
+	}
+	plainDesc, err := descriptionWithoutJobs("bash", vars)
 	if err != nil {
 		return nil, err
 	}
 	// opencode's Parameters (shell/prompt.ts:15-23) as its JSON Schema
 	// renders them (test/tool/__snapshots__/parameters.test.ts.snap):
 	// timeout is a PositiveInt, which renders with both bounds.
-	//
-	// run_in_background is craze's (plan 033 §3.7): Claude Code's name for
-	// the same request, as the agent tool's is (plan 026 §3.11).
-	return &bashTool{host: h, spec: tool.Spec{
+	plain := &bashTool{host: h, spec: tool.Spec{
 		ID:          tool.BashTool,
-		Description: desc,
+		Description: plainDesc,
 		Parameters: map[string]any{
 			"command": map[string]any{"type": "string", "description": "The command to execute"},
 			"timeout": map[string]any{"type": "integer", "exclusiveMinimum": 0, "minimum": -maxSafeInteger, "maximum": maxSafeInteger,
 				"description": "Optional timeout in milliseconds"},
 			"workdir": map[string]any{"type": "string",
 				"description": "The working directory to run the command in. Defaults to the current directory. Use this instead of 'cd' commands."},
-			"run_in_background": map[string]any{"type": "boolean",
-				"description": "Optional. true runs the command in the background where this session supports it: the call returns at once " +
-					"with the job's id, timeout is the job's limit, and its result is delivered to you when it finishes. Where " +
-					"background jobs are not supported the command runs in the foreground."},
 		},
 		Required: []string{"command"},
 		Kind:     tool.KindExecute,
@@ -193,10 +197,35 @@ func newBash() (tool.Tool, error) {
 		// bash keeps the tail of its output, spills the rest, and says so in
 		// opencode's own words, so the dispatcher leaves its text alone.
 		Truncate: tool.None,
-	}}, nil
+	}}
+	// A session that runs background jobs is offered the same tool with its
+	// jobs: the description's jobs blocks kept, and run_in_background, which
+	// is craze's (plan 033 §3.7) — Claude Code's name for the same request, as
+	// the agent tool's is (plan 026 §3.11).
+	full := plain.spec
+	full.Description = desc
+	full.Parameters = maps.Clone(plain.spec.Parameters)
+	full.Parameters["run_in_background"] = map[string]any{"type": "boolean",
+		"description": "Optional. true runs the command in the background where this session supports it: the call returns at once " +
+			"with the job's id, timeout is the job's limit, and its result is delivered to you when it finishes. Where " +
+			"background jobs are not supported the command runs in the foreground."}
+	return &bashTool{host: h, spec: full, plain: plain}, nil
 }
 
 func (b *bashTool) Spec() tool.Spec { return b.spec }
+
+// WithoutJobs is the bash a session that runs no background jobs — headless,
+// or a sub-agent's — is offered (tool.JobsAware, plan 033 X101): C8's
+// description, with no word of the background, promotion or job tools, and no
+// run_in_background parameter. Its Prepare is this one's, so a model that
+// sends run_in_background all the same gets the foreground and a line saying
+// so (foregroundText), never an error.
+func (b *bashTool) WithoutJobs() tool.Tool {
+	if b.plain == nil {
+		return b
+	}
+	return b.plain
+}
 
 func (b *bashTool) Prepare(env tool.Env, c tool.Call) (tool.Prepared, error) {
 	a, err := parseArgs(c.Input)

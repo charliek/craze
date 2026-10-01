@@ -89,7 +89,9 @@ func planFiles(t *testing.T, home string) []string {
 // all; an empty list is a text-only child, whose requests carry no tools and
 // whose header records no tools digest. Its transcript is named by the
 // runner's id and its header carries the four parent keys and a tools digest
-// of its own. The control is the parent, which keeps every tool.
+// of its own. The control is the parent, which keeps every tool but
+// bash_output and bash_stop: it runs no background jobs either (headless,
+// plan 033 X101).
 func TestChildSessionToolsAndHeader(t *testing.T) {
 	childTools := []string{"bash", "read", "glob", "grep", "edit", "write"}
 
@@ -102,7 +104,7 @@ func TestChildSessionToolsAndHeader(t *testing.T) {
 			Role: "You review diffs.", AllTools: true, Mode: "agent",
 		}))
 		equal(t, "the parent's tools", specIDs(parent),
-			[]string{"bash", "bash_output", "bash_stop", "read", "glob", "grep", "edit", "write", "agent", "agent_output", "todo_write", "ask_user_question", "exit_plan_mode"})
+			[]string{"bash", "read", "glob", "grep", "edit", "write", "agent", "agent_output", "todo_write", "ask_user_question", "exit_plan_mode"})
 		equal(t, "the child's tools", specIDs(child), childTools)
 
 		a := f.models["test/a"]

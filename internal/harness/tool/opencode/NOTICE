@@ -90,6 +90,15 @@ todo_write and agent, below.)
 | bash.txt  | "...it will be truncated and the full output will be written to a file. You can use Read with offset/limit to read specific sections or Grep to search the full content. Do NOT use `head`, `tail`, or other truncation commands to limit output; the full output will already be captured to a file for more precise searching." | "...it will be truncated and the output will be written to a file when it can be. The result names the file when there is one, and says when the file holds only part of the output. When the result gives a path, you can use Read with offset/limit to read specific sections or Grep to search the saved content. Do NOT use `head`, `tail`, or other truncation commands to limit output; the output will already be captured to a file for more precise searching whenever it can be." | difference: the spill file is capped at 100 MiB, may hold only what was read, and may not be written at all (the bash rows below); the model must not be promised a full file it may not get |
 | bash.txt  | ${limits.maxLines}, ${limits.maxBytes} (JavaScript interpolations in prompt.ts)                                           | ${maxLines}, ${maxBytes}                                                                                                                                      | rendering: tool.Render's placeholder names are \w+ |
 
+bash.txt's background, promotion and job-tool sentences (the timeout
+bullet's second sentence, the process-group bullet's last, and the two
+bullets after it, all added with plan 033's background jobs, rows above) are
+marked in the file as two {{jobs}}...{{/jobs}} blocks: a session that runs
+background jobs is offered them with the marks removed, and a session that
+runs none (headless, or a sub-agent's) is offered the description with both
+blocks cut, which is the plan 033 section 3.6 description exactly (plan 033
+X101). The marks are craze's, not text the model reads.
+
 No description names opencode, LSP, WebFetch or TodoWrite, so the other
 allowed edits change nothing. opencode fills ${tmp} with its own directory
 (os.tmpdir()/opencode); craze's bash tool supplies craze's.
@@ -213,7 +222,7 @@ Recorded in D-38 (discovery/native-harness/08-decisions.md) as well.
 | opencode                                                        | craze                                                                                                                                               | why |
 |-----------------------------------------------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------|-----|
 | bash's timeout has no maximum                                   | a 10-minute cap, stated in the description; in a session that runs background jobs a command still running at it is moved to the background instead (promotion: 30 more minutes at most, the result block delivered when it ends), unless the call was cancelled, the session is closing or 8 jobs already run — then it is stopped as before, and the result says why | a hidden provider must not hold a turn for hours (plan 033 section 3.8) |
-| bash's children may outlive the call                            | everything left in the command's process group is killed when the command returns; the description says so. A process that leaves the group (setsid, or setpgid as `set -m` job control does) escapes. A background job (run_in_background, or a promoted command) is the session's: its group lives until its leader exits, the model stops it (bash_stop), the user does, its limit passes (30 minutes by default, 2 hours at most) or the session closes; headless sessions and sub-agents run none, and run_in_background runs in the foreground there | background jobs owned by the session, not the call (plan 033 sections 3.7, 3.8; Q5) |
+| bash's children may outlive the call                            | everything left in the command's process group is killed when the command returns; the description says so. A process that leaves the group (setsid, or setpgid as `set -m` job control does) escapes. A background job (run_in_background, or a promoted command) is the session's: its group lives until its leader exits, the model stops it (bash_stop), the user does, its limit passes (30 minutes by default, 2 hours at most) or the session closes; headless sessions and sub-agents run none, are offered no run_in_background, and run one sent anyway in the foreground | background jobs owned by the session, not the call (plan 033 sections 3.7, 3.8; Q5) |
 | bash's exit code is in metadata only (shell.ts:585-594)         | also "exit code: N" in <shell_metadata> when it is not zero                                                                                         | a failed command with no output would otherwise read "(no output)" |
 | read returns images and PDFs as attachments                     | an image is returned to a model that accepts images, after craze's one image path (attach.Process: at most 2000 px and 3.75 MiB, EXIF stripped, a GIF's first frame), beside one line naming it; a model that does not gets "Cannot read image file: <model> does not accept images", and an image the path refuses "Cannot read image file: <path>: <reason>". A PDF gets opencode's binary message, "Cannot read binary file: <path>", since opencode has no refusal of its own for one | a model that does not accept images is refused at the provider; the provider turns media results into a user message, which craze's LLM wrapper regroups after the whole run of tool results (plan 033 §3.5) |
 | write and edit write the file in place (edit.ts:155)            | a temp file renamed over it, under a per-path lock, with an external-change check just before the rename (inode, size, modification time and the content that was read, or still absent for a new file): "File changed on disk since it was read. Read it again before editing." | crash safety. The cost: a rewritten file gets a new inode, so hard links to it keep the old content, and its ownership, ACLs and extended attributes are not carried over; nothing is fsynced, so durability is not promised |
@@ -406,7 +415,9 @@ Code's name for the same request, as the agent tool's is) and every text a
 job answers with: the start and promotion receipts, each ending in the fixed
 <background_job id="..."/> line, and the <background_command> result block.
 bash_output's wait_ms defaults to 0, a snapshot (plan 033 P13), and waits at
-most 600 s; bash_stop waits at most 7 s for the job it stopped to end.
+most 600 s; bash_stop waits at most 7 s for the job it stopped to end. The
+two tools and the parameter are offered only to a session that runs
+background jobs (plan 033 X101).
 
 opencode's truncation hint for an agent that has its task tool
 (truncate.ts, "Use the Task tool to have explore agent process this file")

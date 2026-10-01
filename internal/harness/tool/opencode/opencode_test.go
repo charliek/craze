@@ -6,8 +6,10 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -16,9 +18,14 @@ import (
 	"github.com/charliek/craze/internal/harness/tool"
 )
 
-var updateGolden = flag.Bool("update", false, "rewrite internal/harness/tool/opencode/testdata/specs.golden")
+var updateGolden = flag.Bool("update", false, "rewrite the specs goldens in internal/harness/tool/opencode/testdata")
 
-const specsGolden = "testdata/specs.golden"
+const (
+	specsGolden = "testdata/specs.golden"
+	// bashWithoutJobsGolden is bash as a session that runs no background jobs
+	// is offered it (plan 033 X101).
+	bashWithoutJobsGolden = "testdata/bash_without_jobs.golden"
+)
 
 // keyA is the only credential any test here holds: obviously not a secret,
 // and over modeltable's 8-byte floor.
@@ -294,19 +301,14 @@ func TestSystemPromptDoesNotMandateBrevity(t *testing.T) {
 
 // TestSpecsGolden pins what the model is offered — each tool's name,
 // description and parameter schema, in order, exactly as ToolsJSON sends
-// them — and their hash, which is part of every request's cache prefix.
+// them — and their hash, which is part of every request's cache prefix. It is
+// what a session that runs background jobs is offered (plan 033 X101):
+// TestBashWithoutJobsGolden pins the bash the others are.
 // Regenerate with:
 //
 //	go test ./internal/harness/tool/opencode -run TestSpecsGolden -update
 func TestSpecsGolden(t *testing.T) {
-	// bash's description names the machine's OS, shell and temporary
-	// directory; the golden pins bashVars' instead, whatever runs the test.
-	// Not parallel: thisHost is package state.
-	machine := thisHost
-	thisHost = func() (host, error) {
-		return host{os: bashVars["os"], shell: "/bin/" + bashVars["shell"], tmp: bashVars["tmp"]}, nil
-	}
-	t.Cleanup(func() { thisHost = machine })
+	pinHost(t)
 	p, err := Profile()
 	if err != nil {
 		t.Fatal(err)
@@ -319,6 +321,196 @@ func TestSpecsGolden(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	head := fmt.Sprintf("# The opencode profile's tools as a model is offered them (Profile.ToolsJSON).\n# tools_sha256: %s\n", sum)
+	checkGolden(t, specsGolden, specsText(t, head, wire))
+}
+
+// TestBashWithoutJobsGolden (plan 033 X101) pins the bash a session that runs
+// no background jobs is offered — headless, or a sub-agent's: C8's
+// description, with no word of the background, promotion or the job tools,
+// and no run_in_background parameter. Everything else is the full bash's: the
+// same id, kind and required list, the parameters less that one, and the
+// description less its two jobs blocks, the sentences on either side of each
+// joined as C8 had them. The full bash, which says every one of those words
+// and has the parameter, is the control. Regenerate with:
+//
+//	go test ./internal/harness/tool/opencode -run TestBashWithoutJobsGolden -update
+func TestBashWithoutJobsGolden(t *testing.T) {
+	pinHost(t)
+	p, err := Profile()
+	if err != nil {
+		t.Fatal(err)
+	}
+	full := p.Tools[0]
+	j, ok := full.(tool.JobsAware)
+	if full.Spec().ID != tool.BashTool || !ok {
+		t.Fatalf("the profile's first tool is %q (JobsAware %v); want bash, with a variant", full.Spec().ID, ok)
+	}
+	plain := j.WithoutJobs()
+	if plain == nil {
+		t.Fatal("bash has no variant without jobs")
+	}
+	if again := plain.(tool.JobsAware).WithoutJobs(); again != plain {
+		t.Fatal("the variant's own variant is another tool")
+	}
+	ps, fs := plain.Spec(), full.Spec()
+	wire, err := tool.SpecsJSON([]tool.Spec{ps})
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkGolden(t, bashWithoutJobsGolden, specsText(t, "# bash as a session that runs no background jobs is offered it (bashTool.WithoutJobs, plan 033 X101).\n", wire))
+
+	for _, word := range []string{"run_in_background", "bash_output", "bash_stop", "job", "When the session supports it", "promot"} {
+		if strings.Contains(ps.Description, word) {
+			t.Errorf("the description without jobs says %q", word)
+		}
+		if !strings.Contains(fs.Description, word) && word != "promot" {
+			t.Errorf("control: the full description does not say %q", word)
+		}
+	}
+	for _, join := range []string{
+		"a longer timeout is reduced to 600000ms.\n  - When the command returns, every process",
+		"(setsid, setpgid, `set -m`) escapes this.\n  - Commands run with no terminal: editors and pagers do not open",
+	} {
+		if !strings.Contains(ps.Description, join) {
+			t.Errorf("the description without jobs lacks C8's %q", join)
+		}
+		if strings.Contains(fs.Description, join) {
+			t.Errorf("control: the full description has C8's %q", join)
+		}
+	}
+	if strings.Contains(ps.Description, "{{") || strings.Contains(fs.Description, "{{") {
+		t.Error("a jobs mark is left in a description")
+	}
+	want := maps.Clone(fs.Parameters)
+	delete(want, "run_in_background")
+	if _, ok := fs.Parameters["run_in_background"]; !ok || !reflect.DeepEqual(ps.Parameters, want) {
+		t.Errorf("the parameters without jobs are %v; want the full bash's %v less run_in_background", ps.Parameters, fs.Parameters)
+	}
+	if ps.ID != fs.ID || ps.Kind != fs.Kind || ps.Truncate != fs.Truncate || !slices.Equal(ps.Required, fs.Required) {
+		t.Errorf("the variant's spec %+v differs from the full bash's beyond its jobs", ps)
+	}
+}
+
+// TestJobsAwareTools (plan 033 X101): which of the profile's tools a session
+// that runs no background jobs is offered differently — bash's variant in its
+// place, bash_output and bash_stop not at all — and that no other tool is,
+// so a new jobs tool is a choice made here. The variant prepares a
+// run_in_background it does not offer as the full bash does in a session
+// without jobs: in the foreground, saying so; a call that does not ask is the
+// control.
+func TestJobsAwareTools(t *testing.T) {
+	p, err := Profile()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var variants, dropped []string
+	var plain tool.Tool
+	for _, tl := range p.Tools {
+		j, ok := tl.(tool.JobsAware)
+		if !ok {
+			continue
+		}
+		if v := j.WithoutJobs(); v != nil {
+			variants = append(variants, v.Spec().ID)
+			plain = v
+		} else {
+			dropped = append(dropped, tl.Spec().ID)
+		}
+	}
+	if !slices.Equal(variants, []string{tool.BashTool}) || !slices.Equal(dropped, []string{tool.BashOutputTool, tool.BashStopTool}) {
+		t.Fatalf("variants %v, dropped %v; want bash's variant, and bash_output and bash_stop dropped", variants, dropped)
+	}
+	env := bashEnv(t, nil)
+	for in, foreground := range map[string]bool{`{"command":"true","run_in_background":true}`: true, `{"command":"true"}`: false} {
+		c, err := plain.Prepare(env, tool.Call{ID: "t1.1.1", Tool: tool.BashTool, Input: json.RawMessage(in)})
+		if err != nil {
+			t.Fatalf("Prepare(%s) = %v; want a call", in, err)
+		}
+		if bc := c.(*bashCall); bc.foreground != foreground || bc.background || bc.timeout != defaultTimeout {
+			t.Fatalf("Prepare(%s): foreground %v background %v timeout %v; want foreground %v and the foreground's timeout",
+				in, bc.foreground, bc.background, bc.timeout, foreground)
+		}
+	}
+}
+
+// TestWithJobs: a description's jobs blocks are kept, marks removed, for a
+// session that runs jobs, and cut for one that does not; text with no block
+// is the same either way (the control); a mark out of place is an error, not
+// text the model reads.
+func TestWithJobs(t *testing.T) {
+	for _, tc := range []struct{ in, kept, cut string }{
+		{"a{{jobs}} b{{/jobs}}\nc{{jobs}}\nd{{/jobs}}", "a b\nc\nd", "a\nc"},
+		{"{{jobs}}all{{/jobs}}", "all", ""},
+		{"no blocks, {braces} and ${vars}", "no blocks, {braces} and ${vars}", "no blocks, {braces} and ${vars}"},
+	} {
+		if got, err := withJobs(tc.in, true); err != nil || got != tc.kept {
+			t.Errorf("withJobs(%q, true) = %q, %v; want %q", tc.in, got, err, tc.kept)
+		}
+		if got, err := withJobs(tc.in, false); err != nil || got != tc.cut {
+			t.Errorf("withJobs(%q, false) = %q, %v; want %q", tc.in, got, err, tc.cut)
+		}
+	}
+	for in, want := range map[string]string{
+		"a{{/jobs}}":                      "no {{jobs}} before it",
+		"a{{jobs}}b":                      "never closed",
+		"{{jobs}}a{{jobs}}b{{/jobs}}":     "inside a jobs block",
+		"{{jobs}}a{{/jobs}}{{/jobs}}":     "no {{jobs}} before it",
+		"{{jobs}}a{{/jobs}}b{{jobs}}c":    "never closed",
+		"x{{/jobs}}{{jobs}}y{{/jobs}}":    "no {{jobs}} before it",
+		"{{jobs}}a{{/jobs}}b{{/jobs}}c{{": "no {{jobs}} before it",
+	} {
+		for _, jobs := range []bool{true, false} {
+			if got, err := withJobs(in, jobs); err == nil || !strings.Contains(err.Error(), want) {
+				t.Errorf("withJobs(%q, %v) = %q, %v; want an error saying %q", in, jobs, got, err, want)
+			}
+		}
+	}
+
+	// Every description renders both ways with no mark left, and only bash's
+	// has a block: the others are the same text in either kind of session.
+	entries, err := descriptions.ReadDir("descriptions")
+	if err != nil || len(entries) < 13 {
+		t.Fatalf("the descriptions: %d, %v", len(entries), err)
+	}
+	for _, e := range entries {
+		name := strings.TrimSuffix(e.Name(), ".txt")
+		vars := map[string]map[string]string{"bash": bashVars}[name]
+		full, err := description(name, vars)
+		if err != nil {
+			t.Fatal(err)
+		}
+		plain, err := descriptionWithoutJobs(name, vars)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(full+plain, jobsOpen) || strings.Contains(full+plain, jobsClose) {
+			t.Errorf("%s: a jobs mark is left", name)
+		}
+		if differ := full != plain; differ != (name == "bash") {
+			t.Errorf("%s: the description without jobs differs: %v", name, differ)
+		}
+	}
+}
+
+// pinHost makes bash's description name bashVars' machine for the test's
+// length, whatever runs it: its OS, shell and temporary directory are the
+// machine's otherwise. Not parallel: thisHost is package state.
+func pinHost(t *testing.T) {
+	t.Helper()
+	machine := thisHost
+	thisHost = func() (host, error) {
+		return host{os: bashVars["os"], shell: "/bin/" + bashVars["shell"], tmp: bashVars["tmp"]}, nil
+	}
+	t.Cleanup(func() { thisHost = machine })
+}
+
+// specsText is the specs goldens' form of wire, a tools array as SpecsJSON
+// encodes it: head, then each tool's name, description and parameters, the
+// parameters indented. A tool whose required list is missing or null fails
+// the test: strict providers reject null.
+func specsText(t *testing.T, head string, wire []byte) []byte {
+	t.Helper()
 	var tools []struct {
 		Name        string          `json:"name"`
 		Description string          `json:"description"`
@@ -328,7 +520,7 @@ func TestSpecsGolden(t *testing.T) {
 		t.Fatal(err)
 	}
 	var b bytes.Buffer
-	fmt.Fprintf(&b, "# The opencode profile's tools as a model is offered them (Profile.ToolsJSON).\n# tools_sha256: %s\n", sum)
+	b.WriteString(head)
 	for _, tl := range tools {
 		var params bytes.Buffer
 		if err := json.Indent(&params, tl.Parameters, "", "  "); err != nil {
@@ -336,7 +528,6 @@ func TestSpecsGolden(t *testing.T) {
 		}
 		fmt.Fprintf(&b, "\n=== tool: %s\n--- description\n%s--- parameters\n%s\n", tl.Name, tl.Description, params.String())
 
-		// required is an array, never null: strict providers reject null.
 		var schema struct {
 			Required *[]string `json:"required"`
 		}
@@ -347,17 +538,24 @@ func TestSpecsGolden(t *testing.T) {
 	if bytes.Contains(wire, []byte(`"required":null`)) {
 		t.Fatalf("the wire tools hold a null required list:\n%s", wire)
 	}
+	return b.Bytes()
+}
+
+// checkGolden compares got with the golden at path, which -update rewrites
+// first.
+func checkGolden(t *testing.T, path string, got []byte) {
+	t.Helper()
 	if *updateGolden {
-		if err := os.WriteFile(specsGolden, b.Bytes(), 0o644); err != nil {
+		if err := os.WriteFile(path, got, 0o644); err != nil {
 			t.Fatal(err)
 		}
 	}
-	want, err := os.ReadFile(specsGolden)
+	want, err := os.ReadFile(path)
 	if err != nil {
-		t.Fatalf("%v (regenerate with: go test ./internal/harness/tool/opencode -run TestSpecsGolden -update)", err)
+		t.Fatalf("%v (regenerate with: go test ./internal/harness/tool/opencode -run %s -update)", err, t.Name())
 	}
-	if !bytes.Equal(b.Bytes(), want) {
-		t.Fatalf("the specs differ from %s (regenerate with -update if the change is deliberate)\n--- want ---\n%s\n--- got ---\n%s", specsGolden, want, b.Bytes())
+	if !bytes.Equal(got, want) {
+		t.Fatalf("the specs differ from %s (regenerate with -update if the change is deliberate)\n--- want ---\n%s\n--- got ---\n%s", path, want, got)
 	}
 }
 

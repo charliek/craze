@@ -198,6 +198,11 @@ type toolset struct {
 // the session's sub-agent runner, which the agent tool hands its calls to
 // (Env.Subagents); nil for a child, whose Env.Subagents stays a nil interface.
 //
+// A session that runs no background jobs — every child, and one whose runner
+// is not background (headless) — is offered each tool.JobsAware tool's
+// variant in its place, or nothing where it has none: no jobs surface at all
+// (plan 033 X101).
+//
 // ref is how the profile is chosen: a new session's starting model
 // (modelRef), or, for a resumed one, the profile its transcript's header names
 // and nothing else — the tools and the prompt are that profile's whichever
@@ -273,14 +278,31 @@ func openTools(home, workspace, mode string, asker tool.Asker, table *modeltable
 			}
 		}
 	}
+	// Whether the session runs background jobs (plan 033 §3.8, P11): only one
+	// that runs background work at all (Options.Background — an interactive
+	// one, which something wakes) and is not a sub-agent, whose subs is nil.
+	// It is fixed here, before a spec is read, since it decides what bash and
+	// its job tools offer (tool.JobsAware, X101), and the env below has Jobs
+	// by the same value — what the model is offered and what runs never
+	// disagree.
+	runsJobs := subs != nil && subs.background
 	// tools are the profile's tools this session offers: all of them, or a
-	// child's filtered set. The same list feeds the specs below and the
-	// dispatcher, so a tool the filter drops is neither offered nor run.
+	// child's filtered set, each as the session offers it — a session that
+	// runs no jobs gets a JobsAware tool's variant in its place, or nothing
+	// (bash without run_in_background, no bash_output or bash_stop: X101). The
+	// same list feeds the specs below and the dispatcher, so a tool the filter
+	// drops is neither offered nor run.
 	var tools []tool.Tool
 	for _, t := range p.Tools {
 		s := t.Spec()
 		if !child.keeps(s.ID) {
 			continue
+		}
+		if j, ok := t.(tool.JobsAware); ok && !runsJobs {
+			if t = j.WithoutJobs(); t == nil {
+				continue
+			}
+			s = t.Spec()
 		}
 		// The agent tool is offered with this session's agent types and models
 		// after its own description (plan 026 §3.3). It is wrapped before its
@@ -412,12 +434,10 @@ func openTools(home, workspace, mode string, asker tool.Asker, table *modeltable
 	if subs != nil {
 		env.Subagents = subs
 	}
-	// And for the jobs (plan 033 §3.8, P11): only a session that runs
-	// background work at all (Options.Background — an interactive one, which
-	// something wakes) and is not a sub-agent has them. Anywhere else bash's
-	// run_in_background runs in the foreground and a timeout kills, as D-59
-	// has it for background sub-agents.
-	if subs != nil && subs.background {
+	// And for the jobs (runsJobs above). Anywhere else a timeout kills, as
+	// D-59 has it for background sub-agents, and a run_in_background the
+	// model sends though its bash does not offer it runs in the foreground.
+	if runsJobs {
 		env.Jobs = jobs{r: subs}
 	}
 	ts.d, err = tool.NewDispatcher(tool.Options{Tools: tools, Gate: ts.modeGate, Env: env})

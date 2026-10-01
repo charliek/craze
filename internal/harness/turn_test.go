@@ -183,7 +183,7 @@ func TestUnknownToolIsAnErrorResult(t *testing.T) {
 	if err != nil || res.StopReason != StopEndTurn {
 		t.Fatalf("Run = %+v, %v; want end_turn", res, err)
 	}
-	notFound := "tool not found: read_file. Available tools: bash, bash_output, bash_stop, read, glob, grep, edit, write, agent, agent_output, todo_write, ask_user_question, exit_plan_mode"
+	notFound := "tool not found: read_file. Available tools: bash, read, glob, grep, edit, write, agent, agent_output, todo_write, ask_user_question, exit_plan_mode"
 	// After the first step the context is its usage and its tool message's
 	// estimate; after the second, the second's usage alone.
 	one := Usage{Input: 10, Output: 5, CacheRead: 4}

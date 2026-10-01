@@ -132,8 +132,11 @@ reattach jobs: the model is told, at the first turn after the resume, that the
 session closed before each such command's result was delivered, that it is not
 running now — it may have finished first — and where its output was saved, so
 it can read that file rather than run the command again. Headless
-`craze prompt` and sub-agent children run no jobs — `run_in_background` there
-runs in the foreground and the result says so.
+`craze prompt` and sub-agent children run no jobs, and their model is not
+offered any: its `bash` has no `run_in_background` parameter and its
+description says nothing of jobs or promotion, and it has no `bash_output`
+or `bash_stop`. A command there still runs in the foreground until its
+timeout kills it.
 
 ## Resuming a session
 
