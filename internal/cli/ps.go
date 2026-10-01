@@ -231,7 +231,8 @@ func psRows(res protocol.HubSessionsListResult, home string, titles map[string]s
 // psDir is the DIR column's index.
 const psDir = 4
 
-// psTable is rows as craze ps prints them: psNoSessions for none; otherwise
+// psTable is rows as craze ps prints them: psNoSessions for none (cut to a
+// terminal's width, as every line is); otherwise
 // a header and a row a session, each column as wide as its widest cell and
 // two spaces apart, the title last, cut with an ellipsis — to psTitleCells
 // when width is 0 (no terminal), and on a terminal to what is left of its
@@ -241,7 +242,7 @@ const psDir = 4
 // other columns has every line cut to its width.
 func psTable(rows []psRow, width int) string {
 	if len(rows) == 0 {
-		return psNoSessions + "\n"
+		return psClip(psNoSessions, width) + "\n"
 	}
 	var widths [6]int
 	for i := range widths {
@@ -282,11 +283,7 @@ func psTable(rows []psRow, width int) string {
 			}
 		}
 		l.WriteString(title)
-		out := l.String()
-		if width > 0 && ansi.StringWidth(out) > width {
-			out = ansi.Truncate(out, width, "…")
-		}
-		b.WriteString(strings.TrimRight(out, " "))
+		b.WriteString(strings.TrimRight(psClip(l.String(), width), " "))
 		b.WriteByte('\n')
 	}
 	line(psHeader)
@@ -294,6 +291,16 @@ func psTable(rows []psRow, width int) string {
 		line(r.cells)
 	}
 	return b.String()
+}
+
+// psClip is line cut with an ellipsis to width cells, when width is a
+// terminal's (> 0): no line craze ps prints is wider than its terminal —
+// psNoSessions included (r25 5).
+func psClip(line string, width int) string {
+	if width > 0 && ansi.StringWidth(line) > width {
+		return ansi.Truncate(line, width, "…")
+	}
+	return line
 }
 
 // psCutLeft is s cut from the left to at most w cells, an ellipsis in place

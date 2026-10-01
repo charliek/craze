@@ -206,42 +206,12 @@ func TestAnUnreadableRegistryIsNoRoster(t *testing.T) {
 // never given.
 func TestASubscribeReplyTooLargeKeepsNoSubscription(t *testing.T) {
 	setVar(t, &listWait, step)
-	m := newMemHosts(t)
-	ws := strings.Repeat("\x01", protocol.RosterWorkspaceMax)
-	for n := 1; n <= protocol.RosterRowsMax; n++ {
-		id := hostOf(n)
-		m.put(rundir.Entry{Protocol: 1, HostID: id, PID: 1000 + n, Socket: memSocket(id), CrazeSessionID: sessionOf(n),
-			Provider: "cursor", Workspace: ws, Ready: true, StartedAt: time.Date(2026, 9, 30, 0, 0, 0, 0, time.UTC)},
-			memRow(n, strings.Repeat("t", 6500)))
-	}
+	m := bigRoster(t)
 	rg := newRosterRig(t, testEnv(t), rigOpts{clock: true, hk: func(hk *hooks) { installMem(t, hk, m) }})
 	p := dialPeer(t, rg.sock)
-	// readRaw is the next line, its envelope only: a 16 MB line is not held
-	// to the schema here.
-	readRaw := func() msg {
-		t.Helper()
-		_ = p.nc.SetReadDeadline(time.Now().Add(step))
-		line, err := p.lr.ReadLine()
-		if err != nil {
-			t.Fatalf("read: %v", err)
-		}
-		var out msg
-		if err := json.Unmarshal(line, &out); err != nil {
-			t.Fatal(err)
-		}
-		out.raw = line
-		return out
-	}
+	readRaw := func() msg { t.Helper(); return p.readRaw() }
 
-	bigID, err := json.Marshal(strings.Repeat("i", 1<<20))
-	if err != nil {
-		t.Fatal(err)
-	}
-	_ = p.nc.SetWriteDeadline(time.Now().Add(step))
-	if err := protocol.WriteLine(p.nc, map[string]any{"jsonrpc": "2.0", "id": json.RawMessage(bigID),
-		"method": protocol.MethodSessionsSubscribe}); err != nil {
-		t.Fatal(err)
-	}
+	p.sendBigID(protocol.MethodSessionsSubscribe)
 	failed := readRaw()
 	if failed.Error == nil || failed.Error.Data.Reason != protocol.ReasonResponseTooLarge {
 		t.Fatalf("the subscribe with a 1 MiB id: %s", clip(failed.raw))
@@ -268,5 +238,109 @@ func TestASubscribeReplyTooLargeKeepsNoSubscription(t *testing.T) {
 	var res protocol.SessionsSubscribeResult
 	if string(ok.ID) != id || ok.Error != nil || json.Unmarshal(ok.Result, &res) != nil || len(res.Sessions) != protocol.RosterRowsMax {
 		t.Fatalf("the subscribe with a short id: %s", clip(ok.raw))
+	}
+}
+
+// bigRoster is RosterRowsMax hosts in memory whose roster rows are near the
+// 32,000-byte entry bound — a workspace of 4,096 characters JSON escapes six
+// bytes each, beside a row of about 6,500 — so a full roster's reply is
+// about 16.1 MB: under the 16 MiB line with a short request id, over it with
+// a 1 MiB one (sendBigID).
+func bigRoster(t *testing.T) *memHosts {
+	t.Helper()
+	m := newMemHosts(t)
+	ws := strings.Repeat("\x01", protocol.RosterWorkspaceMax)
+	for n := 1; n <= protocol.RosterRowsMax; n++ {
+		id := hostOf(n)
+		m.put(rundir.Entry{Protocol: 1, HostID: id, PID: 1000 + n, Socket: memSocket(id), CrazeSessionID: sessionOf(n),
+			Provider: "cursor", Workspace: ws, Ready: true, StartedAt: time.Date(2026, 9, 30, 0, 0, 0, 0, time.UTC)},
+			memRow(n, strings.Repeat("t", 6500)))
+	}
+	return m
+}
+
+// sendBigID writes method's request with a request id of 1 MiB.
+func (p *peer) sendBigID(method string) {
+	p.t.Helper()
+	bigID, err := json.Marshal(strings.Repeat("i", 1<<20))
+	if err != nil {
+		p.t.Fatal(err)
+	}
+	_ = p.nc.SetWriteDeadline(time.Now().Add(step))
+	if err := protocol.WriteLine(p.nc, map[string]any{"jsonrpc": "2.0", "id": json.RawMessage(bigID), "method": method}); err != nil {
+		p.t.Fatal(err)
+	}
+}
+
+// readRaw is the next line, within step, its envelope only: a 16 MB line is
+// not held to the schema here.
+func (p *peer) readRaw() msg {
+	p.t.Helper()
+	_ = p.nc.SetReadDeadline(time.Now().Add(step))
+	defer func() { _ = p.nc.SetReadDeadline(time.Time{}) }()
+	line, err := p.lr.ReadLine()
+	if err != nil {
+		p.t.Fatalf("read: %v", err)
+	}
+	var out msg
+	if err := json.Unmarshal(line, &out); err != nil {
+		p.t.Fatal(err)
+	}
+	out.raw = line
+	return out
+}
+
+// TestAListReplyTooLargeKeepsTheSubscriptionsView (r25 1): a sessions.list
+// whose reply cannot be written — a 1 MiB request id over a full roster of
+// large rows, answered response_too_large — on a connection that holds a
+// subscription gives the client no roster in place of the one it holds, so
+// the subscription's membership and what is pending stay as they were: a
+// host that went just before the list is still removed by the next
+// notification. The flusher, woken for the removal, is held before the
+// write lock until the list has been answered. The negative control: a list
+// that rebased the subscription though its reply failed drops the pending
+// removal, and the client keeps a host that is gone.
+func TestAListReplyTooLargeKeepsTheSubscriptionsView(t *testing.T) {
+	setVar(t, &listWait, step)
+	m := bigRoster(t)
+	var armed atomic.Bool
+	flushing := make(chan struct{}, 8)
+	flushGo, releaseFlush := onceCloser(t)
+	rg := newRosterRig(t, testEnv(t), rigOpts{clock: true, hk: func(hk *hooks) {
+		installMem(t, hk, m)
+		hk.rosterLocking = func(_ *conn, what string) {
+			if what == "flush" && armed.Load() {
+				flushing <- struct{}{}
+				<-flushGo
+			}
+		}
+	}})
+	p := dialPeer(t, rg.sock)
+	id := p.send(protocol.MethodSessionsSubscribe, nil)
+	if sub := p.readRaw(); string(sub.ID) != id || sub.Error != nil {
+		t.Fatalf("the subscribe with a short id: %s", clip(sub.raw))
+	}
+	armed.Store(true)
+
+	gone := hostOf(1)
+	m.remove(gone)
+	rg.clk.advance(time.Second)
+	from := rg.snaps.mark()
+	rg.tick()
+	rg.applied("the host gone", from, func(s roster.Snapshot) bool { return snapRow(s, gone) == nil })
+	select {
+	case <-flushing:
+	case <-time.After(step):
+		t.Fatal("the flusher was not woken for the removal")
+	}
+
+	p.sendBigID(protocol.MethodSessionsList)
+	if failed := p.readRaw(); failed.Error == nil || failed.Error.Data.Reason != protocol.ReasonResponseTooLarge {
+		t.Fatalf("the list with a 1 MiB id: %s", clip(failed.raw))
+	}
+	releaseFlush()
+	n := p.roster()
+	if len(n.Upserts) != 0 || len(n.Removes) != 1 || n.Removes[0] != gone {
+		t.Fatalf("the notification after the failed list: %+v; want the host's removal", n)
 	}
 }

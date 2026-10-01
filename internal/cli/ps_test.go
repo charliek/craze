@@ -99,12 +99,14 @@ func TestPsTable(t *testing.T) {
 	}
 }
 
-// TestPsFitsTheTerminal (r24 1): on a terminal no whole line is wider than
-// it, at any width: the title takes what is left; the DIR column gives cells
-// back first when that is under psTitleMin — a long path cut from its left,
-// its end kept — and a terminal too narrow even then has every line cut. At
-// 80 columns the table is pinned. The negative control is a title given
-// psTitleMin cells whatever is left (the overflow r24 found).
+// TestPsFitsTheTerminal (r24 1, r25 5): on a terminal no whole line is
+// wider than it, at any width — `no sessions running` included: the title
+// takes what is left; the DIR column gives cells back first when that is
+// under psTitleMin — a long path cut from its left, its end kept — and a
+// terminal too narrow even then has every line cut. At 80 columns the table
+// is pinned, and with no terminal the empty roster's line is whole. The
+// negative controls: a title given psTitleMin cells whatever is left (the
+// overflow r24 found); the empty roster's line left whole on a terminal.
 func TestPsFitsTheTerminal(t *testing.T) {
 	home := "/home/u"
 	res := psFixture(t, home)
@@ -113,7 +115,7 @@ func TestPsFitsTheTerminal(t *testing.T) {
 		"cursor", "/srv/a/very/long/workspace/path", &protocol.SessionRow{Activity: protocol.ActivityIdle, Title: "deep",
 			Since: psNow.Add(-time.Minute)}))
 	deep := psRows(res, home, nil, psNow)
-	for _, rows := range [][]psRow{plain, deep} {
+	for _, rows := range [][]psRow{plain, deep, nil} {
 		for width := 100; width >= 8; width-- {
 			for _, line := range strings.Split(strings.TrimSuffix(psTable(rows, width), "\n"), "\n") {
 				if w := ansi.StringWidth(line); w > width {
@@ -140,6 +142,12 @@ func TestPsFitsTheTerminal(t *testing.T) {
 		"0000f006  unreachable  cursor    -      /srv/f                 1h     gone quiet\n"
 	if got := psTable(deep, 80); got != want {
 		t.Fatalf("at 80 cells:\n%s\nwant:\n%s", got, want)
+	}
+	if got := psTable(nil, 0); got != "no sessions running\n" {
+		t.Fatalf("no terminal, no sessions: %q", got)
+	}
+	if got := psTable(nil, 10); got != "no sessio…\n" {
+		t.Fatalf("at 10 cells, no sessions: %q", got)
 	}
 }
 

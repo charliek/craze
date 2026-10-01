@@ -401,26 +401,33 @@ func (rs *rosterState) viewLocked() ([]protocol.RosterRow, bool) {
 	return rows, len(rs.order) > n
 }
 
-// list is the hub's sessions.list result now, for an answer of run's — or
-// its refusal while run has read no registry (unreadLocked); false once the
-// hub closes. sub, when not nil, is the subscription of the connection the
-// answer is written to: the client takes the reply's rows for the roster, so
-// they become what sub's client holds (rebaseLocked).
-func (rs *rosterState) list(run uint64, sub *subscription) (protocol.HubSessionsListResult, *protocol.Error, bool) {
+// listLine is the line answering a sessions.list of run's with id: the hub's
+// roster now, or its refusal while run has read no registry (unreadLocked),
+// or response_too_large for a reply over the line limit (encodeReply); false
+// once the hub closes. sub, when not nil, is the subscription of the
+// connection the line is written to: a client that is answered the roster
+// takes its rows for its own, so they become what sub's client holds
+// (rebaseLocked) — only then. A refused or too-large answer gives the client
+// nothing in their place, so sub's membership and what is pending stay as
+// they were (r25 1). The reply is encoded under the roster's lock, beside the
+// snapshot it is of: the rebase and the snapshot stay one section.
+func (rs *rosterState) listLine(run uint64, sub *subscription, id json.RawMessage) ([]byte, bool) {
 	rs.mu.Lock()
 	defer rs.mu.Unlock()
 	if rs.closed {
-		return protocol.HubSessionsListResult{}, nil, false
+		return nil, false
 	}
 	if perr := rs.unreadLocked(run); perr != nil {
-		return protocol.HubSessionsListResult{}, perr, true
+		return errorLine(id, perr), true
 	}
 	rs.reevaluateLocked(rs.now())
 	rows, truncated := rs.viewLocked()
-	if sub != nil && !sub.ended {
+	line, fits := encodeReply(id, protocol.HubSessionsListResult{Epoch: rs.epoch, Cursor: rs.cursor, Sessions: rows,
+		Truncated: truncated})
+	if fits && sub != nil && !sub.ended {
 		sub.rebaseLocked(rows)
 	}
-	return protocol.HubSessionsListResult{Epoch: rs.epoch, Cursor: rs.cursor, Sessions: rows, Truncated: truncated}, nil, true
+	return line, true
 }
 
 // unreadLocked is the refusal of an answer of run's when the hub knows no

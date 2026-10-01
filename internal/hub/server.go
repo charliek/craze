@@ -393,8 +393,9 @@ func (c *conn) hello(req *request) bool {
 // flusher's order, conn.flush): on a connection that holds a subscription the
 // reply is never written behind a notification of a later cursor, nor a
 // notification behind it of an earlier one (r19 1), and the reply's rows are
-// what the subscription's client holds from then on (rebaseLocked, r23 1).
-// The roster's lock is not held across the write.
+// what the subscription's client holds from then on (rebaseLocked, r23 1) —
+// when they are written: a reply over the line limit changes nothing (r25
+// 1). The roster's lock is not held across the write.
 func (c *conn) list(req *request) bool {
 	if perr := emptyParams(req.params); perr != nil {
 		return c.replyErr(req.id, perr)
@@ -407,19 +408,16 @@ func (c *conn) list(req *request) bool {
 	}
 	c.wmu.Lock()
 	defer c.wmu.Unlock()
-	res, perr, ok := rs.list(run, c.lastSub())
+	line, ok := rs.listLine(run, c.lastSub(), req.id)
 	rs.release()
 	if !ok {
 		c.writeLocked(errorLine(req.id, refused(protocol.CodeUnavailable, protocol.ReasonClosing, "the hub is closing")))
 		return false
 	}
-	if perr != nil {
-		return c.writeLocked(errorLine(req.id, perr))
-	}
 	if f := c.s.h.hk.rosterTaken; f != nil {
 		f(c, "list")
 	}
-	return c.writeLocked(replyLine(req.id, res))
+	return c.writeLocked(line)
 }
 
 // lastSub is the connection's latest subscription, nil when it has made
