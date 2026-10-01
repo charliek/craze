@@ -645,6 +645,16 @@ func TestANonVisionModelSaysItGetsAPlaceholder(t *testing.T) {
 	if got := vc.noVision(); got != name {
 		t.Fatalf("a model with no vision: %q, want %q", got, name)
 	}
+	// The shipped catalog (plan 033 X57): glm-5.3 is the model with the note,
+	// the default and every other vision model is not.
+	if alias != "glm-5.3" {
+		t.Fatalf("the shipped non-vision model is %q, want glm-5.3", alias)
+	}
+	for _, v := range []string{"fireworks/deepseek-v4p1-flash", "openrouter/gpt-6.1-sol", "muse-spark-1.3"} {
+		if got := (visionCheck{dir: native, alias: v, name: v}).noVision(); got != "" {
+			t.Fatalf("vision model %s got the note for %q", v, got)
+		}
+	}
 	if got := (visionCheck{dir: native, alias: "no/such-model", name: "x"}).noVision(); got != "" {
 		t.Fatalf("an unknown model: %q", got)
 	}

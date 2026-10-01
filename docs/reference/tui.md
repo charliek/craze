@@ -551,10 +551,26 @@ more, or is outside the attachments directory) goes as `[Image #N: <path> (not
 attached: <reason>)]` rather than failing the message. A chip you deleted from
 the text is never sent.
 
-On a native session an image currently reaches the model as the same
-`[Image #N: <path>]` text. Sending the picture itself to models that take images
-(and a placeholder naming the model to those that do not) arrives with native
-vision support in the next change, which will extend this section.
+On a native session what the model receives depends on the model's `vision`
+setting (see [Native vision](configuration.md#native-vision)):
+
+- A model that takes images (the shipped catalog marks the default model and
+  most others) receives the picture itself.
+- A model that does not, such as `glm-5.3`, receives
+  `[Image omitted: <model> does not accept images. File: <path>]` in the
+  image's place, so it can still name the file, and the composer warns when you
+  paste: `<model> can't see images; it will get a placeholder`.
+- Switching `/model` to a model without `vision` turns the images already in
+  the conversation into those placeholders for the requests that follow. The
+  images stay stored, so switching back to a model that takes them sends them
+  again.
+- The native `Read` tool returns an image file (`png`, `jpeg`, `gif` or `webp`)
+  to a model that takes images, under the same size limits as a paste, and
+  refuses it with `Cannot read image file: <model> does not accept images` on
+  one that does not. A PDF is still refused as a binary file.
+
+`craze prompt` has no paste: an image only reaches a session through the
+composer.
 
 ## Shell mode
 

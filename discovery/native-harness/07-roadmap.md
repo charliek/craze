@@ -15,7 +15,7 @@ the reference reviews.
 | H5 | complete | modes shipped across two PRs, #45 (`b0ea4c4`) and #48 (`feature/plan-023-h5-modes`): the three tools (`ask_user_question`, `exit_plan_mode`, `todo_write`), modes switched on for native, the plan file under the harness home, and the existing offer implementing an approved plan |
 | H6 | complete | sub-agents shipped across three PRs: PR 1 (#51, `f5c3cfd`) end to end; PR 2 (#53, `5901e4a`) per-child stop; PR 3 (`feature/plan-026-h6-background`) background children — `run_in_background`, `agent_output`, the session-level wake, `bg` on the row |
 | H7 | complete; native is a listed provider (D-65) | resume and compaction over the store, `--continue`/`--resume`/rename, cost in the status row |
-| H8 | not started | images: clipboard read per OS, composer attachments, vision flag strip |
+| H8 | complete | images shipped in plan 033 PR 1: clipboard read per OS, `[Image #N]` composer chips, the vision strip over history and tool results, `read` returns images to vision models (D-38 amended), catalog `vision` flags (D-79) |
 | HL | unscheduled | own the turn loop — see D-40's triggers |
 
 ## Phase detail
@@ -701,7 +701,8 @@ Live smoke (plan artifacts, outside the repo — see
 - Clipboard image read (Linux, macOS), composer attachment, `FilePart`,
   per-model strip with placeholder.
 - **Exit**: paste a screenshot, GLM gets the placeholder, a vision model
-  gets the image.
+  gets the image. **Met** in plan 033 PR 1, live (V2): vision models described
+  the screenshot, GLM 5.3 got the placeholder and its `read` was refused (D-79).
 
 ### HL — own the turn loop (unscheduled)
 

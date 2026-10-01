@@ -653,7 +653,7 @@ default_effort = "high"
 
 A model's other optional keys are documented below:
 [`max_output_tokens`](#native-output-ceiling), [`cost`](#native-cost),
-`vision` and `tool_profile`; `models.toml` also takes
+[`vision`](#native-vision) and `tool_profile`; `models.toml` also takes
 [`[compaction]`](#native-compaction) and
 [`[subagents]`](tui.md#sub-agent-models). craze never rewrites `models.toml`,
 and rewrites `providers.toml` only when you run [`craze auth`](#keys) or
@@ -989,6 +989,32 @@ is simply unpriced — its usage is still counted in tokens, but adds no cost.
 The `cost` table is your own entry in `models.toml`, the same as
 [`[compaction]`](#native-compaction) above: craze reads it and never rewrites
 it.
+
+## Native vision
+
+A native model's `vision` key says whether craze may send it images: the
+pictures pasted into the composer (see [Images](tui.md#images)) and the ones
+the `Read` tool returns for an image file. The shipped catalog sets it
+`true` on the models seen to describe a screenshot, among them the default
+model, and leaves it off on `glm-5.3`. A model you add defaults to `false`.
+
+```toml
+[models."local/qwen"]
+provider   = "local"
+wire_model = "qwen3-vl"
+vision     = true            # this one takes images
+
+[models."glm-5.3"]
+vision     = true            # turn it on for a shipped model, or false to turn it off
+```
+
+On a shipped model the key is an overlay like any other (see [How the files
+merge](#how-the-files-merge)): the one you write replaces the catalog's for
+that model alone. For a model without `vision`, the composer warns at paste
+time and the model receives `[Image omitted: <model> does not accept images.
+File: <path>]` where the image was; the
+[Images](tui.md#what-the-agent-receives) section of the TUI reference has the
+rest.
 
 ## Environment
 

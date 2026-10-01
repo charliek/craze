@@ -65,6 +65,31 @@ func TestShippedCatalog(t *testing.T) {
 	if err := tbl.Validate(); err != nil {
 		t.Fatalf("the catalog alone is not a valid Table: %v", err)
 	}
+	// The vision flags (plan 033 X57, from V2's live probe): exactly these
+	// models were seen to describe a pasted screenshot, so exactly these are
+	// true; glm-5.3 stays false, which is what the composer's paste note and
+	// the host's placeholder (D-38, P8) are for.
+	seesImages := map[string]bool{
+		"fireworks/deepseek-v4p1-flash": true, "fireworks/kimi-k3": true,
+		"fireworks/qwen3p8-max": true, "glm-5.3-flash": true,
+		"muse-spark-1.3": true, "muse-spark-1.3-contributor": true,
+		"openrouter/gemini-3.8-flash": true, "openrouter/glm-5.3-flash": true,
+		"openrouter/gpt-6-astra": true, "openrouter/gpt-6-luna": true,
+		"openrouter/gpt-6.1-sol": true, "openrouter/minimax-m3": true,
+	}
+	for alias := range seesImages {
+		if md, ok := tbl.Models[alias]; !ok || !md.Vision {
+			t.Errorf("%s: vision = %v (present %v), want true", alias, md.Vision, ok)
+		}
+	}
+	if md, ok := tbl.Models["glm-5.3"]; !ok || md.Vision {
+		t.Errorf("glm-5.3: vision = %v (present %v), want false", md.Vision, ok)
+	}
+	for alias, md := range tbl.Models {
+		if md.Vision && !seesImages[alias] {
+			t.Errorf("%s is marked vision but is not on X57's list", alias)
+		}
+	}
 }
 
 // shippedAliasHistory reads testdata/shipped-aliases.txt: one alias a line,
