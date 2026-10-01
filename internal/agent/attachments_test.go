@@ -654,7 +654,7 @@ func FuzzSplitAttachments(f *testing.F) {
 		}
 		seen := map[int]bool{}
 		for _, r := range got {
-			if r.N < 1 || r.N > maxAttachmentN || seen[r.N] || !filepath.IsAbs(r.Path) || len(r.Path) > maxAttachmentPath || !attach.Stored(r.MIME) {
+			if r.N < 1 || r.N > MaxAttachmentN || seen[r.N] || !filepath.IsAbs(r.Path) || len(r.Path) > maxAttachmentPath || !attach.Stored(r.MIME) {
 				t.Fatalf("a ref past the limits: %+v", r)
 			}
 			seen[r.N] = true
@@ -674,4 +674,44 @@ func FuzzSplitAttachments(f *testing.F) {
 			t.Fatalf("path text from no envelope: %q", out)
 		}
 	})
+}
+
+// TestAttachmentOriginalIsUntrusted is plan 033 X13: the envelope's ow/oh
+// round-trip through the block (and are absent from it when zero), and the
+// host uses them — for the downscale note's words alone — only when both are
+// positive, within the pixel limit, and larger than what the file's own bytes
+// say; anything else is no claim.
+func TestAttachmentOriginalIsUntrusted(t *testing.T) {
+	r := AttachmentRef{N: 1, Path: "/h/attachments/0123456789abcdef.png", MIME: "image/png", OW: 3024, OH: 1964}
+	block := AttachmentBlock([]AttachmentRef{r})
+	if !strings.Contains(block, `"ow":3024,"oh":1964`) {
+		t.Fatalf("the original size is not in the block: %q", block)
+	}
+	got, _, _ := SplitAttachments(block + "[Image #1]")
+	if len(got) != 1 || got[0] != r {
+		t.Fatalf("round trip: %+v", got)
+	}
+	for _, tc := range []struct {
+		name   string
+		ow, oh int
+		w, h   int
+		ok     bool
+	}{
+		{"a downscale", 3024, 1964, 2000, 1299, true},
+		{"one edge larger", 2001, 1299, 2000, 1299, true},
+		{"absent", 0, 0, 2000, 1299, false},
+		{"one absent", 3024, 0, 2000, 1299, false},
+		{"negative", -3024, -1964, 2000, 1299, false},
+		{"the same size", 2000, 1299, 2000, 1299, false},
+		{"smaller than the bytes", 1000, 600, 2000, 1299, false},
+		{"one edge smaller", 3024, 1000, 2000, 1299, false},
+		{"over the pixel limit", 10000, 10000, 2000, 2000, false},
+		{"an edge past the limit alone", 1 << 62, 1 << 62, 2000, 1299, false},
+	} {
+		a := Attachment{AttachmentRef: AttachmentRef{OW: tc.ow, OH: tc.oh}, Width: tc.w, Height: tc.h}
+		w, h, ok := a.Original()
+		if ok != tc.ok || (ok && (w != tc.ow || h != tc.oh)) || (!ok && (w != 0 || h != 0)) {
+			t.Errorf("%s: Original() = %d, %d, %v; want ok=%v", tc.name, w, h, ok, tc.ok)
+		}
+	}
 }

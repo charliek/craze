@@ -765,10 +765,11 @@ func TestTheCtrlCChainRunsWhole(t *testing.T) {
 				t.Fatalf("the session was prompted %q in the baseline, %q asynchronously", prompts[0], prompts[1])
 			}
 			// Every field the invisibility watch digests, but those two runs
-			// cannot share — their workspaces, their native directories (each
-			// run's own HOME), their sessions' start, and the transcripts' entry
-			// times the engines' clocks stamp — whose text is compared instead.
-			perRun := []string{"cwd", "nativeDir", "sessStart", "layouts", "main", "shared"}
+			// cannot share — their workspaces, their native and attachments
+			// directories (each run's own HOME), their sessions' start, and the
+			// transcripts' entry times the engines' clocks stamp — whose text is
+			// compared instead.
+			perRun := []string{"cwd", "nativeDir", "attachDir", "sessStart", "layouts", "main", "shared"}
 			var changed []string
 			for _, f := range digestModel(&finals[0]).diff(digestModel(&finals[1])) {
 				if !slices.Contains(perRun, f) {

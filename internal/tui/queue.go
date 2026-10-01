@@ -70,6 +70,10 @@ func noHover() queueHover { return queueHover{row: -1} }
 type strongSend struct {
 	text string
 	from string
+	// images is the composer's sidecar when the confirm went up for its draft
+	// (from == ""): the images its chips stood for, whose envelope the send
+	// carries (plan 033 §3.3). A row's send carries its row's own envelope.
+	images []attachment
 }
 
 // queueItems is the queue as the band draws it.
@@ -247,6 +251,11 @@ func (m Model) strongSendDraft() (tea.Model, tea.Cmd) {
 	if text == "" {
 		return m, nil
 	}
+	// A chip still being processed holds every send of the draft, this one's
+	// included (plan 033 §3.3).
+	if m.imagePending() {
+		return m, nil
+	}
 	if m.status != statusWorking {
 		// Nothing to be strong about: this is a plain send.
 		return m.send()
@@ -271,6 +280,12 @@ func (m Model) strongSendDraft() (tea.Model, tea.Cmd) {
 // about (plan 022 §3.6). So does an Interject that did not answer in time
 // (ErrNoAnswer): the message may have been sent, and the note says so; the
 // draft stays, for the user to judge.
+//
+// An interjection is text only (plan 033 P7): the draft's chips go as their
+// paths, [Image #N: <path>], where a send would carry their envelope — the
+// agents hold an envelope to the same rule (agent.AttachmentsAsPathText at
+// their Interject), so a socket client's interjection is too. The sidecar is
+// the draft's, cleared with it once the turn has taken it.
 func (m Model) interject(text string) (tea.Model, tea.Cmd) {
 	if m.eng == nil {
 		return m, nil
@@ -278,7 +293,7 @@ func (m Model) interject(text string) (tea.Model, tea.Cmd) {
 	// The composer's own text, so it carries the pending shell context exactly
 	// as a send does.
 	c := m.nextCmd()
-	sent := m.withShellContext(text)
+	sent, _ := agent.AttachmentsAsPathText(withImages(m.images.list, m.withShellContext(text)))
 	return m.run(interjectDeadline,
 		func(ctx context.Context, b backend.Backend) (any, error) {
 			return nil, b.Interject(ctx, c, sent)
@@ -289,8 +304,7 @@ func (m Model) interject(text string) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			m.dropShellContext()
-			m.input.SetValue("")
-			m.resetSlash()
+			m.clearDraft()
 			return m, nil
 		})
 }
@@ -329,7 +343,11 @@ func (m Model) askStrongSend(text, from string) (tea.Model, tea.Cmd) {
 		m.note("send now already pending")
 		return m, nil
 	}
-	m.confirm = &strongSend{text: text, from: from}
+	sn := &strongSend{text: text, from: from}
+	if from == "" {
+		sn.images = m.images.list
+	}
+	m.confirm = sn
 	return m, nil
 }
 
@@ -463,7 +481,7 @@ func (m Model) confirmStrongSend() (tea.Model, tea.Cmd) {
 		// the context is read now rather than when the question went up,
 		// because a command that finished while it was up is context for this
 		// message too (plan 022 §3.6).
-		return m.submitOwn(pending.text, mode, submitted)
+		return m.submitOwn(pending.text, pending.images, mode, submitted)
 	}
 	return m.submit(pending.text, mode, pending.from, submitted)
 }
@@ -485,6 +503,12 @@ func (m *Model) declineStrongSend() {
 // aside here and put back by saveQueueEdit, so the row keeps the output it was
 // queued with whatever the edit does to the message (plan 022 §3.6).
 //
+// The row's attachment envelope is neither (plan 033 §3.3): it is parsed back
+// into the composer's sidecar, an entry per chip, so its chips are chips
+// again while the row is edited — Backspace takes one whole, with its image —
+// and saveQueueEdit writes the envelope afresh from what the edit kept. The
+// draft's own sidecar is displaced with the draft (editImages).
+//
 // The row's version is recorded too, as it stands in the band this edit was
 // begun from: it is what a save of this edit is checked against, so the edit
 // applies only to the row the user loaded — until a refusal has told the user
@@ -494,12 +518,15 @@ func (m *Model) startQueueEdit(p agent.QueuedPrompt) {
 		// Only the first edit displaces a draft. Moving from one row to
 		// another must not overwrite it with the row being left behind.
 		m.editDraft = m.input.Value()
+		m.editImages = m.images
 	}
 	m.queueEdit = p.ID
 	m.queueEditVer = p.Version
 	m.queueEditPos = m.queueSel
-	block, text := agent.SplitShellContext(p.Text)
+	refs, rest, _ := agent.SplitAttachments(p.Text)
+	block, text := agent.SplitShellContext(rest)
 	m.queueEditCtx = block
+	m.images = m.imagesFromRefs(refs)
 	m.input.SetValue(text)
 	m.resetSlash()
 	m.focusComposer()
@@ -533,6 +560,11 @@ func (m Model) saveQueueEdit(then linkThen) (Model, tea.Cmd) {
 	if m.eng == nil {
 		return then(m)
 	}
+	// A chip pasted into the edit and still being processed holds the save
+	// as it holds a send (plan 033 §3.3); the edit stays open.
+	if m.imagePending() {
+		return m, nil
+	}
 	c := m.nextCmd()
 	if text == "" {
 		// An emptied edit is a cancel: an empty message is not a message. The
@@ -554,7 +586,11 @@ func (m Model) saveQueueEdit(then linkThen) (Model, tea.Cmd) {
 				return then(m)
 			})
 	}
-	edited := m.queueEditCtx + text
+	// The envelope is the edit's own (plan 033 §3.3): written afresh from the
+	// sidecar as the edit left it, for the chips the saved text still holds —
+	// never the row's old block put back, so a chip deleted in the edit takes
+	// its image off the row. It leads the shell context, as a send's does.
+	edited := withImages(m.images.list, m.queueEditCtx+text)
 	expected := m.queueEditVer
 	return m.run(gateDeadline,
 		func(ctx context.Context, b backend.Backend) (any, error) {
@@ -615,6 +651,10 @@ func (m *Model) finishQueueEdit() {
 	m.queueEditVer = 0
 	m.input.SetValue(m.editDraft)
 	m.editDraft = ""
+	// The draft's sidecar comes back with it (plan 033 §3.3); the row's is
+	// done with — saved into the row, or dropped with the edit.
+	m.images = m.editImages
+	m.editImages = draftImages{}
 	m.resetSlash()
 }
 

@@ -457,6 +457,11 @@ func (l *launcher) sessionOptions(ref hostRef) remote.SessionOptions {
 		When:      protocol.WhenNow,
 		Provider:  ref.entry.Provider,
 		Workspace: ref.entry.Workspace,
+		// P27 (plan 033): a host of this launch's own CRAZE_HOME namespace
+		// reads the attachments directory the TUI stores pasted images in;
+		// one of another CRAZE_HOME — a running row of the session list, a
+		// held session — does not, and its pasted paths stay paths.
+		ReadsAttachments: rundir.SocketInNamespace(ref.entry.Socket, l.env.CrazeDir),
 	}
 }
 

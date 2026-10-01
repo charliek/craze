@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"os"
@@ -12,6 +13,8 @@ import (
 	"github.com/atotto/clipboard"
 	"github.com/aymanbagabas/go-osc52/v2"
 	tea "github.com/charmbracelet/bubbletea"
+
+	"github.com/charliek/craze/internal/harness/tool/attach"
 )
 
 const (
@@ -85,6 +88,12 @@ var nativeCopy = clipboard.WriteAll
 // craze binds its own paste and routes it through here.
 var nativePaste = clipboard.ReadAll
 
+// nativePasteImage is the image read's lower half (plan 033 §3.3,
+// clipboard_image.go): the platform's clipboard tools asked for an image —
+// wl-paste or xclip, osascript on macOS — under clipboardMu like nativePaste,
+// so a test or a frame script never runs one.
+var nativePasteImage = readClipboardImage
+
 // clipboardWrite is the one place a copy leaves craze. Both writes go through
 // it, so a test (and `craze frame`) can record exactly what was copied and be
 // certain no bytes reached a terminal and no clipboard tool ran.
@@ -92,6 +101,12 @@ var clipboardWrite = systemCopy
 
 // clipboardRead is the paste seam, the mirror of clipboardWrite.
 var clipboardRead = systemPaste
+
+// clipboardReadImage is the paste seam's image half (plan 033 §3.3): the
+// clipboard's image as bytes — nil when it holds none — read before its text
+// by every paste asked for in the composer (pasteFromClipboard), and by an
+// empty bracketed paste (probeClipboardImage).
+var clipboardReadImage = systemPasteImage
 
 // setClipboardOut installs the OSC 52 writer alone and returns the previous
 // one, which is all a real session changes.
@@ -143,6 +158,25 @@ func systemPaste() (string, error) {
 	paste := nativePaste
 	clipboardMu.Unlock()
 	return paste()
+}
+
+// systemPasteImage is the real image reader: the native tools, run outside
+// the lock as systemPaste's are.
+func systemPasteImage() ([]byte, error) {
+	clipboardMu.Lock()
+	read := nativePasteImage
+	clipboardMu.Unlock()
+	return read()
+}
+
+// swapImagePaste installs the image read's lower seam and returns the
+// previous one, under the lock every access takes.
+func swapImagePaste(read func() ([]byte, error)) func() ([]byte, error) {
+	clipboardMu.Lock()
+	defer clipboardMu.Unlock()
+	prev := nativePasteImage
+	nativePasteImage = read
+	return prev
 }
 
 // clipboardDoneMsg carries the note back into Update, where the status row can
@@ -231,6 +265,14 @@ func lineCount(s string) int {
 type pasteMsg struct {
 	text     string
 	shownGen uint64
+	// image is the clipboard's image (plan 033 §3.3), read before its text
+	// for a paste asked for in the composer: a chip there, or — where no
+	// chip may be made (shell mode, P27, the cap) — text is pasted instead.
+	// imageErr is an image the clipboard held that cannot be pasted (larger
+	// than attach.MaxSourceBytes, or one attach.Probe refuses), which the
+	// status row names before text is pasted instead.
+	image    []byte
+	imageErr error
 	// listGen is the opening of the session list whose input it was asked
 	// for in (sessListState.gen, plan 030 §3.13); 0 is the composer's. Each
 	// lands where it was asked for (X140): the composer's paste in the
@@ -242,15 +284,66 @@ type pasteMsg struct {
 	key     keyField
 }
 
+// hasImage says the paste carries the clipboard's image, or why it could not
+// (plan 033 §3.3): a chip's business, not a text paste's.
+func (m pasteMsg) hasImage() bool { return m.image != nil || m.imageErr != nil }
+
 // pasteFromClipboard is Ctrl+V. bubbles' own binding calls clipboard.ReadAll
 // from inside the textarea (textarea.go:1391), which would run xclip under a
 // test or a frame script, so craze binds the key itself and reads through the
 // seam. Like copyText, the seam is read on the Update goroutine; shown is the
 // shown-session generation the paste is for, and listGen the opening of the
 // session list whose input it is for, 0 for the composer (pasteMsg).
+//
+// A paste for the composer (listGen 0) reads the clipboard's image first (plan
+// 033 §3.3): Ctrl+V — whose binding is handleKey's, unchanged — and Alt+V,
+// its alias, both come here, so an image on the clipboard becomes a chip, and
+// the text is still read alongside it for where no chip may be made. The
+// session list's input is text only, as ever.
 func pasteFromClipboard(shown, listGen uint64) tea.Cmd {
 	read := clipboardRead
-	return func() tea.Msg { return readPaste(read, pasteMsg{shownGen: shown, listGen: listGen}) }
+	if listGen != 0 {
+		return func() tea.Msg { return readPaste(read, pasteMsg{shownGen: shown, listGen: listGen}) }
+	}
+	readImage := clipboardReadImage
+	return func() tea.Msg {
+		return readPaste(read, readPasteImage(readImage, pasteMsg{shownGen: shown}))
+	}
+}
+
+// probeClipboardImage is an empty bracketed paste in the composer (plan 033
+// §3.3): what a terminal sends for a paste of an image it cannot paste as
+// text. The clipboard's image, if it holds one, is pasted as a chip; nothing
+// else is — the text the terminal pasted was nothing — and no image is no
+// message at all.
+func probeClipboardImage(shown uint64) tea.Cmd {
+	readImage := clipboardReadImage
+	return func() tea.Msg {
+		msg := readPasteImage(readImage, pasteMsg{shownGen: shown})
+		if !msg.hasImage() {
+			return nil
+		}
+		return msg
+	}
+}
+
+// readPasteImage reads the clipboard's image into msg, with its header's
+// check (attach.Probe: an image, at least attach.MinEdge on each edge, at most
+// attach.MaxSourcePixels) made here, off the Update, so an image that cannot
+// be attached is never a chip, even for a moment. No image is msg as it was.
+func readPasteImage(read func() ([]byte, error), msg pasteMsg) pasteMsg {
+	b, err := read()
+	switch {
+	case err != nil:
+		msg.imageErr = err
+	case b != nil:
+		if _, err := attach.Probe(bytes.NewReader(b)); err != nil {
+			msg.imageErr = err
+		} else {
+			msg.image = b
+		}
+	}
+	return msg
 }
 
 // pasteFromClipboardForKey is Ctrl+V in /connect's key field (plan 031 §3.9,
@@ -301,20 +394,28 @@ func copyNote(text string, lines int) string {
 // OSC 52 sequence in that stream would corrupt it, and neither a script nor a
 // test may run a clipboard tool. The recorder is the paste source too, so
 // Ctrl+V in a script reads back what Ctrl+Y put there.
+//
+// The clipboard it records holds no image (plan 033 §3.3): Ctrl+V reads the
+// image half first, and a script never runs wl-paste, xclip or osascript.
 func recordCopies() (*copyRecorder, func()) {
 	rec := &copyRecorder{}
-	prevWrite, prevRead := clipboardWrite, clipboardRead
-	clipboardWrite, clipboardRead = rec.write, rec.read
+	prevWrite, prevRead, prevImage := clipboardWrite, clipboardRead, clipboardReadImage
+	clipboardWrite, clipboardRead, clipboardReadImage = rec.write, rec.read, noClipboardImage
 	prevOut, prevNative, prevPaste := swapClipboardSeams(
 		io.Discard,
 		func(string) error { return nil },
 		func() (string, error) { return "", nil },
 	)
+	prevNativeImage := swapImagePaste(noClipboardImage)
 	return rec, func() {
-		clipboardWrite, clipboardRead = prevWrite, prevRead
+		clipboardWrite, clipboardRead, clipboardReadImage = prevWrite, prevRead, prevImage
 		swapClipboardSeams(prevOut, prevNative, prevPaste)
+		swapImagePaste(prevNativeImage)
 	}
 }
+
+// noClipboardImage is a clipboard with no image on it.
+func noClipboardImage() ([]byte, error) { return nil, nil }
 
 // copyRecorder is the recording seam. The copy runs on a tea.Cmd goroutine
 // while the runner reads, so the mutex is not optional.

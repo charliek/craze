@@ -125,7 +125,19 @@ type SessionOptions struct {
 	Workspace    string
 	Label        string
 	Capabilities *agent.Capabilities
+
+	// ReadsAttachments is the dialler's word that the host reads the
+	// attachments directory this client's TUI stores pasted images in (plan
+	// 033 P27): a host of the client's own CRAZE_HOME namespace, which the
+	// dialler decides from the socket's path (rundir.SocketInNamespace) — the
+	// session itself cannot tell. Session.ReadsAttachments answers it to the
+	// TUI, which makes image chips only for a session whose host says yes.
+	ReadsAttachments bool
 }
+
+// ReadsAttachments is the TUI's P27 question (its attachmentsReader, plan 033
+// §3.3): SessionOptions.ReadsAttachments, as the session was dialled.
+func (s *Session) ReadsAttachments() bool { return s.opts.ReadsAttachments }
 
 // closeBound bounds a view close's detach (§3.9): past it the client's close
 // ends the transport, which ends the subscription on the host anyway.

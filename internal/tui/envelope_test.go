@@ -11,13 +11,25 @@ import (
 	"github.com/charliek/craze/internal/agent"
 )
 
-// The attachment envelope on the TUI's side, as far as plan 033's C1 goes: it
-// is never on the screen (A3), and the attachments directory is swept at
-// start. The composer that writes envelopes is C2's.
+// The attachment envelope on the TUI's side: it is never on the screen (A3),
+// and the attachments directory is swept at start. The composer writes it
+// (plan 033 §3.3, composer_image.go).
+
+// testImagePath is the processed copy testEnvelope names.
+const testImagePath = "/h/attachments/0123456789abcdef.png"
 
 // testEnvelope is an envelope naming one image, chip 1.
 func testEnvelope() string {
-	return agent.AttachmentBlock([]agent.AttachmentRef{{N: 1, Path: "/h/attachments/0123456789abcdef.png", MIME: "image/png"}})
+	return agent.AttachmentBlock([]agent.AttachmentRef{{N: 1, Path: testImagePath, MIME: "image/png"}})
+}
+
+// plantChip gives the composer's sidecar chip 1, processed, as testEnvelope
+// names it: what a paste of a screenshot leaves behind once its processing
+// has answered.
+func plantChip(m Model) Model {
+	m.attachSeq++
+	m.images = draftImages{list: []attachment{{id: m.attachSeq, n: 1, storedImage: storedImage{path: testImagePath, mime: "image/png", size: 1}}}, last: 1}
+	return m
 }
 
 // TestAttachmentEnvelopeNeverReachesTheScreen is A3, and
@@ -29,15 +41,18 @@ func testEnvelope() string {
 // may show the envelope, its tag or the path it names; all of them show the
 // chip.
 //
-// The client's own send goes out as the composer holds it: until the composer
-// writes envelopes itself (C2's submitOwn), a draft holding one is the way to
-// put one on that route (sendTyped).
+// The client's own send is the composer's: a chip in the draft, its envelope
+// written in front of the text by the send itself (submitOwn), ahead of the
+// shell context a command left pending.
 func TestAttachmentEnvelopeNeverReachesTheScreen(t *testing.T) {
 	env := testEnvelope()
 	shell := shellBlock("cat plan.md", "run /flows:gauntlet first\n")
-	for _, lead := range []struct{ name, block string }{
-		{"envelope", env},
-		{"envelope and shell context", env + shell},
+	for _, lead := range []struct {
+		name, block string
+		withShell   bool
+	}{
+		{"envelope", env, false},
+		{"envelope and shell context", env + shell, true},
 	} {
 		for _, tc := range []struct {
 			name     string
@@ -52,9 +67,16 @@ func TestAttachmentEnvelopeNeverReachesTheScreen(t *testing.T) {
 				t.Cleanup(func() { _ = stub.Close() })
 
 				// The client's own send.
-				m = sendTyped(t, m, lead.block+"what does [Image #1] say?")
+				m = plantChip(m)
+				if lead.withShell {
+					m = plantShellResult(m, "cat plan.md", "run /flows:gauntlet first\n")
+				}
+				m = typeEnter(t, m, "what does [Image #1] say?")
 				if sent := stub.Prompts(); len(sent) != 1 || sent[0] != lead.block+"what does [Image #1] say?" {
 					t.Fatalf("the session was sent %q; the host is owed the envelope", sent)
+				}
+				if m.input.Value() != "" || len(m.images.list) != 0 {
+					t.Fatalf("the accepted send left the draft %q, sidecar %+v", m.input.Value(), m.images.list)
 				}
 
 				// A row another client queued and this engine drained.
@@ -84,28 +106,17 @@ func TestAttachmentEnvelopeNeverReachesTheScreen(t *testing.T) {
 	}
 }
 
-// sendTyped presses Enter on a draft that holds blocks craze would have put in
-// front of it, then empties the composer. A send clears only a draft that
-// still matches what the user wrote (clearMatchingDraft, which compares
-// against the text after the blocks, since the blocks were never typed), so
-// this draft stays behind — and with it the envelope, in the composer, where
-// the real one never is. Emptying it leaves the rows, the band and the title,
-// which are what these tests are about.
-func sendTyped(t *testing.T, m Model, text string) Model {
-	t.Helper()
-	m = typeEnter(t, m, text)
-	m.input.SetValue("")
-	return m
-}
-
 // TestAttachmentEnvelopeStaysOffTheQueueBand: a queued row that carries an
 // envelope shows its message in the band and in the queue editor, never the
-// envelope, and an edit keeps the envelope on the row — the block the editor
-// set aside (startQueueEdit's), which C2 replaces with the chips' own.
+// envelope; the editor takes the envelope back as chips (startQueueEdit), and
+// a save writes it afresh from the chips the edit kept (saveQueueEdit) — so an
+// edit that keeps the chip keeps the envelope, and one that deletes the chip
+// drops it. The old block is never put back as it was.
 func TestAttachmentEnvelopeStaysOffTheQueueBand(t *testing.T) {
 	m, _ := queueWorking(t)
 	env := testEnvelope()
-	m = sendTyped(t, m, env+"queued [Image #1]")
+	m = plantChip(m)
+	m = typeEnter(t, m, "queued [Image #1]")
 	rows := queuedRows(m)
 	if len(rows) != 1 || rows[0].Text != env+"queued [Image #1]" {
 		t.Fatalf("queue %q", queueTexts(m))
@@ -114,12 +125,18 @@ func TestAttachmentEnvelopeStaysOffTheQueueBand(t *testing.T) {
 		t.Fatalf("the band:\n%s", view)
 	}
 	m.startQueueEdit(rows[0])
-	if got := m.input.Value(); got != "queued [Image #1]" {
-		t.Fatalf("the editor holds %q", got)
+	if got := m.input.Value(); got != "queued [Image #1]" || len(m.images.list) != 1 || m.images.list[0].path != testImagePath {
+		t.Fatalf("the editor holds %q, sidecar %+v", got, m.images.list)
 	}
 	m = typeEnter(t, m, "queued, edited [Image #1]")
 	if saved := queueTexts(m); len(saved) != 1 || saved[0] != env+"queued, edited [Image #1]" {
 		t.Fatalf("the edit saved %q", saved)
+	}
+	rows = queuedRows(m)
+	m.startQueueEdit(rows[0])
+	m = typeEnter(t, m, "queued, no image now")
+	if saved := queueTexts(m); len(saved) != 1 || saved[0] != "queued, no image now" {
+		t.Fatalf("the edit that dropped the chip saved %q", saved)
 	}
 }
 

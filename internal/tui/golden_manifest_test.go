@@ -77,6 +77,11 @@ var goldenManifest = map[string]goldenRuns{
 	"composer-at-files-100x30":               inprocOnly,
 	"composer-at-files-80x24":                inprocOnly,
 	"composer-full-line-100x30":              bothTransports,
+	"composer-image-backspace-100x30":        bothTransports,
+	"composer-image-chip-100x30":             bothTransports,
+	"composer-image-mixed-paste-100x30":      bothTransports,
+	"composer-image-two-chips-100x30":        bothTransports,
+	"composer-image-typed-path-100x30":       bothTransports,
 	"composer-long-line-100x30":              bothTransports,
 	"composer-nine-lines-100x30":             bothTransports,
 	"composer-nine-lines-top-100x30":         bothTransports,
@@ -519,8 +524,8 @@ func TestTheGoldenManifestIsEveryGolden(t *testing.T) {
 			t.Errorf("the manifest runs %s under %v: a golden runs under both transports, or in process alone", name, runs)
 		}
 	}
-	if both != 122 || inprocAlone != 37 {
-		t.Errorf("the manifest lists %d goldens under both transports and %d in process alone, want 122 and 37 (A8)", both, inprocAlone)
+	if both != 127 || inprocAlone != 37 {
+		t.Errorf("the manifest lists %d goldens under both transports and %d in process alone, want 127 and 37 (A8)", both, inprocAlone)
 	}
 }
 

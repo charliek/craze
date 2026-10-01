@@ -48,13 +48,14 @@ const (
 	// guessed at: its images become path text.
 	attachmentsVersion = 1
 	// envelopeMax is the most bytes an envelope may take, tags and newline
-	// included; maxAttachmentN the highest chip number; maxAttachmentPath
-	// the longest path. Past any of them — or with more than
+	// included; MaxAttachmentN the highest chip number — the composer's
+	// numbering stops there too (plan 033 §3.3); maxAttachmentPath the
+	// longest path. Past any of them — or with more than
 	// attach.MaxPerMessage images, a repeated or out-of-range number, a
 	// relative path or a type the store never writes — the whole envelope
 	// becomes path text.
 	envelopeMax       = 4 << 10
-	maxAttachmentN    = 99
+	MaxAttachmentN    = 99
 	maxAttachmentPath = 1024
 	// pathTextMax caps a path as path text shows it, in runes.
 	pathTextMax = 256
@@ -62,10 +63,20 @@ const (
 
 // AttachmentRef is one image an envelope names: its chip number, the absolute
 // path of its processed copy, and that copy's media type.
+//
+// OW and OH are the source's dimensions when the TUI downscaled it (plan 033
+// X13), so the host can tell an ACP agent "[Image #1 was downscaled from
+// 3024×1964 to 2000×1299]" (§3.4) — the host cannot re-derive them, since it
+// only ever sees the processed copy. Both are omitted (zero) when the image
+// was not downscaled. They are a claim like the rest of the envelope, never
+// trusted: Attachment.Original says when they may be used, and they are used
+// for that note's words and nothing else.
 type AttachmentRef struct {
 	N    int    `json:"n"`
 	Path string `json:"path"`
 	MIME string `json:"mime"`
+	OW   int    `json:"ow,omitempty"`
+	OH   int    `json:"oh,omitempty"`
 }
 
 // envelope is the JSON between the tags.
@@ -80,6 +91,28 @@ type Attachment struct {
 	AttachmentRef
 	Data          []byte
 	Width, Height int
+}
+
+// Original is the image's size before the TUI downscaled it, as its envelope
+// claims (OW, OH; plan 033 X13), and whether the claim may be used: only when
+// both are positive, within attach.MaxSourcePixels, and larger than the
+// dimensions the host read from the file's own bytes (Width, Height) — on
+// neither edge smaller, on at least one larger, which is what a downscale
+// leaves. Anything else is no claim at all, and the caller writes no note.
+// The numbers are untrusted: they only ever reach a note's words.
+func (a Attachment) Original() (w, h int, ok bool) {
+	w, h = a.OW, a.OH
+	switch {
+	case w <= 0 || h <= 0:
+		return 0, 0, false
+	// Each edge alone first, so the product below cannot overflow: the
+	// numbers are whatever JSON the envelope carried.
+	case w > attach.MaxSourcePixels || h > attach.MaxSourcePixels || int64(w)*int64(h) > attach.MaxSourcePixels:
+		return 0, 0, false
+	case w < a.Width || h < a.Height || (w == a.Width && h == a.Height):
+		return 0, 0, false
+	}
+	return w, h, true
 }
 
 // ImageLabel is chip n's text, [Image #n]: what the composer writes, what the
@@ -158,8 +191,8 @@ func envelopeProblem(block string, env envelope) string {
 	seen := make(map[int]bool, len(env.Images))
 	for _, r := range env.Images {
 		switch {
-		case r.N < 1 || r.N > maxAttachmentN:
-			return fmt.Sprintf("image number %d is outside 1 to %d", r.N, maxAttachmentN)
+		case r.N < 1 || r.N > MaxAttachmentN:
+			return fmt.Sprintf("image number %d is outside 1 to %d", r.N, MaxAttachmentN)
 		case seen[r.N]:
 			return fmt.Sprintf(namedTwice, r.N)
 		case !filepath.IsAbs(r.Path):

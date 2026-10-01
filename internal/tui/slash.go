@@ -453,7 +453,9 @@ func (m Model) runBuiltin(name, args string) (tea.Model, tea.Cmd) {
 		// draft and the transcript go in the chain's continuation, once the
 		// queue has answered (§3.12).
 		return m.clearPending(func(m Model) (Model, tea.Cmd) {
-			m.input.SetValue("")
+			// The draft goes with its sidecar, the chip numbering starting
+			// again at 1 (plan 033 §3.3, clearDraft).
+			m.clearDraft()
 			m.clearTranscript()
 			return m, nil
 		})

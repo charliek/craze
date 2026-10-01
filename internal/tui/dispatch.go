@@ -480,9 +480,11 @@ type unstartedSession struct {
 	// where a list opened over this session's discard puts its cursor.
 	from sessKey
 	// pending is the spawn its first prompt asked for, awaited (0: none), and
-	// prompt that prompt.
+	// prompt that prompt; images is the sidecar it was typed with (plan 033
+	// §3.3), whose envelope it goes with.
 	pending uint64
 	prompt  string
+	images  []attachment
 }
 
 // unstartedSpawnedMsg is the spawn of an unstarted session's first prompt:
@@ -500,9 +502,10 @@ type unstartedSpawnedMsg struct {
 // path once it is up (the startedMsg arm), or — the start failing — the
 // session is put back to unstarted as it was (from), its host (ref) stopped.
 type firstPrompt struct {
-	text string
-	from unstartedSession
-	ref  roster.Ref
+	text   string
+	images []attachment
+	from   unstartedSession
+	ref    roster.Ref
 }
 
 // openUnstarted is enter on a leading `@dir` alone (§3.13): a new session in
@@ -538,7 +541,7 @@ func (m Model) openUnstarted(spec SpawnSpec) (Model, tea.Cmd) {
 	next.takeDraft()
 	_ = next.input.Focus()
 	next.setViewportContent(true)
-	return next, tea.Batch(next.retire(old), next.sessRosters.closeCmd(r))
+	return next, tea.Batch(next.retire(old), next.sessRosters.closeCmd(r), next.relaunchImages())
 }
 
 // showUnstarted draws the unstarted session as what it will run: its
@@ -566,9 +569,14 @@ func (m Model) enterUnstarted(builtin bool) (tea.Model, tea.Cmd) {
 	if u.pending != 0 || text == "" || builtin || m.shellMode() {
 		return m, nil
 	}
+	// A chip still being processed holds the first prompt as it holds any
+	// send (plan 033 §3.3): nothing is spawned for a message that cannot go.
+	if m.imagePending() {
+		return m, nil
+	}
 	m.unstartedSeq++
 	nu := *u
-	nu.pending, nu.prompt = m.unstartedSeq, text
+	nu.pending, nu.prompt, nu.images = m.unstartedSeq, text, m.images.list
 	m.unstarted = &nu
 	s, spec, seq := m.sessions, nu.spec, nu.pending
 	return m, func() tea.Msg {
@@ -599,7 +607,7 @@ func (m Model) unstartedSpawned(msg unstartedSpawnedMsg) (tea.Model, tea.Cmd) {
 			err = errors.New("no session")
 		}
 		nu := *u
-		nu.pending, nu.prompt = 0, ""
+		nu.pending, nu.prompt, nu.images = 0, "", nil
 		m.unstarted = &nu
 		m.addError(unstartedFailText(err))
 		return m, m.abandonSpawn(msg.b, msg.ref)
@@ -663,23 +671,23 @@ func (m Model) adoptUnstarted(b backend.Backend, u unstartedSession, ref roster.
 	}
 	next.setViewportContent(true)
 	from := u
-	from.pending, from.prompt = 0, ""
-	next.first = &firstPrompt{text: u.prompt, from: from, ref: ref}
+	from.pending, from.prompt, from.images = 0, "", nil
+	next.first = &firstPrompt{text: u.prompt, images: u.images, from: from, ref: ref}
 	return next, tea.Batch(next.startCmd(), next.readOn())
 }
 
 // sendFirst is the session an unstarted session's first prompt spawned coming
 // up (the startedMsg arm): that prompt goes through the TUI's ordinary submit
-// path — the composer's (submitOwn), with the TUI's own command numbering —
-// and the composer is cleared as a send clears it, when it still holds that
-// text.
+// path — the composer's (submitOwn), with the TUI's own command numbering, and
+// the images its chips stood for when enter was pressed (plan 033 §3.3) — and
+// the composer is cleared as a send clears it, when it still holds that text.
 func (m Model) sendFirst() (Model, tea.Cmd) {
 	f := m.first
 	m.first = nil
 	if f == nil || !m.sessionReady() {
 		return m, nil
 	}
-	return m.submitOwn(f.text, engine.SubmitQueue, submitted)
+	return m.submitOwn(f.text, f.images, engine.SubmitQueue, submitted)
 }
 
 // backToUnstarted is the session an unstarted session's first prompt spawned

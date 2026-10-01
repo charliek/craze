@@ -589,6 +589,12 @@ var tuiSites = []tuiSite{
 	{"connect_dialog.go", "storeErrText", "Error", "err", 1, proofLocal},
 	{"connect_dialog.go", "storedProblemText", "Is", "modeltable.ErrKeyTooShort", 1, proofLocal},
 	{"connect_dialog.go", "connectKeyRule", "Is", "modeltable.ErrKeyTooShort", 1, proofLocal},
+	// The composer's images (plan 033 §3.3): a pasted file and the
+	// clipboard's image, read, processed and stored in this process — never
+	// a Backend call's answer.
+	{"composer_image.go", "attachErrReason", "Is", "fs.ErrNotExist", 1, proofLocal},
+	{"composer_image.go", "attachErrReason", "Error", "err", 1, proofLocal},
+	{"clipboard_image.go", "readImageFrom", "Is", "attach.ErrSourceTooLarge", 1, proofLocal},
 	// The frame harness's capture boundary: in process only (engineBehind).
 	{"frame.go", "streamHead", "Is", "agent.ErrLogClosing", 1, proofLocal},
 	{"frame.go", "streamHead", "Is", "agent.ErrClosed", 1, proofLocal},
