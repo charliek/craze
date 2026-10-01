@@ -163,8 +163,10 @@ func TestAttachmentsSweepAtStart(t *testing.T) {
 		}
 	}
 	sweepAttachments(dir, now)
+	// The young file stays, and the store's lock (plan 033 C3r), which the
+	// sweep took.
 	entries, err := os.ReadDir(dir)
-	if err != nil || len(entries) != 1 || entries[0].Name() != "bbbbbbbbbbbbbbbb.png" {
+	if err != nil || len(entries) != 2 || entries[0].Name() != ".lock" || entries[1].Name() != "bbbbbbbbbbbbbbbb.png" {
 		t.Fatalf("left %v (%v)", entries, err)
 	}
 	sweepAttachments("", now) // nothing to sweep, and no panic

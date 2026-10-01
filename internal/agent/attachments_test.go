@@ -521,6 +521,64 @@ func TestReadAttachments(t *testing.T) {
 	})
 }
 
+// TestALabelMustBeDrawnToCount is P28 against what a terminal draws (plan 033
+// C3r, r1 #2): a label inside a string sequence's payload — an OSC title, a
+// DCS, APC, PM or SOS, in either spelling, closed or not — is not visible, and
+// a text with anything that can move, erase, recolour or conceal what is drawn
+// (a CSI eating the label's bracket, SGR conceal, a lone CR, backspace, an
+// 8-bit CSI) shows no label at all. A plain label still counts, beside a title
+// or across a CRLF too.
+func TestALabelMustBeDrawnToCount(t *testing.T) {
+	good := testPNG(t, 16, 16)
+	cases := []struct {
+		name, text string
+		sent       bool
+	}{
+		{"a plain label", "look at [Image #1] please", true},
+		{"a label beside an OSC title", "\x1b]0;a title\x07look at [Image #1]", true},
+		{"a label across a CRLF", "look\r\nat [Image #1]", true},
+		{"a label after a tab", "look\tat [Image #1]", true},
+		{"an OSC title, BEL", "\x1b]0;[Image #1]\x07hello", false},
+		{"an OSC title, ST", "\x1b]2;[Image #1]\x1b\\hello", false},
+		{"an OSC title, 8-bit", "\u009d0;[Image #1]\u009chello", false},
+		{"an OSC never closed", "hello \x1b]0;[Image #1]", false},
+		{"a DCS", "\x1bP[Image #1]\x1b\\hello", false},
+		{"a DCS, 8-bit", "\u0090[Image #1]\u009chello", false},
+		{"an APC", "\x1b_[Image #1]\x1b\\hello", false},
+		{"an APC, 8-bit", "\u009f[Image #1]\u009chello", false},
+		{"a PM", "\x1b^[Image #1]\x07hello", false},
+		{"an SOS", "\x1bX[Image #1]\x07hello", false},
+		{"a CSI eating the bracket", "\x1b[Image #1] hello", false},
+		{"a CSI eating the bracket, 8-bit", "\u009b[Image #1] hello", false},
+		{"SGR conceal around the label", "\x1b[8m[Image #1]\x1b[28m hello", false},
+		{"an erase after the label", "[Image #1]\x1b[2K hello", false},
+		{"a lone CR after the label", "[Image #1]\rhello world", false},
+		{"backspaces over the label", "[Image #1]\b\b\b\b\b\b\b\b\b\b", false},
+		{"another ESC sequence", "[Image #1]\x1b8 hello", false},
+		{"DEL", "[Image #1]\x7f", false},
+		{"a C1 control", "[Image #1]\u0085", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := attachmentsDir(t)
+			p1, err := attach.Save(dir, good, attach.MIMEPNG)
+			if err != nil {
+				t.Fatal(err)
+			}
+			atts, fallbacks, problems := ReadAttachments(dir, []AttachmentRef{ref(1, p1, attach.MIMEPNG)}, tc.text)
+			if fallbacks != nil {
+				t.Fatalf("a label rule drop left path text: %q", fallbacks)
+			}
+			if sent := len(atts) == 1; sent != tc.sent {
+				t.Fatalf("%q: image sent = %v, want %v (problems %q)", tc.text, sent, tc.sent, problems)
+			}
+			if !tc.sent && (len(problems) != 1 || !strings.Contains(problems[0], "[Image #1] is not in the message")) {
+				t.Fatalf("problems %q", problems)
+			}
+		})
+	}
+}
+
 // TestReadAttachmentsHoldsTheEnvelopeLimits: refs that did not come through
 // SplitAttachments are held to its count and numbering limits all the same.
 func TestReadAttachmentsHoldsTheEnvelopeLimits(t *testing.T) {
@@ -644,6 +702,7 @@ func FuzzSplitAttachments(f *testing.F) {
 	f.Add(attachmentsOpen + `{"v":1,"images":[{"n":1}]}` + attachmentsClose + "\n")
 	f.Add(shell + AttachmentBlock(refs))
 	f.Add("plain text")
+	f.Add(AttachmentBlock(refs) + "\x1b]0;[Image #1]\x07 and [Image #2]\r\n")
 	f.Fuzz(func(t *testing.T, text string) {
 		got, rest, _ := SplitAttachments(text)
 		if !strings.HasPrefix(text, attachmentsOpen) && (got != nil || rest != text) {
@@ -672,6 +731,13 @@ func FuzzSplitAttachments(f *testing.F) {
 		}
 		if out, _ := AttachmentsAsPathText(text); block == "" && out != text {
 			t.Fatalf("path text from no envelope: %q", out)
+		}
+		// P28's projection (C3r) is total, and what it keeps is drawable: no
+		// escape, no control but a newline, a tab or a CRLF's CR.
+		for _, r := range visibleText(rest) {
+			if r == 0x1b || r == 0x7f || isC1(r) || (r < 0x20 && r != '\n' && r != '\t' && r != '\r') {
+				t.Fatalf("visibleText(%q) kept %U", rest, r)
+			}
 		}
 	})
 }

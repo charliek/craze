@@ -170,12 +170,20 @@ Environment:
                        byte per turn to release it, so it can act while the
                        turn is known to be in progress. Unset, tasks runs
                        straight through. sigint-hold's held prompts also end
-                       on that byte, answered as echo.
+                       on that byte, answered as echo, and every step of the
+                       long-turn scripts waits for one (CRAZE_FAKE_STEP is
+                       then unused): a turn held for as long as the test needs.
   CRAZE_FAKE_DUMP_PROMPTS=<path>  every script appends one JSON line to this
                        file per session/prompt it reads ({"prompt":[blocks]},
                        each block as prompt-dump describes it) and per
                        x.ai/interject ({"interject":"<text>"}), in arrival
                        order.
+  CRAZE_FAKE_LATE_CATALOG=1  session/new's available_commands_update is held
+                       back until the first session/prompt is read, and sent
+                       then, ahead of that prompt's turn: the catalog lands
+                       while craze's first prompt is in flight, the schedule
+                       the image resend's heard rule has to survive (craze
+                       plan 033 C3r) without a race against the reader.
   CRAZE_FAKE_SESSION_ID=<id>  session/new answers this session id instead of
                        fake-session-1, so several sessions in one test HOME
                        are several rows of its session index. {dir} in it is

@@ -186,12 +186,16 @@ var testBeforeResend func(s *session)
 //     acp.CodeInvalidParams);
 //   - the prompt carried image blocks, which is what such a refusal is taken
 //     to be about;
-//   - the agent sent nothing of its own while the prompt was in flight
-//     (acp.Client.Heard: no update, tool call, permission, plan, nothing but
-//     grok's turn bookkeeping) — a prompt the agent began on is not one it
-//     refused, and sending it again could do its work twice. The signal is
-//     the client's, taken on its read loop, so it is ordered against the
-//     reply: anything the agent sent before refusing has been counted;
+//   - the agent sent nothing of its own about the prompt (acp.Client.Heard:
+//     no turn content, tool call, permission, plan, no queue entry naming it —
+//     the catalog, the mode, the title and the like are about the session and
+//     do not count) — a prompt the agent began on is not one it refused, and
+//     sending it again could do its work twice. The signal is the client's,
+//     taken on its read loop, so it is ordered against the reply: anything the
+//     agent sent before refusing has been counted. It is read here to decide,
+//     and again by acp.Client.ResendBlocks in the section that opens the
+//     resend's turn, so what the agent sends between the two attempts counts
+//     as well;
 //   - no Cancel has marked the prompt since its claim (s.cancelling, read in
 //     the locked section below).
 //
@@ -222,20 +226,30 @@ func (s *session) imageResendWire(err error, ims promptImages, client *acp.Clien
 }
 
 // resendAsPathText is the fallback's second and last attempt (plan 033 §3.4):
-// blocks are the prompt again with every image as path text, sent with no
-// accepted hook — the expansions were announced by the first attempt and are
-// not announced twice — and reporting into wire, the resend's own
-// (imageResendWire). first is the refusal, journaled with the resend; images is
-// how many images went as text. Whatever this attempt returns is the prompt's
-// answer: a second refusal is not resent.
+// blocks are the prompt again with every image as path text, sent through
+// acp.Client.ResendBlocks — which refuses it if the agent has been heard from
+// since the refused prompt opened — with no expansion announcement (the first
+// attempt made it; it is not made twice), and reporting into wire, the
+// resend's own (imageResendWire). first is the refusal, journaled with the
+// resend once the resend's turn has opened; images is how many images went as
+// text. Whatever this attempt returns is the prompt's answer — a second
+// refusal is not resent — except a refusal before the wire: then nothing more
+// was sent, and the answer is first.
 func (s *session) resendAsPathText(ctx context.Context, client *acp.Client, wire *turnWire, blocks []acp.ContentBlock, first error, images int) (*acp.PromptResult, error) {
-	s.log.Note(journal.DiagNote{Kind: diagImageResend, Fields: map[string]any{"images": images, "refusal": first.Error()}})
-	res, err := client.PromptBlocks(ctx, blocks, nil, func() { s.publishWire(wire, wireSent) })
+	opened := func() {
+		s.log.Note(journal.DiagNote{Kind: diagImageResend, Fields: map[string]any{"images": images, "refusal": first.Error()}})
+	}
+	res, err := client.ResendBlocks(ctx, blocks, opened, func() { s.publishWire(wire, wireSent) })
 	// Settled as the first attempt's is (prompt): the first outcome wins, so a
 	// resend whose bytes went out and whose reply then failed stays sent.
 	switch {
-	case refusedBeforeWire(err):
+	case refusedBeforeWire(err) || errors.Is(err, acp.ErrHeardSinceRefusal):
+		// The resend never left craze — the agent was heard from since its
+		// refusal, or is running a turn of its own — so the prompt's answer is
+		// the refusal itself, not a refusal before the wire that would read as
+		// a prompt to be tried again.
 		s.publishWire(wire, wireRefused)
+		return nil, first
 	case err != nil:
 		s.publishWire(wire, wireFailed)
 	default:

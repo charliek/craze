@@ -56,10 +56,21 @@ type limits struct {
 //     alpha) and stepped down through JPEG qualities 85, 75, 60 and 45, then
 //     made 0.75 times smaller and stepped down again, until it fits.
 //
-// The scale is the x/image/draw kernel scaler, whose working buffer is 32
-// bytes per pixel of (output width × source height): a few hundred MB,
-// briefly, for a 50 MP photo. It runs once, at attach time, off the UI
-// goroutine (plan 033 §3.3).
+// Memory, beyond the decoded image and the source bytes (plan 033 C3r, r1
+// #4). An image over MaxEdge is first halved, axis by axis, while an axis is
+// at least twice its output size (shrinkSteps): each halving holds only its
+// own output, at most half its input's pixels at 4 bytes a pixel — 100 MB for
+// the first halving of a 50 MP image's one axis — and drops its input. Only
+// then does the x/image/draw kernel scaler run, whose working buffer is 32
+// bytes per pixel of output width × its input's height; the halving leaves
+// that height under twice the output's, so the buffer is at most 32 B × 2000 ×
+// 3999 ≈ 244 MiB (an image just under 4000 px square), next to its ≤ 15.3 MiB
+// output and its input (the decoded image itself, or a halving smaller than
+// it). Without the halving an 8 × 6,250,000 strip asked 1.6 GB of the scaler;
+// now it asks 0.8 MB. The JPEG ladder's later rounds scale from the ≤ 2000 px
+// image, at most 32 B × 1500 × 2000 ≈ 92 MiB. It all runs once, at attach
+// time, off the UI goroutine (plan 033 §3.3), and the TUI runs one Process at
+// a time.
 func Process(src []byte) (Image, error) {
 	return limits{maxBytes: MaxBytes, maxEdge: MaxEdge}.process(src)
 }
@@ -128,19 +139,65 @@ func decode(src []byte, cfg Config) (image.Image, error) {
 	return img, nil
 }
 
-// fit returns img as an RGBA image at the origin, scaled with CatmullRom to a
-// long edge of at most l.maxEdge. RGBA, because it is the destination the
-// x/image/draw scaler and the JPEG encoder both have fast paths for.
+// fit returns img as an RGBA image at the origin, scaled to a long edge of at
+// most l.maxEdge: halved while it is twice that or more on an axis
+// (shrinkSteps), then scaled with CatmullRom the rest of the way. RGBA,
+// because it is the destination the x/image/draw scalers and the JPEG encoder
+// all have fast paths for.
+//
+// The halving is what bounds the memory (Process): CatmullRom's buffer grows
+// with its input's height, which nothing else bounds — an 8 px wide strip of
+// 6.25 million rows passes every limit Probe has. Each step is
+// ApproxBiLinear at a ratio of two, which samples between each pair of input
+// pixels with equal weights: a 2×2 box average, allocating nothing but its
+// output. img is dropped as each step replaces it, so the decoded image can go
+// once the first is made.
 func (l limits) fit(img image.Image) *image.RGBA {
 	b := img.Bounds()
 	w, h := scaledTo(b.Dx(), b.Dy(), l.maxEdge)
+	for _, p := range shrinkSteps(b.Dx(), b.Dy(), w, h) {
+		half := image.NewRGBA(image.Rect(0, 0, p.X, p.Y))
+		xdraw.ApproxBiLinear.Scale(half, half.Rect, img, img.Bounds(), xdraw.Src, nil)
+		img = half
+	}
 	return scale(img, w, h)
 }
+
+// shrinkSteps is the sizes fit halves a sw×sh image through before scaling it
+// to dw×dh: each step halves (rounding down) every axis still at least twice
+// its output size, so after the last one each axis is under twice its output
+// size and no smaller than it. None when no axis is that large.
+func shrinkSteps(sw, sh, dw, dh int) []image.Point {
+	var steps []image.Point
+	for {
+		nw, nh := sw, sh
+		if sw >= 2*dw {
+			nw = sw / 2
+		}
+		if sh >= 2*dh {
+			nh = sh / 2
+		}
+		if nw == sw && nh == sh {
+			return steps
+		}
+		steps = append(steps, image.Pt(nw, nh))
+		sw, sh = nw, nh
+	}
+}
+
+// testKernelInput, when set, is told the bounds of every image scale hands
+// the CatmullRom scaler and the size it scales to: the seam the memory bound's
+// tests watch fit through. A var only so tests can set it; nothing in craze
+// writes it.
+var testKernelInput func(src image.Rectangle, w, h int)
 
 // scale draws img into a new w×h RGBA image at the origin: copied when that
 // is its own size, scaled with CatmullRom when it is not.
 func scale(img image.Image, w, h int) *image.RGBA {
 	b := img.Bounds()
+	if testKernelInput != nil && (w != b.Dx() || h != b.Dy()) {
+		testKernelInput(b, w, h)
+	}
 	dst := image.NewRGBA(image.Rect(0, 0, w, h))
 	if w == b.Dx() && h == b.Dy() {
 		xdraw.Draw(dst, dst.Rect, img, b.Min, xdraw.Src)

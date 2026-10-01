@@ -10,7 +10,6 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -598,12 +597,13 @@ type Model struct {
 	images    draftImages
 	attachSeq uint64
 	attachDir string
-	// attachRuns counts the chips' processings running (processCmd): shared
-	// by every copy of the model, as shell is, since a processing outlives
-	// the Update that started it — and outlives its chip, when the chip is
-	// deleted first. What the frame runner waits out (imagesInFlight). Nil
-	// only in a model New never built.
-	attachRuns *atomic.Int64
+	// attachRuns is the chips' processing lane (attachLane): how many are
+	// running (processCmd), one at a time, and what is still wanted. Shared by
+	// every copy of the model, as shell is, since a processing outlives the
+	// Update that started it — and outlives its chip, when the chip is deleted
+	// first. Its count is what the frame runner waits out (imagesInFlight).
+	// Nil only in a model New never built.
+	attachRuns *attachLane
 	// attachReads is P27's answer for the backend adopted (adopt,
 	// readsAttachments): its session's host reads attachDir. The session's,
 	// as its backend is.
@@ -1679,7 +1679,7 @@ func New(cfg Config) Model {
 		nativeDir:  configNativeDir(cfg.NativeDir),
 		nativeEnv:  configGetenv(cfg.Getenv),
 		attachDir:  configAttachmentsDir(cfg.AttachmentsDir),
-		attachRuns: &atomic.Int64{},
+		attachRuns: newAttachLane(),
 		// The first session shown is shown from here, before any backend
 		// of it is adopted (shownGen): 1, so no message the program makes
 		// carries the zero stamp a test's hand-built one does.
@@ -2103,6 +2103,12 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if next, cmd, ok := m.applySessMsg(msg); ok {
 		return next, cmd
 	}
+	if p, ok := msg.(pasteMsg); ok && p.textRefused && !p.hasImage() {
+		// Clipboard "text" that was not text (plan 033 C3r): nothing lands,
+		// wherever it was asked for, and the status row says why. With an
+		// image, pasteClipboardImage says it beside what it did.
+		m.note(clipboardNotText)
+	}
 	if m.sessList.open {
 		switch msg := msg.(type) {
 		case tea.MouseMsg, dblClickMsg:
@@ -2455,7 +2461,7 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case attachDoneMsg:
 		// A chip's processing (plan 033 §3.3). One for a session the model
 		// has since left never gets here (staleShown, attachDoneMsg).
-		return m.attachDone(msg), nil
+		return m.attachAnswer(msg)
 
 	case completeLoadedMsg:
 		// The composer `@` popup's search (plan 030 §3.16): the list's own

@@ -10,6 +10,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/charliek/craze/internal/atomicfile"
 )
 
 // attachDir is a fresh attachments directory's path (not yet created) under
@@ -70,9 +72,8 @@ func TestSaveWritesPrivately(t *testing.T) {
 	if got, err := os.ReadFile(path); err != nil || !bytes.Equal(got, data) {
 		t.Fatalf("the file holds %d bytes (%v), want the %d saved", len(got), err, len(data))
 	}
-	entries, _ := os.ReadDir(dir)
-	if len(entries) != 1 {
-		t.Fatalf("the directory holds %d entries, want the one file", len(entries))
+	if got := names(t, dir); len(got) != 2 || got[0] != lockName || got[1] != filepath.Base(path) {
+		t.Fatalf("the directory holds %q, want the store's lock and the one file", got)
 	}
 	// The other two types the store keeps, by their own extensions.
 	for mime, ext := range map[string]string{MIMEJPEG: ".jpg", MIMEWebP: ".webp"} {
@@ -158,9 +159,8 @@ func TestSaveReplacesOtherBytesAtomically(t *testing.T) {
 	if inode(t, path) == before {
 		t.Fatal("the file was written in place, not renamed over")
 	}
-	entries, _ := os.ReadDir(dir)
-	if len(entries) != 1 {
-		t.Fatalf("the directory holds %d entries, want the one file", len(entries))
+	if got := names(t, dir); len(got) != 2 || got[0] != lockName || got[1] != filepath.Base(path) {
+		t.Fatalf("the directory holds %q, want the store's lock and the one file", got)
 	}
 }
 
@@ -535,7 +535,9 @@ func TestSweepByAge(t *testing.T) {
 	if err != nil || n != 2 {
 		t.Fatalf("Sweep = %d, %v; want 2 removed", n, err)
 	}
-	want := []string{"bbbbbbbbbbbbbbbb.png", "cccccccccccccccc.png", "dddddddddddddddd.png", "notes.txt"}
+	// The store's lock (created by the sweep itself) is no stored name: it
+	// stays.
+	want := []string{lockName, "bbbbbbbbbbbbbbbb.png", "cccccccccccccccc.png", "dddddddddddddddd.png", "notes.txt"}
 	if got := names(t, dir); strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("left %q, want %q", got, want)
 	}
@@ -558,7 +560,7 @@ func TestSweepByBudget(t *testing.T) {
 	if err != nil || n != 3 {
 		t.Fatalf("sweep = %d, %v; want 3 removed", n, err)
 	}
-	want := []string{"4444444444444444.png", "5555555555555555.png"}
+	want := []string{lockName, "4444444444444444.png", "5555555555555555.png"}
 	if got := names(t, dir); strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("left %q, want %q", got, want)
 	}
@@ -595,5 +597,122 @@ func TestSweepLeavesAnUnsafeDirectoryAlone(t *testing.T) {
 	}
 	if len(names(t, real)) != 1 {
 		t.Fatal("a refused sweep removed a file")
+	}
+}
+
+// agedSave is Save of data, then the saved file made older than MaxAge.
+func agedSave(t *testing.T, dir string, data []byte, now time.Time) string {
+	t.Helper()
+	path, err := Save(dir, data, MIMEPNG)
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := now.Add(-MaxAge - time.Hour)
+	if err := os.Chtimes(path, old, old); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// TestASaveDuringASweepKeepsItsFile is r1 #12's interleaving (plan 033 C3r):
+// a Sweep has condemned an old file and is about to remove it when another
+// craze pastes the same image. That Save finds the store's lock held, waits
+// for the sweep, and then — the file gone — writes it again: when both are
+// done the chip's file is there. Without the lock the Save's dedupe would
+// refresh the file and return, and the sweep would remove it under it.
+func TestASaveDuringASweepKeepsItsFile(t *testing.T) {
+	dir := madeDir(t)
+	now := time.Now()
+	data := []byte("the same screenshot, pasted again")
+	path := agedSave(t, dir, data, now)
+	busy := make(chan struct{}, 1)
+	saved := make(chan error, 1)
+	lockBusy = func() {
+		select {
+		case busy <- struct{}{}:
+		default:
+		}
+	}
+	sweepRemoving = func(string) {
+		go func() {
+			_, err := Save(dir, data, MIMEPNG)
+			saved <- err
+		}()
+		select {
+		case <-busy: // the Save waits for this sweep
+		case err := <-saved: // the Save did not wait: it refreshed the file this sweep removes next
+			saved <- err
+		case <-time.After(5 * time.Second):
+			t.Error("the Save neither waited nor finished")
+		}
+	}
+	t.Cleanup(func() { lockBusy, sweepRemoving = func() {}, func(string) {} })
+	if n, err := Sweep(dir, now); err != nil || n != 1 {
+		t.Fatalf("Sweep = %d, %v; want the old file removed", n, err)
+	}
+	select {
+	case err := <-saved:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the Save never finished")
+	}
+	got, err := os.ReadFile(path)
+	if err != nil || !bytes.Equal(got, data) {
+		t.Fatalf("the saved file is gone after the sweep: %v", err)
+	}
+	if fi, err := os.Stat(path); err != nil || now.Sub(fi.ModTime()) > time.Minute {
+		t.Fatalf("the saved file is not fresh: %v", err)
+	}
+}
+
+// TestASweepKeepsAFileThatChanged: a file refreshed between the sweep's
+// listing and its removal — by a Save that waited out the lock and went on
+// without it — is stat'ed again and kept.
+func TestASweepKeepsAFileThatChanged(t *testing.T) {
+	dir := madeDir(t)
+	now := time.Now()
+	path := agedSave(t, dir, []byte("refreshed in the window"), now)
+	sweepStatted = func(string) {
+		if err := os.Chtimes(path, now, now); err != nil {
+			t.Error(err)
+		}
+	}
+	t.Cleanup(func() { sweepStatted = func(string) {} })
+	if n, err := Sweep(dir, now); err != nil || n != 0 {
+		t.Fatalf("Sweep = %d, %v; want the refreshed file kept", n, err)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("the refreshed file was removed: %v", err)
+	}
+}
+
+// TestTheStoreLockIsBounded: with the store's lock held elsewhere, Sweep gives
+// up quietly — nothing removed, no error — and Save goes on without it, each
+// after its own short wait.
+func TestTheStoreLockIsBounded(t *testing.T) {
+	saveLockWait, sweepLockWait = 50*time.Millisecond, 50*time.Millisecond
+	t.Cleanup(func() { saveLockWait, sweepLockWait = time.Second, time.Second })
+	dir := madeDir(t)
+	now := time.Now()
+	old := agedSave(t, dir, []byte("old"), now)
+	unlock, err := atomicfile.Lock(filepath.Join(dir, lockName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unlock()
+	if n, err := Sweep(dir, now); err != nil || n != 0 {
+		t.Fatalf("Sweep under a held lock = %d, %v; want nothing, quietly", n, err)
+	}
+	if _, err := os.Stat(old); err != nil {
+		t.Fatalf("a sweep that gave up removed a file: %v", err)
+	}
+	path, err := Save(dir, []byte("new"), MIMEPNG)
+	if err != nil {
+		t.Fatalf("Save under a held lock: %v", err)
+	}
+	if got, err := os.ReadFile(path); err != nil || string(got) != "new" {
+		t.Fatalf("Save under a held lock wrote %q, %v", got, err)
 	}
 }

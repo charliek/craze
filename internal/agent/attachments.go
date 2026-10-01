@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/charliek/craze/internal/harness/tool/attach"
 )
@@ -207,6 +208,18 @@ func envelopeProblem(block string, env envelope) string {
 	return ""
 }
 
+// EnvelopeProblem is why the host would refuse an envelope naming refs whole
+// — over its size, its count or its numbering, a path not absolute or too
+// long, a type the store never writes (envelopeProblem) — or "" when it would
+// read it. The composer asks before it makes a chip (plan 033 C3r, r1 #11), so
+// that it never builds an envelope the host turns into path text.
+func EnvelopeProblem(refs []AttachmentRef) string {
+	if len(refs) == 0 {
+		return ""
+	}
+	return envelopeProblem(AttachmentBlock(refs), envelope{V: attachmentsVersion, Images: refs})
+}
+
 // namedTwice is the refusal of a repeated image number, which both the
 // envelope's limits and ReadAttachments' own check make.
 const namedTwice = "image number %d is named twice"
@@ -256,9 +269,11 @@ func SplitAttachments(text string) (refs []AttachmentRef, rest string, problems 
 //
 // For each ref, in order:
 //
-//   - its label, [Image #N], must be in visible, or it is dropped: no image,
-//     no path text, a problem for the journal. A forged envelope cannot send
-//     an image the user never saw a chip for;
+//   - its label, [Image #N], must be in what a terminal draws of visible
+//     (visibleText), or it is dropped: no image, no path text, a problem for
+//     the journal. A forged envelope cannot send an image the user never saw
+//     a chip for — not behind an OSC title, a DCS or APC payload, nor in a
+//     text whose escapes or controls could hide it;
 //   - the file is opened confined: dir as an os.Root (not a symlink, 0700,
 //     the user's own); the path clean and directly inside dir, its base name
 //     a stored name and a regular file (not a symlink, not a FIFO), read
@@ -285,6 +300,10 @@ func ReadAttachments(dir string, refs []AttachmentRef, visible string) (atts []A
 		return nil, nil, nil
 	}
 	_, visible = splitShellBlock(visible)
+	// What a terminal draws of it: a label inside an escape sequence's
+	// payload, or in a text that can move, erase or conceal what it draws,
+	// is not one the user saw (r1 #2, visibleText).
+	visible = visibleText(visible)
 	// The directory is opened once for the whole message; dirReason is why no
 	// image can be read from it at all, or "".
 	root, dirReason := openAttachments(dir)
@@ -323,6 +342,67 @@ func ReadAttachments(dir string, refs []AttachmentRef, visible string) (atts []A
 		atts = append(atts, att)
 	}
 	return atts, fallbacks, problems
+}
+
+// visibleText is the terminal-safe projection of s that P28's labels are
+// matched against (plan 033 C3r, r1 #2): what a terminal can be relied on to
+// draw of it. The user row is drawn with its escapes intact, so a label a
+// socket client wraps in one is executed, not shown.
+//
+//   - A string sequence — OSC, DCS, SOS, PM, APC, in its 7-bit (ESC ] P X ^ _)
+//     or 8-bit (U+009D U+0090 U+0098 U+009E U+009F) spelling, to BEL, ESC \ or
+//     U+009C, or to the end — draws nothing: its payload is removed whole, and
+//     the text around it is judged as usual. A window title is not a chip.
+//   - Anything that moves the cursor, erases, recolours or conceals — CSI and
+//     every other ESC sequence, a C0 control but \n, \t and the \r of a
+//     \r\n, DEL, any other C1 control — can hide text drawn before it or after
+//     it, so a text carrying one shows no label at all: "" (every image of the
+//     message is dropped). The composer never produces one (its textarea strips
+//     controls); a socket client can, and is then not taken at its word.
+//
+// Zero-width and bidi runes stay: inside a label they break the match, which
+// is the safe side.
+func visibleText(s string) string {
+	var b strings.Builder
+	cut := false // a string sequence was removed: b holds the projection
+	start := 0   // the start of the run not yet copied to b
+	for i := 0; i < len(s); {
+		c := s[i]
+		switch {
+		case c == 0x1b:
+			if i+1 >= len(s) || !strings.ContainsRune("]PX^_", rune(s[i+1])) {
+				return ""
+			}
+			b.WriteString(s[start:i])
+			i = skipToST(s, i+2)
+			start, cut = i, true
+		case c == '\r' && i+1 < len(s) && s[i+1] == '\n':
+			i += 2
+		case c == 0x7f || (c < 0x20 && c != '\n' && c != '\t'):
+			return ""
+		case c >= 0x80:
+			r, size := utf8.DecodeRuneInString(s[i:])
+			if !isC1(r) {
+				i += size
+				continue
+			}
+			switch r {
+			case 0x90, 0x98, 0x9d, 0x9e, 0x9f: // DCS, SOS, OSC, PM, APC
+				b.WriteString(s[start:i])
+				i = skipToST(s, i+size)
+				start, cut = i, true
+			default:
+				return ""
+			}
+		default:
+			i++
+		}
+	}
+	if !cut {
+		return s
+	}
+	b.WriteString(s[start:])
+	return b.String()
 }
 
 // openAttachments opens the attachments directory dir for the host's read

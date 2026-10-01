@@ -33,7 +33,10 @@ import (
 //     agent gets the image block behind block 1.
 //
 // What the agent read is the fake's own record (CRAZE_FAKE_DUMP_PROMPTS), in
-// arrival order.
+// arrival order. Every turn's two steps are held on the fake's gate
+// (CRAZE_FAKE_GATE, fakeAgentGate) until the test releases them, so each mode
+// is sent while the turn it needs is known to be running, however slow the
+// machine (plan 033 C3r, r1 #10); the context deadlines are watchdogs only.
 
 // dumpLine is one line of the fake's prompt record.
 type dumpLine struct {
@@ -77,9 +80,6 @@ func TestAnEnvelopeOverTheSocketInEachMode(t *testing.T) {
 	t.Setenv("CRAZE_HOME", t.TempDir())
 	t.Setenv("XAI_API_KEY", "")
 	t.Setenv("GROK_CODE_XAI_API_KEY", "")
-	// Turn 1 (a plain prompt) and turn 2 (the queued row) hold long enough to
-	// interject into and to send over; turn 3 (the send-now) runs through.
-	t.Setenv("CRAZE_FAKE_STEP", "1500ms,1500ms,1ms")
 	dump := filepath.Join(t.TempDir(), "prompts.jsonl")
 	t.Setenv("CRAZE_FAKE_DUMP_PROMPTS", dump)
 
@@ -104,6 +104,9 @@ func TestAnEnvelopeOverTheSocketInEachMode(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 6*watchdog)
 	defer cancel()
+	// One release lets one held step of the running turn go on.
+	release := fakeAgentGate(t, ctx)
+	releaseTurn := func() { release(); release() }
 	grok := agent.GrokProvider()
 	sess := agent.New(agent.Options{
 		Binary: fakeAgentBin(t), ExtraArgs: []string{"-script=grok-long-turn"},
@@ -126,7 +129,8 @@ func TestAnEnvelopeOverTheSocketInEachMode(t *testing.T) {
 	}
 	isTool := func(ev agent.Event) bool { return ev.Type == agent.EventTool }
 
-	// A plain prompt holds the session for the two busy modes.
+	// A plain prompt holds the session for the two busy modes: its first step
+	// is held until both are in.
 	r1, err := c.s.Submit(ctx, cmd(), "go", engine.SubmitQueue, "")
 	if err != nil || r1.Turn == "" {
 		t.Fatalf("submit: %+v, %v", r1, err)
@@ -142,8 +146,10 @@ func TestAnEnvelopeOverTheSocketInEachMode(t *testing.T) {
 	if err != nil || r2.Queued == nil {
 		t.Fatalf("queue: %+v, %v; want a row", r2, err)
 	}
+	releaseTurn()
 	end1 := p.waitFor(t, at, endedTurn(r1.Turn))
-	// The row drains as the next turn; mode send_now replaces it.
+	// The row drains as the next turn, held at its first step; mode send_now
+	// replaces it (the held step ends cancelled, needing no release).
 	start2 := p.waitFor(t, end1, func(ev agent.Event) bool {
 		return ev.Type == agent.EventTurn && ev.Turn.Phase == agent.TurnStarted && ev.Turn.Origin == agent.TurnOriginDrain
 	})
@@ -155,6 +161,8 @@ func TestAnEnvelopeOverTheSocketInEachMode(t *testing.T) {
 	start3 := p.waitFor(t, start2, func(ev agent.Event) bool {
 		return ev.Type == agent.EventTurn && ev.Turn.Phase == agent.TurnStarted && ev.Turn.Origin == agent.TurnOriginSendNow
 	})
+	p.waitFor(t, start3, isTool)
+	releaseTurn()
 	p.waitFor(t, start3, endedTurn(p.event(start3).Turn.ID))
 
 	lines, raw := readDump(t, dump)

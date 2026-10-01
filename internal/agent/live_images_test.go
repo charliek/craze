@@ -373,6 +373,42 @@ func TestRejectImageIsResentOnceWithPathText(t *testing.T) {
 	}
 }
 
+// TestALateCatalogStillResends is the C3 gate flake as a forced schedule
+// (plan 033 C3r): the catalog session/new advertises reaches craze after the
+// first prompt's turn has opened — cursor's lands seconds after session/new,
+// and under -race the fake's could too — and is followed by the -32602.
+// CRAZE_FAKE_LATE_CATALOG holds the update back until the fake has read the
+// prompt, so it is read inside the turn every time. The catalog is about the
+// session, not the agent doing anything with the prompt, so the refusal is
+// still resent as path text.
+func TestALateCatalogStillResends(t *testing.T) {
+	imageHome(t)
+	dump := promptDumpFile(t)
+	t.Setenv("CRAZE_FAKE_LATE_CATALOG", "1")
+	ref, _ := savedImage(t, 1, 40, 30)
+	s := startScript(t, "reject-image", false)
+	s.mu.Lock()
+	early := s.commandsSeen
+	s.mu.Unlock()
+	if early {
+		t.Fatal("the catalog arrived before the prompt: the schedule is not forced")
+	}
+	res, err := s.Prompt(t.Context(), AttachmentBlock([]AttachmentRef{ref})+"look at [Image #1]")
+	if err != nil || res.StopReason != acp.StopEndTurn {
+		t.Fatalf("Prompt = %+v, %v; want the resend's end_turn", res, err)
+	}
+	s.mu.Lock()
+	seen := s.commandsSeen
+	s.mu.Unlock()
+	if !seen {
+		t.Fatal("the catalog never arrived inside the turn")
+	}
+	prompts := dumpedPrompts(t, dump)
+	if len(prompts) != 2 || blockTypes(prompts[0]) != "text,image" || blockTypes(prompts[1]) != "text,text" {
+		t.Fatalf("the agent read %d prompts (%v), want the refused one and its path-text resend", len(prompts), prompts)
+	}
+}
+
 // TestARejectionAfterActivityIsNotResent: the agent said something for the
 // turn before it refused (SAY-FIRST), so the prompt is one it began on and is
 // not sent again: the -32602 surfaces as the turn's error, once.

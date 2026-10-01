@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"syscall"
 	"unicode"
 	"unicode/utf8"
@@ -417,22 +419,30 @@ func (m Model) pasteClipboardImage(msg pasteMsg) (tea.Model, tea.Cmd) {
 	if m.composerCovered() {
 		return m, nil
 	}
+	var note string
 	switch {
 	case msg.imageErr != nil:
-		m.note("the clipboard image was not pasted: " + attachErrReason(msg.imageErr))
+		note = "the clipboard image was not pasted: " + attachErrReason(msg.imageErr)
 	case m.shellMode():
 	case !m.attachmentsReadable():
-		m.note(p27ClipNote)
+		note = p27ClipNote
 	default:
 		add := attachment{src: attachSource{data: msg.image}}
 		add.size = sourceEstimate(int64(len(msg.image)))
-		chips, cmd, note := m.addImages([]attachment{add})
-		if note == "" {
+		chips, cmd, refused := m.addImages([]attachment{add})
+		if refused == "" {
 			// Inserted as one bracketed paste of the chip's text, the way a
 			// file's chips are: updateComposer leaves text that is not a list
 			// of image paths as it is.
 			return m, tea.Batch(m.updateComposer(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(chips), Paste: true}), cmd)
 		}
+		note = refused
+	}
+	if msg.textRefused {
+		// The text it falls back to was not text either (plan 033 C3r).
+		note = strings.TrimPrefix(note+" · "+clipboardNotText, " · ")
+	}
+	if note != "" {
 		m.note(note)
 	}
 	if msg.text == "" {
@@ -453,9 +463,10 @@ func (m Model) overSSH() bool {
 // sidecar, and answers the chips' text, one after another with a space
 // between, and the commands that process them. A draft the cap refuses (P29:
 // more than attach.MaxPerMessage images, more than attach.MaxMessageBytes
-// counted, or no chip number left), or a TUI with no attachments directory to
-// store them in, gets nothing, and note says why. Nothing is made — no
-// number, no id, no command — unless every chip is.
+// counted, or no chip number left), one whose envelope the host would refuse
+// (envelopeFits: over 4 KiB with a long attachments directory, say), or a TUI
+// with no attachments directory to store them in, gets nothing, and note says
+// why. Nothing is made — no number, no id, no command — unless every chip is.
 func (m *Model) addImages(add []attachment) (string, tea.Cmd, string) {
 	cur := m.images
 	if m.attachDir == "" {
@@ -478,6 +489,9 @@ func (m *Model) addImages(add []attachment) (string, tea.Cmd, string) {
 		a.n, a.pending, last = n, true, n
 		list = append(list, a)
 	}
+	if !envelopeFits(list, m.attachDir) {
+		return "", nil, fmt.Sprintf("a message's image paths may add up to %d KiB at most; pasted as text", envelopeLimitKiB)
+	}
 	labels := make([]string, len(add))
 	cmds := make([]tea.Cmd, len(add))
 	for i := range add {
@@ -489,6 +503,42 @@ func (m *Model) addImages(add []attachment) (string, tea.Cmd, string) {
 	}
 	m.images = draftImages{list: list, last: last}
 	return strings.Join(labels, " "), tea.Batch(cmds...), ""
+}
+
+// envelopeLimitKiB is the envelope's size limit as the note says it: the
+// host's (agent.EnvelopeProblem), 4 KiB.
+const envelopeLimitKiB = 4
+
+// worstOriginal is the most a source's edge can measure (Probe: under
+// attach.MaxSourcePixels with neither edge under attach.MinEdge), so the most
+// digits the envelope's ow and oh can take.
+const worstOriginal = attach.MaxSourcePixels / attach.MinEdge
+
+// envelopeFits reports whether the envelope for list — every chip of a draft,
+// the would-be ones included — is one the host reads (agent.EnvelopeProblem:
+// at most 4 KiB, every path at most 1024 bytes, …), so a draft never holds
+// chips the host would send as path text, every one of them (plan 033 C3r,
+// r1 #11; supersedes X26). A done entry counts as its envelope ref; a pending
+// one at the most its ref can come to, which is known before it is processed
+// because the store's names are: dir, 16 hex digits and the longest
+// extension, the longest type, and an original of the most digits a source
+// can measure.
+func envelopeFits(list []attachment, dir string) bool {
+	refs := make([]agent.AttachmentRef, len(list))
+	for i, a := range list {
+		if !a.pending && a.path != "" {
+			refs[i] = agent.AttachmentRef{N: a.n, Path: a.path, MIME: a.mime, OW: a.ow, OH: a.oh}
+			continue
+		}
+		refs[i] = agent.AttachmentRef{
+			N:    a.n,
+			Path: filepath.Join(dir, strings.Repeat("f", 16)+"."+attach.Ext(attach.MIMEWebP)),
+			MIME: attach.MIMEWebP,
+			OW:   worstOriginal,
+			OH:   worstOriginal,
+		}
+	}
+	return agent.EnvelopeProblem(refs) == ""
 }
 
 // imageBytes is what list counts against the per-message cap (P29): every
@@ -543,22 +593,104 @@ type attachDoneMsg struct {
 	// noVision is the session's model, by name, when it is a native model the
 	// catalog does not mark as taking images (§3.3's note); "" otherwise.
 	noVision string
+	// skipped says the processing never ran: by the time the lane was free,
+	// nothing wanted it (attachLane.enter). It carries nothing else.
+	skipped bool
 }
 
 func (m attachDoneMsg) shownUnder() uint64 { return m.shownGen }
 
+// attachLane is what every copy of the model shares of the chips'
+// processings (Model.attachRuns), so that one attach.Process runs at a time
+// (plan 033 C3r, r1 #4): a paste of ten large photos decodes them one after
+// another, not ten at once, and a chip deleted, a draft sent or a session
+// left before its turn in the lane costs nothing.
+//
+//   - runs counts the processings started and not yet answered (processCmd):
+//     what the frame runner waits out (imagesInFlight).
+//   - slot is the lane: one processing holds it from just before it reads its
+//     source until it has stored the copy, and the rest wait for it in the
+//     order they came.
+//   - gen and want are what the model still wants processed, as the last
+//     Update left it (publish, from finish): the shown generation, and every
+//     entry pending in the composer's sidecar or in the draft a queue edit
+//     displaced. A processing that gets the slot no longer wanted — its chip
+//     gone, its draft sent or cleared, its session switched away from (a draft
+//     put away is relaunched under the new generation when it comes back,
+//     relaunchImages) — gives the slot straight back without reading a byte.
+//     Nothing about the lane depends on an answer reaching the model: the slot
+//     is let go by the processing itself, so a result the command gate drops
+//     strands nothing behind it.
+type attachLane struct {
+	runs atomic.Int64
+	slot chan struct{}
+
+	mu   sync.Mutex
+	gen  uint64
+	want map[uint64]bool
+}
+
+func newAttachLane() *attachLane { return &attachLane{slot: make(chan struct{}, 1)} }
+
+// publish records what the model wants processed now: under the shown
+// generation gen, the pending entries of sidecars.
+func (l *attachLane) publish(gen uint64, sidecars ...draftImages) {
+	var want map[uint64]bool
+	for _, d := range sidecars {
+		for _, a := range d.list {
+			if a.pending {
+				if want == nil {
+					want = make(map[uint64]bool)
+				}
+				want[a.id] = true
+			}
+		}
+	}
+	l.mu.Lock()
+	l.gen, l.want = gen, want
+	l.mu.Unlock()
+}
+
+// enter waits for the slot for the processing of entry id started under the
+// shown generation gen, and takes it only if that processing is still wanted
+// (publish); it reports whether it did. A processing that entered leaves.
+func (l *attachLane) enter(id, gen uint64) bool {
+	l.slot <- struct{}{}
+	l.mu.Lock()
+	wanted := l.gen == gen && l.want[id]
+	l.mu.Unlock()
+	if !wanted {
+		<-l.slot
+	}
+	return wanted
+}
+
+func (l *attachLane) leave() { <-l.slot }
+
+// laneEntered runs once a processing holds the lane, before it reads its
+// source: where the tests watch the lane. A var only so tests can set it;
+// nothing in craze writes it.
+var laneEntered = func(id uint64) {}
+
 // processCmd is the command that processes a's source for the session shown
 // now: into the attachments directory, under the shown generation, counted
-// in attachRuns from now until it has answered.
+// in attachRuns from now until it has answered, and run in its turn in the
+// lane (attachLane) — or not run at all, when nothing wants it by then.
 func (m Model) processCmd(a attachment) tea.Cmd {
 	run := processAttachment(m.attachDir, a.src, a.id, m.shownGen, m.visionCheck())
-	runs := m.attachRuns
-	if runs == nil {
+	lane := m.attachRuns
+	if lane == nil {
 		return run
 	}
-	runs.Add(1)
+	lane.runs.Add(1)
+	id, gen := a.id, m.shownGen
 	return func() tea.Msg {
-		defer runs.Add(-1)
+		defer lane.runs.Add(-1)
+		if !lane.enter(id, gen) {
+			return attachDoneMsg{id: id, shownGen: gen, skipped: true}
+		}
+		defer lane.leave()
+		laneEntered(id)
 		return run()
 	}
 }
@@ -646,6 +778,23 @@ func readSource(path string) ([]byte, error) {
 	}
 	defer f.Close()
 	return capRead(f, attach.MaxSourceBytes)
+}
+
+// attachAnswer is a chip's processing answering (update's attachDoneMsg): a
+// done or failed one applied (attachDone); a skipped one is nothing — the
+// entry it was for is gone — unless the entry is somehow still pending under
+// this generation, which would hold every send of the draft for ever: then its
+// processing starts again.
+func (m Model) attachAnswer(msg attachDoneMsg) (Model, tea.Cmd) {
+	if !msg.skipped {
+		return m.attachDone(msg), nil
+	}
+	for _, d := range []draftImages{m.images, m.editImages} {
+		if i := d.index(msg.id); i >= 0 && d.list[i].pending {
+			return m, m.processCmd(d.list[i])
+		}
+	}
+	return m, nil
 }
 
 // attachDone applies one chip's processing: the entry it was for — in the
@@ -764,13 +913,16 @@ func (d draftImages) reconciled(value string) draftImages {
 }
 
 // reconcileImages holds the composer's sidecar to its text, after every
-// message (finish, beside syncComposerAt). A draft with no chips has nothing
-// to hold, and its text is not read.
+// message (finish, beside syncComposerAt), and then tells the processing lane
+// what is still wanted (attachLane.publish). A draft with no chips has
+// nothing to hold, and its text is not read.
 func (m *Model) reconcileImages() {
-	if len(m.images.list) == 0 {
-		return
+	if len(m.images.list) != 0 {
+		m.images = m.images.reconciled(m.input.Value())
 	}
-	m.images = m.images.reconciled(m.input.Value())
+	if m.attachRuns != nil {
+		m.attachRuns.publish(m.shownGen, m.images, m.editImages)
+	}
 }
 
 // imageRefs is the envelope's list for text, a message about to go: every
@@ -803,7 +955,7 @@ func withImages(list []attachment, text string) string {
 // (frameState.settled). The count covers a chip deleted while its processing
 // ran, whose store write would otherwise race the run's end.
 func (m Model) imagesInFlight() bool {
-	if m.attachRuns != nil && m.attachRuns.Load() > 0 {
+	if m.attachRuns != nil && m.attachRuns.runs.Load() > 0 {
 		return true
 	}
 	_, a := m.images.pending()

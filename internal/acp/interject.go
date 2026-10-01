@@ -139,25 +139,38 @@ func (c *Client) handleQueueChanged(msg *Message) {
 }
 
 // learnPromptIDLocked stamps the in-flight prompt's id the first time a
-// broadcast names it, by the text that was sent.
+// broadcast names it, by the text that was sent: block 1 alone (grok 1.0.30)
+// or every text block joined (grok 1.0.44, which names a prompt carrying the
+// downscale note or a plugin expansion that way; plan 033 V1).
 //
 // A queued entry is preferred over the running one, and that order matters:
 // a prompt craze has just sent is queued, not running. Reading the running id
 // first would misidentify a retry of a prompt whose text the agent is still
 // running — the broadcast names the old turn as running and the new one as
-// queued, and the old turn's completion would then end the new one.
+// queued, and the old turn's completion would then end the new one. An id
+// already retired is one of craze's own turns that is over — the refused
+// prompt an image resend repeats, by the same text — and never this one's.
+//
+// An id learned is the prompt heard: grok has taken it into its queue, so a
+// refusal behind it is not one the prompt can be resent after (plan 033 C3r).
 func (c *Client) learnPromptIDLocked(n QueueChanged) {
 	if !c.inPrompt || c.promptID != "" || c.promptText == "" {
 		return
 	}
+	names := func(id, text string) bool {
+		return id != "" && !IsInterjectFallback(id) && !c.retiredLocked(id) &&
+			(text == c.promptText || text == c.promptJoined)
+	}
 	for _, e := range n.Entries {
-		if e.ID != "" && e.Text == c.promptText && !IsInterjectFallback(e.ID) {
+		if names(e.ID, e.Text) {
 			c.promptID = e.ID
+			c.heard = true
 			return
 		}
 	}
-	if n.RunningPromptID != "" && n.RunningText == c.promptText && !IsInterjectFallback(n.RunningPromptID) {
+	if names(n.RunningPromptID, n.RunningText) {
 		c.promptID = n.RunningPromptID
+		c.heard = true
 	}
 }
 

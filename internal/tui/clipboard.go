@@ -85,8 +85,9 @@ var nativeCopy = clipboard.WriteAll
 // nativePaste is the read half, and the only way text comes back off the
 // system clipboard. bubbles' own Ctrl+V calls clipboard.ReadAll directly, which
 // would shell out to xclip / wl-paste from under a test or a frame script, so
-// craze binds its own paste and routes it through here.
-var nativePaste = clipboard.ReadAll
+// craze binds its own paste and routes it through here. It reads text only
+// when the clipboard offers a text type (readClipboardText, plan 033 C3r).
+var nativePaste = readClipboardText
 
 // nativePasteImage is the image read's lower half (plan 033 §3.3,
 // clipboard_image.go): the platform's clipboard tools asked for an image —
@@ -282,6 +283,10 @@ type pasteMsg struct {
 	// the same (C15r, astra r30-c15 2).
 	listGen uint64
 	key     keyField
+	// textRefused says the clipboard's "text" was not text — not UTF-8, or
+	// holding a NUL (pastableText) — and was dropped: text is "" and the
+	// status row says so (clipboardNotText, plan 033 C3r).
+	textRefused bool
 }
 
 // hasImage says the paste carries the clipboard's image, or why it could not
@@ -361,6 +366,12 @@ func readPaste(read func() (string, error), msg pasteMsg) tea.Msg {
 	// a keystroke that had nothing to insert is noise.
 	text, err := read()
 	if err != nil {
+		return msg
+	}
+	if !pastableText(text) {
+		// Binary that slipped past the typed read never reaches a draft or a
+		// field, whichever one it was asked for (plan 033 C3r, V1 finding 1).
+		msg.textRefused = true
 		return msg
 	}
 	msg.text = text

@@ -475,6 +475,11 @@ else: there are no inline previews.
 
 Reading the clipboard's image needs `wl-paste` (Wayland), `xclip` (X11) or, on
 macOS, `osascript`. Without the tool, or without an image, `Ctrl+V` pastes text.
+It pastes text only when the clipboard holds text: an image that does not become
+a chip (in shell mode, say, or one too small) pastes nothing, and clipboard
+contents that are not text (binary data, a NUL byte) are never pasted anywhere,
+the session list and the `/connect` key field included; the status line says
+`the clipboard's text was not pasted: it is not text`.
 
 A path is only turned into a chip when the file exists, is a regular file, is
 at most 20 MiB, decodes as an image and is at least 8×8 pixels. These stay
@@ -497,9 +502,12 @@ at most 20 MiB, decodes as an image and is at least 8×8 pixels. These stay
   and after `/clear`. Within one draft a number is never reused until it runs
   out past 99.
 - A message holds at most **10 images and 15 MiB** of them together (each
-  image counted at its processed size, or at most 3.75 MiB). A paste over
-  either limit stays text, with a status note.
-- Processing takes a moment. While an image is still being attached, `Enter`
+  image counted at its processed size, or at most 3.75 MiB), and its images'
+  paths may add up to **4 KiB** at most (which binds only when craze's
+  attachments directory has a very long path). A paste over any limit stays
+  text, with a status note.
+- Processing takes a moment, and images are processed one at a time, in the
+  order they were pasted. While an image is still being attached, `Enter`
   (and `Ctrl+L`, the first prompt of a new session, and saving a queue edit) does
   nothing and keeps the draft; the status line says `image #N is still being
   attached; press enter again in a moment`. A file that cannot be attached is
@@ -511,7 +519,8 @@ at most 20 MiB, decodes as an image and is at least 8×8 pixels. These stay
 
 Anything wider or taller than 2000 pixels is scaled down to 2000 on its long
 edge, an image over 3.75 MiB is re-encoded smaller, and photos lose their EXIF
-and XMP metadata. A `gif` sends its first frame as a `png`. When an image is
+and XMP metadata, wherever in the file it is, and anything stored after the image
+itself. A `gif` sends its first frame as a `png`. When an image is
 scaled, the status line says so, for example `image #1 downscaled 3024×1964 →
 2000×1299`, and the agent is told too. Sources over 20 MiB or 50 megapixels are
 refused.
@@ -532,7 +541,7 @@ Two other notes can appear when you paste:
 | Agent | Receives |
 |---|---|
 | Cursor, Grok, gx | the visible message first, then one image block per chip in order, and, for a scaled image, a line `[Image #1 was downscaled from 3024×1964 to 2000×1299]`. An agent that says it does not take images gets `[Image #N: <path>]` text in the chip's place instead (Grok and gx are sent images regardless, since they take them without saying so) |
-| An agent that rejects the images | when it answers the prompt with an invalid-params error before doing anything, craze sends the message once more with each image as `[Image #N: <path>]` text. After the agent has done anything for the turn, or you cancelled, the error is shown as it is |
+| An agent that rejects the images | when it answers the prompt with an invalid-params error without having done anything with it, craze sends the message once more with each image as `[Image #N: <path>]` text. Updates about the session itself (its command list, mode, settings or title) do not count as doing something. After the agent has done anything for the turn, before its error or since, or you cancelled, the error is shown as it is |
 | Native | the same chips; how the image reaches the model depends on the model: see below |
 | An [interjection](#queued-messages) | always path text, `[Image #N: <path>]`, never image data |
 | `craze prompt` | text only: it has no way to attach an image |

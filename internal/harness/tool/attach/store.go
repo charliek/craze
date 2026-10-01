@@ -16,6 +16,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/charliek/craze/internal/atomicfile"
 )
 
 // The attachments directory (plan 033 §3.2): <CRAZE_HOME>/attachments, handed
@@ -48,6 +50,53 @@ const hashLen = 16
 // crashed write's leftover by age and budget like any stored file.
 const tempSuffix = ".tmp"
 
+// lockName is the store's cross-process lock file, inside the directory
+// (plan 033 C3r, r1 #12). It is no stored name and no temp name, so the host
+// never reads it and the sweep never removes it; it is created on first use
+// and stays.
+const lockName = ".lock"
+
+// How long Save and Sweep wait for the store's lock. Save, holding a chip
+// open, waits a little and then goes on without it — it deletes nothing, so
+// the worst it can meet is the race the lock exists for, which Sweep's
+// re-stat narrows. Sweep, a best-effort tidy at TUI start, waits as long and
+// then gives up quietly: the next start sweeps. Vars only so tests can
+// shorten them; nothing in craze writes them.
+var (
+	saveLockWait  = time.Second
+	sweepLockWait = time.Second
+)
+
+// lockBusy runs when the store's lock was busy at its first try, before the
+// wait: the point at which a test knows the other side holds it. A var only
+// so tests can set it; nothing in craze writes it.
+var lockBusy = func() {}
+
+// lockStore takes the store's lock in root, waiting at most d (lockName,
+// atomicfile.FlockWithin). The file is opened through the Root, so the lock
+// is the one in this directory whatever its path now names. unlock is never
+// nil, and releases the lock and closes the file.
+func lockStore(root *os.Root, d time.Duration) (unlock func(), err error) {
+	noop := func() {}
+	f, err := root.OpenFile(lockName, os.O_CREATE|os.O_RDWR|syscall.O_NOFOLLOW, 0o600)
+	if err != nil {
+		return noop, fmt.Errorf("attach: %w", err)
+	}
+	release, err := atomicfile.FlockWithin(f, 0)
+	if errors.Is(err, atomicfile.ErrLockBusy) {
+		lockBusy()
+		release, err = atomicfile.FlockWithin(f, d)
+	}
+	if err != nil {
+		_ = f.Close()
+		return noop, err
+	}
+	return func() {
+		release()
+		_ = f.Close()
+	}, nil
+}
+
 // StoredName reports whether name is a name Save gives a file:
 // <hashLen lowercase hex digits>.<png|jpg|webp>.
 func StoredName(name string) bool {
@@ -76,6 +125,14 @@ func isLowerHex(s string) bool {
 	}
 	return true
 }
+
+// sweepStatted runs between Sweep's listing stat of a file and its re-stat of
+// it, and sweepRemoving between that re-stat and the removal: the windows a
+// Save in another craze would use. Tests run one there.
+var (
+	sweepStatted  = func(string) {}
+	sweepRemoving = func(string) {}
+)
 
 // dirChecked runs between openDir's check of the directory and its open of
 // it: the window a swap would use. Tests make the swap there.
@@ -200,6 +257,12 @@ func private(root *os.Root, checked fs.FileInfo, tighten bool) error {
 //
 // Data over MaxBytes is refused (ErrTooLarge): the host would refuse to read
 // it, and the store keeps nothing the host would not send.
+//
+// The dedupe's refresh and the publish hold the store's lock (lockStore), so
+// a Sweep in another craze cannot decide on a file's age, let this refresh
+// it, and then remove it anyway — leaving a chip whose file is gone (r1 #12).
+// A lock still busy after saveLockWait is gone without: Save removes nothing,
+// and Sweep re-stats what it removes.
 func Save(dir string, data []byte, mime string) (string, error) {
 	ext := Ext(mime)
 	if ext == "" {
@@ -215,6 +278,8 @@ func Save(dir string, data []byte, mime string) (string, error) {
 		return "", err
 	}
 	defer root.Close()
+	unlock, _ := lockStore(root, saveLockWait)
+	defer unlock()
 	path := filepath.Join(dir, name)
 	if old, err := ReadFile(root, name); err == nil && bytes.Equal(old, data) {
 		now := time.Now()
@@ -351,6 +416,14 @@ func ReadPath(root *os.Root, path string) ([]byte, error) {
 // files), never follows a symlink, never removes the directory itself, and
 // treats a file that vanishes under it — another craze sweeping too — as no
 // error. The first other error is returned after every file has been tried.
+//
+// The listing, every decision and every removal hold the store's lock
+// (lockStore), so no Save refreshes or replaces a file between the stat that
+// condemned it and its removal (r1 #12); a lock still busy after
+// sweepLockWait is a sweep given up, quietly — the next start sweeps. Each
+// file is stat'ed again just before it goes, and one that has changed since
+// the listing — a Save that waited out the lock and went on without it — is
+// kept.
 func Sweep(dir string, now time.Time) (int, error) {
 	return sweep(dir, now, DirBudget)
 }
@@ -366,14 +439,31 @@ func sweep(dir string, now time.Time, budget int64) (int, error) {
 		return 0, err
 	}
 	defer root.Close()
+	unlock, err := lockStore(root, sweepLockWait)
+	defer unlock()
+	if err != nil {
+		return 0, nil
+	}
 	entries, err := fs.ReadDir(root.FS(), ".")
 	if err != nil {
 		return 0, fmt.Errorf("attach: %w", err)
 	}
 	removed := 0
 	var first error
-	remove := func(name string) bool {
-		err := root.Remove(name)
+	// remove takes fi's file, the one the listing stat'ed, unless it has
+	// changed since; it reports whether the file is gone.
+	remove := func(fi fs.FileInfo) bool {
+		name := fi.Name()
+		sweepStatted(name)
+		again, err := root.Lstat(name)
+		switch {
+		case errors.Is(err, fs.ErrNotExist):
+			return true
+		case err != nil || !os.SameFile(fi, again) || !again.ModTime().Equal(fi.ModTime()) || again.Size() != fi.Size():
+			return false
+		}
+		sweepRemoving(name)
+		err = root.Remove(name)
 		switch {
 		case err == nil:
 			removed++
@@ -398,8 +488,9 @@ func sweep(dir string, now time.Time, budget int64) (int, error) {
 			continue
 		}
 		if fi.ModTime().Before(cutoff) {
-			remove(fi.Name())
-			continue
+			if remove(fi) {
+				continue
+			}
 		}
 		left = append(left, fi)
 		total += fi.Size()
@@ -414,7 +505,7 @@ func sweep(dir string, now time.Time, budget int64) (int, error) {
 		if total <= budget {
 			break
 		}
-		if remove(fi.Name()) {
+		if remove(fi) {
 			total -= fi.Size()
 		}
 	}

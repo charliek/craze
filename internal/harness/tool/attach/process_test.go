@@ -246,6 +246,132 @@ func TestProcessDownscalesToTheEdge(t *testing.T) {
 	}
 }
 
+// kernelBytes is the CatmullRom scaler's working buffer for an input sw×sh
+// scaled to dw×dh: 32 bytes per pixel of output width × input height
+// (x/image/draw's kernelScaler.makeTmpBuf).
+func kernelBytes(sh, dw int) int64 { return 32 * int64(dw) * int64(sh) }
+
+// TestShrinkStepsBoundTheScaler is the memory bound of Process (plan 033 C3r,
+// r1 #4), checked on the sizes alone so no 50 MP buffer is made: every step
+// halves only an axis at least twice its output, leaves it no smaller than the
+// output, and after the last step every axis is under twice its output — so
+// the kernel buffer for any source Probe lets through is at most 32 B × 2000 ×
+// 3999. The r1 case, an 8 × 6,250,000 strip, asked 1.6 GB of the scaler
+// without the halving; it now asks under 1 MB, and its biggest halving is
+// half the strip.
+func TestShrinkStepsBoundTheScaler(t *testing.T) {
+	const bound = 32 * 2000 * 3999
+	check := func(sw, sh int) (steps []image.Point, kernel int64) {
+		t.Helper()
+		dw, dh := scaledTo(sw, sh, MaxEdge)
+		steps = shrinkSteps(sw, sh, dw, dh)
+		w, h := sw, sh
+		for _, p := range steps {
+			if (p.X != w && (w < 2*dw || p.X != w/2)) || (p.Y != h && (h < 2*dh || p.Y != h/2)) || p.X < dw || p.Y < dh {
+				t.Fatalf("%d×%d → %d×%d: step %d×%d → %v is not a halving of an axis twice its output", sw, sh, dw, dh, w, h, p)
+			}
+			w, h = p.X, p.Y
+		}
+		if w >= 2*dw || h >= 2*dh {
+			t.Fatalf("%d×%d → %d×%d: the kernel's input is %d×%d", sw, sh, dw, dh, w, h)
+		}
+		if dw != w || dh != h {
+			kernel = kernelBytes(h, dw)
+		}
+		if kernel > bound {
+			t.Fatalf("%d×%d: the kernel buffer is %d bytes", sw, sh, kernel)
+		}
+		return steps, kernel
+	}
+
+	steps, kernel := check(8, 6_250_000)
+	if last := steps[len(steps)-1]; last != image.Pt(8, 3051) || kernel != kernelBytes(3051, 8) || kernel > 1<<20 {
+		t.Fatalf("8 × 6,250,000: steps end at %v, kernel %d bytes", last, kernel)
+	}
+	if first := steps[0]; first != image.Pt(8, 3_125_000) {
+		t.Fatalf("8 × 6,250,000: the first halving is %v", first)
+	}
+	if _, kernel := check(3999, 3999); kernel != kernelBytes(3999, 2000) {
+		t.Fatalf("3999²: kernel %d bytes, want the bound", kernel)
+	}
+	if steps, _ := check(2400, 1800); steps != nil {
+		t.Fatalf("2400×1800 was halved: %v", steps)
+	}
+	// Every shape Probe lets through, coarsely: long edges up to the pixel
+	// cap, aspect ratios from square to 8 px wide, both orientations.
+	for long := MinEdge; long <= MaxSourcePixels/MinEdge; long = long*5/4 + 1 {
+		for short := MinEdge; short <= long && long*short <= MaxSourcePixels; short = short*3/2 + 1 {
+			check(long, short)
+			check(short, long)
+		}
+	}
+}
+
+// TestFitHalvesBeforeTheKernel runs fit on images that need halving and
+// watches what reaches the CatmullRom scaler (testKernelInput): never an
+// input twice its output on an axis. The 8 × 100,000 strip is the r1 shape at
+// a size a test can decode; its gradient survives the trip.
+func TestFitHalvesBeforeTheKernel(t *testing.T) {
+	var inputs []image.Rectangle
+	testKernelInput = func(src image.Rectangle, w, h int) {
+		if src.Dx() >= 2*w || src.Dy() >= 2*h {
+			t.Errorf("CatmullRom got %v for %d×%d", src, w, h)
+		}
+		inputs = append(inputs, src)
+	}
+	t.Cleanup(func() { testKernelInput = nil })
+
+	got, err := Process(encodePNG(t, gradient(8, 100_000)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 8 × 100,000 halves five times to 8 × 3125, which CatmullRom takes to
+	// 8 × 2000.
+	if got.Width != MinEdge || got.Height != MaxEdge || len(inputs) != 1 || inputs[0] != image.Rect(0, 0, 8, 3125) {
+		t.Fatalf("got %d×%d through %v", got.Width, got.Height, inputs)
+	}
+	out := decoded(t, got.Data)
+	top, bottom := out.At(4, 10), out.At(4, got.Height-10)
+	if near(top, bottom, 16) {
+		t.Fatalf("the gradient flattened: %v at the top, %v at the bottom", top, bottom)
+	}
+}
+
+// TestHalvingKeepsTheImage: an image halved twice before CatmullRom comes out
+// the same as one CatmullRom took the whole way — to within a few levels a
+// channel on a smooth ramp, and with every quadrant's colour where the
+// quadrants meet nothing (the ladder's own quality, plan 033 §3.2, holds).
+// A hard edge is where they may differ: the halving's box and the kernel's
+// lobes place it a pixel apart.
+func TestHalvingKeepsTheImage(t *testing.T) {
+	l := limits{maxBytes: MaxBytes, maxEdge: 200}
+	ramp := image.NewNRGBA(image.Rect(0, 0, 1600, 1200))
+	for y := range 1200 {
+		for x := range 1600 {
+			ramp.SetNRGBA(x, y, color.NRGBA{uint8(x * 255 / 1599), uint8(y * 255 / 1199), uint8((x + y) * 255 / 2798), 0xff})
+		}
+	}
+	halved, direct := l.fit(ramp), scale(ramp, 200, 150)
+	if halved.Rect != image.Rect(0, 0, 200, 150) {
+		t.Fatalf("ramp: fit to %v", halved.Rect)
+	}
+	worst := 0
+	for i := range halved.Pix {
+		d := int(halved.Pix[i]) - int(direct.Pix[i])
+		worst = max(worst, d, -d)
+	}
+	if worst > 2 {
+		t.Fatalf("ramp: halved and direct differ by %d levels", worst)
+	}
+	q := quadrants(1600, 1200)
+	halved, direct = l.fit(q), scale(q, 200, 150)
+	for _, p := range []image.Point{{50, 37}, {150, 37}, {50, 112}, {150, 112}, {2, 2}, {197, 147}} {
+		if !near(halved.At(p.X, p.Y), direct.At(p.X, p.Y), 2) {
+			t.Fatalf("quadrants: %v is %v halved, %v direct", p, halved.At(p.X, p.Y), direct.At(p.X, p.Y))
+		}
+	}
+}
+
 // TestProcessAlphaGoesToJPEGOnWhite: an image still over the cap as PNG
 // becomes a JPEG, and what was transparent comes out white, not black.
 func TestProcessAlphaGoesToJPEGOnWhite(t *testing.T) {

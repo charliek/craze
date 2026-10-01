@@ -561,9 +561,11 @@ func TestAttachOverTheFakeAgentReproducesTheFirst(t *testing.T) {
 }
 
 // fakeAgentGate points the fake agent's CRAZE_FAKE_GATE at a fresh FIFO and
-// returns what releases one held turn: it writes the one byte the fixture's
-// awaitGate reads (cmd/craze-fake-agent/server.go) — both sides reopen the
-// FIFO fresh on every turn, not just once at startup. The closure that
+// returns what releases one held turn — or one held step of a long turn: it
+// writes the one byte the fixture reads (cmd/craze-fake-agent/server.go:
+// awaitGate, which reopens the FIFO for each turn, or the held turns' shared
+// reader, which keeps it open so that releases back to back lose no byte).
+// This side opens it afresh for every release. The closure that
 // releases it, though, is made once here and reused for every turn; each
 // call instead gets its own fresh, watchdog-sized stepCtx off ctx, not a
 // share of one deadline fixed when the gate was made: a caller with a loop

@@ -595,6 +595,9 @@ var tuiSites = []tuiSite{
 	{"composer_image.go", "attachErrReason", "Is", "fs.ErrNotExist", 1, proofLocal},
 	{"composer_image.go", "attachErrReason", "Error", "err", 1, proofLocal},
 	{"clipboard_image.go", "readImageFrom", "Is", "attach.ErrSourceTooLarge", 1, proofLocal},
+	// The clipboard's text read (plan 033 C3r): no tool could list the
+	// clipboard's types, in this process.
+	{"clipboard_text.go", "readTextVia", "Is", "errNoTextBackend", 1, proofLocal},
 	// The frame harness's capture boundary: in process only (engineBehind).
 	{"frame.go", "streamHead", "Is", "agent.ErrLogClosing", 1, proofLocal},
 	{"frame.go", "streamHead", "Is", "agent.ErrClosed", 1, proofLocal},

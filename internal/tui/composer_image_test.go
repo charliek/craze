@@ -1132,3 +1132,318 @@ func TestTheFrameRunnerWaitsForAChip(t *testing.T) {
 		t.Fatalf("the displaced draft's chip was not stored: %v", err)
 	}
 }
+
+// laneHold makes every processing that enters the lane announce itself on
+// entered and wait for a value on release before it reads its source.
+func laneHold(t *testing.T) (entered chan uint64, release chan struct{}) {
+	t.Helper()
+	entered, release = make(chan uint64, 16), make(chan struct{})
+	done := make(chan struct{})
+	laneEntered = func(id uint64) {
+		entered <- id
+		select {
+		case <-release:
+		case <-done: // the test is over: nothing holds a processing past it
+		}
+	}
+	t.Cleanup(func() {
+		close(done)
+		laneEntered = func(uint64) {}
+	})
+	return entered, release
+}
+
+// answerNoEntry is the next answer on out, failing at once if a processing
+// enters the lane first: none may, by then.
+func answerNoEntry(t *testing.T, out <-chan tea.Msg, entered <-chan uint64, why string) tea.Msg {
+	t.Helper()
+	select {
+	case msg := <-out:
+		return msg
+	case id := <-entered:
+		t.Fatalf("entry %d entered the lane %s", id, why)
+	case <-time.After(5 * time.Second):
+		t.Fatal("no answer")
+	}
+	return nil
+}
+
+// goRun runs cmd on its own goroutine, as the program runs a command, and
+// hands its message to out.
+func goRun(cmd tea.Cmd, out chan<- tea.Msg) { go func() { out <- cmd() }() }
+
+// noEntry fails if a processing enters the lane within a short while: the
+// lane is held, so none may.
+func noEntry(t *testing.T, entered <-chan uint64, why string) {
+	t.Helper()
+	select {
+	case id := <-entered:
+		t.Fatalf("entry %d entered the lane %s", id, why)
+	case <-time.After(150 * time.Millisecond):
+	}
+}
+
+// awaitEntry is the next processing to enter the lane.
+func awaitEntry(t *testing.T, entered <-chan uint64) uint64 {
+	t.Helper()
+	select {
+	case id := <-entered:
+		return id
+	case <-time.After(5 * time.Second):
+		t.Fatal("no processing entered the lane")
+		return 0
+	}
+}
+
+// TestOneProcessingRunsAtATime (plan 033 C3r, r1 #4): three images pasted at
+// once are processed one after another — while one holds the lane, the others
+// wait, whatever the scheduler does — and all three chips are done in the end.
+func TestOneProcessingRunsAtATime(t *testing.T) {
+	m, _ := imageModel(t)
+	dir := t.TempDir()
+	m = pasteText(t, m, writePNG(t, dir, "a.png", 16, 16)+" "+writePNG(t, dir, "b.png", 20, 20)+" "+writePNG(t, dir, "c.png", 24, 24))
+	if len(m.images.list) != 3 {
+		t.Fatalf("the paste made %d chips", len(m.images.list))
+	}
+	entered, release := laneHold(t)
+	// The paste's own commands are counted and never run here (pasteText
+	// drops them): the count is held to what it was.
+	runs := m.attachRuns.runs.Load()
+	out := make(chan tea.Msg, 3)
+	for _, a := range m.images.list {
+		goRun(m.processCmd(a), out)
+	}
+	for range 3 {
+		awaitEntry(t, entered)
+		noEntry(t, entered, "while another held it")
+		release <- struct{}{}
+	}
+	for range 3 {
+		m = deliver(t, m, <-out)
+	}
+	for _, a := range m.images.list {
+		if a.pending || a.path == "" {
+			t.Fatalf("a chip after its processing: %+v", a)
+		}
+	}
+	if n := m.attachRuns.runs.Load(); n != runs || len(m.attachRuns.slot) != 0 {
+		t.Fatalf("%d processings counted (%d before), %d in the lane", n, runs, len(m.attachRuns.slot))
+	}
+}
+
+// TestAStaleProcessingIsSkippedBeforeItStarts: a chip deleted while its
+// processing waited for the lane is never processed — no source read, no file
+// stored — and its answer is nothing; the chip that held the lane is done.
+func TestAStaleProcessingIsSkippedBeforeItStarts(t *testing.T) {
+	m, _ := imageModel(t)
+	dir := t.TempDir()
+	m = pasteText(t, m, writePNG(t, dir, "a.png", 16, 16)+" "+writePNG(t, dir, "b.png", 20, 20))
+	first, second := m.images.list[0], m.images.list[1]
+	entered, release := laneHold(t)
+	out := make(chan tea.Msg, 2)
+	goRun(m.processCmd(first), out)
+	if id := awaitEntry(t, entered); id != first.id {
+		t.Fatalf("entry %d entered first", id)
+	}
+	waiting := make(chan tea.Msg, 1)
+	goRun(m.processCmd(second), waiting)
+	// [Image #2] goes, its processing still waiting for the lane.
+	m = pressKey(t, m, tea.KeyBackspace)
+	if m.input.Value() != "[Image #1] " || len(m.images.list) != 1 {
+		t.Fatalf("after the backspace: %q, %d chips", m.input.Value(), len(m.images.list))
+	}
+	release <- struct{}{}
+	m = deliver(t, m, <-out)
+	skipped := answerNoEntry(t, waiting, entered, "for a deleted chip").(attachDoneMsg)
+	if !skipped.skipped || skipped.id != second.id || skipped.path != "" {
+		t.Fatalf("the deleted chip's processing answered %+v", skipped)
+	}
+	noEntry(t, entered, "for a deleted chip")
+	if files, _ := os.ReadDir(m.attachDir); len(files) != 2 { // the store's lock and the one image
+		t.Fatalf("the attachments directory holds %d entries", len(files))
+	}
+	m = deliver(t, m, skipped)
+	if len(m.images.list) != 1 || m.images.list[0].pending || m.copyNote != "" {
+		t.Fatalf("after both answers: %+v, note %q", m.images.list, m.copyNote)
+	}
+}
+
+// TestASwitchDoesNotStrandTheLane: processings waiting for the lane when the
+// shown generation moves on (a switch: switchBackend's shownGen++, published
+// by finish) are skipped as the lane frees, the lane is free after them, and
+// the draft's chips processed again under the new generation get through.
+func TestASwitchDoesNotStrandTheLane(t *testing.T) {
+	m, _ := imageModel(t)
+	dir := t.TempDir()
+	m = pasteText(t, m, writePNG(t, dir, "a.png", 16, 16)+" "+writePNG(t, dir, "b.png", 20, 20))
+	entered, release := laneHold(t)
+	runs := m.attachRuns.runs.Load()
+	out := make(chan tea.Msg, 2)
+	goRun(m.processCmd(m.images.list[0]), out)
+	awaitEntry(t, entered)
+	goRun(m.processCmd(m.images.list[1]), out)
+	m.shownGen++
+	m.reconcileImages()
+	release <- struct{}{}
+	answers := []attachDoneMsg{
+		answerNoEntry(t, out, entered, "under a generation the model has left").(attachDoneMsg),
+		answerNoEntry(t, out, entered, "under a generation the model has left").(attachDoneMsg),
+	}
+	if answers[0].skipped == answers[1].skipped {
+		t.Fatalf("answers %+v: want the held one done and the waiting one skipped", answers)
+	}
+	noEntry(t, entered, "under a generation the model has left")
+	if len(m.attachRuns.slot) != 0 || m.attachRuns.runs.Load() != runs {
+		t.Fatal("the lane is still held")
+	}
+	// Back again: both chips are still pending in the draft, and start over
+	// under the new generation (relaunchImages' processCmd, one each).
+	laneEntered = func(uint64) {}
+	if m.relaunchImages() == nil {
+		t.Fatal("nothing to relaunch")
+	}
+	m = settleImages(t, m)
+	for _, a := range m.images.list {
+		if a.pending {
+			t.Fatalf("a chip after the relaunch: %+v", a)
+		}
+	}
+}
+
+// TestASkippedAnswerForAPendingChipStartsItAgain: a skipped answer whose
+// entry is pending under this generation all the same starts its processing
+// again rather than hold the draft's sends for ever.
+func TestASkippedAnswerForAPendingChipStartsItAgain(t *testing.T) {
+	m, _ := imageModel(t)
+	m = pasteText(t, m, shotPNG(t))
+	a := m.images.list[0]
+	tm, cmd := m.Update(attachDoneMsg{id: a.id, shownGen: m.shownGen, skipped: true})
+	m = tm.(Model)
+	if cmd == nil || !m.images.list[0].pending {
+		t.Fatal("a skipped answer for a pending chip started nothing")
+	}
+	if m = deliver(t, m, cmd()); m.images.list[0].pending {
+		t.Fatal("the restarted processing did not finish the chip")
+	}
+}
+
+// TestAChipTheEnvelopeCannotHoldStaysText is r1 #11 (plan 033 C3r; supersedes
+// X26): with an attachments directory near 400 bytes long, ten tiny images'
+// envelope would be over the host's 4 KiB, and the host would send every one
+// of them as path text. So the chip that would take the envelope over is not
+// made — that paste stays its path, with a note like the other caps' — and
+// the chips made go, all of them, as images: the host reads the envelope sent.
+func TestAChipTheEnvelopeCannotHoldStaysText(t *testing.T) {
+	m, stub := imageModel(t)
+	long := t.TempDir()
+	for range 7 {
+		long = filepath.Join(long, strings.Repeat("d", 50))
+	}
+	m.attachDir = filepath.Join(long, "attachments")
+	if n := len(m.attachDir); n < 380 || n > 1000 {
+		t.Fatalf("setup: the attachments directory is %d bytes", n)
+	}
+	src := t.TempDir()
+	made := 0
+	var refusedPath string
+	for i := 1; i <= attach.MaxPerMessage; i++ {
+		// Every image its own bytes, so each chip is a file of its own.
+		path := writePNG(t, src, fmt.Sprintf("s%02d.png", i), 16+i, 16)
+		m = pasteText(t, m, path)
+		if len(m.images.list) == made {
+			refusedPath = path
+			break
+		}
+		made++
+		m = settleImages(t, m)
+	}
+	if refusedPath == "" || made < 2 {
+		t.Fatalf("%d chips made and none refused: the envelope check never bound", made)
+	}
+	if !strings.Contains(m.copyNote, "image paths may add up to 4 KiB at most; pasted as text") {
+		t.Fatalf("the refusal's note: %q", m.copyNote)
+	}
+	if !strings.HasSuffix(m.input.Value(), refusedPath) {
+		t.Fatalf("the refused paste is not its path: %q", m.input.Value())
+	}
+	m.input.SetValue(strings.TrimSuffix(m.input.Value(), refusedPath))
+	_ = pressKey(t, m, tea.KeyEnter)
+	sent := stub.Prompts()
+	if len(sent) != 1 {
+		t.Fatalf("sent %d prompts", len(sent))
+	}
+	refs := sentImages(t, sent[0])
+	if len(refs) != made {
+		t.Fatalf("the envelope names %d images, want the %d chips", len(refs), made)
+	}
+	if p := agent.EnvelopeProblem(refs); p != "" {
+		t.Fatalf("the host would refuse the envelope sent: %s", p)
+	}
+}
+
+// dirOfLen is a path under base exactly n bytes long, in components short
+// enough for any file system.
+func dirOfLen(t *testing.T, base string, n int) string {
+	t.Helper()
+	dir := base
+	for len(dir) < n {
+		seg := min(200, n-len(dir)-1)
+		if seg < 1 {
+			t.Fatalf("setup: no path of %d bytes under %q", n, base)
+		}
+		dir = filepath.Join(dir, strings.Repeat("d", seg))
+	}
+	return dir
+}
+
+// TestAPendingChipIsCountedAtItsMost: a chip still being processed is counted
+// at the most its envelope ref can take — a downscaled image's ref carries the
+// source's ow and oh — so nine downscaled chips and a tenth whose ref the
+// envelope could hold only without them do not make an envelope the host
+// would refuse. The attachments directory's length is chosen so that it is
+// exactly that close.
+func TestAPendingChipIsCountedAtItsMost(t *testing.T) {
+	m, stub := imageModel(t)
+	base := t.TempDir()
+	ref := func(dir string, n int, done bool) agent.AttachmentRef {
+		if done { // a 20NN×8 PNG, downscaled to 2000×8
+			return agent.AttachmentRef{N: n, Path: filepath.Join(dir, "0123456789abcdef.png"), MIME: attach.MIMEPNG, OW: 2000 + n, OH: 8}
+		}
+		return agent.AttachmentRef{N: n, Path: filepath.Join(dir, "ffffffffffffffff.webp"), MIME: attach.MIMEWebP}
+	}
+	size := func(dir string, lastDone bool) int {
+		refs := make([]agent.AttachmentRef, 10)
+		for i := range refs {
+			refs[i] = ref(dir, i+1, i < 9 || lastDone)
+		}
+		return len(agent.AttachmentBlock(refs))
+	}
+	dir := ""
+	for n := len(base) + 2; n < 1000 && dir == ""; n++ {
+		if d := strings.Repeat("x", n); size(d, false) <= 4096 && size(d, true) > 4096 {
+			dir = dirOfLen(t, base, n)
+		}
+	}
+	if dir == "" {
+		t.Fatal("setup: no directory length puts the envelope between the two")
+	}
+	m.attachDir = dir
+	src := t.TempDir()
+	for i := 1; i <= 9; i++ {
+		m = pasteText(t, m, writePNG(t, src, fmt.Sprintf("s%d.png", i), 2000+i, 8))
+	}
+	m = settleImages(t, m)
+	if len(m.images.list) != 9 || m.images.list[8].ow != 2009 {
+		t.Fatalf("setup: nine downscaled chips, got %+v", m.images.list)
+	}
+	tenth := writePNG(t, src, "s10.png", 2010, 8)
+	m = pasteText(t, m, tenth)
+	if len(m.images.list) != 9 || !strings.HasSuffix(m.input.Value(), tenth) {
+		t.Fatalf("the tenth chip was made: %d chips, draft %q", len(m.images.list), m.input.Value())
+	}
+	m.input.SetValue(strings.TrimSuffix(m.input.Value(), tenth))
+	_ = pressKey(t, m, tea.KeyEnter)
+	if sent := stub.Prompts(); len(sent) != 1 || len(sentImages(t, sent[0])) != 9 {
+		t.Fatalf("sent %q", sent)
+	}
+}

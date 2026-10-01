@@ -72,6 +72,9 @@ type server struct {
 	// FIFO and could take the byte meant for the next held turn.
 	gateOnce    sync.Once
 	gateRelease chan struct{}
+	// catalogHeld is CRAZE_FAKE_LATE_CATALOG's held available_commands_update:
+	// set by session/new, sent and cleared by the first session/prompt.
+	catalogHeld bool
 	config      []map[string]any
 	// loadedID is the session id a session/load asked for. The load scripts
 	// replay on it and every later stream uses it, so a craze that loads some
@@ -296,6 +299,19 @@ func (s *server) advertiseCommands() {
 		// against the reader goroutine rather than a frame anyone can capture.
 		return
 	}
+	if os.Getenv("CRAZE_FAKE_LATE_CATALOG") == "1" {
+		// Held for the first prompt (releaseLateCatalog), so it reaches craze
+		// inside that prompt's turn rather than racing the turn's opening.
+		s.mu.Lock()
+		s.catalogHeld = true
+		s.mu.Unlock()
+		return
+	}
+	s.sendCatalog()
+}
+
+// sendCatalog is the available_commands_update itself.
+func (s *server) sendCatalog() {
 	cmds := []acp.AvailableCommand{{Name: "research", Description: "Agent-advertised command"}}
 	if s.script == "commands" {
 		cmds = commandsCatalog()
@@ -304,6 +320,20 @@ func (s *server) advertiseCommands() {
 		SessionUpdate:     acp.UpdateAvailableCommands,
 		AvailableCommands: cmds,
 	})
+}
+
+// releaseLateCatalog is CRAZE_FAKE_LATE_CATALOG's other half: the catalog
+// session/new held back goes out now, on the read loop and before the prompt
+// just read is handled, so craze reads it after the prompt's turn opened and
+// before anything the turn sends — a refusal included.
+func (s *server) releaseLateCatalog() {
+	s.mu.Lock()
+	held := s.catalogHeld
+	s.catalogHeld = false
+	s.mu.Unlock()
+	if held {
+		s.sendCatalog()
+	}
 }
 
 // silentCatalogScript names the scripts whose session/new advertises no
@@ -486,6 +516,7 @@ func (s *server) onRequest(msg *acp.Message) {
 	case acp.MethodSessionPrompt:
 		s.noteOrder(orderPrompt, "")
 		dumpPrompt(msg.Params)
+		s.releaseLateCatalog()
 		if queueScript(s.script) {
 			// The queue scripts hold one record per prompt instead of the
 			// single flag, so a second prompt cancelling the first cannot
@@ -749,19 +780,7 @@ func (s *server) sigintHold(id json.RawMessage, text string, n int) {
 		s.reply(id, map[string]any{"stopReason": acp.StopCancelled})
 		return
 	}
-	var gate <-chan struct{}
-	if path := os.Getenv("CRAZE_FAKE_GATE"); path != "" {
-		s.gateOnce.Do(func() {
-			s.gateRelease = make(chan struct{})
-			go func() {
-				for {
-					awaitGate(path)
-					s.gateRelease <- struct{}{}
-				}
-			}()
-		})
-		gate = s.gateRelease
-	}
+	gate := s.gate()
 	select {
 	case <-ch:
 		s.reply(id, map[string]any{"stopReason": acp.StopCancelled})
@@ -1003,6 +1022,48 @@ func (s *server) tool(id json.RawMessage) {
 		Content:       &acp.ContentBlock{Type: "text", Text: "after tool"},
 	})
 	s.reply(id, map[string]any{"stopReason": acp.StopEndTurn})
+}
+
+// gate is CRAZE_FAKE_GATE as a channel, for a wait that must also end on a
+// cancel: one value per byte the test writes, read by the one shared reader
+// (gateOnce) — not one per wait, since a cancelled wait's reader would stay
+// blocked on the FIFO and take the byte meant for the next. nil when the knob
+// is unset, which a select never receives from.
+//
+// The reader holds the FIFO open for reading and writing for the process's
+// life (plan 033 C3r) and reads it a byte at a time. Opening it afresh for
+// every byte, as awaitGate does, loses a byte to two writes in a row: the
+// second writer's open succeeds while the reader still holds the first one's
+// open, writes into the pipe, and closes — and the reader's close then leaves
+// the pipe with no ends, which drops the byte. Held open, the pipe always has
+// this end, a writer's open never waits on it, and every byte is read in
+// turn. A FIFO that will not open read-write falls back to awaitGate.
+func (s *server) gate() <-chan struct{} {
+	path := os.Getenv("CRAZE_FAKE_GATE")
+	if path == "" {
+		return nil
+	}
+	s.gateOnce.Do(func() {
+		s.gateRelease = make(chan struct{})
+		go func() {
+			f, err := os.OpenFile(path, os.O_RDWR, 0)
+			if err != nil {
+				for {
+					awaitGate(path)
+					s.gateRelease <- struct{}{}
+				}
+			}
+			defer f.Close()
+			var b [1]byte
+			for {
+				if _, err := f.Read(b[:]); err != nil {
+					return
+				}
+				s.gateRelease <- struct{}{}
+			}
+		}()
+	})
+	return s.gateRelease
 }
 
 // awaitGate is CRAZE_FAKE_GATE's whole definition: with a path set, it blocks
