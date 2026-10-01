@@ -227,7 +227,13 @@ func TestAskOpeningsCloseTheRunUnlessAuto(t *testing.T) {
 	}
 }
 
-func TestAnAsksEndingDrawsNoEntryAndIsRecorded(t *testing.T) {
+// TestAnAsksEndingIsRecordedAndDrawsOnlyItsOutcome: an ending closes its ask
+// and is recorded in the bounded last-ended list, and the one entry an ending
+// draws is an answered ask's outcome note (plan 032 C4; outcome_test.go has the
+// rule case by case) — here a skip's, and nothing for an ending that carries
+// its own opening. Before plan 032 an ending drew nothing: the notes were the
+// answering client's own rows.
+func TestAnAsksEndingIsRecordedAndDrawsOnlyItsOutcome(t *testing.T) {
 	m := New(Options{})
 	foldAll(t, m, true,
 		agent.Event{Type: agent.EventQuestion, Question: &agent.QuestionEvent{ID: "ask-1"}, At: at(1)},
@@ -236,8 +242,8 @@ func TestAnAsksEndingDrawsNoEntryAndIsRecorded(t *testing.T) {
 		agent.Event{Type: agent.EventAsk, Ask: &agent.AskUpdate{ID: "perm-9", Kind: agent.AskPermission, Outcome: agent.AskAutomatic, By: agent.AskByPolicy,
 			Body: &agent.AskBody{Permission: &agent.PermissionEvent{ID: "perm-9"}}}, At: at(4)},
 	)
-	if n := len(m.Main.live()); n != 0 {
-		t.Fatalf("an ending draws nothing — the notes are the answering client's: %v", facts(m.Main))
+	if es := facts(m.Main); len(es) != 1 || es[0].Kind != "note" || es[0].Text != "? question → skipped" || !es[0].At.Equal(at(3)) {
+		t.Fatalf("the endings drew %v, want the skip's note alone, at its At", es)
 	}
 	st := m.State()
 	if len(st.Asks) != 1 || st.Asks[0].ID != "perm-1" {

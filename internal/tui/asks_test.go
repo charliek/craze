@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -11,10 +12,12 @@ import (
 
 	"github.com/charliek/craze/internal/agent"
 	"github.com/charliek/craze/internal/engine"
+	"github.com/charliek/craze/internal/transcript"
 )
 
 // The Stub's half of the ask seam (plan 021 A13) and the TUI's half of §3.6:
-// an ending that is not this client's own removes the card and writes the row.
+// an ending removes the card, and the row its answer earned is the shared
+// model's, drawn by the fold (plan 032 C4).
 
 // Stub.Emit routes a card event through the registry with the test's OWN id,
 // and the opening is buffered by the time Emit returns — which is what some
@@ -171,16 +174,9 @@ func TestABadAnswerReRaisesTheCard(t *testing.T) {
 		t.Fatal("fixture: no card")
 	}
 	// A plan's answer against a question's id: nothing fits, so nothing is
-	// claimed. The answer's outcome reaches its caller's continuation
-	// (C18c: answerCard goes through the command gate).
-	taken := true
-	m, _ = m.answerCard(head, "ask-1", agent.AskAnswer{Accept: true}, func(m Model, ok bool) (Model, tea.Cmd) {
-		taken = ok
-		return m, nil
-	})
-	if taken {
-		t.Fatal("a mis-addressed answer must not be taken")
-	}
+	// claimed, and the answer's continuation puts the card back (C18c:
+	// answerCard goes through the command gate).
+	m, _ = m.answerCard(head, "ask-1", agent.AskAnswer{Accept: true})
 	if len(m.cards) != 2 || m.cards[0].kind != cardQuestion {
 		t.Fatalf("the card must come back at the head: %+v", m.cards)
 	}
@@ -194,8 +190,10 @@ func TestABadAnswerReRaisesTheCard(t *testing.T) {
 }
 
 // An ending this model did not cause — another client answered, or a cancel,
-// or the turn went — removes the card wherever it is in the queue. What it
-// writes is what the local path writes for the same outcome, and as little.
+// or the turn went — removes the card wherever it is in the queue. The row an
+// answer earns is the fold's (plan 032 C4): a shared row, the same entry every
+// client folding the ending holds, and nothing for an ending that decided
+// nothing.
 func TestAnEndingFromAnotherClientRemovesTheCardAndWritesTheRow(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -253,11 +251,23 @@ func TestAnEndingFromAnotherClientRemovesTheCardAndWritesTheRow(t *testing.T) {
 			if tc.want == "" && (strings.Contains(view, "→") || strings.Contains(view, "skipped")) {
 				t.Fatalf("an ending that decided nothing wrote a row:\n%s", view)
 			}
+			if tc.want != "" {
+				// The fold's row, not this client's: it shows an entry of the
+				// shared model, which holds the note.
+				r := noteRow(t, m, tc.want)
+				if r.local || r.id.IsZero() {
+					t.Fatalf("the outcome row is this client's own (local %v, id %v), not the shared model's", r.local, r.id)
+				}
+				if !slices.Contains(sharedNotes(m), tc.want) {
+					t.Fatalf("the shared model holds notes %q, not %q", sharedNotes(m), tc.want)
+				}
+			}
 		})
 	}
 }
 
-// A plan answered elsewhere writes the same verb the local path writes.
+// A plan answered elsewhere draws its verb: the fold's note, the same one this
+// client's own answer draws.
 func TestAPlanEndingFromAnotherClientWritesItsVerb(t *testing.T) {
 	m, stub := sizedCards(t)
 	m = cardEvent(t, m, stub, agent.Event{Type: agent.EventPlan, Plan: stubPlanEvent()})
@@ -292,27 +302,63 @@ func TestAPermissionEndingWritesNoRow(t *testing.T) {
 	}
 }
 
-// This model's own answer is applied in the Update that sent it, so its ending
-// is an echo: the row is not written twice.
-func TestTheModelSkipsTheEndingOfItsOwnAnswer(t *testing.T) {
+// This model's own answer writes no row of its own (plan 032 C4): its ending,
+// carrying this model's cause, is what draws the note — through the fold, once,
+// as a shared row — and the same ending delivered again finds the ask gone
+// and draws nothing more.
+func TestTheModelsOwnAnswerDrawsItsRowFromItsEnding(t *testing.T) {
 	m, stub := sizedCards(t)
 	m = cardEvent(t, m, stub, agent.Event{Type: agent.EventQuestion, Question: stubQuestion()})
 	m, _ = press(m, tea.KeyMsg{Type: tea.KeyEsc})
+	if m.cardOpen() {
+		t.Fatal("fixture: the skip did not take the card")
+	}
+	if n := strings.Count(plainView(m), "→ skipped"); n != 0 {
+		t.Fatalf("the answer wrote a row of its own before its ending, %d:\n%s", n, plainView(m))
+	}
+	end := awaitStubEvent(t, stub, agent.EventAsk)
+	if end.Cause == "" || end.Ask == nil || !end.Ask.Skip {
+		t.Fatalf("fixture: the ending is %+v", end)
+	}
+	m = feed(t, m, end)
 	if n := strings.Count(plainView(m), "→ skipped"); n != 1 {
-		t.Fatalf("the local path writes one note, got %d:\n%s", n, plainView(m))
+		t.Fatalf("its ending drew %d skip notes, want one:\n%s", n, plainView(m))
 	}
-	// The ending, with this model's own cause on it.
-	cause := m.askEchoes[0]
-	tm, _ := m.Update(eventMsg{ev: agent.Event{Type: agent.EventAsk, Cause: cause, Ask: &agent.AskUpdate{
-		ID: "ask-1", Kind: agent.AskQuestion, Outcome: agent.AskAnswered, Skip: true,
-	}}})
-	m = tm.(Model)
+	if r := noteRow(t, m, "? Question → skipped"); r.local || r.id.IsZero() {
+		t.Fatalf("the skip note is this client's own (local %v, id %v), not the shared model's", r.local, r.id)
+	}
+	// The same ending again: the ask is no longer open, so no second note.
+	again := end
+	again.Seq = 0
+	m = feed(t, m, again)
 	if n := strings.Count(plainView(m), "→ skipped"); n != 1 {
-		t.Fatalf("its own echo wrote the note again, got %d:\n%s", n, plainView(m))
+		t.Fatalf("a re-delivered ending doubled the note, %d:\n%s", n, plainView(m))
 	}
-	if len(m.askEchoes) != 0 {
-		t.Fatalf("the echo is spent once: %v", m.askEchoes)
+}
+
+// noteRow is the main pane's note row reading text; it fails the test when
+// there is none.
+func noteRow(t *testing.T, m Model, text string) *entry {
+	t.Helper()
+	for _, r := range m.main.rows {
+		if r.kind == entryNote && r.text == text {
+			return r
+		}
 	}
+	t.Fatalf("no note row %q in %v", text, texts(m, entryNote))
+	return nil
+}
+
+// sharedNotes is the text of every note the shared model's main transcript
+// holds, oldest first.
+func sharedNotes(m Model) []string {
+	var out []string
+	for _, e := range m.shared.History().Main.Entries {
+		if e.Kind == transcript.KindNote {
+			out = append(out, e.Text)
+		}
+	}
+	return out
 }
 
 // State.PendingAsks and State.HeadAsk are what a host with no TUI publishes
@@ -569,6 +615,44 @@ func hiddenAsksModel(t *testing.T) (Model, *Stub) {
 	return m, stub
 }
 
+// TestAHiddenAsksEndingDrawsNoRowOnAnyFolder (plan 032 C4): an ask the
+// provider's capabilities hide is answered unseen — a question skipped, a plan
+// rejected — and its ending draws no outcome note on either folder in process:
+// the engine's model, built with the provider's capabilities, and this
+// client's, built with its backend's (adopt). Their notes would otherwise
+// claim the user skipped or rejected what they were never shown.
+func TestAHiddenAsksEndingDrawsNoRowOnAnyFolder(t *testing.T) {
+	m, stub := hiddenAsksModel(t)
+	if want := (transcript.HiddenAsks{Questions: true, Plans: true}); m.shared.Hidden() != want {
+		t.Fatalf("the client's model hides %+v, want %+v: its backend's capabilities", m.shared.Hidden(), want)
+	}
+	before := plainView(m)
+	for _, ev := range []agent.Event{
+		{Type: agent.EventQuestion, Question: stubQuestion()},
+		{Type: agent.EventPlan, Plan: stubPlanEvent()},
+	} {
+		stub.Emit(ev)
+		m = hiddenAnswered(t)(m.Update(eventMsg{ev: ev}))
+		m = feed(t, m, awaitStubEvent(t, stub, agent.EventAsk))
+	}
+	calls := stub.Calls()
+	if len(calls) != 2 || !calls[0].Skip || calls[1].Accept {
+		t.Fatalf("the hidden asks were answered %+v, want a skip and a reject", calls)
+	}
+	if m.cardOpen() || len(texts(m, entryNote)) != 0 {
+		t.Fatalf("a hidden ask drew a card (%v) or a note %q:\n%s\nbefore:\n%s", m.cardOpen(), texts(m, entryNote), plainView(m), before)
+	}
+	snap, err := engineOf(t, m).TranscriptSnapshot("", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range snap.Main.Entries {
+		if e.Kind == transcript.KindNote {
+			t.Fatalf("the engine's model drew %q for a hidden ask", e.Text)
+		}
+	}
+}
+
 // The hidden half of finding 5: a question the config shows no card for is
 // answered where it stands, so a refusal for room there is a provider parked
 // with nothing on screen to retry it. The answer is kept and retried on the
@@ -704,8 +788,8 @@ func TestTheLoserOfAnAnswerRaceKeepsTheWinnersRow(t *testing.T) {
 	}
 }
 
-// An ending for an ask this model never raised a card for writes nothing: the
-// hidden paths, a masked card, and every ending that carries its own Body.
+// An ending whose opening the fold never saw draws nothing: every ending that
+// carries its own Body, which by definition had none published.
 func TestAnEndingForNoCardWritesNothing(t *testing.T) {
 	m, _ := sizedCards(t)
 	before := plainView(m)

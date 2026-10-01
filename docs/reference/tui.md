@@ -1098,6 +1098,27 @@ agent is told you declined to answer and the turn carries on. On a plan or a
 permission it cancels the turn, because cancelling is the only way those two
 reach the agent as anything other than an accept or a reject.
 
+An answered question or plan leaves a row in the transcript saying how it was
+answered:
+
+```text
+? Pick one → B
+? Pick any → X, Z
+? Question → skipped
+plan Ship the widget → accepted
+```
+
+A question draws one row per question it asked, naming the options picked
+(`nothing` when none was); a skipped question one `→ skipped` row under its
+title; a plan its name and `accepted` or `rejected`. The rows are part of the
+session's own transcript, not this terminal's: every client attached to the
+session draws them, whichever one answered — this terminal, another, or a
+`craze attach` — and they are still there when the session is opened again from
+the [list](#opening-a-session-in-place) or with `craze attach`. A permission's
+answer, a cancel, a turn ending under a card, and a request answered without a
+card (one the provider never shows, or one craze answered headlessly) leave no
+row.
+
 ## Slash commands
 
 The menu opens on the `/` token under the cursor, not only on a whole-line

@@ -99,6 +99,10 @@ type attachProbe struct {
 	attached func(context.Context)
 	received func(agent.Record, bool)
 	maxItems int
+	// hidden is the ask kinds the session's capabilities hide, which both of
+	// the probe's folds are given, as the engine's own model is (plan 032 C4):
+	// otherwise a hidden ask's ending would draw an outcome note on one side.
+	hidden transcript.HiddenAsks
 
 	// The reader's own, touched only on drive's goroutine.
 	//
@@ -175,6 +179,7 @@ func newAttachProbe(ctx context.Context, path string, eng *engine.Engine, stderr
 		return nil
 	}
 	pctx, cancel := context.WithCancel(ctx)
+	hidden := transcript.HiddenBy(eng.State().Provider.Capabilities())
 	return &attachProbe{
 		path:     path,
 		eng:      eng,
@@ -186,8 +191,10 @@ func newAttachProbe(ctx context.Context, path string, eng *engine.Engine, stderr
 		attached: attachProbeAttached,
 		received: attachProbeReceived,
 		maxItems: attachProbeMaxItems,
+		hidden:   hidden,
 		first: transcript.New(transcript.Options{
 			ErrText: func(e error) string { return e.Error() },
+			Hidden:  hidden,
 		}),
 		progressed: make(chan struct{}, 1),
 		target:     make(chan probeTarget, 1),
@@ -587,7 +594,7 @@ func (p *attachProbe) attachOnce() (*transcript.Model, *agent.Subscription, stri
 			return nil, nil, fmt.Sprintf("DIFF: child %s's snapshot at seq %d came back windowed", s.ID, a.Snapshot.Seq)
 		}
 	}
-	return transcript.Restore(a.Snapshot, transcript.Options{}), a.Sub, ""
+	return transcript.Restore(a.Snapshot, transcript.Options{Hidden: p.hidden}), a.Sub, ""
 }
 
 // attachedLine is PATH's second line: where the attached fold's current

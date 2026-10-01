@@ -26,9 +26,10 @@ import (
 //     holds the same entries under the same ids;
 //   - a local row is one this client wrote for a message of its own, at its own
 //     clock, through appendLocal: a failure, a note about something it changed,
-//     the optimistic user row at Enter, an ask's answer notes, a `!` row, a
-//     receipt-mode sub-agent's rebuilt rows. No event carries it, so it is in no
-//     model and no other client draws it. It is marked local and has no id.
+//     the optimistic user row at Enter, a `!` row, a receipt-mode sub-agent's
+//     rebuilt rows. No event carries it, so it is in no model and no other
+//     client draws it. It is marked local and has no id. An ask's outcome note
+//     is not one: the fold draws it (plan 032 C4).
 //
 // A local row never ends the shared model's open run (execution amendment
 // X27): the run is the model's, and a chunk after a local row grows the entry
@@ -429,8 +430,9 @@ func (m *Model) addUser(text string) {
 	m.main.appendLocal(entry{kind: entryUser, text: userText(text)}, m.now())
 }
 
-// addNote is a local note: a setting this client changed, an ask it answered,
-// or another client's answer to a card this client had (plan 024 §3.3).
+// addNote is a local note: something this client changed or was told. An
+// ask's outcome is not one — the fold draws it for every client (plan 032
+// C4).
 func (m *Model) addNote(text string) {
 	if text == "" {
 		return

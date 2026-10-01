@@ -140,10 +140,12 @@ func (m *Model) applyRestore(r restoreMsg) bool {
 	m.ctrlCDeadline = time.Time{}
 	priorTodos, priorCards := m.snap.Todos, m.cards
 
-	// The fold, and every pane from it: all of its rows are the session's.
+	// The fold, and every pane from it: all of its rows are the session's. Its
+	// hidden asks are the restore's own info document's (infoPin), as the
+	// host's fold's are its provider's (plan 032 C4).
 	in := &foldInputs{}
 	m.foldIn = in
-	m.shared = transcript.Restore(r.snap, sharedOptions(in.now, in.errorText))
+	m.shared = transcript.Restore(r.snap, sharedOptions(in.now, in.errorText, m.hiddenAsks()))
 	m.rebuildPanes()
 	if restoreHook != nil {
 		restoreHook(m, r.snap)
@@ -157,7 +159,6 @@ func (m *Model) applyRestore(r restoreMsg) bool {
 	m.clearOverlays()
 	m.modeRev, m.modelRev, m.configRev = st.Seq, st.Seq, st.Seq
 	m.ownTurn, m.nextTurn, m.armedDraft, m.disarmed = "", "", "", ""
-	m.askEchoes = nil
 	m.cardMask, m.cardMasking = "", false
 	m.planOfferSeq = 0
 	if !first {

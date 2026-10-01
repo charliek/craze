@@ -126,6 +126,83 @@ func noteForForeignTurn(reason string) string {
 	return NoteForeignTurn
 }
 
+// The outcome notes an answered ask's ending draws (foldAsk, plan 032 §3.2
+// C4), with the TUI's wording as its cards.go wrote them when they were each
+// client's own rows: `? <prompt> → <labels>` per question answered, `? <title>
+// → skipped` for a skipped question, and `plan <name> → accepted|rejected`.
+
+// answerNotes is one note per question of q, naming what answers picked for
+// it: the options' labels, comma-separated, or "nothing". A question that asks
+// nothing draws none.
+func answerNotes(q *agent.QuestionEvent, answers map[string][]string) []string {
+	out := make([]string, 0, len(q.Questions))
+	for _, qq := range q.Questions {
+		out = append(out, "? "+sanitizeLine(qq.Prompt)+" → "+answerLabels(qq, answers[qq.ID]))
+	}
+	return out
+}
+
+// answerLabels names the options ids picks, in their order: each one's label
+// folded onto one line. An id the question does not offer names nothing, and
+// nothing named reads "nothing".
+func answerLabels(q agent.Question, ids []string) string {
+	labels := make([]string, 0, len(ids))
+	for _, id := range ids {
+		for _, o := range q.Options {
+			if o.ID == id {
+				labels = append(labels, sanitizeLine(o.Label))
+				break
+			}
+		}
+	}
+	if len(labels) == 0 {
+		return "nothing"
+	}
+	return strings.Join(labels, ", ")
+}
+
+// skipNote is what a skipped question draws.
+func skipNote(q *agent.QuestionEvent) string {
+	return "? " + questionTitle(q) + " → skipped"
+}
+
+// questionTitle names a question request: its title, else its first
+// question's prompt, else "question".
+func questionTitle(q *agent.QuestionEvent) string {
+	if q == nil {
+		return ""
+	}
+	if t := sanitizeLine(q.Title); t != "" {
+		return t
+	}
+	if len(q.Questions) > 0 {
+		return sanitizeLine(q.Questions[0].Prompt)
+	}
+	return "question"
+}
+
+// planNote is what an answered plan draws.
+func planNote(p *agent.PlanEvent, accepted bool) string {
+	verb := "rejected"
+	if accepted {
+		verb = "accepted"
+	}
+	return "plan " + PlanName(p) + " → " + verb
+}
+
+// PlanName is a plan as craze names it anywhere it is drawn — its outcome
+// note here, and the TUI's plan card and plan entry: its name folded onto one
+// line, else "plan"; "" for none.
+func PlanName(p *agent.PlanEvent) string {
+	if p == nil {
+		return ""
+	}
+	if n := sanitizeLine(p.Name); n != "" {
+		return n
+	}
+	return "plan"
+}
+
 // ellipsis leads a streamed entry's text once the stream cap dropped its
 // beginning (capText).
 const ellipsis = "…"

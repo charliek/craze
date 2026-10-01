@@ -130,6 +130,14 @@ func press(m Model, k tea.KeyMsg) (Model, tea.Cmd) {
 	return tm.(Model), cmd
 }
 
+// endingDelivered delivers the ending of the ask the model just answered — the
+// Stub's registry published it into the log when it took the answer — which is
+// what draws the answer's note: the fold's, not the card's (plan 032 C4).
+func endingDelivered(t *testing.T, m Model, stub *Stub) Model {
+	t.Helper()
+	return feed(t, m, awaitStubEvent(t, stub, agent.EventAsk))
+}
+
 func TestQuestionCardWalksTheQuestionsAndAnswersOnce(t *testing.T) {
 	m, stub := questionCard(t)
 	view := plainView(m)
@@ -185,7 +193,8 @@ func TestQuestionCardWalksTheQuestionsAndAnswersOnce(t *testing.T) {
 	if got := strings.Join(c.Answers["q2"], ","); got != "opt-x,opt-z" {
 		t.Fatalf("q2 = %q", got)
 	}
-	// One note per question, naming what was picked.
+	// One note per question, naming what was picked, drawn by the ending.
+	m = endingDelivered(t, m, stub)
 	transcript := plainView(m)
 	for _, want := range []string{"? Pick one → A", "? Pick any → X, Z"} {
 		if !strings.Contains(transcript, want) {
@@ -252,6 +261,7 @@ func TestQuestionCardEscSkipsTheWholeRequest(t *testing.T) {
 	if len(calls) != 1 || !calls[0].Skip || calls[0].ID != "ask-1" {
 		t.Fatalf("esc should skip once, got %+v", calls)
 	}
+	m = endingDelivered(t, m, stub)
 	if !strings.Contains(plainView(m), "? Question → skipped") {
 		t.Fatalf("missing the skipped note:\n%s", plainView(m))
 	}
@@ -291,6 +301,7 @@ func TestPlanCardWritesTheBlockAndAnswers(t *testing.T) {
 			if len(calls) != 1 || calls[0].Method != "plan" || calls[0].ID != "plan-1" || calls[0].Accept != tc.accept {
 				t.Fatalf("plan answered %+v", calls)
 			}
+			m = endingDelivered(t, m, stub)
 			if !strings.Contains(plainView(m), tc.note) {
 				t.Fatalf("missing note %q:\n%s", tc.note, plainView(m))
 			}
@@ -507,6 +518,7 @@ func TestAnswerReachesTheSessionBeforeACancelCanClaimIt(t *testing.T) {
 	if len(calls) != 1 || calls[0].Method != "question" || calls[0].Cancelled || calls[0].Skip {
 		t.Fatalf("the answer must reach the session in the same update: %+v", calls)
 	}
+	m = endingDelivered(t, m, stub)
 	if !strings.Contains(plainView(m), "? Pick one → A") {
 		t.Fatalf("the note follows the answer the session took:\n%s", plainView(m))
 	}

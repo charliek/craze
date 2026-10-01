@@ -438,9 +438,10 @@ func TestARestoreDuringAHoldFoldsNothingTwice(t *testing.T) {
 
 // TestARestoreClearsOverlaysAndEchoMarkers (§3.14): nothing this client laid
 // over the stream a restore replaces survives it — the settings and result
-// overlays, the echo markers (ownTurn, nextTurn, armedDraft, disarmed,
-// askEchoes), the cancel mask, the plan offer, the local rows — and the
-// revision guards stand at the snapshot's seq.
+// overlays, the echo markers (ownTurn, nextTurn, armedDraft, disarmed), the
+// cancel mask, the plan offer, the local rows — and the revision guards stand
+// at the snapshot's seq. (An answer's echo marker is gone: plan 032 C4 — the
+// outcome note is the fold's, so nothing waits on an ask's ending.)
 func TestARestoreClearsOverlaysAndEchoMarkers(t *testing.T) {
 	m := sized(t)
 	m.requestMode(1, "c-1", "plan")
@@ -448,7 +449,6 @@ func TestARestoreClearsOverlaysAndEchoMarkers(t *testing.T) {
 	m.noteResult(resultEntry{kind: resultArmed, cause: "c-3"})
 	m.ownTurn, m.nextTurn = "t-own", "t-next"
 	m.armedDraft, m.disarmed = "c-3", "c-4"
-	m.askEchoes = []string{"c-5"}
 	m.cardMask, m.cardMasking = "t-own", true
 	m.planOfferSeq = m.turnSeq
 	m.addNote("a note of this client's own")
@@ -463,9 +463,9 @@ func TestARestoreClearsOverlaysAndEchoMarkers(t *testing.T) {
 	)
 	m = restoredWith(t, m, "inc-1", 1, evs...)
 	noOverlays(t, m, "after the restore")
-	if m.ownTurn != "" || m.nextTurn != "" || m.armedDraft != "" || m.disarmed != "" || len(m.askEchoes) != 0 {
-		t.Fatalf("echo markers survived the restore: own %q next %q armed %q disarmed %q echoes %v",
-			m.ownTurn, m.nextTurn, m.armedDraft, m.disarmed, m.askEchoes)
+	if m.ownTurn != "" || m.nextTurn != "" || m.armedDraft != "" || m.disarmed != "" {
+		t.Fatalf("echo markers survived the restore: own %q next %q armed %q disarmed %q",
+			m.ownTurn, m.nextTurn, m.armedDraft, m.disarmed)
 	}
 	if m.cardMasking || m.cardMask != "" || m.planArmed() {
 		t.Fatalf("the cancel mask (%v, %q) or the plan offer (%v) survived the restore", m.cardMasking, m.cardMask, m.planArmed())
@@ -1340,6 +1340,41 @@ func TestARestoreReadsItsOwnInfo(t *testing.T) {
 	}
 	if m.snap.Provider.Name != own.Provider {
 		t.Fatalf("the mirror names %q, want the restore's own %q", m.snap.Provider.Name, own.Provider)
+	}
+}
+
+// TestARestoreTakesItsHiddenAsksFromItsOwnInfo (plan 032 C4): a restore builds
+// the client's shared model with the asks the info document its own item
+// carries hides — the host's capabilities (infoPin), as the host's fold was
+// built with its provider's — so a hidden question restored open, then skipped
+// unseen, draws nothing, where the same restore of a session that shows
+// questions draws the skip: the restored transcript and every later fold agree
+// with the host's.
+func TestARestoreTakesItsHiddenAsksFromItsOwnInfo(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		askCards  bool
+		hidden    transcript.HiddenAsks
+		wantNotes []string
+	}{
+		{"questions shown", true, transcript.HiddenAsks{}, []string{"? Question → skipped"}},
+		{"questions hidden", false, transcript.HiddenAsks{Questions: true}, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := sized(t)
+			r := restoreOf(m, snapshotFolded(t, "inc-1", seqd(1, agent.Event{Type: agent.EventQuestion, Question: stubQuestion()})...), 1)
+			r.info.Capabilities.AskCards = tc.askCards
+			m = deliver(t, m, r)
+			if got := m.shared.Hidden(); got != tc.hidden {
+				t.Fatalf("the restored model hides %+v, want %+v: the restore's own info", got, tc.hidden)
+			}
+			m = feed(t, m, seqd(2, agent.Event{Type: agent.EventAsk, Ask: &agent.AskUpdate{
+				ID: "ask-1", Kind: agent.AskQuestion, Outcome: agent.AskAnswered, By: agent.AskByClient, Skip: true,
+			}})...)
+			if got := texts(m, entryNote); !slices.Equal(got, tc.wantNotes) {
+				t.Fatalf("notes %q, want %q", got, tc.wantNotes)
+			}
+		})
 	}
 }
 

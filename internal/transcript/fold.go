@@ -10,8 +10,10 @@ import (
 // Fold applies one event to the model and says what it changed (plan 024
 // §3.3). It is the TUI's fold (internal/tui/app.go applyEvent and its
 // helpers, subview.go applySubagentEvent/applyChildEvent, cards.go pushCard)
-// with its rules unchanged but for the two §3.3 names: every non-Auto ask
-// opening ends the run, and an ask's ending draws no entry.
+// with its rules unchanged but for the two §3.3 names — every non-Auto ask
+// opening ends the run — and plan 032's: an answered question's or plan's
+// ending draws its outcome note (foldAsk), which each client used to write as
+// a row of its own.
 //
 // Routing is the TUI's: EventSubagent goes to the roster whatever Agent says;
 // any other event with an Agent goes to that child's transcript, created on
@@ -81,7 +83,7 @@ var kinds = map[agent.EventType]kindRow{
 	agent.EventPermission:  {class: classState, main: foldPermission, childIgnored: true},
 	agent.EventQuestion:    {class: classState, main: foldQuestion, childIgnored: true},
 	agent.EventPlan:        {class: classState | classStream, main: foldPlan, childIgnored: true},
-	agent.EventAsk:         {class: classState, main: foldAsk, childIgnored: true},
+	agent.EventAsk:         {class: classState | classStream, main: foldAsk, childIgnored: true},
 	agent.EventDone:        {class: classMarker | classStream, main: foldDone, childIgnored: true},
 	agent.EventError:       {class: classStream, main: foldError, childIgnored: true},
 	agent.EventMeta:        {class: classState | classStream, main: foldMeta, childIgnored: true},
@@ -245,9 +247,21 @@ func (m *Model) openAsk(id string, kind agent.AskKind, body agent.AskBody, at ti
 
 // foldAsk is an ask's ending: the ask leaves the open set and joins the
 // last-ended list — replacing its own earlier ending where it stands, else
-// appended, the oldest going past maxEnded. No entry — the answer, skip and
-// plan notes are written only by the client that had the card (§3.3). O(1),
-// amortised (keyedList).
+// appended, the oldest going past maxEnded. O(1), amortised (keyedList), but
+// for the outcome note's wording.
+//
+// First, while the ask is still open, an answered question or plan draws its
+// outcome note into the main transcript, worded from the opening the fold
+// holds (noteOutcome; plan 032 §3.2 C4, P14). It is a shared entry, so every
+// client — one that answered, one that watched, one that attaches or reopens
+// the session later — draws the same row, at the ending's place in the
+// stream. Before, each client wrote it as a row of its own, which a restore
+// dropped (SF-61).
+//
+// Mixed versions: a fold from before this rule draws no note. A client of
+// this build folding an older host's events draws the note live, and loses
+// it on a restore from that host's snapshot, which the older fold cut without
+// it — what every client showed after a restore before.
 func foldAsk(m *Model, ev agent.Event) {
 	u := ev.Ask
 	if u == nil {
@@ -257,11 +271,60 @@ func foldAsk(m *Model, ev agent.Event) {
 	if u.ID == "" {
 		return
 	}
+	at := m.stamp(ev.At)
+	if a, open := m.asks.get(u.ID); open {
+		m.noteOutcome(a, u, at)
+	}
 	m.asks.remove(u.ID)
 	if !m.ended.has(u.ID) && m.ended.len() >= maxEnded {
 		m.ended.dropOldest()
 	}
-	m.ended.upsert(AskEnding{ID: u.ID, Kind: u.Kind, Outcome: u.Outcome, By: u.By, At: m.stamp(ev.At)})
+	m.ended.upsert(AskEnding{ID: u.ID, Kind: u.Kind, Outcome: u.Outcome, By: u.By, At: at})
+}
+
+// noteOutcome draws the outcome note of the open ask a's ending u, if it
+// earns one: `? <prompt> → <labels>` for each question of an answered
+// question (`nothing` where none was picked), `? <title> → skipped` for a
+// skipped one, `plan <name> → accepted|rejected` for an answered plan. It
+// draws nothing for:
+//
+//   - an ending that is not an answer — a cancel, the turn's end, the
+//     session closing, craze's policy (AskAutomatic) — which decided nothing
+//     a user chose;
+//   - a permission, whose answer has never drawn a row;
+//   - an Auto question or plan: craze's headless answer, never a card;
+//   - a kind the session's capabilities hide (Options.Hidden): every client
+//     answers it unseen — a skip, a reject — and the user was never asked;
+//   - an ending whose kind is not its opening's.
+//
+// The caller holds the ask open, so an ending whose opening the fold never
+// saw draws nothing — one that carries its own (AskUpdate.Body, set only when
+// no opening was published) among them — and a second ending of one id finds
+// it gone: a re-ended id never doubles its note.
+func (m *Model) noteOutcome(a Ask, u *agent.AskUpdate, at time.Time) {
+	if u.Outcome != agent.AskAnswered || u.Kind != a.Kind {
+		return
+	}
+	switch a.Kind {
+	case agent.AskQuestion:
+		q := a.Body.Question
+		if q == nil || q.Auto || m.hidden.Questions {
+			return
+		}
+		if u.Skip {
+			m.Main.addNote(skipNote(q), at)
+			return
+		}
+		for _, n := range answerNotes(q, u.Answers) {
+			m.Main.addNote(n, at)
+		}
+	case agent.AskPlan:
+		p := a.Body.Plan
+		if p == nil || p.Auto || m.hidden.Plans {
+			return
+		}
+		m.Main.addNote(planNote(p, u.Accepted), at)
+	}
 }
 
 // ----------------------------------------------------------- markers, turn

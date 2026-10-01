@@ -17,6 +17,11 @@ import (
 // newShared gives the model a fresh shared transcript, for a session that is
 // starting: its entries are that session's events' alone. A model it replaces
 // lets go of its rows (pane.detach), which stay on screen as this client's own.
+//
+// The model treats as hidden the asks the session's capabilities hide
+// (hiddenAsks), read now: the backend's when there is one — adopt makes the
+// model again once it holds the backend, before anything is folded — and the
+// mirror's provider's before.
 func (m *Model) newShared() {
 	if m.shared != nil {
 		if m.main != nil {
@@ -28,18 +33,30 @@ func (m *Model) newShared() {
 	}
 	in := &foldInputs{}
 	m.foldIn = in
-	m.shared = transcript.New(sharedOptions(in.now, in.errorText))
+	m.shared = transcript.New(sharedOptions(in.now, in.errorText, m.hiddenAsks()))
+}
+
+// hiddenAsks is the ask kinds the session's capabilities hide, which the
+// shared model is built to treat as hidden: an answered ask of such a kind
+// draws no outcome note, because this client — like every other — answers it
+// unseen (answerHidden). It reads caps, so a socket backend's are the host's
+// info document's (a restore's own, infoPin, while it is applied), and the
+// in-process backend's are its provider's, which the engine's own model was
+// given (plan 032 C4).
+func (m Model) hiddenAsks() transcript.HiddenAsks {
+	return transcript.HiddenBy(m.caps())
 }
 
 // sharedOptions is how this client makes a shared model: it stamps an event
-// that carries no At with clock — only a unit test's fixture is unstamped — and
+// that carries no At with clock — only a unit test's fixture is unstamped —
 // takes an error event's text from errText (X14: the TUI folds outside every
 // publishing boundary, on its own goroutine, from the publisher's own error
-// values). The parity watch makes its models with it too, handing them the
-// instant and the text the TUI's fold was handed, so they differ from m.shared
-// in nothing but the events they fold.
-func sharedOptions(clock func() time.Time, errText func(error) string) transcript.Options {
-	return transcript.Options{Clock: clock, ErrText: errText}
+// values), and treats the hidden asks as hidden. The parity watch makes its
+// models with it too, handing them the instant and the text the TUI's fold was
+// handed and the TUI's model's hidden asks, so they differ from m.shared in
+// nothing but the events they fold.
+func sharedOptions(clock func() time.Time, errText func(error) string, hidden transcript.HiddenAsks) transcript.Options {
+	return transcript.Options{Clock: clock, ErrText: errText, Hidden: hidden}
 }
 
 // scopeOf is the transcript of sm that the pane of scope shows ("" is main),

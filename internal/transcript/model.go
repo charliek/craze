@@ -44,6 +44,32 @@ type Options struct {
 	// Incarnation is the event log's incarnation the model is folded from,
 	// carried for the snapshot a client attaches from.
 	Incarnation string
+	// Hidden is the ask kinds the session's capabilities hide (HiddenBy),
+	// fixed for the model's life: the ending of an ask of a hidden kind draws
+	// no outcome note (foldAsk, plan 032 §3.2 C4). It is a session fact, so
+	// every folder of one session is given the same: the engine's instance
+	// its provider's capabilities, a client's the session info document's.
+	// Folders given different ones differ by those notes. A snapshot does not
+	// carry it: a model restored from one is given it like a new one.
+	//
+	// The zero value hides nothing, and it is what a construction site with
+	// no capabilities to hand assumes — a probe, a unit test's model — since
+	// every shipped provider (cursor, grok, gx, native) shows both cards.
+	Hidden HiddenAsks
+}
+
+// HiddenAsks is the ask kinds a session's capabilities hide: a question when
+// agent.Capabilities.AskCards is false, a plan when PlanCards is. No client
+// raises a card for a hidden ask — each answers it where it stands, a question
+// skipped and a plan rejected — so its ending draws no outcome note: the user
+// was never shown it. The zero value hides nothing.
+type HiddenAsks struct {
+	Questions, Plans bool
+}
+
+// HiddenBy is the ask kinds c hides.
+func HiddenBy(c agent.Capabilities) HiddenAsks {
+	return HiddenAsks{Questions: !c.AskCards, Plans: !c.PlanCards}
 }
 
 // Model is one session as every client agrees on it (plan 024 §3.2): the
@@ -61,6 +87,7 @@ type Model struct {
 	readErr     func(error) string // Options.ErrText
 	bounds      Bounds
 	incarnation string
+	hidden      HiddenAsks // Options.Hidden
 
 	// seq is the Seq of the last event folded that carried one past it: the
 	// model is the folded prefix up to seq.
@@ -132,8 +159,9 @@ type Ask struct {
 }
 
 // AskEnding is one ask's ending, as the last-ended list keeps it: who ended it
-// and how, for a client that wants it. The answer notes a client writes are
-// its own (§3.3), so no entry is ever drawn from one.
+// and how, for a client that wants it. The outcome note an answered ask draws
+// is an entry of the main transcript (foldAsk), drawn from the opening the
+// ending closes, not from this record.
 type AskEnding struct {
 	ID      string
 	Kind    agent.AskKind
@@ -205,6 +233,7 @@ func New(o Options) *Model {
 		readErr:     o.ErrText,
 		bounds:      o.Bounds.withDefaults(),
 		incarnation: o.Incarnation,
+		hidden:      o.Hidden,
 		subs:        make(map[string]*Transcript),
 		agents:      make(map[string]rosterRow),
 	}
@@ -411,6 +440,11 @@ func (m *Model) finish() Change {
 
 // Incarnation is the log incarnation the model was built for.
 func (m *Model) Incarnation() string { return m.incarnation }
+
+// Hidden is the ask kinds the model was built to treat as hidden
+// (Options.Hidden), so a model made to agree with this one can be given the
+// same.
+func (m *Model) Hidden() HiddenAsks { return m.hidden }
 
 // Seq is the Seq of the last event the model folded.
 func (m *Model) Seq() uint64 {

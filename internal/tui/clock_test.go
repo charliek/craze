@@ -449,20 +449,36 @@ func TestALocalRowKeepsTheClientsClock(t *testing.T) {
 	})
 }
 
-// TestAnAskNoteKeepsTheClientsClock pins the deliberate exclusion: the notes an
-// ask's ending writes are client-local (plan 024 §3.3) — written only by a
-// client that had the card — so even the one written for another client's
-// answer is stamped at this client's clock, not at the ending event's At.
-func TestAnAskNoteKeepsTheClientsClock(t *testing.T) {
-	m := lateModel(t)
-	tr := m.main
-	m = feed(t, m,
-		agent.Event{Type: agent.EventQuestion, Question: stubQuestion(), At: clockBase},
-		agent.Event{Type: agent.EventAsk, Ask: &agent.AskUpdate{
-			ID: "ask-1", Kind: agent.AskQuestion, Outcome: agent.AskAnswered, Skip: true,
-		}, At: clockBase.Add(closedAfter)},
-	)
-	if f := lastFact(t, tr, "note", skipNote(stubQuestion())); !f.At.Equal(m.now()) {
-		t.Fatalf("the skip note is stamped %v, want the clock's %v", f.At, m.now())
-	}
+// TestAnAskNoteIsStampedByItsEnding: the note an answered ask's ending draws
+// is the fold's (plan 032 C4, which reverses plan 024 §3.3's client-local
+// exclusion), so it is stamped at the ending event's own At like every other
+// event-driven row — not at this client's clock — and unstamped falls back to
+// the clock.
+func TestAnAskNoteIsStampedByItsEnding(t *testing.T) {
+	const skipped = "? Question → skipped"
+	ending := agent.Event{Type: agent.EventAsk, Ask: &agent.AskUpdate{
+		ID: "ask-1", Kind: agent.AskQuestion, Outcome: agent.AskAnswered, Skip: true,
+	}}
+	t.Run("stamped", func(t *testing.T) {
+		m := lateModel(t)
+		tr := m.main
+		endedAt := clockBase.Add(closedAfter)
+		stamped := ending
+		stamped.At = endedAt
+		m = feed(t, m, agent.Event{Type: agent.EventQuestion, Question: stubQuestion(), At: clockBase}, stamped)
+		if f := lastFact(t, tr, "note", skipped); !f.At.Equal(endedAt) {
+			t.Fatalf("the skip note is stamped %v, want the ending's %v", f.At, endedAt)
+		}
+		if r := noteRow(t, m, skipped); r.local {
+			t.Fatal("the skip note is a row of this client's own, not the fold's")
+		}
+	})
+	t.Run("unstamped falls back to the clock", func(t *testing.T) {
+		m := lateModel(t)
+		tr := m.main
+		m = feed(t, m, agent.Event{Type: agent.EventQuestion, Question: stubQuestion(), At: clockBase}, ending)
+		if f := lastFact(t, tr, "note", skipped); !f.At.Equal(m.now()) {
+			t.Fatalf("an unstamped ending's note is stamped %v, want the clock's %v", f.At, m.now())
+		}
+	})
 }

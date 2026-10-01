@@ -234,11 +234,10 @@ func TestAnEventNeverOvertakesAnEarlierKey(t *testing.T) {
 // TestAnAnswerThatNeverArrivesKeepsItsCard (§3.12 "ErrNoAnswer never loses an
 // open ask", astra r2 12): a card's answer that does not answer before its
 // deadline — a command that never ran, and one that ran with its reply lost —
-// raises the card again with the pinned note, notes no echo and writes no
-// answer note. The ask the command never reached is still open, and the same
-// key answers it once the session answers; the one it reached is resolved,
-// and its ending, arriving as another's would, removes the card and writes
-// the answer's note.
+// raises the card again with the pinned note and writes no error. The ask the
+// command never reached is still open, and the same key answers it once the
+// session answers; the one it reached is resolved, and its ending removes the
+// card and draws the answer's note (the fold's, plan 032 C4).
 func TestAnAnswerThatNeverArrivesKeepsItsCard(t *testing.T) {
 	shortDeadlines(t, 20*time.Millisecond, 20*time.Millisecond)
 	for _, tc := range []struct {
@@ -271,8 +270,8 @@ func TestAnAnswerThatNeverArrivesKeepsItsCard(t *testing.T) {
 				if !slices.Equal(notes, []string{noAnswerCardNote}) {
 					t.Fatalf("notes %q, want the pinned no-answer note alone", notes)
 				}
-				if len(m.askEchoes) != 0 || len(texts(m, entryError)) != 0 {
-					t.Fatalf("an unanswered answer noted an echo %q or an error %q", m.askEchoes, texts(m, entryError))
+				if len(texts(m, entryError)) != 0 {
+					t.Fatalf("an unanswered answer wrote an error %q", texts(m, entryError))
 				}
 				open := r.stub.Asks().Asks()
 				if ran != (len(open) == 0) {
@@ -606,8 +605,9 @@ func TestAnInterjectionThatNeverAnswersKeepsTheDraft(t *testing.T) {
 // TestHiddenAnswersAreFireAndForget (§3.12 "Fire-and-forget", astra 3): an
 // answer to an ask the config hides is a command of its own, never gated —
 // several in one Update are several commands, a retry and a new opening's
-// alike — and notes no echo; one the outbox refuses for room comes back on
-// the retry list through its own message, which arms the retry's beat.
+// alike; one the outbox refuses for room comes back on the retry list through
+// its own message, which arms the retry's beat. Their endings draw nothing:
+// the fold is given the asks the capabilities hide (plan 032 C4).
 func TestHiddenAnswersAreFireAndForget(t *testing.T) {
 	for _, mode := range frameGateModes {
 		t.Run(mode.name, func(t *testing.T) {
@@ -628,9 +628,8 @@ func TestHiddenAnswersAreFireAndForget(t *testing.T) {
 			// answer as a command, and every answer still waiting for room
 			// with it — an event is the retry's fast path — so the second
 			// carries a retry and an opening, the third two and one: several
-			// in one Update, several commands. None opens a gate, and none
-			// notes an echo; each refusal comes back on the retry list, and
-			// arms its beat.
+			// in one Update, several commands. None opens a gate; each
+			// refusal comes back on the retry list, and arms its beat.
 			for i, e := range evs {
 				tm, cmd := m.Update(eventMsg{ev: e})
 				m = tm.(Model)
@@ -648,8 +647,8 @@ func TestHiddenAnswersAreFireAndForget(t *testing.T) {
 					t.Fatalf("after opening %d the list holds %+v (beat %v), want every refusal back on it", i+1, m.hiddenRetry, m.hiddenRetryLive)
 				}
 			}
-			if len(m.askEchoes) != 0 || len(stub.Calls()) != 0 {
-				t.Fatalf("a refused hidden answer noted an echo %q or resolved %+v", m.askEchoes, stub.Calls())
+			if len(stub.Calls()) != 0 {
+				t.Fatalf("a refused hidden answer resolved %+v", stub.Calls())
 			}
 
 			// Room again: the beats take them, the stream read as the program
@@ -667,8 +666,8 @@ func TestHiddenAnswersAreFireAndForget(t *testing.T) {
 					}
 				}
 				m = hiddenAnswered(t)(m.Update(hiddenRetryMsg{}))
-				if m.gate != nil || len(m.askEchoes) != 0 {
-					t.Fatal("a retried hidden answer opened a gate or noted an echo")
+				if m.gate != nil {
+					t.Fatal("a retried hidden answer opened a gate")
 				}
 			}
 			var ids []string
