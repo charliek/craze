@@ -872,14 +872,19 @@ func teardownWithASplice(t *testing.T, speaks bool) {
 	if !rg.rn.isRunning() {
 		t.Fatal("the hub had stopped by the time the host read its end: closed, not half-closed first")
 	}
+	if !p.eof() {
+		t.Fatal("the client did not read its end")
+	}
 	if speaks {
+		// Only once the client has read its end: halfClose closes the host
+		// leg's writing half before the client leg's, and a line the host
+		// wrote between the two would still be forwarded to the client — not
+		// the client leg's closed half this case is about. Reading the
+		// client's end first makes the write meet it.
 		_ = hc.SetWriteDeadline(time.Now().Add(step))
 		if _, err := hc.Write([]byte("still there?\n")); err != nil {
 			t.Fatalf("the host's leg was closed at the teardown's start, not half-closed: %v", err)
 		}
-	}
-	if !p.eof() {
-		t.Fatal("the client did not read its end")
 	}
 	rg.rn.stopped(t)
 	took := time.Since(start)
