@@ -393,6 +393,43 @@ func TestAnUnansweredStartSettingFailsTheStart(t *testing.T) {
 	})
 }
 
+// TestAStartSettingTimeoutKeepsItsFlag (plan 032 X47, r35): the bound that
+// fired first is the failure Start reports, naming the flag, even when the
+// caller's context ends after it and before the set's error is read — the
+// schedule a check of the caller's context at that point would misread as the
+// caller's own end. And the caller's end that came first — its cancellation or
+// its own deadline — is the caller's.
+func TestAStartSettingTimeoutKeepsItsFlag(t *testing.T) {
+	parent, cancelParent := context.WithCancel(context.Background())
+	setCtx, cancel := context.WithTimeoutCause(parent, time.Nanosecond, errStartSettingWait)
+	defer cancel()
+	<-setCtx.Done()
+	cancelParent()
+	want := "agent: --effort low: the agent did not answer its set within " + startSettingWait.String()
+	if err := startSetFailure(setCtx, setCtx.Err(), "--effort low"); err == nil || err.Error() != want {
+		t.Fatalf("the bound first, then the caller: %v, want %q", err, want)
+	}
+
+	parent, cancelParent = context.WithCancel(context.Background())
+	setCtx, cancel = context.WithTimeoutCause(parent, time.Hour, errStartSettingWait)
+	defer cancel()
+	cancelParent()
+	if err := startSetFailure(setCtx, setCtx.Err(), "--effort low"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("the caller first: %v, want its context's end", err)
+	}
+
+	// A caller's own deadline that passes first is the caller's too, though
+	// it is the same error a fired bound gives the set.
+	parent, cancelParent = context.WithTimeout(context.Background(), time.Nanosecond)
+	defer cancelParent()
+	setCtx, cancel = context.WithTimeoutCause(parent, time.Hour, errStartSettingWait)
+	defer cancel()
+	<-setCtx.Done()
+	if err := startSetFailure(setCtx, setCtx.Err(), "--effort low"); err != context.DeadlineExceeded {
+		t.Fatalf("the caller's deadline first: %v, want it as it is", err)
+	}
+}
+
 // TestStartSettingsApplyOnALoad: --effort and --fast apply to a loaded session
 // too, after its replay — the session the load restored is the one they are
 // for — each announced by SetConfig's own delta, since a load's snapshot is

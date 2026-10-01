@@ -826,7 +826,14 @@ func TestTeardownClosesALiveSplice(t *testing.T) {
 func teardownWithASplice(t *testing.T, speaks bool) {
 	env := testEnv(t)
 	rh := newRawHost(t, env, hostOf(4), sessionOf(4))
-	setVar(t, &teardownBound, 2*time.Second)
+	// A host that answers its end gets a long bound: its write must end the
+	// splice well inside it, so one that ends only at the bound — the write
+	// ignored, the splice left to the teardown's timer — is told apart.
+	bound := 2 * time.Second
+	if speaks {
+		bound = 10 * time.Second
+	}
+	setVar(t, &teardownBound, bound)
 	setVar(t, &spliceDrain, time.Hour)
 	rg := newSpliceRig(t, env, nil)
 	p := dialPeer(t, rg.sock)
@@ -893,6 +900,9 @@ func teardownWithASplice(t *testing.T, speaks bool) {
 	}
 	if !speaks && took < teardownBound {
 		t.Fatalf("the teardown closed a splice nobody ended after %v, before its bound %v", took, teardownBound)
+	}
+	if speaks && took >= teardownBound {
+		t.Fatalf("the teardown took %v, its whole bound: the host's write did not end the splice", took)
 	}
 	_ = hc.SetWriteDeadline(time.Now().Add(step))
 	if _, err := hc.Write([]byte("anyone?\n")); err == nil {

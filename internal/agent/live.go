@@ -864,7 +864,7 @@ func (s *session) startSet(ctx context.Context, client *acp.Client, loading bool
 	if opt.Current == value {
 		return nil
 	}
-	setCtx, cancel := context.WithTimeout(ctx, startSettingWait)
+	setCtx, cancel := context.WithTimeoutCause(ctx, startSettingWait, errStartSettingWait)
 	defer cancel()
 	var err error
 	if loading {
@@ -877,7 +877,19 @@ func (s *session) startSet(ctx context.Context, client *acp.Client, loading bool
 		snap.CurrentModel = s.snap.CurrentModel
 		s.mu.Unlock()
 	}
-	if err != nil && ctx.Err() == nil && errors.Is(err, context.DeadlineExceeded) {
+	return startSetFailure(setCtx, err, flag)
+}
+
+// errStartSettingWait is the cause startSet's own bound ends its set with.
+var errStartSettingWait = errors.New("agent: a start setting's set went unanswered")
+
+// startSetFailure is what startSet returns for err, its set's outcome under
+// setCtx: the bound's own failure, naming flag, when it was startSettingWait
+// that ended the set — told by setCtx's cause, which the bound records when it
+// fires and which a caller's cancellation after it does not overwrite — and
+// err as it is otherwise.
+func startSetFailure(setCtx context.Context, err error, flag string) error {
+	if err != nil && errors.Is(err, context.DeadlineExceeded) && errors.Is(context.Cause(setCtx), errStartSettingWait) {
 		return fmt.Errorf("agent: %s: the agent did not answer its set within %s", flag, startSettingWait)
 	}
 	return err
