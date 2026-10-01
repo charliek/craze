@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -21,6 +22,7 @@ import (
 	"github.com/charliek/craze/internal/protocol"
 	"github.com/charliek/craze/internal/rundir"
 	"github.com/charliek/craze/internal/tui"
+	"github.com/charliek/craze/internal/version"
 )
 
 // update re-records every fixture's s2c lines from its scripted c2s and op
@@ -212,6 +214,20 @@ func (m *incarnations) rewrite(b []byte, sub func([]byte) []byte) []byte {
 // the round trip (toWire then fromWire, or the reverse) even though the
 // value itself changes length (a UUID is 36 bytes, "INCARNATION-1" is 14).
 func rewriteIncarnations(b []byte, sub func([]byte) []byte) ([]byte, error) {
+	return rewriteMembers(b, func(key string, raw []byte) []byte {
+		if key == "incarnation" && raw[0] == '"' {
+			return sub(raw)
+		}
+		return raw
+	})
+}
+
+// rewriteMembers is rewriteIncarnations' pass, for any member: sub is handed
+// the name and the raw bytes (a string's quotes included) of every object
+// member whose value is a scalar — a string, number, true, false or null —
+// at any depth, and what it returns is written in their place (raw itself
+// leaves them); every other byte is copied verbatim.
+func rewriteMembers(b []byte, sub func(key string, raw []byte) []byte) ([]byte, error) {
 	w := &jsonWalker{b: b, sub: sub}
 	if err := w.parseValue(); err != nil {
 		return nil, err
@@ -223,10 +239,9 @@ func rewriteIncarnations(b []byte, sub func([]byte) []byte) ([]byte, error) {
 	return w.out.Bytes(), nil
 }
 
-// jsonWalker is rewriteIncarnations' one recursive-descent pass over b: it
-// copies every byte to out as it goes, except that object's method
-// substitutes a member named "incarnation"'s string value through sub
-// instead of copying it. It does not interpret JSON otherwise — a string's
+// jsonWalker is rewriteMembers' one recursive-descent pass over b: it copies
+// every byte to out as it goes, except that object's method writes each
+// member's scalar value through sub instead of copying it. It does not interpret JSON otherwise — a string's
 // content is never unescaped, only scanned for its own closing quote (so an
 // escaped backslash or quote is skipped two bytes at a time, correctly,
 // without decoding it) — since every byte not itself substituted must come
@@ -235,7 +250,7 @@ type jsonWalker struct {
 	b   []byte
 	i   int
 	out bytes.Buffer
-	sub func([]byte) []byte
+	sub func(key string, raw []byte) []byte
 }
 
 func (w *jsonWalker) skipWS() {
@@ -307,6 +322,17 @@ func (w *jsonWalker) scanString() ([]byte, error) {
 // parseScalar copies a number, true, false, or null verbatim: everything up
 // to the next structural byte or whitespace.
 func (w *jsonWalker) parseScalar() error {
+	raw, err := w.scanScalar()
+	if err != nil {
+		return err
+	}
+	w.out.Write(raw)
+	return nil
+}
+
+// scanScalar returns a number, true, false or null's raw bytes and advances
+// past them, without writing to out.
+func (w *jsonWalker) scanScalar() ([]byte, error) {
 	start := w.i
 	for w.i < len(w.b) {
 		switch w.b[w.i] {
@@ -317,10 +343,9 @@ func (w *jsonWalker) parseScalar() error {
 	}
 done:
 	if w.i == start {
-		return fmt.Errorf("empty value at byte %d", start)
+		return nil, fmt.Errorf("empty value at byte %d", start)
 	}
-	w.out.Write(w.b[start:w.i])
-	return nil
+	return w.b[start:w.i], nil
 }
 
 func (w *jsonWalker) parseArray() error {
@@ -355,9 +380,8 @@ func (w *jsonWalker) parseArray() error {
 	}
 }
 
-// parseObject copies an object, substituting through sub the string value of
-// every member literally named "incarnation" — the one place this walker's
-// pass differs from a byte-for-byte copy.
+// parseObject copies an object, writing every member's scalar value through
+// sub — the one place this walker's pass differs from a byte-for-byte copy.
 func (w *jsonWalker) parseObject() error {
 	w.out.WriteByte('{')
 	w.i++
@@ -385,14 +409,23 @@ func (w *jsonWalker) parseObject() error {
 		w.out.WriteByte(':')
 		w.i++
 		w.skipWS()
-		if key == "incarnation" && w.i < len(w.b) && w.b[w.i] == '"' {
+		switch {
+		case w.i < len(w.b) && w.b[w.i] == '"':
 			raw, err := w.scanString()
 			if err != nil {
 				return err
 			}
-			w.out.Write(w.sub(raw))
-		} else if err := w.parseValue(); err != nil {
-			return err
+			w.out.Write(w.sub(key, raw))
+		case w.i < len(w.b) && w.b[w.i] != '{' && w.b[w.i] != '[':
+			raw, err := w.scanScalar()
+			if err != nil {
+				return err
+			}
+			w.out.Write(w.sub(key, raw))
+		default:
+			if err := w.parseValue(); err != nil {
+				return err
+			}
 		}
 		w.skipWS()
 		if w.i >= len(w.b) {
@@ -495,19 +528,64 @@ type fixtureRunner struct {
 	sockets map[string]string
 	conns   map[int]*fixtureConn
 	inc     *incarnations
+	// hubID is the hub's id in a two-socket fixture ("" for none, or a hub
+	// whose id is to be shown as it is): what hubToWire names HUB-ID.
+	hubID string
 }
 
 // hubStarter serves a hub for a two-socket fixture (plan 032 §3.15): handed
 // the registry the fixture's Host is listed in (rundir.Env, a HOME-like root
 // and a runtime tree of the fixture's own), it starts a hub that finds the
-// Host there, cleans it up through t, and returns the hub's socket.
-type hubStarter func(t *testing.T, env rundir.Env) string
+// Host there, cleans it up through t, and returns the hub's socket and its id
+// (hubToWire's HUB-ID; "" to name none).
+type hubStarter func(t *testing.T, env rundir.Env) (socket, hubID string)
 
-// fixtureHub is the hub every two-socket fixture runs against: nil until
-// there is a hub to start — internal/hub serves the roster from plan 032 C11,
-// which installs it here together with fixtures 19–20 — so a fixture that
-// names the hub before then fails, saying why (fixtureHubFor).
+// fixtureHub is the hub every two-socket fixture runs against: the real one,
+// internal/hub's Run in this process (hub_fixture_test.go installs it); nil,
+// a fixture that names the hub fails, saying why (fixtureHubFor).
 var fixtureHub hubStarter
+
+// What a two-socket fixture names by placeholder in the lines the hub writes
+// (hubToWire), as the incarnation is named everywhere: the values of this run
+// that no fixture can pin.
+const (
+	// hubIDPlaceholder is the hub's id — minted per hub process — as its
+	// hello's endpoint.hostId and its roster's epoch.
+	hubIDPlaceholder = `"HUB-ID"`
+	// hubVersionPlaceholder is the hub's craze version (version.Version),
+	// which moves with every release.
+	hubVersionPlaceholder = `"HUB-VERSION"`
+	// pidPlaceholder is this test process's pid wherever a hub line carries
+	// it — the in-process hub's own, and the pid the fixture Host's registry
+	// entry carries, which every listed host's does: 4242, the fake host's
+	// own (Options.PID's default).
+	pidPlaceholder = `4242`
+)
+
+// hubToWire names by placeholder, in a line the hub wrote, the values a
+// fixture cannot pin: every member named hostId or epoch whose value is the
+// hub's id, crazeVersion whose value is version.Version, and pid whose value
+// is this process's pid — exact values the run itself knows, never a guess at
+// their shape, as the incarnation's rewrite is. Every other byte is the
+// hub's.
+func (r *fixtureRunner) hubToWire(b []byte) []byte {
+	id, ver, pid := `"`+r.hubID+`"`, strconv.Quote(version.Version), strconv.Itoa(os.Getpid())
+	out, err := rewriteMembers(b, func(key string, raw []byte) []byte {
+		switch v := string(raw); {
+		case (key == "hostId" || key == "epoch") && r.hubID != "" && v == id:
+			return []byte(hubIDPlaceholder)
+		case key == "crazeVersion" && v == ver:
+			return []byte(hubVersionPlaceholder)
+		case key == "pid" && v == pid:
+			return []byte(pidPlaceholder)
+		}
+		return raw
+	})
+	if err != nil {
+		panic(fmt.Sprintf("fakehost: rewriting the hub's values: %v", err))
+	}
+	return out
+}
 
 // fixtureNeedsHub reports whether any line of a fixture is to the hub's
 // socket: a two-socket fixture.
@@ -574,7 +652,10 @@ func newTwoSocketRunner(t *testing.T, o Options, start hubStarter) *fixtureRunne
 		t.Fatal(err)
 	}
 	serveFixtureHost(t, h, reg.Listener(), reg)
-	return newRunnerFor(t, h, map[string]string{sockHost: reg.Socket(), sockHub: start(t, env)})
+	sock, id := start(t, env)
+	r := newRunnerFor(t, h, map[string]string{sockHost: reg.Socket(), sockHub: sock})
+	r.hubID = id
+	return r
 }
 
 // fixtureRegistry is a registry of a fixture's own: a fresh 0700 HOME-like
@@ -694,6 +775,9 @@ func (r *fixtureRunner) run(lines []rawFixtureLine, update bool) []byte {
 			}
 			got := c.readLine(r.t)
 			got = r.inc.toWire(got)
+			if c.sock == sockHub {
+				got = r.hubToWire(got)
+			}
 			if err := wiretest.Default().Server(c.methodFor(got), got); err != nil {
 				r.t.Fatalf("line %d: s2c off the schema: %v (%s)", i+1, err, got)
 			}

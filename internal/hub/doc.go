@@ -10,7 +10,11 @@
 //
 //   - lifecycle.go: Run, the process — its lock, staged start, record,
 //     Lost, signals, idle exit, orphan sweep and bounded teardown.
-//   - server.go: its socket's connections — peer check, hello, refusals.
+//   - server.go: its socket's connections — peer check, hello, refusals,
+//     the roster's two methods, and every write's bounds.
+//   - roster.go: the roster — internal/roster's poll, run while someone
+//     wants it, its rows bounded and forwarded, sessions.list and
+//     sessions.subscribe, and each subscription's net-change notifications.
 //   - ensure.go: Ensure, a client's find-or-start (and the wedged hub's
 //     replacement, P17), and Command, the spawn seam.
 //   - env.go: the environment contract (P13) for the hub and every host it

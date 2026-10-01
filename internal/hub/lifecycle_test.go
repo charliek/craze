@@ -62,7 +62,13 @@ func TestAHubServesItsHello(t *testing.T) {
 	if resp := c.call(t, "no.such.method", nil); resp.Error == nil || resp.Error.Data.Reason != protocol.ReasonUnknownMethod {
 		t.Fatalf("an unknown method: %+v", resp)
 	}
-	for _, m := range []string{protocol.MethodSessionsList, protocol.MethodSessionsSubscribe, protocol.MethodSessionConnect, protocol.MethodSessionCreate} {
+	// The roster is served (roster_test.go): an empty registry is an empty
+	// roster at cursor 0, its epoch the hub's id.
+	if resp := c.call(t, protocol.MethodSessionsList, nil); resp.Error != nil ||
+		string(resp.Result) != `{"epoch":"`+line.HubID+`","cursor":0,"sessions":[]}` {
+		t.Fatalf("sessions.list over an empty registry: %+v (%s)", resp, resp.Result)
+	}
+	for _, m := range []string{protocol.MethodSessionConnect, protocol.MethodSessionCreate} {
 		if resp := c.call(t, m, nil); resp.Error == nil || resp.Error.Data.Code != protocol.CodeUnsupported {
 			t.Fatalf("%s before its commit: %+v, want unsupported", m, resp)
 		}

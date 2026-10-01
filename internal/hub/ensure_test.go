@@ -336,6 +336,10 @@ func TestEnsureReplacesASIGSTOPpedHub(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = syscall.Kill(old.PID, syscall.SIGCONT) })
+	// The stop is in effect only once the hub has stopped: kill returns
+	// with it pending, and under load its other threads serve on for a
+	// while — long enough to answer Ensure's hello (seen in C11's gate).
+	waitStopped(t, old.PID)
 	sock, err := ensure(t, env, protocol.ConnectionCapabilities{})
 	if err != nil {
 		t.Fatalf("Ensure past a stopped hub: %v", err)

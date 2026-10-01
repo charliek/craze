@@ -376,7 +376,7 @@ func runIn(t *testing.T, env rundir.Env, hk *hooks) *running {
 	}()
 	go func() {
 		rn.err = Run(context.Background(), Options{Env: env, Ready: NewReadyPipe(w), Signals: rn.sigs,
-			Stderr: rn.stderr, IdleGrace: time.Hour, hooks: hk})
+			Stderr: rn.stderr, IdleGrace: time.Hour, Codecs: protocol.Codecs{Event: 1, Snapshot: 1}, hooks: hk})
 		close(rn.done)
 	}()
 	t.Cleanup(func() {
@@ -656,6 +656,21 @@ func endProcess(t *testing.T, pid int) {
 		_ = syscall.Kill(pid, syscall.SIGKILL)
 		t.Errorf("hub child %d did not exit within %v of SIGTERM; killed", pid, step)
 	}
+}
+
+// waitStopped waits for pid to be stopped (SIGSTOP), within step: a stop
+// signal is in effect only once the thread the kernel woke for it has run and
+// stopped the rest, so kill returns with the process still running — and,
+// under load, its other threads serving — for a while.
+func waitStopped(t *testing.T, pid int) {
+	t.Helper()
+	waitFor(t, fmt.Sprintf("process %d stops", pid), func() bool {
+		if s := procState(pid); s != "?" {
+			return s == "T"
+		}
+		out, err := exec.Command("ps", "-o", "state=", "-p", strconv.Itoa(pid)).Output()
+		return err == nil && strings.HasPrefix(strings.TrimSpace(string(out)), "T")
+	})
 }
 
 // waitGone waits for pid to have exited (gone, or a zombie its reaper has not

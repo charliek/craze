@@ -1,6 +1,7 @@
 package roster
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -38,7 +39,8 @@ type client struct {
 	version string
 }
 
-// clientInfo is who the roster says it is: the TUI's session list.
+// clientInfo is who the roster says it is: the TUI's session list. The
+// hub's roster says it is the hub (HubOptions.Client).
 var clientInfo = protocol.ClientInfo{Kind: "tui", Name: "craze sessions", Version: version.Version}
 
 // dialFunc opens the transport to a socket; its context bounds the dial.
@@ -49,14 +51,14 @@ func dialUnix(ctx context.Context, path string) (net.Conn, error) {
 	return d.DialContext(ctx, "unix", path)
 }
 
-// dialHello opens a connection to socket and says hello, by deadline (the
-// end of the attempt's "dial + hello" share) and until ctx ends — the
+// dialHello opens a connection to socket and says hello as who, by deadline
+// (the end of the attempt's "dial + hello" share) and until ctx ends — the
 // roster's life, whose end closes the connection mid-exchange. check, when
 // not nil, is run on the connection before a byte is written
 // (rundir.DialCheck: the host runs as this user). A hello refused, or
 // answered by anything but a host that speaks a protocol this build does, is
 // an error.
-func dialHello(ctx context.Context, dial dialFunc, check func(*net.UnixConn) error, socket string, deadline time.Time) (*client, error) {
+func dialHello(ctx context.Context, dial dialFunc, check func(*net.UnixConn) error, who protocol.ClientInfo, socket string, deadline time.Time) (*client, error) {
 	dctx, cancel := context.WithDeadline(ctx, deadline)
 	defer cancel()
 	nc, err := dial(dctx, socket)
@@ -76,7 +78,7 @@ func dialHello(ctx context.Context, dial dialFunc, check func(*net.UnixConn) err
 	c := &client{nc: nc, lr: protocol.NewLineReader(nc, protocol.OutboundLineMax), maxLine: protocol.InboundLineMax}
 	var h protocol.HelloResult
 	err = c.exchange(ctx, deadline, func() error {
-		return c.call(protocol.MethodHello, protocol.HelloParams{Protocols: protocol.SupportedProtocols(), Client: clientInfo}, &h)
+		return c.call(protocol.MethodHello, protocol.HelloParams{Protocols: protocol.SupportedProtocols(), Client: who}, &h)
 	})
 	switch {
 	case err != nil:
@@ -100,12 +102,57 @@ func dialHello(ctx context.Context, dial dialFunc, check func(*net.UnixConn) err
 // share) and until ctx ends. Any failure — a refusal included, and a reply
 // that does not decode — leaves the connection in no state to be asked again:
 // the caller closes it.
-func (c *client) list(ctx context.Context, deadline time.Time) (protocol.SessionsListResult, error) {
-	var res protocol.SessionsListResult
+//
+// With raw (the hub's roster, plan 032 §3.6, P4) it answers each row's JSON
+// value too, beside its decoding, index for index: the value the host sent,
+// compacted — its members this build does not know kept, at any depth — or
+// nil for a row that is not a JSON object (a null), which the hub never
+// forwards.
+func (c *client) list(ctx context.Context, deadline time.Time, raw bool) (protocol.SessionsListResult, []json.RawMessage, error) {
+	if !raw {
+		var res protocol.SessionsListResult
+		err := c.exchange(ctx, deadline, func() error {
+			return c.call(protocol.MethodSessionsList, protocol.SessionsListParams{}, &res)
+		})
+		return res, nil, err
+	}
+	var wire struct {
+		Epoch    string            `json:"epoch"`
+		Cursor   uint64            `json:"cursor"`
+		Sessions []json.RawMessage `json:"sessions"`
+	}
 	err := c.exchange(ctx, deadline, func() error {
-		return c.call(protocol.MethodSessionsList, protocol.SessionsListParams{}, &res)
+		return c.call(protocol.MethodSessionsList, protocol.SessionsListParams{}, &wire)
 	})
-	return res, err
+	if err != nil {
+		return protocol.SessionsListResult{}, nil, err
+	}
+	res := protocol.SessionsListResult{Epoch: wire.Epoch, Cursor: wire.Cursor}
+	raws := make([]json.RawMessage, len(wire.Sessions))
+	for i, b := range wire.Sessions {
+		var row protocol.SessionRow
+		if err := json.Unmarshal(b, &row); err != nil {
+			return protocol.SessionsListResult{}, nil, fmt.Errorf("roster: decoding %s's result: %w", protocol.MethodSessionsList, err)
+		}
+		res.Sessions = append(res.Sessions, row)
+		raws[i] = compactObject(b)
+	}
+	return res, raws, nil
+}
+
+// compactObject is b — one JSON value, valid — compacted, as the hub's
+// encoder writes a json.RawMessage (no HTML escaping), so its length is the
+// bytes it costs on the wire; nil when it is not an object.
+func compactObject(b json.RawMessage) json.RawMessage {
+	t := bytes.TrimSpace(b)
+	if len(t) == 0 || t[0] != '{' {
+		return nil
+	}
+	var out bytes.Buffer
+	if err := json.Compact(&out, t); err != nil {
+		return nil
+	}
+	return out.Bytes()
 }
 
 // close closes the connection; the host notes it and releases the client id

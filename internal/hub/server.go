@@ -24,11 +24,18 @@ import (
 // connection reads a line, answers it and reads the next.
 //
 // What the hub serves, method by method: hello (HubHelloResult, the hub's
-// capabilities); every session-scoped method but session.connect is a host's,
+// capabilities); sessions.list and sessions.subscribe, the roster (roster.go;
+// one subscription per connection, whose notifications its own flusher
+// writes); every session-scoped method but session.connect is a host's,
 // refused unsupported, reason host_only — the hub routes by splicing, never
-// method by method (SQ14). sessions.list and sessions.subscribe (C11),
-// session.connect (C12) and session.create (C15) are refused unsupported
-// until the commit that serves each.
+// method by method (SQ14). session.connect (C12) and session.create (C15) are
+// refused unsupported until the commit that serves each.
+//
+// Writes: one line at a time (wmu), each bounded — a reply by writeWait, a
+// roster notification by slowWait (conn.notify) — and every deadline capped
+// by the teardown's (capWrites), so its last word to a subscriber is bounded
+// whatever a write in flight was given. A line cut part way leaves the
+// connection broken: nothing more is written on it, and it closes.
 
 // The server's bounds: variables only so a test can shorten them (never in
 // parallel).
@@ -109,6 +116,16 @@ type conn struct {
 	// writing is set while a write is in the kernel's hands: a test's view
 	// of an answer stuck behind a peer that does not read.
 	writing atomic.Bool
+	// broken says a line was cut part way (under wmu): nothing more can be
+	// written that a peer could read as lines.
+	broken bool
+	// capAt is the teardown's cap on every write deadline, zero for none
+	// (dmu, which orders a deadline's setting against the cap's).
+	dmu   sync.Mutex
+	capAt time.Time
+	// subs is every roster subscription the connection made, the last its
+	// current one: the connection's own goroutine's.
+	subs []*subscription
 }
 
 // serve reads and answers the connection's lines until it closes, the hello
@@ -116,6 +133,9 @@ type conn struct {
 func (c *conn) serve() {
 	defer c.s.conns.Done()
 	defer c.s.h.life.dropConn(c)
+	// After the close, which ends a notification's write in flight: each
+	// subscription ended (unless it has) and its flusher joined.
+	defer c.endSubs()
 	defer c.close()
 	_ = c.uc.SetReadDeadline(time.Now().Add(helloWait))
 	for {
@@ -175,9 +195,12 @@ func (c *conn) dispatch(line []byte) bool {
 	case !c.client:
 		return c.replyErr(req.id, refused(protocol.CodeBadRequest, protocol.ReasonHelloRequired,
 			"%s before hello: every method but hello needs one first", req.method))
-	case req.method == protocol.MethodSessionsList, req.method == protocol.MethodSessionsSubscribe,
-		req.method == protocol.MethodSessionConnect, req.method == protocol.MethodSessionCreate:
-		// Served by the commits that build them (plan 032 C11, C12, C15).
+	case req.method == protocol.MethodSessionsList:
+		return c.list(req)
+	case req.method == protocol.MethodSessionsSubscribe:
+		return c.subscribe(req)
+	case req.method == protocol.MethodSessionConnect, req.method == protocol.MethodSessionCreate:
+		// Served by the commits that build them (plan 032 C12, C15).
 		return c.replyErr(req.id, refused(protocol.CodeUnsupported, protocol.ReasonUnsupported,
 			"%s is not served by this hub yet", req.method))
 	case info.SessionScoped:
@@ -242,15 +265,105 @@ func (c *conn) hello(req *request) bool {
 	})
 }
 
+// list answers sessions.list (roster.go): once the open run has polled every
+// host — at most listWait — the roster as it stands.
+func (c *conn) list(req *request) bool {
+	if perr := emptyParams(req.params); perr != nil {
+		return c.replyErr(req.id, perr)
+	}
+	rs := c.s.h.rs
+	rs.await(rs.acquire())
+	res, ok := rs.list()
+	rs.release()
+	if !ok {
+		c.replyErr(req.id, refused(protocol.CodeUnavailable, protocol.ReasonClosing, "the hub is closing"))
+		return false
+	}
+	return c.reply(req.id, res)
+}
+
+// subscribe answers sessions.subscribe (roster.go): one per connection; once
+// the open run has polled every host — at most listWait — the subscription
+// is registered as its reply is built, the reply written, and its flusher
+// writes its notifications from then on. The subscription keeps its demand on
+// the poll until it ends.
+func (c *conn) subscribe(req *request) bool {
+	if perr := emptyParams(req.params); perr != nil {
+		return c.replyErr(req.id, perr)
+	}
+	rs := c.s.h.rs
+	if n := len(c.subs); n > 0 && rs.live(c.subs[n-1]) {
+		return c.replyErr(req.id, refused(protocol.CodeBadRequest, protocol.ReasonAlreadySubscribed,
+			"this connection holds roster subscription %s already", c.subs[n-1].id))
+	}
+	rs.await(rs.acquire())
+	sub, res, ok := rs.subscribe(c)
+	if !ok {
+		rs.release()
+		c.replyErr(req.id, refused(protocol.CodeUnavailable, protocol.ReasonClosing, "the hub is closing"))
+		return false
+	}
+	c.subs = append(c.subs, sub)
+	go sub.run()
+	if f := c.s.h.hk.subscribed; f != nil {
+		f()
+	}
+	written := c.reply(req.id, res)
+	close(sub.replied)
+	return written
+}
+
+// endSubs ends every subscription the connection made — the connection has
+// closed — and joins their flushers.
+func (c *conn) endSubs() {
+	for _, s := range c.subs {
+		c.s.h.rs.end(s, "")
+		<-s.done
+	}
+}
+
+// emptyParams holds params to {} — absent, or an object with no member — as a
+// host holds a method's params (strict): a member is unknown_field.
+func emptyParams(raw json.RawMessage) *protocol.Error {
+	b := bytes.TrimSpace(raw)
+	if len(b) == 0 {
+		return nil
+	}
+	if string(b) == "null" {
+		return badParams("params must be an object, not null")
+	}
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(b, &m); err != nil {
+		return badParams("params must be an object")
+	}
+	if len(m) > 0 {
+		keys := make([]string, 0, len(m))
+		for k := range m {
+			keys = append(keys, k)
+		}
+		slices.Sort(keys)
+		return &protocol.Error{Code: protocol.RPCInvalidParams, Message: "unknown field params." + keys[0],
+			Data: protocol.ErrorData{Code: protocol.CodeBadRequest, Reason: protocol.ReasonUnknownField}}
+	}
+	return nil
+}
+
 // reply writes result as the answer to id: false when the write failed, which
-// ends the connection.
+// ends the connection. A reply over the outbound line limit is replaced by
+// failed, reason response_too_large — a roster stays under it for a request id
+// within RosterRequestIDBytesMax (limits.go).
 func (c *conn) reply(id json.RawMessage, result any) bool {
 	// MarshalLine's encoding (HTML not escaped), without its newline.
 	raw, err := protocol.MarshalLine(result)
 	if err != nil {
 		return c.replyErr(id, refused(protocol.CodeFailed, protocol.ReasonFailed, "%v", err))
 	}
-	return c.write(protocol.Response{JSONRPC: protocol.JSONRPCVersion, ID: id, Result: bytes.TrimSuffix(raw, []byte{'\n'})})
+	resp := protocol.Response{JSONRPC: protocol.JSONRPCVersion, ID: id, Result: bytes.TrimSuffix(raw, []byte{'\n'})}
+	if len(`{"jsonrpc":"2.0","id":,"result":}`)+len(id)+len(raw)-1 > protocol.OutboundLineMax {
+		return c.replyErr(id, refused(protocol.CodeFailed, protocol.ReasonResponseTooLarge,
+			"the reply would be over the %d-byte line limit", protocol.OutboundLineMax))
+	}
+	return c.write(resp)
 }
 
 // replyErr writes e as the answer to id (nil: null), as reply does.
@@ -267,11 +380,123 @@ func (c *conn) write(v any) bool {
 	}
 	c.wmu.Lock()
 	defer c.wmu.Unlock()
-	_ = c.uc.SetWriteDeadline(time.Now().Add(writeWait))
+	if c.broken {
+		return false
+	}
+	_ = c.setWriteDeadline(time.Now().Add(writeWait))
 	c.writing.Store(true)
-	_, err = c.uc.Write(line)
+	n, err := c.uc.Write(line)
 	c.writing.Store(false)
+	if err != nil && n > 0 {
+		c.broken = true
+	}
 	return err == nil
+}
+
+// notify writes p, s's roster notification, bounded by slowWait: false ends
+// the flusher. A write that blocks that long ends the subscription — unless
+// it has ended meanwhile, the teardown's cap having cut the write — with the
+// rest of the line and a reset{slow_consumer} written after it, bounded by
+// writeWait; the connection stays for a new subscription. A write that fails
+// otherwise, or the rest that cannot be written, ends the connection.
+func (c *conn) notify(s *subscription, p protocol.RosterParams) bool {
+	line, err := notificationLine(protocol.NotifyRoster, p)
+	if err != nil {
+		c.s.h.logf("roster subscription %s: %v", s.id, err)
+		c.close()
+		return false
+	}
+	c.wmu.Lock()
+	defer c.wmu.Unlock()
+	if c.broken {
+		return false
+	}
+	_ = c.setWriteDeadline(time.Now().Add(slowWait))
+	c.writing.Store(true)
+	n, err := c.uc.Write(line)
+	c.writing.Store(false)
+	if err == nil {
+		return true
+	}
+	var ne net.Error
+	if !errors.As(err, &ne) || !ne.Timeout() {
+		c.broken = c.broken || n > 0
+		c.close()
+		return false
+	}
+	if !s.rs.end(s, protocol.ResetSlowConsumer) {
+		c.broken = c.broken || n > 0
+		return false
+	}
+	c.s.h.logf("roster subscription %s: a notification's write blocked for %v; reset slow_consumer", s.id, slowWait)
+	reset, err := notificationLine(protocol.NotifyReset, protocol.ResetParams{Subscription: s.id, Reason: protocol.ResetSlowConsumer})
+	if err == nil {
+		rest := append(append(make([]byte, 0, len(line)-n+len(reset)), line[n:]...), reset...)
+		_ = c.setWriteDeadline(time.Now().Add(writeWait))
+		c.writing.Store(true)
+		var m int
+		m, err = c.uc.Write(rest)
+		c.writing.Store(false)
+		if err == nil {
+			return false
+		}
+		n += m
+	}
+	c.broken = c.broken || n > 0
+	c.close()
+	return false
+}
+
+// writeReset writes reset{why} for subscription sub, bounded by writeWait and
+// the teardown's cap.
+func (c *conn) writeReset(sub string, why protocol.ResetReason) {
+	line, err := notificationLine(protocol.NotifyReset, protocol.ResetParams{Subscription: sub, Reason: why})
+	if err != nil {
+		return
+	}
+	c.wmu.Lock()
+	defer c.wmu.Unlock()
+	if c.broken {
+		return
+	}
+	_ = c.setWriteDeadline(time.Now().Add(writeWait))
+	c.writing.Store(true)
+	n, err := c.uc.Write(line)
+	c.writing.Store(false)
+	if err != nil && n > 0 {
+		c.broken = true
+	}
+}
+
+// setWriteDeadline sets the connection's write deadline to d, or the
+// teardown's cap if that is sooner.
+func (c *conn) setWriteDeadline(d time.Time) error {
+	c.dmu.Lock()
+	defer c.dmu.Unlock()
+	if !c.capAt.IsZero() && c.capAt.Before(d) {
+		d = c.capAt
+	}
+	return c.uc.SetWriteDeadline(d)
+}
+
+// capWrites caps every write deadline at at, the write in flight's included.
+func (c *conn) capWrites(at time.Time) {
+	c.dmu.Lock()
+	defer c.dmu.Unlock()
+	if c.capAt.IsZero() || at.Before(c.capAt) {
+		c.capAt = at
+	}
+	_ = c.uc.SetWriteDeadline(c.capAt)
+}
+
+// notificationLine is one notification's line: method, params.
+func notificationLine(method string, params any) ([]byte, error) {
+	raw, err := protocol.MarshalLine(params)
+	if err != nil {
+		return nil, err
+	}
+	return protocol.MarshalLine(protocol.Notification{JSONRPC: protocol.JSONRPCVersion, Method: method,
+		Params: bytes.TrimSuffix(raw, []byte{'\n'})})
 }
 
 // request is one line parsed as a request: its id verbatim, its method and

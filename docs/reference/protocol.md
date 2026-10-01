@@ -313,7 +313,18 @@ applies it only if it has folded no later turn since, by `turnId`.
 The hub learns hosts from the machine's registry (see [The
 registry](#the-registry)) and reads each one's own `sessions.list`; it lists
 every live host that has a craze session id, keyed by host id, in host-id
-order. Its `sessions.list` result:
+order. It polls as the session list does — a round at most every second that
+reads the registry (sweeping hosts that died, so a crashed host's row leaves
+within one round) and asks every host, eight at a time, 500 ms each, over a
+connection it keeps — but only while someone wants the roster: a
+subscription, or a `sessions.list` or `sessions.subscribe` waiting for its
+answer. Its poll connections say `hello` as client kind `hub`.
+
+A `sessions.list` or `sessions.subscribe` answers once the poll's current
+round has heard from every host it lists — an answer, or a failure — and at
+most a second after it was asked: a host not heard from by then is listed
+`connecting`. A hub that was not polling starts a round for it, so its
+answer is what the hosts say now. Its `sessions.list` result:
 
 | result | |
 |---|---|
@@ -367,19 +378,23 @@ of its notifications:
 ```
 
 then `roster` notifications, each the **net change** since the cursor the
-subscriber last had — rows added or changed in `upserts`, the host ids of
-rows gone in `removes`, a host in at most one of the two — flushed at most
-every 250 ms:
+subscriber last had — rows added or changed in `upserts`, each at its
+latest; the host ids of rows the subscriber holds that are gone in
+`removes`; a host in at most one of the two, and a host that came and went
+between two notifications in neither — flushed at most every 250 ms, in
+host-id order within each list:
 
 ```json
 {"jsonrpc":"2.0","method":"roster","params":{"subscription":"r-1","epoch":"0a1b2c3d4e5f","cursor":12,"upserts":[...],"removes":["0190ab12cd36"]}}
 ```
 
 A subscription ends with the connection, or with a `reset` on the
-subscription: `slow_consumer` (the subscriber fell 10 s behind) or
-`hub_closing` (the hub is shutting down and closes the connection). Either
-way the client subscribes again — after `hub_closing`, on a new connection,
-the new hub's `epoch` reseeding it.
+subscription: `slow_consumer` — a notification's write blocked for 10 s; the
+rest of that line is written, then the reset, and the connection stays — or
+`hub_closing` — the hub is shutting down: it writes the reset within 5 s and
+closes the connection. Either way the client subscribes again: after
+`slow_consumer` it may on the same connection; after `hub_closing`, on a new
+one, the new hub's `epoch` reseeding it.
 
 On the hub, every session-scoped method but `session.connect` is
 `unsupported`, reason `host_only`: a session's methods are its host's,
@@ -1202,7 +1217,7 @@ embedded copy — e.g. [`hello.json`](protocol/schema/hello.json),
 
 ## Fixtures and the fake host
 
-`internal/fakehost/testdata/wire/*.ndjson` is eighteen scripted scenarios
+`internal/fakehost/testdata/wire/*.ndjson` is twenty scripted scenarios
 against a real `internal/control` server over a real engine (wrapping the
 TUI's own `Stub`, never a fixture-only re-implementation) — hello and a fresh
 attach; a cursor resume and its replay; a foreign-incarnation cursor; a
@@ -1216,8 +1231,10 @@ answering a stop's receipt and then ending the session; a stop joined by
 another client's and by its own resend, with an attach refused `closing`;
 and `lastTurn` in `session.state` and a roster row, after a cancelled turn
 and a foreign one; a host with the row facts through a turn — a running
-tool, streaming text, an ask, the ending; and a catalog whose remembered
-models carry their `recent` rank. Every line is
+tool, streaming text, an ask, the ending; a catalog whose remembered
+models carry their `recent` rank; and, against the hub in front of a host,
+the hub's `hello` and roster (19), and a roster subscription told of the
+host's change and then of its leaving the registry (20). Every line is
 `{"conn": N, "dir": "c2s"|"s2c", "msg": {...}}`, plus `{"dir": "op", "op":
 {...}}` lines that are not wire messages at all — they script the host
 directly (emitting text, opening an ask, restarting the engine into a fresh
@@ -1238,8 +1255,13 @@ A wire line may also carry `"sock": "hub"`: its connection is to the hub's
 socket rather than the host's (a connection's first line decides which, for
 good). A fixture with any such line is a **two-socket** fixture: the runner
 binds and lists its host in a registry of the fixture's own, exactly where a
-hub looks for hosts, and starts the hub in front of it, so one script speaks
-to both. The hub's fixtures arrive with the hub's roster.
+hub looks for hosts, and starts the hub in front of it — the real hub, in
+the runner's process — so one script speaks to both. What the hub writes
+carries three values no fixture can pin, named by placeholder as the
+incarnation is: the hub's id (its `hello`'s `endpoint.hostId` and its
+roster's `epoch`) is `HUB-ID`, its craze version `HUB-VERSION`, and the
+runner's own pid — the hub's, and the one the host's registry entry carries
+— `4242`, the fake host's own.
 
 `cmd/craze-fake-host` is the same host as a standalone binary, for anyone
 scripting against protocol 1 without Go: `craze-fake-host --socket PATH`
@@ -1261,7 +1283,8 @@ then reads the same NDJSON ops described above from stdin —
 `foreign_turn`, `stall_writes`, `resume_writes`, `drop_connections`,
 `restart` (a new incarnation of the same session), `quit`, plus a few the
 fixtures alone need (`spawn_subagent`, `oversized_event`, `advance_clock`,
-`hang_next`, `run_stop`). Its clock, ids, host id, craze version, pid and token source
+`hang_next`, `run_stop`, and `unlist` — a `--registry` host leaving the
+registry while it keeps serving the connections it has). Its clock, ids, host id, craze version, pid and token source
 are all deterministic by default, so a script against it produces the same
 wire traffic on every run and every machine (a listed host's registry entry
 carries its real pid, as every host's does).

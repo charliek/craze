@@ -31,9 +31,11 @@
 // registry exactly as a craze host is — its socket in the runtime tree, its
 // entry and lifetime lock in the cache tree — so a hub finds it, and several
 // Hosts with ids of their own (Options.HostID, CrazeSessionID) are listed
-// side by side. cmd/craze-fake-host's --registry, --host-id and --session-id
-// are the same, and the wire fixtures' runner registers a two-socket
-// fixture's Host for the hub it runs in front of it (wire_test.go).
+// side by side; the unlist op takes it out of the registry again (Unlist).
+// cmd/craze-fake-host's --registry, --host-id and --session-id are the same,
+// and the wire fixtures' runner registers a two-socket fixture's Host for the
+// hub — the real internal/hub, in process — it runs in front of it
+// (wire_test.go, hub_fixture_test.go).
 //
 // depguard: this package may import internal/tui (for the Stub),
 // internal/control (the server) and internal/rundir (Register); it may not

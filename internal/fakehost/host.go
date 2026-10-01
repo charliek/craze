@@ -417,7 +417,9 @@ func (h *Host) Incarnation() string { return h.currentEngine().State().Incarnati
 // client, past the binding table's idle bound) and hang_next (fixture 9's
 // prompt, kept from racing its own reply: see HangNext). Plan 030 adds
 // run_stop (RunStop): the stop sequence of a Host built with Options.Stop,
-// run where a fixture's script says. Do is what runs an
+// run where a fixture's script says. Plan 032 adds unlist (Unlist): a
+// registered Host leaving the registry, for the hub's roster (fixture 20).
+// Do is what runs an
 // op to completion — the op, then the log flushed (syncLog) — so a caller
 // that needs the script's seq order goes through Do, as both of those do; the
 // "end" op also waits there, before it cancels, for the Stub to have opened
@@ -717,6 +719,22 @@ func (h *Host) AdvanceClock(d time.Duration) { h.clk.advance(d) }
 // mean this.
 func (h *Host) Quit(ctx context.Context) error { return h.Close(ctx) }
 
+// Unlist takes a registered Host out of the registry (plan 032 §3.15): its
+// registration (Register's) is closed — its entry, lifetime lock and socket
+// gone, as a host's are when it exits, so the hub's next read of the
+// registry finds it gone — while the connections it has stay served. Its
+// caller's own close of the registration later does nothing more; a Host
+// never registered is an error.
+func (h *Host) Unlist() error {
+	h.mu.Lock()
+	reg := h.reg
+	h.mu.Unlock()
+	if reg == nil {
+		return fmt.Errorf("fakehost: unlist: host %s is not registered", h.opts.HostID)
+	}
+	return reg.Close()
+}
+
 // stopRequested is the fixtures' coordinator (control.StopFunc, with
 // Options.Stop): it records the stop the server handed it — once, the
 // server's own rule — and returns, the sequence left to RunStop.
@@ -900,6 +918,8 @@ func (h *Host) do(p opParams) error {
 		return h.Quit(context.Background())
 	case "run_stop":
 		return h.RunStop()
+	case "unlist":
+		return h.Unlist()
 	case "spawn_subagent":
 		h.SpawnSubagent(p.ID)
 	case "oversized_event":

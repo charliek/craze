@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -39,11 +40,11 @@ func twoSocketScript(hub bool) string {
 }
 
 // standIn is a hubStarter for the runner's own test, never for a fixture:
-// there is no hub before plan 032 C11, so what answers the "hub" socket here
-// is a second fake host with an id of its own — enough to tell which socket
-// each connection reached. Before serving it, it checks that the fixture's
+// what answers the "hub" socket here is a second fake host with an id of its
+// own — enough to tell which socket each connection reached — whose id is
+// shown as it is (no HUB-ID). Before serving it, it checks that the fixture's
 // Host is listed in the registry it is handed, as a hub would find it.
-func standIn(t *testing.T, env rundir.Env) string {
+func standIn(t *testing.T, env rundir.Env) (string, string) {
 	t.Helper()
 	entries, err := rundir.Hosts(env)
 	if err != nil {
@@ -67,7 +68,7 @@ func standIn(t *testing.T, env rundir.Env) string {
 		t.Fatal(err)
 	}
 	serveFixtureHost(t, h, l, nil)
-	return socket
+	return socket, ""
 }
 
 // recorded is each connection's s2c lines in out, a run's recorded fixture,
@@ -280,5 +281,60 @@ func TestARegisteredHostIsListedAndFollowsItsRestarts(t *testing.T) {
 	}
 	if listed := byID(); len(listed) != 1 || listed["0123456789ab"].HostID == "" {
 		t.Fatalf("after host b's registration closed the registry lists %+v", listed)
+	}
+}
+
+// TestUnlistTakesAHostOutOfTheRegistry (plan 032 C11, fixture 20's op): a
+// registered Host unlisted is no longer in the registry, while a connection
+// it already had is still served; its caller's own close of the registration
+// afterwards does nothing more. The negative control: a Host never
+// registered cannot be unlisted.
+func TestUnlistTakesAHostOutOfTheRegistry(t *testing.T) {
+	env := fixtureRegistry(t)
+	h, err := New(Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reg, err := h.Register(env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	serveFixtureHost(t, h, reg.Listener(), reg)
+	nc, err := net.Dial("unix", reg.Socket())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = nc.Close() }()
+	lr := protocol.NewLineReader(nc, protocol.OutboundLineMax)
+	hello := func(id int) {
+		t.Helper()
+		if err := protocol.WriteLine(nc, protocol.Request{JSONRPC: protocol.JSONRPCVersion, ID: json.RawMessage(strconv.Itoa(id)),
+			Method: protocol.MethodHello, Params: json.RawMessage(`{"protocols":[1],"client":{"kind":"test"}}`)}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := lr.ReadLine(); err != nil {
+			t.Fatalf("the connection the Host had: %v", err)
+		}
+	}
+	hello(1)
+
+	if err := h.Do(json.RawMessage(`{"name":"unlist"}`)); err != nil {
+		t.Fatal(err)
+	}
+	if entries, err := rundir.Hosts(env); err != nil || len(entries) != 0 {
+		t.Fatalf("after unlist the registry lists %+v (%v)", entries, err)
+	}
+	hello(2) // a second hello is refused, but answered: the connection is served
+	if err := reg.Close(); err != nil {
+		t.Fatalf("the registration's own close after unlist: %v", err)
+	}
+
+	other, err := New(Options{HostID: standInHostID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = other.Close(context.Background()) })
+	if err := other.Unlist(); err == nil || !strings.Contains(err.Error(), "not registered") {
+		t.Fatalf("unlist of a Host never registered: %v", err)
 	}
 }

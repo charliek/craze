@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/charliek/craze/internal/protocol"
+	"github.com/charliek/craze/internal/roster"
 	"github.com/charliek/craze/internal/rundir"
 	"github.com/charliek/craze/internal/version"
 )
@@ -54,19 +55,25 @@ import (
 //     it spawns would inherit).
 //   - Idle (P12, owner decision 7): the hub is busy while it has a client —
 //     a connection past hello — or any live host is in the HOME registry
-//     (rundir.Hosts, every hostsEvery). When neither holds — at start too —
+//     (rundir.Hosts, every hostsEvery, and at every round of the roster's
+//     poll while it polls: pollHosts). When neither holds — at start too —
 //     it arms a check after the grace, capturing the lifecycle epoch, which
 //     every admission and every host appearing bumps. At the check, under the
 //     lifecycle lock, it reads the registry again and re-checks both and the
 //     epoch: still idle and unchanged, it decides, and from that instant every
 //     connection is closed unanswered and every hello refused closing.
 //
+// The roster (roster.go) is served from the start; its poll runs only while a
+// client wants it.
+//
 // Teardown, bounded by teardownBound whatever its peers do: quiesce (refuse
 // every new connection and every request; the lifecycle lock is the
-// barrier), wait for the work in flight, close the listener, close every
-// connection, stop the sweep, unlink the socket and remove the record — each
-// only while it is still the file the hub made — and release the lock last
-// (an explicit LOCK_UN, then close: rundir.HubLock.Release).
+// barrier; no answer waits for the poll any more), wait for the work in
+// flight, close the listener, end every roster subscription with
+// reset{hub_closing} (resetWait), close every connection, stop the roster's
+// poll and the sweep, unlink the socket and remove the record — each only
+// while it is still the file the hub made — and release the lock last (an
+// explicit LOCK_UN, then close: rundir.HubLock.Release).
 
 // DefaultIdleGrace is how long a hub with no client and no live host waits
 // before it exits (P12): 60 s.
@@ -98,7 +105,7 @@ var (
 	lostEvery = time.Second
 	// hostsEvery is how often the hub reads the registry for live hosts
 	// while it has nothing else to read it for (plan 032 §3.5: 5 s; every
-	// round of the roster's poll reads it too, from C11).
+	// round of the roster's poll reads it too: pollHosts).
 	hostsEvery = 5 * time.Second
 	// sweepEvery is how often the hub sweeps orphans (§3.9).
 	sweepEvery = 10 * time.Minute
@@ -171,6 +178,24 @@ type hooks struct {
 	peer func(*net.UnixConn) (pid, uid int, err error)
 	// accepted is told each connection the hub admits, before it is served.
 	accepted func(*net.UnixConn)
+
+	// The roster's (roster.go): rosterTicks replaces its poll's ticker;
+	// rosterNow is its clock, the poll's and freshness's; rosterDial its
+	// dial, and with it rosterCheck its peer check (nil: none);
+	// rosterBudget each share of an attempt's budget; flushTimer
+	// arms a subscription's flush spacing — every time one is spaced, its
+	// wait whatever it is; rosterApplied is told each Snapshot the roster has
+	// taken, after it did.
+	rosterTicks   <-chan time.Time
+	rosterNow     func() time.Time
+	rosterDial    func(ctx context.Context, path string) (net.Conn, error)
+	rosterCheck   func(*net.UnixConn) error
+	rosterBudget  time.Duration
+	flushTimer    func(time.Duration) (<-chan time.Time, func())
+	rosterApplied func(roster.Snapshot)
+	// subscribed runs between a subscription's registration and its reply's
+	// write.
+	subscribed func()
 }
 
 // LogPath is the hub's log for env's namespace:
@@ -220,6 +245,8 @@ type hub struct {
 
 	life lifecycle
 	srv  *server
+	// rs is the roster, from serve on.
+	rs *rosterState
 
 	// The loop's own: the armed grace, its stop, and the epoch it was armed
 	// at.
@@ -412,6 +439,7 @@ func (h *hub) undo() {
 // serve runs the server, the sweep and the loop until the hub is asked to
 // stop, and answers why.
 func (h *hub) serve(ctx context.Context) string {
+	h.rs = newRoster(h)
 	h.srv = &server{h: h, ln: h.ln, peer: rundir.PeerCheck(os.Geteuid()), acceptDone: make(chan struct{})}
 	if h.hk.peer != nil {
 		h.srv.peer = h.hk.peer
@@ -533,6 +561,18 @@ func (h *hub) refreshHosts() {
 	}
 }
 
+// pollHosts is the roster's registry read (roster.HubOptions.Hosts), once a
+// round while it polls: the idle rule takes it too — a host appearing bumps
+// the epoch — and the loop re-arms on it.
+func (h *hub) pollHosts() ([]rundir.Entry, error) {
+	entries, err := hostsRead(h.o.Env)
+	if h.life.setHosts(entries, err) {
+		h.logf("the registry cannot be read: %v", err)
+	}
+	h.life.wakeLoop()
+	return entries, err
+}
+
 // decideIdle is the idle decision at the end of a grace armed at epoch armed:
 // under the lifecycle lock, the registry read again, and the hub still idle —
 // no client, no live host — with the epoch unchanged. Then it is decided:
@@ -595,19 +635,19 @@ func (h *hub) teardown(cause string) {
 	h.logf("stopping: %s", cause)
 	deadline := time.Now().Add(teardownBound)
 	h.life.quiesce()
+	h.rs.quiesce()
 	if !waitUntil(&h.life.work, deadline) {
 		h.logf("work in flight did not end within %v; cut off", teardownBound)
 	}
 	_ = h.ln.Close()
 	<-h.srv.acceptDone
-	// C11: each roster subscription ends here with reset{reason:
-	// hub_closing}, every write bounded by 5 s and the deadline. C12: each
-	// splice closes here (half-close, then close).
+	h.rs.closeSubscriptions(deadline)
+	// C12: each splice closes here (half-close, then close).
 	h.srv.closeAll()
 	if !waitUntil(&h.srv.conns, deadline) {
 		h.logf("connections did not close within %v", teardownBound)
 	}
-	// C11: the roster's poller stops here.
+	h.rs.stop()
 	close(h.sweepStop)
 	select {
 	case <-h.sweepDone:
@@ -721,6 +761,14 @@ func (l *lifecycle) dropConn(c *conn) {
 		case l.kick <- struct{}{}:
 		default:
 		}
+	}
+}
+
+// wakeLoop wakes the loop to re-arm (kick's slot of one).
+func (l *lifecycle) wakeLoop() {
+	select {
+	case l.kick <- struct{}{}:
+	default:
 	}
 }
 

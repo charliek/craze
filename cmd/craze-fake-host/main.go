@@ -13,7 +13,7 @@
 // socket in the runtime tree (CRAZE_RUNTIME_DIR, else the usual bases), its
 // entry and lifetime lock in ROOT/.cache/craze/hosts/ — ROOT standing for
 // HOME — so a hub, `craze attach` or the TUI's list given that HOME finds it,
-// and unlisted when it exits. Its namespace is CRAZE_HOME's, else
+// and unlisted when it exits, or at the unlist op. Its namespace is CRAZE_HOME's, else
 // ROOT/.craze's. --host-id (12 lowercase hex digits) and --session-id (the
 // durable craze session id) replace the fixed defaults, so several fake hosts
 // can run, and be listed, side by side.
