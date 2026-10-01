@@ -65,41 +65,14 @@ func chooseTextType(types []string) string {
 	return other
 }
 
-// textBackend is one platform tool that can read the clipboard's text: the
-// types it says the clipboard offers, and the bytes of one of them.
-type textBackend struct {
-	types func(ctx context.Context) ([]string, error)
-	read  func(ctx context.Context, typ string) ([]byte, error)
-}
-
 // textBackends is the typed text readers for goos under getenv's environment:
+// the image read's Linux tools (linuxBackends), read through clipboardTextMax;
 // none on macOS, whose pbpaste is text only.
-func textBackends(goos string, getenv func(string) string, run runner) []textBackend {
+func textBackends(goos string, getenv func(string) string, run runner) []clipBackend {
 	if goos == "darwin" {
 		return nil
 	}
-	var out []textBackend
-	if getenv("WAYLAND_DISPLAY") != "" {
-		out = append(out, textBackend{
-			types: func(ctx context.Context) ([]string, error) {
-				return listTypes(ctx, run, "wl-paste", "--list-types")
-			},
-			read: func(ctx context.Context, typ string) ([]byte, error) {
-				return run(ctx, clipboardTextMax, "wl-paste", "--no-newline", "--type", typ)
-			},
-		})
-	}
-	if getenv("DISPLAY") != "" {
-		out = append(out, textBackend{
-			types: func(ctx context.Context) ([]string, error) {
-				return listTypes(ctx, run, "xclip", "-selection", "clipboard", "-t", "TARGETS", "-o")
-			},
-			read: func(ctx context.Context, typ string) ([]byte, error) {
-				return run(ctx, clipboardTextMax, "xclip", "-selection", "clipboard", "-t", typ, "-o")
-			},
-		})
-	}
-	return out
+	return linuxBackends(getenv, run, clipboardTextMax)
 }
 
 // errNoTextBackend is readTextFrom's word that no backend could list the
@@ -111,7 +84,7 @@ var errNoTextBackend = errors.New("tui: no clipboard tool lists types")
 // stops the read with no text — the clipboard holds none, an image say, and
 // asking another tool would not change that. errNoTextBackend when none
 // could list.
-func readTextFrom(ctx context.Context, backends []textBackend) (string, error) {
+func readTextFrom(ctx context.Context, backends []clipBackend) (string, error) {
 	for _, b := range backends {
 		types, err := b.types(ctx)
 		if err != nil {
@@ -131,7 +104,7 @@ func readTextFrom(ctx context.Context, backends []textBackend) (string, error) {
 }
 
 // readClipboardText is nativePaste's production reader: the typed backends,
-// bounded by clipboardImageTimeout, and atotto's untyped read where none
+// bounded by clipboardTimeout, and atotto's untyped read where none
 // could list the clipboard's types (macOS's pbpaste among them).
 func readClipboardText() (string, error) {
 	return readTextVia(runtime.GOOS, os.Getenv, runCapped, clipboard.ReadAll)
@@ -140,7 +113,7 @@ func readClipboardText() (string, error) {
 // readTextVia is readClipboardText with its seams: the platform, the
 // environment, the command runner and the untyped fallback.
 func readTextVia(goos string, getenv func(string) string, run runner, untyped func() (string, error)) (string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), clipboardImageTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), clipboardTimeout)
 	defer cancel()
 	text, err := readTextFrom(ctx, textBackends(goos, getenv, run))
 	if errors.Is(err, errNoTextBackend) {

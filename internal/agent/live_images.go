@@ -95,6 +95,19 @@ func (ims promptImages) asPathText() promptImages {
 	return ims
 }
 
+// dropData lets go of the images' bytes once promptBlocks has encoded them
+// into the prompt's blocks. What the turn asks of ims after that — whether it
+// sent images, the resend's path text and downscale note (asPathText), how
+// many there were — reads their numbers, paths and sizes, never the bytes, and
+// on ACP the turn holds ims until PromptBlocks returns at its end: up to
+// 15 MiB a prompt (P29) would otherwise stay alive for the whole turn. atts is
+// this prompt's own (ReadAttachments made it), so nothing else sees the change.
+func (ims promptImages) dropData() {
+	for i := range ims.atts {
+		ims.atts[i].Data = nil
+	}
+}
+
 // promptImagesOf takes a prompt's attachment envelope off text and reads the
 // images it asks for from the host's own attachments directory (plan 033 §3.1,
 // §3.4). rest is the text without the envelope — block 1 before any fallback

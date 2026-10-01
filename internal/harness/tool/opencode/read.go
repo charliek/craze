@@ -378,7 +378,7 @@ var imageLane = make(chan struct{}, 1)
 // The model can still say where the file is; what it cannot do is see it.
 func (c *readCall) image(ctx context.Context, env tool.Env, f *os.File, fileSize int64) (tool.Result, error) {
 	if !env.Vision {
-		return tool.Result{}, fail(tool.ClassToolError, "Cannot read image file: "+env.ModelLabel()+" does not accept images")
+		return tool.Result{}, fail(tool.ClassToolError, "Cannot read image file: "+tool.NoVision(env.ModelLabel()))
 	}
 	if fileSize > attach.MaxSourceBytes {
 		return tool.Result{}, c.imageRefused(attach.ErrSourceTooLarge)

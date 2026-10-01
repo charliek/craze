@@ -1351,6 +1351,7 @@ func (s *session) prompt(ctx context.Context, text string, wire *turnWire) (Resu
 	// accepted the prompt: a refused one expanded nothing, because nothing was
 	// sent.
 	blocks, expanded := promptBlocks(body, refs, ims)
+	ims.dropData()
 	var accepted func()
 	if len(expanded) > 0 {
 		accepted = func() {

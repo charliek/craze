@@ -48,14 +48,15 @@ const (
 	// attachmentsVersion is the envelope's "v". Another version is not
 	// guessed at: its images become path text.
 	attachmentsVersion = 1
-	// envelopeMax is the most bytes an envelope may take, tags and newline
-	// included; MaxAttachmentN the highest chip number — the composer's
-	// numbering stops there too (plan 033 §3.3); maxAttachmentPath the
-	// longest path. Past any of them — or with more than
+	// EnvelopeMax is the most bytes an envelope may take, tags and newline
+	// included — the composer's note on a chip that would pass it says it
+	// too (plan 033 X47); MaxAttachmentN the highest chip number — the
+	// composer's numbering stops there too (plan 033 §3.3);
+	// maxAttachmentPath the longest path. Past any of them — or with more than
 	// attach.MaxPerMessage images, a repeated or out-of-range number, a
 	// relative path or a type the store never writes — the whole envelope
 	// becomes path text.
-	envelopeMax       = 4 << 10
+	EnvelopeMax       = 4 << 10
 	MaxAttachmentN    = 99
 	maxAttachmentPath = 1024
 	// pathTextMax caps a path as path text shows it, in runes.
@@ -182,8 +183,8 @@ func leadingEnvelope(text string) (block string, env envelope, ok bool) {
 // block is the whole envelope, for its size.
 func envelopeProblem(block string, env envelope) string {
 	switch {
-	case len(block) > envelopeMax:
-		return fmt.Sprintf("the attachment list is %d bytes, over its %d-byte limit", len(block), envelopeMax)
+	case len(block) > EnvelopeMax:
+		return fmt.Sprintf("the attachment list is %d bytes, over its %d-byte limit", len(block), EnvelopeMax)
 	case env.V != attachmentsVersion:
 		return fmt.Sprintf("the attachment list is version %d, not %d", env.V, attachmentsVersion)
 	case len(env.Images) > attach.MaxPerMessage:

@@ -620,6 +620,16 @@ func resultPart(callID, id string, res tool.Result) fantasy.ToolResultPart {
 	return fantasy.ToolResultPart{ToolCallID: callID, Output: outputOf(r), ClientMetadata: r.Metadata}
 }
 
+// The vision strip's words (plan 033 §3.5): the tool framework's
+// (tool.NoVision, tool.ImageOmitted, tool.ResultImageOmitted), so the strip
+// (omitImages, turn.go) writes a history's image result the line the tool
+// dispatcher writes a result on a non-vision turn (X52), in the same bytes.
+// They are reached through here because this is the one file of the harness
+// that knows both Fantasy and the framework (plan 019 §3.1, TestSeamOne).
+func noVision(model string) string               { return tool.NoVision(model) }
+func imageOmitted(why, path string) string       { return tool.ImageOmitted(why, path) }
+func resultImageOmitted(text, why string) string { return tool.ResultImageOmitted(text, why) }
+
 // outputOf is r as the output Fantasy records for a run tool's response
 // (agent.go:859-875), for the parts the harness writes itself — a synthetic
 // or a partial step's (resultPart): an error's text as an error; an image or

@@ -490,7 +490,7 @@ func (m *Model) addImages(add []attachment) (string, tea.Cmd, string) {
 		list = append(list, a)
 	}
 	if !envelopeFits(list, m.attachDir) {
-		return "", nil, fmt.Sprintf("a message's image paths may add up to %d KiB at most; pasted as text", envelopeLimitKiB)
+		return "", nil, fmt.Sprintf("a message's image paths may add up to %d KiB at most; pasted as text", agent.EnvelopeMax>>10)
 	}
 	labels := make([]string, len(add))
 	cmds := make([]tea.Cmd, len(add))
@@ -504,10 +504,6 @@ func (m *Model) addImages(add []attachment) (string, tea.Cmd, string) {
 	m.images = draftImages{list: list, last: last}
 	return strings.Join(labels, " "), tea.Batch(cmds...), ""
 }
-
-// envelopeLimitKiB is the envelope's size limit as the note says it: the
-// host's (agent.EnvelopeProblem), 4 KiB.
-const envelopeLimitKiB = 4
 
 // worstOriginal is the most a source's edge can measure (Probe: under
 // attach.MaxSourcePixels with neither edge under attach.MinEdge), so the most
@@ -527,7 +523,7 @@ func envelopeFits(list []attachment, dir string) bool {
 	refs := make([]agent.AttachmentRef, len(list))
 	for i, a := range list {
 		if !a.pending && a.path != "" {
-			refs[i] = agent.AttachmentRef{N: a.n, Path: a.path, MIME: a.mime, OW: a.ow, OH: a.oh}
+			refs[i] = a.ref()
 			continue
 		}
 		refs[i] = agent.AttachmentRef{
@@ -935,9 +931,16 @@ func imageRefs(list []attachment, text string) []agent.AttachmentRef {
 		if a.pending || a.path == "" || !strings.Contains(text, agent.ImageLabel(a.n)) {
 			continue
 		}
-		refs = append(refs, agent.AttachmentRef{N: a.n, Path: a.path, MIME: a.mime, OW: a.ow, OH: a.oh})
+		refs = append(refs, a.ref())
 	}
 	return refs
+}
+
+// ref is a done entry as the envelope names it: what a send writes
+// (imageRefs) and what a paste measures the envelope by (envelopeFits), one
+// conversion so the two never measure different envelopes (plan 033 X47).
+func (a attachment) ref() agent.AttachmentRef {
+	return agent.AttachmentRef{N: a.n, Path: a.path, MIME: a.mime, OW: a.ow, OH: a.oh}
 }
 
 // withImages is text on its way to the agent with the envelope for its chips

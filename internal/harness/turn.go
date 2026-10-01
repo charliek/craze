@@ -12,6 +12,7 @@ import (
 
 	"charm.land/fantasy"
 	"github.com/charliek/craze/internal/harness/llm"
+	"github.com/charliek/craze/internal/harness/modeltable"
 	"github.com/charliek/craze/internal/harness/redact"
 	"github.com/charliek/craze/internal/harness/store"
 )
@@ -318,7 +319,7 @@ func (s *Session) run(ctx context.Context, text string, files []fantasy.FilePart
 	// a tool's image result — goes as a placeholder, the same bytes on every
 	// request to it; to one that does, the history is as it was.
 	msgs, results := s.store.ContextWithResults(m.id())
-	history := stripImages(redactHistory(s.redactor(), msgs, results), m.r.Vision, m.r.Name)
+	history := requestHistory(s.redactor(), msgs, results, m.r)
 	// A prompt still held is an earlier turn's that produced nothing. It is
 	// not in history, so this turn's request never sent it; written ahead of
 	// this turn's answer, it would put in the transcript what the model never
@@ -534,7 +535,7 @@ func (s *Session) overflowCompaction(t *turn, sent int64) error {
 // by. It holds no lock of the turn's; the turn is between requests.
 func (s *Session) rebuildHistory(t *turn) []fantasy.Message {
 	msgs, results := s.store.ContextWithResults(t.model.id())
-	history := stripImages(redactHistory(s.redactor(), msgs, results), t.model.r.Vision, t.model.r.Name)
+	history := requestHistory(s.redactor(), msgs, results, t.model.r)
 	retained := lastReminderVariant(s.store.Steps(t.model.id()))
 	t.mu.Lock()
 	t.retainedReminder = retained
@@ -1667,10 +1668,11 @@ func redactHistory(red *redact.Replacer, msgs []fantasy.Message, results []bool)
 // sent one, and every request to such a model replays the same placeholder
 // bytes for the same image.
 //
-// It applies to the turn's history (run, rebuildHistory), the turn's own
-// prompt (call, and preTurnCompaction's weighing), the context's estimate
-// (contextTokensOn) and the aligned summarizer's history (compactRun), which
-// summarizeAligned then strips of whatever is left, whatever the model.
+// It applies to the turn's own prompt (call, and preTurnCompaction's
+// weighing) and, through requestHistory, to the turn's history (run,
+// rebuildHistory), the context's estimate (contextTokensOn) and the aligned
+// summarizer's history (compactRun), which summarizeAligned then strips of
+// whatever is left, whatever the model.
 // Nothing else sends a message the store holds: a steer, background results
 // and a reminder are text, and a step's own tool results reach only the model
 // that ran them, whose tools return images only when it accepts them (the
@@ -1679,7 +1681,19 @@ func stripImages(msgs []fantasy.Message, vision bool, model string) []fantasy.Me
 	if vision {
 		return msgs
 	}
-	return omitImages(msgs, model+" does not accept images")
+	return omitImages(msgs, noVision(model))
+}
+
+// requestHistory is a stored history as a request to the model r sends it:
+// redacted (redactHistory, marks being msgs' marks), then cut down to what r
+// accepts (stripImages, by r's vision flag and name). It is the one form every
+// history leaves the store in — a turn's (run, rebuildHistory), the
+// context's estimate (contextTokensOn) and the aligned summarizer's
+// (compactRun) — so the same history goes to the same model in the same
+// bytes however it is reached (plan 033 X36), and a history cannot be sent
+// redacted but not stripped.
+func requestHistory(red *redact.Replacer, msgs []fantasy.Message, marks []bool, r modeltable.Resolved) []fantasy.Message {
+	return stripImages(redactHistory(red, msgs, marks), r.Vision, r.Name)
 }
 
 // summarizerOmits is why the summarizer's request carries no image (plan 033
@@ -1688,7 +1702,7 @@ func stripImages(msgs []fantasy.Message, vision bool, model string) []fantasy.Me
 const summarizerOmits = "images are not sent to the summarizer"
 
 // omitImages is msgs with every image replaced by text saying it was left
-// out and why:
+// out and why (imageOmitted, the placeholder's one spelling):
 //
 //   - an attached image, a fantasy.FilePart of an image/* type, becomes the
 //     text part [Image omitted: <why>. File: <path>], the path being the part's
@@ -1696,7 +1710,8 @@ const summarizerOmits = "images are not sent to the summarizer"
 //   - an image a tool returned, a fantasy.ToolResultOutputContentMedia of an
 //     image/* type, becomes a text result — still a result of the same call,
 //     which every provider takes — of its text, if any, then a line
-//     [Image omitted: <why>].
+//     [Image omitted: <why>] (resultImageOmitted, which the tool dispatcher
+//     gives a result on a non-vision turn too).
 //
 // Every other part, and every message holding no image, is carried over as it
 // is; msgs itself, which the caller may share with the store, is never
@@ -1727,32 +1742,35 @@ func omitImages(msgs []fantasy.Message, why string) []fantasy.Message {
 // omitImage is omitImages for one part: its replacement, and whether p was an
 // image.
 func omitImage(p fantasy.MessagePart, why string) (fantasy.MessagePart, bool) {
-	if f, ok := fantasy.AsMessagePart[fantasy.FilePart](p); ok && isImage(f.MediaType) {
+	if f, ok := imageFile(p); ok {
 		return fantasy.TextPart{Text: imageOmitted(why, f.Filename)}, true
 	}
-	r, ok := fantasy.AsMessagePart[fantasy.ToolResultPart](p)
-	if !ok {
-		return p, false
+	if r, o, ok := imageResult(p); ok {
+		r.Output = fantasy.ToolResultOutputContentText{Text: resultImageOmitted(o.Text, why)}
+		return r, true
 	}
-	o, ok := fantasy.AsToolResultOutputType[fantasy.ToolResultOutputContentMedia](r.Output)
-	if !ok || !isImage(o.MediaType) {
-		return p, false
-	}
-	text := imageOmitted(why, "")
-	if o.Text != "" {
-		text = o.Text + "\n" + text
-	}
-	r.Output = fantasy.ToolResultOutputContentText{Text: text}
-	return r, true
+	return p, false
 }
 
-// imageOmitted is an image's placeholder: [Image omitted: <why>. File: <path>],
-// or without the file when there is no path to give.
-func imageOmitted(why, path string) string {
-	if path == "" {
-		return "[Image omitted: " + why + "]"
+// imageFile is p as an attached image: a fantasy.FilePart of an image/* type.
+// It and imageResult are the two shapes an image takes in a history, which
+// the vision strip (omitImage) and the estimate (messageTokens) both find
+// through them, so the two never disagree on what an image is.
+func imageFile(p fantasy.MessagePart) (fantasy.FilePart, bool) {
+	f, ok := fantasy.AsMessagePart[fantasy.FilePart](p)
+	return f, ok && isImage(f.MediaType)
+}
+
+// imageResult is p as an image a tool returned: a fantasy.ToolResultPart
+// whose output is a fantasy.ToolResultOutputContentMedia of an image/* type,
+// and that output.
+func imageResult(p fantasy.MessagePart) (fantasy.ToolResultPart, fantasy.ToolResultOutputContentMedia, bool) {
+	r, ok := fantasy.AsMessagePart[fantasy.ToolResultPart](p)
+	if !ok {
+		return r, fantasy.ToolResultOutputContentMedia{}, false
 	}
-	return "[Image omitted: " + why + ". File: " + path + "]"
+	o, ok := fantasy.AsToolResultOutputType[fantasy.ToolResultOutputContentMedia](r.Output)
+	return r, o, ok && isImage(o.MediaType)
 }
 
 // isImage reports whether a part's media type is an image's: the test

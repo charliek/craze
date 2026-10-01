@@ -341,11 +341,48 @@ type Env struct {
 // ModelLabel is the name a tool gives the call's model in its own words
 // (ModelName), or "this model" when no turn has named one: a sentence about
 // what the model cannot do always has a subject.
-func (e Env) ModelLabel() string {
-	if e.ModelName == "" {
+func (e Env) ModelLabel() string { return modelLabel(e.ModelName) }
+
+// modelLabel is ModelLabel for a model's name, for the dispatcher, which has
+// the name but no call's Env.
+func modelLabel(name string) string {
+	if name == "" {
 		return "this model"
 	}
-	return e.ModelName
+	return name
+}
+
+// NoVision is the words for a model that cannot be sent an image, "<model>
+// does not accept images" (plan 033 §3.5, X37), model being its name as the
+// person sees it: why an image is left out of the history (the harness's
+// vision strip) and of a tool's result (Dispatcher.mediaOf), and why read
+// refuses an image file. One spelling, so the model reads the same words
+// wherever an image was kept from it.
+func NoVision(model string) string { return model + " does not accept images" }
+
+// ImageOmitted is the placeholder an image left out of a request stands in
+// as (plan 033 §3.5): [Image omitted: <why>. File: <path>] for an attached
+// image, whose path the model can still name, and [Image omitted: <why>]
+// for one with no path to give.
+func ImageOmitted(why, path string) string {
+	if path == "" {
+		return "[Image omitted: " + why + "]"
+	}
+	return "[Image omitted: " + why + ". File: " + path + "]"
+}
+
+// ResultImageOmitted is a tool result's text with its image left out (plan
+// 033 §3.5, X52): the text, then on a line of its own [Image omitted: <why>]
+// — that line alone when the result has no text. The harness's vision strip
+// gives a history's image result this text, and the dispatcher gives it to a
+// result whose turn's model does not accept images, so both say it in the
+// same bytes.
+func ResultImageOmitted(text, why string) string {
+	note := ImageOmitted(why, "")
+	if text == "" {
+		return note
+	}
+	return text + "\n" + note
 }
 
 // Resolve returns path as an absolute, cleaned path: a relative path is taken

@@ -29,19 +29,21 @@ import (
 // A backend that fails — not installed, no display, an error — gives way to
 // the next; one that answers with no image type stops the read: the
 // clipboard holds no image, and asking another tool would not change that.
-// Every read is bounded by clipboardImageTimeout and by attach.MaxSourceBytes
+// Every read is bounded by clipboardTimeout and by attach.MaxSourceBytes
 // (a larger image is refused with attach.ErrSourceTooLarge, never read
 // whole), and it runs inside a tea.Cmd, never on the Update.
 
-// clipboardImageTimeout bounds the whole image read, every backend tried.
-const clipboardImageTimeout = 3 * time.Second
+// clipboardTimeout bounds a whole clipboard read, every backend tried: the
+// image read here, and the typed text read (readTextVia).
+const clipboardTimeout = 3 * time.Second
 
-// imageBackend is one platform tool that can read the clipboard's image: the
-// types it says the clipboard offers, and the bytes of one of them, read
-// through the cap.
-type imageBackend struct {
+// clipBackend is one platform tool that can read the clipboard: the types it
+// says the clipboard offers, and the bytes of one of them, read through the
+// cap. The image read (imageBackends) and the typed text read (textBackends,
+// clipboard_text.go) ask the same tools the same way, so they share it.
+type clipBackend struct {
 	types func(ctx context.Context) ([]string, error)
-	read  func(ctx context.Context, mime string) ([]byte, error)
+	read  func(ctx context.Context, typ string) ([]byte, error)
 }
 
 // imageTypeOrder is the order an image type is chosen in: the formats every
@@ -72,7 +74,7 @@ func chooseImageType(types []string) string {
 // readImageFrom reads the clipboard's image through backends, in order (the
 // fallthrough rules above): the bytes, nil for no image, or
 // attach.ErrSourceTooLarge for an image over the cap.
-func readImageFrom(ctx context.Context, backends []imageBackend) ([]byte, error) {
+func readImageFrom(ctx context.Context, backends []clipBackend) ([]byte, error) {
 	for _, b := range backends {
 		types, err := b.types(ctx)
 		if err != nil {
@@ -97,9 +99,9 @@ func readImageFrom(ctx context.Context, backends []imageBackend) ([]byte, error)
 }
 
 // readClipboardImage is nativePasteImage's production reader: this platform's
-// backends, bounded by clipboardImageTimeout.
+// backends, bounded by clipboardTimeout.
 func readClipboardImage() ([]byte, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), clipboardImageTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), clipboardTimeout)
 	defer cancel()
 	return readImageFrom(ctx, imageBackends(runtime.GOOS, os.Getenv, runCapped))
 }
@@ -110,32 +112,39 @@ func readClipboardImage() ([]byte, error) {
 type runner func(ctx context.Context, max int, name string, args ...string) ([]byte, error)
 
 // imageBackends is the backend list for goos under getenv's environment.
-func imageBackends(goos string, getenv func(string) string, run runner) []imageBackend {
-	var out []imageBackend
-	switch goos {
-	case "darwin":
-		out = append(out, osascriptBackend(run))
-	default:
-		if getenv("WAYLAND_DISPLAY") != "" {
-			out = append(out, imageBackend{
-				types: func(ctx context.Context) ([]string, error) {
-					return listTypes(ctx, run, "wl-paste", "--list-types")
-				},
-				read: func(ctx context.Context, mime string) ([]byte, error) {
-					return run(ctx, attach.MaxSourceBytes, "wl-paste", "--no-newline", "--type", mime)
-				},
-			})
-		}
-		if getenv("DISPLAY") != "" {
-			out = append(out, imageBackend{
-				types: func(ctx context.Context) ([]string, error) {
-					return listTypes(ctx, run, "xclip", "-selection", "clipboard", "-t", "TARGETS", "-o")
-				},
-				read: func(ctx context.Context, mime string) ([]byte, error) {
-					return run(ctx, attach.MaxSourceBytes, "xclip", "-selection", "clipboard", "-t", mime, "-o")
-				},
-			})
-		}
+func imageBackends(goos string, getenv func(string) string, run runner) []clipBackend {
+	if goos == "darwin" {
+		return []clipBackend{osascriptBackend(run)}
+	}
+	return linuxBackends(getenv, run, attach.MaxSourceBytes)
+}
+
+// linuxBackends is Linux's typed readers under getenv's environment, each
+// reading through max bytes: wl-paste with WAYLAND_DISPLAY set, then xclip
+// with DISPLAY set (with both set, a wl-paste failure falls through to xclip;
+// plan 033 X20). The image read and the text read differ only in the type
+// they choose and the cap they read through.
+func linuxBackends(getenv func(string) string, run runner, max int) []clipBackend {
+	var out []clipBackend
+	if getenv("WAYLAND_DISPLAY") != "" {
+		out = append(out, clipBackend{
+			types: func(ctx context.Context) ([]string, error) {
+				return listTypes(ctx, run, "wl-paste", "--list-types")
+			},
+			read: func(ctx context.Context, typ string) ([]byte, error) {
+				return run(ctx, max, "wl-paste", "--no-newline", "--type", typ)
+			},
+		})
+	}
+	if getenv("DISPLAY") != "" {
+		out = append(out, clipBackend{
+			types: func(ctx context.Context) ([]string, error) {
+				return listTypes(ctx, run, "xclip", "-selection", "clipboard", "-t", "TARGETS", "-o")
+			},
+			read: func(ctx context.Context, typ string) ([]byte, error) {
+				return run(ctx, max, "xclip", "-selection", "clipboard", "-t", typ, "-o")
+			},
+		})
 	}
 	return out
 }
@@ -157,8 +166,8 @@ func listTypes(ctx context.Context, run runner, name string, args ...string) ([]
 // puts a screenshot on the clipboard in. It is written to a temporary file by
 // osascript itself (its standard output cannot carry binary), read through
 // the cap and removed.
-func osascriptBackend(run runner) imageBackend {
-	return imageBackend{
+func osascriptBackend(run runner) clipBackend {
+	return clipBackend{
 		types: func(ctx context.Context) ([]string, error) {
 			out, err := run(ctx, typesMax, "osascript", "-e", "clipboard info")
 			if err != nil {

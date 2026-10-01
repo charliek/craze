@@ -56,23 +56,18 @@ func textTokens(s string) int64 { return tokensOf(len(s)) }
 func messageTokens(m fantasy.Message) int64 {
 	var images int64
 	m = mapParts(m, func(p fantasy.MessagePart) (fantasy.MessagePart, bool) {
-		if f, ok := fantasy.AsMessagePart[fantasy.FilePart](p); ok && isImage(f.MediaType) {
+		if f, ok := imageFile(p); ok {
 			images += imageTokens(bytes.NewReader(f.Data))
 			f.Data = nil
 			return f, true
 		}
-		r, ok := fantasy.AsMessagePart[fantasy.ToolResultPart](p)
-		if !ok {
-			return p, false
+		if r, o, ok := imageResult(p); ok {
+			images += imageTokens(base64.NewDecoder(base64.StdEncoding, strings.NewReader(o.Data)))
+			o.Data = ""
+			r.Output = o
+			return r, true
 		}
-		o, ok := fantasy.AsToolResultOutputType[fantasy.ToolResultOutputContentMedia](r.Output)
-		if !ok || !isImage(o.MediaType) {
-			return p, false
-		}
-		images += imageTokens(base64.NewDecoder(base64.StdEncoding, strings.NewReader(o.Data)))
-		o.Data = ""
-		r.Output = o
-		return r, true
+		return p, false
 	})
 	b, err := json.Marshal(m)
 	if err != nil {

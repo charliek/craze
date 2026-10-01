@@ -387,11 +387,12 @@ func errorResult(class ErrorClass, text string) Result {
 // image; an error never carries one (it is text, as Fantasy records it);
 // and a result on a turn whose model does not accept images loses it, its
 // text then ending with the line the harness's vision strip gives an image
-// a tool returned ([Image omitted: <model> does not accept images]), so the
-// model is told rather than left with an answer that silently lacks it. A
-// tool that honours Env.Vision, as read does, never reaches that last case;
-// this holds the line for one that does not, since nothing after the
-// dispatcher strips an image from the turn's own steps.
+// a tool returned ([Image omitted: <model> does not accept images];
+// ResultImageOmitted, the strip's own), so the model is told rather than
+// left with an answer that silently lacks it. A tool that honours
+// Env.Vision, as read does, never reaches that last case; this holds the
+// line for one that does not, since nothing after the dispatcher strips an
+// image from the turn's own steps.
 func (d *Dispatcher) mediaOf(r Result) Result {
 	if r.Media == nil {
 		return r
@@ -402,12 +403,7 @@ func (d *Dispatcher) mediaOf(r Result) Result {
 		r.Media = nil
 	case !m.vision:
 		r.Media = nil
-		note := "[Image omitted: " + (Env{ModelName: m.name}).ModelLabel() + " does not accept images]"
-		if r.Text == "" {
-			r.Text = note
-		} else {
-			r.Text += "\n" + note
-		}
+		r.Text = ResultImageOmitted(r.Text, NoVision(modelLabel(m.name)))
 	}
 	return r
 }

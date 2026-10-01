@@ -68,15 +68,11 @@ func LockWithin(path string, d time.Duration) (unlock func(), err error) {
 	if err != nil {
 		return noop, err
 	}
-	release, err := FlockWithin(f, d)
-	if err != nil {
+	if _, err := FlockWithin(f, d); err != nil {
 		_ = f.Close()
 		return noop, err
 	}
-	return func() {
-		release()
-		_ = f.Close()
-	}, nil
+	return unlocker(f), nil
 }
 
 // FlockWithin is LockWithin on a file the caller opened — through an os.Root,

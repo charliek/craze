@@ -81,14 +81,14 @@ func (s *Session) contextTokensOn(r modeltable.Resolved) (tokens int64, frontier
 		frontier = &f.Entry
 		u := f.Entry.Usage
 		if n := u.Input + u.CacheRead + u.CacheCreation + u.Output; n > 0 {
-			for _, msg := range stripImages(redactHistory(s.redactor(), f.After, f.Marks), r.Vision, r.Name) {
+			for _, msg := range requestHistory(s.redactor(), f.After, f.Marks, r) {
 				n += messageTokens(msg)
 			}
 			return n, frontier
 		}
 	}
 	msgs, marks := s.store.ContextWithResults(id)
-	return s.estimateContext(stripImages(redactHistory(s.redactor(), msgs, marks), r.Vision, r.Name)), frontier
+	return s.estimateContext(requestHistory(s.redactor(), msgs, marks, r)), frontier
 }
 
 // suppression is automatic compaction switched off (plan 028 §3.6, PD14,

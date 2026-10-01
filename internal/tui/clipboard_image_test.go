@@ -28,8 +28,8 @@ type fakeImageBackend struct {
 	lists   int
 }
 
-func (f *fakeImageBackend) backend() imageBackend {
-	return imageBackend{
+func (f *fakeImageBackend) backend() clipBackend {
+	return clipBackend{
 		types: func(context.Context) ([]string, error) {
 			f.lists++
 			return f.types, f.listErr
@@ -72,26 +72,26 @@ func TestTheClipboardImageReadFallsThrough(t *testing.T) {
 
 	failing := &fakeImageBackend{listErr: errors.New("wl-paste: not found")}
 	next := &fakeImageBackend{types: []string{"image/jpeg", "image/png"}, data: img}
-	got, err := readImageFrom(ctx, []imageBackend{failing.backend(), next.backend()})
+	got, err := readImageFrom(ctx, []clipBackend{failing.backend(), next.backend()})
 	if err != nil || !bytes.Equal(got, img) || !reflect.DeepEqual(next.asked, []string{"image/png"}) {
 		t.Fatalf("after a failing backend: %d bytes, %v, asked %q", len(got), err, next.asked)
 	}
 
 	readFails := &fakeImageBackend{types: []string{"image/png"}, readErr: errors.New("exit 1")}
 	next = &fakeImageBackend{types: []string{"image/png"}, data: img}
-	if got, err := readImageFrom(ctx, []imageBackend{readFails.backend(), next.backend()}); err != nil || !bytes.Equal(got, img) {
+	if got, err := readImageFrom(ctx, []clipBackend{readFails.backend(), next.backend()}); err != nil || !bytes.Equal(got, img) {
 		t.Fatalf("after a backend whose read failed: %d bytes, %v", len(got), err)
 	}
 
 	empty := &fakeImageBackend{types: []string{"text/plain"}}
 	never := &fakeImageBackend{types: []string{"image/png"}, data: img}
-	if got, err := readImageFrom(ctx, []imageBackend{empty.backend(), never.backend()}); got != nil || err != nil || never.lists != 0 {
+	if got, err := readImageFrom(ctx, []clipBackend{empty.backend(), never.backend()}); got != nil || err != nil || never.lists != 0 {
 		t.Fatalf("after a backend with no image: %d bytes, %v, the next listed %d times", len(got), err, never.lists)
 	}
 
 	tooBig := &fakeImageBackend{types: []string{"image/png"}, readErr: attach.ErrSourceTooLarge}
 	never = &fakeImageBackend{types: []string{"image/png"}, data: img}
-	if got, err := readImageFrom(ctx, []imageBackend{tooBig.backend(), never.backend()}); got != nil || !errors.Is(err, attach.ErrSourceTooLarge) || never.lists != 0 {
+	if got, err := readImageFrom(ctx, []clipBackend{tooBig.backend(), never.backend()}); got != nil || !errors.Is(err, attach.ErrSourceTooLarge) || never.lists != 0 {
 		t.Fatalf("an image over the cap: %d bytes, %v, the next listed %d times", len(got), err, never.lists)
 	}
 
@@ -152,7 +152,7 @@ func TestTheClipboardImageBackends(t *testing.T) {
 	}
 	env := func(vars map[string]string) func(string) string { return func(k string) string { return vars[k] } }
 	// The tool each backend runs, in order, as its type listing names it.
-	tools := func(bs []imageBackend) []string {
+	tools := func(bs []clipBackend) []string {
 		var out []string
 		for _, b := range bs {
 			ran = nil

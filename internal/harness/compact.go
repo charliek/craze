@@ -226,7 +226,7 @@ func (s *Session) compactRun(ctx context.Context, m model, fit modeltable.Resolv
 	// images when m does not accept them (stripImages, plan 033 §3.5) — what
 	// before weighs, and what the aligned summarizer replays, so its prefix
 	// is the turns' own on such a model.
-	history := stripImages(redactHistory(red, msgs, marks), m.r.Vision, m.r.Name)
+	history := requestHistory(red, msgs, marks, m.r)
 	before := s.estimateContext(history)
 
 	steps := s.store.Steps(m.id())
