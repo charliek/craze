@@ -256,7 +256,7 @@ off.
 | `PgUp` / `PgDn` | scroll the transcript, or page the `/help` box; page the slash menu instead when it is open — the menu takes priority over both |
 | wheel | scroll the transcript three lines a notch; over an open slash menu, move its selection one row a notch instead — it selects, it does not page (see [Mouse](#mouse)) |
 | `Tab` | with the slash menu open, accept the highlighted row (see [Slash commands](#slash-commands)); with the [`@` file popup](#file-mentions) open, open the highlighted folder or pick the highlighted file; elsewhere a no-op |
-| `Ctrl+V`, `Alt+V` | paste the clipboard into the composer: an image becomes an `[Image #N]` chip, otherwise its text (see [Images](#images)) |
+| `Ctrl+V` | paste the clipboard into the composer: an image becomes an `[Image #N]` chip, otherwise its text (see [Images](#images)) |
 
 `/help` lists the same keys plus every slash command — see
 [Help dialog](#help-dialog). `/exit` ends the session; there are no bare `q` or `?`
@@ -469,8 +469,8 @@ else: there are no inline previews.
 | Gesture | What happens |
 |---|---|
 | Paste, or drag-and-drop a file into the terminal | a bracketed paste whose every word is the absolute path of an image (`png`, `jpg`, `jpeg`, `gif`, `webp`, `bmp`) becomes one chip per path. Quotes, backslash escapes, `file://` URLs and a leading `~/` are understood, and several paths may be separated by spaces or newlines |
-| `Ctrl+V` with an image on the clipboard | the image becomes a chip. With no image on the clipboard it pastes the clipboard's text, as it always has |
-| `Alt+V` | the same as `Ctrl+V` |
+| `Ctrl+V` with an image on the clipboard | the image becomes a chip (on macOS only PNG clipboard data is read, which is what a screenshot is; a JPEG, GIF or WebP on the clipboard is not). With no image on the clipboard it pastes the clipboard's text, as it always has |
+| `Alt+V` | the same as `Ctrl+V` (the keys table and `/help` name `Ctrl+V` only) |
 | An **empty** paste | what a terminal sends when you paste an image it cannot paste as text: craze looks for an image on the clipboard. It does not look over SSH (`SSH_CONNECTION` or `SSH_TTY` set), where the clipboard craze can read is the remote machine's, not yours |
 
 Reading the clipboard's image needs `wl-paste` (Wayland), `xclip` (X11) or, on
@@ -502,12 +502,13 @@ at most 20 MiB, decodes as an image and is at least 8×8 pixels. These stay
   and after `/clear`. Within one draft a number is never reused until it runs
   out past 99.
 - A message holds at most **10 images and 15 MiB** of them together (each
-  image counted at its processed size, or at most 3.75 MiB), and its images'
-  paths may add up to **4 KiB** at most (which binds only when craze's
-  attachments directory has a very long path). A paste over any limit stays
+  image counted at its processed size, or at most 3.75 MiB), and the attachment
+  block that names its images (the tags and JSON around the paths included) is
+  at most **4 KiB**, each path at most 1024 bytes (which binds only when
+  craze's attachments directory has a very long path). A paste over any limit stays
   text, with a status note.
-- Processing takes a moment, and images are processed one at a time, in the
-  order they were pasted. While an image is still being attached, `Enter`
+- Processing takes a moment, and images are processed one at a time (in no
+  promised order). While an image is still being attached, `Enter`
   (and `Ctrl+L`, the first prompt of a new session, and saving a queue edit) does
   nothing and keeps the draft; the status line says `image #N is still being
   attached; press enter again in a moment`. A file that cannot be attached is
@@ -519,12 +520,22 @@ at most 20 MiB, decodes as an image and is at least 8×8 pixels. These stay
 
 Anything wider or taller than 2000 pixels is scaled down to 2000 on its long
 edge, an image over 3.75 MiB is re-encoded smaller, and images lose their
-metadata, wherever in the file it is: a photo's EXIF, XMP, IPTC and comments, a
-`png`'s text, time and EXIF chunks (a macOS screenshot's XMP among them), and
-anything stored after the image itself. A `webp` with EXIF or XMP is sent as a
-`png`, and a `gif` sends its first frame as a `png`. When an image is
+metadata, per format:
+
+- a `jpeg` loses its EXIF and XMP (APP1), IPTC (APP13), comments, the other
+  vendor application segments, and anything stored after the image itself;
+- a `png` keeps the chunks that say how to read the pixels (palette,
+  transparency, gamma, colour profile and the like) and loses its text, EXIF
+  and time chunks (a macOS screenshot's XMP among them), the other ancillary
+  chunks and anything after the image; its pixel data is untouched;
+- a `webp` that carries EXIF or XMP, or anything beyond plain image data, is
+  sent as a `png`; a plain one passes through;
+- a `gif` sends its first frame as a `png`.
+
+ When an image is
 scaled, the status line says so, for example `image #1 downscaled 3024×1964 →
-2000×1299`, and the agent is told too. Sources over 20 MiB or 50 megapixels are
+2000×1299`, and an ACP agent is told too (a native model gets the processed
+image only). Sources over 20 MiB or 50 megapixels are
 refused.
 
 Two other notes can appear when you paste:
@@ -546,7 +557,7 @@ Two other notes can appear when you paste:
 | An agent that rejects the images | when it answers the prompt with an invalid-params error without having done anything with it, craze sends the message once more with each image as `[Image #N: <path>]` text. Updates about the session itself (its command list, mode, settings or title) do not count as doing something. After the agent has done anything for the turn, before its error or since, or you cancelled, the error is shown as it is |
 | Native | the same chips; how the image reaches the model depends on the model: see below |
 | An [interjection](#queued-messages) | always path text, `[Image #N: <path>]`, never image data |
-| `craze prompt` | text only: it has no way to attach an image |
+| `craze prompt` | it has no way to attach an image |
 
 An image craze cannot read at send time (the file was swept, is not an image any
 more, or is outside the attachments directory) goes as `[Image #N: <path> (not
@@ -571,8 +582,7 @@ setting (see [Native vision](configuration.md#native-vision)):
   refuses it with `Cannot read image file: <model> does not accept images` on
   one that does not. A PDF is still refused as a binary file.
 
-`craze prompt` has no paste: an image only reaches a session through the
-composer.
+`craze prompt` has no way to attach an image.
 
 ## Shell mode
 

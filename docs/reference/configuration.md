@@ -83,11 +83,11 @@ directory](#the-craze-directory): `~/.craze/attachments/`, or
 files named `<16 hex digits>.<png|jpg|webp>`, mode `0600`, written atomically.
 The name is the start of the content's SHA-256, so pasting the same image twice
 stores one file. craze refuses to read from a directory that is a symlink, is
-owned by another user, or is wider than `0700`, and an attachment path in a
+owned by another user, or has any mode other than exactly `0700`, and an attachment path in a
 message that points anywhere else is sent to the agent as text, not read.
 
 Every TUI start sweeps the directory, quietly: files older than seven days are
-deleted, and then the oldest files go until what is left is under 500 MiB.
+deleted, and then the oldest files go until at most 500 MiB is left.
 Deleting the directory by hand is always safe; an image that has gone by the
 time the message is sent goes as text saying `no longer available`. What the
 agent receives is described under [what the agent
