@@ -4086,11 +4086,19 @@ const replayPaintEvery = 256
 // Update (plan 032 §3.3 C6). Outside a replay it always does. While one runs,
 // it does on every replayPaintEvery-th event folded and on a restore
 // (paintNow), once the replay has failed — the start failed, or the stream
-// ended — and whenever the viewport is not following the bottom of the pane;
-// and not otherwise: a long resume draws in steps of 256 events rather than on
-// every one, and which frames it draws depends on the events and the user's
-// gestures alone, never on the clock. The replay's end is not replaying any
-// more. A forced refresh that paints for itself — a resize, a theme, Ctrl+O, a
+// ended — once craze is quitting, and whenever the viewport is not following
+// the bottom of the pane; and not otherwise: a long resume draws in steps of
+// 256 events rather than on every one, and which frames it draws depends on
+// the events and the user's gestures alone, never on the clock. The replay's
+// end is not replaying any more.
+//
+// A quit is the program's last frame on its way: Bubble Tea takes the quit
+// without another Update and draws View once more, so whatever the cadence
+// held back would be missing from it (r12 P2). The Update that sets quitting
+// paints — Ctrl+D, /exit, a second Ctrl+C, the list's quit — and so does
+// every event applied while the quit waits for its stop, its shell or its
+// host, so a second quit's tea.Quit, which comes at once (stopQuit), finds
+// the pane painted too. A forced refresh that paints for itself — a resize, a theme, Ctrl+O, a
 // view switch — needs nothing from here, and neither does a user gesture that
 // reads or moves the drawn rows — a press, a drag, a release, a double-click,
 // Ctrl+Y, the wheel, the page keys and a sub-agent view's arrows: each paints
@@ -4119,7 +4127,7 @@ const replayPaintEvery = 256
 // (TestTheReplayCadenceDrawsWhatPaintingEveryEventDraws).
 func (m Model) paintDue() bool {
 	following := m.vp.Height == 0 || m.vp.AtBottom()
-	return !m.replaying || m.paintEveryEvent || m.paintNow || m.startErr != nil || m.ended || !following
+	return !m.replaying || m.paintEveryEvent || m.paintNow || m.startErr != nil || m.ended || m.quitting || !following
 }
 
 // reduceEvent is applyEvent's event itself: the fold, then its arm, answering

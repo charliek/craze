@@ -653,7 +653,13 @@ func TestPhysicalLinesAreBubblesLines(t *testing.T) {
 	if bv.YOffset != cv.YOffset {
 		t.Fatalf("at the bottom bubbles stands at %d, craze at %d", bv.YOffset, cv.YOffset)
 	}
-	for off := 0; off <= bv.YOffset; off++ {
+	// The bottom's offset is taken before the walk moves it (r12 7): read in
+	// the loop's condition, it was 0 after the first step.
+	bottom := bv.YOffset
+	if bottom == 0 {
+		t.Fatal("fixture: the rows fit the viewport, so there is no offset to walk")
+	}
+	for off := 0; off <= bottom; off++ {
 		bv.SetYOffset(off)
 		cv.SetYOffset(off)
 		if want, got := bv.View(), cv.View(); got != want {

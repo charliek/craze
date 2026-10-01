@@ -861,3 +861,69 @@ func TestAReplayScrolledAwayPaintsEveryEvent(t *testing.T) {
 		t.Fatal("the replay's end left the viewport above the bottom")
 	}
 }
+
+// TestAQuitMidReplayPaintsTheLastFrame (r12 P2): Bubble Tea takes a quit
+// without another Update and draws View once more, as the program's last
+// frame. A quit mid-replay, with the events folded since the last boundary
+// still unpainted and the viewport following the bottom, paints them: the
+// Update that sets quitting paints the drawn pane, and so does every event
+// applied while the quit waits. So the last frame — after Ctrl+D, after an
+// event that lands while the quit waits, and after a served session's second
+// Ctrl+D, whose tea.Quit comes at once (stopQuit) — is the frame painting
+// every event draws.
+func TestAQuitMidReplayPaintsTheLastFrame(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// remote quits as a session served elsewhere does (stopQuit): the
+		// second quit answers tea.Quit in its own Update.
+		remote bool
+	}{
+		{"ctrl+d", false},
+		{"a served session's ctrl+d, twice", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newCadenceRun(t, 100, 30, nil)
+			r.lazy.remote, r.eager.remote = tc.remote, tc.remote
+			r.send(eventMsg{ev: replayEvent(agent.ReplayStart)}, "the replay's start")
+			for i := 0; r.lazy.replayFolded < replayPaintEvery+40; i++ {
+				r.event(para("line " + strconv.Itoa(i)))
+			}
+			if r.boundaries == 0 || !r.lazy.cur().dirty || !r.lazy.vp.AtBottom() {
+				t.Fatalf("fixture: %d boundaries; the pane dirty %v, the viewport at the bottom %v",
+					r.boundaries, r.lazy.cur().dirty, r.lazy.vp.AtBottom())
+			}
+			// last holds the cadence model's last frame, were the program to
+			// end here, to the oracle's: painted, and the same.
+			last := func(what string) {
+				t.Helper()
+				if r.lazy.cur().dirty {
+					t.Fatalf("%s left the drawn pane unpainted: the last frame misses the events folded since the boundary", what)
+				}
+				if lv, ev := r.lazy.View(), r.eager.View(); lv != ev {
+					t.Fatalf("after %s the last frame differs from painting every event\ncadence:\n%s\nevery event:\n%s", what, plain(lv), plain(ev))
+				}
+			}
+			r.send(tea.KeyMsg{Type: tea.KeyCtrlD}, "ctrl+d")
+			if !r.lazy.quitting || !r.lazy.replaying || (tc.remote && !r.lazy.exit.stopping) {
+				t.Fatalf("fixture: after ctrl+d quitting %v, replaying %v, stopping %v", r.lazy.quitting, r.lazy.replaying, r.lazy.exit.stopping)
+			}
+			last("the quit")
+			r.event(para("while the quit waits"))
+			last("an event while the quit waits")
+			if !tc.remote {
+				return
+			}
+			var quits [2]int
+			for i, m := range []*Model{&r.lazy, &r.eager} {
+				tm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlD})
+				*m = tm.(Model)
+				quits[i] = len(namedCmds(cmd, "bubbletea.Quit"))
+			}
+			if quits != [2]int{1, 1} {
+				t.Fatalf("fixture: the second quit answered %v tea.Quit, want one each", quits)
+			}
+			r.check("the second quit")
+			last("the second quit")
+		})
+	}
+}
