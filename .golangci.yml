@@ -287,6 +287,45 @@ linters:
             - github.com/charliek/craze/internal/atomicfile
             - github.com/charliek/craze/internal/protocol
             - golang.org/x/sys/unix
+        # The spawn machinery (plan 032 §3.16): a detached host's command
+        # line, its start, its ready line, its end and the held rendezvous,
+        # moved out of internal/cli so the hub can spawn hosts too. Both
+        # spawners build on it, so it imports neither — nor the TUI — or the
+        # hub could not import it without a cycle through the CLI. One glob
+        # covers its tests as well as its sources, which are held to the same
+        # boundary (transcript's rule says why a bare $test would not do).
+        hostspawn:
+          list-mode: lax
+          files:
+            - "**/internal/hostspawn/**"
+          deny:
+            - pkg: github.com/charliek/craze/internal/cli
+              desc: "the spawn machinery is every spawner's; the CLI builds on it, never the reverse (plan 032 §3.16)"
+            - pkg: github.com/charliek/craze/internal/tui
+              desc: "the spawn machinery is every spawner's; a client package is not its concern (plan 032 §3.16)"
+            - pkg: github.com/charliek/craze/internal/hub
+              desc: "the spawn machinery is every spawner's; the hub builds on it, never the reverse (plan 032 §3.16)"
+        # The hub (plan 032 §3.5, §3.16): the per-user process that lists
+        # every host and spawns hosts for session.create. The CLI starts it
+        # (`craze hub`) and dials it, so it imports no client package — it
+        # spawns through internal/hostspawn — and no provider transport: the
+        # hosts it spawns run the sessions. Its non-test files only ("!$test",
+        # as control's rule does), so its tests may run what they need. Added
+        # in C8, ahead of the package (C10): until then it matches no file.
+        hub:
+          list-mode: lax
+          files:
+            - "**/internal/hub/**"
+            - "!$test"
+          deny:
+            - pkg: github.com/charliek/craze/internal/cli
+              desc: "the hub is spawned and dialled by the CLI; a client package is exactly what it must not know about, and it spawns through internal/hostspawn (plan 032 §3.16)"
+            - pkg: github.com/charliek/craze/internal/tui
+              desc: "the hub serves every client uniformly; a client package is exactly what it must not know about (plan 032 §3.16)"
+            - pkg: github.com/charliek/craze/internal/acp
+              desc: "the hub lists and spawns hosts; the ACP wire is the hosts' concern, not the hub's (plan 032 §3.16)"
+            - pkg: github.com/charliek/craze/internal/harness
+              desc: "the hub lists and spawns hosts; a provider transport is the hosts' concern, not the hub's (plan 032 §3.16)"
   exclusions:
     presets:
       - std-error-handling

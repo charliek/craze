@@ -297,13 +297,13 @@ func TestTheSessionListResumesTheHolderOfASavedRow(t *testing.T) {
 	switch {
 	case cmds.count() != 1:
 		t.Fatalf("%d hosts spawned, want the holder alone", cmds.count())
-	case holder.child.exited():
+	case holder.child.Exited():
 		t.Fatal("the quit ended the holder")
 	}
 	if got := stderr(); strings.Contains(got, "attached to it") {
 		t.Fatalf("a resume of a held row left the ignored-flags note: %q", got)
 	}
-	stopEntry(t, onlyHost(t, env), holder.child.pid)
+	stopEntry(t, onlyHost(t, env), holder.child.PID())
 }
 
 // TestTheSessionListRefusesASavedRowItCannotRun (§3.12): a saved row whose

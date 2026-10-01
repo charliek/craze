@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/charliek/craze/internal/hostspawn"
 	"github.com/charliek/craze/internal/sessions"
 )
 
@@ -38,7 +39,8 @@ const (
 	// due (serveAnnouncing): "skip" writes nothing and serves on, its pipe
 	// open; "block" parks craze serve's goroutine for good, so a SIGTERM is
 	// never acted on; "malformed" writes a line that is not JSON;
-	// "oversized" writes one longer than readyLineMax. The spawn tests.
+	// "oversized" writes one longer than hostspawn.ReadyLineMax. The spawn
+	// tests.
 	cliChildReady = "CRAZE_CLI_TEST_READY"
 	// cliChildGate is a FIFO a loading craze serve reads one byte from once
 	// its session is claimed, before its socket binds (serveClaimed): the
@@ -204,7 +206,7 @@ func childAnnouncing(mode string) func(*readyPipe) bool {
 		case "oversized":
 			// Written whole or not at all: past what the spawner reads, the
 			// write blocks until the spawner closes its end, and fails.
-			_, _ = f.WriteString(`{"ok":true,"pad":"` + strings.Repeat("x", readyLineMax) + "\"}\n")
+			_, _ = f.WriteString(`{"ok":true,"pad":"` + strings.Repeat("x", hostspawn.ReadyLineMax) + "\"}\n")
 			p.close()
 		default:
 			fmt.Fprintln(os.Stderr, "craze test child: bad", cliChildReady, mode)

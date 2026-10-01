@@ -18,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/charliek/craze/internal/hostspawn"
 	"github.com/charliek/craze/internal/protocol"
 	"github.com/charliek/craze/internal/remote"
 	"github.com/charliek/craze/internal/rundir"
@@ -33,11 +34,15 @@ import (
 // fails after ok; the reaping of every child; the recorded agent groups killed
 // with an agent that survives its host; the ready descriptor kept from the
 // agent; a start failure reaching the client; legacy loads; --no-host-status.
+// They drive internal/hostspawn through its seams (hostspawn.Command and the
+// rest), since only this package can run craze serve; hostspawn's own tests
+// are the ones that need no host (the ready line's parsing, the agents'
+// record).
 //
 // Every wait is bounded on its own (serveStep), and the schedules are forced:
-// a timeout fires when the test says (spawnReadyTimer), a holder is held
+// a timeout fires when the test says (hostspawn.ReadyTimer), a holder is held
 // where it is claimed and not yet in the registry (cliChildGate), and the
-// rendezvous is acted on while it is known to be polling (spawnPolled).
+// rendezvous is acted on while it is known to be polling (hostspawn.Polled).
 
 // childCmds is every host command a test built (spawnAsChild).
 type childCmds struct {
@@ -73,8 +78,8 @@ func spawnAsChild(t *testing.T, extra func(n int) []string) *childCmds {
 		t.Fatal(err)
 	}
 	c := &childCmds{}
-	prev := hostCommand
-	hostCommand = func(argv []string) (*exec.Cmd, error) {
+	prev := hostspawn.Command
+	hostspawn.Command = func(argv []string) (*exec.Cmd, error) {
 		i := int(c.n.Add(1))
 		b, err := json.Marshal(argv)
 		if err != nil {
@@ -92,7 +97,7 @@ func spawnAsChild(t *testing.T, extra func(n int) []string) *childCmds {
 		c.mu.Unlock()
 		return cmd, nil
 	}
-	t.Cleanup(func() { hostCommand = prev })
+	t.Cleanup(func() { hostspawn.Command = prev })
 	return c
 }
 
@@ -101,9 +106,9 @@ func spawnAsChild(t *testing.T, extra func(n int) []string) *childCmds {
 // a test that is not about a bound sets them all to serveStep.
 func spawnBounds(t *testing.T, ready, rendezvous, grace time.Duration) {
 	t.Helper()
-	r, v, g := spawnReadyWait, spawnRendezvousWait, spawnTermGrace
-	spawnReadyWait, spawnRendezvousWait, spawnTermGrace = ready, rendezvous, grace
-	t.Cleanup(func() { spawnReadyWait, spawnRendezvousWait, spawnTermGrace = r, v, g })
+	r, v, g := hostspawn.ReadyWait, hostspawn.RendezvousWait, hostspawn.TermGrace
+	hostspawn.ReadyWait, hostspawn.RendezvousWait, hostspawn.TermGrace = ready, rendezvous, grace
+	t.Cleanup(func() { hostspawn.ReadyWait, hostspawn.RendezvousWait, hostspawn.TermGrace = r, v, g })
 }
 
 // spawnFor is a new session's spawn in ws with the fake agent.
@@ -160,7 +165,7 @@ func spawnNow(t *testing.T, opts spawnOptions) (hostRef, error) {
 // endHost ends a host a spawn started, if it is still there.
 func endHost(ref hostRef) {
 	if ref.child != nil {
-		ref.child.terminate()
+		ref.child.Terminate()
 	}
 }
 
@@ -172,6 +177,13 @@ func failure(t *testing.T, err error) *spawnError {
 		t.Fatalf("spawnHost: %v (%T), want a *spawnError", err, err)
 	}
 	return se
+}
+
+// processAlive reports whether pid names a live process (a zombie counts:
+// it has not been reaped).
+func processAlive(pid int) bool {
+	err := syscall.Kill(pid, 0)
+	return err == nil || errors.Is(err, syscall.EPERM)
 }
 
 // waitReaped: pid no longer names a process — exited and waited for, so not a
@@ -287,8 +299,8 @@ func recordedGroups(t *testing.T, path string) []int {
 		b, _ := os.ReadFile(path)
 		var pgids []int
 		for _, line := range strings.Split(string(b), "\n") {
-			if g, ok := parseAgentGroup(line); ok {
-				pgids = append(pgids, g.pgid)
+			if g, ok := hostspawn.ParseAgentGroup(line); ok {
+				pgids = append(pgids, g.PGID)
 			}
 		}
 		if len(pgids) > 0 {
@@ -356,33 +368,33 @@ func TestSpawnHostServesASession(t *testing.T) {
 		t.Fatalf("a new session's spawn answered %+v", ref)
 	case ref.version != version.Version:
 		t.Fatalf("the host is craze %q, want %q", ref.version, version.Version)
-	case ref.entry.PID != c.pid || ref.entry.Provider != "cursor" || ref.entry.Workspace != absDir(ws) || ref.entry.CrazeSessionID == "":
-		t.Fatalf("the ref's entry %+v (pid %d): the registry had not the session's identity when ok came", ref.entry, c.pid)
-	case filepath.Base(ref.log) != ref.entry.HostID+".log" || filepath.Base(c.groups) != ref.entry.HostID+".pgids":
-		t.Fatalf("the host's files: %s, %s", ref.log, c.groups)
+	case ref.entry.PID != c.PID() || ref.entry.Provider != "cursor" || ref.entry.Workspace != absDir(ws) || ref.entry.CrazeSessionID == "":
+		t.Fatalf("the ref's entry %+v (pid %d): the registry had not the session's identity when ok came", ref.entry, c.PID())
+	case filepath.Base(ref.log) != ref.entry.HostID+".log" || filepath.Base(c.Groups()) != ref.entry.HostID+".pgids":
+		t.Fatalf("the host's files: %s, %s", ref.log, c.Groups())
 	}
-	if pgid, err := syscall.Getpgid(c.pid); err != nil || pgid != c.pid {
-		t.Fatalf("the host's process group %d (%v), want its own, %d", pgid, err, c.pid)
+	if pgid, err := syscall.Getpgid(c.PID()); err != nil || pgid != c.PID() {
+		t.Fatalf("the host's process group %d (%v), want its own, %d", pgid, err, c.PID())
 	}
-	agents := recordedGroups(t, c.groups)
+	agents := recordedGroups(t, c.Groups())
 	s := dialRef(t, ref)
 	if err := s.Attach(stepCtx(t)); err != nil {
 		t.Fatalf("attach: %v", err)
 	}
 	stopOver(t, s, "1")
 	select {
-	case <-c.done:
+	case <-c.Done():
 	case <-time.After(serveStep):
 		t.Fatalf("the host has not exited after session.stop")
 	}
-	if c.err != nil {
-		t.Fatalf("the host exited %v, want 0", c.err)
+	if c.Err() != nil {
+		t.Fatalf("the host exited %v, want 0", c.Err())
 	}
-	waitReaped(t, c.pid)
+	waitReaped(t, c.PID())
 	for _, pgid := range agents {
 		waitGroupGone(t, pgid)
 	}
-	if fileExists(c.groups) {
+	if fileExists(c.Groups()) {
 		t.Fatal("a host that stopped cleanly left its agents' record")
 	}
 	assertHostGone(t, env, ref.entry)
@@ -420,9 +432,9 @@ func TestSpawnHostEndsAHostWithNoAnswer(t *testing.T) {
 			// The ready wait never ends on its own here: an early exit that
 			// were read as a timeout would hang this test's step, not pass it.
 			fire := make(chan time.Time)
-			prevTimer := spawnReadyTimer
-			spawnReadyTimer = func(time.Duration) <-chan time.Time { return fire }
-			t.Cleanup(func() { spawnReadyTimer = prevTimer })
+			prevTimer := hostspawn.ReadyTimer
+			hostspawn.ReadyTimer = func(time.Duration) <-chan time.Time { return fire }
+			t.Cleanup(func() { hostspawn.ReadyTimer = prevTimer })
 
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
@@ -509,10 +521,10 @@ func TestSpawnHostEndsAHostItCannotDial(t *testing.T) {
 			if _, err := dialHost(stepCtx(t), ref, remote.SessionOptions{SessionID: ref.entry.CrazeSessionID}); err == nil {
 				t.Fatal("the failed dial answered a session")
 			}
-			if !ref.child.exited() {
+			if !ref.child.Exited() {
 				t.Fatal("dialHost returned with the host it could not dial still running")
 			}
-			waitReaped(t, ref.child.pid)
+			waitReaped(t, ref.child.PID())
 			want := "craze serve: stopping: session.stop from client"
 			if !reachable {
 				want = "craze serve: stopping: SIGTERM"
@@ -588,15 +600,15 @@ func waitClaimed(t *testing.T, env rundir.Env, crazeID string) (pid int, hostID 
 	}
 }
 
-// pollSignal makes spawnPolled close the channel it answers on the
+// pollSignal makes hostspawn.Polled close the channel it answers on the
 // rendezvous's first read of the registry.
 func pollSignal(t *testing.T) <-chan struct{} {
 	t.Helper()
 	ch := make(chan struct{})
 	var once sync.Once
-	prev := spawnPolled
-	spawnPolled = func() { once.Do(func() { close(ch) }) }
-	t.Cleanup(func() { spawnPolled = prev })
+	prev := hostspawn.Polled
+	hostspawn.Polled = func() { once.Do(func() { close(ch) }) }
+	t.Cleanup(func() { hostspawn.Polled = prev })
 	return ch
 }
 
@@ -684,8 +696,8 @@ func TestSpawnHostRendezvousesWithAHeldSession(t *testing.T) {
 			case spawns.count() != 3:
 				t.Fatalf("%d hosts spawned, want 3: the holder, the held one, the retry", spawns.count())
 			}
-			if got, _ := waitClaimed(t, env, id); got != b.ref.child.pid {
-				t.Fatalf("the session is claimed by pid %d, not the retry's host %d", got, b.ref.child.pid)
+			if got, _ := waitClaimed(t, env, id); got != b.ref.child.PID() {
+				t.Fatalf("the session is claimed by pid %d, not the retry's host %d", got, b.ref.child.PID())
 			}
 		})
 	}
@@ -790,7 +802,7 @@ func TestSpawnHostKillsTheAgentsItsHostLeaves(t *testing.T) {
 	defer cancel()
 	ch := goSpawn(t, ctx, spawnFor(t, env, ws))
 	e := onlyHost(t, env)
-	record := filepath.Join(env.Home, ".cache", "craze", "host-logs", agentGroupsName(e.HostID))
+	record := filepath.Join(env.Home, ".cache", "craze", "host-logs", hostspawn.AgentGroupsName(e.HostID))
 	agents := recordedGroups(t, record)
 	for _, pgid := range agents {
 		if err := syscall.Kill(-pgid, 0); err != nil {
@@ -811,126 +823,6 @@ func TestSpawnHostKillsTheAgentsItsHostLeaves(t *testing.T) {
 		t.Fatal("the spawner left the host's agents' record")
 	}
 	waitLog(t, filepath.Join(env.Home, ".cache", "craze", "host-logs", e.HostID+".log"), "craze serve: host "+e.HostID)
-}
-
-// groupLeader is a process of the test's own leading a process group of its
-// own, as an ACP agent does: its pid, the group's id; exited is closed once it
-// has exited and been reaped, and err is then its Wait's. It is killed and
-// reaped when the test ends, if it is still there.
-type groupLeader struct {
-	pid    int
-	start  uint64
-	exited chan struct{}
-	err    error
-}
-
-// leadGroup starts `sleep 60` leading a group of its own, and reads its start
-// time.
-func leadGroup(t *testing.T) *groupLeader {
-	t.Helper()
-	cmd := exec.Command("sleep", "60")
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	if err := cmd.Start(); err != nil {
-		t.Fatal(err)
-	}
-	g := &groupLeader{pid: cmd.Process.Pid, exited: make(chan struct{})}
-	go func() {
-		g.err = cmd.Wait()
-		close(g.exited)
-	}()
-	t.Cleanup(func() {
-		select {
-		case <-g.exited:
-		default:
-			_ = cmd.Process.Kill()
-			<-g.exited
-		}
-	})
-	id, err := rundir.ProcessIdentity(g.pid)
-	if err != nil {
-		t.Fatal(err)
-	}
-	g.start = id.Start
-	return g
-}
-
-// killed waits, within serveStep, for g to have died of SIGKILL.
-func (g *groupLeader) killed(t *testing.T) {
-	t.Helper()
-	select {
-	case <-g.exited:
-	case <-time.After(serveStep):
-		t.Fatalf("process %d was not killed within %v", g.pid, serveStep)
-	}
-	var ee *exec.ExitError
-	if !errors.As(g.err, &ee) {
-		t.Fatalf("process %d exited %v, want killed", g.pid, g.err)
-	}
-	if ws, ok := ee.Sys().(syscall.WaitStatus); !ok || !ws.Signaled() || ws.Signal() != syscall.SIGKILL {
-		t.Fatalf("process %d exited %v, want killed", g.pid, g.err)
-	}
-}
-
-// TestSpawnKillsOnlyTheGroupsProvablyItsAgents (astra r5-c3 1): the spawner's
-// last resort signals a recorded group only while the process leading it is
-// the agent the host recorded — the group's number as its pid, and the start
-// time the record has. Three groups the test leads, each a sleep in a group
-// of its own: one recorded with a start time not its own — an agent that has
-// gone, its number now a stranger's — survives; one recorded as it is is
-// killed; one whose leader has exited and been reaped is not signalled. A
-// line that names no group — a bare number, as a record without start times
-// had, or group 1 — is not acted on. Each group left alone is noted in the
-// host's log, and the record is removed. The stranger comes first in the
-// record, so it would have been signalled before the agent that is.
-func TestSpawnKillsOnlyTheGroupsProvablyItsAgents(t *testing.T) {
-	dir := t.TempDir()
-	c := &hostChild{groups: filepath.Join(dir, "0123456789ab.pgids"), log: filepath.Join(dir, "0123456789ab.log")}
-	stranger, agent, gone := leadGroup(t), leadGroup(t), leadGroup(t)
-	if err := syscall.Kill(gone.pid, syscall.SIGKILL); err != nil {
-		t.Fatal(err)
-	}
-	gone.killed(t)
-	record := agentGroup{pgid: stranger.pid, start: stranger.start + 1}.line() +
-		agentGroup{pgid: agent.pid, start: agent.start}.line() +
-		agentGroup{pgid: gone.pid, start: gone.start}.line() +
-		strconv.Itoa(stranger.pid) + "\n" +
-		"1 1\n"
-	if err := os.WriteFile(c.groups, []byte(record), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	c.killAgents()
-	agent.killed(t)
-	if fileExists(c.groups) {
-		t.Fatal("the spawner left the record")
-	}
-	b, err := os.ReadFile(c.log)
-	if err != nil {
-		t.Fatal(err)
-	}
-	log := string(b)
-	for _, want := range []string{
-		fmt.Sprintf("craze: agent process group %d not killed: its number is another process's now", stranger.pid),
-		fmt.Sprintf("craze: agent process group %d not killed: ", gone.pid),
-		fmt.Sprintf("craze: a record that names no agent's process group not acted on: %q", strconv.Itoa(stranger.pid)),
-		`craze: a record that names no agent's process group not acted on: "1 1"`,
-	} {
-		if !strings.Contains(log, want) {
-			t.Fatalf("the host's log does not say %q:\n%s", want, log)
-		}
-	}
-	if strings.Contains(log, fmt.Sprintf("group %d not killed", agent.pid)) {
-		t.Fatalf("the log says the agent was left:\n%s", log)
-	}
-	// The stranger was never signalled: its SIGKILL, had one been sent,
-	// preceded the agent's, which has been delivered and reaped.
-	select {
-	case <-stranger.exited:
-		t.Fatalf("the stranger's group was killed: %v", stranger.err)
-	case <-time.After(200 * time.Millisecond):
-	}
-	if err := syscall.Kill(-stranger.pid, 0); err != nil {
-		t.Fatalf("the stranger's group: %v", err)
-	}
 }
 
 // TestSpawnHostKeepsTheReadyPipeFromTheAgent (Linux: /proc): the host marks
@@ -954,8 +846,8 @@ func TestSpawnHostKeepsTheReadyPipeFromTheAgent(t *testing.T) {
 	spawnBounds(t, serveStep, serveStep, serveStep)
 	var mu sync.Mutex
 	var inodes []uint64
-	prev := spawnPipe
-	spawnPipe = func() (*os.File, *os.File, error) {
+	prev := hostspawn.Pipe
+	hostspawn.Pipe = func() (*os.File, *os.File, error) {
 		r, w, err := os.Pipe()
 		if err != nil {
 			return r, w, err
@@ -975,7 +867,7 @@ func TestSpawnHostKeepsTheReadyPipeFromTheAgent(t *testing.T) {
 		}
 		return r, w, nil
 	}
-	t.Cleanup(func() { spawnPipe = prev })
+	t.Cleanup(func() { hostspawn.Pipe = prev })
 	pipeOf := func(n int) string {
 		mu.Lock()
 		defer mu.Unlock()
@@ -1001,7 +893,7 @@ func TestSpawnHostKeepsTheReadyPipeFromTheAgent(t *testing.T) {
 	defer cancel()
 	ch := goSpawn(t, ctx, spawnFor(t, env, ws))
 	e := onlyHost(t, env)
-	agents := recordedGroups(t, filepath.Join(env.Home, ".cache", "craze", "host-logs", agentGroupsName(e.HostID)))
+	agents := recordedGroups(t, filepath.Join(env.Home, ".cache", "craze", "host-logs", hostspawn.AgentGroupsName(e.HostID)))
 	pipe := pipeOf(0)
 	if !holds(e.PID, pipe) {
 		t.Fatalf("the unanswering host does not hold its ready pipe %s", pipe)
@@ -1015,7 +907,7 @@ func TestSpawnHostKeepsTheReadyPipeFromTheAgent(t *testing.T) {
 			t.Fatal(err)
 		}
 		for _, kv := range strings.Split(string(b), "\x00") {
-			if strings.HasPrefix(kv, readyFDEnv+"=") || strings.HasPrefix(kv, hostChildEnv+"=") {
+			if strings.HasPrefix(kv, hostspawn.ReadyFDEnv+"=") || strings.HasPrefix(kv, hostspawn.HostChildEnv+"=") {
 				t.Fatalf("the agent's environment holds %s", kv)
 			}
 		}
@@ -1034,7 +926,7 @@ func TestSpawnHostKeepsTheReadyPipeFromTheAgent(t *testing.T) {
 	// after spawnHost returns (seen under -race -count=20, V1), so wait for it,
 	// bounded.
 	deadline := time.Now().Add(10 * time.Second)
-	for holds(ref.child.pid, pipeOf(1)) {
+	for holds(ref.child.PID(), pipeOf(1)) {
 		if time.Now().After(deadline) {
 			t.Fatal("a host that answered still holds its ready pipe")
 		}
@@ -1082,11 +974,11 @@ func TestSpawnHostStartFailureReachesTheClient(t *testing.T) {
 		t.Fatalf("the client's start: %v, want the host's start failure", err)
 	}
 	stopOver(t, s, "1")
-	waitReaped(t, ref.child.pid)
+	waitReaped(t, ref.child.PID())
 }
 
 // TestSpawnHostPassesNoHostStatus: the launching TUI's --no-host-status
-// reaches its host (serveArgv), which leaves the agent's host hook gates in
+// reaches its host (serveSpec), which leaves the agent's host hook gates in
 // its environment as the in-process TUI would; without it the host strips
 // them, whatever it reports itself (nothing).
 func TestSpawnHostPassesNoHostStatus(t *testing.T) {
@@ -1124,7 +1016,7 @@ func TestSpawnHostPassesNoHostStatus(t *testing.T) {
 				t.Fatalf("the agent's environment, want %q: %s", want, snap)
 			}
 			stopOver(t, s, "1")
-			waitReaped(t, ref.child.pid)
+			waitReaped(t, ref.child.PID())
 		})
 	}
 }
@@ -1151,7 +1043,7 @@ func TestSpawnArgvCarriesEverySessionFlag(t *testing.T) {
 		{"nothing set", tuiFlags{force: true}, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			argv := serveArgv(&tc.flags, tc.load, "0123456789ab", "/h/0123456789ab.log")
+			argv := hostspawn.Args(serveSpec(&tc.flags, tc.load, "0123456789ab", "/h/0123456789ab.log"))
 			if argv[0] != "serve" {
 				t.Fatalf("argv %q", argv)
 			}
@@ -1182,83 +1074,6 @@ func TestSpawnArgvCarriesEverySessionFlag(t *testing.T) {
 				if set != given {
 					t.Fatalf("--%s passed %v, want %v: %q", name, set, given, argv)
 				}
-			}
-		})
-	}
-}
-
-// TestParseReadyLine is the spawner's reading of the line itself: one line of
-// at most readyLineMax bytes, its newline included, decoded; EOF before a byte
-// is an exit, within a line a malformed one; a line past the bound is
-// oversized however it ends. And what makes a line a ready line (astra r5-c3
-// 4): ok needs its host id in a host id's form, an absolute socket, a craze
-// session id and a craze version, and no refusal — no reason, no holder, not
-// refused; not ok needs a reason, and its holder, when it names one, the
-// session and a host id — or, a lock that names nobody yet, no host and no
-// pid. A member the spawner does not know is ignored on either branch.
-func TestParseReadyLine(t *testing.T) {
-	ok := `{"ok":true,"hostId":"0123456789ab","socket":"/s","crazeSessionId":"c","crazeVersion":"v","future":1}`
-	okWithout := func(member, value string) string {
-		m := map[string]any{"ok": true, "hostId": "0123456789ab", "socket": "/s", "crazeSessionId": "c", "crazeVersion": "v"}
-		if value == "" {
-			delete(m, member)
-		} else {
-			m[member] = json.RawMessage(value)
-		}
-		b, err := json.Marshal(m)
-		if err != nil {
-			t.Fatal(err)
-		}
-		return string(b) + "\n"
-	}
-	notOK := func(held string) string {
-		return `{"ok":false,"error":"e","held":` + held + `}` + "\n"
-	}
-	pad := func(n int) string { return `{"ok":false,"error":"` + strings.Repeat("x", n) + `"}` }
-	for _, tc := range []struct {
-		name string
-		in   string
-		want spawnFailure
-	}{
-		{"ok, an unknown member ignored", ok + "\n", 0},
-		{"ok, and more after it", ok + "\nmore", 0},
-		{"exactly the bound", pad(readyLineMax-len(pad(0))-1) + "\n", 0},
-		{"one past the bound", pad(readyLineMax-len(pad(0))) + "\n", spawnOversized},
-		{"no newline, past the bound", pad(readyLineMax), spawnOversized},
-		{"nothing", "", spawnExited},
-		{"no newline", ok, spawnMalformed},
-		{"not JSON", "hello\n", spawnMalformed},
-		{"not ok, no reason", `{"ok":false}` + "\n", spawnMalformed},
-		{"not ok, an unknown member ignored", `{"ok":false,"error":"e","future":{"x":1}}` + "\n", 0},
-
-		{"ok, no host id", okWithout("hostId", ""), spawnMalformed},
-		{"ok, a host id not in a host id's form", okWithout("hostId", `"0123456789AB"`), spawnMalformed},
-		{"ok, no socket", okWithout("socket", ""), spawnMalformed},
-		{"ok, a relative socket", okWithout("socket", `"s"`), spawnMalformed},
-		{"ok, no session", okWithout("crazeSessionId", ""), spawnMalformed},
-		{"ok, a session that is no token", okWithout("crazeSessionId", `"a/b"`), spawnMalformed},
-		{"ok, no craze version", okWithout("crazeVersion", ""), spawnMalformed},
-		{"ok, and a refusal", okWithout("error", `"e"`), spawnMalformed},
-		{"ok, and a holder", okWithout("held", `{"hostId":"0123456789ab","crazeSessionId":"c"}`), spawnMalformed},
-		{"ok, and refused", okWithout("refused", `true`), spawnMalformed},
-		{"not ok, the choice refused", `{"ok":false,"error":"e","refused":true}` + "\n", 0},
-
-		{"held", notOK(`{"hostId":"0123456789ab","pid":12,"crazeSessionId":"c"}`), 0},
-		{"held by a lock that names nobody yet", notOK(`{"hostId":"","crazeSessionId":"c"}`), 0},
-		{"held, an unknown member ignored", notOK(`{"hostId":"0123456789ab","crazeSessionId":"c","future":1}`), 0},
-		{"held, no reason", `{"ok":false,"held":{"hostId":"0123456789ab","crazeSessionId":"c"}}` + "\n", spawnMalformed},
-		{"held by nobody, no reason", `{"ok":false,"held":{}}` + "\n", spawnMalformed},
-		{"held by nobody", notOK(`{}`), spawnMalformed},
-		{"held, no session", notOK(`{"hostId":"0123456789ab","pid":12}`), spawnMalformed},
-		{"held, a session that is no token", notOK(`{"hostId":"0123456789ab","crazeSessionId":".."}`), spawnMalformed},
-		{"held, a host id not in a host id's form", notOK(`{"hostId":"h","crazeSessionId":"c"}`), spawnMalformed},
-		{"held, a pid and no host", notOK(`{"hostId":"","pid":12,"crazeSessionId":"c"}`), spawnMalformed},
-		{"held, a negative pid", notOK(`{"hostId":"0123456789ab","pid":-1,"crazeSessionId":"c"}`), spawnMalformed},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			_, got, why := parseReady(strings.NewReader(tc.in))
-			if got != tc.want {
-				t.Fatalf("failure %d (%s), want %d", got, why, tc.want)
 			}
 		})
 	}
