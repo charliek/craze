@@ -201,8 +201,10 @@ type hooks struct {
 	flushTimer    func(time.Duration) (<-chan time.Time, func())
 	rosterApplied func(roster.Snapshot)
 	// subscribed runs between a subscription's registration and its reply's
-	// write.
-	subscribed func()
+	// write; subscriptions is told, on the connection's goroutine, how many
+	// subscriptions the connection holds once it has registered a new one.
+	subscribed    func()
+	subscriptions func(n int)
 	// rosterLocking is told, on c's own goroutine (a sessions.list, what
 	// "list") or a subscription's flusher ("flush"), as it is about to take
 	// c's write lock for a line of the roster's; rosterTaken once it holds

@@ -897,3 +897,48 @@ func teardownWithASplice(t *testing.T, speaks bool) {
 		t.Fatalf("the hub's log: %s", log)
 	}
 }
+
+// TestAConnectRefusalNamesNoPath (r23 2): no socket path crosses the wire
+// (§3.6), a refused session.connect's message included. A listed host whose
+// socket refuses and a registry that cannot be read are each refused
+// unavailable, reason host_unreachable, with no path in the message, and
+// the hub's log keeps the detail. The negative control: the dial's own
+// error, in the log, names the host's socket.
+func TestAConnectRefusalNamesNoPath(t *testing.T) {
+	env := testEnv(t)
+	refusing, err := rundir.Bind(env, hostOf(7), rundir.Entry{CrazeSessionID: sessionOf(7), Ready: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = refusing.Close() })
+	_ = refusing.Listener().Close()
+	sock := entryOf(t, env, hostOf(7)).Socket
+	var unreadable atomic.Bool
+	rg := newSpliceRig(t, env, func(*hooks) {
+		// Set before the hub runs, so it is put back after the hub stops.
+		setVar(t, &hostsRead, func(e rundir.Env) ([]rundir.Entry, error) {
+			if unreadable.Load() {
+				return nil, errors.New("rundir: " + env.Home + "/.cache/craze/hosts: permission denied")
+			}
+			return rundir.Hosts(e)
+		})
+	})
+	pathFree := func(what string, m msg) {
+		t.Helper()
+		refusal(t, m, protocol.CodeUnavailable, protocol.ReasonHostUnreachable)
+		if strings.Contains(m.Error.Message, "/") || strings.Contains(m.Error.Message, ".sock") {
+			t.Fatalf("%s: the refusal names a path: %q", what, m.Error.Message)
+		}
+	}
+	p := dialPeer(t, rg.sock)
+	pathFree("a refusing socket", p.call(protocol.MethodSessionConnect, protocol.ConnectParams{SessionID: sessionOf(7)}))
+	if log := rg.rn.stderr.String(); !strings.Contains(log, sock) {
+		t.Fatalf("the hub's log lacks the dial's detail (%s): %s", sock, log)
+	}
+	unreadable.Store(true)
+	p = dialPeer(t, rg.sock) // a connect must be a connection's first request
+	pathFree("an unreadable registry", p.call(protocol.MethodSessionConnect, protocol.ConnectParams{SessionID: sessionOf(7)}))
+	if log := rg.rn.stderr.String(); !strings.Contains(log, "permission denied") {
+		t.Fatalf("the hub's log lacks the registry's error: %s", log)
+	}
+}

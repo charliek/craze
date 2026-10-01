@@ -99,27 +99,66 @@ func TestPsTable(t *testing.T) {
 	}
 }
 
-// TestPsTitleFitsTheTerminal: on a terminal, the title takes what is left of
-// its width — every line fits — and at least psTitleMin cells however narrow
-// the terminal.
-func TestPsTitleFitsTheTerminal(t *testing.T) {
+// TestPsFitsTheTerminal (r24 1): on a terminal no whole line is wider than
+// it, at any width: the title takes what is left; the DIR column gives cells
+// back first when that is under psTitleMin — a long path cut from its left,
+// its end kept — and a terminal too narrow even then has every line cut. At
+// 80 columns the table is pinned. The negative control is a title given
+// psTitleMin cells whatever is left (the overflow r24 found).
+func TestPsFitsTheTerminal(t *testing.T) {
 	home := "/home/u"
-	rows := psRows(psFixture(t, home), home, nil, psNow)
-	// The columns before the title take 57 cells here.
-	for _, width := range []int{80, 67} {
-		lines := strings.Split(strings.TrimSuffix(psTable(rows, width), "\n"), "\n")
-		for _, line := range lines {
-			if w := ansi.StringWidth(line); w > width {
-				t.Errorf("at %d cells a line is %d: %q", width, w, line)
+	res := psFixture(t, home)
+	plain := psRows(res, home, nil, psNow)
+	res.Sessions = append(res.Sessions, psRosterRow(t, 8, "0192f0aa-8888-7000-8000-00000000e008", protocol.RosterReachable,
+		"cursor", "/srv/a/very/long/workspace/path", &protocol.SessionRow{Activity: protocol.ActivityIdle, Title: "deep",
+			Since: psNow.Add(-time.Minute)}))
+	deep := psRows(res, home, nil, psNow)
+	for _, rows := range [][]psRow{plain, deep} {
+		for width := 100; width >= 8; width-- {
+			for _, line := range strings.Split(strings.TrimSuffix(psTable(rows, width), "\n"), "\n") {
+				if w := ansi.StringWidth(line); w > width {
+					t.Fatalf("at %d cells a line is %d: %q", width, w, line)
+				}
 			}
 		}
-		if w := ansi.StringWidth(lines[2]); w != width || !strings.HasSuffix(lines[2], "…") {
-			t.Errorf("at %d cells the long title's line is %d cells: %q", width, w, lines[2])
-		}
 	}
-	narrow := strings.Split(psTable(rows, 20), "\n")[2]
-	if !strings.HasSuffix(narrow, "…") || ansi.StringWidth(narrow[strings.Index(narrow, "a very"):]) != psTitleMin {
-		t.Fatalf("at 20 cells the long title reads %q, want %d cells", narrow, psTitleMin)
+	// The columns before the title take 57 cells with the plain rows: at 67
+	// the long title has the 10 left.
+	long := strings.Split(psTable(plain, 67), "\n")[2]
+	if ansi.StringWidth(long) != 67 || !strings.HasSuffix(long, "a very lo…") {
+		t.Fatalf("at 67 cells the long title's line is %q", long)
+	}
+	want := "" +
+		"SESSION   STATE        PROVIDER  MODEL  DIR                    SINCE  TITLE\n" +
+		"0000a001  needs you    cursor    -      ~/proj-a               2m     fix the f…\n" +
+		"0000b002  working      grok      -      /srv/b2                42s    a very lo…\n" +
+		"0000c003  starting     cursor    -      ~                      3h     -\n" +
+		"0000d004  failed       grok      -      /srv/d                 6d     a red line\n" +
+		"0000e008  idle         cursor    -      …/long/workspace/path  1m     deep\n" +
+		"0000e007  idle         native    -      ~/newer                5m     -\n" +
+		"0000e005  idle         cursor    -      ~/older                -      -\n" +
+		"0000f006  unreachable  cursor    -      /srv/f                 1h     gone quiet\n"
+	if got := psTable(deep, 80); got != want {
+		t.Fatalf("at 80 cells:\n%s\nwant:\n%s", got, want)
+	}
+}
+
+// TestPsTilde (r24 2): HOME abbreviates to ~ — itself, and what is under it —
+// written with a trailing slash too; a sibling whose name it begins is not
+// under it, and "/" abbreviates nothing.
+func TestPsTilde(t *testing.T) {
+	for _, c := range []struct{ home, dir, want string }{
+		{"/home/al", "/home/al/proj", "~/proj"},
+		{"/home/al/", "/home/al/proj", "~/proj"},
+		{"/home/al//", "/home/al", "~"},
+		{"/home/al/", "/home/al", "~"},
+		{"/home/al/", "/home/alice/proj", "/home/alice/proj"},
+		{"/", "/srv/x", "/srv/x"},
+		{"", "/srv/x", "/srv/x"},
+	} {
+		if got := psTilde(c.home, c.dir); got != c.want {
+			t.Errorf("HOME %q, dir %q: %q, want %q", c.home, c.dir, got, c.want)
+		}
 	}
 }
 
@@ -327,5 +366,33 @@ func TestPsThroughTheHub(t *testing.T) {
 	}
 	if len(got) != 2 || want[got[0]] == [2]string{} || want[got[1]] == [2]string{} {
 		t.Fatalf("the hub's roster lists %v, want %v", got, want)
+	}
+}
+
+// TestPsWithAnUnreadableRegistry (r23 4): a hub that runs but cannot read the
+// hosts' registry (its directory world-writable, which rundir refuses)
+// refuses its roster rather than answer an empty one, so craze ps falls back,
+// reads the hosts itself, fails the same way and exits 1 — never `no sessions
+// running`. The negative control: a hub answering an empty roster would have
+// had craze ps print that, exit 0.
+func TestPsWithAnUnreadableRegistry(t *testing.T) {
+	env, _ := serveHome(t)
+	hosts := filepath.Join(env.Home, ".cache", "craze", "hosts")
+	if err := os.MkdirAll(hosts, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(hosts, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	hubAsChild(t)
+	stdout, stderr, code := executeErr([]string{"ps"})
+	lines := strings.Split(strings.TrimSuffix(stderr, "\n"), "\n")
+	if code != 1 || stdout != "" || len(lines) != 2 ||
+		!strings.HasPrefix(lines[0], "craze ps: the hub is not available (hub: sessions.list refused: unavailable (host_unreachable)") ||
+		!strings.HasPrefix(lines[1], "craze ps: ") || !strings.Contains(lines[1], "0700 is required") {
+		t.Fatalf("craze ps with an unreadable registry exited %d: stdout %q, stderr %q (hub log: %s)", code, stdout, stderr, hubLog(env)())
+	}
+	if _, _, err := rundir.ReadHubRecord(env); err != nil {
+		t.Fatalf("no hub ran: %v", err)
 	}
 }

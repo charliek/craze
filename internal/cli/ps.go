@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"time"
@@ -41,9 +42,11 @@ const (
 	// of the poll, each host asked once.
 	psDirectWait = 3 * time.Second
 	// psTitleCells is the title column's width when stdout is no terminal
-	// that says its own; psTitleMin the least a terminal leaves it.
+	// that says its own; psTitleMin the width a terminal's narrower DIR
+	// column gives the title back first, down to psDirMin cells.
 	psTitleCells = 100
 	psTitleMin   = 10
+	psDirMin     = 10
 	// psShortID is how many characters of a craze session id craze ps shows.
 	psShortID = 8
 	// psNone is a cell craze ps has nothing for.
@@ -225,11 +228,17 @@ func psRows(res protocol.HubSessionsListResult, home string, titles map[string]s
 	return rows
 }
 
+// psDir is the DIR column's index.
+const psDir = 4
+
 // psTable is rows as craze ps prints them: psNoSessions for none; otherwise
 // a header and a row a session, each column as wide as its widest cell and
-// two spaces apart, the title last — cut with an ellipsis to what is left of
-// width (a terminal's, at least psTitleMin), or to psTitleCells when width is
-// 0 (no terminal).
+// two spaces apart, the title last, cut with an ellipsis — to psTitleCells
+// when width is 0 (no terminal), and on a terminal to what is left of its
+// width, no line ever wider than it (r24 1): when what is left is under
+// psTitleMin, the DIR column gives cells back first, down to psDirMin, its
+// paths cut from the left so their ends stay; a terminal too narrow for the
+// other columns has every line cut to its width.
 func psTable(rows []psRow, width int) string {
 	if len(rows) == 0 {
 		return psNoSessions + "\n"
@@ -247,19 +256,37 @@ func psTable(rows []psRow, width int) string {
 		for _, w := range widths {
 			used += w + 2
 		}
-		titleMax = max(width-used, psTitleMin)
+		titleMax = width - used
+		if short := psTitleMin - titleMax; short > 0 {
+			give := max(min(short, widths[psDir]-psDirMin), 0)
+			widths[psDir] -= give
+			titleMax += give
+		}
 	}
 	var b strings.Builder
 	line := func(cells [7]string) {
+		var l strings.Builder
 		for i, w := range widths {
-			b.WriteString(cells[i])
-			b.WriteString(strings.Repeat(" ", w-ansi.StringWidth(cells[i])+2))
+			cell := cells[i]
+			if i == psDir {
+				cell = psCutLeft(cell, w)
+			}
+			l.WriteString(cell)
+			l.WriteString(strings.Repeat(" ", w-ansi.StringWidth(cell)+2))
 		}
 		title := cells[6]
 		if ansi.StringWidth(title) > titleMax {
-			title = ansi.Truncate(title, titleMax, "…")
+			title = ""
+			if titleMax > 0 {
+				title = ansi.Truncate(cells[6], titleMax, "…")
+			}
 		}
-		b.WriteString(title)
+		l.WriteString(title)
+		out := l.String()
+		if width > 0 && ansi.StringWidth(out) > width {
+			out = ansi.Truncate(out, width, "…")
+		}
+		b.WriteString(strings.TrimRight(out, " "))
 		b.WriteByte('\n')
 	}
 	line(psHeader)
@@ -267,6 +294,24 @@ func psTable(rows []psRow, width int) string {
 		line(r.cells)
 	}
 	return b.String()
+}
+
+// psCutLeft is s cut from the left to at most w cells, an ellipsis in place
+// of what went: a path's end is what tells it apart.
+func psCutLeft(s string, w int) string {
+	n := ansi.StringWidth(s)
+	if n <= w {
+		return s
+	}
+	if w < 1 {
+		return ""
+	}
+	out := ansi.TruncateLeft(s, n-w+1, "…")
+	for drop := n - w + 2; ansi.StringWidth(out) > w; drop++ {
+		// A wide character straddling the cut.
+		out = ansi.TruncateLeft(s, drop, "…")
+	}
+	return out
 }
 
 // psShort is a craze session id as craze ps shows it: its last psShortID
@@ -284,8 +329,12 @@ func psShort(id string) string {
 // whitespace one space (the list's rule).
 func psLine(s string) string { return transcript.SanitizeLine(s) }
 
-// psTilde is dir with home abbreviated to ~.
+// psTilde is dir with home abbreviated to ~: home cleaned first, so a HOME
+// written with a trailing slash still is (r24 2).
 func psTilde(home, dir string) string {
+	if home != "" {
+		home = filepath.Clean(home)
+	}
 	if home == "" || home == "/" {
 		return dir
 	}

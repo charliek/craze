@@ -120,9 +120,11 @@ func (c *conn) connect(req *request) bool {
 	}
 	hc, err := h.dialHost(e.Socket)
 	if err != nil {
+		// The dial's error names the host's socket path, which never crosses
+		// the wire (§3.6): it is the hub's log's alone (r23 2).
 		h.logf("session.connect %s: host %s is unreachable: %v", sessionID, e.HostID, err)
 		return c.replyErr(req.id, refused(protocol.CodeUnavailable, protocol.ReasonHostUnreachable,
-			"session %s's host %s cannot be reached: %v", sessionID, e.HostID, err))
+			"session %s's host %s cannot be reached", sessionID, e.HostID))
 	}
 	sp := &splice{client: c.uc, host: hc, hostID: e.HostID, sessionID: sessionID, done: make(chan struct{})}
 	if !c.handTo(sp) {
@@ -181,12 +183,15 @@ func connectParams(raw json.RawMessage) (string, *protocol.Error) {
 }
 
 // lookup is the one live host sessionID names (the file's comment), or the
-// refusal that answers the connect.
+// refusal that answers the connect. A registry that cannot be read is
+// refused with no word of why — its error names the registry's paths — and
+// the hub's log says it (r23 2).
 func (h *hub) lookup(sessionID string) (rundir.Entry, *protocol.Error) {
 	entries, err := hostsRead(h.o.Env)
 	if err != nil {
+		h.logf("session.connect %s: the registry cannot be read: %v", sessionID, err)
 		return rundir.Entry{}, refused(protocol.CodeUnavailable, protocol.ReasonHostUnreachable,
-			"the registry cannot be read, so no session's host can be found: %v", err)
+			"the registry cannot be read, so no session's host can be found")
 	}
 	var matches []rundir.Entry
 	for _, e := range entries {

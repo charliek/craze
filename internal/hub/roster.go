@@ -143,6 +143,11 @@ type rosterState struct {
 	run      uint64
 	seenRun  uint64
 	complete bool
+	// regErr is why the last Snapshot's registry read failed (nil: it did
+	// not), and readRun the run of the last Snapshot whose read succeeded: a
+	// run with no read that succeeded answers no roster (unread).
+	regErr  error
+	readRun uint64
 	// changed is closed, and replaced, by every Snapshot applied.
 	changed chan struct{}
 	// closed is the teardown's: no answer, subscription or Snapshot more.
@@ -298,6 +303,9 @@ func (rs *rosterState) apply(snap roster.Snapshot) {
 		}
 	}
 	rs.seenRun, rs.complete = snap.Run, complete
+	if rs.regErr = snap.RegistryErr; rs.regErr == nil {
+		rs.readRun = snap.Run
+	}
 	close(rs.changed)
 	rs.changed = make(chan struct{})
 	rs.wakeLocked()
@@ -393,16 +401,40 @@ func (rs *rosterState) viewLocked() ([]protocol.RosterRow, bool) {
 	return rows, len(rs.order) > n
 }
 
-// list is the hub's sessions.list result now; false once the hub closes.
-func (rs *rosterState) list() (protocol.HubSessionsListResult, bool) {
+// list is the hub's sessions.list result now, for an answer of run's — or
+// its refusal while run has read no registry (unreadLocked); false once the
+// hub closes. sub, when not nil, is the subscription of the connection the
+// answer is written to: the client takes the reply's rows for the roster, so
+// they become what sub's client holds (rebaseLocked).
+func (rs *rosterState) list(run uint64, sub *subscription) (protocol.HubSessionsListResult, *protocol.Error, bool) {
 	rs.mu.Lock()
 	defer rs.mu.Unlock()
 	if rs.closed {
-		return protocol.HubSessionsListResult{}, false
+		return protocol.HubSessionsListResult{}, nil, false
+	}
+	if perr := rs.unreadLocked(run); perr != nil {
+		return protocol.HubSessionsListResult{}, perr, true
 	}
 	rs.reevaluateLocked(rs.now())
 	rows, truncated := rs.viewLocked()
-	return protocol.HubSessionsListResult{Epoch: rs.epoch, Cursor: rs.cursor, Sessions: rows, Truncated: truncated}, true
+	if sub != nil && !sub.ended {
+		sub.rebaseLocked(rows)
+	}
+	return protocol.HubSessionsListResult{Epoch: rs.epoch, Cursor: rs.cursor, Sessions: rows, Truncated: truncated}, nil, true
+}
+
+// unreadLocked is the refusal of an answer of run's when the hub knows no
+// roster: the last registry read failed and none has succeeded in run — a
+// hub whose registry cannot be read answers that, never an empty roster
+// (r23 4). unavailable, reason host_unreachable — session.connect's own
+// answer when the registry cannot be read — and a message with no path in
+// it: the hub's log has the read's error.
+func (rs *rosterState) unreadLocked(run uint64) *protocol.Error {
+	if rs.regErr == nil || rs.readRun == run {
+		return nil
+	}
+	return refused(protocol.CodeUnavailable, protocol.ReasonHostUnreachable,
+		"the hub cannot read the registry of session hosts, so it knows no roster")
 }
 
 // listable says a host can be listed (limits.go): a host id of 12 lowercase
@@ -580,14 +612,19 @@ type subscription struct {
 	done    chan struct{}
 }
 
-// subscribe registers a subscription of c's, under the roster lock that
-// builds its reply: false once the hub closes. Its flusher runs from now, and
-// writes nothing before its reply is written (replied).
-func (rs *rosterState) subscribe(c *conn) (*subscription, protocol.SessionsSubscribeResult, bool) {
+// subscribe registers a subscription of c's for an answer of run's, under
+// the roster lock that builds its reply — or answers its refusal while run
+// has read no registry (unreadLocked), registering nothing: false once the
+// hub closes. Its flusher, started by the caller, writes nothing before its
+// reply is written (replied).
+func (rs *rosterState) subscribe(c *conn, run uint64) (*subscription, protocol.SessionsSubscribeResult, *protocol.Error, bool) {
 	rs.mu.Lock()
 	defer rs.mu.Unlock()
 	if rs.closed {
-		return nil, protocol.SessionsSubscribeResult{}, false
+		return nil, protocol.SessionsSubscribeResult{}, nil, false
+	}
+	if perr := rs.unreadLocked(run); perr != nil {
+		return nil, protocol.SessionsSubscribeResult{}, perr, true
 	}
 	rs.reevaluateLocked(rs.now())
 	rows, truncated := rs.viewLocked()
@@ -600,7 +637,30 @@ func (rs *rosterState) subscribe(c *conn) (*subscription, protocol.SessionsSubsc
 	}
 	rs.subs[s] = struct{}{}
 	return s, protocol.SessionsSubscribeResult{Subscription: s.id, Epoch: rs.epoch, Cursor: rs.cursor,
-		Sessions: rows, Truncated: truncated}, true
+		Sessions: rows, Truncated: truncated}, nil, true
+}
+
+// rebaseLocked makes rows — a sessions.list reply's, written on s's
+// connection — what s's client holds, and drops what was pending: the reply
+// carries it. A change after the list's snapshot marks its row pending again,
+// and s's flusher, which writes after the reply (the connection's write lock,
+// held from the snapshot through the write), sends it as a change from these
+// rows — a host the reply listed and that has gone since included (r23 1).
+func (s *subscription) rebaseLocked(rows []protocol.RosterRow) {
+	s.has = make(map[string]bool, len(rows))
+	for _, r := range rows {
+		s.has[r.HostID] = true
+	}
+	clear(s.pending)
+}
+
+// abandon ends s, which its connection never told its client of — its
+// reply could not be written as a result (r23 5) — before its flusher was
+// started: unregistered, its demand released, and done.
+func (s *subscription) abandon() {
+	s.rs.end(s, "")
+	close(s.replied)
+	close(s.done)
 }
 
 // live says s has not ended.
@@ -630,7 +690,9 @@ func (rs *rosterState) endLocked(s *subscription, why protocol.ResetReason) bool
 		return false
 	}
 	s.ended, s.why = true, why
-	s.pending = nil
+	// Neither is read again (take, rebaseLocked check ended): released now,
+	// not when the connection closes (r23 3).
+	s.pending, s.has = nil, nil
 	delete(rs.subs, s)
 	rs.releaseLocked()
 	close(s.stop)

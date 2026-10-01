@@ -206,7 +206,9 @@ const (
 	// become ready (plan 032 §3.10); the hub has reaped it. Never stored.
 	ReasonSpawnFailed Reason = "spawn_failed"
 	// ReasonHostUnreachable is a session.connect whose host the hub could not
-	// dial: its socket refused or timed out, or its peer check failed.
+	// dial: its socket refused or timed out, or its peer check failed — or a
+	// hub that cannot read its registry, so it reaches no host: refused a
+	// session.connect, a sessions.list and a sessions.subscribe.
 	ReasonHostUnreachable Reason = "host_unreachable"
 )
 

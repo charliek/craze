@@ -744,10 +744,14 @@ SESSION   STATE        PROVIDER  MODEL  DIR       SINCE  TITLE
 | `MODEL` | `-` for now: a session's row does not carry the model it runs |
 | `DIR` | The session's working directory, `~` for `$HOME` |
 | `SINCE` | How long the session has been in its state, in one unit (`42s`, `5m`, `3h`, `6d`); `-` when its host does not say (an older craze) |
-| `TITLE` | The session's title, else its first prompt (the session index's title), else `-`: one line, cut with `…` to the terminal's width, or to 100 cells when stdout is not a terminal |
+| `TITLE` | The session's title, else its first prompt (the session index's title), else `-`: one line, cut with `…` to what is left of the terminal's width, or to 100 cells when stdout is not a terminal |
 
 Rows are ordered by state, in the order above, then newest in its state
-first. With nothing running it prints `no sessions running`.
+first. On a terminal no line is wider than it: when fewer than 10 cells are
+left for the title, `DIR` gives up cells first (down to 10), its paths cut
+from the left so their ends stay, and a terminal too narrow even for the
+other columns has every line cut. With nothing running it prints `no
+sessions running`.
 
 | Flag | Description |
 |------|-------------|

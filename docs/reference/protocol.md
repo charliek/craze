@@ -324,7 +324,10 @@ A `sessions.list` or `sessions.subscribe` answers once the poll's current
 round has heard from every host it lists — an answer, or a failure — and at
 most a second after it was asked: a host not heard from by then is listed
 `connecting`. A hub that was not polling starts a round for it, so its
-answer is what the hosts say now. Its `sessions.list` result:
+answer is what the hosts say now. A hub that cannot read the registry — its
+last read failed, and none has succeeded since the answer's round began —
+answers both `unavailable`, reason `host_unreachable` (as `session.connect`
+does then), never an empty roster. Its `sessions.list` result:
 
 | result | |
 |---|---|
@@ -402,7 +405,13 @@ may on the same connection, and reads `truncated` from the new reply; after
 
 On one connection, the lines that carry the roster's cursor — `roster`
 notifications and `sessions.list` replies — are written in the order their
-roster was taken: a cursor never goes back from one line to the next.
+roster was taken: a cursor never goes back from one line to the next. A
+`sessions.list` reply on a connection that holds a subscription is that
+subscription's roster from then on: its next notification is the change from
+the rows the reply listed. A `sessions.subscribe` whose reply cannot be
+written — a request id long enough to take it over the line limit, answered
+`failed`, reason `response_too_large` — subscribes to nothing, and the
+connection may subscribe again.
 
 On the hub, every session-scoped method but `session.connect` is
 `unsupported`, reason `host_only`: a session's methods are its host's,

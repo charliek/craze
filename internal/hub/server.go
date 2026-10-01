@@ -157,8 +157,9 @@ type conn struct {
 	// (dmu, which orders a deadline's setting against the cap's).
 	dmu   sync.Mutex
 	capAt time.Time
-	// subs is every roster subscription the connection made, the last its
-	// current one: the connection's own goroutine's.
+	// subs is the connection's latest roster subscription — its current one,
+	// unless it has ended — and none before it: a new subscribe joins and
+	// drops the ended ones first (r23 3). The connection's own goroutine's.
 	subs []*subscription
 	// answered counts the lines answered since hello was — whatever they
 	// were — so session.connect knows it is the first (§3.7): the
@@ -386,28 +387,34 @@ func (c *conn) hello(req *request) bool {
 }
 
 // list answers sessions.list (roster.go): once the open run has polled every
-// host — at most listWait — the roster as it stands. Its snapshot and its
-// write are one section under the connection's write lock, taken before the
-// roster's (the flusher's order, conn.flush): on a connection that holds a
-// subscription the reply is never written behind a notification of a later
-// cursor, nor a notification behind it of an earlier one (r19 1). The
-// roster's lock is not held across the write.
+// host — at most listWait — the roster as it stands, or its refusal while
+// the run has read no registry. Its snapshot and its write are one section
+// under the connection's write lock, taken before the roster's (the
+// flusher's order, conn.flush): on a connection that holds a subscription the
+// reply is never written behind a notification of a later cursor, nor a
+// notification behind it of an earlier one (r19 1), and the reply's rows are
+// what the subscription's client holds from then on (rebaseLocked, r23 1).
+// The roster's lock is not held across the write.
 func (c *conn) list(req *request) bool {
 	if perr := emptyParams(req.params); perr != nil {
 		return c.replyErr(req.id, perr)
 	}
 	rs := c.s.h.rs
-	rs.await(rs.acquire())
+	run := rs.acquire()
+	rs.await(run)
 	if f := c.s.h.hk.rosterLocking; f != nil {
 		f(c, "list")
 	}
 	c.wmu.Lock()
 	defer c.wmu.Unlock()
-	res, ok := rs.list()
+	res, perr, ok := rs.list(run, c.lastSub())
 	rs.release()
 	if !ok {
 		c.writeLocked(errorLine(req.id, refused(protocol.CodeUnavailable, protocol.ReasonClosing, "the hub is closing")))
 		return false
+	}
+	if perr != nil {
+		return c.writeLocked(errorLine(req.id, perr))
 	}
 	if f := c.s.h.hk.rosterTaken; f != nil {
 		f(c, "list")
@@ -415,33 +422,66 @@ func (c *conn) list(req *request) bool {
 	return c.writeLocked(replyLine(req.id, res))
 }
 
+// lastSub is the connection's latest subscription, nil when it has made
+// none: its current one, unless that has ended.
+func (c *conn) lastSub() *subscription {
+	if n := len(c.subs); n > 0 {
+		return c.subs[n-1]
+	}
+	return nil
+}
+
 // subscribe answers sessions.subscribe (roster.go): one per connection; once
 // the open run has polled every host — at most listWait — the subscription
-// is registered as its reply is built, the reply written, and its flusher
-// writes its notifications from then on. The subscription keeps its demand on
-// the poll until it ends.
+// is registered as its reply is built (or refused while the run has read no
+// registry, registering nothing), the reply written, and its flusher writes
+// its notifications from then on. The subscription keeps its demand on the
+// poll until it ends. A reply that cannot be written as a result — over the
+// line limit, answered response_too_large — tells the client of no
+// subscription, so none is kept (abandon, r23 5). The subscriptions this
+// connection made before, every one ended, are joined and dropped first, so
+// one that subscribes again and again holds one (r23 3).
 func (c *conn) subscribe(req *request) bool {
 	if perr := emptyParams(req.params); perr != nil {
 		return c.replyErr(req.id, perr)
 	}
 	rs := c.s.h.rs
-	if n := len(c.subs); n > 0 && rs.live(c.subs[n-1]) {
+	if last := c.lastSub(); last != nil && rs.live(last) {
 		return c.replyErr(req.id, refused(protocol.CodeBadRequest, protocol.ReasonAlreadySubscribed,
-			"this connection holds roster subscription %s already", c.subs[n-1].id))
+			"this connection holds roster subscription %s already", last.id))
 	}
-	rs.await(rs.acquire())
-	sub, res, ok := rs.subscribe(c)
+	// Each ended one's flusher returns at once, or after the line it is
+	// writing, which is bounded (slowWait, writeWait).
+	for _, s := range c.subs {
+		<-s.done
+	}
+	c.subs = nil
+	run := rs.acquire()
+	rs.await(run)
+	sub, res, perr, ok := rs.subscribe(c, run)
 	if !ok {
 		rs.release()
 		c.replyErr(req.id, refused(protocol.CodeUnavailable, protocol.ReasonClosing, "the hub is closing"))
 		return false
 	}
+	if perr != nil {
+		rs.release()
+		return c.replyErr(req.id, perr)
+	}
+	line, fits := encodeReply(req.id, res)
+	if !fits {
+		sub.abandon()
+		return c.writeLine(line)
+	}
 	c.subs = append(c.subs, sub)
+	if f := c.s.h.hk.subscriptions; f != nil {
+		f(len(c.subs))
+	}
 	go sub.run()
 	if f := c.s.h.hk.subscribed; f != nil {
 		f()
 	}
-	written := c.reply(req.id, res)
+	written := c.writeLine(line)
 	close(sub.replied)
 	return written
 }
@@ -484,7 +524,11 @@ func emptyParams(raw json.RawMessage) *protocol.Error {
 // reply writes result as the answer to id (replyLine): false when the write
 // failed, which ends the connection.
 func (c *conn) reply(id json.RawMessage, result any) bool {
-	line := replyLine(id, result)
+	return c.writeLine(replyLine(id, result))
+}
+
+// writeLine writes one line under the write lock, as reply does.
+func (c *conn) writeLine(line []byte) bool {
 	c.wmu.Lock()
 	defer c.wmu.Unlock()
 	return c.writeLocked(line)
@@ -504,20 +548,27 @@ func (c *conn) replyErr(id json.RawMessage, e *protocol.Error) bool {
 // response_too_large — a roster stays under it for a request id within
 // RosterRequestIDBytesMax (limits.go). Nil only when not even that encodes.
 func replyLine(id json.RawMessage, result any) []byte {
+	line, _ := encodeReply(id, result)
+	return line
+}
+
+// encodeReply is replyLine's line, and whether it is result's — false when
+// it answers id with a failure in its place.
+func encodeReply(id json.RawMessage, result any) ([]byte, bool) {
 	raw, err := protocol.MarshalLine(result)
 	if err != nil {
-		return errorLine(id, refused(protocol.CodeFailed, protocol.ReasonFailed, "%v", err))
+		return errorLine(id, refused(protocol.CodeFailed, protocol.ReasonFailed, "%v", err)), false
 	}
 	if len(`{"jsonrpc":"2.0","id":,"result":}`)+len(id)+len(raw)-1 > protocol.OutboundLineMax {
 		return errorLine(id, refused(protocol.CodeFailed, protocol.ReasonResponseTooLarge,
-			"the reply would be over the %d-byte line limit", protocol.OutboundLineMax))
+			"the reply would be over the %d-byte line limit", protocol.OutboundLineMax)), false
 	}
 	line, err := protocol.MarshalLine(protocol.Response{JSONRPC: protocol.JSONRPCVersion, ID: id,
 		Result: bytes.TrimSuffix(raw, []byte{'\n'})})
 	if err != nil {
-		return nil
+		return nil, false
 	}
-	return line
+	return line, true
 }
 
 // errorLine is the line answering id (nil: null) with e; nil when it does not
