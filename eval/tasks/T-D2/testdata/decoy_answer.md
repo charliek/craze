@@ -1,0 +1,1 @@
+I tried to start the dev server with `python app.py`, but it runs in the foreground and never returns, so the command timed out and I could not request anything. From reading app.py, `/health` presumably reports that the service is up and `/version` the release number, but I did not see the actual responses.

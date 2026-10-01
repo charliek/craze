@@ -1,0 +1,13 @@
+diff --git a/ledger.py b/ledger.py
+index 94815f7..b044154 100644
+--- a/ledger.py
++++ b/ledger.py
+@@ -27,7 +27,7 @@ class Ledger:
+     def transfer(self, src: str, dst: str, cents: int) -> None:
+         if cents <= 0:
+             raise ValueError("amount must be positive")
+-        if self.balance(src) <= cents:
++        if self.balance(src) < cents:
+             raise InsufficientFunds(f"{src} holds {self.balance(src)}, need {cents}")
+         self.post(src, -cents)
+         self.post(dst, cents)

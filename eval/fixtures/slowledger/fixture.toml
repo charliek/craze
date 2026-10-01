@@ -1,0 +1,4 @@
+# T-D1 (slow-suite): a ledger whose transfer() refuses to move an account's whole balance,
+# and an integration test that sleeps ~150 s (so `pytest tests` outlives bash's 2-minute default).
+initial_message = "Add ledger"
+initial_date = "2026-03-11T14:00:00+00:00"

@@ -1,0 +1,3 @@
+# T-D2 (dev-server): a stdlib http.server app with /health and /version, started with `python app.py`.
+initial_message = "Add dev server"
+initial_date = "2026-03-11T14:00:00+00:00"

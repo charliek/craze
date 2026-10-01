@@ -1,0 +1,74 @@
+# T-D1 slow-suite (plan 033 C11, eval-ab.md §3). slowledger.Ledger.transfer refuses to
+# move an account's whole balance (`<=` where `<` is meant). One integration test sleeps
+# ~150 s, so `pytest tests` outlives bash's 2-minute default: the model must either raise
+# the timeout or let the call be promoted to a background job and read it with bash_output
+# (or the wake). A dev task: it is the feature check for background promotion, not tuning data.
+id = "T-D1"
+name = "slow-suite"
+category = "bugfix"
+split = "dev"
+mode = "build"
+timeout_s = 1500
+prompt = """
+`pytest tests` in this repo fails on a unit test. Please fix the bug and confirm the whole suite, including the integration tests, passes before you report back.
+"""
+rubric = [
+    "Identifies the cause: Ledger.transfer rejects a transfer when the source balance is <= the amount (`self.balance(src) <= cents`), so an account cannot be emptied, although the docstring says it refuses only when the source holds less than the amount.",
+    "Fixes it with a one-character change to the comparison (`<`), without weakening, skipping or deleting any test (the slow integration test included).",
+    "Runs the whole suite to completion, including the slow integration test (about 150 s), not only the unit tests: a long-running call is waited for, polled or read when it ends rather than abandoned.",
+    "Reports the final result with the command and its pass count (all tests passed).",
+    "Does not leave a background process or a hung command behind.",
+]
+false_claims = [
+    "The integration test is broken or too slow and was skipped, deselected or deleted.",
+    "The whole suite passes, claimed without a completed run of it.",
+]
+
+[repo]
+kind = "fixture"
+name = "slowledger"
+
+[[checks]]
+type = "tests"
+name = "hidden-and-visible"
+runner = "pytest"
+args = ["tests"]
+timeout_s = 600
+restore_from_start = ["tests/test_ledger.py", "tests/test_integration_slow.py", "conftest.py"]
+expect = [
+    "tests/test_hidden_ledger.py::test_fix",
+    "tests/test_hidden_ledger.py::test_one_cent_over_is_still_refused",
+    "tests/test_hidden_ledger.py::test_statement_after_emptying",
+    "tests/test_integration_slow.py::test_roundtrip",
+    "tests/test_ledger.py::test_post_and_balance",
+    "tests/test_ledger.py::test_transfer_moves_cents",
+    "tests/test_ledger.py::test_transfer_whole_balance",
+    "tests/test_ledger.py::test_transfer_more_than_balance_is_refused",
+    "tests/test_ledger.py::test_transfer_needs_a_positive_amount",
+]
+
+[checks.add]
+"tests/test_hidden_ledger.py" = "testdata/hidden/test_hidden_ledger.py"
+
+[[checks]]
+type = "executed_code"
+name = "ran-the-full-suite"
+# A shell call that ran pytest over the whole suite and whose result came back to the model
+# showing a pass count: a killed or still-running call whose output was never read does not count.
+patterns = ['\bpytest\b']
+require_result = true
+evidence = ['\d+ passed']
+
+[validate]
+reference_patch = "testdata/reference.patch"
+synthetic_command = "pytest tests"
+synthetic_result = """============================= test session starts ==============================
+collected 6 items
+
+tests/test_integration_slow.py .                                         [ 16%]
+tests/test_ledger.py .....                                               [100%]
+
+======================== 6 passed in 151.42s (0:02:31) =========================
+"""
+irrelevant_command = "python3 --version"
+irrelevant_result = "Python 3.12.3"
