@@ -1455,7 +1455,7 @@ func TestFrameGoldenHelpDialog(t *testing.T) {
 		// Paged to the bottom: the command sections, and the agent's own
 		// commands under their own heading so they cannot read as builtins.
 		{"help-bottom-100x30", 100, 30, "<wait:idle>/help<enter><pgdn><pgdn><pgdn><pgdn>", []string{
-			"commands", "  /model            Switch model", "  /exit             Quit craze",
+			"commands", "  /model            Switch model", "  /exit             End this session",
 			"this session's commands", "  /research         Agent-advertised command", "▲",
 		}},
 		{"help-80x24", 80, 24, "<wait:idle>/help<enter>", []string{"help", "sending and editing"}},

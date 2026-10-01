@@ -765,3 +765,23 @@ func TestHelpAndTheOtherDialogsAreExclusive(t *testing.T) {
 		t.Fatalf("help over /model left dialog=%v filter=%q", back.dialog, back.mdlg.filter.Value())
 	}
 }
+
+// TestHelpDialogDescriptionsFitTheirColumn: at 80x24 no help row description
+// is truncated (clampWidth swaps its tail for "…") or wrapped; the column is the
+// box's inner width less the key gutter.
+func TestHelpDialogDescriptionsFitTheirColumn(t *testing.T) {
+	m := helpModel(t, 80, 24)
+	col := m.lay.Dialog.W - dialogBorder - lipgloss.Width(helpIndent) - helpKeyCol
+	// Two rows already clamp at 80x24 (both sit below the first page, in the
+	// scrolled part); they predate this test and keep their text, so a third
+	// long row fails here instead of passing unnoticed.
+	known := map[string]bool{"↑ ↓": true, "pgup pgdn": true}
+	for _, l := range m.helpLines() {
+		if l.heading() || known[l.key] {
+			continue
+		}
+		if w := lipgloss.Width(l.desc); w > col {
+			t.Errorf("%q: description is %d cells, the column is %d: %q", l.key, w, col, l.desc)
+		}
+	}
+}

@@ -231,8 +231,8 @@ off.
 | `Ctrl+L` | the strong send: on Grok, add the draft to the running turn without cancelling it; on Cursor, cancel the running turn and send (it asks first). On an idle session it is a plain send |
 | `Alt+Enter`, `Ctrl+J` | newline (see below) |
 | `Esc` | answer the card on top; close a dialog (`/help` included); leave the sub-agent view; kill a running `!` command; clear a `!` draft; hide the slash menu or the [`@` file popup](#file-mentions) for the token under the cursor — a second `Esc` then cancels the running turn; otherwise cancel the running turn (the transcript says `cancelled`). An Esc pressed immediately after Enter cancels that turn; craze never writes the cancel ahead of the prompt |
-| `Ctrl+C` | kill a running `!` command, and nothing else — it is the only way to stop one while a card has the keyboard. With none running: cancel the running turn **and everything queued behind it** — the queue, a confirm on screen, a send-now waiting to fire; a second press within one second quits; quits outright when idle or after an error. Inside the sub-agent view it still cancels the **main** turn, and the view stays open |
-| `Ctrl+D` | quit, always |
+| `Ctrl+C` | kill a running `!` command, and nothing else — it is the only way to stop one while a card has the keyboard. With none running: cancel the running turn **and everything queued behind it** — the queue, a confirm on screen, a send-now waiting to fire; a second press within one second ends the session; it ends it outright when idle or after an error. Inside the sub-agent view it still cancels the **main** turn, and the view stays open |
+| `Ctrl+D` | ends the session, always |
 | `Shift+Tab` | cycle the ACP mode (agent / plan / ask); inside the sub-agent view, switch to the previous sub-agent instead |
 | `Ctrl+T`, `/tasks` | tasks panel: compact → expanded → hidden |
 | `Ctrl+G`, `/theme` | theme picker |
@@ -252,7 +252,7 @@ off.
 | `Tab` | with the slash menu open, accept the highlighted row (see [Slash commands](#slash-commands)); with the [`@` file popup](#file-mentions) open, open the highlighted folder or pick the highlighted file; elsewhere a no-op |
 
 `/help` lists the same keys plus every slash command — see
-[Help dialog](#help-dialog). `/exit` quits; there are no bare `q` or `?`
+[Help dialog](#help-dialog). `/exit` ends the session; there are no bare `q` or `?`
 bindings, so a message that starts with either is just a message.
 
 !!! note
@@ -1109,7 +1109,7 @@ skills carry no such restriction; they complete anywhere in the draft.
 | `/ask` | Set ask mode |
 | `/agent` | Set agent mode |
 | `/sessions` | The [session list](#session-list) — listed only when sessions run in detached hosts |
-| `/exit` | Quit craze |
+| `/exit` | End this session |
 
 Matches are prefix hits first, then substring hits, each group kept in the
 catalog's own order, case-insensitive — no fuzzy matching. The band shows up
