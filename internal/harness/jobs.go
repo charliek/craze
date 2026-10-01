@@ -274,7 +274,7 @@ func promotionRead(link *turnLink, id string, seen int64) []jobRead {
 	if seen <= 0 || link == nil {
 		return nil
 	}
-	return []jobRead{{own: owner{turn: link.number, step: stepOfCall(id), call: id, wake: link.wake}, to: seen}}
+	return []jobRead{{own: link.callOwner(id), to: seen}}
 }
 
 // commandLine is a job's command as a compaction's running-tasks list names
@@ -479,7 +479,7 @@ func (r *subagents) jobOutput(ctx context.Context, call tool.JobOutputCall) tool
 	if link == nil {
 		return tool.Result{Text: jobsNoTurn, IsError: true, Class: tool.ClassToolError}
 	}
-	own := owner{turn: link.number, step: stepOfCall(call.CallID), call: call.CallID, wake: link.wake}
+	own := link.callOwner(call.CallID)
 	// A step that stops a job waits for nothing (stopAnnounced): its stop
 	// must not queue behind this call in Fantasy's slots.
 	skipped := call.Wait > 0 && r.stopping(own)
@@ -621,7 +621,7 @@ func (r *subagents) jobStop(ctx context.Context, call tool.JobStopCall) tool.Res
 	if link == nil {
 		return tool.Result{Text: jobsNoTurn, IsError: true, Class: tool.ClassToolError}
 	}
-	own := owner{turn: link.number, step: stepOfCall(call.CallID), call: call.CallID, wake: link.wake}
+	own := link.callOwner(call.CallID)
 	r.regMu.Lock()
 	res := r.results[call.ID]
 	if res == nil || res.kind != kindJob {
@@ -751,25 +751,19 @@ func jobBlock(id, status string, a jobAttrs, text string) string {
 }
 
 // commitReadsLocked commits the reads of turn's calls among calls
-// (commitCalls):
-// each job's cursor moves to the furthest of them, and they are forgotten.
-// regMu is held.
+// (commitCalls): each job's cursor moves to the furthest of them, and they
+// are forgotten. regMu is held.
 func (r *subagents) commitReadsLocked(turn int, calls []string) {
 	for _, res := range r.results {
-		if res.job == nil || len(res.job.reads) == 0 {
-			continue
-		}
-		j := res.job
-		kept := j.reads[:0]
-		for _, rd := range j.reads {
-			switch {
-			case rd.own.turn == turn && slices.Contains(calls, rd.own.call):
+		if j := res.job; j != nil {
+			j.reads = slices.DeleteFunc(j.reads, func(rd jobRead) bool {
+				if rd.own.turn != turn || !slices.Contains(calls, rd.own.call) {
+					return false
+				}
 				j.read = max(j.read, rd.to)
-			default:
-				kept = append(kept, rd)
-			}
+				return true
+			})
 		}
-		j.reads = kept
 	}
 }
 
@@ -777,16 +771,9 @@ func (r *subagents) commitReadsLocked(turn int, calls []string) {
 // (restoreTurn): the next read shows that output again. regMu is held.
 func (r *subagents) forgetReadsLocked(turn int) {
 	for _, res := range r.results {
-		if res.job == nil || len(res.job.reads) == 0 {
-			continue
+		if j := res.job; j != nil {
+			j.reads = slices.DeleteFunc(j.reads, func(rd jobRead) bool { return rd.own.turn == turn })
 		}
-		kept := res.job.reads[:0]
-		for _, rd := range res.job.reads {
-			if rd.own.turn != turn {
-				kept = append(kept, rd)
-			}
-		}
-		res.job.reads = kept
 	}
 }
 

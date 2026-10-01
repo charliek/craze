@@ -439,7 +439,7 @@ func (m Model) subagentSpinnerView() string {
 // or later than this clock's now, is not used.
 func (m Model) spawnStart(info agent.SubagentInfo) time.Time {
 	now := m.now()
-	if bashJobRow(info) && !info.StartedAt.IsZero() && info.StartedAt.Before(now) {
+	if agent.IsBashJob(info) && !info.StartedAt.IsZero() && info.StartedAt.Before(now) {
 		return info.StartedAt
 	}
 	return now
@@ -475,7 +475,7 @@ func (m Model) spinnerElapsed() string {
 		return m.turnElapsed()
 	}
 	for i := range m.snap.Subagents {
-		if s := m.snap.Subagents[i]; subagentRunning(s) && !bashJobRow(s) {
+		if subagentBusy(m.snap.Subagents[i]) {
 			return m.subElapsed(m.snap.Subagents[i])
 		}
 	}

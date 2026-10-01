@@ -584,8 +584,8 @@ func (m *Model) History() History {
 // made, and a trimmed one is dropped from entries by bounds.go). Cut under the
 // lock like State; the caller owns every value, nested fields and all
 // (cloneTool): nothing it writes into one reaches the model. A bash job's
-// scope is left out (jobScope, plan 033 C10r): its running command is no tool
-// of the turn's.
+// scope is left out (agent.IsBashJob, Mirror; plan 033 C10r): its running
+// command is no tool of the turn's.
 func (m *Model) Tools() []agent.ToolEvent {
 	c := m.cut()
 	return c.tools()
@@ -818,14 +818,14 @@ func (c *cut) state() State {
 func (c *cut) tools() []agent.ToolEvent {
 	jobs := map[string]bool{}
 	for _, row := range c.agents {
-		if jobScope(row.info) {
+		if agent.IsBashJob(row.info) {
 			jobs[row.info.ID] = true
 		}
 	}
 	out := appendTools(nil, c.main.entries)
 	for i := range c.subs {
 		if jobs[c.subs[i].id] {
-			continue // a bash job's scope (jobScope)
+			continue // a bash job's scope (Mirror)
 		}
 		out = appendTools(out, c.subs[i].t.entries)
 	}

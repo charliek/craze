@@ -747,7 +747,7 @@ func (r *subagents) output(ctx context.Context, call tool.OutputCall) tool.Resul
 	if link == nil {
 		return tool.Result{Text: subagentNoTurn, IsError: true, Class: tool.ClassToolError}
 	}
-	own := owner{turn: link.number, step: stepOfCall(call.CallID), call: call.CallID, wake: link.wake}
+	own := link.callOwner(call.CallID)
 	// A step that stops a job waits for nothing (stopAnnounced, plan 033
 	// C10r): its bash_stop must not queue behind this call in Fantasy's slots.
 	skipped := call.Wait > 0 && r.stopping(own)

@@ -92,21 +92,18 @@ func (m Model) liveSubIDs() map[string]struct{} {
 // still moves with the slow tick.
 func (m Model) anySubagentRunning() bool {
 	for i := range m.snap.Subagents {
-		if s := m.snap.Subagents[i]; subagentRunning(s) && !bashJobRow(s) {
+		if subagentBusy(m.snap.Subagents[i]) {
 			return true
 		}
 	}
-	if m.tombstone != nil && subagentRunning(*m.tombstone) && !bashJobRow(*m.tombstone) {
-		return true
-	}
-	return false
+	return m.tombstone != nil && subagentBusy(*m.tombstone)
 }
 
-// bashJobRow reports whether s is a native session's background bash job's
-// roster row (plan 033 P12): background, of type agent.BashJobType, which no
-// sub-agent's type can be — persona names are slugs.
-func bashJobRow(s agent.SubagentInfo) bool {
-	return s.Background && s.SubagentType == agent.BashJobType
+// subagentBusy reports whether s is a running row the spinner, its clock and
+// /connect wait for: any running row but a native session's background bash
+// job's (agent.IsBashJob, plan 033 §3.8 "Display").
+func subagentBusy(s agent.SubagentInfo) bool {
+	return subagentRunning(s) && !agent.IsBashJob(s)
 }
 
 func (m Model) viewedInfo() (agent.SubagentInfo, bool) {

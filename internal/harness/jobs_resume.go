@@ -29,11 +29,11 @@ import (
 // job wrote from its first byte to its end; a receipt that named none — the
 // file could not be opened — gives a notice that says so.
 //
-// set aside as a suspended result (restoreJobs): it wakes nothing and keeps no
-// host alive, and the first turn a person starts takes it at its step 0, as it
-// takes a result a failed wake set aside; bash_output or bash_stop naming it
-// deliver it too. It is never running — it has no handle — so a stop, the
-// stop key's included, finds nothing to stop.
+// Each such block is set aside as a suspended result (restoreJobs): it wakes
+// nothing and keeps no host alive, and the first turn a person starts takes it
+// at its step 0, as it takes a result a failed wake set aside; bash_output or
+// bash_stop naming it deliver it too. It is never running — it has no handle —
+// so a stop, the stop key's included, finds nothing to stop.
 //
 // # The scan (jobScan)
 //

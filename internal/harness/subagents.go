@@ -276,6 +276,16 @@ type turnLink struct {
 	wake   bool
 }
 
+// callOwner is the owner of what the call id — a harness id,
+// "t<turn>.<step>.<n>" — reserves or reads in this turn: its step, whose
+// append commits it, and the call itself, whose own result part in that
+// append is what commits it (commitCalls). agent_output's reservations,
+// bash_output's and bash_stop's, and a promotion receipt's read (plan 033
+// §3.8) are all owned so.
+func (l *turnLink) callOwner(id string) owner {
+	return owner{turn: l.number, step: stepOfCall(id), call: id, wake: l.wake}
+}
+
 // childHandle is one registered child: what Close and SetMode reach it by.
 type childHandle struct {
 	id string

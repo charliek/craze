@@ -166,7 +166,7 @@ func (m Model) spinnerActivity() string {
 	if m.status != statusWorking {
 		running := 0
 		for i := range m.snap.Subagents {
-			if s := m.snap.Subagents[i]; subagentRunning(s) && !bashJobRow(s) {
+			if subagentBusy(m.snap.Subagents[i]) {
 				running++
 			}
 		}

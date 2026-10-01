@@ -69,9 +69,18 @@ import (
 // BashJobType is a background bash job's SubagentType on its roster row (plan
 // 033 P12): the harness's tool.JobType. Persona and agent-type names are
 // slugs, so no sub-agent's type can be spelled with a space, and a client tells
-// a job's row from a child's by it — the TUI's spinner and /connect's busy
-// check ignore a running job (internal/tui's bashJobRow).
+// a job's row from a child's by it (IsBashJob).
 const BashJobType = tool.JobType
+
+// IsBashJob reports whether the roster row info is a background bash job's
+// (P12): background, of type BashJobType, which no sub-agent's type can be.
+// The one test a client tells a job's row by: the TUI's spinner, its clock
+// and /connect's busy check leave a running job out (internal/tui's
+// subagentBusy), and so do the transcript's ordered tools, a job's scope
+// (internal/transcript's Mirror).
+func IsBashJob(info SubagentInfo) bool {
+	return info.Background && info.SubagentType == BashJobType
+}
 
 // jobStarted is a job starting: its roster row, EventSubagent{spawned}, the
 // barrier, and its one execute row opened in its own tool set — and nothing
@@ -97,20 +106,7 @@ func (s *nativeSession) jobStarted(e harness.JobStarted) {
 	// The set before the row exists for anyone: the job's goroutine sends
 	// nothing before this returns (the harness gates it on JobStarted).
 	s.openChildTools(e.ID)
-
-	s.rosterMu.Lock()
-	if s.roster == nil {
-		s.roster = map[string]*nativeChild{}
-	}
-	if _, again := s.roster[e.ID]; !again {
-		s.rosterOrder = append(s.rosterOrder, e.ID)
-	}
-	row := &nativeChild{info: info}
-	s.roster[e.ID] = row
-	safeSubagent(&row.info, safe)
-	s.enqueueRosterLocked(SubagentChangeSpawned, row.info)
-	s.rosterMu.Unlock()
-	s.flushRoster()
+	s.spawnRow(info, safe)
 
 	// The view's one row: the command as a foreground bash call's row draws
 	// it (its title and its raw input), published directly once spawned has
@@ -158,11 +154,11 @@ func (s *nativeSession) jobFinished(e harness.JobFinished) {
 		return
 	}
 	safe := nativeSafe{red: s.redactor()}
-	status, settled := jobRowStatus(e)
+	status := jobRowStatus(e)
 	out := safe.text(e.Output)
 
 	s.publishTool(e.ID, e.ID, func(t *ToolEvent) {
-		t.Status = settled
+		t.Status = rowToolStatus(status)
 		o := ToolOutput{}
 		if t.Output != nil {
 			o = *t.Output // what progress kept
@@ -208,19 +204,19 @@ func (s *nativeSession) jobFinished(e harness.JobFinished) {
 	s.flushRoster()
 }
 
-// jobRowStatus is a finished job's roster status and its execute row's (the
-// file's "Statuses").
-func jobRowStatus(e harness.JobFinished) (SubagentStatus, string) {
+// jobRowStatus is a finished job's roster status (the file's "Statuses"); its
+// execute row settles to the matching tool status (rowToolStatus).
+func jobRowStatus(e harness.JobFinished) SubagentStatus {
 	switch e.Status {
 	case tool.JobExited:
 		if e.ExitCode == 0 {
-			return SubagentCompleted, toolCompleted
+			return SubagentCompleted
 		}
-		return SubagentFailed, toolFailed
+		return SubagentFailed
 	case tool.JobStopped, tool.JobTimedOut:
-		return SubagentCancelled, toolCancelled
+		return SubagentCancelled
 	}
-	return SubagentFailed, toolFailed
+	return SubagentFailed
 }
 
 // jobDescription is a job's row label: the command's first line that holds

@@ -143,7 +143,8 @@ func TestBashJobRowCountsFromItsCommand(t *testing.T) {
 // command, folded as its own scope's execute row, is neither counted in status
 // row 2's in-flight work nor named by the working line, during a turn that is
 // working; a background sub-agent's running command beside it is both, the
-// control. Both read the fold's ordered tools (transcript's jobScope).
+// control. Both read the fold's ordered tools (agent.IsBashJob, transcript's
+// Mirror).
 func TestBashJobsToolsAreNotCounted(t *testing.T) {
 	kid := stopKid("kid-1", "scan", agent.SubagentRunning)
 	kid.Background = true

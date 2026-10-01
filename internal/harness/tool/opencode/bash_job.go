@@ -37,7 +37,7 @@ import (
 // clean-up). The job's own Wait is the foreground's end, under the job's
 // context and limit: a second supervise that takes up the group where the
 // first stopped, then the same collect, close of the stages, finish and spill
-// wait, and the pipe's close.
+// wait (ended), and the pipe's close.
 //
 // # The texts (§3.7, exact modulo values)
 //
@@ -77,28 +77,9 @@ func (j *bashJob) Wait(ctx context.Context, limit time.Duration, progress tool.P
 	defer j.untrack() // however Wait returns: a panic the harness recovers included
 	stopProgress := j.out.report(progress)
 	why, reaped := j.g.supervise(ctx, j.closing, limit, nil, j.copied, nil)
-	returned, complete := collect(j.r, j.copied, &j.copyErr)
-	stopProgress()
-	if returned {
-		_ = j.stream.Close()
-	}
-	kept, cut, trunc, capped, spill := j.out.finish()
-	if spill != nil {
-		wait := spillWait
-		if tool.SessionClosing(ctx, j.closing) {
-			wait = 0 // nobody will read this result; the session must close
-		}
-		if path := spill.wait(wait, j.closing); cut {
-			trunc.Spill = path
-		}
-	}
+	o := j.ended(ctx, why, reaped, stopProgress)
 	_ = j.r.Close()
-	var state *os.ProcessState
-	if reaped {
-		state = j.g.state
-	}
-	return j.c.jobEnd(outcome{why: why, state: state, kept: kept, cut: cut, trunc: trunc,
-		capped: capped && trunc.Spill != "", partial: !complete, took: time.Since(j.began)})
+	return j.c.jobEnd(o)
 }
 
 // jobEnd is how a job ended (tool.JobEnd): its status from how supervise

@@ -62,10 +62,7 @@ func (c *bashStopCall) Request() tool.Request {
 // Run hands the call to the session's jobs, as bash_output's does.
 func (c *bashStopCall) Run(ctx context.Context, env tool.Env) tool.Result {
 	if env.Jobs == nil {
-		if ctx.Err() != nil {
-			return aborted()
-		}
-		return tool.Result{Text: noJobsText, IsError: true, Class: tool.ClassToolError}
+		return noJobs(ctx)
 	}
 	return env.Jobs.Stop(ctx, c.call)
 }

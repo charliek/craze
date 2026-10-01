@@ -104,13 +104,10 @@ func (r *Replacer) empty() bool { return r == nil || len(r.keys) == 0 }
 // the same set.
 func (r *Replacer) Union(o *Replacer) *Replacer {
 	switch {
+	case r != nil && r.covers(o):
+		return r // the same keys or more: keep the one the caller has
 	case o.covers(r):
-		if r.covers(o) && r != nil {
-			return r // the same keys: keep the one the caller has
-		}
 		return o
-	case r.covers(o):
-		return r
 	}
 	return New(append(slices.Clone(r.keys), o.keys...)...)
 }

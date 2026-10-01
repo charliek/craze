@@ -102,15 +102,20 @@ func (c *bashOutputCall) Request() tool.Request {
 // no jobs answers here: it started none.
 func (c *bashOutputCall) Run(ctx context.Context, env tool.Env) tool.Result {
 	if env.Jobs == nil {
-		if ctx.Err() != nil {
-			return aborted()
-		}
-		return tool.Result{Text: noJobsText, IsError: true, Class: tool.ClassToolError}
+		return noJobs(ctx)
 	}
 	return env.Jobs.Output(ctx, c.call)
 }
 
-// noJobsText answers a job tool's call in a session that runs no background
-// jobs (Env.Jobs nil): headless, or a sub-agent's, neither of which is
-// offered the tools — a defence, not a path.
+// noJobs answers a job tool's call in a session that runs no background jobs
+// (Env.Jobs nil): headless, or a sub-agent's, neither of which is offered the
+// tools — a defence, not a path. A cancelled call is aborted.
+func noJobs(ctx context.Context) tool.Result {
+	if ctx.Err() != nil {
+		return aborted()
+	}
+	return tool.Result{Text: noJobsText, IsError: true, Class: tool.ClassToolError}
+}
+
+// noJobsText is noJobs' answer.
 const noJobsText = "This session runs no background jobs."

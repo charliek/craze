@@ -217,11 +217,9 @@ func (b *bashTool) Prepare(env tool.Env, c tool.Call) (tool.Prepared, error) {
 	}
 	// run_in_background is a boolean, null or absent being false, and
 	// anything else refused, as the agent tool reads its own.
-	var background bool
-	if raw, present := a["run_in_background"]; !present || jsonType(raw) != "null" {
-		if background, _, err = a.boolean("run_in_background"); err != nil {
-			return nil, err
-		}
+	background, _, err := a.boolOrNull("run_in_background")
+	if err != nil {
+		return nil, err
 	}
 	call := &bashCall{host: b.host, id: c.ID, command: command, dir: env.Workspace, timeout: defaultTimeout,
 		ops: realOps, spillCap: maxSpillBytes}
@@ -406,20 +404,34 @@ func (c *bashCall) supervised(ctx context.Context, env tool.Env, j *bashJob, dea
 		stopProgress()
 		return c.promote(env, j, slot, &handed)
 	}
+	o := j.ended(ctx, why, reaped, stopProgress)
+	o.refused = refused
+	return c.result(o)
+}
+
+// ended is what a command left once supervise has returned why and reaped —
+// in the foreground (supervised) or as a job (bashJob.Wait), the same steps:
+// the reader collected, the progress stopped, the bytes the stream's stages
+// held back written out now that it has ended, the output finished and the
+// spill file waited for — not at all once the session is closing, since
+// nobody will read the result and the session must close — and the leader's
+// exit status when it was reaped. It does not close the pipe: its caller
+// does.
+func (j *bashJob) ended(ctx context.Context, why ending, reaped bool, stopProgress func()) outcome {
 	returned, complete := collect(j.r, j.copied, &j.copyErr)
 	stopProgress()
 	if returned {
-		_ = j.stream.Close() // the bytes its stages held back, now that the stream has ended
+		_ = j.stream.Close()
 	}
 	took := time.Since(j.began)
 
 	kept, cut, trunc, capped, spill := j.out.finish()
 	if spill != nil {
 		wait := spillWait
-		if tool.SessionClosing(ctx, env.Closing) {
-			wait = 0 // nobody will read this result; the session must close
+		if tool.SessionClosing(ctx, j.closing) {
+			wait = 0
 		}
-		if path := spill.wait(wait, env.Closing); cut {
+		if path := spill.wait(wait, j.closing); cut {
 			trunc.Spill = path
 		}
 	}
@@ -427,8 +439,8 @@ func (c *bashCall) supervised(ctx context.Context, env tool.Env, j *bashJob, dea
 	if reaped {
 		state = j.g.state
 	}
-	return c.result(outcome{why: why, state: state, kept: kept, cut: cut, trunc: trunc,
-		capped: capped && trunc.Spill != "", partial: !complete, took: took, refused: refused})
+	return outcome{why: why, state: state, kept: kept, cut: cut, trunc: trunc,
+		capped: capped && trunc.Spill != "", partial: !complete, took: took}
 }
 
 // attach starts reading a started command's output: the pipe's read end r,
