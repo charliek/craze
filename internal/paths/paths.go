@@ -19,13 +19,15 @@ const (
 	crazeHomeEnv = "CRAZE_HOME"
 	// crazeDirName is the craze directory's name under the home directory.
 	crazeDirName = ".craze"
-	// configName, sessionsName, nativeName and journalName are fixed names
-	// inside the craze directory: the config file, the session index next
-	// to it, the native harness's directory, and the session journals'.
-	configName   = "config.toml"
-	sessionsName = "sessions.jsonl"
-	nativeName   = "native"
-	journalName  = "journal"
+	// configName, sessionsName, nativeName, journalName and attachmentsName
+	// are fixed names inside the craze directory: the config file, the
+	// session index next to it, the native harness's directory, the session
+	// journals', and the attachments directory pasted images are kept in.
+	configName      = "config.toml"
+	sessionsName    = "sessions.jsonl"
+	nativeName      = "native"
+	journalName     = "journal"
+	attachmentsName = "attachments"
 
 	// removedConfigEnv named the config *file* before CRAZE_HOME replaced it.
 	// It is kept only as a tripwire (tripped, CheckEnv): a script or test
@@ -103,6 +105,20 @@ func NativeDir() string {
 // and the caller then journals nothing.
 func JournalDir() string {
 	return absInCrazeDir(journalName)
+}
+
+// AttachmentsDir is where the TUI keeps the processed copy of every image
+// pasted into the composer, and where the host reads them back from when it
+// sends a message that names them (plan 033 §3.1–§3.2; the directory's rules —
+// 0700, 0600 files, the confined read, the sweeps — are
+// internal/harness/tool/attach's). It is absolute even when CRAZE_HOME is
+// relative, for two reasons: an envelope carries absolute paths, which the
+// host checks are directly inside this directory, so both sides must name it
+// the same way whatever their working directories; and it is NativeDir's
+// reason too, since a session is handed it once. "" when CrazeDir is "" or
+// the working directory cannot be read: nothing is pasted as an image then.
+func AttachmentsDir() string {
+	return absInCrazeDir(attachmentsName)
 }
 
 // expandTilde cleans dir, first replacing a leading "~" or "~/" with the home

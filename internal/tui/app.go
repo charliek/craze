@@ -1731,6 +1731,7 @@ type Result struct {
 // (§3.7.3), or p.Run's own error.
 func Run(cfg Config) (Result, error) {
 	cfg = cfg.viewing()
+	sweepAttachmentsAtStart()
 	m := New(cfg)
 	// One writer for the whole session: bubbletea's frames and the OSC 52 copy
 	// are written from different goroutines, and a copy landing inside a frame
