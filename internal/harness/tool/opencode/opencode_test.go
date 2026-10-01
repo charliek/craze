@@ -404,6 +404,13 @@ func TestDescriptions(t *testing.T) {
 		{"bash", "", "commands will time out after 120000ms.",
 			" The timeout cannot exceed 600000ms (10 minutes); a longer timeout is reduced to 600000ms.\n" +
 				"  - When the command returns, every process still in its process group is killed, so nothing it runs in the background (for example, with `&` or `nohup`) outlives the call; a process that starts its own session or process group (setsid, setpgid, `set -m`) escapes this.\n"},
+		// plan 033 §3.6: the shell does not persist, and a command has no
+		// terminal.
+		{"bash", "persistent shell session", "Executes a given bash command with optional timeout, ensuring proper handling and security measures.",
+			"security measures. Each call runs in a fresh shell; the working directory does not persist.\n"},
+		{"bash", "", "(setsid, setpgid, `set -m`) escapes this.\n",
+			"escapes this.\n  - Commands run with no terminal: editors and pagers do not open, `git commit` needs `-m`, and colour is off.\n" +
+				"  - If the output exceeds 2000 lines"},
 	}
 	for _, e := range edits {
 		d := rendered[e.file]

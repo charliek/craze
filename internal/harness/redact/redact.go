@@ -158,7 +158,9 @@ var ErrClosed = errors.New("redact: write after close")
 //
 // There is no Flush: writing the held-back bytes before the stream ends
 // could emit the first half of a key. A bash tool's progress snapshots
-// therefore lag the command's output by at most that many bytes.
+// therefore lag the command's output by at most that many bytes for each
+// Writer the output passes through (bash has two, around its escape-sequence
+// stripper).
 type Writer struct {
 	r      *Replacer
 	w      io.Writer

@@ -39,9 +39,10 @@ import (
 //     kills whatever it goes on to start.
 //   - The watcher (group.watch, process.go): waits on the leader with waitid
 //     and wait4, and on the release channel supervise closes. No filesystem.
-//   - The reader: io.Copy from the pipe through the redaction writer into
-//     output.Write. It blocks on the pipe, which collect closes, and on
-//     output.mu and spiller.mu, both held for memory work only. No filesystem.
+//   - The reader: io.Copy from the pipe through the redaction writers and the
+//     escape-sequence stripper (modelStream, ansi.go) into output.Write. It
+//     blocks on the pipe, which collect closes, and on output.mu and
+//     spiller.mu, both held for memory work only. No filesystem.
 //   - The progress goroutine (output.report): takes output.mu for a snapshot,
 //     releases it, then delivers to the consumer. No filesystem.
 //   - The spill writer (spiller.run): the one goroutine that touches the spill
@@ -101,8 +102,8 @@ const (
 //
 // A reader that has not returned readerWait after that — it cannot block on
 // anything but the pipe, so this does not happen — is abandoned: its
-// goroutine may leak, and the bytes its redaction writer held back are lost
-// with it. Either way the result then says the output may be incomplete.
+// goroutine may leak, and the bytes its stream held back (modelStream) are
+// lost with it. Either way the result then says the output may be incomplete.
 func collect(r *os.File, copied <-chan struct{}, copyErr *error) (returned, complete bool) {
 	_ = r.SetReadDeadline(time.Now().Add(flushWait)) // an error leaves the timer below
 	wait := time.NewTimer(flushWait + readerWait)
@@ -140,8 +141,8 @@ func openSpill(home, id string) (spillFile, error) {
 	return f, nil
 }
 
-// output is a command's merged stdout and stderr, redacted before it
-// arrives: the last tailBytes of it in memory, and — once there is more than
+// output is a command's merged stdout and stderr, redacted and stripped of
+// escape sequences before it arrives: the last tailBytes of it in memory, and — once there is more than
 // the model is shown — all of it, up to the cap, in a spill file that a
 // goroutine of its own writes (spiller). Writing to it never waits on a
 // file, so the reader always empties the pipe. The reader writes it and the

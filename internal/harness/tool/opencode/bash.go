@@ -295,13 +295,15 @@ func (c *bashCall) Run(ctx context.Context, env tool.Env) tool.Result {
 	defer func() { _ = r.Close() }()
 
 	out := &output{home: env.Home, id: c.id, open: c.ops.openSpill, cap: c.spillCap}
-	// The redactor sees the output before anything else does, so the tail,
-	// every progress snapshot and the spill file hold only its redacted form
-	// (plan 019 §3.8). It holds back a key's length less one byte, so a key
-	// split across two reads of the pipe is still caught. Nothing the reader
-	// writes to waits on a file: the spill file is written by a goroutine of
-	// its own (spiller), so the reader always empties the pipe.
-	stream := env.Redactor.NewWriter(out)
+	// The redactor and the escape-sequence stripper see the output before
+	// anything else does (modelStream, ansi.go), so the tail, every progress
+	// snapshot and the spill file hold only its redacted, stripped form (plan
+	// 019 §3.8, plan 033 §3.6). The redactor holds back a key's length less
+	// one byte, so a key split across two reads of the pipe is still caught,
+	// and the stripper carries an escape sequence the same way. Nothing the
+	// reader writes to waits on a file: the spill file is written by a
+	// goroutine of its own (spiller), so the reader always empties the pipe.
+	stream := newModelStream(env.Redactor, out)
 	copied := make(chan struct{})
 	var copyErr error // set before copied closes
 	go func() {
@@ -314,7 +316,7 @@ func (c *bashCall) Run(ctx context.Context, env tool.Env) tool.Result {
 	returned, complete := collect(r, copied, &copyErr)
 	stopProgress()
 	if returned {
-		_ = stream.Close() // the bytes it held back, now that the stream has ended
+		_ = stream.Close() // the bytes its stages held back, now that the stream has ended
 	}
 	took := time.Since(began)
 
@@ -514,11 +516,48 @@ func (c *bashCall) start(env tool.Env, hold *readEnd) (*group, *os.File, error) 
 // builds with tool.ChildEnviron so that craze's own provider keys are gone
 // (plan 019 §3.8), less every OPENAI_* variable once more in case a caller
 // did not, and with PWD set to the working directory, as exec.Cmd does
-// itself only when it builds the environment. Run refuses a nil
-// env.Environ before it gets here: this tool cannot know which variables
+// itself only when it builds the environment; then noPrompt. Run refuses a
+// nil env.Environ before it gets here: this tool cannot know which variables
 // hold provider keys, so it never falls back to craze's own environment.
+//
+// noPrompt comes last so that it overrides: exec.Cmd keeps the last value of
+// a name it finds twice, so the user's PAGER or EDITOR never reaches the
+// command. ripgrep (grep and glob) runs with this environment too, where
+// none of it changes anything: rg writes JSON or NUL-separated paths to a
+// pipe.
 func environ(env tool.Env, dir string) []string {
-	return append(tool.ChildEnviron(env.Environ, nil), "PWD="+dir)
+	return append(append(tool.ChildEnviron(env.Environ, nil), "PWD="+dir), noPrompt...)
+}
+
+// noPrompt is the environment that keeps a command from waiting on a
+// terminal it does not have (plan 033 §3.6). A command runs with no
+// controlling terminal and stdin on /dev/null (start), so anything that asks
+// for input fails or, worse, waits for the timeout; these make the usual
+// askers not ask:
+//
+//   - pagers are cat, or none where an empty value means none (AWS, systemd);
+//   - editors are true, which exits at once and leaves the file as it was —
+//     so `git commit` without -m aborts on its empty message, `git rebase -i`
+//     takes its plan as written, and a merge keeps its default message;
+//   - git and ssh never prompt for a password or passphrase, on the terminal
+//     (GIT_TERMINAL_PROMPT=0) or through a graphical askpass, which ssh
+//     would otherwise run under a desktop session (SSH_ASKPASS_REQUIRE=never;
+//     an empty GIT_ASKPASS ends git's search for one);
+//   - apt and dpkg do not ask (DEBIAN_FRONTEND);
+//   - the terminal is dumb and colour is off, for the commands that honour
+//     one of these three conventions — the escape sequences of the rest are
+//     stripped from the output (ansi.go);
+//   - CRAZE_AGENT=1 tells a script it runs under craze's agent.
+//
+// The description tells the model the result: no terminal, editors and
+// pagers do not open, `git commit` needs -m, colour is off
+// (descriptions/bash.txt).
+var noPrompt = []string{
+	"PAGER=cat", "GIT_PAGER=cat", "MANPAGER=cat", "GH_PAGER=cat", "AWS_PAGER=", "SYSTEMD_PAGER=",
+	"GIT_EDITOR=true", "GIT_SEQUENCE_EDITOR=true", "EDITOR=true", "VISUAL=true",
+	"GIT_TERMINAL_PROMPT=0", "GIT_ASKPASS=", "SSH_ASKPASS=", "SSH_ASKPASS_REQUIRE=never",
+	"DEBIAN_FRONTEND=noninteractive", "TERM=dumb", "NO_COLOR=1", "FORCE_COLOR=0", "CLICOLOR=0",
+	"CRAZE_AGENT=1",
 }
 
 // checkWorkdir refuses a working directory that does not exist or is not a
