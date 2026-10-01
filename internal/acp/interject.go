@@ -3,6 +3,7 @@ package acp
 import (
 	"context"
 	"fmt"
+	"slices"
 )
 
 // interjectSeenCap bounds the interjection dedup set. Ids arrive in wire
@@ -155,24 +156,21 @@ func (c *Client) handleQueueChanged(msg *Message) {
 // An id learned is the prompt heard: grok has taken it into its queue, so a
 // refusal behind it is not one the prompt can be resent after (plan 033 C3r).
 //
-// The image resend's block 1 is the refused attempt's, and that attempt's id
-// was never learned (or it would have been heard, and not resent), so neither
-// retirement nor the text tells the two apart. The resend learns its id only
-// from a broadcast read after its own bytes were written (resendWritten) —
-// grok cannot name a prompt it has not read — and never an id grok named
-// before that write (queueNamed): a broadcast still listing the refused
-// attempt, however late, cannot then hand the resend that attempt's id, whose
-// completion would end the resend while it runs (plan 033 C6r, r2 #1a).
+// The image resend learns nothing here. Its block 1 is the refused attempt's,
+// and that attempt's id was never learned (or it would have been heard, and
+// not resent), so neither retirement nor the text tells a broadcast naming
+// the attempt from one naming the resend — and grok may first name the
+// attempt late, after the resend's bytes are out. An id learned from it could
+// be the attempt's, whose completion would then end the resend while it ran;
+// the resend's RPC reply ends it instead, and the ids grok named meanwhile are
+// retired with it (queueNamed; plan 033 C6r2, r4 #2, superseding C6r's
+// learn-after-the-write rule).
 func (c *Client) learnPromptIDLocked(n QueueChanged) {
-	if !c.inPrompt || c.promptID != "" || c.promptText == "" {
-		return
-	}
-	if c.resending && (!c.resendWritten || c.queueNamedFull) {
+	if !c.inPrompt || c.resending || c.promptID != "" || c.promptText == "" {
 		return
 	}
 	names := func(id, text string) bool {
 		return id != "" && !IsInterjectFallback(id) && !c.retiredLocked(id) &&
-			(!c.resending || !c.queueNamedLocked(id)) &&
 			(text == c.promptText || text == c.promptJoined)
 	}
 	for _, e := range n.Entries {
@@ -188,26 +186,19 @@ func (c *Client) learnPromptIDLocked(n QueueChanged) {
 	}
 }
 
-// queueNamedCap bounds queueNamed. grok's queue holds the prompt in flight and
-// the odd interject fallback; a set this size between two prompts is not one
-// any agent sends, and past it a resend learns nothing (its reply ends it).
-const queueNamedCap = 64
+// queueNamedCap bounds queueNamed at what retired can hold: grok's queue holds
+// the prompt in flight, so between a refused attempt and the end of its resend
+// it names that attempt and the resend, and past retiredCap ids retiring more
+// would only push the first ones out again.
+const queueNamedCap = retiredCap
 
 // noteQueueNamedLocked records every promptId a broadcast names, queued or
-// running, in queueNamed — but nothing once a resend's bytes are out: a
-// broadcast read after the write may name the resend itself, the one id it
-// must stay free to learn. Ids named before the write stay in, however the
-// broadcasts after it change.
+// running, in queueNamed, the first queueNamedCap of them. An interject
+// fallback's id is left out: no completion naming one ever settles a prompt of
+// craze's (settlesLocked), so it needs no retiring.
 func (c *Client) noteQueueNamedLocked(n QueueChanged) {
-	if c.resending && c.resendWritten {
-		return
-	}
 	add := func(id string) {
-		if id == "" || c.queueNamedLocked(id) {
-			return
-		}
-		if len(c.queueNamed) == queueNamedCap {
-			c.queueNamedFull = true
+		if id == "" || IsInterjectFallback(id) || len(c.queueNamed) == queueNamedCap || slices.Contains(c.queueNamed, id) {
 			return
 		}
 		c.queueNamed = append(c.queueNamed, id)
@@ -218,15 +209,12 @@ func (c *Client) noteQueueNamedLocked(n QueueChanged) {
 	add(n.RunningPromptID)
 }
 
-// queueNamedLocked reports whether grok's queue named id since the last
-// prompt that was not a resend opened (queueNamed).
-func (c *Client) queueNamedLocked(id string) bool {
-	for _, q := range c.queueNamed {
-		if q == id {
-			return true
-		}
+// retireQueueNamedLocked retires every id in queueNamed (retireLocked): what
+// an image resend leaves behind when it ends (plan 033 C6r2, r4 #2).
+func (c *Client) retireQueueNamedLocked() {
+	for _, id := range c.queueNamed {
+		c.retireLocked(id)
 	}
-	return false
 }
 
 // trackForeignLocked turns the broadcast's running id into foreign-turn

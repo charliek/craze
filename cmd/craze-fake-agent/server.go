@@ -708,6 +708,8 @@ func (s *server) handlePrompt(msg *acp.Message) {
 		s.promptDump(msg.ID, msg.Params, n)
 	case "reject-image":
 		s.rejectImage(msg.ID, msg.Params, n)
+	case "grok-reject-image":
+		s.grokRejectImage(msg.ID, msg.Params, n)
 	default:
 		s.echo(msg.ID, text)
 	}

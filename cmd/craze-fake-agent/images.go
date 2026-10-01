@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -130,6 +131,53 @@ func (s *server) rejectImage(id json.RawMessage, params json.RawMessage, n int) 
 		Message: "Invalid params",
 		Data:    json.RawMessage(`"image content is not supported"`),
 	})
+}
+
+// grokRejectImage is reject-image over the grok dialect (craze plan 033 C6r2,
+// r4 #2): a prompt carrying an image block is refused -32602 before anything
+// else, as reject-image refuses it. The resend that follows — its images as
+// path text — gets the bookkeeping r4 #2 is about first, as grok might send
+// it once the resend is on the wire: a queue/changed naming the refused prompt
+// alone (p-<n-1>), by the block 1 the resend repeats, and that prompt's
+// prompt_complete, cancelled. Then the resend is answered as grok answers a
+// prompt: its own queue entry, running (p-<n>), its dump as one message
+// chunk, its prompt_complete and the RPC reply carrying its promptId. A client
+// that took the first broadcast for the resend's ends it on the refused
+// prompt's completion, cancelled, without its dump.
+func (s *server) grokRejectImage(id json.RawMessage, params json.RawMessage, n int) {
+	blocks := dumpBlocks(params)
+	if hasImage(blocks) {
+		_ = s.conn.ReplyErr(id, &acp.RPCError{
+			Code:    acp.CodeInvalidParams,
+			Message: "Invalid params",
+			Data:    json.RawMessage(`"image content is not supported"`),
+		})
+		return
+	}
+	sid := s.mainID()
+	refused, own := fmt.Sprintf("p-%d", n-1), fmt.Sprintf("p-%d", n)
+	// Block 1, the draft: what grok 1.0.30 names a prompt by.
+	var text string
+	if len(blocks) > 0 {
+		text = blocks[0].Text
+	}
+	ctx := context.Background()
+	_ = s.conn.Notify(ctx, acp.MethodGrokQueueChangedWrapped, map[string]any{
+		"sessionId": sid,
+		"entries":   []map[string]any{{"id": refused, "version": 0, "kind": "prompt", "text": text, "position": 0}},
+	})
+	_ = s.conn.Notify(ctx, acp.MethodGrokPromptComplete, map[string]any{
+		"sessionId": sid, "promptId": refused, "stopReason": acp.StopCancelled,
+	})
+	_ = s.conn.Notify(ctx, acp.MethodGrokQueueChangedWrapped, map[string]any{
+		"sessionId": sid, "entries": []map[string]any{},
+		"runningPromptId": own, "runningText": text, "runningKind": "prompt",
+	})
+	s.say(dumpReply(n, blocks))
+	_ = s.conn.Notify(ctx, acp.MethodGrokPromptComplete, map[string]any{
+		"sessionId": sid, "promptId": own, "stopReason": acp.StopEndTurn,
+	})
+	s.reply(id, map[string]any{"stopReason": acp.StopEndTurn, "_meta": map[string]any{"promptId": own}})
 }
 
 // dumpPromptFile is CRAZE_FAKE_DUMP_PROMPTS: every session/prompt's blocks

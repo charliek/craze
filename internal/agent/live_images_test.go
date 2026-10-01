@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"charm.land/fantasy"
 	"github.com/charliek/craze/internal/acp"
@@ -370,6 +371,45 @@ func TestRejectImageIsResentOnceWithPathText(t *testing.T) {
 	resends := diags(lines, diagImageResend)
 	if len(resends) != 1 || resends[0]["images"] != float64(1) || !strings.Contains(fmt.Sprint(resends[0]["refusal"]), "-32602") {
 		t.Fatalf("image_resend diags %v", resends)
+	}
+}
+
+// TestAGrokResendEndsOnItsReply is the image resend on grok's fake (plan 033
+// C6r2, r4 #2): grok-reject-image refuses the image block, and the path-text
+// resend first gets a queue/changed naming the refused prompt alone, by the
+// block 1 the resend repeats, and that prompt's cancelled completion — then
+// its own queue entry, its dump, its completion and its reply. The resend
+// learns no id from the queue and no completion ends it, so the turn ends on
+// its reply, promptly: the answer is the resend's dump and its end_turn, with
+// no error.
+func TestAGrokResendEndsOnItsReply(t *testing.T) {
+	imageHome(t)
+	t.Setenv("XAI_API_KEY", "")
+	t.Setenv("GROK_CODE_XAI_API_KEY", "")
+	dump := promptDumpFile(t)
+	ref, _ := savedImage(t, 1, 40, 30)
+	p := GrokProvider()
+	s := startScriptOpts(t, "grok-reject-image", Options{Force: true, Provider: &p})
+	log := collect(t, s)
+	// A watchdog, not a schedule: the reply follows the resend's completion
+	// at once.
+	ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
+	defer cancel()
+	res, err := s.Prompt(ctx, AttachmentBlock([]AttachmentRef{ref})+"look at [Image #1]")
+	if err != nil || res.StopReason != acp.StopEndTurn {
+		t.Fatalf("Prompt = %+v, %v; want the resend's own end_turn", res, err)
+	}
+	prompts := dumpedPrompts(t, dump)
+	if len(prompts) != 2 || blockTypes(prompts[0]) != "text,image" || blockTypes(prompts[1]) != "text,text" {
+		t.Fatalf("the agent read %d prompts (%v), want the refused one and its path-text resend", len(prompts), prompts)
+	}
+	log.waitType(t, EventDone)
+	evs := log.snapshot()
+	if reply := texts(evs); !strings.HasPrefix(reply, "prompt 2: 2 blocks\n") {
+		t.Fatalf("the turn's answer is %q, want the resend's", reply)
+	}
+	if errs := eventsOf(evs, EventError); len(errs) != 0 {
+		t.Fatalf("error events %+v", errs)
 	}
 }
 

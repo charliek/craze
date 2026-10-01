@@ -141,6 +141,12 @@ Flags:
           reject-image a prompt carrying an image block is refused -32602
                       (after one message chunk when its text holds SAY-FIRST);
                       any other prompt is answered as prompt-dump answers
+          grok-reject-image the same refusal over the grok dialect; the
+                      resend that follows it first gets a queue/changed naming
+                      the refused prompt (p-<n-1>) alone, by the resend's
+                      block 1, and that prompt's prompt_complete (cancelled),
+                      then its own queue entry, dump, prompt_complete and a
+                      reply carrying its promptId (p-<n>)
 
 Every script advertises promptCapabilities as its dialect's live agent does:
 image true for the cursor scripts, false for the grok- ones.
@@ -234,7 +240,7 @@ func main() {
 		"load", "grok-load", "load-missing", "load-hang", "load-long", "load-settings",
 		"permodel", "permodel-empty", "permodel-noreply", "permodel-refuse", "permodel-nomodel",
 		"permodel-pushbefore", "permodel-pushafter", "permodel-pushmodel-after",
-		"prompt-dump", "grok-prompt-dump", "reject-image":
+		"prompt-dump", "grok-prompt-dump", "reject-image", "grok-reject-image":
 	default:
 		fmt.Fprintf(os.Stderr, "craze-fake-agent: unknown script %q\n", script)
 		os.Exit(2)

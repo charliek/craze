@@ -217,7 +217,7 @@ func TestJPEGMetaCutsAPP1AfterTheFirstScan(t *testing.T) {
 func TestJPEGMetaKeepsWhatDrawsThePixels(t *testing.T) {
 	plain := encodeJPEG(t, gradient(16, 16), 90)
 	jfif := segment(markerAPP0, []byte("JFIF\x00\x01\x02\x00\x00\x01\x00\x01\x00\x00"))
-	icc := segment(markerAPP2, append([]byte("ICC_PROFILE\x00\x01\x01"), bytes.Repeat([]byte{7}, 40)...))
+	icc := iccAPP2()
 	adobe := segment(markerAPP14, []byte("Adobe\x00\x64\x00\x00\x00\x00\x01"))
 	kept := afterSOI(plain, jfif, icc, adobe)
 	planted := afterSOI(plain, jfif, segment(markerCOM, []byte("a note")), icc, iptcAPP13("a place"), adobe, exifAPP1(1, false))
@@ -228,13 +228,57 @@ func TestJPEGMetaKeepsWhatDrawsThePixels(t *testing.T) {
 	if _, again, ok := jpegMeta(kept); !ok || !bytes.Equal(again, kept) {
 		t.Fatal("a file of the kept segments alone was cut")
 	}
+	profile := []byte("ICC_PROFILE\x00\x01\x01")
 	for m := byte(markerAPP0); m <= markerAPP15; m++ {
-		if want := m != markerAPP0 && m != markerAPP2 && m != markerAPP14; jpegMetadata(m) != want {
-			t.Errorf("jpegMetadata(APP%d) = %v, want %v", m-markerAPP0, !want, want)
+		for _, payload := range [][]byte{nil, profile, []byte("MPF\x00")} {
+			want := m != markerAPP0 && m != markerAPP14 && (m != markerAPP2 || !bytes.Equal(payload, profile))
+			if jpegMetadata(m, payload) != want {
+				t.Errorf("jpegMetadata(APP%d, %q) = %v, want %v", m-markerAPP0, payload, !want, want)
+			}
 		}
 	}
-	if !jpegMetadata(markerCOM) || jpegMetadata(markerSOS) || jpegMetadata(0xdb) || jpegMetadata(0xc0) {
+	if !jpegMetadata(markerCOM, nil) || jpegMetadata(markerSOS, nil) || jpegMetadata(0xdb, nil) || jpegMetadata(0xc0, nil) {
 		t.Error("COM, or a table or frame marker, judged wrongly")
+	}
+}
+
+// TestJPEGMetaCutsAnAPP2ThatIsNotAProfile is r4 #3 (plan 033 C6r2): APP2 is
+// the ICC profile's marker, but not the profile's alone. A phone's MPF
+// (Multi-Picture Format) segment — whose preview images are JPEGs with EXIF
+// and GPS of their own — and a vendor's FlashPix data share it. Only an APP2
+// whose payload starts ICC_PROFILE\0 stays, in place; any other is cut,
+// wherever it sits, an empty one and a header cut short included. Each
+// planted file decodes to the same pixels, and Process passes the file
+// through without the segment.
+func TestJPEGMetaCutsAnAPP2ThatIsNotAProfile(t *testing.T) {
+	plain := encodeJPEG(t, gradient(16, 16), 90)
+	icc := iccAPP2()
+	kept := afterSOI(plain, icc)
+	gps := []byte("GPS 37.7749 N 122.4194 W")
+	preview := afterSOI(encodeJPEG(t, gradient(8, 8), 50), segment(markerAPP1, append([]byte(exifHeader), gps...)))
+	mpf := mpfAPP2(preview)
+	for what, planted := range map[string][]byte{
+		"MPF after the profile":      afterSOI(plain, icc, mpf),
+		"MPF before the profile":     afterSOI(plain, mpf, icc),
+		"MPF before EOI":             insertAt(kept, len(kept)-2, mpf),
+		"a vendor's FlashPix APP2":   afterSOI(plain, icc, segment(markerAPP2, []byte("FPXR\x00\x00\x01private"))),
+		"an empty APP2":              afterSOI(plain, icc, segment(markerAPP2, nil)),
+		"a profile header cut short": afterSOI(plain, icc, segment(markerAPP2, []byte("ICC_PROFILE"))),
+	} {
+		if !samePixels(planted, plain) {
+			t.Fatalf("%s: the planted file does not decode to the fixture's pixels", what)
+		}
+		o, s, ok := jpegMeta(planted)
+		if !ok || o != 1 || !bytes.Equal(s, kept) {
+			t.Errorf("%s: jpegMeta = (%d, %d bytes, %v), want the %d bytes with the profile alone kept", what, o, len(s), ok, len(kept))
+		}
+	}
+	img, err := Process(afterSOI(plain, icc, mpf))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(img.Data, kept) || bytes.Contains(img.Data, []byte("MPF\x00")) || bytes.Contains(img.Data, gps) {
+		t.Fatalf("Process kept %d bytes, want the %d with the profile alone", len(img.Data), len(kept))
 	}
 }
 
@@ -269,10 +313,17 @@ func markerOffsets(b []byte) []int {
 }
 
 // metadataMarkers is every segment marker jpegMeta cuts (jpegMetadata), as the
-// fuzz plants them: APP1, APP3 to APP13, APP15 and COM.
+// fuzz plants them: APP1, APP3 to APP13, APP15 and COM, and APP2, which is cut
+// unless its payload is an ICC profile's (iccPayload; C6r2, r4 #3).
 var metadataMarkers = []byte{
 	markerAPP1, 0xe3, 0xe4, 0xe5, 0xe6, 0xe7, 0xe8, 0xe9, 0xea, 0xeb, 0xec,
-	markerAPP13, markerAPP15, markerCOM,
+	markerAPP13, markerAPP15, markerCOM, markerAPP2,
+}
+
+// iccPayload reports whether an APP2 payload is an ICC profile's, the one
+// APP2 the walk keeps: the fuzz property's own words for it, not the walk's.
+func iccPayload(payload []byte) bool {
+	return bytes.HasPrefix(payload, []byte("ICC_PROFILE\x00"))
 }
 
 // FuzzJPEGMeta: the walk is total over anything a paste can hold. It never
@@ -284,11 +335,12 @@ var metadataMarkers = []byte{
 // #4a). That half does not trust the walk to say where the markers are — a
 // walk that stopped at the first scan would agree with itself: the second walk
 // of its output stopped at the same place. A segment of a fuzz-chosen metadata
-// kind (APP1, APP13, COM, a vendor's APPn: metadataMarkers) with the fuzzed
-// payload is planted in front of a fuzz-chosen marker of a fixture
+// kind (APP1, APP13, COM, a vendor's APPn, an APP2: metadataMarkers) with the
+// fuzzed payload is planted in front of a fuzz-chosen marker of a fixture
 // (markerOffsets: before a table, an SOS between a progressive file's scans,
 // EOI), Go's decoder confirms the planted file decodes to the fixture's
-// pixels, and the walk must give the fixture back, byte for byte.
+// pixels, and the walk must give the fixture back, byte for byte — or, for an
+// APP2 whose payload is an ICC profile's, the planted file as it is (C6r2).
 func FuzzJPEGMeta(f *testing.F) {
 	fixtures := multiScanFixtures(f)
 	names := []string{"go baseline", "prog16", "base24rst", "prog24"}
@@ -299,6 +351,10 @@ func FuzzJPEGMeta(f *testing.F) {
 	f.Add([]byte{0xff, markerSOI, 0xff, markerAPP1, 0x00, 0x08, 'E', 'x', 'i', 'f', 0, 0}, uint16(1), []byte{0xff, markerAPP1, 0, 8}, uint8(3))
 	f.Add(afterSOI(good, iptcAPP13("a byline"), segment(markerCOM, []byte("a comment"))), uint16(2), []byte("Photoshop 3.0"), uint8(1))
 	f.Add([]byte{}, uint16(0), []byte{}, uint8(0))
+	// An MPF APP2 and an ICC one, planted (kind 14 is APP2).
+	f.Add([]byte{}, uint16(1), []byte("MPF\x00MM\x00*\x00\x00\x00\x08"), uint8(14))
+	f.Add([]byte{}, uint16(6), []byte("ICC_PROFILE\x00\x01\x01"), uint8(14))
+	f.Add(afterSOI(good, mpfAPP2([]byte("preview")), iccAPP2()), uint16(2), []byte("FPXR\x00"), uint8(14))
 	for k, name := range names {
 		for j := range markerOffsets(fixtures[name]) {
 			// at picks the fixture (at % 4) and its marker ((at / 4) % count);
@@ -333,8 +389,13 @@ func FuzzJPEGMeta(f *testing.F) {
 		}
 		// A planted APP1 the fuzzer made an EXIF of may say an orientation.
 		exif := marker == markerAPP1 && bytes.HasPrefix(payload, []byte(exifHeader))
-		if o, s, ok := jpegMeta(planted); !ok || (o != 1 && !exif) || !bytes.Equal(s, base) {
-			t.Fatalf("a %#x segment before the marker at %d of a %d-byte fixture: jpegMeta = (%d, %d bytes, %v), want the fixture back", marker, off, len(base), o, len(s), ok)
+		// A planted APP2 the fuzzer made an ICC profile of stays where it is.
+		want := base
+		if marker == markerAPP2 && iccPayload(payload) {
+			want = planted
+		}
+		if o, s, ok := jpegMeta(planted); !ok || (o != 1 && !exif) || !bytes.Equal(s, want) {
+			t.Fatalf("a %#x segment before the marker at %d of a %d-byte fixture: jpegMeta = (%d, %d bytes, %v), want the %d bytes back", marker, off, len(base), o, len(s), ok, len(want))
 		}
 	})
 }

@@ -32,11 +32,12 @@ type Client struct {
 	promptWait chan promptResult
 	// retired is the grok promptIds of craze's own turns that are over,
 	// newest last and at most retiredCap of them: the id the RPC reply ended
-	// a turn with, and the id queue/changed taught for a prompt that has
-	// returned whichever way — a refusal included (plan 033 C3r). A
-	// prompt_complete carrying one is a late twin and must not end the turn
-	// now running, and a broadcast naming one never teaches the id of the
-	// prompt in flight.
+	// a turn with, the id queue/changed taught for a prompt that has
+	// returned whichever way — a refusal included (plan 033 C3r) — and every
+	// id grok named while an image resend and the attempt it repeats were in
+	// flight (queueNamed, C6r2). A prompt_complete carrying one is a late
+	// twin and must not end the turn now running, and a broadcast naming one
+	// never teaches the id of the prompt in flight.
 	retired []string
 	// promptID is the grok promptId of the prompt in flight, learned from
 	// the queue/changed broadcast that names it (§3.2). promptText is what
@@ -47,25 +48,20 @@ type Client struct {
 	promptID     string
 	promptText   string
 	promptJoined string
-	// resending says the prompt in flight is the image resend (ResendBlocks),
-	// whose turn only a completion naming its own learned promptId settles.
+	// resending says the prompt in flight is the image resend (ResendBlocks).
+	// Its block 1 is the refused attempt's, so no queue/changed text can tell
+	// the resend from that attempt: it learns no promptId and no
+	// prompt_complete settles it — its RPC reply alone ends it (plan 033
+	// C6r2, r4 #2).
 	resending bool
-	// resendWritten says the resend's session/prompt bytes are on the wire:
-	// set by its sent hook, only for the turn that opened it. Until then no
-	// queue/changed can name the resend — grok has not read it — so a
-	// broadcast with its text is the refused attempt's, late (plan 033 C6r,
-	// r2 #1a).
-	resendWritten bool
 	// queueNamed is every promptId grok's queue/changed has named, queued or
-	// running, since the last PromptBlocks — not a resend — opened its turn,
-	// at most queueNamedCap of them; queueNamedFull says one more was named.
-	// A resend learns its own id only from an entry that is not in it, read
-	// after resendWritten: whatever grok named before the resend's bytes went
-	// out is the refused attempt's or another prompt's, never the resend's,
-	// however late it is broadcast again. A full set teaches a resend nothing,
-	// and its reply ends it.
-	queueNamed     []string
-	queueNamedFull bool
+	// running — interject fallbacks aside — since the last PromptBlocks that
+	// was not a resend opened its turn, at most queueNamedCap of them. When a
+	// resend ends, whichever way, every one of them is retired: the refused
+	// attempt's id, however late grok first names it, and the resend's own,
+	// so a late completion of either cannot end the next prompt (plan 033
+	// C6r2, r4 #2).
+	queueNamed []string
 	// foreignSeen records that some other running promptId was broadcast
 	// since the prompt was sent. Until promptID is known it is the only
 	// reason to distrust an unmatched prompt_complete.
@@ -553,39 +549,29 @@ func (c *Client) promptBlocks(ctx context.Context, blocks []ContentBlock, accept
 	c.foreignSeen = false
 	c.heard = false
 	c.resending = resend
-	c.resendWritten = false
 	if !resend {
 		// A resend keeps what grok named since the refused attempt opened:
-		// that is what it must never take for its own id.
+		// the refused attempt's id may be among it, and is retired with the
+		// resend.
 		c.queueNamed = c.queueNamed[:0]
-		c.queueNamedFull = false
 	}
 	sid := c.sessionID
 	dialect := c.dialect
-	turn := c.turn
 	wait := make(chan promptResult, 1)
 	c.promptWait = wait
 	c.mu.Unlock()
-	if resend {
-		// The resend's bytes are out once sent runs: from then on a broadcast
-		// can name it. sent can run after this call has returned (grok's
-		// writer goroutine, below), so it marks only the turn it belongs to.
-		callerSent := sent
-		sent = func() {
-			c.mu.Lock()
-			if c.turn == turn {
-				c.resendWritten = true
-			}
-			c.mu.Unlock()
-			if callerSent != nil {
-				callerSent()
-			}
-		}
-	}
 	defer func() {
 		c.mu.Lock()
 		c.inPrompt = false
 		c.promptWait = nil
+		if resend {
+			// Every id grok named since the refused attempt opened is the
+			// refused attempt's, the resend's own or another turn of craze's
+			// that is over — none of them the next prompt's — and the resend
+			// learned none of them, so they are retired here, whichever way
+			// it ended: its reply, an error, the caller giving up.
+			c.retireQueueNamedLocked()
+		}
 		// Whichever way the prompt ended — its completion, its reply, a
 		// refusal, the caller giving up — a completion naming it from here on
 		// is late and ends nothing.
@@ -594,7 +580,6 @@ func (c *Client) promptBlocks(ctx context.Context, blocks []ContentBlock, accept
 		c.promptText = ""
 		c.promptJoined = ""
 		c.resending = false
-		c.resendWritten = false
 		c.mu.Unlock()
 	}()
 
@@ -1313,14 +1298,18 @@ func (c *Client) handlePromptComplete(msg *Message) {
 // completion settles the turn unless it names an interject fallback or some
 // other running turn has been broadcast since the prompt went out — the two
 // ways a completion craze did not ask for can reach it.
+//
+// No completion settles the image resend: its block 1 is the refused
+// attempt's, so no broadcast can tell a completion of that attempt from one of
+// the resend, and the resend's RPC reply ends it (ResendBlocks).
 func (c *Client) settlesLocked(promptID string) bool {
+	if c.resending {
+		return false
+	}
 	if c.promptID != "" {
 		return promptID == c.promptID
 	}
-	if IsInterjectFallback(promptID) || c.resending {
-		// The image resend's block 1 is the refused prompt's, so until its
-		// own id is known a completion may as well be that prompt's
-		// (ResendBlocks); the RPC reply ends it.
+	if IsInterjectFallback(promptID) {
 		return false
 	}
 	return !c.foreignSeen

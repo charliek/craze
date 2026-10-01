@@ -179,6 +179,20 @@ func iptcAPP13(text string) []byte {
 	return segment(markerAPP13, append(payload, iptc...))
 }
 
+// iccAPP2 is an APP2 segment holding (the first and only chunk of) an ICC
+// profile: the ICC_PROFILE\0 header, the chunk's number and count, a body.
+func iccAPP2() []byte {
+	return segment(markerAPP2, append([]byte("ICC_PROFILE\x00\x01\x01"), bytes.Repeat([]byte{7}, 40)...))
+}
+
+// mpfAPP2 is an APP2 segment of a phone's MPF (CIPA DC-007, Multi-Picture
+// Format): the MPF\0 header, a big-endian TIFF header, and then preview — as
+// the private part a vendor fills, the preview image's own bytes (EXIF and
+// all) carried inside the segment, which is what r4 #3 is about.
+func mpfAPP2(preview []byte) []byte {
+	return segment(markerAPP2, append([]byte("MPF\x00MM\x00*\x00\x00\x00\x08"), preview...))
+}
+
 // xmpAPP1 is an APP1 XMP segment padded to about n bytes.
 func xmpAPP1(n int) []byte {
 	payload := append([]byte("http://ns.adobe.com/xap/1.0/\x00<x:xmpmeta/>"), bytes.Repeat([]byte(" "), n)...)

@@ -374,7 +374,8 @@ func readPaste(read func() (string, error), msg pasteMsg) tea.Msg {
 		msg.textRefused = true
 		return msg
 	}
-	msg.text = text
+	// Nor does a control character in text that is text (plan 033 C6r2).
+	msg.text = pasteClean(text)
 	return msg
 }
 

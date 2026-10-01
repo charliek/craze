@@ -389,22 +389,13 @@ func TestALateCompletionDoesNotSettleTheResend(t *testing.T) {
 			t.Fatalf("the refused prompt's late completion settled the resend: %+v, %v", out.res, out.err)
 		default:
 		}
-		// The resend's own id, once learned, does settle it: a broadcast read
-		// after its bytes were written (sent) can name it.
+		// The resend's own reply ends it (C6r2, r4 #2: no completion settles a
+		// resend, TestAResendEndsOnlyOnItsReply).
 		awaitClosed(t, written, "the resend's sent hook")
-		p.send(t, nil, MethodGrokQueueChangedWrapped,
-			`{"sessionId":"s1","entries":[],"runningPromptId":"p-2","runningText":"look at [Image #1]","runningKind":"prompt"}`)
-		waitFor(t, func() bool { return p.client.PromptID() == "p-2" }, "the resend's own id")
-		p.send(t, nil, MethodGrokPromptComplete, `{"sessionId":"s1","promptId":"p-2","stopReason":"end_turn"}`)
-		select {
-		case out := <-again:
-			if out.err != nil || out.res.StopReason != StopEndTurn {
-				t.Fatalf("resend: %+v, %v", out.res, out.err)
-			}
-		case <-time.After(5 * time.Second):
-			t.Fatal("the resend never settled")
-		}
 		replyPrompt(t, p, resend.ID, StopEndTurn)
+		if res, err := awaitPrompt(t, again); err != nil || res.StopReason != StopEndTurn {
+			t.Fatalf("resend: %+v, %v", res, err)
+		}
 	})
 	t.Run("the resend's reply ends it", func(t *testing.T) {
 		p := newRawPipeDialect(t, DialectGrok)
@@ -438,77 +429,148 @@ func awaitClosed(t *testing.T, ch <-chan struct{}, what string) {
 	}
 }
 
-// TestALateBroadcastOfTheRefusedPromptIsNotTheResends is "refusal, resend
-// opened, a late queue/changed still listing the refused attempt" on grok (plan
-// 033 C6r, r2 #1a). The attempt's id was never learned — it would have been
-// heard, and not resent — and block 1 is the same text, so neither retirement
-// nor the text tells that broadcast from one naming the resend. The resend
-// learns its id only from a broadcast read after its own bytes were written,
-// and never an id grok named before that write: the late broadcast teaches
-// nothing, a re-broadcast of it after the write teaches nothing, the refused
-// attempt's prompt_complete does not settle the resend, and the resend's own
-// id, named next to it, does. The broadcast lands either while the resend's
-// turn is opening (its accepted hook, before the write) or between the
-// attempts.
-func TestALateBroadcastOfTheRefusedPromptIsNotTheResends(t *testing.T) {
-	const late = `{"sessionId":"s1","entries":[{"id":"p-1","text":"look at [Image #1]"}]}`
-	for _, between := range []bool{false, true} {
-		name := "while the resend opens"
-		if between {
-			name = "between the attempts"
+// replyPromptAs answers a session/prompt with stop and, unless promptID is
+// empty, grok's _meta.promptId.
+func replyPromptAs(t *testing.T, p *rawPipe, id json.RawMessage, stop, promptID string) {
+	t.Helper()
+	res := map[string]any{"stopReason": stop}
+	if promptID != "" {
+		res["_meta"] = map[string]string{"promptId": promptID}
+	}
+	raw, err := json.Marshal(res)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := p.enc.WriteMessage(&Message{JSONRPC: jsonrpcVersion, ID: id, Result: raw}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// refusedThenResent is the image resend's schedule on grok up to the resend's
+// bytes: a prompt the agent refuses, then its path-text resend, with a
+// queue/changed naming the refused attempt (p-1, by block 1) first read at
+// when — "between" the attempts, while the resend's turn "opens" (its
+// accepted hook, before the write), or "after" the resend's write (its sent
+// hook has run). It returns the resend's return and its session/prompt.
+func refusedThenResent(t *testing.T, p *rawPipe, when, named string) (<-chan struct {
+	res *PromptResult
+	err error
+}, *Message) {
+	t.Helper()
+	name := func() {
+		p.send(t, nil, MethodGrokQueueChangedWrapped, named)
+		p.roundTrip(t)
+	}
+	done, req := startPromptBlocks(t, p, imageTestBlocks("AAAA"), nil, nil)
+	refusePrompt(t, p, req)
+	refusedPrompt(t, done)
+	if when == "between" {
+		name()
+		if p.client.Heard() {
+			t.Fatal("a broadcast between the attempts made the refused prompt heard")
 		}
-		t.Run(name, func(t *testing.T) {
+	}
+	opened, proceed, written := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	again := goResendBlocksWith(p, pathTextBlocks(),
+		func() { close(opened); <-proceed },
+		func() { close(written) })
+	awaitClosed(t, opened, "the resend's turn to open")
+	if when == "opens" {
+		// The turn is open and its bytes are not written: the barrier is the
+		// next thing the client writes.
+		name()
+	}
+	close(proceed)
+	resend := p.readWithin(t, 3*time.Second, "the resend")
+	awaitClosed(t, written, "the resend's sent hook")
+	if when == "after" {
+		name()
+	}
+	return again, resend
+}
+
+// lateRefused is a queue/changed naming only the refused attempt, p-1, by its
+// block 1 — the text the resend repeats.
+const lateRefused = `{"sessionId":"s1","entries":[{"id":"p-1","text":"look at [Image #1]"}]}`
+
+// TestAResendEndsOnlyOnItsReply is r4 #2 (plan 033 C6r2, superseding C6r's
+// learn-after-the-write rule): on grok the image resend learns no promptId
+// from queue/changed and no prompt_complete settles it. Block 1 is the refused
+// attempt's, so a broadcast naming that attempt — however late grok first
+// sends it: between the attempts, while the resend's turn opens, or after the
+// resend's bytes are out, the case C6r took for the resend's own — cannot be
+// told from one naming the resend. Neither the attempt's completion nor the
+// resend's own (named beside it, running) ends the resend; its RPC reply does,
+// with the reply's stop reason.
+func TestAResendEndsOnlyOnItsReply(t *testing.T) {
+	for _, when := range []string{"between", "opens", "after"} {
+		t.Run(when, func(t *testing.T) {
 			p := newRawPipeDialect(t, DialectGrok)
 			p.setSession("s1")
-			done, req := startPromptBlocks(t, p, imageTestBlocks("AAAA"), nil, nil)
-			refusePrompt(t, p, req)
-			refusedPrompt(t, done)
-			if between {
-				p.send(t, nil, MethodGrokQueueChangedWrapped, late)
-				p.roundTrip(t)
-			}
-			opened, proceed, written := make(chan struct{}), make(chan struct{}), make(chan struct{})
-			again := goResendBlocksWith(p, pathTextBlocks(),
-				func() { close(opened); <-proceed },
-				func() { close(written) })
-			awaitClosed(t, opened, "the resend's turn to open")
-			if !between {
-				// The turn is open and its bytes are not written: the barrier is
-				// the next thing the client writes.
-				p.send(t, nil, MethodGrokQueueChangedWrapped, late)
-				p.roundTrip(t)
-				if id := p.client.PromptID(); id != "" {
-					t.Fatalf("the resend learned %q from a broadcast read before its bytes were written", id)
-				}
-			}
-			close(proceed)
-			resend := p.readWithin(t, 3*time.Second, "the resend")
-			awaitClosed(t, written, "the resend's sent hook")
-
-			// grok still lists the refused attempt, and then completes it.
-			p.send(t, nil, MethodGrokQueueChangedWrapped, late)
+			again, resend := refusedThenResent(t, p, when, lateRefused)
+			p.send(t, nil, MethodGrokQueueChangedWrapped,
+				`{"sessionId":"s1","entries":[{"id":"p-1","text":"look at [Image #1]"}],"runningPromptId":"p-2","runningText":"look at [Image #1]","runningKind":"prompt"}`)
+			p.send(t, nil, MethodGrokPromptComplete, `{"sessionId":"s1","promptId":"p-1","stopReason":"cancelled"}`)
+			p.send(t, nil, MethodGrokPromptComplete, `{"sessionId":"s1","promptId":"p-2","stopReason":"cancelled"}`)
 			p.roundTrip(t)
 			if id := p.client.PromptID(); id != "" {
-				t.Fatalf("the resend learned %q, an id grok named before its bytes were written", id)
+				t.Fatalf("the resend learned %q from queue/changed", id)
 			}
-			p.send(t, nil, MethodGrokPromptComplete, `{"sessionId":"s1","promptId":"p-1","stopReason":"end_turn"}`)
-			p.roundTrip(t)
 			select {
 			case out := <-again:
-				t.Fatalf("the refused attempt's completion settled the resend: %+v, %v", out.res, out.err)
+				t.Fatalf("a prompt_complete settled the resend: %+v, %v", out.res, out.err)
 			default:
 			}
+			replyPromptAs(t, p, resend.ID, StopEndTurn, "p-2")
+			if res, err := awaitPrompt(t, again); err != nil || res.StopReason != StopEndTurn {
+				t.Fatalf("resend: %+v, %v; want its reply's end_turn", res, err)
+			}
+		})
+	}
+}
 
-			// The resend's own entry, named beside the late one, is learned and
-			// settles it.
-			p.send(t, nil, MethodGrokQueueChangedWrapped,
-				`{"sessionId":"s1","entries":[{"id":"p-1","text":"look at [Image #1]"},{"id":"p-2","text":"look at [Image #1]"}]}`)
-			waitFor(t, func() bool { return p.client.PromptID() == "p-2" }, "the resend's own id")
-			p.send(t, nil, MethodGrokPromptComplete, `{"sessionId":"s1","promptId":"p-2","stopReason":"end_turn"}`)
+// TestTheResendRetiresWhatGrokNamed is r4 #2's other half (plan 033 C6r2):
+// an id grok's queue named while the refused attempt and its resend were in
+// flight is retired when the resend ends, so its late prompt_complete does not
+// end the next prompt — even before the next prompt has learned its own id,
+// when any completion craze cannot place would otherwise settle it. That is
+// the refused attempt's id, whenever grok first named it, and the resend's
+// own when its reply carries no promptId. The next prompt then ends on its own
+// id, as any grok prompt does.
+func TestTheResendRetiresWhatGrokNamed(t *testing.T) {
+	for _, tc := range []struct {
+		name, when, named, late, replyID string
+	}{
+		{"the refused attempt's, named between the attempts", "between", lateRefused, "p-1", "p-2"},
+		{"the refused attempt's, named while the resend opens", "opens", lateRefused, "p-1", "p-2"},
+		{"the refused attempt's, named after the resend's write", "after", lateRefused, "p-1", "p-2"},
+		{"the resend's own, its reply carrying no promptId", "after",
+			`{"sessionId":"s1","entries":[],"runningPromptId":"p-2","runningText":"look at [Image #1]","runningKind":"prompt"}`, "p-2", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := newRawPipeDialect(t, DialectGrok)
+			p.setSession("s1")
+			again, resend := refusedThenResent(t, p, tc.when, tc.named)
+			replyPromptAs(t, p, resend.ID, StopEndTurn, tc.replyID)
 			if res, err := awaitPrompt(t, again); err != nil || res.StopReason != StopEndTurn {
 				t.Fatalf("resend: %+v, %v", res, err)
 			}
-			replyPrompt(t, p, resend.ID, StopEndTurn)
+
+			next, _ := startPromptBlocks(t, p, []ContentBlock{{Type: "text", Text: "next"}}, nil, nil)
+			p.send(t, nil, MethodGrokPromptComplete, `{"sessionId":"s1","promptId":"`+tc.late+`","stopReason":"cancelled"}`)
+			p.roundTrip(t)
+			select {
+			case out := <-next:
+				t.Fatalf("%s's late completion ended the next prompt: %+v, %v", tc.late, out.res, out.err)
+			default:
+			}
+			p.send(t, nil, MethodGrokQueueChangedWrapped,
+				`{"sessionId":"s1","entries":[],"runningPromptId":"p-3","runningText":"next","runningKind":"prompt"}`)
+			waitFor(t, func() bool { return p.client.PromptID() == "p-3" }, "the next prompt's own id")
+			p.send(t, nil, MethodGrokPromptComplete, `{"sessionId":"s1","promptId":"p-3","stopReason":"end_turn"}`)
+			if res, err := awaitPrompt(t, next); err != nil || res.StopReason != StopEndTurn {
+				t.Fatalf("next prompt: %+v, %v", res, err)
+			}
 		})
 	}
 }

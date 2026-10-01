@@ -22,22 +22,33 @@ const (
 	markerRST7  = 0xd7
 )
 
-// jpegMetadata reports whether a segment with this marker is metadata the
-// walk cuts: a comment (COM), and every application segment but the three
-// that say how to read the pixels — APP0 (JFIF), APP2 (the ICC profile) and
-// APP14 (Adobe's colour transform). The rest carry the user's, never the
-// image's: APP1 EXIF and XMP (the camera, the time, GPS, a thumbnail of the
-// uncropped original), APP13 Photoshop/IPTC (a caption, a byline, a place),
-// APP11's JUMBF (content credentials, a signer's name), the vendors' APP3 to
-// APP12 and APP15 (plan 033 C6r, r2 #4a, which named APP13 and COM). No
-// decoder draws a pixel from any of them.
-func jpegMetadata(marker byte) bool {
-	if marker == markerCOM {
+// jpegMetadata reports whether a segment with this marker and payload (the
+// bytes after its length) is metadata the walk cuts: a comment (COM), and
+// every application segment but the three that say how to read the pixels —
+// APP0 (JFIF), APP2 holding an ICC profile (iccProfileHeader) and APP14
+// (Adobe's colour transform). The rest carry the user's, never the image's:
+// APP1 EXIF and XMP (the camera, the time, GPS, a thumbnail of the uncropped
+// original), every other APP2 — a phone's MPF (Multi-Picture Format: preview
+// images, each a JPEG with EXIF and GPS of its own; plan 033 C6r2, r4 #3) and
+// the vendors' payloads that share the marker — APP13 Photoshop/IPTC (a
+// caption, a byline, a place), APP11's JUMBF (content credentials, a signer's
+// name), the vendors' APP3 to APP12 and APP15 (C6r, r2 #4a, which named APP13
+// and COM). No decoder draws a pixel from any of them.
+func jpegMetadata(marker byte, payload []byte) bool {
+	switch marker {
+	case markerCOM:
 		return true
+	case markerAPP2:
+		return !bytes.HasPrefix(payload, []byte(iccProfileHeader))
+	case markerAPP0, markerAPP14:
+		return false
 	}
-	return marker >= markerAPP0 && marker <= markerAPP15 &&
-		marker != markerAPP0 && marker != markerAPP2 && marker != markerAPP14
+	return marker >= markerAPP0 && marker <= markerAPP15
 }
+
+// iccProfileHeader leads an APP2 segment that holds (a chunk of) an ICC
+// profile (ICC.1, Annex B.4): the only APP2 the walk keeps.
+const iccProfileHeader = "ICC_PROFILE\x00"
 
 // exifHeader leads an APP1 segment that holds EXIF (XMP's APP1 leads with a
 // namespace URI instead, and is cut all the same).
@@ -54,8 +65,8 @@ const (
 // over), the tables and segments between a progressive file's scans, to EOI —
 // and returns the EXIF orientation (1 when there is none, or it is unreadable
 // or out of range) and the file with every metadata segment (jpegMetadata:
-// APP1, APP13, COM and the other application segments but APP0, APP2 and
-// APP14) cut out, wherever it sits, and nothing after its EOI. A file with no
+// APP1, APP13, COM, an APP2 that is not an ICC profile, and the other
+// application segments but APP0 and APP14) cut out, wherever it sits, and nothing after its EOI. A file with no
 // such segment and nothing past its EOI comes back as the same slice. ok is
 // false when the file cannot be walked to an EOI after at least one scan: the
 // caller then re-encodes rather than guess what a lossless cut of it would be
@@ -66,9 +77,9 @@ const (
 // is the model's business — and the decoder ignores those segments wherever
 // they are, so a file can carry one between scans or before EOI as well as up
 // front. What follows EOI is not the image either (a phone's motion-photo
-// video, a vendor trailer): no decoder reads it. APP0 (JFIF), APP2 (the ICC
-// profile) and APP14 (Adobe's colour transform) stay: they say how to read the
-// pixels. The orientation is read only from an EXIF APP1 ahead of the first
+// video, a vendor trailer): no decoder reads it. APP0 (JFIF), an APP2 holding
+// the ICC profile and APP14 (Adobe's colour transform) stay: they say how to
+// read the pixels. The orientation is read only from an EXIF APP1 ahead of the first
 // scan, where EXIF belongs.
 //
 // It is total over arbitrary bytes: every read is bounds-checked, and the walk
@@ -116,13 +127,12 @@ func jpegMeta(b []byte) (orientation int, stripped []byte, ok bool) {
 		if n < 2 || i+n > len(b) {
 			return 1, nil, false
 		}
-		if jpegMetadata(marker) {
+		payload := b[i+2 : i+n]
+		if jpegMetadata(marker, payload) {
 			cut.cut(start, i+n)
 		}
-		if marker == markerAPP1 {
-			if payload := b[i+2 : i+n]; !scanned && !foundOrientation && bytes.HasPrefix(payload, []byte(exifHeader)) {
-				orientation, foundOrientation = exifOrientation(payload[len(exifHeader):]), true
-			}
+		if marker == markerAPP1 && !scanned && !foundOrientation && bytes.HasPrefix(payload, []byte(exifHeader)) {
+			orientation, foundOrientation = exifOrientation(payload[len(exifHeader):]), true
 		}
 		i += n
 		if marker == markerSOS {

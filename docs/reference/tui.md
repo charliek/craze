@@ -479,7 +479,10 @@ It pastes text only when the clipboard holds text: an image that does not become
 a chip (in shell mode, say, or one too small) pastes nothing, and clipboard
 contents that are not text (binary data, a NUL byte) are never pasted anywhere,
 the session list and the `/connect` key field included; the status line says
-`the clipboard's text was not pasted: it is not text`.
+`the clipboard's text was not pasted: it is not text`. Pasted text loses its
+control characters other than newlines and tabs. Text an X11 application
+offers only in the old `STRING` form is read as Windows-1252, so its curly
+quotes, dashes and euro signs paste as themselves.
 
 A path is only turned into a chip when the file exists, is a regular file, is
 at most 20 MiB, decodes as an image and is at least 8×8 pixels. These stay
@@ -522,8 +525,10 @@ Anything wider or taller than 2000 pixels is scaled down to 2000 on its long
 edge, an image over 3.75 MiB is re-encoded smaller, and images lose their
 metadata, per format:
 
-- a `jpeg` loses its EXIF and XMP (APP1), IPTC (APP13), comments, the other
-  vendor application segments, and anything stored after the image itself;
+- a `jpeg` loses its EXIF and XMP (APP1), IPTC (APP13), comments, every APP2
+  segment but its colour profile (a phone's Multi-Picture preview images among
+  them), the other vendor application segments, and anything stored after the
+  image itself;
 - a `png` keeps the chunks that say how to read the pixels (palette,
   transparency, gamma, colour profile and the like) and loses its text, EXIF
   and time chunks (a macOS screenshot's XMP among them), the other ancillary
