@@ -123,13 +123,33 @@ func ReadReady(ctx context.Context, r *os.File) (ReadyLine, Failure, string) {
 // exited, or closed the pipe unwritten, before it was ready; EOF within a line
 // is a malformed one.
 func ParseReady(r io.Reader) (ReadyLine, Failure, string) {
+	raw, failure, why := ReadLine(r)
+	if failure != 0 {
+		return ReadyLine{}, failure, why
+	}
+	var line ReadyLine
+	if err := json.Unmarshal(raw, &line); err != nil {
+		return ReadyLine{}, Malformed, err.Error()
+	}
+	if why := line.invalid(); why != "" {
+		return ReadyLine{}, Malformed, why
+	}
+	return line, 0, ""
+}
+
+// ReadLine reads one line from a ready pipe r — a host's, or the hub's (plan
+// 032 §3.5), whose line is its own — without its newline: every byte up to
+// the newline, at most ReadyLineMax with it. EOF before any byte is Exited;
+// EOF within a line is Malformed, as is a read that fails; no newline within
+// ReadyLineMax bytes is Oversized. What the line says is its reader's.
+func ReadLine(r io.Reader) ([]byte, Failure, string) {
 	br := bufio.NewReaderSize(io.LimitReader(r, ReadyLineMax+1), 4096)
 	var buf []byte
 	for {
 		chunk, err := br.ReadSlice('\n')
 		buf = append(buf, chunk...)
 		if len(buf) > ReadyLineMax {
-			return ReadyLine{}, Oversized, ""
+			return nil, Oversized, ""
 		}
 		if err == nil {
 			break
@@ -138,21 +158,14 @@ func ParseReady(r io.Reader) (ReadyLine, Failure, string) {
 			continue
 		}
 		if len(buf) == 0 && errors.Is(err, io.EOF) {
-			return ReadyLine{}, Exited, ""
+			return nil, Exited, ""
 		}
 		if errors.Is(err, io.EOF) {
-			return ReadyLine{}, Malformed, "the line has no end"
+			return nil, Malformed, "the line has no end"
 		}
-		return ReadyLine{}, Malformed, err.Error()
+		return nil, Malformed, err.Error()
 	}
-	var line ReadyLine
-	if err := json.Unmarshal(bytes.TrimSuffix(buf, []byte("\n")), &line); err != nil {
-		return ReadyLine{}, Malformed, err.Error()
-	}
-	if why := line.invalid(); why != "" {
-		return ReadyLine{}, Malformed, why
-	}
-	return line, 0, ""
+	return bytes.TrimSuffix(buf, []byte("\n")), 0, ""
 }
 
 // invalid says why a decoded line is not a ready line, "" when it is one

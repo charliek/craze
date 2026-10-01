@@ -72,8 +72,9 @@ const (
 // running for hours, reparented to init. So every child watches its parent:
 // once the test process that started it is no longer its parent it SIGTERMs
 // itself — a host that can still act runs its ordinary stop sequence, closing
-// its agent and leaving no registry entry — and exits childTermGrace later
-// whatever it is doing. childLifetime is the backstop behind that, longer
+// its agent and leaving no registry entry; a craze hub child (plan 032 C10,
+// hub_child_test.go) its teardown, leaving no record — and exits
+// childTermGrace later whatever it is doing. childLifetime is the backstop behind that, longer
 // than any test binary's timeout (make test-race's is 20 minutes).
 const (
 	childWatchEvery = 100 * time.Millisecond

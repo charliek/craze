@@ -183,6 +183,18 @@ func Start(argv []string, groups, log string) (*Child, *os.File, error) {
 	if err != nil {
 		return nil, nil, err
 	}
+	return StartCmd(cmd, HostChildEnv, groups, log)
+}
+
+// StartCmd is Start for a command its caller built — a host's (Start), or
+// the hub's (plan 032 §3.5: internal/hub, through a seam of its own): cmd is
+// started detached exactly as a host is — a session of its own, stdio on
+// /dev/null, the write end of a fresh ready pipe as its fd 3 — with
+// ReadyFDEnv=3 and marker=1 in its environment, and one goroutine waits for
+// it. The environment is cmd.Env, or this process's own when that is nil,
+// less any ReadyFDEnv or marker already in it; cmd.Dir is the caller's. groups
+// and log are the child's record of its agents and its log, "" for none.
+func StartCmd(cmd *exec.Cmd, marker, groups, log string) (*Child, *os.File, error) {
 	r, w, err := Pipe()
 	if err != nil {
 		return nil, nil, err
@@ -191,7 +203,7 @@ func Start(argv []string, groups, log string) (*Child, *os.File, error) {
 	if env == nil {
 		env = os.Environ()
 	}
-	cmd.Env = append(withoutEnv(env, ReadyFDEnv, HostChildEnv), ReadyFDEnv+"=3", HostChildEnv+"=1")
+	cmd.Env = append(withoutEnv(env, ReadyFDEnv, marker), ReadyFDEnv+"=3", marker+"=1")
 	// stdin, stdout and stderr nil are /dev/null: the host writes to its log.
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = nil, nil, nil
 	cmd.ExtraFiles = []*os.File{w}
@@ -283,18 +295,29 @@ func (c *Child) Settle() {
 // within the second grace (an uninterruptible wait), when the reaper still
 // takes it whenever it goes.
 func (c *Child) Terminate() {
+	c.End(TermGrace)
+	c.KillAgents()
+}
+
+// End is Terminate without the agents' record: SIGTERM, grace for the child
+// to exit, then SIGKILL to its process group (setsid made it the leader of its
+// own) and a second grace for the reaper. It reports whether the child has
+// exited and been reaped. A child that records no agents — the hub (plan 032
+// §3.8), which runs none — is ended with it alone, within a grace of its
+// caller's.
+func (c *Child) End(grace time.Duration) bool {
 	if !c.Exited() {
 		// Signal on the Process, not the pid: once the reaper has waited for
 		// it, this is refused rather than sent to whatever reused the pid.
 		_ = c.cmd.Process.Signal(syscall.SIGTERM)
-		if !c.WaitExit(TermGrace) {
+		if !c.WaitExit(grace) {
 			if !c.Exited() {
 				_ = syscall.Kill(-c.pid, syscall.SIGKILL)
 			}
-			c.WaitExit(TermGrace)
+			c.WaitExit(grace)
 		}
 	}
-	c.KillAgents()
+	return c.Exited()
 }
 
 // KillAgents kills every agent process group the host recorded and removes

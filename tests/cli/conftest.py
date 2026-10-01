@@ -352,15 +352,22 @@ def _darwin_procargs(pid: int) -> tuple[list[bytes], list[bytes]] | None:
     return argv, env
 
 
-def _is_serve(pid: int) -> bool:
-    """A `craze serve` host, by its argv."""
-    return _argv(pid)[1:2] == ["serve"]
+# The craze processes a test can leave running (plan 030 §3.18, plan 032
+# §3.18): a detached `craze serve` host, and the per-machine `craze hub` (plan
+# 032 C10), which outlives whoever spawned it until it is idle. Both are found
+# by the test's marker, never by name alone.
+_LINGERING = (["serve"], ["hub"])
+
+
+def _is_lingering(pid: int) -> bool:
+    """A `craze serve` host or a `craze hub`, by its argv."""
+    return _argv(pid)[1:2] in _LINGERING
 
 
 def _is_host_or_agent(pid: int, fake_agent: str | None) -> bool:
-    """A `craze serve` host, or the fake agent, by argv."""
+    """A `craze serve` host, a `craze hub`, or the fake agent, by argv."""
     argv = _argv(pid)
-    return argv[1:2] == ["serve"] or (bool(argv) and argv[0] == fake_agent)
+    return argv[1:2] in _LINGERING or (bool(argv) and argv[0] == fake_agent)
 
 
 def _registry_files(root: Path) -> list[Path]:
@@ -409,12 +416,16 @@ def host_cleanup(isolate_run_env: None, tmp_path: Path, fake_agent_bin: Path) ->
     registered under its HOME, and each `craze serve` carrying its marker
     whose entry is already gone -- is sent SIGTERM (the resumable stop), given
     a bounded wait, and whatever is then left is SIGKILLed, the kill itself
-    checked within a bound of its own, and reported. The leftovers checked
-    are the registry (any entry file still there, whether or not it parses),
-    and any `craze serve` or fake agent carrying this test's marker
+    checked within a bound of its own, and reported. A `craze hub` carrying
+    the marker is stopped the same way (plan 032 C10): its SIGTERM is its
+    teardown, which removes its record and socket. The leftovers checked are
+    the registry (any entry file still there, whether or not it parses), and
+    any `craze serve`, `craze hub` or fake agent carrying this test's marker
     (marker_pids) -- so a process another session owns is never looked at,
-    let alone killed. (A pytest that is itself SIGKILLed runs none of this:
-    TEST_HOST_IDLE_EXIT bounds what it leaves.)
+    let alone killed. A hub's record is not a leftover: one a test killed on
+    purpose is stale, and the next hub writes over it. (A pytest that is
+    itself SIGKILLed runs none of this: TEST_HOST_IDLE_EXIT bounds the hosts
+    it leaves, and a hub with no host and no client exits after its grace.)
 
     A scan of the machine's processes that fails or does not answer
     (ProcessScanError) ends the cleanup there, and the test fails with it and
@@ -439,7 +450,7 @@ def _stop_hosts(tmp_path: Path, fake: str) -> str | None:
     and otherwise why the test fails. A failed scan raises ProcessScanError."""
     mine = marker_pids()
     registered = {pid for pid in map(_entry_pid, _registry_files(tmp_path)) if pid is not None}
-    _signal((registered & mine) | {p for p in mine if _is_serve(p)}, signal.SIGTERM)
+    _signal((registered & mine) | {p for p in mine if _is_lingering(p)}, signal.SIGTERM)
     deadline = time.monotonic() + 8.0
     while True:
         left = _stray_processes(fake) + [_describe_entry(p) for p in _registry_files(tmp_path)]
@@ -469,7 +480,8 @@ def _signal(pids: set[int], sig: signal.Signals) -> None:
 
 
 def _stray_processes(fake_agent: str) -> list[str]:
-    """This test's `craze serve` hosts and fake agents still running."""
+    """This test's `craze serve` hosts, `craze hub`s and fake agents still
+    running."""
     live = sorted(p for p in marker_pids() if pid_alive(p))
     return [f"process {p}: {' '.join(_argv(p))[:200]}" for p in live if _is_host_or_agent(p, fake_agent)]
 
