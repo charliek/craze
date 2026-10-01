@@ -138,18 +138,22 @@ func sameRows(a, b []string) bool {
 // press landed on and the line it copied could differ; reading the physical
 // lines is a deliberate fix of that, and changes no drawn byte.
 //
-// What the per-row split does not reproduce is a row ending in a lone "\r":
-// joined to the next row it made "\r\n", which bubbles cut back to "\n". No row
-// holds one — sanitizeText and sanitizeShellOutput drop "\r", and the tests'
-// paint watch refuses any "\r" left in a drawn row.
+// Each row is split as the joined transcript split it: followed by the join's
+// "\n", so a row ending in a lone "\r" — joined to the next it made "\r\n",
+// which bubbles cut back to "\n" — loses that "\r" here too (a raw-input
+// path "/tmp/a\r" decoded by toolPath keeps one; review r8). The one row this
+// cannot know about is the transcript's very last, which bubbles left
+// unjoined: ending in "\r" it kept the "\r" and drew a raw carriage return,
+// and here it does not (X24) — an entry's rows are cached without knowing
+// whether another entry follows.
 //
-// rows comes back untouched when no row holds a "\n" (one byte scan per row,
-// no allocation); otherwise the lines are a new slice, so a rendered slice is
-// never written to (rowIndex).
+// rows comes back untouched when no row holds a "\n" or ends in "\r" (one
+// byte scan per row, no allocation); otherwise the lines are a new slice, so a
+// rendered slice is never written to (rowIndex).
 func physicalLines(rows []string) []string {
 	first := -1
 	for i, r := range rows {
-		if strings.IndexByte(r, '\n') >= 0 {
+		if breaks(r) {
 			first = i
 			break
 		}
@@ -160,13 +164,22 @@ func physicalLines(rows []string) []string {
 	out := make([]string, first, len(rows)+1)
 	copy(out, rows[:first])
 	for _, r := range rows[first:] {
-		if strings.IndexByte(r, '\n') < 0 {
+		if !breaks(r) {
 			out = append(out, r)
 			continue
 		}
-		out = append(out, strings.Split(strings.ReplaceAll(r, "\r\n", "\n"), "\n")...)
+		// The row with the join's "\n" after it, as bubbles saw it: the
+		// last element of the split is that "\n"'s empty remainder.
+		lines := strings.Split(strings.ReplaceAll(r+"\n", "\r\n", "\n"), "\n")
+		out = append(out, lines[:len(lines)-1]...)
 	}
 	return out
+}
+
+// breaks says whether physicalLines has to split or trim row: it holds a line
+// break, or ends in the "\r" a join would have made half of a "\r\n".
+func breaks(row string) bool {
+	return strings.IndexByte(row, '\n') >= 0 || strings.HasSuffix(row, "\r")
 }
 
 // needsRender says whether e has to be rendered again before it is drawn under

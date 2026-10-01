@@ -636,8 +636,8 @@ func TestALineBreakInARowIsALineOfItsOwn(t *testing.T) {
 // draws over the rows joined, at every offset; and rows with no break come
 // back as the same slice, with nothing allocated.
 func TestPhysicalLinesAreBubblesLines(t *testing.T) {
-	first := []string{"plain", "a\r\nb", "c\nd\n", "\r\n"}
-	second := []string{"", "\ne\n\nf", "x\r\n\r\ny", "tail"}
+	first := []string{"plain", "a\r\nb", "c\nd\n", "\r\n", "cr\r", "crcr\r\r", "lf-cr\n\r"}
+	second := []string{"", "\ne\n\nf", "x\r\n\r\ny", "ends\r", "\nstarts", "tail"}
 	lines1, lines2 := physicalLines(first), physicalLines(second)
 	idx := &rowIndex{
 		base:  []rowSpan{{rows: lines1}},
@@ -661,9 +661,14 @@ func TestPhysicalLinesAreBubblesLines(t *testing.T) {
 		}
 	}
 	for _, row := range slices.Concat(lines1, lines2) {
-		if strings.ContainsAny(row, "\r\n") {
+		if strings.Contains(row, "\n") {
 			t.Fatalf("a line still holds a break: %q", row)
 		}
+	}
+	// A row ending in "\r" is cut back as the join cut it (review r8):
+	// "cr\r" + the join's "\n" was "cr\r\n", which bubbles made "cr".
+	if want := []string{"cr"}; !slices.Equal(physicalLines([]string{"cr\r"}), want) {
+		t.Fatalf("a row ending in \\r: got %q, want %q", physicalLines([]string{"cr\r"}), want)
 	}
 
 	clean := []string{"one", "two \x1b[1mthree\x1b[0m", ""}
