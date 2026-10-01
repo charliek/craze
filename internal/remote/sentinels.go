@@ -130,6 +130,10 @@ func sentinels(code protocol.Code, reason protocol.Reason) []error {
 	}
 	// failed (a provider's or the host's own failure), not_ready, busy,
 	// response_too_large, the protocol's bad_request and unsupported reasons,
-	// unknown_session: no sentinel stands behind them.
+	// unknown_session, and every reason of the hub's (plan 032 §3.15:
+	// host_only, connect_not_first, ambiguous_session, already_subscribed,
+	// request_conflict, spawn_failed, host_unreachable — refusals of a hub
+	// connection, which no engine stands behind): no sentinel stands behind
+	// them, and a caller tells them apart by code and reason.
 	return nil
 }

@@ -3,6 +3,7 @@ package roster
 import (
 	"cmp"
 	"context"
+	"encoding/json"
 	"errors"
 	"net"
 	"os"
@@ -40,15 +41,20 @@ type Snapshot struct {
 	// IndexErr is the same for the index and Saved.
 	RegistryErr error
 	IndexErr    error
+	// Run is the poll's run the Snapshot is from: a roster OpenHub opened
+	// polls only while a run is open (Resume), and each run is its own
+	// number; the list's roster (Open) is one run, 1, from Open to Close.
+	Run uint64
 }
 
 // Status is whether a running session's host answers.
 type Status int
 
 const (
-	// Connecting: no attempt of the roster's has finished yet — or the host
-	// has not published its session yet (its registry entry names none), so
-	// there is nothing to ask it for.
+	// Connecting: no attempt of the roster's has finished yet — none since
+	// the host's registry entry last named another session included — or the
+	// host has not published its session yet (its registry entry names
+	// none), so there is nothing to ask it for.
 	Connecting Status = iota
 	// Reachable: its last attempt was answered.
 	Reachable
@@ -80,12 +86,31 @@ type Row struct {
 	// an older host shows.
 	Version string
 	// Session is the host's last sessions.list row, nil until the first
-	// answer, and kept as it was while the host does not answer.
+	// answer of the session its entry names, and kept as it was while the
+	// host does not answer.
 	Session *Session
 	// IndexTitle is the index's title for the session — its newest row with
 	// the host's craze id — "" when there is none: what a row shows before
 	// its host has answered.
 	IndexTitle string
+
+	// Raw is the host's last sessions.list row as the JSON value it sent,
+	// compacted — every member kept, those this build does not know
+	// included, at any depth — beside Session, its decoding; nil until the
+	// first answer of the session its entry names, kept as it was while the
+	// host does not answer, and nil for a row that is not an object. Only a
+	// roster OpenHub opened keeps it (plan 032 §3.6, P4).
+	Raw json.RawMessage
+	// ReadAt is when the host's row was last read — its last answered
+	// attempt, by the roster's clock — zero before the first of the session
+	// its entry names.
+	ReadAt time.Time
+	// Polled says the row is this run's (Snapshot.Run): the host's last
+	// attempt to finish started in it, or the host is waiting out the
+	// backoff of a failed one — its Unreachable stands until then. A host
+	// whose attempt has not come back yet in the run, a new one, and one
+	// with no session to ask for are not.
+	Polled bool
 }
 
 // Ref is this row's session as Open and Stop name it (tui.Sessions).
@@ -98,6 +123,9 @@ type Host struct {
 	PID       int
 	Socket    string
 	StartedAt time.Time
+	// Protocol is the control protocol the registry entry says the host
+	// speaks.
+	Protocol int
 	// CrazeSessionID, ProviderSessionID and Incarnation are the session the
 	// host published last: "" before its engine is up.
 	CrazeSessionID    string
@@ -110,7 +138,7 @@ type Host struct {
 
 // HostOf is e's host.
 func HostOf(e rundir.Entry) Host {
-	return Host{ID: e.HostID, PID: e.PID, Socket: e.Socket, StartedAt: e.StartedAt,
+	return Host{ID: e.HostID, PID: e.PID, Socket: e.Socket, StartedAt: e.StartedAt, Protocol: e.Protocol,
 		CrazeSessionID: e.CrazeSessionID, ProviderSessionID: e.ProviderSessionID, Incarnation: e.Incarnation,
 		Provider: e.Provider, Workspace: e.Workspace, Ready: e.Ready}
 }
@@ -250,6 +278,11 @@ const (
 	savedMax = 50
 )
 
+// TickEvery is how often a round runs: the registry read, and every host
+// asked once. A host gone from the registry leaves the roster within one
+// (the hub's A9 bound is one tick and one flush).
+const TickEvery = tickEvery
+
 // options are the poll's rules and its seams: production's are defaults(),
 // and a test changes what it needs.
 type options struct {
@@ -271,6 +304,17 @@ type options struct {
 	check func(*net.UnixConn) error
 	// indexPath is the index file whose modification says it changed.
 	indexPath func() string
+	// client is who the roster's hello says it is.
+	client protocol.ClientInfo
+
+	// hub is the hub's roster (OpenHub; plan 032 §3.6): each host's row kept
+	// as the JSON value it sent (Row.Raw), no index, every Snapshot handed to
+	// publish — in order, on the poller's goroutine — in place of the slot,
+	// one published whenever a host's read or run state moves too
+	// (Row.ReadAt, Row.Polled), and a poll only while a run is open (Resume,
+	// Pause), which starts closed.
+	hub     bool
+	publish func(Snapshot)
 	// The tests' barriers, nil in production: attempting runs on the poller
 	// as an attempt is started, with its host's id — after its budget's clock
 	// has started, and before its goroutine exists, so a tick's barrier
@@ -283,6 +327,9 @@ type options struct {
 	attempted  func(hostID string)
 	ticked     func()
 	applied    func(hostID string, err error)
+	// paused runs on the poller once a Pause has taken effect (the hub's
+	// roster's tests).
+	paused func()
 }
 
 func defaults(env rundir.Env) options {
@@ -294,6 +341,7 @@ func defaults(env rundir.Env) options {
 		dial:      dialUnix,
 		check:     rundir.DialCheck(os.Geteuid()),
 		indexPath: paths.SessionsPath,
+		client:    clientInfo,
 	}
 }
 
@@ -309,6 +357,12 @@ type Roster struct {
 	out   chan Snapshot
 	done  chan struct{}
 	once  sync.Once
+
+	// want is the run Resume asked for, 0 after Pause (wantMu), and wake
+	// tells the poller it moved: a latest-value slot, so neither ever waits.
+	wantMu sync.Mutex
+	want   uint64
+	wake   chan struct{}
 }
 
 // Index is the session index the saved rows come from: *sessions.Store.
@@ -325,16 +379,110 @@ func Open(env rundir.Env, index Index) *Roster {
 	return open(index, defaults(env))
 }
 
+// HubOptions are the hub's roster's (OpenHub). Hosts and Publish are
+// required; every other field's zero value is production's.
+type HubOptions struct {
+	// Hosts reads the registry: the hub's read, which its idle rule also
+	// takes (plan 032 §3.5) — rundir.Hosts at its heart, which sweeps the
+	// dead, so a crashed host leaves at the next round.
+	Hosts func() ([]rundir.Entry, error)
+	// Publish is handed every Snapshot, in order, on the poller's goroutine:
+	// it must not block, and must not call back into the roster but for
+	// Resume and Pause. No slot is filled (Updates only closes, at Close).
+	Publish func(Snapshot)
+	// Client is who the roster's hello says it is.
+	Client protocol.ClientInfo
+
+	// A test's seams, zero in production: Ticks stands in for the ticker;
+	// Now is the clock of the backoff and of Row.ReadAt; Dial opens a host's
+	// socket, and Check — only with Dial set, nil for none — vets its peer
+	// (production's is rundir.DialCheck); Budget replaces both shares of an
+	// attempt's budget (dialBudget, listBudget); Attempting is told each
+	// attempt as the poller starts it, on its goroutine, before the
+	// Snapshot that follows is published; Paused once a Pause has taken
+	// effect, on its goroutine.
+	Ticks      <-chan time.Time
+	Now        func() time.Time
+	Dial       func(ctx context.Context, path string) (net.Conn, error)
+	Check      func(*net.UnixConn) error
+	Budget     time.Duration
+	Attempting func(hostID string)
+	Paused     func()
+}
+
+// OpenHub starts the hub's roster (plan 032 §3.6, P1): the list's poller —
+// the same tick, budgets, cap and backoff, and the same kept connections —
+// with no index, each host's row kept as the JSON value it sent (Row.Raw),
+// and its Snapshots handed to o.Publish. It polls only while a run is open:
+// none is at first; Resume opens one, which reads the registry and asks every
+// host at once and then at every tick, and Pause closes it, keeping every
+// connection and every host's state for the next. Close stops it as Open's.
+func OpenHub(o HubOptions) *Roster {
+	opts := defaults(rundir.Env{})
+	opts.hosts, opts.publish, opts.hub = o.Hosts, o.Publish, true
+	opts.indexPath = func() string { return "" }
+	if o.Client.Kind != "" {
+		opts.client = o.Client
+	}
+	if o.Ticks != nil {
+		opts.ticks = o.Ticks
+	}
+	if o.Now != nil {
+		opts.now = o.Now
+	}
+	if o.Dial != nil {
+		opts.dial, opts.check = o.Dial, o.Check
+	}
+	if o.Budget > 0 {
+		opts.dialBudget, opts.listBudget = o.Budget, o.Budget
+	}
+	opts.attempting, opts.paused = o.Attempting, o.Paused
+	return open(nil, opts)
+}
+
 func open(index Index, o options) *Roster {
 	ctx, stop := context.WithCancel(context.Background())
-	r := &Roster{o: o, index: index, ctx: ctx, stop: stop, out: make(chan Snapshot, 1), done: make(chan struct{})}
+	r := &Roster{o: o, index: index, ctx: ctx, stop: stop, out: make(chan Snapshot, 1), done: make(chan struct{}),
+		wake: make(chan struct{}, 1)}
 	// Dirty from the start: the first tick publishes what it found, however
 	// little. An empty registry and an empty index change nothing, and a list
 	// that waited for a change to draw would draw nothing — not even that
 	// nothing runs — until one came (C12r2, r27-pr2 2).
 	p := &poller{r: r, o: o, hosts: map[string]*hostState{}, results: make(chan result, o.maxInFlight), dirty: true}
-	go p.run()
+	if !o.hub {
+		// The list's roster is one run, open from the start.
+		p.run, p.active = 1, true
+	}
+	go p.loop()
 	return r
+}
+
+// Resume opens run — a number above every run before it — on a roster
+// OpenHub opened: at once the poller reads the registry and asks every host,
+// as a tick does, and it goes on at every tick; Snapshot.Run says which run a
+// Snapshot is from, and Row.Polled whether a row is that run's. It never
+// waits: the poller takes the latest of Resume and Pause.
+func (r *Roster) Resume(run uint64) { r.ask(run) }
+
+// Pause closes the run: the poller asks no host and reads no registry until
+// the next Resume. Attempts in flight finish and are taken, and every kept
+// connection is kept. It never waits.
+func (r *Roster) Pause() { r.ask(0) }
+
+func (r *Roster) ask(run uint64) {
+	r.wantMu.Lock()
+	r.want = run
+	r.wantMu.Unlock()
+	select {
+	case r.wake <- struct{}{}:
+	default:
+	}
+}
+
+func (r *Roster) wanted() uint64 {
+	r.wantMu.Lock()
+	defer r.wantMu.Unlock()
+	return r.want
 }
 
 // Updates is the latest-snapshot slot: capacity one, the newest Snapshot
@@ -375,14 +523,33 @@ type hostState struct {
 	status   Status
 	version  string
 	session  *Session
+	// raw is the hub's roster's (options.hub): the last row's JSON value.
+	// readAt is when the last answer came (the roster's clock).
+	raw    json.RawMessage
+	readAt time.Time
+	// startRun is the run the host's last attempt started in, and doneRun
+	// the run of the last attempt to finish: Row.Polled's.
+	startRun, doneRun uint64
+}
+
+// forget drops what h said of its last session — its row, its read, its
+// status and backoff, and whether it was polled — for a host whose entry now
+// names another: it is Connecting again, due at once. Its connection and its
+// version, the host process's, are kept.
+func (h *hostState) forget() {
+	h.status, h.session, h.raw, h.readAt = Connecting, nil, nil, time.Time{}
+	h.failures, h.next, h.doneRun = 0, time.Time{}, 0
 }
 
 // result is one attempt's end: the connection to keep (nil on a failure,
-// which has closed it), the host's row and hello's version, or why not.
+// which has closed it), the host's row and hello's version, or why not; and
+// the craze session the attempt asked for (its entry's).
 type result struct {
 	hostID  string
+	session string
 	conn    *client
 	row     protocol.SessionRow
+	raw     json.RawMessage
 	version string
 	err     error
 }
@@ -401,13 +568,17 @@ type poller struct {
 	attempts sync.WaitGroup
 	// round counts the ticks.
 	round uint64
+	// run is the open run's number (the last opened, while paused), and
+	// active whether one is open: the poller ticks only while one is.
+	run    uint64
+	active bool
 
 	regErr error
 	saved  savedRows
 	dirty  bool
 }
 
-func (p *poller) run() {
+func (p *poller) loop() {
 	defer close(p.r.done)
 	defer close(p.r.out)
 	ticks := p.o.ticks
@@ -416,14 +587,20 @@ func (p *poller) run() {
 		defer t.Stop()
 		ticks = t.C
 	}
-	p.tick()
+	if p.active {
+		p.tick()
+	}
 	for {
 		select {
 		case <-p.r.ctx.Done():
 			p.shutdown()
 			return
+		case <-p.r.wake:
+			p.control()
 		case <-ticks:
-			p.tick()
+			if p.active {
+				p.tick()
+			}
 		case res := <-p.results:
 			p.apply(res)
 			// Every other result already back goes into the same Snapshot.
@@ -436,10 +613,33 @@ func (p *poller) run() {
 				}
 			}
 			// The attempts that ended leave their places to the hosts this
-			// tick has not asked yet.
-			p.launch()
+			// tick has not asked yet — while a run is open: a paused poll
+			// starts nothing, the rest of its round included.
+			if p.active {
+				p.launch()
+			}
 			p.publish()
 		}
+	}
+}
+
+// control takes the latest of Resume and Pause: a run asked for that is not
+// the open one opens — dirty, so its first Snapshot says so whatever else
+// moved — and ticks at once; 0 closes the open one.
+func (p *poller) control() {
+	switch run := p.r.wanted(); {
+	case run == 0:
+		p.active = false
+		if f := p.o.paused; f != nil {
+			f()
+		}
+	case run != p.run || !p.active:
+		if run != p.run {
+			p.run = run
+			p.dirty = true
+		}
+		p.active = true
+		p.tick()
 	}
 }
 
@@ -473,7 +673,10 @@ func (p *poller) tick() {
 // reconcile brings the hosts to the registry's list: a new host is
 // Connecting, a changed entry is taken, and a host gone from the registry has
 // its connection closed — or, while an attempt holds it, closed by that
-// attempt's result.
+// attempt's result. An entry that names another craze session than before is
+// a host whose row is not yet read: what it said of the last session is
+// dropped, and it is Connecting until an attempt made for the new one comes
+// back (r19 2).
 func (p *poller) reconcile(entries []rundir.Entry) {
 	listed := make(map[string]bool, len(entries))
 	for _, e := range entries {
@@ -484,6 +687,9 @@ func (p *poller) reconcile(entries []rundir.Entry) {
 			p.hosts[e.HostID] = &hostState{entry: e}
 			p.dirty = true
 		case h.gone || h.entry != e:
+			if h.entry.CrazeSessionID != e.CrazeSessionID {
+				h.forget()
+			}
 			h.gone, h.entry = false, e
 			p.dirty = true
 		}
@@ -537,7 +743,7 @@ func (p *poller) launch() {
 // deadline, dialBudget and listBudget from now, is fixed before the goroutine
 // exists and carried through everything the attempt does.
 func (p *poller) start(h *hostState) {
-	h.busy, h.round = true, p.round
+	h.busy, h.round, h.startRun = true, p.round, p.run
 	p.inFlight++
 	conn, e := h.conn, h.entry
 	h.conn = nil
@@ -564,12 +770,12 @@ func (p *poller) start(h *hostState) {
 // dialBudget + listBudget, however its host behaves. A connection that fails
 // is closed; one that answered is the result's, to keep.
 func (p *poller) attempt(e rundir.Entry, c *client, deadline time.Time) result {
-	res := result{hostID: e.HostID}
+	res := result{hostID: e.HostID, session: e.CrazeSessionID}
 	ctx := p.r.ctx
 	if c != nil {
-		rows, err := c.list(ctx, share(p.o.listBudget, deadline))
+		rows, raws, err := c.list(ctx, share(p.o.listBudget, deadline), p.o.hub)
 		if err == nil {
-			return answered(res, c, rows, e)
+			return answered(res, c, rows, raws, e)
 		}
 		c.close()
 		if !stale(err) {
@@ -577,18 +783,18 @@ func (p *poller) attempt(e rundir.Entry, c *client, deadline time.Time) result {
 			return res
 		}
 	}
-	c, err := dialHello(ctx, p.o.dial, p.o.check, e.Socket, share(p.o.dialBudget, deadline))
+	c, err := dialHello(ctx, p.o.dial, p.o.check, p.o.client, e.Socket, share(p.o.dialBudget, deadline))
 	if err != nil {
 		res.err = err
 		return res
 	}
-	rows, err := c.list(ctx, share(p.o.listBudget, deadline))
+	rows, raws, err := c.list(ctx, share(p.o.listBudget, deadline), p.o.hub)
 	if err != nil {
 		c.close()
 		res.err = err
 		return res
 	}
-	return answered(res, c, rows, e)
+	return answered(res, c, rows, raws, e)
 }
 
 // share is the deadline of one share of an attempt that starts now: budget
@@ -601,33 +807,41 @@ func share(budget time.Duration, deadline time.Time) time.Time {
 }
 
 // answered is res for rows, c's answer: c kept with the row of the session e
-// names — a host serves one — or, from a host that answered with none, closed
-// and a failure.
-func answered(res result, c *client, rows protocol.SessionsListResult, e rundir.Entry) result {
+// names — a host serves one — and, when raws holds the rows' JSON values
+// (the hub's roster), that row's; or, from a host that answered with none,
+// closed and a failure.
+func answered(res result, c *client, rows protocol.SessionsListResult, raws []json.RawMessage, e rundir.Entry) result {
 	if len(rows.Sessions) == 0 {
 		c.close()
 		res.err = errNoRow
 		return res
 	}
-	res.conn, res.row, res.version = c, pick(rows, e), c.version
+	i := pick(rows, e)
+	res.conn, res.row, res.version = c, rows.Sessions[i], c.version
+	if i < len(raws) {
+		res.raw = raws[i]
+	}
 	return res
 }
 
 // errNoRow is a host that answered sessions.list with no session.
 var errNoRow = errors.New("roster: the host answered sessions.list with no session")
 
-// pick is the row of the session e names, else the first: rows has one.
-func pick(rows protocol.SessionsListResult, e rundir.Entry) protocol.SessionRow {
-	for _, r := range rows.Sessions {
+// pick is the index of the row of the session e names, else the first's:
+// rows has one.
+func pick(rows protocol.SessionsListResult, e rundir.Entry) int {
+	for i, r := range rows.Sessions {
 		if r.SessionID == e.CrazeSessionID {
-			return r
+			return i
 		}
 	}
-	return rows.Sessions[0]
+	return 0
 }
 
 // apply takes one attempt's result: an answer keeps its connection and
-// resets the backoff; a failure marks the host unreachable and doubles it.
+// resets the backoff; a failure marks the host unreachable and doubles it;
+// either, made for a session the host's entry no longer names, is not
+// taken.
 func (p *poller) apply(res result) {
 	if h := p.o.applied; h != nil {
 		defer h(res.hostID, res.err)
@@ -642,6 +856,20 @@ func (p *poller) apply(res result) {
 		return
 	}
 	h.busy = false
+	if res.session != h.entry.CrazeSessionID {
+		// Made for the session the host's entry named before it changed
+		// (reconcile): what it read is the last session's, and is not taken.
+		// Its connection, if it answered, is kept, and the host is asked
+		// again at once — launch, after this: the attempt started a round
+		// before the one whose registry read named the new session.
+		h.conn = res.conn
+		return
+	}
+	if p.o.hub && h.doneRun != h.startRun {
+		// Row.Polled may have moved.
+		p.dirty = true
+	}
+	h.doneRun = h.startRun
 	if res.err != nil {
 		h.failures++
 		h.next = p.o.now().Add(p.backoff(h.failures))
@@ -653,6 +881,14 @@ func (p *poller) apply(res result) {
 	}
 	h.failures, h.next = 0, time.Time{}
 	h.conn = res.conn
+	h.readAt = p.o.now()
+	if p.o.hub {
+		// Every answer moves Row.ReadAt — what the hub's roster tells a fresh
+		// row by — and may move Raw where Session is unchanged: a newer
+		// host's member this build does not decode.
+		h.raw = res.raw
+		p.dirty = true
+	}
 	if res.version != "" && res.version != h.version {
 		h.version = res.version
 		p.dirty = true
@@ -677,12 +913,19 @@ func (p *poller) backoff(n int) time.Duration {
 // publish puts the latest Snapshot in the slot when something changed since
 // the last: the one waiting untaken, if any, is replaced. The poller is the
 // slot's only sender, so once it has emptied it the send cannot wait.
+//
+// The hub's roster (options.hub) fills no slot: each Snapshot is handed to
+// its publish, in order, on this goroutine.
 func (p *poller) publish() {
 	if !p.dirty {
 		return
 	}
 	p.dirty = false
 	snap := p.snapshot()
+	if p.o.publish != nil {
+		p.o.publish(snap)
+		return
+	}
 	select {
 	case <-p.r.out:
 	default:
@@ -693,12 +936,15 @@ func (p *poller) publish() {
 // snapshot is the Snapshot of now: the hosts in host-id order, each row a
 // copy.
 func (p *poller) snapshot() Snapshot {
-	s := Snapshot{RegistryErr: p.regErr, IndexErr: p.saved.err, Saved: slices.Clone(p.saved.rows)}
+	s := Snapshot{RegistryErr: p.regErr, IndexErr: p.saved.err, Saved: slices.Clone(p.saved.rows), Run: p.run}
+	now := p.o.now()
 	for _, h := range p.hosts {
 		if h.gone {
 			continue
 		}
-		row := Row{Host: HostOf(h.entry), Status: h.status, Version: h.version, IndexTitle: p.saved.titles[h.entry.CrazeSessionID]}
+		row := Row{Host: HostOf(h.entry), Status: h.status, Version: h.version, IndexTitle: p.saved.titles[h.entry.CrazeSessionID],
+			Raw: h.raw, ReadAt: h.readAt,
+			Polled: p.run != 0 && h.doneRun == p.run || h.failures > 0 && now.Before(h.next)}
 		if h.session != nil {
 			c := *h.session
 			row.Session = &c

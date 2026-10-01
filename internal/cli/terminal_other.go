@@ -14,6 +14,10 @@ func isTerminal(f *os.File) bool {
 	return err == nil && st.Mode()&os.ModeCharDevice != 0
 }
 
+// terminalWidth has no window-size ioctl off Linux and macOS: craze ps's
+// title column takes its fixed width there.
+func terminalWidth(*os.File) (int, bool) { return 0, false }
+
 // echoOff has no termios to change off Linux and macOS (terminal.go).
 type echoOff struct{}
 

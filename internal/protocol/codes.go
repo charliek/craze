@@ -71,9 +71,10 @@ func Retry(c Code) bool {
 
 // Reason is an error's data.reason (plan 027 §3.2): a second closed set,
 // finer than the code, naming the exact sentinel — the engine's own reasons
-// (engine.Reason), the protocol's, and three a client makes up for itself and
-// no host ever sends. It is for wording and for a craze client's
-// reconstruction of the Go error, never for retry: that is the code's alone.
+// (engine.Reason), the protocol's, the hub's (plan 032), and three a client
+// makes up for itself and no host ever sends. It is for wording and for a
+// craze client's reconstruction of the Go error, never for retry: that is the
+// code's alone.
 type Reason string
 
 // The engine's reasons: classify's third column (internal/engine/control.go),
@@ -177,6 +178,40 @@ const (
 	ReasonHubOnly Reason = "hub_only"
 )
 
+// The hub's own reasons (plan 032 §3.6, §3.7, §3.10, §3.15): refusals of a
+// hub connection, which no host sends. Each sits under a code a client
+// already decides from, so a client that does not know one maps it by its
+// code.
+const (
+	// ReasonHostOnly is a session-scoped method other than session.connect
+	// sent to the hub: a session's methods are its host's, reached through
+	// the splice — hub_only's mirror.
+	ReasonHostOnly Reason = "host_only"
+	// ReasonConnectNotFirst is a session.connect that is not the
+	// connection's first request after hello, or arrives with another
+	// request in flight or a roster subscription open: the splice takes the
+	// whole connection.
+	ReasonConnectNotFirst Reason = "connect_not_first"
+	// ReasonAmbiguousSession is a session.connect whose sessionId matches
+	// more than one live host (a craze session id, a provider session id or a
+	// host id): the client names the one it means by its host id.
+	ReasonAmbiguousSession Reason = "ambiguous_session"
+	// ReasonAlreadySubscribed is a second sessions.subscribe on a connection
+	// that holds a roster subscription: one per connection.
+	ReasonAlreadySubscribed Reason = "already_subscribed"
+	// ReasonRequestConflict is a session.create whose requestId was already
+	// used with other params (plan 032 §3.10): nothing was created.
+	ReasonRequestConflict Reason = "request_conflict"
+	// ReasonSpawnFailed is a session.create whose host failed to start or to
+	// become ready (plan 032 §3.10); the hub has reaped it. Never stored.
+	ReasonSpawnFailed Reason = "spawn_failed"
+	// ReasonHostUnreachable is a session.connect whose host the hub could not
+	// dial: its socket refused or timed out, or its peer check failed — or a
+	// hub that cannot read its registry, so it reaches no host: refused a
+	// session.connect, a sessions.list and a sessions.subscribe.
+	ReasonHostUnreachable Reason = "host_unreachable"
+)
+
 // The client-side reasons (plan 027 §3.2): a client names these outcomes
 // itself, for wording, and no host ever sends one — they are listed so a
 // client never mistakes one for a host's answer. None has a code of its own
@@ -211,9 +246,11 @@ type ReasonInfo struct {
 	ClientSide bool
 }
 
-// reasons is plan 027 §3.2's table, every row: the reasons a host sends,
-// under their codes, then the client-side ones. A code with a single reason
-// sends the code itself.
+// reasons is plan 027 §3.2's table, every row: the reasons a host or the hub
+// sends, under their codes, then the client-side ones. A code with a single
+// reason sends the code itself. A reason is one code's, always (envelope.json's
+// errorData holds it): a new one joins the code a client already decides
+// from, never a second code.
 var reasons = []ReasonInfo{
 	{ReasonNotAccepting, CodeNotAccepting, true, false},
 	{ReasonNotInTurn, CodeNotAccepting, true, false},
@@ -232,6 +269,8 @@ var reasons = []ReasonInfo{
 	{ReasonNotReady, CodeUnavailable, false, false},
 	{ReasonBusy, CodeUnavailable, false, false},
 	{ReasonClosing, CodeUnavailable, true, false},
+	{ReasonSpawnFailed, CodeUnavailable, false, false},
+	{ReasonHostUnreachable, CodeUnavailable, false, false},
 
 	{ReasonOptionGone, CodeFailed, true, false},
 	{ReasonFailed, CodeFailed, true, false},
@@ -246,12 +285,17 @@ var reasons = []ReasonInfo{
 	{ReasonProtocolVersion, CodeBadRequest, false, false},
 	{ReasonBadToken, CodeBadRequest, false, false},
 	{ReasonAlreadyAttached, CodeBadRequest, false, false},
+	{ReasonConnectNotFirst, CodeBadRequest, false, false},
+	{ReasonAmbiguousSession, CodeBadRequest, false, false},
+	{ReasonAlreadySubscribed, CodeBadRequest, false, false},
+	{ReasonRequestConflict, CodeBadRequest, false, false},
 
 	{ReasonUnsupported, CodeUnsupported, true, false},
 	{ReasonUnknownMethod, CodeUnsupported, false, false},
 	{ReasonStopUnsupported, CodeUnsupported, false, false},
 	{ReasonRosterUnsupported, CodeUnsupported, false, false},
 	{ReasonHubOnly, CodeUnsupported, false, false},
+	{ReasonHostOnly, CodeUnsupported, false, false},
 
 	// Every other code: the code itself, its one reason.
 	{ReasonUnknownSession, CodeUnknownSession, false, false},
@@ -277,8 +321,8 @@ var reasons = []ReasonInfo{
 	{ReasonNoAnswer, "", false, true},
 }
 
-// Reasons is the whole table, in a fixed order: every reason a host sends,
-// each under its one code, then the client-side ones.
+// Reasons is the whole table, in a fixed order: every reason a host or the
+// hub sends, each under its one code, then the client-side ones.
 func Reasons() []ReasonInfo { return slices.Clone(reasons) }
 
 // Lookup is r's row of the table, and false for a reason the table does not

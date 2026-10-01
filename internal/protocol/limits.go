@@ -57,3 +57,52 @@ const (
 	// synchronized (§3.14).
 	ReattachesPerEpisode = 8
 )
+
+// The hub roster's bounds (plan 032 §3.6), which the hub enforces (C11) and
+// the schema states (info.json's rosterRow, rosterHost and forwardedRow;
+// maxItems on every roster list), so that a whole roster — RosterRowsMax
+// roster rows of at most RosterEntryBytesMax encoded bytes each, in a reply
+// whose request id is at most RosterRequestIDBytesMax encoded bytes, or a
+// roster notification, the hub's own epoch and subscription id each at most
+// 64 bytes — is always one line under OutboundLineMax
+// (TestAFullRosterFitsOneLine builds it). The hub keeps every roster row
+// within them, in this order, marking each roster row it changes
+// approximate:
+//
+//  1. a host string over its bound (RosterCrazeVersionMax, RosterProviderMax,
+//     RosterWorkspaceMax — characters, as JSON Schema's maxLength counts
+//     them) is cut to it at a character boundary;
+//  2. a host row whose JSON encoding is over RosterRowBytesMax is dropped
+//     (the roster row's row absent);
+//  3. a roster row whose JSON encoding is still over RosterEntryBytesMax —
+//     only a row near its bound beside host strings that encode to six
+//     bytes a character (control characters, escaped) can be — has its row
+//     dropped. Without its row a roster row always fits: its strings at
+//     their bounds encode to at most 6 × (128 + 64 + 4096) bytes.
+//
+// A host id is 12 hex digits and a craze session id a token of at most 128
+// characters ([A-Za-z0-9._-]): a host whose ids are not is not listed.
+const (
+	// RosterCrazeVersionMax bounds a roster row's host.crazeVersion: 128
+	// characters.
+	RosterCrazeVersionMax = 128
+	// RosterProviderMax bounds a roster row's host.provider: 64 characters.
+	RosterProviderMax = 64
+	// RosterWorkspaceMax bounds a roster row's host.workspace: 4096
+	// characters, Linux's PATH_MAX.
+	RosterWorkspaceMax = 4096
+	// RosterRowBytesMax bounds the host row a roster row carries, as JSON:
+	// 16 KiB.
+	RosterRowBytesMax = 16 << 10
+	// RosterEntryBytesMax bounds a whole roster row, as JSON: 32,000 bytes.
+	RosterEntryBytesMax = 32_000
+	// RosterRowsMax is the most rows a hub roster holds (plan 032 §3.6): 512,
+	// in hostId order, the result's truncated set beyond — and the most a
+	// roster notification's upserts and removes each hold.
+	RosterRowsMax = 512
+	// RosterRequestIDBytesMax is the longest request id, as JSON, the
+	// roster's size guarantee covers: 1 KiB. A client that sends a longer one
+	// for sessions.list or sessions.subscribe may meet response_too_large,
+	// as any reply over OutboundLineMax does.
+	RosterRequestIDBytesMax = 1 << 10
+)

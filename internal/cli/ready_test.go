@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/charliek/craze/internal/hostspawn"
 	"github.com/charliek/craze/internal/protocol"
 	"github.com/charliek/craze/internal/remote"
 	"github.com/charliek/craze/internal/rundir"
@@ -67,17 +68,17 @@ func runServeReady(t *testing.T, closed bool, argv ...string) (*serveRun, *os.Fi
 }
 
 // readyFrom is the one ready line on rd, read as the spawner reads it
-// (parseReady), within serveStep.
-func readyFrom(t *testing.T, rd *os.File) readyLine {
+// (hostspawn.ParseReady), within serveStep.
+func readyFrom(t *testing.T, rd *os.File) hostspawn.ReadyLine {
 	t.Helper()
 	type got struct {
-		line    readyLine
-		failure spawnFailure
+		line    hostspawn.ReadyLine
+		failure hostspawn.Failure
 		why     string
 	}
 	ch := make(chan got, 1)
 	go func() {
-		line, failure, why := parseReady(rd)
+		line, failure, why := hostspawn.ParseReady(rd)
 		ch <- got{line, failure, why}
 	}()
 	select {
@@ -88,7 +89,7 @@ func readyFrom(t *testing.T, rd *os.File) readyLine {
 		return g.line
 	case <-time.After(serveStep):
 		t.Fatalf("no ready line within %v", serveStep)
-		return readyLine{}
+		return hostspawn.ReadyLine{}
 	}
 }
 
@@ -242,7 +243,7 @@ func TestServeAnswersWhyItNeverServed(t *testing.T) {
 		r, rd := runServeReady(t, false, "--agent-bin", fakeAgentPath(t), "--load", id)
 		line := readyFrom(t, rd)
 		code, msg := exitCode(t, r.result(t, serveStep))
-		want := readyHeld{HostID: holder, PID: os.Getpid(), CrazeSessionID: id}
+		want := hostspawn.ReadyHeld{HostID: holder, PID: os.Getpid(), CrazeSessionID: id}
 		if line.OK || line.Held == nil || *line.Held != want || line.Refused || line.Error != msg || code != 1 ||
 			!strings.HasPrefix(msg, "craze serve: that session is already running (pid ") {
 			t.Fatalf("the line %+v (held %+v); exit %d %q", line, line.Held, code, msg)
@@ -401,7 +402,7 @@ func TestServeFailsAStartWhoseAgentCannotBeRecorded(t *testing.T) {
 		t.Fatal(err)
 	}
 	hostID := rundir.NewHostID()
-	if err := os.Mkdir(filepath.Join(dir, agentGroupsName(hostID)), 0o700); err != nil {
+	if err := os.Mkdir(filepath.Join(dir, hostspawn.AgentGroupsName(hostID)), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	type record struct {
@@ -533,7 +534,7 @@ func TestServeKeepsItsAgentsRecordUntilItsStartHasJoined(t *testing.T) {
 			t.Cleanup(func() { teardownStep = prevStep })
 
 			hostID := rundir.NewHostID()
-			record := filepath.Join(env.Home, ".cache", "craze", "host-logs", agentGroupsName(hostID))
+			record := filepath.Join(env.Home, ".cache", "craze", "host-logs", hostspawn.AgentGroupsName(hostID))
 			r, rd := runServeReady(t, false, "--agent-bin", fakeAgentPath(t), "--workspace", ws, "--host-id", hostID)
 			// Before runServeReady's own cleanup: a failing test lets the
 			// start go, so the host can still stop.

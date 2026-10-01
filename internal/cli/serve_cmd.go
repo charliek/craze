@@ -16,6 +16,7 @@ import (
 
 	"github.com/charliek/craze/internal/agent"
 	"github.com/charliek/craze/internal/engine"
+	"github.com/charliek/craze/internal/hostspawn"
 	"github.com/charliek/craze/internal/journal"
 	"github.com/charliek/craze/internal/rundir"
 	"github.com/charliek/craze/internal/sessions"
@@ -481,9 +482,9 @@ func serveSession(cmd *cobra.Command, f *serveFlags, env hostEnv, sigs <-chan os
 // one that cannot run where it ran, a spawn flag the row's provider cannot
 // take, a claim to try again. It carries the refusal whole — its exit code
 // and its words (diagnose finds the *exitError through it) — and marks it
-// for the ready line (readyLine.Refused), so the launcher shows a picker's
-// choice refused as that picker's error row, and a host that could not bind
-// its socket as the start failure it is.
+// for the ready line (hostspawn.ReadyLine.Refused), so the launcher shows a
+// picker's choice refused as that picker's error row, and a host that could
+// not bind its socket as the start failure it is.
 type choiceRefusal struct{ err error }
 
 func (r *choiceRefusal) Error() string { return r.err.Error() }
@@ -692,7 +693,7 @@ func (h *serveHost) announce() {
 	if serveAnnouncing(h.ready) {
 		return
 	}
-	err := h.ready.send(readyLine{
+	err := h.ready.send(hostspawn.ReadyLine{
 		OK:             true,
 		HostID:         h.rh.ctl.host.ID(),
 		Socket:         h.rh.ctl.host.Socket(),
@@ -793,7 +794,7 @@ func (h *serveHost) joinStart() bool {
 // join (astra r6-fix3): every agent process group it recorded that is still
 // provably the agent's is sent SIGTERM, given serveAgentTermGrace, and sent
 // SIGKILL if it is still there, and the record is removed. It is the
-// spawner's killAgents, run by the host itself before it exits — a record
+// spawner's KillAgents, run by the host itself before it exits — a record
 // left for a launcher that has gone is an agent nobody ends. A host run by
 // hand records nothing and kills nothing.
 func (h *serveHost) killOwnAgents() {
@@ -803,7 +804,7 @@ func (h *serveHost) killOwnAgents() {
 	// Nothing is recorded from here: a spawn the stalled start finishes now
 	// is refused its record, which fails that start and ends its agent.
 	h.groups.seal()
-	killRecordedAgents(h.groups.path, serveAgentTermGrace, func(format string, args ...any) {
+	hostspawn.KillRecordedAgents(h.groups.path, serveAgentTermGrace, func(format string, args ...any) {
 		fmt.Fprintf(h.log, "craze serve: "+format+"\n", args...)
 	})
 }

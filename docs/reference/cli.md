@@ -5,6 +5,7 @@ craze [flags]
 craze prompt [text] [flags]
 craze bridge [flags]
 craze attach [flags]
+craze ps [flags]
 craze serve [flags]
 craze auth login [provider]
 craze auth logout <provider>
@@ -503,6 +504,7 @@ the client's job, not this command's.
 | Flag | Description |
 |------|-------------|
 | `--session` | A craze session id, a provider session id, or a host id (default: the one running session) |
+| `--hub` | Relay to this machine's [hub](#the-hub) instead, starting it when none runs. Not with `--session` |
 
 `--session`'s id is resolved against the registry under the bridge
 process's own `$HOME` (`~/.cache/craze/hosts/*.json`; see
@@ -541,6 +543,20 @@ craze bridge: session <id> is unreachable: <reason>
 `craze bridge: no session <id>` is the contract line for an unknown
 `--session`: a device reading it back knows the id it asked for is not (or no
 longer) running here, not that something else broke.
+
+**`--hub`** relays to [the hub](#the-hub) instead of one session's host,
+starting it when none runs (found, like a host, under the bridge process's
+own `$HOME`). The same pump and the same error contract apply; the client
+says `hello` to the hub and then reads the [roster](protocol.md#the-hubs-roster)
+or splices itself to a session with
+[`session.connect`](protocol.md#the-hub-splice). Plain `craze bridge` is
+unchanged. Its own failures:
+
+```text
+craze bridge: --hub and --session cannot be used together: the hub's session.connect names the session
+craze bridge: no hub: <reason>
+craze bridge: the hub is unreachable: <reason>
+```
 
 | Code | When |
 |------|------|
@@ -699,6 +715,80 @@ See [A session already running in another craze](#a-session-already-running-in-a
 `--continue`/`-c` (and a `--resume` choice) of a session already running in
 another `craze` attaches to it through this same command, rather than
 refusing.
+
+## craze ps
+
+```bash
+./bin/craze ps
+./bin/craze ps --json
+./bin/craze ps --no-hub
+```
+
+Lists every running craze session of this user on this machine — every live
+host in the [registry](protocol.md#the-registry) under `$HOME` that has a
+craze session id, whichever terminal or `CRAZE_HOME` started it — one row
+each, from [the hub](#the-hub)'s roster:
+
+```text
+SESSION   STATE        PROVIDER  MODEL  DIR       SINCE  TITLE
+0000a001  needs you    cursor    -      ~/proj-a  2m     fix the flaky test
+0000c003  starting     cursor    -      ~         3h     add the ps command
+0000e007  idle         native    -      ~/newer   5m     -
+```
+
+| Column | |
+|--------|---|
+| `SESSION` | The last eight characters of the session's craze id: its random end. A craze id is a UUIDv7, whose first characters are its clock's, the same for every session started within a minute or so. `--json`, `craze attach --session` and `craze bridge --session` take the whole id |
+| `STATE` | The session list's state: `needs you` (an ask is open), `working`, `starting` (its host has not answered yet), `failed` (its start or its last turn failed), `idle`, or `unreachable` (listed, and its socket does not answer) |
+| `PROVIDER` | The session's provider |
+| `MODEL` | `-` for now: a session's row does not carry the model it runs |
+| `DIR` | The session's working directory, `~` for `$HOME` |
+| `SINCE` | How long the session has been in its state, in one unit (`42s`, `5m`, `3h`, `6d`); `-` when its host does not say (an older craze) |
+| `TITLE` | The session's title, else its first prompt (the session index's title), else `-`: one line, cut with `…` to what is left of the terminal's width, or to 100 cells when stdout is not a terminal |
+
+Rows are ordered by state, in the order above, then newest in its state
+first. On a terminal no line is wider than it: when fewer than 10 cells are
+left for the title, `DIR` gives up cells first (down to 10), its paths cut
+from the left so their ends stay, and a terminal too narrow even for the
+other columns has every line cut. With nothing running it prints `no
+sessions running`.
+
+| Flag | Description |
+|------|-------------|
+| `--json` | Print the hub's roster (its `sessions.list` result, [the protocol's](protocol.md#the-hubs-roster) roster rows) on one line instead of the table |
+| `--no-hub` | Read each session's host directly, without the hub |
+
+`--no-hub` — and any failure to have a hub (none could be started, or it did
+not answer within 10 s) — reads each host itself, exactly as the hub would
+(one round of the same poll; the same rows), and says so on stderr:
+
+```text
+craze ps: --no-hub: reading each session's host directly
+craze ps: the hub is not available (<reason>); reading each session's host directly
+```
+
+With `--json`, that roster's `epoch` is `""` and its `cursor` 0: it is no
+hub's. `craze ps` exits 0 unless that read fails too — the registry cannot be
+read — which is exit 1 with the reason on one line.
+
+### The hub
+
+The hub is one process per user and craze directory (`CRAZE_HOME`), `craze
+hub`: it serves the [roster](protocol.md#the-hubs-roster) of every running
+session and a [splice](protocol.md#the-hub-splice) to any one of them, on a
+socket of its own in the runtime namespace. **Nothing needs starting by
+hand:** `craze ps` and `craze bridge --hub` start it when none runs —
+re-executed, in a session of its own, its stdio on `/dev/null` — and the next
+one finds it. A hub that does not answer is replaced.
+
+It **exits by itself 60 seconds after the last host has gone and the last
+client has disconnected** — one nobody ever connected to included — and
+while any session runs it stays. Killing it loses nothing: hosts run on
+without it, and the next `craze ps` starts another.
+
+Its log is `~/.cache/craze/host-logs/hub-<ns>.log`, beside the
+[host logs](configuration.md#host-logs) (under the process's own `$HOME`;
+`<ns>` names the craze directory), rotated once at 4 MiB like a host's.
 
 ## craze auth
 

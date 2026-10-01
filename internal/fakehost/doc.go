@@ -26,7 +26,19 @@
 // their rank, the catalogs' "recent" — in place of its own; the Stub's
 // provider stays its own, since only the catalog is on trial.
 //
-// depguard: this package may import internal/tui (for the Stub) and
-// internal/control (the server); it may not import internal/cli, internal/acp
-// or internal/harness (.golangci.yml's fakehost rule).
+// A Host is served on a listener its caller makes, listed nowhere, unless it
+// is registered (Register, plan 032 §3.15): then it is bound and listed in a
+// registry exactly as a craze host is — its socket in the runtime tree, its
+// entry and lifetime lock in the cache tree — so a hub finds it, and several
+// Hosts with ids of their own (Options.HostID, CrazeSessionID) are listed
+// side by side; the unlist op takes it out of the registry again (Unlist).
+// cmd/craze-fake-host's --registry, --host-id and --session-id are the same,
+// and the wire fixtures' runner registers a two-socket fixture's Host for the
+// hub — the real internal/hub, in process — it runs in front of it
+// (wire_test.go, hub_fixture_test.go).
+//
+// depguard: this package may import internal/tui (for the Stub),
+// internal/control (the server) and internal/rundir (Register); it may not
+// import internal/cli, internal/acp or internal/harness (.golangci.yml's
+// fakehost rule).
 package fakehost

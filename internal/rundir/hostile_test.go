@@ -213,7 +213,7 @@ func TestTheWrongOwnerIsRefused(t *testing.T) {
 		// the real uid's.
 		env := testEnv(t)
 		env.EUID = other
-		_, err := env.socketDir("0123abcd", NewHostID())
+		_, err := env.socketDir("0123abcd")
 		want := mustCanonical(t, env.CrazeRuntimeDir) + " is owned by uid " + strconv.Itoa(os.Geteuid()) + ", not uid " + strconv.Itoa(other)
 		if err == nil || !strings.Contains(err.Error(), want) {
 			t.Fatalf("socketDir error %v; want %q", err, want)

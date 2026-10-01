@@ -20,10 +20,13 @@ import (
 // it, as the socket is chmod-ed: the umask may have cleared the owner's bits,
 // and a lock file without them could never be opened again — by Hosts,
 // probing a live host, or by the session's next claim. A file that already
-// exists is opened as it is, and never changed.
+// exists is opened as it is, and never changed. Between the two opens the
+// file can go (a sweep unlinking an orphan lock): the second then fails with
+// an error wrapping fs.ErrNotExist, for the caller to open again.
 func openLock(d *dir, name string) (*os.File, error) {
 	f, err := d.openFile(name, os.O_CREATE|os.O_EXCL|os.O_RDWR, 0o600)
 	if errors.Is(err, fs.ErrExist) {
+		lockFound(d.join(name))
 		return d.openFile(name, os.O_RDWR, 0)
 	}
 	if err != nil {
@@ -35,6 +38,11 @@ func openLock(d *dir, name string) (*os.File, error) {
 	}
 	return f, nil
 }
+
+// lockFound runs in openLock between the exclusive create that found the
+// lock file there and the open of that file, with its path: nothing in
+// production, and in a test (never in parallel) a sweep in that window.
+var lockFound = func(string) {}
 
 // tryLock is flock(LOCK_EX|LOCK_NB) on f: true when taken, false when
 // another open file description holds it. flock locks belong to the open

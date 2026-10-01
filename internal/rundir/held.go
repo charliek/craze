@@ -63,7 +63,7 @@ func isDirStat(st *unix.Stat_t) bool { return uint32(st.Mode)&unix.S_IFMT == uni
 func permOfStat(st *unix.Stat_t) uint32 { return uint32(st.Mode) & 0o7777 }
 
 // idOfStat is st's (dev, ino), converted as idOf converts a FileInfo's.
-func idOfStat(st *unix.Stat_t) fileID { return fileID{dev: uint64(st.Dev), ino: uint64(st.Ino)} }
+func idOfStat(st *unix.Stat_t) FileID { return FileID{Dev: uint64(st.Dev), Ino: uint64(st.Ino)} }
 
 // lstat is fstatat(d, name, AT_SYMLINK_NOFOLLOW).
 func (d *dir) lstat(name string) (unix.Stat_t, error) {
@@ -340,7 +340,7 @@ var fstatTemp = unix.Fstat
 // returns, before any step that can fail, so no failure leaves it. It returns
 // the new file's identity, fstat-ed on the descriptor it was written through:
 // there is no stat after the rename to fail.
-func (d *dir) replace(name string, b []byte, perm uint32) (fileID, error) {
+func (d *dir) replace(name string, b []byte, perm uint32) (FileID, error) {
 	var f *os.File
 	var tmp string
 	for range tempTries {
@@ -350,13 +350,13 @@ func (d *dir) replace(name string, b []byte, perm uint32) (fileID, error) {
 			continue
 		}
 		if err != nil {
-			return fileID{}, &fs.PathError{Op: "create", Path: d.join(tmp), Err: err}
+			return FileID{}, &fs.PathError{Op: "create", Path: d.join(tmp), Err: err}
 		}
 		f = os.NewFile(uintptr(fd), d.join(tmp))
 		break
 	}
 	if f == nil {
-		return fileID{}, fmt.Errorf("no unused temporary name for %s in %d tries", d.join(name), tempTries)
+		return FileID{}, fmt.Errorf("no unused temporary name for %s in %d tries", d.join(name), tempTries)
 	}
 	// Unlinked by name, which is safe here: d is the euid's own 0700 leaf,
 	// held by descriptor, so only the euid (or root) can have put anything
@@ -379,10 +379,10 @@ func (d *dir) replace(name string, b []byte, perm uint32) (fileID, error) {
 		err = cerr
 	}
 	if err != nil {
-		return fileID{}, fmt.Errorf("write %s: %w", d.join(tmp), err)
+		return FileID{}, fmt.Errorf("write %s: %w", d.join(tmp), err)
 	}
 	if err := unix.Renameat(d.fd, tmp, d.fd, name); err != nil {
-		return fileID{}, fmt.Errorf("rename %s to %s: %w", d.join(tmp), name, err)
+		return FileID{}, fmt.Errorf("rename %s to %s: %w", d.join(tmp), name, err)
 	}
 	renamed = true
 	return idOfStat(&st), nil
@@ -400,7 +400,7 @@ func (d *dir) unlink(name string) error {
 // unlinkIfOurs removes name in d only while it is still the file whose
 // identity was recorded (fstatat, then unlinkat): a file put in its place
 // since is left alone, as is a name already gone.
-func (d *dir) unlinkIfOurs(name string, want fileID) error {
+func (d *dir) unlinkIfOurs(name string, want FileID) error {
 	st, err := d.lstat(name)
 	if errors.Is(err, unix.ENOENT) {
 		return nil

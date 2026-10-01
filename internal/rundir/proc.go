@@ -76,3 +76,45 @@ func parseProcStat(line string) (ProcIdentity, error) {
 	}
 	return ProcIdentity{Start: start, PPID: ppid}, nil
 }
+
+// bootSessionScope is a start time's scope on macOS, read through sysctl
+// (unix.Sysctl there; a fake in a test — it lives here, not in the Darwin
+// file, so every platform's tests check it): the boot is
+// kern.bootsessionuuid, a UUID the kernel makes at each boot, as Linux's
+// boot_id, and there is no PID namespace ("-": Darwin has none). Nothing else
+// stands in for the UUID: not kern.boottime, which XNU moves when the wall
+// clock is stepped (keeping the uptime), so a live hub's token would stop
+// matching its own process after an NTP correction — whole seconds or not.
+// Without the UUID there is no scope, so no token is made and none is
+// carried: a wedged hub is then never terminated on its record's word, only
+// reported (plan 032 P17).
+func bootSessionScope(sysctl func(name string) (string, error)) (string, string, error) {
+	id, err := sysctl("kern.bootsessionuuid")
+	if err != nil {
+		return "", "", fmt.Errorf("sysctl kern.bootsessionuuid: %w", err)
+	}
+	if !validUUID(id) {
+		return "", "", fmt.Errorf("sysctl kern.bootsessionuuid is %q, not a UUID", id)
+	}
+	return id, "-", nil
+}
+
+// validUUID reports whether s has a UUID's shape: 8-4-4-4-12 hex digits,
+// either case, nothing else.
+func validUUID(s string) bool {
+	if len(s) != 36 {
+		return false
+	}
+	for i := range len(s) {
+		c := s[i]
+		switch {
+		case i == 8 || i == 13 || i == 18 || i == 23:
+			if c != '-' {
+				return false
+			}
+		case (c < '0' || c > '9') && (c < 'a' || c > 'f') && (c < 'A' || c > 'F'):
+			return false
+		}
+	}
+	return true
+}

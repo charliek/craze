@@ -32,3 +32,7 @@ func processIdentity(pid int) (ProcIdentity, error) {
 	}
 	return ProcIdentity{Start: uint64(tv.Sec)*1_000_000 + uint64(tv.Usec), PPID: int(kp.Eproc.Ppid)}, nil
 }
+
+// processTokenScope is a start time's scope on macOS: the kernel's boot
+// session UUID, and no PID namespace (bootSessionScope).
+func processTokenScope() (string, string, error) { return bootSessionScope(unix.Sysctl) }

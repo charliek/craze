@@ -106,6 +106,99 @@ func TestTheLineReaderReturnsAReadError(t *testing.T) {
 	}
 }
 
+// chunked is a stream that delivers its parts one Read each — a pipelining
+// peer whose first write carried a line and part of the next — so where the
+// reader's buffer ends is the test's to say, not the scheduler's.
+type chunked struct{ parts []string }
+
+func (c *chunked) Read(p []byte) (int, error) {
+	if len(c.parts) == 0 {
+		return 0, io.EOF
+	}
+	n := copy(p, c.parts[0])
+	if n < len(c.parts[0]) {
+		c.parts[0] = c.parts[0][n:]
+	} else {
+		c.parts = c.parts[1:]
+	}
+	return n, nil
+}
+
+// TestBufferedHandsOverWhatTheReaderReadAhead (plan 032 §3.7, the splice): a
+// peer that wrote session.connect and, in the same write, the start of its
+// host hello has had both read off the stream by the reader's first fill;
+// ReadLine returns the first line and Buffered the rest, and those bytes then
+// the stream's own are everything the peer sent after the first line, in
+// order. The reader holds nothing afterwards — a second Buffered is nil and a
+// ReadLine reads on from the stream — and the bytes handed over are the
+// caller's own: the reader's next fill, which reuses its buffer, leaves them
+// as they were. The negative control is the hazard the method exists for: a
+// splice that copies the stream itself after the first line, without them,
+// loses the read-ahead.
+func TestBufferedHandsOverWhatTheReaderReadAhead(t *testing.T) {
+	first := `{"jsonrpc":"2.0","id":1,"method":"session.connect","params":{"sessionId":"s"}}`
+	ahead := `{"jsonrpc":"2.0","id":1,"method":"hello","params":{"protocols":[1],"client":{"kind":"tui"}}}` + "\n" + `{"jsonrpc":"2.0","id":2,"meth`
+	rest := `od":"session.attach","params":{"sessionId":"s"}}` + "\n"
+	script := func() *chunked { return &chunked{parts: []string{first + "\n" + ahead, rest}} }
+
+	stream := script()
+	lr := protocol.NewLineReader(stream, 0)
+	line, err := lr.ReadLine()
+	if err != nil || string(line) != first {
+		t.Fatalf("ReadLine = %q, %v; want the first line", line, err)
+	}
+	got := lr.Buffered()
+	if string(got) != ahead {
+		t.Fatalf("Buffered = %q, want the read-ahead %q", got, ahead)
+	}
+	tail, err := io.ReadAll(stream)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if spliced := string(got) + string(tail); spliced != ahead+rest {
+		t.Fatalf("the read-ahead and the stream are %q, want everything after the first line, %q", spliced, ahead+rest)
+	}
+	if again := lr.Buffered(); again != nil {
+		t.Fatalf("a second Buffered = %q: the reader still held what it handed over", again)
+	}
+
+	// The reader holds nothing: a ReadLine after Buffered reads on from the
+	// stream — here the next part, a line longer than everything the first
+	// fill held — and its fill rewrites the buffer from its start, over the
+	// bytes it handed over, which leaves the caller's copy untouched.
+	filler := strings.Repeat("y", len(first)+1+len(ahead)+8)
+	stream = &chunked{parts: []string{first + "\n" + ahead, filler + "\n"}}
+	lr = protocol.NewLineReader(stream, 0)
+	if _, err := lr.ReadLine(); err != nil {
+		t.Fatal(err)
+	}
+	got = lr.Buffered()
+	if line, err := lr.ReadLine(); err != nil || string(line) != filler {
+		t.Fatalf("ReadLine after Buffered = %q, %v; want the stream's next line", abbreviate([]string{string(line)}), err)
+	}
+	if string(got) != ahead {
+		t.Fatalf("the handed-over bytes became %q after the reader's next fill: they were its buffer, not a copy", got)
+	}
+	if b := protocol.NewLineReader(strings.NewReader("a\n"), 0).Buffered(); b != nil {
+		t.Fatalf("Buffered with nothing read = %q, want nil", b)
+	}
+
+	// Negative control: the stream alone, after the first line, is missing
+	// what the reader read ahead.
+	stream = script()
+	lr = protocol.NewLineReader(stream, 0)
+	if _, err := lr.ReadLine(); err != nil {
+		t.Fatal(err)
+	}
+	tail, err = io.ReadAll(stream)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(tail) == ahead+rest {
+		t.Fatal("the stream alone carried everything after the first line: the control cannot tell a splice that forwards the read-ahead from one that drops it")
+	}
+}
+
 // TestMarshalLineCarriesARawBodyVerbatim (§3.3): an event notification
 // carries Record.Body byte for byte — HTML characters unescaped, an escape
 // the codec wrote kept as it wrote it, UTF-8 as it is — and the line ends in

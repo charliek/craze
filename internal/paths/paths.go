@@ -37,6 +37,13 @@ const (
 	removedConfigEnv = "CRAZE_CONFIG"
 )
 
+// RemovedConfigEnv is the removed config-file variable's name, for the one
+// place outside this package that must name it: the hub's environment
+// contract (internal/hub, plan 032 §3.5, P13), which hands it on absolute, as
+// it does CRAZE_HOME, so a hub or a host it spawns from another directory
+// reads exactly what its spawner would have. Goes with removedConfigEnv.
+const RemovedConfigEnv = removedConfigEnv
+
 // HomeDir is the user's home directory: HOME wins over the account database,
 // so a test (and the frame runner) can isolate it with one variable. It keys
 // the user-level skills and plugin caches (see agent.HomeDir), and it is the

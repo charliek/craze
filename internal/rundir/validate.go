@@ -18,9 +18,11 @@ const (
 	modeLeaf       = 0o700
 )
 
-// fileID is a file's identity: two files at one path across a replacement
-// differ here though the path is byte-identical.
-type fileID struct{ dev, ino uint64 }
+// FileID is a file's identity, its (dev, ino): two files at one path across a
+// replacement differ here though the path is byte-identical. It is exported
+// for the hub (plan 032 §3.4), which removes its record and socket only while
+// each is still the file it made (HubLock, ReadHubRecord, UnlinkIfOurs).
+type FileID struct{ Dev, Ino uint64 }
 
 // statOf is fi's raw stat. Every FileInfo this package reads comes from
 // os.Lstat on Linux or Darwin, where it is a *syscall.Stat_t.
@@ -30,9 +32,9 @@ func statOf(fi fs.FileInfo) *syscall.Stat_t {
 
 // idOf is fi's (dev, ino). Stat_t.Dev is an int32 on Darwin and a uint64 on
 // Linux; the conversion is the same on both, and the same as idOfStat's.
-func idOf(fi fs.FileInfo) fileID {
+func idOf(fi fs.FileInfo) FileID {
 	st := statOf(fi)
-	return fileID{dev: uint64(st.Dev), ino: uint64(st.Ino)}
+	return FileID{Dev: uint64(st.Dev), Ino: uint64(st.Ino)}
 }
 
 // permOf is fi's st_mode & 07777: permissions plus setuid, setgid and sticky.

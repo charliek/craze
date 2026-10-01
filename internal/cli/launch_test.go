@@ -505,7 +505,7 @@ func TestContinueOfAHeldSessionAttaches(t *testing.T) {
 		t.Fatalf("attached through %q, the holder serves %q", socket, holder.entry.Socket)
 	case cmds.count() != 2:
 		t.Fatalf("%d hosts spawned, want the holder and the one refused held", cmds.count())
-	case holder.child.exited():
+	case holder.child.Exited():
 		t.Fatal("the TUI's quit ended the holder")
 	}
 	waitReaped(t, cmds.pids()[1])
@@ -514,7 +514,7 @@ func TestContinueOfAHeldSessionAttaches(t *testing.T) {
 	if got := stderr(); !strings.Contains(got, "; attached to it (ignored: --model, --agent-bin)") {
 		t.Fatalf("stderr %q, want the ignored flag named", got)
 	}
-	stopEntry(t, onlyHost(t, env), holder.child.pid)
+	stopEntry(t, onlyHost(t, env), holder.child.PID())
 }
 
 // captureStderr points os.Stderr at a file for the rest of the test — the
@@ -1263,7 +1263,7 @@ func TestAReattachSpawnsNothing(t *testing.T) {
 				t.Fatalf("%d hosts spawned, want only the one serving the session", cmds.count())
 			case !slices.Equal(after, logs):
 				t.Fatalf("host logs %q after the reattach, were %q", after, logs)
-			case holder.child.exited():
+			case holder.child.Exited():
 				t.Fatal("the TUI's quit ended the host")
 			case !strings.Contains(stderr(), "; attached to it (ignored: --model, --agent-bin)"):
 				t.Fatalf("stderr %q, want the ignored flags named", stderr())
@@ -1271,7 +1271,7 @@ func TestAReattachSpawnsNothing(t *testing.T) {
 			if locks, _ := filepath.Glob(filepath.Join(env.Home, ".cache", "craze", "locks", "*.lock")); len(locks) != 1 {
 				t.Fatalf("locks %q, want the host's claim alone", locks)
 			}
-			stopEntry(t, onlyHost(t, env), holder.child.pid)
+			stopEntry(t, onlyHost(t, env), holder.child.PID())
 		})
 	}
 }
@@ -1365,8 +1365,8 @@ func TestAReattachToAStoppingHostSpawnsInstead(t *testing.T) {
 	if cmds.count() != 1 {
 		t.Fatalf("%d hosts spawned, want the fallback's one", cmds.count())
 	}
-	if spawned.child.exited() {
+	if spawned.child.Exited() {
 		t.Fatal("the TUI's quit ended the session it came up with")
 	}
-	stopEntry(t, onlyHost(t, env), spawned.child.pid)
+	stopEntry(t, onlyHost(t, env), spawned.child.PID())
 }

@@ -396,6 +396,8 @@ type tap struct {
 	lines []wireLine
 	errs  []string
 	dials int
+	// deadlines is each dial's context's deadline, in order (zero: none).
+	deadlines []time.Time
 	// dialGate, when set, holds every dial until it is closed; dialFail,
 	// when set, fails every dial with it.
 	dialGate chan struct{}
@@ -449,6 +451,8 @@ func (tp *tap) changedLocked() {
 func (tp *tap) dial(ctx context.Context, path string) (net.Conn, error) {
 	tp.mu.Lock()
 	tp.dials++
+	dl, _ := ctx.Deadline()
+	tp.deadlines = append(tp.deadlines, dl)
 	gate := tp.dialGate
 	if gate != nil && tp.dialHeld != nil {
 		close(tp.dialHeld)
@@ -522,6 +526,13 @@ func (tp *tap) dialCount() int {
 	tp.mu.Lock()
 	defer tp.mu.Unlock()
 	return tp.dials
+}
+
+// dialDeadline is dial i's context's deadline (zero: none).
+func (tp *tap) dialDeadline(i int) time.Time {
+	tp.mu.Lock()
+	defer tp.mu.Unlock()
+	return tp.deadlines[i]
 }
 
 // kill closes the newest connection under the client, as a dead link would.

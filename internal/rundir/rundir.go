@@ -8,15 +8,18 @@
 //     base is the first usable of CRAZE_RUNTIME_DIR, $XDG_RUNTIME_DIR/craze,
 //     /run/user/<euid>/craze (Linux) and /tmp/craze-<euid>, deduplicated by
 //     canonical path, and ns keys one CRAZE_HOME (Namespace). Only a host
-//     searches bases.
+//     and its namespace's hub, whose socket is <base>/<ns>/hub.sock
+//     (HubSocket), search bases.
 //   - Everything a resolver must find lives under a fixed per-user path,
 //     <HOME>/.cache/craze/: the registry (hosts/<hostId>.json), each host's
-//     lifetime lock (hosts/<hostId>.lock) and one lock per craze session
-//     (locks/<crazeSessionId>.lock, SQ16). $HOME is the same under an SSH exec
-//     as in the tab that started the host, whatever XDG_RUNTIME_DIR, CRAZE_HOME
-//     or CRAZE_RUNTIME_DIR held there, so discovery depends on no environment
-//     variable: a resolver reads the registry (Hosts), and each entry names
-//     its socket's absolute path.
+//     lifetime lock (hosts/<hostId>.lock), one lock per craze session
+//     (locks/<crazeSessionId>.lock, SQ16), and each namespace's hub's
+//     lifetime lock and record (hubs/<ns>.lock, hubs/<ns>.json: hub.go).
+//     $HOME is the same under an SSH exec as in the tab that started the
+//     host, whatever XDG_RUNTIME_DIR, CRAZE_HOME or CRAZE_RUNTIME_DIR held
+//     there, so discovery depends on no environment variable: a resolver
+//     reads the registry (Hosts), and each entry names its socket's absolute
+//     path.
 //
 // Both trees are validated before anything in them is probed, bound, written
 // or removed, by roost's rules (plan 027 §2.10) with two changes:
@@ -56,10 +59,14 @@
 // Every open under either tree carries O_NOFOLLOW. A host's socket and
 // registry entry are unlinked at exit only while their (dev, ino) still match
 // what the host recorded, and its lock file only while it still holds it. A
-// session lock file is never unlinked. A dead host's entry, temporaries and
-// lock are swept (Hosts) under its lock; its socket never is, since a lock
-// in the cache tree is no authority over a file in the runtime tree, so it
-// stays until that directory is cleared.
+// session lock file is never unlinked, nor is a hub's. A dead host's entry,
+// temporaries and lock are swept (Hosts) under its lock; its socket never is
+// by Hosts, since a lock in the cache tree is no authority over a file in the
+// runtime tree. The hub's sweep (SweepOrphans) removes what Hosts never
+// visits — a lock with no entry, a temporary, both past an age — and a host
+// socket only on the runtime tree's own evidence: old, refusing connections,
+// and still the socket it probed (never on Darwin, where a live listener with
+// a full backlog refuses too).
 //
 // The trees' modes stop another user opening the socket on this machine, and
 // nothing once it is reached another way (an SSH-forwarded socket is opened by

@@ -3,9 +3,10 @@
 // sessions of this CRAZE_HOME that are not running — the list the TUI shows
 // on ← and /sessions (tui.Config.Sessions).
 //
-// There is no hub yet (S4b): the roster reads the registry (rundir.Hosts) and
-// asks each host's own control socket for its row (sessions.list), once a
-// second while the list is open, over a connection it keeps per host. A host
+// The list's roster reads the registry (rundir.Hosts) and asks each host's
+// own control socket for its row (sessions.list), once a second while the
+// list is open, over a connection it keeps per host (the hub's roster runs
+// the same poll: OpenHub, below). A host
 // with the row facts (capability rowFacts, §3.8) says what it is doing, what
 // it last said and since when; an older one is listed with what S2's row
 // has and its craze version.
@@ -39,4 +40,19 @@
 // hello (client kind "tui", name "craze sessions"), never attaches — so it
 // does not keep a host from its idle exit (plan 030 §3.6) — and leaves the
 // S2 open and close notes in that session's journal, two per list opened.
+//
+// # The hub's roster (OpenHub)
+//
+// The hub (plan 032 §3.6, P1) runs this same poller — the same rounds,
+// budgets, cap, backoff and kept connections — opened by OpenHub: with no
+// index, each host's row kept as the JSON value it sent beside its decoding
+// (Row.Raw: members this build does not know pass through the hub), and
+// every Snapshot handed to the hub's Publish, in order, rather than to the
+// slot — one whenever a host's read moves too (Row.ReadAt: what the hub
+// tells a fresh row by). It polls only while a run is open: the hub opens one
+// (Resume) when someone first wants the roster and closes it (Pause) when
+// nobody does, keeping its connections between runs; Snapshot.Run and
+// Row.Polled say which run a row is from, so the hub can answer once every
+// host has been heard from in the run its answer opened. Its hello says
+// client kind "hub".
 package roster

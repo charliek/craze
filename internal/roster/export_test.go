@@ -14,7 +14,6 @@ import (
 
 // The poll's rules.
 const (
-	TickEvery   = tickEvery
 	DialBudget  = dialBudget
 	ListBudget  = listBudget
 	MaxInFlight = maxInFlight

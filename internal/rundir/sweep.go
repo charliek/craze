@@ -98,8 +98,10 @@ func probe(hosts *dir, id string) (Entry, bool) {
 // copied entry names is alive, and that host's socket must survive it. A dead
 // host's socket stays in its runtime directory, under a name never reused,
 // until that directory is cleared (/run/user is a tmpfs emptied at logout,
-// /tmp is emptied at boot or by systemd-tmpfiles); a host's own Close removes
-// its socket, identity-checked.
+// /tmp is emptied at boot or by systemd-tmpfiles), or until the hub's sweep
+// finds it old and refusing (SweepOrphans: the runtime tree's own evidence,
+// never this lock's); a host's own Close removes its socket,
+// identity-checked.
 func sweep(hosts *dir, id string) {
 	entry := id + ".json"
 	_ = hosts.unlink(entry)

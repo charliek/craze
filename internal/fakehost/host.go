@@ -3,6 +3,7 @@ package fakehost
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math/rand"
 	"net"
@@ -14,6 +15,7 @@ import (
 	"github.com/charliek/craze/internal/control"
 	"github.com/charliek/craze/internal/engine"
 	"github.com/charliek/craze/internal/protocol"
+	"github.com/charliek/craze/internal/rundir"
 	"github.com/charliek/craze/internal/tui"
 )
 
@@ -107,8 +109,11 @@ type clock struct {
 	t  time.Time
 }
 
+// clockStart is where every Host's clock starts.
+var clockStart = time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+
 func newClock() *clock {
-	return &clock{t: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)}
+	return &clock{t: clockStart}
 }
 
 func (c *clock) now() time.Time {
@@ -188,6 +193,9 @@ type Host struct {
 	stopHeard     chan struct{}
 	stopHeardOnce sync.Once
 	stopped       bool
+	// reg is the Host's registration (Register), nil while it has none: each
+	// new incarnation is written into its entry, as a real host's is.
+	reg *rundir.Host
 }
 
 // New builds a Host and its first incarnation, started. Nothing is served
@@ -259,10 +267,18 @@ func (h *Host) newIncarnation() error {
 	h.mu.Lock()
 	old := h.eng
 	h.stub, h.eng = stub, eng
+	reg := h.reg
 	h.mu.Unlock()
 	h.srv.SetEngine(eng)
 	if old != nil {
 		go func() { _ = old.Close() }()
+	}
+	if reg != nil {
+		st := eng.State()
+		err := reg.Update(func(e *rundir.Entry) { e.Incarnation, e.ProviderSessionID = st.Incarnation, st.SessionID })
+		if err != nil && !errors.Is(err, rundir.ErrClosed) {
+			return fmt.Errorf("fakehost: the registry entry: %w", err)
+		}
 	}
 	return nil
 }
@@ -320,6 +336,40 @@ func (h *Host) Serve(l net.Listener) error {
 	return h.srv.Serve(sl)
 }
 
+// Register binds the Host's control socket in env's runtime tree and lists it
+// in env's registry exactly as a craze host does (rundir.Bind; plan 032
+// §3.15): its lifetime lock held, its entry naming the socket, the Host's id
+// and durable session id, the current incarnation and provider session id,
+// its provider's name and workspace, ready, and started when its clock
+// started. That is what a hub (or `craze attach`, or the TUI's list) finds a
+// host by, so several Hosts with distinct ids can be listed side by side in
+// one registry. The caller serves the returned host's Listener (Serve) and
+// closes it — which unlists the Host and unlinks its socket — after Close.
+// Each later incarnation (Restart) is written into the entry. A Host is
+// registered at most once.
+func (h *Host) Register(env rundir.Env) (*rundir.Host, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.reg != nil {
+		return nil, fmt.Errorf("fakehost: host %s is registered already", h.opts.HostID)
+	}
+	st := h.eng.State()
+	reg, err := rundir.Bind(env, h.opts.HostID, rundir.Entry{
+		StartedAt:         clockStart,
+		CrazeSessionID:    h.opts.CrazeSessionID,
+		ProviderSessionID: st.SessionID,
+		Incarnation:       st.Incarnation,
+		Provider:          st.Provider.Name,
+		Workspace:         h.opts.Workspace,
+		Ready:             true,
+	})
+	if err != nil {
+		return nil, err
+	}
+	h.reg = reg
+	return reg, nil
+}
+
 // listener is the current stallListener, under mu like every other field a
 // caller and Serve's own goroutine can touch concurrently.
 func (h *Host) listener() *stallListener {
@@ -346,6 +396,13 @@ func (h *Host) HostID() string { return h.srv.HostID() }
 // poller that keeps one per host, and closes them all when it stops.
 func (h *Host) OpenConns() int { return h.srv.OpenConns() }
 
+// OnAttachments is the server's (control.Server.OnAttachments): f is told the
+// number of attached clients at every change, in order — a client's
+// half-close takes its attachment out of the count — under the server's
+// locks, so it must only record the number. What a test of a splice in front
+// of this Host watches (plan 032 A11).
+func (h *Host) OnAttachments(f func(n int)) { h.srv.OnAttachments(f) }
+
 // SessionID is the durable craze session id every incarnation shares.
 func (h *Host) SessionID() string { return h.opts.CrazeSessionID }
 
@@ -367,7 +424,9 @@ func (h *Host) Incarnation() string { return h.currentEngine().State().Incarnati
 // client, past the binding table's idle bound) and hang_next (fixture 9's
 // prompt, kept from racing its own reply: see HangNext). Plan 030 adds
 // run_stop (RunStop): the stop sequence of a Host built with Options.Stop,
-// run where a fixture's script says. Do is what runs an
+// run where a fixture's script says. Plan 032 adds unlist (Unlist): a
+// registered Host leaving the registry, for the hub's roster (fixture 20).
+// Do is what runs an
 // op to completion — the op, then the log flushed (syncLog) — so a caller
 // that needs the script's seq order goes through Do, as both of those do; the
 // "end" op also waits there, before it cancels, for the Stub to have opened
@@ -667,6 +726,22 @@ func (h *Host) AdvanceClock(d time.Duration) { h.clk.advance(d) }
 // mean this.
 func (h *Host) Quit(ctx context.Context) error { return h.Close(ctx) }
 
+// Unlist takes a registered Host out of the registry (plan 032 §3.15): its
+// registration (Register's) is closed — its entry, lifetime lock and socket
+// gone, as a host's are when it exits, so the hub's next read of the
+// registry finds it gone — while the connections it has stay served. Its
+// caller's own close of the registration later does nothing more; a Host
+// never registered is an error.
+func (h *Host) Unlist() error {
+	h.mu.Lock()
+	reg := h.reg
+	h.mu.Unlock()
+	if reg == nil {
+		return fmt.Errorf("fakehost: unlist: host %s is not registered", h.opts.HostID)
+	}
+	return reg.Close()
+}
+
 // stopRequested is the fixtures' coordinator (control.StopFunc, with
 // Options.Stop): it records the stop the server handed it — once, the
 // server's own rule — and returns, the sequence left to RunStop.
@@ -850,6 +925,8 @@ func (h *Host) do(p opParams) error {
 		return h.Quit(context.Background())
 	case "run_stop":
 		return h.RunStop()
+	case "unlist":
+		return h.Unlist()
 	case "spawn_subagent":
 		h.SpawnSubagent(p.ID)
 	case "oversized_event":

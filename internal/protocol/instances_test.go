@@ -126,6 +126,9 @@ func TestInstancesValidate(t *testing.T) {
 	}
 	hubAsHost := hub
 	hubAsHost.Endpoint.Kind = protocol.EndpointHost
+	// The hub's own hello, as the hub builds it (plan 032 §3.6).
+	theHub := hub
+	theHub.Endpoint.HostID, theHub.Capabilities = "0a1b2c3d4e5f", protocol.HubCapabilities()
 	// without drops one member from a JSON object written by jsonOf.
 	without := func(doc, member string) string {
 		var m map[string]json.RawMessage
@@ -144,6 +147,60 @@ func TestInstancesValidate(t *testing.T) {
 		m[member] = json.RawMessage(value)
 		return jsonOf(t, m)
 	}
+	// The hub's roster (plan 032 §3.6): a reachable host's row carrying its
+	// own sessions.list row, one the hub has not reached yet (no row), and an
+	// unreachable one keeping its last row, approximate.
+	hostRow := json.RawMessage(jsonOf(t, rowFacts))
+	reachable := protocol.RosterRow{HostID: "0190ab12cd34", SessionID: info.SessionID, Status: protocol.RosterReachable, Row: hostRow,
+		Host: protocol.RosterHost{PID: 4242, CrazeVersion: "0.4.0", Protocol: protocol.ProtocolVersion, Provider: "grok", Workspace: "/work",
+			StartedAt: instanceTime, Ready: true}}
+	connecting := protocol.RosterRow{HostID: "0190ab12cd35", SessionID: "session-2", Status: protocol.RosterConnecting, Approximate: true,
+		Host: protocol.RosterHost{PID: 4343, Protocol: protocol.ProtocolVersion, Provider: "cursor", Workspace: "/other", StartedAt: instanceTime}}
+	unreachable := reachable
+	unreachable.HostID, unreachable.Status, unreachable.Approximate = "0190ab12cd36", protocol.RosterUnreachable, true
+	roster := []protocol.RosterRow{reachable, connecting, unreachable}
+	hubList := protocol.HubSessionsListResult{Epoch: "0a1b2c3d4e5f", Cursor: 9, Sessions: roster}
+	hubTruncated := hubList
+	hubTruncated.Truncated = true
+	// rosterOf is a hub roster of one row, written out and then edited.
+	rosterOf := func(row string) string {
+		return `{"epoch":"0a1b2c3d4e5f","cursor":1,"sessions":[` + row + `]}`
+	}
+	// A roster row whose host strings are at their bounds, in characters
+	// (multi-byte ones, as JSON Schema counts them), and one a character over
+	// one of them.
+	atBounds := connecting
+	atBounds.Host.CrazeVersion = strings.Repeat("é", protocol.RosterCrazeVersionMax)
+	atBounds.Host.Provider = strings.Repeat("p", protocol.RosterProviderMax)
+	atBounds.Host.Workspace = "/" + strings.Repeat("w", protocol.RosterWorkspaceMax-1)
+	overBound := func(edit func(*protocol.RosterHost)) protocol.RosterRow {
+		r := atBounds
+		edit(&r.Host)
+		return r
+	}
+	// rosterOfN is a hub roster of n rows.
+	rosterOfN := func(n int) string {
+		rows := make([]protocol.RosterRow, n)
+		for i := range rows {
+			rows[i] = connecting
+		}
+		return jsonOf(t, protocol.HubSessionsListResult{Epoch: "0a1b2c3d4e5f", Sessions: rows})
+	}
+	// rosterChangeN is a roster notification of n upserts and m removes.
+	rosterChangeN := func(n, m int) string {
+		p := protocol.RosterParams{Subscription: "r-1", Epoch: "e", Upserts: make([]protocol.RosterRow, n), Removes: make([]string, m)}
+		for i := range p.Upserts {
+			p.Upserts[i] = connecting
+		}
+		for i := range p.Removes {
+			p.Removes[i] = "0190ab12cd36"
+		}
+		return jsonOf(t, p)
+	}
+	subscribed := protocol.SessionsSubscribeResult{Subscription: "r-1", Epoch: "0a1b2c3d4e5f", Cursor: 9, Sessions: roster}
+	change := protocol.RosterParams{Subscription: "r-1", Epoch: "0a1b2c3d4e5f", Cursor: 12,
+		Upserts: []protocol.RosterRow{connecting}, Removes: []string{"0190ab12cd36"}}
+
 	record := protocol.AskRecord{ID: "perm-1", Kind: "permission", Status: protocol.AskResolved, Outcome: "answered", By: "client",
 		Answer: &protocol.Answer{OptionID: "allow-once-2"}, Body: permBody, OpenedAt: instanceTime, ResolvedAt: instanceTime.Add(time.Second)}
 	openRecord := protocol.AskRecord{ID: "perm-2", Kind: "permission", Status: protocol.AskOpen, Body: permBody, OpenedAt: instanceTime, Truncated: true}
@@ -180,6 +237,7 @@ func TestInstancesValidate(t *testing.T) {
 		{"a host's hello calling itself a hub", "hello.json", "result", strings.Replace(jsonOf(t, hello), `"kind":"host"`, `"kind":"hub"`, 1), false},
 		{"a host's hello with a field it does not define", "hello.json", "result", with(jsonOf(t, hello), "extra", "1"), false},
 		{"a hub's hello", "hello.json", "result", jsonOf(t, hub), true},
+		{"the hub's hello, its capabilities the hub's", "hello.json", "result", jsonOf(t, theHub), true},
 		{"a hub's hello carrying clientId", "hello.json", "result", with(jsonOf(t, hub), "clientId", `"c-1"`), false},
 		{"a hub's hello carrying resumed", "hello.json", "result", with(jsonOf(t, hub), "resumed", "false"), false},
 		{"a hub's hello carrying retryHorizon", "hello.json", "result",
@@ -220,8 +278,72 @@ func TestInstancesValidate(t *testing.T) {
 		{"a head ask whose summary is not text", "sessions.list.json", "result",
 			strings.Replace(rosterLastTurn(rowFacts), `"summary":"Run `+"`go test ./...`"+`"`, `"summary":["Run"]`, 1), false},
 
+		// The hub's roster (plan 032 §3.6): sessions.list's result is a host's
+		// or the hub's, an anyOf, an empty roster being both.
+		{"the hub's roster", "sessions.list.json", "result", jsonOf(t, hubList), true},
+		{"the hub's roster, cut at its bound", "sessions.list.json", "result", jsonOf(t, hubTruncated), true},
+		{"the hub's empty roster", "sessions.list.json", "result",
+			jsonOf(t, protocol.HubSessionsListResult{Epoch: "0a1b2c3d4e5f", Sessions: []protocol.RosterRow{}}), true},
+		{"the hub's roster saying truncated false, which it never writes", "sessions.list.json", "result",
+			with(jsonOf(t, hubList), "truncated", "false"), false},
+		{"the hub's roster with its rows null", "sessions.list.json", "result",
+			jsonOf(t, protocol.HubSessionsListResult{Epoch: "0a1b2c3d4e5f"}), false},
+		{"a roster mixing a host's row and the hub's", "sessions.list.json", "result",
+			`{"epoch":"h","cursor":0,"sessions":[` + jsonOf(t, row) + `,` + jsonOf(t, reachable) + `]}`, false},
+		{"a host's roster saying truncated", "sessions.list.json", "result",
+			with(jsonOf(t, protocol.SessionsListResult{Epoch: "h", Sessions: []protocol.SessionRow{row}}), "truncated", "true"), false},
+		{"a roster row naming its host's socket", "sessions.list.json", "result",
+			rosterOf(with(jsonOf(t, reachable), "socket", `"/run/user/1000/craze/1a2b3c4d/0190ab12cd34.sock"`)), false},
+		{"a roster row of a status there is none of", "sessions.list.json", "result",
+			rosterOf(strings.Replace(jsonOf(t, reachable), `"reachable"`, `"asleep"`, 1)), false},
+		{"a roster row with no approximate", "sessions.list.json", "result", rosterOf(without(jsonOf(t, reachable), "approximate")), false},
+		{"a roster row with no session id", "sessions.list.json", "result", rosterOf(without(jsonOf(t, connecting), "sessionId")), false},
+		{"a roster row with an empty session id", "sessions.list.json", "result",
+			rosterOf(strings.Replace(jsonOf(t, connecting), `"sessionId":"session-2"`, `"sessionId":""`, 1)), false},
+		{"a roster row whose host has no pid", "sessions.list.json", "result",
+			rosterOf(strings.Replace(jsonOf(t, reachable), `"pid":4242,`, ``, 1)), false},
+		{"a roster row whose host says nothing of its version", "sessions.list.json", "result",
+			rosterOf(strings.Replace(jsonOf(t, connecting), `"crazeVersion":"",`, ``, 1)), false},
+		// The row a roster row carries is the host's own, as it sent it: any
+		// object (info.json's forwardedRow), a newer host's members included —
+		// the host's own sessionRow schema stays strict (roster_test.go) —
+		// and nothing that is not an object.
+		{"a roster row whose host row carries a member this build does not know", "sessions.list.json", "result",
+			rosterOf(with(jsonOf(t, connecting), "row", with(string(hostRow), "attached", "2"))), true},
+		{"a roster row whose host row is no row this build knows", "sessions.list.json", "result",
+			rosterOf(with(jsonOf(t, connecting), "row", `{"title":"fix it"}`)), true},
+		{"a roster row whose row is not an object", "sessions.list.json", "result",
+			rosterOf(with(jsonOf(t, connecting), "row", `["fix it"]`)), false},
+		{"a roster row whose row is null", "sessions.list.json", "result",
+			rosterOf(with(jsonOf(t, connecting), "row", `null`)), false},
+		// Every member is bounded (limits.go's roster bounds), so a roster
+		// always fits a line (roster_test.go's TestAFullRosterFitsOneLine).
+		{"a roster row whose host strings are at their bounds", "sessions.list.json", "result", rosterOf(jsonOf(t, atBounds)), true},
+		{"a roster row whose craze version is a character too long", "sessions.list.json", "result",
+			rosterOf(jsonOf(t, overBound(func(h *protocol.RosterHost) { h.CrazeVersion += "x" }))), false},
+		{"a roster row whose provider is a character too long", "sessions.list.json", "result",
+			rosterOf(jsonOf(t, overBound(func(h *protocol.RosterHost) { h.Provider += "x" }))), false},
+		{"a roster row whose workspace is a character too long", "sessions.list.json", "result",
+			rosterOf(jsonOf(t, overBound(func(h *protocol.RosterHost) { h.Workspace += "x" }))), false},
+		{"a roster row whose host id is not 12 hex digits", "sessions.list.json", "result",
+			rosterOf(strings.Replace(jsonOf(t, connecting), `"hostId":"0190ab12cd35"`, `"hostId":"0190AB12CD35"`, 1)), false},
+		{"a roster row whose session id could name no file", "sessions.list.json", "result",
+			rosterOf(strings.Replace(jsonOf(t, connecting), `"sessionId":"session-2"`, `"sessionId":"session/2"`, 1)), false},
+		{"a roster row whose session id is 129 characters", "sessions.list.json", "result",
+			rosterOf(strings.Replace(jsonOf(t, connecting), `"sessionId":"session-2"`, `"sessionId":"`+strings.Repeat("s", 129)+`"`, 1)), false},
+		{"the hub's roster of 512 rows", "sessions.list.json", "result", rosterOfN(protocol.RosterRowsMax), true},
+		{"the hub's roster of 513 rows", "sessions.list.json", "result", rosterOfN(protocol.RosterRowsMax + 1), false},
+
 		{"sessions.subscribe", "sessions.subscribe.json", "params", `{}`, true},
-		{"sessions.subscribe has no result a host sends", "sessions.subscribe.json", "result", `{}`, false},
+		{"a roster subscription", "sessions.subscribe.json", "result", jsonOf(t, subscribed), true},
+		{"a roster subscription to an empty roster", "sessions.subscribe.json", "result",
+			jsonOf(t, protocol.SessionsSubscribeResult{Subscription: "r-1", Epoch: "e", Sessions: []protocol.RosterRow{}}), true},
+		{"a roster subscription with no subscription id", "sessions.subscribe.json", "result", without(jsonOf(t, subscribed), "subscription"), false},
+		{"a roster subscription answered with a host's rows", "sessions.subscribe.json", "result",
+			`{"subscription":"r-1","epoch":"h","cursor":0,"sessions":[` + jsonOf(t, row) + `]}`, false},
+		{"sessions.subscribe answered with nothing", "sessions.subscribe.json", "result", `{}`, false},
+		{"a roster subscription of 513 rows", "sessions.subscribe.json", "result",
+			strings.Replace(rosterOfN(protocol.RosterRowsMax+1), `{"epoch"`, `{"subscription":"r-1","epoch"`, 1), false},
 		{"session.connect", "session.connect.json", "params", jsonOf(t, protocol.ConnectParams{SessionID: "s"}), true},
 		{"session.connect with no session", "session.connect.json", "params", `{}`, false},
 		{"session.connect's reply", "session.connect.json", "result", jsonOf(t, protocol.Empty{}), true},
@@ -376,6 +498,24 @@ func TestInstancesValidate(t *testing.T) {
 			StartFailed: true, Err: "agent exited"}), true},
 		inst{"a reset", "notification.reset.json", "params", jsonOf(t, protocol.ResetParams{Subscription: "s-1", Reason: protocol.ResetSlowConsumer}), true},
 		inst{"a reset for a reason there is none of", "notification.reset.json", "params", `{"subscription":"s-1","reason":"tired"}`, false},
+		// The hub's (plan 032 §3.5, §3.6).
+		inst{"the hub closing its roster subscription", "notification.reset.json", "params",
+			jsonOf(t, protocol.ResetParams{Subscription: "r-1", Reason: protocol.ResetHubClosing}), true},
+		inst{"a roster change", "notification.roster.json", "params", jsonOf(t, change), true},
+		inst{"a roster change with nothing in it", "notification.roster.json", "params",
+			jsonOf(t, protocol.RosterParams{Subscription: "r-1", Epoch: "e", Upserts: []protocol.RosterRow{}, Removes: []string{}}), true},
+		inst{"a roster change with its removes null", "notification.roster.json", "params",
+			jsonOf(t, protocol.RosterParams{Subscription: "r-1", Epoch: "e", Upserts: []protocol.RosterRow{}}), false},
+		inst{"a roster change with no epoch", "notification.roster.json", "params", without(jsonOf(t, change), "epoch"), false},
+		inst{"a roster change upserting a host's row", "notification.roster.json", "params",
+			`{"subscription":"r-1","epoch":"e","cursor":1,"upserts":[` + jsonOf(t, row) + `],"removes":[]}`, false},
+		inst{"a roster change removing a row by its whole row", "notification.roster.json", "params",
+			`{"subscription":"r-1","epoch":"e","cursor":1,"upserts":[],"removes":[` + jsonOf(t, connecting) + `]}`, false},
+		inst{"a roster change removing what is no host id", "notification.roster.json", "params",
+			`{"subscription":"r-1","epoch":"e","cursor":1,"upserts":[],"removes":["session-2"]}`, false},
+		inst{"a roster change of 512 upserts and 512 removes", "notification.roster.json", "params", rosterChangeN(protocol.RosterRowsMax, protocol.RosterRowsMax), true},
+		inst{"a roster change of 513 upserts", "notification.roster.json", "params", rosterChangeN(protocol.RosterRowsMax+1, 0), false},
+		inst{"a roster change of 513 removes", "notification.roster.json", "params", rosterChangeN(0, protocol.RosterRowsMax+1), false},
 	)
 	// The envelope.
 	cases = append(cases,
@@ -407,6 +547,18 @@ func TestInstancesValidate(t *testing.T) {
 		inst{"a reason under another code", "envelope.json", "response", errResp(protocol.CodeUnavailable, protocol.ReasonNotInTurn), false},
 		inst{"an attach refused while the host closes", "envelope.json", "response", errResp(protocol.CodeUnavailable, protocol.ReasonClosing), true},
 		inst{"closing under a code it is not", "envelope.json", "response", errResp(protocol.CodeNotAccepting, protocol.ReasonClosing), false},
+		// The hub's reasons (plan 032 §3.15), each under its one code.
+		inst{"a session method sent to the hub", "envelope.json", "response", errResp(protocol.CodeUnsupported, protocol.ReasonHostOnly), true},
+		inst{"host_only under a code it is not", "envelope.json", "response", errResp(protocol.CodeBadRequest, protocol.ReasonHostOnly), false},
+		inst{"a connect that was not the first request", "envelope.json", "response", errResp(protocol.CodeBadRequest, protocol.ReasonConnectNotFirst), true},
+		inst{"a connect naming two sessions", "envelope.json", "response", errResp(protocol.CodeBadRequest, protocol.ReasonAmbiguousSession), true},
+		inst{"a second roster subscription", "envelope.json", "response", errResp(protocol.CodeBadRequest, protocol.ReasonAlreadySubscribed), true},
+		inst{"a create reusing its request id", "envelope.json", "response", errResp(protocol.CodeBadRequest, protocol.ReasonRequestConflict), true},
+		inst{"a host that never started", "envelope.json", "response", errResp(protocol.CodeUnavailable, protocol.ReasonSpawnFailed), true},
+		inst{"a host the hub could not dial", "envelope.json", "response", errResp(protocol.CodeUnavailable, protocol.ReasonHostUnreachable), true},
+		inst{"host_unreachable under a code it is not", "envelope.json", "response", errResp(protocol.CodeFailed, protocol.ReasonHostUnreachable), false},
+		inst{"a roster notification", "envelope.json", "notification", jsonOf(t, protocol.Notification{JSONRPC: protocol.JSONRPCVersion,
+			Method: protocol.NotifyRoster, Params: json.RawMessage(jsonOf(t, change))}), true},
 		inst{"a code outside the closed set", "envelope.json", "response", errResp("teapot", "teapot"), false},
 		inst{"a notification", "envelope.json", "notification", jsonOf(t, protocol.Notification{JSONRPC: protocol.JSONRPCVersion,
 			Method: protocol.NotifyReset, Params: json.RawMessage(`{"subscription":"s-1","reason":"session_closed"}`)}), true},

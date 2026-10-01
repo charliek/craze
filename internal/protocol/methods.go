@@ -31,13 +31,16 @@ const (
 )
 
 // MethodSessionCreate is reserved for the hub (S4): protocol 1 defines no
-// params or result for it and it has no schema, and the connection
-// capability sessionCreate is false on a host. A host answers it like
-// session.connect: unsupported, reason hub_only (plan 027 X6). It is in the
-// method table, marked Reserved, so a server finds that answer there.
+// params or result for it yet and it has no schema, and the connection
+// capability sessionCreate is false on a host and, until it serves it (plan
+// 032 C15), on the hub. A host answers it like session.connect: unsupported,
+// reason hub_only (plan 027 X6). It is in the method table, marked Reserved,
+// so a server finds that answer there.
 const MethodSessionCreate = "session.create"
 
-// The host's notifications (plan 027 §3.3). Each carries its subscription id.
+// The notifications (plan 027 §3.3; plan 032 §3.6). Each carries its
+// subscription id: an attachment's, from a host, or the roster subscription's,
+// from the hub.
 const (
 	// NotifyEvent is one committed event: {subscription, seq, event}, event
 	// being the record's body in the lossless codec, verbatim.
@@ -50,8 +53,14 @@ const (
 	NotifyReady = "ready"
 	// NotifyReset ends the subscription, with its reason (ResetReason); the
 	// client re-attaches or, for session_closed and session_replaced, is
-	// done with this connection.
+	// done with this connection. The hub's roster subscription ends with one
+	// too: slow_consumer, omitted (the roster's completeness changed:
+	// subscribe again), or hub_closing.
 	NotifyReset = "reset"
+	// NotifyRoster is the hub's roster subscription's net change since the
+	// subscriber's last cursor: {subscription, epoch, cursor, upserts,
+	// removes} (RosterParams; plan 032 §3.6). Only the hub sends it.
+	NotifyRoster = "roster"
 )
 
 // MethodInfo is one method's place on the wire.
@@ -63,8 +72,11 @@ type MethodInfo struct {
 	// method's same commandId is how a client asks "did it happen?".
 	Mutating bool
 	// SessionScoped says its params carry sessionId, the durable craze
-	// session id (SD-22), at params.sessionId, so a hub can route a method it
-	// does not know (SQ14): every method but hello and sessions.*.
+	// session id (SD-22), at params.sessionId: every method but hello and
+	// sessions.*. The hub serves one of them, session.connect — the splice
+	// that hands the connection to the session's host — and refuses every
+	// other unsupported, reason host_only: it routes by splicing, never
+	// method by method (plan 032 §3.6, SQ14).
 	SessionScoped bool
 	// Tolerant says the host ignores params fields it does not know. Only
 	// hello is (§3.2); every other method refuses one, reason unknown_field.
@@ -137,7 +149,8 @@ func Method(name string) (MethodInfo, bool) {
 	return MethodInfo{}, false
 }
 
-var notifications = []string{NotifyEvent, NotifySynchronized, NotifyReady, NotifyReset}
+var notifications = []string{NotifyEvent, NotifySynchronized, NotifyReady, NotifyReset, NotifyRoster}
 
-// Notifications is every notification a host sends, in §3.3's order.
+// Notifications is every notification protocol 1 names: a host's, in §3.3's
+// order, then the hub's roster.
 func Notifications() []string { return slices.Clone(notifications) }

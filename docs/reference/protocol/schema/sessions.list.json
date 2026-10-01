@@ -2,15 +2,35 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://charliek.github.io/craze/reference/protocol/schema/sessions.list.json",
   "title": "sessions.list",
-  "description": "The roster, readable without attaching. On a host, epoch is its hostId (a new host process is a new epoch: reseed) and cursor the log's committed seq when the rows were read.",
+  "description": "The roster, readable without attaching. On a host, epoch is its hostId (a new host process is a new epoch: reseed), cursor the log's committed seq when the rows were read, and sessions its one session's row. On the hub (plan 032 §3.6), epoch is the hub's incarnation (its endpoint.hostId), cursor the hub's roster sequence, and sessions one roster row per live host with a craze session id, in hostId order.",
   "$defs": {
     "params": {"$ref": "envelope.json#/$defs/empty"},
     "result": {
+      "description": "A host's result or the hub's. An anyOf, not a oneOf: an empty roster is both.",
+      "anyOf": [
+        {"$ref": "#/$defs/hostResult"},
+        {"$ref": "#/$defs/hubResult"}
+      ]
+    },
+    "hostResult": {
+      "description": "A host's roster: its one session's row.",
       "type": "object",
       "properties": {
         "epoch": {"type": "string"},
         "cursor": {"type": "integer", "minimum": 0},
         "sessions": {"type": "array", "items": {"$ref": "info.json#/$defs/sessionRow"}}
+      },
+      "required": ["epoch", "cursor", "sessions"],
+      "additionalProperties": false
+    },
+    "hubResult": {
+      "description": "The hub's roster (plan 032 §3.6): epoch is the hub's incarnation, cursor its roster sequence — bumped by every change to a row's content, an approximate flip included; it only increases within an epoch, and may jump. truncated says the roster was cut at 512 rows, and is absent otherwise. At its bounds — 512 rows of at most 32,000 bytes each — the whole reply fits one line.",
+      "type": "object",
+      "properties": {
+        "epoch": {"type": "string"},
+        "cursor": {"type": "integer", "minimum": 0, "maximum": 18446744073709551615},
+        "sessions": {"type": "array", "items": {"$ref": "info.json#/$defs/rosterRow"}, "maxItems": 512},
+        "truncated": {"type": "boolean", "const": true}
       },
       "required": ["epoch", "cursor", "sessions"],
       "additionalProperties": false

@@ -443,3 +443,73 @@ answers `{}`, then copies bytes between the client and the host's own socket.
 The client then says its own `hello` to the host through the splice, so the
 host's identity, capabilities and incarnation reach it untouched (SQ14).
 `session.connect` is hub-only: a host refuses it `unsupported/hub_only`.
+
+## As shipped (S4b, plan 032 PR 3): the hub's wire
+
+Plan 032 C9 fills in what protocol 1 had reserved for the hub, every value
+inside the sets a client already decides from (plan 032 §3.15); the published
+spec is `docs/reference/protocol.md`'s "The hub's result", "The hub's roster"
+and "The hub splice", the schema checked against the Go types as ever.
+
+- **`hello`** on the hub answers `HubHelloResult` (`endpoint.kind: hub`, its
+  `hostId` the hub's own id) with `rosterSubscribe` and `connect` true,
+  `multiplex`, `snapshot` and `attachWhenNow` false, and `sessionCreate`
+  false until the hub serves `session.create` (plan 032 C15).
+- **The roster** is `sessions.list` on the hub: `{epoch, cursor, sessions:
+  [rosterRow], truncated?}`, `epoch` the hub's incarnation and `cursor` its
+  own roster sequence. A **roster row** is `{hostId, sessionId, host{pid,
+  crazeVersion, protocol, provider, workspace, startedAt, ready}, status:
+  connecting|reachable|unreachable, approximate, row?}`, keyed by `hostId`;
+  `row` is the host's own `sessions.list` row kept as the JSON value the
+  host sent — this sketch's "pass host identity and unknown payload fields
+  through untouched" (`02`) — and so described as any object
+  (`forwardedRow`), the host's own `sessionRow` schema staying strict; no
+  socket path crosses the wire. The method's result schema is an `anyOf` of
+  a host's and the hub's, both accepting an empty roster. Bounds, so any
+  roster is one line under 16 MiB (`protocol.Roster*`, stated in the schema
+  too; review r13): host strings in characters (`crazeVersion` 128,
+  `provider` 64, `workspace` 4096), a host row 16 KiB, a whole roster row
+  32,000 bytes as JSON, 512 rows (and 512 upserts and removes in a
+  notification); the hub cuts or drops to keep them and marks the row
+  `approximate`. The new cursors carry `maximum` 2^64−1 (a Go `uint64`); the
+  host's own `sessions.list` cursor predates them and does not.
+- **`sessions.subscribe`** (hosts keep `roster_unsupported`) answers the
+  roster at a cursor with a subscription id, then **`roster`** notifications
+  `{subscription, epoch, cursor, upserts, removes}` carrying the net change
+  since the subscriber's last cursor: this sketch's "`roster` (epoch +
+  cursor)". One per connection.
+- **Reasons**, each under one code: `unsupported/host_only` (a session's
+  method sent to the hub — `hub_only`'s mirror); `bad_request/
+  connect_not_first`, `/ambiguous_session`, `/already_subscribed`,
+  `/request_conflict`; `unavailable/spawn_failed`, `/host_unreachable`.
+  `request_conflict` and `spawn_failed` are `session.create`'s (C15),
+  added with the rest so the reason table moved once.
+- **Reset reason `hub_closing`**: the hub ending its roster subscriptions as
+  it shuts down.
+- The hub routes by the splice alone, never method by method (this sketch's
+  "`sessionId` at a fixed position so unknown methods still route" did not
+  ship): `session.connect` stays session-scoped in the method table, and
+  every other session-scoped method is refused `host_only`.
+- `protocol.LineReader.Buffered` hands the splice the bytes read past
+  `session.connect`; the fixture runner gains a two-socket mode (`"sock":
+  "hub"`) and the fake host `--registry`, `--host-id` and `--session-id`
+  (`Host.Register`), so several fake hosts are listed side by side for a hub
+  to find. The hub's own fixtures (19 and 20) arrive with the roster's
+  server, plan 032 C11.
+- **The splice** (plan 032 C12): `session.connect` is served as this sketch
+  has it, its handoff exclusive — the connection's first request after
+  `hello` (any line answered since, refused or not, makes it not the first),
+  no subscription — and its lookup `craze bridge`'s (craze session id,
+  provider session id, host id; none `unknown_session`, several
+  `ambiguous_session`). The hub dials the host (connect + peer check, 500 ms;
+  else `host_unreachable`), writes `{}` as its last line, and splices: the
+  bytes it read past `session.connect` first, then one 32 KiB buffer per
+  direction; the client's EOF is the host leg's `CloseWrite` (the host's idle
+  count drops; its answers still arrive), the host's EOF closes the client,
+  anything else closes both, and a spliced connection is a client of the
+  hub's until both legs close. The teardown half-closes splices, then closes
+  them. A dead hub costs a session nothing: craze's `hub.Dialer`
+  (`remote.Options.Dial`) restarts it inside the client's reconnect window —
+  on a refused or absent socket, or EOF before the hub's first reply, bounded
+  by the reconnect episode's end, which `remote` now hands its dial as the
+  context's deadline — and the client resumes with its host. Fixture 21.

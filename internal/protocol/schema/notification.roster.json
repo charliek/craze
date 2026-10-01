@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://charliek.github.io/craze/reference/protocol/schema/notification.roster.json",
+  "title": "roster",
+  "description": "The hub's roster subscription's net change since the cursor the subscriber last had — the sessions.subscribe reply's, or the previous roster notification's (plan 032 §3.6): rows added or changed (upserts) and the host ids of rows gone (removes); a host is in at most one of the two. Flushed at most every 250 ms. cursor only increases within an epoch, and may jump. Only the hub sends it.",
+  "$defs": {
+    "params": {
+      "type": "object",
+      "properties": {
+        "subscription": {"type": "string"},
+        "epoch": {"type": "string"},
+        "cursor": {"type": "integer", "minimum": 0, "maximum": 18446744073709551615},
+        "upserts": {"type": "array", "items": {"$ref": "info.json#/$defs/rosterRow"}, "maxItems": 512},
+        "removes": {"type": "array", "items": {"type": "string", "pattern": "^[0-9a-f]{12}$"}, "maxItems": 512, "description": "The host ids of the rows gone."}
+      },
+      "required": ["subscription", "epoch", "cursor", "upserts", "removes"],
+      "additionalProperties": false
+    }
+  }
+}
