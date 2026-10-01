@@ -130,35 +130,87 @@ func noteForForeignTurn(reason string) string {
 // C4), with the TUI's wording as its cards.go wrote them when they were each
 // client's own rows: `? <prompt> → <labels>` per question answered, `? <title>
 // → skipped` for a skipped question, and `plan <name> → accepted|rejected`.
+// noteOutcome words each from the ask as a snapshot carries it (capAsk) and
+// bounds it at outcomeNoteCap (capNote).
+
+// outcomeNoteCap bounds an outcome note's whole text, in bytes (capNote). The
+// note is the newest entry of the main transcript when it is drawn, and a
+// snapshot must carry its newest entry beside the mandatory sections in a
+// budget of DefaultSnapshotBytes (4 MiB) by default (ErrSnapshotTooLarge):
+// 4 KiB is a thousandth of that, and some fifty lines of an 80-column
+// terminal for what is a one-line row. Without it, an answer that picks one
+// long label many times — the agent's validator checks that each pick is
+// offered, not that it is new — makes a note that many times the label's size
+// (plan 032 C4 review r3, finding 2). The count of notes needs no cap of its
+// own: an ending draws at most one per question of its opening, so their
+// number is bounded by the opening's own size — an event the fold already
+// holds whole as the open ask — each costs at most this cap to build, Bounds
+// trims their retention like every entry's after each append, and a snapshot
+// needs only the newest of them.
+const outcomeNoteCap = 4 << 10
+
+// capNote is an outcome note bounded at outcomeNoteCap bytes: s itself when it
+// fits, else its head cut back to a rune boundary (headOf) and closed by the
+// ellipsis, outcomeNoteCap bytes at most with it. It reads no byte of s past
+// outcomeNoteCap, so a note built only until it is longer than that (answerNote)
+// caps to exactly what the whole note would.
+func capNote(s string) string {
+	if len(s) <= outcomeNoteCap {
+		return s
+	}
+	h, _ := headOf(s, outcomeNoteCap-len(ellipsis))
+	return h + ellipsis
+}
 
 // answerNotes is one note per question of q, naming what answers picked for
-// it: the options' labels, comma-separated, or "nothing". A question that asks
-// nothing draws none.
+// it (answerNote). A question that asks nothing draws none.
 func answerNotes(q *agent.QuestionEvent, answers map[string][]string) []string {
 	out := make([]string, 0, len(q.Questions))
 	for _, qq := range q.Questions {
-		out = append(out, "? "+sanitizeLine(qq.Prompt)+" → "+answerLabels(qq, answers[qq.ID]))
+		out = append(out, answerNote(qq, answers[qq.ID]))
 	}
 	return out
 }
 
-// answerLabels names the options ids picks, in their order: each one's label
-// folded onto one line. An id the question does not offer names nothing, and
+// answerNote is one question's note: `? <prompt> → ` and the labels of the
+// options ids picks, in their order, each folded onto one line and
+// comma-separated. An id the question does not offer names nothing, and
 // nothing named reads "nothing".
-func answerLabels(q agent.Question, ids []string) string {
-	labels := make([]string, 0, len(ids))
+//
+// Each id is matched after the cap a snapshot puts on every option id
+// (capper.str, as capQuestion applies it), since q's options are the capped
+// ones (noteOutcome): an id over ItemCap still finds the option it picked.
+//
+// It stops naming once the note is longer than outcomeNoteCap: capNote keeps
+// none of what would follow, and one long label picked over and over cannot
+// first build a note an answer's length times its size.
+func answerNote(qq agent.Question, ids []string) string {
+	var b strings.Builder
+	b.WriteString("? ")
+	b.WriteString(sanitizeLine(qq.Prompt))
+	b.WriteString(" → ")
+	named := 0
 	for _, id := range ids {
-		for _, o := range q.Options {
+		if b.Len() > outcomeNoteCap {
+			break
+		}
+		var c capper
+		id = c.str(id)
+		for _, o := range qq.Options {
 			if o.ID == id {
-				labels = append(labels, sanitizeLine(o.Label))
+				if named > 0 {
+					b.WriteString(", ")
+				}
+				b.WriteString(sanitizeLine(o.Label))
+				named++
 				break
 			}
 		}
 	}
-	if len(labels) == 0 {
-		return "nothing"
+	if named == 0 {
+		b.WriteString("nothing")
 	}
-	return strings.Join(labels, ", ")
+	return b.String()
 }
 
 // skipNote is what a skipped question draws.

@@ -3,7 +3,9 @@ package transcript
 import (
 	"fmt"
 	"slices"
+	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/charliek/craze/internal/agent"
 )
@@ -379,4 +381,229 @@ func TestOutcomeNotesSurviveASnapshotAndItsTail(t *testing.T) {
 			}
 		})
 	}
+}
+
+// The note is worded from the ask as a snapshot carries it (plan 032 C4
+// review r3, finding 1). A client restored from a snapshot taken while the ask
+// was open holds every string of it at its ItemCap head; at every cut — the
+// one between the opening and the ending above all — it draws, under the one
+// shared entry id, the note the model that folded everything draws, byte for
+// byte: an oversized prompt, label, title or plan name, and an option id the
+// snapshot cut, alike. Each row pins its note; an ask a snapshot carries whole
+// words exactly as it always did. While the ask is open the restored state
+// holds its capped form (Ask.Truncated), so the models are compared once the
+// ending has taken it out of the open set.
+func TestOutcomeNotesWordTheAskAsASnapshotCarriesIt(t *testing.T) {
+	pad := strings.Repeat(" ", ItemCap)
+	longID := strings.Repeat("x", ItemCap) + "-yes"
+	longLabel := strings.Repeat("a", ItemCap+10)
+	proceed := func(prompt, yesID, yesLabel string) *agent.QuestionEvent {
+		return &agent.QuestionEvent{ID: "ask-1", Questions: []agent.Question{{
+			ID: "q1", Prompt: prompt,
+			Options: []agent.Option{{ID: yesID, Label: yesLabel}, {ID: "no", Label: "No"}},
+		}}}
+	}
+	answer := func(ids ...string) agent.Event {
+		return ending("ask-1", agent.AskQuestion, func(u *agent.AskUpdate) { u.Answers = map[string][]string{"q1": ids} })
+	}
+	skip := ending("ask-1", agent.AskQuestion, func(u *agent.AskUpdate) { u.Skip = true })
+	accept := ending("plan-1", agent.AskPlan, func(u *agent.AskUpdate) { u.Accepted = true })
+	titled := func(title string) *agent.QuestionEvent {
+		q := stubQuestion()
+		q.Title = title
+		return q
+	}
+	named := func(name string) *agent.PlanEvent {
+		p := stubPlanEvent()
+		p.Name = name
+		return p
+	}
+	head := "? Proceed? → "
+	for _, tc := range []struct {
+		name string
+		open agent.Event
+		end  agent.Event
+		want string
+	}{
+		{"a question a snapshot carries whole", questionOpens(proceed("Proceed?", "yes", "Yes")), answer("yes"), "? Proceed? → Yes"},
+		{"a plan a snapshot carries whole", planOpens(stubPlanEvent()), accept, "plan Fake Plan → accepted"},
+		{"a prompt whose words start past ItemCap", questionOpens(proceed(pad+"Proceed?", "yes", "Yes")), answer("yes"), "?  → Yes"},
+		{"a prompt cut in a run of spaces", questionOpens(proceed("Proceed?"+pad+"really", "yes", "Yes")), answer("yes"), "? Proceed? → Yes"},
+		{"a label cut in a run of spaces", questionOpens(proceed("Proceed?", "yes", "Yes"+pad+"!")), answer("yes"), "? Proceed? → Yes"},
+		{"a label past the note's cap", questionOpens(proceed("Proceed?", "yes", longLabel)), answer("yes"),
+			head + longLabel[:outcomeNoteCap-len(ellipsis)-len(head)] + ellipsis},
+		{"an option id past ItemCap", questionOpens(proceed("Proceed?", longID, "Yes")), answer(longID), "? Proceed? → Yes"},
+		{"a skipped question's title cut in a run of spaces", questionOpens(titled("Skip me" + pad + "now")), skip, "? Skip me → skipped"},
+		{"a plan's name cut in a run of spaces", planOpens(named("Ship" + pad + "it")), accept, "plan Ship → accepted"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			evs := sequenced([]agent.Event{tc.open, tc.end, {Type: agent.EventDone, StopReason: "end_turn", At: at(60)}})
+			whole := New(Options{})
+			foldAll(t, whole, true, evs...)
+			want := notesOf(whole)
+			if !slices.Equal(want, []string{tc.want}) {
+				t.Fatalf("folded whole, the notes are %s, want %s", clipNotes(want...), clipNotes(tc.want))
+			}
+			for cut := 0; cut <= len(evs); cut++ {
+				m := New(Options{})
+				foldAll(t, m, false, evs[:cut]...)
+				s, b := snapshotOf(t, m, 0)
+				r1, r2 := restoredBoth(t, s, b, Options{})
+				for _, ev := range evs[cut:] {
+					for _, x := range []*Model{m, r1, r2} {
+						x.Fold(ev)
+					}
+				}
+				for i, x := range []*Model{m, r1, r2} {
+					what := fmt.Sprintf("cut %d, %s", cut, []string{"live", "restored in process", "restored through the codec"}[i])
+					if got := notesOf(x); !slices.Equal(got, want) {
+						t.Fatalf("%s: the notes are %s, want %s", what, clipNotes(got...), clipNotes(want...))
+					}
+					assertSameModel(t, what, whole, x)
+					checkInvariants(t, x)
+				}
+			}
+		})
+	}
+}
+
+// An ask whose id a snapshot cuts draws no note, live or restored: a restored
+// fold holds it under the id's head, which its ending's id can never find, so
+// a live note would be one no restored client could draw. Only the notes are
+// compared: the restored open set keeps the ask under that head, the
+// snapshot's own cut and not this rule's.
+func TestAnAskIDASnapshotCutsDrawsNoNote(t *testing.T) {
+	q := stubQuestion()
+	q.ID = strings.Repeat("k", ItemCap+1)
+	evs := sequenced([]agent.Event{
+		questionOpens(q),
+		ending(q.ID, agent.AskQuestion, func(u *agent.AskUpdate) { u.Answers = map[string][]string{"q1": {"opt-a"}} }),
+	})
+	whole := New(Options{})
+	foldAll(t, whole, true, evs...)
+	m := New(Options{})
+	foldAll(t, m, false, evs[0])
+	s, b := snapshotOf(t, m, 0)
+	r1, r2 := restoredBoth(t, s, b, Options{})
+	for i, x := range []*Model{whole, r1, r2} {
+		if i > 0 {
+			x.Fold(evs[1])
+		}
+		if got := notesOf(x); len(got) != 0 {
+			t.Fatalf("model %d drew %s for an ask whose id a snapshot cuts", i, clipNotes(got...))
+		}
+	}
+}
+
+// One long label picked over and over (plan 032 C4 review r3, finding 2):
+// the agent's validator checks that each pick is offered, not that it is new,
+// so 65 picks of one 64 KiB label would word a note of over 4 MiB — the
+// newest entry once the turn ends, which every snapshot must carry, so no
+// client could attach. The note is held to outcomeNoteCap: the ended session
+// snapshots at the default budget and restores as itself.
+func TestARepeatedLongLabelLeavesTheSessionAttachable(t *testing.T) {
+	label := strings.Repeat("a", 64<<10)
+	q := &agent.QuestionEvent{ID: "ask-1", Questions: []agent.Question{{
+		ID: "q1", Prompt: "Pick", AllowMultiple: true, Options: []agent.Option{{ID: "x", Label: label}},
+	}}}
+	evs := sequenced([]agent.Event{
+		questionOpens(q),
+		ending("ask-1", agent.AskQuestion, func(u *agent.AskUpdate) {
+			u.Answers = map[string][]string{"q1": slices.Repeat([]string{"x"}, 65)}
+		}),
+		{Type: agent.EventDone, StopReason: "end_turn", At: at(60)},
+	})
+	m := New(Options{})
+	foldAll(t, m, true, evs...)
+	s, b := snapshotOf(t, m, 0)
+	r1, r2 := restoredBoth(t, s, b, Options{})
+	assertSameModel(t, "restored in process", m, r1)
+	assertSameModel(t, "restored through the codec", m, r2)
+	head := "? Pick → "
+	want := head + label[:outcomeNoteCap-len(ellipsis)-len(head)] + ellipsis
+	if got := notesOf(m); !slices.Equal(got, []string{want}) {
+		t.Fatalf("the notes are %s, want %s", clipNotes(got...), clipNotes(want))
+	}
+	if len(want) > outcomeNoteCap {
+		t.Fatalf("the note is %d bytes, over its %d-byte cap", len(want), outcomeNoteCap)
+	}
+}
+
+// capNote keeps a note that fits whole, and cuts a longer one back to a rune
+// boundary under the ellipsis, outcomeNoteCap bytes at most with it.
+func TestCapNoteCutsOnARuneBoundary(t *testing.T) {
+	fits := strings.Repeat("a", outcomeNoteCap)
+	if got := capNote(fits); got != fits {
+		t.Fatalf("a note of exactly the cap was cut to %d bytes", len(got))
+	}
+	for _, unit := range []string{"a", "é", "⤷", "😀"} {
+		for pad := range 4 {
+			s := strings.Repeat("b", pad) + strings.Repeat(unit, outcomeNoteCap+1)
+			got := capNote(s)
+			body, ok := strings.CutSuffix(got, ellipsis)
+			switch {
+			case !ok || len(got) > outcomeNoteCap:
+				t.Fatalf("%q after %d bytes: capped to %d bytes, ellipsis %v", unit, pad, len(got), ok)
+			case !utf8.ValidString(got) || !strings.HasPrefix(s, body):
+				t.Fatalf("%q after %d bytes: the head is not a rune-boundary prefix of the note", unit, pad)
+			case len(body) < outcomeNoteCap-len(ellipsis)-utf8.UTFMax+1:
+				t.Fatalf("%q after %d bytes: the head is %d bytes, cut back further than one rune", unit, pad, len(body))
+			}
+		}
+	}
+}
+
+// answerNote stops naming once its note is past the cap, and what it builds
+// caps to exactly the whole note's capping — the rule before the early stop,
+// answerLabels' join, here as the reference — for every length of label and
+// count of picks around the cap, a multi-byte label and an empty one among
+// them; and what it builds is bounded by the cap plus one label, not by the
+// count of picks — 3000 picks of a label three caps long build no more than
+// four caps.
+func TestAnswerNoteStopsPastTheCapAndCapsAsTheWholeNote(t *testing.T) {
+	whole := func(qq agent.Question, ids []string) string {
+		var labels []string
+		for _, id := range ids {
+			for _, o := range qq.Options {
+				if o.ID == id {
+					labels = append(labels, sanitizeLine(o.Label))
+					break
+				}
+			}
+		}
+		named := "nothing"
+		if len(labels) > 0 {
+			named = strings.Join(labels, ", ")
+		}
+		return "? " + sanitizeLine(qq.Prompt) + " → " + named
+	}
+	for _, label := range []string{"", "a", "ab", "é", "😀x", strings.Repeat("c", 1000), strings.Repeat("d", outcomeNoteCap-20), strings.Repeat("e", 3*outcomeNoteCap)} {
+		qq := agent.Question{ID: "q1", Prompt: "Pick", Options: []agent.Option{{ID: "x", Label: label}, {ID: "y", Label: "Y"}}}
+		for _, picks := range []int{0, 1, 2, 3, 5, 100, 1000, 1500, 2000, 2100, 3000} {
+			ids := slices.Repeat([]string{"x", "nope", "y"}, picks)
+			built := answerNote(qq, ids)
+			// The reference builds the whole note: past a MiB it proves no
+			// more than the rows below it do, and only costs time.
+			if len(label)*picks <= 1<<20 {
+				if got, want := capNote(built), capNote(whole(qq, ids)); got != want {
+					t.Fatalf("label of %d bytes, %d picks: capped to %s, the whole note caps to %s", len(label), picks, clipNotes(got), clipNotes(want))
+				}
+			}
+			// The longest it can go past the cap: a separator and the longest
+			// label ("Y" among them), or "nothing".
+			if limit := outcomeNoteCap + len(", ") + max(len(label), len("nothing")); len(built) > limit {
+				t.Fatalf("label of %d bytes, %d picks: built %d bytes, over the cap plus one label (%d)", len(label), picks, len(built), limit)
+			}
+		}
+	}
+}
+
+// clip quotes each string as at most its first 40 bytes and its length.
+func clipNotes(ss ...string) string {
+	out := make([]string, len(ss))
+	for i, s := range ss {
+		h, _ := headOf(s, 40)
+		out[i] = fmt.Sprintf("%q(%d bytes)", h, len(s))
+	}
+	return "[" + strings.Join(out, " ") + "]"
 }

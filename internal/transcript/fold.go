@@ -252,11 +252,11 @@ func (m *Model) openAsk(id string, kind agent.AskKind, body agent.AskBody, at ti
 //
 // First, while the ask is still open, an answered question or plan draws its
 // outcome note into the main transcript, worded from the opening the fold
-// holds (noteOutcome; plan 032 §3.2 C4, P14). It is a shared entry, so every
-// client — one that answered, one that watched, one that attaches or reopens
-// the session later — draws the same row, at the ending's place in the
-// stream. Before, each client wrote it as a row of its own, which a restore
-// dropped (SF-61).
+// holds as a snapshot would carry it (noteOutcome; plan 032 §3.2 C4, P14).
+// It is a shared entry, so every client — one that answered, one that
+// watched, one that attaches or reopens the session later — draws the same
+// row, at the ending's place in the stream. Before, each client wrote it as a
+// row of its own, which a restore dropped (SF-61).
 //
 // Mixed versions: a fold from before this rule draws no note. A client of
 // this build folding an older host's events draws the note live, and loses
@@ -301,10 +301,29 @@ func foldAsk(m *Model, ev agent.Event) {
 // saw draws nothing — one that carries its own (AskUpdate.Body, set only when
 // no opening was published) among them — and a second ending of one id finds
 // it gone: a re-ended id never doubles its note.
+//
+// The note is worded from the ask exactly as a snapshot carries it (capAsk:
+// every string at its ItemCap head), never from the opening as it came, and
+// the ending's picks are matched against the capped option ids after the same
+// cap (answerNote): a client restored from a snapshot taken while the ask was
+// open holds only that form, so wording from it is what makes the engine,
+// every live client and every restored one draw the same text under the one
+// shared entry id (plan 032 C4 review r3, finding 1). An ask a snapshot
+// carries whole — every real one — words exactly as its opening reads. An ask
+// whose id the snapshot cuts draws nothing: a restored fold holds it under the
+// head, which its ending's id can never find. Each note is then bounded at
+// outcomeNoteCap (capNote), so an answer that picks one long label many times
+// cannot make the newest entry too large for any snapshot (finding 2).
 func (m *Model) noteOutcome(a Ask, u *agent.AskUpdate, at time.Time) {
 	if u.Outcome != agent.AskAnswered || u.Kind != a.Kind {
 		return
 	}
+	c := capAsk(a)
+	if c.ID != a.ID {
+		return
+	}
+	a = c
+	note := func(s string) { m.Main.addNote(capNote(s), at) }
 	switch a.Kind {
 	case agent.AskQuestion:
 		q := a.Body.Question
@@ -312,18 +331,18 @@ func (m *Model) noteOutcome(a Ask, u *agent.AskUpdate, at time.Time) {
 			return
 		}
 		if u.Skip {
-			m.Main.addNote(skipNote(q), at)
+			note(skipNote(q))
 			return
 		}
 		for _, n := range answerNotes(q, u.Answers) {
-			m.Main.addNote(n, at)
+			note(n)
 		}
 	case agent.AskPlan:
 		p := a.Body.Plan
 		if p == nil || p.Auto || m.hidden.Plans {
 			return
 		}
-		m.Main.addNote(planNote(p, u.Accepted), at)
+		note(planNote(p, u.Accepted))
 	}
 }
 

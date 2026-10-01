@@ -18,7 +18,8 @@ type Bounds struct {
 	SubBytes   int
 	// StreamText caps a streamed entry's text (assistant, thought, a child's
 	// user rows): the tail is kept, led by "…". User rows, notes and errors
-	// are uncapped (today's rule).
+	// are uncapped (today's rule), but for an ask's outcome note, which is
+	// held to outcomeNoteCap whatever the bounds (capNote).
 	StreamText int
 	// Agents is how many FINISHED roster rows are kept; past it the oldest
 	// finish is evicted with its child transcript — the live session's rule
