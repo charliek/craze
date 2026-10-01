@@ -172,7 +172,8 @@ func TestShippedCatalogOwnerDecisions(t *testing.T) {
 	for _, r := range c.Retired {
 		switch r.Alias {
 		case "fireworks/glm-5p3-fast", "fireworks/kimi-k3-fast",
-			"openrouter/gpt-5.6-luna", "openrouter/gpt-5.6-sol", "openrouter/gpt-5.6-terra":
+			"openrouter/gpt-5.6-luna", "openrouter/gpt-5.6-sol", "openrouter/gpt-5.6-terra",
+			"openrouter/gpt-6-sol":
 			if len(r.WireModels) != 0 {
 				t.Errorf("retired %q names live wire ids %v", r.Alias, r.WireModels)
 			}

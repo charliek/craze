@@ -18,3 +18,4 @@ openrouter/gpt-6-astra
 openrouter/gpt-6-luna
 openrouter/gpt-6-sol
 openrouter/minimax-m3
+openrouter/gpt-6.1-sol

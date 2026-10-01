@@ -67,6 +67,13 @@ provider = "openrouter"
 alias = "openrouter/gpt-5.6-terra"
 provider = "openrouter"
 
+# Replaced 2026-09-30 by OpenRouter's GPT-6.1 Sol (openai/gpt-6.1-sol).
+# openai/gpt-6-sol still answers, so, like the GPT-5.6 rows above, the alias
+# alone is retired (X6).
+[[retired]]
+alias = "openrouter/gpt-6-sol"
+provider = "openrouter"
+
 # ---------------------------------------------------------------------------
 # Providers: a display name, the endpoint, and the environment variables a key
 # may come from, tried in order before the user's inline api_key.
@@ -197,7 +204,7 @@ default_effort = "high"
 [models."openrouter/gpt-6-astra"]
 provider = "openrouter"
 wire_model = "openai/gpt-6-astra"
-name = "GPT-6 Astra (OpenRouter, metered)"
+name = "GPT-6 Astra (OpenRouter)"
 context_window = 1050000
 efforts = ["low", "medium", "high", "xhigh", "max"]
 default_effort = "medium"
@@ -210,7 +217,7 @@ cache_read = 1.0
 [models."openrouter/gpt-6-luna"]
 provider = "openrouter"
 wire_model = "openai/gpt-6-luna"
-name = "GPT-6 Luna (OpenRouter, metered)"
+name = "GPT-6 Luna (OpenRouter)"
 context_window = 1050000
 efforts = ["low", "medium", "high", "xhigh", "max"]
 default_effort = "medium"
@@ -220,18 +227,18 @@ input = 0.1
 output = 0.5
 cache_read = 0.01
 
-[models."openrouter/gpt-6-sol"]
+[models."openrouter/gpt-6.1-sol"]
 provider = "openrouter"
-wire_model = "openai/gpt-6-sol"
-name = "GPT-6 Sol (OpenRouter, metered)"
+wire_model = "openai/gpt-6.1-sol"
+name = "GPT-6.1 Sol (OpenRouter)"
 context_window = 1050000
 efforts = ["low", "medium", "high", "xhigh", "max"]
 default_effort = "medium"
 
-[models."openrouter/gpt-6-sol".cost]
+[models."openrouter/gpt-6.1-sol".cost]
 input = 2.0
 output = 10.0
-cache_read = 0.2
+cache_read = 0.1
 
 [models."openrouter/minimax-m3"]
 provider = "openrouter"
