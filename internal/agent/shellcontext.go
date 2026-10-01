@@ -114,10 +114,39 @@ func escapeShellContext(s string) string {
 	return escapeClosingTag(s, shellCommandTag)
 }
 
-// SplitShellContext separates a shell context block leading text from the text
-// itself: the block (with its trailing blank line) and the rest, which together
-// are exactly the string handed in. Text that does not start with a well-formed
-// block comes back unchanged as the rest, with an empty context.
+// SplitShellContext separates what craze put in front of a message from the
+// message the user wrote: the block and the rest, which together are exactly
+// the string handed in. It is the one question every display site, the title
+// index and the reference scanners ask ("what did the user actually write?"),
+// so it answers for both of the leading blocks craze writes:
+//
+//   - the attachment envelope (attachments.go, plan 033 §3.1), when one leads
+//     the text and is well-formed — whatever its limits say, since the host
+//     turns an over-limit one into path text, which is no more the user's
+//     words than the envelope was;
+//   - then the shell context block (splitShellBlock), which follows the
+//     envelope when both are there.
+//
+// block is both together, envelope first. Text that starts with neither comes
+// back unchanged as the rest, with an empty block; a block that is not
+// well-formed is the user's text and stays in the rest.
+//
+// Both are wire content, never display content: the envelope never reaches
+// the agent either, and the shell context is the model's, not the screen's.
+// Stripping both here is what keeps them off all twelve display sites with
+// none of them changed (plan 033 §3.1). The envelope is recognised by the very
+// test the host uses (leadingEnvelope), so what the screen hides is exactly
+// what the host takes off.
+func SplitShellContext(text string) (block, rest string) {
+	envelope, _, _ := leadingEnvelope(text)
+	shell, rest := splitShellBlock(text[len(envelope):])
+	return envelope + shell, rest
+}
+
+// splitShellBlock separates a shell context block leading text from the text
+// itself: the block (with its trailing blank line) and the rest, which
+// together are exactly the string handed in. Text that does not start with a
+// well-formed block comes back unchanged as the rest, with an empty context.
 //
 // It is fed arbitrary text — a prompt another client wrote, a transcript
 // replayed from an agent, a message the user typed that merely looks like a
@@ -135,7 +164,7 @@ func escapeShellContext(s string) string {
 // Against the other direction — hiding text somebody actually typed — three
 // exact lines in that order is already far more than prose stumbles into, and
 // the text is the sender's own either way.
-func SplitShellContext(text string) (block, rest string) {
+func splitShellBlock(text string) (block, rest string) {
 	if !strings.HasPrefix(text, shellContextOpen+"\n") {
 		return "", text
 	}

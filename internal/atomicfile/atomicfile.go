@@ -68,18 +68,30 @@ func LockWithin(path string, d time.Duration) (unlock func(), err error) {
 	if err != nil {
 		return noop, err
 	}
+	if _, err := FlockWithin(f, d); err != nil {
+		_ = f.Close()
+		return noop, err
+	}
+	return unlocker(f), nil
+}
+
+// FlockWithin is LockWithin on a file the caller opened — through an os.Root,
+// say, where a path would not be confined (plan 033 C3r's attachments store).
+// f stays the caller's: the returned unlock releases the lock and does not
+// close f, and on an error f is left open and unlocked. The bound and the
+// answers are LockWithin's.
+func FlockWithin(f *os.File, d time.Duration) (unlock func(), err error) {
+	noop := func() {}
 	deadline := now().Add(d)
 	for first := true; ; first = false {
 		if !first && !now().Before(deadline) {
-			_ = f.Close()
 			return noop, ErrLockBusy
 		}
 		err := flockNB(f)
 		switch {
 		case err == nil:
-			return unlocker(f), nil
+			return func() { _ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN) }, nil
 		case !errors.Is(err, syscall.EWOULDBLOCK):
-			_ = f.Close()
 			return noop, err
 		}
 		sleep(min(lockPoll, max(deadline.Sub(now()), 0)))

@@ -51,7 +51,9 @@ func (s *session) interject(ctx context.Context, text string) error {
 	if !live {
 		return ErrNotInTurn
 	}
-	return client.Interject(ctx, text, id)
+	// Text only (plan 033 P7): an envelope becomes [Image #N: <path>] lines.
+	// The TUI sends none here; a socket client's mode "interject" can.
+	return client.Interject(ctx, interjectText(s.log, text), id)
 }
 
 // onInterjection turns grok's broadcast into the transcript entry. The ack

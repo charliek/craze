@@ -81,8 +81,19 @@ func (r *promptReq) cancelled() bool {
 }
 
 // waitStep sleeps out one tool step, returning false as soon as the request is
-// cancelled.
-func (r *promptReq) waitStep(d time.Duration) bool {
+// cancelled. With CRAZE_FAKE_GATE set (gate) the step is held instead until
+// the test writes a byte to the gate: a turn in progress for exactly as long
+// as the test needs it, with no timing window to fit into (plan 033 C3r, r1
+// #10).
+func (r *promptReq) waitStep(d time.Duration, gate <-chan struct{}) bool {
+	if gate != nil {
+		select {
+		case <-r.cancel:
+			return false
+		case <-gate:
+			return true
+		}
+	}
 	t := time.NewTimer(d)
 	defer t.Stop()
 	select {
@@ -211,7 +222,7 @@ func (s *server) runTurn(r *promptReq) {
 		// turn's row into the first turn's finished one.
 		call := fmt.Sprintf("call-t%d-step-%d", r.turn, i+1)
 		s.executeTool(call, name)
-		if !r.waitStep(step) {
+		if !r.waitStep(step, s.gate()) {
 			s.update(fakeSessionID, map[string]any{
 				"sessionUpdate": "tool_call_update",
 				"toolCallId":    call,

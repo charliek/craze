@@ -206,3 +206,37 @@ func TestSigintHoldCancelledTurnDoesNotTakeTheNextGateByte(t *testing.T) {
 		t.Fatalf("turn 3 stopReason %q, want %q", got, acp.StopEndTurn)
 	}
 }
+
+// TestTheSharedGateLosesNoByte is the shared reader's protocol (plan 033
+// C3r): two bytes in the pipe at once — two releases back to back, here one
+// write of two — release two waits. A reader that opened the FIFO for each
+// byte and closed it after reading one dropped the second with the pipe:
+// back-to-back releases of a long turn's two steps lost the second whenever
+// the second writer opened before the first read's close, and the turn was
+// held for ever.
+func TestTheSharedGateLosesNoByte(t *testing.T) {
+	fifo := filepath.Join(t.TempDir(), "gate")
+	if err := syscall.Mkfifo(fifo, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CRAZE_FAKE_GATE", fifo)
+	s := &server{}
+	gate := s.gate()
+	w, err := os.OpenFile(fifo, os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.Write([]byte{1, 1}); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	for i := range 2 {
+		select {
+		case <-gate:
+		case <-time.After(10 * time.Second):
+			t.Fatalf("release %d of 2 never came", i+1)
+		}
+	}
+}

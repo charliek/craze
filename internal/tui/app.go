@@ -252,6 +252,14 @@ type Config struct {
 	// the developer's ~/.craze.
 	NativeDir string
 	Getenv    func(string) string
+	// AttachmentsDir is where the composer stores the processed copy of every
+	// image pasted into it (plan 033 §3.2–§3.3), and what the envelope's
+	// paths name: the TUI's, whichever session it shows — a chip is only
+	// made for a session whose host reads this same directory (P27). Empty
+	// is paths.AttachmentsDir(), read once by New: every production caller,
+	// and the frame runner inside its isolated HOME. A test that pastes an
+	// image sets it to a temporary directory.
+	AttachmentsDir string
 }
 
 // viewing is c as it runs: for a viewer (Config.Viewer with a Backend)
@@ -578,6 +586,28 @@ type Model struct {
 	connSeq   uint64
 	nativeDir string
 	nativeEnv func(string) string
+	// images is the composer's sidecar (plan 033 §3.3, composer_image.go):
+	// the image behind each chip of the draft. The TUI's, as input is — it
+	// is the draft's, and the draft is carried through an unstarted
+	// session's adoption and put back by a switch with its text (drafts,
+	// takeDraft). attachSeq numbers its entries for the TUI's life, so a
+	// processing result finds its entry by an id no other entry ever had;
+	// attachDir is Config.AttachmentsDir, its default applied: where the
+	// processed copies go.
+	images    draftImages
+	attachSeq uint64
+	attachDir string
+	// attachRuns is the chips' processing lane (attachLane): how many are
+	// running (processCmd), one at a time, and what is still wanted. Shared by
+	// every copy of the model, as shell is, since a processing outlives the
+	// Update that started it — and outlives its chip, when the chip is deleted
+	// first. Its count is what the frame runner waits out (imagesInFlight).
+	// Nil only in a model New never built.
+	attachRuns *attachLane
+	// attachReads is P27's answer for the backend adopted (adopt,
+	// readsAttachments): its session's host reads attachDir. The session's,
+	// as its backend is.
+	attachReads bool
 	// applyGen counts this client's model changes: the model dialog's applies
 	// and `/model`'s. The box closes optimistically, so a second change can be
 	// under way before the first one answers; each answer carries its own, and
@@ -681,8 +711,10 @@ type Model struct {
 	// drafts is the composer's text of each session this TUI has left, by
 	// its craze id (draftKey): stashed as a switch leaves a session and put
 	// back when a switch returns to it, so a draft never follows the user to
-	// another session (plan 030 §3.11). Copied on write, as cards is.
-	drafts map[string]string
+	// another session (plan 030 §3.11). Copied on write, as cards is. Each
+	// carries its sidecar (plan 033 §3.3): a draft's chips come back with
+	// their images.
+	drafts map[string]stashedDraft
 	// retired is every backend a switch let go of, and every one a dial
 	// answered after the user had moved on, until its close — a view close,
 	// made off the Update — has run (switch.go). Shared by every copy, as
@@ -749,6 +781,10 @@ type Model struct {
 	editDraft    string
 	queueEditCtx string
 	queueEditVer int
+	// editImages is editDraft's sidecar (plan 033 §3.3): the draft's images,
+	// displaced with it while the composer holds the row's own (its envelope
+	// parsed back into chips, startQueueEdit), and put back with it.
+	editImages draftImages
 	// confirm is the send-now waiting for an answer. The confirm line is
 	// client-local UI: nothing is taken from anywhere and the engine has not
 	// heard of it. The send-now it turns into, on the other hand, is the
@@ -1073,11 +1109,12 @@ func (m errMsg) backendGen() uint64     { return m.bgen }
 // shownStamped is a result of this terminal's own work that is only ever
 // about the session shown when it was asked for, and carries the
 // shown-session generation it was asked under (Model.shownGen): a paste
-// (pasteMsg), whose text is that session's composer's, and a copy's note
+// (pasteMsg), whose text is that session's composer's, a copy's note
 // (clipboardDoneMsg), which that session's status row shows (plan 030 C11r,
 // astra r22-c11 2) — asked for before that session's backend was adopted
 // too, which a switch leaves behind as it leaves any other (C11r2, astra
-// r24-fix1112). The composer's shell's completion carries the generation
+// r24-fix1112) — and a chip's processing (attachDoneMsg, plan 033 §3.3),
+// whose draft a switch stashed and starts again when it comes back. The composer's shell's completion carries the generation
 // too, and is judged where it is applied instead (finishShell): its row may
 // still be on screen.
 type shownStamped interface{ shownUnder() uint64 }
@@ -1468,6 +1505,9 @@ func (m *Model) setBackend(b backend.Backend) {
 func (m *Model) adopt(b backend.Backend) {
 	m.bgen++
 	m.eng = b
+	// P27 is read from b as it was handed over, before a test's hook wraps it
+	// (plan 033 §3.3, readsAttachments).
+	m.attachReads = readsAttachments(b)
 	if sessionBackendHook != nil {
 		m.eng = sessionBackendHook(m.eng)
 	}
@@ -1638,6 +1678,8 @@ func New(cfg Config) Model {
 		gateSync:   gateSyncDefault,
 		nativeDir:  configNativeDir(cfg.NativeDir),
 		nativeEnv:  configGetenv(cfg.Getenv),
+		attachDir:  configAttachmentsDir(cfg.AttachmentsDir),
+		attachRuns: newAttachLane(),
 		// The first session shown is shown from here, before any backend
 		// of it is adopted (shownGen): 1, so no message the program makes
 		// carries the zero stamp a test's hand-built one does.
@@ -1731,6 +1773,7 @@ type Result struct {
 // (§3.7.3), or p.Run's own error.
 func Run(cfg Config) (Result, error) {
 	cfg = cfg.viewing()
+	sweepAttachmentsAtStart()
 	m := New(cfg)
 	// One writer for the whole session: bubbletea's frames and the OSC 52 copy
 	// are written from different goroutines, and a copy landing inside a frame
@@ -2000,6 +2043,10 @@ func (m Model) finish(cmd tea.Cmd) (Model, tea.Cmd) {
 	if at := next.syncComposerAt(); at != nil {
 		cmd = tea.Batch(cmd, at)
 	}
+	// The draft's sidecar follows it the same way (plan 033 §3.3): a chip no
+	// longer in the text — broken by hand, gone with an external editor's
+	// rewrite, cleared with the draft — takes its image with it.
+	next.reconcileImages()
 	// The handler has already decided where the transcript sits: sticking now
 	// only follows it down when the chrome above it changed shape.
 	next.relayout(next.vp.Height == 0 || next.vp.AtBottom())
@@ -2056,6 +2103,12 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if next, cmd, ok := m.applySessMsg(msg); ok {
 		return next, cmd
 	}
+	if p, ok := msg.(pasteMsg); ok && p.textRefused && !p.hasImage() {
+		// Clipboard "text" that was not text (plan 033 C3r): nothing lands,
+		// wherever it was asked for, and the status row says why. With an
+		// image, pasteClipboardImage says it beside what it did.
+		m.note(clipboardNotText)
+	}
 	if m.sessList.open {
 		switch msg := msg.(type) {
 		case tea.MouseMsg, dblClickMsg:
@@ -2068,6 +2121,12 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// included (C15r); one asked for in the composer before the list
 			// opened in the composer's draft, which is where the user finds it
 			// on going back.
+			if msg.hasImage() && msg.listGen == 0 && msg.key == (keyField{}) {
+				// An image off the clipboard, asked for in the composer (plan
+				// 033 §3.3): a chip in the composer's draft, where the
+				// composer's text paste lands too.
+				return m.pasteClipboardImage(msg)
+			}
 			if msg.text == "" || msg.key != (keyField{}) {
 				// One asked for in /connect's key field (plan 031 §3.9) lands
 				// in that field while it is open, or nowhere: never in the
@@ -2387,12 +2446,22 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// never the composer, whatever is on screen now.
 			return m.pasteIntoKey(msg), nil
 		}
+		if msg.hasImage() && msg.listGen == 0 {
+			// An image off the clipboard (plan 033 §3.3): a chip, or — where
+			// no chip may be made — the clipboard's text after all.
+			return m.pasteClipboardImage(msg)
+		}
 		if msg.text == "" || msg.listGen != 0 || m.composerCovered() {
 			return m, nil
 		}
 		// One bracketed paste, the way a terminal delivers it: the textarea
 		// inserts the whole thing as text instead of reading it as keys.
 		return m, m.updateComposer(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(msg.text), Paste: true})
+
+	case attachDoneMsg:
+		// A chip's processing (plan 033 §3.3). One for a session the model
+		// has since left never gets here (staleShown, attachDoneMsg).
+		return m.attachAnswer(msg)
 
 	case completeLoadedMsg:
 		// The composer `@` popup's search (plan 030 §3.16): the list's own
@@ -3172,6 +3241,31 @@ func (m *Model) updateComposer(msg tea.KeyMsg) tea.Cmd {
 	if key.Matches(msg, m.input.KeyMap.WordBackward) && strings.TrimSpace(m.input.Value()[:m.composerCursorOffset()]) == "" {
 		return nil
 	}
+	// Images (plan 033 §3.3, composer_image.go). Every composer paste, drop,
+	// Alt+V, Backspace and Delete passes here, and nowhere else does: never
+	// the session list's input, /connect's key field, or a dialog's.
+	var imgCmd tea.Cmd
+	switch {
+	case msg.Alt && msg.Type == tea.KeyRunes && len(msg.Runes) == 1 && msg.Runes[0] == 'v':
+		// Alt+V is Ctrl+V's alias: the clipboard's image, then its text.
+		return pasteFromClipboard(m.shownGen, 0)
+	case msg.Paste && len(msg.Runes) == 0:
+		// An empty bracketed paste: what a terminal sends for an image it
+		// could not paste as text. Its clipboard is the GUI's — except over
+		// SSH, where the clipboard craze could read is the remote machine's,
+		// not the one the user pasted from — and a `!` command line takes no
+		// image.
+		if m.overSSH() || m.shellMode() {
+			return nil
+		}
+		return probeClipboardImage(m.shownGen)
+	case msg.Paste:
+		// A paste of image paths becomes their chips, inserted as the paste
+		// would have been; any other paste goes in as it came.
+		if chips, cmd := m.pasteImages(string(msg.Runes)); cmd != nil {
+			msg.Runes, imgCmd = []rune(chips), cmd
+		}
+	}
 	prev := m.input.Value()
 	// bubbles repositions its own viewport inside Update (textarea.go:1087),
 	// against the height in force *before* the key, and never rewinds slack
@@ -3183,7 +3277,12 @@ func (m *Model) updateComposer(msg tea.KeyMsg) tea.Cmd {
 	// before anything is drawn.
 	m.input.SetHeight(composerHeadroom)
 	var cmd tea.Cmd
-	m.input, cmd = m.input.Update(msg)
+	// Backspace at a chip's end, or Delete at its start, takes the whole chip
+	// and its image (plan 033 §3.3); any other key is the textarea's.
+	if !m.deleteChip(msg) {
+		m.input, cmd = m.input.Update(msg)
+	}
+	cmd = tea.Batch(cmd, imgCmd)
 	if m.input.Value() != prev {
 		// A bare "/" coming under the cursor rescans the disk skills, so a
 		// skill saved since the session started is in the catalog the menu is
@@ -3434,7 +3533,12 @@ func (m Model) send() (tea.Model, tea.Cmd) {
 		// session that is still restoring would race the replay it is reading.
 		return m, nil
 	}
-	return m.submitOwn(text, engine.SubmitQueue, submitted)
+	// A chip still being processed holds the send (plan 033 §3.3): the draft
+	// stays, and the status row says which image it waits for.
+	if m.imagePending() {
+		return m, nil
+	}
+	return m.submitOwn(text, m.images.list, engine.SubmitQueue, submitted)
 }
 
 // sendText starts a turn with text of craze's own: today the plan offer's
@@ -3465,8 +3569,14 @@ func (m Model) sendText(text string) (tea.Model, tea.Cmd) {
 // answer (ErrNoAnswer) keeps it: the prompt may never have been sent, and the
 // block stays with the draft it belongs to, as for any refusal — the next send
 // carries it.
-func (m Model) submitOwn(text string, mode engine.SubmitMode, then submitThen) (Model, tea.Cmd) {
-	return m.submit(m.withShellContext(text), mode, "", func(m Model, res engine.SubmitResult, err error) (Model, tea.Cmd) {
+//
+// images is the sidecar the text was written with (plan 033 §3.3): the
+// envelope for the chips text holds goes in front of everything, the shell
+// context included (§3.1, withImages). The sidecar itself is the draft's, and
+// is cleared with it — only once the send was accepted (clearMatchingDraft) —
+// so a refused send keeps its chips and their images for the next attempt.
+func (m Model) submitOwn(text string, images []attachment, mode engine.SubmitMode, then submitThen) (Model, tea.Cmd) {
+	return m.submit(withImages(images, m.withShellContext(text)), mode, "", func(m Model, res engine.SubmitResult, err error) (Model, tea.Cmd) {
 		if shellContextTaken(res, err) {
 			m.dropShellContext()
 		}
@@ -3681,12 +3791,27 @@ func (m *Model) maskCards() {
 // The comparison is against what was typed: the shell context craze put in
 // front of it was never in the composer, so a draft matched against the whole
 // sent string would never match and would sit there after its own send (§3.6).
+// Nor was the attachment envelope in front of that (plan 033 §3.1), which the
+// same split takes off.
+//
+// The draft's sidecar goes with it, its chip numbering restarting at 1 (owner
+// decision 6): the images went with the text. A draft kept — changed since it
+// was sent — keeps its chips, and whatever images they still stand for.
 func (m *Model) clearMatchingDraft(text string) {
 	_, text = agent.SplitShellContext(text)
 	if strings.TrimSpace(m.input.Value()) != text {
 		return
 	}
+	m.clearDraft()
+}
+
+// clearDraft empties the composer of a draft that has gone — sent, queued,
+// interjected, or wiped by /clear: its text, its sidecar, the chip numbering
+// restarting at 1 (plan 033 §3.3, owner decision 6), and the slash menu it
+// opened (resetSlash).
+func (m *Model) clearDraft() {
 	m.input.SetValue("")
+	m.images = draftImages{}
 	m.resetSlash()
 }
 

@@ -308,6 +308,9 @@ func TestMain(m *testing.M) {
 	swapClipboardSeams(io.Discard,
 		func(string) error { return nil },
 		func() (string, error) { return "", nil })
+	// The clipboard's image half (plan 033 §3.3) the same way: Ctrl+V reads
+	// it first, and no test may run wl-paste, xclip or osascript.
+	swapImagePaste(noClipboardImage)
 	// The composer `@` search's fake rg and git, written before any test's
 	// goroutine can fork (installAtFakeTools says why).
 	if err := installAtFakeTools(); err != nil {

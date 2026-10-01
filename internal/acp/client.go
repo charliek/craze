@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -29,20 +30,52 @@ type Client struct {
 	// promptWait is the grok prompt_complete racer. First of the RPC reply
 	// or a matching notify wins; the other is abandoned.
 	promptWait chan promptResult
-	// donePromptID is the grok promptId of the last turn the RPC reply
-	// ended. A prompt_complete carrying it is that turn's late twin and
-	// must not end the turn now running.
-	donePromptID string
+	// retired is the grok promptIds of craze's own turns that are over,
+	// newest last and at most retiredCap of them: the id the RPC reply ended
+	// a turn with, the id queue/changed taught for a prompt that has
+	// returned whichever way — a refusal included (plan 033 C3r) — and every
+	// id grok named while an image resend and the attempt it repeats were in
+	// flight (queueNamed, C6r2). A prompt_complete carrying one is a late
+	// twin and must not end the turn now running, and a broadcast naming one
+	// never teaches the id of the prompt in flight.
+	retired []string
 	// promptID is the grok promptId of the prompt in flight, learned from
 	// the queue/changed broadcast that names it (§3.2). promptText is what
-	// was sent, which is how the broadcast is recognised. Both are reset by
+	// was sent, which is how the broadcast is recognised: block 1, as grok
+	// 1.0.30 names a prompt, and promptJoined every text block joined by a
+	// blank line, as grok 1.0.44 does (plan 033 V1). All three are reset by
 	// every Prompt.
-	promptID   string
-	promptText string
+	promptID     string
+	promptText   string
+	promptJoined string
+	// resending says the prompt in flight is the image resend (ResendBlocks).
+	// Its block 1 is the refused attempt's, so no queue/changed text can tell
+	// the resend from that attempt: it learns no promptId and no
+	// prompt_complete settles it — its RPC reply alone ends it (plan 033
+	// C6r2, r4 #2).
+	resending bool
+	// queueNamed is every promptId grok's queue/changed has named, queued or
+	// running — interject fallbacks aside — since the last PromptBlocks that
+	// was not a resend opened its turn, at most queueNamedCap of them. When a
+	// resend ends, whichever way, every one of them is retired: the refused
+	// attempt's id, however late grok first names it, and the resend's own,
+	// so a late completion of either cannot end the next prompt (plan 033
+	// C6r2, r4 #2).
+	queueNamed []string
 	// foreignSeen records that some other running promptId was broadcast
 	// since the prompt was sent. Until promptID is known it is the only
 	// reason to distrust an unmatched prompt_complete.
 	foreignSeen bool
+	// heard says the agent has sent something of its own about the last
+	// prompt — turn content, a request of any kind, grok naming the prompt in
+	// its queue (turnActivity, heard.go) — since its turn opened. It is set on
+	// the read loop, which handles every message in arrival order before the
+	// next, so whatever the agent sent ahead of its reply is counted by the
+	// time PromptBlocks returns that reply; and it goes on being set after the
+	// return, so whatever the agent sends between a refusal and its resend
+	// counts too. Every PromptBlocks resets it as it opens its turn
+	// (ResendBlocks refuses instead when it is set).
+	heard bool
 	// foreignID is the turn the agent is running without a craze prompt —
 	// grok's interject fallback is the only known producer. While it is set,
 	// Prompt is refused.
@@ -470,6 +503,11 @@ func (c *Client) Prompt(ctx context.Context, text string) (*PromptResult, error)
 // this call abandons once prompt_complete has settled the turn, so sent may run
 // after PromptBlocks has returned; a caller must tolerate a late call.
 func (c *Client) PromptBlocks(ctx context.Context, blocks []ContentBlock, accepted, sent func()) (*PromptResult, error) {
+	return c.promptBlocks(ctx, blocks, accepted, sent, false)
+}
+
+// promptBlocks is PromptBlocks, and ResendBlocks when resend is set.
+func (c *Client) promptBlocks(ctx context.Context, blocks []ContentBlock, accepted, sent func(), resend bool) (*PromptResult, error) {
 	if len(blocks) == 0 {
 		return nil, errors.New("acp: prompt has no content")
 	}
@@ -490,6 +528,12 @@ func (c *Client) PromptBlocks(ctx context.Context, blocks []ContentBlock, accept
 		c.mu.Unlock()
 		return nil, ErrForeignTurn
 	}
+	if resend && c.heard {
+		// The refused prompt may have run: the agent has said something about
+		// it, before its refusal or since (heard.go).
+		c.mu.Unlock()
+		return nil, ErrHeardSinceRefusal
+	}
 	c.inPrompt = true
 	// A new turn: every blocking request registered from here on belongs to it,
 	// and every request of the turn before it is now stale.
@@ -497,10 +541,20 @@ func (c *Client) PromptBlocks(ctx context.Context, blocks []ContentBlock, accept
 	// The new turn's identity is not known yet: queue/changed teaches it, and
 	// until then nothing the last turn learned may speak for this one.
 	c.promptID = ""
-	// Block 1 and nothing else: grok's queue correlation compares this against
-	// the text the user typed, which is all block 1 ever holds.
+	// grok's queue correlation compares these against the text it names the
+	// prompt by: block 1, the text the user typed, or every text block joined
+	// (promptJoined).
 	c.promptText = firstBlockText(blocks)
+	c.promptJoined = joinedTextBlocks(blocks)
 	c.foreignSeen = false
+	c.heard = false
+	c.resending = resend
+	if !resend {
+		// A resend keeps what grok named since the refused attempt opened:
+		// the refused attempt's id may be among it, and is retired with the
+		// resend.
+		c.queueNamed = c.queueNamed[:0]
+	}
 	sid := c.sessionID
 	dialect := c.dialect
 	wait := make(chan promptResult, 1)
@@ -510,8 +564,22 @@ func (c *Client) PromptBlocks(ctx context.Context, blocks []ContentBlock, accept
 		c.mu.Lock()
 		c.inPrompt = false
 		c.promptWait = nil
+		if resend {
+			// Every id grok named since the refused attempt opened is the
+			// refused attempt's, the resend's own or another turn of craze's
+			// that is over — none of them the next prompt's — and the resend
+			// learned none of them, so they are retired here, whichever way
+			// it ended: its reply, an error, the caller giving up.
+			c.retireQueueNamedLocked()
+		}
+		// Whichever way the prompt ended — its completion, its reply, a
+		// refusal, the caller giving up — a completion naming it from here on
+		// is late and ends nothing.
+		c.retireLocked(c.promptID)
 		c.promptID = ""
 		c.promptText = ""
+		c.promptJoined = ""
+		c.resending = false
 		c.mu.Unlock()
 	}()
 
@@ -572,6 +640,53 @@ func firstBlockText(blocks []ContentBlock) string {
 		return ""
 	}
 	return blocks[0].Text
+}
+
+// joinedTextBlocks is every text block of a prompt joined by a blank line, the
+// images left out: the text grok 1.0.44 names a queued or running prompt by
+// (plan 033 V1: block 1 and the downscale note, "\n\n" between them). For a
+// prompt of one text block it is block 1.
+func joinedTextBlocks(blocks []ContentBlock) string {
+	var b strings.Builder
+	for _, bl := range blocks {
+		if bl.Type != "text" {
+			continue
+		}
+		if b.Len() > 0 {
+			b.WriteString("\n\n")
+		}
+		b.WriteString(bl.Text)
+	}
+	return b.String()
+}
+
+// retiredCap bounds retired. Only the newest few matter: a late completion
+// trails its own turn, not turns long gone.
+const retiredCap = 8
+
+// retireLocked records id as one of craze's own turns that is over (retired).
+func (c *Client) retireLocked(id string) {
+	if id == "" || c.retiredLocked(id) {
+		return
+	}
+	if len(c.retired) == retiredCap {
+		copy(c.retired, c.retired[1:])
+		c.retired = c.retired[:retiredCap-1]
+	}
+	c.retired = append(c.retired, id)
+}
+
+// retiredLocked reports whether id names a turn of craze's own that is over.
+func (c *Client) retiredLocked(id string) bool {
+	if id == "" {
+		return false
+	}
+	for _, r := range c.retired {
+		if r == id {
+			return true
+		}
+	}
+	return false
 }
 
 func promptResultOrErr(w promptResult) (*PromptResult, error) {
@@ -884,6 +999,7 @@ func (c *Client) Exited() <-chan struct{} {
 // loop, before their handler goroutine starts: a cancel landing in between
 // must still find the request and answer it exactly once.
 func (c *Client) onRequest(msg *Message) {
+	c.noteHeard()
 	d := c.Dialect()
 	switch msg.Method {
 	case MethodRequestPermission:
@@ -1086,6 +1202,7 @@ func (c *Client) TurnActive(turn int) bool {
 }
 
 func (c *Client) onNotify(msg *Message) {
+	c.noteActivity(msg)
 	switch msg.Method {
 	case MethodSessionUpdate:
 		c.handleSessionUpdate(msg)
@@ -1125,11 +1242,8 @@ func (c *Client) onNotify(msg *Message) {
 // notePromptDone records the promptId of a turn the RPC reply ended, so
 // the notify for that same turn, arriving late, is recognised as stale.
 func (c *Client) notePromptDone(promptID string) {
-	if promptID == "" {
-		return
-	}
 	c.mu.Lock()
-	c.donePromptID = promptID
+	c.retireLocked(promptID)
 	c.mu.Unlock()
 }
 
@@ -1154,12 +1268,19 @@ func (c *Client) handlePromptComplete(msg *Message) {
 	h := c.foreignHandler
 	ch := c.promptWait
 	in := c.inPrompt
-	stale := n.PromptID != "" && n.PromptID == c.donePromptID
+	stale := c.retiredLocked(n.PromptID)
 	settles := c.settlesLocked(n.PromptID)
 	if in && !stale && !settles {
 		// A completion that could have ended this turn and does not belong
 		// to it is the one worth counting.
 		c.dropped++
+	}
+	if !in && !stale && end == nil && !IsInterjectFallback(n.PromptID) {
+		// A completion between prompts that is no late twin and no turn of
+		// the agent's own: a turn craze never learned the id of ran to its
+		// end — the last prompt's, refused or not, as far as anyone can tell.
+		// That prompt was heard (plan 033 C3r).
+		c.heard = true
 	}
 	c.mu.Unlock()
 	fireForeign(h, nil, end)
@@ -1177,7 +1298,14 @@ func (c *Client) handlePromptComplete(msg *Message) {
 // completion settles the turn unless it names an interject fallback or some
 // other running turn has been broadcast since the prompt went out — the two
 // ways a completion craze did not ask for can reach it.
+//
+// No completion settles the image resend: its block 1 is the refused
+// attempt's, so no broadcast can tell a completion of that attempt from one of
+// the resend, and the resend's RPC reply ends it (ResendBlocks).
 func (c *Client) settlesLocked(promptID string) bool {
+	if c.resending {
+		return false
+	}
 	if c.promptID != "" {
 		return promptID == c.promptID
 	}

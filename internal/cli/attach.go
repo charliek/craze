@@ -13,6 +13,7 @@ import (
 	"github.com/muesli/termenv"
 	"github.com/spf13/cobra"
 
+	"github.com/charliek/craze/internal/paths"
 	"github.com/charliek/craze/internal/protocol"
 	"github.com/charliek/craze/internal/remote"
 	"github.com/charliek/craze/internal/rundir"
@@ -300,6 +301,10 @@ func attachConfig(target attachTarget, view attachView) (tui.Config, error) {
 		When:      protocol.WhenReady,
 		Provider:  target.entry.Provider,
 		Workspace: target.entry.Workspace,
+		// P27 (plan 033): attach resolves a session in any CRAZE_HOME the
+		// registry lists, and only a host of this craze's own namespace
+		// reads the attachments directory the TUI stores pasted images in.
+		ReadsAttachments: rundir.SocketInNamespace(target.entry.Socket, paths.CrazeDir()),
 	})
 	if err != nil {
 		return tui.Config{}, exitf(1, "craze attach: session %s is unreachable: %s",

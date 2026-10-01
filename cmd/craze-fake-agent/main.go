@@ -132,6 +132,24 @@ Flags:
           permodel-pushafter the same push, just after the reply
           permodel-pushmodel-after after the reply, a push of the next
                       model's catalog, the model moved on to it
+          prompt-dump echo's session, but each prompt is answered with one
+                      chunk listing its blocks: "prompt N: K blocks", then per
+                      block its index and type, a text block's quoted text, an
+                      image's mimeType, data=<base64 length>, bytes=<decoded
+                      length> and uri
+          grok-prompt-dump the same over the grok dialect (image:false)
+          reject-image a prompt carrying an image block is refused -32602
+                      (after one message chunk when its text holds SAY-FIRST);
+                      any other prompt is answered as prompt-dump answers
+          grok-reject-image the same refusal over the grok dialect; the
+                      resend that follows it first gets a queue/changed naming
+                      the refused prompt (p-<n-1>) alone, by the resend's
+                      block 1, and that prompt's prompt_complete (cancelled),
+                      then its own queue entry, dump, prompt_complete and a
+                      reply carrying its promptId (p-<n>)
+
+Every script advertises promptCapabilities as its dialect's live agent does:
+image true for the cursor scripts, false for the grok- ones.
 
 The six load scripts refuse session/new with an error, so a test can prove no
 client fell back to it. The permodel scripts advertise loadSession and answer
@@ -158,7 +176,20 @@ Environment:
                        byte per turn to release it, so it can act while the
                        turn is known to be in progress. Unset, tasks runs
                        straight through. sigint-hold's held prompts also end
-                       on that byte, answered as echo.
+                       on that byte, answered as echo, and every step of the
+                       long-turn scripts waits for one (CRAZE_FAKE_STEP is
+                       then unused): a turn held for as long as the test needs.
+  CRAZE_FAKE_DUMP_PROMPTS=<path>  every script appends one JSON line to this
+                       file per session/prompt it reads ({"prompt":[blocks]},
+                       each block as prompt-dump describes it) and per
+                       x.ai/interject ({"interject":"<text>"}), in arrival
+                       order.
+  CRAZE_FAKE_LATE_CATALOG=1  session/new's available_commands_update is held
+                       back until the first session/prompt is read, and sent
+                       then, ahead of that prompt's turn: the catalog lands
+                       while craze's first prompt is in flight, the schedule
+                       the image resend's heard rule has to survive (craze
+                       plan 033 C3r) without a race against the reader.
   CRAZE_FAKE_SESSION_ID=<id>  session/new answers this session id instead of
                        fake-session-1, so several sessions in one test HOME
                        are several rows of its session index. {dir} in it is
@@ -208,7 +239,8 @@ func main() {
 		"long-turn", "grok-long-turn", "grok-long-turn-fallback",
 		"load", "grok-load", "load-missing", "load-hang", "load-long", "load-settings",
 		"permodel", "permodel-empty", "permodel-noreply", "permodel-refuse", "permodel-nomodel",
-		"permodel-pushbefore", "permodel-pushafter", "permodel-pushmodel-after":
+		"permodel-pushbefore", "permodel-pushafter", "permodel-pushmodel-after",
+		"prompt-dump", "grok-prompt-dump", "reject-image", "grok-reject-image":
 	default:
 		fmt.Fprintf(os.Stderr, "craze-fake-agent: unknown script %q\n", script)
 		os.Exit(2)

@@ -157,6 +157,15 @@ func (m Model) withSession(seed sessionSeed) Model {
 		// session it shows.
 		nativeDir: m.nativeDir,
 		nativeEnv: m.nativeEnv,
+		// The composer's sidecar is the draft's, and the draft is the
+		// TUI's (input): carried through an unstarted session's adoption
+		// with its text, and replaced with it by a switch's takeDraft
+		// (plan 033 §3.3). Its entry numbering and its directory are the
+		// TUI's for its life.
+		images:     m.images,
+		attachSeq:  m.attachSeq,
+		attachDir:  m.attachDir,
+		attachRuns: m.attachRuns,
 		// The composer's `@` popup follows the draft, which is the TUI's
 		// (input): a switch to another session closes it first
 		// (switchBackend, openUnstarted), and the first adoption of the
@@ -264,7 +273,7 @@ func (m Model) switchBackend(b backend.Backend, loading bool, indexTitle string)
 	// Init's batch, for the backend Init never saw: the read it arms is the
 	// one the command gate's reader rule counts (readOn) — or none yet, while
 	// held messages drain, whose last one arms it.
-	return next, tea.Batch(next.retire(old), next.sessRosters.closeCmd(roster), next.startCmd(), next.readOn())
+	return next, tea.Batch(next.retire(old), next.sessRosters.closeCmd(roster), next.startCmd(), next.readOn(), next.relaunchImages())
 }
 
 // dropStaleHeld takes out of the held queue every item of a stream the model
@@ -313,20 +322,21 @@ func (m Model) draftKey() string {
 // from its temporary id to the craze id its host answered with. Nothing
 // stashed under from moves nothing.
 func (m *Model) moveDraft(from, to string) {
-	text, ok := m.drafts[from]
+	dr, ok := m.drafts[from]
 	if !ok || from == to {
 		return
 	}
 	d := maps.Clone(m.drafts)
 	delete(d, from)
-	d[to] = text
+	d[to] = dr
 	m.drafts = d
 }
 
 // stashDraft puts the composer's text away under the session it was written
-// for (draftKey), as a switch leaves it; an empty composer leaves nothing
-// stashed. A session with no name yet keeps no draft: nothing could find it
-// again.
+// for (draftKey), as a switch leaves it, with its sidecar (plan 033 §3.3) —
+// a chip still being processed included, which takeDraft starts again; an
+// empty composer leaves nothing stashed. A session with no name yet keeps no
+// draft: nothing could find it again.
 func (m *Model) stashDraft() {
 	key := m.draftKey()
 	if key == "" {
@@ -334,10 +344,10 @@ func (m *Model) stashDraft() {
 	}
 	d := maps.Clone(m.drafts)
 	if d == nil {
-		d = map[string]string{}
+		d = map[string]stashedDraft{}
 	}
 	if text := m.input.Value(); text != "" {
-		d[key] = text
+		d[key] = stashedDraft{text: text, images: m.images.reconciled(text)}
 	} else {
 		delete(d, key)
 	}
@@ -347,16 +357,21 @@ func (m *Model) stashDraft() {
 // takeDraft puts the draft stashed for the session the model now shows back
 // in the composer — and takes it out of the stash, since it is the
 // composer's again — or empties the composer when none is: a draft never
-// follows the user to another session.
+// follows the user to another session, and nor do its images. A chip of it
+// whose processing had not answered when it was stashed is the caller's to
+// start again (relaunchImages), once the session it is shown in is set up:
+// the answer that was on its way carried the shown generation the switch
+// moved past, and the command gate dropped it.
 func (m *Model) takeDraft() {
 	key := m.draftKey()
-	text, ok := m.drafts[key]
+	dr, ok := m.drafts[key]
 	if key != "" && ok {
 		d := maps.Clone(m.drafts)
 		delete(d, key)
 		m.drafts = d
 	}
-	m.input.SetValue(text)
+	m.input.SetValue(dr.text)
+	m.images = dr.images
 }
 
 // --------------------------------------------------------- retired backends

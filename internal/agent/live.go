@@ -145,6 +145,11 @@ type session struct {
 	plugins         []PluginEntry
 	commandsSeen    bool
 	commandsApplied chan struct{}
+	// promptImage is what initialize said of image blocks
+	// (acp.InitializeResult.PromptImage), kept for every prompt's choice
+	// between image blocks and path text (plan 033 §3.4). Written once by
+	// Start, beside plugins, and read under s.mu.
+	promptImage bool
 	// catalogAbort is the abort channel of the one prompt parked in that wait,
 	// nil when none is. It lives on the session because the prompt holding it
 	// has opened no turn yet, so Cancel has nothing else to find it by.
@@ -567,6 +572,8 @@ func (s *session) start(ctx context.Context) (teardown bool, _ error) {
 	plugins := s.discoverPlugins(cwd)
 	s.mu.Lock()
 	s.plugins = plugins
+	// An agent that did not say takes none: ACP's baseline is text.
+	s.promptImage, _ = initRes.PromptImage()
 	s.mu.Unlock()
 	// A load replaces session/new entirely: there is no fallback, because a
 	// silent new session is the one outcome a user who typed --continue must
@@ -1330,12 +1337,21 @@ func (s *session) prompt(ctx context.Context, text string, wire *turnWire) (Resu
 	// renamed the entries before this prompt resolved them or after, never
 	// halfway through.
 	refs := pluginRefs(text, s.pluginLookupLocked())
+	images := s.promptImage
 	s.mu.Unlock()
+	images = images || s.provider().imagesDespiteCapability
 
-	// Block 1 is the draft; what craze expanded follows it. The events go out
-	// from the hook, which runs only once the client has accepted the prompt:
-	// a refused one expanded nothing, because nothing was sent.
-	blocks, expanded := promptBlocks(text, refs)
+	// The attachment envelope comes off here, and the images it names are read
+	// from the host's own directory (plan 033 §3.4, live_images.go); what the
+	// host refused is journaled, never shown. The references above were read
+	// from the same text: the envelope is invisible to them (SplitShellContext).
+	body, ims := s.readImages(text, images)
+	// Block 1 is the draft; what craze expanded follows it, then the images.
+	// The events go out from the hook, which runs only once the client has
+	// accepted the prompt: a refused one expanded nothing, because nothing was
+	// sent.
+	blocks, expanded := promptBlocks(body, refs, ims)
+	ims.dropData()
 	var accepted func()
 	if len(expanded) > 0 {
 		accepted = func() {
@@ -1352,10 +1368,12 @@ func (s *session) prompt(ctx context.Context, text string, wire *turnWire) (Resu
 			}
 		}
 	}
-	// sent reports the bytes leaving, and it reports them into this turn's own
-	// wire, never s.wire: on grok it can run after PromptBlocks has returned,
-	// and by then s.wire may be the next turn's, whose prompt is not out yet.
-	sent := func() { s.publishWire(wire, wireSent) }
+	// sent reports the bytes leaving, and it reports them into this attempt's
+	// own wire, never s.wire: on grok it can run after PromptBlocks has
+	// returned, and by then s.wire may be the next turn's — or this turn's
+	// image resend's (below) — whose prompt is not out yet.
+	first := wire
+	sent := func() { s.publishWire(first, wireSent) }
 	if testBeforeWire != nil {
 		testBeforeWire(s)
 	}
@@ -1388,6 +1406,16 @@ func (s *session) prompt(ctx context.Context, text string, wire *turnWire) (Resu
 		s.doneEmitted = prevDone
 		s.mu.Unlock()
 		return Result{}, err
+	}
+	// An agent that refused the image blocks (-32602) before doing anything
+	// with the prompt gets it once more, each image as path text (plan 033
+	// §3.4, imageResendWire): same turn, same block 1, no second announcement
+	// of the expansions. The resend reports into a wire of its own, which
+	// becomes the claim's, so a Cancel from here lands behind it.
+	if next := s.imageResendWire(err, ims, client); next != nil {
+		wire = next
+		again, _ := promptBlocks(body, refs, ims.asPathText())
+		res, err = s.resendAsPathText(ctx, client, wire, again, err, len(ims.atts))
 	}
 	// The turn is over the moment Prompt returns, whichever way it went.
 	// Marking it here and not beside the EventDone below is what closes the

@@ -171,6 +171,7 @@ type switchRig struct {
 	shells    []tea.Cmd
 	pastes    []tea.Cmd
 	copies    []tea.Cmd
+	images    []tea.Cmd
 	drains    int
 	// last is the command the latest Update answered, whole.
 	last tea.Cmd
@@ -238,6 +239,9 @@ func (r *switchRig) sort(cmd tea.Cmd) {
 		r.pastes = append(r.pastes, cmd)
 	case strings.Contains(name, "sendCopy"):
 		r.copies = append(r.copies, cmd)
+	case strings.Contains(name, "processCmd"):
+		// A pasted image's processing (plan 033 §3.3).
+		r.images = append(r.images, cmd)
 	}
 	// Anything else — a timer, a roster's read or close — is never run.
 }
@@ -1297,7 +1301,7 @@ var (
 		"sessRosters", "bandOn", "drafts", "retired", "sessGen", "bgen", "shownGen", "gateSeq",
 		"resumeAttempt", "spawnSeq", "restores", "turnStarts", "held", "heldBytes", "heldDrained", "syncAck",
 		"syncPending", "gateSync", "harnessQuit", "completeLoads", "unstartedSeq", "sessPick",
-		"connSeq", "nativeDir", "nativeEnv", "composerAt",
+		"connSeq", "nativeDir", "nativeEnv", "composerAt", "images", "attachSeq", "attachDir", "attachRuns",
 	}
 	sessionFields = []string{
 		"eng", "cmdSeq", "chains", "engErr", "cwd", "model", "status", "err", "startErr", "startInc", "git",
@@ -1315,7 +1319,7 @@ var (
 		"planOfferSeq", "planDeadSeq", "offerGen", "turnID", "ownTurn", "nextTurn", "armedDraft", "disarmed",
 		"turnStart", "lastThought", "ctrlCDeadline", "shellCtx", "remote", "cancelled", "prompted",
 		"sessProvider", "foreignEnded", "foreignNoted", "gate", "reading", "ended", "endErr", "infoPin",
-		"upDone", "indexTitle", "unstarted", "first", "cdlg",
+		"upDone", "indexTitle", "unstarted", "first", "cdlg", "attachReads", "editImages",
 	}
 )
 

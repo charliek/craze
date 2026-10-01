@@ -374,6 +374,21 @@ func TestAttachDialsTheEntry(t *testing.T) {
 	if info := cfg.Backend.Info(); info.Provider != "grok" || info.CrazeSessionID != crazeID {
 		t.Fatalf("Info once attached: %+v", info)
 	}
+	// P27 (plan 033): the host runs in this craze's CRAZE_HOME namespace, so
+	// it reads the attachments directory the TUI pastes images into — and
+	// for an attach from under another CRAZE_HOME it does not.
+	if !readsAttachments(cfg.Backend) {
+		t.Fatal("a host of this CRAZE_HOME says it cannot read the attachments")
+	}
+	t.Setenv("CRAZE_HOME", t.TempDir())
+	elsewhere, err := attachConfig(attachTarget{entry: entry, sessionID: entry.CrazeSessionID}, attachView{})
+	if err != nil {
+		t.Fatalf("dial from another CRAZE_HOME: %v", err)
+	}
+	t.Cleanup(func() { _ = elsewhere.Backend.Close() })
+	if readsAttachments(elsewhere.Backend) {
+		t.Fatal("a host of another CRAZE_HOME says it can read this one's attachments")
+	}
 
 	gone := entry
 	gone.Socket = filepath.Join(filepath.Dir(entry.Socket), "gone.sock")
@@ -428,4 +443,11 @@ func TestTheTerminalCheckIsATerminalsOwn(t *testing.T) {
 	cmd.SetErr(io.Discard)
 	cmd.SetArgs([]string{"attach", "--session", hostID})
 	assertExit(t, cmd.Execute(), 2, "craze attach: refusing to start TUI on a non-tty")
+}
+
+// readsAttachments is the TUI's P27 question of a backend (plan 033): its
+// optional ReadsAttachments, false without one.
+func readsAttachments(b interface{}) bool {
+	r, ok := b.(interface{ ReadsAttachments() bool })
+	return ok && r.ReadsAttachments()
 }

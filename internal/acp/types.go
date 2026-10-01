@@ -167,6 +167,47 @@ func (r InitializeResult) LoadSession() bool {
 	return caps.LoadSession
 }
 
+// PromptImage is agentCapabilities.promptCapabilities.image: whether the agent
+// says it takes image blocks in session/prompt, and known, whether it said
+// anything at all (plan 033 §3.4). cursor advertises true; grok 1.0.30 and gx
+// advertise false and forward image blocks regardless, which is the provider's
+// call to make (agent.Provider), not this decoder's.
+//
+// The decode is tolerant, as LoadSession's is: only the one field is read, so
+// a capability of any other shape or type beside it changes nothing, and
+// anything that is not an object holding a promptCapabilities object holding a
+// JSON boolean image — absent, null, malformed, a string — is (false, false):
+// the agent did not say, and ACP's baseline is text only.
+func (r InitializeResult) PromptImage() (image, known bool) {
+	raw := bytes.TrimSpace(r.AgentCapabilities)
+	if len(raw) == 0 || raw[0] != '{' {
+		return false, false
+	}
+	var caps struct {
+		PromptCapabilities json.RawMessage `json:"promptCapabilities"`
+	}
+	if err := json.Unmarshal(raw, &caps); err != nil {
+		return false, false
+	}
+	pc := bytes.TrimSpace(caps.PromptCapabilities)
+	if len(pc) == 0 || pc[0] != '{' {
+		return false, false
+	}
+	var prompt struct {
+		Image json.RawMessage `json:"image"`
+	}
+	if err := json.Unmarshal(pc, &prompt); err != nil {
+		return false, false
+	}
+	switch string(bytes.TrimSpace(prompt.Image)) {
+	case "true":
+		return true, true
+	case "false":
+		return false, true
+	}
+	return false, false
+}
+
 type AuthMethod struct {
 	ID   string `json:"id"`
 	Name string `json:"name"`
@@ -242,9 +283,20 @@ func loadSessionDeadline() time.Duration {
 	return loadSessionTimeout
 }
 
+// ContentBlock is one block of a prompt or of an update's content. A text
+// block is {type:"text", text}. An image block — the only other kind craze
+// sends (plan 033 §3.4) — is {type:"image", data, mimeType, uri}: data the
+// file's bytes in standard base64, mimeType its type, and uri the file:// URL
+// of the processed copy craze read them from, so an agent that would rather
+// open the file than decode the bytes can. The image fields are omitted from a
+// text block, and an agent's own image chunk decodes into them and is dropped
+// by the transcript (messageText reads Text alone).
 type ContentBlock struct {
-	Type string `json:"type"`
-	Text string `json:"text,omitempty"`
+	Type     string `json:"type"`
+	Text     string `json:"text,omitempty"`
+	Data     string `json:"data,omitempty"`
+	MimeType string `json:"mimeType,omitempty"`
+	URI      string `json:"uri,omitempty"`
 }
 
 type PromptParams struct {
@@ -699,7 +751,9 @@ var ErrForeignTurn = errors.New("acp: agent is running a turn of its own")
 // ErrNoSession is a session-scoped call made before session/new.
 var ErrNoSession = errors.New("acp: no session")
 
-// InterjectParams is x.ai/interject. content is not sent: no images this cut.
+// InterjectParams is x.ai/interject. content is never sent: an interjection is
+// text only (plan 033 P7), and an image the user attached to one reaches the
+// agent as [Image #N: <path>] in Text — the session's Interject turns it so.
 type InterjectParams struct {
 	SessionID      string `json:"sessionId"`
 	Text           string `json:"text"`

@@ -54,6 +54,7 @@ fixed names:
 | `config.toml` | The saved theme, provider, and other settings — see [Config file](#config-file) |
 | `sessions.jsonl` | The [session index](#session-index) |
 | `journal/` | One directory per workspace of [session journals](#session-journal) |
+| `attachments/` | The images pasted into the composer — see [Attachments](#attachments) |
 
 `CRAZE_HOME` moves the whole directory. With `CRAZE_HOME=/some/dir`, craze
 reads and writes `/some/dir/config.toml`, `/some/dir/sessions.jsonl` and
@@ -72,6 +73,25 @@ been removed, not kept as an alias: while it is still set, `craze`,
 it, before reading or writing anything. Unset it and set `CRAZE_HOME` to the
 directory the file was in — `CRAZE_HOME=/some/dir` for `/some/dir/config.toml`.
 A config file with any other name has to be renamed `config.toml`.
+
+## Attachments
+
+An image pasted into the TUI's composer (see [Images](tui.md#images)) is
+processed and stored in `attachments/` inside the [craze
+directory](#the-craze-directory): `~/.craze/attachments/`, or
+`$CRAZE_HOME/attachments/`. The directory is created `0700` and holds only
+files named `<16 hex digits>.<png|jpg|webp>`, mode `0600`, written atomically.
+The name is the start of the content's SHA-256, so pasting the same image twice
+stores one file. craze refuses to read from a directory that is a symlink, is
+owned by another user, or has any mode other than exactly `0700`, and an attachment path in a
+message that points anywhere else is sent to the agent as text, not read.
+
+Every TUI start sweeps the directory, quietly: files older than seven days are
+deleted, and then the oldest files go until at most 500 MiB is left.
+Deleting the directory by hand is always safe; an image that has gone by the
+time the message is sent goes as text saying `no longer available`. What the
+agent receives is described under [what the agent
+receives](tui.md#what-the-agent-receives).
 
 ## Config file
 
@@ -633,7 +653,7 @@ default_effort = "high"
 
 A model's other optional keys are documented below:
 [`max_output_tokens`](#native-output-ceiling), [`cost`](#native-cost),
-`vision` and `tool_profile`; `models.toml` also takes
+[`vision`](#native-vision) and `tool_profile`; `models.toml` also takes
 [`[compaction]`](#native-compaction) and
 [`[subagents]`](tui.md#sub-agent-models). craze never rewrites `models.toml`,
 and rewrites `providers.toml` only when you run [`craze auth`](#keys) or
@@ -969,6 +989,32 @@ is simply unpriced — its usage is still counted in tokens, but adds no cost.
 The `cost` table is your own entry in `models.toml`, the same as
 [`[compaction]`](#native-compaction) above: craze reads it and never rewrites
 it.
+
+## Native vision
+
+A native model's `vision` key says whether craze may send it images: the
+pictures pasted into the composer (see [Images](tui.md#images)) and the ones
+the `Read` tool returns for an image file. The shipped catalog sets it
+`true` on the models seen to describe a screenshot, among them the default
+model, and leaves it off on `glm-5.3`. A model you add defaults to `false`.
+
+```toml
+[models."local/qwen"]
+provider   = "local"
+wire_model = "qwen3-vl"
+vision     = true            # this one takes images
+
+[models."glm-5.3"]
+vision     = true            # turn it on for a shipped model, or false to turn it off
+```
+
+On a shipped model the key is an overlay like any other (see [How the files
+merge](#how-the-files-merge)): the one you write replaces the catalog's for
+that model alone. For a model without `vision`, the composer warns at paste
+time and the model receives `[Image omitted: <model> does not accept images.
+File: <path>]` where the image was; the
+[Images](tui.md#what-the-agent-receives) section of the TUI reference has the
+rest.
 
 ## Environment
 

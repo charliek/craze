@@ -267,6 +267,13 @@ func buildSocketHost(cfg Config, startedAt time.Time) (*frameHost, error) {
 		Budget:    &protocol.AttachBudget{MaxItems: frameBudget.MaxItems, MaxBytes: frameBudget.MaxBytes},
 		Provider:  prov.Name(),
 		Workspace: ws,
+		// The host runs in this process, under the run's isolated HOME — the
+		// TUI's own CRAZE_HOME — so it reads the attachments directory the
+		// composer stores pasted images in, and says so (plan 033 P27), as
+		// internal/cli's dials say it for a host of the TUI's own namespace:
+		// a golden that pastes an image draws the same chip over the socket
+		// as in process.
+		ReadsAttachments: true,
 	})
 	if err != nil {
 		return fail(fmt.Errorf("dial: %w", err))

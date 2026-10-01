@@ -448,12 +448,15 @@ func (endlessReader) Read(p []byte) (int, error) {
 }
 
 // TestReadMediaAndBinary ports the image, attachment-sniffing, .fbs, and
-// binary-detection cases. Images are refused where opencode attaches them
-// (plan 019 §3.2), PDFs with the binary message; unsupported image types
-// fall through to the text path, as in opencode; each of the three binary
-// rules refuses, and the text just under the non-printable threshold reads.
+// binary-detection cases, on a model that does not accept images: an image
+// opencode would attach is refused naming the model (plan 033 §3.5; the
+// vision side is TestReadImage), PDFs with the binary message; unsupported
+// image types fall through to the text path, as in opencode; each of the
+// three binary rules refuses, and the text just under the non-printable
+// threshold reads.
 func TestReadMediaAndBinary(t *testing.T) {
 	f := newFixture(t)
+	f.d.SetVision(false, "GLM 5.3 (Z.AI)")
 	png, err := base64.StdEncoding.DecodeString("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==")
 	if err != nil {
 		t.Fatal(err)
@@ -461,22 +464,26 @@ func TestReadMediaAndBinary(t *testing.T) {
 	nonPrintable := func(pct int) string { // 1000 bytes, pct% of them \x01
 		return strings.Repeat("\x01", pct*10) + strings.Repeat("a", 1000-pct*10)
 	}
+	const noVision = "Cannot read image file: GLM 5.3 (Z.AI) does not accept images"
 	refused := []struct{ name, content, text string }{
-		{"image.png", string(png), "Cannot read image file yet: "},
-		{"image.bin", "\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01", "Cannot read image file yet: "}, // sniffed, before .bin refuses
-		{"anim.gif", "GIF89a...", "Cannot read image file yet: "},
-		{"pic.webp", "RIFF\x00\x00\x00\x00WEBPVP8 ", "Cannot read image file yet: "},
-		{"named.jpeg", "just text", "Cannot read image file yet: "}, // by extension
-		{"doc.txt", "%PDF-1.7\nsome text", "Cannot read binary file: "},
-		{"doc.pdf", "just text", "Cannot read binary file: "},
-		{"null-byte.txt", "hello\x00world", "Cannot read binary file: "},
-		{"module.wasm", "not really wasm", "Cannot read binary file: "},
-		{"noise.txt", nonPrintable(31), "Cannot read binary file: "},
+		{"image.png", string(png), noVision},
+		{"image.bin", "\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01", noVision}, // sniffed, before .bin refuses
+		{"anim.gif", "GIF89a...", noVision},
+		{"pic.webp", "RIFF\x00\x00\x00\x00WEBPVP8 ", noVision},
+		{"named.jpeg", "just text", noVision}, // by extension
+		{"doc.txt", "%PDF-1.7\nsome text", "Cannot read binary file: " + f.path("doc.txt")},
+		{"doc.pdf", "just text", "Cannot read binary file: " + f.path("doc.pdf")},
+		{"null-byte.txt", "hello\x00world", "Cannot read binary file: " + f.path("null-byte.txt")},
+		{"module.wasm", "not really wasm", "Cannot read binary file: " + f.path("module.wasm")},
+		{"noise.txt", nonPrintable(31), "Cannot read binary file: " + f.path("noise.txt")},
 	}
 	for _, tc := range refused {
 		put(t, f.path(tc.name), tc.content)
 		_, res := f.call(t, "read", map[string]any{"filePath": f.path(tc.name)})
-		failed(t, res, tool.ClassToolError, tc.text+f.path(tc.name))
+		failed(t, res, tool.ClassToolError, tc.text)
+		if res.Media != nil {
+			t.Fatalf("%s: a refusal carried an image", tc.name)
+		}
 	}
 
 	read := []struct{ name, content string }{

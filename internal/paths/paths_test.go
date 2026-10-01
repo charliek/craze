@@ -18,10 +18,10 @@ func crazeEnv(t *testing.T, home, crazeHome string) {
 }
 
 // all is every location this package hands out, in one comparable value.
-type all struct{ craze, config, sessions, native, journal string }
+type all struct{ craze, config, sessions, native, journal, attachments string }
 
 func locations() all {
-	return all{CrazeDir(), ConfigPath(), SessionsPath(), NativeDir(), JournalDir()}
+	return all{CrazeDir(), ConfigPath(), SessionsPath(), NativeDir(), JournalDir(), AttachmentsDir()}
 }
 
 func TestHomeDirPrefersHOME(t *testing.T) {
@@ -58,18 +58,19 @@ func TestDefaultsUnderHome(t *testing.T) {
 	home := t.TempDir()
 	crazeEnv(t, home, "")
 	dir := filepath.Join(home, ".craze")
-	want := all{dir, filepath.Join(dir, "config.toml"), filepath.Join(dir, "sessions.jsonl"), filepath.Join(dir, "native"), filepath.Join(dir, "journal")}
+	want := all{dir, filepath.Join(dir, "config.toml"), filepath.Join(dir, "sessions.jsonl"), filepath.Join(dir, "native"), filepath.Join(dir, "journal"), filepath.Join(dir, "attachments")}
 	if got := locations(); got != want {
 		t.Fatalf("locations() = %+v, want %+v", got, want)
 	}
 }
 
-// TestCrazeHomeAbsolute: CRAZE_HOME=/x puts config, index, native/ and
-// journal/ under /x itself, not /x/.craze, and HOME plays no part.
+// TestCrazeHomeAbsolute: CRAZE_HOME=/x puts config, index, native/,
+// journal/ and attachments/ under /x itself, not /x/.craze, and HOME plays no
+// part.
 func TestCrazeHomeAbsolute(t *testing.T) {
 	dir := t.TempDir()
 	crazeEnv(t, t.TempDir(), dir)
-	want := all{dir, filepath.Join(dir, "config.toml"), filepath.Join(dir, "sessions.jsonl"), filepath.Join(dir, "native"), filepath.Join(dir, "journal")}
+	want := all{dir, filepath.Join(dir, "config.toml"), filepath.Join(dir, "sessions.jsonl"), filepath.Join(dir, "native"), filepath.Join(dir, "journal"), filepath.Join(dir, "attachments")}
 	if got := locations(); got != want {
 		t.Fatalf("locations() = %+v, want %+v", got, want)
 	}
@@ -87,8 +88,9 @@ func TestCrazeHomeWorksWithoutHome(t *testing.T) {
 
 // TestCrazeHomeRelative: a relative CRAZE_HOME stays relative to the working
 // directory for the config file and the index — never an absolute surprise —
-// while NativeDir and JournalDir are made absolute, because the harness and a
-// session's journal are each handed theirs once.
+// while NativeDir, JournalDir and AttachmentsDir are made absolute, because
+// the harness and a session's journal are each handed theirs once, and an
+// envelope's paths are compared against the attachments directory's.
 func TestCrazeHomeRelative(t *testing.T) {
 	cwd := t.TempDir()
 	t.Chdir(cwd)
@@ -119,6 +121,13 @@ func TestCrazeHomeRelative(t *testing.T) {
 	}
 	if got := JournalDir(); !filepath.IsAbs(got) || got != wantJournal {
 		t.Fatalf("JournalDir() = %q, want the absolute %q", got, wantJournal)
+	}
+	wantAttachments, err := filepath.Abs(filepath.Join(rel, "attachments"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := AttachmentsDir(); !filepath.IsAbs(got) || got != wantAttachments {
+		t.Fatalf("AttachmentsDir() = %q, want the absolute %q", got, wantAttachments)
 	}
 }
 

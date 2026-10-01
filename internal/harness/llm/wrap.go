@@ -2,9 +2,11 @@ package llm
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"maps"
+	"slices"
 	"strings"
 
 	"charm.land/fantasy"
@@ -80,10 +82,15 @@ func (e *MidStreamError) IsContextTooLarge() bool { return e.contextTooLarge }
 //  4. Every error leaving the model — from Stream itself, from an error
 //     part, and from Generate, GenerateObject and StreamObject — is
 //     scrubbed of the key and of URL query strings (see scrubber).
+//  5. The images tools returned in a run of tool results go to the provider
+//     after the whole run, in one user message, rather than one after each
+//     result (regroupToolImages, plan 033 §3.5, P10). The request alone is
+//     rewritten, never the messages the caller holds.
 //
 // Generate, GenerateObject and StreamObject otherwise delegate untouched:
 // nothing in the harness uses them, and the finish rules only matter to a
-// streamed agent loop.
+// streamed agent loop. Generate sends the request rule 5 rewrites, as Stream
+// does, since the request is the same either way.
 type model struct {
 	inner fantasy.LanguageModel
 	scrub *scrubber
@@ -98,6 +105,7 @@ func (m *model) Provider() string { return m.inner.Provider() }
 func (m *model) Model() string    { return m.inner.Model() }
 
 func (m *model) Generate(ctx context.Context, call fantasy.Call) (*fantasy.Response, error) {
+	call.Prompt = regroupToolImages(call.Prompt)
 	resp, err := m.inner.Generate(ctx, call)
 	return resp, m.scrub.err(err)
 }
@@ -122,7 +130,7 @@ func (m *model) StreamObject(ctx context.Context, call fantasy.ObjectCall) (fant
 	}, nil
 }
 
-// Stream applies the four rules above to one step. An error returned by the
+// Stream applies the five rules above to one step. An error returned by the
 // inner Stream itself — the OpenAI-compatible client returns one only for a
 // request it could not build; HTTP failures arrive as error parts — precedes
 // any output by definition, so it is scrubbed and otherwise left to Fantasy.
@@ -131,6 +139,7 @@ func (m *model) StreamObject(ctx context.Context, call fantasy.ObjectCall) (fant
 // clean: a retry calls Stream again, and the fresh response has yielded
 // nothing.
 func (m *model) Stream(ctx context.Context, call fantasy.Call) (fantasy.StreamResponse, error) {
+	call.Prompt = regroupToolImages(call.Prompt)
 	inner, err := m.inner.Stream(ctx, call)
 	if err != nil {
 		return nil, m.scrub.err(err)
@@ -228,4 +237,125 @@ func RawFinish(md fantasy.ProviderMetadata) (reason fantasy.FinishReason, ok boo
 		return "", false
 	}
 	return r.Reason, true
+}
+
+// regroupToolImages is rule 5 (plan 033 §3.5, P10): prompt as the request
+// sends it, with the images tools returned moved out of their tool results
+// and into one user message after the run of tool results they came in.
+//
+// Chat Completions has no image in a tool message, so the OpenAI-compatible
+// client sends a tool's image result as a text tool message followed at once
+// by a user message holding the image (openai.ToolResultMediaMessages,
+// openaicompat language_model_hooks.go:539-556). Two images read in parallel
+// then go out as tool, user, tool, user: the step's run of tool messages, the
+// answers to the assistant's tool calls, is split by a user message, which
+// providers that want every call answered before anything else refuse or
+// misread. So here, before the client encodes the request, each run of
+// consecutive tool messages is rewritten:
+//
+//   - a tool result whose output is an image (a fantasy.ToolResultOutputContentMedia
+//     of an image/* type) becomes a text result of its text — or, with none,
+//     a line saying an image follows the results — still answering the same
+//     call, so the run stays tool messages alone;
+//   - after the run comes one user message: "Images returned by tool call(s)
+//     <ids>:", the calls' ids in order, then each image as a file part, which
+//     the client sends as an image_url data URI, as it sends a pasted image.
+//
+// A run with no image, every message outside a run, and an image whose
+// base64 does not decode (left to the client's own encoding) are kept as
+// they are; a prompt with nothing to move comes back as it is. Nothing the
+// caller holds is written to — the messages, their parts, the slice — so the
+// history the harness keeps, and the transcript, still hold each image in
+// its own result: the regroup is the request's alone, made again for every
+// request, and it is a pure function of the messages, so a history replayed
+// on a later step or turn is regrouped into the same bytes, and a provider's
+// prefix cache sees the same request it saw before.
+//
+// It composes with the harness's vision strip (stripImages, plan 033 §3.5),
+// which runs first, before Fantasy assembles the request: to a model that
+// does not accept images the history's image results are text already, and
+// the turn's own tools return none (tool.Env.Vision), so there is nothing
+// left here to move.
+func regroupToolImages(prompt fantasy.Prompt) fantasy.Prompt {
+	var out fantasy.Prompt // nil until a run changes
+	for i := 0; i < len(prompt); {
+		if prompt[i].Role != fantasy.MessageRoleTool {
+			if out != nil {
+				out = append(out, prompt[i])
+			}
+			i++
+			continue
+		}
+		j := i + 1
+		for j < len(prompt) && prompt[j].Role == fantasy.MessageRoleTool {
+			j++
+		}
+		run, images, moved := liftToolImages(prompt[i:j])
+		switch {
+		case moved:
+			if out == nil {
+				out = append(make(fantasy.Prompt, 0, len(prompt)+1), prompt[:i]...)
+			}
+			out = append(out, run...)
+			out = append(out, images)
+		case out != nil:
+			out = append(out, prompt[i:j]...)
+		}
+		i = j
+	}
+	if out == nil {
+		return prompt
+	}
+	return out
+}
+
+// liftToolImages is regroupToolImages for one run of tool messages: the run
+// with each image result made text, and the user message holding the images,
+// in the order the results came; moved is false, and the rest zero, when the
+// run holds no image to move. run itself is never written to.
+func liftToolImages(run []fantasy.Message) (out []fantasy.Message, images fantasy.Message, moved bool) {
+	var ids []string
+	var files []fantasy.MessagePart
+	for k, m := range run {
+		var content []fantasy.MessagePart // m's, copied once it changes
+		for p, part := range m.Content {
+			r, ok := fantasy.AsMessagePart[fantasy.ToolResultPart](part)
+			if !ok {
+				continue
+			}
+			o, ok := fantasy.AsToolResultOutputType[fantasy.ToolResultOutputContentMedia](r.Output)
+			if !ok || !strings.HasPrefix(o.MediaType, "image/") {
+				continue
+			}
+			data, err := base64.StdEncoding.DecodeString(o.Data)
+			if err != nil {
+				continue
+			}
+			if content == nil {
+				content = slices.Clone(m.Content)
+			}
+			text := o.Text
+			if text == "" {
+				text = "The tool returned an image (" + o.MediaType + "); it follows the tool results."
+			}
+			r.Output = fantasy.ToolResultOutputContentText{Text: text}
+			content[p] = r
+			ids = append(ids, r.ToolCallID)
+			files = append(files, fantasy.FilePart{Data: data, MediaType: o.MediaType})
+		}
+		if content == nil {
+			continue
+		}
+		if out == nil {
+			out = slices.Clone(run)
+		}
+		m.Content = content
+		out[k] = m
+	}
+	if out == nil {
+		return nil, fantasy.Message{}, false
+	}
+	intro := fantasy.TextPart{Text: "Images returned by tool call(s) " + strings.Join(ids, ", ") + ":"}
+	images = fantasy.Message{Role: fantasy.MessageRoleUser, Content: append([]fantasy.MessagePart{intro}, files...)}
+	return out, images, true
 }

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -374,17 +375,21 @@ func TestCtrlVPastesThroughTheSeam(t *testing.T) {
 	prevOut, prevNative, prevPaste := swapClipboardSeams(io.Discard,
 		func(string) error { native++; return nil },
 		func() (string, error) { native++; return "xclip", nil })
-	prevRead := clipboardRead
+	// The image half too (plan 033 §3.3): Ctrl+V asks it first.
+	prevImage := swapImagePaste(func() ([]byte, error) { native++; return nil, nil })
+	prevRead, prevReadImage := clipboardRead, clipboardReadImage
 	clipboardRead = func() (string, error) { return "pasted text", nil }
+	clipboardReadImage = noClipboardImage
 	t.Cleanup(func() {
-		clipboardRead = prevRead
+		clipboardRead, clipboardReadImage = prevRead, prevReadImage
 		swapClipboardSeams(prevOut, prevNative, prevPaste)
+		swapImagePaste(prevImage)
 	})
 
 	tm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlV})
 	m = tm.(Model)
 	msg := runCmd(cmd)
-	if got, want := msg, (pasteMsg{text: "pasted text", shownGen: m.shownGen}); got != want {
+	if got, want := msg, (pasteMsg{text: "pasted text", shownGen: m.shownGen}); !reflect.DeepEqual(got, want) {
 		t.Fatalf("ctrl+v produced %#v, want %#v", got, want)
 	}
 	tm, _ = m.Update(msg)

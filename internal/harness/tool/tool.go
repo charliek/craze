@@ -204,6 +204,25 @@ type Result struct {
 	// names, in a copy, as it does every outward string. nil for every other
 	// tool, and for an agent call that never opened a child.
 	Child *ChildUsage
+	// Media is an image the call returns to the model beside Text (plan 033
+	// §3.5, owner decision 8): the read tool's, for an image file, on a turn
+	// whose model accepts images (Env.Vision). Text still says what it is —
+	// the model reads both, and a model the history later reaches that does
+	// not accept images reads the text alone. Only a successful result on
+	// such a turn carries one: the dispatcher drops it from an error, and
+	// from any result on a turn whose model does not accept images, which
+	// then gets a line saying so (Dispatcher.Run). It is never redacted, as
+	// it holds no text, and never truncated. nil for every other result.
+	Media *Media
+}
+
+// Media is an image a tool returns (Result.Media): its bytes and their media
+// type, one of the types attach.Process emits (image/png, image/jpeg,
+// image/webp) — a tool returns an image only through that one processing
+// path (plan 033 P30), so it is held to the limits a pasted image is.
+type Media struct {
+	Data []byte
+	MIME string
 }
 
 // ExecOutput is a command's outcome, for its card.
@@ -302,6 +321,68 @@ type Env struct {
 	// session, whose depth is 1, or a build that wired no runner — and the
 	// agent tool then answers with a tool_error result.
 	Subagents Subagents
+	// Vision says whether the model the call runs for accepts images
+	// (modeltable's vision flag, plan 033 §3.5): a tool returns an image
+	// (Result.Media) only when it does, and otherwise says the model cannot
+	// see one, naming it (ModelName). The dispatcher sets both per turn
+	// (SetVision), from the model the turn runs on, so a /model switch is
+	// taken up by the next turn's calls and a sub-agent's calls are its own
+	// model's, never its parent's. Within a turn it is fixed, which is what
+	// keeps a model that does not accept images from being sent one by the
+	// turn's own steps: the history's images are the harness's vision strip's
+	// to stand in for, but a step's tool results reach the model as they are.
+	Vision bool
+	// ModelName is that model's name as the person sees it — its display
+	// name, or its alias when it has none — for a tool's words about it:
+	// "<model> does not accept images". "" before any turn has set it.
+	ModelName string
+}
+
+// ModelLabel is the name a tool gives the call's model in its own words
+// (ModelName), or "this model" when no turn has named one: a sentence about
+// what the model cannot do always has a subject.
+func (e Env) ModelLabel() string { return modelLabel(e.ModelName) }
+
+// modelLabel is ModelLabel for a model's name, for the dispatcher, which has
+// the name but no call's Env.
+func modelLabel(name string) string {
+	if name == "" {
+		return "this model"
+	}
+	return name
+}
+
+// NoVision is the words for a model that cannot be sent an image, "<model>
+// does not accept images" (plan 033 §3.5, X37), model being its name as the
+// person sees it: why an image is left out of the history (the harness's
+// vision strip) and of a tool's result (Dispatcher.mediaOf), and why read
+// refuses an image file. One spelling, so the model reads the same words
+// wherever an image was kept from it.
+func NoVision(model string) string { return model + " does not accept images" }
+
+// ImageOmitted is the placeholder an image left out of a request stands in
+// as (plan 033 §3.5): [Image omitted: <why>. File: <path>] for an attached
+// image, whose path the model can still name, and [Image omitted: <why>]
+// for one with no path to give.
+func ImageOmitted(why, path string) string {
+	if path == "" {
+		return "[Image omitted: " + why + "]"
+	}
+	return "[Image omitted: " + why + ". File: " + path + "]"
+}
+
+// ResultImageOmitted is a tool result's text with its image left out (plan
+// 033 §3.5, X52): the text, then on a line of its own [Image omitted: <why>]
+// — that line alone when the result has no text. The harness's vision strip
+// gives a history's image result this text, and the dispatcher gives it to a
+// result whose turn's model does not accept images, so both say it in the
+// same bytes.
+func ResultImageOmitted(text, why string) string {
+	note := ImageOmitted(why, "")
+	if text == "" {
+		return note
+	}
+	return text + "\n" + note
 }
 
 // Resolve returns path as an absolute, cleaned path: a relative path is taken

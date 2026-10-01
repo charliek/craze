@@ -3,6 +3,7 @@ package acp
 import (
 	"context"
 	"fmt"
+	"slices"
 )
 
 // interjectSeenCap bounds the interjection dedup set. Ids arrive in wire
@@ -132,6 +133,7 @@ func (c *Client) handleQueueChanged(msg *Message) {
 		return
 	}
 	c.learnPromptIDLocked(n)
+	c.noteQueueNamedLocked(n)
 	start, end := c.trackForeignLocked(n.RunningPromptID, n.RunningText)
 	h := c.foreignHandler
 	c.mu.Unlock()
@@ -139,25 +141,79 @@ func (c *Client) handleQueueChanged(msg *Message) {
 }
 
 // learnPromptIDLocked stamps the in-flight prompt's id the first time a
-// broadcast names it, by the text that was sent.
+// broadcast names it, by the text that was sent: block 1 alone (grok 1.0.30)
+// or every text block joined (grok 1.0.44, which names a prompt carrying the
+// downscale note or a plugin expansion that way; plan 033 V1).
 //
 // A queued entry is preferred over the running one, and that order matters:
 // a prompt craze has just sent is queued, not running. Reading the running id
 // first would misidentify a retry of a prompt whose text the agent is still
 // running — the broadcast names the old turn as running and the new one as
-// queued, and the old turn's completion would then end the new one.
+// queued, and the old turn's completion would then end the new one. An id
+// already retired is one of craze's own turns that is over — the refused
+// prompt an image resend repeats, by the same text — and never this one's.
+//
+// An id learned is the prompt heard: grok has taken it into its queue, so a
+// refusal behind it is not one the prompt can be resent after (plan 033 C3r).
+//
+// The image resend learns nothing here. Its block 1 is the refused attempt's,
+// and that attempt's id was never learned (or it would have been heard, and
+// not resent), so neither retirement nor the text tells a broadcast naming
+// the attempt from one naming the resend — and grok may first name the
+// attempt late, after the resend's bytes are out. An id learned from it could
+// be the attempt's, whose completion would then end the resend while it ran;
+// the resend's RPC reply ends it instead, and the ids grok named meanwhile are
+// retired with it (queueNamed; plan 033 C6r2, r4 #2, superseding C6r's
+// learn-after-the-write rule).
 func (c *Client) learnPromptIDLocked(n QueueChanged) {
-	if !c.inPrompt || c.promptID != "" || c.promptText == "" {
+	if !c.inPrompt || c.resending || c.promptID != "" || c.promptText == "" {
 		return
 	}
+	names := func(id, text string) bool {
+		return id != "" && !IsInterjectFallback(id) && !c.retiredLocked(id) &&
+			(text == c.promptText || text == c.promptJoined)
+	}
 	for _, e := range n.Entries {
-		if e.ID != "" && e.Text == c.promptText && !IsInterjectFallback(e.ID) {
+		if names(e.ID, e.Text) {
 			c.promptID = e.ID
+			c.heard = true
 			return
 		}
 	}
-	if n.RunningPromptID != "" && n.RunningText == c.promptText && !IsInterjectFallback(n.RunningPromptID) {
+	if names(n.RunningPromptID, n.RunningText) {
 		c.promptID = n.RunningPromptID
+		c.heard = true
+	}
+}
+
+// queueNamedCap bounds queueNamed at what retired can hold: grok's queue holds
+// the prompt in flight, so between a refused attempt and the end of its resend
+// it names that attempt and the resend, and past retiredCap ids retiring more
+// would only push the first ones out again.
+const queueNamedCap = retiredCap
+
+// noteQueueNamedLocked records every promptId a broadcast names, queued or
+// running, in queueNamed, the first queueNamedCap of them. An interject
+// fallback's id is left out: no completion naming one ever settles a prompt of
+// craze's (settlesLocked), so it needs no retiring.
+func (c *Client) noteQueueNamedLocked(n QueueChanged) {
+	add := func(id string) {
+		if id == "" || IsInterjectFallback(id) || len(c.queueNamed) == queueNamedCap || slices.Contains(c.queueNamed, id) {
+			return
+		}
+		c.queueNamed = append(c.queueNamed, id)
+	}
+	for _, e := range n.Entries {
+		add(e.ID)
+	}
+	add(n.RunningPromptID)
+}
+
+// retireQueueNamedLocked retires every id in queueNamed (retireLocked): what
+// an image resend leaves behind when it ends (plan 033 C6r2, r4 #2).
+func (c *Client) retireQueueNamedLocked() {
+	for _, id := range c.queueNamed {
+		c.retireLocked(id)
 	}
 }
 

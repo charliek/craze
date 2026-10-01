@@ -385,7 +385,7 @@ func TestPromptBlocksKeepTheDraftFirst(t *testing.T) {
 		entryOf("p", "two", PluginKindSkill, "second body"),
 	}
 	draft := "/one a\n/two b"
-	blocks, cmds := promptBlocks(draft, pluginRefs(draft, lookupOf(entries)))
+	blocks, cmds := promptBlocks(draft, pluginRefs(draft, lookupOf(entries)), promptImages{})
 	if len(blocks) != 3 || len(cmds) != 2 {
 		t.Fatalf("%d blocks, %d commands", len(blocks), len(cmds))
 	}
@@ -408,7 +408,7 @@ func TestPromptBlocksKeepTheDraftFirst(t *testing.T) {
 		t.Fatalf("path %q", cmds[1].Path)
 	}
 	// A draft with nothing to expand is still exactly one block.
-	plain, none := promptBlocks("hello", nil)
+	plain, none := promptBlocks("hello", nil, promptImages{})
 	if len(plain) != 1 || plain[0].Text != "hello" || none != nil {
 		t.Fatalf("plain draft %+v %+v", plain, none)
 	}

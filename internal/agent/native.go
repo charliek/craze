@@ -1714,9 +1714,18 @@ func (s *nativeSession) prompt(ctx context.Context, text string, rel chan struct
 		res, err = hs.Compact(turnCtx, hs.Redact(focus), hs.Redact(command), s.sink)
 	} else {
 		// One string, not content blocks: the harness takes the whole user
-		// message at once (turn.go). Redacted with the session's own
-		// redactor, because Run persists and sends it unchanged.
-		sent, expanded := nativePrompt(text, refs, sessionID, hs.Redact)
+		// message's text at once (turn.go). Redacted with the session's own
+		// redactor, because RunWith persists and sends it unchanged.
+		//
+		// The attachment envelope never reaches the model (plan 033 §3.5): it
+		// comes off here, and its images go to the turn as file parts after
+		// the text — the model's vision decides what of them is sent, in the
+		// harness — or, for any the host would not read, as path text with
+		// the reason (nativeImages). The title and the references above read
+		// the envelope as nothing (SplitShellContext).
+		body, images, problems := nativeImages(text)
+		noteAttachments(s.log, "native", problems)
+		sent, expanded := nativePrompt(body, refs, sessionID, hs.Redact)
 		for _, cmd := range expanded {
 			// Its own copy, not a pointer into the slice: the event outlives
 			// this loop, and the range variable is per-iteration. A publish
@@ -1727,7 +1736,7 @@ func (s *nativeSession) prompt(ctx context.Context, text string, rel chan struct
 				break
 			}
 		}
-		res, err = hs.Run(turnCtx, sent, s.sink)
+		res, err = hs.RunWith(turnCtx, sent, images, s.sink)
 	}
 	// Translated the moment Run hands it over, and before anything reads it:
 	// what a turn could not answer comes back in the spelling craze sent, and
@@ -2701,10 +2710,18 @@ func (s *nativeSession) interject(_ context.Context, text string) error {
 	// describes, or after the turn's ending. The expansion still reaches the
 	// model, and the row the user sees is the EventUser the sink emits, which
 	// is the only ordering that keeps an interjection ahead of that ending.
-	sent, _ := nativePrompt(text, refs, sessionID, hs.Redact)
+	//
+	// Text only (plan 033 P7): an attachment envelope — which the TUI never
+	// sends here, and a socket client's mode "interject" can — becomes
+	// [Image #N: <path>] lines, and that is the text the steer is from here on:
+	// its echo and, unanswered, its queued row say what was sent, as grok's
+	// echo of an ACP interjection does. The references and the /compact check
+	// above read the envelope as nothing (SplitShellContext).
+	body := interjectText(s.log, text)
+	sent, _ := nativePrompt(body, refs, sessionID, hs.Redact)
 	// Paired before the steer, because the turn's goroutine may echo it back
 	// through the sink before Steer has even returned here.
-	s.rememberSteer(sent, text)
+	s.rememberSteer(sent, body)
 	err := hs.Steer(turn, sent)
 	if err == nil {
 		return nil

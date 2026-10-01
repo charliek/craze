@@ -83,6 +83,11 @@ func TestTheSessionListListsOpensAndStopsAHost(t *testing.T) {
 			t.Fatalf("NewBackend: %v", err)
 		}
 		started(t, b)
+		// P27 (plan 033): a host this launch spawned runs in its CRAZE_HOME,
+		// and so reads the TUI's attachments directory.
+		if !readsAttachments(b) {
+			t.Fatal("the launch's own host says it cannot read the attachments")
+		}
 		id := b.Info().CrazeSessionID
 		if _, err := b.Submit(stepCtx(t), engine.Command{Client: b.ClientID(), ID: "1"}, "hello there", engine.SubmitQueue, ""); err != nil {
 			t.Fatalf("prompt: %v", err)
@@ -107,6 +112,9 @@ func TestTheSessionListListsOpensAndStopsAHost(t *testing.T) {
 		}
 		if got := o.Info().CrazeSessionID; got != id {
 			t.Fatalf("Open answered session %q, want %q", got, id)
+		}
+		if !readsAttachments(o) {
+			t.Fatal("a running row of this CRAZE_HOME opened says it cannot read the attachments")
 		}
 		_ = o.Close()
 		_ = b.Close()

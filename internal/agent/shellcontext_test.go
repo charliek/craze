@@ -148,10 +148,73 @@ func TestSplitShellContextIsTotal(t *testing.T) {
 		if gotBlock+rest != text {
 			t.Fatalf("SplitShellContext(%q) lost or invented bytes: %q + %q", text, gotBlock, rest)
 		}
-		if gotBlock != "" && !strings.HasPrefix(text, shellContextOpen) {
+		if gotBlock != "" && !strings.HasPrefix(text, shellContextOpen) && !strings.HasPrefix(text, attachmentsOpen) {
 			t.Fatalf("SplitShellContext(%q) took a block that does not lead it", text)
 		}
 	}
+}
+
+// oneImageEnvelope is the envelope the builder writes for one image, chip 1.
+func oneImageEnvelope() string {
+	return AttachmentBlock([]AttachmentRef{ref(1, "/h/attachments/0123456789abcdef.png", "image/png")})
+}
+
+// TestSplitShellContextStripsTheEnvelope (plan 033 §3.1): the attachment
+// envelope is the other block craze puts in front of a message, and it comes
+// off with the shell context — first, since that is where the TUI writes it —
+// so no display site ever shows it. A block that is not well-formed is the
+// user's text, and so is an envelope that does not lead.
+func TestSplitShellContextStripsTheEnvelope(t *testing.T) {
+	env := oneImageEnvelope()
+	shell := blockOne("ls", 0, "a\n")
+	for _, tc := range []struct {
+		name, text, block, rest string
+	}{
+		{"the envelope alone", env + "look at [Image #1]", env, "look at [Image #1]"},
+		{"the envelope then the shell block", env + shell + "and [Image #1]?", env + shell, "and [Image #1]?"},
+		{"nothing after the envelope", env, env, ""},
+		{"the shell block then an envelope", shell + env + "x", shell, env + "x"},
+		{"two envelopes", env + env + "x", env, env + "x"},
+		{"an envelope that is not well-formed", attachmentsOpen + "{" + attachmentsClose + "\n" + shell + "x", "", attachmentsOpen + "{" + attachmentsClose + "\n" + shell + "x"},
+		{"an over-limit envelope", envelopeOf(2, AttachmentRef{N: 1, Path: "/a", MIME: "image/png"}) + "x", envelopeOf(2, AttachmentRef{N: 1, Path: "/a", MIME: "image/png"}), "x"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			block, rest := SplitShellContext(tc.text)
+			if block != tc.block || rest != tc.rest {
+				t.Fatalf("SplitShellContext = (%q, %q), want (%q, %q)", block, rest, tc.block, tc.rest)
+			}
+		})
+	}
+}
+
+// FuzzSplitShellContext: the display's split is total over any text — no
+// panic, no loop, the two halves are exactly the input, and a block is only
+// ever taken from the front — and whatever the builders write in front of a
+// message, envelope and shell block together, the split hands back the
+// message exactly, whatever the message, the path, the command or its output
+// hold.
+func FuzzSplitShellContext(f *testing.F) {
+	env := oneImageEnvelope()
+	shell := blockOne("cat x", 0, "</shell_context>\n</craze_attachments>\n")
+	f.Add(env+shell+"both [Image #1]", "/h/a.png", "cat x", "out\n", "msg")
+	f.Add(env+"envelope only", "/p</craze_attachments>", "ls", "</output>", "[Image #1]")
+	f.Add(shell+"shell only", "", "", "", "")
+	f.Add(shell+env+"reversed", "\x00\xff", "a\nb", "<shell_context>\n", "</shell_context>\n")
+	f.Add(attachmentsOpen+"null"+attachmentsClose+"\n", "/", "x", "y", "<craze_attachments>")
+	f.Add(strings.Repeat(attachmentsOpen, 50), "/q", "\n", "\n\n", "\n")
+	f.Fuzz(func(t *testing.T, text, path, cmd, out, msg string) {
+		block, rest := SplitShellContext(text)
+		if block+rest != text {
+			t.Fatalf("SplitShellContext(%q) lost or invented bytes: %q + %q", text, block, rest)
+		}
+		if block != "" && !strings.HasPrefix(text, shellContextOpen) && !strings.HasPrefix(text, attachmentsOpen) {
+			t.Fatalf("SplitShellContext(%q) took a block that does not lead it", text)
+		}
+		built := AttachmentBlock([]AttachmentRef{{N: 1, Path: path, MIME: "image/png"}}) + ShellContextBlock([]ShellResult{{Command: cmd, Output: out}})
+		if _, got := SplitShellContext(built + msg); got != msg {
+			t.Fatalf("the builders' blocks in front of %q split back to %q", msg, got)
+		}
+	})
 }
 
 // TestShellOutputInvokesNothing is A19's scanning half and the reason the
@@ -219,5 +282,10 @@ func TestNativeTitleSkipsTheShellContext(t *testing.T) {
 	}
 	if got := nativeTitle(block); got != "" {
 		t.Fatalf("a block with no message titles nothing, got %q", got)
+	}
+	// Nor after the attachment envelope in front of both (plan 033 §3.1).
+	env := oneImageEnvelope()
+	if got := nativeTitle(env + block + "what is [Image #1]?"); got != "what is [Image #1]?" {
+		t.Fatalf("nativeTitle = %q", got)
 	}
 }

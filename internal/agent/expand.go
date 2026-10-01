@@ -552,14 +552,24 @@ func pluginFrame(ref pluginRef, kind, source, body string) string {
 // promptBlocks is the whole of what one session/prompt carries: the draft
 // verbatim as block 1 — the agent must see the /name the user typed, and its
 // own catalog still owns every name craze did not resolve — then one block per
-// reference, in the order they were written.
-func promptBlocks(text string, refs []pluginRef) ([]acp.ContentBlock, []ExpandedCommand) {
-	blocks := make([]acp.ContentBlock, 0, len(refs)+1)
-	blocks = append(blocks, acp.ContentBlock{Type: "text", Text: text})
-	if len(refs) == 0 {
-		return blocks, nil
+// reference, in the order they were written, then the prompt's images (plan 033
+// §3.4, imageBlocks).
+//
+// text is the draft with its attachment envelope already taken off
+// (SplitAttachments): the text the user sees, chips and all, so block 1 is
+// what grok's queue correlation compares (firstBlockText) whether or not
+// images ride behind it (P6). The only thing added to it is the path text of
+// the images the host could not attach (ims.fallbacks), after any shell block
+// (PlacePathText), so the model still learns the user meant to show it
+// something. Images never interleave with the draft: they follow the
+// expansions.
+func promptBlocks(text string, refs []pluginRef, ims promptImages) ([]acp.ContentBlock, []ExpandedCommand) {
+	blocks := make([]acp.ContentBlock, 0, len(refs)+len(ims.atts)+2)
+	blocks = append(blocks, acp.ContentBlock{Type: "text", Text: PlacePathText(text, ims.fallbacks)})
+	var cmds []ExpandedCommand
+	if len(refs) > 0 {
+		cmds = make([]ExpandedCommand, 0, len(refs))
 	}
-	cmds := make([]ExpandedCommand, 0, len(refs))
 	for _, ref := range refs {
 		block := pluginBlock(ref)
 		blocks = append(blocks, acp.ContentBlock{Type: "text", Text: block})
@@ -569,5 +579,5 @@ func promptBlocks(text string, refs []pluginRef) ([]acp.ContentBlock, []Expanded
 			Text:          block,
 		})
 	}
-	return blocks, cmds
+	return append(blocks, imageBlocks(ims)...), cmds
 }
