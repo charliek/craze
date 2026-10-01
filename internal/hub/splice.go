@@ -59,8 +59,10 @@ import (
 // a buffer of spliceChunk (32 KiB) — a peer that does not read stops the copy
 // toward it, and so the reading from the other: the hub holds at most one
 // buffer per direction, and backpressure reaches the writer (a host's own
-// write-stall bound ends a connection whose client stopped reading). Each
-// write must move within spliceStall, the host's own stall bound, or fails.
+// write-stall bound ends a connection whose client stopped reading). A write
+// fails once no byte of it has moved for spliceStall — measured from the last
+// byte that moved, never from the write's start: the host's own stall bound
+// and rule (internal/control's writeLine).
 // The client's EOF closes the host leg's writing half (CloseWrite, never
 // Close): the host sees the client go — its attachment leaves the host's idle
 // count — and still answers what it admitted, which reaches the client. The
@@ -76,9 +78,9 @@ var (
 	// connectWait bounds session.connect's dial: the connect and the peer
 	// check together.
 	connectWait = 500 * time.Millisecond
-	// spliceStall bounds one write of a splice's: a peer that takes nothing
-	// for that long ends the splice. 60 s, the host's own write-stall bound
-	// (internal/control's writeStall).
+	// spliceStall bounds a splice's write: a peer that takes nothing for that
+	// long — from the last byte that moved — ends the splice. 60 s, the host's
+	// own write-stall bound (internal/control's writeStall).
 	spliceStall = 60 * time.Second
 	// spliceDrain is how long the teardown gives a splice it has half-closed
 	// to end on its own before it closes both legs.
@@ -87,6 +89,15 @@ var (
 
 // spliceChunk is a splice copy's buffer: 32 KiB per direction.
 const spliceChunk = 32 << 10
+
+// spliceAttempts is how many attempts spliceStall is cut into, as the host's
+// writer cuts its own (internal/control's writeAttempts): each socket write
+// waits at most a spliceAttempts'th of it (a second, of 60 s) before the
+// splice looks at its progress again.
+const spliceAttempts = 60
+
+// errSpliceStalled is a splice write that moved no byte for spliceStall.
+var errSpliceStalled = errors.New("splice write stalled: the peer is not reading")
 
 // connect answers session.connect (the file's comment). A refusal answers
 // and keeps the connection in hub mode, as any refusal does (true, while its
@@ -324,14 +335,50 @@ func (f *flow) copy(dst, src *net.UnixConn) error {
 	}
 }
 
-// write writes b to dst whole, within spliceStall.
+// write writes b to dst whole, or fails once no byte of it has moved for
+// spliceStall — the host's rule (internal/control's writeLine): each socket
+// write gets a short deadline (a spliceAttempts'th of the bound, and never
+// past the bound's end), a short write continues from where it stopped, the
+// time of the last write that moved bytes is kept, and a write that times out
+// fails once the bound has passed since then. A peer that reads, however
+// slowly, keeps the splice; one that takes nothing for the bound ends it.
+//
+// A deadline that cannot be set is a failed write: nothing is written without
+// one in place, since a write with none could block forever on a peer that
+// stops reading.
 func (f *flow) write(dst *net.UnixConn, b []byte) error {
-	_ = dst.SetWriteDeadline(time.Now().Add(spliceStall))
+	stall := spliceStall
+	attempt := max(stall/spliceAttempts, time.Millisecond)
 	f.writing.Store(true)
-	n, err := dst.Write(b)
-	f.writing.Store(false)
-	f.written.Add(int64(n))
-	return err
+	defer f.writing.Store(false)
+	last := time.Now()
+	for len(b) > 0 {
+		deadline := time.Now().Add(attempt)
+		if end := last.Add(stall); end.Before(deadline) {
+			deadline = end
+		}
+		if err := dst.SetWriteDeadline(deadline); err != nil {
+			return fmt.Errorf("splice write failed: its deadline could not be set: %w", err)
+		}
+		n, err := dst.Write(b)
+		b = b[n:]
+		f.written.Add(int64(n))
+		if n > 0 {
+			last = time.Now()
+		}
+		if err == nil {
+			continue
+		}
+		var ne net.Error
+		if errors.As(err, &ne) && ne.Timeout() {
+			if time.Since(last) >= stall {
+				return errSpliceStalled
+			}
+			continue
+		}
+		return err
+	}
+	return nil
 }
 
 // halfClose closes both legs' writing halves (the teardown's first step).

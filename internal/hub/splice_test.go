@@ -10,6 +10,7 @@ import (
 	"os"
 	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"testing"
@@ -22,8 +23,9 @@ import (
 // session.connect and the splice (plan 032 §3.7, §3.18, A11): the exclusive
 // handoff's refusals, the lookup by each id a session has, an unreachable
 // host, the bytes a client pipelined past session.connect, half-close each
-// way, a host's EOF, bounded backpressure, the client a splice stays, and
-// the teardown's close. The hosts are fake hosts listed in a registry of the
+// way, a host's EOF, bounded backpressure, a write's stall bound (no
+// progress, never a slow write), the client a splice stays, and the
+// teardown's close. The hosts are fake hosts listed in a registry of the
 // test's own (hostIn), or a host of the test's own whose socket it serves
 // byte by byte (rawHost); the hub runs in process with a quiet schedule. Each
 // lifecycle test here is also run under a 5% CPU quota.
@@ -517,7 +519,6 @@ func TestBackpressureIsBounded(t *testing.T) {
 	}
 	sp := rg.splice(t)
 	hc := rh.accept(t)
-	pattern := func(i int) byte { return byte(i % 251) }
 	var wrote atomic.Int64
 	done := make(chan error, 1)
 	go func() {
@@ -596,6 +597,205 @@ func TestBackpressureIsBounded(t *testing.T) {
 	case <-time.After(step):
 		t.Fatal("the host's flood did not finish once the client read it")
 	}
+}
+
+// TestASpliceWriteStallsOnlyWithoutProgress (§3.7, the host's writeLine
+// rule): a splice's write fails once no byte of it has moved for spliceStall —
+// measured from the last byte that moved, never from the write's start. The
+// window is shortened, and the client leg's send buffer shrunk to the
+// kernel's least, so what the client reads reaches the hub's write a few KiB
+// at a time.
+//
+//   - a client that reads a few bytes at a time — slower than one splice
+//     buffer per window, yet always moving — receives every byte of the
+//     host's, in order, and the splice stays up, though the hub spent longer
+//     than the window writing one buffer;
+//   - a client that reads nothing ends the splice once the window has passed:
+//     the client reads what the hub wrote and then its end, the host leg is
+//     closed, and the hub counts no client.
+//
+// The negative control: a write bounded from its start (one deadline of the
+// window for the whole buffer) ends the slow reader's splice mid-buffer.
+func TestASpliceWriteStallsOnlyWithoutProgress(t *testing.T) {
+	t.Run("a slow reader", spliceSlowReader)
+	t.Run("a reader that stops", spliceStoppedReader)
+}
+
+// patterned is n bytes of a pattern a reader checks byte by byte (pattern).
+func patterned(n int) []byte {
+	b := make([]byte, n)
+	for i := range b {
+		b[i] = pattern(i)
+	}
+	return b
+}
+
+func pattern(i int) byte { return byte(i % 251) }
+
+// preloaded is a client spliced to a raw host whose payload is all in the
+// hub's host leg before the splice runs — the handoff held in handedOff while
+// the host writes it — so the splice's first read is one whole buffer. The
+// client leg's send buffer is shrunk to the kernel's least.
+type preloaded struct {
+	rg *spliceRig
+	p  *peer
+	sp *splice
+	hc *net.UnixConn
+	// ran is when the splice was let run: no byte of it moved before.
+	ran time.Time
+}
+
+func preload(t *testing.T, n int, payload []byte) *preloaded {
+	t.Helper()
+	env := testEnv(t)
+	rh := newRawHost(t, env, hostOf(n), sessionOf(n))
+	held, release := make(chan *splice, 1), make(chan struct{})
+	rg := newSpliceRig(t, env, func(k *hooks) {
+		prev := k.handedOff
+		k.handedOff = func(sp *splice) {
+			held <- sp
+			<-release
+			prev(sp)
+		}
+	})
+	var once sync.Once
+	run := func() { once.Do(func() { close(release) }) }
+	t.Cleanup(run)
+	p := dialPeer(t, rg.sock)
+	if m := p.call(protocol.MethodSessionConnect, protocol.ConnectParams{SessionID: sessionOf(n)}); m.Error != nil {
+		t.Fatalf("connect: %s", clip(m.raw))
+	}
+	var sp *splice
+	select {
+	case sp = <-held:
+	case <-time.After(step):
+		t.Fatalf("the hub handed no connection to a splice within %v", step)
+	}
+	hc := rh.accept(t)
+	if err := sp.client.SetWriteBuffer(4 << 10); err != nil {
+		t.Fatal(err)
+	}
+	if err := hc.SetWriteBuffer(4 * len(payload)); err != nil {
+		t.Fatal(err)
+	}
+	_ = hc.SetWriteDeadline(time.Now().Add(step))
+	if _, err := hc.Write(payload); err != nil {
+		t.Fatalf("the host's %d bytes did not fit its leg before the splice ran: %v", len(payload), err)
+	}
+	if b := p.lr.Buffered(); len(b) > 0 {
+		t.Fatalf("the client's reader held %d bytes past the connect's {}", len(b))
+	}
+	ran := time.Now()
+	run()
+	if got := rg.splice(t); got != sp {
+		t.Fatal("the splice let run is not the one held")
+	}
+	return &preloaded{rg: rg, p: p, sp: sp, hc: hc, ran: ran}
+}
+
+// spliceSlowReader: the client takes at most readSize bytes per readEvery,
+// about 21 KiB/s, so the hub's write of its first 32 KiB buffer — less the
+// few KiB the shrunk leg holds — cannot finish within a second, past the
+// 750 ms window, while each step the kernel frees (4 KiB on Linux) reaches
+// the write every ~190 ms, well inside it.
+func spliceSlowReader(t *testing.T) {
+	const (
+		size      = spliceChunk + spliceChunk/2
+		readSize  = 256
+		readEvery = 12 * time.Millisecond
+	)
+	setVar(t, &spliceStall, 750*time.Millisecond)
+	pl := preload(t, 5, patterned(size))
+	sp := pl.sp
+	buf := make([]byte, readSize)
+	got := 0
+	// first is the hub's first read of the host — one whole buffer — seen at
+	// firstAt; nextAt is when its second read is seen, the first buffer's
+	// write between them.
+	var first int64
+	var firstAt, nextAt time.Time
+	_ = pl.p.nc.SetReadDeadline(time.Now().Add(step))
+	for got < size {
+		time.Sleep(readEvery)
+		switch r := sp.down.read.Load(); {
+		case first == 0 && r > 0:
+			first, firstAt = r, time.Now()
+		case first > 0 && r > first && nextAt.IsZero():
+			nextAt = time.Now()
+		}
+		n, err := pl.p.nc.Read(buf)
+		for i := range n {
+			if buf[i] != pattern(got+i) {
+				t.Fatalf("byte %d is %d, want %d", got+i, buf[i], pattern(got+i))
+			}
+		}
+		got += n
+		if err != nil {
+			t.Fatalf("after %d of the host's %d bytes, read slowly but steadily: %v (the hub wrote %d)",
+				got, size, err, sp.down.written.Load())
+		}
+	}
+	select {
+	case <-sp.done:
+		t.Fatal("the splice ended under a client that never stopped reading")
+	default:
+	}
+	if n := clients(pl.rg.h); n != 1 {
+		t.Fatalf("the hub counts %d clients with one live splice", n)
+	}
+	// The regime the test claims: the first buffer's write outlasted the
+	// window (its second read seen up to an iteration late, hence the slack).
+	if first != spliceChunk || nextAt.IsZero() {
+		t.Fatalf("the hub's first read of the host was %d bytes, want one whole %d-byte buffer", first, spliceChunk)
+	}
+	if took := nextAt.Sub(firstAt) - 2*readEvery; took <= spliceStall {
+		t.Fatalf("the hub wrote its first buffer in about %v, within the %v window: the reader was not slow enough to test the bound", took, spliceStall)
+	} else {
+		t.Logf("one buffer's write took about %v against a %v window; the splice stayed up", took, spliceStall)
+	}
+}
+
+// spliceStoppedReader: the client reads nothing; the hub's write moves the few
+// KiB the shrunk leg holds and then nothing, and the window ends the splice.
+func spliceStoppedReader(t *testing.T) {
+	const size = spliceChunk + spliceChunk/2
+	setVar(t, &spliceStall, 300*time.Millisecond)
+	pl := preload(t, 6, patterned(size))
+	sp := pl.sp
+	select {
+	case <-sp.done:
+	case <-time.After(step):
+		t.Fatalf("a client that read nothing kept its splice past %v, its window %v", step, spliceStall)
+	}
+	if took := time.Since(pl.ran); took < spliceStall {
+		t.Fatalf("the splice ended %v after it ran, inside its %v window", took, spliceStall)
+	}
+	written := sp.down.written.Load()
+	if written <= 0 || written >= size {
+		t.Fatalf("the hub wrote %d of the host's %d bytes toward a client that read nothing", written, size)
+	}
+	buf := make([]byte, 64<<10)
+	got := 0
+	_ = pl.p.nc.SetReadDeadline(time.Now().Add(step))
+	var err error
+	for err == nil {
+		var n int
+		n, err = pl.p.nc.Read(buf)
+		for i := range n {
+			if buf[i] != pattern(got+i) {
+				t.Fatalf("byte %d is %d, want %d", got+i, buf[i], pattern(got+i))
+			}
+		}
+		got += n
+	}
+	if !errors.Is(err, io.EOF) || int64(got) != written {
+		t.Fatalf("the client read %d bytes and then %v, want the hub's %d and its end", got, err, written)
+	}
+	_ = pl.hc.SetReadDeadline(time.Now().Add(step))
+	if _, err := pl.hc.Read(make([]byte, 1)); err == nil || isTimeout(err) {
+		t.Fatalf("the host leg is still open after the splice ended (%v)", err)
+	}
+	waitFor(t, "the hub counts no client", func() bool { return clients(pl.rg.h) == 0 })
 }
 
 // TestTeardownClosesALiveSplice (§3.5, §3.7): a hub tearing down with a live
