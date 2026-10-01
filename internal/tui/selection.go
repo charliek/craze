@@ -81,13 +81,13 @@ func selSpan(line int, from, to cellPos, width int) (lo, hi int, ok bool) {
 // the line into the content, so a drag that runs past the top or the bottom
 // still has a cell to extend to rather than losing the selection.
 func (m Model) transcriptCell(x, y int) (cellPos, bool) {
-	rows := m.cur().transcriptRows
+	rows := m.cur().drawnLen()
 	tr := m.lay.Region(regionTranscript)
-	if tr.Empty() || m.width <= 0 || len(rows) == 0 {
+	if tr.Empty() || m.width <= 0 || rows == 0 {
 		return cellPos{}, false
 	}
 	y = clampInt(y, tr.Top, tr.Bottom-1)
-	line := clampInt(m.vp.YOffset+(y-tr.Top), 0, len(rows)-1)
+	line := clampInt(m.vp.YOffset+(y-tr.Top), 0, rows-1)
 	return cellPos{line: line, col: clampInt(x, 0, m.width-1)}, true
 }
 
@@ -99,39 +99,41 @@ func (m Model) selectable(x, y int) bool {
 		return false
 	}
 	tr := m.lay.Region(regionTranscript)
-	rows := m.cur().transcriptRows
-	if !tr.Contains(y) || len(rows) == 0 {
+	rows := m.cur().drawnLen()
+	if !tr.Contains(y) || rows == 0 {
 		return false
 	}
 	// The band is taller than the content until the transcript fills it, and
 	// the blank cells below the last row hold no text: a press there starts
 	// nothing. transcriptCell clamps onto the last row on purpose — that is for
 	// a drag already under way running off the end, not for a press.
-	if m.vp.YOffset+(y-tr.Top) >= len(rows) {
+	if m.vp.YOffset+(y-tr.Top) >= rows {
 		return false
 	}
 	return x >= 0 && x < m.width
 }
 
 // selectionText is what the selection copies: the plain rows, cut to the
-// selected cells. A span that runs past the end of its row takes the line break
-// with it, which is what makes a multi-row selection paste as multiple lines.
+// selected cells; the rows it touches are the only ones made plain. A span
+// that runs past the end of its row takes the line break with it, which is
+// what makes a multi-row selection paste as multiple lines.
 func (m Model) selectionText() string {
 	if m.sel.empty() {
 		return ""
 	}
 	from, to := m.sel.bounds()
-	plainRows := m.cur().transcriptPlain
+	tr := m.cur()
+	rows := tr.drawnLen()
 	var b strings.Builder
 	for line := from.line; line <= to.line; line++ {
-		if line < 0 || line >= len(plainRows) {
+		if line < 0 || line >= rows {
 			continue
 		}
 		lo, hi, ok := selSpan(line, from, to, m.width)
 		if !ok {
 			continue
 		}
-		plain := plainRows[line]
+		plain := tr.plainRow(line)
 		w := ansi.StringWidth(plain)
 		b.WriteString(cutCells(plain, lo, min(hi+1, w)))
 		// Every row but the last one of the selection is followed by the row
@@ -214,14 +216,17 @@ func (m Model) transcriptView() string {
 	}
 	from, to := m.sel.bounds()
 	bg := selectionSeq(m.theme.SelectionBG)
-	drawn := m.cur().transcriptRows
-	rows := make([]string, 0, m.vp.Height)
-	for i := m.vp.YOffset; i < m.vp.YOffset+m.vp.Height && i < len(drawn); i++ {
-		row := padRow(drawn[i], m.width)
-		if lo, hi, ok := selSpan(i, from, to, m.width); ok {
+	top := m.vp.YOffset
+	var rows []string
+	if drawn := m.cur().drawn; drawn != nil {
+		rows = drawn.appendRows(make([]string, 0, m.vp.Height), top, min(top+m.vp.Height, drawn.total))
+	}
+	for k, row := range rows {
+		row = padRow(row, m.width)
+		if lo, hi, ok := selSpan(top+k, from, to, m.width); ok {
 			row = highlightSpan(row, lo, hi, bg)
 		}
-		rows = append(rows, row)
+		rows[k] = row
 	}
 	return strings.Join(rows, "\n")
 }

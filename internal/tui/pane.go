@@ -59,13 +59,18 @@ type pane struct {
 	trimmed    bool
 	// pathDirs is the pane's own (notePath): the directories each basename
 	// has been seen in, from the tool entries this pane was given.
-	pathDirs        map[string]map[string]struct{}
-	renders         int
-	transcriptRows  []string
-	transcriptPlain []string
-	yOffset         int
-	atBottom        bool
-	dirty           bool
+	pathDirs map[string]map[string]struct{}
+	renders  int
+	work     paintWork
+	// drawn is the rows the last paint drew (rowIndex), nil before the first
+	// paint and after one with no width. reshaped says the list changed shape
+	// since — a row left from the front or the middle, or all of them — so the
+	// next paint assembles every span again (paint).
+	drawn    *rowIndex
+	reshaped bool
+	yOffset  int
+	atBottom bool
+	dirty    bool
 	// entryCap / textBudget are 0 on main (maxEntries, unlimited text).
 	entryCap   int
 	textBudget int
@@ -83,13 +88,36 @@ type pane struct {
 	emptied int
 }
 
+// paintWork is what painting a pane has cost, counted rather than timed so a
+// test can hold it to a bound on any machine (plan 032 §3.3 C6): the markdown
+// source bytes the renderer read (a resumed render reads only what follows its
+// checkpoint), the row spans paint assembled (only those from the first entry
+// that changed), and the paints. Three additions per paint; only tests read it.
+type paintWork struct {
+	mdBytes int
+	spans   int
+	paints  int
+}
+
 // newSubPane is a sub-agent's pane, under the tighter caps.
 func newSubPane() *pane { return &pane{entryCap: subMaxEntries, textBudget: subTextBudget} }
 
 // reset empties the pane in place, keeping its caps: it is the same *pane
-// m.subs and m.cur() hold, so it is emptied rather than replaced.
+// m.subs and m.cur() hold, so it is emptied rather than replaced. The rows
+// the last paint drew stay the drawn ones until the next paint, which makes
+// every span again (reshaped): they are what the viewport still shows, so
+// the hit test, the highlight and the copy read them until then — a replay's
+// cadence can leave the emptied pane unpainted (paintDue). The work counted
+// stays too.
 func (t *pane) reset() {
-	*t = pane{entryCap: t.entryCap, textBudget: t.textBudget, emptied: t.emptied + 1}
+	*t = pane{
+		entryCap:   t.entryCap,
+		textBudget: t.textBudget,
+		emptied:    t.emptied + 1,
+		work:       t.work,
+		drawn:      t.drawn,
+		reshaped:   t.drawn != nil,
+	}
 }
 
 func (m *Model) cur() *pane {
@@ -254,6 +282,7 @@ func (t *pane) removeRow(r *entry) {
 	}
 	t.forget(r)
 	t.trimmed = true
+	t.reshaped = true
 	t.dirty = true
 }
 
@@ -305,6 +334,7 @@ func (t *pane) dropFirst(n int) {
 	clear(t.rows[kept:])
 	t.rows = t.rows[:kept]
 	t.trimmed = true
+	t.reshaped = true
 	t.dirty = true
 }
 
@@ -330,6 +360,7 @@ func (t *pane) clearRows() {
 	t.pathDirs = nil
 	t.clearOpen, t.clearFrom = transcript.EntryID{}, 0
 	t.emptied++
+	t.reshaped = true
 	t.dirty = true
 }
 
@@ -406,6 +437,8 @@ func (t *pane) detach() {
 		if !r.id.IsZero() {
 			r.id = transcript.EntryID{}
 			r.local = true
+			// Its text grows no more: no generation, no checkpoint.
+			r.gen, r.md = 0, nil
 		}
 	}
 	t.ids = nil

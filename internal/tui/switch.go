@@ -111,6 +111,9 @@ func (m Model) withSession(seed sessionSeed) Model {
 		spinFrame:       m.spinFrame,
 		hiddenRetryLive: m.hiddenRetryLive,
 		clock:           m.clock,
+		// A test's oracle (paintEveryEvent) paints every session it shows
+		// the same way.
+		paintEveryEvent: m.paintEveryEvent,
 		frozen:          m.frozen,
 		frameStart:      m.frameStart,
 		terminalTitle:   m.terminalTitle,

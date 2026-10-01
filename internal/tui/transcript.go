@@ -100,11 +100,25 @@ type entry struct {
 	// tail (the recorded approximation).
 	cont     bool
 	contFrom int
+	// gen is text's append generation while the row shows the open stream
+	// entry (transcript.Transcript.TailGen), and 0 otherwise: under one
+	// generation the text only ever grows by appends. md is where the next
+	// render of an assistant row's text can resume (mdCheckpoint), nil for
+	// any other row and dropped when its entry closes (show).
+	gen uint64
+	md  *mdCheckpoint
 
+	// rendered is the entry's physical lines (physicalLines: a row holding a
+	// line break is split into the lines it draws), and is never written to
+	// once it is set: a render makes a new slice, which is what lets a paint's
+	// rowIndex hold it rather than copy it.
 	rendered    []string
 	renderedFor renderKey
 	// dirty marks content that changed under an unchanged key.
 	dirty bool
+	// plain is rendered as the selection reads it, worked out the first time
+	// a selection asks (pane.plainRow) and dropped when the entry renders again.
+	plain []string
 }
 
 func (m Model) renderKey() renderKey {
@@ -136,10 +150,21 @@ func kindOf(k transcript.Kind) entryKind {
 // marks. An error entry's text is the error's, which the model read through
 // Options.ErrText. A continuation keeps its own At and shows the text from its
 // offset. r is re-rendered at the next paint.
+//
+// The open stream entry's text comes with its append generation (gen), which
+// is what lets the render resume rather than start over (mdCheckpoint); any
+// other entry's has none, so a row whose entry has closed drops its checkpoint
+// here. A continuation is a row of its own, so it starts with none, and its
+// text — the run's from a fixed offset — grows by appends under the run's
+// generation as long as the run's does: once the run is past the cap the row
+// shows the whole tail, and that chunk changed the generation.
 func (r *entry) show(e *transcript.Entry, tr *transcript.Transcript) {
-	text := e.Text
+	text, gen := e.Text, uint64(0)
 	if e.Streaming {
-		text = tr.Tail()
+		text, gen = tr.TailGen()
+	}
+	if r.gen = gen; gen == 0 {
+		r.md = nil
 	}
 	at := e.At
 	if r.cont {
@@ -286,14 +311,31 @@ func (m *Model) refreshViewport() {
 	m.setViewportContent(m.vp.Height == 0 || m.vp.AtBottom())
 }
 
+// catchUp paints the drawn pane when a replay's cadence left it unpainted
+// (paintDue), and is what a user gesture that reads or moves the drawn rows
+// runs first: a scroll, a press, a drag, a release, a double-click, Ctrl+Y.
+// Painting every event, as craze did before plan 032 C6, the pane was never
+// dirty when a gesture came; so the gesture acts on the rows it would have
+// acted on then, and the paint clears a selection made over the rows the
+// cadence held back, as that paint on the event did. A scroll decided on the
+// rows left unpainted would leave a different place to stick to the bottom
+// from, and a selection extended or copied over them would be text no longer
+// on the screen once it is painted. Outside a replay the pane the gesture
+// meets has always been painted (finish), and this does nothing.
+func (m *Model) catchUp() {
+	if m.cur().dirty {
+		m.refreshViewport()
+	}
+}
+
 func (m *Model) storeViewport(tr *pane) {
 	tr.yOffset = m.vp.YOffset
 	tr.atBottom = m.vp.AtBottom()
 }
 
 // setViewportContent re-renders the dirty entries of the drawn transcript,
-// joins everything and only then scrolls, so "stick to bottom" is decided by
-// where the user was before the change, not after it.
+// hands the viewport the rows (paint) and only then scrolls, so "stick to
+// bottom" is decided by where the user was before the change, not after it.
 func (m *Model) setViewportContent(stick bool) {
 	tr := m.cur()
 	// Every rebuild moves the text under the selection — a streaming chunk, a
@@ -301,45 +343,31 @@ func (m *Model) setViewportContent(stick bool) {
 	// with it rather than pointing at rows that are no longer there.
 	m.sel = selection{}
 	if m.width <= 0 {
-		tr.transcriptRows, tr.transcriptPlain = nil, nil
-		m.vp.SetContent("")
+		tr.drawn = nil
+		tr.reshaped = false
+		m.vp.setRows(noRows)
 		tr.dirty = false
 		m.storeViewport(tr)
 		return
 	}
-	key := m.renderKey()
-	lines := make([]string, 0, len(tr.rows)+1)
-	if tr.trimmed {
-		lines = append(lines, renderSegs(m.width, seg{trimmedNote, styleFG(m.theme.Dim)}))
+	// The canonical rows: exactly what the viewport is about to hold, which
+	// the hit test, the highlight and the copy read too.
+	tr.work.paints++
+	tr.drawn = m.paint(tr)
+	if paintHook != nil {
+		paintHook(m, tr)
 	}
-	for _, e := range tr.rows {
-		// A shell row that is still running draws the spinner, and the cache is
-		// keyed on things that do not move while it spins, so the row is
-		// re-rendered on every rebuild until it settles. The tick is what asks
-		// for those rebuilds (handleTick), so this costs one comparison per
-		// entry rather than a walk of its own.
-		if e.dirty || e.renderedFor != key || (e.shell != nil && !e.shell.done) {
-			e.rendered = m.renderEntry(tr, e, key)
-			e.renderedFor = key
-			e.dirty = false
-			tr.renders++
-		}
-		lines = append(lines, e.rendered...)
-	}
-	// The canonical rows: exactly what the viewport is about to hold, plus the
-	// plain form the selection cuts and copies from.
-	tr.transcriptRows = lines
-	tr.transcriptPlain = make([]string, len(lines))
-	for i, ln := range lines {
-		tr.transcriptPlain[i] = strings.TrimRight(ansi.Strip(ln), " ")
-	}
-	m.vp.SetContent(strings.Join(lines, "\n"))
+	m.vp.setRows(tr.drawn)
 	if stick {
 		m.vp.GotoBottom()
 	}
 	tr.dirty = false
 	m.storeViewport(tr)
 }
+
+// paintHook, when a test sets it, is told of every paint, with the pane just
+// painted (TestMain's paint watch). Nil in production, like foldHook.
+var paintHook func(m *Model, tr *pane)
 
 func (m *Model) renderEntry(tr *pane, e *entry, key renderKey) []string {
 	switch e.kind {
@@ -355,7 +383,13 @@ func (m *Model) renderEntry(tr *pane, e *entry, key renderKey) []string {
 		}
 		return hangingRowsStyled(e.text, "❯ ", "  ", key.width, markSt, contSt, textSt)
 	case entryAssistant:
-		return renderMarkdown(e.text, key.width, m.theme)
+		if e.gen == 0 {
+			tr.work.mdBytes += len(e.text)
+			return renderMarkdown(e.text, key.width, m.theme)
+		}
+		rows, parsed := renderStreamingMarkdown(e.text, key.width, m.theme, e.gen, &e.md)
+		tr.work.mdBytes += parsed
+		return rows
 	case entryThought:
 		return m.thoughtRows(e, key)
 	case entryTool:

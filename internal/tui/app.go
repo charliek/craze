@@ -15,7 +15,6 @@ import (
 
 	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/textarea"
-	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/charliek/craze/internal/agent"
@@ -294,7 +293,7 @@ type Host interface {
 
 type Model struct {
 	theme Theme
-	vp    viewport.Model
+	vp    viewport
 	input textarea.Model
 
 	// eng is the session's backend (plan 027 §3.12): the engine in process —
@@ -437,6 +436,20 @@ type Model struct {
 	// startCmd and the first waitEvent — and only EventReplay{end} clears it.
 	// Whichever of startedMsg and that event lands second runs sessionUp.
 	replaying bool
+	// replayFolded counts the events folded while replaying, and paintNow
+	// asks finish to paint the drawn pane this Update whatever the replay's
+	// cadence (paintDue): every replayPaintEvery-th of those events sets it,
+	// and so does a restore. finish clears it. The count is one replay's: a
+	// replay's start begins it again, and so does a restore that adopts
+	// another incarnation (applyRestore); a forced paint, and a restore of
+	// the same incarnation, leave it where it is.
+	replayFolded int
+	paintNow     bool
+	// paintEveryEvent turns the replay's cadence off: every Update paints a
+	// dirty drawn pane, as before plan 032 C6. Only tests set it, as the
+	// oracle the cadence's frames are held to
+	// (TestTheReplayCadenceDrawsWhatPaintingEveryEventDraws).
+	paintEveryEvent bool
 	// sessionIndex is Config.SessionIndex; nil means nothing is persisted. The
 	// model does not write it any more — the engine does, and decides every
 	// moment worth recording (plan 021 §3.8) — so this is held only to hand to
@@ -1578,12 +1591,6 @@ func New(cfg Config) Model {
 	cfg = cfg.viewing().launching()
 	cwd := configWorkspace(cfg.Workspace)
 
-	vp := viewport.New(0, 0)
-	vp.KeyMap = viewport.KeyMap{
-		PageUp:   key.NewBinding(key.WithKeys("pgup")),
-		PageDown: key.NewBinding(key.WithKeys("pgdown")),
-	}
-
 	th := Preset(cfg.Theme)
 	prov := configProvider(cfg.Provider)
 	loads := &completeLoadSet{}
@@ -1592,7 +1599,6 @@ func New(cfg Config) Model {
 	// (withSession, plan 030 §3.11).
 	m := Model{
 		theme:           th,
-		vp:              vp,
 		input:           newComposer(th),
 		yolo:            cfg.Yolo,
 		mouseEnabled:    !cfg.NoMouse,
@@ -1981,10 +1987,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m Model) finish(cmd tea.Cmd) (Model, tea.Cmd) {
 	next := m
 	// Mutation only marks the transcript dirty. Paint the drawn one here so a
-	// background transcript (U3b) never moves m.vp.
-	if next.cur().dirty {
+	// background transcript (U3b) never moves m.vp — and, while a replay
+	// runs, only on its cadence (paintDue).
+	if next.cur().dirty && next.paintDue() {
 		next.refreshViewport()
 	}
+	next.paintNow = false
 	// The composer's `@` popup follows the draft the handler left (plan 030
 	// §3.16): synced here, where every change to the draft passes, and before
 	// the layout that gives it its rows. Its search, when an opening starts
@@ -2399,7 +2407,15 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// The frame runner's deterministic double-click: two real presses would
 		// make a golden depend on the clock. The state machine itself is
 		// unit-tested against the injected one.
-		if !m.mouseEnabled || m.cardOpen() || !m.selectable(msg.X, msg.Y) {
+		if !m.mouseEnabled || m.cardOpen() {
+			return m, nil
+		}
+		if m.lay.Region(regionTranscript).Contains(msg.Y) {
+			// The word is read from the rows as they stand (catchUp), as a
+			// press reads them.
+			m.catchUp()
+		}
+		if !m.selectable(msg.X, msg.Y) {
 			return m, nil
 		}
 		pos, ok := m.transcriptCell(msg.X, msg.Y)
@@ -2495,12 +2511,15 @@ func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 				return m.slashWheel(-1), nil
 			}
 			// The selection is in transcript rows, not screen rows, so it
-			// scrolls with the text it holds and survives the wheel.
+			// scrolls with the text it holds and survives the wheel. The
+			// scroll is from the rows as they stand (catchUp).
+			m.catchUp()
 			m.vp.ScrollUp(wheelLines)
 		case tea.MouseButtonWheelDown:
 			if m.slashBandActive() && m.lay.Region(regionOverlay).Contains(msg.Y) {
 				return m.slashWheel(1), nil
 			}
+			m.catchUp()
 			m.vp.ScrollDown(wheelLines)
 		case tea.MouseButtonLeft:
 			return m.handlePress(msg.X, msg.Y)
@@ -2546,6 +2565,13 @@ func (m Model) slashWheel(delta int) Model {
 // window), and anywhere else it is the click the regions already understood.
 func (m Model) handlePress(x, y int) (tea.Model, tea.Cmd) {
 	now := m.now()
+	if m.lay.Region(regionTranscript).Contains(y) {
+		// A selection starts from the rows as they stand, so a press into the
+		// transcript paints them first when a replay's cadence left them
+		// unpainted (catchUp): before it asks whether there is a row under
+		// it, and before it anchors a selection, which a paint would clear.
+		m.catchUp()
+	}
 	if !m.selectable(x, y) {
 		// The press belongs to another band, so whatever was highlighted is
 		// the previous gesture and goes.
@@ -2581,6 +2607,14 @@ func (m Model) handlePress(x, y int) (tea.Model, tea.Cmd) {
 // Cell motion only reports a change of cell: a pointer held still on the edge
 // does not keep scrolling. That is the mode's contract, not a bug to fix.
 func (m Model) handleDrag(x, y int) tea.Model {
+	// Rows a replay's cadence left unpainted are painted first (catchUp), as
+	// a paint on every event would have painted them before this motion came:
+	// that paint clears the selection, and a drag with no selection under way
+	// does nothing.
+	m.catchUp()
+	if !m.sel.drag {
+		return m
+	}
 	tr := m.lay.Region(regionTranscript)
 	if tr.Empty() {
 		return m
@@ -2601,6 +2635,10 @@ func (m Model) handleDrag(x, y int) tea.Model {
 // a selection of more than the one cell the press made is copied.
 func (m Model) handleRelease(x, y int) (tea.Model, tea.Cmd) {
 	m.pressed = tea.MouseButtonNone
+	// As a drag does (handleDrag): a selection over rows the cadence left
+	// unpainted goes with the paint, so nothing is hit-tested or copied from
+	// them.
+	m.catchUp()
 	if !m.sel.on {
 		return m, nil
 	}
@@ -2616,11 +2654,11 @@ func (m Model) handleRelease(x, y int) (tea.Model, tea.Cmd) {
 // the gesture's whole answer.
 func (m Model) selectWord(pos cellPos) Model {
 	m.sel = selection{}
-	plain := m.cur().transcriptPlain
-	if pos.line >= len(plain) {
+	tr := m.cur()
+	if pos.line >= tr.drawnLen() {
 		return m
 	}
-	lo, hi, ok := wordAt(plain[pos.line], pos.col)
+	lo, hi, ok := wordAt(tr.plainRow(pos.line), pos.col)
 	if !ok {
 		return m
 	}
@@ -2650,6 +2688,10 @@ func (m Model) copySelection() (tea.Model, tea.Cmd) {
 // reply's own text rather than the rows it was wrapped into, so what lands on
 // the clipboard is the agent's paragraph and not the screen's line breaks.
 func (m Model) copySelectionOrLastReply() (tea.Model, tea.Cmd) {
+	// A selection over rows a replay's cadence left unpainted goes with the
+	// paint (catchUp), as it went with a paint on every event: what is copied
+	// then is the last reply.
+	m.catchUp()
 	if !m.sel.empty() {
 		return m.copySelection()
 	}
@@ -3001,6 +3043,10 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 	if msg.Type == tea.KeyPgUp || msg.Type == tea.KeyPgDown {
+		// A page of the rows as they stand (catchUp), so where it leaves the
+		// transcript, and whether it still follows the bottom, is decided on
+		// them.
+		m.catchUp()
 		var cmd tea.Cmd
 		m.vp, cmd = m.vp.Update(msg)
 		return m, cmd
@@ -4022,7 +4068,66 @@ func (m *Model) applyEvent(ev agent.Event) tea.Cmd {
 	// The retry list is taken here, once, for every arm (reduceEvent): no
 	// return of the event's can drop a retried answer.
 	retry := m.retryHidden()
-	return tea.Batch(retry, m.reduceEvent(ev))
+	cmd := m.reduceEvent(ev)
+	if m.replaying {
+		m.replayFolded++
+		if m.replayFolded%replayPaintEvery == 0 {
+			m.paintNow = true
+		}
+	}
+	return tea.Batch(retry, cmd)
+}
+
+// replayPaintEvery is a replay's paint cadence: the drawn pane is painted on
+// every replayPaintEvery-th event folded while replaying (paintDue).
+const replayPaintEvery = 256
+
+// paintDue says whether finish paints the drawn pane, when it is dirty, this
+// Update (plan 032 §3.3 C6). Outside a replay it always does. While one runs,
+// it does on every replayPaintEvery-th event folded and on a restore
+// (paintNow), once the replay has failed — the start failed, or the stream
+// ended — once craze is quitting, and whenever the viewport is not following
+// the bottom of the pane; and not otherwise: a long resume draws in steps of
+// 256 events rather than on every one, and which frames it draws depends on
+// the events and the user's gestures alone, never on the clock. The replay's
+// end is not replaying any more.
+//
+// A quit is the program's last frame on its way: Bubble Tea takes the quit
+// without another Update and draws View once more, so whatever the cadence
+// held back would be missing from it (r12 P2). The Update that sets quitting
+// paints — Ctrl+D, /exit, a second Ctrl+C, the list's quit — and so does
+// every event applied while the quit waits for its stop, its shell or its
+// host, so a second quit's tea.Quit, which comes at once (stopQuit), finds
+// the pane painted too. A forced refresh that paints for itself — a resize, a theme, Ctrl+O, a
+// view switch — needs nothing from here, and neither does a user gesture that
+// reads or moves the drawn rows — a press, a drag, a release, a double-click,
+// Ctrl+Y, the wheel, the page keys and a sub-agent view's arrows: each paints
+// first (catchUp), so it acts on the rows a paint on every event would have
+// left, never on rows the cadence held back.
+//
+// The cadence holds only while the viewport follows the bottom, because only
+// there does skipping a paint change nothing a later frame shows: a paint on
+// every event would have kept it at the bottom of every intermediate set of
+// rows, and the next paint puts it at the bottom of the latest. A viewport the
+// user scrolled away from the bottom sits where it was left only as long as
+// the rows under it never shrink to it: a paint on every event moves it to the
+// bottom, and keeps it there, the moment one does (a tool row that loses its
+// diff, a re-wrapped paragraph, the cap's trim), which a paint on the cadence
+// alone would not see. So while the user is scrolled away the replay paints
+// every event, as craze did before C6; the replay's cost is the cadence's
+// again once the viewport is back at the bottom. Only the drawn pane's
+// viewport counts: a background pane is painted when it is switched to.
+//
+// What it buys: the per-event cost of a replay no longer depends on how long
+// the message being replayed is, whatever its shape; a single growing block,
+// which no markdown checkpoint can split (mdCheckpoint), is rendered every
+// 256 events rather than on every one. What it keeps: every frame drawn on a
+// boundary or a forced refresh, and the one the replay's end draws, is the
+// frame painting every event would have drawn there
+// (TestTheReplayCadenceDrawsWhatPaintingEveryEventDraws).
+func (m Model) paintDue() bool {
+	following := m.vp.Height == 0 || m.vp.AtBottom()
+	return !m.replaying || m.paintEveryEvent || m.paintNow || m.startErr != nil || m.ended || m.quitting || !following
 }
 
 // reduceEvent is applyEvent's event itself: the fold, then its arm, answering
@@ -4098,7 +4203,11 @@ func (m *Model) reduceEvent(ev agent.Event) tea.Cmd {
 			// C27a) — learns of the replay here, and the session is not up
 			// until its end: sends wait, and the tail runs once (sessionUp).
 			if ev.Replay.Phase == agent.ReplayStart {
+				// A replay's cadence counts its own events (paintDue): this
+				// one is its first, whatever an earlier replay — of this
+				// incarnation or of one before it — left the count at.
 				m.replaying = true
+				m.replayFolded = 0
 			}
 			return nil
 		}

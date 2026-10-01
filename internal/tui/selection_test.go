@@ -106,7 +106,7 @@ func TestDragCopiesTheSelectedCells(t *testing.T) {
 	now := time.Date(2026, 9, 12, 10, 0, 0, 0, time.UTC)
 	rec := captureCopies(t)
 	m := selModel(t, &now, twoRows)
-	if got := m.main.transcriptPlain[0]; got != "• alpha bravo" {
+	if got := m.main.plainRows()[0]; got != "• alpha bravo" {
 		t.Fatalf("transcript row 0 is %q", got)
 	}
 	top := m.lay.Region(regionTranscript).Top
@@ -149,9 +149,9 @@ func TestReverseDragAcrossViewportsCopiesInReadingOrder(t *testing.T) {
 	first := m.vp.YOffset + (last - 2 - tr.Top)
 	// From the head's column to the end of its row, the row between whole, and
 	// the anchor's row up to and including the anchor cell.
-	want := cutCells(m.main.transcriptPlain[first], 2, 100) + "\n" +
-		m.main.transcriptPlain[first+1] + "\n" +
-		cutCells(m.main.transcriptPlain[first+2], 0, 7)
+	want := cutCells(m.main.plainRows()[first], 2, 100) + "\n" +
+		m.main.plainRows()[first+1] + "\n" +
+		cutCells(m.main.plainRows()[first+2], 0, 7)
 	if copies := rec.copies(); len(copies) != 1 || copies[0] != want {
 		t.Fatalf("clipboard got %q, want [%q]", copies, want)
 	}
@@ -393,8 +393,8 @@ func TestCtrlYCopiesTheLastReply(t *testing.T) {
 	rec := captureCopies(t)
 	m := selModel(t, &now, reply)
 	m.mouseEnabled = false
-	if len(m.main.transcriptPlain) < 3 {
-		t.Fatalf("the fixture should have wrapped: %d rows", len(m.main.transcriptPlain))
+	if len(m.main.plainRows()) < 3 {
+		t.Fatalf("the fixture should have wrapped: %d rows", len(m.main.plainRows()))
 	}
 	tm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlY})
 	m = tm.(Model)
@@ -639,11 +639,12 @@ func TestWordAt(t *testing.T) {
 
 // fakeRows replaces the canonical rows with exactly these. It is the only way
 // to put a row of precisely the terminal's width in the transcript: the
-// renderer wraps before it fills the last cell.
+// renderer wraps before it fills the last cell. A row holding a line break is
+// the lines it draws, as an entry's rendered rows are (physicalLines).
 func fakeRows(m Model, rows ...string) Model {
-	m.main.transcriptRows = rows
-	m.main.transcriptPlain = rows
-	m.vp.SetContent(strings.Join(rows, "\n"))
+	rows = physicalLines(rows)
+	m.main.drawn = &rowIndex{tail: []rowSpan{{rows: rows}}, total: len(rows)}
+	m.vp.setRows(m.main.drawn)
 	m.vp.GotoTop()
 	return m
 }
@@ -689,8 +690,8 @@ func TestPressBelowTheContentStartsNoSelection(t *testing.T) {
 	now := time.Date(2026, 9, 12, 10, 0, 0, 0, time.UTC)
 	rec := captureCopies(t)
 	m := selModel(t, &now, "alpha bravo")
-	if len(m.main.transcriptPlain) != 1 {
-		t.Fatalf("the fixture wants one content row, got %d", len(m.main.transcriptPlain))
+	if len(m.main.plainRows()) != 1 {
+		t.Fatalf("the fixture wants one content row, got %d", len(m.main.plainRows()))
 	}
 	tr := m.lay.Region(regionTranscript)
 	if tr.Height() < 5 {

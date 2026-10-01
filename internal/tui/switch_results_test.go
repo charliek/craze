@@ -255,7 +255,7 @@ func launchLaneModel(t *testing.T, a *laneBackend, lanes map[string][]*laneBacke
 func transcriptWord(r *switchRig, word string) (x, y int) {
 	r.t.Helper()
 	top := r.m.lay.Region(regionTranscript).Top
-	for i, line := range r.m.cur().transcriptPlain {
+	for i, line := range r.m.cur().plainRows() {
 		if c := strings.Index(line, word); c >= 0 {
 			return lipgloss.Width(line[:c]), top + i - r.m.vp.YOffset
 		}

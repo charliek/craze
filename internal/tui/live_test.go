@@ -295,6 +295,7 @@ func TestMain(m *testing.M) {
 	pristineEnv = os.Environ()
 	lipgloss.SetColorProfile(termenv.TrueColor)
 	installParityWatch()
+	installPaintWatch()
 	gateSyncDefault = true
 	stubInstallOnStartDefault = true
 	installGateWatch()
@@ -321,6 +322,10 @@ func TestMain(m *testing.M) {
 		code = 1
 	}
 	if err := gateWatch.err(); err != nil && code == 0 {
+		fmt.Fprintln(os.Stderr, err)
+		code = 1
+	}
+	if err := paints.err(); err != nil && code == 0 {
 		fmt.Fprintln(os.Stderr, err)
 		code = 1
 	}

@@ -2,6 +2,7 @@ package transcript
 
 import (
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -99,6 +100,10 @@ type Transcript struct {
 	// openEnd is the open run's end — its last chunk's stamp — while a run
 	// is open (X24): the stored Streaming entry's End is its first chunk's.
 	openEnd time.Time
+	// tailGen is the open run's append generation (TailGen): the same number
+	// for as long as the tail only grows by appends, a new one on anything
+	// else, 0 while no run is open.
+	tailGen uint64
 
 	// The todo-note dedupe (the TUI's todoPlanned / todoDone): the largest
 	// list a "planned" note was written for, and whether the "done" note has
@@ -246,6 +251,33 @@ func (t *Transcript) Tail() string {
 	}
 	return t.tail()
 }
+
+// TailGen is Tail and the open run's append generation, read together (plan
+// 032 §3.3 C6): a number that stays the same for as long as the tail only grows
+// by appends — every earlier read of it, under the same generation, is a
+// prefix of this one — and changes on anything else: a run opening, every
+// chunk once the run is past the cap (the "…" and the head move), a run
+// restored from a snapshot. It is 0 when Tail is "" for want of a run (none
+// open, or a placeholder's). A client that renders the tail incrementally
+// resumes only under the generation it rendered at, so it never compares the
+// bytes themselves; a closed run's entry carries its text and no generation.
+//
+// Generations are drawn from one process-wide counter, so no two runs — in
+// this transcript, another, or another model — ever share one.
+func (t *Transcript) TailGen() (string, uint64) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if !t.streamOpen || t.omittedRun != 0 {
+		return "", 0
+	}
+	return t.tail(), t.tailGen
+}
+
+// tailGens is where every append generation is drawn from (TailGen).
+var tailGens atomic.Uint64
+
+// newTailGen gives the open run a generation no tail has had.
+func (t *Transcript) newTailGen() { t.tailGen = tailGens.Add(1) }
 
 // Trimmed reports whether the transcript has dropped entries off its front;
 // a client draws TrimmedNote above it for Trimmed || Windowed.
@@ -549,10 +581,11 @@ func (t *Transcript) bufReserve(need int) {
 // 2 × StreamText of builder once one long run has closed; a child's is let go
 // when its roster row finishes (bufRelease) or with the whole transcript when
 // the row is evicted, since children are where transcripts are many. The
-// run's length starts over with it.
+// run's length starts over with it, and its generation goes (TailGen).
 func (t *Transcript) bufReset() {
 	t.buf = t.buf[:0]
 	t.runLen = 0
+	t.tailGen = 0
 }
 
 // bufRelease lets the builder's capacity go. The run must be closed.
@@ -688,6 +721,12 @@ func (t *Transcript) appendStream(kind Kind, text string, at time.Time) {
 			before := t.runBytes()
 			t.bufAppend(text)
 			t.streamed(len(text))
+			if t.runCut() {
+				// Past the cap the tail's head moves with every chunk (and
+				// the first chunk past it puts the "…" in front): not an
+				// append, so a new generation (TailGen).
+				t.newTailGen()
+			}
 			t.openEnd = at
 			t.bytes += t.runBytes() - before
 			t.model.noteTouched(t, last.ID)
@@ -701,6 +740,7 @@ func (t *Transcript) appendStream(kind Kind, text string, at time.Time) {
 	t.endRun(at)
 	t.bufAppend(text)
 	t.streamed(len(text))
+	t.newTailGen()
 	e.Bytes = t.runBytes()
 	t.push(e)
 	t.trim()

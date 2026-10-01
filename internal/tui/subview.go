@@ -40,7 +40,7 @@ func (m *Model) enterView(id string) {
 	m.agentFocus = false
 	m.input.Blur()
 	tr := m.ensureSub(id)
-	first := tr.transcriptRows == nil
+	first := tr.drawn == nil
 	if !m.showSubagentTranscript() {
 		m.rebuildReceiptTranscript(id)
 	}
@@ -132,12 +132,17 @@ func (m Model) handleViewKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.leaveView()
 		return m, nil
 	case tea.KeyUp:
+		// Every scroll here is of the rows as they stand (catchUp), as the
+		// main transcript's page keys are.
+		m.catchUp()
 		m.vp.ScrollUp(1)
 		return m, nil
 	case tea.KeyDown:
+		m.catchUp()
 		m.vp.ScrollDown(1)
 		return m, nil
 	case tea.KeyPgUp, tea.KeyPgDown:
+		m.catchUp()
 		var cmd tea.Cmd
 		m.vp, cmd = m.vp.Update(msg)
 		return m, cmd
@@ -186,11 +191,11 @@ func (m *Model) applySubagentEvent(ev agent.Event) {
 		m.noteAgentStart(id)
 	}
 	if m.viewing == id && !m.showSubagentTranscript() {
+		// The rebuilt receipt is the drawn pane, dirty: it is painted where
+		// every event's rows are (finish) — at once outside a replay, from
+		// where the user is, and on the replay's cadence inside one (paintDue)
+		// — and until then the rows last painted stay the drawn ones.
 		m.rebuildReceiptTranscript(id)
-		if m.cur().dirty {
-			stick := m.vp.Height == 0 || m.vp.AtBottom()
-			m.setViewportContent(stick)
-		}
 	}
 }
 
@@ -216,7 +221,7 @@ func (m *Model) rebuildReceiptTranscript(id string) {
 	}
 	tr := m.ensureSub(id)
 	stick, off := tr.atBottom, tr.yOffset
-	had := tr.transcriptRows != nil
+	had := tr.drawn != nil
 	tr.reset()
 	now := m.now()
 	label := m.snap.Provider.Label()
