@@ -176,14 +176,16 @@ func HostCapabilities() ConnectionCapabilities {
 	return ConnectionCapabilities{Snapshot: true, AttachWhenNow: true}
 }
 
-// HubCapabilities is the hub's connection capabilities (plan 032 §3.6): the
-// roster subscription (sessions.subscribe) and the splice (session.connect)
-// are served; a session is never multiplexed on one connection (SQ14), and a
-// snapshot and an attach are a host's, reached through the splice, so those
-// three are false. sessionCreate is false until the hub serves session.create
-// (plan 032 C15): a client that needs it checks it, never the hub's version.
+// HubCapabilities is the hub's connection capabilities (plan 032 §3.6,
+// §3.10): the roster subscription (sessions.subscribe), session creation
+// (session.create) and the splice (session.connect) are served; a session is
+// never multiplexed on one connection (SQ14), and a snapshot and an attach
+// are a host's, reached through the splice, so those three are false. A
+// client that needs one checks it, never the hub's version: a hub from
+// before session.create says sessionCreate false, and so does a hub given no
+// way to spawn a host (internal/hub's Options.Creates, nil only in a test).
 func HubCapabilities() ConnectionCapabilities {
-	return ConnectionCapabilities{RosterSubscribe: true, Connect: true}
+	return ConnectionCapabilities{RosterSubscribe: true, SessionCreate: true, Connect: true}
 }
 
 // Codecs is the version of each codec whose output the protocol carries
@@ -632,6 +634,82 @@ type SessionsSubscribeResult struct {
 // host answers unsupported, reason hub_only.
 type ConnectParams struct {
 	SessionID string `json:"sessionId"`
+}
+
+// CreateParams is session.create's params (plan 032 §3.10, P5): a new
+// session in Cwd, started in a host the hub spawns, given Prompt as its first
+// prompt when there is one. Cwd is an absolute path to an existing directory.
+// Provider is a provider id ("cursor", "grok", "gx", "native"), absent for
+// the hub's configured default — none configured is bad_request. Model,
+// Effort and Fast are the session's start settings, each absent for the
+// provider's own default (the host's --model, --effort, --fast/--no-fast);
+// PermissionMode is bypass when absent, as a plain launch's is. No agent
+// binary is a client's to name (SD-16): the host finds its own. RequestID,
+// 1–64 of [A-Za-z0-9._-], makes the create idempotent: a repeat with the
+// same params answers the first one's result, or joins it while it runs —
+// across a hub restart too, while its session's host lives — and one with
+// other params is bad_request, reason request_conflict.
+type CreateParams struct {
+	Cwd            string         `json:"cwd"`
+	Prompt         string         `json:"prompt,omitempty"`
+	Provider       string         `json:"provider,omitempty"`
+	Model          string         `json:"model,omitempty"`
+	Effort         string         `json:"effort,omitempty"`
+	Fast           *bool          `json:"fast,omitempty"`
+	PermissionMode PermissionMode `json:"permissionMode,omitempty"`
+	RequestID      string         `json:"requestId,omitempty"`
+}
+
+// CreateResult is a create that started its session (plan 032 §3.10): the
+// session as the hub's roster lists it, read fresh from its host — so its
+// approximate is false — and what became of the first prompt. A start that
+// failed is no result but a refusal: not_accepting, reason start_failed, its
+// data.cause the host's first error line.
+type CreateResult struct {
+	Session RosterRow `json:"session"`
+	// Prompt is the first prompt's outcome; PromptError, the session's
+	// refusal of it, or why its answer was lost, is beside refused and
+	// unknown.
+	Prompt      CreatePrompt `json:"prompt"`
+	PromptError string       `json:"promptError,omitempty"`
+}
+
+// CreatePrompt is what became of a create's first prompt.
+type CreatePrompt string
+
+const (
+	// CreatePromptNone: the create carried no prompt.
+	CreatePromptNone CreatePrompt = "none"
+	// CreatePromptAccepted: the session took it.
+	CreatePromptAccepted CreatePrompt = "accepted"
+	// CreatePromptUnknown: it was sent and its answer was lost — the
+	// session exists and may be working on it. A create joined after a hub
+	// restart says unknown too: that hub never saw the answer.
+	CreatePromptUnknown CreatePrompt = "unknown"
+	// CreatePromptRefused: the session refused it, and runs on, idle.
+	CreatePromptRefused CreatePrompt = "refused"
+)
+
+var createPrompts = []CreatePrompt{CreatePromptNone, CreatePromptAccepted, CreatePromptUnknown, CreatePromptRefused}
+
+// CreatePrompts is every first-prompt outcome, none first.
+func CreatePrompts() []CreatePrompt { return slices.Clone(createPrompts) }
+
+// RequestIDMax is the longest session.create requestId, in characters.
+const RequestIDMax = 64
+
+// ValidRequestID reports whether id is a session.create requestId: 1 to
+// RequestIDMax of [A-Za-z0-9._-].
+func ValidRequestID(id string) bool {
+	if id == "" || len(id) > RequestIDMax {
+		return false
+	}
+	for i := range len(id) {
+		if c := id[i]; (c < 'a' || c > 'z') && (c < 'A' || c > 'Z') && (c < '0' || c > '9') && c != '.' && c != '_' && c != '-' {
+			return false
+		}
+	}
+	return true
 }
 
 // ------------------------------------------------------------------ attach

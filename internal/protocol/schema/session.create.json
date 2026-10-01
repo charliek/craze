@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://charliek.github.io/craze/reference/protocol/schema/session.create.json",
+  "title": "session.create",
+  "description": "The hub's (plan 032 §3.10): a new session in cwd, started in a host the hub spawns, and given prompt as its first prompt when there is one. It answers once the session has started: the session as the roster lists it, read fresh, and what became of the prompt. Neither session-scoped nor mutating: requestId is its idempotency — a repeat with the same params answers the first call's result, or joins it while it runs, also after a hub restart while the session's host lives; with other params it is bad_request, reason request_conflict; a retry after the session has ended creates another. Bad params are bad_request; a host that fails to spawn or to become ready is unavailable, reason spawn_failed; a start that fails or takes over 60 s is not_accepting, reason start_failed, data.cause the host's first error line, and the hub stops that host; more than 16 creates in flight is unavailable, reason busy; a hub tearing down, unavailable, reason closing. A host answers unsupported, reason hub_only; the connection capability sessionCreate says a hub serves it. No agent binary is a client's to name: the host finds its own.",
+  "$defs": {
+    "params": {
+      "type": "object",
+      "properties": {
+        "cwd": {"type": "string", "maxLength": 4096, "pattern": "^/", "description": "The session's directory: an absolute path to an existing directory."},
+        "prompt": {"type": "string", "minLength": 1, "description": "The first prompt, sent once the session has started; absent for none."},
+        "provider": {"type": "string", "minLength": 1, "maxLength": 64, "description": "A provider id (cursor, grok, gx, native); absent for the hub's configured default, and with none configured the create is bad_request."},
+        "model": {"type": "string", "minLength": 1, "maxLength": 256, "description": "The model to start on (the host's --model); absent for the provider's default."},
+        "effort": {"type": "string", "minLength": 1, "maxLength": 64, "description": "The effort to start at, where the model offers one (the host's --effort); absent for the model's own."},
+        "fast": {"type": "boolean", "description": "The fast setting to start with, where the model offers one (--fast or --no-fast); absent for the model's own."},
+        "permissionMode": {"$ref": "info.json#/$defs/permissionMode"},
+        "requestId": {"type": "string", "pattern": "^[A-Za-z0-9._-]{1,64}$", "description": "The create's idempotency id."}
+      },
+      "required": ["cwd"],
+      "additionalProperties": false
+    },
+    "result": {
+      "type": "object",
+      "properties": {
+        "session": {"$ref": "info.json#/$defs/rosterRow"},
+        "prompt": {"type": "string", "enum": ["none", "accepted", "unknown", "refused"], "description": "What became of the first prompt: none was sent; the session took it; it was sent and its answer lost (the session may be working on it; a create joined after a hub restart says unknown too); the session refused it, and runs on, idle."},
+        "promptError": {"type": "string", "minLength": 1, "description": "Beside refused, the session's refusal; beside unknown, why the answer was lost."}
+      },
+      "required": ["session", "prompt"],
+      "additionalProperties": false
+    }
+  }
+}

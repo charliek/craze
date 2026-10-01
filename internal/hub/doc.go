@@ -14,6 +14,10 @@
 //     the roster's two methods, and every write's bounds.
 //   - splice.go: session.connect — the exclusive handoff, the lookup, the
 //     dial — and the splice that copies between the client and the host.
+//   - create.go: session.create — a host spawned for a new session, its
+//     start waited for, its first prompt sent, and the requestId that makes
+//     a retry, across a hub restart too, answer the same session — and
+//     Create, a client's ask for one (craze new).
 //   - roster.go: the roster — internal/roster's poll, run while someone
 //     wants it, its rows bounded and forwarded, sessions.list and
 //     sessions.subscribe, and each subscription's net-change notifications.

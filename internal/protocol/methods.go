@@ -30,12 +30,13 @@ const (
 	MethodAsksAnswer        = "asks.answer"
 )
 
-// MethodSessionCreate is reserved for the hub (S4): protocol 1 defines no
-// params or result for it yet and it has no schema, and the connection
-// capability sessionCreate is false on a host and, until it serves it (plan
-// 032 C15), on the hub. A host answers it like session.connect: unsupported,
-// reason hub_only (plan 027 X6). It is in the method table, marked Reserved,
-// so a server finds that answer there.
+// MethodSessionCreate is the hub's (plan 032 §3.10, P5): it starts a session
+// in a new host and answers once the session has started. It is neither
+// session-scoped — the session does not exist yet — nor mutating: the hub
+// mints no client ids and keeps no command receipts, and its idempotency is
+// the params' own requestId. A host answers it like session.connect:
+// unsupported, reason hub_only (plan 027 X6); the connection capability
+// sessionCreate says a hub serves it.
 const MethodSessionCreate = "session.create"
 
 // The notifications (plan 027 §3.3; plan 032 §3.6). Each carries its
@@ -72,11 +73,12 @@ type MethodInfo struct {
 	// method's same commandId is how a client asks "did it happen?".
 	Mutating bool
 	// SessionScoped says its params carry sessionId, the durable craze
-	// session id (SD-22), at params.sessionId: every method but hello and
-	// sessions.*. The hub serves one of them, session.connect — the splice
-	// that hands the connection to the session's host — and refuses every
-	// other unsupported, reason host_only: it routes by splicing, never
-	// method by method (plan 032 §3.6, SQ14).
+	// session id (SD-22), at params.sessionId: every method but hello,
+	// sessions.* and session.create (whose session does not exist yet). The
+	// hub serves one of them, session.connect — the splice that hands the
+	// connection to the session's host — and refuses every other
+	// unsupported, reason host_only: it routes by splicing, never method by
+	// method (plan 032 §3.6, SQ14).
 	SessionScoped bool
 	// Tolerant says the host ignores params fields it does not know. Only
 	// hello is (§3.2); every other method refuses one, reason unknown_field.
@@ -87,8 +89,7 @@ type MethodInfo struct {
 	// roster_unsupported: rosterSubscribe is false; session.connect and
 	// session.create, hub_only, X6) — which no host serves — or one a host
 	// serves only where Capability says so (session.stop, stop_unsupported).
-	// Such a method's schema is protocol 1's all the same, session.create's
-	// aside.
+	// Such a method's schema is protocol 1's all the same.
 	HostUnsupported Reason
 	// Capability, when set, is the session capability (its wire name) whose
 	// true says a host serves the method (plan 030 §3.6a): a host whose
@@ -97,9 +98,6 @@ type MethodInfo struct {
 	// false on a TUI-hosted session and on an older host. "" for a method
 	// whose HostUnsupported, if any, holds on every host.
 	Capability string
-	// Reserved says protocol 1 names the method and defines nothing else of
-	// it — no params, no result, no schema: session.create, the hub's (S4).
-	Reserved bool
 }
 
 // CapabilityStop is the session capability that says a host serves
@@ -130,10 +128,10 @@ var methods = []MethodInfo{
 	{Name: MethodAsksList, SessionScoped: true},
 	{Name: MethodAsksGet, SessionScoped: true},
 	{Name: MethodAsksAnswer, SessionScoped: true, Mutating: true},
-	{Name: MethodSessionCreate, Reserved: true, HostUnsupported: ReasonHubOnly},
+	{Name: MethodSessionCreate, HostUnsupported: ReasonHubOnly},
 }
 
-// Methods is every method protocol 1 names, in §3.3's order, the reserved
+// Methods is every method protocol 1 names, in §3.3's order, the hub's
 // session.create last.
 func Methods() []MethodInfo { return slices.Clone(methods) }
 

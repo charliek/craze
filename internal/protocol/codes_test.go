@@ -163,15 +163,15 @@ func TestTheLimits(t *testing.T) {
 	if c := protocol.HostCapabilities(); c.RosterSubscribe || c.SessionCreate || c.Multiplex || c.Connect || !c.Snapshot || !c.AttachWhenNow {
 		t.Fatalf("HostCapabilities = %+v", c)
 	}
-	// The hub's (plan 032 §3.6): the roster subscription and the splice;
-	// session.create not yet (C15); never a multiplexed session, a snapshot or
-	// an attach of its own — those are a host's, through the splice.
-	if c := protocol.HubCapabilities(); !c.RosterSubscribe || c.SessionCreate || c.Multiplex || !c.Connect || c.Snapshot || c.AttachWhenNow {
+	// The hub's (plan 032 §3.6, §3.10): the roster subscription, session
+	// creation and the splice; never a multiplexed session, a snapshot or an
+	// attach of its own — those are a host's, through the splice.
+	if c := protocol.HubCapabilities(); !c.RosterSubscribe || !c.SessionCreate || c.Multiplex || !c.Connect || c.Snapshot || c.AttachWhenNow {
 		t.Fatalf("HubCapabilities = %+v", c)
 	}
 }
 
-// TestTheMethodTable pins §3.3's method list, the reserved session.create
+// TestTheMethodTable pins §3.3's method list, the hub's session.create
 // last, and which of them a TUI host answers unsupported, with which reason
 // (X6): each an unsupported reason of the table.
 func TestTheMethodTable(t *testing.T) {

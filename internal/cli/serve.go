@@ -239,7 +239,7 @@ func (l *landing) land() { l.once.Do(func() { close(l.ch) }) }
 // coordinator: a TUI-hosted session is stopped by its own TUI's quit, and
 // refuses session.stop, stop_unsupported (§3.6a).
 func serveControl(env rundir.Env, hostID, workspace string, force bool, diag io.Writer) *controlHost {
-	h, err := bindControl(env, hostID, workspace, force, nil, diag)
+	h, err := bindControl(env, hostID, workspace, force, hostRequest{}, nil, diag)
 	if err != nil {
 		fmt.Fprintf(diag, "craze: control socket off: %v\n", err)
 		return nil
@@ -247,17 +247,27 @@ func serveControl(env rundir.Env, hostID, workspace string, force bool, diag io.
 	return h
 }
 
+// hostRequest is the hub's session.create that spawned a host (plan 032
+// §3.10): its idempotency id and its params' hash, written into the host's
+// registry entry for the life of the host — so a hub that restarts still
+// knows a retried create's session. Zero for every other host.
+type hostRequest struct {
+	id, hash string
+}
+
 // bindControl is serveControl's bind and serve, answering a failure rather
 // than warning about it: for craze serve a socket it cannot bind is fatal
 // (plan 030 §3.3), since a headless host is reachable through nothing else.
 // A failure has bound nothing — rundir.Bind unwinds what it built — and
-// started no goroutine. stop is the host's lifecycle coordinator
-// (control.Options.Stop): set, the server serves session.stop and advertises
-// capabilities.stop; nil — the TUI-hosted path — it refuses it,
-// stop_unsupported.
-func bindControl(env rundir.Env, hostID, workspace string, force bool, stop control.StopFunc, diag io.Writer) (*controlHost, error) {
+// started no goroutine. req is the create that spawned the host, written into
+// its registry entry (rundir.Entry.RequestID, RequestHash). stop is the
+// host's lifecycle coordinator (control.Options.Stop): set, the server serves
+// session.stop and advertises capabilities.stop; nil — the TUI-hosted path —
+// it refuses it, stop_unsupported.
+func bindControl(env rundir.Env, hostID, workspace string, force bool, req hostRequest, stop control.StopFunc, diag io.Writer) (*controlHost, error) {
 	started := time.Now().UTC()
-	host, err := rundir.Bind(env, hostID, rundir.Entry{StartedAt: started, Workspace: workspace})
+	host, err := rundir.Bind(env, hostID, rundir.Entry{StartedAt: started, Workspace: workspace,
+		RequestID: req.id, RequestHash: req.hash})
 	if err != nil {
 		return nil, err
 	}

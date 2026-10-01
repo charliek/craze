@@ -6,6 +6,7 @@ craze prompt [text] [flags]
 craze bridge [flags]
 craze attach [flags]
 craze ps [flags]
+craze new [prompt...] [flags]
 craze serve [flags]
 craze auth login [provider]
 craze auth logout <provider>
@@ -793,9 +794,10 @@ The hub is one process per user and craze directory (`CRAZE_HOME`), `craze
 hub`: it serves the [roster](protocol.md#the-hubs-roster) of every running
 session and a [splice](protocol.md#the-hub-splice) to any one of them, on a
 socket of its own in the runtime namespace. **Nothing needs starting by
-hand:** `craze ps` and `craze bridge --hub` start it when none runs —
-re-executed, in a session of its own, its stdio on `/dev/null` — and the next
-one finds it. A hub that does not answer is replaced.
+hand:** `craze ps`, [`craze new`](#craze-new) and `craze bridge --hub` start
+it when none runs — re-executed, in a session of its own, its stdio on
+`/dev/null` — and the next one finds it. A hub that does not answer is
+replaced.
 
 It **exits by itself 60 seconds after the last host has gone and the last
 client has disconnected** — one nobody ever connected to included — and
@@ -805,6 +807,59 @@ without it, and the next `craze ps` starts another.
 Its log is `~/.cache/craze/host-logs/hub-<ns>.log`, beside the
 [host logs](configuration.md#host-logs) (under the process's own `$HOME`;
 `<ns>` names the craze directory), rotated once at 4 MiB like a host's.
+
+## craze new
+
+```bash
+./bin/craze new "fix the flaky test"
+./bin/craze new -C ~/projects/lumen --provider grok --effort high "add the ps command"
+./bin/craze new --json
+```
+
+Starts a session in the background — in its own host, through the hub's
+[`session.create`](protocol.md#sessioncreate) — in the current directory or
+`-C`'s, and returns once the session has started, its first prompt (the
+arguments, joined by spaces) sent to it when there is one:
+
+```text
+started 8327352e in ~/projects/lumen
+```
+
+The id is the session's short id, as [`craze ps`](#craze-ps) shows it. When
+the prompt was sent and its answer lost, a second line says `the prompt may
+not have reached it`: the session exists, and may be working on it. The
+session runs on as any detached session does — `craze attach`, the session
+list (`←`) and `craze ps` find it — until its host's idle exit.
+
+| Flag | Description |
+|------|-------------|
+| `-C`, `--dir <dir>` | Start the session in this directory (default: the current one) |
+| `--provider <id>` | The session's provider. Without it the hub's configured default — `provider` in `config.toml`, the one the last session to start persisted — and with none configured the create is refused |
+| `--model <id>` | The model to start on |
+| `--effort <value>` | The effort to start at, where the model offers one (as the [session flag](#flags)) |
+| `--fast` / `--no-fast` | The fast setting to start with, where the model offers one |
+| `--no-force` | The session's agent asks for permission, and a client answers (the default is `--force`'s bypass) |
+| `--json` | Print the hub's answer (`session.create`'s result: the session as the roster lists it, and the prompt's outcome) on one line |
+
+The session's host finds its agent binary as a session the list starts for
+another provider does — `[agents]` in `config.toml`, then `PATH`: a hub never
+hands a host the launch's `--agent-bin` or `CRAZE_AGENT_BIN`. It persists its
+provider as the next plain launch's default, as every new session does.
+
+A refusal is the hub's own words on one line, exit 1 — a session whose start
+failed (`the session did not start: …`, its agent's first error line), a
+directory that does not exist, no provider. So is a session that started and
+refused its first prompt: it runs on, idle, and the line says why. A hub from
+before `craze new` says `this hub (craze <v>) cannot create sessions; it exits
+when idle`: it is not replaced, and the next `craze new` after it has gone
+starts this craze's. Each run creates under a request id of its own, and a
+connection to the hub that ends before the answer (the hub restarted
+mid-create) is tried once more under the same id, so the new hub answers the
+session the first one started rather than start a second.
+
+On macOS a session the hub creates runs in the hub's security session: a hub
+first started over `ssh` cannot start a `cursor` session (its keychain is
+locked there), and says so as a start that failed.
 
 ## craze auth
 

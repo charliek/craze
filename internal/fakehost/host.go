@@ -79,6 +79,19 @@ type Options struct {
 	// catalogs' "recent" says (§3.6, P9). Every incarnation gets it. Empty,
 	// the catalog is the Stub's, and the wire is exactly what it was.
 	Models []agent.ModelInfo
+
+	// Start, when set, is the first incarnation's start (plan 032 §3.10's
+	// tests): the Host serves its engine before the start has run — a
+	// client's attach with when: ready waits for it, as on a real host whose
+	// agent is coming up — and the start runs on a goroutine of its own,
+	// waiting for Start, failing with its error (the engine's start failure:
+	// an attach is then refused start_failed, its cause the error) or going
+	// on to the Stub's own. A registered Host's entry says ready only once it
+	// has started. nil starts the engine before New returns, as before.
+	Start func(context.Context) error
+	// RequestID and RequestHash are written into a registered Host's entry
+	// (rundir.Entry): the hub's session.create that spawned it. "" for none.
+	RequestID, RequestHash string
 }
 
 func (o Options) withDefaults() Options {
@@ -193,6 +206,10 @@ type Host struct {
 	stopHeard     chan struct{}
 	stopHeardOnce sync.Once
 	stopped       bool
+	// started says the current incarnation's start has succeeded
+	// (Options.Start's included): what a registered Host's entry says of its
+	// readiness.
+	started bool
 	// reg is the Host's registration (Register), nil while it has none: each
 	// new incarnation is written into its entry, as a real host's is.
 	reg *rundir.Host
@@ -234,7 +251,9 @@ func newHost(o Options, hooks hostHooks) (*Host, error) {
 // id, starts it and hands it to the server (control.Server.SetEngine): a new
 // incarnation, exactly what Restart is for. The Stub's InstallOnStart is on,
 // so every incarnation's first delta carries every section, as a real
-// session's session/new or session/load does (plan 027 §3.13).
+// session's session/new or session/load does (plan 027 §3.13). The first
+// incarnation of a Host with Options.Start is handed to the server before it
+// starts (startLater).
 func (h *Host) newIncarnation() error {
 	stub := tui.NewStubNoPrimary()
 	stub.Clock = h.clk.now
@@ -246,12 +265,22 @@ func (h *Host) newIncarnation() error {
 	if f := h.hooks.session; f != nil {
 		sess = f(stub)
 	}
+	h.mu.Lock()
+	first := h.eng == nil
+	h.mu.Unlock()
+	if first && h.opts.Start != nil {
+		sess = gatedStart{Stub: stub, gate: h.opts.Start}
+	}
 	eng, err := engine.New(sess, engine.Options{
 		CrazeSessionID: h.opts.CrazeSessionID,
 		ReceiptClock:   h.clk.now,
 	})
 	if err != nil {
 		return err
+	}
+	if first && h.opts.Start != nil {
+		h.startLater(stub, eng)
+		return nil
 	}
 	if err := eng.Start(context.Background()); err != nil {
 		return err
@@ -266,7 +295,7 @@ func (h *Host) newIncarnation() error {
 	}
 	h.mu.Lock()
 	old := h.eng
-	h.stub, h.eng = stub, eng
+	h.stub, h.eng, h.started = stub, eng, true
 	reg := h.reg
 	h.mu.Unlock()
 	h.srv.SetEngine(eng)
@@ -275,13 +304,61 @@ func (h *Host) newIncarnation() error {
 	}
 	if reg != nil {
 		st := eng.State()
-		err := reg.Update(func(e *rundir.Entry) { e.Incarnation, e.ProviderSessionID = st.Incarnation, st.SessionID })
+		err := reg.Update(func(e *rundir.Entry) {
+			e.Incarnation, e.ProviderSessionID, e.Ready = st.Incarnation, st.SessionID, true
+		})
 		if err != nil && !errors.Is(err, rundir.ErrClosed) {
 			return fmt.Errorf("fakehost: the registry entry: %w", err)
 		}
 	}
 	return nil
 }
+
+// gatedStart is the Stub with a start that waits for gate first
+// (Options.Start), and fails with its error: every other method is the
+// Stub's own — the optional interfaces engine.New looks for included,
+// promoted through the embedded pointer (as wire_test.go's heldStub).
+type gatedStart struct {
+	*tui.Stub
+	gate func(context.Context) error
+}
+
+func (s gatedStart) Start(ctx context.Context) error {
+	if err := s.gate(ctx); err != nil {
+		return err
+	}
+	return s.Stub.Start(ctx)
+}
+
+// startLater serves eng, the first incarnation of a Host with Options.Start,
+// before its start, and starts it on a goroutine of its own: once started, a
+// registered Host's entry is rewritten ready, as a real host's is.
+func (h *Host) startLater(stub *tui.Stub, eng *engine.Engine) {
+	h.mu.Lock()
+	h.stub, h.eng = stub, eng
+	h.mu.Unlock()
+	h.srv.SetEngine(eng)
+	go func() {
+		if err := eng.Start(context.Background()); err != nil {
+			return
+		}
+		_ = syncLog(eng)
+		h.mu.Lock()
+		h.started = eng == h.eng
+		reg := h.reg
+		h.mu.Unlock()
+		if reg != nil {
+			st := eng.State()
+			_ = reg.Update(func(e *rundir.Entry) {
+				e.Incarnation, e.ProviderSessionID, e.Ready = st.Incarnation, st.SessionID, true
+			})
+		}
+	}()
+}
+
+// StopHeard is closed once the server has handed the Host's coordinator a
+// session.stop (Options.Stop): what a spawned Host (RunSpawned) ends on.
+func (h *Host) StopHeard() <-chan struct{} { return h.stopHeard }
 
 // syncWait bounds syncLog's flush: generous next to how long the drainer
 // takes to commit what an op enqueued (microseconds; the Stub's log has no
@@ -361,7 +438,9 @@ func (h *Host) Register(env rundir.Env) (*rundir.Host, error) {
 		Incarnation:       st.Incarnation,
 		Provider:          st.Provider.Name,
 		Workspace:         h.opts.Workspace,
-		Ready:             true,
+		Ready:             h.started,
+		RequestID:         h.opts.RequestID,
+		RequestHash:       h.opts.RequestHash,
 	})
 	if err != nil {
 		return nil, err

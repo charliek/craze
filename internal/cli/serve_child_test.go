@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/charliek/craze/internal/hostspawn"
+	"github.com/charliek/craze/internal/hub"
 	"github.com/charliek/craze/internal/sessions"
 )
 
@@ -62,6 +63,13 @@ const (
 	// (childEnv sets it): the child's watchdog ends the child once that
 	// process is no longer its parent (childWatchdog).
 	cliChildParent = "CRAZE_CLI_TEST_PARENT"
+	// cliChildHubHosts makes a craze hub child create its sessions' hosts as
+	// children of this test binary run as craze serve (hub.HostCommand) —
+	// without it a hub in a test binary creates none (plan 032 §3.10) — each
+	// in the hub's environment with this variable carried on, so a host
+	// re-executes as craze too, and a hub the test did not mean to create
+	// with never runs the binary as a host.
+	cliChildHubHosts = "CRAZE_CLI_TEST_HUB_HOSTS"
 )
 
 // The child's watchdog (plan 030 C5r): a child of the test binary can park —
@@ -175,6 +183,10 @@ func init() {
 		_ = os.Unsetenv(authEchoRaceEnv)
 		childEchoRace()
 	}
+	if _, ok := os.LookupEnv(cliChildHubHosts); ok {
+		_ = os.Unsetenv(cliChildHubHosts)
+		hub.HostCommand = childHostCommand
+	}
 	var argv []string
 	if err := json.Unmarshal([]byte(raw), &argv); err != nil {
 		fmt.Fprintln(os.Stderr, "craze test child:", err)
@@ -191,6 +203,24 @@ func init() {
 		fmt.Fprintln(os.Stderr, line)
 	}
 	os.Exit(code)
+}
+
+// childHostCommand is hub.HostCommand in a craze hub child (cliChildHubHosts):
+// this test binary run as `craze <argv…>` — craze serve — with the hub's own
+// environment (which the hub hands on through its contract) and its watchdog
+// watching the hub, whose child it is.
+func childHostCommand(argv []string) (*exec.Cmd, error) {
+	exe, err := os.Executable()
+	if err != nil {
+		return nil, err
+	}
+	b, err := json.Marshal(argv)
+	if err != nil {
+		return nil, err
+	}
+	cmd := exec.Command(exe, "-test.run=^$")
+	cmd.Env = append(os.Environ(), cliChildEnv+"="+string(b), cliChildParent+"="+strconv.Itoa(os.Getpid()))
+	return cmd, nil
 }
 
 // childAnnouncing is serveAnnouncing for cliChildReady's mode.

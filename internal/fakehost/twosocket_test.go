@@ -44,7 +44,7 @@ func twoSocketScript(hub bool) string {
 // own — enough to tell which socket each connection reached — whose id is
 // shown as it is (no HUB-ID). Before serving it, it checks that the fixture's
 // Host is listed in the registry it is handed, as a hub would find it.
-func standIn(t *testing.T, env rundir.Env) (string, string) {
+func standIn(t *testing.T, env rundir.Env, _ bool) (string, string) {
 	t.Helper()
 	entries, err := rundir.Hosts(env)
 	if err != nil {
@@ -110,7 +110,7 @@ func TestATwoSocketFixtureDialsEachConnectionsSocket(t *testing.T) {
 	if !fixtureNeedsHub(lines) {
 		t.Fatal("a fixture with a hub line is not a two-socket one")
 	}
-	out := newTwoSocketRunner(t, Options{}, standIn).run(lines, true)
+	out := newTwoSocketRunner(t, Options{}, false, standIn).run(lines, true)
 	msgs, socks := recorded(t, out)
 	if got := helloHostID(t, msgs[1][0]); got != standInHostID {
 		t.Errorf("conn 1 (the hub's socket) was answered by %q, want the stand-in %q", got, standInHostID)
@@ -125,7 +125,7 @@ func TestATwoSocketFixtureDialsEachConnectionsSocket(t *testing.T) {
 		t.Errorf("conn 2's roster is not the fixture's Host's, its incarnation by placeholder: %s", msgs[2][1])
 	}
 	// The recording replays, byte for byte, against a fresh pair.
-	newTwoSocketRunner(t, Options{}, standIn).run(parseFixtureLines(t, "recorded", out), false)
+	newTwoSocketRunner(t, Options{}, false, standIn).run(parseFixtureLines(t, "recorded", out), false)
 
 	// Negative control: no socket named, one socket — conn 1 reaches the Host.
 	plain := parseFixtureLines(t, "one-socket", []byte(twoSocketScript(false)))
@@ -143,7 +143,7 @@ func TestATwoSocketFixtureDialsEachConnectionsSocket(t *testing.T) {
 // called by that name and a hub line in a fixture with no hub; and a fixture
 // that names the hub needs one to start — refused, saying why, with none.
 func TestAFixtureConnectionKeepsItsSocket(t *testing.T) {
-	r := newTwoSocketRunner(t, Options{}, standIn)
+	r := newTwoSocketRunner(t, Options{}, false, standIn)
 	if _, err := r.connFor(fixtureLine{Conn: 1, Sock: sockHub, Dir: "c2s"}); err != nil {
 		t.Fatal(err)
 	}

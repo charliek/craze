@@ -174,7 +174,7 @@ through (all `false` on a host in protocol 1), plus whether it serves
 {"jsonrpc":"2.0","id":"1","result":{
   "protocol":1,
   "endpoint":{"kind":"hub","hostId":"0a1b2c3d4e5f","crazeVersion":"0.4.0","pid":5150},
-  "capabilities":{"rosterSubscribe":true,"sessionCreate":false,"multiplex":false,"connect":true,"snapshot":false,"attachWhenNow":false},
+  "capabilities":{"rosterSubscribe":true,"sessionCreate":true,"multiplex":false,"connect":true,"snapshot":false,"attachWhenNow":false},
   "codecs":{"event":1,"snapshot":1},
   "limits":{"inboundLine":4194304,"outboundLine":16777216}
 }}
@@ -183,12 +183,13 @@ through (all `false` on a host in protocol 1), plus whether it serves
 `endpoint.hostId` is the hub's own id — twelve hex digits, minted per hub
 process — and the [roster](#the-hubs-roster)'s `epoch`: a client that sees it
 change is talking to a new hub, and reseeds. The hub serves the roster
-subscription (`rosterSubscribe`) and the splice (`connect`); `snapshot` and
+subscription (`rosterSubscribe`), [session creation](#sessioncreate)
+(`sessionCreate`) and the splice (`connect`); `snapshot` and
 `attachWhenNow` are `false` because a session's methods are its host's,
 reached through the splice; `multiplex` is `false` because one connection
 carries the roster or one spliced session, never several. `sessionCreate` is
-`true` only on a hub that serves `session.create`: a client checks it, never
-the hub's version.
+`true` only on a hub that serves `session.create` — `false` on a hub from
+before it existed: a client checks it, never the hub's version.
 
 ### Client ids and resume
 
@@ -426,9 +427,12 @@ from 1 **per client**, never reused. Resending a mutating method under the
 same `commandId` is how a client asks "did that happen?" — see
 [Errors and retry](#errors-and-retry).
 
-The hub serves `hello`, `sessions.list`, `sessions.subscribe` and
-`session.connect`; every other session-scoped method sent to it is refused
-`unsupported`, reason `host_only`.
+The hub serves `hello`, `sessions.list`, `sessions.subscribe`,
+`session.connect` and `session.create`; every other session-scoped method
+sent to it is refused `unsupported`, reason `host_only`. `session.create` is
+neither session-scoped (its session does not exist until it answers) nor
+mutating (the hub mints no client ids and keeps no command receipts: its
+idempotency is its own `requestId`).
 
 | method | mutating | params (beyond `sessionId`/`commandId`) | result | notes |
 |---|---|---|---|---|
@@ -455,7 +459,7 @@ The hub serves `hello`, `sessions.list`, `sessions.subscribe` and
 | `asks.list` | | — | `asks[]` (summaries: `id`, `kind`, `label`, `openedAt`) | |
 | `asks.get` | | `askId` | `ask` (the full record, body strings capped at 256 KiB) | |
 | `asks.answer` | ✓ | `askId`, `answer` | `{}` | the first valid answer wins; an invalid one is `bad_request`, reason `bad_answer`, and leaves the ask open |
-| `session.create` | | — | — | reserved for the hub (S4); a host answers `unsupported`, reason `hub_only` |
+| `session.create` | | `cwd`, `prompt?`, `provider?`, `model?`, `effort?`, `fast?`, `permissionMode?`, `requestId?` (no `sessionId`, no `commandId`) | `session` (a roster row), `prompt`, `promptError?` | the hub's: a new session, answered once it has started — see [`session.create`](#sessioncreate); `unsupported` on a host, reason `hub_only` |
 
 Deliberately not on the wire: `GiveUp`/`GiveUpDrain` (`craze prompt`'s own
 foreign-turn policy, no socket client's concern), `Start`/`Close` (a host's
@@ -532,6 +536,81 @@ updated in place long after it is first written — so paging entries that can
 still change needs rules protocol 1 does not yet have. If a client needs
 history older than the snapshot window, that arrives later as a new method
 behind a new capability; it is not a breaking change.
+
+### `session.create`
+
+The hub's, where its `hello` says `sessionCreate: true`: a new session in a
+host the hub spawns (`craze serve`, as any launch's), answered **once the
+session has started**.
+
+```json
+{"jsonrpc":"2.0","id":"2","method":"session.create","params":{"cwd":"/home/me/projects/lumen","prompt":"fix the flaky test","provider":"grok","effort":"high","requestId":"new-9c1f04ab7d2e3a10"}}
+{"jsonrpc":"2.0","id":"2","result":{"session":{"hostId":"0a1b2c3d4e5f","sessionId":"01a0f89a-4db5-7621-8335-63ae8327352e","host":{...},"status":"reachable","approximate":false,"row":{...}},"prompt":"accepted"}}
+```
+
+**Params.** `cwd` is an absolute path to an existing directory. `provider`
+is a provider id; absent, it is the hub's configured default — `provider` in
+the hub's `config.toml`, read at each create (the provider the last session
+to start persisted) — and with none configured the create is `bad_request`.
+`model`, `effort` and `fast` are the session's start settings, each absent
+for the provider's own default; `permissionMode` is `bypass` when absent, as
+a plain launch's is. No params member names an agent binary: the host finds
+its own (`[agents]`, then `PATH`), and the hub hands it neither a launch's
+`--agent-bin` nor `CRAZE_AGENT_BIN`. `requestId` (1–64 of `[A-Za-z0-9._-]`)
+makes the create idempotent (below).
+
+**What the hub does.** It spawns the host with the session's directory as
+its working directory and the hub's own environment less what is one
+launch's or one terminal's (the environment contract: `CRAZE_HOME` absolute;
+no `CRAZE_PROVIDER`, `CRAZE_AGENT_BIN`, `TMUX`, `HERDR_*`, …), reads its ready
+line, attaches with `when: "ready"` and waits for the session's start —
+at most 60 s — sends `prompt` when there is one (queued, as the session list's
+background dispatch sends one, its answer waited for at most 15 s), reads the
+session's own row, and detaches. The session runs on in its host, listed in
+the roster like any other; its host persists its provider as the next plain
+launch's default, as every new session does.
+
+**The result.** `session` is the session's roster row, read fresh from its
+host (`approximate: false`). `prompt` says what became of the first prompt:
+`none` (there was none), `accepted`, `unknown` (it was sent and its answer
+lost — the session exists, and may be working on it; `promptError` says why
+it was lost) or `refused` (the session's refusal, in `promptError`; the
+session runs on, idle).
+
+**Refusals.** Bad params are `bad_request` (`unknown_field` for a member the
+schema does not define). A host that fails to spawn, or to become ready, is
+`unavailable`, reason `spawn_failed` — the hub has ended it. A session whose
+start fails — its agent binary missing, a locked keychain — or does not end
+within 60 s is `not_accepting`, reason `start_failed`, `data.cause` the
+host's first error line; the hub stops that host (`session.stop`, then, its
+own child, its termination), so nothing of it is left. More than 16 creates
+in flight are `unavailable`, reason `busy`; a hub tearing down answers
+`unavailable`, reason `closing`.
+
+**Idempotency.** A create's `requestId` is kept with a hash of its
+normalized params — in the hub's memory (an answer kept 10 minutes, at most
+256 of them; a create in flight never forgotten) and in the new host's
+[registry entry](#the-registry) (`requestId`, `requestHash`). A repeat with
+the same params is answered the first create's answer — its failure too —
+or joins it while it runs; with other params it is `bad_request`, reason
+`request_conflict`. A waiter that disconnects does not cancel the create. A
+hub that does not remember the id — it restarted since — finds the live host
+whose entry carries it and **joins it under the same contract**: a session
+already started is answered at once (its row, `prompt: "unknown"`: this hub
+never saw the prompt's answer, nor sent one); a start still running is
+waited for, at most 60 s from the join; a start that failed is answered
+`start_failed` and its host stopped. A retry after the created session has
+ended finds nothing, and creates another. A client must not retry a create
+across a hub restart unless it reuses its `requestId` ([Errors and
+retry](#errors-and-retry)).
+
+**Teardown.** A hub that is tearing down gives the creates in flight its own
+bound (10 s); past it their waiters see the connection close, and a host
+already started runs on, its `requestId` intact for the next hub to join.
+
+On macOS a session the hub creates runs in the hub's security session: a hub
+first started over `ssh` cannot start a `cursor` session, whose keychain is
+locked there — a start that failed, `start_failed`.
 
 ## Notifications
 
@@ -1241,9 +1320,8 @@ Every method, notification and shared document has a hand-written [JSON
 Schema](https://json-schema.org/) (2020-12) file, embedded in
 `internal/protocol` and checked by reflection against the Go wire types both
 ways (`TestSchemaCoversEveryWireField`) — a field the code sends that the
-schema does not describe, or vice versa, fails the build — with one named
-exception: `session.create` is reserved for the hub (S4) and has no params,
-result, or schema file of its own; a host answers it `unsupported`, reason
+schema does not describe, or vice versa, fails the build — the hub's
+`session.create` among them, which a host answers `unsupported`, reason
 `hub_only`, like `session.connect`. The event and snapshot codecs' own
 hand-shaped wire structs get the same treatment in `internal/agent`
 (`TestEventSchemaCoversTheCodec`) and `internal/transcript`
@@ -1271,7 +1349,7 @@ embedded copy — e.g. [`hello.json`](protocol/schema/hello.json),
 
 ## Fixtures and the fake host
 
-`internal/fakehost/testdata/wire/*.ndjson` is twenty-one scripted scenarios
+`internal/fakehost/testdata/wire/*.ndjson` is twenty-two scripted scenarios
 against a real `internal/control` server over a real engine (wrapping the
 TUI's own `Stub`, never a fixture-only re-implementation) — hello and a fresh
 attach; a cursor resume and its replay; a foreign-incarnation cursor; a
@@ -1291,7 +1369,11 @@ the hub's `hello` and roster (19), a roster subscription told of the
 host's change and then of its leaving the registry (20), and a splice — a
 `session.connect` with the client's host `hello` pipelined behind it, an
 attach and an event through it, and on a second connection a connect to no
-session and one that is no longer the first (21). Every line is
+session and one that is no longer the first (21); and against a hub that
+creates sessions, a `session.create` with a first prompt, taken, its repeat
+answered the same, the same `requestId` with other params refused
+`request_conflict`, and a create whose session's start fails,
+`start_failed` with its cause (22). Every line is
 `{"conn": N, "dir": "c2s"|"s2c", "msg": {...}}`, plus `{"dir": "op", "op":
 {...}}` lines that are not wire messages at all — they script the host
 directly (emitting text, opening an ask, restarting the engine into a fresh
@@ -1321,7 +1403,12 @@ runner's own pid — where the hub's `hello` carries it as `endpoint.pid`, and
 where a roster row carries it as `host.pid`, the pid the host's registry
 entry carries — `999999999`, which no process can have (it is above every
 `pid_max`). A pid anywhere else, the fake host's own `4242` in its `hello`
-through the splice included, is compared as written.
+through the splice included, is compared as written. A fixture whose `host`
+line says `hubCreates` has a hub that creates sessions, each host it spawns
+the test binary run as a fake `craze serve`; a host a create started is
+named by placeholder too, from its registry entry: its id (which the hub
+minted) as `cccccccccccc`, its session's incarnation as
+`CREATED-INCARNATION`, and its pid, in the create's result, as `999999999`.
 
 `cmd/craze-fake-host` is the same host as a standalone binary, for anyone
 scripting against protocol 1 without Go: `craze-fake-host --socket PATH`
@@ -1440,10 +1527,13 @@ A registry entry, `hosts/<hostId>.json`, has exactly these members:
 | `provider` | The provider's name |
 | `workspace` | The session's working directory |
 | `ready` | Whether the engine has started |
+| `requestId`, `requestHash` | Only on a host the hub's [`session.create`](#sessioncreate) spawned, and absent otherwise: the create's `requestId` and its params' hash, fixed for the host's life — what a restarted hub joins a retried create by |
 
 This set is a one-way door: a resolver — `craze bridge`, `craze
 attach`, shed — reads these members and connects to nothing merely to find a
-session, so none of them is ever renamed or removed.
+session, so none of them is ever renamed or removed; members may be added
+(`requestId` and `requestHash` were), and a reader ignores those it does not
+know.
 
 The socket writes an initial entry at bind time, before any engine is
 attached (`crazeSessionId`, `provider` and the rest of the identity still

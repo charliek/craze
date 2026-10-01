@@ -126,12 +126,17 @@ type Spec struct {
 	// status, so the host leaves the agent's host hook gates in its
 	// environment, as an in-process session would.
 	NoHostStatus bool
+	// RequestID and RequestHash are --request-id and --request-hash, each
+	// passed only when set: the hub's session.create that spawns the host
+	// (plan 032 §3.10), its idempotency id and its params' hash, which the
+	// host writes into its registry entry.
+	RequestID, RequestHash string
 }
 
 // Args is craze serve's command line for s: the host's id and log, then every
-// session flag s carries — each only when it says something — and --load, and
-// --no-host-status. Every value is spelled --flag=value, so none is read as a
-// flag of its own.
+// session flag s carries — each only when it says something — and --load,
+// --no-host-status, --request-id and --request-hash. Every value is spelled
+// --flag=value, so none is read as a flag of its own.
 func Args(s Spec) []string {
 	argv := []string{"serve", "--host-id=" + s.HostID, "--log=" + s.Log}
 	str := func(name, v string) {
@@ -170,6 +175,8 @@ func Args(s Spec) []string {
 	if s.NoHostStatus {
 		argv = append(argv, "--no-host-status")
 	}
+	str("request-id", s.RequestID)
+	str("request-hash", s.RequestHash)
 	return argv
 }
 

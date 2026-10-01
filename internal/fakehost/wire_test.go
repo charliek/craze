@@ -10,6 +10,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -75,6 +76,11 @@ type fixtureLine struct {
 // its Host is built with (Options.Stop, PermissionMode, StartedAt, RowFacts),
 // and plan 031's model catalog (Options.Models).
 type fixtureHost struct {
+	// HubCreates is the hub's, in a two-socket fixture: one that serves
+	// session.create (hub.Options.Creates), its hosts this test binary run
+	// as a spawned fake host (hub_fixture_test.go). The fixture Host is
+	// built as the rest of the line says.
+	HubCreates     bool                    `json:"hubCreates,omitempty"`
 	Stop           bool                    `json:"stop,omitempty"`
 	PermissionMode protocol.PermissionMode `json:"permissionMode,omitempty"`
 	StartedAt      bool                    `json:"startedAt,omitempty"`
@@ -545,14 +551,20 @@ type fixtureRunner struct {
 	// hubID is the hub's id in a two-socket fixture ("" for none, or a hub
 	// whose id is to be shown as it is): what hubToWire names HUB-ID.
 	hubID string
+	// env is a two-socket fixture's registry; created is every host a
+	// session.create of the fixture's started, as the registry listed it
+	// (learnCreated): their values hubToWire names by placeholder.
+	env     rundir.Env
+	created []rundir.Entry
 }
 
 // hubStarter serves a hub for a two-socket fixture (plan 032 §3.15): handed
 // the registry the fixture's Host is listed in (rundir.Env, a HOME-like root
 // and a runtime tree of the fixture's own), it starts a hub that finds the
-// Host there, cleans it up through t, and returns the hub's socket and its id
-// (hubToWire's HUB-ID; "" to name none).
-type hubStarter func(t *testing.T, env rundir.Env) (socket, hubID string)
+// Host there — one that creates sessions when creates says so (the host
+// line's hubCreates) — cleans it up through t, and returns the hub's socket
+// and its id (hubToWire's HUB-ID; "" to name none).
+type hubStarter func(t *testing.T, env rundir.Env, creates bool) (socket, hubID string)
 
 // fixtureHub is the hub every two-socket fixture runs against: the real one,
 // internal/hub's Run in this process (hub_fixture_test.go installs it); nil,
@@ -574,9 +586,58 @@ const (
 	// — the pid of the fixture Host's registry entry, which the Host was
 	// bound by. It is no pid at all — above any pid_max (Linux's is at most
 	// 2^22, macOS's 99998) — so no value the hub wrote can be mistaken for
-	// it, the way HUB-ID can be no host id.
+	// it, the way HUB-ID can be no host id. A created session's row's
+	// host.pid, its host's — a child's — is named by it too.
 	pidPlaceholder = `999999999`
+	// createdIDPlaceholder and createdIncPlaceholder are a host a
+	// session.create started (plan 032 §3.10): its id, which the hub minted,
+	// and its session's incarnation, which its Stub did — wherever a hub line
+	// carries either. The id's is twelve hex digits, the schema's form for a
+	// host id where a line carries one, and one no run of the hub's random
+	// minting is ever expected to give a fixture's host.
+	createdIDPlaceholder  = `"cccccccccccc"`
+	createdIncPlaceholder = `"CREATED-INCARNATION"`
 )
+
+// learnCreated reads the fixture's registry for the hosts a session.create
+// started — an entry carrying a requestId — and keeps each it has not seen
+// (by host id): values the run itself reported, as the incarnation's are,
+// read before every hub line is compared. A host gone from the registry since
+// stays learnt.
+func (r *fixtureRunner) learnCreated() {
+	if r.env.Home == "" {
+		return
+	}
+	entries, err := rundir.Hosts(r.env)
+	if err != nil {
+		r.t.Fatalf("the fixture's registry: %v", err)
+	}
+	for _, e := range entries {
+		if e.RequestID == "" || slices.ContainsFunc(r.created, func(c rundir.Entry) bool { return c.HostID == e.HostID }) {
+			continue
+		}
+		r.created = append(r.created, e)
+	}
+}
+
+// createdValue is the placeholder of raw, a value at the end of path in a
+// line answering or notifying method, when it is a created host's — its id
+// (as any hostId), its incarnation (as any incarnation), its pid (as a
+// session.create's result's host.pid) — and nil when it is none of them.
+func (r *fixtureRunner) createdValue(path []string, raw []byte, method string) []byte {
+	key, v := path[len(path)-1], string(raw)
+	for _, e := range r.created {
+		switch {
+		case key == "hostId" && v == strconv.Quote(e.HostID):
+			return []byte(createdIDPlaceholder)
+		case key == "incarnation" && e.Incarnation != "" && v == strconv.Quote(e.Incarnation):
+			return []byte(createdIncPlaceholder)
+		case method == protocol.MethodSessionCreate && strings.Join(path, ".") == "result.session.host.pid" && v == strconv.Itoa(e.PID):
+			return []byte(pidPlaceholder)
+		}
+	}
+	return nil
+}
 
 // hubToWire names by placeholder, in a line the hub wrote — method being the
 // method it answers or notifies (fixtureConn.methodFor) — the values a
@@ -599,7 +660,11 @@ func (r *fixtureRunner) hubToWire(b []byte, method string) []byte {
 	_ = json.Unmarshal(b, &probe) // a line it does not fit names no endpoint
 	hubHello := method == protocol.MethodHello && probe.Result != nil && probe.Result.Endpoint != nil &&
 		probe.Result.Endpoint.Kind == protocol.EndpointHub
+	r.learnCreated()
 	out, err := rewritePaths(b, func(path []string, raw []byte) []byte {
+		if p := r.createdValue(path, raw, method); p != nil {
+			return p
+		}
 		switch key, v := path[len(path)-1], string(raw); {
 		case (key == "hostId" || key == "epoch") && r.hubID != "" && v == id:
 			return []byte(hubIDPlaceholder)
@@ -684,7 +749,7 @@ func newHookedFixtureRunner(t *testing.T, o Options, hooks hostHooks) *fixtureRu
 // exactly where a hub looks for hosts, and start serves the hub that finds it
 // there. A connection dials the Host's socket or the hub's, as its lines say
 // (fixtureLine.Sock).
-func newTwoSocketRunner(t *testing.T, o Options, start hubStarter) *fixtureRunner {
+func newTwoSocketRunner(t *testing.T, o Options, creates bool, start hubStarter) *fixtureRunner {
 	t.Helper()
 	h, err := newHost(o, hostHooks{})
 	if err != nil {
@@ -697,9 +762,9 @@ func newTwoSocketRunner(t *testing.T, o Options, start hubStarter) *fixtureRunne
 		t.Fatal(err)
 	}
 	serveFixtureHost(t, h, reg.Listener(), reg)
-	sock, id := start(t, env)
+	sock, id := start(t, env, creates)
 	r := newRunnerFor(t, h, map[string]string{sockHost: reg.Socket(), sockHub: sock})
-	r.hubID = id
+	r.hubID, r.env = id, env
 	return r
 }
 
@@ -874,6 +939,12 @@ func (r *fixtureRunner) runOp(raw json.RawMessage) {
 // fixturePath is a fixture file's path by name (testdata/wire/<name>.ndjson).
 func fixturePath(name string) string { return filepath.Join("testdata", "wire", name+".ndjson") }
 
+// fixtureHubCreates is whether a fixture's host line asks for a hub that
+// creates sessions.
+func fixtureHubCreates(lines []rawFixtureLine) bool {
+	return len(lines) > 0 && lines[0].parsed.Dir == "host" && lines[0].parsed.Host != nil && lines[0].parsed.Host.HubCreates
+}
+
 // fixtureOptions is the Options a fixture's host line asks for (Options{}
 // without one).
 func fixtureOptions(lines []rawFixtureLine) Options {
@@ -897,7 +968,7 @@ func runFixture(t *testing.T, name string) {
 	}
 	var r *fixtureRunner
 	if hub != nil {
-		r = newTwoSocketRunner(t, fixtureOptions(lines), hub)
+		r = newTwoSocketRunner(t, fixtureOptions(lines), fixtureHubCreates(lines), hub)
 	} else {
 		r = newFixtureRunner(t, fixtureOptions(lines))
 	}

@@ -39,3 +39,19 @@ func TestArgsPassTheStartSettingsOnlyWhenSet(t *testing.T) {
 		})
 	}
 }
+
+// TestArgsPassTheRequestOnlyWhenSet: a hub's create (plan 032 §3.10) hands
+// its host --request-id and --request-hash; every other spawn passes neither.
+func TestArgsPassTheRequestOnlyWhenSet(t *testing.T) {
+	argv := Args(Spec{HostID: "0123456789ab", Log: "/l", RequestID: "-r1", RequestHash: "abc"})
+	for _, a := range []string{"--request-id=-r1", "--request-hash=abc"} {
+		if !slices.Contains(argv, a) {
+			t.Fatalf("%q lacks %s", argv, a)
+		}
+	}
+	for _, a := range Args(Spec{HostID: "0123456789ab", Log: "/l"}) {
+		if strings.HasPrefix(a, "--request-") {
+			t.Fatalf("a spawn with no request passes %s", a)
+		}
+	}
+}

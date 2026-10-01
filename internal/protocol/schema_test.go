@@ -24,8 +24,7 @@ type oneOf []any
 type anyOf []any
 
 // methodTypes is every method's params and result Go type: what the schema's
-// $defs params and result describe. session.create, reserved, has no types at
-// all.
+// $defs params and result describe.
 var methodTypes = map[string]struct{ params, result any }{
 	protocol.MethodHello:             {protocol.HelloParams{}, oneOf{protocol.HelloResult{}, protocol.HubHelloResult{}}},
 	protocol.MethodSessionsList:      {protocol.SessionsListParams{}, anyOf{protocol.SessionsListResult{}, protocol.HubSessionsListResult{}}},
@@ -50,6 +49,7 @@ var methodTypes = map[string]struct{ params, result any }{
 	protocol.MethodAsksList:          {protocol.AsksListParams{}, protocol.AsksListResult{}},
 	protocol.MethodAsksGet:           {protocol.AsksGetParams{}, protocol.AsksGetResult{}},
 	protocol.MethodAsksAnswer:        {protocol.AsksAnswerParams{}, protocol.Empty{}},
+	protocol.MethodSessionCreate:     {protocol.CreateParams{}, protocol.CreateResult{}},
 }
 
 // errorResultTypes is the data.result a method's refusal carries beside it,
@@ -137,9 +137,6 @@ func TestSchemaCoversEveryWireField(t *testing.T) {
 	c := protocolCoverage(t)
 	defined := 0
 	for _, m := range protocol.Methods() {
-		if m.Reserved {
-			continue
-		}
 		defined++
 		types, ok := methodTypes[m.Name]
 		if !ok {
@@ -387,7 +384,8 @@ func TestEverySchemaFileCompiles(t *testing.T) {
 
 // TestEveryMethodAndNotificationHasItsFile: one file per method with its
 // params and result, one per notification with its params, the four shared
-// files, and nothing else; session.create, reserved, has none.
+// files, and nothing else — session.create's included (plan 032 C15: no
+// longer reserved).
 func TestEveryMethodAndNotificationHasItsFile(t *testing.T) {
 	want := []string{protocol.SchemaEnvelope, protocol.SchemaEvent, protocol.SchemaSnapshot, protocol.SchemaInfo}
 	defsOf := func(name string) map[string]json.RawMessage {
@@ -404,9 +402,6 @@ func TestEveryMethodAndNotificationHasItsFile(t *testing.T) {
 		return doc.Defs
 	}
 	for _, m := range protocol.Methods() {
-		if m.Reserved {
-			continue
-		}
 		name := protocol.MethodSchema(m.Name)
 		want = append(want, name)
 		defs := defsOf(name)
@@ -425,18 +420,10 @@ func TestEveryMethodAndNotificationHasItsFile(t *testing.T) {
 	if got := protocol.SchemaNames(); !slices.Equal(got, want) {
 		t.Fatalf("schema files\n got %v\nwant %v", got, want)
 	}
-	// session.create is reserved (X6): named, answered unsupported, reason
-	// hub_only, and nothing else of it defined — no schema.
-	if m, ok := protocol.Method(protocol.MethodSessionCreate); !ok || !m.Reserved || m.HostUnsupported != protocol.ReasonHubOnly {
-		t.Fatalf("session.create is %+v, %v; want reserved, answered hub_only", m, ok)
-	}
-	if _, err := protocol.SchemaFile(protocol.MethodSchema(protocol.MethodSessionCreate)); err == nil {
-		t.Fatal("session.create is reserved and has no schema")
-	}
-	for _, m := range protocol.Methods() {
-		if m.Reserved && m.Name != protocol.MethodSessionCreate {
-			t.Errorf("%s is reserved; protocol 1 reserves session.create alone", m.Name)
-		}
+	// session.create is the hub's (plan 032 §3.10): a host answers it
+	// unsupported, reason hub_only, whatever its params, as session.connect.
+	if m, ok := protocol.Method(protocol.MethodSessionCreate); !ok || m.HostUnsupported != protocol.ReasonHubOnly || m.SessionScoped || m.Mutating {
+		t.Fatalf("session.create is %+v, %v; want the hub's, answered hub_only by a host, neither scoped nor mutating", m, ok)
 	}
 }
 
@@ -446,16 +433,15 @@ func TestEveryMethodAndNotificationHasItsFile(t *testing.T) {
 // tolerant method (§3.3).
 func TestScopedAndMutatingMethodsCarryTheirIds(t *testing.T) {
 	for _, m := range protocol.Methods() {
-		if m.Reserved {
-			continue
-		}
 		typ := reflect.TypeOf(methodTypes[m.Name].params)
 		fields := map[string]bool{}
 		for i := range typ.NumField() {
 			name, opts, _ := strings.Cut(typ.Field(i).Tag.Get("json"), ",")
 			fields[name] = !strings.Contains(opts, "omit")
 		}
-		wantScoped := m.Name != protocol.MethodHello && !strings.HasPrefix(m.Name, "sessions.")
+		// session.create is the scoped names' one exception (plan 032
+		// §3.10): its session does not exist until it answers.
+		wantScoped := m.Name != protocol.MethodHello && !strings.HasPrefix(m.Name, "sessions.") && m.Name != protocol.MethodSessionCreate
 		if m.SessionScoped != wantScoped {
 			t.Errorf("%s: SessionScoped %v, want %v", m.Name, m.SessionScoped, wantScoped)
 		}
@@ -564,6 +550,7 @@ func TestTheSchemaEnumsAreTheGoSets(t *testing.T) {
 		{"permission modes", "info.json", "/$defs/permissionMode/enum", asStrings(protocol.PermissionModes())},
 		{"turn outcomes", "info.json", "/$defs/turnOutcome/enum", asStrings(protocol.TurnOutcomes())},
 		{"roster statuses", "info.json", "/$defs/rosterStatus/enum", asStrings(protocol.RosterStatuses())},
+		{"create prompt outcomes", "session.create.json", "/$defs/result/properties/prompt/enum", asStrings(protocol.CreatePrompts())},
 		{"JSON-RPC integers", "envelope.json", "/$defs/error/properties/code/enum", []string{"-32700", "-32600", "-32601", "-32602", "-32000"}},
 	} {
 		if got := schemaEnum(t, tc.file, tc.pointer); !slices.Equal(got, tc.want) {

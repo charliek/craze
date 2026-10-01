@@ -54,14 +54,16 @@ import (
 //     (caught with signal.Notify by its caller, never ignored, which a host
 //     it spawns would inherit).
 //   - Idle (P12, owner decision 7): the hub is busy while it has a client —
-//     a connection past hello — or any live host is in the HOME registry
-//     (rundir.Hosts, every hostsEvery, and at every round of the roster's
-//     poll while it polls: pollHosts). When neither holds — at start too —
-//     it arms a check after the grace, capturing the lifecycle epoch, which
-//     every admission and every host appearing bumps. At the check, under the
-//     lifecycle lock, it reads the registry again and re-checks both and the
-//     epoch: still idle and unchanged, it decides, and from that instant every
-//     connection is closed unanswered and every hello refused closing. A
+//     a connection past hello — a create in flight (session.create's, whose
+//     waiter may have gone: create.go), or any live host is in the HOME
+//     registry (rundir.Hosts, every hostsEvery, and at every round of the
+//     roster's poll while it polls: pollHosts). When none holds — at start
+//     too — it arms a check after the grace, capturing the lifecycle epoch,
+//     which every admission (a hello, a create) and every host appearing
+//     bumps. At the check, under the lifecycle lock, it reads the registry
+//     again and re-checks all three and the epoch: still idle and unchanged,
+//     it decides, and from that instant every connection is closed
+//     unanswered and every hello refused closing. A
 //     registry read that fails is no host's leaving: the hosts the last good
 //     read listed stand, and until a read succeeds again no grace is armed
 //     and no check decides (said in the log, at most every readErrSayEvery).
@@ -70,9 +72,12 @@ import (
 // client wants it.
 //
 // Teardown, bounded by teardownBound whatever its peers do: quiesce (refuse
-// every new connection and every request; the lifecycle lock is the
-// barrier; no answer waits for the poll any more), wait for the work in
-// flight, close the listener, end every roster subscription with
+// every new connection, every request and every create; the lifecycle lock
+// is the barrier; no answer waits for the poll any more), wait for the work
+// in flight — the creates in flight among it, whose waiters wait for them,
+// and those whose waiters have gone — then cut every create still running
+// (its waiter's connection closes unanswered; a host already started runs
+// on: creator.stop), close the listener, end every roster subscription with
 // reset{hub_closing} (resetWait), close every connection — a splice's legs
 // half-closed first, then closed once it has ended or spliceDrain has passed —
 // stop the roster's poll and the sweep, unlink the socket and remove the
@@ -149,6 +154,9 @@ type Options struct {
 	// the writer, and its close. nil, or one that fails, leaves the hub
 	// speaking on Stderr.
 	OpenLog func(path string) (io.Writer, func(), error)
+	// Creates is what session.create needs (create.go): nil — a test's hub
+	// alone — creates nothing, and its hello says sessionCreate false.
+	Creates *Creates
 	// IdleGrace is the idle exit's grace; 0 is DefaultIdleGrace.
 	IdleGrace time.Duration
 
@@ -271,6 +279,8 @@ type hub struct {
 	srv  *server
 	// rs is the roster, from serve on.
 	rs *rosterState
+	// cr is session.create's, nil for a hub given no Options.Creates.
+	cr *creator
 
 	// The loop's own: the armed grace, its stop, and the epoch it was armed
 	// at.
@@ -294,6 +304,9 @@ func newHub(o Options) *hub {
 		h.grace = DefaultIdleGrace
 	}
 	h.life.init()
+	if o.Creates != nil {
+		h.cr = newCreator(h, *o.Creates)
+	}
 	return h
 }
 
@@ -602,15 +615,15 @@ func (h *hub) sayRead(say string) {
 
 // decideIdle is the idle decision at the end of a grace armed at epoch armed:
 // under the lifecycle lock, the registry read again — and read, not failed —
-// and the hub still idle — no client, no live host — with the epoch
-// unchanged. Then it is decided: closing is set under the same lock, and
-// nothing is admitted after it.
+// and the hub still idle — no client, no create in flight, no live host —
+// with the epoch unchanged. Then it is decided: closing is set under the
+// same lock, and nothing is admitted after it.
 func (h *hub) decideIdle(armed uint64) bool {
 	l := &h.life
 	l.mu.Lock()
 	entries, err := hostsRead(h.o.Env)
 	say := l.setHostsLocked(entries, err, time.Now())
-	done := !l.closing && l.clients == 0 && !l.hostsLive && !l.readErr && l.epoch == armed
+	done := !l.closing && l.clients == 0 && l.creates == 0 && !l.hostsLive && !l.readErr && l.epoch == armed
 	if done {
 		l.closing = true
 	}
@@ -668,6 +681,12 @@ func (h *hub) teardown(cause string) {
 	h.rs.quiesce()
 	if !waitUntil(&h.life.work, deadline) {
 		h.logf("work in flight did not end within %v; cut off", teardownBound)
+	}
+	if h.cr != nil {
+		if !waitUntil(&h.life.createWG, deadline) {
+			h.logf("creates in flight did not end within %v; cut off, their hosts left as they are", teardownBound)
+		}
+		h.cr.stop()
 	}
 	_ = h.ln.Close()
 	<-h.srv.acceptDone
@@ -742,6 +761,10 @@ type lifecycle struct {
 	// many.
 	work     sync.WaitGroup
 	inflight int
+	// creates is how many creates are in flight (beginCreate, endCreate),
+	// each also counted on createWG.
+	creates  int
+	createWG sync.WaitGroup
 	// kick wakes the loop to re-arm: a client left.
 	kick chan struct{}
 }
@@ -835,6 +858,35 @@ func (l *lifecycle) end() {
 	l.work.Done()
 }
 
+// beginCreate admits one create in flight (create.go): refused unavailable,
+// reason closing, once the hub is closing, and reason busy at createsMax in
+// flight. An admission, it bumps the epoch.
+func (l *lifecycle) beginCreate() *protocol.Error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	switch {
+	case l.closing:
+		return closingErr()
+	case l.creates >= createsMax:
+		return refused(protocol.CodeUnavailable, protocol.ReasonBusy,
+			"the hub has %d creates in flight already: try again once one has answered", l.creates)
+	}
+	l.creates++
+	l.epoch++
+	l.createWG.Add(1)
+	return nil
+}
+
+// endCreate is a create's end: it wakes the loop, which arms the grace if
+// the hub is now idle.
+func (l *lifecycle) endCreate() {
+	l.mu.Lock()
+	l.creates--
+	l.mu.Unlock()
+	l.createWG.Done()
+	l.wakeLoop()
+}
+
 // quiesce closes admission (the decision, when an idle check has not made it
 // already); taking the lock is the barrier behind which every admission made
 // before it has finished registering.
@@ -844,12 +896,13 @@ func (l *lifecycle) quiesce() {
 	l.mu.Unlock()
 }
 
-// idle reports whether the hub is idle now — no client, no live host as last
-// read, and that read not failed — and the epoch.
+// idle reports whether the hub is idle now — no client, no create in
+// flight, no live host as last read, and that read not failed — and the
+// epoch.
 func (l *lifecycle) idle() (bool, uint64) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	return l.clients == 0 && !l.hostsLive && !l.readErr, l.epoch
+	return l.clients == 0 && l.creates == 0 && !l.hostsLive && !l.readErr, l.epoch
 }
 
 // setHosts records a registry read (setHostsLocked).

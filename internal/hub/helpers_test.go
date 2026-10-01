@@ -400,6 +400,13 @@ type running struct {
 // ends is sent SIGTERM and waited for.
 func runIn(t *testing.T, env rundir.Env, hk *hooks) *running {
 	t.Helper()
+	return runWith(t, env, hk, nil)
+}
+
+// runWith is runIn with session.create's options (nil: a hub that creates
+// nothing).
+func runWith(t *testing.T, env rundir.Env, hk *hooks, creates *Creates) *running {
+	t.Helper()
 	r, w, err := os.Pipe()
 	if err != nil {
 		t.Fatal(err)
@@ -427,7 +434,7 @@ func runIn(t *testing.T, env rundir.Env, hk *hooks) *running {
 	}()
 	go func() {
 		rn.err = Run(context.Background(), Options{Env: env, Ready: NewReadyPipe(w), Signals: rn.sigs,
-			Stderr: rn.stderr, IdleGrace: time.Hour, Codecs: protocol.Codecs{Event: 1, Snapshot: 1}, hooks: hk})
+			Stderr: rn.stderr, IdleGrace: time.Hour, Codecs: protocol.Codecs{Event: 1, Snapshot: 1}, Creates: creates, hooks: hk})
 		close(rn.done)
 	}()
 	t.Cleanup(func() {

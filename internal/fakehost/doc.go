@@ -37,6 +37,13 @@
 // hub — the real internal/hub, in process — it runs in front of it
 // (wire_test.go, hub_fixture_test.go).
 //
+// For the hub's session.create (plan 032 §3.10) a Host can stand in for the
+// craze serve a spawner starts (RunSpawned, over craze serve's command line,
+// ParseSpawnArgs): its ready line on the spawner's pipe, its entry carrying
+// the create's request (Options.RequestID, RequestHash), its start held or
+// failed as its test says (Options.Start), and its end on session.stop
+// (StopHeard) or a signal.
+//
 // depguard: this package may import internal/tui (for the Stub),
 // internal/control (the server) and internal/rundir (Register); it may not
 // import internal/cli, internal/acp or internal/harness (.golangci.yml's
