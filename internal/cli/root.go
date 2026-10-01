@@ -70,6 +70,7 @@ func NewRootCmd() *cobra.Command {
 	cmd.AddCommand(newFrameCmd())
 	cmd.AddCommand(newBridgeCmd())
 	cmd.AddCommand(newAttachCmd())
+	cmd.AddCommand(newPsCmd())
 	cmd.AddCommand(newServeCmd())
 	cmd.AddCommand(newHubCmd())
 	cmd.AddCommand(newAuthCmd())

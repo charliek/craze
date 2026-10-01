@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://charliek.github.io/craze/reference/protocol/schema/sessions.subscribe.json",
   "title": "sessions.subscribe",
-  "description": "The hub's roster subscription (plan 032 §3.6). The reply is the roster at a cursor and the subscription's id, written before any of its roster notifications; each notification then carries the net change since the cursor the subscriber last had. One per connection: a second is bad_request, reason already_subscribed. It ends with a reset (slow_consumer, hub_closing) or with the connection. A host answers unsupported, reason roster_unsupported (connection capability rosterSubscribe: false).",
+  "description": "The hub's roster subscription (plan 032 §3.6). The reply is the roster at a cursor and the subscription's id, written before any of its roster notifications; each notification then carries the net change since the cursor the subscriber last had. One per connection: a second is bad_request, reason already_subscribed. It ends with a reset (slow_consumer; omitted, the roster's completeness changed, so subscribe again; hub_closing) or with the connection. A host answers unsupported, reason roster_unsupported (connection capability rosterSubscribe: false).",
   "$defs": {
     "params": {"$ref": "envelope.json#/$defs/empty"},
     "result": {

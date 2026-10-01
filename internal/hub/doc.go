@@ -21,6 +21,8 @@
 //     replacement, P17), and Command, the spawn seam.
 //   - dialer.go: Dialer, internal/remote's dial for a client that reaches
 //     its session through the hub, which brings a dead hub back.
+//   - list.go: the roster read once (craze ps) — List from a hub, and
+//     Direct, the same rows read from the hosts with no hub.
 //   - env.go: the environment contract (P13) for the hub and every host it
 //     spawns.
 //   - ready.go: the hub's ready line, both ends.

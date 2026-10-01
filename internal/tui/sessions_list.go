@@ -1005,37 +1005,34 @@ func sessRunningRow(r roster.Row, here sessKey) sessRow {
 	}
 	row.title = sessTitle(own, row.indexTitle)
 	row.here = !here.zero() && row.key == here
-	switch {
-	case r.Status == roster.Unreachable:
+	// The state is the roster's rule (roster.Row.State), which craze ps
+	// prints too: one rule for both.
+	row.since = r.Since()
+	switch r.State() {
+	case roster.StateUnreachable:
 		row.state, row.want = sessUnreachable, "not answering"
-		if s != nil {
-			row.since = s.Since
-		}
-	case s == nil || r.Status == roster.Connecting:
+	case roster.StateStarting:
 		row.state, row.connecting = sessWorking, true
 		row.want = "Connecting…"
 		if !h.Ready || h.CrazeSessionID == "" {
 			row.want = "Starting…"
 		}
-		row.since = h.StartedAt
 	default:
 		row.state, row.want = sessStateOf(s)
-		row.since = s.Since
 	}
 	return row
 }
 
 // sessStateOf is an answering session's state and what it wants (plan 030
-// §3.10's table), by the engine's own precedence (engine.RowStateOf, X64).
-// An older host's row has no row facts: its head ask's label, no error
-// text, no Doing, no last reply — each read as the table's fallback.
+// §3.10's table): its state is the roster's rule (roster.Session.State, the
+// engine's own precedence, X64). An older host's row has no row facts: its
+// head ask's label, no error text, no Doing, no last reply — each read as
+// the table's fallback.
 func sessStateOf(s *roster.Session) (sessState, string) {
-	in := engine.State{Activity: s.Activity, PendingAsks: s.PendingAsks, StartFailed: s.StartFailed, LastTurn: s.LastTurn}
-	in.ForeignTurn = s.ForeignTurn
-	switch engine.RowStateOf(in) {
-	case engine.RowNeedsYou:
+	switch s.State() {
+	case roster.StateNeedsYou:
 		return sessNeedsYou, sessAskText(s.HeadAsk)
-	case engine.RowFailed:
+	case roster.StateFailed:
 		msg := ""
 		switch {
 		case s.StartFailed:
@@ -1047,7 +1044,7 @@ func sessStateOf(s *roster.Session) (sessState, string) {
 			return sessFailed, "error"
 		}
 		return sessFailed, "error: " + msg
-	case engine.RowWorking:
+	case roster.StateWorking:
 		if d := sanitizeLine(s.Doing); d != "" {
 			return sessWorking, d
 		}

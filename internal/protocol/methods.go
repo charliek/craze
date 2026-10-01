@@ -54,7 +54,8 @@ const (
 	// NotifyReset ends the subscription, with its reason (ResetReason); the
 	// client re-attaches or, for session_closed and session_replaced, is
 	// done with this connection. The hub's roster subscription ends with one
-	// too: slow_consumer, or hub_closing.
+	// too: slow_consumer, omitted (the roster's completeness changed:
+	// subscribe again), or hub_closing.
 	NotifyReset = "reset"
 	// NotifyRoster is the hub's roster subscription's net change since the
 	// subscriber's last cursor: {subscription, epoch, cursor, upserts,

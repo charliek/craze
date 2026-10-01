@@ -20,6 +20,19 @@ func isTerminal(f *os.File) bool {
 	return err == nil
 }
 
+// terminalWidth is f's width in cells when f is a terminal that says one,
+// and false otherwise (craze ps's title column).
+func terminalWidth(f *os.File) (int, bool) {
+	if !isTerminal(f) {
+		return 0, false
+	}
+	ws, err := unix.IoctlGetWinsize(int(f.Fd()), unix.TIOCGWINSZ)
+	if err != nil || ws.Col == 0 {
+		return 0, false
+	}
+	return int(ws.Col), true
+}
+
 // echoOff is a terminal craze auth login has turned the echo off on (plan
 // 031 §3.7, X29; review r2): from before it draws the first prompt whose
 // answer may be a key — the provider menu's, or the key's own — until the

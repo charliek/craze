@@ -1049,6 +1049,16 @@ resends an in-flight command only when the reconnecting `hello` answered
 `resumed: true` for the exact client id, token and host it held before —
 see [Attach, resume, and snapshots](#attach-resume-and-snapshots).
 
+**A create across a hub restart.** `session.create` (the hub's, where its
+`hello` says `sessionCreate: true`) carries a `requestId`, which the hub
+stamps into the new host's registry entry, so that a hub that restarts still
+knows the session a create started. A client that sees the hub's epoch change
+(its `hello`'s `endpoint.hostId` is new) while a create of its own went
+unanswered **must not retry that create automatically unless it reuses its
+`requestId`**: under the same id the new hub answers with the session the
+first create started (or joins its start if it is still running), while a new
+id is a new create, and can start a second session.
+
 ### The reason table
 
 Every reason a host or the hub sends, grouped by its one code — a reason is

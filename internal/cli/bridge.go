@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -14,6 +15,8 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/charliek/craze/internal/hub"
+	"github.com/charliek/craze/internal/protocol"
 	"github.com/charliek/craze/internal/rundir"
 )
 
@@ -46,20 +49,46 @@ func bridgeErrorf(format string, args ...any) error {
 
 func newBridgeCmd() *cobra.Command {
 	var session string
+	var toHub bool
 	cmd := &cobra.Command{
 		Use:   "bridge",
 		Short: "Pump bytes between stdin/stdout and a running craze session's control socket",
 		Long: "craze bridge is a pure byte pump for an SSH client (plan 027 §3.10): it " +
 			"resolves the one running craze session (or --session's), dials its control " +
-			"socket, and relays stdin/stdout to it verbatim. It speaks no protocol itself.",
+			"socket, and relays stdin/stdout to it verbatim. With --hub it relays to this " +
+			"machine's hub instead, starting it if none runs. It speaks no protocol itself.",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			if toHub {
+				if cmd.Flags().Changed("session") {
+					return bridgeErrorf("--hub and --session cannot be used together: the hub's session.connect names the session")
+				}
+				return runBridgeHub(cmd)
+			}
 			return runBridge(cmd, session, cmd.Flags().Changed("session"))
 		},
 	}
 	cmd.Flags().StringVar(&session, "session", "",
 		"a craze session id, provider session id, or host id (default: the one running session)")
+	cmd.Flags().BoolVar(&toHub, "hub", false,
+		"relay to this machine's hub (started if none runs) instead of a session's host")
 	return cmd
+}
+
+// runBridgeHub is craze bridge --hub (plan 032 §3.12, P8): the hub of this
+// HOME's namespace, found or started (hub.Ensure, within hubBudget: no hub
+// is a bridge error), its socket dialled and peer-checked as a session's is,
+// and the same pump. The client says its own hello to the hub — and then
+// sessions.list, sessions.subscribe or session.connect — as it would on the
+// hub's socket itself; the bridge parses nothing.
+func runBridgeHub(cmd *cobra.Command) error {
+	ctx, cancel := context.WithTimeout(context.Background(), hubBudget)
+	sock, err := hub.Ensure(ctx, rundir.ProcessEnv(), protocol.ConnectionCapabilities{})
+	cancel()
+	if err != nil {
+		return bridgeErrorf("no hub: %v", err)
+	}
+	return dialRelay("the hub", sock, cmd.InOrStdin(), cmd.OutOrStdout(), rundir.DialCheck(os.Geteuid()))
 }
 
 // runBridge is craze bridge's whole job: resolve the target session, dial its
@@ -162,19 +191,25 @@ const dialTimeout = 10 * time.Second
 // names the session in an unreachable error: the socket gone is R10, a real
 // risk once logind or systemd-tmpfiles has cleared the runtime directory.
 func dialAndPump(id, socket string, stdin io.Reader, stdout io.Writer, peerCheck func(*net.UnixConn) error) error {
+	return dialRelay("session "+id, socket, stdin, stdout, peerCheck)
+}
+
+// dialRelay is dialAndPump for what — "session <id>", or "the hub" — which
+// names it in an unreachable error.
+func dialRelay(what, socket string, stdin io.Reader, stdout io.Writer, peerCheck func(*net.UnixConn) error) error {
 	dialer := net.Dialer{Timeout: dialTimeout}
 	c, err := dialer.Dial("unix", socket)
 	if err != nil {
-		return bridgeErrorf("session %s is unreachable: %v", id, err)
+		return bridgeErrorf("%s is unreachable: %v", what, err)
 	}
 	conn, ok := c.(*net.UnixConn)
 	if !ok {
 		_ = c.Close()
-		return bridgeErrorf("session %s is unreachable: dialed a %T, not a unix connection", id, c)
+		return bridgeErrorf("%s is unreachable: dialed a %T, not a unix connection", what, c)
 	}
 	if err := peerCheck(conn); err != nil {
 		_ = conn.Close()
-		return bridgeErrorf("session %s is unreachable: %v", id, err)
+		return bridgeErrorf("%s is unreachable: %v", what, err)
 	}
 	if err := pump(stdin, stdout, conn); err != nil {
 		return bridgeErrorf("%v", err)

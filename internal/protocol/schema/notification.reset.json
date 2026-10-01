@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://charliek.github.io/craze/reference/protocol/schema/notification.reset.json",
   "title": "reset",
-  "description": "The subscription is over; nothing was silently lost. slow_consumer: after readiness re-attach with the cursor, before it re-attach when: ready with none; a hub roster subscription's, subscribe again. omitted and replay_failed: re-attach with no cursor. session_replaced: the host closes the connection; reconnect, hello afresh (the token is void) and attach the new session. session_closed: the session is over, its final records delivered; the host closes the connection. hub_closing: the hub is shutting down and closes the connection (plan 032 §3.5); reconnect and subscribe again, the new hub's epoch reseeding the roster.",
+  "description": "The subscription is over; nothing was silently lost. slow_consumer: after readiness re-attach with the cursor, before it re-attach when: ready with none; a hub roster subscription's, subscribe again. omitted and replay_failed: re-attach with no cursor; a hub roster subscription's omitted: subscribe again, the roster's completeness changed (it crossed 512 rows). session_replaced: the host closes the connection; reconnect, hello afresh (the token is void) and attach the new session. session_closed: the session is over, its final records delivered; the host closes the connection. hub_closing: the hub is shutting down and closes the connection (plan 032 §3.5); reconnect and subscribe again, the new hub's epoch reseeding the roster.",
   "$defs": {
     "params": {
       "type": "object",
