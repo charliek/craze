@@ -44,7 +44,10 @@ type Options struct {
 	// check.
 	PeerCheck func(*net.UnixConn) error
 	// Dial opens the transport to path. nil dials a Unix socket. A test's
-	// seam: it may wrap the connection.
+	// seam: it may wrap the connection — and hub.Dialer's, which brings a dead
+	// hub back for a client that reaches its session through it (Connect).
+	// Its context's deadline is the end of what bounds the dial: the
+	// reconnect episode's, for a redial, and Dial's own context's otherwise.
 	Dial func(ctx context.Context, path string) (net.Conn, error)
 	// Redials and RedialWindow bound reconnection (plan 027 §3.14, X18 5): a
 	// reconnect episode — from the loss until a connection is adopted — makes
@@ -343,7 +346,17 @@ func (c *Client) open(ctx context.Context, end time.Time, resume *protocol.Resum
 	if dial == nil {
 		dial = dialUnix
 	}
-	nc, err := dial(ctx, c.path)
+	// The dial's context carries end as its deadline: a dial that does more
+	// than connect (hub.Dialer, which may start a hub) bounds it by what is
+	// left of the reconnect episode — the episode's own context ends then
+	// too, but says no deadline.
+	dctx := ctx
+	if !end.IsZero() {
+		var cancel context.CancelFunc
+		dctx, cancel = context.WithDeadline(ctx, end)
+		defer cancel()
+	}
+	nc, err := dial(dctx, c.path)
 	if err != nil {
 		return nil, none, err
 	}

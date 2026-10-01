@@ -12,11 +12,15 @@
 //     Lost, signals, idle exit, orphan sweep and bounded teardown.
 //   - server.go: its socket's connections — peer check, hello, refusals,
 //     the roster's two methods, and every write's bounds.
+//   - splice.go: session.connect — the exclusive handoff, the lookup, the
+//     dial — and the splice that copies between the client and the host.
 //   - roster.go: the roster — internal/roster's poll, run while someone
 //     wants it, its rows bounded and forwarded, sessions.list and
 //     sessions.subscribe, and each subscription's net-change notifications.
 //   - ensure.go: Ensure, a client's find-or-start (and the wedged hub's
 //     replacement, P17), and Command, the spawn seam.
+//   - dialer.go: Dialer, internal/remote's dial for a client that reaches
+//     its session through the hub, which brings a dead hub back.
 //   - env.go: the environment contract (P13) for the hub and every host it
 //     spawns.
 //   - ready.go: the hub's ready line, both ends.

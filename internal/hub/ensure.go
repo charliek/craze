@@ -593,7 +593,7 @@ func dialHello(ctx context.Context, socket string, wait time.Duration) (protocol
 	}
 	dctx, cancel := context.WithDeadline(ctx, deadline)
 	defer cancel()
-	nc, err := dialPastBacklog(dctx, socket)
+	nc, err := dialPastBacklog(dctx, helloDial, socket)
 	if err != nil {
 		return protocol.HubHelloResult{}, classify(ctx, err), ctx.Err()
 	}
@@ -643,13 +643,14 @@ func dialHello(ctx context.Context, socket string, wait time.Duration) (protocol
 	return res, helloOK, nil
 }
 
-// dialPastBacklog dials socket (helloDial), and again every backlogPause
-// while its listener's backlog is full — Linux's EAGAIN, at once: a hub not
-// accepting yet, busy or not scheduled, which is no strike against it (P17) —
-// until ctx ends: the connection, or the last dial's error.
-func dialPastBacklog(ctx context.Context, socket string) (net.Conn, error) {
+// dialPastBacklog dials socket with dial, and again every backlogPause while
+// its listener's backlog is full — Linux's EAGAIN, at once: a listener not
+// accepting yet, busy or not scheduled, which for a hub is no strike against
+// it (P17), and for a session's host no sign it is gone — until ctx ends: the
+// connection, or the last dial's error.
+func dialPastBacklog(ctx context.Context, dial func(context.Context, string) (net.Conn, error), socket string) (net.Conn, error) {
 	for {
-		nc, err := helloDial(ctx, socket)
+		nc, err := dial(ctx, socket)
 		if err == nil || !errors.Is(err, syscall.EAGAIN) {
 			return nc, err
 		}

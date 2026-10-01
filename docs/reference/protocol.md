@@ -1151,21 +1151,21 @@ needed no change to it. A connection to the hub starts in **hub mode**:
 then the roster — `sessions.list`, `sessions.subscribe` — or the splice.
 
 `session.connect{sessionId}` makes the hub dial that session's host and
-splice the two connections together: the hub answers `{}`, and from the next
-byte on, the client is talking **directly to the host** — starting with its
-own `hello`. So client ids, tokens and receipts, always the host's, are
-minted by the host the splice lands on, and a resumed connection resumes with
-that same host, never with the hub. Bytes the client sent after
-`session.connect` before the reply — a pipelined host `hello` — reach the
-host first, in order; a client that closes its writing half closes the host
-leg's the same way, so the host sees the client go.
+splice the two connections together: the hub answers `{}` — the last line it
+writes on the connection — and from the next byte on, the client is talking
+**directly to the host**, starting with its own `hello`. So client ids,
+tokens and receipts, always the host's, are minted by the host the splice
+lands on, and a resumed connection resumes with that same host, never with
+the hub. Bytes the client sent after `session.connect` before the reply — a
+pipelined host `hello` — reach the host first, in order.
 
 The splice takes the whole connection, so `session.connect` must be the
-**first** request after `hello`, with nothing else in flight and no roster
-subscription; otherwise it is refused `bad_request`, reason
-`connect_not_first`. `sessionId` is matched against every live host's craze
-session id, provider session id and host id, as `craze bridge --session`
-matches it:
+**first** request after `hello` — any line the hub has answered since
+`hello`, a refused one included, makes it not the first — with nothing else
+in flight and no roster subscription; otherwise it is refused `bad_request`,
+reason `connect_not_first`, and the connection stays in hub mode. `sessionId`
+is matched against every live host's craze session id, provider session id
+and host id, as `craze bridge --session` matches it:
 
 | the match | answer |
 |---|---|
@@ -1173,8 +1173,33 @@ matches it:
 | none | `unknown_session` |
 | more than one | `bad_request`, reason `ambiguous_session` — name the host by its host id |
 | one, which the hub cannot dial | `unavailable`, reason `host_unreachable` |
+| none known: the hub cannot read its registry | `unavailable`, reason `host_unreachable` |
 
-The host sees the hub as its peer; `hello`'s `via` stays absent.
+The hub's dial is a connect and a peer check (the host must run as the same
+user), within 500 ms. The hub says nothing to the host: the host sees the hub
+as its peer, and `hello`'s `via` stays as the client sent it, absent.
+
+Once spliced, each side's bytes reach the other as they were sent, through
+one 32 KiB buffer per direction: a client that stops reading stops the host's
+writes toward it, which the host's own write-stall bound (60 s) then ends;
+the hub's own writes give up on a peer that takes nothing for 60 s.
+Closing is carried through:
+
+- a client that closes its writing half (or its connection) closes the host
+  leg's **writing half** only: the host sees the client go — its attachment
+  stops counting toward the host's idle exit — and still answers what it
+  admitted, which reaches the client;
+- the host's end (its connection closed) closes the client's connection;
+- any other failure closes both.
+
+A spliced connection counts as one of the hub's clients, keeping it from its
+idle exit, until both legs are closed. A hub shutting down half-closes every
+splice — each side reads its end after everything already forwarded — and
+closes it once it has ended or half a second has passed. A hub that dies
+takes its splices with it and nothing else: the session lives on in its host.
+The client redials the hub — craze's own clients start one when none
+answers, and the new hub finds the session from the registry at once — and
+resumes with its token, from its cursor.
 
 A per-session host answers `session.connect` `unsupported`, reason
 `hub_only`: a client dialing a host directly is already where the splice
@@ -1217,7 +1242,7 @@ embedded copy — e.g. [`hello.json`](protocol/schema/hello.json),
 
 ## Fixtures and the fake host
 
-`internal/fakehost/testdata/wire/*.ndjson` is twenty scripted scenarios
+`internal/fakehost/testdata/wire/*.ndjson` is twenty-one scripted scenarios
 against a real `internal/control` server over a real engine (wrapping the
 TUI's own `Stub`, never a fixture-only re-implementation) — hello and a fresh
 attach; a cursor resume and its replay; a foreign-incarnation cursor; a
@@ -1233,8 +1258,11 @@ and `lastTurn` in `session.state` and a roster row, after a cancelled turn
 and a foreign one; a host with the row facts through a turn — a running
 tool, streaming text, an ask, the ending; a catalog whose remembered
 models carry their `recent` rank; and, against the hub in front of a host,
-the hub's `hello` and roster (19), and a roster subscription told of the
-host's change and then of its leaving the registry (20). Every line is
+the hub's `hello` and roster (19), a roster subscription told of the
+host's change and then of its leaving the registry (20), and a splice — a
+`session.connect` with the client's host `hello` pipelined behind it, an
+attach and an event through it, and on a second connection a connect to no
+session and one that is no longer the first (21). Every line is
 `{"conn": N, "dir": "c2s"|"s2c", "msg": {...}}`, plus `{"dir": "op", "op":
 {...}}` lines that are not wire messages at all — they script the host
 directly (emitting text, opening an ask, restarting the engine into a fresh
@@ -1242,7 +1270,7 @@ incarnation, stalling or dropping connections, running a stop's sequence) —
 and, as a fixture's first line or not at all, `{"dir": "host", "host":
 {...}}`, which says how the host was built: `stop`, `permissionMode`,
 `startedAt` and `rowFacts` turn on what an older host does not have, and
-`models` gives it a catalog of its own. The thirteen fixtures
+`models` gives it a catalog of its own. The seventeen fixtures
 without one are, byte for byte, an older host to a newer client. `TestWireFixtures` replays
 every one of them byte for byte, validating every line against the schema
 above as it sends or reads it — except a c2s line fixture 10 marks

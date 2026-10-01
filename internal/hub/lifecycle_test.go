@@ -23,8 +23,8 @@ import (
 // TestAHubServesItsHello (plan 032 §3.5, §3.6): a hub comes up through its
 // stages — ready ok naming its id, its namespace and its socket; a record
 // naming the same, its pid and this process's start token — answers hello
-// as a hub, refuses a host's methods host_only and every method before hello,
-// and on SIGTERM leaves no record and no socket and lets its lock go.
+// as a hub, refuses a host's methods host_only, every method before hello and
+// a session.connect that is not the first request, and on SIGTERM leaves no record and no socket and lets its lock go.
 func TestAHubServesItsHello(t *testing.T) {
 	env := testEnv(t)
 	rn := runIn(t, env, quiet())
@@ -69,10 +69,14 @@ func TestAHubServesItsHello(t *testing.T) {
 		string(resp.Result) != `{"epoch":"`+line.HubID+`","cursor":0,"sessions":[]}` {
 		t.Fatalf("sessions.list over an empty registry: %+v (%s)", resp, resp.Result)
 	}
-	for _, m := range []string{protocol.MethodSessionConnect, protocol.MethodSessionCreate} {
-		if resp := c.call(t, m, nil); resp.Error == nil || resp.Error.Data.Code != protocol.CodeUnsupported {
-			t.Fatalf("%s before its commit: %+v, want unsupported", m, resp)
-		}
+	// session.connect is served (splice_test.go), as a connection's first
+	// request after hello: here it is not.
+	if resp := c.call(t, protocol.MethodSessionConnect, map[string]any{"sessionId": "s"}); resp.Error == nil ||
+		resp.Error.Data.Reason != protocol.ReasonConnectNotFirst {
+		t.Fatalf("session.connect after other requests: %+v, want connect_not_first", resp)
+	}
+	if resp := c.call(t, protocol.MethodSessionCreate, nil); resp.Error == nil || resp.Error.Data.Code != protocol.CodeUnsupported {
+		t.Fatalf("session.create before its commit: %+v, want unsupported", resp)
 	}
 
 	rn.sigs <- syscall.SIGTERM

@@ -397,6 +397,29 @@ func TestAClientWorksThroughASplice(t *testing.T) {
 	}
 }
 
+// TestARedialsDialCarriesTheEpisodesEnd (plan 032 §3.8): a redial's Dial is
+// handed the reconnect episode's end as its context's deadline — what
+// hub.Dialer bounds a hub's respawn by, the episode's own context saying no
+// deadline — and the first dial its caller's. The negative control is the
+// first dial: its deadline is the caller's context's, not a window's.
+func TestARedialsDialCarriesTheEpisodesEnd(t *testing.T) {
+	const window = 7 * time.Second
+	h := newHost(t)
+	tp := newTap(t)
+	before := time.Now()
+	dialClient(t, h.path, tp, remote.Options{RedialWindow: window})
+	if first := tp.dialDeadline(0); first.Before(before.Add(watchdog)) || first.After(time.Now().Add(watchdog)) {
+		t.Fatalf("the first dial's deadline is %v, want its caller's (%v from the dial)", first, watchdog)
+	}
+	lost := time.Now()
+	tp.kill()
+	tp.await(t, "the redial", func() bool { return tp.dialCount() >= 2 })
+	dl := tp.dialDeadline(1)
+	if dl.IsZero() || dl.Before(lost.Add(window)) || dl.After(time.Now().Add(window)) {
+		t.Fatalf("the redial's deadline is %v, want the episode's end: %v after the loss (%v)", dl, window, lost)
+	}
+}
+
 // TestRedialsAreBoundedThenDisconnected (§3.14): a lost connection whose
 // redials all fail is redialled Options.Redials times within the window and
 // no more; then a command still waiting — here a Set parked in the session

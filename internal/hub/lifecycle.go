@@ -73,10 +73,11 @@ import (
 // every new connection and every request; the lifecycle lock is the
 // barrier; no answer waits for the poll any more), wait for the work in
 // flight, close the listener, end every roster subscription with
-// reset{hub_closing} (resetWait), close every connection, stop the roster's
-// poll and the sweep, unlink the socket and remove the record — each only
-// while it is still the file the hub made — and release the lock last (an
-// explicit LOCK_UN, then close: rundir.HubLock.Release).
+// reset{hub_closing} (resetWait), close every connection — a splice's legs
+// half-closed first, then closed once it has ended or spliceDrain has passed —
+// stop the roster's poll and the sweep, unlink the socket and remove the
+// record — each only while it is still the file the hub made — and release the
+// lock last (an explicit LOCK_UN, then close: rundir.HubLock.Release).
 
 // DefaultIdleGrace is how long a hub with no client and no live host waits
 // before it exits (P12): 60 s.
@@ -202,6 +203,14 @@ type hooks struct {
 	// subscribed runs between a subscription's registration and its reply's
 	// write.
 	subscribed func()
+
+	// session.connect's (splice.go): connectDial replaces its dial, and
+	// connectCheck its peer check (rundir.DialCheck); handedOff is told each
+	// splice as it is handed the connection — its buffered bytes taken,
+	// before it runs — and may change them.
+	connectDial  func(ctx context.Context, path string) (net.Conn, error)
+	connectCheck func(*net.UnixConn) error
+	handedOff    func(*splice)
 }
 
 // LogPath is the hub's log for env's namespace:
@@ -654,8 +663,8 @@ func (h *hub) teardown(cause string) {
 	_ = h.ln.Close()
 	<-h.srv.acceptDone
 	h.rs.closeSubscriptions(deadline)
-	// C12: each splice closes here (half-close, then close).
-	h.srv.closeAll()
+	// Every connection closed; each splice half-closed first, then closed.
+	h.srv.closeAll(deadline)
 	if !waitUntil(&h.srv.conns, deadline) {
 		h.logf("connections did not close within %v", teardownBound)
 	}

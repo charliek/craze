@@ -26,10 +26,11 @@ import (
 // What the hub serves, method by method: hello (HubHelloResult, the hub's
 // capabilities); sessions.list and sessions.subscribe, the roster (roster.go;
 // one subscription per connection, whose notifications its own flusher
-// writes); every session-scoped method but session.connect is a host's,
-// refused unsupported, reason host_only — the hub routes by splicing, never
-// method by method (SQ14). session.connect (C12) and session.create (C15) are
-// refused unsupported until the commit that serves each.
+// writes); session.connect, which hands the whole connection to a session's
+// host (splice.go); every other session-scoped method is a host's, refused
+// unsupported, reason host_only — the hub routes by splicing, never method by
+// method (SQ14). session.create (C15) is refused unsupported until the commit
+// that serves it.
 //
 // Writes: one line at a time (wmu), each bounded — a reply by writeWait, a
 // roster notification by slowWait (conn.notify) — and every deadline capped
@@ -94,12 +95,41 @@ func (s *server) accept() {
 	}
 }
 
-// closeAll closes every connection still open: teardown's last word to its
-// clients. Each one's goroutine then ends.
-func (s *server) closeAll() {
+// closeAll ends every connection still open: teardown's last word to its
+// clients (§3.5). A splice is half-closed first — both legs' writing halves,
+// so each peer reads everything already forwarded and then its end: the host
+// sees its client go, as when the client half-closes, and the client sees the
+// hub go — and closed once it has ended on its own or spliceDrain has passed,
+// whichever is first (never past deadline, the teardown's). Every other
+// connection is closed at once. Each one's goroutine then ends.
+func (s *server) closeAll(deadline time.Time) {
+	var splices []*conn
 	for _, c := range s.h.life.openConns() {
+		if c.halfClose() {
+			splices = append(splices, c)
+			continue
+		}
 		c.close()
 	}
+	if len(splices) == 0 {
+		return
+	}
+	until := time.Now().Add(spliceDrain)
+	if deadline.Before(until) {
+		until = deadline
+	}
+	for _, c := range splices {
+		t := time.NewTimer(time.Until(until))
+		select {
+		case <-c.splice().done:
+		case <-t.C:
+		}
+		t.Stop()
+	}
+	for _, c := range splices {
+		c.close()
+	}
+	s.h.logf("closed %d splice(s)", len(splices))
 }
 
 // conn is one accepted connection.
@@ -126,10 +156,28 @@ type conn struct {
 	// subs is every roster subscription the connection made, the last its
 	// current one: the connection's own goroutine's.
 	subs []*subscription
+	// answered counts the lines answered since hello was — whatever they
+	// were — so session.connect knows it is the first (§3.7): the
+	// connection's own goroutine's.
+	answered int
+	// handoff is the splice session.connect handed the connection to, which
+	// serve runs once the reading has stopped: the connection's own
+	// goroutine's.
+	handoff *splice
+
+	// smu orders the teardown's close against a splice's start: shut once
+	// the connection has been closed or half-closed, sp the splice it is
+	// handed to (set before session.connect's {} is written).
+	smu  sync.Mutex
+	shut bool
+	sp   *splice
 }
 
 // serve reads and answers the connection's lines until it closes, the hello
-// deadline passes, or an answer ends it.
+// deadline passes, or an answer ends it — and then, for a connection
+// session.connect handed to a host, runs the splice until both its legs are
+// closed: until then the connection is a client (lifecycle.dropConn runs
+// last).
 func (c *conn) serve() {
 	defer c.s.conns.Done()
 	defer c.s.h.life.dropConn(c)
@@ -137,11 +185,22 @@ func (c *conn) serve() {
 	// subscription ended (unless it has) and its flusher joined.
 	defer c.endSubs()
 	defer c.close()
+	c.read()
+	if sp := c.handoff; sp != nil {
+		sp.run()
+		c.s.h.logf("the splice to host %s (session %s) ended: %d bytes to the host, %d to the client",
+			sp.hostID, sp.sessionID, sp.up.written.Load(), sp.down.written.Load())
+	}
+}
+
+// read is serve's reading: one line at a time, each answered before the next
+// is read, until the connection ends or an answer says to stop.
+func (c *conn) read() {
 	_ = c.uc.SetReadDeadline(time.Now().Add(helloWait))
 	for {
 		line, err := c.lr.ReadLine()
 		if errors.Is(err, protocol.ErrLineTooLong) {
-			if !c.answer(func() bool {
+			if !c.counted(func() bool {
 				c.replyErr(nil, &protocol.Error{Code: protocol.RPCInvalidRequest, Message: "line too long",
 					Data: protocol.ErrorData{Code: protocol.CodeBadRequest, Reason: protocol.ReasonLineTooLong}})
 				return true
@@ -156,10 +215,21 @@ func (c *conn) serve() {
 		if len(bytes.TrimSpace(line)) == 0 {
 			continue
 		}
-		if !c.answer(func() bool { return c.dispatch(line) }) {
+		if !c.counted(func() bool { return c.dispatch(line) }) {
 			return
 		}
 	}
+}
+
+// counted is answer, counting the line as answered after hello when hello was
+// answered before it.
+func (c *conn) counted(fn func() bool) bool {
+	after := c.client
+	ok := c.answer(fn)
+	if after {
+		c.answered++
+	}
+	return ok
 }
 
 // answer runs fn — one line's answer — as in-flight work the teardown waits
@@ -173,9 +243,53 @@ func (c *conn) answer(fn func() bool) bool {
 	return fn()
 }
 
-// close closes the connection, once.
+// close closes the connection, once — and, once it is handed to a splice, the
+// splice's host leg with it.
 func (c *conn) close() {
+	c.smu.Lock()
+	c.shut = true
+	sp := c.sp
+	c.smu.Unlock()
+	if sp != nil {
+		sp.close()
+	}
 	c.once.Do(func() { _ = c.uc.Close() })
+}
+
+// halfClose is the teardown's first word to a splice (server.closeAll): both
+// legs' writing halves closed, and true. A connection that is not a splice is
+// left to close, and false; either way nothing can be handed to a splice
+// after it.
+func (c *conn) halfClose() bool {
+	c.smu.Lock()
+	c.shut = true
+	sp := c.sp
+	c.smu.Unlock()
+	if sp == nil {
+		return false
+	}
+	sp.halfClose()
+	return true
+}
+
+// handTo makes sp the connection's splice: false, sp untouched, once the
+// teardown has closed the connection.
+func (c *conn) handTo(sp *splice) bool {
+	c.smu.Lock()
+	defer c.smu.Unlock()
+	if c.shut {
+		return false
+	}
+	c.sp = sp
+	return true
+}
+
+// splice is the connection's splice, nil before session.connect has handed it
+// to one.
+func (c *conn) splice() *splice {
+	c.smu.Lock()
+	defer c.smu.Unlock()
+	return c.sp
 }
 
 // dispatch answers one request line: false ends the connection.
@@ -199,8 +313,10 @@ func (c *conn) dispatch(line []byte) bool {
 		return c.list(req)
 	case req.method == protocol.MethodSessionsSubscribe:
 		return c.subscribe(req)
-	case req.method == protocol.MethodSessionConnect, req.method == protocol.MethodSessionCreate:
-		// Served by the commits that build them (plan 032 C12, C15).
+	case req.method == protocol.MethodSessionConnect:
+		return c.connect(req)
+	case req.method == protocol.MethodSessionCreate:
+		// Served by the commit that builds it (plan 032 C15).
 		return c.replyErr(req.id, refused(protocol.CodeUnsupported, protocol.ReasonUnsupported,
 			"%s is not served by this hub yet", req.method))
 	case info.SessionScoped:

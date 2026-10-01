@@ -396,6 +396,13 @@ func (h *Host) HostID() string { return h.srv.HostID() }
 // poller that keeps one per host, and closes them all when it stops.
 func (h *Host) OpenConns() int { return h.srv.OpenConns() }
 
+// OnAttachments is the server's (control.Server.OnAttachments): f is told the
+// number of attached clients at every change, in order — a client's
+// half-close takes its attachment out of the count — under the server's
+// locks, so it must only record the number. What a test of a splice in front
+// of this Host watches (plan 032 A11).
+func (h *Host) OnAttachments(f func(n int)) { h.srv.OnAttachments(f) }
+
 // SessionID is the durable craze session id every incarnation shares.
 func (h *Host) SessionID() string { return h.opts.CrazeSessionID }
 

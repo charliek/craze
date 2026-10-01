@@ -496,3 +496,20 @@ and "The hub splice", the schema checked against the Go types as ever.
   (`Host.Register`), so several fake hosts are listed side by side for a hub
   to find. The hub's own fixtures (19 and 20) arrive with the roster's
   server, plan 032 C11.
+- **The splice** (plan 032 C12): `session.connect` is served as this sketch
+  has it, its handoff exclusive — the connection's first request after
+  `hello` (any line answered since, refused or not, makes it not the first),
+  no subscription — and its lookup `craze bridge`'s (craze session id,
+  provider session id, host id; none `unknown_session`, several
+  `ambiguous_session`). The hub dials the host (connect + peer check, 500 ms;
+  else `host_unreachable`), writes `{}` as its last line, and splices: the
+  bytes it read past `session.connect` first, then one 32 KiB buffer per
+  direction; the client's EOF is the host leg's `CloseWrite` (the host's idle
+  count drops; its answers still arrive), the host's EOF closes the client,
+  anything else closes both, and a spliced connection is a client of the
+  hub's until both legs close. The teardown half-closes splices, then closes
+  them. A dead hub costs a session nothing: craze's `hub.Dialer`
+  (`remote.Options.Dial`) restarts it inside the client's reconnect window —
+  on a refused or absent socket, or EOF before the hub's first reply, bounded
+  by the reconnect episode's end, which `remote` now hands its dial as the
+  context's deadline — and the client resumes with its host. Fixture 21.
