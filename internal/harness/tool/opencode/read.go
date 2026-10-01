@@ -16,6 +16,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/charliek/craze/internal/harness/tool"
+	"github.com/charliek/craze/internal/harness/tool/attach"
 )
 
 // read's limits, opencode's (read.ts:13-18).
@@ -145,7 +146,7 @@ func (c *readCall) run(ctx context.Context, env tool.Env) (tool.Result, error) {
 		// it forever (plan 019 §3.9).
 		return tool.Result{}, fail(tool.ClassToolError, "Path is not a regular file or a directory: "+c.abs)
 	}
-	return c.file(ctx, f, info.Size())
+	return c.file(ctx, env, f, info.Size())
 }
 
 // miss is opencode's answer for a path that does not exist: up to three
@@ -257,10 +258,10 @@ func entryName(dir string, e fs.DirEntry) string {
 }
 
 // file is read's file mode (read.ts:300-377) for a regular file of
-// fileSize bytes: images, PDFs and binary files are refused, and the rest is
-// shown as numbered lines from offset, at most limit of them and
-// maxReadBytes of text, each cut to maxLineLength.
-func (c *readCall) file(ctx context.Context, f *os.File, fileSize int64) (tool.Result, error) {
+// fileSize bytes: an image is returned as one (image), PDFs and binary files
+// are refused, and the rest is shown as numbered lines from offset, at most
+// limit of them and maxReadBytes of text, each cut to maxLineLength.
+func (c *readCall) file(ctx context.Context, env tool.Env, f *os.File, fileSize int64) (tool.Result, error) {
 	sample := make([]byte, min(fileSize, sampleBytes))
 	n, err := f.ReadAt(sample, 0)
 	if err != nil && err != io.EOF {
@@ -269,8 +270,7 @@ func (c *readCall) file(ctx context.Context, f *os.File, fileSize int64) (tool.R
 	sample = sample[:n]
 	switch media(c.abs, sample) {
 	case mediaImage:
-		// opencode attaches images; craze cannot yet (plan 019 §3.2).
-		return tool.Result{}, fail(tool.ClassToolError, "Cannot read image file yet: "+c.abs)
+		return c.image(ctx, env, f, fileSize)
 	case mediaPDF:
 		// Nor PDFs, which opencode attaches too and has no refusal for.
 		return tool.Result{}, fail(tool.ClassToolError, "Cannot read binary file: "+c.abs)
@@ -348,6 +348,78 @@ func (c *readCall) file(ctx context.Context, f *os.File, fileSize int64) (tool.R
 		res.Trunc = tool.Truncation{KeptBytes: kept, TotalBytes: int(fileSize), KeptLines: len(raw), TotalLines: count}
 	}
 	return res, nil
+}
+
+// imageLane lets one image at a time through attach.Process, across every read
+// call in the process — a step's parallel reads, and its sub-agents' — as the
+// TUI lets one paste at a time through it (plan 033 X45): a large source costs
+// some hundreds of megabytes while it is decoded and scaled (attach.Process),
+// and five at once, Fantasy's parallel limit, would cost five times that. A
+// call waiting for the lane still stops at a cancel.
+var imageLane = make(chan struct{}, 1)
+
+// image is read's image mode (plan 033 §3.5, owner decision 8), for a file
+// media sniffed as an image (png, jpeg, gif or webp, by its bytes or else its
+// name), of fileSize bytes, open as f; the checks every read makes — the
+// key file, a directory, not a regular file — have been made by then.
+//
+// To a model that accepts images (Env.Vision) it returns the image itself
+// (Result.Media) beside one line of text naming the file, its size and type,
+// and how it was scaled if it was: the file goes through attach.Process, the
+// one path a pasted image goes through too (P30), in memory — nothing is
+// stored — so a tool's image is held to a paste's limits and is what a paste
+// of the same file would send: at most 2000 px on the long edge and 3.75 MiB,
+// stripped of EXIF, upright, a GIF's first frame as PNG. A file Process
+// refuses — too large, too many pixels, too small, not an image after all —
+// is refused with its reason, as a PDF is.
+//
+// To a model that does not accept images it says so, naming the model, and
+// reads nothing: "Cannot read image file: <model> does not accept images".
+// The model can still say where the file is; what it cannot do is see it.
+func (c *readCall) image(ctx context.Context, env tool.Env, f *os.File, fileSize int64) (tool.Result, error) {
+	if !env.Vision {
+		return tool.Result{}, fail(tool.ClassToolError, "Cannot read image file: "+env.ModelLabel()+" does not accept images")
+	}
+	if fileSize > attach.MaxSourceBytes {
+		return tool.Result{}, c.imageRefused(attach.ErrSourceTooLarge)
+	}
+	select {
+	case imageLane <- struct{}{}:
+	case <-ctx.Done():
+		return tool.Result{}, ctx.Err()
+	}
+	defer func() { <-imageLane }()
+	// One byte past the cap, so a file that grew since its stat is refused
+	// by Process's own size check rather than read without end.
+	src, err := io.ReadAll(io.NewSectionReader(f, 0, attach.MaxSourceBytes+1))
+	if err != nil {
+		return tool.Result{}, err
+	}
+	if err := ctx.Err(); err != nil {
+		return tool.Result{}, err
+	}
+	img, err := attach.Process(src)
+	if err != nil {
+		return tool.Result{}, c.imageRefused(err)
+	}
+	text := fmt.Sprintf("Read image file: %s (%d×%d %s)", c.abs, img.Width, img.Height, img.MIME)
+	if img.Downscaled() {
+		text = fmt.Sprintf("Read image file: %s (%d×%d %s, downscaled from %d×%d)",
+			c.abs, img.Width, img.Height, img.MIME, img.OrigWidth, img.OrigHeight)
+	}
+	return tool.Result{Text: text, Content: text, Media: &tool.Media{Data: img.Data, MIME: img.MIME}}, nil
+}
+
+// imageRefused is the refusal for an image attach.Process would not take, in
+// its own words ("smaller than 8×8 pixels"; attach.Reason): "Cannot read image
+// file: <path>: <reason>", as "Cannot read binary file: <path>" names a file
+// it refuses.
+func (c *readCall) imageRefused(err error) error {
+	reason := attach.Reason(err)
+	if reason == "" {
+		reason = "it could not be processed"
+	}
+	return fail(tool.ClassToolError, "Cannot read image file: "+c.abs+": "+reason)
 }
 
 type mediaKind int

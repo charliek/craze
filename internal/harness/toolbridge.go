@@ -646,12 +646,24 @@ func outputOf(r fantasy.ToolResponse) fantasy.ToolResultOutputContent {
 // all, which the store refuses (it would panic a replay). Metadata carries
 // the harness id, into the transcript's result part, where it joins the
 // result to the call's events; no provider sends it.
+//
+// A result with an image (tool.Result.Media, plan 033 §3.5) is an image
+// response — Fantasy's NewImageResponse, its text beside it — which Fantasy
+// records as a media output (agent.go:865-870), base64, type and text, and
+// which the harness's own results keep too (outputOf). An error never
+// carries one (the dispatcher drops it), and the check here keeps it so.
 func toResponse(res tool.Result, id string) fantasy.ToolResponse {
 	text := res.Text
 	if res.IsError && strings.TrimSpace(text) == "" {
 		text = "The tool call failed and said nothing more."
 	}
-	return fantasy.ToolResponse{Type: "text", Content: text, IsError: res.IsError, StopTurn: res.StopTurn, Metadata: metadata(id)}
+	r := fantasy.NewTextResponse(text)
+	if res.Media != nil && !res.IsError {
+		r = fantasy.NewImageResponse(res.Media.Data, res.Media.MIME)
+		r.Content = text
+	}
+	r.IsError, r.StopTurn, r.Metadata = res.IsError, res.StopTurn, metadata(id)
+	return r
 }
 
 // metadata is a result's client metadata: {"id":"<harness id>"}, or "" for

@@ -570,6 +570,15 @@ func (s *Session) begin(ctx context.Context, wake bool) (model, []func(*store.St
 		return model{}, nil, nil, 0, err
 	}
 	m := s.cur
+	// The turn's tools are told whether its model accepts images, and its
+	// name (tool.Env.Vision, plan 033 §3.5) — here, with no call running, as
+	// the redactor is adopted: so every call of the turn sees the one model
+	// it runs on, a /model switch during it is taken up by the next turn's
+	// calls, and a sub-agent, whose turns begin here on its own session,
+	// tells its calls of its own model, never its parent's. Read returns an
+	// image only when the model accepts one, and nothing strips one from the
+	// turn's own steps (stripImages).
+	s.tools.d.SetVision(m.r.Vision, m.r.Name)
 	// A switch and a switch back before this turn leave nothing to record;
 	// several switches record only the last. A change held for a turn that
 	// then produced nothing stays held in the store, and a later change of

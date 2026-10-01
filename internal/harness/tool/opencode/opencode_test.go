@@ -396,7 +396,7 @@ func TestDescriptions(t *testing.T) {
 	edits := []struct {
 		file, gone, kept, added string
 	}{
-		{"read", "This tool can read image files and PDFs", "Avoid tiny repeated slices", "- This tool cannot read image files or PDFs yet.\n"},
+		{"read", "This tool can read image files and PDFs", "Avoid tiny repeated slices", "- This tool can read image files and return them as file attachments to models that accept images. It cannot read PDFs.\n"},
 		{"write", "This tool will fail if you did not read the file first.", "you MUST use the Read tool first to read the file's contents.\n", ""},
 		{"edit", "This tool will error if you attempt an edit without reading the file.", "at least once in the conversation before editing.\n", ""},
 		{"grep", "use the Task tool instead", "Do NOT use `grep`.\n", ""},

@@ -58,6 +58,9 @@ type Dispatcher struct {
 	red atomic.Pointer[redact.Replacer]
 	// planPath is Env.PlanPath, set once the session knows it (SetPlanPath).
 	planPath atomic.Pointer[string]
+	// vision is Env.Vision and Env.ModelName, set as each turn begins
+	// (SetVision); nil, before the first, is no vision and no name.
+	vision atomic.Pointer[turnModel]
 
 	// interval is the progress throttle's; tests replace it.
 	interval time.Duration
@@ -129,17 +132,46 @@ func (d *Dispatcher) SetRedactor(r *redact.Replacer) { d.red.Store(r) }
 // dispatcher is built.
 func (d *Dispatcher) SetPlanPath(path string) { d.planPath.Store(&path) }
 
+// turnModel is what a turn's calls are told of the model it runs on
+// (Env.Vision, Env.ModelName).
+type turnModel struct {
+	vision bool
+	name   string
+}
+
+// SetVision tells every call prepared or run from now on whether the model
+// it runs for accepts images, and that model's name (Env.Vision,
+// Env.ModelName; plan 033 §3.5). The session calls it as each turn begins,
+// from the model that turn runs on — no call of the session's is running
+// then — so a turn's calls all see one model, and a /model switch is taken
+// up by the next turn's. It is safe to call while calls run, as SetRedactor
+// is, though the session never does.
+func (d *Dispatcher) SetVision(vision bool, model string) {
+	d.vision.Store(&turnModel{vision: vision, name: model})
+}
+
+// model is the model SetVision last named: zero before it ever has.
+func (d *Dispatcher) model() turnModel {
+	if m := d.vision.Load(); m != nil {
+		return *m
+	}
+	return turnModel{}
+}
+
 // redactor is the current one.
 func (d *Dispatcher) redactor() *redact.Replacer { return d.red.Load() }
 
 // callEnv is the Env one call gets: the session's, with this call's
-// progress and the redactor of the moment.
+// progress and the redactor, the plan file and the turn's model of the
+// moment.
 func (d *Dispatcher) callEnv(progress Progress) Env {
 	env := d.env
 	env.Progress, env.Redactor = progress, d.redactor()
 	if p := d.planPath.Load(); p != nil {
 		env.PlanPath = *p
 	}
+	m := d.model()
+	env.Vision, env.ModelName = m.vision, m.name
 	return env
 }
 
@@ -254,8 +286,9 @@ func (d *Dispatcher) Pending() int {
 // The result is, in order: the held error result for a call that will not
 // run; aborted, when ctx is already done; denied, when the gate refuses,
 // fails, or asks (there is no one to ask); otherwise the tool's result, with
-// a panic as tool_error. Every outward field is then redacted, and a
-// successful result's text truncated per its Spec.
+// a panic as tool_error. An image it carries is kept only where one may go
+// (mediaOf), every outward field is then redacted, and a successful result's
+// text truncated per its Spec.
 func (d *Dispatcher) Run(ctx context.Context, id string, progress Progress) Result {
 	d.mu.Lock()
 	e := d.pending[id]
@@ -276,6 +309,7 @@ func (d *Dispatcher) Run(ctx context.Context, id string, progress Progress) Resu
 	if res.IsError && res.Class == "" {
 		res.Class = ClassToolError
 	}
+	res = d.mediaOf(res)
 	res = d.redactResult(res)
 	if !res.IsError && e.spec.Truncate != None {
 		res.Text, res.Trunc = truncate(d.env.Home, id, res.Text, e.spec.Truncate, limits{MaxLines, MaxBytes}, d.redactor())
@@ -346,6 +380,36 @@ func (d *Dispatcher) run(ctx context.Context, e *entry, env Env) (res Result) {
 
 func errorResult(class ErrorClass, text string) Result {
 	return Result{Text: text, IsError: true, Class: class}
+}
+
+// mediaOf is r with an image only where one may go (Result.Media; plan 033
+// §3.5): a successful result on a turn whose model accepts images keeps its
+// image; an error never carries one (it is text, as Fantasy records it);
+// and a result on a turn whose model does not accept images loses it, its
+// text then ending with the line the harness's vision strip gives an image
+// a tool returned ([Image omitted: <model> does not accept images]), so the
+// model is told rather than left with an answer that silently lacks it. A
+// tool that honours Env.Vision, as read does, never reaches that last case;
+// this holds the line for one that does not, since nothing after the
+// dispatcher strips an image from the turn's own steps.
+func (d *Dispatcher) mediaOf(r Result) Result {
+	if r.Media == nil {
+		return r
+	}
+	m := d.model()
+	switch {
+	case r.IsError:
+		r.Media = nil
+	case !m.vision:
+		r.Media = nil
+		note := "[Image omitted: " + (Env{ModelName: m.name}).ModelLabel() + " does not accept images]"
+		if r.Text == "" {
+			r.Text = note
+		} else {
+			r.Text += "\n" + note
+		}
+	}
+	return r
 }
 
 // redactRequest returns a copy of r with every text field redacted, and
