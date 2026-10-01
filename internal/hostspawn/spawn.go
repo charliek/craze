@@ -108,6 +108,11 @@ type Spec struct {
 	// the workspace) exactly as the spawner would, from the same environment
 	// and config.
 	Workspace, Provider, Model, AgentBin string
+	// Effort is --effort and Fast --fast (true) or --no-fast (false), each
+	// passed only when set (plan 032 §3.11, P6): nil leaves the provider's
+	// own default.
+	Effort string
+	Fast   *bool
 	// PluginDirs is --plugin-dir, once each.
 	PluginDirs []string
 	// NoForce is --no-force: the session handles permission requests
@@ -137,6 +142,14 @@ func Args(s Spec) []string {
 	str("workspace", s.Workspace)
 	str("provider", s.Provider)
 	str("model", s.Model)
+	str("effort", s.Effort)
+	if s.Fast != nil {
+		if *s.Fast {
+			argv = append(argv, "--fast")
+		} else {
+			argv = append(argv, "--no-fast")
+		}
+	}
 	str("agent-bin", s.AgentBin)
 	for _, d := range s.PluginDirs {
 		argv = append(argv, "--plugin-dir="+d)
@@ -176,12 +189,22 @@ type Child struct {
 }
 
 // Start starts `craze serve argv…` detached (the package's doc comment, step
-// 2) and answers it with the read end of its ready pipe. groups and log are
-// the host's record of its agents and its log.
-func Start(argv []string, groups, log string) (*Child, *os.File, error) {
+// 2) and answers it with the read end of its ready pipe. unset names
+// variables left out of the host's environment — CRAZE_AGENT_BIN for a host
+// whose provider is not its launch's (plan 032 §3.11, P7) — which is
+// otherwise this process's own (or Command's). groups and log are the host's
+// record of its agents and its log.
+func Start(argv, unset []string, groups, log string) (*Child, *os.File, error) {
 	cmd, err := Command(argv)
 	if err != nil {
 		return nil, nil, err
+	}
+	if len(unset) > 0 {
+		env := cmd.Env
+		if env == nil {
+			env = os.Environ()
+		}
+		cmd.Env = withoutEnv(env, unset...)
 	}
 	return StartCmd(cmd, HostChildEnv, groups, log)
 }

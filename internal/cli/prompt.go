@@ -192,8 +192,7 @@ func (o *promptOpts) run() (retErr error) {
 	if o.force {
 		approval.Permission = agent.ApprovalAllow
 	}
-	sess := agent.New(agent.Options{
-		Binary:     o.agentBin,
+	opts := agent.Options{
 		Workspace:  ws,
 		Force:      o.force,
 		Approval:   approval,
@@ -206,7 +205,12 @@ func (o *promptOpts) run() (retErr error) {
 		// Headless craze has one stream for its own notes, stderr, as it
 		// does for discoverPlugins' (Options.Diag falls back to it).
 		JournalDir: journalDir(o.stderr),
-	})
+	}
+	// Its one session is its launch's own (plan 032 §3.11, P7): --agent-bin,
+	// else CRAZE_AGENT_BIN — read by the agent's own lookup, as it always
+	// was — else `[agents].<provider>`, else the provider's PATH candidates.
+	agentBinary(prov, prov, o.agentBin, o.stderr).apply(&opts)
+	sess := agent.New(opts)
 	// The engine is this run's one driver: admission, craze's own message queue,
 	// the turn a row leaves the queue to become, and the endings the wire never
 	// produced (plan 021 §3.4). The chain policy is `craze prompt`'s own, where

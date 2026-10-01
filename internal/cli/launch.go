@@ -149,7 +149,7 @@ func runLaunch(cmd *cobra.Command, f *tuiFlags, env hostEnv, diag *deferredStder
 		Yolo:      f.force,
 		NoMouse:   f.noMouse,
 		Provider:  resolved.Provider,
-		Providers: pickerProviders(f.agentBin),
+		Providers: pickerProviders(resolved.Provider, f.agentBin),
 		// No picker when the provider is known; the picker's choice is
 		// spawned otherwise. The host persists the provider it starts
 		// (serve's persistProvider), so the TUI does not: PersistProvider
@@ -205,6 +205,8 @@ type launcher struct {
 	mu       sync.Mutex
 	closed   bool
 	inflight sync.WaitGroup
+	// own is the launch's own provider (launchProvider), under mu.
+	own      agent.Provider
 	launched []*launchedBackend
 	// spawned is every host the session list's Spawn started, by host id,
 	// for the launcher's life: whose each is to stop is decided per host
@@ -216,7 +218,38 @@ type launcher struct {
 func newLauncher(cmd *cobra.Command, f *tuiFlags, resolved resolvedProvider, diag io.Writer) *launcher {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &launcher{cmd: cmd, env: rundir.ProcessEnv(), flags: *f, resolved: resolved, diag: diag, ctx: ctx, cancel: cancel,
-		spawned: map[string]*listHost{}}
+		own: resolved.Provider, spawned: map[string]*listHost{}}
+}
+
+// launchProvider is the provider of the session this launch's command line
+// names — agentBinary's launch (plan 032 §3.11, P7), whose agent binary
+// --agent-bin and CRAZE_AGENT_BIN are: the resolved provider, until a load
+// names another — --continue's row (resolveLoad) or the row the resume
+// picker chose (loadBackend), whose provider a load always takes.
+func (l *launcher) launchProvider() agent.Provider {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.own
+}
+
+// setLaunchProvider is a load naming the launch's own provider (launchProvider).
+func (l *launcher) setLaunchProvider(p agent.Provider) {
+	l.mu.Lock()
+	l.own = p
+	l.mu.Unlock()
+}
+
+// hostOptions is the spawn of a host for a session of p, for the command line
+// f says (plan 032 §3.11, P7): a host of the launch's own provider takes the
+// launch's --agent-bin and inherits CRAZE_AGENT_BIN; any other takes neither
+// — the variable is left out of its environment — and finds its binary in
+// `[agents]` or on PATH, as its own lookup does.
+func (l *launcher) hostOptions(f tuiFlags, p agent.Provider, load string) spawnOptions {
+	own := ownsAgentBin(p, l.launchProvider())
+	if !own {
+		f.agentBin = ""
+	}
+	return spawnOptions{env: l.env, flags: f, load: load, foreign: !own}
 }
 
 // errLaunchOver is a spawn asked for after the TUI has quit.
@@ -281,6 +314,7 @@ func (l *launcher) resolveLoad(cmd *cobra.Command, f *tuiFlags, cwd string, cfg 
 	cfg.FallbackDefault = false
 	cfg.Loading = true
 	cfg.Continue = &row
+	l.setLaunchProvider(p)
 	return nil
 }
 
@@ -313,6 +347,11 @@ func hostServing(env rundir.Env, crazeID string) (rundir.Entry, bool) {
 // chosen on the picker explicitly: the host then resolves the same fallback
 // itself, and knows it for one, and writes nothing, as the in-process TUI
 // writes nothing for it.
+//
+// The launch's --agent-bin and CRAZE_AGENT_BIN go only to a host of the
+// launch's own provider (hostOptions, plan 032 §3.11, P7): the provider
+// picker's choice of another provider finds its binary in `[agents]` or on
+// PATH, as the picker's own check did (pickerProviders).
 func (l *launcher) newBackend(p agent.Provider, explicit bool) (backend.Backend, error) {
 	f := l.flags
 	f.cont = false
@@ -320,7 +359,7 @@ func (l *launcher) newBackend(p agent.Provider, explicit bool) (backend.Backend,
 	if !explicit && l.resolved.Fallback && p.Name() == l.resolved.Provider.Name() {
 		f.provider = ""
 	}
-	return l.spawn(spawnOptions{env: l.env, flags: f}, "", true)
+	return l.spawn(l.hostOptions(f, p, ""), "", true)
 }
 
 // loadBackend is tui.Config.LoadBackend: a host spawned to load row (--load,
@@ -333,10 +372,19 @@ func (l *launcher) newBackend(p agent.Provider, explicit bool) (backend.Backend,
 // A row whose session a running host serves already is attached to there
 // without a spawn (spawn's crazeID): the reattach after a closed terminal is
 // the ordinary way back to a session, and costs no process and no log.
+//
+// The row is the session this launch's command line names (--continue's, or
+// the resume picker's choice), so its provider is the launch's own
+// (launchProvider): the host takes the launch's --agent-bin and
+// CRAZE_AGENT_BIN, as a load always has, and a session the list starts later
+// of that provider does too.
 func (l *launcher) loadBackend(_ agent.Provider, row sessions.Row) (backend.Backend, error) {
 	f := l.flags
 	f.cont = false
 	f.workspace = ""
+	if p, err := agent.ProviderByName(row.Provider); err == nil {
+		l.setLaunchProvider(p)
+	}
 	return l.spawn(spawnOptions{env: l.env, flags: f, load: loadArg(row)}, row.CrazeID, true)
 }
 

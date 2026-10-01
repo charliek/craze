@@ -699,11 +699,13 @@ func TestServeTakesEverySessionFlag(t *testing.T) {
 			name: "a new session", script: "echo",
 			argv: func(ws string) []string {
 				return []string{"--agent-bin", fake, "--workspace", ws, "--provider", "cursor", "--model", "m-1",
+					"--effort", "low", "--no-fast",
 					"--ask", "--no-force", "--plugin-dir", "/p/one", "--plugin-dir", "/p/two"}
 			},
 			check: func(t *testing.T, ws string, o agent.Options) {
 				if o.Binary != fake || o.Workspace != ws || o.Provider == nil || o.Provider.Name() != "cursor" ||
-					o.Model != "m-1" || o.Mode != "ask" || o.Force || !slices.Equal(o.PluginDirs, []string{"/p/one", "/p/two"}) ||
+					o.Model != "m-1" || o.Effort != "low" || o.Fast == nil || *o.Fast ||
+					o.Mode != "ask" || o.Force || !slices.Equal(o.PluginDirs, []string{"/p/one", "/p/two"}) ||
 					o.LoadSessionID != "" {
 					t.Fatalf("options %+v", o)
 				}
@@ -718,7 +720,8 @@ func TestServeTakesEverySessionFlag(t *testing.T) {
 				return []string{"--agent-bin", fake, "--workspace", ws, "--provider", "gx", "--plan", "--force"}
 			},
 			check: func(t *testing.T, ws string, o agent.Options) {
-				if o.Provider == nil || o.Provider.Name() != "gx" || o.Mode != "plan" || !o.Force || o.Model != "" {
+				if o.Provider == nil || o.Provider.Name() != "gx" || o.Mode != "plan" || !o.Force || o.Model != "" ||
+					o.Effort != "" || o.Fast != nil {
 					t.Fatalf("options %+v", o)
 				}
 			},
@@ -1071,7 +1074,7 @@ func TestServeSweepsOldHostLogsAtStart(t *testing.T) {
 // and usage — and neither command has the other's own flags.
 func TestServeFlagsAreTheRootsSessionFlags(t *testing.T) {
 	root, serve := NewRootCmd(), newServeCmd()
-	shared := []string{"workspace", "provider", "model", "agent-bin", "force", "no-force", "ask", "plan", "plugin-dir", "continue"}
+	shared := []string{"workspace", "provider", "model", "effort", "fast", "no-fast", "agent-bin", "force", "no-force", "ask", "plan", "plugin-dir", "continue"}
 	for _, name := range shared {
 		r, s := root.Flags().Lookup(name), serve.Flags().Lookup(name)
 		if r == nil || s == nil {

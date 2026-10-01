@@ -490,7 +490,14 @@ func (s *session) start(ctx context.Context) (teardown bool, _ error) {
 	// refuses still passes Spawn's own os.Stat fallback, which is where such a
 	// path came from. Candidates are left out for that reason: with a resolved
 	// Binary they can never be reached.
-	binary, err := acp.ResolveBinaryCandidates(s.opts.Binary, s.provider().Bins())
+	//
+	// Under NoBinaryEnv the lookup leaves CRAZE_AGENT_BIN out (plan 032
+	// §3.11, P7): the caller has decided the variable is not this session's.
+	resolve := acp.ResolveBinaryCandidates
+	if s.opts.NoBinaryEnv {
+		resolve = acp.LookupBinary
+	}
+	binary, err := resolve(s.opts.Binary, s.provider().Bins())
 	if err != nil {
 		s.unstart()
 		return false, err
@@ -684,6 +691,12 @@ func (s *session) start(ctx context.Context) (teardown bool, _ error) {
 		}
 		s.mu.Unlock()
 	}
+	// The --effort/--fast tail (plan 032 §3.11, P6): after --model, so against
+	// the catalog of the model the session starts on, and still inside Start,
+	// so before anything can admit a prompt.
+	if err := s.startSettings(ctx, client, loading, &snap); err != nil {
+		return true, err
+	}
 	if loading {
 		return false, nil
 	}
@@ -758,6 +771,116 @@ func (s *session) start(ctx context.Context) (teardown bool, _ error) {
 	s.enqueueDeltaLocked("", Event{}, s.installDeltaLocked())
 	s.mu.Unlock()
 	return false, nil
+}
+
+// startSettings is Start's last tail (plan 032 §3.11, P6; startsettings.go):
+// --effort, then --fast/--no-fast, each chosen against the catalog the
+// --ask/--plan/--model tail left — the model's own, once --model has moved it
+// — and set by the one call a setting is (session/set_config_option), whose
+// reply the read loop installs (onSettingsReply) before the call returns. A
+// value the option already holds is not sent.
+//
+// On a new session nothing is announced here, as the --model tail announces
+// nothing: the install that follows publishes the catalog this left, in its
+// one delta. On a load, whose snapshot is published already, the set is
+// SetConfig's own, delta and all, as the load's --model is (r23 finding 2).
+//
+// A setting that matches nothing, or that the session has no control for, is
+// skipped and noted; one the agent refuses — it answered the call with an
+// error — is noted and the start goes on. Any other failure (the context
+// ended, the agent went away, a reply that could not be read) fails the start,
+// as the --mode/--model tails' do.
+func (s *session) startSettings(ctx context.Context, client *acp.Client, loading bool, snap *Snapshot) error {
+	effort := strings.TrimSpace(s.opts.Effort)
+	if effort == "" && s.opts.Fast == nil {
+		return nil
+	}
+	notes := startNotes{log: s.log, say: func(line string) {
+		if w := diagWriter(s.opts); w != nil {
+			fmt.Fprintln(w, "craze: "+line)
+		}
+	}}
+	if effort != "" {
+		opt := s.startOption(loading, snap, EffortOption)
+		value, why := effortValue(opt, effort)
+		if why != "" {
+			notes.effortUnmatched(effort, why, opt)
+		} else if err := s.startSet(ctx, client, loading, snap, opt, value); err != nil {
+			if !refusedByAgent(err) {
+				return err
+			}
+			notes.refused("effort", "--effort "+effort, opt.ID, value, err)
+		}
+	}
+	if s.opts.Fast != nil {
+		on := *s.opts.Fast
+		opt := s.startOption(loading, snap, FastOption)
+		if value, ok := fastValue(opt, on); !ok {
+			notes.fastUnmatched(on)
+		} else if err := s.startSet(ctx, client, loading, snap, opt, value); err != nil {
+			if !refusedByAgent(err) {
+				return err
+			}
+			notes.refused("fast", fastFlag(on), opt.ID, value, err)
+		}
+	}
+	return nil
+}
+
+// startOption is the option find picks out of the catalog a start setting is
+// chosen from: s.snap's. On a new session — whose snapshot session/new
+// answered is still Start's local snap — s.snap is first given that
+// snapshot's catalog and model, unless an update of the agent's own has
+// written them since: the --model tail's own priming, which a start without
+// --model has not done, and which repeats as a no-op after it. It is also what
+// the set's reply is installed against (applyConfigLocked), so the model
+// option it holds is never read as a first appearance.
+func (s *session) startOption(loading bool, snap *Snapshot, find func(Snapshot) *ConfigOption) *ConfigOption {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !loading {
+		if !s.agentWrote.config {
+			s.snap.Config = cloneConfig(snap.Config)
+		}
+		if !s.agentWrote.model {
+			s.snap.CurrentModel = snap.CurrentModel
+		}
+	}
+	return find(Snapshot{Provider: s.provider().Info(), Config: s.snap.Config})
+}
+
+// startSet sets opt to value for startSettings. A new session's result is
+// copied back into Start's local snap, which the install publishes — the
+// catalog and the model as the read loop left them, the --model tail's own
+// copy-back. A load's goes through SetConfig, whose delta announces it; an
+// option the answered catalog no longer lists (ErrOptionGone) was still set.
+func (s *session) startSet(ctx context.Context, client *acp.Client, loading bool, snap *Snapshot, opt *ConfigOption, value string) error {
+	if opt.Current == value {
+		return nil
+	}
+	if loading {
+		_, err := s.SetConfig(ctx, "", opt.ID, value, "")
+		if errors.Is(err, ErrOptionGone) {
+			return nil
+		}
+		return err
+	}
+	if _, err := client.SetConfig(ctx, opt.ID, value); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	snap.Config = cloneConfig(s.snap.Config)
+	snap.CurrentModel = s.snap.CurrentModel
+	s.mu.Unlock()
+	return nil
+}
+
+// refusedByAgent reports whether err is the agent's own answer refusing a
+// call — a JSON-RPC error response — rather than the call failing to be
+// answered at all.
+func refusedByAgent(err error) bool {
+	var rpcErr *acp.RPCError
+	return errors.As(err, &rpcErr)
 }
 
 // markAgentWroteLocked records that one of the AGENT's own updates has written

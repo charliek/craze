@@ -192,12 +192,13 @@ func (l *launcher) open(e rundir.Entry) (backend.Backend, error) {
 // its provider. The command line's session flags were for its own session,
 // not for every session the list resumes, so a resume passes only what any
 // spawn of this launch takes — the permission mode, the plugin directories,
-// the host-status switch, and --agent-bin, the launch's agent binary for
-// whichever ACP provider runs (as the provider picker's choice takes it), not
-// for one craze runs in process, which refuses it — and never --provider (a
-// filter on a load, which would refuse a row of another provider),
-// --workspace, --model, --ask or --plan; a held session attached to leaves
-// no note of flags ignored.
+// the host-status switch, and --agent-bin, the launch's agent binary, when
+// the row's provider is the launch's own (hostOptions, plan 032 §3.11, P7:
+// any other's host takes neither it nor CRAZE_AGENT_BIN, and finds its own in
+// `[agents]` or on PATH) — and never --provider (a filter on a load, which
+// would refuse a row of another provider), --workspace, --model, --effort,
+// --fast/--no-fast, --ask or --plan; a held session attached to leaves no
+// note of flags ignored.
 //
 // A row this craze cannot run is refused before anything is spawned
 // (savedRunnable), a *tui.Refusal as the host's own refusal of it would be.
@@ -209,11 +210,10 @@ func (l *launcher) openSaved(row sessions.Row) (backend.Backend, error) {
 	f := l.flags
 	f.cont, f.resume = false, false
 	f.workspace, f.provider, f.model = "", "", ""
+	f.effort = ""
+	f.setFast(nil)
 	f.ask, f.plan = false, false
-	if p.InProcess() {
-		f.agentBin = ""
-	}
-	return l.spawn(spawnOptions{env: l.env, flags: f, load: loadArg(row)}, row.CrazeID, false)
+	return l.spawn(l.hostOptions(f, p, loadArg(row)), row.CrazeID, false)
 }
 
 // savedRunnable is the provider of a saved row this craze can resume, or the
@@ -338,13 +338,14 @@ func (l *launcher) cameUpLocked(hostID string) bool {
 // Of the command line's own session flags a new session from the list takes
 // only what every spawn of this launch takes, as a resume from the list does
 // (openSaved, X111): the plugin directories, the host-status switch, and
-// --agent-bin, the launch's agent binary for whichever ACP provider runs —
-// the provider picker's choice takes it the same way, and CRAZE_AGENT_BIN,
-// which every host inherits, is read for any ACP provider too — but not for a
-// provider craze runs in process, which refuses it. Never --ask or --plan:
-// they were the command line's own session's mode, not every session the
-// list starts (plan 030 C15; per-dispatch modes are not built, as effort is
-// not).
+// --agent-bin, the launch's agent binary, when spec's provider is the
+// launch's own — a host of any other provider takes neither it nor
+// CRAZE_AGENT_BIN, which is left out of its environment, and finds its binary
+// in `[agents]` or on PATH (hostOptions, plan 032 §3.11, P7). Never --ask or
+// --plan: they were the command line's own session's mode, not every session
+// the list starts (plan 030 C15; per-dispatch modes are not built). Its
+// effort and fast setting are spec's own (plan 032 §3.11), never the
+// command line's.
 func (l *launcher) spawnFor(spec tui.SpawnSpec) (roster.Ref, error) {
 	done, err := l.begin()
 	if err != nil {
@@ -354,17 +355,16 @@ func (l *launcher) spawnFor(spec tui.SpawnSpec) (roster.Ref, error) {
 	f := l.flags
 	f.cont, f.resume = false, false
 	f.workspace, f.provider, f.model = spec.Workspace, spec.Provider.Name(), spec.Model
+	f.effort = spec.Effort
+	f.setFast(spec.Fast)
 	f.ask, f.plan = false, false
-	if spec.Provider.InProcess() {
-		f.agentBin = ""
-	}
 	switch spec.PermissionMode {
 	case backend.PermissionBypass:
 		f.force, f.noForce = true, false
 	case backend.PermissionPrompt:
 		f.force, f.noForce = false, true
 	}
-	ref, err := spawnHost(l.ctx, spawnOptions{env: l.env, flags: f})
+	ref, err := spawnHost(l.ctx, l.hostOptions(f, spec.Provider, ""))
 	if err != nil {
 		return roster.Ref{}, launchFailure(err)
 	}

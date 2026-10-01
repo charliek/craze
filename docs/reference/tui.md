@@ -911,9 +911,11 @@ meanwhile, and the screen then shows it as [opening one in
 place](#opening-a-session-in-place) does, `restoring…` until its transcript
 is back. A saved session that another terminal has resumed meanwhile is
 opened where it runs. The command line's own session flags (`--provider`,
-`--model`, `--ask`, `--plan`) were for the session it started and are not
-applied to a resumed one; its permission mode, `--plugin-dir` and (for a
-provider craze does not run in process) `--agent-bin` are. A
+`--model`, `--effort`, `--fast`/`--no-fast`, `--ask`, `--plan`) were for the
+session it started and are not applied to a resumed one; its permission mode
+and `--plugin-dir` are, and so is `--agent-bin` (with `CRAZE_AGENT_BIN`) when
+the session's provider is the launch's own — any other runs the binary
+[`[agents]`](configuration.md#agent-binaries) or `PATH` gives it. A
 session whose directory is gone, or whose provider this craze cannot resume,
 is refused on the hint line (`could not resume <title>: that session ran in
 …, which is no longer a directory`) and nothing is started. `Ctrl+X` does
@@ -954,10 +956,12 @@ The new session runs:
   launch's own `--model`; else the provider's default.
 - with the **permission mode** of the session you came from (`--force` or
   `--no-force`, as its host reports it), the launch's `--plugin-dir`, and —
-  for a provider craze does not run in process — its `--agent-bin`. The
-  command line's own `--ask`, `--plan` and `--provider` were for the session
-  it started and are not applied, and its `--model` only in the one case
-  above.
+  when its provider is the launch's own — its `--agent-bin` (and
+  `CRAZE_AGENT_BIN`); a session of any other provider runs the binary
+  [`[agents]`](configuration.md#agent-binaries) or `PATH` gives it. The
+  command line's own `--ask`, `--plan`, `--effort`, `--fast`/`--no-fast` and
+  `--provider` were for the session it started and are not applied, and its
+  `--model` only in the one case above.
 
 All of it is decided when `Enter` is pressed: moving the selection while the
 session starts changes nothing.

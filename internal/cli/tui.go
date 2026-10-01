@@ -28,8 +28,13 @@ type tuiFlags struct {
 	theme     string
 	workspace string
 	model     string
-	agentBin  string
-	provider  string
+	// effort is --effort, and fast and noFast --fast and --no-fast (plan 032
+	// §3.11): the session's start settings, read through fastSetting.
+	effort   string
+	fast     bool
+	noFast   bool
+	agentBin string
+	provider string
 	// pluginDirs are extra plugin roots, cursor-agent's --plugin-dir spelled
 	// the same way. They are craze's own: the child agent is never told.
 	pluginDirs []string
@@ -179,8 +184,22 @@ func runTUI(cmd *cobra.Command, f *tuiFlags, env hostEnv) error {
 	// picker may build several sessions, and a journal that is off because of
 	// a mistake says so once, on craze's own lane.
 	journal := journalDir(diag.craze())
+	// The launch's own provider (agentBinary, plan 032 §3.11), as the
+	// launcher keeps it (launchProvider): the resolved one — another the
+	// provider picker chose is another provider — until a load names its
+	// row's, the session this command line named (--continue's, or the resume
+	// picker's choice). Under ownMu: the pickers build from bubbletea's
+	// goroutines.
+	var ownMu sync.Mutex
+	own := resolved.Provider
 	build := func(p agent.Provider, row sessions.Row) agent.Session {
-		opts := sessionOptions(f, ws, mode, diag.agent(), diag.craze(), childEnv, p, row)
+		ownMu.Lock()
+		if row.SessionID != "" {
+			own = p
+		}
+		launch := own
+		ownMu.Unlock()
+		opts := sessionOptions(f, ws, mode, diag.agent(), diag.craze(), childEnv, p, launch, row)
 		opts.JournalDir = journal
 		return agent.New(opts)
 	}
@@ -192,7 +211,7 @@ func runTUI(cmd *cobra.Command, f *tuiFlags, env hostEnv) error {
 		Yolo:            f.force,
 		NoMouse:         f.noMouse,
 		Provider:        resolved.Provider,
-		Providers:       pickerProviders(f.agentBin),
+		Providers:       pickerProviders(resolved.Provider, f.agentBin),
 		ProviderLocked:  resolved.Locked,
 		PersistProvider: true,
 		FallbackDefault: resolved.Fallback,
@@ -272,12 +291,19 @@ func runTUI(cmd *cobra.Command, f *tuiFlags, env hostEnv) error {
 // JournalDir is left to the caller — runTUI's build closure, craze serve —
 // which sets the directory it resolved once for the whole run (journalDir);
 // so is NoPrimary, which only a headless host sets.
-func sessionOptions(f *tuiFlags, ws, mode string, stderr, diag io.Writer, env []string, p agent.Provider, row sessions.Row) agent.Options {
-	return agent.Options{
-		Binary:      f.agentBin,
+//
+// launch is the launch's own provider, which the agent binary is resolved
+// against (agentBinary, plan 032 §3.11, P7): --agent-bin and CRAZE_AGENT_BIN
+// are p's only when p is it, and [agents].<p> or p's PATH candidates
+// otherwise. --effort and --fast/--no-fast go to every session the command
+// line starts, as --model does.
+func sessionOptions(f *tuiFlags, ws, mode string, stderr, diag io.Writer, env []string, p, launch agent.Provider, row sessions.Row) agent.Options {
+	opts := agent.Options{
 		Workspace:   ws,
 		Force:       f.force,
 		Model:       f.model,
+		Effort:      strings.TrimSpace(f.effort),
+		Fast:        f.fastSetting(),
 		Mode:        mode,
 		Stderr:      stderr,
 		Diag:        diag,
@@ -293,6 +319,8 @@ func sessionOptions(f *tuiFlags, ws, mode string, stderr, diag io.Writer, env []
 		Title:         row.Title,
 		TitlePinned:   row.Pinned,
 	}
+	agentBinary(p, launch, f.agentBin, diag).apply(&opts)
+	return opts
 }
 
 // resolveLoad answers --continue and --resume out of the index, and is a no-op
@@ -396,19 +424,23 @@ func noSessionMsg(cwd, provider string) string {
 // cursor and grok are never filtered, which is what makes an empty picker
 // impossible (§3.3).
 //
-// explicitBin is --agent-bin. Resolution is the same question spawn asks, so an
-// override makes every optional provider resolve — with one set, a gx session
-// genuinely would spawn that binary — and an override that resolves to nothing
-// hides gx even with gx on PATH, because the override is exclusive.
+// Resolution is the same question the session's own lookup asks, by the same
+// per-provider rule (agentBinary, plan 032 §3.11, P7): launch is the resolved
+// provider — the picker's preselection — and explicitBin --agent-bin, which
+// with CRAZE_AGENT_BIN is that provider's alone. So an override makes gx
+// resolve only when gx is the resolved provider — a gx session started from
+// the picker then genuinely spawns it — and one that resolves to nothing hides
+// gx even with gx on PATH, because the override is exclusive; for any other
+// launch gx shows when `[agents].gx` or its PATH candidate resolves.
 //
 // This filters for availability and nothing else. Inserting the resolved
 // default belongs to tui.New, which guarantees it for every caller rather than
 // for the ones that remember (§3.4).
-func pickerProviders(explicitBin string) []agent.Provider {
+func pickerProviders(launch agent.Provider, explicitBin string) []agent.Provider {
 	all := agent.Providers()
 	out := make([]agent.Provider, 0, len(all))
 	for _, p := range all {
-		if p.Optional() && !p.BinaryResolves(explicitBin) {
+		if p.Optional() && !agentBinary(p, launch, explicitBin, nil).resolves(p) {
 			continue
 		}
 		out = append(out, p)

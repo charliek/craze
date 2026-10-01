@@ -131,7 +131,7 @@ func runResolveLoadWith(t *testing.T, cwd string, claims *sessionClaims, argv ..
 	}
 	var built []agent.Options
 	build := func(p agent.Provider, row sessions.Row) agent.Session {
-		built = append(built, sessionOptions(f, cwd, "", io.Discard, io.Discard, nil, p, row))
+		built = append(built, sessionOptions(f, cwd, "", io.Discard, io.Discard, nil, p, p, row))
 		return nil
 	}
 	err = resolveLoad(cmd, f, cwd, &cfg, build, claims)

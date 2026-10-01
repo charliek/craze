@@ -25,7 +25,9 @@ flags; see [craze prompt](#craze-prompt).
 |------|-------------|
 | `--workspace` | Existing workspace directory (default: current directory) |
 | `--model` | Model to start on: an ACP model id, or on `native` a model alias. Native resolves it against every model it knows — shipped or yours, connected or not — and a model whose provider has no key refuses to start, saying how to give it one. It applies to this start only, and is never remembered as a default; a new native session takes the effort last picked for that model in a session's `/model`, when the model still offers it ([Model memory](configuration.md#model-memory-recentjson)) |
-| `--agent-bin` | Path to the agent binary (or `CRAZE_AGENT_BIN`) |
+| `--effort` | Effort to start at, where the model offers an effort setting: a level's id (`high`), the id in any case (`HIGH`), or its name (`extra high`) — tried in that order, and a step counts only when it matches exactly one level. Set after `--model`, so against that model's levels, and before the session takes any prompt. A value that matches no level, or more than one, or a model with no effort setting, leaves the model's own effort, with one line on stderr. Applies to this start only — a `--continue` or `--resume` load included — and is never remembered |
+| `--fast`, `--no-fast` | Start with the model's fast setting on, or off, where the model offers one (cursor's per-model `fast`). Neither leaves it as the model has it. Set as `--effort` is; a model without one is a line on stderr |
+| `--agent-bin` | Path to the agent binary for this launch's own provider (or `CRAZE_AGENT_BIN`); a session of another provider uses its own. See [Agent binaries](configuration.md#agent-binaries) |
 | `--provider` | Provider: `cursor`, `grok`, `gx` (ACP agents) or `native` (runs inside craze). Empty is unset. Unknown id exits 2 |
 | `--force` | Spawn the agent with `--force` / `--always-approve` (yolo). Default: on |
 | `--no-force` | Disable yolo and handle permission requests |
@@ -39,8 +41,18 @@ flags; see [craze prompt](#craze-prompt).
 | `--continue`, `-c` | Load the newest session in this workspace instead of starting a new one. No matching session exits 1 |
 | `--resume`, `-r` | Open a picker of the last 10 sessions in this workspace. Empty index exits 1 the same way; `Esc` in the picker exits 0 |
 
-`--ask` and `--plan` are mutually exclusive. So are `--continue` and
-`--resume` (exit 2).
+`--ask` and `--plan` are mutually exclusive. So are `--fast` and `--no-fast`,
+and `--continue` and `--resume` (exit 2).
+
+`--effort` and `--fast`/`--no-fast` are set inside the session's start, after
+`--model` and `--ask`/`--plan`, so no prompt — typed, queued, or sent by
+another client — reaches the agent before them; that holds whether the
+session runs in a [detached host](#sessions-outlive-their-terminal) or, under
+`detach = false`, in the TUI's own process. A setting the agent refuses is a
+line on stderr, and the session starts without it. Each one that is skipped or
+refused is also a `diag` line in the session's
+[journal](configuration.md#session-journal) (`effort_unmatched`,
+`fast_unmatched`, `start_setting_refused`).
 
 `--provider` on the TUI skips the startup picker. Without it, `$CRAZE_PROVIDER`
 then `provider` in the config file then `cursor` is the default, and the picker
@@ -48,6 +60,9 @@ lets you change it before Start. The picker holds its choice to the same flags
 `--provider` is held to: picking `native` with `--agent-bin` or
 `CRAZE_AGENT_BIN` set shows the message `--provider native` would exit 2
 with, as an error row, and starts nothing (see [TUI reference](tui.md)).
+`--agent-bin` and `CRAZE_AGENT_BIN` are the resolved provider's: another
+provider picked there runs the binary `[agents]` names for it, or the one on
+`PATH` ([Agent binaries](configuration.md#agent-binaries)).
 `craze prompt` has no picker; it uses the same precedence. `craze frame`
 ignores env and config and defaults to cursor unless `--provider` is passed.
 
@@ -125,8 +140,9 @@ through the holder's host id, after one line on stderr:
 craze: that session is already running (pid N); attaching
 ```
 
-The flags a *new* session would take (`--model`, `--ask`, `--plan`,
-`--agent-bin`, `--provider`) do not apply to an attach; each one this command
+The flags a *new* session would take (`--model`, `--effort`,
+`--fast`/`--no-fast`, `--ask`, `--plan`, `--agent-bin`, `--provider`) do not
+apply to an attach; each one this command
 line explicitly passed is named in the note — whether the flag was
 **changed** on the command line, not what it is worth — e.g. `(ignored:
 --model, --provider)`. Nothing is built, spawned, bound, or claimed for it.
@@ -323,9 +339,9 @@ session (its own session, stdio on `/dev/null`) and attaches to it. Run by hand
 it is the same host in the foreground, logging to stderr; SIGHUP is ignored.
 
 It takes the session flags the TUI takes — `--workspace`, `--model`,
-`--agent-bin`, `--provider`, `--force`/`--no-force`, `--ask`/`--plan`,
-`--plugin-dir`, `--continue`/`-c` — with the same refusals in the same words,
-and:
+`--effort`, `--fast`/`--no-fast`, `--agent-bin`, `--provider`,
+`--force`/`--no-force`, `--ask`/`--plan`, `--plugin-dir`, `--continue`/`-c` —
+with the same refusals in the same words, and:
 
 | Flag | Description |
 |------|-------------|
@@ -361,7 +377,7 @@ echo "hello" | ./bin/craze prompt --json
 |------|-------------|
 | `--workspace` | Existing workspace directory (default: current directory) |
 | `--model` | Model to start on: an ACP model id (`session/set_model` after `session/new`), or a native model alias, resolved as the TUI's `--model` is, at the effort remembered for it. Never remembered. Without it a native run starts where a new TUI session would, on the remembered model ([Model memory](configuration.md#model-memory-recentjson)) |
-| `--agent-bin` | Path to the agent binary (or `CRAZE_AGENT_BIN`) |
+| `--agent-bin` | Path to the agent binary (or `CRAZE_AGENT_BIN`, then `[agents]` in `config.toml`: [Agent binaries](configuration.md#agent-binaries)) |
 | `--provider` | Provider: `cursor`, `grok`, `gx` (ACP agents) or `native` (runs inside craze) |
 | `--follow-up` | Additional prompt on the same ACP session (repeatable) — the headless queue, see below |
 | `--permission-decision` | Headless permission answer: `allow-once` or `reject-once` (repeatable) |

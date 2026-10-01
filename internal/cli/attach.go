@@ -460,9 +460,9 @@ func holderEntry(env rundir.Env, held *rundir.HeldError) (rundir.Entry, holderSo
 // becomes `craze attach --session <id>`, resolved through the holder's host
 // id — after one stderr line, printed before the TUI takes the screen:
 // `craze: that session is already running (pid N); attaching`. The
-// flags a new session would take (--model, --ask, --plan, --agent-bin,
-// --provider) do not apply to an attach: they are ignored, and the line names
-// the ones given. Nothing is built, spawned, bound or claimed for it.
+// flags a new session would take (--model, --effort, --fast/--no-fast, --ask,
+// --plan, --agent-bin, --provider) do not apply to an attach: they are
+// ignored, and the line names the ones given. Nothing is built, spawned, bound or claimed for it.
 //
 // A holder whose live registry entry does not serve that session keeps PR
 // 2's refusal, exit 1 naming the pid, plus why (holderSocket.refusalSuffix):
@@ -498,6 +498,9 @@ func ignoredForAttach(cmd *cobra.Command, f *tuiFlags) []string {
 		set  bool
 	}{
 		{"model", f.model != ""},
+		{"effort", f.effort != ""},
+		{"fast", f.fast},
+		{"no-fast", f.noFast},
 		{"ask", f.ask},
 		{"plan", f.plan},
 		{"agent-bin", f.agentBin != ""},

@@ -841,12 +841,35 @@ type Result struct {
 }
 
 type Options struct {
-	Binary    string
-	ExtraArgs []string
-	Workspace string
-	Force     bool
-	Model     string
-	Mode      string
+	// Binary is the agent binary to spawn. "" is $CRAZE_AGENT_BIN, then the
+	// provider's own PATH candidates (Provider.Bins) — the variable left out
+	// under NoBinaryEnv.
+	Binary string
+	// NoBinaryEnv leaves $CRAZE_AGENT_BIN out of the agent binary's lookup:
+	// Binary, else the provider's PATH candidates. The CLI sets it once it has
+	// decided whose the variable is (plan 032 §3.11, P7): the launch's own
+	// provider's alone, so a session of another provider never spawns the
+	// binary a launch named for its own.
+	NoBinaryEnv bool
+	ExtraArgs   []string
+	Workspace   string
+	Force       bool
+	Model       string
+	Mode        string
+	// Effort and Fast are --effort and --fast/--no-fast (plan 032 §3.11, P6):
+	// the session's effort and its fast toggle, set by Start after --model and
+	// before Start returns — after session/new, or after a load's replay — so
+	// before any prompt can be admitted. Effort is matched against the
+	// session's effort select (EffortOption): the value whose id is Effort
+	// exactly, else whose id is Effort in any case, else whose name is; Fast
+	// goes through FastOnOff. Nothing matching, more than one value matching,
+	// or a session that offers no such control skips it, journalled
+	// (effort_unmatched, fast_unmatched) and said on Diag; a set the provider
+	// refuses is journalled and said the same way (start_setting_refused), and
+	// the session starts all the same. "" and nil leave the provider's own
+	// default.
+	Effort string
+	Fast   *bool
 	// Stderr is the agent child's own stderr sink. Diag is where craze's own
 	// notes about this session go — discoverPlugins' warn closure — and
 	// falls back to Stderr when nil, so headless craze prompt and craze

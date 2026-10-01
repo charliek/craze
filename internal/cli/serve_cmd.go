@@ -414,7 +414,9 @@ func serveSession(cmd *cobra.Command, f *serveFlags, env hostEnv, sigs <-chan os
 	// with one the 257th unread event would block the agent — a turn or a
 	// replay run with nobody attached must never wait for a reader (SD-33).
 	// Clients read through their budgeted subscriptions.
-	opts := sessionOptions(&f.tuiFlags, ws, f.mode(), out, out, childEnv, p, row)
+	// The host's session is its launch's own: --agent-bin and CRAZE_AGENT_BIN,
+	// when its spawner left them to it, are its provider's (plan 032 §3.11).
+	opts := sessionOptions(&f.tuiFlags, ws, f.mode(), out, out, childEnv, p, p, row)
 	opts.JournalDir = journalAt
 	opts.NoPrimary = true
 	// A start that fails leaves the session listable and attachable until

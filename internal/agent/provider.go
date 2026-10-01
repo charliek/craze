@@ -563,6 +563,18 @@ func (p Provider) BinaryResolves(explicit string) bool {
 	return err == nil
 }
 
+// BinaryResolvesNoEnv is BinaryResolves for a session started with
+// Options.NoBinaryEnv: binary, or p's own PATH candidates when it is "" —
+// $CRAZE_AGENT_BIN is not consulted (plan 032 §3.11, P7). An in-process
+// provider always resolves.
+func (p Provider) BinaryResolvesNoEnv(binary string) bool {
+	if p.inProcess {
+		return true
+	}
+	_, err := acp.LookupBinary(binary, p.Bins())
+	return err == nil
+}
+
 // Bins is the provider's PATH lookup order for its agent binary.
 func (p Provider) Bins() []string { return append([]string(nil), p.defaultBins...) }
 

@@ -487,3 +487,39 @@ func TestConfigHostIdleExitTable(t *testing.T) {
 		}
 	})
 }
+
+// TestConfigAgentBin is `[agents]` (plan 032 §3.11, P7): one absolute path per
+// ACP provider, read for that provider alone. A value that is not an absolute
+// path — relative, "~", blank — or not a string, and a table that is not one,
+// is ignored with a line naming it; native and an unknown provider have no
+// key; a missing file, an absent table and a malformed file are silent.
+func TestConfigAgentBin(t *testing.T) {
+	for _, tc := range []struct {
+		name, body, provider, path, why string
+	}{
+		{"absolute", "[agents]\ngrok = \"/opt/grok/bin/grok\"\n", "grok", "/opt/grok/bin/grok", ""},
+		{"cleaned and trimmed", "[agents]\ncursor = \" /opt//cursor/../cursor/agent \"\n", "cursor", "/opt/cursor/agent", ""},
+		{"another provider's key", "[agents]\ngrok = \"/opt/grok\"\n", "gx", "", ""},
+		{"relative", "[agents]\ngx = \"bin/gx\"\n", "gx", "", `config.toml agents.gx "bin/gx" is not an absolute path; ignoring it`},
+		{"home", "[agents]\ngx = \"~/bin/gx\"\n", "gx", "", `config.toml agents.gx "~/bin/gx" is not an absolute path; ignoring it`},
+		{"blank", "[agents]\ngx = \"  \"\n", "gx", "", `config.toml agents.gx "" is not an absolute path; ignoring it`},
+		{"not a string", "[agents]\ngrok = 3\n", "grok", "", "config.toml agents.grok is not a string; ignoring it"},
+		{"not a table", "agents = \"/opt/grok\"\n", "grok", "", "config.toml agents is not a table; ignoring it"},
+		{"native", "[agents]\nnative = \"/opt/native\"\n", "native", "", ""},
+		{"no table", "theme = \"gruvbox\"\n", "cursor", "", ""},
+		{"malformed", "[agents\n", "cursor", "", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			writeConfigFile(t, tc.body)
+			if path, why := ConfigAgentBin(tc.provider); path != tc.path || why != tc.why {
+				t.Fatalf("ConfigAgentBin(%q) = %q, %q; want %q, %q", tc.provider, path, why, tc.path, tc.why)
+			}
+		})
+	}
+	t.Run("no file", func(t *testing.T) {
+		t.Setenv("CRAZE_HOME", filepath.Join(t.TempDir(), "nothing"))
+		if path, why := ConfigAgentBin("cursor"); path != "" || why != "" {
+			t.Fatalf("no file: %q, %q", path, why)
+		}
+	})
+}

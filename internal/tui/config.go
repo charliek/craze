@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -334,6 +335,51 @@ func configSwitch(key string) bool {
 		return true
 	}
 	return on
+}
+
+// AgentBinKeys are the [agents] table's keys: the ACP providers craze spawns
+// an agent binary for (plan 032 §3.11, P7). native runs inside craze and has
+// none.
+var AgentBinKeys = []string{"cursor", "grok", "gx"}
+
+// ConfigAgentBin is `[agents].<provider>`: the agent binary a session of that
+// provider is spawned with when neither the launch's --agent-bin nor
+// $CRAZE_AGENT_BIN is its own (plan 032 §3.11, P7), "" for none — the
+// provider's PATH candidates. The path must be absolute; anything else (a
+// relative path, a "~", a value that is not a string) is ignored, with a line
+// naming it for the caller's diagnostics. A provider that is not one of
+// AgentBinKeys has no key. A config craze cannot read or parse has no table,
+// silently, as the provider and the theme read it: a broken file is reported
+// where it is written.
+func ConfigAgentBin(provider string) (path, why string) {
+	if !slices.Contains(AgentBinKeys, provider) {
+		return "", ""
+	}
+	cfg, err := readConfig()
+	if err != nil {
+		return "", ""
+	}
+	v, ok := cfg["agents"]
+	if !ok {
+		return "", ""
+	}
+	table, ok := v.(map[string]any)
+	if !ok {
+		return "", "config.toml agents is not a table; ignoring it"
+	}
+	raw, ok := table[provider]
+	if !ok {
+		return "", ""
+	}
+	s, ok := raw.(string)
+	if !ok {
+		return "", fmt.Sprintf("config.toml agents.%s is not a string; ignoring it", provider)
+	}
+	s = strings.TrimSpace(s)
+	if !filepath.IsAbs(s) {
+		return "", fmt.Sprintf("config.toml agents.%s %q is not an absolute path; ignoring it", provider, s)
+	}
+	return filepath.Clean(s), ""
 }
 
 // ConfigProvider is the persisted provider id, or "" when there is none. An

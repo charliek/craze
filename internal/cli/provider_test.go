@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -270,46 +271,76 @@ func providerNames(list []agent.Provider) []string {
 
 // TestPickerProviders pins the picker's availability filter: cursor, grok and
 // native are unconditional, so the picker is never empty, and gx appears only
-// when a binary for it resolves. Resolution is the same question spawn asks,
-// so --agent-bin reveals gx and an unresolvable --agent-bin hides it even with
-// gx on PATH (§3.3, AC 4 and AC 9). Native is in-process and never optional
-// (plan 028 §3.16), so it is unaffected by PATH or --agent-bin.
+// when a binary for it resolves. Resolution is the question gx's own session
+// would ask, by the per-provider rule (agentBinary, plan 032 §3.11, P7): the
+// launch's --agent-bin and CRAZE_AGENT_BIN are its resolved provider's alone,
+// so either reveals gx only when gx is that provider — and an unresolvable one
+// then hides it even with gx on PATH, the override being exclusive — while for
+// a launch of another provider gx shows by `[agents].gx` or its PATH
+// candidate, whatever the override says (§3.3, AC 4 and AC 9). Native is
+// in-process and never optional (plan 028 §3.16), so it is unaffected by PATH
+// or --agent-bin.
 //
 // CRAZE_AGENT_BIN is cleared once for every case and each builds its own PATH
-// in a temp directory, so none of them can read what the host happens to have
-// installed.
+// and craze directory in temp directories, so none of them can read what the
+// host happens to have installed or configured.
 func TestPickerProviders(t *testing.T) {
 	t.Setenv("CRAZE_AGENT_BIN", "")
-	t.Run("gx absent", func(t *testing.T) {
-		t.Setenv("PATH", t.TempDir())
-		if got := providerNames(pickerProviders("")); !reflect.DeepEqual(got, []string{"cursor", "grok", "native"}) {
-			t.Fatalf("rows %q, want [cursor grok native]", got)
-		}
-	})
-	t.Run("gx on PATH", func(t *testing.T) {
-		dir := t.TempDir()
-		writeExecutable(t, dir, "gx")
-		t.Setenv("PATH", dir)
-		if got := providerNames(pickerProviders("")); !reflect.DeepEqual(got, []string{"cursor", "grok", "gx", "native"}) {
-			t.Fatalf("rows %q, want [cursor grok gx native]", got)
-		}
-	})
-	t.Run("agent-bin reveals gx", func(t *testing.T) {
-		bin := writeExecutable(t, t.TempDir(), "some-agent")
-		t.Setenv("PATH", t.TempDir())
-		if got := providerNames(pickerProviders(bin)); !reflect.DeepEqual(got, []string{"cursor", "grok", "gx", "native"}) {
-			t.Fatalf("rows %q, want [cursor grok gx native]", got)
-		}
-	})
-	t.Run("invalid agent-bin hides gx", func(t *testing.T) {
-		dir := t.TempDir()
-		writeExecutable(t, dir, "gx")
-		t.Setenv("PATH", dir)
-		missing := filepath.Join(t.TempDir(), "does-not-exist")
-		if got := providerNames(pickerProviders(missing)); !reflect.DeepEqual(got, []string{"cursor", "grok", "native"}) {
-			t.Fatalf("rows %q, want [cursor grok native] — the override is exclusive", got)
-		}
-	})
+	cursor, gx := agent.CursorProvider(), agent.GxProvider()
+	withGx := []string{"cursor", "grok", "gx", "native"}
+	withoutGx := []string{"cursor", "grok", "native"}
+	for _, tc := range []struct {
+		name   string
+		launch agent.Provider
+		onPath bool   // gx is on PATH
+		flag   string // --agent-bin: "ok" a binary, "missing" none
+		env    string // CRAZE_AGENT_BIN, the same spelling
+		config string // [agents].gx: "ok", "missing", "relative"
+		want   []string
+	}{
+		{name: "gx absent", launch: cursor, want: withoutGx},
+		{name: "gx on PATH", launch: cursor, onPath: true, want: withGx},
+		{name: "agent-bin reveals gx for a gx launch", launch: gx, flag: "ok", want: withGx},
+		{name: "CRAZE_AGENT_BIN reveals gx for a gx launch", launch: gx, env: "ok", want: withGx},
+		// The negative control of P7: before it, a cursor launch's binary
+		// revealed gx too, and a gx session picked there spawned it.
+		{name: "agent-bin is the cursor launch's, not gx's", launch: cursor, flag: "ok", want: withoutGx},
+		{name: "CRAZE_AGENT_BIN is the cursor launch's, not gx's", launch: cursor, env: "ok", want: withoutGx},
+		{name: "an invalid agent-bin hides gx for a gx launch", launch: gx, onPath: true, flag: "missing", want: withoutGx},
+		{name: "an invalid agent-bin of a cursor launch leaves gx on PATH", launch: cursor, onPath: true, flag: "missing", want: withGx},
+		{name: "[agents].gx reveals gx", launch: cursor, config: "ok", want: withGx},
+		{name: "[agents].gx under a cursor launch's agent-bin", launch: cursor, flag: "ok", config: "ok", want: withGx},
+		{name: "a missing [agents].gx hides gx on PATH", launch: cursor, onPath: true, config: "missing", want: withoutGx},
+		{name: "a relative [agents].gx is ignored", launch: cursor, onPath: true, config: "relative", want: withGx},
+		{name: "a gx launch's agent-bin wins over [agents].gx", launch: gx, flag: "missing", config: "ok", want: withoutGx},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := t.TempDir()
+			if tc.onPath {
+				writeExecutable(t, path, "gx")
+			}
+			t.Setenv("PATH", path)
+			bin := func(how string) string {
+				switch how {
+				case "ok":
+					return writeExecutable(t, t.TempDir(), "some-agent")
+				case "missing":
+					return filepath.Join(t.TempDir(), "does-not-exist")
+				case "relative":
+					return "bin/gx"
+				}
+				return ""
+			}
+			t.Setenv("CRAZE_AGENT_BIN", bin(tc.env))
+			crazeHome(t)
+			if c := bin(tc.config); c != "" {
+				writeCrazeConfig(t, fmt.Sprintf("[agents]\ngx = %q\n", c))
+			}
+			if got := providerNames(pickerProviders(tc.launch, bin(tc.flag))); !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("rows %q, want %q", got, tc.want)
+			}
+		})
+	}
 }
 
 // TestGxResolvesThroughEveryEntryPoint pins §3.2: gx is a provider id like any
