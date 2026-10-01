@@ -132,6 +132,7 @@ func (c *Client) handleQueueChanged(msg *Message) {
 		return
 	}
 	c.learnPromptIDLocked(n)
+	c.noteQueueNamedLocked(n)
 	start, end := c.trackForeignLocked(n.RunningPromptID, n.RunningText)
 	h := c.foreignHandler
 	c.mu.Unlock()
@@ -153,12 +154,25 @@ func (c *Client) handleQueueChanged(msg *Message) {
 //
 // An id learned is the prompt heard: grok has taken it into its queue, so a
 // refusal behind it is not one the prompt can be resent after (plan 033 C3r).
+//
+// The image resend's block 1 is the refused attempt's, and that attempt's id
+// was never learned (or it would have been heard, and not resent), so neither
+// retirement nor the text tells the two apart. The resend learns its id only
+// from a broadcast read after its own bytes were written (resendWritten) —
+// grok cannot name a prompt it has not read — and never an id grok named
+// before that write (queueNamed): a broadcast still listing the refused
+// attempt, however late, cannot then hand the resend that attempt's id, whose
+// completion would end the resend while it runs (plan 033 C6r, r2 #1a).
 func (c *Client) learnPromptIDLocked(n QueueChanged) {
 	if !c.inPrompt || c.promptID != "" || c.promptText == "" {
 		return
 	}
+	if c.resending && (!c.resendWritten || c.queueNamedFull) {
+		return
+	}
 	names := func(id, text string) bool {
 		return id != "" && !IsInterjectFallback(id) && !c.retiredLocked(id) &&
+			(!c.resending || !c.queueNamedLocked(id)) &&
 			(text == c.promptText || text == c.promptJoined)
 	}
 	for _, e := range n.Entries {
@@ -172,6 +186,47 @@ func (c *Client) learnPromptIDLocked(n QueueChanged) {
 		c.promptID = n.RunningPromptID
 		c.heard = true
 	}
+}
+
+// queueNamedCap bounds queueNamed. grok's queue holds the prompt in flight and
+// the odd interject fallback; a set this size between two prompts is not one
+// any agent sends, and past it a resend learns nothing (its reply ends it).
+const queueNamedCap = 64
+
+// noteQueueNamedLocked records every promptId a broadcast names, queued or
+// running, in queueNamed — but nothing once a resend's bytes are out: a
+// broadcast read after the write may name the resend itself, the one id it
+// must stay free to learn. Ids named before the write stay in, however the
+// broadcasts after it change.
+func (c *Client) noteQueueNamedLocked(n QueueChanged) {
+	if c.resending && c.resendWritten {
+		return
+	}
+	add := func(id string) {
+		if id == "" || c.queueNamedLocked(id) {
+			return
+		}
+		if len(c.queueNamed) == queueNamedCap {
+			c.queueNamedFull = true
+			return
+		}
+		c.queueNamed = append(c.queueNamed, id)
+	}
+	for _, e := range n.Entries {
+		add(e.ID)
+	}
+	add(n.RunningPromptID)
+}
+
+// queueNamedLocked reports whether grok's queue named id since the last
+// prompt that was not a resend opened (queueNamed).
+func (c *Client) queueNamedLocked(id string) bool {
+	for _, q := range c.queueNamed {
+		if q == id {
+			return true
+		}
+	}
+	return false
 }
 
 // trackForeignLocked turns the broadcast's running id into foreign-turn

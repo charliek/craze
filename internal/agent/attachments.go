@@ -360,10 +360,24 @@ func ReadAttachments(dir string, refs []AttachmentRef, visible string) (atts []A
 //     it, so a text carrying one shows no label at all: "" (every image of the
 //     message is dropped). The composer never produces one (its textarea strips
 //     controls); a socket client can, and is then not taken at its word.
+//   - A bidi embedding, override or isolate (U+202A–U+202E, U+2066–U+2069,
+//     isBidi) drawn anywhere reorders what follows it: a label can be drawn
+//     backwards, or out of its place, while its bytes still match. It shows no
+//     label either: "" (plan 033 C6r, r2 #2a). Stripping it and matching what is
+//     left would judge a string the terminal does not draw. The textarea keeps
+//     these (it strips Cc, and they are Cf), so a paste can carry one too.
+//   - Invalid UTF-8 anywhere — a raw 8-bit C1 byte, 0x9B CSI or 0x9D OSC rather
+//     than its UTF-8 spelling — is "": a terminal that honours 8-bit controls
+//     executes it, and a raw 0x9C inside a string sequence's payload ends that
+//     sequence early there, drawing the rest (plan 033 C6r, r2 #2b).
 //
-// Zero-width and bidi runes stay: inside a label they break the match, which
-// is the safe side.
+// Zero-width runes and the two marks (LRM, RLM) stay: inside a label they
+// break the match, which is the safe side, and outside one they reorder
+// nothing.
 func visibleText(s string) string {
+	if !utf8.ValidString(s) {
+		return ""
+	}
 	var b strings.Builder
 	cut := false // a string sequence was removed: b holds the projection
 	start := 0   // the start of the run not yet copied to b
@@ -383,6 +397,9 @@ func visibleText(s string) string {
 			return ""
 		case c >= 0x80:
 			r, size := utf8.DecodeRuneInString(s[i:])
+			if isBidi(r) {
+				return ""
+			}
 			if !isC1(r) {
 				i += size
 				continue

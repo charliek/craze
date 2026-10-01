@@ -726,13 +726,29 @@ func (c visionCheck) noVision() string {
 	return c.name
 }
 
+// processImage is the processing a chip's bytes go through: attach.Process. A
+// var only so tests can make it panic; nothing in craze writes it.
+var processImage = attach.Process
+
 // processAttachment is one chip's processing, off the Update (§3.3): the
 // pasted file read (at most attach.MaxSourceBytes, through openSource) or the
 // clipboard's bytes, attach.Process — the one processing path, P30 — and the
 // copy stored in dir (attach.Save; never "": addImages makes no chip without
 // one). Its answer is attachDoneMsg.
+//
+// It always answers, a panic included: the decoders run on whatever the user
+// pasted, and a panic in them would otherwise leave the chip pending — every
+// send of the draft held, and quit waiting on it — or take the whole program
+// down with it (bubbletea's recovery of a command ends the program). A panic
+// is a failed processing, so the chip reverts to its text with a note (plan
+// 033 C6r, r2 #3). The lane's slot is released by processCmd's own defer.
 func processAttachment(dir string, src attachSource, id, shown uint64, vc visionCheck) tea.Cmd {
-	return func() tea.Msg {
+	return func() (answer tea.Msg) {
+		defer func() {
+			if v := recover(); v != nil {
+				answer = attachDoneMsg{id: id, shownGen: shown, err: fmt.Errorf("craze could not process it (%v)", v)}
+			}
+		}()
 		msg := attachDoneMsg{id: id, shownGen: shown}
 		data := src.data
 		if data == nil {
@@ -743,7 +759,7 @@ func processAttachment(dir string, src attachSource, id, shown uint64, vc vision
 			}
 			data = b
 		}
-		img, err := attach.Process(data)
+		img, err := processImage(data)
 		if err != nil {
 			msg.err = err
 			return msg

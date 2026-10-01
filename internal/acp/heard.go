@@ -156,7 +156,11 @@ const (
 // On grok the resend's turn is settled by a prompt_complete only once
 // queue/changed has named the resend's own promptId: block 1 is the refused
 // prompt's, so a late completion of that prompt — its id never learned —
-// could otherwise end the resend while it runs. The RPC reply always ends it.
+// could otherwise end the resend while it runs. Its own id is one a broadcast
+// names after the resend's bytes were written and no broadcast named before
+// (learnPromptIDLocked), so a late broadcast still listing the refused prompt
+// cannot pass that prompt's id off as the resend's. The RPC reply always ends
+// it.
 func (c *Client) ResendBlocks(ctx context.Context, blocks []ContentBlock, accepted, sent func()) (*PromptResult, error) {
 	return c.promptBlocks(ctx, blocks, accepted, sent, true)
 }

@@ -176,7 +176,8 @@ func TestJPEGMetaWalksEveryScan(t *testing.T) {
 
 // TestJPEGMetaCutsAPP1AfterTheFirstScan is r1 #9: an APP1 the decoder takes
 // in its stride — before EOI, between a progressive file's scans, after fill
-// bytes — is cut like one up front, and what follows EOI is dropped. Each
+// bytes — is cut like one up front, and what follows EOI is dropped; IPTC and
+// comments too (C6r, r2 #4a). Each
 // planted file still decodes to the same pixels, which is what makes it a
 // file a camera or an editor could hand over.
 func TestJPEGMetaCutsAPP1AfterTheFirstScan(t *testing.T) {
@@ -189,10 +190,13 @@ func TestJPEGMetaCutsAPP1AfterTheFirstScan(t *testing.T) {
 			"before EOI and up front":   afterSOI(insertAt(b, eoi, xmp), exifAPP1(1, false)),
 			"a trailer after EOI":       append(append([]byte{}, b...), []byte("motion-photo video")...),
 			"an APP1 and a trailer too": append(insertAt(b, eoi, xmp), 0xff, 0xd8, 0xff, 0xe1, 0, 4, 'x', 'y'),
+			"IPTC before EOI":           insertAt(b, eoi, iptcAPP13("a byline")),
+			"a comment before EOI":      insertAt(b, eoi, segment(markerCOM, []byte("a comment"))),
 		}
 		if sos := sosOffsets(b); len(sos) > 1 {
 			cases["between scans"] = insertAt(b, sos[1], xmp)
 			cases["before the last scan"] = insertAt(b, sos[len(sos)-1], xmp)
+			cases["a comment and IPTC between scans"] = insertAt(insertAt(b, sos[1], segment(markerCOM, []byte("c"))), sos[1], iptcAPP13("x"))
 		}
 		for what, planted := range cases {
 			if !samePixels(planted, b) {
@@ -203,6 +207,34 @@ func TestJPEGMetaCutsAPP1AfterTheFirstScan(t *testing.T) {
 				t.Errorf("%s, %s: jpegMeta = (%d, %d bytes, %v), want the fixture's %d bytes", name, what, o, len(s), ok, len(b))
 			}
 		}
+	}
+}
+
+// TestJPEGMetaKeepsWhatDrawsThePixels (C6r, r2 #4a): the segments that say
+// how to read the pixels — APP0 (JFIF), APP2 (the ICC profile), APP14 (Adobe's
+// colour transform) — stay, byte for byte and in place, beside the metadata
+// cut around them.
+func TestJPEGMetaKeepsWhatDrawsThePixels(t *testing.T) {
+	plain := encodeJPEG(t, gradient(16, 16), 90)
+	jfif := segment(markerAPP0, []byte("JFIF\x00\x01\x02\x00\x00\x01\x00\x01\x00\x00"))
+	icc := segment(markerAPP2, append([]byte("ICC_PROFILE\x00\x01\x01"), bytes.Repeat([]byte{7}, 40)...))
+	adobe := segment(markerAPP14, []byte("Adobe\x00\x64\x00\x00\x00\x00\x01"))
+	kept := afterSOI(plain, jfif, icc, adobe)
+	planted := afterSOI(plain, jfif, segment(markerCOM, []byte("a note")), icc, iptcAPP13("a place"), adobe, exifAPP1(1, false))
+	o, s, ok := jpegMeta(planted)
+	if !ok || o != 1 || !bytes.Equal(s, kept) {
+		t.Fatalf("jpegMeta = (%d, %d bytes, %v), want the %d bytes with APP0, APP2 and APP14 kept", o, len(s), ok, len(kept))
+	}
+	if _, again, ok := jpegMeta(kept); !ok || !bytes.Equal(again, kept) {
+		t.Fatal("a file of the kept segments alone was cut")
+	}
+	for m := byte(markerAPP0); m <= markerAPP15; m++ {
+		if want := m != markerAPP0 && m != markerAPP2 && m != markerAPP14; jpegMetadata(m) != want {
+			t.Errorf("jpegMetadata(APP%d) = %v, want %v", m-markerAPP0, !want, want)
+		}
+	}
+	if !jpegMetadata(markerCOM) || jpegMetadata(markerSOS) || jpegMetadata(0xdb) || jpegMetadata(0xc0) {
+		t.Error("COM, or a table or frame marker, judged wrongly")
 	}
 }
 
@@ -236,35 +268,45 @@ func markerOffsets(b []byte) []int {
 	return out
 }
 
+// metadataMarkers is every segment marker jpegMeta cuts (jpegMetadata), as the
+// fuzz plants them: APP1, APP3 to APP13, APP15 and COM.
+var metadataMarkers = []byte{
+	markerAPP1, 0xe3, 0xe4, 0xe5, 0xe6, 0xe7, 0xe8, 0xe9, 0xea, 0xeb, 0xec,
+	markerAPP13, markerAPP15, markerCOM,
+}
+
 // FuzzJPEGMeta: the walk is total over anything a paste can hold. It never
 // panics, the orientation is always one of the eight, and when it answers ok
 // the result is no longer than the input, still starts with SOI, and walks
 // again with nothing left to cut.
 //
-// And it cuts every APP1, wherever one sits (C3r, r1 #9). That half does not
-// trust the walk to say where the markers are — a walk that stopped at the
-// first scan would agree with itself: the second walk of its output stopped
-// at the same place. An APP1 with the fuzzed payload is planted in front of a
-// fuzz-chosen marker of a fixture (markerOffsets: before a table, an SOS
-// between a progressive file's scans, EOI), Go's decoder confirms the planted
-// file decodes to the fixture's pixels, and the walk must give the fixture
-// back, byte for byte.
+// And it cuts every metadata segment, wherever one sits (C3r, r1 #9; C6r, r2
+// #4a). That half does not trust the walk to say where the markers are — a
+// walk that stopped at the first scan would agree with itself: the second walk
+// of its output stopped at the same place. A segment of a fuzz-chosen metadata
+// kind (APP1, APP13, COM, a vendor's APPn: metadataMarkers) with the fuzzed
+// payload is planted in front of a fuzz-chosen marker of a fixture
+// (markerOffsets: before a table, an SOS between a progressive file's scans,
+// EOI), Go's decoder confirms the planted file decodes to the fixture's
+// pixels, and the walk must give the fixture back, byte for byte.
 func FuzzJPEGMeta(f *testing.F) {
 	fixtures := multiScanFixtures(f)
 	names := []string{"go baseline", "prog16", "base24rst", "prog24"}
 	good := fixtures["go baseline"]
-	f.Add(good, uint16(0), []byte("x"))
-	f.Add(afterSOI(good, exifAPP1(6, false), xmpAPP1(8)), uint16(5), []byte{})
-	f.Add(afterSOI(good, exifAPP1(8, true)), uint16(6), []byte("http://ns.adobe.com/xap/1.0/"))
-	f.Add([]byte{0xff, markerSOI, 0xff, markerAPP1, 0x00, 0x08, 'E', 'x', 'i', 'f', 0, 0}, uint16(1), []byte{0xff, markerAPP1, 0, 8})
-	f.Add([]byte{}, uint16(0), []byte{})
+	f.Add(good, uint16(0), []byte("x"), uint8(0))
+	f.Add(afterSOI(good, exifAPP1(6, false), xmpAPP1(8)), uint16(5), []byte{}, uint8(1))
+	f.Add(afterSOI(good, exifAPP1(8, true)), uint16(6), []byte("http://ns.adobe.com/xap/1.0/"), uint8(2))
+	f.Add([]byte{0xff, markerSOI, 0xff, markerAPP1, 0x00, 0x08, 'E', 'x', 'i', 'f', 0, 0}, uint16(1), []byte{0xff, markerAPP1, 0, 8}, uint8(3))
+	f.Add(afterSOI(good, iptcAPP13("a byline"), segment(markerCOM, []byte("a comment"))), uint16(2), []byte("Photoshop 3.0"), uint8(1))
+	f.Add([]byte{}, uint16(0), []byte{}, uint8(0))
 	for k, name := range names {
 		for j := range markerOffsets(fixtures[name]) {
-			// at picks the fixture (at % 4) and its marker ((at / 4) % count).
-			f.Add([]byte{}, uint16(j*len(names)+k), []byte("private"))
+			// at picks the fixture (at % 4) and its marker ((at / 4) % count);
+			// kind picks what is planted there (kind % len(metadataMarkers)).
+			f.Add([]byte{}, uint16(j*len(names)+k), []byte("private"), uint8(j+k))
 		}
 	}
-	f.Fuzz(func(t *testing.T, b []byte, at uint16, payload []byte) {
+	f.Fuzz(func(t *testing.T, b []byte, at uint16, payload []byte, kind uint8) {
 		o, s, ok := jpegMeta(b)
 		if o < 1 || o > 8 {
 			t.Fatalf("orientation %d", o)
@@ -274,7 +316,7 @@ func FuzzJPEGMeta(f *testing.F) {
 				t.Fatalf("the cut is %d bytes from %d", len(s), len(b))
 			}
 			if _, again, ok := jpegMeta(s); !ok || !bytes.Equal(again, s) {
-				t.Fatal("the cut left an APP1, or a file that no longer walks")
+				t.Fatal("the cut left a metadata segment, or a file that no longer walks")
 			}
 		}
 
@@ -284,12 +326,15 @@ func FuzzJPEGMeta(f *testing.F) {
 		if len(payload) > 0xfff0 {
 			return
 		}
-		planted := insertAt(base, off, segment(markerAPP1, payload))
+		marker := metadataMarkers[int(kind)%len(metadataMarkers)]
+		planted := insertAt(base, off, segment(marker, payload))
 		if !samePixels(planted, base) {
-			t.Fatalf("an APP1 before the marker at %d does not decode to the fixture's pixels", off)
+			t.Fatalf("a %#x segment before the marker at %d does not decode to the fixture's pixels", marker, off)
 		}
-		if o, s, ok := jpegMeta(planted); !ok || o != 1 || !bytes.Equal(s, base) {
-			t.Fatalf("an APP1 before the marker at %d of a %d-byte fixture: jpegMeta = (%d, %d bytes, %v), want the fixture back", off, len(base), o, len(s), ok)
+		// A planted APP1 the fuzzer made an EXIF of may say an orientation.
+		exif := marker == markerAPP1 && bytes.HasPrefix(payload, []byte(exifHeader))
+		if o, s, ok := jpegMeta(planted); !ok || (o != 1 && !exif) || !bytes.Equal(s, base) {
+			t.Fatalf("a %#x segment before the marker at %d of a %d-byte fixture: jpegMeta = (%d, %d bytes, %v), want the fixture back", marker, off, len(base), o, len(s), ok)
 		}
 	})
 }

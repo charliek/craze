@@ -83,7 +83,8 @@ var errNoTextBackend = errors.New("tui: no clipboard tool lists types")
 // backend that fails gives way to the next; one that lists no text type
 // stops the read with no text — the clipboard holds none, an image say, and
 // asking another tool would not change that. errNoTextBackend when none
-// could list.
+// could list. Text read as X11's STRING or TEXT is Latin-1 and comes back as
+// UTF-8 (latin1Type).
 func readTextFrom(ctx context.Context, backends []clipBackend) (string, error) {
 	for _, b := range backends {
 		types, err := b.types(ctx)
@@ -98,9 +99,34 @@ func readTextFrom(ctx context.Context, backends []clipBackend) (string, error) {
 		if err != nil {
 			continue
 		}
+		if latin1Type(typ) {
+			return latin1ToUTF8(data), nil
+		}
 		return string(data), nil
 	}
 	return "", errNoTextBackend
+}
+
+// latin1Type reports whether typ is one of X11's Latin-1 text types: STRING,
+// which the ICCCM defines as ISO-8859-1, and TEXT, which an owner answers with
+// STRING when it can. An app that offers only these — no UTF8_STRING, no
+// text/plain — hands over "café" as 63 61 66 e9, not valid UTF-8, and
+// pastableText would refuse it as not text (plan 033 C6r, r2 #6). XWayland
+// lists them under the same names to wl-paste.
+func latin1Type(typ string) bool {
+	return typ == "STRING" || typ == "TEXT"
+}
+
+// latin1ToUTF8 is ISO-8859-1 text as UTF-8: each byte the code point of the
+// same number. Every byte decodes, so whether it is text at all is still
+// pastableText's question — an image's bytes offered as STRING carry a NUL.
+func latin1ToUTF8(b []byte) string {
+	var s strings.Builder
+	s.Grow(len(b) + len(b)/2)
+	for _, c := range b {
+		s.WriteRune(rune(c))
+	}
+	return s.String()
 }
 
 // readClipboardText is nativePaste's production reader: the typed backends,

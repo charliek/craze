@@ -113,11 +113,17 @@ var (
 	ErrUnsafeDir = errors.New("craze's attachments directory is not private to this user")
 )
 
-// refusals is every sentinel the package refuses with, ErrNotStored (the
-// store's) included: what Reason recognises.
+// ErrStoreBusy is a Save that could not take the store's lock within its
+// wait: a sweep (or another craze's Save) held it throughout, and the image
+// is not stored rather than stored without it (plan 033 C6r, r2 #5).
+var ErrStoreBusy = errors.New("craze's attachments directory was busy; paste it again")
+
+// refusals is every sentinel the package refuses with, ErrNotStored and
+// ErrStoreBusy (the store's) included: what Reason recognises.
 var refusals = [...]error{
 	ErrNotImage, ErrSourceTooLarge, ErrTooManyPixels, ErrTooSmall, ErrTooLarge,
 	ErrOverEdge, ErrWrongType, ErrNotRegular, ErrUnsafeDir, ErrNotStored,
+	ErrStoreBusy,
 }
 
 // Reason is the refusal err carries, in its sentinel's own words — the reason
@@ -137,7 +143,8 @@ func Reason(err error) string {
 // Image is a processed image: what Process returns and the store keeps.
 type Image struct {
 	// Data is the image file. For a pass-through it is the source itself
-	// (sharing its backing array), with a JPEG's APP1 segments cut out.
+	// (sharing its backing array), or the source with its metadata cut out
+	// (Process).
 	Data []byte
 	// MIME is Data's media type: one of MIMEPNG, MIMEJPEG and MIMEWebP.
 	MIME string

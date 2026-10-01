@@ -106,6 +106,54 @@ func TestTheClipboardTextReadAsksForAType(t *testing.T) {
 	}
 }
 
+// TestLatin1ClipboardTextIsDecoded is r2 #6 (plan 033 C6r): text an app
+// offers only as X11's STRING or TEXT is Latin-1 — "café" is 63 61 66 e9 — and
+// is read as UTF-8, so it pastes instead of being refused as not text; through
+// xclip and through wl-paste (XWayland's names). UTF-8 types are untouched,
+// and an image's bytes offered as STRING are still not text: they carry a NUL.
+func TestLatin1ClipboardTextIsDecoded(t *testing.T) {
+	env := func(vars map[string]string) func(string) string { return func(k string) string { return vars[k] } }
+	x11 := map[string]string{"DISPLAY": ":0"}
+	wayland := map[string]string{"WAYLAND_DISPLAY": "wayland-0"}
+	for _, tc := range []struct {
+		name string
+		vars map[string]string
+		clip fakeClipboard
+		want string
+		text bool
+	}{
+		{"x11 STRING", x11,
+			fakeClipboard{tools: map[string][]string{"xclip": {"TARGETS", "STRING"}}, data: map[string]string{"STRING": "caf\xe9"}},
+			"café", true},
+		{"x11 TEXT", x11,
+			fakeClipboard{tools: map[string][]string{"xclip": {"TARGETS", "TEXT"}}, data: map[string]string{"TEXT": "na\xefve \xbd\xb0"}},
+			"naïve ½°", true},
+		{"xwayland STRING through wl-paste", wayland,
+			fakeClipboard{tools: map[string][]string{"wl-paste": {"STRING", "TEXT"}}, data: map[string]string{"STRING": "\xc5ngstr\xf6m"}},
+			"Ångström", true},
+		{"UTF8_STRING is not decoded again", x11,
+			fakeClipboard{tools: map[string][]string{"xclip": {"TARGETS", "UTF8_STRING", "STRING"}}, data: map[string]string{"UTF8_STRING": "café"}},
+			"café", true},
+		{"an image's bytes as STRING", x11,
+			fakeClipboard{tools: map[string][]string{"xclip": {"TARGETS", "STRING"}}, data: map[string]string{"STRING": pngClip}},
+			latin1ToUTF8([]byte(pngClip)), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := readTextVia("linux", env(tc.vars), tc.clip.run, func() (string, error) {
+				t.Fatal("the untyped read ran")
+				return "", nil
+			})
+			if err != nil || got != tc.want {
+				t.Fatalf("read %q, %v; want %q", got, err, tc.want)
+			}
+			msg := readPaste(func() (string, error) { return got, nil }, pasteMsg{}).(pasteMsg)
+			if pasted := msg.text == tc.want && !msg.textRefused; pasted != tc.text {
+				t.Fatalf("readPaste = %#v; pasted %v, want %v", msg, pasted, tc.text)
+			}
+		})
+	}
+}
+
 // TestTheClipboardTextTypeOrder: UTF-8 first in either spelling, then the
 // older plain forms, then any text/*; nothing else is text.
 func TestTheClipboardTextTypeOrder(t *testing.T) {

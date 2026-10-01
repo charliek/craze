@@ -358,6 +358,10 @@ func (c *readCall) file(ctx context.Context, env tool.Env, f *os.File, fileSize 
 // call waiting for the lane still stops at a cancel.
 var imageLane = make(chan struct{}, 1)
 
+// processImage is the processing an image read goes through: attach.Process.
+// A var only so tests can hold a read inside it; nothing in craze writes it.
+var processImage = attach.Process
+
 // image is read's image mode (plan 033 §3.5, owner decision 8), for a file
 // media sniffed as an image (png, jpeg, gif or webp, by its bytes or else its
 // name), of fileSize bytes, open as f; the checks every read makes — the
@@ -389,6 +393,13 @@ func (c *readCall) image(ctx context.Context, env tool.Env, f *os.File, fileSize
 		return tool.Result{}, ctx.Err()
 	}
 	defer func() { <-imageLane }()
+	// A cancel is checked again at every step from here (plan 033 C6r, r2b
+	// #13), and answered with ctx.Err(), which Run turns into an aborted call
+	// with no image (errorResult). The lane and a cancel can be ready at once,
+	// and select may take the lane: such a call reads nothing.
+	if err := ctx.Err(); err != nil {
+		return tool.Result{}, err
+	}
 	// One byte past the cap, so a file that grew since its stat is refused
 	// by Process's own size check rather than read without end.
 	src, err := io.ReadAll(io.NewSectionReader(f, 0, attach.MaxSourceBytes+1))
@@ -398,7 +409,13 @@ func (c *readCall) image(ctx context.Context, env tool.Env, f *os.File, fileSize
 	if err := ctx.Err(); err != nil {
 		return tool.Result{}, err
 	}
-	img, err := attach.Process(src)
+	img, err := processImage(src)
+	// Process takes no context, so a cancel that came while it decoded is
+	// seen only now: a cancelled call returns no image, whatever Process made
+	// of the file.
+	if cerr := ctx.Err(); cerr != nil {
+		return tool.Result{}, cerr
+	}
 	if err != nil {
 		return tool.Result{}, c.imageRefused(err)
 	}

@@ -526,8 +526,10 @@ func TestReadAttachments(t *testing.T) {
 // DCS, APC, PM or SOS, in either spelling, closed or not — is not visible, and
 // a text with anything that can move, erase, recolour or conceal what is drawn
 // (a CSI eating the label's bracket, SGR conceal, a lone CR, backspace, an
-// 8-bit CSI) shows no label at all. A plain label still counts, beside a title
-// or across a CRLF too.
+// 8-bit CSI) shows no label at all. Nor does one with a bidi embedding,
+// override or isolate anywhere it is drawn, nor one with invalid UTF-8 — a raw
+// 8-bit C1 byte — anywhere (C6r, r2 #2a/#2b). A plain label still counts,
+// beside a title, across a CRLF, or between the two bidi marks too.
 func TestALabelMustBeDrawnToCount(t *testing.T) {
 	good := testPNG(t, 16, 16)
 	cases := []struct {
@@ -557,6 +559,24 @@ func TestALabelMustBeDrawnToCount(t *testing.T) {
 		{"another ESC sequence", "[Image #1]\x1b8 hello", false},
 		{"DEL", "[Image #1]\x7f", false},
 		{"a C1 control", "[Image #1]\u0085", false},
+		// r2 #2a: a bidi embedding, override or isolate reorders what is drawn.
+		{"an RLO reversing the label", "look at \u202e[Image #1]", false},
+		{"an RLO after the label", "[Image #1] \u202eolleh", false},
+		{"an LRE", "\u202a[Image #1]", false},
+		{"an RLE", "\u202b[Image #1]", false},
+		{"a PDF", "[Image #1]\u202c", false},
+		{"an LRO", "\u202d[Image #1]", false},
+		{"an LRI", "\u2066[Image #1]\u2069", false},
+		{"an RLI", "\u2067[Image #1]", false},
+		{"an FSI", "\u2068[Image #1]", false},
+		{"a PDI", "[Image #1]\u2069", false},
+		{"an RLM and an LRM beside the label", "\u200f[Image #1]\u200e", true},
+		{"a bidi override inside an OSC title", "\x1b]0;\u202etitle\x07look at [Image #1]", true},
+		// r2 #2b: invalid UTF-8, the raw 8-bit C1 bytes among it.
+		{"a raw 8-bit CSI", "\x9b8m[Image #1] hello", false},
+		{"a raw 8-bit OSC", "\x9d0;title\x9c[Image #1]", false},
+		{"a raw 8-bit ST ending a title early", "\x1b]0;title\x9c[Image #1]", false},
+		{"Latin-1 after the label", "[Image #1] caf\xe9", false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -703,6 +723,8 @@ func FuzzSplitAttachments(f *testing.F) {
 	f.Add(shell + AttachmentBlock(refs))
 	f.Add("plain text")
 	f.Add(AttachmentBlock(refs) + "\x1b]0;[Image #1]\x07 and [Image #2]\r\n")
+	f.Add(AttachmentBlock(refs) + "\u202e[Image #1] \x1b]0;\u2066\x07[Image #2]")
+	f.Add(AttachmentBlock(refs) + "\x1b]0;t\x9c[Image #1] caf\xe9")
 	f.Fuzz(func(t *testing.T, text string) {
 		got, rest, _ := SplitAttachments(text)
 		if !strings.HasPrefix(text, attachmentsOpen) && (got != nil || rest != text) {
@@ -733,9 +755,14 @@ func FuzzSplitAttachments(f *testing.F) {
 			t.Fatalf("path text from no envelope: %q", out)
 		}
 		// P28's projection (C3r) is total, and what it keeps is drawable: no
-		// escape, no control but a newline, a tab or a CRLF's CR.
-		for _, r := range visibleText(rest) {
-			if r == 0x1b || r == 0x7f || isC1(r) || (r < 0x20 && r != '\n' && r != '\t' && r != '\r') {
+		// escape, no control but a newline, a tab or a CRLF's CR, no bidi
+		// embedding, override or isolate, and nothing but valid UTF-8 (C6r).
+		v := visibleText(rest)
+		if !utf8.ValidString(v) {
+			t.Fatalf("visibleText(%q) = %q, not valid UTF-8", rest, v)
+		}
+		for _, r := range v {
+			if r == 0x1b || r == 0x7f || isC1(r) || isBidi(r) || (r < 0x20 && r != '\n' && r != '\t' && r != '\r') {
 				t.Fatalf("visibleText(%q) kept %U", rest, r)
 			}
 		}

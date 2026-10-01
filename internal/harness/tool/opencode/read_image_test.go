@@ -178,3 +178,68 @@ func TestReadImageWaitsForTheLane(t *testing.T) {
 
 	readImage(t, f, "shot.png", shot, "Read image file: "+f.path("shot.png")+" (16×16 image/png)")
 }
+
+// TestACancelledImageReadReturnsNoImage is r2b #13 (plan 033 C6r): Process
+// takes no context, so a read cancelled while it decodes — held there by the
+// processImage seam — must not answer with the image Process then makes: it
+// is an aborted call with no media, as a cancel during the lane's wait is. And
+// a read already cancelled when it reaches a free lane, the two ready at once,
+// never gets as far as Process.
+func TestACancelledImageReadReturnsNoImage(t *testing.T) {
+	f := newFixture(t)
+	f.d.SetVision(true, "Eye")
+	shot := pngOf(t, 16, 16)
+	put(t, f.path("shot.png"), string(shot))
+	entered, release := make(chan struct{}), make(chan struct{})
+	processImage = func(src []byte) (attach.Image, error) {
+		close(entered)
+		<-release
+		return attach.Process(src)
+	}
+	t.Cleanup(func() { processImage = attach.Process })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan tool.Result, 1)
+	go func() {
+		_, res := f.callCtx(t, ctx, "read", map[string]any{"filePath": "shot.png"})
+		done <- res
+	}()
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the read never reached Process")
+	}
+	cancel()
+	close(release)
+	var res tool.Result
+	select {
+	case res = <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the read never answered")
+	}
+	if res.Media != nil {
+		t.Fatal("a read cancelled during Process carried the image")
+	}
+	failed(t, res, tool.ClassAborted, tool.AbortedText)
+
+	// Cancelled when it reaches the lane, the lane free: whichever case its
+	// select takes, nothing is processed. The call is run as the tool's own
+	// (the dispatcher answers a call cancelled before it starts itself, and
+	// would never reach the lane).
+	processImage = func([]byte) (attach.Image, error) {
+		t.Error("a cancelled read processed its image")
+		return attach.Image{}, fmt.Errorf("cancelled")
+	}
+	gone, stop := context.WithCancel(context.Background())
+	stop()
+	call := &readCall{abs: f.path("shot.png"), title: "shot.png"}
+	env := tool.Env{Home: t.TempDir(), Vision: true, ModelName: "Eye"}
+	for range 20 {
+		res := call.Run(gone, env)
+		if res.Media != nil {
+			t.Fatal("a cancelled read carried an image")
+		}
+		failed(t, res, tool.ClassAborted, tool.AbortedText)
+	}
+}

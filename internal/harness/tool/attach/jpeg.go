@@ -7,14 +7,37 @@ import (
 
 // JPEG markers jpegMeta reads (ITU T.81 Annex B).
 const (
-	markerSOI  = 0xd8
-	markerEOI  = 0xd9
-	markerSOS  = 0xda
-	markerAPP1 = 0xe1
-	markerTEM  = 0x01
-	markerRST0 = 0xd0
-	markerRST7 = 0xd7
+	markerSOI   = 0xd8
+	markerEOI   = 0xd9
+	markerSOS   = 0xda
+	markerAPP0  = 0xe0
+	markerAPP1  = 0xe1
+	markerAPP2  = 0xe2
+	markerAPP13 = 0xed
+	markerAPP14 = 0xee
+	markerAPP15 = 0xef
+	markerCOM   = 0xfe
+	markerTEM   = 0x01
+	markerRST0  = 0xd0
+	markerRST7  = 0xd7
 )
+
+// jpegMetadata reports whether a segment with this marker is metadata the
+// walk cuts: a comment (COM), and every application segment but the three
+// that say how to read the pixels — APP0 (JFIF), APP2 (the ICC profile) and
+// APP14 (Adobe's colour transform). The rest carry the user's, never the
+// image's: APP1 EXIF and XMP (the camera, the time, GPS, a thumbnail of the
+// uncropped original), APP13 Photoshop/IPTC (a caption, a byline, a place),
+// APP11's JUMBF (content credentials, a signer's name), the vendors' APP3 to
+// APP12 and APP15 (plan 033 C6r, r2 #4a, which named APP13 and COM). No
+// decoder draws a pixel from any of them.
+func jpegMetadata(marker byte) bool {
+	if marker == markerCOM {
+		return true
+	}
+	return marker >= markerAPP0 && marker <= markerAPP15 &&
+		marker != markerAPP0 && marker != markerAPP2 && marker != markerAPP14
+}
 
 // exifHeader leads an APP1 segment that holds EXIF (XMP's APP1 leads with a
 // namespace URI instead, and is cut all the same).
@@ -30,22 +53,23 @@ const (
 // entropy-coded data (stuffed zeros, restart markers and fill bytes stepped
 // over), the tables and segments between a progressive file's scans, to EOI —
 // and returns the EXIF orientation (1 when there is none, or it is unreadable
-// or out of range) and the file with every APP1 segment cut out, wherever it
-// sits, and nothing after its EOI. A file with no APP1 and nothing past its
-// EOI comes back as the same slice. ok is false when the file cannot be walked
-// to an EOI after at least one scan: the caller then re-encodes rather than
-// guess what a lossless cut of it would be (plan 033 C3r, r1 #9: an APP1 after
-// the first scan used to be copied through with the scan data).
+// or out of range) and the file with every metadata segment (jpegMetadata:
+// APP1, APP13, COM and the other application segments but APP0, APP2 and
+// APP14) cut out, wherever it sits, and nothing after its EOI. A file with no
+// such segment and nothing past its EOI comes back as the same slice. ok is
+// false when the file cannot be walked to an EOI after at least one scan: the
+// caller then re-encodes rather than guess what a lossless cut of it would be
+// (plan 033 C3r, r1 #9: an APP1 after the first scan used to be copied through
+// with the scan data).
 //
-// APP1 carries EXIF and XMP: the camera, the time, GPS, a thumbnail of the
-// uncropped original. None of it is the image, all of it is the user's, and
-// none of it is the model's business — and the decoder ignores an APP1
-// wherever it is, so a file can carry one between scans or before EOI as
-// well as up front. What follows EOI is not the image either (a phone's
-// motion-photo video, a vendor trailer): no decoder reads it. APP0 (JFIF),
-// APP2 (the ICC profile) and APP14 (Adobe's colour transform) stay: they say
-// how to read the pixels. The orientation is read only from an EXIF ahead of
-// the first scan, where EXIF belongs.
+// None of the metadata is the image, all of it is the user's, and none of it
+// is the model's business — and the decoder ignores those segments wherever
+// they are, so a file can carry one between scans or before EOI as well as up
+// front. What follows EOI is not the image either (a phone's motion-photo
+// video, a vendor trailer): no decoder reads it. APP0 (JFIF), APP2 (the ICC
+// profile) and APP14 (Adobe's colour transform) stay: they say how to read the
+// pixels. The orientation is read only from an EXIF APP1 ahead of the first
+// scan, where EXIF belongs.
 //
 // It is total over arbitrary bytes: every read is bounds-checked, and the walk
 // moves forward by at least one byte a step.
@@ -54,7 +78,7 @@ func jpegMeta(b []byte) (orientation int, stripped []byte, ok bool) {
 		return 1, nil, false
 	}
 	orientation = 1
-	var cuts [][2]int
+	cut := cutter{b: b}
 	foundOrientation, scanned := false, false
 	i := 2
 	for {
@@ -77,7 +101,7 @@ func jpegMeta(b []byte) (orientation int, stripped []byte, ok bool) {
 				// An EOI before any scan is not a JPEG this walk understands.
 				return 1, nil, false
 			}
-			return orientation, cutJPEG(b, cuts, i), true
+			return orientation, cut.end(i), true
 		case marker == 0x00, marker == markerSOI:
 			// A stuffed zero outside a scan is not a marker, and a second SOI
 			// is not a JPEG this walk understands.
@@ -92,8 +116,10 @@ func jpegMeta(b []byte) (orientation int, stripped []byte, ok bool) {
 		if n < 2 || i+n > len(b) {
 			return 1, nil, false
 		}
+		if jpegMetadata(marker) {
+			cut.cut(start, i+n)
+		}
 		if marker == markerAPP1 {
-			cuts = append(cuts, [2]int{start, i + n})
 			if payload := b[i+2 : i+n]; !scanned && !foundOrientation && bytes.HasPrefix(payload, []byte(exifHeader)) {
 				orientation, foundOrientation = exifOrientation(payload[len(exifHeader):]), true
 			}
@@ -131,21 +157,6 @@ func skipEntropy(b []byte, i int) int {
 		return i
 	}
 	return i
-}
-
-// cutJPEG is b up to end (just past its EOI) with every cut range removed;
-// b itself when there is nothing to remove.
-func cutJPEG(b []byte, cuts [][2]int, end int) []byte {
-	if len(cuts) == 0 {
-		return b[:end:end]
-	}
-	out := make([]byte, 0, end)
-	at := 0
-	for _, c := range cuts {
-		out = append(out, b[at:c[0]]...)
-		at = c[1]
-	}
-	return append(out, b[at:end]...)
 }
 
 // exifOrientation reads the orientation tag from a TIFF structure (EXIF's

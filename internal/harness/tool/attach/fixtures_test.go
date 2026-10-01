@@ -168,6 +168,17 @@ func exifAPP1(orientation uint16, bigEndian bool) []byte {
 	return segment(markerAPP1, append([]byte(exifHeader), tiff...))
 }
 
+// iptcAPP13 is an APP13 Photoshop segment holding one IPTC dataset (2:80,
+// the byline) with text in it.
+func iptcAPP13(text string) []byte {
+	iptc := []byte{0x1c, 2, 80, 0, 0}
+	binary.BigEndian.PutUint16(iptc[3:], uint16(len(text)))
+	iptc = append(iptc, text...)
+	payload := []byte("Photoshop 3.0\x008BIM\x04\x04\x00\x00")
+	payload = binary.BigEndian.AppendUint32(payload, uint32(len(iptc)))
+	return segment(markerAPP13, append(payload, iptc...))
+}
+
 // xmpAPP1 is an APP1 XMP segment padded to about n bytes.
 func xmpAPP1(n int) []byte {
 	payload := append([]byte("http://ns.adobe.com/xap/1.0/\x00<x:xmpmeta/>"), bytes.Repeat([]byte(" "), n)...)

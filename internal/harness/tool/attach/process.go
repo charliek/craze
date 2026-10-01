@@ -43,14 +43,20 @@ type limits struct {
 // decodes the image — every one, so a file that only looks like an image is
 // refused here and not by a provider mid-turn — and either:
 //
-//   - passes it through, bytes untouched, when it is a PNG, WebP or JPEG no
-//     larger than MaxEdge on its long edge and MaxBytes in size. A JPEG's APP1
-//     segments (EXIF and XMP: camera, GPS, thumbnails) are cut out losslessly
-//     first, and the size is checked after the cut. A JPEG whose EXIF
-//     orientation is not 1 is not passed through: the model sees pixels, not
-//     tags, so the rotation is applied by re-encoding;
+//   - passes it through, its image bytes untouched, when it is a PNG, WebP or
+//     JPEG no larger than MaxEdge on its long edge and MaxBytes in size. Its
+//     metadata is cut out losslessly first — a JPEG's APP1 (EXIF, XMP), APP13
+//     (IPTC), comments and the other vendors' segments (jpegMeta); a PNG's
+//     eXIf, tEXt, zTXt, iTXt, tIME and every ancillary chunk that is not about
+//     drawing the pixels (pngMeta); anything after the end of either — and the
+//     size is checked after the cut. A WebP with metadata, or anything else it
+//     does not know, is not passed through (webpPlain). Nor is a JPEG whose
+//     EXIF orientation is not 1: the model sees pixels, not tags, so the
+//     rotation is applied by re-encoding;
 //   - or re-encodes it: a GIF's first frame and every BMP always, anything
-//     else when it is too large or must be rotated. The image is scaled with
+//     else when it is too large, must be rotated, or carries metadata that
+//     cannot be cut losslessly (a WebP's; a PNG or JPEG that cannot be
+//     walked), which a re-encode never copies. The image is scaled with
 //     CatmullRom to a long edge of at most MaxEdge, oriented, and encoded as
 //     PNG; when that is over MaxBytes it is composited onto white (JPEG has no
 //     alpha) and stepped down through JPEG qualities 85, 75, 60 and 45, then
@@ -83,15 +89,21 @@ func (l limits) process(src []byte) (Image, error) {
 	if err != nil {
 		return Image{}, err
 	}
-	// pass is the file a pass-through would keep: the source, or a JPEG's
-	// source with its APP1 segments cut. nil means re-encode whatever the
-	// size: a GIF or BMP, or a JPEG whose header could not be walked, which
-	// cannot then be stripped losslessly either.
+	// pass is the file a pass-through would keep: the source with its
+	// metadata cut (plan 033 C6r). nil means re-encode whatever the size: a
+	// GIF or BMP, a WebP that is not plain, or a PNG or JPEG that could not be
+	// walked, which cannot then be stripped losslessly either.
 	var pass []byte
 	orientation := 1
 	switch cfg.MIME {
-	case MIMEPNG, MIMEWebP:
-		pass = src
+	case MIMEPNG:
+		if stripped, ok := pngMeta(src); ok {
+			pass = stripped
+		}
+	case MIMEWebP:
+		if webpPlain(src) {
+			pass = src
+		}
 	case MIMEJPEG:
 		if o, stripped, ok := jpegMeta(src); ok {
 			orientation, pass = o, stripped

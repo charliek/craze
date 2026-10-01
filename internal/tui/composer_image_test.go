@@ -1337,6 +1337,48 @@ func TestASkippedAnswerForAPendingChipStartsItAgain(t *testing.T) {
 	}
 }
 
+// TestAPanickingProcessingRevertsItsChip is r2 #3 (plan 033 C6r): a panic in
+// the processing — a decoder bug on what the user pasted — is a failed
+// processing. The command answers, the lane's slot and count are released,
+// the chip goes back to the path it stood for with a note, and Enter is no
+// longer held: the draft goes as the text it now is.
+func TestAPanickingProcessingRevertsItsChip(t *testing.T) {
+	m, stub := imageModel(t)
+	prev := processImage
+	processImage = func([]byte) (attach.Image, error) { panic("a decoder bug") }
+	t.Cleanup(func() { processImage = prev })
+	shot := shotPNG(t)
+	m = pasteText(t, m, shot)
+	if m.input.Value() != "[Image #1]" {
+		t.Fatalf("the paste: %q", m.input.Value())
+	}
+	// The paste's own command is counted and never run here (pasteText drops
+	// it): the count is held to what it was.
+	runs := m.attachRuns.runs.Load()
+	out := make(chan tea.Msg, 1)
+	goRun(m.processCmd(m.images.list[0]), out)
+	var msg tea.Msg
+	select {
+	case msg = <-out:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the panicking processing never answered")
+	}
+	if n := m.attachRuns.runs.Load(); n != runs || len(m.attachRuns.slot) != 0 {
+		t.Fatalf("%d processings counted (%d before), %d in the lane", n, runs, len(m.attachRuns.slot))
+	}
+	m = deliver(t, m, msg)
+	if m.input.Value() != shot || len(m.images.list) != 0 {
+		t.Fatalf("after the panic: draft %q, chips %+v", m.input.Value(), m.images.list)
+	}
+	if !strings.Contains(m.copyNote, "image #1 not attached: craze could not process it (a decoder bug)") {
+		t.Fatalf("note %q", m.copyNote)
+	}
+	_ = pressKey(t, m, tea.KeyEnter)
+	if sent := stub.Prompts(); len(sent) != 1 || sent[0] != shot {
+		t.Fatalf("the send after the revert: %q", sent)
+	}
+}
+
 // TestAChipTheEnvelopeCannotHoldStaysText is r1 #11 (plan 033 C3r; supersedes
 // X26): with an attachments directory near 400 bytes long, ten tiny images'
 // envelope would be over the host's 4 KiB, and the host would send every one

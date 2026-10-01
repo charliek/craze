@@ -518,9 +518,11 @@ at most 20 MiB, decodes as an image and is at least 8×8 pixels. These stay
 ### What craze does to the image
 
 Anything wider or taller than 2000 pixels is scaled down to 2000 on its long
-edge, an image over 3.75 MiB is re-encoded smaller, and photos lose their EXIF
-and XMP metadata, wherever in the file it is, and anything stored after the image
-itself. A `gif` sends its first frame as a `png`. When an image is
+edge, an image over 3.75 MiB is re-encoded smaller, and images lose their
+metadata, wherever in the file it is: a photo's EXIF, XMP, IPTC and comments, a
+`png`'s text, time and EXIF chunks (a macOS screenshot's XMP among them), and
+anything stored after the image itself. A `webp` with EXIF or XMP is sent as a
+`png`, and a `gif` sends its first frame as a `png`. When an image is
 scaled, the status line says so, for example `image #1 downscaled 3024×1964 →
 2000×1299`, and the agent is told too. Sources over 20 MiB or 50 megapixels are
 refused.

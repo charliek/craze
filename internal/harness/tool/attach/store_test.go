@@ -3,6 +3,7 @@ package attach
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -689,30 +690,147 @@ func TestASweepKeepsAFileThatChanged(t *testing.T) {
 }
 
 // TestTheStoreLockIsBounded: with the store's lock held elsewhere, Sweep gives
-// up quietly — nothing removed, no error — and Save goes on without it, each
-// after its own short wait.
+// up quietly — nothing removed, no error — and Save, after its own short wait,
+// fails with ErrStoreBusy and touches nothing: no refresh of a file it already
+// holds, no new file (plan 033 C6r, r2 #5; it used to go on without the lock).
+// Either half of the lock held is the lock held: the flock, by another craze,
+// and the in-process slot, by this one.
 func TestTheStoreLockIsBounded(t *testing.T) {
 	saveLockWait, sweepLockWait = 50*time.Millisecond, 50*time.Millisecond
-	t.Cleanup(func() { saveLockWait, sweepLockWait = time.Second, time.Second })
-	dir := madeDir(t)
-	now := time.Now()
-	old := agedSave(t, dir, []byte("old"), now)
-	unlock, err := atomicfile.Lock(filepath.Join(dir, lockName))
-	if err != nil {
-		t.Fatal(err)
+	t.Cleanup(func() { saveLockWait, sweepLockWait = 5*time.Second, time.Second })
+	for _, half := range []string{"the flock", "the in-process slot"} {
+		t.Run(half, func(t *testing.T) {
+			dir := madeDir(t)
+			now := time.Now()
+			old := agedSave(t, dir, []byte("old"), now)
+			before, err := os.Stat(old)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if half == "the flock" {
+				unlock, err := atomicfile.Lock(filepath.Join(dir, lockName))
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer unlock()
+			} else {
+				root, err := OpenDir(dir)
+				if err != nil {
+					t.Fatal(err)
+				}
+				slot := storeSlot(root)
+				root.Close()
+				slot <- struct{}{}
+				defer func() { <-slot }()
+			}
+			if n, err := Sweep(dir, now); err != nil || n != 0 {
+				t.Fatalf("Sweep under a held lock = %d, %v; want nothing, quietly", n, err)
+			}
+			if _, err := os.Stat(old); err != nil {
+				t.Fatalf("a sweep that gave up removed a file: %v", err)
+			}
+			if path, err := Save(dir, []byte("old"), MIMEPNG); !errors.Is(err, ErrStoreBusy) || path != "" {
+				t.Fatalf("Save of a stored file under a held lock = %q, %v; want ErrStoreBusy", path, err)
+			}
+			if after, err := os.Stat(old); err != nil || !after.ModTime().Equal(before.ModTime()) {
+				t.Fatalf("Save refreshed a file without the lock: %v", err)
+			}
+			if path, err := Save(dir, []byte("new"), MIMEPNG); !errors.Is(err, ErrStoreBusy) || path != "" {
+				t.Fatalf("Save of a new file under a held lock = %q, %v; want ErrStoreBusy", path, err)
+			}
+			entries, err := os.ReadDir(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(entries) != 2 { // the old file and .lock
+				t.Fatalf("Save wrote under a held lock: %d entries", len(entries))
+			}
+			if got := Reason(fmt.Errorf("x: %w", ErrStoreBusy)); got != ErrStoreBusy.Error() {
+				t.Fatalf("Reason = %q", got)
+			}
+		})
 	}
-	defer unlock()
-	if n, err := Sweep(dir, now); err != nil || n != 0 {
-		t.Fatalf("Sweep under a held lock = %d, %v; want nothing, quietly", n, err)
-	}
-	if _, err := os.Stat(old); err != nil {
-		t.Fatalf("a sweep that gave up removed a file: %v", err)
-	}
-	path, err := Save(dir, []byte("new"), MIMEPNG)
-	if err != nil {
-		t.Fatalf("Save under a held lock: %v", err)
-	}
-	if got, err := os.ReadFile(path); err != nil || string(got) != "new" {
-		t.Fatalf("Save under a held lock wrote %q, %v", got, err)
+}
+
+// TestASaveNeverGoesOnWithoutTheLock is r2 #5's interleaving (plan 033 C6r):
+// a Sweep holds the store's lock, has stat'ed an old file again and decided
+// to remove it (sweepRemoving), and a Save of the same image — the dedupe that
+// would refresh the file — starts there and waits. It must not refresh or
+// replace anything without the lock: it fails with ErrStoreBusy once its wait
+// is over, the Sweep removes the file, and a Save after the Sweep stores it
+// again. A Save that went on without the lock would answer a path whose file
+// the Sweep then removes.
+//
+// It holds within one process whatever the filesystem's flock does with two
+// opens by it: with the real flock, and with one that grants every open (as
+// Linux's NFS client's fcntl emulation does), where the in-process slot is
+// all that excludes the Save.
+func TestASaveNeverGoesOnWithoutTheLock(t *testing.T) {
+	saveLockWait = 50 * time.Millisecond
+	t.Cleanup(func() { saveLockWait = 5 * time.Second })
+	for _, fl := range []string{"the flock", "a flock that never excludes this process"} {
+		t.Run(fl, func(t *testing.T) {
+			if fl != "the flock" {
+				flockStore = func(*os.File, time.Duration) (func(), error) { return func() {}, nil }
+				t.Cleanup(func() { flockStore = atomicfile.FlockWithin })
+			}
+			dir := madeDir(t)
+			now := time.Now()
+			data := []byte("the same screenshot, pasted again")
+			path := agedSave(t, dir, data, now)
+			busy := make(chan struct{}, 1)
+			lockBusy = func() {
+				select {
+				case busy <- struct{}{}:
+				default:
+				}
+			}
+			type saved struct {
+				path string
+				err  error
+			}
+			during := make(chan saved, 1)
+			sweepRemoving = func(string) {
+				go func() {
+					p, err := Save(dir, data, MIMEPNG)
+					during <- saved{p, err}
+				}()
+				// The Sweep holds the lock until the Save has answered.
+				select {
+				case got := <-during:
+					during <- got
+				case <-time.After(5 * time.Second):
+					t.Error("the Save never answered")
+				}
+			}
+			t.Cleanup(func() { lockBusy, sweepRemoving = func() {}, func(string) {} })
+			if n, err := Sweep(dir, now); err != nil || n != 1 {
+				t.Fatalf("Sweep = %d, %v; want the old file removed", n, err)
+			}
+			select {
+			case <-busy:
+			default:
+				t.Fatal("the Save did not find the lock held")
+			}
+			got := <-during
+			if got.err == nil {
+				if _, err := os.Stat(got.path); err != nil {
+					t.Fatalf("the Save went on without the lock: it answered %q, which the Sweep then removed", got.path)
+				}
+			}
+			if !errors.Is(got.err, ErrStoreBusy) || got.path != "" {
+				t.Fatalf("the Save during the Sweep = %q, %v; want ErrStoreBusy", got.path, got.err)
+			}
+			if _, err := os.Stat(path); !errors.Is(err, fs.ErrNotExist) {
+				t.Fatalf("the swept file: %v", err)
+			}
+			again, err := Save(dir, data, MIMEPNG)
+			if err != nil || again != path {
+				t.Fatalf("the Save after the Sweep = %q, %v", again, err)
+			}
+			if b, err := os.ReadFile(path); err != nil || !bytes.Equal(b, data) {
+				t.Fatalf("the file stored again: %v", err)
+			}
+		})
 	}
 }

@@ -50,6 +50,22 @@ type Client struct {
 	// resending says the prompt in flight is the image resend (ResendBlocks),
 	// whose turn only a completion naming its own learned promptId settles.
 	resending bool
+	// resendWritten says the resend's session/prompt bytes are on the wire:
+	// set by its sent hook, only for the turn that opened it. Until then no
+	// queue/changed can name the resend — grok has not read it — so a
+	// broadcast with its text is the refused attempt's, late (plan 033 C6r,
+	// r2 #1a).
+	resendWritten bool
+	// queueNamed is every promptId grok's queue/changed has named, queued or
+	// running, since the last PromptBlocks — not a resend — opened its turn,
+	// at most queueNamedCap of them; queueNamedFull says one more was named.
+	// A resend learns its own id only from an entry that is not in it, read
+	// after resendWritten: whatever grok named before the resend's bytes went
+	// out is the refused attempt's or another prompt's, never the resend's,
+	// however late it is broadcast again. A full set teaches a resend nothing,
+	// and its reply ends it.
+	queueNamed     []string
+	queueNamedFull bool
 	// foreignSeen records that some other running promptId was broadcast
 	// since the prompt was sent. Until promptID is known it is the only
 	// reason to distrust an unmatched prompt_complete.
@@ -537,11 +553,35 @@ func (c *Client) promptBlocks(ctx context.Context, blocks []ContentBlock, accept
 	c.foreignSeen = false
 	c.heard = false
 	c.resending = resend
+	c.resendWritten = false
+	if !resend {
+		// A resend keeps what grok named since the refused attempt opened:
+		// that is what it must never take for its own id.
+		c.queueNamed = c.queueNamed[:0]
+		c.queueNamedFull = false
+	}
 	sid := c.sessionID
 	dialect := c.dialect
+	turn := c.turn
 	wait := make(chan promptResult, 1)
 	c.promptWait = wait
 	c.mu.Unlock()
+	if resend {
+		// The resend's bytes are out once sent runs: from then on a broadcast
+		// can name it. sent can run after this call has returned (grok's
+		// writer goroutine, below), so it marks only the turn it belongs to.
+		callerSent := sent
+		sent = func() {
+			c.mu.Lock()
+			if c.turn == turn {
+				c.resendWritten = true
+			}
+			c.mu.Unlock()
+			if callerSent != nil {
+				callerSent()
+			}
+		}
+	}
 	defer func() {
 		c.mu.Lock()
 		c.inPrompt = false
@@ -554,6 +594,7 @@ func (c *Client) promptBlocks(ctx context.Context, blocks []ContentBlock, accept
 		c.promptText = ""
 		c.promptJoined = ""
 		c.resending = false
+		c.resendWritten = false
 		c.mu.Unlock()
 	}()
 

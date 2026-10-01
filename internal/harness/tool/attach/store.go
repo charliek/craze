@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -57,13 +58,14 @@ const tempSuffix = ".tmp"
 const lockName = ".lock"
 
 // How long Save and Sweep wait for the store's lock. Save, holding a chip
-// open, waits a little and then goes on without it — it deletes nothing, so
-// the worst it can meet is the race the lock exists for, which Sweep's
-// re-stat narrows. Sweep, a best-effort tidy at TUI start, waits as long and
-// then gives up quietly: the next start sweeps. Vars only so tests can
-// shorten them; nothing in craze writes them.
+// open, waits a few seconds — a sweep of a full directory takes a moment —
+// and then fails the attach (ErrStoreBusy): it never refreshes or replaces a
+// file without the lock, since that is the race the lock exists for (plan 033
+// C6r, r2 #5). Sweep, a best-effort tidy at TUI start, waits a second and then
+// gives up quietly: the next start sweeps. Vars only so tests can shorten
+// them; nothing in craze writes them.
 var (
-	saveLockWait  = time.Second
+	saveLockWait  = 5 * time.Second
 	sweepLockWait = time.Second
 )
 
@@ -72,28 +74,81 @@ var (
 // so tests can set it; nothing in craze writes it.
 var lockBusy = func() {}
 
-// lockStore takes the store's lock in root, waiting at most d (lockName,
-// atomicfile.FlockWithin). The file is opened through the Root, so the lock
-// is the one in this directory whatever its path now names. unlock is never
-// nil, and releases the lock and closes the file.
+// flockStore is the cross-process half of the store's lock:
+// atomicfile.FlockWithin. A var only so tests can stand in a flock that never
+// excludes this process from itself, as one emulated over fcntl does (Linux's
+// NFS client); nothing in craze writes it.
+var flockStore = atomicfile.FlockWithin
+
+// storeSlots is the in-process half of the store's lock: one slot (a channel
+// of one) per attachments directory this process has locked, keyed by its
+// clean absolute path (root.Name()). A process uses one directory, two at
+// most, so they are never removed.
+var storeSlots sync.Map
+
+// storeSlot is the in-process slot for the attachments directory root.
+func storeSlot(root *os.Root) chan struct{} {
+	slot, _ := storeSlots.LoadOrStore(root.Name(), make(chan struct{}, 1))
+	return slot.(chan struct{})
+}
+
+// lockStore takes the store's lock in root, waiting at most d for the whole of
+// it, and answers ErrStoreBusy when it is still held by then (plan 033 C6r,
+// r2 #5). It has two halves, taken in this order and released together:
+//
+//   - the in-process slot for the directory (storeSlot), so a Save and the
+//     Sweep in one craze exclude each other however the filesystem's flock
+//     treats two opens by one process — a flock emulated over fcntl, as
+//     Linux's NFS client does, grants both;
+//   - the flock of lockName (atomicfile.FlockWithin), which excludes every
+//     other craze. The file is opened through the Root, so the lock is the
+//     one in this directory whatever its path now names.
+//
+// unlock is never nil; on success it releases both halves and closes the
+// file.
 func lockStore(root *os.Root, d time.Duration) (unlock func(), err error) {
 	noop := func() {}
+	deadline := time.Now().Add(d)
+	slot := storeSlot(root)
+	busy := false
+	select {
+	case slot <- struct{}{}:
+	default:
+		busy = true
+		lockBusy()
+		wait := time.NewTimer(d)
+		select {
+		case slot <- struct{}{}:
+			wait.Stop()
+		case <-wait.C:
+			return noop, ErrStoreBusy
+		}
+	}
+	leave := func() { <-slot }
 	f, err := root.OpenFile(lockName, os.O_CREATE|os.O_RDWR|syscall.O_NOFOLLOW, 0o600)
 	if err != nil {
+		leave()
 		return noop, fmt.Errorf("attach: %w", err)
 	}
-	release, err := atomicfile.FlockWithin(f, 0)
+	release, err := flockStore(f, 0)
 	if errors.Is(err, atomicfile.ErrLockBusy) {
-		lockBusy()
-		release, err = atomicfile.FlockWithin(f, d)
+		if !busy {
+			lockBusy()
+		}
+		release, err = flockStore(f, time.Until(deadline))
 	}
 	if err != nil {
 		_ = f.Close()
-		return noop, err
+		leave()
+		if errors.Is(err, atomicfile.ErrLockBusy) {
+			return noop, ErrStoreBusy
+		}
+		return noop, fmt.Errorf("attach: %w", err)
 	}
 	return func() {
 		release()
 		_ = f.Close()
+		leave()
 	}, nil
 }
 
@@ -259,10 +314,12 @@ func private(root *os.Root, checked fs.FileInfo, tighten bool) error {
 // it, and the store keeps nothing the host would not send.
 //
 // The dedupe's refresh and the publish hold the store's lock (lockStore), so
-// a Sweep in another craze cannot decide on a file's age, let this refresh
-// it, and then remove it anyway — leaving a chip whose file is gone (r1 #12).
-// A lock still busy after saveLockWait is gone without: Save removes nothing,
-// and Sweep re-stats what it removes.
+// a Sweep — in another craze or in this one — cannot decide on a file's age,
+// let this refresh it, and then remove it anyway, leaving a chip whose file
+// is gone (r1 #12). Nothing is refreshed or replaced without it: a lock still
+// busy after saveLockWait fails the Save with ErrStoreBusy, and any other
+// failure to take it fails it too (plan 033 C6r, r2 #5) — the composer's
+// usual note, and the paste stays text.
 func Save(dir string, data []byte, mime string) (string, error) {
 	ext := Ext(mime)
 	if ext == "" {
@@ -278,7 +335,10 @@ func Save(dir string, data []byte, mime string) (string, error) {
 		return "", err
 	}
 	defer root.Close()
-	unlock, _ := lockStore(root, saveLockWait)
+	unlock, err := lockStore(root, saveLockWait)
+	if err != nil {
+		return "", err
+	}
 	defer unlock()
 	path := filepath.Join(dir, name)
 	if old, err := ReadFile(root, name); err == nil && bytes.Equal(old, data) {
@@ -419,11 +479,11 @@ func ReadPath(root *os.Root, path string) ([]byte, error) {
 //
 // The listing, every decision and every removal hold the store's lock
 // (lockStore), so no Save refreshes or replaces a file between the stat that
-// condemned it and its removal (r1 #12); a lock still busy after
-// sweepLockWait is a sweep given up, quietly — the next start sweeps. Each
-// file is stat'ed again just before it goes, and one that has changed since
-// the listing — a Save that waited out the lock and went on without it — is
-// kept.
+// condemned it and its removal (r1 #12; a Save never goes on without the
+// lock, r2 #5); a lock still busy after sweepLockWait is a sweep given up,
+// quietly — the next start sweeps. Each file is stat'ed again just before it
+// goes, and one that has changed since the listing — anything that writes the
+// directory without the lock: the user, an older craze — is kept.
 func Sweep(dir string, now time.Time) (int, error) {
 	return sweep(dir, now, DirBudget)
 }

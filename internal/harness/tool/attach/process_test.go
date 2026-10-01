@@ -59,9 +59,10 @@ func TestProcessPassesThroughUntouched(t *testing.T) {
 	}
 }
 
-// TestProcessStripsJPEGAPP1 is the pass-through's one exception: every APP1
+// TestProcessStripsJPEGAPP1 is the JPEG pass-through's exception: every APP1
 // segment — EXIF with orientation 1, EXIF without one, XMP — is cut out, and
-// nothing else changes: the result is byte for byte the JPEG the segments
+// so are APP13 (IPTC), comments and the other vendors' segments (C6r, r2 #4a),
+// and nothing else changes: the result is byte for byte the JPEG the segments
 // were inserted into.
 func TestProcessStripsJPEGAPP1(t *testing.T) {
 	plain := encodeJPEG(t, gradient(40, 30), 90)
@@ -75,6 +76,11 @@ func TestProcessStripsJPEGAPP1(t *testing.T) {
 		{"xmp", [][]byte{xmpAPP1(100)}},
 		{"exif and xmp", [][]byte{exifAPP1(1, false), xmpAPP1(100)}},
 		{"an orientation out of range", [][]byte{exifAPP1(9, false)}},
+		{"iptc (APP13)", [][]byte{iptcAPP13("Jane Doe, Main Street")}},
+		{"a comment", [][]byte{segment(markerCOM, []byte("taken at home"))}},
+		{"exif, iptc and a comment", [][]byte{exifAPP1(1, false), iptcAPP13("Jane Doe"), segment(markerCOM, []byte("hi"))}},
+		{"a vendor APP12", [][]byte{segment(0xec, []byte("Ducky\x00\x01"))}},
+		{"APP11 content credentials", [][]byte{segment(0xeb, []byte("JP\x00\x00jumb c2pa signer"))}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			src := afterSOI(plain, tc.segs...)
@@ -83,10 +89,10 @@ func TestProcessStripsJPEGAPP1(t *testing.T) {
 				t.Fatal(err)
 			}
 			if !bytes.Equal(got.Data, plain) {
-				t.Fatalf("got %d bytes, want the %d of the JPEG without its APP1", len(got.Data), len(plain))
+				t.Fatalf("got %d bytes, want the %d of the JPEG without its metadata", len(got.Data), len(plain))
 			}
 			if _, stripped, ok := jpegMeta(got.Data); !ok || len(stripped) != len(got.Data) {
-				t.Fatal("an APP1 segment is left")
+				t.Fatal("a metadata segment is left")
 			}
 			if got.MIME != MIMEJPEG || got.Width != 40 || got.Height != 30 {
 				t.Fatalf("got %s %d×%d", got.MIME, got.Width, got.Height)
