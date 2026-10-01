@@ -12,6 +12,8 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync"
@@ -50,6 +52,16 @@ const (
 	// "block" parks it there for good, its record written and its socket
 	// bound.
 	hubTestReady = "CRAZE_HUB_TEST_READY"
+	// hubTestHold, a duration, runs the hub off the child's main thread and
+	// holds that thread for so long at each SIGUSR1 (holdThread): a SIGSTOP
+	// sent during a hold stops the child only once the hold ends.
+	hubTestHold = "CRAZE_HUB_TEST_HOLD"
+	// hubTestStall, a directory, stalls the child's teardown just before it
+	// releases the lock — its record and socket gone — until the test lets
+	// it go (stallAt).
+	hubTestStall = "CRAZE_HUB_TEST_STALL"
+	// hubTestPIDFile is a path the child writes its pid to as it starts.
+	hubTestPIDFile = "CRAZE_HUB_TEST_PIDFILE"
 )
 
 // The child's watchdog (internal/cli's childWatchdog): a test binary that dies
@@ -90,11 +102,20 @@ func init() {
 		}
 	}
 	go childWatchdog(parent)
-	var hk *hooks
-	if os.Getenv(hubTestReady) == "block" {
-		hk = &hooks{beforeReady: func() { select {} }}
+	if p := os.Getenv(hubTestPIDFile); p != "" {
+		_ = os.WriteFile(p, []byte(strconv.Itoa(os.Getpid())), 0o600)
 	}
-	_ = os.Unsetenv(hubTestReady)
+	hk := &hooks{}
+	if os.Getenv(hubTestReady) == "block" {
+		hk.beforeReady = func() { select {} }
+	}
+	if dir := os.Getenv(hubTestStall); dir != "" {
+		hk.beforeRelease = func() { stallAt(dir) }
+	}
+	hold, _ := time.ParseDuration(os.Getenv(hubTestHold))
+	for _, k := range []string{hubTestReady, hubTestStall, hubTestPIDFile, hubTestHold} {
+		_ = os.Unsetenv(k)
+	}
 	ready, err := TakeReadyPipe()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "hub test child:", err)
@@ -103,12 +124,42 @@ func init() {
 	sigs := make(chan os.Signal, 8)
 	signal.Notify(sigs, syscall.SIGHUP, syscall.SIGINT, syscall.SIGTERM)
 	grace, _ := IdleGraceFromEnv(os.Getenv)
-	err = Run(context.Background(), Options{Env: rundir.ProcessEnv(), Ready: ready, Signals: sigs,
-		Stderr: os.Stderr, IdleGrace: grace, hooks: hk})
-	if err != nil {
-		os.Exit(1)
+	run := func() {
+		err := Run(context.Background(), Options{Env: rundir.ProcessEnv(), Ready: ready, Signals: sigs,
+			Stderr: os.Stderr, IdleGrace: grace, hooks: hk})
+		if err != nil {
+			os.Exit(1)
+		}
+		os.Exit(0)
 	}
-	os.Exit(0)
+	if hold <= 0 {
+		run()
+	}
+	// init's goroutine has the main thread (the runtime locks it there for
+	// init, which never returns here): it keeps that thread for the holds,
+	// and the hub runs on others. No GC either: its stop-the-world would wait
+	// out a hold, and stop the hub with it.
+	runtime.LockOSThread()
+	debug.SetGCPercent(-1)
+	usr1 := make(chan os.Signal, 1)
+	signal.Notify(usr1, syscall.SIGUSR1)
+	go run()
+	for range usr1 {
+		holdThread(hold)
+	}
+}
+
+// stallAt is the child's teardown held just before its Release
+// (hubTestStall): it says so (dir/stalled) and waits until the test lets it
+// go (dir/go). The watchdog ends a child whose test has gone.
+func stallAt(dir string) {
+	_ = os.WriteFile(filepath.Join(dir, "stalled"), nil, 0o600)
+	for {
+		if _, err := os.Stat(filepath.Join(dir, "go")); err == nil {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }
 
 // TestMain isolates the package: a test that forgot its own HOME, CRAZE_HOME
@@ -627,7 +678,18 @@ func alive(pid int) bool {
 
 // procState is pid's state letter from /proc on Linux, "?" elsewhere.
 func procState(pid int) string {
-	b, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+	return statState(fmt.Sprintf("/proc/%d/stat", pid))
+}
+
+// taskState is the state letter of pid's thread tid, as procState.
+func taskState(pid, tid int) string {
+	return statState(fmt.Sprintf("/proc/%d/task/%d/stat", pid, tid))
+}
+
+// statState is the state letter in a /proc stat file, "?" when it cannot be
+// read.
+func statState(path string) string {
+	b, err := os.ReadFile(path)
 	if err != nil {
 		return "?"
 	}
@@ -658,19 +720,45 @@ func endProcess(t *testing.T, pid int) {
 	}
 }
 
-// waitStopped waits for pid to be stopped (SIGSTOP), within step: a stop
-// signal is in effect only once the thread the kernel woke for it has run and
-// stopped the rest, so kill returns with the process still running — and,
-// under load, its other threads serving — for a while.
+// waitStopped waits for pid to be stopped (SIGSTOP), within step. kill(2)
+// returns once the signal is queued; on Linux a multi-threaded process stops
+// when the thread the kernel woke for the signal — its main one, when it can
+// take it — runs and stops the others, and until then they run on: on a
+// loaded machine a hub answers a hello a millisecond after its SIGSTOP was
+// sent, and a main thread that cannot take the signal yet (holdThread) keeps
+// the rest serving for as long as that lasts. So on Linux every thread's
+// state in /proc is the judge (allStopped). macOS suspends the whole task
+// before kill returns; ps's state is enough there.
 func waitStopped(t *testing.T, pid int) {
 	t.Helper()
-	waitFor(t, fmt.Sprintf("process %d stops", pid), func() bool {
-		if s := procState(pid); s != "?" {
-			return s == "T"
+	waitFor(t, fmt.Sprintf("every thread of process %d stops", pid), func() bool {
+		if runtime.GOOS == "linux" {
+			return allStopped(pid)
 		}
 		out, err := exec.Command("ps", "-o", "state=", "-p", strconv.Itoa(pid)).Output()
 		return err == nil && strings.HasPrefix(strings.TrimSpace(string(out)), "T")
 	})
+}
+
+// allStopped reports whether every thread of pid is stopped (/proc's T) or
+// has exited.
+func allStopped(pid int) bool {
+	tasks, err := os.ReadDir(fmt.Sprintf("/proc/%d/task", pid))
+	if err != nil {
+		return false
+	}
+	for _, task := range tasks {
+		tid, err := strconv.Atoi(task.Name())
+		if err != nil {
+			continue
+		}
+		switch taskState(pid, tid) {
+		case "T", "Z", "X", "?": // "?": gone since the listing
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // waitGone waits for pid to have exited (gone, or a zombie its reaper has not

@@ -32,7 +32,9 @@ import (
 //     endpoint kind hub, the record's hub id, a protocol this build speaks
 //     and the capabilities the caller needs — an older hub without them is
 //     reported (LacksError), never used and never replaced. EOF or
-//     unavailable/closing during the hello is no hub.
+//     unavailable/closing during the hello is no hub. A dial that meets a
+//     full listen backlog (EAGAIN) is dialled again until the hello's bound:
+//     a hub not accepting yet times out, it does not refuse.
 //  2. Otherwise `craze hub` is spawned (Command, through
 //     hostspawn.StartCmd: re-executed, a session of its own, stdio on
 //     /dev/null, the ready pipe on fd 3, HubChildEnv=1, the environment
@@ -45,12 +47,19 @@ import (
 //  3. A wedged hub (P17): two hellos that time out — not refused, not EOF —
 //     against a hub whose pid carries its record's non-empty start token:
 //     SIGTERM to that pid (its identity checked again just before), up to
-//     wedgedTermWait for it to go, SIGKILL if it has not, and then 2. A hub
-//     whose identity cannot be verified is never signalled: it is reported
-//     (WedgedError).
-//  4. A failure is tried once more after retryPause, when the context
-//     leaves room for it — never an answer that another try cannot change
-//     (ErrNoHub, LacksError, the context's end).
+//     wedgedTermWait for it to go, SIGKILL if it has not, and then 2 once it
+//     is gone. A hub whose identity cannot be verified is never signalled,
+//     and one still there wedgedKillWait after its SIGKILL is not spawned
+//     over: each is reported (WedgedError).
+//  4. A rendezvous whose holder exited (errHolderGone: the lock is free, so
+//     this call becomes the hub), or whose bound passed with the holder
+//     still there and no hello of its timed out — a holder tearing down,
+//     which keeps the lock until its teardown's last step, or still starting
+//     (errHolderLeaving) — is another round of 1–2 after retryPause, as many
+//     as the context leaves room for: the context, not a count, bounds them.
+//     Any other failure is tried once more after retryPause, when the
+//     context leaves room for it — never an answer that another try cannot
+//     change (ErrNoHub, LacksError, the context's end).
 //
 // It answers the hub's socket, for the caller to dial. A test binary spawns
 // no hub unless the test installs Command: Ensure is ErrNoHub there before it
@@ -64,18 +73,37 @@ func Ensure(ctx context.Context, env rundir.Env, need protocol.ConnectionCapabil
 		return "", err
 	}
 	e := &ensurer{env: env, ns: ns, need: need}
-	sock, err := e.attempt(ctx)
-	if err == nil || final(err) || !room(ctx, retryPause) {
-		return sock, err
+	retried := false
+	for {
+		sock, err := e.attempt(ctx)
+		if err == nil || final(err) {
+			return sock, err
+		}
+		if !roundAgain(err) {
+			if retried {
+				return sock, err
+			}
+			retried = true
+		}
+		if !room(ctx, retryPause) {
+			return sock, err
+		}
+		if err := pause(ctx, retryPause); err != nil {
+			return "", err
+		}
 	}
-	t := time.NewTimer(retryPause)
+}
+
+// pause waits d, or until ctx ends: its error then.
+func pause(ctx context.Context, d time.Duration) error {
+	t := time.NewTimer(d)
 	defer t.Stop()
 	select {
 	case <-ctx.Done():
-		return "", ctx.Err()
+		return ctx.Err()
 	case <-t.C:
+		return nil
 	}
-	return e.attempt(ctx)
 }
 
 // Command builds the hub's command, `craze hub`, from argv (its first word
@@ -112,11 +140,20 @@ var (
 	// contenderGrace is how long a spawned hub that has not answered has to
 	// exit on SIGTERM before its group is killed (hostspawn.Child.End).
 	contenderGrace = 2 * time.Second
-	// retryPause is the pause before Ensure's one retry.
+	// retryPause is the pause before each of Ensure's further rounds.
 	retryPause = 200 * time.Millisecond
 	// startToken is rundir.StartToken: a test plays a process whose
 	// identity cannot be read.
 	startToken = rundir.StartToken
+	// helloDial is a hello's connect: a test plays a listener whose backlog
+	// is full.
+	helloDial = func(ctx context.Context, socket string) (net.Conn, error) {
+		var d net.Dialer
+		return d.DialContext(ctx, "unix", socket)
+	}
+	// backlogPause is how long a hello whose dial met a full listen backlog
+	// (EAGAIN) waits before it dials again.
+	backlogPause = 10 * time.Millisecond
 )
 
 // LacksError is a hub that answered, and cannot do what the caller needs: an
@@ -167,6 +204,13 @@ func final(err error) bool {
 	var ns *nsError
 	return errors.Is(err, ErrNoHub) || errors.As(err, &lacks) || errors.As(err, &ns) ||
 		errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
+}
+
+// roundAgain reports whether err is a rendezvous that came to no hub with
+// the lock free, or about to be (Ensure's step 4): another round, not a
+// failure.
+func roundAgain(err error) bool {
+	return errors.Is(err, errHolderGone) || errors.Is(err, errHolderLeaving)
 }
 
 // room reports whether ctx has not ended and leaves more than d.
@@ -285,7 +329,9 @@ func (e *ensurer) use(sock, wantID string, res protocol.HubHelloResult) (string,
 }
 
 // replaceWedged is step 3, for rec's hub whose two hellos timed out: nil once
-// it is gone (a spawn follows), or why it is not replaced.
+// it is gone (a spawn follows), or why it is not replaced — a hub still there
+// after its SIGKILL among them: it may still hold the lock, so no spawn
+// follows.
 func (e *ensurer) replaceWedged(ctx context.Context, rec rundir.HubRecord, ident identity) error {
 	if ident != verified {
 		why := "its identity cannot be verified"
@@ -306,8 +352,13 @@ func (e *ensurer) replaceWedged(ctx context.Context, rec rundir.HubRecord, ident
 	if carries(rec) {
 		_ = syscall.Kill(rec.PID, syscall.SIGKILL)
 	}
-	gone(ctx, rec, wedgedKillWait)
-	return ctx.Err()
+	if gone(ctx, rec, wedgedKillWait) {
+		return nil
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return &WedgedError{PID: rec.PID, Why: fmt.Sprintf("it is still running %v after SIGKILL", wedgedKillWait)}
 }
 
 // gone waits up to d, polling, for rec's pid to stop carrying its token —
@@ -375,7 +426,11 @@ func (e *ensurer) spawn(ctx context.Context) (string, error) {
 	switch failure {
 	case 0:
 	case hostspawn.Cancelled:
-		// SIGTERM at once; the rest of its end is the reaper's.
+		// SIGTERM at once; the rest of its end is the reaper's. The goroutine
+		// is not joined: a caller that leaves main before it has run leaves
+		// the contender unsignalled — a session leader of its own, which
+		// idles out after its grace, as any hub with nothing to do (accepted
+		// in review r18).
 		go child.End(contenderGrace)
 		return "", ctx.Err()
 	case hostspawn.Exited:
@@ -410,16 +465,29 @@ func (e *ensurer) spawn(ctx context.Context) (string, error) {
 }
 
 // errHolderGone is a held spawn whose holder exited before it answered: the
-// next attempt may take the lock itself.
+// lock is free, and the next round takes it — this call becomes the hub
+// (Ensure's step 4).
 var errHolderGone = errors.New("the hub that held the lock exited before it answered")
+
+// errHolderLeaving is a held spawn whose holder is still there when the
+// rendezvous' bound passes, with no hello of its timed out: no record, or one
+// that answered closing, EOF or nothing at all — a hub tearing down, whose
+// lock goes at its teardown's last step, or one still starting. Another round
+// finds it serving or gone (Ensure's step 4).
+var errHolderLeaving = errors.New("the hub holding the namespace's lock neither answered nor let it go")
 
 // rendezvous waits for the hub that holds the lock (held) to answer as in
 // step 1: the record polled every rendezvousPoll, a record not tried yet (by
 // its (dev, ino)) — or one whose hello timed out — said hello to, until a hub
-// answers, the holder's pid is gone, rendezvousWait passes or ctx ends.
+// answers, the holder's pid is gone (errHolderGone), rendezvousWait passes or
+// ctx ends. At its bound, a holder whose last hello timed out — a hub there
+// that does not answer — is a failure, which the retry's step 3 judges; any
+// other is errHolderLeaving.
 func (e *ensurer) rendezvous(ctx context.Context, held ReadyHeld) (string, error) {
 	deadline := time.Now().Add(rendezvousWait)
 	var tried rundir.FileID
+	// again: the last hello timed out, so the same record is said hello to
+	// again.
 	again := false
 	for {
 		rec, id, err := rundir.ReadHubRecord(e.env)
@@ -444,6 +512,9 @@ func (e *ensurer) rendezvous(ctx context.Context, held ReadyHeld) (string, error
 			who := "a hub that has not written its line yet"
 			if held.PID > 0 {
 				who = fmt.Sprintf("pid %d, hub %s", held.PID, held.HubID)
+			}
+			if !again {
+				return "", fmt.Errorf("%w (%s) within %v", errHolderLeaving, who, rendezvousWait)
 			}
 			return "", fmt.Errorf("the hub holding the namespace's lock (%s) did not answer within %v", who, rendezvousWait)
 		}
@@ -522,8 +593,7 @@ func dialHello(ctx context.Context, socket string, wait time.Duration) (protocol
 	}
 	dctx, cancel := context.WithDeadline(ctx, deadline)
 	defer cancel()
-	var d net.Dialer
-	nc, err := d.DialContext(dctx, "unix", socket)
+	nc, err := dialPastBacklog(dctx, socket)
 	if err != nil {
 		return protocol.HubHelloResult{}, classify(ctx, err), ctx.Err()
 	}
@@ -573,10 +643,27 @@ func dialHello(ctx context.Context, socket string, wait time.Duration) (protocol
 	return res, helloOK, nil
 }
 
+// dialPastBacklog dials socket (helloDial), and again every backlogPause
+// while its listener's backlog is full — Linux's EAGAIN, at once: a hub not
+// accepting yet, busy or not scheduled, which is no strike against it (P17) —
+// until ctx ends: the connection, or the last dial's error.
+func dialPastBacklog(ctx context.Context, socket string) (net.Conn, error) {
+	for {
+		nc, err := helloDial(ctx, socket)
+		if err == nil || !errors.Is(err, syscall.EAGAIN) {
+			return nc, err
+		}
+		if pause(ctx, backlogPause) != nil {
+			return nil, err
+		}
+	}
+}
+
 // classify is a failed dial, write or read: the caller's context ending is
 // failed (its error is the caller's), a timeout — or a listener whose
-// backlog is full, which is a hub not accepting — is timed out, and anything
-// else (refused, absent, EOF, a reset, a broken pipe) is no hub.
+// backlog was full until the hello's bound (dialPastBacklog), which is a hub
+// not accepting — is timed out, and anything else (refused, absent, EOF, a
+// reset, a broken pipe) is no hub.
 func classify(ctx context.Context, err error) helloOutcome {
 	var ne net.Error
 	switch {

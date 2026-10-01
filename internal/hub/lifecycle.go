@@ -61,7 +61,10 @@ import (
 //     every admission and every host appearing bumps. At the check, under the
 //     lifecycle lock, it reads the registry again and re-checks both and the
 //     epoch: still idle and unchanged, it decides, and from that instant every
-//     connection is closed unanswered and every hello refused closing.
+//     connection is closed unanswered and every hello refused closing. A
+//     registry read that fails is no host's leaving: the hosts the last good
+//     read listed stand, and until a read succeeds again no grace is armed
+//     and no check decides (said in the log, at most every readErrSayEvery).
 //
 // The roster (roster.go) is served from the start; its poll runs only while a
 // client wants it.
@@ -112,6 +115,9 @@ var (
 	// teardownBound bounds the whole teardown: what in-flight work and peers
 	// have not finished by then is cut off.
 	teardownBound = 10 * time.Second
+	// readErrSayEvery is how often a registry that keeps failing to read is
+	// said in the hub's log again.
+	readErrSayEvery = time.Minute
 )
 
 // Seams over rundir, each its real function in production: a test replaces
@@ -552,13 +558,11 @@ func (h *hub) disarm() {
 }
 
 // refreshHosts reads the registry for live hosts (the idle rule's third
-// condition). A registry that cannot be read is said once, and counts as no
-// host: the hub can know of none.
+// condition). A registry that cannot be read keeps the last good read's hosts
+// and holds the idle exit off (setHostsLocked).
 func (h *hub) refreshHosts() {
 	entries, err := hostsRead(h.o.Env)
-	if h.life.setHosts(entries, err) {
-		h.logf("the registry cannot be read: %v", err)
-	}
+	h.sayRead(h.life.setHosts(entries, err))
 }
 
 // pollHosts is the roster's registry read (roster.HubOptions.Hosts), once a
@@ -566,27 +570,35 @@ func (h *hub) refreshHosts() {
 // the epoch — and the loop re-arms on it.
 func (h *hub) pollHosts() ([]rundir.Entry, error) {
 	entries, err := hostsRead(h.o.Env)
-	if h.life.setHosts(entries, err) {
-		h.logf("the registry cannot be read: %v", err)
-	}
+	h.sayRead(h.life.setHosts(entries, err))
 	h.life.wakeLoop()
 	return entries, err
 }
 
-// decideIdle is the idle decision at the end of a grace armed at epoch armed:
-// under the lifecycle lock, the registry read again, and the hub still idle —
-// no client, no live host — with the epoch unchanged. Then it is decided:
-// closing is set under the same lock, and nothing is admitted after it.
-func (h *hub) decideIdle(armed uint64) bool {
-	h.life.mu.Lock()
-	defer h.life.mu.Unlock()
-	entries, err := hostsRead(h.o.Env)
-	h.life.setHostsLocked(entries, err)
-	if h.life.closing || h.life.clients > 0 || h.life.hostsLive || h.life.epoch != armed {
-		return false
+// sayRead logs what a registry read had to say (setHostsLocked), if anything.
+func (h *hub) sayRead(say string) {
+	if say != "" {
+		h.logf("%s", say)
 	}
-	h.life.closing = true
-	return true
+}
+
+// decideIdle is the idle decision at the end of a grace armed at epoch armed:
+// under the lifecycle lock, the registry read again — and read, not failed —
+// and the hub still idle — no client, no live host — with the epoch
+// unchanged. Then it is decided: closing is set under the same lock, and
+// nothing is admitted after it.
+func (h *hub) decideIdle(armed uint64) bool {
+	l := &h.life
+	l.mu.Lock()
+	entries, err := hostsRead(h.o.Env)
+	say := l.setHostsLocked(entries, err, time.Now())
+	done := !l.closing && l.clients == 0 && !l.hostsLive && !l.readErr && l.epoch == armed
+	if done {
+		l.closing = true
+	}
+	l.mu.Unlock()
+	h.sayRead(say)
+	return done
 }
 
 // lost says why the hub can no longer be found — its record or its socket
@@ -699,11 +711,13 @@ type lifecycle struct {
 	epoch uint64
 	// clients is how many connections are past hello and open.
 	clients int
-	// hostsLive is whether the last registry read found a live host, and
-	// hostIDs which; readErr whether that read failed.
-	hostsLive bool
-	hostIDs   map[string]bool
-	readErr   bool
+	// hostsLive is whether the last good registry read found a live host,
+	// and hostIDs which; readErr whether the last read failed (the hub is not
+	// idle while it has), and readErrSaid when that was last said.
+	hostsLive   bool
+	hostIDs     map[string]bool
+	readErr     bool
+	readErrSaid time.Time
 	// conns is every open connection.
 	conns map[*conn]struct{}
 	// work is every request being answered (begin, end), and inflight how
@@ -813,27 +827,37 @@ func (l *lifecycle) quiesce() {
 }
 
 // idle reports whether the hub is idle now — no client, no live host as last
-// read — and the epoch.
+// read, and that read not failed — and the epoch.
 func (l *lifecycle) idle() (bool, uint64) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	return l.clients == 0 && !l.hostsLive, l.epoch
+	return l.clients == 0 && !l.hostsLive && !l.readErr, l.epoch
 }
 
-// setHosts records a registry read: true when it failed and the last one had
-// not (the hub says so once).
-func (l *lifecycle) setHosts(entries []rundir.Entry, err error) bool {
+// setHosts records a registry read (setHostsLocked).
+func (l *lifecycle) setHosts(entries []rundir.Entry, err error) string {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	was := l.readErr
-	l.setHostsLocked(entries, err)
-	return err != nil && !was
+	return l.setHostsLocked(entries, err, time.Now())
 }
 
-// setHostsLocked is setHosts under the lifecycle lock: a host not seen in the
-// last read bumps the epoch.
-func (l *lifecycle) setHostsLocked(entries []rundir.Entry, err error) {
-	l.readErr = err != nil
+// setHostsLocked records a registry read, under the lifecycle lock, made at
+// now. A read that failed changes no host: the last good read's stand, and
+// readErr holds the idle exit off (idle, decideIdle) until a read succeeds —
+// a failure is no host's leaving. A good read replaces the hosts; one not in
+// the last good read bumps the epoch. It answers what the hub's log is to
+// say: a failure, at its start and then at most every readErrSayEvery while
+// it lasts, and the registry's being readable again.
+func (l *lifecycle) setHostsLocked(entries []rundir.Entry, err error, now time.Time) string {
+	if err != nil {
+		if l.readErr && now.Sub(l.readErrSaid) < readErrSayEvery {
+			return ""
+		}
+		l.readErr, l.readErrSaid = true, now
+		return fmt.Sprintf("the registry cannot be read (%v); the hosts it last listed stand, and the hub does not go idle until it can be", err)
+	}
+	was := l.readErr
+	l.readErr = false
 	ids := make(map[string]bool, len(entries))
 	for _, e := range entries {
 		ids[e.HostID] = true
@@ -843,4 +867,8 @@ func (l *lifecycle) setHostsLocked(entries []rundir.Entry, err error) {
 	}
 	l.hostIDs = ids
 	l.hostsLive = len(ids) > 0
+	if was {
+		return "the registry can be read again"
+	}
+	return ""
 }

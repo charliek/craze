@@ -6,6 +6,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -492,6 +493,133 @@ func TestAClientOrAHostAtExpiryKeepsTheHub(t *testing.T) {
 			}
 		})
 	}
+}
+
+// registry is a hub's registry reads in a test's hands (hostsRead): the
+// hosts it lists, or the error it fails with.
+type registry struct {
+	mu    sync.Mutex
+	hosts []rundir.Entry
+	err   error
+}
+
+// install makes r the hub's registry for one test.
+func (r *registry) install(t *testing.T) {
+	t.Helper()
+	setVar(t, &hostsRead, func(rundir.Env) ([]rundir.Entry, error) {
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		if r.err != nil {
+			return nil, r.err
+		}
+		return slices.Clone(r.hosts), nil
+	})
+}
+
+// list makes the registry list hosts; fail makes it fail.
+func (r *registry) list(hosts ...rundir.Entry) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.hosts, r.err = hosts, nil
+}
+
+func (r *registry) fail(err error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.err = err
+}
+
+// TestARegistryReadThatFailsKeepsTheHub (P12, review r18): a registry read
+// that fails is no host's leaving. The hosts the last good read listed stand
+// — a hub with live hosts arms no grace on a failed read — and a failed read
+// at a grace's end decides nothing: the hub stays, and arms no grace until a
+// read succeeds. Once one does, the idle rule is as before. The failure is
+// said once however often it repeats within readErrSayEvery, and the
+// recovery once.
+func TestARegistryReadThatFailsKeepsTheHub(t *testing.T) {
+	broken := errors.New("the registry is broken")
+	host := rundir.Entry{HostID: rundir.NewHostID()}
+	said := func(t *testing.T, ih *idleHub) {
+		t.Helper()
+		log := ih.rn.stderr.String()
+		if n := strings.Count(log, "the registry cannot be read"); n != 1 {
+			t.Fatalf("the failure said %d times, want once: %s", n, log)
+		}
+		if n := strings.Count(log, "the registry can be read again"); n != 1 {
+			t.Fatalf("the recovery said %d times, want once: %s", n, log)
+		}
+	}
+	// exits checks a hub with nothing — every read good — still goes idle.
+	exits := func(t *testing.T, ih *idleHub, reg *registry) {
+		t.Helper()
+		reg.list()
+		ih.tickHosts(t)
+		for {
+			ih.g.fire(t)
+			if ih.decision(t) {
+				break
+			}
+		}
+		if err := ih.rn.stopped(t); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	t.Run("hosts live, then reads that fail", func(t *testing.T) {
+		reg := &registry{}
+		reg.install(t)
+		reg.list(host)
+		ih := runIdle(t, testEnv(t), nil)
+		ih.g.none(t)
+		reg.fail(broken)
+		ih.tickHosts(t)
+		ih.tickHosts(t) // a second tick is taken only once the first is done
+		ih.g.none(t)
+		if !ih.rn.isRunning() {
+			t.Fatal("the hub stopped")
+		}
+		reg.list(host)
+		ih.tickHosts(t)
+		ih.tickHosts(t)
+		ih.g.none(t)
+		exits(t, ih, reg)
+		said(t, ih)
+	})
+
+	t.Run("a read that fails at the decision", func(t *testing.T) {
+		reg := &registry{}
+		reg.install(t)
+		var once atomic.Bool
+		ih := runIdle(t, testEnv(t), func(*idleHub) {
+			if once.CompareAndSwap(false, true) {
+				// A host appears as the grace ends — and the read that would
+				// list it fails.
+				reg.list(host)
+				reg.fail(broken)
+			}
+		})
+		select {
+		case <-ih.g.armed:
+		default:
+			t.Fatal("a hub with nothing armed no grace at start")
+		}
+		ih.g.fire(t)
+		if ih.decision(t) {
+			t.Fatal("the registry read at the grace's end failed, and the hub decided to exit")
+		}
+		ih.tickHosts(t)
+		ih.tickHosts(t)
+		ih.g.none(t)
+		if !ih.rn.isRunning() {
+			t.Fatal("the hub stopped")
+		}
+		reg.list(host)
+		ih.tickHosts(t)
+		ih.tickHosts(t)
+		ih.g.none(t)
+		exits(t, ih, reg)
+		said(t, ih)
+	})
 }
 
 // TestALostRecordOrSocketStopsTheHub (§3.5's Lost): a record removed, or a

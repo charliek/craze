@@ -3,10 +3,15 @@ package hub
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"runtime"
 	"slices"
+	"strconv"
+	"strings"
 	"sync/atomic"
 	"syscall"
 	"testing"
@@ -320,40 +325,68 @@ func TestEnsureReapsAContenderThatDoesNotAnswer(t *testing.T) {
 // that time out, not refused, not EOF — and whose pid carries its record's
 // start token is sent SIGTERM, then SIGKILL when it does not go (a stopped
 // process acts on neither until it is killed), and a new hub takes its place.
+//
+// The hub has stopped before Ensure looks (waitStopped): on Linux kill(2)
+// returns before a process has stopped, and a hub whose stop lands after
+// Ensure's hello is a hub that answered, which Ensure uses — rightly. "its
+// stop late" forces that schedule: the hub's main thread, the one the kernel
+// wakes to stop the rest, is held across the SIGSTOP (holdThread) while its
+// other threads would answer; without the wait it fails every time.
 func TestEnsureReplacesASIGSTOPpedHub(t *testing.T) {
-	env := processEnv(t)
-	generous(t)
-	setVar(t, &helloTimeout, 3*time.Second)
-	kids := asChildren(t, nil)
-	if _, err := ensure(t, env, protocol.ConnectionCapabilities{}); err != nil {
-		t.Fatal(err)
-	}
-	old, _, err := rundir.ReadHubRecord(env)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := syscall.Kill(old.PID, syscall.SIGSTOP); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = syscall.Kill(old.PID, syscall.SIGCONT) })
-	// The stop is in effect only once the hub has stopped: kill returns
-	// with it pending, and under load its other threads serve on for a
-	// while — long enough to answer Ensure's hello (seen in C11's gate).
-	waitStopped(t, old.PID)
-	sock, err := ensure(t, env, protocol.ConnectionCapabilities{})
-	if err != nil {
-		t.Fatalf("Ensure past a stopped hub: %v", err)
-	}
-	waitGone(t, old.PID)
-	rec, _, err := rundir.ReadHubRecord(env)
-	if err != nil || rec.HubID == old.HubID || rec.PID == old.PID {
-		t.Fatalf("the record after the replacement: %+v, %v (the stopped hub's was %+v)", rec, err, old)
-	}
-	if res := dial(t, sock).hello(t); res.Endpoint.HostID != rec.HubID {
-		t.Fatalf("Ensure's socket answers %+v, not the new hub", res)
-	}
-	if n := kids.n.Load(); n != 2 {
-		t.Fatalf("%d hubs spawned, want 2", n)
+	for _, tc := range []struct {
+		name string
+		hold time.Duration
+	}{
+		{"its stop at once", 0},
+		{"its stop late", 2 * time.Second},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.hold > 0 && runtime.GOOS != "linux" {
+				t.Skip("a stop that lands after kill(2) returns is Linux's: macOS suspends the task first")
+			}
+			env := processEnv(t)
+			generous(t)
+			setVar(t, &helloTimeout, 3*time.Second)
+			kids := asChildren(t, func(n int) []string {
+				if n == 1 && tc.hold > 0 {
+					return []string{hubTestHold + "=" + tc.hold.String()}
+				}
+				return nil
+			})
+			if _, err := ensure(t, env, protocol.ConnectionCapabilities{}); err != nil {
+				t.Fatal(err)
+			}
+			old, _, err := rundir.ReadHubRecord(env)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.hold > 0 {
+				if err := syscall.Kill(old.PID, syscall.SIGUSR1); err != nil {
+					t.Fatal(err)
+				}
+				waitFor(t, "the hub's main thread held", func() bool { return taskState(old.PID, old.PID) == "D" })
+			}
+			if err := syscall.Kill(old.PID, syscall.SIGSTOP); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = syscall.Kill(old.PID, syscall.SIGCONT) })
+			waitStopped(t, old.PID)
+			sock, err := ensure(t, env, protocol.ConnectionCapabilities{})
+			if err != nil {
+				t.Fatalf("Ensure past a stopped hub: %v", err)
+			}
+			waitGone(t, old.PID)
+			rec, _, err := rundir.ReadHubRecord(env)
+			if err != nil || rec.HubID == old.HubID || rec.PID == old.PID {
+				t.Fatalf("the record after the replacement: %+v, %v (the stopped hub's was %+v)", rec, err, old)
+			}
+			if res := dial(t, sock).hello(t); res.Endpoint.HostID != rec.HubID {
+				t.Fatalf("Ensure's socket answers %+v, not the new hub", res)
+			}
+			if n := kids.n.Load(); n != 2 {
+				t.Fatalf("%d hubs spawned, want 2", n)
+			}
+		})
 	}
 }
 
@@ -438,5 +471,230 @@ func TestTwoRacingEnsuresMakeOneHub(t *testing.T) {
 	}
 	if !alive(rec.PID) {
 		t.Fatalf("the hub the record names (pid %d) is not running", rec.PID)
+	}
+}
+
+// TestEnsureOutlastsAHubTearingDown (§3.8 step 4, review r18): a hub whose
+// teardown keeps the namespace's lock past a whole rendezvous — stalled here
+// just before its Release, its record and socket already gone — is waited
+// out. Ensure's first spawn loses the lock to it and its rendezvous ends with
+// the hub still there (errHolderLeaving); the second spawn loses too, and the
+// hub lets the lock go only once that second contender has answered held, so
+// the second rendezvous ends with the holder gone (errHolderGone) or, starved,
+// with it still leaving. Either is another round, never Ensure's answer: it
+// ends with a hub of its own answering. With one retry and no rounds, the
+// second rendezvous' end was Ensure's error while the lock was free.
+func TestEnsureOutlastsAHubTearingDown(t *testing.T) {
+	env := processEnv(t)
+	generous(t)
+	setVar(t, &rendezvousWait, 2*time.Second)
+	gate := shortDir(t, "czg")
+	pids := shortDir(t, "czp")
+	kids := asChildren(t, func(n int) []string {
+		extra := []string{hubTestPIDFile + "=" + filepath.Join(pids, strconv.Itoa(n))}
+		if n == 1 {
+			extra = append(extra, hubTestStall+"="+gate)
+		}
+		return extra
+	})
+	if _, err := ensure(t, env, protocol.ConnectionCapabilities{}); err != nil {
+		t.Fatal(err)
+	}
+	old, _, err := rundir.ReadHubRecord(env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Kill(old.PID, syscall.SIGTERM); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "the old hub's teardown stalls before its Release", func() bool {
+		_, err := os.Stat(filepath.Join(gate, "stalled"))
+		return err == nil
+	})
+	lockHeld(t, env)
+
+	type result struct {
+		sock string
+		err  error
+	}
+	got := make(chan result, 1)
+	ctx, cancel := context.WithTimeout(context.Background(), 8*step)
+	defer cancel()
+	go func() {
+		sock, err := Ensure(ctx, env, protocol.ConnectionCapabilities{})
+		got <- result{sock, err}
+	}()
+	// The second contender (the third hub spawned) is spawned only once the
+	// first's rendezvous has ended with the old hub still holding the lock;
+	// it has answered held once it has exited.
+	for want := int32(2); want <= 3; want++ {
+		deadline := time.Now().Add(step)
+		for kids.n.Load() < want {
+			select {
+			case r := <-got:
+				t.Fatalf("Ensure = %q, %v while the old hub (pid %d) held the lock in its teardown, with %d hubs spawned", r.sock, r.err, old.PID, kids.n.Load())
+			case <-time.After(5 * time.Millisecond):
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("hub %d not spawned within %v", want, step)
+			}
+		}
+	}
+	second := childPID(t, pids, 3)
+	waitGone(t, second)
+	if err := os.WriteFile(filepath.Join(gate, "go"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var r result
+	select {
+	case r = <-got:
+	case <-time.After(2 * step):
+		t.Fatalf("Ensure did not return within %v of the old hub's letting its lock go", 2*step)
+	}
+	if r.err != nil {
+		t.Fatalf("Ensure once the old hub let its lock go: %v (%d hubs spawned)", r.err, kids.n.Load())
+	}
+	waitGone(t, old.PID)
+	rec, _, err := rundir.ReadHubRecord(env)
+	if err != nil || rec.HubID == old.HubID || rec.PID == old.PID || rec.PID == second {
+		t.Fatalf("the record after the old hub went: %+v, %v (the old hub's was %+v; the second contender was pid %d)", rec, err, old, second)
+	}
+	if res := dial(t, r.sock).hello(t); res.Endpoint.HostID != rec.HubID {
+		t.Fatalf("Ensure's socket answers %+v, not the record's hub", res)
+	}
+}
+
+// childPID is the pid hub child n wrote (hubTestPIDFile), within step.
+func childPID(t *testing.T, dir string, n int) int {
+	t.Helper()
+	var pid int
+	waitFor(t, fmt.Sprintf("hub child %d's pid", n), func() bool {
+		b, err := os.ReadFile(filepath.Join(dir, strconv.Itoa(n)))
+		if err != nil {
+			return false
+		}
+		pid, err = strconv.Atoi(string(b))
+		return err == nil && pid > 0
+	})
+	return pid
+}
+
+// eagain is the error a dial to a listener whose backlog is full returns on
+// Linux, at once.
+func eagain(socket string) error {
+	return &net.OpError{Op: "dial", Net: "unix", Addr: &net.UnixAddr{Name: socket, Net: "unix"},
+		Err: os.NewSyscallError("connect", syscall.EAGAIN)}
+}
+
+// backlogFor makes every hello's dial meet a full backlog (eagain) n times —
+// for good with n < 0 — before it dials for real, and counts the dials.
+func backlogFor(t *testing.T, n int) *atomic.Int32 {
+	t.Helper()
+	var dials atomic.Int32
+	through := helloDial
+	setVar(t, &helloDial, func(ctx context.Context, socket string) (net.Conn, error) {
+		if k := dials.Add(1); n < 0 || int(k) <= n {
+			return nil, eagain(socket)
+		}
+		return through(ctx, socket)
+	})
+	return &dials
+}
+
+// TestAFullBacklogIsNoStrike (P17, review r18): a listener whose backlog is
+// full refuses a dial at once with EAGAIN — a hub not accepting yet, busy or
+// not scheduled — which is no hello that timed out: the hello dials again
+// until its bound, answers once a dial gets through, and is one timeout only
+// when none has by then. So a hub behind a full backlog for a moment is found,
+// never signalled and never spawned over.
+func TestAFullBacklogIsNoStrike(t *testing.T) {
+	answer := func(t *testing.T) (*decoy, string) {
+		hubID := rundir.NewHubID()
+		return newDecoy(t, decoyAnswer, hubResult(hubID, "decoy", protocol.HubCapabilities())), hubID
+	}
+	t.Run("dialled again until one gets through", func(t *testing.T) {
+		d, hubID := answer(t)
+		dials := backlogFor(t, 3)
+		res, out, err := dialHello(context.Background(), d.path, step)
+		if out != helloOK || err != nil || res.Endpoint.HostID != hubID {
+			t.Fatalf("a hello past three full backlogs = %v, %v, %+v; want the hub's answer", out, err, res)
+		}
+		if n := dials.Load(); n != 4 {
+			t.Fatalf("%d dials, want 4", n)
+		}
+	})
+	t.Run("full until the bound is one timeout", func(t *testing.T) {
+		d, _ := answer(t)
+		dials := backlogFor(t, -1)
+		const wait = 300 * time.Millisecond
+		start := time.Now()
+		_, out, err := dialHello(context.Background(), d.path, wait)
+		took := time.Since(start)
+		if out != helloTimedOut || err != nil {
+			t.Fatalf("a hello whose backlog stays full = %v, %v; want one timeout", out, err)
+		}
+		if took < wait {
+			t.Fatalf("the hello was judged timed out after %v, inside its %v bound", took, wait)
+		}
+		if n := dials.Load(); n < 2 {
+			t.Fatalf("%d dials within the bound; a full backlog is dialled again", n)
+		}
+		if n := d.accepted.Load(); n != 0 {
+			t.Fatalf("the decoy accepted %d connections", n)
+		}
+	})
+	t.Run("Ensure finds the hub", func(t *testing.T) {
+		env := processEnv(t)
+		noCommand(t)
+		setVar(t, &helloTimeout, 5*time.Second)
+		d, hubID := answer(t)
+		pid := sleeper(t)
+		writeRecord(t, env, rundir.HubRecord{HubID: hubID, PID: pid, StartToken: token(t, pid), Socket: d.path})
+		dials := backlogFor(t, 3)
+		sock, err := ensure(t, env, protocol.ConnectionCapabilities{})
+		if err != nil || sock != d.path {
+			t.Fatalf("Ensure past a full backlog = %q, %v; want the hub at %s", sock, err, d.path)
+		}
+		if !alive(pid) {
+			t.Fatalf("Ensure signalled the hub (pid %d) behind a full backlog", pid)
+		}
+		if n := dials.Load(); n != 4 {
+			t.Fatalf("%d dials, want 4", n)
+		}
+	})
+}
+
+// TestEnsureReportsAHubThatOutlivesItsKill (P17, review r18): a wedged hub
+// still carrying its start token wedgedKillWait after its SIGKILL may still
+// hold the namespace's lock, so nothing is spawned over it: it is reported
+// (WedgedError). The hub here is a process of the test's own that is never
+// reaped while the test runs — its pid is no other process's meanwhile, so
+// Ensure's signals reach nothing else — and the start-token seam says it
+// carries its token still, as a process the kill has not ended would.
+func TestEnsureReportsAHubThatOutlivesItsKill(t *testing.T) {
+	env := processEnv(t)
+	noCommand(t)
+	setVar(t, &helloTimeout, 200*time.Millisecond)
+	setVar(t, &wedgedTermWait, 100*time.Millisecond)
+	setVar(t, &wedgedKillWait, 100*time.Millisecond)
+	cmd := exec.Command("true")
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = cmd.Wait() })
+	pid := cmd.Process.Pid
+	const tok = "st1/test/unkillable"
+	setVar(t, &startToken, func(p int) (string, error) {
+		if p == pid {
+			return tok, nil
+		}
+		return rundir.StartToken(p)
+	})
+	d := newDecoy(t, decoySilent, protocol.HubHelloResult{})
+	writeRecord(t, env, rundir.HubRecord{HubID: rundir.NewHubID(), PID: pid, StartToken: tok, Socket: d.path})
+	_, err := ensure(t, env, protocol.ConnectionCapabilities{})
+	var wedged *WedgedError
+	if !errors.As(err, &wedged) || wedged.PID != pid || !strings.Contains(wedged.Why, "after SIGKILL") {
+		t.Fatalf("Ensure = %v; want the hub that outlived its SIGKILL (pid %d) reported, nothing spawned", err, pid)
 	}
 }
