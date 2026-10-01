@@ -106,6 +106,333 @@ func TestTheRegistryEntryHasExactlyItsMembers(t *testing.T) {
 	}
 }
 
+// lockHeldElsewhere reports whether the lock file at p is held by another
+// open file description: a fresh open of it cannot be flocked.
+func lockHeldElsewhere(t *testing.T, p string) bool {
+	t.Helper()
+	f, err := os.OpenFile(p, os.O_RDWR, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	taken, err := tryLock(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if taken {
+		_ = unlock(f)
+	}
+	return !taken
+}
+
+// TestBindTakesAFreshLockWhenASweepUnlinksItsOwn is not parallel: it
+// replaces hostLockOpened, which every Bind calls. The hub's sweep runs in
+// the window between the host's open of its lock and its flock, ten minutes
+// on: the lock has no entry yet and nobody holds it, so the sweep takes it
+// for an orphan and unlinks it. The host's flock then takes an inode no
+// reader can find; it sees that, and takes the name afresh — so it is bound
+// under a lock at its name, which it holds and Hosts finds, and which a
+// second sweep leaves.
+func TestBindTakesAFreshLockWhenASweepUnlinksItsOwn(t *testing.T) {
+	env := testEnv(t)
+	id := NewHostID()
+	opens := 0
+	var swept OrphanReport
+	hostLockOpened = func(string) {
+		opens++
+		if opens == 1 {
+			r, err := SweepOrphans(env, time.Now().Add(OrphanAge+time.Minute))
+			if err != nil {
+				t.Errorf("the sweep in the window: %v", err)
+			}
+			swept = r
+		}
+	}
+	t.Cleanup(func() { hostLockOpened = func(string) {} })
+	h, err := Bind(env, id, Entry{Workspace: "/w"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = h.Close() })
+	if !slices.Equal(swept.Locks, []string{id}) {
+		t.Fatalf("setup: the sweep in the window removed %v; want the host's lock %s", swept.Locks, id)
+	}
+	lock := filepath.Join(hostsDir(env), id+".lock")
+	if !exists(t, lock) || !lockHeldElsewhere(t, lock) {
+		t.Fatalf("the host was bound under a lock that is not at %s, held", lock)
+	}
+	if opens != 2 {
+		t.Fatalf("the lock was opened %d times; want once more after the sweep", opens)
+	}
+	if got, err := Hosts(env); err != nil || !slices.Equal(entries(got), []string{id}) {
+		t.Fatalf("Hosts = %v, %v; want the host", entries(got), err)
+	}
+	if r := sweepOrphansAt(t, env, time.Now().Add(OrphanAge+time.Minute)); len(r.Locks) != 0 || !exists(t, lock) {
+		t.Fatalf("a second sweep removed the bound host's lock (report %#v)", r)
+	}
+}
+
+// sweepOrphansAt is SweepOrphans expected to succeed.
+func sweepOrphansAt(t *testing.T, env Env, now time.Time) OrphanReport {
+	t.Helper()
+	r, err := SweepOrphans(env, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return r
+}
+
+// TestBindGivesUpOnALockUnlinkedOnEveryTry is not parallel: it replaces
+// hostLockOpened. A lock unlinked between its open and its flock on every
+// try is never taken: Bind fails, bounded, and leaves no socket or entry.
+func TestBindGivesUpOnALockUnlinkedOnEveryTry(t *testing.T) {
+	env := testEnv(t)
+	opens := 0
+	hostLockOpened = func(p string) {
+		opens++
+		_ = os.Remove(p)
+	}
+	t.Cleanup(func() { hostLockOpened = func(string) {} })
+	id := NewHostID()
+	if h, err := Bind(env, id, Entry{}); err == nil {
+		_ = h.Close()
+		t.Fatal("Bind took a lock unlinked under it on every try")
+	} else if !strings.Contains(err.Error(), "unlinked or replaced") {
+		t.Fatalf("Bind = %v; want the lost lock named", err)
+	}
+	if opens != lockTries {
+		t.Fatalf("the lock was opened %d times, want %d", opens, lockTries)
+	}
+	if exists(t, filepath.Join(hostsDir(env), id+".json")) {
+		t.Fatal("a Bind with no lock wrote an entry")
+	}
+}
+
+// TestBindRetriesPastASweepHoldingItsUnlinkedLock is not parallel: it
+// replaces hostLockOpened and orphanUnlinked. A host reopens an old lock left
+// at its id; a sweep that read the lock's time before the host refreshed it
+// takes it, unlinks it, and is paused before it lets it go. The host's flock
+// is refused — but on a file no longer at its name, so a sweep's, not
+// another host's: the host opens the name again, makes the lock afresh and is
+// bound under it.
+func TestBindRetriesPastASweepHoldingItsUnlinkedLock(t *testing.T) {
+	env := testEnv(t)
+	id := NewHostID()
+	orphanLock(t, env, id, time.Now().Add(-time.Hour))
+	paused, resume := make(chan struct{}), make(chan struct{})
+	var release sync.Once
+	t.Cleanup(func() { release.Do(func() { close(resume) }) })
+	orphanUnlinked = func(string) { close(paused); <-resume }
+	swept := make(chan OrphanReport, 1)
+	opens := 0
+	hostLockOpened = func(string) {
+		opens++
+		if opens != 1 {
+			return
+		}
+		go func() {
+			r, err := SweepOrphans(env, time.Now().Add(OrphanAge+time.Minute))
+			if err != nil {
+				t.Errorf("the sweep: %v", err)
+			}
+			swept <- r
+		}()
+		select {
+		case <-paused:
+		case <-time.After(10 * time.Second):
+			t.Error("setup: the sweep never took and unlinked the lock")
+		}
+	}
+	t.Cleanup(func() {
+		hostLockOpened = func(string) {}
+		orphanUnlinked = func(string) {}
+	})
+	h, err := Bind(env, id, Entry{Workspace: "/w"})
+	release.Do(func() { close(resume) })
+	r := <-swept
+	if err != nil {
+		t.Fatalf("Bind while a sweep held its unlinked lock: %v", err)
+	}
+	t.Cleanup(func() { _ = h.Close() })
+	if !slices.Equal(r.Locks, []string{id}) {
+		t.Fatalf("setup: the sweep removed %v; want the old lock %s", r.Locks, id)
+	}
+	lock := filepath.Join(hostsDir(env), id+".lock")
+	if !exists(t, lock) || !lockHeldElsewhere(t, lock) || opens != 2 {
+		t.Fatalf("the host is not bound under a lock at %s, held (opens %d, want 2)", lock, opens)
+	}
+}
+
+// TestBindRetriesWhenASweepUnlinksItsLockBetweenItsOpens is not parallel: it
+// replaces lockFound. A host's exclusive create finds an old lock left at its
+// id; before the open that follows, a sweep takes the lock and unlinks it, so
+// that open finds nothing. The host opens the name again — the lock made
+// afresh — and is bound under it.
+func TestBindRetriesWhenASweepUnlinksItsLockBetweenItsOpens(t *testing.T) {
+	env := testEnv(t)
+	id := NewHostID()
+	orphanLock(t, env, id, time.Now().Add(-time.Hour))
+	var swept OrphanReport
+	found := 0
+	lockFound = func(string) {
+		found++
+		if found == 1 {
+			r, err := SweepOrphans(env, time.Now())
+			if err != nil {
+				t.Errorf("the sweep: %v", err)
+			}
+			swept = r
+		}
+	}
+	t.Cleanup(func() { lockFound = func(string) {} })
+	h, err := Bind(env, id, Entry{Workspace: "/w"})
+	if err != nil {
+		t.Fatalf("Bind after its lock was unlinked between its opens: %v", err)
+	}
+	t.Cleanup(func() { _ = h.Close() })
+	if !slices.Equal(swept.Locks, []string{id}) {
+		t.Fatalf("setup: the sweep removed %v; want the old lock %s", swept.Locks, id)
+	}
+	lock := filepath.Join(hostsDir(env), id+".lock")
+	if !exists(t, lock) || !lockHeldElsewhere(t, lock) || found != 1 {
+		t.Fatalf("the host is not bound under a lock made afresh at %s (found %d, want 1)", lock, found)
+	}
+}
+
+// A host's lock another process holds — still the file at its name — is
+// another holder of this host's id, never a sweep: Bind refuses at once,
+// takes nothing and writes nothing.
+func TestBindRefusesAHostLockAnotherHolds(t *testing.T) {
+	t.Parallel()
+	env := testEnv(t)
+	id := NewHostID()
+	lock := orphanLock(t, env, id, time.Now())
+	holdLock(t, lock)
+	h, err := Bind(env, id, Entry{})
+	if err == nil {
+		_ = h.Close()
+		t.Fatal("Bind took a host lock another process holds")
+	}
+	if !strings.Contains(err.Error(), "another process holds it") {
+		t.Fatalf("Bind = %v; want the holder named", err)
+	}
+	if !exists(t, lock) || exists(t, filepath.Join(hostsDir(env), id+".json")) {
+		t.Fatal("a refused Bind removed the held lock or wrote an entry")
+	}
+}
+
+// TestBindRefreshesAReopenedLocksTime is not parallel: it replaces
+// hostLockOpened. A host that reopens a lock file left at its id — an old
+// one, at a reused --host-id — refreshes its modification time as it opens
+// it, before its flock: in that window the sweep's age gate sees a lock as
+// young as a new one.
+func TestBindRefreshesAReopenedLocksTime(t *testing.T) {
+	env := testEnv(t)
+	id := NewHostID()
+	lock := filepath.Join(cacheSubdir(t, env, hostsName), id+".lock")
+	writeFile(t, lock, "")
+	old := time.Now().Add(-time.Hour)
+	if err := os.Chtimes(lock, old, old); err != nil {
+		t.Fatal(err)
+	}
+	var seen time.Time
+	hostLockOpened = func(p string) {
+		if fi, err := os.Lstat(p); err == nil {
+			seen = fi.ModTime()
+		}
+	}
+	t.Cleanup(func() { hostLockOpened = func(string) {} })
+	start := time.Now().Add(-time.Second)
+	h, err := Bind(env, id, Entry{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = h.Close() })
+	if seen.Before(start) {
+		t.Fatalf("between the open and the flock the reopened lock was modified at %v; want it refreshed (after %v)", seen, start)
+	}
+}
+
+// entryV1 is the registry entry as plan 027 shipped it, before plan 032 added
+// requestId and requestHash: what an older reader — shed, a craze before
+// plan 032 — decodes a newer entry into.
+type entryV1 struct {
+	Protocol          int       `json:"protocol"`
+	HostID            string    `json:"hostId"`
+	PID               int       `json:"pid"`
+	StartedAt         time.Time `json:"startedAt"`
+	Socket            string    `json:"socket"`
+	CrazeSessionID    string    `json:"crazeSessionId"`
+	ProviderSessionID string    `json:"providerSessionId"`
+	Incarnation       string    `json:"incarnation"`
+	Provider          string    `json:"provider"`
+	Workspace         string    `json:"workspace"`
+	Ready             bool      `json:"ready"`
+}
+
+// The two members plan 032 adds (§3.10, §3.15): a hub-created host's create
+// request, given at Bind, is written as requestId and requestHash, kept by
+// every rewrite whatever the rewrite does to them, and listed by Hosts; an
+// older reader decodes the same file as before, ignoring them; and a host
+// given none writes neither, so its file is byte for byte the older shape.
+func TestTheRegistryEntrysRequestMembersRoundTrip(t *testing.T) {
+	t.Parallel()
+	env := testEnv(t)
+	h, err := Bind(env, NewHostID(), Entry{Workspace: "/w", Provider: "fake", RequestID: "req-1", RequestHash: "abc123"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = h.Close() })
+	if err := h.Update(func(e *Entry) {
+		e.Ready, e.CrazeSessionID = true, "s-1"
+		e.RequestID, e.RequestHash = "", "other"
+	}); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(hostsDir(env), h.ID()+".json")
+	got := readEntryFile(t, path)
+	if got.RequestID != "req-1" || got.RequestHash != "abc123" || !got.Ready || got.CrazeSessionID != "s-1" {
+		t.Fatalf("the rewritten entry is %+v; want the request kept and the rewrite applied", got)
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(b, &m); err != nil {
+		t.Fatal(err)
+	}
+	if m["requestId"] != "req-1" || m["requestHash"] != "abc123" {
+		t.Fatalf("the entry file holds %v; want requestId and requestHash", m)
+	}
+	var old entryV1
+	if err := json.Unmarshal(b, &old); err != nil {
+		t.Fatalf("an older reader cannot decode the entry: %v", err)
+	}
+	if want := (entryV1{Protocol: got.Protocol, HostID: got.HostID, PID: got.PID, StartedAt: got.StartedAt,
+		Socket: got.Socket, CrazeSessionID: got.CrazeSessionID, ProviderSessionID: got.ProviderSessionID,
+		Incarnation: got.Incarnation, Provider: got.Provider, Workspace: got.Workspace, Ready: got.Ready}); old != want {
+		t.Fatalf("an older reader decoded %+v, want %+v", old, want)
+	}
+	listed, err := Hosts(env)
+	if err != nil || len(listed) != 1 || listed[0] != h.Entry() || listed[0].RequestID != "req-1" {
+		t.Fatalf("Hosts = %+v, %v; want the entry with its request", listed, err)
+	}
+
+	plain := bind(t, env)
+	b, err = os.ReadFile(filepath.Join(hostsDir(env), plain.ID()+".json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	m = nil
+	if err := json.Unmarshal(b, &m); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := m["requestId"]; ok || len(m) != 11 {
+		t.Fatalf("a host with no create request wrote %v; want the 11 older members only", m)
+	}
+}
+
 func TestClosingTheListenerLeavesTheSocket(t *testing.T) {
 	t.Parallel()
 	h := bind(t, testEnv(t))

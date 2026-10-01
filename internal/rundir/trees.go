@@ -16,14 +16,25 @@ import (
 // created under its base.
 const SocketPathMax = 100
 
-// The cache tree's names: <Home>/.cache/craze/{hosts,locks}.
+// The cache tree's names: <Home>/.cache/craze/{hosts,locks,hubs}.
 const (
 	cacheName  = ".cache"
 	crazeName  = "craze"
 	hostsName  = "hosts"
 	locksName  = "locks"
+	hubsName   = "hubs"
 	tmpPrefix  = "craze-"
 	sockSuffix = ".sock"
+)
+
+// The sockets a <base>/<ns> directory holds: each host's <hostId>.sock and
+// the namespace's hub's hub.sock (plan 032 §3.4). socketNameMax is the longest
+// of their names, which a base is measured with (tryBase), so that every
+// socket of a namespace fits sun_path in the base any one of them chooses:
+// the hub and its namespace's hosts choose the same base.
+const (
+	hubSocketName = "hub.sock"
+	socketNameMax = max(hostIDLen+len(sockSuffix), len(hubSocketName))
 )
 
 // cacheDir validates the cache tree down to <Home>/.cache/craze/<sub> and
@@ -188,18 +199,30 @@ func (env Env) runUserSkip(p string) string {
 	return ""
 }
 
-// socketDir chooses the socket base — the first usable candidate, each
-// canonical base tried once — and returns the validated <base>/<ns>, both
-// leaves created as needed. A candidate is usable when its parent resolves,
-// the socket path it would give fits SocketPathMax (checked before anything is
-// created), every component of its canonical parent validates as an ancestor
-// by path under the strict rule — a group-writable one is refused whoever owns
-// it, since nothing holds this tree between the check and bind(2)
-// (checkAncestor) — and the base and <ns> validate as leaves. An explicit
+// socketDir is the validated <base>/<ns> for the namespace ns (socketBase),
+// both leaves created as needed.
+func (env Env) socketDir(ns string) (string, error) {
+	base, err := env.socketBase(ns)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(base, ns), nil
+}
+
+// socketBase chooses the socket base — the first usable candidate, each
+// canonical base tried once — and returns it, canonical, with it and its
+// <ns> validated, both leaves created as needed. A candidate is usable when
+// its parent resolves, the longest socket path its <ns> can hold
+// (socketNameMax: a host's, which is longer than the hub's) fits
+// SocketPathMax (checked before anything is created), every component of its
+// canonical parent validates as an ancestor by path under the strict rule — a
+// group-writable one is refused whoever owns it, since nothing holds this
+// tree between the check and bind(2) (checkAncestor) — and the base and <ns>
+// validate as leaves. An explicit
 // CRAZE_RUNTIME_DIR that is not usable is an error (under a group-writable
 // directory, one naming the chmod that fixes it); any other candidate falls
 // through, and when none is usable the error names each and why.
-func (env Env) socketDir(ns, hostID string) (string, error) {
+func (env Env) socketBase(ns string) (string, error) {
 	cands, err := env.candidates()
 	if err != nil {
 		return "", err
@@ -211,9 +234,9 @@ func (env Env) socketDir(ns, hostID string) (string, error) {
 			reasons = append(reasons, c.label+": "+c.skip)
 			continue
 		}
-		base, reason := env.tryBase(c, ns, hostID, tried)
+		base, reason := env.tryBase(c, ns, tried)
 		if reason == "" {
-			return filepath.Join(base, ns), nil
+			return base, nil
 		}
 		if c.explicit {
 			return "", fmt.Errorf("rundir: %s: %s", c.label, reason)
@@ -226,7 +249,7 @@ func (env Env) socketDir(ns, hostID string) (string, error) {
 
 // tryBase validates one candidate, recording its canonical base in tried; it
 // returns the canonical base, or why the candidate is not usable.
-func (env Env) tryBase(c candidate, ns, hostID string, tried map[string]string) (string, string) {
+func (env Env) tryBase(c candidate, ns string, tried map[string]string) (string, string) {
 	parent, err := canonical(c.parent)
 	if err != nil {
 		return "", err.Error()
@@ -236,10 +259,10 @@ func (env Env) tryBase(c candidate, ns, hostID string, tried map[string]string) 
 		return "", fmt.Sprintf("%s is the directory %s already named", base, by)
 	}
 	tried[base] = c.label
-	sock := filepath.Join(base, ns, hostID+sockSuffix)
-	if len(sock) > SocketPathMax {
-		return "", fmt.Sprintf("the socket path %s is %d bytes, over the %d-byte limit; set %s to a shorter absolute path",
-			sock, len(sock), SocketPathMax, envRuntimeDir)
+	nsDir := filepath.Join(base, ns)
+	if n := len(nsDir) + 1 + socketNameMax; n > SocketPathMax {
+		return "", fmt.Sprintf("a socket path in %s is up to %d bytes, over the %d-byte limit; set %s to a shorter absolute path",
+			nsDir, n, SocketPathMax, envRuntimeDir)
 	}
 	if err := env.checkAncestors(parent); err != nil {
 		return "", err.Error()

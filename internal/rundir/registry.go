@@ -12,13 +12,15 @@ import (
 	"sync"
 	"time"
 
+	"golang.org/x/sys/unix"
+
 	"github.com/charliek/craze/internal/protocol"
 )
 
 // Entry is a host's registry entry, hosts/<hostId>.json: what a resolver
 // reads to find a session without connecting to anything (plan 027 §3.8).
 // shed reads these members, so the set is a one-way door: none is renamed or
-// removed.
+// removed. Members may be added; a reader ignores those it does not know.
 type Entry struct {
 	// Protocol is the control protocol the host speaks
 	// (protocol.ProtocolVersion).
@@ -44,6 +46,14 @@ type Entry struct {
 	Workspace string `json:"workspace"`
 	// Ready is whether the engine has started.
 	Ready bool `json:"ready"`
+	// RequestID is the idempotency id of the hub's session.create that
+	// spawned this host (plan 032 §3.10), so a hub that restarts still
+	// recognises a retried create; "" — and absent from the file — for any
+	// other host. Added in plan 032, after the original members.
+	RequestID string `json:"requestId,omitempty"`
+	// RequestHash is that create's hash of its normalized params, which a
+	// retry with the same RequestID must match; "" and absent like RequestID.
+	RequestHash string `json:"requestHash,omitempty"`
 }
 
 // ErrClosed is Update on a closed Host.
@@ -68,10 +78,10 @@ type Host struct {
 	closed   bool
 	hosts    *dir     // the registry directory; nil once closed
 	lock     *os.File // nil once released
-	sockID   fileID
+	sockID   FileID
 	hasSock  bool
 	entry    Entry
-	entryID  fileID
+	entryID  FileID
 	hasEntry bool
 }
 
@@ -85,16 +95,21 @@ func (h *Host) lockName() string  { return h.id + ".lock" }
 //     their leaves created) — the base first, so that a socket path too long
 //     for sun_path is refused before either tree is touched — and the
 //     registry directory is held from here to Close;
-//  2. hosts/<hostID>.lock is opened without truncating, flocked without
-//     blocking, then truncated to "<pid> <hostId>";
+//  2. hosts/<hostID>.lock is opened without truncating, its modification
+//     time set to now, flocked without blocking, checked to be still the
+//     file at its name (taken afresh when it is not: takeLock), then
+//     truncated to "<pid> <hostId>";
 //  3. the socket is bound at <base>/<ns>/<hostID>.sock — no probe and no
 //     unlink, the id is fresh — and the listener is told at once never to
 //     unlink it (Close's guarded unlink is the only one);
 //  4. its (dev, ino) is recorded, and it is chmod-ed 0600;
 //  5. the registry entry is written (0600) and its (dev, ino) recorded.
 //
-// entry's Protocol, HostID, PID and Socket are Bind's to fill. A failure part
-// way unwinds what was built, identity-checked, and returns the error.
+// entry's Protocol, HostID, PID and Socket are Bind's to fill. Its RequestID
+// and RequestHash — a hub-created host's create request (plan 032 §3.10) —
+// are the caller's, given here or never: every rewrite keeps them (Update). A
+// failure part way unwinds what was built, identity-checked, and returns the
+// error.
 func Bind(env Env, hostID string, entry Entry) (*Host, error) {
 	if !ValidHostID(hostID) {
 		return nil, fmt.Errorf("rundir: host id %q is not 12 lowercase hex digits", hostID)
@@ -106,7 +121,7 @@ func Bind(env Env, hostID string, entry Entry) (*Host, error) {
 	// The socket base first: it measures the socket path against sun_path
 	// before it creates anything, so a path too long is refused with nothing
 	// created in either tree.
-	dir, err := env.socketDir(ns, hostID)
+	dir, err := env.socketDir(ns)
 	if err != nil {
 		return nil, err
 	}
@@ -122,25 +137,20 @@ func Bind(env Env, hostID string, entry Entry) (*Host, error) {
 	return h, nil
 }
 
+// hostLockOpened runs in Bind between the open of the host's lock (and its
+// modification time's refresh) and its flock, with the lock's path: nothing
+// in production, and in a test (never in parallel) a sweep in that window.
+var hostLockOpened = func(string) {}
+
+// lockTries bounds takeLock's attempts at a lock that is still the file at
+// its name once flocked.
+const lockTries = 3
+
 // bind is Bind's steps 2–5; whatever it built is on h for teardown.
 func (h *Host) bind(entry Entry) error {
-	lock, err := openLock(h.hosts, h.lockName())
-	if err != nil {
-		return fmt.Errorf("rundir: open the host lock: %w", err)
+	if err := h.takeLock(); err != nil {
+		return err
 	}
-	taken, err := tryLock(lock)
-	if err != nil || !taken {
-		_ = lock.Close() // not ours: never unlinked
-		if err == nil {
-			err = errors.New("another process holds it")
-		}
-		return fmt.Errorf("rundir: lock %s: %w", h.hosts.join(h.lockName()), err)
-	}
-	h.lock = lock
-	if err := writeHolder(lock, h.id); err != nil {
-		return fmt.Errorf("rundir: write %s: %w", h.hosts.join(h.lockName()), err)
-	}
-
 	ln, err := net.ListenUnix("unix", &net.UnixAddr{Name: h.socket, Net: "unix"})
 	if err != nil {
 		return fmt.Errorf("rundir: bind the control socket: %w", err)
@@ -174,6 +184,78 @@ func (h *Host) bind(entry Entry) error {
 	entry.PID = os.Getpid()
 	entry.Socket = h.socket
 	return h.writeEntry(entry)
+}
+
+// takeLock is Bind's step 2: it takes hosts/<id>.lock in the held registry
+// directory and writes the holder line, leaving the lock on h.
+//
+// The hub's sweep (SweepOrphans) takes a lock with no entry beside it that
+// has not been modified for OrphanAge, and unlinks it. A host between its
+// open and its flock holds nothing, so the open is followed at once by a
+// refresh of the file's modification time through the descriptor (touch):
+// a lock file this host reopens — an old one left at a reused --host-id —
+// is then as young as one it creates. That is a grace, not a guarantee: a
+// host stopped between its open and its flock for longer than OrphanAge, or
+// a sweep that read the old time just before the refresh, can still have the
+// file unlinked under it, and its flock would then take an inode no reader
+// can find. So the name is opened again — the lock made afresh where the
+// sweep unlinked it — up to lockTries times, whenever a sweep is seen at
+// work:
+//   - the exclusive create found the file there, and it was gone by the
+//     open that followed (openLock: an error wrapping fs.ErrNotExist);
+//   - the flock is refused, and the file refused is no longer the one at its
+//     name (dir.sameFile): a sweep holds it, having unlinked it;
+//   - the flock is taken, and the file is no longer the one at its name.
+//
+// A flock refused on the file still at its name is another holder of this
+// host's lock, and is refused as before: a host is never bound under a lock
+// someone else holds. (So is the instant in which a sweep holds an old lock
+// it has not unlinked yet; the host's spawner sees a failed start.)
+func (h *Host) takeLock() error {
+	path := h.hosts.join(h.lockName())
+	for range lockTries {
+		lock, err := openLock(h.hosts, h.lockName())
+		if errors.Is(err, fs.ErrNotExist) {
+			continue // unlinked between the create and the open
+		}
+		if err != nil {
+			return fmt.Errorf("rundir: open the host lock: %w", err)
+		}
+		// Best effort: a refresh that fails leaves the identity check below.
+		_ = touch(lock)
+		hostLockOpened(path)
+		taken, err := tryLock(lock)
+		if err != nil {
+			_ = lock.Close()
+			return fmt.Errorf("rundir: lock %s: %w", path, err)
+		}
+		named := h.hosts.sameFile(lock, h.lockName())
+		if !taken {
+			_ = lock.Close() // not ours: never unlinked
+			if named {
+				return fmt.Errorf("rundir: lock %s: another process holds it", path)
+			}
+			continue // held by a sweep that has unlinked it
+		}
+		if !named {
+			_ = unlock(lock)
+			_ = lock.Close()
+			continue
+		}
+		h.lock = lock
+		if err := writeHolder(lock, h.id); err != nil {
+			return fmt.Errorf("rundir: write %s: %w", path, err)
+		}
+		return nil
+	}
+	return fmt.Errorf("rundir: lock %s: it was unlinked or replaced under its open or its flock %d times", path, lockTries)
+}
+
+// touch sets f's access and modification times to now, through its
+// descriptor (futimes).
+func touch(f *os.File) error {
+	tv := unix.NsecToTimeval(time.Now().UnixNano())
+	return unix.Futimes(int(f.Fd()), []unix.Timeval{tv, tv})
 }
 
 // writeEntry writes e as the registry entry, atomically and relative to the
@@ -216,10 +298,11 @@ func (h *Host) Entry() Entry {
 
 // Update rewrites the registry entry with fn's changes — when the engine
 // becomes ready, and when it changes — and records the new file's identity.
-// Protocol, HostID, PID and Socket are kept as Bind wrote them. After Close it
-// returns ErrClosed and writes nothing. The new file's identity is taken
-// from the descriptor it was written through, before the rename, so a rename
-// that succeeds always records the file it installed.
+// Protocol, HostID, PID and Socket are kept as Bind wrote them, as are
+// RequestID and RequestHash: the request that made a host is fixed for its
+// life. After Close it returns ErrClosed and writes nothing. The new file's
+// identity is taken from the descriptor it was written through, before the
+// rename, so a rename that succeeds always records the file it installed.
 func (h *Host) Update(fn func(*Entry)) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -229,6 +312,7 @@ func (h *Host) Update(fn func(*Entry)) error {
 	e := h.entry
 	fn(&e)
 	e.Protocol, e.HostID, e.PID, e.Socket = h.entry.Protocol, h.entry.HostID, h.entry.PID, h.entry.Socket
+	e.RequestID, e.RequestHash = h.entry.RequestID, h.entry.RequestHash
 	return h.writeEntry(e)
 }
 
@@ -251,7 +335,7 @@ func (h *Host) Lost() string {
 	if h.closed {
 		return ""
 	}
-	gone := func(what, path string, want fileID) string {
+	gone := func(what, path string, want FileID) string {
 		fi, err := os.Lstat(path)
 		switch {
 		case errors.Is(err, fs.ErrNotExist):
@@ -329,7 +413,7 @@ func (h *Host) teardown() error {
 // unlinkIfOurs removes path — the runtime tree's socket — only while it is
 // still the file whose identity was recorded: a file put in its place since
 // is left alone, as is a path already gone.
-func unlinkIfOurs(path string, want fileID) error {
+func unlinkIfOurs(path string, want FileID) error {
 	fi, err := os.Lstat(path)
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil

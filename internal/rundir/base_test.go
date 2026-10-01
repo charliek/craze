@@ -143,7 +143,7 @@ func TestTheRunUserCandidateNeedsA0700DirectoryOwnedByTheUser(t *testing.T) {
 				// Every directory of the real uid is refused for another, the
 				// cache tree's included, so the base search is asked
 				// directly: the candidate is skipped for its owner.
-				_, err := env.socketDir("0123abcd", NewHostID())
+				_, err := env.socketDir("0123abcd")
 				if err == nil || !strings.Contains(err.Error(), runUser+": is owned by uid") {
 					t.Fatalf("socketDir error %v; want the /run/user candidate skipped for its owner", err)
 				}
