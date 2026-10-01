@@ -256,6 +256,7 @@ off.
 | `PgUp` / `PgDn` | scroll the transcript, or page the `/help` box; page the slash menu instead when it is open — the menu takes priority over both |
 | wheel | scroll the transcript three lines a notch; over an open slash menu, move its selection one row a notch instead — it selects, it does not page (see [Mouse](#mouse)) |
 | `Tab` | with the slash menu open, accept the highlighted row (see [Slash commands](#slash-commands)); with the [`@` file popup](#file-mentions) open, open the highlighted folder or pick the highlighted file; elsewhere a no-op |
+| `Ctrl+V`, `Alt+V` | paste the clipboard into the composer: an image becomes an `[Image #N]` chip, otherwise its text (see [Images](#images)) |
 
 `/help` lists the same keys plus every slash command — see
 [Help dialog](#help-dialog). `/exit` ends the session; there are no bare `q` or `?`
@@ -454,6 +455,97 @@ not be written into a mention.
 The popup says `searching…` while the list is read, `nothing matches` when
 nothing does, `no files here` in an empty workspace, and `could not list
 files: <why>` when the listing failed.
+
+## Images
+
+An image in the composer is a **chip**: the text `[Image #1]`, `[Image #2]` and
+so on, sitting in the draft where you put it. The picture itself is kept in
+craze's [attachments directory](configuration.md#attachments) and travels with
+the message when you send it. The transcript shows the chip text and nothing
+else: there are no inline previews.
+
+### Making a chip
+
+| Gesture | What happens |
+|---|---|
+| Paste, or drag-and-drop a file into the terminal | a bracketed paste whose every word is the absolute path of an image (`png`, `jpg`, `jpeg`, `gif`, `webp`, `bmp`) becomes one chip per path. Quotes, backslash escapes, `file://` URLs and a leading `~/` are understood, and several paths may be separated by spaces or newlines |
+| `Ctrl+V` with an image on the clipboard | the image becomes a chip. With no image on the clipboard it pastes the clipboard's text, as it always has |
+| `Alt+V` | the same as `Ctrl+V` |
+| An **empty** paste | what a terminal sends when you paste an image it cannot paste as text: craze looks for an image on the clipboard. It does not look over SSH (`SSH_CONNECTION` or `SSH_TTY` set), where the clipboard craze can read is the remote machine's, not yours |
+
+Reading the clipboard's image needs `wl-paste` (Wayland), `xclip` (X11) or, on
+macOS, `osascript`. Without the tool, or without an image, `Ctrl+V` pastes text.
+
+A path is only turned into a chip when the file exists, is a regular file, is
+at most 20 MiB, decodes as an image and is at least 8×8 pixels. These stay
+**plain text**, never a chip:
+
+- a path you **type**: only a paste is ever turned into a chip;
+- a paste that mixes paths with other words, or has any word that is not an
+  image path craze can open;
+- anything pasted in [shell mode](#shell-mode);
+- a paste into the [session list](#session-list) or the `/connect` key field
+  (see [`/connect`](#connect)): they take text only;
+- a paste in a session whose host cannot read craze's attachments (see below).
+
+### Editing and sending
+
+- `Backspace` at the end of a chip, or `Delete` at its start, removes the whole
+  chip. A chip you break by hand (or in an external editor) stops being an
+  image: only an intact `[Image #N]` is sent.
+- The number is for the message being written: it restarts at 1 after each send
+  and after `/clear`. Within one draft a number is never reused until it runs
+  out past 99.
+- A message holds at most **10 images and 15 MiB** of them together (each
+  image counted at its processed size, or at most 3.75 MiB). A paste over
+  either limit stays text, with a status note.
+- Processing takes a moment. While an image is still being attached, `Enter`
+  (and `Ctrl+L`, the first prompt of a new session, and saving a queue edit) does
+  nothing and keeps the draft; the status line says `image #N is still being
+  attached; press enter again in a moment`. A file that cannot be attached is
+  put back as the text you pasted, with a note.
+- Drafts keep their chips when you move between sessions, and a queued message
+  keeps its images: editing it from the queue band loads the chips back.
+
+### What craze does to the image
+
+Anything wider or taller than 2000 pixels is scaled down to 2000 on its long
+edge, an image over 3.75 MiB is re-encoded smaller, and photos lose their EXIF
+and XMP metadata. A `gif` sends its first frame as a `png`. When an image is
+scaled, the status line says so, for example `image #1 downscaled 3024×1964 →
+2000×1299`, and the agent is told too. Sources over 20 MiB or 50 megapixels are
+refused.
+
+Two other notes can appear when you paste:
+
+- `<model> can't see images; it will get a placeholder`: the session is native
+  and its model is not known to take images.
+- `this session's host can't read craze attachments; pasted as a path`: a chip
+  needs the process that hosts the session to read the file from the
+  attachments directory of **this** craze. A session hosted by a process under
+  another `CRAZE_HOME` (a detached host started with a different home, or a
+  socket attached from one) cannot, so the paste stays a path and no chip is
+  made. A session in this `CRAZE_HOME`, in-process or detached, is fine.
+
+### What the agent receives
+
+| Agent | Receives |
+|---|---|
+| Cursor, Grok, gx | the visible message first, then one image block per chip in order, and, for a scaled image, a line `[Image #1 was downscaled from 3024×1964 to 2000×1299]`. An agent that says it does not take images gets `[Image #N: <path>]` text in the chip's place instead (Grok and gx are sent images regardless, since they take them without saying so) |
+| An agent that rejects the images | when it answers the prompt with an invalid-params error before doing anything, craze sends the message once more with each image as `[Image #N: <path>]` text. After the agent has done anything for the turn, or you cancelled, the error is shown as it is |
+| Native | the same chips; how the image reaches the model depends on the model: see below |
+| An [interjection](#queued-messages) | always path text, `[Image #N: <path>]`, never image data |
+| `craze prompt` | text only: it has no way to attach an image |
+
+An image craze cannot read at send time (the file was swept, is not an image any
+more, or is outside the attachments directory) goes as `[Image #N: <path> (not
+attached: <reason>)]` rather than failing the message. A chip you deleted from
+the text is never sent.
+
+On a native session an image currently reaches the model as the same
+`[Image #N: <path>]` text. Sending the picture itself to models that take images
+(and a placeholder naming the model to those that do not) arrives with native
+vision support in the next change, which will extend this section.
 
 ## Shell mode
 

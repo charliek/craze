@@ -54,6 +54,7 @@ fixed names:
 | `config.toml` | The saved theme, provider, and other settings — see [Config file](#config-file) |
 | `sessions.jsonl` | The [session index](#session-index) |
 | `journal/` | One directory per workspace of [session journals](#session-journal) |
+| `attachments/` | The images pasted into the composer — see [Attachments](#attachments) |
 
 `CRAZE_HOME` moves the whole directory. With `CRAZE_HOME=/some/dir`, craze
 reads and writes `/some/dir/config.toml`, `/some/dir/sessions.jsonl` and
@@ -72,6 +73,25 @@ been removed, not kept as an alias: while it is still set, `craze`,
 it, before reading or writing anything. Unset it and set `CRAZE_HOME` to the
 directory the file was in — `CRAZE_HOME=/some/dir` for `/some/dir/config.toml`.
 A config file with any other name has to be renamed `config.toml`.
+
+## Attachments
+
+An image pasted into the TUI's composer (see [Images](tui.md#images)) is
+processed and stored in `attachments/` inside the [craze
+directory](#the-craze-directory): `~/.craze/attachments/`, or
+`$CRAZE_HOME/attachments/`. The directory is created `0700` and holds only
+files named `<16 hex digits>.<png|jpg|webp>`, mode `0600`, written atomically.
+The name is the start of the content's SHA-256, so pasting the same image twice
+stores one file. craze refuses to read from a directory that is a symlink, is
+owned by another user, or is wider than `0700`, and an attachment path in a
+message that points anywhere else is sent to the agent as text, not read.
+
+Every TUI start sweeps the directory, quietly: files older than seven days are
+deleted, and then the oldest files go until what is left is under 500 MiB.
+Deleting the directory by hand is always safe; an image that has gone by the
+time the message is sent goes as text saying `no longer available`. What the
+agent receives is described under [what the agent
+receives](tui.md#what-the-agent-receives).
 
 ## Config file
 
