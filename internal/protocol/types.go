@@ -111,19 +111,24 @@ type HelloResult struct {
 }
 
 // HubHelloResult is a hub's answer to hello (endpoint.kind "hub"; plan 027
-// §3.3's hub mode, X5): the protocol, the hub's identity and what the
-// connection can do there. It carries no client id, token, resumed or retry
-// horizon — a hub mints no client ids and keeps no receipts — and a hub result
-// that carries any of them is invalid. A client that goes on to a session is
-// spliced to its host (session.connect) and says hello to the host itself.
-// No hub exists before S4; protocol 1 defines the shape so S4 needs no change.
+// §3.3's hub mode, X5; plan 032 §3.6): the protocol, the hub's identity and
+// what the connection can do there. It carries no client id, token, resumed
+// or retry horizon — a hub mints no client ids and keeps no receipts — and a
+// hub result that carries any of them is invalid. A client that goes on to a
+// session is spliced to its host (session.connect) and says hello to the host
+// itself. Protocol 1 defined the shape before any hub existed, so the hub
+// (S4b) needed no change to it.
 type HubHelloResult struct {
 	Protocol int `json:"protocol"`
-	// Endpoint is the hub; its Kind is EndpointHub.
-	Endpoint     Endpoint               `json:"endpoint"`
+	// Endpoint is the hub; its Kind is EndpointHub and its HostID the hub's
+	// own id (12 hex digits, minted per hub process: the roster's epoch).
+	Endpoint Endpoint `json:"endpoint"`
+	// Capabilities is HubCapabilities() for the hub's build.
 	Capabilities ConnectionCapabilities `json:"capabilities"`
 	Codecs       Codecs                 `json:"codecs"`
-	Limits       Limits                 `json:"limits"`
+	// Limits is HostLimits(): the hub reads and writes lines under the same
+	// two limits a host does.
+	Limits Limits `json:"limits"`
 }
 
 // HelloErrorResult is data.result beside hello's protocol_version refusal:
@@ -169,6 +174,16 @@ type ConnectionCapabilities struct {
 // are served.
 func HostCapabilities() ConnectionCapabilities {
 	return ConnectionCapabilities{Snapshot: true, AttachWhenNow: true}
+}
+
+// HubCapabilities is the hub's connection capabilities (plan 032 §3.6): the
+// roster subscription (sessions.subscribe) and the splice (session.connect)
+// are served; a session is never multiplexed on one connection (SQ14), and a
+// snapshot and an attach are a host's, reached through the splice, so those
+// three are false. sessionCreate is false until the hub serves session.create
+// (plan 032 C15): a client that needs it checks it, never the hub's version.
+func HubCapabilities() ConnectionCapabilities {
+	return ConnectionCapabilities{RosterSubscribe: true, Connect: true}
 }
 
 // Codecs is the version of each codec whose output the protocol carries
@@ -478,25 +493,143 @@ func Activities() []Activity { return slices.Clone(activities) }
 // SessionsListParams takes nothing.
 type SessionsListParams struct{}
 
-// SessionsListResult is the roster (plan 027 §3.3, SD-28). On a host, Epoch
-// is its hostId — a new host process is a new epoch, and a client reseeds —
-// and Cursor is the log's committed seq when the rows were read. The hub (S4)
-// keeps both fields with meanings of its own.
+// SessionsListResult is a host's roster (plan 027 §3.3, SD-28): Epoch is its
+// hostId — a new host process is a new epoch, and a client reseeds — and
+// Cursor is the log's committed seq when the rows were read. The hub answers
+// the same method with HubSessionsListResult, whose two fields have meanings
+// of the hub's own; sessions.list's result schema is either (an anyOf: an
+// empty roster is both).
 type SessionsListResult struct {
 	Epoch    string       `json:"epoch"`
 	Cursor   uint64       `json:"cursor"`
 	Sessions []SessionRow `json:"sessions"`
 }
 
+// HubSessionsListResult is the hub's roster (plan 032 §3.6): one RosterRow per
+// live host in the registry that has a craze session id, in hostId order.
+// Epoch is the hub's incarnation — its endpoint.hostId: a new hub process is a
+// new epoch, and a client reseeds. Cursor is the hub's roster sequence, bumped
+// by every change to a row's content (an approximate flip included): it only
+// increases within an epoch, and may jump. Truncated says the roster was cut
+// at RosterRowsMax rows; it is absent otherwise.
+type HubSessionsListResult struct {
+	Epoch     string      `json:"epoch"`
+	Cursor    uint64      `json:"cursor"`
+	Sessions  []RosterRow `json:"sessions"`
+	Truncated bool        `json:"truncated,omitempty"`
+}
+
+// RosterRow is one row of the hub's roster (plan 032 §3.6, P4): what the hub
+// knows about one host, and that host's own sessions.list row. HostID is the
+// key — stable from the host's first registry appearance; SessionID is the
+// host's craze session id, what session.connect and `craze bridge --session`
+// take (a host without one is not listed until it has one). No socket path
+// crosses the wire: a local client that needs one resolves it from the
+// registry by HostID. Every member is bounded — HostID 12 hex digits,
+// SessionID a token of at most 128 characters, RosterHost's strings and Row
+// by limits.go's roster bounds — and the whole row encodes to at most
+// RosterEntryBytesMax, which the hub keeps true by cutting and dropping in the
+// order limits.go gives, marking the row Approximate.
+type RosterRow struct {
+	HostID    string     `json:"hostId"`
+	SessionID string     `json:"sessionId"`
+	Host      RosterHost `json:"host"`
+	// Status is whether the hub reaches the host: connecting until its first
+	// attempt, then reachable or unreachable.
+	Status RosterStatus `json:"status"`
+	// Approximate says Row is not fresh — its last successful read is more
+	// than 3 s old, or the host is not reachable — or the hub cut or dropped
+	// something to keep the row within its bounds, and so the row may not
+	// say what the session is doing now.
+	Approximate bool `json:"approximate"`
+	// Row is the host's own sessions.list row (a sessionRow), kept as the
+	// JSON value the host sent, not re-encoded from a SessionRow: a newer
+	// host's members this build does not know, at any depth, pass through the
+	// hub untouched (02's rule) — so the schema describes it as any object
+	// (info.json's forwardedRow), the host's own sessionRow schema staying
+	// strict — and a client reads it tolerantly (RosterRow.SessionRow).
+	// Absent until the hub's first read of the host; while the host is
+	// unreachable, the last row read is kept. At most RosterRowBytesMax.
+	Row json.RawMessage `json:"row,omitempty"`
+}
+
+// SessionRow is r's Row decoded tolerantly — the members this build knows,
+// every other one ignored, as a client reads every result (tolerant inbound)
+// — and false when the row is absent.
+func (r RosterRow) SessionRow() (SessionRow, bool, error) {
+	if len(r.Row) == 0 {
+		return SessionRow{}, false, nil
+	}
+	var row SessionRow
+	if err := json.Unmarshal(r.Row, &row); err != nil {
+		return SessionRow{}, true, err
+	}
+	return row, true, nil
+}
+
+// RosterHost is what the hub knows about a host beside its row (plan 032
+// §3.6): from the host's registry entry its pid, protocol, provider name,
+// workspace, start time and readiness, and from its hello its craze version
+// ("" until the hub's first hello to it). CrazeVersion, Provider and
+// Workspace are at most RosterCrazeVersionMax, RosterProviderMax and
+// RosterWorkspaceMax characters: the hub cuts a longer one to its bound.
+type RosterHost struct {
+	PID          int       `json:"pid"`
+	CrazeVersion string    `json:"crazeVersion"`
+	Protocol     int       `json:"protocol"`
+	Provider     string    `json:"provider"`
+	Workspace    string    `json:"workspace"`
+	StartedAt    time.Time `json:"startedAt"`
+	Ready        bool      `json:"ready"`
+}
+
+// RosterStatus is whether the hub reaches a host (plan 032 §3.6).
+type RosterStatus string
+
+const (
+	// RosterConnecting: the hub has not yet attempted the host.
+	RosterConnecting RosterStatus = "connecting"
+	// RosterReachable: the hub's last attempt read the host's row.
+	RosterReachable RosterStatus = "reachable"
+	// RosterUnreachable: the hub's last attempt failed; Row, if any, is the
+	// last one read.
+	RosterUnreachable RosterStatus = "unreachable"
+)
+
+var rosterStatuses = []RosterStatus{RosterConnecting, RosterReachable, RosterUnreachable}
+
+// RosterStatuses is every roster status, connecting first.
+func RosterStatuses() []RosterStatus { return slices.Clone(rosterStatuses) }
+
 // SessionsSubscribeParams takes nothing. A host answers unsupported, reason
-// roster_unsupported (rosterSubscribe: false); the hub defines the method and
-// its result (S4), which protocol 1 does not specify.
+// roster_unsupported (rosterSubscribe: false); the hub answers
+// SessionsSubscribeResult. A connection holds at most one roster
+// subscription: a second is bad_request, reason already_subscribed.
 type SessionsSubscribeParams struct{}
 
+// SessionsSubscribeResult is the hub's answer to sessions.subscribe (plan 032
+// §3.6): the roster as HubSessionsListResult has it, at Cursor, and the
+// subscription's id, which every roster notification carries. The reply is
+// written before any notification of the subscription, and each notification
+// carries the net change since the cursor the subscriber last had.
+type SessionsSubscribeResult struct {
+	Subscription string      `json:"subscription"`
+	Epoch        string      `json:"epoch"`
+	Cursor       uint64      `json:"cursor"`
+	Sessions     []RosterRow `json:"sessions"`
+	Truncated    bool        `json:"truncated,omitempty"`
+}
+
 // ConnectParams names the session a hub splices this connection to (plan 027
-// §3.3's hub splice): the hub dials that host's socket, answers {}, and from
-// the next byte on the client speaks to the host itself, starting with its
-// own hello. A per-session host answers unsupported, reason hub_only.
+// §3.3's hub splice; plan 032 §3.7): the hub dials that host's socket, answers
+// {}, and from the next byte on the client speaks to the host itself,
+// starting with its own hello. It must be the connection's first request
+// after hello, with nothing else in flight and no roster subscription
+// (otherwise bad_request, reason connect_not_first). SessionID matches a live
+// host's craze session id, provider session id or host id: none is
+// unknown_session, more than one bad_request, reason ambiguous_session, and a
+// host the hub cannot dial unavailable, reason host_unreachable. A per-session
+// host answers unsupported, reason hub_only.
 type ConnectParams struct {
 	SessionID string `json:"sessionId"`
 }
@@ -1032,8 +1165,24 @@ type ReadyParams struct {
 	Err          string      `json:"err,omitempty"`
 }
 
+// RosterParams is a roster notification's params (plan 032 §3.6): the hub's
+// roster subscription's net change since the cursor the subscriber last had
+// — the reply's, or the previous notification's. Upserts are rows added or
+// changed, Removes the host ids of rows gone (a host that went away, or lost
+// its craze session id); a host is in at most one of the two, and each holds
+// at most RosterRowsMax. Cursor only increases, and may jump; Epoch is the
+// reply's (a new epoch is a new subscription, after a reconnect).
+type RosterParams struct {
+	Subscription string      `json:"subscription"`
+	Epoch        string      `json:"epoch"`
+	Cursor       uint64      `json:"cursor"`
+	Upserts      []RosterRow `json:"upserts"`
+	Removes      []string    `json:"removes"`
+}
+
 // ResetParams is a reset notification's params, which end the subscription
-// (plan 027 §3.4). A reset is not a gap: nothing was silently lost.
+// (plan 027 §3.4) — an attachment's, or the hub's roster subscription's (plan
+// 032 §3.6). A reset is not a gap: nothing was silently lost.
 type ResetParams struct {
 	Subscription string      `json:"subscription"`
 	Reason       ResetReason `json:"reason"`
@@ -1062,11 +1211,18 @@ const (
 	// ResetSessionClosed: the session is over, its final records delivered;
 	// the host closes the connection.
 	ResetSessionClosed ResetReason = "session_closed"
+	// ResetHubClosing: the hub is shutting down (plan 032 §3.5) and ends its
+	// roster subscriptions; it closes the connection. The client reconnects —
+	// a hub is started on demand — and subscribes afresh: the new hub's epoch
+	// reseeds it. A roster subscription a client fell behind on ends
+	// slow_consumer, and is resubscribed the same way.
+	ResetHubClosing ResetReason = "hub_closing"
 )
 
 var resetReasons = []ResetReason{
 	ResetSlowConsumer, ResetOmitted, ResetReplayFailed, ResetSessionReplaced, ResetSessionClosed,
+	ResetHubClosing,
 }
 
-// ResetReasons is every reset reason, in §3.4's order.
+// ResetReasons is every reset reason, in §3.4's order, then the hub's.
 func ResetReasons() []ResetReason { return slices.Clone(resetReasons) }

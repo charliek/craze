@@ -3,6 +3,7 @@ package fakehost
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math/rand"
 	"net"
@@ -14,6 +15,7 @@ import (
 	"github.com/charliek/craze/internal/control"
 	"github.com/charliek/craze/internal/engine"
 	"github.com/charliek/craze/internal/protocol"
+	"github.com/charliek/craze/internal/rundir"
 	"github.com/charliek/craze/internal/tui"
 )
 
@@ -107,8 +109,11 @@ type clock struct {
 	t  time.Time
 }
 
+// clockStart is where every Host's clock starts.
+var clockStart = time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+
 func newClock() *clock {
-	return &clock{t: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)}
+	return &clock{t: clockStart}
 }
 
 func (c *clock) now() time.Time {
@@ -188,6 +193,9 @@ type Host struct {
 	stopHeard     chan struct{}
 	stopHeardOnce sync.Once
 	stopped       bool
+	// reg is the Host's registration (Register), nil while it has none: each
+	// new incarnation is written into its entry, as a real host's is.
+	reg *rundir.Host
 }
 
 // New builds a Host and its first incarnation, started. Nothing is served
@@ -259,10 +267,18 @@ func (h *Host) newIncarnation() error {
 	h.mu.Lock()
 	old := h.eng
 	h.stub, h.eng = stub, eng
+	reg := h.reg
 	h.mu.Unlock()
 	h.srv.SetEngine(eng)
 	if old != nil {
 		go func() { _ = old.Close() }()
+	}
+	if reg != nil {
+		st := eng.State()
+		err := reg.Update(func(e *rundir.Entry) { e.Incarnation, e.ProviderSessionID = st.Incarnation, st.SessionID })
+		if err != nil && !errors.Is(err, rundir.ErrClosed) {
+			return fmt.Errorf("fakehost: the registry entry: %w", err)
+		}
 	}
 	return nil
 }
@@ -318,6 +334,40 @@ func (h *Host) Serve(l net.Listener) error {
 	h.ln = sl
 	h.mu.Unlock()
 	return h.srv.Serve(sl)
+}
+
+// Register binds the Host's control socket in env's runtime tree and lists it
+// in env's registry exactly as a craze host does (rundir.Bind; plan 032
+// §3.15): its lifetime lock held, its entry naming the socket, the Host's id
+// and durable session id, the current incarnation and provider session id,
+// its provider's name and workspace, ready, and started when its clock
+// started. That is what a hub (or `craze attach`, or the TUI's list) finds a
+// host by, so several Hosts with distinct ids can be listed side by side in
+// one registry. The caller serves the returned host's Listener (Serve) and
+// closes it — which unlists the Host and unlinks its socket — after Close.
+// Each later incarnation (Restart) is written into the entry. A Host is
+// registered at most once.
+func (h *Host) Register(env rundir.Env) (*rundir.Host, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.reg != nil {
+		return nil, fmt.Errorf("fakehost: host %s is registered already", h.opts.HostID)
+	}
+	st := h.eng.State()
+	reg, err := rundir.Bind(env, h.opts.HostID, rundir.Entry{
+		StartedAt:         clockStart,
+		CrazeSessionID:    h.opts.CrazeSessionID,
+		ProviderSessionID: st.SessionID,
+		Incarnation:       st.Incarnation,
+		Provider:          st.Provider.Name,
+		Workspace:         h.opts.Workspace,
+		Ready:             true,
+	})
+	if err != nil {
+		return nil, err
+	}
+	h.reg = reg
+	return reg, nil
 }
 
 // listener is the current stallListener, under mu like every other field a

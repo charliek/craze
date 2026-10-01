@@ -12,13 +12,15 @@ authentication in protocol 1 — `hello`'s `auth` field is reserved for scopes,
 which arrive at S6 — and no encryption, because nothing crosses the machine
 boundary yet.
 
-Today the endpoint is always a **host**: one process serving one session —
-by default a detached [`craze serve`](cli.md#craze-serve) the ordinary `craze`
-spawned, or, with detaching off, the TUI's own process.
-A future **hub** endpoint (S4) will multiplex several hosts behind one
-socket and splice a client through to the one it asks for
-([The hub splice](#the-hub-splice)); protocol 1 already reserves the shapes
-that needs, so no wire change is required to add it.
+An endpoint is one of two kinds. A **host** is one process serving one
+session — by default a detached [`craze serve`](cli.md#craze-serve) the
+ordinary `craze` spawned, or, with detaching off, the TUI's own process. The
+**hub** (S4b) is the machine's one place that knows every host: it lists
+them all ([The hub's roster](#the-hubs-roster)) and splices a client through
+to the one it asks for ([The hub splice](#the-hub-splice)). It never
+multiplexes sessions on one connection, and it never serves a session's
+methods itself: those are always the host's. `hello`'s `endpoint.kind` says
+which one answered.
 
 This page documents protocol 1 as `internal/protocol`, `internal/control`,
 `internal/remote` and `internal/fakehost` build it. Where this page and a
@@ -164,7 +166,29 @@ distinct from the **session**'s (the attach reply's — see
 [Capabilities](#capabilities)): whether the endpoint can multiplex several
 sessions, subscribe to the roster, create a session, or splice a client
 through (all `false` on a host in protocol 1), plus whether it serves
-`session.snapshot` and an attach with `when: "now"` (both `true`).
+`session.snapshot` and an attach with `when: "now"` (both `true` on a host).
+
+### The hub's result
+
+```json
+{"jsonrpc":"2.0","id":"1","result":{
+  "protocol":1,
+  "endpoint":{"kind":"hub","hostId":"0a1b2c3d4e5f","crazeVersion":"0.4.0","pid":5150},
+  "capabilities":{"rosterSubscribe":true,"sessionCreate":false,"multiplex":false,"connect":true,"snapshot":false,"attachWhenNow":false},
+  "codecs":{"event":1,"snapshot":1},
+  "limits":{"inboundLine":4194304,"outboundLine":16777216}
+}}
+```
+
+`endpoint.hostId` is the hub's own id — twelve hex digits, minted per hub
+process — and the [roster](#the-hubs-roster)'s `epoch`: a client that sees it
+change is talking to a new hub, and reseeds. The hub serves the roster
+subscription (`rosterSubscribe`) and the splice (`connect`); `snapshot` and
+`attachWhenNow` are `false` because a session's methods are its host's,
+reached through the splice; `multiplex` is `false` because one connection
+carries the roster or one spliced session, never several. `sessionCreate` is
+`true` only on a hub that serves `session.create`: a client checks it, never
+the hub's version.
 
 ### Client ids and resume
 
@@ -209,8 +233,9 @@ every time, not answered from the table. A resend of a command whose answer
 
 ## Sessions and the roster
 
-`sessions.list` returns every session this endpoint serves (one, on a host in
-protocol 1):
+`sessions.list` returns every session this endpoint knows. On a host, that
+is its one session (below); on the hub, every host on the machine — [the
+hub's roster](#the-hubs-roster), whose rows wrap these.
 
 | result | |
 |---|---|
@@ -283,6 +308,83 @@ applies it only if it has folded no later turn since, by `turnId`.
 `sessions.subscribe` and `session.connect` are `unsupported` on a host
 (reasons `roster_unsupported` and `hub_only`): both belong to the hub.
 
+### The hub's roster
+
+The hub learns hosts from the machine's registry (see [The
+registry](#the-registry)) and reads each one's own `sessions.list`; it lists
+every live host that has a craze session id, keyed by host id, in host-id
+order. Its `sessions.list` result:
+
+| result | |
+|---|---|
+| `epoch` | the hub's own id (its `hello`'s `endpoint.hostId`): a new hub process is a new epoch, and a client reseeds |
+| `cursor` | the hub's roster sequence, an unsigned 64-bit integer: bumped by every change to a row's content (an `approximate` flip included); it only increases within an epoch, and may jump |
+| `sessions[]` | one **roster row** per host (below) |
+| `truncated` | `true` when the roster was cut at 512 rows; absent otherwise |
+
+`sessions.list`'s result is a host's or the hub's — the schema says
+`anyOf`, since an empty roster is both — and a client knows which from the
+endpoint it said `hello` to. A roster row:
+
+| field | |
+|---|---|
+| `hostId` | the host's id, twelve lowercase hex digits: the row's key, stable from the host's first appearance in the registry |
+| `sessionId` | the host's craze session id, a token of at most 128 characters of `[A-Za-z0-9._-]`: what [`session.connect`](#the-hub-splice) and `craze bridge --session` take |
+| `host` | what the hub knows about the host beside its row: `pid`, `protocol`, `provider` (its name, at most 64 characters), `workspace` (at most 4096), `startedAt` and `ready` from its registry entry, and `crazeVersion` (at most 128) from its `hello` (`""` until the hub's first) |
+| `status` | `connecting` (not yet attempted), `reachable` (the last attempt read its row) or `unreachable` (the last attempt failed) |
+| `approximate` | the row is not fresh — its last successful read is more than 3 s old, or the host is not reachable — or the hub cut or dropped something to keep it within its bounds (below) |
+| `row` | the host's own `sessions.list` row, **as the JSON value the host sent** — not re-encoded — so a newer host's members this build does not know, at any depth, pass through the hub untouched; absent until the hub's first read, and while the host is unreachable the last one read |
+
+No socket path crosses the wire: a local client that needs a host's socket
+resolves it from the registry by `hostId`. A row's `row` is a host's of
+whatever build, so the schema describes it as any object (`forwardedRow`) —
+a host's own row is still held to this build's strict `sessionRow` — and a
+client reads it tolerantly — the members it knows, the rest ignored — its
+`capabilities.rowFacts` saying what it holds, exactly as when the client
+polls the host itself.
+
+**The roster's bounds** keep any roster one line, whatever the hosts behind
+it send: at most 512 roster rows (`truncated` beyond, in host-id order), and
+each roster row at most 32,000 bytes as JSON. The hub keeps every roster row
+within them, in this order, and marks each one it changes `approximate`: a
+host string over its bound is cut to it; a host row over 16 KiB as JSON is
+dropped (`row` absent); and a roster row still over 32,000 bytes — only a
+large row beside host strings that JSON escapes can be — has its row
+dropped, which always suffices. With a request id of at most 1 KiB, the
+hub's `sessions.list` and `sessions.subscribe` replies and every `roster`
+notification are then under the 16 MiB line limit (`internal/protocol`'s
+`TestAFullRosterFitsOneLine` builds the largest). A host whose ids are not
+of the forms above is not listed. The numbers are `internal/protocol`'s
+`Roster*` constants, which the schema states too.
+
+**`sessions.subscribe`** (`{}`) is the roster as a subscription, one per
+connection (a second is `bad_request`, reason `already_subscribed`). The
+reply is the roster at a cursor and the subscription's id, written before any
+of its notifications:
+
+```json
+{"jsonrpc":"2.0","id":"2","result":{"subscription":"r-1","epoch":"0a1b2c3d4e5f","cursor":9,"sessions":[...]}}
+```
+
+then `roster` notifications, each the **net change** since the cursor the
+subscriber last had — rows added or changed in `upserts`, the host ids of
+rows gone in `removes`, a host in at most one of the two — flushed at most
+every 250 ms:
+
+```json
+{"jsonrpc":"2.0","method":"roster","params":{"subscription":"r-1","epoch":"0a1b2c3d4e5f","cursor":12,"upserts":[...],"removes":["0190ab12cd36"]}}
+```
+
+A subscription ends with the connection, or with a `reset` on the
+subscription: `slow_consumer` (the subscriber fell 10 s behind) or
+`hub_closing` (the hub is shutting down and closes the connection). Either
+way the client subscribes again — after `hub_closing`, on a new connection,
+the new hub's `epoch` reseeding it.
+
+On the hub, every session-scoped method but `session.connect` is
+`unsupported`, reason `host_only`: a session's methods are its host's,
+reached through the splice.
+
 ## Methods
 
 Every session-scoped method carries `sessionId`, the durable craze session
@@ -292,12 +394,16 @@ from 1 **per client**, never reused. Resending a mutating method under the
 same `commandId` is how a client asks "did that happen?" — see
 [Errors and retry](#errors-and-retry).
 
+The hub serves `hello`, `sessions.list`, `sessions.subscribe` and
+`session.connect`; every other session-scoped method sent to it is refused
+`unsupported`, reason `host_only`.
+
 | method | mutating | params (beyond `sessionId`/`commandId`) | result | notes |
 |---|---|---|---|---|
-| `hello` | | see [`hello`](#hello) | see [`hello`](#hello) | tolerant; before any other method |
-| `sessions.list` | | — | `epoch`, `cursor`, `sessions[]` | |
-| `sessions.subscribe` | | — | — | `unsupported` on a host, reason `roster_unsupported`; the hub's (S4) |
-| `session.connect` | | `sessionId` | — | `unsupported` on a host, reason `hub_only`; the hub's splice (below) |
+| `hello` | | see [`hello`](#hello) | see [`hello`](#hello) | tolerant; before any other method; a host's result or [the hub's](#the-hubs-result) |
+| `sessions.list` | | — | `epoch`, `cursor`, `sessions[]`; the hub's `truncated?` | a host's one row, or [the hub's roster](#the-hubs-roster) of roster rows |
+| `sessions.subscribe` | | — | `subscription`, `epoch`, `cursor`, `sessions[]`, `truncated?` | the hub's: then `roster` notifications ([above](#the-hubs-roster)); a second on one connection is `bad_request`, reason `already_subscribed`; `unsupported` on a host, reason `roster_unsupported` |
+| `session.connect` | | `sessionId` | `{}` | the hub's [splice](#the-hub-splice): the connection's first request after `hello`, else `bad_request`, reason `connect_not_first`; `unsupported` on a host, reason `hub_only` |
 | `session.attach` | | `cursor?`, `when?`, `budget?` | `subscription`, `session`, `ready`, `after`, `snapshot?`, `reset?` | see [Attach, resume and snapshots](#attach-resume-and-snapshots) |
 | `session.detach` | | `subscription` | `{}` | ends this connection's attachment; the reply is its terminal acknowledgement |
 | `session.state` | | — | activity, `foreignTurn`, `turn`, `waiting`, `sendNow?`, `queue[]`, `pendingAsks`, `headAsk?`, `err`, `startFailed`, `prompted`, `cancelled`, `settings`, `lastTurn?` | a read, not a cut of the stream; `lastTurn` is [the last turn](#the-last-turn)'s ending |
@@ -397,7 +503,8 @@ behind a new capability; it is not a breaking change.
 
 ## Notifications
 
-A notification has no `id` and carries its subscription id in `params`.
+A notification has no `id` and carries its subscription id in `params`: an
+attachment's, from a host, or the roster subscription's, from the hub.
 
 | notification | params | meaning |
 |---|---|---|
@@ -405,6 +512,7 @@ A notification has no `id` and carries its subscription id in `params`.
 | `synchronized` | `subscription`, `seq` | the stream has delivered through this attachment's cutoff — shed's "ready" for the *stream* (not to be confused with `ready`, the *session*'s readiness). Sent once per attachment |
 | `ready` | `subscription`, `session`, `startFailed`, `err?` | the session's start has finished (`startFailed: false`) or failed (`true`, `err` the text); owed once, only to an attachment made **before** readiness (`when: "now"`, or a `when: "ready"` attach that raced the start) — but not delivered if that subscription resets before its position reaches the seq the start completed at, and not owed at all if the session closes without ever starting (that attachment ends `reset{session_closed}` instead, with no `ready`). `session` is the final [info document](#the-session-info-document) — catalogs and provider session id included |
 | `reset` | `subscription`, `reason` | the subscription is over (below) |
+| `roster` | `subscription`, `epoch`, `cursor`, `upserts[]`, `removes[]` | the hub's alone: the roster's net change since the cursor the subscriber last had — see [the hub's roster](#the-hubs-roster) |
 
 A `reset` is a notification, not a gap: nothing is ever silently lost. Every
 reason and what a client does about it:
@@ -416,6 +524,10 @@ reason and what a client does about it:
 | `replay_failed` | the journal leg of a cursor replay failed asynchronously | discard everything folded since the cursor; re-attach with no cursor |
 | `session_replaced` | the host swapped its engine for a new session | the connection closes ([terminal-only from the swap](#the-reply-barrier): no ordinary reply queued before it survives); reconnect, say `hello` afresh (the old token is void) and attach the new session |
 | `session_closed` | the session is over; its final records were delivered first — or, if the journal's tail could not be read, the contiguous prefix of them the host still had | the connection closes; there is nothing to reconnect to |
+| `hub_closing` | the hub is shutting down — a roster subscription's reset, never an attachment's | the connection closes; reconnect (a hub is started on demand) and subscribe again: the new hub's `epoch` reseeds the roster |
+
+A roster subscription can also end `slow_consumer` (the subscriber fell 10 s
+behind); the client subscribes again.
 
 ## Attach, resume, and snapshots
 
@@ -645,7 +757,10 @@ what **this session** can do.
 
 **Connection** (`hello`'s `capabilities`): `rosterSubscribe`, `sessionCreate`,
 `multiplex`, `connect` — all `false` on a host in protocol 1, the hub's
-alone — plus `snapshot` and `attachWhenNow`, both `true`.
+alone — plus `snapshot` and `attachWhenNow`, both `true` on a host. On the
+hub, `rosterSubscribe` and `connect` are `true`, `sessionCreate` is `true`
+where it serves `session.create`, and the other three are `false` (see [the
+hub's result](#the-hubs-result)).
 
 **Session** (the info document's `capabilities`): every field of the
 engine's own capability set, in its wire name, plus four the protocol states
@@ -702,6 +817,21 @@ is optional the same way, except that its absence is ordinary on any host —
 the model is not remembered — so a catalog with no ranks at all, an ACP
 provider's or an older host's, is listed after the current model in the
 client's own order.
+
+The hub is announced the same way. A client learns it is talking to one from
+`hello`'s `endpoint.kind`, and what it serves from its connection
+capabilities; an older client never dials it — it reaches hosts through the
+registry, and refuses a `hello` from anything but a host where it expects
+one. The hub lists hosts of every build side by side: each roster row's
+`row` is that host's own row, read tolerantly, its `capabilities.rowFacts`
+saying what it holds; a host with no `stop` keeps refusing
+`stop_unsupported` however it was found. The hub's reasons
+(`host_only`, `connect_not_first`, `ambiguous_session`, `already_subscribed`,
+`request_conflict`, `spawn_failed`, `host_unreachable`) are new values of the
+reason set, each under a code a client already decides from, so one that does
+not know a reason decides by its code ([Errors and retry](#errors-and-retry));
+the reset reason `hub_closing` ends only a roster subscription, which no older
+client holds.
 
 ## The foreign turn
 
@@ -880,7 +1010,8 @@ before that — a malformed request, an unknown session, or an unsupported
 method are refused by the socket layer itself (`internal/control/dispatch.go`,
 `handlers.go`), with no command receipt at all. Resending one of those is
 just resending the same malformed or unsupported request, never a replay of
-a stored answer.
+a stored answer. The hub holds no command receipts at all: every refusal of
+its own is of that kind.
 
 `aborted` is the one exception worth calling out: the command ran, but its
 outcome cannot be vouched for (a caller's context ended mid-flight, a call
@@ -895,18 +1026,18 @@ see [Attach, resume, and snapshots](#attach-resume-and-snapshots).
 
 ### The reason table
 
-Every reason a host sends, grouped by its one code. Client-side reasons (last
-group) are named here so a client never mistakes one for a host's own answer
-— no host ever sends them.
+Every reason a host or the hub sends, grouped by its one code — a reason is
+always one code's. Client-side reasons (last group) are named here so a
+client never mistakes one for a host's own answer — no host ever sends them.
 
-| code | reasons a host sends |
+| code | reasons a host or the hub sends |
 |---|---|
 | `not_accepting` | `not_accepting`, `not_in_turn`, `start_failed` |
 | `aborted` | `command_aborted`, `set_outcome_unknown`, `bad_catalog`, `context` |
-| `unavailable` | `log_backed_up`, `ask_unavailable`, `set_unavailable`, `not_run`, `attach_raced`, `not_ready`, `busy`, `closing` |
+| `unavailable` | `log_backed_up`, `ask_unavailable`, `set_unavailable`, `not_run`, `attach_raced`, `not_ready`, `busy`, `closing`; the hub's `spawn_failed`, `host_unreachable` |
 | `failed` | `option_gone`, `failed`, `response_too_large`, `snapshot_too_large` |
-| `bad_request` | `bad_request`, `bad_answer`, `hello_required`, `unknown_field`, `line_too_long`, `protocol_version`, `bad_token`, `already_attached` |
-| `unsupported` | `unsupported`, `unknown_method`, `stop_unsupported`, `roster_unsupported`, `hub_only` |
+| `bad_request` | `bad_request`, `bad_answer`, `hello_required`, `unknown_field`, `line_too_long`, `protocol_version`, `bad_token`, `already_attached`; the hub's `connect_not_first`, `ambiguous_session`, `already_subscribed`, `request_conflict` |
+| `unsupported` | `unsupported`, `unknown_method`, `stop_unsupported`, `roster_unsupported`, `hub_only`; the hub's `host_only` |
 | `unknown_session` | `unknown_session` |
 | `unknown_ask` | `unknown_ask` |
 | `already_submitted` | `already_submitted` |
@@ -947,8 +1078,8 @@ craze's own codes directly and does not need this table.
 | `foreign_turn` | `NotAccepting` | "the session will not take this send-now right now" is exactly `NotAccepting`'s posture, but unlike `not_accepting` and `in_progress`, `protocol.Retry` is **false**: retrying under the same `commandId` after the foreign turn ends replays the stored `foreign_turn` refusal rather than trying again, so a later attempt needs a **new** `commandId` |
 | `in_progress` | `NotAccepting` | did not run under a new attempt — it is this command's own attempt, still running; `protocol.Retry` is true (mandatory: it is the safe way to learn the answer). A resend of a command still running reads the same way to a caller: "not yet, try later" |
 | `stale_model` | `NotAccepting` | did not run — refused before the provider was ever asked, because the session had already left the model the change was bound to. `protocol.Retry` is true: craze resends the **same** `commandId` once the session is back on that model, judged fresh, never as a replay. This is not an argument error — `NotAccepting`'s "will not take this right now" is the closer shed posture, and it is the closest fit shed has, not an exact one: a shed caller should still consult craze's own `data.code` (and `protocol.Retry`) rather than assume shed's `NotAccepting` alone carries the "resend once the model comes back" rule |
-| `unavailable` | `Unavailable` | did not run — a gate refusal; `protocol.Retry` is true, and `LaneError::Unavailable`'s own doc ("nothing to talk to… quiet") already reads as retryable rather than terminal |
-| `unsupported` | `Failed` | reachable by ignoring a capability already `false`, **or** by sending a method protocol 1 does not know at all (`unknown_method`, no capability involved); `LaneError` has no dedicated variant for either |
+| `unavailable` | `Unavailable` | did not run — a gate refusal; `protocol.Retry` is true, and `LaneError::Unavailable`'s own doc ("nothing to talk to… quiet") already reads as retryable rather than terminal. The hub's `host_unreachable` (a host it could not dial) and `spawn_failed` (a session it could not start) read the same way |
+| `unsupported` | `Failed` | reachable by ignoring a capability already `false`, **or** by sending a method protocol 1 does not know at all (`unknown_method`, no capability involved), **or** by sending the hub a session's method (`host_only`: a session's methods are its host's, through the splice); `LaneError` has no dedicated variant for any of them |
 | `stale_version` | `BadRequest` | about this command's own arguments (an edit against a row version that moved), the same posture as a malformed request; `protocol.Retry` is false — it ran (was refused) and a resend replays that refusal |
 | `stale_turn` | `BadRequest` | a cancel naming a turn that is no longer current — likewise about the command's own arguments; `protocol.Retry` is false |
 | `queue_full`, `text_too_long`, `prompt_in_flight`, `prompt_cancelled`, `unknown_row`, `unknown_command`, `unknown_subagent`, `aborted`, `failed`, `index_write` | `Failed` | no `LaneError` variant models a queue, a row, a sub-agent or "ran but the outcome cannot be vouched for"; the craze code's own text, kept in `Failed`'s string, is what a shed client actually shows |
@@ -999,20 +1130,41 @@ foreign turn` row shows.
 
 ## The hub splice
 
-Reserved now so protocol 1 needs no change when the hub (S4) arrives. A
-connection to a hub starts in **hub mode**: `hello` (a hub's result, no
-client id, no receipts), then `sessions.list` and `sessions.subscribe`.
+Protocol 1 defined the splice before any hub existed, so the hub (S4b)
+needed no change to it. A connection to the hub starts in **hub mode**:
+`hello` ([the hub's result](#the-hubs-result): no client id, no receipts),
+then the roster — `sessions.list`, `sessions.subscribe` — or the splice.
 
 `session.connect{sessionId}` makes the hub dial that session's host and
 splice the two connections together: the hub answers `{}`, and from the next
 byte on, the client is talking **directly to the host** — starting with its
 own `hello`. So client ids, tokens and receipts, always the host's, are
 minted by the host the splice lands on, and a resumed connection resumes with
-that same host, never with the hub.
+that same host, never with the hub. Bytes the client sent after
+`session.connect` before the reply — a pipelined host `hello` — reach the
+host first, in order; a client that closes its writing half closes the host
+leg's the same way, so the host sees the client go.
 
-A per-session host (every host in protocol 1 today) answers `session.connect`
-`unsupported`, reason `hub_only`: a client dialing a host directly is already
-where the splice would have put it.
+The splice takes the whole connection, so `session.connect` must be the
+**first** request after `hello`, with nothing else in flight and no roster
+subscription; otherwise it is refused `bad_request`, reason
+`connect_not_first`. `sessionId` is matched against every live host's craze
+session id, provider session id and host id, as `craze bridge --session`
+matches it:
+
+| the match | answer |
+|---|---|
+| exactly one host | `{}`, then the splice |
+| none | `unknown_session` |
+| more than one | `bad_request`, reason `ambiguous_session` — name the host by its host id |
+| one, which the hub cannot dial | `unavailable`, reason `host_unreachable` |
+
+The host sees the hub as its peer; `hello`'s `via` stays absent.
+
+A per-session host answers `session.connect` `unsupported`, reason
+`hub_only`: a client dialing a host directly is already where the splice
+would have put it. The mirror: the hub answers every other session-scoped
+method `unsupported`, reason `host_only`.
 
 ## The published schema
 
@@ -1050,7 +1202,7 @@ embedded copy — e.g. [`hello.json`](protocol/schema/hello.json),
 
 ## Fixtures and the fake host
 
-`internal/fakehost/testdata/wire/*.ndjson` is seventeen scripted scenarios
+`internal/fakehost/testdata/wire/*.ndjson` is eighteen scripted scenarios
 against a real `internal/control` server over a real engine (wrapping the
 TUI's own `Stub`, never a fixture-only re-implementation) — hello and a fresh
 attach; a cursor resume and its replay; a foreign-incarnation cursor; a
@@ -1063,15 +1215,17 @@ token, a wrong one, and one aged past its bound; a host that serves
 answering a stop's receipt and then ending the session; a stop joined by
 another client's and by its own resend, with an attach refused `closing`;
 and `lastTurn` in `session.state` and a roster row, after a cancelled turn
-and a foreign one; and a host with the row facts through a turn — a running
-tool, streaming text, an ask, the ending. Every line is
+and a foreign one; a host with the row facts through a turn — a running
+tool, streaming text, an ask, the ending; and a catalog whose remembered
+models carry their `recent` rank. Every line is
 `{"conn": N, "dir": "c2s"|"s2c", "msg": {...}}`, plus `{"dir": "op", "op":
 {...}}` lines that are not wire messages at all — they script the host
 directly (emitting text, opening an ask, restarting the engine into a fresh
 incarnation, stalling or dropping connections, running a stop's sequence) —
 and, as a fixture's first line or not at all, `{"dir": "host", "host":
 {...}}`, which says how the host was built: `stop`, `permissionMode`,
-`startedAt` and `rowFacts` turn on what an older host does not have. The thirteen fixtures
+`startedAt` and `rowFacts` turn on what an older host does not have, and
+`models` gives it a catalog of its own. The thirteen fixtures
 without one are, byte for byte, an older host to a newer client. `TestWireFixtures` replays
 every one of them byte for byte, validating every line against the schema
 above as it sends or reads it — except a c2s line fixture 10 marks
@@ -1080,9 +1234,23 @@ protocol 1 defines with today's params (an unknown method, or a field no
 schema allows), sent as it stands and held to no request schema, since it is
 designed never to pass one.
 
+A wire line may also carry `"sock": "hub"`: its connection is to the hub's
+socket rather than the host's (a connection's first line decides which, for
+good). A fixture with any such line is a **two-socket** fixture: the runner
+binds and lists its host in a registry of the fixture's own, exactly where a
+hub looks for hosts, and starts the hub in front of it, so one script speaks
+to both. The hub's fixtures arrive with the hub's roster.
+
 `cmd/craze-fake-host` is the same host as a standalone binary, for anyone
 scripting against protocol 1 without Go: `craze-fake-host --socket PATH`
-prints one ready line on stdout,
+serves on a socket at `PATH`, listed nowhere; `craze-fake-host --registry
+ROOT` instead binds and lists it exactly as a craze host is — its socket in
+the runtime tree (`CRAZE_RUNTIME_DIR`), its registry entry and lifetime lock
+under `ROOT/.cache/craze/hosts/`, `ROOT` standing for `HOME` — so a hub, or
+`craze attach`, given that `HOME` finds it, and unlists it when it exits.
+`--host-id` (twelve lowercase hex digits) and `--session-id` replace the
+fixed ids, so several can run, and be listed, side by side. It prints one
+ready line on stdout,
 
 ```json
 {"socket":"/tmp/.../host.sock","sessionId":"session-fake-1","hostId":"0123456789ab"}
@@ -1095,7 +1263,8 @@ then reads the same NDJSON ops described above from stdin —
 fixtures alone need (`spawn_subagent`, `oversized_event`, `advance_clock`,
 `hang_next`, `run_stop`). Its clock, ids, host id, craze version, pid and token source
 are all deterministic by default, so a script against it produces the same
-wire traffic on every run and every machine.
+wire traffic on every run and every machine (a listed host's registry entry
+carries its real pid, as every host's does).
 
 ## Reaching a host
 

@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://charliek.github.io/craze/reference/protocol/schema/info.json",
   "title": "info",
-  "description": "The shared documents (plan 027 §3.3): the session info document, the sessions.list row, both capability sets, and the pieces they share.",
+  "description": "The shared documents (plan 027 §3.3): the session info document, the sessions.list row, both capability sets, the hub's roster row (plan 032 §3.6), and the pieces they share.",
   "$defs": {
     "sessionInfoFields": {
       "description": "The session info document's members, shared by sessionInfo and sessionRow.",
@@ -115,7 +115,7 @@
       "additionalProperties": false
     },
     "connectionCapabilities": {
-      "description": "The connection's capability set (hello's). On a host: rosterSubscribe, sessionCreate, multiplex and connect are false; snapshot and attachWhenNow are true.",
+      "description": "The connection's capability set (hello's). On a host: rosterSubscribe, sessionCreate, multiplex and connect are false; snapshot and attachWhenNow are true. On the hub: rosterSubscribe and connect are true; multiplex, snapshot and attachWhenNow false; sessionCreate true where the hub serves session.create.",
       "type": "object",
       "properties": {
         "rosterSubscribe": {"type": "boolean"},
@@ -180,6 +180,45 @@
       "description": "done: ran to its end (a foreign turn's ending is always done); failed: its ending carried an error; cancelled: stopped before its end — a cancel, a prompt withdrawn before it was sent, or the session's close.",
       "type": "string",
       "enum": ["done", "failed", "cancelled"]
+    },
+    "rosterRow": {
+      "description": "One row of the hub's roster (plan 032 §3.6): what the hub knows about one host, keyed by hostId, and the host's own sessions.list row. A host without a craze session id is not listed. No socket path crosses the wire. Every member is bounded, so a whole roster row encodes to at most 32,000 bytes (protocol.RosterEntryBytesMax): the hub cuts an over-long host string to its bound, drops a host row over 16 KiB, and drops the row of a roster row still over 32,000 bytes, marking each such roster row approximate.",
+      "type": "object",
+      "properties": {
+        "hostId": {"type": "string", "pattern": "^[0-9a-f]{12}$", "description": "The host's id: the row's key, stable from the host's first registry appearance."},
+        "sessionId": {"type": "string", "pattern": "^[A-Za-z0-9._-]{1,128}$", "description": "The host's craze session id: what session.connect and craze bridge --session take. A host whose craze session id is not such a token is not listed."},
+        "host": {"$ref": "#/$defs/rosterHost"},
+        "status": {"$ref": "#/$defs/rosterStatus"},
+        "approximate": {"type": "boolean", "description": "The row is not fresh — its last successful read is more than 3 s old, or the host is not reachable — or the hub cut or dropped something to keep it within its bounds."},
+        "row": {"$ref": "#/$defs/forwardedRow"}
+      },
+      "required": ["hostId", "sessionId", "host", "status", "approximate"],
+      "additionalProperties": false
+    },
+    "forwardedRow": {
+      "description": "A host's own sessions.list row (sessionRow) as that host sent it, passed through the hub as a JSON value: any object, since the members a newer host adds — at any depth — pass through untouched. This build's sessionRow describes the members it knows, and a client reads the row tolerantly. Absent until the hub's first read of the host; while it is unreachable, the last row read. At most 16 KiB encoded (protocol.RosterRowBytesMax).",
+      "type": "object",
+      "additionalProperties": true
+    },
+    "rosterHost": {
+      "description": "What the hub knows about a host beside its row: its registry entry's pid, protocol, provider name, workspace, start time and readiness, and its hello's craze version. Each string is bounded in characters (protocol.RosterCrazeVersionMax, RosterProviderMax, RosterWorkspaceMax); the hub cuts a longer one to its bound and marks the roster row approximate.",
+      "type": "object",
+      "properties": {
+        "pid": {"type": "integer"},
+        "crazeVersion": {"type": "string", "maxLength": 128, "description": "From the host's hello; \"\" until the hub's first hello to it."},
+        "protocol": {"type": "integer", "minimum": 1},
+        "provider": {"type": "string", "maxLength": 64, "description": "The provider's name."},
+        "workspace": {"type": "string", "maxLength": 4096},
+        "startedAt": {"$ref": "event.json#/$defs/time"},
+        "ready": {"type": "boolean", "description": "The host's engine has started."}
+      },
+      "required": ["pid", "crazeVersion", "protocol", "provider", "workspace", "startedAt", "ready"],
+      "additionalProperties": false
+    },
+    "rosterStatus": {
+      "description": "Whether the hub reaches the host: connecting until its first attempt, then reachable (the last attempt read the row) or unreachable (it failed; row is the last one read, if any).",
+      "type": "string",
+      "enum": ["connecting", "reachable", "unreachable"]
     }
   }
 }

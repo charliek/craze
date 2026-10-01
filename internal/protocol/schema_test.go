@@ -18,14 +18,18 @@ import (
 // in the order of its schema's oneOf branches (hello's, plan 027 X5).
 type oneOf []any
 
+// anyOf is oneOf for a schema whose branches may overlap — an anyOf:
+// sessions.list's, a host's roster or the hub's, an empty one being both
+// (plan 032 §3.6).
+type anyOf []any
+
 // methodTypes is every method's params and result Go type: what the schema's
-// $defs params and result describe. A nil result is a method whose result
-// protocol 1 does not specify (sessions.subscribe, the hub's); session.create,
-// reserved, has no types at all.
+// $defs params and result describe. session.create, reserved, has no types at
+// all.
 var methodTypes = map[string]struct{ params, result any }{
 	protocol.MethodHello:             {protocol.HelloParams{}, oneOf{protocol.HelloResult{}, protocol.HubHelloResult{}}},
-	protocol.MethodSessionsList:      {protocol.SessionsListParams{}, protocol.SessionsListResult{}},
-	protocol.MethodSessionsSubscribe: {protocol.SessionsSubscribeParams{}, nil},
+	protocol.MethodSessionsList:      {protocol.SessionsListParams{}, anyOf{protocol.SessionsListResult{}, protocol.HubSessionsListResult{}}},
+	protocol.MethodSessionsSubscribe: {protocol.SessionsSubscribeParams{}, protocol.SessionsSubscribeResult{}},
 	protocol.MethodSessionConnect:    {protocol.ConnectParams{}, protocol.Empty{}},
 	protocol.MethodSessionAttach:     {protocol.AttachParams{}, protocol.AttachResult{}},
 	protocol.MethodSessionDetach:     {protocol.DetachParams{}, protocol.Empty{}},
@@ -61,6 +65,7 @@ var notificationTypes = map[string]any{
 	protocol.NotifySynchronized: protocol.SynchronizedParams{},
 	protocol.NotifyReady:        protocol.ReadyParams{},
 	protocol.NotifyReset:        protocol.ResetParams{},
+	protocol.NotifyRoster:       protocol.RosterParams{},
 }
 
 // envelopeTypes is the envelope's own Go types, by their $defs.
@@ -96,6 +101,10 @@ var protocolRaw = map[string]string{
 	"QueueClearResult.removed[]": "event.json#/$defs/queued",
 	"AskRecord.body":             "event.json#/$defs/askBody",
 	"EventParams.event":          "event.json#",
+	// The hub's roster row carries the host's own row as the JSON value the
+	// host sent (plan 032 §3.6, P4): any object, members a newer host adds
+	// passing through.
+	"RosterRow.row": "info.json#/$defs/forwardedRow",
 }
 
 // tolerantObjects is every object allowed to accept fields it does not
@@ -140,13 +149,10 @@ func TestSchemaCoversEveryWireField(t *testing.T) {
 		file := protocol.MethodSchema(m.Name)
 		c.Check(file+"#/$defs/params", reflect.TypeOf(types.params))
 		switch r := types.result.(type) {
-		case nil:
 		case oneOf:
-			var variants []reflect.Type
-			for _, v := range r {
-				variants = append(variants, reflect.TypeOf(v))
-			}
-			c.CheckOneOf(file+"#/$defs/result", variants...)
+			c.CheckOneOf(file+"#/$defs/result", typesOf(r)...)
+		case anyOf:
+			c.CheckAnyOf(file+"#/$defs/result", typesOf(r)...)
 		default:
 			c.Check(file+"#/$defs/result", reflect.TypeOf(r))
 		}
@@ -171,19 +177,23 @@ func TestSchemaCoversEveryWireField(t *testing.T) {
 	for _, p := range c.Problems() {
 		t.Error(p)
 	}
-	// The one $def no Go type stands behind: the hub's roster result, which
-	// protocol 1 leaves unspecified and no host ever sends.
-	unspecified := map[string]bool{protocol.MethodSchema(protocol.MethodSessionsSubscribe) + "#/$defs/result": true}
 	for _, name := range protocol.SchemaNames() {
 		if name == protocol.SchemaEvent || name == protocol.SchemaSnapshot {
 			continue
 		}
 		for _, def := range c.Unvisited(name) {
-			if !unspecified[def] {
-				t.Errorf("%s describes nothing any wire type carries", def)
-			}
+			t.Errorf("%s describes nothing any wire type carries", def)
 		}
 	}
+}
+
+// typesOf is each value's Go type, in order.
+func typesOf(vs []any) []reflect.Type {
+	out := make([]reflect.Type, len(vs))
+	for i, v := range vs {
+		out[i] = reflect.TypeOf(v)
+	}
+	return out
 }
 
 // TestCoverageCatchesWhatItIsFor is the reflection check's own negative
@@ -257,7 +267,7 @@ func TestCoverageCatchesWhatItIsFor(t *testing.T) {
 		variants []reflect.Type
 		want     string
 	}{
-		{"a variant missing", []reflect.Type{reflect.TypeFor[protocol.HelloResult]()}, "a oneOf of 2 branches, and 1 Go types"},
+		{"a variant missing", []reflect.Type{reflect.TypeFor[protocol.HelloResult]()}, "the oneOf has 2 branches, and 1 Go types"},
 		{"a host that may leave out resumed", []reflect.Type{reflect.TypeFor[hostOptionalResumed](), reflect.TypeFor[protocol.HubHelloResult]()},
 			"resumed: omitted at its zero value"},
 		{"a hub that carries a client id", []reflect.Type{reflect.TypeFor[protocol.HelloResult](), reflect.TypeFor[hubWithClient]()},
@@ -271,6 +281,44 @@ func TestCoverageCatchesWhatItIsFor(t *testing.T) {
 				t.Fatal(err)
 			}
 			c.CheckOneOf("hello.json#/$defs/result", tc.variants...)
+			problems := strings.Join(c.Problems(), "\n")
+			if !strings.Contains(problems, tc.want) {
+				t.Fatalf("want a problem mentioning %s; got:\n%s", tc.want, problems)
+			}
+		})
+	}
+
+	// CheckAnyOf (plan 032 §3.6): sessions.list's anyOf holds each variant to
+	// its own branch just as strictly, and is told from a oneOf.
+	type hubAlwaysTruncated struct {
+		Epoch     string               `json:"epoch"`
+		Cursor    uint64               `json:"cursor"`
+		Sessions  []protocol.RosterRow `json:"sessions"`
+		Truncated bool                 `json:"truncated"`
+	}
+	host, hub := reflect.TypeFor[protocol.SessionsListResult](), reflect.TypeFor[protocol.HubSessionsListResult]()
+	for _, tc := range []struct {
+		name     string
+		oneOf    bool
+		variants []reflect.Type
+		want     string
+	}{
+		{"a variant missing", false, []reflect.Type{host}, "the anyOf has 2 branches, and 1 Go types"},
+		{"the variants swapped", false, []reflect.Type{hub, host}, `"truncated"`},
+		{"a hub that always writes truncated", false, []reflect.Type{host, reflect.TypeFor[hubAlwaysTruncated]()},
+			"truncated: always written"},
+		{"an anyOf held as a oneOf", true, []reflect.Type{host, hub}, "the oneOf has 0 branches"},
+	} {
+		t.Run("CheckAnyOf: "+tc.name, func(t *testing.T) {
+			c, err := protocol.NewCoverage(protocol.CoverageOptions{Raw: protocolRaw})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.oneOf {
+				c.CheckOneOf("sessions.list.json#/$defs/result", tc.variants...)
+			} else {
+				c.CheckAnyOf("sessions.list.json#/$defs/result", tc.variants...)
+			}
 			problems := strings.Join(c.Problems(), "\n")
 			if !strings.Contains(problems, tc.want) {
 				t.Fatalf("want a problem mentioning %s; got:\n%s", tc.want, problems)
@@ -478,11 +526,12 @@ func asStrings[T ~string](vs []T) []string {
 
 // TestTheSchemaEnumsAreTheGoSets: every enum the schema pins is exactly the
 // Go set it describes — codes, reasons (and which code each goes with),
-// reset and cursor reasons, activities, when, the prompt modes, the setting
-// kinds, the cancel outcomes, the ask statuses, the permission modes and turn
-// outcomes (plan 030 §3.7), the JSON-RPC integers and the endpoint kind — in
-// the same order, so a value added on one side and not
-// the other fails here.
+// reset and cursor reasons (the hub's hub_closing included, plan 032 §3.5),
+// activities, when, the prompt modes, the setting kinds, the cancel outcomes,
+// the ask statuses, the permission modes and turn outcomes (plan 030 §3.7),
+// the roster statuses (plan 032 §3.6), the JSON-RPC integers and the endpoint
+// kind — in the same order, so a value added on one side and not the other
+// fails here.
 func TestTheSchemaEnumsAreTheGoSets(t *testing.T) {
 	var hostReasons []string
 	byCode := map[string][]string{}
@@ -514,6 +563,7 @@ func TestTheSchemaEnumsAreTheGoSets(t *testing.T) {
 			asStrings([]protocol.AskStatus{protocol.AskOpen, protocol.AskResolved})},
 		{"permission modes", "info.json", "/$defs/permissionMode/enum", asStrings(protocol.PermissionModes())},
 		{"turn outcomes", "info.json", "/$defs/turnOutcome/enum", asStrings(protocol.TurnOutcomes())},
+		{"roster statuses", "info.json", "/$defs/rosterStatus/enum", asStrings(protocol.RosterStatuses())},
 		{"JSON-RPC integers", "envelope.json", "/$defs/error/properties/code/enum", []string{"-32700", "-32600", "-32601", "-32602", "-32000"}},
 	} {
 		if got := schemaEnum(t, tc.file, tc.pointer); !slices.Equal(got, tc.want) {
@@ -536,6 +586,15 @@ func TestTheSchemaEnumsAreTheGoSets(t *testing.T) {
 	}
 	if want := []string{"#/$defs/hostResult", "#/$defs/hubResult"}; !slices.Equal(hosts, want) {
 		t.Errorf("hello's result is a oneOf of %v, want %v", hosts, want)
+	}
+	// sessions.list's result is a host's roster or the hub's (plan 032 §3.6),
+	// an anyOf — an empty roster is both — in the same order.
+	var lists []string
+	for _, b := range schemaValue(t, "sessions.list.json", "/$defs/result/anyOf").([]any) {
+		lists = append(lists, b.(map[string]any)["$ref"].(string))
+	}
+	if want := []string{"#/$defs/hostResult", "#/$defs/hubResult"}; !slices.Equal(lists, want) {
+		t.Errorf("sessions.list's result is an anyOf of %v, want %v", lists, want)
 	}
 
 	// Which reasons go with which code: errorData's if/then table, one entry

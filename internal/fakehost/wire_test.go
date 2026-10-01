@@ -19,6 +19,7 @@ import (
 	"github.com/charliek/craze/internal/agent"
 	"github.com/charliek/craze/internal/control/wiretest"
 	"github.com/charliek/craze/internal/protocol"
+	"github.com/charliek/craze/internal/rundir"
 	"github.com/charliek/craze/internal/tui"
 )
 
@@ -41,7 +42,14 @@ const fixtureTimeout = 10 * time.Second
 // what the host actually sends; a replay without one first is an error, not a
 // silent skip.
 type fixtureLine struct {
-	Conn int             `json:"conn,omitempty"`
+	Conn int `json:"conn,omitempty"`
+	// Sock is which socket a wire line's connection is to, in a two-socket
+	// fixture (plan 032 §3.15): "hub" for the hub's, "" (or "host") for the
+	// fake host's. A connection's first line decides it for good — a later
+	// line of the same connection may leave it out, and may not name the
+	// other — and a fixture with any hub line is a two-socket one
+	// (fixtureNeedsHub).
+	Sock string          `json:"sock,omitempty"`
 	Dir  string          `json:"dir"`
 	Msg  json.RawMessage `json:"msg,omitempty"`
 	Op   json.RawMessage `json:"op,omitempty"`
@@ -100,6 +108,13 @@ func readFixtureLines(t *testing.T, path string) []rawFixtureLine {
 	if err != nil {
 		t.Fatalf("reading %s: %v", path, err)
 	}
+	return parseFixtureLines(t, path, b)
+}
+
+// parseFixtureLines is a fixture's lines from its bytes; path names it in an
+// error.
+func parseFixtureLines(t *testing.T, path string, b []byte) []rawFixtureLine {
+	t.Helper()
 	var out []rawFixtureLine
 	for _, line := range bytes.Split(b, []byte("\n")) {
 		if len(bytes.TrimSpace(line)) == 0 {
@@ -406,6 +421,25 @@ type fixtureConn struct {
 	nc      *net.UnixConn
 	lr      *protocol.LineReader
 	methods map[string]string
+	// sock is the socket it was dialed to (sockHost or sockHub).
+	sock string
+}
+
+// The sockets a fixture's connections dial (fixtureLine.Sock).
+const (
+	sockHost = "host"
+	sockHub  = "hub"
+)
+
+// sockOf is a line's socket by name: "" is the host's.
+func sockOf(fl fixtureLine) (string, error) {
+	switch fl.Sock {
+	case "", sockHost:
+		return sockHost, nil
+	case sockHub:
+		return sockHub, nil
+	}
+	return "", fmt.Errorf("conn %d: no socket called %q (want %q or %q)", fl.Conn, fl.Sock, sockHost, sockHub)
 }
 
 func (c *fixtureConn) readLine(t *testing.T) []byte {
@@ -451,13 +485,52 @@ func (c *fixtureConn) methodFor(line []byte) string {
 	return ""
 }
 
-// fixtureRunner drives one fixture file against one fresh Host.
+// fixtureRunner drives one fixture file against one fresh Host — and, in a
+// two-socket fixture, the hub in front of it.
 type fixtureRunner struct {
-	t      *testing.T
-	h      *Host
-	socket string
-	conns  map[int]*fixtureConn
-	inc    *incarnations
+	t *testing.T
+	h *Host
+	// sockets is each socket a connection may dial, by name: sockHost always,
+	// sockHub in a two-socket fixture (newTwoSocketRunner).
+	sockets map[string]string
+	conns   map[int]*fixtureConn
+	inc     *incarnations
+}
+
+// hubStarter serves a hub for a two-socket fixture (plan 032 §3.15): handed
+// the registry the fixture's Host is listed in (rundir.Env, a HOME-like root
+// and a runtime tree of the fixture's own), it starts a hub that finds the
+// Host there, cleans it up through t, and returns the hub's socket.
+type hubStarter func(t *testing.T, env rundir.Env) string
+
+// fixtureHub is the hub every two-socket fixture runs against: nil until
+// there is a hub to start — internal/hub serves the roster from plan 032 C11,
+// which installs it here together with fixtures 19–20 — so a fixture that
+// names the hub before then fails, saying why (fixtureHubFor).
+var fixtureHub hubStarter
+
+// fixtureNeedsHub reports whether any line of a fixture is to the hub's
+// socket: a two-socket fixture.
+func fixtureNeedsHub(lines []rawFixtureLine) bool {
+	for _, rl := range lines {
+		if rl.parsed.Sock == sockHub {
+			return true
+		}
+	}
+	return false
+}
+
+// fixtureHubFor is the hub a fixture runs against: none for a one-socket
+// fixture, start for a two-socket one, and an error for a two-socket one when
+// there is no hub to start.
+func fixtureHubFor(lines []rawFixtureLine, start hubStarter) (hubStarter, error) {
+	if !fixtureNeedsHub(lines) {
+		return nil, nil
+	}
+	if start == nil {
+		return nil, errors.New("a two-socket fixture needs a hub, and this build installs none (fixtureHub)")
+	}
+	return start, nil
 }
 
 func newFixtureRunner(t *testing.T, o Options) *fixtureRunner {
@@ -473,18 +546,63 @@ func newHookedFixtureRunner(t *testing.T, o Options, hooks hostHooks) *fixtureRu
 	if err != nil {
 		t.Fatal(err)
 	}
-	// A short dir under /tmp itself: t.TempDir() and $TMPDIR can overflow
-	// sun_path on macOS (internal/control's own tests avoid it the same way).
-	dir, err := os.MkdirTemp("/tmp", "czfh-")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(dir) })
-	socket := filepath.Join(dir, "s")
+	socket := filepath.Join(shortTempDir(t, "czfh-"), "s")
 	l, err := net.Listen("unix", socket)
 	if err != nil {
 		t.Fatal(err)
 	}
+	serveFixtureHost(t, h, l, nil)
+	return newRunnerFor(t, h, map[string]string{sockHost: socket})
+}
+
+// newTwoSocketRunner is newFixtureRunner for a two-socket fixture (plan 032
+// §3.15): the Host is bound and listed in a registry of the fixture's own
+// (Register: a HOME-like root and a runtime tree under one short directory),
+// exactly where a hub looks for hosts, and start serves the hub that finds it
+// there. A connection dials the Host's socket or the hub's, as its lines say
+// (fixtureLine.Sock).
+func newTwoSocketRunner(t *testing.T, o Options, start hubStarter) *fixtureRunner {
+	t.Helper()
+	h, err := newHost(o, hostHooks{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	env := fixtureRegistry(t)
+	reg, err := h.Register(env)
+	if err != nil {
+		_ = h.Close(context.Background())
+		t.Fatal(err)
+	}
+	serveFixtureHost(t, h, reg.Listener(), reg)
+	return newRunnerFor(t, h, map[string]string{sockHost: reg.Socket(), sockHub: start(t, env)})
+}
+
+// fixtureRegistry is a registry of a fixture's own: a fresh 0700 HOME-like
+// root (its cache tree, so its registry) with the craze directory and a short
+// runtime tree under it.
+func fixtureRegistry(t *testing.T) rundir.Env {
+	t.Helper()
+	home := shortTempDir(t, "czfr-")
+	return rundir.Env{Home: home, CrazeDir: filepath.Join(home, ".craze"), CrazeRuntimeDir: filepath.Join(home, "run"), EUID: os.Geteuid()}
+}
+
+// shortTempDir is a fresh 0700 directory under /tmp itself, removed at the
+// end: t.TempDir() and $TMPDIR can overflow sun_path on macOS
+// (internal/control's own tests avoid it the same way).
+func shortTempDir(t *testing.T, prefix string) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("/tmp", prefix)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	return dir
+}
+
+// serveFixtureHost serves h on l until the test ends, then closes it — and,
+// for a registered Host, its registration last, which unlists it.
+func serveFixtureHost(t *testing.T, h *Host, l net.Listener, reg *rundir.Host) {
+	t.Helper()
 	served := make(chan error, 1)
 	go func() { served <- h.Serve(l) }()
 	t.Cleanup(func() {
@@ -492,24 +610,44 @@ func newHookedFixtureRunner(t *testing.T, o Options, hooks hostHooks) *fixtureRu
 		defer cancel()
 		_ = h.Close(ctx)
 		<-served
+		if reg != nil {
+			_ = reg.Close()
+		}
 	})
-	inc := newIncarnations()
-	inc.learn(h.Incarnation())
-	return &fixtureRunner{t: t, h: h, socket: socket, conns: map[int]*fixtureConn{}, inc: inc}
 }
 
-func (r *fixtureRunner) conn(n int) *fixtureConn {
-	if c, ok := r.conns[n]; ok {
-		return c
-	}
-	nc, err := net.Dial("unix", r.socket)
+func newRunnerFor(t *testing.T, h *Host, sockets map[string]string) *fixtureRunner {
+	inc := newIncarnations()
+	inc.learn(h.Incarnation())
+	return &fixtureRunner{t: t, h: h, sockets: sockets, conns: map[int]*fixtureConn{}, inc: inc}
+}
+
+// connFor is fl's connection, dialed the first time its number is named, to
+// the socket that line names; a later line of the same connection that names
+// another socket, or a socket this runner does not serve, is an error.
+func (r *fixtureRunner) connFor(fl fixtureLine) (*fixtureConn, error) {
+	sock, err := sockOf(fl)
 	if err != nil {
-		r.t.Fatalf("dial conn %d: %v", n, err)
+		return nil, err
 	}
-	c := &fixtureConn{nc: nc.(*net.UnixConn), lr: protocol.NewLineReader(nc, protocol.OutboundLineMax), methods: map[string]string{}}
-	r.conns[n] = c
+	if c, ok := r.conns[fl.Conn]; ok {
+		if fl.Sock != "" && sock != c.sock {
+			return nil, fmt.Errorf("conn %d is to the %s's socket, and this line names the %s's", fl.Conn, c.sock, sock)
+		}
+		return c, nil
+	}
+	path, ok := r.sockets[sock]
+	if !ok {
+		return nil, fmt.Errorf("conn %d: this fixture has no %s socket (a hub line makes it a two-socket fixture)", fl.Conn, sock)
+	}
+	nc, err := net.Dial("unix", path)
+	if err != nil {
+		return nil, fmt.Errorf("dial conn %d (%s): %w", fl.Conn, sock, err)
+	}
+	c := &fixtureConn{nc: nc.(*net.UnixConn), lr: protocol.NewLineReader(nc, protocol.OutboundLineMax), methods: map[string]string{}, sock: sock}
+	r.conns[fl.Conn] = c
 	r.t.Cleanup(func() { _ = c.nc.Close() })
-	return c
+	return c, nil
 }
 
 // run walks lines in file order: c2s lines are sent, op lines run, s2c lines
@@ -533,7 +671,10 @@ func (r *fixtureRunner) run(lines []rawFixtureLine, update bool) []byte {
 			out.Write(rl.raw)
 			out.WriteByte('\n')
 		case "c2s":
-			c := r.conn(fl.Conn)
+			c, err := r.connFor(fl)
+			if err != nil {
+				r.t.Fatalf("line %d: %v", i+1, err)
+			}
 			line := r.inc.fromWire(append([]byte(nil), fl.Msg...))
 			if !fl.Invalid {
 				if err := wiretest.Default().Request(line); err != nil {
@@ -547,7 +688,10 @@ func (r *fixtureRunner) run(lines []rawFixtureLine, update bool) []byte {
 			out.Write(rl.raw)
 			out.WriteByte('\n')
 		case "s2c":
-			c := r.conn(fl.Conn)
+			c, err := r.connFor(fl)
+			if err != nil {
+				r.t.Fatalf("line %d: %v", i+1, err)
+			}
 			got := c.readLine(r.t)
 			got = r.inc.toWire(got)
 			if err := wiretest.Default().Server(c.methodFor(got), got); err != nil {
@@ -561,7 +705,7 @@ func (r *fixtureRunner) run(lines []rawFixtureLine, update bool) []byte {
 				// real server never wrote (plan 027 X6's escaping rule, the
 				// same reason the server itself never hand-builds JSON
 				// around embedded codec output).
-				b, err := protocol.MarshalLine(fixtureLine{Conn: fl.Conn, Dir: "s2c", Msg: json.RawMessage(got)})
+				b, err := protocol.MarshalLine(fixtureLine{Conn: fl.Conn, Sock: fl.Sock, Dir: "s2c", Msg: json.RawMessage(got)})
 				if err != nil {
 					r.t.Fatalf("line %d: %v", i+1, err)
 				}
@@ -611,12 +755,23 @@ func fixtureOptions(lines []rawFixtureLine) Options {
 	return host.options()
 }
 
-// runFixture runs one fixture file by name (testdata/wire/<name>.ndjson).
+// runFixture runs one fixture file by name (testdata/wire/<name>.ndjson): a
+// one-socket fixture against the Host alone, a two-socket one against the
+// Host and the hub in front of it (fixtureHub).
 func runFixture(t *testing.T, name string) {
 	t.Helper()
 	path := fixturePath(name)
 	lines := readFixtureLines(t, path)
-	r := newFixtureRunner(t, fixtureOptions(lines))
+	hub, err := fixtureHubFor(lines, fixtureHub)
+	if err != nil {
+		t.Fatalf("%s: %v", path, err)
+	}
+	var r *fixtureRunner
+	if hub != nil {
+		r = newTwoSocketRunner(t, fixtureOptions(lines), hub)
+	} else {
+		r = newFixtureRunner(t, fixtureOptions(lines))
+	}
 	out := r.run(lines, *update)
 	if *update {
 		if err := os.WriteFile(path, out, 0o644); err != nil {

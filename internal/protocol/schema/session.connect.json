@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://charliek.github.io/craze/reference/protocol/schema/session.connect.json",
   "title": "session.connect",
-  "description": "The hub splice (plan 027 §3.3): the hub dials the session's host, answers {}, and from the next byte on splices the two connections; the client then speaks to the host itself, starting with its own hello, so client ids, tokens and receipts are always the host's. A per-session host answers unsupported, reason hub_only: the client is already there.",
+  "description": "The hub splice (plan 027 §3.3; plan 032 §3.7): the hub dials the session's host, answers {}, and from the next byte on splices the two connections; the client then speaks to the host itself, starting with its own hello, so client ids, tokens and receipts are always the host's. It must be the connection's first request after hello, with nothing else in flight and no roster subscription (else bad_request, reason connect_not_first). sessionId is matched against every live host's craze session id, provider session id and host id: none is unknown_session, more than one bad_request, reason ambiguous_session; a host the hub cannot dial is unavailable, reason host_unreachable. A per-session host answers unsupported, reason hub_only: the client is already there.",
   "$defs": {
     "params": {
       "type": "object",

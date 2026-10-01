@@ -42,7 +42,7 @@
       "additionalProperties": false
     },
     "notification": {
-      "description": "A host's notification: event, synchronized, ready or reset. A client ignores a method it does not know.",
+      "description": "A host's notification — event, synchronized, ready or reset — or the hub's — roster or reset. A client ignores a method it does not know.",
       "type": "object",
       "properties": {
         "jsonrpc": {"const": "2.0"},
@@ -77,10 +77,10 @@
       "allOf": [
         {"if": {"properties": {"code": {"const": "not_accepting"}}}, "then": {"properties": {"reason": {"enum": ["not_accepting", "not_in_turn", "start_failed"]}}}},
         {"if": {"properties": {"code": {"const": "aborted"}}}, "then": {"properties": {"reason": {"enum": ["command_aborted", "set_outcome_unknown", "bad_catalog", "context"]}}}},
-        {"if": {"properties": {"code": {"const": "unavailable"}}}, "then": {"properties": {"reason": {"enum": ["log_backed_up", "ask_unavailable", "set_unavailable", "not_run", "attach_raced", "not_ready", "busy", "closing"]}}}},
+        {"if": {"properties": {"code": {"const": "unavailable"}}}, "then": {"properties": {"reason": {"enum": ["log_backed_up", "ask_unavailable", "set_unavailable", "not_run", "attach_raced", "not_ready", "busy", "closing", "spawn_failed", "host_unreachable"]}}}},
         {"if": {"properties": {"code": {"const": "failed"}}}, "then": {"properties": {"reason": {"enum": ["option_gone", "failed", "response_too_large", "snapshot_too_large"]}}}},
-        {"if": {"properties": {"code": {"const": "bad_request"}}}, "then": {"properties": {"reason": {"enum": ["bad_request", "bad_answer", "hello_required", "unknown_field", "line_too_long", "protocol_version", "bad_token", "already_attached"]}}}},
-        {"if": {"properties": {"code": {"const": "unsupported"}}}, "then": {"properties": {"reason": {"enum": ["unsupported", "unknown_method", "stop_unsupported", "roster_unsupported", "hub_only"]}}}},
+        {"if": {"properties": {"code": {"const": "bad_request"}}}, "then": {"properties": {"reason": {"enum": ["bad_request", "bad_answer", "hello_required", "unknown_field", "line_too_long", "protocol_version", "bad_token", "already_attached", "connect_not_first", "ambiguous_session", "already_subscribed", "request_conflict"]}}}},
+        {"if": {"properties": {"code": {"const": "unsupported"}}}, "then": {"properties": {"reason": {"enum": ["unsupported", "unknown_method", "stop_unsupported", "roster_unsupported", "hub_only", "host_only"]}}}},
         {"if": {"properties": {"code": {"const": "unknown_session"}}}, "then": {"properties": {"reason": {"enum": ["unknown_session"]}}}},
         {"if": {"properties": {"code": {"const": "unknown_ask"}}}, "then": {"properties": {"reason": {"enum": ["unknown_ask"]}}}},
         {"if": {"properties": {"code": {"const": "already_submitted"}}}, "then": {"properties": {"reason": {"enum": ["already_submitted"]}}}},
@@ -106,12 +106,12 @@
       "enum": ["bad_request", "unknown_session", "unknown_ask", "already_submitted", "already_resolved", "not_accepting", "unsupported", "unavailable", "queue_full", "text_too_long", "prompt_in_flight", "foreign_turn", "prompt_cancelled", "stale_version", "stale_turn", "unknown_row", "unknown_command", "in_progress", "stale_model", "aborted", "failed", "index_write", "unknown_subagent"]
     },
     "reason": {
-      "description": "Every reason a host sends, each under one code (errorData's allOf). resume_lost, disconnected and no_answer are client-side reasons no host ever sends, and are not here.",
+      "description": "Every reason a host or the hub sends, each under one code (errorData's allOf). resume_lost, disconnected and no_answer are client-side reasons no host ever sends, and are not here.",
       "type": "string",
-      "enum": ["not_accepting", "not_in_turn", "start_failed", "command_aborted", "set_outcome_unknown", "bad_catalog", "context", "log_backed_up", "ask_unavailable", "set_unavailable", "not_run", "attach_raced", "not_ready", "busy", "closing", "option_gone", "failed", "response_too_large", "snapshot_too_large", "bad_request", "bad_answer", "hello_required", "unknown_field", "line_too_long", "protocol_version", "bad_token", "already_attached", "unsupported", "unknown_method", "stop_unsupported", "roster_unsupported", "hub_only", "unknown_session", "unknown_ask", "already_submitted", "already_resolved", "queue_full", "text_too_long", "prompt_in_flight", "foreign_turn", "prompt_cancelled", "stale_version", "stale_turn", "unknown_row", "unknown_command", "in_progress", "stale_model", "index_write", "unknown_subagent"]
+      "enum": ["not_accepting", "not_in_turn", "start_failed", "command_aborted", "set_outcome_unknown", "bad_catalog", "context", "log_backed_up", "ask_unavailable", "set_unavailable", "not_run", "attach_raced", "not_ready", "busy", "closing", "spawn_failed", "host_unreachable", "option_gone", "failed", "response_too_large", "snapshot_too_large", "bad_request", "bad_answer", "hello_required", "unknown_field", "line_too_long", "protocol_version", "bad_token", "already_attached", "connect_not_first", "ambiguous_session", "already_subscribed", "request_conflict", "unsupported", "unknown_method", "stop_unsupported", "roster_unsupported", "hub_only", "host_only", "unknown_session", "unknown_ask", "already_submitted", "already_resolved", "queue_full", "text_too_long", "prompt_in_flight", "foreign_turn", "prompt_cancelled", "stale_version", "stale_turn", "unknown_row", "unknown_command", "in_progress", "stale_model", "index_write", "unknown_subagent"]
     },
     "sessionId": {
-      "description": "The durable craze session id, at params.sessionId in every session-scoped method, so a hub can route a method it does not know.",
+      "description": "The durable craze session id, at params.sessionId in every session-scoped method. The hub serves one session-scoped method, session.connect, which hands the connection to the session's host, and refuses every other unsupported, reason host_only.",
       "type": "string",
       "minLength": 1
     },

@@ -36,7 +36,10 @@ import (
 //     omitzero, unless CoverageOptions.Presence says otherwise.
 //   - A document that is one of several Go types (hello's result: a host's
 //     or a hub's, plan 027 X5) is a oneOf with a branch per type, and
-//     CheckOneOf holds each type to its own branch by these same rules.
+//     CheckOneOf holds each type to its own branch by these same rules; one
+//     whose types' shapes may overlap (sessions.list's result, where an
+//     empty roster is a host's and the hub's alike, plan 032 §3.6) is an
+//     anyOf, which CheckAnyOf holds the same way.
 //   - A type with its own MarshalJSON or UnmarshalJSON (time.Time and
 //     json.RawMessage aside) is a leaf: its schema is checked by the
 //     instances a test validates, not here.
@@ -114,19 +117,33 @@ func (c *Coverage) Check(ref string, t reflect.Type) {
 // are the same Go type's alternatives — session.prompt's result — is one
 // object with conditional members, and stays Check's.)
 func (c *Coverage) CheckOneOf(ref string, variants ...reflect.Type) {
+	c.checkUnion(ref, "oneOf", variants)
+}
+
+// CheckAnyOf is CheckOneOf for an anyOf: a document that is one of several Go
+// types whose shapes may overlap — sessions.list's result, a host's
+// (SessionsListResult) or the hub's (HubSessionsListResult, plan 032 §3.6),
+// where an empty roster is both, so a oneOf would refuse it. Each variant is
+// held to its own branch, in order, exactly as CheckOneOf holds one.
+func (c *Coverage) CheckAnyOf(ref string, variants ...reflect.Type) {
+	c.checkUnion(ref, "anyOf", variants)
+}
+
+// checkUnion is CheckOneOf and CheckAnyOf: keyword is the union's.
+func (c *Coverage) checkUnion(ref, keyword string, variants []reflect.Type) {
 	n, err := c.resolve(schemaNode{}, ref)
 	if err != nil {
 		c.problem("%s: %v", ref, err)
 		return
 	}
 	c.visited[n.key()] = true
-	branches, _ := n.obj()["oneOf"].([]any)
+	branches, _ := n.obj()[keyword].([]any)
 	if len(branches) != len(variants) {
-		c.problem("%s: a oneOf of %d branches, and %d Go types to hold them to", n.key(), len(branches), len(variants))
+		c.problem("%s: the %s has %d branches, and %d Go types to hold them to", n.key(), keyword, len(branches), len(variants))
 		return
 	}
 	for i, b := range branches {
-		c.check(variants[i].String(), "", n.child(b, "oneOf", strconv.Itoa(i)), variants[i])
+		c.check(variants[i].String(), "", n.child(b, keyword, strconv.Itoa(i)), variants[i])
 	}
 }
 

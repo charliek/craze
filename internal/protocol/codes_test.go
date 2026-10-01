@@ -39,11 +39,13 @@ func TestTheReasonTableIsExhaustive(t *testing.T) {
 	shared := map[protocol.Code][]protocol.Reason{
 		protocol.CodeNotAccepting: {"not_accepting", "not_in_turn", "start_failed"},
 		protocol.CodeAborted:      {"command_aborted", "set_outcome_unknown", "bad_catalog", "context"},
-		protocol.CodeUnavailable:  {"log_backed_up", "ask_unavailable", "set_unavailable", "not_run", "attach_raced", "not_ready", "busy", "closing"},
-		protocol.CodeFailed:       {"option_gone", "failed", "response_too_large", "snapshot_too_large"},
+		protocol.CodeUnavailable: {"log_backed_up", "ask_unavailable", "set_unavailable", "not_run", "attach_raced", "not_ready", "busy", "closing",
+			"spawn_failed", "host_unreachable"},
+		protocol.CodeFailed: {"option_gone", "failed", "response_too_large", "snapshot_too_large"},
 		protocol.CodeBadRequest: {"bad_request", "bad_answer", "hello_required", "unknown_field", "line_too_long",
-			"protocol_version", "bad_token", "already_attached"},
-		protocol.CodeUnsupported: {"unsupported", "unknown_method", "stop_unsupported", "roster_unsupported", "hub_only"},
+			"protocol_version", "bad_token", "already_attached", "connect_not_first", "ambiguous_session", "already_subscribed",
+			"request_conflict"},
+		protocol.CodeUnsupported: {"unsupported", "unknown_method", "stop_unsupported", "roster_unsupported", "hub_only", "host_only"},
 	}
 	byCode := map[protocol.Code][]protocol.Reason{}
 	seen := map[protocol.Reason]bool{}
@@ -107,9 +109,10 @@ func TestTheListsAreCopies(t *testing.T) {
 	protocol.ResetReasons()[0] = "x"
 	protocol.CursorReasons()[0] = "x"
 	protocol.Activities()[0] = "x"
+	protocol.RosterStatuses()[0] = "x"
 	if protocol.Codes()[0] == "x" || protocol.Reasons()[0].Reason == "x" || protocol.Methods()[0].Name == "x" ||
 		protocol.Notifications()[0] == "x" || protocol.SupportedProtocols()[0] == 99 || protocol.ResetReasons()[0] == "x" ||
-		protocol.CursorReasons()[0] == "x" || protocol.Activities()[0] == "x" {
+		protocol.CursorReasons()[0] == "x" || protocol.Activities()[0] == "x" || protocol.RosterStatuses()[0] == "x" {
 		t.Fatal("a list handed out shares its storage")
 	}
 }
@@ -132,6 +135,13 @@ func TestTheLimits(t *testing.T) {
 		{"RequestsPerConnection", protocol.RequestsPerConnection, 16},
 		{"CommandsPerHost", protocol.CommandsPerHost, 64},
 		{"ReattachesPerEpisode", protocol.ReattachesPerEpisode, 8},
+		{"RosterCrazeVersionMax", protocol.RosterCrazeVersionMax, 128},
+		{"RosterProviderMax", protocol.RosterProviderMax, 64},
+		{"RosterWorkspaceMax", protocol.RosterWorkspaceMax, 4096},
+		{"RosterRowBytesMax", protocol.RosterRowBytesMax, 16 << 10},
+		{"RosterEntryBytesMax", protocol.RosterEntryBytesMax, 32_000},
+		{"RosterRowsMax", protocol.RosterRowsMax, 512},
+		{"RosterRequestIDBytesMax", protocol.RosterRequestIDBytesMax, 1 << 10},
 		{"ProtocolVersion", protocol.ProtocolVersion, 1},
 	} {
 		if tc.got != tc.want {
@@ -141,8 +151,10 @@ func TestTheLimits(t *testing.T) {
 	if !slices.Equal(protocol.SupportedProtocols(), []int{1}) {
 		t.Errorf("SupportedProtocols = %v", protocol.SupportedProtocols())
 	}
+	// (That a full roster fits a line is not arithmetic here but the encoded
+	// roster itself: TestAFullRosterFitsOneLine.)
 	if protocol.WriterQueueBytes < 2*protocol.OutboundLineMax || protocol.SnapshotBytesMax >= protocol.OutboundLineMax ||
-		protocol.InboundLineMax >= protocol.OutboundLineMax {
+		protocol.InboundLineMax >= protocol.OutboundLineMax || protocol.RosterRowBytesMax >= protocol.RosterEntryBytesMax {
 		t.Fatal("the limits no longer nest as §3.2 and §3.7 need")
 	}
 	if l := protocol.HostLimits(); l.InboundLine != protocol.InboundLineMax || l.OutboundLine != protocol.OutboundLineMax {
@@ -150,6 +162,12 @@ func TestTheLimits(t *testing.T) {
 	}
 	if c := protocol.HostCapabilities(); c.RosterSubscribe || c.SessionCreate || c.Multiplex || c.Connect || !c.Snapshot || !c.AttachWhenNow {
 		t.Fatalf("HostCapabilities = %+v", c)
+	}
+	// The hub's (plan 032 §3.6): the roster subscription and the splice;
+	// session.create not yet (C15); never a multiplexed session, a snapshot or
+	// an attach of its own — those are a host's, through the splice.
+	if c := protocol.HubCapabilities(); !c.RosterSubscribe || c.SessionCreate || c.Multiplex || !c.Connect || c.Snapshot || c.AttachWhenNow {
+		t.Fatalf("HubCapabilities = %+v", c)
 	}
 }
 
@@ -209,7 +227,7 @@ func TestTheMethodTable(t *testing.T) {
 	if _, ok := protocol.Method("session.teleport"); ok {
 		t.Fatal("Method found a method protocol 1 does not name")
 	}
-	if want := []string{"event", "synchronized", "ready", "reset"}; !slices.Equal(protocol.Notifications(), want) {
+	if want := []string{"event", "synchronized", "ready", "reset", "roster"}; !slices.Equal(protocol.Notifications(), want) {
 		t.Fatalf("notifications %v, want %v", protocol.Notifications(), want)
 	}
 }

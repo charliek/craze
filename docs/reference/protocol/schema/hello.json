@@ -76,7 +76,7 @@
       "unevaluatedProperties": false
     },
     "hubResult": {
-      "description": "A hub's result (endpoint.kind hub, S4's hub mode): no client id, token, resumed or retry horizon — a hub mints no client ids and keeps no receipts — and carrying any of them is invalid. A client spliced to a host (session.connect) says hello to the host itself.",
+      "description": "A hub's result (endpoint.kind hub; plan 032 §3.6): no client id, token, resumed or retry horizon — a hub mints no client ids and keeps no receipts — and carrying any of them is invalid. A client spliced to a host (session.connect) says hello to the host itself.",
       "$ref": "#/$defs/resultFields",
       "properties": {
         "endpoint": {"$ref": "#/$defs/hubEndpoint"}
@@ -104,7 +104,7 @@
       "unevaluatedProperties": false
     },
     "hubEndpoint": {
-      "description": "The hub (S4).",
+      "description": "The hub: hostId is the hub's own id, minted per hub process, which its roster's epoch is.",
       "$ref": "#/$defs/endpointFields",
       "properties": {
         "kind": {"type": "string", "const": "hub"}

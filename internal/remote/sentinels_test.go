@@ -378,7 +378,8 @@ func exprString(fset *token.FileSet, e ast.Expr) string {
 // start_failed is a gate refusal (engine.ErrNotAccepting, refusalLocked's for a
 // failed start), snapshot_too_large transcript.ErrSnapshotTooLarge, and
 // stop_unsupported the backend's own backend.ErrStopUnsupported (plan 030
-// §3.6a) — and every other none; a reason sent under another code than the table's, or one this
+// §3.6a) — and every other none, the hub's reasons (plan 032 §3.15) among
+// them; a reason sent under another code than the table's, or one this
 // build does not know, reconstructs nothing.
 func TestTheProtocolsReasonsReconstructTheirSentinel(t *testing.T) {
 	want := map[protocol.Reason][]string{
@@ -387,10 +388,12 @@ func TestTheProtocolsReasonsReconstructTheirSentinel(t *testing.T) {
 		protocol.ReasonStopUnsupported:  {"backend.ErrStopUnsupported"},
 	}
 	set := matchSet()
+	held := map[protocol.Reason]bool{}
 	for _, info := range protocol.Reasons() {
 		if info.Engine || info.ClientSide {
 			continue
 		}
+		held[info.Reason] = true
 		got := overTheWire(t, &protocol.Error{Code: protocol.RPCRefused, Message: "m",
 			Data: protocol.ErrorData{Code: info.Code, Reason: info.Reason}})
 		var matched []string
@@ -402,6 +405,14 @@ func TestTheProtocolsReasonsReconstructTheirSentinel(t *testing.T) {
 		sort.Strings(matched)
 		if !slices.Equal(matched, want[info.Reason]) {
 			t.Errorf("%s/%s reconstructs %v, want %v", info.Code, info.Reason, matched, want[info.Reason])
+		}
+	}
+	// The hub's reasons are the protocol's own, so the loop above held each
+	// of them to reconstructing nothing.
+	for _, r := range []protocol.Reason{protocol.ReasonHostOnly, protocol.ReasonConnectNotFirst, protocol.ReasonAmbiguousSession,
+		protocol.ReasonAlreadySubscribed, protocol.ReasonRequestConflict, protocol.ReasonSpawnFailed, protocol.ReasonHostUnreachable} {
+		if !held[r] {
+			t.Errorf("the hub's reason %s is not one of the protocol's own the table lists", r)
 		}
 	}
 	for _, e := range []*protocol.Error{

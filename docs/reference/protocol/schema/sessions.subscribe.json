@@ -2,12 +2,20 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://charliek.github.io/craze/reference/protocol/schema/sessions.subscribe.json",
   "title": "sessions.subscribe",
-  "description": "A roster subscription: defined for the hub (S4). A host answers unsupported, reason roster_unsupported (connection capability rosterSubscribe: false).",
+  "description": "The hub's roster subscription (plan 032 §3.6). The reply is the roster at a cursor and the subscription's id, written before any of its roster notifications; each notification then carries the net change since the cursor the subscriber last had. One per connection: a second is bad_request, reason already_subscribed. It ends with a reset (slow_consumer, hub_closing) or with the connection. A host answers unsupported, reason roster_unsupported (connection capability rosterSubscribe: false).",
   "$defs": {
     "params": {"$ref": "envelope.json#/$defs/empty"},
     "result": {
-      "description": "Not specified in protocol 1: no host ever answers with a result. The hub defines it (S4).",
-      "not": {}
+      "type": "object",
+      "properties": {
+        "subscription": {"type": "string", "minLength": 1, "description": "The subscription's id, which every roster notification and its reset carry."},
+        "epoch": {"type": "string", "description": "The hub's incarnation (its endpoint.hostId): a new epoch, after a reconnect, reseeds."},
+        "cursor": {"type": "integer", "minimum": 0, "maximum": 18446744073709551615, "description": "The hub's roster sequence the sessions were read at."},
+        "sessions": {"type": "array", "items": {"$ref": "info.json#/$defs/rosterRow"}, "maxItems": 512},
+        "truncated": {"type": "boolean", "const": true, "description": "The roster was cut at 512 rows; absent otherwise."}
+      },
+      "required": ["subscription", "epoch", "cursor", "sessions"],
+      "additionalProperties": false
     }
   }
 }

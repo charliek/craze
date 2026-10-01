@@ -118,11 +118,13 @@ func classifyTable() []classifyCase {
 var wireReasons = map[string][]string{
 	"not_accepting": {"not_accepting", "not_in_turn", "start_failed"},
 	"aborted":       {"command_aborted", "set_outcome_unknown", "bad_catalog", "context"},
-	"unavailable":   {"log_backed_up", "ask_unavailable", "set_unavailable", "not_run", "attach_raced", "not_ready", "busy", "closing"},
-	"failed":        {"option_gone", "failed", "response_too_large", "snapshot_too_large"},
+	"unavailable": {"log_backed_up", "ask_unavailable", "set_unavailable", "not_run", "attach_raced", "not_ready", "busy", "closing",
+		"spawn_failed", "host_unreachable"},
+	"failed": {"option_gone", "failed", "response_too_large", "snapshot_too_large"},
 	"bad_request": {"bad_request", "bad_answer", "hello_required", "unknown_field", "line_too_long",
-		"protocol_version", "bad_token", "already_attached"},
-	"unsupported": {"unsupported", "unknown_method", "stop_unsupported", "roster_unsupported", "hub_only"},
+		"protocol_version", "bad_token", "already_attached", "connect_not_first", "ambiguous_session", "already_subscribed",
+		"request_conflict"},
+	"unsupported": {"unsupported", "unknown_method", "stop_unsupported", "roster_unsupported", "hub_only", "host_only"},
 }
 
 // reasonBelongsToCode reports whether §3.2's table lets a host send reason
@@ -213,6 +215,9 @@ func TestEveryListedEngineReasonIsProduced(t *testing.T) {
 		"snapshot_too_large": true, "hello_required": true, "unknown_field": true, "line_too_long": true,
 		"protocol_version": true, "bad_token": true, "already_attached": true, "unknown_method": true,
 		"stop_unsupported": true, "roster_unsupported": true, "hub_only": true,
+		// The hub's (plan 032 §3.15): no engine is involved in any of them.
+		"host_only": true, "connect_not_first": true, "ambiguous_session": true, "already_subscribed": true,
+		"request_conflict": true, "spawn_failed": true, "host_unreachable": true,
 	}
 	produced := map[string]bool{}
 	for _, tc := range classifyTable() {

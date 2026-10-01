@@ -104,6 +104,28 @@ func (l *LineReader) ReadLine() ([]byte, error) {
 	}
 }
 
+// Buffered hands over the bytes the reader has taken from its stream past the
+// last line it returned — a pipelining peer's next lines, whole or in part —
+// and stops holding them: the reader is left empty, and a later ReadLine reads
+// on from the stream after them. The slice is the caller's own (a copy), nil
+// when nothing is buffered. It is for a reader that hands its connection on:
+// the hub's splice (plan 032 §3.7) takes the client's bytes already read past
+// session.connect and forwards them to the host before anything else read
+// from the connection itself, which would otherwise lose them. Like ReadLine,
+// it is not safe for concurrent use, and it must not be called while a
+// ReadLine runs.
+func (l *LineReader) Buffered() []byte {
+	n := l.r.Buffered()
+	if n == 0 {
+		return nil
+	}
+	out := make([]byte, n)
+	// A bufio.Reader holding n bytes serves a Read of n from its buffer
+	// alone: it copies them and never touches the stream.
+	got, _ := l.r.Read(out)
+	return out[:got]
+}
+
 // trimLineEnd is line without a final "\n", and then without a final "\r",
 // and never nil.
 func trimLineEnd(line []byte) []byte {
