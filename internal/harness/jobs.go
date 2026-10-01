@@ -650,7 +650,7 @@ func unknownJob(quoted string, waiting []string) tool.Result {
 // and a closing tag inside the text is written <\/background_command, so
 // nothing the command printed can end its own wrapper and speak outside it.
 func jobBlock(id, status string, a jobAttrs, text string) string {
-	b := `<background_command id="` + attrEscaper.Replace(id) + `" status="` + attrEscaper.Replace(status) + `"`
+	b := jobBlockOpen + attrEscaper.Replace(id) + `" status="` + attrEscaper.Replace(status) + `"`
 	if a.by != "" {
 		b += ` by="` + attrEscaper.Replace(a.by) + `"`
 	}
@@ -660,7 +660,7 @@ func jobBlock(id, status string, a jobAttrs, text string) string {
 	if a.dur != "" {
 		b += ` duration="` + attrEscaper.Replace(a.dur) + `"`
 	}
-	return b + ">\n" + strings.ReplaceAll(text, "</background_command", `<\/background_command`) + "\n</background_command>"
+	return b + ">\n" + strings.ReplaceAll(text, "</background_command", `<\/background_command`) + "\n" + jobBlockClose
 }
 
 // commitReadsLocked commits the reads of turn's calls among calls

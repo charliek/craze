@@ -1942,6 +1942,10 @@ func nativeTitle(prompt string) string {
 //     keys gathered under the harness's own leaf locks (redactor) — and then
 //     applied inside the section, to the whole payload, where applying it
 //     takes no lock (review r8).
+//   - the three job events (plan 033 §3.8, native_jobs.go): the sub-agent
+//     events' locks exactly — a job is a roster row and a child tool set —
+//     from the bash call's goroutine (JobStarted) and the job's own (its
+//     JobOutput and JobFinished), which may run outside any turn.
 //
 // s.mu, when a case takes it, is taken alone: never under toolMu or rosterMu,
 // which Snapshot takes under s.mu, one after the other.
@@ -1976,6 +1980,12 @@ func (s *nativeSession) sink(ev harness.Event) {
 		s.subagentFinished(e)
 	case harness.SubagentUndelivered:
 		s.subagentUndelivered(e)
+	case harness.JobStarted:
+		s.jobStarted(e)
+	case harness.JobOutput:
+		s.jobProgress(e)
+	case harness.JobFinished:
+		s.jobFinished(e)
 	case harness.Retrying, harness.Diag:
 		// Dropped (the function's comment).
 	case harness.Todos:

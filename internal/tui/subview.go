@@ -454,13 +454,14 @@ func (m Model) mergedSpinnerText() string {
 
 // spinnerElapsed is the clock the main spinner shows: the turn's while it
 // runs, else the longest-running sub-agent's — after end_turn the turn's
-// clock would keep growing for a turn that is over.
+// clock would keep growing for a turn that is over. A bash job's row is not a
+// sub-agent's (anySubagentRunning).
 func (m Model) spinnerElapsed() string {
 	if m.status == statusWorking {
 		return m.turnElapsed()
 	}
 	for i := range m.snap.Subagents {
-		if subagentRunning(m.snap.Subagents[i]) {
+		if s := m.snap.Subagents[i]; subagentRunning(s) && !bashJobRow(s) {
 			return m.subElapsed(m.snap.Subagents[i])
 		}
 	}

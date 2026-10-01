@@ -109,7 +109,9 @@ func (m Model) connectOffered() bool { return m.snap.Provider.Name == nativeProv
 
 // connectBusy reports work running that /connect refuses under (§3.9): a
 // turn — this client's or another's — the agent's own (a wake), or any
-// sub-agent still running, a background one's included.
+// sub-agent still running, a background one's included. A background bash
+// job is not one (plan 033 §3.8, anySubagentRunning): a server left running
+// would refuse /connect for its whole life.
 func (m Model) connectBusy() bool {
 	return m.status == statusWorking || m.snap.ForeignTurn || m.anySubagentRunning()
 }

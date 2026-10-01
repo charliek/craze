@@ -78,16 +78,29 @@ func (m Model) liveSubIDs() map[string]struct{} {
 	return live
 }
 
+// anySubagentRunning reports a sub-agent still running: what keeps the
+// spinner on and its fast tick going (spinner.go) and refuses /connect
+// (connectBusy). A background bash job's row is not one (plan 033 §3.8
+// "Display"): a dev server may run for hours, and neither the working line
+// nor /connect should wait on it. Its row still draws, and its elapsed time
+// still moves with the slow tick.
 func (m Model) anySubagentRunning() bool {
 	for i := range m.snap.Subagents {
-		if subagentRunning(m.snap.Subagents[i]) {
+		if s := m.snap.Subagents[i]; subagentRunning(s) && !bashJobRow(s) {
 			return true
 		}
 	}
-	if m.tombstone != nil && subagentRunning(*m.tombstone) {
+	if m.tombstone != nil && subagentRunning(*m.tombstone) && !bashJobRow(*m.tombstone) {
 		return true
 	}
 	return false
+}
+
+// bashJobRow reports whether s is a native session's background bash job's
+// roster row (plan 033 P12): background, of type agent.BashJobType, which no
+// sub-agent's type can be — persona names are slugs.
+func bashJobRow(s agent.SubagentInfo) bool {
+	return s.Background && s.SubagentType == agent.BashJobType
 }
 
 func (m Model) viewedInfo() (agent.SubagentInfo, bool) {

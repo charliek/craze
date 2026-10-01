@@ -184,8 +184,15 @@ func isBracket(running bool) func(Event) bool {
 }
 
 // bracket waits for the n-th bracket of the kind and checks its shape: the
-// wake's id, its reason on both ends, and the text on the opening alone.
+// wake's id, its reason on both ends, and the text on the opening alone — a
+// sub-agent's wake's.
 func (rig *wakeRig) bracket(running bool, n int, id string) Event {
+	rig.t.Helper()
+	return rig.bracketAs(running, n, id, ReasonSubagentWake, wakeText)
+}
+
+// bracketAs is bracket for a wake of reason, whose opening's text is text.
+func (rig *wakeRig) bracketAs(running bool, n int, id, reason, wantText string) Event {
 	rig.t.Helper()
 	kind := "ending"
 	if running {
@@ -206,10 +213,10 @@ func (rig *wakeRig) bracket(running bool, n int, id string) Event {
 	f := got.ForeignTurn
 	text := ""
 	if running {
-		text = wakeText
+		text = wantText
 	}
-	if f.ID != id || f.Reason != ReasonSubagentWake || f.Text != text {
-		rig.t.Fatalf("the %s bracket is %+v; want id %s, reason %s, text %q", kind, f, id, ReasonSubagentWake, text)
+	if f.ID != id || f.Reason != reason || f.Text != text {
+		rig.t.Fatalf("the %s bracket is %+v; want id %s, reason %s, text %q", kind, f, id, reason, text)
 	}
 	return got
 }

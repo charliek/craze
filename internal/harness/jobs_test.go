@@ -1322,3 +1322,32 @@ func TestJobOutputEvents(t *testing.T) {
 		t.Fatalf("the session's sink saw %q; want %q", kinds, want)
 	}
 }
+
+// TestJobListedInTheCompactionState (plan 033 §3.8 "Compaction"): a running
+// job is in a compaction's running-tasks list as `- <id> (bash job): <the
+// command's first line>` — one of several lines marked cut — in the order the
+// jobs started, and leaves it when it ends: the list reads "None." once
+// nothing runs, the negative control at both ends.
+func TestJobListedInTheCompactionState(t *testing.T) {
+	b := openJobs(t)
+	section := func() string { return b.s.stateSection(b.s.redactor()) }
+	const none = "Running background tasks: None."
+	if got := section(); !strings.HasSuffix(got, none) {
+		t.Fatalf("control: with no job running the section ends %q", got)
+	}
+	one := fakeJob(t, b.s, "t9.1.1", "npm run dev")
+	two := fakeJob(t, b.s, "t9.1.2", "cat > notes.txt <<'EOF'\nhello\nEOF")
+	want := "Running background tasks:\n- t9.1.1 (bash job): npm run dev\n- t9.1.2 (bash job): cat > notes.txt <<'EOF' …"
+	if got := section(); !strings.HasSuffix(got, want) {
+		t.Fatalf("the section is\n%s\nwant it to end\n%s", got, want)
+	}
+	b.endJob(t, one, exited(0, ""))
+	want = "Running background tasks:\n- t9.1.2 (bash job): cat > notes.txt <<'EOF' …"
+	if got := section(); !strings.HasSuffix(got, want) {
+		t.Fatalf("after the first job ended the section is\n%s\nwant it to end\n%s", got, want)
+	}
+	b.endJob(t, two, exited(0, ""))
+	if got := section(); !strings.HasSuffix(got, none) {
+		t.Fatalf("with every job ended the section ends %q", got)
+	}
+}
