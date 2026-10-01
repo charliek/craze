@@ -396,6 +396,8 @@ func (s *server) onRequest(msg *acp.Message) {
 				// as well: their own handler takes both (permodel.go), so
 				// loadScript's refusal of session/new never applies to them.
 				"loadSession": loadScript(s.script) || permodelScript(s.script),
+				// Each dialect's live shape (images.go).
+				"promptCapabilities": promptCapabilities(s.script),
 			},
 		}
 		if grokScript(s.script) {
@@ -483,6 +485,7 @@ func (s *server) onRequest(msg *acp.Message) {
 		go s.handleLoad(msg)
 	case acp.MethodSessionPrompt:
 		s.noteOrder(orderPrompt, "")
+		dumpPrompt(msg.Params)
 		if queueScript(s.script) {
 			// The queue scripts hold one record per prompt instead of the
 			// single flag, so a second prompt cancelling the first cannot
@@ -499,6 +502,7 @@ func (s *server) onRequest(msg *acp.Message) {
 		s.cancelled.Store(false)
 		go s.handlePrompt(msg)
 	case acp.MethodGrokInterject, acp.MethodGrokInterjectWrapped:
+		dumpInterject(msg.Params)
 		// Only grok answers it. The cursor scripts fall through to the
 		// -32601 every other unknown method gets, which is the live wire.
 		if !grokScript(s.script) || !queueScript(s.script) {
@@ -669,6 +673,10 @@ func (s *server) handlePrompt(msg *acp.Message) {
 		// The session is up, so this is an error mid-session: the turn's
 		// ending is the error, with no stop reason at all.
 		_ = s.conn.ReplyErr(msg.ID, &acp.RPCError{Code: -32000, Message: "the turn failed"})
+	case "prompt-dump", "grok-prompt-dump":
+		s.promptDump(msg.ID, msg.Params, n)
+	case "reject-image":
+		s.rejectImage(msg.ID, msg.Params, n)
 	default:
 		s.echo(msg.ID, text)
 	}

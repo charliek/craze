@@ -43,6 +43,14 @@ type Client struct {
 	// since the prompt was sent. Until promptID is known it is the only
 	// reason to distrust an unmatched prompt_complete.
 	foreignSeen bool
+	// heard says the agent has sent something of its own about the prompt in
+	// flight — a session update, a request of any kind, any notification but
+	// the turn's bookkeeping (turnBookkeeping) — since its turn opened. It is
+	// set on the read loop, which handles every message in arrival order
+	// before the next, so whatever the agent sent ahead of its reply is
+	// counted by the time PromptBlocks returns that reply. Every PromptBlocks
+	// resets it; it stays readable after the call (Heard) until the next.
+	heard bool
 	// foreignID is the turn the agent is running without a craze prompt —
 	// grok's interject fallback is the only known producer. While it is set,
 	// Prompt is refused.
@@ -501,6 +509,7 @@ func (c *Client) PromptBlocks(ctx context.Context, blocks []ContentBlock, accept
 	// the text the user typed, which is all block 1 ever holds.
 	c.promptText = firstBlockText(blocks)
 	c.foreignSeen = false
+	c.heard = false
 	sid := c.sessionID
 	dialect := c.dialect
 	wait := make(chan promptResult, 1)
@@ -572,6 +581,39 @@ func firstBlockText(blocks []ContentBlock) string {
 		return ""
 	}
 	return blocks[0].Text
+}
+
+// Heard reports whether the agent sent anything of its own about the last
+// prompt while it was in flight (heard): an update, a tool call, a permission
+// request, a plan — anything but grok's prompt_complete and queue/changed.
+// Read after PromptBlocks has returned and before the next one, it is that
+// prompt's answer. It is what decides whether a prompt the agent refused may
+// be sent again: only one the agent did nothing with (plan 033 §3.4).
+func (c *Client) Heard() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.heard
+}
+
+// noteHeard marks the prompt in flight as one the agent has sent something
+// about (heard). Between prompts it marks nothing.
+func (c *Client) noteHeard() {
+	c.mu.Lock()
+	if c.inPrompt {
+		c.heard = true
+	}
+	c.mu.Unlock()
+}
+
+// turnBookkeeping is the notifications that are not the agent doing anything
+// with a prompt: grok's prompt_complete, the turn's own ending racing its
+// reply, and queue/changed, which only names what is queued and what runs.
+func turnBookkeeping(method string) bool {
+	switch method {
+	case MethodGrokPromptComplete, MethodGrokPromptCompleteWrapped, MethodGrokQueueChanged, MethodGrokQueueChangedWrapped:
+		return true
+	}
+	return false
 }
 
 func promptResultOrErr(w promptResult) (*PromptResult, error) {
@@ -884,6 +926,7 @@ func (c *Client) Exited() <-chan struct{} {
 // loop, before their handler goroutine starts: a cancel landing in between
 // must still find the request and answer it exactly once.
 func (c *Client) onRequest(msg *Message) {
+	c.noteHeard()
 	d := c.Dialect()
 	switch msg.Method {
 	case MethodRequestPermission:
@@ -1086,6 +1129,9 @@ func (c *Client) TurnActive(turn int) bool {
 }
 
 func (c *Client) onNotify(msg *Message) {
+	if !turnBookkeeping(msg.Method) {
+		c.noteHeard()
+	}
 	switch msg.Method {
 	case MethodSessionUpdate:
 		c.handleSessionUpdate(msg)

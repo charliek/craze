@@ -79,6 +79,14 @@ type Provider struct {
 	// planUpdatesAreTodos maps ACP `plan` session updates onto the todo
 	// stream; cursor drives todos through cursor/update_todos instead.
 	planUpdatesAreTodos bool
+	// imagesDespiteCapability sends a prompt's images as image blocks even to
+	// an agent whose initialize says promptCapabilities.image is false (plan
+	// 033 P5, §3.4). grok 1.0.30 and gx advertise false and their handler
+	// forwards image blocks all the same; without the flag, an agent that says
+	// false gets each image as [Image #N: <path>] text instead. A refusal is
+	// still caught either way: a -32602 before the agent did anything is sent
+	// again with path text (live_images.go).
+	imagesDespiteCapability bool
 	// subagentToolName is the wire tool name that is a sub-agent spawn:
 	// grok spawn_subagent, cursor task. Title-regex fallback only runs
 	// when this is unknown and titleTaskFallback is set (cursor).
@@ -305,7 +313,8 @@ func GrokProvider() Provider {
 			{ID: "plan", Name: "Plan"},
 			{ID: "ask", Name: "Ask"},
 		},
-		planUpdatesAreTodos: true,
+		planUpdatesAreTodos:     true,
+		imagesDespiteCapability: true,
 	}
 }
 
