@@ -1,0 +1,4 @@
+Stop a background job, by the id its bash call returned: a command you started with `run_in_background`, or one moved to the background when it reached its timeout.
+
+- The job's process group is sent SIGTERM, then SIGKILL 3 seconds later if it is still running. The call waits up to 7 seconds for the job to end and returns its result, which is delivered once.
+- Stop the background jobs you no longer need, such as a server you have finished with, before you finish.

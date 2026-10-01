@@ -265,10 +265,11 @@ func (s *ansiStripper) put(b []byte) error {
 // marker the stripper cuts the start off ("\x1b" before a marker reads as
 // "\x1b[c") is left as the rest of the marker, which is no key.
 //
-// Each stage holds back what it must (the redactors the longest key's length
-// less one byte each, the stripper at most three bytes), so the progress
-// snapshots lag the command's output by that much. Close writes it all out,
-// stage by stage, in order.
+// Each stage holds back what it must (each redactor a tail that could still
+// begin a key, at most the longest key's length less one byte; the stripper
+// at most three bytes), so the progress snapshots and a background job's
+// reads lag the command's output by that much. Close writes it all out, stage
+// by stage, in order.
 type modelStream struct {
 	raw   *redact.Writer // keys as the command wrote them
 	strip *ansiStripper

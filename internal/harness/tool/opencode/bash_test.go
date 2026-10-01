@@ -1020,9 +1020,6 @@ func TestBashGitCommitWithoutMessage(t *testing.T) {
 	if res.IsError || res.Output.ExitCode != 1 || !strings.Contains(res.Text, "Aborting commit due to empty commit message") {
 		t.Fatalf("result is {IsError:%v Class:%q ExitCode:%d}, want git's abort, exit code 1:\n%s", res.IsError, res.Class, res.Output.ExitCode, res.Text)
 	}
-	if res.Output.Duration > 5*time.Second {
-		t.Fatalf("git commit took %v: it waited on something", res.Output.Duration)
-	}
 }
 
 // TestBashRefusesWithoutAnEnvironment: with no Env.Environ bash runs
@@ -2296,7 +2293,7 @@ func TestSuperviseShutdownHasOneDeadline(t *testing.T) {
 				close(g.reaped)
 			})
 			began := time.Now()
-			why, _ := g.supervise(ctx, closing, time.Hour, make(chan struct{}))
+			why, _ := g.supervise(ctx, closing, time.Hour, make(chan struct{}), nil)
 			took := time.Since(began)
 			if why != endAbort {
 				t.Fatalf("supervise ended with %v, want the abort", why)

@@ -141,6 +141,10 @@ func Raise(s *atomic.Int32, mode string) {
 //     goes inward like any call the mode allows (plan 026 §3.3, panel GLM 8).
 //     The restriction reaches the child instead: it runs in its parent's mode
 //     and is tightened by the parent's later switches (NewChildModeGate).
+//   - every mode: bash_stop is allowed by name too (plan 033 §3.7): it only
+//     ends a command this session already started, which ask mode would
+//     otherwise refuse for not being ReadOnly — leaving a job the mode had
+//     let run with no way for the model to stop it.
 //
 // The mode is read atomically on every call, so SetMode is effective at once:
 // the next call whose Check reaches the read is judged under the new mode,
@@ -239,7 +243,7 @@ func (g *ModeGate) Check(ctx context.Context, req Request) (Decision, error) {
 	// sub-agent's gate never sees one — a child is not offered the tool, and
 	// the dispatcher refuses a call to a tool it does not have before any gate
 	// runs — so the rule is the parent's in practice.
-	if req.Tool == AgentTool {
+	if req.Tool == AgentTool || req.Tool == BashStopTool {
 		return g.inner.Check(ctx, req)
 	}
 	mode, raised := g.judgedMode()

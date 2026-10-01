@@ -44,15 +44,29 @@ const (
 // retries only a step that failed before it produced any output, so a call a
 // failed attempt began never arrives and was never counted (turn.go's retry,
 // plan 018 §3.7).
+//
+// observed is the signature of the last call that finished having seen what
+// it waits on (tool.Result.Observed, plan 033 P13, D-42's exemption): a
+// bash_output or agent_output call that waited out its whole wait, or saw
+// the job or the sub-agent end, and a bash_stop that saw its job end. The
+// next identical call counts as a first again (vet), so a model that waits
+// on a silent build three times in a row, each wait to its end, is not
+// refused, while three identical snapshots of it are. A call is counted when
+// it is announced and marked observed when it finishes, so identical calls
+// announced in one step are counted before any of them finishes, and are not
+// exempt: only sequential ones are.
 type doomLoop struct {
-	sig     string // the last announced call's signature; "" before the first
-	n       int    // how many calls in a row have had it
-	stopped bool   // the turn ends once this step does (halted), reporting max_turn_requests (finish)
+	sig      string // the last announced call's signature; "" before the first
+	n        int    // how many calls in a row have had it
+	stopped  bool   // the turn ends once this step does (halted), reporting max_turn_requests (finish)
+	observed string // the last observed call's signature, until the next call is vetted
 }
 
 // vet is the guard, called from OnToolCall on its goroutine with mu held,
-// once per announced call in call order (toolbridge.go). It counts the call,
-// and from the third identical one in a row refuses it: the veto stands in
+// once per announced call in call order (toolbridge.go). It counts the call —
+// as a first when the identical call before it finished observed (doomLoop's
+// observed, plan 033 P13) — and from the third identical one in a row refuses
+// it: the veto stands in
 // for the run, so the tool never acts, and the model reads why. The fifth
 // also ends the turn, which Run reports as max_turn_requests; its failed card
 // carries the same text, so the user sees why too.
@@ -66,7 +80,10 @@ type doomLoop struct {
 // (halted) and reported by finish, not by the result's StopTurn, which only a
 // dispatched call could ever carry.
 func (t *turn) vet(c *toolCall) {
-	if sig := callSignature(c.name, c.input); sig != t.loop.sig {
+	sig := callSignature(c.name, c.input)
+	observed := sig == t.loop.observed
+	t.loop.observed = ""
+	if sig != t.loop.sig || observed {
 		t.loop.sig, t.loop.n = sig, 1
 		return
 	}

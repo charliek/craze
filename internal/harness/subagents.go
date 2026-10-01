@@ -213,6 +213,12 @@ type subagents struct {
 	results  map[string]*bgResult
 	order    []string
 	finished int
+	// jobsHeld counts the job slots held — reserved or running (jobs.go,
+	// plan 033 P14): at most maxJobs. wakeChain counts the wakes in a row
+	// whose prompt held a job's result with no turn a person started between
+	// them; at maxJobWakes a job result that becomes ready is suspended.
+	jobsHeld  int
+	wakeChain int
 
 	// seams are the runner's test seams, set before the first turn; zero is
 	// production.
@@ -236,9 +242,20 @@ type subagentSeams struct {
 	ended    func(id string)                 // the child's Run returned and its end is latched; its cause is not yet read
 	retiring func(id string)                 // the call is about to take regMu to retire its child
 	settling func(id string)                 // a registered call's last word (settle) begins: its child closed, retired, its slot given back
-	// outputWaiting: an agent_output call found its child running and is about
-	// to wait for it, holding no lock.
+	// outputWaiting: an agent_output or a bash_output call found its child or
+	// job running and is about to wait for it, holding no lock.
 	outputWaiting func(id string)
+	// reserving and reserved bracket a reservation's regMu section (reserve):
+	// a step's boundary, or a person's step 0, before and after it takes up
+	// what is waiting.
+	reserving, reserved func(own owner)
+	// jobReturned: a job's body has returned, its end not yet latched, and a
+	// stop is still taken; jobEnded: its end is latched, its cause not yet
+	// read (runJob). Both on the job's goroutine, which Close joins.
+	jobReturned, jobEnded func(id string)
+	// stopWaiting: a bash_stop call has stopped its job and is about to wait
+	// for it, holding no lock.
+	stopWaiting func(id string)
 }
 
 // turnLink is what a call needs of the turn it runs in: the turn's locked
@@ -465,6 +482,15 @@ func (h *childHandle) session() *Session {
 // its turn will run under, though no client knows its id yet (SubagentStarted
 // follows the Open): its turn starts cancelled and reads stopped, and an Open
 // that fails keeps its failure, which the stop cannot have caused.
+//
+// A background job's id (plan 033 §3.8) is a sub-agent's for the stop key:
+// the same rows draw both (P12). An id that names no child falls through to
+// the jobs, and a running one is stopped with errJobStoppedByUser — its
+// result then says the user stopped it (by="the user") — on the same terms:
+// no wait, no lock but the registry's and the job's own, refused
+// (ErrNoSuchSubagent) once the job's end is latched, a stop racing its end
+// harmless, since only a body that ended stopped is read as stopped
+// (runJob). An id that names neither keeps the refusal.
 func (s *Session) CancelSubagent(id string) error {
 	r := s.subs
 	if r == nil {
@@ -474,11 +500,18 @@ func (s *Session) CancelSubagent(id string) error {
 	// taken: the two are never held together (childKeys, closeChildren).
 	r.regMu.Lock()
 	h := r.live[id]
-	r.regMu.Unlock()
-	if h == nil || !h.stop() {
-		return ErrNoSuchSubagent
+	var job *jobHandle
+	if res := r.results[id]; h == nil && res != nil && res.kind == kindJob && res.state == resultRunning {
+		job = res.job.h
 	}
-	return nil
+	r.regMu.Unlock()
+	switch {
+	case h != nil && h.stop():
+		return nil
+	case job != nil && job.stop(errJobStoppedByUser):
+		return nil
+	}
+	return ErrNoSuchSubagent
 }
 
 // stop cancels the child's context with errStoppedByUser unless its end has

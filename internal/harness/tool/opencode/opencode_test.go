@@ -146,7 +146,7 @@ func TestProfile(t *testing.T) {
 	if p.Name != Name || Name != "opencode" {
 		t.Fatalf("profile name = %q", p.Name)
 	}
-	if got := names(p); !slices.Equal(got, []string{"bash", "read", "glob", "grep", "edit", "write", "agent", "agent_output", "todo_write", "ask_user_question", "exit_plan_mode"}) {
+	if got := names(p); !slices.Equal(got, []string{"bash", "bash_output", "bash_stop", "read", "glob", "grep", "edit", "write", "agent", "agent_output", "todo_write", "ask_user_question", "exit_plan_mode"}) {
 		t.Fatalf("tools = %q, want opencode's registry order", got)
 	}
 	want := map[string]struct {
@@ -154,12 +154,17 @@ func TestProfile(t *testing.T) {
 		readOnly, parallel bool
 		trunc              tool.Direction
 	}{
-		"bash":  {tool.KindExecute, false, false, tool.None},
-		"read":  {tool.KindRead, true, true, tool.None},
-		"glob":  {tool.KindSearch, true, true, tool.None},
-		"grep":  {tool.KindSearch, true, true, tool.None},
-		"edit":  {tool.KindEdit, false, false, tool.Head},
-		"write": {tool.KindEdit, false, false, tool.Head},
+		"bash": {tool.KindExecute, false, false, tool.None},
+		// plan 033 §3.7: bash_output reads a job's output or result, changing
+		// nothing; bash_stop ends a process. Both are answered by the session's
+		// jobs, which cap and redact their texts, so None.
+		"bash_output": {tool.KindRead, true, true, tool.None},
+		"bash_stop":   {tool.KindExecute, false, true, tool.None},
+		"read":        {tool.KindRead, true, true, tool.None},
+		"glob":        {tool.KindSearch, true, true, tool.None},
+		"grep":        {tool.KindSearch, true, true, tool.None},
+		"edit":        {tool.KindEdit, false, false, tool.Head},
+		"write":       {tool.KindEdit, false, false, tool.Head},
 		// plan 026 §3.3: a child may edit, so not ReadOnly; fanned out, so
 		// Parallel; the runner cuts its answer itself, so None (review r6).
 		"agent": {tool.KindTask, false, true, tool.None},
@@ -197,10 +202,10 @@ func TestProfile(t *testing.T) {
 	if q.Tools[0] == p.Tools[0] {
 		t.Fatal("two profiles share a tool")
 	}
-	if p.Tools[2].(*globTool).rg != p.Tools[3].(*grepTool).rg {
+	if p.Tools[4].(*globTool).rg != p.Tools[5].(*grepTool).rg {
 		t.Fatal("a session's grep and glob do not share their ripgrep")
 	}
-	if p.Tools[2].(*globTool).rg == q.Tools[2].(*globTool).rg {
+	if p.Tools[4].(*globTool).rg == q.Tools[4].(*globTool).rg {
 		t.Fatal("control: two sessions share a ripgrep")
 	}
 }
@@ -401,15 +406,28 @@ func TestDescriptions(t *testing.T) {
 		{"edit", "This tool will error if you attempt an edit without reading the file.", "at least once in the conversation before editing.\n", ""},
 		{"grep", "use the Task tool instead", "Do NOT use `grep`.\n", ""},
 		{"glob", "use the Task tool instead", "as a batch that are potentially useful.\n", ""},
+		// plan 033 §3.7: a command still running at its timeout is promoted,
+		// and `&` and `nohup` are not the way to keep one running.
 		{"bash", "", "commands will time out after 120000ms.",
-			" The timeout cannot exceed 600000ms (10 minutes); a longer timeout is reduced to 600000ms.\n" +
-				"  - When the command returns, every process still in its process group is killed, so nothing it runs in the background (for example, with `&` or `nohup`) outlives the call; a process that starts its own session or process group (setsid, setpgid, `set -m`) escapes this.\n"},
+			" The timeout cannot exceed 600000ms (10 minutes); a longer timeout is reduced to 600000ms. " +
+				"When the session supports it, a command still running at its timeout is not stopped: it is moved to the background as a job, " +
+				"the call returns its output so far and the job's id, and its result is delivered to you when it finishes.\n" +
+				"  - When the command returns, every process still in its process group is killed, so nothing it runs in the background (for example, with `&` or `nohup`) outlives the call; a process that starts its own session or process group (setsid, setpgid, `set -m`) escapes this. " +
+				"`&` and `nohup` are not the way to keep a command running: use `run_in_background` when the session supports it.\n"},
 		// plan 033 §3.6: the shell does not persist, and a command has no
 		// terminal.
 		{"bash", "persistent shell session", "Executes a given bash command with optional timeout, ensuring proper handling and security measures.",
 			"security measures. Each call runs in a fresh shell; the working directory does not persist.\n"},
-		{"bash", "", "(setsid, setpgid, `set -m`) escapes this.\n",
-			"escapes this.\n  - Commands run with no terminal: editors and pagers do not open, `git commit` needs `-m`, and colour is off.\n" +
+		// plan 033 §3.7: run_in_background for what keeps running, not for
+		// what is needed now; stop the jobs no longer needed. Every background
+		// line says "when the session supports it".
+		{"bash", "", "(setsid, setpgid, `set -m`) escapes this.",
+			"use `run_in_background` when the session supports it.\n" +
+				"  - When the session supports it, set `run_in_background` for a command that keeps running, such as a dev server, a watch command or `tail -f`: " +
+				"the call returns at once with the job's id, `timeout` is then the job's limit (default 1800000ms, at most 7200000ms), and the job's result is delivered to you when it finishes; do not poll it or sleep waiting for it. " +
+				"Read its output so far with bash_output, and stop it with bash_stop. Do not use it for builds, tests or git commands whose result you need now: run those in the foreground.\n" +
+				"  - When the session supports it, stop the background jobs you no longer need with bash_stop before you finish.\n" +
+				"  - Commands run with no terminal: editors and pagers do not open, `git commit` needs `-m`, and colour is off.\n" +
 				"  - If the output exceeds 2000 lines"},
 	}
 	for _, e := range edits {

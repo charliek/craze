@@ -31,10 +31,13 @@ func nativeSummaryParts(what string, n int) []fantasy.StreamPart {
 }
 
 // The golden's thinking and summary sizes, in bytes (TestFrameGoldenNative-
-// Compaction100x30): about 150k and 110k tokens of estimate.
+// Compaction100x30): about 150k and 110k tokens of estimate, each near the
+// middle of its thousand. The estimate counts the tools offered, so a change
+// to them moves both: plan 033's job tools (bash_output, bash_stop and bash's
+// new lines) cost about 3,750 bytes, taken off both here.
 const (
-	compactionGoldenThought = 564_800
-	compactionGoldenSummary = 413_188
+	compactionGoldenThought = 561_050
+	compactionGoldenSummary = 409_438
 )
 
 // longThought is n bytes of thinking, in lines: what a turn that thought at

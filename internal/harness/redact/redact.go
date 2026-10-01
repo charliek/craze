@@ -151,16 +151,20 @@ func (r *Replacer) scan(dst, src []byte, end, run int) ([]byte, int) {
 var ErrClosed = errors.New("redact: write after close")
 
 // Writer redacts a stream on its way to an underlying writer. It holds back
-// the last len(longest key)-1 bytes it has been given, because they could be
-// the start of a key the next Write completes; Close writes them out. So a
+// the end of what it has been given that could be the start of a key the
+// next Write completes — the longest tail that is a proper prefix of a key,
+// so at most len(longest key)-1 bytes, and none at all when the stream so far
+// ends in nothing a key begins with (held) — and Close writes it out. So a
 // key split across any number of writes is still caught, and the bytes that
 // reach the underlying writer are exactly String of everything written.
 //
 // There is no Flush: writing the held-back bytes before the stream ends
-// could emit the first half of a key. A bash tool's progress snapshots
-// therefore lag the command's output by at most that many bytes for each
-// Writer the output passes through (bash has two, around its escape-sequence
-// stripper).
+// could emit the first half of a key. A bash tool's live output — its
+// progress snapshots, and a background job's reads (plan 033 §3.7) — lags the
+// command's output only by such a tail, for each Writer the output passes
+// through (bash has two, around its escape-sequence stripper): a server's
+// last line, printed before it goes quiet, reaches a read unless it ends in
+// the first bytes of a key.
 type Writer struct {
 	r      *Replacer
 	w      io.Writer
@@ -196,7 +200,7 @@ func (w *Writer) Write(p []byte) (int, error) {
 		return len(p), nil
 	}
 	w.buf = append(w.buf, p...)
-	end := len(w.buf) - (w.r.longest - 1)
+	end := len(w.buf) - w.r.held(w.buf)
 	if end <= 0 {
 		return len(p), nil
 	}
@@ -204,6 +208,34 @@ func (w *Writer) Write(p []byte) (int, error) {
 		return 0, err
 	}
 	return len(p), nil
+}
+
+// held is how many bytes at the end of buf a Writer must hold back: the
+// longest tail of buf, shorter than the longest key, that is a proper prefix
+// of a key — the start of a key the next Write could complete — or 0.
+// Everything before it can be decided now, which is scan's streaming rule
+// met another way: an occurrence that starts there either lies whole in buf,
+// where scan finds it, or runs past its end, and then buf from its start is a
+// proper prefix of that key and a tail at least that long would have been
+// held. The same goes for a longer key starting where a shorter one is whole:
+// it is found, or its start is held. So the output is String's still, for
+// every way of cutting the stream (TestWriterEverySplitPoint,
+// TestRandomSplitsMatchStringAndReference, FuzzWriterMatchesString).
+//
+// A key's bytes after its first are compared only where its first byte
+// stands (byFirst), and each comparison stops at the first difference, so
+// against keys of random characters this costs a few comparisons per
+// position of the tail examined.
+func (r *Replacer) held(buf []byte) int {
+	for n := min(len(buf), r.longest-1); n > 0; n-- {
+		tail := buf[len(buf)-n:]
+		for _, k := range r.byFirst[tail[0]] {
+			if len(k) > n && k[:n] == string(tail) {
+				return n
+			}
+		}
+	}
+	return 0
 }
 
 // Close writes out the held-back bytes, the stream having ended: a key's

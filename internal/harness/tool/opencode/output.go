@@ -162,6 +162,10 @@ type output struct {
 	spillDone bool     // nothing more goes to it: it is capped, abandoned or ended
 	capped    bool     // output past the cap was not given to it
 	ended     bool     // finish has run: a late write, from a reader collect abandoned, is dropped
+	// kept says the spill file was asked for whatever the output's length
+	// (startSpill): a job's, whose receipt names it from the start, so
+	// finish keeps it when the output turns out short.
+	kept bool
 }
 
 // Write takes the next piece of the output. It never fails and never waits
@@ -219,6 +223,87 @@ func (o *output) toSpill(b []byte) {
 // tail is the last tailBytes of the output. It is called under mu.
 func (o *output) tail() []byte { return o.buf[max(len(o.buf)-tailBytes, 0):] }
 
+// startSpill starts the spill file now, whatever the output's length, and
+// keeps it however short the output ends (plan 033 §3.8): a job's output is
+// saved from its first byte, so its receipt can name the file. All of the
+// output so far is still in buf — the spiller starts on its own once there is
+// more than MaxBytes, half of what buf keeps — so the file, too, holds it from
+// its first byte. Once the output has ended (finish), or the file is started
+// already, it does nothing.
+func (o *output) startSpill() {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.kept = true
+	if o.spill == nil && !o.ended {
+		o.spill = startSpiller(o.open, o.home, o.id)
+		o.toSpill(o.buf)
+	}
+}
+
+// spillName waits at most d — and no longer once closing closes — for the
+// spill file to be opened, and returns its path, or "" when there is none:
+// it was never started, its open failed, or it was not open in time. The path
+// names a file that holds the output from its first byte, unless the file is
+// later given up (spiller.abandon), which the result that follows the end
+// says. Its wait is on the spill writer's goroutine, never the filesystem
+// itself (the top of this file).
+func (o *output) spillName(d time.Duration, closing <-chan struct{}) string {
+	o.mu.Lock()
+	sp := o.spill
+	o.mu.Unlock()
+	if sp == nil {
+		return ""
+	}
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-sp.opened:
+		return sp.name
+	case <-t.C:
+	case <-closing:
+	}
+	return ""
+}
+
+// peek is the output so far as a finished command's result would show it —
+// opencode's tail, at the model's limits (tailText) — whether that is less
+// than all of it, and how many bytes have been written: what a promotion's
+// result shows of a command still running, and where its job's read cursor
+// starts.
+func (o *output) peek() (kept string, cut bool, total int64) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	kept, cut = tailText(string(o.tail()), tool.MaxLines, tool.MaxBytes)
+	return kept, cut, int64(o.total)
+}
+
+// since is the output after byte from as bash_output shows it (tool.JobOutput,
+// plan 033 §3.7): of what the in-memory tail still holds after from, the
+// whole lines from its end that fit the model's limits (tailText), starting
+// at a character's start; how many bytes after from that leaves out; the
+// total; and the spill file, when it holds every byte left out — open, not
+// given up, and not stopped at its cap before them. It takes mu, and the
+// spill writer's lock under it (the order the file's comment pins), for
+// memory work only.
+func (o *output) since(from int64) tool.JobOutput {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	total := int64(o.total)
+	tail := o.tail()
+	start := total - int64(len(tail)) // the offset tail begins at
+	from = min(max(from, 0), total)
+	b := tail[max(from-start, 0):]
+	for len(b) > 0 && !utf8.RuneStart(b[0]) {
+		b = b[1:] // a character the cursor fell inside
+	}
+	text, _ := tailText(string(b), tool.MaxLines, tool.MaxBytes)
+	out := tool.JobOutput{Text: text, Skipped: total - from - int64(len(text)), Total: total}
+	if out.Skipped > 0 && o.spill != nil && total-int64(len(text)) <= o.spilled {
+		out.Spill = o.spill.whole()
+	}
+	return out
+}
+
 func (o *output) snapshot() (tail string, writes int) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
@@ -242,8 +327,8 @@ func (o *output) finish() (kept string, cut bool, trunc tool.Truncation, capped 
 		o.toSpill(o.buf)
 	}
 	if o.spill != nil {
-		if !cut {
-			o.spill.abandon() // cannot happen: a spill file means the output was cut
+		if !cut && !o.kept {
+			o.spill.abandon() // cannot happen: a spill file nobody asked for means the output was cut
 		}
 		o.spill.end()
 		o.spillDone = true
@@ -277,6 +362,11 @@ type spiller struct {
 	wake chan struct{} // one token: there is something new in the backlog
 	done chan struct{} // closed when the writer has finished
 	path string        // the whole file, set by the writer before done closes; "" when there is none
+	// opened is closed once the writer has tried to open the file, and name
+	// is the file's path, set before it closes — "" when the open failed: a
+	// job's receipt names the file before it is finished (output.spillName).
+	opened chan struct{}
+	name   string
 
 	mu        sync.Mutex // never held across a syscall, or anything that waits
 	backlog   []byte     // output not yet taken by the writer
@@ -285,9 +375,25 @@ type spiller struct {
 }
 
 func startSpiller(open spillOpener, home, id string) *spiller {
-	s := &spiller{wake: make(chan struct{}, 1), done: make(chan struct{})}
+	s := &spiller{wake: make(chan struct{}, 1), done: make(chan struct{}), opened: make(chan struct{})}
 	go s.run(open, home, id)
 	return s
+}
+
+// whole is the file's path while it may still end whole: opened, and not
+// given up; "" otherwise. It takes mu, and does not wait.
+func (s *spiller) whole() string {
+	select {
+	case <-s.opened:
+	default:
+		return ""
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.abandoned {
+		return ""
+	}
+	return s.name
 }
 
 // run is the writer: open the file, write the backlog as it comes until the
@@ -297,9 +403,12 @@ func (s *spiller) run(open spillOpener, home, id string) {
 	defer close(s.done)
 	f, err := open(home, id)
 	if err != nil {
+		close(s.opened)
 		s.abandon()
 		return
 	}
+	s.name = f.Name()
+	close(s.opened)
 	whole := false
 	for {
 		b, ended, abandoned := s.take()

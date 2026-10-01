@@ -41,17 +41,22 @@ func Profile() (tool.Profile, error) {
 	// order (tool/registry.ts:229-246). The order is part of every request's
 	// cache prefix, so a tool is added at its place in it, never at the end.
 	//
-	// agent, right after write, is craze's sub-agent tool at the place
-	// opencode gives its own task tool (plan 026 §3.3, §5 C3b), and
-	// agent_output, which reads a background agent call's result, follows it
-	// (§3.11). The three after them are grok-build's tools (plan 023 §3.4,
-	// D-53), each at the place
+	// bash_output and bash_stop, which read and stop a background job (plan
+	// 033 §3.7), follow bash, the tool whose jobs they are, as agent_output
+	// follows agent: bash's own description changed with them, so the prefix
+	// they move is moved anyway. agent, right after write, is craze's
+	// sub-agent tool at the place opencode gives its own task tool (plan 026
+	// §3.3, §5 C3b), and agent_output, which reads a background agent call's
+	// result, follows it (§3.11). The three after them are grok-build's tools
+	// (plan 023 §3.4, D-53), each at the place
 	// opencode gives its own counterpart — question, todo and plan — with one
 	// difference: opencode offers its question tool first of all, and here it
 	// follows the six, so that a session's requests still open with the tools
 	// every earlier session's did.
 	builders := []func() (tool.Tool, error){
 		newBash,
+		newBashOutput,
+		newBashStop,
 		newRead,
 		func() (tool.Tool, error) { return newGlob(rg) },
 		func() (tool.Tool, error) { return newGrep(rg) },

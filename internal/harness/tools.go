@@ -400,6 +400,14 @@ func openTools(home, workspace, mode string, asker tool.Asker, table *modeltable
 	if subs != nil {
 		env.Subagents = subs
 	}
+	// And for the jobs (plan 033 §3.8, P11): only a session that runs
+	// background work at all (Options.Background — an interactive one, which
+	// something wakes) and is not a sub-agent has them. Anywhere else bash's
+	// run_in_background runs in the foreground and a timeout kills, as D-59
+	// has it for background sub-agents.
+	if subs != nil && subs.background {
+		env.Jobs = jobs{r: subs}
+	}
 	ts.d, err = tool.NewDispatcher(tool.Options{Tools: tools, Gate: ts.modeGate, Env: env})
 	if err != nil {
 		return nil, fmt.Errorf("harness: %w", err)

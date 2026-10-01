@@ -270,12 +270,18 @@ func (t *turn) toolResult(r fantasy.ToolResultContent) error {
 	return nil
 }
 
-// finishCall sends c's ToolFinished, once. mu is held.
+// finishCall sends c's ToolFinished, once, and tells the doom-loop guard of a
+// waiting call that saw what it waits on (tool.Result.Observed, plan 033
+// P13): the next identical call counts as a first again (doomloop.go). mu is
+// held.
 func (t *turn) finishCall(c *toolCall, res tool.Result) {
 	if c.done {
 		return
 	}
 	c.done = true
+	if res.Observed {
+		t.loop.observed = callSignature(c.name, c.input)
+	}
 	now := time.Now()
 	var d time.Duration
 	if !c.at.IsZero() {
@@ -492,13 +498,15 @@ func (t *turn) synthesizeStep(stop string) (done bool, err error) {
 	return true, err
 }
 
-// outputCalls are the harness ids of the agent_output calls among answered:
-// the calls whose own result a written tool entry holds, and so the ones
-// whose reservations it commits (plan 026 §3.11).
+// outputCalls are the harness ids of the agent_output, bash_output and
+// bash_stop calls among answered: the calls whose own result a written tool
+// entry holds, and so the ones whose reservations — and, for bash_output, the
+// reads of a running job — it commits (plan 026 §3.11, plan 033 §3.8).
 func outputCalls(answered []*toolCall) []string {
 	var ids []string
 	for _, c := range answered {
-		if c.name == tool.AgentOutputTool {
+		switch c.name {
+		case tool.AgentOutputTool, tool.BashOutputTool, tool.BashStopTool:
 			ids = append(ids, c.id)
 		}
 	}

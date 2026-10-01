@@ -47,6 +47,10 @@ const (
 	// command left running outside its process group still held the pipe
 	// when reading stopped.
 	partialText = "The output may be incomplete: something the command started still held its output open when the call ended, and what it wrote after that was not read."
+	// foregroundText says a call that asked for the background ran in the
+	// foreground: the session runs no background jobs — headless `craze
+	// prompt`, or a sub-agent's session (plan 033 §3.7, P11).
+	foregroundText = "This session does not run background jobs: run_in_background was ignored, and the command ran in the foreground with the foreground's timeout."
 )
 
 // noEnvironText refuses a call whose Env has no child environment. The tool
@@ -164,8 +168,11 @@ func newBash() (tool.Tool, error) {
 	// opencode's Parameters (shell/prompt.ts:15-23) as its JSON Schema
 	// renders them (test/tool/__snapshots__/parameters.test.ts.snap):
 	// timeout is a PositiveInt, which renders with both bounds.
+	//
+	// run_in_background is craze's (plan 033 §3.7): Claude Code's name for
+	// the same request, as the agent tool's is (plan 026 §3.11).
 	return &bashTool{host: h, spec: tool.Spec{
-		ID:          "bash",
+		ID:          tool.BashTool,
 		Description: desc,
 		Parameters: map[string]any{
 			"command": map[string]any{"type": "string", "description": "The command to execute"},
@@ -173,6 +180,10 @@ func newBash() (tool.Tool, error) {
 				"description": "Optional timeout in milliseconds"},
 			"workdir": map[string]any{"type": "string",
 				"description": "The working directory to run the command in. Defaults to the current directory. Use this instead of 'cd' commands."},
+			"run_in_background": map[string]any{"type": "boolean",
+				"description": "Optional. true runs the command in the background where this session supports it: the call returns at once " +
+					"with the job's id, timeout is the job's limit, and its result is delivered to you when it finishes. Where " +
+					"background jobs are not supported the command runs in the foreground."},
 		},
 		Required: []string{"command"},
 		Kind:     tool.KindExecute,
@@ -204,6 +215,14 @@ func (b *bashTool) Prepare(env tool.Env, c tool.Call) (tool.Prepared, error) {
 	if err != nil {
 		return nil, err
 	}
+	// run_in_background is a boolean, null or absent being false, and
+	// anything else refused, as the agent tool reads its own.
+	var background bool
+	if raw, present := a["run_in_background"]; !present || jsonType(raw) != "null" {
+		if background, _, err = a.boolean("run_in_background"); err != nil {
+			return nil, err
+		}
+	}
 	call := &bashCall{host: b.host, id: c.ID, command: command, dir: env.Workspace, timeout: defaultTimeout,
 		ops: realOps, spillCap: maxSpillBytes}
 	// `params.workdir ? resolvePath(params.workdir, ...) : directory`
@@ -213,9 +232,22 @@ func (b *bashTool) Prepare(env tool.Env, c tool.Call) (tool.Prepared, error) {
 	if workdir != "" {
 		call.dir = env.Resolve(workdir)
 	}
+	// The timeout's meaning follows where the command will run (plan 033
+	// §3.7): in the background — asked for, in a session that runs jobs — it
+	// is the job's limit, 30 minutes when none is given and 2 hours at most;
+	// anywhere else it is the foreground's, 2 minutes and 10 at most,
+	// run_in_background or not, and a call that asked for the background
+	// says it ran in the foreground (foregroundText).
+	most := maxTimeout
+	switch {
+	case background && env.Jobs != nil:
+		call.background, call.timeout, most = true, tool.JobDefaultLimit, tool.JobMaxLimit
+	case background:
+		call.foreground = true
+	}
 	if hasTimeout {
-		if ms > maxTimeout.Milliseconds() {
-			call.requested, call.timeout = ms, maxTimeout
+		if ms > most.Milliseconds() {
+			call.requested, call.timeout = ms, most
 		} else {
 			call.timeout = time.Duration(ms) * time.Millisecond
 		}
@@ -228,10 +260,17 @@ type bashCall struct {
 	id      string // the harness's id, which names the spill file
 	command string
 	dir     string // resolved; not yet checked
+	// timeout is the command's: in the foreground, how long it runs before
+	// it is stopped (or promoted); in the background, the job's limit.
 	timeout time.Duration
 	// requested is the timeout the model asked for, in milliseconds, when
-	// it was over maxTimeout and reduced; 0 otherwise.
+	// it was over the maximum (maxTimeout, or tool.JobMaxLimit in the
+	// background) and reduced; 0 otherwise.
 	requested int64
+	// background: run_in_background, in a session that runs jobs (Env.Jobs);
+	// foreground: run_in_background in one that does not, which runs the
+	// command in the foreground and says so (plan 033 §3.7).
+	background, foreground bool
 
 	// ops is the call's filesystem and process work, which tests replace to
 	// stall any one piece of it; spillCap bounds what the spill file holds.
@@ -248,6 +287,9 @@ type ops struct {
 	ensureTmp func(string) error                // the temporary directory: made, or checked
 	start     func(*exec.Cmd) (*group, error)   // exec, in the workdir
 	openSpill spillOpener                       // the spill file, under the harness home
+	// expiring is a test seam: promotion.expiring, run as the foreground
+	// timeout fires in a session that runs jobs. nil in production.
+	expiring func()
 }
 
 var realOps = ops{stat: os.Stat, ensureTmp: ensureTmp, start: startGroup, openSpill: openSpill}
@@ -274,14 +316,28 @@ func (c *bashCall) Request() tool.Request {
 //	ctx done, or the timeout passing, while the command runs           6.7 s: the 3 s grace comes first
 //	the session closing — ctx cancelled with tool.ErrClosing, or        2.7 s, whatever came before, an ordinary cancel's grace included;
 //	env.Closing closed                                                 a close does not wait for the spill file
+//	the timeout passing, the command moved to the background            1 s: the wait for the spill file to open (bash_job.go)
+//	a run_in_background command started                                1 s, the same wait
 //
 // (supervise, collect, spiller.wait).
+//
+// In a session that runs jobs (Env.Jobs, plan 033 §3.7–§3.8), a command
+// still running at its timeout is moved to the background rather than
+// stopped (promote, bash_job.go) — unless the call has been cancelled or the
+// session is closing, or the session already runs as many jobs as it may:
+// then it is stopped as it always was, and the result says why. A call that
+// asked for the background starts its command as a job and returns at once
+// (runBackground); one that asked for it where there are no jobs runs in the
+// foreground, and says so.
 func (c *bashCall) Run(ctx context.Context, env tool.Env) tool.Result {
 	if ctx.Err() != nil || tool.SessionClosing(ctx, env.Closing) {
 		return tool.Result{Text: tool.AbortedText, IsError: true, Class: tool.ClassAborted}
 	}
 	if env.Environ == nil {
 		return errorResult(fail(tool.ClassToolError, noEnvironText))
+	}
+	if c.background {
+		return c.runBackground(ctx, env)
 	}
 	began := time.Now()
 	deadline := began.Add(c.timeout)
@@ -292,35 +348,64 @@ func (c *bashCall) Run(ctx context.Context, env tool.Env) tool.Result {
 		}
 		return errorResult(err)
 	}
-	defer func() { _ = r.Close() }()
+	return c.supervised(ctx, env, c.attach(env, g, r, began), deadline, env.Jobs != nil)
+}
 
-	out := &output{home: env.Home, id: c.id, open: c.ops.openSpill, cap: c.spillCap}
-	// The redactor and the escape-sequence stripper see the output before
-	// anything else does (modelStream, ansi.go), so the tail, every progress
-	// snapshot and the spill file hold only its redacted, stripped form (plan
-	// 019 §3.8, plan 033 §3.6). The redactor holds back a key's length less
-	// one byte, so a key split across two reads of the pipe is still caught,
-	// and the stripper carries an escape sequence the same way. Nothing the
-	// reader writes to waits on a file: the spill file is written by a
-	// goroutine of its own (spiller), so the reader always empties the pipe.
-	stream := newModelStream(env.Redactor, out)
-	copied := make(chan struct{})
-	var copyErr error // set before copied closes
-	go func() {
-		defer close(copied)
-		_, copyErr = io.Copy(stream, r)
+// supervised runs a started command in the foreground to its end and
+// returns its result — or, with promotable set (a session that runs jobs), to
+// its timeout and then into the background (promote). j holds what was
+// started: the group, its output pipe and the reader feeding the call's
+// output. supervised closes the pipe when it is done with it, unless it has
+// handed j to a job — exactly once, in promote — whose from then on it all is
+// (plan 033 §3.8).
+func (c *bashCall) supervised(ctx context.Context, env tool.Env, j *bashJob, deadline time.Time, promotable bool) (res tool.Result) {
+	handed := false // j is a job's (promote): nothing here closes or kills it
+	var slot tool.JobSlot
+	var refused string // why a promotion was refused: the cap, or a close (P26)
+	defer func() {
+		if handed {
+			return
+		}
+		// A slot taken for a promotion that never got as far as the hand-over
+		// — a panic between the two, which the dispatcher recovers — is given
+		// back, and its command killed and released for reaping, as supervise
+		// would have: the slots are what the session's Close joins on. handed
+		// is set just before the hand-over itself (promote), so this never
+		// touches what a job may already own.
+		if slot != nil {
+			j.g.signal(syscall.SIGKILL)
+			close(j.g.release)
+			slot.Release()
+		}
+		_ = j.r.Close()
 	}()
-	stopProgress := out.report(env.Progress)
+	stopProgress := j.out.report(env.Progress)
+	var promote *promotion
+	if promotable {
+		promote = &promotion{expiring: c.ops.expiring, try: func() bool {
+			s, err := env.Jobs.Reserve(c.id)
+			if err != nil {
+				refused = refusal(err)
+				return false
+			}
+			slot = s
+			return true
+		}}
+	}
 
-	why, reaped := g.supervise(ctx, env.Closing, time.Until(deadline), copied)
-	returned, complete := collect(r, copied, &copyErr)
+	why, reaped := j.g.supervise(ctx, env.Closing, time.Until(deadline), j.copied, promote)
+	if why == endPromote {
+		stopProgress()
+		return c.promote(env, j, slot, &handed)
+	}
+	returned, complete := collect(j.r, j.copied, &j.copyErr)
 	stopProgress()
 	if returned {
-		_ = stream.Close() // the bytes its stages held back, now that the stream has ended
+		_ = j.stream.Close() // the bytes its stages held back, now that the stream has ended
 	}
-	took := time.Since(began)
+	took := time.Since(j.began)
 
-	kept, cut, trunc, capped, spill := out.finish()
+	kept, cut, trunc, capped, spill := j.out.finish()
 	if spill != nil {
 		wait := spillWait
 		if tool.SessionClosing(ctx, env.Closing) {
@@ -332,10 +417,32 @@ func (c *bashCall) Run(ctx context.Context, env tool.Env) tool.Result {
 	}
 	var state *os.ProcessState
 	if reaped {
-		state = g.state
+		state = j.g.state
 	}
 	return c.result(outcome{why: why, state: state, kept: kept, cut: cut, trunc: trunc,
-		capped: capped && trunc.Spill != "", partial: !complete, took: took})
+		capped: capped && trunc.Spill != "", partial: !complete, took: took, refused: refused})
+}
+
+// attach starts reading a started command's output: the pipe's read end r,
+// through the redaction and escape-sequence stages, into the call's output.
+//
+// The redactor and the escape-sequence stripper see the output before
+// anything else does (modelStream, ansi.go), so the tail, every progress
+// snapshot and the spill file hold only its redacted, stripped form (plan
+// 019 §3.8, plan 033 §3.6). The redactor holds back a key's length less one
+// byte, so a key split across two reads of the pipe is still caught, and the
+// stripper carries an escape sequence the same way. Nothing the reader writes
+// to waits on a file: the spill file is written by a goroutine of its own
+// (spiller), so the reader always empties the pipe.
+func (c *bashCall) attach(env tool.Env, g *group, r *os.File, began time.Time) *bashJob {
+	out := &output{home: env.Home, id: c.id, open: c.ops.openSpill, cap: c.spillCap}
+	j := &bashJob{c: c, g: g, r: r, out: out, stream: newModelStream(env.Redactor, out),
+		copied: make(chan struct{}), began: began, closing: env.Closing}
+	go func() {
+		defer close(j.copied)
+		_, j.copyErr = io.Copy(j.stream, r)
+	}()
+	return j
 }
 
 // launched is what setup produced: the started command and the read end of
@@ -585,6 +692,10 @@ type outcome struct {
 	capped  bool             // the spill file stops at the cap
 	partial bool             // the output was not read to its end
 	took    time.Duration
+	// refused is why a command that reached its timeout was not moved to the
+	// background (plan 033 P26): the job cap's refusal, or a close's; "" when
+	// it was not asked to be.
+	refused string
 }
 
 // result is the call's result: the tail of the output with opencode's
@@ -592,21 +703,29 @@ type outcome struct {
 // To opencode's lines craze adds one when the timeout was reduced, "exit
 // code: N" when the command exited non-zero — a failed command with no output
 // would otherwise read "(no output)" — and one when the output may be
-// incomplete. A non-zero exit is not an error: the command ran, and the model
-// reads the code. A timeout and a cancel are, classed timeout and aborted; an
-// aborted result's text starts with opencode's "Tool execution aborted" and
-// keeps what the command wrote.
+// incomplete; and, in a session that runs jobs, why a command that reached its
+// timeout was not moved to the background (P26), or, in one that runs none,
+// that run_in_background ran it in the foreground (plan 033 §3.7). A non-zero
+// exit is not an error: the command ran, and the model reads the code. A
+// timeout and a cancel are, classed timeout and aborted; an aborted result's
+// text starts with opencode's "Tool execution aborted" and keeps what the
+// command wrote.
 func (c *bashCall) result(o outcome) tool.Result {
 	var meta []string
+	if c.foreground {
+		meta = append(meta, foregroundText)
+	}
 	if c.requested > 0 {
-		meta = append(meta, fmt.Sprintf("The requested timeout of %d ms is above the maximum of %d ms; the command ran with a timeout of %d ms.",
-			c.requested, maxTimeout.Milliseconds(), maxTimeout.Milliseconds()))
+		meta = append(meta, c.reducedText())
 	}
 	code := -1 // none: the command was stopped, or its leader never reaped
 	switch o.why {
 	case endTimeout:
 		meta = append(meta, fmt.Sprintf("shell tool terminated command after exceeding timeout %d ms. If this command is expected to take longer and is not waiting for interactive input, retry with a larger timeout value in milliseconds.",
 			c.timeout.Milliseconds()))
+		if o.refused != "" {
+			meta = append(meta, o.refused) // why it was not moved to the background instead (P26)
+		}
 	case endAbort:
 		meta = append(meta, "User aborted the command")
 	default:
@@ -622,30 +741,7 @@ func (c *bashCall) result(o outcome) tool.Result {
 		meta = append(meta, partialText)
 	}
 
-	text := o.kept
-	if text == "" {
-		text = "(no output)"
-	}
-	if o.cut {
-		// "Full" only when the file holds every byte the command wrote:
-		// not when it stops at the cap, and not when the output itself was
-		// not read to its end.
-		saved := "The full output could not be saved."
-		switch {
-		case o.trunc.Spill != "" && !o.capped && !o.partial:
-			saved = "Full output saved to: " + o.trunc.Spill
-		case o.trunc.Spill != "":
-			// Each shortfall is stated; a file can have both.
-			saved = "Output saved to: " + o.trunc.Spill
-			if o.capped {
-				saved += "\nThe saved output stops at " + size(c.spillCap) + "; the rest was not saved."
-			}
-			if o.partial {
-				saved += "\nThe saved output holds only what was read of the output."
-			}
-		}
-		text = "...output truncated...\n\n" + saved + "\n\n" + text
-	}
+	text := c.text(o)
 	if len(meta) > 0 {
 		text += "\n\n<shell_metadata>\n" + strings.Join(meta, "\n") + "\n</shell_metadata>"
 	}
@@ -658,6 +754,40 @@ func (c *bashCall) result(o outcome) tool.Result {
 		res.IsError, res.Class, res.Text = true, tool.ClassAborted, tool.AbortedText+"\n\n"+text
 	}
 	return res
+}
+
+// text is the output as a result shows it: its tail, "(no output)" when there
+// is none, and when the tail is less than all of it opencode's notice, with
+// the file that holds the rest — "Full" only when the file holds every byte
+// the command wrote, each shortfall stated otherwise. A foreground result
+// puts its metadata after it (result); a job's result block holds it as its
+// body (jobEnd).
+func (c *bashCall) text(o outcome) string {
+	text := o.kept
+	if text == "" {
+		text = "(no output)"
+	}
+	if !o.cut {
+		return text
+	}
+	// "Full" only when the file holds every byte the command wrote: not when
+	// it stops at the cap, and not when the output itself was not read to its
+	// end.
+	saved := "The full output could not be saved."
+	switch {
+	case o.trunc.Spill != "" && !o.capped && !o.partial:
+		saved = "Full output saved to: " + o.trunc.Spill
+	case o.trunc.Spill != "":
+		// Each shortfall is stated; a file can have both.
+		saved = "Output saved to: " + o.trunc.Spill
+		if o.capped {
+			saved += "\nThe saved output stops at " + size(c.spillCap) + "; the rest was not saved."
+		}
+		if o.partial {
+			saved += "\nThe saved output holds only what was read of the output."
+		}
+	}
+	return "...output truncated...\n\n" + saved + "\n\n" + text
 }
 
 // size says n bytes the way the spill cap is stated: in MiB when it is a

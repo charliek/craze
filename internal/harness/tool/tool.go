@@ -214,6 +214,14 @@ type Result struct {
 	// then gets a line saying so (Dispatcher.Run). It is never redacted, as
 	// it holds no text, and never truncated. nil for every other result.
 	Media *Media
+	// Observed says a waiting call saw what it waits on (plan 033 P13): it
+	// waited out the whole wait it asked for (more than 0), or the job or
+	// sub-agent it waits on ended. The doom-loop guard counts an identical
+	// call that follows an observed one as a first call again (D-42's
+	// exemption): three bash_output calls that each wait their full time
+	// for a silent build are not a loop, three snapshots of it are. Set by
+	// bash_output, bash_stop and agent_output.
+	Observed bool
 }
 
 // Media is an image a tool returns (Result.Media): its bytes and their media
@@ -321,6 +329,12 @@ type Env struct {
 	// session, whose depth is 1, or a build that wired no runner — and the
 	// agent tool then answers with a tool_error result.
 	Subagents Subagents
+	// Jobs is the session's background jobs (plan 033 §3.8, jobs.go): what
+	// bash hands a command that outlives its call to, and what bash_output
+	// and bash_stop read and stop. nil in a session that runs none — headless
+	// `craze prompt`, and a sub-agent's session (P11, D-59) — where
+	// run_in_background runs in the foreground and the timeout kills.
+	Jobs Jobs
 	// Vision says whether the model the call runs for accepts images
 	// (modeltable's vision flag, plan 033 §3.5): a tool returns an image
 	// (Result.Media) only when it does, and otherwise says the model cannot

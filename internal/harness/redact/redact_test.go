@@ -198,27 +198,49 @@ func TestWriterEverySplitPoint(t *testing.T) {
 }
 
 // TestWriterHoldsBackOnlyWhatItMust: the stream reaches the underlying writer
-// as it is written, less the longest key's length minus one, so a bash
-// tool's live output lags by a few dozen bytes at most.
+// as it is written, less only a tail that could still begin a key (held): so
+// a bash tool's live output — a background job's reads included (plan 033
+// §3.7) — shows a command's last line at once unless that line ends in the
+// first bytes of a key. A tail that is a key's prefix is held exactly, and a
+// longer prefix of a longer key wins. Close writes the rest.
 func TestWriterHoldsBackOnlyWhatItMust(t *testing.T) {
 	r := New("short-key", keyA) // keyA is the longest: 20 bytes
-	var buf bytes.Buffer
-	w := r.NewWriter(&buf)
-	text := strings.Repeat("plain output line\n", 10)
-	if _, err := w.Write([]byte(text)); err != nil {
-		t.Fatal(err)
+	cases := []struct {
+		text string
+		held int
+	}{
+		{strings.Repeat("plain output line\n", 10), 0},
+		{"listening on :3000", 0},
+		{"no key here, but s", 1},                    // "s" could begin either key
+		{"maybe sk-can", len("sk-can")},              // keyA's start
+		{"maybe short-", len("short-")},              // short-key's start
+		{"maybe sk-canary-alpha-000", len(keyA) - 1}, // all but keyA's last byte
+		{"whole " + keyA + " then sh", len("sh")},    // a key whole, then another's start
+		{"x" + keyA[:len(keyA)-1] + "x", 0},          // a prefix broken off: nothing to hold
 	}
-	if want := len(text) - (len(keyA) - 1); buf.Len() != want {
-		t.Fatalf("after one write, %d bytes reached the writer, want %d", buf.Len(), want)
-	}
-	if err := w.Close(); err != nil {
-		t.Fatal(err)
-	}
-	if buf.String() != text {
-		t.Fatalf("after Close = %q, want the whole text", buf.String())
+	for _, tc := range cases {
+		var buf bytes.Buffer
+		w := r.NewWriter(&buf)
+		if _, err := w.Write([]byte(tc.text)); err != nil {
+			t.Fatal(err)
+		}
+		if want := r.String(tc.text[:len(tc.text)-tc.held]); buf.String() != want {
+			t.Fatalf("%q: after one write %q reached the writer, want %q (%d bytes held)", tc.text, buf.String(), want, tc.held)
+		}
+		if err := w.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if buf.String() != r.String(tc.text) {
+			t.Fatalf("%q: after Close = %q, want the whole text, redacted", tc.text, buf.String())
+		}
 	}
 	// Close is the end of the stream: a second one changes nothing and a
 	// Write after it fails.
+	var buf bytes.Buffer
+	w := r.NewWriter(&buf)
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
 	if err := w.Close(); err != nil {
 		t.Fatalf("second Close = %v", err)
 	}
