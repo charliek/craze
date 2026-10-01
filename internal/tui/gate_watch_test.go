@@ -221,6 +221,16 @@ func digestModel(m *Model) gateDigest {
 			w.walk(reflect.ValueOf(m.cdlg))
 		case "shared":
 			digestShared(w, m)
+		case "vp":
+			// The viewport as bubbles' was digested: its size, its offset and
+			// the text of the rows it holds — not the entries its rowIndex
+			// points at, which "main" digests (plan 032 §3.3 C5).
+			w.buf = fmt.Appendf(w.buf, "%d %d %d ", m.vp.Width, m.vp.Height, m.vp.YOffset)
+			if x := m.vp.rows; x == nil {
+				w.str("nil;")
+			} else {
+				w.walk(reflect.ValueOf(x.appendRows(nil, 0, x.total)))
+			}
 		default:
 			w.walk(v.Field(i))
 		}

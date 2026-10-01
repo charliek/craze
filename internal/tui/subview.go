@@ -40,7 +40,7 @@ func (m *Model) enterView(id string) {
 	m.agentFocus = false
 	m.input.Blur()
 	tr := m.ensureSub(id)
-	first := tr.transcriptRows == nil
+	first := tr.drawn == nil
 	if !m.showSubagentTranscript() {
 		m.rebuildReceiptTranscript(id)
 	}
@@ -216,7 +216,7 @@ func (m *Model) rebuildReceiptTranscript(id string) {
 	}
 	tr := m.ensureSub(id)
 	stick, off := tr.atBottom, tr.yOffset
-	had := tr.transcriptRows != nil
+	had := tr.drawn != nil
 	tr.reset()
 	now := m.now()
 	label := m.snap.Provider.Label()

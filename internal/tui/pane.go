@@ -59,13 +59,17 @@ type pane struct {
 	trimmed    bool
 	// pathDirs is the pane's own (notePath): the directories each basename
 	// has been seen in, from the tool entries this pane was given.
-	pathDirs        map[string]map[string]struct{}
-	renders         int
-	transcriptRows  []string
-	transcriptPlain []string
-	yOffset         int
-	atBottom        bool
-	dirty           bool
+	pathDirs map[string]map[string]struct{}
+	renders  int
+	// drawn is the rows the last paint drew (rowIndex), nil before the first
+	// paint and after one with no width. reshaped says the list changed shape
+	// since — a row left from the front or the middle, or all of them — so the
+	// next paint assembles every span again (paint).
+	drawn    *rowIndex
+	reshaped bool
+	yOffset  int
+	atBottom bool
+	dirty    bool
 	// entryCap / textBudget are 0 on main (maxEntries, unlimited text).
 	entryCap   int
 	textBudget int
@@ -254,6 +258,7 @@ func (t *pane) removeRow(r *entry) {
 	}
 	t.forget(r)
 	t.trimmed = true
+	t.reshaped = true
 	t.dirty = true
 }
 
@@ -305,6 +310,7 @@ func (t *pane) dropFirst(n int) {
 	clear(t.rows[kept:])
 	t.rows = t.rows[:kept]
 	t.trimmed = true
+	t.reshaped = true
 	t.dirty = true
 }
 
@@ -330,6 +336,7 @@ func (t *pane) clearRows() {
 	t.pathDirs = nil
 	t.clearOpen, t.clearFrom = transcript.EntryID{}, 0
 	t.emptied++
+	t.reshaped = true
 	t.dirty = true
 }
 

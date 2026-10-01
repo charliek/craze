@@ -15,7 +15,6 @@ import (
 
 	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/textarea"
-	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/charliek/craze/internal/agent"
@@ -294,7 +293,7 @@ type Host interface {
 
 type Model struct {
 	theme Theme
-	vp    viewport.Model
+	vp    viewport
 	input textarea.Model
 
 	// eng is the session's backend (plan 027 §3.12): the engine in process —
@@ -1578,12 +1577,6 @@ func New(cfg Config) Model {
 	cfg = cfg.viewing().launching()
 	cwd := configWorkspace(cfg.Workspace)
 
-	vp := viewport.New(0, 0)
-	vp.KeyMap = viewport.KeyMap{
-		PageUp:   key.NewBinding(key.WithKeys("pgup")),
-		PageDown: key.NewBinding(key.WithKeys("pgdown")),
-	}
-
 	th := Preset(cfg.Theme)
 	prov := configProvider(cfg.Provider)
 	loads := &completeLoadSet{}
@@ -1592,7 +1585,6 @@ func New(cfg Config) Model {
 	// (withSession, plan 030 §3.11).
 	m := Model{
 		theme:           th,
-		vp:              vp,
 		input:           newComposer(th),
 		yolo:            cfg.Yolo,
 		mouseEnabled:    !cfg.NoMouse,
@@ -2616,11 +2608,11 @@ func (m Model) handleRelease(x, y int) (tea.Model, tea.Cmd) {
 // the gesture's whole answer.
 func (m Model) selectWord(pos cellPos) Model {
 	m.sel = selection{}
-	plain := m.cur().transcriptPlain
-	if pos.line >= len(plain) {
+	tr := m.cur()
+	if pos.line >= tr.drawnLen() {
 		return m
 	}
-	lo, hi, ok := wordAt(plain[pos.line], pos.col)
+	lo, hi, ok := wordAt(tr.plainRow(pos.line), pos.col)
 	if !ok {
 		return m
 	}

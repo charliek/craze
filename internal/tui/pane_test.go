@@ -61,7 +61,7 @@ func TestModelCopiesShareTheirPanes(t *testing.T) {
 		t.Fatalf("the original holds the notes %q, want the copy's row last", got)
 	}
 	cp.refreshViewport()
-	if plain := m.main.transcriptPlain; len(plain) == 0 || plain[len(plain)-1] != "written through the copy" {
+	if plain := m.main.plainRows(); len(plain) == 0 || plain[len(plain)-1] != "written through the copy" {
 		t.Fatalf("the original's painted rows are not the copy's: %q", plain)
 	}
 
@@ -167,7 +167,7 @@ func TestEchoHidingLeavesTheFrameUnchanged(t *testing.T) {
 		if got := shownRows(m.main); !slices.Equal(got, want) {
 			t.Fatalf("before the echo the rows are %v, want %v", got, want)
 		}
-		frame := slices.Clone(m.main.transcriptPlain)
+		frame := slices.Clone(m.main.plainRows())
 
 		m = feed(t, m, agent.Event{Type: agent.EventTurn, Turn: &agent.TurnInfo{
 			ID: own, Phase: agent.TurnStarted, Text: "my question",
@@ -175,7 +175,7 @@ func TestEchoHidingLeavesTheFrameUnchanged(t *testing.T) {
 		if got := shownRows(m.main); !slices.Equal(got, want) {
 			t.Fatalf("the started echo changed the rows to %v, want %v", got, want)
 		}
-		if got := m.main.transcriptPlain; !slices.Equal(got, frame) {
+		if got := m.main.plainRows(); !slices.Equal(got, frame) {
 			t.Fatalf("the started echo changed the frame:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(frame, "\n"))
 		}
 		if view := plainView(m); !inOrder(view, "an earlier reply", "❯ my question", "theme → "+theme) {
@@ -197,7 +197,7 @@ func TestEchoHidingLeavesTheFrameUnchanged(t *testing.T) {
 		if got := shownRows(m.main); !slices.Equal(got, before) {
 			t.Fatalf("before the ending the rows are %v, want %v: the answer wrote a row of its own", got, before)
 		}
-		frame := slices.Clone(m.main.transcriptPlain)
+		frame := slices.Clone(m.main.plainRows())
 
 		m = feed(t, m, end)
 		want := append(slices.Clone(before),
@@ -207,7 +207,7 @@ func TestEchoHidingLeavesTheFrameUnchanged(t *testing.T) {
 		if got := shownRows(m.main); !slices.Equal(got, want) {
 			t.Fatalf("after the ending the rows are %v, want %v", got, want)
 		}
-		if got := m.main.transcriptPlain; len(got) < len(frame) || !slices.Equal(got[:len(frame)], frame) {
+		if got := m.main.plainRows(); len(got) < len(frame) || !slices.Equal(got[:len(frame)], frame) {
 			t.Fatalf("the ending moved the rows above it:\n%s\nwant a frame starting:\n%s", strings.Join(got, "\n"), strings.Join(frame, "\n"))
 		}
 		if view := plainView(m); !inOrder(view, "carrying on", "? Pick one → A", "? Pick any → X") {

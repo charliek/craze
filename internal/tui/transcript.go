@@ -101,10 +101,15 @@ type entry struct {
 	cont     bool
 	contFrom int
 
+	// rendered is never written to once it is set: a render makes a new
+	// slice, which is what lets a paint's rowIndex hold it rather than copy it.
 	rendered    []string
 	renderedFor renderKey
 	// dirty marks content that changed under an unchanged key.
 	dirty bool
+	// plain is rendered as the selection reads it, worked out the first time
+	// a selection asks (pane.plainRow) and dropped when the entry renders again.
+	plain []string
 }
 
 func (m Model) renderKey() renderKey {
@@ -292,8 +297,8 @@ func (m *Model) storeViewport(tr *pane) {
 }
 
 // setViewportContent re-renders the dirty entries of the drawn transcript,
-// joins everything and only then scrolls, so "stick to bottom" is decided by
-// where the user was before the change, not after it.
+// hands the viewport the rows (paint) and only then scrolls, so "stick to
+// bottom" is decided by where the user was before the change, not after it.
 func (m *Model) setViewportContent(stick bool) {
 	tr := m.cur()
 	// Every rebuild moves the text under the selection — a streaming chunk, a
@@ -301,45 +306,30 @@ func (m *Model) setViewportContent(stick bool) {
 	// with it rather than pointing at rows that are no longer there.
 	m.sel = selection{}
 	if m.width <= 0 {
-		tr.transcriptRows, tr.transcriptPlain = nil, nil
-		m.vp.SetContent("")
+		tr.drawn = nil
+		tr.reshaped = false
+		m.vp.setRows(noRows)
 		tr.dirty = false
 		m.storeViewport(tr)
 		return
 	}
-	key := m.renderKey()
-	lines := make([]string, 0, len(tr.rows)+1)
-	if tr.trimmed {
-		lines = append(lines, renderSegs(m.width, seg{trimmedNote, styleFG(m.theme.Dim)}))
+	// The canonical rows: exactly what the viewport is about to hold, which
+	// the hit test, the highlight and the copy read too.
+	tr.drawn = m.paint(tr)
+	if paintHook != nil {
+		paintHook(m, tr)
 	}
-	for _, e := range tr.rows {
-		// A shell row that is still running draws the spinner, and the cache is
-		// keyed on things that do not move while it spins, so the row is
-		// re-rendered on every rebuild until it settles. The tick is what asks
-		// for those rebuilds (handleTick), so this costs one comparison per
-		// entry rather than a walk of its own.
-		if e.dirty || e.renderedFor != key || (e.shell != nil && !e.shell.done) {
-			e.rendered = m.renderEntry(tr, e, key)
-			e.renderedFor = key
-			e.dirty = false
-			tr.renders++
-		}
-		lines = append(lines, e.rendered...)
-	}
-	// The canonical rows: exactly what the viewport is about to hold, plus the
-	// plain form the selection cuts and copies from.
-	tr.transcriptRows = lines
-	tr.transcriptPlain = make([]string, len(lines))
-	for i, ln := range lines {
-		tr.transcriptPlain[i] = strings.TrimRight(ansi.Strip(ln), " ")
-	}
-	m.vp.SetContent(strings.Join(lines, "\n"))
+	m.vp.setRows(tr.drawn)
 	if stick {
 		m.vp.GotoBottom()
 	}
 	tr.dirty = false
 	m.storeViewport(tr)
 }
+
+// paintHook, when a test sets it, is told of every paint, with the pane just
+// painted (TestMain's paint watch). Nil in production, like foldHook.
+var paintHook func(m *Model, tr *pane)
 
 func (m *Model) renderEntry(tr *pane, e *entry, key renderKey) []string {
 	switch e.kind {
