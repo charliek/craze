@@ -172,14 +172,9 @@ func answerNotes(q *agent.QuestionEvent, answers map[string][]string) []string {
 	return out
 }
 
-// answerNote is one question's note: `? <prompt> → ` and the labels of the
-// options ids picks, in their order, each folded onto one line and
-// comma-separated. An id the question does not offer names nothing, and
-// nothing named reads "nothing".
-//
-// Each id is matched after the cap a snapshot puts on every option id
-// (capper.str, as capQuestion applies it), since q's options are the capped
-// ones (noteOutcome): an id over ItemCap still finds the option it picked.
+// answerNote is one question's note: `? <prompt> → ` and what each of ids
+// picks names (pickName), in their order, comma-separated. A pick that names
+// nothing is left out, and nothing named reads "nothing".
 //
 // It stops naming once the note is longer than outcomeNoteCap: capNote keeps
 // none of what would follow, and one long label picked over and over cannot
@@ -194,23 +189,56 @@ func answerNote(qq agent.Question, ids []string) string {
 		if b.Len() > outcomeNoteCap {
 			break
 		}
-		var c capper
-		id = c.str(id)
-		for _, o := range qq.Options {
-			if o.ID == id {
-				if named > 0 {
-					b.WriteString(", ")
-				}
-				b.WriteString(sanitizeLine(o.Label))
-				named++
-				break
-			}
+		name, ok := pickName(qq.Options, id)
+		if !ok {
+			continue
 		}
+		if named > 0 {
+			b.WriteString(", ")
+		}
+		b.WriteString(name)
+		named++
 	}
 	if named == 0 {
 		b.WriteString("nothing")
 	}
 	return b.String()
+}
+
+// pickName is what a pick of id names among opts, which are a question's
+// options as a snapshot carries them (noteOutcome): id is matched after the
+// cap a snapshot puts on every option id (capper.str, as capQuestion applies
+// it), and
+//
+//   - one option whose capped id it is: its label, folded onto one line — an
+//     id cut at ItemCap still finds the option it picked, since the agent's
+//     validator matched the whole id against the offered ones;
+//   - none: nothing (false) — an id the question does not offer;
+//   - two or more: the ellipsis — the pick is ambiguous, since ids that share
+//     their first ItemCap bytes cap to one, and the capped form cannot tell
+//     which of them was picked (plan 032 C4 review r4, finding 2). It names
+//     none of them: the first would word the wrong option's label for a
+//     pick of the second, while the provider got the second.
+//
+// Every rule reads only the capped form, so the engine, every live client and
+// every restored one name a pick alike.
+func pickName(opts []agent.Option, id string) (string, bool) {
+	var c capper
+	id = c.str(id)
+	label, n := "", 0
+	for _, o := range opts {
+		if o.ID != id {
+			continue
+		}
+		if n++; n > 1 {
+			return ellipsis, true
+		}
+		label = o.Label
+	}
+	if n == 0 {
+		return "", false
+	}
+	return sanitizeLine(label), true
 }
 
 // skipNote is what a skipped question draws.

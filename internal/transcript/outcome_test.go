@@ -56,6 +56,9 @@ func TestAnAnsweredQuestionDrawsANotePerQuestion(t *testing.T) {
 			[]string{"? Pick one → A", "? Pick any → nothing"}},
 		{"an option the question does not offer", oneQuestionAsk(), map[string][]string{"q1": {"opt-nope"}},
 			[]string{"? Pick one → nothing"}},
+		{"an id two options share", &agent.QuestionEvent{ID: "ask-1", Questions: []agent.Question{{
+			ID: "q1", Prompt: "Pick one", Options: []agent.Option{{ID: "o", Label: "A"}, {ID: "o", Label: "B"}, {ID: "p", Label: "C"}},
+		}}}, map[string][]string{"q1": {"o", "p"}}, []string{"? Pick one → …, C"}},
 		{"no answers at all", stubQuestion(), nil, []string{"? Pick one → nothing", "? Pick any → nothing"}},
 		{"a request that asks nothing", &agent.QuestionEvent{ID: "ask-1", Title: "Anything?"}, nil, nil},
 		{"text folded onto one line", &agent.QuestionEvent{ID: "ask-1", Questions: []agent.Question{{
@@ -389,10 +392,13 @@ func TestOutcomeNotesSurviveASnapshotAndItsTail(t *testing.T) {
 // one between the opening and the ending above all — it draws, under the one
 // shared entry id, the note the model that folded everything draws, byte for
 // byte: an oversized prompt, label, title or plan name, and an option id the
-// snapshot cut, alike. Each row pins its note; an ask a snapshot carries whole
-// words exactly as it always did. While the ask is open the restored state
-// holds its capped form (Ask.Truncated), so the models are compared once the
-// ending has taken it out of the open set.
+// snapshot cut, alike. Two option ids the snapshot cuts to one head make a
+// pick of either ambiguous in that form: it reads as the ellipsis, never as
+// the first's label (review r4, finding 2), while an id cut to a head no
+// other option shares still names its own. Each row pins its note; an ask a
+// snapshot carries whole words exactly as it always did. While the ask is
+// open the restored state holds its capped form (Ask.Truncated), so the
+// models are compared once the ending has taken it out of the open set.
 func TestOutcomeNotesWordTheAskAsASnapshotCarriesIt(t *testing.T) {
 	pad := strings.Repeat(" ", ItemCap)
 	longID := strings.Repeat("x", ItemCap) + "-yes"
@@ -418,6 +424,16 @@ func TestOutcomeNotesWordTheAskAsASnapshotCarriesIt(t *testing.T) {
 		p.Name = name
 		return p
 	}
+	// files offers a keep and a delete whose ids may share their first
+	// ItemCap bytes, and a short third.
+	shared := strings.Repeat("x", ItemCap)
+	keep, del, apart := shared+"-keep", shared+"-delete", shared[:ItemCap-1]+"y-delete"
+	files := func(keepID, deleteID string) *agent.QuestionEvent {
+		return &agent.QuestionEvent{ID: "ask-1", Questions: []agent.Question{{
+			ID: "q1", Prompt: "Proceed?", AllowMultiple: true,
+			Options: []agent.Option{{ID: keepID, Label: "Keep files"}, {ID: deleteID, Label: "Delete files"}, {ID: "no", Label: "No"}},
+		}}}
+	}
 	head := "? Proceed? → "
 	for _, tc := range []struct {
 		name string
@@ -433,6 +449,11 @@ func TestOutcomeNotesWordTheAskAsASnapshotCarriesIt(t *testing.T) {
 		{"a label past the note's cap", questionOpens(proceed("Proceed?", "yes", longLabel)), answer("yes"),
 			head + longLabel[:outcomeNoteCap-len(ellipsis)-len(head)] + ellipsis},
 		{"an option id past ItemCap", questionOpens(proceed("Proceed?", longID, "Yes")), answer(longID), "? Proceed? → Yes"},
+		{"the second of two option ids a snapshot cuts to one", questionOpens(files(keep, del)), answer(del), "? Proceed? → …"},
+		{"the first of two option ids a snapshot cuts to one", questionOpens(files(keep, del)), answer(keep), "? Proceed? → …"},
+		{"both of two option ids a snapshot cuts to one", questionOpens(files(keep, del)), answer(keep, del), "? Proceed? → …, …"},
+		{"one of two option ids a snapshot cuts to one, and a short one", questionOpens(files(keep, del)), answer(del, "no"), "? Proceed? → …, No"},
+		{"the second of two option ids a snapshot cuts apart", questionOpens(files(keep, apart)), answer(apart), "? Proceed? → Delete files"},
 		{"a skipped question's title cut in a run of spaces", questionOpens(titled("Skip me" + pad + "now")), skip, "? Skip me → skipped"},
 		{"a plan's name cut in a run of spaces", planOpens(named("Ship" + pad + "it")), accept, "plan Ship → accepted"},
 	} {

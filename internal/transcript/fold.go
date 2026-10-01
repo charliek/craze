@@ -305,15 +305,21 @@ func foldAsk(m *Model, ev agent.Event) {
 // The note is worded from the ask exactly as a snapshot carries it (capAsk:
 // every string at its ItemCap head), never from the opening as it came, and
 // the ending's picks are matched against the capped option ids after the same
-// cap (answerNote): a client restored from a snapshot taken while the ask was
+// cap (pickName): a client restored from a snapshot taken while the ask was
 // open holds only that form, so wording from it is what makes the engine,
 // every live client and every restored one draw the same text under the one
-// shared entry id (plan 032 C4 review r3, finding 1). An ask a snapshot
-// carries whole — every real one — words exactly as its opening reads. An ask
-// whose id the snapshot cuts draws nothing: a restored fold holds it under the
-// head, which its ending's id can never find. Each note is then bounded at
+// shared entry id (plan 032 C4 review r3, finding 1). A pick whose capped id
+// is one option's names that option's label; one whose capped id two or more
+// options share — ids alike in their first ItemCap bytes — is ambiguous in
+// that form and reads as the ellipsis, never as any of their labels, which
+// would name the wrong option for a pick of any but the first (review r4,
+// finding 2). An ask a snapshot carries whole, its option ids distinct —
+// every real one — words exactly as its opening reads. An ask whose id the
+// snapshot cuts draws nothing: a restored fold holds it under the head,
+// which its ending's id can never find. Each note is then bounded at
 // outcomeNoteCap (capNote), so an answer that picks one long label many times
-// cannot make the newest entry too large for any snapshot (finding 2).
+// cannot make the newest entry too large for any snapshot (review r3,
+// finding 2).
 func (m *Model) noteOutcome(a Ask, u *agent.AskUpdate, at time.Time) {
 	if u.Outcome != agent.AskAnswered || u.Kind != a.Kind {
 		return
