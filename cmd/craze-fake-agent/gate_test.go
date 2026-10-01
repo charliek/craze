@@ -150,3 +150,59 @@ func TestSigintHoldTurnTwoEndsOnTheGate(t *testing.T) {
 		t.Fatalf("turn 2 stopReason %q, want %q", got, acp.StopEndTurn)
 	}
 }
+
+// TestSigintHoldCancelledTurnDoesNotTakeTheNextGateByte: turn 2 is held and
+// cancelled, turn 3 is held, and one gate byte releases turn 3 as echo. One
+// shared reader owns the FIFO, so the cancelled turn has no reader left to take
+// the byte meant for the turn after it. The gate writer stays open throughout:
+// opening it completes once the first held turn's reader has the FIFO open,
+// and every wait is bounded by pmWait.
+func TestSigintHoldCancelledTurnDoesNotTakeTheNextGateByte(t *testing.T) {
+	fifo := filepath.Join(t.TempDir(), "gate")
+	if err := syscall.Mkfifo(fifo, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CRAZE_FAKE_GATE", fifo)
+	w, id2 := sigintHoldSecondPrompt(t)
+	// Opening the writer blocks until the shared reader has the FIFO open, so
+	// it gets its own bound: a reader that never starts fails here, not at the
+	// package timeout.
+	opened := make(chan *os.File, 1)
+	go func() {
+		f, err := os.OpenFile(fifo, os.O_WRONLY, 0)
+		if err != nil {
+			t.Error(err)
+			close(opened)
+			return
+		}
+		opened <- f
+	}()
+	var f *os.File
+	select {
+	case f = <-opened:
+		if f == nil {
+			t.FailNow()
+		}
+	case <-time.After(pmWait):
+		t.Fatalf("the gate's reader did not open the FIFO within %s", pmWait)
+	}
+	defer f.Close()
+	raw, _ := json.Marshal(map[string]any{"sessionId": fakeSessionID})
+	if err := w.enc.WriteMessage(&acp.Message{Method: acp.MethodSessionCancel, Params: raw}); err != nil {
+		t.Fatal(err)
+	}
+	if got := stopReason(t, w.answerTo(id2, 0)); got != acp.StopCancelled {
+		t.Fatalf("turn 2 stopReason %q, want %q", got, acp.StopCancelled)
+	}
+	id3 := w.send(acp.MethodSessionPrompt, map[string]any{
+		"sessionId": fakeSessionID,
+		"prompt":    []map[string]any{{"type": "text", "text": "three"}},
+	})
+	w.answerTo(id3, 200*time.Millisecond)
+	if _, err := f.Write([]byte{1}); err != nil {
+		t.Fatal(err)
+	}
+	if got := stopReason(t, w.answerTo(id3, 0)); got != acp.StopEndTurn {
+		t.Fatalf("turn 3 stopReason %q, want %q", got, acp.StopEndTurn)
+	}
+}

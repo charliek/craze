@@ -66,7 +66,13 @@ type server struct {
 	promptN   int
 	cancelled atomic.Bool
 	hangWait  chan struct{}
-	config    []map[string]any
+	// gateOnce starts the one shared CRAZE_FAKE_GATE reader sigint-hold's held
+	// turns wait on, and gateRelease carries each byte it reads. One reader,
+	// not one per held turn: a cancelled turn's reader would stay blocked on the
+	// FIFO and could take the byte meant for the next held turn.
+	gateOnce    sync.Once
+	gateRelease chan struct{}
+	config      []map[string]any
 	// loadedID is the session id a session/load asked for. The load scripts
 	// replay on it and every later stream uses it, so a craze that loads some
 	// other id than fakeSessionID still sees its own session.
@@ -735,12 +741,18 @@ func (s *server) sigintHold(id json.RawMessage, text string, n int) {
 		s.reply(id, map[string]any{"stopReason": acp.StopCancelled})
 		return
 	}
-	gate := make(chan struct{})
+	var gate <-chan struct{}
 	if path := os.Getenv("CRAZE_FAKE_GATE"); path != "" {
-		go func() {
-			awaitGate(path)
-			close(gate)
-		}()
+		s.gateOnce.Do(func() {
+			s.gateRelease = make(chan struct{})
+			go func() {
+				for {
+					awaitGate(path)
+					s.gateRelease <- struct{}{}
+				}
+			}()
+		})
+		gate = s.gateRelease
 	}
 	select {
 	case <-ch:
