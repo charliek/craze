@@ -591,6 +591,8 @@ func (s *server) handlePrompt(msg *acp.Message) {
 		s.hang(msg.ID)
 	case "hang-ack":
 		s.hangAck(msg.ID, text)
+	case "sigint-hold":
+		s.sigintHold(msg.ID, text, n)
 	case "followup":
 		s.followup(msg.ID, n)
 	case "tool":
@@ -701,6 +703,56 @@ func (s *server) holdOpen() {
 		return
 	}
 	<-ch
+}
+
+// sigintHold is the script behind V2's sigint-between-turns scenario (plan 032
+// SF-87). Turn 1 is echo. Every later turn holds its session/prompt until
+// session/cancel arrives, which it answers cancelled like hang, or — only with
+// CRAZE_FAKE_GATE set — until the gate's byte arrives, which it answers as echo.
+//
+// A signal sent while craze moves from turn 1 to turn 2 lands at a different
+// point of that race each run: with echo, turn 2 can finish, and turn 3 start,
+// before craze has processed the signal. Holding turn 2 closes it whatever the
+// landing point: the turn cannot end until the cancel the signal causes, so the
+// signal always finds turn 2 in flight and the run always ends in that cancel.
+// The gate is the way out for a harness that wants the turn to finish instead
+// (or for a test that must not wait on a cancel); the cancel path needs no
+// write to it.
+func (s *server) sigintHold(id json.RawMessage, text string, n int) {
+	if n < 2 {
+		s.echo(id, text)
+		return
+	}
+	s.mu.Lock()
+	ch := make(chan struct{})
+	s.hangWait = ch
+	already := s.cancelled.Load()
+	if already {
+		s.hangWait = nil
+	}
+	s.mu.Unlock()
+	if already {
+		s.reply(id, map[string]any{"stopReason": acp.StopCancelled})
+		return
+	}
+	gate := make(chan struct{})
+	if path := os.Getenv("CRAZE_FAKE_GATE"); path != "" {
+		go func() {
+			awaitGate(path)
+			close(gate)
+		}()
+	}
+	select {
+	case <-ch:
+		s.reply(id, map[string]any{"stopReason": acp.StopCancelled})
+	case <-gate:
+		s.mu.Lock()
+		if s.hangWait == ch {
+			s.hangWait = nil
+		}
+		s.mu.Unlock()
+		s.echo(id, text)
+	}
 }
 
 // hangAck is hang, plus one agent-message chunk sent before it blocks. hang by
@@ -938,8 +990,8 @@ func (s *server) tool(id json.RawMessage) {
 // let the turn go on. Opening a FIFO for reading waits for its writer and the
 // read waits for the byte, so the barrier has no delay in it. An empty path
 // (the knob unset), a path that cannot be opened and a writer that closes
-// without writing all return at once. Only tasks uses it, after its first
-// tool_call.
+// without writing all return at once. tasks uses it after its first
+// tool_call, and sigint-hold for its held prompts.
 func awaitGate(path string) {
 	if path == "" {
 		return

@@ -12,8 +12,8 @@ flowchart LR
       engB["engine"]
     end
     hub["hub (owns no sessions)"]
-    hostA -- "registers" --> hub
-    hostB -- "registers" --> hub
+    hub -- "polls (registry)" --> hostA
+    hub -- "polls (registry)" --> hostB
     bridge["craze bridge (stdio pump)"] --> hub
     view["agent view (TUI): the registry + each host's socket (S5); the hub's roster from S4b"] --> hostA
     view --> hostB
@@ -37,7 +37,8 @@ The alternative is a prox-style daemon holding every session as a goroutine.
 It was rejected because:
 
 - A daemon crash or upgrade kills every running agent. With hosts, the hub
-  can die or be replaced and sessions keep running, then re-register.
+  can die or be replaced and sessions keep running; a respawned hub rebuilds
+  its roster from the registry.
 - The agents are already processes (`cursor-agent`, `grok`, `gx`). In-process
   native sessions would share one failure domain: one panic, all sessions.
 - prox's daemon has to demand exact binary version equality on its socket
@@ -57,8 +58,10 @@ arrive in S4a and the hub in S4b (SD-34), speaking the identical protocol.
 changes.
 
 The hub↔host leg is part of that promise: the hub **dials the host's own
-socket once per attached client and splices bytes** (SQ14). Hosts keep only a
-small registration connection to the hub for the roster. Session traffic is
+socket once per attached client and splices bytes** (SQ14). The hub learns
+its hosts from the registry (`~/.cache/craze/hosts/`, whose lifetime flock is
+authoritative liveness) and polls their `sessions.list`; hosts keep no
+connection to it and need no change (SD-37). Session traffic is
 never multiplexed through a hub-side buffer, so the host's per-subscriber
 budget stays end to end, there is no head-of-line blocking across clients,
 and S4b reuses S2's socket server unchanged.
@@ -70,8 +73,8 @@ session-level capabilities and incarnation (a hub fronts heterogeneous hosts;
 an id with unsubscribe, and route notifications by it. The **roster has its
 own epoch and cursor**: a crashed host cannot journal its own removal and
 per-session sequences do not order a machine, so after a hub restart clients
-reseed the roster authoritatively. The hub also needs a registration grace
-before idle exit, and must pass host identity and unknown payload fields
+reseed the roster authoritatively. The hub waits out an idle grace (60 s)
+before exiting, and must pass host identity and unknown payload fields
 through untouched.
 
 **Lifecycle separation comes before the hub, too (SD-28).** Today
@@ -90,13 +93,23 @@ not turning a live TUI process into a daemon.
 ## Paths
 
 ```
-<runtime dir>/                   0700, validated (below)
+<base>/<ns>/                     0700, validated (below); the runtime tree
+  <hostId>.sock                  0600   S2
   hub.sock                       0600   S4b
-  hub.lock                       lifetime flock, prox's and roost's pattern
-  h/<short-id>.sock              0600   S2
-  h/<short-id>.lock              lifetime flock held by the host
+~/.cache/craze/                  the cache tree, fixed per user, found by HOME alone
+  hosts/<hostId>.json            the registry entry; names its socket's absolute path   S2
+  hosts/<hostId>.lock            lifetime flock held by the host   S2
+  locks/<crazeSessionId>.lock    one lock per craze session, never unlinked   S2 (SQ16)
+  hubs/<ns>.lock                 the hub's lifetime flock, never unlinked   S4b
+  hubs/<ns>.json                 the hub's record   S4b
 $CRAZE_HOME/journal/<cwd-slug>/<utc>_<incarnation-id>.jsonl   0600   S1 (SQ1)
 ```
+
+`<base>` is the first usable of `$CRAZE_RUNTIME_DIR`, `$XDG_RUNTIME_DIR/craze`,
+`/run/user/<euid>/craze` (Linux) and `/tmp/craze-<euid>`; `<ns>` keys one
+`CRAZE_HOME` (`internal/rundir`). One hub runs per (HOME, `CRAZE_HOME`
+namespace): its lock and record live in the cache tree because an SSH exec
+finds that by HOME alone, its socket in the runtime base with the hosts'.
 
 **The runtime namespace is an S2 design item, not a detail (SD-27).** Three
 facts make `$CRAZE_HOME/run/host/<session-id>.sock` wrong as written:

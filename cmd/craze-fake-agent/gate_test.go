@@ -1,11 +1,14 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/charliek/craze/internal/acp"
 )
 
 // TestAwaitGateHoldsUntilItsByte is CRAZE_FAKE_GATE's barrier: awaitGate
@@ -42,5 +45,108 @@ func TestAwaitGateHoldsUntilItsByte(t *testing.T) {
 	case <-done:
 	case <-time.After(10 * time.Second):
 		t.Fatal("the gate did not open on its byte")
+	}
+}
+
+// sigintHoldSecondPrompt runs the sigint-hold script over a pipe, answers turn
+// 1 (echo: end_turn with no wait), and returns with turn 2's prompt on the wire.
+func sigintHoldSecondPrompt(t *testing.T) (*pmWire, json.RawMessage) {
+	t.Helper()
+	w := dialPermodel(t, "sigint-hold")
+	w.ok(acp.MethodInitialize, map[string]any{"protocolVersion": acp.ProtocolVersion})
+	w.ok(acp.MethodSessionNew, map[string]any{"cwd": t.TempDir(), "mcpServers": []any{}})
+	resp, _ := w.call(acp.MethodSessionPrompt, map[string]any{
+		"sessionId": fakeSessionID,
+		"prompt":    []map[string]any{{"type": "text", "text": "one"}},
+	})
+	if got := stopReason(t, resp); got != acp.StopEndTurn {
+		t.Fatalf("turn 1 stopReason %q, want %q", got, acp.StopEndTurn)
+	}
+	id := w.send(acp.MethodSessionPrompt, map[string]any{
+		"sessionId": fakeSessionID,
+		"prompt":    []map[string]any{{"type": "text", "text": "two"}},
+	})
+	return w, id
+}
+
+func stopReason(t *testing.T, m *acp.Message) string {
+	t.Helper()
+	if m.Error != nil {
+		t.Fatalf("refused: %+v", m.Error)
+	}
+	var r struct {
+		StopReason string `json:"stopReason"`
+	}
+	if err := json.Unmarshal(m.Result, &r); err != nil {
+		t.Fatal(err)
+	}
+	return r.StopReason
+}
+
+// answerTo reads frames until the answer to id. With quiet > 0 it instead
+// requires that no answer arrives within quiet, and returns nil.
+func (w *pmWire) answerTo(id json.RawMessage, quiet time.Duration) *acp.Message {
+	w.t.Helper()
+	var timeout <-chan time.Time
+	if quiet > 0 {
+		timeout = time.After(quiet)
+	}
+	for {
+		select {
+		case msg, ok := <-w.frames:
+			if !ok {
+				w.t.Fatal("the fake closed the wire")
+			}
+			if msg.IsResponse() && string(msg.ID) == string(id) {
+				if quiet > 0 {
+					w.t.Fatalf("the held prompt was answered early: %s", msg.Result)
+				}
+				return msg
+			}
+		case <-timeout:
+			return nil
+		case <-time.After(pmWait):
+			w.t.Fatalf("no answer within %v", pmWait)
+		}
+	}
+}
+
+// TestSigintHoldTurnTwoEndsOnCancel: turn 2 is still unanswered after a quiet
+// stretch, and session/cancel answers it cancelled with no gate involved, so a
+// signal landing anywhere in craze's between-turns race still finds it in
+// flight.
+func TestSigintHoldTurnTwoEndsOnCancel(t *testing.T) {
+	t.Setenv("CRAZE_FAKE_GATE", "")
+	w, id := sigintHoldSecondPrompt(t)
+	w.answerTo(id, 200*time.Millisecond)
+	raw, _ := json.Marshal(map[string]any{"sessionId": fakeSessionID})
+	if err := w.enc.WriteMessage(&acp.Message{Method: acp.MethodSessionCancel, Params: raw}); err != nil {
+		t.Fatal(err)
+	}
+	if got := stopReason(t, w.answerTo(id, 0)); got != acp.StopCancelled {
+		t.Fatalf("turn 2 stopReason %q, want %q", got, acp.StopCancelled)
+	}
+}
+
+// TestSigintHoldTurnTwoEndsOnTheGate: with CRAZE_FAKE_GATE set, the gate's byte
+// releases the held turn as an ordinary echo.
+func TestSigintHoldTurnTwoEndsOnTheGate(t *testing.T) {
+	fifo := filepath.Join(t.TempDir(), "gate")
+	if err := syscall.Mkfifo(fifo, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CRAZE_FAKE_GATE", fifo)
+	w, id := sigintHoldSecondPrompt(t)
+	f, err := os.OpenFile(fifo, os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	w.answerTo(id, 200*time.Millisecond)
+	if _, err := f.Write([]byte{1}); err != nil {
+		t.Fatal(err)
+	}
+	if got := stopReason(t, w.answerTo(id, 0)); got != acp.StopEndTurn {
+		t.Fatalf("turn 2 stopReason %q, want %q", got, acp.StopEndTurn)
 	}
 }
