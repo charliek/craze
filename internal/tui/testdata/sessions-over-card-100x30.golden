@@ -1,0 +1,30 @@
+ sessions  9 running                             ! 3 need you   ✳ 2 working   ✗ 1 failed   ○ 2 idle 
+                                                                                                    
+needs you 3 ────────────────────────────────────────────────────────────────────────────────────────
+❯ ! write the v0.1.0 release no…  question: Pick one                     native  craze · here     1m
+  ! fix the roost tab rename      permission: cargo test -p roost-ipc    grok    roost            2m
+  ! add persistence to the read…  question: Which storage?               native  lumen           14m
+                                                                                                    
+working 2 ──────────────────────────────────────────────────────────────────────────────────────────
+  ✳ new session                   Starting…                              grok    shed             3s
+  ✳ move queue edits onto remot…  go test ./internal/remote/...          cursor  craze           12m
+                                                                                                    
+failed 1 ───────────────────────────────────────────────────────────────────────────────────────────
+  ✗ bump the flutter deps         error: 402 Payment Required from ope…  native  spendwise        3h
+                                                                                                    
+idle 2 ─────────────────────────────────────────────────────────────────────────────────────────────
+  ○ triage the flaky pty test     Found it: os.NewFile(0) races the pt…  grok    craze            1h
+  ○ port the docs site            waiting for a prompt · craze 0.0.9     gx      folio              
+                                                                                                    
+unreachable 1 ──────────────────────────────────────────────────────────────────────────────────────
+  ? spike the prox sweep          not answering                          native  prox            20m
+                                                                                                    
+  ▸ saved · 3 not running ──────────────────────────────────────────────────────────────────────────
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+────────────────────────────────────────────────────────────────────────────────────────────────────
+ enter back to it · ctrl+x stop · ctrl+s by directory · ← back                                      

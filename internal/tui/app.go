@@ -2822,8 +2822,17 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	// A card owns the keyboard: everything below this, Ctrl+T / Ctrl+G /
 	// Ctrl+O and the agent-row arrows included, is out of reach until it is
-	// answered.
+	// answered. The one exception is an unmodified ← where there is a session
+	// list (SF-99, plan 032 §3.2 C3): it leaves the session for the list with
+	// the card unanswered. The ask stays open on the host, the list shows the
+	// session under "needs you", and the card — its progress, the draft under
+	// it and the sub-agent view it is over — is all still here on the way
+	// back (leaveSessions touches none of them). No card binds ←, and Alt+←
+	// stays the card's (swallowed): only the bare key passes through.
 	if m.cardOpen() {
+		if msg.Type == tea.KeyLeft && !msg.Alt && m.sessions != nil {
+			return m.openSessions()
+		}
 		return m.handleCardKey(msg)
 	}
 

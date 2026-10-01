@@ -245,6 +245,7 @@ off.
 | `Backspace` / `Delete` on a queued row | cancel it |
 | `Ctrl+L` on a queued row | send it now instead of the running turn (it asks first) |
 | `←` on an empty composer, `/sessions` | open the [session list](#session-list) — only when sessions run in detached hosts (the default); under `CRAZE_DETACH=0` the key reaches the composer as it always has |
+| `←` with a [card](#cards) up | open the session list with the card left unanswered: the ask stays open, and the card is there again when you come back. A card lets this key through only where there is a list; `Alt+←` stays the card's |
 | `Esc` or `←` inside the sub-agent view | return to the main transcript; entering or leaving cancels nothing |
 | `Tab` inside the sub-agent view | switch to the next sub-agent |
 | `PgUp` / `PgDn` | scroll the transcript, or page the `/help` box; page the slash menu instead when it is open — the menu takes priority over both |
@@ -598,18 +599,21 @@ Keys inside the view: `Esc` and `←` return; `↑`/`↓` scroll it a line,
 unreachable here); `Ctrl+O` toggles detail and `Ctrl+Y` copies from it, both
 as outside; `Ctrl+C` still cancels the main turn and the view stays open.
 Typing, pasting and the slash menu are inert inside the view, and a card
-still lands on top and owns the keyboard until it is answered.
+still lands on top and owns the keyboard until it is answered — `←` aside,
+which opens the [session list](#session-list) and comes back to the view
+and its card (see [Cards](#cards)).
 
 ## Session list
 
-`←` on an empty composer, or `/sessions`, replaces the screen with every
-session of yours running on this machine, whatever its directory, and the
-saved ones that are not running. It exists only when sessions run in detached
-hosts (the default); under `CRAZE_DETACH=0`, `detach = false` or with the
-control socket off there is no list, no `/sessions` and no `←` binding (and
-`/help` has no line for it). The session you came from stays attached behind
-the list — its turn keeps running, a card it raises waits for you — and the
-cursor starts on its row. If it ends while the list is up (another client's
+`←` on an empty composer (or with a [card](#cards) up), or `/sessions`,
+replaces the screen with every session of yours running on this machine,
+whatever its directory, and the saved ones that are not running. It exists
+only when sessions run in detached hosts (the default); under
+`CRAZE_DETACH=0`, `detach = false` or with the control socket off there is no
+list, no `/sessions` and no `←` binding (and `/help` has no line for it). The
+session you came from stays attached behind the list — its turn keeps running,
+a card it raises (or the one you left it with) waits for you — and the cursor
+starts on its row. If it ends while the list is up (another client's
 `/exit`, a close from the list, the idle timeout), craze stays on the list and
 its row stays, `· ended`, for as long as the list is up, even once its host
 has gone; a later run of the same session is a row of its own.
@@ -1064,6 +1068,21 @@ A blocking request from the agent is a card, and the card owns the keyboard and
 the mouse while it is up: `Ctrl+T`, `Ctrl+G`, `Ctrl+O`, the arrows and the wheel
 all do nothing until it is answered. `Ctrl+C` and `Ctrl+D` still work. Cards
 queue, and only the one on top is drawn.
+
+`←` is the one exception among those keys (`Alt+←` is not), and only where
+there is a [session list](#session-list): it opens the list and leaves the card
+unanswered. The ask stays open on the session's host, and the list shows the
+session under **needs you**. `Esc` or `←` from the list comes back to the same
+card — the question you were on and what you had picked — with your draft
+still under it, and inside the [sub-agent view](#sub-agent-view) if that is
+where you were. Opening the session again later, from another one, shows the
+card again (a question card starts again from its first question).
+
+The [tab title](#tab-title) and a herdr pane or roost tab report the session
+on screen. While the list is up over the session they still report its card
+(the tab's `⚠`, herdr's `blocked`, roost's `needs input`); once you open
+another session they report that one instead, and the ask you left open is
+reported again only when you come back to it.
 
 | Card | Keys |
 |---|---|
