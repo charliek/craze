@@ -120,6 +120,22 @@ func (rg *hubRig) until(what string, pred func(roster.Snapshot) bool) (roster.Sn
 	}
 }
 
+// first waits for a published Snapshot pred holds for and answers the
+// earliest one: what the poller published first, however far it has gone
+// since — until answers the latest, which an attempt that came back meanwhile
+// may already have moved past.
+func (rg *hubRig) first(what string, pred func(roster.Snapshot) bool) roster.Snapshot {
+	rg.t.Helper()
+	rg.until(what, pred)
+	for _, s := range rg.published() {
+		if pred(s) {
+			return s
+		}
+	}
+	rg.t.Fatalf("%s: the snapshot until found is gone", what)
+	return roster.Snapshot{}
+}
+
 // polledIn is a predicate: a Snapshot of run with every id listed, reachable
 // and polled.
 func polledIn(run uint64, ids ...string) func(roster.Snapshot) bool {
@@ -192,8 +208,7 @@ func TestAHubRosterPollsOnlyWhileARunIsOpen(t *testing.T) {
 	rg.r.Pause()
 	rg.tick() // paused again
 	rg.r.Resume(2)
-	_, first := rg.until("run 2's first snapshot", func(s roster.Snapshot) bool { return s.Run == 2 })
-	if got := rg.published()[first]; row(got, a) == nil || row(got, a).Polled || row(got, b).Polled {
+	if got := rg.first("run 2's first snapshot", func(s roster.Snapshot) bool { return s.Run == 2 }); row(got, a) == nil || row(got, a).Polled || row(got, b).Polled {
 		t.Fatalf("run 2's first snapshot already says its rows were polled in it: %+v", got.Running)
 	}
 	rg.until("run 2 polled both", polledIn(2, a, b))
@@ -308,16 +323,14 @@ func TestAHostInBackoffIsPolled(t *testing.T) {
 	rg.until("run 1: unreachable, polled", unreachablePolled(1))
 	rg.r.Pause()
 	rg.r.Resume(2)
-	_, first := rg.until("run 2's first snapshot", func(s roster.Snapshot) bool { return s.Run == 2 })
-	if r := row(rg.published()[first], id); !r.Polled {
+	if r := row(rg.first("run 2's first snapshot", func(s roster.Snapshot) bool { return s.Run == 2 }), id); !r.Polled {
 		t.Fatalf("a host waiting out its backoff is not polled at its run's start: %+v", r)
 	}
 
 	rg.clk.advance(2 * time.Second) // past the first backoff (1 s)
 	rg.r.Pause()
 	rg.r.Resume(3)
-	_, first = rg.until("run 3's first snapshot", func(s roster.Snapshot) bool { return s.Run == 3 })
-	if r := row(rg.published()[first], id); r.Polled {
+	if r := row(rg.first("run 3's first snapshot", func(s roster.Snapshot) bool { return s.Run == 3 }), id); r.Polled {
 		t.Fatalf("a host past its backoff is polled at its run's start, before it was asked: %+v", r)
 	}
 	rg.until("run 3: asked again, unreachable, polled", unreachablePolled(3))
