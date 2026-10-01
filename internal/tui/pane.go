@@ -103,9 +103,21 @@ type paintWork struct {
 func newSubPane() *pane { return &pane{entryCap: subMaxEntries, textBudget: subTextBudget} }
 
 // reset empties the pane in place, keeping its caps: it is the same *pane
-// m.subs and m.cur() hold, so it is emptied rather than replaced.
+// m.subs and m.cur() hold, so it is emptied rather than replaced. The rows
+// the last paint drew stay the drawn ones until the next paint, which makes
+// every span again (reshaped): they are what the viewport still shows, so
+// the hit test, the highlight and the copy read them until then — a replay's
+// cadence can leave the emptied pane unpainted (paintDue). The work counted
+// stays too.
 func (t *pane) reset() {
-	*t = pane{entryCap: t.entryCap, textBudget: t.textBudget, emptied: t.emptied + 1}
+	*t = pane{
+		entryCap:   t.entryCap,
+		textBudget: t.textBudget,
+		emptied:    t.emptied + 1,
+		work:       t.work,
+		drawn:      t.drawn,
+		reshaped:   t.drawn != nil,
+	}
 }
 
 func (m *Model) cur() *pane {

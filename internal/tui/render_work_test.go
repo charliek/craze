@@ -146,8 +146,11 @@ func proseChunk(i int) string {
 // 032 §3.3 C6): while the model replays, finish paints the drawn pane on every
 // 256th event folded and on a forced refresh — a resize, Ctrl+O, a theme, a
 // view switch, a press into the transcript, a restore, the replay's failure or
-// its end — and
-// on nothing else: not on a tick, not on an event between boundaries.
+// its end — and on nothing else: not on a tick, not on an event between
+// boundaries. While the replay runs only the paints are counted: what a frame
+// shows is read once the replay has ended or failed, and what the boundaries
+// and the forced refreshes draw is held to painting every event by
+// TestTheReplayCadenceDrawsWhatPaintingEveryEventDraws.
 func TestAReplayPaintsEvery256thEventAndWhenForced(t *testing.T) {
 	// step applies msg and reports whether the main pane was painted.
 	step := func(t *testing.T, m *Model, msg tea.Msg) bool {
@@ -180,14 +183,7 @@ func TestAReplayPaintsEvery256thEventAndWhenForced(t *testing.T) {
 
 	t.Run("the cadence and the forced refreshes", func(t *testing.T) {
 		m, folded, line := start(t)
-		replayTo(t, &m, &folded, &line, replayPaintEvery-1)
-		if v := plainView(m); strings.Contains(v, "line ") {
-			t.Fatalf("a line was drawn before the first boundary:\n%s", v)
-		}
 		replayTo(t, &m, &folded, &line, replayPaintEvery)
-		if v := plainView(m); !strings.Contains(v, "line "+strconv.Itoa(line)) {
-			t.Fatalf("the boundary did not draw line %d:\n%s", line, v)
-		}
 		if step(t, &m, tickMsg{gen: m.tickGen}) {
 			t.Fatal("a tick painted mid-replay")
 		}
@@ -234,8 +230,8 @@ func TestAReplayPaintsEvery256thEventAndWhenForced(t *testing.T) {
 			if !f.do(&m) {
 				t.Fatalf("%s did not paint mid-replay", f.name)
 			}
-			if v := plainView(m); !strings.Contains(v, "line "+strconv.Itoa(line)) {
-				t.Fatalf("%s did not draw line %d:\n%s", f.name, line, v)
+			if m.cur().dirty {
+				t.Fatalf("%s left the drawn pane unpainted", f.name)
 			}
 		}
 		// The forced refreshes leave the cadence where it was.

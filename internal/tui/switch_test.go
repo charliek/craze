@@ -1289,7 +1289,8 @@ var (
 	tuiFields = []string{
 		"theme", "vp", "input", "yolo", "width", "height", "ready", "expanded", "quitting", "mouseEnabled",
 		"lay", "layouts", "mouseAll", "tickGen", "tickLive", "tickFast", "spinFrame", "hiddenRetryLive",
-		"clock", "frozen", "frameStart", "terminalTitle", "lastTitle", "term", "shell", "owner", "exit",
+		"clock", "paintEveryEvent", "frozen", "frameStart", "terminalTitle", "lastTitle", "term", "shell",
+		"owner", "exit",
 		"host", "lastHost", "viewer", "sessionIndex", "crazeID", "resume", "loadSession", "claimSession",
 		"refuseLoad", "onEngine", "providerLocked", "persistProvider", "fallbackDefault", "pickedExplicit",
 		"providerDefault", "providers", "newSession", "spawnNew", "spawnLoad", "cont", "sessions", "sessList",

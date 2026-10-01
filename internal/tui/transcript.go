@@ -311,6 +311,23 @@ func (m *Model) refreshViewport() {
 	m.setViewportContent(m.vp.Height == 0 || m.vp.AtBottom())
 }
 
+// catchUp paints the drawn pane when a replay's cadence left it unpainted
+// (paintDue), and is what a user gesture that reads or moves the drawn rows
+// runs first: a scroll, a press, a drag, a release, a double-click, Ctrl+Y.
+// Painting every event, as craze did before plan 032 C6, the pane was never
+// dirty when a gesture came; so the gesture acts on the rows it would have
+// acted on then, and the paint clears a selection made over the rows the
+// cadence held back, as that paint on the event did. A scroll decided on the
+// rows left unpainted would leave a different place to stick to the bottom
+// from, and a selection extended or copied over them would be text no longer
+// on the screen once it is painted. Outside a replay the pane the gesture
+// meets has always been painted (finish), and this does nothing.
+func (m *Model) catchUp() {
+	if m.cur().dirty {
+		m.refreshViewport()
+	}
+}
+
 func (m *Model) storeViewport(tr *pane) {
 	tr.yOffset = m.vp.YOffset
 	tr.atBottom = m.vp.AtBottom()

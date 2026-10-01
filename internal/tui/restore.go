@@ -149,8 +149,15 @@ func (m *Model) applyRestore(r restoreMsg) bool {
 	m.rebuildPanes()
 	// Every pane is made anew, as a view switch makes one: painted now even
 	// while a replay runs (paintDue), so a client that attaches mid-replay
-	// shows what the snapshot holds at once.
+	// shows what the snapshot holds at once. A restore that adopts an
+	// incarnation the model did not hold begins the replay's count again: the
+	// events it counted were another session's (or none), and the replay this
+	// one is in counts from here. One of the same incarnation is the same
+	// replay going on, and keeps its count.
 	m.paintNow = true
+	if r.snap.Incarnation != held {
+		m.replayFolded = 0
+	}
 	if restoreHook != nil {
 		restoreHook(m, r.snap)
 	}

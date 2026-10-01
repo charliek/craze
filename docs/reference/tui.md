@@ -113,8 +113,9 @@ replies) and ends with a `restored` note marking the seam between the old
 session's history and the live one. A long resume draws in steps of 256
 events: while the replay runs, the transcript is redrawn on every 256th
 replayed event rather than on each one — and at once on a resize, a theme
-change, `Ctrl+O`, a switch of view or a click into the transcript — and in
-full when the replay ends. Once restored, the rule above the
+change, `Ctrl+O`, a switch of view, a scroll, a click, a drag or a copy — and
+in full when the replay ends. Scrolled up from the bottom, you see every event
+drawn as it lands. Once restored, the rule above the
 composer shows the row's stored title (see [`/rename`](#slash-commands))
 instead of `craze`.
 
