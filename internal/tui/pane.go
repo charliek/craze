@@ -61,6 +61,7 @@ type pane struct {
 	// has been seen in, from the tool entries this pane was given.
 	pathDirs map[string]map[string]struct{}
 	renders  int
+	work     paintWork
 	// drawn is the rows the last paint drew (rowIndex), nil before the first
 	// paint and after one with no width. reshaped says the list changed shape
 	// since — a row left from the front or the middle, or all of them — so the
@@ -85,6 +86,17 @@ type pane struct {
 	// rebuild — which is what the parity test (A11) reads to know that the rows
 	// appended before it are no longer this pane's to show.
 	emptied int
+}
+
+// paintWork is what painting a pane has cost, counted rather than timed so a
+// test can hold it to a bound on any machine (plan 032 §3.3 C6): the markdown
+// source bytes the renderer read (a resumed render reads only what follows its
+// checkpoint), the row spans paint assembled (only those from the first entry
+// that changed), and the paints. Three additions per paint; only tests read it.
+type paintWork struct {
+	mdBytes int
+	spans   int
+	paints  int
 }
 
 // newSubPane is a sub-agent's pane, under the tighter caps.
@@ -413,6 +425,8 @@ func (t *pane) detach() {
 		if !r.id.IsZero() {
 			r.id = transcript.EntryID{}
 			r.local = true
+			// Its text grows no more: no generation, no checkpoint.
+			r.gen, r.md = 0, nil
 		}
 	}
 	t.ids = nil

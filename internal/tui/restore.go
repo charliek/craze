@@ -147,6 +147,10 @@ func (m *Model) applyRestore(r restoreMsg) bool {
 	m.foldIn = in
 	m.shared = transcript.Restore(r.snap, sharedOptions(in.now, in.errorText, m.hiddenAsks()))
 	m.rebuildPanes()
+	// Every pane is made anew, as a view switch makes one: painted now even
+	// while a replay runs (paintDue), so a client that attaches mid-replay
+	// shows what the snapshot holds at once.
+	m.paintNow = true
 	if restoreHook != nil {
 		restoreHook(m, r.snap)
 	}

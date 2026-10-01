@@ -1301,7 +1301,8 @@ var (
 	sessionFields = []string{
 		"eng", "cmdSeq", "chains", "engErr", "cwd", "model", "status", "err", "startErr", "startInc", "git",
 		"branch", "sessStart", "hostPerm", "hostStart", "shared", "foldIn", "main", "subs", "viewing",
-		"tombstone", "started", "replaying", "sel", "pressed", "clickPos", "clickAt", "clicks", "copyNote",
+		"tombstone", "started", "replaying", "replayFolded", "paintNow", "sel", "pressed", "clickPos", "clickAt",
+		"clicks", "copyNote",
 		"copyUntil", "cards", "cardMask", "cardMasking", "hiddenRetry", "snap", "queue",
 		"sendNowArmed", "ov", "modeInFlight", "modeGen", "modeRev", "modelRev", "configRev", "dialog", "mdlg",
 		"helpTop", "applyGen", "themeSel", "themeNames", "themePrev", "slashSel", "slashTop", "slashKey",

@@ -387,12 +387,14 @@ func TestReplayRendersTheRestoredTranscript(t *testing.T) {
 	if got := texts(m, entryThought); len(got) != 1 {
 		t.Fatalf("thought entries %q", got)
 	}
-	if got := toolRows(m); len(got) != 1 || !strings.Contains(got[0], "List Directory") {
-		t.Fatalf("tool rows %q", got)
-	}
 	// The last replayed thought must not be left open under the note, so the
 	// bracket's end breaks the stream before it writes.
 	m = feed(t, m, replayEvent(agent.ReplayEnd))
+	// What the rows draw is read once the replay has ended: while it runs the
+	// pane is painted every 256 events (paintDue), and these are four.
+	if got := toolRows(m); len(got) != 1 || !strings.Contains(got[0], "List Directory") {
+		t.Fatalf("tool rows %q", got)
+	}
 	if got := texts(m, entryNote); len(got) != 1 || got[0] != restoredNote {
 		t.Fatalf("notes %q, want one %q", got, restoredNote)
 	}

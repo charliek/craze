@@ -1005,6 +1005,7 @@ func (t *Transcript) restoreRun(e *Entry, tailCut bool) {
 	if cut {
 		t.runLen = t.streamCap + 1
 	}
+	t.newTailGen()
 	e.Text = ""
 	e.Streaming = true
 	e.Cut = t.runCut()

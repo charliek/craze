@@ -202,5 +202,6 @@ func (m *Model) paint(tr *pane) *rowIndex {
 		tail = append(tail, rowSpan{e: e, rows: e.rendered, start: start})
 		start += len(e.rendered)
 	}
+	tr.work.spans += len(tail)
 	return &rowIndex{base: base, tail: tail, total: start, key: key, trimmed: tr.trimmed}
 }

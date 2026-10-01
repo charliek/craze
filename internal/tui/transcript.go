@@ -100,6 +100,13 @@ type entry struct {
 	// tail (the recorded approximation).
 	cont     bool
 	contFrom int
+	// gen is text's append generation while the row shows the open stream
+	// entry (transcript.Transcript.TailGen), and 0 otherwise: under one
+	// generation the text only ever grows by appends. md is where the next
+	// render of an assistant row's text can resume (mdCheckpoint), nil for
+	// any other row and dropped when its entry closes (show).
+	gen uint64
+	md  *mdCheckpoint
 
 	// rendered is never written to once it is set: a render makes a new
 	// slice, which is what lets a paint's rowIndex hold it rather than copy it.
@@ -141,10 +148,21 @@ func kindOf(k transcript.Kind) entryKind {
 // marks. An error entry's text is the error's, which the model read through
 // Options.ErrText. A continuation keeps its own At and shows the text from its
 // offset. r is re-rendered at the next paint.
+//
+// The open stream entry's text comes with its append generation (gen), which
+// is what lets the render resume rather than start over (mdCheckpoint); any
+// other entry's has none, so a row whose entry has closed drops its checkpoint
+// here. A continuation is a row of its own, so it starts with none, and its
+// text — the run's from a fixed offset — grows by appends under the run's
+// generation as long as the run's does: once the run is past the cap the row
+// shows the whole tail, and that chunk changed the generation.
 func (r *entry) show(e *transcript.Entry, tr *transcript.Transcript) {
-	text := e.Text
+	text, gen := e.Text, uint64(0)
 	if e.Streaming {
-		text = tr.Tail()
+		text, gen = tr.TailGen()
+	}
+	if r.gen = gen; gen == 0 {
+		r.md = nil
 	}
 	at := e.At
 	if r.cont {
@@ -315,6 +333,7 @@ func (m *Model) setViewportContent(stick bool) {
 	}
 	// The canonical rows: exactly what the viewport is about to hold, which
 	// the hit test, the highlight and the copy read too.
+	tr.work.paints++
 	tr.drawn = m.paint(tr)
 	if paintHook != nil {
 		paintHook(m, tr)
@@ -345,7 +364,13 @@ func (m *Model) renderEntry(tr *pane, e *entry, key renderKey) []string {
 		}
 		return hangingRowsStyled(e.text, "❯ ", "  ", key.width, markSt, contSt, textSt)
 	case entryAssistant:
-		return renderMarkdown(e.text, key.width, m.theme)
+		if e.gen == 0 {
+			tr.work.mdBytes += len(e.text)
+			return renderMarkdown(e.text, key.width, m.theme)
+		}
+		rows, parsed := renderStreamingMarkdown(e.text, key.width, m.theme, e.gen, &e.md)
+		tr.work.mdBytes += parsed
+		return rows
 	case entryThought:
 		return m.thoughtRows(e, key)
 	case entryTool:

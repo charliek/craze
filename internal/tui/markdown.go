@@ -2,6 +2,7 @@ package tui
 
 import (
 	"regexp"
+	"slices"
 	"strings"
 	"unicode"
 
@@ -35,39 +36,148 @@ func renderMarkdown(text string, width int, th Theme) []string {
 		return nil
 	}
 	r := mdRenderer{width: width, th: th}
-	lines := strings.Split(strings.TrimRight(text, "\n"), "\n")
+	r.run(text, 0, false)
+	return r.trimTrailingBlank()
+}
+
+// mdCheckpoint is a place where a later render of the same growing text can
+// pick up from where this one stood (plan 032 §3.3 C6): the text's append
+// generation, the source length before the line the render resumes at, the
+// rows written before that line — untrimmed, and with no spare capacity, so
+// the resumed render's first row copies them rather than writing into an array
+// rows already drawn still share — and the width and theme they were drawn at.
+//
+// # Why resuming is byte-identical
+//
+// The main loop (run) carries nothing from one block to the next but the rows
+// written (out) and the paragraph being gathered (para); and it reads the
+// source forwards only. So at the top of the loop, with para empty, the rows
+// still to come depend only on the lines from there on and on out — read back
+// only by blank(), which looks at the last row, and by trimTrailingBlank at the
+// end, which is why out is kept untrimmed. Rendering those lines with out as
+// it stood is the same render, provided nothing the loop read to get there
+// can change. The text only grows by appends while its generation holds
+// (transcript.Transcript.TailGen), so what can change is the last line — the
+// unterminated tail — and a checkpoint is taken only where every line the loop
+// has read to reach it is complete, followed by a "\n". The furthest the loop
+// reads before arriving at line c is c itself, through its look-aheads:
+//
+//   - a paragraph line i is tested with isTable(lines, i), which reads line
+//     i+1 — a line that will not be the table's delimiter yet may become one
+//     — so a paragraph that ended at c-1 read line c;
+//   - a table reads its rows until the line that ends it, and returns the line
+//     before it: a table that ended at c-1 read line c, which may still grow
+//     into a row (`| a |`, `| - |`, `long` and then ` |`);
+//   - a fence — on its own, or owned by a list item — reads up to its closing
+//     marker and returns that line, so one closed at c-1 read nothing past it,
+//     and one still open reads every line and leaves no line c at all (its
+//     marker, arriving in pieces, is the tail until it is whole);
+//   - headings, rules, quotes, blanks and list items read their own line.
+//
+// So the rule is that line c itself is complete: c is not the source's last
+// line when the source is split at every "\n" (c ≤ len(lines) − 2 for those
+// lines, whose last element is the unterminated tail). Under it, a resumed
+// render equals a full one (TestStreamingMarkdownResumesByteIdentical).
+//
+// # What this does not make linear (SF-105)
+//
+// A checkpoint sits only between blocks, at the start of the block before the
+// one still growing, so a resumed render reads the last two blocks or so: text
+// of many blocks costs about the same per chunk however long it gets. A single
+// growing block — one long paragraph, a table, an unterminated fence — has no
+// boundary inside it, and is rendered whole on every render: live, on every
+// chunk, up to the stream cap's 64 KiB (~13–15 ms a render there); during a
+// replay, only on the paints the replay's cadence makes (finish), every 256
+// events. Once the run is past the cap its head moves with every chunk, the
+// generation with it, and every render is a full one.
+type mdCheckpoint struct {
+	gen   uint64
+	off   int
+	out   []string
+	width int
+	theme string
+}
+
+// renderStreamingMarkdown is renderMarkdown for the text of a streaming entry
+// at append generation gen (gen > 0): it resumes from *cp when *cp is this
+// text's — the generation, width and theme it was taken at, and a text still
+// longer than its source length — and otherwise renders from the top; either
+// way it leaves in *cp the furthest checkpoint the render passed, nil when it
+// passed none. parsed is how many bytes of text the renderer read, the pane's
+// work counter.
+func renderStreamingMarkdown(text string, width int, th Theme, gen uint64, cp **mdCheckpoint) (rows []string, parsed int) {
+	if width <= 0 {
+		*cp = nil
+		return nil, 0
+	}
+	r := mdRenderer{width: width, th: th}
+	from := 0
+	if c := *cp; c != nil && c.gen == gen && c.width == width && c.theme == th.Name && len(text) > c.off {
+		from, r.out = c.off, c.out
+	}
+	off, n := r.run(text, from, true)
+	*cp = nil
+	if off > 0 {
+		*cp = &mdCheckpoint{gen: gen, off: off, out: slices.Clip(r.out[:n]), width: width, theme: th.Name}
+	}
+	return r.trimTrailingBlank(), len(text) - from
+}
+
+// run is the main loop over text from byte from, which is 0 or a checkpoint's
+// source length. With record set it returns the furthest checkpoint it
+// passed — the source length at it and how many rows out held there — and an
+// off of 0 when it passed none past the start (mdCheckpoint has the rule).
+// The paragraph left gathering at the end is flushed; the trailing blank rows
+// are the caller's to trim.
+func (r *mdRenderer) run(text string, from int, record bool) (off, rows int) {
+	lines := strings.Split(strings.TrimRight(text[from:], "\n"), "\n")
+	at := from // the source offset of lines[i]
 	for i := 0; i < len(lines); i++ {
-		ln := strings.TrimRight(lines[i], " \t")
-		if f := fenceRe.FindStringSubmatch(ln); f != nil {
-			r.flush()
-			i = r.fence(lines, i, f[1], f[2], "")
-			continue
+		if record && len(r.para) == 0 && at > 0 && at+len(lines[i]) < len(text) {
+			off, rows = at, len(r.out)
 		}
-		switch {
-		case strings.TrimSpace(ln) == "":
-			r.flush()
-			r.blank()
-		case headingRe.MatchString(ln):
-			r.flush()
-			r.heading(ln)
-		case isRule(ln):
-			r.flush()
-			r.rule()
-		case quoteRe.MatchString(ln):
-			r.flush()
-			r.quote(ln)
-		case bulletRe.MatchString(ln) || numberRe.MatchString(ln):
-			r.flush()
-			i = r.list(lines, i)
-		case isTable(lines, i):
-			r.flush()
-			i = r.table(lines, i)
-		default:
-			r.para = append(r.para, strings.TrimSpace(ln))
+		last := r.block(lines, i)
+		for ; i < last; i++ {
+			at += len(lines[i]) + 1
 		}
+		at += len(lines[i]) + 1
 	}
 	r.flush()
-	return r.trimTrailingBlank()
+	return off, rows
+}
+
+// block renders the block that starts at line i, and returns the index of its
+// last line: i itself, or further for a fence, a table, or a list item that
+// owns a fence. A paragraph line is gathered, not written (flush).
+func (r *mdRenderer) block(lines []string, i int) int {
+	ln := strings.TrimRight(lines[i], " \t")
+	if f := fenceRe.FindStringSubmatch(ln); f != nil {
+		r.flush()
+		return r.fence(lines, i, f[1], f[2], "")
+	}
+	switch {
+	case strings.TrimSpace(ln) == "":
+		r.flush()
+		r.blank()
+	case headingRe.MatchString(ln):
+		r.flush()
+		r.heading(ln)
+	case isRule(ln):
+		r.flush()
+		r.rule()
+	case quoteRe.MatchString(ln):
+		r.flush()
+		r.quote(ln)
+	case bulletRe.MatchString(ln) || numberRe.MatchString(ln):
+		r.flush()
+		return r.list(lines, i)
+	case isTable(lines, i):
+		r.flush()
+		return r.table(lines, i)
+	default:
+		r.para = append(r.para, strings.TrimSpace(ln))
+	}
+	return i
 }
 
 type mdRenderer struct {

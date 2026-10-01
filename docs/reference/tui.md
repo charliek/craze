@@ -110,7 +110,11 @@ Loading a row is a **replay**, not a fresh start. Status row 1 reads
 agent has otherwise answered the initial handshake. The replay renders as
 ordinary transcript entries (the user's prompt, thoughts, tool rows,
 replies) and ends with a `restored` note marking the seam between the old
-session's history and the live one. Once restored, the rule above the
+session's history and the live one. A long resume draws in steps of 256
+events: while the replay runs, the transcript is redrawn on every 256th
+replayed event rather than on each one — and at once on a resize, a theme
+change, `Ctrl+O`, a switch of view or a click into the transcript — and in
+full when the replay ends. Once restored, the rule above the
 composer shows the row's stored title (see [`/rename`](#slash-commands))
 instead of `craze`.
 

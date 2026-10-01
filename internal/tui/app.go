@@ -436,6 +436,12 @@ type Model struct {
 	// startCmd and the first waitEvent — and only EventReplay{end} clears it.
 	// Whichever of startedMsg and that event lands second runs sessionUp.
 	replaying bool
+	// replayFolded counts the events folded while replaying, and paintNow
+	// asks finish to paint the drawn pane this Update whatever the replay's
+	// cadence (paintDue): every replayPaintEvery-th of those events sets it,
+	// and so does a restore. finish clears it.
+	replayFolded int
+	paintNow     bool
 	// sessionIndex is Config.SessionIndex; nil means nothing is persisted. The
 	// model does not write it any more — the engine does, and decides every
 	// moment worth recording (plan 021 §3.8) — so this is held only to hand to
@@ -1973,10 +1979,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m Model) finish(cmd tea.Cmd) (Model, tea.Cmd) {
 	next := m
 	// Mutation only marks the transcript dirty. Paint the drawn one here so a
-	// background transcript (U3b) never moves m.vp.
-	if next.cur().dirty {
+	// background transcript (U3b) never moves m.vp — and, while a replay
+	// runs, only on its cadence (paintDue).
+	if next.cur().dirty && next.paintDue() {
 		next.refreshViewport()
 	}
+	next.paintNow = false
 	// The composer's `@` popup follows the draft the handler left (plan 030
 	// §3.16): synced here, where every change to the draft passes, and before
 	// the layout that gives it its rows. Its search, when an opening starts
@@ -2538,6 +2546,13 @@ func (m Model) slashWheel(delta int) Model {
 // window), and anywhere else it is the click the regions already understood.
 func (m Model) handlePress(x, y int) (tea.Model, tea.Cmd) {
 	now := m.now()
+	if m.cur().dirty && m.lay.Region(regionTranscript).Contains(y) {
+		// A replay's cadence left the pane unpainted (paintDue). A selection
+		// starts from the rows as they stand, so a press into the transcript
+		// paints them first: before it asks whether there is a row under it,
+		// and before it anchors a selection, which a paint would clear.
+		m.refreshViewport()
+	}
 	if !m.selectable(x, y) {
 		// The press belongs to another band, so whatever was highlighted is
 		// the previous gesture and goes.
@@ -4014,7 +4029,37 @@ func (m *Model) applyEvent(ev agent.Event) tea.Cmd {
 	// The retry list is taken here, once, for every arm (reduceEvent): no
 	// return of the event's can drop a retried answer.
 	retry := m.retryHidden()
-	return tea.Batch(retry, m.reduceEvent(ev))
+	cmd := m.reduceEvent(ev)
+	if m.replaying {
+		m.replayFolded++
+		if m.replayFolded%replayPaintEvery == 0 {
+			m.paintNow = true
+		}
+	}
+	return tea.Batch(retry, cmd)
+}
+
+// replayPaintEvery is a replay's paint cadence: the drawn pane is painted on
+// every replayPaintEvery-th event folded while replaying (paintDue).
+const replayPaintEvery = 256
+
+// paintDue says whether finish paints the drawn pane, when it is dirty, this
+// Update (plan 032 §3.3 C6). Outside a replay it always does. While one runs,
+// it does on every replayPaintEvery-th event folded and on a restore
+// (paintNow), and once the replay has failed — the start failed, or the
+// stream ended — and not otherwise: a long resume draws in steps of 256
+// events rather than on every one, and which frames it draws depends on the
+// events alone, never on the clock. The replay's end is not replaying any
+// more. A forced refresh that paints for itself — a resize, a theme, Ctrl+O, a
+// view switch — needs nothing from here, and a press into the transcript
+// paints the rows it is about to select from (handlePress).
+//
+// What it buys: the per-event cost of a replay no longer depends on how long
+// the message being replayed is, whatever its shape; a single growing block,
+// which no markdown checkpoint can split (mdCheckpoint), is rendered every
+// 256 events rather than on every one.
+func (m Model) paintDue() bool {
+	return !m.replaying || m.paintNow || m.startErr != nil || m.ended
 }
 
 // reduceEvent is applyEvent's event itself: the fold, then its arm, answering
