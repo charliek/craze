@@ -31,13 +31,16 @@ type tokenReply struct {
 const maxExpiresIn = 24 * time.Hour
 
 // expiresIn is the reply's access-token lifetime, if it states a sane one.
+// The bound is checked on the seconds, before the conversion: a float out of
+// int64's range converts to an unspecified Duration (math.MinInt64 on amd64),
+// which a check after it would pass, and every Token call would then refresh
+// — rotating the refresh token on each request (CodeRabbit on #82).
 func (r *tokenReply) expiresIn() (time.Duration, bool) {
 	f, err := r.ExpiresIn.Float64()
-	if err != nil || f <= 0 {
+	if err != nil || !(f > 0 && f <= maxExpiresIn.Seconds()) {
 		return 0, false
 	}
-	d := time.Duration(f * float64(time.Second))
-	return d, d <= maxExpiresIn
+	return time.Duration(f * float64(time.Second)), true
 }
 
 // earliestRefresh is the reply's earliest_refresh_at — Unix seconds (the
