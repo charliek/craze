@@ -830,7 +830,9 @@ the plan). Manage that usage in [ChatGPT's settings](https://chatgpt.com/setting
 
 **It takes no key.** It names no variable and stores no `api_key`: it is
 funded by signing in with
-[`craze auth login chatgpt`](cli.md#signing-in-to-the-chatgpt-plan), and
+[`craze auth login chatgpt`](cli.md#signing-in-to-the-chatgpt-plan) or, in a
+native session, with [`/connect`](tui.md#connect) — the same sign-in, inside
+the TUI, into the TUI's own craze directory — and
 [`craze auth list`](cli.md#craze-auth-list) shows the sign-in. A
 `providers.toml` entry for it may set only `name`; a `driver`, `base_url`,
 `env_keys` or `api_key` written there is dropped with a warning naming the

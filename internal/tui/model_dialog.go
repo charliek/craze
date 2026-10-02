@@ -508,8 +508,10 @@ func (m Model) closeDialog(revert bool) Model {
 		// Every way out of /connect lands here or in leaveKeyStep — Esc, a
 		// save, a click outside, a card, another dialog opening — and the
 		// key field goes with the state, so no key typed or pasted into it
-		// outlives the dialog (plan 031 §3.9, astra 15).
+		// outlives the dialog (plan 031 §3.9, astra 15). So does a sign-in's
+		// attempt, its listener closed (plan 033 §3.13).
 		m.dialog = dialogNone
+		m.cdlg.signIn.end()
 		m.cdlg = connectDialog{}
 	case dialogHelp:
 		m.dialog = dialogNone

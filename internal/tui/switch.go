@@ -85,7 +85,12 @@ type sessionSeed struct {
 // It builds no backend and adopts none: the caller does (setSession,
 // setBackend), which also moves the session generation and the backend
 // generation.
+//
+// /connect is the session's, made afresh with the rest; a ChatGPT sign-in it
+// was running ends here, its listener closed (plan 033 §3.13), since nothing
+// would reach its step again.
 func (m Model) withSession(seed sessionSeed) Model {
+	m.cdlg.signIn.end()
 	s := Model{
 		// ---- The TUI's: kept across every session it shows.
 		theme:  m.theme,

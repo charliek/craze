@@ -132,6 +132,12 @@ var goldenManifest = map[string]goldenRuns{
 	"native-connect-busy-80x24":              bothTransports,
 	"native-connect-key-100x30":              bothTransports,
 	"native-connect-key-80x24":               bothTransports,
+	"native-connect-signin-100x30":           bothTransports,
+	"native-connect-signin-80x24":            bothTransports,
+	"native-connect-signin-cancel-100x30":    bothTransports,
+	"native-connect-signin-done-100x30":      bothTransports,
+	"native-connect-signin-off-100x30":       bothTransports,
+	"native-connect-signin-paste-100x30":     bothTransports,
 	"native-echo-80x24":                      bothTransports,
 	"native-menu-100x30":                     bothTransports,
 	"native-model-dialog-100x30":             bothTransports,
@@ -505,7 +511,9 @@ func transportList(set map[frameTransport]bool) string {
 // the four of the composer's `@` popup (C18), and plan 032's list over a
 // session with a card up (C3) and the six of the input's `/effort` and
 // `/fast` and its rule with both set (C17), in process only; and plan 032's
-// `N attached` chip (C18, presence-100x30), under both.
+// `N attached` chip (C18, presence-100x30), plan 033's five composer image
+// chips (C2, composer-image-*) and its six frames of /connect's ChatGPT
+// sign-in (C16, native-connect-signin-*), under both — 134 in all.
 func TestTheGoldenManifestIsEveryGolden(t *testing.T) {
 	files, err := filepath.Glob(filepath.Join("testdata", "*.golden"))
 	if err != nil {
@@ -533,8 +541,8 @@ func TestTheGoldenManifestIsEveryGolden(t *testing.T) {
 			t.Errorf("the manifest runs %s under %v: a golden runs under both transports, or in process alone", name, runs)
 		}
 	}
-	if both != 128 || inprocAlone != 43 {
-		t.Errorf("the manifest lists %d goldens under both transports and %d in process alone, want 128 and 43 (A8)", both, inprocAlone)
+	if both != 134 || inprocAlone != 43 {
+		t.Errorf("the manifest lists %d goldens under both transports and %d in process alone, want 134 and 43 (A8)", both, inprocAlone)
 	}
 }
 

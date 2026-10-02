@@ -727,13 +727,28 @@ live smoke (C14); see `08-decisions.md`.
 ## Deferred (not scheduled)
 
 settings.json translation · hooks · MCP and plugin `.mcp.json` · native
-marketplace installer · ACP server binary · ChatGPT-plan (codex) auth ·
-background bash with auto-background · the process-based sub-agent runner
+marketplace installer · ACP server binary · the process-based sub-agent runner
 (D-54's fallback, triggered by a crash/leak or S4) · sandboxing ·
 flipping the provider to visible · lazy loading of nested instruction files
 (deferred out of H4 by D-47) · `paths:` gating of rules (deferred out of H4
-by D-47) · OpenAI provider integration, as gx has (a Responses API driver and
-ChatGPT-plan auth).
+by D-47).
+
+**Done since they were listed here (plan 033):** background bash with
+auto-background — `run_in_background`, an interactive command promoted to a
+job at its timeout instead of killed, `bash_output` and `bash_stop`, a job's
+end waking the agent (D-80); and ChatGPT-plan auth with the OpenAI
+integration gx has — a craze-owned Responses API driver, and the ChatGPT plan
+signed in to through OpenAI's Sign in with ChatGPT (`craze auth login
+chatgpt` or `/connect`) rather than codex's `auth.json` (D-81).
+
+**Lazy loading and `paths:` gating stay deferred** (D-47 kept; plan 033 owner
+decision 12, 2026-10-01). Measured on 2026-09-30 across the owner's 43
+repositories: only two — shed and slaudio — have nested instruction files
+(four files, about 87 KB: shed's root file already points the model at its
+nested ones, and slaudio's largest is over the 32 KiB per-file cap a lazy load
+would cut it to anyway), and none uses `.claude/rules` or a `paths:` key.
+Eager loading serves every other repository whole, and gating would gate
+nothing today.
 
 ## Conventions per phase
 

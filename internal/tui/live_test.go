@@ -18,6 +18,7 @@ import (
 	"github.com/muesli/termenv"
 
 	"github.com/charliek/craze/internal/agent"
+	"github.com/charliek/craze/internal/chatgptauth"
 	"github.com/charliek/craze/internal/harness/modeltable"
 )
 
@@ -292,6 +293,16 @@ func TestMain(m *testing.M) {
 	// developer's shell would otherwise reach every session and every frame
 	// built from pristineEnv, so they are unset before it is captured.
 	unsetCatalogEnv()
+	// The ChatGPT plan's endpoints (plan 033 §3.10) are aimed at a loopback
+	// port nothing serves, for the package and every child it starts, as
+	// internal/cli's are: /connect's sign-in tests stand in for chatgptauth
+	// through connect_signin.go's seams or serve a fake issuer of their own
+	// (t.Setenv over this), and a path that reached the real package
+	// anyway — a native session's model refresh, a sign-in left at its
+	// production seam — gets a refused connection on this machine instead of
+	// reaching OpenAI (common.md: fake servers only).
+	_ = os.Setenv(chatgptauth.IssuerEnv, chatgptFence)
+	_ = os.Setenv(chatgptauth.APIEnv, chatgptFence+"/v1")
 	pristineEnv = os.Environ()
 	lipgloss.SetColorProfile(termenv.TrueColor)
 	installParityWatch()

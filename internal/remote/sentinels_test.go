@@ -601,6 +601,13 @@ var tuiSites = []tuiSite{
 	{"connect_dialog.go", "storeErrText", "Error", "err", 1, proofLocal},
 	{"connect_dialog.go", "storedProblemText", "Is", "modeltable.ErrKeyTooShort", 1, proofLocal},
 	{"connect_dialog.go", "connectKeyRule", "Is", "modeltable.ErrKeyTooShort", 1, proofLocal},
+	// /connect's ChatGPT sign-in (plan 033 §3.13): chatgptauth's own
+	// attempt, run in this process into Config.NativeDir — the begin, the
+	// wait, a pasted address and the model list — never a Backend call's
+	// answer.
+	{"connect_signin.go", "signInErrorText", "Error", "err", 1, proofLocal},
+	{"connect_signin.go", "signInFailureText", "Is", "chatgptauth.ErrAccessDenied", 1, proofLocal},
+	{"connect_signin.go", "pasteSignIn", "Is", "chatgptauth.ErrAttemptOver", 1, proofLocal},
 	// The composer's images (plan 033 §3.3): a pasted file and the
 	// clipboard's image, read, processed and stored in this process — never
 	// a Backend call's answer.

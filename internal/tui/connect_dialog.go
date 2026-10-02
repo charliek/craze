@@ -41,6 +41,9 @@ import (
 //     host's session reads) and, when one of the provider's variables funds
 //     it, that the variable wins. Enter stores the key off the Update; an
 //     unusable key is refused in the field, nothing stored.
+//   - A provider funded by signing in — the ChatGPT plan's (plan 033 §3.13) —
+//     has no key field: its row opens a third step, "Sign in with ChatGPT",
+//     which runs the sign-in itself (connect_signin.go).
 //   - The running session keeps its model table (P8): the notice after a save
 //     says new sessions offer the provider's models, and that this
 //     conversation does after /exit and craze -c.
@@ -135,12 +138,14 @@ func configGetenv(getenv func(string) string) func(string) string {
 	return getenv
 }
 
-// connectStep is which of the dialog's two steps is up.
+// connectStep is which of the dialog's steps is up: the list, a key field,
+// or — for a provider funded by signing in — the sign-in (plan 033 §3.13).
 type connectStep int
 
 const (
 	connectPick connectStep = iota
 	connectKey
+	connectSignIn
 )
 
 // connectDialog is /connect's state. The zero value is no dialog, which is
@@ -163,19 +168,27 @@ type connectDialog struct {
 	// Step two. field is the key field's own number (Model.connSeq), taken
 	// each time the step opens, so a paste asked for in one field never lands
 	// in the next (keyField). keyErr is the field's refusal, or "".
+	//
+	// Step three, the sign-in (connect_signin.go), has a field too — the
+	// redirect address's, not masked — and uses the same three: its run's
+	// number is its field's.
 	field  uint64
 	key    textinput.Model
 	keyErr string
+	// signIn is step three's run: the attempt, its addresses and the way to
+	// end it. Every way out of the step ends it (signInState.end).
+	signIn signInState
 }
 
-// keyField names one opening of the key field: the dialog's number and the
-// field's. The zero value is no key field — the composer's paste.
+// keyField names one opening of the key field — or the sign-in's address
+// field: the dialog's number and the field's. The zero value is no field —
+// the composer's paste.
 type keyField struct{ dialog, field uint64 }
 
-// openField is the key field that is open, or the zero keyField when step two
-// is not up.
+// openField is the field that is open — step two's key field or step three's
+// address field — or the zero keyField when neither is up.
 func (d connectDialog) openField() keyField {
-	if d.step != connectKey || d.field == 0 {
+	if (d.step != connectKey && d.step != connectSignIn) || d.field == 0 {
 		return keyField{}
 	}
 	return keyField{dialog: d.gen, field: d.field}
@@ -190,10 +203,12 @@ func (d connectDialog) provider() (modeltable.ProviderInfo, bool) {
 	return d.providers[d.sel], true
 }
 
-// leaveKeyStep is Esc on the key field: back to step one, the field and its
-// refusal gone with it.
+// leaveKeyStep is Esc on the key field, or on the sign-in: back to step one,
+// the field and its refusal gone with it, and the sign-in's attempt ended
+// with its listener (plan 033 §3.13).
 func (d connectDialog) leaveKeyStep() connectDialog {
-	d.step, d.field, d.key, d.keyErr = connectPick, 0, textinput.Model{}, ""
+	d.signIn.end()
+	d.step, d.field, d.key, d.keyErr, d.signIn = connectPick, 0, textinput.Model{}, "", signInState{}
 	return d
 }
 
@@ -211,6 +226,7 @@ func (m Model) dropConnect() Model {
 	if m.dialog == dialogConnect {
 		return m.closeDialog(false)
 	}
+	m.cdlg.signIn.end()
 	m.cdlg = connectDialog{}
 	return m
 }
@@ -446,16 +462,19 @@ func (m Model) applyConnect(msg connectAnswer) (Model, tea.Cmd) {
 		if m.dialog == dialogModel && m.mdlg.gen == msg.gen {
 			m.mdlg.connect = msg.show
 		}
+	case signInBegunMsg, signInDoneMsg, signInFinishedMsg:
+		return m.applySignIn(msg)
 	}
 	return m, nil
 }
 
-// pasteIntoKey is a clipboard paste asked for in a key field
-// (pasteFromClipboard): into that field when it is still the one open, and
-// dropped otherwise — the dialog gone, back on step one, or another field
-// opened since.
+// pasteIntoKey is a clipboard paste asked for in a key field — or the
+// sign-in's address field (pasteFromClipboard): into that field when it is
+// still the one open, and dropped otherwise — the dialog gone, back on step
+// one, another field opened since, or the sign-in's address already handed
+// over.
 func (m Model) pasteIntoKey(msg pasteMsg) Model {
-	if msg.text == "" || m.dialog != dialogConnect || m.cdlg.openField() != msg.key {
+	if msg.text == "" || m.dialog != dialogConnect || m.cdlg.openField() != msg.key || m.cdlg.signIn.handed {
 		return m
 	}
 	m.cdlg.key, _ = m.cdlg.key.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(msg.text), Paste: true})
@@ -464,19 +483,23 @@ func (m Model) pasteIntoKey(msg pasteMsg) Model {
 }
 
 // handleConnectDialogKey is the dialog's keyboard. On step one ↑/↓ (and
-// Tab/Shift+Tab) move, Enter opens the selected provider's key field and Esc
-// closes the box; everything else — typing, a paste — is swallowed, since
-// step one has no field and a key pasted there must land nowhere.
+// Tab/Shift+Tab) move, Enter opens the selected provider's key field — or,
+// for the ChatGPT plan, its sign-in (pickConnectProvider) — and Esc closes the
+// box; everything else — typing, a paste — is swallowed, since step one has no
+// field and a key pasted there must land nowhere.
 func (m Model) handleConnectDialogKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	if m.cdlg.step == connectKey {
+	switch m.cdlg.step {
+	case connectKey:
 		return m.handleConnectKeyStep(msg)
+	case connectSignIn:
+		return m.handleSignInKey(msg)
 	}
 	n := len(m.cdlg.providers)
 	switch msg.Type {
 	case tea.KeyEsc:
 		return m.closeDialog(true), nil
 	case tea.KeyEnter:
-		return m.openKeyStep(), nil
+		return m.pickConnectProvider()
 	case tea.KeyUp, tea.KeyShiftTab:
 		if n > 0 {
 			m.cdlg.sel = (m.cdlg.sel - 1 + n) % n
@@ -602,8 +625,11 @@ func (m Model) connectPickPlan(inner, budget int) connectPickPlan {
 
 // connectDialogBody draws the step that is up.
 func (m Model) connectDialogBody(inner, budget int) []string {
-	if m.cdlg.step == connectKey {
+	switch m.cdlg.step {
+	case connectKey:
 		return m.connectKeyBody(inner, budget)
+	case connectSignIn:
+		return m.signInBody(inner, budget)
 	}
 	plan := m.connectPickPlan(inner, budget)
 	rows := []string{m.dialogTitle(connectDialogTitle, inner)}
@@ -628,13 +654,20 @@ func (m Model) connectDialogBody(inner, budget int) []string {
 }
 
 // connectMark is a step-one row's tag: ✓ for a provider with a usable key,
-// from a variable or stored, or a funded sign-in (ProviderInfo.Connected); the
-// word for one whose stored key cannot be used and that nothing else funds;
-// nothing for the rest.
+// from a variable or stored, or a funded sign-in (ProviderInfo.Connected);
+// for a provider funded by signing in, "plan usage off" when its account did
+// not grant plan usage (plan 033 X129) — a key stored for it by hand funds
+// nothing, so it is never "stored key unusable"; for any other, the word for
+// one whose stored key cannot be used and that nothing else funds; nothing
+// for the rest.
 func connectMark(p modeltable.ProviderInfo) string {
 	switch {
 	case p.Connected():
 		return connectConnectedMark
+	case p.SignIn && p.Via == modeltable.KeyPlanDisabled:
+		return connectPlanOffMark
+	case p.SignIn:
+		return ""
 	case p.StoredProblem != nil:
 		return connectUnusableMark
 	}
@@ -688,7 +721,8 @@ func (m Model) connectKeyBody(inner, budget int) []string {
 }
 
 // connectDialogClick is a press on a body row: on step one a provider's row
-// opens its key field, as Enter on it does; nothing else in the box acts.
+// opens its key field, or its sign-in, as Enter on it does; nothing else in
+// the box acts.
 func (m Model) connectDialogClick(i int) (tea.Model, tea.Cmd) {
 	if m.cdlg.step != connectPick {
 		return m, nil
@@ -699,5 +733,5 @@ func (m Model) connectDialogClick(i int) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	m.cdlg.sel = plan.top + row
-	return m.openKeyStep(), nil
+	return m.pickConnectProvider()
 }
