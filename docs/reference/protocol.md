@@ -576,10 +576,12 @@ start, as every new session does — so the create's answer can precede that
 save by an instant.
 
 **The result.** `session` is the session's roster row, read fresh from its
-host after the create let go of it (`approximate: false`). When that read
-fails the create is still a success — the session exists, and its id must
-reach the client — and `session` is the row the hub builds from the
-registry, `row` absent and `approximate: true`. `prompt` says what became of the first prompt:
+host after the create let go of it, and approximate as any roster row's is
+(a row the hub had to cut or drop to its bounds says so) — and true also
+when that fresh read fails: the create is still a success — the session
+exists, and its id must reach the client — and `session` is the row the hub
+builds from the registry, `row` absent. `prompt` says what became of the
+first prompt:
 `none` (there was none), `accepted`, `unknown` (it was sent and its answer
 lost — the session exists, and may be working on it; `promptError` says why
 it was lost) or `refused` (the session's refusal, in `promptError`; the

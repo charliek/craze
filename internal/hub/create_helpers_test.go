@@ -126,13 +126,21 @@ func init() {
 
 // startRecordedAgent starts a `sleep` leading a process group of its own and
 // appends it to host hostID's agents' record, as craze serve records the
-// agent it spawns (hostspawn.AgentGroup).
-func startRecordedAgent(hostID string) error {
+// agent it spawns (hostspawn.AgentGroup). An agent it could not record is
+// killed and waited for before it returns (r38 7): nobody else could ever
+// find it.
+func startRecordedAgent(hostID string) (err error) {
 	cmd := exec.Command("sleep", "600")
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if err := cmd.Start(); err != nil {
 		return err
 	}
+	defer func() {
+		if err != nil {
+			_ = cmd.Process.Kill()
+			_ = cmd.Wait()
+		}
+	}()
 	id, err := rundir.ProcessIdentity(cmd.Process.Pid)
 	if err != nil {
 		return err
@@ -145,9 +153,11 @@ func startRecordedAgent(hostID string) error {
 	if err != nil {
 		return err
 	}
-	defer f.Close()
-	_, err = f.WriteString(hostspawn.AgentGroup{PGID: cmd.Process.Pid, Start: id.Start}.Line())
-	return err
+	if _, err = f.WriteString(hostspawn.AgentGroup{PGID: cmd.Process.Pid, Start: id.Start}.Line()); err != nil {
+		_ = f.Close()
+		return err
+	}
+	return f.Close()
 }
 
 // spawned is every created-host child a test's hub started (hostsAsChildren).

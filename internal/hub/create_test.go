@@ -8,7 +8,9 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1174,4 +1176,107 @@ func TestTheRowIsFreshAfterASlowDetach(t *testing.T) {
 	if res.Session.Approximate || len(res.Session.Row) == 0 {
 		t.Fatalf("the row after a slow detach: %+v", res.Session)
 	}
+}
+
+// TestAStalledWorldCheckHoldsOnlyItsCreate (r38 4): a new create's check of
+// the world runs outside the table's lock, so one whose workspace stat stalls
+// (held here at its check) holds its own create alone: a repeat of a kept
+// answer is answered, and another create runs to its answer and frees its
+// slot — with two creates allowed in flight, a third is then taken — while it
+// stays held; let go, it is answered too.
+func TestAStalledWorldCheckHoldsOnlyItsCreate(t *testing.T) {
+	setVar(t, &createsMax, 2)
+	env := testEnv(t)
+	stalled := t.TempDir()
+	entered, release := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	t.Cleanup(func() { once.Do(func() { close(release) }) })
+	setVar(t, &createCheck, func(cr *creator, p *createReq) *protocol.Error {
+		if p.p.Cwd == stalled {
+			close(entered)
+			<-release
+		}
+		return cr.check(p)
+	})
+	_, s, sock := creating(t, env, nil, always("ok"))
+	c := dial(t, sock)
+	c.hello(t)
+	work := t.TempDir()
+	kept := map[string]any{"cwd": work, "requestId": "r-kept"}
+	first := createOn(t, c, kept)
+	result(t, first)
+
+	held := dial(t, sock)
+	held.hello(t)
+	held.sendCreate(t, map[string]any{"cwd": stalled, "requestId": "r-stall"})
+	select {
+	case <-entered:
+	case <-time.After(step):
+		t.Fatal("the stalled create never reached its check")
+	}
+	if again := createOn(t, c, kept); string(again.Result) != string(first.Result) {
+		t.Fatalf("the kept answer's repeat answered %+v (%s), want %s", again.Error, again.Result, first.Result)
+	}
+	if res := result(t, createOn(t, c, map[string]any{"cwd": work})); res.Session.HostID == "" {
+		t.Fatalf("a create beside the stalled one answered %+v", res)
+	}
+	if res := result(t, createOn(t, c, map[string]any{"cwd": work})); res.Session.HostID == "" || s.count() != 3 {
+		t.Fatalf("a create after one freed its slot answered %+v after %d spawns", res, s.count())
+	}
+	once.Do(func() { close(release) })
+	if res := result(t, held.readAnswer(t)); res.Session.HostID == "" || s.count() != 4 {
+		t.Fatalf("the stalled create, let go, answered %+v after %d spawns", res, s.count())
+	}
+}
+
+// TestAnAgentTheHelperCannotRecordIsKilled (r38 7): the created-host child's
+// agent (startRecordedAgent) that cannot be recorded — here the host logs'
+// directory cannot be made, HOME being a file — is killed and waited for
+// before the helper returns: no child of this process is left a `sleep`.
+func TestAnAgentTheHelperCannotRecordIsKilled(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("reads this process's children from /proc")
+	}
+	home := filepath.Join(t.TempDir(), "home-is-a-file")
+	writeFile(t, home)
+	t.Setenv("HOME", home)
+	if err := startRecordedAgent(rundir.NewHostID()); err == nil {
+		t.Fatal("an agent whose record cannot be written was recorded")
+	}
+	if kids := sleepChildren(t); len(kids) != 0 {
+		for _, pid := range kids {
+			_ = syscall.Kill(pid, syscall.SIGKILL)
+		}
+		t.Fatalf("the unrecorded agent %v was left running", kids)
+	}
+}
+
+// sleepChildren is every `sleep` child of this process, from /proc.
+func sleepChildren(t *testing.T) []int {
+	t.Helper()
+	dirs, err := os.ReadDir("/proc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out []int
+	for _, d := range dirs {
+		pid, err := strconv.Atoi(d.Name())
+		if err != nil {
+			continue
+		}
+		b, err := os.ReadFile(filepath.Join("/proc", d.Name(), "stat"))
+		if err != nil {
+			continue
+		}
+		s := string(b)
+		open, closing := strings.IndexByte(s, '('), strings.LastIndexByte(s, ')')
+		if open < 0 || closing < open {
+			continue
+		}
+		f := strings.Fields(s[closing+1:])
+		if s[open+1:closing] == "sleep" && len(f) > 1 && f[1] == strconv.Itoa(os.Getpid()) {
+			out = append(out, pid)
+		}
+	}
+	return out
 }

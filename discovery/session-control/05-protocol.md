@@ -542,9 +542,9 @@ above: "spawn a headless host"); the published spec is
   registry entry), waits for the start (60 s), sends the first prompt as the
   list's dispatch does, and answers `{session: rosterRow, prompt:
   none|accepted|unknown|refused, promptError?}`, the row read fresh on a
-  connection of its own. X49 (C15r): a row that cannot be read leaves the
-  create a success, `session` the registry's row with `approximate: true` —
-  no new member, no shape change.
+  connection of its own, approximate as any roster row's is — and true also
+  when that read fails (X49, C15r): the create is a success all the same,
+  `session` the registry's row — no new member, no shape change.
 - **Failures** reuse the reason table: `bad_request/bad_request`,
   `/request_conflict`; `unavailable/spawn_failed`, `/busy` (over 16 in
   flight), `/closing`; `not_accepting/start_failed` with `data.cause`, the

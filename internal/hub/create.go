@@ -79,7 +79,8 @@ import (
 //     that stopped reading holds that connection's writer, which nothing
 //     else must wait behind). Then the session's row is read from its host
 //     on a connection of its own (freshRow), bounded by closing it, and the
-//     result's roster row is judged fresh at that read — approximate false.
+//     result's roster row is judged fresh at that read — approximate only as
+//     any roster row is (cut or dropped to its bounds).
 //     A row that cannot be read leaves the result a success all the same,
 //     its row built from the registry and approximate (X49): the session
 //     exists, and its id must reach the client. The created host runs on, as
@@ -441,13 +442,20 @@ func createHash(q protocol.CreateParams) string {
 // --------------------------------------------------------------- the table
 
 // admit finds p's create or starts it (the file's comment, "Idempotency"):
-// the call to wait on, or the refusal — request_conflict, busy, closing, a
-// registry that cannot prove the id unused, or a new create's check. The id is
-// looked up first — the memory, then the registry — so a repeat is answered
-// whatever the world has become since (r32 3b); only a genuinely new create
-// is checked against it (check). A new create — or a join of a host a
-// previous hub created — is counted in flight (lifecycle.beginCreate) and run
-// on a goroutine of its own.
+// the call to wait on, or the refusal — request_conflict, busy, closing, or a
+// registry that cannot prove the id unused. The id is looked up first — the
+// memory, then the registry — so a repeat is answered whatever the world has
+// become since (r32 3b). A new create — or a join of a host a previous hub
+// created — is reserved under the table's lock: counted in flight
+// (lifecycle.beginCreate) and kept under its id, so a concurrent repeat joins
+// this one execution; then it runs on a goroutine of its own, where a new
+// create's check of the world comes first (createCheck), outside the lock
+// (r38 4): a workspace whose stat stalls — a network mount — holds its own
+// create alone, never the table, a cached answer or another create. Its
+// failure is the create's answer, kept like any other and freeing its slot as
+// any other does. A check that never returns keeps its create in flight until
+// it does; its waiter is answered by its own deadline (craze new's), and a
+// teardown cuts it as it cuts any create.
 func (cr *creator) admit(p createReq) (*createCall, *protocol.Error) {
 	cr.mu.Lock()
 	defer cr.mu.Unlock()
@@ -478,16 +486,23 @@ func (cr *creator) admit(p createReq) (*createCall, *protocol.Error) {
 			return c, nil
 		}
 	}
-	if perr := cr.check(&p); perr != nil {
-		return nil, perr
-	}
 	if perr := cr.h.life.beginCreate(); perr != nil {
 		return nil, perr
 	}
 	c := cr.newCallLocked(id, p.hash)
-	go cr.run(c, func(ctx context.Context) createAnswer { return cr.h.create(ctx, p) })
+	go cr.run(c, func(ctx context.Context) createAnswer {
+		if perr := createCheck(cr, &p); perr != nil {
+			return createRefusal(perr)
+		}
+		return cr.h.create(ctx, p)
+	})
 	return c, nil
 }
+
+// createCheck is a new create's check of the world (creator.check): a seam a
+// test gates to hold one create's check while others go on (never in
+// parallel).
+var createCheck = (*creator).check
 
 // conflict is a requestId reused with other params.
 func conflict(id string) *protocol.Error {
@@ -1101,7 +1116,8 @@ func freshRow(ctx context.Context, socket, sid string) (json.RawMessage, string,
 // createdRow is a created session's roster row (RosterRow), its session's
 // own row read now on a connection of its own (createRowRead: freshRow) —
 // after the create has let go of its connection — and judged fresh at that
-// read, so nothing after it can age it: approximate false. Its host is as the
+// read, so nothing after it can age it: approximate only as any roster row
+// is (cut or dropped to its bounds, RosterRow). Its host is as the
 // registry names it — or, not listed (yet), as its ready line did — ready,
 // since its session has started; reachable. A row that cannot be read leaves
 // the answer a success all the same (X49): the session exists, and its id must
