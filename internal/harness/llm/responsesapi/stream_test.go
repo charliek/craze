@@ -1,11 +1,14 @@
 package responsesapi
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
+	"net/http/httptest"
 	"slices"
 	"strings"
 	"testing"
@@ -350,4 +353,201 @@ func TestStreamCancelledIsTheContextsError(t *testing.T) {
 	if !errors.Is(s.Err(), context.Canceled) {
 		t.Fatalf("err = %v, want context.Canceled", s.Err())
 	}
+}
+
+// TestStreamAnnouncesACallOnlyWithItsCallID (review r9 item 1a): argument
+// deltas that arrive before their call's .added are held until an event
+// names the call — its .added, or failing that its .done — and follow its
+// ItemAdded, which carries the call id and name; two calls interleaved this
+// way never share an identity. A call whose .added names no call id waits
+// for its .done, and one no event ever names is never reported.
+func TestStreamAnnouncesACallOnlyWithItsCallID(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		evs   []string
+		kinds []string
+		calls map[int]string // each index's call id, as its ItemAdded carries it
+		args  map[int]string // each index's argument deltas, added up
+	}{
+		{"two calls interleaved before their .added", []string{
+			argsDelta(0, "fc_a", `{"path":`),
+			argsDelta(1, "fc_b", `{"path":`),
+			argsDelta(0, "fc_a", `"a.txt"}`),
+			added(1, call("fc_b", "call_b", "read", "")),
+			argsDelta(1, "fc_b", `"b.txt"}`),
+			added(0, call("fc_a", "call_a", "read", "")),
+			itemDone(0, call("fc_a", "call_a", "read", `{"path":"a.txt"}`)),
+			itemDone(1, call("fc_b", "call_b", "read", `{"path":"b.txt"}`)),
+			completed(5, 0, 5, 0),
+		}, []string{"added1", "args1", "args1", "added0", "args0", "args0", "done0", "done1", "completed"},
+			map[int]string{0: "call_a", 1: "call_b"}, map[int]string{0: `{"path":"a.txt"}`, 1: `{"path":"b.txt"}`}},
+		{"named by its .done alone", []string{
+			argsDelta(0, "fc_a", `{"path":`),
+			argsDelta(0, "fc_a", `"a.txt"}`),
+			itemDone(0, call("fc_a", "call_a", "read", `{"path":"a.txt"}`)),
+			completed(5, 0, 5, 0),
+		}, []string{"added0", "args0", "args0", "done0", "completed"},
+			map[int]string{0: "call_a"}, map[int]string{0: `{"path":"a.txt"}`}},
+		{"an .added with no call id", []string{
+			added(0, call("fc_a", "", "read", "")),
+			argsDelta(0, "fc_a", `{}`),
+			itemDone(0, call("fc_a", "call_a", "read", `{}`)),
+			completed(5, 0, 5, 0),
+		}, []string{"added0", "args0", "done0", "completed"},
+			map[int]string{0: "call_a"}, map[int]string{0: `{}`}},
+		{"never named", []string{
+			argsDelta(0, "fc_a", `{"path":`),
+			completed(5, 0, 5, 0),
+		}, []string{"completed"}, map[int]string{}, map[int]string{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			evs, err := streamOf(t, newServer(t, events(tc.evs...)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := kinds(evs); !slices.Equal(got, tc.kinds) {
+				t.Fatalf("events = %v, want %v", got, tc.kinds)
+			}
+			calls := map[int]string{}
+			for _, e := range evs {
+				if e.Kind == ItemAdded {
+					calls[e.Index] = e.Item.CallID
+					if e.Item.Name != "read" {
+						t.Errorf("index %d began with name %q", e.Index, e.Item.Name)
+					}
+				}
+			}
+			if !maps.Equal(calls, tc.calls) {
+				t.Fatalf("the calls began as %v, want %v", calls, tc.calls)
+			}
+			for idx, want := range tc.args {
+				if got := deltas(evs, ArgumentsDelta, idx); got != want {
+					t.Errorf("index %d's argument deltas = %q, want %q", idx, got, want)
+				}
+			}
+		})
+	}
+}
+
+// TestStreamPassesOverUnknownEvents (review r9 item 1b): an event of a type
+// the stream does not read is passed over whatever its fields hold — here
+// fields of the very names craze reads, in shapes it does not — and so is
+// an output item of a type it does not read; the stream goes on to
+// complete. The control: the same field shape in an event the stream reads
+// ends it, an error.
+func TestStreamPassesOverUnknownEvents(t *testing.T) {
+	unknown := []string{
+		ev(map[string]any{"type": "response.future_event", "delta": map[string]any{}, "output_index": "first", "item": 7}),
+		ev(map[string]any{"type": 7, "response": "not an object"}),
+	}
+	strange := map[string]any{"type": "web_search_call", "id": "ws_1", "content": "a string", "summary": map[string]any{}, "arguments": []any{1}}
+	evs, err := streamOf(t, newServer(t, events(
+		created(),
+		unknown[0],
+		added(0, message("msg_1", "")),
+		textDelta(0, "msg_1", "Hello"),
+		unknown[1],
+		itemDone(0, message("msg_1", "Hello")),
+		added(1, strange),
+		itemDone(1, strange),
+		completed(1, 0, 1, 0),
+	)))
+	if err != nil {
+		t.Fatalf("an unknown event or item failed the stream: %v", err)
+	}
+	if got, want := kinds(evs), []string{"added0", "text0", "done0", "added1", "done1", "completed"}; !slices.Equal(got, want) {
+		t.Fatalf("events = %v, want %v", got, want)
+	}
+	if it := evs[4].Item; it.Type != "web_search_call" || it.ID != "ws_1" {
+		t.Fatalf("the unknown item = %+v, want its type and id", it)
+	}
+
+	_, err = streamOf(t, newServer(t, events(
+		added(0, message("msg_1", "")),
+		ev(map[string]any{"type": "response.output_text.delta", "output_index": 0, "delta": map[string]any{}}),
+		completed(1, 0, 1, 0),
+	)))
+	if err == nil || errors.Is(err, ErrIncomplete) || !strings.Contains(err.Error(), "response.output_text.delta event is malformed") {
+		t.Fatalf("a malformed known event: err = %v, want the stream ended with a decoding error", err)
+	}
+}
+
+// bufferedStream is a stream over a reply held whole in memory: nothing is
+// left to read that a cancel could fail.
+func bufferedStream(ctx context.Context, evs ...string) *Stream {
+	rec := httptest.NewRecorder()
+	events(evs...)(rec, nil)
+	return newStream(ctx, &http.Response{Body: io.NopCloser(bytes.NewReader(rec.Body.Bytes()))})
+}
+
+// TestStreamStopsAtACancelWithTheReplyBuffered (review r9 item 2): with the
+// whole reply already read, a cancel still ends the stream at once — no
+// event after it, Completed above all, and Err the context's error — both
+// between events still on the wire and with Completed already queued behind
+// the event the cancel came after. The control: read to its end without a
+// cancel, the same reply completes.
+func TestStreamStopsAtACancelWithTheReplyBuffered(t *testing.T) {
+	reply := []string{
+		added(0, message("msg_1", "")),
+		textDelta(0, "msg_1", "first"),
+		textDelta(0, "msg_1", " second"),
+		itemDone(0, message("msg_1", "first second")),
+		completed(1, 0, 1, 0),
+	}
+	// done1 and Completed come out of the one response.completed event, which
+	// releases the item an index gap held.
+	queued := []string{
+		added(1, message("msg_2", "")),
+		itemDone(1, message("msg_2", "after a gap")),
+		completed(1, 0, 1, 0),
+	}
+	for _, tc := range []struct {
+		name  string
+		reply []string
+		at    func(Event) bool // the event the cancel comes after
+		want  []string         // the events reported, through that one
+	}{
+		{"after the first text delta", reply, func(e Event) bool { return e.Kind == TextDelta },
+			[]string{"added0", "text0"}},
+		{"with Completed queued", queued, func(e Event) bool { return e.Kind == ItemDone },
+			[]string{"added1", "text1", "done1"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			s := bufferedStream(ctx, tc.reply...)
+			var got []Event
+			for s.Next() {
+				got = append(got, s.Event())
+				if tc.at(s.Event()) {
+					cancel()
+				}
+			}
+			if k := kinds(got); !slices.Equal(k, tc.want) {
+				t.Fatalf("events = %v, want %v: the stream ran on past the cancel", k, tc.want)
+			}
+			if !errors.Is(s.Err(), context.Canceled) {
+				t.Fatalf("err = %v, want context.Canceled", s.Err())
+			}
+			if s.Next() || !errors.Is(s.Err(), context.Canceled) {
+				t.Fatal("the stream moved on after it ended")
+			}
+		})
+	}
+	t.Run("no cancel", func(t *testing.T) {
+		evs, err := collect(t, bufferedStream(context.Background(), reply...))
+		if err != nil || evs[len(evs)-1].Kind != Completed {
+			t.Fatalf("events %v, err %v: the buffered reply does not complete", kinds(evs), err)
+		}
+	})
+	t.Run("a cancel after Completed", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		s := bufferedStream(ctx, reply...)
+		for s.Next() {
+		}
+		cancel()
+		if s.Next() || s.Err() != nil {
+			t.Fatalf("err = %v: a cancel after Completed was read undid it", s.Err())
+		}
+	})
 }

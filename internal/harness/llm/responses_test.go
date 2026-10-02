@@ -40,12 +40,13 @@ const (
 )
 
 // staticAuth is an Auth over fixed tokens: the first until it is
-// invalidated, then the next.
+// invalidated, then the next. It counts every Invalidate.
 type staticAuth struct {
-	mu     sync.Mutex
-	tokens []string
-	gen    uint64
-	err    error // Token's answer, when set
+	mu          sync.Mutex
+	tokens      []string
+	gen         uint64
+	err         error // Token's answer, when set
+	invalidated int
 }
 
 func newStaticAuth(tokens ...string) *staticAuth { return &staticAuth{tokens: tokens} }
@@ -62,10 +63,17 @@ func (a *staticAuth) Token(context.Context) (string, uint64, error) {
 func (a *staticAuth) Invalidate(_ context.Context, gen uint64) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	a.invalidated++
 	if gen == a.gen {
 		a.gen++
 	}
 	return nil
+}
+
+func (a *staticAuth) invalidations() int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.invalidated
 }
 
 func (a *staticAuth) Values() []string {
@@ -459,6 +467,56 @@ func TestResponsesKeepsParallelCallsApart(t *testing.T) {
 	}
 }
 
+// TestResponsesNamesEveryCallPart (review r9 item 1a): two calls whose
+// argument deltas interleave before either call's .added — one named only by
+// its .done — reach Fantasy with every tool part under its own call id: per
+// call, ToolInputStart, its deltas, ToolInputEnd and ToolCall, in that
+// order, never a part with a blank id the two would share.
+func TestResponsesNamesEveryCallPart(t *testing.T) {
+	srv := newRxServer(t, rxEvents(
+		rxArgs(0, "fc_a", `{"path":`),
+		rxArgs(1, "fc_b", `{"path":`),
+		rxArgs(0, "fc_a", `"a.txt"}`),
+		rxAdded(0, rxCall("fc_a", "call_a", "read_file", "")),
+		rxArgs(1, "fc_b", `"b.txt"}`),
+		rxDone(1, rxCall("fc_b", "call_b", "read_file", `{"path":"b.txt"}`)),
+		rxDone(0, rxCall("fc_a", "call_a", "read_file", `{"path":"a.txt"}`)),
+		rxCompleted(50, 0, 30, 0),
+	))
+	stream, err := srv.model(t, chatgpt(), newStaticAuth(chatgptToken)).Stream(context.Background(),
+		fantasy.Call{Prompt: fantasy.Prompt{fantasy.NewUserMessage("read a and b")}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	seq := map[string][]fantasy.StreamPartType{}
+	args := map[string]string{}
+	for part := range stream {
+		switch part.Type {
+		case fantasy.StreamPartTypeToolInputStart, fantasy.StreamPartTypeToolInputDelta, fantasy.StreamPartTypeToolInputEnd, fantasy.StreamPartTypeToolCall:
+			seq[part.ID] = append(seq[part.ID], part.Type)
+			if part.Type == fantasy.StreamPartTypeToolInputDelta {
+				args[part.ID] += part.Delta
+			}
+			if part.Type == fantasy.StreamPartTypeToolInputStart && part.ToolCallName != "read_file" {
+				t.Errorf("call %q began named %q", part.ID, part.ToolCallName)
+			}
+		case fantasy.StreamPartTypeError:
+			t.Fatalf("the step failed: %v", part.Error)
+		}
+	}
+	start, delta, end, toolCall := fantasy.StreamPartTypeToolInputStart, fantasy.StreamPartTypeToolInputDelta, fantasy.StreamPartTypeToolInputEnd, fantasy.StreamPartTypeToolCall
+	want := map[string][]fantasy.StreamPartType{
+		"call_a": {start, delta, delta, end, toolCall},
+		"call_b": {start, delta, delta, end, toolCall},
+	}
+	if len(seq) != len(want) || !slices.Equal(seq["call_a"], want["call_a"]) || !slices.Equal(seq["call_b"], want["call_b"]) {
+		t.Fatalf("tool parts by id = %v, want %v", seq, want)
+	}
+	if args["call_a"] != `{"path":"a.txt"}` || args["call_b"] != `{"path":"b.txt"}` {
+		t.Fatalf("argument deltas by id = %v", args)
+	}
+}
+
 // TestResponsesSendsTheCallsHeaders: the call's headers — the session-id
 // the harness sets for this driver (P18) — go with the request, and a call
 // with none sends none (the control).
@@ -848,6 +906,48 @@ func TestResponsesRetryableFailures(t *testing.T) {
 			t.Fatalf("err = %v, want a non-retryable auth failure", err)
 		}
 	})
+}
+
+// TestResponsesAnExhausted401IsNeverRetried (review r9 item 4): a 401 to
+// the renewed token is not retried, whatever it says — not for headers that
+// tell Fantasy to retry (x-should-retry, which it honours whatever the
+// status, and a Retry-After), not for a transient code in its body — so a
+// turn through Fantasy's agent, its retries on, sends two requests and
+// invalidates once, wrapped as every model is or not. Each reply would be
+// retried at once (retry-after-ms) if it were retried at all.
+func TestResponsesAnExhausted401IsNeverRetried(t *testing.T) {
+	retry := []string{"x-should-retry", "true", "retry-after-ms", "1", "retry-after", "1"}
+	for _, tc := range []struct {
+		name  string
+		reply http.HandlerFunc
+	}{
+		{"x-should-retry", rxJSON(401, `{"detail":"Unauthorized"}`, retry...)},
+		{"a transient code", rxJSON(401, `{"error":{"code":"server_error","message":"try again"}}`, "retry-after-ms", "1")},
+	} {
+		for _, wrapped := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s, wrapped %v", tc.name, wrapped), func(t *testing.T) {
+				replies := make([]http.HandlerFunc, 8) // what three retries of two requests each would take
+				for i := range replies {
+					replies[i] = tc.reply
+				}
+				srv := newRxServer(t, replies...)
+				auth := newStaticAuth(chatgptToken, chatgptTokenNext)
+				var lm fantasy.LanguageModel = srv.model(t, chatgpt(), auth)
+				if wrapped {
+					lm = wrap(lm, newScrubber(""))
+				}
+				agent := fantasy.NewAgent(lm, fantasy.WithMaxRetries(3))
+				_, err := agent.Stream(context.Background(), fantasy.AgentStreamCall{Prompt: "hi"})
+				if n, inv := len(srv.requests()), auth.invalidations(); n != 2 || inv != 1 {
+					t.Fatalf("%d requests and %d invalidations, want 2 and 1: the refused renewal was retried", n, inv)
+				}
+				var pe *fantasy.ProviderError
+				if !errors.As(err, &pe) || pe.StatusCode != 401 || !pe.AuthError || pe.IsRetryable() {
+					t.Fatalf("err = %v, want a non-retryable auth failure", err)
+				}
+			})
+		}
+	}
 }
 
 // TestResponsesCredentialErrorsKeepTheirSentinel: the sign-in's own errors

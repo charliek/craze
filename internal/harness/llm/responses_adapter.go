@@ -342,7 +342,9 @@ type partState struct {
 // parts yields ev as Fantasy stream parts, false when the consumer stopped.
 // A message's and a reasoning item's part id is its item id; a function
 // call's is its call id, which is what Fantasy and the transcript know the
-// call by.
+// call by — the stream announces a call only with its call id, its argument
+// deltas held until then (responsesapi.ItemAdded), so each of a call's parts
+// carries it.
 func (st *partState) parts(ev responsesapi.Event, yield func(fantasy.StreamPart) bool) bool {
 	id := st.ids[ev.Index]
 	switch ev.Kind {
@@ -437,7 +439,9 @@ func fantasyUsage(u responsesapi.Usage) fantasy.Usage {
 //     reads the code and type back (ErrorNames). One inside the stream is
 //     retryable when the core calls it transient (usage or account
 //     information unavailable, a server error) — before any output only,
-//     which the wrapper's rule 3 enforces (D-32).
+//     which the wrapper's rule 3 enforces (D-32). A 401, the token refused
+//     after its one renewal, is an auth failure nothing retries, whatever
+//     its body or headers say.
 //   - A stream that stopped before saying how it ended is Fantasy's
 //     retryable incomplete-stream error.
 //   - Anything else — the context's error, the credential source's (its
@@ -473,16 +477,24 @@ func responsesProviderError(re *responsesapi.Error) *fantasy.ProviderError {
 	default:
 		title = "response failed"
 	}
+	// A 401 here is the token refused after its one renewal (Client.send
+	// renews on the first), so it is never retried, whatever it says (review
+	// r9 item 4): each retry would be a fresh send with a renewal of its own,
+	// up to four invalidations for Fantasy's three retries. Not a transient
+	// code in its body, and none of its headers either — Fantasy retries any
+	// status whose x-should-retry says to (ProviderError.IsRetryable), and
+	// nothing reads a 401's headers otherwise.
+	refused := re.StatusCode == http.StatusUnauthorized
 	pe := &fantasy.ProviderError{
 		Title:              title,
 		Message:            responsesMessage(re),
 		StatusCode:         re.StatusCode,
 		ResponseBody:       responsesErrorBody(re),
-		AuthError:          re.StatusCode == http.StatusUnauthorized,
+		AuthError:          refused,
 		ContextTooLargeErr: re.ContextTooLarge(),
-		TransientError:     re.Transient(),
+		TransientError:     re.Transient() && !refused,
 	}
-	if len(re.Header) > 0 {
+	if len(re.Header) > 0 && !refused {
 		pe.ResponseHeaders = make(map[string]string, len(re.Header))
 		for k, v := range re.Header {
 			if len(v) > 0 {
