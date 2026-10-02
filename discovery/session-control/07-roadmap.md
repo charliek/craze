@@ -412,7 +412,7 @@ named only in the host log (X75, SF-125); and such a hub denies the keychain
 to every create in its namespace, a GUI terminal's too (SF-126). The owner's
 rows (SF-86, SF-99, SF-61) passed a fake-agent smoke at PR 1's tip (SF-86
 again by eye in V4); SF-102's render bounds are V8's. No golden moved but the
-four SF-86 frames the owner allowed. The execution amendments X1–X81, the
+four SF-86 frames the owner allowed. The execution amendments X1–X82, the
 review record, V1–V8 and the handoff are in `12`; what it found and did not
 do is `13`, SF-104–SF-127. **S3 (the shed lane) is next**, after shed's
 first release of its own lane work.

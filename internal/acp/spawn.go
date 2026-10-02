@@ -348,9 +348,15 @@ func Spawn(opts SpawnOptions) (*Client, error) {
 	// not at its reap: that waits for its process group to be cleaned up,
 	// which a tool that ignores SIGTERM stretches by a grace or two. Where
 	// the status is known only at the reap (Child), they fail then, with it.
+	// The agent's stdin is closed then too: nothing more is for it, and a
+	// write still blocked there — a pipe it stopped reading, held open by a
+	// tool it left behind — fails now, its call answered with that status,
+	// rather than at the tool's end or the client's Close. Its stdout stays
+	// open, so what it wrote before it went is still read (X72).
 	go func() {
 		<-child.statusCh
 		conn.failAll(child.endErr())
+		conn.closeWriter()
 	}()
 	return client, nil
 }

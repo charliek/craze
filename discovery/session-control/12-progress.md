@@ -4133,7 +4133,7 @@ UX:
 | | |
 |---|---|
 | Status | complete (Plan 032, FINAL v3.2 after panel rounds 1–3, 2026-09-30); all five PRs done, PR 5 carrying this record |
-| Plan | `032-session-control-s4b-hub` (outside the repo, `~/.claude/plans/craze/`; the owner's decisions, the discovery reports, the render prototypes, the raw panel reviews, every review round, the per-PR progress files with the amendments X1–X81, and the V2–V8 artifacts in its folder) |
+| Plan | `032-session-control-s4b-hub` (outside the repo, `~/.claude/plans/craze/`; the owner's decisions, the discovery reports, the render prototypes, the raw panel reviews, every review round, the per-PR progress files with the amendments X1–X82, and the V2–V8 artifacts in its folder) |
 | Baseline | `origin/main` `a0d88c3` (#74), on top of S4a + S5's last PR (#72, `b88e7b7`) and Plan 031 (#73, `0f82531`) |
 | Branch / PRs | five sequential PRs, each branched from a freshly fetched `origin/main`: `feature/plan-032-rows`, `feature/plan-032-render`, `feature/plan-032-hub`, `feature/plan-032-create`, `feature/plan-032-reaper` (PR 2's C5 and PR 3's C7 were begun in isolated worktrees before the previous merge and applied after it, X11, X15) |
 | Merged | PR 1 — #75 `2eec72f` (2026-10-01); PR 2 — #76 `2dc80b7` (2026-10-01); PR 3 — #78 `bc8da8f` (2026-10-01); PR 4 — #79 `8a33a12` (2026-10-02); PR 5 — #81 (2026-10-02) |
@@ -4370,8 +4370,8 @@ fail at the exit with its status (`acp.ExitError`); a stdout EOF waits up to
 onto Plan 033's #82, macOS CI found a real bug in PR 4's `session.create`:
 X80, below. Commits: C19 `cab2868`, C19r `8ea676e`, C19r2 `5a0ed5c`, X76
 `8d405c3` and `9732161`, X77 `c9a6ca7`, the darwin lint pass `a680fb4`, C20
-`0f6857d`, X80 `5661c32` and `862742f`, the record's fixes, and X81 (a gate test's
-deadline, below).
+`0f6857d`, X80 `5661c32` and `862742f`, the record's fixes, X81 (a gate test's
+deadline, below) and X82 (the agent's stdin closed at its exit).
 
 **The roadmap's S4b exits** (`07`):
 
@@ -4555,8 +4555,8 @@ on the mac.
 
 ### Deviations from the plan
 
-The amendments X1–X81 (PR 1 X1–X11; PR 2 X12–X14, X16, X17, X23, X24; PR 3
-X15, X18–X22, X25–X41; PR 4 X42–X69; PR 5 X70–X81; the full text in the plan
+The amendments X1–X82 (PR 1 X1–X11; PR 2 X12–X14, X16, X17, X23, X24; PR 3
+X15, X18–X22, X25–X41; PR 4 X42–X69; PR 5 X70–X82; the full text in the plan
 folder's `progress-pr1.md` … `progress-pr5.md`), grouped here by what they
 changed. Left out: the ones that only record process or tests — reviewer seats
 (X1, X31), worktrees and the order of work (X4, X11, X14, X15, X42, X51, X74),
@@ -4715,8 +4715,12 @@ decision.
     failing zombie query hands over to the fallback; whether a shutdown came
     first is latched at the observation, so a later `Close` cannot recast a
     self-exit as `ErrClosed`. The residuals are SF-121.
-28. **X72** — on a stdout EOF the connection waits up to 1 s for the exit and
-    fails pending calls with its status, not `ErrClosed`.
+28. **X72, X82** — on a stdout EOF the connection waits up to 1 s for the exit
+    and fails pending calls with its status, not `ErrClosed`; at the exit the
+    agent's stdin is closed too (its stdout is not, so what it wrote before it
+    went is still read), so a call still writing its request to a pipe the
+    agent left full and a tool holds open fails then, with the exit's status,
+    not a grace later with the write's error (CodeRabbit on #81).
 
 **Verification (PR 5):**
 

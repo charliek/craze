@@ -7,11 +7,13 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -30,11 +32,34 @@ const helperEnv = "CRAZE_ACP_TEST_HELPER"
 const helperGateEnv = "CRAZE_ACP_TEST_GATE"
 
 func init() {
-	if os.Getenv(helperEnv) == "exit-256" {
+	switch os.Getenv(helperEnv) {
+	case "exit-256":
 		awaitGate(os.Getenv(helperGateEnv))
 		// exit(256): a status only its low byte of reaches a wait — and
 		// macOS's zombie record saturates (reaper_darwin.go).
 		os.Exit(256)
+	case "hold-stdin-exit-7":
+		// A tool left behind in the agent's group, holding its stdin open,
+		// never reading it and immune to SIGTERM from its first instruction
+		// — an ignored signal stays ignored across fork and exec, so no
+		// TERM can find it before a trap is set (r56) — so it dies only at
+		// the grace's KILL. Then, once craze's write has begun — its first
+		// byte read here, the rest larger than any pipe, so the write
+		// cannot end — the exit.
+		signal.Ignore(syscall.SIGTERM)
+		holder := exec.Command("sleep", "30")
+		holder.Stdin = os.Stdin
+		if err := holder.Start(); err != nil {
+			os.Exit(3)
+		}
+		fmt.Fprintln(os.Stderr, "ready")
+		var b [1]byte
+		if n, _ := os.Stdin.Read(b[:]); n != 1 {
+			syscall.Exit(4)
+		}
+		// Not os.Exit: under -race its finalizer can hold a starved exit
+		// for seconds (SF-118).
+		syscall.Exit(7)
 	}
 }
 
@@ -547,6 +572,59 @@ func TestPendingCallsFailWithTheObservedExit(t *testing.T) {
 	case <-c.child.reapedCh:
 		t.Fatal("the pending call failed only at the reap, not at the exit")
 	default:
+	}
+	checkExit(t, c.child, "exit status 7", 7)
+}
+
+// TestAWriteBlockedOnTheAgentsStdinFailsAtItsExit (CodeRabbit on #81, X82): a
+// call whose request is still being written when the agent exits — its stdin
+// full, held open by a tool it left behind that never reads it and ignores
+// SIGTERM — fails at the exit, with its status, as a call waiting for its
+// reply does: not a grace later, when the tool dies at the KILL or the reap
+// closes the pipe, and not with the write's own error. The agent, ready,
+// exits as soon as the write has begun, so the call ends within the grace of
+// its start only if the exit ends it: the tool's KILL comes a grace after the
+// exit. It is timed from the observation of the exit, recorded as the
+// observation returns — before the status is published, so before the call
+// can end — not from the call's start, which a starved 1 MiB encode can put
+// seconds earlier (r56).
+func TestAWriteBlockedOnTheAgentsStdinFailsAtItsExit(t *testing.T) {
+	var observedAt atomic.Int64
+	real := watch
+	watch = func(pid int) (func() (syscall.WaitStatus, bool, error), error) {
+		w, err := real(pid)
+		if err != nil {
+			return nil, err
+		}
+		return func() (syscall.WaitStatus, bool, error) {
+			st, known, err := w()
+			observedAt.Store(time.Now().UnixNano())
+			return st, known, err
+		}, nil
+	}
+	// Registered before the Spawn, so it runs after its Close.
+	t.Cleanup(func() { watch = real })
+	exe, args := helperArgs(t)
+	stderr := &syncBuffer{}
+	c, err := Spawn(SpawnOptions{
+		Binary: exe, Args: args, Stderr: stderr,
+		Env: append(os.Environ(), helperEnv+"=hold-stdin-exit-7"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = c.Close() })
+	stderr.waitFor(t, "ready")
+
+	pad := map[string]string{"pad": strings.Repeat("x", 1<<20)}
+	err = c.conn.Call(t.Context(), "x/blocked", pad, nil)
+	returned := time.Now()
+	var ee *ExitError
+	if !errors.As(err, &ee) || ee.ExitCode() != 7 {
+		t.Fatalf("the blocked call = %v, want it failed with the agent's exit status 7", err)
+	}
+	if took := returned.Sub(time.Unix(0, observedAt.Load())); took >= shutdownGrace/2 {
+		t.Fatalf("the blocked call failed %v after the exit was observed: at the tool's KILL or the reap, not the exit", took)
 	}
 	checkExit(t, c.child, "exit status 7", 7)
 }
