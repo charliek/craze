@@ -1,6 +1,7 @@
 package atomicfile
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -321,5 +322,199 @@ func assertOnlyFile(t *testing.T, dir, want string) {
 			names[i] = e.Name()
 		}
 		t.Fatalf("directory contents = %v, want only %q", names, want)
+	}
+}
+
+// countFsyncs replaces the fsync seam for one test: every call is counted,
+// and fail, when it returns an error, makes that call fail.
+func countFsyncs(t *testing.T, fail func(n int) error) *int {
+	t.Helper()
+	n := 0
+	fsync = func(f *os.File) error {
+		n++
+		if fail != nil {
+			if err := fail(n); err != nil {
+				return err
+			}
+		}
+		return f.Sync()
+	}
+	t.Cleanup(func() { fsync = (*os.File).Sync })
+	return &n
+}
+
+// TestWriteSyncFlushesTheFileAndTheDirectory (plan 033 §3.10): WriteSync
+// lands the contents at perm with no temp file left, and syncs twice — the
+// file before the rename, the directory after it. Write is the control: the
+// same write, and no sync at all.
+func TestWriteSyncFlushesTheFileAndTheDirectory(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "chatgpt.json")
+	syncs := countFsyncs(t, nil)
+	if err := WriteSync(path, []byte("durable"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if *syncs != 2 {
+		t.Fatalf("WriteSync synced %d times, want 2 (the file, then its directory)", *syncs)
+	}
+	if b, _ := os.ReadFile(path); string(b) != "durable" {
+		t.Fatalf("content = %q", b)
+	}
+	if info, err := os.Stat(path); err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("stat = %v, %v; want mode 0600", info, err)
+	}
+	assertOnlyFile(t, dir, "chatgpt.json")
+
+	*syncs = 0
+	if err := Write(path, []byte("plain"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if *syncs != 0 {
+		t.Fatalf("Write synced %d times; only the WriteSync family syncs", *syncs)
+	}
+}
+
+// TestWriteSyncFailsOnAFailedFsync: a file whose contents could not be made
+// durable is not renamed into place — the target keeps its old contents and
+// no temp file is left. A directory fsync that fails after the rename is the
+// write's failure too, with the new contents in place.
+func TestWriteSyncFailsOnAFailedFsync(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "chatgpt.json")
+	if err := os.WriteFile(path, []byte("old"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	diskFull := errors.New("no space left on device")
+	countFsyncs(t, func(n int) error {
+		if n == 1 {
+			return diskFull
+		}
+		return nil
+	})
+	if err := WriteSync(path, []byte("new"), 0o600); !errors.Is(err, diskFull) {
+		t.Fatalf("WriteSync = %v, want the file's fsync error", err)
+	}
+	if b, _ := os.ReadFile(path); string(b) != "old" {
+		t.Fatalf("content = %q after a failed fsync, want the old contents", b)
+	}
+	assertOnlyFile(t, dir, "chatgpt.json")
+
+	countFsyncs(t, func(n int) error {
+		if n == 2 {
+			return diskFull
+		}
+		return nil
+	})
+	if err := WriteSync(path, []byte("new"), 0o600); !errors.Is(err, diskFull) {
+		t.Fatalf("WriteSync = %v, want the directory's fsync error", err)
+	}
+	if b, _ := os.ReadFile(path); string(b) != "new" {
+		t.Fatalf("content = %q after the rename, want the new contents", b)
+	}
+}
+
+// TestWriteSyncCheckedRefusesBeforeTheRename: the check runs before the
+// rename, and a refusal leaves the target as it was; a passing check is the
+// control.
+func TestWriteSyncCheckedRefusesBeforeTheRename(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "chatgpt.json")
+	if err := os.WriteFile(path, []byte("old"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gone := errors.New("the file was removed")
+	if err := WriteSyncChecked(path, []byte("new"), 0o600, func() error { return gone }); !errors.Is(err, gone) {
+		t.Fatalf("WriteSyncChecked = %v, want the check's error", err)
+	}
+	if b, _ := os.ReadFile(path); string(b) != "old" {
+		t.Fatalf("content = %q after a refused write", b)
+	}
+	assertOnlyFile(t, dir, "chatgpt.json")
+	if err := WriteSyncChecked(path, []byte("new"), 0o600, func() error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(path); string(b) != "new" {
+		t.Fatalf("content = %q after a passing check", b)
+	}
+}
+
+// TestRemoveSyncSyncsTheDirectory: a removal is synced once (the
+// directory); a path already gone is no error and syncs nothing.
+func TestRemoveSyncSyncsTheDirectory(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "chatgpt.json")
+	if err := os.WriteFile(path, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	syncs := countFsyncs(t, nil)
+	if err := RemoveSync(path); err != nil {
+		t.Fatal(err)
+	}
+	if *syncs != 1 {
+		t.Fatalf("RemoveSync synced %d times, want 1", *syncs)
+	}
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("the file is still there: %v", err)
+	}
+	*syncs = 0
+	if err := RemoveSync(path); err != nil {
+		t.Fatalf("RemoveSync of a missing file = %v, want nil", err)
+	}
+	if *syncs != 0 {
+		t.Fatalf("RemoveSync of a missing file synced %d times", *syncs)
+	}
+}
+
+// TestLockContextGivesUpWhenItsContextIsDone (plan 033 §2.3): a caller
+// waiting on a held lock with a minute's bound returns at once when its
+// context is cancelled, with the context's error; an already-done context
+// tries nothing. The controls: a free lock is taken, and a held one with a
+// short bound and a live context is ErrLockBusy.
+func TestLockContextGivesUpWhenItsContextIsDone(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "chatgpt.json.lock")
+
+	unlock, err := LockContext(context.Background(), path, time.Second)
+	if err != nil {
+		t.Fatalf("LockContext on a free lock = %v", err)
+	}
+	unlock()
+
+	held, err := Lock(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer held()
+
+	if unlock, err := LockContext(context.Background(), path, 3*lockPoll); !errors.Is(err, ErrLockBusy) {
+		unlock()
+		t.Fatalf("LockContext on a held lock = %v, want ErrLockBusy at its bound", err)
+	}
+
+	done, cancel := context.WithCancel(context.Background())
+	cancel()
+	if unlock, err := LockContext(done, path, time.Minute); !errors.Is(err, context.Canceled) {
+		unlock()
+		t.Fatalf("LockContext with a done context = %v, want context.Canceled", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	got := make(chan error, 1)
+	go func() {
+		unlock, err := LockContext(ctx, path, time.Minute)
+		unlock()
+		got <- err
+	}()
+	cancel()
+	select {
+	case err := <-got:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("LockContext = %v after its context was cancelled, want context.Canceled", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("LockContext kept waiting for a minute's bound after its context was cancelled")
+	}
+	if unlock, err := LockWithin(path, 0); !errors.Is(err, ErrLockBusy) {
+		unlock()
+		t.Fatalf("a cancelled LockContext released the holder's lock: %v", err)
 	}
 }
