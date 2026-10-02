@@ -853,8 +853,16 @@ func nativeTurnErr(t *testing.T, text string, steps ...step) error {
 }
 
 // agentExitStatusErr is the reaper's error for an agent that exited non-zero
-// under a turn (acp/spawn.go): a real *exec.ExitError, wrapped the same way.
-func agentExitStatusErr(t *testing.T) error {
+// under a turn (acp/spawn.go): the *acp.ExitError it observed, wrapped the
+// same way.
+func agentExitStatusErr(*testing.T) error {
+	return fmt.Errorf("acp: agent exited: %w", &acp.ExitError{Status: syscall.WaitStatus(3 << 8)})
+}
+
+// agentReapedExitStatusErr is the same error where the reaper could only
+// learn of the exit by reaping it (acp/reaper.go's reapUnobserved): a real
+// *exec.ExitError, wrapped the same way.
+func agentReapedExitStatusErr(t *testing.T) error {
 	t.Helper()
 	err := exec.Command("sh", "-c", "exit 3").Run()
 	var exit *exec.ExitError
@@ -904,6 +912,8 @@ func TestEventCodecErrorsKeepMessageClassCodeAndIs(t *testing.T) {
 			EventErrAgentExited, 0, []error{acp.ErrAgentExited, ErrAgentExited}},
 		{"the agent exited non-zero under the turn (the reaper's error)",
 			agentExitStatusErr, EventErrAgentExitStatus, 3, nil},
+		{"the agent exited non-zero under the turn (the reap's error)",
+			agentReapedExitStatusErr, EventErrAgentExitStatus, 3, nil},
 		{"the live caller's context was cancelled",
 			func(*testing.T) error { return cancelled.Err() }, EventErrCanceled, 0, []error{context.Canceled}},
 		{"the live caller's deadline passed",

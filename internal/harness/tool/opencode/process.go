@@ -109,9 +109,9 @@ func startGroup(cmd *exec.Cmd) (*group, error) {
 // leader before the last SIGKILL (at most the 2 s drain wait later) would get
 // that signal. The group must already be empty — while any member lives the
 // id stays taken — and macOS hands out pids in sequence up to 99999, so the
-// counter would have to go round the whole pid space within those 2 s. It is
-// the window internal/acp/spawn.go's group shutdown accepts; on Linux,
-// waitNoReap closes it.
+// counter would have to go round the whole pid space within those 2 s. On
+// Linux, waitNoReap closes it; internal/acp's agent reaper closes it on macOS
+// too, with a kqueue that sees the exit without reaping (reaper_darwin.go).
 func (g *group) watch() {
 	defer close(g.reaped)
 	pinned := waitNoReap(g.pid)

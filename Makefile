@@ -18,6 +18,7 @@ build:
 # must not import the rest of craze (D-02; plan 018 §3.1).
 lint:
 	golangci-lint run
+	GOOS=darwin golangci-lint run
 	@n=$$(go list -f '{{join .Imports "\n"}}' ./internal/tui ./internal/cli | grep -c internal/acp || true); \
 	echo "$$n"; test "$$n" = "0"
 

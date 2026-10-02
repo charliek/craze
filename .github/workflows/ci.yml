@@ -24,10 +24,12 @@ permissions:
 # syscall.SysProcAttr and syscall.Flock. They stay ubuntu-only because the
 # macOS legs below already compile everything: `go test ./...` builds every
 # package there, and the cli job runs `make build` on both legs. A separate
-# darwin build job would recompile what those legs just compiled. The same
-# goes for lint: there is no GOOS-suffixed or //go:build-gated source in the
-# tree, so there is no file golangci-lint would only see with GOOS=darwin.
-# Add either of those and this reasoning needs revisiting.
+# darwin build job would recompile what those legs just compiled. Lint is
+# different: the tree has GOOS-suffixed sources (internal/acp's reaper_linux.go
+# and reaper_darwin.go, plan 032 C19, among others), and golangci-lint on
+# ubuntu sees only the linux ones — so `make lint` runs it a second time with
+# GOOS=darwin, type-checking and linting the darwin files on this one ubuntu
+# job without a macOS runner.
 jobs:
   test:
     strategy:
