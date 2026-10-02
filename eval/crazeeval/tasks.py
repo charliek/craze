@@ -32,6 +32,10 @@ CHECK_TYPES = {
 
 
 TEST_RUNNERS = ("pytest", "go")
+# Where an executed_code check's evidence may show (its ``evidence_in``; checks.py):
+# the call's command, the result it returned, or a file an earlier call wrote that the
+# command names.
+EVIDENCE_PLACES = ("command", "result", "file")
 FULL_SHA = re.compile(r"^[0-9a-f]{40}$")
 
 
@@ -143,6 +147,10 @@ def load_task(d: Path) -> Task:
             # Without evidence any code-running call passes, `python --version` included
             # (review r1-c2 §4).
             raise TaskError(f"{tid}: {c['name']}: executed_code needs evidence regexes")
+        if c["type"] == "executed_code" and "evidence_in" in c:
+            where = c["evidence_in"]
+            if not isinstance(where, list) or not where or not set(where) <= set(EVIDENCE_PLACES):
+                raise TaskError(f"{tid}: {c['name']}: evidence_in must list some of {EVIDENCE_PLACES}")
         if c["type"] == "shared_helper" and not (c.get("callers") and c.get("markers")):
             raise TaskError(f"{tid}: {c['name']}: shared_helper needs callers and markers")
         if c["type"] == "tests":

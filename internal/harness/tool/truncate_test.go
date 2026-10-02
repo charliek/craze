@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -200,6 +201,73 @@ func TestSpillRefusals(t *testing.T) {
 		t.Fatal(err)
 	}
 	f.Close()
+}
+
+// TestSpillFilesOfAnID (plan 033 C11r2, review r8 finding 4): SpillFiles are
+// the files OpenSpill names for an id — the plain name and its suffixed ones,
+// regular files only, in name order — and nothing else in the directory: not
+// another id's (one whose id the given id is a prefix of included), not a
+// suffix OpenSpill never makes, not a symlink or a directory with the id's
+// name, not a file reached through a symlinked spill directory, and nothing
+// for an id OpenSpill would refuse. The files OpenSpill itself creates are
+// the positive control.
+func TestSpillFilesOfAnID(t *testing.T) {
+	home := t.TempDir()
+	dir := filepath.Join(home, SpillDir)
+	if got := SpillFiles(home, "t4.2.1"); got != nil {
+		t.Fatalf("no spill directory: SpillFiles = %q", got)
+	}
+	open := func(id string) string {
+		t.Helper()
+		f, err := OpenSpill(home, id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		f.Close()
+		return f.Name()
+	}
+	plain := open("t4.2.1")
+	if got := SpillFiles(home, "t4.2.1"); len(got) != 1 || got[0] != plain || plain != filepath.Join(dir, "tool_t4.2.1") {
+		t.Fatalf("SpillFiles = %q; want [%s]", got, plain)
+	}
+	suffixed := open("t4.2.1") // the plain name is taken: a suffixed one
+	open("t4.2.10")
+	open("t4.2.1.1")
+	outside := filepath.Join(t.TempDir(), "passwd")
+	if err := os.WriteFile(outside, []byte("root:x:0:0"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"tool_t4.2.1-0123abcd", "tool_t4.2.10-0123abcd"} {
+		if err := os.Symlink(outside, filepath.Join(dir, name)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Mkdir(filepath.Join(dir, "tool_t4.2.1-fedcba98"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"tool_t4.2.1-ABCDEF12", "tool_t4.2.1-0123abc", "tool_t4.2.1-0123abcde", "tool_t4.2.1x", "t4.2.1"} {
+		if err := os.WriteFile(filepath.Join(dir, name), nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got := SpillFiles(home, "t4.2.1")
+	if want := []string{plain, suffixed}; !slices.Equal(got, want) {
+		t.Fatalf("SpillFiles = %q; want %q", got, want)
+	}
+	for _, id := range []string{"", "..", "../tool-output/tool_t4.2.1", "a/b"} {
+		if got := SpillFiles(home, id); got != nil {
+			t.Fatalf("SpillFiles(%q) = %q; want none", id, got)
+		}
+	}
+
+	// A symlinked spill directory is never read through.
+	linked := t.TempDir()
+	if err := os.Symlink(dir, filepath.Join(linked, SpillDir)); err != nil {
+		t.Fatal(err)
+	}
+	if got := SpillFiles(linked, "t4.2.1"); got != nil {
+		t.Fatalf("through a symlinked spill directory: SpillFiles = %q", got)
+	}
 }
 
 // atSpillCheck runs f in the window between openSpillDir's check of the

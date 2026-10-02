@@ -99,50 +99,10 @@ const (
 // incarnation started and never delivered (plan 033 C10r, V3 F1): the session
 // closed before the job's result came through, so whether the command had
 // finished by then, and how, is not known — it may have exited, its result
-// waiting (P14's suspended results among them), or been killed by the close.
-// It is no ending a running job reports.
+// waiting (P14's suspended results among them), been killed by the close, or,
+// when craze crashed rather than closed, still be running, no longer managed
+// (C11r2, review r8 finding 8). It is no ending a running job reports.
 const JobUnknown = "unknown"
-
-// The words of the receipts (§3.7) around the spill file's path, which the
-// bash tool writes and a resumed session reads the path back from
-// (JobSpillPath), to name the file in its notice. A start receipt begins with
-// JobStartedHead and names the file after JobSavedTo, the path ending its
-// line; a promotion receipt names it in its metadata, after the output so
-// far, after JobSavedTo too, the path followed by JobPromotedSavedEnd.
-// Neither has JobSavedTo when the file could not be opened.
-const (
-	JobStartedHead      = "Started the command in the background as job `"
-	JobSavedTo          = "saved to: "
-	JobPromotedSavedEnd = ". Its result is delivered to you when it finishes"
-)
-
-// JobSpillPath is the spill file a receipt names — a start receipt's, or a
-// promotion receipt's — or "" when it names none. A promotion receipt's path
-// is read from its last <shell_metadata> block only, which follows the
-// command's output: what the command printed cannot name it.
-func JobSpillPath(receipt string) string {
-	if strings.HasPrefix(receipt, JobStartedHead) {
-		_, rest, ok := strings.Cut(receipt, JobSavedTo)
-		if !ok {
-			return ""
-		}
-		path, _, _ := strings.Cut(rest, "\n")
-		return path
-	}
-	i := strings.LastIndex(receipt, "<shell_metadata>\n")
-	if i < 0 {
-		return ""
-	}
-	_, rest, ok := strings.Cut(receipt[i:], JobSavedTo)
-	if !ok {
-		return ""
-	}
-	path, _, ok := strings.Cut(rest, JobPromotedSavedEnd)
-	if !ok || strings.Contains(path, "\n") {
-		return ""
-	}
-	return path
-}
 
 // Who stopped a job, as the delivered result's by attribute says it (§3.7):
 // the model reading the result is "you".

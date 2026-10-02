@@ -129,9 +129,11 @@ row carry job results while no turn of yours has started; after that, results
 wait and arrive with your next prompt. Quitting or closing the session
 stops every running job without delivering anything. `--resume` does not
 reattach jobs: the model is told, at the first turn after the resume, that the
-session closed before each such command's result was delivered, that it is not
-running now — it may have finished first — and where its output was saved, so
-it can read that file rather than run the command again. Headless
+session closed before each such command's result was delivered and craze no
+longer manages it — stopped if the session closed normally, possibly still
+running if craze crashed, and possibly finished first — and where its output
+was saved, so it can read that file and check whether the command still runs
+rather than start it again. Headless
 `craze prompt` and sub-agent children run no jobs, and their model is not
 offered any: its `bash` has no `run_in_background` parameter and its
 description says nothing of jobs or promotion, and it has no `bash_output`

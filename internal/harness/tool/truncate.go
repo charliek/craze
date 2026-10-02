@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -220,6 +221,62 @@ func createSpill(root *os.Root, id string) (*os.File, string, error) {
 		_, _ = rand.Read(b[:]) // never fails (crypto/rand)
 		name = spillPrefix + id + "-" + hex.EncodeToString(b[:])
 	}
+}
+
+// SpillFiles are the spill files under <home>/tool-output that the call id
+// may have written, as paths, in name order: tool_<id> and every
+// tool_<id>-<8 hex digits> — OpenSpill's names for it — that is a regular
+// file. nil when there are none, when the directory is missing, a symlink or
+// unreadable (it is opened as OpenSpill opens it), or when id is not one
+// OpenSpill would name a file after.
+//
+// It is how a resumed session finds a background job's output (plan 033
+// C11r2, review r8 finding 4): by the job's id, never by a path read from the
+// job's receipt, whose text begins with what the command printed and so can
+// name any file at all. More than one file can carry an id's names, since ids
+// repeat across sessions (OpenSpill); nothing on disk tells which is the
+// job's, so the caller is given every one. A symlink or a directory with such
+// a name is never one: OpenSpill creates neither.
+func SpillFiles(home, id string) []string {
+	if !validID(id) {
+		return nil
+	}
+	root, err := openSpillDir(home, false)
+	if err != nil {
+		return nil
+	}
+	defer root.Close()
+	d, err := root.Open(".")
+	if err != nil {
+		return nil
+	}
+	entries, err := d.ReadDir(-1) // in directory order
+	d.Close()
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for _, e := range entries {
+		if e.Type().IsRegular() && spillNameOf(e.Name(), id) {
+			out = append(out, filepath.Join(home, SpillDir, e.Name()))
+		}
+	}
+	slices.Sort(out) // the plain name first
+	return out
+}
+
+// spillNameOf reports whether name is one createSpill gives the call id:
+// tool_<id>, or tool_<id>-<8 lowercase hex digits>.
+func spillNameOf(name, id string) bool {
+	rest, ok := strings.CutPrefix(name, spillPrefix+id)
+	if !ok {
+		return false
+	}
+	if rest == "" {
+		return true
+	}
+	suffix, ok := strings.CutPrefix(rest, "-")
+	return ok && len(suffix) == 8 && allBytes(suffix, func(c byte) bool { return c >= '0' && c <= '9' || c >= 'a' && c <= 'f' })
 }
 
 // spillDirChecked runs between openSpillDir's check of the directory and its

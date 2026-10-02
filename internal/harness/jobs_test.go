@@ -1462,6 +1462,11 @@ func (c promotingCall) Run(_ context.Context, env tool.Env) tool.Result {
 // promotingProfile is opencode's profile with its bash replaced by
 // promotingBash.
 func promotingProfile(bodies chan *fakeBody) func() (*tool.Registry, error) {
+	return profileWithBash(promotingBash{bodies: bodies})
+}
+
+// profileWithBash is opencode's profile with its bash replaced by bash.
+func profileWithBash(bash tool.Tool) func() (*tool.Registry, error) {
 	return func() (*tool.Registry, error) {
 		p, err := opencode.Profile()
 		if err != nil {
@@ -1469,7 +1474,7 @@ func promotingProfile(bodies chan *fakeBody) func() (*tool.Registry, error) {
 		}
 		for i, tl := range p.Tools {
 			if tl.Spec().ID == tool.BashTool {
-				p.Tools[i] = promotingBash{bodies: bodies}
+				p.Tools[i] = bash
 			}
 		}
 		var reg tool.Registry

@@ -182,11 +182,11 @@ const (
 // values), with the note of a reduced limit, as metadata, before the marker.
 // path is the spill file, "" when it could not be opened in time.
 func (c *bashCall) startReceipt(path string) string {
-	saved := "Its output is " + tool.JobSavedTo + path
+	saved := "Its output is saved to: " + path
 	if path == "" {
 		saved = "Its output could not be saved to a file."
 	}
-	text := tool.JobStartedHead + c.id + "`. It runs until it exits, until you stop it with bash_stop, " +
+	text := "Started the command in the background as job `" + c.id + "`. It runs until it exits, until you stop it with bash_stop, " +
 		"or for at most " + tool.JobLimit(c.timeout) + "; the session closing stops it too. " + saved + "\n" +
 		"Its result is delivered to you when it finishes; do not poll it or sleep waiting for it. " +
 		"Call bash_output with its id to read its output so far."
@@ -211,7 +211,7 @@ func (c *bashCall) promotionReceipt(kept string, cut bool, path string) string {
 	if cut {
 		text = "...output truncated...\n\n" + text
 	}
-	saved := "all of it is " + tool.JobSavedTo + path + "."
+	saved := "all of it is saved to: " + path + "."
 	if path == "" {
 		saved = "it could not be saved to a file."
 	}
@@ -221,7 +221,7 @@ func (c *bashCall) promotionReceipt(kept string, cut bool, path string) string {
 	}
 	meta = append(meta, fmt.Sprintf("The command did not finish within its timeout of %d ms. It was not stopped: it was moved to the background as "+
 		"job `%s` and is still running, for at most %s. Its output so far is above; %s "+
-		strings.TrimPrefix(tool.JobPromotedSavedEnd, ". ")+"; do not poll it or sleep waiting for it. "+
+		"Its result is delivered to you when it finishes; do not poll it or sleep waiting for it. "+
 		"Call bash_output with its id to read newer output, or bash_stop to stop it.",
 		c.timeout.Milliseconds(), c.id, strings.Replace(tool.JobLimit(tool.JobPromotedLimit), " ", " more ", 1), saved))
 	return strings.TrimSuffix(text, "\n") + "\n\n<shell_metadata>\n" + strings.Join(meta, "\n") + "\n</shell_metadata>\n" + tool.JobMarker(c.id)

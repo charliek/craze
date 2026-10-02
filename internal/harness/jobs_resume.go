@@ -9,31 +9,38 @@ import (
 )
 
 // Resuming a session that ran background jobs (plan 033 §3.8 "Resume", P15,
-// owner decision 3). Jobs are never reattached: a session that closes kills
-// them, and nothing of a job's result is persisted until it is delivered. So a
-// resumed session tells its model, once, that every job its last incarnation
-// started and never delivered is not running, in the job's own block — and,
-// since the session cannot tell a job the close killed from one that had
-// finished with its result still to be delivered (a result the wake chain's
-// cap suspended, P14, which a detached host closes on), that it may have
-// finished, and where its output is (plan 033 C10r, V3 F1, superseding §3.7's
+// owner decision 3). Jobs are never reattached, and nothing of a job's result
+// is persisted until it is delivered. A session that closes stops its jobs; a
+// craze that crashes stops nothing, and a command in its own session that
+// outlives it runs on, managed by no one (review r8 finding 8). So a resumed
+// session tells its model, once, of every job its last incarnation started
+// and never delivered, in the job's own block: that craze no longer manages
+// it — stopped if the session closed normally, perhaps still running if craze
+// crashed — that it may have finished first (a result the wake chain's cap
+// suspended, P14, which a detached host closes on, is one the session cannot
+// tell from a job the close killed; plan 033 C10r, V3 F1, superseding §3.7's
 // "Start it again if you still need it", which a model read as "it produced
-// nothing" of a job that had exited 0):
+// nothing" of a job that had exited 0), and where its output is (C11r2):
 //
 //	<background_command id="t4.2.1" status="unknown">
 //	$ npm run dev
-//	The session was closed before this command's result was delivered. It is not running now; it may have finished first. Its output, if it wrote any, is saved to: /…/tool-output/tool_t4.2.1. Check that file before running it again.
+//	The session was closed before this command's result was delivered, and craze no longer manages it: if the session closed normally the command was stopped, but if craze crashed it may still be running. It may also have finished first. Its output, if it wrote any, is saved to: /…/tool-output/tool_t4.2.1. Check that file, and whether the command is still running, before running it again.
 //	</background_command>
 //
-// The file is the one the job's receipt named (tool.JobSpillPath), which the
-// job wrote from its first byte to its end; a receipt that named none — the
-// file could not be opened — gives a notice that says so.
+// The file is found by the job's id (tool.SpillFiles), never read from its
+// receipt (C11r2, review r8 finding 4): a promotion receipt begins with the
+// command's own output, which can spell any receipt at all, and a path taken
+// from it would send the model to whatever file the command chose. The job
+// wrote its file from its first byte to its end; when no file carries its
+// names the notice says none was found, and when several do — ids repeat
+// across sessions — it names each, saying the others are other sessions'.
 //
 // Each such block is set aside as a suspended result (restoreJobs): it wakes
 // nothing and keeps no host alive, and the first turn a person starts takes it
 // at its step 0, as it takes a result a failed wake set aside; bash_output or
-// bash_stop naming it deliver it too. It is never running — it has no handle —
-// so a stop, the stop key's included, finds nothing to stop.
+// bash_stop naming it deliver it too. It is never running in this session —
+// it has no handle — so a stop, the stop key's included, finds nothing to
+// stop.
 //
 // # The scan (jobScan)
 //
@@ -56,18 +63,27 @@ import (
 // A job started and not delivered is one to tell the model about, in the
 // order the path started them. A command that printed a marker line naming
 // a call of its own turn as its last line forges one: the model is then told
-// a job it never started stopped — the cost of P15's one-line rule, and a
-// harmless one.
+// of a job it never started — the cost of P15's one-line rule, and a harmless
+// one, since the notice names only files in the spill directory that carry
+// that call's names.
 
 // jobResumeNotice is the resume notice (the file's comment): the body of a
-// job's block after its command's line, naming spill, the file its receipt
-// named, or saying there is none.
-func jobResumeNotice(spill string) string {
-	const head = "The session was closed before this command's result was delivered. It is not running now; it may have finished first. "
-	if spill == "" {
-		return head + "Its output was not saved to a file."
+// job's block after its command's line, naming spills, the files that carry
+// the job's names in the spill directory (tool.SpillFiles), or saying none
+// was found.
+func jobResumeNotice(spills []string) string {
+	const head = "The session was closed before this command's result was delivered, and craze no longer manages it: " +
+		"if the session closed normally the command was stopped, but if craze crashed it may still be running. " +
+		"It may also have finished first. "
+	const running = "whether the command is still running"
+	switch len(spills) {
+	case 0:
+		return head + "No file of its output was found. Check " + running + " before running it again."
+	case 1:
+		return head + "Its output, if it wrote any, is saved to: " + spills[0] + ". Check that file, and " + running + ", before running it again."
 	}
-	return head + "Its output, if it wrote any, is saved to: " + spill + ". Check that file before running it again."
+	return head + "Its output, if it wrote any, is saved to one of these files; the others hold the output of other sessions' " +
+		"commands with the same id: " + strings.Join(spills, ", ") + ". Check them, and " + running + ", before running it again."
 }
 
 // The delimiters of the result blocks a results entry holds: a job's
@@ -82,9 +98,10 @@ const (
 )
 
 // stoppedJob is a job a resumed session's last incarnation started and never
-// delivered: its id, its command, as the call that started it gave it, and
-// its spill file, as its receipt named it ("" for none).
-type stoppedJob struct{ id, cmd, spill string }
+// delivered: its id, and its command, as the call that started it gave it.
+// Its spill file is not here: the scan reads only the path, and the file is
+// found by the id when the session is restored (restoreJobs).
+type stoppedJob struct{ id, cmd string }
 
 // jobScan reads a transcript's path, entry by entry, for the jobs it started
 // and the ones it delivered (the file's comment). It is handed each entry's
@@ -128,7 +145,7 @@ func (j *jobScan) result(callID, text string, isErr bool, turn int) {
 	switch c.name {
 	case tool.BashTool:
 		if id, ok := tool.ParseJobMarker(text); ok && !isErr && jobTurn(id) == turn {
-			j.started = append(j.started, stoppedJob{id: id, cmd: commandArg(c.input), spill: tool.JobSpillPath(text)})
+			j.started = append(j.started, stoppedJob{id: id, cmd: commandArg(c.input)})
 		}
 	default: // bash_output, bash_stop: the block, when the answer is one
 		if id, ok := blockID(text, jobBlockOpen); ok {
@@ -226,19 +243,24 @@ func resultsJobIDs(text string) []string {
 // restoreJobs sets aside, in a resumed session, one result per job its last
 // incarnation started and never delivered (the file's comment): suspended, in
 // stopped's order, its done closed and no handle, its status unknown and its
-// block the resume notice — the command redacted with the session's widest
-// redaction as it is now (union, P19), and the text again as deliver makes
-// the block. An id the registry holds already is left alone (it cannot be: a
-// resumed session numbers its turns on from the path's). A nil runner has
-// none.
-func (r *subagents) restoreJobs(stopped []stoppedJob) {
+// block the resume notice — naming the files under home that carry the job's
+// names (tool.SpillFiles, looked up before the registry's lock is taken), the
+// command redacted with the session's widest redaction as it is now (union,
+// P19), and the text again as deliver makes the block. An id the registry
+// holds already is left alone (it cannot be: a resumed session numbers its
+// turns on from the path's). A nil runner has none.
+func (r *subagents) restoreJobs(home string, stopped []stoppedJob) {
 	if r == nil || len(stopped) == 0 {
 		return
+	}
+	notices := make([]string, len(stopped))
+	for i, sj := range stopped {
+		notices[i] = jobResumeNotice(tool.SpillFiles(home, sj.id))
 	}
 	red := r.union(nil)
 	r.regMu.Lock()
 	defer r.regMu.Unlock()
-	for _, sj := range stopped {
+	for i, sj := range stopped {
 		if r.results[sj.id] != nil {
 			continue
 		}
@@ -247,7 +269,7 @@ func (r *subagents) restoreJobs(stopped []stoppedJob) {
 		close(done)
 		r.finished++
 		r.results[sj.id] = &bgResult{kind: kindJob, id: sj.id, typ: tool.JobType, desc: commandLine(cmd), callID: sj.id,
-			state: resultSuspended, status: tool.JobUnknown, text: red.String(jobText(cmd, jobResumeNotice(sj.spill))),
+			state: resultSuspended, status: tool.JobUnknown, text: red.String(jobText(cmd, notices[i])),
 			seq: r.finished, done: done, job: &jobState{cmd: cmd, attrs: jobAttrs{exit: -1}}}
 		r.order = append(r.order, sj.id)
 	}

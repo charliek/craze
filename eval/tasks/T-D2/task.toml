@@ -48,13 +48,30 @@ id = "version-build"
 regex = 'a41c9e0'
 cite = "app.py: BUILD"
 
+# One check per endpoint (plan 033 C11r2, review r8 #7c): a curl call whose own returned
+# output is that endpoint's served body -- separate calls or one call for both. Only the
+# result counts (evidence_in): a comment or an expected body in the command's text, or a
+# file an earlier call wrote, is no evidence, and a request that failed returns no body.
+# /health's served body is compact JSON, or reformatted across lines (json.tool, jq); app.py
+# spells it on one line with spaces, so a listing of the source is no evidence either.
 [[checks]]
 type = "executed_code"
-name = "curled-the-running-server"
-# A shell call that ran curl and whose result came back showing a served body.
+name = "curled-health"
 patterns = ['\bcurl\b']
 require_result = true
-evidence = ['"status"\s*:\s*"ok"', '"version"\s*:\s*"2\.7\.3"']
+evidence_in = ["result"]
+evidence = [
+    '\{"status":"ok","checks":\{"db":"up","queue":"up"\}\}',
+    '"status"\s*:\s*"ok"\s*,[ \t]*\n\s*"checks"\s*:\s*\{[ \t]*\n\s*"db"\s*:\s*"up"\s*,[ \t]*\n\s*"queue"\s*:\s*"up"',
+]
+
+[[checks]]
+type = "executed_code"
+name = "curled-version"
+patterns = ['\bcurl\b']
+require_result = true
+evidence_in = ["result"]
+evidence = ['"version"\s*:\s*"2\.7\.3"\s*,\s*"build"\s*:\s*"a41c9e0"']
 
 [[checks]]
 type = "no_writes"

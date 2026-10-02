@@ -30,7 +30,7 @@ from pathlib import Path
 from crazeeval import capture as cap
 from crazeeval import safefs
 from crazeeval.sandbox import SandboxSpec, Toolchains, run_sandboxed
-from crazeeval.tasks import Task
+from crazeeval.tasks import EVIDENCE_PLACES, Task
 from crazeeval.workspace import Start, build_manifest, changed_paths, compare, materialise
 
 CHECK_TIMEOUT_S = 600
@@ -282,9 +282,15 @@ def check_executed_code(check: dict, records: list[dict]) -> dict:
     evidence), and which shows one of the ``evidence`` regexes -- in its command, in its
     result, or in an earlier call's arguments that wrote a file this command names (a
     script written, then run). ``python --version`` matches the command patterns and
-    nothing else, so it is no hit."""
+    nothing else, so it is no hit.
+
+    ``evidence_in`` narrows those places (any of :data:`EVIDENCE_PLACES`, default all):
+    ``["result"]`` counts only what the call returned, so evidence the command spells
+    itself -- a comment, an expected value in its text -- or a file an earlier call wrote
+    is none, and a request that failed shows nothing (plan 033 C11r2, review r8 #7)."""
     pats = [re.compile(p) for p in (check.get("patterns") or [r"\S"])]
     evidence = [re.compile(p) for p in (check.get("evidence") or [])]
+    places = set(check.get("evidence_in") or EVIDENCE_PLACES)
     need_result = check.get("require_result", True)
     results = cap.tool_results(records)
     calls = cap.all_tool_calls(records)
@@ -302,11 +308,11 @@ def check_executed_code(check: dict, records: list[dict]) -> dict:
         where = None
         if not evidence:
             where = "command"
-        elif any(p.search(cmd) for p in evidence):
+        elif "command" in places and any(p.search(cmd) for p in evidence):
             where = "command"
-        elif res is not None and any(p.search(res) for p in evidence):
+        elif "result" in places and res is not None and any(p.search(res) for p in evidence):
             where = "result"
-        else:
+        elif "file" in places:
             named = set(FILE_TOKEN.findall(cmd))
             names = {n.rsplit("/", 1)[-1] for n in named}
             for prev in calls[:i]:
