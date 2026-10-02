@@ -1821,9 +1821,13 @@ func TestFrameGoldenGrokSubagentCancel100x30(t *testing.T) {
 }
 
 func TestFrameGoldenGrokSubagentLate80x24(t *testing.T) {
-	got := runFakeFrameProvider(t, "grok-subagent-late-hold", 80, 24,
-		"<wait:idle>go<enter><wait:idle>",
-		agent.GrokProvider(), true)
+	// Frozen, as the other running-child goldens are: the parent is idle with
+	// its child still running, so the waiting line's spinner beats on the
+	// fast tick and its elapsed time counts on, and a slow run (a -race macOS
+	// runner, or a 25% CPU quota, which fails it every time unfrozen) caught
+	// another glyph or "1s" in one run of the matrix and not the other.
+	got := runFakeFrameFrozen(t, "grok-subagent-late-hold", 80, 24,
+		"<wait:idle>go<enter><wait:idle>", agent.GrokProvider())
 	assertGolden(t, "grok-subagent-late-80x24", 80, 24, got)
 	if !strings.Contains(got, "○") {
 		t.Fatalf("parent idle, the child should still be running:\n%s", got)
