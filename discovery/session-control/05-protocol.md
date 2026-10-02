@@ -606,7 +606,8 @@ through a splice. What those sections leave out:
   to nothing.
 - **When the roster answers.** A list or subscribe waits, at most 1 s, until
   the poll's current round has heard from every host, so a cold hub's first
-  answer is what the hosts say and not a page of `connecting` rows; a hub
+  answer is what the hosts say rather than a page of `connecting` rows — a
+  host that has not answered when that second ends is listed `connecting`; a hub
   that cannot read its registry answers `unavailable`, `host_unreachable` —
   never an empty roster, which `craze ps` would read as nothing running.
 - **Retrying a create.** A client must not retry `session.create` across a

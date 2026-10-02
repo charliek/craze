@@ -30,9 +30,9 @@ decisions `SD-nn`, open questions `SQ-n`.
 | 2026-10-01/02 | **S4b executed and shipped**: the per-machine hub (`craze hub`, auto-spawned, exiting when idle), its roster (`sessions.list`, `sessions.subscribe`), the `session.connect` splice and `session.create`; `craze ps`, `craze new` and `craze bridge --hub`; the session list on the hub's subscription, with its poller as the fallback; `--effort`/`--fast` at a session's start and per-provider agent binaries (`[agents]`); presence (`N attached`); with it the owner's rows (SF-86, SF-99, SF-61), the transcript's render cost (SF-102) and the agent reaper (SF-80). Five PRs (`feature/plan-032-rows` #75 `2eec72f`, `feature/plan-032-render` #76 `2dc80b7`, `feature/plan-032-hub` #78 `bc8da8f`, `feature/plan-032-create` #79 `8a33a12`, `feature/plan-032-reaper` #81). Live smoke on Linux (cursor, grok, native; a real `a0d88c3` host behind the hub) and the mac-mini (grok, native and, for the first time there, cursor, from the GUI login session's tmux server; a hub first started over ssh cannot start cursor, SF-126). **S4b is now complete.** Outcome, the execution amendments X1–X75, smoke tables and handoff in `12`; the backlog it leaves is `13`. |
 
 **Current phase: S4b is complete; S3 (the shed lane) is next, after shed's
-first release of its own lane work.** S1–S5 are committed and done (S4 is S4a
-and S4b, SD-34); S4c, S6 and S7 are directional and get decided after S1–S5
-are in daily use (SD-12, SD-38).
+first release of its own lane work.** S1, S2, S4 (S4a and S4b, SD-34) and S5
+are done; S3 is committed and next; S4c, S6 and S7 are directional and get
+decided after S1–S5 are in daily use (SD-12, SD-38).
 
 ## Reading order
 
