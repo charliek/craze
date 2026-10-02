@@ -80,14 +80,16 @@ import (
 // (its waiter's connection closes unanswered; a host already started runs
 // on: creator.stop) and wait, bounded by createCleanupWait (3 s) of its own
 // past teardownBound, for the cut creates whose host was launched to be done
-// with it — a host cut before its ready line ended (SIGTERM, createCutGrace,
-// SIGKILL) and reaped before Run returns; a stalled world check, which can
-// launch nothing now, is not waited for; a launch whose start returns within
-// that wait finds the hub closing and kills its host at once, no grace, and
-// reaps it; and one whose start returns only after it, or never (its child
-// stalled before its exec, in its chdir on a hung filesystem: no pid yet,
-// and no signal ends it), is left as it is, its host possibly coming up once
-// the hub has gone, owned by nobody (SF-117 (e)) — then,
+// with it: a host cut before its ready line is ended (SIGTERM,
+// createCutGrace, SIGKILL) and reaped, and a launch whose start returns once
+// the hub is closing kills its host at once, no grace, and reaps it — each
+// before Run returns when it completes within that wait. That is bounded
+// cleanup, not a guarantee (X66): a start that returns only after the wait,
+// or never (its child stalled before its exec, in its chdir on a hung
+// filesystem: no pid yet, and no signal ends it), or a kill whose goroutine
+// has not run when the wait expires, leaves its host as it is — owned by
+// nobody once the hub has gone (SF-117 (e)). A stalled world check, which can
+// launch nothing now, is not waited for. Then,
 // bounded by teardownBound still, or by teardownTail (1 s) of its own once
 // the waits before have used it up: close the listener, end every roster
 // subscription with reset{hub_closing} (resetWait), close every connection —
@@ -711,18 +713,18 @@ func (h *hub) teardown(cause string) {
 		}
 		h.cr.stop()
 		// The launches in flight and the cut creates whose host was launched
-		// are done with it before Run returns (r43 5, r45 F2, r46 1): a host
-		// cut before its ready line is ended and reaped, in createCutGrace;
-		// one whose start returns after the closing is killed at once, no
-		// grace, and reaped (creator.launch); a stalled world check launched
-		// nothing and is not waited for. A start that has not returned is
-		// waited for only so long: its child — stalled in its chdir into the
-		// create's directory on a hung filesystem, before its exec — has no
-		// pid the hub has been told yet, and a process in that
-		// uninterruptible wait does not die of SIGKILL either. It is left as
-		// it is: a start that returns while the hub still runs is killed by
-		// its launch, and one that returns after the hub has exited leaves
-		// its host owned by nobody, to its own idle exit (SF-117 (e)).
+		// are waited for within createCleanupWait (r43 5, r45 F2, r46 1): a
+		// host cut before its ready line is ended and reaped, in
+		// createCutGrace, and one whose start returns after the closing is
+		// killed at once, no grace, and reaped (creator.launch) — each gone
+		// before Run returns when that completes within the wait. Bounded
+		// cleanup, not a guarantee (X66): a start that has not returned when
+		// the wait expires — its child stalled in its chdir into the create's
+		// directory on a hung filesystem, before its exec, with no pid the
+		// hub has been told, in an uninterruptible wait SIGKILL does not end
+		// — or a kill whose goroutine has not run by then is left as it is,
+		// and its host is owned by nobody once the hub has exited (SF-117
+		// (e)). A stalled world check launched nothing and is not waited for.
 		if !waitUntil(&h.cr.launches, time.Now().Add(createCleanupWait)) {
 			h.logf("launches in flight, or hosts the cut creates launched, were not done within %v; a start that has not returned is left as it is",
 				createCleanupWait)

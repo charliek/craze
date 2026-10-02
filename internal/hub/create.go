@@ -214,9 +214,10 @@ type creator struct {
 	// are not yet done with its host — the start still running, or the host
 	// still to be ended, settled or handed on by its create — each Added
 	// under the lifecycle lock, so never once the hub is closing: what the
-	// teardown waits for after its cut, so that a host it cut, or one whose
-	// start returned after the closing, is ended and reaped before Run
-	// returns (r43 5, r45 F2).
+	// teardown waits for after its cut, within its cleanup wait, so that a
+	// host it cut, or one whose start returned after the closing, is ended
+	// and reaped before Run returns when that completes within the wait (r43
+	// 5, r45 F2; bounded cleanup, X66).
 	launches sync.WaitGroup
 }
 
@@ -824,13 +825,17 @@ type ownedHost struct {
 // errLaunchClosing. Either way the count is the create's to drop: here on a
 // failure or a closing — once the host is gone — at its end otherwise. So a
 // launch is whole before the hub closes — a host the teardown's cut handles
-// as any create's mid-start — or refused, or killed by the launch itself, and
-// the teardown waits for each within its cleanup wait. A start that returns
-// only once that wait has passed, or never, is left as it is (lifecycle.go's
-// teardown): its host can come up after the hub has exited, owned by nobody,
-// and live until its own idle exit (SF-117 (e); closing it needs a start gate
-// the hub holds — the child waiting on a pipe whose EOF aborts it — a new
-// host handshake). groups and log are the host's agents' record and its log.
+// as any create's mid-start — or refused, or killed by the launch itself;
+// the teardown waits for each within its cleanup wait, and the host is gone
+// before Run returns when its ending completes within that wait. That is
+// bounded cleanup, not a guarantee (X66): a start that returns only once the
+// wait has passed, or never, or a kill whose goroutine has not run when it
+// expires, leaves the host as it is (lifecycle.go's teardown) — owned by
+// nobody once the hub has exited (SF-117 (e), which says what ends it then,
+// and the fix: a start gate the hub holds, whose EOF aborts the child, and a
+// shutdown that coordinates the children whose start returned and that
+// nobody has committed). groups and log are the host's agents' record and
+// its log.
 // The lock order is the table's lock, then this one: launch holds the table's
 // lock never.
 func (cr *creator) launch(cmd *exec.Cmd, groups, log string) (*ownedHost, *os.File, error) {

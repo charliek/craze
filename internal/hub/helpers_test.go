@@ -404,7 +404,10 @@ type running struct {
 	ready  chan []byte // its ready line, once; closed with none
 	done   chan struct{}
 	err    error // Run's, once done is closed
-	h      chan *hub
+	// returned is when Run returned, taken on Run's own goroutine before done
+	// is closed: a teardown's length, whenever the test next runs.
+	returned time.Time
+	h        chan *hub
 }
 
 // runIn runs a hub over env with hk's schedule (nil: production's), its
@@ -447,6 +450,7 @@ func runWith(t *testing.T, env rundir.Env, hk *hooks, creates *Creates) *running
 	go func() {
 		rn.err = Run(context.Background(), Options{Env: env, Ready: NewReadyPipe(w), Signals: rn.sigs,
 			Stderr: rn.stderr, IdleGrace: time.Hour, Codecs: protocol.Codecs{Event: 1, Snapshot: 1}, Creates: creates, hooks: hk})
+		rn.returned = time.Now()
 		close(rn.done)
 	}()
 	t.Cleanup(func() {

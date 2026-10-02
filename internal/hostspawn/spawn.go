@@ -353,7 +353,9 @@ func (c *Child) End(grace time.Duration) bool {
 // Kill ends the host at once — SIGKILL to its process group (setsid made it
 // the leader of its own), no SIGTERM and no grace: a host that never got to
 // its ready line owes nothing — and waits for the reaper. A host in an
-// uninterruptible wait keeps it waiting until it goes.
+// uninterruptible wait keeps it waiting until it goes. Like End's SIGKILL,
+// the group signal follows an Exited check the reaper can overtake: a group
+// id reused in between would be signalled instead (SF-120).
 func (c *Child) Kill() {
 	if !c.Exited() {
 		_ = syscall.Kill(-c.pid, syscall.SIGKILL)
