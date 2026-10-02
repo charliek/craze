@@ -8,6 +8,7 @@ import (
 
 	"github.com/charliek/craze/internal/agent"
 	"github.com/charliek/craze/internal/backend"
+	"github.com/charliek/craze/internal/hub"
 	"github.com/charliek/craze/internal/modelcache"
 	"github.com/charliek/craze/internal/roster"
 	"github.com/charliek/craze/internal/rundir"
@@ -38,11 +39,39 @@ type sessionList struct{ l *launcher }
 // drawn under the rows.
 var _ tui.SessionStarter = sessionList{}
 
-// Roster opens the list's poller: the registry of this user (the launcher's
-// env, the process's), the index of this CRAZE_HOME, and only the providers
-// this build knows offered as saved.
+// Roster opens the list's roster through the hub (hub.Roster, plan 032
+// §3.13): it returns at once, its running rows the hub's roster
+// subscription's — the hub of this HOME and CRAZE_HOME (the launcher's env,
+// the process's), started on demand — or, when the hub cannot be had, the
+// list's own poller's over this user's registry; its saved rows the index of
+// this CRAZE_HOME's, only the providers this build knows offered. A row the
+// hub lists carries no socket: Open, Stop and Cancel resolve it from the
+// registry when they act (entryOf).
 func (s sessionList) Roster() tui.SessionRoster {
-	return roster.Open(s.l.env, &sessions.Store{KnownProvider: knownProvider})
+	return hub.Roster(s.l.env, &sessions.Store{KnownProvider: knownProvider})
+}
+
+// errNotReachable is a running row acted on whose host the registry no longer
+// lists: a row the hub listed names its host by id alone, and a host gone
+// from the registry has no socket to reach it by.
+var errNotReachable = errors.New("session not reachable")
+
+// entryOf is the registry entry ref's running session is reached by: its
+// host as its row names it, with the socket the registry lists for that host
+// id now when the row carries none — a row the hub listed (§3.13: no socket
+// crosses the wire) — and errNotReachable when the registry lists no such
+// host. The session it names is the row's, never whatever the host serves
+// by now.
+func (s sessionList) entryOf(ref roster.Ref) (rundir.Entry, error) {
+	h := ref.Host
+	if h.Socket == "" {
+		e, ok := hostEntry(s.l.env, h.ID)
+		if !ok || e.Socket == "" {
+			return rundir.Entry{}, errNotReachable
+		}
+		h.Socket = e.Socket
+	}
+	return h.Entry(), nil
 }
 
 // RecentDirs is the `@` picker's recent directories (plan 030 §3.15): up to
@@ -87,7 +116,11 @@ func (s sessionList) Open(ref roster.Ref) (backend.Backend, error) {
 	if ref.Saved != nil {
 		return s.l.openSaved(*ref.Saved)
 	}
-	return s.l.open(ref.Host.Entry())
+	e, err := s.entryOf(ref)
+	if err != nil {
+		return nil, &launchError{msg: "craze: " + err.Error(), err: err}
+	}
+	return s.l.open(e)
 }
 
 // Spawn starts a host for spec's new session and answers its ref, for Open
@@ -116,7 +149,11 @@ func (s sessionList) Stop(ref roster.Ref) error {
 	if ref.Saved != nil {
 		return errStopSaved
 	}
-	return stopHost(ref.Host.Entry())
+	e, err := s.entryOf(ref)
+	if err != nil {
+		return err
+	}
+	return stopHost(e)
 }
 
 // Cancel clears ref's queue and cancels its running turn on its host, over a
@@ -126,7 +163,11 @@ func (s sessionList) Cancel(ref roster.Ref) error {
 	if ref.Saved != nil {
 		return errStopSaved
 	}
-	return cancelHost(ref.Host.Entry())
+	e, err := s.entryOf(ref)
+	if err != nil {
+		return err
+	}
+	return cancelHost(e)
 }
 
 // open dials the host e names as the TUI's client and attaches — as the

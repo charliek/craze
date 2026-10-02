@@ -795,10 +795,10 @@ The hub is one process per user and craze directory (`CRAZE_HOME`), `craze
 hub`: it serves the [roster](protocol.md#the-hubs-roster) of every running
 session and a [splice](protocol.md#the-hub-splice) to any one of them, on a
 socket of its own in the runtime namespace. **Nothing needs starting by
-hand:** `craze ps`, [`craze new`](#craze-new) and `craze bridge --hub` start
-it when none runs — re-executed, in a session of its own, its stdio on
-`/dev/null` — and the next one finds it. A hub that does not answer is
-replaced.
+hand:** `craze ps`, [`craze new`](#craze-new), `craze bridge --hub` and the
+TUI's [session list](tui.md#session-list) start it when none runs —
+re-executed, in a session of its own, its stdio on `/dev/null` — and the next
+one finds it. A hub that does not answer is replaced.
 
 It **exits by itself 60 seconds after the last host has gone and the last
 client has disconnected** — one nobody ever connected to included — and

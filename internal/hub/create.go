@@ -1291,8 +1291,8 @@ func joinWithin(done <-chan struct{}, d time.Duration) {
 // ------------------------------------------------------------ the client
 
 // ErrUnanswered is a hub request whose connection ended before its answer
-// (Create): the request may have been taken. A create retried under the same
-// requestId answers the session it started, if it did.
+// (hubConn.call): the request may have been taken. A create (Create) retried
+// under the same requestId answers the session it started, if it did.
 var ErrUnanswered = errors.New("hub: the connection ended before the answer")
 
 // Create asks the hub at socket for a new session — hello as who, then
@@ -1302,13 +1302,13 @@ var ErrUnanswered = errors.New("hub: the connection ended before the answer")
 // before the answer, one wrapping ErrUnanswered; a hub whose hello says it
 // creates no session, a *LacksError.
 func Create(ctx context.Context, socket string, who protocol.ClientInfo, p protocol.CreateParams) (json.RawMessage, error) {
-	hc, err := dialHub(ctx, socket, who)
+	hc, hello, err := openHub(ctx, socket, who)
 	if err != nil {
 		return nil, err
 	}
 	defer hc.close()
-	if !hc.hello.Capabilities.SessionCreate {
-		return nil, &LacksError{Version: hc.hello.Endpoint.CrazeVersion, Missing: []string{"create sessions"}}
+	if !hello.Capabilities.SessionCreate {
+		return nil, &LacksError{Version: hello.Endpoint.CrazeVersion, Missing: []string{"create sessions"}}
 	}
 	res, err := hc.call(protocol.MethodSessionCreate, p)
 	if err != nil {

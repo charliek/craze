@@ -93,8 +93,10 @@ def _hosts_in(home: Path, workspace: Path) -> list[dict]:
 
 def _host_logs(home: Path) -> list[Path]:
     """Every host log: each spawn leaves one, whether or not its host came
-    up."""
-    return sorted((home / ".cache" / "craze" / "host-logs").glob("*.log"))
+    up. The hub's log beside them (`hub-<ns>.log`) is not a host's: opening
+    the list starts the hub (plan 032 §3.13)."""
+    logs = (home / ".cache" / "craze" / "host-logs").glob("*.log")
+    return sorted(p for p in logs if not p.name.startswith("hub-"))
 
 
 def test_a_prompt_starts_a_session_in_another_workspace(craze_bin: Path, fake_agent_bin: Path, tmp_path: Path) -> None:

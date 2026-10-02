@@ -843,6 +843,16 @@ A host that has not answered yet is drawn with the working rows, `Starting…`
 or `Connecting…`. With no other session the list says `No other sessions.
 Type a prompt below to start one.` It needs 40×10; smaller, it says so.
 
+The running rows come from this machine's [hub](cli.md#the-hub), started when
+the list opens if none runs: the list draws at once and the hub's rows follow,
+and while the list is open this terminal holds no connection to any other
+session. When no hub answers within 2 seconds, when the hub keeps dropping
+the list (three times in 10 seconds), or when what it sends cannot show every
+session in full (more than 512 of them, or a session whose row is too large
+for the hub to pass on), the list asks each session's host itself for the
+rest of that opening; it looks the same either way. The saved rows are read
+from this craze directory's session index whichever it is.
+
 Under the rows is an input, always focused, where a new session is started
 ([Starting a session from the list](#starting-a-session-from-the-list)): a
 prompt typed there and `Enter` starts one, `@` picks the directory it runs in,

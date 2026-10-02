@@ -43,7 +43,8 @@ import (
 //     1; held is a rendezvous — the record polled every rendezvousPoll for a
 //     hub that answers as in 1, until the holder is gone, rendezvousWait
 //     has passed or the context ends; a hub that does not answer in time is
-//     ended (SIGTERM, then SIGKILL) and reaped.
+//     ended (SIGTERM, then SIGKILL) and reaped — waited for only until the
+//     context ends, the rest left to a goroutine of its own (endContender).
 //  3. A wedged hub (P17): two hellos that time out — not refused, not EOF —
 //     against a hub whose pid carries its record's non-empty start token:
 //     SIGTERM to that pid (its identity checked again just before), up to
@@ -436,11 +437,11 @@ func (e *ensurer) spawn(ctx context.Context) (string, error) {
 	case hostspawn.Exited:
 		return "", fmt.Errorf("the hub it started (pid %d) exited before it answered", child.PID())
 	case hostspawn.TimedOut:
-		child.End(contenderGrace)
-		return "", fmt.Errorf("the hub it started (pid %d) did not answer within %v, and was ended", child.PID(), readyWait)
+		return "", fmt.Errorf("the hub it started (pid %d) did not answer within %v, and %s", child.PID(), readyWait,
+			endContender(ctx, child))
 	default:
-		child.End(contenderGrace)
-		return "", fmt.Errorf("the hub it started (pid %d) answered no ready line (%s), and was ended", child.PID(), why)
+		return "", fmt.Errorf("the hub it started (pid %d) answered no ready line (%s), and %s", child.PID(), why,
+			endContender(ctx, child))
 	}
 	switch {
 	case line.OK && line.NS != e.ns:
@@ -525,6 +526,37 @@ func (e *ensurer) rendezvous(ctx context.Context, held ReadyHeld) (string, error
 		}
 	}
 }
+
+// endContender ends child, a hub this call started that did not answer —
+// SIGTERM, contenderGrace, SIGKILL to its group, its reap (hostspawn's End)
+// — on a goroutine of its own, and waits for that end only until ctx ends:
+// a contender that ignores SIGTERM must not hold its caller past its
+// deadline (r28 3). Past ctx's end the rest is the goroutine's, never joined,
+// as the cancelled ready wait's is (SF-111's residual). It says which, in
+// the words of Ensure's error.
+func endContender(ctx context.Context, child *hostspawn.Child) string {
+	if h := endingContender; h != nil {
+		h(child.PID())
+	}
+	// Read here, not on the goroutine, which outlives the call: a test's
+	// grace is restored when the test ends.
+	grace := contenderGrace
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		child.End(grace)
+	}()
+	select {
+	case <-done:
+		return "was ended"
+	case <-ctx.Done():
+		return "is being ended"
+	}
+}
+
+// endingContender, when set, is told the pid of each contender endContender
+// is about to end (a test's).
+var endingContender func(pid int)
 
 // processAlive reports whether pid names a process (a zombie counts).
 func processAlive(pid int) bool {

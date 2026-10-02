@@ -19,8 +19,8 @@ import (
 
 // The roster read once (plan 032 §3.12, craze ps): from the hub (List), or —
 // with no hub to ask — straight from the hosts, as the hub itself would
-// (Direct). A hub's client's connection (hubConn) is List's, and Create's
-// (create.go).
+// (Direct). A hub's client's connection (hubConn) is List's, Create's
+// (create.go) and the session list's roster subscription's (listroster.go).
 
 // List asks the hub at socket for its roster — hello as who, then
 // sessions.list — and answers the result as the hub wrote it, not
@@ -32,7 +32,7 @@ import (
 // answer an i/o timeout rather than ctx's end. Anything but a hub answering
 // hello, a refusal, or a result that is not a hub's roster is an error.
 func List(ctx context.Context, socket string, who protocol.ClientInfo) (json.RawMessage, error) {
-	hc, err := dialHub(ctx, socket, who)
+	hc, hello, err := openHub(ctx, socket, who)
 	if err != nil {
 		return nil, err
 	}
@@ -45,27 +45,16 @@ func List(ctx context.Context, socket string, who protocol.ClientInfo) (json.Raw
 	if err := json.Unmarshal(res, &check); err != nil {
 		return nil, fmt.Errorf("hub: %s's result: %w", protocol.MethodSessionsList, err)
 	}
-	if check.Epoch != hc.hello.Endpoint.HostID {
-		return nil, fmt.Errorf("hub: the roster's epoch %q is not the hub's id %q", check.Epoch, hc.hello.Endpoint.HostID)
+	if check.Epoch != hello.Endpoint.HostID {
+		return nil, fmt.Errorf("hub: the roster's epoch %q is not the hub's id %q", check.Epoch, hello.Endpoint.HostID)
 	}
 	return res, nil
 }
 
-// hubConn is one connection to a hub, said hello to (dialHub): what List and
-// Create ask over, one call at a time.
-type hubConn struct {
-	ctx   context.Context
-	nc    net.Conn
-	lr    *protocol.LineReader
-	stop  func() bool
-	hello protocol.HubHelloResult
-	next  int
-}
-
-// dialHub dials the hub at socket, peer-checks it and says hello as who (the
-// comment on List): the connection, its hello answered by a hub of a
-// protocol this build speaks.
-func dialHub(ctx context.Context, socket string, who protocol.ClientInfo) (*hubConn, error) {
+// dialHub connects to the hub at socket, past a full listen backlog, and
+// checks its peer before a byte is written: the hub runs as this user. ctx
+// bounds the dial; its end is the error.
+func dialHub(ctx context.Context, socket string) (net.Conn, error) {
 	nc, err := dialPastBacklog(ctx, helloDial, socket)
 	if err != nil {
 		return nil, ctxOr(ctx, fmt.Errorf("hub: dial %s: %w", socket, err))
@@ -79,33 +68,51 @@ func dialHub(ctx context.Context, socket string, who protocol.ClientInfo) (*hubC
 		_ = nc.Close()
 		return nil, fmt.Errorf("hub: the socket %s: %w", socket, err)
 	}
-	hc := &hubConn{ctx: ctx, nc: nc, lr: protocol.NewLineReader(nc, protocol.OutboundLineMax),
-		stop: context.AfterFunc(ctx, func() { _ = nc.Close() })}
-	b, err := hc.call(protocol.MethodHello, protocol.HelloParams{Protocols: protocol.SupportedProtocols(), Client: who})
-	if err != nil {
-		hc.close()
-		return nil, err
-	}
-	if err := json.Unmarshal(b, &hc.hello); err != nil {
-		hc.close()
-		return nil, fmt.Errorf("hub: hello's result: %w", err)
-	}
-	if hc.hello.Endpoint.Kind != protocol.EndpointHub {
-		hc.close()
-		return nil, fmt.Errorf("hub: an endpoint of kind %q answers at the hub's socket %s", hc.hello.Endpoint.Kind, socket)
-	}
-	if !slices.Contains(protocol.SupportedProtocols(), hc.hello.Protocol) {
-		hc.close()
-		return nil, fmt.Errorf("hub: the hub (craze %s) chose protocol %d, which this craze does not speak",
-			hc.hello.Endpoint.CrazeVersion, hc.hello.Protocol)
-	}
-	return hc, nil
+	return nc, nil
 }
 
-// call sends one request — ids counted from 1 — and reads its answer, which
-// must be the next line: its result, or an error — the hub's refusal
-// wrapped, ErrUnanswered for a connection that ended (or failed) before the
-// answer, ctx's own once it has ended.
+// openHub dials the hub at socket (dialHub) and says hello as who: the
+// connection, bound by ctx (newHubConn), and the hub's hello — List's and
+// Create's.
+func openHub(ctx context.Context, socket string, who protocol.ClientInfo) (*hubConn, protocol.HubHelloResult, error) {
+	nc, err := dialHub(ctx, socket)
+	if err != nil {
+		return nil, protocol.HubHelloResult{}, err
+	}
+	hc := newHubConn(ctx, nc)
+	hello, err := hc.hello(socket, who)
+	if err != nil {
+		hc.close()
+		return nil, protocol.HubHelloResult{}, err
+	}
+	return hc, hello, nil
+}
+
+// hubConn is a client's connection to a hub (dialHub's): its requests made
+// one at a time on the caller's goroutine, ids counted from 1, each reply the
+// next line. Its context bounds it — the context's end closes the connection,
+// until detach — and a failure that end made is the context's error (ctxOr).
+// What follows the replies (a subscription's notifications) is the lines lr
+// reads next.
+type hubConn struct {
+	ctx  context.Context
+	nc   net.Conn
+	lr   *protocol.LineReader
+	stop func() bool
+	next int
+}
+
+// newHubConn is a client on nc, bound by ctx: ctx's end closes nc.
+func newHubConn(ctx context.Context, nc net.Conn) *hubConn {
+	return &hubConn{ctx: ctx, nc: nc, lr: protocol.NewLineReader(nc, protocol.OutboundLineMax),
+		stop: context.AfterFunc(ctx, func() { _ = nc.Close() })}
+}
+
+// call sends one request and reads its answer, which must be the next line:
+// its result, or an error — the hub's refusal wrapped, ErrUnanswered for a
+// connection that ended (or failed) before the answer, the context's own once
+// it has ended; a reply that is not the next line, or one that does not
+// decode, is an error too.
 func (hc *hubConn) call(method string, params any) (json.RawMessage, error) {
 	raw, err := json.Marshal(params)
 	if err != nil {
@@ -132,6 +139,35 @@ func (hc *hubConn) call(method string, params any) (json.RawMessage, error) {
 		return nil, fmt.Errorf("hub: %s refused: %w", method, resp.Error)
 	}
 	return resp.Result, nil
+}
+
+// hello says hello as who — the connection's first request — and answers the
+// hub's result: an endpoint that is not a hub, or a protocol this build does
+// not speak, is an error.
+func (hc *hubConn) hello(socket string, who protocol.ClientInfo) (protocol.HubHelloResult, error) {
+	b, err := hc.call(protocol.MethodHello, protocol.HelloParams{Protocols: protocol.SupportedProtocols(), Client: who})
+	if err != nil {
+		return protocol.HubHelloResult{}, err
+	}
+	var hello protocol.HubHelloResult
+	if err := json.Unmarshal(b, &hello); err != nil {
+		return protocol.HubHelloResult{}, fmt.Errorf("hub: hello's result: %w", err)
+	}
+	if hello.Endpoint.Kind != protocol.EndpointHub {
+		return protocol.HubHelloResult{}, fmt.Errorf("hub: an endpoint of kind %q answers at the hub's socket %s", hello.Endpoint.Kind, socket)
+	}
+	if !slices.Contains(protocol.SupportedProtocols(), hello.Protocol) {
+		return protocol.HubHelloResult{}, fmt.Errorf("hub: the hub (craze %s) chose protocol %d, which this craze does not speak",
+			hello.Endpoint.CrazeVersion, hello.Protocol)
+	}
+	return hello, nil
+}
+
+// detach ends the context's bound on the connection, which stays open — its
+// closing the caller's from then on — and is false when the context's end
+// has closed it already.
+func (hc *hubConn) detach() bool {
+	return hc.stop()
 }
 
 // close ends the connection.

@@ -27,6 +27,9 @@
 //     its session through the hub, which brings a dead hub back.
 //   - list.go: the roster read once (craze ps) — List from a hub, and
 //     Direct, the same rows read from the hosts with no hub.
+//   - listroster.go: Roster, the TUI's session list's roster — the hub's
+//     roster subscription, its saved half kept beside it, and the list's own
+//     poller when the hub cannot be had or kept (plan 032 §3.13).
 //   - env.go: the environment contract (P13) for the hub and every host it
 //     spawns.
 //   - ready.go: the hub's ready line, both ends.

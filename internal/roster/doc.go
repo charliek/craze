@@ -6,7 +6,10 @@
 // The list's roster reads the registry (rundir.Hosts) and asks each host's
 // own control socket for its row (sessions.list), once a second while the
 // list is open, over a connection it keeps per host (the hub's roster runs
-// the same poll: OpenHub, below). A host
+// the same poll: OpenHub, below). Since plan 032 (§3.13) the TUI's list
+// reads the hub's roster subscription first (internal/hub's Roster), which
+// keeps its saved half with this package's Saved, and opens this poller only
+// when the hub cannot be had, or kept. A host
 // with the row facts (capability rowFacts, §3.8) says what it is doing, what
 // it last said and since when; an older one is listed with what S2's row
 // has and its craze version.
