@@ -4133,7 +4133,7 @@ UX:
 | | |
 |---|---|
 | Status | complete (Plan 032, FINAL v3.2 after panel rounds 1–3, 2026-09-30); all five PRs done, PR 5 carrying this record |
-| Plan | `032-session-control-s4b-hub` (outside the repo, `~/.claude/plans/craze/`; the owner's decisions, the discovery reports, the render prototypes, the raw panel reviews, every review round, the per-PR progress files with the amendments X1–X75, and the V2–V8 artifacts in its folder) |
+| Plan | `032-session-control-s4b-hub` (outside the repo, `~/.claude/plans/craze/`; the owner's decisions, the discovery reports, the render prototypes, the raw panel reviews, every review round, the per-PR progress files with the amendments X1–X80, and the V2–V8 artifacts in its folder) |
 | Baseline | `origin/main` `a0d88c3` (#74), on top of S4a + S5's last PR (#72, `b88e7b7`) and Plan 031 (#73, `0f82531`) |
 | Branch / PRs | five sequential PRs, each branched from a freshly fetched `origin/main`: `feature/plan-032-rows`, `feature/plan-032-render`, `feature/plan-032-hub`, `feature/plan-032-create`, `feature/plan-032-reaper` (PR 2's C5 and PR 3's C7 were begun in isolated worktrees before the previous merge and applied after it, X11, X15) |
 | Merged | PR 1 — #75 `2eec72f` (2026-10-01); PR 2 — #76 `2dc80b7` (2026-10-01); PR 3 — #78 `bc8da8f` (2026-10-01); PR 4 — #79 `8a33a12` (2026-10-02); PR 5 — #81 (2026-10-02) |
@@ -4366,8 +4366,11 @@ itself, signals only the agent and only between its own polls, never the
 group, and releases the process before `cmd.Wait` (X71, X73). Pending calls
 fail at the exit with its status (`acp.ExitError`); a stdout EOF waits up to
 1 s for that status (X72). `make lint` runs a second time with `GOOS=darwin`
-(the tree now has darwin-only sources). C20 is this record. Commits: C19
-`ea8d8b2`, C19r `530f870`, C19r2 `a7855e2`, C20.
+(the tree now has darwin-only sources). C20 is this record. After the rebase
+onto Plan 033's #82, macOS CI found a real bug in PR 4's `session.create`:
+X80, below. Commits: C19 `cab2868`, C19r `8ea676e`, C19r2 `5a0ed5c`, X76
+`8d405c3` and `9732161`, X77 `c9a6ca7`, the darwin lint pass `a680fb4`, C20
+`0f6857d`, X80 `5661c32` and `862742f`, and the record's fixes.
 
 **The roadmap's S4b exits** (`07`):
 
@@ -4551,8 +4554,8 @@ on the mac.
 
 ### Deviations from the plan
 
-The amendments X1–X77 (PR 1 X1–X11; PR 2 X12–X14, X16, X17, X23, X24; PR 3
-X15, X18–X22, X25–X41; PR 4 X42–X69; PR 5 X70–X77; the full text in the plan
+The amendments X1–X80 (PR 1 X1–X11; PR 2 X12–X14, X16, X17, X23, X24; PR 3
+X15, X18–X22, X25–X41; PR 4 X42–X69; PR 5 X70–X80; the full text in the plan
 folder's `progress-pr1.md` … `progress-pr5.md`), grouped here by what they
 changed. Left out: the ones that only record process or tests — reviewer seats
 (X1, X31), worktrees and the order of work (X4, X11, X14, X15, X42, X51, X74),
@@ -4777,6 +4780,20 @@ said.
   indexed by the engine's worker after the turn, so the test now waits for the
   row. Also from PR 5's CI review: the lint job now runs golangci-lint a second
   time with `GOOS=darwin`, as `make lint` does.
+- **X78, X79 (PR 4's tests, fixed in Plan 033's #82 and reviewed here)** — a
+  TUI golden that was never frozen, and a roster test race.
+- **X80 (PR 5's CI after the rebase, macOS) — a production fix, not a
+  flake.** `TestCreateTeardownMidCreate`: a create the teardown cut answered
+  its waiter with the cut's own `unavailable`/`closing`, where §3.10 closes
+  that connection unanswered. The cut cancels the creates before it closes
+  `cut`, so a create cancelled on a slow runner could publish first; and
+  sol's review of the first fix (r53) found its mark sampled as the create's
+  function returned, before the bookkeeping, so a cut in between still
+  slipped through. Now `stop` marks the cut and each create marks and
+  publishes its answer (`publish`) under one short mutex: an answer published
+  before the cut is delivered, any other never. Two tests, each red without
+  its check; the second holds the create at `endCreate` across the cut (r54
+  found its first version could let the create publish first).
 
 ### Decisions and questions touched
 
