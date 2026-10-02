@@ -145,7 +145,13 @@ func startSettingsSession(t *testing.T, script string, opts Options) (*session, 
 	var diag bytes.Buffer
 	opts.Diag = &diag
 	opts.JournalDir = filepath.Join(t.TempDir(), "journal")
-	return startScriptOpts(t, script, opts), &diag
+	s := startScriptOpts(t, script, opts)
+	// The agent advertises its commands just after session/new answers, on
+	// the read loop, so they can land between a test's Snapshot and its
+	// flushAll — a fold with commands the snapshot lacks. Waited for here, as
+	// the other fold-against-snapshot tests wait for them (awaitCatalog).
+	awaitCatalog(t, s)
+	return s, &diag
 }
 
 // TestStartSettingsAreSetBeforeStartReturns: a new session's --effort and

@@ -16,6 +16,7 @@ import (
 	"github.com/charliek/craze/internal/hostspawn"
 	"github.com/charliek/craze/internal/hub"
 	"github.com/charliek/craze/internal/sessions"
+	"golang.org/x/sys/unix"
 )
 
 // The test binary as craze itself (plan 030 C2): a test that needs a host in
@@ -59,6 +60,11 @@ const (
 	// (idleTicks): a test about what a spawner does to a host whose socket it
 	// removed must not race the host's own socket-lost stop.
 	cliChildNoIdle = "CRAZE_CLI_TEST_NO_IDLE"
+	// cliChildStderrDir is a directory the child writes its own stderr into,
+	// as <dir>/<pid>: a spawned hub's stderr is /dev/null, and a SIGQUIT's
+	// goroutine dump goes to stderr — so a hub child that will not exit can
+	// say where it is parked (hubAsChild, plan 032 X54).
+	cliChildStderrDir = "CRAZE_CLI_TEST_STDERR_DIR"
 	// cliChildParent is the pid of the test process that started the child
 	// (childEnv sets it): the child's watchdog ends the child once that
 	// process is no longer its parent (childWatchdog).
@@ -124,6 +130,12 @@ func init() {
 	// Not the agent's to inherit: the fake agent is another binary, but a
 	// grandchild of this one must never run as craze by accident.
 	_ = os.Unsetenv(cliChildEnv)
+	if dir, ok := os.LookupEnv(cliChildStderrDir); ok {
+		_ = os.Unsetenv(cliChildStderrDir)
+		if f, err := os.OpenFile(filepath.Join(dir, strconv.Itoa(os.Getpid())), os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600); err == nil {
+			_ = unix.Dup2(int(f.Fd()), 2)
+		}
+	}
 	// The watchdog first, before anything can park: the parent its test named,
 	// else the parent this process has now.
 	parent := os.Getppid()
