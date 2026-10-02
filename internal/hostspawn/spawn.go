@@ -108,6 +108,11 @@ type Spec struct {
 	// the workspace) exactly as the spawner would, from the same environment
 	// and config.
 	Workspace, Provider, Model, AgentBin string
+	// Effort is --effort and Fast --fast (true) or --no-fast (false), each
+	// passed only when set (plan 032 §3.11, P6): nil leaves the provider's
+	// own default.
+	Effort string
+	Fast   *bool
 	// PluginDirs is --plugin-dir, once each.
 	PluginDirs []string
 	// NoForce is --no-force: the session handles permission requests
@@ -121,12 +126,17 @@ type Spec struct {
 	// status, so the host leaves the agent's host hook gates in its
 	// environment, as an in-process session would.
 	NoHostStatus bool
+	// RequestID and RequestHash are --request-id and --request-hash, each
+	// passed only when set: the hub's session.create that spawns the host
+	// (plan 032 §3.10), its idempotency id and its params' hash, which the
+	// host writes into its registry entry.
+	RequestID, RequestHash string
 }
 
 // Args is craze serve's command line for s: the host's id and log, then every
-// session flag s carries — each only when it says something — and --load, and
-// --no-host-status. Every value is spelled --flag=value, so none is read as a
-// flag of its own.
+// session flag s carries — each only when it says something — and --load,
+// --no-host-status, --request-id and --request-hash. Every value is spelled
+// --flag=value, so none is read as a flag of its own.
 func Args(s Spec) []string {
 	argv := []string{"serve", "--host-id=" + s.HostID, "--log=" + s.Log}
 	str := func(name, v string) {
@@ -137,6 +147,14 @@ func Args(s Spec) []string {
 	str("workspace", s.Workspace)
 	str("provider", s.Provider)
 	str("model", s.Model)
+	str("effort", s.Effort)
+	if s.Fast != nil {
+		if *s.Fast {
+			argv = append(argv, "--fast")
+		} else {
+			argv = append(argv, "--no-fast")
+		}
+	}
 	str("agent-bin", s.AgentBin)
 	for _, d := range s.PluginDirs {
 		argv = append(argv, "--plugin-dir="+d)
@@ -157,6 +175,8 @@ func Args(s Spec) []string {
 	if s.NoHostStatus {
 		argv = append(argv, "--no-host-status")
 	}
+	str("request-id", s.RequestID)
+	str("request-hash", s.RequestHash)
 	return argv
 }
 
@@ -176,12 +196,22 @@ type Child struct {
 }
 
 // Start starts `craze serve argv…` detached (the package's doc comment, step
-// 2) and answers it with the read end of its ready pipe. groups and log are
-// the host's record of its agents and its log.
-func Start(argv []string, groups, log string) (*Child, *os.File, error) {
+// 2) and answers it with the read end of its ready pipe. unset names
+// variables left out of the host's environment — CRAZE_AGENT_BIN for a host
+// whose provider is not its launch's (plan 032 §3.11, P7) — which is
+// otherwise this process's own (or Command's). groups and log are the host's
+// record of its agents and its log.
+func Start(argv, unset []string, groups, log string) (*Child, *os.File, error) {
 	cmd, err := Command(argv)
 	if err != nil {
 		return nil, nil, err
+	}
+	if len(unset) > 0 {
+		env := cmd.Env
+		if env == nil {
+			env = os.Environ()
+		}
+		cmd.Env = withoutEnv(env, unset...)
 	}
 	return StartCmd(cmd, HostChildEnv, groups, log)
 }
@@ -318,6 +348,19 @@ func (c *Child) End(grace time.Duration) bool {
 		}
 	}
 	return c.Exited()
+}
+
+// Kill ends the host at once — SIGKILL to its process group (setsid made it
+// the leader of its own), no SIGTERM and no grace: a host that never got to
+// its ready line owes nothing — and waits for the reaper. A host in an
+// uninterruptible wait keeps it waiting until it goes. Like End's SIGKILL,
+// the group signal follows an Exited check the reaper can overtake: a group
+// id reused in between would be signalled instead (SF-120).
+func (c *Child) Kill() {
+	if !c.Exited() {
+		_ = syscall.Kill(-c.pid, syscall.SIGKILL)
+	}
+	<-c.done
 }
 
 // KillAgents kills every agent process group the host recorded and removes

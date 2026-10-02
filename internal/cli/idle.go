@@ -27,8 +27,9 @@ import (
 //  3. The startup grace: the clock starts only once a client has attached or
 //     hostStartupGrace has passed since the host started, so a host spawned
 //     for a client that has not dialled yet is not reaped first.
-//  4. Attached and in flight: a client attached (control.Server.OnAttachments
-//     — which never counts a list poller, nor a peer that has half-closed) or
+//  4. Attached and in flight: a client attached (an attachments listener,
+//     control.Server.AddAttachmentsListener — which never counts a list
+//     poller, nor a peer that has half-closed) or
 //     anything in flight (engine.Engine.Busy) restarts the clock, and so does
 //     a turn that ended since it last looked (State.LastTurn): a sample's gap
 //     does not hide a turn that began and ended between two ticks.
@@ -98,13 +99,13 @@ type idleEngine interface {
 
 // idleServer is what the watcher asks of the control server.
 type idleServer interface {
-	OnAttachments(func(int))
+	AddAttachmentsListener(func(int)) (remove func())
 	FenceClose() (attached int, busy bool, release func())
 }
 
 // idleWatcher is one host's idle watcher. Everything below mu is written by
-// the server's OnAttachments callback; the rest is the watcher's goroutine's
-// own.
+// its attachments listener on the server; the rest is the watcher's
+// goroutine's own.
 type idleWatcher struct {
 	srv    idleServer
 	eng    idleEngine
@@ -136,11 +137,14 @@ func newIdleWatcher(srv idleServer, eng idleEngine, lost func() string, now func
 		fmt.Fprintf(log, "craze serve: %s; the idle exit is the default, %s\n", why, policy.After)
 	}
 	w := &idleWatcher{srv: srv, eng: eng, lost: lost, policy: policy, now: now, start: now()}
-	srv.OnAttachments(w.attachments)
+	// For the host's life: the watcher is never removed, and the listener
+	// beside it — none on a detached host — hears every change too.
+	srv.AddAttachmentsListener(w.attachments)
 	return w
 }
 
-// attachments is control.Server.OnAttachments: called in order, under the
+// attachments is the watcher's attachments listener
+// (control.Server.AddAttachmentsListener): called in order, under the
 // server's locks, so it only records.
 func (w *idleWatcher) attachments(n int) {
 	now := w.now()

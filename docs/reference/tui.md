@@ -63,6 +63,17 @@ keeps its slot until it leaves the band, and the rows below close up. Past
 the cap the band ends in `… +n more`; the viewed sub-agent always keeps a
 visible row, taking the last one when it would otherwise fall behind the cap.
 
+When another client has the same session open, status row 2 ends in an
+accent `N attached` chip: N counts every client attached to the session, this
+one included — a `craze attach`, another TUI showing it from its [session
+list](#session-list), and the TUI that hosts it under `detach = false` — so a
+second client makes it `2 attached`, and with you alone it is not there at
+all. It follows the host's count within about a second (at most two updates a
+second), hides while the connection to the host is being re-established until
+the host says again, and is the first thing on the row to go when the
+terminal is too narrow. A host from before craze counted its clients sends no
+count, and the chip never shows.
+
 On a provider that can stop one child (native today), `Delete` or
 `Backspace` on the selected **running** row stops just that child (or a
 [background command](#background-commands-bash-jobs)); the turn
@@ -832,11 +843,24 @@ A host that has not answered yet is drawn with the working rows, `Starting…`
 or `Connecting…`. With no other session the list says `No other sessions.
 Type a prompt below to start one.` It needs 40×10; smaller, it says so.
 
+The running rows come from this machine's [hub](cli.md#the-hub), started when
+the list opens if none runs: the list draws at once and the hub's rows follow,
+and while the list reads from the hub this terminal holds no connection to
+any other session — only the one to the hub. When no hub answers within 2
+seconds, when the hub keeps dropping the list (three times in 10 seconds), or
+when what it sends cannot show every session in full (more than 512 of them,
+or a session whose row is too large for the hub to pass on), the list asks
+each session's host itself for the rest of that opening, keeping a connection
+to each and asking it once a second, as the list did before the hub; it looks
+the same either way. The saved rows are read
+from this craze directory's session index whichever it is.
+
 Under the rows is an input, always focused, where a new session is started
 ([Starting a session from the list](#starting-a-session-from-the-list)): a
 prompt typed there and `Enter` starts one, `@` picks the directory it runs in,
-and `/provider` and `/model` choose what it runs. The rule above the input
-names where and as what the next one would start:
+`/provider` and `/model` choose what it runs, and `/effort` and `/fast` what it
+starts at. The rule above the input names where and as what the next one would
+start:
 
 ```text
 ─────────────────────────── new session → ~/projects/lumen · cursor · Composer 2.5 ─
@@ -911,9 +935,11 @@ meanwhile, and the screen then shows it as [opening one in
 place](#opening-a-session-in-place) does, `restoring…` until its transcript
 is back. A saved session that another terminal has resumed meanwhile is
 opened where it runs. The command line's own session flags (`--provider`,
-`--model`, `--ask`, `--plan`) were for the session it started and are not
-applied to a resumed one; its permission mode, `--plugin-dir` and (for a
-provider craze does not run in process) `--agent-bin` are. A
+`--model`, `--effort`, `--fast`/`--no-fast`, `--ask`, `--plan`) were for the
+session it started and are not applied to a resumed one; its permission mode
+and `--plugin-dir` are, and so is `--agent-bin` (with `CRAZE_AGENT_BIN`) when
+the session's provider is the launch's own — any other runs the binary
+[`[agents]`](configuration.md#agent-binaries) or `PATH` gives it. A
 session whose directory is gone, or whose provider this craze cannot resume,
 is refused on the hint line (`could not resume <title>: that session ran in
 …, which is no longer a directory`) and nothing is started. `Ctrl+X` does
@@ -952,12 +978,17 @@ The new session runs:
   `/model`](#provider-and-model), else those of the session you came from —
   its current model; when its host has not said which model it is on, the
   launch's own `--model`; else the provider's default.
+- at the effort and fast mode chosen with [`/effort` and
+  `/fast`](#effort-and-fast-mode), else the model's own.
 - with the **permission mode** of the session you came from (`--force` or
   `--no-force`, as its host reports it), the launch's `--plugin-dir`, and —
-  for a provider craze does not run in process — its `--agent-bin`. The
-  command line's own `--ask`, `--plan` and `--provider` were for the session
-  it started and are not applied, and its `--model` only in the one case
-  above.
+  when its provider is the launch's own — its `--agent-bin` (and
+  `CRAZE_AGENT_BIN`); a session of any other provider runs the binary
+  [`[agents]`](configuration.md#agent-binaries) or `PATH` gives it. The
+  command line's own `--ask`, `--plan`, `--effort`, `--fast`/`--no-fast` and
+  `--provider` were for the session it started and are not applied (the
+  list's `/effort` and `/fast` set the last two for its own), and its
+  `--model` only in the one case above.
 
 All of it is decided when `Enter` is pressed: moving the selection while the
 session starts changes nothing.
@@ -1073,6 +1104,43 @@ A session started from the list is saved as the last provider started, as any
 launch is (see [Configuration](configuration.md)), so the next `craze` without
 `--provider` preselects its provider in the provider dialog. The list's own
 choice still lasts only until craze quits.
+
+### Effort and fast mode
+
+`/effort` and `/fast` set the effort and fast mode every session started from
+the list starts at, as `craze --effort` and `--fast`/`--no-fast` do for the
+session a launch starts. They are not in the popup a bare `/` opens: each is
+listed once what you type is the start of its name and of no other command —
+`/ef` lists `/effort` (`/e` is still `/exit`'s alone), `/f` lists `/fast`:
+
+```text
+───────────────────────────────────────────── commands ─
+❯ /effort  effort for new sessions  default
+```
+
+- **`/effort`** offers `default`, `low`, `medium`, `high` and `xhigh`.
+- **`/fast`** offers `default`, `on` and `off`.
+
+`default` clears the setting: the model's own. Choosing works as it does for
+`/provider` — `↑` `↓` choose, typing narrows, `Tab` or `Enter` uses the
+highlighted value, the one in use is marked `current` — and `/effort high` or
+`/fast off` typed in full does the same without the popup; a value not offered
+is refused on the hint line. A choice lasts as the provider and model do, until
+you change it or craze quits; choosing a provider does not reset it. The rule
+over the input appends it — `new session → ~/projects/lumen · cursor · Grok ·
+high · fast`, or `· no fast` with fast mode off — and says nothing while both
+are `default`.
+
+The values are not checked against the provider or model here: the new
+session's host applies them as it starts, before its first prompt, exactly as
+it applies [`--effort` and `--fast`](cli.md#flags) — the effort matched
+against the levels its model offers (an exact id, then an id or a name, case
+folded). One that matches nothing — `xhigh` where a model stops at `high`, or
+a model with no effort or no fast mode at all — is skipped, noted in the
+session's journal, and the session starts at the model's own. So is one the
+agent refuses. An agent that does not answer the setting at all within 15
+seconds fails the session's start instead, and the list shows that session
+as failed, with the setting named in its error.
 
 ## Modes
 

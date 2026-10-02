@@ -93,8 +93,10 @@ def _hosts_in(home: Path, workspace: Path) -> list[dict]:
 
 def _host_logs(home: Path) -> list[Path]:
     """Every host log: each spawn leaves one, whether or not its host came
-    up."""
-    return sorted((home / ".cache" / "craze" / "host-logs").glob("*.log"))
+    up. The hub's log beside them (`hub-<ns>.log`) is not a host's: opening
+    the list starts the hub (plan 032 §3.13)."""
+    logs = (home / ".cache" / "craze" / "host-logs").glob("*.log")
+    return sorted(p for p in logs if not p.name.startswith("hub-"))
 
 
 def test_a_prompt_starts_a_session_in_another_workspace(craze_bin: Path, fake_agent_bin: Path, tmp_path: Path) -> None:
@@ -195,6 +197,8 @@ def test_provider_and_model_change_the_next_dispatch(craze_bin: Path, fake_agent
     the title, and a model chosen from it is the next dispatch's --model --
     the catalog's own `default` model included (--model=default), which is
     not the agent's own default listed above it (no --model at all).
+    `/effort high` and `/fast on` (plan 032 C17) are that dispatch's --effort
+    and --fast, and `default` clears both for the next one.
     `/provider native` resets the model to native's default from its model
     table, and the next dispatch runs native on it -- no agent binary."""
     home = tmp_path
@@ -232,11 +236,30 @@ def test_provider_and_model_change_the_next_dispatch(craze_bin: Path, fake_agent
             rows = _wait_hint(sa, "the model chosen", "new sessions use cursor · Composer")
             assert "· cursor · Composer ─" in _rule(rows), sa.dump()
 
+            # /effort and /fast, each revealed by its prefix and chosen from
+            # its values (C17): the fake agent offers neither, so its host
+            # notes them unmatched and starts the session anyway.
+            _type(a, sa, "/effort high", lambda rows: any(r.startswith("❯ high") for r in rows[:-4]))
+            a.write(ENTER)
+            _wait_hint(sa, "the effort chosen", "new sessions use cursor · Composer · high")
+            _type(a, sa, "/fast on", lambda rows: any(r.startswith("❯ on") for r in rows[:-4]))
+            a.write(ENTER)
+            rows = _wait_hint(sa, "fast mode chosen", "new sessions use cursor · Composer · high · fast")
+            assert "· cursor · Composer · high · fast ─" in _rule(rows), sa.dump()
+
             _type(a, sa, "@~/bravo on composer")
             a.write(ENTER)
             _wait_hint(sa, "the first dispatch's outcome", "started in ~/bravo", timeout=SPAWN)
             argv = _argv(_entry(home, bravo, timeout=SPAWN)["pid"])
             assert "--provider=cursor" in argv and "--model=composer" in argv, argv
+            assert "--effort=high" in argv and "--fast" in argv, argv
+
+            for line in ("/effort default", "/fast default"):
+                _type(a, sa, line, lambda rows: any(r.startswith("❯ default") for r in rows[:-4]))
+                a.write(ENTER)
+                _wait_screen(sa, f"{line} applied", lambda rows: _input(rows).startswith("❯ type a prompt"))
+            rows = _wait_hint(sa, "both cleared", "new sessions use cursor · Composer")
+            assert "· cursor · Composer ─" in _rule(rows), sa.dump()
 
             # The fake agent's catalog has a model whose id is `default`: it
             # is listed as itself, under the agent's own default (C15r).
@@ -260,6 +283,7 @@ def test_provider_and_model_change_the_next_dispatch(craze_bin: Path, fake_agent
             _wait_hint(sa, "the catalog's default dispatch", "started in ~/delta", timeout=SPAWN)
             argv = _argv(_entry(home, delta, timeout=SPAWN)["pid"])
             assert "--model=default" in argv, argv
+            assert not any(arg.startswith(("--effort", "--fast", "--no-fast")) for arg in argv), argv
 
             _type(
                 a,

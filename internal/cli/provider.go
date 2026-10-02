@@ -108,6 +108,70 @@ func resolveProvider(cmd *cobra.Command, flag string, stderr io.Writer, hermetic
 // envAgentBin is the environment's --agent-bin, read by acp's binary lookup.
 const envAgentBin = "CRAZE_AGENT_BIN"
 
+// agentBin is how a session finds its agent binary: the two fields of
+// agent.Options that say it (apply).
+type agentBin struct {
+	// path is agent.Options.Binary: "" for the lookup's own order.
+	path string
+	// noEnv is agent.Options.NoBinaryEnv: CRAZE_AGENT_BIN is not this
+	// session's, and the lookup leaves it out.
+	noEnv bool
+}
+
+// apply sets the binary on opts.
+func (b agentBin) apply(opts *agent.Options) {
+	opts.Binary, opts.NoBinaryEnv = b.path, b.noEnv
+}
+
+// resolves reports whether p's binary resolves under b — the lookup p's
+// session would make — for the startup picker (pickerProviders).
+func (b agentBin) resolves(p agent.Provider) bool {
+	if b.noEnv {
+		return p.BinaryResolvesNoEnv(b.path)
+	}
+	return p.BinaryResolves(b.path)
+}
+
+// agentBinary is the agent binary a session of p starts with (plan 032
+// §3.11, P7), in order: the launch's --agent-bin (flag), else
+// CRAZE_AGENT_BIN — both only when p is the launch's own provider — then
+// `[agents].<p>` in config.toml, then p's own PATH candidates. launch is the
+// provider the command line resolved its own session to: --provider, else
+// $CRAZE_PROVIDER, else the config's, else cursor — the startup picker's
+// preselection, so another provider picked there is another provider — and
+// for a load (--continue, the resume picker's row) the row's, whose provider
+// a load always takes. CRAZE_AGENT_BIN is left to the agent's own lookup,
+// which reads it exactly as it always has, whenever it is p's; every other
+// case resolves without it. A why line from the config goes to diag, which
+// may be nil. An in-process provider has no binary, and gets none.
+func agentBinary(p, launch agent.Provider, flag string, diag io.Writer) agentBin {
+	if p.InProcess() {
+		return agentBin{}
+	}
+	if p.Name() == launch.Name() {
+		if flag != "" {
+			return agentBin{path: flag}
+		}
+		if os.Getenv(envAgentBin) != "" {
+			return agentBin{}
+		}
+	}
+	path, why := tui.ConfigAgentBin(p.Name())
+	if why != "" && diag != nil {
+		fmt.Fprintln(diag, "craze: "+why)
+	}
+	return agentBin{path: path, noEnv: true}
+}
+
+// ownsAgentBin reports whether a host of p, spawned by a launch whose own
+// provider is launch, takes the launch's --agent-bin and CRAZE_AGENT_BIN
+// (agentBinary's rule): the launcher passes the flag to such a host, and to
+// no other, and leaves the variable out of every other host's environment
+// (plan 032 §3.11, P7).
+func ownsAgentBin(p, launch agent.Provider) bool {
+	return !p.InProcess() && p.Name() == launch.Name()
+}
+
 // refuseInProcess is the usage error for asking an in-process provider for
 // something it has not got (plan 018 §3.4): an agent binary, from --agent-bin
 // or CRAZE_AGENT_BIN, has nothing to be spawned as, and a mode (--ask or

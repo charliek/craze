@@ -106,9 +106,14 @@
 //     of attachments it reads (Server.attached) rises only inside it and
 //     falls wherever an attachment closes, or its connection reads EOF, under
 //     conn.mu.
-//   - Server.countMu guards that count and the OnAttachments callback: a
-//     leaf under attachMu and conn.mu, taken in the section that changes the
-//     count, so the callback hears every change in order.
+//   - Server.countMu guards that count, the attachments listeners and the
+//     presence slots (plan 032 §3.14): a leaf under attachMu and conn.mu,
+//     taken in the section that changes the count, so each listener and slot
+//     hears every change in order — and under connMu where accept puts a new
+//     connection's slot among them. No lock of the server's is taken under
+//     it: a listener takes none (only a leaf of its own), and a presence
+//     slot is an atomic store and a wake that never waits (conn.go's
+//     "Presence").
 //   - conn.mu guards a connection's admission count, half-close and end
 //     state, and its attachment's lifecycle and position; the outbox has its
 //     own mutex. conn.mu → outbox.mu is the one edge between them: a line

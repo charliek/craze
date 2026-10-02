@@ -95,6 +95,22 @@ type TestHooks struct {
 	// forces an attach, a prompt, a setting or the session's own work to
 	// arrive in each gap (plan 030 §3.6).
 	CloseFenceStep func(step string)
+	// PresenceTaken runs on a writer that has taken a presence line, before
+	// it writes it, with the connection's id (the order the server accepted
+	// it in, from 1), the line and when the outbox handed it over: the
+	// instant presence's two-a-second bound is kept by (plan 032 §3.14).
+	PresenceTaken func(conn uint64, line []byte, at time.Time)
+	// WriterIdle runs on a writer about to wait for a wake with nothing
+	// queued, no presence owed and no wake pending, with the connection's id
+	// and how many lines it has taken from its outbox: where a test knows the
+	// writer has drained, and that only a wake made from then on can wake
+	// it.
+	WriterIdle func(conn, taken uint64)
+	// BeforeArm runs on a forwarder in the conn.mu section that has just
+	// queued its attachment's synchronized, before it arms the presence
+	// slot, with the subscription's id: a test that blocks in it holds the
+	// arm back (conn.mu held) while the writer drains.
+	BeforeArm func(sub string)
 }
 
 // NewForTest is New with hooks in place, and the stall bound and outbound line
@@ -125,6 +141,9 @@ func NewForTest(o Options, h TestHooks, stall time.Duration, maxLine int) *Serve
 		reserving:      h.Reserving,
 		fenceWaits:     h.FenceWaits,
 		closeFenceStep: h.CloseFenceStep,
+		presenceTaken:  h.PresenceTaken,
+		writerIdle:     h.WriterIdle,
+		beforeArm:      h.BeforeArm,
 	}
 	if stall > 0 {
 		s.stall = stall

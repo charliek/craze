@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 	"unicode"
@@ -41,12 +42,52 @@ import (
 //     another provider still starts the model's own.
 //   - Typed in full, `/provider <id>` and `/model <id>` do the same with no
 //     popup; any other `/…` line is a prompt like any other (X152).
+//   - `/effort` (default, low, medium, high, xhigh) and `/fast` (default, on,
+//     off) set the effort and fast mode new sessions start at (plan 032
+//     §3.11, C17) the same way — a popup of values, or typed in full — and
+//     last as the pick does. `default` clears the setting: the model's own.
+//     Neither is checked against a provider here: a host's start matches the
+//     value against what the model offers, and notes it when nothing does.
+//     They are revealed by prefix, never listed by a bare `/`
+//     (sessCmdRevealed).
 
 // The list's commands.
 const (
 	sessCmdProvider = "provider"
 	sessCmdModel    = "model"
 	sessCmdExit     = "exit"
+	sessCmdEffort   = "effort"
+	sessCmdFast     = "fast"
+)
+
+// sessCmdOlder are the list's first commands (plan 030 C16), the ones a bare
+// `/` lists; sessCmdLater the ones added after them (plan 032 C17).
+var (
+	sessCmdOlder = []string{sessCmdProvider, sessCmdModel, sessCmdExit}
+	sessCmdLater = []string{sessCmdEffort, sessCmdFast}
+)
+
+// sessCmdRevealed is the reveal rule for a later command (plan 032 §3.11): it
+// is listed only once the typed command word is a prefix of it and of no
+// older command. A bare `/` (the empty word, a prefix of every command) and
+// `/e` (a prefix of /exit too) therefore list exactly what they did before
+// C17 — `/`'s popup keeps its frames — while `/ef` reveals /effort and `/f`
+// /fast.
+func sessCmdRevealed(cmd, word string) bool {
+	starts := func(c string) bool { return strings.HasPrefix(c, word) }
+	return starts(cmd) && !slices.ContainsFunc(sessCmdOlder, starts)
+}
+
+// The values /effort and /fast offer, `default` (sessDefaultModel's word)
+// first: the setting cleared.
+var (
+	sessEffortLevels = []string{sessDefaultModel, "low", "medium", "high", "xhigh"}
+	sessFastValues   = []string{sessDefaultModel, sessFastOn, sessFastOff}
+)
+
+const (
+	sessFastOn  = "on"
+	sessFastOff = "off"
 )
 
 // sessCmdSourceID names the `/` popup's source: a load's result is stamped
@@ -67,6 +108,9 @@ const (
 	sessUseNotePrefix  = "new sessions use "
 	sessNeedsProvider  = "/provider needs a provider: "
 	sessNeedsModel     = "/model needs a model id"
+	sessEffortTitle    = "effort for new sessions"
+	sessFastTitle      = "fast mode for new sessions"
+	sessSettingDetail  = "the model's own"
 )
 
 // sessProviderDetail is each provider's line in /provider's list (the
@@ -78,11 +122,16 @@ var sessProviderDetail = map[string]string{
 	agent.NativeProvider().Name(): "craze's own harness",
 }
 
-// sessPick is what /provider and /model chose for new sessions from the list
-// (§3.14). It is the TUI's, not an opening's (Model.sessPick, carried by
-// withSession): it lasts across every opening of the list and every session
-// shown, until changed or craze quits.
+// sessPick is what /provider and /model — and /effort and /fast (plan 032
+// C17) — chose for new sessions from the list (§3.14). It is the TUI's, not an
+// opening's (Model.sessPick, carried by withSession): it lasts across every
+// opening of the list and every session shown, until changed or craze quits.
 type sessPick struct {
+	// effort and fast are /effort's and /fast's: "" and nil the model's own.
+	// Unlike the model they belong to no provider — a host matches them
+	// against what its model offers — so a /provider choice keeps them.
+	effort string
+	fast   *bool
 	// prov is the chosen provider, when provSet: without one a new session
 	// runs the provider of the session the list came from (X145).
 	prov    agent.Provider
@@ -238,13 +287,59 @@ func (m Model) sessNewModels() []agent.ModelInfo {
 	return m.snap.Models
 }
 
+// sessNewSettings is the effort and fast mode new sessions start at, as the
+// rule and the hint line append them to the provider and model: ` · <effort>`
+// when /effort set one, ` · fast` or ` · no fast` when /fast did — nothing
+// for either left to the model's own, so a list where neither was chosen
+// draws what it always drew.
+func (m Model) sessNewSettings() string {
+	var b strings.Builder
+	if e := m.sessPick.effort; e != "" {
+		b.WriteString(" · " + sanitizeLine(e))
+	}
+	if f := m.sessPick.fast; f != nil {
+		if *f {
+			b.WriteString(" · fast")
+		} else {
+			b.WriteString(" · no fast")
+		}
+	}
+	return b.String()
+}
+
+// sessUseNote is the hint line's `new sessions use …` after a choice: the
+// provider, the model and the settings, as the rule names them.
+func (m Model) sessUseNote() string {
+	return sessUseNotePrefix + m.sessNewProvider() + " · " + m.sessNewModel() + m.sessNewSettings()
+}
+
+// sessEffortLabel and sessFastLabel are /effort's and /fast's current value
+// as their rows in the `/` popup note it, and their values' `current` mark.
+func sessEffortLabel(pk sessPick) string {
+	if pk.effort == "" {
+		return sessDefaultModel
+	}
+	return sanitizeLine(pk.effort)
+}
+
+func sessFastLabel(pk sessPick) string {
+	switch {
+	case pk.fast == nil:
+		return sessDefaultModel
+	case *pk.fast:
+		return sessFastOn
+	}
+	return sessFastOff
+}
+
 // ------------------------------------------------------------ the `/` grammar
 
 // sessCmdGrammar is the list's `/` line: the whole input from its leading `/`
 // (its first non-space rune), while the cursor is past it — a command word
-// being typed that some command starts with (`/`, `/pro`), or `/provider` or
-// `/model` and a space, with the value after it. Any other `/…` is a prompt,
-// and opens nothing: agents have slash commands of their own (X152).
+// being typed that some command starts with (`/`, `/pro`, `/ef`), or
+// `/provider`, `/model`, `/effort` or `/fast` and a space, with the value
+// after it. Any other `/…` is a prompt, and opens nothing: agents have slash
+// commands of their own (X152).
 var sessCmdGrammar = completeGrammar{
 	under: sessCmdToken,
 	write: func(text string) (string, int, bool) {
@@ -268,7 +363,9 @@ func sessCmdToken(value string, cursor int) (completeToken, bool) {
 	word, _, spaced := strings.Cut(text, " ")
 	word = strings.ToLower(word)
 	if spaced {
-		if word != sessCmdProvider && word != sessCmdModel {
+		switch word {
+		case sessCmdProvider, sessCmdModel, sessCmdEffort, sessCmdFast:
+		default:
 			return completeToken{}, false
 		}
 	} else if strings.IndexFunc(text, unicode.IsSpace) >= 0 || !sessCmdKnownPrefix(word) {
@@ -279,12 +376,8 @@ func sessCmdToken(value string, cursor int) (completeToken, bool) {
 
 // sessCmdKnownPrefix says some command of the list's starts with word.
 func sessCmdKnownPrefix(word string) bool {
-	for _, c := range []string{sessCmdProvider, sessCmdModel, sessCmdExit} {
-		if strings.HasPrefix(c, word) {
-			return true
-		}
-	}
-	return false
+	starts := func(c string) bool { return strings.HasPrefix(c, word) }
+	return slices.ContainsFunc(sessCmdOlder, starts) || slices.ContainsFunc(sessCmdLater, starts)
 }
 
 // ------------------------------------------------------------ the source
@@ -300,11 +393,16 @@ type sessCmdSource struct {
 	provLabel  string
 	model      string
 	modelLabel string
-	starter    SessionStarter
-	nativeDir  string
-	nativeEnv  func(string) string
-	now        time.Time
-	frozen     bool
+	// effort and fast are /effort's and /fast's current values, as their
+	// rows note them and their values mark them (sessEffortLabel,
+	// sessFastLabel).
+	effort    string
+	fast      string
+	starter   SessionStarter
+	nativeDir string
+	nativeEnv func(string) string
+	now       time.Time
+	frozen    bool
 }
 
 func (s sessCmdSource) completeID() string { return sessCmdSourceID }
@@ -320,12 +418,17 @@ func (s sessCmdSource) complete(q completeQuery) completeAnswer {
 		return s.providerValues(arg)
 	case sessCmdModel:
 		return s.modelValues(q, arg)
+	case sessCmdEffort:
+		return sessSettingValues(sessCmdEffort, sessEffortTitle, sessEffortLevels, s.effort, arg)
+	case sessCmdFast:
+		return sessSettingValues(sessCmdFast, sessFastTitle, sessFastValues, s.fast, arg)
 	}
 	return completeAnswer{}
 }
 
-// commands is the list's commands whose names start with prefix: each with
-// what it sets and, for /provider and /model, what new sessions use now.
+// commands is the list's commands whose names start with prefix — a later
+// one only once the reveal rule shows it (sessCmdRevealed) — each with what
+// it sets and, but for /exit, what new sessions use now.
 func (s sessCmdSource) commands(prefix string) completeAnswer {
 	all := []completeItem{
 		{Name: "/" + sessCmdProvider, Detail: "provider for new sessions", Note: s.provLabel, Tone: completeToneProvider,
@@ -334,12 +437,46 @@ func (s sessCmdSource) commands(prefix string) completeAnswer {
 			Value: "cmd:" + sessCmdModel, Insert: sessCmdModel},
 		{Name: "/" + sessCmdExit, Detail: "quit; sessions keep running",
 			Value: "cmd:" + sessCmdExit, Insert: sessCmdExit},
+		{Name: "/" + sessCmdEffort, Detail: sessEffortTitle, Note: s.effort,
+			Value: "cmd:" + sessCmdEffort, Insert: sessCmdEffort},
+		{Name: "/" + sessCmdFast, Detail: sessFastTitle, Note: s.fast,
+			Value: "cmd:" + sessCmdFast, Insert: sessCmdFast},
 	}
 	ans := completeAnswer{Title: sessCmdTitle}
 	for _, it := range all {
-		if strings.HasPrefix(it.Insert, prefix) {
-			ans.Items = append(ans.Items, it)
+		if !strings.HasPrefix(it.Insert, prefix) {
+			continue
 		}
+		if slices.Contains(sessCmdLater, it.Insert) && !sessCmdRevealed(it.Insert, prefix) {
+			continue
+		}
+		ans.Items = append(ans.Items, it)
+	}
+	return ans
+}
+
+// sessSettingValues is /effort's or /fast's list (cmd's): its values whose
+// names start with arg, case folded — `default`, the model's own, first — the
+// one new sessions use marked `current`. They are offered whatever the
+// provider: a host matches the value against what its model offers.
+func sessSettingValues(cmd, title string, values []string, current, arg string) completeAnswer {
+	fold := strings.ToLower(arg)
+	ans := completeAnswer{Title: title}
+	for _, v := range values {
+		if !strings.HasPrefix(v, fold) {
+			continue
+		}
+		it := completeItem{Name: v, Value: cmd + ":" + v, Insert: cmd + " " + v}
+		if v == sessDefaultModel {
+			it.Detail = sessSettingDetail
+		}
+		if v == current {
+			it.Note, it.Tone = sessCurrentNote, completeToneAccent
+		}
+		ans.Items = append(ans.Items, it)
+	}
+	if len(ans.Items) == 0 {
+		ans.Note, ans.NoteErr = "no "+cmd+" "+sanitizeLine(arg)+": one of "+strings.Join(values, ", "), true
 	}
 	return ans
 }
@@ -480,18 +617,19 @@ func (m Model) sessCmdSourceNow() sessCmdSource {
 	st, _ := m.sessions.(SessionStarter)
 	return sessCmdSource{
 		providers: m.providers, provider: p, provOK: ok, provLabel: m.sessNewProvider(),
-		model: m.sessNewModelID(), modelLabel: m.sessNewModel(), starter: st, nativeDir: m.nativeDir, nativeEnv: m.nativeEnv, now: m.now(), frozen: m.frozen,
+		model: m.sessNewModelID(), modelLabel: m.sessNewModel(), effort: sessEffortLabel(m.sessPick), fast: sessFastLabel(m.sessPick),
+		starter: st, nativeDir: m.nativeDir, nativeEnv: m.nativeEnv, now: m.now(), frozen: m.frozen,
 	}
 }
 
 // ------------------------------------------------------------ choosing
 
 // sessCmdChosen is a key the `/` popup took on a candidate (§3.14): a value —
-// a provider, a model — is applied by tab and enter alike (the mockup's
-// "tab/enter use it"); /provider and /model are written, with the space that
-// opens their values; /exit quits craze on enter, every session left running,
-// and is only written by tab, which never submits. handled false: write what
-// the popup chose.
+// a provider, a model, an effort, a fast mode — is applied by tab and enter
+// alike (the mockup's "tab/enter use it"); /provider, /model, /effort and
+// /fast are written, with the space that opens their values; /exit quits
+// craze on enter, every session left running, and is only written by tab,
+// which never submits. handled false: write what the popup chose.
 func (m Model) sessCmdChosen(key tea.KeyType, it completeItem) (Model, tea.Cmd, bool) {
 	kind, id, _ := strings.Cut(it.Value, ":")
 	switch {
@@ -508,14 +646,19 @@ func (m Model) sessCmdChosen(key tea.KeyType, it completeItem) (Model, tea.Cmd, 
 	case kind == "model":
 		next, cmd := m.sessPickModel(id, it.Name)
 		return next, cmd, true
+	case kind == sessCmdEffort || kind == sessCmdFast:
+		next, cmd := m.sessPickSetting(kind, id)
+		return next, cmd, true
 	}
 	return m, nil, false
 }
 
-// sessCmdTyped is enter on a `/provider` or `/model` line the popup did not
-// take — typed in full, or with the popup put away: the provider named, by
-// id or by name (one the startup picker lists), or the model id as typed,
-// which the next start applies as --model would. ok false: not one of them.
+// sessCmdTyped is enter on a `/provider`, `/model`, `/effort` or `/fast`
+// line the popup did not take — typed in full, or with the popup put away:
+// the provider named, by id or by name (one the startup picker lists); the
+// model id as typed, which the next start applies as --model would; or one
+// of /effort's or /fast's values, case folded, as /provider takes only a
+// provider it lists. ok false: not one of them.
 func (m Model) sessCmdTyped(line string) (Model, tea.Cmd, bool) {
 	name, args, ok := parseSlashLine(line)
 	if !ok {
@@ -546,6 +689,24 @@ func (m Model) sessCmdTyped(line string) (Model, tea.Cmd, bool) {
 		}
 		next, cmd := m.sessPickModel(args, args)
 		return next, cmd, true
+	case sessCmdEffort, sessCmdFast:
+		values := sessEffortLevels
+		if name == sessCmdFast {
+			values = sessFastValues
+		}
+		one := strings.Join(values, ", ")
+		if args == "" {
+			m.sessNote("/"+name+" needs a value: "+one, sessNoteErr)
+			return m, nil, true
+		}
+		for _, v := range values {
+			if strings.EqualFold(v, args) {
+				next, cmd := m.sessPickSetting(name, v)
+				return next, cmd, true
+			}
+		}
+		m.sessNote("no "+name+" "+sanitizeLine(args)+": one of "+one, sessNoteErr)
+		return m, nil, true
 	}
 	return m, nil, false
 }
@@ -566,15 +727,15 @@ func (m Model) sessProviderIDs() string {
 // what new sessions use.
 func (m Model) sessPickProvider(p agent.Provider) (Model, tea.Cmd) {
 	seq := m.sessPick.seq + 1
-	m.sessPick = sessPick{prov: p, provSet: true, modelSet: true, seq: seq}
+	m.sessPick = sessPick{prov: p, provSet: true, modelSet: true, seq: seq, effort: m.sessPick.effort, fast: m.sessPick.fast}
 	m.sessList.in.set("", 0)
 	var read tea.Cmd
 	if isNative(p) {
 		m.sessPick.resolving = true
-		m.sessNote(sessUseNotePrefix+m.sessNewProvider()+" · …", sessNoteOK)
+		m.sessNote(sessUseNotePrefix+m.sessNewProvider()+" · …"+m.sessNewSettings(), sessNoteOK)
 		read = readNativeDefault(seq, m.sessList.gen, m.nativeDir, m.nativeEnv)
 	} else {
-		m.sessNote(sessUseNotePrefix+m.sessNewProvider()+" · "+m.sessNewModel(), sessNoteOK)
+		m.sessNote(m.sessUseNote(), sessNoteOK)
 	}
 	return m, tea.Batch(read, m.syncSessInput())
 }
@@ -597,7 +758,30 @@ func (m Model) sessPickModel(id, name string) (Model, tea.Cmd) {
 	m.sessPick.resolving = false
 	m.sessPick.seq++
 	m.sessList.in.set("", 0)
-	m.sessNote(sessUseNotePrefix+m.sessNewProvider()+" · "+m.sessNewModel(), sessNoteOK)
+	m.sessNote(m.sessUseNote(), sessNoteOK)
+	return m, m.syncSessInput()
+}
+
+// sessPickSetting is /effort's or /fast's choice (kind's; plan 032 C17): new
+// sessions start at value — `default` clearing it, the model's own; `on` and
+// `off` fast mode on and off. Nothing else about the pick moves, and nothing
+// checks the value against a provider: a host matches it against what its
+// model offers. The input is cleared and the hint line says what new
+// sessions use.
+func (m Model) sessPickSetting(kind, value string) (Model, tea.Cmd) {
+	switch {
+	case kind == sessCmdEffort && value == sessDefaultModel:
+		m.sessPick.effort = ""
+	case kind == sessCmdEffort:
+		m.sessPick.effort = value
+	case value == sessFastOn, value == sessFastOff:
+		on := value == sessFastOn
+		m.sessPick.fast = &on
+	default:
+		m.sessPick.fast = nil
+	}
+	m.sessList.in.set("", 0)
+	m.sessNote(m.sessUseNote(), sessNoteOK)
 	return m, m.syncSessInput()
 }
 
@@ -623,7 +807,7 @@ func (m Model) sessNativeDefault(msg sessNativeDefaultMsg) Model {
 			" (its model table: "+strings.TrimPrefix(sanitizeLine(msg.err.Error()), "modeltable: ")+")", sessNoteWarn)
 		return m
 	}
-	m.sessNote(sessUseNotePrefix+m.sessNewProvider()+" · "+m.sessNewModel(), sessNoteOK)
+	m.sessNote(m.sessUseNote(), sessNoteOK)
 	return m
 }
 
@@ -637,7 +821,7 @@ func sessCmdLineHint(v string, key, txt func(string) seg) []seg {
 	switch {
 	case name == sessCmdExit && args == "":
 		return []seg{key("enter"), txt(" quits craze; every session keeps running · "), key("esc"), txt(" clear")}
-	case name == sessCmdProvider || name == sessCmdModel:
+	case name == sessCmdProvider || name == sessCmdModel || name == sessCmdEffort || name == sessCmdFast:
 		return []seg{key("enter"), txt(" sets it for new sessions · "), key("esc"), txt(" clear")}
 	}
 	return nil

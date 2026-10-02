@@ -454,7 +454,8 @@ and "The hub splice", the schema checked against the Go types as ever.
 - **`hello`** on the hub answers `HubHelloResult` (`endpoint.kind: hub`, its
   `hostId` the hub's own id) with `rosterSubscribe` and `connect` true,
   `multiplex`, `snapshot` and `attachWhenNow` false, and `sessionCreate`
-  false until the hub serves `session.create` (plan 032 C15).
+  false until the hub serves `session.create` (plan 032 C15, below: true
+  from then).
 - **The roster** is `sessions.list` on the hub: `{epoch, cursor, sessions:
   [rosterRow], truncated?}`, `epoch` the hub's incarnation and `cursor` its
   own roster sequence. A **roster row** is `{hostId, sessionId, host{pid,
@@ -513,3 +514,64 @@ and "The hub splice", the schema checked against the Go types as ever.
   on a refused or absent socket, or EOF before the hub's first reply, bounded
   by the reconnect episode's end, which `remote` now hands its dial as the
   context's deadline — and the client resumes with its host. Fixture 21.
+
+## As shipped (S4b, plan 032 PR 4): `session.create`
+
+Plan 032 C15 serves the method this sketch reserved for the hub (the table
+above: "spawn a headless host"); the published spec is
+`docs/reference/protocol.md`'s "`session.create`", the schema
+`session.create.json`, fixture 22.
+
+- **Not reserved any more:** the method table's `session.create` is the
+  hub's, neither session-scoped — the scoped-name rule's one exception, its
+  session does not exist until it answers — nor mutating: the hub mints no
+  client ids and keeps no receipts; its `requestId` is its idempotency. A
+  host still answers it `unsupported`, reason `hub_only`. The hub's `hello`
+  says `sessionCreate: true` (a hub given no way to spawn a host — a test's
+  — says false).
+- **Params** `{cwd, prompt?, provider?, model?, effort?, fast?,
+  permissionMode?, requestId?}`; never an agent binary (SD-16). The provider
+  defaults to the hub's configured one, read at each create, else
+  `bad_request`; the permission mode to a plain launch's, `bypass`
+  (`--force`'s default: `config.toml` has no permission setting). The
+  directory and the provider are checked only for a create that will start a
+  session, after the `requestId` is looked up (plan 032 C15r).
+- **Success means started:** the hub spawns `craze serve` (its environment
+  contract's environment, `--no-host-status`, the session's directory as its
+  working directory, `--request-id`/`--request-hash` written into the host's
+  registry entry), waits for the start (60 s), sends the first prompt as the
+  list's dispatch does, and answers `{session: rosterRow, prompt:
+  none|accepted|unknown|refused, promptError?}`, the row read fresh on a
+  connection of its own, approximate as any roster row's is — and true also
+  when that read fails (X49, C15r): the create is a success all the same,
+  `session` the registry's row — no new member, no shape change.
+- **Failures** reuse the reason table: `bad_request/bad_request`,
+  `/request_conflict`; `unavailable/spawn_failed`, `/busy` (over 16 in
+  flight), `/closing`; `not_accepting/start_failed` with `data.cause`, the
+  host stopped.
+- **Idempotency across a hub restart:** the registry entry's `requestId` and
+  `requestHash` let a hub with no memory of a create join its live host —
+  readiness first, so a session started long ago answers at once; a start
+  still running is waited for 60 s from the join. Only hosts of the hub's own
+  namespace are candidates, and an incomplete registry read (unreadable, or a
+  live host's unreadable entry) refuses the create
+  `unavailable/host_unreachable` rather than spawn a second session (C15r).
+  The hub ends the recorded agents of every host it spawned once that host
+  has gone, for as long as the hub runs.
+- `craze new` is its CLI.
+
+## As shipped (S4b, plan 032 PR 4): presence
+
+Plan 032 C18 (SF-64) gives a host a count of the clients attached to its
+session, as a host-owned session capability, `presence` (omitted when false,
+as `rowFacts` is): a `presence{subscription, attached}` notification on every
+attachment — after its `synchronized`, then on every change, the latest at most
+twice a second, never after its reset or its detach reply — and `attached` on
+the `sessions.list` row. It is not one of the session's events: no `seq`, no
+journal, no cursor. The count is the attachments the host counts for its idle
+exit (pending, live or closing, less a half-closed peer's) plus, on a
+TUI-hosted session, the hosting TUI's own seat (`control.Options.LocalClient`).
+Each connection's writer sends its own count from a latest-value slot, so a
+client that has stopped reading delays only its own. An older client ignores
+the notification, as it ignores any it does not know; a client of an older
+host sees no count. Fixture 23.

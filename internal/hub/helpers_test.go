@@ -24,6 +24,7 @@ import (
 
 	"github.com/charliek/craze/internal/protocol"
 	"github.com/charliek/craze/internal/rundir"
+	"golang.org/x/sys/unix"
 )
 
 // The hub's tests (plan 032 §3.18). In process, a hub is Run on a goroutine
@@ -62,6 +63,11 @@ const (
 	hubTestStall = "CRAZE_HUB_TEST_STALL"
 	// hubTestPIDFile is a path the child writes its pid to as it starts.
 	hubTestPIDFile = "CRAZE_HUB_TEST_PIDFILE"
+	// hubTestStderrDir is a directory the child writes its own stderr into,
+	// as <dir>/<pid>: a spawned hub's stderr is /dev/null, and a SIGQUIT's
+	// goroutine dump goes to stderr — so a child that will not exit can say
+	// where it is parked (asChildren, endProcess; plan 032 X58).
+	hubTestStderrDir = "CRAZE_HUB_TEST_STDERR_DIR"
 )
 
 // The child's watchdog (internal/cli's childWatchdog): a test binary that dies
@@ -94,6 +100,12 @@ func init() {
 		return
 	}
 	_ = os.Unsetenv(hubTestChild)
+	if dir, ok := os.LookupEnv(hubTestStderrDir); ok {
+		_ = os.Unsetenv(hubTestStderrDir)
+		if f, err := os.OpenFile(filepath.Join(dir, strconv.Itoa(os.Getpid())), os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600); err == nil {
+			_ = unix.Dup2(int(f.Fd()), 2)
+		}
+	}
 	parent := os.Getppid()
 	if v, ok := os.LookupEnv(hubTestParent); ok {
 		_ = os.Unsetenv(hubTestParent)
@@ -128,9 +140,9 @@ func init() {
 		err := Run(context.Background(), Options{Env: rundir.ProcessEnv(), Ready: ready, Signals: sigs,
 			Stderr: os.Stderr, IdleGrace: grace, hooks: hk})
 		if err != nil {
-			os.Exit(1)
+			exitChild(1)
 		}
-		os.Exit(0)
+		exitChild(0)
 	}
 	if hold <= 0 {
 		run()
@@ -148,6 +160,16 @@ func init() {
 		holdThread(hold)
 	}
 }
+
+// exitChild ends a test child with code through the exit system call, not
+// os.Exit: under -race, os.Exit(0) first runs the race runtime's finalizer
+// (racefini: __tsan_fini, then C's exit), and a hub child that had already
+// finished its teardown — "stopped" in its log — was seen not to exit for its
+// test's whole 30 s, three times and only under make test-race, its SIGQUIT
+// answered with no goroutine dump (plan 032 X67, SF-118). A child's exit
+// status is all its test reads; it owes no race summary and runs no exit
+// hook.
+func exitChild(code int) { syscall.Exit(code) }
 
 // stallAt is the child's teardown held just before its Release
 // (hubTestStall): it says so (dir/stalled) and waits until the test lets it
@@ -392,13 +414,23 @@ type running struct {
 	ready  chan []byte // its ready line, once; closed with none
 	done   chan struct{}
 	err    error // Run's, once done is closed
-	h      chan *hub
+	// returned is when Run returned, taken on Run's own goroutine before done
+	// is closed: a teardown's length, whenever the test next runs.
+	returned time.Time
+	h        chan *hub
 }
 
 // runIn runs a hub over env with hk's schedule (nil: production's), its
 // ready line read from a pipe of the test's. One still running when the test
 // ends is sent SIGTERM and waited for.
 func runIn(t *testing.T, env rundir.Env, hk *hooks) *running {
+	t.Helper()
+	return runWith(t, env, hk, nil)
+}
+
+// runWith is runIn with session.create's options (nil: a hub that creates
+// nothing).
+func runWith(t *testing.T, env rundir.Env, hk *hooks, creates *Creates) *running {
 	t.Helper()
 	r, w, err := os.Pipe()
 	if err != nil {
@@ -427,7 +459,8 @@ func runIn(t *testing.T, env rundir.Env, hk *hooks) *running {
 	}()
 	go func() {
 		rn.err = Run(context.Background(), Options{Env: env, Ready: NewReadyPipe(w), Signals: rn.sigs,
-			Stderr: rn.stderr, IdleGrace: time.Hour, Codecs: protocol.Codecs{Event: 1, Snapshot: 1}, hooks: hk})
+			Stderr: rn.stderr, IdleGrace: time.Hour, Codecs: protocol.Codecs{Event: 1, Snapshot: 1}, Creates: creates, hooks: hk})
+		rn.returned = time.Now()
 		close(rn.done)
 	}()
 	t.Cleanup(func() {
@@ -631,6 +664,9 @@ func asChildren(t *testing.T, extra func(n int) []string) *children {
 		t.Fatal(err)
 	}
 	c := &children{}
+	// Each child's own stderr, for the dump a hung one is asked for
+	// (registered before the cleanup that reads it, so removed after it).
+	stderrs := t.TempDir()
 	prev := Command
 	Command = func(argv []string) (*exec.Cmd, error) {
 		if len(argv) != 1 || argv[0] != "hub" {
@@ -638,7 +674,8 @@ func asChildren(t *testing.T, extra func(n int) []string) *children {
 		}
 		n := int(c.n.Add(1))
 		cmd := exec.Command(exe, "-test.run=^$")
-		cmd.Env = append(os.Environ(), hubTestChild+"=1", hubTestParent+"="+strconv.Itoa(os.Getpid()))
+		cmd.Env = append(os.Environ(), hubTestChild+"=1", hubTestParent+"="+strconv.Itoa(os.Getpid()),
+			hubTestStderrDir+"="+stderrs)
 		if extra != nil {
 			cmd.Env = append(cmd.Env, extra(n)...)
 		}
@@ -650,7 +687,7 @@ func asChildren(t *testing.T, extra func(n int) []string) *children {
 	t.Cleanup(func() {
 		Command = prev
 		for _, pid := range c.pids() {
-			endProcess(t, pid)
+			endProcess(t, pid, stderrs)
 		}
 	})
 	return c
@@ -701,9 +738,14 @@ func statState(path string) string {
 	return s[i+2 : i+3]
 }
 
-// endProcess ends pid — a child of this test — and fails the test if it will
-// not go: SIGCONT and SIGTERM, step to exit, then SIGKILL.
-func endProcess(t *testing.T, pid int) {
+// endProcess ends pid — a child of this test, its stderr in dir/<pid>
+// (hubTestStderrDir) — and fails the test if it will not go: SIGCONT and
+// SIGTERM, step to exit, then SIGKILL. One that has not gone within step
+// says first where it is — /proc's state and signal masks, then the
+// goroutine dump a SIGQUIT writes to its stderr — before its SIGKILL (plan
+// 032 X58: a hub child ignored its SIGTERM for the whole step, twice, on
+// loaded boxes).
+func endProcess(t *testing.T, pid int, dir string) {
 	t.Helper()
 	if !alive(pid) {
 		return
@@ -715,9 +757,47 @@ func endProcess(t *testing.T, pid int) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	if alive(pid) {
+		state := procSignalState(pid)
+		var dump []byte
+		if dir != "" {
+			_ = syscall.Kill(pid, syscall.SIGQUIT)
+			quit := time.Now().Add(5 * time.Second)
+			for alive(pid) && time.Now().Before(quit) {
+				time.Sleep(10 * time.Millisecond)
+			}
+		}
 		_ = syscall.Kill(pid, syscall.SIGKILL)
-		t.Errorf("hub child %d did not exit within %v of SIGTERM; killed", pid, step)
+		if dir != "" {
+			dump, _ = os.ReadFile(filepath.Join(dir, strconv.Itoa(pid)))
+		}
+		t.Errorf("hub child %d did not exit within %v of SIGTERM; killed\n%s\n--- its stderr, a SIGQUIT's dump:\n%s", pid, step, state, dump)
 	}
+}
+
+// procSignalState is what /proc says of pid's state and signals — State,
+// SigQ, SigPnd, ShdPnd, SigBlk, SigIgn, SigCgt, and its wait channel — for a
+// failure's message; "" where there is no /proc.
+func procSignalState(pid int) string {
+	b, err := os.ReadFile(fmt.Sprintf("/proc/%d/status", pid))
+	if err != nil {
+		if runtime.GOOS != "linux" {
+			return ""
+		}
+		// A process kill still finds but /proc cannot show: say both.
+		return fmt.Sprintf("/proc/%d/status: %v; kill(%d, 0): %v", pid, err, pid, syscall.Kill(pid, 0))
+	}
+	var out []string
+	for _, line := range strings.Split(string(b), "\n") {
+		for _, key := range []string{"State:", "SigQ:", "SigPnd:", "ShdPnd:", "SigBlk:", "SigIgn:", "SigCgt:"} {
+			if strings.HasPrefix(line, key) {
+				out = append(out, line)
+			}
+		}
+	}
+	if w, err := os.ReadFile(fmt.Sprintf("/proc/%d/wchan", pid)); err == nil {
+		out = append(out, "wchan:\t"+string(w))
+	}
+	return strings.Join(out, "\n")
 }
 
 // waitStopped waits for pid to be stopped (SIGSTOP), within step. kill(2)

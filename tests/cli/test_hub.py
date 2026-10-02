@@ -1,5 +1,6 @@
 """The per-machine hub (plan 032 §3.5, §3.12): `craze hub` run by hand, and
-the commands that start it on demand, `craze ps` and `craze bridge --hub`.
+the commands that start it on demand, `craze ps`, `craze new` and
+`craze bridge --hub`.
 
 The first cases start the real binary's hidden `craze hub` directly: what a
 spawned hub does once it is up is the same, less its ready line. The later
@@ -15,6 +16,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import signal
 import socket
 import subprocess
@@ -25,7 +27,7 @@ from pathlib import Path
 import pytest
 
 import conftest
-from conftest import seed_host_idle_exit
+from conftest import TEST_HOST_IDLE_EXIT, seed_host_idle_exit
 from test_bridge import _hello as _bridge_hello
 from test_bridge import _recv_line, _send
 from test_detach import _entries, _prompt
@@ -123,6 +125,7 @@ def test_a_hub_serves_its_hello_and_stops_on_sigterm(craze_bin: Path, tmp_path: 
     assert result["endpoint"]["hostId"] == rec["hubId"]
     assert result["endpoint"]["pid"] == proc.pid
     assert result["capabilities"]["rosterSubscribe"] is True
+    assert result["capabilities"]["sessionCreate"] is True, result["capabilities"]
     assert "clientId" not in result
     proc.send_signal(signal.SIGTERM)
     assert proc.wait(timeout=WAIT) == 0
@@ -351,3 +354,103 @@ def test_bridge_hub_answers_a_hub_hello(craze_bin: Path, fake_agent_bin: Path, t
     assert both.returncode == 1 and both.stdout == b"", both
     assert both.stderr.startswith(b"craze bridge: --hub and --session cannot be used together") and both.stderr.count(b"\n") == 1
     _cleanup_stops(rec, tmp_path, fake_agent_bin)
+
+
+# ------------------------------------------------------------- craze new
+
+
+def _new(craze_bin: Path, *args: str) -> subprocess.CompletedProcess[bytes]:
+    """`craze new` with no terminal, in the test's environment, so the hub it
+    spawns -- and every host that hub spawns -- carries the test's marker."""
+    return subprocess.run(
+        [str(craze_bin), "new", *args],
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        env=os.environ.copy(),
+        timeout=6 * WAIT,
+    )
+
+
+def _started(out: subprocess.CompletedProcess[bytes], work: Path) -> str:
+    """craze new's one line, `started <id> in <dir>`: the short id."""
+    assert out.returncode == 0 and out.stderr == b"", (out.returncode, out.stdout, out.stderr)
+    m = re.fullmatch(rb"started ([0-9a-f]{8}) in (.+)\n", out.stdout)
+    assert m is not None and m.group(2).decode() == str(work), out.stdout
+    return m.group(1).decode()
+
+
+def _created_entry(short: str) -> dict:
+    """The registry entry of the session craze new started, by its short id."""
+    (entry,) = [e for e in _entries(_home()) if e.get("crazeSessionId", "").endswith(short)]
+    return entry
+
+
+def _ready_entry(short: str) -> dict:
+    """_created_entry once it says ready, within 10 s: the host writes its
+    entry's ready flag on its own, after the start craze new's answer waited
+    for (X48), so the flag can follow the answer (plan 032 X69: seen on macOS
+    CI)."""
+    deadline = time.monotonic() + 10.0
+    while True:
+        entry = _created_entry(short)
+        if entry.get("ready") is True:
+            return entry
+        assert time.monotonic() < deadline, f"the created session's entry never said ready: {entry}"
+        time.sleep(0.05)
+
+
+def test_new_starts_sessions_that_ps_lists(craze_bin: Path, fake_agent_bin: Path, tmp_path: Path) -> None:
+    """A12: `craze new` starts a session in another directory through the hub
+    it spawns -- with a first prompt and without -- and returns only once the
+    session has started (its registry entry, carrying the create's request id,
+    says ready on its own soon after), printing its short id and directory; the hub's hosts find the
+    fake agent through `[agents]` (no agent binary crosses to them), and the
+    provider is persisted as the next default. `craze ps` then lists both,
+    the first titled by its prompt."""
+    craze_home = Path(os.environ["CRAZE_HOME"])
+    craze_home.mkdir(parents=True, exist_ok=True)
+    (craze_home / "config.toml").write_text(
+        f'host_idle_exit = "{TEST_HOST_IDLE_EXIT}"\n\n[agents]\ncursor = "{fake_agent_bin}"\n', encoding="utf-8"
+    )
+    work = tmp_path / "proj-new"
+    work.mkdir()
+
+    first = _started(_new(craze_bin, "-C", str(work), "--provider", "cursor", "first", "words"), work)
+    entry = _ready_entry(first)
+    assert entry["workspace"] == str(work), entry
+    assert entry["requestId"].startswith("new-") and entry["requestHash"].startswith("sha256:"), entry
+    # The host saves its provider just after its start publishes readiness,
+    # which is what craze new's answer waits for: the save can follow it
+    # (SF-117), so it is awaited, within 10 s.
+    deadline = time.monotonic() + 10.0
+    while not re.search(r'(?m)^provider = "cursor"$', (craze_home / "config.toml").read_text(encoding="utf-8")):
+        assert time.monotonic() < deadline, "the created session did not persist its provider within 10s"
+        time.sleep(0.05)
+
+    second = _started(_new(craze_bin, "-C", str(work), "--provider", "cursor"), work)
+    assert second != first
+    _ready_entry(second)
+    rec = _the_hub(_home())
+
+    deadline = time.monotonic() + WAIT
+    while True:
+        out = _ps(craze_bin, None)
+        assert out.returncode == 0 and out.stderr == b"", out.stderr
+        rows = {r["SESSION"]: r for r in _ps_rows(out.stdout)}
+        if rows.get(first, {}).get("TITLE") == "first words" or time.monotonic() > deadline:
+            break
+        time.sleep(0.1)
+    assert sorted(rows) == sorted([first, second]), out.stdout
+    assert rows[first]["TITLE"] == "first words" and rows[first]["PROVIDER"] == "cursor", rows[first]
+    assert rows[second]["STATE"] == "idle" and rows[second]["DIR"] == str(work), rows[second]
+    _cleanup_stops(rec, tmp_path, fake_agent_bin)
+
+
+def test_new_refuses_with_the_hubs_words(craze_bin: Path, fake_agent_bin: Path, tmp_path: Path) -> None:
+    """A create the hub refuses is its words on one stderr line, exit 1: no
+    provider named and none configured. Nothing is started."""
+    out = _new(craze_bin, "-C", str(tmp_path), "hello")
+    assert out.returncode == 1 and out.stdout == b"", out
+    assert out.stderr.startswith(b"craze new: params.provider is required") and out.stderr.count(b"\n") == 1, out.stderr
+    assert not [e for e in _entries(_home()) if e.get("requestId")]
+    _cleanup_stops(_the_hub(_home()), tmp_path, fake_agent_bin)

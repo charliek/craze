@@ -81,7 +81,7 @@ type conn struct {
 
 func newConn(s *Server, nc net.Conn) *conn {
 	ctx, cancel := context.WithCancel(context.Background())
-	return &conn{
+	c := &conn{
 		srv:    s,
 		nc:     nc,
 		ctx:    ctx,
@@ -89,6 +89,12 @@ func newConn(s *Server, nc net.Conn) *conn {
 		out:    newOutbox(s.hooks.outboxFull),
 		slots:  make(chan struct{}, protocol.RequestsPerConnection),
 	}
+	if h := s.hooks.writerIdle; h != nil {
+		// c.id is set before the writer starts (accept), so the writer reads
+		// it set.
+		c.out.idle = func(taken uint64) { h(c.id, taken) }
+	}
+	return c
 }
 
 // ------------------------------------------------------------------ reader
@@ -412,6 +418,9 @@ func (c *conn) write() {
 		if !ok {
 			return
 		}
+		if h := c.srv.hooks.presenceTaken; h != nil && ln.presence {
+			h(c.id, ln.b, ln.at)
+		}
 		if h := c.srv.hooks.beforeWrite; h != nil {
 			h(ln.b)
 		}
@@ -525,6 +534,7 @@ func (c *conn) close(reason string) {
 		sub.Close()
 	}
 	c.srv.unbind(c)
+	c.srv.forgetPresence(c.out)
 	c.srv.forget(c)
 	fields := map[string]any{"event": "close", "reason": reason}
 	if c.superseded.Load() {
@@ -543,12 +553,16 @@ func (c *conn) close(reason string) {
 // outLine is one line queued for the writer, what it is to a replaced
 // connection, and what to do once it is on the socket (or never will be).
 // counted is how many of the budget's bytes it holds: len(b), or 0 for the
-// one line ever queued outside the budget (outbox.admit).
+// one line ever queued outside the budget (outbox.admit) and for a presence
+// line, which is never queued at all: next makes it from the presence slot
+// when it hands it over (presence, at that instant at).
 type outLine struct {
-	b       []byte
-	kind    lineKind
-	done    func()
-	counted int
+	b        []byte
+	kind     lineKind
+	done     func()
+	counted  int
+	presence bool
+	at       time.Time
 }
 
 // lineKind is what a queued line is to a replaced connection (plan 027 X25).
@@ -598,12 +612,133 @@ type outbox struct {
 	// everyone waiting for room.
 	ready chan struct{}
 	room  chan struct{}
-	// full is a test's barrier (hooks.outboxFull), nil in production.
+	// full is a test's barrier (hooks.outboxFull), nil in production; idle
+	// is another (hooks.writerIdle), told how many lines the writer has
+	// taken each time it is about to wait for a wake with nothing owed and
+	// no wake pending.
 	full func()
+	idle func(taken uint64)
+	// offered and taken count the lines ever queued and ever handed to the
+	// writer (next): a presence slot armed by a line goes on once the writer
+	// has taken as many as were offered by then (presenceSlot.after).
+	offered, taken uint64
+	// pres is the connection's presence slot (below).
+	pres presenceSlot
 }
+
+// Presence (plan 032 §3.14, SF-64; R2-6): how a Presence server tells each
+// attachment how many clients are attached, without one slow reader holding
+// back anybody else's count.
+//
+// Each connection's outbox has a presence slot, and the server keeps every
+// open connection's (Server.presence). A change in the count stores the count
+// clients see in every slot — an atomic store — and wakes each writer with a
+// send that never waits (setPresence), all in the countMu section that made
+// the change: nothing there can block on a connection. The writer, the next
+// time it asks its outbox for a line (next), is handed a presence line made
+// from the slot ahead of the queue whenever one is owed: the slot is armed,
+// the count differs from the last one sent, and the last was taken at least
+// presenceInterval ago — otherwise next waits for the rest of it, or for a
+// wake. So a count that moves several times while a writer is busy, or
+// within one interval, goes out once, as its latest value; and a writer
+// stalled on a peer that has stopped reading delays its own connection's
+// presence alone.
+//
+// The slot is armed for one attachment at a time, by its synchronized — in
+// the conn.mu section that queues it, so only while the attachment is live
+// (forward.go's catchUp) — and a presence line is owed only once the writer
+// has taken every line queued up to then: the synchronized is on the socket
+// first. The arm wakes the writer itself, since the synchronized's own wake
+// may already be spent (armPresence). It is disarmed in the conn.mu section
+// that claims the attachment's
+// end — a detach's claim (sessionDetach), the forwarder's (terminal) — and
+// wherever it closes (closedLocked), each before its terminal line is
+// offered, so no presence follows its reset or its detach's reply; and a
+// replaced connection writes only its terminal line, so none follows a
+// replacement either. A presence line is not queued, sequenced or budgeted:
+// it is made when it is taken, and is never anything but the latest count.
+type presenceSlot struct {
+	// count is the count clients see, as the server last stored it — written
+	// with no lock (setPresence), read under the outbox's.
+	count atomic.Int64
+	// The rest under outbox.mu. sub is the armed attachment's subscription
+	// id, "" while none is; after is how many lines the outbox had been
+	// offered when it was armed; sent is the count last taken for sub, -1
+	// before the first; last is when the last presence line was taken on this
+	// connection, the zero time before any.
+	sub   string
+	after uint64
+	sent  int64
+	last  time.Time
+}
+
+// presenceInterval is the least time between two presence lines on one
+// connection: at most two a second (plan 032 §3.14).
+const presenceInterval = 500 * time.Millisecond
 
 func newOutbox(full func()) *outbox {
 	return &outbox{ready: make(chan struct{}, 1), room: make(chan struct{}), full: full}
+}
+
+// setPresence stores n, the count clients see, in the presence slot and wakes
+// the writer to send it. It takes no lock and never waits: the server calls
+// it under countMu for every open connection (countAttachment).
+func (o *outbox) setPresence(n int) {
+	o.pres.count.Store(int64(n))
+	select {
+	case o.ready <- struct{}{}:
+	default:
+	}
+}
+
+// armPresence arms the presence slot for the attachment sub, its
+// synchronized just offered (the "Presence" doc above): the writer owes it the
+// count once it has taken every line offered so far, whatever was last sent
+// on the connection. Called under conn.mu, as offer is. It wakes the writer,
+// never waiting: the synchronized's own wake may have been spent already —
+// the writer can have taken and written the line, and parked again, between
+// the offer and this — and with nothing more queued no other wake would come.
+func (o *outbox) armPresence(sub string) {
+	o.mu.Lock()
+	o.pres.sub, o.pres.after, o.pres.sent = sub, o.offered, -1
+	o.mu.Unlock()
+	select {
+	case o.ready <- struct{}{}:
+	default:
+	}
+}
+
+// disarmPresence ends the presence the attachment sub is owed, if the slot is
+// armed for it: no presence line is taken for it from here on. Called under
+// conn.mu, before the attachment's terminal line is offered.
+func (o *outbox) disarmPresence(sub string) {
+	o.mu.Lock()
+	if o.pres.sub == sub {
+		o.pres.sub = ""
+	}
+	o.mu.Unlock()
+}
+
+// presenceLocked is the presence line the slot owes now, if one is (its
+// params, and true), or how long until one may be (0: none until a wake);
+// o.mu is held. A line it answers is taken: the slot records its count and
+// now.
+func (o *outbox) presenceLocked(now time.Time) (protocol.PresenceParams, bool, time.Duration) {
+	p := &o.pres
+	if p.sub == "" || o.terminalOnly || o.taken < p.after {
+		return protocol.PresenceParams{}, false, 0
+	}
+	n := p.count.Load()
+	if n == p.sent {
+		return protocol.PresenceParams{}, false, 0
+	}
+	if !p.last.IsZero() {
+		if wait := presenceInterval - now.Sub(p.last); wait > 0 {
+			return protocol.PresenceParams{}, false, wait
+		}
+	}
+	p.sent, p.last = n, now
+	return protocol.PresenceParams{Subscription: p.sub, Attached: uint(max(n, 0))}, true, 0
 }
 
 var (
@@ -651,6 +786,7 @@ func (o *outbox) offer(b []byte, done func(), limit int, kind lineKind) (<-chan 
 		return o.room, errNoRoom
 	}
 	o.q = append(o.q, outLine{b: b, kind: kind, done: done, counted: len(b)})
+	o.offered++
 	o.bytes += len(b)
 	o.high = max(o.high, o.bytes)
 	if kind == terminalLine {
@@ -744,6 +880,7 @@ func (o *outbox) admit(b []byte, done func()) error {
 		return errOutboxReplaced
 	}
 	o.q = append(o.q, outLine{b: b, kind: ordinaryLine, done: done})
+	o.offered++
 	select {
 	case o.ready <- struct{}{}:
 	default:
@@ -794,23 +931,74 @@ func (o *outbox) wakeLocked() {
 	o.room = make(chan struct{})
 }
 
-// next is the line at the head, waiting for one; false once closed.
+// next is the writer's next line, waiting for one; false once closed. A
+// presence line the slot owes goes ahead of the queue's head (presenceLocked;
+// the "Presence" doc above); otherwise it is the head. With neither, it waits
+// for a wake — a line queued, a count stored — or, when a presence line is
+// owed but not yet due, for the rest of its interval.
 func (o *outbox) next() (outLine, bool) {
+	var timer *time.Timer
+	defer func() {
+		if timer != nil {
+			timer.Stop()
+		}
+	}()
 	for {
+		now := time.Now()
 		o.mu.Lock()
 		if o.closed {
 			o.mu.Unlock()
 			return outLine{}, false
 		}
+		p, owed, wait := o.presenceLocked(now)
+		if owed {
+			o.mu.Unlock()
+			line, err := notificationLine(protocol.NotifyPresence, p)
+			if err != nil {
+				// Two strings and a number always encode: a bug, and the
+				// count is left for the next change rather than the line.
+				continue
+			}
+			return outLine{b: line, kind: ordinaryLine, presence: true, at: now}, true
+		}
 		if len(o.q) > 0 {
 			ln := o.q[0]
 			o.q[0] = outLine{}
 			o.q = o.q[1:]
+			o.taken++
 			o.mu.Unlock()
 			return ln, true
 		}
+		taken := o.taken
 		o.mu.Unlock()
-		<-o.ready
+		if wait <= 0 {
+			if o.idle != nil {
+				// A test's barrier, told only with no wake pending: a wake
+				// still buffered is taken here and the state looked at again,
+				// as the receive below would, so a writer the barrier says
+				// has parked can be woken only by a wake made after it.
+				select {
+				case <-o.ready:
+					continue
+				default:
+				}
+				o.idle(taken)
+			}
+			<-o.ready
+			continue
+		}
+		if timer == nil {
+			timer = time.NewTimer(wait)
+		} else {
+			timer.Reset(wait)
+		}
+		// Go 1.23's timers: a Reset after a Stop, or after the timer fired,
+		// leaves no stale tick behind.
+		select {
+		case <-o.ready:
+			timer.Stop()
+		case <-timer.C:
+		}
 	}
 }
 

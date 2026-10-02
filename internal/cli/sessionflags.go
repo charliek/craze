@@ -17,8 +17,8 @@ import (
 // functions on both, so a flag cannot mean one thing to the TUI and another to
 // the host it is handed to:
 //
-//	--workspace --provider --model --agent-bin --force/--no-force --ask
-//	--plan --plugin-dir --continue
+//	--workspace --provider --model --effort --fast/--no-fast --agent-bin
+//	--force/--no-force --ask --plan --plugin-dir --continue
 //
 // The TUI's own flags (--theme, --no-mouse, --no-background,
 // --no-host-status, --resume) stay on the root: a headless host draws nothing
@@ -37,7 +37,12 @@ func registerSessionFlags(cmd *cobra.Command, f *tuiFlags) {
 	// Worded without the provider's name: the root's help names native once,
 	// in --provider (TestRootHelpNamesNativeOnceAndNeverTheHarness).
 	cmd.Flags().StringVar(&f.model, "model", "", "model to start on: an ACP model id, or a model alias")
-	cmd.Flags().StringVar(&f.agentBin, "agent-bin", "", "path to cursor-agent / fake agent (or CRAZE_AGENT_BIN)")
+	// --effort and --fast/--no-fast (plan 032 §3.11, P6): the session's own
+	// settings, set by its Start after --model and before any prompt.
+	cmd.Flags().StringVar(&f.effort, "effort", "", "effort to start at, where the model offers one: a level's id or name (default: the model's own)")
+	cmd.Flags().BoolVar(&f.fast, "fast", false, "start with the fast setting on, where the model offers one")
+	cmd.Flags().BoolVar(&f.noFast, "no-fast", false, "start with the fast setting off, where the model offers one")
+	cmd.Flags().StringVar(&f.agentBin, "agent-bin", "", "path to the agent binary for this launch's provider (or CRAZE_AGENT_BIN)")
 	registerPluginDirFlag(cmd, &f.pluginDirs)
 	cmd.Flags().BoolVar(&f.force, "force", true, "spawn the agent with --force (yolo)")
 	cmd.Flags().BoolVar(&f.noForce, "no-force", false, "disable yolo and handle permission requests")
@@ -49,15 +54,39 @@ func registerSessionFlags(cmd *cobra.Command, f *tuiFlags) {
 
 // settle is the session flags' own rules, before anything reads them: --ask
 // and --plan are mutually exclusive — a usage error, worded as the root has
-// always worded it — and --no-force turns --force off.
+// always worded it — and so are --fast and --no-fast; --no-force turns
+// --force off.
 func (f *tuiFlags) settle() error {
 	if f.ask && f.plan {
 		return usagef("craze: --ask and --plan are mutually exclusive")
+	}
+	if f.fast && f.noFast {
+		return usagef("craze: --fast and --no-fast are mutually exclusive")
 	}
 	if f.noForce {
 		f.force = false
 	}
 	return nil
+}
+
+// fastSetting is --fast/--no-fast as the session takes it (agent.Options.Fast,
+// hostspawn.Spec.Fast): true, false, or nil for neither — the provider's own
+// default. settle has refused both.
+func (f *tuiFlags) fastSetting() *bool {
+	switch {
+	case f.fast:
+		on := true
+		return &on
+	case f.noFast:
+		off := false
+		return &off
+	}
+	return nil
+}
+
+// setFast is fastSetting's inverse: the command line that asks for v.
+func (f *tuiFlags) setFast(v *bool) {
+	f.fast, f.noFast = v != nil && *v, v != nil && !*v
 }
 
 // agentEnv is the agent child's environment for this command line, and the

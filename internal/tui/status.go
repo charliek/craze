@@ -206,11 +206,12 @@ func formatUSD(pico int64) string {
 	return fmt.Sprintf("$%d.%02d", cents/100, cents%100)
 }
 
-// statusRow2 is the mode chip, the permission chip, the in-flight tool counts
-// and the sub-agent count. The hint beside the mode goes first when the row is
-// narrow, then the agent count, then the counts; neither chip ever drops, and
-// when the two of them alone do not fit it is the permission chip that
-// truncates, because it comes second.
+// statusRow2 is the mode chip, the permission chip, the in-flight tool counts,
+// the sub-agent count and — with another client attached to the session —
+// `N attached` (presence.go). When the row is narrow `N attached` goes first,
+// then the hint beside the mode, then the agent count, then the counts;
+// neither chip ever drops, and when the two of them alone do not fit it is
+// the permission chip that truncates, because it comes second.
 func (m Model) statusRow2(lay frameLayout) (string, []segSpan) {
 	dim := styleFG(m.theme.Dim)
 	chip, chipStyle := m.permissionChip()
@@ -219,7 +220,7 @@ func (m Model) statusRow2(lay frameLayout) (string, []segSpan) {
 	if mode != "" {
 		hint = modeHint
 	}
-	parts := make([]statusPart, 0, 6)
+	parts := make([]statusPart, 0, 9)
 	if lay.SpinnerMerged {
 		// Degradation step 6 took the spinner line away; this is all that is
 		// left of it, and it is worth more than any of its neighbours.
@@ -230,14 +231,17 @@ func (m Model) statusRow2(lay frameLayout) (string, []segSpan) {
 	}
 	parts = append(parts,
 		statusPart{text: mode, style: modeStyle, id: spanMode},
-		statusPart{text: hint, style: dim, drop: 1},
+		statusPart{text: hint, style: dim, drop: 2},
 		// The copy note is here for two seconds and gone; it never drops,
 		// because the row it is crowding is the only feedback a copy gets.
 		statusPart{text: m.copyChip(), style: styleFG(m.theme.Accent)},
 		statusPart{text: chip, style: chipStyle},
-		statusPart{text: m.inFlightCounts(), style: dim, drop: 3},
-		statusPart{text: m.queueCount(), style: styleFG(m.theme.Accent), drop: 2},
-		statusPart{text: m.agentCount(), style: styleFG(m.theme.Accent), drop: 2},
+		statusPart{text: m.inFlightCounts(), style: dim, drop: 4},
+		statusPart{text: m.queueCount(), style: styleFG(m.theme.Accent), drop: 3},
+		statusPart{text: m.agentCount(), style: styleFG(m.theme.Accent), drop: 3},
+		// Who else has the session open is worth the least of the row: it
+		// goes first (plan 032 §3.14), and is "" while nobody else does.
+		statusPart{text: m.presenceChip(), style: styleFG(m.theme.Accent), drop: 1},
 	)
 	return fitStatus(parts, statusDot, dim, m.width)
 }

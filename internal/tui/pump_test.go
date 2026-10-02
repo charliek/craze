@@ -273,7 +273,7 @@ func (p *pump) read() {
 
 // readRemote is read over a socket session: its stream's items, as the model's
 // own reader delivers them (waitEvent) — an event with its generation, a
-// restore, a ready, the end. A fetcher of its own reads the stream, since a
+// restore, a ready, the end, a presence. A fetcher of its own reads the stream, since a
 // read blocks where the primary's receive would select; the loop keeps the
 // rendezvous's shape. What the fetcher holds is not counted by quiet, which
 // is why a remote pump is quiet only once its model has folded to the host's
@@ -304,6 +304,8 @@ func (p *pump) readRemote() {
 				msg = readyMsg{info: it.Info, err: it.Err}
 			case backend.ItemEnd:
 				msg = endMsg{err: it.Err}
+			case backend.ItemPresence:
+				msg = presenceMsg{n: it.Attached, gen: it.Gen}
 			default:
 				continue
 			}

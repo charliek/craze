@@ -37,8 +37,11 @@ type Snapshot struct {
 	// unreachable is never shown as saved.
 	Saved []sessions.Row
 	// RegistryErr is why the registry could not be read at the last tick,
-	// nil when it was; Running is then what the last good read listed.
-	// IndexErr is the same for the index and Saved.
+	// nil when it was; Running is then what the last good read listed —
+	// nothing, before any. A Snapshot is published only after a read, so nil
+	// says a read succeeded (what the hub's list roster waits for before it
+	// hands a new poller's Snapshots on, plan 032 r34 2). IndexErr is the
+	// same for the index and Saved.
 	RegistryErr error
 	IndexErr    error
 	// Run is the poll's run the Snapshot is from: a roster OpenHub opened
@@ -379,6 +382,17 @@ func Open(env rundir.Env, index Index) *Roster {
 	return open(index, defaults(env))
 }
 
+// OpenBudget is Open with budget as each share of an attempt's budget in
+// place of dialBudget and listBudget (0: theirs) — a test's, whose real hosts
+// a starved scheduler must not turn unreachable mid-assertion.
+func OpenBudget(env rundir.Env, index Index, budget time.Duration) *Roster {
+	o := defaults(env)
+	if budget > 0 {
+		o.dialBudget, o.listBudget = budget, budget
+	}
+	return open(index, o)
+}
+
 // HubOptions are the hub's roster's (OpenHub). Hosts and Publish are
 // required; every other field's zero value is production's.
 type HubOptions struct {
@@ -660,7 +674,9 @@ func (p *poller) tick() {
 		p.regErr = nil
 		p.reconcile(entries)
 	}
-	if p.saved.read(p.r.index, p.o, p.hosts) {
+	// The hub's roster has no index: no saved rows, and no running set to
+	// build for them.
+	if p.r.index != nil && p.saved.read(p.r.index, p.o.indexPath, p.o.savedMax, runningOfHosts(p.hosts)) {
 		p.dirty = true
 	}
 	p.launch()

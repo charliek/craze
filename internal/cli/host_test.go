@@ -278,7 +278,7 @@ func TestAttachHostBuildsAHubOnlyForAnActiveHost(t *testing.T) {
 			}
 
 			childEnv := hosts.childEnv(env.list())
-			opts := sessionOptions(f, t.TempDir(), "", io.Discard, io.Discard, childEnv, agent.CursorProvider(), sessions.Row{})
+			opts := sessionOptions(f, t.TempDir(), "", io.Discard, io.Discard, childEnv, agent.CursorProvider(), agent.CursorProvider(), sessions.Row{})
 			if !tc.want {
 				if opts.Env != nil {
 					t.Fatalf("no host active, but the child env is replaced: %q", opts.Env)

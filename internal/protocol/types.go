@@ -176,14 +176,16 @@ func HostCapabilities() ConnectionCapabilities {
 	return ConnectionCapabilities{Snapshot: true, AttachWhenNow: true}
 }
 
-// HubCapabilities is the hub's connection capabilities (plan 032 §3.6): the
-// roster subscription (sessions.subscribe) and the splice (session.connect)
-// are served; a session is never multiplexed on one connection (SQ14), and a
-// snapshot and an attach are a host's, reached through the splice, so those
-// three are false. sessionCreate is false until the hub serves session.create
-// (plan 032 C15): a client that needs it checks it, never the hub's version.
+// HubCapabilities is the hub's connection capabilities (plan 032 §3.6,
+// §3.10): the roster subscription (sessions.subscribe), session creation
+// (session.create) and the splice (session.connect) are served; a session is
+// never multiplexed on one connection (SQ14), and a snapshot and an attach
+// are a host's, reached through the splice, so those three are false. A
+// client that needs one checks it, never the hub's version: a hub from
+// before session.create says sessionCreate false, and so does a hub given no
+// way to spawn a host (internal/hub's Options.Creates, nil only in a test).
 func HubCapabilities() ConnectionCapabilities {
-	return ConnectionCapabilities{RosterSubscribe: true, Connect: true}
+	return ConnectionCapabilities{RosterSubscribe: true, SessionCreate: true, Connect: true}
 }
 
 // Codecs is the version of each codec whose output the protocol carries
@@ -322,6 +324,13 @@ type CatalogMode struct {
 // omitted when false — which is every older host's document, and the fake
 // host's by default (X1), so no fixture from before it moves — and so absent
 // means an older host: a client then reads the row as S2's.
+//
+// Presence is the host's own too (plan 032 §3.14, SF-64): true where the
+// host counts the clients attached to the session — every craze from plan 032
+// on, detached or TUI-hosted — and so sends each attachment the presence
+// notification and puts attached on the session's sessions.list row. It is
+// omitted when false, as rowFacts is: absent is an older host, which sends no
+// presence, and a client then shows no count.
 type SessionCapabilities struct {
 	Interject           bool `json:"interject"`
 	SubagentCancel      bool `json:"subagentCancel"`
@@ -340,6 +349,7 @@ type SessionCapabilities struct {
 	HistoryCursor       bool `json:"historyCursor"`
 	Stop                bool `json:"stop"`
 	RowFacts            bool `json:"rowFacts,omitempty"`
+	Presence            bool `json:"presence,omitempty"`
 }
 
 // SessionRow is one sessions.list row (plan 027 §3.3): the info document
@@ -394,6 +404,15 @@ type SessionRow struct {
 	// Prompted says a turn has been started at all (StateResult.Prompted): a
 	// session that never was has nothing to resume.
 	Prompted bool `json:"prompted,omitempty"`
+
+	// Attached is how many clients are attached to the session as the row is
+	// read (plan 032 §3.14, SF-64): every attachment the host counts —
+	// pending, live or closing, but not one whose peer has half-closed — and,
+	// on a TUI-hosted session, the hosting TUI's own seat. It is carried where
+	// the session capability presence is true and omitted when 0: on such a
+	// host an absent one is 0, and on one without presence, unknown. A
+	// connection that only lists is not attached.
+	Attached uint `json:"attached,omitempty"`
 }
 
 // RowTextCells is the widest a row fact's string is, in terminal cells (plan
@@ -632,6 +651,84 @@ type SessionsSubscribeResult struct {
 // host answers unsupported, reason hub_only.
 type ConnectParams struct {
 	SessionID string `json:"sessionId"`
+}
+
+// CreateParams is session.create's params (plan 032 §3.10, P5): a new
+// session in Cwd, started in a host the hub spawns, given Prompt as its first
+// prompt when there is one. Cwd is an absolute path to an existing directory.
+// Provider is a provider id ("cursor", "grok", "gx", "native"), absent for
+// the hub's configured default — none configured is bad_request. Model,
+// Effort and Fast are the session's start settings, each absent for the
+// provider's own default (the host's --model, --effort, --fast/--no-fast);
+// PermissionMode is bypass when absent, as a plain launch's is. No agent
+// binary is a client's to name (SD-16): the host finds its own. RequestID,
+// 1–64 of [A-Za-z0-9._-], makes the create idempotent: a repeat with the
+// same params answers the first one's result, or joins it while it runs —
+// across a hub restart too, while its session's host lives — and one with
+// other params is bad_request, reason request_conflict.
+type CreateParams struct {
+	Cwd            string         `json:"cwd"`
+	Prompt         string         `json:"prompt,omitempty"`
+	Provider       string         `json:"provider,omitempty"`
+	Model          string         `json:"model,omitempty"`
+	Effort         string         `json:"effort,omitempty"`
+	Fast           *bool          `json:"fast,omitempty"`
+	PermissionMode PermissionMode `json:"permissionMode,omitempty"`
+	RequestID      string         `json:"requestId,omitempty"`
+}
+
+// CreateResult is a create that started its session (plan 032 §3.10): the
+// session as the hub's roster lists it, read fresh from its host —
+// approximate as any roster row's is, and true also when that read fails
+// (X49: the row is then the registry's, row absent) — and what became of the
+// first prompt. A start that
+// failed is no result but a refusal: not_accepting, reason start_failed, its
+// data.cause the host's first error line.
+type CreateResult struct {
+	Session RosterRow `json:"session"`
+	// Prompt is the first prompt's outcome; PromptError, the session's
+	// refusal of it, or why its answer was lost, is beside refused and
+	// unknown.
+	Prompt      CreatePrompt `json:"prompt"`
+	PromptError string       `json:"promptError,omitempty"`
+}
+
+// CreatePrompt is what became of a create's first prompt.
+type CreatePrompt string
+
+const (
+	// CreatePromptNone: the create carried no prompt.
+	CreatePromptNone CreatePrompt = "none"
+	// CreatePromptAccepted: the session took it.
+	CreatePromptAccepted CreatePrompt = "accepted"
+	// CreatePromptUnknown: it was sent and its answer was lost — the
+	// session exists and may be working on it. A create joined after a hub
+	// restart says unknown too: that hub never saw the answer.
+	CreatePromptUnknown CreatePrompt = "unknown"
+	// CreatePromptRefused: the session refused it, and runs on, idle.
+	CreatePromptRefused CreatePrompt = "refused"
+)
+
+var createPrompts = []CreatePrompt{CreatePromptNone, CreatePromptAccepted, CreatePromptUnknown, CreatePromptRefused}
+
+// CreatePrompts is every first-prompt outcome, none first.
+func CreatePrompts() []CreatePrompt { return slices.Clone(createPrompts) }
+
+// RequestIDMax is the longest session.create requestId, in characters.
+const RequestIDMax = 64
+
+// ValidRequestID reports whether id is a session.create requestId: 1 to
+// RequestIDMax of [A-Za-z0-9._-].
+func ValidRequestID(id string) bool {
+	if id == "" || len(id) > RequestIDMax {
+		return false
+	}
+	for i := range len(id) {
+		if c := id[i]; (c < 'a' || c > 'z') && (c < 'A' || c > 'Z') && (c < '0' || c > '9') && c != '.' && c != '_' && c != '-' {
+			return false
+		}
+	}
+	return true
 }
 
 // ------------------------------------------------------------------ attach
@@ -1163,6 +1260,19 @@ type ReadyParams struct {
 	Session      SessionInfo `json:"session"`
 	StartFailed  bool        `json:"startFailed"`
 	Err          string      `json:"err,omitempty"`
+}
+
+// PresenceParams is a presence notification's params (plan 032 §3.14,
+// SF-64): how many clients are attached to the session now, the receiving one
+// included — the count SessionRow.Attached carries. A host sends it on an
+// attachment once its synchronized has been written, and again whenever the
+// count changes — the latest value only, at most two a second — until the
+// attachment ends: never before synchronized, and never after its reset or
+// its detach's reply. It has no seq: it is none of the session's events, and
+// no cursor or journal holds it.
+type PresenceParams struct {
+	Subscription string `json:"subscription"`
+	Attached     uint   `json:"attached"`
 }
 
 // RosterParams is a roster notification's params (plan 032 §3.6): the hub's

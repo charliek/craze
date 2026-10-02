@@ -14,7 +14,9 @@ import (
 	"time"
 
 	"github.com/charliek/craze/internal/hostspawn"
+	"github.com/charliek/craze/internal/hub"
 	"github.com/charliek/craze/internal/sessions"
+	"golang.org/x/sys/unix"
 )
 
 // The test binary as craze itself (plan 030 C2): a test that needs a host in
@@ -58,10 +60,22 @@ const (
 	// (idleTicks): a test about what a spawner does to a host whose socket it
 	// removed must not race the host's own socket-lost stop.
 	cliChildNoIdle = "CRAZE_CLI_TEST_NO_IDLE"
+	// cliChildStderrDir is a directory the child writes its own stderr into,
+	// as <dir>/<pid>: a spawned hub's stderr is /dev/null, and a SIGQUIT's
+	// goroutine dump goes to stderr — so a hub child that will not exit can
+	// say where it is parked (hubAsChild, plan 032 X54).
+	cliChildStderrDir = "CRAZE_CLI_TEST_STDERR_DIR"
 	// cliChildParent is the pid of the test process that started the child
 	// (childEnv sets it): the child's watchdog ends the child once that
 	// process is no longer its parent (childWatchdog).
 	cliChildParent = "CRAZE_CLI_TEST_PARENT"
+	// cliChildHubHosts makes a craze hub child create its sessions' hosts as
+	// children of this test binary run as craze serve (hub.HostCommand) —
+	// without it a hub in a test binary creates none (plan 032 §3.10) — each
+	// in the hub's environment with this variable carried on, so a host
+	// re-executes as craze too, and a hub the test did not mean to create
+	// with never runs the binary as a host.
+	cliChildHubHosts = "CRAZE_CLI_TEST_HUB_HOSTS"
 )
 
 // The child's watchdog (plan 030 C5r): a child of the test binary can park —
@@ -116,6 +130,12 @@ func init() {
 	// Not the agent's to inherit: the fake agent is another binary, but a
 	// grandchild of this one must never run as craze by accident.
 	_ = os.Unsetenv(cliChildEnv)
+	if dir, ok := os.LookupEnv(cliChildStderrDir); ok {
+		_ = os.Unsetenv(cliChildStderrDir)
+		if f, err := os.OpenFile(filepath.Join(dir, strconv.Itoa(os.Getpid())), os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600); err == nil {
+			_ = unix.Dup2(int(f.Fd()), 2)
+		}
+	}
 	// The watchdog first, before anything can park: the parent its test named,
 	// else the parent this process has now.
 	parent := os.Getppid()
@@ -175,6 +195,10 @@ func init() {
 		_ = os.Unsetenv(authEchoRaceEnv)
 		childEchoRace()
 	}
+	if _, ok := os.LookupEnv(cliChildHubHosts); ok {
+		_ = os.Unsetenv(cliChildHubHosts)
+		hub.HostCommand = childHostCommand
+	}
 	var argv []string
 	if err := json.Unmarshal([]byte(raw), &argv); err != nil {
 		fmt.Fprintln(os.Stderr, "craze test child:", err)
@@ -184,13 +208,41 @@ func init() {
 	cmd.SetArgs(argv)
 	ranCmd, err := cmd.ExecuteC()
 	if err == nil {
-		os.Exit(0)
+		exitChild(0)
 	}
 	line, code := diagnose(ranCmd, err)
 	if line != "" {
 		fmt.Fprintln(os.Stderr, line)
 	}
-	os.Exit(code)
+	exitChild(code)
+}
+
+// exitChild ends a test child with code through the exit system call, not
+// os.Exit: under -race, os.Exit(0) first runs the race runtime's finalizer
+// (racefini: __tsan_fini, then C's exit), and a hub child that had already
+// finished its teardown — "stopped" in its log — was seen not to exit for its
+// test's whole 30 s, three times and only under make test-race, its SIGQUIT
+// answered with no goroutine dump (plan 032 X67, SF-118). A child's exit
+// status is all its test reads; it owes no race summary and runs no exit
+// hook.
+func exitChild(code int) { syscall.Exit(code) }
+
+// childHostCommand is hub.HostCommand in a craze hub child (cliChildHubHosts):
+// this test binary run as `craze <argv…>` — craze serve — with the hub's own
+// environment (which the hub hands on through its contract) and its watchdog
+// watching the hub, whose child it is.
+func childHostCommand(argv []string) (*exec.Cmd, error) {
+	exe, err := os.Executable()
+	if err != nil {
+		return nil, err
+	}
+	b, err := json.Marshal(argv)
+	if err != nil {
+		return nil, err
+	}
+	cmd := exec.Command(exe, "-test.run=^$")
+	cmd.Env = append(os.Environ(), cliChildEnv+"="+string(b), cliChildParent+"="+strconv.Itoa(os.Getpid()))
+	return cmd, nil
 }
 
 // childAnnouncing is serveAnnouncing for cliChildReady's mode.

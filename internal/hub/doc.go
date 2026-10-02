@@ -14,6 +14,10 @@
 //     the roster's two methods, and every write's bounds.
 //   - splice.go: session.connect — the exclusive handoff, the lookup, the
 //     dial — and the splice that copies between the client and the host.
+//   - create.go: session.create — a host spawned for a new session, its
+//     start waited for, its first prompt sent, and the requestId that makes
+//     a retry, across a hub restart too, answer the same session — and
+//     Create, a client's ask for one (craze new).
 //   - roster.go: the roster — internal/roster's poll, run while someone
 //     wants it, its rows bounded and forwarded, sessions.list and
 //     sessions.subscribe, and each subscription's net-change notifications.
@@ -23,6 +27,9 @@
 //     its session through the hub, which brings a dead hub back.
 //   - list.go: the roster read once (craze ps) — List from a hub, and
 //     Direct, the same rows read from the hosts with no hub.
+//   - listroster.go: Roster, the TUI's session list's roster — the hub's
+//     roster subscription, its saved half kept beside it, and the list's own
+//     poller when the hub cannot be had or kept (plan 032 §3.13).
 //   - env.go: the environment contract (P13) for the hub and every host it
 //     spawns.
 //   - ready.go: the hub's ready line, both ends.

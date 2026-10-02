@@ -431,7 +431,7 @@ func (s *server) onPermodelRequest(msg *acp.Message) {
 	case acp.MethodSessionLoad:
 		s.permodelLoad(msg)
 	case acp.MethodSessionSetConfig:
-		s.permodelSetConfig(msg)
+		s.setGated(msg, s.permodelSetConfig)
 	case acp.MethodSessionSetModel:
 		var p acp.SetModelParams
 		_ = json.Unmarshal(msg.Params, &p)

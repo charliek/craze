@@ -60,11 +60,21 @@ func ResolveBinary(explicit string) (string, error) {
 // absolute-path checks; candidates are PATH lookups only, so a grok lookup
 // can never fall back to a stray "agent" on PATH.
 func ResolveBinaryCandidates(explicit string, candidates []string) (string, error) {
+	if explicit == "" {
+		explicit = os.Getenv("CRAZE_AGENT_BIN")
+	}
+	return LookupBinary(explicit, candidates)
+}
+
+// LookupBinary is ResolveBinaryCandidates without CRAZE_AGENT_BIN: explicit
+// when it is set, else the candidate list, by the same checks. It is the
+// lookup for a caller that has already decided whether the variable is its
+// session's to take (plan 032 §3.11, P7: only the launch's own provider's),
+// and must not have it read again here for a session of another provider.
+func LookupBinary(explicit string, candidates []string) (string, error) {
 	var names []string
 	if explicit != "" {
 		names = append(names, explicit)
-	} else if env := os.Getenv("CRAZE_AGENT_BIN"); env != "" {
-		names = append(names, env)
 	} else {
 		names = append(names, candidates...)
 	}

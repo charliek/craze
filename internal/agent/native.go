@@ -511,6 +511,10 @@ func (s *nativeSession) start(context.Context) error {
 	for _, m := range models {
 		efforts[m.Alias] = m.Efforts
 	}
+	// --effort and --fast (plan 032 §3.11, P6), on the harness Open returned,
+	// before the section below installs it: what the install publishes, and
+	// what the first turn asks for, is already the effort they set.
+	s.startSettings(hs, efforts)
 	// The models the session offers — the ones whose provider has a key,
 	// and the one it runs on — in the picker's order, each with its rank in
 	// the model memory (plan 031 §3.6; nativeOpened.choices). The name is
@@ -1467,23 +1471,73 @@ func (s *nativeSession) note(msg string) {
 func (s *nativeSession) refreshCurrentLocked() {
 	alias, effort := s.hs.Current()
 	s.snap.CurrentModel = alias
-	levels := s.efforts[alias]
+	s.snap.Config = nil
+	if opt := nativeEffortOption(s.efforts[alias], effort); opt != nil {
+		s.snap.Config = []ConfigOption{*opt}
+	}
+}
+
+// nativeEffortOption is the effort option a model whose efforts are levels
+// advertises, at current: the one config option a native session has, nil
+// for a model that lists no efforts.
+func nativeEffortOption(levels []string, current string) *ConfigOption {
 	if len(levels) == 0 {
-		s.snap.Config = nil
-		return
+		return nil
 	}
 	values := make([]SelectValue, 0, len(levels))
 	for _, e := range levels {
 		values = append(values, SelectValue{Value: e, Name: sanitizeLine(e)})
 	}
-	s.snap.Config = []ConfigOption{{
+	return &ConfigOption{
 		ID:           nativeEffortID,
 		Name:         "Effort",
 		Category:     "thought_level",
 		Type:         "select",
-		Current:      effort,
+		Current:      current,
 		SelectValues: values,
-	}}
+	}
+}
+
+// startSettings is --effort and --fast/--no-fast on a native session (plan
+// 032 §3.11, P6; startsettings.go), applied to the harness Open returned —
+// after --model, which Open applied, and before Start installs anything or
+// returns, so the install delta carries the effort and no turn can run on any
+// other. A load's too: the transcript's effort is the harness's at Open, and
+// --effort overrides it as --model overrides its model. Effort is matched
+// against the very option the session advertises for its model
+// (nativeEffortOption, through EffortOption), and set on the harness, which
+// asks no one; native has no fast toggle, so --fast and --no-fast are always
+// unmatched. Neither is remembered: --effort, like --model, is this start's
+// choice and not a switch the user made in the session (remember).
+func (s *nativeSession) startSettings(hs *harness.Session, efforts map[string][]string) {
+	effort := strings.TrimSpace(s.opts.Effort)
+	if effort == "" && s.opts.Fast == nil {
+		return
+	}
+	notes := startNotes{log: s.log, say: func(line string) { s.note(nativeSafe{red: hs.Redact}.line(line)) }}
+	alias, current := hs.Current()
+	snap := Snapshot{Provider: NativeProvider().Info()}
+	if opt := nativeEffortOption(efforts[alias], current); opt != nil {
+		snap.Config = []ConfigOption{*opt}
+	}
+	if effort != "" {
+		opt := EffortOption(snap)
+		value, why := effortValue(opt, effort)
+		switch {
+		case why != "":
+			notes.effortUnmatched(effort, why, opt)
+		case value == opt.Current:
+		default:
+			if err := hs.SetEffort(value); err != nil {
+				notes.refused("effort", "--effort "+effort, opt.ID, value, errors.New(nativeSafe{red: hs.Redact}.line(err.Error())))
+			}
+		}
+	}
+	if s.opts.Fast != nil {
+		if _, ok := fastValue(FastOption(snap), *s.opts.Fast); !ok {
+			notes.fastUnmatched(*s.opts.Fast)
+		}
+	}
 }
 
 // Prompt is Begin and its continuation back to back, as on the live session.

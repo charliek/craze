@@ -213,6 +213,12 @@ func (c *conn) sessionsList(b *bound, info protocol.MethodInfo, req *request) ou
 	if c.srv.opts.RowFacts {
 		rowFacts(&row, b.eng, st)
 	}
+	if c.srv.opts.Presence {
+		// The count clients see (plan 032 §3.14): this connection's own
+		// attachment among them when it has one, the host TUI's seat on a
+		// LocalClient server.
+		row.Attached = uint(c.srv.presenceCount())
+	}
 	return answer(protocol.SessionsListResult{Epoch: c.srv.hostID, Cursor: seq, Sessions: []protocol.SessionRow{row}})
 }
 

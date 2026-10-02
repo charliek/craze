@@ -66,6 +66,10 @@ type spawnOptions struct {
 	flags tuiFlags
 	// load is --load: loadArg's answer for the row to load, "" for none.
 	load string
+	// foreign is a host whose provider is not the launch's own (plan 032
+	// §3.11, P7; ownsAgentBin): CRAZE_AGENT_BIN is left out of its
+	// environment, as the launcher leaves --agent-bin out of flags.
+	foreign bool
 }
 
 // hostRef is a host a spawn found for its caller: the one it started, which
@@ -159,7 +163,11 @@ func spawnOnce(ctx context.Context, opts spawnOptions) (hostRef, *hostspawn.Read
 	}
 	hostID := rundir.NewHostID()
 	logPath := filepath.Join(dir, hostID+".log")
-	child, r, err := hostspawn.Start(hostspawn.Args(serveSpec(&opts.flags, opts.load, hostID, logPath)), filepath.Join(dir, hostspawn.AgentGroupsName(hostID)), logPath)
+	var unset []string
+	if opts.foreign {
+		unset = []string{envAgentBin}
+	}
+	child, r, err := hostspawn.Start(hostspawn.Args(serveSpec(&opts.flags, opts.load, hostID, logPath)), unset, filepath.Join(dir, hostspawn.AgentGroupsName(hostID)), logPath)
 	if err != nil {
 		return hostRef{}, nil, &spawnError{kind: spawnStartFailed, msg: "craze: the session host cannot be started: " + err.Error(), err: err}
 	}
@@ -216,6 +224,8 @@ func serveSpec(f *tuiFlags, load, hostID, logPath string) hostspawn.Spec {
 		Workspace:    f.workspace,
 		Provider:     f.provider,
 		Model:        f.model,
+		Effort:       strings.TrimSpace(f.effort),
+		Fast:         f.fastSetting(),
 		AgentBin:     f.agentBin,
 		PluginDirs:   f.pluginDirs,
 		NoForce:      !f.force || f.noForce,

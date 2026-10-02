@@ -28,51 +28,84 @@ import (
 // A registry tree that does not exist yet is no hosts, and is not created;
 // one that fails validation is an error.
 func Hosts(env Env) ([]Entry, error) {
+	live, _, err := HostsScan(env)
+	return live, err
+}
+
+// HostsScan is Hosts for a reader that must know its scan missed no live host
+// (plan 032 §3.10: a hub proving that no live host carries a create's request
+// before it spawns one): the live hosts Hosts lists, and beside them the id of
+// every host the scan cannot vouch for — alive, or perhaps alive (its lock
+// held by another, or a lock it could neither open nor try), and its entry
+// unreadable or naming another host. Hosts skips those. An entry whose lock is
+// free is a dead host's, swept as Hosts sweeps it; one whose lock is missing is
+// mid-exit; neither is either list's. A registry that cannot be read is an
+// error, as for Hosts.
+func HostsScan(env Env) ([]Entry, []string, error) {
 	hosts, err := env.cacheDir(hostsName, false)
 	if errors.Is(err, fs.ErrNotExist) {
-		return nil, nil
+		return nil, nil, nil
 	}
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	defer func() { _ = hosts.close() }()
 	names, err := hosts.names()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	var live []Entry
+	var unreadable []string
 	for _, name := range names {
 		id, ok := strings.CutSuffix(name, ".json")
 		if !ok || !ValidHostID(id) {
 			continue
 		}
-		if e, ok := probe(hosts, id); ok {
+		switch e, st := probe(hosts, id); st {
+		case probeLive:
 			live = append(live, e)
+		case probeUnreadable:
+			unreadable = append(unreadable, id)
 		}
 	}
-	return live, nil
+	return live, unreadable, nil
 }
 
+// probeState is what one registry entry's check came to.
+type probeState int
+
+const (
+	// probeGone: not listed — stale and swept, or mid-exit (no lock).
+	probeGone probeState = iota
+	// probeLive: its host is alive and its entry read.
+	probeLive
+	// probeUnreadable: its host is alive (or its lock could not be tried)
+	// and its entry cannot be read, or names another host.
+	probeUnreadable
+)
+
 // probe is one registry entry's check, in the held registry directory: its
-// live Entry, or false when it is not listed (stale and swept, mid-exit, or
-// unreadable).
-func probe(hosts *dir, id string) (Entry, bool) {
+// live Entry, or why it is not listed (probeState).
+func probe(hosts *dir, id string) (Entry, probeState) {
 	lockName := id + ".lock"
 	lock, err := hosts.openFile(lockName, os.O_RDWR, 0)
+	if errors.Is(err, fs.ErrNotExist) {
+		return Entry{}, probeGone
+	}
 	if err != nil {
-		return Entry{}, false
+		return Entry{}, probeUnreadable
 	}
 	defer lock.Close()
 	taken, err := tryLock(lock)
 	if err != nil {
-		return Entry{}, false
+		return Entry{}, probeUnreadable
 	}
 	if !taken {
 		e, err := readEntry(hosts, id+".json")
 		if err != nil || e.HostID != id {
-			return Entry{}, false
+			return Entry{}, probeUnreadable
 		}
-		return e, true
+		return e, probeLive
 	}
 	defer func() { _ = unlock(lock) }() // before the Close deferred above
 	// The lock taken must still be the one at the name: a sweeper that got
@@ -81,7 +114,7 @@ func probe(hosts *dir, id string) (Entry, bool) {
 	if hosts.sameFile(lock, lockName) {
 		sweep(hosts, id)
 	}
-	return Entry{}, false
+	return Entry{}, probeGone
 }
 
 // sweep removes a dead host's files from the held registry directory, whose

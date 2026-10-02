@@ -257,12 +257,12 @@ func newServer(conn *acp.Conn, script string) *server {
 		cfg = modelConfigOptions()
 	}
 	s := &server{conn: conn, script: script, config: cfg}
-	conn.SetRequestHandler(s.onRequest)
+	conn.SetRequestHandler(withCalls(s.onRequest))
 	if permodelScript(script) {
 		s.pm = newPermodelState(script)
-		conn.SetRequestHandler(s.onPermodelRequest)
+		conn.SetRequestHandler(withCalls(s.onPermodelRequest))
 	}
-	conn.SetNotifyHandler(s.onNotify)
+	conn.SetNotifyHandler(withCalls(s.onNotify))
 	return s
 }
 
@@ -573,28 +573,35 @@ func (s *server) onRequest(msg *acp.Message) {
 			})
 		}
 	case acp.MethodSessionSetConfig:
-		var p struct {
-			ConfigID string `json:"configId"`
-			Value    string `json:"value"`
-		}
-		_ = json.Unmarshal(msg.Params, &p)
-		s.mu.Lock()
-		for _, opt := range s.config {
-			id, _ := opt["id"].(string)
-			if id == p.ConfigID {
-				opt["currentValue"] = p.Value
-			}
-		}
-		cfg := s.config
-		s.mu.Unlock()
-		s.update(fakeSessionID, map[string]any{
-			"sessionUpdate": acp.UpdateConfigOption,
-			"configOptions": cfg,
-		})
-		s.reply(msg.ID, map[string]any{})
+		s.setGated(msg, s.setConfig)
 	default:
 		_ = s.conn.ReplyErr(msg.ID, acp.MethodNotFound(msg.Method))
 	}
+}
+
+// setConfig is session/set_config_option for every script but the permodel
+// family: the option takes the value, the whole list is pushed, and the
+// answer is {}.
+func (s *server) setConfig(msg *acp.Message) {
+	var p struct {
+		ConfigID string `json:"configId"`
+		Value    string `json:"value"`
+	}
+	_ = json.Unmarshal(msg.Params, &p)
+	s.mu.Lock()
+	for _, opt := range s.config {
+		id, _ := opt["id"].(string)
+		if id == p.ConfigID {
+			opt["currentValue"] = p.Value
+		}
+	}
+	cfg := s.config
+	s.mu.Unlock()
+	s.update(fakeSessionID, map[string]any{
+		"sessionUpdate": acp.UpdateConfigOption,
+		"configOptions": cfg,
+	})
+	s.reply(msg.ID, map[string]any{})
 }
 
 func (s *server) onNotify(msg *acp.Message) {

@@ -18,6 +18,7 @@ import (
 	"github.com/charliek/craze/internal/engine"
 	"github.com/charliek/craze/internal/hostspawn"
 	"github.com/charliek/craze/internal/journal"
+	"github.com/charliek/craze/internal/protocol"
 	"github.com/charliek/craze/internal/rundir"
 	"github.com/charliek/craze/internal/sessions"
 	"github.com/charliek/craze/internal/version"
@@ -103,6 +104,10 @@ type serveFlags struct {
 	// names this host's registry entry, lock and socket, its ready line, and
 	// its files in the host logs' directory (plan 030 §3.4). "" mints one.
 	hostID string
+	// requestID and requestHash are --request-id and --request-hash
+	// (hidden): the hub's session.create that spawned this host (plan 032
+	// §3.10), written into its registry entry; "" for any other host.
+	requestID, requestHash string
 	// ready is the spawner's ready pipe (CRAZE_READY_FD, ready.go), taken
 	// before anything else runs; nil for a host run by hand. Not a flag.
 	ready *readyPipe
@@ -204,8 +209,15 @@ func registerServeFlags(cmd *cobra.Command, f *serveFlags) {
 	cmd.Flags().StringVar(&f.hostID, "host-id", "", "the host's id, twelve lowercase hex digits (set by the spawner)")
 	cmd.Flags().BoolVar(&f.noHostStatus, "no-host-status", false,
 		"the launching TUI reports no session status: leave the agent's host hook gates in its environment (set by the spawner)")
+	// The hub's (plan 032 §3.10): the session.create that spawned the host,
+	// written into its registry entry so that a restarted hub still knows a
+	// retried create's session.
+	cmd.Flags().StringVar(&f.requestID, "request-id", "", "the hub's create request id (set by the hub)")
+	cmd.Flags().StringVar(&f.requestHash, "request-hash", "", "the hub's create request's params hash (set by the hub)")
 	_ = cmd.Flags().MarkHidden("host-id")
 	_ = cmd.Flags().MarkHidden("no-host-status")
+	_ = cmd.Flags().MarkHidden("request-id")
+	_ = cmd.Flags().MarkHidden("request-hash")
 }
 
 // serveSignals is craze serve's signal set, registered for the command's
@@ -257,6 +269,10 @@ func serveBody(cmd *cobra.Command, f *serveFlags, env hostEnv, sigs <-chan os.Si
 	if err != nil {
 		return err
 	}
+	req, err := f.request()
+	if err != nil {
+		return err
+	}
 	var why bytes.Buffer
 	if !controlSocketOn(&why) {
 		return controlSocketRefusal(why.String())
@@ -270,7 +286,7 @@ func serveBody(cmd *cobra.Command, f *serveFlags, env hostEnv, sigs <-chan os.Si
 	if err != nil {
 		return err
 	}
-	err = serveSession(cmd, f, env, sigs, runEnv, hostID, load, out)
+	err = serveSession(cmd, f, env, sigs, runEnv, hostID, req, load, out)
 	// A host that never served says why in its log too: a spawned host's
 	// stderr is /dev/null.
 	if err != nil && f.log != "" {
@@ -294,6 +310,39 @@ func (f *serveFlags) hostIdentity() (string, error) {
 	return f.hostID, nil
 }
 
+// request is the hub's create that spawned this host (--request-id,
+// --request-hash; plan 032 §3.10): both or neither, the id a requestId's form
+// (protocol.ValidRequestID) and the hash a token of at most 128 of
+// [A-Za-z0-9:._-] — the hub's to choose, and opaque here. Anything else is a
+// usage error, before anything is created.
+func (f *serveFlags) request() (hostRequest, error) {
+	switch {
+	case f.requestID == "" && f.requestHash == "":
+		return hostRequest{}, nil
+	case f.requestID == "" || f.requestHash == "":
+		return hostRequest{}, usagef("craze serve: --request-id and --request-hash go together")
+	case !protocol.ValidRequestID(f.requestID):
+		return hostRequest{}, usagef("craze serve: --request-id %q is not 1-%d of [A-Za-z0-9._-]", f.requestID, protocol.RequestIDMax)
+	case !validRequestHash(f.requestHash):
+		return hostRequest{}, usagef("craze serve: --request-hash %q is not 1-128 of [A-Za-z0-9:._-]", f.requestHash)
+	}
+	return hostRequest{id: f.requestID, hash: f.requestHash}, nil
+}
+
+// validRequestHash reports whether h is a request hash's form: 1 to 128 of
+// [A-Za-z0-9:._-].
+func validRequestHash(h string) bool {
+	if h == "" || len(h) > 128 {
+		return false
+	}
+	for i := range len(h) {
+		if c := h[i]; (c < 'a' || c > 'z') && (c < 'A' || c > 'Z') && (c < '0' || c > '9') && c != ':' && c != '.' && c != '_' && c != '-' {
+			return false
+		}
+	}
+	return true
+}
+
 // hostLogNamed refuses a --log in the host logs' directory that is not named
 // for this host, <hostId>.log — a usage error, before anything is created.
 // The start-up sweep keeps a live host's files there only by that host's own
@@ -312,7 +361,7 @@ func hostLogNamed(env rundir.Env, path, hostID string) error {
 
 // serveSession is serveBody once its log is open, out: the session claimed,
 // bound, built, served and — once asked — stopped.
-func serveSession(cmd *cobra.Command, f *serveFlags, env hostEnv, sigs <-chan os.Signal, runEnv rundir.Env, hostID string, load *loadID, out io.Writer) error {
+func serveSession(cmd *cobra.Command, f *serveFlags, env hostEnv, sigs <-chan os.Signal, runEnv rundir.Env, hostID string, req hostRequest, load *loadID, out io.Writer) error {
 	// The host id first, as runTUI's: the session claims write it into their
 	// lock files. The teardown is deferred from here, so every return after it
 	// releases what was claimed — and, once the socket is bound, closes and
@@ -402,7 +451,7 @@ func serveSession(cmd *cobra.Command, f *serveFlags, env hostEnv, sigs <-chan os
 	journalAt := journalDir(out)
 
 	lc := newHostLifecycle()
-	ctl, err := bindControl(runEnv, hostID, indexCWD, f.force, lc.stopFunc, out)
+	ctl, err := bindControl(runEnv, hostID, indexCWD, f.force, req, lc.stopFunc, false, out)
 	if err != nil {
 		return exitf(1, "craze serve: the control socket: %v", err)
 	}
@@ -414,7 +463,9 @@ func serveSession(cmd *cobra.Command, f *serveFlags, env hostEnv, sigs <-chan os
 	// with one the 257th unread event would block the agent — a turn or a
 	// replay run with nobody attached must never wait for a reader (SD-33).
 	// Clients read through their budgeted subscriptions.
-	opts := sessionOptions(&f.tuiFlags, ws, f.mode(), out, out, childEnv, p, row)
+	// The host's session is its launch's own: --agent-bin and CRAZE_AGENT_BIN,
+	// when its spawner left them to it, are its provider's (plan 032 §3.11).
+	opts := sessionOptions(&f.tuiFlags, ws, f.mode(), out, out, childEnv, p, p, row)
 	opts.JournalDir = journalAt
 	opts.NoPrimary = true
 	// A start that fails leaves the session listable and attachable until

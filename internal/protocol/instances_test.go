@@ -25,6 +25,8 @@ var (
 	permBody     = json.RawMessage(`{"permission":{"id":"perm-1","tool":"Shell","options":[{"optionId":"allow-once","name":"Allow","kind":"allow_once"},{"optionId":"allow-once-2","name":"Allow, and stop asking","kind":"allow_once"}]}}`)
 	snapshotBody = json.RawMessage(`{"version":1,"incarnation":"inc-1","seq":7,"queue":[{"id":"q-1","text":"next"}],"main":{"entries":[{"id":"4.0","kind":"user","text":"fix it"}]},"subs":[{"id":"sub-1","omitted":[[12,"t-1"],[3]]}]}`)
 	configBody   = json.RawMessage(`{"options":[{"id":"effort","name":"Effort","type":"select","current":"high","selectValues":[{"value":"high","name":"high"}]}]}`)
+	// instanceTrue is a *bool's true (session.create's fast).
+	instanceTrue = true
 )
 
 func sessionInfo() protocol.SessionInfo {
@@ -91,6 +93,14 @@ func TestInstancesValidate(t *testing.T) {
 		Prompted:  true}
 	rowStartFailed := protocol.SessionRow{SessionInfo: withFacts, Activity: protocol.ActivityError,
 		Since: instanceTime, StartFailed: true, StartErr: "cursor-agent: not logged in"}
+	// Plan 032 §3.14's presence (SF-64): a row of a presence host carries how
+	// many clients are attached, omitted when none is.
+	withPresence := withFacts
+	withPresence.Capabilities.Presence = true
+	rowPresence := rowFacts
+	rowPresence.SessionInfo, rowPresence.Attached = withPresence, 2
+	rowNobody := rowPresence
+	rowNobody.Attached = 0
 	stateNoConfig := state
 	stateNoConfig.Settings.Config = json.RawMessage(`{}`)
 	// Plan 031 §3.6's rank (P9): a native session's remembered models carry
@@ -277,6 +287,14 @@ func TestInstancesValidate(t *testing.T) {
 			strings.Replace(rosterLastTurn(rowFacts), `"prompted":true`, `"prompted":true,"preview":"…"`, 1), false},
 		{"a head ask whose summary is not text", "sessions.list.json", "result",
 			strings.Replace(rosterLastTurn(rowFacts), `"summary":"Run `+"`go test ./...`"+`"`, `"summary":["Run"]`, 1), false},
+		{"a presence host's row, two attached", "sessions.list.json", "result", rosterLastTurn(rowPresence), true},
+		{"a presence host's row, nobody attached", "sessions.list.json", "result", rosterLastTurn(rowNobody), true},
+		{"a row whose attached is negative", "sessions.list.json", "result",
+			strings.Replace(rosterLastTurn(rowPresence), `"attached":2`, `"attached":-1`, 1), false},
+		{"a row whose attached is not a count", "sessions.list.json", "result",
+			strings.Replace(rosterLastTurn(rowPresence), `"attached":2`, `"attached":"two"`, 1), false},
+		{"a row whose presence is not a boolean", "sessions.list.json", "result",
+			strings.Replace(rosterLastTurn(rowPresence), `"presence":true`, `"presence":1`, 1), false},
 
 		// The hub's roster (plan 032 §3.6): sessions.list's result is a host's
 		// or the hub's, an anyOf, an empty roster being both.
@@ -347,6 +365,34 @@ func TestInstancesValidate(t *testing.T) {
 		{"session.connect", "session.connect.json", "params", jsonOf(t, protocol.ConnectParams{SessionID: "s"}), true},
 		{"session.connect with no session", "session.connect.json", "params", `{}`, false},
 		{"session.connect's reply", "session.connect.json", "result", jsonOf(t, protocol.Empty{}), true},
+		// session.create (plan 032 §3.10).
+		{"session.create, everything", "session.create.json", "params", jsonOf(t, protocol.CreateParams{Cwd: "/work/lumen",
+			Prompt: "fix the build", Provider: "grok", Model: "grok-4.7", Effort: "high", Fast: &instanceTrue,
+			PermissionMode: protocol.PermissionPrompt, RequestID: "new-0a1b.c_d-9"}), true},
+		{"session.create, a directory alone", "session.create.json", "params", `{"cwd":"/work"}`, true},
+		{"session.create, fast off", "session.create.json", "params", `{"cwd":"/work","fast":false}`, true},
+		{"session.create with no directory", "session.create.json", "params", `{"prompt":"hi"}`, false},
+		{"session.create in a relative directory", "session.create.json", "params", `{"cwd":"work"}`, false},
+		{"session.create in the root", "session.create.json", "params", `{"cwd":"/"}`, true},
+		{"session.create in no directory at all", "session.create.json", "params", `{"cwd":""}`, false},
+		{"session.create with an empty prompt", "session.create.json", "params", `{"cwd":"/work","prompt":""}`, false},
+		{"session.create with a requestId too long", "session.create.json", "params",
+			`{"cwd":"/work","requestId":"` + strings.Repeat("r", protocol.RequestIDMax+1) + `"}`, false},
+		{"session.create with a requestId of a space", "session.create.json", "params", `{"cwd":"/work","requestId":"a b"}`, false},
+		{"session.create with a permission mode there is none of", "session.create.json", "params", `{"cwd":"/work","permissionMode":"ask"}`, false},
+		{"session.create naming an agent binary", "session.create.json", "params", `{"cwd":"/work","agentBin":"/bin/sh"}`, false},
+		{"session.create naming a session", "session.create.json", "params", `{"cwd":"/work","sessionId":"s"}`, false},
+		{"a create's answer", "session.create.json", "result", jsonOf(t, protocol.CreateResult{Session: reachable,
+			Prompt: protocol.CreatePromptAccepted}), true},
+		{"a create's answer, its prompt refused", "session.create.json", "result", jsonOf(t, protocol.CreateResult{Session: reachable,
+			Prompt: protocol.CreatePromptRefused, PromptError: "the session is not accepting prompts"}), true},
+		{"a create's answer with no session", "session.create.json", "result", `{"prompt":"none"}`, false},
+		{"a create's answer with no prompt outcome", "session.create.json", "result", without(jsonOf(t, protocol.CreateResult{Session: reachable,
+			Prompt: protocol.CreatePromptNone}), "prompt"), false},
+		{"a create's answer with a prompt outcome there is none of", "session.create.json", "result",
+			`{"session":` + jsonOf(t, reachable) + `,"prompt":"maybe"}`, false},
+		{"a create's answer with a host's row for its session", "session.create.json", "result",
+			`{"session":` + jsonOf(t, row) + `,"prompt":"none"}`, false},
 
 		{"session.attach with a cursor, now, a budget", "session.attach.json", "params", jsonOf(t, protocol.AttachParams{SessionID: "s",
 			Cursor: &protocol.Cursor{Incarnation: "inc-1", Seq: 42}, When: protocol.WhenNow, Budget: &protocol.AttachBudget{MaxItems: 64}}), true},
@@ -478,9 +524,9 @@ func TestInstancesValidate(t *testing.T) {
 		{"an answer's reply with something in it", "asks.answer.json", "result", `{"ok":true}`, false},
 	}
 	// Every method's params with a field it does not define is refused,
-	// hello's aside (and session.create's, which has no schema).
+	// hello's aside.
 	for _, m := range protocol.Methods() {
-		if m.Tolerant || m.Reserved {
+		if m.Tolerant {
 			continue
 		}
 		cases = append(cases, inst{m.Name + " with an unknown params field", params(protocol.MethodSchema(m.Name)), "params",
@@ -498,6 +544,13 @@ func TestInstancesValidate(t *testing.T) {
 			StartFailed: true, Err: "agent exited"}), true},
 		inst{"a reset", "notification.reset.json", "params", jsonOf(t, protocol.ResetParams{Subscription: "s-1", Reason: protocol.ResetSlowConsumer}), true},
 		inst{"a reset for a reason there is none of", "notification.reset.json", "params", `{"subscription":"s-1","reason":"tired"}`, false},
+		// Plan 032 §3.14's presence (SF-64): no seq, a count that is never
+		// negative.
+		inst{"presence", "notification.presence.json", "params", jsonOf(t, protocol.PresenceParams{Subscription: "s-1", Attached: 2}), true},
+		inst{"presence of nobody", "notification.presence.json", "params", jsonOf(t, protocol.PresenceParams{Subscription: "s-1"}), true},
+		inst{"presence with a seq", "notification.presence.json", "params", `{"subscription":"s-1","attached":2,"seq":7}`, false},
+		inst{"presence with no count", "notification.presence.json", "params", `{"subscription":"s-1"}`, false},
+		inst{"presence of a negative count", "notification.presence.json", "params", `{"subscription":"s-1","attached":-1}`, false},
 		// The hub's (plan 032 §3.5, §3.6).
 		inst{"the hub closing its roster subscription", "notification.reset.json", "params",
 			jsonOf(t, protocol.ResetParams{Subscription: "r-1", Reason: protocol.ResetHubClosing}), true},

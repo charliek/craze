@@ -72,6 +72,16 @@ import (
 // A connection still being opened (the reconnect's own) is the reconnect's to
 // notice.
 func (c *Client) lost(w *wire) {
+	// The stream's count of attached clients was its subscription's on w,
+	// if that is where it lives: not known from here (plan 032 §3.14), and
+	// said so before any reconnect starts, so no count outlives its
+	// connection through a redial or a handshake that hangs.
+	c.mu.Lock()
+	s := c.stream
+	c.mu.Unlock()
+	if s != nil {
+		s.wireLost(w)
+	}
 	c.mu.Lock()
 	if c.err != nil || c.cur != w {
 		c.mu.Unlock()

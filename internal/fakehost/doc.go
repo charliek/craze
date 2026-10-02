@@ -20,7 +20,9 @@
 // and startedAt out, and answers sessions.list with S2's row. Options turns
 // each on (plan 030 §3.6a, §3.7, §3.8; X1): Stop serves session.stop through
 // a coordinator whose sequence the run_stop op runs, RowFacts puts the row
-// facts on the row, and a fixture asks for them in its first line ({"dir":
+// facts on the row, Presence (plan 032 §3.14) counts the attached clients —
+// capabilities.presence, the row's attached and the presence notification —
+// and a fixture asks for them in its first line ({"dir":
 // "host", …}). The same line's models (Options.Models, plan 031 §3.6) gives
 // the Stub the catalog a native session advertises — remembered models with
 // their rank, the catalogs' "recent" — in place of its own; the Stub's
@@ -36,6 +38,13 @@
 // and the wire fixtures' runner registers a two-socket fixture's Host for the
 // hub — the real internal/hub, in process — it runs in front of it
 // (wire_test.go, hub_fixture_test.go).
+//
+// For the hub's session.create (plan 032 §3.10) a Host can stand in for the
+// craze serve a spawner starts (RunSpawned, over craze serve's command line,
+// ParseSpawnArgs): its ready line on the spawner's pipe, its entry carrying
+// the create's request (Options.RequestID, RequestHash), its start held or
+// failed as its test says (Options.Start), and its end on session.stop
+// (StopHeard) or a signal.
 //
 // depguard: this package may import internal/tui (for the Stub),
 // internal/control (the server) and internal/rundir (Register); it may not

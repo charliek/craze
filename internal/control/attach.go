@@ -73,7 +73,8 @@ import (
 //
 // A detached host's idle clock runs while no client is attached, and a close
 // fence reads the same count (FenceAttaches), so the server counts its
-// attachments — Server.attached, reported in order to OnAttachments. An
+// attachments — Server.attached, reported in order to every attachments
+// listener (AddAttachmentsListener) and presence slot (conn.go). An
 // attachment counts from the section that reserves it until the one that
 // closes it: pending, live and closing alike, so an attach that has reserved
 // and not yet been answered keeps a host as surely as a live one.
@@ -171,6 +172,10 @@ func (c *conn) closedLocked(a *attachment) {
 	if a.state != attClosed {
 		a.state = attClosed
 		c.uncountLocked(a)
+		// Whichever way it closed, it is owed no more presence (conn.go's
+		// "Presence"); a detach or the forwarder claimed its end already
+		// where either queued its terminal line.
+		c.out.disarmPresence(a.id)
 	}
 	a.changedLocked()
 }
@@ -533,6 +538,9 @@ func (c *conn) sessionDetach(b *bound, info protocol.MethodInfo, req *request) o
 			a.state = attClosing
 			a.changedLocked()
 		}
+		// No presence from the claim on, so none follows the detach's
+		// reply (conn.go's "Presence").
+		c.out.disarmPresence(a.id)
 	}
 	c.mu.Unlock()
 	if !claimed {

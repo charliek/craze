@@ -66,6 +66,9 @@ func hubAsChild(t *testing.T, extra ...string) *hubChildren {
 		t.Fatal(err)
 	}
 	kids := &hubChildren{}
+	// Each child's own stderr, for the dump a hung one is asked for below
+	// (registered before the cleanup that reads it, so removed after it).
+	stderrs := t.TempDir()
 	prev := hub.Command
 	hub.Command = func(argv []string) (*exec.Cmd, error) {
 		if !slices.Equal(argv, []string{"hub"}) {
@@ -74,7 +77,7 @@ func hubAsChild(t *testing.T, extra ...string) *hubChildren {
 		// -test.run matches nothing, so a child whose init fell through runs
 		// no test.
 		cmd := exec.Command(exe, "-test.run=^$")
-		cmd.Env = append(childEnv(argvJSON), extra...)
+		cmd.Env = append(append(childEnv(argvJSON), cliChildStderrDir+"="+stderrs), extra...)
 		kids.mu.Lock()
 		kids.cmds = append(kids.cmds, cmd)
 		kids.mu.Unlock()
@@ -92,12 +95,49 @@ func hubAsChild(t *testing.T, extra ...string) *hubChildren {
 				time.Sleep(10 * time.Millisecond)
 			}
 			if hubAlive(pid) {
+				// Where it is before anything else is sent (plan 033 saw one
+				// once, on a loaded box, and it never reproduced: X54): its
+				// state and signal masks, then the goroutine dump a SIGQUIT
+				// writes to its stderr.
+				state := procSignalState(pid)
+				_ = syscall.Kill(pid, syscall.SIGQUIT)
+				quit := time.Now().Add(5 * time.Second)
+				for hubAlive(pid) && time.Now().Before(quit) {
+					time.Sleep(10 * time.Millisecond)
+				}
 				_ = syscall.Kill(pid, syscall.SIGKILL)
-				t.Errorf("hub child %d did not exit within %v of SIGTERM; killed", pid, serveStep)
+				dump, _ := os.ReadFile(filepath.Join(stderrs, strconv.Itoa(pid)))
+				t.Errorf("hub child %d did not exit within %v of SIGTERM; killed\n%s\n--- its stderr, a SIGQUIT's dump:\n%s", pid, serveStep, state, dump)
 			}
 		}
 	})
 	return kids
+}
+
+// procSignalState is what /proc says of pid's state and signals — State,
+// SigQ, SigPnd, ShdPnd, SigBlk, SigIgn, SigCgt, and its wait channel — for a
+// failure's message; "" where there is no /proc.
+func procSignalState(pid int) string {
+	b, err := os.ReadFile(fmt.Sprintf("/proc/%d/status", pid))
+	if err != nil {
+		if runtime.GOOS != "linux" {
+			return ""
+		}
+		// A process kill still finds but /proc cannot show: say both.
+		return fmt.Sprintf("/proc/%d/status: %v; kill(%d, 0): %v", pid, err, pid, syscall.Kill(pid, 0))
+	}
+	var out []string
+	for _, line := range strings.Split(string(b), "\n") {
+		for _, key := range []string{"State:", "SigQ:", "SigPnd:", "ShdPnd:", "SigBlk:", "SigIgn:", "SigCgt:"} {
+			if strings.HasPrefix(line, key) {
+				out = append(out, line)
+			}
+		}
+	}
+	if w, err := os.ReadFile(fmt.Sprintf("/proc/%d/wchan", pid)); err == nil {
+		out = append(out, "wchan:\t"+string(w))
+	}
+	return strings.Join(out, "\n")
 }
 
 // hubAlive reports whether pid has not exited: not gone, and not a zombie

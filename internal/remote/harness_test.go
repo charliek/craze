@@ -116,6 +116,9 @@ type hostConfig struct {
 	// a plan 030 host's info document (§3.7); unset, an older host's.
 	perm      protocol.PermissionMode
 	startedAt time.Time
+	// presence is control.Options.Presence: the host counts its clients for
+	// them (plan 032 §3.14); unset, an older host's wire.
+	presence bool
 }
 
 type hostOpt func(*hostConfig)
@@ -134,6 +137,9 @@ func withStop(stop control.StopFunc) hostOpt { return func(c *hostConfig) { c.st
 func withInfo(perm protocol.PermissionMode, startedAt time.Time) hostOpt {
 	return func(c *hostConfig) { c.perm, c.startedAt = perm, startedAt }
 }
+
+// withPresence counts the clients attached, for them (plan 032 §3.14).
+func withPresence() hostOpt { return func(c *hostConfig) { c.presence = true } }
 
 // host is a server on a socket in front of an engine over a Stub.
 type host struct {
@@ -184,7 +190,7 @@ func newHost(t *testing.T, opts ...hostOpt) *host {
 		}
 	}
 	h.srv = control.New(control.Options{Log: h.logs.log, Workspace: cfg.workspace, Clock: h.clock.now, Stop: cfg.stop,
-		PermissionMode: cfg.perm, StartedAt: cfg.startedAt})
+		PermissionMode: cfg.perm, StartedAt: cfg.startedAt, Presence: cfg.presence})
 	h.srv.SetEngine(h.eng)
 	l, err := net.Listen("unix", h.path)
 	if err != nil {
@@ -1134,6 +1140,8 @@ func describe(it remote.Item) string {
 		return fmt.Sprintf("ready %+v", *it.Ready)
 	case remote.KindError:
 		return fmt.Sprintf("error %v", it.Err)
+	case remote.KindPresence:
+		return fmt.Sprintf("presence %d", it.Attached)
 	}
 	return it.Kind.String()
 }

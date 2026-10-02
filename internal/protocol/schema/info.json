@@ -42,7 +42,8 @@
         "since": {"$ref": "event.json#/$defs/time", "description": "A row fact: when the row entered its current state — the first of needs you (pendingAsks > 0), failed (startFailed, or lastTurn.outcome failed, or activity error with neither lastTurn nor foreignTurn: a failure whose ending is still on its way), working (activity starting, replaying, working or closing, or foreignTurn), idle — on the host's clock, in UTC."},
         "startFailed": {"type": "boolean", "description": "A row fact: the session's start failed. Absent is false on a rowFacts host."},
         "startErr": {"$ref": "#/$defs/rowText", "description": "A row fact: the first line of a failed start's error."},
-        "prompted": {"type": "boolean", "description": "A row fact: a turn has been started at all. Absent is false on a rowFacts host."}
+        "prompted": {"type": "boolean", "description": "A row fact: a turn has been started at all. Absent is false on a rowFacts host."},
+        "attached": {"type": "integer", "minimum": 0, "description": "Where the session capability presence is true: how many clients are attached to the session as the row is read — every attachment the host counts (pending, live or closing, not one whose peer has half-closed) and, on a TUI-hosted session, the hosting TUI's own seat. Absent is 0 on a presence host, and unknown on any other."}
       },
       "required": ["title", "activity", "foreignTurn", "pendingAsks"],
       "unevaluatedProperties": false
@@ -90,7 +91,7 @@
       "additionalProperties": false
     },
     "sessionCapabilities": {
-      "description": "The session's capability set: every provider capability in its wire name, and cancel, approvals, historyCursor (true for every protocol 1 host), stop (the host's own: true where session.stop is served, every craze serve; false on a TUI-hosted session and an older host) and rowFacts (the host's own, omitted when false: the row carries the row facts). A client hides what a capability says the session cannot do.",
+      "description": "The session's capability set: every provider capability in its wire name, and cancel, approvals, historyCursor (true for every protocol 1 host), stop (the host's own: true where session.stop is served, every craze serve; false on a TUI-hosted session and an older host), rowFacts (the host's own, omitted when false: the row carries the row facts) and presence (the host's own, omitted when false: the host sends presence and the row carries attached). A client hides what a capability says the session cannot do.",
       "type": "object",
       "properties": {
         "interject": {"type": "boolean"},
@@ -109,7 +110,8 @@
         "approvals": {"type": "boolean"},
         "historyCursor": {"type": "boolean"},
         "stop": {"type": "boolean"},
-        "rowFacts": {"type": "boolean", "description": "The host's own: the session's sessions.list row carries the row facts (headAsk.summary, doing, lastReply, since, startFailed, startErr, prompted). Absent — false — on an older host, whose row is read as it was."}
+        "rowFacts": {"type": "boolean", "description": "The host's own: the session's sessions.list row carries the row facts (headAsk.summary, doing, lastReply, since, startFailed, startErr, prompted). Absent — false — on an older host, whose row is read as it was."},
+        "presence": {"type": "boolean", "description": "The host's own: the host counts the clients attached to the session, sends each attachment the presence notification, and puts attached on the session's sessions.list row. Absent — false — on an older host, which sends no presence: a client shows no count."}
       },
       "required": ["interject", "subagentCancel", "subagentBackground", "modes", "effort", "fastToggle", "subagentRows", "subagentTranscript", "todos", "askCards", "planCards", "parameterizedPicker", "cancel", "approvals", "historyCursor", "stop"],
       "additionalProperties": false

@@ -50,8 +50,12 @@ func TestAHubServesItsHello(t *testing.T) {
 		t.Fatalf("sessions.list before hello: %+v, want hello_required", resp)
 	}
 	res := c.hello(t)
+	// A hub given no way to start a host (Options.Creates nil) creates
+	// nothing, and says so (create_test.go has one that does).
+	caps := protocol.HubCapabilities()
+	caps.SessionCreate = false
 	if res.Endpoint.Kind != protocol.EndpointHub || res.Endpoint.HostID != line.HubID || res.Endpoint.PID != os.Getpid() ||
-		res.Capabilities != protocol.HubCapabilities() || res.Limits != protocol.HostLimits() || res.Protocol != 1 {
+		res.Capabilities != caps || res.Limits != protocol.HostLimits() || res.Protocol != 1 {
 		t.Fatalf("hello answered %+v", res)
 	}
 	for _, m := range []string{protocol.MethodSessionAttach, protocol.MethodSessionPrompt, protocol.MethodAsksAnswer} {
@@ -75,8 +79,9 @@ func TestAHubServesItsHello(t *testing.T) {
 		resp.Error.Data.Reason != protocol.ReasonConnectNotFirst {
 		t.Fatalf("session.connect after other requests: %+v, want connect_not_first", resp)
 	}
-	if resp := c.call(t, protocol.MethodSessionCreate, nil); resp.Error == nil || resp.Error.Data.Code != protocol.CodeUnsupported {
-		t.Fatalf("session.create before its commit: %+v, want unsupported", resp)
+	if resp := c.call(t, protocol.MethodSessionCreate, map[string]any{"cwd": "/"}); resp.Error == nil ||
+		resp.Error.Data.Code != protocol.CodeUnsupported || resp.Error.Data.Reason != protocol.ReasonUnsupported {
+		t.Fatalf("session.create on a hub that creates nothing: %+v, want unsupported", resp)
 	}
 
 	rn.sigs <- syscall.SIGTERM

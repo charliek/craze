@@ -117,4 +117,9 @@ type SpawnSpec struct {
 	Provider       agent.Provider
 	Model          string
 	PermissionMode backend.PermissionMode
+	// Effort and Fast are the new session's --effort and --fast/--no-fast
+	// (plan 032 §3.11): "" and nil leave the provider's default. The launch's
+	// own are its own session's, never a list's.
+	Effort string
+	Fast   *bool
 }

@@ -13,6 +13,7 @@ import (
 	"github.com/charliek/craze/internal/protocol"
 	"github.com/charliek/craze/internal/rundir"
 	"github.com/charliek/craze/internal/transcript"
+	"github.com/charliek/craze/internal/tui"
 )
 
 // craze hub (plan 032 §3.5): the per-machine hub, internal/hub's Run. Hidden:
@@ -59,11 +60,26 @@ func runHub(cmd *cobra.Command, ready *hub.ReadyPipe, sigs <-chan os.Signal) err
 		Stderr:    stderr,
 		OpenLog:   func(path string) (io.Writer, func(), error) { return openHubLog(env, path) },
 		IdleGrace: grace,
+		Creates:   hubCreates(),
 	})
 	if err != nil {
 		return exitf(1, "craze hub: %v", err)
 	}
 	return nil
+}
+
+// hubCreates is what the hub's session.create reads of this build (plan 032
+// §3.10): the config file's provider, at each create — the default of a
+// create that names none — and the providers craze can start, by the name
+// --provider takes.
+func hubCreates() *hub.Creates {
+	return &hub.Creates{
+		DefaultProvider: tui.ConfigProvider,
+		KnownProvider: func(id string) bool {
+			_, err := agent.ProviderByName(id)
+			return err == nil
+		},
+	}
 }
 
 // openHubLog opens the hub's log at path (hub.LogPath: hub-<ns>.log in the

@@ -374,7 +374,7 @@ func (m Model) gated(msg tea.Msg, handle handler) (tea.Model, tea.Cmd) {
 		return m.drain(handle)
 	case frameSyncMsg:
 		return m.syncFrame(msg)
-	case eventMsg, restoreMsg, readyMsg, endMsg:
+	case eventMsg, restoreMsg, readyMsg, endMsg, presenceMsg:
 		// The one outstanding read is over; readOn decides whether another
 		// starts, once this item is placed.
 		m.reading = false
@@ -425,12 +425,12 @@ func (m Model) apply(msg tea.Msg, handle handler, drained bool) (tea.Model, tea.
 }
 
 // fromStream reports whether msg is an item of the backend's stream other than
-// an event — a restore, a ready or the end (waitEvent) — which the gate places
-// as it places an event: holding it in arrival order behind whatever is held,
-// and reconciling the reader once it is placed.
+// an event — a restore, a ready, the end or a presence (waitEvent) — which the
+// gate places as it places an event: holding it in arrival order behind
+// whatever is held, and reconciling the reader once it is placed.
 func fromStream(msg tea.Msg) bool {
 	switch msg.(type) {
-	case restoreMsg, readyMsg, endMsg:
+	case restoreMsg, readyMsg, endMsg, presenceMsg:
 		return true
 	}
 	return false

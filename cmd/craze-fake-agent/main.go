@@ -184,6 +184,19 @@ Environment:
                        each block as prompt-dump describes it) and per
                        x.ai/interject ({"interject":"<text>"}), in arrival
                        order.
+  CRAZE_FAKE_DUMP_CALLS=<path>  every script appends one line to this file per
+                       request and notification it reads, in arrival order:
+                       the method, and for session/set_config_option a space
+                       and "<configId>=<value>".
+  CRAZE_FAKE_SET_GATE=<path>  every session/set_config_option is answered only
+                       once one byte has been read from <path>, a FIFO (one
+                       byte per set), off the read loop: the fake reads -- and
+                       CRAZE_FAKE_DUMP_CALLS records -- whatever craze sends
+                       while a set is held.
+  CRAZE_FAKE_SET_REFUSE=<id>  every session/set_config_option of option <id>
+                       is refused -32602 (data.message "Refused config option:
+                       <id>"), after CRAZE_FAKE_SET_GATE's byte when that is
+                       set too.
   CRAZE_FAKE_LATE_CATALOG=1  session/new's available_commands_update is held
                        back until the first session/prompt is read, and sent
                        then, ahead of that prompt's turn: the catalog lands

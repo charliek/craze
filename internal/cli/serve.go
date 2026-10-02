@@ -205,6 +205,14 @@ type controlHost struct {
 	wake       chan struct{} // a rewrite was queued
 	stop       chan struct{} // the host is closing
 	writerDone chan struct{}
+
+	// presence is the TUI-hosted server's count of attached clients, the
+	// host TUI's own seat included (plan 032 §3.14, R2-7): a latest-value
+	// channel its attachments listener keeps (latestCount), which the host
+	// TUI reads (tui.Config.LocalPresence). nil on a detached host. unwatch
+	// removes the listener; close then closes the channel.
+	presence chan int
+	unwatch  func()
 }
 
 // rewrite is one registry rewrite, for the engine it describes, and the
@@ -237,9 +245,12 @@ func (l *landing) land() { l.once.Do(func() { close(l.ch) }) }
 // server's life, a picker replacing the engine included — and that its
 // sessions.list row carries the row facts (§3.8). The server is built with no
 // coordinator: a TUI-hosted session is stopped by its own TUI's quit, and
-// refuses session.stop, stop_unsupported (§3.6a).
+// refuses session.stop, stop_unsupported (§3.6a). Its TUI is a client of the
+// session for the server's whole life, so the server counts it among the
+// attached clients (plan 032 §3.14, control.Options.LocalClient) and keeps the
+// count where the TUI reads it (controlHost.presence).
 func serveControl(env rundir.Env, hostID, workspace string, force bool, diag io.Writer) *controlHost {
-	h, err := bindControl(env, hostID, workspace, force, nil, diag)
+	h, err := bindControl(env, hostID, workspace, force, hostRequest{}, nil, true, diag)
 	if err != nil {
 		fmt.Fprintf(diag, "craze: control socket off: %v\n", err)
 		return nil
@@ -247,17 +258,31 @@ func serveControl(env rundir.Env, hostID, workspace string, force bool, diag io.
 	return h
 }
 
+// hostRequest is the hub's session.create that spawned a host (plan 032
+// §3.10): its idempotency id and its params' hash, written into the host's
+// registry entry for the life of the host — so a hub that restarts still
+// knows a retried create's session. Zero for every other host.
+type hostRequest struct {
+	id, hash string
+}
+
 // bindControl is serveControl's bind and serve, answering a failure rather
 // than warning about it: for craze serve a socket it cannot bind is fatal
 // (plan 030 §3.3), since a headless host is reachable through nothing else.
 // A failure has bound nothing — rundir.Bind unwinds what it built — and
-// started no goroutine. stop is the host's lifecycle coordinator
-// (control.Options.Stop): set, the server serves session.stop and advertises
-// capabilities.stop; nil — the TUI-hosted path — it refuses it,
-// stop_unsupported.
-func bindControl(env rundir.Env, hostID, workspace string, force bool, stop control.StopFunc, diag io.Writer) (*controlHost, error) {
+// started no goroutine. req is the create that spawned the host, written into
+// its registry entry (rundir.Entry.RequestID, RequestHash). stop is the
+// host's lifecycle coordinator (control.Options.Stop): set, the server serves
+// session.stop and advertises capabilities.stop; nil — the TUI-hosted path —
+// it refuses it, stop_unsupported. local says this process's TUI is the
+// session's own client (the TUI-hosted path, control.Options.LocalClient): the
+// count of attached clients includes it, and is kept for it in
+// controlHost.presence. Every host counts its clients for them
+// (control.Options.Presence, plan 032 §3.14).
+func bindControl(env rundir.Env, hostID, workspace string, force bool, req hostRequest, stop control.StopFunc, local bool, diag io.Writer) (*controlHost, error) {
 	started := time.Now().UTC()
-	host, err := rundir.Bind(env, hostID, rundir.Entry{StartedAt: started, Workspace: workspace})
+	host, err := rundir.Bind(env, hostID, rundir.Entry{StartedAt: started, Workspace: workspace,
+		RequestID: req.id, RequestHash: req.hash})
 	if err != nil {
 		return nil, err
 	}
@@ -278,12 +303,21 @@ func bindControl(env rundir.Env, hostID, workspace string, force bool, stop cont
 			// a TUI-hosted one's too: another craze's session list reads
 			// them the same way.
 			RowFacts: true,
+			// And every one counts its attached clients for them (plan 032
+			// §3.14): the TUI-hosted one its own TUI among them.
+			Presence:    true,
+			LocalClient: local,
 		}),
 		diag:       diag,
 		update:     host.Update,
 		wake:       make(chan struct{}, 1),
 		stop:       make(chan struct{}),
 		writerDone: make(chan struct{}),
+	}
+	if local {
+		// Before Serve, so the TUI hears every change from the first.
+		h.presence = make(chan int, 1)
+		h.unwatch = h.server.AddAttachmentsListener(func(n int) { latestCount(h.presence, n) })
 	}
 	go func() {
 		// nil once the server has closed; anything else stopped accepting
@@ -294,6 +328,31 @@ func bindControl(env rundir.Env, hostID, workspace string, force bool, stop cont
 	}()
 	go h.writeLoop()
 	return h, nil
+}
+
+// latestCount puts n in ch, a one-slot latest-value channel, in place of a
+// count not yet read: an attachments listener's, so it never waits. The
+// listener's calls are one at a time (control.Server.AddAttachmentsListener)
+// and it is the channel's only sender, so the slot it empties stays free for
+// n.
+func latestCount(ch chan int, n int) {
+	select {
+	case <-ch:
+	default:
+	}
+	select {
+	case ch <- n:
+	default:
+	}
+}
+
+// localPresence is the host TUI's count of attached clients
+// (tui.Config.LocalPresence): nil but on the TUI-hosted path.
+func (h *controlHost) localPresence() <-chan int {
+	if h == nil || h.presence == nil {
+		return nil
+	}
+	return h.presence
 }
 
 // permissionMode is the info document's word for how a host spawned its
@@ -447,6 +506,12 @@ func (h *controlHost) close() {
 	ctx, cancel := context.WithTimeout(context.Background(), closeWait)
 	_ = h.server.Close(ctx)
 	cancel()
+	if h.unwatch != nil {
+		// The count is heard no more, and its reader — the host TUI's, gone
+		// by now — is let go.
+		h.unwatch()
+		close(h.presence)
+	}
 	teardownStep("server closed")
 	if err := hostClose(h.host); err != nil {
 		fmt.Fprintf(h.diag, "craze: control socket not cleaned up: %v\n", err)

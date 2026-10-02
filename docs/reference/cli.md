@@ -6,6 +6,7 @@ craze prompt [text] [flags]
 craze bridge [flags]
 craze attach [flags]
 craze ps [flags]
+craze new [prompt...] [flags]
 craze serve [flags]
 craze auth login [provider]
 craze auth logout <provider>
@@ -25,7 +26,9 @@ flags; see [craze prompt](#craze-prompt).
 |------|-------------|
 | `--workspace` | Existing workspace directory (default: current directory) |
 | `--model` | Model to start on: an ACP model id, or on `native` a model alias. Native resolves it against every model it knows — shipped or yours, connected or not — and a model whose provider has no key refuses to start, saying how to give it one. It applies to this start only, and is never remembered as a default; a new native session takes the effort last picked for that model in a session's `/model`, when the model still offers it ([Model memory](configuration.md#model-memory-recentjson)) |
-| `--agent-bin` | Path to the agent binary (or `CRAZE_AGENT_BIN`) |
+| `--effort` | Effort to start at, where the model offers an effort setting: a level's id (`high`), the id in any case (`HIGH`), or its name (`extra high`) — tried in that order, and a step counts only when it matches exactly one level. Set after `--model`, so against that model's levels, and before the session takes any prompt. A value that matches no level, or more than one, or a model with no effort setting, leaves the model's own effort, with one line on stderr. Applies to this start only — a `--continue` or `--resume` load included — and is never remembered |
+| `--fast`, `--no-fast` | Start with the model's fast setting on, or off, where the model offers one (cursor's per-model `fast`). Neither leaves it as the model has it. Set as `--effort` is; a model without one is a line on stderr |
+| `--agent-bin` | Path to the agent binary for this launch's own provider (or `CRAZE_AGENT_BIN`); a session of another provider uses its own. See [Agent binaries](configuration.md#agent-binaries) |
 | `--provider` | Provider: `cursor`, `grok`, `gx` (ACP agents) or `native` (runs inside craze). Empty is unset. Unknown id exits 2 |
 | `--force` | Spawn the agent with `--force` / `--always-approve` (yolo). Default: on |
 | `--no-force` | Disable yolo and handle permission requests |
@@ -39,8 +42,19 @@ flags; see [craze prompt](#craze-prompt).
 | `--continue`, `-c` | Load the newest session in this workspace instead of starting a new one. No matching session exits 1 |
 | `--resume`, `-r` | Open a picker of the last 10 sessions in this workspace. Empty index exits 1 the same way; `Esc` in the picker exits 0 |
 
-`--ask` and `--plan` are mutually exclusive. So are `--continue` and
-`--resume` (exit 2).
+`--ask` and `--plan` are mutually exclusive. So are `--fast` and `--no-fast`,
+and `--continue` and `--resume` (exit 2).
+
+`--effort` and `--fast`/`--no-fast` are set inside the session's start, after
+`--model` and `--ask`/`--plan`, so no prompt — typed, queued, or sent by
+another client — reaches the agent before them; that holds whether the
+session runs in a [detached host](#sessions-outlive-their-terminal) or, under
+`detach = false`, in the TUI's own process. A setting the agent refuses is a
+line on stderr, and the session starts without it; one the agent does not
+answer within 15 s fails the start. Each one that is skipped or
+refused is also a `diag` line in the session's
+[journal](configuration.md#session-journal) (`effort_unmatched`,
+`fast_unmatched`, `start_setting_refused`).
 
 `--provider` on the TUI skips the startup picker. Without it, `$CRAZE_PROVIDER`
 then `provider` in the config file then `cursor` is the default, and the picker
@@ -48,6 +62,9 @@ lets you change it before Start. The picker holds its choice to the same flags
 `--provider` is held to: picking `native` with `--agent-bin` or
 `CRAZE_AGENT_BIN` set shows the message `--provider native` would exit 2
 with, as an error row, and starts nothing (see [TUI reference](tui.md)).
+`--agent-bin` and `CRAZE_AGENT_BIN` are the resolved provider's: another
+provider picked there runs the binary `[agents]` names for it, or the one on
+`PATH` ([Agent binaries](configuration.md#agent-binaries)).
 `craze prompt` has no picker; it uses the same precedence. `craze frame`
 ignores env and config and defaults to cursor unless `--provider` is passed.
 
@@ -125,8 +142,9 @@ through the holder's host id, after one line on stderr:
 craze: that session is already running (pid N); attaching
 ```
 
-The flags a *new* session would take (`--model`, `--ask`, `--plan`,
-`--agent-bin`, `--provider`) do not apply to an attach; each one this command
+The flags a *new* session would take (`--model`, `--effort`,
+`--fast`/`--no-fast`, `--ask`, `--plan`, `--agent-bin`, `--provider`) do not
+apply to an attach; each one this command
 line explicitly passed is named in the note — whether the flag was
 **changed** on the command line, not what it is worth — e.g. `(ignored:
 --model, --provider)`. Nothing is built, spawned, bound, or claimed for it.
@@ -323,9 +341,9 @@ session (its own session, stdio on `/dev/null`) and attaches to it. Run by hand
 it is the same host in the foreground, logging to stderr; SIGHUP is ignored.
 
 It takes the session flags the TUI takes — `--workspace`, `--model`,
-`--agent-bin`, `--provider`, `--force`/`--no-force`, `--ask`/`--plan`,
-`--plugin-dir`, `--continue`/`-c` — with the same refusals in the same words,
-and:
+`--effort`, `--fast`/`--no-fast`, `--agent-bin`, `--provider`,
+`--force`/`--no-force`, `--ask`/`--plan`, `--plugin-dir`, `--continue`/`-c` —
+with the same refusals in the same words, and:
 
 | Flag | Description |
 |------|-------------|
@@ -361,7 +379,7 @@ echo "hello" | ./bin/craze prompt --json
 |------|-------------|
 | `--workspace` | Existing workspace directory (default: current directory) |
 | `--model` | Model to start on: an ACP model id (`session/set_model` after `session/new`), or a native model alias, resolved as the TUI's `--model` is, at the effort remembered for it. Never remembered. Without it a native run starts where a new TUI session would, on the remembered model ([Model memory](configuration.md#model-memory-recentjson)) |
-| `--agent-bin` | Path to the agent binary (or `CRAZE_AGENT_BIN`) |
+| `--agent-bin` | Path to the agent binary (or `CRAZE_AGENT_BIN`, then `[agents]` in `config.toml`: [Agent binaries](configuration.md#agent-binaries)) |
 | `--provider` | Provider: `cursor`, `grok`, `gx` (ACP agents) or `native` (runs inside craze) |
 | `--follow-up` | Additional prompt on the same ACP session (repeatable) — the headless queue, see below |
 | `--permission-decision` | Headless permission answer: `allow-once` or `reject-once` (repeatable) |
@@ -777,7 +795,8 @@ The hub is one process per user and craze directory (`CRAZE_HOME`), `craze
 hub`: it serves the [roster](protocol.md#the-hubs-roster) of every running
 session and a [splice](protocol.md#the-hub-splice) to any one of them, on a
 socket of its own in the runtime namespace. **Nothing needs starting by
-hand:** `craze ps` and `craze bridge --hub` start it when none runs —
+hand:** `craze ps`, [`craze new`](#craze-new), `craze bridge --hub` and the
+TUI's [session list](tui.md#session-list) start it when none runs —
 re-executed, in a session of its own, its stdio on `/dev/null` — and the next
 one finds it. A hub that does not answer is replaced.
 
@@ -789,6 +808,59 @@ without it, and the next `craze ps` starts another.
 Its log is `~/.cache/craze/host-logs/hub-<ns>.log`, beside the
 [host logs](configuration.md#host-logs) (under the process's own `$HOME`;
 `<ns>` names the craze directory), rotated once at 4 MiB like a host's.
+
+## craze new
+
+```bash
+./bin/craze new "fix the flaky test"
+./bin/craze new -C ~/projects/lumen --provider grok --effort high "add the ps command"
+./bin/craze new --json
+```
+
+Starts a session in the background — in its own host, through the hub's
+[`session.create`](protocol.md#sessioncreate) — in the current directory or
+`-C`'s, and returns once the session has started, its first prompt (the
+arguments, joined by spaces) sent to it when there is one:
+
+```text
+started 8327352e in ~/projects/lumen
+```
+
+The id is the session's short id, as [`craze ps`](#craze-ps) shows it. When
+the prompt was sent and its answer lost, a second line says `the prompt may
+not have reached it`: the session exists, and may be working on it. The
+session runs on as any detached session does — `craze attach`, the session
+list (`←`) and `craze ps` find it — until its host's idle exit.
+
+| Flag | Description |
+|------|-------------|
+| `-C`, `--dir <dir>` | Start the session in this directory (default: the current one) |
+| `--provider <id>` | The session's provider. Without it the hub's configured default — `provider` in `config.toml`, the one the last session to start persisted — and with none configured the create is refused |
+| `--model <id>` | The model to start on |
+| `--effort <value>` | The effort to start at, where the model offers one (as the [session flag](#flags)) |
+| `--fast` / `--no-fast` | The fast setting to start with, where the model offers one |
+| `--no-force` | The session's agent asks for permission, and a client answers (the default is a plain launch's: `--force`'s bypass — `config.toml` has no permission setting) |
+| `--json` | Print the hub's answer (`session.create`'s result: the session as the roster lists it, and the prompt's outcome) on one line |
+
+The session's host finds its agent binary as a session the list starts for
+another provider does — `[agents]` in `config.toml`, then `PATH`: a hub never
+hands a host the launch's `--agent-bin` or `CRAZE_AGENT_BIN`. It persists its
+provider as the next plain launch's default, as every new session does.
+
+A refusal is the hub's own words on one line, exit 1 — a session whose start
+failed (`the session did not start: …`, its agent's first error line), a
+directory that does not exist, no provider. So is a session that started and
+refused its first prompt: it runs on, idle, and the line says why. A hub from
+before `craze new` says `this hub (craze <v>) cannot create sessions; it exits
+when idle`: it is not replaced, and the next `craze new` after it has gone
+starts this craze's. Each run creates under a request id of its own, and a
+connection to the hub that ends before the answer (the hub restarted
+mid-create) is tried once more under the same id, so the new hub answers the
+session the first one started rather than start a second.
+
+On macOS a session the hub creates runs in the hub's security session: a hub
+first started over `ssh` cannot start a `cursor` session (its keychain is
+locked there), and says so as a start that failed.
 
 ## craze auth
 

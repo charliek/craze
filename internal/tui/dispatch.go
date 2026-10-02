@@ -123,8 +123,9 @@ const (
 // from — as the status row names them, the model its current one, or none
 // ("" — the provider's default) when it has not said one — and that session's
 // permission mode (§3.13, Claude Code's rule; PermissionUnsaid, from an older
-// host, is the launch's own flags). A provider this craze does not know
-// starts nothing.
+// host, is the launch's own flags) — and the effort and fast mode /effort and
+// /fast chose (plan 032 C17), else the model's own. A provider this craze
+// does not know starts nothing.
 func (m Model) sessNewSpec(dir string) (SpawnSpec, error) {
 	p, ok := m.sessNewProviderOf()
 	if !ok {
@@ -134,7 +135,13 @@ func (m Model) sessNewSpec(dir string) (SpawnSpec, error) {
 		}
 		return SpawnSpec{}, errNoProvider(name)
 	}
-	return SpawnSpec{Workspace: dir, Provider: p, Model: m.sessNewModelID(), PermissionMode: m.hostPerm}, nil
+	spec := SpawnSpec{Workspace: dir, Provider: p, Model: m.sessNewModelID(), PermissionMode: m.hostPerm, Effort: m.sessPick.effort}
+	if f := m.sessPick.fast; f != nil {
+		// The spec's own: nothing it reaches can move the pick.
+		on := *f
+		spec.Fast = &on
+	}
+	return spec, nil
 }
 
 // ------------------------------------------------------- background dispatch

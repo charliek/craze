@@ -1029,7 +1029,7 @@ func TestSpawnHostPassesNoHostStatus(t *testing.T) {
 // launcher would. A value that looks like a flag stays a value.
 func TestSpawnArgvCarriesEverySessionFlag(t *testing.T) {
 	full := tuiFlags{
-		workspace: "-ws", provider: "grok", model: "m-1", agentBin: "/bin/agent",
+		workspace: "-ws", provider: "grok", model: "m-1", effort: "-high", fast: true, agentBin: "/bin/agent",
 		pluginDirs: []string{"/p/one,two", "-p three"}, force: false, noForce: true, ask: true,
 		cont: true, noHostStatus: true,
 	}
@@ -1039,7 +1039,7 @@ func TestSpawnArgvCarriesEverySessionFlag(t *testing.T) {
 		load  string
 	}{
 		{"every flag", full, ""},
-		{"plan and a load", tuiFlags{force: true, plan: true}, "cursor:legacy-1"},
+		{"plan, --no-fast and a load", tuiFlags{force: true, plan: true, noFast: true}, "cursor:legacy-1"},
 		{"nothing set", tuiFlags{force: true}, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1057,6 +1057,7 @@ func TestSpawnArgvCarriesEverySessionFlag(t *testing.T) {
 			}
 			got := f.tuiFlags
 			if got.workspace != want.workspace || got.provider != want.provider || got.model != want.model ||
+				got.effort != want.effort || got.fast != want.fast || got.noFast != want.noFast ||
 				got.agentBin != want.agentBin || !slices.Equal(got.pluginDirs, want.pluginDirs) || got.force != want.force ||
 				got.ask != want.ask || got.plan != want.plan || got.cont != want.cont || got.noHostStatus != want.noHostStatus {
 				t.Fatalf("serve parsed %+v from %q, want %+v", got, argv, want)
@@ -1064,10 +1065,11 @@ func TestSpawnArgvCarriesEverySessionFlag(t *testing.T) {
 			if f.load != tc.load || f.hostID != "0123456789ab" || f.log != "/h/0123456789ab.log" {
 				t.Fatalf("serve's own: load %q, host id %q, log %q", f.load, f.hostID, f.log)
 			}
-			for _, name := range []string{"workspace", "provider", "model", "agent-bin", "plugin-dir", "no-force", "ask", "plan", "continue", "load", "no-host-status"} {
+			for _, name := range []string{"workspace", "provider", "model", "effort", "fast", "no-fast", "agent-bin", "plugin-dir", "no-force", "ask", "plan", "continue", "load", "no-host-status"} {
 				set := cmd.Flags().Changed(name)
 				given := map[string]bool{
 					"workspace": want.workspace != "", "provider": want.provider != "", "model": want.model != "",
+					"effort": want.effort != "", "fast": want.fast, "no-fast": want.noFast,
 					"agent-bin": want.agentBin != "", "plugin-dir": len(want.pluginDirs) > 0, "no-force": !want.force,
 					"ask": want.ask, "plan": want.plan, "continue": want.cont, "load": tc.load != "", "no-host-status": want.noHostStatus,
 				}[name]

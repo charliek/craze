@@ -8,6 +8,7 @@ import (
 
 	"github.com/charliek/craze/internal/agent"
 	"github.com/charliek/craze/internal/backend"
+	"github.com/charliek/craze/internal/hub"
 	"github.com/charliek/craze/internal/modelcache"
 	"github.com/charliek/craze/internal/roster"
 	"github.com/charliek/craze/internal/rundir"
@@ -38,11 +39,39 @@ type sessionList struct{ l *launcher }
 // drawn under the rows.
 var _ tui.SessionStarter = sessionList{}
 
-// Roster opens the list's poller: the registry of this user (the launcher's
-// env, the process's), the index of this CRAZE_HOME, and only the providers
-// this build knows offered as saved.
+// Roster opens the list's roster through the hub (hub.Roster, plan 032
+// §3.13): it returns at once, its running rows the hub's roster
+// subscription's — the hub of this HOME and CRAZE_HOME (the launcher's env,
+// the process's), started on demand — or, when the hub cannot be had, the
+// list's own poller's over this user's registry; its saved rows the index of
+// this CRAZE_HOME's, only the providers this build knows offered. A row the
+// hub lists carries no socket: Open, Stop and Cancel resolve it from the
+// registry when they act (entryOf).
 func (s sessionList) Roster() tui.SessionRoster {
-	return roster.Open(s.l.env, &sessions.Store{KnownProvider: knownProvider})
+	return hub.Roster(s.l.env, &sessions.Store{KnownProvider: knownProvider})
+}
+
+// errNotReachable is a running row acted on whose host the registry no longer
+// lists: a row the hub listed names its host by id alone, and a host gone
+// from the registry has no socket to reach it by.
+var errNotReachable = errors.New("session not reachable")
+
+// entryOf is the registry entry ref's running session is reached by: its
+// host as its row names it, with the socket the registry lists for that host
+// id now when the row carries none — a row the hub listed (§3.13: no socket
+// crosses the wire) — and errNotReachable when the registry lists no such
+// host. The session it names is the row's, never whatever the host serves
+// by now.
+func (s sessionList) entryOf(ref roster.Ref) (rundir.Entry, error) {
+	h := ref.Host
+	if h.Socket == "" {
+		e, ok := hostEntry(s.l.env, h.ID)
+		if !ok || e.Socket == "" {
+			return rundir.Entry{}, errNotReachable
+		}
+		h.Socket = e.Socket
+	}
+	return h.Entry(), nil
 }
 
 // RecentDirs is the `@` picker's recent directories (plan 030 §3.15): up to
@@ -87,7 +116,11 @@ func (s sessionList) Open(ref roster.Ref) (backend.Backend, error) {
 	if ref.Saved != nil {
 		return s.l.openSaved(*ref.Saved)
 	}
-	return s.l.open(ref.Host.Entry())
+	e, err := s.entryOf(ref)
+	if err != nil {
+		return nil, &launchError{msg: "craze: " + err.Error(), err: err}
+	}
+	return s.l.open(e)
 }
 
 // Spawn starts a host for spec's new session and answers its ref, for Open
@@ -116,7 +149,11 @@ func (s sessionList) Stop(ref roster.Ref) error {
 	if ref.Saved != nil {
 		return errStopSaved
 	}
-	return stopHost(ref.Host.Entry())
+	e, err := s.entryOf(ref)
+	if err != nil {
+		return err
+	}
+	return stopHost(e)
 }
 
 // Cancel clears ref's queue and cancels its running turn on its host, over a
@@ -126,7 +163,11 @@ func (s sessionList) Cancel(ref roster.Ref) error {
 	if ref.Saved != nil {
 		return errStopSaved
 	}
-	return cancelHost(ref.Host.Entry())
+	e, err := s.entryOf(ref)
+	if err != nil {
+		return err
+	}
+	return cancelHost(e)
 }
 
 // open dials the host e names as the TUI's client and attaches — as the
@@ -192,12 +233,13 @@ func (l *launcher) open(e rundir.Entry) (backend.Backend, error) {
 // its provider. The command line's session flags were for its own session,
 // not for every session the list resumes, so a resume passes only what any
 // spawn of this launch takes — the permission mode, the plugin directories,
-// the host-status switch, and --agent-bin, the launch's agent binary for
-// whichever ACP provider runs (as the provider picker's choice takes it), not
-// for one craze runs in process, which refuses it — and never --provider (a
-// filter on a load, which would refuse a row of another provider),
-// --workspace, --model, --ask or --plan; a held session attached to leaves
-// no note of flags ignored.
+// the host-status switch, and --agent-bin, the launch's agent binary, when
+// the row's provider is the launch's own (hostOptions, plan 032 §3.11, P7:
+// any other's host takes neither it nor CRAZE_AGENT_BIN, and finds its own in
+// `[agents]` or on PATH) — and never --provider (a filter on a load, which
+// would refuse a row of another provider), --workspace, --model, --effort,
+// --fast/--no-fast, --ask or --plan; a held session attached to leaves no
+// note of flags ignored.
 //
 // A row this craze cannot run is refused before anything is spawned
 // (savedRunnable), a *tui.Refusal as the host's own refusal of it would be.
@@ -209,11 +251,10 @@ func (l *launcher) openSaved(row sessions.Row) (backend.Backend, error) {
 	f := l.flags
 	f.cont, f.resume = false, false
 	f.workspace, f.provider, f.model = "", "", ""
+	f.effort = ""
+	f.setFast(nil)
 	f.ask, f.plan = false, false
-	if p.InProcess() {
-		f.agentBin = ""
-	}
-	return l.spawn(spawnOptions{env: l.env, flags: f, load: loadArg(row)}, row.CrazeID, false)
+	return l.spawn(l.hostOptions(f, p, loadArg(row)), row.CrazeID, false)
 }
 
 // savedRunnable is the provider of a saved row this craze can resume, or the
@@ -338,13 +379,14 @@ func (l *launcher) cameUpLocked(hostID string) bool {
 // Of the command line's own session flags a new session from the list takes
 // only what every spawn of this launch takes, as a resume from the list does
 // (openSaved, X111): the plugin directories, the host-status switch, and
-// --agent-bin, the launch's agent binary for whichever ACP provider runs —
-// the provider picker's choice takes it the same way, and CRAZE_AGENT_BIN,
-// which every host inherits, is read for any ACP provider too — but not for a
-// provider craze runs in process, which refuses it. Never --ask or --plan:
-// they were the command line's own session's mode, not every session the
-// list starts (plan 030 C15; per-dispatch modes are not built, as effort is
-// not).
+// --agent-bin, the launch's agent binary, when spec's provider is the
+// launch's own — a host of any other provider takes neither it nor
+// CRAZE_AGENT_BIN, which is left out of its environment, and finds its binary
+// in `[agents]` or on PATH (hostOptions, plan 032 §3.11, P7). Never --ask or
+// --plan: they were the command line's own session's mode, not every session
+// the list starts (plan 030 C15; per-dispatch modes are not built). Its
+// effort and fast setting are spec's own (plan 032 §3.11), never the
+// command line's.
 func (l *launcher) spawnFor(spec tui.SpawnSpec) (roster.Ref, error) {
 	done, err := l.begin()
 	if err != nil {
@@ -354,17 +396,16 @@ func (l *launcher) spawnFor(spec tui.SpawnSpec) (roster.Ref, error) {
 	f := l.flags
 	f.cont, f.resume = false, false
 	f.workspace, f.provider, f.model = spec.Workspace, spec.Provider.Name(), spec.Model
+	f.effort = spec.Effort
+	f.setFast(spec.Fast)
 	f.ask, f.plan = false, false
-	if spec.Provider.InProcess() {
-		f.agentBin = ""
-	}
 	switch spec.PermissionMode {
 	case backend.PermissionBypass:
 		f.force, f.noForce = true, false
 	case backend.PermissionPrompt:
 		f.force, f.noForce = false, true
 	}
-	ref, err := spawnHost(l.ctx, spawnOptions{env: l.env, flags: f})
+	ref, err := spawnHost(l.ctx, l.hostOptions(f, spec.Provider, ""))
 	if err != nil {
 		return roster.Ref{}, launchFailure(err)
 	}
