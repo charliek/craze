@@ -37,7 +37,8 @@ import (
 //     finished typing it; else the selected row's workspace (running or
 //     saved); else the workspace of the session the list came from. With it
 //     the provider and model the session the list came from runs (C16's
-//     /provider and /model set them for the list).
+//     /provider and /model set them for the list), and the effort and fast
+//     mode plan 032's /effort and /fast set, when they set one.
 //   - Only a leading `@` token — the first thing typed — chooses the
 //     directory, and it alone opens the `@` popup (at_dirs.go); any later
 //     `@…` is prompt text the agent reads. Text typed before it makes it
@@ -55,7 +56,8 @@ import (
 //   - The token only chooses: the prompt sent is the rest (sessSubmit).
 //   - `/` first opens the list's commands in a popup of their own —
 //     /provider and /model, which set what new sessions run, and /exit
-//     (sessions_models.go, C16).
+//     (sessions_models.go, C16); /effort and /fast (plan 032 C17) join them
+//     once what is typed reveals them (sessCmdRevealed).
 
 // The input's words.
 const (
@@ -378,7 +380,8 @@ func (m Model) sessInputEnter() (Model, tea.Cmd, bool) {
 		tm, cmd := m.sessQuit()
 		return tm.(Model), cmd, true
 	}
-	// `/provider <id>` and `/model <id>` set what new sessions run (C16).
+	// `/provider <id>` and `/model <id>` set what new sessions run (C16),
+	// `/effort <level>` and `/fast <on|off>` what they start at (plan 032 C17).
 	if next, cmd, ok := m.sessCmdTyped(m.sessList.in.ti.Value()); ok {
 		return next, cmd, true
 	}
@@ -565,10 +568,12 @@ func (m Model) sessNewModel() string {
 // ------------------------------------------------------------ view
 
 // sessTargetRule is the rule over the input, naming the target: `──── new
-// session → ~/projects/lumen · native · glm-5.3 ─`, the directory in the
-// accent when a token chose it, or the error in red when the leading token
-// names none. Too long for the row, the directory is cut from the left — its
-// last elements are what tell it apart — then the whole is clipped.
+// session → ~/projects/lumen · native · glm-5.3 ─`, and ` · high`, ` · fast`
+// or ` · no fast` after it once /effort or /fast set them (sessNewSettings),
+// the directory in the accent when a token chose it, or the error in red
+// when the leading token names none. Too long for the row, the directory is
+// cut from the left — its last elements are what tell it apart — then the
+// whole is clipped.
 func (m Model) sessTargetRule(width int) string {
 	th := m.theme
 	rule := styleFG(th.Rule)
@@ -582,7 +587,8 @@ func (m Model) sessTargetRule(width int) string {
 			dirSt = styleFG(th.Accent)
 		}
 		dir := sanitizeLine(sessTilde(m.sessList.home, t.dir))
-		tail := []seg{{" · ", styleFG(th.Dim)}, {m.sessNewProvider(), styleFG(th.Provider)}, {" · " + m.sessNewModel(), styleFG(th.Dim)}}
+		tail := []seg{{" · ", styleFG(th.Dim)}, {m.sessNewProvider(), styleFG(th.Provider)},
+			{" · " + m.sessNewModel() + m.sessNewSettings(), styleFG(th.Dim)}}
 		room := width - 4 - lipgloss.Width(sessNewRuleLead) - segsWidth(tail)
 		if lipgloss.Width(dir) > room && room > 1 {
 			dir = sessCutLeft(dir, room)

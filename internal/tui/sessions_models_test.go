@@ -749,3 +749,311 @@ func TestFrameGoldenSessionsSlash(t *testing.T) {
 				"Composer 2.5", "❯ /model"}, nil)
 	}
 }
+
+// TestEffortAndFastAreRevealedByPrefix (plan 032 §3.11, C17): /effort and
+// /fast are never in the bare `/` popup — it lists /provider, /model and
+// /exit as it always did — and are listed once the typed command word is a
+// prefix of theirs and of no older command's: `/e` is /exit's alone (it starts
+// /exit too), `/ef` reveals /effort, `/f` and `/fa` /fast; typed in full each
+// is listed alone, case folded. A word past them opens nothing; with a space
+// each lists its values, `default` first and current.
+func TestEffortAndFastAreRevealedByPrefix(t *testing.T) {
+	m, _ := cmdList(t, 100, 30, nil)
+	for _, tc := range []struct {
+		typed string
+		want  []string
+	}{
+		{"/", []string{"/provider", "/model", "/exit"}},
+		{"/e", []string{"/exit"}},
+		{"/ex", []string{"/exit"}},
+		{"/ef", []string{"/effort"}},
+		{"/effort", []string{"/effort"}},
+		{"/EFF", []string{"/effort"}},
+		{"/f", []string{"/fast"}},
+		{"/fa", []string{"/fast"}},
+		{"/fast", []string{"/fast"}},
+	} {
+		mm, _ := typeList(t, m, tc.typed)
+		if got := cmdItems(mm); !slices.Equal(got, tc.want) {
+			t.Fatalf("%q lists %v, want %v", tc.typed, got, tc.want)
+		}
+	}
+	for _, line := range []string{"/efforts", "/fastest", "/fix the build"} {
+		if mm, _ := typeList(t, m, line); mm.sessList.in.cmd.visible() {
+			t.Fatalf("%q opened the popup: %v", line, cmdItems(mm))
+		}
+	}
+	mm, _ := typeList(t, m, "/ef")
+	if it := cmdItem(t, mm, "/effort"); it.Detail != sessEffortTitle || it.Note != sessDefaultModel {
+		t.Fatalf("/effort's row %+v", it)
+	}
+	mm, _ = typeList(t, m, "/f")
+	if it := cmdItem(t, mm, "/fast"); it.Detail != sessFastTitle || it.Note != sessDefaultModel {
+		t.Fatalf("/fast's row %+v", it)
+	}
+	// enter on the command writes it with the space that lists its values.
+	mm, _ = press(mm, enter())
+	if v, _ := inputOf(mm); v != "/fast " {
+		t.Fatalf("enter on /fast left %q", v)
+	}
+	if got := cmdItems(mm); !slices.Equal(got, []string{"default", "on", "off"}) {
+		t.Fatalf("/fast lists %v", got)
+	}
+	mm, _ = typeList(t, m, "/effort ")
+	if got := cmdItems(mm); !slices.Equal(got, []string{"default", "low", "medium", "high", "xhigh"}) {
+		t.Fatalf("/effort lists %v", got)
+	}
+	if it := cmdItem(t, mm, "default"); it.Note != sessCurrentNote || it.Detail != sessSettingDetail {
+		t.Fatalf("/effort's default row %+v", it)
+	}
+	if mm.sessList.in.cmd.ans.Title != sessEffortTitle {
+		t.Fatalf("/effort's title %q", mm.sessList.in.cmd.ans.Title)
+	}
+	mm, _ = typeList(t, mm, "x")
+	if got := cmdItems(mm); !slices.Equal(got, []string{"xhigh"}) {
+		t.Fatalf("/effort x lists %v", got)
+	}
+	mm, _ = typeList(t, m, "/effort max")
+	if p := mm.sessList.in.cmd; len(p.ans.Items) != 0 || !p.ans.NoteErr || p.ans.Note != "no effort max: one of default, low, medium, high, xhigh" {
+		t.Fatalf("/effort max: %+v", p.ans)
+	}
+}
+
+// TestChoosingEffortAndFast (plan 032 §3.11, C17): a value chosen from the
+// popup — enter or tab — or typed in full sets the effort or fast mode of the
+// next session the list starts, the rule and the hint line name it, it is
+// marked current the next time it is offered, and `default` clears it. A
+// value not offered, and either command with none, is the hint line's error
+// and changes nothing.
+func TestChoosingEffortAndFast(t *testing.T) {
+	m, _ := cmdList(t, 100, 30, nil)
+	before := ruleOf(t, m)
+	if !strings.HasSuffix(before, " · cursor · Grok") {
+		t.Fatalf("the rule %q", before)
+	}
+	spec := func(m Model) SpawnSpec {
+		t.Helper()
+		s, err := m.sessNewSpec("/x")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return s
+	}
+
+	m, _ = typeList(t, m, "/effort hi")
+	m, _ = press(m, enter())
+	if s := spec(m); s.Effort != "high" || s.Fast != nil {
+		t.Fatalf("after /effort high: %+v", s)
+	}
+	if r := ruleOf(t, m); !strings.HasSuffix(r, " · cursor · Grok · high") {
+		t.Fatalf("after /effort high: the rule %q", r)
+	}
+	if h := sessHint(m); h != "new sessions use cursor · Grok · high" {
+		t.Fatalf("after /effort high: the hint %q", h)
+	}
+	if v, _ := inputOf(m); v != "" {
+		t.Fatalf("a choice left %q in the input", v)
+	}
+	m, _ = typeList(t, m, "/effort ")
+	if it := cmdItem(t, m, "high"); it.Note != sessCurrentNote {
+		t.Fatalf("the effort chosen is not marked: %+v", it)
+	}
+	if it := cmdItem(t, m, "default"); it.Note != "" {
+		t.Fatalf("default is still marked: %+v", it)
+	}
+	m = clearInput(t, m)
+	m, _ = typeList(t, m, "/f")
+	if it := cmdItem(t, m, "/fast"); it.Note != sessDefaultModel {
+		t.Fatalf("/fast's row %+v", it)
+	}
+	m = clearInput(t, m)
+
+	m, _ = typeList(t, m, "/fast o")
+	if got := cmdItems(m); !slices.Equal(got, []string{"on", "off"}) {
+		t.Fatalf("/fast o lists %v", got)
+	}
+	m, _ = press(m, tea.KeyMsg{Type: tea.KeyTab}) // tab uses it too
+	if s := spec(m); s.Effort != "high" || s.Fast == nil || !*s.Fast {
+		t.Fatalf("after /fast on: %+v", s)
+	}
+	if r := ruleOf(t, m); !strings.HasSuffix(r, " · cursor · Grok · high · fast") {
+		t.Fatalf("after /fast on: the rule %q", r)
+	}
+
+	typed := func(m Model, line string) Model {
+		t.Helper()
+		m, _ = typeList(t, m, line)
+		if m.sessList.in.cmd.visible() {
+			m, _ = press(m, tea.KeyMsg{Type: tea.KeyEsc})
+		}
+		if h := sessHint(m); !strings.Contains(h, "sets it for new sessions") {
+			t.Fatalf("%q's hint line %q", line, h)
+		}
+		m, _ = press(m, enter())
+		return m
+	}
+	m = typed(m, "/fast OFF")
+	if s := spec(m); s.Fast == nil || *s.Fast {
+		t.Fatalf("after /fast OFF: %+v", s)
+	}
+	if r := ruleOf(t, m); !strings.HasSuffix(r, " · cursor · Grok · high · no fast") {
+		t.Fatalf("after /fast off: the rule %q", r)
+	}
+	m = typed(m, "/effort XHigh")
+	if s := spec(m); s.Effort != "xhigh" {
+		t.Fatalf("after /effort XHigh: %+v", s)
+	}
+
+	for _, tc := range []struct{ line, note string }{
+		{"/effort max", "no effort max: one of default, low, medium, high, xhigh"},
+		{"/effort ", "/effort needs a value: default, low, medium, high, xhigh"},
+		{"/fast maybe", "no fast maybe: one of default, on, off"},
+		{"/fast ", "/fast needs a value: default, on, off"},
+	} {
+		was := m.sessPick
+		m = typed(m, tc.line)
+		if h := sessHint(m); h != tc.note || m.sessList.noteKind != sessNoteErr {
+			t.Fatalf("%q: the hint %q (%v), want %q", tc.line, h, m.sessList.noteKind, tc.note)
+		}
+		if !reflect.DeepEqual(m.sessPick, was) {
+			t.Fatalf("%q changed the pick", tc.line)
+		}
+		m = clearInput(t, m)
+	}
+
+	// default clears each: typed, and chosen from the popup.
+	m = typed(m, "/effort default")
+	if s := spec(m); s.Effort != "" || s.Fast == nil || *s.Fast {
+		t.Fatalf("after /effort default: %+v", s)
+	}
+	m, _ = typeList(t, m, "/fast def")
+	m, _ = press(m, enter())
+	if s := spec(m); s.Effort != "" || s.Fast != nil {
+		t.Fatalf("after /fast default: %+v", s)
+	}
+	if r := ruleOf(t, m); r != before {
+		t.Fatalf("both cleared, the rule %q; want %q as before", r, before)
+	}
+	if h := sessHint(m); h != "new sessions use cursor · Grok" {
+		t.Fatalf("both cleared, the hint %q", h)
+	}
+}
+
+// TestTheRuleNamesEffortAndFast (plan 032 §3.11, C17): the rule over the
+// input appends ` · <effort>` when an effort is set, ` · fast` when fast mode
+// is on and ` · no fast` when off — nothing when neither is set, so the rule
+// is what it was — and the hint line's `new sessions use …` says the same.
+func TestTheRuleNamesEffortAndFast(t *testing.T) {
+	on, off := true, false
+	for _, tc := range []struct {
+		effort string
+		fast   *bool
+		tail   string
+	}{
+		{"", nil, ""},
+		{"high", nil, " · high"},
+		{"", &on, " · fast"},
+		{"", &off, " · no fast"},
+		{"xhigh", &on, " · xhigh · fast"},
+		{"low", &off, " · low · no fast"},
+	} {
+		m, _ := cmdList(t, 100, 30, nil)
+		base := ruleOf(t, m)
+		m.sessPick.effort, m.sessPick.fast = tc.effort, tc.fast
+		if r := ruleOf(t, m); r != base+tc.tail {
+			t.Fatalf("effort %q, fast %v: the rule %q, want %q", tc.effort, tc.fast, r, base+tc.tail)
+		}
+		if n := m.sessUseNote(); n != "new sessions use cursor · Grok"+tc.tail {
+			t.Fatalf("effort %q, fast %v: the note %q", tc.effort, tc.fast, n)
+		}
+	}
+}
+
+// TestEffortAndFastReachTheDispatch (plan 032 §3.11, A13): a session the
+// list starts with `/effort high` and `/fast on` set is spawned with
+// SpawnSpec.Effort "high" and Fast on — the spec's own copy, never the
+// pick's; the setting outlives a /provider choice, which resets only the
+// model, and the list's closing and reopening; and an unstarted session
+// opened from the list carries it too.
+func TestEffortAndFastReachTheDispatch(t *testing.T) {
+	m, fs := cmdList(t, 100, 30, nil)
+	m, _ = typeList(t, m, "/effort high")
+	m, _ = press(m, enter())
+	m, _ = typeList(t, m, "/fast on")
+	m, _ = press(m, enter())
+
+	hb := newHostBackend("new", homePath("projects/lumen"), &callLog{})
+	fs.spawn = func(SpawnSpec) (roster.Ref, error) { return hostRef("new"), nil }
+	fs.open = func(roster.Ref) (backend.Backend, error) { return hb, nil }
+	m, _ = typeList(t, m, "@lu")
+	m, _ = press(m, enter())
+	m, _ = typeList(t, m, "tidy the changelog")
+	m, cmd := press(m, enter())
+	msg := dispatched(t, mustCmd(t, cmd, "sessDispatch"))
+	if msg.out != dispatchAccepted {
+		t.Fatalf("the dispatch: %v, %v", msg.out, msg.err)
+	}
+	if len(fs.spawns) != 1 || fs.spawns[0].Effort != "high" || fs.spawns[0].Fast == nil || !*fs.spawns[0].Fast {
+		t.Fatalf("spawned %+v", fs.spawns)
+	}
+	if fs.spawns[0].Fast == m.sessPick.fast {
+		t.Fatal("the spec shares the pick's fast setting")
+	}
+	tm, _ := m.Update(msg)
+	m = tm.(Model)
+
+	// /provider resets the model, not the settings.
+	m, _ = typeList(t, m, "/provider grok")
+	m, _ = press(m, enter())
+	if s, _ := m.sessNewSpec("/x"); s.Provider.Name() != "grok" || s.Effort != "high" || s.Fast == nil || !*s.Fast {
+		t.Fatalf("after /provider grok: %+v", s)
+	}
+	if h := sessHint(m); h != "new sessions use grok · default · high · fast" {
+		t.Fatalf("after /provider grok: the hint %q", h)
+	}
+
+	// Across the list's closing and reopening, to the unstarted session.
+	m = clearInput(t, m)
+	m, _ = press(m, tea.KeyMsg{Type: tea.KeyEsc})
+	if m.sessList.open {
+		t.Fatal("esc on an empty input did not leave the list")
+	}
+	m = openList(t, m)
+	if r := ruleOf(t, m); !strings.HasSuffix(r, " · grok · default · high · fast") {
+		t.Fatalf("reopened: the rule %q", r)
+	}
+	m = listSnap(t, m, richSnapshot(os.Getenv("HOME"), m.hereKey()))
+	m, _ = typeList(t, m, "@lu")
+	m, _ = press(m, enter())
+	m, _ = press(m, enter())
+	if u := m.unstarted; u == nil || u.spec.Effort != "high" || u.spec.Fast == nil || !*u.spec.Fast {
+		t.Fatalf("the unstarted session: %+v", u)
+	}
+}
+
+// TestFrameGoldenSessionsEffortAndFast (plan 032 §3.17, C17): /effort revealed
+// by `/ef`, /fast by `/fa`, and the rule with both set, at 100×30 and 80×24.
+func TestFrameGoldenSessionsEffortAndFast(t *testing.T) {
+	for _, size := range []struct{ cols, rows int }{{100, 30}, {80, 24}} {
+		suffix := fmt.Sprintf("-%dx%d", size.cols, size.rows)
+		m, _ := cmdList(t, size.cols, size.rows, map[string]ModelCatalog{"cursor": cursorCatalog})
+
+		effort, _ := typeList(t, m, "/ef")
+		assertFrameGolden(t, "sessions-new-effort"+suffix, size.cols, size.rows, plainView(effort),
+			[]string{"commands", "/effort", sessEffortTitle, "❯ /ef", "tab/enter use it"},
+			[]string{"/provider", "/exit", "/fast"})
+
+		fast, _ := typeList(t, m, "/fa")
+		assertFrameGolden(t, "sessions-new-fast"+suffix, size.cols, size.rows, plainView(fast),
+			[]string{"commands", "/fast", sessFastTitle, "❯ /fa", "tab/enter use it"},
+			[]string{"/provider", "/exit", "/effort"})
+
+		set, _ := typeList(t, m, "/effort high")
+		set, _ = press(set, enter())
+		set, _ = typeList(t, set, "/fast on")
+		set, _ = press(set, enter())
+		assertFrameGolden(t, "sessions-new-settings"+suffix, size.cols, size.rows, plainView(set),
+			[]string{"new session → ~/projects/craze · cursor · Grok · high · fast ─", "new sessions use cursor · Grok · high · fast"},
+			nil)
+	}
+}

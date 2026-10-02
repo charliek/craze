@@ -195,9 +195,15 @@ var goldenManifest = map[string]goldenRuns{
 	"sessions-new-bound-80x24":               inprocOnly,
 	"sessions-new-browse-100x30":             inprocOnly,
 	"sessions-new-browse-80x24":              inprocOnly,
+	"sessions-new-effort-100x30":             inprocOnly,
+	"sessions-new-effort-80x24":              inprocOnly,
 	"sessions-new-empty-80x24":               inprocOnly,
+	"sessions-new-fast-100x30":               inprocOnly,
+	"sessions-new-fast-80x24":                inprocOnly,
 	"sessions-new-model-100x30":              inprocOnly,
 	"sessions-new-model-80x24":               inprocOnly,
+	"sessions-new-settings-100x30":           inprocOnly,
+	"sessions-new-settings-80x24":            inprocOnly,
 	"sessions-new-slash-100x30":              inprocOnly,
 	"sessions-new-slash-80x24":               inprocOnly,
 	"sessions-older-host-100x30":             inprocOnly,
@@ -496,7 +502,8 @@ func transportList(set map[frameTransport]bool) string {
 // ten session-list frames, the nine of the list's input (C14), the two of
 // the unstarted session (C15), the four of the input's `/` popup (C16) and
 // the four of the composer's `@` popup (C18), and plan 032's list over a
-// session with a card up (C3), in process only.
+// session with a card up (C3) and the six of the input's `/effort` and
+// `/fast` and its rule with both set (C17), in process only.
 func TestTheGoldenManifestIsEveryGolden(t *testing.T) {
 	files, err := filepath.Glob(filepath.Join("testdata", "*.golden"))
 	if err != nil {
@@ -524,8 +531,8 @@ func TestTheGoldenManifestIsEveryGolden(t *testing.T) {
 			t.Errorf("the manifest runs %s under %v: a golden runs under both transports, or in process alone", name, runs)
 		}
 	}
-	if both != 127 || inprocAlone != 37 {
-		t.Errorf("the manifest lists %d goldens under both transports and %d in process alone, want 127 and 37 (A8)", both, inprocAlone)
+	if both != 127 || inprocAlone != 43 {
+		t.Errorf("the manifest lists %d goldens under both transports and %d in process alone, want 127 and 43 (A8)", both, inprocAlone)
 	}
 }
 

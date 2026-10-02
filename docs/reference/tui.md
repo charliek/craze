@@ -835,8 +835,9 @@ Type a prompt below to start one.` It needs 40×10; smaller, it says so.
 Under the rows is an input, always focused, where a new session is started
 ([Starting a session from the list](#starting-a-session-from-the-list)): a
 prompt typed there and `Enter` starts one, `@` picks the directory it runs in,
-and `/provider` and `/model` choose what it runs. The rule above the input
-names where and as what the next one would start:
+`/provider` and `/model` choose what it runs, and `/effort` and `/fast` what it
+starts at. The rule above the input names where and as what the next one would
+start:
 
 ```text
 ─────────────────────────── new session → ~/projects/lumen · cursor · Composer 2.5 ─
@@ -954,13 +955,16 @@ The new session runs:
   `/model`](#provider-and-model), else those of the session you came from —
   its current model; when its host has not said which model it is on, the
   launch's own `--model`; else the provider's default.
+- at the effort and fast mode chosen with [`/effort` and
+  `/fast`](#effort-and-fast-mode), else the model's own.
 - with the **permission mode** of the session you came from (`--force` or
   `--no-force`, as its host reports it), the launch's `--plugin-dir`, and —
   when its provider is the launch's own — its `--agent-bin` (and
   `CRAZE_AGENT_BIN`); a session of any other provider runs the binary
   [`[agents]`](configuration.md#agent-binaries) or `PATH` gives it. The
   command line's own `--ask`, `--plan`, `--effort`, `--fast`/`--no-fast` and
-  `--provider` were for the session it started and are not applied, and its
+  `--provider` were for the session it started and are not applied (the
+  list's `/effort` and `/fast` set the last two for its own), and its
   `--model` only in the one case above.
 
 All of it is decided when `Enter` is pressed: moving the selection while the
@@ -1077,6 +1081,40 @@ A session started from the list is saved as the last provider started, as any
 launch is (see [Configuration](configuration.md)), so the next `craze` without
 `--provider` preselects its provider in the provider dialog. The list's own
 choice still lasts only until craze quits.
+
+### Effort and fast mode
+
+`/effort` and `/fast` set the effort and fast mode every session started from
+the list starts at, as `craze --effort` and `--fast`/`--no-fast` do for the
+session a launch starts. They are not in the popup a bare `/` opens: each is
+listed once what you type is the start of its name and of no other command —
+`/ef` lists `/effort` (`/e` is still `/exit`'s alone), `/f` lists `/fast`:
+
+```text
+───────────────────────────────────────────── commands ─
+❯ /effort  effort for new sessions  default
+```
+
+- **`/effort`** offers `default`, `low`, `medium`, `high` and `xhigh`.
+- **`/fast`** offers `default`, `on` and `off`.
+
+`default` clears the setting: the model's own. Choosing works as it does for
+`/provider` — `↑` `↓` choose, typing narrows, `Tab` or `Enter` uses the
+highlighted value, the one in use is marked `current` — and `/effort high` or
+`/fast off` typed in full does the same without the popup; a value not offered
+is refused on the hint line. A choice lasts as the provider and model do, until
+you change it or craze quits; choosing a provider does not reset it. The rule
+over the input appends it — `new session → ~/projects/lumen · cursor · Grok ·
+high · fast`, or `· no fast` with fast mode off — and says nothing while both
+are `default`.
+
+The values are not checked against the provider or model here: the new
+session's host applies them as it starts, before its first prompt, exactly as
+it applies [`--effort` and `--fast`](cli.md#flags) — the effort matched
+against the levels its model offers (an exact id, then an id or a name, case
+folded). One that matches nothing — `xhigh` where a model stops at `high`, or
+a model with no effort or no fast mode at all — is skipped, noted in the
+session's journal, and the session starts at the model's own.
 
 ## Modes
 

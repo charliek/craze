@@ -690,10 +690,10 @@ type Model struct {
 	sessions    Sessions
 	sessList    sessListState
 	sessRosters *sessRosterSet
-	// sessPick is what the list's /provider and /model chose for the
-	// sessions it starts (plan 030 §3.14, sessions_models.go): the TUI's, so
-	// it lasts across every opening of the list and every session shown,
-	// until changed or craze quits.
+	// sessPick is what the list's /provider, /model, /effort and /fast chose
+	// for the sessions it starts (plan 030 §3.14, plan 032 C17,
+	// sessions_models.go): the TUI's, so it lasts across every opening of the
+	// list and every session shown, until changed or craze quits.
 	sessPick sessPick
 	// bandOn says the session list has been opened in this TUI: from then on
 	// every session's frame carries the band — which session it is, and the
