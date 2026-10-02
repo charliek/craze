@@ -32,6 +32,26 @@ const exitPoll = time.Second
 // exit watch gives up and the reaper falls back to reapPolling.
 const zombieQueryErrors = 3
 
+// The ways the exit watch learns of an exit, as watchBranch names them.
+const (
+	branchEvent              = "event"                 // NOTE_EXIT, with the status
+	branchGoneAtRegistration = "gone at registration"  // ESRCH, then the zombie
+	branchGoneAtEvent        = "gone at the event"     // an EV_ERROR ESRCH, then the zombie
+	branchZombiePoll         = "zombie poll"           // the wait's own zombie query
+	branchQueriesFailed      = "zombie queries failed" // the wait gave up: the fallback
+)
+
+// watchBranch, a test seam, is told which way the exit watch went for pid
+// (the branch constants); nil in production.
+var watchBranch func(pid int, branch string)
+
+// tookBranch tells watchBranch, when set.
+func tookBranch(pid int, branch string) {
+	if watchBranch != nil {
+		watchBranch(pid, branch)
+	}
+}
+
 // watchExit is the reaper's observation of the agent's exit on macOS, which
 // has no waitid(WNOWAIT) to call: a kqueue with an EVFILT_PROC filter for
 // NOTE_EXIT|NOTE_EXITSTATUS on pid, registered here, right after the start,
@@ -66,6 +86,7 @@ func watchExit(pid int) (func() (syscall.WaitStatus, bool, error), error) {
 	if err != nil {
 		_ = unix.Close(kq)
 		if errors.Is(err, unix.ESRCH) {
+			tookBranch(pid, branchGoneAtRegistration)
 			return func() (syscall.WaitStatus, bool, error) { return 0, false, awaitZombie(pid) }, nil
 		}
 		return nil, fmt.Errorf("kevent EVFILT_PROC: %w", err)
@@ -88,9 +109,11 @@ func watchExit(pid int) (func() (syscall.WaitStatus, bool, error), error) {
 				switch {
 				case err != nil:
 					if fails++; fails >= zombieQueryErrors {
+						tookBranch(pid, branchQueriesFailed)
 						return 0, false, err
 					}
 				case zombie:
+					tookBranch(pid, branchZombiePoll)
 					return 0, false, nil
 				default:
 					fails = 0
@@ -103,6 +126,7 @@ func watchExit(pid int) (func() (syscall.WaitStatus, bool, error), error) {
 			ev := events[0]
 			if ev.Flags&unix.EV_ERROR != 0 {
 				if syscall.Errno(ev.Data) == unix.ESRCH {
+					tookBranch(pid, branchGoneAtEvent)
 					return 0, false, awaitZombie(pid)
 				}
 				return 0, false, fmt.Errorf("kevent EVFILT_PROC: %w", syscall.Errno(ev.Data))
@@ -110,6 +134,7 @@ func watchExit(pid int) (func() (syscall.WaitStatus, bool, error), error) {
 			if ev.Fflags&unix.NOTE_EXIT == 0 {
 				continue
 			}
+			tookBranch(pid, branchEvent)
 			return syscall.WaitStatus(uint32(ev.Data) & 0xffff), true, nil
 		}
 	}, nil

@@ -950,6 +950,11 @@ func (c *Client) Close() error {
 		}
 		if c.child != nil {
 			c.child.Shutdown()
+			// How the agent ended, when it ended on its own, is what the
+			// calls still pending fail with: delivered here, before the
+			// connection's own close could answer them ErrClosed first
+			// (Child.endErr; the first answer stands).
+			c.conn.failAll(c.child.endErr())
 		}
 		_ = c.conn.Close()
 		<-c.conn.Done()

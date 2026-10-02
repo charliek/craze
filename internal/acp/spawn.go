@@ -159,15 +159,25 @@ func LookupBinary(explicit string, candidates []string) (string, error) {
 // in the second; whatever reads exitErr waits for statusCh. In the fallback
 // (reapPolling) the exit, its status and the reap are one wait4.
 type Child struct {
-	cmd  *exec.Cmd
+	cmd *exec.Cmd
+	// pid is the agent's, kept here: the fallback releases cmd.Process
+	// (reapPolling), which sets its Pid to -1. pgid is the same number, the
+	// agent's group's id.
+	pid  int
 	pgid int
 	// exitedCh is closed once the reaper has observed the agent's exit,
 	// without reaping it.
 	exitedCh chan struct{}
 	// statusCh is closed once exitErr — how the agent ended (exitErrorOf:
-	// nil for an exit 0) — is set: at the exit, or at the reap (above).
+	// nil for an exit 0) — and endedByShutdown are set: at the exit, or at
+	// the reap (above).
 	statusCh chan struct{}
 	exitErr  error
+	// endedByShutdown is whether a shutdown had been asked for when the
+	// reaper observed the exit — latched then, so a Shutdown that comes
+	// later, while the reaper cleans up after an agent that exited on its
+	// own, does not make that exit craze's (endErr).
+	endedByShutdown bool
 	// reapedCh is closed once the reaper has reaped the agent — after the
 	// last signal it will ever send, and after statusCh; waitErr is
 	// cmd.Wait's answer, set before (in the fallback, which reaps with wait4
@@ -188,6 +198,7 @@ type Child struct {
 func newChild(cmd *exec.Cmd) *Child {
 	ch := &Child{
 		cmd:        cmd,
+		pid:        cmd.Process.Pid,
 		pgid:       cmd.Process.Pid,
 		exitedCh:   make(chan struct{}),
 		statusCh:   make(chan struct{}),
@@ -197,7 +208,7 @@ func newChild(cmd *exec.Cmd) *Child {
 	}
 	// Right after the start: on macOS this registers the exit watch, and a
 	// child that has already exited by then is noticed as one (reaper_darwin.go).
-	observe, err := watch(ch.pgid)
+	observe, err := watch(ch.pid)
 	if err != nil {
 		go ch.reapPolling()
 	} else {
@@ -207,11 +218,12 @@ func newChild(cmd *exec.Cmd) *Child {
 }
 
 // endErr is what the calls still pending fail with once the agent has ended
-// and its status is known: ErrClosed when craze asked for the end (Shutdown)
-// or the agent exited 0 — the connection's own word for both — and otherwise
-// "acp: agent exited: …" with how it ended.
+// and its status is known (statusCh): ErrClosed when craze had asked for the
+// end (Shutdown) by the time the exit was observed, or the agent exited 0 —
+// the connection's own word for both — and otherwise "acp: agent exited: …"
+// with how it ended.
 func (ch *Child) endErr() error {
-	if ch.exitErr == nil || isClosed(ch.shutdownCh) {
+	if ch.exitErr == nil || ch.endedByShutdown {
 		return ErrClosed
 	}
 	return fmt.Errorf("acp: agent exited: %w", ch.exitErr)
@@ -246,11 +258,12 @@ func (ch *Child) setStatus(err error) {
 	close(ch.statusCh)
 }
 
+// PID is the agent's pid, 0 for no child.
 func (ch *Child) PID() int {
-	if ch == nil || ch.cmd == nil || ch.cmd.Process == nil {
+	if ch == nil {
 		return 0
 	}
-	return ch.cmd.Process.Pid
+	return ch.pid
 }
 
 // Wait waits for the agent to have been reaped and its stderr copied to the

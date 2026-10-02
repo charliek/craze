@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -24,11 +25,35 @@ import (
 // helperEnv names the helper this test binary is when it is run as one.
 const helperEnv = "CRAZE_ACP_TEST_HELPER"
 
+// helperGateEnv names a file the helper waits for, when set, before it does
+// what it is for.
+const helperGateEnv = "CRAZE_ACP_TEST_GATE"
+
 func init() {
 	if os.Getenv(helperEnv) == "exit-256" {
+		awaitGate(os.Getenv(helperGateEnv))
 		// exit(256): a status only its low byte of reaches a wait — and
 		// macOS's zombie record saturates (reaper_darwin.go).
 		os.Exit(256)
+	}
+}
+
+// awaitGate waits, up to 30 s, for the file gate to exist; "" waits for
+// nothing.
+func awaitGate(gate string) {
+	for deadline := time.Now().Add(30 * time.Second); gate != "" && time.Now().Before(deadline); {
+		if _, err := os.Stat(gate); err == nil {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// openGate creates the file gate, which a gated agent waits for.
+func openGate(t *testing.T, gate string) {
+	t.Helper()
+	if err := os.WriteFile(gate, nil, 0o600); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -649,14 +674,60 @@ func checkFallback(t *testing.T, r *lifeRecorder, ch *Child, want ...syscall.Sig
 	}
 }
 
+// finalWaits records the fallback's cmd.Wait calls (finalWait): the
+// Process's pid as each was made, and its answer.
+type finalWaits struct {
+	mu    sync.Mutex
+	calls map[*exec.Cmd][2]any // pid at the call, the error
+}
+
+func recordFinalWaits(t *testing.T) *finalWaits {
+	fw := &finalWaits{calls: map[*exec.Cmd][2]any{}}
+	real := finalWait
+	finalWait = func(cmd *exec.Cmd) error {
+		pid := cmd.Process.Pid
+		err := real(cmd)
+		fw.mu.Lock()
+		fw.calls[cmd] = [2]any{pid, err}
+		fw.mu.Unlock()
+		return err
+	}
+	// Registered before any Spawn, so it runs after every Close.
+	t.Cleanup(func() { finalWait = real })
+	return fw
+}
+
+// checkNoWaitAfterTheReap checks that the fallback's cmd.Wait for ch, after
+// its own reap, waited on no pid: the Process released first (its Pid -1),
+// so its wait answered EINVAL without a system call. ch keeps the agent's
+// pid all the same.
+func (fw *finalWaits) checkNoWaitAfterTheReap(t *testing.T, ch *Child) {
+	t.Helper()
+	fw.mu.Lock()
+	call, ok := fw.calls[ch.cmd]
+	fw.mu.Unlock()
+	if !ok {
+		t.Fatal("the fallback never called cmd.Wait for its pipes")
+	}
+	if pid, err := call[0].(int), call[1]; pid != -1 || !errors.Is(err.(error), syscall.EINVAL) {
+		t.Fatalf("cmd.Wait after the fallback's reap: the Process's pid %d, its answer %v; want it released (-1) and EINVAL, no wait on a pid", pid, err)
+	}
+	if ch.PID() <= 0 || ch.PID() != ch.pgid {
+		t.Fatalf("PID() = %d after the release, want the agent's %d", ch.PID(), ch.pgid)
+	}
+}
+
 // TestTheFallbackOwnsTheReapAndItsSignals (X71): where the exit cannot be
 // observed without a reap — the observation refused (ENOSYS, as under a
 // seccomp filter) — the reaper polls wait4 itself and signals only the agent,
 // only between its polls, while it knows the agent is unreaped: no group
-// signal, and no signal after the reap. Its status is that wait4's.
+// signal, and no signal after the reap. Its status is that wait4's. No wait
+// on the pid follows that reap (X73): cmd.Wait, called for the pipes, finds
+// the Process released.
 func TestTheFallbackOwnsTheReapAndItsSignals(t *testing.T) {
 	stubObserve(t, 0, syscall.ENOSYS, nil)
 	r := recordLife(t)
+	fw := recordFinalWaits(t)
 	t.Run("a shutdown at its entry", func(t *testing.T) {
 		entered, release := stopAtFallback(t)
 		var stderr syncBuffer
@@ -679,6 +750,7 @@ func TestTheFallbackOwnsTheReapAndItsSignals(t *testing.T) {
 			t.Fatalf("exit %v, want signal: terminated", c.child.exitErr)
 		}
 		checkFallback(t, r, c.child, syscall.SIGTERM)
+		fw.checkNoWaitAfterTheReap(t, c.child)
 		if !gone(c.PID()) {
 			t.Fatal("the agent was left a zombie")
 		}
@@ -693,6 +765,7 @@ func TestTheFallbackOwnsTheReapAndItsSignals(t *testing.T) {
 			t.Fatalf("exit %v, want signal: killed", c.child.exitErr)
 		}
 		checkFallback(t, r, c.child, syscall.SIGTERM, syscall.SIGKILL)
+		fw.checkNoWaitAfterTheReap(t, c.child)
 	})
 	t.Run("its own exit", func(t *testing.T) {
 		c := spawnShell(t, "exit 3", nil)
@@ -701,6 +774,7 @@ func TestTheFallbackOwnsTheReapAndItsSignals(t *testing.T) {
 			t.Fatalf("Close = %v, want ErrAgentExited with exit status 3", err)
 		}
 		checkFallback(t, r, c.child)
+		fw.checkNoWaitAfterTheReap(t, c.child)
 	})
 }
 
@@ -791,37 +865,87 @@ func TestAnExitWithoutAStatusTakesTheReaps(t *testing.T) {
 	}
 }
 
+// TestALaterShutdownLeavesASelfExitItsOwn (X73): whether craze asked for
+// the end is latched when the exit is observed. An agent that exits 7 on its
+// own, its status known only at the reap (here held a grace by a tool that
+// ignores SIGTERM), and then a Close — its Shutdown arriving while the reaper
+// still cleans up — keeps exit 7: the call pending at the exit fails with
+// it, and Close reports it, rather than ErrClosed.
+func TestALaterShutdownLeavesASelfExitItsOwn(t *testing.T) {
+	withoutStatus(t)
+	c := spawnShell(t, `trap '' TERM; sleep 60 & read line; exit 7`, nil)
+	failed := make(chan error, 1)
+	go func() {
+		_, err := c.Initialize(t.Context())
+		failed <- err
+	}()
+	waitClosed(t, c.child.exitedCh, 10*time.Second, "the agent's exit")
+	closed := make(chan error, 1)
+	go func() { closed <- c.Close() }()
+	waitClosed(t, c.child.shutdownCh, 10*time.Second, "Close's Shutdown")
+	if isClosed(c.child.statusCh) {
+		t.Fatal("the status came before the Shutdown: the schedule this test is for did not happen")
+	}
+	err := <-failed
+	var ee *ExitError
+	if !errors.As(err, &ee) || ee.ExitCode() != 7 {
+		t.Fatalf("the pending call failed with %v, want the agent's own exit status 7", err)
+	}
+	select {
+	case err := <-closed:
+		if !errors.Is(err, ErrAgentExited) || !strings.HasSuffix(err.Error(), ": exit status 7") {
+			t.Fatalf("Close = %v, want ErrAgentExited with exit status 7", err)
+		}
+	case <-time.After(2*shutdownGrace + 10*time.Second):
+		t.Fatal("Close did not return")
+	}
+}
+
 // TestWatchExitLeavesTheProcessUnreaped: the platform's observation reports a
 // process's exit and its status and leaves it a zombie, so it can be
-// observed again — on macOS then through the zombie, with no status — and
-// the reap that follows agrees.
+// observed again, and the reap that follows agrees. The process waits for a
+// gate the test opens once the first watch is set up, so that watch sees the
+// exit happen (macOS: its NOTE_EXIT, not a registration refused). The second
+// watch is set up on the zombie: Linux's waitid reports the status again;
+// macOS's registration is refused, so the exit comes with no status, and the
+// reap's stands.
 func TestWatchExitLeavesTheProcessUnreaped(t *testing.T) {
-	for _, tc := range []struct{ script, want string }{
+	for _, tc := range []struct{ last, want string }{
 		{"exit 9", "exit status 9"},
 		{"kill -KILL $$", "signal: killed"},
 	} {
 		t.Run(tc.want, func(t *testing.T) {
-			cmd := exec.Command("/bin/sh", "-c", tc.script)
+			gate := filepath.Join(t.TempDir(), "go")
+			cmd := exec.Command("/bin/sh", "-c", "while [ ! -e "+gate+" ]; do sleep 0.01; done; "+tc.last)
 			if err := cmd.Start(); err != nil {
 				t.Fatal(err)
 			}
 			pid := cmd.Process.Pid
-			observe := func() (syscall.WaitStatus, bool, error) {
-				w, err := watchExit(pid)
-				if err != nil {
-					return 0, false, err
+			t.Cleanup(func() {
+				if cmd.ProcessState == nil {
+					_ = cmd.Process.Kill()
+					_ = cmd.Wait()
 				}
-				return w()
+			})
+			w, err := watchExit(pid)
+			if err != nil {
+				t.Fatal(err)
 			}
-			first, known, err := observe()
+			openGate(t, gate)
+			first, known, err := w()
 			if err != nil || !known {
-				_ = cmd.Wait()
 				t.Fatalf("the first observation: %v, a status %v", err, known)
 			}
-			again, againKnown, err := observe()
+			w, err = watchExit(pid)
 			if err != nil {
-				_ = cmd.Wait()
+				t.Fatalf("the second watch: %v (was the first observation a reap?)", err)
+			}
+			again, againKnown, err := w()
+			if err != nil {
 				t.Fatalf("the second observation: %v (was the first a reap?)", err)
+			}
+			if wantKnown := runtime.GOOS != "darwin"; againKnown != wantKnown {
+				t.Fatalf("the observation of a zombie came with a status %v, want %v", againKnown, wantKnown)
 			}
 			_ = cmd.Wait()
 			reaped := cmd.ProcessState.Sys().(syscall.WaitStatus)

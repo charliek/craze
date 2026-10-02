@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"os"
+	"os/exec"
 	"strconv"
 	"syscall"
 	"time"
@@ -86,6 +87,11 @@ var wait4 = func(pid int, ws *syscall.WaitStatus, options int) (int, error) {
 // before its first wait4; nil in production.
 var fallbackEntered func(pid int)
 
+// finalWait is the fallback's cmd.Wait, after its own reap and the
+// Process's release: a variable so a test can see that wait wait on no pid;
+// nothing else replaces it.
+var finalWait = func(cmd *exec.Cmd) error { return cmd.Wait() }
+
 // reap is the reaper: the four steps above. observe is watchExit's wait.
 func (ch *Child) reap(observe func() (syscall.WaitStatus, bool, error)) {
 	observed := make(chan observation, 1)
@@ -103,6 +109,7 @@ func (ch *Child) reap(observe func() (syscall.WaitStatus, bool, error)) {
 		ch.reapPolling()
 		return
 	}
+	ch.endedByShutdown = isClosed(ch.shutdownCh)
 	if obs.known {
 		ch.setStatus(exitErrorOf(obs.status))
 	}
@@ -213,8 +220,9 @@ const reapPoll = 50 * time.Millisecond
 // is never signalled here — nothing holds its id once the poll that finds
 // the exit has reaped it — so what the agent left running in it is not
 // cleaned up, the cost of this fallback. Once reaped, the stderr copy is
-// drained and cmd.Wait called for what it still owns, the pipes and their
-// goroutines; its ECHILD — the reap was this one's — is expected.
+// drained, cmd.Process released — so no wait on the pid follows the reap —
+// and cmd.Wait called for what it still owns, the pipes and their
+// goroutines; its error, the released Process's, is expected.
 //
 // A wait4 that fails (an environment that refuses it as well, under a
 // seccomp filter) leaves the reap to cmd.Wait, with no signal at all: such an
@@ -223,7 +231,7 @@ const reapPoll = 50 * time.Millisecond
 // still be there, as it always could before this reaper (accepted).
 func (ch *Child) reapPolling() {
 	if fallbackEntered != nil {
-		fallbackEntered(ch.pgid)
+		fallbackEntered(ch.pid)
 	}
 	var (
 		termed  time.Time
@@ -231,15 +239,17 @@ func (ch *Child) reapPolling() {
 		request = ch.shutdownCh
 	)
 	for {
-		st, reaped, err := pollReap(ch.pgid)
+		st, reaped, err := pollReap(ch.pid)
 		if err != nil {
 			ch.waitErr = ch.cmd.Wait()
+			ch.endedByShutdown = isClosed(ch.shutdownCh)
 			ch.setStatus(reapedExit(ch.cmd.ProcessState, ch.waitErr))
 			close(ch.exitedCh)
 			close(ch.reapedCh)
 			return
 		}
 		if reaped {
+			ch.endedByShutdown = isClosed(ch.shutdownCh)
 			ch.setStatus(exitErrorOf(st))
 			close(ch.exitedCh)
 			break
@@ -248,10 +258,10 @@ func (ch *Child) reapPolling() {
 		// the agent, or its zombie.
 		switch {
 		case termed.IsZero() && isClosed(ch.shutdownCh):
-			_ = sendSignal(ch.pgid, syscall.SIGTERM)
+			_ = sendSignal(ch.pid, syscall.SIGTERM)
 			termed, request = time.Now(), nil
 		case !termed.IsZero() && !killed && time.Since(termed) >= shutdownGrace:
-			_ = sendSignal(ch.pgid, syscall.SIGKILL)
+			_ = sendSignal(ch.pid, syscall.SIGKILL)
 			killed = true
 		}
 		poll := time.NewTimer(reapPoll)
@@ -262,11 +272,14 @@ func (ch *Child) reapPolling() {
 		poll.Stop()
 	}
 	ch.drainStderr()
-	if err := ch.cmd.Wait(); err != nil && !errors.Is(err, syscall.ECHILD) {
-		ch.waitErr = err
-	} else {
-		ch.waitErr = ch.exitErr
-	}
+	// The agent is reaped: no wait on its pid may follow, for the pid may be
+	// another child's of this process by now, and a second wait would block
+	// on that child or take its status from its own reaper. Released first,
+	// cmd.Process answers cmd.Wait's process wait at once (EINVAL), with no
+	// system call, and cmd.Wait only awaits its copies and closes the pipes.
+	_ = ch.cmd.Process.Release()
+	_ = finalWait(ch.cmd)
+	ch.waitErr = ch.exitErr
 	close(ch.reapedCh)
 }
 
