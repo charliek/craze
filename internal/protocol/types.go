@@ -678,8 +678,10 @@ type CreateParams struct {
 }
 
 // CreateResult is a create that started its session (plan 032 §3.10): the
-// session as the hub's roster lists it, read fresh from its host — so its
-// approximate is false — and what became of the first prompt. A start that
+// session as the hub's roster lists it, read fresh from its host —
+// approximate as any roster row's is, and true also when that read fails
+// (X49: the row is then the registry's, row absent) — and what became of the
+// first prompt. A start that
 // failed is no result but a refusal: not_accepting, reason start_failed, its
 // data.cause the host's first error line.
 type CreateResult struct {
