@@ -7,36 +7,86 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"syscall"
 	"time"
 )
 
+// shutdownGrace is how long the agent — and then, once it has exited, what is
+// left in its process group — has between SIGTERM and SIGKILL, and how long
+// the reaper waits after a group SIGKILL for the group to empty (reaper.go).
 const shutdownGrace = 2 * time.Second
 
-// groupPoll is how often Shutdown looks for the agent's process group to have
-// emptied after its SIGTERM.
+// groupPoll is how often the reaper looks for the agent's process group to
+// have no live member left after a signal.
 const groupPoll = 20 * time.Millisecond
 
 // ErrAgentExited is Client.Close's answer when the non-blocking probe of
-// child.waitCh found it already closed: the agent's exit had been reaped
-// before craze's first Close on it sampled it. It does not mean Close
+// child.exitedCh found it already closed: the reaper had observed the agent's
+// exit before craze's first Close on it sampled it. It does not mean Close
 // failed — match it with errors.Is, never a nil check, because a
 // craze-initiated close still returns nil. There is a real window between
-// the process exiting, cmd.Wait returning and the reaper closing waitCh, so
-// an agent that crashes in the same microseconds as craze's own close is
-// reported as craze-initiated (§9, accepted).
+// the process exiting and the reaper closing exitedCh, so an agent that
+// crashes in the same microseconds as craze's own close is reported as
+// craze-initiated (§9, accepted).
 var ErrAgentExited = errors.New("acp: agent exited")
 
-// agentExitedErr wraps ErrAgentExited with what the reaper recorded: the
-// wait error when the agent exited non-zero or crashed, and "exit 0" when it
-// exited clean — the one case Conn.Err() cannot otherwise tell apart from
-// craze's own close (both read ErrClosed).
-func agentExitedErr(waitErr error) error {
-	if waitErr != nil {
-		return fmt.Errorf("%w: %v", ErrAgentExited, waitErr)
+// agentExitedErr wraps ErrAgentExited with how the reaper recorded the agent
+// end (Child.exitErr): an *ExitError when it exited non-zero or on a signal,
+// and "exit 0" when it exited clean — the one case Conn.Err() cannot
+// otherwise tell apart from craze's own close (both read ErrClosed).
+func agentExitedErr(exitErr error) error {
+	if exitErr != nil {
+		return fmt.Errorf("%w: %v", ErrAgentExited, exitErr)
 	}
 	return fmt.Errorf("%w: exit 0", ErrAgentExited)
+}
+
+// ExitError is how the agent ended — non-zero, or on a signal — as the reaper
+// observed it before reaping it (plan 032 §3.2a): the status the kernel
+// reported for the exit (waitid's siginfo on Linux, the NOTE_EXIT kevent's
+// data on macOS). It is what a call still pending when the agent exits fails
+// with, wrapped as "acp: agent exited: …", and what Close's ErrAgentExited
+// carries. Its message is os.ProcessState's ("exit status 3", "signal:
+// killed"), the words of the *exec.ExitError the reap that follows returns
+// for the same exit.
+type ExitError struct {
+	Status syscall.WaitStatus
+}
+
+func (e *ExitError) Error() string {
+	var s string
+	switch st := e.Status; {
+	case st.Exited():
+		s = "exit status " + strconv.Itoa(st.ExitStatus())
+	case st.Signaled():
+		s = "signal: " + st.Signal().String()
+	default:
+		s = "wait status " + strconv.FormatUint(uint64(st), 10)
+	}
+	if e.Status.CoreDump() {
+		s += " (core dumped)"
+	}
+	return s
+}
+
+// ExitCode is the agent's exit code, or -1 when a signal ended it — what
+// *exec.ExitError's ExitCode answers for the same exit.
+func (e *ExitError) ExitCode() int {
+	if e.Status.Exited() {
+		return e.Status.ExitStatus()
+	}
+	return -1
+}
+
+// exitErrorOf is how an observed wait status reads as an error: nil for an
+// exit 0, an *ExitError for anything else.
+func exitErrorOf(st syscall.WaitStatus) error {
+	if st.Exited() && st.ExitStatus() == 0 {
+		return nil
+	}
+	return &ExitError{Status: st}
 }
 
 type SpawnOptions struct {
@@ -94,84 +144,156 @@ func LookupBinary(explicit string, candidates []string) (string, error) {
 	return "", fmt.Errorf("agent binary not found: %w", last)
 }
 
+// Child is the agent process Spawn started, the leader of a process group of
+// its own (Setpgid: the group's id is the agent's pid), and its reaper
+// (reaper.go), the one goroutine that waits for it and signals it. It goes
+// through three states: running; exited — the exit observed but the agent
+// not reaped, so the zombie keeps its pid, and with it the group's id, from
+// being reused (exitedCh); and reaped (reapedCh).
+//
+// How the agent ended (exitErr, statusCh) is known at the exit when the
+// observation carries the status — Linux's always does, macOS's NOTE_EXIT
+// does — and only at the reap when it does not: a macOS agent found already
+// a zombie, whose kernel record saturates the status (reaper_darwin.go). So
+// statusCh closes with exitedCh in the first case, and after it, at the reap,
+// in the second; whatever reads exitErr waits for statusCh. In the fallback
+// (reapPolling) the exit, its status and the reap are one wait4.
 type Child struct {
-	cmd          *exec.Cmd
-	pgid         int
-	waitCh       chan struct{}
-	waitErr      error
-	stderrDone   chan struct{}
+	cmd *exec.Cmd
+	// pid is the agent's, kept here: the fallback releases cmd.Process
+	// (reapPolling), which sets its Pid to -1. pgid is the same number, the
+	// agent's group's id.
+	pid  int
+	pgid int
+	// exitedCh is closed once the reaper has observed the agent's exit,
+	// without reaping it.
+	exitedCh chan struct{}
+	// statusCh is closed once exitErr — how the agent ended (exitErrorOf:
+	// nil for an exit 0) — and endedByShutdown are set: at the exit, or at
+	// the reap (above).
+	statusCh chan struct{}
+	exitErr  error
+	// endedByShutdown is whether a shutdown had been asked for when the
+	// reaper observed the exit — latched then, so a Shutdown that comes
+	// later, while the reaper cleans up after an agent that exited on its
+	// own, does not make that exit craze's (endErr).
+	endedByShutdown bool
+	// reapedCh is closed once the reaper has reaped the agent — after the
+	// last signal it will ever send, and after statusCh; waitErr is
+	// cmd.Wait's answer, set before (in the fallback, which reaps with wait4
+	// first, the status that reap took).
+	reapedCh chan struct{}
+	waitErr  error
+	// shutdownCh is closed by the first Shutdown: the reaper's shutdown
+	// request.
+	shutdownCh   chan struct{}
 	shutdownOnce sync.Once
+	stderrDone   chan struct{}
 }
 
+// newChild starts watching cmd, just started, and its reaper. Whether the
+// exit can be observed without a reap is settled here, before the reaper
+// runs and so before any signal: if it cannot, the reaper is the fallback
+// from the start (reapPolling), which never signals the group.
+func newChild(cmd *exec.Cmd) *Child {
+	ch := &Child{
+		cmd:        cmd,
+		pid:        cmd.Process.Pid,
+		pgid:       cmd.Process.Pid,
+		exitedCh:   make(chan struct{}),
+		statusCh:   make(chan struct{}),
+		reapedCh:   make(chan struct{}),
+		shutdownCh: make(chan struct{}),
+		stderrDone: make(chan struct{}),
+	}
+	// Right after the start: on macOS this registers the exit watch, and a
+	// child that has already exited by then is noticed as one (reaper_darwin.go).
+	observe, err := watch(ch.pid)
+	if err != nil {
+		go ch.reapPolling()
+	} else {
+		go ch.reap(observe)
+	}
+	return ch
+}
+
+// endErr is what the calls still pending fail with once the agent has ended
+// and its status is known (statusCh): ErrClosed when craze had asked for the
+// end (Shutdown) by the time the exit was observed, or the agent exited 0 —
+// the connection's own word for both — and otherwise "acp: agent exited: …"
+// with how it ended.
+func (ch *Child) endErr() error {
+	if ch.exitErr == nil || ch.endedByShutdown {
+		return ErrClosed
+	}
+	return fmt.Errorf("acp: agent exited: %w", ch.exitErr)
+}
+
+// exitAfterEOF bounds endedWith's wait for the agent's exit.
+const exitAfterEOF = time.Second
+
+// endedWith is the connection's ended (Conn): what the calls still pending
+// fail with when the agent's stdout ends. An agent's stdout ends as it exits
+// — a moment before the reaper observes the exit — or, when a tool held it,
+// as the reaper's cleanup ends the tool, which comes before the reap that
+// gives the status when the observation had none (Child). So the end waits
+// up to exitAfterEOF for the exit and then for its status, and the calls
+// fail with endErr; an agent that closed its stdout and runs on is the
+// connection's own end, def.
+func (ch *Child) endedWith(def error) error {
+	exit := time.NewTimer(exitAfterEOF)
+	defer exit.Stop()
+	select {
+	case <-ch.exitedCh:
+	case <-exit.C:
+		return def
+	}
+	<-ch.statusCh
+	return ch.endErr()
+}
+
+// setStatus records how the agent ended and closes statusCh.
+func (ch *Child) setStatus(err error) {
+	ch.exitErr = err
+	close(ch.statusCh)
+}
+
+// PID is the agent's pid, 0 for no child.
 func (ch *Child) PID() int {
-	if ch == nil || ch.cmd == nil || ch.cmd.Process == nil {
+	if ch == nil {
 		return 0
 	}
-	return ch.cmd.Process.Pid
+	return ch.pid
 }
 
+// Wait waits for the agent to have been reaped and its stderr copied to the
+// end.
 func (ch *Child) Wait() {
 	if ch == nil {
 		return
 	}
-	<-ch.waitCh
+	<-ch.reapedCh
 	if ch.stderrDone != nil {
 		<-ch.stderrDone
 	}
 }
 
-// Shutdown signals the agent's whole process group, once per child. The first
-// call signals even when the agent itself has already exited: what it started
-// — a tool's subprocess — is still in its group, and that is exactly what
-// would otherwise be left running. A later call signals nothing, because by
-// then the group may be gone and its id free for something else.
-//
-// The grace is the group's too, not only the agent's: a member that ignores
-// SIGTERM outlives an agent that exits on it, so Shutdown waits for the group
-// to empty and sends SIGKILL to whatever is still in it when the grace runs
-// out.
+// Shutdown asks the reaper to end the agent and waits until it has been
+// reaped. It sends no signal itself: the reaper sends every one (reaper.go),
+// so none can follow the reap. An agent still running gets SIGTERM, and
+// SIGKILL if it outlives the grace; then, as after an agent's own exit, what
+// is left alive in its process group — a tool's subprocess — gets SIGTERM and,
+// past a second grace, SIGKILL, and the group a last SIGKILL. (In the
+// fallback, reapPolling, the agent alone is signalled.) An agent that had
+// already exited and been reaped is not signalled again: its group was
+// cleaned up at its exit, and its id may by now be someone else's. Every
+// call, the first and any later one, returns once the agent has been reaped.
 func (ch *Child) Shutdown() {
 	if ch == nil || ch.cmd == nil || ch.cmd.Process == nil {
 		return
 	}
-	ch.shutdownOnce.Do(func() {
-		_ = signalGroup(ch.pgid, ch.cmd.Process, syscall.SIGTERM)
-		deadline := time.After(shutdownGrace)
-		for !ch.groupGone() {
-			select {
-			case <-deadline:
-				_ = signalGroup(ch.pgid, ch.cmd.Process, syscall.SIGKILL)
-				<-ch.waitCh
-				return
-			case <-time.After(groupPoll):
-			}
-		}
-		<-ch.waitCh
-	})
-}
-
-// groupGone reports whether nothing is left to signal: the agent's process
-// group is empty, or — with no group to ask about — the agent has been reaped.
-func (ch *Child) groupGone() bool {
-	if ch.pgid <= 0 {
-		select {
-		case <-ch.waitCh:
-			return true
-		default:
-			return false
-		}
-	}
-	return errors.Is(syscall.Kill(-ch.pgid, 0), syscall.ESRCH)
-}
-
-func signalGroup(pgid int, proc *os.Process, sig syscall.Signal) error {
-	if pgid > 0 {
-		return syscall.Kill(-pgid, sig)
-	}
-	if proc != nil {
-		return proc.Signal(sig)
-	}
-	return nil
+	ch.shutdownOnce.Do(func() { close(ch.shutdownCh) })
+	<-ch.reapedCh
 }
 
 func Spawn(opts SpawnOptions) (*Client, error) {
@@ -204,16 +326,7 @@ func Spawn(opts SpawnOptions) (*Client, error) {
 		return nil, fmt.Errorf("start agent: %w", err)
 	}
 
-	child := &Child{
-		cmd:        cmd,
-		pgid:       cmd.Process.Pid,
-		waitCh:     make(chan struct{}),
-		stderrDone: make(chan struct{}),
-	}
-	go func() {
-		child.waitErr = cmd.Wait()
-		close(child.waitCh)
-	}()
+	child := newChild(cmd)
 
 	stderrDst := opts.Stderr
 	if stderrDst == nil {
@@ -225,20 +338,25 @@ func Spawn(opts SpawnOptions) (*Client, error) {
 	}()
 
 	conn := NewConn(stdout, stdin)
+	conn.ended = child.endedWith
 	client := newClient(conn, child)
 	if opts.Dialect != "" {
 		client.dialect = opts.Dialect
 	}
 	conn.Start()
+	// The calls still pending fail at the agent's exit, with how it ended,
+	// not at its reap: that waits for its process group to be cleaned up,
+	// which a tool that ignores SIGTERM stretches by a grace or two. Where
+	// the status is known only at the reap (Child), they fail then, with it.
+	// The agent's stdin is closed then too: nothing more is for it, and a
+	// write still blocked there — a pipe it stopped reading, held open by a
+	// tool it left behind — fails now, its call answered with that status,
+	// rather than at the tool's end or the client's Close. Its stdout stays
+	// open, so what it wrote before it went is still read (X72).
 	go func() {
-		<-child.waitCh
-		err := child.waitErr
-		if err == nil {
-			err = ErrClosed
-		} else {
-			err = fmt.Errorf("acp: agent exited: %w", err)
-		}
-		conn.failAll(err)
+		<-child.statusCh
+		conn.failAll(child.endErr())
+		conn.closeWriter()
 	}()
 	return client, nil
 }

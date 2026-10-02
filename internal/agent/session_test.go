@@ -20,6 +20,12 @@ var (
 	fakeOnce sync.Once
 	fakeBin  string
 	fakeErr  error
+	// buildEnv is the environment before any test rewrites HOME: the one
+	// fake-agent build runs in it, so it keeps the developer's warm build
+	// and module caches and never writes a Go cache into whichever test's
+	// temp HOME happened to trigger it — a module cache there is read-only,
+	// and that test's TempDir cleanup fails on it (internal/cli's buildEnv).
+	buildEnv = os.Environ()
 )
 
 func fakeAgentPath(t *testing.T) string {
@@ -35,6 +41,7 @@ func fakeAgentPath(t *testing.T) string {
 		}
 		fakeBin = filepath.Join(dir, "craze-fake-agent")
 		cmd := exec.Command("go", "build", "-o", fakeBin, "github.com/charliek/craze/cmd/craze-fake-agent")
+		cmd.Env = buildEnv
 		out, err := cmd.CombinedOutput()
 		if err != nil {
 			fakeErr = err

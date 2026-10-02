@@ -896,29 +896,31 @@ func (c *Client) AnswerPermission(id string, dec PermissionDecision) {
 const closeCancelWait = 500 * time.Millisecond
 
 // Close shuts the agent down and reports whether it had already exited on
-// its own: a non-blocking probe of c.child.waitCh, at the very top, before
+// its own: a non-blocking probe of c.child.exitedCh, at the very top, before
 // anything else — including the pre-close session/cancel below — so an agent
 // that exits *because of* that cancel is never misread as having exited
-// first. If the channel is already closed the agent's exit had been reaped
-// before this probe sampled it, and Close returns an error wrapping
-// ErrAgentExited; a craze-initiated shutdown returns nil, as before. The rest
-// of Close is unchanged and still runs either way — only the return value
-// depends on the probe.
+// first. If the channel is already closed the reaper had observed the
+// agent's exit before this probe sampled it, and Close returns an error
+// wrapping ErrAgentExited and how it ended — read once the agent has been
+// reaped, since on one path the status is known only then (Child); a
+// craze-initiated shutdown returns nil, as before. The rest of Close is
+// unchanged and still runs either way — only the return value depends on the
+// probe.
 //
 // Close is idempotent with a stored result: the first call is authoritative
 // and every later call blocks on closeDone and returns the same value,
 // exactly the shape session.Close already has. Without this, a repeated
 // Close — spawnScript's own t.Cleanup, or requestQuit followed by
-// finishRun — would find waitCh already closed by the first call's own
+// finishRun — would find exitedCh already closed by the first call's own
 // Shutdown and misreport a craze-initiated close as a self-exit.
 func (c *Client) Close() error {
 	c.closeOnce.Do(func() {
 		defer close(c.closeDone)
-		var exited error
+		exitedFirst := false
 		if c.child != nil {
 			select {
-			case <-c.child.waitCh:
-				exited = agentExitedErr(c.child.waitErr)
+			case <-c.child.exitedCh:
+				exitedFirst = true
 			default:
 			}
 		}
@@ -948,13 +950,20 @@ func (c *Client) Close() error {
 		}
 		if c.child != nil {
 			c.child.Shutdown()
+			// How the agent ended, when it ended on its own, is what the
+			// calls still pending fail with: delivered here, before the
+			// connection's own close could answer them ErrClosed first
+			// (Child.endErr; the first answer stands).
+			c.conn.failAll(c.child.endErr())
 		}
 		_ = c.conn.Close()
 		<-c.conn.Done()
 		if c.child != nil {
 			c.child.Wait()
+			if exitedFirst {
+				c.closeErr = agentExitedErr(c.child.exitErr)
+			}
 		}
-		c.closeErr = exited
 	})
 	<-c.closeDone
 	return c.closeErr
@@ -968,7 +977,7 @@ func (c *Client) PID() int {
 }
 
 // ProcessGroup is the process group the agent child leads — Spawn puts it in
-// one of its own (Setpgid), so it is the group Shutdown signals — or 0 for an
+// one of its own (Setpgid), so it is the group the reaper signals — or 0 for an
 // in-process test client with no child. A detached host records it (plan 030
 // §3.4), because an agent in its own group can outlive a host killed outright,
 // and only the group reaches what the agent started.
@@ -979,17 +988,18 @@ func (c *Client) ProcessGroup() int {
 	return c.child.pgid
 }
 
-// Exited is closed once the reaper has recorded the agent's exit: the point
-// from which Close's probe reports ErrAgentExited. The OS losing the process
-// is not that point — cmd.Wait's own wait reaps it, and the reaper closes this
-// only after cmd.Wait has returned and the goroutine has run again, so
-// kill(pid, 0) failing proves nothing about it. nil, never closed, for an
+// Exited is closed once the reaper has observed the agent's exit: the point
+// from which Close's probe reports ErrAgentExited, and the calls still
+// pending fail. The agent is not reaped yet then — it stays a zombie, its
+// pid and its process group's id taken, while the reaper cleans up what is
+// left in its group (reaper.go) — so kill(pid, 0) still succeeds after it,
+// until the reap that follows the cleanup. nil, never closed, for an
 // in-process test client with no child.
 func (c *Client) Exited() <-chan struct{} {
 	if c.child == nil {
 		return nil
 	}
-	return c.child.waitCh
+	return c.child.exitedCh
 }
 
 // onRequest and onNotify route the cursor extension methods identically; the

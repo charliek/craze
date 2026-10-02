@@ -399,8 +399,9 @@ func startShellGroup(cmd *exec.Cmd) (*shellGroup, error) {
 // follows the reap. That leaves the window open there, accepted and narrow: the
 // group must already be empty, since any live member keeps the id taken, and
 // macOS hands out pids in sequence up to 99999, so the counter would have to go
-// round the whole pid space inside the microseconds between the two lines. It
-// is the window internal/acp/spawn.go's group shutdown accepts.
+// round the whole pid space inside the microseconds between the two lines.
+// (internal/acp's agent reaper closes it on macOS too, with a kqueue that sees
+// the exit without reaping: reaper_darwin.go.)
 func (g *shellGroup) watch() {
 	defer close(g.reaped)
 	g.pinned = waitNoReap(g.pid)

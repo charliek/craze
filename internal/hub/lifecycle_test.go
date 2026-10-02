@@ -641,15 +641,28 @@ func TestALostRecordOrSocketStopsTheHub(t *testing.T) {
 		hk := quiet()
 		lost := make(chan time.Time)
 		hk.lostTick = lost
+		// Each look's end, so the record goes only once the first look is
+		// over: a tick's receipt does not say its look is done, and a record
+		// removed before that look would rightly stop the hub at it (X76).
+		looked := make(chan string, 4)
+		hk.lostLooked = func(why string) { looked <- why }
 		rn := runIn(t, env, hk)
 		rn.line(t)
 		h := rn.serving(t)
-		lost <- time.Now() // still its own: nothing happens
+		rn.tick(t, lost)
+		select {
+		case why := <-looked:
+			if why != "" {
+				t.Fatalf("the hub's first look found it lost: %s", why)
+			}
+		case <-time.After(step):
+			t.Fatalf("the hub's first look did not end within %v", step)
+		}
 		dial(t, h.sock).hello(t)
 		if err := os.Remove(recordPath(t, env)); err != nil {
 			t.Fatal(err)
 		}
-		lost <- time.Now()
+		rn.tick(t, lost)
 		if err := rn.stopped(t); err != nil {
 			t.Fatal(err)
 		}
@@ -680,7 +693,7 @@ func TestALostRecordOrSocketStopsTheHub(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		lost <- time.Now()
+		rn.tick(t, lost)
 		if err := rn.stopped(t); err != nil {
 			t.Fatal(err)
 		}
@@ -889,7 +902,7 @@ func TestTheOrphanSweepRuns(t *testing.T) {
 	rn := runIn(t, env, hk)
 	rn.line(t)
 	waitFor(t, "the sweep at start", func() bool { return n.Load() == 1 })
-	tick <- time.Now()
+	rn.tick(t, tick)
 	waitFor(t, "the sweep at a tick", func() bool { return n.Load() == 2 })
 	if !strings.Contains(rn.stderr.String(), "orphan sweep: 1 orphan locks") {
 		t.Fatalf("the sweep's report is not in the log: %s", rn.stderr)

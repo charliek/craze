@@ -91,8 +91,10 @@ const (
 	EventErrAgentExited EventErrClass = "agent_exited"
 	// EventErrAgentExitStatus is the agent process ending non-zero or on a
 	// signal under a turn: the reaper's "acp: agent exited: exit status N",
-	// which wraps the *exec.ExitError and not acp.ErrAgentExited, so it
-	// matches no sentinel. Code is the exit status, -1 for a signal.
+	// which wraps the *acp.ExitError the reaper recorded (an *exec.ExitError,
+	// which it no longer returns, is classified the same way) and not
+	// acp.ErrAgentExited, so it matches no sentinel. Code is the exit status,
+	// -1 for a signal.
 	EventErrAgentExitStatus EventErrClass = "agent_exit_status"
 	// EventErrCanceled and EventErrDeadline are the prompt caller's own
 	// context ending the turn: live.go returns ctx.Err() as it is, and the
@@ -239,6 +241,10 @@ func typedEventErr(err error) (EventErrClass, int) {
 	var pe *harness.ProviderError
 	if errors.As(err, &pe) && pe != nil {
 		return EventErrProvider, pe.StatusCode
+	}
+	var agentExit *acp.ExitError
+	if errors.As(err, &agentExit) && agentExit != nil {
+		return EventErrAgentExitStatus, agentExit.ExitCode()
 	}
 	var exit *exec.ExitError
 	if errors.As(err, &exit) && exit != nil {

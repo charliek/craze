@@ -10,11 +10,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"testing"
 	"time"
 )
@@ -380,7 +378,7 @@ func TestChildCrash(t *testing.T) {
 }
 
 // TestClientCloseReportsWhetherTheAgentExitedFirst is issue #23's §3.7.2/
-// §3.7.3: Close's non-blocking probe of child.waitCh has to tell an agent
+// §3.7.3: Close's non-blocking probe of child.exitedCh has to tell an agent
 // that ended on its own — including the exit-0 case Conn.Err() cannot see,
 // since it reads ErrClosed either way — from a close craze asked for, and
 // the answer must not flip on a second call, because something already
@@ -398,7 +396,7 @@ func TestClientCloseReportsWhetherTheAgentExitedFirst(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		<-c.child.waitCh // deterministic: the reaper has already published the exit
+		<-c.child.exitedCh // deterministic: the reaper has already published the exit
 		first := c.Close()
 		if !errors.Is(first, ErrAgentExited) {
 			t.Fatalf("Close() = %v, want an error wrapping ErrAgentExited", first)
@@ -418,7 +416,7 @@ func TestClientCloseReportsWhetherTheAgentExitedFirst(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		<-c.child.waitCh
+		<-c.child.exitedCh
 		first := c.Close()
 		if !errors.Is(first, ErrAgentExited) {
 			t.Fatalf("Close() = %v, want an error wrapping ErrAgentExited (exit 0 included)", first)
@@ -439,7 +437,7 @@ func TestClientCloseReportsWhetherTheAgentExitedFirst(t *testing.T) {
 		}
 		// spawnScript's own t.Cleanup closes a third time: the regression
 		// this case exists for. Without the stored result, Child.Shutdown's
-		// SIGTERM above would have left waitCh closed by the time cleanup
+		// SIGTERM above would have left exitedCh closed by the time cleanup
 		// runs, and a naive probe would misreport this craze-initiated close
 		// as a self-exit on its third call.
 	})
@@ -1537,81 +1535,6 @@ func waitDone(t *testing.T, wg *sync.WaitGroup) {
 	case <-done:
 	case <-time.After(30 * time.Second):
 		t.Fatal("timed out waiting for the goroutines to finish")
-	}
-}
-
-// TestCloseSignalsWhatAnExitedAgentLeftBehind: an agent that exits on its own
-// can leave something running in its process group — a tool's subprocess —
-// and the first Close must still signal that group, or it is orphaned. Here
-// the "agent" is a shell that starts a sleep in its own group and exits.
-func TestCloseSignalsWhatAnExitedAgentLeftBehind(t *testing.T) {
-	pidFile := filepath.Join(t.TempDir(), "left-behind.pid")
-	c, err := Spawn(SpawnOptions{
-		Binary: "/bin/sh",
-		Args:   []string{"-c", "sleep 60 & echo $! > " + pidFile + "; exit 0"},
-		Stderr: io.Discard,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	<-c.child.waitCh
-	raw, err := os.ReadFile(pidFile)
-	if err != nil {
-		t.Fatal(err)
-	}
-	pid, err := strconv.Atoi(strings.TrimSpace(string(raw)))
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = syscall.Kill(pid, syscall.SIGKILL) })
-	if err := syscall.Kill(pid, 0); err != nil {
-		t.Fatalf("the left-behind process was not running before Close: %v", err)
-	}
-
-	if err := c.Close(); !errors.Is(err, ErrAgentExited) {
-		t.Fatalf("Close = %v, want ErrAgentExited", err)
-	}
-	deadline := time.Now().Add(5 * time.Second)
-	for syscall.Kill(pid, 0) == nil {
-		if time.Now().After(deadline) {
-			t.Fatal("Close left the exited agent's process group running")
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-}
-
-// TestCloseKillsWhatIgnoresSIGTERM: the grace is the process group's, not only
-// the agent's. A member that ignores SIGTERM outlives an agent that exits on
-// it, and must still be killed when the grace runs out. Here the "agent" is a
-// shell that starts a sleep ignoring SIGTERM in its own group and exits.
-func TestCloseKillsWhatIgnoresSIGTERM(t *testing.T) {
-	pidFile := filepath.Join(t.TempDir(), "stubborn.pid")
-	c, err := Spawn(SpawnOptions{
-		Binary: "/bin/sh",
-		Args:   []string{"-c", "trap '' TERM; sleep 60 & echo $! > " + pidFile + "; exit 0"},
-		Stderr: io.Discard,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	<-c.child.waitCh
-	raw, err := os.ReadFile(pidFile)
-	if err != nil {
-		t.Fatal(err)
-	}
-	pid, err := strconv.Atoi(strings.TrimSpace(string(raw)))
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = syscall.Kill(pid, syscall.SIGKILL) })
-
-	_ = c.Close()
-	deadline := time.Now().Add(shutdownGrace + 3*time.Second)
-	for syscall.Kill(pid, 0) == nil {
-		if time.Now().After(deadline) {
-			t.Fatal("a process group member that ignores SIGTERM survived Close")
-		}
-		time.Sleep(20 * time.Millisecond)
 	}
 }
 

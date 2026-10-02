@@ -207,6 +207,14 @@ type creator struct {
 	cancel context.CancelFunc
 	cut    chan struct{}
 	once   sync.Once
+	// cutting is set as the cut begins, before ctx is cancelled: an answer
+	// published from then on is the cut's own doing, never delivered (wait).
+	// pubMu orders it with each publication (run), so an answer is either
+	// published before the cut began or marked as after it — never sampled
+	// before and published after (X80, r53). It is held only for that, never
+	// across I/O, unlike mu.
+	pubMu   sync.Mutex
+	cutting bool
 
 	mu    sync.Mutex
 	calls map[string]*createCall
@@ -233,6 +241,9 @@ func newCreator(h *hub, o Creates) *creator {
 // waiter stops waiting for it.
 func (cr *creator) stop() {
 	cr.once.Do(func() {
+		cr.pubMu.Lock()
+		cr.cutting = true
+		cr.pubMu.Unlock()
 		cr.cancel()
 		close(cr.cut)
 	})
@@ -248,6 +259,9 @@ type createCall struct {
 	ans      createAnswer
 	at       time.Time
 	finished bool
+	// afterCut says ans was published once the teardown's cut had begun:
+	// written before done is closed, like ans.
+	afterCut bool
 }
 
 // createAnswer is a create's answer: its result, or its refusal.
@@ -257,19 +271,25 @@ type createAnswer struct {
 }
 
 // wait is a waiter's wait for c: its answer, or false once the teardown has
-// cut it — the waiter's connection closes unanswered.
+// cut it — the waiter's connection closes unanswered. An answer published
+// after the cut began is the cut's (a create it cancelled answering
+// closing), so it is not delivered either, whichever the waiter sees first:
+// the cut cancels the creates before it closes cut, and a create cancelled
+// on a slow machine can publish before either is seen (X80).
 func (c *createCall) wait(cut <-chan struct{}) (createAnswer, bool) {
 	select {
 	case <-c.done:
-		return c.ans, true
 	case <-cut:
+		select {
+		case <-c.done:
+		default:
+			return createAnswer{}, false
+		}
 	}
-	select {
-	case <-c.done:
-		return c.ans, true
-	default:
+	if c.afterCut {
 		return createAnswer{}, false
 	}
+	return c.ans, true
 }
 
 // create answers session.create (the file's comment) on the connection's own
@@ -623,8 +643,7 @@ func (cr *creator) evictLocked(now time.Time) {
 // is no longer counted in flight, so a waiter that has its answer can be
 // sure the create's slot is free again (busy).
 func (cr *creator) run(c *createCall, fn func(context.Context) createAnswer) {
-	ans := fn(cr.ctx)
-	c.ans = ans
+	c.ans = fn(cr.ctx)
 	cr.mu.Lock()
 	c.at, c.finished = time.Now(), true
 	// The cap holds as each answer is kept, not only at the next admission
@@ -632,6 +651,16 @@ func (cr *creator) run(c *createCall, fn func(context.Context) createAnswer) {
 	cr.evictLocked(c.at)
 	cr.mu.Unlock()
 	cr.h.life.endCreate()
+	cr.publish(c)
+}
+
+// publish closes c.done, marking the answer as after the cut when the cut
+// began first (wait): under pubMu, so the mark is the one true when done
+// closes (X80, r53).
+func (cr *creator) publish(c *createCall) {
+	cr.pubMu.Lock()
+	defer cr.pubMu.Unlock()
+	c.afterCut = cr.cutting
 	close(c.done)
 }
 

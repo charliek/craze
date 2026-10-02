@@ -50,6 +50,12 @@ type Conn struct {
 	// Set before the call is made and never written again.
 	takenWait func()
 
+	// ended, when set — Spawn's, for the agent it started; set before Start
+	// and never written again — is what the calls still pending fail with
+	// when the reader ends (EOF, or a read that failed), given the error they
+	// would fail with otherwise.
+	ended func(error) error
+
 	wCloser io.Closer
 	rCloser io.Closer
 }
@@ -157,8 +163,16 @@ func (c *Conn) callRaw(ctx context.Context, method string, params any, sent func
 	msg := &Message{JSONRPC: jsonrpcVersion, ID: id, Method: method, Params: paramRaw}
 	if err := c.enc.WriteMessage(msg); err != nil {
 		c.mu.Lock()
+		_, mine := c.pending[key]
 		delete(c.pending, key)
 		c.mu.Unlock()
+		if !mine {
+			// The write failed because the connection ended under it — the
+			// agent's exit closing its stdin (closeWriter), or Close — and
+			// failAll has answered the request already: that answer, how
+			// the connection ended, is this call's, not the write's error.
+			return c.takenAnswer(ch)
+		}
 		return nil, err
 	}
 	// The encoder writes each frame whole under its own lock, so from here
@@ -243,6 +257,15 @@ func (c *Conn) ReplyErr(id json.RawMessage, rpcErr *RPCError) error {
 	return c.enc.WriteMessage(&Message{JSONRPC: jsonrpcVersion, ID: id, Error: rpcErr})
 }
 
+// closeWriter closes the connection's writer alone, failing any write still
+// blocked on it and every later one, while its reader reads on: what the
+// peer wrote before it went is still delivered (Spawn, at the agent's exit).
+func (c *Conn) closeWriter() {
+	if c.wCloser != nil {
+		_ = c.wCloser.Close()
+	}
+}
+
 func (c *Conn) Close() error {
 	c.failAll(ErrClosed)
 	if c.wCloser != nil {
@@ -260,8 +283,10 @@ func (c *Conn) readLoop() {
 		msg, err := c.dec.ReadMessage()
 		if err != nil {
 			if errors.Is(err, io.EOF) {
-				c.failAll(ErrClosed)
-				return
+				err = ErrClosed
+			}
+			if c.ended != nil {
+				err = c.ended(err)
 			}
 			c.failAll(err)
 			return

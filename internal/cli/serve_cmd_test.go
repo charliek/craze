@@ -290,6 +290,28 @@ func assertHostGone(t *testing.T, env rundir.Env, e rundir.Entry) {
 }
 
 // indexRowByID is the index's row carrying crazeID.
+// waitIndexRowByID is indexRowByID once the row is there, within serveStep:
+// a first prompt the drain took off the queue is indexed by the engine's
+// index worker after the turn, not before Submit answers, so a row can follow
+// the turn's end (plan 032 X77: seen on macOS CI).
+func waitIndexRowByID(t *testing.T, crazeID string) sessions.Row {
+	t.Helper()
+	deadline := time.Now().Add(serveStep)
+	for {
+		rows, err := (&sessions.Store{}).ByCrazeID()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if row, ok := rows[crazeID]; ok {
+			return row
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("no index row carries %s within %v: %+v", crazeID, serveStep, rows)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
 func indexRowByID(t *testing.T, crazeID string) sessions.Row {
 	t.Helper()
 	rows, err := (&sessions.Store{}).ByCrazeID()
