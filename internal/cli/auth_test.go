@@ -690,6 +690,14 @@ const echoRaceWait = 300 * time.Millisecond
 // terminal's settings once the child is gone.
 func authChild(t *testing.T, env []string, argv ...string) (cmd *exec.Cmd, tail *ptyTail, tty *os.File) {
 	t.Helper()
+	cmd, tail, _, tty = authChildIO(t, env, argv...)
+	return cmd, tail, tty
+}
+
+// authChildIO is authChild with the pty's master side too, where a test
+// types at the child's prompts.
+func authChildIO(t *testing.T, env []string, argv ...string) (cmd *exec.Cmd, tail *ptyTail, ptmx, tty *os.File) {
+	t.Helper()
 	ptmx, tty, err := pty.Open()
 	if err != nil {
 		t.Skipf("no pty: %v", err)
@@ -714,7 +722,7 @@ func authChild(t *testing.T, env []string, argv ...string) (cmd *exec.Cmd, tail 
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = cmd.Process.Kill(); _ = cmd.Wait() })
-	return cmd, tail, tty
+	return cmd, tail, ptmx, tty
 }
 
 // authChildExit is the child's exit code, within 10 seconds.

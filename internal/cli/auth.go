@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bufio"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -24,7 +25,12 @@ import (
 // provider's env_keys. `login` stores one, `logout` removes one, `list` says
 // how each provider is funded. No key is ever checked with its provider (the
 // owner's decision: a bad key shows on first use), so none of the three makes
-// a network request.
+// a network request for a key.
+//
+// The ChatGPT plan is the exception (plan 033 §3.13): it is funded by Sign in
+// with ChatGPT and never by a key, so for it `login` runs the sign-in,
+// `logout` signs out, and `list` shows the sign-in — auth_chatgpt.go. Its
+// login branches off before any key is read or asked for (X134).
 //
 // A key is read from stdin when stdin is not a terminal — its first line, at
 // most maxKeyLine bytes, trimmed — and otherwise from a prompt that does not
@@ -43,7 +49,8 @@ const maxKeyLine = 8 << 10
 
 // authRun is one craze auth command's world: the directory it keeps keys in,
 // the environment it judges variables by, and its streams. tty is stdin when
-// that is a terminal, nil otherwise.
+// that is a terminal, nil otherwise. ctx is the command's, and noBrowser is
+// login's --no-browser, for the ChatGPT plan's sign-in.
 type authRun struct {
 	name      string // "craze auth login", for messages
 	dir       string
@@ -51,18 +58,25 @@ type authRun struct {
 	in        io.Reader
 	tty       *os.File
 	out, errw io.Writer
+	ctx       context.Context
+	noBrowser bool
 }
 
 func newAuthCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "auth",
-		Short: "Manage model provider API keys",
-		Long: `Manage the API keys of the native provider's model providers.
+		Short: "Manage model provider API keys and the ChatGPT sign-in",
+		Long: `Manage the API keys of the native provider's model providers, and the
+ChatGPT plan's sign-in.
 
 A key is stored in the craze directory's native/providers.toml (0600), which
 craze rewrites whole: comments there are not kept. A provider's environment
 variable (FIREWORKS_API_KEY, say) is used before its stored key. No key is
-checked with its provider when it is stored: a wrong one shows on first use.`,
+checked with its provider when it is stored: a wrong one shows on first use.
+
+The ChatGPT plan takes no key: "craze auth login chatgpt" signs in with
+ChatGPT in a browser, "craze auth logout chatgpt" signs out, and
+"craze auth list" shows the sign-in.`,
 		// A group's own run: bare, it prints its help; with an argument —
 		// a subcommand mistyped, `craze auth lgin fireworks` — it is a usage
 		// error, where cobra's default would print the help and exit 0. The
@@ -103,17 +117,25 @@ func authFlagError(cmd *cobra.Command, _ error) error {
 }
 
 func newAuthLoginCmd() *cobra.Command {
-	return &cobra.Command{
+	cmd := &cobra.Command{
 		Use:   "login [provider]",
-		Short: "Store a provider's API key",
-		Long: `Store a provider's API key.
+		Short: "Store a provider's API key, or sign in to the ChatGPT plan",
+		Long: `Store a provider's API key, or sign in to the ChatGPT plan.
 
 The provider is its id or its display name, in any case. With none given on a
 terminal, craze shows a numbered list to pick from. The key is read without
-echo on a terminal, and otherwise from the first line of stdin.`,
+echo on a terminal, and otherwise from the first line of stdin.
+
+For the ChatGPT plan (chatgpt), craze prints an address to open in a browser
+(and opens it, on a desktop), then waits for the browser to come back to it,
+or for the address the browser was sent to pasted here. --no-browser opens
+no browser and waits only for the pasted address: the way to sign in from a
+machine the browser is not on.`,
 		Args: authArgs(1, "takes one argument at most, the provider"),
 		RunE: authRunE((*authRun).login),
 	}
+	cmd.Flags().Bool("no-browser", false, "ChatGPT plan: open no browser and listen for no redirect; paste the redirect address instead")
+	return cmd
 }
 
 func newAuthLogoutCmd() *cobra.Command {
@@ -162,7 +184,10 @@ func newAuthRun(cmd *cobra.Command) (*authRun, error) {
 		in:     cmd.InOrStdin(),
 		out:    cmd.OutOrStdout(),
 		errw:   cmd.ErrOrStderr(),
+		ctx:    cmd.Context(),
 	}
+	// login's alone; the others have no such flag, and read false.
+	a.noBrowser, _ = cmd.Flags().GetBool("no-browser")
 	if a.dir == "" {
 		return nil, exitf(1, "%s: there is no craze directory to keep API keys in (set HOME or CRAZE_HOME)", a.name)
 	}
@@ -185,6 +210,11 @@ func (a *authRun) login(arg string) error {
 		if p, err = a.match(infos, arg); err != nil {
 			return err
 		}
+		if p.SignIn {
+			// The ChatGPT plan signs in, before any key is read or asked
+			// for (plan 033 §3.13, X134).
+			return a.signIn()
+		}
 	case a.tty == nil:
 		return usagef("%s: name a provider (%s); craze shows a list to pick from only on a terminal", a.name, keyProviderIDs(infos))
 	}
@@ -196,6 +226,11 @@ func (a *authRun) login(arg string) error {
 	}
 	if err != nil {
 		return err
+	}
+	if p.SignIn {
+		// Picked from the menu: ask returned before the key's prompt, with
+		// the terminal's echo back on, so the pasted redirect shows.
+		return a.signIn()
 	}
 	name := sanitizeLine(p.Name)
 	if key == "" {
@@ -224,6 +259,9 @@ func (a *authRun) logout(arg string) error {
 	p, err := a.match(infos, arg)
 	if err != nil {
 		return err
+	}
+	if p.SignIn {
+		return a.signOut(p)
 	}
 	removed, err := modeltable.RemoveKey(a.dir, p.ID)
 	if err != nil {
@@ -255,7 +293,7 @@ func (a *authRun) list() error {
 	}
 	tw := tabwriter.NewWriter(a.out, 0, 0, 2, ' ', 0)
 	for _, p := range infos {
-		fmt.Fprintf(tw, "%s\t%s\t%s\n", sanitizeLine(p.Name), sanitizeLine(p.ID), connectedBy(p))
+		fmt.Fprintf(tw, "%s\t%s\t%s\n", sanitizeLine(p.Name), sanitizeLine(p.ID), a.connectedBy(p))
 	}
 	if err := tw.Flush(); err != nil {
 		return err
@@ -278,21 +316,17 @@ func (a *authRun) list() error {
 
 // connectedBy is a list row's last column: the variable that funds the
 // provider, its stored key, or neither — the order Resolve tries them in —
-// and, for the ChatGPT plan, its sign-in (plan 033 §3.11): signed in with
-// plan usage, or signed in with plan usage off, or not.
-func connectedBy(p modeltable.ProviderInfo) string {
+// and, for the ChatGPT plan, its sign-in (plan 033 §3.13, signInStatus):
+// signed in with plan usage, signed in with plan usage off, or not.
+func (a *authRun) connectedBy(p modeltable.ProviderInfo) string {
+	if p.SignIn {
+		return a.signInStatus(p.Via)
+	}
 	switch p.Via {
 	case modeltable.KeyFromEnv:
 		return "env " + sanitizeLine(p.EnvVar)
 	case modeltable.KeyStored:
 		return "stored key"
-	case modeltable.KeySignedIn:
-		return "signed in"
-	case modeltable.KeyPlanDisabled:
-		return "plan usage disabled"
-	}
-	if p.SignIn {
-		return "not signed in"
 	}
 	return "not connected"
 }
@@ -370,6 +404,11 @@ func (a *authRun) ask(infos []modeltable.ProviderInfo, p modeltable.ProviderInfo
 	if !named {
 		if p, err = a.choose(infos); err != nil {
 			return p, "", err
+		}
+		if p.SignIn {
+			// The ChatGPT plan takes no key: login signs in instead, once
+			// the deferred restore has put the echo back.
+			return p, "", nil
 		}
 	}
 	key, err := a.promptKey(sanitizeLine(p.Name))

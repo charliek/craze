@@ -60,6 +60,21 @@ const (
 	modelsFileName = "chatgpt-models.json"
 )
 
+// UsageURL is ChatGPT's usage settings, where a person reviews the plan's
+// usage and limits, craze's included: the SIWC UI guidelines' "Manage usage"
+// link, which every place craze speaks of the plan's usage points at.
+const UsageURL = "https://chatgpt.com/settings/usage"
+
+// NoticeTitle and Notice are the one-time plan-usage notice (plan 033 §3.13;
+// the SIWC UI guidelines' first-sign-in confirmation, "You're using your
+// ChatGPT plan"): craze auth login and /connect show them once a sign-in with
+// plan usage returns Result.ShowNotice, then call MarkNoticeShown, so a later
+// sign-in to the same registration does not show them again.
+const (
+	NoticeTitle = "You're using your ChatGPT plan."
+	Notice      = "Eligible usage in this app uses your ChatGPT plan. Manage usage in your ChatGPT settings: " + UsageURL
+)
+
 // AuthDir is dir's sign-in directory, <dir>/auth: every file of the sign-in
 // but the model list. File tools refuse it whole (plan 033 §3.12).
 func AuthDir(dir string) string { return filepath.Join(dir, authDirName) }

@@ -9,9 +9,16 @@ import (
 	"slices"
 	"testing"
 
+	"github.com/charliek/craze/internal/chatgptauth"
 	"github.com/charliek/craze/internal/harness/modeltable"
 	"github.com/charliek/craze/internal/paths"
 )
+
+// chatgptFence is where TestMain points the ChatGPT plan's endpoints: port 9
+// of the loopback address (the discard service's, served by nothing on a
+// developer's machine or a CI runner), so a request that should never have
+// been sent is refused there.
+const chatgptFence = "http://127.0.0.1:9"
 
 // TestMain is the guard plan 020 R6 asks for. The TUI and `craze prompt`
 // journal every session by default, so a test in this package that builds a
@@ -63,6 +70,15 @@ func TestMain(m *testing.M) {
 	for _, name := range names {
 		_ = os.Unsetenv(name)
 	}
+	// The ChatGPT plan's endpoints (plan 033 §3.10) are aimed at a loopback
+	// port nothing serves, for the package and every craze child it starts:
+	// the sign-in's tests stand in for chatgptauth through auth_chatgpt.go's
+	// seams, and a path that reached the real package anyway — a native
+	// session's model refresh, a sign-in run in a child — gets a refused
+	// connection on this machine instead of reaching OpenAI (common.md: fake
+	// servers only).
+	_ = os.Setenv(chatgptauth.IssuerEnv, chatgptFence)
+	_ = os.Setenv(chatgptauth.APIEnv, chatgptFence+"/v1")
 	code := m.Run()
 	_ = os.RemoveAll(runtimeDir)
 	if leaked := journaledBy(os.Getpid(), dirs, before); len(leaked) > 0 {

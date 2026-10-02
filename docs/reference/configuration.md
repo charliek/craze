@@ -624,6 +624,7 @@ from, tried in order:
 
 | Provider id | Name | Key variables |
 |-------------|------|---------------|
+| `chatgpt` | ChatGPT plan | none: [signs in with ChatGPT](#the-chatgpt-plan) |
 | `fireworks` | Fireworks | `FIREWORKS_API_KEY` |
 | `meta` | Meta | `META_API_KEY` |
 | `openrouter` | OpenRouter | `OPENROUTER_API_KEY` |
@@ -816,6 +817,99 @@ during a turn is learned when the next one starts, and a shell command or a
 sub-agent already running keeps the redaction it started with. A sub-agent
 started after the key was learned redacts it.
 
+### The ChatGPT plan
+
+The catalog's `chatgpt` provider, **ChatGPT plan**, runs OpenAI's models on
+your ChatGPT subscription through OpenAI's Sign in with ChatGPT: requests are
+billed to the plan's usage, not to an API account, and count against the
+plan's limits (on Plus, a five-hour limit shared with your other apps that use
+the plan). Manage that usage in [ChatGPT's settings](https://chatgpt.com/settings/usage).
+
+**It takes no key.** It names no variable and stores no `api_key`: it is
+funded by signing in with
+[`craze auth login chatgpt`](cli.md#signing-in-to-the-chatgpt-plan), and
+[`craze auth list`](cli.md#craze-auth-list) shows the sign-in. A
+`providers.toml` entry for it may set only `name`; a `driver`, `base_url`,
+`env_keys` or `api_key` written there is dropped with a warning naming the
+key. The `chatgpt` driver belongs to this provider alone: an entry of yours
+that names it under another id is dropped with a warning (a load error in a
+[`catalog = false`](#isolated-setups-catalog-false) directory, which has no
+ChatGPT plan).
+
+**Its models are the account's own**, not the catalog's: the list ChatGPT
+offers the signed-in account, fetched when you sign in and again, in the
+background, by a native session that starts with a list over a day old. Each
+is `chatgpt/<slug>` — `chatgpt/gpt-5.6-sol`, say — for `--model` and
+`/model`, named as ChatGPT names it with ` (ChatGPT plan)` after, and listed
+in `/model` together, in the account's order. Its context window is the one
+the list gives; its efforts are those the list offers among `none`,
+`minimal`, `low`, `medium`, `high`, `xhigh` and `max`, and it takes images
+when the list says it does. It has no cost (the status row shows tokens
+alone) and no `/fast`. Signed out, or with plan usage off, the plan's models
+are not offered; a session already on one keeps it in its picker, as with any
+provider that loses its key.
+
+The shipped catalog's `[chatgpt_defaults]` table holds craze's own settings for
+the plan's models, laid over the account's list: `start`, the model a new
+session starts on when nothing it remembers is funded and the default model is
+not either (`gpt-5.6-sol`), and per-slug `name`, `efforts` (which can only
+narrow the account's), `default_effort` and `tool_profile` (`gpt-6-astra`
+defaults to `low`). It ships in the binary like the rest of the catalog; it is
+not a `models.toml` setting.
+
+**Its files** are in the native directory (`~/.craze/native/`, or
+`$CRAZE_HOME/native/`), each `0600`, the sign-in's under `auth/`, a directory
+craze makes `0700`:
+
+| File | Holds | Secret | Signing out |
+|------|-------|--------|-------------|
+| `auth/host-id` | This machine's id for ChatGPT (`urn:uuid:…`), made before the first sign-in | no | kept |
+| `auth/chatgpt-client.json` | craze's registration with ChatGPT: the client id it was issued, the account's id and email, whether the account allowed plan usage, whether the one-time notice was shown | no | kept |
+| `auth/chatgpt.json` | The tokens: access, refresh and id token, and when they expire | **yes** | deleted |
+| `auth/chatgpt.json.lock` | The lock every change of the two files above is made under | no | kept |
+| `chatgpt-models.json` | The account's model list, with the account it belongs to | no | kept |
+
+Never copy or paste `auth/chatgpt.json`; craze writes it durably (synced to
+disk) and never logs it. Signing out deletes it and keeps the rest, so the
+next sign-in reuses craze's registration and the browser asks only which
+account to use. A craze directory holds **one ChatGPT account**: a sign-in
+with a different account is refused, since the registration is that
+account's; use another `CRAZE_HOME` for a second account. The model list is
+bound to the account too: a list that another account fetched — after a
+change of account, say — is ignored until the next sign-in fetches the
+account's own, and one craze cannot read is a warning at session start, with
+no plan models until it is fetched again.
+
+**Renewal.** An access token lasts about an hour. craze renews it itself when a
+request finds less than five minutes left, so the sign-in lasts until you sign
+out. Every craze process — each native session's host, `craze auth`, the TUI —
+shares the token file: one renews it under the lock, and the others take its
+new tokens rather than renewing again. A renewal ChatGPT refuses for good (the
+sign-in revoked, say) deletes the tokens, and the next turn ends with
+`native: ChatGPT sign-in is no longer valid; run /connect or craze auth login
+chatgpt`.
+
+**Requests** go to OpenAI's Responses API at `https://api.openai.com/v1` with
+the access token, and nowhere else: no redirect is followed, and the token is
+never put in any process's environment. Each carries the session's id, so
+ChatGPT can reuse the cached start of a conversation. The
+[output ceiling](#native-output-ceiling) is not sent: ChatGPT plan requests
+refuse one, though the ceiling still sizes compaction.
+
+**The usage limit.** When ChatGPT says the plan's usage limit is reached, the
+turn ends with `native: ChatGPT plan usage limit reached for craze. Manage
+usage: https://chatgpt.com/settings/usage`, and that craze process sends no
+other request on the plan — a background sub-agent's, a wake's or a retry —
+until you start the next turn. An account the plan cannot be used with in
+craze, or a request it refuses, ends the turn with its own message.
+
+**Redaction.** The token values are treated as keys are ([Keys](#keys)):
+every native session, whatever its provider, learns the ones in
+`auth/chatgpt.json` at the start of each turn and redacts them from tool
+output, and a session that uses the plan learns renewed ones the moment it
+renews them. The file tools refuse the whole `auth/` directory, a hard link to
+any file in it included.
+
 ### Model memory: `recent.json`
 
 A model or effort you pick in a native session's `/model` is remembered for
@@ -968,6 +1062,10 @@ resumed after upgrading that is already past the new trigger compacts before
 its next turn. A smaller `max_output_tokens` moves the trigger back up.
 The value is your own entry in `models.toml`; craze
 never rewrites it.
+
+The [ChatGPT plan](#the-chatgpt-plan)'s models are the exception: no ceiling
+is sent to them, since ChatGPT plan requests refuse one, but the ceiling
+(32,000, or the quarter of the window) still sizes their compaction.
 
 ## Native compaction
 
