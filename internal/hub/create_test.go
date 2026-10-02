@@ -432,6 +432,41 @@ func TestCreateReplayAfterARestart(t *testing.T) {
 	})
 }
 
+// TestACutWaiterGetsOnlyAnAnswerFromBeforeTheCut (X80): once the teardown's
+// cut has begun, a waiter is answered only with an answer its create
+// published before it — the case of a create that finished just as the cut
+// came — and never with one published after (a create the cut cancelled,
+// answering closing), whichever of done and cut the waiter sees first. PR 5's
+// macOS CI delivered the cut's own "closing" to a cut waiter: the cut cancels
+// the creates before it closes cut, and on a slow runner the cancelled create
+// published first.
+func TestACutWaiterGetsOnlyAnAnswerFromBeforeTheCut(t *testing.T) {
+	closing := createAnswer{err: refused(protocol.CodeUnavailable, protocol.ReasonClosing, "the hub is closing")}
+	done := createAnswer{res: &protocol.CreateResult{Prompt: protocol.CreatePromptNone}}
+	for _, tc := range []struct {
+		name     string
+		ans      createAnswer
+		afterCut bool
+		want     bool
+	}{
+		{"published after the cut began", closing, true, false},
+		{"published before it", done, false, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := &createCall{done: make(chan struct{}), ans: tc.ans, afterCut: tc.afterCut}
+			close(c.done)
+			cut := make(chan struct{})
+			close(cut)
+			for range 50 { // both ready: the select takes either
+				ans, ok := c.wait(cut)
+				if ok != tc.want {
+					t.Fatalf("wait answered %v (%+v), want %v", ok, ans, tc.want)
+				}
+			}
+		})
+	}
+}
+
 // TestCreateTeardownMidCreate (§3.10): a create still in flight when its hub
 // tears down gets the teardown's bound; past it the waiter's connection
 // closes unanswered, and the host — left at its gate — runs on, its request

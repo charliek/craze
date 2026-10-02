@@ -16,6 +16,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 	"unicode"
@@ -207,6 +208,9 @@ type creator struct {
 	cancel context.CancelFunc
 	cut    chan struct{}
 	once   sync.Once
+	// cutting is set as the cut begins, before ctx is cancelled: an answer
+	// published from then on is the cut's own doing, never delivered (wait).
+	cutting atomic.Bool
 
 	mu    sync.Mutex
 	calls map[string]*createCall
@@ -233,6 +237,7 @@ func newCreator(h *hub, o Creates) *creator {
 // waiter stops waiting for it.
 func (cr *creator) stop() {
 	cr.once.Do(func() {
+		cr.cutting.Store(true)
 		cr.cancel()
 		close(cr.cut)
 	})
@@ -248,6 +253,9 @@ type createCall struct {
 	ans      createAnswer
 	at       time.Time
 	finished bool
+	// afterCut says ans was published once the teardown's cut had begun:
+	// written before done is closed, like ans.
+	afterCut bool
 }
 
 // createAnswer is a create's answer: its result, or its refusal.
@@ -257,19 +265,25 @@ type createAnswer struct {
 }
 
 // wait is a waiter's wait for c: its answer, or false once the teardown has
-// cut it — the waiter's connection closes unanswered.
+// cut it — the waiter's connection closes unanswered. An answer published
+// after the cut began is the cut's (a create it cancelled answering
+// closing), so it is not delivered either, whichever the waiter sees first:
+// the cut cancels the creates before it closes cut, and a create cancelled
+// on a slow machine can publish before either is seen (X80).
 func (c *createCall) wait(cut <-chan struct{}) (createAnswer, bool) {
 	select {
 	case <-c.done:
-		return c.ans, true
 	case <-cut:
+		select {
+		case <-c.done:
+		default:
+			return createAnswer{}, false
+		}
 	}
-	select {
-	case <-c.done:
-		return c.ans, true
-	default:
+	if c.afterCut {
 		return createAnswer{}, false
 	}
+	return c.ans, true
 }
 
 // create answers session.create (the file's comment) on the connection's own
@@ -625,6 +639,7 @@ func (cr *creator) evictLocked(now time.Time) {
 func (cr *creator) run(c *createCall, fn func(context.Context) createAnswer) {
 	ans := fn(cr.ctx)
 	c.ans = ans
+	c.afterCut = cr.cutting.Load()
 	cr.mu.Lock()
 	c.at, c.finished = time.Now(), true
 	// The cap holds as each answer is kept, not only at the next admission
