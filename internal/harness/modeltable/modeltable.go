@@ -63,6 +63,14 @@ const (
 	DriverOpenAICompat = "openai-compat"
 	DriverOpenRouter   = "openrouter"
 
+	// DriverChatGPT is the ChatGPT plan's driver (plan 033 §3.9, §3.11): the
+	// Responses API at OpenAI's fixed endpoint, funded by a Sign in with
+	// ChatGPT token rather than a key (package llm/responsesapi). It is
+	// defined ahead of being enabled: driverProblem still refuses it, so no
+	// table can name it and the driver stays inert until the sign-in that
+	// funds it lands (plan 033 C14).
+	DriverChatGPT = "chatgpt"
+
 	// SourceManual is the source of an entry the owner wrote; an entry with no
 	// source loads as manual. Any other source string is accepted verbatim, so
 	// a file an older craze wrote (source = "gx") still loads — and such an
@@ -197,6 +205,13 @@ type Model struct {
 	// default. Load refuses a name not in ToolProfiles.
 	ToolProfile string
 	Source      string
+	// ParallelToolCalls says whether a request on the model lets it call
+	// several tools in one step (plan 033 §3.11): nil leaves it to the
+	// driver's default, which for every driver today is to say nothing and
+	// take the provider's own. Only a model the table learns from its
+	// provider sets it (the ChatGPT plan's list, plan 033 C14); no file has a
+	// key for it.
+	ParallelToolCalls *bool
 	// Cost is [models."<alias>".cost] (plan 028 §3.14): nil when the file's
 	// entry has no such table, so a model with no cost saves exactly as it
 	// did before this section existed (mirrors [compaction]). Rates are
@@ -330,6 +345,9 @@ type Resolved struct {
 	DefaultEffort   string
 	Vision          bool
 	ToolProfile     string // "" is the default profile
+	// ParallelToolCalls is the model's Model.ParallelToolCalls, a copy: nil
+	// means the driver's default (plan 033 §3.11).
+	ParallelToolCalls *bool
 }
 
 // The on-disk shapes Save writes. They are separate from the public types so
@@ -402,6 +420,10 @@ type modelEntry struct {
 	Vision          bool     `toml:"vision,omitempty"`
 	ToolProfile     string   `toml:"tool_profile,omitempty"`
 	Source          string   `toml:"source,omitempty"`
+	// ParallelToolCalls is never written: no file has a key for it — only a
+	// model learned from its provider sets it (plan 033 §3.11) — and it is
+	// here so that the conversion from Model still compiles.
+	ParallelToolCalls *bool `toml:"-"`
 	// Cost is encoded separately, by encodeModels, as its own
 	// [models."<alias>".cost] table: encoding it here, nested inside this
 	// struct's own standalone Encode call, would print an unqualified
@@ -751,10 +773,15 @@ func validateProvider(file, id string, p Provider) error {
 }
 
 // driverProblem is why driver is not one craze has, "" when it is.
+// DriverChatGPT is refused until the sign-in that funds it lands (plan 033
+// C14): its driver is built and tested on its own, but no table may name it
+// before a session can be funded through it.
 func driverProblem(driver string) string {
 	switch driver {
 	case DriverOpenAICompat, DriverOpenRouter:
 		return ""
+	case DriverChatGPT:
+		return `driver "chatgpt" is not available yet: want "openai-compat" or "openrouter"`
 	case "":
 		return `missing: want "openai-compat" or "openrouter"`
 	}
@@ -954,19 +981,20 @@ func (t *Table) Resolve(alias string, getenv func(string) string) (Resolved, err
 		name = alias
 	}
 	return Resolved{
-		Alias:           alias,
-		ProviderID:      m.Provider,
-		Driver:          p.Driver,
-		BaseURL:         p.BaseURL,
-		APIKey:          key,
-		WireModel:       m.WireModel,
-		Name:            name,
-		ContextWindow:   m.ContextWindow,
-		MaxOutputTokens: outputCeiling(m),
-		Efforts:         slices.Clone(m.Efforts),
-		DefaultEffort:   m.DefaultEffort,
-		Vision:          m.Vision,
-		ToolProfile:     m.ToolProfile,
+		Alias:             alias,
+		ProviderID:        m.Provider,
+		Driver:            p.Driver,
+		BaseURL:           p.BaseURL,
+		APIKey:            key,
+		WireModel:         m.WireModel,
+		Name:              name,
+		ContextWindow:     m.ContextWindow,
+		MaxOutputTokens:   outputCeiling(m),
+		Efforts:           slices.Clone(m.Efforts),
+		DefaultEffort:     m.DefaultEffort,
+		Vision:            m.Vision,
+		ToolProfile:       m.ToolProfile,
+		ParallelToolCalls: clonePtr(m.ParallelToolCalls),
 	}, nil
 }
 

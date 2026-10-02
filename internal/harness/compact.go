@@ -670,10 +670,11 @@ func observeUsage(into *store.Usage) func(fantasy.Usage, fantasy.FinishReason, f
 // item 1, P11, PD10): the session's own agent, with the session's tools
 // offered inert (s.inertTools, same Info as a turn's) so Fantasy converts
 // and normalizes them exactly as a turn's would, one step
-// (fantasy.StepCountIs(1)), the same provider options and output ceiling as
-// a turn. Messages is history, exactly the next request's; Prompt is the
-// compaction prompt, the state section, and, for a focus, the "Focus this
-// summary on" line (item 1, item 2, item 3). Its agent's own retries are off
+// (fantasy.StepCountIs(1)), the same provider options, headers
+// (requestHeaders) and output ceiling as a turn. Messages is history,
+// exactly the next request's; Prompt is the compaction prompt, the state
+// section, and, for a focus, the "Focus this summary on" line (item 1, item
+// 2, item 3). Its agent's own retries are off
 // (newSummarizerAgent, review r1-c9 "three attempts means three requests"):
 // compact's outer attempts are the whole retry budget.
 //
@@ -691,6 +692,7 @@ func (s *Session) summarizeAligned(ctx context.Context, m model, history []fanta
 		Prompt:          s.compactionPromptText(focus, red),
 		Messages:        omitImages(history, summarizerOmits),
 		ProviderOptions: m.effortOpts,
+		Headers:         requestHeaders(m.r, s.store.ID()),
 		StopWhen:        []fantasy.StopCondition{fantasy.StepCountIs(1)},
 		OnStreamFinish:  observeUsage(&observed),
 	}
@@ -720,6 +722,7 @@ func (s *Session) summarizeText(ctx context.Context, m model, before, sent int64
 	call := fantasy.AgentStreamCall{
 		Prompt:          prompt,
 		ProviderOptions: m.effortOpts,
+		Headers:         requestHeaders(m.r, s.store.ID()),
 		StopWhen:        []fantasy.StopCondition{fantasy.StepCountIs(1)},
 		OnStreamFinish:  observeUsage(&observed),
 	}

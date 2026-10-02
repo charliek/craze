@@ -183,6 +183,7 @@ func (c *Catalog) Clone() *Catalog {
 func cloneModel(m Model) Model {
 	m.Efforts = slices.Clone(m.Efforts)
 	m.Cost = m.Cost.Clone()
+	m.ParallelToolCalls = clonePtr(m.ParallelToolCalls)
 	return m
 }
 

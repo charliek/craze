@@ -1,0 +1,129 @@
+{
+  "model": "gpt-5.6-luna",
+  "instructions": "You are craze.",
+  "input": [
+    {
+      "type": "message",
+      "role": "user",
+      "content": [
+        {
+          "type": "input_text",
+          "text": "Read README.md and give me its first line."
+        }
+      ]
+    }
+  ],
+  "store": false,
+  "stream": true,
+  "include": [
+    "reasoning.encrypted_content"
+  ],
+  "reasoning": {
+    "effort": "high",
+    "summary": "auto"
+  },
+  "tools": [
+    {
+      "type": "namespace",
+      "name": "craze",
+      "description": "craze tools",
+      "tools": [
+        {
+          "type": "function",
+          "name": "read_file",
+          "description": "Read a file.",
+          "parameters": {
+            "properties": {
+              "path": {
+                "description": "the file to read",
+                "type": "string"
+              }
+            },
+            "required": [
+              "path"
+            ],
+            "type": "object"
+          },
+          "strict": false
+        }
+      ]
+    }
+  ],
+  "tool_choice": "auto"
+}
+{
+  "model": "gpt-5.6-luna",
+  "instructions": "You are craze.",
+  "input": [
+    {
+      "type": "message",
+      "role": "user",
+      "content": [
+        {
+          "type": "input_text",
+          "text": "Read README.md and give me its first line."
+        }
+      ]
+    },
+    {
+      "type": "reasoning",
+      "id": "rs_1",
+      "summary": [
+        {
+          "type": "summary_text",
+          "text": "Reading the file"
+        }
+      ],
+      "encrypted_content": "sealed-whole"
+    },
+    {
+      "type": "function_call",
+      "call_id": "call_1",
+      "name": "read_file",
+      "namespace": "craze",
+      "arguments": "{\"path\":\"README.md\"}"
+    },
+    {
+      "type": "function_call_output",
+      "call_id": "call_1",
+      "output": "contents of README.md"
+    }
+  ],
+  "store": false,
+  "stream": true,
+  "include": [
+    "reasoning.encrypted_content"
+  ],
+  "reasoning": {
+    "effort": "high",
+    "summary": "auto"
+  },
+  "tools": [
+    {
+      "type": "namespace",
+      "name": "craze",
+      "description": "craze tools",
+      "tools": [
+        {
+          "type": "function",
+          "name": "read_file",
+          "description": "Read a file.",
+          "parameters": {
+            "properties": {
+              "path": {
+                "description": "the file to read",
+                "type": "string"
+              }
+            },
+            "required": [
+              "path"
+            ],
+            "type": "object"
+          },
+          "strict": false
+        }
+      ]
+    }
+  ],
+  "tool_choice": "auto"
+}

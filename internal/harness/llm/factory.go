@@ -13,6 +13,13 @@
 // (owner decision 2). OpenRouter's API is OpenAI-compatible, so the
 // "openrouter" driver is the same client at OpenRouter's fixed endpoint, with
 // effort sent in OpenRouter's own request shape. deps_test.go holds the line.
+//
+// A third driver, the ChatGPT plan's (modeltable.DriverChatGPT, plan 033
+// §3.9), is craze's own Responses client, package responsesapi — no Fantasy
+// provider and no SDK at all — adapted to Fantasy in responses_adapter.go
+// and authenticated by an Auth rather than a key. It lands inert: the model
+// table refuses the driver and New does not build it yet (plan 033 C14
+// wires both, with the sign-in that funds it).
 package llm
 
 import (
@@ -136,6 +143,8 @@ func New(r modeltable.Resolved, opts ...Option) (fantasy.LanguageModel, error) {
 
 // openAIEfforts are the reasoning efforts Fantasy's OpenAI-compatible client
 // can send (openaicompat PrepareCallFunc); it fails a request with any other.
+// They are also the ChatGPT plan's Responses route's own list (plan 033
+// §3.9).
 var openAIEfforts = []openai.ReasoningEffort{
 	openai.ReasoningEffortNone,
 	openai.ReasoningEffortMinimal,
@@ -149,9 +158,10 @@ var openAIEfforts = []openai.ReasoningEffort{
 // EffortOptions returns the provider options that ask r's model for effort,
 // for a call's ProviderOptions (fantasy.AgentStreamCall.ProviderOptions):
 // reasoning_effort for the openai-compat driver, OpenRouter's
-// reasoning.effort for openrouter, keyed by the provider id New named the
-// model's provider with. It returns nil when effort is "", so nothing is
-// sent: the harness passes "" for a model with no effort control.
+// reasoning.effort for openrouter, and the Responses reasoning.effort for
+// chatgpt (responsesOptions, plan 033 §3.9), keyed by the provider id New
+// named the model's provider with. It returns nil when effort is "", so
+// nothing is sent: the harness passes "" for a model with no effort control.
 //
 // An effort the model does not list is an error rather than a silent no-op,
 // as is one the OpenAI-compatible client cannot send, so a bad switch fails
@@ -174,6 +184,15 @@ func EffortOptions(r modeltable.Resolved, effort string) (fantasy.ProviderOption
 			return nil, fmt.Errorf("llm: model %q: effort %q is not one an OpenAI-compatible request can carry", r.Alias, effort)
 		}
 		opts = &openaicompat.ProviderOptions{ReasoningEffort: &e}
+	case modeltable.DriverChatGPT:
+		// The Responses route's own list, which its validation error names
+		// (spike): the same seven as an OpenAI-compatible request. Never
+		// "ultra", which the account's model list offers some models but which
+		// is codex's multi-agent mode, not a request value (plan 033 §3.9).
+		if !slices.Contains(openAIEfforts, openai.ReasoningEffort(effort)) {
+			return nil, fmt.Errorf("llm: model %q: effort %q is not one a ChatGPT plan request can carry", r.Alias, effort)
+		}
+		return fantasy.ProviderOptions{r.ProviderID: &responsesOptions{Effort: effort}}, nil
 	case modeltable.DriverOpenRouter:
 		// The same body openrouter.ProviderOptions{Reasoning: {Effort}}
 		// produces, spelled through the OpenAI-compatible client's extra

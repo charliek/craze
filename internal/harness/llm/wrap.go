@@ -271,6 +271,12 @@ func RawFinish(md fantasy.ProviderMetadata) (reason fantasy.FinishReason, ok boo
 // on a later step or turn is regrouped into the same bytes, and a provider's
 // prefix cache sees the same request it saw before.
 //
+// The ChatGPT plan's Responses driver (responses_adapter.go) keeps it too
+// (plan 033 C12): the Responses API's function_call_output can carry an
+// image, but the route was only ever seen to take one as user input_image
+// (the spike), which is also where Fantasy's own Responses model puts a
+// tool's image.
+//
 // It composes with the harness's vision strip (stripImages, plan 033 §3.5),
 // which runs first, before Fantasy assembles the request: to a model that
 // does not accept images the history's image results are text already, and
