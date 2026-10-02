@@ -596,7 +596,9 @@ will start a session: a repeat (below) is answered without them. A host that fai
 start fails — its agent binary missing, a locked keychain — or does not end
 within 60 s is `not_accepting`, reason `start_failed`, `data.cause` the
 host's first error line; the hub stops that host (`session.stop`, then, its
-own child, its termination), so nothing of it is left. More than 16 creates
+own child, its termination: SIGTERM, a grace, SIGKILL, and its reap) — a host
+that does not exit even then, stuck in an uninterruptible wait, is left as
+it is. More than 16 creates
 in flight are `unavailable`, reason `busy`; a hub tearing down answers
 `unavailable`, reason `closing`.
 

@@ -59,7 +59,8 @@ import (
 //     environment (ChildEnv); its working directory the session's. Its ready
 //     line is read (hostspawn.ReadReady). A host that does not start, or does
 //     not answer ok, is unavailable, reason spawn_failed — the host
-//     terminated and reaped (Settle, Terminate).
+//     terminated (Settle, Terminate) and reaped once it exits; one stuck in
+//     an uninterruptible wait through both graces is left as it is.
 //  2. The hub dials it as a client of its own and attaches with when: ready
 //     (remote.Session.Start), waiting for the session's start at most
 //     createStartWait: a start that fails, or that takes longer, is
@@ -765,7 +766,8 @@ func (h *hub) join(ctx context.Context, id string, e rundir.Entry) createAnswer 
 }
 
 // notReady is a spawned host that gave no usable ready line (failure, why):
-// ended and reaped — its agents' record read once (ownedHost) — and a
+// ended — and reaped once it exits; its agents' record read once (ownedHost)
+// — and a
 // refusal: closing for a create the teardown cut.
 func (h *hub) notReady(tag string, host *ownedHost, failure hostspawn.Failure, why string) createAnswer {
 	var msg string
@@ -990,7 +992,9 @@ func dialCreated(ctx context.Context, socket, sid string) (createdSession, error
 // connection of its own, bounded by createStopWait, then
 // hostspawn.TermGrace for the host's stop sequence; a stop that cannot be
 // sent, or a host still there after the grace, is terminated. It returns once
-// the host is gone and reaped.
+// the host is gone and reaped, or once the termination's own graces have
+// passed with it still there (an uninterruptible wait), which is left as it
+// is.
 func (h *hub) abandonHost(host *ownedHost, socket, sid string) {
 	if host.child.Exited() {
 		host.killAgents()
