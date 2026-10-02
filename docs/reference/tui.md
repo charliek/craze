@@ -845,12 +845,14 @@ Type a prompt below to start one.` It needs 40×10; smaller, it says so.
 
 The running rows come from this machine's [hub](cli.md#the-hub), started when
 the list opens if none runs: the list draws at once and the hub's rows follow,
-and while the list is open this terminal holds no connection to any other
-session. When no hub answers within 2 seconds, when the hub keeps dropping
-the list (three times in 10 seconds), or when what it sends cannot show every
-session in full (more than 512 of them, or a session whose row is too large
-for the hub to pass on), the list asks each session's host itself for the
-rest of that opening; it looks the same either way. The saved rows are read
+and while the list reads from the hub this terminal holds no connection to
+any other session — only the one to the hub. When no hub answers within 2
+seconds, when the hub keeps dropping the list (three times in 10 seconds), or
+when what it sends cannot show every session in full (more than 512 of them,
+or a session whose row is too large for the hub to pass on), the list asks
+each session's host itself for the rest of that opening, keeping a connection
+to each and asking it once a second, as the list did before the hub; it looks
+the same either way. The saved rows are read
 from this craze directory's session index whichever it is.
 
 Under the rows is an input, always focused, where a new session is started
@@ -1135,7 +1137,10 @@ it applies [`--effort` and `--fast`](cli.md#flags) — the effort matched
 against the levels its model offers (an exact id, then an id or a name, case
 folded). One that matches nothing — `xhigh` where a model stops at `high`, or
 a model with no effort or no fast mode at all — is skipped, noted in the
-session's journal, and the session starts at the model's own.
+session's journal, and the session starts at the model's own. So is one the
+agent refuses. An agent that does not answer the setting at all within 15
+seconds fails the session's start instead, and the list shows that session
+as failed, with the setting named in its error.
 
 ## Modes
 
