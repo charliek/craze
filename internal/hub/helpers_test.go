@@ -544,6 +544,23 @@ func (rn *running) stopped(t *testing.T) error {
 	}
 }
 
+// tick hands the hub's loop one tick on ch, within step. A hub that has
+// already returned, or a loop that never takes the tick, fails the test with
+// what the hub said — its log names why it stopped — rather than parking the
+// test on an unbuffered send for good (plan 032 X76: V1's -race ×20 saw
+// TestALostRecordOrSocketStopsTheHub parked on its second lost tick for 54
+// minutes, the hub already gone and its reason never printed).
+func (rn *running) tick(t *testing.T, ch chan<- time.Time) {
+	t.Helper()
+	select {
+	case ch <- time.Now():
+	case <-rn.done:
+		t.Fatalf("the hub had stopped (Run: %v) before the test's tick; it said: %s", rn.err, rn.stderr)
+	case <-time.After(step):
+		t.Fatalf("the hub's loop took no tick within %v; it said: %s", step, rn.stderr)
+	}
+}
+
 // isRunning reports whether Run has not returned.
 func (rn *running) isRunning() bool {
 	select {

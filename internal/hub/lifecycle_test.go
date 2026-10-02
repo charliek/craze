@@ -644,12 +644,12 @@ func TestALostRecordOrSocketStopsTheHub(t *testing.T) {
 		rn := runIn(t, env, hk)
 		rn.line(t)
 		h := rn.serving(t)
-		lost <- time.Now() // still its own: nothing happens
+		rn.tick(t, lost) // still its own: nothing happens
 		dial(t, h.sock).hello(t)
 		if err := os.Remove(recordPath(t, env)); err != nil {
 			t.Fatal(err)
 		}
-		lost <- time.Now()
+		rn.tick(t, lost)
 		if err := rn.stopped(t); err != nil {
 			t.Fatal(err)
 		}
@@ -680,7 +680,7 @@ func TestALostRecordOrSocketStopsTheHub(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		lost <- time.Now()
+		rn.tick(t, lost)
 		if err := rn.stopped(t); err != nil {
 			t.Fatal(err)
 		}
@@ -889,7 +889,7 @@ func TestTheOrphanSweepRuns(t *testing.T) {
 	rn := runIn(t, env, hk)
 	rn.line(t)
 	waitFor(t, "the sweep at start", func() bool { return n.Load() == 1 })
-	tick <- time.Now()
+	rn.tick(t, tick)
 	waitFor(t, "the sweep at a tick", func() bool { return n.Load() == 2 })
 	if !strings.Contains(rn.stderr.String(), "orphan sweep: 1 orphan locks") {
 		t.Fatalf("the sweep's report is not in the log: %s", rn.stderr)
