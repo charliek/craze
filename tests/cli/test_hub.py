@@ -385,11 +385,25 @@ def _created_entry(short: str) -> dict:
     return entry
 
 
+def _ready_entry(short: str) -> dict:
+    """_created_entry once it says ready, within 10 s: the host writes its
+    entry's ready flag on its own, after the start craze new's answer waited
+    for (X48), so the flag can follow the answer (plan 032 X69: seen on macOS
+    CI)."""
+    deadline = time.monotonic() + 10.0
+    while True:
+        entry = _created_entry(short)
+        if entry.get("ready") is True:
+            return entry
+        assert time.monotonic() < deadline, f"the created session's entry never said ready: {entry}"
+        time.sleep(0.05)
+
+
 def test_new_starts_sessions_that_ps_lists(craze_bin: Path, fake_agent_bin: Path, tmp_path: Path) -> None:
     """A12: `craze new` starts a session in another directory through the hub
     it spawns -- with a first prompt and without -- and returns only once the
-    session has started (its registry entry ready, carrying the create's
-    request id), printing its short id and directory; the hub's hosts find the
+    session has started (its registry entry, carrying the create's request id,
+    says ready on its own soon after), printing its short id and directory; the hub's hosts find the
     fake agent through `[agents]` (no agent binary crosses to them), and the
     provider is persisted as the next default. `craze ps` then lists both,
     the first titled by its prompt."""
@@ -402,8 +416,8 @@ def test_new_starts_sessions_that_ps_lists(craze_bin: Path, fake_agent_bin: Path
     work.mkdir()
 
     first = _started(_new(craze_bin, "-C", str(work), "--provider", "cursor", "first", "words"), work)
-    entry = _created_entry(first)
-    assert entry["ready"] is True and entry["workspace"] == str(work), entry
+    entry = _ready_entry(first)
+    assert entry["workspace"] == str(work), entry
     assert entry["requestId"].startswith("new-") and entry["requestHash"].startswith("sha256:"), entry
     # The host saves its provider just after its start publishes readiness,
     # which is what craze new's answer waits for: the save can follow it
@@ -414,7 +428,8 @@ def test_new_starts_sessions_that_ps_lists(craze_bin: Path, fake_agent_bin: Path
         time.sleep(0.05)
 
     second = _started(_new(craze_bin, "-C", str(work), "--provider", "cursor"), work)
-    assert second != first and _created_entry(second)["ready"] is True
+    assert second != first
+    _ready_entry(second)
     rec = _the_hub(_home())
 
     deadline = time.monotonic() + WAIT

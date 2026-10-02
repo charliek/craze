@@ -69,7 +69,27 @@ func (s *server) setGated(msg *acp.Message, handle func(*acp.Message)) {
 		return
 	}
 	go func() {
-		awaitGate(gate)
+		awaitSetGate(gate)
 		run()
 	}()
+}
+
+// awaitSetGate is one set's release: a byte read from the FIFO at path. An
+// end of file is no release — the FIFO is opened afresh and read again — since
+// a set whose gate opens while the test's writer for the set before it is
+// still open would otherwise read that writer's close as its own release, and
+// answer before the test let it go (plan 032 X69: seen on macOS CI).
+func awaitSetGate(path string) {
+	for {
+		f, err := os.Open(path)
+		if err != nil {
+			return
+		}
+		var b [1]byte
+		n, _ := f.Read(b[:])
+		_ = f.Close()
+		if n == 1 {
+			return
+		}
+	}
 }
