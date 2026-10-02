@@ -167,10 +167,12 @@ type listOptions struct {
 	// A test's hooks, nil in production, each run on the roster's goroutine:
 	// moved is told each mode the roster enters; seeded each reply that
 	// (re)seeds the running rows, with its epoch; published each Snapshot
-	// as it is put in the slot.
+	// as it is put in the slot; capFired as a handover's cap is taken, before
+	// the poller's newest Snapshot is looked for.
 	moved     func(Mode)
 	seeded    func(epoch string)
 	published func(roster.Snapshot)
+	capFired  func()
 }
 
 func listDefaults(env rundir.Env, index roster.Index) listOptions {
@@ -437,6 +439,33 @@ func (r *ListRoster) poll(late *reaching, hold bool) {
 		}
 		capped = r.o.holdCap()
 	}
+	// take is one Snapshot of the poller's taken: handed on, or — holding —
+	// weighed against the hold's conditions.
+	take := func(s roster.Snapshot) {
+		if !hold {
+			r.publish(s)
+			return
+		}
+		latest, have = s, true
+		switch {
+		case s.RegistryErr != nil:
+			if why := s.RegistryErr.Error(); why != heldErr {
+				heldErr = why
+				h := held
+				h.RegistryErr = s.RegistryErr
+				r.publish(h)
+			}
+		case listed != nil && (waiting(s, listed) || s.SavesRunning()):
+			if heldErr != "" {
+				// Read now: the note goes, the hub's rows stay.
+				heldErr = ""
+				r.publish(held)
+			}
+		default:
+			hold, capped = false, nil
+			r.publish(s)
+		}
+	}
 	for {
 		var pending <-chan dialed
 		if late != nil {
@@ -452,38 +481,32 @@ func (r *ListRoster) poll(late *reaching, hold bool) {
 			d.sub.close()
 		case <-capped:
 			capped, listed = nil, nil
-			if hold && have && latest.RegistryErr == nil {
-				hold = false
-				r.publish(latest)
+			if f := r.o.capFired; f != nil {
+				f()
+			}
+			// The release is weighed against the poller's newest Snapshot: one
+			// waiting in its slot — a read that failed since, say — is taken
+			// first, as any is, and the one taken before only when none is
+			// (r44 1).
+			select {
+			case s, ok := <-p.Updates():
+				if !ok {
+					late.abandon()
+					return
+				}
+				take(s)
+			default:
+				if hold && have && latest.RegistryErr == nil {
+					hold = false
+					r.publish(latest)
+				}
 			}
 		case s, ok := <-p.Updates():
 			if !ok {
 				late.abandon()
 				return
 			}
-			if !hold {
-				r.publish(s)
-				continue
-			}
-			latest, have = s, true
-			switch {
-			case s.RegistryErr != nil:
-				if why := s.RegistryErr.Error(); why != heldErr {
-					heldErr = why
-					h := held
-					h.RegistryErr = s.RegistryErr
-					r.publish(h)
-				}
-			case listed != nil && (waiting(s, listed) || s.SavesRunning()):
-				if heldErr != "" {
-					// Read now: the note goes, the hub's rows stay.
-					heldErr = ""
-					r.publish(held)
-				}
-			default:
-				hold, capped = false, nil
-				r.publish(s)
-			}
+			take(s)
 		}
 	}
 }

@@ -134,6 +134,15 @@ func hostWith(t *testing.T, env rundir.Env, o fakehost.Options) (*fakehost.Host,
 	return h, reg
 }
 
+// generousPoller is the list's own poller over env and x — roster.Open's — with
+// an attempt budget of step in place of production's 500 ms shares: a real
+// host a starved run schedules late is still heard from, never turned
+// unreachable mid-assertion (r44 5). The scripted tests keep the exact
+// transitions.
+func generousPoller(env rundir.Env, x *listIndex) func() listPoller {
+	return func() listPoller { return roster.OpenBudget(env, x, step) }
+}
+
 // gate keeps a poller from asking the host reg lists: its entry names no
 // craze session — a host before its engine is up — so a poller lists it
 // connecting, and asks it nothing (roster's launch), until ungate gives the
@@ -278,7 +287,7 @@ func TestAReachableRowWithNoUsableBodyIsThePollers(t *testing.T) {
 				o.seedWait, o.reseedWait = step, step
 				o.ensure = fixed(h.sock)
 				o.holdCap = func() <-chan time.Time { return nil }
-				poller := o.poller
+				poller := generousPoller(env, ho.x)
 				o.poller = func() listPoller {
 					mu.Lock()
 					defer mu.Unlock()
@@ -391,7 +400,7 @@ func TestTheHandoverHoldsUntilTheHubsSessionsAreHeardFrom(t *testing.T) {
 	connecting := polledRow(1, sessionOf(1), roster.Connecting, nil)
 	// open is the roster on the hub's two rows, handed over to the scripted
 	// poller: the list's Snapshots so far, and the cap's channel.
-	open := func(t *testing.T) (*listRig, *scriptPoller, chan time.Time, int) {
+	open := func(t *testing.T, tweaks ...func(*listOptions)) (*listRig, *scriptPoller, chan time.Time, int) {
 		t.Helper()
 		h := newScriptHub(t, hostOf(0xa), one, rosterRowOf(2, "two"))
 		p := &scriptPoller{out: make(chan roster.Snapshot)}
@@ -401,6 +410,9 @@ func TestTheHandoverHoldsUntilTheHubsSessionsAreHeardFrom(t *testing.T) {
 			o.ensure = fixed(h.sock)
 			o.poller = func() listPoller { return p }
 			o.holdCap = func() <-chan time.Time { return capC }
+			for _, f := range tweaks {
+				f(o)
+			}
 		})
 		sub := h.next()
 		rg.mode(ModeHub)
@@ -498,6 +510,131 @@ func TestTheHandoverHoldsUntilTheHubsSessionsAreHeardFrom(t *testing.T) {
 			t.Fatalf("the Snapshot at the cap: %s", listed(s))
 		}
 	})
+
+	// fire ends the hold's wait: the cap's channel has no slot, so this
+	// returns once the list has taken it — and the hand that follows, once it
+	// has dealt with it.
+	fire := func(t *testing.T, capC chan time.Time) {
+		t.Helper()
+		select {
+		case capC <- time.Now():
+		case <-time.After(step):
+			t.Fatal("the list was not waiting on the cap")
+		}
+	}
+	failed := roster.Snapshot{Run: 1, RegistryErr: errors.New("the registry cannot be read")}
+	waitingFor1 := roster.Snapshot{Run: 1, Running: []roster.Row{connecting, answered(2, "two, polled")}}
+
+	// done is the barrier after a cap that nothing else is to follow: the
+	// roster's Close cancels it and joins its goroutine, so once it returns
+	// the cap has been dealt with, and nothing was handed meanwhile — a hand
+	// racing the cap's own look for a newer Snapshot would be taken there
+	// instead, and the cap judged on it.
+	done := func(rg *listRig) { rg.r.Close() }
+
+	// The cap before the poller has published anything releases nothing:
+	// there is nothing of the poller's to show (have). The negative control:
+	// a cap that released without one would publish a Snapshot of nothing.
+	t.Run("the cap before any Snapshot", func(t *testing.T) {
+		rg, _, capC, from := open(t)
+		fire(t, capC)
+		done(rg)
+		nothingSince(t, rg, from, "a cap before any Snapshot")
+	})
+
+	// After that cap, the first Snapshot is shown at once: the wait for the
+	// hub's sessions is over.
+	t.Run("the first Snapshot after the cap", func(t *testing.T) {
+		rg, p, capC, from := open(t)
+		fire(t, capC)
+		p.hand(t, waitingFor1)
+		s := rg.until("the poller's first", from, func(roster.Snapshot) bool { return true })
+		if len(s.Running) != 2 || hostRow(s, hostOf(1)).Status != roster.Connecting || fromHub(s) {
+			t.Fatalf("the first Snapshot after a cap that came before any: %s", listed(s))
+		}
+	})
+
+	// The cap while the poller's reads fail releases nothing: the hub's rows
+	// stand with the error, published once. The negative control: a cap that
+	// released whatever the read said would show the failed read's Snapshot —
+	// nothing running.
+	t.Run("the cap while reads fail", func(t *testing.T) {
+		rg, p, capC, from := open(t)
+		p.hand(t, failed)
+		p.hand(t, failed)
+		fire(t, capC)
+		done(rg)
+		got := rg.published(from)
+		if len(got) != 1 || got[0].RegistryErr == nil || !fromHub(got[0]) {
+			for _, s := range got {
+				t.Logf("published: %s", listed(s))
+			}
+			t.Fatalf("%d Snapshots while the reads failed through the cap: want the hub's with the error, once", len(got))
+		}
+	})
+
+	// And the first good read after that cap is shown at once.
+	t.Run("a good read after the cap while reads failed", func(t *testing.T) {
+		rg, p, capC, from := open(t)
+		p.hand(t, failed)
+		p.hand(t, failed)
+		fire(t, capC)
+		p.hand(t, waitingFor1)
+		s := rg.until("the first good read", from+1, func(roster.Snapshot) bool { return true })
+		if len(s.Running) != 2 || fromHub(s) || s.RegistryErr != nil {
+			t.Fatalf("the first good read after the cap: %s", listed(s))
+		}
+	})
+
+	// The cap with only the saved half in the way — both hosts answered, the
+	// poller's saved half not yet taken again — releases the poller's latest,
+	// whole. The negative control: a cap that released nothing would leave
+	// the hub's rows up.
+	t.Run("the cap with only a saved-half conflict", func(t *testing.T) {
+		rg, p, capC, from := open(t)
+		stale := roster.Snapshot{Run: 1, Running: []roster.Row{answered(1, "one, polled"), answered(2, "two, polled")},
+			Saved: []sessions.Row{savedRow(1, "one, saved", 9)}}
+		p.hand(t, stale)
+		p.hand(t, stale)
+		nothingSince(t, rg, from, "before the cap")
+		fire(t, capC)
+		s := rg.until("the poller's latest at the cap", from, func(roster.Snapshot) bool { return true })
+		if title(s, 1) != "one, polled" || !slices.Equal(savedTitles(s), []string{"one, saved"}) {
+			t.Fatalf("the Snapshot at the cap: %s", listed(s))
+		}
+	})
+
+	// A newer Snapshot waiting in the poller's slot as the cap is taken — a
+	// read that failed after the one the list took last — is what the release
+	// is weighed against (r44 1): the hold stays, the hub's rows with the
+	// error. The poller here has a slot of one, and the newer Snapshot is put
+	// in it as the cap is taken (capFired), after the list has dealt with the
+	// one before. The negative control: a cap that weighed the Snapshot it
+	// took last would show host 1 connecting, and then the failed read.
+	t.Run("a newer Snapshot waiting as the cap is taken", func(t *testing.T) {
+		slot := &scriptPoller{out: make(chan roster.Snapshot, 1)}
+		rg, _, capC, from := open(t, func(o *listOptions) {
+			o.poller = func() listPoller { return slot }
+			o.capFired = func() { slot.out <- failed }
+		})
+		slot.out <- waitingFor1
+		waitFor(t, "the list takes the good read", func() bool { return len(slot.out) == 0 })
+		fire(t, capC)
+		s := rg.until("the hub's rows with the error", from, func(roster.Snapshot) bool { return true })
+		if !fromHub(s) || s.RegistryErr == nil {
+			t.Fatalf("the Snapshot as the cap was taken: %s", listed(s))
+		}
+		slot.out <- failed
+		waitFor(t, "the list takes the failure", func() bool { return len(slot.out) == 0 })
+		slot.out <- failed
+		waitFor(t, "the list takes the failure again", func() bool { return len(slot.out) == 0 })
+		if got := rg.published(from); len(got) != 1 {
+			for _, s := range got {
+				t.Logf("published: %s", listed(s))
+			}
+			t.Fatalf("%d Snapshots after the cap: want the hub's with the error, once", len(got))
+		}
+	})
 }
 
 // TestALegacySavedRowIsNotListedTwiceAcrossAHandover (r42 3, X57): host 1's
@@ -543,7 +680,7 @@ func TestALegacySavedRowIsNotListedTwiceAcrossAHandover(t *testing.T) {
 		o.seedWait, o.reseedWait = step, step
 		o.ensure = fixed(h.sock)
 		o.holdCap = func() <-chan time.Time { return nil }
-		poller := o.poller
+		poller := generousPoller(env, x)
 		o.poller = func() listPoller {
 			mu.Lock()
 			defer mu.Unlock()
@@ -678,7 +815,7 @@ func TestAHandoverHoldsTheHubsRowsUntilTheRegistryIsRead(t *testing.T) {
 		o.seedWait, o.reseedWait = step, step
 		o.ensure = fixed(h.sock)
 		o.holdCap = func() <-chan time.Time { return nil }
-		poller := o.poller
+		poller := generousPoller(env, ho.x)
 		o.poller = func() listPoller {
 			mu.Lock()
 			defer mu.Unlock()

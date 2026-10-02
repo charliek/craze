@@ -382,6 +382,17 @@ func Open(env rundir.Env, index Index) *Roster {
 	return open(index, defaults(env))
 }
 
+// OpenBudget is Open with budget as each share of an attempt's budget in
+// place of dialBudget and listBudget (0: theirs) — a test's, whose real hosts
+// a starved scheduler must not turn unreachable mid-assertion.
+func OpenBudget(env rundir.Env, index Index, budget time.Duration) *Roster {
+	o := defaults(env)
+	if budget > 0 {
+		o.dialBudget, o.listBudget = budget, budget
+	}
+	return open(index, o)
+}
+
 // HubOptions are the hub's roster's (OpenHub). Hosts and Publish are
 // required; every other field's zero value is production's.
 type HubOptions struct {
