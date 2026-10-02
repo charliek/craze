@@ -77,7 +77,12 @@ import (
 // in flight — the creates in flight among it, whose waiters wait for them,
 // and those whose waiters have gone — then cut every create still running
 // (its waiter's connection closes unanswered; a host already started runs
-// on: creator.stop), close the listener, end every roster subscription with
+// on: creator.stop) and wait, bounded by createCleanupWait (3 s) of its own
+// past teardownBound, for the cut creates whose host was launched to be done
+// with it — a host cut before its ready line ended (SIGTERM, createCutGrace,
+// SIGKILL) and reaped before Run returns; a stalled world check, which can
+// launch nothing now, is not waited for — close the listener, end every
+// roster subscription with
 // reset{hub_closing} (resetWait), close every connection — a splice's legs
 // half-closed first, then closed once it has ended or spliceDrain has passed —
 // stop the roster's poll and the sweep, unlink the socket and remove the
@@ -688,6 +693,13 @@ func (h *hub) teardown(cause string) {
 			h.logf("creates in flight did not end within %v; cut off, their hosts left as they are", teardownBound)
 		}
 		h.cr.stop()
+		// The cut creates whose host was launched are done with it before Run
+		// returns (r43 5): a host cut before its ready line is ended and
+		// reaped, in createCutGrace; a stalled world check launched nothing
+		// and is not waited for.
+		if !waitUntil(&h.cr.launches, time.Now().Add(createCleanupWait)) {
+			h.logf("hosts the cut creates launched were not ended within %v", createCleanupWait)
+		}
 	}
 	_ = h.ln.Close()
 	<-h.srv.acceptDone

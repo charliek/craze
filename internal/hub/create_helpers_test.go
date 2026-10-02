@@ -47,6 +47,8 @@ const (
 //     anything else fails it with failCause. It writes <dir>/waiting first.
 //   - "exit": it exits 3 with no ready line.
 //   - "notok": it answers a ready line that is not ok.
+//   - "hang": it never answers its ready line, and serves nothing; with
+//     ",ignoreterm" it ignores SIGTERM too, so only a SIGKILL ends it.
 //
 // Each serves session.stop and ends on it; a mode with the suffix ",nostop"
 // refuses it (stop_unsupported), and ends only on SIGTERM. One with the
@@ -73,6 +75,12 @@ func init() {
 		os.Exit(97)
 	}
 	a := fakehost.ParseSpawnArgs(argv)
+	if hang, ok := strings.CutPrefix(mode, "hang"); ok {
+		if hang == ",ignoreterm" {
+			signal.Ignore(syscall.SIGTERM)
+		}
+		select {}
+	}
 	mode, agent := strings.CutSuffix(mode, ",agent")
 	mode, nostop := strings.CutSuffix(mode, ",nostop")
 	if agent {

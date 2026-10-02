@@ -1391,3 +1391,54 @@ func sleepChildren(t *testing.T) []int {
 	}
 	return out
 }
+
+// TestALaunchRacingTheClosingStartsNothing (r43 1): a create past its last
+// stopping check whose hub closes in that instant — the teardown's quiesce,
+// run by the seam between the check and the launch — starts no host: the
+// launch is decided under the lifecycle lock the closing is set under, and is
+// refused unavailable, reason closing.
+func TestALaunchRacingTheClosingStartsNothing(t *testing.T) {
+	env := testEnv(t)
+	rn, s, sock := creating(t, env, nil, always("ok"))
+	h := rn.serving(t)
+	setVar(t, &createLaunching, func(hh *hub) { hh.life.quiesce() })
+	t.Cleanup(func() { joinCreates(t, h) })
+	c := dial(t, sock)
+	c.hello(t)
+	refusedAs(t, createOn(t, c, map[string]any{"cwd": t.TempDir()}), protocol.CodeUnavailable, protocol.ReasonClosing)
+	for i := range s.count() {
+		if cmd, _ := s.cmd(i); cmd.Process != nil {
+			t.Fatalf("a host was started (pid %d) after the hub closed", cmd.Process.Pid)
+		}
+	}
+}
+
+// TestACutHostIsReapedBeforeRunReturns (r43 5): a create whose host has not
+// answered its ready line — one that never will, and ignores SIGTERM — is cut
+// by its hub's teardown, and that host is ended (SIGTERM, the cut's grace,
+// SIGKILL) and reaped before Run returns: no such process is left the instant
+// it has.
+func TestACutHostIsReapedBeforeRunReturns(t *testing.T) {
+	setVar(t, &teardownBound, 300*time.Millisecond)
+	setVar(t, &createCutGrace, 200*time.Millisecond)
+	env := testEnv(t)
+	launched := make(chan int, 1)
+	setVar(t, &createLaunched, func(pid int) { launched <- pid })
+	rn, _, sock := creating(t, env, nil, always("hang,ignoreterm"))
+	c := dial(t, sock)
+	c.hello(t)
+	c.sendCreate(t, map[string]any{"cwd": t.TempDir()})
+	var pid int
+	select {
+	case pid = <-launched:
+	case <-time.After(step):
+		t.Fatal("no host was launched")
+	}
+	rn.sigs <- syscall.SIGTERM
+	if err := rn.stopped(t); err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Kill(pid, 0); !errors.Is(err, syscall.ESRCH) {
+		t.Fatalf("the cut host %d is still there (%v, %s) when Run has returned", pid, err, procState(pid))
+	}
+}

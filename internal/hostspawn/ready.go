@@ -96,7 +96,10 @@ const (
 
 // ReadReady reads the host's ready line from r: the line, or why there is
 // none — a failure and what it was — within ReadyWait, or until ctx ends. The
-// read runs on a goroutine of its own, which the caller's close of r ends.
+// read runs on a goroutine of its own, which the caller's close of r ends. A
+// line already read when the wait ends — the timer and the read, or ctx's end
+// and the read, ready at once — is the answer (plan 032 r43 3): a host that
+// has announced itself is never taken for one that has not.
 func ReadReady(ctx context.Context, r *os.File) (ReadyLine, Failure, string) {
 	type result struct {
 		line    ReadyLine
@@ -107,16 +110,34 @@ func ReadReady(ctx context.Context, r *os.File) (ReadyLine, Failure, string) {
 	go func() {
 		line, failure, why := ParseReady(r)
 		got <- result{line, failure, why}
+		readyRead()
 	}()
+	readySelecting()
+	var failure Failure
 	select {
 	case res := <-got:
 		return res.line, res.failure, res.why
 	case <-ReadyTimer(ReadyWait):
-		return ReadyLine{}, TimedOut, ""
+		failure = TimedOut
 	case <-ctx.Done():
-		return ReadyLine{}, Cancelled, ""
+		failure = Cancelled
+	}
+	select {
+	case res := <-got:
+		return res.line, res.failure, res.why
+	default:
+		return ReadyLine{}, failure, ""
 	}
 }
+
+// ReadReady's test seams (never in parallel), no-ops in production:
+// readyRead runs on its read's goroutine once the outcome is there to take,
+// and readySelecting just before ReadReady waits on its outcomes — so a test
+// can have the line read and the context ended both before the wait.
+var (
+	readyRead      = func() {}
+	readySelecting = func() {}
+)
 
 // ParseReady reads one ready line from r: every byte up to its newline, at
 // most ReadyLineMax with it, decoded. EOF before any byte is a host that

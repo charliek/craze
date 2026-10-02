@@ -1,7 +1,9 @@
 package hostspawn
 
 import (
+	"context"
 	"encoding/json"
+	"os"
 	"strings"
 	"testing"
 )
@@ -80,5 +82,35 @@ func TestParseReadyLine(t *testing.T) {
 				t.Fatalf("failure %d (%s), want %d", got, why, tc.want)
 			}
 		})
+	}
+}
+
+// TestReadReadyPrefersALineAlreadyRead (plan 032 r43 3): with the ready line
+// read and the caller's context ended both before ReadReady waits — either
+// the select could take — the line is the answer, every time: a host that
+// has announced itself is never taken for one cut before it did.
+func TestReadReadyPrefersALineAlreadyRead(t *testing.T) {
+	prevRead, prevSelecting := readyRead, readySelecting
+	t.Cleanup(func() { readyRead, readySelecting = prevRead, prevSelecting })
+	line := `{"ok":true,"hostId":"0123456789ab","socket":"/run/h.sock","crazeSessionId":"s-1","crazeVersion":"1.0.0"}` + "\n"
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	for i := range 64 {
+		r, w, err := os.Pipe()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := w.WriteString(line); err != nil {
+			t.Fatal(err)
+		}
+		_ = w.Close()
+		read := make(chan struct{})
+		readyRead = func() { close(read) }
+		readySelecting = func() { <-read }
+		got, failure, why := ReadReady(ctx, r)
+		_ = r.Close()
+		if failure != 0 || !got.OK || got.HostID != "0123456789ab" {
+			t.Fatalf("attempt %d: ReadReady = %+v, failure %d (%s); want the line read", i, got, failure, why)
+		}
 	}
 }

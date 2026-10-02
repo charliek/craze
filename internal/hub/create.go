@@ -174,6 +174,13 @@ var (
 	createJoinWait = time.Second
 	// createsMax is how many creates may be in flight at once.
 	createsMax = 16
+	// createCutGrace is the grace a host this hub spawned is given, once the
+	// hub is closing, between SIGTERM and SIGKILL (and again for its reap):
+	// the teardown waits for that ending (createCleanupWait), which must fit.
+	createCutGrace = time.Second
+	// createCleanupWait bounds the teardown's wait, after its cut, for the
+	// creates whose host was launched to be done with it (creator.launches).
+	createCleanupWait = 3 * time.Second
 	// createKeep is how long a done create's answer is kept for its
 	// requestId; createKeepMax how many are.
 	createKeep    = 10 * time.Minute
@@ -202,6 +209,13 @@ type creator struct {
 
 	mu    sync.Mutex
 	calls map[string]*createCall
+
+	// launches counts the creates whose host is launched and not yet done
+	// with — still ended, settled or handed on by its create — each Added
+	// under the lifecycle lock as its host starts (launch), so never once the
+	// hub is closing: what the teardown waits for after its cut, so that a
+	// host it cut is ended and reaped before Run returns (r43 5).
+	launches sync.WaitGroup
 }
 
 func newCreator(h *hub, o Creates) *creator {
@@ -503,10 +517,16 @@ func (cr *creator) admit(p createReq) (*createCall, *protocol.Error) {
 		if cr.stopping() {
 			return createRefusal(closingErr())
 		}
+		createLaunching(cr.h)
 		return cr.h.create(ctx, p)
 	})
 	return c, nil
 }
+
+// createLaunching runs between a create's last stopping check and its launch
+// (launch, which decides again under the lifecycle lock): a no-op, and a
+// test's seam to close the hub in that instant (never in parallel).
+var createLaunching = func(*hub) {}
 
 // stopping reports whether no create may launch a host any more: the hub has
 // decided to close (its lifecycle's closing), or its teardown has cut the
@@ -644,13 +664,18 @@ func (h *hub) create(ctx context.Context, p createReq) createAnswer {
 	wd, _ := os.Getwd()
 	cmd.Env = ChildEnv(environ, wd)
 	cmd.Dir = q.Cwd
-	child, r, err := hostspawn.StartCmd(cmd, hostspawn.HostChildEnv, filepath.Join(dir, hostspawn.AgentGroupsName(hostID)), logPath)
+	host, r, launched, err := h.cr.launch(cmd, filepath.Join(dir, hostspawn.AgentGroupsName(hostID)), logPath)
+	if !launched {
+		h.logf("%s: the hub is closing: no host launched", tag)
+		return createRefusal(closingErr())
+	}
 	if err != nil {
 		// Its error names the executable's path: the hub's log's alone.
 		h.logf("%s: start the session host: %v", tag, err)
 		return createRefusal(spawnFailed("the session host cannot be started"))
 	}
-	host := h.cr.own(child)
+	defer h.cr.launches.Done()
+	child := host.child
 	h.logf("%s: host %s (pid %d) started for a %s session in %s; its log: %s", tag, hostID, child.PID(), p.provider, q.Cwd, logPath)
 	line, failure, why := hostspawn.ReadReady(ctx, r)
 	_ = r.Close()
@@ -779,7 +804,47 @@ func (h *hub) notReady(tag string, host *ownedHost, failure hostspawn.Failure, w
 // not its child and is never owned.
 type ownedHost struct {
 	child *hostspawn.Child
+	cr    *creator
 	once  sync.Once
+}
+
+// launch is a create's launch of cmd, its host, decided under the lifecycle
+// lock — the lock quiesce and the idle decision set closing under (r43 1): a
+// hub that is closing launches nothing (launched false); otherwise the host
+// is started (hostspawn.StartCmd: cmd.Start) and owned, and counted among the
+// launches the teardown waits for, all before the lock is let go — so a
+// launch is either whole before the hub closes, a host the teardown's cut
+// handles as any create's mid-start, or refused. groups and log are the
+// host's agents' record and its log. The lock order is the table's lock, then
+// this one: launch holds the table's lock never.
+func (cr *creator) launch(cmd *exec.Cmd, groups, log string) (*ownedHost, *os.File, bool, error) {
+	l := &cr.h.life
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.closing {
+		return nil, nil, false, nil
+	}
+	child, r, err := hostspawn.StartCmd(cmd, hostspawn.HostChildEnv, groups, log)
+	if err != nil {
+		return nil, nil, true, err
+	}
+	cr.launches.Add(1)
+	createLaunched(child.PID())
+	return cr.own(child), r, true, nil
+}
+
+// createLaunched is told each host a create launched, by its pid, as it is
+// launched: a no-op, and a test's seam (never in parallel).
+var createLaunched = func(int) {}
+
+// grace is how long the host is given between SIGTERM and SIGKILL, and to
+// exit of its own accord: hostspawn.TermGrace, or createCutGrace once the hub
+// is closing, whose teardown waits for its ending (createCleanupWait).
+func (o *ownedHost) grace() time.Duration {
+	if o.cr.stopping() {
+		return createCutGrace
+	}
+	return hostspawn.TermGrace
 }
 
 // own starts watching child, a host this hub just spawned: when it exits —
@@ -788,7 +853,7 @@ type ownedHost struct {
 // has gone leaves its started hosts running, and one of them that dies later
 // is the orphan's lot (SF-80's reaper, C19).
 func (cr *creator) own(child *hostspawn.Child) *ownedHost {
-	o := &ownedHost{child: child}
+	o := &ownedHost{child: child, cr: cr}
 	go func() {
 		select {
 		case <-child.Done():
@@ -804,14 +869,14 @@ func (o *ownedHost) killAgents() { o.once.Do(o.child.KillAgents) }
 
 // terminate is hostspawn.Child.Terminate, its agents' cleanup run once.
 func (o *ownedHost) terminate() {
-	o.child.End(hostspawn.TermGrace)
+	o.child.End(o.grace())
 	o.killAgents()
 }
 
 // settle is hostspawn.Child.Settle, its agents' cleanup run once: a host
 // exiting of its own accord is given the grace to, and terminated past it.
 func (o *ownedHost) settle() {
-	if !o.child.WaitExit(hostspawn.TermGrace) {
+	if !o.child.WaitExit(o.grace()) {
 		o.terminate()
 		return
 	}
@@ -883,7 +948,7 @@ func (h *hub) abandonHost(host *ownedHost, socket, sid string) {
 		host.killAgents()
 		return
 	}
-	if stopCreated(socket, sid) == nil && host.child.WaitExit(hostspawn.TermGrace) {
+	if stopCreated(socket, sid) == nil && host.child.WaitExit(host.grace()) {
 		host.killAgents()
 		return
 	}
