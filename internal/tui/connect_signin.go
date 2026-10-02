@@ -680,9 +680,12 @@ func (m Model) signInStatus() (text string, ready bool) {
 // redirect carries. A key glued onto the address changes its path or its
 // state, so it is not one; a declined approval's redirect, which has no code,
 // is not either, though Enter still hands it over, to be told as declined.
+// Nor is anything Enter would refuse before the attempt sees it
+// (redirectRefusal): an address padded past connectRedirectMax is told "too
+// long" on Enter, so it never reads as ready (review r16 b).
 func redirectReady(value, redirect, state string) bool {
 	v := strings.TrimSpace(value)
-	if redirect == "" || state == "" || strings.ContainsFunc(v, unicode.IsSpace) {
+	if redirect == "" || state == "" || strings.ContainsFunc(v, unicode.IsSpace) || redirectRefusal(v, redirect) != "" {
 		return false
 	}
 	want, err := url.Parse(redirect)

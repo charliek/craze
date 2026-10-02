@@ -843,6 +843,8 @@ func TestRedirectReady(t *testing.T) {
 		{"another path", "http://127.0.0.1:1455/auth/other?code=c&state=" + signInGoldenState, false},
 		{"a user", "http://u@127.0.0.1:1455/auth/callback?code=c&state=" + signInGoldenState, false},
 		{"nothing", "", false},
+		{"the redirect padded past what Enter takes", signInPasted + "&pad=" + strings.Repeat("a", connectRedirectMax), false},
+		{"the redirect padded to just what Enter takes", signInPasted + "&pad=" + strings.Repeat("a", connectRedirectMax-len(signInPasted)-len("&pad=")), true},
 	} {
 		if got := redirectReady(tc.value, signInRedirect, signInGoldenState); got != tc.ready {
 			t.Errorf("%s: redirectReady = %v, want %v", tc.name, got, tc.ready)

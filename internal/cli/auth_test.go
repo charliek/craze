@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -512,8 +513,13 @@ func ptyAuthScreen(t *testing.T, drive func(tail *ptyTail, ptmx *os.File), argv 
 	if perr != nil {
 		t.Skipf("no pty: %v", perr)
 	}
-	defer func() { _ = ptmx.Close() }()
-	defer func() { _ = tty.Close() }()
+	// Closed when the test ends, however it ends — a fatal before the command
+	// starts included (review r17 b) — and last: the cleanup that joins the
+	// command is registered after this one, so it runs first.
+	t.Cleanup(func() {
+		_ = tty.Close()
+		_ = ptmx.Close()
+	})
 	tail := newPTYTail(ptmx)
 	if !echoing(t, tty) {
 		t.Fatal("control: a new terminal's echo is off, so finding it on afterwards proves nothing")
@@ -528,16 +534,27 @@ func ptyAuthScreen(t *testing.T, drive func(tail *ptyTail, ptmx *os.File), argv 
 	what := "craze " + strings.Join(argv, " ")
 	done := make(chan error, 1)
 	finished := make(chan struct{})
+	ctx, stop := context.WithCancel(context.Background())
 	go func() {
 		defer close(finished)
-		done <- cmd.Execute()
+		done <- cmd.ExecuteContext(ctx)
 	}()
-	// The command is joined when the test ends, however it ends (review r15
-	// d): a drive that fails waiting for a prompt leaves it running, and it
-	// must not run on into the next test. Registered before drive runs, so a
-	// cleanup drive registers — a hold it would have released — runs first
-	// (cleanups run last-registered first).
+	// The command is joined when the test ends, however it ends (reviews r15
+	// d, r16 d): a drive that fails waiting for a prompt leaves it running,
+	// and it must not run on into the next test, under the seams that test
+	// puts back. So the cleanup ends it — its context cancelled, which ends a
+	// sign-in, and a line typed, which ends a prompt's read: the terminal is
+	// blocking (echoing's Fd), and closing it would not wake a read under way
+	// — and joins it, before the cleanup above closes the terminal.
+	// Registered before drive runs, so a cleanup drive registers — a hold it
+	// would have released — runs first (cleanups run last-registered first).
 	t.Cleanup(func() {
+		stop()
+		select {
+		case <-finished:
+		default:
+			_, _ = ptmx.WriteString("\n")
+		}
 		select {
 		case <-finished:
 		case <-time.After(10 * time.Second):
