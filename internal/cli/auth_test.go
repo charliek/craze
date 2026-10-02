@@ -525,10 +525,26 @@ func ptyAuthScreen(t *testing.T, drive func(tail *ptyTail, ptmx *os.File), argv 
 	cmd.SetOut(&out)
 	cmd.SetErr(tty)
 	cmd.SetArgs(argv)
-	done := make(chan error, 1)
-	go func() { done <- cmd.Execute() }()
-	drive(tail, ptmx)
 	what := "craze " + strings.Join(argv, " ")
+	done := make(chan error, 1)
+	finished := make(chan struct{})
+	go func() {
+		defer close(finished)
+		done <- cmd.Execute()
+	}()
+	// The command is joined when the test ends, however it ends (review r15
+	// d): a drive that fails waiting for a prompt leaves it running, and it
+	// must not run on into the next test. Registered before drive runs, so a
+	// cleanup drive registers — a hold it would have released — runs first
+	// (cleanups run last-registered first).
+	t.Cleanup(func() {
+		select {
+		case <-finished:
+		case <-time.After(10 * time.Second):
+			t.Errorf("%s was still running after its test", maskKeys(what))
+		}
+	})
+	drive(tail, ptmx)
 	select {
 	case err = <-done:
 	case <-time.After(10 * time.Second):

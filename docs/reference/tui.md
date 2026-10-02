@@ -1589,16 +1589,18 @@ auth login chatgpt`](cli.md#signing-in-to-the-chatgpt-plan) inside the box.
   machine, the page it lands on after you approve does not load: copy that
   page's whole address from the address bar, paste it into the field under the
   address — a terminal paste or `Ctrl+V` — and press `Enter`. If craze could
-  not listen, the hint names the address the browser lands on. The field shows
-  what is in it only while that reads as the address the browser lands on — it
-  starts `http://127.0.0.1:<port>/auth/callback`, and holds a one-time code and
-  the sign-in's state, not a key or a token — and masks anything else with `•`,
-  as the key field does, so an API key pasted there out of habit is never drawn,
-  not even before `Enter`. A line that is not an address, or the address of
-  another sign-in, is refused in the field, which is emptied, and is never
-  repeated. Whichever
-  comes first, the browser's return or the pasted address, finishes the
-  sign-in (`Signing in…`).
+  not listen, the hint names the address the browser lands on. The field masks
+  everything in it with `•`, as the key field does — the address too — so an
+  API key pasted there out of habit is never drawn, not even before `Enter`,
+  and not when it is pasted onto the end of the address either. The line under
+  the field says what it holds instead, never repeating any of it: `That's the
+  redirect address: press enter to sign in.` once it is this sign-in's address
+  as the browser was sent to it — `http://127.0.0.1:<port>/auth/callback` with
+  a one-time code and the sign-in's state — and `Paste the whole address the
+  browser was sent to.` for anything else. A line that is not an address, or
+  the address of another sign-in, is refused in the field, which is emptied,
+  and is never repeated. Whichever comes first, the browser's return or the
+  pasted address, finishes the sign-in (`Signing in…`).
 - **`Esc`** goes back to step one and stops the sign-in, closing craze's
   listener; so does every other way out of the box, and every way craze
   exits — a quit, the terminal closing, `SIGTERM`, or craze failing.

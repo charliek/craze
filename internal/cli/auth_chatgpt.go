@@ -240,13 +240,20 @@ func (a *authRun) signIn() error {
 	defer close(done)
 	events := make(chan pasteEvent)
 	var accepted acceptedPaste
-	go a.readRedirects(att, &accepted, cancel, events, done)
+	// The stdin reader and the wait each put the echo back if they panic
+	// (restoreOnPanic): a panic on a goroutine of their own ends craze
+	// without running this function's deferred restore.
+	go func() {
+		defer restoreOnPanic(restoreEcho)
+		a.readRedirects(att, &accepted, cancel, events, done)
+	}()
 	type waited struct {
 		res chatgptauth.Result
 		err error
 	}
 	result := make(chan waited, 1)
 	go func() {
+		defer restoreOnPanic(restoreEcho)
 		res, err := att.Wait(ctx)
 		result <- waited{res, err}
 	}()
@@ -294,6 +301,22 @@ func (a *authRun) signIn() error {
 			}
 			return a.signedIn(ctx, w.res)
 		}
+	}
+}
+
+// restoreOnPanic is deferred by each goroutine signIn starts that runs the
+// attempt's code — the stdin reader and the wait (review r15 a). A panic
+// that unwinds such a goroutine ends craze there and then, without running
+// signIn's deferred restore, which would leave the terminal it turned the echo
+// off on silent for the shell after it. So the panic is recovered just long
+// enough to put the terminal back — restore does nothing a second time, and
+// nothing on a sign-in with no terminal — and is raised again with the same
+// value: craze still crashes, with the panic's own stack, which is still on
+// the goroutine while this deferred call runs.
+func restoreOnPanic(restore func()) {
+	if r := recover(); r != nil {
+		restore()
+		panic(r)
 	}
 }
 

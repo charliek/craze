@@ -38,15 +38,17 @@ import (
 //     closes the attempt it carries (applySignIn).
 //   - The browser comes back to the attempt's loopback listener, or — when the
 //     browser is on another machine, where that page cannot load — its address
-//     is pasted into the step's field. The field draws its text only while it
-//     reads as that address (signInField: the address carries a one-time code
-//     and the attempt's state, never a token) and masks anything else, so a key
-//     pasted out of habit is never in a frame, not even the one before Enter
-//     refuses it (review r14 1, amending §3.13's unmasked field). The listener
-//     and the paste race inside the attempt, and whichever is accepted first
-//     wins (chatgptauth.Attempt). A line that is not an address is refused
-//     before the attempt sees it, never quoted, and the field is emptied, as is
-//     one the attempt refuses.
+//     is pasted into the step's field. The field is always drawn masked, as the
+//     key field is, whatever it holds (signInField; review r15 b, amending
+//     §3.13's unmasked field and superseding r14 1's address-only mask, which a
+//     key glued onto the address got past): a key pasted out of habit is never
+//     in a frame, not even the one before Enter refuses it. A line under the
+//     field says, in one of two fixed texts, whether what it holds is this
+//     attempt's redirect address (signInStatus) — never a word of it. The
+//     listener and the paste race inside the attempt, and whichever is
+//     accepted first wins (chatgptauth.Attempt). A line that is not an address
+//     is refused before the attempt sees it, never quoted, and the field is
+//     emptied, as is one the attempt refuses.
 //   - Every way out of the step ends the attempt and closes its listener with
 //     every connection to it (signInState.end): Esc, which goes back to step
 //     one; the dialog closing for any reason (closeDialog); the dialog dropped
@@ -94,6 +96,11 @@ const (
 	// connectSignInHanded replaces the hint and the field once a pasted
 	// address was accepted: the exchange is under way.
 	connectSignInHanded = "Signing in…"
+	// The line under the field while it holds something (signInStatus): it
+	// is this attempt's redirect address, or it is not (yet). Neither repeats
+	// anything of the field's, which is masked.
+	connectSignInReady     = "That's the redirect address: press enter to sign in."
+	connectSignInPasteHint = "Paste the whole address the browser was sent to."
 	// The footers: while the attempt begins, while it waits, and once the
 	// address is handed over.
 	connectSignInStartHint  = "esc back"
@@ -169,10 +176,13 @@ type signInState struct {
 	cancel context.CancelFunc
 	// att is the attempt, once it has begun; url and redirect are its
 	// authorization and redirect addresses, listening whether a loopback
-	// listener waits for the browser.
+	// listener waits for the browser. state is the state url carries
+	// (authState), which the browser's redirect brings back: what the line
+	// under the field knows this attempt's redirect by (signInStatus).
 	att       signInAttempt
 	url       string
 	redirect  string
+	state     string
 	listening bool
 	// handed says a pasted address was accepted: the attempt is finishing,
 	// and the field is gone.
@@ -346,8 +356,10 @@ func (m Model) openSignInStep() (Model, tea.Cmd) {
 		return m, nil
 	}
 	ti := m.dialogInput()
-	// Masked when drawn unless it reads as the redirect address
-	// (signInField; plan 033 §3.13 as review r14 1 amends it).
+	// Masked, whatever it holds (signInField; plan 033 §3.13 as review r15 b
+	// amends it).
+	ti.EchoMode = textinput.EchoPassword
+	ti.EchoCharacter = connectMask
 	ti.CharLimit = connectRedirectMax + 1
 	// bubbles' own Ctrl+V reads the clipboard with no seam in front of it;
 	// craze reads it itself, tagged with this field (pasteFromClipboard).
@@ -428,6 +440,7 @@ func (m Model) applySignIn(msg connectAnswer) (Model, tea.Cmd) {
 		}
 		s := &m.cdlg.signIn
 		s.att, s.url, s.redirect, s.listening = msg.att, msg.att.URL(), msg.att.RedirectURI(), msg.att.Listening()
+		s.state = authState(s.url)
 		return m, msg.wait
 	case signInDoneMsg:
 		open := m.signInOpen(msg.gen, msg.run)
@@ -622,48 +635,77 @@ func pasteWhat(redirect string) string {
 	return "Paste the whole address the browser was sent to; it starts with " + sanitizeLine(redirect) + "."
 }
 
-// The start every sign-in's redirect address has but for its port:
-// chatgptauth's listener on 127.0.0.1, at the callback's path.
-const (
-	loopbackRedirectStart = "http://127.0.0.1:"
-	loopbackRedirectPath  = "/auth/callback"
-)
-
-// signInField is the field as the step draws it: its text while that reads as
-// the redirect address (redirectShown), and every character masked otherwise,
-// as the key field's are (plan 033 §3.13 as review r14 1 amends it). The mask
-// is decided as the field is drawn, from what it holds then, so no way text
-// reaches it — a key, a terminal's paste, Ctrl+V's clipboard — can draw a key
-// in any frame, the one before Enter refuses it included.
+// signInField is the field as the step draws it: every character masked, as
+// the key field's are, whatever it holds — the redirect address included
+// (plan 033 §3.13 as review r15 b amends it). r14 1's rule drew the text
+// while it started with the redirect address, and a key glued onto that
+// start, or onto a whole address, was drawn with it; no rule about what the
+// text starts with can tell a key from the rest of an address. The step opens
+// the field masked (openSignInStep), and the mask is put on again here as it
+// is drawn, so no way text reaches it — a key, a terminal's paste, Ctrl+V's
+// clipboard — draws any of it in any frame, the one before Enter refuses it
+// included. What the person cannot see, signInStatus says.
 func (m Model) signInField() textinput.Model {
 	f := m.cdlg.key
-	if !redirectShown(f.Value(), m.cdlg.signIn.redirect) {
-		f.EchoMode, f.EchoCharacter = textinput.EchoPassword, connectMask
-	}
+	f.EchoMode, f.EchoCharacter = textinput.EchoPassword, connectMask
 	return f
 }
 
-// redirectShown says whether value, the field's text, may be drawn: whether,
-// its surrounding blanks aside and with no blank inside, it starts with the
-// attempt's redirect address or with any sign-in's
-// (http://127.0.0.1:<port>/auth/callback) — what the browser lands on, whose
-// query is a one-time code and the attempt's state — or is still the start of
-// the attempt's address, as it is while one is typed by hand, which shows
-// nothing that address does not. Anything else may be a key.
-func redirectShown(value, redirect string) bool {
+// signInStatus is the line under the field, and whether it says the field
+// holds the redirect address (review r15 b): nothing while the field is empty
+// or once an address was handed over; connectSignInReady while the field
+// holds this attempt's redirect address as the browser is sent to it
+// (redirectReady), so Enter will hand it over; and connectSignInPasteHint for
+// anything else — a key, an address cut short, one still being typed. Both are
+// fixed texts: the line never repeats any of the field's text.
+func (m Model) signInStatus() (text string, ready bool) {
+	s := m.cdlg.signIn
+	v := m.cdlg.key.Value()
+	switch {
+	case s.handed || v == "":
+		return "", false
+	case redirectReady(v, s.redirect, s.state):
+		return connectSignInReady, true
+	}
+	return connectSignInPasteHint, false
+}
+
+// redirectReady says whether value, the field's text, is this attempt's
+// redirect address as the browser is sent to it after an approval: its
+// surrounding blanks aside and with none inside, an address with the
+// attempt's redirect address's scheme, host, port and path, no user, a code,
+// and the attempt's state — state, which the step reads off the
+// authorization address it shows (authState). That is what the attempt's
+// Paste takes (chatgptauth.Attempt.Paste), and the code an approval's
+// redirect carries. A key glued onto the address changes its path or its
+// state, so it is not one; a declined approval's redirect, which has no code,
+// is not either, though Enter still hands it over, to be told as declined.
+func redirectReady(value, redirect, state string) bool {
 	v := strings.TrimSpace(value)
-	if strings.ContainsFunc(v, unicode.IsSpace) {
+	if redirect == "" || state == "" || strings.ContainsFunc(v, unicode.IsSpace) {
 		return false
 	}
-	if strings.HasPrefix(redirect, v) || redirect != "" && strings.HasPrefix(v, redirect) {
-		return true
-	}
-	rest, ok := strings.CutPrefix(v, loopbackRedirectStart)
-	if !ok {
+	want, err := url.Parse(redirect)
+	if err != nil {
 		return false
 	}
-	port, path, ok := strings.Cut(rest, "/")
-	return ok && port != "" && strings.Trim(port, "0123456789") == "" && strings.HasPrefix("/"+path, loopbackRedirectPath)
+	u, err := url.Parse(v)
+	if err != nil || u.Scheme != want.Scheme || u.Host != want.Host || u.Path != want.Path || u.User != nil {
+		return false
+	}
+	q := u.Query()
+	return q.Get("code") != "" && q.Get("state") == state
+}
+
+// authState is the state the authorization address authURL carries, which
+// the browser's redirect brings back to the attempt (chatgptauth.Begin puts
+// it there), or "" when it carries none.
+func authState(authURL string) string {
+	u, err := url.Parse(authURL)
+	if err != nil {
+		return ""
+	}
+	return u.Query().Get("state")
 }
 
 // hint is the line under the address: how the redirect comes back, or that
@@ -679,12 +721,12 @@ func (s signInState) hint() string {
 }
 
 // signInBody is step three at an inner size: the title, the introduction, the
-// address, the hint, the field, its refusal and the footer, top to bottom. A
-// short box keeps, in order: the title, the field and its refusal; the
-// address's first row; the footer, which says Ctrl+Y copies the whole
-// address; the hint, which says how the paste path ends; the introduction;
-// and the rest of the address, its last row shown ending in "…" when it is
-// cut.
+// address, the hint, the field, the line under it — its refusal, or else its
+// status (signInStatus) — and the footer, top to bottom. A short box keeps,
+// in order: the title, the field and the line under it; the address's first
+// row; the footer, which says Ctrl+Y copies the whole address; the hint,
+// which says how the paste path ends; the introduction; and the rest of the
+// address, its last row shown ending in "…" when it is cut.
 func (m Model) signInBody(inner, budget int) []string {
 	s := m.cdlg.signIn
 	dim, plain := styleFG(m.theme.Dim), styleFG(m.theme.FG)
@@ -709,9 +751,17 @@ func (m Model) signInBody(inner, budget int) []string {
 	if !s.handed {
 		field = take([]string{dialogInputView(m.signInField(), inner)})
 	}
-	var errs []string
+	// A refusal is the field's news while it stands, and the status says
+	// what the field holds otherwise: one of them under the field.
+	var errs, status []string
+	statusStyle := dim
 	if m.cdlg.keyErr != "" {
 		errs = take(dialogWrap(m.cdlg.keyErr, inner))
+	} else if text, ready := m.signInStatus(); text != "" {
+		status = take(dialogWrap(text, inner))
+		if ready {
+			statusStyle = styleFG(m.theme.OK)
+		}
 	}
 	// The address is cut at the width, never at a word: a URL's hyphens and
 	// slashes are no place to break it (dialogWrap would), and its rows are
@@ -738,6 +788,9 @@ func (m Model) signInBody(inner, budget int) []string {
 		rows = append(rows, dim.Render(clampWidth(r, inner)))
 	}
 	rows = append(rows, field...)
+	for _, r := range status {
+		rows = append(rows, statusStyle.Render(clampWidth(r, inner)))
+	}
 	for _, e := range errs {
 		rows = append(rows, styleFG(m.theme.Err).Render(clampWidth(e, inner)))
 	}

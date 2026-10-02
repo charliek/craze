@@ -15,6 +15,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/creack/pty"
+	"golang.org/x/sys/unix"
+
 	"github.com/charliek/craze/internal/chatgptauth"
 	"github.com/charliek/craze/internal/harness/modeltable"
 )
@@ -636,7 +639,10 @@ func TestAuthLoginChatGPTOnATerminal(t *testing.T) {
 // screen; a held Paste keeps the event back until the loop has taken the
 // result — the prompt's line ended — which is the order a confirmation carried
 // by the event alone loses (the -race run's failure: it confirmed nothing).
-// Each order's screen is the other's control.
+// Each order's screen is the other's control. However the test ends, the hold
+// is released and the command joined (review r15 d): a prompt that never shows
+// fails the test with a goroutine still held, which must not run on into the
+// next test's.
 func TestAuthLoginChatGPTConfirmsAPasteEitherWay(t *testing.T) {
 	confirmed := redirectPrompt + "\n" + receivedText(signInRedirect) + "\n"
 	for _, first := range []string{"the event", "the result"} {
@@ -644,19 +650,24 @@ func TestAuthLoginChatGPTConfirmsAPasteEitherWay(t *testing.T) {
 			authNative(t)
 			f := useFakeSignIn(t)
 			hold := make(chan struct{})
+			release := sync.OnceFunc(func() { close(hold) })
 			if first == "the event" {
 				f.waitHold = hold
 			} else {
 				f.pasteHold = hold
 			}
 			screen, stdout, err := ptyAuth(t, func(tail *ptyTail, ptmx *os.File) {
+				// Registered once the command runs, after ptyAuthScreen's
+				// cleanup that joins it, so it runs before that join: the
+				// held goroutine is let go, then the command is waited for.
+				t.Cleanup(release)
 				typeAtPrompt(t, tail, ptmx, redirectPrompt, signInGood)
 				if first == "the event" {
 					seePrompt(t, tail, receivedText(signInRedirect))
 				} else {
 					seePrompt(t, tail, redirectPrompt+"\r\n")
 				}
-				close(hold)
+				release()
 			}, "auth", "login", "chatgpt")
 			if err != nil {
 				t.Fatalf("login on a terminal: %v (screen %q)", err, maskKeys(screen))
@@ -943,6 +954,113 @@ func TestAuthLoginChatGPTRealCancel(t *testing.T) {
 			}
 			if _, err := os.Stat(filepath.Join(native, "auth", "chatgpt.json")); !errors.Is(err, os.ErrNotExist) {
 				t.Fatal("a cancelled sign-in left a token file")
+			}
+		})
+	}
+}
+
+// authSignInPanicEnv makes the sign-in of the test binary's craze child panic
+// on one of its own goroutines (childSignInPanic): "reader", the stdin
+// reader's, as it hands the line typed at the prompt to the attempt; "wait",
+// the wait's, once that line has reached the attempt. Read by the child's init
+// in serve_child_test.go.
+const authSignInPanicEnv = "CRAZE_CLI_TEST_SIGNIN_PANIC"
+
+// signInPanicText is the panicking stand-in's panic value, which the child's
+// stderr — the terminal — shows as craze crashes.
+const signInPanicText = "craze test: the sign-in's stand-in panics"
+
+// panicSignIn is the craze child's stand-in attempt under
+// authSignInPanicEnv: paste-only, with this file's fixed addresses. Where is
+// "reader": its Paste panics, on the stdin reader's goroutine. Where is
+// "wait": its Paste takes the line, and its Wait, on the wait's goroutine,
+// panics once it has.
+type panicSignIn struct {
+	where  string
+	pasted chan struct{}
+	once   sync.Once
+}
+
+func (p *panicSignIn) URL() string         { return signInURL }
+func (p *panicSignIn) RedirectURI() string { return signInRedirect }
+func (p *panicSignIn) Listening() bool     { return false }
+func (p *panicSignIn) Close()              {}
+
+func (p *panicSignIn) Paste(string) error {
+	if p.where == "reader" {
+		panic(signInPanicText)
+	}
+	p.once.Do(func() { close(p.pasted) })
+	return nil
+}
+
+func (p *panicSignIn) Wait(ctx context.Context) (chatgptauth.Result, error) {
+	select {
+	case <-p.pasted:
+		panic(signInPanicText)
+	case <-ctx.Done():
+		return chatgptauth.Result{}, ctx.Err()
+	}
+}
+
+// childSignInPanic puts panicSignIn, panicking where says, behind the craze
+// child's sign-in.
+func childSignInPanic(where string) {
+	beginSignIn = func(context.Context, string, chatgptauth.BeginOptions) (signInAttempt, error) {
+		return &panicSignIn{where: where, pasted: make(chan struct{})}, nil
+	}
+}
+
+// termiosOf is the terminal settings of tty, the pty's slave side.
+func termiosOf(t *testing.T, tty *os.File) unix.Termios {
+	t.Helper()
+	tio, err := unix.IoctlGetTermios(int(tty.Fd()), getTermios)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return *tio
+}
+
+// TestAuthLoginChatGPTPanicRestoresTheEcho (review r15 a): a panic on one of
+// the sign-in's own goroutines — the stdin reader's, or the wait's — ends
+// craze as a panic does, exit 2 with the panic on stderr, but with the
+// terminal put back first: its echo on, and every setting as a new terminal
+// has them, as craze found this one. craze runs in a process of its own, so
+// the panic is a real one that ends it, past every deferred call but the
+// panicking goroutine's; its attempt is a stand-in that panics
+// (authSignInPanicEnv). The control is the echo at the prompt, which is off.
+func TestAuthLoginChatGPTPanicRestoresTheEcho(t *testing.T) {
+	// A new terminal's settings, which the child's terminal has when it
+	// starts: what a restored one is compared with.
+	newPTMX, newTTY, err := pty.Open()
+	if err != nil {
+		t.Skipf("no pty: %v", err)
+	}
+	found := termiosOf(t, newTTY)
+	_ = newPTMX.Close()
+	_ = newTTY.Close()
+	for _, where := range []string{"reader", "wait"} {
+		t.Run(where, func(t *testing.T) {
+			authNative(t)
+			cmd, tail, ptmx, tty := authChildIO(t, []string{authSignInPanicEnv + "=" + where}, "auth", "login", "chatgpt", "--no-browser")
+			seePrompt(t, tail, redirectPrompt)
+			if echoing(t, tty) {
+				t.Fatal("control: the echo is on at the sign-in's prompt, so finding it on afterwards proves nothing")
+			}
+			if _, err := ptmx.WriteString(signInGood + "\n"); err != nil {
+				t.Fatal(err)
+			}
+			if code := authChildExit(t, cmd, tail); code != 2 {
+				t.Fatalf("exit %d; want a panic's 2 (the terminal shows %q)", code, tail.text())
+			}
+			if !tail.wait("panic: "+signInPanicText, 5*time.Second) {
+				t.Fatalf("the terminal does not show the %s's panic:\n%s", where, tail.text())
+			}
+			if !echoing(t, tty) {
+				t.Fatalf("a panic in the sign-in's %s left the terminal's echo off", where)
+			}
+			if got := termiosOf(t, tty); got != found {
+				t.Fatalf("a panic in the sign-in's %s left the terminal's settings changed:\n got %+v\nwant %+v", where, got, found)
 			}
 		})
 	}

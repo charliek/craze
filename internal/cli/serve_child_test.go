@@ -195,6 +195,10 @@ func init() {
 		_ = os.Unsetenv(authEchoRaceEnv)
 		childEchoRace()
 	}
+	if where, ok := os.LookupEnv(authSignInPanicEnv); ok {
+		_ = os.Unsetenv(authSignInPanicEnv)
+		childSignInPanic(where)
+	}
 	if _, ok := os.LookupEnv(cliChildHubHosts); ok {
 		_ = os.Unsetenv(cliChildHubHosts)
 		hub.HostCommand = childHostCommand

@@ -472,8 +472,11 @@ func TestConnectSignInIsTheChatGPTPlansAction(t *testing.T) {
 	if strings.Contains(view, connectKeyTitle) {
 		t.Fatalf("the ChatGPT plan got a key field:\n%s", view)
 	}
-	if m.signInField().EchoMode != textinput.EchoNormal {
-		t.Fatal("the empty address field is drawn masked")
+	if m.cdlg.key.EchoMode != textinput.EchoPassword || m.signInField().EchoMode != textinput.EchoPassword {
+		t.Fatal("the address field is not masked from the moment it opens")
+	}
+	if strings.Contains(view, connectSignInReady) || strings.Contains(view, connectSignInPasteHint) {
+		t.Fatalf("the empty address field has a status line:\n%s", view)
 	}
 	if s.dirs[0] != dir {
 		t.Fatalf("the sign-in went to %s, not the TUI's directory %s", s.dirs[0], dir)
@@ -634,10 +637,18 @@ func TestConnectSignInRefusedWhileWorkRuns(t *testing.T) {
 	m, _ = signInModel(t, false)
 	m, _ = beginStep(t, m)
 	m, _ = press(m, pasteKey(signInPasted))
+	if !strings.Contains(connectView(t, m), connectSignInReady) {
+		t.Fatal("the control: the pasted address has no status line before the refusal")
+	}
 	m.status = statusWorking
 	m, _ = press(m, enter())
 	if m.cdlg.keyErr != connectBusySignInText || m.cdlg.key.Value() != signInPasted || m.cdlg.signIn.handed {
 		t.Fatal("a paste's Enter was not refused, the address kept, while work ran")
+	}
+	// The refusal is the line under the field while it stands: no "press
+	// enter" beside "finish the running work first".
+	if view := connectView(t, m); !strings.Contains(view, "Finish or stop the running work first") || strings.Contains(view, connectSignInReady) {
+		t.Fatalf("the refusal is not the one line under the field:\n%s", view)
 	}
 	// The control.
 	m.status = statusIdle
@@ -798,75 +809,139 @@ func TestConnectSignInStepOneMarks(t *testing.T) {
 	}
 }
 
-// TestRedirectShown (review r14 1): what the address field may draw — an
-// address that starts with the attempt's redirect, or any sign-in's
-// (http://127.0.0.1:<port>/auth/callback), or the attempt's redirect still
-// being typed — and what it masks: a key, an address with a blank in it (a
-// paste's newline becomes one), another path, scheme or host, a port that is
-// not one. The shown rows are the controls: the rule is not "mask everything".
-func TestRedirectShown(t *testing.T) {
+// TestRedirectReady (review r15 b): what the line under the address field
+// calls this attempt's redirect address — the attempt's own address, as the
+// browser is sent to it after an approval, with a code and the attempt's
+// state, its surrounding blanks aside — and what it does not: a key alone, a
+// key glued onto the address's start or onto a whole address, or after a
+// blank; the address cut short, with no code, with another attempt's state,
+// on another attempt's port, scheme or host, or with a user; and anything
+// before the attempt has begun. The true rows are the controls.
+func TestRedirectReady(t *testing.T) {
 	for _, tc := range []struct {
+		name  string
 		value string
-		shown bool
+		ready bool
 	}{
-		{"", true},
-		{"http://127.0", true},
-		{signInRedirect, true},
-		{signInPasted, true},
-		{"  " + signInPasted + " ", true},
-		{"http://127.0.0.1:50123/auth/callback?code=c&state=s", true},
-		{connectCanary, false},
-		{" " + connectCanary, false},
-		{"h" + connectCanary, false},
-		{signInPasted + " " + connectCanary, false},
-		{"http://127.0.0.1:1455/other?code=c", false},
-		{"http://127.0.0.1:/auth/callback", false},
-		{"http://127.0.0.1:14x5/auth/callback", false},
-		{"https://127.0.0.1:1455/auth/callback", false},
-		{"http://localhost:1455/auth/callback", false},
+		{"the redirect", signInPasted, true},
+		{"the redirect between blanks", "  " + signInPasted + " ", true},
+		{"its parameters in another order", signInRedirect + "?state=" + signInGoldenState + "&code=c", true},
+		{"a key alone", connectCanary, false},
+		{"a key glued onto the address's start", signInRedirect + connectCanary, false},
+		{"a key glued onto the address's start, a query after", signInRedirect + connectCanary + "?code=c&state=" + signInGoldenState, false},
+		{"a key glued onto the whole address", signInPasted + connectCanary, false},
+		{"a key after a blank", signInPasted + " " + connectCanary, false},
+		{"the address alone", signInRedirect, false},
+		{"the address being typed", "http://127.0", false},
+		{"no code", signInRedirect + "?state=" + signInGoldenState, false},
+		{"an empty code", signInRedirect + "?code=&state=" + signInGoldenState, false},
+		{"another attempt's state", signInRedirect + "?code=c&state=another-attempts-state", false},
+		{"no state", signInRedirect + "?code=c", false},
+		{"another port", "http://127.0.0.1:50123/auth/callback?code=c&state=" + signInGoldenState, false},
+		{"another scheme", "https://127.0.0.1:1455/auth/callback?code=c&state=" + signInGoldenState, false},
+		{"another host", "http://localhost:1455/auth/callback?code=c&state=" + signInGoldenState, false},
+		{"another path", "http://127.0.0.1:1455/auth/other?code=c&state=" + signInGoldenState, false},
+		{"a user", "http://u@127.0.0.1:1455/auth/callback?code=c&state=" + signInGoldenState, false},
+		{"nothing", "", false},
 	} {
-		if got := redirectShown(tc.value, signInRedirect); got != tc.shown {
-			t.Errorf("redirectShown(<value %d bytes>) = %v, want %v", len(tc.value), got, tc.shown)
+		if got := redirectReady(tc.value, signInRedirect, signInGoldenState); got != tc.ready {
+			t.Errorf("%s: redirectReady = %v, want %v", tc.name, got, tc.ready)
 		}
 	}
-	if redirectShown("http://127", "") {
-		t.Error("before the attempt has begun, a partial address is shown")
+	if redirectReady(signInPasted, "", signInGoldenState) || redirectReady(signInPasted, signInRedirect, "") {
+		t.Error("the redirect is ready before the attempt has begun")
+	}
+	if authState(signInURL) != signInGoldenState {
+		t.Error("the state is not read off the authorization address")
 	}
 }
 
-// TestConnectSignInFieldMasksAKey (review r14 1, amending §3.13's unmasked
-// field): the frame right after a key is pasted into the address field —
-// before Enter refuses it — draws it masked, one mask per character, as is a
-// key typed in by hand a character at a time; nowhere else in the frame is
-// it either (connectLeak). The control is the browser's redirect in the same
-// field, drawn as it is, its state in the frame.
-func TestConnectSignInFieldMasksAKey(t *testing.T) {
-	standInSignIn(t, func() *fakeSignIn { return newFakeSignIn(false, chatgptauth.Result{}) })
-	m, _ := signInModel(t, false)
-	m, _ = beginStep(t, m)
-	masked := "│❯ " + strings.Repeat(string(connectMask), len(connectCanary))
-
-	m, _ = press(m, pasteKey(connectCanary))
-	connectLeak(t, m, nil)
-	if view := connectView(t, m); !strings.Contains(view, masked) {
-		t.Fatalf("the pasted key is not drawn masked:\n%s", view)
+// signInFieldRow is the address field's row in view, from its prompt to the
+// box's border, or "" when the box has no field.
+func signInFieldRow(view string) string {
+	for _, line := range strings.Split(view, "\n") {
+		if _, rest, ok := strings.Cut(line, "│❯ "); ok {
+			row, _, _ := strings.Cut(rest, "│")
+			return row
+		}
 	}
-	m, _ = press(m, enter())
+	return ""
+}
 
-	for _, r := range connectCanary {
-		m, _ = press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
-		connectLeak(t, m, nil)
+// assertSignInFieldMasked fails the test unless view — a frame already
+// screened for the canary key, a box of the widest a dialog gets — draws its
+// address field as value's masks alone: one per character, as far as the
+// field is wide, and nothing else but the cursor's blank.
+func assertSignInFieldMasked(t *testing.T, view, value string) {
+	t.Helper()
+	row := signInFieldRow(view)
+	want := min(len([]rune(value)), dialogFieldWidth(dialogMaxWidth-dialogBorder))
+	if strings.Trim(row, string(connectMask)+" ") != "" || strings.Count(row, string(connectMask)) != want {
+		t.Fatalf("the field is not drawn as %d masks (row %q, the field holding %d bytes)", want, row, len(value))
 	}
-	if view := connectView(t, m); !strings.Contains(view, masked) {
-		t.Fatalf("the typed key is not drawn masked:\n%s", view)
-	}
-	m, _ = press(m, enter())
+}
 
-	// The control.
-	m, _ = press(m, pasteKey(signInPasted))
-	view := connectView(t, m)
-	if !strings.Contains(view, "state="+signInGoldenState) || strings.Contains(view, "│❯ "+string(connectMask)) {
-		t.Fatalf("the control: the pasted redirect is not drawn as it is:\n%s", view)
+// TestConnectSignInFieldIsAlwaysMasked (review r15 b, amending §3.13's
+// unmasked field and superseding r14 1's address-only mask): whatever the
+// address field holds, the frame right after it lands — before Enter — draws
+// it masked, one mask per character: a key alone, pasted or typed a
+// character at a time; a key glued onto the redirect address's start, which
+// r14 1's rule drew whole; a key glued onto the whole redirect address; and
+// the redirect address itself. The key is nowhere in any of those frames
+// (connectLeak), nor the address's one-time code. The line under the field
+// tells them apart without a word of them: the redirect is "That's the
+// redirect address", the rest "Paste the whole address" — each the other's
+// control — and an emptied field has no line.
+func TestConnectSignInFieldIsAlwaysMasked(t *testing.T) {
+	const code = "golden-code-4f2a9c" // signInPasted's one-time code
+	for _, tc := range []struct {
+		name  string
+		value string
+		typed bool
+		ready bool
+	}{
+		{"a key", connectCanary, false, false},
+		{"a key typed", connectCanary, true, false},
+		{"a key glued onto the address's start", signInRedirect + connectCanary, false, false},
+		{"a key glued onto the address", signInPasted + connectCanary, false, false},
+		{"the redirect", signInPasted, false, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			standInSignIn(t, func() *fakeSignIn { return newFakeSignIn(false, chatgptauth.Result{}) })
+			m, _ := signInModel(t, false)
+			m, _ = beginStep(t, m)
+			if tc.typed {
+				for _, r := range tc.value {
+					m, _ = press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+					connectLeak(t, m, nil)
+					assertSignInFieldMasked(t, connectView(t, m), m.cdlg.key.Value())
+				}
+			} else {
+				m, _ = press(m, pasteKey(tc.value))
+			}
+			connectLeak(t, m, nil)
+			view := connectView(t, m)
+			assertSignInFieldMasked(t, view, tc.value)
+			if strings.Contains(view, code) {
+				t.Fatal("the frame shows the pasted address's one-time code")
+			}
+			want, not := connectSignInPasteHint, connectSignInReady
+			if tc.ready {
+				want, not = not, want
+			}
+			if !strings.Contains(view, want) || strings.Contains(view, not) {
+				t.Fatalf("the line under the field is not %q:\n%s", want, view)
+			}
+			if _, ready := m.signInStatus(); ready != tc.ready {
+				t.Fatalf("signInStatus says ready %v, want %v", ready, tc.ready)
+			}
+
+			// Emptied, the field has no line under it.
+			m.cdlg.key.Reset()
+			if view := connectView(t, m); strings.Contains(view, connectSignInReady) || strings.Contains(view, connectSignInPasteHint) {
+				t.Fatalf("the emptied field still has a status line:\n%s", view)
+			}
+		})
 	}
 }
 
@@ -1121,8 +1196,17 @@ func TestConnectSignInPastedRedirectAgainstFakeIssuer(t *testing.T) {
 
 	redirect := iss.authorize(t, s.url)
 	m, _ = press(m, pasteKey(redirect))
-	if !signInFieldShown(connectView(t, m)) {
-		t.Fatal("no address field")
+	// chatgptauth's own redirect, masked like anything else, is known for
+	// this attempt's by the state its authorization address carries (review
+	// r15 b): the line under the field says so, and the one-time code is not
+	// in the frame.
+	ru, err := url.Parse(redirect)
+	if err != nil {
+		t.Fatal(err)
+	}
+	view := connectView(t, m)
+	if !signInFieldShown(view) || !strings.Contains(view, connectSignInReady) || strings.Contains(view, ru.Query().Get("code")) {
+		t.Fatalf("the pasted redirect is not masked and known as this attempt's:\n%s", view)
 	}
 	m, _ = press(m, enter())
 	if !m.cdlg.signIn.handed || m.cdlg.keyErr != "" {
