@@ -370,6 +370,29 @@ func (r *subagents) childKeys() []string {
 	return keys
 }
 
+// liveChildren are the registered children that have opened, copied out
+// under regMu and released before any child is touched (AddSecrets, plan 033
+// §3.12): a child's own locks are leaves never taken under the registry's. A
+// nil runner — a sub-agent's — has none.
+func (r *subagents) liveChildren() []*Session {
+	if r == nil {
+		return nil
+	}
+	r.regMu.Lock()
+	handles := make([]*childHandle, 0, len(r.live))
+	for _, h := range r.live {
+		handles = append(handles, h)
+	}
+	r.regMu.Unlock()
+	var out []*Session
+	for _, h := range handles {
+		if child := h.session(); child != nil {
+			out = append(out, child)
+		}
+	}
+	return out
+}
+
 // setMode is SetMode's critical section under the registry lock: set the
 // session's mode, then raise every registered child to it, both while no
 // child can register (§3.5, panel P50). The caller holds s.mu; set takes

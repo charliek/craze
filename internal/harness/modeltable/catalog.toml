@@ -101,6 +101,27 @@ driver = "openai-compat"
 base_url = "https://api.z.ai/api/coding/paas/v4"
 env_keys = ["ZHIPU_API_KEY", "ZAI_API_KEY"]
 
+# The ChatGPT plan (plan 033 §3.11): OpenAI's Responses API at its fixed
+# endpoint, funded by Sign in with ChatGPT (craze auth login chatgpt, or
+# /connect), never by a key, so it names no variable and takes no api_key. Its
+# models are not shipped here: they are the signed-in account's own list,
+# fetched and cached beside the model files, and each is chatgpt/<slug>.
+[providers.chatgpt]
+name = "ChatGPT plan"
+driver = "chatgpt"
+
+# craze's own settings for the ChatGPT plan's models (plan 033 §3.11), laid
+# over the account's list: never models of the catalog's, so they need no
+# history line and show nothing for an account that does not list them. start
+# is the slug a new session with nothing remembered starts on when the
+# default model is not funded; a slug's table takes name, efforts,
+# default_effort and tool_profile.
+[chatgpt_defaults]
+start = "gpt-5.6-sol"
+
+[chatgpt_defaults.models."gpt-6-astra"]
+default_effort = "low"
+
 # ---------------------------------------------------------------------------
 # Models, by alias. Every key but provider and wire_model is optional, as in
 # models.toml; cost is dollars per 1,000,000 tokens.

@@ -152,7 +152,7 @@ func (s *rxServer) requests() []rxRequest {
 // redirected to the server.
 func (s *rxServer) model(t *testing.T, r modeltable.Resolved, auth Auth) *responsesModel {
 	t.Helper()
-	m, err := newResponsesModel(r, auth, redirectClient(t, s.srv.URL))
+	m, err := newResponsesModel(r, auth, "", redirectClient(t, s.srv.URL))
 	if err != nil {
 		t.Fatalf("newResponsesModel: %v", err)
 	}
@@ -639,7 +639,7 @@ func TestResponsesSendsImages(t *testing.T) {
 	}
 	t.Run("wrapped", func(t *testing.T) {
 		srv := newRxServer(t, rxAnswer("ok"))
-		lm := wrap(srv.model(t, chatgpt(), newStaticAuth(chatgptToken)), newScrubber(""))
+		lm := wrap(srv.model(t, chatgpt(), newStaticAuth(chatgptToken)), newScrubber("", nil))
 		items := input(t, streamPrompt(t, lm, srv, toolTurn()))
 		if got, want := itemTypes(items), []string{"message/user", "function_call/call_1", "function_call_output/call_1", "message/user"}; !slices.Equal(got, want) {
 			t.Fatalf("input = %v, want %v", got, want)
@@ -934,7 +934,7 @@ func TestResponsesAnExhausted401IsNeverRetried(t *testing.T) {
 				auth := newStaticAuth(chatgptToken, chatgptTokenNext)
 				var lm fantasy.LanguageModel = srv.model(t, chatgpt(), auth)
 				if wrapped {
-					lm = wrap(lm, newScrubber(""))
+					lm = wrap(lm, newScrubber("", nil))
 				}
 				agent := fantasy.NewAgent(lm, fantasy.WithMaxRetries(3))
 				_, err := agent.Stream(context.Background(), fantasy.AgentStreamCall{Prompt: "hi"})
@@ -1081,15 +1081,15 @@ func TestResponsesGenerateCollectsTheStream(t *testing.T) {
 
 // TestNewResponsesModelRefusesWhatCannotBeBuilt: no sign-in, no wire model.
 func TestNewResponsesModelRefusesWhatCannotBeBuilt(t *testing.T) {
-	if _, err := newResponsesModel(chatgpt(), nil, nil); err == nil {
+	if _, err := newResponsesModel(chatgpt(), nil, "", nil); err == nil {
 		t.Error("a model with no Auth was built")
 	}
 	r := chatgpt()
 	r.WireModel = " "
-	if _, err := newResponsesModel(r, newStaticAuth(chatgptToken), nil); err == nil {
+	if _, err := newResponsesModel(r, newStaticAuth(chatgptToken), "", nil); err == nil {
 		t.Error("a model with no wire model was built")
 	}
-	m, err := newResponsesModel(chatgpt(), newStaticAuth(chatgptToken), nil)
+	m, err := newResponsesModel(chatgpt(), newStaticAuth(chatgptToken), "", nil)
 	if err != nil || m.Provider() != "chatgpt" || m.Model() != "gpt-5.6-luna" {
 		t.Fatalf("model %v, err %v", m, err)
 	}
@@ -1098,13 +1098,6 @@ func TestNewResponsesModelRefusesWhatCannotBeBuilt(t *testing.T) {
 	}
 	if _, err := m.StreamObject(context.Background(), fantasy.ObjectCall{}); err == nil {
 		t.Error("StreamObject did something")
-	}
-}
-
-// The factory does not build the driver yet: it lands inert (plan 033 C12).
-func TestNewDoesNotBuildTheChatGPTDriverYet(t *testing.T) {
-	if _, err := New(chatgpt()); err == nil || !strings.Contains(err.Error(), "unknown driver") {
-		t.Fatalf("New(chatgpt) = %v, want the unknown-driver refusal until the sign-in lands", err)
 	}
 }
 

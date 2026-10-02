@@ -36,3 +36,27 @@ type Auth interface {
 	// P19, P35). It never blocks on the network.
 	Values() []string
 }
+
+// The optional sides of an Auth (plan 033 §3.12). The ChatGPT plan's token
+// source (chatgptauth.TokenSource) has both; an Auth without them works, with
+// neither its sentinels kept nor a usage limit latched.
+
+// authSentinels is an Auth whose failures callers tell apart by sentinel —
+// the sign-in's "signed out", "sign in again", "plan usage disabled" and
+// "usage limit reached" — each a fixed-text error its Token wraps. The
+// scrubber keeps the one an error carries reachable through the error it
+// rebuilds (scrubber.sentinel), as it keeps context.Canceled: a sentinel has
+// no text but its own, so it cannot carry a token, and errors.Is then answers
+// through every layer above, which is how the adapter phrases them.
+type authSentinels interface {
+	Sentinels() []error
+}
+
+// usageLatch is an Auth that stops every new request once the ChatGPT plan's
+// usage limit is reached (P33): the driver calls LatchUsageLimit as it
+// returns the usage-limit FinalError, so no wake, sub-agent, summarizer or
+// retry sends another request on the plan until the adapter clears the latch
+// at the next turn a person starts. Until then Token fails at once.
+type usageLatch interface {
+	LatchUsageLimit()
+}

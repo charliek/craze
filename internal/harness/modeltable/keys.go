@@ -136,6 +136,12 @@ var (
 	// ErrSymlinkedKeyFile is SetKey's and RemoveKey's error for a
 	// providers.toml that is a symlink.
 	ErrSymlinkedKeyFile = errors.New("modeltable: providers.toml is a symlink")
+
+	// ErrSignInProvider is SetKey's refusal of a key for the ChatGPT plan's
+	// provider, which is funded by signing in and never by a key (plan 033
+	// §3.11): a stored one would fund nothing, and validateProvider refuses
+	// it on that driver.
+	ErrSignInProvider = errors.New(`modeltable: the ChatGPT plan is funded by signing in, not by an API key: run "craze auth login chatgpt"`)
 )
 
 // KeySource is how a provider is funded: the variable, or the stored key,
@@ -148,8 +154,16 @@ const (
 	// KeyStored is a usable inline api_key in providers.toml, with no usable
 	// variable ahead of it.
 	KeyStored KeySource = "stored"
-	// KeyNone is neither: the provider's models cannot be used.
+	// KeyNone is neither: the provider's models cannot be used. For the
+	// ChatGPT plan's provider it is "not signed in".
 	KeyNone KeySource = "none"
+	// KeySignedIn is the ChatGPT plan's provider with its sign-in funding it:
+	// the token file there and plan usage granted (plan 033 §3.11, P34).
+	KeySignedIn KeySource = "signedin"
+	// KeyPlanDisabled is the ChatGPT plan's provider signed in to by an
+	// account that did not grant craze plan usage: not funded, and signing in
+	// again with consent is how to fund it.
+	KeyPlanDisabled KeySource = "plan_disabled"
 )
 
 // ProviderInfo is one provider as key management sees it (Providers).
@@ -164,8 +178,13 @@ type ProviderInfo struct {
 	// plan 031 §3.2).
 	EnvKeys []string
 	// Via is how it is funded now, judged exactly as Resolve judges it: the
-	// first of EnvKeys set to a usable key, else a usable stored key.
+	// first of EnvKeys set to a usable key, else a usable stored key — or,
+	// for the ChatGPT plan's provider (SignIn), its sign-in: KeySignedIn,
+	// KeyPlanDisabled or KeyNone. Connected says whether that funds it.
 	Via KeySource
+	// SignIn says the provider is funded by signing in, never by a key: the
+	// ChatGPT plan's (plan 033 §3.11). SetKey refuses a key for it.
+	SignIn bool
 	// EnvVar is the variable that funds it when Via is KeyFromEnv, "" else.
 	EnvVar string
 	// Stored says providers.toml holds a non-blank api_key for it, usable or
@@ -176,6 +195,17 @@ type ProviderInfo struct {
 	// for a usable key or none. A table with such a key does not load, so a
 	// caller shows it to have it replaced or removed.
 	StoredProblem error
+}
+
+// Connected reports whether p is funded now, so its models can be used: a
+// variable, a stored key, or a sign-in with plan usage. A sign-in whose plan
+// usage is off is not.
+func (p ProviderInfo) Connected() bool {
+	switch p.Via {
+	case KeyFromEnv, KeyStored, KeySignedIn:
+		return true
+	}
+	return false
 }
 
 // Providers is every provider a key can be given to in dir: the shipped
@@ -223,6 +253,17 @@ func providersWith(dir string, getenv func(string) string, cat *Catalog) ([]Prov
 	out := make([]ProviderInfo, 0, len(merged))
 	for id, p := range merged {
 		info := ProviderInfo{ID: id, Name: cmp.Or(p.Name, id), EnvKeys: slices.Clone(p.EnvKeys), Via: KeyNone}
+		if p.Driver == DriverChatGPT {
+			// Funded by the sign-in alone, as Resolve judges it (plan 033
+			// §3.11): a key stored for it by hand is listed, so it can be
+			// removed, and funds nothing.
+			info.SignIn, info.Via = true, signInVia(dir)
+			if k, ok := doc.Providers[id].storedKey(); ok {
+				info.Stored, info.StoredProblem = true, KeyProblem(k)
+			}
+			out = append(out, info)
+			continue
+		}
 		if name, _, _ := firstEnvKey(getenv, p.EnvKeys); name != "" {
 			info.Via, info.EnvVar = KeyFromEnv, name
 		}
@@ -269,7 +310,9 @@ func keylessProviders(cat *Catalog, path string, doc providersOverlay) map[strin
 // the file already has. An empty key, or one KeyProblem refuses, is refused
 // before anything is read or written, with an error that names the rule and
 // never the value (ErrEmptyKey, ErrKeyTooShort, ErrKeyOverlapsMarker through
-// errors.Is). The rest is the store's rule: see the comment above
+// errors.Is), and so is a key for the ChatGPT plan's provider, which signs in
+// (ErrSignInProvider, plan 033 §3.11), once the file is read under the lock
+// and nothing written. The rest is the store's rule: see the comment above
 // keyFileHeader.
 func SetKey(dir, providerID, key string) error {
 	cat, err := shippedCatalog()
@@ -288,12 +331,29 @@ func setKeyWith(dir, id, key string, cat *Catalog) error {
 	if rule != nil {
 		return &keyRefusedError{provider: id, rule: rule}
 	}
-	return editKeyFile(dir, id, cat, true, func(doc *providersOverlay) bool {
+	return editKeyFile(dir, id, cat, true, func(doc *providersOverlay) (bool, error) {
+		if signInDriver(dir, id, cat, *doc) {
+			return false, ErrSignInProvider
+		}
 		o := doc.Providers[id]
 		o.APIKey = &k
 		doc.Providers[id] = o
-		return true
+		return true, nil
 	})
+}
+
+// signInDriver reports whether id's entry, as dir's providers.toml writes it
+// over the catalog, is on the ChatGPT plan's driver: its own driver when it
+// writes one, else the catalog's (unless dir's models.toml turns the catalog
+// off).
+func signInDriver(dir, id string, cat *Catalog, doc providersOverlay) bool {
+	if d := doc.Providers[id].Driver; d != nil {
+		return *d == DriverChatGPT
+	}
+	if catalogOff(dir) || cat.empty() {
+		return false
+	}
+	return cat.Providers[id].Driver == DriverChatGPT
 }
 
 // RemoveKey clears providerID's inline api_key in dir's providers.toml, and
@@ -318,10 +378,10 @@ func removeKeyWith(dir, id string, cat *Catalog) (removed bool, err error) {
 			return false, knownProvider(dir, id, cat, providersOverlay{})
 		}
 	}
-	err = editKeyFile(dir, id, cat, false, func(doc *providersOverlay) bool {
+	err = editKeyFile(dir, id, cat, false, func(doc *providersOverlay) (bool, error) {
 		o := doc.Providers[id]
 		if o.APIKey == nil {
-			return false
+			return false, nil
 		}
 		_, removed = o.storedKey()
 		o.APIKey = nil
@@ -332,7 +392,7 @@ func removeKeyWith(dir, id string, cat *Catalog) (removed bool, err error) {
 		} else {
 			doc.Providers[id] = o
 		}
-		return true
+		return true, nil
 	})
 	return removed && err == nil, err
 }
@@ -342,8 +402,9 @@ func removeKeyWith(dir, id string, cat *Catalog) (removed bool, err error) {
 // refused, the file read strictly without judging keys (a missing one is
 // empty), id checked against the catalog and the file, and — when edit, which
 // changes doc in place, says there is something to write — the whole file
-// written back atomically at 0600.
-func editKeyFile(dir, id string, cat *Catalog, create bool, edit func(doc *providersOverlay) bool) error {
+// written back atomically at 0600. An error from edit is returned with
+// nothing written.
+func editKeyFile(dir, id string, cat *Catalog, create bool, edit func(doc *providersOverlay) (bool, error)) error {
 	if dir == "" {
 		// paths.NativeDir is "" with no home directory; joining "" would
 		// write providers.toml into the working directory.
@@ -377,8 +438,8 @@ func editKeyFile(dir, id string, cat *Catalog, create bool, edit func(doc *provi
 	if err := knownProvider(dir, id, cat, doc); err != nil {
 		return err
 	}
-	if !edit(&doc) {
-		return nil
+	if changed, err := edit(&doc); err != nil || !changed {
+		return err
 	}
 	b, err := encodeKeyFile(doc)
 	if err != nil {

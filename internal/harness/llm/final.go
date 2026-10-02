@@ -66,3 +66,19 @@ func (e *FinalError) Error() string {
 // sending a smaller one (plan 028), as it does for a *fantasy.ProviderError
 // that says so.
 func (e *FinalError) IsContextTooLarge() bool { return e.contextTooLarge }
+
+// The ChatGPT plan's error codes the harness and the adapter decide by (plan
+// 033 §3.12; OpenAI's Sign in with ChatGPT docs, errors-and-recovery), as a
+// FinalError's Code carries them.
+const (
+	// UsageLimitCode is the plan's usage limit reached: final (an HTTP 429,
+	// or response.failed inside the stream), it latches the token source
+	// (usageLatch), and the account's quota is what is gone
+	// (compact.go's quotaExhaustedCodes).
+	UsageLimitCode = "subscription_sharing_usage_limit_exceeded"
+	// NotEligibleCode is an account whose ChatGPT plan cannot be used here.
+	NotEligibleCode = "subscription_sharing_user_not_eligible"
+	// UnsupportedCapabilityCode is a request using something the route does
+	// not support, named by the error's param.
+	UnsupportedCapabilityCode = "subscription_sharing_unsupported_capability"
+)

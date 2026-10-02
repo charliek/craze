@@ -5,10 +5,10 @@ package llm
 // Responses client, which imports neither Fantasy nor openai-go — to
 // fantasy.LanguageModel, mapping Fantasy's messages to Responses input items
 // and the stream's events to Fantasy's stream parts. It lives here, beside
-// the factory that will build it (plan 033 C14), rather than in
-// responsesapi: it returns *FinalError, and package llm imports the driver,
-// so the driver's package could not import llm back. Its design follows
-// Fantasy's Apache-2.0 responses_language_model.go (responsesapi/NOTICE).
+// the factory that builds it (newSignedIn), rather than in responsesapi: it
+// returns *FinalError, and package llm imports the driver, so the driver's
+// package could not import llm back. Its design follows Fantasy's Apache-2.0
+// responses_language_model.go (responsesapi/NOTICE).
 
 import (
 	"cmp"
@@ -30,10 +30,8 @@ import (
 
 // responsesModel is a model on the ChatGPT plan's driver (DriverChatGPT): the
 // Responses API at OpenAI's fixed endpoint, authenticated by an Auth rather
-// than a key.
-//
-// It lands inert (plan 033 C12): the model table still refuses the driver,
-// and the factory builds it from C14 on, wrapped as every model is (wrap.go).
+// than a key. The factory builds it (newSignedIn), wrapped as every model is
+// (wrap.go).
 //
 // Each request is built from the step's call alone, whole, as the route
 // keeps nothing between requests (store false):
@@ -53,19 +51,25 @@ type responsesModel struct {
 	model    string // the wire model
 	parallel *bool
 	client   *responsesapi.Client
+	// latch is the Auth's usage latch (usageLatch), nil when it has none: the
+	// usage-limit FinalError sets it (fail), so the plan's next request — a
+	// wake's, a sub-agent's, a summary's — fails at once (P33).
+	latch usageLatch
 }
 
-// newResponsesModel builds r's model on auth. httpClient, when not nil,
-// sends the requests (tests reach a local server through it); the client
-// refuses redirects whatever it is.
-func newResponsesModel(r modeltable.Resolved, auth Auth, httpClient *http.Client) (*responsesModel, error) {
+// newResponsesModel builds r's model on auth, sending to the API at baseURL
+// ("" is OpenAI's own; anything but it or a loopback URL is refused,
+// responsesapi.ErrBaseURL). httpClient, when not nil, sends the requests
+// (tests reach a local server through it); the client refuses redirects
+// whatever it is.
+func newResponsesModel(r modeltable.Resolved, auth Auth, baseURL string, httpClient *http.Client) (*responsesModel, error) {
 	if auth == nil {
 		return nil, fmt.Errorf("llm: provider %q (model %q): driver %q signs in, and no sign-in was given", r.ProviderID, r.Alias, r.Driver)
 	}
 	if strings.TrimSpace(r.WireModel) == "" {
 		return nil, fmt.Errorf("llm: provider %q (model %q) names no wire model", r.ProviderID, r.Alias)
 	}
-	c, err := responsesapi.NewClient(responsesapi.Config{HTTPClient: httpClient, Credentials: auth})
+	c, err := responsesapi.NewClient(responsesapi.Config{BaseURL: baseURL, HTTPClient: httpClient, Credentials: auth})
 	if err != nil {
 		return nil, fmt.Errorf("llm: model %q: %w", r.Alias, err)
 	}
@@ -74,7 +78,22 @@ func newResponsesModel(r modeltable.Resolved, auth Auth, httpClient *http.Client
 		v := *r.ParallelToolCalls
 		parallel = &v
 	}
-	return &responsesModel{provider: r.ProviderID, model: r.WireModel, parallel: parallel, client: c}, nil
+	m := &responsesModel{provider: r.ProviderID, model: r.WireModel, parallel: parallel, client: c}
+	m.latch, _ = auth.(usageLatch)
+	return m, nil
+}
+
+// fail is err, from the driver's core, as the error a step ends with
+// (responsesError) — and, for the plan's usage limit, the latch set first,
+// before anything above sees the failure (P33): the usage-limit code is final
+// wherever it arrives, before the stream or inside it.
+func (m *responsesModel) fail(err error) error {
+	out := responsesError(err)
+	var fe *FinalError
+	if m.latch != nil && errors.As(out, &fe) && fe.Code == UsageLimitCode {
+		m.latch.LatchUsageLimit()
+	}
+	return out
 }
 
 func (m *responsesModel) Provider() string { return m.provider }
@@ -306,7 +325,7 @@ func (m *responsesModel) Stream(ctx context.Context, call fantasy.Call) (fantasy
 		}
 		s, err := m.client.Stream(ctx, req)
 		if err != nil {
-			yield(fantasy.StreamPart{Type: fantasy.StreamPartTypeError, Error: responsesError(err)})
+			yield(fantasy.StreamPart{Type: fantasy.StreamPartTypeError, Error: m.fail(err)})
 			return
 		}
 		defer func() { _ = s.Close() }()
@@ -329,7 +348,7 @@ func (m *responsesModel) Stream(ctx context.Context, call fantasy.Call) (fantasy
 				return
 			}
 		}
-		yield(fantasy.StreamPart{Type: fantasy.StreamPartTypeError, Error: responsesError(err)})
+		yield(fantasy.StreamPart{Type: fantasy.StreamPartTypeError, Error: m.fail(err)})
 	}, nil
 }
 

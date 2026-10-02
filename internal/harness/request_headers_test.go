@@ -2,6 +2,9 @@ package harness
 
 import (
 	"context"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -10,14 +13,51 @@ import (
 	"github.com/charliek/craze/internal/harness/store"
 )
 
-// onChatGPT re-points the fixture's "test" provider at the ChatGPT plan's
-// driver. The table loaded from files refuses that driver until its sign-in
-// lands (plan 033 C14), so the test sets it on the loaded table, which the
-// harness reads as it is.
+// onChatGPT puts the fixture's default model, test/a, on the ChatGPT plan:
+// the provider chatgpt on its driver in providers.toml, test/a on it in
+// models.toml, and the fixture's home signed in with plan usage — the
+// registration, and a token file that holds no token, since the table only
+// stats it (plan 033 §3.11) and the scripted models never ask for one. The
+// table is loaded again from the files.
 func onChatGPT(f *fixture) {
-	p := f.table.Providers["test"]
-	p.Driver = modeltable.DriverChatGPT
-	f.table.Providers["test"] = p
+	f.t.Helper()
+	signInFixture(f.t, f.home)
+	edit := func(name, old, new string) {
+		path := filepath.Join(f.home, name)
+		b, err := os.ReadFile(path)
+		if err != nil {
+			f.t.Fatal(err)
+		}
+		if !strings.Contains(string(b), old) {
+			f.t.Fatalf("%s holds no %q", name, old)
+		}
+		if err := os.WriteFile(path, []byte(strings.Replace(string(b), old, new, 1)), 0o600); err != nil {
+			f.t.Fatal(err)
+		}
+	}
+	edit(modeltable.ProvidersFile, "[providers.test]", "[providers.chatgpt]\ndriver = \"chatgpt\"\n\n[providers.test]")
+	edit(modeltable.ModelsFile, "[models.\"test/a\"]\nprovider = \"test\"", "[models.\"test/a\"]\nprovider = \"chatgpt\"")
+	f.table = f.load()
+	f.models["test/a"].provider = modeltable.ChatGPTProvider
+}
+
+// signInFixture lays down dir's ChatGPT sign-in as internal/chatgptauth
+// leaves it, for the table's funding: a registration with plan usage, and a
+// token file that is a placeholder, never a token.
+func signInFixture(t *testing.T, dir string) {
+	t.Helper()
+	auth := filepath.Join(dir, modeltable.ChatGPTAuthDir)
+	if err := os.MkdirAll(auth, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for name, body := range map[string]string{
+		modeltable.ChatGPTClientFile: `{"client_id":"app_client-0001","subject":"user-subject-0001","plan_usage":true}`,
+		modeltable.ChatGPTTokenFile:  `{"placeholder":"no token here"}`,
+	} {
+		if err := os.WriteFile(filepath.Join(auth, name), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
 }
 
 // sessionIDs is the session-id header of each call the model was sent, ""

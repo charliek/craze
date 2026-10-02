@@ -13,10 +13,11 @@ import (
 // TestShippedCatalog is the check a catalog change has to pass (plan 031
 // §3.1; RELEASING.md): catalog.toml decodes strictly into its own schema,
 // every provider has a display name, a valid driver and base URL and at least
-// one env_keys name and no key, every model validates against the catalog's
-// own providers, default_model is a model, no two aliases share an identity,
-// the retired aliases are unique and none is a model, and no model's identity
-// is a retired one. Merged over an empty directory it is a valid Table.
+// one env_keys name and no key — the ChatGPT plan's none at all, since it
+// signs in (plan 033 §3.11) — every model validates against the catalog's own
+// providers, default_model is a model, no two aliases share an identity, the
+// retired aliases are unique and none is a model, and no model's identity is
+// a retired one. Merged over an empty directory it is a valid Table.
 func TestShippedCatalog(t *testing.T) {
 	c, err := shippedCatalog()
 	if err != nil {
@@ -28,6 +29,12 @@ func TestShippedCatalog(t *testing.T) {
 	// The rules restated one by one, so a failure reads as the rule it
 	// breaks even if validate itself were wrong.
 	for id, p := range c.Providers {
+		if p.Driver == DriverChatGPT {
+			if id != ChatGPTProvider || p.Name == "" || len(p.EnvKeys) != 0 || p.BaseURL != "" || p.APIKey != "" || p.Source != "" {
+				t.Errorf("provider %q = %+v: want the chatgpt id, a name, and no env_keys, base URL, key or source", id, p)
+			}
+			continue
+		}
 		if p.Name == "" || len(p.EnvKeys) == 0 || p.APIKey != "" || p.Source != "" {
 			t.Errorf("provider %q = %+v: want a name, env_keys, no key, no source", id, p)
 		}
@@ -169,9 +176,12 @@ func TestShippedCatalogHistory(t *testing.T) {
 }
 
 // TestShippedCatalogOwnerDecisions pins the decisions about the catalog's
-// contents that are not rules of its shape (plan 031 P5, §3.1): the four
-// providers' display names, and no generic MODEL_API_KEY — a variable that
-// name could be set for anything, and would fund (and be redacted as) Meta.
+// contents that are not rules of its shape (plan 031 P5, §3.1): the
+// providers' display names, the ChatGPT plan's among them (plan 033 §3.11),
+// and no generic MODEL_API_KEY — a variable that name could be set for
+// anything, and would fund (and be redacted as) Meta. And the ChatGPT plan's
+// defaults: gpt-5.6-sol to start on, gpt-6-astra at low effort, and none of
+// it a model of the catalog's.
 func TestShippedCatalogOwnerDecisions(t *testing.T) {
 	c, err := ShippedCatalog()
 	if err != nil {
@@ -184,9 +194,21 @@ func TestShippedCatalogOwnerDecisions(t *testing.T) {
 			t.Errorf("provider %q ships MODEL_API_KEY", id)
 		}
 	}
-	want := map[string]string{"fireworks": "Fireworks", "meta": "Meta", "openrouter": "OpenRouter", "zai-coding-plan": "Z.AI Coding Plan"}
+	want := map[string]string{"chatgpt": "ChatGPT plan", "fireworks": "Fireworks", "meta": "Meta", "openrouter": "OpenRouter", "zai-coding-plan": "Z.AI Coding Plan"}
 	if !maps.Equal(names, want) {
 		t.Fatalf("providers = %v, want %v", names, want)
+	}
+	if c.Providers["chatgpt"].Driver != DriverChatGPT {
+		t.Fatalf("chatgpt's driver = %q", c.Providers["chatgpt"].Driver)
+	}
+	wantDefaults := ChatGPTDefaults{Start: "gpt-5.6-sol", Models: map[string]ChatGPTModelDefaults{"gpt-6-astra": {DefaultEffort: "low"}}}
+	if !reflect.DeepEqual(c.ChatGPT, wantDefaults) {
+		t.Fatalf("[chatgpt_defaults] = %+v, want %+v", c.ChatGPT, wantDefaults)
+	}
+	for alias, m := range c.Models {
+		if m.Provider == ChatGPTProvider || strings.HasPrefix(alias, ChatGPTAliasPrefix) {
+			t.Errorf("%s is a shipped model of the ChatGPT plan; its models are the account's own", alias)
+		}
 	}
 	if c.DefaultModel != "fireworks/deepseek-v4p1-flash" {
 		t.Fatalf("default_model = %q", c.DefaultModel)
@@ -283,7 +305,11 @@ func TestShippedCatalogLoadsShareNothing(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	b, err := Load(t.TempDir())
+	// b and fresh read one directory: a table that funds the ChatGPT plan
+	// keeps the directory its sign-in is in (plan 033 §3.11), so two loads of
+	// two directories differ by that alone.
+	bDir := t.TempDir()
+	b, err := Load(bDir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -308,7 +334,7 @@ func TestShippedCatalogLoadsShareNothing(t *testing.T) {
 	a.Models["fireworks/kimi-k3"] = m
 	a.Providers["fireworks"].EnvKeys[0] = "CHANGED"
 	a.Models["new"] = Model{}
-	fresh, err := Load(t.TempDir())
+	fresh, err := Load(bDir)
 	if err != nil {
 		t.Fatal(err)
 	}

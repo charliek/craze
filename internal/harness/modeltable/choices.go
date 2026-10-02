@@ -39,9 +39,11 @@ type Choice struct {
 //
 // The order is the model memory's first — recent, through Recent, so a renamed
 // model keeps its place and a re-pointed alias does not — newest first, each
-// with its rank; then every other model by display name, then alias. The ranks
-// count only the models listed, so they run 1, 2, 3… with no gap where an
-// unfunded remembered model was passed over.
+// with its rank; then every other model by display name, then alias — but the
+// ChatGPT plan's models, which keep the order of the account's own list
+// (priority, plan 033 §7 A19) as one block, placed by its provider's display
+// name. The ranks count only the models listed, so they run 1, 2, 3… with no
+// gap where an unfunded remembered model was passed over.
 func (t *Table) Choices(recent []RecentEntry, getenv func(string) string, current string) []Choice {
 	listed := func(alias string) bool {
 		if alias == current {
@@ -68,9 +70,34 @@ func (t *Table) Choices(recent []RecentEntry, getenv func(string) string, curren
 		}
 	}
 	slices.SortFunc(rest, func(a, b Choice) int {
-		return cmp.Or(cmp.Compare(a.Name, b.Name), cmp.Compare(a.Alias, b.Alias))
+		ka, ra, da := t.sortKey(a)
+		kb, rb, db := t.sortKey(b)
+		return cmp.Or(cmp.Compare(ka, kb), compareBool(da, db), cmp.Compare(ra, rb), cmp.Compare(a.Alias, b.Alias))
 	})
 	return append(out, rest...)
+}
+
+// sortKey is how Choices orders c among the models the memory does not hold:
+// by its display name; a model of the ChatGPT plan's list by its provider's
+// display name instead, and then by its rank in the list, so the plan's
+// models stay one block in the account's own order (discovered says whether
+// c is one).
+func (t *Table) sortKey(c Choice) (key string, rank int, discovered bool) {
+	if r, ok := t.discovered[c.Alias]; ok {
+		return cmp.Or(t.Providers[c.Provider].Name, c.Provider), r, true
+	}
+	return c.Name, 0, false
+}
+
+// compareBool orders false before true.
+func compareBool(a, b bool) int {
+	switch {
+	case a == b:
+		return 0
+	case b:
+		return -1
+	}
+	return 1
 }
 
 // choice is alias's Choice with no rank: t has alias.

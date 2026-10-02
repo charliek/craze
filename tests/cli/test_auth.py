@@ -3,7 +3,8 @@
 The native provider's keys are stored as the inline api_key of their
 providers.toml entry, in the craze directory's native/ (0600), by the real
 binary against a temp CRAZE_HOME (isolate_run_env: every variable the shipped
-catalog names is unset, so its four providers start unconnected). stdin is a
+catalog names is unset, so its four key providers start unconnected, and
+nobody is signed in to the fifth, the ChatGPT plan). stdin is a
 pipe here, never a terminal, so the key is always stdin's first line; the
 no-echo prompt on a terminal is the Go pty test's
 (internal/cli/auth_test.go).
@@ -33,6 +34,10 @@ SHIPPED_ROWS = [
     ["OpenRouter", "openrouter"],
     ["Z.AI Coding Plan", "zai-coding-plan"],
 ]
+
+# The ChatGPT plan's row, first by name: funded by its sign-in, never a key
+# (plan 033 §3.11), and nobody is signed in here.
+PLAN_ROW = ["ChatGPT plan", "chatgpt", "not signed in"]
 
 
 @pytest.fixture
@@ -113,7 +118,7 @@ def files_holding(root: Path, needle: bytes) -> list[Path]:
 def test_login_list_logout(craze_bin: Path) -> None:
     proc = run_craze(craze_bin, "auth", "list")
     assert proc.returncode == 0, proc.stderr
-    assert list_rows(proc.stdout) == [row + ["not connected"] for row in SHIPPED_ROWS]
+    assert list_rows(proc.stdout) == [PLAN_ROW] + [row + ["not connected"] for row in SHIPPED_ROWS]
 
     proc = run_craze(craze_bin, "auth", "login", "fireworks", stdin=CANARY + "\n")
     assert proc.returncode == 0, proc.stderr
@@ -126,12 +131,12 @@ def test_login_list_logout(craze_bin: Path) -> None:
     assert not (craze_home() / "native" / "models.toml").exists()
 
     proc = run_craze(craze_bin, "auth", "list")
-    assert list_rows(proc.stdout)[0] == ["Fireworks", "fireworks", "stored key"]
+    assert list_rows(proc.stdout)[1] == ["Fireworks", "fireworks", "stored key"]
 
     # An exported variable wins over the stored key, and both commands say so.
     exported = {"FIREWORKS_API_KEY": "sk-exported-not-a-secret-0002"}
     proc = run_craze(craze_bin, "auth", "list", env=exported)
-    assert list_rows(proc.stdout)[0] == ["Fireworks", "fireworks", "env FIREWORKS_API_KEY"]
+    assert list_rows(proc.stdout)[1] == ["Fireworks", "fireworks", "env FIREWORKS_API_KEY"]
     proc = run_craze(craze_bin, "auth", "login", "Fireworks", stdin=CANARY + "\n", env=exported)
     assert proc.stdout.endswith(
         "FIREWORKS_API_KEY is set in this environment; craze uses it before the stored key.\n"
@@ -144,13 +149,13 @@ def test_login_list_logout(craze_bin: Path) -> None:
     proc = run_craze(craze_bin, "auth", "logout", "fireworks")
     assert (proc.returncode, proc.stdout) == (0, "No stored Fireworks key.\n")
     proc = run_craze(craze_bin, "auth", "list")
-    assert list_rows(proc.stdout)[0] == ["Fireworks", "fireworks", "not connected"]
+    assert list_rows(proc.stdout)[1] == ["Fireworks", "fireworks", "not connected"]
 
 
 @pytest.mark.parametrize(
     ("args", "stdin", "code", "says"),
     [
-        (["login", "nosuch"], KEY + "\n", 2, "no such provider; craze has fireworks, meta, openrouter, zai-coding-plan"),
+        (["login", "nosuch"], KEY + "\n", 2, "no such provider; craze has chatgpt, fireworks, meta, openrouter, zai-coding-plan"),
         (["login", KEY], KEY + "\n", 2, "no such provider"),
         (["login", "fireworks"], "", 1, "no key given; nothing was saved"),
         (["login", "fireworks"], "abc\n", 1, "was not saved: shorter than 8 bytes"),
@@ -204,7 +209,7 @@ def test_symlinked_providers_toml_is_refused(craze_bin: Path, tmp_path: Path) ->
     no_canary("craze auth login meta", "the symlink's target", target.read_text(encoding="utf-8"))
     # Listing still works through the link.
     proc = run_craze(craze_bin, "auth", "list")
-    assert list_rows(proc.stdout)[1] == ["Meta (mine)", "meta", "not connected"]
+    assert list_rows(proc.stdout)[2] == ["Meta (mine)", "meta", "not connected"]
 
 
 def test_stored_key_funds_a_native_session(craze_bin: Path, tmp_path: Path, fixture_server: SSEFixture) -> None:

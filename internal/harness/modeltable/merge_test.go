@@ -394,9 +394,11 @@ func TestMergeStructuralProblemsStillFail(t *testing.T) {
 		{"retired is not a user key", "", "version = 1\n\n[[retired]]\nalias = \"x\"\n", ModelsFile, "", "retired"},
 		{"unknown model key", "", "version = 1\n\n[models.\"acme/fast\"]\ncontxt_window = 1\n", ModelsFile, `models."acme/fast"`, "contxt_window"},
 		{"unknown driver", "version = 1\n\n[providers.acme]\ndriver = \"anthropic\"\n", "", ProvidersFile, "providers.acme", "driver"},
-		// Defined for the Responses driver, and refused until its sign-in
-		// lands (plan 033 C12, C14).
-		{"the chatgpt driver, not yet enabled", "version = 1\n\n[providers.acme]\ndriver = \"chatgpt\"\n", "", ProvidersFile, "providers.acme", "driver"},
+		// The chatgpt driver with an endpoint of its own, written by the
+		// entry itself: a pair that cannot go together, as openrouter's is
+		// (plan 033 §3.11). Under another id it is dropped with a warning
+		// instead (TestChatGPTProviderRules).
+		{"the chatgpt driver with a base URL", "version = 1\n\n[providers.acme]\ndriver = \"chatgpt\"\nbase_url = \"https://x.example\"\n", "", ProvidersFile, "providers.acme", "base_url"},
 		{"not a URL", "version = 1\n\n[providers.acme]\nbase_url = \"api.example\"\n", "", ProvidersFile, "providers.acme", "base_url"},
 		{"a pair that cannot go together", "version = 1\n\n[providers.acme]\ndriver = \"openrouter\"\nbase_url = \"https://x.example\"\n", "", ProvidersFile, "providers.acme", "base_url"},
 		{"a blank env_keys name", "version = 1\n\n[providers.acme]\nenv_keys = [\" \"]\n", "", ProvidersFile, "providers.acme", "env_keys"},
@@ -1063,7 +1065,10 @@ func TestOwnerFilesUpgrade(t *testing.T) {
 					t.Errorf("%s = %+v\nwant %+v", alias, m, want)
 				}
 			}
-			for id := range cat.Providers {
+			for id, p := range cat.Providers {
+				if p.Driver == DriverChatGPT {
+					continue // signs in: no key, inline or not (plan 033 §3.11)
+				}
 				if tbl.Providers[id].APIKey == "" {
 					t.Errorf("provider %s lost its inline key", id)
 				}

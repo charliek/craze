@@ -10,6 +10,7 @@ import (
 
 	"charm.land/fantasy"
 	"github.com/charliek/craze/internal/harness/llm"
+	"github.com/charliek/craze/internal/harness/modeltable"
 	"github.com/charliek/craze/internal/harness/store"
 )
 
@@ -44,7 +45,7 @@ func TestClassify(t *testing.T) {
 		{"mid-stream 404", &llm.MidStreamError{Message: "m", StatusCode: 404}, ErrModelNotFound, 404, "m"},
 		{"anything else", errors.New("dial tcp 127.0.0.1:1: connect: connection refused"), nil, 0, "dial tcp 127.0.0.1:1: connect: connection refused"},
 	}
-	m := store.Model{Provider: "test", Alias: "test/a", WireModel: "wire-a"}
+	m := modeltable.Resolved{ProviderID: "test", Alias: "test/a", WireModel: "wire-a"}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			err := classify(tc.err, m)
@@ -66,7 +67,7 @@ func TestClassify(t *testing.T) {
 
 // ErrEmptyStep is its own error, not a provider failure.
 func TestClassifyEmptyStep(t *testing.T) {
-	err := classify(fmt.Errorf("fantasy: %w", llm.ErrEmptyStep), store.Model{Provider: "p", Alias: "a", WireModel: "w"})
+	err := classify(fmt.Errorf("fantasy: %w", llm.ErrEmptyStep), modeltable.Resolved{ProviderID: "p", Alias: "a", WireModel: "w"})
 	var pe *ProviderError
 	if !errors.Is(err, ErrEmptyStep) || errors.As(err, &pe) {
 		t.Fatalf("classify = %#v; want ErrEmptyStep and no ProviderError", err)
@@ -81,7 +82,7 @@ func TestClassifyEmptyStep(t *testing.T) {
 // or kilobytes with it.
 func TestClassifyBoundsTheMessage(t *testing.T) {
 	body := "<html>\n<body>\x1b[31mBad\tGateway</body>\n</html>\n" + strings.Repeat("é", 400)
-	err := classify(&fantasy.ProviderError{Message: body, StatusCode: 400}, store.Model{})
+	err := classify(&fantasy.ProviderError{Message: body, StatusCode: 400}, modeltable.Resolved{})
 	var pe *ProviderError
 	if !errors.As(err, &pe) {
 		t.Fatalf("classify = %#v", err)

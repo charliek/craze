@@ -3,7 +3,9 @@ package llm
 import (
 	"bufio"
 	"bytes"
+	"cmp"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -15,6 +17,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"unicode/utf16"
 	"unicode/utf8"
 
@@ -30,30 +33,87 @@ const redacted = "[redacted]"
 // (modeltable never echoes base_url for the same reason).
 var urlQuery = regexp.MustCompile(`(?i)(\b[a-z][a-z0-9+.-]*://[^\s?#"'<>]*)\?[^\s#"'<>]*`)
 
-// scrubber removes the model's own API key, and any URL query string, from
-// every error the model returns. Fantasy's errors carry far more than their
-// message: a *fantasy.ProviderError from the OpenAI-compatible client holds
-// the dumped request (Authorization header included), the response body (a
-// provider may echo the header into a 401's message), the URL and the
-// response headers, and its Cause is the SDK's error, which holds the
-// *http.Request itself. Wrapping such an error would keep all of that
-// reachable through errors.Unwrap and errors.As — one %+v or field read in a
-// later layer from a leak — so every error is rebuilt from scrubbed values
-// instead, keeping only what the harness and Fantasy's retry logic classify
-// by.
+// scrubber removes the model's own API key, the sign-in's token values, and
+// any URL query string, from every error the model returns. Fantasy's errors
+// carry far more than their message: a *fantasy.ProviderError from the
+// OpenAI-compatible client holds the dumped request (Authorization header
+// included), the response body (a provider may echo the header into a 401's
+// message), the URL and the response headers, and its Cause is the SDK's
+// error, which holds the *http.Request itself. Wrapping such an error would
+// keep all of that reachable through errors.Unwrap and errors.As — one %+v or
+// field read in a later layer from a leak — so every error is rebuilt from
+// scrubbed values instead, keeping only what the harness and Fantasy's retry
+// logic classify by.
+//
+// What it hides is a static key, a driver's own, and the values of an Auth
+// (plan 033 §3.12): the sign-in's access, refresh and id tokens, current and
+// retired — a token rotates mid-session, and a late error can echo the one it
+// replaced (A21b) — read at each scrub, so a value the source has retired (an
+// hour after its expiry or rotation, P35) leaves the set with it. A value's
+// pattern is kept between scrubs under the SHA-256 of the value, never the
+// value: the cache holds no token a reflective walk could find whole.
 //
 // It holds the key only inside a regexp, reached through a pointer, so
 // formatting a model with %+v prints an address, never the key.
 type scrubber struct {
 	key *regexp.Regexp // keyPattern; nil when there is no key to hide
+	// values is the Auth's Values, nil without one: every token value the
+	// source holds or retired within the hour.
+	values func() []string
+	// sentinels are the Auth's fixed-text sentinels (authSentinels), kept
+	// through every error rebuilt (sentinel).
+	sentinels []error
+
+	mu       sync.Mutex
+	patterns map[[sha256.Size]byte]*regexp.Regexp // the patterns of the values last read, by each value's digest
 }
 
-func newScrubber(key string) *scrubber {
+// newScrubber is the scrubber of a model whose own key is key ("" for none)
+// and whose sign-in is auth (nil for none).
+func newScrubber(key string, auth Auth) *scrubber {
 	s := &scrubber{}
 	if key != "" {
 		s.key = keyPattern(key)
 	}
+	if auth != nil {
+		s.values = auth.Values
+		if a, ok := auth.(authSentinels); ok {
+			s.sentinels = slices.Clone(a.Sentinels())
+		}
+	}
 	return s
+}
+
+// hidden is every pattern a scrub replaces now: the key's, then one per value
+// the Auth holds, longest value first — a value inside a longer one must not
+// split it, leaving the rest of the longer for nothing to recognise. The
+// patterns of values the Auth no longer holds are dropped from the cache.
+func (s *scrubber) hidden() []*regexp.Regexp {
+	var out []*regexp.Regexp
+	if s.key != nil {
+		out = append(out, s.key)
+	}
+	if s.values == nil {
+		return out
+	}
+	vals := slices.DeleteFunc(s.values(), func(v string) bool { return v == "" })
+	slices.SortStableFunc(vals, func(a, b string) int { return cmp.Compare(len(b), len(a)) })
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	next := make(map[[sha256.Size]byte]*regexp.Regexp, len(vals))
+	for _, v := range vals {
+		d := sha256.Sum256([]byte(v))
+		p, ok := next[d]
+		if !ok {
+			if p, ok = s.patterns[d]; !ok {
+				p = keyPattern(v)
+			}
+			next[d] = p
+		}
+		out = append(out, p)
+	}
+	s.patterns = next
+	return out
 }
 
 // shortEscapes are the escapes a JSON string has for a character besides
@@ -87,11 +147,11 @@ func keyPattern(key string) *regexp.Regexp {
 	return regexp.MustCompile(b.String())
 }
 
-// text scrubs one string: the key first, in any spelling (keyPattern), then
-// every URL query string.
+// text scrubs one string: the key and every token value first, each in any
+// spelling (keyPattern), then every URL query string.
 func (s *scrubber) text(v string) string {
-	if s.key != nil {
-		v = s.key.ReplaceAllLiteralString(v, redacted)
+	for _, p := range s.hidden() {
+		v = p.ReplaceAllLiteralString(v, redacted)
 	}
 	return urlQuery.ReplaceAllString(v, "${1}?"+redacted)
 }
@@ -246,6 +306,12 @@ func (s *scrubber) headers(h map[string]string) map[string]string {
 //   - The bare context.Canceled and context.DeadlineExceeded sentinels pass
 //     through unchanged: they carry no text of their own, and callers compare
 //     them by identity as well as with errors.Is.
+//   - An error holding a *FinalError — the ChatGPT plan's driver's refusal
+//     never to be repeated (plan 033 §3.9) — becomes a fresh one: its status,
+//     its code, type and param (each kept only as the identifier it is meant
+//     to be, and as the scrub leaves it) and its context-too-large flag, with
+//     its message scrubbed. It stays final, which is what P33's latch and the
+//     harness's classification read (C12's "C14 must").
 //   - An error holding a *fantasy.ProviderError becomes a fresh one built
 //     from scrubbed fields. The status code, the auth and context-too-large
 //     classification, and retryability survive; the dumped request does not
@@ -258,8 +324,9 @@ func (s *scrubber) headers(h map[string]string) map[string]string {
 // Whatever it builds unwraps only to a fixed-text sentinel found in the
 // original chain (see sentinel) — a rebuilt ProviderError by way of the
 // provider's names for the failure, when it sent any (providerNames), which
-// hold no text but two identifiers — so errors.Is(err, context.Canceled) and
-// Fantasy's own abort and EOF checks answer as they did before.
+// hold no text but two identifiers — so errors.Is(err, context.Canceled),
+// Fantasy's own abort and EOF checks, and the sign-in's sentinels answer as
+// they did before.
 func (s *scrubber) err(err error) error {
 	// Identity, not errors.Is: only the bare sentinel is known to carry
 	// nothing to scrub.
@@ -267,17 +334,44 @@ func (s *scrubber) err(err error) error {
 	case nil, context.Canceled, context.DeadlineExceeded:
 		return err
 	}
+	var fe *FinalError
+	if errors.As(err, &fe) {
+		return s.final(fe)
+	}
 	var pe *fantasy.ProviderError
 	if errors.As(err, &pe) {
-		return s.providerError(pe, sentinel(err))
+		return s.providerError(pe, s.sentinel(err))
 	}
-	se := &scrubbedError{msg: s.text(err.Error()), cause: sentinel(err)}
+	cause := s.sentinel(err)
+	se := &scrubbedError{msg: s.text(err.Error()), cause: cause, auth: slices.Contains(s.sentinels, cause)}
 	var ne net.Error
 	if errors.As(err, &ne) {
 		return &scrubbedNetError{scrubbedError: se, timeout: ne.Timeout()}
 	}
 	return se
 }
+
+// final rebuilds fe from scrubbed values (err's second rule): the message
+// scrubbed as text, each name kept only when the scrub leaves it exactly as
+// it is — a token is never an identifier, and the scrub's own pass catches
+// one that happens to be.
+func (s *scrubber) final(fe *FinalError) *FinalError {
+	out := &FinalError{
+		StatusCode:      fe.StatusCode,
+		Code:            s.name(fe.Code),
+		Type:            s.name(fe.Type),
+		Message:         s.text(fe.Message),
+		contextTooLarge: fe.contextTooLarge,
+	}
+	if paramName.MatchString(fe.Param) && s.text(fe.Param) == fe.Param {
+		out.Param = fe.Param
+	}
+	return out
+}
+
+// paramName is what a FinalError's param must look like to be kept: a field
+// path, as responsesapi keeps it ("input[3].content[0].image_url").
+var paramName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_.\[\]-]{0,127}$`)
 
 // providerError rebuilds pe from scrubbed fields. When pe was retryable for a
 // reason the rebuild drops — its cause was an HTTP/2 transport error, say —
@@ -451,14 +545,33 @@ func jsonString(raw json.RawMessage) string {
 
 // sentinel returns the first fixed-text sentinel in err's chain that callers
 // test for with errors.Is — cancellation, deadline, and the unexpected EOF
-// that marks Fantasy's retryable incomplete stream — or nil. It is the only
-// part of an original chain a scrubbed error keeps: a sentinel has no text
-// but its own, so it cannot carry a key.
-func sentinel(err error) error {
-	for _, s := range []error{context.Canceled, context.DeadlineExceeded, io.ErrUnexpectedEOF} {
-		if errors.Is(err, s) {
-			return s
+// that marks Fantasy's retryable incomplete stream, then the Auth's own
+// (authSentinels: "signed out", "sign in again" and the rest, plan 033 §3.12)
+// — or nil. It is the only part of an original chain a scrubbed error keeps:
+// a sentinel has no text but its own, so it cannot carry a key.
+func (s *scrubber) sentinel(err error) error {
+	for _, x := range []error{context.Canceled, context.DeadlineExceeded, io.ErrUnexpectedEOF} {
+		if errors.Is(err, x) {
+			return x
 		}
+	}
+	for _, x := range s.sentinels {
+		if errors.Is(err, x) {
+			return x
+		}
+	}
+	return nil
+}
+
+// AuthSentinel is the sign-in's own sentinel err carries — one its Auth
+// listed (authSentinels), which the scrubber kept in an error it rebuilt — or
+// nil. The harness keeps it on the turn's failure (classify), whose chain is
+// otherwise the harness's own, so the adapter tells "signed out" or "usage
+// limit reached" from a provider's refusal by errors.Is (plan 033 §3.12).
+func AuthSentinel(err error) error {
+	var se *scrubbedError
+	if errors.As(err, &se) && se.auth {
+		return se.cause
 	}
 	return nil
 }
@@ -467,6 +580,7 @@ func sentinel(err error) error {
 type scrubbedError struct {
 	msg   string
 	cause error // a sentinel, or nil
+	auth  bool  // cause is the Auth's own (AuthSentinel)
 }
 
 func (e *scrubbedError) Error() string { return e.msg }

@@ -2,10 +2,13 @@ package modeltable
 
 import (
 	_ "embed"
+	"fmt"
 	"maps"
 	"slices"
 	"strconv"
 	"sync"
+
+	"github.com/BurntSushi/toml"
 )
 
 // catalogTOML is catalog.toml, the model catalog craze ships (plan 031 §3.1),
@@ -30,6 +33,38 @@ type Catalog struct {
 	Providers    map[string]Provider
 	Models       map[string]Model
 	Retired      []Retired
+	// ChatGPT is [chatgpt_defaults] (plan 033 §3.11): craze's own settings for
+	// the ChatGPT plan's models, which a load learns from the account's list
+	// (withDiscovered) and never ships, so they are no [models] rows — no
+	// history line, no [[retired]] row, nothing shown for an account that does
+	// not list them. Its zero value is no section.
+	ChatGPT ChatGPTDefaults
+}
+
+// ChatGPTDefaults is the catalog's [chatgpt_defaults] (plan 033 §3.11).
+type ChatGPTDefaults struct {
+	// Start is the slug a new session with nothing remembered and an unfunded
+	// default starts on among the plan's models (StartModel), "" for none.
+	Start string
+	// Models are craze's settings for a slug, laid over what the account's
+	// list says of it; nil for none.
+	Models map[string]ChatGPTModelDefaults
+}
+
+// ChatGPTModelDefaults are craze's settings for one plan model's slug: each
+// zero value leaves the list's own.
+type ChatGPTModelDefaults struct {
+	// Name is the name shown before " (ChatGPT plan)" in place of the list's
+	// display name.
+	Name string
+	// Efforts are the efforts offered, in order, among those the list offers;
+	// nil, or empty, offers the list's own.
+	Efforts []string
+	// DefaultEffort is the effort a session on the model starts at, when the
+	// model offers it; else the list's default_reasoning_level.
+	DefaultEffort string
+	// ToolProfile is the model's tool profile ("" is the default).
+	ToolProfile string
 }
 
 // Retired is one alias a release took out of the catalog, with the provider
@@ -52,6 +87,22 @@ type catalogDoc struct {
 	Retired      []catalogRetiredEntry           `toml:"retired"`
 	Providers    map[string]catalogProviderEntry `toml:"providers"`
 	Models       map[string]catalogModelEntry    `toml:"models"`
+	// ChatGPT is [chatgpt_defaults], decoded as strictly as the rest: a slug's
+	// table takes name, efforts, default_effort and tool_profile, and nothing
+	// else (plan 033 §3.11).
+	ChatGPT *catalogChatGPTDoc `toml:"chatgpt_defaults"`
+}
+
+type catalogChatGPTDoc struct {
+	Start  string                            `toml:"start"`
+	Models map[string]catalogChatGPTModelDoc `toml:"models"`
+}
+
+type catalogChatGPTModelDoc struct {
+	Name          string   `toml:"name"`
+	Efforts       []string `toml:"efforts"`
+	DefaultEffort string   `toml:"default_effort"`
+	ToolProfile   string   `toml:"tool_profile"`
 }
 
 func (d *catalogDoc) version() int { return d.Version }
@@ -109,6 +160,16 @@ func parseCatalog(name string, data []byte) (*Catalog, error) {
 	}
 	for _, r := range d.Retired {
 		c.Retired = append(c.Retired, Retired{Alias: r.Alias, Provider: r.Provider, WireModels: nilIfEmpty(r.WireModels)})
+	}
+	if g := d.ChatGPT; g != nil {
+		c.ChatGPT.Start = g.Start
+		for slug, e := range g.Models {
+			if c.ChatGPT.Models == nil {
+				c.ChatGPT.Models = make(map[string]ChatGPTModelDefaults, len(g.Models))
+			}
+			c.ChatGPT.Models[slug] = ChatGPTModelDefaults{Name: e.Name, Efforts: nilIfEmpty(e.Efforts),
+				DefaultEffort: e.DefaultEffort, ToolProfile: e.ToolProfile}
+		}
 	}
 	return c, nil
 }
@@ -176,6 +237,14 @@ func (c *Catalog) Clone() *Catalog {
 		r.WireModels = slices.Clone(r.WireModels)
 		out.Retired = append(out.Retired, r)
 	}
+	out.ChatGPT.Start = c.ChatGPT.Start
+	for slug, d := range c.ChatGPT.Models {
+		if out.ChatGPT.Models == nil {
+			out.ChatGPT.Models = make(map[string]ChatGPTModelDefaults, len(c.ChatGPT.Models))
+		}
+		d.Efforts = slices.Clone(d.Efforts)
+		out.ChatGPT.Models[slug] = d
+	}
 	return out
 }
 
@@ -221,10 +290,12 @@ func hasModel(models map[string]Model, alias string) bool {
 // validate checks every rule the merge relies on (plan 031 §3.1), in a fixed
 // order so the same catalog always reports the same problem: each provider
 // has a name, a valid driver and base URL, and at least one env_keys name and
-// no key; each model validates against the catalog's own providers, as a
+// no key — but the ChatGPT plan's, which signs in and names no variable (plan
+// 033 §3.11); each model validates against the catalog's own providers, as a
 // models.toml entry would; default_model is a model; no two aliases share an
 // identity; the retired aliases are unique, none is a model, and no model's
-// identity is a retired one. Errors are *FileErrors against name.
+// identity is a retired one; and [chatgpt_defaults] is valid
+// (validateChatGPT). Errors are *FileErrors against name.
 func (c *Catalog) validate(name string) error {
 	at := func(table, key, reason string) error {
 		return &FileError{File: name, Table: table, Key: key, Reason: reason}
@@ -238,7 +309,7 @@ func (c *Catalog) validate(name string) error {
 		switch {
 		case p.Name == "":
 			return at(table, "name", "missing: every shipped provider has a display name")
-		case len(p.EnvKeys) == 0:
+		case len(p.EnvKeys) == 0 && p.Driver != DriverChatGPT:
 			return at(table, "env_keys", "missing: every shipped provider names at least one variable a key comes from")
 		case p.APIKey != "":
 			return at(table, "api_key", "the catalog never holds a key")
@@ -283,6 +354,56 @@ func (c *Catalog) validate(name string) error {
 			if alias, ok := byIdentity[identity{r.Provider, w}]; ok {
 				return at(table, "wire_models", r.Alias+"'s "+w+" is shipped model "+alias+"'s identity")
 			}
+		}
+	}
+	return c.validateChatGPT(name)
+}
+
+// validateChatGPT checks [chatgpt_defaults] (plan 033 §3.11): it is only for a
+// catalog that ships the chatgpt provider on its driver; start, and every
+// slug it has settings for, is a slug craze can name; a name is one line of
+// text; each effort is one a ChatGPT plan request can carry, listed once; a
+// default effort is one of them (and of efforts, when the slug lists them);
+// and a tool profile is one craze has. Slugs are checked in sorted order.
+func (c *Catalog) validateChatGPT(name string) error {
+	d := c.ChatGPT
+	if d.Start == "" && len(d.Models) == 0 {
+		return nil
+	}
+	at := func(table, key, reason string) error {
+		return &FileError{File: name, Table: table, Key: key, Reason: reason}
+	}
+	if p, ok := c.Providers[ChatGPTProvider]; !ok || p.Driver != DriverChatGPT {
+		return at("chatgpt_defaults", "", fmt.Sprintf("no provider %q on driver %q ships for these settings to apply to", ChatGPTProvider, DriverChatGPT))
+	}
+	if d.Start != "" && !chatgptSlug.MatchString(d.Start) {
+		return at("chatgpt_defaults", "start", "not a model slug")
+	}
+	for _, slug := range slices.Sorted(maps.Keys(d.Models)) {
+		m := d.Models[slug]
+		table := toml.Key{"chatgpt_defaults", "models", slug}.String()
+		switch {
+		case !chatgptSlug.MatchString(slug):
+			return at(table, "", "not a model slug")
+		case m.Name != "" && !shownText(m.Name, 128):
+			return at(table, "name", "not one line of text")
+		}
+		if r := effortsProblem(m.Efforts); r != "" {
+			return at(table, "efforts", r)
+		}
+		for _, e := range m.Efforts {
+			if !slices.Contains(chatgptEfforts, e) {
+				return at(table, "efforts", fmt.Sprintf("%q is not an effort a ChatGPT plan request can carry", e))
+			}
+		}
+		switch {
+		case m.DefaultEffort != "" && !slices.Contains(chatgptEfforts, m.DefaultEffort):
+			return at(table, "default_effort", fmt.Sprintf("%q is not an effort a ChatGPT plan request can carry", m.DefaultEffort))
+		case m.Efforts != nil && defaultEffortProblem(m.Efforts, m.DefaultEffort) != "":
+			return at(table, "default_effort", defaultEffortProblem(m.Efforts, m.DefaultEffort))
+		}
+		if r := toolProfileProblem(m.ToolProfile); r != "" {
+			return at(table, "tool_profile", r)
 		}
 	}
 	return nil

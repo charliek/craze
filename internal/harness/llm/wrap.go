@@ -78,7 +78,10 @@ func (e *MidStreamError) IsContextTooLarge() bool { return e.contextTooLarge }
 //  3. A provider error after output began becomes a *MidStreamError, which
 //     Fantasy does not retry (D-32). Before that, an error keeps its
 //     classification, so a failed connection or a 503 is retried as usual.
-//     Cancellation and deadline errors always pass through as themselves.
+//     Cancellation and deadline errors always pass through as themselves,
+//     and so does a *FinalError, scrubbed, before output or after: it is
+//     never retried either way, and its code is what the ChatGPT plan's
+//     usage latch and the harness's classification read (plan 033 §3.12).
 //  4. Every error leaving the model — from Stream itself, from an error
 //     part, and from Generate, GenerateObject and StreamObject — is
 //     scrubbed of the key and of URL query strings (see scrubber).
@@ -172,7 +175,8 @@ func (m *model) Stream(ctx context.Context, call fantasy.Call) (fantasy.StreamRe
 
 // stepError is rule 3 plus the scrub.
 func (m *model) stepError(err error, output bool) error {
-	if !output || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+	var fe *FinalError
+	if !output || errors.As(err, &fe) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return m.scrub.err(err)
 	}
 	return m.scrub.midStream(err)

@@ -1013,7 +1013,7 @@ func (t *turn) overflowed(err error) bool {
 	if t.ctx.Err() != nil || t.saveErr != nil || t.badIDs || t.loop.stopped || t.planApproved || t.step >= maxSteps {
 		return false
 	}
-	return errors.Is(classify(err, t.model.id()), ErrContextTooLarge)
+	return errors.Is(classify(err, t.model.r), ErrContextTooLarge)
 }
 
 // classify is the turn's failure as the session returns it: classify on the
@@ -1022,7 +1022,7 @@ func (t *turn) overflowed(err error) bool {
 // otherwise nothing was compacted for it and the request alone is too large
 // (C9c item 4). mu is held.
 func (t *turn) classify(err error) error {
-	cerr := classify(err, t.model.id())
+	cerr := classify(err, t.model.r)
 	var pe *ProviderError
 	if t.overflowCompacted && errors.As(cerr, &pe) && pe.kind == ErrContextTooLarge {
 		pe.Compacted = true

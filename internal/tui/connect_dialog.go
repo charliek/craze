@@ -330,11 +330,12 @@ func (m Model) askConnectRow() (Model, tea.Cmd) {
 	}, connectRowMsg{gen: gen})
 }
 
-// firstUnconnected is the index of the first provider with no usable key, or
+// firstUnconnected is the index of the first provider with no usable key —
+// or, for the ChatGPT plan, no funded sign-in (ProviderInfo.Connected) — or
 // -1.
 func firstUnconnected(infos []modeltable.ProviderInfo) int {
 	for i, p := range infos {
-		if p.Via == modeltable.KeyNone {
+		if !p.Connected() {
 			return i
 		}
 	}
@@ -627,11 +628,12 @@ func (m Model) connectDialogBody(inner, budget int) []string {
 }
 
 // connectMark is a step-one row's tag: ✓ for a provider with a usable key,
-// from a variable or stored; the word for one whose stored key cannot be used
-// and that nothing else funds; nothing for the rest.
+// from a variable or stored, or a funded sign-in (ProviderInfo.Connected); the
+// word for one whose stored key cannot be used and that nothing else funds;
+// nothing for the rest.
 func connectMark(p modeltable.ProviderInfo) string {
 	switch {
-	case p.Via != modeltable.KeyNone:
+	case p.Connected():
 		return connectConnectedMark
 	case p.StoredProblem != nil:
 		return connectUnusableMark

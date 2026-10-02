@@ -17,9 +17,8 @@
 // A third driver, the ChatGPT plan's (modeltable.DriverChatGPT, plan 033
 // §3.9), is craze's own Responses client, package responsesapi — no Fantasy
 // provider and no SDK at all — adapted to Fantasy in responses_adapter.go
-// and authenticated by an Auth rather than a key. It lands inert: the model
-// table refuses the driver and New does not build it yet (plan 033 C14
-// wires both, with the sign-in that funds it).
+// and authenticated by an Auth rather than a key: the sign-in's token source,
+// which the caller hands New with WithSignIn (plan 033 §3.12).
 package llm
 
 import (
@@ -60,12 +59,28 @@ type Option func(*options)
 
 type options struct {
 	httpClient *http.Client
+	auth       Auth
+	apiBase    func() (string, error)
 }
 
 // WithHTTPClient sends the model's requests through c instead of the SDK's
 // default client: the seam tests use to reach a local server.
 func WithHTTPClient(c *http.Client) Option {
 	return func(o *options) { o.httpClient = c }
+}
+
+// WithSignIn is the sign-in a model on the ChatGPT plan's driver is funded by
+// (plan 033 §3.12, P31): auth, the process's token source — the harness
+// knows it only as an Auth, handed in through harness.Options — and apiBase,
+// which answers the API's base URL when the model is built: OpenAI's own, or
+// a test's loopback server (chatgptauth.APIBase, whose error — a test
+// override that is not a loopback URL — fails the build, so the bearer can
+// never fall back to another host). A nil apiBase is OpenAI's. Every model
+// New builds also keeps auth's token values out of its errors, whatever its
+// driver: a provider error can echo a request, and a request can hold a tool
+// result that printed a token (scrubber, A21b).
+func WithSignIn(auth Auth, apiBase func() (string, error)) Option {
+	return func(o *options) { o.auth, o.apiBase = auth, apiBase }
 }
 
 // New builds r's language model, wrapped (see wrap.go). This is the one
@@ -97,6 +112,8 @@ func New(r modeltable.Resolved, opts ...Option) (fantasy.LanguageModel, error) {
 		}
 	case modeltable.DriverOpenRouter:
 		baseURL = openRouterBaseURL
+	case modeltable.DriverChatGPT:
+		return newSignedIn(r, o)
 	default:
 		return nil, unknownDriver(r)
 	}
@@ -107,7 +124,7 @@ func New(r modeltable.Resolved, opts ...Option) (fantasy.LanguageModel, error) {
 	case len(key) < minKeyLen:
 		return nil, fmt.Errorf("%w: provider %q (model %q) has one under %d bytes", ErrAPIKeyTooShort, r.ProviderID, r.Alias, minKeyLen)
 	}
-	scrub := newScrubber(key)
+	scrub := newScrubber(key, o.auth)
 
 	providerOpts := []openaicompat.Option{
 		openaicompat.WithBaseURL(baseURL),
@@ -139,6 +156,31 @@ func New(r modeltable.Resolved, opts ...Option) (fantasy.LanguageModel, error) {
 		return nil, fmt.Errorf("llm: model %q: %w", r.Alias, scrub.err(err))
 	}
 	return wrap(lm, scrub), nil
+}
+
+// newSignedIn is New for the ChatGPT plan's driver (plan 033 §3.12): the
+// Responses model on the sign-in's Auth, at the API base apiBase answers,
+// wrapped as every model is, its scrubber hiding the Auth's token values. The
+// model is funded by the sign-in or not at all: with no Auth it is refused,
+// and a key r carries — none, from the table — is never sent.
+func newSignedIn(r modeltable.Resolved, o options) (fantasy.LanguageModel, error) {
+	if o.auth == nil {
+		return nil, fmt.Errorf("llm: provider %q (model %q): driver %q is funded by signing in to ChatGPT, and no sign-in was given",
+			r.ProviderID, r.Alias, r.Driver)
+	}
+	base := ""
+	if o.apiBase != nil {
+		b, err := o.apiBase()
+		if err != nil {
+			return nil, fmt.Errorf("llm: model %q: %w", r.Alias, err)
+		}
+		base = b
+	}
+	lm, err := newResponsesModel(r, o.auth, base, o.httpClient)
+	if err != nil {
+		return nil, err
+	}
+	return wrap(lm, newScrubber("", o.auth)), nil
 }
 
 // openAIEfforts are the reasoning efforts Fantasy's OpenAI-compatible client

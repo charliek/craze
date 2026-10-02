@@ -28,6 +28,12 @@ const Name = "opencode"
 // pins the two together.
 const CredentialsFile = "providers.toml"
 
+// AuthDir is the name of the harness's sign-in directory under Env.Home, the
+// ChatGPT plan's tokens and registration (plan 033 §3.12), which the file
+// tools refuse whole. It is modeltable.ChatGPTAuthDir (and chatgptauth's), a
+// test in internal/agent pins the three together.
+const AuthDir = "auth"
+
 // Profile returns the opencode profile with a fresh set of its tools. A
 // session builds its own, so grep and glob share one ripgrep, and look for
 // rg on PATH once per session. Its System func is the system prompt written

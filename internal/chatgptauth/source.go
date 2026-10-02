@@ -631,6 +631,15 @@ func (s *TokenSource) notify(values []string) {
 	}
 }
 
+// Sentinels are the fixed-text errors Token and Invalidate wrap, which
+// callers tell apart by errors.Is: the scrubber in package llm keeps the one
+// an error carries through every error it rebuilds (plan 033 §3.12), so the
+// adapter can word "signed out" or "usage limit reached" for the person. Each
+// is fixed text, so none can carry a token.
+func (s *TokenSource) Sentinels() []error {
+	return []error{ErrSignedOut, ErrSignInAgain, ErrPlanUsageDisabled, ErrUsageLimited}
+}
+
 // LatchUsageLimit stops every new request on this source (P33): the ChatGPT
 // plan's usage limit was reached (the driver's usage-limit FinalError), and
 // until ClearUsageLimit — the next turn the person starts — Token answers

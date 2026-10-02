@@ -277,13 +277,22 @@ func (a *authRun) list() error {
 }
 
 // connectedBy is a list row's last column: the variable that funds the
-// provider, its stored key, or neither — the order Resolve tries them in.
+// provider, its stored key, or neither — the order Resolve tries them in —
+// and, for the ChatGPT plan, its sign-in (plan 033 §3.11): signed in with
+// plan usage, or signed in with plan usage off, or not.
 func connectedBy(p modeltable.ProviderInfo) string {
 	switch p.Via {
 	case modeltable.KeyFromEnv:
 		return "env " + sanitizeLine(p.EnvVar)
 	case modeltable.KeyStored:
 		return "stored key"
+	case modeltable.KeySignedIn:
+		return "signed in"
+	case modeltable.KeyPlanDisabled:
+		return "plan usage disabled"
+	}
+	if p.SignIn {
+		return "not signed in"
 	}
 	return "not connected"
 }
@@ -384,7 +393,7 @@ func (a *authRun) choose(infos []modeltable.ProviderInfo) (modeltable.ProviderIn
 	fmt.Fprintln(a.errw, "Connect a model provider:")
 	for i, p := range infos {
 		mark := ""
-		if p.Via != modeltable.KeyNone {
+		if p.Connected() {
 			mark = " (connected)"
 		}
 		fmt.Fprintf(a.errw, "  %d. %s%s\n", i+1, sanitizeLine(p.Name), mark)

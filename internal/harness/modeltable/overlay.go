@@ -46,6 +46,11 @@ const (
 	// OriginYours is an entry only the user's files define. Every entry of a
 	// table loaded without a catalog, or built in memory, is the user's.
 	OriginYours Origin = "yours"
+	// OriginDiscovered is a model the load learned from the ChatGPT plan's
+	// own list (withDiscovered, plan 033 §3.11), as the list and craze's
+	// defaults make it; one the user's models.toml overrides is
+	// OriginOverridden.
+	OriginDiscovered Origin = "discovered"
 )
 
 // The overlay shapes. Their toml keys are exactly providerEntry's and
@@ -221,6 +226,11 @@ func overlayModel(base Model, o modelOverlay) Model {
 // says `catalog = false`: the two files are then the whole table under the
 // rules that held before the catalog existed — both needed, default_model
 // required, every entry complete. cat itself is never changed.
+//
+// Over a catalog, the ChatGPT plan's models from dir's account-bound list are
+// added to the catalog's copy before the user's files are laid over it
+// (withDiscovered, plan 033 §3.11). Either way, a table with a provider on
+// the chatgpt driver keeps dir as the directory whose sign-in funds it.
 func LoadWith(dir string, cat *Catalog) (*Table, error) {
 	if dir == "" {
 		// paths.NativeDir is "" when there is no home directory; joining ""
@@ -266,7 +276,11 @@ func LoadWith(dir string, cat *Catalog) (*Table, error) {
 		if err := checkOverlays(ppath, mpath, &pd, &md); err != nil {
 			return nil, err
 		}
-		t = merge(cat.Clone(), ppath, mpath, &pd, &md)
+		c := cat.Clone()
+		disc, discWarnings := withDiscovered(c, dir)
+		warnings = append(warnings, discWarnings...)
+		t = merge(c, ppath, mpath, &pd, &md)
+		t.discover(disc, c)
 		// Every entry of the user's that could not stand was dropped above,
 		// and every shipped entry passed TestShippedCatalog: a failure here is
 		// a bug in the catalog or the merge, reported rather than papered over.
@@ -274,10 +288,41 @@ func LoadWith(dir string, cat *Catalog) (*Table, error) {
 			return nil, err
 		}
 	}
+	for _, p := range t.Providers {
+		if p.Driver == DriverChatGPT {
+			t.signIn = dir
+			break
+		}
+	}
 	t.Warnings = append(warnings, t.Warnings...)
 	_, priceWarnings := pricedIdentities(t.Models)
 	t.Warnings = append(t.Warnings, priceWarnings...)
 	return t, nil
+}
+
+// discover records what withDiscovered added to cat, the catalog t was
+// merged over: each discovered model still in t, by its rank, as
+// OriginDiscovered unless the user's files overrode it; and the start alias
+// [chatgpt_defaults] names. A nil disc discovered nothing.
+func (t *Table) discover(disc *discovered, cat *Catalog) {
+	if s := cat.ChatGPT.Start; s != "" {
+		t.chatgptStart = ChatGPTAliasPrefix + s
+	}
+	if disc == nil {
+		return
+	}
+	for alias, rank := range disc.rank {
+		if !hasModel(t.Models, alias) {
+			continue
+		}
+		if t.discovered == nil {
+			t.discovered = make(map[string]int, len(disc.rank))
+		}
+		t.discovered[alias] = rank
+		if t.modelOrigins[alias] == OriginShipped {
+			t.modelOrigins[alias] = OriginDiscovered
+		}
+	}
 }
 
 // readIfPresent reads path; a file that does not exist is not an error, only
@@ -502,6 +547,14 @@ func (m *merger) provider(id string, o providerOverlay) {
 		m.t.providerOrigins[id] = OriginYours
 		return
 	}
+	if shipped.Driver == DriverChatGPT {
+		// The ChatGPT plan's provider is funded by the sign-in and sends its
+		// bearer to OpenAI's fixed endpoint alone (plan 033 §3.11, P37): an
+		// entry may rename it and nothing else, so a key, a variable, an
+		// endpoint or another driver written for it is dropped, each with a
+		// warning, and craze's own is used — an old import's entry too.
+		o = m.signInOverlay(id, o)
+	}
 	if deref(o.Source) == legacySource {
 		// An old import's copy of a provider craze now ships (§3.3): only
 		// its key counts, and any variable names the catalog lacks, after
@@ -533,6 +586,33 @@ func (m *merger) provider(id string, o providerOverlay) {
 	}
 	m.t.Providers[id] = p
 	m.t.providerOrigins[id] = OriginOverridden
+}
+
+// signInOverlay is o, an entry of the user's for the ChatGPT plan's shipped
+// provider, with every key but its name and source dropped — the driver when
+// it is not the plan's, base_url, env_keys and api_key — each with a warning
+// naming the key, never its value.
+func (m *merger) signInOverlay(id string, o providerOverlay) providerOverlay {
+	drop := func(key, reason string) {
+		m.warn(&FileError{File: m.ppath, Table: providerTable(id), Key: key, Reason: reason}, "craze's own ChatGPT plan provider is used")
+	}
+	if o.Driver != nil && *o.Driver != DriverChatGPT {
+		drop("driver", fmt.Sprintf("the ChatGPT plan's provider is always driver %q", DriverChatGPT))
+		o.Driver = nil
+	}
+	if o.BaseURL != nil {
+		drop("base_url", `must be absent for driver "chatgpt", whose endpoint is fixed`)
+		o.BaseURL = nil
+	}
+	if o.EnvKeys != nil {
+		drop("env_keys", signInKeyReason)
+		o.EnvKeys = nil
+	}
+	if o.APIKey != nil {
+		drop("api_key", signInKeyReason)
+		o.APIKey = nil
+	}
+	return o
 }
 
 // redundantProvider is the note for a provider entry whose every endpoint

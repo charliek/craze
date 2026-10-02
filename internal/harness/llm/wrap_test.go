@@ -223,7 +223,7 @@ func TestFinishRules(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			m := wrap(stubModel{parts: tc.parts}, newScrubber(canary))
+			m := wrap(stubModel{parts: tc.parts}, newScrubber(canary, nil))
 			parts, err := m.Stream(context.Background(), fantasy.Call{})
 			if err != nil {
 				t.Fatal(err)
@@ -263,7 +263,7 @@ func TestRawFinishLeavesProviderMetadataAlone(t *testing.T) {
 		{Type: fantasy.StreamPartTypeTextDelta, ID: "0", Delta: "hi"},
 		{Type: fantasy.StreamPartTypeFinish, FinishReason: fantasy.FinishReasonStop, Usage: fantasy.Usage{TotalTokens: 3}, ProviderMetadata: theirs},
 	}
-	resp, err := wrap(stubModel{parts: parts}, newScrubber(canary)).Stream(context.Background(), fantasy.Call{})
+	resp, err := wrap(stubModel{parts: parts}, newScrubber(canary, nil)).Stream(context.Background(), fantasy.Call{})
 	if err != nil {
 		t.Fatal(err)
 	}

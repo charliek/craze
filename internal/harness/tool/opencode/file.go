@@ -105,8 +105,9 @@ func missing(err error) bool {
 }
 
 // isCredentials reports whether real, a path realPath resolved, is the
-// harness's key file (plan 019 §3.8): by name and directory, or, when real
-// exists (info is its), by identity, so a hard link to it is refused too.
+// harness's key file (plan 019 §3.8) or in its sign-in directory (plan 033
+// §3.12): by name and directory, or, when real exists (info is its), by
+// identity, so a hard link to either is refused too.
 //
 // The name is compared ignoring case and the directory by identity. On a
 // case-insensitive file system (macOS's APFS, by default) a file has many
@@ -122,11 +123,64 @@ func isCredentials(env tool.Env, real string, info fs.FileInfo) bool {
 	if strings.EqualFold(filepath.Base(real), filepath.Base(cred)) && sameDir(filepath.Dir(real), filepath.Dir(cred)) {
 		return true
 	}
+	if inAuthDir(env, real, info) {
+		return true
+	}
 	if info == nil {
 		return false
 	}
 	ci, err := os.Stat(cred)
 	return err == nil && os.SameFile(info, ci)
+}
+
+// inAuthDir reports whether real, a path realPath resolved, is the harness's
+// sign-in directory <Home>/auth or anything under it (plan 033 §3.12): the
+// ChatGPT plan's token file, its lock, its registration and the host id. Two
+// ways, as for the key file:
+//
+//   - by place: real or one of its parents is that directory — by identity
+//     where both exist, so another spelling of it on a case-insensitive file
+//     system, or the real path behind a symlink to it, is refused, and by
+//     name, ignoring case, where neither does, so a file cannot be created
+//     there before the sign-in makes the directory;
+//   - by identity, when real exists (info is its): it is the same file as one
+//     in that directory, so a hard link made elsewhere to the token file is
+//     refused too.
+//
+// Only the directory's own entries are compared: the sign-in makes no
+// subdirectory.
+func inAuthDir(env tool.Env, real string, info fs.FileInfo) bool {
+	auth := filepath.Join(env.Home, AuthDir)
+	if r, err := realPath(auth); err == nil {
+		auth = r
+	}
+	// sameDir's rule, with the directory stat'ed once for every parent.
+	ai, aerr := os.Stat(auth)
+	for p := real; ; p = filepath.Dir(p) {
+		pi, perr := os.Stat(p)
+		switch {
+		case p == auth,
+			aerr == nil && perr == nil && os.SameFile(pi, ai),
+			aerr != nil && perr != nil && strings.EqualFold(p, auth):
+			return true
+		}
+		if filepath.Dir(p) == p {
+			break
+		}
+	}
+	if info == nil || aerr != nil {
+		return false
+	}
+	entries, err := os.ReadDir(auth)
+	if err != nil {
+		return false
+	}
+	for _, e := range entries {
+		if fi, err := os.Stat(filepath.Join(auth, e.Name())); err == nil && os.SameFile(info, fi) {
+			return true
+		}
+	}
+	return false
 }
 
 // sameDir reports whether a and b name one directory: by identity when both
