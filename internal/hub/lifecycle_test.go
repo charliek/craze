@@ -641,10 +641,23 @@ func TestALostRecordOrSocketStopsTheHub(t *testing.T) {
 		hk := quiet()
 		lost := make(chan time.Time)
 		hk.lostTick = lost
+		// Each look's end, so the record goes only once the first look is
+		// over: a tick's receipt does not say its look is done, and a record
+		// removed before that look would rightly stop the hub at it (X76).
+		looked := make(chan string, 4)
+		hk.lostLooked = func(why string) { looked <- why }
 		rn := runIn(t, env, hk)
 		rn.line(t)
 		h := rn.serving(t)
-		rn.tick(t, lost) // still its own: nothing happens
+		rn.tick(t, lost)
+		select {
+		case why := <-looked:
+			if why != "" {
+				t.Fatalf("the hub's first look found it lost: %s", why)
+			}
+		case <-time.After(step):
+			t.Fatalf("the hub's first look did not end within %v", step)
+		}
 		dial(t, h.sock).hello(t)
 		if err := os.Remove(recordPath(t, env)); err != nil {
 			t.Fatal(err)

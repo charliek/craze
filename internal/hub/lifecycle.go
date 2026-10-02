@@ -194,6 +194,9 @@ type Options struct {
 type hooks struct {
 	// lostTick, hostsTick and sweepTick replace the tickers.
 	lostTick, hostsTick, sweepTick <-chan time.Time
+	// lostLooked runs once a lost tick's look is done, with what it found
+	// ("" for nothing): a tick's receipt alone does not say its look is over.
+	lostLooked func(why string)
 	// graceTimer arms the idle grace: the channel that fires at its end, and
 	// its stop.
 	graceTimer func(time.Duration) (<-chan time.Time, func())
@@ -557,7 +560,11 @@ func (h *hub) loop(ctx context.Context) string {
 			}
 			return "signal " + sig.String()
 		case <-lost:
-			if why := h.lost(); why != "" {
+			why := h.lost()
+			if h.hk.lostLooked != nil {
+				h.hk.lostLooked(why)
+			}
+			if why != "" {
 				return why + ", so nobody can find this hub"
 			}
 		case <-hosts:
