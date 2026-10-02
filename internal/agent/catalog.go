@@ -5,11 +5,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
 
 	"github.com/charliek/craze/internal/acp"
+	"github.com/charliek/craze/internal/harness/modeltable"
 )
 
 func parseModels(raw json.RawMessage) (current string, models []ModelInfo) {
@@ -418,16 +420,23 @@ func sortModelBucket(ms []ModelInfo) {
 // OrderModels returns advertised models with the current model first, then
 // the remembered ones by rank (ModelInfo.Recent, newest first: plan 031
 // §3.6), then any id/name matching grok, then the rest by display name and
-// id. Only a native session's models carry a rank — an ACP provider's never
-// do — so an ACP picker's order is what it always was. Nothing is labelled:
-// the order, and the current model being the pre-selected row, say it all
-// (owner, Q4).
+// id — but the ChatGPT plan's models (modeltable.ChatGPTAliasPrefix), which
+// stay one block, in the order the session listed them: the account's own
+// priority order (plan 033 §3.11, A19), which modeltable.Choices gives them,
+// placed among the rest where Choices placed it, after the models it listed
+// before the block (plan 033 C14r2, V5: sorted by name, the dialog listed
+// Luna, GPT-5.5, Sol, Terra, Astra for astra, sol, terra, luna, gpt-5.5).
+// Only a native session's models carry a rank or the plan's prefix — an ACP
+// provider's never do — so an ACP picker's order is what it always was.
+// Nothing is labelled: the order, and the current model being the
+// pre-selected row, say it all (owner, Q4).
 func OrderModels(snap Snapshot) []ModelInfo {
 	models := snapshotModels(snap)
 	if len(models) == 0 {
 		return nil
 	}
-	var cur, recent, grok, rest []ModelInfo
+	var cur, recent, grok, rest, plan []ModelInfo
+	planAt := -1 // where the plan's block goes in rest: after the models listed before it
 	seenCurrent := false
 	for _, m := range models {
 		if !seenCurrent && snap.CurrentModel != "" && m.ID == snap.CurrentModel {
@@ -437,6 +446,13 @@ func OrderModels(snap Snapshot) []ModelInfo {
 		}
 		if m.Recent > 0 {
 			recent = append(recent, m)
+			continue
+		}
+		if strings.HasPrefix(m.ID, modeltable.ChatGPTAliasPrefix) {
+			if planAt < 0 {
+				planAt = len(rest)
+			}
+			plan = append(plan, m)
 			continue
 		}
 		if isGrokModel(m) {
@@ -452,6 +468,9 @@ func OrderModels(snap Snapshot) []ModelInfo {
 	sort.SliceStable(recent, func(i, j int) bool { return recent[i].Recent < recent[j].Recent })
 	sortModelBucket(grok)
 	sortModelBucket(rest)
+	if len(plan) > 0 {
+		rest = slices.Insert(rest, planAt, plan...)
+	}
 	out := make([]ModelInfo, 0, len(models))
 	out = append(out, cur...)
 	out = append(out, recent...)

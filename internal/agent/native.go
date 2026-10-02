@@ -3104,7 +3104,8 @@ func phraseTurnError(err error) error {
 // phraseChatGPT is the ChatGPT plan's failure err carries in the adapter's
 // words (plan 033 §3.12's table), "" for any other failure: by the sign-in's
 // own sentinel, which the harness keeps on the turn's error — the usage
-// latch, signed out or to sign in again, plan usage turned off — or by the
+// latch, signed out or to sign in again, plan usage turned off, a model of
+// another account's list than the one signed in (C14r2) — or by the
 // plan's code on a failure of its driver: the usage limit, an account that is
 // not eligible, a capability the route does not support (named by its param),
 // and a 401 the token's one renewal did not cure.
@@ -3118,6 +3119,17 @@ func phraseChatGPT(err error) string {
 		return chatgptPlanOffText
 	}
 	var pe *harness.ProviderError
+	if errors.Is(err, modeltable.ErrOtherAccount) {
+		// The driver's refusal to send a model of one account's list with
+		// another account's token (plan 033 C14r2, review r13 d): a turn,
+		// a summary or a wake on a model the session opened before the
+		// switch. The words are phraseSetupError's for the same model.
+		alias := ""
+		if errors.As(err, &pe) {
+			alias = pe.Model
+		}
+		return otherAccountText(alias)
+	}
 	if !errors.As(err, &pe) || pe.Driver != modeltable.DriverChatGPT {
 		return ""
 	}
@@ -3157,12 +3169,21 @@ func phraseSetupError(err error, table *modeltable.Table, alias string) error {
 	case errors.Is(err, modeltable.ErrOtherAccount):
 		// Another account signed in since this session's table was loaded
 		// (plan 033 C14r, r12 #4): not a key to add, so not noKeyText.
-		return &nativeError{msg: fmt.Sprintf("native: model %q is from another ChatGPT account's model list; a new session offers the signed-in account's models",
-			sanitizeLine(alias)), cause: err}
+		return &nativeError{msg: otherAccountText(alias), cause: err}
 	case errors.Is(err, harness.ErrNoAPIKey) && table != nil:
 		return &nativeError{msg: noKeyText(table, alias), cause: err}
 	}
 	return &nativeError{msg: fmt.Sprintf("native: model %q: %s", alias, sanitizeLine(err.Error())), cause: err}
+}
+
+// otherAccountText says that alias is a model of another ChatGPT account's
+// list than the one signed in now (modeltable.ErrOtherAccount): Resolve's
+// refusal to switch to it or open on it, and the driver's refusal of a
+// request on it from a session opened before the switch (plan 033 C14r,
+// C14r2).
+func otherAccountText(alias string) string {
+	return fmt.Sprintf("native: model %q is from another ChatGPT account's model list; a new session offers the signed-in account's models",
+		sanitizeLine(alias))
 }
 
 // phraseLoadError is a load's Open error in the adapter's words (plan 028

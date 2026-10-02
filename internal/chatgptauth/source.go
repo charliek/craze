@@ -171,6 +171,21 @@ func (s *TokenSource) Token(ctx context.Context) (string, uint64, error) {
 	return tok, gen, err
 }
 
+// TokenAccount is Token with the account the token belongs to: the subject
+// and the issued client id of the record it came from, read with it as one
+// fact (plan 033 C14r2, review r13 d). The driver holds every request on a
+// model of an account's own list to that account with it (package llm's
+// boundCredentials): after a sign-in to another account, the token in the
+// file is the other account's, and a session opened on the first's model
+// must send none of it. Its failures are Token's.
+func (s *TokenSource) TokenAccount(ctx context.Context) (token string, gen uint64, subject, clientID string, err error) {
+	tok, gen, rec, err := s.token(ctx)
+	if err != nil {
+		return "", 0, "", "", err
+	}
+	return tok, gen, rec.Subject, rec.ClientID, nil
+}
+
 // Invalidate is Token's answer to a request the server refused with the
 // token gen named (an HTTP 401): if the token in memory is already another
 // one, nothing is done; otherwise, under the lock, a token in the file newer

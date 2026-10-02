@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"slices"
 	"strings"
 	"sync"
@@ -350,5 +351,126 @@ func TestAProviderErrorBodyIsScrubbedOfARotatedValue(t *testing.T) {
 	}
 	if n := len(srv.requests()); n != 1 {
 		t.Fatalf("the request was sent %d times", n)
+	}
+}
+
+// accountAuth is a signInAuth that says whose its token is (accountTokens),
+// and whose account a test can switch, as a sign-in to another account in the
+// same process switches the token source's.
+type accountAuth struct {
+	*signInAuth
+	subject, client string
+	// onInvalidate, when set, runs on each Invalidate: the renewal a 401
+	// asks for, which a test has land on another account.
+	onInvalidate func()
+}
+
+func newAccountAuth(subject, client string) *accountAuth {
+	return &accountAuth{signInAuth: newSignInAuth(), subject: subject, client: client}
+}
+
+// signIn makes token, of subject and client, the one handed out.
+func (a *accountAuth) signIn(subject, client, token string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.subject, a.client, a.token = subject, client, token
+	a.values = append(a.values, token)
+}
+
+func (a *accountAuth) TokenAccount(ctx context.Context) (string, uint64, string, string, error) {
+	tok, gen, err := a.Token(ctx)
+	if err != nil {
+		return "", 0, "", "", err
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return tok, gen, a.subject, a.client, nil
+}
+
+func (a *accountAuth) Invalidate(context.Context, uint64) error {
+	if a.onInvalidate != nil {
+		a.onInvalidate()
+	}
+	return nil
+}
+
+// TestABoundModelSendsOnlyItsAccountsToken (plan 033 C14r2, review r13 d): a
+// model of an account's list (Resolved.Account) sends with its account's
+// token, and once another account is signed in the next request is refused
+// before it is sent — ErrOtherAccount, kept through the scrub as a sign-in
+// sentinel (AuthSentinel), its text free of every token — and so is the retry
+// after a 401 whose renewal landed on the other account; with the first
+// account signed in again, the model sends once more. The server saw no
+// request with the other account's token. The controls: the same model
+// unbound (a plan model a user's models.toml adds) sends with whatever token
+// the sign-in holds, and a bound model on a sign-in that cannot say whose its
+// token is, is refused at build.
+func TestABoundModelSendsOnlyItsAccountsToken(t *testing.T) {
+	const tokB, tokA2 = "test-plan-other-0004", "test-plan-again-0005"
+	answer := func() http.HandlerFunc {
+		return rxEvents(rxAdded(0, rxMessage("m1", "")), rxText(0, "m1", "hi"), rxDone(0, rxMessage("m1", "hi")), rxCompleted(5, 0, 1, 0))
+	}
+	refused := func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, `{"error":{"message":"no"}}`, http.StatusUnauthorized)
+	}
+	srv := newRxServer(t, answer(), refused, answer())
+	auth := newAccountAuth("user-subject-a", "app_client-a")
+	bound := chatgpt()
+	bound.Account = modeltable.Account{Subject: "user-subject-a", ClientID: "app_client-a"}
+	lm, err := New(bound, WithSignIn(auth, at(srv)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := streamErr(t, lm); err != nil {
+		t.Fatalf("the first request, on its own account: %v", err)
+	}
+
+	auth.signIn("user-subject-b", "app_client-b", tokB)
+	_, err = streamErr(t, lm)
+	if !errors.Is(err, modeltable.ErrOtherAccount) || AuthSentinel(err) != modeltable.ErrOtherAccount {
+		t.Fatalf("a request after another account signed in = %v (sentinel %v), want ErrOtherAccount", err, AuthSentinel(err))
+	}
+	for _, v := range []string{planToken, tokB} {
+		if strings.Contains(err.Error(), v) {
+			t.Fatalf("the refusal carries a token: %v", err)
+		}
+	}
+
+	// A 401 of the first account's token, renewed onto the other account's.
+	auth.signIn("user-subject-a", "app_client-a", tokA2)
+	auth.onInvalidate = func() { auth.signIn("user-subject-b", "app_client-b", tokB) }
+	if _, err = streamErr(t, lm); !errors.Is(err, modeltable.ErrOtherAccount) {
+		t.Fatalf("the retry after a renewal onto the other account = %v, want ErrOtherAccount", err)
+	}
+	auth.onInvalidate = nil
+	auth.signIn("user-subject-a", "app_client-a", tokA2)
+	if _, err := streamErr(t, lm); err != nil {
+		t.Fatalf("with the account signed in again: %v", err)
+	}
+	reqs := srv.requests()
+	if len(reqs) != 3 {
+		t.Fatalf("the server saw %d requests, want 3: the first, the refused one, the last", len(reqs))
+	}
+	for i, want := range []string{planToken, tokA2, tokA2} {
+		if got := reqs[i].header.Get("Authorization"); got != "Bearer "+want {
+			t.Fatalf("request %d carried %q, want %q's", i, got, want)
+		}
+	}
+
+	// The controls.
+	srv2 := newRxServer(t, answer())
+	unbound, err := New(chatgpt(), WithSignIn(auth, at(srv2)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	auth.signIn("user-subject-b", "app_client-b", tokB)
+	if _, err := streamErr(t, unbound); err != nil {
+		t.Fatalf("control: an unbound plan model on the other account: %v", err)
+	}
+	if reqs := srv2.requests(); len(reqs) != 1 || reqs[0].header.Get("Authorization") != "Bearer "+tokB {
+		t.Fatalf("control: the unbound model sent %+v", reqs)
+	}
+	if _, err := New(bound, WithSignIn(newSignInAuth(), at(srv2))); err == nil || !strings.Contains(err.Error(), "cannot say whose token") {
+		t.Fatalf("a bound model on a sign-in with no TokenAccount = %v, want a refusal", err)
 	}
 }

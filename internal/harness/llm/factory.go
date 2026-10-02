@@ -180,7 +180,14 @@ func newSignedIn(r modeltable.Resolved, o options) (fantasy.LanguageModel, error
 	if err != nil {
 		return nil, err
 	}
-	return wrap(lm, newScrubber("", o.auth)), nil
+	// The driver's refusal of another account's token (boundCredentials) is
+	// kept through the scrub as the Auth's own sentinels are, so the turn's
+	// failure answers errors.Is(err, modeltable.ErrOtherAccount) and the
+	// adapter can say so, and a summary gives up on it at once (plan 033
+	// C14r2): it is fixed text, so it can carry no token.
+	scrub := newScrubber("", o.auth)
+	scrub.sentinels = append(scrub.sentinels, modeltable.ErrOtherAccount)
+	return wrap(lm, scrub), nil
 }
 
 // openAIEfforts are the reasoning efforts Fantasy's OpenAI-compatible client

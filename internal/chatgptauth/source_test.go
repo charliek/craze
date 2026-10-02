@@ -172,6 +172,40 @@ func TestPeerRefreshIsAdopted(t *testing.T) {
 	}
 }
 
+// TestTokenAccountNamesTheTokensAccount (plan 033 C14r2, review r13 d):
+// TokenAccount hands out Token's token with the subject and issued client id
+// of the record it came from, so after another account signs in — its record
+// written over the first's — the token it hands out next is the new
+// account's, and says so. The control is Token itself, which hands out the
+// new account's token just the same, with nothing to tell the two apart.
+func TestTokenAccountNamesTheTokensAccount(t *testing.T) {
+	f := newFake(t)
+	useFake(t, f)
+	dir := nativeDir(t)
+	seeded := seedSignedIn(t, f, dir, seedOpts{})
+	s := newSource(dir)
+	tok, _, subject, client, err := s.TokenAccount(context.Background())
+	if err != nil || tok != seeded.AccessToken || subject != testSubject || client != testClient {
+		t.Fatalf("TokenAccount = %s, %q, %q, %v; want the seeded token of %q, %q", digest(tok), subject, client, err, testSubject, testClient)
+	}
+
+	const otherSubject, otherClient = "user-subject-other-0002", "app_client-other-0002"
+	access, refresh := f.mint(otherClient)
+	other := *seeded
+	other.Subject, other.ClientID, other.AccessToken, other.RefreshToken = otherSubject, otherClient, access, refresh
+	other.Incarnation, other.Generation = "inc-other", 1
+	if err := writeRecord(dir, &other, false); err != nil {
+		t.Fatal(err)
+	}
+	tok, _, subject, client, err = s.TokenAccount(context.Background())
+	if err != nil || tok != access || subject != otherSubject || client != otherClient {
+		t.Fatalf("after the other account signed in, TokenAccount = %s, %q, %q, %v", digest(tok), subject, client, err)
+	}
+	if tok, _, err := s.Token(context.Background()); err != nil || tok != access {
+		t.Fatalf("control: Token = %s, %v; want the other account's token, unremarked", digest(tok), err)
+	}
+}
+
 // TestMultiProcessRefreshRace (P20, A18): two processes — this test and a
 // re-exec of its binary — both hold the same token in memory and both find
 // it under 5 minutes from expiry (each runs a clock 57 minutes ahead once it

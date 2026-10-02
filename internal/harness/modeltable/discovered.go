@@ -115,6 +115,12 @@ var (
 	// account signed in now can use, and its list may order the plan's models
 	// otherwise. It unwraps to ErrNoAPIKey: the model is not funded. A table
 	// loaded anew offers the account's own list once it is fetched.
+	//
+	// It is the driver's error too, at each request on such a model
+	// (Resolved.Account; plan 033 C14r2, review r13 d): a session, or a
+	// sub-agent, opened on the model before the switch resolved it then, and
+	// its every turn, summary and wake would otherwise send with whatever
+	// account's token the process's sign-in holds now.
 	ErrOtherAccount error = &fundingError{msg: "modeltable: that ChatGPT plan model is from another account's list"}
 )
 
@@ -192,15 +198,15 @@ func signInVia(dir string) KeySource {
 
 // signInState is signInVia with the registration it read: the account that
 // is signed in, which Resolve holds a discovered model's list to (r12 #4).
-func signInState(dir string) (KeySource, chatgptAccount) {
+func signInState(dir string) (KeySource, Account) {
 	if dir == "" {
-		return KeyNone, chatgptAccount{}
+		return KeyNone, Account{}
 	}
 	c, ok := readChatGPTClient(dir)
 	if !ok {
-		return KeyNone, chatgptAccount{}
+		return KeyNone, Account{}
 	}
-	account := chatgptAccount{subject: c.Subject, clientID: c.ClientID}
+	account := Account{Subject: c.Subject, ClientID: c.ClientID}
 	info, err := os.Lstat(filepath.Join(dir, ChatGPTAuthDir, ChatGPTTokenFile))
 	tokens := err == nil && info.Mode().IsRegular() && info.Size() > 0
 	switch {
@@ -212,10 +218,13 @@ func signInState(dir string) (KeySource, chatgptAccount) {
 	return KeyNone, account
 }
 
-// chatgptAccount names a ChatGPT account's registration as the model list is
-// bound to it: the subject and the issued client id (P34).
-type chatgptAccount struct {
-	subject, clientID string
+// Account names a ChatGPT account's registration as the model list is bound
+// to it: the subject and the issued client id (P34). A model the table
+// learned from that list carries it (Resolved.Account), and its driver sends
+// no request with another account's token (plan 033 C14r2, review r13 d).
+// The zero Account binds nothing.
+type Account struct {
+	Subject, ClientID string
 }
 
 // signInError is the reason a model on provider id is not funded when the
@@ -256,7 +265,7 @@ type chatgptModelEntry struct {
 // only while that account is the one signed in (r12 #4).
 type discovered struct {
 	rank    map[string]int
-	account chatgptAccount
+	account Account
 }
 
 // withDiscovered adds the ChatGPT plan's models to cat, the merge's own copy
@@ -327,7 +336,7 @@ func withDiscovered(cat *Catalog, dir string) (*discovered, []string) {
 	// file is sorted again, stably, in case anything else wrote it.
 	sort.SliceStable(entries, func(a, b int) bool { return entries[a].m.Priority < entries[b].m.Priority })
 
-	d := &discovered{rank: map[string]int{}, account: chatgptAccount{subject: client.Subject, clientID: client.ClientID}}
+	d := &discovered{rank: map[string]int{}, account: Account{Subject: client.Subject, ClientID: client.ClientID}}
 	for _, e := range entries {
 		m := e.m
 		alias := ChatGPTAliasPrefix + m.Slug

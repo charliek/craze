@@ -60,3 +60,15 @@ type authSentinels interface {
 type usageLatch interface {
 	LatchUsageLimit()
 }
+
+// accountTokens is an Auth that says whose each token is (plan 033 C14r2,
+// review r13 d): TokenAccount is Token with the account the token belongs to
+// — the subject and the issued client id of the sign-in it came from, read
+// with the token, as one fact — so a model bound to an account
+// (modeltable.Resolved.Account) can refuse another account's token before a
+// request carries it. The ChatGPT plan's token source has it; a model bound to
+// an account is refused at build on an Auth without it (newResponsesModel),
+// since nothing else could say whose token it sends.
+type accountTokens interface {
+	TokenAccount(ctx context.Context) (token string, gen uint64, subject, clientID string, err error)
+}

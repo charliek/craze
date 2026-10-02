@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/charliek/craze/internal/harness/redact"
@@ -291,8 +292,14 @@ type Env struct {
 	// Redactor holds every loaded provider key. The dispatcher redacts every
 	// result on its own; a tool uses this only where text leaves it before
 	// the result does (bash wraps its output in NewWriter, so the progress
-	// snapshot and the spill file are redacted too).
+	// snapshot and the spill file are redacted too). It is the redactor of
+	// when the call began: a tool that cuts text redacts it with
+	// CurrentRedactor instead.
 	Redactor *redact.Replacer
+	// live is the dispatcher's redactor, which the session widens while the
+	// call runs (Dispatcher.SetRedactor): what CurrentRedactor reads. nil in
+	// an Env the dispatcher did not hand out.
+	live *atomic.Pointer[redact.Replacer]
 	// Environ is the environment a child process gets: the user's, less
 	// craze's own provider keys (ChildEnviron). nil is no environment
 	// configured, and a tool that starts processes refuses to run rather
@@ -360,6 +367,24 @@ type Env struct {
 	// name, or its alias when it has none — for a tool's words about it:
 	// "<model> does not accept images". "" before any turn has set it.
 	ModelName string
+}
+
+// CurrentRedactor is the session's redactor as it is now, not as it was when
+// the call began (Redactor): the dispatcher's, which a key the session learns
+// while the call runs widens at once — a ChatGPT plan token the sign-in mints
+// mid-turn (Session.AddSecrets, plan 033 §3.12). A tool that cuts text it
+// hands on redacts the text with it at the cut — grep's preview of a long
+// matching line, read's of a long line (plan 033 C14r2, review r13 a): the
+// dispatcher redacts the result again, with the redactor of the moment it
+// returns, but a key the cut halved is no longer whole by then, and the half
+// the cut kept is matched by no redactor at all. Taken at the cut, it knows
+// every key the session had learned by then. In an Env the dispatcher did
+// not hand out (a test's), it is Redactor.
+func (e Env) CurrentRedactor() *redact.Replacer {
+	if e.live == nil {
+		return e.Redactor
+	}
+	return e.live.Load()
 }
 
 // ModelLabel is the name a tool gives the call's model in its own words

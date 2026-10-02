@@ -166,6 +166,9 @@ func (c *grepCall) Run(ctx context.Context, env tool.Env) tool.Result {
 			return false, err
 		}
 		if ok && !guard.protected(m.path) {
+			if beforeCut != nil {
+				beforeCut()
+			}
 			m.text = preview(env, m.text)
 			rows = append(rows, m)
 		}
@@ -284,13 +287,26 @@ func parseMatch(dir string, line []byte) (m grepMatch, ok bool, err error) {
 	return grepMatch{path: abs, line: *data.LineNumber, text: text}, true, nil
 }
 
+// beforeCut, when a test sets it, is called just before grep previews a
+// matching line and before read cuts a line it read — after the line was
+// read, before the cut — where a key the session learns mid-call must still
+// be caught (plan 033 C14r2, review r13 a). nil in production.
+var beforeCut func()
+
 // preview is a matching line as grep shows it: without its line ending,
 // which rg's JSON keeps and opencode shows (NOTICE); with craze's provider
 // keys redacted, before the cut, so a key the cut would halve leaves no
 // half behind; and cut to maxMatchLength runes, then "...", when longer.
+//
+// The keys are the session's as they are at the cut (Env.CurrentRedactor),
+// not as they were when the call began (plan 033 C14r2, review r13 a): a
+// ChatGPT plan token the sign-in mints while rg runs is learned by the
+// session at once (Session.AddSecrets), and a line holding it across the cut
+// would otherwise keep its first half, which the dispatcher's redaction of
+// the result, though it knows the token by then, cannot recognise.
 func preview(env tool.Env, s string) string {
 	s = strings.TrimSuffix(strings.TrimSuffix(s, "\n"), "\r")
-	s = env.Redactor.String(s)
+	s = env.CurrentRedactor().String(s)
 	if utf8.RuneCountInString(s) <= maxMatchLength {
 		return s
 	}

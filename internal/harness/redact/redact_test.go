@@ -249,6 +249,63 @@ func TestWriterHoldsBackOnlyWhatItMust(t *testing.T) {
 	}
 }
 
+// TestHead (plan 033 C14r2): Head is what a Writer given the text would have
+// written before its Close — the start of a line whose rest a reader never
+// held, redacted as far as it can be decided — so a key the text's end halves
+// leaves none of itself, a key whole in it is replaced, and text that begins
+// no key is kept as it is. Every prefix of a line holding a key is cut, as a
+// reader's window could cut it: none shows a byte of the key. The negative
+// control is String, which shows the halved key's first bytes; and a nil
+// Replacer's Head is the text.
+func TestHead(t *testing.T) {
+	r := New("short-key", keyA)
+	for _, tc := range []struct{ text, want string }{
+		{"", ""},
+		{"plain output line", "plain output line"},
+		{"export KEY=" + keyA, "export KEY=" + Marker},
+		{"cut at sk-canary-al", "cut at "},
+		{"cut at " + keyA[:len(keyA)-1], "cut at "},
+		{"whole " + keyA + " then sh", "whole " + Marker + " then "},
+		{"x" + keyA[:len(keyA)-1] + "x", "x" + keyA[:len(keyA)-1] + "x"}, // a prefix broken off: no key
+	} {
+		if got := r.Head(tc.text); got != tc.want {
+			t.Fatalf("Head(%q) = %q, want %q", tc.text, got, tc.want)
+		}
+		var buf bytes.Buffer
+		if _, err := r.NewWriter(&buf).Write([]byte(tc.text)); err != nil {
+			t.Fatal(err)
+		}
+		if buf.String() != tc.want {
+			t.Fatalf("%q: a Writer wrote %q before its Close, Head %q", tc.text, buf.String(), tc.want)
+		}
+	}
+
+	head := "a line of output, then "
+	line := head + keyA + " and more"
+	for i := 0; i <= len(line); i++ {
+		got := r.Head(line[:i])
+		switch {
+		case i < len(head):
+			if got != line[:i] {
+				t.Fatalf("Head of %d bytes = %q, want them as they are", i, got)
+			}
+		case i < len(head)+len(keyA):
+			if got != head {
+				t.Fatalf("Head of %d bytes, %d of the key = %q, want none of it", i, i-len(head), got)
+			}
+		case !strings.HasPrefix(got, head+Marker) || strings.Contains(got, keyA[:3]):
+			t.Fatalf("Head of %d bytes, the key whole = %q", i, got)
+		}
+	}
+	if cut := line[:len(head)+10]; !strings.Contains(r.String(cut), keyA[:10]) {
+		t.Fatalf("control: String(%q) = %q shows no half of the key", cut, r.String(cut))
+	}
+	var none *Replacer
+	if got := none.Head(line[:len(head)+10]); got != line[:len(head)+10] {
+		t.Fatalf("a nil Replacer's Head = %q", got)
+	}
+}
+
 func TestWriterManySmallWrites(t *testing.T) {
 	r := New(keyA, keyB)
 	text := strings.Repeat("line with "+keyA+" and "+keyB+"\n", 50)

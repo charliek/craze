@@ -69,7 +69,15 @@ func newResponsesModel(r modeltable.Resolved, auth Auth, baseURL string, httpCli
 	if strings.TrimSpace(r.WireModel) == "" {
 		return nil, fmt.Errorf("llm: provider %q (model %q) names no wire model", r.ProviderID, r.Alias)
 	}
-	c, err := responsesapi.NewClient(responsesapi.Config{BaseURL: baseURL, HTTPClient: httpClient, Credentials: auth})
+	var creds responsesapi.Credentials = auth
+	if r.Account != (modeltable.Account{}) {
+		at, ok := auth.(accountTokens)
+		if !ok {
+			return nil, fmt.Errorf("llm: model %q is bound to the ChatGPT account whose list it came from, and the sign-in cannot say whose token it hands out", r.Alias)
+		}
+		creds = &boundCredentials{auth: auth, tokens: at, want: r.Account, alias: r.Alias}
+	}
+	c, err := responsesapi.NewClient(responsesapi.Config{BaseURL: baseURL, HTTPClient: httpClient, Credentials: creds})
 	if err != nil {
 		return nil, fmt.Errorf("llm: model %q: %w", r.Alias, err)
 	}
@@ -81,6 +89,40 @@ func newResponsesModel(r modeltable.Resolved, auth Auth, baseURL string, httpCli
 	m := &responsesModel{provider: r.ProviderID, model: r.WireModel, parallel: parallel, client: c}
 	m.latch, _ = auth.(usageLatch)
 	return m, nil
+}
+
+// boundCredentials are a sign-in's credentials for a model bound to the
+// account whose list it came from (modeltable.Resolved.Account; plan 033
+// C14r2, review r13 d): each token is handed to the client only when the
+// token source's account at that moment — read with the token — is the
+// model's, and is ErrOtherAccount otherwise, before any request carries it.
+// Every request on the model asks here — each step of a turn, a summary, a
+// wake, a retry after a 401's renewal — whichever session or sub-agent sends
+// it, so another account's sign-in in the same process never pays for, or
+// sees, a conversation begun on the first's model. Resolve refuses the model
+// to anything opened after the switch; this is what holds one opened before
+// it. Signing in to the first account again lets the model's requests go
+// through once more.
+type boundCredentials struct {
+	auth   Auth
+	tokens accountTokens
+	want   modeltable.Account
+	alias  string
+}
+
+func (b *boundCredentials) Token(ctx context.Context) (string, uint64, error) {
+	tok, gen, subject, clientID, err := b.tokens.TokenAccount(ctx)
+	if err != nil {
+		return "", 0, err
+	}
+	if (modeltable.Account{Subject: subject, ClientID: clientID}) != b.want {
+		return "", 0, fmt.Errorf("%w (model %q)", modeltable.ErrOtherAccount, b.alias)
+	}
+	return tok, gen, nil
+}
+
+func (b *boundCredentials) Invalidate(ctx context.Context, gen uint64) error {
+	return b.auth.Invalidate(ctx, gen)
 }
 
 // fail is err, from the driver's core, as the error a step ends with

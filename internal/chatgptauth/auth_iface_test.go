@@ -1,6 +1,8 @@
 package chatgptauth_test
 
 import (
+	"context"
+
 	"github.com/charliek/craze/internal/chatgptauth"
 	"github.com/charliek/craze/internal/harness/llm"
 )
@@ -10,11 +12,16 @@ import (
 // harness (P31), so the check lives in this external test.
 var _ llm.Auth = (*chatgptauth.TokenSource)(nil)
 
-// And the two optional sides package llm looks for on an Auth (auth.go): the
-// sentinels its scrubber keeps through every error it rebuilds, and the usage
-// latch its driver sets on the plan's usage limit (plan 033 §3.12, P33). llm's
-// interfaces are its own; these are their method sets.
+// And the optional sides package llm looks for on an Auth (auth.go): the
+// sentinels its scrubber keeps through every error it rebuilds, the usage
+// latch its driver sets on the plan's usage limit (plan 033 §3.12, P33), and
+// the account each token belongs to, which its driver holds a model of an
+// account's list to (C14r2, review r13 d). llm's interfaces are its own;
+// these are their method sets.
 var (
 	_ interface{ Sentinels() []error } = (*chatgptauth.TokenSource)(nil)
 	_ interface{ LatchUsageLimit() }   = (*chatgptauth.TokenSource)(nil)
+	_ interface {
+		TokenAccount(context.Context) (string, uint64, string, string, error)
+	} = (*chatgptauth.TokenSource)(nil)
 )

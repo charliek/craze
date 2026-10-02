@@ -60,8 +60,10 @@ type scrubber struct {
 	// values is the Auth's Values, nil without one: every token value the
 	// source holds or retired within the hour.
 	values func() []string
-	// sentinels are the Auth's fixed-text sentinels (authSentinels), kept
-	// through every error rebuilt (sentinel).
+	// sentinels are the Auth's fixed-text sentinels (authSentinels), and the
+	// signed-in driver's own refusal of another account's token
+	// (modeltable.ErrOtherAccount, newSignedIn), kept through every error
+	// rebuilt (sentinel).
 	sentinels []error
 
 	mu       sync.Mutex
@@ -564,8 +566,9 @@ func (s *scrubber) sentinel(err error) error {
 }
 
 // AuthSentinel is the sign-in's own sentinel err carries — one its Auth
-// listed (authSentinels), which the scrubber kept in an error it rebuilt — or
-// nil. The harness keeps it on the turn's failure (classify), whose chain is
+// listed (authSentinels), or the driver's refusal of another account's token
+// (modeltable.ErrOtherAccount), which the scrubber kept in an error it
+// rebuilt — or nil. The harness keeps it on the turn's failure (classify), whose chain is
 // otherwise the harness's own, so the adapter tells "signed out" or "usage
 // limit reached" from a provider's refusal by errors.Is (plan 033 §3.12).
 func AuthSentinel(err error) error {

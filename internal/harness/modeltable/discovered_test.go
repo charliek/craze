@@ -256,6 +256,51 @@ func TestDiscoveredModelsFollowTheAccountSignedIn(t *testing.T) {
 	}
 }
 
+// TestResolvedCarriesTheListsAccount (plan 033 C14r2, review r13 d): a model
+// the table learned from the account's list resolves bound to that account —
+// the registration's subject and issued client id, which the driver holds
+// every request on the model to — while a plan model the user's models.toml
+// adds, which no list named, and a key-funded model resolve bound to none.
+func TestResolvedCarriesTheListsAccount(t *testing.T) {
+	dir := signedInDir(t)
+	if err := os.WriteFile(filepath.Join(dir, ModelsFile), []byte("version = 1\n\n[models.\"mine\"]\nprovider = \"chatgpt\"\nwire_model = \"gpt-5.6-sol\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	tbl, err := Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for alias, want := range map[string]Account{
+		"chatgpt/gpt-5.6-sol": {Subject: planSubject, ClientID: planClient},
+		"chatgpt/gpt-6-astra": {Subject: planSubject, ClientID: planClient},
+		"mine":                {},
+	} {
+		r, err := tbl.Resolve(alias, fakeEnv(nil))
+		if err != nil {
+			t.Fatalf("Resolve(%s): %v", alias, err)
+		}
+		if r.Account != want {
+			t.Fatalf("Resolve(%s).Account = %+v, want %+v", alias, r.Account, want)
+		}
+	}
+	keyed := 0
+	for alias, m := range tbl.Models {
+		if p := tbl.Providers[m.Provider]; p.Driver == DriverChatGPT {
+			continue
+		}
+		r, err := tbl.Resolve(alias, func(string) string { return "sk-canary-funded-0001" })
+		if err != nil {
+			continue
+		}
+		if keyed++; r.Account != (Account{}) {
+			t.Fatalf("the key-funded %s resolved bound to %+v", alias, r.Account)
+		}
+	}
+	if keyed == 0 {
+		t.Fatal("premise: no key-funded model resolved")
+	}
+}
+
 // TestChatGPTFunding (P34): a plan model resolves only while the sign-in
 // funds it — the token file a non-empty regular file and plan usage granted —
 // and is ErrPlanUsageDisabled when the account declined plan usage and

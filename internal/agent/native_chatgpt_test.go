@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -106,25 +107,61 @@ func noOpenAI(t *testing.T) (api, issuer *fakeEndpoint) {
 // writes it.
 func writePlanTokens(t *testing.T, dir, access, refresh, incarnation string, generation int) {
 	t.Helper()
-	if err := os.MkdirAll(chatgptauth.AuthDir(dir), 0o700); err != nil {
+	if err := writePlanTokensOf(dir, planSubject, planClient, access, refresh, incarnation, generation); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// writePlanTokensOf is writePlanTokens for the account subject and client
+// names, returning its failure rather than failing a test, so a fake
+// server's handler can call it.
+func writePlanTokensOf(dir, subject, client, access, refresh, incarnation string, generation int) error {
+	if err := os.MkdirAll(chatgptauth.AuthDir(dir), 0o700); err != nil {
+		return err
+	}
 	b, err := json.Marshal(map[string]any{
-		"version": 1, "client_id": planClient, "issuer": "https://auth.openai.com", "subject": planSubject,
+		"version": 1, "client_id": client, "issuer": "https://auth.openai.com", "subject": subject,
 		"email": "someone@example.com", "scopes": []string{"openid", "offline_access", "chatgpt.tokens.use.direct"},
 		"access_token": access, "access_expires_at": time.Now().Add(time.Hour).UTC(), "refresh_token": refresh,
 		"id_token": planIDToken, "incarnation": incarnation, "generation": generation,
 	})
 	if err != nil {
-		t.Fatal(err)
+		return err
 	}
 	tmp := chatgptauth.TokenFile(dir) + ".tmp"
 	if err := os.WriteFile(tmp, b, 0o600); err != nil {
-		t.Fatal(err)
+		return err
 	}
-	if err := os.Rename(tmp, chatgptauth.TokenFile(dir)); err != nil {
-		t.Fatal(err)
+	return os.Rename(tmp, chatgptauth.TokenFile(dir))
+}
+
+// The other account of the account-binding tests (plan 033 C14r2), and its
+// dummy tokens.
+const (
+	otherSubject = "user-subject-0002"
+	otherClient  = "app_client-0002"
+	otherAccess  = "test-plan-other-access-0017"
+	otherRefresh = "test-plan-other-refresh-0018"
+)
+
+// signInOf signs dir in to the account subject and client names, as a sign-in
+// in another process leaves it: that account's registration, with plan
+// usage, and a token record of access and refresh, each written by a rename.
+// The model list is left as it is, still the first account's: the process's
+// running sessions never read it again.
+func signInOf(dir, subject, client, access, refresh, incarnation string) error {
+	b, err := json.Marshal(chatgptauth.Client{ClientID: client, Subject: subject, Email: "someone@example.com", PlanUsage: true, NoticeShown: true})
+	if err != nil {
+		return err
 	}
+	tmp := chatgptauth.ClientFile(dir) + ".tmp"
+	if err := os.WriteFile(tmp, b, 0o600); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, chatgptauth.ClientFile(dir)); err != nil {
+		return err
+	}
+	return writePlanTokensOf(dir, subject, client, access, refresh, incarnation, 1)
 }
 
 // writePlanAccount writes dir's registration, with plan usage, and its model
@@ -580,5 +617,172 @@ func TestNativePhrasesTheChatGPTPlansFailures(t *testing.T) {
 		Providers: map[string]modeltable.Provider{modeltable.ChatGPTProvider: {Driver: modeltable.DriverChatGPT}}}
 	if got := phraseSetupError(other, tbl, "chatgpt/gpt-5.6-sol"); got.Error() != `native: model "chatgpt/gpt-5.6-sol" is from another ChatGPT account's model list; a new session offers the signed-in account's models` || !errors.Is(got, modeltable.ErrOtherAccount) {
 		t.Fatalf("phraseSetupError(another account's model) = %q", got)
+	}
+}
+
+// planAgentCall answers with one call of the agent tool: a sub-agent on the
+// session's own model, given prompt.
+func planAgentCall(prompt string) http.HandlerFunc {
+	b, _ := json.Marshal(map[string]any{"description": "look for me", "prompt": prompt, "model": "inherit"})
+	args := string(b)
+	call := func(a string) map[string]any {
+		return map[string]any{"type": "function_call", "id": "fc_a", "call_id": "call_a", "name": "agent", "namespace": "craze", "arguments": a}
+	}
+	return func(w http.ResponseWriter, _ *http.Request) {
+		planEvent(w, map[string]any{"type": "response.output_item.added", "output_index": 0, "item": call("")})
+		planEvent(w, map[string]any{"type": "response.function_call_arguments.delta", "output_index": 0, "item_id": "fc_a", "delta": args})
+		planEvent(w, map[string]any{"type": "response.output_item.done", "output_index": 0, "item": call(args)})
+		planCompleted(w)
+	}
+}
+
+// noBearerOf fails the test if any request the API saw carried one of tokens.
+func noBearerOf(t *testing.T, api *fakeEndpoint, tokens ...string) {
+	t.Helper()
+	for i, r := range api.requests() {
+		for _, tok := range tokens {
+			if strings.Contains(r.header.Get("Authorization"), tok) {
+				t.Fatalf("request %d reached the API with another account's token", i)
+			}
+		}
+	}
+}
+
+// TestNativeChatGPTHoldsASessionToItsAccount (plan 033 C14r2, review r13 d):
+// a session open on a model of account A's list sends nothing with account
+// B's token once B has signed in — B's registration and token record written
+// as a sign-in in another process writes them, while the session's table,
+// and so Resolve, still holds A's list — and its next turn ends in the plan's
+// words for a model of another account's list: the request is refused as its
+// credential is fetched, and the API sees nothing after the switch. With A
+// signed in again, the turn goes through on A's new token. That last turn is
+// the control: the switch of the record reaches the requests, so without the
+// binding B's token would have reached them too.
+func TestNativeChatGPTHoldsASessionToItsAccount(t *testing.T) {
+	api, _ := noOpenAI(t)
+	api.queue(planAnswer("first"), planAnswer("again"))
+	s, dir := planSession(t, t.TempDir())
+	if _, err := s.Prompt(context.Background(), "hi"); err != nil {
+		t.Fatalf("the first turn, on A: %v", err)
+	}
+	drained(s)
+
+	if err := signInOf(dir, otherSubject, otherClient, otherAccess, otherRefresh, "inc-b"); err != nil {
+		t.Fatal(err)
+	}
+	_, err := s.Prompt(context.Background(), "and again")
+	if want := otherAccountText("chatgpt/gpt-5.6-sol"); err == nil || err.Error() != want || !errors.Is(err, modeltable.ErrOtherAccount) {
+		t.Fatalf("a turn after B signed in = %v, want %q", err, want)
+	}
+	if n := len(api.requests()); n != 1 {
+		t.Fatalf("the API saw %d requests, want the first turn's alone", n)
+	}
+	for _, v := range []string{otherAccess, otherRefresh, planAccess} {
+		if l := nativeLeaks(err, v); len(l) > 0 {
+			t.Fatalf("a token reached the error at %v", l)
+		}
+	}
+	drained(s)
+
+	if err := signInOf(dir, planSubject, planClient, planAccess2, planRefresh2, "inc-a2"); err != nil {
+		t.Fatal(err)
+	}
+	if res, err := s.Prompt(context.Background(), "once more"); err != nil || res.StopReason != harness.StopEndTurn {
+		t.Fatalf("control: with A signed in again the turn = %+v, %v", res, err)
+	}
+	reqs := api.requests()
+	if len(reqs) != 2 || reqs[1].header.Get("Authorization") != "Bearer "+planAccess2 {
+		t.Fatalf("control: the API saw %d requests (the second with A's new token?)", len(reqs))
+	}
+	noBearerOf(t, api, otherAccess)
+}
+
+// TestNativeChatGPTHoldsASubagentToItsAccount (r13 d): the same for a
+// sub-agent already running on A's model. B signs in while the child works —
+// the API's answer to the child's first request switches the files, then asks
+// for a read — and the child's next request, after the read, is refused, so
+// the child fails; the parent's next request is refused too, and the turn
+// ends in the plan's words. The API saw the parent's first request and the
+// child's, both with A's token, and nothing with B's.
+func TestNativeChatGPTHoldsASubagentToItsAccount(t *testing.T) {
+	api, _ := noOpenAI(t)
+	var dir string
+	switched := func(w http.ResponseWriter, r *http.Request) {
+		if err := signInOf(dir, otherSubject, otherClient, otherAccess, otherRefresh, "inc-b"); err != nil {
+			t.Error(err)
+		}
+		planReadCall("hello.txt")(w, r)
+	}
+	api.queue(planAgentCall("read hello.txt and say what it holds"), switched)
+	s, d := planSession(t, nativeWorkspaceWith(t, map[string]string{"hello.txt": "hello world\n"}))
+	dir = d
+	_, err := s.Prompt(context.Background(), "delegate the read")
+	if want := otherAccountText("chatgpt/gpt-5.6-sol"); err == nil || err.Error() != want {
+		t.Fatalf("the parent's turn = %v, want %q", err, want)
+	}
+	reqs := api.requests()
+	if len(reqs) != 2 {
+		t.Fatalf("the API saw %d requests, want the parent's first and the child's first", len(reqs))
+	}
+	for i, r := range reqs {
+		if r.header.Get("Authorization") != "Bearer "+planAccess {
+			t.Fatalf("request %d did not carry A's token", i)
+		}
+	}
+	if !strings.Contains(reqs[1].body, "read hello.txt and say what it holds") {
+		t.Fatalf("the second request was not the child's: %.200s", reqs[1].body)
+	}
+	rows := s.Snapshot().Subagents
+	if len(rows) != 1 || rows[0].Status != SubagentFailed || !strings.Contains(rows[0].Error, "another account") {
+		t.Fatalf("the child's row = %+v, want it failed on the other account's token", rows)
+	}
+	noBearerOf(t, api, otherAccess)
+}
+
+// TestNativeModelDialogListsThePlanInTheAccountsOrder (plan 033 C14r2, V5):
+// a session signed in to the plan, with an account list of five models whose
+// priority order is not their names' — astra, sol, terra, luna, gpt-5.5 —
+// offers them, through its snapshot and the dialog's order (OrderModels), as
+// the running model first and then the rest of the block in the account's
+// order. The control is the names' order, which the V5 dialog showed: GPT-5.5
+// first.
+func TestNativeModelDialogListsThePlanInTheAccountsOrder(t *testing.T) {
+	_, _ = noOpenAI(t)
+	home := t.TempDir()
+	t.Setenv("CRAZE_HOME", home)
+	dir := filepath.Join(home, "native")
+	writePlanAccount(t, dir)
+	var models []chatgptauth.Model
+	for i, m := range [][2]string{
+		{"gpt-6-astra", "GPT-6-Astra"}, {"gpt-5.6-sol", "GPT-5.6-Sol"}, {"gpt-5.6-terra", "GPT-5.6-Terra"},
+		{"gpt-5.6-luna", "GPT-5.6-Luna"}, {"gpt-5.5", "GPT-5.5"},
+	} {
+		models = append(models, chatgptauth.Model{Slug: m[0], DisplayName: m[1], ContextWindow: 272000,
+			Efforts: []string{"low", "medium", "high"}, InputModalities: []string{"text"}, Priority: i})
+	}
+	list, err := json.Marshal(chatgptauth.Models{Version: 1, Subject: planSubject, ClientID: planClient, FetchedAt: time.Now().UTC(), Models: models})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(chatgptauth.ModelsFile(dir), list, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	writePlanTokens(t, dir, planAccess, planRefresh, "inc-1", 1)
+	s := newNative(Options{Workspace: t.TempDir(), ContentHome: t.TempDir()}, func(o *harness.Options) {
+		o.Getenv = func(string) string { return "" }
+	})
+	closeAtCleanup(t, s)
+	if err := s.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	snap := s.Snapshot()
+	got := modelIDs(OrderModels(snap))
+	if want := "chatgpt/gpt-5.6-sol,chatgpt/gpt-6-astra,chatgpt/gpt-5.6-terra,chatgpt/gpt-5.6-luna,chatgpt/gpt-5.5"; got != want {
+		t.Fatalf("the dialog lists %s, want %s", got, want)
+	}
+	byName := slices.Clone(snap.Models)
+	slices.SortFunc(byName, func(a, b ModelInfo) int { return strings.Compare(a.Name, b.Name) })
+	if byName[0].ID != "chatgpt/gpt-5.5" {
+		t.Fatalf("control: by name the list would start %s", byName[0].ID)
 	}
 }

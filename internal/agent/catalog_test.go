@@ -354,6 +354,59 @@ func TestOrderModelsPutsTheRememberedAfterTheCurrent(t *testing.T) {
 	}
 }
 
+// TestOrderModelsKeepsThePlansOrder (plan 033 C14r2, V5): the ChatGPT plan's
+// models stay one block in the order the session listed them — the account's
+// priority order, which modeltable.Choices gives them — placed where Choices
+// placed the block among the rest (after Aaa, before Zed: by the provider's
+// name, "ChatGPT plan"), while the current model still comes first, a
+// remembered plan model with the remembered, and every other model as before.
+// The control is the same models with the plan's prefix taken off, which the
+// rest's rule sorts by name, as the V5 dialog showed them.
+func TestOrderModelsKeepsThePlansOrder(t *testing.T) {
+	plan := func(slug, name string) ModelInfo {
+		return ModelInfo{ID: "chatgpt/" + slug, Name: name + " (ChatGPT plan)"}
+	}
+	snap := Snapshot{
+		CurrentModel: "chatgpt/gpt-5.6-luna",
+		Models: []ModelInfo{
+			{ID: "test/new", Name: "Newest", Recent: 1},
+			{ID: "test/aaa", Name: "Aaa"},
+			plan("gpt-6-astra", "GPT-6-Astra"),
+			plan("gpt-5.6-sol", "GPT-5.6-Sol"),
+			plan("gpt-5.6-terra", "GPT-5.6-Terra"),
+			plan("gpt-5.6-luna", "GPT-5.6-Luna"),
+			plan("gpt-5.5", "GPT-5.5"),
+			{ID: "xai/grok", Name: "Grok"},
+			{ID: "test/zed", Name: "Zed"},
+		},
+	}
+	want := "chatgpt/gpt-5.6-luna,test/new,xai/grok,test/aaa,chatgpt/gpt-6-astra,chatgpt/gpt-5.6-sol,chatgpt/gpt-5.6-terra,chatgpt/gpt-5.5,test/zed"
+	if got := modelIDs(OrderModels(snap)); got != want {
+		t.Fatalf("OrderModels =\n %s\nwant\n %s", got, want)
+	}
+
+	// The block first among the rest, as when nothing sorts before its
+	// provider's name, and a remembered plan model taken out of it.
+	first := Snapshot{Models: []ModelInfo{
+		{ID: "chatgpt/gpt-5.6-sol", Name: "GPT-5.6-Sol (ChatGPT plan)", Recent: 1},
+		plan("gpt-6-astra", "GPT-6-Astra"), plan("gpt-5.5", "GPT-5.5"), {ID: "test/zed", Name: "Zed"},
+	}}
+	if got := modelIDs(OrderModels(first)); got != "chatgpt/gpt-5.6-sol,chatgpt/gpt-6-astra,chatgpt/gpt-5.5,test/zed" {
+		t.Fatalf("a block that leads the rest = %s", got)
+	}
+
+	control := snap
+	control.CurrentModel = "gpt-5.6-luna"
+	control.Models = make([]ModelInfo, len(snap.Models))
+	for i, m := range snap.Models {
+		m.ID = strings.TrimPrefix(m.ID, "chatgpt/")
+		control.Models[i] = m
+	}
+	if got := modelIDs(OrderModels(control)); got != "gpt-5.6-luna,test/new,xai/grok,test/aaa,gpt-5.5,gpt-5.6-sol,gpt-5.6-terra,gpt-6-astra,test/zed" {
+		t.Fatalf("control: without the plan's prefix the rest sort by name: %s", got)
+	}
+}
+
 func TestEffortOptionPreference(t *testing.T) {
 	vals := []SelectValue{
 		{Value: "low", Name: "Low"},

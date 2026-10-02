@@ -883,7 +883,12 @@ account's; use another `CRAZE_HOME` for a second account. The model list is
 bound to the account too: a list that another account fetched — after a
 change of account, say — is ignored until the next sign-in fetches the
 account's own, and one craze cannot read is a warning at session start, with
-no plan models until it is fetched again.
+no plan models until it is fetched again. So are the models it lists: a
+session already running on one, or a sub-agent, sends nothing on another
+account's sign-in — its next request, a summary's or a wake's too, ends with
+`native: model "chatgpt/…" is from another ChatGPT account's model list; a
+new session offers the signed-in account's models` — and goes on once the
+first account is signed in again.
 
 **Renewal.** An access token lasts about an hour. craze renews it itself when a
 request finds less than five minutes left, so the sign-in lasts until you sign
@@ -917,6 +922,9 @@ a sub-agent that is just starting too. The file tools refuse the whole `auth/`
 directory, a hard link to any file in it included, and so does a search:
 `grep` refuses to search there, and neither `grep` nor `glob` shows a file
 there — or `providers.toml` — among what it finds in a directory above it.
+A long line `grep` or `read` shortens is redacted, with every value the
+session knows by then, before it is cut, so a value renewed while a search
+runs leaves no piece of itself at the cut.
 
 ### Model memory: `recent.json`
 

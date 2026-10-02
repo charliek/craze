@@ -15,6 +15,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/charliek/craze/internal/harness/redact"
 	"github.com/charliek/craze/internal/harness/tool"
 	"github.com/charliek/craze/internal/harness/tool/attach"
 )
@@ -303,7 +304,10 @@ func (c *readCall) file(ctx context.Context, env tool.Env, f *os.File, fileSize 
 			more = true // and keep counting, for the total
 			continue
 		}
-		text := clip(line, long)
+		if beforeCut != nil {
+			beforeCut()
+		}
+		text := clip(env.CurrentRedactor(), line, long)
 		add := len(text)
 		if len(raw) > 0 {
 			add++ // the newline joining it to the line before
@@ -577,9 +581,25 @@ func (lr *lineReader) next(ctx context.Context) (line []byte, long, ok bool, err
 // byte as U+FFFD, and cut to maxLineLength runes with opencode's suffix.
 // long says the line had more bytes than b holds, and so more runes than
 // the cut.
-func clip(b []byte, long bool) string {
-	s := validUTF8(b)
-	if !long && utf8.RuneCountInString(s) <= maxLineLength {
+//
+// A line it cuts is redacted first, with red — the session's keys as they
+// are at the cut (Env.CurrentRedactor) — as grep redacts a line before its
+// preview's cut (plan 033 C14r2, review r13 a): the dispatcher redacts the
+// result again, but a key the cut halved is no longer whole then, and its
+// first half would reach the model. The bytes are redacted as the file holds
+// them, before they are decoded. A long line's b is only its first keepBytes,
+// so it is redacted as the start of a longer text (redact.Replacer.Head): a
+// key that the window's end halves, before the cut, leaves none of itself
+// either. A line the redaction brings within maxLineLength is not cut at
+// all; one shown whole is left to the dispatcher's redaction.
+func clip(red *redact.Replacer, b []byte, long bool) string {
+	if !long && utf8.RuneCount(b) <= maxLineLength {
+		return validUTF8(b)
+	}
+	var s string
+	if long {
+		s = validUTF8([]byte(red.Head(string(b))))
+	} else if s = validUTF8([]byte(red.String(string(b)))); utf8.RuneCountInString(s) <= maxLineLength {
 		return s
 	}
 	i := 0

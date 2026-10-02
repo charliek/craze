@@ -187,7 +187,7 @@ type Table struct {
 	// model only while the registration still names it, so a sign-in to
 	// another account in a running process does not fund the first
 	// account's list with the second's sign-in.
-	discoveredFor chatgptAccount
+	discoveredFor Account
 	// chatgptStart is the alias [chatgpt_defaults] start names, which
 	// StartModel prefers among the funded models when the default is not
 	// funded (plan 033 §3.11); "" for none.
@@ -366,7 +366,17 @@ type Resolved struct {
 	Auth string
 	// CredentialDir is the native directory whose sign-in funds the model,
 	// "" for a key-funded one: the directory the sign-in's token source reads.
-	CredentialDir   string
+	CredentialDir string
+	// Account is the ChatGPT account whose model list the model came from —
+	// the registration's subject and issued client id when the table learned
+	// it (plan 033 C14r2, review r13 d) — and the zero Account for every
+	// other model, a plan model a user's models.toml adds included. Resolve
+	// refuses such a model once another account is signed in; the driver
+	// holds every request on it to the account too, comparing the token
+	// source's at each one, so a session (or a sub-agent) already open on it
+	// sends nothing with another account's token after a switch
+	// (ErrOtherAccount).
+	Account         Account
 	WireModel       string
 	Name            string // the model's name, or its alias when it has none
 	ContextWindow   int
@@ -1013,8 +1023,10 @@ func httpURL(s string) bool {
 // otherwise, both ErrNoAPIKey to every caller that asks. A model the load
 // learned from the plan's own list resolves only while the account signed in
 // is the one that list was bound to (the registration's subject and client
-// id), and is ErrOtherAccount otherwise (plan 033 C14r, r12 #4). Choices keeps
-// listing a session's current model all the same (P7).
+// id), and is ErrOtherAccount otherwise (plan 033 C14r, r12 #4); it resolves
+// bound to that account (Resolved.Account), which its driver holds every
+// request to (C14r2, r13 d). Choices keeps listing a session's current model
+// all the same (P7).
 //
 // A missing key fails only the models that need it: Load accepts a provider
 // with no key at all, so one unfunded provider never hides the others.
@@ -1033,13 +1045,17 @@ func (t *Table) Resolve(alias string, getenv func(string) string) (Resolved, err
 	}
 	var key Secret
 	var auth, credDir string
+	var bound Account
 	if p.Driver == DriverChatGPT {
 		via, account := signInState(t.signIn)
 		if via != KeySignedIn {
 			return Resolved{}, signInError(m.Provider, via)
 		}
-		if _, listed := t.discovered[alias]; listed && account != t.discoveredFor {
-			return Resolved{}, fmt.Errorf("%w (model %q)", ErrOtherAccount, alias)
+		if _, listed := t.discovered[alias]; listed {
+			if account != t.discoveredFor {
+				return Resolved{}, fmt.Errorf("%w (model %q)", ErrOtherAccount, alias)
+			}
+			bound = t.discoveredFor
 		}
 		auth, credDir = AuthSignIn, t.signIn
 	} else {
@@ -1060,6 +1076,7 @@ func (t *Table) Resolve(alias string, getenv func(string) string) (Resolved, err
 		APIKey:            key,
 		Auth:              auth,
 		CredentialDir:     credDir,
+		Account:           bound,
 		WireModel:         m.WireModel,
 		Name:              name,
 		ContextWindow:     m.ContextWindow,

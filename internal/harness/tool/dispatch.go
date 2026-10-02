@@ -121,9 +121,12 @@ func NewDispatcher(o Options) (*Dispatcher, error) {
 //
 // A call already running keeps the Env it was given, so what it redacts as
 // it goes — a command's live output, and the spill file written from it —
-// still uses the redactor of when it started; its result does not, since the
-// dispatcher redacts that when the call returns. A call that began before
-// the session knew a key belongs to that earlier state (plan 019 §3.8).
+// still uses the redactor of when it started, unless its session widens the
+// stream (Env.Streams); its result does not, since the dispatcher redacts
+// that when the call returns, and neither does text it cuts, which it
+// redacts with r from the moment r is set (Env.CurrentRedactor, plan 033
+// C14r2). A call that began before the session knew a key belongs to that
+// earlier state (plan 019 §3.8).
 func (d *Dispatcher) SetRedactor(r *redact.Replacer) { d.red.Store(r) }
 
 // SetPlanPath makes path the plan file every call prepared or run from now on
@@ -166,7 +169,7 @@ func (d *Dispatcher) redactor() *redact.Replacer { return d.red.Load() }
 // moment.
 func (d *Dispatcher) callEnv(progress Progress) Env {
 	env := d.env
-	env.Progress, env.Redactor = progress, d.redactor()
+	env.Progress, env.Redactor, env.live = progress, d.redactor(), &d.red
 	if p := d.planPath.Load(); p != nil {
 		env.PlanPath = *p
 	}
