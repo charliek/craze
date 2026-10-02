@@ -484,20 +484,26 @@ func (j *bashJob) ended(ctx context.Context, why ending, reaped bool, stopProgre
 // to waits on a file: the spill file is written by a goroutine of its own
 // (spiller), so the reader always empties the pipe.
 //
-// In a session that runs jobs the stream is tracked from here until the
-// command is done with (tool.Jobs.Track; bashJob.untrack): any command there
-// may become a job and outlive its turn's redactor, so its redaction is
-// widened with every key the session learns while it runs, and the output,
-// its spill file and every bash_output read hold none of them (plan 033
-// C10r).
+// The stream is tracked from here until the command is done with
+// (bashJob.untrack): its redaction is widened with every key the session
+// learns while it runs, and the output, its spill file and every bash_output
+// read hold none of them. In a session that runs jobs it is tracked through
+// tool.Jobs.Track — any command there may become a job and outlive its turn's
+// redactor (plan 033 C10r) — and in any other through Env.Streams, the same
+// registry: a token the ChatGPT sign-in mints while a command runs must not
+// reach the rest of its output raw (plan 033 C14r, r12 #6a).
 func (c *bashCall) attach(env tool.Env, g *group, r *os.File, began time.Time) *bashJob {
 	out := &output{home: env.Home, id: c.id, open: c.ops.openSpill, cap: c.spillCap}
 	j := &bashJob{c: c, g: g, r: r, out: out, stream: newModelStream(env.Redactor, out),
 		copied: make(chan struct{}), began: began, closing: env.Closing, untrack: func() {}}
+	tracker := env.Streams
 	if env.Jobs != nil {
+		tracker = env.Jobs
+	}
+	if tracker != nil {
 		// Before the reader starts, so the stream decides no byte before it
 		// knows every key the session does.
-		j.untrack = env.Jobs.Track(j.stream)
+		j.untrack = tracker.Track(j.stream)
 	}
 	go func() {
 		defer close(j.copied)

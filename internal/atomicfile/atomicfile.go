@@ -33,6 +33,13 @@ var (
 // count the calls and fail one; (*os.File).Sync in production.
 var fsync = (*os.File).Sync
 
+// onBusyTry, when a test sets it, is called each time LockContext's try finds
+// the lock held, before it waits to try again: where the cancellation test
+// learns the caller is waiting on a held lock, so its cancel lands in the
+// wait rather than before the first try (plan 033 C14r, r12 #8). nil in
+// production.
+var onBusyTry func()
+
 // Lock takes an exclusive lock on path, creating it if it does not exist.
 // syscall.Flock exists on both Linux and Darwin (the two platforms this repo
 // pins), so this works unchanged on both.
@@ -141,6 +148,9 @@ func LockContext(ctx context.Context, path string, d time.Duration) (unlock func
 		case !errors.Is(err, syscall.EWOULDBLOCK):
 			_ = f.Close()
 			return noop, err
+		}
+		if onBusyTry != nil {
+			onBusyTry()
 		}
 		t := time.NewTimer(min(lockPoll, max(deadline.Sub(now()), 0)))
 		select {

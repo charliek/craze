@@ -100,6 +100,11 @@ func (c *globCall) Run(ctx context.Context, env tool.Env) tool.Result {
 		return errorResult(fail(tool.ClassToolError, "glob path must be a directory: "+c.abs))
 	}
 
+	// The files the file tools refuse — the key file, the sign-in
+	// directory's, a hard link to one of them — are left out of the list
+	// before it is counted (plan 033 C14r, r12 #7, searchGuard): a listing of
+	// the craze directory says nothing of them.
+	guard := newSearchGuard(env)
 	var files []string
 	end, readErr, runErr := c.rg.run(ctx, env, bin, c.abs, globArgs(c.pattern), 0, func(rec []byte) (bool, error) {
 		// Joined onto the path as the call named it (glob.ts:53).
@@ -107,7 +112,9 @@ func (c *globCall) Run(ctx context.Context, env tool.Env) tool.Result {
 		if err != nil {
 			return false, err
 		}
-		files = append(files, file)
+		if !guard.protected(file) {
+			files = append(files, file)
+		}
 		return len(files) <= searchLimit, nil
 	})
 	if res, ok := searchOutcome(ctx, "glob", end, readErr, runErr, c.rg.timeout); !ok {

@@ -419,6 +419,10 @@ func openTools(home, workspace, mode string, asker tool.Asker, table *modeltable
 		Environ:   tool.ChildEnviron(os.Environ(), keyNames),
 		Locks:     ts.locks,
 		Closing:   ts.closing,
+		// Every session's commands are tracked (plan 033 C14r, r12 #6a),
+		// a child's and a headless one's too: a token minted while one runs
+		// reaches its stream through extend, as a job's does (X91).
+		Streams: streams{ts},
 	}
 	// Set only when there is one, so a child's Env.Todos is a nil interface
 	// rather than an interface around a nil store: todo_write tests the
@@ -605,7 +609,8 @@ func (ts *toolset) widestLocked() *redact.Replacer {
 	return ts.red.Load()
 }
 
-// track is tool.Jobs.Track (jobs.go): s registered, and widened to every key
+// track is tool.Jobs.Track (jobs.go) and tool.Env.Streams' Track (streams):
+// s registered, and widened to every key
 // the session knows now — the redactor its call was given may be an earlier
 // turn's, or narrower than one a switch has prepared — in one section with the
 // registration, so a key learned meanwhile reaches s through this widening or

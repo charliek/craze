@@ -407,6 +407,103 @@ func TestNativeLearnsTheTokenFileAtTurnStart(t *testing.T) {
 	}
 }
 
+// TestNativeModelsRefreshJournalsNoEchoedToken (plan 033 C14r, r12 #1): the
+// background refresh of the plan's model list, refused by an API that echoes a
+// token as its error code — one the session learned (the bearer it sent), and
+// one it never saw — journals its chatgpt_models_refresh diag with neither:
+// the code is unrecognised, and so unnamed. The control is the diag itself,
+// which is there and names the refusal, so the refresh ran and failed.
+func TestNativeModelsRefreshJournalsNoEchoedToken(t *testing.T) {
+	for _, tc := range []struct{ name, echoed string }{{"learned", planAccess}, {"never seen", planUnlearned}} {
+		echoed := tc.echoed
+		t.Run(tc.name, func(t *testing.T) {
+			api, _ := noOpenAI(t)
+			api.queue(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusBadRequest)
+				_, _ = io.WriteString(w, `{"error":{"code":"`+echoed+`","message":"refused"}}`)
+			})
+			home := t.TempDir()
+			t.Setenv("CRAZE_HOME", home)
+			dir := filepath.Join(home, "native")
+			writePlanAccount(t, dir)
+			writePlanTokens(t, dir, planAccess, planRefresh, "inc-1", 1)
+			staleModels(t, dir)
+			jdir := filepath.Join(t.TempDir(), "journal")
+			s := newNative(Options{Workspace: t.TempDir(), ContentHome: t.TempDir(), JournalDir: jdir}, func(o *harness.Options) {
+				o.Getenv = func(string) string { return "" }
+			})
+			closeAtCleanup(t, s)
+			if err := s.Start(context.Background()); err != nil {
+				t.Fatalf("Start: %v", err)
+			}
+			jw, inc := journalOf(t, s.log), s.Incarnation()
+			s.mu.Lock()
+			refreshed := s.refreshed
+			s.mu.Unlock()
+			if refreshed == nil {
+				t.Fatal("the stale model list started no refresh")
+			}
+			await(t, refreshed, "the model list's refresh")
+			closeJournaled(t, s, jw)
+			lines := assertOneJournal(t, jdir, jw, inc)
+			notes := diags(lines, diagModelsRefresh)
+			if len(notes) != 1 || !strings.Contains(fmt.Sprint(notes[0]["error"]), "models refused (HTTP 400, an unrecognised error code)") {
+				t.Fatalf("the refresh's diags = %v, want the one refusal", notes)
+			}
+			for _, v := range []string{planAccess, planRefresh, planUnlearned} {
+				if l := nativeLeaks(lines, v); len(l) > 0 {
+					t.Fatalf("a token reached the journal at %v", l)
+				}
+			}
+		})
+	}
+}
+
+// TestNativeModelsRefreshNoteIsRedacted (plan 033 C14r, r12 #1): the diag a
+// failed refresh is journaled as passes the error through the session's
+// redactor, so a token a wrapped error might carry — one the session knows —
+// is the marker there. The session learns it as the refresh would before it
+// could fail: the source's first look adopts the file and tells its
+// subscribers. The control is the same error through no redactor, whose note
+// shows the value: the sanitiser alone hides nothing.
+func TestNativeModelsRefreshNoteIsRedacted(t *testing.T) {
+	noOpenAI(t)
+	s, _ := planSession(t, t.TempDir())
+	if _, _, err := s.signIn.Token(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	err := fmt.Errorf("chatgptauth: a wrapped failure: %s", planAccess)
+	if got := fmt.Sprint(modelsRefreshNote(err, func(v string) string { return v }).Fields["error"]); !strings.Contains(got, planAccess) {
+		t.Fatalf("control: the unredacted note = %q", got)
+	}
+	got := fmt.Sprint(modelsRefreshNote(err, s.hs.Redact).Fields["error"])
+	if strings.Contains(got, planAccess) || !strings.Contains(got, redact.Marker) {
+		t.Fatalf("the note = %q, want the token redacted", got)
+	}
+}
+
+// staleModels makes dir's model list two days old, so a session's open
+// fetches it again (chatgptauth.ModelsMaxAge).
+func staleModels(t *testing.T, dir string) {
+	t.Helper()
+	b, err := os.ReadFile(chatgptauth.ModelsFile(dir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m chatgptauth.Models
+	if err := json.Unmarshal(b, &m); err != nil {
+		t.Fatal(err)
+	}
+	m.FetchedAt = time.Now().Add(-48 * time.Hour).UTC()
+	if b, err = json.Marshal(m); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(chatgptauth.ModelsFile(dir), b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // TestNativeUsageLatchLiftsOnAPersonsTurnOnly (P33): the plan's usage latch,
 // set for the process, stays set through a wake — a turn nobody started —
 // and the next turn a person starts lifts it. The control is the wake itself,
@@ -475,5 +572,13 @@ func TestNativePhrasesTheChatGPTPlansFailures(t *testing.T) {
 	}
 	if got := phraseSetupError(fmt.Errorf("harness: %w", modeltable.ErrNotSignedIn), nil, "chatgpt/gpt-5.6-sol"); !strings.Contains(got.Error(), "nobody is signed in; run /connect or craze auth login chatgpt") {
 		t.Fatalf("phraseSetupError(not signed in) = %q", got)
+	}
+	// Another account's list (C14r, r12 #4) is not a missing key: the
+	// table is at hand, and noKeyText's api_key advice is not what is said.
+	other := fmt.Errorf("harness: %w", modeltable.ErrOtherAccount)
+	tbl := &modeltable.Table{Models: map[string]modeltable.Model{"chatgpt/gpt-5.6-sol": {Provider: modeltable.ChatGPTProvider}},
+		Providers: map[string]modeltable.Provider{modeltable.ChatGPTProvider: {Driver: modeltable.DriverChatGPT}}}
+	if got := phraseSetupError(other, tbl, "chatgpt/gpt-5.6-sol"); got.Error() != `native: model "chatgpt/gpt-5.6-sol" is from another ChatGPT account's model list; a new session offers the signed-in account's models` || !errors.Is(got, modeltable.ErrOtherAccount) {
+		t.Fatalf("phraseSetupError(another account's model) = %q", got)
 	}
 }

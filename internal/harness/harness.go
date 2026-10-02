@@ -1024,8 +1024,11 @@ func (s *Session) LearnKeys(keys []modeltable.Secret) (skipped []error, err erro
 // starts with them, and one inside a frozen surface puts the session in its
 // refusal state — and, unlike a stored key, installed at once: the running
 // turn's tools redact them from their next output on (toolset.addSecrets says
-// why that one exception to "one redactor per turn" is safe). Every
-// registered sub-agent is taught them too, each by its own AddSecrets.
+// why that one exception to "one redactor per turn" is safe), and every
+// command still running redacts them from the rest of its output and spill
+// file (Env.Streams, X91). Every attached sub-agent is taught them too, each
+// by its own AddSecrets, and one still opening is caught up from the
+// parent's learned values as it is attached (attachCaughtUp, r12 #6c).
 //
 // It is safe from any goroutine, a closed session included, and quick: it
 // takes the toolset's lock and, briefly, the runner's registry lock, both

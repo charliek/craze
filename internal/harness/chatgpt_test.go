@@ -20,6 +20,7 @@ import (
 	"github.com/charliek/craze/internal/harness/llm"
 	"github.com/charliek/craze/internal/harness/modeltable"
 	"github.com/charliek/craze/internal/harness/redact"
+	"github.com/charliek/craze/internal/harness/tool"
 )
 
 // The ChatGPT plan through the harness (plan 033 §3.12, C14): token values
@@ -257,6 +258,195 @@ func TestAddSecretsReachesARunningSubagent(t *testing.T) {
 			}
 			settled(t, s)
 		})
+	}
+}
+
+// TestAddSecretsReachesAChildOpening (plan 033 C14r, r12 #6c): a value the
+// parent is taught while a sub-agent is opening — after the runner read the
+// parent's learned keys for it, before the child is attached, where a push
+// reaches no child — is redacted from the child's own tools all the same:
+// the child is caught up from the parent's learned values once attached,
+// before it runs. The barrier is the runner's open seam, which teaches the
+// parent between Open and the attachment; foreground and background calls
+// each attach their child their own way, so both are run. The control is the
+// same schedule with nothing taught, whose child's read shows the value.
+func TestAddSecretsReachesAChildOpening(t *testing.T) {
+	for _, background := range []bool{false, true} {
+		for _, taught := range []bool{true, false} {
+			t.Run(fmt.Sprintf("background %v, taught %v", background, taught), func(t *testing.T) {
+				var f *routed
+				var s *Session
+				var b *bg
+				if background {
+					b = openBG(t)
+					f, s = b.routed, b.s
+				} else {
+					f = newRouted(t)
+					s = f.open(f.options())
+				}
+				f.put("token.txt", "the token is "+planRotated+"\n")
+				a := f.routers["test/a"]
+				a.route("child reads", callStep(callParts("r1", "read", input(t, map[string]any{"filePath": "token.txt"}))), answerWith("child done"))
+				call := agentPart(t, "a1", task("look", "child reads"))
+				if background {
+					call = bgPart(t, "a1", "look", "child reads")
+				}
+				a.route("parent", callStep(call), answerWith("done"))
+				opened := 0
+				s.subs.seams.open = func(o Options) (*Session, error) {
+					child, err := Open(o)
+					opened++
+					if taught {
+						s.AddSecrets(planRotated) // the learned keys read, the child not yet attached
+					}
+					return child, err
+				}
+				var ev events
+				runWith(t, s, "parent", ev.sink)
+				evs := ev.list()
+				if background {
+					if !await(t, b.pending, "the child's result") {
+						t.Fatal("nothing pending")
+					}
+					evs = b.own.list()
+				}
+				if opened != 1 {
+					t.Fatalf("the seam opened %d children, want 1", opened)
+				}
+				var read tool.Result
+				for _, e := range of[SubagentEvent](evs) {
+					if tf, ok := e.Event.(ToolFinished); ok {
+						read = tf.Result
+					}
+				}
+				if read.Text == "" || read.IsError {
+					t.Fatalf("the child's read = %+v", read)
+				}
+				shown := strings.Contains(read.Text+read.Content, planRotated)
+				switch {
+				case taught && (shown || !strings.Contains(read.Text, redact.Marker)):
+					t.Fatalf("the value taught while the child opened reached its read: %q", read.Text)
+				case !taught && !shown:
+					t.Fatalf("control: with nothing taught the child's read = %q", read.Text)
+				}
+			})
+		}
+	}
+}
+
+// TestAddSecretsWidensARunningCommand (plan 033 C14r, r12 #6a, X91): a token
+// value the sign-in learns while a bash command runs is redacted from the
+// rest of that command's output — its spill file, which the stream writes as
+// the command prints and no later pass rewrites, and its result — in every
+// kind of session: one that runs jobs (PR 2's X91 path, the command's stream
+// tracked through Jobs.Track), a headless one and a sub-agent's (tracked
+// through Env.Streams). The command is gated by named pipes: it says it is
+// running, waits while the value is taught, then prints it, more than the
+// result shows (so it spills), and it again. The control is the same schedule
+// with nothing taught: its spill file and result show the value.
+func TestAddSecretsWidensARunningCommand(t *testing.T) {
+	const filler = 60 << 10 // past tool.MaxBytes: the output spills
+	cmd := "echo ready > ready; read x < go; cat tok.txt; head -c " + fmt.Sprint(filler) + " /dev/zero | tr '\\0' x; echo; cat tok.txt"
+	type rig struct {
+		s    *Session
+		home string
+		// run starts the turn whose command (or whose child's) runs cmd,
+		// and content is the command's result — the text the model reads —
+		// as its events show it.
+		run     func(sink func(Event)) <-chan outcome
+		content func(evs []Event) string
+	}
+	direct := func(f *routed, s *Session) rig {
+		in := input(t, map[string]any{"command": cmd})
+		f.routers["test/a"].route("run it", callStep(callParts("c1", "bash", in)), answerWith("ran"))
+		return rig{s: s, home: f.home,
+			run: func(sink func(Event)) <-chan outcome { return start(context.Background(), s, "run it", sink) },
+			content: func(evs []Event) string {
+				for _, tf := range of[ToolFinished](evs) {
+					return tf.Result.Text
+				}
+				return ""
+			}}
+	}
+	for _, tc := range []struct {
+		name string
+		open func(t *testing.T) (rig, string)
+	}{
+		{"a session that runs jobs", func(t *testing.T) (rig, string) {
+			b := openBG(t)
+			return direct(b.routed, b.s), b.workspace
+		}},
+		{"a headless session", func(t *testing.T) (rig, string) {
+			f := newRouted(t)
+			return direct(f, f.open(f.options())), f.workspace
+		}},
+		{"a sub-agent's command", func(t *testing.T) (rig, string) {
+			f := newRouted(t)
+			s := f.open(f.options())
+			in := input(t, map[string]any{"command": cmd})
+			a := f.routers["test/a"]
+			a.route("parent", callStep(agentPart(t, "a1", task("look", "child runs"))), answerWith("done"))
+			a.route("child runs", callStep(callParts("c1", "bash", in)), answerWith("child done"))
+			return rig{s: s, home: f.home,
+				run: func(sink func(Event)) <-chan outcome { return start(context.Background(), s, "parent", sink) },
+				content: func(evs []Event) string {
+					for _, e := range of[SubagentEvent](evs) {
+						if tf, ok := e.Event.(ToolFinished); ok {
+							return tf.Result.Text
+						}
+					}
+					return ""
+				}}, f.workspace
+		}},
+	} {
+		for _, taught := range []bool{true, false} {
+			t.Run(fmt.Sprintf("%s, taught %v", tc.name, taught), func(t *testing.T) {
+				r, ws := tc.open(t)
+				if err := os.WriteFile(filepath.Join(ws, "tok.txt"), []byte(planRotated+"\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				ready, gate := makeFIFO(t, ws, "ready"), makeFIFO(t, ws, "go")
+				running := make(chan error, 1)
+				go func() {
+					_, err := os.ReadFile(ready) // returns once the command has written it
+					running <- err
+				}()
+				var ev events
+				out := r.run(ev.sink)
+				if err := await(t, running, "the command to run"); err != nil {
+					t.Fatal(err)
+				}
+				if taught {
+					r.s.AddSecrets(planRotated)
+				}
+				openFIFO(t, gate)
+				if got := await(t, out, "the turn"); got.err != nil {
+					t.Fatal(got.err)
+				}
+				spills, err := filepath.Glob(filepath.Join(r.home, tool.SpillDir, "*"))
+				if err != nil || len(spills) != 1 {
+					t.Fatalf("spill files %q, %v; want the command's one", spills, err)
+				}
+				raw, err := os.ReadFile(spills[0])
+				if err != nil || !strings.Contains(string(raw), strings.Repeat("x", 1024)) {
+					t.Fatalf("the spill file holds %d bytes, %v; want the command's output", len(raw), err)
+				}
+				content := r.content(ev.list())
+				if content == "" {
+					t.Fatal("the command's result was not seen")
+				}
+				spilled, shown := strings.Contains(string(raw), planRotated), strings.Contains(content, planRotated)
+				switch {
+				case taught && (spilled || shown):
+					t.Fatalf("the value taught while the command ran reached its spill file (%v) or its result (%v)", spilled, shown)
+				case taught && strings.Count(string(raw), redact.Marker) != 2:
+					t.Fatalf("the spill file holds %d markers, want the value's two prints", strings.Count(string(raw), redact.Marker))
+				case !taught && (!spilled || !shown):
+					t.Fatalf("control: with nothing taught the spill file (%v) and the result (%v) do not both show the value", spilled, shown)
+				}
+				settled(t, r.s)
+			})
+		}
 	}
 }
 

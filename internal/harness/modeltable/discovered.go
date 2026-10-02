@@ -106,6 +106,16 @@ var (
 	// chatgpt.tokens.use.direct scope): signed in, but not funded (P34). It
 	// unwraps to ErrNoAPIKey too.
 	ErrPlanUsageDisabled error = &fundingError{msg: "modeltable: ChatGPT plan usage is off for craze"}
+
+	// ErrOtherAccount is Resolve's error for a model the table learned from
+	// the ChatGPT plan's list of an account that is no longer the one signed
+	// in (plan 033 C14r, r12 #4): the list was bound to the registration the
+	// table loaded with, and the registration has changed since — another
+	// account signed in while the process runs — so the model may be none the
+	// account signed in now can use, and its list may order the plan's models
+	// otherwise. It unwraps to ErrNoAPIKey: the model is not funded. A table
+	// loaded anew offers the account's own list once it is fetched.
+	ErrOtherAccount error = &fundingError{msg: "modeltable: that ChatGPT plan model is from another account's list"}
 )
 
 // fundingError is a sign-in's reason a model is not funded: a fixed text,
@@ -176,22 +186,36 @@ func readSmallFile(path string, max int64) ([]byte, error) {
 // cannot be read, or no token file. Only the registration is read and the
 // token file stat'ed: no token is ever read here.
 func signInVia(dir string) KeySource {
+	via, _ := signInState(dir)
+	return via
+}
+
+// signInState is signInVia with the registration it read: the account that
+// is signed in, which Resolve holds a discovered model's list to (r12 #4).
+func signInState(dir string) (KeySource, chatgptAccount) {
 	if dir == "" {
-		return KeyNone
+		return KeyNone, chatgptAccount{}
 	}
 	c, ok := readChatGPTClient(dir)
 	if !ok {
-		return KeyNone
+		return KeyNone, chatgptAccount{}
 	}
+	account := chatgptAccount{subject: c.Subject, clientID: c.ClientID}
 	info, err := os.Lstat(filepath.Join(dir, ChatGPTAuthDir, ChatGPTTokenFile))
 	tokens := err == nil && info.Mode().IsRegular() && info.Size() > 0
 	switch {
 	case tokens && c.PlanUsage:
-		return KeySignedIn
+		return KeySignedIn, account
 	case !c.PlanUsage && (tokens || c.ClientID != "" || c.Subject != ""):
-		return KeyPlanDisabled
+		return KeyPlanDisabled, account
 	}
-	return KeyNone
+	return KeyNone, account
+}
+
+// chatgptAccount names a ChatGPT account's registration as the model list is
+// bound to it: the subject and the issued client id (P34).
+type chatgptAccount struct {
+	subject, clientID string
 }
 
 // signInError is the reason a model on provider id is not funded when the
@@ -227,9 +251,12 @@ type chatgptModelEntry struct {
 
 // discovered is what withDiscovered added to a catalog: the alias of each
 // model it learned from the account's list, ranked by its place in that list
-// (priority order), which is the order Choices lists them in.
+// (priority order), which is the order Choices lists them in; and the account
+// the list is bound to, which the table keeps so Resolve funds those models
+// only while that account is the one signed in (r12 #4).
 type discovered struct {
-	rank map[string]int
+	rank    map[string]int
+	account chatgptAccount
 }
 
 // withDiscovered adds the ChatGPT plan's models to cat, the merge's own copy
@@ -300,7 +327,7 @@ func withDiscovered(cat *Catalog, dir string) (*discovered, []string) {
 	// file is sorted again, stably, in case anything else wrote it.
 	sort.SliceStable(entries, func(a, b int) bool { return entries[a].m.Priority < entries[b].m.Priority })
 
-	d := &discovered{rank: map[string]int{}}
+	d := &discovered{rank: map[string]int{}, account: chatgptAccount{subject: client.Subject, clientID: client.ClientID}}
 	for _, e := range entries {
 		m := e.m
 		alias := ChatGPTAliasPrefix + m.Slug

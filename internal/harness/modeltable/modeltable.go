@@ -182,6 +182,12 @@ type Table struct {
 	// own list (withDiscovered) by its place in that list, priority order;
 	// nil when it learned none. Choices lists them in that order.
 	discovered map[string]int
+	// discoveredFor is the account that list was bound to, as the load read
+	// the registration (plan 033 C14r, r12 #4): Resolve funds a discovered
+	// model only while the registration still names it, so a sign-in to
+	// another account in a running process does not fund the first
+	// account's list with the second's sign-in.
+	discoveredFor chatgptAccount
 	// chatgptStart is the alias [chatgpt_defaults] start names, which
 	// StartModel prefers among the funded models when the default is not
 	// funded (plan 033 §3.11); "" for none.
@@ -1004,7 +1010,11 @@ func httpURL(s string) bool {
 // AuthSignIn and CredentialDir the table's directory, while that directory's
 // sign-in funds it (signInVia, plan 033 §3.11) — the token file there and
 // plan usage granted — and is ErrNotSignedIn or ErrPlanUsageDisabled
-// otherwise, both ErrNoAPIKey to every caller that asks.
+// otherwise, both ErrNoAPIKey to every caller that asks. A model the load
+// learned from the plan's own list resolves only while the account signed in
+// is the one that list was bound to (the registration's subject and client
+// id), and is ErrOtherAccount otherwise (plan 033 C14r, r12 #4). Choices keeps
+// listing a session's current model all the same (P7).
 //
 // A missing key fails only the models that need it: Load accepts a provider
 // with no key at all, so one unfunded provider never hides the others.
@@ -1024,8 +1034,12 @@ func (t *Table) Resolve(alias string, getenv func(string) string) (Resolved, err
 	var key Secret
 	var auth, credDir string
 	if p.Driver == DriverChatGPT {
-		if via := signInVia(t.signIn); via != KeySignedIn {
+		via, account := signInState(t.signIn)
+		if via != KeySignedIn {
 			return Resolved{}, signInError(m.Provider, via)
+		}
+		if _, listed := t.discovered[alias]; listed && account != t.discoveredFor {
+			return Resolved{}, fmt.Errorf("%w (model %q)", ErrOtherAccount, alias)
 		}
 		auth, credDir = AuthSignIn, t.signIn
 	} else {

@@ -133,6 +133,39 @@ func isCredentials(env tool.Env, real string, info fs.FileInfo) bool {
 	return err == nil && os.SameFile(info, ci)
 }
 
+// searchGuard is isCredentials for the many paths one search turns up (plan
+// 033 C14r, r12 #7): grep's matching files and glob's listed ones, each
+// resolved as the file tools resolve a path they are given — every symlink on
+// the way followed — and judged by place and by identity, so a match in the
+// sign-in directory reached from a search of a directory above it, and one
+// in a hard link to the token file made elsewhere, are both caught. A file
+// is judged once per search, however many of its lines match.
+type searchGuard struct {
+	env  tool.Env
+	seen map[string]bool
+}
+
+func newSearchGuard(env tool.Env) *searchGuard {
+	return &searchGuard{env: env, seen: map[string]bool{}}
+}
+
+// protected reports whether abs, a path a search turned up, is one the file
+// tools refuse. A path that will not resolve or stat is judged as spelled,
+// with no identity to compare: it was there a moment ago, when rg listed it.
+func (g *searchGuard) protected(abs string) bool {
+	if v, ok := g.seen[abs]; ok {
+		return v
+	}
+	real := targetPath(abs)
+	info, err := os.Stat(real)
+	if err != nil {
+		info = nil
+	}
+	v := isCredentials(g.env, real, info)
+	g.seen[abs] = v
+	return v
+}
+
 // inAuthDir reports whether real, a path realPath resolved, is the harness's
 // sign-in directory <Home>/auth or anything under it (plan 033 §3.12): the
 // ChatGPT plan's token file, its lock, its registration and the host id. Two

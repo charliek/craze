@@ -142,34 +142,110 @@ var (
 // OAuthError is a refusal from one of the sign-in's endpoints: the step
 // (authorize, exchange, refresh, revoke, models), the HTTP status (0 for a
 // refusal the redirect carried), and the OAuth error code when the reply had
-// an identifier-like one. A reply's description and body are never kept: the
-// code is the machine-readable part (the docs' "handle errors by their
-// code"), and free text from the server is no place to risk a token.
+// one craze knows (knownCodes). A reply's description and body are never
+// kept: the code is the machine-readable part (the docs' "handle errors by
+// their code"), and free text from the server is no place to risk a token.
+//
+// Nor is a code craze does not know (plan 033 C14r, r12 #1): a server that
+// echoes something of the request as its error code — a refresh token, say,
+// or a fragment of one — would otherwise have it repeated in every message
+// and journal line this error reaches. Such a refusal keeps only the fact
+// that it carried a code (Unrecognised), and reads "an unrecognised error
+// code".
 type OAuthError struct {
 	Step   string
 	Status int
 	Code   string
+	// Unrecognised says the reply carried an error code that is not one of
+	// knownCodes: Code is then "", and the message says so without it.
+	Unrecognised bool
 }
 
 func (e *OAuthError) Error() string {
+	code := e.Code
+	if code == "" && e.Unrecognised {
+		code = unrecognisedCode
+	}
 	switch {
-	case e.Code != "" && e.Status != 0:
-		return fmt.Sprintf("chatgptauth: %s refused (HTTP %d, %s)", e.Step, e.Status, e.Code)
-	case e.Code != "":
-		return fmt.Sprintf("chatgptauth: %s refused (%s)", e.Step, e.Code)
+	case code != "" && e.Status != 0:
+		return fmt.Sprintf("chatgptauth: %s refused (HTTP %d, %s)", e.Step, e.Status, code)
+	case code != "":
+		return fmt.Sprintf("chatgptauth: %s refused (%s)", e.Step, code)
 	default:
 		return fmt.Sprintf("chatgptauth: %s refused (HTTP %d)", e.Step, e.Status)
 	}
 }
 
-// codeOf is s when it can be an OAuth error code — one to 64 of letters,
-// digits and "_.:-" — and "" otherwise, so nothing else a server sends is
-// ever repeated.
-func codeOf(s string) string {
-	if !identifier(s, 64) {
-		return ""
+// unrecognisedCode is how a refusal's code that craze does not know is
+// named in its message (OAuthError.Unrecognised).
+const unrecognisedCode = "an unrecognised error code"
+
+// knownCodes are the error codes a refusal is allowed to repeat (plan 033
+// C14r, r12 #1): a fixed vocabulary, so no server-chosen string — a token
+// echoed back, or a fragment of one — ever reaches a message or the journal
+// through a code. They are:
+//
+//   - the codes craze acts on (§3.10): access_denied at the authorize step,
+//     invalid_client, and the refresh refusals that end a sign-in
+//     (signInAgainCodes);
+//   - the Sign in with ChatGPT docs' structured codes (errors and recovery:
+//     the subscription_sharing_* and chatpass_v2_* refusals), which an API
+//     reply such as the model list's can carry;
+//   - the standard OAuth registries' codes (RFC 6749 §4.1.2.1 and §5.2, RFC
+//     7009 §2.2.1, RFC 8707 §2 — craze sends a resource — and OpenID
+//     Connect Core §3.1.2.6), which name what a refused sign-in did wrong
+//     without carrying anything of it.
+var knownCodes = func() map[string]bool {
+	m := map[string]bool{
+		"access_denied":   true,
+		codeInvalidClient: true,
+
+		"subscription_sharing_user_not_eligible":      true,
+		"subscription_sharing_usage_limit_exceeded":   true,
+		"subscription_sharing_usage_unavailable":      true,
+		"subscription_sharing_unsupported_capability": true,
+		"subscription_sharing_route_not_supported":    true,
+		"subscription_sharing_invalid_user":           true,
+		"subscription_sharing_user_unavailable":       true,
+		"chatpass_v2_scope_not_authorized":            true,
+		"chatpass_v2_invalid_authorization_context":   true,
+
+		"invalid_request":            true,
+		"unauthorized_client":        true,
+		"unsupported_response_type":  true,
+		"invalid_scope":              true,
+		"server_error":               true,
+		"temporarily_unavailable":    true,
+		"unsupported_grant_type":     true,
+		"unsupported_token_type":     true,
+		"invalid_target":             true,
+		"interaction_required":       true,
+		"login_required":             true,
+		"account_selection_required": true,
+		"consent_required":           true,
 	}
-	return s
+	for c := range signInAgainCodes {
+		m[c] = true
+	}
+	return m
+}()
+
+// codeOf sorts a refusal's error code: s itself when it is one of knownCodes,
+// else "" — with unrecognised set when there was a code at all — so nothing
+// else a server sends is ever repeated.
+func codeOf(s string) (code string, unrecognised bool) {
+	if knownCodes[s] {
+		return s, false
+	}
+	return "", s != ""
+}
+
+// refused is step's *OAuthError for a refusal with HTTP status (0 for one
+// the redirect carried) whose reply named code: kept only when craze knows
+// it (codeOf).
+func refused(step string, status int, code string) *OAuthError {
+	c, odd := codeOf(code)
+	return &OAuthError{Step: step, Status: status, Code: c, Unrecognised: odd}
 }
 
 // identifier says s is one to max of letters, digits and "_.:-".

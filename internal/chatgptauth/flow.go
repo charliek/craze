@@ -346,7 +346,7 @@ func (a *Attempt) finish(ctx context.Context, q url.Values) (Result, error) {
 		if e == "access_denied" {
 			return Result{}, ErrAccessDenied
 		}
-		return Result{}, &OAuthError{Step: "authorize", Code: codeOf(e)}
+		return Result{}, refused("authorize", 0, e)
 	}
 	code := q.Get("code")
 	if code == "" {

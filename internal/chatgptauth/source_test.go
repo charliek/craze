@@ -770,7 +770,7 @@ func TestSubscribersNotifiedBeforeTheWrite(t *testing.T) {
 		fileGen uint64
 	}
 	var calls []call
-	unsubscribe := s.Subscribe(func(values []string) {
+	_, unsubscribe := s.Subscribe(func(values []string) {
 		r, _, err := readRecord(dir)
 		if err != nil {
 			t.Errorf("the subscriber's look at the file: %v", err)
@@ -911,6 +911,120 @@ func TestTransientRefreshErrorsKeepCredentials(t *testing.T) {
 	}
 }
 
+// TestRefusalsRepeatOnlyKnownCodes (plan 033 C14r, r12 #1): an endpoint that
+// echoes a credential as its error code — the refresh token a refresh sent,
+// in the standard {"error":"…"} shape; a short opaque value (a token's
+// fragment, shaped like a code) from the model list, in the
+// {"error":{"code":…}} shape, and in the authorize redirect's error — gets "an unrecognised error code" in the message, and the value
+// nowhere: not in the text, not in Code. The control is a code craze knows,
+// kept and named in the same three places — so the allowlist, not a
+// blanket drop, is what hides the echoed one.
+func TestRefusalsRepeatOnlyKnownCodes(t *testing.T) {
+	const echoed = "test-oauth-echo-0042"
+	type shaped struct {
+		err   error
+		value string // the value the endpoint echoed back
+	}
+	refreshing := func(t *testing.T, known string) shaped {
+		f := newFake(t)
+		useFake(t, f)
+		dir := nativeDir(t)
+		rec := seedSignedIn(t, f, dir, seedOpts{})
+		code := rec.RefreshToken
+		if known != "" {
+			code = known
+		}
+		f.mu.Lock()
+		f.refreshErr = code
+		f.mu.Unlock()
+		s := newSource(dir)
+		_, gen, err := s.Token(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		err = s.Invalidate(context.Background(), gen)
+		if err == nil || tokenFileGone(t, dir) {
+			t.Fatalf("Invalidate = %v (file gone %v), want the refusal with the sign-in kept", err, tokenFileGone(t, dir))
+		}
+		f.assertNoLeak(t, err.Error())
+		return shaped{err, rec.RefreshToken}
+	}
+	listing := func(t *testing.T, known string) shaped {
+		f := newFake(t)
+		useFake(t, f)
+		dir := nativeDir(t)
+		seedSignedIn(t, f, dir, seedOpts{})
+		code := echoed
+		if known != "" {
+			code = known
+		}
+		f.mu.Lock()
+		f.modelsErr = code
+		f.mu.Unlock()
+		_, err := FetchModels(context.Background(), newSource(dir))
+		if err == nil {
+			t.Fatal("FetchModels succeeded against a refusal")
+		}
+		f.assertNoLeak(t, err.Error())
+		return shaped{err, echoed}
+	}
+	authorizing := func(t *testing.T, known string) shaped {
+		f := newFake(t)
+		useFake(t, f)
+		a, err := Begin(context.Background(), nativeDir(t), BeginOptions{PasteOnly: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		code := echoed
+		if known != "" {
+			code = known
+		}
+		q := url.Values{"error": {code}, "state": {authQuery(t, a).Get("state")}}
+		if err := a.Paste(a.RedirectURI() + "?" + q.Encode()); err != nil {
+			t.Fatal(err)
+		}
+		_, err = a.Wait(context.Background())
+		if err == nil {
+			t.Fatal("Wait succeeded against a refusal")
+		}
+		return shaped{err, echoed}
+	}
+	for _, tc := range []struct {
+		name  string
+		run   func(t *testing.T, known string) shaped
+		known string
+	}{
+		{"refresh", refreshing, "invalid_scope"},
+		{"models", listing, "subscription_sharing_usage_unavailable"},
+		{"authorize", authorizing, "consent_required"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := tc.run(t, "")
+			var oe *OAuthError
+			if !errors.As(got.err, &oe) || oe.Code != "" || !oe.Unrecognised {
+				t.Fatalf("the refusal = %#v (%v), want an unrecognised code", oe, got.err)
+			}
+			if strings.Contains(got.err.Error(), got.value) || !strings.Contains(got.err.Error(), "an unrecognised error code") {
+				t.Fatalf("the message = %q, want the code unnamed (the echoed value is %d bytes)", got.err, len(got.value))
+			}
+			t.Run("a known code (control)", func(t *testing.T) {
+				kept := tc.run(t, tc.known)
+				if !errors.As(kept.err, &oe) || oe.Code != tc.known || oe.Unrecognised || !strings.Contains(kept.err.Error(), tc.known) {
+					t.Fatalf("the refusal = %#v (%v), want %s kept", oe, kept.err, tc.known)
+				}
+			})
+		})
+	}
+	for _, code := range []string{"invalid_grant", "refresh_token_reused", "invalid_client", "access_denied", "subscription_sharing_usage_limit_exceeded"} {
+		if c, odd := codeOf(code); c != code || odd {
+			t.Errorf("codeOf(%q) = %q, %v: a code craze acts on was dropped", code, c, odd)
+		}
+	}
+	if c, odd := codeOf(""); c != "" || odd {
+		t.Errorf(`codeOf("") = %q, %v: no code is not an unrecognised one`, c, odd)
+	}
+}
+
 // TestCorruptTokenFile: a token file that is not one craze wrote is "sign
 // in again", never ErrSignedOut, and is left in place for a sign-in to
 // replace.
@@ -957,6 +1071,148 @@ func TestUsageLatch(t *testing.T) {
 	s.ClearUsageLimit()
 	if _, _, err := s.Token(context.Background()); err != nil || s.UsageLimited() {
 		t.Fatalf("Token after the latch was cleared = %v", err)
+	}
+}
+
+// TestLatchSetWhileATokenWaits (plan 033 C14r, r12 #5): a Token call that
+// passed the latch's first look and then waited — for a refresh's reply as
+// its own look, for another caller's look it joined, for the lock a peer
+// held — is answered ErrUsageLimited when the latch was set meanwhile, not
+// with a token for a new request. The rotation the wait obtained is on disk
+// and in use all the same: the file is at generation 2, and once the latch
+// lifts the next Token is that token, with no second refresh. The control is
+// each schedule without the latch, which answers the rotated token.
+func TestLatchSetWhileATokenWaits(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// wait starts Token on s and returns once it waits; release ends the
+		// wait; the result is the Token call's answer.
+		wait func(t *testing.T, f *fakeOpenAI, s *TokenSource) (release func(), results []chan tokenResult)
+	}{
+		{"its own refresh", func(t *testing.T, f *fakeOpenAI, s *TokenSource) (func(), []chan tokenResult) {
+			arrived, release := holdRefreshes(f)
+			out := goToken(s)
+			await(t, arrived, "the refresh to reach the server")
+			return release, []chan tokenResult{out}
+		}},
+		{"another caller's refresh", func(t *testing.T, f *fakeOpenAI, s *TokenSource) (func(), []chan tokenResult) {
+			arrived, release := holdRefreshes(f)
+			joined := make(chan struct{}, 1)
+			onJoin = func() { joined <- struct{}{} }
+			t.Cleanup(func() { onJoin = nil })
+			owner := goToken(s)
+			await(t, arrived, "the owner's refresh to reach the server")
+			joiner := goToken(s)
+			await(t, joined, "the second caller to join the look")
+			return release, []chan tokenResult{owner, joiner}
+		}},
+		{"a peer's lock", func(t *testing.T, f *fakeOpenAI, s *TokenSource) (func(), []chan tokenResult) {
+			held, err := atomicfile.Lock(lockFile(s.dir))
+			if err != nil {
+				t.Fatal(err)
+			}
+			busy := onBusy(t)
+			out := goToken(s)
+			await(t, busy, "the look to find the lock held")
+			return held, []chan tokenResult{out}
+		}},
+	} {
+		for _, latch := range []bool{true, false} {
+			t.Run(fmt.Sprintf("%s, latched %v", tc.name, latch), func(t *testing.T) {
+				f := newFake(t)
+				useFake(t, f)
+				dir := nativeDir(t)
+				seedSignedIn(t, f, dir, seedOpts{expiresIn: 2 * time.Minute, earliestPassed: true})
+				s := newSource(dir)
+				release, results := tc.wait(t, f, s)
+				if latch {
+					s.LatchUsageLimit()
+				}
+				release()
+				rotated := ""
+				for i, out := range results {
+					r := await(t, out, "the waiting Token call")
+					rotated = readRec(t, dir).AccessToken
+					switch {
+					case latch && (!errors.Is(r.err, ErrUsageLimited) || r.tok != ""):
+						t.Fatalf("call %d: Token = %s, %v; want ErrUsageLimited", i, digest(r.tok), r.err)
+					case !latch && (r.err != nil || r.tok != rotated):
+						t.Fatalf("control, call %d: Token = %s, %v; want the rotated token", i, digest(r.tok), r.err)
+					}
+				}
+				if readRec(t, dir).Generation != 2 || !slices.Contains(s.Values(), rotated) {
+					t.Fatal("the rotation the wait obtained is not on disk and in use")
+				}
+				s.ClearUsageLimit()
+				if tok, _, err := s.Token(context.Background()); err != nil || tok != rotated {
+					t.Fatalf("Token after the latch lifted = %s, %v; want the rotated token", digest(tok), err)
+				}
+				if _, r, _, _ := f.counts(); r != 1 {
+					t.Fatalf("%d refreshes, want the one the wait obtained", r)
+				}
+			})
+		}
+	}
+}
+
+// TestSubscribeBetweenAnnouncementAndUse (plan 033 C14r, r12 #6b): a
+// subscriber that registers after a refresh's announcement took its snapshot
+// of the subscribers — so its function is not called with the new values —
+// and before the record holding them is the source's, gets them from
+// Subscribe itself: notify published them first. The barrier holds the
+// refresh there, between the snapshot and the publication of the record. The
+// control is the subscriber registered before the barrier, whose function is
+// called; and the announced values reach Values in the same window.
+func TestSubscribeBetweenAnnouncementAndUse(t *testing.T) {
+	f := newFake(t)
+	useFake(t, f)
+	dir := nativeDir(t)
+	seeded := seedSignedIn(t, f, dir, seedOpts{expiresIn: 2 * time.Minute, earliestPassed: true})
+	s := newSource(dir)
+	var mu sync.Mutex
+	var early, late [][]string
+	_, unsubscribe := s.Subscribe(func(v []string) {
+		mu.Lock()
+		defer mu.Unlock()
+		early = append(early, v)
+	})
+	defer unsubscribe()
+	announced, proceed := make(chan []string, 1), make(chan struct{})
+	onNotify = func(values []string) {
+		if slices.Contains(values, seeded.AccessToken) {
+			return // the first look's adoption: not the refresh
+		}
+		announced <- values
+		<-proceed
+	}
+	t.Cleanup(func() { onNotify = nil })
+	out := goToken(s)
+	values := await(t, announced, "the refresh's announcement")
+
+	got, unsubscribeLate := s.Subscribe(func(v []string) {
+		mu.Lock()
+		defer mu.Unlock()
+		late = append(late, v)
+	})
+	defer unsubscribeLate()
+	inValues := s.Values()
+	close(proceed)
+	r := await(t, out, "the refreshing Token call")
+	if r.err != nil || !slices.Contains(values, r.tok) {
+		t.Fatalf("Token = %v; want the token the refresh announced", r.err)
+	}
+	for _, v := range values {
+		if !slices.Contains(got, v) || !slices.Contains(inValues, v) {
+			t.Fatal("a value announced before the subscription is in neither what Subscribe returned nor Values")
+		}
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(late) != 0 {
+		t.Fatal("premise: the late subscriber's function was called, so the window was not between the snapshot and the publication")
+	}
+	if len(early) != 2 || !slices.Contains(early[1], r.tok) {
+		t.Fatalf("control: the early subscriber heard %d announcements, want the adoption's and the refresh's", len(early))
 	}
 }
 

@@ -336,6 +336,15 @@ type Env struct {
 	// none of them (JobsAware, X101): a run_in_background its model sends
 	// anyway runs in the foreground, and the timeout kills.
 	Jobs Jobs
+	// Streams keeps a running command's output stream widened to every key
+	// its session learns while it runs (StreamTracker; plan 033 C14r, r12
+	// #6a): in every session — a headless one and a sub-agent's included,
+	// where Jobs is nil — so a token the ChatGPT sign-in mints mid-command
+	// (Session.AddSecrets) is redacted from the rest of that command's output
+	// and spill file, not only from the next command's. A session that runs
+	// jobs tracks through Jobs.Track, the same registry. nil tracks nothing
+	// (a test's Env).
+	Streams StreamTracker
 	// Vision says whether the model the call runs for accepts images
 	// (modeltable's vision flag, plan 033 §3.5): a tool returns an image
 	// (Result.Media) only when it does, and otherwise says the model cannot

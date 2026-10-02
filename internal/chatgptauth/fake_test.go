@@ -101,6 +101,7 @@ type fakeOpenAI struct {
 	refreshArrived chan struct{}                    // a refresh signals it on arrival, when set
 	holdModels     chan struct{}                    // a model list request waits on it, when set
 	modelsArrived  chan struct{}                    // signalled on a model list request, when set
+	modelsErr      string                           // an error code the model list answers (400, {"error":{"code":…}})
 	redirectPath   map[string]bool                  // these paths answer 302 to /elsewhere
 	jwksURI        string                           // the discovery document's jwks_uri ("" = ours)
 	models         []map[string]any
@@ -347,8 +348,12 @@ func (f *fakeOpenAI) serve(w http.ResponseWriter, r *http.Request) {
 		tok, _ := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
 		f.mu.Lock()
 		_, live := f.access[tok]
-		models, etag := f.models, f.modelsEtag
+		models, etag, refuse := f.models, f.modelsEtag, f.modelsErr
 		f.mu.Unlock()
+		if refuse != "" {
+			f.writeJSON(w, 400, map[string]any{"error": map[string]any{"code": refuse, "message": "refused"}})
+			return
+		}
 		if !live {
 			f.writeJSON(w, 401, map[string]any{"error": map[string]any{"code": "invalid_api_key", "message": "no"}})
 			return

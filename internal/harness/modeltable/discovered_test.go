@@ -196,6 +196,66 @@ func TestDiscoveredModelsAreAccountBound(t *testing.T) {
 	}
 }
 
+// TestDiscoveredModelsFollowTheAccountSignedIn (plan 033 C14r, r12 #4): a
+// table loaded with account A's list keeps the account that list was bound
+// to, and once the registration names another account — B signed in while
+// the process runs, by its subject, its client id or both — A's models no
+// longer resolve: ErrOtherAccount, an unfunded model (ErrNoAPIKey), so a
+// picker offers none of them, though a session running on one still lists it
+// (P7). The controls: before the switch A's models resolve, and after A signs
+// in again — a new sign-in to the same registration — they resolve again.
+func TestDiscoveredModelsFollowTheAccountSignedIn(t *testing.T) {
+	for _, tc := range []struct{ name, subject, client string }{
+		{"another account", "user-subject-0002", "app_client-0002"},
+		{"another subject", "user-subject-0002", planClient},
+		{"another client", planSubject, "app_client-0002"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := signedInDir(t)
+			tbl, err := Load(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			aliases := planAliases(tbl)
+			if len(aliases) != 3 {
+				t.Fatalf("premise: plan models = %q", aliases)
+			}
+			resolves := func() (funded []string) {
+				for _, a := range aliases {
+					_, err := tbl.Resolve(a, fakeEnv(nil))
+					switch {
+					case err == nil:
+						funded = append(funded, a)
+					case !errors.Is(err, ErrOtherAccount) || !errors.Is(err, ErrNoAPIKey):
+						t.Fatalf("Resolve(%s) = %v, want ErrOtherAccount", a, err)
+					}
+				}
+				return funded
+			}
+			if got := resolves(); len(got) != 3 {
+				t.Fatalf("control: before the switch %q resolve", got)
+			}
+
+			signInAs(t, dir, registration(tc.subject, tc.client, true), true)
+			if got := resolves(); len(got) != 0 {
+				t.Fatalf("after %s signed in, %q resolve on its sign-in", tc.name, got)
+			}
+			if got := tbl.Choices(nil, fakeEnv(nil), ""); len(got) != 0 {
+				t.Fatalf("Choices offers %+v of the other account's list", got)
+			}
+			got := tbl.Choices(nil, fakeEnv(nil), "chatgpt/gpt-5.6-sol")
+			if len(got) != 1 || got[0].Alias != "chatgpt/gpt-5.6-sol" {
+				t.Fatalf("Choices = %+v, want the running model alone", got)
+			}
+
+			signInAs(t, dir, registration(planSubject, planClient, true), true)
+			if got := resolves(); len(got) != 3 {
+				t.Fatalf("control: after the account signed in again %q resolve", got)
+			}
+		})
+	}
+}
+
 // TestChatGPTFunding (P34): a plan model resolves only while the sign-in
 // funds it — the token file a non-empty regular file and plan usage granted —
 // and is ErrPlanUsageDisabled when the account declined plan usage and

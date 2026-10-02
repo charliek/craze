@@ -123,7 +123,7 @@ func oauthError(step string, status int, body []byte) *OAuthError {
 			code = v.Code
 		}
 	}
-	return &OAuthError{Step: step, Status: status, Code: codeOf(code)}
+	return refused(step, status, code)
 }
 
 // signInAgainCodes are the refresh refusals that mean the refresh token can

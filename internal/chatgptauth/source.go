@@ -67,10 +67,27 @@ type TokenSource struct {
 	base    version     // the file's version a dirty rec was refreshed from
 	flight  *flight     // the look under the lock in progress, which every other caller joins
 	retired []retired
+	// pending are values announced to the subscribers (notify) that rec does
+	// not hold yet: a refresh's or an adoption's, published here under mu in
+	// the same hold that takes the subscribers' snapshot, so a subscriber that
+	// registers after the snapshot finds them in Values and in what Subscribe
+	// returns (plan 033 C14r, r12 #6b). They leave when rec takes them, or
+	// retire with a sign-out.
+	pending []string
 	subs    map[uint64]func([]string)
 	nextSub uint64
 	latched bool
 }
+
+// onJoin and onNotify, when a test sets them, are the forced schedules of the
+// latch and subscription tests: onJoin is called when a Token caller joins
+// another caller's flight, just before it waits for it; onNotify after
+// notify has published values and taken the subscribers' snapshot, before it
+// calls them. nil in production.
+var (
+	onJoin   func()
+	onNotify func(values []string)
+)
 
 // flight is one look under the lock (TokenSource.fly), shared by every
 // caller that arrives while it runs (the in-process singleflight).
@@ -145,7 +162,10 @@ func (s *TokenSource) Dir() string { return s.dir }
 // or a 5xx keeps them, and Token returns the token in memory while it has not
 // expired, else the error. A refresh whose write fails keeps the new tokens
 // in this process (the file is retried on later calls) and surfaces the
-// failure once. While the usage latch is set, Token is ErrUsageLimited.
+// failure once. While the usage latch is set, Token is ErrUsageLimited — and a
+// caller that waited (for the lock, a refresh, or another caller's look)
+// while the latch was set is answered so too, its token unused, though any
+// rotation the wait obtained is on disk (plan 033 C14r, r12 #5).
 func (s *TokenSource) Token(ctx context.Context) (string, uint64, error) {
 	tok, gen, _, err := s.token(ctx)
 	return tok, gen, err
@@ -207,7 +227,10 @@ func (s *TokenSource) token(ctx context.Context) (string, uint64, *record, error
 		f, own := s.join(false)
 		s.mu.Unlock()
 		if own {
-			return s.run(ctx, f)
+			return s.admit(s.run(ctx, f))
+		}
+		if onJoin != nil {
+			onJoin()
 		}
 		select {
 		case <-f.done:
@@ -217,8 +240,23 @@ func (s *TokenSource) token(ctx context.Context) (string, uint64, *record, error
 		if isContextError(f.err) && ctx.Err() == nil {
 			continue // the flight's own caller gave up; fly again
 		}
-		return f.token, f.gen, f.rec, f.err
+		return s.admit(f.token, f.gen, f.rec, f.err)
 	}
+}
+
+// admit is the latch's second look, at a token a look under the lock
+// obtained (plan 033 C14r, r12 #5): the latch may have been set while this
+// caller waited for the lock, a refresh's reply or another caller's look, and
+// a request it would admit is one the person's plan has no usage left for. So
+// a latched source answers ErrUsageLimited instead of the token. Nothing the
+// look did is undone: a rotation it obtained was told to the subscribers and
+// written before the look returned, and stays the token in use. An error is
+// passed on as it is — a failed write's is the one report of it (X124).
+func (s *TokenSource) admit(tok string, gen uint64, rec *record, err error) (string, uint64, *record, error) {
+	if err == nil && s.UsageLimited() {
+		return "", 0, nil, ErrUsageLimited
+	}
+	return tok, gen, rec, err
 }
 
 // fast is Token's steps 1 and 2. It answers a record when it returns a token,
@@ -525,10 +563,12 @@ func (s *TokenSource) endSignIn(cur *record, dropClient, planOff bool) {
 }
 
 // signedOut drops the tokens in memory: the file is gone. Their values
-// retire.
+// retire, and so do any announced that never became the tokens in use (a
+// refresh whose file went before its write).
 func (s *TokenSource) signedOut() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.retirePendingLocked()
 	if s.rec == nil {
 		return
 	}
@@ -537,10 +577,28 @@ func (s *TokenSource) signedOut() {
 	s.gen++
 }
 
+// retirePendingLocked moves the announced values rec never took to the
+// retired, for retireAfter: subscribers learned them, and the scrubber keeps
+// hiding them for as long as it would a replaced token's. s.mu is held.
+func (s *TokenSource) retirePendingLocked() {
+	until := s.now().Add(retireAfter)
+	for _, v := range s.pending {
+		if !slices.ContainsFunc(s.retired, func(r retired) bool { return r.value == v }) {
+			s.retired = append(s.retired, retired{value: v, until: until})
+		}
+	}
+	s.pending = nil
+}
+
 // retireLocked retires old's values that next does not keep: an access
 // token until retireAfter past the later of now and its expiry, the others
-// until retireAfter past now (P35). s.mu is held.
+// until retireAfter past now (P35). next's own values are no longer pending:
+// rec is about to hold them. s.mu is held.
 func (s *TokenSource) retireLocked(old, next *record) {
+	if next != nil {
+		keep := next.values()
+		s.pending = slices.DeleteFunc(s.pending, func(v string) bool { return slices.Contains(keep, v) })
+	}
 	if old == nil {
 		return
 	}
@@ -572,12 +630,18 @@ func (s *TokenSource) retireLocked(old, next *record) {
 	}
 }
 
-// Values is every token value this source holds or retired less than
-// retireAfter ago (P19, P35) — the access, refresh and id tokens — for the
-// scrubber. It never blocks on the network or the lock.
+// Values is every token value this source holds, has announced to its
+// subscribers, or retired less than retireAfter ago (P19, P35) — the access,
+// refresh and id tokens — for the scrubber. It never blocks on the network or
+// the lock.
 func (s *TokenSource) Values() []string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.valuesLocked()
+}
+
+// valuesLocked is Values with s.mu held.
+func (s *TokenSource) valuesLocked() []string {
 	t := s.now()
 	kept := s.retired[:0]
 	for _, r := range s.retired {
@@ -591,6 +655,11 @@ func (s *TokenSource) Values() []string {
 	if s.rec != nil {
 		out = s.rec.values()
 	}
+	for _, v := range s.pending {
+		if !slices.Contains(out, v) {
+			out = append(out, v)
+		}
+	}
 	for _, r := range s.retired {
 		if !slices.Contains(out, r.value) {
 			out = append(out, r.value)
@@ -603,29 +672,46 @@ func (s *TokenSource) Values() []string {
 // (P19): on a refresh, before the new record is written; on an adoption —
 // the first look included — before the token is used. fn is called on the
 // goroutine that learned them, with the lock held, so it must be quick and
-// must not call Token or Invalidate. Subscribe first, then read Values, and
-// no value is missed between the two. The returned function unsubscribes.
-func (s *TokenSource) Subscribe(fn func(values []string)) (unsubscribe func()) {
+// must not call Token or Invalidate. The returned function unsubscribes.
+//
+// It returns the values the source has now (Values) as of the registration,
+// in the same hold of the source's mutex (plan 033 C14r, r12 #6b): every value
+// is either in them or told to fn, never neither. A value announced just
+// before fn was registered — notify publishes it as pending before it takes
+// the subscribers' snapshot, so fn missed the call — is among them, though
+// the record that holds it is not in use yet.
+func (s *TokenSource) Subscribe(fn func(values []string)) (values []string, unsubscribe func()) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	id := s.nextSub
 	s.nextSub++
 	s.subs[id] = fn
-	return func() {
+	return s.valuesLocked(), func() {
 		s.mu.Lock()
 		defer s.mu.Unlock()
 		delete(s.subs, id)
 	}
 }
 
-// notify hands values to every subscriber.
+// notify hands values to every subscriber. They are published first — as
+// pending, so Values and a Subscribe after this hold include them — and the
+// subscribers' snapshot is taken in the same hold of s.mu, so a subscriber
+// is in the snapshot or finds them published (r12 #6b).
 func (s *TokenSource) notify(values []string) {
 	s.mu.Lock()
+	for _, v := range values {
+		if !slices.Contains(s.pending, v) {
+			s.pending = append(s.pending, v)
+		}
+	}
 	fns := make([]func([]string), 0, len(s.subs))
 	for _, fn := range s.subs {
 		fns = append(fns, fn)
 	}
 	s.mu.Unlock()
+	if onNotify != nil {
+		onNotify(slices.Clone(values))
+	}
 	for _, fn := range fns {
 		fn(slices.Clone(values))
 	}

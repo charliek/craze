@@ -235,7 +235,7 @@ func (r *subagents) runBackground(ctx context.Context, link *turnLink, call tool
 			_ = child.Close()
 		}
 	}()
-	if !h.attachChild(child) || ctx.Err() != nil {
+	if !r.attachCaughtUp(h, child) || ctx.Err() != nil {
 		return abortedResult()
 	}
 	if r.seams.opened != nil {

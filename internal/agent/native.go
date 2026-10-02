@@ -587,7 +587,7 @@ func (s *nativeSession) start(context.Context) error {
 	s.table, s.home = opened.table, opened.home
 	s.signIn, s.unsubscribe = opened.signIn, opened.unsubscribe
 	if refresh {
-		s.refreshModelsLocked(opened.signIn)
+		s.refreshModelsLocked(opened.signIn, hs.Redact)
 	}
 	s.efforts = efforts
 	s.plugins = entries
@@ -1219,12 +1219,16 @@ func (s *nativeSession) open() (*harness.Session, nativeOpened, nativeLoad, erro
 	if signIn != nil {
 		// Every token value this process mints or adopts from here on is
 		// redacted at once (P19): the source tells its subscribers before it
-		// writes the file or uses the token. Subscribed first and read
-		// second, so no value is missed between the two — one an in-process
-		// sibling session's refresh learned already, say.
+		// writes the file or uses the token. The subscription returns the
+		// values the source has as of the registration, in the same hold of
+		// its lock (plan 033 C14r, r12 #6b), so no value is missed between
+		// the two — one an in-process sibling session's refresh is announcing
+		// at this moment, say, which the callback missed and the record does
+		// not hold yet.
 		out.signIn = signIn
-		out.unsubscribe = signIn.Subscribe(func(values []string) { hs.AddSecrets(values...) })
-		hs.AddSecrets(signIn.Values()...)
+		var values []string
+		values, out.unsubscribe = signIn.Subscribe(func(values []string) { hs.AddSecrets(values...) })
+		hs.AddSecrets(values...)
 	}
 	return hs, out, content, nil
 }
@@ -1232,8 +1236,21 @@ func (s *nativeSession) open() (*harness.Session, nativeOpened, nativeLoad, erro
 // diagModelsRefresh is the journal diag a failed background fetch of the
 // ChatGPT plan's model list is noted as (refreshModelsLocked): its one field,
 // "error", names the endpoint, the status and the code, never a token
-// (chatgptauth's errors).
+// (chatgptauth's errors repeat only the codes it knows) — and it is redacted
+// by the session's redactor besides (modelsRefreshNote).
 const diagModelsRefresh = "chatgpt_models_refresh"
+
+// modelsRefreshNote is the diag a failed background fetch is journaled as:
+// err's text through the session's redactor, then made one line (plan 033
+// C14r, r12 #1). chatgptauth keeps a server's free text out of its errors and
+// repeats only error codes it knows, so a token reaching err is not expected;
+// the redaction is the journal boundary's own guard, as every other surface
+// the session writes has one, should a wrapped error ever carry one. Redacted
+// first, so the sanitiser's rewriting cannot split a value the redactor would
+// have matched.
+func modelsRefreshNote(err error, redact func(string) string) journal.DiagNote {
+	return journal.DiagNote{Kind: diagModelsRefresh, Fields: map[string]any{"error": sanitizeLine(redact(err.Error()))}}
+}
 
 // refreshModelsLocked fetches the ChatGPT plan's model list again in the
 // background when it is over a day old, missing or another account's (plan
@@ -1242,8 +1259,9 @@ const diagModelsRefresh = "chatgpt_models_refresh"
 // for an account signed in with plan usage; anything else would only fail.
 // The fetch takes the list's own lock and checks its age again under it, so
 // hosts opening at once fetch it once. Close cancels it (done) and waits for
-// it (refreshed). s.mu is held: it only starts the goroutine.
-func (s *nativeSession) refreshModelsLocked(src *chatgptauth.TokenSource) {
+// it (refreshed). A failure is journaled through redact, the session's
+// redactor (modelsRefreshNote). s.mu is held: it only starts the goroutine.
+func (s *nativeSession) refreshModelsLocked(src *chatgptauth.TokenSource, redact func(string) string) {
 	done := make(chan struct{})
 	s.refreshed = done
 	go func() {
@@ -1258,7 +1276,7 @@ func (s *nativeSession) refreshModelsLocked(src *chatgptauth.TokenSource) {
 			}
 		}()
 		if _, err := chatgptauth.RefreshModels(ctx, src, chatgptauth.ModelsMaxAge); err != nil && ctx.Err() == nil {
-			s.log.Note(journal.DiagNote{Kind: diagModelsRefresh, Fields: map[string]any{"error": sanitizeLine(err.Error())}})
+			s.log.Note(modelsRefreshNote(err, redact))
 		}
 	}()
 }
@@ -3125,7 +3143,8 @@ func phraseChatGPT(err error) string {
 // value), which is the actionable part; table is nil when the caller has
 // none to hand, and the harness's own text is used then. A model on the
 // ChatGPT plan has no key: not signed in, or plan usage off, says how to sign
-// in (plan 033 §3.12).
+// in (plan 033 §3.12); a model of another account's list says a new session
+// offers this account's.
 func phraseSetupError(err error, table *modeltable.Table, alias string) error {
 	switch {
 	case errors.Is(err, harness.ErrClosed):
@@ -3135,6 +3154,11 @@ func phraseSetupError(err error, table *modeltable.Table, alias string) error {
 			sanitizeLine(alias)), cause: err}
 	case errors.Is(err, modeltable.ErrPlanUsageDisabled):
 		return &nativeError{msg: chatgptPlanOffText, cause: err}
+	case errors.Is(err, modeltable.ErrOtherAccount):
+		// Another account signed in since this session's table was loaded
+		// (plan 033 C14r, r12 #4): not a key to add, so not noKeyText.
+		return &nativeError{msg: fmt.Sprintf("native: model %q is from another ChatGPT account's model list; a new session offers the signed-in account's models",
+			sanitizeLine(alias)), cause: err}
 	case errors.Is(err, harness.ErrNoAPIKey) && table != nil:
 		return &nativeError{msg: noKeyText(table, alias), cause: err}
 	}

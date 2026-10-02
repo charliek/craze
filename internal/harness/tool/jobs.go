@@ -245,10 +245,20 @@ type Jobs interface {
 	// key set at once, and again each time that set grows — a stored key at a
 	// turn's start, a provider's on a model switch, a token as it is minted —
 	// until untrack is called. The bash tool tracks every command of a
-	// session that runs jobs from the moment its output is read (any of them
-	// may become a job: promotion), and untracks it once the stream is done
-	// with; untrack may be called more than once. A command's text decided
-	// before a key was learned stays as it was (redact.Writer.Widen).
+	// session that runs jobs here from the moment its output is read (any of
+	// them may become a job: promotion), and untracks it once the stream is
+	// done with; untrack may be called more than once. A command's text
+	// decided before a key was learned stays as it was
+	// (redact.Writer.Widen). A session that runs no jobs tracks its commands
+	// through Env.Streams instead, the same registry (plan 033 C14r).
+	Track(s KeyedStream) (untrack func())
+}
+
+// StreamTracker is Env.Streams: Jobs.Track's registration, for every session
+// whether or not it runs jobs (plan 033 C14r, r12 #6a) — a command's stream
+// widened to its session's key set at once and each time the set grows, until
+// untrack.
+type StreamTracker interface {
 	Track(s KeyedStream) (untrack func())
 }
 

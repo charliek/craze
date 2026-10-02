@@ -124,6 +124,9 @@ type itemState struct {
 	// args are the argument deltas held for it until it is (announce).
 	waiting bool
 	args    []string
+	// callID is the call id a function call was announced with: its
+	// .done's, should that event not repeat it.
+	callID string
 }
 
 func newStream(ctx context.Context, resp *http.Response) *Stream {
@@ -257,7 +260,7 @@ func (s *Stream) handle(typ string, w *wireEvent) {
 		case !st.waiting:
 			return // announced already
 		}
-		s.announce(st, idx, w.Item.output(), false)
+		s.announce(st, idx, w.Item.output())
 
 	case "response.output_text.delta", "response.refusal.delta":
 		if st, idx := s.state(w, "message"); st != nil && w.Delta != "" {
@@ -307,15 +310,27 @@ func (s *Stream) handle(typ string, w *wireEvent) {
 		}
 		item := w.Item.output()
 		st := s.items[idx]
-		switch {
-		case st == nil:
+		if st != nil && st.done {
+			return
+		}
+		if item.Type == "function_call" && item.CallID == "" {
+			// A call that ends with no call id (plan 033 C14r, r12 #9): one
+			// announced with its id keeps that one; one that no event named
+			// never will be now, and a call without an identity — which a
+			// second such call would share — is no call to run. The response
+			// fails here, before any of the call's events is sent.
+			if st == nil || st.waiting || st.callID == "" {
+				s.fail(fmt.Errorf("responsesapi: a %s event is malformed: its function call names no call id, and no earlier event named one", typ))
+				return
+			}
+			item.CallID = st.callID
+		}
+		if st == nil {
 			st = &itemState{summary: -1}
 			s.items[idx] = st
-			s.announce(st, idx, item, true)
-		case st.done:
-			return
-		case st.waiting:
-			s.announce(st, idx, item, true)
+			s.announce(st, idx, item)
+		} else if st.waiting {
+			s.announce(st, idx, item)
 		}
 		st.done = true
 		switch item.Type {
@@ -385,16 +400,16 @@ func (s *Stream) state(w *wireEvent, typ string) (*itemState, int) {
 
 // announce reports the item at idx begun: ItemAdded with item, then the
 // argument deltas held for it while it waited. A function call whose item
-// names no call id stays waiting, its deltas held, unless the item is the
-// call's end (final), after which nothing will name it: it is announced
-// with what it has.
-func (s *Stream) announce(st *itemState, idx int, item OutputItem, final bool) {
+// names no call id stays waiting, its deltas held, for an event that does —
+// its .added, else its .done, which fails the response when it names none
+// either (r12 #9), so no call is ever announced without its identity.
+func (s *Stream) announce(st *itemState, idx int, item OutputItem) {
 	st.typ, st.id = item.Type, cmp.Or(st.id, item.ID)
-	if item.Type == "function_call" && item.CallID == "" && !final {
+	if item.Type == "function_call" && item.CallID == "" {
 		st.waiting = true
 		return
 	}
-	st.waiting = false
+	st.waiting, st.callID = false, item.CallID
 	s.emit(Event{Kind: ItemAdded, Index: idx, Item: item})
 	if item.Type == "function_call" {
 		for _, d := range st.args {

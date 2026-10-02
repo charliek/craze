@@ -429,6 +429,75 @@ func TestStreamAnnouncesACallOnlyWithItsCallID(t *testing.T) {
 	}
 }
 
+// TestStreamRejectsACallEndingWithoutItsCallID (plan 033 C14r, r12 #9): a
+// function call whose .done names no call id, when no earlier event named one
+// — no .added at all, or an .added with none — fails the response there:
+// an error, and not one event of the call (no ItemAdded, no argument delta,
+// no ItemDone), so no tool part with an empty identity can follow, nor two
+// such calls share one. The control is a call announced with its id by its
+// .added, whose .done leaves it out: it completes, its ItemDone carrying the
+// announced id.
+func TestStreamRejectsACallEndingWithoutItsCallID(t *testing.T) {
+	callEvents := func(evs []Event) (n int) {
+		for _, e := range evs {
+			if e.Kind == ArgumentsDelta || ((e.Kind == ItemAdded || e.Kind == ItemDone) && e.Item.Type == "function_call") {
+				n++
+			}
+		}
+		return n
+	}
+	for _, tc := range []struct {
+		name string
+		evs  []string
+	}{
+		{"a .done alone", []string{
+			argsDelta(0, "fc_a", `{}`),
+			itemDone(0, call("fc_a", "", "read", `{}`)),
+			completed(5, 0, 5, 0),
+		}},
+		{"a .done after an .added with no id", []string{
+			added(0, call("fc_a", "", "read", "")),
+			argsDelta(0, "fc_a", `{}`),
+			itemDone(0, call("fc_a", "", "read", `{}`)),
+			completed(5, 0, 5, 0),
+		}},
+		{"two of them", []string{
+			itemDone(0, call("fc_a", "", "read", `{}`)),
+			itemDone(1, call("fc_b", "", "read", `{}`)),
+			completed(5, 0, 5, 0),
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			evs, err := streamOf(t, newServer(t, events(tc.evs...)))
+			if err == nil || !strings.Contains(err.Error(), "names no call id") {
+				t.Fatalf("err = %v, want the nameless call refused", err)
+			}
+			if n := callEvents(evs); n != 0 {
+				t.Fatalf("%d events of the nameless call were sent: %v", n, kinds(evs))
+			}
+		})
+	}
+	t.Run("announced with its id (control)", func(t *testing.T) {
+		evs, err := streamOf(t, newServer(t, events(
+			added(0, call("fc_a", "call_a", "read", "")),
+			argsDelta(0, "fc_a", `{}`),
+			itemDone(0, call("fc_a", "", "read", `{}`)),
+			completed(5, 0, 5, 0),
+		)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := kinds(evs); !slices.Equal(got, []string{"added0", "args0", "done0", "completed"}) {
+			t.Fatalf("events = %v", got)
+		}
+		for _, e := range evs {
+			if (e.Kind == ItemAdded || e.Kind == ItemDone) && e.Item.CallID != "call_a" {
+				t.Fatalf("%s carries call id %q, want call_a", kinds([]Event{e})[0], e.Item.CallID)
+			}
+		}
+	})
+}
+
 // TestStreamPassesOverUnknownEvents (review r9 item 1b): an event of a type
 // the stream does not read is passed over whatever its fields hold — here
 // fields of the very names craze reads, in shapes it does not — and so is

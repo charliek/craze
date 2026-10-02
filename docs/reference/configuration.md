@@ -813,9 +813,12 @@ session refuses every later turn with `a newly stored API key appears in this
 session's frozen prompt; start a new session`.
 
 The redaction starts at the next turn, so there is a window: a key stored
-during a turn is learned when the next one starts, and a shell command or a
-sub-agent already running keeps the redaction it started with. A sub-agent
-started after the key was learned redacts it.
+during a turn is learned when the next one starts. From then on a shell
+command still running — a background command's included — redacts it from the
+rest of its output and from its saved output file, but not from what it
+printed before. A sub-agent already running keeps the redaction it started
+with, though what it reports back is redacted of the key; one started after
+the key was learned redacts it.
 
 ### The ChatGPT plan
 
@@ -907,8 +910,11 @@ craze, or a request it refuses, ends the turn with its own message.
 every native session, whatever its provider, learns the ones in
 `auth/chatgpt.json` at the start of each turn and redacts them from tool
 output, and a session that uses the plan learns renewed ones the moment it
-renews them. The file tools refuse the whole `auth/` directory, a hard link to
-any file in it included.
+renews them — its shell commands still running and its sub-agents included,
+a sub-agent that is just starting too. The file tools refuse the whole `auth/`
+directory, a hard link to any file in it included, and so does a search:
+`grep` refuses to search there, and neither `grep` nor `glob` shows a file
+there — or `providers.toml` — among what it finds in a directory above it.
 
 ### Model memory: `recent.json`
 
