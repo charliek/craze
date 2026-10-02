@@ -210,11 +210,13 @@ type creator struct {
 	mu    sync.Mutex
 	calls map[string]*createCall
 
-	// launches counts the creates whose host is launched and not yet done
-	// with — still ended, settled or handed on by its create — each Added
-	// under the lifecycle lock as its host starts (launch), so never once the
-	// hub is closing: what the teardown waits for after its cut, so that a
-	// host it cut is ended and reaped before Run returns (r43 5).
+	// launches counts the creates whose launch is reserved (launch) and that
+	// are not yet done with its host — the start still running, or the host
+	// still to be ended, settled or handed on by its create — each Added
+	// under the lifecycle lock, so never once the hub is closing: what the
+	// teardown waits for after its cut, so that a host it cut, or one whose
+	// start returned after the closing, is ended and reaped before Run
+	// returns (r43 5, r45 F2).
 	launches sync.WaitGroup
 }
 
@@ -664,9 +666,9 @@ func (h *hub) create(ctx context.Context, p createReq) createAnswer {
 	wd, _ := os.Getwd()
 	cmd.Env = ChildEnv(environ, wd)
 	cmd.Dir = q.Cwd
-	host, r, launched, err := h.cr.launch(cmd, filepath.Join(dir, hostspawn.AgentGroupsName(hostID)), logPath)
-	if !launched {
-		h.logf("%s: the hub is closing: no host launched", tag)
+	host, r, err := h.cr.launch(cmd, filepath.Join(dir, hostspawn.AgentGroupsName(hostID)), logPath)
+	if errors.Is(err, errLaunchClosing) {
+		h.logf("%s: %v", tag, err)
 		return createRefusal(closingErr())
 	}
 	if err != nil {
@@ -808,33 +810,60 @@ type ownedHost struct {
 	once  sync.Once
 }
 
-// launch is a create's launch of cmd, its host, decided under the lifecycle
-// lock — the lock quiesce and the idle decision set closing under (r43 1): a
-// hub that is closing launches nothing (launched false); otherwise the host
-// is started (hostspawn.StartCmd: cmd.Start) and owned, and counted among the
-// launches the teardown waits for, all before the lock is let go — so a
-// launch is either whole before the hub closes, a host the teardown's cut
-// handles as any create's mid-start, or refused. groups and log are the
-// host's agents' record and its log. The lock order is the table's lock, then
-// this one: launch holds the table's lock never.
-func (cr *creator) launch(cmd *exec.Cmd, groups, log string) (*ownedHost, *os.File, bool, error) {
+// launch is a create's launch of cmd, its host, by a reservation (r43 1, r45
+// F2). Under the lifecycle lock — the lock quiesce and the idle decision set
+// closing under — a hub that is closing launches nothing, and otherwise the
+// launch is counted among those the teardown waits for (launches). The start
+// (hostspawn.StartCmd: cmd.Start) runs outside the lock: it can block — Go's
+// fork waits for the child to exec, and the child's chdir into the create's
+// directory can stall on a hung filesystem — and the teardown's quiesce must
+// never wait on it. Then, under the lock again, the host is owned; if the hub
+// began closing meanwhile, the host — which never got to its ready line — is
+// ended at once (terminate) and the answer is errLaunchClosing. Either way
+// the count is the create's to drop: here on a failure or a closing, at its
+// end otherwise. So a launch is whole before the hub closes — a host the
+// teardown's cut handles as any create's mid-start — or refused, or ended by
+// the launch itself; the teardown waits for each within its bounds, and only
+// a start that never returns outlives it (lifecycle.go's teardown). groups
+// and log are the host's agents' record and its log. The lock order is the
+// table's lock, then this one: launch holds the table's lock never.
+func (cr *creator) launch(cmd *exec.Cmd, groups, log string) (*ownedHost, *os.File, error) {
 	l := &cr.h.life
 	l.mu.Lock()
-	defer l.mu.Unlock()
 	if l.closing {
-		return nil, nil, false, nil
-	}
-	child, r, err := hostspawn.StartCmd(cmd, hostspawn.HostChildEnv, groups, log)
-	if err != nil {
-		return nil, nil, true, err
+		l.mu.Unlock()
+		return nil, nil, fmt.Errorf("%w: no host launched", errLaunchClosing)
 	}
 	cr.launches.Add(1)
+	l.mu.Unlock()
+	child, r, err := createStart(cmd, hostspawn.HostChildEnv, groups, log)
+	if err != nil {
+		cr.launches.Done()
+		return nil, nil, err
+	}
 	createLaunched(child.PID())
-	return cr.own(child), r, true, nil
+	l.mu.Lock()
+	host := cr.own(child)
+	closing := l.closing
+	l.mu.Unlock()
+	if closing {
+		_ = r.Close()
+		host.terminate()
+		cr.launches.Done()
+		return nil, nil, fmt.Errorf("%w: its host (pid %d) started meanwhile, and was ended", errLaunchClosing, child.PID())
+	}
+	return host, r, nil
 }
 
-// createLaunched is told each host a create launched, by its pid, as it is
-// launched: a no-op, and a test's seam (never in parallel).
+// errLaunchClosing is a launch the hub's closing refused (launch).
+var errLaunchClosing = errors.New("the hub is closing")
+
+// createStart is a launch's start (hostspawn.StartCmd): a test's seam to
+// stall one (never in parallel).
+var createStart = hostspawn.StartCmd
+
+// createLaunched is told each host a create launched, by its pid, as its
+// start returns: a no-op, and a test's seam (never in parallel).
 var createLaunched = func(int) {}
 
 // grace is how long the host is given between SIGTERM and SIGKILL, and to

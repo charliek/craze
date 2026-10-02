@@ -1,12 +1,15 @@
 package hub
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"slices"
@@ -1392,11 +1395,12 @@ func sleepChildren(t *testing.T) []int {
 	return out
 }
 
-// TestALaunchRacingTheClosingStartsNothing (r43 1): a create past its last
-// stopping check whose hub closes in that instant — the teardown's quiesce,
-// run by the seam between the check and the launch — starts no host: the
-// launch is decided under the lifecycle lock the closing is set under, and is
-// refused unavailable, reason closing.
+// TestALaunchRacingTheClosingStartsNothing (r43 1, r45 F2): a create past
+// its last stopping check whose hub closes in that instant — the teardown's
+// quiesce, run by the seam between the check and the launch — starts no
+// host: the launch's reservation is taken under the lifecycle lock the
+// closing is set under, and is refused unavailable, reason closing, with
+// nothing counted in flight.
 func TestALaunchRacingTheClosingStartsNothing(t *testing.T) {
 	env := testEnv(t)
 	rn, s, sock := creating(t, env, nil, always("ok"))
@@ -1410,6 +1414,143 @@ func TestALaunchRacingTheClosingStartsNothing(t *testing.T) {
 		if cmd, _ := s.cmd(i); cmd.Process != nil {
 			t.Fatalf("a host was started (pid %d) after the hub closed", cmd.Process.Pid)
 		}
+	}
+	if !waitUntil(&h.cr.launches, time.Now().Add(step)) {
+		t.Fatal("a refused launch is still counted in flight")
+	}
+}
+
+// TestALaunchDoneAfterTheClosingEndsItsHost (r45 F2): a launch whose start
+// returns once the hub has begun closing — the closing set while the host was
+// being started, outside the lifecycle lock — ends that host at once: when
+// the create is answered unavailable, reason closing, the host has been
+// terminated and reaped, and the launch is no longer counted in flight. The
+// negative control is the launch that does not look again: the host is
+// handed on, and the create answers its session.
+func TestALaunchDoneAfterTheClosingEndsItsHost(t *testing.T) {
+	env := testEnv(t)
+	launched := make(chan int, 1)
+	setVar(t, &createLaunched, func(pid int) { launched <- pid })
+	rn, _, sock := creating(t, env, nil, always("ok"))
+	h := rn.serving(t)
+	setVar(t, &createStart, func(cmd *exec.Cmd, marker, groups, log string) (*hostspawn.Child, *os.File, error) {
+		child, r, err := hostspawn.StartCmd(cmd, marker, groups, log)
+		h.life.quiesce()
+		return child, r, err
+	})
+	t.Cleanup(func() { joinCreates(t, h) })
+	c := dial(t, sock)
+	c.hello(t)
+	refusedAs(t, createOn(t, c, map[string]any{"cwd": t.TempDir()}), protocol.CodeUnavailable, protocol.ReasonClosing)
+	var pid int
+	select {
+	case pid = <-launched:
+	default:
+		t.Fatal("no host was launched")
+	}
+	if err := syscall.Kill(pid, 0); !errors.Is(err, syscall.ESRCH) {
+		t.Fatalf("the host %d launched as the hub closed is still there (%v, %s) when the create is answered", pid, err, procState(pid))
+	}
+	if !waitUntil(&h.cr.launches, time.Now().Add(step)) {
+		t.Fatal("the launch is still counted in flight")
+	}
+}
+
+// TestAStalledLaunchHoldsNoTeardown (r45 F2): a create whose launch is
+// stalled inside its start — cmd.Start not returning, as for a child stalled
+// in its chdir into a hung filesystem — while its hub tears down, with a
+// roster subscription and a splice open, holds the teardown only within its
+// bounds: the lifecycle lock is not held across the start, so the quiesce
+// goes on; the subscription is ended with reset{hub_closing}, the splice is
+// closed both ways, Run returns within teardownBound, createCleanupWait and
+// teardownTail, the hub's lock is free and its files are gone, and the log
+// says a start was left as it was. The negative controls: the start run under
+// the lifecycle lock (r43 1's launch) — the teardown never gets past its
+// quiesce, and nothing is written to the subscriber; and no tail of its own
+// once the creates' waits have used the bound up — the reset's write is past
+// its deadline, and the subscriber reads only the connection's end.
+func TestAStalledLaunchHoldsNoTeardown(t *testing.T) {
+	setVar(t, &teardownBound, 300*time.Millisecond)
+	setVar(t, &createCleanupWait, 300*time.Millisecond)
+	env := testEnv(t)
+	rh := newRawHost(t, env, hostOf(4), sessionOf(4))
+	rn, _, sock := creating(t, env, quiet(), always("ok"))
+	h := rn.serving(t)
+	t.Cleanup(func() { joinCreates(t, h) })
+	entered, release := make(chan struct{}, 1), make(chan struct{})
+	setVar(t, &createStart, func(*exec.Cmd, string, string, string) (*hostspawn.Child, *os.File, error) {
+		entered <- struct{}{}
+		<-release
+		return nil, nil, errors.New("the stalled start, let go")
+	})
+	t.Cleanup(func() { close(release) })
+
+	// The splice first, its host leg the first connection the host accepts
+	// (the subscriber's poll dials the host too): the host reads the client's
+	// hello through it.
+	sp := dialPeer(t, sock)
+	if m := sp.call(protocol.MethodSessionConnect, protocol.ConnectParams{SessionID: sessionOf(4)}); m.Error != nil || string(m.Result) != "{}" {
+		t.Fatalf("session.connect: %s", clip(m.raw))
+	}
+	hc := rh.accept(t)
+	sent, err := protocol.MarshalLine(map[string]any{"jsonrpc": "2.0", "id": 9, "method": "hello", "params": hostHello})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sp.nc.Write(sent); err != nil {
+		t.Fatal(err)
+	}
+	_ = hc.SetReadDeadline(time.Now().Add(step))
+	hr := protocol.NewLineReader(hc, 0)
+	if got, err := hr.ReadLine(); err != nil || !bytes.Equal(append(got, '\n'), sent) {
+		t.Fatalf("the host read %q (%v), want the client's hello as written, %q", got, err, sent)
+	}
+	p := dialPeer(t, sock)
+	sub := p.subscribe()
+	c := dial(t, sock)
+	c.hello(t)
+	c.sendCreate(t, map[string]any{"cwd": t.TempDir()})
+	select {
+	case <-entered:
+	case <-time.After(step):
+		t.Fatal("the create's launch never reached its start")
+	}
+
+	start := time.Now()
+	rn.sigs <- syscall.SIGTERM
+	var last msg
+	for {
+		last = p.read()
+		if last.Method != protocol.NotifyRoster {
+			break
+		}
+	}
+	var reset protocol.ResetParams
+	if last.Method != protocol.NotifyReset || json.Unmarshal(last.Params, &reset) != nil ||
+		reset != (protocol.ResetParams{Subscription: sub.Subscription, Reason: protocol.ResetHubClosing}) {
+		t.Fatalf("the subscriber's last line: %s, want reset{%s, hub_closing}", clip(last.raw), sub.Subscription)
+	}
+	if !p.eof() {
+		t.Fatal("the subscriber's connection was not closed after its reset")
+	}
+	if !sp.eof() {
+		t.Fatal("the splice's client leg was not closed")
+	}
+	_ = hc.SetReadDeadline(time.Now().Add(step))
+	if got, err := hr.ReadLine(); !errors.Is(err, io.EOF) {
+		t.Fatalf("the splice's host leg read %q (%v), not its end", got, err)
+	}
+	if err := rn.stopped(t); err != nil {
+		t.Fatal(err)
+	}
+	if took, bound := time.Since(start), teardownBound+createCleanupWait+teardownTail; took > bound+2*time.Second {
+		t.Fatalf("the teardown took %v with a stalled launch, past its bounds %v", took, bound)
+	}
+	absent(t, "the record", recordPath(t, env))
+	absent(t, "the socket", sock)
+	lockFree(t, env)
+	if log := rn.stderr.String(); !strings.Contains(log, "a start that has not returned is left as it is") {
+		t.Fatalf("the hub's log does not say the stalled start was left: %s", log)
 	}
 }
 

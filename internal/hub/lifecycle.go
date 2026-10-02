@@ -71,7 +71,8 @@ import (
 // The roster (roster.go) is served from the start; its poll runs only while a
 // client wants it.
 //
-// Teardown, bounded by teardownBound whatever its peers do: quiesce (refuse
+// Teardown, bounded whatever its peers do — by teardownBound, and the two
+// waits of its own below past it: quiesce (refuse
 // every new connection, every request and every create; the lifecycle lock
 // is the barrier; no answer waits for the poll any more), wait for the work
 // in flight — the creates in flight among it, whose waiters wait for them,
@@ -81,13 +82,19 @@ import (
 // past teardownBound, for the cut creates whose host was launched to be done
 // with it — a host cut before its ready line ended (SIGTERM, createCutGrace,
 // SIGKILL) and reaped before Run returns; a stalled world check, which can
-// launch nothing now, is not waited for — close the listener, end every
-// roster subscription with
-// reset{hub_closing} (resetWait), close every connection — a splice's legs
-// half-closed first, then closed once it has ended or spliceDrain has passed —
-// stop the roster's poll and the sweep, unlink the socket and remove the
-// record — each only while it is still the file the hub made — and release the
-// lock last (an explicit LOCK_UN, then close: rundir.HubLock.Release).
+// launch nothing now, is not waited for, and a launch whose start has not
+// returned (its child stalled before its exec, in its chdir on a hung
+// filesystem: no pid yet, and no signal ends it) is left as it is — then,
+// bounded by teardownBound still, or by teardownTail (1 s) of its own once
+// the waits before have used it up: close the listener, end every roster
+// subscription with reset{hub_closing} (resetWait), close every connection —
+// a splice's legs half-closed first, then closed once it has ended or
+// spliceDrain has passed — stop the roster's poll and the sweep, unlink the
+// socket and remove the record — each only while it is still the file the
+// hub made — and release the lock last (an explicit LOCK_UN, then close:
+// rundir.HubLock.Release). A launch's start runs outside the lifecycle lock
+// (creator.launch), so the quiesce that begins the teardown never waits on
+// it.
 
 // DefaultIdleGrace is how long a hub with no client and no live host waits
 // before it exits (P12): 60 s.
@@ -126,6 +133,10 @@ var (
 	// teardownBound bounds the whole teardown: what in-flight work and peers
 	// have not finished by then is cut off.
 	teardownBound = 10 * time.Second
+	// teardownTail bounds the teardown's steps after the creates' — the
+	// subscriptions' resets, the splices' drain, the connections' close, the
+	// sweep's end — once the waits before them have used teardownBound up.
+	teardownTail = time.Second
 	// readErrSayEvery is how often a registry that keeps failing to read is
 	// said in the hub's log again.
 	readErrSayEvery = time.Minute
@@ -693,13 +704,29 @@ func (h *hub) teardown(cause string) {
 			h.logf("creates in flight did not end within %v; cut off, their hosts left as they are", teardownBound)
 		}
 		h.cr.stop()
-		// The cut creates whose host was launched are done with it before Run
-		// returns (r43 5): a host cut before its ready line is ended and
-		// reaped, in createCutGrace; a stalled world check launched nothing
-		// and is not waited for.
+		// The launches in flight and the cut creates whose host was launched
+		// are done with it before Run returns (r43 5, r45 F2): a host cut
+		// before its ready line, or whose start returned after the closing,
+		// is ended and reaped, in createCutGrace; a stalled world check
+		// launched nothing and is not waited for. A start that has not
+		// returned is waited for only so long: its child — stalled in its
+		// chdir into the create's directory on a hung filesystem, before its
+		// exec — has no pid the hub has been told yet, and a process in that
+		// uninterruptible wait does not die of SIGKILL either; it is left as
+		// it is, and the launch ends the host itself should its start ever
+		// return (creator.launch).
 		if !waitUntil(&h.cr.launches, time.Now().Add(createCleanupWait)) {
-			h.logf("hosts the cut creates launched were not ended within %v", createCleanupWait)
+			h.logf("launches in flight, or hosts the cut creates launched, were not done within %v; a start that has not returned is left as it is",
+				createCleanupWait)
 		}
+	}
+	// What follows is bounded by the deadline, or — once the waits before
+	// have used it up (a create stalled in its launch holds createWG to the
+	// deadline) — by teardownTail of its own: a write deadline already passed
+	// fails a write at once, and a subscriber that reads would never be told
+	// hub_closing (r45 F2).
+	if tail := time.Now().Add(teardownTail); deadline.Before(tail) {
+		deadline = tail
 	}
 	_ = h.ln.Close()
 	<-h.srv.acceptDone
