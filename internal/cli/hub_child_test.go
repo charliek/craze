@@ -120,7 +120,11 @@ func hubAsChild(t *testing.T, extra ...string) *hubChildren {
 func procSignalState(pid int) string {
 	b, err := os.ReadFile(fmt.Sprintf("/proc/%d/status", pid))
 	if err != nil {
-		return ""
+		if runtime.GOOS != "linux" {
+			return ""
+		}
+		// A process kill still finds but /proc cannot show: say both.
+		return fmt.Sprintf("/proc/%d/status: %v; kill(%d, 0): %v", pid, err, pid, syscall.Kill(pid, 0))
 	}
 	var out []string
 	for _, line := range strings.Split(string(b), "\n") {

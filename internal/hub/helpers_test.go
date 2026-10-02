@@ -140,9 +140,9 @@ func init() {
 		err := Run(context.Background(), Options{Env: rundir.ProcessEnv(), Ready: ready, Signals: sigs,
 			Stderr: os.Stderr, IdleGrace: grace, hooks: hk})
 		if err != nil {
-			os.Exit(1)
+			exitChild(1)
 		}
-		os.Exit(0)
+		exitChild(0)
 	}
 	if hold <= 0 {
 		run()
@@ -160,6 +160,16 @@ func init() {
 		holdThread(hold)
 	}
 }
+
+// exitChild ends a test child with code through the exit system call, not
+// os.Exit: under -race, os.Exit(0) first runs the race runtime's finalizer
+// (racefini: __tsan_fini, then C's exit), and a hub child that had already
+// finished its teardown — "stopped" in its log — was seen not to exit for its
+// test's whole 30 s, three times and only under make test-race, its SIGQUIT
+// answered with no goroutine dump (plan 032 X67, SF-118). A child's exit
+// status is all its test reads; it owes no race summary and runs no exit
+// hook.
+func exitChild(code int) { syscall.Exit(code) }
 
 // stallAt is the child's teardown held just before its Release
 // (hubTestStall): it says so (dir/stalled) and waits until the test lets it
@@ -770,7 +780,11 @@ func endProcess(t *testing.T, pid int, dir string) {
 func procSignalState(pid int) string {
 	b, err := os.ReadFile(fmt.Sprintf("/proc/%d/status", pid))
 	if err != nil {
-		return ""
+		if runtime.GOOS != "linux" {
+			return ""
+		}
+		// A process kill still finds but /proc cannot show: say both.
+		return fmt.Sprintf("/proc/%d/status: %v; kill(%d, 0): %v", pid, err, pid, syscall.Kill(pid, 0))
 	}
 	var out []string
 	for _, line := range strings.Split(string(b), "\n") {

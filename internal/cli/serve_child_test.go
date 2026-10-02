@@ -208,14 +208,24 @@ func init() {
 	cmd.SetArgs(argv)
 	ranCmd, err := cmd.ExecuteC()
 	if err == nil {
-		os.Exit(0)
+		exitChild(0)
 	}
 	line, code := diagnose(ranCmd, err)
 	if line != "" {
 		fmt.Fprintln(os.Stderr, line)
 	}
-	os.Exit(code)
+	exitChild(code)
 }
+
+// exitChild ends a test child with code through the exit system call, not
+// os.Exit: under -race, os.Exit(0) first runs the race runtime's finalizer
+// (racefini: __tsan_fini, then C's exit), and a hub child that had already
+// finished its teardown — "stopped" in its log — was seen not to exit for its
+// test's whole 30 s, three times and only under make test-race, its SIGQUIT
+// answered with no goroutine dump (plan 032 X67, SF-118). A child's exit
+// status is all its test reads; it owes no race summary and runs no exit
+// hook.
+func exitChild(code int) { syscall.Exit(code) }
 
 // childHostCommand is hub.HostCommand in a craze hub child (cliChildHubHosts):
 // this test binary run as `craze <argv…>` — craze serve — with the hub's own
