@@ -19,10 +19,23 @@ var waitid = unix.Waitid
 // watchExit is the reaper's observation of the agent's exit on Linux:
 // waitid(P_PID, pid, WEXITED|WNOWAIT), which waits for the process to exit
 // and leaves it unreaped — a zombie, its pid still taken — and reports its
-// status in a siginfo. EINTR is retried. The wait is the returned function;
-// nothing has to be set up before it.
-func watchExit(pid int) func() (syscall.WaitStatus, error) {
-	return func() (syscall.WaitStatus, error) {
+// status in a siginfo. EINTR is retried. The same call with WNOHANG is made
+// here first, so a waitid the environment refuses (ENOSYS under a seccomp
+// filter or an emulator) is known before the reaper runs: the error, and the
+// reaper is the fallback (reapPolling). The wait is the returned function.
+func watchExit(pid int) (func() (syscall.WaitStatus, bool, error), error) {
+	var probe unix.Siginfo
+	for {
+		err := waitid(unix.P_PID, pid, &probe, unix.WEXITED|unix.WNOWAIT|unix.WNOHANG, nil)
+		if errors.Is(err, unix.EINTR) {
+			continue
+		}
+		if err != nil {
+			return nil, fmt.Errorf("waitid: %w", err)
+		}
+		break
+	}
+	return func() (syscall.WaitStatus, bool, error) {
 		for {
 			var info unix.Siginfo
 			err := waitid(unix.P_PID, pid, &info, unix.WEXITED|unix.WNOWAIT, nil)
@@ -30,11 +43,12 @@ func watchExit(pid int) func() (syscall.WaitStatus, error) {
 				continue
 			}
 			if err != nil {
-				return 0, fmt.Errorf("waitid: %w", err)
+				return 0, false, fmt.Errorf("waitid: %w", err)
 			}
-			return siginfoStatus(&info, pid)
+			st, err := siginfoStatus(&info, pid)
+			return st, err == nil, err
 		}
-	}
+	}, nil
 }
 
 // sigchldInfo is a siginfo_t as waitid fills it for a child: the header
@@ -80,37 +94,71 @@ func cldStatus(code, status int32) (syscall.WaitStatus, error) {
 	return 0, fmt.Errorf("waitid: si_code %d is not an exit", code)
 }
 
-// groupHasLiveMember reports whether a process that is not a zombie is in the
-// process group pgid: a scan of /proc/<pid>/stat, whose fields 3 and 5 are a
-// process's state and its process group (parseStatGroup). A process that goes
-// between the listing and its read is not counted; /proc that cannot be
-// listed is an error.
+// procListed, a test seam, runs in groupHasLiveMember between the listing of
+// /proc and the reads of what it listed; nil in production.
+var procListed func(pgid int)
+
+// statRead reads up to len(buf) bytes of the file at path — an open, a read
+// and a close — and answers the first error it met. A variable so a test can
+// fail it; nothing else replaces it.
+var statRead = func(path string, buf []byte) (int, error) {
+	fd, err := syscall.Open(path, syscall.O_RDONLY|syscall.O_CLOEXEC, 0)
+	if err != nil {
+		return 0, err
+	}
+	n, err := syscall.Read(fd, buf)
+	_ = syscall.Close(fd)
+	return n, err
+}
+
+// groupHasLiveMember reports whether a live process is in the process group
+// pgid: a scan of /proc/<pid>/stat, whose fields 3, 5 and 20 are a process's
+// state, its process group and its thread count (parseStat). A zombie is not
+// live, except a zombie thread-group leader with threads left — its main
+// thread exited, a worker still runs. A process gone between the listing and
+// its read (ENOENT, ESRCH) is not there; a read that fails any other way, or
+// a line that cannot be read, answers live with the error, and so does a
+// /proc that cannot be listed. EINTR is retried.
 func groupHasLiveMember(pgid int) (bool, error) {
 	d, err := os.Open("/proc")
 	if err != nil {
-		return false, err
+		return true, err
 	}
 	names, err := d.Readdirnames(-1)
 	_ = d.Close()
 	if err != nil {
-		return false, err
+		return true, err
 	}
-	var buf [512]byte
+	if procListed != nil {
+		procListed(pgid)
+	}
+	var buf [1024]byte
 	for _, name := range names {
 		if name == "" || name[0] < '0' || name[0] > '9' {
 			continue
 		}
-		fd, err := syscall.Open("/proc/"+name+"/stat", syscall.O_RDONLY|syscall.O_CLOEXEC, 0)
-		if err != nil {
+		path := "/proc/" + name + "/stat"
+		var n int
+		for {
+			n, err = statRead(path, buf[:])
+			if !errors.Is(err, syscall.EINTR) {
+				break
+			}
+		}
+		switch {
+		case errors.Is(err, syscall.ENOENT), errors.Is(err, syscall.ESRCH):
+			continue
+		case err != nil:
+			return true, fmt.Errorf("%s: %w", path, err)
+		}
+		st, ok := parseStat(buf[:n])
+		if !ok {
+			return true, fmt.Errorf("%s: %q is not a stat line", path, buf[:n])
+		}
+		if st.pgrp != pgid {
 			continue
 		}
-		n, err := syscall.Read(fd, buf[:])
-		_ = syscall.Close(fd)
-		if err != nil || n <= 0 {
-			continue
-		}
-		state, pgrp, ok := parseStatGroup(buf[:n])
-		if ok && pgrp == pgid && state != 'Z' && state != 'X' {
+		if (st.state != 'Z' && st.state != 'X') || st.threads > 1 {
 			return true, nil
 		}
 	}

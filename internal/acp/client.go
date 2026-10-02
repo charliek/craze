@@ -901,9 +901,11 @@ const closeCancelWait = 500 * time.Millisecond
 // that exits *because of* that cancel is never misread as having exited
 // first. If the channel is already closed the reaper had observed the
 // agent's exit before this probe sampled it, and Close returns an error
-// wrapping ErrAgentExited and how it ended; a craze-initiated shutdown
-// returns nil, as before. The rest of Close is unchanged and still runs
-// either way — only the return value depends on the probe.
+// wrapping ErrAgentExited and how it ended — read once the agent has been
+// reaped, since on one path the status is known only then (Child); a
+// craze-initiated shutdown returns nil, as before. The rest of Close is
+// unchanged and still runs either way — only the return value depends on the
+// probe.
 //
 // Close is idempotent with a stored result: the first call is authoritative
 // and every later call blocks on closeDone and returns the same value,
@@ -914,11 +916,11 @@ const closeCancelWait = 500 * time.Millisecond
 func (c *Client) Close() error {
 	c.closeOnce.Do(func() {
 		defer close(c.closeDone)
-		var exited error
+		exitedFirst := false
 		if c.child != nil {
 			select {
 			case <-c.child.exitedCh:
-				exited = agentExitedErr(c.child.exitErr)
+				exitedFirst = true
 			default:
 			}
 		}
@@ -953,8 +955,10 @@ func (c *Client) Close() error {
 		<-c.conn.Done()
 		if c.child != nil {
 			c.child.Wait()
+			if exitedFirst {
+				c.closeErr = agentExitedErr(c.child.exitErr)
+			}
 		}
-		c.closeErr = exited
 	})
 	<-c.closeDone
 	return c.closeErr

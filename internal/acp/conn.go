@@ -50,6 +50,12 @@ type Conn struct {
 	// Set before the call is made and never written again.
 	takenWait func()
 
+	// ended, when set — Spawn's, for the agent it started; set before Start
+	// and never written again — is what the calls still pending fail with
+	// when the reader ends (EOF, or a read that failed), given the error they
+	// would fail with otherwise.
+	ended func(error) error
+
 	wCloser io.Closer
 	rCloser io.Closer
 }
@@ -260,8 +266,10 @@ func (c *Conn) readLoop() {
 		msg, err := c.dec.ReadMessage()
 		if err != nil {
 			if errors.Is(err, io.EOF) {
-				c.failAll(ErrClosed)
-				return
+				err = ErrClosed
+			}
+			if c.ended != nil {
+				err = c.ended(err)
 			}
 			c.failAll(err)
 			return

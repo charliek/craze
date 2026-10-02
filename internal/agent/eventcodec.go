@@ -91,8 +91,8 @@ const (
 	EventErrAgentExited EventErrClass = "agent_exited"
 	// EventErrAgentExitStatus is the agent process ending non-zero or on a
 	// signal under a turn: the reaper's "acp: agent exited: exit status N",
-	// which wraps the *acp.ExitError the reaper observed (an *exec.ExitError
-	// where the exit could only be learned by reaping it) and not
+	// which wraps the *acp.ExitError the reaper recorded (an *exec.ExitError,
+	// which it no longer returns, is classified the same way) and not
 	// acp.ErrAgentExited, so it matches no sentinel. Code is the exit status,
 	// -1 for a signal.
 	EventErrAgentExitStatus EventErrClass = "agent_exit_status"

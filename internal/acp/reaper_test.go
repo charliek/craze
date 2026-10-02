@@ -18,7 +18,30 @@ import (
 
 // The reaper's tests (plan 032 §3.2a, A4; SF-80). The agents are /bin/sh
 // scripts: what a test needs of one — a leader or a tool that ignores
-// SIGTERM, an exit status, a tool left behind — is a line of shell.
+// SIGTERM, an exit status, a tool left behind — is a line of shell. What a
+// shell cannot do, this test binary does, run again as a helper.
+
+// helperEnv names the helper this test binary is when it is run as one.
+const helperEnv = "CRAZE_ACP_TEST_HELPER"
+
+func init() {
+	if os.Getenv(helperEnv) == "exit-256" {
+		// exit(256): a status only its low byte of reaches a wait — and
+		// macOS's zombie record saturates (reaper_darwin.go).
+		os.Exit(256)
+	}
+}
+
+// helperArgs is how a test runs this binary as a helper: its path, and a run
+// pattern no test matches, should the helper ever get as far as the tests.
+func helperArgs(t *testing.T) (string, []string) {
+	t.Helper()
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return exe, []string{"-test.run=^$"}
+}
 
 // spawnShell spawns /bin/sh -c script as the agent, its stderr into stderr
 // (io.Discard when nil), and closes it when the test ends.
@@ -157,74 +180,114 @@ func checkExit(t *testing.T, ch *Child, want string, code int) {
 	}
 }
 
-// groupSignal is one group signal the reaper sent, as recordGroupSignals saw
-// it.
-type groupSignal struct {
-	sig syscall.Signal
-	// pinned: kill(pgid, 0) found the agent — the group's leader, running or
-	// a zombie, but not reaped — just before the signal went.
+// lifeEvent is a signal the reaper sent, or a reap the fallback's wait4
+// made, as recordLife saw it.
+type lifeEvent struct {
+	// target is a signal's: the agent's pid, or -pgid for its group. A reap
+	// has none.
+	target int
+	sig    syscall.Signal
+	reap   bool
+	// pinned: a signal's, kill(agent, 0) found the agent — running or a
+	// zombie, not reaped — just before the signal went.
 	pinned bool
 }
 
-type signalRecorder struct {
-	mu   sync.Mutex
-	sent map[int][]groupSignal // by process group
+func (e lifeEvent) String() string {
+	if e.reap {
+		return "reap"
+	}
+	return fmt.Sprintf("%d→%d pinned=%v", e.sig, e.target, e.pinned)
 }
 
-// recordGroupSignals puts a stub over killGroup for the rest of the test: it
-// notes every group signal, and whether the agent was still unreaped when it
-// went, then sends it.
-func recordGroupSignals(t *testing.T) *signalRecorder {
-	r := &signalRecorder{sent: make(map[int][]groupSignal)}
-	real := killGroup
-	killGroup = func(pgid int, sig syscall.Signal) error {
-		pinned := syscall.Kill(pgid, 0) == nil
-		r.mu.Lock()
-		r.sent[pgid] = append(r.sent[pgid], groupSignal{sig: sig, pinned: pinned})
-		r.mu.Unlock()
-		return real(pgid, sig)
+type lifeRecorder struct {
+	mu     sync.Mutex
+	events map[int][]lifeEvent // by the agent's pid
+}
+
+// recordLife puts stubs over the reaper's signal and wait4 for the rest of
+// the test: they note every signal — and whether the agent was still
+// unreaped when it went — and every reap wait4 makes, in order, then do
+// what they stand for.
+func recordLife(t *testing.T) *lifeRecorder {
+	r := &lifeRecorder{events: make(map[int][]lifeEvent)}
+	realSignal, realWait4 := sendSignal, wait4
+	sendSignal = func(pid int, sig syscall.Signal) error {
+		agent := max(pid, -pid)
+		pinned := syscall.Kill(agent, 0) == nil
+		r.add(agent, lifeEvent{target: pid, sig: sig, pinned: pinned})
+		return realSignal(pid, sig)
+	}
+	wait4 = func(pid int, ws *syscall.WaitStatus, options int) (int, error) {
+		got, err := realWait4(pid, ws, options)
+		if err == nil && got == pid {
+			r.add(pid, lifeEvent{reap: true})
+		}
+		return got, err
 	}
 	// Registered before any Spawn, so it runs after every Close.
-	t.Cleanup(func() { killGroup = real })
+	t.Cleanup(func() { sendSignal, wait4 = realSignal, realWait4 })
 	return r
 }
 
-func (r *signalRecorder) of(pgid int) []groupSignal {
+func (r *lifeRecorder) add(agent int, e lifeEvent) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return append([]groupSignal(nil), r.sent[pgid]...)
+	r.events[agent] = append(r.events[agent], e)
 }
 
-// reapedSignals waits for ch's reap and takes its group signals, as r saw
-// them, then.
-type reapedSignals struct {
+func (r *lifeRecorder) of(agent int) []lifeEvent {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]lifeEvent(nil), r.events[agent]...)
+}
+
+// groupSignals is the signals in events that went to the group, as a string
+// of their numbers.
+func groupSignals(events []lifeEvent) string {
+	var b strings.Builder
+	for _, e := range events {
+		if !e.reap && e.target < 0 {
+			fmt.Fprintf(&b, "%d ", e.sig)
+		}
+	}
+	return b.String()
+}
+
+// reapedEvents is an agent's events, taken at its reap.
+type reapedEvents struct {
 	ch     *Child
-	atReap []groupSignal
+	atReap []lifeEvent
 }
 
-func signalsAtTheReap(t *testing.T, r *signalRecorder, ch *Child) reapedSignals {
+func eventsAtTheReap(t *testing.T, r *lifeRecorder, ch *Child) reapedEvents {
 	t.Helper()
 	waitClosed(t, ch.reapedCh, 10*time.Second, "the reap")
-	return reapedSignals{ch: ch, atReap: r.of(ch.pgid)}
+	return reapedEvents{ch: ch, atReap: r.of(ch.pgid)}
 }
 
-// checkSignalsPrecedeTheReap checks reaped children's group signals, as r
-// saw them: every one sent while the agent was unreaped, and none since the
-// reap — the count taken at the reap and again now, after a pause in which a
-// stray signal would have shown up. It returns the last child's.
-func checkSignalsPrecedeTheReap(t *testing.T, r *signalRecorder, reaped ...reapedSignals) []groupSignal {
+// checkSignalsPrecedeTheReap checks reaped agents' events, as r saw them:
+// every signal sent while the agent was unreaped, none after a reap wait4
+// made, and none since the reap — the count taken at the reap and again now,
+// after a pause in which a stray signal would have shown up. It returns the
+// last agent's.
+func checkSignalsPrecedeTheReap(t *testing.T, r *lifeRecorder, reaped ...reapedEvents) []lifeEvent {
 	t.Helper()
 	time.Sleep(200 * time.Millisecond)
-	var later []groupSignal
-	for _, rs := range reaped {
-		later = r.of(rs.ch.pgid)
-		for i, s := range later {
-			if !s.pinned {
-				t.Fatalf("signal %d of %v (%v) went after the agent was reaped", i, later, s.sig)
+	var later []lifeEvent
+	for _, re := range reaped {
+		later = r.of(re.ch.pgid)
+		afterReap := false
+		for i, e := range later {
+			switch {
+			case e.reap:
+				afterReap = true
+			case !e.pinned || afterReap:
+				t.Fatalf("event %d of %v (%v) went after the agent was reaped", i, later, e)
 			}
 		}
-		if len(later) != len(rs.atReap) {
-			t.Fatalf("signals %v after the reap (%v before it)", later[len(rs.atReap):], rs.atReap)
+		if len(later) != len(re.atReap) {
+			t.Fatalf("events %v after the reap (%v before it)", later[len(re.atReap):], re.atReap)
 		}
 	}
 	return later
@@ -318,37 +381,46 @@ func TestTheExitStatusIsObservedOnEveryPath(t *testing.T) {
 // TestShutdownRacesTheAgentsOwnExit (A4): a Shutdown that comes as the agent
 // exits on its own — before its exit, around it, after its reap — returns,
 // leaves no zombie, records an exit the reap agrees with, and never has a
-// group signal follow the reap.
+// signal follow the reap. Both outcomes are required, each forced in rounds
+// of its own: the agent's exit first (Shutdown after its exit, or after its
+// reap), and the SIGTERM first (an agent that never exits by itself); the
+// remaining rounds race the two for real.
 func TestShutdownRacesTheAgentsOwnExit(t *testing.T) {
-	r := recordGroupSignals(t)
-	var reaped []reapedSignals
+	r := recordLife(t)
+	var reaped []reapedEvents
 	outcomes := map[string]int{}
 	for i := range 24 {
-		c, err := Spawn(SpawnOptions{Binary: "/bin/sh", Args: []string{"-c", "exit 4"}, Stderr: io.Discard})
+		script := "exit 4"
+		if i%4 == 3 {
+			script = "exec sleep 60"
+		}
+		c, err := Spawn(SpawnOptions{Binary: "/bin/sh", Args: []string{"-c", script}, Stderr: io.Discard})
 		if err != nil {
 			t.Fatal(err)
 		}
 		t.Cleanup(func() { _ = c.Close() })
-		switch i % 3 {
+		switch i % 4 {
 		case 1:
 			<-c.child.exitedCh
 		case 2:
 			<-c.child.reapedCh
 		}
 		shutdownWithin(t, c.child, shutdownGrace+10*time.Second)
-		// Either the exit was its own, or the SIGTERM came first.
 		var ee *ExitError
 		if !errors.As(c.child.exitErr, &ee) || (ee.Error() != "exit status 4" && ee.Error() != "signal: terminated") {
-			t.Fatalf("iteration %d: observed %v, want exit status 4 or signal: terminated", i, c.child.exitErr)
+			t.Fatalf("round %d: observed %v, want exit status 4 or signal: terminated", i, c.child.exitErr)
 		}
 		checkExit(t, c.child, ee.Error(), ee.ExitCode())
 		outcomes[ee.Error()]++
-		reaped = append(reaped, signalsAtTheReap(t, r, c.child))
+		reaped = append(reaped, eventsAtTheReap(t, r, c.child))
 		if !gone(c.PID()) {
-			t.Fatalf("iteration %d: the agent was left a zombie", i)
+			t.Fatalf("round %d: the agent was left a zombie", i)
 		}
 	}
 	checkSignalsPrecedeTheReap(t, r, reaped...)
+	if outcomes["exit status 4"] == 0 || outcomes["signal: terminated"] == 0 {
+		t.Fatalf("exits %v: want both the agent's own and the SIGTERM's", outcomes)
+	}
 	t.Logf("exits: %v", outcomes)
 }
 
@@ -423,7 +495,7 @@ func TestTheAgentsStderrTailOutlivesTheReap(t *testing.T) {
 // still observed — status included — without a reap: the reaper goes on to
 // clean the group, which ends the tool the agent left behind.
 func TestAnInterruptedObserveIsRetried(t *testing.T) {
-	calls := stubObserve(t, 3, nil)
+	calls := stubObserve(t, 3, nil, nil)
 	pidFile := filepath.Join(t.TempDir(), "tool.pid")
 	c := spawnShell(t, "sleep 60 & echo $! > "+pidFile+"; exit 6", nil)
 	waitClosed(t, c.child.exitedCh, 10*time.Second, "the agent's exit")
@@ -491,21 +563,16 @@ func TestNoZombieIsLeftAfterShutdown(t *testing.T) {
 	})
 }
 
-// TestEveryGroupSignalPrecedesTheReap (A4): a stub over the group-signal
-// function records every signal the reaper sends, and whether the agent was
-// still unreaped — so its pid, the group's id, still taken — when it went:
-// every signal precedes the reap, and none follows it. Both ways in: a
-// Shutdown that escalates against a running agent and then cleans up a tool
-// that ignores SIGTERM, and an agent's own exit leaving that tool.
+// TestEveryGroupSignalPrecedesTheReap (A4): a stub over the signal function
+// records every signal the reaper sends, and whether the agent was still
+// unreaped — so its pid, the group's id, still taken — when it went: every
+// signal precedes the reap, and none follows it. Three ways in: a Shutdown
+// that escalates against a running agent and then cleans up a tool that
+// ignores SIGTERM; an agent's own exit leaving that tool; and a clean exit,
+// which costs the group nothing but the last SIGKILL.
 func TestEveryGroupSignalPrecedesTheReap(t *testing.T) {
-	r := recordGroupSignals(t)
-	sigs := func(sent []groupSignal) string {
-		var b strings.Builder
-		for _, s := range sent {
-			fmt.Fprintf(&b, "%d ", s.sig)
-		}
-		return b.String()
-	}
+	r := recordLife(t)
+	term, kill := int(syscall.SIGTERM), int(syscall.SIGKILL)
 	t.Run("a shutdown", func(t *testing.T) {
 		var stderr syncBuffer
 		pidFile := filepath.Join(t.TempDir(), "tool.pid")
@@ -513,10 +580,11 @@ func TestEveryGroupSignalPrecedesTheReap(t *testing.T) {
 		stderr.waitFor(t, "ready")
 		tool := readPID(t, pidFile)
 		shutdownWithin(t, c.child, 2*shutdownGrace+10*time.Second)
-		sent := checkSignalsPrecedeTheReap(t, r, signalsAtTheReap(t, r, c.child))
-		// The escalation's SIGTERM, then the cleanup's SIGTERM and SIGKILL.
-		want := fmt.Sprintf("%d %d %d ", syscall.SIGTERM, syscall.SIGTERM, syscall.SIGKILL)
-		if got := sigs(sent); got != want {
+		sent := checkSignalsPrecedeTheReap(t, r, eventsAtTheReap(t, r, c.child))
+		// The escalation's SIGTERM, the cleanup's SIGTERM and SIGKILL, the
+		// last SIGKILL.
+		want := fmt.Sprintf("%d %d %d %d ", term, term, kill, kill)
+		if got := groupSignals(sent); got != want {
 			t.Fatalf("group signals %q, want %q", got, want)
 		}
 		waitGone(t, tool, 10*time.Second, "the tool")
@@ -525,38 +593,106 @@ func TestEveryGroupSignalPrecedesTheReap(t *testing.T) {
 		pidFile := filepath.Join(t.TempDir(), "tool.pid")
 		c := spawnShell(t, `trap '' TERM; sleep 60 & echo $! > `+pidFile+`; exit 0`, nil)
 		tool := readPID(t, pidFile)
-		sent := checkSignalsPrecedeTheReap(t, r, signalsAtTheReap(t, r, c.child))
-		want := fmt.Sprintf("%d %d ", syscall.SIGTERM, syscall.SIGKILL)
-		if got := sigs(sent); got != want {
+		sent := checkSignalsPrecedeTheReap(t, r, eventsAtTheReap(t, r, c.child))
+		want := fmt.Sprintf("%d %d %d ", term, kill, kill)
+		if got := groupSignals(sent); got != want {
 			t.Fatalf("group signals %q, want %q", got, want)
 		}
 		waitGone(t, tool, 10*time.Second, "the tool")
 	})
+	t.Run("a clean exit", func(t *testing.T) {
+		c := spawnShell(t, `exit 0`, nil)
+		sent := checkSignalsPrecedeTheReap(t, r, eventsAtTheReap(t, r, c.child))
+		if got, want := groupSignals(sent), fmt.Sprintf("%d ", kill); got != want {
+			t.Fatalf("group signals %q, want %q", got, want)
+		}
+	})
 }
 
-// TestAnUnobservableExitIsReapedWithoutAGroupSignal: where the exit cannot be
+// stopAtFallback holds the reaper at its entry to the fallback, until the
+// returned release is called; entered is closed as it gets there.
+func stopAtFallback(t *testing.T) (entered <-chan struct{}, release func()) {
+	in, out := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	fallbackEntered = func(int) {
+		close(in)
+		<-out
+	}
+	// Registered before any Spawn, so it runs after every Close.
+	t.Cleanup(func() { fallbackEntered = nil })
+	return in, func() { once.Do(func() { close(out) }) }
+}
+
+// checkFallback checks a reaped agent's events in the fallback: no group
+// signal, the agent's own signals as want lists them, then the reap wait4
+// made, and nothing after.
+func checkFallback(t *testing.T, r *lifeRecorder, ch *Child, want ...syscall.Signal) {
+	t.Helper()
+	events := checkSignalsPrecedeTheReap(t, r, eventsAtTheReap(t, r, ch))
+	var got []string
+	for _, e := range events {
+		if !e.reap && e.target != ch.pgid {
+			t.Fatalf("events %v: a signal to %d in the fallback, which signals the agent alone", events, e.target)
+		}
+		got = append(got, e.String())
+	}
+	var exp []string
+	for _, s := range want {
+		exp = append(exp, lifeEvent{target: ch.pgid, sig: s, pinned: true}.String())
+	}
+	exp = append(exp, "reap")
+	if strings.Join(got, ", ") != strings.Join(exp, ", ") {
+		t.Fatalf("events %v, want %v", got, exp)
+	}
+	if ch.waitErr != ch.exitErr {
+		t.Fatalf("waitErr %v, exitErr %v: the fallback's reap is its status", ch.waitErr, ch.exitErr)
+	}
+}
+
+// TestTheFallbackOwnsTheReapAndItsSignals (X71): where the exit cannot be
 // observed without a reap — the observation refused (ENOSYS, as under a
-// seccomp filter) — the reap is the observation, and no group signal is ever
-// sent, since nothing pins the group's id: a Shutdown signals the agent
-// alone, and still ends it.
-func TestAnUnobservableExitIsReapedWithoutAGroupSignal(t *testing.T) {
-	stubObserve(t, 0, syscall.ENOSYS)
-	r := recordGroupSignals(t)
-	t.Run("a shutdown", func(t *testing.T) {
+// seccomp filter) — the reaper polls wait4 itself and signals only the agent,
+// only between its polls, while it knows the agent is unreaped: no group
+// signal, and no signal after the reap. Its status is that wait4's.
+func TestTheFallbackOwnsTheReapAndItsSignals(t *testing.T) {
+	stubObserve(t, 0, syscall.ENOSYS, nil)
+	r := recordLife(t)
+	t.Run("a shutdown at its entry", func(t *testing.T) {
+		entered, release := stopAtFallback(t)
 		var stderr syncBuffer
 		c := spawnShell(t, `echo ready >&2; exec sleep 60`, &stderr)
+		t.Cleanup(release)
+		waitClosed(t, entered, 10*time.Second, "the fallback's entry")
 		stderr.waitFor(t, "ready")
-		shutdownWithin(t, c.child, shutdownGrace+10*time.Second)
-		var we *exec.ExitError
-		if !errors.As(c.child.exitErr, &we) || we.Error() != "signal: terminated" || c.child.exitErr != c.child.waitErr {
-			t.Fatalf("exit %v, reap %v; want the reap's signal: terminated as both", c.child.exitErr, c.child.waitErr)
+		done := make(chan struct{})
+		go func() {
+			c.child.Shutdown()
+			close(done)
+		}()
+		for !isClosed(c.child.shutdownCh) {
+			time.Sleep(time.Millisecond)
 		}
-		if sent := r.of(c.child.pgid); len(sent) != 0 {
-			t.Fatalf("group signals %v with nothing pinning the group's id", sent)
+		release()
+		waitClosed(t, done, shutdownGrace+10*time.Second, "the Shutdown")
+		var ee *ExitError
+		if !errors.As(c.child.exitErr, &ee) || ee.Error() != "signal: terminated" {
+			t.Fatalf("exit %v, want signal: terminated", c.child.exitErr)
 		}
+		checkFallback(t, r, c.child, syscall.SIGTERM)
 		if !gone(c.PID()) {
 			t.Fatal("the agent was left a zombie")
 		}
+	})
+	t.Run("a leader that ignores SIGTERM", func(t *testing.T) {
+		var stderr syncBuffer
+		c := spawnShell(t, `trap '' TERM; echo ready >&2; exec sleep 60`, &stderr)
+		stderr.waitFor(t, "ready")
+		shutdownWithin(t, c.child, shutdownGrace+10*time.Second)
+		var ee *ExitError
+		if !errors.As(c.child.exitErr, &ee) || ee.Error() != "signal: killed" {
+			t.Fatalf("exit %v, want signal: killed", c.child.exitErr)
+		}
+		checkFallback(t, r, c.child, syscall.SIGTERM, syscall.SIGKILL)
 	})
 	t.Run("its own exit", func(t *testing.T) {
 		c := spawnShell(t, "exit 3", nil)
@@ -564,16 +700,101 @@ func TestAnUnobservableExitIsReapedWithoutAGroupSignal(t *testing.T) {
 		if err := c.Close(); !errors.Is(err, ErrAgentExited) || !strings.HasSuffix(err.Error(), ": exit status 3") {
 			t.Fatalf("Close = %v, want ErrAgentExited with exit status 3", err)
 		}
-		if sent := r.of(c.child.pgid); len(sent) != 0 {
-			t.Fatalf("group signals %v with nothing pinning the group's id", sent)
-		}
+		checkFallback(t, r, c.child)
 	})
 }
 
+// TestTheFallbackIsChosenBeforeAnySignal (X71): whether the exit can be
+// observed is settled before the reaper runs, so a Shutdown that comes at
+// once never finds the normal reaper escalating against the group while the
+// observation's refusal is still on its way: here the observation's wait
+// would be held until the test lets it go, and the group is never signalled.
+func TestTheFallbackIsChosenBeforeAnySignal(t *testing.T) {
+	hold := make(chan struct{})
+	var released sync.Once
+	stubObserve(t, 0, syscall.ENOSYS, hold)
+	r := recordLife(t)
+	entered := make(chan struct{})
+	var once sync.Once
+	fallbackEntered = func(int) { once.Do(func() { close(entered) }) }
+	t.Cleanup(func() { fallbackEntered = nil })
+	t.Cleanup(func() { released.Do(func() { close(hold) }) })
+	var stderr syncBuffer
+	c := spawnShell(t, `echo ready >&2; exec sleep 60`, &stderr)
+	stderr.waitFor(t, "ready")
+	done := make(chan struct{})
+	go func() {
+		c.child.Shutdown()
+		close(done)
+	}()
+	// The fallback's entry, or — the decision left to the observation — a
+	// group signal: whichever comes, the held observation is let go.
+	deadline := time.Now().Add(10 * time.Second)
+	for !isClosed(entered) && groupSignals(r.of(c.child.pgid)) == "" {
+		if time.Now().After(deadline) {
+			t.Fatal("neither the fallback nor a signal")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	released.Do(func() { close(hold) })
+	waitClosed(t, done, 2*shutdownGrace+10*time.Second, "the Shutdown")
+	if got := groupSignals(r.of(c.child.pgid)); got != "" {
+		t.Fatalf("group signals %q with nothing pinning the group's id", got)
+	}
+	checkFallback(t, r, c.child, syscall.SIGTERM)
+}
+
+// withoutStatus makes the observation report the exit with no status for
+// the rest of the test, as macOS's does for an agent found already a zombie.
+func withoutStatus(t *testing.T) {
+	real := watch
+	watch = func(pid int) (func() (syscall.WaitStatus, bool, error), error) {
+		w, err := real(pid)
+		if err != nil {
+			return nil, err
+		}
+		return func() (syscall.WaitStatus, bool, error) {
+			_, _, err := w()
+			return 0, false, err
+		}, nil
+	}
+	// Registered before any Spawn, so it runs after every Close.
+	t.Cleanup(func() { watch = real })
+}
+
+// TestAnExitWithoutAStatusTakesTheReaps (X71): an exit observed with no
+// status — macOS's for an agent already a zombie, whose kernel record
+// saturates it — closes exitedCh at once and publishes the status at the
+// reap, cmd.Wait's: the call pending at the exit fails then, with it, and so
+// does Close's ErrAgentExited. Here a tool that ignores SIGTERM holds the
+// reap a grace after the exit.
+func TestAnExitWithoutAStatusTakesTheReaps(t *testing.T) {
+	withoutStatus(t)
+	c := spawnShell(t, `trap '' TERM; sleep 60 & read line; exit 7`, nil)
+	failed := make(chan error, 1)
+	go func() {
+		_, err := c.Initialize(t.Context())
+		failed <- err
+	}()
+	waitClosed(t, c.child.exitedCh, 10*time.Second, "the agent's exit")
+	if isClosed(c.child.statusCh) {
+		t.Fatalf("a status (%v) published at an exit observed without one", c.child.exitErr)
+	}
+	err := <-failed
+	var ee *ExitError
+	if !errors.As(err, &ee) || ee.ExitCode() != 7 || !strings.Contains(err.Error(), "acp: agent exited: exit status 7") {
+		t.Fatalf("Initialize = %v, want it failed with the reap's exit status 7", err)
+	}
+	checkExit(t, c.child, "exit status 7", 7)
+	if err := c.Close(); !errors.Is(err, ErrAgentExited) || !strings.HasSuffix(err.Error(), ": exit status 7") {
+		t.Fatalf("Close = %v, want ErrAgentExited with exit status 7", err)
+	}
+}
+
 // TestWatchExitLeavesTheProcessUnreaped: the platform's observation reports a
-// process's exit status and leaves it a zombie — so it can be observed again
-// (on macOS through the zombie's own record, the exit watch refusing a
-// process already gone) — and the reap that follows agrees.
+// process's exit and its status and leaves it a zombie, so it can be
+// observed again — on macOS then through the zombie, with no status — and
+// the reap that follows agrees.
 func TestWatchExitLeavesTheProcessUnreaped(t *testing.T) {
 	for _, tc := range []struct{ script, want string }{
 		{"exit 9", "exit status 9"},
@@ -585,20 +806,27 @@ func TestWatchExitLeavesTheProcessUnreaped(t *testing.T) {
 				t.Fatal(err)
 			}
 			pid := cmd.Process.Pid
-			first, err := watchExit(pid)()
-			if err != nil {
-				_ = cmd.Wait()
-				t.Fatal(err)
+			observe := func() (syscall.WaitStatus, bool, error) {
+				w, err := watchExit(pid)
+				if err != nil {
+					return 0, false, err
+				}
+				return w()
 			}
-			again, err := watchExit(pid)()
+			first, known, err := observe()
+			if err != nil || !known {
+				_ = cmd.Wait()
+				t.Fatalf("the first observation: %v, a status %v", err, known)
+			}
+			again, againKnown, err := observe()
 			if err != nil {
 				_ = cmd.Wait()
 				t.Fatalf("the second observation: %v (was the first a reap?)", err)
 			}
 			_ = cmd.Wait()
 			reaped := cmd.ProcessState.Sys().(syscall.WaitStatus)
-			if first != reaped || again != reaped {
-				t.Fatalf("observed %#x, then %#x; the reap says %#x", first, again, reaped)
+			if first != reaped || (againKnown && again != reaped) {
+				t.Fatalf("observed %#x, then %#x (a status: %v); the reap says %#x", first, again, againKnown, reaped)
 			}
 			if got := (&ExitError{Status: first}).Error(); got != tc.want || got != cmd.ProcessState.String() {
 				t.Fatalf("observed %q, reaped %q; want %q", got, cmd.ProcessState.String(), tc.want)
@@ -607,27 +835,28 @@ func TestWatchExitLeavesTheProcessUnreaped(t *testing.T) {
 	}
 }
 
-// TestParseStatGroup: a /proc/<pid>/stat line's state and process group, its
-// command's parentheses and spaces notwithstanding.
-func TestParseStatGroup(t *testing.T) {
+// TestParseStat: a /proc/<pid>/stat line's state, process group and thread
+// count, its command's parentheses and spaces notwithstanding.
+func TestParseStat(t *testing.T) {
+	tail := " 0 -1 4194304 92 0 0 0 1 2 3 4 20 0 %d 0 9"
 	for _, tc := range []struct {
-		line  string
-		state byte
-		pgrp  int
-		ok    bool
+		line string
+		want procStat
+		ok   bool
 	}{
-		{"4242 (sleep) S 4241 4240 4240 0 -1 4194304 92 0 0 0", 'S', 4240, true},
-		{"4242 (sh) Z 1 4242 4242 0", 'Z', 4242, true},
-		{"77 (a) b) (c) R 1 99 99", 'R', 99, true},
-		{"77 (tool name) D 2 123", 'D', 123, true},
-		{"77 (sleep) S 1", 0, 0, false},
-		{"77 sleep S 1 2 3", 0, 0, false},
-		{"77 (sleep) SS 1 2", 0, 0, false},
-		{"77 (sleep) S 1 x", 0, 0, false},
+		{"4242 (sleep) S 4241 4240 4240" + fmt.Sprintf(tail, 1), procStat{'S', 4240, 1}, true},
+		{"4242 (sh) Z 1 4242 4242" + fmt.Sprintf(tail, 3), procStat{'Z', 4242, 3}, true},
+		{"77 (a) b) (c) R 1 99 99" + fmt.Sprintf(tail, 1), procStat{'R', 99, 1}, true},
+		{"77 (tool name) D 2 123 123" + fmt.Sprintf(tail, 12), procStat{'D', 123, 12}, true},
+		{"77 (sleep) S 1 2 3 0 -1", procStat{}, false},
+		{"77 sleep S 1 2 3" + fmt.Sprintf(tail, 1), procStat{}, false},
+		{"77 (sleep) SS 1 2 3" + fmt.Sprintf(tail, 1), procStat{}, false},
+		{"77 (sleep) S 1 x 3" + fmt.Sprintf(tail, 1), procStat{}, false},
+		{"77 (sleep) S 1 2 3" + strings.Replace(fmt.Sprintf(tail, 1), " 1 0 9", " x 0 9", 1), procStat{}, false},
 	} {
-		state, pgrp, ok := parseStatGroup([]byte(tc.line))
-		if state != tc.state || pgrp != tc.pgrp || ok != tc.ok {
-			t.Errorf("parseStatGroup(%q) = %q, %d, %v; want %q, %d, %v", tc.line, state, pgrp, ok, tc.state, tc.pgrp, tc.ok)
+		got, ok := parseStat([]byte(tc.line))
+		if got != tc.want || ok != tc.ok {
+			t.Errorf("parseStat(%q) = %+v, %v; want %+v, %v", tc.line, got, ok, tc.want, tc.ok)
 		}
 	}
 }
