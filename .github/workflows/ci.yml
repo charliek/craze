@@ -27,9 +27,9 @@ permissions:
 # darwin build job would recompile what those legs just compiled. Lint is
 # different: the tree has GOOS-suffixed sources (internal/acp's reaper_linux.go
 # and reaper_darwin.go, plan 032 C19, among others), and golangci-lint on
-# ubuntu sees only the linux ones — so `make lint` runs it a second time with
-# GOOS=darwin, type-checking and linting the darwin files on this one ubuntu
-# job without a macOS runner.
+# ubuntu sees only the linux ones — so the lint job below, like `make lint`,
+# runs it a second time with GOOS=darwin, type-checking and linting the darwin
+# files on this one ubuntu job without a macOS runner.
 jobs:
   test:
     strategy:
@@ -108,6 +108,14 @@ jobs:
       # Pinned to the same version .mise.toml installs locally, so `make lint`
       # and this job cannot disagree about what a lint failure is.
       - uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.13.2
+      # The darwin-only sources (see the comment at the top), linted on this
+      # same job as `make lint`'s second pass does.
+      - name: golangci-lint with GOOS=darwin
+        uses: golangci/golangci-lint-action@v9
+        env:
+          GOOS: darwin
         with:
           version: v2.13.2
       # go.mod / go.sum drift is not a lint rule, and it breaks
