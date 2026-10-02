@@ -808,7 +808,7 @@ func TestADetachedSessionOutlivesItsTUI(t *testing.T) {
 	if got := onlyHost(t, env); got.HostID != e.HostID || cmds.count() != 1 {
 		t.Fatalf("after the terminal closed: %+v (%d spawned), want the host %s still serving", got, cmds.count(), e.HostID)
 	}
-	if row := indexRowByID(t, e.CrazeSessionID); row.CWD != absDir(ws) {
+	if row := waitIndexRowByID(t, e.CrazeSessionID); row.CWD != absDir(ws) {
 		t.Fatalf("the host's index row %+v", row)
 	}
 
