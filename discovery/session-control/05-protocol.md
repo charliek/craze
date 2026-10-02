@@ -575,3 +575,62 @@ Each connection's writer sends its own count from a latest-value slot, so a
 client that has stopped reading delays only its own. An older client ignores
 the notification, as it ignores any it does not know; a client of an older
 host sees no count. Fixture 23.
+
+## As shipped (S4b, plan 032): the pieces together
+
+The three sections above are the hub's wire PR by PR; together they make the
+hub one more endpoint of protocol 1, not a second protocol. One hub runs per
+HOME and `CRAZE_HOME` namespace, its socket `<base>/<ns>/hub.sock` beside its
+hosts' (`02`). A connection to it says `hello`, learns from `endpoint.kind:
+hub` and the connection capabilities what it serves, then does one of three
+things: reads the roster (`sessions.list`, or `sessions.subscribe` and its
+`roster` notifications), hands itself to one session (`session.connect`,
+after which it is that host's connection and the hub only copies bytes), or
+starts one (`session.create`). Presence is the hosts', not the hub's: the hub
+carries it only as `attached` inside a host's forwarded row, and as bytes
+through a splice. What those sections leave out:
+
+- **How a roster subscription ends.** Each end is a `reset` on the
+  subscription, and the client subscribes again: `slow_consumer` (a
+  notification's write blocked 10 s; the line in progress is finished first,
+  and the connection stays), `omitted` (the roster crossed its 512-row cap,
+  either way: an existing reason given a roster meaning rather than a new
+  one, since `truncated` is the reply's alone; the connection stays) and
+  `hub_closing` (on a new connection, whose new `epoch` reseeds). A
+  subscriber that does not read its reset within 10 s is closed.
+- **One order per connection.** The lines that carry the roster's cursor —
+  `roster` notifications and `sessions.list` replies — leave in the order
+  their roster was taken, and a `sessions.list` on a connection holding a
+  subscription becomes that subscription's base. A `sessions.subscribe`
+  whose reply cannot be written (`failed`, `response_too_large`) subscribes
+  to nothing.
+- **When the roster answers.** A list or subscribe waits, at most 1 s, until
+  the poll's current round has heard from every host, so a cold hub's first
+  answer is what the hosts say and not a page of `connecting` rows; a hub
+  that cannot read its registry answers `unavailable`, `host_unreachable` —
+  never an empty roster, which `craze ps` would read as nothing running.
+- **Retrying a create.** A client must not retry `session.create` across a
+  hub epoch change unless it reuses its `requestId`; `craze new` retries
+  once, under the same id, and only when the connection ended before the
+  answer.
+- **Old peers, both ways.** An older client never dials a hub: it finds
+  hosts through the registry and refuses a `hello` from anything but a host
+  where it expects one. The hub lists and splices hosts of every protocol-1
+  build, each row the host's own — a real `a0d88c3` host and the S2-era fake
+  host behind one hub (`12`, S4b: V4 leg 6, `TestAnOldAndANewHostBehindOneHub`).
+  A hub from before `session.create` says `sessionCreate: false`, and craze's
+  `hub.Ensure` reports it rather than use it; it is left to idle out.
+- **The fixtures.** None of 1–18 moved: presence is opt-in per control
+  server (real hosts on; the fake host only where a fixture's `host` line
+  turns it on), and a hub says `sessionCreate: true` only when it can spawn
+  hosts, so 19–21 keep their bytes under a hub that cannot. The hub's own run
+  in the runner's two-socket mode, the hub's id, version and pid as
+  placeholders (`HUB-ID`, `HUB-VERSION`, `999999999`): **19** the hub's
+  `hello` and roster; **20** a subscription told of a host's change, then of
+  its leaving the registry; **21** a splice — `session.connect` with the
+  host's `hello` pipelined behind it, an attach and an event through it, then
+  a connect to no session and one no longer first; **22** (a hub that
+  creates) a create with a first prompt, its repeat answered the same, the
+  same `requestId` with other params `request_conflict`, and a start that
+  fails `start_failed` with its cause; **23** a presence host counting two
+  clients, the row saying `attached: 2`.

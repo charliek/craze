@@ -4127,3 +4127,719 @@ UX:
 - **The Plan 031 seam is on `main`** (#71): `nativeModelChoices()` and
   `nativeDefaultModel()` in `internal/tui/sessions_models.go` are the TUI's
   only readers of native's model table (X161); Plan 031 swaps their bodies.
+
+## S4b — the hub
+
+| | |
+|---|---|
+| Status | complete (Plan 032, FINAL v3.2 after panel rounds 1–3, 2026-09-30); all five PRs done, PR 5 carrying this record |
+| Plan | `032-session-control-s4b-hub` (outside the repo, `~/.claude/plans/craze/`; the owner's decisions, the discovery reports, the render prototypes, the raw panel reviews, every review round, the per-PR progress files with the amendments X1–X75, and the V2–V8 artifacts in its folder) |
+| Baseline | `origin/main` `a0d88c3` (#74), on top of S4a + S5's last PR (#72, `b88e7b7`) and Plan 031 (#73, `0f82531`) |
+| Branch / PRs | five sequential PRs, each branched from a freshly fetched `origin/main`: `feature/plan-032-rows`, `feature/plan-032-render`, `feature/plan-032-hub`, `feature/plan-032-create`, `feature/plan-032-reaper` (PR 2's C5 and PR 3's C7 were begun in isolated worktrees before the previous merge and applied after it, X11, X15) |
+| Merged | PR 1 — #75 `2eec72f` (2026-10-01); PR 2 — #76 `2dc80b7` (2026-10-01); PR 3 — #78 `bc8da8f` (2026-10-01); PR 4 — #79 `8a33a12` (2026-10-02); PR 5 — #81 (2026-10-02) |
+
+### The PR cut
+
+| PR | branch | content |
+|---|---|---|
+| 1 | `feature/plan-032-rows` | the roadmap records the plan's decisions (SD-36–SD-39); the fake agent's `sigint-hold` (SF-87); the owner's rows SF-86 (the words for ending a session), SF-99 (`←` through a card), SF-61 (shared ask outcomes) |
+| 2 | `feature/plan-032-render` | SF-102: the transcript's two render quadratics, byte-identical output |
+| 3 | `feature/plan-032-hub` | the hub: its paths, lock and record, the SF-49 sweep, `internal/hostspawn`, the wire, the hub process, the roster, the splice and `hub.Dialer`, `craze ps` and `craze bridge --hub` |
+| 4 | `feature/plan-032-create` | `--effort`/`--fast` and `[agents]` (SF-75, SF-93); `session.create` and `craze new`; the session list on the hub (SF-76); `/effort` and `/fast` in the list; presence (SF-64) |
+| 5 | `feature/plan-032-reaper` | SF-80, the agent reaper; this record |
+
+PR 2 did not depend on PR 1, nor PR 5 on PRs 2–4; PR 5 carries the record, so it
+lands last.
+
+### Owner decisions (2026-09-30)
+
+Taken in the planning session (`research/DECISIONS.md` in the plan folder, four
+rounds); not for the panel to reopen.
+
+1. SF-101 kept: the provider of the last session that started, from anywhere,
+   is the next plain launch's default.
+2. SF-99: `←` leaves a session while a card is up; the ask stays open; the list
+   shows it under "needs you"; reopening shows the card.
+3. SF-86: `/exit`, `Ctrl+D` and `Ctrl+C`'s second press read as ending the
+   session; the four goldens holding those strings move on purpose.
+4. SF-61: answered-ask outcome rows become shared transcript entries.
+5. SF-77 (`detach = false`) and SF-78 (an open ask keeps a host) kept;
+   SF-18/25/32 left as rows.
+6. SQ3: keep every journal (SD-36).
+7. SQ6: the hub is auto-spawned on demand and exits when idle, after a grace
+   with no live host and no client (SD-37). Accepted on macOS: a session the
+   hub creates inherits its security session.
+8. Local machine only; listing other machines becomes S4c (SD-38).
+9. SQ13: the provider's replay stays the resume authority (SD-39).
+10. SQ4 and SQ15 unchanged; the measured `meta` repetition becomes a row
+    (SF-104).
+11. In scope beside the hub: SF-102, SF-49, SF-80, SF-64, SF-75, SF-93.
+12. Out: SF-70/91 (notices), SF-68/69/71/73 (held-back list features).
+
+### The planner's decisions
+
+P1 the hub learns hosts from the registry and polls them — no registration
+connection, every shipped host works behind it unchanged. P2 one hub per HOME
+and `CRAZE_HOME` namespace: lock and record in the cache tree
+(`~/.cache/craze/hubs/<ns>.{lock,json}`), socket `<base>/<ns>/hub.sock`. P3
+local TUIs keep talking to hosts directly; the hub feeds the list, `craze ps`,
+`craze new` and `craze bridge --hub`, so killing it never touches a TUI's
+session. P4 a roster row wraps the host's row as a preserved JSON value, keyed
+by host id. P5 `session.create` succeeds once the session has started, takes
+an idempotency `requestId` stamped into the new host's registry entry, and
+never names an agent binary. P6 effort and speed are session flags applied in
+the agent's start tail, after `--model`. P7 `[agents]` per provider;
+`--agent-bin`/`CRAZE_AGENT_BIN` only for the launch's own provider. P8 `craze
+ps`, `craze new`, `craze bridge --hub`; plain `craze bridge` unchanged. P9
+SF-80: the agent stays an unreaped zombie, pinning its group id, until its
+group has no live member. P10 presence: a host capability, an unsequenced
+notification and a row count. P11 the hub's sweep is age-gated, on runtime-tree
+evidence, and kills no agent. P12 the idle grace is 60 s. P13 an explicit
+environment contract for the hub and the hosts it spawns: `CRAZE_HOME` and
+`CRAZE_CONFIG` exported absolute, one launch's or one terminal's variables
+(`CRAZE_PROVIDER`, `CRAZE_AGENT_BIN`, `TMUX`, `HERDR_*`, …) removed. P14 the
+fold draws SF-61's notes, governed by the session's ask capabilities. P15 the
+five-PR cut. P16 SF-102 takes both quadratics with a craze-owned viewport and
+a 256-event replay cadence. P17 a wedged hub (two hello timeouts, its pid
+still carrying the record's start token) is replaced.
+
+### Plan review — 2026-09-30
+
+| round | reviewer | result |
+|---|---|---|
+| 1 | Codex `gpt-6-astra`, GLM 5.3, CodeRabbit | 22 finding groups, all adopted; blockers: the idle rule had drifted from the owner's (CodeRabbit), the sweep killed agents without proof of death and raced a host's bind (astra, CodeRabbit), SF-80 reaped after the first signal (astra); GLM "approve with changes" |
+| 2 | Codex `gpt-6-astra` on v3 | one blocker (the reaper waited for the exit before escalating, so a TERM-ignoring leader hung `Shutdown`) and six majors (a socket paused between `bind` and `listen`, a `requestId` replay answering before the start, the checkpoint's byte comparison, the table look-ahead, a slow attachment stalling presence, the in-process host TUI's count): all adopted |
+| 3 | Codex `gpt-6-astra`, focused | R2-1–R2-6 confirmed; R2-7 not (a remote client's count still missed the host TUI's seat), and two new majors (an aged session's `requestId` replay would time out; A15 expected the wrong count); all three fixed in text, no fourth round |
+
+### Roadmap wording this plan departs from
+
+- `07`'s S4b line, "the per-machine hub at `run/hub.sock` with roster,
+  routing, spawn, and stop": the socket is `<base>/<ns>/hub.sock`, one hub per
+  namespace (P2); the hub has no stop — a session's stop stays its host's
+  `session.stop`, reached directly or through a splice, and the hub refuses
+  every other session-scoped method `host_only`; routing is the splice, which
+  only remote clients take (`craze bridge --hub`), while the TUI and `craze
+  attach` dial hosts directly (P3).
+- `02`'s "small registration connection" from hosts became registry polling
+  (P1, SD-37), and `07`'s exit clause "hosts re-register with the respawned
+  hub" became "a respawned hub lists the same sessions, rebuilt from the
+  registry" (C1).
+- "It replaces the per-host polling" of S5's list: the list runs on the hub's
+  subscription and keeps its poller as the fallback (SF-76's close, C16).
+- Remote-machine aggregation left S4b for S4c (SD-38).
+
+### Outcome
+
+Shipped in five PRs, each gated per commit. Every session on the machine is
+now known to one small process, the **hub** — `craze hub`, hidden, spawned on
+demand by whoever needs it and gone 60 s after the last live host and the last
+client — which learns hosts from the registry, polls them only while someone
+wants the roster, and serves that roster, a splice to any session and the
+creation of new ones over protocol 1. `craze ps`, `craze new` and `craze bridge
+--hub` are its local faces, and the TUI's session list runs on its
+subscription. Beside it the plan shipped the owner's everyday fixes (SF-86,
+SF-99, SF-61), the render cost of long sessions (SF-102), effort and speed at
+a session's start, per-provider agent binaries, an `N attached` count, and the
+agent reaper that closes SF-80. No wire change beyond the plan's pinned table
+(§3.15; `05`'s "As shipped (S4b, …)" sections say what shipped); no golden
+moved but the four SF-86 frames.
+
+**PR 1 (#75).** C1 records the owner's calls in this folder (SD-36–SD-39;
+`02`'s registration connection replaced by registry polling, `07`'s S4b scoped
+to the local machine with S4c split out, `10`'s SQ3/SQ6/SQ13 resolved, `13`'s
+SF-42/78/87/101 deleted and SF-104 added) and gives the fake agent
+`sigint-hold`, which holds every later prompt until a cancel or a gate byte, so
+V2's `sigint-between-turns` is deterministic (SF-87). C2 rewords SF-86: `/exit`
+"End this session", `ctrl+d` "end this session", `ctrl+c` "cancel the turn and
+the queue; again ends it" (44 cells, the 80×24 column being 50); a test renders
+the help at 80×24 at every scroll position and fails on any clamped row but
+five pre-existing ones it names (X2, SF-106). C3 (SF-99): inside the card
+branch only, an unmodified `←` with a session list opens the list, keeping the
+card, the draft and the sub-agent view for the return; `Alt+←` stays the
+card's; one new golden (`sessions-over-card-100x30`). C4 (SF-61): the fold
+draws the outcome note — `? <prompt> → <labels>`, `? <title> → skipped`, `plan
+<name> → accepted|rejected` — for answered and skipped questions and answered
+plans only, never a kind the session's capabilities hide (a construction
+option every folder takes from the same capabilities, X5); notes are worded
+from the ask as a snapshot carries it and capped at 4 KiB (X10), so engine,
+live and restored folds agree byte for byte; the TUI's local writes are gone,
+and the plan's implement offer fires as before. Commits: C1 `6394afb`, C2
+`e75edc4`, C3 `6497c72`, C1r/C2r `6a999c1`, C4 `627e3bc`, C4r `a426da9`, C4r2
+`71f8ee0`.
+
+**PR 2 (#76, SF-102).** Both quadratics, with byte-identical output. C5: each
+entry keeps its rendered rows as an immutable slice and the pane an immutable
+offsets index; a paint re-renders dirty entries and re-indexes from the first
+changed one; a craze-owned viewport (`internal/tui/viewport.go`) reads rows
+through the index with bubbles' exact `View` call and no join, split or width
+scan, parity-tested against bubbles; plain text for a selection is computed
+per entry on demand. C6: a growing reply's markdown resumes from its last
+complete top-level block, keyed by an append generation on the open run (no
+byte comparison), an equivalence test holding it to a full render over seeded
+random markdown in 1–9 byte chunks at widths 1–160; a replay paints every
+256th event and on every forced refresh, and every event while scrolled away
+from the bottom (X23); a deterministic work counter bounds it. What stays
+non-linear is SF-105 (one growing block, live) and the per-frame floor
+(SF-107). Commits: C5 `dea9af0`, C6 `6641098`, C5r `3d5945a`, C6r `1f73de7`,
+C5r2 `5eadaec`, C6r2 `8ca8c87`.
+
+**PR 3 (#78), the hub.** C7 (`internal/rundir`): the hub's lock
+(`~/.cache/craze/hubs/<ns>.lock`, never unlinked, its name re-checked after the
+flock), record (`hubs/<ns>.json`, written and removed by identity) and socket;
+start tokens scoped by boot and PID namespace, so a record from another boot
+or namespace never authorises a kill (X20, X27); `SweepOrphans` (old orphan
+registry locks and temps; on Linux, old refused sockets in the hub's own base;
+no agent killed) closing SF-49; a host's `Bind` refreshes and re-checks its
+lock against a concurrent sweep; the registry entry's `requestId` and
+`requestHash`. C8: the host-spawn machinery moves to `internal/hostspawn`, no
+behaviour change. C9: the wire — the hub's `hello`, the roster row (the
+host's row forwarded as JSON), the hub's `sessions.list`, `sessions.subscribe`
+and `roster`, a size contract keeping 512 rows under the 16 MiB line, seven
+reasons, the reset reason `hub_closing`, `LineReader.Buffered`, the fixture
+runner's two-socket mode. C10 (`internal/hub`): the staged start (lock,
+runtime dir, stale-socket probe, bind, record, ready), `Lost()`, the idle rule
+under one lifecycle lock with an epoch, a bounded teardown releasing the lock
+last, `Ensure` (find, spawn, rendezvous with a holder, P17's replacement), the
+environment contract; Go test binaries never spawn a real hub. C11: the roster
+— `internal/roster`'s poller in a hub mode (rows kept as JSON, no index,
+polling only on demand), net-change coalescing at most every 250 ms, the
+bounds; fixtures 19–20. C12: `session.connect` with its exclusive handoff and
+bounded splice, `hub.Dialer` respawning a dead hub inside a client's redial
+window, fixture 21, the real-process kill-the-hub test. C13: `craze ps`
+(`--json`, `--no-hub`) and `craze bridge --hub`; the list's state rule shared
+from `internal/roster`. Commits, after the rebase onto Plan 033's #77 (X38):
+C7 `c94cf75`, C8 `a9a26cf`, C9 `90a6f24`, C10 `20f225e`, C11 `5a76d0c`, C10r
+`7036098`, C12 `738f8bb`, C11r `18c14fa`, C12r `d591521`, C11r2 `8a0883c`, C13
+`17fb18f`, C13r `2002d65`, C13r2 `9c4953b`.
+
+**PR 4 (#79), creation and the list.** C14: `--effort` and `--fast`/`--no-fast`
+applied in the agent's start tail after `--model`, ACP and native, detached and
+in process, before admission opens (effort matched by id, by id ignoring case,
+then by name; unmatched, ambiguous or refused is journalled and the session
+starts); each set's answer bounded at 15 s, an unanswered one failing the start
+(C14r, X47); `[agents]` in `config.toml`, with `--agent-bin` and
+`CRAZE_AGENT_BIN` applying only to the launch's own resolved provider (SF-75,
+SF-93). C15: `session.create` and `craze new` — the `requestId` looked up in
+memory, then in the registry of the hub's own namespace (failing closed when it
+cannot be fully read), before any check of the world; the launch reserved
+against the closing; the host spawned through `hostspawn` with the
+environment contract, the workspace as its directory and the request id in its
+registry entry; the start waited for (60 s), the first prompt sent as the
+list's dispatch sends one, the row read fresh on its own connection; the hub
+owns the hosts it spawns and ends their recorded agents when one exits;
+`sessionCreate: true`; fixture 22. C16: the list on the hub (`hub.Roster`) —
+returning at once with the registry's hosts listed as connecting, subscribing
+within 2 s, reconnecting through `Ensure`, and falling back to its own poller
+on a missing, older or slow hub or a row it cannot use, holding the hub's last
+whole snapshot through the handover (X57); one hub client (`list.go`) for
+`List`, `Create` and the subscription; opening the list no longer writes
+journal notes in every session. C17: `/effort` and `/fast` in the list's input,
+revealed only by typing (`/ef`, `/fa`) so the bare `/` popup's goldens hold,
+shown in the target rule when set and carried by the dispatch; six goldens.
+C18 (SF-64): presence — the `presence` capability, `presence{subscription,
+attached}` after `synchronized` and on every change (at most two a second),
+`attached` on the row, a per-attachment latest-value slot that each
+connection's own writer sends, the in-process host TUI's seat counted
+(`LocalClient`), the `N attached` chip at N ≥ 2; fixture 23 and
+`presence-100x30`. Commits on `main`, after the rebase onto Plan 033's #80: C14
+`9c7318a`, C15 `3f83474`, C14r `2f50ff5`, X50 `d4a5bbe`, C15r `25671b4`, C14r2
+`b70639c`, C17 `da433da`, X52/X54 `aed53ba`, C15r2 `bef3e2c`, C18 `f6812ac`,
+C15r3 `2f32e2e`, C15r4 `94a932b`, C16 `143930a`, X58 `aaf717c`, C15r5
+`8f244dd`, C16r6 `d0d32b6`, C15r6 `46e7f25`, C15r7 `128b9b1`, C15r8
+`e797748`, CodeRabbit `53a6583` and `cd8cea1`, X67 `a703c0c`, X69 `3d6fd24`.
+
+**PR 5 (#81), the reaper.** C19 (SF-80): `acp.Child` has three states —
+running, exited (observed, unreaped: the zombie keeps its pid and its group
+id), reaped — and one goroutine, the reaper, owns `cmd.Wait` and sends every
+group signal. It observes the exit without reaping (Linux `waitid(P_PID,
+WEXITED|WNOWAIT)`; macOS a `kqueue` `EVFILT_PROC` `NOTE_EXIT|NOTE_EXITSTATUS`
+watch registered at the start — a registration that finds the agent already
+exited takes its status from the reap — and a once-a-second zombie check
+against a missed event), escalates while the leader runs (TERM `-pgid`, KILL
+at the 2 s grace), cleans the group while the zombie pins its id (a live
+member is a non-zombie with the agent's pgid: Linux `/proc/*/stat`, macOS
+`kern.proc.pgrp`; TERM, 20 ms polls up to the grace, KILL, poll) — a self-exit
+too, so an agent's orphaned tools die at its exit — sends one last SIGKILL to
+the group, drains stderr (up to 500 ms), reaps, and sends nothing after. Where
+the exit cannot be observed without reaping, the fallback polls `wait4`
+itself, signals only the agent and only between its own polls, never the
+group, and releases the process before `cmd.Wait` (X71, X73). Pending calls
+fail at the exit with its status (`acp.ExitError`); a stdout EOF waits up to
+1 s for that status (X72). `make lint` runs a second time with `GOOS=darwin`
+(the tree now has darwin-only sources). C20 is this record. Commits: C19
+`ea8d8b2`, C19r `530f870`, C19r2 `a7855e2`, C20.
+
+**The roadmap's S4b exits** (`07`):
+
+| criterion | result | evidence |
+|---|---|---|
+| Start two sessions, close every terminal, list them with `craze ps`, attach to one | pass | V4 leg 1 (cursor and grok, panes killed, both hosts alive; `craze ps` spawned the hub and listed both idle with titles; `craze attach --session <id>` reached each with its transcript); V5 leg 3 (grok and native on the mac-mini, every terminal gone: `craze ps` over ssh listed both, a new pane's `craze attach` reached one); `test_ps_lists_detached_sessions_and_attach_reaches_one` (`tests/cli/test_hub.py`) |
+| Kill the hub mid-turn and lose nothing; a respawned hub lists the same sessions, rebuilt from the registry | pass | V4 leg 4 (`kill -9` 0.3 s into a 60-line cursor reply: `end_turn` with all 60 lines, 504 chunks after the kill; the next `craze ps` through a respawned hub under a new epoch, the same 8 host and session id pairs; the open list re-subscribed). The hub-routed resume no production TUI takes live (P3): `TestAHubKilledMidTurnLosesNothing` (`internal/cli/hub_splice_test.go`: a spliced client's redial respawns the hub through `hub.Dialer`, its `hello` answered `resumed: true` by the same host, the re-attach silent from its cursor) |
+| A host crash removes its row within a sweep | pass | V4 leg 5 (`kill -9` of a grok host: gone from `craze ps --json` at 0.37 s, from the open list at 0.38 s; its entry swept, its agent exited); `TestACrashedHostLeavesWithinOneRound` (`internal/hub`) |
+| Hub and host of different craze versions interoperate on the protocol integer | pass | V4 leg 6 (a real `craze serve` built at `a0d88c3` listed, attached and spliced through `craze bridge --hub` behind one hub; the one difference live was presence, since that build already has `rowFacts` and `stop`; both builds say 0.0.1); `TestAnOldAndANewHostBehindOneHub` (an S2-era host, no `rowFacts` and no `stop`, beside a current one: both listed and spliced, the old one refusing `session.stop` `stop_unsupported` through the splice) |
+
+**The proof.** Every commit was gated — the full gate (`make lint && make test
+&& make test-race && make build && make test-cli`, with `make docs` where
+`docs/` changed), by its implementer and again on the committed tree — green
+throughout: PR 1 508–522 s (`tests/cli` 224 tests), PR 2 518–540 s, PR 3
+541–558 s (231), PR 4 554–584 s (235), PR 5 702 s at C19r2. Before each of PRs
+1–4's pushes a one-CPU `-count=2` run of the changed packages and the
+mac-mini's run of them were green; C19's darwin tests ran on the mac-mini, not
+skipped (a TERM-ignoring leader KILLed at 2.02 s, a leftover tool dead at
+2.08 s), and all five darwin negative controls were red there. Every new
+lifecycle test ran ×5 under a 5 % CPU quota when written (C4 155/155, C7
+145/145, C10 180/180, the hub's create 125/125, the list's roster 90/90, C19's
+15 lifecycle tests 5/5), and no gate failure was retried: each was diagnosed
+(below, "Flakes diagnosed").
+
+Every commit was reviewed: gpt-6-astra (45-minute cap) for C4–C7, C9–C12,
+C14–C16, C18, C19 and most fix rounds, gpt-6.1-sol (20-minute cap, X1) for
+C1–C3, C8, C13, C17 and some fix rounds, and Grok 4.7 xhigh through cursor for
+r18–r22 (C10, C10r, C11, C11r, C12) while codex was at its usage limit (X31) —
+rounds r1–r50 (48 run; two numbers unused), every finding's disposition in its
+fix commit's message and the plan folder's `reviews/`. Two branch-level astra
+reviews: r23 over PR 3 found five cross-commit defects (a list leaving a
+subscription's view stale, connect refusals naming socket paths, a growing
+per-connection history, an unreadable registry read as an empty roster, an
+oversized subscribe reply leaving an undisclosed subscription), fixed in C13r,
+whose own review found two more (C13r2); r45 over PR 4 found two (a start
+setting's request write unbounded, accepted as X60; a launch holding the
+lifecycle lock across `cmd.Start`, fixed as X61). CodeRabbit on every PR: #75
+one minor (declined: the plan-pinned 44-cell help text), #76 and #78 none, #79
+three (fixed and answered); PR 5's with its push. Two paths took many rounds:
+
+- **C15, `session.create`: eight fix rounds** (C15r–C15r8; r32, r38, r41, r43,
+  r45, r46, r47, r48). From the fourth on, each round found a narrower case of
+  one class — a launch's cleanup racing the hub's own exit, a start stalled in
+  its `chdir` on a hung filesystem — whose real fix is a start gate the hub
+  holds, a new host handshake. X65 and X66 stopped there: the create path's
+  cleanup is bounded, its docs say no more than it does, and the rest is
+  SF-117(e) and SF-120.
+- **C16, the list on the hub: five rounds as a patch** (r28, r30, r34, r39,
+  r42), each fixing a hand-over case and finding the next: a per-host merge of
+  the hub's rows into the poller's lost a retirement to the poller's
+  latest-value channel and listed a legacy session twice. X57 ended the class
+  with a stateless rule — the hub's last whole snapshot held until the
+  poller's current snapshot has heard from every host the hub listed, capped
+  at 3 s, no snapshot ever mixing sources — which r44 and r46 checked.
+- C19 took three rounds (r49, r50); X73 applied the same lesson.
+
+The verification plan (plan §8):
+
+- **V1** (`-race -count=20` on the changed packages; `internal/tui` in
+  slices), at PR 5's code: the whole non-TUI tree at `a7855e2` at once —
+  every package ok, no data race (3,613 s) — but for one hang in
+  `internal/hub` (`TestALostRecordOrSocketStopsTheHub`, parked 54 minutes
+  on a tick: a test race, X76, fixed and its package re-run ×20 green,
+  1,566 s); `internal/tui` as four sequential `-count=5` slices at
+  `0ad6de3`, 20 passes, no data race (6,195 s). `internal/hostspawn` was
+  added to the run's list (PR 4 changed it).
+- **V2** (`craze prompt --json` parity, 103 scenarios, the plan-021 harness
+  with `sigint-hold` on both sides, X3): PR 1 103/103 at `627e3bc`
+  (`sigint-between-turns` alone 20/20 SAME, 5/5 under a 5 % quota); PR 2
+  103/103 at `8ca8c87`; PR 3 103/103 at `17fb18f`; PR 4 102/103 at `d0d72b3`
+  and 102/103 after its rebase (`a703c0c`). Both DIFFs are
+  `sigint-foreign-turn-holds-the-drain`, a pre-existing exit race in both
+  binaries (X59, X68): the baseline dropped the final `foreign_turn ended`
+  line at `d0d72b3`, the candidate in the rebased run; run alone ×20 the
+  candidate printed all 15 lines 20/20 and the baseline dropped one or two
+  4/20. The candidate's stdout for it is byte-identical at the four tips (md5
+  `a9800b16`); not a hard stop (SF-122).
+- **V3** (launch and list cost, at `d0d72b3`; 60 launch runs, 125 list
+  openings): launch to ready p50/p95 +0.1/+2.0 ms in process and −0.2/+0.4 ms
+  detached against `a0d88c3` (within 10 ms, met); list open to the first real
+  row, warm hub p95 16.8 ms (≤ 150, met), cold hub p95 28.0 ms (≤ 600, met; the
+  hub up 3.4–11.8 ms after the key); the list's frame first in every run, ≤
+  17 ms (met); the poller fallback, forced by a hub that cannot start, p95
+  232.9 ms against today's 16.1 ms — **missed as written** (X62: `Ensure`'s
+  one 200 ms retry before the list falls back).
+- **V4** (Linux live, real agents, at `8a33a12`): every leg passed (below,
+  "Live smoke").
+- **V5** (mac-mini live at `a7855e2`: grok, native and cursor): legs 1b, 2, 3
+  and 5 passed; leg 4 passed with a caveat (the real agents' tools run in
+  sessions of their own, so the reaper was proven through a wrapper); leg 1a
+  passed but for the start failure's cause text (X75). Below, "Live smoke".
+- **V6** (goldens, §3.17's two checks per PR): PR 1 exactly the four allowed
+  `M` and one `A`; PR 2 no `testdata` change; PR 3 only `A` (fixtures 19–21);
+  PR 4 only `A` (fixtures 22–23, `presence-100x30`, six
+  `sessions-new-{effort,fast,settings}`); PR 5 none. Against `a0d88c3` at the
+  tips: the four allowed `M`, the plan's `A`s, and Plan 033's `specs.golden`
+  from `main` (X40). The manifest from 122 both-transport and 36 in-process
+  goldens to 128 and 43, Plan 033's five included.
+- **V7** (CI, ubuntu and macOS): green at every merged tip. PR 4's CI caught
+  SF-118's third sighting and two macOS test races (X67, X69) before its green
+  run; PR 5's with its push.
+- **V8** (render, `a0d88c3` against PR 2's tip, fixed seeds, pinned to the
+  P-cores): a 4,800-chunk one-paragraph replay 14.9–16.7 → 1.92–1.98 s (≤ 3 s,
+  met); 4,800 prose chunks live 6.3–10.4 → 1.61–1.88 s (≤ 2.5 s, met on the
+  P-cores; 2.45–2.85 s unpinned, X16); one chunk at 22,500 rows 13.1 →
+  0.33–0.43 ms (≤ 1.5 ms, met), flat to 44,100 rows; a 12,000-chunk paragraph
+  replay 69.6–70.5 → 5.2–5.8 s; one paragraph streamed live unchanged (SF-105).
+  Live, in V4: a 2,006-character cursor reply in 556 chunks over 5.73 s cost
+  the attached TUI a mean 15.8 % of a core (peak 37 %), about 1.7 ms a chunk.
+
+### Live smoke
+
+**PR 1, fake agent** (`a426da9`, tmux, an isolated HOME, `CRAZE_HOME` and
+runtime dir; `v4/pr1/NOTES.md`): the help's new words, and `/exit` ending the
+session; `←` over a question card opening the list with the session under
+"needs you" and `esc` returning to the same card, twice (`Alt+←` does nothing);
+`? Pick one → A` and a multi-select `? Pick any → X, Z` in the answering
+client, in `craze attach` and in a second craze that opened the session from
+the list; `plan Fake Plan → accepted` live in an attached client and in one
+attached later. One harness artefact: two digits sent in one burst answered
+`? Pick any → nothing`; paced 0.4 s apart they toggled both (a key burst, not
+reproduced as a craze race).
+
+**V4, Linux** (2026-10-02, `8a33a12`, against an `a0d88c3` build for leg 6;
+i9-14900KF; cursor-agent 2026.09.28 on Grok 4.7 at xhigh, grok 1.0.44, native
+on `fireworks/deepseek-v4p1-flash`; an isolated `CRAZE_HOME` and runtime dir, a
+private tmux server; `v4/live/NOTES.md`). Three cursor turns, three grok turns
+and one native turn (under $0.01).
+
+| # | leg | result |
+|---|---|---|
+| 1 | A7: two sessions, terminals closed, `craze ps`, `craze attach` | PASS — see the exits table |
+| 2 | A12/A13: `craze new --effort` per provider; a start failure | PASS — cursor at `high` (its default xhigh) from the first `meta` event, "Grok 4.7 (high)"; grok and native created at `low`, prompt-less, at `low` from their first `meta`; creates returned in 3.5 s (cursor's `session/new`), 0.09 s and 0.015 s; a bogus `[agents].cursor` failed in 0.03 s, exit 1, `not_accepting`/`start_failed` with its cause on the wire, no host left |
+| 3 | A15: presence | PASS — `2 attached` in both clients within 0.15 s; dropped within 0.07 s of one leaving; `3 attached` within 0.18 s and back to 2 within 0.45 s; the row's `attached: 2` |
+| 4 | A8: `kill -9` of the hub mid-turn | PASS — see the exits table |
+| 5 | A9: `kill -9` of a host | PASS — gone in 0.37 s; its socket file left, as designed (only a refused socket older than 10 minutes is swept) |
+| 6 | A10: an `a0d88c3` host behind the hub | PASS — listed, attached, spliced; no presence; it has `rowFacts` and `stop` |
+| 7 | P17: a SIGSTOPped hub | PASS — `craze ps` answered in 4.04 s through a replacement; the stopped hub gone; the open list on the replacement (its own re-subscribe had won the spawn) |
+| 8 | V8 live | PASS (measured) — above |
+
+The run ended with every host stopped and its agent gone, the registry empty,
+the hub exited by itself ("idle: no client and no live host for 1m0s") with
+its record and socket removed. What it found: a bridge whose stdin closed
+lingers (SF-123) and `craze new --json` prints no JSON on a failure (SF-124);
+known rows seen again: `ps`'s MODEL column is `-` (SF-114) and its short id is
+not accepted by `--session` (SF-115). By design, recorded: no production TUI
+reaches its session through the hub (A8's hub-routed resume is the Go test's);
+a prompt-less created session nobody attaches ends at the never-prompted
+5-minute cap; the hub lists every host of the HOME registry, whatever its
+namespace. SF-99 and SF-61 need a real agent to raise a question, so they stand
+on the fake-agent smoke; SF-86 was checked by eye.
+
+**V5, the mac-mini** (2026-10-02, `a7855e2`, PR 5's tip; macOS 26.5.1 arm64;
+cursor-agent 2026.09.10 on Grok 4.6, grok 1.0.30, native on
+`fireworks/deepseek-v4p1-flash`; each leg its own `CRAZE_HOME` and runtime dir,
+so its own hub; live sessions only in the GUI login session's `tmux -L smoke`
+server; `v5/NOTES.md`). Two cursor turns, four grok turns and one native turn
+(under $0.01).
+
+| # | leg | result |
+|---|---|---|
+| 1a | a hub first spawned over plain ssh; `craze new --provider cursor "say hi"` | PASS but for the cause text — `not_accepting`/`start_failed` in 0.28 s, exit 1, no host left, the hub's log saying it stopped the host; but `data.cause` is craze's own `acp: agent exited: exit status 1`, and cursor's "Your macOS login keychain is locked" is only in the host log (X75, SF-125). From a GUI pane whose own cursor is logged in, a create through that same hub failed the same way (SF-126) |
+| 1b | a hub first spawned inside the `smoke` server; the same create | PASS — `started` in 2 s, cursor answered "Hi — what would you like to work on?"; from a plain ssh shell whose own keychain is locked, a cursor create through this hub started too |
+| 2 | `craze new --provider {grok,native} --effort low "say hi"`; two `craze attach` | PASS — both at `low` from their journals; `2 attached` in both clients at +0.19 and +0.20 s, dropped by the first 50 ms poll after one left |
+| 3 | A7: every terminal closed; `craze ps`; `craze attach` | PASS — both hosts and the hub survived; `craze ps` and `craze ps --no-hub` over ssh listed both; a new pane's `craze attach`, by directory, reached the native session with its transcript |
+| 4 | SF-80's macOS path, live | PASS, with a caveat — cursor and grok both run their shell tools in sessions of their own (cursor a pty session; a `setpgrp` into grok's group is `EPERM`), so a TERM-ignoring `nohup` a tool starts is out of the reaper's reach by design and outlives the session, with either agent (it was KILLed by hand); through an `--agent-bin` wrapper that leaves a TERM-ignoring child in a real grok's own group, `/exit`: grok an unreaped zombie pinning the group at +0.14 s, the child KILLed at the 2 s grace, grok reaped and the group empty at +2.14 s, no zombie left |
+| 5 | `internal/acp` ×3 on the mac (`-v`) | PASS — 151 s; all 20 reaper tests ran three times, the darwin-only ones included, 0 skips and 0 fails; the TERM-ignoring leader 2.02 s each run, a clean shutdown 0.01–0.02 s |
+
+Why 1a and 1b differ: a macOS process inherits its login (security) session
+from its parent, and the GUI login's keychain is unlocked only inside it. A hub
+is set apart (`setsid`, re-parented to launchd) but keeps the session of
+whichever client first spawned it, and every host it creates inherits that, so
+the hub's first spawner decides keychain access for every `craze new` in its
+namespace for the hub's whole life — the two cross-checks prove it both ways —
+and a hub lives while any host of the HOME runs (SF-126). The TUI's own
+launches spawn their hosts directly and are unaffected. Also seen:
+`craze new --provider grok` started on Muse Spark 1.3 Contributor where the
+TUI's grok sessions started on Grok 4.7 (SF-127); SF-114 and SF-115 again.
+Every hub idled out on its own, and no craze process, agent or tool was left
+on the mac.
+
+### Deviations from the plan
+
+The amendments X1–X77 (PR 1 X1–X11; PR 2 X12–X14, X16, X17, X23, X24; PR 3
+X15, X18–X22, X25–X41; PR 4 X42–X69; PR 5 X70–X77; the full text in the plan
+folder's `progress-pr1.md` … `progress-pr5.md`), grouped here by what they
+changed. Left out: the ones that only record process or tests — reviewer seats
+(X1, X31), worktrees and the order of work (X4, X11, X14, X15, X42, X51, X74),
+the V2 harness and a fixture's field (X3, X6), the gate's batching (X29), the
+golden check's view of another plan's file (X40), an accepted naming nit
+(X22) — and those in "Flakes diagnosed" and V2 above. None reopens an owner
+decision.
+
+**The owner's rows (PR 1):**
+
+1. **X2** — the help-fit test names five pre-existing rows that clamp at
+   80×24 at some scroll position (`↑ ↓`, `pgup pgdn`, the list's `←`,
+   `ctrl+l`, `alt+enter, ctrl+j`) rather than rewording them, which would
+   move more goldens (SF-106).
+2. **X5, X9** — a hidden ask kind is the transcript model's construction
+   option (`transcript.Options.Hidden`), from the provider's capabilities in
+   the engine and the info document's in a client; a site with none hides
+   nothing. An ending whose kind differs from its opening's draws nothing.
+3. **X7, X8 (UX)** — an outcome note takes the ending's time (not drawn) and
+   lands at the ending's place in the log: an agent event already in flight
+   when the user answered now sits above it, and a cancel-masked ask answered
+   by another client now shows its note too.
+4. **X10** — notes are worded from the ask as a snapshot carries it (its own
+   capping) and capped at 4 KiB; an option pick whose capped id matches two
+   options reads `…`; an ask whose id a snapshot would cut draws none.
+
+**Rendering (PR 2):**
+
+5. **X12, X13, X24** — rows are not always within the width (a tab is 0 cells
+   to the row builder, 4 to lipgloss), so the viewport cuts each visible
+   over-wide row, as bubbles' scan did; the row index is fully immutable (an
+   older model copy draws what it drew), with a test-only paint watch over
+   every paint; a trailing lone `\r` is cut as the old join cut it.
+6. **X16** — A5's live-prose bound holds on the fast cores, not always
+   unpinned; the rest is a per-frame floor outside SF-102 (SF-107).
+7. **X17, X23 (UX)** — the append generation is process-wide; a restore forces
+   a paint; a press paints before it selects; and a replay paints every event
+   while the viewport is scrolled away from the bottom (a row above can shrink
+   and move it), keeping the 256-event cadence when it follows the bottom.
+
+**The hub's identity and lifecycle (PR 3):**
+
+8. **X18, X19** — the lock's name is re-checked after the flock; the hubs tree
+   takes the cache tree's ancestor rule, since the strict rule refused this
+   box's 0775 `~/.cache` and every user-private-group setup (SF-112); on macOS
+   the sweep removes no sockets, because a saturated live listener also
+   answers `ECONNREFUSED` there (SF-108).
+9. **X20, X27** — start tokens: Linux `boot_id` plus the PID namespace, the
+   `/proc` mount checked through `/proc/self/status`'s `NStgid` (`/proc/1/ns/pid`
+   is unreadable to users); macOS `kern.bootsessionuuid` (`kern.boottime`
+   moves when the clock is stepped). With no trustworthy scope the record
+   carries no token, and its hub is reported, never killed.
+10. **X30, X34, X36** — the rendezvous is bounded by min(ctx, 5 s) and ends
+    early when the holder's pid is gone; P17 waits for the pid to stop
+    carrying its token; a cancelled ready wait ends the contender at once;
+    `Ensure` loops while a lock holder is leaving, bounded only by its context,
+    so every caller passes a deadline; an unreadable registry keeps an idle hub
+    up; the residuals are SF-110 and SF-111.
+
+**The roster and its wire (PR 3):**
+
+11. **X25, X26, X28** — fixtures 19–20 landed with the roster's server (C11),
+    not the wire (C9); all seven reasons landed at once, so the reason table
+    moved once; the forwarded row is any object in the schema (a newer host's
+    members pass), the new cursors carry `maximum` 2^64−1, and the roster's
+    strings and rows have stated bounds a serialization test proves fit one
+    line.
+12. **X33, X35, X41** — a list or subscribe waits, at most 1 s, for the poll's
+    current round; per connection the list's snapshot and its write are one
+    section with the flusher's, so a cursor never goes back; a session id that
+    changes starts its row afresh; crossing the 512-row cap ends every
+    subscription with `reset{omitted}` (an existing reason) so clients reread
+    `truncated`; a list is encoded under the roster lock (latency only).
+13. **C13r** — an unreadable registry refuses a list or subscribe
+    `unavailable`, `host_unreachable`, so `craze ps` falls back and exits 1
+    rather than claim nothing runs; connect refusals name no socket path.
+
+**The splice and the CLI faces (PR 3):**
+
+14. **X37, X38** — `remote.open` hands its dial the reconnect episode's end as
+    a deadline (the Dialer's budget); a first write or read that meets EOF
+    gets one respawn, replaying what was written (≤ 64 KiB); a splice write
+    must progress within 60 s; the fake agent's `long-turn` holds every step
+    at `CRAZE_FAKE_GATE` (Plan 033's rule, taken in the rebase).
+15. **X39 (UX)** — `craze ps` shows the **last** eight characters of a
+    session id (a UUIDv7's first eight are its clock, alike for sessions
+    started within a minute) and `-` for MODEL, which no row carries yet
+    (SF-114, SF-115).
+
+**Session settings and binaries (PR 4):**
+
+16. **X43** — "the launch's own provider" is the resolved one until a
+    `--continue` or resume load names its row's; effort and fast apply on a
+    load too; a configured `[agents]` path that does not exist fails the
+    start; a value already held is not sent.
+17. **X47, X60** — each effort/fast set's answer is bounded at 15 s and an
+    unanswered one fails the start (a refusal still continues); its request
+    write is not bounded, as for every ACP call (SF-116).
+18. **X56 (UX)** — typed `/effort` and `/fast` values are checked against
+    fixed lists; `/provider` keeps them; they persist as `/model`'s do.
+
+**`session.create` (PR 4):**
+
+19. **X48, X49** — `sessionCreate: true` only where the hub can spawn hosts
+    (so fixtures 19–21 keep their bytes); the hash takes the provider as sent;
+    failures are kept under the id too; a blank prompt, control characters and
+    unknown members are refused; a row read that fails still answers success,
+    with the registry's row marked `approximate`; recovery after a restart
+    stays in the hub's namespace and fails closed; an omitted
+    `permissionMode` is bypass; `craze new` retries once under the same id.
+20. **X53, X61, X63** — the log sweep can remove an owned host's week-old
+    agent record before the hub's watcher reads it (accepted, SF-117(c)); a
+    launch is reserved under the lifecycle lock and started outside it, so a
+    child stalled in its `chdir` cannot block the teardown; the teardown keeps
+    a 1 s tail for its resets (worst case 10 + 3 + 1 s).
+21. **X65, X66** — a launch registered after the closing is SIGKILLed and
+    reaped at once; a start that returns after the teardown's cleanup wait, or
+    never, leaves its host unowned, and the docs say no more than that
+    (SF-117(e), SF-120).
+
+**The list on the hub (PR 4):**
+
+22. **X44 (UX)** — the list's first snapshot lists the registry's hosts as
+    connecting, read from files, so a running session never flashes as saved;
+    opening the list now starts the hub.
+23. **X46, X55, X57 (UX)** — a reachable row with no usable body sends the
+    list to its poller rather than show an invented idle row (a real cursor
+    row measured 3,157 bytes against the 16 KiB cap); X55's per-host merge was
+    replaced by X57's whole-snapshot hold, so a session that needs you never
+    flickers to connecting and no snapshot mixes sources.
+24. **X62** — V3's poller-fallback target was missed as written, and
+    `Ensure`'s retry rule left as it is.
+
+**Presence (PR 4):**
+
+25. **X45** — presence is opt-in per control server (real hosts on, the fake
+    and test hosts off, so no fixture or golden moved); `attached` is omitted
+    at 0; at most one presence line per 500 ms per connection, a repeat of
+    the last value suppressed; a `Presence(0)` item clears the chip on any
+    re-attach or reset.
+
+**The agent reaper (PR 5):**
+
+26. **X70** — after its KILL the reaper waits for the exit unbounded (a
+    SIGKILL cannot be ignored, as `cmd.Wait` always waited); stderr is drained
+    up to 500 ms before `cmd.Wait` (the old code lost 48 KiB of a 64 KiB
+    tail); an exit that cannot be observed makes the reap the observation, with
+    no group signal; `acp.ExitError`; pending calls fail at the exit, not the
+    reap; `make lint` also runs with `GOOS=darwin`.
+27. **X71, X73** — the fallback is the reaper's too (a `wait4` WNOHANG loop,
+    the agent signalled only between its own polls, `Process.Release` before
+    `cmd.Wait` so no second pid wait can take another child's reap); the Linux
+    scan counts a zombie leader with live threads as live and a stat it cannot
+    read as live; one last SIGKILL `-pgid` precedes every reap; on macOS the
+    zombie paths take the status from the reap (`P_xstat` saturates) and a
+    failing zombie query hands over to the fallback; whether a shutdown came
+    first is latched at the observation, so a later `Close` cannot recast a
+    self-exit as `ErrClosed`. The residuals are SF-121.
+28. **X72** — on a stdout EOF the connection waits up to 1 s for the exit and
+    fails pending calls with its status, not `ErrClosed`.
+
+**Verification (PR 5):**
+
+29. **X75** — V5 leg 1a's start-failure cause is craze's own first error line
+    (`acp: agent exited: exit status 1`), as the plan pinned it ("the host's
+    first error line"), not the agent's (cursor's locked keychain, in the host
+    log). Carrying the agent's last stderr line in the start error would change
+    start-failure texts late, `craze prompt --json`'s among them (V2's
+    hard-stop surface), so it is a row (SF-125), with the macOS hub's
+    inherited login session (SF-126) and `craze new`'s grok model (SF-127).
+
+### Flakes diagnosed
+
+Every gate failure was diagnosed, never retried; each fix is test-side unless
+said.
+
+- **X21 (C7)** — `TestStartTokens` forks a `sleep`; the forked child held a
+  copy of a parallel sweep test's listener until its exec, so a dead host
+  looked live (91/500). Not run in parallel with the sweep tests, test sockets
+  close-on-exec: 0/500.
+- **X32 (C10's gate)** — `TestEnsureReplacesASIGSTOPpedHub` waited 30 s for a
+  hub nobody killed: Linux returns from `kill(SIGSTOP)` before every thread of
+  a multi-threaded process has stopped, and another thread answered the hello
+  0.6–1.4 ms later, so `Ensure` rightly kept the hub. A forced repro failed
+  20/20; the test now waits until every `/proc/<pid>/task/*/stat` reads `T`.
+- **X50 (a PR 3 test, reported by Plan 033's session)** —
+  `TestTeardownClosesALiveSplice/a_host_that_answers_its_end`: the teardown
+  half-closes the host leg first, so a host writing in between reaches the
+  still-open client. A legitimate order; the test writes only after the client
+  read its end (a forced 200 ms delay: red 3/3, then green 5/5).
+- **X52 (C14's test, caught by C15r's gate)** —
+  `TestStartSettingsFollowTheModel/neither`: the fake agent's commands can land
+  between a test's `Snapshot()` and its flush; the helper lacked the
+  `awaitCatalog` every other such test has. Red under a forced schedule, green
+  with it.
+- **X54, X58, X67 (SF-118)** — a re-executed hub test child still alive 30 s
+  after its cleanup's SIGTERM: three sightings, each under `make test-race`
+  (Plan 033's gate in `internal/cli`, C16's gate in `internal/hub`, PR 4's
+  CI), none in ~230 targeted runs. Diagnostics went in first (stderr per pid,
+  `/proc` state and signal masks, a SIGQUIT dump before the SIGKILL); the
+  third sighting carried them: the hub had logged "stopped" within the second
+  and its `Run` returned, but the process did not exit, gave no Go dump and
+  its `/proc` status was unreadable. Under `-race`, `os.Exit` runs the race
+  runtime's finalizer (`__tsan_fini`) first; the test children now exit
+  through `syscall.Exit`. SF-118 stays open until CI has been quiet a while.
+- **X69 (PR 4's CI, macOS)** — the fake agent's set gate reopened its FIFO per
+  held set and took the previous writer's close for a release (it now needs a
+  byte); and a Python test asserted an asynchronously written ready flag at
+  once (now polled). A writer held open 500 ms reproduced it 3/3 before, never
+  after.
+- **X64** — `TestBashCloseSignal` (Plan 033's bash code) failed in C15r5's
+  run, 2/10 under a 5 % quota; reported to Plan 033, which took it into its own
+  PR.
+- **X76 (V1, PR 5)** — `TestALostRecordOrSocketStopsTheHub` parked 54 minutes
+  on an unbuffered tick: the send completes at the loop's receipt, not when its
+  look ends, so the test could remove the record before the first look, which
+  then rightly stopped the hub. A nil-in-production hook (`lostLooked`) the test
+  waits on, and bounded ticks that report a stopped hub; a 200 ms delay in the
+  look reproduced it before, never after.
+- **X77 (PR 5's CI, macOS)** — `TestADetachedSessionOutlivesItsTUI` read the
+  host's index row right after the turn; a first prompt the drain took is
+  indexed by the engine's worker after the turn, so the test now waits for the
+  row. Also from PR 5's CI review: the lint job now runs golangci-lint a second
+  time with `GOOS=darwin`, as `make lint` does.
+
+### Decisions and questions touched
+
+**SD-36** (every journal kept), **SD-37** (the hub's lifecycle, registry
+polling and sweep — reversing Plan 030's X30 for sockets, on runtime-tree
+evidence), **SD-38** (S4b local-only; S4c) and **SD-39** (the provider's
+replay stays the resume authority), all written in C1 from the owner's calls.
+SQ3 (SD-36), SQ6 (SD-37) and SQ13 (SD-39) are resolved in `10`; SQ4 and SQ15
+carry the 2026-09-30 measurement and stay open (SF-104). No `SD-nn` added
+during execution.
+
+### Coordination with Plan 033
+
+Plan 033 (images, background bash jobs and the ChatGPT plan, in its own
+worktree and session) ran alongside this plan from PR 1 on; it was given this
+plan's file map before PR 1 (2026-09-30) and told every merge's commit. Its
+images PR (#77, `9affbba`) merged before PR 3's push, which rebased onto it
+(X38: one conflict family, the fake agent's `long-turn` gate, resolved in
+Plan 033's favour) and re-ran the gate. For PR 4 and its bash PR (#80) the two
+sessions agreed a merge protocol at the owner's request (2026-10-01): the
+first fully green PR merges and sends its SHA; the second rebases onto it,
+re-gates, pushes, goes green, then merges; each says "merging now" first; #79
+first if both are green together. #80 merged first (`28210f6`); #79 rebased
+onto it cleanly (21 commits), re-gated (564 s) and re-ran V2 (X68) before its
+merge. Flakes crossed both ways: Plan 033's gates found X50 and X54 in this
+plan's tests; X64 went the other way. During PR 5 only Plan 033's ChatGPT PR
+was active, touching nothing in `internal/acp`, under the same protocol.
+
+### Handoff
+
+**S3 (the shed lane) is next** (SD-34), after shed's first release of its own
+lane work. What it inherits:
+
+- **The hub's wire**, published in `docs/reference/protocol.md` with its schema
+  and fixtures 19–23 (`05`, the "As shipped (S4b, …)" sections): `craze bridge
+  --hub` over an ssh exec reaches the hub, starting one when none answers;
+  `sessions.subscribe` gives the roster at a cursor, then net-change `roster`
+  notifications, with an epoch to reseed on; `session.connect` hands the
+  connection to a host, after which it is S2's protocol exactly (resume by
+  token and cursor through a new splice); `session.create` starts a session,
+  idempotent by `requestId` across a hub restart while the host lives. craze's
+  own respawn seam is `hub.Dialer`; a client in another language redials `craze
+  bridge --hub`, which runs `Ensure`. The fake host lists itself side by side
+  with others (`--registry`, `--host-id`, `--session-id`).
+- **Limits to plan around:** a session the hub creates on macOS runs in the
+  hub's login session, so cursor cannot start under a hub first spawned over
+  ssh, whoever asks, and the failure does not say why (SD-37; V5; SF-125,
+  SF-126); the roster lists every host of the HOME registry, across
+  `CRAZE_HOME` namespaces, while a create lands in the hub's own; a prompt-less
+  created session nobody attaches ends after 5 minutes; no launchd or systemd
+  unit (the hub is spawned on demand, plan §4); a bridge whose ssh dropped can
+  linger while its session is quiet (SF-123).
+- **The rows that matter most** (`13`): SF-114 (no model on a row) and SF-115
+  (short ids) for any client's list; SF-116 (a session's start is not bounded
+  end to end) and SF-117 (the create path's residuals, whose real fix is a
+  hub-held start gate); SF-118 (open until CI stays quiet); SF-120 (hostspawn's
+  group signal can take C19's reaper protocol); SF-121 (the agent reaper's
+  residuals); SF-122–SF-124 (V2's exit race, the lingering bridge, `craze new
+  --json`'s errors); SF-125–SF-127 (a start failure's cause, a macOS hub's
+  inherited login session, `craze new`'s grok model); and, from earlier, SF-70
+  (notices of other sessions, which a subscription now makes cheap), the
+  held-back list features SF-68/69/71/73, and the owner's SF-77, SF-18, SF-25
+  and SF-32.
+- **Directional, not designed:** a host-side roster push behind a capability
+  (P1's alternative, if polling ever costs too much), remote-machine listing
+  (S4c), per-model `/effort` choices from the catalog cache.

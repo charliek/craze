@@ -12,14 +12,14 @@ non-test source lines, from the reference reviews (`09`).
 | done | S2 | complete (Plan 027, 4 PRs: #55, #56, #61, #63) | Per-session Unix socket, published protocol spec + schema, fake host, `craze bridge`, `craze attach` |
 | done | S4a | complete (Plan 030, with S5; 5 PRs: #66, #68, #70, #71, PR 4) | Detached hosts: `craze serve`, hosts born detached, `session.stop`, idle exit |
 | done | S5 | complete (Plan 030, with S4a) | Agent view in the TUI: a session list of every running session on the machine, new sessions started from it, composer `@` mentions |
-| 1 | S4b | in progress (Plan 032) | The hub (local machine only): `craze ps`, `hub.sock`, `sessions.subscribe` on the hub, `session.create` |
-| 2 | S3 | not started (after S4b, and after shed's first release of its own lane work) | `shed-craze` lane adapter in shed; craze in shed-mobile's `LANE_KINDS` |
-| 3 | S4c | directional | Remote-machine listing: the hub roster across machines (SD-38) |
-| 3 | S6 | directional | `craze web`: hub serves WebSocket + a web bundle on loopback / tailnet |
-| 3 | S7 | directional | Outbound relay uplink and a hosted server; enrollment, scopes, TLS |
+| done | S4b | complete (Plan 032; 5 PRs: #75, #76, #78, #79, #81) | The hub (local machine only): `craze ps`, `hub.sock`, `sessions.subscribe` on the hub, `session.create` |
+| 1 | S3 | not started (next, after shed's first release of its own lane work) | `shed-craze` lane adapter in shed; craze in shed-mobile's `LANE_KINDS` |
+| 2 | S4c | directional | Remote-machine listing: the hub roster across machines (SD-38) |
+| 2 | S6 | directional | `craze web`: hub serves WebSocket + a web bundle on loopback / tailnet |
+| 2 | S7 | directional | Outbound relay uplink and a hosted server; enrollment, scopes, TLS |
 
 The order column is the order phases run in (SD-34); phase IDs are stable
-names, not positions. S4a and S5 were built together in Plan 030. S4b runs
+names, not positions. S4a and S5 were built together in Plan 030. S4b ran
 before S3 so that the shed lane starts with a hub roster and `create`.
 
 ## Phase detail
@@ -321,7 +321,7 @@ The per-machine hub at `run/hub.sock` with roster, routing, spawn, and stop;
 `create` capability on. Local machine only (SD-38): listing other machines'
 sessions is S4c. The hub learns its hosts from the registry and polls them
 (SD-37); hosts do not register with it. It replaces the per-host polling that
-S5's session list does until it exists. In progress (Plan 032), after S4a + S5
+S5's session list did until it existed. Complete (Plan 032), after S4a + S5
 and before S3.
 
 - Size: M, about 2k lines (the old S4's estimate, which covered the hub, the
@@ -334,6 +334,88 @@ and before S3.
   respawned hub lists the same sessions, rebuilt from the registry; a host
   crash removes its row within a sweep; hub and host of different craze versions interoperate on the
   protocol integer.
+
+**Exit result (S4b):** complete 2026-10-02, plan
+`032-session-control-s4b-hub`, five sequential PRs from fresh `origin/main`
+— `feature/plan-032-rows` (#75, `2eec72f`), `feature/plan-032-render` (#76,
+`2dc80b7`), `feature/plan-032-hub` (#78, `bc8da8f`, the hub itself),
+`feature/plan-032-create` (#79, `8a33a12`) and `feature/plan-032-reaper`
+(#81). Every exit clause met, against the Linux live smoke with real agents
+(V4 at `8a33a12`: cursor, grok and native; the legs are in `12`), the
+mac-mini's for the first (V5), and, where a leg could not go through the hub
+live, a real-process Go test:
+
+- **Two sessions, every terminal closed, listed by `craze ps`, one
+  attached: pass.** A cursor session and a grok session in two directories,
+  their tmux panes killed: only their two `craze serve` hosts survived;
+  `craze ps` spawned the hub and listed both, idle, with their titles, and
+  `craze attach --session <id>` reached each with its transcript (V4 leg 1;
+  `test_ps_lists_detached_sessions_and_attach_reaches_one`,
+  `tests/cli/test_hub.py`). On the mac-mini, a grok and a native session
+  outlived every terminal, `craze ps` over ssh listed both, and a new pane's
+  `craze attach` reached one (V5 leg 3). The eight characters `ps` shows are
+  not accepted by `--session` (SF-115).
+- **The hub killed mid-turn loses nothing, and a respawned hub lists the
+  same sessions, rebuilt from the registry: pass.** `kill -9` of the hub
+  0.3 s into a 60-line cursor reply: the turn ended `end_turn` with all 60
+  lines (504 chunks after the kill), the next `craze ps` answered at once
+  through a respawned hub under a new epoch, whose roster held the same 8
+  host and session id pairs, and the open session list re-subscribed to it
+  (V4 leg 4). No production TUI reaches its session through the hub — the
+  TUI and `craze attach` dial hosts directly (plan 032 P3) — so the live
+  client simply kept streaming; the clause's hub-routed half, a client
+  spliced through the hub resuming from its cursor once `hub.Dialer` has
+  respawned the hub, is `TestAHubKilledMidTurnLosesNothing`
+  (`internal/cli/hub_splice_test.go`: a hub child and three host children;
+  the redial's `hello` answered `resumed: true` by the same host and the
+  re-attach silent from its cursor, no gap, no duplicate).
+- **A host crash removes its row within a sweep: pass.** `kill -9` of a grok
+  host: its row left `craze ps --json` 0.37 s later and the open list's
+  running count fell at 0.38 s; its registry entry was swept and its agent
+  exited by itself (V4 leg 5). The one-round bound is
+  `TestACrashedHostLeavesWithinOneRound` (`internal/hub`, the poll's ticks in
+  the test's hands); the real-process test logs the latency.
+- **Hub and host of different builds interoperate on the protocol integer:
+  pass.** A real `craze serve` built at `a0d88c3` (Plan 030's tip, before
+  the hub's wire; it reports the same version string, 0.0.1) was listed by
+  `craze ps` beside current hosts behind one hub, took a grok turn from a
+  current `craze attach`, and was spliced to through `craze bridge --hub`
+  (the hub's `hello`, `session.connect`, `{}`, the host's own `hello`, an
+  attach and its snapshot); the one difference live was presence — no
+  capability, no `attached`, no chip — since that host already has Plan
+  030's `rowFacts` and `stop` (V4 leg 6). An S2-era host (no `rowFacts`, no
+  `stop`) beside a current one is `TestAnOldAndANewHostBehindOneHub`
+  (`internal/cli/hub_splice_test.go`): both listed with their own rows, both
+  spliced to, the old one refusing `session.stop` `stop_unsupported` through
+  the splice.
+
+Beyond the clauses, V4 replaced a SIGSTOPped hub (`craze ps` answered in
+4.04 s through its replacement, P17); `craze new --effort` started a cursor,
+a grok and a native session with the effort set from their first `meta`
+event, and a missing `[agents].cursor` binary failed `not_accepting`,
+`start_failed`, leaving no host (A12, A13); the `N attached` chip showed in
+0.15 s and followed a third client and a leaving one (A15). The mac-mini
+(V5 at `a7855e2`: grok, native and cursor, live sessions in the GUI login
+session's tmux server) passed legs 1b, 2, 3 and 5: a hub first spawned inside
+the GUI session created a cursor session that answered; `craze new --effort
+low` for grok and native, and the `2 attached` chip in 0.20 s; A7 above; the
+acp package ×3 on the mac with every reaper test run. Leg 4, SF-80's macOS
+path live, passed with a caveat: grok and cursor run their tools in sessions
+of their own, out of the reaper's reach by design, so the reaper was proven
+through a wrapper that leaves a TERM-ignoring child in a real grok's own
+group — the agent an unreaped zombie at 0.14 s, the child KILLed at the 2 s
+grace, the agent reaped at 2.14 s, no zombie left. Leg 1a, a hub first
+spawned over plain ssh, passed but for the cause text: `craze new --provider
+cursor` failed `not_accepting`, `start_failed`, leaving no host, but its
+cause is craze's `acp: agent exited: exit status 1`, the locked keychain
+named only in the host log (X75, SF-125); and such a hub denies the keychain
+to every create in its namespace, a GUI terminal's too (SF-126). The owner's
+rows (SF-86, SF-99, SF-61) passed a fake-agent smoke at PR 1's tip (SF-86
+again by eye in V4); SF-102's render bounds are V8's. No golden moved but the
+four SF-86 frames the owner allowed. The execution amendments X1–X75, the
+review record, V1–V8 and the handoff are in `12`; what it found and did not
+do is `13`, SF-104–SF-127. **S3 (the shed lane) is next**, after shed's
+first release of its own lane work.
 
 ### S4c — remote-machine listing (directional)
 
