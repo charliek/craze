@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -98,6 +99,24 @@ type Options struct {
 	// detached or TUI-hosted; false — the fake host by default — answers the
 	// row S2 answered, which is an older host's (X1).
 	RowFacts bool
+	// Presence counts the clients attached to the session for them (plan 032
+	// §3.14, SF-64): the info document says capabilities.presence: true, its
+	// sessions.list row carries attached, and every attachment is sent the
+	// presence notification — once its synchronized is written, then on
+	// every change, the latest count at most twice a second (conn.go's
+	// "Presence"). Every craze host sets it, detached or TUI-hosted; false —
+	// the fake host by default — sends none of it, which is an older host's
+	// wire.
+	Presence bool
+	// LocalClient says a client of the server's own process is attached for
+	// its whole life: the TUI that hosts the session (`detach = false`), whose
+	// seat is the process's and no connection's (plan 032 §3.14, R3-1). It
+	// adds one to the count every attachments listener, every presence
+	// notification and every row's attached see — so a `craze attach` beside
+	// the host TUI reads 2, as the host TUI does — and to nothing else: a
+	// close fence counts connections (FenceAttaches). True only for the
+	// TUI-hosted server.
+	LocalClient bool
 }
 
 // Budget is a subscription budget: the event log's SubscribeOptions MaxItems
@@ -203,11 +222,14 @@ type Server struct {
 	// fences is how many close fences are up (FenceAttaches); while it is
 	// not 0 a new attach is refused closing. Guarded by attachMu.
 	fences int
-	// countMu guards attached and onAttach (plan 030 §3.6; attach.go's
-	// "Counting attachments"). It is a leaf, taken under attachMu and under
-	// conn.mu — every change to the count is made in the section that
-	// decides it — and nothing is taken under it but the OnAttachments
-	// callback, which takes no lock of the server's.
+	// countMu guards attached, onAttach and presence (plan 030 §3.6;
+	// attach.go's "Counting attachments"; plan 032 §3.14). It is a leaf,
+	// taken under attachMu and under conn.mu — every change to the count is
+	// made in the section that decides it — and under connMu (accept's
+	// watchPresence), and nothing is taken under it but
+	// the attachments listeners, which take no lock of the server's: a
+	// presence slot is set with an atomic store and a wake that never waits
+	// (outbox.setPresence).
 	countMu sync.Mutex
 	// attached is how many attachments the server counts: every one it holds
 	// that is not yet closed — pending (reserved), live or closing (attach.go's
@@ -217,10 +239,14 @@ type Server struct {
 	// closes (conn.closedLocked) or its connection reads EOF (conn.eof), under
 	// conn.mu, so under attachMu with a fence up it can only fall.
 	attached int
-	// onAttach is OnAttachments' callback, nil for none: called with the new
-	// count, under countMu, on every change to it, so the calls are in the
-	// order of the changes.
-	onAttach func(n int)
+	// onAttach is AddAttachmentsListener's listeners, in the order they were
+	// added: each called with the count they see (seenLocked), under countMu,
+	// on every change, so each hears the changes in order.
+	onAttach []*attachListener
+	// presence is every open connection's presence slot on a Presence server
+	// (conn.go's "Presence"): each change stores the count it sees in every
+	// one and wakes its writer, never waiting for it.
+	presence map[*outbox]struct{}
 	// stopOnce hands the first session.stop to Options.Stop, and raises the
 	// stop's own fence, once for the server's life (stop.go).
 	stopOnce sync.Once
@@ -315,6 +341,18 @@ type hooks struct {
 	// once the attach fence is up, before the engine's; "engine fenced" once
 	// both are, before it returns (plan 030 §3.6's forced races).
 	closeFenceStep func(step string)
+	// presenceTaken runs on a writer that has taken a presence line, before
+	// it writes it, with the connection's id, the line and when the outbox
+	// handed it over: the instant the twice-a-second bound is kept by.
+	presenceTaken func(conn uint64, line []byte, at time.Time)
+	// writerIdle runs on a writer about to wait for a wake with nothing
+	// queued, no presence owed and no wake pending, with the connection's id
+	// and how many lines it has taken from its outbox.
+	writerIdle func(conn, taken uint64)
+	// beforeArm runs on a forwarder in the conn.mu section that has just
+	// queued its attachment's synchronized, before it arms the presence
+	// slot, with the subscription's id.
+	beforeArm func(sub string)
 }
 
 // New builds a server. It serves nothing until SetEngine and Serve.
@@ -334,6 +372,7 @@ func New(o Options) *Server {
 		tokens:     map[string]tokenOwner{},
 		conns:      map[*conn]struct{}{},
 		listeners:  map[net.Listener]struct{}{},
+		presence:   map[*outbox]struct{}{},
 		done:       make(chan struct{}),
 	}
 	if s.opts.Clock == nil {
@@ -364,41 +403,113 @@ func New(o Options) *Server {
 // HostID is the host's id: hello's endpoint.hostId and sessions.list's epoch.
 func (s *Server) HostID() string { return s.hostID }
 
-// OnAttachments sets f to be called, in order, on every change in the number
-// of attached clients, with the new number (plan 030 §3.6; SF-64's hook): an
-// attachment counts from its reservation to its close — pending, live or
-// closing — unless its connection's peer has half-closed (attach.go,
-// "Counting attachments"). A connection that only calls hello or
-// sessions.list is not attached and moves nothing. f is called on the
-// goroutine that changed the count, under the server's own locks, one call at
-// a time: it must return promptly and must not call into the server, an
-// engine or a connection — a lifecycle goroutine records the number and acts
-// on it elsewhere. nil stops the calls. Set it before Serve, or any time: a
-// change made while it is being set is reported to the old f or the new.
-func (s *Server) OnAttachments(f func(n int)) {
+// attachListener is one AddAttachmentsListener's f, by pointer so its remove
+// finds it.
+type attachListener struct{ f func(n int) }
+
+// AddAttachmentsListener has f called, in order, on every change in the
+// number of attached clients, with the new number (plan 030 §3.6; plan 032
+// §3.14), until remove is called: an attachment counts from its reservation
+// to its close — pending, live or closing — unless its connection's peer has
+// half-closed (attach.go, "Counting attachments"), and a server with
+// Options.LocalClient counts its own process's client too, so f never hears
+// less than 1 there. A connection that only calls hello or sessions.list is
+// not attached and moves nothing. f is not called with the number as it
+// stands when it is added: it hears the changes from there on (the idle
+// watcher and the host TUI are added before Serve, when nothing is attached).
+//
+// Every listener is called on the goroutine that changed the count, under the
+// server's own locks, one call at a time: it must return promptly and must
+// not block, nor call into the server, an engine or a connection — it records
+// the number, and a goroutine of its own acts on it elsewhere (the idle
+// watcher; the host TUI's latest-value channel). Listeners are independent:
+// one added beside another leaves it hearing every change (the idle watcher's
+// and the host TUI's, side by side). remove may be called any number of
+// times and from anywhere but a listener; once it has returned, f is not
+// called again. A nil f is never called.
+func (s *Server) AddAttachmentsListener(f func(n int)) (remove func()) {
+	if f == nil {
+		return func() {}
+	}
+	l := &attachListener{f: f}
 	s.countMu.Lock()
-	s.onAttach = f
+	s.onAttach = append(s.onAttach, l)
 	s.countMu.Unlock()
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			s.countMu.Lock()
+			s.onAttach = slices.DeleteFunc(s.onAttach, func(x *attachListener) bool { return x == l })
+			s.countMu.Unlock()
+		})
+	}
 }
 
-// countAttachment moves the count of attachments by d and reports the new
-// count to OnAttachments' callback, in one countMu section, so the callback
-// sees every change in order. It is called only in the section that decides
-// the change: reserve (attachMu, conn.mu), closedLocked and eof (conn.mu).
+// countAttachment moves the count of attachments by d and reports the count
+// clients see (seenLocked) to every attachments listener and every
+// connection's presence slot, in one countMu section, so each hears every
+// change in order. A presence slot is an atomic store and a wake that never
+// waits (outbox.setPresence): a writer stalled on a peer that has stopped
+// reading holds back its own connection's presence and nobody else's (plan
+// 032 §3.14, R2-6). It is called only in the section that decides the change:
+// reserve (attachMu, conn.mu), closedLocked and eof (conn.mu).
 func (s *Server) countAttachment(d int) {
 	s.countMu.Lock()
 	defer s.countMu.Unlock()
 	s.attached += d
-	if f := s.onAttach; f != nil {
-		f(s.attached)
+	n := s.seenLocked()
+	for _, l := range s.onAttach {
+		l.f(n)
+	}
+	for o := range s.presence {
+		o.setPresence(n)
 	}
 }
 
-// attachedCount is the count now.
+// seenLocked is the count clients see: the attachments, and the host TUI's
+// own seat on a LocalClient server; countMu is held.
+func (s *Server) seenLocked() int {
+	if s.opts.LocalClient {
+		return s.attached + 1
+	}
+	return s.attached
+}
+
+// attachedCount is the count of attachments now: what a close fence reads,
+// with no LocalClient seat.
 func (s *Server) attachedCount() int {
 	s.countMu.Lock()
 	defer s.countMu.Unlock()
 	return s.attached
+}
+
+// presenceCount is the count clients see now (seenLocked): a sessions.list
+// row's attached.
+func (s *Server) presenceCount() int {
+	s.countMu.Lock()
+	defer s.countMu.Unlock()
+	return s.seenLocked()
+}
+
+// watchPresence puts o, a new connection's outbox, among the presence slots
+// of a Presence server, holding the count clients see now; a server without
+// presence keeps none.
+func (s *Server) watchPresence(o *outbox) {
+	if !s.opts.Presence {
+		return
+	}
+	s.countMu.Lock()
+	o.setPresence(s.seenLocked())
+	s.presence[o] = struct{}{}
+	s.countMu.Unlock()
+}
+
+// forgetPresence takes a closed connection's outbox out of the presence
+// slots.
+func (s *Server) forgetPresence(o *outbox) {
+	s.countMu.Lock()
+	delete(s.presence, o)
+	s.countMu.Unlock()
 }
 
 // MaxBudget is the largest subscription budget an attach may ask for.
@@ -620,6 +731,10 @@ func (s *Server) accept(nc net.Conn) {
 	c.id = s.nextConn
 	s.conns[c] = struct{}{}
 	s.transport.Add(2)
+	// In the section that makes the connection one Close closes, so its
+	// close always forgets the slot; and before its reader starts, so the
+	// slot holds the count before any attach of this connection's can arm it.
+	s.watchPresence(c.out)
 	s.connMu.Unlock()
 	s.connNote(c.id, withPeer(map[string]any{"event": "open"}, pid, uid))
 	go c.read()

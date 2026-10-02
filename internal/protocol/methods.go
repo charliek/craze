@@ -58,6 +58,12 @@ const (
 	// too: slow_consumer, omitted (the roster's completeness changed:
 	// subscribe again), or hub_closing.
 	NotifyReset = "reset"
+	// NotifyPresence is how many clients are attached to the session now:
+	// {subscription, attached} (PresenceParams; plan 032 §3.14, SF-64). A
+	// host whose session capability presence is true sends it on each
+	// attachment once its synchronized is out, and again on every change,
+	// at most two a second; it is never sequenced or journalled.
+	NotifyPresence = "presence"
 	// NotifyRoster is the hub's roster subscription's net change since the
 	// subscriber's last cursor: {subscription, epoch, cursor, upserts,
 	// removes} (RosterParams; plan 032 §3.6). Only the hub sends it.
@@ -147,8 +153,8 @@ func Method(name string) (MethodInfo, bool) {
 	return MethodInfo{}, false
 }
 
-var notifications = []string{NotifyEvent, NotifySynchronized, NotifyReady, NotifyReset, NotifyRoster}
+var notifications = []string{NotifyEvent, NotifySynchronized, NotifyReady, NotifyReset, NotifyPresence, NotifyRoster}
 
 // Notifications is every notification protocol 1 names: a host's, in §3.3's
-// order, then the hub's roster.
+// order and then presence (plan 032 §3.14), then the hub's roster.
 func Notifications() []string { return slices.Clone(notifications) }

@@ -42,7 +42,7 @@
       "additionalProperties": false
     },
     "notification": {
-      "description": "A host's notification — event, synchronized, ready or reset — or the hub's — roster or reset. A client ignores a method it does not know.",
+      "description": "A host's notification — event, synchronized, ready, reset or presence — or the hub's — roster or reset. A client ignores a method it does not know.",
       "type": "object",
       "properties": {
         "jsonrpc": {"const": "2.0"},

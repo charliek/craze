@@ -10,13 +10,13 @@ import (
 	"github.com/charliek/craze/internal/protocol"
 )
 
-// OnAttachments and the count it reports (plan 030 §3.6; attach.go's
+// An attachments listener and the count it hears (plan 030 §3.6; attach.go's
 // "Counting attachments"): every attachment from its reservation to its close,
 // reported in order; a connection that only lists is not attached; and a
 // peer's read EOF takes its attachment out of the count — the half-close
 // hazard C1 found — without changing what the half-closed peer is delivered.
 
-// attachLog is every count a server's OnAttachments reported, in order.
+// attachLog is every count a server's attachments listener heard, in order.
 type attachLog struct {
 	mu     sync.Mutex
 	counts []int
@@ -26,7 +26,7 @@ type attachLog struct {
 // watchAttachments starts recording h's counts.
 func watchAttachments(h *host) *attachLog {
 	l := &attachLog{grew: make(chan struct{})}
-	h.srv.OnAttachments(func(n int) {
+	h.srv.AddAttachmentsListener(func(n int) {
 		l.mu.Lock()
 		l.counts = append(l.counts, n)
 		close(l.grew)
@@ -59,7 +59,7 @@ func (l *attachLog) waitLen(t *testing.T, n int) []int {
 		select {
 		case <-grew:
 		case <-deadline:
-			t.Fatalf("OnAttachments reported %v; want %d reports within %s", got, n, watchdog)
+			t.Fatalf("the listener heard %v; want %d reports within %s", got, n, watchdog)
 		}
 	}
 }
@@ -69,20 +69,20 @@ func (l *attachLog) wantCounts(t *testing.T, what string, want ...int) {
 	t.Helper()
 	got := l.waitLen(t, len(want))
 	if len(got) != len(want) {
-		t.Fatalf("%s: OnAttachments reported %v, want %v", what, got, want)
+		t.Fatalf("%s: the listener heard %v, want %v", what, got, want)
 	}
 	for i := range want {
 		if got[i] != want[i] {
-			t.Fatalf("%s: OnAttachments reported %v, want %v", what, got, want)
+			t.Fatalf("%s: the listener heard %v, want %v", what, got, want)
 		}
 	}
 }
 
-// TestOnAttachmentsHearsEveryChangeInOrder: eight clients attach and detach
+// TestAListenerHearsEveryChangeInOrder: eight clients attach and detach
 // three times each, all at once. Every change is reported, one call at a time
 // and in the order the count moved — each report one more or one less than
 // the last, from 0 — and the count ends at 0 with every client detached.
-func TestOnAttachmentsHearsEveryChangeInOrder(t *testing.T) {
+func TestAListenerHearsEveryChangeInOrder(t *testing.T) {
 	h := newHost(t)
 	l := watchAttachments(h)
 	const clients, rounds = 8, 3

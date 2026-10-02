@@ -19,7 +19,8 @@ import (
 // which is the provider's answer: stop is the host's own, and a server that
 // serves session.stop turns it on in the document it builds
 // (sessionInfoReady; plan 030 §3.6a), as a server with the row facts turns on
-// rowFacts (§3.8), which is omitted while false. TestEveryCapabilityIsOnTheWire
+// rowFacts (§3.8) and one that counts its clients presence (plan 032 §3.14),
+// each omitted while false. TestEveryCapabilityIsOnTheWire
 // holds every agent.Capabilities field to a wire name here and in the schema,
 // so a field added to the struct fails the gate until it is mapped.
 func sessionCapabilities(c agent.Capabilities) protocol.SessionCapabilities {
@@ -94,6 +95,9 @@ func (s *Server) sessionInfoReady(eng *engine.Engine) (protocol.SessionInfo, eng
 	// rowFacts is too: its sessions.list row carries the row facts (rowFacts,
 	// plan 030 §3.8), and a document of a server without them leaves it out.
 	info.Capabilities.RowFacts = s.opts.RowFacts
+	// presence is too (plan 032 §3.14): the server counts its clients for
+	// them, and a document of a server that does not leaves it out.
+	info.Capabilities.Presence = s.opts.Presence
 	if ready {
 		for _, m := range st.Models {
 			info.Catalogs.Models = append(info.Catalogs.Models, protocol.CatalogModel{ID: m.ID, Name: m.Name, Recent: m.Recent})

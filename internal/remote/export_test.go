@@ -101,6 +101,28 @@ func (s *Stream) QueuedItems() int {
 	return len(s.q.items)
 }
 
+// AwaitQueued waits until cond holds over the items the stream's queue
+// holds now — a copy, read under its lock — waking on the queue's own change
+// signal (every item queued, folded in or handed out moves it), or until ctx
+// ends: a barrier on what the stream has applied, which no line the tap
+// recorded can be (the tap records a line before the client reads it).
+func (s *Stream) AwaitQueued(ctx context.Context, cond func([]Item) bool) error {
+	for {
+		s.q.mu.Lock()
+		ok := cond(append([]Item(nil), s.q.items...))
+		changed := s.q.changed
+		s.q.mu.Unlock()
+		if ok {
+			return nil
+		}
+		select {
+		case <-changed:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+}
+
 // QueueClosed says the stream's queue takes nothing more: its last item is
 // in it, or it was dropped.
 func (s *Stream) QueueClosed() bool {

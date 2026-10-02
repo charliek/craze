@@ -63,6 +63,17 @@ keeps its slot until it leaves the band, and the rows below close up. Past
 the cap the band ends in `… +n more`; the viewed sub-agent always keeps a
 visible row, taking the last one when it would otherwise fall behind the cap.
 
+When another client has the same session open, status row 2 ends in an
+accent `N attached` chip: N counts every client attached to the session, this
+one included — a `craze attach`, another TUI showing it from its [session
+list](#session-list), and the TUI that hosts it under `detach = false` — so a
+second client makes it `2 attached`, and with you alone it is not there at
+all. It follows the host's count within about a second (at most two updates a
+second), hides while the connection to the host is being re-established until
+the host says again, and is the first thing on the row to go when the
+terminal is too narrow. A host from before craze counted its clients sends no
+count, and the chip never shows.
+
 On a provider that can stop one child (native today), `Delete` or
 `Backspace` on the selected **running** row stops just that child (or a
 [background command](#background-commands-bash-jobs)); the turn

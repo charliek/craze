@@ -1302,6 +1302,7 @@ var (
 		"resumeAttempt", "spawnSeq", "restores", "turnStarts", "held", "heldBytes", "heldDrained", "syncAck",
 		"syncPending", "gateSync", "harnessQuit", "completeLoads", "unstartedSeq", "sessPick",
 		"connSeq", "nativeDir", "nativeEnv", "composerAt", "images", "attachSeq", "attachDir", "attachRuns",
+		"localPresence", "hostAttached",
 	}
 	sessionFields = []string{
 		"eng", "cmdSeq", "chains", "engErr", "cwd", "model", "status", "err", "startErr", "startInc", "git",
@@ -1319,7 +1320,7 @@ var (
 		"planOfferSeq", "planDeadSeq", "offerGen", "turnID", "ownTurn", "nextTurn", "armedDraft", "disarmed",
 		"turnStart", "lastThought", "ctrlCDeadline", "shellCtx", "remote", "cancelled", "prompted",
 		"sessProvider", "foreignEnded", "foreignNoted", "gate", "reading", "ended", "endErr", "infoPin",
-		"upDone", "indexTitle", "unstarted", "first", "cdlg", "attachReads", "editImages",
+		"upDone", "indexTitle", "unstarted", "first", "cdlg", "attachReads", "editImages", "attached",
 	}
 )
 
@@ -1406,7 +1407,8 @@ func fillEvery(v reflect.Value, depth int) {
 	case reflect.Slice:
 		v.Set(reflect.MakeSlice(v.Type(), 1, 1))
 	case reflect.Chan:
-		v.Set(reflect.MakeChan(v.Type(), 0))
+		// A receive- or send-only channel is made both ways and converted.
+		v.Set(reflect.MakeChan(reflect.ChanOf(reflect.BothDir, v.Type().Elem()), 0).Convert(v.Type()))
 	case reflect.Array:
 		if depth < 3 {
 			for i := range v.Len() {

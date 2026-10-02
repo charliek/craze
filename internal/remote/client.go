@@ -786,7 +786,8 @@ func (m inMsg) response() *protocol.Response {
 // that do not decode break the protocol (errMalformed).
 func (c *Client) notification(w *wire, method string, params json.RawMessage) error {
 	switch method {
-	case protocol.NotifyEvent, protocol.NotifySynchronized, protocol.NotifyReady, protocol.NotifyReset:
+	case protocol.NotifyEvent, protocol.NotifySynchronized, protocol.NotifyReady, protocol.NotifyReset,
+		protocol.NotifyPresence:
 	default:
 		return nil
 	}

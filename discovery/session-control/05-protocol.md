@@ -559,3 +559,19 @@ above: "spawn a headless host"); the published spec is
   The hub ends the recorded agents of every host it spawned once that host
   has gone, for as long as the hub runs.
 - `craze new` is its CLI.
+
+## As shipped (S4b, plan 032 PR 4): presence
+
+Plan 032 C18 (SF-64) gives a host a count of the clients attached to its
+session, as a host-owned session capability, `presence` (omitted when false,
+as `rowFacts` is): a `presence{subscription, attached}` notification on every
+attachment — after its `synchronized`, then on every change, the latest at most
+twice a second, never after its reset or its detach reply — and `attached` on
+the `sessions.list` row. It is not one of the session's events: no `seq`, no
+journal, no cursor. The count is the attachments the host counts for its idle
+exit (pending, live or closing, less a half-closed peer's) plus, on a
+TUI-hosted session, the hosting TUI's own seat (`control.Options.LocalClient`).
+Each connection's writer sends its own count from a latest-value slot, so a
+client that has stopped reading delays only its own. An older client ignores
+the notification, as it ignores any it does not know; a client of an older
+host sees no count. Fixture 23.

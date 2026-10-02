@@ -241,11 +241,22 @@ func buildSocketHost(cfg Config, startedAt time.Time) (*frameHost, error) {
 	// frameStart; sol r10-c6 2) — so every golden's chip and elapsed read the
 	// same over the socket, from the host's word, as in process from the
 	// model's own, however long a run takes.
+	//
+	// A builder that gives its in-process runs a host TUI's own count of
+	// attached clients (Config.LocalPresence: the `N attached` golden, plan
+	// 032 §3.14) is the TUI-hosted session: over the socket its host counts
+	// the host TUI's seat with the run's own attachment
+	// (control.Options.LocalClient) and tells the model on its stream, so
+	// both runs draw the same count. Every other host counts nothing, as
+	// every golden before it has it.
+	local := cfg.LocalPresence != nil
 	h.srv = control.New(control.Options{
 		Workspace:      ws,
 		MaxBudget:      frameBudget,
 		PermissionMode: framePermissionMode(cfg.Yolo),
 		StartedAt:      startedAt,
+		Presence:       local,
+		LocalClient:    local,
 	})
 	h.srv.SetEngine(eng)
 	l, err := net.Listen("unix", path)
@@ -292,6 +303,7 @@ func buildSocketHost(cfg Config, startedAt time.Time) (*frameHost, error) {
 	run := cfg
 	run.Session = nil
 	run.Backend = h.sess
+	run.LocalPresence = nil
 	return &frameHost{cfg: run, head: h.head, start: h.start, match: h.match, barrier: h.barrier, end: h.end}, nil
 }
 

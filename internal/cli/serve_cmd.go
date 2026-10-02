@@ -451,7 +451,7 @@ func serveSession(cmd *cobra.Command, f *serveFlags, env hostEnv, sigs <-chan os
 	journalAt := journalDir(out)
 
 	lc := newHostLifecycle()
-	ctl, err := bindControl(runEnv, hostID, indexCWD, f.force, req, lc.stopFunc, out)
+	ctl, err := bindControl(runEnv, hostID, indexCWD, f.force, req, lc.stopFunc, false, out)
 	if err != nil {
 		return exitf(1, "craze serve: the control socket: %v", err)
 	}

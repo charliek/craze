@@ -225,6 +225,15 @@ const (
 	ItemRestore
 	// ItemEnd is the stream's last item (remote only): Err says why it ended.
 	ItemEnd
+	// ItemPresence is how many clients are attached to the session now
+	// (remote only; plan 032 §3.14, SF-64): Attached, every attached client,
+	// this one included, as the host counts them — the host's presence
+	// notification. 0 says the count is not known: the stream's
+	// subscription ended (a reset, a lost connection, a fall behind), and
+	// the next attachment's count is still to come. A host without the
+	// presence capability sends none. The latest is the one that holds; none
+	// is ever a session event.
+	ItemPresence
 )
 
 // Item is one thing Read delivers.
@@ -247,6 +256,9 @@ type Item struct {
 	// end, reset{session_closed}); on ItemReady, the start's failure (nil when
 	// the session came up), whose Error() is the host's start error text.
 	Err error
+	// Attached is an ItemPresence's count of attached clients, 0 for not
+	// known.
+	Attached int
 }
 
 // SessionInfo is the session's static facts (§3.13), fixed once the session

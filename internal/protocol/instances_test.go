@@ -93,6 +93,14 @@ func TestInstancesValidate(t *testing.T) {
 		Prompted:  true}
 	rowStartFailed := protocol.SessionRow{SessionInfo: withFacts, Activity: protocol.ActivityError,
 		Since: instanceTime, StartFailed: true, StartErr: "cursor-agent: not logged in"}
+	// Plan 032 §3.14's presence (SF-64): a row of a presence host carries how
+	// many clients are attached, omitted when none is.
+	withPresence := withFacts
+	withPresence.Capabilities.Presence = true
+	rowPresence := rowFacts
+	rowPresence.SessionInfo, rowPresence.Attached = withPresence, 2
+	rowNobody := rowPresence
+	rowNobody.Attached = 0
 	stateNoConfig := state
 	stateNoConfig.Settings.Config = json.RawMessage(`{}`)
 	// Plan 031 §3.6's rank (P9): a native session's remembered models carry
@@ -279,6 +287,14 @@ func TestInstancesValidate(t *testing.T) {
 			strings.Replace(rosterLastTurn(rowFacts), `"prompted":true`, `"prompted":true,"preview":"…"`, 1), false},
 		{"a head ask whose summary is not text", "sessions.list.json", "result",
 			strings.Replace(rosterLastTurn(rowFacts), `"summary":"Run `+"`go test ./...`"+`"`, `"summary":["Run"]`, 1), false},
+		{"a presence host's row, two attached", "sessions.list.json", "result", rosterLastTurn(rowPresence), true},
+		{"a presence host's row, nobody attached", "sessions.list.json", "result", rosterLastTurn(rowNobody), true},
+		{"a row whose attached is negative", "sessions.list.json", "result",
+			strings.Replace(rosterLastTurn(rowPresence), `"attached":2`, `"attached":-1`, 1), false},
+		{"a row whose attached is not a count", "sessions.list.json", "result",
+			strings.Replace(rosterLastTurn(rowPresence), `"attached":2`, `"attached":"two"`, 1), false},
+		{"a row whose presence is not a boolean", "sessions.list.json", "result",
+			strings.Replace(rosterLastTurn(rowPresence), `"presence":true`, `"presence":1`, 1), false},
 
 		// The hub's roster (plan 032 §3.6): sessions.list's result is a host's
 		// or the hub's, an anyOf, an empty roster being both.
@@ -528,6 +544,13 @@ func TestInstancesValidate(t *testing.T) {
 			StartFailed: true, Err: "agent exited"}), true},
 		inst{"a reset", "notification.reset.json", "params", jsonOf(t, protocol.ResetParams{Subscription: "s-1", Reason: protocol.ResetSlowConsumer}), true},
 		inst{"a reset for a reason there is none of", "notification.reset.json", "params", `{"subscription":"s-1","reason":"tired"}`, false},
+		// Plan 032 §3.14's presence (SF-64): no seq, a count that is never
+		// negative.
+		inst{"presence", "notification.presence.json", "params", jsonOf(t, protocol.PresenceParams{Subscription: "s-1", Attached: 2}), true},
+		inst{"presence of nobody", "notification.presence.json", "params", jsonOf(t, protocol.PresenceParams{Subscription: "s-1"}), true},
+		inst{"presence with a seq", "notification.presence.json", "params", `{"subscription":"s-1","attached":2,"seq":7}`, false},
+		inst{"presence with no count", "notification.presence.json", "params", `{"subscription":"s-1"}`, false},
+		inst{"presence of a negative count", "notification.presence.json", "params", `{"subscription":"s-1","attached":-1}`, false},
 		// The hub's (plan 032 §3.5, §3.6).
 		inst{"the hub closing its roster subscription", "notification.reset.json", "params",
 			jsonOf(t, protocol.ResetParams{Subscription: "r-1", Reason: protocol.ResetHubClosing}), true},

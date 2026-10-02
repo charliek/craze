@@ -254,6 +254,9 @@ func runTUI(cmd *cobra.Command, f *tuiFlags, env hostEnv) error {
 		rh.ctl = serveControl(runEnv, hostID, indexCWD, f.force, diag.craze())
 	}
 	cfg.OnEngine = rh.onEngine
+	// The count of clients attached to the session it hosts, its own seat
+	// included (plan 032 §3.14): nil with no socket.
+	cfg.LocalPresence = rh.ctl.localPresence()
 	cfg.ClaimSession = rh.claims.pickerClaim
 	// Only after resolveLoad: a --continue with no row has returned above, so
 	// the hub's goroutines start only for a run that reaches tui.Run, whose

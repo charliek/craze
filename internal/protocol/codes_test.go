@@ -227,7 +227,7 @@ func TestTheMethodTable(t *testing.T) {
 	if _, ok := protocol.Method("session.teleport"); ok {
 		t.Fatal("Method found a method protocol 1 does not name")
 	}
-	if want := []string{"event", "synchronized", "ready", "reset", "roster"}; !slices.Equal(protocol.Notifications(), want) {
+	if want := []string{"event", "synchronized", "ready", "reset", "presence", "roster"}; !slices.Equal(protocol.Notifications(), want) {
 		t.Fatalf("notifications %v, want %v", protocol.Notifications(), want)
 	}
 }

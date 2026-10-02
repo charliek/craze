@@ -74,7 +74,8 @@ type fixtureLine struct {
 
 // fixtureHost is a fixture's host line: which of Options' plan 030 opt-ins
 // its Host is built with (Options.Stop, PermissionMode, StartedAt, RowFacts),
-// and plan 031's model catalog (Options.Models).
+// plan 031's model catalog (Options.Models) and plan 032's presence
+// (Options.Presence).
 type fixtureHost struct {
 	// HubCreates is the hub's, in a two-socket fixture: one that serves
 	// session.create (hub.Options.Creates), its hosts this test binary run
@@ -85,6 +86,7 @@ type fixtureHost struct {
 	PermissionMode protocol.PermissionMode `json:"permissionMode,omitempty"`
 	StartedAt      bool                    `json:"startedAt,omitempty"`
 	RowFacts       bool                    `json:"rowFacts,omitempty"`
+	Presence       bool                    `json:"presence,omitempty"`
 	// Models is written as the catalog's own models are: id, name and, for
 	// a remembered one, recent.
 	Models []protocol.CatalogModel `json:"models,omitempty"`
@@ -99,7 +101,8 @@ func (fh *fixtureHost) options() Options {
 	for _, m := range fh.Models {
 		models = append(models, agent.ModelInfo{ID: m.ID, Name: m.Name, Recent: m.Recent})
 	}
-	return Options{Stop: fh.Stop, PermissionMode: fh.PermissionMode, StartedAt: fh.StartedAt, RowFacts: fh.RowFacts, Models: models}
+	return Options{Stop: fh.Stop, PermissionMode: fh.PermissionMode, StartedAt: fh.StartedAt, RowFacts: fh.RowFacts,
+		Presence: fh.Presence, Models: models}
 }
 
 // rawFixtureLine is one line of the file, its own bytes kept beside its

@@ -432,7 +432,7 @@ func TestHalfCloseBothWays(t *testing.T) {
 	env := testEnv(t)
 	h1, closeHost := hostIn(t, env, 1)
 	counts := make(chan int, 64)
-	h1.OnAttachments(func(n int) {
+	h1.AddAttachmentsListener(func(n int) {
 		select {
 		case counts <- n:
 		default:

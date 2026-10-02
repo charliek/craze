@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://charliek.github.io/craze/reference/protocol/schema/notification.presence.json",
+  "title": "presence",
+  "description": "How many clients are attached to the session now, the receiving one included: every attachment the host counts (pending, live or closing, not one whose peer has half-closed) and, on a TUI-hosted session, the hosting TUI's own seat — the count a sessions.list row's attached carries. Sent only by a host whose session capability presence is true: on each attachment once its synchronized has been written, then whenever the count changes, the latest value only and at most two a second, until the attachment ends (never after its reset or its detach's reply). It has no seq: it is none of the session's events, and is never sequenced or journalled. A client that does not know it ignores it.",
+  "$defs": {
+    "params": {
+      "type": "object",
+      "properties": {
+        "subscription": {"type": "string"},
+        "attached": {"type": "integer", "minimum": 0}
+      },
+      "required": ["subscription", "attached"],
+      "additionalProperties": false
+    }
+  }
+}

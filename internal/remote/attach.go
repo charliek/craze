@@ -104,11 +104,21 @@ const (
 	// KindError is the stream stopping for Item.Err: a hole, the re-attach
 	// bound, a refused re-attach, the client stopping. The last item.
 	KindError
+	// KindPresence is how many clients are attached to the session
+	// (Item.Attached; plan 032 §3.14): the host's presence notification for
+	// the live subscription — or 0, not known, once that subscription has
+	// ended (a reset, a lost connection, a fall behind) after a count was
+	// handed up. It is never sequenced, never a cursor's, and never makes the
+	// stream fall behind: queued past the byte bound, and folded into a
+	// presence item still waiting at the queue's tail (itemQueue
+	// .offerPresence), so the queue holds at most one between any two other
+	// items.
+	KindPresence
 )
 
 var kindNames = map[Kind]string{
 	KindAttached: "attached", KindEvent: "event", KindSynchronized: "synchronized", KindReady: "ready",
-	KindRestore: "restore", KindEnd: "end", KindError: "error",
+	KindRestore: "restore", KindEnd: "end", KindError: "error", KindPresence: "presence",
 }
 
 func (k Kind) String() string {
@@ -134,6 +144,9 @@ type Item struct {
 	Ready *protocol.ReadyParams
 	// Err is why an Error item stopped the stream.
 	Err error
+	// Attached is a Presence item's count of attached clients, 0 for not
+	// known.
+	Attached int
 
 	// cost is what the item counts in its queue (size, taken as it is
 	// queued).
@@ -256,6 +269,9 @@ type Stream struct {
 	// episode is how many re-attaches since the stream last reached
 	// synchronized.
 	episode int
+	// shown is the count of attached clients the stream last handed up (a
+	// Presence item), 0 for none or not known (presenceGoneLocked).
+	shown int
 	// reconnecting is closed once a reconnect's re-attach has been answered
 	// (or the stream has stopped or fallen behind): the reconnect sends its
 	// commands then.
@@ -420,6 +436,7 @@ func (s *Stream) prepareLocked(w *wire, p protocol.AttachParams) int {
 	s.params = p
 	s.cursor = p.Cursor
 	s.sub, s.subW = "", nil
+	s.presenceGoneLocked()
 	s.w = w
 	return s.tag
 }
@@ -495,6 +512,7 @@ func (s *Stream) reconnected(w *wire, resumed bool, sid string) <-chan struct{} 
 	}
 	s.w = w
 	s.sub, s.subW = "", nil
+	s.presenceGoneLocked()
 	withCursor := resumed && s.ready
 	if b := s.behind; b != nil {
 		// The subscription it abandoned went with its connection, and
@@ -735,12 +753,13 @@ func (s *Stream) refusedLocked(e *Error) (items []Item, retry, ended bool) {
 
 // notice is one notification of the stream's, decoded.
 type notice struct {
-	method string
-	sub    string
-	seq    uint64
-	body   json.RawMessage
-	ready  *protocol.ReadyParams
-	reason protocol.ResetReason
+	method   string
+	sub      string
+	seq      uint64
+	body     json.RawMessage
+	ready    *protocol.ReadyParams
+	reason   protocol.ResetReason
+	attached uint
 }
 
 // decodeNotice decodes a notification protocol 1 names; params that do not
@@ -765,6 +784,10 @@ func decodeNotice(method string, params json.RawMessage) (notice, error) {
 		var p protocol.ResetParams
 		err = json.Unmarshal(params, &p)
 		n.sub, n.reason = p.Subscription, p.Reason
+	case protocol.NotifyPresence:
+		var p protocol.PresenceParams
+		err = json.Unmarshal(params, &p)
+		n.sub, n.attached = p.Subscription, p.Attached
 	}
 	if err != nil {
 		return notice{}, fmt.Errorf("%w: %s's params: %w", errMalformed, method, err)
@@ -818,8 +841,47 @@ func (s *Stream) note(w *wire, n notice) {
 	case protocol.NotifyReset:
 		s.resetLocked(w, n.reason)
 		return
+	case protocol.NotifyPresence:
+		s.presenceLocked(int(min(n.attached, uint(maxAttached))))
 	}
 	s.mu.Unlock()
+}
+
+// maxAttached bounds the count a presence item carries: far past any number
+// of clients, and an int on every platform.
+const maxAttached = 1 << 20
+
+// presenceLocked hands up n, the count of attached clients, as a Presence
+// item (KindPresence): never refused for room, and folded into one still
+// waiting at the queue's tail (itemQueue.offerPresence). s.mu is held.
+func (s *Stream) presenceLocked(n int) {
+	s.shown = n
+	s.q.offerPresence(n)
+}
+
+// presenceGoneLocked is the live subscription ending — a reset, a re-attach,
+// a lost connection, a fall behind — with a count handed up for it: the
+// count is not known again until the next attachment's presence, and a
+// Presence item of 0 says so. s.mu is held.
+func (s *Stream) presenceGoneLocked() {
+	if s.shown != 0 {
+		s.presenceLocked(0)
+	}
+}
+
+// wireLost is connection w gone (Client.lost, on w's reader, before its
+// reconnect starts): a count handed up for a subscription that lived on w is
+// not known any more, and a Presence of 0 says so at once — not only once a
+// reconnect has adopted another connection (reconnected), which a failing
+// redial or a hanging handshake can hold off for the whole episode. A
+// subscription on another connection, a newer one, keeps its count.
+func (s *Stream) wireLost(w *wire) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.done || s.subW != w {
+		return
+	}
+	s.presenceGoneLocked()
 }
 
 // brokenLocked stops the stream for err — never swallowed — its live
@@ -838,6 +900,7 @@ func (s *Stream) brokenLocked(w *wire, err error) {
 // held, and released here.
 func (s *Stream) resetLocked(w *wire, reason protocol.ResetReason) {
 	s.sub, s.subW = "", nil
+	s.presenceGoneLocked()
 	var cursor *protocol.Cursor
 	switch reason {
 	case protocol.ResetSessionClosed:
@@ -877,6 +940,7 @@ func (s *Stream) resetLocked(w *wire, reason protocol.ResetReason) {
 func (s *Stream) fellBehindLocked(cursor bool, need int) {
 	sub, sw, sid := s.sub, s.subW, s.sessionID
 	s.sub, s.subW = "", nil
+	s.presenceGoneLocked()
 	b := &behind{cursor: cursor, need: need, detaching: sub != "" && sw != nil}
 	s.behind = b
 	// A reconnect waiting on this re-attach goes on: the stream re-attaches
@@ -1262,6 +1326,31 @@ func (q *itemQueue) offer(items ...Item) bool {
 	q.observeLocked(items...)
 	q.changedLocked()
 	return true
+}
+
+// offerPresence queues a Presence item of n, whatever the bound: in place of
+// the count of one still at the queue's tail — not yet handed out, and with
+// nothing queued after it — or after the rest. So it never refuses and never
+// makes the stream fall behind, and the queue holds at most one Presence item
+// between any two others: what it holds of them is bounded by the rest. A
+// closed queue takes nothing.
+func (q *itemQueue) offerPresence(n int) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if q.closed {
+		return
+	}
+	it := Item{Kind: KindPresence, Attached: n}
+	if last := len(q.items) - 1; last >= 0 && q.items[last].Kind == KindPresence {
+		it.cost = q.items[last].cost
+		q.items[last] = it
+	} else {
+		it.cost = it.size()
+		q.items = append(q.items, it)
+		q.bytes += it.cost
+	}
+	q.observeLocked(it)
+	q.changedLocked()
 }
 
 // observeLocked shows the observer items just queued; q.mu is held.

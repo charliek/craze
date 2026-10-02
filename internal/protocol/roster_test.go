@@ -66,8 +66,8 @@ func TestARosterRowKeepsTheHostsRowWhole(t *testing.T) {
 	// A newer host's row: members this build has never heard of, at the top
 	// (one of them an object of its own) and nested inside objects this build
 	// does know.
-	newer := withMember(t, withMember(t, jsonOf(t, host), "attached", "2"), "preview", `{"lines":["a","b"],"cut":false}`)
-	newer = withNestedMember(t, withNestedMember(t, newer, "headAsk", "urgency", `"high"`), "capabilities", "presence", "true")
+	newer := withMember(t, withMember(t, jsonOf(t, host), "watching", "2"), "preview", `{"lines":["a","b"],"cut":false}`)
+	newer = withNestedMember(t, withNestedMember(t, newer, "headAsk", "urgency", `"high"`), "capabilities", "teleport", "true")
 	in := `{"hostId":"0190ab12cd34","sessionId":"` + info.SessionID + `","host":{"pid":4242,"crazeVersion":"0.9.0","protocol":1,` +
 		`"provider":"grok","workspace":"/work","startedAt":"2026-09-25T10:30:45Z","ready":true},` +
 		`"status":"reachable","approximate":false,"row":` + newer + `}`
@@ -155,7 +155,7 @@ func TestARosterRowKeepsTheHostsRowWhole(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if bytes.Contains(lossy, []byte(`"preview"`)) || bytes.Contains(lossy, []byte(`"attached"`)) {
+	if bytes.Contains(lossy, []byte(`"preview"`)) || bytes.Contains(lossy, []byte(`"watching"`)) {
 		t.Fatalf("a typed row kept the unknown members (%s): the control cannot tell the preserved row from a re-encoded one", lossy)
 	}
 }

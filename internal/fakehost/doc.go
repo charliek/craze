@@ -20,7 +20,9 @@
 // and startedAt out, and answers sessions.list with S2's row. Options turns
 // each on (plan 030 §3.6a, §3.7, §3.8; X1): Stop serves session.stop through
 // a coordinator whose sequence the run_stop op runs, RowFacts puts the row
-// facts on the row, and a fixture asks for them in its first line ({"dir":
+// facts on the row, Presence (plan 032 §3.14) counts the attached clients —
+// capabilities.presence, the row's attached and the presence notification —
+// and a fixture asks for them in its first line ({"dir":
 // "host", …}). The same line's models (Options.Models, plan 031 §3.6) gives
 // the Stub the catalog a native session advertises — remembered models with
 // their rank, the catalogs' "recent" — in place of its own; the Stub's

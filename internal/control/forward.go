@@ -189,13 +189,13 @@ func (f *forwarder) record(rec agent.Record, stop <-chan struct{}) forwarded {
 func (f *forwarder) catchUp(stop <-chan struct{}) forwarded {
 	a := f.a
 	if !f.synced && f.pos >= a.cutoff {
-		if r := f.notify(protocol.NotifySynchronized, protocol.SynchronizedParams{Subscription: a.id, Seq: a.cutoff}, stop); r != forwardedOK {
+		if r := f.notify(protocol.NotifySynchronized, protocol.SynchronizedParams{Subscription: a.id, Seq: a.cutoff}, stop, f.armPresence); r != forwardedOK {
 			return r
 		}
 		f.synced = true
 	}
 	if f.ready != nil && f.pos >= f.ready.seq {
-		if r := f.notify(protocol.NotifyReady, f.ready.params, stop); r != forwardedOK {
+		if r := f.notify(protocol.NotifyReady, f.ready.params, stop, nil); r != forwardedOK {
 			return r
 		}
 		f.ready = nil
@@ -203,8 +203,21 @@ func (f *forwarder) catchUp(stop <-chan struct{}) forwarded {
 	return forwardedOK
 }
 
-// notify queues one notification of the attachment's.
-func (f *forwarder) notify(method string, params any, stop <-chan struct{}) forwarded {
+// armPresence is synchronized's commit on a Presence server (conn.go's
+// "Presence"): in the conn.mu section that queues it, a live attachment's
+// presence slot is armed — the count follows the synchronized. One whose end
+// is claimed already (a detach's, the forwarder's own) is owed none.
+func (f *forwarder) armPresence() {
+	if f.c.srv.opts.Presence && f.a.state == attLive {
+		if h := f.c.srv.hooks.beforeArm; h != nil {
+			h(f.a.id)
+		}
+		f.c.out.armPresence(f.a.id)
+	}
+}
+
+// notify queues one notification of the attachment's, with commit (push).
+func (f *forwarder) notify(method string, params any, stop <-chan struct{}, commit func()) forwarded {
 	line, err := notificationLine(method, params)
 	if err != nil {
 		// Only the server's own documents are in these; one that cannot be
@@ -212,7 +225,7 @@ func (f *forwarder) notify(method string, params any, stop <-chan struct{}) forw
 		f.c.srv.logf("control: conn %d %s: %s cannot be put on a line: %v", f.c.id, f.a.id, method, err)
 		return forwardedOK
 	}
-	return f.push(line, stop, nil)
+	return f.push(line, stop, commit)
 }
 
 // push queues one line of the attachment's with commit (conn.enqueue). It is
@@ -342,6 +355,9 @@ func (f *forwarder) terminal(reason protocol.ResetReason, final []agent.Record, 
 		a.state = attClosing
 		a.changedLocked()
 	}
+	// Its end is claimed: no presence from here on, so none follows the
+	// final records' reset (conn.go's "Presence").
+	c.out.disarmPresence(a.id)
 	c.unwritten++
 	c.mu.Unlock()
 	if endsSession {

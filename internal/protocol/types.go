@@ -324,6 +324,13 @@ type CatalogMode struct {
 // omitted when false — which is every older host's document, and the fake
 // host's by default (X1), so no fixture from before it moves — and so absent
 // means an older host: a client then reads the row as S2's.
+//
+// Presence is the host's own too (plan 032 §3.14, SF-64): true where the
+// host counts the clients attached to the session — every craze from plan 032
+// on, detached or TUI-hosted — and so sends each attachment the presence
+// notification and puts attached on the session's sessions.list row. It is
+// omitted when false, as rowFacts is: absent is an older host, which sends no
+// presence, and a client then shows no count.
 type SessionCapabilities struct {
 	Interject           bool `json:"interject"`
 	SubagentCancel      bool `json:"subagentCancel"`
@@ -342,6 +349,7 @@ type SessionCapabilities struct {
 	HistoryCursor       bool `json:"historyCursor"`
 	Stop                bool `json:"stop"`
 	RowFacts            bool `json:"rowFacts,omitempty"`
+	Presence            bool `json:"presence,omitempty"`
 }
 
 // SessionRow is one sessions.list row (plan 027 §3.3): the info document
@@ -396,6 +404,15 @@ type SessionRow struct {
 	// Prompted says a turn has been started at all (StateResult.Prompted): a
 	// session that never was has nothing to resume.
 	Prompted bool `json:"prompted,omitempty"`
+
+	// Attached is how many clients are attached to the session as the row is
+	// read (plan 032 §3.14, SF-64): every attachment the host counts —
+	// pending, live or closing, but not one whose peer has half-closed — and,
+	// on a TUI-hosted session, the hosting TUI's own seat. It is carried where
+	// the session capability presence is true and omitted when 0: on such a
+	// host an absent one is 0, and on one without presence, unknown. A
+	// connection that only lists is not attached.
+	Attached uint `json:"attached,omitempty"`
 }
 
 // RowTextCells is the widest a row fact's string is, in terminal cells (plan
@@ -1241,6 +1258,19 @@ type ReadyParams struct {
 	Session      SessionInfo `json:"session"`
 	StartFailed  bool        `json:"startFailed"`
 	Err          string      `json:"err,omitempty"`
+}
+
+// PresenceParams is a presence notification's params (plan 032 §3.14,
+// SF-64): how many clients are attached to the session now, the receiving one
+// included — the count SessionRow.Attached carries. A host sends it on an
+// attachment once its synchronized has been written, and again whenever the
+// count changes — the latest value only, at most two a second — until the
+// attachment ends: never before synchronized, and never after its reset or
+// its detach's reply. It has no seq: it is none of the session's events, and
+// no cursor or journal holds it.
+type PresenceParams struct {
+	Subscription string `json:"subscription"`
+	Attached     uint   `json:"attached"`
 }
 
 // RosterParams is a roster notification's params (plan 032 §3.6): the hub's

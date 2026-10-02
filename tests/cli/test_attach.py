@@ -126,6 +126,30 @@ def test_attach_sees_the_host_quit(
     _wait_fake_gone(fake_agent_bin)
 
 
+def test_attach_and_its_host_both_show_two_attached(
+    craze_bin: Path, fake_agent_bin: Path, tmp_path: Path, both_modes: str
+) -> None:
+    """Presence (plan 032 §3.14, A15): with `craze attach` open beside the TUI
+    that started the session, status row 2 of both ends in `2 attached` -- on
+    the opt-out's TUI-hosted socket the host TUI's own seat is counted with
+    the attach; detached, the launching TUI is a client like the attach. The
+    host TUI alone shows no chip before the attach."""
+    with _host(craze_bin, fake_agent_bin, tmp_path, tmp_path) as host:
+        host.wait_contains("cursor")
+        host.write(b"before the view\r")
+        host.wait_contains("echo: before the view")
+        _wait_running_entry(tmp_path / ".cache" / "craze")
+        assert "attached" not in _ANSI.sub("", host.screen()), host.screen()[-3000:]
+        host_mark = host.mark()
+
+        with _attach(craze_bin, tmp_path, tmp_path) as view:
+            view.wait_contains("2 attached")
+            host.wait_contains_since("2 attached", host_mark)
+            quit_craze(host)
+            assert view.wait_exit(timeout=WAIT) == 0, view.screen()[-3000:]
+    _wait_fake_gone(fake_agent_bin)
+
+
 def _wait_gone(hosts: Path, timeout: float = 5.0) -> None:
     """Every registry entry under hosts removed, within timeout (a stopped
     detached host unlinks its own entry, §3.6a)."""

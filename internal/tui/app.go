@@ -260,6 +260,17 @@ type Config struct {
 	// and the frame runner inside its isolated HOME. A test that pastes an
 	// image sets it to a temporary directory.
 	AttachmentsDir string
+	// LocalPresence is how many clients are attached to the session this
+	// TUI hosts, its own seat included (plan 032 §3.14, R2-7): the
+	// TUI-hosted control server's count (control.Options.LocalClient),
+	// which internal/cli keeps in this latest-value channel, read by a
+	// command of the model's own (presenceCmd) since the in-process
+	// backend's stream carries only the engine's events. Status row 2 shows
+	// `N attached` while it is 2 or more. It is read only on the in-process
+	// path, and closed when the server is; nil — every test Config, every
+	// golden but the chip's own, the frame runner, the launch flow and a
+	// craze with no socket — reads nothing.
+	LocalPresence <-chan int
 }
 
 // viewing is c as it runs: for a viewer (Config.Viewer with a Backend)
@@ -276,6 +287,7 @@ func (c Config) viewing() Config {
 	}
 	c.Session, c.NewSession, c.LoadSession, c.Resume = nil, nil, nil, nil
 	c.ClaimSession, c.RefuseLoad, c.OnEngine = nil, nil, nil
+	c.LocalPresence = nil
 	c.NewBackend, c.LoadBackend, c.Continue = nil, nil, nil
 	c.PersistProvider = false
 	c.SessionIndex = nil
@@ -342,6 +354,19 @@ type Model struct {
 	// 0 on a message is one a test built by hand, and means whichever
 	// backend the model holds, as the zero session stamp does (issued).
 	bgen uint64
+	// attached is how many clients the backend's stream last said are
+	// attached to the session, this one included (backend.ItemPresence; plan
+	// 032 §3.14, SF-64): the current backend generation's, 0 while not known
+	// — before the first presence, and from a restore, the stream's end or the
+	// adoption of another backend until the next one. Status row 2 shows it
+	// at 2 or more (presenceChip).
+	attached int
+	// localPresence is Config.LocalPresence, the in-process host TUI's count
+	// from its own server, read by presenceCmd; nil anywhere else. hostAttached
+	// is the last count it gave: the server's, for its whole life, whichever
+	// engine a picker has put behind it.
+	localPresence <-chan int
+	hostAttached  int
 	// shownGen is the shown-session generation (plan 030 §3.11; C11r2, astra
 	// r24-fix1112): it moves when the TUI starts showing another session —
 	// a switch (switchBackend) — and on nothing else, and the results of this
@@ -1584,8 +1609,10 @@ func (m *Model) dropSession() {
 	// and its backend's Ready is still to come.
 	m.upDone = false
 	m.startInc = ""
-	// Its host's facts are its own, read again from its backend (recompute).
+	// Its host's facts are its own, read again from its backend (recompute);
+	// its count of attached clients comes on its own stream (presence.go).
 	m.hostPerm, m.hostStart = backend.PermissionUnsaid, time.Time{}
+	m.attached = 0
 	m.owner.set(nil)
 }
 
@@ -1656,6 +1683,7 @@ func New(cfg Config) Model {
 		claimSession:    cfg.ClaimSession,
 		refuseLoad:      cfg.RefuseLoad,
 		onEngine:        cfg.OnEngine,
+		localPresence:   cfg.LocalPresence,
 		resume:          resumeRows(cfg.Resume),
 		sessionIndex:    cfg.SessionIndex,
 		crazeID:         cfg.CrazeSessionID,
@@ -1721,6 +1749,9 @@ func New(cfg Config) Model {
 	// that builds another session carries its own row's id instead.
 	if cfg.Backend != nil {
 		m.setBackend(cfg.Backend)
+		// Its count comes on its stream (attached); a host's own count is
+		// the in-process path's alone.
+		m.localPresence = nil
 	} else {
 		m.setSession(sess, m.crazeID)
 	}
@@ -1971,15 +2002,19 @@ func finishRun(out io.Writer, final tea.Model, m Model, h Host) (bool, error) {
 // The read it arms is the one the command gate's reader rule counts: New set
 // m.reading to match, since this value receiver cannot.
 func (m Model) Init() tea.Cmd {
+	// The host TUI's count of attached clients is read for the program's
+	// whole life, a picker's wait included: it is the server's, not a
+	// session's (presenceCmd; nil off the in-process path).
+	presence := presenceCmd(m.localPresence)
 	if m.picking() {
-		return nil
+		return presence
 	}
 	if m.spawnWaiting != 0 {
 		// The launch flow's session is not here yet: Init spawns it, and its
 		// start and its reader are armed once it is adopted (launch.go).
-		return m.initSpawn()
+		return tea.Batch(m.initSpawn(), presence)
 	}
-	return tea.Batch(m.startCmd(), waitEvent(m.eng, m.bgen))
+	return tea.Batch(m.startCmd(), waitEvent(m.eng, m.bgen), presence)
 }
 
 // startCmd starts the session through the engine, whose gate opens on it: until
@@ -2150,6 +2185,7 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// CodeRabbit on #71).
 			m.first = nil
 			m.ended, m.endErr = true, msg.err
+			m.attached = 0
 			m.sessionEnded(msg.err)
 			return m, nil
 		}
@@ -2163,7 +2199,21 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if !m.applyRestore(msg) {
 			return m, nil
 		}
+		// A new attachment: its own count of attached clients follows it
+		// (presence.go), and until then there is none.
+		m.attached = 0
 		return m, m.readLastTurn()
+
+	case presenceMsg:
+		// How many clients are attached, this one included (presence.go):
+		// the stream's latest, 0 when it no longer knows.
+		m.attached = msg.n
+		return m, nil
+
+	case localPresenceMsg:
+		// The host TUI's own server's count, and the next read of it.
+		m.hostAttached = msg.n
+		return m, presenceCmd(m.localPresence)
 
 	case lastTurnMsg:
 		m.applyLastTurn(msg)
@@ -2194,6 +2244,8 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// this goes (plan 031 §3.9, dropConnect): the list covers the box,
 		// and nothing would reach it or its field again.
 		m = m.dropConnect()
+		// Nobody is attached through a stream that has ended.
+		m.attached = 0
 		if f := m.first; f != nil && !m.quitting {
 			// The session an unstarted session's first prompt spawned ended
 			// before it came up: the same as its start failing (§3.13).
@@ -5115,9 +5167,10 @@ func workspaceName(cwd string) string {
 // outbox may still be publishing after a turn's ending.
 //
 // Every item is delivered, each as its message: an event as an eventMsg with
-// its stream generation; and the three a socket's stream adds (PR 4; nothing
-// in process delivers them) — a Restore as a restoreMsg, a Ready as a readyMsg
-// and an End as an endMsg (restore.go). After each the command gate decides
+// its stream generation; and the four a socket's stream adds (PR 4; nothing
+// in process delivers them) — a Restore as a restoreMsg, a Ready as a readyMsg,
+// an End as an endMsg (restore.go) and a Presence as a presenceMsg (plan 032
+// §3.14, presence.go). After each the command gate decides
 // whether the next read starts (readOn): exactly one is ever in flight, and
 // each is held and drained in arrival order like any other message. A stream
 // that has ended (backend.ErrClosed, after its End) or failed is nil, as a
@@ -5152,6 +5205,8 @@ func waitEvent(b backend.Backend, bgen uint64) tea.Cmd {
 				return readyMsg{info: it.Info, err: it.Err, bgen: bgen}
 			case backend.ItemEnd:
 				return endMsg{err: it.Err, bgen: bgen}
+			case backend.ItemPresence:
+				return presenceMsg{n: it.Attached, gen: it.Gen, bgen: bgen}
 			}
 			// A kind this build does not know carries nothing to apply: it
 			// is read past, as the stream's own unknown items are.

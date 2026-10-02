@@ -255,6 +255,7 @@ A row is the [session info document](#the-session-info-document) plus:
 | `headAsk` | `{id, kind, label, summary?}`, the first open ask (absent when none is); `summary` is a [row fact](#the-row-facts) |
 | `lastTurn` | how the last turn ended — [below](#the-last-turn); absent while a turn runs, before any has ended, and from an older host |
 | `doing`, `lastReply`, `since`, `startFailed`, `startErr`, `prompted` | the [row facts](#the-row-facts), where the session capability `rowFacts` is `true` |
+| `attached` | where the session capability `presence` is `true`: how many clients are attached as the row is read — the count a [`presence`](#presence) notification carries; absent is `0` on such a host, and unknown on any other |
 
 `activity`/`foreignTurn` answer "is it running"; `pendingAsks`/`headAsk`
 answer "is it blocked on me" — two independent signals, because an agent can
@@ -644,6 +645,7 @@ attachment's, from a host, or the roster subscription's, from the hub.
 | `synchronized` | `subscription`, `seq` | the stream has delivered through this attachment's cutoff — shed's "ready" for the *stream* (not to be confused with `ready`, the *session*'s readiness). Sent once per attachment |
 | `ready` | `subscription`, `session`, `startFailed`, `err?` | the session's start has finished (`startFailed: false`) or failed (`true`, `err` the text); owed once, only to an attachment made **before** readiness (`when: "now"`, or a `when: "ready"` attach that raced the start) — but not delivered if that subscription resets before its position reaches the seq the start completed at, and not owed at all if the session closes without ever starting (that attachment ends `reset{session_closed}` instead, with no `ready`). `session` is the final [info document](#the-session-info-document) — catalogs and provider session id included |
 | `reset` | `subscription`, `reason` | the subscription is over (below) |
+| `presence` | `subscription`, `attached` | how many clients are attached to the session now, this one included — see [below](#presence); only from a host whose session capability `presence` is `true` |
 | `roster` | `subscription`, `epoch`, `cursor`, `upserts[]`, `removes[]` | the hub's alone: the roster's net change since the cursor the subscriber last had — see [the hub's roster](#the-hubs-roster) |
 
 A `reset` is a notification, not a gap: nothing is ever silently lost. Every
@@ -662,6 +664,34 @@ A roster subscription can also end `slow_consumer` (the subscriber fell 10 s
 behind) or `omitted` (the roster's completeness changed: it crossed 512 rows,
 either way); the client subscribes again and reads `truncated` from the
 reply.
+
+### `presence`
+
+A host whose session capability `presence` is `true` — every craze from plan
+032 on, detached or TUI-hosted — tells each attachment how many clients are
+attached to the session: `attached` counts every attachment the host holds
+that is not yet closed (pending, live or closing), less any whose connection's
+peer has half-closed, and, on a TUI-hosted session, the hosting TUI's own seat
+(so a `craze attach` beside it reads `2`). A connection that only says `hello`
+or lists is not attached.
+
+- It is sent on an attachment once its `synchronized` has been written, and
+  then whenever the count changes — the latest count only, at most two a
+  second on a connection: a count that moves several times between two sends
+  goes out once, as its latest value, and one that comes back to what was last
+  sent is not sent at all.
+- It is never sent before `synchronized`, nor after the attachment's `reset`
+  or its `session.detach` reply.
+- It has no `seq` and is no session event: nothing sequences, journals or
+  replays it, and no cursor covers it. A client keeps the latest for its live
+  subscription and forgets it when that subscription ends — until the next
+  attachment's arrives.
+- Each connection is sent its count by its own writer: a client that has
+  stopped reading delays its own count and nobody else's.
+
+A client that does not know `presence` ignores it, as any notification it
+does not know. A host without the capability sends none, and its rows carry no
+`attached`.
 
 ## Attach, resume, and snapshots
 
@@ -899,7 +929,7 @@ hub's result](#the-hubs-result)).
 **Session** (the info document's `capabilities`): every field of the
 engine's own capability set, in its wire name, plus four the protocol states
 for every host of protocol 1 — three always `true`, and `stop`, which says
-what this host can do — and `rowFacts`, the host's too:
+what this host can do — and `rowFacts` and `presence`, the host's too:
 
 | wire name | meaning |
 |---|---|
@@ -920,6 +950,7 @@ what this host can do — and `rowFacts`, the host's too:
 | `historyCursor` | `true` on every host in protocol 1 |
 | `stop` | the host's own, not the provider's: `true` where [`session.stop`](#sessionstop) is served (every `craze serve`), `false` on a TUI-hosted session and on a host from before it existed |
 | `rowFacts` | the host's own too, and omitted when `false`: the session's `sessions.list` row carries the [row facts](#the-row-facts). It is a session capability, not a connection one, because it describes the row, and a hub's roster carries rows of hosts of different builds |
+| `presence` | the host's own too, and omitted when `false`: the host counts the clients attached to the session, sends each attachment the [`presence`](#presence) notification, and puts `attached` on the session's row |
 
 A client hides — never merely disables — whatever a capability says this
 session cannot do. A capability the engine's own `agent.Capabilities` grows
@@ -943,7 +974,9 @@ version number: a client checks `capabilities.foo`, never "am I talking to a
 build recent enough to have foo". A capability or a field that is **absent**
 means an older host: `capabilities.stop` is `false` there (and `session.stop`
 answers `stop_unsupported`), `capabilities.rowFacts` is absent (and so are
-the row facts), and the info document's `permissionMode` and `startedAt` and
+the row facts), `capabilities.presence` is absent (and so are the row's
+`attached` and every `presence` notification — a client shows no count), and
+the info document's `permissionMode` and `startedAt` and
 the state's and row's `lastTurn` are simply not there — a
 client falls back to what it did before each existed, and the schema, closed
 as it is, describes every one of them as optional. A catalog model's `recent`
@@ -1390,18 +1423,21 @@ the hub's `hello` and roster (19), a roster subscription told of the
 host's change and then of its leaving the registry (20), and a splice — a
 `session.connect` with the client's host `hello` pipelined behind it, an
 attach and an event through it, and on a second connection a connect to no
-session and one that is no longer the first (21); and against a hub that
+session and one that is no longer the first (21); against a hub that
 creates sessions, a `session.create` with a first prompt, taken, its repeat
 answered the same, the same `requestId` with other params refused
 `request_conflict`, and a create whose session's start fails,
-`start_failed` with its cause (22). Every line is
+`start_failed` with its cause (22); and a presence host
+counting two clients — each told after its `synchronized`, the first told
+again of the second's arrival and of its detach, the row saying `attached: 2`
+(23). Every line is
 `{"conn": N, "dir": "c2s"|"s2c", "msg": {...}}`, plus `{"dir": "op", "op":
 {...}}` lines that are not wire messages at all — they script the host
 directly (emitting text, opening an ask, restarting the engine into a fresh
 incarnation, stalling or dropping connections, running a stop's sequence) —
 and, as a fixture's first line or not at all, `{"dir": "host", "host":
 {...}}`, which says how the host was built: `stop`, `permissionMode`,
-`startedAt` and `rowFacts` turn on what an older host does not have, and
+`startedAt`, `rowFacts` and `presence` turn on what an older host does not have, and
 `models` gives it a catalog of its own. The seventeen fixtures
 without one are, byte for byte, an older host to a newer client. `TestWireFixtures` replays
 every one of them byte for byte, validating every line against the schema

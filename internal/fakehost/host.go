@@ -72,6 +72,12 @@ type Options struct {
 	// server's, from the engine over the Stub, every time on the Host's
 	// pinned clock. Off, the row is S2's.
 	RowFacts bool
+	// Presence is plan 032 §3.14's opt-in (SF-64): capabilities.presence in
+	// the info document, attached on the sessions.list row, and the presence
+	// notification on every attachment — the real server's. Off, the Host
+	// sends none of it, an older host's wire, so no fixture from before it
+	// moves.
+	Presence bool
 
 	// Models, when non-empty, is the Stub's model catalog in place of its own
 	// (grok, fast): plan 031's opt-in, so a fixture can advertise what a
@@ -233,6 +239,7 @@ func newHost(o Options, hooks hostHooks) (*Host, error) {
 		Clock:          h.clk.now,
 		PermissionMode: o.PermissionMode,
 		RowFacts:       o.RowFacts,
+		Presence:       o.Presence,
 	}
 	if o.Stop {
 		co.Stop = h.stopRequested
@@ -475,12 +482,15 @@ func (h *Host) HostID() string { return h.srv.HostID() }
 // poller that keeps one per host, and closes them all when it stops.
 func (h *Host) OpenConns() int { return h.srv.OpenConns() }
 
-// OnAttachments is the server's (control.Server.OnAttachments): f is told the
-// number of attached clients at every change, in order — a client's
-// half-close takes its attachment out of the count — under the server's
-// locks, so it must only record the number. What a test of a splice in front
+// AddAttachmentsListener is the server's
+// (control.Server.AddAttachmentsListener): f is told the number of attached
+// clients at every change, in order — a client's half-close takes its
+// attachment out of the count — under the server's locks, so it must only
+// record the number, until remove is called. What a test of a splice in front
 // of this Host watches (plan 032 A11).
-func (h *Host) OnAttachments(f func(n int)) { h.srv.OnAttachments(f) }
+func (h *Host) AddAttachmentsListener(f func(n int)) (remove func()) {
+	return h.srv.AddAttachmentsListener(f)
+}
 
 // SessionID is the durable craze session id every incarnation shares.
 func (h *Host) SessionID() string { return h.opts.CrazeSessionID }

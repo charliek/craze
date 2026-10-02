@@ -65,6 +65,7 @@ var notificationTypes = map[string]any{
 	protocol.NotifySynchronized: protocol.SynchronizedParams{},
 	protocol.NotifyReady:        protocol.ReadyParams{},
 	protocol.NotifyReset:        protocol.ResetParams{},
+	protocol.NotifyPresence:     protocol.PresenceParams{},
 	protocol.NotifyRoster:       protocol.RosterParams{},
 }
 

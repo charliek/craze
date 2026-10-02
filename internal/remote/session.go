@@ -580,6 +580,14 @@ func (s *Session) item(st *Stream, it Item) (backend.Item, bool) {
 		s.over = true
 		s.mu.Unlock()
 		return backend.Item{Kind: backend.ItemEnd, Err: it.Err}, true
+	case KindPresence:
+		// How many clients are attached (plan 032 §3.14), in the stream
+		// generation it was read in: a Restore after it is a later
+		// attachment's, whose own count follows it.
+		s.mu.Lock()
+		gen := s.gen
+		s.mu.Unlock()
+		return backend.Item{Kind: backend.ItemPresence, Attached: it.Attached, Gen: gen}, true
 	}
 	// synchronized, and a kind this build does not hand up.
 	return backend.Item{}, false

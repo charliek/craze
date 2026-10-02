@@ -162,6 +162,7 @@ var goldenManifest = map[string]goldenRuns{
 	"plugin-open":                            bothTransports,
 	"plugin-provisional":                     bothTransports,
 	"plugin-sent":                            bothTransports,
+	"presence-100x30":                        bothTransports,
 	"provider-picker-100x30":                 inprocOnly,
 	"provider-picker-3rows-100x30":           inprocOnly,
 	"provider-picker-3rows-40x12":            inprocOnly,
@@ -503,7 +504,8 @@ func transportList(set map[frameTransport]bool) string {
 // the unstarted session (C15), the four of the input's `/` popup (C16) and
 // the four of the composer's `@` popup (C18), and plan 032's list over a
 // session with a card up (C3) and the six of the input's `/effort` and
-// `/fast` and its rule with both set (C17), in process only.
+// `/fast` and its rule with both set (C17), in process only; and plan 032's
+// `N attached` chip (C18, presence-100x30), under both.
 func TestTheGoldenManifestIsEveryGolden(t *testing.T) {
 	files, err := filepath.Glob(filepath.Join("testdata", "*.golden"))
 	if err != nil {
@@ -531,8 +533,8 @@ func TestTheGoldenManifestIsEveryGolden(t *testing.T) {
 			t.Errorf("the manifest runs %s under %v: a golden runs under both transports, or in process alone", name, runs)
 		}
 	}
-	if both != 127 || inprocAlone != 43 {
-		t.Errorf("the manifest lists %d goldens under both transports and %d in process alone, want 127 and 43 (A8)", both, inprocAlone)
+	if both != 128 || inprocAlone != 43 {
+		t.Errorf("the manifest lists %d goldens under both transports and %d in process alone, want 128 and 43 (A8)", both, inprocAlone)
 	}
 }
 
