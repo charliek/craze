@@ -159,6 +159,9 @@ func (m Model) withSession(seed sessionSeed) Model {
 		drafts:          m.drafts,
 		retired:         m.retired,
 		completeLoads:   m.completeLoads,
+		// The /connect sign-ins' set is the TUI's, for finishRun: the run a
+		// switch ends (above) is ended through it, and taken out of it.
+		signIns: m.signIns,
 		// Where /connect and the connect row read and write (plan 031
 		// §3.9): the TUI's own native directory and environment, whichever
 		// session it shows.

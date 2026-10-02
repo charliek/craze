@@ -1589,15 +1589,19 @@ auth login chatgpt`](cli.md#signing-in-to-the-chatgpt-plan) inside the box.
   machine, the page it lands on after you approve does not load: copy that
   page's whole address from the address bar, paste it into the field under the
   address — a terminal paste or `Ctrl+V` — and press `Enter`. If craze could
-  not listen, the hint names the address the browser lands on. Unlike the key
-  field, this field is **not masked**: the address holds a one-time code and
-  the sign-in's state, not a key or a token. A line that is not an address — an
-  API key pasted out of habit, say — or the address of another sign-in is
-  refused in the field, which is emptied, and is never repeated. Whichever
+  not listen, the hint names the address the browser lands on. The field shows
+  what is in it only while that reads as the address the browser lands on — it
+  starts `http://127.0.0.1:<port>/auth/callback`, and holds a one-time code and
+  the sign-in's state, not a key or a token — and masks anything else with `•`,
+  as the key field does, so an API key pasted there out of habit is never drawn,
+  not even before `Enter`. A line that is not an address, or the address of
+  another sign-in, is refused in the field, which is emptied, and is never
+  repeated. Whichever
   comes first, the browser's return or the pasted address, finishes the
   sign-in (`Signing in…`).
 - **`Esc`** goes back to step one and stops the sign-in, closing craze's
-  listener; so does every other way out of the box.
+  listener; so does every other way out of the box, and every way craze
+  exits — a quit, the terminal closing, `SIGTERM`, or craze failing.
 - **Signed in**, the box closes and the transcript says `Signed in to ChatGPT
   as <email>.` The first time this registration signs in with plan usage the
   one-time notice follows — `You're using your ChatGPT plan.` and `Eligible

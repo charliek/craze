@@ -229,7 +229,8 @@ func (a *authRun) login(arg string) error {
 	}
 	if p.SignIn {
 		// Picked from the menu: ask returned before the key's prompt, with
-		// the terminal's echo back on, so the pasted redirect shows.
+		// the terminal as it found it; the sign-in turns the echo off again
+		// for its own prompt, under its own signal handling (signIn).
 		return a.signIn()
 	}
 	name := sanitizeLine(p.Name)
@@ -407,7 +408,8 @@ func (a *authRun) ask(infos []modeltable.ProviderInfo, p modeltable.ProviderInfo
 		}
 		if p.SignIn {
 			// The ChatGPT plan takes no key: login signs in instead, once
-			// the deferred restore has put the echo back.
+			// the deferred restore has put the echo back and taken this
+			// handler away (the sign-in has its own: signIn).
 			return p, "", nil
 		}
 	}

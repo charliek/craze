@@ -97,6 +97,28 @@ func quiet(f *os.File) (*echoOff, error) {
 	return q, nil
 }
 
+// muteEcho turns f's echo off as quiet does, without quiet's handler: for a
+// caller that catches the signals that would end craze itself, from before
+// it calls this until after it has called restore — the ChatGPT sign-in
+// (auth_chatgpt.go, plan 033 §3.13 as review r14 1 amends it), whose own
+// handler puts the terminal back before it cancels the sign-in, which then
+// says it was cancelled, closes its listener and exits as the signal asked,
+// none of which quiet's os.Exit would let it do. The two share mu and
+// restored, so the handler's restore and this one's mute cannot interleave:
+// once the terminal is back, nothing turns the echo off again.
+func muteEcho(f *os.File) (*echoOff, error) {
+	fd := int(f.Fd())
+	saved, err := unix.IoctlGetTermios(fd, getTermios)
+	if err != nil {
+		return nil, err
+	}
+	q := &echoOff{fd: fd, saved: *saved}
+	if err := q.mute(); err != nil {
+		return nil, err
+	}
+	return q, nil
+}
+
 // mute turns the echo off, unless the terminal was put back for good.
 // Canonical mode and signals stay on, and a carriage return still ends the
 // line, as x/term's ReadPassword sets them.
@@ -147,9 +169,12 @@ func (q *echoOff) restore() {
 	q.unhandle()
 }
 
-// unhandle takes the signal handler away.
+// unhandle takes the signal handler away; muteEcho's has none.
 func (q *echoOff) unhandle() {
 	q.stop.Do(func() {
+		if q.sigs == nil {
+			return
+		}
 		signal.Stop(q.sigs)
 		close(q.done)
 	})

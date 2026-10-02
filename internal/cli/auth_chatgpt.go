@@ -10,6 +10,7 @@ import (
 	"os/signal"
 	"runtime"
 	"strings"
+	"sync"
 	"syscall"
 
 	"github.com/charliek/craze/internal/chatgptauth"
@@ -22,12 +23,14 @@ import (
 // stored key. `craze auth login chatgpt` — or the plan picked from login's
 // menu — runs the whole sign-in here (chatgptauth.Begin): it prints the
 // authorization URL, opens a browser only in a desktop session, and waits for
-// the browser's redirect on the loopback listener or pasted on stdin, shown as
-// it is typed (it carries a one-time code and the attempt's state, never a
-// token). Once signed in it prints the account's email, the one-time plan-usage
-// notice, and the plan's models, fetched there and then. `craze auth logout
-// chatgpt` revokes and deletes the tokens; `craze auth list` shows the
-// sign-in's state. No token, nor any part of one, is ever printed:
+// the browser's redirect on the loopback listener or pasted on stdin — on a
+// terminal at a prompt that does not echo, so a key pasted there out of habit
+// is never displayed, and an accepted address is confirmed by its origin and
+// path alone, never its query (review r14 1, amending §3.13's "shown, not
+// masked"). Once signed in it prints the account's email, the one-time
+// plan-usage notice, and the plan's models, fetched there and then. `craze
+// auth logout chatgpt` revokes and deletes the tokens; `craze auth list` shows
+// the sign-in's state. No token, nor any part of one, is ever printed:
 // chatgptauth's errors name a step, a status and an OAuth code, nothing a
 // server sent, and a pasted line that is not this sign-in's redirect — an API
 // key pasted out of habit, say — is never repeated back.
@@ -71,7 +74,21 @@ var (
 	// on the channel instead of signalling the test binary.
 	notifySignInSignals = func(c chan<- os.Signal) { signal.Notify(c, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP) }
 	stopSignInSignals   = func(c chan<- os.Signal) { signal.Stop(c) }
+	// muteSignIn turns the terminal's echo off for the sign-in (muteEcho)
+	// and answers what puts it back: a seam, so a test's control can leave
+	// the echo on and see what the terminal would show then.
+	muteSignIn = func(f *os.File) (echoRestorer, error) {
+		q, err := muteEcho(f)
+		if err != nil {
+			return nil, err
+		}
+		return q, nil
+	}
 )
+
+// echoRestorer puts a terminal's echo back (echoOff.restore); a second call
+// does nothing.
+type echoRestorer interface{ restore() }
 
 // context is the command's context, or a background one when it has none
 // (an authRun a test built by hand).
@@ -131,11 +148,50 @@ func (c *signalCause) code() int {
 	return 128 + int(syscall.SIGINT)
 }
 
-// pasteEvent is what the stdin reader tells the sign-in: a line it refused,
-// to say why (never the line), or that a paste was accepted.
+// pasteEvent is what the stdin reader tells the sign-in of a line it read: one
+// it refused, to say why (never the line); a paste accepted (acceptedPaste
+// says what for); or, on a terminal, a blank one, for the prompt to be drawn
+// again.
 type pasteEvent struct {
 	refusal string
 	pasted  bool
+}
+
+// acceptedPaste is where a pasted redirect the attempt accepted led — its
+// origin and path (receivedAt), never its query — for the sign-in to confirm
+// on a terminal. The stdin reader holds mu across the attempt's Paste and the
+// record (paste), and the sign-in reads it under mu (at): an accepted paste
+// can finish the wait — its result back on the sign-in's loop — before the
+// reader's event is, and the record is there all the same.
+type acceptedPaste struct {
+	mu sync.Mutex
+	to string
+}
+
+// paste hands line to att as a pasted redirect, recording where it led if
+// att accepts it.
+func (p *acceptedPaste) paste(att signInAttempt, line string) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	err := att.Paste(line)
+	if err == nil {
+		p.to = receivedAt(line)
+	}
+	return err
+}
+
+// at is where an accepted paste led, or "" when none was accepted.
+func (p *acceptedPaste) at() string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.to
+}
+
+// receivedText is what the sign-in prints on a terminal once a pasted
+// address is accepted: where it led, never the one-time code and state its
+// query carries — the prompt did not echo it (review r14 1).
+func receivedText(at string) string {
+	return "Received the redirect to " + at + "; signing in."
 }
 
 // signIn is `craze auth login chatgpt` (plan 033 §3.13): a whole sign-in into
@@ -146,9 +202,26 @@ func (a *authRun) signIn() error {
 	sigs := make(chan os.Signal, 1)
 	notifySignInSignals(sigs)
 	defer stopSignInSignals(sigs)
+	// On a terminal the echo goes off before anything is drawn and stays off
+	// until the sign-in returns (review r14 1): whatever is typed or pasted
+	// at the prompt — a key pasted out of habit included — is never
+	// displayed, however soon after the prompt it comes, and the sign-in
+	// says what it received instead. The signals are caught from before
+	// (above) until after the echo is back — the deferred calls run in
+	// reverse — and the one that ends the sign-in puts it back first.
+	restoreEcho := func() {}
+	if a.tty != nil {
+		q, err := muteSignIn(a.tty)
+		if err != nil {
+			return exitf(1, "%s: turning the terminal's echo off: %v; nothing was changed", a.name, err)
+		}
+		restoreEcho = q.restore
+		defer q.restore()
+	}
 	go func() {
 		select {
 		case s := <-sigs:
+			restoreEcho()
 			cancel(&signalCause{sig: s})
 		case <-ctx.Done():
 		}
@@ -166,7 +239,8 @@ func (a *authRun) signIn() error {
 	done := make(chan struct{})
 	defer close(done)
 	events := make(chan pasteEvent)
-	go a.readRedirects(att, cancel, events, done)
+	var accepted acceptedPaste
+	go a.readRedirects(att, &accepted, cancel, events, done)
 	type waited struct {
 		res chatgptauth.Result
 		err error
@@ -176,24 +250,45 @@ func (a *authRun) signIn() error {
 		res, err := att.Wait(ctx)
 		result <- waited{res, err}
 	}()
-	pasted := false
+	// open says the prompt's line is open — on a terminal, from the prompt
+	// until a line read at it, whose Enter was not echoed, is answered —
+	// and confirmed whether an accepted paste's confirmation is on screen.
+	open, confirmed := a.tty != nil, false
+	confirm := func() {
+		if to := accepted.at(); a.tty != nil && to != "" && !confirmed {
+			fmt.Fprintln(a.errw, receivedText(to))
+			confirmed = true
+		}
+	}
 	for {
 		select {
 		case ev := <-events:
+			if open {
+				fmt.Fprintln(a.errw)
+				open = false
+			}
 			if ev.pasted {
-				pasted = true
+				confirm()
 				continue
 			}
-			fmt.Fprintln(a.errw, ev.refusal)
+			if ev.refusal != "" {
+				fmt.Fprintln(a.errw, ev.refusal)
+			}
 			if a.tty != nil {
 				fmt.Fprint(a.errw, redirectPrompt)
+				open = true
 			}
 		case w := <-result:
-			if a.tty != nil && !pasted {
-				// The prompt's line, left open by a listener's redirect or
-				// by Ctrl-C (whose ^C the terminal echoed), is ended first.
+			if open {
+				// The prompt's line, left open by a listener's redirect, by
+				// Ctrl-C, by an address the browser's redirect beat or by a
+				// paste whose result came back before its event — none of
+				// them echoed — is ended first.
 				fmt.Fprintln(a.errw)
 			}
+			// A paste that finished the wait is confirmed here when its
+			// event has not been read yet (acceptedPaste).
+			confirm()
 			if w.err != nil {
 				return a.signInFailed(ctx, w.err)
 			}
@@ -230,11 +325,14 @@ func (a *authRun) introduceSignIn(att signInAttempt) {
 // readRedirects reads stdin a line at a time and hands each non-blank one to
 // the attempt as a pasted redirect, until one is accepted or the attempt is
 // over. A line it refuses is told to the sign-in as a reason, never quoted:
-// whatever was pasted by mistake — a key included — is not repeated. At the
-// end of stdin a paste-only attempt is cancelled (errNoRedirect), since
-// nothing else can finish it; one with a listener goes on waiting for the
-// browser. It never writes: the sign-in prints what it sends, until done.
-func (a *authRun) readRedirects(att signInAttempt, cancel context.CancelCauseFunc, events chan<- pasteEvent, done <-chan struct{}) {
+// whatever was pasted by mistake — a key included — is not repeated. One
+// accepted is recorded with where it led (accepted) and told, and on a terminal
+// a blank line is told too, so the prompt — whose Enter did not echo — is
+// drawn again. At the end of stdin a paste-only attempt is cancelled
+// (errNoRedirect), since nothing else can finish it; one with a listener goes
+// on waiting for the browser. It never writes: the sign-in prints what it
+// sends, until done.
+func (a *authRun) readRedirects(att signInAttempt, accepted *acceptedPaste, cancel context.CancelCauseFunc, events chan<- pasteEvent, done <-chan struct{}) {
 	send := func(ev pasteEvent) bool {
 		select {
 		case events <- ev:
@@ -247,12 +345,13 @@ func (a *authRun) readRedirects(att signInAttempt, cancel context.CancelCauseFun
 	for {
 		line, long, err := readRedirectLine(br)
 		line = strings.TrimSpace(line)
-		if line != "" || long {
+		switch {
+		case line != "" || long:
 			// A line too long, or not an address at all, never reaches the
 			// attempt: it is not a redirect, and may be a key.
 			refusal := redirectRefusal(line, long, att.RedirectURI())
 			if refusal == "" {
-				switch perr := att.Paste(line); {
+				switch perr := accepted.paste(att, line); {
 				case perr == nil:
 					send(pasteEvent{pasted: true})
 					return
@@ -262,6 +361,10 @@ func (a *authRun) readRedirects(att signInAttempt, cancel context.CancelCauseFun
 				refusal = "That is not this sign-in's redirect address. " + pasteWhat(att.RedirectURI())
 			}
 			if !send(pasteEvent{refusal: refusal}) {
+				return
+			}
+		case err == nil && a.tty != nil:
+			if !send(pasteEvent{}) {
 				return
 			}
 		}
@@ -314,6 +417,17 @@ func redirectRefusal(line string, long bool, redirect string) string {
 		return "That is not an address: the ChatGPT plan is funded by signing in, never by an API key. " + pasteWhat(redirect)
 	}
 	return ""
+}
+
+// receivedAt is the address line, an accepted paste, was for: its scheme,
+// host and path — the attempt's redirect address — without the query, whose
+// one-time code and state the sign-in never prints.
+func receivedAt(line string) string {
+	u, err := url.Parse(line)
+	if err != nil {
+		return ""
+	}
+	return sanitizeLine(u.Scheme + "://" + u.Host + u.Path)
 }
 
 // pasteWhat says what to paste instead: the address the browser was sent

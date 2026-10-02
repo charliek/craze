@@ -170,8 +170,9 @@ type connectDialog struct {
 	// in the next (keyField). keyErr is the field's refusal, or "".
 	//
 	// Step three, the sign-in (connect_signin.go), has a field too — the
-	// redirect address's, not masked — and uses the same three: its run's
-	// number is its field's.
+	// redirect address's, drawn masked unless it reads as that address
+	// (signInField) — and uses the same three: its run's number is its
+	// field's.
 	field  uint64
 	key    textinput.Model
 	keyErr string

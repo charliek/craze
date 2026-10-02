@@ -502,8 +502,9 @@ def test_chatgpt_sign_in_by_paste_list_and_logout(craze_bin: Path, issuer: FakeI
     """A17, A19: the paste-only sign-in a person on another machine uses
     (`--no-browser`, P25) from first registration to logout. The URL is a
     first registration's, with PKCE, state and nonce, and no hint; a stale
-    redirect is refused, and the pasted address is shown as it is typed, not
-    masked; the right one signs in -- the exchange proving the PKCE verifier,
+    redirect is refused, never shown -- the prompt does not echo (review r14
+    1) -- and the right one is confirmed by its origin and path alone, never
+    its query, and signs in -- the exchange proving the PKCE verifier,
     the redirect address and the issued client id, the id_token validated
     over the key set -- and craze prints the account, the one-time notice and
     the plan's models in priority order, fetched there and then (the hidden
@@ -538,12 +539,15 @@ def test_chatgpt_sign_in_by_paste_list_and_logout(craze_bin: Path, issuer: FakeI
     redirect = issuer.authorize(url)
     term.type(stale(redirect) + "\n")
     screen = term.wait_for("That is not this sign-in's redirect address.")
-    assert "Redirect address: " + stale(redirect) + "\n" in screen, "the pasted address was not shown:\n" + screen
+    assert "Redirect address: \nThat is not this sign-in's redirect address." in screen, screen
+    lacks(issuer, "the terminal", screen, "an-earlier-attempt")
     term.type(redirect + "\n")
     screen = term.finish(0)
     issuer.assert_no_token("the terminal", screen)
     shows(issuer, "the terminal", screen,
-          "Redirect address: " + redirect + "\nSigned in to ChatGPT as person@example.test.\n" + NOTICE + PLAN_MODELS)
+          "Redirect address: \nReceived the redirect to " + CALLBACK + "; signing in.\n"
+          "Signed in to ChatGPT as person@example.test.\n" + NOTICE + PLAN_MODELS)
+    lacks(issuer, "the terminal", screen, "code=" + parse_qs(urlsplit(redirect).query)["code"][0])
 
     assert len(issuer.exchanges) == 1
     exchange = issuer.exchanges[0]
@@ -576,6 +580,35 @@ def test_chatgpt_sign_in_by_paste_list_and_logout(craze_bin: Path, issuer: FakeI
     assert plan_row(craze_bin, issuer) == PLAN_ROW
     proc = run_craze(craze_bin, "auth", "logout", "chatgpt", env=env)
     assert (proc.returncode, proc.stdout) == (0, "Not signed in to ChatGPT.\n")
+
+
+def test_chatgpt_sign_in_hides_a_pasted_key(craze_bin: Path, issuer: FakeIssuer) -> None:
+    """Review r14 1: a key pasted at the sign-in's prompt on a real terminal --
+    where a key prompt would be, out of habit -- is on no part of the
+    terminal: the prompt does not echo, and the refusal, which says the plan
+    takes no key, never quotes it. It is stored nowhere, and the redirect
+    pasted after it signs in. The whole screen is scanned. The control is the
+    authorization URL's state on that screen: the scan reads what craze
+    printed. (The control with the echo left on, where the key shows, is the
+    Go pty test's: TestAuthLoginChatGPTHidesAPastedKey.)"""
+    term = AuthTerminal(craze_bin, issuer, "auth", "login", "chatgpt", "--no-browser")
+    url, q = authorization(term.wait_for("Redirect address: "))
+    term.type(CANARY + "\n")
+    term.wait_for("never by an API key.")
+    term.type(issuer.authorize(url) + "\n")
+    screen = term.finish(0)
+    assert q["state"] in screen, "control: the authorization URL's state is not on the screen"
+    no_canary("craze auth login chatgpt", "the terminal", screen)
+    shows(issuer, "the terminal", screen,
+          "Redirect address: \nThat is not an address: the ChatGPT plan is funded by signing in, never by an API key. "
+          "Paste the whole address the browser was sent to; it starts with " + CALLBACK + ".\n"
+          "Redirect address: \nReceived the redirect to " + CALLBACK + "; signing in.\n"
+          "Signed in to ChatGPT as person@example.test.\n")
+    assert not providers_toml().exists()
+    holding = files_holding(craze_home(), CANARY.encode())
+    if holding:
+        pytest.fail(f"the pasted key is in {holding}", pytrace=False)
+    assert plan_row(craze_bin, issuer) == SIGNED_IN_ROW
 
 
 @contextmanager

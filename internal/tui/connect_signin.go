@@ -6,8 +6,11 @@ import (
 	"net/url"
 	"slices"
 	"strings"
+	"sync"
 	"time"
+	"unicode"
 
+	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/x/ansi"
 
@@ -35,17 +38,23 @@ import (
 //     closes the attempt it carries (applySignIn).
 //   - The browser comes back to the attempt's loopback listener, or — when the
 //     browser is on another machine, where that page cannot load — its address
-//     is pasted into the step's field, which is not masked: the address carries
-//     a one-time code and the attempt's state, never a token. The listener and
-//     the paste race inside the attempt, and whichever is accepted first wins
-//     (chatgptauth.Attempt). A line that is not an address — a key pasted out of
-//     habit — is refused before the attempt sees it, never quoted, and the field
-//     is emptied, as is one the attempt refuses.
+//     is pasted into the step's field. The field draws its text only while it
+//     reads as that address (signInField: the address carries a one-time code
+//     and the attempt's state, never a token) and masks anything else, so a key
+//     pasted out of habit is never in a frame, not even the one before Enter
+//     refuses it (review r14 1, amending §3.13's unmasked field). The listener
+//     and the paste race inside the attempt, and whichever is accepted first
+//     wins (chatgptauth.Attempt). A line that is not an address is refused
+//     before the attempt sees it, never quoted, and the field is emptied, as is
+//     one the attempt refuses.
 //   - Every way out of the step ends the attempt and closes its listener with
 //     every connection to it (signInState.end): Esc, which goes back to step
 //     one; the dialog closing for any reason (closeDialog); the dialog dropped
 //     on a quit or the session's end (dropConnect); and a switch to another
-//     session (withSession).
+//     session (withSession). The exits no Update sees — SIGTERM, SIGHUP, a
+//     program failure — end it in finishRun, through the run's record in the
+//     model's shared set (signInRuns), which also reaches an attempt whose
+//     begin's answer was never read (review r14 2).
 //   - Signed in, the box closes and the transcript says as whom; the first
 //     time a registration signs in with plan usage, the one-time notice follows
 //     (chatgptauth.NoticeTitle and Notice, craze auth's texts) and is recorded
@@ -151,6 +160,10 @@ var (
 // signInState is step three's own state (connectDialog.signIn): the zero value
 // is no sign-in, which every other step has.
 type signInState struct {
+	// runs is the model's set of runs (Model.signIns) this one is recorded
+	// in, under its number run — the step's field number (Model.connSeq).
+	runs *signInRuns
+	run  uint64
 	// cancel ends the run: the context the begin and the wait run under,
 	// whose end closes the attempt's listener (chatgptauth.Attempt.Wait).
 	cancel context.CancelFunc
@@ -166,15 +179,110 @@ type signInState struct {
 	handed bool
 }
 
-// end ends the run, if there is one: the context cancelled, and the attempt —
-// if it has begun — closed with its listener and every connection to it. It
-// is safe to call more than once, and on a copy: the copies share the run.
+// end ends the run, if there is one: the context cancelled, and the attempt
+// closed with its listener and every connection to it — the one the step
+// adopted, or one Begin has returned whose answer the step has not seen yet
+// (signInRuns). It is safe to call more than once, and on a copy: the copies
+// share the run.
 func (s signInState) end() {
+	s.runs.end(s.run)
 	if s.cancel != nil {
 		s.cancel()
 	}
 	if s.att != nil {
 		s.att.Close()
+	}
+}
+
+// signInRuns is every /connect sign-in run not yet ended, by its number: the
+// cancel of the context its begin and wait run under, and its attempt from the
+// moment Begin returns it. It is shared by every copy of the model
+// (Model.signIns), as the completion popups' loads are, for the exits no
+// Update sees (plan 033 §3.13; review r14 2): SIGTERM, SIGHUP and a program
+// failure reach finishRun without passing through requestQuit's dropConnect,
+// and finishRun ends every run here (closeAll), so no listener — nor a wait
+// that a browser's late redirect could still finish — outlives the program.
+//
+// The begin's command records its attempt here as Begin returns it (adopt),
+// not where its answer lands: an answer the program never reads — it quit in
+// between — would otherwise leave that attempt listening. Whichever comes
+// second, the end or the record, closes it. Nil — a model a test built on its
+// own — holds nothing, and every method allows it.
+type signInRuns struct {
+	mu   sync.Mutex
+	open map[uint64]*signInRun
+}
+
+// signInRun is one run's: its context's cancel and, once begun, its attempt.
+type signInRun struct {
+	cancel context.CancelFunc
+	att    signInAttempt
+}
+
+// stop cancels the run's context and closes its attempt, if it has one.
+func (r *signInRun) stop() {
+	r.cancel()
+	if r.att != nil {
+		r.att.Close()
+	}
+}
+
+// add records run, its begin and wait to run under cancel's context.
+func (s *signInRuns) add(run uint64, cancel context.CancelFunc) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.open == nil {
+		s.open = map[uint64]*signInRun{}
+	}
+	s.open[run] = &signInRun{cancel: cancel}
+}
+
+// adopt records att as run's attempt, Begin having returned it, and says
+// whether the run is still open. False is a run already ended — by its step
+// or by finishRun — whose attempt nothing else will close: the caller closes
+// it.
+func (s *signInRuns) adopt(run uint64, att signInAttempt) bool {
+	if s == nil {
+		return true
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	r, ok := s.open[run]
+	if ok {
+		r.att = att
+	}
+	return ok
+}
+
+// end ends run, if it is still open: its context cancelled, its attempt
+// closed, and the run forgotten.
+func (s *signInRuns) end(run uint64) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	r := s.open[run]
+	delete(s.open, run)
+	s.mu.Unlock()
+	if r != nil {
+		r.stop()
+	}
+}
+
+// closeAll ends every run still open: finishRun's, on every exit path.
+func (s *signInRuns) closeAll() {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	open := s.open
+	s.open = nil
+	s.mu.Unlock()
+	for _, r := range open {
+		r.stop()
 	}
 }
 
@@ -228,7 +336,9 @@ func (m Model) pickConnectProvider() (Model, tea.Cmd) {
 // runs (connectBusy), and otherwise opened at once with the attempt beginning
 // off the Update (beginSignInCmd) under a context of its own and a number of
 // its own (Model.connSeq), which is also its field's: a clipboard paste asked
-// for in it lands in it alone (keyField).
+// for in it lands in it alone (keyField). The run is recorded in the model's
+// shared set (Model.signIns), so every exit ends it, those no Update sees
+// included (finishRun).
 func (m Model) openSignInStep() (Model, tea.Cmd) {
 	if m.connectBusy() {
 		m = m.closeDialog(false)
@@ -236,27 +346,31 @@ func (m Model) openSignInStep() (Model, tea.Cmd) {
 		return m, nil
 	}
 	ti := m.dialogInput()
-	// Not masked: what is pasted here is an address (plan 033 §3.13).
+	// Masked when drawn unless it reads as the redirect address
+	// (signInField; plan 033 §3.13 as review r14 1 amends it).
 	ti.CharLimit = connectRedirectMax + 1
 	// bubbles' own Ctrl+V reads the clipboard with no seam in front of it;
 	// craze reads it itself, tagged with this field (pasteFromClipboard).
 	ti.KeyMap.Paste.SetEnabled(false)
 	m.connSeq++
 	ctx, cancel := context.WithCancel(context.Background())
+	m.signIns.add(m.connSeq, cancel)
 	m.cdlg.step, m.cdlg.field, m.cdlg.key, m.cdlg.keyErr = connectSignIn, m.connSeq, ti, ""
-	m.cdlg.signIn = signInState{cancel: cancel}
-	return m, beginSignInCmd(ctx, m.cdlg.gen, m.connSeq, m.nativeDir)
+	m.cdlg.signIn = signInState{runs: m.signIns, run: m.connSeq, cancel: cancel}
+	return m, beginSignInCmd(ctx, m.signIns, m.cdlg.gen, m.connSeq, m.nativeDir)
 }
 
 // errNoSignInDir is a sign-in with no native directory to sign in to.
 var errNoSignInDir = errors.New("there is no craze directory to sign in to (set HOME or CRAZE_HOME)")
 
 // beginSignInCmd begins a sign-in into dir, off the Update, under ctx, which
-// the step ends: an attempt that begins after that is closed here, and one
-// that begins before it is closed where its answer lands (applySignIn). The
-// wait over it is made here, with ctx, for the step to run once it adopts the
-// attempt.
-func beginSignInCmd(ctx context.Context, gen, run uint64, dir string) tea.Cmd {
+// the step ends. The attempt is recorded with its run in runs the moment
+// Begin returns it (signInRuns.adopt), so whatever ends the run — the step, or
+// finishRun on an exit no Update sees — closes it even when this command's
+// answer is never read; an attempt that begins after the run has ended is
+// closed here. The wait over it is made here, with ctx, for the step to run
+// once it adopts the attempt (applySignIn).
+func beginSignInCmd(ctx context.Context, runs *signInRuns, gen, run uint64, dir string) tea.Cmd {
 	begin := beginSignIn
 	return func() tea.Msg {
 		msg := signInBegunMsg{gen: gen, run: run}
@@ -269,9 +383,9 @@ func beginSignInCmd(ctx context.Context, gen, run uint64, dir string) tea.Cmd {
 			msg.err = err
 			return msg
 		}
-		if err := ctx.Err(); err != nil {
+		if !runs.adopt(run, att) || ctx.Err() != nil {
 			att.Close()
-			msg.err = err
+			msg.err = context.Canceled
 			return msg
 		}
 		msg.att, msg.wait = att, waitSignInCmd(ctx, gen, run, att)
@@ -508,6 +622,50 @@ func pasteWhat(redirect string) string {
 	return "Paste the whole address the browser was sent to; it starts with " + sanitizeLine(redirect) + "."
 }
 
+// The start every sign-in's redirect address has but for its port:
+// chatgptauth's listener on 127.0.0.1, at the callback's path.
+const (
+	loopbackRedirectStart = "http://127.0.0.1:"
+	loopbackRedirectPath  = "/auth/callback"
+)
+
+// signInField is the field as the step draws it: its text while that reads as
+// the redirect address (redirectShown), and every character masked otherwise,
+// as the key field's are (plan 033 §3.13 as review r14 1 amends it). The mask
+// is decided as the field is drawn, from what it holds then, so no way text
+// reaches it — a key, a terminal's paste, Ctrl+V's clipboard — can draw a key
+// in any frame, the one before Enter refuses it included.
+func (m Model) signInField() textinput.Model {
+	f := m.cdlg.key
+	if !redirectShown(f.Value(), m.cdlg.signIn.redirect) {
+		f.EchoMode, f.EchoCharacter = textinput.EchoPassword, connectMask
+	}
+	return f
+}
+
+// redirectShown says whether value, the field's text, may be drawn: whether,
+// its surrounding blanks aside and with no blank inside, it starts with the
+// attempt's redirect address or with any sign-in's
+// (http://127.0.0.1:<port>/auth/callback) — what the browser lands on, whose
+// query is a one-time code and the attempt's state — or is still the start of
+// the attempt's address, as it is while one is typed by hand, which shows
+// nothing that address does not. Anything else may be a key.
+func redirectShown(value, redirect string) bool {
+	v := strings.TrimSpace(value)
+	if strings.ContainsFunc(v, unicode.IsSpace) {
+		return false
+	}
+	if strings.HasPrefix(redirect, v) || redirect != "" && strings.HasPrefix(v, redirect) {
+		return true
+	}
+	rest, ok := strings.CutPrefix(v, loopbackRedirectStart)
+	if !ok {
+		return false
+	}
+	port, path, ok := strings.Cut(rest, "/")
+	return ok && port != "" && strings.Trim(port, "0123456789") == "" && strings.HasPrefix("/"+path, loopbackRedirectPath)
+}
+
 // hint is the line under the address: how the redirect comes back, or that
 // it has.
 func (s signInState) hint() string {
@@ -549,7 +707,7 @@ func (m Model) signInBody(inner, budget int) []string {
 	}
 	var field []string
 	if !s.handed {
-		field = take([]string{dialogInputView(m.cdlg.key, inner)})
+		field = take([]string{dialogInputView(m.signInField(), inner)})
 	}
 	var errs []string
 	if m.cdlg.keyErr != "" {

@@ -1300,7 +1300,7 @@ var (
 		"providerDefault", "providers", "newSession", "spawnNew", "spawnLoad", "cont", "sessions", "sessList",
 		"sessRosters", "bandOn", "drafts", "retired", "sessGen", "bgen", "shownGen", "gateSeq",
 		"resumeAttempt", "spawnSeq", "restores", "turnStarts", "held", "heldBytes", "heldDrained", "syncAck",
-		"syncPending", "gateSync", "harnessQuit", "completeLoads", "unstartedSeq", "sessPick",
+		"syncPending", "gateSync", "harnessQuit", "completeLoads", "signIns", "unstartedSeq", "sessPick",
 		"connSeq", "nativeDir", "nativeEnv", "composerAt", "images", "attachSeq", "attachDir", "attachRuns",
 		"localPresence", "hostAttached",
 	}

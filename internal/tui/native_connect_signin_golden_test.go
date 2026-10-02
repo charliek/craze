@@ -91,13 +91,30 @@ func TestFrameGoldenNativeConnectSignIn(t *testing.T) {
 
 // TestFrameGoldenNativeConnectSignInPaste is the browser's redirect pasted
 // into the field, not yet sent: drawn as it is, the field scrolled to its
-// end — the address field is not masked (§3.13), unlike the key field.
+// end — the field shows what reads as the redirect address (§3.13 as review
+// r14 1 amends it) and masks anything else, as the key field does
+// (TestFrameNativeConnectSignInMasksAKey).
 func TestFrameGoldenNativeConnectSignInPaste(t *testing.T) {
 	standInSignIn(t, func() *fakeSignIn { return newFakeSignIn(true, chatgptauth.Result{}) })
 	got := runSignInFrame(t, false, 100, 30, signInOpenKeys+"<paste:"+signInPasted+">")
 	assertFrameGolden(t, "native-connect-signin-paste-100x30", 100, 30, got,
 		[]string{"│❯ ", "state=" + signInGoldenState, connectSignInWaitHint},
 		[]string{"•", connectSignInHanded})
+}
+
+// TestFrameNativeConnectSignInMasksAKey (review r14 1, amending §3.13's
+// unmasked field): a key pasted into the address field where the redirect
+// goes, not yet sent, as every transport and gate mode frames it — every
+// run's frame and error screened for the key (connectScreen) — is drawn
+// masked, one mask per character, in the step as it was. The control is
+// TestFrameGoldenNativeConnectSignInPaste: the browser's redirect in the same
+// field, drawn as it is.
+func TestFrameNativeConnectSignInMasksAKey(t *testing.T) {
+	standInSignIn(t, func() *fakeSignIn { return newFakeSignIn(true, chatgptauth.Result{}) })
+	got := runSignInFrame(t, false, 100, 30, signInOpenKeys+"<paste:"+connectCanary+">")
+	if !strings.Contains(got, "│❯ "+strings.Repeat(string(connectMask), len(connectCanary))) || !strings.Contains(got, connectSignInWaitHint) {
+		t.Fatalf("the pasted key is not drawn masked in the step:\n%s", got)
+	}
 }
 
 // TestFrameGoldenNativeConnectSignInDone is the pasted redirect sent: the box

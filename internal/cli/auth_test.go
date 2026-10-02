@@ -492,8 +492,21 @@ func TestAuthPick(t *testing.T) {
 // ptyAuth runs craze auth with argv on a terminal of its own: stdin and stderr
 // (the prompts) are the pty, stdout a buffer. It returns what the terminal
 // showed, stdout, and the command's error, and fails when the command left
-// the terminal's echo off. drive is the user at the keyboard.
+// the terminal's echo off or a key is in any of the three. drive is the user
+// at the keyboard.
 func ptyAuth(t *testing.T, drive func(tail *ptyTail, ptmx *os.File), argv ...string) (screen, stdout string, err error) {
+	t.Helper()
+	screen, stdout, err = ptyAuthScreen(t, drive, argv...)
+	what := "craze " + strings.Join(argv, " ")
+	noKeyIn(t, what, "the terminal", screen)
+	noKeyIn(t, what, "stdout", stdout)
+	noKeyIn(t, what, "the error", errString(err))
+	return screen, stdout, err
+}
+
+// ptyAuthScreen is ptyAuth without its key checks: for a control that must
+// see a key on the screen, to show the checks would find one there.
+func ptyAuthScreen(t *testing.T, drive func(tail *ptyTail, ptmx *os.File), argv ...string) (screen, stdout string, err error) {
 	t.Helper()
 	ptmx, tty, perr := pty.Open()
 	if perr != nil {
@@ -533,11 +546,7 @@ func ptyAuth(t *testing.T, drive func(tail *ptyTail, ptmx *os.File), argv ...str
 	if !tail.wait(sentinel, 5*time.Second) {
 		t.Fatalf("the terminal never showed the sentinel: %q", maskKeys(tail.text()))
 	}
-	screen = tail.text()
-	noKeyIn(t, what, "the terminal", screen)
-	noKeyIn(t, what, "stdout", out.String())
-	noKeyIn(t, what, "the error", errString(err))
-	return screen, out.String(), err
+	return tail.text(), out.String(), err
 }
 
 // echoing is whether the terminal tty echoes what is typed.

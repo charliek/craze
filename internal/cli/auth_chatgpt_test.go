@@ -54,6 +54,11 @@ type fakeSignIn struct {
 	markErr     error
 	logout      chatgptauth.LogoutResult
 	logoutErr   error
+	// pasteHold, when set, keeps an accepted Paste from returning until it is
+	// closed, and waitHold a Wait whose redirect is in: a case orders the
+	// sign-in's loop with them (TestAuthLoginChatGPTConfirmsAPasteEitherWay).
+	pasteHold chan struct{}
+	waitHold  chan struct{}
 
 	mu       sync.Mutex
 	opts     chatgptauth.BeginOptions
@@ -165,16 +170,22 @@ func (f *fakeSignIn) Listening() bool {
 
 func (f *fakeSignIn) Paste(raw string) error {
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	f.pastes = append(f.pastes, raw)
-	if f.over {
+	switch {
+	case f.over:
+		f.mu.Unlock()
 		return chatgptauth.ErrAttemptOver
-	}
-	if strings.TrimSpace(raw) != signInGood {
+	case strings.TrimSpace(raw) != signInGood:
+		f.mu.Unlock()
 		return chatgptauth.ErrRedirectMismatch
 	}
 	f.over = true
 	close(f.got)
+	hold := f.pasteHold
+	f.mu.Unlock()
+	if hold != nil {
+		<-hold
+	}
 	return nil
 }
 
@@ -192,6 +203,9 @@ func (f *fakeSignIn) Wait(ctx context.Context) (chatgptauth.Result, error) {
 	f.waiting <- struct{}{}
 	select {
 	case <-f.got:
+		if f.waitHold != nil {
+			<-f.waitHold
+		}
 		return f.result, f.waitErr
 	case <-ctx.Done():
 		f.Close()
@@ -581,29 +595,167 @@ func TestAuthLoginChatGPTBrowser(t *testing.T) {
 	}
 }
 
-// TestAuthLoginChatGPTOnATerminal (plan 033 §3.13): on a terminal the
-// redirect is read at a prompt with the echo on — shown as it is pasted,
-// unlike a key — and the sign-in finishes with it.
+// TestAuthLoginChatGPTOnATerminal (plan 033 §3.13 as review r14 1 amends
+// it): on a terminal the redirect is read at a prompt drawn with the echo
+// already off, as a key's is, so the address pasted the moment it shows is not
+// displayed; the sign-in confirms it by its origin and path alone — never its
+// query, the one-time code — and finishes with it. A blank Enter before it,
+// which the terminal did not echo either, draws the prompt again on a line of
+// its own. ptyAuth finds the echo back on after. The control for the query's
+// absence is the authorization URL above the prompt, whose query the screen
+// does show.
 func TestAuthLoginChatGPTOnATerminal(t *testing.T) {
 	authNative(t)
 	useFakeSignIn(t)
 	screen, stdout, err := ptyAuth(t, func(tail *ptyTail, ptmx *os.File) {
-		typeAtPrompt(t, tail, ptmx, redirectPrompt, signInGood)
+		typeAtPrompt(t, tail, ptmx, redirectPrompt, "")
+		typeAtPrompt(t, tail, ptmx, redirectPrompt+"\r\n"+redirectPrompt, signInGood)
 	}, "auth", "login", "chatgpt")
 	if err != nil {
 		t.Fatalf("login on a terminal: %v (screen %q)", err, maskKeys(screen))
 	}
-	if !strings.Contains(strings.ReplaceAll(screen, "\r\n", "\n"), redirectPrompt+signInGood+"\n") {
-		t.Fatalf("the pasted address was not shown at the prompt:\n%s", screen)
+	got := strings.ReplaceAll(screen, "\r\n", "\n")
+	if !strings.Contains(got, redirectPrompt+"\n"+redirectPrompt+"\n"+receivedText(signInRedirect)+"\n") {
+		t.Fatalf("the blank line's prompt, then the accepted address confirmed by its origin and path, are not on the screen:\n%s", got)
+	}
+	if !strings.Contains(got, signInURL) {
+		t.Fatalf("control: the authorization URL's query is not on the screen:\n%s", got)
+	}
+	if strings.Contains(got, "stub-code") {
+		t.Fatalf("the pasted address's query is on the screen:\n%s", got)
 	}
 	if stdout != signedInLine+noticeLines+modelsLine {
 		t.Fatalf("stdout %q", stdout)
 	}
 }
 
+// TestAuthLoginChatGPTConfirmsAPasteEitherWay: an accepted paste is
+// confirmed on the terminal whichever the sign-in's loop reads first — the
+// reader's event, or the result of the wait the paste finished. The orders are
+// forced: a held Wait keeps the result back until the confirmation is on the
+// screen; a held Paste keeps the event back until the loop has taken the
+// result — the prompt's line ended — which is the order a confirmation carried
+// by the event alone loses (the -race run's failure: it confirmed nothing).
+// Each order's screen is the other's control.
+func TestAuthLoginChatGPTConfirmsAPasteEitherWay(t *testing.T) {
+	confirmed := redirectPrompt + "\n" + receivedText(signInRedirect) + "\n"
+	for _, first := range []string{"the event", "the result"} {
+		t.Run(first, func(t *testing.T) {
+			authNative(t)
+			f := useFakeSignIn(t)
+			hold := make(chan struct{})
+			if first == "the event" {
+				f.waitHold = hold
+			} else {
+				f.pasteHold = hold
+			}
+			screen, stdout, err := ptyAuth(t, func(tail *ptyTail, ptmx *os.File) {
+				typeAtPrompt(t, tail, ptmx, redirectPrompt, signInGood)
+				if first == "the event" {
+					seePrompt(t, tail, receivedText(signInRedirect))
+				} else {
+					seePrompt(t, tail, redirectPrompt+"\r\n")
+				}
+				close(hold)
+			}, "auth", "login", "chatgpt")
+			if err != nil {
+				t.Fatalf("login on a terminal: %v (screen %q)", err, maskKeys(screen))
+			}
+			got := strings.ReplaceAll(screen, "\r\n", "\n")
+			if !strings.Contains(got, confirmed) || strings.Count(got, receivedText(signInRedirect)) != 1 {
+				t.Fatalf("the accepted paste is not confirmed once:\n%s", got)
+			}
+			if stdout != signedInLine+noticeLines+modelsLine {
+				t.Fatalf("stdout %q", stdout)
+			}
+		})
+	}
+}
+
+// TestAuthLoginChatGPTRefusesWithTheEchoOn: a terminal whose echo the
+// sign-in cannot turn off is no place to paste — a key pasted there would
+// show — so the sign-in ends, exit 1, before it begins: no address printed,
+// no prompt, nothing changed. The control is the same terminal with the echo
+// turned off, which begins and prints the address.
+func TestAuthLoginChatGPTRefusesWithTheEchoOn(t *testing.T) {
+	authNative(t)
+	f := useFakeSignIn(t)
+	prev := muteSignIn
+	t.Cleanup(func() { muteSignIn = prev })
+	muteSignIn = func(*os.File) (echoRestorer, error) { return nil, errors.New("no termios here") }
+	screen, stdout, err := ptyAuth(t, func(*ptyTail, *os.File) {}, "auth", "login", "chatgpt", "--no-browser")
+	wantExit(t, err, 1, "craze auth login: turning the terminal's echo off: no termios here; nothing was changed")
+	if strings.Contains(screen, signInURL) || strings.Contains(screen, redirectPrompt) || stdout != "" || f.opts.PasteOnly {
+		t.Fatalf("a sign-in began with the echo on (screen %q)", screen)
+	}
+
+	muteSignIn = prev
+	screen, _, err = ptyAuth(t, func(tail *ptyTail, ptmx *os.File) {
+		typeAtPrompt(t, tail, ptmx, redirectPrompt, signInGood)
+	}, "auth", "login", "chatgpt", "--no-browser")
+	if err != nil || !strings.Contains(screen, signInURL) || !f.opts.PasteOnly {
+		t.Fatalf("the control: with the echo off the sign-in did not begin: %v (screen %q)", err, screen)
+	}
+}
+
+// noEcho is a muteSignIn that leaves the echo on: a control's.
+type noEcho struct{}
+
+func (noEcho) restore() {}
+
+// TestAuthLoginChatGPTHidesAPastedKey (review r14 1): a key pasted at the
+// sign-in's prompt the moment it shows — out of habit, where a key prompt
+// would be — is on no part of the terminal: not echoed as it arrives, nor in
+// the refusal, which says the plan takes no key and draws the prompt again.
+// The redirect pasted after it signs in, the key never handed to the attempt.
+// ptyAuth checks the whole screen, stdout and the error. The control is the
+// same keyboard with the echo left on (muteSignIn a no-op): the key is on that
+// screen, so the check finds a key the terminal echoes.
+func TestAuthLoginChatGPTHidesAPastedKey(t *testing.T) {
+	refused := "That is not an address: the ChatGPT plan is funded by signing in, never by an API key. " + pasteWhat(signInRedirect)
+	drive := func(tail *ptyTail, ptmx *os.File) {
+		typeAtPrompt(t, tail, ptmx, redirectPrompt, authKey)
+		seePrompt(t, tail, refused+"\r\n"+redirectPrompt)
+		if _, err := ptmx.WriteString(signInGood + "\n"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Run("the echo off", func(t *testing.T) {
+		authNative(t)
+		f := useFakeSignIn(t)
+		screen, stdout, err := ptyAuth(t, drive, "auth", "login", "chatgpt")
+		if err != nil {
+			t.Fatalf("login on a terminal: %v (screen %q)", err, maskKeys(screen))
+		}
+		got := strings.ReplaceAll(screen, "\r\n", "\n")
+		want := redirectPrompt + "\n" + refused + "\n" + redirectPrompt + "\n" + receivedText(signInRedirect) + "\n"
+		if !strings.Contains(got, want) {
+			t.Fatalf("the screen lacks %q:\n%s", want, maskKeys(got))
+		}
+		if stdout != signedInLine+noticeLines+modelsLine || len(f.pastes) != 1 || f.pastes[0] != signInGood {
+			t.Fatalf("stdout %q, %d pastes", stdout, len(f.pastes))
+		}
+	})
+	t.Run("control: the echo on", func(t *testing.T) {
+		authNative(t)
+		useFakeSignIn(t)
+		prev := muteSignIn
+		muteSignIn = func(*os.File) (echoRestorer, error) { return noEcho{}, nil }
+		t.Cleanup(func() { muteSignIn = prev })
+		screen, _, err := ptyAuthScreen(t, drive, "auth", "login", "chatgpt")
+		if err != nil {
+			t.Fatalf("login on a terminal: %v (screen %q)", err, maskKeys(screen))
+		}
+		if keyAt(screen) < 0 {
+			t.Fatal("control: with the echo on the pasted key is not on the screen, so finding none there proves nothing")
+		}
+	})
+}
+
 // TestAuthLoginMenuChoosesTheChatGPTPlan (X134): the ChatGPT plan picked from
 // login's menu is signed in to, never asked for a key: no key prompt is drawn,
-// the echo is back on for the redirect's prompt, and the pasted address shows.
+// and the redirect's prompt has the echo off again, the sign-in's own (review
+// r14 1) — the pasted address is confirmed by its origin and path alone.
 func TestAuthLoginMenuChoosesTheChatGPTPlan(t *testing.T) {
 	authNative(t)
 	f := useFakeSignIn(t)
@@ -618,10 +770,13 @@ func TestAuthLoginMenuChoosesTheChatGPTPlan(t *testing.T) {
 	if strings.Contains(got, "API key") {
 		t.Fatalf("a key was asked for:\n%s", got)
 	}
-	for _, want := range []string{"Provider [1-5]: 1\n", redirectPrompt + signInGood + "\n"} {
+	for _, want := range []string{"Provider [1-5]: 1\n", redirectPrompt + "\n" + receivedText(signInRedirect) + "\n"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("the screen lacks %q:\n%s", want, got)
 		}
+	}
+	if strings.Contains(got, "stub-code") {
+		t.Fatalf("the pasted address's query is on the screen:\n%s", got)
 	}
 	if stdout != signedInLine+noticeLines+modelsLine || len(f.pastes) != 1 {
 		t.Fatalf("stdout %q, %d pastes", stdout, len(f.pastes))
@@ -735,45 +890,61 @@ func TestAuthListChatGPTStates(t *testing.T) {
 // TestAuthLoginChatGPTRealCancel: the real sign-in (chatgptauth, no stand-in)
 // in a craze process of its own on a terminal, paste-only: the URL is a first
 // registration's — no login_hint, never an id_token_hint — a wrong address
-// pasted is refused by the attempt itself, and SIGINT cancels it with exit 130
-// and no token file. Nothing leaves the machine: the endpoints are TestMain's
-// fence, and no request is due before a redirect is accepted.
+// pasted is refused by the attempt itself and never shown (the prompt does not
+// echo: review r14 1), and SIGINT, SIGTERM or SIGHUP cancels it, saying so,
+// with exit 128 plus the signal's number, no token file, and the terminal's
+// echo back on. The control for the last is the echo at the prompt, which is
+// off. Nothing leaves the machine: the endpoints are TestMain's fence, and no
+// request is due before a redirect is accepted.
 func TestAuthLoginChatGPTRealCancel(t *testing.T) {
-	native := authNative(t)
-	cmd, tail, ptmx, _ := authChildIO(t, nil, "auth", "login", "chatgpt", "--no-browser")
-	seePrompt(t, tail, redirectPrompt)
-	screen := tail.text()
-	at := strings.Index(screen, chatgptFence+"/api/accounts/authorize?")
-	if at < 0 {
-		t.Fatalf("no authorization URL on the fence's issuer:\n%s", screen)
-	}
-	raw := strings.Fields(screen[at:])[0]
-	u, err := url.Parse(raw)
-	if err != nil {
-		t.Fatal(err)
-	}
-	q := u.Query()
-	if q.Get("client_id") != "dynamic_agent_client" || q.Get("agent_name_hint") != "craze" || q.Get("redirect_uri") != signInRedirect ||
-		q.Get("code_challenge_method") != "S256" || q.Get("state") == "" || q.Get("nonce") == "" || q.Has("login_hint") || q.Has("id_token_hint") {
-		t.Fatalf("the authorization URL is not a first registration's: %v", q)
-	}
-	if _, err := ptmx.WriteString(signInRedirect + "?code=x&state=not-this-attempts\n"); err != nil {
-		t.Fatal(err)
-	}
-	if !tail.wait("That is not this sign-in's redirect address.", 10*time.Second) {
-		t.Fatalf("the wrong address was not refused:\n%s", tail.text())
-	}
-	if err := cmd.Process.Signal(syscall.SIGINT); err != nil {
-		t.Fatal(err)
-	}
-	if code := authChildExit(t, cmd, tail); code != 130 {
-		t.Fatalf("exit %d; want 130 (the terminal shows %q)", code, tail.text())
-	}
-	if !tail.wait("craze auth login: the sign-in was cancelled; nothing was changed", 5*time.Second) {
-		t.Fatalf("no cancel line:\n%s", tail.text())
-	}
-	if _, err := os.Stat(filepath.Join(native, "auth", "chatgpt.json")); !errors.Is(err, os.ErrNotExist) {
-		t.Fatal("a cancelled sign-in left a token file")
+	for _, sig := range []syscall.Signal{syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP} {
+		t.Run(sig.String(), func(t *testing.T) {
+			native := authNative(t)
+			cmd, tail, ptmx, tty := authChildIO(t, nil, "auth", "login", "chatgpt", "--no-browser")
+			seePrompt(t, tail, redirectPrompt)
+			if echoing(t, tty) {
+				t.Fatal("control: the echo is on at the sign-in's prompt, so finding it on afterwards proves nothing")
+			}
+			screen := tail.text()
+			at := strings.Index(screen, chatgptFence+"/api/accounts/authorize?")
+			if at < 0 {
+				t.Fatalf("no authorization URL on the fence's issuer:\n%s", screen)
+			}
+			raw := strings.Fields(screen[at:])[0]
+			u, err := url.Parse(raw)
+			if err != nil {
+				t.Fatal(err)
+			}
+			q := u.Query()
+			if q.Get("client_id") != "dynamic_agent_client" || q.Get("agent_name_hint") != "craze" || q.Get("redirect_uri") != signInRedirect ||
+				q.Get("code_challenge_method") != "S256" || q.Get("state") == "" || q.Get("nonce") == "" || q.Has("login_hint") || q.Has("id_token_hint") {
+				t.Fatalf("the authorization URL is not a first registration's: %v", q)
+			}
+			if _, err := ptmx.WriteString(signInRedirect + "?code=x&state=not-this-attempts\n"); err != nil {
+				t.Fatal(err)
+			}
+			if !tail.wait("That is not this sign-in's redirect address.", 10*time.Second) {
+				t.Fatalf("the wrong address was not refused:\n%s", tail.text())
+			}
+			if err := cmd.Process.Signal(sig); err != nil {
+				t.Fatal(err)
+			}
+			if code := authChildExit(t, cmd, tail); code != 128+int(sig) {
+				t.Fatalf("exit %d; want %d (the terminal shows %q)", code, 128+int(sig), tail.text())
+			}
+			if !tail.wait("craze auth login: the sign-in was cancelled; nothing was changed", 5*time.Second) {
+				t.Fatalf("no cancel line:\n%s", tail.text())
+			}
+			if !echoing(t, tty) {
+				t.Fatal("the signal ended the sign-in with the terminal's echo off")
+			}
+			if strings.Contains(tail.text(), "not-this-attempts") {
+				t.Fatalf("the pasted address was echoed:\n%s", tail.text())
+			}
+			if _, err := os.Stat(filepath.Join(native, "auth", "chatgpt.json")); !errors.Is(err, os.ErrNotExist) {
+				t.Fatal("a cancelled sign-in left a token file")
+			}
+		})
 	}
 }
 

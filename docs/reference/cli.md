@@ -937,11 +937,20 @@ macOS, and not over SSH, it opens the address in your browser itself.
 
 When the browser is on another machine, the page it is sent back to does not
 load there: copy that page's whole address from the browser's address bar and
-paste it at craze's `Redirect address: ` prompt. The address is shown as you
-paste it (it carries a one-time code, not a credential). `--no-browser` opens
-no browser and runs no listener, so the pasted address is the only way in: the
-way to sign in from an SSH session or a container. With stdin not a terminal,
-each line of it is taken as a pasted address.
+paste it at craze's `Redirect address: ` prompt. Like the key prompt, it does
+not echo — the terminal's echo is off from before the address is printed until
+the sign-in ends — so a key pasted there by mistake is never displayed. An
+address craze accepts is confirmed by where it leads alone, never its query
+(the one-time code):
+
+```text
+Redirect address:
+Received the redirect to http://127.0.0.1:1455/auth/callback; signing in.
+```
+
+`--no-browser` opens no browser and runs no listener, so the pasted address is
+the only way in: the way to sign in from an SSH session or a container. With
+stdin not a terminal, each line of it is taken as a pasted address.
 
 ```bash
 craze auth login chatgpt                # opens the browser on a desktop, else prints the address
@@ -974,7 +983,7 @@ back — and craze goes on waiting: one that is not an address at all (a key,
 say) is told the plan takes none. With `--no-browser`, or when stdin is not a
 terminal and no listener runs, the end of stdin with no address accepted is
 exit 1. Ctrl-C cancels the sign-in and closes the listener, exit 130, and
-changes nothing. Declining in the browser is exit 1, as is any error from
+changes nothing; it, `SIGTERM` and `SIGHUP` leave the terminal's echo on. Declining in the browser is exit 1, as is any error from
 ChatGPT's sign-in service, which is named by its step, its HTTP status and its
 OAuth error code — never a token, which craze never prints.
 

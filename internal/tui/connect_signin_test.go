@@ -11,6 +11,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"io"
 	"math/big"
 	"net"
 	"net/http"
@@ -376,8 +377,9 @@ func signInModel(t *testing.T, planOff bool) (Model, string) {
 }
 
 // beginStep is Enter on the ChatGPT plan's row, with the begin's command run
-// and its answer applied: the step up, its attempt begun. It answers the
-// wait's command, which the test runs or leaves.
+// and its answer applied: the step up, its attempt begun — and closed when the
+// test ends, however it ends, so a real one's listener never outlives it. It
+// answers the wait's command, which the test runs (runWait) or leaves.
 func beginStep(t *testing.T, m Model) (Model, tea.Cmd) {
 	t.Helper()
 	m, cmd := press(m, enter())
@@ -388,15 +390,35 @@ func beginStep(t *testing.T, m Model) (Model, tea.Cmd) {
 	if !ok {
 		t.Fatal("Enter on the ChatGPT plan did not begin a sign-in")
 	}
+	if begun.att != nil {
+		t.Cleanup(begun.att.Close)
+	}
 	tm, wait := m.Update(begun)
 	return tm.(Model), wait
 }
 
 // runWait runs the wait's command on a goroutine of its own, as bubbletea
-// would, and answers its message's channel.
-func runWait(wait tea.Cmd) <-chan tea.Msg {
+// would, and answers its message's channel. Before the wait starts, it
+// registers a cleanup that ends m's run and joins the wait (review r14 6): a
+// test that skips or fails on its way leaves no wait running into a later
+// test's goroutine checks (awaitNoSignInRun).
+func runWait(t *testing.T, m Model, wait tea.Cmd) <-chan tea.Msg {
+	t.Helper()
+	run := m.cdlg.signIn
 	out := make(chan tea.Msg, 1)
-	go func() { out <- runCmd(wait) }()
+	joined := make(chan struct{})
+	t.Cleanup(func() {
+		run.end()
+		select {
+		case <-joined:
+		case <-time.After(10 * time.Second):
+			t.Error("the sign-in's wait outlived its test")
+		}
+	})
+	go func() {
+		defer close(joined)
+		out <- runCmd(wait)
+	}()
 	return out
 }
 
@@ -427,7 +449,7 @@ func transcriptText(m Model) string {
 }
 
 // TestConnectSignInIsTheChatGPTPlansAction (§3.13): Enter on the ChatGPT
-// plan's row opens "Sign in with ChatGPT" — the address, the unmasked field —
+// plan's row opens "Sign in with ChatGPT" — the address, the address field —
 // into the TUI's own directory (R2), and never a key field. The control is
 // Enter on Gamma, a provider funded by a key, which still opens its masked
 // key field and begins nothing.
@@ -450,8 +472,8 @@ func TestConnectSignInIsTheChatGPTPlansAction(t *testing.T) {
 	if strings.Contains(view, connectKeyTitle) {
 		t.Fatalf("the ChatGPT plan got a key field:\n%s", view)
 	}
-	if m.cdlg.key.EchoMode != textinput.EchoNormal {
-		t.Fatal("the address field is masked")
+	if m.signInField().EchoMode != textinput.EchoNormal {
+		t.Fatal("the empty address field is drawn masked")
 	}
 	if s.dirs[0] != dir {
 		t.Fatalf("the sign-in went to %s, not the TUI's directory %s", s.dirs[0], dir)
@@ -481,7 +503,7 @@ func TestConnectSignInEscClosesTheListener(t *testing.T) {
 	standInSignIn(t, func() *fakeSignIn { return newFakeSignIn(true, chatgptauth.Result{}) })
 	m, _ := signInModel(t, false)
 	m, wait := beginStep(t, m)
-	done := runWait(wait)
+	done := runWait(t, m, wait)
 	f := m.cdlg.signIn.att.(*fakeSignIn)
 	<-f.waiting
 
@@ -562,10 +584,11 @@ func TestConnectSignInPasteIsRefusedUnquoted(t *testing.T) {
 	m, _ = beginStep(t, m)
 	f := m.cdlg.signIn.att.(*fakeSignIn)
 
-	// The field is not masked, so the canary is drawn while it sits there:
-	// that frame is neither screened nor printed. Enter is what must take it
-	// away and never repeat it.
+	// The field draws the key masked from the frame it lands in (review r14
+	// 1), so that frame is screened as the one after Enter is; Enter takes it
+	// away and never repeats it.
 	m, _ = press(m, pasteKey(connectCanary))
+	connectLeak(t, m, nil)
 	m, _ = press(m, enter())
 	connectLeak(t, m, nil)
 	if !strings.Contains(m.cdlg.keyErr, "never by an API key") || m.cdlg.key.Value() != "" {
@@ -681,7 +704,7 @@ func TestConnectSignInBrowserWinsTheRace(t *testing.T) {
 	})
 	m, _ := signInModel(t, false)
 	m, wait := beginStep(t, m)
-	done := runWait(wait)
+	done := runWait(t, m, wait)
 	f := m.cdlg.signIn.att.(*fakeSignIn)
 	m, _ = press(m, pasteKey(signInPasted))
 	f.browse()
@@ -730,7 +753,7 @@ func TestConnectSignInFailures(t *testing.T) {
 			tm, wait := m.Update(runCmd(cmd))
 			m = tm.(Model)
 			if tc.beginErr == nil {
-				done := runWait(wait)
+				done := runWait(t, m, wait)
 				m, _ = press(m, pasteKey(signInPasted))
 				m, _ = press(m, enter())
 				tm, _ = m.Update(awaitMsg(t, done))
@@ -773,6 +796,153 @@ func TestConnectSignInStepOneMarks(t *testing.T) {
 	if connectMark(modeltable.ProviderInfo{SignIn: true, StoredProblem: modeltable.ErrKeyTooShort}) != "" {
 		t.Fatal("a sign-in provider is marked by a key stored for it by hand")
 	}
+}
+
+// TestRedirectShown (review r14 1): what the address field may draw — an
+// address that starts with the attempt's redirect, or any sign-in's
+// (http://127.0.0.1:<port>/auth/callback), or the attempt's redirect still
+// being typed — and what it masks: a key, an address with a blank in it (a
+// paste's newline becomes one), another path, scheme or host, a port that is
+// not one. The shown rows are the controls: the rule is not "mask everything".
+func TestRedirectShown(t *testing.T) {
+	for _, tc := range []struct {
+		value string
+		shown bool
+	}{
+		{"", true},
+		{"http://127.0", true},
+		{signInRedirect, true},
+		{signInPasted, true},
+		{"  " + signInPasted + " ", true},
+		{"http://127.0.0.1:50123/auth/callback?code=c&state=s", true},
+		{connectCanary, false},
+		{" " + connectCanary, false},
+		{"h" + connectCanary, false},
+		{signInPasted + " " + connectCanary, false},
+		{"http://127.0.0.1:1455/other?code=c", false},
+		{"http://127.0.0.1:/auth/callback", false},
+		{"http://127.0.0.1:14x5/auth/callback", false},
+		{"https://127.0.0.1:1455/auth/callback", false},
+		{"http://localhost:1455/auth/callback", false},
+	} {
+		if got := redirectShown(tc.value, signInRedirect); got != tc.shown {
+			t.Errorf("redirectShown(<value %d bytes>) = %v, want %v", len(tc.value), got, tc.shown)
+		}
+	}
+	if redirectShown("http://127", "") {
+		t.Error("before the attempt has begun, a partial address is shown")
+	}
+}
+
+// TestConnectSignInFieldMasksAKey (review r14 1, amending §3.13's unmasked
+// field): the frame right after a key is pasted into the address field —
+// before Enter refuses it — draws it masked, one mask per character, as is a
+// key typed in by hand a character at a time; nowhere else in the frame is
+// it either (connectLeak). The control is the browser's redirect in the same
+// field, drawn as it is, its state in the frame.
+func TestConnectSignInFieldMasksAKey(t *testing.T) {
+	standInSignIn(t, func() *fakeSignIn { return newFakeSignIn(false, chatgptauth.Result{}) })
+	m, _ := signInModel(t, false)
+	m, _ = beginStep(t, m)
+	masked := "│❯ " + strings.Repeat(string(connectMask), len(connectCanary))
+
+	m, _ = press(m, pasteKey(connectCanary))
+	connectLeak(t, m, nil)
+	if view := connectView(t, m); !strings.Contains(view, masked) {
+		t.Fatalf("the pasted key is not drawn masked:\n%s", view)
+	}
+	m, _ = press(m, enter())
+
+	for _, r := range connectCanary {
+		m, _ = press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+		connectLeak(t, m, nil)
+	}
+	if view := connectView(t, m); !strings.Contains(view, masked) {
+		t.Fatalf("the typed key is not drawn masked:\n%s", view)
+	}
+	m, _ = press(m, enter())
+
+	// The control.
+	m, _ = press(m, pasteKey(signInPasted))
+	view := connectView(t, m)
+	if !strings.Contains(view, "state="+signInGoldenState) || strings.Contains(view, "│❯ "+string(connectMask)) {
+		t.Fatalf("the control: the pasted redirect is not drawn as it is:\n%s", view)
+	}
+}
+
+// TestConnectSignInEndsAtFinishRun (review r14 2): the exits no Update sees —
+// SIGTERM, SIGHUP, a program failure — all land in finishRun, which ends the
+// sign-in through the model's shared set, reached from the model Run started
+// with: the listener closed and the wait returned, during the wait; an
+// attempt Begin returned whose answer the program never read closed too, its
+// wait returning at once; and one Begin returns after the shutdown closed as
+// it does. The controls are each attempt just before finishRun — listening,
+// its wait still waiting — which is where r14 found them left.
+func TestConnectSignInEndsAtFinishRun(t *testing.T) {
+	t.Run("during the wait", func(t *testing.T) {
+		standInSignIn(t, func() *fakeSignIn { return newFakeSignIn(true, chatgptauth.Result{}) })
+		initial, _ := signInModel(t, false)
+		m, wait := beginStep(t, initial)
+		done := runWait(t, m, wait)
+		f := m.cdlg.signIn.att.(*fakeSignIn)
+		<-f.waiting
+		if !f.listenerUp() || f.waitEnded(50*time.Millisecond) || f.isClosed() {
+			t.Fatal("the control: the attempt is not listening and waiting before the shutdown")
+		}
+		_, _ = finishRun(io.Discard, nil, initial, nil)
+		if !f.isClosed() || f.listenerUp() {
+			t.Fatal("finishRun left the attempt's listener open")
+		}
+		if _, ok := awaitMsg(t, done).(signInDoneMsg); !ok || !f.waitEnded(5*time.Second) {
+			t.Fatal("finishRun left the attempt's wait running")
+		}
+		awaitNoSignInRun(t)
+	})
+	t.Run("its begin never read", func(t *testing.T) {
+		standInSignIn(t, func() *fakeSignIn { return newFakeSignIn(true, chatgptauth.Result{}) })
+		initial, _ := signInModel(t, false)
+		_, cmd := press(initial, enter())
+		begun := runCmd(cmd).(signInBegunMsg) // never handed to Update
+		f := begun.att.(*fakeSignIn)
+		if f.isClosed() || !f.listenerUp() {
+			t.Fatal("the control: an attempt whose answer was not read is not listening before the shutdown")
+		}
+		_, _ = finishRun(io.Discard, nil, initial, nil)
+		if !f.isClosed() || f.listenerUp() {
+			t.Fatal("finishRun left an unread begin's listener open")
+		}
+		waited := make(chan tea.Msg, 1)
+		go func() { waited <- runCmd(begun.wait) }()
+		if _, ok := awaitMsg(t, waited).(signInDoneMsg); !ok || !f.waitEnded(5*time.Second) {
+			t.Fatal("an unread begin's wait did not return at once")
+		}
+		awaitNoSignInRun(t)
+	})
+	t.Run("a begin after the shutdown", func(t *testing.T) {
+		s := standInSignIn(t, func() *fakeSignIn { return newFakeSignIn(true, chatgptauth.Result{}) })
+		release := make(chan struct{})
+		standIn := beginSignIn
+		beginSignIn = func(ctx context.Context, dir string) (signInAttempt, error) {
+			<-release
+			return standIn(ctx, dir)
+		}
+		t.Cleanup(func() { beginSignIn = standIn })
+		initial, _ := signInModel(t, false)
+		_, cmd := press(initial, enter())
+		answer := make(chan tea.Msg, 1)
+		go func() { answer <- runCmd(cmd) }()
+		_, _ = finishRun(io.Discard, nil, initial, nil)
+		close(release)
+		begun, ok := awaitMsg(t, answer).(signInBegunMsg)
+		if !ok || begun.att != nil || begun.err == nil {
+			t.Fatal("a begin after the shutdown was answered as begun")
+		}
+		made := s.all()
+		if len(made) != 1 || !made[0].isClosed() || made[0].listenerUp() {
+			t.Fatal("a begin after the shutdown left its listener open")
+		}
+		awaitNoSignInRun(t)
+	})
 }
 
 // ---------------------------------------------------------------- end to end
@@ -943,7 +1113,7 @@ func TestConnectSignInPastedRedirectAgainstFakeIssuer(t *testing.T) {
 	iss := newFakeIssuer(t)
 	m, dir := signInModel(t, false)
 	m, wait := beginStep(t, m)
-	done := runWait(wait)
+	done := runWait(t, m, wait)
 	s := m.cdlg.signIn
 	if st, err := chatgptauth.ReadStatus(dir); err != nil || st.SignedIn {
 		t.Fatalf("the control: signed in before the paste (%v)", err)
@@ -1005,17 +1175,22 @@ func TestConnectSignInPastedRedirectAgainstFakeIssuer(t *testing.T) {
 
 // TestConnectSignInEscClosesTheRealListener: the same Esc as
 // TestConnectSignInEscClosesTheListener, over chatgptauth's own attempt — its
-// loopback listener, when 1455 was free to bind, refuses connections after,
-// and no sign-in command or listener goroutine is left. The control is the
-// listener before Esc, which takes a connection.
+// loopback listener refuses connections after, and no sign-in command or
+// listener goroutine is left. The directory is already registered with
+// ChatGPT (signInFixture's plan-off registration), so the attempt is a
+// re-login, which listens on 1455 or, when that is taken, on a free port
+// (chatgptauth.Begin): there is always a listener to close, and the test
+// never skips (review r14 6). Its run is ended and its wait joined on every
+// way out of the test (runWait, beginStep). The control is the listener
+// before Esc, which takes a connection.
 func TestConnectSignInEscClosesTheRealListener(t *testing.T) {
 	newFakeIssuer(t)
-	m, _ := signInModel(t, false)
+	m, _ := signInModel(t, true)
 	m, wait := beginStep(t, m)
-	done := runWait(wait)
+	done := runWait(t, m, wait)
 	s := m.cdlg.signIn
 	if !s.listening {
-		t.Skip("127.0.0.1:1455 is taken on this machine: the attempt is paste-only, with no listener to close")
+		t.Fatal("a re-login's attempt has no listener: neither 1455 nor a free port could be bound")
 	}
 	u, _ := url.Parse(s.redirect)
 	c, err := net.DialTimeout("tcp", u.Host, time.Second)
