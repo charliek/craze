@@ -699,6 +699,10 @@ func TestTheWorkingFrameSurvivesAShortTurn(t *testing.T) {
 type submitBackend struct {
 	backend.Backend
 	submit func(ctx context.Context, c engine.Command, text string, mode engine.SubmitMode, fromRow string) (engine.SubmitResult, error)
+	// settled closes once a Submit that never answers has done all it will
+	// (neverAnswers), so a test reads the engine after it, however long the
+	// call took past its deadline.
+	settled chan struct{}
 }
 
 func (b *submitBackend) Submit(ctx context.Context, c engine.Command, text string, mode engine.SubmitMode, fromRow string) (engine.SubmitResult, error) {
@@ -711,11 +715,16 @@ func (b *submitBackend) Submit(ctx context.Context, c engine.Command, text strin
 func neverAnswers(t *testing.T, inner backend.Backend, ran bool) *submitBackend {
 	never := make(chan struct{})
 	t.Cleanup(func() { close(never) })
-	return &submitBackend{Backend: inner, submit: func(ctx context.Context, c engine.Command, text string, mode engine.SubmitMode, fromRow string) (engine.SubmitResult, error) {
+	settled := make(chan struct{})
+	return &submitBackend{Backend: inner, settled: settled, submit: func(ctx context.Context, c engine.Command, text string, mode engine.SubmitMode, fromRow string) (engine.SubmitResult, error) {
 		if ran {
-			if _, err := inner.Submit(ctx, c, text, mode, fromRow); err != nil {
+			_, err := inner.Submit(ctx, c, text, mode, fromRow)
+			close(settled)
+			if err != nil {
 				return engine.SubmitResult{}, err
 			}
+		} else {
+			close(settled)
 		}
 		<-never
 		return engine.SubmitResult{}, nil
@@ -730,10 +739,6 @@ func neverAnswers(t *testing.T, inner backend.Backend, ran bool) *submitBackend 
 // later is dropped. Both cases: the command never ran, and it ran with its
 // answer lost; each from an idle model and behind a working turn.
 func TestASubmitThatNeverAnswersKeepsTheDraft(t *testing.T) {
-	prev := gateDeadline
-	gateDeadline = 20 * time.Millisecond
-	t.Cleanup(func() { gateDeadline = prev })
-
 	for _, working := range []bool{false, true} {
 		for _, ran := range []bool{false, true} {
 			name := fmt.Sprintf("working %v, ran %v", working, ran)
@@ -753,7 +758,11 @@ func TestASubmitThatNeverAnswersKeepsTheDraft(t *testing.T) {
 				r.m.shellCtx = []agent.ShellResult{{Command: "ls", Output: "a b"}}
 				before := texts(r.m, entryUser)
 				own, next, armed := r.m.ownTurn, r.m.nextTurn, r.m.armedDraft
-				r.m.eng = neverAnswers(t, r.m.eng, ran)
+				// Short only for the Submit under test: the setup's own
+				// Submit keeps the full deadline (plan 032 X81).
+				shortDeadlines(t, 20*time.Millisecond, interjectDeadline)
+				lost := neverAnswers(t, r.m.eng, ran)
+				r.m.eng = lost
 				r.m.input.SetValue("lost prompt")
 				r.send(enter())
 				if r.m.gate == nil {
@@ -763,6 +772,13 @@ func TestASubmitThatNeverAnswersKeepsTheDraft(t *testing.T) {
 				rep := r.answer()
 				if rep.err != ErrNoAnswer {
 					t.Fatalf("the reply is %v, want ErrNoAnswer", rep.err)
+				}
+				// The engine is read below: the Submit may still be on its
+				// way to it when the deadline releases the gate (r55).
+				select {
+				case <-lost.settled:
+				case <-time.After(pumpWatchdog):
+					t.Fatal("the unanswered Submit never settled")
 				}
 				m = r.m
 				if got := m.input.Value(); got != "lost prompt" {
@@ -820,16 +836,15 @@ func TestASubmitThatNeverAnswersKeepsTheDraft(t *testing.T) {
 // is still drawn afterwards: an emptied band gives the keyboard back on its
 // own (syncQueue), which would hide where the send put it.
 func TestAQueuedRowSentNowThatNeverAnswersKeepsTheBand(t *testing.T) {
-	prev := gateDeadline
-	gateDeadline = 20 * time.Millisecond
-	t.Cleanup(func() { gateDeadline = prev })
-
 	for _, answered := range []bool{true, false} {
 		t.Run(fmt.Sprintf("answered %v", answered), func(t *testing.T) {
 			m, _ := gatedModel(t)
 			enqueueRow(t, m, "ROW")
 			enqueueRow(t, m, "NEXT")
 			if !answered {
+				// Short for the unanswered row alone: the answered one is
+				// the control, and must answer however loaded (plan 032 X81).
+				shortDeadlines(t, 20*time.Millisecond, interjectDeadline)
 				m.eng = neverAnswers(t, m.eng, false)
 			}
 			r := newGateRig(t, m)

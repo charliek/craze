@@ -804,17 +804,31 @@ type stallBackend struct {
 	// engine's call, or not — so a test applies the unanswered reply to a
 	// session that is no longer moving, however long the call took.
 	settled chan struct{}
+	// gate and interject are the deadlines before the stall (unstall).
+	gate, interject time.Duration
 }
 
 // stall puts the model's backend behind a stallBackend for verb, until the
-// test ends, and hands it back: its settled for answerStalled, its Backend to
-// put back.
+// test ends or unstall, and hands it back: its settled for answerStalled. The
+// gate's deadlines are short from here until then, for the call the stall is
+// for, and only for it: a prepare's own calls (a Submit, a queued row) and a
+// later call meant to answer keep the full deadline, since one that answered
+// late under load would release unanswered — CI's "goROW!", a Submit's draft
+// kept (plan 032 X81).
 func (r *schedRun) stall(verb string, ran bool) *stallBackend {
 	never := make(chan struct{})
 	r.t.Cleanup(func() { close(never) })
-	sb := &stallBackend{Backend: r.m().eng, verb: verb, ran: ran, never: never, settled: make(chan struct{})}
+	sb := &stallBackend{Backend: r.m().eng, verb: verb, ran: ran, never: never, settled: make(chan struct{}),
+		gate: gateDeadline, interject: interjectDeadline}
+	shortDeadlines(r.t, 20*time.Millisecond, 20*time.Millisecond)
 	r.f.inner.eng = sb
 	return sb
+}
+
+// unstall puts the engine back behind the model, and the gate's deadlines.
+func (r *schedRun) unstall(sb *stallBackend) {
+	r.f.inner.eng = sb.Backend
+	gateDeadline, interjectDeadline = sb.gate, sb.interject
 }
 
 func (b *stallBackend) stall(verb string, call func()) bool {
@@ -905,9 +919,6 @@ func (r *schedRun) answerStalled(b *stallBackend) {
 // — and the chain goes on where the user asked for everything to stop. Both
 // cases each time: the command never ran, and it ran with its answer lost.
 func TestAQueueVerbThatNeverAnswersSaysSo(t *testing.T) {
-	prev := gateDeadline
-	gateDeadline = 20 * time.Millisecond
-	t.Cleanup(func() { gateDeadline = prev })
 	ctrlC := tea.KeyMsg{Type: tea.KeyCtrlC}
 	ctrlL := tea.KeyMsg{Type: tea.KeyCtrlL}
 	up := tea.KeyMsg{Type: tea.KeyUp}

@@ -239,7 +239,6 @@ func TestAnEventNeverOvertakesAnEarlierKey(t *testing.T) {
 // session answers; the one it reached is resolved, and its ending removes the
 // card and draws the answer's note (the fold's, plan 032 C4).
 func TestAnAnswerThatNeverArrivesKeepsItsCard(t *testing.T) {
-	shortDeadlines(t, 20*time.Millisecond, 20*time.Millisecond)
 	for _, tc := range []struct {
 		name  string
 		ev    agent.Event
@@ -290,7 +289,7 @@ func TestAnAnswerThatNeverArrivesKeepsItsCard(t *testing.T) {
 					return
 				}
 				// The ask is still open: the same key answers it.
-				r.f.inner.eng = sb.Backend
+				r.unstall(sb)
 				r.step(tc.key)
 				r.answer()
 				r.feed()
@@ -372,7 +371,6 @@ func maskedOpening(r *schedRun, live bool) (opening agent.Event, after []agent.E
 // answers it. The control: a read that answers drops the resolved opening,
 // never raising its card, asynchronously as in the baseline.
 func TestAMaskReadThatFailsShowsTheCard(t *testing.T) {
-	shortDeadlines(t, 20*time.Millisecond, 20*time.Millisecond)
 	resolvedAsk := agent.Event{Type: agent.EventQuestion, Question: oneQuestion("ask-q")}
 	for _, ran := range []bool{false, true} {
 		t.Run(fmt.Sprintf("resolved by the cancel/ran %v", ran), func(t *testing.T) {
@@ -401,7 +399,7 @@ func TestAMaskReadThatFailsShowsTheCard(t *testing.T) {
 			if headAsk(r.m()) != "ask-live" {
 				t.Fatalf("a mask read that failed dropped a live card: %+v", r.m().cards)
 			}
-			r.f.inner.eng = sb.Backend
+			r.unstall(sb)
 			r.step(runeKey('1'))
 			r.answer()
 			r.feed()
@@ -549,11 +547,12 @@ func (b slowInterject) Interject(ctx context.Context, c engine.Command, text str
 // one that takes longer than a gated call's deadline still lands: the draft
 // and the shell context go, and nothing is noted.
 func TestAnInterjectionIsGivenItsMinute(t *testing.T) {
-	shortDeadlines(t, 20*time.Millisecond, 5*time.Second)
 	r := newSchedRun(t, false)
 	grokWorking(r)
 	r.f.inner = plantShellResult(r.f.inner, "git status", "clean\n")
 	r.typeText("hi")
+	// Short from here, past the setup's own Submit (plan 032 X81).
+	shortDeadlines(t, 20*time.Millisecond, 5*time.Second)
 	r.f.inner.eng = slowInterject{Backend: r.m().eng, d: 200 * time.Millisecond}
 	r.step(tea.KeyMsg{Type: tea.KeyCtrlL})
 	if len(r.calls) != 1 {
@@ -576,7 +575,6 @@ func TestAnInterjectionIsGivenItsMinute(t *testing.T) {
 // its answer lost — keeps the draft and the shell context and says the
 // message may have been sent.
 func TestAnInterjectionThatNeverAnswersKeepsTheDraft(t *testing.T) {
-	shortDeadlines(t, 20*time.Millisecond, 20*time.Millisecond)
 	for _, ran := range []bool{false, true} {
 		t.Run(fmt.Sprintf("ran %v", ran), func(t *testing.T) {
 			r := newSchedRun(t, false)
