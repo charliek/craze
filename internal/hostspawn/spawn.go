@@ -350,6 +350,17 @@ func (c *Child) End(grace time.Duration) bool {
 	return c.Exited()
 }
 
+// Kill ends the host at once — SIGKILL to its process group (setsid made it
+// the leader of its own), no SIGTERM and no grace: a host that never got to
+// its ready line owes nothing — and waits for the reaper. A host in an
+// uninterruptible wait keeps it waiting until it goes.
+func (c *Child) Kill() {
+	if !c.Exited() {
+		_ = syscall.Kill(-c.pid, syscall.SIGKILL)
+	}
+	<-c.done
+}
+
 // KillAgents kills every agent process group the host recorded and removes
 // the record: nothing, for a host that stopped cleanly and removed it itself
 // (KillRecordedAgents, at once: the host has gone, and so has any grace an

@@ -1420,11 +1420,11 @@ func TestALaunchRacingTheClosingStartsNothing(t *testing.T) {
 	}
 }
 
-// TestALaunchDoneAfterTheClosingEndsItsHost (r45 F2): a launch whose start
-// returns once the hub has begun closing — the closing set while the host was
-// being started, outside the lifecycle lock — ends that host at once: when
-// the create is answered unavailable, reason closing, the host has been
-// terminated and reaped, and the launch is no longer counted in flight. The
+// TestALaunchDoneAfterTheClosingEndsItsHost (r45 F2, r46 1): a launch whose
+// start returns once the hub has begun closing — the closing set while the
+// host was being started, outside the lifecycle lock — kills that host at
+// once: when the create is answered unavailable, reason closing, the host has
+// been killed and reaped, and the launch is no longer counted in flight. The
 // negative control is the launch that does not look again: the host is
 // handed on, and the create answers its session.
 func TestALaunchDoneAfterTheClosingEndsItsHost(t *testing.T) {
@@ -1456,6 +1456,52 @@ func TestALaunchDoneAfterTheClosingEndsItsHost(t *testing.T) {
 	}
 }
 
+// TestALateLaunchIsKilledBeforeRunReturns (r46 1): a launch whose start is
+// held through the teardown's cut and returns, successfully, inside the
+// cleanup wait — with less of it left than a graced end would take — finds
+// the hub closing and kills its host at once, no grace: a host that ignores
+// SIGTERM and never answers its ready line is gone, reaped, when Run
+// returns. The negative control is the graced end (terminate): SIGTERM,
+// ignored, and a grace that runs past the cleanup wait — Run returns with
+// the host still there.
+func TestALateLaunchIsKilledBeforeRunReturns(t *testing.T) {
+	setVar(t, &teardownBound, 300*time.Millisecond)
+	setVar(t, &createCleanupWait, 3*time.Second)
+	setVar(t, &createCutGrace, 2*time.Second)
+	env := testEnv(t)
+	rn, _, sock := creating(t, env, nil, always("hang,ignoreterm"))
+	h := rn.serving(t)
+	t.Cleanup(func() { joinCreates(t, h) })
+	started := make(chan int, 1)
+	setVar(t, &createStart, func(cmd *exec.Cmd, marker, groups, log string) (*hostspawn.Child, *os.File, error) {
+		child, r, err := hostspawn.StartCmd(cmd, marker, groups, log)
+		if err != nil {
+			return nil, nil, err
+		}
+		started <- child.PID()
+		// The start returns inside the cleanup wait, a second of it left.
+		<-h.cr.cut
+		time.Sleep(createCleanupWait - time.Second)
+		return child, r, nil
+	})
+	c := dial(t, sock)
+	c.hello(t)
+	c.sendCreate(t, map[string]any{"cwd": t.TempDir()})
+	var pid int
+	select {
+	case pid = <-started:
+	case <-time.After(step):
+		t.Fatal("no host was started")
+	}
+	rn.sigs <- syscall.SIGTERM
+	if err := rn.stopped(t); err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Kill(pid, 0); !errors.Is(err, syscall.ESRCH) {
+		t.Fatalf("the host %d whose start returned in the cleanup wait is still there (%v, %s) when Run has returned", pid, err, procState(pid))
+	}
+}
+
 // TestAStalledLaunchHoldsNoTeardown (r45 F2): a create whose launch is
 // stalled inside its start — cmd.Start not returning, as for a child stalled
 // in its chdir into a hung filesystem — while its hub tears down, with a
@@ -1463,8 +1509,11 @@ func TestALaunchDoneAfterTheClosingEndsItsHost(t *testing.T) {
 // bounds: the lifecycle lock is not held across the start, so the quiesce
 // goes on; the subscription is ended with reset{hub_closing}, the splice is
 // closed both ways, Run returns within teardownBound, createCleanupWait and
-// teardownTail, the hub's lock is free and its files are gone, and the log
-// says a start was left as it was. The negative controls: the start run under
+// the splice's drain (taken when Run returns, not when this goroutine next
+// runs), the hub's lock is free and its files are gone, and the log says a
+// start was left as it was. The tail and the reset's own wait are generous
+// here (r46 5): a starved flusher still writes the reset in time — the tail
+// is a deadline, never a wait. The negative controls: the start run under
 // the lifecycle lock (r43 1's launch) — the teardown never gets past its
 // quiesce, and nothing is written to the subscriber; and no tail of its own
 // once the creates' waits have used the bound up — the reset's write is past
@@ -1472,6 +1521,8 @@ func TestALaunchDoneAfterTheClosingEndsItsHost(t *testing.T) {
 func TestAStalledLaunchHoldsNoTeardown(t *testing.T) {
 	setVar(t, &teardownBound, 300*time.Millisecond)
 	setVar(t, &createCleanupWait, 300*time.Millisecond)
+	setVar(t, &teardownTail, step)
+	setVar(t, &resetWait, step)
 	env := testEnv(t)
 	rh := newRawHost(t, env, hostOf(4), sessionOf(4))
 	rn, _, sock := creating(t, env, quiet(), always("ok"))
@@ -1516,6 +1567,11 @@ func TestAStalledLaunchHoldsNoTeardown(t *testing.T) {
 		t.Fatal("the create's launch never reached its start")
 	}
 
+	stoppedAt := make(chan time.Time, 1)
+	go func() {
+		<-rn.done
+		stoppedAt <- time.Now()
+	}()
 	start := time.Now()
 	rn.sigs <- syscall.SIGTERM
 	var last msg
@@ -1543,7 +1599,7 @@ func TestAStalledLaunchHoldsNoTeardown(t *testing.T) {
 	if err := rn.stopped(t); err != nil {
 		t.Fatal(err)
 	}
-	if took, bound := time.Since(start), teardownBound+createCleanupWait+teardownTail; took > bound+2*time.Second {
+	if took, bound := (<-stoppedAt).Sub(start), teardownBound+createCleanupWait+spliceDrain; took > bound+3*time.Second {
 		t.Fatalf("the teardown took %v with a stalled launch, past its bounds %v", took, bound)
 	}
 	absent(t, "the record", recordPath(t, env))

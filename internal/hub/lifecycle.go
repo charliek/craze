@@ -82,9 +82,12 @@ import (
 // past teardownBound, for the cut creates whose host was launched to be done
 // with it — a host cut before its ready line ended (SIGTERM, createCutGrace,
 // SIGKILL) and reaped before Run returns; a stalled world check, which can
-// launch nothing now, is not waited for, and a launch whose start has not
-// returned (its child stalled before its exec, in its chdir on a hung
-// filesystem: no pid yet, and no signal ends it) is left as it is — then,
+// launch nothing now, is not waited for; a launch whose start returns within
+// that wait finds the hub closing and kills its host at once, no grace, and
+// reaps it; and one whose start returns only after it, or never (its child
+// stalled before its exec, in its chdir on a hung filesystem: no pid yet,
+// and no signal ends it), is left as it is, its host possibly coming up once
+// the hub has gone, owned by nobody (SF-117 (e)) — then,
 // bounded by teardownBound still, or by teardownTail (1 s) of its own once
 // the waits before have used it up: close the listener, end every roster
 // subscription with reset{hub_closing} (resetWait), close every connection —
@@ -94,7 +97,10 @@ import (
 // hub made — and release the lock last (an explicit LOCK_UN, then close:
 // rundir.HubLock.Release). A launch's start runs outside the lifecycle lock
 // (creator.launch), so the quiesce that begins the teardown never waits on
-// it.
+// it. A filesystem call stalled in the kernel is outside every one of these
+// bounds: the poll's join waits for a registry read in flight, and the
+// unlink, the record's removal and the lock's release are calls of the
+// teardown's own (SF-119).
 
 // DefaultIdleGrace is how long a hub with no client and no live host waits
 // before it exits (P12): 60 s.
@@ -705,16 +711,18 @@ func (h *hub) teardown(cause string) {
 		}
 		h.cr.stop()
 		// The launches in flight and the cut creates whose host was launched
-		// are done with it before Run returns (r43 5, r45 F2): a host cut
-		// before its ready line, or whose start returned after the closing,
-		// is ended and reaped, in createCutGrace; a stalled world check
-		// launched nothing and is not waited for. A start that has not
-		// returned is waited for only so long: its child — stalled in its
-		// chdir into the create's directory on a hung filesystem, before its
-		// exec — has no pid the hub has been told yet, and a process in that
-		// uninterruptible wait does not die of SIGKILL either; it is left as
-		// it is, and the launch ends the host itself should its start ever
-		// return (creator.launch).
+		// are done with it before Run returns (r43 5, r45 F2, r46 1): a host
+		// cut before its ready line is ended and reaped, in createCutGrace;
+		// one whose start returns after the closing is killed at once, no
+		// grace, and reaped (creator.launch); a stalled world check launched
+		// nothing and is not waited for. A start that has not returned is
+		// waited for only so long: its child — stalled in its chdir into the
+		// create's directory on a hung filesystem, before its exec — has no
+		// pid the hub has been told yet, and a process in that
+		// uninterruptible wait does not die of SIGKILL either. It is left as
+		// it is: a start that returns while the hub still runs is killed by
+		// its launch, and one that returns after the hub has exited leaves
+		// its host owned by nobody, to its own idle exit (SF-117 (e)).
 		if !waitUntil(&h.cr.launches, time.Now().Add(createCleanupWait)) {
 			h.logf("launches in flight, or hosts the cut creates launched, were not done within %v; a start that has not returned is left as it is",
 				createCleanupWait)

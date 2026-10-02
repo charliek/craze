@@ -818,15 +818,21 @@ type ownedHost struct {
 // fork waits for the child to exec, and the child's chdir into the create's
 // directory can stall on a hung filesystem — and the teardown's quiesce must
 // never wait on it. Then, under the lock again, the host is owned; if the hub
-// began closing meanwhile, the host — which never got to its ready line — is
-// ended at once (terminate) and the answer is errLaunchClosing. Either way
-// the count is the create's to drop: here on a failure or a closing, at its
-// end otherwise. So a launch is whole before the hub closes — a host the
-// teardown's cut handles as any create's mid-start — or refused, or ended by
-// the launch itself; the teardown waits for each within its bounds, and only
-// a start that never returns outlives it (lifecycle.go's teardown). groups
-// and log are the host's agents' record and its log. The lock order is the
-// table's lock, then this one: launch holds the table's lock never.
+// began closing meanwhile, the host — which never got to its ready line and
+// owes nothing — is killed at once, with no grace, and reaped before the
+// launch goes on (kill: r46 1), its agents' cleanup run, and the answer is
+// errLaunchClosing. Either way the count is the create's to drop: here on a
+// failure or a closing — once the host is gone — at its end otherwise. So a
+// launch is whole before the hub closes — a host the teardown's cut handles
+// as any create's mid-start — or refused, or killed by the launch itself, and
+// the teardown waits for each within its cleanup wait. A start that returns
+// only once that wait has passed, or never, is left as it is (lifecycle.go's
+// teardown): its host can come up after the hub has exited, owned by nobody,
+// and live until its own idle exit (SF-117 (e); closing it needs a start gate
+// the hub holds — the child waiting on a pipe whose EOF aborts it — a new
+// host handshake). groups and log are the host's agents' record and its log.
+// The lock order is the table's lock, then this one: launch holds the table's
+// lock never.
 func (cr *creator) launch(cmd *exec.Cmd, groups, log string) (*ownedHost, *os.File, error) {
 	l := &cr.h.life
 	l.mu.Lock()
@@ -848,9 +854,9 @@ func (cr *creator) launch(cmd *exec.Cmd, groups, log string) (*ownedHost, *os.Fi
 	l.mu.Unlock()
 	if closing {
 		_ = r.Close()
-		host.terminate()
+		host.kill()
 		cr.launches.Done()
-		return nil, nil, fmt.Errorf("%w: its host (pid %d) started meanwhile, and was ended", errLaunchClosing, child.PID())
+		return nil, nil, fmt.Errorf("%w: its host (pid %d) started meanwhile, and was killed", errLaunchClosing, child.PID())
 	}
 	return host, r, nil
 }
@@ -895,6 +901,14 @@ func (cr *creator) own(child *hostspawn.Child) *ownedHost {
 
 // killAgents ends the host's recorded agents, once.
 func (o *ownedHost) killAgents() { o.once.Do(o.child.KillAgents) }
+
+// kill is hostspawn.Child.Kill — SIGKILL at once, no grace, and the reap
+// waited for — its agents' cleanup run once: a host launched as the hub
+// closed, before its ready line (launch).
+func (o *ownedHost) kill() {
+	o.child.Kill()
+	o.killAgents()
+}
 
 // terminate is hostspawn.Child.Terminate, its agents' cleanup run once.
 func (o *ownedHost) terminate() {
