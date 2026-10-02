@@ -467,6 +467,59 @@ func TestACutWaiterGetsOnlyAnAnswerFromBeforeTheCut(t *testing.T) {
 	}
 }
 
+// TestACutBetweenACreatesAnswerAndItsPublicationIsAfterTheCut (X80, r53): a
+// create whose fn has returned and whose bookkeeping is done, but whose
+// answer the cut overtakes before done closes — here run is held at its
+// endCreate (the lifecycle lock) while the cut comes — is published as after
+// the cut, so its waiter is not answered; one published before the cut still
+// is. Red when the mark is sampled as fn returns rather than as done closes.
+func TestACutBetweenACreatesAnswerAndItsPublicationIsAfterTheCut(t *testing.T) {
+	ok := createAnswer{res: &protocol.CreateResult{Prompt: protocol.CreatePromptNone}}
+	start := func(t *testing.T, held bool) (release func(), cr *creator, c *createCall) {
+		h := &hub{}
+		h.life.init()
+		if perr := h.life.beginCreate(); perr != nil {
+			t.Fatal(perr)
+		}
+		cr = newCreator(h, Creates{})
+		t.Cleanup(cr.stop)
+		release = func() {}
+		if held {
+			// Held before run starts, so it stops at endCreate: past fn and
+			// its bookkeeping, short of its publication (r54).
+			h.life.mu.Lock()
+			release = sync.OnceFunc(h.life.mu.Unlock)
+			t.Cleanup(release)
+		}
+		c = &createCall{done: make(chan struct{})}
+		go cr.run(c, func(context.Context) createAnswer { return ok })
+		return release, cr, c
+	}
+
+	t.Run("the cut overtakes the publication", func(t *testing.T) {
+		release, cr, c := start(t, true)
+		waitFor(t, "the create's bookkeeping", func() bool {
+			cr.mu.Lock()
+			defer cr.mu.Unlock()
+			return c.finished
+		})
+		cr.stop()
+		release()
+		<-c.done
+		if ans, answered := c.wait(cr.cut); answered {
+			t.Fatalf("a create published after the cut was answered %+v", ans)
+		}
+	})
+	t.Run("published before the cut", func(t *testing.T) {
+		_, cr, c := start(t, false)
+		<-c.done
+		cr.stop()
+		if ans, answered := c.wait(cr.cut); !answered || ans.res != ok.res {
+			t.Fatalf("a create published before the cut: %+v, answered %v", ans, answered)
+		}
+	})
+}
+
 // TestCreateTeardownMidCreate (§3.10): a create still in flight when its hub
 // tears down gets the teardown's bound; past it the waiter's connection
 // closes unanswered, and the host — left at its gate — runs on, its request

@@ -16,7 +16,6 @@ import (
 	"slices"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 	"unicode"
@@ -210,7 +209,12 @@ type creator struct {
 	once   sync.Once
 	// cutting is set as the cut begins, before ctx is cancelled: an answer
 	// published from then on is the cut's own doing, never delivered (wait).
-	cutting atomic.Bool
+	// pubMu orders it with each publication (run), so an answer is either
+	// published before the cut began or marked as after it — never sampled
+	// before and published after (X80, r53). It is held only for that, never
+	// across I/O, unlike mu.
+	pubMu   sync.Mutex
+	cutting bool
 
 	mu    sync.Mutex
 	calls map[string]*createCall
@@ -237,7 +241,9 @@ func newCreator(h *hub, o Creates) *creator {
 // waiter stops waiting for it.
 func (cr *creator) stop() {
 	cr.once.Do(func() {
-		cr.cutting.Store(true)
+		cr.pubMu.Lock()
+		cr.cutting = true
+		cr.pubMu.Unlock()
 		cr.cancel()
 		close(cr.cut)
 	})
@@ -637,9 +643,7 @@ func (cr *creator) evictLocked(now time.Time) {
 // is no longer counted in flight, so a waiter that has its answer can be
 // sure the create's slot is free again (busy).
 func (cr *creator) run(c *createCall, fn func(context.Context) createAnswer) {
-	ans := fn(cr.ctx)
-	c.ans = ans
-	c.afterCut = cr.cutting.Load()
+	c.ans = fn(cr.ctx)
 	cr.mu.Lock()
 	c.at, c.finished = time.Now(), true
 	// The cap holds as each answer is kept, not only at the next admission
@@ -647,6 +651,16 @@ func (cr *creator) run(c *createCall, fn func(context.Context) createAnswer) {
 	cr.evictLocked(c.at)
 	cr.mu.Unlock()
 	cr.h.life.endCreate()
+	cr.publish(c)
+}
+
+// publish closes c.done, marking the answer as after the cut when the cut
+// began first (wait): under pubMu, so the mark is the one true when done
+// closes (X80, r53).
+func (cr *creator) publish(c *createCall) {
+	cr.pubMu.Lock()
+	defer cr.pubMu.Unlock()
+	c.afterCut = cr.cutting
 	close(c.done)
 }
 
