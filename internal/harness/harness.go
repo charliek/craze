@@ -203,9 +203,23 @@ type Options struct {
 	// sets it, and fills the rest of these Options with the parent's own
 	// values.
 	Child *ChildOptions
-	// NewModel builds a model's client; nil is llm.New. It is the test seam:
-	// a test hands in a scripted fantasy.LanguageModel.
+	// NewModel builds a model's client; nil is llm.New, with Auth and
+	// AuthAPIBase as its sign-in (llm.WithSignIn). It is the test seam: a
+	// test hands in a scripted fantasy.LanguageModel.
 	NewModel func(modeltable.Resolved) (fantasy.LanguageModel, error)
+	// Auth is the sign-in a model on the ChatGPT plan's driver is funded by
+	// (plan 033 §3.12, P31): the process's token source, which the adapter in
+	// internal/agent builds (chatgptauth.Source) and the harness knows only as
+	// an llm.Auth. The default NewModel builds every model with it — the
+	// plan's driver takes its bearer from it, and every driver's scrubber
+	// keeps its token values out of the model's errors — and a sub-agent
+	// builds its models with the parent's. nil leaves no model on that driver
+	// buildable. The adapter, not the harness, subscribes AddSecrets to it.
+	Auth llm.Auth
+	// AuthAPIBase answers the API base the plan's driver sends to, when a
+	// model is built (llm.WithSignIn): chatgptauth.APIBase in production —
+	// OpenAI's own, or a test's loopback override — and nil for OpenAI's.
+	AuthAPIBase func() (string, error)
 	// Getenv looks up the environment variables that hold API keys; nil is
 	// os.Getenv. The ACP child's environment (agent.Options.Env) is not the
 	// harness's, and tests never read the real one (plan 018 §3.5).
@@ -500,7 +514,15 @@ func Open(opts Options) (*Session, error) {
 		s.getenv = os.Getenv
 	}
 	if s.newModel == nil {
-		s.newModel = func(r modeltable.Resolved) (fantasy.LanguageModel, error) { return llm.New(r) }
+		// A sub-agent is handed its parent's builder (childOpenOptions), so
+		// it builds on the parent's sign-in too.
+		auth, base := opts.Auth, opts.AuthAPIBase
+		s.newModel = func(r modeltable.Resolved) (fantasy.LanguageModel, error) {
+			if auth == nil {
+				return llm.New(r)
+			}
+			return llm.New(r, llm.WithSignIn(auth, base))
+		}
 	}
 	if s.now == nil {
 		s.now = time.Now
@@ -986,6 +1008,46 @@ func (s *Session) LearnKeys(keys []modeltable.Secret) (skipped []error, err erro
 		err = ErrStoredKeyFrozen
 	}
 	return skipped, err
+}
+
+// AddSecrets teaches the session values its sign-in learned while it runs
+// (plan 033 §3.12, P19): the ChatGPT plan's token values, which the adapter
+// hands it as the process's token source mints or adopts them — subscribed at
+// open, before the source writes the file or uses the token, and
+// unsubscribed at the adapter's Close. A refresh that lands mid-turn rotates
+// the token a tool could print, and the next turn's start is too late to
+// redact it.
+//
+// Each value is trimmed and held to modeltable.KeyProblem, as LearnKeys holds
+// a stored key: one that cannot be a key is skipped. The rest are learned as
+// LearnKeys learns them — the session's keys grow, a sub-agent opened later
+// starts with them, and one inside a frozen surface puts the session in its
+// refusal state — and, unlike a stored key, installed at once: the running
+// turn's tools redact them from their next output on (toolset.addSecrets says
+// why that one exception to "one redactor per turn" is safe), and every
+// command still running redacts them from the rest of its output and spill
+// file (Env.Streams, X91). Every attached sub-agent is taught them too, each
+// by its own AddSecrets, and one still opening is caught up from the
+// parent's learned values as it is attached (attachCaughtUp, r12 #6c).
+//
+// It is safe from any goroutine, a closed session included, and quick: it
+// takes the toolset's lock and, briefly, the runner's registry lock, both
+// leaves, so the token source may call it with its own lock held.
+func (s *Session) AddSecrets(values ...string) {
+	var vals []string
+	for _, v := range values {
+		v = strings.TrimSpace(v)
+		if v != "" && modeltable.KeyProblem(v) == nil && !slices.Contains(vals, v) {
+			vals = append(vals, v)
+		}
+	}
+	if len(vals) == 0 {
+		return
+	}
+	s.tools.addSecrets(vals)
+	for _, child := range s.subs.liveChildren() {
+		child.AddSecrets(vals...)
+	}
 }
 
 // Redactor is Redact taken once: a function over the keys Redact covers now,

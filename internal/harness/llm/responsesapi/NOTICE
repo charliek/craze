@@ -1,0 +1,38 @@
+craze's Responses API driver
+============================
+
+This package, and its Fantasy adapter in the package above it
+(internal/harness/llm/responses_adapter.go), take their design from
+Fantasy's OpenAI Responses language model:
+
+    https://github.com/charmbracelet/fantasy
+    charm.land/fantasy v0.43.2
+    providers/openai/responses_language_model.go
+
+-- the mapping of a conversation's messages to Responses input items
+(toResponsesPrompt), of a stream's events to Fantasy stream parts (Stream),
+and of a response's usage (responsesUsage). The code here is craze's own,
+written against the standard library rather than the OpenAI SDK, and it
+differs where the ChatGPT plan's route needs it to (plan 033 §3.9): the
+system prompt always goes in instructions; reasoning effort and its summary
+are sent for every model; max_output_tokens is never sent; tools go in one
+namespace; encrypted reasoning is read from each item's end and replayed;
+items are assembled from response.output_item.done; and success is
+response.completed alone.
+
+Fantasy is distributed under the Apache License, Version 2.0, with this
+notice:
+
+    Copyright 2025-2026 Charmbracelet, Inc.
+
+    Licensed under the Apache License, Version 2.0 (the "License");
+    you may not use this file except in compliance with the License.
+    You may obtain a copy of the License at
+
+        http://www.apache.org/licenses/LICENSE-2.0
+
+    Unless required by applicable law or agreed to in writing, software
+    distributed under the License is distributed on an "AS IS" BASIS,
+    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+    See the License for the specific language governing permissions and
+    limitations under the License.

@@ -271,9 +271,10 @@ func fitDialogField(f *textinput.Model, inner int) {
 }
 
 // fitDialogFields gives the open box's text field — the model dialog's
-// filter, /connect's key field — the width of its body row as the box is
-// laid out (relayout): on the Update that opened it, and again on every
-// resize, so bubbles scrolls it by the width it is drawn at.
+// filter, /connect's key field or its sign-in's address field — the width of
+// its body row as the box is laid out (relayout): on the Update that opened
+// it, and again on every resize, so bubbles scrolls it by the width it is
+// drawn at.
 func (m *Model) fitDialogFields() {
 	r := m.lay.Dialog
 	if r.Empty() {
@@ -282,7 +283,7 @@ func (m *Model) fitDialogFields() {
 	switch inner := r.W - dialogBorder; {
 	case m.dialog == dialogModel:
 		fitDialogField(&m.mdlg.filter, inner)
-	case m.dialog == dialogConnect && m.cdlg.step == connectKey:
+	case m.dialog == dialogConnect && (m.cdlg.step == connectKey || m.cdlg.step == connectSignIn):
 		fitDialogField(&m.cdlg.key, inner)
 	}
 }

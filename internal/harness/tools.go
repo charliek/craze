@@ -104,10 +104,15 @@ type toolset struct {
 	// nothing can see the toolset's pointer and the dispatcher's disagree. A
 	// key is only ever added, and a Replacer is immutable: they are swapped,
 	// never changed.
-	mu      sync.Mutex // guards keys, pending, streams, learned, and refusing's writes
+	mu      sync.Mutex // guards keys, pending, pendingKeys, installed, streams, learned, and refusing's writes
 	keys    []string
 	pending *redact.Replacer // resolved, waiting for the next turn (adopt)
 	red     atomic.Pointer[redact.Replacer]
+	// installed are the keys red redacts, sorted, and pendingKeys the ones
+	// pending does: what addSecrets widens the installed redactor from, since
+	// a Replacer does not expose its keys. installed is ts.keys but for a
+	// switch's or a stored key's that the next turn adopts.
+	installed, pendingKeys []string
 
 	// streams are the output streams of the commands running in this
 	// session's bash calls and jobs, as the bash tool tracks them
@@ -238,6 +243,7 @@ func openTools(home, workspace, mode string, asker tool.Asker, table *modeltable
 		ts.todos = newSessionTodos()
 	}
 	slices.Sort(ts.keys)
+	ts.installed = slices.Clone(ts.keys)
 	ts.red.Store(redact.New(ts.keys...))
 	if holdsAKey(workspace, ts.keys) {
 		return nil, errWorkspaceKey
@@ -413,6 +419,10 @@ func openTools(home, workspace, mode string, asker tool.Asker, table *modeltable
 		Environ:   tool.ChildEnviron(os.Environ(), keyNames),
 		Locks:     ts.locks,
 		Closing:   ts.closing,
+		// Every session's commands are tracked (plan 033 C14r, r12 #6a),
+		// a child's and a headless one's too: a token minted while one runs
+		// reaches its stream through extend, as a job's does (X91).
+		Streams: streams{ts},
 	}
 	// Set only when there is one, so a child's Env.Todos is a nil interface
 	// rather than an interface around a nil store: todo_write tests the
@@ -599,7 +609,8 @@ func (ts *toolset) widestLocked() *redact.Replacer {
 	return ts.red.Load()
 }
 
-// track is tool.Jobs.Track (jobs.go): s registered, and widened to every key
+// track is tool.Jobs.Track (jobs.go) and tool.Env.Streams' Track (streams):
+// s registered, and widened to every key
 // the session knows now — the redactor its call was given may be an earlier
 // turn's, or narrower than one a switch has prepared — in one section with the
 // registration, so a key learned meanwhile reaches s through this widening or
@@ -716,6 +727,7 @@ func (ts *toolset) extend(added []string) {
 	ts.keys = append(ts.keys, added...)
 	slices.Sort(ts.keys)
 	ts.pending = redact.New(ts.keys...)
+	ts.pendingKeys = slices.Clone(ts.keys)
 	for _, s := range ts.streams {
 		s.Widen(ts.pending)
 	}
@@ -742,6 +754,12 @@ func (ts *toolset) extend(added []string) {
 func (ts *toolset) learn(vals []string) (frozen bool) {
 	ts.mu.Lock()
 	defer ts.mu.Unlock()
+	return ts.learnLocked(vals)
+}
+
+// learnLocked is learn's section, ts.mu held: learn's, and addSecrets', which
+// installs what it learned in the same section.
+func (ts *toolset) learnLocked(vals []string) (frozen bool) {
 	var added []string
 	for _, v := range vals {
 		if !slices.Contains(ts.learned, v) {
@@ -761,6 +779,44 @@ func (ts *toolset) learn(vals []string) (frozen bool) {
 		frozen = true
 	}
 	ts.extend(added)
+	return frozen
+}
+
+// addSecrets is Session.AddSecrets' section (plan 033 §3.12, P19): vals —
+// each already vetted by modeltable.KeyProblem — learned exactly as learn
+// learns a stored key, through extend, the one place the key set grows (the
+// next turn's redactor covers them, a child opened later starts with them,
+// and one inside a frozen surface puts the session in its refusal state), and
+// then installed at once, in the toolset and the dispatcher: the redactor a
+// running turn uses widened by these values alone.
+//
+// That install is the one exception to "one redactor per turn" (adopt,
+// tools.go's R1). The rule keeps a turn from persisting a key it sent raw in
+// an earlier step, and a key the next turn adopts may be in this turn's
+// history already. A sign-in's token value is not: it was minted or adopted
+// this instant, by this process (the token source notifies before it writes
+// the file or uses the token), so no request of the session has carried it,
+// and a tool's output that would print it from here on — a cat of the token
+// file, an echo — must not wait for the next turn to be redacted. Every other
+// key still waits for begin: installed grows by vals alone. It reports
+// whether learning found one inside a frozen surface.
+func (ts *toolset) addSecrets(vals []string) (frozen bool) {
+	ts.mu.Lock()
+	defer ts.mu.Unlock()
+	frozen = ts.learnLocked(vals)
+	grown := false
+	for _, v := range vals {
+		if !slices.Contains(ts.installed, v) {
+			ts.installed, grown = append(ts.installed, v), true
+		}
+	}
+	if !grown {
+		return frozen
+	}
+	slices.Sort(ts.installed)
+	red := redact.New(ts.installed...)
+	ts.red.Store(red)
+	ts.d.SetRedactor(red)
 	return frozen
 }
 
@@ -795,6 +851,7 @@ func (ts *toolset) adopt() error {
 	}
 	red := ts.pending
 	ts.pending = nil
+	ts.installed, ts.pendingKeys = ts.pendingKeys, nil
 	ts.red.Store(red)
 	ts.d.SetRedactor(red)
 	return nil

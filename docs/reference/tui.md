@@ -1396,7 +1396,7 @@ skills carry no such restriction; they complete anywhere in the draft.
 |---------|--------|
 | `/help` | Keybindings and commands |
 | `/model` | Switch model |
-| `/connect` | Store a model provider's API key — [native sessions only](#connect) |
+| `/connect` | Store a model provider's API key, or sign in to the ChatGPT plan — [native sessions only](#connect) |
 | `/clear` | Clear transcript |
 | `/tasks` | Tasks panel: compact, expanded, hidden |
 | `/theme` | Theme picker, or `/theme <name>` |
@@ -1532,19 +1532,24 @@ without leaving the TUI — the dialog twin of [`craze auth
 login`](cli.md#craze-auth-login), storing the key the same way, as that
 provider's `api_key` in `providers.toml` (see
 [Keys](configuration.md#keys)). Like `craze auth login` it never checks the
-key with the provider: a wrong one shows as an error on first use. It exists
-in native sessions only: in a cursor, grok or gx session it is not in the menu,
-and a typed `/connect` goes to the agent as ordinary text. It is also what the
-last row of native's [`/model`](#model-dialog) opens, while some provider has
-no key.
+key with the provider: a wrong one shows as an error on first use. The
+[ChatGPT plan](configuration.md#the-chatgpt-plan), which takes no key, is
+signed in to instead, in the same box (below).
+It exists in native sessions only: in a cursor, grok or gx session it is not in
+the menu, and a typed `/connect` goes to the agent as ordinary text. It is also
+what the last row of native's [`/model`](#model-dialog) opens, while some
+provider has no key.
 
 - **Step one, `Connect a provider`**, lists every provider craze knows — the
   shipped ones and any in your own `providers.toml` — by name, a `✓` beside each
   one that has a usable key, from its variable or stored; connecting one that
   already has a key replaces its stored key. A provider whose stored key cannot
   be used (shorter than 8 bytes, or overlapping the redaction marker) is marked
-  `stored key unusable`. The box opens on the first provider with no key.
-  `↑`/`↓` move, `Enter` or a click picks, `Esc` closes.
+  `stored key unusable`. The ChatGPT plan is marked `✓` while signed in with
+  plan usage, and `plan usage off` when its account did not allow craze to use
+  the plan. The box opens on the first provider with no key.
+  `↑`/`↓` move, `Enter` or a click picks — the ChatGPT plan's sign-in, or any
+  other provider's key field — and `Esc` closes.
 - **Step two, `<Name> API key`**, is a masked field: what you type or paste is
   drawn as `•`, never as text. Under it, where the key is stored — `Stored in
   ~/.craze/native/providers.toml.`, or wherever this TUI's `CRAZE_HOME` puts it —
@@ -1570,11 +1575,58 @@ no key.
   craze, or the session ending or this terminal losing its connection to it
   (the box closes before craze goes back to the session list).
 
+**Signing in to the ChatGPT plan.** The ChatGPT plan has no key field: its
+row opens **`Sign in with ChatGPT`**, which runs the same sign-in as [`craze
+auth login chatgpt`](cli.md#signing-in-to-the-chatgpt-plan) inside the box.
+
+- **The address.** The box shows the address to open in a browser, where you
+  sign in to ChatGPT and approve craze. `Ctrl+Y` copies it whole — through the
+  terminal (OSC 52) where the terminal supports it, so it reaches the clipboard
+  of the machine you are typing on even over SSH — and the box cuts it with `…`
+  when the window is too short to show it all. The address carries no token.
+- **The way back.** craze waits for the browser to come back to it on
+  `127.0.0.1` (`Waiting for the browser.`). When the browser is on another
+  machine, the page it lands on after you approve does not load: copy that
+  page's whole address from the address bar, paste it into the field under the
+  address — a terminal paste or `Ctrl+V` — and press `Enter`. If craze could
+  not listen, the hint names the address the browser lands on. The field masks
+  everything in it with `•`, as the key field does — the address too — so an
+  API key pasted there out of habit is never drawn, not even before `Enter`,
+  and not when it is pasted onto the end of the address either. The line under
+  the field says what it holds instead, never repeating any of it: `That's the
+  redirect address: press enter to sign in.` once it is this sign-in's address
+  as the browser was sent to it — `http://127.0.0.1:<port>/auth/callback` with
+  a one-time code and the sign-in's state — and `Paste the whole address the
+  browser was sent to.` for anything else. A line that is not an address, or
+  the address of another sign-in, is refused in the field, which is emptied,
+  and is never repeated. Whichever comes first, the browser's return or the
+  pasted address, finishes the sign-in (`Signing in…`).
+- **`Esc`** goes back to step one and stops the sign-in, closing craze's
+  listener; so does every other way out of the box, and every way craze
+  exits — a quit, the terminal closing, `SIGTERM`, or craze failing.
+- **Signed in**, the box closes and the transcript says `Signed in to ChatGPT
+  as <email>.` The first time this registration signs in with plan usage the
+  one-time notice follows — `You're using your ChatGPT plan.` and `Eligible
+  usage in this app uses your ChatGPT plan. Manage usage in your ChatGPT
+  settings: https://chatgpt.com/settings/usage` — and is not shown again. Then
+  craze fetches the plan's models (`ChatGPT plan models: chatgpt/gpt-5.6-sol,
+  …`) and says `New sessions offer the ChatGPT plan's models; to use them in
+  this conversation, /exit and run craze -c.` An account that did not allow
+  plan usage gets `Signed in to ChatGPT as <email>, but ChatGPT plan usage is
+  off: …` and `To turn it on, sign in again with /connect and allow ChatGPT
+  plan usage when ChatGPT asks.` A sign-in that fails — declined in the
+  browser, refused by ChatGPT, or for another account than the one this craze
+  directory is registered with — closes the box with an error row, `/connect:
+  …`, naming the step and ChatGPT's error code, never a token.
+
 **Refused while work runs.** While a turn is running — yours, another
 client's, or the agent's own — or a sub-agent is still running in the
 background, `/connect` writes `Finish or stop the running work first, then
 /connect.` and opens nothing; work that starts while the box is open refuses
-the save in the field instead, keeping the key for another `Enter`. A running
+the save in the field instead, keeping the key for another `Enter`. The
+ChatGPT plan's row is refused the same way when it is picked, and so is a
+pasted address's `Enter`, which keeps the address in the field; a browser that
+comes back on its own while work runs still finishes the sign-in. A running
 session learns a newly stored key, to redact it, only when its next turn starts
 (see [Keys stored while a session
 runs](configuration.md#keys-stored-while-a-session-runs)), so a shell command
@@ -1583,13 +1635,18 @@ session can lag its host by a moment, and another client attached to the same
 session can start work while the box is open, so the refusal narrows that
 window rather than closing it.
 
-**The running session keeps its models.** A provider connected here is offered
-by every new session, and by this conversation once you `/exit` and resume it
-with `craze -c`; the running one keeps the model table it started with, and a
-key you replace reaches it only after the same `/exit` and `craze -c`.
+**The running session keeps its models.** A provider connected here — the
+ChatGPT plan signed in to here included — is offered by every new session, and
+by this conversation once you `/exit` and resume it with `craze -c`; the running
+one keeps the model table it started with, and a key you replace reaches it
+only after the same `/exit` and `craze -c`. What the TUI itself lists is read
+afresh each time: the session list's `/provider` and `/model`, and the
+`Connect a provider…` row of `/model`, see a sign-in at once.
 
 **Where it writes.** `/connect` writes to the `providers.toml` of *this* TUI's
-craze directory (`CRAZE_HOME`, or `~/.craze`). A session attached with `craze
+craze directory (`CRAZE_HOME`, or `~/.craze`), and the ChatGPT plan's sign-in
+to that directory's `native/auth/` and `native/chatgpt-models.json` (see [its
+files](configuration.md#the-chatgpt-plan)). A session attached with `craze
 attach` from a shell with another `CRAZE_HOME` reads its host's directory, not
 this one — which is why step two names the file.
 

@@ -167,7 +167,12 @@ func TestAHubRosterPollsOnlyWhileARunIsOpen(t *testing.T) {
 	g := newRegistry(t)
 	g.add(1, false)
 	g.add(2, true)
-	rg := newHubRig(t, g)
+	// Pause never waits, so the poller can still be on its way to the wake
+	// when the next tick is sent: with both ready its select may take the
+	// tick first, while the run is still open, and poll (a -race CI run did).
+	// The test waits for the Pause to take effect before it ticks.
+	paused := make(chan struct{}, 1)
+	rg := newHubRigWith(t, g, func(o *roster.HubOptions) { o.Paused = func() { paused <- struct{}{} } })
 	a, b := hostID(1), hostID(2)
 
 	rg.tick() // paused: taken, and nothing done
@@ -206,6 +211,11 @@ func TestAHubRosterPollsOnlyWhileARunIsOpen(t *testing.T) {
 	}
 
 	rg.r.Pause()
+	select {
+	case <-paused:
+	case <-time.After(step):
+		t.Fatal("the Pause never took effect")
+	}
 	rg.tick() // paused again
 	rg.r.Resume(2)
 	if got := rg.first("run 2's first snapshot", func(s roster.Snapshot) bool { return s.Run == 2 }); row(got, a) == nil || row(got, a).Polled || row(got, b).Polled {

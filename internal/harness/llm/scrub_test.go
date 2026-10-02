@@ -217,7 +217,7 @@ func dirtyProviderError() *fantasy.ProviderError {
 }
 
 func TestScrubProviderErrorKeepsClassification(t *testing.T) {
-	s := newScrubber(canary)
+	s := newScrubber(canary, nil)
 	with := func(edit func(*fantasy.ProviderError)) *fantasy.ProviderError {
 		pe := dirtyProviderError()
 		edit(pe)
@@ -283,7 +283,7 @@ func TestScrubProviderErrorKeepsClassification(t *testing.T) {
 }
 
 func TestScrubOtherErrors(t *testing.T) {
-	s := newScrubber(canary)
+	s := newScrubber(canary, nil)
 
 	t.Run("bare cancellation passes through as itself", func(t *testing.T) {
 		for _, sentinel := range []error{context.Canceled, context.DeadlineExceeded} {
@@ -342,7 +342,7 @@ func (*timeoutError) Timeout() bool   { return true }
 func (*timeoutError) Temporary() bool { return true }
 
 func TestScrubText(t *testing.T) {
-	s := newScrubber(canary)
+	s := newScrubber(canary, nil)
 	cases := []struct{ in, want string }{
 		{"no secrets here", "no secrets here"},
 		{"key " + canary + " twice " + canary, "key [redacted] twice [redacted]"},
@@ -356,7 +356,7 @@ func TestScrubText(t *testing.T) {
 			t.Errorf("text(%q) = %q, want %q", tc.in, got, tc.want)
 		}
 	}
-	if got := newScrubber("").text("key " + canary); got != "key "+canary {
+	if got := newScrubber("", nil).text("key " + canary); got != "key "+canary {
 		t.Errorf("a scrubber with no key changed %q to %q", "key "+canary, got)
 	}
 }
@@ -366,7 +366,7 @@ func TestScrubText(t *testing.T) {
 // and a slash as \/ — and a spelling of anything else is left as it is.
 func TestScrubTextFindsTheKeyInEveryJSONSpelling(t *testing.T) {
 	const key = "sk-Ab/cd+ef/gh" // a slash and a plus, as a base64 key has
-	s := newScrubber(key)
+	s := newScrubber(key, nil)
 	lower := func(r rune) string { return fmt.Sprintf(`\u%04x`, r) }
 	upper := func(r rune) string { return fmt.Sprintf(`\u%04X`, r) }
 	every := func(spell func(rune) string) string {
@@ -484,7 +484,7 @@ func TestAnEscapedKeyNeverSurvivesAnyField(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			pe := &fantasy.ProviderError{Title: tc.title, Message: tc.message, StatusCode: 401, ResponseBody: []byte(tc.body)}
-			err := newScrubber(canary).err(pe)
+			err := newScrubber(canary, nil).err(pe)
 			for _, gone := range []string{canary, "abc123"} {
 				if found := decodedLeaks(err, gone); len(found) > 0 {
 					t.Fatalf("%q, decoded, is reachable from the error at %v", gone, found)
@@ -524,7 +524,7 @@ func TestANonJSONBodyIsScrubbedAsBytesAsBefore(t *testing.T) {
 			}
 			pe := &fantasy.ProviderError{Title: "t", Message: "m", StatusCode: 502, ResponseBody: []byte(tc.body)}
 			var out *fantasy.ProviderError
-			if err := newScrubber(canary).err(pe); !errors.As(err, &out) {
+			if err := newScrubber(canary, nil).err(pe); !errors.As(err, &out) {
 				t.Fatalf("scrubbed error %#v is no longer a ProviderError", err)
 			}
 			if string(out.ResponseBody) != want {
@@ -544,7 +544,7 @@ func TestAnEmptyChunkedBodyStaysChunked(t *testing.T) {
 	const head = "HTTP/1.1 502 Bad Gateway\r\nTransfer-Encoding: chunked\r\n\r\n"
 	pe := &fantasy.ProviderError{Title: "t", Message: "m", StatusCode: 502, ResponseBody: []byte(head + chunked())}
 	var out *fantasy.ProviderError
-	if err := newScrubber(canary).err(pe); !errors.As(err, &out) {
+	if err := newScrubber(canary, nil).err(pe); !errors.As(err, &out) {
 		t.Fatalf("scrubbed error %#v is no longer a ProviderError", err)
 	}
 	gotHead, body, ok := bytes.Cut(out.ResponseBody, []byte("\r\n\r\n"))
@@ -567,7 +567,7 @@ func TestMidStreamErrorCopiesClassification(t *testing.T) {
 	pe.AuthError = true
 	pe.ContextTooLargeErr = true
 	pe.TransientError = true
-	mse := newScrubber(canary).midStream(pe)
+	mse := newScrubber(canary, nil).midStream(pe)
 	if found := leaks(mse, canary); len(found) > 0 {
 		t.Fatalf("the key is reachable at %v", found)
 	}
@@ -594,7 +594,7 @@ func TestMidStreamErrorCopiesClassification(t *testing.T) {
 // is not an identifier is dropped, whatever it is.
 func TestErrorNamesKeepOnlyIdentifiersTheScrubPasses(t *testing.T) {
 	const idKey = "abcdef0123456789abcdef0123456789" // a key that is a lowercase identifier
-	s := newScrubber(idKey)
+	s := newScrubber(idKey, nil)
 	for _, tc := range []struct {
 		name, body, code, typ string
 	}{
@@ -678,7 +678,7 @@ func seq[T any](items []T) iter.Seq[T] {
 // error returned by the inner Stream itself, and every method besides Stream.
 func TestEveryErrorPathIsScrubbed(t *testing.T) {
 	dirty := fmt.Errorf("request to https://h.example/v1?key=%s failed: %w", canary, dirtyProviderError())
-	failing := wrap(stubModel{err: dirty}, newScrubber(canary))
+	failing := wrap(stubModel{err: dirty}, newScrubber(canary, nil))
 	ctx := context.Background()
 
 	check := func(t *testing.T, err error) {
@@ -713,7 +713,7 @@ func TestEveryErrorPathIsScrubbed(t *testing.T) {
 	// The part checks count what they saw: a wrapper that yielded nothing
 	// would otherwise pass them.
 	t.Run("StreamObject error part", func(t *testing.T) {
-		m := wrap(stubModel{objectParts: []fantasy.ObjectStreamPart{{Type: fantasy.ObjectStreamPartTypeError, Error: dirty}}}, newScrubber(canary))
+		m := wrap(stubModel{objectParts: []fantasy.ObjectStreamPart{{Type: fantasy.ObjectStreamPartTypeError, Error: dirty}}}, newScrubber(canary, nil))
 		parts, err := m.StreamObject(ctx, fantasy.ObjectCall{})
 		if err != nil {
 			t.Fatal(err)
@@ -728,7 +728,7 @@ func TestEveryErrorPathIsScrubbed(t *testing.T) {
 		}
 	})
 	t.Run("Stream error part before output", func(t *testing.T) {
-		m := wrap(stubModel{parts: []fantasy.StreamPart{{Type: fantasy.StreamPartTypeError, Error: dirty}}}, newScrubber(canary))
+		m := wrap(stubModel{parts: []fantasy.StreamPart{{Type: fantasy.StreamPartTypeError, Error: dirty}}}, newScrubber(canary, nil))
 		parts, err := m.Stream(ctx, fantasy.Call{})
 		if err != nil {
 			t.Fatal(err)
@@ -748,7 +748,7 @@ func TestEveryErrorPathIsScrubbed(t *testing.T) {
 // name must not mangle the name, or Fantasy's lowercase retry-after-ms
 // lookup misses and the retry waits its 5 s default.
 func TestScrubNeverTouchesHeaderNames(t *testing.T) {
-	s := newScrubber("After") // as it appears in the canonical name
+	s := newScrubber("After", nil) // as it appears in the canonical name
 	got := s.headers(map[string]string{"Retry-After-Ms": "1", "X-Echo": "Bearer After"})
 	want := map[string]string{"retry-after-ms": "1", "x-echo": "Bearer " + redacted}
 	if !reflect.DeepEqual(got, want) {

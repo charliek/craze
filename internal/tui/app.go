@@ -752,6 +752,12 @@ type Model struct {
 	// retired is: a popup cancels its own as it closes, and finishRun cancels
 	// whatever a quit the popup never saw left running (sol r28-c14 2).
 	completeLoads *completeLoadSet
+	// signIns is every /connect ChatGPT sign-in run not yet ended — its
+	// context's cancel and, from the moment Begin returns it, its attempt
+	// (connect_signin.go) — shared by every copy as completeLoads is: the
+	// step ends its own on every way out it sees, and finishRun ends whatever
+	// an exit no Update sees left listening (plan 033 §3.13; review r14 2).
+	signIns *signInRuns
 	// composerAt is the composer's `@` popup (plan 030 §3.16,
 	// composer_at.go): the files of the shown session's workspace, completed
 	// into an `@` token of the draft. The TUI's, as input is — it follows the
@@ -1699,6 +1705,7 @@ func New(cfg Config) Model {
 		sessRosters:   &sessRosterSet{},
 		retired:       &backendSet{},
 		completeLoads: loads,
+		signIns:       &signInRuns{},
 		// The composer's `@` popup searches the disk: rg, git or a walk of
 		// the workspace (at_files.go). A test hands it a listing of its own
 		// (setSource).
@@ -1963,6 +1970,13 @@ func finishRun(out io.Writer, final tea.Model, m Model, h Host) (bool, error) {
 	// directory, a quit the popup never saw having ended the program (sol
 	// r28-c14 2) — is cancelled with it.
 	m.completeLoads.cancelAll()
+	// A /connect sign-in still running — its loopback listener, and a wait a
+	// browser's late redirect could still finish into the native directory —
+	// is ended the same way, before the engine's Close, which may block: none
+	// of SIGTERM, SIGHUP or a recovered panic passed through requestQuit's
+	// dropConnect (review r14 2). The set reaches an attempt Begin returned
+	// whose answer the program stopped before reading, too.
+	m.signIns.closeAll()
 	// And a backend a switch let go of, or a dial answered after the user
 	// had moved on, whose close — a command — the program stopped before it
 	// ran (plan 030 §3.11): a view close each, bounded, side by side.

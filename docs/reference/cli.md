@@ -8,7 +8,7 @@ craze attach [flags]
 craze ps [flags]
 craze new [prompt...] [flags]
 craze serve [flags]
-craze auth login [provider]
+craze auth login [provider] [--no-browser]
 craze auth logout <provider>
 craze auth list
 craze version
@@ -865,19 +865,25 @@ locked there), and says so as a start that failed.
 ## craze auth
 
 ```bash
-craze auth login [provider]
+craze auth login [provider] [--no-browser]
 craze auth logout <provider>
 craze auth list
 ```
 
 Manages the API keys of the [native provider](configuration.md#native-models-and-providers)'s
-model providers. A key is stored as its provider's `api_key` in
+model providers, and the [ChatGPT plan](configuration.md#the-chatgpt-plan)'s
+sign-in. A key is stored as its provider's `api_key` in
 `native/providers.toml` in the craze directory (`~/.craze`, or `$CRAZE_HOME`),
 written at `0600`; a provider's environment variable, when it holds a usable
 key, is used before the stored one. **No key is checked with its provider**
-when it is stored — a wrong one shows on first use — and none of the three
-commands makes a network request. What they do to the file is under
+when it is stored — a wrong one shows on first use — and for a key none of the
+three commands makes a network request. What they do to the file is under
 [Keys](configuration.md#keys).
+
+The ChatGPT plan (`chatgpt`) takes no key: it is funded by signing in with
+ChatGPT, so for it `login` [signs in](#signing-in-to-the-chatgpt-plan), `logout`
+signs out, and `list` shows the sign-in. Those talk to OpenAI's sign-in
+service, and nothing else does.
 
 A provider is named by its id or its display name, in any case: `fireworks`,
 `Fireworks`, `"z.ai coding plan"`. The providers are the
@@ -919,6 +925,78 @@ repeated back, in case what was typed there was the key. Another provider's
 stored key that cannot be used is kept as it is and named in a note on
 stderr, so it can be replaced or removed next.
 
+#### Signing in to the ChatGPT plan
+
+`craze auth login chatgpt` — or `ChatGPT plan` picked from the list — signs in
+with ChatGPT instead of asking for a key: no key is read, or asked for, for
+the plan. craze prints an address to open in a browser, where you sign in to
+ChatGPT and approve craze, and waits for the browser to come back to
+`http://127.0.0.1:1455/auth/callback`, a listener craze runs for the length of
+the sign-in. On a Linux desktop (`DISPLAY` or `WAYLAND_DISPLAY` set) or on
+macOS, and not over SSH, it opens the address in your browser itself.
+
+When the browser is on another machine, the page it is sent back to does not
+load there: copy that page's whole address from the browser's address bar and
+paste it at craze's `Redirect address: ` prompt. Like the key prompt, it does
+not echo — the terminal's echo is off from before the address is printed until
+the sign-in ends — so a key pasted there by mistake is never displayed. An
+address craze accepts is confirmed by where it leads alone, never its query
+(the one-time code):
+
+```text
+Redirect address:
+Received the redirect to http://127.0.0.1:1455/auth/callback; signing in.
+```
+
+`--no-browser` opens no browser and runs no listener, so the pasted address is
+the only way in: the way to sign in from an SSH session or a container. With
+stdin not a terminal, each line of it is taken as a pasted address.
+
+```bash
+craze auth login chatgpt                # opens the browser on a desktop, else prints the address
+craze auth login chatgpt --no-browser   # paste the redirect address from any machine
+```
+
+```text
+Sign in with ChatGPT to use your ChatGPT plan in craze. Open this address in a browser and approve craze:
+
+  https://auth.openai.com/api/accounts/authorize?client_id=…
+
+craze is waiting for the browser to come back to http://127.0.0.1:1455/auth/callback.
+If the browser is on another machine, that page will not load there: copy its whole address from the address bar and paste it here.
+Redirect address:
+Signed in to ChatGPT as you@example.com.
+You're using your ChatGPT plan.
+Eligible usage in this app uses your ChatGPT plan. Manage usage in your ChatGPT settings: https://chatgpt.com/settings/usage
+ChatGPT plan models: chatgpt/gpt-6-astra, chatgpt/gpt-5.6-sol, chatgpt/gpt-5.6-luna
+```
+
+The two notice lines appear once, the first time an account signs in with
+plan usage; a later sign-in prints the account and the models alone. The
+models are the account's own list, fetched then and there (a native session
+fetches it again when it is a day old); a list that cannot be fetched is a
+note on stderr, and the sign-in stands. Signing in again reuses craze's
+registration with ChatGPT, so the browser asks only which account to use.
+
+A pasted line that is not this sign-in's address is refused — never repeated
+back — and craze goes on waiting: one that is not an address at all (a key,
+say) is told the plan takes none. With `--no-browser`, or when stdin is not a
+terminal and no listener runs, the end of stdin with no address accepted is
+exit 1. Ctrl-C cancels the sign-in and closes the listener, exit 130, and
+changes nothing; it, `SIGTERM` and `SIGHUP` leave the terminal's echo on. Declining in the browser is exit 1, as is any error from
+ChatGPT's sign-in service, which is named by its step, its HTTP status and its
+OAuth error code — never a token, which craze never prints.
+
+An account that signs in without allowing craze to use its plan — the
+permission ChatGPT asks for alongside the sign-in — is signed in with plan
+usage off: craze keeps no tokens, its models cannot be used, and the next
+`craze auth login chatgpt` asks ChatGPT to show the permission again:
+
+```text
+Signed in to ChatGPT as you@example.com, but ChatGPT plan usage is off: the account did not allow craze to use its ChatGPT plan, so the plan's models cannot be used.
+To turn it on, run craze auth login chatgpt again and allow ChatGPT plan usage when ChatGPT asks.
+```
+
 ### craze auth logout
 
 Removes a provider's stored key, and only the key: whatever else its entry
@@ -933,13 +1011,34 @@ With nothing stored the first line is `No stored Fireworks key.`; the second
 is there only while a variable still funds the provider. No provider named is
 exit 2.
 
+`craze auth logout chatgpt` signs out of the ChatGPT plan: craze asks ChatGPT
+to revoke the sign-in (waiting at most 10 seconds) and deletes its tokens from
+this machine whatever the answer, keeping its registration so the next sign-in
+reuses it:
+
+```text
+Signed out of ChatGPT: the sign-in is revoked, and its tokens are deleted from this machine.
+An access token already issued may keep working for up to an hour, until it expires.
+```
+
+When ChatGPT does not confirm the revocation, the first line says `remote
+revocation not confirmed` and that craze can be disconnected in ChatGPT's
+settings, under Apps. Not signed in, it prints `Not signed in to ChatGPT.`
+A key someone wrote for the plan in `providers.toml`, which it never uses, is
+removed as well.
+
 ### craze auth list
 
 One row per provider, by display name: its name, its id, and how it is
 connected — `env <VAR>`, `stored key` or `not connected`, in the order a
-session tries them.
+session tries them. The ChatGPT plan's row is its sign-in: `signed in as
+<email> · ChatGPT plan · renews automatically` (its tokens are renewed as
+they near expiry, with no action from you), `plan usage disabled — run craze
+auth login chatgpt`, or `not signed in`. It is read from the registration and
+the token file's presence; no token is read, and none is ever printed.
 
 ```text
+ChatGPT plan      chatgpt          signed in as you@example.com · ChatGPT plan · renews automatically
 Fireworks         fireworks        env FIREWORKS_API_KEY
 Meta              meta             stored key
 OpenRouter        openrouter       not connected

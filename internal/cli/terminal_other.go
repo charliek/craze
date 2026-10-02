@@ -27,4 +27,10 @@ func quiet(*os.File) (*echoOff, error) {
 	return nil, errors.New("craze cannot turn this terminal's echo off; pipe the key on stdin")
 }
 
+// muteEcho cannot either, so the ChatGPT sign-in reads a pasted redirect
+// from stdin only, as a key is.
+func muteEcho(*os.File) (*echoOff, error) {
+	return nil, errors.New("craze cannot turn this terminal's echo off; pipe the redirect address on stdin")
+}
+
 func (*echoOff) restore() {}

@@ -370,6 +370,29 @@ func (r *subagents) childKeys() []string {
 	return keys
 }
 
+// liveChildren are the registered children that have opened, copied out
+// under regMu and released before any child is touched (AddSecrets, plan 033
+// §3.12): a child's own locks are leaves never taken under the registry's. A
+// nil runner — a sub-agent's — has none.
+func (r *subagents) liveChildren() []*Session {
+	if r == nil {
+		return nil
+	}
+	r.regMu.Lock()
+	handles := make([]*childHandle, 0, len(r.live))
+	for _, h := range r.live {
+		handles = append(handles, h)
+	}
+	r.regMu.Unlock()
+	var out []*Session
+	for _, h := range handles {
+		if child := h.session(); child != nil {
+			out = append(out, child)
+		}
+	}
+	return out
+}
+
 // setMode is SetMode's critical section under the registry lock: set the
 // session's mode, then raise every registered child to it, both while no
 // child can register (§3.5, panel P50). The caller holds s.mu; set takes
@@ -438,6 +461,27 @@ func (h *childHandle) attachChild(sess *Session) bool {
 		sess.signalClose()
 	}
 	return !closing
+}
+
+// attachCaughtUp is step 6's attachment of a child that opened
+// (attachChild), and then its catch-up with every value its parent has
+// learned (plan 033 C14r, r12 #6c). The child started with the parent's
+// learned keys as openChild read them, before Open; a value AddSecrets
+// teaches the parent after that read and before the attachment is pushed to
+// no child — the push reaches only attached ones (liveChildren) — so without
+// the catch-up the child would run with a token it could print raw from its
+// own tools, transcript and requests. The attachment comes first: a push
+// whose learning lands after the catch-up's read finds the child attached,
+// and one before it is in what is read, so every value reaches the child one
+// way or the other. The catch-up installs at once (AddSecrets), as the open
+// installed the rest: the child has run no turn yet. It reports what
+// attachChild does.
+func (r *subagents) attachCaughtUp(h *childHandle, child *Session) bool {
+	if !h.attachChild(child) {
+		return false
+	}
+	child.AddSecrets(r.s.tools.learnedKeys()...)
+	return true
 }
 
 // isClosing reports whether a Close has signalled this child.
@@ -889,7 +933,7 @@ func (r *subagents) runChild(ctx, childCtx context.Context, link *turnLink, call
 	defer func() { _ = child.Close() }()
 	// Step 6: a Close that signalled while the child was opening is honoured
 	// now; and a cancel that landed meanwhile starts nothing.
-	if !h.attachChild(child) || ctx.Err() != nil {
+	if !r.attachCaughtUp(h, child) || ctx.Err() != nil {
 		return abortedResult()
 	}
 	if r.seams.opened != nil {

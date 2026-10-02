@@ -60,10 +60,10 @@ type bashJob struct {
 	copyErr error // the reader's, set before copied closes
 	began   time.Time
 	closing <-chan struct{} // the session's (Env.Closing)
-	// untrack ends the session's tracking of stream (tool.Jobs.Track, from
-	// attach), once, as the command is done with: by the call that never
-	// handed it over (supervised), else by the job's Wait. A no-op where the
-	// session runs no jobs.
+	// untrack ends the session's tracking of stream (tool.Jobs.Track or
+	// Env.Streams, from attach), once, as the command is done with: by the
+	// call that never handed it over (supervised), else by the job's Wait. A
+	// no-op where nothing tracks it (an Env with neither).
 	untrack func()
 }
 

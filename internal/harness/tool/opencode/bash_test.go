@@ -2178,6 +2178,58 @@ func TestBashStopAsTheStartCompletes(t *testing.T) {
 	}
 }
 
+// TestBashStopBeforeLaunchTakesTheStart (plan 033 C14r2): the schedule under
+// which TestBashStopAsTheStartCompletes once failed under -race, forced. The
+// stop fires inside the start, after the command began, and launch reaches
+// its select only once the start has returned (ops.launching), so the started
+// command and the stop are both ready when it looks, and select takes either
+// at random. Whichever it takes, the result is the bare abort and the command
+// is killed at once: launch checks for a stop as it takes the start. Each
+// case runs 20 times because select's pick is random: a launch that
+// supervised the command it took would fail about half of them, with the
+// started command's abort ("(no output)" and its metadata) — the negative
+// control, run by removing that check. The short wait once the start has
+// returned only makes it likely that the start's result is ready when launch
+// looks; the outcome does not depend on it.
+func TestBashStopBeforeLaunchTakesTheStart(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct{ name, marker string }{
+		{"a cancel", "sleep 647"},
+		{"a close", "sleep 648"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			for range 20 {
+				env, closeSession := withClosing(bashEnv(t, nil))
+				c := prepareBash(t, env, map[string]any{"command": tc.marker})
+				pids := startedPIDs(c)
+				var r *bashRun
+				ready, returned := make(chan struct{}), make(chan struct{})
+				start := c.ops.start
+				c.ops.start = func(cmd *exec.Cmd) (*group, error) {
+					g, err := start(cmd)
+					<-ready
+					if tc.name == "a cancel" {
+						r.cancel(nil)
+					} else {
+						closeSession()
+					}
+					close(returned)
+					return g, err
+				}
+				c.ops.launching = func() {
+					<-returned
+					time.Sleep(20 * time.Millisecond) // the start's result, most likely, ready too
+				}
+				r = startBash(t, c, env)
+				close(ready)
+				failed(t, r.await(t, 30*time.Second), tool.ClassAborted, tool.AbortedText)
+				gone(t, <-pids, tc.marker)
+			}
+		})
+	}
+}
+
 // TestBashSavedNotice pins the notice over a cut output for every state of
 // its spill file: whole, capped, partial, both, and none. "Full" is said
 // only of a whole file, and each shortfall is stated when a file has both.

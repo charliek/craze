@@ -6,6 +6,7 @@
 package atomicfile
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -26,6 +27,18 @@ var (
 	now   = time.Now
 	sleep = time.Sleep
 )
+
+// fsync makes a file's contents, or a directory's entries, durable: the
+// WriteSync family's one call into the disk's cache. A seam so a test can
+// count the calls and fail one; (*os.File).Sync in production.
+var fsync = (*os.File).Sync
+
+// onBusyTry, when a test sets it, is called each time LockContext's try finds
+// the lock held, before it waits to try again: where the cancellation test
+// learns the caller is waiting on a held lock, so its cancel lands in the
+// wait rather than before the first try (plan 033 C14r, r12 #8). nil in
+// production.
+var onBusyTry func()
 
 // Lock takes an exclusive lock on path, creating it if it does not exist.
 // syscall.Flock exists on both Linux and Darwin (the two platforms this repo
@@ -98,6 +111,56 @@ func FlockWithin(f *os.File, d time.Duration) (unlock func(), err error) {
 	}
 }
 
+// LockContext is LockWithin that also gives up when ctx is done (plan 033
+// §2.3, §3.10): a caller whose request is cancelled — a turn the person
+// stopped, a sign-in they backed out of — stops waiting for another
+// process's lock at once, with ctx's error, instead of at the bound. The
+// bound and the other answers are LockWithin's: ErrLockBusy once d has
+// passed with the lock still held, the open or flock error as it is, and at
+// least one try unless ctx is already done, in which case nothing is tried
+// and ctx's error is the answer. The wait between tries is LockWithin's
+// poll, cut short by ctx.
+//
+// The returned unlock is always non-nil, as Lock's is.
+func LockContext(ctx context.Context, path string, d time.Duration) (unlock func(), err error) {
+	noop := func() {}
+	if err := ctx.Err(); err != nil {
+		return noop, err
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return noop, err
+	}
+	deadline := now().Add(d)
+	for first := true; ; first = false {
+		if err := ctx.Err(); err != nil {
+			_ = f.Close()
+			return noop, err
+		}
+		if !first && !now().Before(deadline) {
+			_ = f.Close()
+			return noop, ErrLockBusy
+		}
+		err := flockNB(f)
+		switch {
+		case err == nil:
+			return unlocker(f), nil
+		case !errors.Is(err, syscall.EWOULDBLOCK):
+			_ = f.Close()
+			return noop, err
+		}
+		if onBusyTry != nil {
+			onBusyTry()
+		}
+		t := time.NewTimer(min(lockPoll, max(deadline.Sub(now()), 0)))
+		select {
+		case <-ctx.Done():
+			t.Stop()
+		case <-t.C:
+		}
+	}
+}
+
 // flockNB is one LOCK_EX|LOCK_NB try on f, retried on EINTR.
 func flockNB(f *os.File) error {
 	for {
@@ -133,6 +196,33 @@ func Write(path string, b []byte, perm os.FileMode) error {
 // changed while it was preparing the new content: the check sits as close to
 // the rename as a rename-based write allows.
 func WriteChecked(path string, b []byte, perm os.FileMode, check func() error) error {
+	return write(path, b, perm, check, false)
+}
+
+// WriteSync is Write made durable (plan 033 §3.10): the temp file's contents
+// are flushed to the disk before the rename, and the directory after it, so
+// once WriteSync returns nil a crash or a power cut can lose neither the new
+// contents nor the rename that put them at path. It is for a file whose loss
+// cannot be undone — the ChatGPT plan's rotating refresh token, of which the
+// server keeps only the newest (R10) — and costs two fsyncs, so the stores
+// that can afford to lose a write keep Write.
+//
+// An fsync failure is the write's failure: before the rename, path is
+// untouched and the temp file removed; after it (the directory's), path
+// holds the new contents, which may not survive a crash.
+func WriteSync(path string, b []byte, perm os.FileMode) error {
+	return write(path, b, perm, nil, true)
+}
+
+// WriteSyncChecked is WriteSync with WriteChecked's last check before the
+// rename.
+func WriteSyncChecked(path string, b []byte, perm os.FileMode, check func() error) error {
+	return write(path, b, perm, check, true)
+}
+
+// write is the one write behind Write, WriteChecked, WriteSync and
+// WriteSyncChecked: durable adds the two fsyncs.
+func write(path string, b []byte, perm os.FileMode, check func() error, durable bool) error {
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
@@ -147,6 +237,12 @@ func WriteChecked(path string, b []byte, perm os.FileMode, check func() error) e
 		_ = tmp.Close()
 		return err
 	}
+	if durable {
+		if err := fsync(tmp); err != nil {
+			_ = tmp.Close()
+			return err
+		}
+	}
 	if err := tmp.Close(); err != nil {
 		return err
 	}
@@ -158,5 +254,36 @@ func WriteChecked(path string, b []byte, perm os.FileMode, check func() error) e
 			return err
 		}
 	}
-	return os.Rename(tmpName, path)
+	if err := os.Rename(tmpName, path); err != nil {
+		return err
+	}
+	if durable {
+		return syncDir(dir)
+	}
+	return nil
+}
+
+// syncDir makes dir's entries durable — a rename into it, or a removal from
+// it. A directory that cannot be opened is the caller's error.
+func syncDir(dir string) error {
+	d, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = d.Close() }()
+	return fsync(d)
+}
+
+// RemoveSync removes path and makes the removal durable (the directory's
+// fsync), for the file WriteSync wrote: a sign-out whose deletion a crash
+// could undo would bring back the tokens the person removed. A path that is
+// already gone is not an error, and nothing is synced for it.
+func RemoveSync(path string) error {
+	if err := os.Remove(path); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+	return syncDir(filepath.Dir(path))
 }

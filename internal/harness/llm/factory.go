@@ -13,6 +13,12 @@
 // (owner decision 2). OpenRouter's API is OpenAI-compatible, so the
 // "openrouter" driver is the same client at OpenRouter's fixed endpoint, with
 // effort sent in OpenRouter's own request shape. deps_test.go holds the line.
+//
+// A third driver, the ChatGPT plan's (modeltable.DriverChatGPT, plan 033
+// §3.9), is craze's own Responses client, package responsesapi — no Fantasy
+// provider and no SDK at all — adapted to Fantasy in responses_adapter.go
+// and authenticated by an Auth rather than a key: the sign-in's token source,
+// which the caller hands New with WithSignIn (plan 033 §3.12).
 package llm
 
 import (
@@ -53,12 +59,28 @@ type Option func(*options)
 
 type options struct {
 	httpClient *http.Client
+	auth       Auth
+	apiBase    func() (string, error)
 }
 
 // WithHTTPClient sends the model's requests through c instead of the SDK's
 // default client: the seam tests use to reach a local server.
 func WithHTTPClient(c *http.Client) Option {
 	return func(o *options) { o.httpClient = c }
+}
+
+// WithSignIn is the sign-in a model on the ChatGPT plan's driver is funded by
+// (plan 033 §3.12, P31): auth, the process's token source — the harness
+// knows it only as an Auth, handed in through harness.Options — and apiBase,
+// which answers the API's base URL when the model is built: OpenAI's own, or
+// a test's loopback server (chatgptauth.APIBase, whose error — a test
+// override that is not a loopback URL — fails the build, so the bearer can
+// never fall back to another host). A nil apiBase is OpenAI's. Every model
+// New builds also keeps auth's token values out of its errors, whatever its
+// driver: a provider error can echo a request, and a request can hold a tool
+// result that printed a token (scrubber, A21b).
+func WithSignIn(auth Auth, apiBase func() (string, error)) Option {
+	return func(o *options) { o.auth, o.apiBase = auth, apiBase }
 }
 
 // New builds r's language model, wrapped (see wrap.go). This is the one
@@ -90,6 +112,8 @@ func New(r modeltable.Resolved, opts ...Option) (fantasy.LanguageModel, error) {
 		}
 	case modeltable.DriverOpenRouter:
 		baseURL = openRouterBaseURL
+	case modeltable.DriverChatGPT:
+		return newSignedIn(r, o)
 	default:
 		return nil, unknownDriver(r)
 	}
@@ -100,7 +124,7 @@ func New(r modeltable.Resolved, opts ...Option) (fantasy.LanguageModel, error) {
 	case len(key) < minKeyLen:
 		return nil, fmt.Errorf("%w: provider %q (model %q) has one under %d bytes", ErrAPIKeyTooShort, r.ProviderID, r.Alias, minKeyLen)
 	}
-	scrub := newScrubber(key)
+	scrub := newScrubber(key, o.auth)
 
 	providerOpts := []openaicompat.Option{
 		openaicompat.WithBaseURL(baseURL),
@@ -134,8 +158,42 @@ func New(r modeltable.Resolved, opts ...Option) (fantasy.LanguageModel, error) {
 	return wrap(lm, scrub), nil
 }
 
+// newSignedIn is New for the ChatGPT plan's driver (plan 033 §3.12): the
+// Responses model on the sign-in's Auth, at the API base apiBase answers,
+// wrapped as every model is, its scrubber hiding the Auth's token values. The
+// model is funded by the sign-in or not at all: with no Auth it is refused,
+// and a key r carries — none, from the table — is never sent.
+func newSignedIn(r modeltable.Resolved, o options) (fantasy.LanguageModel, error) {
+	if o.auth == nil {
+		return nil, fmt.Errorf("llm: provider %q (model %q): driver %q is funded by signing in to ChatGPT, and no sign-in was given",
+			r.ProviderID, r.Alias, r.Driver)
+	}
+	base := ""
+	if o.apiBase != nil {
+		b, err := o.apiBase()
+		if err != nil {
+			return nil, fmt.Errorf("llm: model %q: %w", r.Alias, err)
+		}
+		base = b
+	}
+	lm, err := newResponsesModel(r, o.auth, base, o.httpClient)
+	if err != nil {
+		return nil, err
+	}
+	// The driver's refusal of another account's token (boundCredentials) is
+	// kept through the scrub as the Auth's own sentinels are, so the turn's
+	// failure answers errors.Is(err, modeltable.ErrOtherAccount) and the
+	// adapter can say so, and a summary gives up on it at once (plan 033
+	// C14r2): it is fixed text, so it can carry no token.
+	scrub := newScrubber("", o.auth)
+	scrub.sentinels = append(scrub.sentinels, modeltable.ErrOtherAccount)
+	return wrap(lm, scrub), nil
+}
+
 // openAIEfforts are the reasoning efforts Fantasy's OpenAI-compatible client
 // can send (openaicompat PrepareCallFunc); it fails a request with any other.
+// They are also the ChatGPT plan's Responses route's own list (plan 033
+// §3.9).
 var openAIEfforts = []openai.ReasoningEffort{
 	openai.ReasoningEffortNone,
 	openai.ReasoningEffortMinimal,
@@ -149,9 +207,10 @@ var openAIEfforts = []openai.ReasoningEffort{
 // EffortOptions returns the provider options that ask r's model for effort,
 // for a call's ProviderOptions (fantasy.AgentStreamCall.ProviderOptions):
 // reasoning_effort for the openai-compat driver, OpenRouter's
-// reasoning.effort for openrouter, keyed by the provider id New named the
-// model's provider with. It returns nil when effort is "", so nothing is
-// sent: the harness passes "" for a model with no effort control.
+// reasoning.effort for openrouter, and the Responses reasoning.effort for
+// chatgpt (responsesOptions, plan 033 §3.9), keyed by the provider id New
+// named the model's provider with. It returns nil when effort is "", so
+// nothing is sent: the harness passes "" for a model with no effort control.
 //
 // An effort the model does not list is an error rather than a silent no-op,
 // as is one the OpenAI-compatible client cannot send, so a bad switch fails
@@ -174,6 +233,15 @@ func EffortOptions(r modeltable.Resolved, effort string) (fantasy.ProviderOption
 			return nil, fmt.Errorf("llm: model %q: effort %q is not one an OpenAI-compatible request can carry", r.Alias, effort)
 		}
 		opts = &openaicompat.ProviderOptions{ReasoningEffort: &e}
+	case modeltable.DriverChatGPT:
+		// The Responses route's own list, which its validation error names
+		// (spike): the same seven as an OpenAI-compatible request. Never
+		// "ultra", which the account's model list offers some models but which
+		// is codex's multi-agent mode, not a request value (plan 033 §3.9).
+		if !slices.Contains(openAIEfforts, openai.ReasoningEffort(effort)) {
+			return nil, fmt.Errorf("llm: model %q: effort %q is not one a ChatGPT plan request can carry", r.Alias, effort)
+		}
+		return fantasy.ProviderOptions{r.ProviderID: &responsesOptions{Effort: effort}}, nil
 	case modeltable.DriverOpenRouter:
 		// The same body openrouter.ProviderOptions{Reasoning: {Effort}}
 		// produces, spelled through the OpenAI-compatible client's extra

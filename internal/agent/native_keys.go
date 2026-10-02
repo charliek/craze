@@ -9,6 +9,7 @@ import (
 	"sync"
 	"syscall"
 
+	"github.com/charliek/craze/internal/chatgptauth"
 	"github.com/charliek/craze/internal/harness"
 	"github.com/charliek/craze/internal/harness/modeltable"
 )
@@ -46,6 +47,16 @@ import (
 // a change — a rewrite in place, to the same size, within one tick of the
 // file system's clock of the last reading — which waits for the file's next
 // change.
+//
+// The same look reads the ChatGPT plan's token file beside it (plan 033
+// §3.12, P19): native/auth/chatgpt.json, whose access, refresh and id tokens
+// every native session — on any provider, the plan's or not — learns the same
+// way, stamp-gated, through LearnKeys. A session on another provider never
+// asks the token source for a token, so it would otherwise never learn one,
+// and a `cat` of the file would show the model what any process's refresh
+// wrote. A rotation by this process is learned sooner, mid-turn, through the
+// token source's subscription (AddSecrets); one by another process is learned
+// here, at the next turn's start (R9: the cross-process mid-turn window).
 
 // storedKeys is the session's look at its providers.toml. mu serializes the
 // looks — a turn's and a wake's are already one at a time behind the claim,
@@ -68,6 +79,11 @@ type storedKeys struct {
 	// problem is the last diagnostic said, so a file that stays unreadable is
 	// said once rather than at every turn; a reading that succeeds clears it.
 	problem string
+	// The token file's look keeps its own three: its stamp before the last
+	// reading that succeeded, whether there was one, and its last diagnostic.
+	tokenStamp   fileStamp
+	tokenRead    bool
+	tokenProblem string
 }
 
 // fileStamp is what a look compares: a file's size, its modification time in
@@ -107,7 +123,8 @@ func (k *storedKeys) watch(home string) {
 // anything: hs is the harness the turn runs on. Every diagnostic it writes is
 // one line through s.note that names a file, a provider id or a rule — never
 // a value — redacted by the session's own redactor after this look's learning
-// and sanitized, since a provider id is text from a file.
+// and sanitized, since a provider id is text from a file. It looks at
+// providers.toml, then at the ChatGPT plan's token file.
 func (s *nativeSession) learnStoredKeys(hs *harness.Session) {
 	k := &s.keys
 	k.mu.Lock()
@@ -115,8 +132,15 @@ func (s *nativeSession) learnStoredKeys(hs *harness.Session) {
 	if k.home == "" {
 		return
 	}
-	path := filepath.Join(k.home, modeltable.ProvidersFile)
 	note := func(msg string) { s.note(nativeSafe{red: hs.Redact}.line(msg)) }
+	s.lookAtProviders(hs, note)
+	s.lookAtTokens(hs, note)
+}
+
+// lookAtProviders is the look at providers.toml. k.mu is held.
+func (s *nativeSession) lookAtProviders(hs *harness.Session, note func(string)) {
+	k := &s.keys
+	path := filepath.Join(k.home, modeltable.ProvidersFile)
 	say := func(msg string) {
 		if msg == k.problem {
 			return
@@ -169,6 +193,50 @@ func (s *nativeSession) learnStoredKeys(hs *harness.Session) {
 	if errors.Is(err, harness.ErrStoredKeyFrozen) {
 		note(fmt.Sprintf(
 			"a key stored in %s since this session started appears in its frozen prompt; every turn from now on is refused — start a new session",
+			path))
+	}
+}
+
+// lookAtTokens is the look at the ChatGPT plan's token file (plan 033 §3.12):
+// stamp-gated like the look at providers.toml, and every value the file holds
+// — the access, refresh and id tokens (chatgptauth.StoredValues, which reads
+// no network and takes no lock) — handed to LearnKeys. A file that cannot be
+// read is one diagnostic, said once, naming the file and never a value, and
+// nothing is learned until it can be. k.mu is held.
+func (s *nativeSession) lookAtTokens(hs *harness.Session, note func(string)) {
+	k := &s.keys
+	path := chatgptauth.TokenFile(k.home)
+	say := func(msg string) {
+		if msg == k.tokenProblem {
+			return
+		}
+		k.tokenProblem = msg
+		note(msg)
+	}
+	stamp, err := stampOf(path)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		k.tokenRead = false
+		return
+	case err != nil:
+		say(fmt.Sprintf("cannot check %s for ChatGPT tokens written since this session started: %v", path, err))
+		return
+	case k.tokenRead && stamp == k.tokenStamp:
+		return
+	}
+	values, err := chatgptauth.StoredValues(k.home)
+	if err != nil {
+		say(fmt.Sprintf("%s changed, but its tokens cannot be read (%v); this session learns none of them until it is fixed", path, err))
+		return
+	}
+	k.tokenStamp, k.tokenRead, k.tokenProblem = stamp, true, ""
+	keys := make([]modeltable.Secret, len(values))
+	for i, v := range values {
+		keys[i] = modeltable.Secret(v)
+	}
+	if _, err := hs.LearnKeys(keys); errors.Is(err, harness.ErrStoredKeyFrozen) {
+		note(fmt.Sprintf(
+			"a ChatGPT token in %s appears in this session's frozen prompt; every turn from now on is refused — start a new session",
 			path))
 	}
 }

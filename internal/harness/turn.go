@@ -836,8 +836,9 @@ func (t *turn) emitLocked(ev Event) {
 	t.emit(ev)
 }
 
-// call is the turn's request. MaxOutputTokens, effort and retries are per
-// call; the system prompt and the tools are the agent's.
+// call is the turn's request. MaxOutputTokens, effort, headers
+// (requestHeaders) and retries are per call; the system prompt and the tools
+// are the agent's.
 //
 // A prompt with files (RunWith, plan 033 §3.5) is not handed over as Prompt
 // and Files: its message — the one the transcript keeps — goes at the end of
@@ -859,6 +860,7 @@ func (t *turn) call(text string, files []fantasy.FilePart, history []fantasy.Mes
 		Prompt:          text,
 		Messages:        history,
 		ProviderOptions: t.model.effortOpts,
+		Headers:         requestHeaders(t.model.r, t.store.ID()),
 		// The step allowance is the turn's, not the segment's (plan 028
 		// §3.11 item 8): a segment may make what earlier ones left of it.
 		StopWhen: []fantasy.StopCondition{fantasy.StepCountIs(maxSteps - t.stepBase), t.halted, t.compactionDue},
@@ -906,6 +908,27 @@ func (t *turn) call(text string, files []fantasy.FilePart, history []fantasy.Mes
 		c.MaxOutputTokens = &ceiling
 	}
 	return c
+}
+
+// requestHeaders are the HTTP headers every request on r's model carries
+// beyond its driver's own (fantasy.AgentStreamCall.Headers, which Fantasy
+// hands to each step's call): for the ChatGPT plan's driver, session-id, the
+// session's id (plan 033 §3.9, P18). The route derives its prompt-cache
+// affinity from that header — the spike saw 0 of 3,054 tokens cached on a
+// repeat without it and 2,816 with it — and replaces a prompt_cache_key, so
+// the header is how a session's turns, its steps and its summaries share a
+// cache. A sub-agent child sends its own id: its prompt's prefix is not its
+// parent's.
+//
+// Every other driver gets none (nil): Fantasy's OpenAI-compatible client sends
+// whatever headers a call carries, and a session's id is nothing another
+// provider asked for — and a request change there is the eval's to measure
+// first (D-69).
+func requestHeaders(r modeltable.Resolved, sessionID string) map[string]string {
+	if r.Driver != modeltable.DriverChatGPT || sessionID == "" {
+		return nil
+	}
+	return map[string]string{"session-id": sessionID}
 }
 
 // halted is the turn's own stop condition, checked after every step
@@ -990,7 +1013,7 @@ func (t *turn) overflowed(err error) bool {
 	if t.ctx.Err() != nil || t.saveErr != nil || t.badIDs || t.loop.stopped || t.planApproved || t.step >= maxSteps {
 		return false
 	}
-	return errors.Is(classify(err, t.model.id()), ErrContextTooLarge)
+	return errors.Is(classify(err, t.model.r), ErrContextTooLarge)
 }
 
 // classify is the turn's failure as the session returns it: classify on the
@@ -999,7 +1022,7 @@ func (t *turn) overflowed(err error) bool {
 // otherwise nothing was compacted for it and the request alone is too large
 // (C9c item 4). mu is held.
 func (t *turn) classify(err error) error {
-	cerr := classify(err, t.model.id())
+	cerr := classify(err, t.model.r)
 	var pe *ProviderError
 	if t.overflowCompacted && errors.As(cerr, &pe) && pe.kind == ErrContextTooLarge {
 		pe.Compacted = true

@@ -394,6 +394,11 @@ func TestMergeStructuralProblemsStillFail(t *testing.T) {
 		{"retired is not a user key", "", "version = 1\n\n[[retired]]\nalias = \"x\"\n", ModelsFile, "", "retired"},
 		{"unknown model key", "", "version = 1\n\n[models.\"acme/fast\"]\ncontxt_window = 1\n", ModelsFile, `models."acme/fast"`, "contxt_window"},
 		{"unknown driver", "version = 1\n\n[providers.acme]\ndriver = \"anthropic\"\n", "", ProvidersFile, "providers.acme", "driver"},
+		// The chatgpt driver with an endpoint of its own, written by the
+		// entry itself: a pair that cannot go together, as openrouter's is
+		// (plan 033 §3.11). Under another id it is dropped with a warning
+		// instead (TestChatGPTProviderRules).
+		{"the chatgpt driver with a base URL", "version = 1\n\n[providers.acme]\ndriver = \"chatgpt\"\nbase_url = \"https://x.example\"\n", "", ProvidersFile, "providers.acme", "base_url"},
 		{"not a URL", "version = 1\n\n[providers.acme]\nbase_url = \"api.example\"\n", "", ProvidersFile, "providers.acme", "base_url"},
 		{"a pair that cannot go together", "version = 1\n\n[providers.acme]\ndriver = \"openrouter\"\nbase_url = \"https://x.example\"\n", "", ProvidersFile, "providers.acme", "base_url"},
 		{"a blank env_keys name", "version = 1\n\n[providers.acme]\nenv_keys = [\" \"]\n", "", ProvidersFile, "providers.acme", "env_keys"},
@@ -680,13 +685,17 @@ func TestNoCatalogIsTodaysTable(t *testing.T) {
 // TestOverlayKeysMatchTheSavedShape: Load reads through the pointer-typed
 // overlays and Save writes through providerEntry and modelEntry; the two
 // shapes must name exactly the same keys, or Save would write one Load
-// refuses (models.toml's `catalog` is the top-level key both docs carry).
+// refuses (models.toml's `catalog` is the top-level key both docs carry). A
+// field tagged "-" is never written (modelEntry.ParallelToolCalls, plan 033
+// §3.11), so it names no key.
 func TestOverlayKeysMatchTheSavedShape(t *testing.T) {
 	keys := func(v any) []string {
 		var out []string
 		rt := reflect.TypeOf(v)
 		for i := range rt.NumField() {
-			out = append(out, strings.Split(rt.Field(i).Tag.Get("toml"), ",")[0])
+			if key := strings.Split(rt.Field(i).Tag.Get("toml"), ",")[0]; key != "-" {
+				out = append(out, key)
+			}
 		}
 		slices.Sort(out)
 		return out
@@ -1056,7 +1065,10 @@ func TestOwnerFilesUpgrade(t *testing.T) {
 					t.Errorf("%s = %+v\nwant %+v", alias, m, want)
 				}
 			}
-			for id := range cat.Providers {
+			for id, p := range cat.Providers {
+				if p.Driver == DriverChatGPT {
+					continue // signs in: no key, inline or not (plan 033 §3.11)
+				}
 				if tbl.Providers[id].APIKey == "" {
 					t.Errorf("provider %s lost its inline key", id)
 				}

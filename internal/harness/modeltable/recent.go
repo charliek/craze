@@ -314,6 +314,10 @@ func (t *Table) recentAlias(e RecentEntry) (string, bool) {
 //   - DefaultModel, at its default_effort, unless its provider has no key. A
 //     default that fails for any other reason is still the answer, left for
 //     the caller's open to report, as it always was (plan 018 §3.8);
+//   - the ChatGPT plan's start model ([chatgpt_defaults] start, plan 033
+//     §3.11) when it resolves — the account lists it and the sign-in funds it
+//     — at its default_effort: an owner signed in with nothing else funded
+//     starts on the plan's chosen model, not on whichever sorts first;
 //   - the first alias in sorted order that resolves, at its default_effort:
 //     one unfunded provider must not lock the owner out of the others. The
 //     caller says it did not start on the default.
@@ -331,6 +335,11 @@ func (t *Table) StartModel(recent []RecentEntry, getenv func(string) string) (al
 	_, derr := t.Resolve(def, getenv)
 	if !errors.Is(derr, ErrNoAPIKey) {
 		return def, t.Models[def].DefaultEffort, nil
+	}
+	if start := t.chatgptStart; start != "" {
+		if _, err := t.Resolve(start, getenv); err == nil {
+			return start, t.Models[start].DefaultEffort, nil
+		}
 	}
 	for _, alias := range t.Aliases() {
 		if _, err := t.Resolve(alias, getenv); err == nil {

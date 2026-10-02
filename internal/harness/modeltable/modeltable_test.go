@@ -1142,6 +1142,53 @@ func TestResolveFields(t *testing.T) {
 	}
 }
 
+// TestResolveParallelToolCalls (plan 033 §3.11): Resolve carries a model's
+// ParallelToolCalls, nil for one that sets none (the driver's default), as
+// a copy of its own; Clone copies it too; and Save never writes it — no
+// file has a key for it.
+func TestResolveParallelToolCalls(t *testing.T) {
+	tbl := validTable()
+	off := false
+	m := tbl.Models["fireworks/kimi-k3"]
+	m.ParallelToolCalls = &off
+	tbl.Models["fireworks/kimi-k3"] = m
+	env := fakeEnv(map[string]string{"FIREWORKS_API_KEY": "key-fw-0001"})
+
+	got, err := tbl.Resolve("fireworks/kimi-k3", env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ParallelToolCalls == nil || *got.ParallelToolCalls {
+		t.Fatalf("ParallelToolCalls = %v, want false", got.ParallelToolCalls)
+	}
+	*got.ParallelToolCalls = true
+	if *tbl.Models["fireworks/kimi-k3"].ParallelToolCalls {
+		t.Fatal("Resolve returned the table's own ParallelToolCalls")
+	}
+	if or, err := tbl.Resolve("openrouter/minimax-m3", env); err != nil || or.ParallelToolCalls != nil {
+		t.Fatalf("a model that sets none: ParallelToolCalls = %v, err %v; want nil", or.ParallelToolCalls, err)
+	}
+
+	cat := &Catalog{Models: map[string]Model{"a": m}}
+	cl := cat.Clone()
+	*cl.Models["a"].ParallelToolCalls = true
+	if *cat.Models["a"].ParallelToolCalls {
+		t.Fatal("Clone shared ParallelToolCalls")
+	}
+
+	dir := t.TempDir()
+	if err := Save(dir, tbl); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(filepath.Join(dir, ModelsFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(strings.ToLower(string(raw)), "parallel") {
+		t.Fatalf("Save wrote ParallelToolCalls:\n%s", raw)
+	}
+}
+
 // Resolve supplies the default output ceiling (D-74) and nothing else does:
 // an explicit max_output_tokens wins whatever its size, and the default is
 // held to a quarter of a known window.

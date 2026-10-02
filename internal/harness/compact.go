@@ -552,10 +552,13 @@ func (s *Session) estimateContext(msgs []fantasy.Message) int64 {
 // large (switches every later attempt to the text form); "fatal" for
 // authentication, model-not-found, an account whose quota or credit is gone
 // whatever the status says (quotaExhausted — an in-band stream error has
-// none, review r3), or any other client error the provider raised
-// deliberately (a 4xx this craze has no more specific name for) — these end
-// the summarizer at once; "" for anything else — a 5xx, a timeout, a stream
-// error — which is retried.
+// none, review r3), a failure the provider said not to repeat (the ChatGPT
+// plan's Final, plan 033 P33 — a retry would be the same request, every 429
+// on that driver among them), the sign-in's own failure (signed out, the
+// usage latch: nothing a backoff changes, §3.12), or any other client error
+// the provider raised deliberately (a 4xx this craze has no more specific
+// name for) — these end the summarizer at once; "" for anything else — a
+// 5xx, a timeout, a stream error — which is retried.
 func summarizerFailureKind(err error) string {
 	switch {
 	case err == nil:
@@ -570,7 +573,7 @@ func summarizerFailureKind(err error) string {
 		return ""
 	}
 	switch {
-	case quotaExhausted(pe):
+	case pe.Final, pe.signIn != nil, quotaExhausted(pe):
 		return "fatal"
 	case pe.StatusCode >= 400 && pe.StatusCode < 500 && !transientClientStatus(pe):
 		return "fatal"
@@ -590,8 +593,9 @@ var quotaExhaustedPattern = regexp.MustCompile(
 // quotaExhaustedCodes are the structured error codes and types (lowercase)
 // that name a failure as the account's quota or credit being gone — a 429's
 // or an in-band stream error's alike (ProviderError.Code, .Type):
-// OpenAI-family "insufficient_quota".
-var quotaExhaustedCodes = map[string]bool{"insufficient_quota": true}
+// OpenAI-family "insufficient_quota", and the ChatGPT plan's usage limit
+// (plan 033 §3.12), which a retry cannot lift either.
+var quotaExhaustedCodes = map[string]bool{"insufficient_quota": true, CodeUsageLimit: true}
 
 // transientClientStatus reports whether a classified 4xx failure is worth
 // retrying rather than ending the summarizer at once (plan 028 §3.8 decision
@@ -670,10 +674,11 @@ func observeUsage(into *store.Usage) func(fantasy.Usage, fantasy.FinishReason, f
 // item 1, P11, PD10): the session's own agent, with the session's tools
 // offered inert (s.inertTools, same Info as a turn's) so Fantasy converts
 // and normalizes them exactly as a turn's would, one step
-// (fantasy.StepCountIs(1)), the same provider options and output ceiling as
-// a turn. Messages is history, exactly the next request's; Prompt is the
-// compaction prompt, the state section, and, for a focus, the "Focus this
-// summary on" line (item 1, item 2, item 3). Its agent's own retries are off
+// (fantasy.StepCountIs(1)), the same provider options, headers
+// (requestHeaders) and output ceiling as a turn. Messages is history,
+// exactly the next request's; Prompt is the compaction prompt, the state
+// section, and, for a focus, the "Focus this summary on" line (item 1, item
+// 2, item 3). Its agent's own retries are off
 // (newSummarizerAgent, review r1-c9 "three attempts means three requests"):
 // compact's outer attempts are the whole retry budget.
 //
@@ -691,6 +696,7 @@ func (s *Session) summarizeAligned(ctx context.Context, m model, history []fanta
 		Prompt:          s.compactionPromptText(focus, red),
 		Messages:        omitImages(history, summarizerOmits),
 		ProviderOptions: m.effortOpts,
+		Headers:         requestHeaders(m.r, s.store.ID()),
 		StopWhen:        []fantasy.StopCondition{fantasy.StepCountIs(1)},
 		OnStreamFinish:  observeUsage(&observed),
 	}
@@ -700,7 +706,7 @@ func (s *Session) summarizeAligned(ctx context.Context, m model, history []fanta
 	}
 	res, err := agent.Stream(ctx, call)
 	if err != nil {
-		return "", observed, classify(err, m.id())
+		return "", observed, classify(err, m.r)
 	}
 	return res.Response.Content.Text(), *store.UsageOf(res.TotalUsage), nil
 }
@@ -720,6 +726,7 @@ func (s *Session) summarizeText(ctx context.Context, m model, before, sent int64
 	call := fantasy.AgentStreamCall{
 		Prompt:          prompt,
 		ProviderOptions: m.effortOpts,
+		Headers:         requestHeaders(m.r, s.store.ID()),
 		StopWhen:        []fantasy.StopCondition{fantasy.StepCountIs(1)},
 		OnStreamFinish:  observeUsage(&observed),
 	}
@@ -729,7 +736,7 @@ func (s *Session) summarizeText(ctx context.Context, m model, before, sent int64
 	}
 	res, err := agent.Stream(ctx, call)
 	if err != nil {
-		return "", observed, classify(err, m.id())
+		return "", observed, classify(err, m.r)
 	}
 	return res.Response.Content.Text(), *store.UsageOf(res.TotalUsage), nil
 }

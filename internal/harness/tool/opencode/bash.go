@@ -324,6 +324,12 @@ type ops struct {
 	// 10). Such a test gives a timeout long enough that launch's own bound,
 	// which is real time, is never what it meets. nil in production.
 	expire <-chan time.Time
+	// launching is a test seam: called on launch's own goroutine once it has
+	// set the start going, before it waits for the start or a stop — where a
+	// test holds it until the start has returned with a stop fired inside
+	// it, so that both are ready when launch looks (plan 033 C14r2). nil in
+	// production.
+	launching func()
 }
 
 var realOps = ops{stat: os.Stat, ensureTmp: ensureTmp, start: startGroup, openSpill: openSpill}
@@ -484,20 +490,26 @@ func (j *bashJob) ended(ctx context.Context, why ending, reaped bool, stopProgre
 // to waits on a file: the spill file is written by a goroutine of its own
 // (spiller), so the reader always empties the pipe.
 //
-// In a session that runs jobs the stream is tracked from here until the
-// command is done with (tool.Jobs.Track; bashJob.untrack): any command there
-// may become a job and outlive its turn's redactor, so its redaction is
-// widened with every key the session learns while it runs, and the output,
-// its spill file and every bash_output read hold none of them (plan 033
-// C10r).
+// The stream is tracked from here until the command is done with
+// (bashJob.untrack): its redaction is widened with every key the session
+// learns while it runs, and the output, its spill file and every bash_output
+// read hold none of them. In a session that runs jobs it is tracked through
+// tool.Jobs.Track — any command there may become a job and outlive its turn's
+// redactor (plan 033 C10r) — and in any other through Env.Streams, the same
+// registry: a token the ChatGPT sign-in mints while a command runs must not
+// reach the rest of its output raw (plan 033 C14r, r12 #6a).
 func (c *bashCall) attach(env tool.Env, g *group, r *os.File, began time.Time) *bashJob {
 	out := &output{home: env.Home, id: c.id, open: c.ops.openSpill, cap: c.spillCap}
 	j := &bashJob{c: c, g: g, r: r, out: out, stream: newModelStream(env.Redactor, out),
 		copied: make(chan struct{}), began: began, closing: env.Closing, untrack: func() {}}
+	tracker := env.Streams
 	if env.Jobs != nil {
+		tracker = env.Jobs
+	}
+	if tracker != nil {
 		// Before the reader starts, so the stream decides no byte before it
 		// knows every key the session does.
-		j.untrack = env.Jobs.Track(j.stream)
+		j.untrack = tracker.Track(j.stream)
 	}
 	go func() {
 		defer close(j.copied)
@@ -518,12 +530,13 @@ type launched struct {
 // end. A start that failed left nothing to discard.
 //
 // This is the one place a started command is killed without the SIGTERM
-// grace: the stop was fired before setup's check, but Start had already
-// returned by the time launch read the result, so the command has existed
-// for the width of that window — microseconds, or the scheduler's delay
-// under load — and has produced nothing worth draining. Accepted after
-// review (plan 019 execution record); a command that runs past launch is
-// always stopped through supervise, with the grace.
+// grace: the stop fired before launch took the start's result — select took
+// the stop, or took the start with the stop already fired (launch) — but
+// Start had begun the command, so it has existed for the width of that
+// window — microseconds, or the scheduler's delay under load — and has
+// produced nothing worth draining. Accepted after review (plan 019 execution
+// record); a command that runs past launch is always stopped through
+// supervise, with the grace.
 func (l launched) discard() {
 	if l.err != nil {
 		return
@@ -569,10 +582,13 @@ func (e *readEnd) close() {
 // timeout's slack, errLaunchTimeout (a timeout result). A stop that has
 // fired by the time the work before the command is done is still a stop:
 // setup checks once more, just before it starts the command, and starts
-// nothing (stopped). So a stop is never mistaken for one that came after the
-// command had started — which select alone could not tell, ready as both may
-// be when it looks — and a command that did start before the stop is a
-// started command, stopped by supervise with its grace and its output kept.
+// nothing (stopped). One that fires while the command starts — after Start
+// began it, before launch has its result — is a stop too: launch checks
+// again as it takes the result, and discards the command (plan 033 C14r2).
+// So a stop is never mistaken for one that came after the command had
+// started — which select alone could not tell, ready as both may be when it
+// looks — and a command launch has returned before the stop is a started
+// command, stopped by supervise with its grace and its output kept.
 //
 // An abandoned start is left to the one goroutine running it: it discards
 // whatever it goes on to start, the moment it has started. Until then, if
@@ -598,9 +614,28 @@ func (c *bashCall) launch(ctx context.Context, env tool.Env, deadline time.Time)
 	}()
 	expiry := time.NewTimer(time.Until(deadline) + timeoutSlack)
 	defer expiry.Stop()
+	if c.ops.launching != nil {
+		c.ops.launching()
+	}
 	err := context.Canceled
 	select {
 	case l := <-done:
+		// The start's result and a stop can both be ready by the time select
+		// looks — the stop fired inside the start, after the command began
+		// and before Start returned, and this goroutine reached select only
+		// then, as a loaded scheduler can leave it — and select takes either
+		// at random. So a stop that has fired by the time launch takes the
+		// start is still a stop, whichever it took: the command is discarded,
+		// never supervised, as it is when select takes the stop (plan 033
+		// C14r2: TestBashStopAsTheStartCompletes failed once under -race, the
+		// start taken and the command supervised). A command is supervised,
+		// with the grace, only once launch has returned it.
+		if l.err == nil {
+			if stop := stopped(ctx, env.Closing, deadline); stop != nil {
+				l.discard()
+				return nil, nil, stop
+			}
+		}
 		return l.g, l.r, l.err
 	case <-ctx.Done():
 	case <-env.Closing:

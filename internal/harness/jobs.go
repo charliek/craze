@@ -211,6 +211,17 @@ func (j jobs) Redact(text string) string { return j.r.union(nil).String(text) }
 // it runs (toolset.track, plan 033 C10r).
 func (j jobs) Track(s tool.KeyedStream) (untrack func()) { return j.r.s.tools.track(s) }
 
+// streams is tool.Env.Streams, which every session's env has (plan 033 C14r,
+// r12 #6a): toolset.track, Jobs.Track's registry, for a session that runs no
+// jobs — headless, or a sub-agent's — whose commands' streams are widened as
+// its key set grows all the same.
+type streams struct{ ts *toolset }
+
+var _ tool.StreamTracker = streams{}
+
+// Track is tool.StreamTracker's: toolset.track.
+func (s streams) Track(k tool.KeyedStream) (untrack func()) { return s.ts.track(k) }
+
 // jobSlot is one reserved slot (tool.JobSlot): Start or Release, once.
 type jobSlot struct {
 	r    *subagents

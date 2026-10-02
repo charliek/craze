@@ -777,3 +777,43 @@ func mode(t *testing.T, path string) os.FileMode {
 	}
 	return info.Mode().Perm()
 }
+
+// TestCurrentRedactorFollowsTheSession (plan 033 C14r2, review r13 a): a
+// call's Env.CurrentRedactor is the dispatcher's redactor as it is when the
+// tool asks, so a key the session learns while the call runs (SetRedactor,
+// which Session.AddSecrets calls) is known to the call at once, for the text
+// it cuts. Env.Redactor, the control, stays the one of when the call began.
+// An Env the dispatcher did not hand out answers its own Redactor.
+func TestCurrentRedactorFollowsTheSession(t *testing.T) {
+	const keyB = "zq-plan-token-0022"
+	running, learned := make(chan struct{}), make(chan struct{})
+	var began, now string
+	probe := newFake("probe", func(_ context.Context, env Env, _ fakeInput) Result {
+		close(running)
+		<-learned
+		began, now = env.Redactor.String(keyB), env.CurrentRedactor().String(keyB)
+		return Result{Text: "ok"}
+	})
+	d := newDispatcher(t, testEnv(t, keyA), nil, probe)
+	if _, res, ok := d.Prepare(Call{ID: "t1.1.1", CallID: "call_1", Tool: "probe", Input: input(t, fakeInput{Text: "x"})}); !ok {
+		t.Fatalf("Prepare refused the call: %s", res.Text)
+	}
+	done := make(chan Result, 1)
+	go func() { done <- d.Run(context.Background(), "t1.1.1", nil) }()
+	<-running
+	d.SetRedactor(redact.New(keyA, keyB))
+	close(learned)
+	if res := <-done; res.IsError {
+		t.Fatalf("the call failed: %s", res.Text)
+	}
+	if now != redact.Marker {
+		t.Fatalf("CurrentRedactor, after the key was learned mid-call, made %q of it", now)
+	}
+	if began != keyB {
+		t.Fatalf("control: the call's own Redactor made %q of a key it never knew", began)
+	}
+	env := testEnv(t, keyA)
+	if env.CurrentRedactor() != env.Redactor {
+		t.Fatal("an Env the dispatcher did not hand out has a CurrentRedactor of its own")
+	}
+}

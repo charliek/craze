@@ -105,8 +105,9 @@ func missing(err error) bool {
 }
 
 // isCredentials reports whether real, a path realPath resolved, is the
-// harness's key file (plan 019 §3.8): by name and directory, or, when real
-// exists (info is its), by identity, so a hard link to it is refused too.
+// harness's key file (plan 019 §3.8) or in its sign-in directory (plan 033
+// §3.12): by name and directory, or, when real exists (info is its), by
+// identity, so a hard link to either is refused too.
 //
 // The name is compared ignoring case and the directory by identity. On a
 // case-insensitive file system (macOS's APFS, by default) a file has many
@@ -122,11 +123,97 @@ func isCredentials(env tool.Env, real string, info fs.FileInfo) bool {
 	if strings.EqualFold(filepath.Base(real), filepath.Base(cred)) && sameDir(filepath.Dir(real), filepath.Dir(cred)) {
 		return true
 	}
+	if inAuthDir(env, real, info) {
+		return true
+	}
 	if info == nil {
 		return false
 	}
 	ci, err := os.Stat(cred)
 	return err == nil && os.SameFile(info, ci)
+}
+
+// searchGuard is isCredentials for the many paths one search turns up (plan
+// 033 C14r, r12 #7): grep's matching files and glob's listed ones, each
+// resolved as the file tools resolve a path they are given — every symlink on
+// the way followed — and judged by place and by identity, so a match in the
+// sign-in directory reached from a search of a directory above it, and one
+// in a hard link to the token file made elsewhere, are both caught. A file
+// is judged once per search, however many of its lines match.
+type searchGuard struct {
+	env  tool.Env
+	seen map[string]bool
+}
+
+func newSearchGuard(env tool.Env) *searchGuard {
+	return &searchGuard{env: env, seen: map[string]bool{}}
+}
+
+// protected reports whether abs, a path a search turned up, is one the file
+// tools refuse. A path that will not resolve or stat is judged as spelled,
+// with no identity to compare: it was there a moment ago, when rg listed it.
+func (g *searchGuard) protected(abs string) bool {
+	if v, ok := g.seen[abs]; ok {
+		return v
+	}
+	real := targetPath(abs)
+	info, err := os.Stat(real)
+	if err != nil {
+		info = nil
+	}
+	v := isCredentials(g.env, real, info)
+	g.seen[abs] = v
+	return v
+}
+
+// inAuthDir reports whether real, a path realPath resolved, is the harness's
+// sign-in directory <Home>/auth or anything under it (plan 033 §3.12): the
+// ChatGPT plan's token file, its lock, its registration and the host id. Two
+// ways, as for the key file:
+//
+//   - by place: real or one of its parents is that directory — by identity
+//     where both exist, so another spelling of it on a case-insensitive file
+//     system, or the real path behind a symlink to it, is refused, and by
+//     name, ignoring case, where neither does, so a file cannot be created
+//     there before the sign-in makes the directory;
+//   - by identity, when real exists (info is its): it is the same file as one
+//     in that directory, so a hard link made elsewhere to the token file is
+//     refused too.
+//
+// Only the directory's own entries are compared: the sign-in makes no
+// subdirectory.
+func inAuthDir(env tool.Env, real string, info fs.FileInfo) bool {
+	auth := filepath.Join(env.Home, AuthDir)
+	if r, err := realPath(auth); err == nil {
+		auth = r
+	}
+	// sameDir's rule, with the directory stat'ed once for every parent.
+	ai, aerr := os.Stat(auth)
+	for p := real; ; p = filepath.Dir(p) {
+		pi, perr := os.Stat(p)
+		switch {
+		case p == auth,
+			aerr == nil && perr == nil && os.SameFile(pi, ai),
+			aerr != nil && perr != nil && strings.EqualFold(p, auth):
+			return true
+		}
+		if filepath.Dir(p) == p {
+			break
+		}
+	}
+	if info == nil || aerr != nil {
+		return false
+	}
+	entries, err := os.ReadDir(auth)
+	if err != nil {
+		return false
+	}
+	for _, e := range entries {
+		if fi, err := os.Stat(filepath.Join(auth, e.Name())); err == nil && os.SameFile(info, fi) {
+			return true
+		}
+	}
+	return false
 }
 
 // sameDir reports whether a and b name one directory: by identity when both

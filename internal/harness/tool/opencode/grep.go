@@ -138,6 +138,12 @@ func (c *grepCall) Run(ctx context.Context, env tool.Env) tool.Result {
 	case err != nil:
 		return errorResult(err)
 	}
+	// The path the call named is refused as read refuses it (plan 033
+	// C14r, r12 #7): the key file, or the sign-in directory or anything in
+	// it, through any symlink, or a hard link to a file there.
+	if isCredentials(env, targetPath(c.abs), info) {
+		return errorResult(fail(tool.ClassToolError, credentialsText))
+	}
 	dir, target := c.abs, "."
 	switch {
 	case info.IsDir():
@@ -148,13 +154,22 @@ func (c *grepCall) Run(ctx context.Context, env tool.Env) tool.Result {
 		return errorResult(fail(tool.ClassToolError, "Path is not a regular file or a directory: "+c.abs))
 	}
 
+	// A search of a directory above them — the craze directory, a home that
+	// holds it — finds those files too: each match in one is dropped before
+	// its line is previewed or counted against the limit, so neither the
+	// line nor a cut piece of it reaches the result (searchGuard).
+	guard := newSearchGuard(env)
 	var rows []grepMatch
 	end, readErr, runErr := c.rg.run(ctx, env, bin, dir, grepArgs(c.pattern, c.include, target), '\n', func(line []byte) (bool, error) {
-		m, ok, err := parseMatch(env, dir, line)
+		m, ok, err := parseMatch(dir, line)
 		if err != nil {
 			return false, err
 		}
-		if ok {
+		if ok && !guard.protected(m.path) {
+			if beforeCut != nil {
+				beforeCut()
+			}
+			m.text = preview(env, m.text)
 			rows = append(rows, m)
 		}
 		// One more than the limit, to know there are more (ripgrep.ts:126).
@@ -232,12 +247,13 @@ var (
 // path, a line and a positive line number. The path is joined onto dir,
 // where rg ran (rgPath). It is a JSON string, so a newline in a name is
 // escaped in it, not a record's end, and the path cannot leave dir; rgPath
-// fails the search if it ever did. The line loses its line ending, and is
-// redacted and then cut to maxMatchLength runes (preview).
+// fails the search if it ever did. The line is the file's, as rg printed it:
+// the caller previews it (preview) once the file is known to be one the
+// search may show (searchGuard).
 //
 // opencode fails the whole search on a line or path that is not valid
 // UTF-8, which rg reports as base64 bytes; craze decodes it (NOTICE).
-func parseMatch(env tool.Env, dir string, line []byte) (m grepMatch, ok bool, err error) {
+func parseMatch(dir string, line []byte) (m grepMatch, ok bool, err error) {
 	if !json.Valid(line) {
 		return grepMatch{}, false, errInvalidJSON
 	}
@@ -268,16 +284,29 @@ func parseMatch(env tool.Env, dir string, line []byte) (m grepMatch, ok bool, er
 	if err != nil {
 		return grepMatch{}, false, err
 	}
-	return grepMatch{path: abs, line: *data.LineNumber, text: preview(env, text)}, true, nil
+	return grepMatch{path: abs, line: *data.LineNumber, text: text}, true, nil
 }
+
+// beforeCut, when a test sets it, is called just before grep previews a
+// matching line and before read cuts a line it read — after the line was
+// read, before the cut — where a key the session learns mid-call must still
+// be caught (plan 033 C14r2, review r13 a). nil in production.
+var beforeCut func()
 
 // preview is a matching line as grep shows it: without its line ending,
 // which rg's JSON keeps and opencode shows (NOTICE); with craze's provider
 // keys redacted, before the cut, so a key the cut would halve leaves no
 // half behind; and cut to maxMatchLength runes, then "...", when longer.
+//
+// The keys are the session's as they are at the cut (Env.CurrentRedactor),
+// not as they were when the call began (plan 033 C14r2, review r13 a): a
+// ChatGPT plan token the sign-in mints while rg runs is learned by the
+// session at once (Session.AddSecrets), and a line holding it across the cut
+// would otherwise keep its first half, which the dispatcher's redaction of
+// the result, though it knows the token by then, cannot recognise.
 func preview(env tool.Env, s string) string {
 	s = strings.TrimSuffix(strings.TrimSuffix(s, "\n"), "\r")
-	s = env.Redactor.String(s)
+	s = env.CurrentRedactor().String(s)
 	if utf8.RuneCountInString(s) <= maxMatchLength {
 		return s
 	}

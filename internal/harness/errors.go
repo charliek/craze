@@ -141,6 +141,35 @@ var (
 	ErrEmptyPrompt = errors.New("harness: empty prompt")
 )
 
+// The ChatGPT plan's error codes the adapter words its failures by (plan 033
+// §3.12), as ProviderError.Code carries them: package llm's.
+const (
+	// CodeUsageLimit is the plan's usage limit reached; a ProviderError with
+	// it is Final, and the sign-in is latched (P33).
+	CodeUsageLimit = llm.UsageLimitCode
+	// CodeNotEligible is an account whose plan cannot be used here.
+	CodeNotEligible = llm.NotEligibleCode
+	// CodeUnsupportedCapability is a request using something the route does
+	// not support, named by ProviderError.Param.
+	CodeUnsupportedCapability = llm.UnsupportedCapabilityCode
+)
+
+// EmptyStepError is ErrEmptyStep on one model (classify): the provider
+// finished a step having sent nothing at all (D-25). It names the model's
+// alias and the driver it ran on, since what to do about it is the driver's
+// — raising max_output_tokens helps a key-funded model, and means nothing on
+// the ChatGPT plan, whose requests carry no output ceiling (plan 033 §3.12).
+// errors.Is(err, ErrEmptyStep) answers through it.
+type EmptyStepError struct {
+	Model  string // the alias the turn ran on
+	Driver string // that model's provider's driver
+}
+
+func (e *EmptyStepError) Error() string {
+	return fmt.Sprintf("harness: model %q: %v", e.Model, ErrEmptyStep)
+}
+func (e *EmptyStepError) Unwrap() error { return ErrEmptyStep }
+
 // maxMessageBytes bounds ProviderError.Message. A provider whose error the
 // SDK cannot parse has its whole response body used as the message — an HTML
 // error page from a proxy, say — and a message is shown on one line of a
@@ -160,6 +189,7 @@ const maxMessageBytes = 300
 type ProviderError struct {
 	Provider   string // the model table's provider id
 	Model      string // the alias the turn ran on
+	Driver     string // the provider's driver: what the adapter's wording of an auth failure turns on
 	StatusCode int    // the HTTP status; 0 for an error with none, such as a stream error event
 	Message    string
 
@@ -175,6 +205,19 @@ type ProviderError struct {
 	// leaves as it is, so neither can hold the key (review r3 major 2).
 	Code, Type string
 
+	// Param is the provider's name for the part of the request a failure is
+	// about — the ChatGPT plan's error.param, "tools[0]" or
+	// "input[3].content[0].image_url" — kept only as a field path
+	// (llm.FinalError); "" when it sent none.
+	Param string
+
+	// Final is set when the provider said not to repeat the request: the
+	// ChatGPT plan's every 429, every 400, and the codes its docs say not to
+	// retry (llm.FinalError, plan 033 §3.9, P33). Nothing retries it — not
+	// Fantasy, and not the summarizer's attempts (summarizerFailureKind) —
+	// though an overflow among them is still answered by compacting.
+	Final bool
+
 	// Compacted is set on an ErrContextTooLarge the turn compacted for (plan
 	// 028 §3.12): its overflow compaction ran, and either failed or left a
 	// context whose replacement request overflowed too. Unset, nothing was
@@ -184,6 +227,11 @@ type ProviderError struct {
 	Compacted bool
 
 	kind error
+	// signIn is the sign-in's own sentinel the failure carried — "signed
+	// out", "sign in again", "usage limit reached" (llm.AuthSentinel, plan
+	// 033 §3.12) — or nil: fixed text, kept so the adapter tells the sign-in's
+	// failures apart by errors.Is.
+	signIn error
 }
 
 func (e *ProviderError) Error() string {
@@ -207,8 +255,17 @@ func (e *ProviderError) Error() string {
 	return fmt.Sprintf("%s (provider %q, model %q%s)%s", head, e.Provider, e.Model, status, msg)
 }
 
-// Unwrap is the error's kind, so errors.Is(err, ErrAuth) works.
-func (e *ProviderError) Unwrap() error { return e.kind }
+// Unwrap is the error's kind, so errors.Is(err, ErrAuth) works, and the
+// sign-in's sentinel when the failure carried one.
+func (e *ProviderError) Unwrap() []error {
+	var out []error
+	for _, err := range []error{e.kind, e.signIn} {
+		if err != nil {
+			out = append(out, err)
+		}
+	}
+	return out
+}
 
 // classify maps a failed turn's error, from Fantasy's agent loop, onto the
 // errors above. Every error that left the model has been rebuilt by package
@@ -216,31 +273,45 @@ func (e *ProviderError) Unwrap() error { return e.kind }
 // keeps only what the adapter needs, so a raw response body never travels
 // further either.
 //
-//   - ErrEmptyStep passes through, naming the model.
+//   - ErrEmptyStep passes through, naming the model and its driver
+//     (EmptyStepError).
 //   - A *fantasy.RetryError (the step failed, was retried, and failed again)
 //     is judged by its last error, the one the user would have seen.
+//   - The ChatGPT plan's *llm.FinalError is Final (plan 033 §3.12), with its
+//     status, message, code, type and param; it is ErrContextTooLarge when
+//     it says so, which the turn answers by compacting.
 //   - The wrapper's *llm.MidStreamError (a failure after output began) and a
 //     *fantasy.ProviderError are classified the same way: by status, the
 //     auth flag, and the context-too-large flag; and both give up the
 //     provider's code and type for the failure (llm.ErrorNames), which
 //     package llm read from the response before scrubbing it.
-//   - Anything else — a connection that failed, say — is a ProviderError
-//     with no status, carrying the error's text.
+//   - Anything else — a connection that failed, the sign-in's own failure —
+//     is a ProviderError with no status, carrying the error's text, and the
+//     sign-in's sentinel when the scrubber kept one (llm.AuthSentinel).
 //
 // The error is never Compacted: only the turn knows whether it compacted
 // for an overflow (turn.classify).
-func classify(err error, m store.Model) error {
+func classify(err error, r modeltable.Resolved) error {
+	m := idOf(r)
 	if errors.Is(err, ErrEmptyStep) {
-		return fmt.Errorf("harness: model %q: %w", m.Alias, ErrEmptyStep)
+		return &EmptyStepError{Model: m.Alias, Driver: r.Driver}
 	}
 	var re *fantasy.RetryError
 	if errors.As(err, &re) && len(re.Errors) > 0 {
 		err = re.Errors[len(re.Errors)-1]
 	}
-	pe := &ProviderError{Provider: m.Provider, Model: m.Alias}
+	pe := &ProviderError{Provider: m.Provider, Model: m.Alias, Driver: r.Driver}
+	var fe *llm.FinalError
 	var mse *llm.MidStreamError
 	var fpe *fantasy.ProviderError
 	switch {
+	case errors.As(err, &fe):
+		pe.StatusCode, pe.Message, pe.Final = fe.StatusCode, fe.Message, true
+		if pe.Message == "" {
+			pe.Message = fe.Error()
+		}
+		pe.kind = kindOf(fe.StatusCode, false, fe.IsContextTooLarge())
+		pe.Code, pe.Type, pe.Param = fe.Code, fe.Type, fe.Param
 	case errors.As(err, &mse):
 		pe.StatusCode, pe.Message = mse.StatusCode, mse.Message
 		pe.kind = kindOf(mse.StatusCode, mse.AuthError, mse.IsContextTooLarge())
@@ -254,6 +325,7 @@ func classify(err error, m store.Model) error {
 		pe.Code, pe.Type = llm.ErrorNames(fpe)
 	default:
 		pe.Message = err.Error()
+		pe.signIn = llm.AuthSentinel(err)
 	}
 	pe.Message = oneLine(pe.Message, maxMessageBytes)
 	return pe

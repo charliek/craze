@@ -63,6 +63,14 @@ const (
 	DriverOpenAICompat = "openai-compat"
 	DriverOpenRouter   = "openrouter"
 
+	// DriverChatGPT is the ChatGPT plan's driver (plan 033 §3.9, §3.11): the
+	// Responses API at OpenAI's fixed endpoint, funded by a Sign in with
+	// ChatGPT token rather than a key (package llm/responsesapi). Its one
+	// provider is ChatGPTProvider, which takes no base URL, no env_keys and
+	// no api_key (validateProvider), and its models are the signed-in
+	// account's own list (discovered.go).
+	DriverChatGPT = "chatgpt"
+
 	// SourceManual is the source of an entry the owner wrote; an entry with no
 	// source loads as manual. Any other source string is accepted verbatim, so
 	// a file an older craze wrote (source = "gx") still loads — and such an
@@ -135,10 +143,11 @@ type Table struct {
 	Compaction Compaction
 	// Warnings are problems Load fixed on its own, for the caller to print: a
 	// providers.toml found readable by others and tightened, two priced
-	// aliases of one identity that disagree, and each key or entry of the
-	// user's files dropped because it could not stand against the merged
-	// catalog (plan 031 §3.2). A warning names a path, a table, a key and a
-	// reason, never a key's value. Save ignores it.
+	// aliases of one identity that disagree, each key or entry of the user's
+	// files dropped because it could not stand against the merged catalog
+	// (plan 031 §3.2), and each entry of the ChatGPT plan's model list skipped
+	// (plan 033 §3.11). A warning names a path, a table, a key and a reason,
+	// never a key's value. Save ignores it.
 	Warnings []string
 	// NoCatalog is models.toml's `catalog = false` (plan 031 P10): the
 	// directory's two files are the whole table, under the rules that held
@@ -161,6 +170,28 @@ type Table struct {
 	// without a catalog or built in memory, whose providers' names are all
 	// there is.
 	credentialEnv []string
+
+	// signIn is the directory whose ChatGPT sign-in funds the table's
+	// chatgpt provider (plan 033 §3.11, P34): the one LoadWith read, kept
+	// only when the table has a provider on DriverChatGPT, so a table with
+	// none reads the same whatever directory it came from. "" — a table
+	// built in memory, say — funds no model on that driver: each resolves to
+	// ErrNotSignedIn.
+	signIn string
+	// discovered ranks each model the load learned from the ChatGPT plan's
+	// own list (withDiscovered) by its place in that list, priority order;
+	// nil when it learned none. Choices lists them in that order.
+	discovered map[string]int
+	// discoveredFor is the account that list was bound to, as the load read
+	// the registration (plan 033 C14r, r12 #4): Resolve funds a discovered
+	// model only while the registration still names it, so a sign-in to
+	// another account in a running process does not fund the first
+	// account's list with the second's sign-in.
+	discoveredFor Account
+	// chatgptStart is the alias [chatgpt_defaults] start names, which
+	// StartModel prefers among the funded models when the default is not
+	// funded (plan 033 §3.11); "" for none.
+	chatgptStart string
 }
 
 // Provider is one provider: shipped, overridden in providers.toml, or the
@@ -197,6 +228,13 @@ type Model struct {
 	// default. Load refuses a name not in ToolProfiles.
 	ToolProfile string
 	Source      string
+	// ParallelToolCalls says whether a request on the model lets it call
+	// several tools in one step (plan 033 §3.11): nil leaves it to the
+	// driver's default, which for every driver today is to say nothing and
+	// take the provider's own. Only a model the table learns from its
+	// provider sets it (the ChatGPT plan's list, plan 033 C14); no file has a
+	// key for it.
+	ParallelToolCalls *bool
 	// Cost is [models."<alias>".cost] (plan 028 §3.14): nil when the file's
 	// entry has no such table, so a model with no cost saves exactly as it
 	// did before this section existed (mirrors [compaction]). Rates are
@@ -317,11 +355,28 @@ func clonePtr[T any](p *T) *T {
 }
 
 type Resolved struct {
-	Alias           string
-	ProviderID      string
-	Driver          string
-	BaseURL         string
-	APIKey          Secret
+	Alias      string
+	ProviderID string
+	Driver     string
+	BaseURL    string
+	APIKey     Secret
+	// Auth is how the model is funded beyond a key: "" for a key (APIKey),
+	// AuthSignIn for the ChatGPT plan, whose driver takes its bearer from the
+	// sign-in's token source instead (plan 033 §3.11).
+	Auth string
+	// CredentialDir is the native directory whose sign-in funds the model,
+	// "" for a key-funded one: the directory the sign-in's token source reads.
+	CredentialDir string
+	// Account is the ChatGPT account whose model list the model came from —
+	// the registration's subject and issued client id when the table learned
+	// it (plan 033 C14r2, review r13 d) — and the zero Account for every
+	// other model, a plan model a user's models.toml adds included. Resolve
+	// refuses such a model once another account is signed in; the driver
+	// holds every request on it to the account too, comparing the token
+	// source's at each one, so a session (or a sub-agent) already open on it
+	// sends nothing with another account's token after a switch
+	// (ErrOtherAccount).
+	Account         Account
 	WireModel       string
 	Name            string // the model's name, or its alias when it has none
 	ContextWindow   int
@@ -330,6 +385,9 @@ type Resolved struct {
 	DefaultEffort   string
 	Vision          bool
 	ToolProfile     string // "" is the default profile
+	// ParallelToolCalls is the model's Model.ParallelToolCalls, a copy: nil
+	// means the driver's default (plan 033 §3.11).
+	ParallelToolCalls *bool
 }
 
 // The on-disk shapes Save writes. They are separate from the public types so
@@ -402,6 +460,10 @@ type modelEntry struct {
 	Vision          bool     `toml:"vision,omitempty"`
 	ToolProfile     string   `toml:"tool_profile,omitempty"`
 	Source          string   `toml:"source,omitempty"`
+	// ParallelToolCalls is never written: no file has a key for it — only a
+	// model learned from its provider sets it (plan 033 §3.11) — and it is
+	// here so that the conversion from Model still compiles.
+	ParallelToolCalls *bool `toml:"-"`
 	// Cost is encoded separately, by encodeModels, as its own
 	// [models."<alias>".cost] table: encoding it here, nested inside this
 	// struct's own standalone Encode call, would print an unqualified
@@ -731,6 +793,12 @@ func validateProvider(file, id string, p Provider) error {
 	if r := driverProblem(p.Driver); r != "" {
 		return at("driver", r)
 	}
+	if p.Driver == DriverChatGPT && id != ChatGPTProvider {
+		// The sign-in funds the one provider made for it (plan 033 §3.11):
+		// a merge drops an entry of the user's that names the driver under
+		// another id, with a warning, rather than let the plan pay for it.
+		return at("driver", fmt.Sprintf("driver %q is craze's own provider %q's alone", DriverChatGPT, ChatGPTProvider))
+	}
 	if r := baseURLProblem(p.BaseURL); r != "" {
 		return at("base_url", r)
 	}
@@ -739,6 +807,16 @@ func validateProvider(file, id string, p Provider) error {
 	}
 	if r := envKeysProblem(p.EnvKeys); r != "" {
 		return at("env_keys", r)
+	}
+	if p.Driver == DriverChatGPT {
+		// A key would fund nothing here, and one in providers.toml or the
+		// environment would look as if it did (plan 033 §3.11).
+		switch {
+		case len(p.EnvKeys) > 0:
+			return at("env_keys", signInKeyReason)
+		case strings.TrimSpace(p.APIKey.Reveal()) != "":
+			return at("api_key", signInKeyReason)
+		}
 	}
 	// Every provider's key is checked, not only the ones a session uses:
 	// the redactor covers every loaded key, and one it cannot redact could
@@ -750,15 +828,19 @@ func validateProvider(file, id string, p Provider) error {
 	return nil
 }
 
+// signInKeyReason is validateProvider's reason for a key, or a variable
+// naming one, on the ChatGPT plan's provider.
+const signInKeyReason = `must be absent for driver "chatgpt", which is funded by signing in (craze auth login chatgpt), not by a key`
+
 // driverProblem is why driver is not one craze has, "" when it is.
 func driverProblem(driver string) string {
 	switch driver {
-	case DriverOpenAICompat, DriverOpenRouter:
+	case DriverOpenAICompat, DriverOpenRouter, DriverChatGPT:
 		return ""
 	case "":
-		return `missing: want "openai-compat" or "openrouter"`
+		return `missing: want "openai-compat", "openrouter" or "chatgpt"`
 	}
-	return fmt.Sprintf(`unknown driver %q: want "openai-compat" or "openrouter"`, driver)
+	return fmt.Sprintf(`unknown driver %q: want "openai-compat", "openrouter" or "chatgpt"`, driver)
 }
 
 // baseURLProblem is why a base URL is not one, "" when it is (or is ""). The
@@ -771,13 +853,17 @@ func baseURLProblem(baseURL string) string {
 }
 
 // endpointProblem is why a known driver and a base URL do not go together,
-// "" when they do: openai-compat needs one, openrouter's is fixed.
+// "" when they do: openai-compat needs one, openrouter's and chatgpt's are
+// fixed — chatgpt's above all, since its bearer must reach OpenAI's API and
+// nowhere else (plan 033 P37).
 func endpointProblem(driver, baseURL string) string {
 	switch {
 	case driver == DriverOpenAICompat && baseURL == "":
 		return `missing: driver "openai-compat" needs the endpoint's base URL`
 	case driver == DriverOpenRouter && baseURL != "":
 		return `must be absent for driver "openrouter", whose endpoint is fixed`
+	case driver == DriverChatGPT && baseURL != "":
+		return `must be absent for driver "chatgpt", whose endpoint is fixed`
 	}
 	return ""
 }
@@ -930,6 +1016,18 @@ func httpURL(s string) bool {
 // getenv is os.Getenv; the harness injects its own so tests never read the
 // real environment.
 //
+// A model on the ChatGPT plan takes no key: it resolves, with Auth
+// AuthSignIn and CredentialDir the table's directory, while that directory's
+// sign-in funds it (signInVia, plan 033 §3.11) — the token file there and
+// plan usage granted — and is ErrNotSignedIn or ErrPlanUsageDisabled
+// otherwise, both ErrNoAPIKey to every caller that asks. A model the load
+// learned from the plan's own list resolves only while the account signed in
+// is the one that list was bound to (the registration's subject and client
+// id), and is ErrOtherAccount otherwise (plan 033 C14r, r12 #4); it resolves
+// bound to that account (Resolved.Account), which its driver holds every
+// request to (C14r2, r13 d). Choices keeps listing a session's current model
+// all the same (P7).
+//
 // A missing key fails only the models that need it: Load accepts a provider
 // with no key at all, so one unfunded provider never hides the others.
 func (t *Table) Resolve(alias string, getenv func(string) string) (Resolved, error) {
@@ -945,28 +1043,49 @@ func (t *Table) Resolve(alias string, getenv func(string) string) (Resolved, err
 	if getenv == nil {
 		getenv = os.Getenv
 	}
-	key, err := resolveKey(m.Provider, p, getenv)
-	if err != nil {
-		return Resolved{}, err
+	var key Secret
+	var auth, credDir string
+	var bound Account
+	if p.Driver == DriverChatGPT {
+		via, account := signInState(t.signIn)
+		if via != KeySignedIn {
+			return Resolved{}, signInError(m.Provider, via)
+		}
+		if _, listed := t.discovered[alias]; listed {
+			if account != t.discoveredFor {
+				return Resolved{}, fmt.Errorf("%w (model %q)", ErrOtherAccount, alias)
+			}
+			bound = t.discoveredFor
+		}
+		auth, credDir = AuthSignIn, t.signIn
+	} else {
+		var err error
+		if key, err = resolveKey(m.Provider, p, getenv); err != nil {
+			return Resolved{}, err
+		}
 	}
 	name := m.Name
 	if name == "" {
 		name = alias
 	}
 	return Resolved{
-		Alias:           alias,
-		ProviderID:      m.Provider,
-		Driver:          p.Driver,
-		BaseURL:         p.BaseURL,
-		APIKey:          key,
-		WireModel:       m.WireModel,
-		Name:            name,
-		ContextWindow:   m.ContextWindow,
-		MaxOutputTokens: outputCeiling(m),
-		Efforts:         slices.Clone(m.Efforts),
-		DefaultEffort:   m.DefaultEffort,
-		Vision:          m.Vision,
-		ToolProfile:     m.ToolProfile,
+		Alias:             alias,
+		ProviderID:        m.Provider,
+		Driver:            p.Driver,
+		BaseURL:           p.BaseURL,
+		APIKey:            key,
+		Auth:              auth,
+		CredentialDir:     credDir,
+		Account:           bound,
+		WireModel:         m.WireModel,
+		Name:              name,
+		ContextWindow:     m.ContextWindow,
+		MaxOutputTokens:   outputCeiling(m),
+		Efforts:           slices.Clone(m.Efforts),
+		DefaultEffort:     m.DefaultEffort,
+		Vision:            m.Vision,
+		ToolProfile:       m.ToolProfile,
+		ParallelToolCalls: clonePtr(m.ParallelToolCalls),
 	}, nil
 }
 

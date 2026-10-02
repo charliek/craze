@@ -13,6 +13,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/charliek/craze/internal/chatgptauth"
 	"github.com/charliek/craze/internal/harness"
 	"github.com/charliek/craze/internal/harness/modeltable"
 	"github.com/charliek/craze/internal/harness/redact"
@@ -282,6 +283,21 @@ type nativeSession struct {
 	// the first turn. It exists so a test can write the file in exactly the
 	// window that decides which stamp a look must record.
 	keysSeam func()
+
+	// signIn is the process's ChatGPT token source for the Home the harness
+	// was opened with (chatgptauth.Source, plan 033 §3.12), handed to the
+	// harness as its Auth whatever model the session is on — a switch or a
+	// sub-agent can reach the plan — and nil when the seam handed in an Auth
+	// of its own. Set under s.mu with hs; read under it. Its usage latch is
+	// cleared by every turn a person starts (prompt).
+	signIn *chatgptauth.TokenSource
+	// unsubscribe ends the harness's subscription to signIn (AddSecrets),
+	// made as the harness opened; Close calls it. nil with no signIn.
+	unsubscribe func()
+	// refreshed is closed when the background fetch of the plan's model list
+	// that open started has returned, nil when none was started; Close waits
+	// for it, after done has cancelled it.
+	refreshed chan struct{}
 }
 
 // steerText is one interjection in both of its spellings: sent is what went
@@ -542,11 +558,22 @@ func (s *nativeSession) start(context.Context) error {
 	// but the hidden ones. Naming ran over every entry, hidden ones included,
 	// so a visible row's spelling never depends on what is hidden.
 	rows := visibleNativeRows(entries, redactNativeRows(content.rows, hs.Redact))
+	// The plan's model list is fetched again in the background only for an
+	// account signed in with plan usage (refreshModelsLocked): read here,
+	// before s.mu, which every Snapshot takes.
+	refresh := false
+	if opened.signIn != nil {
+		st, err := chatgptauth.ReadStatus(opened.signIn.Dir())
+		refresh = err == nil && st.SignedIn && st.PlanUsage
+	}
 
 	s.mu.Lock()
 	if s.closed {
 		// Close ran while the table was loading and found no harness to
 		// close; this one is closed here so it cannot outlive the session.
+		if opened.unsubscribe != nil {
+			opened.unsubscribe()
+		}
 		_ = hs.Close()
 		s.loading = false
 		s.mu.Unlock()
@@ -558,6 +585,10 @@ func (s *nativeSession) start(context.Context) error {
 	}
 	s.hs = hs
 	s.table, s.home = opened.table, opened.home
+	s.signIn, s.unsubscribe = opened.signIn, opened.unsubscribe
+	if refresh {
+		s.refreshModelsLocked(opened.signIn, hs.Redact)
+	}
 	s.efforts = efforts
 	s.plugins = entries
 	s.snap.Plugins = rows
@@ -1010,6 +1041,19 @@ func (s *nativeSession) open() (*harness.Session, nativeOpened, nativeLoad, erro
 	// environment or a seam could answer differently then, and a session
 	// would learn another directory's keys, or miss its own (panel astra 12).
 	s.keys.watch(hopts.Home)
+	// The ChatGPT plan's sign-in (plan 033 §3.12): the process's token source
+	// for this Home, handed to every session whatever model it starts on — a
+	// /model switch or a sub-agent can reach the plan, and every driver's
+	// scrubber keeps the plan's token values out of its errors. Making it
+	// costs nothing (one per process per directory, no I/O); left to the
+	// seam's last word like the fields below. Its API base is read when a
+	// model is built, so a test's loopback override applies and an invalid one
+	// fails the build rather than falling back to OpenAI.
+	var signIn *chatgptauth.TokenSource
+	if hopts.Auth == nil {
+		signIn = chatgptauth.Source(hopts.Home)
+		hopts.Auth, hopts.AuthAPIBase = signIn, chatgptauth.APIBase
+	}
 	if hopts.Table == nil {
 		// The shipped catalog with the user's files merged over it (plan 031
 		// §3.2): both files are optional, so an empty directory is the
@@ -1171,7 +1215,70 @@ func (s *nativeSession) open() (*harness.Session, nativeOpened, nativeLoad, erro
 	// harness actually opened on as the current one, which for a resume is
 	// the transcript's.
 	current, _ := hs.Current()
-	return hs, nativeOpened{table: table, home: hopts.Home, choices: table.Choices(recent, getenv, current)}, content, nil
+	out := nativeOpened{table: table, home: hopts.Home, choices: table.Choices(recent, getenv, current)}
+	if signIn != nil {
+		// Every token value this process mints or adopts from here on is
+		// redacted at once (P19): the source tells its subscribers before it
+		// writes the file or uses the token. The subscription returns the
+		// values the source has as of the registration, in the same hold of
+		// its lock (plan 033 C14r, r12 #6b), so no value is missed between
+		// the two — one an in-process sibling session's refresh is announcing
+		// at this moment, say, which the callback missed and the record does
+		// not hold yet.
+		out.signIn = signIn
+		var values []string
+		values, out.unsubscribe = signIn.Subscribe(func(values []string) { hs.AddSecrets(values...) })
+		hs.AddSecrets(values...)
+	}
+	return hs, out, content, nil
+}
+
+// diagModelsRefresh is the journal diag a failed background fetch of the
+// ChatGPT plan's model list is noted as (refreshModelsLocked): its one field,
+// "error", names the endpoint, the status and the code, never a token
+// (chatgptauth's errors repeat only the codes it knows) — and it is redacted
+// by the session's redactor besides (modelsRefreshNote).
+const diagModelsRefresh = "chatgpt_models_refresh"
+
+// modelsRefreshNote is the diag a failed background fetch is journaled as:
+// err's text through the session's redactor, then made one line (plan 033
+// C14r, r12 #1). chatgptauth keeps a server's free text out of its errors and
+// repeats only error codes it knows, so a token reaching err is not expected;
+// the redaction is the journal boundary's own guard, as every other surface
+// the session writes has one, should a wrapped error ever carry one. Redacted
+// first, so the sanitiser's rewriting cannot split a value the redactor would
+// have matched.
+func modelsRefreshNote(err error, redact func(string) string) journal.DiagNote {
+	return journal.DiagNote{Kind: diagModelsRefresh, Fields: map[string]any{"error": sanitizeLine(redact(err.Error()))}}
+}
+
+// refreshModelsLocked fetches the ChatGPT plan's model list again in the
+// background when it is over a day old, missing or another account's (plan
+// 033 §3.10, §3.12): the next session's table offers what this one fetched —
+// this session keeps the table it opened with (plan 031 P8). Start asks only
+// for an account signed in with plan usage; anything else would only fail.
+// The fetch takes the list's own lock and checks its age again under it, so
+// hosts opening at once fetch it once. Close cancels it (done) and waits for
+// it (refreshed). A failure is journaled through redact, the session's
+// redactor (modelsRefreshNote). s.mu is held: it only starts the goroutine.
+func (s *nativeSession) refreshModelsLocked(src *chatgptauth.TokenSource, redact func(string) string) {
+	done := make(chan struct{})
+	s.refreshed = done
+	go func() {
+		defer close(done)
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		go func() {
+			select {
+			case <-s.done:
+				cancel()
+			case <-ctx.Done():
+			}
+		}()
+		if _, err := chatgptauth.RefreshModels(ctx, src, chatgptauth.ModelsMaxAge); err != nil && ctx.Err() == nil {
+			s.log.Note(modelsRefreshNote(err, redact))
+		}
+	}()
 }
 
 // nativeOpened is what open() resolved beside the harness and the content:
@@ -1181,6 +1288,11 @@ func (s *nativeSession) open() (*harness.Session, nativeOpened, nativeLoad, erro
 type nativeOpened struct {
 	table *modeltable.Table
 	home  string
+	// signIn and unsubscribe are the session's token source and its
+	// subscription (nativeSession.signIn), nil when the seam handed in an
+	// Auth of its own.
+	signIn      *chatgptauth.TokenSource
+	unsubscribe func()
 	// choices is the advertised list (plan 031 §3.6, owner decision Q4):
 	// the table's models whose provider has a key, plus the model the
 	// session runs on (P7), the remembered ones first, by rank, then the
@@ -1652,7 +1764,7 @@ func (s *nativeSession) prompt(ctx context.Context, text string, rel chan struct
 		s.mu.Unlock()
 		return Result{}, fmt.Errorf("agent: session closed")
 	}
-	hs := s.hs
+	hs, signIn := s.hs, s.signIn
 	if hs == nil || s.loading {
 		// A load's harness is installed before its replay, and the session is
 		// not started until the bracket has closed (s.loading).
@@ -1755,6 +1867,12 @@ func (s *nativeSession) prompt(ctx context.Context, text string, rel chan struct
 	// puts the harness in its refusal state, and the Run or Compact below is
 	// refused with nothing sent.
 	s.learnStoredKeys(hs)
+	// A turn a person started — this one: a wake never comes here — lifts the
+	// ChatGPT plan's usage latch (P33), which a usage-limit error set for the
+	// whole process: the person has seen the message and asks again.
+	if signIn != nil {
+		signIn.ClearUsageLimit()
+	}
 
 	var (
 		res harness.Result
@@ -2256,7 +2374,7 @@ func (s *nativeSession) Close() error {
 		s.closed = true
 		close(s.done)
 		hs, in, cancel, rel := s.hs, s.inPrompt, s.turnCancel, s.released
-		worker := s.wakeDone
+		worker, unsubscribe, refreshed := s.wakeDone, s.unsubscribe, s.refreshed
 		s.mu.Unlock()
 		// The close order, in the one place it is decided (plan 023 §3.5, X10):
 		// the turn's context, then the registry, then the harness, then the
@@ -2282,6 +2400,11 @@ func (s *nativeSession) Close() error {
 			cancel()
 		}
 		s.asks.Close()
+		// The harness stops learning the sign-in's values as it closes
+		// (AddSecrets' subscription, made at open).
+		if unsubscribe != nil {
+			unsubscribe()
+		}
 		if hs != nil {
 			if err := hs.Close(); err != nil {
 				s.note(sanitizeLine(err.Error()))
@@ -2297,6 +2420,10 @@ func (s *nativeSession) Close() error {
 		// found no harness finds no worker either.
 		if worker != nil {
 			<-worker
+		}
+		// The model list's background fetch, which done has cancelled.
+		if refreshed != nil {
+			<-refreshed
 		}
 		// The turn's own ending settled its rows; this settles the rows of
 		// a claim that never opened one. Nothing is published — done is
@@ -2894,13 +3021,31 @@ type nativeError struct {
 func (e *nativeError) Error() string { return e.msg }
 func (e *nativeError) Unwrap() error { return e.cause }
 
+// The ChatGPT plan's failures in the adapter's words (plan 033 §3.12): each
+// says what happened and what to do, and none quotes a token — they are fixed
+// text, but for a param the route names, which is a field path.
+const (
+	chatgptUsageLimitText  = "native: ChatGPT plan usage limit reached for craze. Manage usage: https://chatgpt.com/settings/usage"
+	chatgptNotEligibleText = "native: this ChatGPT account can't use its plan in craze (" + harness.CodeNotEligible + ")"
+	chatgptSignInText      = "native: ChatGPT sign-in is no longer valid; run /connect or craze auth login chatgpt"
+	chatgptPlanOffText     = "native: ChatGPT plan usage is off for craze; run craze auth login chatgpt to enable it"
+)
+
 // phraseTurnError is a failed turn in the adapter's own words (plan 018
 // §3.8): the harness's typed errors each get a sentence that says what to do,
 // and the provider's own message, already bounded to one line by the harness,
-// is sanitized before a terminal shows it.
+// is sanitized before a terminal shows it. The ChatGPT plan's own failures —
+// its usage limit, an ineligible account, a capability the route refuses, a
+// sign-in that is gone, plan usage off — are worded for the plan (plan 033
+// §3.12, phraseChatGPT).
 func phraseTurnError(err error) error {
 	phrase := func(msg string) error { return &nativeError{msg: msg, cause: err} }
 	if errors.Is(err, harness.ErrEmptyStep) {
+		// No output ceiling is ever sent on the ChatGPT plan (its route
+		// refuses one), so raising max_output_tokens is no advice there.
+		if es := (*harness.EmptyStepError)(nil); errors.As(err, &es) && es.Driver == modeltable.DriverChatGPT {
+			return phrase("native: the model ended its answer without sending anything")
+		}
 		return phrase("native: the model ended its answer without sending anything " +
 			"(a reasoning model can spend its whole output ceiling thinking; raise max_output_tokens in models.toml)")
 	}
@@ -2919,6 +3064,9 @@ func phraseTurnError(err error) error {
 		// surface.
 		return phrase("native: a newly stored API key appears in this session's frozen prompt; start a new session")
 	}
+	if msg := phraseChatGPT(err); msg != "" {
+		return phrase(msg)
+	}
 	var pe *harness.ProviderError
 	if !errors.As(err, &pe) {
 		return phrase("native: the turn failed: " + sanitizeLine(err.Error()))
@@ -2929,7 +3077,9 @@ func phraseTurnError(err error) error {
 		status = fmt.Sprintf(" (HTTP %d)", pe.StatusCode)
 	}
 	switch {
-	case errors.Is(err, harness.ErrAuth):
+	case errors.Is(err, harness.ErrAuth) && pe.Driver != modeltable.DriverChatGPT:
+		// The plan has no key to check: its 401 is phraseChatGPT's, and any
+		// other refusal it flags is said as the provider's own, below.
 		return phrase(fmt.Sprintf("native: provider %q rejected the API key%s; check its env_keys or api_key in providers.toml",
 			provider, status))
 	case errors.Is(err, harness.ErrModelNotFound):
@@ -2951,18 +3101,89 @@ func phraseTurnError(err error) error {
 	return phrase(msg)
 }
 
+// phraseChatGPT is the ChatGPT plan's failure err carries in the adapter's
+// words (plan 033 §3.12's table), "" for any other failure: by the sign-in's
+// own sentinel, which the harness keeps on the turn's error — the usage
+// latch, signed out or to sign in again, plan usage turned off, a model of
+// another account's list than the one signed in (C14r2) — or by the
+// plan's code on a failure of its driver: the usage limit, an account that is
+// not eligible, a capability the route does not support (named by its param),
+// and a 401 the token's one renewal did not cure.
+func phraseChatGPT(err error) string {
+	switch {
+	case errors.Is(err, chatgptauth.ErrUsageLimited):
+		return chatgptUsageLimitText
+	case errors.Is(err, chatgptauth.ErrSignedOut), errors.Is(err, chatgptauth.ErrSignInAgain):
+		return chatgptSignInText
+	case errors.Is(err, chatgptauth.ErrPlanUsageDisabled), errors.Is(err, modeltable.ErrPlanUsageDisabled):
+		return chatgptPlanOffText
+	}
+	var pe *harness.ProviderError
+	if errors.Is(err, modeltable.ErrOtherAccount) {
+		// The driver's refusal to send a model of one account's list with
+		// another account's token (plan 033 C14r2, review r13 d): a turn,
+		// a summary or a wake on a model the session opened before the
+		// switch. The words are phraseSetupError's for the same model.
+		alias := ""
+		if errors.As(err, &pe) {
+			alias = pe.Model
+		}
+		return otherAccountText(alias)
+	}
+	if !errors.As(err, &pe) || pe.Driver != modeltable.DriverChatGPT {
+		return ""
+	}
+	switch {
+	case pe.Code == harness.CodeUsageLimit:
+		return chatgptUsageLimitText
+	case pe.Code == harness.CodeNotEligible:
+		return chatgptNotEligibleText
+	case pe.Code == harness.CodeUnsupportedCapability:
+		what := "a part of the request"
+		if p := sanitizeLine(pe.Param); p != "" {
+			what = p
+		}
+		return "native: ChatGPT plan request refused: " + what + " is not supported"
+	case pe.StatusCode == 401 && errors.Is(err, harness.ErrAuth):
+		return chatgptSignInText
+	}
+	return ""
+}
+
 // phraseSetupError is Open's, SetModel's or SetEffort's error in the adapter's
 // words. A missing key names the variables to set (their names, never a
 // value), which is the actionable part; table is nil when the caller has
-// none to hand, and the harness's own text is used then.
+// none to hand, and the harness's own text is used then. A model on the
+// ChatGPT plan has no key: not signed in, or plan usage off, says how to sign
+// in (plan 033 §3.12); a model of another account's list says a new session
+// offers this account's.
 func phraseSetupError(err error, table *modeltable.Table, alias string) error {
 	switch {
 	case errors.Is(err, harness.ErrClosed):
 		return &nativeError{msg: "agent: session closed", cause: err}
+	case errors.Is(err, modeltable.ErrNotSignedIn):
+		return &nativeError{msg: fmt.Sprintf("native: model %q is on the ChatGPT plan, and nobody is signed in; run /connect or craze auth login chatgpt",
+			sanitizeLine(alias)), cause: err}
+	case errors.Is(err, modeltable.ErrPlanUsageDisabled):
+		return &nativeError{msg: chatgptPlanOffText, cause: err}
+	case errors.Is(err, modeltable.ErrOtherAccount):
+		// Another account signed in since this session's table was loaded
+		// (plan 033 C14r, r12 #4): not a key to add, so not noKeyText.
+		return &nativeError{msg: otherAccountText(alias), cause: err}
 	case errors.Is(err, harness.ErrNoAPIKey) && table != nil:
 		return &nativeError{msg: noKeyText(table, alias), cause: err}
 	}
 	return &nativeError{msg: fmt.Sprintf("native: model %q: %s", alias, sanitizeLine(err.Error())), cause: err}
+}
+
+// otherAccountText says that alias is a model of another ChatGPT account's
+// list than the one signed in now (modeltable.ErrOtherAccount): Resolve's
+// refusal to switch to it or open on it, and the driver's refusal of a
+// request on it from a session opened before the switch (plan 033 C14r,
+// C14r2).
+func otherAccountText(alias string) string {
+	return fmt.Sprintf("native: model %q is from another ChatGPT account's model list; a new session offers the signed-in account's models",
+		sanitizeLine(alias))
 }
 
 // phraseLoadError is a load's Open error in the adapter's words (plan 028

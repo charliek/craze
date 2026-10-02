@@ -144,6 +144,23 @@ func (r *Replacer) String(s string) string {
 	return string(out)
 }
 
+// Head returns s, the start of a longer text whose rest is not at hand, with
+// every key replaced as far as s can decide it: exactly what a Writer given s
+// would have written by now. A tail of s that could be the start of a key the
+// unseen rest completes (held) is dropped rather than shown, since only that
+// rest could say whether it is one; everything before it is String's. A
+// reader that kept only the first bytes of a long line redacts them with it
+// before it cuts them (read, plan 033 C14r2): String would leave the first
+// bytes of a key the window's end halved.
+func (r *Replacer) Head(s string) string {
+	if r.empty() {
+		return s
+	}
+	b := []byte(s)
+	out, _ := r.scan(nil, b, len(b)-r.held(b), 0)
+	return string(out)
+}
+
 // matchAt returns the length of the longest key that s starts with, or 0.
 func (r *Replacer) matchAt(s []byte) int {
 	for _, k := range r.byFirst[s[0]] {

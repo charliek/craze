@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -207,9 +208,9 @@ func TestAuthLoginRefusals(t *testing.T) {
 		want  []string
 	}{
 		{"no provider, no terminal", authKey + "\n", []string{"auth", "login"}, 2,
-			[]string{"craze auth login: name a provider (fireworks, meta, openrouter, zai-coding-plan)", "only on a terminal"}},
+			[]string{"craze auth login: name a provider (chatgpt, fireworks, meta, openrouter, zai-coding-plan)", "only on a terminal"}},
 		{"an unknown provider", authKey + "\n", []string{"auth", "login", "nosuch"}, 2,
-			[]string{"craze auth login: no such provider; craze has fireworks, meta, openrouter, zai-coding-plan"}},
+			[]string{"craze auth login: no such provider; craze has chatgpt, fireworks, meta, openrouter, zai-coding-plan"}},
 		{"a key where the provider goes", authKey + "\n", []string{"auth", "login", authKey2}, 2,
 			[]string{"no such provider"}},
 		{"empty stdin", "", []string{"auth", "login", "fireworks"}, 1,
@@ -223,7 +224,7 @@ func TestAuthLoginRefusals(t *testing.T) {
 		{"a line over 8 KiB", strings.Repeat("k", maxKeyLine+1), []string{"auth", "login", "fireworks"}, 1,
 			[]string{"the key is longer than 8 KiB; nothing was saved"}},
 		{"logout of nothing named", "", []string{"auth", "logout"}, 2,
-			[]string{"craze auth logout: name the provider whose stored key to remove (fireworks, meta, openrouter, zai-coding-plan)"}},
+			[]string{"craze auth logout: name the provider whose stored key to remove (chatgpt, fireworks, meta, openrouter, zai-coding-plan)"}},
 		{"logout of an unknown provider", "", []string{"auth", "logout", "nosuch"}, 2,
 			[]string{"craze auth logout: no such provider"}},
 		{"a mistyped subcommand", authKey + "\n", []string{"auth", "nosuch", "fireworks"}, 2,
@@ -390,7 +391,10 @@ func TestAuthList(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The ChatGPT plan's row is its sign-in's (plan 033 §3.11): no key to
+	// have, and nobody signed in here.
 	wantRows := "" +
+		"ChatGPT plan      chatgpt          not signed in\n" +
 		"Fireworks         fireworks        env FIREWORKS_API_KEY\n" +
 		"Meta              meta             stored key\n" +
 		"OpenRouter        openrouter       env OPENROUTER_API_KEY\n" +
@@ -489,15 +493,33 @@ func TestAuthPick(t *testing.T) {
 // ptyAuth runs craze auth with argv on a terminal of its own: stdin and stderr
 // (the prompts) are the pty, stdout a buffer. It returns what the terminal
 // showed, stdout, and the command's error, and fails when the command left
-// the terminal's echo off. drive is the user at the keyboard.
+// the terminal's echo off or a key is in any of the three. drive is the user
+// at the keyboard.
 func ptyAuth(t *testing.T, drive func(tail *ptyTail, ptmx *os.File), argv ...string) (screen, stdout string, err error) {
+	t.Helper()
+	screen, stdout, err = ptyAuthScreen(t, drive, argv...)
+	what := "craze " + strings.Join(argv, " ")
+	noKeyIn(t, what, "the terminal", screen)
+	noKeyIn(t, what, "stdout", stdout)
+	noKeyIn(t, what, "the error", errString(err))
+	return screen, stdout, err
+}
+
+// ptyAuthScreen is ptyAuth without its key checks: for a control that must
+// see a key on the screen, to show the checks would find one there.
+func ptyAuthScreen(t *testing.T, drive func(tail *ptyTail, ptmx *os.File), argv ...string) (screen, stdout string, err error) {
 	t.Helper()
 	ptmx, tty, perr := pty.Open()
 	if perr != nil {
 		t.Skipf("no pty: %v", perr)
 	}
-	defer func() { _ = ptmx.Close() }()
-	defer func() { _ = tty.Close() }()
+	// Closed when the test ends, however it ends — a fatal before the command
+	// starts included (review r17 b) — and last: the cleanup that joins the
+	// command is registered after this one, so it runs first.
+	t.Cleanup(func() {
+		_ = tty.Close()
+		_ = ptmx.Close()
+	})
 	tail := newPTYTail(ptmx)
 	if !echoing(t, tty) {
 		t.Fatal("control: a new terminal's echo is off, so finding it on afterwards proves nothing")
@@ -509,10 +531,37 @@ func ptyAuth(t *testing.T, drive func(tail *ptyTail, ptmx *os.File), argv ...str
 	cmd.SetOut(&out)
 	cmd.SetErr(tty)
 	cmd.SetArgs(argv)
-	done := make(chan error, 1)
-	go func() { done <- cmd.Execute() }()
-	drive(tail, ptmx)
 	what := "craze " + strings.Join(argv, " ")
+	done := make(chan error, 1)
+	finished := make(chan struct{})
+	ctx, stop := context.WithCancel(context.Background())
+	go func() {
+		defer close(finished)
+		done <- cmd.ExecuteContext(ctx)
+	}()
+	// The command is joined when the test ends, however it ends (reviews r15
+	// d, r16 d): a drive that fails waiting for a prompt leaves it running,
+	// and it must not run on into the next test, under the seams that test
+	// puts back. So the cleanup ends it — its context cancelled, which ends a
+	// sign-in, and a line typed, which ends a prompt's read: the terminal is
+	// blocking (echoing's Fd), and closing it would not wake a read under way
+	// — and joins it, before the cleanup above closes the terminal.
+	// Registered before drive runs, so a cleanup drive registers — a hold it
+	// would have released — runs first (cleanups run last-registered first).
+	t.Cleanup(func() {
+		stop()
+		select {
+		case <-finished:
+		default:
+			_, _ = ptmx.WriteString("\n")
+		}
+		select {
+		case <-finished:
+		case <-time.After(10 * time.Second):
+			t.Errorf("%s was still running after its test", maskKeys(what))
+		}
+	})
+	drive(tail, ptmx)
 	select {
 	case err = <-done:
 	case <-time.After(10 * time.Second):
@@ -530,11 +579,7 @@ func ptyAuth(t *testing.T, drive func(tail *ptyTail, ptmx *os.File), argv ...str
 	if !tail.wait(sentinel, 5*time.Second) {
 		t.Fatalf("the terminal never showed the sentinel: %q", maskKeys(tail.text()))
 	}
-	screen = tail.text()
-	noKeyIn(t, what, "the terminal", screen)
-	noKeyIn(t, what, "stdout", out.String())
-	noKeyIn(t, what, "the error", errString(err))
-	return screen, out.String(), err
+	return tail.text(), out.String(), err
 }
 
 // echoing is whether the terminal tty echoes what is typed.
@@ -601,7 +646,7 @@ func TestAuthLoginMenuOnATerminal(t *testing.T) {
 	native := authNative(t)
 	t.Setenv("FIREWORKS_API_KEY", authEnvK)
 	screen, stdout, err := ptyAuth(t, func(tail *ptyTail, ptmx *os.File) {
-		typeAtPrompt(t, tail, ptmx, "Provider [1-4]: ", "3")
+		typeAtPrompt(t, tail, ptmx, "Provider [1-5]: ", "4")
 		typeAtPrompt(t, tail, ptmx, "OpenRouter API key: ", authKey)
 	}, "auth", "login")
 	if err != nil {
@@ -610,11 +655,12 @@ func TestAuthLoginMenuOnATerminal(t *testing.T) {
 	menu := strings.ReplaceAll(screen, "\r\n", "\n")
 	for _, line := range []string{
 		"Connect a model provider:\n",
-		"  1. Fireworks (connected)\n",
-		"  2. Meta\n",
-		"  3. OpenRouter\n",
-		"  4. Z.AI Coding Plan\n",
-		"Provider [1-4]: 3\nOpenRouter API key: \n",
+		"  1. ChatGPT plan\n",
+		"  2. Fireworks (connected)\n",
+		"  3. Meta\n",
+		"  4. OpenRouter\n",
+		"  5. Z.AI Coding Plan\n",
+		"Provider [1-5]: 4\nOpenRouter API key: \n",
 	} {
 		if !strings.Contains(menu, line) {
 			t.Fatalf("the menu lacks %q:\n%s", line, maskKeys(menu))
@@ -632,10 +678,10 @@ func TestAuthLoginMenuOnATerminal(t *testing.T) {
 func TestAuthLoginMenuHidesAPastedKey(t *testing.T) {
 	native := authNative(t)
 	screen, stdout, err := ptyAuth(t, func(tail *ptyTail, ptmx *os.File) {
-		typeAtPrompt(t, tail, ptmx, "Provider [1-4]: ", authKey)
+		typeAtPrompt(t, tail, ptmx, "Provider [1-5]: ", authKey)
 	}, "auth", "login")
 	wantExit(t, err, 2, "craze auth login: that is not a provider on the list; nothing was saved")
-	if got := strings.ReplaceAll(screen, "\r\n", "\n"); !strings.Contains(got, "Provider [1-4]: \n") {
+	if got := strings.ReplaceAll(screen, "\r\n", "\n"); !strings.Contains(got, "Provider [1-5]: \n") {
 		t.Fatalf("the prompt's line = %q; want it to end with the Enter alone", maskKeys(got))
 	}
 	if stdout != "" {
@@ -686,6 +732,14 @@ const echoRaceWait = 300 * time.Millisecond
 // terminal's settings once the child is gone.
 func authChild(t *testing.T, env []string, argv ...string) (cmd *exec.Cmd, tail *ptyTail, tty *os.File) {
 	t.Helper()
+	cmd, tail, _, tty = authChildIO(t, env, argv...)
+	return cmd, tail, tty
+}
+
+// authChildIO is authChild with the pty's master side too, where a test
+// types at the child's prompts.
+func authChildIO(t *testing.T, env []string, argv ...string) (cmd *exec.Cmd, tail *ptyTail, ptmx, tty *os.File) {
+	t.Helper()
 	ptmx, tty, err := pty.Open()
 	if err != nil {
 		t.Skipf("no pty: %v", err)
@@ -710,7 +764,7 @@ func authChild(t *testing.T, env []string, argv ...string) (cmd *exec.Cmd, tail 
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = cmd.Process.Kill(); _ = cmd.Wait() })
-	return cmd, tail, tty
+	return cmd, tail, ptmx, tty
 }
 
 // authChildExit is the child's exit code, within 10 seconds.
