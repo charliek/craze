@@ -31,10 +31,16 @@ func nativeSummaryParts(what string, n int) []fantasy.StreamPart {
 }
 
 // The golden's thinking and summary sizes, in bytes (TestFrameGoldenNative-
-// Compaction100x30): about 150k and 110k tokens of estimate.
+// Compaction100x30): about 150k and 110k tokens of estimate, each near the
+// middle of its thousand (150,013 and 109,999 on the machine that set them).
+// The estimate counts the tools offered, so a change to them moves both. The
+// session is not interactive, so it runs no background jobs and is offered
+// none of plan 033's jobs surface (X101): its tools are about 3,250 bytes
+// smaller than an interactive session's, and both sizes were re-centred on
+// what it is offered.
 const (
-	compactionGoldenThought = 564_800
-	compactionGoldenSummary = 413_188
+	compactionGoldenThought = 564_374
+	compactionGoldenSummary = 412_682
 )
 
 // longThought is n bytes of thinking, in lines: what a turn that thought at

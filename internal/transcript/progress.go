@@ -69,7 +69,7 @@ func turnBoundary(e *Entry) bool {
 	case KindUser:
 		return !e.Interject
 	case KindNote:
-		return e.Text == NoteForeignTurn || e.Text == NoteSubagentWake || e.Text == NoteRestored
+		return e.Text == NoteForeignTurn || e.Text == NoteSubagentWake || e.Text == NoteJobWake || e.Text == NoteRestored
 	}
 	return false
 }

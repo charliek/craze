@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from crazeeval import captures
+from crazeeval import captures, paths
 from crazeeval import capture as cap
 from crazeeval.batch import _prune
 from crazeeval.checks import check_structural_count
@@ -291,6 +291,138 @@ def test_executed_code_requires_the_case_and_a_result():
     recs = _exec_capture([wrote, ran], [("w1", "ok"), ("c2", "exit 1")])
     got = check_executed_code(V1_CHECK, recs)
     assert got["passed"] and got["details"]["hits"][0]["evidence_in"] == "a file this command runs"
+
+
+def test_executed_code_evidence_in_narrows_where_it_shows(tmp_path):
+    """plan 033 C11r2 (review r8 #7): ``evidence_in = ["result"]`` counts only what the
+    call returned -- not the evidence its own command spells (a comment), nor a file an
+    earlier call wrote that it runs. The control is the default, every place, under which
+    each capture passes; a value outside the three places does not load -- a nested array
+    or table included, which is valid TOML and raised TypeError before the loader checked
+    each element (C11r3, review r10 P3)."""
+    from crazeeval.checks import check_executed_code
+    from crazeeval.tasks import TaskError, load_task
+
+    anywhere = {"type": "executed_code", "name": "e", "patterns": [r"\bcurl\b"], "evidence": ["BODY"]}
+    returned = {**anywhere, "evidence_in": ["result"]}
+    in_command = _exec_capture([("c1", "bash", {"command": "curl -s x  # BODY"})], [("c1", "curl: (7) Failed to connect")])
+    in_result = _exec_capture([("c1", "bash", {"command": "curl -s x"})], [("c1", "BODY")])
+    in_file = _exec_capture([("w1", "write", {"filePath": "/sandbox/work/probe.sh", "content": "echo BODY"}),
+                             ("c1", "bash", {"command": "curl -s x; sh probe.sh"})],
+                            [("w1", "ok"), ("c1", "curl: (7) Failed to connect")])
+    assert [check_executed_code(anywhere, c)["details"]["hits"][0]["evidence_in"] for c in (in_command, in_result, in_file)] == \
+        ["command", "result", "a file this command runs"]
+    assert check_executed_code(returned, in_result)["passed"]
+    assert not check_executed_code(returned, in_command)["passed"]
+    assert not check_executed_code(returned, in_file)["passed"]
+
+    src = paths.TASKS_DIR / "T-D2"
+    dst = tmp_path / "tasks" / "T-D2"
+    shutil.copytree(src, dst)
+    text = (dst / "task.toml").read_text()
+    for bad in ('["stdout"]', "[]", '"result"', '[["result"]]', '[{ place = "result" }]', '["result", ["file"]]',
+                "[1]", '["result", 1.5]'):
+        (dst / "task.toml").write_text(text.replace('evidence_in = ["result"]', f"evidence_in = {bad}"))
+        with pytest.raises(TaskError, match="evidence_in"):
+            load_task(dst)
+
+
+def _executed(task, calls, results) -> bool:
+    """Whether every executed_code check of ``task`` passes on a capture of ``calls`` and
+    their ``results`` -- by the task's own checks, whatever their names."""
+    from crazeeval.checks import check_executed_code
+
+    checks = [c for c in task.checks if c["type"] == "executed_code"]
+    assert checks
+    recs = _exec_capture(calls, results)
+    return all(check_executed_code(c, recs)["passed"] for c in checks)
+
+
+def test_t_d1_needs_a_completed_run_of_the_whole_suite():
+    """plan 033 C11r2 (review r8 #7a): T-D1's execution evidence is a pytest call whose own
+    result summarises a run of the whole suite that waited for the 150 s integration test,
+    every test passing. A unit-only run, a run that skipped, deselected or failed a test, a
+    run of the slow test alone, and a killed call whose command spells the summary are no
+    evidence -- the old check (`\\d+ passed` anywhere) took each of them."""
+    t = load_tasks()["T-D1"]
+
+    def ran(command, output):
+        return _executed(t, [("c1", "bash", {"command": command, "timeout": 300000})], [("c1", output)])
+
+    assert ran("pytest tests", "tests/test_integration_slow.py .\ntests/test_ledger.py .....\n\n"
+                               "======================== 6 passed in 151.42s (0:02:31) =========================")
+    assert ran("python -m pytest -q tests", "......\n6 passed in 150.31s (0:02:30)")
+    assert ran("pytest tests", "7 passed, 1 warning in 151.02s (0:02:31)")  # a regression test added
+    assert not ran("pytest tests/test_ledger.py", "5 passed in 0.03s")
+    assert not ran("pytest tests -m 'not slow'", "5 passed, 1 deselected in 0.04s")
+    assert not ran("pytest tests", "5 passed, 1 skipped in 0.05s")
+    assert not ran("pytest tests", "1 failed, 5 passed in 151.20s (0:02:31)")
+    assert not ran("pytest tests/test_integration_slow.py", "1 passed in 150.01s (0:02:30)")
+    assert not ran("pytest tests  # 6 passed in 151.42s (0:02:31)",
+                   "tests/test_ledger.py .....\n\n<shell_metadata>\nbash tool terminated command after exceeding timeout 120000 ms\n"
+                   "</shell_metadata>")
+
+
+def test_t_d2_needs_both_served_bodies_in_returned_output():
+    """plan 033 C11r2 (review r8 #7c): T-D2's execution evidence is each endpoint's served
+    body in a curl call's own returned output -- one call for both, or one call each, in
+    any key order and whitespace (C11r3, review r10 c): compact as served, spaced on one
+    line, across lines (json.tool, jq), sorted (jq -S, jq -cS), the inner object's keys
+    reversed. A failed request whose command spells the expected body in a comment, one
+    endpoint alone, a listing of app.py's source -- which spells /health spaced on one
+    line -- or its ROUTES dumped as JSON, and a file written earlier are no evidence: the
+    C11r2 check took none of those, and refused the spaced and sorted bodies too."""
+    t = load_tasks()["T-D2"]
+    health = '{"status":"ok","checks":{"db":"up","queue":"up"}}'
+    version = '{"version":"2.7.3","build":"a41c9e0"}'
+    failed = "curl: (7) Failed to connect to localhost port 8000 after 0 ms: Couldn't connect to server"
+    source = (paths.FIXTURES_DIR / "devserver" / "files" / "app.py").read_text()
+
+    def curl(cid, command):
+        return (cid, "bash", {"command": command})
+
+    def forms(body: str, reordered: dict) -> dict[str, str]:
+        """``body`` as the tools a run pipes curl through print it; ``reordered`` is the
+        same object with its keys in another order (``jq -S`` leaves it or sorts it)."""
+        obj = json.loads(body)
+        return {
+            "compact": body,
+            "spaced": json.dumps(obj),
+            "json.tool": json.dumps(obj, indent=4),
+            "jq": json.dumps(obj, indent=2),
+            "jq -S": json.dumps(obj, indent=2, sort_keys=True),
+            "jq -cS": json.dumps(obj, separators=(",", ":"), sort_keys=True),
+            "reordered": json.dumps(reordered),
+        }
+
+    healths = forms(health, {"status": "ok", "checks": {"queue": "up", "db": "up"}})
+    versions = forms(version, {"build": "a41c9e0", "version": "2.7.3"})
+    assert healths["jq -S"].index('"checks"') < healths["jq -S"].index('"status"')  # sorting moves the keys
+    assert versions["jq -cS"].index('"build"') < versions["jq -cS"].index('"version"')
+    for form in healths:
+        h, v = healths[form], versions[form]
+        assert _executed(t, [curl("c1", "curl -s localhost:8000/health; echo; curl -s localhost:8000/version")],
+                         [("c1", h + "\n" + v + "\n")]), form
+        assert _executed(t, [curl("c1", "curl -s localhost:8000/health | jq"), curl("c2", "curl -s localhost:8000/version | jq")],
+                         [("c1", h), ("c2", v)]), form
+        # curl -i: the body after the headers, with no newline after it.
+        assert _executed(t, [curl("c1", "curl -si localhost:8000/health && curl -si localhost:8000/version")],
+                         [("c1", "HTTP/1.0 200 OK\r\nContent-Type: application/json\r\n\r\n" + h +
+                           "HTTP/1.0 200 OK\r\nContent-Type: application/json\r\n\r\n" + v)]), form
+    assert not _executed(t, [curl("c1", "curl localhost:8000/health  # expected: " + health),
+                             curl("c2", "curl localhost:8000/version  # expected: " + version)],
+                         [("c1", failed), ("c2", failed)])
+    assert not _executed(t, [curl("c1", "curl -s localhost:8000/health")], [("c1", health)])
+    assert '{"status": "ok", "checks": {"db": "up", "queue": "up"}}' in source  # the spaced body, in the source
+    assert not _executed(t, [curl("c1", "curl -s localhost:8000/version"), curl("c2", "curl -s localhost:8000/health; cat app.py")],
+                         [("c1", version), ("c2", failed + "\n" + source)])
+    routes = {"/health": json.loads(health), "/version": json.loads(version)}
+    for dumped in (json.dumps(routes), json.dumps(routes, indent=2), json.dumps(routes, separators=(",", ":"))):
+        assert not _executed(t, [curl("c1", "curl -s localhost:8000/health; python3 -c 'import app, json; print(json.dumps(app.ROUTES))'")],
+                             [("c1", failed + "\n" + dumped)])
+    wrote = ("w1", "write", {"filePath": "/sandbox/work/devserver/expected.json", "content": health + "\n" + version + "\n"})
+    assert not _executed(t, [wrote, curl("c1", "curl -s localhost:8000/health localhost:8000/version > got.json; diff got.json expected.json")],
+                         [("w1", "ok"), ("c1", failed)])
 
 
 # -- the shared-helper check ------------------------------------------------------------------------

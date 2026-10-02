@@ -625,9 +625,19 @@ func TestBashCloseKillsAtOnce(t *testing.T) {
 	t.Run("a close during a timeout's grace", func(t *testing.T) {
 		t.Parallel()
 		env := bashEnv(t, nil)
-		// The shell survives SIGTERM and says it got it.
-		c := prepareBash(t, env, map[string]any{"command": "trap 'echo term > got' TERM; while :; do sleep 0.05; done", "timeout": 200})
+		// The shell survives SIGTERM and says it got it, waiting in the wait
+		// builtin, which a trapped signal ends at once (bashWaitLoop). The
+		// timeout passes once the trap is set (ops.expire): a real 200 ms one
+		// could pass, on a starved machine, before the shell had run its
+		// first line, and its SIGTERM then killed the shell with no trap set
+		// — 4 runs in 20 under a 2% CPU quota, 1 in 10 with -race under 5%;
+		// none in 20 and 30 so since (plan 033 C11r3).
+		c := prepareBash(t, env, map[string]any{"command": "trap 'echo term > got' TERM; : > ready; " + bashWaitLoop, "timeout": longTimeout})
+		expire := make(chan time.Time, 1)
+		c.ops.expire = expire
 		r := startBash(t, c, env)
+		untilFile(t, env, "ready", "the shell's trap")
+		expire <- time.Now()
 		if !waitFor(15*time.Second, func() bool { _, err := os.Stat(filepath.Join(env.Workspace, "got")); return err == nil }) {
 			t.Fatal("the timeout never sent SIGTERM")
 		}
@@ -642,6 +652,19 @@ func TestBashCloseKillsAtOnce(t *testing.T) {
 		}
 	})
 }
+
+// bashWaitLoop keeps a shell that traps SIGTERM running, waiting in the wait
+// builtin: bash runs a trapped signal's handler as soon as wait returns, which
+// the signal makes it do at once, but runs it during a foreground command only
+// once that command has ended. A loop of foreground sleeps (`while :; do sleep
+// 0.05; done`) left the handler waiting on the sleep — sent the group's
+// SIGTERM too, but to die and be reaped it must be scheduled first — and with
+// the CPU starved the 3 s grace's SIGKILL could land before it was, the
+// handler never run: 1 run in 30 failed so under systemd-run -p CPUQuota=5%,
+// none in 30 with this loop (plan 033 C11r3, reported by plan 032). The shell
+// itself must still be scheduled within the grace: under a 2% quota, 2 runs
+// in 20 still miss it.
+const bashWaitLoop = "while :; do sleep 0.05 & wait $!; done"
 
 // withClosing gives env a session close signal, Env.Closing, and returns
 // the func that closes it.
@@ -674,9 +697,10 @@ func TestBashCloseSignal(t *testing.T) {
 	t.Run("after a cancel, during its grace", func(t *testing.T) {
 		t.Parallel()
 		env, closeSession := withClosing(bashEnv(t, nil))
-		// The shell survives SIGTERM and says it got it; its child ignores
-		// SIGTERM.
-		c := prepareBash(t, env, map[string]any{"command": "trap 'echo term > got' TERM; (trap '' TERM; sleep 614) & echo $! > pid; while :; do sleep 0.05; done"})
+		// The shell survives SIGTERM and says it got it, waiting in the wait
+		// builtin, which a trapped signal ends at once (bashWaitLoop); its
+		// child ignores SIGTERM.
+		c := prepareBash(t, env, map[string]any{"command": "trap 'echo term > got' TERM; (trap '' TERM; sleep 614) & echo $! > pid; " + bashWaitLoop})
 		r := startBash(t, c, env)
 		pid := bashPID(t, filepath.Join(env.Workspace, "pid"), "sleep 614")
 		r.cancel(nil)
@@ -943,6 +967,85 @@ func TestBashEnvironment(t *testing.T) {
 	}
 }
 
+// antiPrompt is the plan's anti-prompt environment (plan 033 §3.6), written
+// out here rather than read from noPrompt, so that a variable dropped from
+// noPrompt fails TestBashAntiPromptEnvironment.
+var antiPrompt = []string{
+	"PAGER=cat", "GIT_PAGER=cat", "MANPAGER=cat", "GH_PAGER=cat", "AWS_PAGER=", "SYSTEMD_PAGER=",
+	"GIT_EDITOR=true", "GIT_SEQUENCE_EDITOR=true", "EDITOR=true", "VISUAL=true",
+	"GIT_TERMINAL_PROMPT=0", "GIT_ASKPASS=", "SSH_ASKPASS=", "SSH_ASKPASS_REQUIRE=never",
+	"DEBIAN_FRONTEND=noninteractive", "TERM=dumb", "NO_COLOR=1", "FORCE_COLOR=0", "CLICOLOR=0",
+	"CRAZE_AGENT=1",
+}
+
+// TestBashAntiPromptEnvironment: the child has every variable of the
+// anti-prompt environment exactly once, with craze's value, although the
+// user's environment holds a conflicting value for each; craze's provider
+// key and OPENAI_* are still filtered, and the rest of the user's
+// environment stays. The user's environment is a small fixed one, so `env`
+// prints no multi-line value to misread. The control is the user's own
+// values, each of which the child would otherwise have seen.
+func TestBashAntiPromptEnvironment(t *testing.T) {
+	t.Parallel()
+	user := []string{"PATH=" + os.Getenv("PATH"), "CRAZE_TEST_UNRELATED=kept",
+		"CRAZE_TEST_PROVIDER_KEY=" + keyA, "OPENAI_API_KEY=sk-openai-canary"}
+	for _, kv := range antiPrompt {
+		name, _, _ := strings.Cut(kv, "=")
+		user = append(user, name+"=user-value")
+	}
+	env := bashEnv(t, nil)
+	env.Environ = tool.ChildEnviron(user, []string{"CRAZE_TEST_PROVIDER_KEY"})
+	text := ok(t, runBash(t, env, map[string]any{"command": "env"}))
+	seen := map[string][]string{}
+	for _, line := range strings.Split(text, "\n") {
+		if name, value, found := strings.Cut(line, "="); found {
+			seen[name] = append(seen[name], value)
+		}
+	}
+	for _, kv := range antiPrompt {
+		name, value, _ := strings.Cut(kv, "=")
+		if got := seen[name]; len(got) != 1 || got[0] != value {
+			t.Errorf("the child has %s = %q, want exactly %q", name, got, value)
+		}
+	}
+	for _, name := range []string{"CRAZE_TEST_PROVIDER_KEY", "OPENAI_API_KEY"} {
+		if _, found := seen[name]; found {
+			t.Errorf("the child has %s", name)
+		}
+	}
+	if got := seen["CRAZE_TEST_UNRELATED"]; len(got) != 1 || got[0] != "kept" {
+		t.Errorf("the child lost the user's CRAZE_TEST_UNRELATED: %q", got)
+	}
+	if got := seen["PWD"]; len(got) != 1 || got[0] != env.Workspace {
+		t.Errorf("PWD = %q, want the workspace", got)
+	}
+}
+
+// TestBashGitCommitWithoutMessage: `git commit` without -m exits at once,
+// aborting on its empty message, rather than waiting for an editor until the
+// timeout. The user's environment names an editor that never exits — sleep
+// 650, a marker no other test uses — for GIT_EDITOR, EDITOR and VISUAL, and
+// the tool's GIT_EDITOR=true overrides it. git's global and system
+// configuration are shut out, so no hook or editor of the machine's plays a
+// part. Were the override gone, the call would end at its 10 s timeout as
+// a timeout error.
+func TestBashGitCommitWithoutMessage(t *testing.T) {
+	t.Parallel()
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skipf("no git on PATH: %v", err)
+	}
+	env := bashEnv(t, nil)
+	env.Environ = []string{"PATH=" + os.Getenv("PATH"), "HOME=" + env.Home,
+		"GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null",
+		"GIT_AUTHOR_NAME=craze test", "GIT_AUTHOR_EMAIL=test@example.invalid",
+		"GIT_COMMITTER_NAME=craze test", "GIT_COMMITTER_EMAIL=test@example.invalid",
+		"GIT_EDITOR=sleep 650", "EDITOR=sleep 650", "VISUAL=sleep 650"}
+	res := runBash(t, env, map[string]any{"command": "git init -q . && echo x > f && git add f && git commit", "timeout": 10000})
+	if res.IsError || res.Output.ExitCode != 1 || !strings.Contains(res.Text, "Aborting commit due to empty commit message") {
+		t.Fatalf("result is {IsError:%v Class:%q ExitCode:%d}, want git's abort, exit code 1:\n%s", res.IsError, res.Class, res.Output.ExitCode, res.Text)
+	}
+}
+
 // TestBashRefusesWithoutAnEnvironment: with no Env.Environ bash runs
 // nothing — it cannot know which of craze's variables hold provider keys, so
 // it fails closed rather than fall back to craze's own environment. The
@@ -996,6 +1099,12 @@ func (s *snapshots) all() []string {
 // the pipe in two writes 0.8 s apart, so that a snapshot is taken
 // between them. The control, with no redactor, sees the key, and a snapshot
 // holding its first half alone, which is what shows it really was split.
+//
+// A snapshot taken after the key holds the start of the marker, not all of
+// it: the output is redacted twice, around the escape-sequence stripper
+// (modelStream), and the second pass holds back the last bytes of what it
+// is given — here the first pass's marker — as it holds back the end of any
+// output, until more comes or the output ends.
 func TestBashRedactsItsOutput(t *testing.T) {
 	t.Parallel()
 	const split = `printf 'before\n'; printf 'sk-canary-'; sleep 0.8; printf 'alpha-0001\n'; sleep 0.8; printf 'after\n'`
@@ -1017,7 +1126,7 @@ func TestBashRedactsItsOutput(t *testing.T) {
 		if leaks(s) {
 			t.Fatalf("a progress snapshot holds the key or part of it: %q", s)
 		}
-		marked = marked || strings.Contains(s, redact.Marker)
+		marked = marked || strings.Contains(s, "before\n"+redact.Marker[:1])
 	}
 	if !marked {
 		t.Fatalf("no snapshot was taken after the key was printed: %q", snaps)
@@ -1052,6 +1161,102 @@ func TestBashRedactsItsOutput(t *testing.T) {
 	res, _, _ = run(nil, spilled)
 	if !strings.Contains(load(t, res.Trunc.Spill), keyA) {
 		t.Fatal("control: with no redactor the key is not in the spill file")
+	}
+}
+
+// TestBashStripsEscapes: a command's escape sequences — CSI, OSC, and a C1
+// CSI written as its code point — never reach the result's text, its output,
+// a progress snapshot or the spill file (plan 033 §3.6), while a character
+// whose UTF-8 holds a 0x9B byte (Û) is kept. The control: the commands
+// really do write escape sequences, which the result could not show
+// otherwise.
+func TestBashStripsEscapes(t *testing.T) {
+	t.Parallel()
+	env := bashEnv(t, nil)
+	var s snapshots
+	env.Progress = s.add
+	const colours = `printf '\033[31mred\033[0m \033]0;title\007ok \302\23331mC1\302\2330m \303\233\n'`
+	res := runBash(t, env, map[string]any{"command": colours})
+	if want := "red ok C1 Û\n"; res.Text != want || res.Output.Output != want {
+		t.Fatalf("result = %q, output %q; want %q", res.Text, res.Output.Output, want)
+	}
+
+	// Past 50 KiB the output spills, and the file holds stripped text: seq's
+	// own output, each line of which the command wrote green.
+	const green = `seq 1 12000 | awk '{ printf "\033[32m%s\033[0m\n", $0 }'`
+	res = runBash(t, env, map[string]any{"command": green})
+	if res.Trunc.Spill == "" || strings.IndexByte(res.Text, 0x1b) >= 0 || !strings.HasSuffix(res.Text, "\n11999\n12000\n") {
+		t.Fatalf("result = ...%q, Trunc %+v; want the stripped tail and a spill file", res.Text[max(len(res.Text)-80, 0):], res.Trunc)
+	}
+	if spill := load(t, res.Trunc.Spill); spill != seqOutput(1, 12000) {
+		t.Fatalf("the spill file is not seq's output, stripped: ...%q", spill[max(len(spill)-80, 0):])
+	}
+	for _, snap := range s.all() {
+		if strings.IndexByte(snap, 0x1b) >= 0 {
+			t.Fatalf("a progress snapshot holds ESC: %q", snap[max(len(snap)-80, 0):])
+		}
+	}
+
+	if got := ok(t, runBash(t, env, map[string]any{"command": colours + ` | grep -c "$(printf '\033')"`})); got != "1\n" {
+		t.Fatalf("control: the command's one line does not hold ESC: %q", got)
+	}
+	if got := ok(t, runBash(t, env, map[string]any{"command": green + ` | grep -c "$(printf '\033')"`})); got != "12000\n" {
+		t.Fatalf("control: the command's lines do not hold ESC: %q", got)
+	}
+}
+
+// TestBashRedactsAKeySplitByAnEscape: a key the command prints with an
+// escape sequence inside it — `sk-canary-\033[0malpha-0001`, cut across two
+// reads of the pipe as well — is redacted in the result, every progress
+// snapshot and the spill file: the stripper joins the key before the
+// redactor looks (plan 033 §3.6). So is a key an escape sequence ends on the
+// first character of (`\033[sk-…`), which the redactor before the stripper
+// catches (modelStream). The control, with no redactor, has the key whole in
+// the result: the stripper really did join it.
+func TestBashRedactsAKeySplitByAnEscape(t *testing.T) {
+	t.Parallel()
+	const split = `printf 'before sk-canary-\033['; sleep 0.3; printf '0malpha-0001 after\n'`
+	leaks := func(s string) bool {
+		return strings.Contains(s, "canary") || strings.Contains(s, "alpha-0001") || strings.IndexByte(s, 0x1b) >= 0
+	}
+	run := func(red *redact.Replacer, command string) (tool.Result, []string) {
+		env := bashEnv(t, red)
+		var s snapshots
+		env.Progress = s.add
+		return runBash(t, env, map[string]any{"command": command}), s.all()
+	}
+
+	res, snaps := run(redact.New(keyA), split)
+	if want := "before " + redact.Marker + " after\n"; res.Text != want || res.Output.Output != want {
+		t.Fatalf("result = %q, want %q", res.Text, want)
+	}
+	for _, snap := range snaps {
+		if leaks(snap) {
+			t.Fatalf("a progress snapshot holds the key, part of it, or ESC: %q", snap)
+		}
+	}
+
+	res, _ = run(redact.New(keyA), `printf 'x\033[sk-canary-alpha-0001\n'`)
+	if leaks(res.Text) || !strings.HasPrefix(res.Text, "x") {
+		t.Fatalf("a key an escape sequence ends on leaks: %q", res.Text)
+	}
+
+	res, snaps = run(redact.New(keyA), `seq 1 12000; printf 'sk-canary-\033[0malpha-0001\n'`)
+	if res.Trunc.Spill == "" || leaks(res.Text) || !strings.HasSuffix(res.Text, "12000\n"+redact.Marker+"\n") {
+		t.Fatalf("result = ...%q, Trunc %+v; want the tail redacted and a spill file", res.Text[max(len(res.Text)-80, 0):], res.Trunc)
+	}
+	if spill := load(t, res.Trunc.Spill); leaks(spill) || spill != seqOutput(1, 12000)+redact.Marker+"\n" {
+		t.Fatalf("the spill file holds the key, part of it or ESC, or not the marker: ...%q", spill[max(len(spill)-80, 0):])
+	}
+	for _, snap := range snaps {
+		if leaks(snap) {
+			t.Fatal("a progress snapshot holds the key, part of it, or ESC")
+		}
+	}
+
+	res, _ = run(nil, split)
+	if res.Text != "before "+keyA+" after\n" {
+		t.Fatalf("control: with no redactor the stripped result is not the key whole: %q", res.Text)
 	}
 }
 
@@ -2112,7 +2317,7 @@ func TestSuperviseShutdownHasOneDeadline(t *testing.T) {
 				close(g.reaped)
 			})
 			began := time.Now()
-			why, _ := g.supervise(ctx, closing, time.Hour, make(chan struct{}))
+			why, _ := g.supervise(ctx, closing, time.Hour, nil, make(chan struct{}), nil)
 			took := time.Since(began)
 			if why != endAbort {
 				t.Fatalf("supervise ended with %v, want the abort", why)

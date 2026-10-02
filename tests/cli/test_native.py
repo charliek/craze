@@ -758,8 +758,10 @@ def test_native_tool_loop_read_grep_edit_bash(
     assert (ws / "notes.txt").read_text(encoding="utf-8") == "beta\n"
 
     # The wire's own view of the same loop. The first request offers the
-    # profile's eleven tools in its registry order (opencode.Profile), and the
-    # last one carries every call's result back, each tied to its call id.
+    # profile's eleven tools in its registry order (opencode.Profile) -- a
+    # headless session runs no background jobs, so it is offered neither
+    # bash_output nor bash_stop (plan 033 X101) -- and the last one carries
+    # every call's result back, each tied to its call id.
     first, last = fixture_server.requests[0], fixture_server.requests[-1]
     assert first.tool_names == [
         "bash",
@@ -774,6 +776,13 @@ def test_native_tool_loop_read_grep_edit_bash(
         "ask_user_question",
         "exit_plan_mode",
     ], first.tool_names
+    # Its bash is the one without jobs: no run_in_background parameter and no
+    # word of it in the description. workdir is the control: the schema read
+    # is bash's own.
+    bash_fn = next(t["function"] for t in first.body["tools"] if t["function"]["name"] == "bash")
+    assert "workdir" in bash_fn["parameters"]["properties"], bash_fn["parameters"]
+    assert "run_in_background" not in bash_fn["parameters"]["properties"], bash_fn["parameters"]
+    assert "run_in_background" not in bash_fn["description"], bash_fn["description"]
     results = {m["tool_call_id"]: m["content"] for m in last.messages if m.get("role") == "tool"}
     assert set(results) == {"read", "grep", "edit", "bash"}, sorted(results)
     assert "alpha" in results["read"], results["read"]

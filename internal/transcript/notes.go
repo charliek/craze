@@ -23,6 +23,9 @@ const (
 	// of its own delivering a background sub-agent's result (plan 026 §3.11,
 	// agent.ReasonSubagentWake).
 	NoteSubagentWake = "sub-agent finished — the agent continues"
+	// NoteJobWake heads the stream of a native wake that delivers background
+	// bash jobs' results alone (plan 033 §3.8, agent.ReasonJobWake).
+	NoteJobWake = "background command finished — the agent continues"
 	// NoteRestored closes a session/load replay: everything above it is
 	// history the agent handed back, everything below is this session.
 	NoteRestored = "restored"
@@ -115,13 +118,16 @@ const stopCancelled = "cancelled"
 
 // noteForForeignTurn is the note a foreign turn's start draws, by the reason the
 // bracket carries (agent.ForeignTurnInfo.Reason): the native wake's own
-// wording for agent.ReasonSubagentWake, and today's for "" — and for any
-// reason this build does not know, which a newer session may publish: the
-// reason is an open string on the wire, and an unknown one is still a turn
-// the agent ran on its own.
+// wordings for agent.ReasonSubagentWake and agent.ReasonJobWake, and today's
+// for "" — and for any reason this build does not know, which a newer session
+// may publish: the reason is an open string on the wire, and an unknown one is
+// still a turn the agent ran on its own.
 func noteForForeignTurn(reason string) string {
-	if reason == agent.ReasonSubagentWake {
+	switch reason {
+	case agent.ReasonSubagentWake:
 		return NoteSubagentWake
+	case agent.ReasonJobWake:
+		return NoteJobWake
 	}
 	return NoteForeignTurn
 }

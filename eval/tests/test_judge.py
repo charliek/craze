@@ -139,8 +139,8 @@ def test_evidence_is_bounded_in_bytes():
 # Every tool name each harness offered in the C1/C2 captures (craze's opencode profile,
 # gx, opencode, codex), and a few more they call.
 HARNESS_TOOLS = {
-    "craze": ["agent", "agent_output", "ask_user_question", "bash", "edit", "exit_plan_mode", "glob", "grep", "read",
-              "todo_write", "write"],
+    "craze": ["agent", "agent_output", "ask_user_question", "bash", "bash_output", "bash_stop", "edit",
+              "exit_plan_mode", "glob", "grep", "read", "todo_write", "write"],
     "gx": ["ask_user_question", "enter_plan_mode", "exit_plan_mode", "get_command_or_subagent_output", "grep",
            "kill_command_or_subagent", "list_dir", "monitor", "read_file", "run_terminal_command", "scheduler_create",
            "scheduler_delete", "scheduler_list", "search_replace", "search_tool", "session_title", "spawn_subagent",

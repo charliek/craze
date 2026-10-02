@@ -64,7 +64,8 @@ the cap the band ends in `… +n more`; the viewed sub-agent always keeps a
 visible row, taking the last one when it would otherwise fall behind the cap.
 
 On a provider that can stop one child (native today), `Delete` or
-`Backspace` on the selected **running** row stops just that child; the turn
+`Backspace` on the selected **running** row stops just that child (or a
+[background command](#background-commands-bash-jobs)); the turn
 goes on and the parent reads that the user stopped it. On any other row —
 grok, cursor, or a finished row — the key goes to the composer as before.
 This works the same on a background sub-agent's row (below).
@@ -90,6 +91,54 @@ any turn the agent runs on its own — when nothing of craze's own is
 working, leaving a `cancelled` note. Headless `craze prompt` never
 sees any of this: every `run_in_background` call there runs in the
 foreground, as if the flag had not been set.
+
+### Background commands (bash jobs)
+
+On native, the `bash` tool can also run a command as a **job**: the model
+sets `run_in_background` for a server, a watch command or a `tail -f`, and
+the command keeps running while the turn goes on. An interactive
+foreground command that outlives its timeout (120 s unless the model asked
+for more, at most 10 minutes) is **promoted** to a job instead of being
+killed. The model reads a job's output with `bash_output {id, wait_ms?}`
+(a snapshot of what is new, or a wait of up to 10 minutes for the end) and
+stops one with `bash_stop {id}`; in a step that also stops a job, the reads
+do not wait, so a stop never queues behind them. A job runs until it exits,
+until it is stopped, or for its limit — 30 minutes by default, 2 hours at
+most, counted from the promotion for a promoted command — and a session holds
+at most 8 running jobs. When the cap is full, or the session is closing, a command
+that would have been promoted is killed at its timeout as before, and the
+result says why.
+
+A job shows in the same band as a sub-agent, with the type `bash job`, the
+first line of its command as the description, and `bg` first in its suffix;
+`Enter` on it opens its output in the read-only view. `Delete`/`Backspace`
+on a running job's row, or inside its view, stops it, like a sub-agent. A job
+never keeps the working spinner on and never blocks `/connect`, so a dev
+server running for an hour leaves the session idle; nor is its command counted
+in status row 2's running tools, or named by the working line of a turn that
+runs beside it. (The `← n agents` count on status row 2 still includes job
+rows.) A job's row counts its running time from its command's own start —
+for a promoted command, from before the promotion — and the bash call's own
+row shows no exit code for a command that was promoted.
+
+A finished job's result is delivered to the model like a background
+sub-agent's: at the next step of a running turn, through `bash_output`, or,
+once the agent is idle, by a **wake** of its own that heads the transcript
+with "background command finished — the agent continues". At most 3 wakes in a
+row carry job results while no turn of yours has started; after that, results
+wait and arrive with your next prompt. Quitting or closing the session
+stops every running job without delivering anything. `--resume` does not
+reattach jobs: the model is told, at the first turn after the resume, that the
+session closed before each such command's result was delivered and craze no
+longer manages it — stopped if the session closed normally, possibly still
+running if craze crashed, and possibly finished first — and where its output
+was saved, so it can read that file and check whether the command still runs
+rather than start it again. Headless
+`craze prompt` and sub-agent children run no jobs, and their model is not
+offered any: its `bash` has no `run_in_background` parameter and its
+description says nothing of jobs or promotion, and it has no `bash_output`
+or `bash_stop`. A command there still runs in the foreground until its
+timeout kills it.
 
 ## Resuming a session
 

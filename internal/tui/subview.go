@@ -182,7 +182,7 @@ func (m *Model) applySubagentEvent(ev agent.Event) {
 		if m.agentStart == nil {
 			m.agentStart = make(map[string]time.Time)
 		}
-		m.agentStart[id] = m.now()
+		m.agentStart[id] = m.spawnStart(info)
 		delete(m.agentDone, id)
 	case agent.SubagentChangeFinished:
 		// The child's run is closed by the fold, at the event's At.
@@ -431,6 +431,20 @@ func (m Model) subagentSpinnerView() string {
 	)
 }
 
+// spawnStart is where a row's running counter starts, as its spawned event
+// arrives: this sighting — but for a bash job's row, its command's own start
+// (StartedAt), which for a promoted command lies before the promotion that
+// spawned the row, so the counter runs on to the duration the row ends with
+// rather than jumping to it (plan 033 C10r, V3 F4). A StartedAt that is zero,
+// or later than this clock's now, is not used.
+func (m Model) spawnStart(info agent.SubagentInfo) time.Time {
+	now := m.now()
+	if agent.IsBashJob(info) && !info.StartedAt.IsZero() && info.StartedAt.Before(now) {
+		return info.StartedAt
+	}
+	return now
+}
+
 func (m Model) subElapsed(info agent.SubagentInfo) string {
 	start, ok := m.agentStart[info.ID]
 	if !ok || m.frozen {
@@ -454,13 +468,14 @@ func (m Model) mergedSpinnerText() string {
 
 // spinnerElapsed is the clock the main spinner shows: the turn's while it
 // runs, else the longest-running sub-agent's — after end_turn the turn's
-// clock would keep growing for a turn that is over.
+// clock would keep growing for a turn that is over. A bash job's row is not a
+// sub-agent's (anySubagentRunning).
 func (m Model) spinnerElapsed() string {
 	if m.status == statusWorking {
 		return m.turnElapsed()
 	}
 	for i := range m.snap.Subagents {
-		if subagentRunning(m.snap.Subagents[i]) {
+		if subagentBusy(m.snap.Subagents[i]) {
 			return m.subElapsed(m.snap.Subagents[i])
 		}
 	}

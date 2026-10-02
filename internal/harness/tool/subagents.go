@@ -188,15 +188,17 @@ var claudeToolIDs = map[string]string{
 // droppedTools are the names, lowercased, a persona's list may hold that are
 // dropped without a word: Claude Code's tools craze has no counterpart for, or
 // withholds from every child by design — starting another agent or reading a
-// background one's result, the todo list, asking the person, leaving plan mode
-// — and the native ids of those five, since a list may be written in either
-// vocabulary. Every name starting "task" and every MCP name ("mcp__…") is
-// dropped as well (droppedTool).
+// background one's result, the todo list, asking the person, leaving plan
+// mode, reading or stopping a background job (a child runs none: plan 033
+// P11, D-59) — and the native ids of those seven, since a list may be written
+// in either vocabulary. Every name starting "task" and every MCP name
+// ("mcp__…") is dropped as well (droppedTool).
 var droppedTools = []string{
 	AgentTool, "todowrite", "askuserquestion", "exitplanmode",
 	"webfetch", "websearch", "notebookedit", "notebookread",
 	"killshell", "bashoutput", "workflow", "skill",
 	"todo_write", "ask_user_question", ExitPlanModeTool, AgentOutputTool,
+	BashOutputTool, BashStopTool,
 }
 
 // droppedTool reports whether a persona's tool name, lowercased and without
@@ -215,10 +217,11 @@ func droppedTool(base string) bool {
 // is taken verbatim. Dropped silently: Agent, Agent(…), Task and every name
 // that starts with it, TodoWrite, AskUserQuestion, ExitPlanMode, WebFetch,
 // WebSearch, NotebookEdit, NotebookRead, KillShell, BashOutput, Workflow,
-// Skill, every MCP name, and the native ids of the four tools a child never
-// gets. Every other name is returned in unknown, for the caller's one
-// diagnostic, and not mapped — a name with a parenthesised restriction
-// included, Bash(git status:*) say: craze cannot honour the restriction, and
+// Skill, every MCP name, and the native ids of the tools a child never gets,
+// bash_output and bash_stop among them. Every other name is returned in
+// unknown, for the caller's one diagnostic, and not mapped — a name with a
+// parenthesised restriction included, Bash(git status:*) say: craze cannot
+// honour the restriction, and
 // the unrestricted tool would give the child more than its author wrote, so it
 // fails closed, as a tools key craze cannot read does. Surrounding spaces are
 // trimmed and an empty name is skipped. Both results are deduplicated, first

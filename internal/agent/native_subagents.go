@@ -215,21 +215,7 @@ func (s *nativeSession) subagentStarted(e harness.SubagentStarted) {
 	// The child's tool rows get their set before the child exists for anyone:
 	// it cannot stream before this returns (the runner runs it after).
 	s.openChildTools(e.ID)
-
-	s.rosterMu.Lock()
-	if s.roster == nil {
-		s.roster = map[string]*nativeChild{}
-	}
-	if _, again := s.roster[e.ID]; !again {
-		s.rosterOrder = append(s.rosterOrder, e.ID)
-	}
-	row := &nativeChild{info: info}
-	s.roster[e.ID] = row
-	safeSubagent(&row.info, safe)
-	s.enqueueRosterLocked(SubagentChangeSpawned, row.info)
-	info = cloneSubagent(row.info) // what spawned said, for what follows it
-	s.rosterMu.Unlock()
-	s.flushRoster()
+	info = s.spawnRow(info, safe) // what spawned said, for what follows it
 
 	if info.Prompt != "" {
 		s.emit(Event{Type: EventUser, Agent: e.ID, Text: info.Prompt})
@@ -379,14 +365,7 @@ func (s *nativeSession) subagentFinished(e harness.SubagentFinished) {
 
 	// Settled, and published directly, before the roster's finished is
 	// enqueued: a child's rows are all terminal by the time it is.
-	settled := toolCompleted
-	switch status {
-	case SubagentFailed:
-		settled = toolFailed
-	case SubagentCancelled:
-		settled = toolCancelled
-	}
-	s.settleChildTools(e.ID, settled)
+	s.settleChildTools(e.ID, rowToolStatus(status))
 
 	s.rosterMu.Lock()
 	row := s.roster[e.ID]
@@ -434,6 +413,43 @@ func (s *nativeSession) subagentFinished(e harness.SubagentFinished) {
 		}
 		t.Task.Status, t.Task.DurationMs, t.Task.Model = done.Status, done.DurationMs, done.Model
 	})
+}
+
+// spawnRow puts info on the roster as a new running row — a child's
+// (subagentStarted) or a background job's (jobStarted, native_jobs.go) — and
+// says so: the whole row put through safeSubagent, EventSubagent{spawned}
+// enqueued in the same rosterMu section, then the barrier (the file's
+// comment). It returns the row as spawned said it. Its tool set is opened
+// before, by the caller.
+func (s *nativeSession) spawnRow(info SubagentInfo, safe nativeSafe) SubagentInfo {
+	s.rosterMu.Lock()
+	if s.roster == nil {
+		s.roster = map[string]*nativeChild{}
+	}
+	if _, again := s.roster[info.ID]; !again {
+		s.rosterOrder = append(s.rosterOrder, info.ID)
+	}
+	row := &nativeChild{info: info}
+	s.roster[info.ID] = row
+	safeSubagent(&row.info, safe)
+	s.enqueueRosterLocked(SubagentChangeSpawned, row.info)
+	info = cloneSubagent(row.info)
+	s.rosterMu.Unlock()
+	s.flushRoster()
+	return info
+}
+
+// rowToolStatus is the status a finished row's open tool rows settle to: a
+// completed row's are completed, a failed one's failed, a cancelled one's
+// cancelled.
+func rowToolStatus(status SubagentStatus) string {
+	switch status {
+	case SubagentFailed:
+		return toolFailed
+	case SubagentCancelled:
+		return toolCancelled
+	}
+	return toolCompleted
 }
 
 // enqueueRosterLocked enqueues the roster change change of info, cloned under

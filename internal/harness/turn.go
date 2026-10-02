@@ -247,6 +247,14 @@ func (s *Session) run(ctx context.Context, text string, files []fantasy.FilePart
 	if err != nil {
 		return Result{}, err
 	}
+	// A turn a person started — Run, which the engine admits for a submit, a
+	// queue's drain or a send-now — starts the wake chain again (plan 033
+	// P14, jobs.go): before anything of the turn, so a job result that
+	// becomes ready while it runs is pending, for its next step boundary, and
+	// not suspended. A wake never does.
+	if !wake {
+		s.subs.resetWakeChain()
+	}
 	// The turn's reservations of background results are settled once it has
 	// ended, on every path — after the interrupted answer is saved (finish),
 	// and on a return before the model was asked or a panic too — and before
@@ -268,8 +276,9 @@ func (s *Session) run(ctx context.Context, text string, files []fantasy.FilePart
 	var held []string
 	if wake {
 		// Taken under the runner's lock now the session is claimed, owned by
-		// the wake's first step (P47) before anything is sent.
-		b := s.subs.reserve(owner{turn: number, step: 1, wake: true}, false)
+		// the wake's first step (P47) before anything is sent; a prompt that
+		// holds a job's result is one more wake in the chain (P14).
+		b := s.subs.reserveWake(owner{turn: number, step: 1, wake: true})
 		s.mu.Lock()
 		if b == nil {
 			// Nothing was waiting: no turn was, its number is not spent, and a

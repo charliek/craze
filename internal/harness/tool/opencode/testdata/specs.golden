@@ -1,9 +1,9 @@
 # The opencode profile's tools as a model is offered them (Profile.ToolsJSON).
-# tools_sha256: 8165ca3ccbbb40612aa28b5ea3daf821530e59b675db06adb6bb0f93ca691563
+# tools_sha256: 645ce9fe804c4ef9b504cd6f6d376c87496d9446ea804e6f17f77e27a155eed2
 
 === tool: bash
 --- description
-Executes a given bash command in a persistent shell session with optional timeout, ensuring proper handling and security measures.
+Executes a given bash command with optional timeout, ensuring proper handling and security measures. Each call runs in a fresh shell; the working directory does not persist.
 
 Be aware: OS: linux, Shell: bash
 
@@ -31,8 +31,11 @@ Before executing the command, please follow these steps:
 
 Usage notes:
   - The command argument is required.
-  - You can specify an optional timeout in milliseconds. If not specified, commands will time out after 120000ms. The timeout cannot exceed 600000ms (10 minutes); a longer timeout is reduced to 600000ms.
-  - When the command returns, every process still in its process group is killed, so nothing it runs in the background (for example, with `&` or `nohup`) outlives the call; a process that starts its own session or process group (setsid, setpgid, `set -m`) escapes this.
+  - You can specify an optional timeout in milliseconds. If not specified, commands will time out after 120000ms. The timeout cannot exceed 600000ms (10 minutes); a longer timeout is reduced to 600000ms. When the session supports it, a command still running at its timeout is not stopped: it is moved to the background as a job, the call returns its output so far and the job's id, and its result is delivered to you when it finishes.
+  - When the command returns, every process still in its process group is killed, so nothing it runs in the background (for example, with `&` or `nohup`) outlives the call; a process that starts its own session or process group (setsid, setpgid, `set -m`) escapes this. `&` and `nohup` are not the way to keep a command running: use `run_in_background` when the session supports it.
+  - When the session supports it, set `run_in_background` for a command that keeps running, such as a dev server, a watch command or `tail -f`: the call returns at once with the job's id, `timeout` is then the job's limit (default 1800000ms, at most 7200000ms), and the job's result is delivered to you when it finishes; do not poll it or sleep waiting for it. Read its output so far with bash_output, and stop it with bash_stop. Do not use it for builds, tests or git commands whose result you need now: run those in the foreground.
+  - When the session supports it, stop the background jobs you no longer need with bash_stop before you finish.
+  - Commands run with no terminal: editors and pagers do not open, `git commit` needs `-m`, and colour is off.
   - If the output exceeds 2000 lines or 51200 bytes, it will be truncated and the output will be written to a file when it can be. The result names the file when there is one, and says when the file holds only part of the output. When the result gives a path, you can use Read with offset/limit to read specific sections or Grep to search the saved content. Do NOT use `head`, `tail`, or other truncation commands to limit output; the output will already be captured to a file for more precise searching whenever it can be.
 
   - Avoid using Bash with the `find`, `grep`, `cat`, `head`, `tail`, `sed`, `awk`, or `echo` commands, unless explicitly instructed or when these commands are truly necessary for the task. Instead, always prefer using the dedicated tools for these commands:
@@ -72,6 +75,10 @@ Usage notes:
       "description": "The command to execute",
       "type": "string"
     },
+    "run_in_background": {
+      "description": "Optional. true runs the command in the background where this session supports it: the call returns at once with the job's id, timeout is the job's limit, and its result is delivered to you when it finishes. Where background jobs are not supported the command runs in the foreground.",
+      "type": "boolean"
+    },
     "timeout": {
       "description": "Optional timeout in milliseconds",
       "exclusiveMinimum": 0,
@@ -86,6 +93,53 @@ Usage notes:
   },
   "required": [
     "command"
+  ]
+}
+
+=== tool: bash_output
+--- description
+Read a background job's output, by the id its bash call returned: a command you started with `run_in_background`, or one moved to the background when it reached its timeout.
+
+- A background job's result is delivered to you on its own when it finishes; do not poll it or sleep waiting for it. Call this tool when you need its output now: a server's log, or how far a long command has got.
+- While the job runs, the call returns its output since your last read of it. With `wait_ms` it first waits up to that many milliseconds for the job to finish (default 0, which does not wait; at most 600000).
+- Once the job has finished, the call returns its result instead. A result is delivered once: if you already have it, or it is already part of your input, the call says so instead of repeating it.
+--- parameters
+{
+  "type": "object",
+  "properties": {
+    "id": {
+      "description": "The background job's id, as the bash call that started it returned it.",
+      "type": "string"
+    },
+    "wait_ms": {
+      "description": "Optional. How long to wait for the job to finish, in milliseconds (default 0, which does not wait; at most 600000).",
+      "maximum": 9007199254740991,
+      "minimum": 0,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "id"
+  ]
+}
+
+=== tool: bash_stop
+--- description
+Stop a background job, by the id its bash call returned: a command you started with `run_in_background`, or one moved to the background when it reached its timeout.
+
+- The job's process group is sent SIGTERM, then SIGKILL 3 seconds later if it is still running. The call waits up to 7 seconds for the job to end and returns its result, which is delivered once.
+- Stop the background jobs you no longer need, such as a server you have finished with, before you finish.
+--- parameters
+{
+  "type": "object",
+  "properties": {
+    "id": {
+      "description": "The background job's id, as the bash call that started it returned it.",
+      "type": "string"
+    }
+  },
+  "required": [
+    "id"
   ]
 }
 

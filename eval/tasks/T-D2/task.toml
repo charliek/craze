@@ -1,0 +1,98 @@
+# T-D2 dev-server (plan 033 C11, eval-ab.md §3). A stdlib http.server app that never
+# returns: on main the model must hand-roll `&` and `sleep`; with background jobs it can
+# use run_in_background, curl, then bash_stop. The runner's post-run quiescence assertion
+# (every descendant of the sandbox PID namespace) catches a server left running. A dev
+# task: the feature check for run_in_background, not tuning data.
+id = "T-D2"
+name = "dev-server"
+category = "verify"
+split = "dev"
+mode = "build"
+timeout_s = 900
+prompt = """
+Start the dev server (`python app.py`), request `/health` and `/version` with curl, and tell me what each returns. Don't leave the server running.
+"""
+rubric = [
+    "Starts the server (`python app.py`) without blocking on it forever: in the background, with a job, or with a backgrounding construct and a wait.",
+    "Requests both /health and /version with curl against the running server and shows the responses.",
+    "Reports /health returns {\"status\":\"ok\",\"checks\":{\"db\":\"up\",\"queue\":\"up\"}} and /version returns {\"version\":\"2.7.3\",\"build\":\"a41c9e0\"}.",
+    "Stops the server before finishing (bash_stop, kill, or equivalent), leaving no process behind.",
+    "Changes no files.",
+]
+false_claims = [
+    "The server could not be started or the requests failed.",
+    "The server was stopped, claimed without having stopped it (it is still running).",
+]
+
+[repo]
+kind = "fixture"
+name = "devserver"
+
+[[checks]]
+type = "facts"
+name = "facts"
+min = 3
+
+[[checks.items]]
+id = "health-status-ok"
+regex = '"status"\s*:\s*"ok"|status[^\n]{0,20}\bok\b'
+cite = "app.py: ROUTES['/health']"
+
+[[checks.items]]
+id = "version-number"
+regex = '2\.7\.3'
+cite = "app.py: VERSION"
+
+[[checks.items]]
+id = "version-build"
+regex = 'a41c9e0'
+cite = "app.py: BUILD"
+
+# One check per endpoint (plan 033 C11r2, review r8 #7c): a curl call whose own returned
+# output is that endpoint's served body -- separate calls or one call for both. Only the
+# result counts (evidence_in): a comment or an expected body in the command's text, or a
+# file an earlier call wrote, is no evidence, and a request that failed returns no body.
+# A body counts in any key order and any whitespace (plan 033 C11r3, review r10 c): compact
+# as served, spaced on one line (json.dumps), across lines (json.tool, jq) or sorted (jq -S)
+# -- one regex per order of the outer keys, the inner object's two orders alternated, each
+# object whole, from its brace to its brace. An object that is the value of a quoted key
+# (`"...": {`, the lookbehinds) is no evidence: that is how app.py's source spells /health,
+# on one line with spaces, so a listing of the source shows it so. Residual (X113): a
+# command that prints the expected body itself -- echo, or json.dumps of app.py's ROUTES
+# entry -- still passes.
+[[checks]]
+type = "executed_code"
+name = "curled-health"
+patterns = ['\bcurl\b']
+require_result = true
+evidence_in = ["result"]
+evidence = [
+    '(?<!":)(?<!": )\{\s*"status"\s*:\s*"ok"\s*,\s*"checks"\s*:\s*\{\s*(?:"db"\s*:\s*"up"\s*,\s*"queue"\s*:\s*"up"|"queue"\s*:\s*"up"\s*,\s*"db"\s*:\s*"up")\s*\}\s*\}',
+    '(?<!":)(?<!": )\{\s*"checks"\s*:\s*\{\s*(?:"db"\s*:\s*"up"\s*,\s*"queue"\s*:\s*"up"|"queue"\s*:\s*"up"\s*,\s*"db"\s*:\s*"up")\s*\}\s*,\s*"status"\s*:\s*"ok"\s*\}',
+]
+
+[[checks]]
+type = "executed_code"
+name = "curled-version"
+patterns = ['\bcurl\b']
+require_result = true
+evidence_in = ["result"]
+evidence = [
+    '(?<!":)(?<!": )\{\s*"version"\s*:\s*"2\.7\.3"\s*,\s*"build"\s*:\s*"a41c9e0"\s*\}',
+    '(?<!":)(?<!": )\{\s*"build"\s*:\s*"a41c9e0"\s*,\s*"version"\s*:\s*"2\.7\.3"\s*\}',
+]
+
+[[checks]]
+type = "no_writes"
+name = "no-writes"
+
+[validate]
+reference_answer = "testdata/reference_answer.md"
+decoy_answer = "testdata/decoy_answer.md"
+synthetic_command = "curl -s localhost:8000/health; echo; curl -s localhost:8000/version"
+synthetic_result = """{"status":"ok","checks":{"db":"up","queue":"up"}}
+{"version":"2.7.3","build":"a41c9e0"}
+"""
+irrelevant_command = "curl --version"
+irrelevant_result = "curl 8.5.0 (x86_64-pc-linux-gnu)"
+planted_edit = { path = "app.py", append = "\n# planted edit\n" }

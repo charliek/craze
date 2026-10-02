@@ -1,0 +1,5 @@
+Read a background job's output, by the id its bash call returned: a command you started with `run_in_background`, or one moved to the background when it reached its timeout.
+
+- A background job's result is delivered to you on its own when it finishes; do not poll it or sleep waiting for it. Call this tool when you need its output now: a server's log, or how far a long command has got.
+- While the job runs, the call returns its output since your last read of it. With `wait_ms` it first waits up to that many milliseconds for the job to finish (default 0, which does not wait; at most 600000).
+- Once the job has finished, the call returns its result instead. A result is delivered once: if you already have it, or it is already part of your input, the call says so instead of repeating it.

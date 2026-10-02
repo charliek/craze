@@ -222,6 +222,55 @@ func createSpill(root *os.Root, id string) (*os.File, string, error) {
 	}
 }
 
+// SpillFile is the path of the spill file name under <home>/tool-output —
+// name being a base name, as a job's marker line carries it (JobMarker) —
+// when name is one of OpenSpill's names for the call id (spillNameOf: no
+// separator, no other id's) and a regular file there, as the spill directory
+// opens through its checked root (openSpillDir): not a symlink, a directory or
+// anything else at the name, nor any file through a symlinked or swapped
+// directory. It is "" otherwise, and when the directory is missing or
+// unreadable.
+//
+// It is how a resumed session finds a background job's output (plan 033
+// C11r3, review r10 findings a2 and b, superseding C11r2's search of the
+// directory by the job's id): by the one name the job's own marker line
+// carries, looked up alone — the directory is never listed, so neither its
+// size nor another session's file under the same id's names reaches the
+// notice.
+func SpillFile(home, id, name string) string {
+	if !validID(id) || !spillNameOf(name, id) {
+		return ""
+	}
+	root, err := openSpillDir(home, false)
+	if err != nil {
+		return ""
+	}
+	defer root.Close()
+	fi, err := root.Lstat(name)
+	if err != nil || !fi.Mode().IsRegular() {
+		return ""
+	}
+	return filepath.Join(home, SpillDir, name)
+}
+
+// spillNameOf reports whether name is one createSpill gives the call id:
+// tool_<id>, or tool_<id>-<8 lowercase hex digits>. An id createSpill would
+// refuse has none.
+func spillNameOf(name, id string) bool {
+	if !validID(id) {
+		return false
+	}
+	rest, ok := strings.CutPrefix(name, spillPrefix+id)
+	if !ok {
+		return false
+	}
+	if rest == "" {
+		return true
+	}
+	suffix, ok := strings.CutPrefix(rest, "-")
+	return ok && len(suffix) == 8 && allBytes(suffix, func(c byte) bool { return c >= '0' && c <= '9' || c >= 'a' && c <= 'f' })
+}
+
 // spillDirChecked runs between openSpillDir's check of the directory and its
 // open of it: the window a swap would use. Tests make the swap there.
 var spillDirChecked = func() {}

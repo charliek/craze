@@ -65,6 +65,25 @@ import (
 // nothing, ErrNothingPending (nothing ran: the results went to a turn that
 // claimed first), and a recovered panic. None leaves the claim held.
 //
+// # Background jobs (plan 033 §3.8)
+//
+// A background bash job's result wakes the session as a sub-agent's does: it
+// is a result on the same registry, pending when it finishes, and HasPending
+// counts it. The wake's reason says which kind it delivers — ReasonJobWake,
+// with its own text, when the pending results the claim saw were all jobs'
+// (PendingKinds), ReasonSubagentWake otherwise, mixed included — read in the
+// claim's s.mu section, beside the HasPending that decided it; a result that
+// becomes pending between the claim and the harness's reservation joins the
+// wake under the reason already enqueued. Both brackets carry the one reason.
+//
+// The wake-chain cap (P14) needs nothing here: the harness counts the wakes
+// whose prompt holds a job's result, resets the count on every turn the
+// engine admits — a submit, a drain, a send-now, each a Run — and never on a
+// wake, and from the cap on publishes a job's result suspended, so HasPending
+// — and so wakeReadyLocked — never sees it, OwesWork does not count it (a
+// detached host goes idle), and the next turn a person starts delivers it at
+// its step 0.
+//
 // # Locks
 //
 // No sink, Publish or Flush is ever called with s.mu held, and the only cross
@@ -72,7 +91,11 @@ import (
 // return, and the kick never blocks.
 
 // wakeText is the opening bracket's Text: what the agent's turn is about.
-const wakeText = "sub-agent result"
+// jobWakeText is a job wake's (ReasonJobWake).
+const (
+	wakeText    = "sub-agent result"
+	jobWakeText = "background command result"
+)
 
 // diagSubagentWake is the journal diag each wake's outcome is written as
 // (noteWake): a wake publishes no terminal event, so this is the one record
@@ -112,6 +135,17 @@ func (s *nativeSession) wakeReadyLocked() bool {
 	return !s.closed && s.hs != nil && !s.claimed && !s.inPrompt && !s.fenced && s.hs.HasPending()
 }
 
+// wakeReasonLocked is the reason and the opening's text of a wake that is
+// claiming now (the file's "Background jobs"): ReasonJobWake when every
+// result pending is a job's, ReasonSubagentWake otherwise. s.mu is held, s.hs
+// set; PendingKinds takes the registry's leaf lock, as HasPending does.
+func (s *nativeSession) wakeReasonLocked() (reason, text string) {
+	if subagents, jobs := s.hs.PendingKinds(); jobs && !subagents {
+		return ReasonJobWake, jobWakeText
+	}
+	return ReasonSubagentWake, wakeText
+}
+
 // recheckPending is one recheck (the file's comment). It reads first without
 // claiming, so a kick that finds nothing to do — every prompt's release in a
 // session with no background children — costs one locked read and no ask
@@ -146,6 +180,7 @@ func (s *nativeSession) recheckPending() {
 		return
 	}
 	hs := s.hs
+	reason, text := s.wakeReasonLocked()
 	s.wakeSeq++
 	id := "wake-" + strconv.FormatUint(s.wakeSeq, 10)
 	rel := make(chan struct{})
@@ -157,7 +192,7 @@ func (s *nativeSession) recheckPending() {
 	s.turnCancel, s.turnToken = cancel, tok
 	s.wake, s.foreign, s.snap.ForeignTurn = true, true, true
 	s.log.Enqueue(Event{Type: EventForeignTurn, At: s.Now(), ForeignTurn: &ForeignTurnInfo{
-		ID: id, Text: wakeText, Reason: ReasonSubagentWake, Running: true,
+		ID: id, Text: text, Reason: reason, Running: true,
 	}})
 	s.mu.Unlock()
 	if decided != nil {
@@ -169,7 +204,7 @@ func (s *nativeSession) recheckPending() {
 
 	res, err := s.wakeTurn(hs, turnCtx)
 	cancel()
-	s.endWake(id, tok, rel, res, err)
+	s.endWake(id, reason, tok, rel, res, err)
 }
 
 // wakeTurn runs the wake's turn and recovers a panic from it as a failure of
@@ -196,8 +231,8 @@ func (s *nativeSession) wakeTurn(hs *harness.Session, ctx context.Context) (res 
 // follows has committed it, for a prompt claiming in between (native.go's
 // prompt); the flush; the journal's note of what the wake came to; and the
 // recheck's kick, because a result that finished during the wake's last step
-// is pending now and this ending is what delivers it.
-func (s *nativeSession) endWake(id string, tok TurnToken, rel chan struct{}, res harness.Result, err error) {
+// is pending now and this ending is what delivers it. reason is the opening's.
+func (s *nativeSession) endWake(id, reason string, tok TurnToken, rel chan struct{}, res harness.Result, err error) {
 	s.settleTools()
 	s.asks.EndTurn(tok)
 	s.mu.Lock()
@@ -210,7 +245,7 @@ func (s *nativeSession) endWake(id string, tok TurnToken, rel chan struct{}, res
 	}
 	close(rel)
 	s.log.Enqueue(Event{Type: EventForeignTurn, At: s.Now(), ForeignTurn: &ForeignTurnInfo{
-		ID: id, Reason: ReasonSubagentWake,
+		ID: id, Reason: reason,
 	}})
 	s.wakeEndingQueued = true
 	s.mu.Unlock()
@@ -221,16 +256,17 @@ func (s *nativeSession) endWake(id string, tok TurnToken, rel chan struct{}, res
 	s.mu.Lock()
 	s.wakeEndingQueued = false
 	s.mu.Unlock()
-	s.noteWake(id, res, err)
+	s.noteWake(id, reason, res, err)
 	s.kickWake()
 }
 
 // noteWake journals one wake's outcome: delivered, nothing pending (a turn
 // took the results first), cancelled, or failed with its error — redacted,
-// since a provider's message can hold anything (plan 018 §3.7). Notes are
-// journal-only and never block (EventLog.Note).
-func (s *nativeSession) noteWake(id string, res harness.Result, err error) {
-	fields := map[string]any{"wake": id}
+// since a provider's message can hold anything (plan 018 §3.7) — beside its
+// reason (subagent_wake or job_wake, plan 033 §3.8). Notes are journal-only
+// and never block (EventLog.Note).
+func (s *nativeSession) noteWake(id, reason string, res harness.Result, err error) {
+	fields := map[string]any{"wake": id, "reason": reason}
 	switch {
 	case errors.Is(err, harness.ErrNothingPending):
 		fields["outcome"] = "nothing_pending"

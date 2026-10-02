@@ -161,6 +161,12 @@ func (t *turn) toolCall(tc fantasy.ToolCallContent) error {
 	defer t.mu.Unlock()
 	c.at = time.Now()
 	t.emit(ToolCalled{ID: c.id, CallID: req.CallID, Request: requestOf(req), At: c.at})
+	// A step that stops a job lets its output calls wait for nothing, so the
+	// stop never queues behind them in Fantasy's slots (stopAnnounced, plan
+	// 033 C10r); marked here, before any call of the step runs.
+	if tc.ToolName == tool.BashStopTool {
+		t.subs.stopAnnounced(t.number, stepOfCall(c.id))
+	}
 	// The doom-loop guard (doomloop.go) sees every announced call here, in
 	// call order across steps, invalid ones included, and refuses one by
 	// setting its veto, which runTool returns instead of running it. Fantasy
@@ -270,12 +276,18 @@ func (t *turn) toolResult(r fantasy.ToolResultContent) error {
 	return nil
 }
 
-// finishCall sends c's ToolFinished, once. mu is held.
+// finishCall sends c's ToolFinished, once, and tells the doom-loop guard of a
+// waiting call that saw what it waits on (tool.Result.Observed, plan 033
+// P13): the next identical call counts as a first again (doomloop.go). mu is
+// held.
 func (t *turn) finishCall(c *toolCall, res tool.Result) {
 	if c.done {
 		return
 	}
 	c.done = true
+	if res.Observed {
+		t.loop.observed = callSignature(c.name, c.input)
+	}
 	now := time.Now()
 	var d time.Duration
 	if !c.at.IsZero() {
@@ -492,13 +504,19 @@ func (t *turn) synthesizeStep(stop string) (done bool, err error) {
 	return true, err
 }
 
-// outputCalls are the harness ids of the agent_output calls among answered:
-// the calls whose own result a written tool entry holds, and so the ones
-// whose reservations it commits (plan 026 §3.11).
+// outputCalls are the harness ids of the agent_output, bash_output, bash_stop
+// and bash calls among answered: the calls whose own result a written tool
+// entry holds, and so the ones whose reservations — and, for bash_output, the
+// reads of a running job — it commits (plan 026 §3.11, plan 033 §3.8). A bash
+// call's is the read its promotion receipt made, the output so far, which the
+// job's cursor passes only once the receipt is written (promotionRead, plan
+// 033 C10r); a bash call that promoted nothing owns nothing, and commits
+// nothing.
 func outputCalls(answered []*toolCall) []string {
 	var ids []string
 	for _, c := range answered {
-		if c.name == tool.AgentOutputTool {
+		switch c.name {
+		case tool.AgentOutputTool, tool.BashOutputTool, tool.BashStopTool, tool.BashTool:
 			ids = append(ids, c.id)
 		}
 	}

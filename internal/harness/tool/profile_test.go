@@ -108,6 +108,50 @@ func TestRegisterRefusesBrokenProfiles(t *testing.T) {
 	}
 }
 
+// jobsFake is a fake with a variant for a session that runs no background
+// jobs (JobsAware, plan 033 X101).
+type jobsFake struct {
+	*fake
+	variant Tool
+}
+
+func (j jobsFake) WithoutJobs() Tool { return j.variant }
+
+// TestRegisterChecksJobsVariants (plan 033 X101): a JobsAware tool's variant
+// is what a session without jobs is offered in the tool's place, so Register
+// holds it to the tool's own rules — a broken spec, a typed nil and another id
+// are each refused, the error naming the tool and the variant. A variant that
+// is nothing (the tool is dropped) and a good one with the tool's id are the
+// controls, accepted.
+func TestRegisterChecksJobsVariants(t *testing.T) {
+	broken := newFake("echo", nil)
+	broken.spec.Required = nil
+	var typedNil *fake
+	cases := map[string]struct {
+		variant Tool
+		want    string
+	}{
+		"a broken variant":          {broken, "required is nil"},
+		"a typed nil variant":       {typedNil, "is a nil"},
+		"a variant with another id": {newFake("other", nil), "a variant keeps its tool's id"},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			var r Registry
+			err := r.Register(Profile{Name: "p", Tools: []Tool{jobsFake{fake: newFake("echo", nil), variant: tc.variant}}, System: system})
+			if err == nil || !strings.Contains(err.Error(), tc.want) || !strings.Contains(err.Error(), `tool "echo" without jobs`) {
+				t.Fatalf("Register = %v, want an error naming the variant and containing %q", err, tc.want)
+			}
+		})
+	}
+	for name, v := range map[string]Tool{"no variant": nil, "a good variant": newFake("echo", nil)} {
+		var r Registry
+		if err := r.Register(Profile{Name: "p", Tools: []Tool{jobsFake{fake: newFake("echo", nil), variant: v}}, System: system}); err != nil {
+			t.Fatalf("control, %s: Register = %v", name, err)
+		}
+	}
+}
+
 // TestSecondProfileSelectedByOverride is Seam 2 end to end: a second
 // profile with another tool set is chosen by a model's tool_profile, the
 // default by any other model, and a dispatcher built on either knows only

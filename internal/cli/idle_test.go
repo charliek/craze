@@ -66,14 +66,23 @@ func (s idleServerHook) FenceClose() (int, bool, func()) {
 // are production's unless the test moves them.
 func newIdleRig(t *testing.T, config string, started bool) *idleRig {
 	t.Helper()
+	stub := tui.NewStubNoPrimary()
+	r := newIdleRigOver(t, config, started, stub)
+	r.stub = stub
+	return r
+}
+
+// newIdleRigOver is newIdleRig with sess as the engine's session — a Stub's,
+// or a real one (idle_jobs_test.go) — and no stub of the rig's.
+func newIdleRigOver(t *testing.T, config string, started bool, sess agent.Session) *idleRig {
+	t.Helper()
 	if config != "" {
 		writeCrazeConfig(t, config)
 	} else {
 		crazeHome(t)
 	}
 	r := &idleRig{t: t, base: time.Now()}
-	r.stub = tui.NewStubNoPrimary()
-	eng, err := engine.New(r.stub, engine.Options{})
+	eng, err := engine.New(sess, engine.Options{})
 	if err != nil {
 		t.Fatal(err)
 	}

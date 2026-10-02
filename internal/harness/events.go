@@ -389,6 +389,60 @@ type SubagentUndelivered struct {
 	Usage    []ModelUsage
 }
 
+// JobStarted reports that a background job started (plan 033 §3.8): the bash
+// call CallID (its ToolStarted.ID, and the job's ID, the same harness id)
+// either ran its command with run_in_background or reached its timeout with
+// the command still running, and the command was handed to the session
+// (Promoted) — its limit counted from now. It goes to the session's sink
+// (Options.Sink), as a background child's own events do, before every
+// JobOutput and the JobFinished of the job, which come from the job's own
+// goroutine. Command and Workdir are redacted. At is the session's clock;
+// Began is when the command itself started — a promoted job's foreground
+// phase included, so the time JobFinished's Duration counts from — and what a
+// row's running counter counts from too (plan 033 C10r, V3 F4).
+//
+// The adapter maps a job onto the roster's rows (P12: the type "bash job", no
+// model, background) without stamping the call's row, which keeps the
+// call's own result: the receipt.
+type JobStarted struct {
+	ID, CallID       string
+	Command, Workdir string
+	Limit            time.Duration
+	Promoted         bool
+	At, Began        time.Time
+}
+
+// JobOutput is a snapshot of a running job's output — the whole of what its
+// row should show now, as a ToolProgress is — lossy, at most every 100 ms and
+// only when it changed. Output is the command's output stripped of escape
+// sequences (plan 033 §3.6), redacted as the stream went — with the session's
+// key set as it grew while the job ran — and again, whole, with the session's
+// widest redaction as the snapshot went out (plan 033 C10r).
+type JobOutput struct {
+	ID, Output string
+}
+
+// JobFinished reports that a background job ended (plan 033 §3.8), after its
+// every JobOutput and before its result is delivered. Status is
+// tool.JobExited, JobStopped, JobTimedOut or JobFailed; By, for a stopped
+// job, who stopped it (tool.JobStoppedByYou, JobStoppedByUser; "" when the
+// session's close did); Error the row's word for any ending but a clean exit
+// — "exit code N", "stopped by the agent", "stopped by the user", "stopped:
+// the session closed", "time limit reached", "failed" — "" for exit code 0.
+// ExitCode is the leader's, -1 for none; Output the tail it left, redacted;
+// Duration its whole running time, a promoted job's foreground phase
+// included. A job the session's close ended reports this and nothing else:
+// its result is never delivered, and Close reports no SubagentUndelivered for
+// it (it spent nothing), so this — which the adapter journals — is its one
+// record.
+type JobFinished struct {
+	ID, Status, By, Error string
+	ExitCode              int
+	Output                string
+	Duration              time.Duration
+	At                    time.Time
+}
+
 // The statuses a SubagentFinished reports. A child that finished its turn —
 // cut off, refused and stopped by a limit included, which its result
 // explains — completed; one whose turn failed, or that could not run, failed;
@@ -414,6 +468,9 @@ func (SubagentStarted) isEvent()     {}
 func (SubagentEvent) isEvent()       {}
 func (SubagentFinished) isEvent()    {}
 func (SubagentUndelivered) isEvent() {}
+func (JobStarted) isEvent()          {}
+func (JobOutput) isEvent()           {}
+func (JobFinished) isEvent()         {}
 func (Prompted) isEvent()            {}
 func (Compacted) isEvent()           {}
 func (Spent) isEvent()               {}

@@ -29,6 +29,8 @@ func subagentTerminal(s agent.SubagentInfo) bool {
 	return s.Status == agent.SubagentCompleted || s.Status == agent.SubagentFailed || s.Status == agent.SubagentCancelled
 }
 
+// noteAgentStart stamps the row id's running counter on its first sighting:
+// now, or for a bash job's row its command's own start (spawnStart).
 func (m *Model) noteAgentStart(id string) {
 	if id == "" {
 		return
@@ -37,7 +39,11 @@ func (m *Model) noteAgentStart(id string) {
 		m.agentStart = make(map[string]time.Time)
 	}
 	if _, ok := m.agentStart[id]; !ok {
-		m.agentStart[id] = m.now()
+		start := m.now()
+		if info, found := m.subagentByID(id); found {
+			start = m.spawnStart(info)
+		}
+		m.agentStart[id] = start
 	}
 }
 
@@ -78,16 +84,26 @@ func (m Model) liveSubIDs() map[string]struct{} {
 	return live
 }
 
+// anySubagentRunning reports a sub-agent still running: what keeps the
+// spinner on and its fast tick going (spinner.go) and refuses /connect
+// (connectBusy). A background bash job's row is not one (plan 033 §3.8
+// "Display"): a dev server may run for hours, and neither the working line
+// nor /connect should wait on it. Its row still draws, and its elapsed time
+// still moves with the slow tick.
 func (m Model) anySubagentRunning() bool {
 	for i := range m.snap.Subagents {
-		if subagentRunning(m.snap.Subagents[i]) {
+		if subagentBusy(m.snap.Subagents[i]) {
 			return true
 		}
 	}
-	if m.tombstone != nil && subagentRunning(*m.tombstone) {
-		return true
-	}
-	return false
+	return m.tombstone != nil && subagentBusy(*m.tombstone)
+}
+
+// subagentBusy reports whether s is a running row the spinner, its clock and
+// /connect wait for: any running row but a native session's background bash
+// job's (agent.IsBashJob, plan 033 §3.8 "Display").
+func subagentBusy(s agent.SubagentInfo) bool {
+	return subagentRunning(s) && !agent.IsBashJob(s)
 }
 
 func (m Model) viewedInfo() (agent.SubagentInfo, bool) {

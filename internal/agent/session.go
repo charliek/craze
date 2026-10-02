@@ -651,9 +651,11 @@ type ExpandedCommand struct {
 // Reason says why the agent started it, for a client that folds the stream to
 // word its note by (internal/transcript's foldForeignTurn): "" is grok's
 // interjection fallback, today's wording; ReasonSubagentWake is the native
-// session delivering a background sub-agent's result (plan 026 §3.11). An
-// open string, not an enum: a reason this build does not know renders as ""
-// does, so a newer session's reason never breaks an older client's fold.
+// session delivering a background sub-agent's result (plan 026 §3.11), and
+// ReasonJobWake one delivering background bash jobs' results alone (plan 033
+// §3.8). An open string, not an enum: a reason this build does not know
+// renders as "" does, so a newer session's reason never breaks an older
+// client's fold.
 type ForeignTurnInfo struct {
 	ID      string
 	Text    string
@@ -665,6 +667,13 @@ type ForeignTurnInfo struct {
 // a turn of its own, bracketed as foreign, that delivers a finished background
 // sub-agent's result to the model (plan 026 §3.11). Both brackets carry it.
 const ReasonSubagentWake = "subagent_wake"
+
+// ReasonJobWake is ForeignTurnInfo.Reason for a native wake whose pending
+// results, when it claimed, were all background bash jobs' (plan 033 §3.8): a
+// command finished — or was stopped — while nothing ran. A wake with a
+// sub-agent's result pending as well keeps ReasonSubagentWake. Both brackets
+// carry it.
+const ReasonJobWake = "job_wake"
 
 type ToolEvent struct {
 	ID          string

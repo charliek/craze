@@ -38,7 +38,8 @@ type Mirror struct {
 	// one is running.
 	Turn Turn
 	// Tools is Tools(): every retained tool's last state in entry order, main
-	// first and then each child's in creation order.
+	// first and then each child's in creation order — a bash job's left out
+	// (agent.IsBashJob, Mirror).
 	Tools []agent.ToolEvent
 }
 
@@ -80,6 +81,18 @@ func (m *Model) Mirror() Mirror {
 	}
 	mr.Tools = appendTools(mr.Tools, m.Main.live())
 	for _, id := range m.subOrder {
+		// A native session's background bash job's scope (agent.IsBashJob)
+		// is left out: its one execute row stays in its own transcript, for
+		// its view, and out of the ordered tools a client reads what is
+		// working from (plan 033 C10r, V3 F2). A job is no work of the
+		// turn's — a dev server runs for hours — so its running command is
+		// neither counted in the session's in-flight tools ("· 2 shells")
+		// nor named by the working line ("Running sleep 900"), as its roster
+		// row is neither the spinner's nor /connect's. A scope with no row is
+		// a child's.
+		if agent.IsBashJob(m.agents[id].info) {
+			continue
+		}
 		mr.Tools = appendTools(mr.Tools, m.subs[id].live())
 	}
 	return mr

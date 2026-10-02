@@ -59,9 +59,13 @@ func (m *Model) handleTick(msg tickMsg) {
 	}
 }
 
+// wantFastTick is whether the tick chain beats at fastTick. viewedRunning
+// keeps an open view's spinner moving — a running bash job's view included,
+// which anySubagentRunning leaves out (plan 033 §3.8): the view is the one
+// place a job's spinner is drawn.
 func (m Model) wantFastTick() bool {
 	return m.status == statusWorking || m.cardOpen() || m.tasksLingering() ||
-		m.agentLingering() || m.copyLingering() || m.anySubagentRunning() ||
+		m.agentLingering() || m.copyLingering() || m.anySubagentRunning() || m.viewedRunning() ||
 		m.shellRunning() || m.compacting("") || m.sessListSpinning()
 }
 
@@ -157,11 +161,12 @@ func (m Model) spinnerActivity() string {
 		}
 	}
 	// After end_turn the tools are settled but the children may not be; the
-	// rows are what is still running then.
+	// rows are what is still running then — a bash job's aside (plan 033
+	// §3.8): it is no sub-agent waited for.
 	if m.status != statusWorking {
 		running := 0
 		for i := range m.snap.Subagents {
-			if subagentRunning(m.snap.Subagents[i]) {
+			if subagentBusy(m.snap.Subagents[i]) {
 				running++
 			}
 		}

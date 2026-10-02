@@ -126,3 +126,22 @@ func TestProgressOfALongReplyIsItsTail(t *testing.T) {
 		t.Fatalf("last reply %q, want the capped tail", got)
 	}
 }
+
+// TestProgressWakesOpenTheirTurn: every wake's opening note is a turn's
+// boundary, as grok's interjection fallback's is — a sub-agent's wake's and a
+// background job's (plan 033 §3.8, NoteJobWake) alike — so a tool the turn
+// before it left running is not what the session is doing in the wake.
+func TestProgressWakesOpenTheirTurn(t *testing.T) {
+	for _, reason := range []string{"", agent.ReasonSubagentWake, agent.ReasonJobWake} {
+		m := New(Options{})
+		started(m, "turn-1", "fix it")
+		tool(m, "t-1", "Stuck", "in_progress")
+		if got := m.Progress().Tool; got != "Stuck" {
+			t.Fatalf("control (%q): tool %q before the wake, want the turn's running tool", reason, got)
+		}
+		m.Fold(agent.Event{Type: agent.EventForeignTurn, ForeignTurn: &agent.ForeignTurnInfo{ID: "wake-1", Reason: reason, Running: true}})
+		if got := m.Progress().Tool; got != "" {
+			t.Fatalf("reason %q: tool %q in the wake, want none of the turn before it", reason, got)
+		}
+	}
+}

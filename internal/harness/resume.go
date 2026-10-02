@@ -194,6 +194,12 @@ func (s *Session) openResumed(opts Options) (_ *Session, err error) {
 	if was.todos != nil {
 		s.tools.todos.restore(toolTodos(*was.todos))
 	}
+	// The background jobs the last incarnation started and never delivered
+	// are no longer managed (plan 033 P15, owner decision 3, C11r2): the
+	// model is told so once, at the first turn a person starts, with the
+	// file under the home each one's output went to, as its marker line
+	// named it (C11r3, jobs_resume.go).
+	s.subs.restoreJobs(opts.Home, was.jobs)
 	return s, nil
 }
 
@@ -221,12 +227,16 @@ type pathState struct {
 	// records, or for a transcript written before turns were, the turns its
 	// user entries are read as opening (turnReader).
 	turns int
+	// jobs are the background jobs the path started and never delivered
+	// (plan 033 P15, jobScan), in the order it started them.
+	jobs []stoppedJob
 }
 
 // readPath reads a transcript's path, root to leaf.
 func readPath(path []store.Entry) pathState {
 	var ps pathState
 	var turns turnReader
+	var jobs jobScan
 	for i := range path {
 		e := &path[i]
 		switch e.Type {
@@ -246,9 +256,43 @@ func readPath(path []store.Entry) pathState {
 			}
 		}
 		turns.read(e)
+		scanJobs(&jobs, e, turns.turn) // after read: the turn e belongs to
 	}
 	ps.turns = turns.numbered()
+	ps.jobs = jobs.stopped()
 	return ps
+}
+
+// scanJobs hands e, of turn, to the background jobs' scan (jobs_resume.go,
+// plan 033 P15) as plain values: an assistant entry's calls, a tool entry's
+// results — their text, and whether each is an error — and a results entry's
+// text. Calls and results the provider executed are its own, and none of the
+// session's.
+func scanJobs(j *jobScan, e *store.Entry, turn int) {
+	if e.Type != store.TypeMessage {
+		return
+	}
+	switch e.Message.Role {
+	case fantasy.MessageRoleAssistant:
+		var calls []storedCall
+		for _, p := range e.Message.Content {
+			if c, ok := fantasy.AsMessagePart[fantasy.ToolCallPart](p); ok && !c.ProviderExecuted {
+				calls = append(calls, storedCall{id: c.ToolCallID, name: c.ToolName, input: c.Input})
+			}
+		}
+		j.answer(calls)
+	case fantasy.MessageRoleTool:
+		for _, p := range e.Message.Content {
+			if r, ok := fantasy.AsMessagePart[fantasy.ToolResultPart](p); ok && !r.ProviderExecuted {
+				text, isErr := outputText(r.Output)
+				j.result(r.ToolCallID, text, isErr, turn)
+			}
+		}
+	case fantasy.MessageRoleUser:
+		if e.SubagentResults {
+			j.results(textOf(e.Message))
+		}
+	}
 }
 
 // turnReader tells, along a path, the user entries that open a turn from the

@@ -64,6 +64,16 @@ func (a args) strOrNull(name string) (s string, ok bool, err error) {
 	return a.str(name, false)
 }
 
+// boolOrNull is boolean, but an explicit JSON null reads as an omission, as
+// strOrNull's does: the agent tool's and bash's run_in_background, which a
+// model that sends null means as false.
+func (a args) boolOrNull(name string) (b, ok bool, err error) {
+	if raw, present := a[name]; present && jsonType(raw) == "null" {
+		return false, false, nil
+	}
+	return a.boolean(name)
+}
+
 // boolean returns the optional boolean field name, which must be a JSON true
 // or false: "true" as a string, or null, is refused. ok is false when it is
 // absent.

@@ -128,11 +128,9 @@ func (t *agentTool) Prepare(_ tool.Env, c tool.Call) (tool.Prepared, error) {
 		}
 		*f.into = strings.TrimSpace(*f.into)
 	}
-	var background bool
-	if raw, present := a["run_in_background"]; !present || jsonType(raw) != "null" {
-		if background, _, err = a.boolean("run_in_background"); err != nil {
-			return nil, err
-		}
+	background, _, err := a.boolOrNull("run_in_background")
+	if err != nil {
+		return nil, err
 	}
 	// A blank description would leave the child's row without a label, and a
 	// blank prompt would start an agent with nothing to do.

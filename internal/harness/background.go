@@ -62,6 +62,15 @@ import (
 // as a SubagentUndelivered (closeBackground). Nothing persists the results
 // themselves: a session that closes forgets them.
 //
+// # Background jobs
+//
+// A background bash job (plan 033 §3.8, jobs.go) is a result of a second
+// kind on the same registry: the same states, the same three ways of being
+// delivered, the same reservation, commit and restore — its own wrapper
+// (jobBlock), its own goroutine and slots, and no usage. agent_output reads
+// only sub-agents' results and bash_output only jobs'; a job Close finds is
+// reported to nobody (it spent nothing: its JobFinished is its record).
+//
 // # Locks
 //
 // regMu guards every result's state, as it guards the registry, and is held
@@ -93,11 +102,17 @@ type owner struct {
 }
 
 // bgResult is one background child's result and its delivery state; every
-// field but the fixed ones is guarded by regMu.
+// field but the fixed ones is guarded by regMu. A background job's result
+// (plan 033 §3.8, jobs.go) is one too, of kind kindJob: its id is its bash
+// call's harness id, its type tool.JobType, its description its command's
+// first line, and its own part — the command, the read cursor, the block's
+// attributes — is job.
 type bgResult struct {
+	kind    resultKind
 	id, typ string // the child's id, and its agent type, redacted
 	desc    string // the call's description, redacted: what a compaction's state section names it by
 	callID  string // the agent call that started it: its result's spill file is named for it
+	job     *jobState
 
 	state, prior delivery // prior: what a reservation gives back to (pending or suspended)
 	own          owner    // a reservation's
@@ -121,11 +136,13 @@ type bgResult struct {
 }
 
 // taken is a result as a consumer took it: what it formats the model's text
-// from.
+// from — in its kind's wrapper, a job's with its attributes.
 type taken struct {
+	kind                  resultKind
 	id, typ, status, text string
 	usage                 *tool.ChildUsage
 	seq                   int
+	attrs                 jobAttrs
 }
 
 // batch is results one consumer took, as the model reads them: their ids, the
@@ -466,11 +483,13 @@ func (s *Session) BackgroundOwed() bool { return s.subs.owed(s.tools.refusing.Lo
 
 // runningChild is a background child still running, as a compaction's state
 // section names it (plan 028 §3.8, PD24): its id, its agent type and its
-// call's description, both redacted when it was launched.
+// call's description, both redacted when it was launched. A background job
+// is one too (plan 033 §3.8): its id, tool.JobType ("bash job") and its
+// command's first line.
 type runningChild struct{ id, typ, desc string }
 
-// running lists the background children still running, in launch order. It
-// takes regMu alone.
+// running lists the background children and jobs still running, in launch
+// order. It takes regMu alone.
 func (r *subagents) running() []runningChild {
 	if r == nil {
 		return nil
@@ -489,31 +508,73 @@ func (r *subagents) running() []runningChild {
 // reserve takes, for own, every result waiting to be delivered — every
 // suspended one as well when withSuspended — in the order they finished, and
 // returns them as the model reads them (deliver), or nil when there was none.
-// The taking is one regMu section; the text is made after it.
+// The taking is one regMu section; the text is made after it. The reserving
+// and reserved seams bracket that section, for a test that lands a result's
+// publication on either side of a step's boundary.
 func (r *subagents) reserve(own owner, withSuspended bool) *batch {
 	if r == nil {
 		return nil
 	}
+	if r.seams.reserving != nil {
+		r.seams.reserving(own)
+	}
 	r.regMu.Lock()
-	var got []taken
-	for _, id := range r.order {
-		res := r.results[id]
-		if res.state == resultPending || (withSuspended && res.state == resultSuspended) {
-			got = append(got, r.reserveLocked(res, own))
-		}
+	got, _ := r.takeLocked(own, withSuspended)
+	r.regMu.Unlock()
+	if r.seams.reserved != nil {
+		r.seams.reserved(own)
+	}
+	return r.deliver(got)
+}
+
+// reserveWake is a wake's reservation of its prompt (Session.run): reserve
+// for own, every pending result and no suspended one, and — in the same regMu
+// section — one more wake in the chain when they hold a job's result (P14,
+// jobs.go): from maxJobWakes on, a job result that becomes ready is
+// suspended.
+func (r *subagents) reserveWake(own owner) *batch {
+	if r == nil {
+		return nil
+	}
+	r.regMu.Lock()
+	got, jobs := r.takeLocked(own, false)
+	if jobs {
+		r.wakeChain++
 	}
 	r.regMu.Unlock()
 	return r.deliver(got)
 }
 
+// takeLocked takes for own every result waiting — and every suspended one
+// when withSuspended — in launch order, and reports whether a job's is among
+// them. regMu is held.
+func (r *subagents) takeLocked(own owner, withSuspended bool) (got []taken, jobs bool) {
+	for _, id := range r.order {
+		res := r.results[id]
+		if res.reported {
+			continue // Close has given it up: nothing delivers it now
+		}
+		if res.state == resultPending || (withSuspended && res.state == resultSuspended) {
+			got = append(got, r.reserveLocked(res, own))
+			jobs = jobs || res.kind == kindJob
+		}
+	}
+	return got, jobs
+}
+
 // reserveLocked takes res for own and returns it as taken. regMu is held.
 func (r *subagents) reserveLocked(res *bgResult, own owner) taken {
 	res.prior, res.state, res.own = res.state, resultReserved, own
-	return taken{id: res.id, typ: res.typ, status: res.status, text: res.text, usage: res.usage, seq: res.seq}
+	t := taken{kind: res.kind, id: res.id, typ: res.typ, status: res.status, text: res.text, usage: res.usage, seq: res.seq}
+	if res.job != nil {
+		t.attrs = res.job.attrs
+	}
+	return t
 }
 
-// deliver is taken results as the model reads them: each in its wrapper, in
-// the order they finished, a blank line between two, the whole redacted once
+// deliver is taken results as the model reads them: each in its kind's
+// wrapper — a sub-agent's resultBlock, a job's jobBlock (jobs.go) — in the
+// order they finished, a blank line between two, the whole redacted once
 // more with a replacer built now (astra r14, major 3): a result was redacted
 // when it became deliverable, but a key the session learned while it waited
 // must not reach the model. Their usage is merged into a row per model, the
@@ -529,7 +590,12 @@ func (r *subagents) deliver(got []taken) *batch {
 	usages := make([]*tool.ChildUsage, 0, len(got))
 	for i, t := range got {
 		out.ids = append(out.ids, t.id)
-		blocks[i] = resultBlock(t.id, t.typ, t.status, red.String(t.text))
+		switch t.kind {
+		case kindJob:
+			blocks[i] = jobBlock(t.id, t.status, t.attrs, red.String(t.text))
+		default:
+			blocks[i] = resultBlock(t.id, t.typ, t.status, red.String(t.text))
+		}
 		if u := t.usage; u != nil {
 			usages = append(usages, &tool.ChildUsage{Provider: red.String(u.Provider), Model: red.String(u.Model),
 				WireModel: red.String(u.WireModel), Usage: u.Usage})
@@ -586,21 +652,34 @@ func (r *subagents) commitIDs(turn int, entry string, ids []string) {
 // commitCalls commits the results turn's agent_output calls among calls
 // reserved (commit): the calls whose own result part is in the tool entry the
 // append wrote, and no other — not merely because some tool entry was saved.
+//
+// The same calls' reads of a running job (bash_output, plan 033 §3.8) are
+// committed with them: each job's read cursor moves to the furthest a written
+// call read to.
 func (r *subagents) commitCalls(turn int, entry string, calls []string) {
 	r.commit(turn, entry, func(res *bgResult) bool { return res.own.call != "" && slices.Contains(calls, res.own.call) })
+	if r == nil {
+		return
+	}
+	r.regMu.Lock()
+	r.commitReadsLocked(turn, calls)
+	r.regMu.Unlock()
 }
 
 // restoreTurn gives back every reservation turn still holds, once it has
 // ended: no append wrote it. It goes back to what it was — pending, or
 // suspended — unless the turn was a wake, when it is suspended whatever it
 // was (§3.11: no automatic retry loop). It reports whether one went back to
-// pending, for the caller to say so (OnPending) once it holds no lock.
+// pending, for the caller to say so (OnPending) once it holds no lock. The
+// reads of a running job the turn made and no append wrote are forgotten
+// (jobs.go): the next read shows that output again.
 func (r *subagents) restoreTurn(turn int) (gave bool) {
 	if r == nil {
 		return false
 	}
 	r.regMu.Lock()
 	defer r.regMu.Unlock()
+	r.forgetReadsLocked(turn)
 	for _, res := range r.results {
 		if res.state != resultReserved || res.own.turn != turn {
 			continue
@@ -631,7 +710,8 @@ func (r *subagents) restoreTurn(turn int) (gave bool) {
 //   - running: the call waits — holding no lock, and never cancelling the
 //     child — for it to end, for call.Wait, for its own cancel or for the
 //     session's closing, and then judges again; a child still running when
-//     the wait runs out is not an error.
+//     the wait runs out is not an error. In a step that also stops a job it
+//     does not wait, and says so (stopAnnounced, plan 033 C10r).
 //
 // Whatever it answers — the result, a fixed reply, a refusal or aborted — is
 // redacted last with a replacer built as it returns (union), over the keys
@@ -667,14 +747,20 @@ func (r *subagents) output(ctx context.Context, call tool.OutputCall) tool.Resul
 	if link == nil {
 		return tool.Result{Text: subagentNoTurn, IsError: true, Class: tool.ClassToolError}
 	}
-	own := owner{turn: link.number, step: stepOfCall(call.CallID), call: call.CallID, wake: link.wake}
+	own := link.callOwner(call.CallID)
+	// A step that stops a job waits for nothing (stopAnnounced, plan 033
+	// C10r): its bash_stop must not queue behind this call in Fantasy's slots.
+	skipped := call.Wait > 0 && r.stopping(own)
+	if skipped {
+		call.Wait = 0
+	}
 	closing := parent.tools.closing
 	var timeout <-chan time.Time
 	for {
 		r.regMu.Lock()
 		res := r.results[call.ID]
-		if res == nil {
-			waiting := r.undeliveredLocked()
+		if res == nil || res.kind != kindSubagent {
+			waiting := r.undeliveredLocked(kindSubagent)
 			r.regMu.Unlock()
 			return unknownSubagent(parent.quoteRaw(call.ID), waiting)
 		}
@@ -689,12 +775,16 @@ func (r *subagents) output(ctx context.Context, call tool.OutputCall) tool.Resul
 			got := r.reserveLocked(res, own)
 			r.regMu.Unlock()
 			// The usage's names are redacted with the text, by Output's last
-			// replacer; the copy it makes leaves the result's own alone.
-			return tool.Result{Text: r.deliver([]taken{got}).text, Child: got.usage}
+			// replacer; the copy it makes leaves the result's own alone. The
+			// call saw the child end (Observed, plan 033 P13).
+			return tool.Result{Text: r.deliver([]taken{got}).text, Child: got.usage, Observed: true}
 		}
 		done := res.done
 		r.regMu.Unlock()
 		still := tool.Result{Text: fmt.Sprintf(outputStillRunning, call.ID)}
+		if skipped {
+			still.Text += stopStepNoWait
+		}
 		if call.Wait <= 0 {
 			return still
 		}
@@ -709,6 +799,9 @@ func (r *subagents) output(ctx context.Context, call tool.OutputCall) tool.Resul
 		select {
 		case <-done:
 		case <-timeout:
+			// The call waited out its whole wait (Observed, plan 033 P13): an
+			// identical call after it is not a loop's.
+			still.Observed = true
 			return still
 		case <-ctx.Done():
 			return abortedResult()
@@ -721,12 +814,13 @@ func (r *subagents) output(ctx context.Context, call tool.OutputCall) tool.Resul
 	}
 }
 
-// undeliveredLocked are the ids of the background children whose results
-// have not been delivered, in launch order. regMu is held.
-func (r *subagents) undeliveredLocked() []string {
+// undeliveredLocked are the ids of the background results of kind whose
+// results have not been delivered, in launch order: agent_output names the
+// sub-agents', bash_output and bash_stop the jobs'. regMu is held.
+func (r *subagents) undeliveredLocked(kind resultKind) []string {
 	var ids []string
 	for _, id := range r.order {
-		if r.results[id].state != resultCommitted {
+		if res := r.results[id]; res.kind == kind && res.state != resultCommitted {
 			ids = append(ids, id)
 		}
 	}
@@ -773,7 +867,10 @@ func stepOfCall(id string) int {
 // every result that was never committed is reported, once, as a
 // SubagentUndelivered through the session's sink: the terminal owner of what
 // those children spent (astra r14, major 4), since nothing will deliver them
-// now. A nil runner has none.
+// now. A nil runner has none. Every job's goroutine is joined with them — its
+// command killed at once by the closing channel signalClose closed — and a
+// job's result is marked reported and given to nobody: a job spent nothing,
+// and its JobFinished is its record (plan 033 §3.8).
 //
 // Each report is redacted as it is emitted, every string of it, with a
 // replacer built then (union), outside regMu (astra r15, finding 3): what the
@@ -795,6 +892,9 @@ func (r *subagents) closeBackground() {
 			continue
 		}
 		res.reported = true
+		if res.kind == kindJob {
+			continue // a job spent nothing: its JobFinished, journalled, is its record (plan 033 §3.8)
+		}
 		out = append(out, taken{id: res.id, typ: res.typ, usage: res.usage})
 	}
 	r.regMu.Unlock()

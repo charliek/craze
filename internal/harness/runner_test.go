@@ -181,7 +181,8 @@ func TestToolLoop(t *testing.T) {
 		replay[5] != "assistant: done" || replay[6] != "user: thanks" {
 		t.Fatalf("the next turn's history:\n%s", strings.Join(replay, "\n"))
 	}
-	// Every request offered the profile's tools, in its order.
+	// Every request offered the profile's tools, in its order, less the job
+	// tools: the session runs no background jobs (plan 033 X101).
 	for i, c := range calls {
 		var names []string
 		for _, tl := range c.Tools {

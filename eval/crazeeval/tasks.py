@@ -32,6 +32,10 @@ CHECK_TYPES = {
 
 
 TEST_RUNNERS = ("pytest", "go")
+# Where an executed_code check's evidence may show (its ``evidence_in``; checks.py):
+# the call's command, the result it returned, or a file an earlier call wrote that the
+# command names.
+EVIDENCE_PLACES = ("command", "result", "file")
 FULL_SHA = re.compile(r"^[0-9a-f]{40}$")
 
 
@@ -143,6 +147,14 @@ def load_task(d: Path) -> Task:
             # Without evidence any code-running call passes, `python --version` included
             # (review r1-c2 §4).
             raise TaskError(f"{tid}: {c['name']}: executed_code needs evidence regexes")
+        if c["type"] == "executed_code" and "evidence_in" in c:
+            where = c["evidence_in"]
+            # Each element is checked as one of the place names before anything hashes it
+            # (plan 033 C11r3, review r10 P3): a nested array or table is valid TOML, and
+            # set() over it raised TypeError instead of this error.
+            places_ok = isinstance(where, list) and all(isinstance(x, str) and x in EVIDENCE_PLACES for x in where)
+            if not places_ok or not where:
+                raise TaskError(f"{tid}: {c['name']}: evidence_in must list some of {EVIDENCE_PLACES}")
         if c["type"] == "shared_helper" and not (c.get("callers") and c.get("markers")):
             raise TaskError(f"{tid}: {c['name']}: shared_helper needs callers and markers")
         if c["type"] == "tests":

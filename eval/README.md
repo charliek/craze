@@ -479,7 +479,10 @@ The check types:
   back to the model (`require_result`, on by default: an attempted call is no evidence),
   and which shows one of the `evidence` regexes -- in its command, in its result, or in an
   earlier call that wrote a file the command runs. `evidence` is required: without it
-  `python --version` would pass.
+  `python --version` would pass. `evidence_in` narrows those places (any of `command`,
+  `result`, `file`; all by default): `["result"]` counts only what the call returned, so a
+  comment or an expected value in the command's own text, or a file written earlier, is
+  no evidence, and a request that failed shows none (T-D1, T-D2).
 
 The validators, per category, are run by `crazeeval validate` (§3.1.5):
 

@@ -102,9 +102,15 @@ type ChildOptions struct {
 // because depth is 1 by construction (§3.2, crush's structural shape), and
 // agent_output with it, since a child starts no background sub-agent whose
 // result it could read (§3.11); the todo list and the two tools that block on
-// a person, because a child has neither and nobody to ask. agent is filtered
-// by name before any profile registers it, so the rule holds the day one does.
-var childWithheld = []string{tool.AgentTool, tool.AgentOutputTool, "todo_write", "ask_user_question", tool.ExitPlanModeTool}
+// a person, because a child has neither and nobody to ask; and bash_output and
+// bash_stop, since a child runs no background job (plan 033 P11, D-59: its
+// bash offers no run_in_background, X101). agent is filtered by name before
+// any profile registers it, so the rule holds the day one does; the two job
+// tools are withheld here as well as by openTools' rule for a session without
+// jobs (tool.JobsAware) so that what the agent tool's description lists a
+// type's tools as (toolset.offered) is what it was.
+var childWithheld = []string{tool.AgentTool, tool.AgentOutputTool, "todo_write", "ask_user_question", tool.ExitPlanModeTool,
+	tool.BashOutputTool, tool.BashStopTool}
 
 // keeps reports whether a session opened with c offers the tool with id:
 // every tool for an ordinary session (c nil), and for a child every tool but

@@ -11,7 +11,9 @@
 // the accidental, verbatim disclosure — `env`, `cat`, a grep hit, a diff.
 //
 // A Replacer is immutable and safe for concurrent use. A Writer, which
-// redacts a stream, belongs to one goroutine at a time, like a bufio.Writer.
+// redacts a stream, belongs to one goroutine at a time, like a bufio.Writer:
+// its Widen too, which a caller that widens a stream from another goroutine
+// serializes with the writes itself (a bash job's stream, plan 033 C10r).
 //
 // The package imports only the standard library, so it can sit under the
 // tool framework, which must not link Fantasy or the rest of craze.
@@ -79,11 +81,7 @@ type Replacer struct {
 // refuses both before they get here (modeltable).
 func New(keys ...string) *Replacer {
 	r := &Replacer{keys: slices.DeleteFunc(slices.Clone(keys), func(k string) bool { return k == "" })}
-	// Longest first, then bytewise, so the order and therefore every
-	// decision is the same whatever order the keys came in.
-	slices.SortFunc(r.keys, func(a, b string) int {
-		return cmp.Or(cmp.Compare(len(b), len(a)), strings.Compare(a, b))
-	})
+	slices.SortFunc(r.keys, keyOrder)
 	r.keys = slices.Compact(r.keys)
 	for _, k := range r.keys {
 		r.byFirst[k[0]] = append(r.byFirst[k[0]], k)
@@ -97,6 +95,44 @@ func New(keys ...string) *Replacer {
 // empty reports whether r redacts nothing, which makes every method a
 // pass-through.
 func (r *Replacer) empty() bool { return r == nil || len(r.keys) == 0 }
+
+// Union returns a Replacer over r's keys and o's together. It builds nothing
+// when one side already holds every key of the other: it returns r when o
+// adds no key, and o when o holds all of r's. Either may be nil. A Replacer
+// only ever widens through it, so applying a series of Unions in any order —
+// two updates crossing on their way to one stream (Writer.Widen) — ends on
+// the same set.
+func (r *Replacer) Union(o *Replacer) *Replacer {
+	switch {
+	case r != nil && r.covers(o):
+		return r // the same keys or more: keep the one the caller has
+	case o.covers(r):
+		return o
+	}
+	return New(append(slices.Clone(r.keys), o.keys...)...)
+}
+
+// covers reports whether r redacts every key o does: o's keys are all r's.
+// Every Replacer covers an empty one, a nil one included.
+func (r *Replacer) covers(o *Replacer) bool {
+	if o.empty() {
+		return true
+	}
+	if r.empty() {
+		return false
+	}
+	for _, k := range o.keys {
+		if _, found := slices.BinarySearchFunc(r.keys, k, keyOrder); !found {
+			return false
+		}
+	}
+	return true
+}
+
+// keyOrder is the order a Replacer keeps its keys in: longest first, then
+// bytewise, so the order and therefore every decision is the same whatever
+// order the keys came in.
+func keyOrder(a, b string) int { return cmp.Or(cmp.Compare(len(b), len(a)), strings.Compare(a, b)) }
 
 // String returns s with every key replaced. When s holds no key it returns s
 // itself, without allocating.
@@ -151,14 +187,20 @@ func (r *Replacer) scan(dst, src []byte, end, run int) ([]byte, int) {
 var ErrClosed = errors.New("redact: write after close")
 
 // Writer redacts a stream on its way to an underlying writer. It holds back
-// the last len(longest key)-1 bytes it has been given, because they could be
-// the start of a key the next Write completes; Close writes them out. So a
+// the end of what it has been given that could be the start of a key the
+// next Write completes — the longest tail that is a proper prefix of a key,
+// so at most len(longest key)-1 bytes, and none at all when the stream so far
+// ends in nothing a key begins with (held) — and Close writes it out. So a
 // key split across any number of writes is still caught, and the bytes that
 // reach the underlying writer are exactly String of everything written.
 //
 // There is no Flush: writing the held-back bytes before the stream ends
-// could emit the first half of a key. A bash tool's progress snapshots
-// therefore lag the command's output by at most that many bytes.
+// could emit the first half of a key. A bash tool's live output — its
+// progress snapshots, and a background job's reads (plan 033 §3.7) — lags the
+// command's output only by such a tail, for each Writer the output passes
+// through (bash has two, around its escape-sequence stripper): a server's
+// last line, printed before it goes quiet, reaches a read unless it ends in
+// the first bytes of a key.
 type Writer struct {
 	r      *Replacer
 	w      io.Writer
@@ -194,7 +236,7 @@ func (w *Writer) Write(p []byte) (int, error) {
 		return len(p), nil
 	}
 	w.buf = append(w.buf, p...)
-	end := len(w.buf) - (w.r.longest - 1)
+	end := len(w.buf) - w.r.held(w.buf)
 	if end <= 0 {
 		return len(p), nil
 	}
@@ -202,6 +244,55 @@ func (w *Writer) Write(p []byte) (int, error) {
 		return 0, err
 	}
 	return len(p), nil
+}
+
+// held is how many bytes at the end of buf a Writer must hold back: the
+// longest tail of buf, shorter than the longest key, that is a proper prefix
+// of a key — the start of a key the next Write could complete — or 0.
+// Everything before it can be decided now, which is scan's streaming rule
+// met another way: an occurrence that starts there either lies whole in buf,
+// where scan finds it, or runs past its end, and then buf from its start is a
+// proper prefix of that key and a tail at least that long would have been
+// held. The same goes for a longer key starting where a shorter one is whole:
+// it is found, or its start is held. So the output is String's still, for
+// every way of cutting the stream (TestWriterEverySplitPoint,
+// TestRandomSplitsMatchStringAndReference, FuzzWriterMatchesString).
+//
+// A key's bytes after its first are compared only where its first byte
+// stands (byFirst), and each comparison stops at the first difference, so
+// against keys of random characters this costs a few comparisons per
+// position of the tail examined.
+func (r *Replacer) held(buf []byte) int {
+	for n := min(len(buf), r.longest-1); n > 0; n-- {
+		tail := buf[len(buf)-n:]
+		for _, k := range r.byFirst[tail[0]] {
+			if len(k) > n && k[:n] == string(tail) {
+				return n
+			}
+		}
+	}
+	return 0
+}
+
+// Widen makes w redact o's keys as well as its own (Union) in everything it
+// has not yet decided: the tail it holds back now and every byte written
+// after. It writes nothing and drops nothing — the held tail stays held, and
+// the next Write or Close decides it with the wider set, as one stream — so a
+// key learned while a stream runs is caught whole when every byte of it comes
+// after the Widen, even when its first bytes were being held back as the
+// start of a key the Writer knew already (plan 033 C10r, review r7 finding
+// 9). Holding more never emits: every tail the old set held is still the
+// start of a key in the wider one, and the wider set may hold a longer tail
+// at the next Write, which is what keeps a new key split across two writes
+// together.
+//
+// What it cannot reach is what was decided before it: bytes already written
+// to the underlying writer stay as they were, so a key whose first bytes the
+// stream had passed on before the Widen leaks those bytes. It may be called
+// any number of times, before the first Write or after Close (a no-op then),
+// and never concurrently with Write or Close.
+func (w *Writer) Widen(o *Replacer) {
+	w.r = w.r.Union(o)
 }
 
 // Close writes out the held-back bytes, the stream having ended: a key's

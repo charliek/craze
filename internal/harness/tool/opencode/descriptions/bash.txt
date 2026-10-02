@@ -1,4 +1,4 @@
-Executes a given bash command in a persistent shell session with optional timeout, ensuring proper handling and security measures.
+Executes a given bash command with optional timeout, ensuring proper handling and security measures. Each call runs in a fresh shell; the working directory does not persist.
 
 Be aware: OS: ${os}, Shell: ${shell}
 
@@ -26,8 +26,11 @@ Before executing the command, please follow these steps:
 
 Usage notes:
   - The command argument is required.
-  - You can specify an optional timeout in milliseconds. If not specified, commands will time out after ${defaultTimeoutMs}ms. The timeout cannot exceed 600000ms (10 minutes); a longer timeout is reduced to 600000ms.
-  - When the command returns, every process still in its process group is killed, so nothing it runs in the background (for example, with `&` or `nohup`) outlives the call; a process that starts its own session or process group (setsid, setpgid, `set -m`) escapes this.
+  - You can specify an optional timeout in milliseconds. If not specified, commands will time out after ${defaultTimeoutMs}ms. The timeout cannot exceed 600000ms (10 minutes); a longer timeout is reduced to 600000ms.{{jobs}} When the session supports it, a command still running at its timeout is not stopped: it is moved to the background as a job, the call returns its output so far and the job's id, and its result is delivered to you when it finishes.{{/jobs}}
+  - When the command returns, every process still in its process group is killed, so nothing it runs in the background (for example, with `&` or `nohup`) outlives the call; a process that starts its own session or process group (setsid, setpgid, `set -m`) escapes this.{{jobs}} `&` and `nohup` are not the way to keep a command running: use `run_in_background` when the session supports it.
+  - When the session supports it, set `run_in_background` for a command that keeps running, such as a dev server, a watch command or `tail -f`: the call returns at once with the job's id, `timeout` is then the job's limit (default 1800000ms, at most 7200000ms), and the job's result is delivered to you when it finishes; do not poll it or sleep waiting for it. Read its output so far with bash_output, and stop it with bash_stop. Do not use it for builds, tests or git commands whose result you need now: run those in the foreground.
+  - When the session supports it, stop the background jobs you no longer need with bash_stop before you finish.{{/jobs}}
+  - Commands run with no terminal: editors and pagers do not open, `git commit` needs `-m`, and colour is off.
   - If the output exceeds ${maxLines} lines or ${maxBytes} bytes, it will be truncated and the output will be written to a file when it can be. The result names the file when there is one, and says when the file holds only part of the output. When the result gives a path, you can use Read with offset/limit to read specific sections or Grep to search the saved content. Do NOT use `head`, `tail`, or other truncation commands to limit output; the output will already be captured to a file for more precise searching whenever it can be.
 
   - Avoid using Bash with the `find`, `grep`, `cat`, `head`, `tail`, `sed`, `awk`, or `echo` commands, unless explicitly instructed or when these commands are truly necessary for the task. Instead, always prefer using the dedicated tools for these commands:

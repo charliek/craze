@@ -67,6 +67,14 @@ func TestModeGateAllowsAgentInEveryMode(t *testing.T) {
 		{name: "a read", req: Request{Tool: "read", Kind: KindRead, ReadOnly: true}},
 		{name: "exit_plan_mode", req: Request{Tool: ExitPlanModeTool, Kind: KindAsk, ReadOnly: true},
 			deny: map[string]string{ModeAgent: planDisabledText, ModeAsk: planDisabledText}},
+		// plan 033 §3.7: bash_stop is allowed by name, as agent is — it only
+		// ends what the session started — where "a command" above, the same
+		// kind and not ReadOnly either, is ask mode's to refuse; bash_output is
+		// ReadOnly, and needs no rule.
+		{name: "bash_stop", req: Request{Tool: BashStopTool, Kind: KindExecute}},
+		{name: "a case-changed name is not bash_stop", req: Request{Tool: "Bash_Stop", Kind: KindExecute},
+			deny: map[string]string{ModeAsk: askRejectedText}},
+		{name: "bash_output", req: Request{Tool: BashOutputTool, Kind: KindRead, ReadOnly: true}},
 	}
 	for _, mode := range []string{ModeAgent, ModePlan, ModeAsk} {
 		for _, tc := range cases {

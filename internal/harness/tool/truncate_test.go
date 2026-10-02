@@ -202,6 +202,94 @@ func TestSpillRefusals(t *testing.T) {
 	f.Close()
 }
 
+// TestSpillFileOfAMarker (plan 033 C11r3, review r10 findings a2 and b):
+// SpillFile names the one file a job's marker line names — the plain name or
+// a suffixed one, each giving its own file, never the other — when it is a
+// regular file in the spill directory, and nothing else: not a symlink — out
+// of the directory, or to a file in it — or a directory at the name, not a name that is missing, not another id's file
+// (one whose id the given id is a prefix of included), not a suffix OpenSpill
+// never makes, not a name with a separator or a parent, not a file reached
+// through a symlinked spill directory, and nothing for an id OpenSpill would
+// refuse. The files OpenSpill itself creates, named by their own base names,
+// are the positive controls.
+func TestSpillFileOfAMarker(t *testing.T) {
+	home := t.TempDir()
+	dir := filepath.Join(home, SpillDir)
+	if got := SpillFile(home, "t4.2.1", "tool_t4.2.1"); got != "" {
+		t.Fatalf("no spill directory: SpillFile = %q", got)
+	}
+	open := func(id string) string {
+		t.Helper()
+		f, err := OpenSpill(home, id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		f.Close()
+		return f.Name()
+	}
+	plain := open("t4.2.1")
+	suffixed := open("t4.2.1") // the plain name is taken: a suffixed one
+	if plain != filepath.Join(dir, "tool_t4.2.1") || filepath.Dir(suffixed) != dir {
+		t.Fatalf("premise: OpenSpill named %s and %s", plain, suffixed)
+	}
+	for _, p := range []string{plain, suffixed} {
+		if got := SpillFile(home, "t4.2.1", filepath.Base(p)); got != p {
+			t.Fatalf("SpillFile(%s) = %q; want %s", filepath.Base(p), got, p)
+		}
+	}
+	other := open("t4.2.10")
+	open("t4.2.1.1")
+	outside := filepath.Join(t.TempDir(), "passwd")
+	if err := os.WriteFile(outside, []byte("root:x:0:0"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(dir, "tool_t4.2.1-0123abcd")); err != nil {
+		t.Fatal(err)
+	}
+	// A symlink that stays in the directory, which the Root would follow.
+	if err := os.Symlink(filepath.Base(other), filepath.Join(dir, "tool_t4.2.1-22222222")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(dir, "tool_t4.2.1-fedcba98"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	notItsNames := []string{"tool_t4.2.1-ABCDEF12", "tool_t4.2.1-0123abc", "tool_t4.2.1-0123abcde", "tool_t4.2.1x", "t4.2.1"}
+	for _, name := range notItsNames {
+		if err := os.WriteFile(filepath.Join(dir, name), nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	refused := []string{
+		"tool_t4.2.1-0123abcd", // a symlink, to a file outside
+		"tool_t4.2.1-22222222", // a symlink, to another id's file beside it
+		"tool_t4.2.1-fedcba98", // a directory
+		"tool_t4.2.1-11111111", // missing
+		filepath.Base(other),   // another id's
+		"tool_t4.2.1.1",        // another id's
+		// With a separator or a parent, or none at all.
+		"../" + SpillDir + "/tool_t4.2.1", "./tool_t4.2.1", "/tool_t4.2.1", plain, outside, "", ".", "..",
+	}
+	for _, name := range append(refused, notItsNames...) {
+		if got := SpillFile(home, "t4.2.1", name); got != "" {
+			t.Errorf("SpillFile(%q) = %q; want none", name, got)
+		}
+	}
+	for _, id := range []string{"", "..", "../tool-output/t4.2.1", "a/b"} {
+		if got := SpillFile(home, id, "tool_"+id); got != "" {
+			t.Errorf("SpillFile(id %q) = %q; want none", id, got)
+		}
+	}
+
+	// A symlinked spill directory is never read through.
+	linked := t.TempDir()
+	if err := os.Symlink(dir, filepath.Join(linked, SpillDir)); err != nil {
+		t.Fatal(err)
+	}
+	if got := SpillFile(linked, "t4.2.1", "tool_t4.2.1"); got != "" {
+		t.Fatalf("through a symlinked spill directory: SpillFile = %q", got)
+	}
+}
+
 // atSpillCheck runs f in the window between openSpillDir's check of the
 // directory and its open of it, for the rest of the test.
 func atSpillCheck(t *testing.T, f func()) {

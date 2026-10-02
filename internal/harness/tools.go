@@ -104,10 +104,22 @@ type toolset struct {
 	// nothing can see the toolset's pointer and the dispatcher's disagree. A
 	// key is only ever added, and a Replacer is immutable: they are swapped,
 	// never changed.
-	mu      sync.Mutex // guards keys, pending, learned, and refusing's writes
+	mu      sync.Mutex // guards keys, pending, streams, learned, and refusing's writes
 	keys    []string
 	pending *redact.Replacer // resolved, waiting for the next turn (adopt)
 	red     atomic.Pointer[redact.Replacer]
+
+	// streams are the output streams of the commands running in this
+	// session's bash calls and jobs, as the bash tool tracks them
+	// (tool.Jobs.Track, plan 033 C10r, review r7 finding 9), by a number of
+	// track's: each is widened to the session's widest key set when it is
+	// tracked, and again by every extend, under mu — so a stream tracked
+	// while a key is learned is widened by one or the other, never missed.
+	// Only a session that runs jobs has any (Env.Jobs). The lock order is
+	// mu, then a stream's own lock, a leaf held for one write's memory work
+	// (opencode's modelStream).
+	streams    map[uint64]tool.KeyedStream
+	nextStream uint64
 
 	// learned is every stored key learn has accepted, in the order it first
 	// did, each once — the ones the session already knew included, since a
@@ -186,6 +198,11 @@ type toolset struct {
 // the session's sub-agent runner, which the agent tool hands its calls to
 // (Env.Subagents); nil for a child, whose Env.Subagents stays a nil interface.
 //
+// A session that runs no background jobs — every child, and one whose runner
+// is not background (headless) — is offered each tool.JobsAware tool's
+// variant in its place, or nothing where it has none: no jobs surface at all
+// (plan 033 X101).
+//
 // ref is how the profile is chosen: a new session's starting model
 // (modelRef), or, for a resumed one, the profile its transcript's header names
 // and nothing else — the tools and the prompt are that profile's whichever
@@ -261,14 +278,31 @@ func openTools(home, workspace, mode string, asker tool.Asker, table *modeltable
 			}
 		}
 	}
+	// Whether the session runs background jobs (plan 033 §3.8, P11): only one
+	// that runs background work at all (Options.Background — an interactive
+	// one, which something wakes) and is not a sub-agent, whose subs is nil.
+	// It is fixed here, before a spec is read, since it decides what bash and
+	// its job tools offer (tool.JobsAware, X101), and the env below has Jobs
+	// by the same value — what the model is offered and what runs never
+	// disagree.
+	runsJobs := subs != nil && subs.background
 	// tools are the profile's tools this session offers: all of them, or a
-	// child's filtered set. The same list feeds the specs below and the
-	// dispatcher, so a tool the filter drops is neither offered nor run.
+	// child's filtered set, each as the session offers it — a session that
+	// runs no jobs gets a JobsAware tool's variant in its place, or nothing
+	// (bash without run_in_background, no bash_output or bash_stop: X101). The
+	// same list feeds the specs below and the dispatcher, so a tool the filter
+	// drops is neither offered nor run.
 	var tools []tool.Tool
 	for _, t := range p.Tools {
 		s := t.Spec()
 		if !child.keeps(s.ID) {
 			continue
+		}
+		if j, ok := t.(tool.JobsAware); ok && !runsJobs {
+			if t = j.WithoutJobs(); t == nil {
+				continue
+			}
+			s = t.Spec()
 		}
 		// The agent tool is offered with this session's agent types and models
 		// after its own description (plan 026 §3.3). It is wrapped before its
@@ -399,6 +433,12 @@ func openTools(home, workspace, mode string, asker tool.Asker, table *modeltable
 	// sub-agents are not available (plan 026 §3.2).
 	if subs != nil {
 		env.Subagents = subs
+	}
+	// And for the jobs (runsJobs above). Anywhere else a timeout kills, as
+	// D-59 has it for background sub-agents, and a run_in_background the
+	// model sends though its bash does not offer it runs in the foreground.
+	if runsJobs {
+		env.Jobs = jobs{r: subs}
 	}
 	ts.d, err = tool.NewDispatcher(tool.Options{Tools: tools, Gate: ts.modeGate, Env: env})
 	if err != nil {
@@ -548,10 +588,45 @@ func (ts *toolset) redactor() *redact.Replacer { return ts.red.Load() }
 func (ts *toolset) widest() *redact.Replacer {
 	ts.mu.Lock()
 	defer ts.mu.Unlock()
+	return ts.widestLocked()
+}
+
+// widestLocked is widest under ts.mu.
+func (ts *toolset) widestLocked() *redact.Replacer {
 	if ts.pending != nil {
 		return ts.pending
 	}
 	return ts.red.Load()
+}
+
+// track is tool.Jobs.Track (jobs.go): s registered, and widened to every key
+// the session knows now — the redactor its call was given may be an earlier
+// turn's, or narrower than one a switch has prepared — in one section with the
+// registration, so a key learned meanwhile reaches s through this widening or
+// through extend's. untrack forgets it; a second call does nothing.
+//
+// It covers the keys the session itself knows (widest), not those only one of
+// its sub-agents knows (Session.Redact's wider set: a key a child found in the
+// environment as it opened, which the session never switched to). Every text
+// a job gives the model goes through that wider set as it is made (union,
+// jobs.go), so such a key is caught there whole; one a job printed split
+// across two reads is not — a residual of plan 033 C10r's, as narrow as a key
+// the environment gained mid-session that only a sub-agent ever used.
+func (ts *toolset) track(s tool.KeyedStream) (untrack func()) {
+	ts.mu.Lock()
+	defer ts.mu.Unlock()
+	if ts.streams == nil {
+		ts.streams = map[uint64]tool.KeyedStream{}
+	}
+	ts.nextStream++
+	id := ts.nextStream
+	ts.streams[id] = s
+	s.Widen(ts.widestLocked())
+	return func() {
+		ts.mu.Lock()
+		defer ts.mu.Unlock()
+		delete(ts.streams, id)
+	}
 }
 
 // knownKeys are the keys widest redacts — every key the session knows — as a
@@ -628,10 +703,22 @@ func (ts *toolset) frozenHolds(keys []string) bool {
 // extend adds keys new to the session — added, which resolve or learn found
 // in none of ts.keys — and prepares the redactor over all of them for the
 // next turn to adopt; it never installs one. Under ts.mu.
+//
+// It is the one place the session's key set grows, and so where every
+// tracked stream — a running command's, a background job's above all — is
+// widened with it at once, not at the next turn (track; plan 033 C10r): a job
+// prints for longer than any turn lasts, and what its stream passes on
+// unredacted reaches bash_output's reads and the spill file in pieces no
+// whole-text pass matches. Whatever else grows the set — ChatGPT's tokens as
+// they are minted (AddSecrets, plan 033 §3.12) — comes through here too, and
+// so reaches the streams the same way.
 func (ts *toolset) extend(added []string) {
 	ts.keys = append(ts.keys, added...)
 	slices.Sort(ts.keys)
 	ts.pending = redact.New(ts.keys...)
+	for _, s := range ts.streams {
+		s.Widen(ts.pending)
+	}
 }
 
 // learn adds stored keys to the session's (plan 031 §3.8): vals, each already

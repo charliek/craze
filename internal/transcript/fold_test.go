@@ -714,13 +714,15 @@ func TestSanitizeLineFastPathMatchesTheFullOne(t *testing.T) {
 
 // TestForeignTurnReasonPicksNote (plan 026 §3.11): the note a foreign turn's
 // start draws is worded by the bracket's Reason — the native wake's own for
-// agent.ReasonSubagentWake, today's for "" — and a reason this build does not
-// know (the session-control session's condition: S2 publishes reason as an
-// open string) renders today's wording rather than nothing or a failure. The
-// ending carries no note whatever its reason.
+// agent.ReasonSubagentWake and, for a wake delivering background bash jobs'
+// results alone, agent.ReasonJobWake (plan 033 §3.8), today's for "" — and a
+// reason this build does not know (the session-control session's condition:
+// S2 publishes reason as an open string) renders today's wording rather than
+// nothing or a failure. The ending carries no note whatever its reason.
 func TestForeignTurnReasonPicksNote(t *testing.T) {
 	for _, c := range []struct{ reason, want string }{
 		{agent.ReasonSubagentWake, NoteSubagentWake},
+		{agent.ReasonJobWake, NoteJobWake},
 		{"", NoteForeignTurn},
 		{"a_reason_from_a_newer_build", NoteForeignTurn},
 	} {
@@ -739,6 +741,9 @@ func TestForeignTurnReasonPicksNote(t *testing.T) {
 	}
 	if NoteSubagentWake != "sub-agent finished — the agent continues" {
 		t.Fatalf("NoteSubagentWake = %q", NoteSubagentWake)
+	}
+	if NoteJobWake != "background command finished — the agent continues" || agent.ReasonJobWake != "job_wake" {
+		t.Fatalf("NoteJobWake = %q, ReasonJobWake = %q", NoteJobWake, agent.ReasonJobWake)
 	}
 }
 

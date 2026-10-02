@@ -34,7 +34,26 @@ const (
 	endExit    ending = iota // the leader exited by itself
 	endTimeout               // its timeout passed first
 	endAbort                 // its call was cancelled first
+	// endPromote: its timeout passed and it was moved to the background
+	// (plan 033 §3.8). supervise returns it having sent no signal and kept
+	// the release channel open: the command, its group and its reaping are
+	// handed on, whole, to a second supervise under the job's context.
+	endPromote
 )
+
+// promotion is how supervise may hand a command that reaches its timeout to
+// the background instead of stopping it (plan 033 §3.8). nil never does.
+type promotion struct {
+	// try asks for a job slot (tool.Jobs.Reserve) and reports whether one was
+	// given. It is called at most once, at the timeout, and only for a call
+	// that is neither cancelled nor closing; false kills the command as a
+	// timeout always has (P26).
+	try func() bool
+	// expiring, a test seam, runs as the timeout fires, before supervise
+	// reads anything: a test lands a cancel, a close or the leader's exit
+	// there, so the race it means is the one that happens. nil in production.
+	expiring func()
+}
 
 // group is a started command: the shell craze ran, and the session and the
 // process group it leads. Setsid made the shell the leader of a new session
@@ -137,6 +156,27 @@ func waitNoReap(pid int) bool {
 	}
 }
 
+// promoted is supervise's question at the timeout (see there): the call
+// neither cancelled nor closing, the leader still running, and a job slot
+// given. The slot is asked for last, so one is taken only for a command that
+// will be handed on.
+func (g *group) promoted(ctx context.Context, closing <-chan struct{}, promote *promotion) bool {
+	if ctx.Err() != nil || tool.SessionClosing(ctx, closing) || isClosed(g.exited) {
+		return false
+	}
+	return promote.try()
+}
+
+// isClosed reports whether ch is closed, without waiting; a nil ch never is.
+func isClosed(ch <-chan struct{}) bool {
+	select {
+	case <-ch:
+		return true
+	default:
+		return false
+	}
+}
+
 // signal sends sig to every process in the command's group. Its error —
 // ESRCH once the group is empty — is nothing to act on.
 func (g *group) signal(sig syscall.Signal) { _ = syscall.Kill(-g.pid, sig) }
@@ -182,14 +222,38 @@ func (g *group) terminate() {
 // the group: one that called setsid (setsid(1), a daemon) or setpgid (a
 // shell's job control, `set -m`) escapes, as it does internal/acp's group
 // kill (plan 019 §9).
-func (g *group) supervise(ctx context.Context, closing <-chan struct{}, timeout time.Duration, output <-chan struct{}) (why ending, reaped bool) {
+//
+// # Promotion (plan 033 §3.8)
+//
+// With promote set, the timeout is first a question. When it fires, a call
+// whose context is done or whose session is closing is never promoted — it is
+// stopped as a timeout always was; and a leader that has exited by then —
+// the command ended at the timeout's own instant — is an exit, read as one.
+// Otherwise promote.try asks for a job slot. Refused (the cap, or a close
+// that landed since), the command is stopped as a timeout; given one,
+// supervise returns endPromote at once, having signalled nothing and closed
+// nothing: the leader unreaped, the release channel open, and the timers it
+// set stopped. The caller hands the command on, and a second supervise under
+// the job's context, with no promotion, takes it up where this one stopped —
+// with the same output channel, which may already be closed — and ends it as
+// it would have: its own timeout (the job's limit), its context's cancel (a
+// stop) or the session's close, and D-38's kill of whatever is left in the
+// group once the leader has exited.
+//
+// fire, a test seam, stands in for the timeout's timer: the timeout passes
+// when it fires, whatever timeout says (bashCall's ops.expire). nil in
+// production.
+func (g *group) supervise(ctx context.Context, closing <-chan struct{}, timeout time.Duration, fire <-chan time.Time, output <-chan struct{}, promote *promotion) (why ending, reaped bool) {
 	expiry := time.NewTimer(timeout + timeoutSlack)
 	defer expiry.Stop()
+	if fire == nil {
+		fire = expiry.C
+	}
 	var (
 		exited = g.exited
 		done   = ctx.Done()
 		closed = closing
-		expire = expiry.C
+		expire = fire
 		grace  <-chan time.Time // SIGTERM sent: SIGKILL when it fires
 		limit  <-chan time.Time // the shutdown's deadline: stop waiting, whatever the state, when it fires
 		end    time.Time        // when limit fires
@@ -255,6 +319,18 @@ wait:
 				kill(true) // the grace of a timeout or a cancel
 			}
 		case <-expire:
+			if promote != nil {
+				if promote.expiring != nil {
+					promote.expiring()
+				}
+				if g.promoted(ctx, closing, promote) {
+					return endPromote, false
+				}
+				if isClosed(exited) {
+					expire = nil // an exit at the timeout's instant: read it as one, next time round
+					continue
+				}
+			}
 			stop(endTimeout)
 		case <-grace:
 			kill(false)
