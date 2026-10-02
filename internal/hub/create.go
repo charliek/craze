@@ -210,7 +210,9 @@ func newCreator(h *hub, o Creates) *creator {
 }
 
 // stop is the teardown's cut: every create still in flight stops waiting —
-// it leaves its host as it is — and every waiter stops waiting for it.
+// a host already started is left as it is, one launched but not yet ready is
+// ended (notReady), and none is launched any more (stopping) — and every
+// waiter stops waiting for it.
 func (cr *creator) stop() {
 	cr.once.Do(func() {
 		cr.cancel()
@@ -454,8 +456,12 @@ func createHash(q protocol.CreateParams) string {
 // create alone, never the table, a cached answer or another create. Its
 // failure is the create's answer, kept like any other and freeing its slot as
 // any other does. A check that never returns keeps its create in flight until
-// it does; its waiter is answered by its own deadline (craze new's), and a
-// teardown cuts it as it cuts any create.
+// it does; its waiter is answered by its own deadline (craze new's). A
+// teardown cuts it as it cuts any create — its waiter's connection closes —
+// but a stalled stat cannot be interrupted and outlives the teardown's
+// goroutine; what it can no longer do is launch anything (r41 4): a check
+// that returns once the hub is closing, or once the teardown has cut its
+// create, answers closing and spawns nothing (stopping).
 func (cr *creator) admit(p createReq) (*createCall, *protocol.Error) {
 	cr.mu.Lock()
 	defer cr.mu.Unlock()
@@ -494,9 +500,19 @@ func (cr *creator) admit(p createReq) (*createCall, *protocol.Error) {
 		if perr := createCheck(cr, &p); perr != nil {
 			return createRefusal(perr)
 		}
+		if cr.stopping() {
+			return createRefusal(closingErr())
+		}
 		return cr.h.create(ctx, p)
 	})
 	return c, nil
+}
+
+// stopping reports whether no create may launch a host any more: the hub has
+// decided to close (its lifecycle's closing), or its teardown has cut the
+// creates in flight (stop, which cancels ctx).
+func (cr *creator) stopping() bool {
+	return cr.ctx.Err() != nil || cr.h.life.isClosing()
 }
 
 // createCheck is a new create's check of the world (creator.check): a seam a
@@ -721,14 +737,18 @@ func (h *hub) join(ctx context.Context, id string, e rundir.Entry) createAnswer 
 }
 
 // notReady is a spawned host that gave no usable ready line (failure, why):
-// ended, and a refusal — closing for a create the teardown cut, whose host is
-// left to stop itself (its ready line has nobody to take it).
+// ended and reaped — its agents' record read once (ownedHost) — and a
+// refusal: closing for a create the teardown cut.
 func (h *hub) notReady(tag string, host *ownedHost, failure hostspawn.Failure, why string) createAnswer {
 	var msg string
 	child := host.child
 	switch failure {
 	case hostspawn.Cancelled:
-		h.logf("%s: host pid %d: cut by the teardown before it was ready", tag, child.PID())
+		// Launched as the teardown cut it: ended and reaped here, its
+		// agents' record with it, rather than left to find its ready pipe
+		// gone (r41 4).
+		h.logf("%s: host pid %d: cut by the teardown before it was ready; ending it", tag, child.PID())
+		host.terminate()
 		return createRefusal(closingErr())
 	case hostspawn.Exited:
 		host.settle()

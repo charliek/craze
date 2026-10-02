@@ -1190,7 +1190,6 @@ func TestAStalledWorldCheckHoldsOnlyItsCreate(t *testing.T) {
 	stalled := t.TempDir()
 	entered, release := make(chan struct{}), make(chan struct{})
 	var once sync.Once
-	t.Cleanup(func() { once.Do(func() { close(release) }) })
 	setVar(t, &createCheck, func(cr *creator, p *createReq) *protocol.Error {
 		if p.p.Cwd == stalled {
 			close(entered)
@@ -1198,7 +1197,15 @@ func TestAStalledWorldCheckHoldsOnlyItsCreate(t *testing.T) {
 		}
 		return cr.check(p)
 	})
-	_, s, sock := creating(t, env, nil, always("ok"))
+	rn, s, sock := creating(t, env, nil, always("ok"))
+	// Registered after the fixtures, so it runs before they are taken down
+	// (r41 5a): the held check let go and its execution joined while the hub,
+	// its hosts' command and the seams are still this test's.
+	h := rn.serving(t)
+	t.Cleanup(func() {
+		once.Do(func() { close(release) })
+		joinCreates(t, h)
+	})
 	c := dial(t, sock)
 	c.hello(t)
 	work := t.TempDir()
@@ -1246,8 +1253,112 @@ func TestAnAgentTheHelperCannotRecordIsKilled(t *testing.T) {
 	if kids := sleepChildren(t); len(kids) != 0 {
 		for _, pid := range kids {
 			_ = syscall.Kill(pid, syscall.SIGKILL)
+			reap(pid)
 		}
 		t.Fatalf("the unrecorded agent %v was left running", kids)
+	}
+}
+
+// reap waits for this process's child pid to exit, past an interrupted wait
+// (r41 5b): a killed child is not left a zombie.
+func reap(pid int) {
+	var ws syscall.WaitStatus
+	for {
+		_, err := syscall.Wait4(pid, &ws, 0, nil)
+		if !errors.Is(err, syscall.EINTR) {
+			return
+		}
+	}
+}
+
+// joinCreates waits, within step, until h has no create in flight and every
+// create it keeps has published its answer: each execution has returned.
+func joinCreates(t *testing.T, h *hub) {
+	t.Helper()
+	waitFor(t, "every create's execution to end", func() bool {
+		h.life.mu.Lock()
+		n := h.life.creates
+		h.life.mu.Unlock()
+		if n != 0 {
+			return false
+		}
+		h.cr.mu.Lock()
+		defer h.cr.mu.Unlock()
+		for _, c := range h.cr.calls {
+			select {
+			case <-c.done:
+			default:
+				return false
+			}
+		}
+		return true
+	})
+}
+
+// TestACreateCutAtItsCheckLaunchesNothing (r41 4): a create held at its check
+// of the world while its hub tears down and cuts it — its waiter's
+// connection closed — launches nothing once the check returns: it answers
+// closing (the answer kept under its id, when it has one) and frees its slot,
+// with no host command built, with a requestId and without one.
+func TestACreateCutAtItsCheckLaunchesNothing(t *testing.T) {
+	for _, id := range []string{"r-cut", ""} {
+		name := "with a requestId"
+		if id == "" {
+			name = "without one"
+		}
+		t.Run(name, func(t *testing.T) {
+			setVar(t, &teardownBound, 300*time.Millisecond)
+			env := testEnv(t)
+			held := t.TempDir()
+			entered, release := make(chan struct{}), make(chan struct{})
+			var once sync.Once
+			setVar(t, &createCheck, func(cr *creator, p *createReq) *protocol.Error {
+				if p.p.Cwd == held {
+					close(entered)
+					<-release
+				}
+				return cr.check(p)
+			})
+			rn, s, sock := creating(t, env, nil, always("ok"))
+			h := rn.serving(t)
+			t.Cleanup(func() {
+				once.Do(func() { close(release) })
+				joinCreates(t, h)
+			})
+			c := dial(t, sock)
+			c.hello(t)
+			params := map[string]any{"cwd": held}
+			if id != "" {
+				params["requestId"] = id
+			}
+			c.sendCreate(t, params)
+			select {
+			case <-entered:
+			case <-time.After(step):
+				t.Fatal("the create never reached its check")
+			}
+			rn.sigs <- syscall.SIGTERM
+			if err := rn.stopped(t); err != nil {
+				t.Fatal(err)
+			}
+			_ = c.nc.SetReadDeadline(time.Now().Add(step))
+			if line, err := c.lr.ReadLine(); err == nil {
+				t.Fatalf("the cut create was answered %s", line)
+			}
+			once.Do(func() { close(release) })
+			joinCreates(t, h)
+			if n := s.count(); n != 0 {
+				t.Fatalf("the cut create built %d host commands, want none", n)
+			}
+			if id != "" {
+				h.cr.mu.Lock()
+				ans := h.cr.calls[id].ans
+				h.cr.mu.Unlock()
+				if ans.err == nil || ans.err.Data.Reason != protocol.ReasonClosing {
+					t.Fatalf("the cut create's kept answer is %+v, want closing", ans)
+				}
+			}
+		})
 	}
 }
 

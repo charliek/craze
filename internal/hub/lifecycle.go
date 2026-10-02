@@ -888,6 +888,14 @@ func (l *lifecycle) endCreate() {
 	l.wakeLoop()
 }
 
+// isClosing reports whether the hub has decided to close (quiesce, the idle
+// decision): nothing is admitted, and no create launches a host.
+func (l *lifecycle) isClosing() bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.closing
+}
+
 // quiesce closes admission (the decision, when an idle check has not made it
 // already); taking the lock is the barrier behind which every admission made
 // before it has finished registering.
