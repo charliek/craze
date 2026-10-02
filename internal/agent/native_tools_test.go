@@ -641,7 +641,7 @@ func TestNativeBashRowWithoutAnExitCode(t *testing.T) {
 			Tool: "bash", Kind: tool.KindExecute, Title: "make", Input: `{"command":"make"}`}})
 		s.sink(harness.ToolFinished{ID: id, Result: res})
 	}
-	call("t1.1.1", tool.Result{Text: "tick 4\n\n<shell_metadata>\n…\n</shell_metadata>\n" + tool.JobMarker("t1.1.1"),
+	call("t1.1.1", tool.Result{Text: "tick 4\n\n<shell_metadata>\n…\n</shell_metadata>\n" + tool.JobMarker("t1.1.1", ""),
 		Output: &tool.ExecOutput{ExitCode: -1, Output: "tick 4\n"}})
 	call("t1.1.2", tool.Result{Text: "tick\n", IsError: true, Class: tool.ClassTimeout,
 		Output: &tool.ExecOutput{ExitCode: -1, Output: "tick\n"}})

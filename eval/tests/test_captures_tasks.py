@@ -297,7 +297,9 @@ def test_executed_code_evidence_in_narrows_where_it_shows(tmp_path):
     """plan 033 C11r2 (review r8 #7): ``evidence_in = ["result"]`` counts only what the
     call returned -- not the evidence its own command spells (a comment), nor a file an
     earlier call wrote that it runs. The control is the default, every place, under which
-    each capture passes; a value outside the three places does not load."""
+    each capture passes; a value outside the three places does not load -- a nested array
+    or table included, which is valid TOML and raised TypeError before the loader checked
+    each element (C11r3, review r10 P3)."""
     from crazeeval.checks import check_executed_code
     from crazeeval.tasks import TaskError, load_task
 
@@ -318,7 +320,8 @@ def test_executed_code_evidence_in_narrows_where_it_shows(tmp_path):
     dst = tmp_path / "tasks" / "T-D2"
     shutil.copytree(src, dst)
     text = (dst / "task.toml").read_text()
-    for bad in ('["stdout"]', "[]", '"result"'):
+    for bad in ('["stdout"]', "[]", '"result"', '[["result"]]', '[{ place = "result" }]', '["result", ["file"]]',
+                "[1]", '["result", 1.5]'):
         (dst / "task.toml").write_text(text.replace('evidence_in = ["result"]', f"evidence_in = {bad}"))
         with pytest.raises(TaskError, match="evidence_in"):
             load_task(dst)
@@ -362,10 +365,13 @@ def test_t_d1_needs_a_completed_run_of_the_whole_suite():
 
 def test_t_d2_needs_both_served_bodies_in_returned_output():
     """plan 033 C11r2 (review r8 #7c): T-D2's execution evidence is each endpoint's served
-    body in a curl call's own returned output -- one call for both, or one call each,
-    compact or reformatted. A failed request whose command spells the expected body in a
-    comment, one endpoint alone, a listing of app.py's source, and a file written earlier
-    are no evidence -- the old check (either body, anywhere) took each of them."""
+    body in a curl call's own returned output -- one call for both, or one call each, in
+    any key order and whitespace (C11r3, review r10 c): compact as served, spaced on one
+    line, across lines (json.tool, jq), sorted (jq -S, jq -cS), the inner object's keys
+    reversed. A failed request whose command spells the expected body in a comment, one
+    endpoint alone, a listing of app.py's source -- which spells /health spaced on one
+    line -- or its ROUTES dumped as JSON, and a file written earlier are no evidence: the
+    C11r2 check took none of those, and refused the spaced and sorted bodies too."""
     t = load_tasks()["T-D2"]
     health = '{"status":"ok","checks":{"db":"up","queue":"up"}}'
     version = '{"version":"2.7.3","build":"a41c9e0"}'
@@ -375,17 +381,45 @@ def test_t_d2_needs_both_served_bodies_in_returned_output():
     def curl(cid, command):
         return (cid, "bash", {"command": command})
 
-    assert _executed(t, [curl("c1", "curl -s localhost:8000/health; echo; curl -s localhost:8000/version")],
-                     [("c1", health + "\n" + version + "\n")])
-    assert _executed(t, [curl("c1", "curl -s localhost:8000/health | python3 -m json.tool"),
-                         curl("c2", "curl -s localhost:8000/version | jq .")],
-                     [("c1", json.dumps(json.loads(health), indent=4)), ("c2", json.dumps(json.loads(version), indent=2))])
+    def forms(body: str, reordered: dict) -> dict[str, str]:
+        """``body`` as the tools a run pipes curl through print it; ``reordered`` is the
+        same object with its keys in another order (``jq -S`` leaves it or sorts it)."""
+        obj = json.loads(body)
+        return {
+            "compact": body,
+            "spaced": json.dumps(obj),
+            "json.tool": json.dumps(obj, indent=4),
+            "jq": json.dumps(obj, indent=2),
+            "jq -S": json.dumps(obj, indent=2, sort_keys=True),
+            "jq -cS": json.dumps(obj, separators=(",", ":"), sort_keys=True),
+            "reordered": json.dumps(reordered),
+        }
+
+    healths = forms(health, {"status": "ok", "checks": {"queue": "up", "db": "up"}})
+    versions = forms(version, {"build": "a41c9e0", "version": "2.7.3"})
+    assert healths["jq -S"].index('"checks"') < healths["jq -S"].index('"status"')  # sorting moves the keys
+    assert versions["jq -cS"].index('"build"') < versions["jq -cS"].index('"version"')
+    for form in healths:
+        h, v = healths[form], versions[form]
+        assert _executed(t, [curl("c1", "curl -s localhost:8000/health; echo; curl -s localhost:8000/version")],
+                         [("c1", h + "\n" + v + "\n")]), form
+        assert _executed(t, [curl("c1", "curl -s localhost:8000/health | jq"), curl("c2", "curl -s localhost:8000/version | jq")],
+                         [("c1", h), ("c2", v)]), form
+        # curl -i: the body after the headers, with no newline after it.
+        assert _executed(t, [curl("c1", "curl -si localhost:8000/health && curl -si localhost:8000/version")],
+                         [("c1", "HTTP/1.0 200 OK\r\nContent-Type: application/json\r\n\r\n" + h +
+                           "HTTP/1.0 200 OK\r\nContent-Type: application/json\r\n\r\n" + v)]), form
     assert not _executed(t, [curl("c1", "curl localhost:8000/health  # expected: " + health),
                              curl("c2", "curl localhost:8000/version  # expected: " + version)],
                          [("c1", failed), ("c2", failed)])
     assert not _executed(t, [curl("c1", "curl -s localhost:8000/health")], [("c1", health)])
+    assert '{"status": "ok", "checks": {"db": "up", "queue": "up"}}' in source  # the spaced body, in the source
     assert not _executed(t, [curl("c1", "curl -s localhost:8000/version"), curl("c2", "curl -s localhost:8000/health; cat app.py")],
                          [("c1", version), ("c2", failed + "\n" + source)])
+    routes = {"/health": json.loads(health), "/version": json.loads(version)}
+    for dumped in (json.dumps(routes), json.dumps(routes, indent=2), json.dumps(routes, separators=(",", ":"))):
+        assert not _executed(t, [curl("c1", "curl -s localhost:8000/health; python3 -c 'import app, json; print(json.dumps(app.ROUTES))'")],
+                             [("c1", failed + "\n" + dumped)])
     wrote = ("w1", "write", {"filePath": "/sandbox/work/devserver/expected.json", "content": health + "\n" + version + "\n"})
     assert not _executed(t, [wrote, curl("c1", "curl -s localhost:8000/health localhost:8000/version > got.json; diff got.json expected.json")],
                          [("w1", "ok"), ("c1", failed)])

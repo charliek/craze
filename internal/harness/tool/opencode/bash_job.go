@@ -41,9 +41,11 @@ import (
 //
 // # The texts (§3.7, exact modulo values)
 //
-// Both receipts end with the fixed marker line (tool.JobMarker), and both go
-// through the session's widest redaction as they are made (Jobs.Redact, P19):
-// the call's own redactor was fixed when its turn began.
+// Both receipts end with the fixed marker line (tool.JobMarker), which names
+// the job and the base name of the spill file it opened — the one place a
+// resumed session reads the file from (plan 033 C11r3) — and both go through
+// the session's widest redaction as they are made (Jobs.Redact, P19): the
+// call's own redactor was fixed when its turn began.
 
 // bashJob is a started command: what Run started, and what a job takes over.
 // Its fields are fixed once attach has made it, but copyErr, which the reader
@@ -193,7 +195,7 @@ func (c *bashCall) startReceipt(path string) string {
 	if c.requested > 0 {
 		text += "\n\n<shell_metadata>\n" + c.reducedText() + "\n</shell_metadata>"
 	}
-	return text + "\n" + tool.JobMarker(c.id)
+	return text + "\n" + tool.JobMarker(c.id, path)
 }
 
 // promotionReceipt is a promoted command's result (§3.7, exact modulo
@@ -224,7 +226,7 @@ func (c *bashCall) promotionReceipt(kept string, cut bool, path string) string {
 		"Its result is delivered to you when it finishes; do not poll it or sleep waiting for it. "+
 		"Call bash_output with its id to read newer output, or bash_stop to stop it.",
 		c.timeout.Milliseconds(), c.id, strings.Replace(tool.JobLimit(tool.JobPromotedLimit), " ", " more ", 1), saved))
-	return strings.TrimSuffix(text, "\n") + "\n\n<shell_metadata>\n" + strings.Join(meta, "\n") + "\n</shell_metadata>\n" + tool.JobMarker(c.id)
+	return strings.TrimSuffix(text, "\n") + "\n\n<shell_metadata>\n" + strings.Join(meta, "\n") + "\n</shell_metadata>\n" + tool.JobMarker(c.id, path)
 }
 
 // reducedText is the note of a timeout the model asked for above the most it

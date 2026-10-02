@@ -8,7 +8,6 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -223,51 +222,44 @@ func createSpill(root *os.Root, id string) (*os.File, string, error) {
 	}
 }
 
-// SpillFiles are the spill files under <home>/tool-output that the call id
-// may have written, as paths, in name order: tool_<id> and every
-// tool_<id>-<8 hex digits> — OpenSpill's names for it — that is a regular
-// file. nil when there are none, when the directory is missing, a symlink or
-// unreadable (it is opened as OpenSpill opens it), or when id is not one
-// OpenSpill would name a file after.
+// SpillFile is the path of the spill file name under <home>/tool-output —
+// name being a base name, as a job's marker line carries it (JobMarker) —
+// when name is one of OpenSpill's names for the call id (spillNameOf: no
+// separator, no other id's) and a regular file there, as the spill directory
+// opens through its checked root (openSpillDir): not a symlink, a directory or
+// anything else at the name, nor any file through a symlinked or swapped
+// directory. It is "" otherwise, and when the directory is missing or
+// unreadable.
 //
 // It is how a resumed session finds a background job's output (plan 033
-// C11r2, review r8 finding 4): by the job's id, never by a path read from the
-// job's receipt, whose text begins with what the command printed and so can
-// name any file at all. More than one file can carry an id's names, since ids
-// repeat across sessions (OpenSpill); nothing on disk tells which is the
-// job's, so the caller is given every one. A symlink or a directory with such
-// a name is never one: OpenSpill creates neither.
-func SpillFiles(home, id string) []string {
-	if !validID(id) {
-		return nil
+// C11r3, review r10 findings a2 and b, superseding C11r2's search of the
+// directory by the job's id): by the one name the job's own marker line
+// carries, looked up alone — the directory is never listed, so neither its
+// size nor another session's file under the same id's names reaches the
+// notice.
+func SpillFile(home, id, name string) string {
+	if !validID(id) || !spillNameOf(name, id) {
+		return ""
 	}
 	root, err := openSpillDir(home, false)
 	if err != nil {
-		return nil
+		return ""
 	}
 	defer root.Close()
-	d, err := root.Open(".")
-	if err != nil {
-		return nil
+	fi, err := root.Lstat(name)
+	if err != nil || !fi.Mode().IsRegular() {
+		return ""
 	}
-	entries, err := d.ReadDir(-1) // in directory order
-	d.Close()
-	if err != nil {
-		return nil
-	}
-	var out []string
-	for _, e := range entries {
-		if e.Type().IsRegular() && spillNameOf(e.Name(), id) {
-			out = append(out, filepath.Join(home, SpillDir, e.Name()))
-		}
-	}
-	slices.Sort(out) // the plain name first
-	return out
+	return filepath.Join(home, SpillDir, name)
 }
 
 // spillNameOf reports whether name is one createSpill gives the call id:
-// tool_<id>, or tool_<id>-<8 lowercase hex digits>.
+// tool_<id>, or tool_<id>-<8 lowercase hex digits>. An id createSpill would
+// refuse has none.
 func spillNameOf(name, id string) bool {
+	if !validID(id) {
+		return false
+	}
 	rest, ok := strings.CutPrefix(name, spillPrefix+id)
 	if !ok {
 		return false

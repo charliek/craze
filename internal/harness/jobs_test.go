@@ -1182,7 +1182,7 @@ func TestJobLifetimeEndToEnd(t *testing.T) {
 		return "Started the command in the background as job `" + id + "`. It runs until it exits, until you stop it with bash_stop, " +
 			"or for at most " + limit + "; the session closing stops it too. Its output is saved to: " + spill(b, id) + "\n" +
 			"Its result is delivered to you when it finishes; do not poll it or sleep waiting for it. " +
-			"Call bash_output with its id to read its output so far.\n" + tool.JobMarker(id)
+			"Call bash_output with its id to read its output so far.\n" + tool.JobMarker(id, spill(b, id))
 	}
 	wake := func(t *testing.T, b *bg) string {
 		t.Helper()
@@ -1234,7 +1234,7 @@ func TestJobLifetimeEndToEnd(t *testing.T) {
 		}
 		evs := ev.list()
 		r := callResult(t, evs, "t2.1.1")
-		if id, ok := tool.ParseJobMarker(r.Text); r.IsError || !ok || id != "t2.1.1" || !strings.HasPrefix(r.Text, "before\n\n<shell_metadata>\nThe command did not finish within its timeout of 300 ms. It was not stopped: it was moved to the background as job `t2.1.1`") ||
+		if id, name, ok := tool.ParseJobMarker(r.Text); r.IsError || !ok || id != "t2.1.1" || name != "tool_t2.1.1" || !strings.HasPrefix(r.Text, "before\n\n<shell_metadata>\nThe command did not finish within its timeout of 300 ms. It was not stopped: it was moved to the background as job `t2.1.1`") ||
 			!strings.Contains(r.Text, "all of it is saved to: "+spill(b, "t2.1.1")+". ") {
 			t.Fatalf("the promotion receipt = %q", r.Text)
 		}
@@ -1456,7 +1456,7 @@ func (c promotingCall) Run(_ context.Context, env tool.Env) tool.Result {
 	slot.Start(tool.JobSpec{ID: c.id, Command: "make", Workdir: env.Workspace, Limit: time.Hour, Promoted: true,
 		Began: jobBegan, Seen: int64(len(body.out))}, body)
 	c.bodies <- body
-	return tool.Result{Text: "before\n\n<shell_metadata>\nMoved to the background.\n</shell_metadata>\n" + tool.JobMarker(c.id)}
+	return tool.Result{Text: "before\n\n<shell_metadata>\nMoved to the background.\n</shell_metadata>\n" + tool.JobMarker(c.id, "")}
 }
 
 // promotingProfile is opencode's profile with its bash replaced by

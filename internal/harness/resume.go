@@ -197,7 +197,8 @@ func (s *Session) openResumed(opts Options) (_ *Session, err error) {
 	// The background jobs the last incarnation started and never delivered
 	// are no longer managed (plan 033 P15, owner decision 3, C11r2): the
 	// model is told so once, at the first turn a person starts, with the
-	// files under the home their output went to (jobs_resume.go).
+	// file under the home each one's output went to, as its marker line
+	// named it (C11r3, jobs_resume.go).
 	s.subs.restoreJobs(opts.Home, was.jobs)
 	return s, nil
 }

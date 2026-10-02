@@ -413,7 +413,8 @@ read and stop a background job by the id its bash call returned, are craze's
 own in name and wording, as is bash's run_in_background parameter (Claude
 Code's name for the same request, as the agent tool's is) and every text a
 job answers with: the start and promotion receipts, each ending in the fixed
-<background_job id="..."/> line, and the <background_command> result block.
+<background_job id="..." spill="..."/> line, and the <background_command>
+result block.
 bash_output's wait_ms defaults to 0, a snapshot (plan 033 P13), and waits at
 most 600 s; bash_stop waits at most 7 s for the job it stopped to end. The
 two tools and the parameter are offered only to a session that runs

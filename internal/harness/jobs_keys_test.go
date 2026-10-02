@@ -66,7 +66,7 @@ func startScript(t *testing.T, b *bg, prints ...string) *jobScript {
 	if _, err := b.s.Run(context.Background(), "next", ev.sink); err != nil {
 		t.Fatal(err)
 	}
-	if r := callResult(t, ev.list(), j.id); r.IsError || !strings.Contains(r.Text, tool.JobMarker(j.id)) {
+	if r := callResult(t, ev.list(), j.id); r.IsError || !strings.HasSuffix(r.Text, "\n"+tool.JobMarker(j.id, filepath.Join(b.home, tool.SpillDir, "tool_"+j.id))) {
 		t.Fatalf("the job's receipt = %+v", r)
 	}
 	return j

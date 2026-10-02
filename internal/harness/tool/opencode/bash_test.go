@@ -625,9 +625,19 @@ func TestBashCloseKillsAtOnce(t *testing.T) {
 	t.Run("a close during a timeout's grace", func(t *testing.T) {
 		t.Parallel()
 		env := bashEnv(t, nil)
-		// The shell survives SIGTERM and says it got it.
-		c := prepareBash(t, env, map[string]any{"command": "trap 'echo term > got' TERM; while :; do sleep 0.05; done", "timeout": 200})
+		// The shell survives SIGTERM and says it got it, waiting in the wait
+		// builtin, which a trapped signal ends at once (bashWaitLoop). The
+		// timeout passes once the trap is set (ops.expire): a real 200 ms one
+		// could pass, on a starved machine, before the shell had run its
+		// first line, and its SIGTERM then killed the shell with no trap set
+		// — 4 runs in 20 under a 2% CPU quota, 1 in 10 with -race under 5%;
+		// none in 20 and 30 so since (plan 033 C11r3).
+		c := prepareBash(t, env, map[string]any{"command": "trap 'echo term > got' TERM; : > ready; " + bashWaitLoop, "timeout": longTimeout})
+		expire := make(chan time.Time, 1)
+		c.ops.expire = expire
 		r := startBash(t, c, env)
+		untilFile(t, env, "ready", "the shell's trap")
+		expire <- time.Now()
 		if !waitFor(15*time.Second, func() bool { _, err := os.Stat(filepath.Join(env.Workspace, "got")); return err == nil }) {
 			t.Fatal("the timeout never sent SIGTERM")
 		}
@@ -642,6 +652,19 @@ func TestBashCloseKillsAtOnce(t *testing.T) {
 		}
 	})
 }
+
+// bashWaitLoop keeps a shell that traps SIGTERM running, waiting in the wait
+// builtin: bash runs a trapped signal's handler as soon as wait returns, which
+// the signal makes it do at once, but runs it during a foreground command only
+// once that command has ended. A loop of foreground sleeps (`while :; do sleep
+// 0.05; done`) left the handler waiting on the sleep — sent the group's
+// SIGTERM too, but to die and be reaped it must be scheduled first — and with
+// the CPU starved the 3 s grace's SIGKILL could land before it was, the
+// handler never run: 1 run in 30 failed so under systemd-run -p CPUQuota=5%,
+// none in 30 with this loop (plan 033 C11r3, reported by plan 032). The shell
+// itself must still be scheduled within the grace: under a 2% quota, 2 runs
+// in 20 still miss it.
+const bashWaitLoop = "while :; do sleep 0.05 & wait $!; done"
 
 // withClosing gives env a session close signal, Env.Closing, and returns
 // the func that closes it.
@@ -674,9 +697,10 @@ func TestBashCloseSignal(t *testing.T) {
 	t.Run("after a cancel, during its grace", func(t *testing.T) {
 		t.Parallel()
 		env, closeSession := withClosing(bashEnv(t, nil))
-		// The shell survives SIGTERM and says it got it; its child ignores
-		// SIGTERM.
-		c := prepareBash(t, env, map[string]any{"command": "trap 'echo term > got' TERM; (trap '' TERM; sleep 614) & echo $! > pid; while :; do sleep 0.05; done"})
+		// The shell survives SIGTERM and says it got it, waiting in the wait
+		// builtin, which a trapped signal ends at once (bashWaitLoop); its
+		// child ignores SIGTERM.
+		c := prepareBash(t, env, map[string]any{"command": "trap 'echo term > got' TERM; (trap '' TERM; sleep 614) & echo $! > pid; " + bashWaitLoop})
 		r := startBash(t, c, env)
 		pid := bashPID(t, filepath.Join(env.Workspace, "pid"), "sleep 614")
 		r.cancel(nil)

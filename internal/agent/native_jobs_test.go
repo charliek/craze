@@ -60,7 +60,7 @@ func TestNativeJobRows(t *testing.T) {
 	s.sink(harness.ToolStarted{ID: "t1.1.1", Step: 1, Tool: tool.BashTool, Kind: tool.KindExecute})
 	s.sink(harness.ToolCalled{ID: "t1.1.1", Request: harness.ToolRequest{Tool: tool.BashTool, Kind: tool.KindExecute, Title: cmd, Command: cmd}})
 	s.sink(harness.JobStarted{ID: "t1.1.1", CallID: "t1.1.1", Command: cmd, Workdir: "/work", Limit: 30 * time.Minute, At: at})
-	s.sink(harness.ToolFinished{ID: "t1.1.1", Result: tool.Result{Text: "Started the command in the background as job `t1.1.1`.\n" + tool.JobMarker("t1.1.1")}})
+	s.sink(harness.ToolFinished{ID: "t1.1.1", Result: tool.Result{Text: "Started the command in the background as job `t1.1.1`.\n" + tool.JobMarker("t1.1.1", "")}})
 	s.sink(harness.JobOutput{ID: "t1.1.1", Output: "ready on :3000\n"})
 	w.wait("the job's progress", func(ev Event) bool {
 		return ev.Type == EventTool && ev.Agent == "t1.1.1" && ev.Tool.Output != nil && ev.Tool.Output.Stdout == "ready on :3000\n"

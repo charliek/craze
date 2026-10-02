@@ -312,6 +312,13 @@ func timeoutLine(ms int) string {
 	return fmt.Sprintf("shell tool terminated command after exceeding timeout %d ms. If this command is expected to take longer and is not waiting for interactive input, retry with a larger timeout value in milliseconds.", ms)
 }
 
+// markerLine is the marker line ending both receipts for job id, its output
+// saved to path, spelled out (plan 033 P15, C11r3): the spill file's base
+// name as the job opened it.
+func markerLine(id, path string) string {
+	return `<background_job id="` + id + `" spill="` + filepath.Base(path) + `"/>`
+}
+
 // promotionText is §3.7's promotion receipt for job id, after the output so
 // far, spelled out: one blank line between the two (V3 F5).
 func promotionText(out string, timeoutMs int, id, path string) string {
@@ -320,7 +327,7 @@ func promotionText(out string, timeoutMs int, id, path string) string {
 			"job `%s` and is still running, for at most 30 more minutes. Its output so far is above; all of it is saved to: "+
 			"%s. Its result is delivered to you when it finishes; do not poll it or sleep waiting for it. "+
 			"Call bash_output with its id to read newer output, or bash_stop to stop it.", timeoutMs, id, path) +
-		"\n</shell_metadata>\n" + `<background_job id="` + id + `"/>`
+		"\n</shell_metadata>\n" + markerLine(id, path)
 }
 
 // startText is §3.7's start receipt for job id, spelled out.
@@ -328,7 +335,7 @@ func startText(id, limit, path string) string {
 	return "Started the command in the background as job `" + id + "`. It runs until it exits, until you stop it with bash_stop, " +
 		"or for at most " + limit + "; the session closing stops it too. Its output is saved to: " + path + "\n" +
 		"Its result is delivered to you when it finishes; do not poll it or sleep waiting for it. " +
-		"Call bash_output with its id to read its output so far.\n" + `<background_job id="` + id + `"/>`
+		"Call bash_output with its id to read its output so far.\n" + markerLine(id, path)
 }
 
 // spillOf is the spill file of call c under env's home.
@@ -555,14 +562,14 @@ func TestBashRunInBackground(t *testing.T) {
 		c := prepareBash(t, env, map[string]any{"command": "true", "run_in_background": true, "timeout": 9000000})
 		res := startBash(t, c, env).await(t, 30*time.Second)
 		adopt(t, jobs)
-		want := strings.TrimSuffix(startText(c.id, "2 hours", spillOf(env, c)), "\n"+`<background_job id="`+c.id+`"/>`) +
+		want := strings.TrimSuffix(startText(c.id, "2 hours", spillOf(env, c)), "\n"+markerLine(c.id, spillOf(env, c))) +
 			"\n\n<shell_metadata>\nThe requested timeout of 9000000 ms is above the maximum of 7200000 ms for a background job; it runs for at most 7200000 ms.\n</shell_metadata>\n" +
-			`<background_job id="` + c.id + `"/>`
+			markerLine(c.id, spillOf(env, c))
 		if res.Text != want || jobs.spec(t).Limit != tool.JobMaxLimit {
 			t.Fatalf("result = %q, limit %v\nwant %q, 2 hours", res.Text, jobs.spec(t).Limit, want)
 		}
-		if id, ok := tool.ParseJobMarker(res.Text); !ok || id != c.id {
-			t.Fatalf("the receipt's marker reads %q, %v; want %s", id, ok, c.id)
+		if id, spill, ok := tool.ParseJobMarker(res.Text); !ok || id != c.id || spill != "tool_"+c.id {
+			t.Fatalf("the receipt's marker reads %q, %q, %v; want %s, tool_%s", id, spill, ok, c.id, c.id)
 		}
 	})
 
@@ -676,6 +683,11 @@ func TestBashReceiptsRedacted(t *testing.T) {
 			adopt(t, jobs)
 			if strings.Contains(res.Text, keyA) || !strings.Contains(res.Text, redact.Marker) || !strings.Contains(res.Text, "<background_job id=") {
 				t.Fatalf("receipt = %q; want the key redacted by the session's redaction", res.Text)
+			}
+			// The marker names the file by its base name, which the home's
+			// key is not part of: it reads back whole (plan 033 C11r3).
+			if id, spill, ok := tool.ParseJobMarker(res.Text); !ok || id != c.id || spill != "tool_"+c.id {
+				t.Fatalf("the receipt's marker reads %q, %q, %v; want %s, tool_%s", id, spill, ok, c.id, c.id)
 			}
 		})
 	}

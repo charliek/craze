@@ -3,6 +3,7 @@ package tool
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -280,34 +281,66 @@ type JobStopCall struct {
 }
 
 // The fixed marker line that ends both receipts — a run_in_background call's
-// and a promotion's (P15): `<background_job id="t4.2.1"/>`, nothing before or
-// after it on its line. A resumed session finds the jobs its last incarnation
-// started by this line in its tool results, and nowhere else.
+// and a promotion's (P15): `<background_job id="t4.2.1"
+// spill="tool_t4.2.1-ab12cd34"/>`, nothing before or after it on its line. Its
+// spill attribute is the base name of the job's spill file as the job opened
+// it (OpenSpill), and is left out when the job has none (plan 033 C11r3,
+// review r10 finding b). A resumed session finds the jobs its last
+// incarnation started by this line in its tool results, and nowhere else, and
+// the file each one's output went to by this line's spill attribute, and
+// nowhere else: the line is craze's own, written after everything the command
+// printed, so what the command printed can neither follow it nor stand in for
+// it — while a receipt's text above it begins with that output and can spell
+// any path at all (review r8 finding 4), and the spill directory can hold
+// other sessions' files under the same call id's names (ids repeat across
+// sessions), which the job's id alone cannot tell from its own.
 const (
 	jobMarkerOpen  = `<background_job id="`
+	jobMarkerSpill = `" spill="`
 	jobMarkerClose = `"/>`
 )
 
-// JobMarker is the marker line for the job id, a harness call id.
-func JobMarker(id string) string { return jobMarkerOpen + id + jobMarkerClose }
+// JobMarker is the marker line for the job id, a harness call id, whose
+// output is saved to spill — the spill file's path as OpenSpill opened it, or
+// "" when it has none. The line names the file by its base name, and only
+// when that is one of OpenSpill's names for id (spillNameOf): any other name,
+// which OpenSpill never gives, is left out as no file.
+func JobMarker(id, spill string) string {
+	if name := filepath.Base(spill); spill != "" && spillNameOf(name, id) {
+		return jobMarkerOpen + id + jobMarkerSpill + name + jobMarkerClose
+	}
+	return jobMarkerOpen + id + jobMarkerClose
+}
 
 // ParseJobMarker reads the marker off text's last line: the job id it names,
-// when that line is exactly a marker naming a harness call id
-// ("t<turn>.<step>.<n>"), and ok false otherwise — a marker quoted inside a
-// line, one with anything around it on its line, or one naming anything else.
-// A caller that knows which call wrote text compares the id with that call's
-// own, since a command's output can print any line.
-func ParseJobMarker(text string) (id string, ok bool) {
+// and the base name of the job's spill file it names, when that line is
+// exactly a marker naming a harness call id ("t<turn>.<step>.<n>"), with no
+// spill attribute or one spill attribute, and ok false otherwise — a marker
+// quoted inside a line, one with anything around it on its line, any other
+// attribute, or one naming anything else. spill is "" when the line names no
+// file, or names one that is not among OpenSpill's names for the id
+// (spillNameOf) — never a path, then, nor a name with a separator: the job
+// still counts, and its file is none. A caller that knows which call wrote
+// text compares the id with that call's own, since a command's output can
+// print any line.
+func ParseJobMarker(text string) (id, spill string, ok bool) {
 	line := text[strings.LastIndexByte(text, '\n')+1:]
-	id, found := strings.CutPrefix(line, jobMarkerOpen)
+	rest, found := strings.CutPrefix(line, jobMarkerOpen)
 	if !found {
-		return "", false
+		return "", "", false
 	}
-	id, found = strings.CutSuffix(id, jobMarkerClose)
-	if !found || !harnessCallID(id) {
-		return "", false
+	rest, found = strings.CutSuffix(rest, jobMarkerClose)
+	if !found {
+		return "", "", false
 	}
-	return id, true
+	id, spill, _ = strings.Cut(rest, jobMarkerSpill)
+	if !harnessCallID(id) || strings.Contains(spill, `"`) {
+		return "", "", false
+	}
+	if !spillNameOf(spill, id) {
+		spill = ""
+	}
+	return id, spill, true
 }
 
 // harnessCallID reports whether id has the shape of a harness call id:

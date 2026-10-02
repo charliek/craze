@@ -24,16 +24,23 @@ import (
 //
 //	<background_command id="t4.2.1" status="unknown">
 //	$ npm run dev
-//	The session was closed before this command's result was delivered, and craze no longer manages it: if the session closed normally the command was stopped, but if craze crashed it may still be running. It may also have finished first. Its output, if it wrote any, is saved to: /…/tool-output/tool_t4.2.1. Check that file, and whether the command is still running, before running it again.
+//	The session was closed before this command's result was delivered, and craze no longer manages it: if the session closed normally the command was stopped, but if craze crashed it may still be running. It may also have finished first. Its output, if it wrote any, is saved to: /…/tool-output/tool_t4.2.1-ab12cd34. Check that file, and whether the command is still running, before running it again.
 //	</background_command>
 //
-// The file is found by the job's id (tool.SpillFiles), never read from its
-// receipt (C11r2, review r8 finding 4): a promotion receipt begins with the
-// command's own output, which can spell any receipt at all, and a path taken
-// from it would send the model to whatever file the command chose. The job
-// wrote its file from its first byte to its end; when no file carries its
-// names the notice says none was found, and when several do — ids repeat
-// across sessions — it names each, saying the others are other sessions'.
+// The file is the one the receipt's marker line names (its spill attribute,
+// tool.ParseJobMarker): the base name of the file the job opened, which craze
+// writes on the result's last line, after everything the command printed
+// (plan 033 C11r3, review r10 finding b). Nothing else of the receipt is read
+// for it — a promotion receipt begins with the command's own output, which can
+// spell any receipt, path or marker at all (C11r2, review r8 finding 4) — and
+// the spill directory is never searched for it: call ids repeat across
+// sessions, so a file there with the job's id in its name may be another
+// session's. The name is checked against the spill naming for the job's id
+// and looked up alone, through the checked spill directory (tool.SpillFile);
+// the notice names it only when it is a regular file there, and otherwise
+// says no file of the job's output was found — as it does for a job whose
+// file could not be opened, whose marker names none. The job wrote its file
+// from its first byte to its end.
 //
 // Each such block is set aside as a suspended result (restoreJobs): it wakes
 // nothing and keeps no host alive, and the first turn a person starts takes it
@@ -53,7 +60,9 @@ import (
 //     and a promotion's, end with it. Only tool results are read, so a model
 //     that quotes the marker in its own text, or a person who pastes it,
 //     starts nothing; and a marker naming another turn's call is a command's
-//     output, not a receipt. The command is the call's own argument.
+//     output, not a receipt. The command is the call's own argument, and the
+//     spill file the marker's own spill attribute (only the last line's: a
+//     marker the command printed above it names nothing).
 //   - delivered: a job's block in a results entry — a step's, a wake's, a
 //     person's step 0 — read block by block (resultsJobIDs), or the block a
 //     bash_output or bash_stop call's result is. A result committed only
@@ -64,26 +73,22 @@ import (
 // order the path started them. A command that printed a marker line naming
 // a call of its own turn as its last line forges one: the model is then told
 // of a job it never started — the cost of P15's one-line rule, and a harmless
-// one, since the notice names only files in the spill directory that carry
-// that call's names.
+// one, since the notice can name only a regular file in the spill directory
+// under one of that call's own spill names.
 
 // jobResumeNotice is the resume notice (the file's comment): the body of a
-// job's block after its command's line, naming spills, the files that carry
-// the job's names in the spill directory (tool.SpillFiles), or saying none
-// was found.
-func jobResumeNotice(spills []string) string {
+// job's block after its command's line, naming spill, the job's spill file
+// as its marker line named it and the spill directory holds it
+// (tool.SpillFile), or saying none was found ("").
+func jobResumeNotice(spill string) string {
 	const head = "The session was closed before this command's result was delivered, and craze no longer manages it: " +
 		"if the session closed normally the command was stopped, but if craze crashed it may still be running. " +
 		"It may also have finished first. "
 	const running = "whether the command is still running"
-	switch len(spills) {
-	case 0:
+	if spill == "" {
 		return head + "No file of its output was found. Check " + running + " before running it again."
-	case 1:
-		return head + "Its output, if it wrote any, is saved to: " + spills[0] + ". Check that file, and " + running + ", before running it again."
 	}
-	return head + "Its output, if it wrote any, is saved to one of these files; the others hold the output of other sessions' " +
-		"commands with the same id: " + strings.Join(spills, ", ") + ". Check them, and " + running + ", before running it again."
+	return head + "Its output, if it wrote any, is saved to: " + spill + ". Check that file, and " + running + ", before running it again."
 }
 
 // The delimiters of the result blocks a results entry holds: a job's
@@ -98,10 +103,12 @@ const (
 )
 
 // stoppedJob is a job a resumed session's last incarnation started and never
-// delivered: its id, and its command, as the call that started it gave it.
-// Its spill file is not here: the scan reads only the path, and the file is
-// found by the id when the session is restored (restoreJobs).
-type stoppedJob struct{ id, cmd string }
+// delivered: its id, its command, as the call that started it gave it, and
+// its spill file's base name, as its receipt's marker line named it ("" for
+// none; tool.ParseJobMarker has checked it is one of the id's spill names).
+// The scan reads only the path: whether the file is there is looked up when
+// the session is restored (restoreJobs).
+type stoppedJob struct{ id, cmd, spill string }
 
 // jobScan reads a transcript's path, entry by entry, for the jobs it started
 // and the ones it delivered (the file's comment). It is handed each entry's
@@ -144,8 +151,8 @@ func (j *jobScan) result(callID, text string, isErr bool, turn int) {
 	}
 	switch c.name {
 	case tool.BashTool:
-		if id, ok := tool.ParseJobMarker(text); ok && !isErr && jobTurn(id) == turn {
-			j.started = append(j.started, stoppedJob{id: id, cmd: commandArg(c.input)})
+		if id, spill, ok := tool.ParseJobMarker(text); ok && !isErr && jobTurn(id) == turn {
+			j.started = append(j.started, stoppedJob{id: id, cmd: commandArg(c.input), spill: spill})
 		}
 	default: // bash_output, bash_stop: the block, when the answer is one
 		if id, ok := blockID(text, jobBlockOpen); ok {
@@ -243,19 +250,20 @@ func resultsJobIDs(text string) []string {
 // restoreJobs sets aside, in a resumed session, one result per job its last
 // incarnation started and never delivered (the file's comment): suspended, in
 // stopped's order, its done closed and no handle, its status unknown and its
-// block the resume notice — naming the files under home that carry the job's
-// names (tool.SpillFiles, looked up before the registry's lock is taken), the
-// command redacted with the session's widest redaction as it is now (union,
-// P19), and the text again as deliver makes the block. An id the registry
-// holds already is left alone (it cannot be: a resumed session numbers its
-// turns on from the path's). A nil runner has none.
+// block the resume notice — naming the job's spill file under home when its
+// marker line named one and it is there (tool.SpillFile, looked up before the
+// registry's lock is taken), the command redacted with the session's widest
+// redaction as it is now (union, P19), and the text again as deliver makes
+// the block. An id the registry holds already is left alone (it cannot be: a
+// resumed session numbers its turns on from the path's). A nil runner has
+// none.
 func (r *subagents) restoreJobs(home string, stopped []stoppedJob) {
 	if r == nil || len(stopped) == 0 {
 		return
 	}
 	notices := make([]string, len(stopped))
 	for i, sj := range stopped {
-		notices[i] = jobResumeNotice(tool.SpillFiles(home, sj.id))
+		notices[i] = jobResumeNotice(tool.SpillFile(home, sj.id, sj.spill))
 	}
 	red := r.union(nil)
 	r.regMu.Lock()

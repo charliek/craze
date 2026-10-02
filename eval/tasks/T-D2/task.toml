@@ -52,8 +52,14 @@ cite = "app.py: BUILD"
 # output is that endpoint's served body -- separate calls or one call for both. Only the
 # result counts (evidence_in): a comment or an expected body in the command's text, or a
 # file an earlier call wrote, is no evidence, and a request that failed returns no body.
-# /health's served body is compact JSON, or reformatted across lines (json.tool, jq); app.py
-# spells it on one line with spaces, so a listing of the source is no evidence either.
+# A body counts in any key order and any whitespace (plan 033 C11r3, review r10 c): compact
+# as served, spaced on one line (json.dumps), across lines (json.tool, jq) or sorted (jq -S)
+# -- one regex per order of the outer keys, the inner object's two orders alternated, each
+# object whole, from its brace to its brace. An object that is the value of a quoted key
+# (`"...": {`, the lookbehinds) is no evidence: that is how app.py's source spells /health,
+# on one line with spaces, so a listing of the source shows it so. Residual (X113): a
+# command that prints the expected body itself -- echo, or json.dumps of app.py's ROUTES
+# entry -- still passes.
 [[checks]]
 type = "executed_code"
 name = "curled-health"
@@ -61,8 +67,8 @@ patterns = ['\bcurl\b']
 require_result = true
 evidence_in = ["result"]
 evidence = [
-    '\{"status":"ok","checks":\{"db":"up","queue":"up"\}\}',
-    '"status"\s*:\s*"ok"\s*,[ \t]*\n\s*"checks"\s*:\s*\{[ \t]*\n\s*"db"\s*:\s*"up"\s*,[ \t]*\n\s*"queue"\s*:\s*"up"',
+    '(?<!":)(?<!": )\{\s*"status"\s*:\s*"ok"\s*,\s*"checks"\s*:\s*\{\s*(?:"db"\s*:\s*"up"\s*,\s*"queue"\s*:\s*"up"|"queue"\s*:\s*"up"\s*,\s*"db"\s*:\s*"up")\s*\}\s*\}',
+    '(?<!":)(?<!": )\{\s*"checks"\s*:\s*\{\s*(?:"db"\s*:\s*"up"\s*,\s*"queue"\s*:\s*"up"|"queue"\s*:\s*"up"\s*,\s*"db"\s*:\s*"up")\s*\}\s*,\s*"status"\s*:\s*"ok"\s*\}',
 ]
 
 [[checks]]
@@ -71,7 +77,10 @@ name = "curled-version"
 patterns = ['\bcurl\b']
 require_result = true
 evidence_in = ["result"]
-evidence = ['"version"\s*:\s*"2\.7\.3"\s*,\s*"build"\s*:\s*"a41c9e0"']
+evidence = [
+    '(?<!":)(?<!": )\{\s*"version"\s*:\s*"2\.7\.3"\s*,\s*"build"\s*:\s*"a41c9e0"\s*\}',
+    '(?<!":)(?<!": )\{\s*"build"\s*:\s*"a41c9e0"\s*,\s*"version"\s*:\s*"2\.7\.3"\s*\}',
+]
 
 [[checks]]
 type = "no_writes"
