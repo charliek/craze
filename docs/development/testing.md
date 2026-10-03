@@ -277,7 +277,11 @@ agent already gone would get. The start-failure tests
 (`internal/cli/starterr_test.go`) use it, with `CRAZE_TEST_GUI_SESSION=0` or
 `1` forcing the macOS login session craze reads (`rundir.GUISession`) — honoured
 only in a test binary's own processes — so the login-session hint is tested on
-every OS.
+every OS. Those that pin the agent's exact words set
+`CRAZE_TEST_STDERR_TAIL_WAIT=10s` (`acp.StderrWaitEnv`, honoured the same way),
+which stretches craze's two half-second waits for the copy of the agent's
+stderr — the reaper's before it closes the pipe, and the failed start's — so a
+starved copy cannot cut the lines. A wait ends as soon as the copy does.
 
 `CRAZE_FAKE_SESSION_ID=<id>` makes `session/new` answer that session id
 instead of `fake-session-1`. The session index keys a row by provider and

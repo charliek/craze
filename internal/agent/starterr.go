@@ -22,8 +22,9 @@ import (
 
 // startErrStderrWait bounds how long a failed start waits for the copy of its
 // agent's stderr to reach its end: acp's stderrDrain, the reaper's own bound
-// for the same copy. The agent's last line can still be in the pipe when its
-// exit fails the start's call.
+// for the same copy, and like it stretched in a test by acp.StderrWaitEnv.
+// The agent's last line can still be in the pipe when its exit fails the
+// start's call.
 const startErrStderrWait = 500 * time.Millisecond
 
 // startErrTailMax is how much of the agent's stderr a start error carries:
@@ -50,7 +51,7 @@ func (s *session) decorateStartErr(err error) error {
 	}
 	var raw []byte
 	if c := s.clientRef(); c != nil {
-		raw = c.StderrTail(startErrStderrWait)
+		raw = c.StderrTail(acp.StderrWait(startErrStderrWait))
 	}
 	return withAgentWords(err, stderrTailLine(raw), s.opts.StartErrExitHint)
 }
@@ -73,8 +74,12 @@ func withAgentWords(err error, tail, hint string) error {
 // trailing "\r" trimmed and the line sanitized (sanitizeLine: escape
 // sequences and control characters gone, invalid UTF-8 replaced, whitespace
 // collapsed); blank lines dropped; the last lines that fit startErrTailMax
-// bytes kept, joined by " / ". A last line longer than that alone is cut at
-// the cap, on a rune boundary. "" for nothing to say.
+// bytes kept, joined by " / ". A last line longer than that alone keeps its
+// last startErrTailMax bytes, cut on a rune boundary (lastRunes): the agent's
+// last words, which say why it exited, and not the line's start, which can
+// hold a credential the agent printed before them. Nothing is redacted: the
+// tail is the end of what the host's log already holds. "" for nothing to
+// say.
 func stderrTailLine(raw []byte) string {
 	lines := strings.Split(string(raw), "\n")
 	var kept []string
@@ -90,7 +95,7 @@ func stderrTailLine(raw []byte) string {
 		}
 		if grown > startErrTailMax {
 			if len(kept) == 0 {
-				kept = append(kept, cutRunes(line, startErrTailMax))
+				kept = append(kept, lastRunes(line, startErrTailMax))
 			}
 			break
 		}
@@ -103,13 +108,16 @@ func stderrTailLine(raw []byte) string {
 	return strings.Join(kept, startErrTailSep)
 }
 
-// cutRunes is s cut to at most n bytes, on a rune boundary.
-func cutRunes(s string, n int) string {
+// lastRunes is the end of s, at most n bytes of it, cut on a rune boundary:
+// a rune the cut falls inside goes whole, and so does a space the cut leaves
+// first (s is sanitizeLine's, its whitespace single spaces).
+func lastRunes(s string, n int) string {
 	if len(s) <= n {
 		return s
 	}
-	for n > 0 && !utf8.RuneStart(s[n]) {
-		n--
+	i := len(s) - n
+	for i < len(s) && !utf8.RuneStart(s[i]) {
+		i++
 	}
-	return s[:n]
+	return strings.TrimLeft(s[i:], " ")
 }

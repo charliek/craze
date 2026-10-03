@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/charliek/craze/internal/acp"
 	"github.com/charliek/craze/internal/agent"
 	"github.com/charliek/craze/internal/protocol"
 	"github.com/charliek/craze/internal/remote"
@@ -108,6 +109,16 @@ func TestServeTakesTheHubsPID(t *testing.T) {
 // The cause A6 pins: craze's own error, then the fake agent's two lines.
 const a6Cause = "acp: agent exited: exit status 1: Error: KEYCHAIN LOCKED / Run unlock and retry."
 
+// a6Words runs the fake agent's exit-two-lines and makes a test that pins
+// a6Cause wait for the fake's whole stderr, whatever the machine's load,
+// rather than the production bounds (acp.StderrWaitEnv): in this process and
+// in every hub and host child it starts, which inherit its environment. The
+// waits end with the copy, and nothing holds the pipe after the fake's exit.
+func a6Words(t *testing.T) {
+	t.Setenv("CRAZE_FAKE_SCRIPT", "exit-two-lines")
+	t.Setenv(acp.StderrWaitEnv, "10s")
+}
+
 // The macOS login-session hint (plan 035 P3), spelled out so the test pins
 // the text: the shared head, then the hub's form or the terminal's.
 const (
@@ -194,7 +205,7 @@ func TestServeStartFailureSaysTheAgentsWords(t *testing.T) {
 				t.Skip("unforced, macOS's session is known")
 			}
 			env, ws := serveHome(t)
-			t.Setenv("CRAZE_FAKE_SCRIPT", "exit-two-lines")
+			a6Words(t)
 			t.Setenv(rundir.GUISessionEnv, tc.forced)
 			r := runServeIn(t, hostEnv{}, append([]string{"--agent-bin", tc.bin, "--workspace", ws}, tc.argv...)...)
 			e := r.waitServing(t, env, false)
@@ -209,10 +220,24 @@ func TestServeStartFailureSaysTheAgentsWords(t *testing.T) {
 			if tc.wantPrefix != "" && (!strings.HasPrefix(re.Cause, tc.wantPrefix) || strings.Contains(re.Cause, "login session")) {
 				t.Fatalf("data.cause %q, want %q… and no hint", re.Cause, tc.wantPrefix)
 			}
-			if !strings.Contains(r.stderr.String(), "craze serve: the session did not start: "+re.Cause+"\n") {
-				t.Fatalf("the host's log does not say the same: %s", r.stderr)
-			}
+			waitServeLog(t, r, "craze serve: the session did not start: "+re.Cause+"\n")
 		})
+	}
+}
+
+// waitServeLog waits, within serveStep, for craze serve's log to hold want.
+// Engine.Started publishes a failed start before serveHost.start writes it
+// on the log, so a row, a state or an attach refusal that says it can come
+// first (astra r11 6; plan 035 C5 found the same in
+// TestServeFailsAStartWhoseAgentCannotBeRecorded).
+func waitServeLog(t *testing.T, r *serveRun, want string) {
+	t.Helper()
+	deadline := time.Now().Add(serveStep)
+	for !strings.Contains(r.stderr.String(), want) {
+		if time.Now().After(deadline) {
+			t.Fatalf("the host's log does not say %q after %v: %s", want, serveStep, r.stderr)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 
@@ -223,7 +248,7 @@ func TestServeStartFailureSaysTheAgentsWords(t *testing.T) {
 // agent's spawn (serveAgentGroup) while the client attaches "now".
 func TestServeStartFailureWordsReachAnAttachedClient(t *testing.T) {
 	env, ws := serveHome(t)
-	t.Setenv("CRAZE_FAKE_SCRIPT", "exit-two-lines")
+	a6Words(t)
 	t.Setenv(rundir.GUISessionEnv, "0")
 	held, release := make(chan struct{}), make(chan struct{})
 	var once atomic.Bool
@@ -291,7 +316,7 @@ func TestNewSaysTheAgentsWordsThroughAHub(t *testing.T) {
 			if err := os.WriteFile(filepath.Join(env.CrazeDir, "config.toml"), []byte(config), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			t.Setenv("CRAZE_FAKE_SCRIPT", "exit-two-lines")
+			a6Words(t)
 			kids := hubAsChild(t, cliChildHubHosts+"=1", rundir.GUISessionEnv+"="+tc.forced)
 			ws := t.TempDir()
 			id, err := newRequestID()

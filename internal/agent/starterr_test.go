@@ -15,8 +15,8 @@ import (
 
 // TestStderrTailLineFoldsTheAgentsLastLines: the raw end of an agent's
 // stderr, folded onto one line — each shape the plan names, the 512-byte
-// budget taken from the end, and a last line longer than it cut on a rune
-// boundary.
+// budget taken from the end, and a last line longer than it keeping its own
+// end, cut on a rune boundary.
 func TestStderrTailLineFoldsTheAgentsLastLines(t *testing.T) {
 	line := func(c byte, n int) string { return strings.Repeat(string(c), n) }
 	hundreds := func(n, width int) (string, []string) {
@@ -47,9 +47,12 @@ func TestStderrTailLineFoldsTheAgentsLastLines(t *testing.T) {
 		{"exactly the cap", five, strings.Join(fiveEach[1:], " / ")},
 		{"one byte a line over", over, strings.Join(overEach[2:], " / ")},
 		{"a long line stops the choice", "early\n" + line('z', 600) + "\nlate\n", "late"},
-		{"one line over the cap", line('q', 600) + "\n", line('q', 512)},
-		// 512 is two bytes into the 171st three-byte rune: 170 whole ones.
-		{"a cut inside a rune", strings.Repeat("日", 200) + "\n", strings.Repeat("日", 170)},
+		{"one line over the cap", "start " + line('q', 600) + " end\n", line('q', 508) + " end"},
+		// The last 512 bytes of 603 begin at byte 91, one byte into the 31st
+		// three-byte rune, which goes whole: 169 runes, then "end".
+		{"a cut inside a rune", strings.Repeat("日", 200) + "end\n", strings.Repeat("日", 169) + "end"},
+		// The cut falls just after a space, which goes: no line starts with one.
+		{"a cut after a space", line('p', 100) + " " + line('r', 511) + "\n", line('r', 511)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got := stderrTailLine([]byte(tc.raw))
@@ -60,6 +63,28 @@ func TestStderrTailLineFoldsTheAgentsLastLines(t *testing.T) {
 				t.Fatalf("stderrTailLine = %d bytes, %q: over the cap or not one line", len(got), got)
 			}
 		})
+	}
+}
+
+// TestAnOversizedLastLineKeepsItsEnd (astra r11 3): an agent whose last line
+// begins with a credential and goes on past the budget — a token printed
+// before its diagnostics — has that line's end folded, its last words, and
+// not its start: the token stays in the host's log alone.
+func TestAnOversizedLastLineKeepsItsEnd(t *testing.T) {
+	const (
+		token = "Authorization: Bearer sk-SECRET0123456789abcdef"
+		last  = "the agent's last words."
+	)
+	said := token + " " + strings.Repeat("ordinary diagnostic text ", 40) + last
+	got := stderrTailLine([]byte("an earlier line\n" + said + "\n"))
+	if strings.Contains(got, "SECRET") || strings.Contains(got, "Bearer") {
+		t.Fatalf("the folded line carries the token from the last line's start: %q", got)
+	}
+	if !strings.HasSuffix(got, last) {
+		t.Fatalf("the folded line %q does not end with the agent's last words %q", got, last)
+	}
+	if want := said[len(said)-startErrTailMax:]; got != want {
+		t.Fatalf("stderrTailLine = %d bytes %q\nwant the line's last %d bytes %q", len(got), got, len(want), want)
 	}
 }
 
@@ -126,6 +151,9 @@ func TestAFailedStartSaysTheAgentsLastLines(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("CRAZE_FAKE_STDERR", tc.stderr)
+			// The exact words whatever the machine's load: the waits end with
+			// the copy, and nothing holds the pipe after the fake's exit.
+			t.Setenv(acp.StderrWaitEnv, "10s")
 			dir := filepath.Join(t.TempDir(), "journal")
 			s := newTestSession(t, Options{
 				Binary:              fakeAgentPath(t),

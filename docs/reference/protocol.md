@@ -599,13 +599,16 @@ will start a session: a repeat (below) is answered without them. A host that fai
 `unavailable`, reason `spawn_failed` — the hub has ended it. A session whose
 start fails — its agent binary missing, a locked keychain — or does not end
 within 60 s is `not_accepting`, reason `start_failed`, `data.cause` the
-host's first error line. For a start that failed because its agent exited,
-that line is craze's error followed by the agent's last non-blank stderr
-lines (sanitized, folded onto the line with ` / `, at most 512 bytes:
-`acp: agent exited: exit status 1: Error: Your macOS login keychain is
-locked. / Run security unlock-keychain and try again.`), and on macOS, when
-the host runs outside the GUI login session, a hint naming the hub's pid
-(below); none of it is a field of its own. The hub stops that host
+host's first error line. For a start that failed because its agent exited
+with a non-zero status or a signal after craze sent `initialize`, that line
+is craze's error followed by the agent's last non-blank stderr lines — what
+reached craze within half a second of the exit, sanitized, folded onto the
+line with ` / `, at most 512 bytes, not redacted: `acp: agent exited: exit
+status 1: Error: Your macOS login keychain is locked. / Run security
+unlock-keychain and try again.` — and on macOS, when the host runs outside
+the GUI login session, a hint naming the hub's pid (below). An agent that
+exits before `initialize` is sent, or exits 0, leaves craze's error alone,
+with no hint. None of it is a field of its own. The hub stops that host
 (`session.stop`, then, its own child, its termination: SIGTERM, a grace,
 SIGKILL, and its reap) — a host
 that does not exit even then, stuck in an uninterruptible wait, is left as

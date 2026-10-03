@@ -2,7 +2,9 @@ package acp
 
 import (
 	"io"
+	"os"
 	"sync"
+	"testing"
 	"time"
 	"unicode/utf8"
 )
@@ -72,6 +74,29 @@ func (t *stderrTail) tail() []byte {
 		}
 	}
 	return out
+}
+
+// StderrWaitEnv stretches, in a test process — a test binary
+// (testing.Testing), or a host or hub a test re-executed — every bounded wait
+// for the copy of an agent's stderr to reach its end to the duration it holds
+// (time.ParseDuration, above zero): the reaper's before the reap closes the
+// pipe under the copy (drainStderr), and a failed start's for its agent's
+// words (the agent package's). A test that pins those words exactly then
+// does not depend on a starved copy finishing within the production bounds.
+// Each wait ends as soon as the copy does, so a long one costs nothing when
+// nothing holds the pipe. Anything else, and every process that is not a
+// test binary's, waits the production bound.
+const StderrWaitEnv = "CRAZE_TEST_STDERR_TAIL_WAIT"
+
+// StderrWait is d, a bound on a wait for the copy of an agent's stderr to
+// reach its end — or, in a test process, StderrWaitEnv's duration.
+func StderrWait(d time.Duration) time.Duration {
+	if testing.Testing() {
+		if v, err := time.ParseDuration(os.Getenv(StderrWaitEnv)); err == nil && v > 0 {
+			return v
+		}
+	}
+	return d
 }
 
 // StderrTail is the last 2 KiB of what the agent wrote to its stderr, raw:
