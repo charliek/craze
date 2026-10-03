@@ -361,8 +361,8 @@ type Session struct {
 
 	// openTable is Options.Table, the table the session was opened with,
 	// fixed at Open: spend prices a usage whose identity the current table
-	// does not price with it (spend.go, plan 034 §3.4), so a swap that drops
-	// a model the session spent on never changes what it spent.
+	// does not price with it, when it first counts it (spend.go, plan 034
+	// §3.4) — a resumed transcript's usage on a model no longer listed, say.
 	openTable *modeltable.Table
 	// setModelBuilt runs in SetModel once the new model's client is built and
 	// before the switch is installed, with no lock held: the window a SetTable
@@ -408,8 +408,14 @@ type Session struct {
 	autoOff suppression
 	// unsaved is the usage this incarnation was billed for that no entry
 	// holds (spend.go, plan 028 §3.14): a session's spend counts it beside
-	// the transcript's.
+	// the transcript's, each at the price it was noted with.
 	unsaved []unsavedUsage
+	// prices are the rates every usage the session's spend has counted was
+	// priced at, by the entry that holds it and its identity (spend.go):
+	// recorded the first time it is counted, by the table the session held
+	// when it was used, and kept, so a table swapped in later neither
+	// unprices nor reprices it (plan 034 C4r, r9 #5).
+	prices map[usageKey]priced
 }
 
 // renderer is what the session hands its store (store.Renderer, plan 028
@@ -853,11 +859,15 @@ func (s *Session) SetModel(alias string) error {
 //
 // t becomes the session's: SetTable writes the carried entries into it, so it
 // must be a table no session holds — a fresh Load — and the caller must not
-// change it afterwards. Keys are not learned here: the
-// caller teaches the session the new table's keys first (LearnKeys), having
-// withheld any it cannot take (FrozenKey, modeltable.Table.WithholdFrozen).
-// The current model and effort are untouched, and nothing is written to the
-// transcript.
+// change it afterwards. Keys are not learned here: the caller teaches the
+// session the new table's keys (LearnKeys) once SetTable has taken it, and
+// never for a table it refused — a turn is running then, and a key learned
+// under it that is inside the frozen prompt would end it (plan 034 C4r, r9
+// #7a) — having withheld any it cannot take (FrozenKey,
+// modeltable.Table.WithholdFrozen). Nothing can use the new table before the
+// keys are learned: no turn runs, and the native adapter starts none while
+// its reload holds the swap. The current model and effort are untouched, and
+// nothing is written to the transcript.
 func (s *Session) SetTable(t *modeltable.Table, match func(raw string) (alias string, ok bool)) error {
 	if t == nil {
 		return errors.New("harness: no model table")
@@ -1110,7 +1120,9 @@ func (s *Session) Redact(text string) string { return s.redactor().String(text) 
 // A new key inside what the session sends unredacted with every request — its
 // system prompt, its encoded tools or its plan file's path — is learned all the
 // same, and puts the session in the refusal state: every Run, Compact and Wake
-// from then on is ErrStoredKeyFrozen, until Close (r2-2). LearnKeys returns
+// from then on is ErrStoredKeyFrozen, until Close (r2-2), and a turn running
+// as it is learned sends no request after its next step boundary and ends
+// with it (turn.refusingNow, plan 034 C4r). LearnKeys returns
 // ErrStoredKeyFrozen from the call that found one; nil otherwise, including
 // from a later call on a session already refusing.
 //

@@ -27,36 +27,45 @@ import (
 //
 // A reload (reloadModels) is one transaction, and every reload and every
 // switch takes turns on one lock, modelsMu, which is never taken under s.mu or
-// any lock of the harness's, and under which nothing slow but the files'
-// reading happens — no network, no turn:
+// any lock of the harness's. What runs under it is local: the files' reading
+// — a reload's, and a switch's model memory — and a switch's building of its
+// model's client (harness SetModel; r9 #1). No network, no turn:
 //
 //  1. The five inputs are stat'ed, through their path helpers, before anything
 //     is read: providers.toml, models.toml, the plan's registration
 //     (auth/chatgpt-client.json), its model list (chatgpt-models.json) and its
 //     sign-in (auth/chatgpt.json, stat only — Resolve reads its state). If none
 //     changed since the last reload that was published — and the list was not
-//     just fetched — the answer is ModelsCurrent.
+//     just fetched, nor fetched while a reload was held back (forced) — the
+//     answer is ModelsCurrent.
 //  2. Outside every lock of the adapter's and the harness's: the table is
 //     loaded; the running model's entry is carried into it unchanged (Q16,
 //     modeltable.Table.Carry); every provider whose key the session cannot take
-//     — one inside its frozen prompt, tools or plan path — is withheld, with
-//     one note (A22, WithholdFrozen); the session is taught every key the
-//     table holds (LearnKeys), so a model it offers is one whose key it
-//     redacts; and the picker's list (Choices, with the model memory read now,
-//     one sealed reading of the environment and the running model), the
-//     efforts and the matcher are built from it.
+//     — one inside its frozen prompt, tools or plan path — is withheld
+//     (A22, WithholdFrozen); its keys are read (Keys); and the picker's list
+//     (Choices, with the model memory read now, one sealed reading of the
+//     environment and the running model), the efforts and the matcher are
+//     built from it.
 //  3. A generation is taken: the list's revision, monotonic.
 //  4. While the session is not started, loading or closed, nothing is
 //     published: a load's replay bracket holds the reload until its end
 //     bracket is out (A19), when it is taken up.
-//  5. The harness takes the table (SetTable). While a turn runs it refuses
-//     (ErrTurnRunning): the reload is owed, and the turn's end — every end: a
-//     success, a cancel, a withdrawal, a failure, a wake's, a /compact's —
-//     takes it up, before the next turn's claim (owed below).
+//  5. While a turn holds the session's claim — from its Begin until its
+//     ending is out — the reload is owed, decided before the harness is asked
+//     (r9 #4): the turn's end — every end: a success, a cancel, a withdrawal,
+//     a failure, a wake's, a /compact's — takes it up once the ending is out,
+//     before the next turn's claim (owed below). The turn's own start reload
+//     (reloadTurn) is the one that goes on under the claim, before the
+//     harness's turn begins. Otherwise the harness takes the table
+//     (SetTable), and only then is the session taught every key the table
+//     holds (LearnKeys), so a model it offers is one whose key it redacts,
+//     and an owed reload learns nothing until it is taken up (r9 #7a); a
+//     withheld provider gets its one note.
 //  6. In one s.mu section, the adapter's table, list, efforts and revision
 //     change together, and the StateDelta.Catalog saying so — with the effort
 //     option, should the running model's have changed — is enqueued in that
-//     section. A generation older than the one published is dropped.
+//     section, and marked for the next turn's edge to flush
+//     (catalogQueued). A generation older than the one published is dropped.
 //
 // Only a reload that published records the stamps it took in step 1, so one
 // that failed or is owed is made again. A failed Load records nothing and is
@@ -64,7 +73,11 @@ import (
 //
 // SetModel and SetConfig take modelsMu across their reading of the list and
 // the harness's switch, so a switch is judged against the very list the
-// session offers: the picker never offers what SetModel refuses (A24).
+// session offers: the picker never offers what SetModel refuses (A24). A
+// switch to the model the session runs on builds it again while the table
+// resolves it, and changes nothing when it does not (the carry: its client is
+// kept); a switch away from a model the table no longer funds takes it off
+// the list, in the switch's own delta (r9 #1).
 //
 // # Triggers (Q14)
 //
@@ -119,6 +132,9 @@ type modelsWatch struct {
 	// gen numbers the reloads that got as far as a table to publish: the
 	// revision of the list each would publish.
 	gen uint64
+	// forced says a fetched list's reload was held back (heldBack): the next
+	// reload reads the files whatever their stamps say, as reloadFetched does.
+	forced bool
 	// problem is the last failure journaled, so one that stays is said once.
 	problem string
 	// withheld are the providers already said to be withheld (A22), so each
@@ -184,16 +200,18 @@ func (s *nativeSession) reloadLocked(reason reloadReason) ModelsStatus {
 	case closed:
 		return ModelsFailed
 	case loading:
-		return ModelsPending
+		return s.heldBack(reason)
 	case hs == nil:
 		return ModelsFailed
 	case !s.models.reloadable:
 		return ModelsCurrent
 	}
 
-	// Step 1: the stamps, before anything is read.
+	// Step 1: the stamps, before anything is read. A fetched list a turn or
+	// a load held back is read whatever they say (forced), as its own reload
+	// would have read it.
 	stamps := statModelInputs(home)
-	if s.models.read && stamps == s.models.stamps && reason != reloadFetched {
+	if s.models.read && stamps == s.models.stamps && reason != reloadFetched && !s.models.forced {
 		return ModelsCurrent
 	}
 	if seam := s.reloadSeam; seam != nil {
@@ -211,7 +229,7 @@ func (s *nativeSession) reloadLocked(reason reloadReason) ModelsStatus {
 	defer release()
 	current, _ := hs.Current()
 	t.Carry(prev, current)
-	s.noteWithheld(hs, t.WithholdFrozen(getenv, hs.FrozenKey, current))
+	withheld := t.WithholdFrozen(getenv, hs.FrozenKey, current)
 	keys, err := t.Keys(getenv)
 	if err != nil {
 		// Unreachable for a table Load returned: it refuses an inline key Keys
@@ -219,12 +237,6 @@ func (s *nativeSession) reloadLocked(reason reloadReason) ModelsStatus {
 		s.noteReloadFailed(hs, err)
 		return ModelsFailed
 	}
-	// The keys are learned before anything offers a model they fund. None is
-	// inside a frozen surface — WithholdFrozen took those out — but for one
-	// stored for the running model's own provider, which the turn-start look
-	// at providers.toml has already put the session in its refusal state for
-	// (native_keys.go).
-	_, _ = hs.LearnKeys(keys)
 	infos := choiceInfos(t.Choices(modeltable.ReadRecent(home), getenv, current))
 	efforts := make(map[string][]string, len(t.Models))
 	for alias, m := range t.Models {
@@ -239,31 +251,65 @@ func (s *nativeSession) reloadLocked(reason reloadReason) ModelsStatus {
 		seam("computed")
 	}
 
-	// Step 5. A turn that holds the harness makes the reload owed: its end
-	// takes it up. The claim is read in the section that marks it owed, and
-	// a turn's end reads the mark in the section that releases its claim
-	// (prompt, endWake), so either this marking is before that release — and
-	// the end takes it up — or the claim is already released, the harness's
-	// turn with it, and the swap is tried again here. A turn begun meanwhile
-	// holds the claim, and its end takes the reload up.
-	for attempt := 0; ; attempt++ {
-		err = hs.SetTable(t, match)
-		if !errors.Is(err, harness.ErrTurnRunning) {
-			break
-		}
-		s.mu.Lock()
-		owed := (s.claimed && !s.closed) || attempt == 2
-		if owed {
-			s.reloadOwed = true
-		}
-		s.mu.Unlock()
-		if owed {
-			return ModelsPending
-		}
+	// Step 5. A turn's claim — a prompt's or a wake's, from its Begin to the
+	// section that releases it, after its ending is out — makes the reload
+	// owed, decided here, before the harness is asked: the harness's own
+	// refusal ends with its turn, before the adapter's ending (EventDone) is
+	// out, and a catalog published in between would reach a client ahead of
+	// the ending (r9 #4). The claim is read in the section that marks the
+	// reload owed, and a turn's end reads the mark in the section that
+	// releases its claim (prompt, endWake), so either this marking is before
+	// that release — and the end takes it up — or the claim is already
+	// released and the turn's ending out. The one reload that goes on under a
+	// claim is the turn's own (reloadTurn): it runs before the harness's turn
+	// begins, and its catalog is flushed before the turn says anything
+	// (reloadFlushed). A claim taken after this reading waits for the reload
+	// at its own turn-start reload, which takes modelsMu, and flushes what
+	// this one publishes (catalogQueued).
+	s.mu.Lock()
+	closed = s.closed
+	held := !closed && s.claimed && reason != reloadTurn
+	if held {
+		s.reloadOwed = true
 	}
-	if err != nil {
+	s.mu.Unlock()
+	switch {
+	case closed:
+		return ModelsFailed
+	case held:
+		return s.heldBack(reason)
+	}
+	if seam := s.reloadSeam; seam != nil {
+		seam("unclaimed")
+	}
+	if err := hs.SetTable(t, match); err != nil {
+		if errors.Is(err, harness.ErrTurnRunning) {
+			// A harness turn with no claim of the adapter's: none in this
+			// adapter, whose every turn and replay runs under a claim or the
+			// load's bracket — the next turn's start, or its end, takes it up.
+			s.mu.Lock()
+			s.reloadOwed = true
+			s.mu.Unlock()
+			return s.heldBack(reason)
+		}
 		return ModelsFailed // closed
 	}
+	// The keys are learned only now, by a reload the harness has taken — never
+	// by one that is owed, which learns them when it is taken up (r9 #7a): a
+	// turn is running then, and a key it learned that is inside the frozen
+	// prompt would leave that turn sending what the session knows to be a
+	// key. Nothing has used the new table yet: no turn runs (SetTable), none
+	// can begin before its own turn-start reload — which waits for modelsMu —
+	// and nothing offers a model of it before step 6. None is inside a frozen
+	// surface — WithholdFrozen took those out — but for one stored for the
+	// running model's own provider, which puts the session in its refusal
+	// state, said once, as the turn-start look at providers.toml says it.
+	if _, err := hs.LearnKeys(keys); errors.Is(err, harness.ErrStoredKeyFrozen) {
+		s.note(nativeSafe{red: hs.Redact}.line(fmt.Sprintf(
+			"a key stored in %s since this session started appears in its frozen prompt; every turn from now on is refused — start a new session",
+			filepath.Join(home, modeltable.ProvidersFile))))
+	}
+	s.noteWithheld(hs, withheld)
 
 	// Step 6.
 	s.mu.Lock()
@@ -281,9 +327,22 @@ func (s *nativeSession) reloadLocked(reason reloadReason) ModelsStatus {
 		delta.Config = &ConfigState{Options: cloneConfig(s.snap.Config)}
 	}
 	s.enqueueDeltaLocked("", Event{}, delta)
+	s.catalogQueued = true
 	s.mu.Unlock()
-	s.models.stamps, s.models.read = stamps, true
+	s.models.stamps, s.models.read, s.models.forced = stamps, true, false
 	return ModelsApplied
+}
+
+// heldBack is a reload held back — by a load's replay or a turn's claim, and
+// marked owed (s.reloadOwed) in the section that read which, for the load's
+// end or the turn's to take up (steps 4, 5) — and says so: ModelsPending. A
+// fetched list's reload makes the one that takes it up read the files
+// whatever their stamps say (forced). modelsMu is held.
+func (s *nativeSession) heldBack(reason reloadReason) ModelsStatus {
+	if reason == reloadFetched {
+		s.models.forced = true
+	}
+	return ModelsPending
 }
 
 // noteReloadFailed journals a table that would not load (diagModelsReload),
@@ -333,20 +392,29 @@ func (s *nativeSession) takeOwedLocked() bool {
 	return owed
 }
 
-// reloadFlushed is a reload at a turn's edge and, when it published, the
-// delta flushed with it, since what a turn publishes does not wait for the
-// outbox (prompt's behindAWake). It holds no lock. Its two reasons:
+// reloadFlushed is a reload at a turn's edge and, when a catalog is queued
+// — its own, or one a reload or a switch published since the last turn's
+// edge (catalogQueued) — the outbox flushed with it, since what a turn
+// publishes does not wait for the outbox (prompt's behindAWake). It holds no
+// lock. Its two reasons:
 //
 //   - reloadTurn, a turn's own reload (Q14 a), beside its key learning and
-//     before the harness's claim: a model funded since the last turn is
-//     offered from this turn on, and a sub-agent this turn starts can name
-//     it; the list is out before the turn says anything;
+//     under the turn's claim, before the harness's turn begins: a model
+//     funded since the last turn is offered from this turn on, and a
+//     sub-agent this turn starts can name it; the list is out before the turn
+//     says anything — and so is one a reload that read the claim free just
+//     before it was taken published meanwhile (step 5);
 //   - reloadOwed, a turn's or a load's end taking up a reload that was owed,
-//     before the next turn's claim, whose own start reloads too: the list a
-//     turn's end left is the one a client folds before the next turn's first
-//     event.
+//     once the claim is released and the turn's ending out, before the next
+//     turn's claim, whose own start reloads too: the list a turn's end left
+//     is the one a client folds before the next turn's first event.
 func (s *nativeSession) reloadFlushed(reason reloadReason) {
-	if s.reloadModels(reason) == ModelsApplied {
+	s.reloadModels(reason)
+	s.mu.Lock()
+	queued := s.catalogQueued
+	s.catalogQueued = false
+	s.mu.Unlock()
+	if queued {
 		_ = s.log.Flush(context.Background(), s.done)
 	}
 }

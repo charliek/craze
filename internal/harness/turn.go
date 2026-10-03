@@ -456,6 +456,10 @@ func (s *Session) run(ctx context.Context, text string, files []fantasy.FilePart
 	for {
 		res, err := agent.Stream(turnCtx, t.call(prompt, promptFiles, history))
 		switch {
+		case t.refusedRequest(err):
+			// A key learned since the last boundary is in every request the
+			// turn would send (refusingNow): the request was not sent.
+			return t.stopBeforeRequest(err)
 		case t.restartDue(err):
 			// Between requests: the completed step's call state is retired and
 			// nothing is outstanding, so a cancel here — during the summarizer —
@@ -697,6 +701,12 @@ type turn struct {
 	usage   Usage  // that step's usage
 	saveErr error  // the first failed append of a finished step
 	badIDs  bool   // a step's tool calls had an unusable provider id (ErrBadToolCalls)
+	// refused says a step boundary found the session in its refusal state
+	// (ErrStoredKeyFrozen, plan 031 §3.8): a key learned while the turn ran,
+	// by whatever path, is inside what every request of it sends, so the turn
+	// sends no request after that boundary and ends with the refusal (plan
+	// 034 C4r, r9 #7a; refusingNow).
+	refused bool
 
 	calls // this step's tool calls (toolbridge.go)
 
@@ -953,7 +963,26 @@ func requestHeaders(r modeltable.Resolved, sessionID string) map[string]string {
 func (t *turn) halted([]fantasy.StepResult) bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	return t.saveErr != nil || t.badIDs || t.loop.stopped || t.planApproved || t.ctx.Err() != nil
+	return t.refusingNow() || t.saveErr != nil || t.badIDs || t.loop.stopped || t.planApproved || t.ctx.Err() != nil
+}
+
+// refusingNow is the refusal state checked at a step boundary — after a step
+// (halted), before a request (prepareStep), before a segment's or an
+// overflow's compaction (restartDue, overflowed) — and remembered for the
+// turn (refused). begin refuses a turn in that state before anything is
+// sent; this is the defence in depth for a key learned while the turn runs
+// (plan 034 C4r, r9 #7a): the native adapter learns a reload's keys only when
+// no turn holds the session, but a key learned mid-turn by any path — a
+// stored key, a sign-in's token — that is inside the frozen prompt, the tools
+// or the plan path is in every request the turn would still send, so none is
+// sent after the boundary that sees it, and the turn ends with the refusal
+// (finish, stopBeforeRequest). A turn a test built with no toolset is never
+// refusing. mu is held.
+func (t *turn) refusingNow() bool {
+	if !t.refused && t.tools != nil && t.tools.refusing.Load() {
+		t.refused = true
+	}
+	return t.refused
 }
 
 // compactionDue is the segmented turn's stop condition (plan 028 §3.11 item
@@ -984,7 +1013,9 @@ func (t *turn) restartDue(err error) bool {
 	if err != nil || !t.compactDue {
 		return false
 	}
-	if t.saveErr != nil || t.badIDs || t.loop.stopped || t.planApproved || t.ctx.Err() != nil || t.step >= maxSteps {
+	// refusingNow first: the compaction's summarizer request sends the frozen
+	// prompt too.
+	if t.refusingNow() || t.saveErr != nil || t.badIDs || t.loop.stopped || t.planApproved || t.ctx.Err() != nil || t.step >= maxSteps {
 		return false
 	}
 	t.resetCalls(true)
@@ -1010,7 +1041,7 @@ func (t *turn) overflowed(err error) bool {
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	if t.ctx.Err() != nil || t.saveErr != nil || t.badIDs || t.loop.stopped || t.planApproved || t.step >= maxSteps {
+	if t.refusingNow() || t.ctx.Err() != nil || t.saveErr != nil || t.badIDs || t.loop.stopped || t.planApproved || t.step >= maxSteps {
 		return false
 	}
 	return errors.Is(classify(err, t.model.r), ErrContextTooLarge)
@@ -1379,6 +1410,10 @@ func (t *turn) finish(res *fantasy.AgentResult, err error) (out Result, ferr err
 			return Result{}, fmt.Errorf("harness: saving the answer: %w", t.tools.redactErr(t.saveErr))
 		case t.badIDs:
 			return Result{}, badToolCalls(t.model.id())
+		case t.refused:
+			// A step boundary found the session refusing (refusingNow): the
+			// steps so far are persisted, and no request followed.
+			return Result{}, ErrStoredKeyFrozen
 		}
 		stop := StopEndTurn
 		if t.stepped {
@@ -1443,6 +1478,15 @@ func (t *turn) finish(res *fantasy.AgentResult, err error) (out Result, ferr err
 		return Result{StopReason: t.stop, Usage: t.total}, nil
 	case cancelled:
 		return Result{StopReason: StopCancelled}, nil
+	case t.refused:
+		// The failure was an overflow the turn would have compacted for, and
+		// the summarizer's request sends the frozen prompt too (overflowed):
+		// the turn ends with the refusal instead.
+		if saveErr != nil {
+			return Result{}, errors.Join(ErrStoredKeyFrozen,
+				fmt.Errorf("harness: saving the interrupted answer: %w", t.tools.redactErr(saveErr)))
+		}
+		return Result{}, ErrStoredKeyFrozen
 	case saveErr != nil:
 		return Result{}, errors.Join(t.classify(err),
 			fmt.Errorf("harness: saving the interrupted answer: %w", t.tools.redactErr(saveErr)))
@@ -1463,6 +1507,13 @@ func (t *turn) finish(res *fantasy.AgentResult, err error) (out Result, ferr err
 // between requests the steps so far are in the transcript and stay there,
 // written once. A save failure fails the turn; a cancel is a cancelled turn,
 // with no usage, as a cancel after a tool step has always been (R3-3).
+//
+// It also ends a turn whose next request prepareStep refused because the
+// session is refusing (refusingNow, plan 034 C4r): before any request of the
+// segment, or after a finished step, which is persisted and its calls
+// answered — settled again here, a no-op for every call that ran, as finish's
+// defence is — so the turn fails with ErrStoredKeyFrozen, and persists
+// nothing more.
 func (t *turn) stopBeforeRequest(err error) (Result, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -1471,7 +1522,23 @@ func (t *turn) stopBeforeRequest(err error) (Result, error) {
 	if errors.As(err, new(*errCompactionSaveFailed)) {
 		return Result{Unanswered: unanswered}, fmt.Errorf("harness: saving the compaction: %w", t.tools.redactErr(err))
 	}
+	if t.refused && errors.Is(err, ErrStoredKeyFrozen) {
+		t.settleCalls(incomplete)
+		return Result{Unanswered: unanswered}, ErrStoredKeyFrozen
+	}
 	return Result{StopReason: StopCancelled, Unanswered: unanswered}, nil
+}
+
+// refusedRequest reports whether err, the error a segment's agent.Stream
+// returned, is prepareStep's refusal of the request it was preparing
+// (refusingNow): nothing of that request went out.
+func (t *turn) refusedRequest(err error) bool {
+	if !errors.Is(err, ErrStoredKeyFrozen) {
+		return false
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.refused
 }
 
 // saveInterrupted appends the step a cancel or a failure cut short, marked

@@ -142,7 +142,8 @@ type Backend interface {
 	// replaced by each Ready and Restore as the stream receives them. A
 	// native session's model list can change while it runs (plan 034 §3.4):
 	// each change is a StateDelta.Catalog in the stream, which a client's
-	// fold holds and prefers to this list (tui's mirror). It waits on
+	// fold holds, and a client shows whichever of the two is the newer by
+	// revision (SessionInfo.CatalogRevision; tui's mirror). It waits on
 	// nothing, and before Start (over the socket: before the first attach
 	// reply) it reflects the configured provider, as the TUI does today
 	// (GLM 11).
@@ -294,6 +295,12 @@ type SessionInfo struct {
 	// and mode catalogs, empty until the session is ready.
 	Models []agent.ModelInfo
 	Modes  []agent.ModeInfo
+	// CatalogRevision is the revision of Models (agent.Snapshot's, plan 034
+	// §3.4): 0 for the list a session started with, and for a backend that
+	// does not say — over the socket until the wire carries it (C5). A
+	// client that also folds the stream's catalog section shows whichever of
+	// the two lists is newer (C4r, r9 #8), never an older one.
+	CatalogRevision uint64
 	// RetryHorizon is the command-id table's bound: within it a resent
 	// command id is answered from the table and never re-executes.
 	RetryHorizon engine.RetryHorizon

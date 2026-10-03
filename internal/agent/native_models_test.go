@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"charm.land/fantasy"
@@ -235,11 +236,20 @@ func TestNativeRefreshFollowsASignInAndASignOut(t *testing.T) {
 // list, which a session's open starts for a list that is stale, writes a list
 // that names a model the open did not have; its completion reloads the table
 // through the same transaction, and the session offers the model — a session
-// now sees its own fetch. The control: the open did not offer it. Negative
-// control: a fetch that does not reload leaves the list as it opened.
+// now sees its own fetch. The control: the open did not offer it — read
+// while the fixture holds the fetch's answer back, so the fetch cannot have
+// been taken up before the test looks (r9 #10). Negative control: a fetch
+// that does not reload leaves the list as it opened.
 func TestNativeFetchedListIsTakenUp(t *testing.T) {
 	api, _ := noOpenAI(t)
-	api.queue(func(w http.ResponseWriter, _ *http.Request) {
+	captured := make(chan struct{})
+	t.Cleanup(func() { closeOnce(captured) })
+	api.queue(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-captured:
+		case <-r.Context().Done():
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = io.WriteString(w, `{"models":[{"slug":"gpt-6.1-sol","display_name":"GPT-6.1 Sol","visibility":"list","priority":0,`+
 			`"context_window":272000,"input_modalities":["text"],"supported_reasoning_levels":[{"effort":"low"}],"default_reasoning_level":"low"}]}`)
@@ -262,6 +272,7 @@ func TestNativeFetchedListIsTakenUp(t *testing.T) {
 	refreshed := s.refreshed
 	opened := offeredIDs(s.snap.Models)
 	s.mu.Unlock()
+	close(captured)
 	if refreshed == nil {
 		t.Fatal("a stale list started no fetch")
 	}
@@ -656,5 +667,314 @@ func TestNativeReloadFailureIsOneValueFreeNote(t *testing.T) {
 	}
 	if l := nativeLeaks(lines, "sk-not-a-key-in-a-note-0206"); len(l) > 0 {
 		t.Fatalf("the file's text reached the journal at %v", l)
+	}
+}
+
+// eventIndex is the index of the first event of evs ok reports, -1 for none.
+func eventIndex(evs []Event, ok func(Event) bool) int {
+	return slices.IndexFunc(evs, ok)
+}
+
+// TestNativeTheUnfundedCarry (A20, A24; plan 034 C4r, r9 #1): the model
+// the session runs on, asked for again while the table still resolves it, is
+// built again from the table — so a rotated key is taken up: the build the
+// switch makes carries it. Kept listed by a reload whose table no longer
+// funds it (the carry), it is offered, and asking for it again is a
+// successful no-op that keeps its client: nothing is built, which would fail
+// for its missing key, and a turn still runs on it. A switch away to a funded
+// model takes it off the list in the switch's own delta, at a higher
+// revision; every model the list offers then is one SetModel switches to,
+// and the carry left behind is not one. The control: the carry was listed
+// before the switch away. Negative controls: a reselect that never builds
+// leaves the rotated key unused; one that always builds fails the carry with
+// its missing key; a switch away that does not drop the unfunded carry
+// leaves test/a offered.
+func TestNativeTheUnfundedCarry(t *testing.T) {
+	const rotated = "sk-test-rotated-0344"
+	f := newNativeFixture(t)
+	var mu sync.Mutex
+	var builds []bool // each build of test/a: whether it carried the rotated key
+	f.edit = func(o *harness.Options) {
+		build := o.NewModel
+		o.NewModel = func(r modeltable.Resolved) (fantasy.LanguageModel, error) {
+			if r.Alias == "test/a" {
+				mu.Lock()
+				builds = append(builds, r.APIKey.Reveal() == rotated)
+				mu.Unlock()
+			}
+			return build(r)
+		}
+	}
+	built := func() []bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return slices.Clone(builds)
+	}
+	s := f.started(Options{})
+	if b := built(); len(b) != 1 || b[0] {
+		t.Fatalf("premise: Start built test/a %d times (%v); want once, on the key it opened with", len(b), b)
+	}
+
+	// Resolved: asked for again, it is built again, and takes up the
+	// rotated key.
+	f.env["NATIVE_TEST_KEY"] = rotated
+	if out, err := s.SetModel(context.Background(), "", "test/a"); err != nil || out.Value != "test/a" {
+		t.Fatalf("reselecting the running model = %+v, %v", out, err)
+	}
+	if b := built(); len(b) != 2 || !b[1] {
+		t.Fatalf("after the reselect test/a was built %d times (%v); want once more, on the rotated key", len(b), b)
+	}
+
+	// Unresolved, the carry: a no-op that keeps its client.
+	unfunded := nativeTestTable("http://127.0.0.1:9/v1")
+	p := unfunded.Providers["test"]
+	p.EnvKeys = []string{"NATIVE_GONE_KEY"}
+	unfunded.Providers["test"] = p
+	saveTable(t, f.dir, unfunded)
+	refreshApplied(t, s, "")
+	snap := s.Snapshot()
+	if !slices.Contains(offeredIDs(snap.Models), "test/a") || snap.CurrentModel != "test/a" {
+		t.Fatalf("control: the carry is not listed (%v on %s)", offeredIDs(snap.Models), snap.CurrentModel)
+	}
+	_ = deltaSettled(t, s)
+
+	out, err := s.SetModel(context.Background(), "", "test/a")
+	if err != nil || out.Value != "test/a" {
+		t.Fatalf("reselecting the unfunded carry = %+v, %v; want a successful no-op", out, err)
+	}
+	if b := built(); len(b) != 2 {
+		t.Fatalf("reselecting the carry built test/a again (%d builds); want its client kept", len(b))
+	}
+	if snap := s.Snapshot(); !slices.Contains(offeredIDs(snap.Models), "test/a") || snap.CurrentModel != "test/a" {
+		t.Fatalf("after reselecting it the list is %v on %s; want test/a, current and listed", offeredIDs(snap.Models), snap.CurrentModel)
+	}
+	f.models["test/a"].push(answer("still a"))
+	if _, err := s.Prompt(context.Background(), "go on"); err != nil {
+		t.Fatalf("a turn on the reselected carry: %v", err)
+	}
+	rev := s.Snapshot().CatalogRevision
+	_ = deltaSettled(t, s)
+
+	if _, err := s.SetModel(context.Background(), "", "other/c"); err != nil {
+		t.Fatalf("a switch to a funded model: %v", err)
+	}
+	snap = s.Snapshot()
+	if slices.Contains(offeredIDs(snap.Models), "test/a") || snap.CatalogRevision <= rev {
+		t.Fatalf("after the switch away the list is %v at revision %d; want test/a gone, past %d", offeredIDs(snap.Models), snap.CatalogRevision, rev)
+	}
+	evs := deltaSettled(t, s)
+	i := eventIndex(evs, func(ev Event) bool { return hasCatalog(ev) && ev.State.Model != nil })
+	if i < 0 || *evs[i].State.Model != "other/c" || evs[i].State.Catalog.Revision != snap.CatalogRevision ||
+		slices.Contains(offeredIDs(evs[i].State.Catalog.Models), "test/a") {
+		t.Fatalf("the switch published %+v; want one delta with the model and the list without test/a", evs)
+	}
+	everyOfferedSwitches(t, s)
+	if _, err := s.SetModel(context.Background(), "", "test/a"); err == nil {
+		t.Fatal("a switch back to the carry left behind was taken")
+	}
+}
+
+// TestNativeRefreshAtATurnsEdgesIsOwed (A18; plan 034 C4r, r9 #4): a refresh
+// while a turn holds the session's claim is pending even where the harness
+// holds no turn — between the turn's own start reload and the harness's
+// turn, and between the harness's turn returning and the turn's ending going
+// out — so its catalog is never published inside the turn: it is taken up at
+// the turn's end, after EventDone. Negative control: a reload that reads only
+// the harness's refusal publishes in either window — applied, its catalog
+// ahead of the ending in the second.
+func TestNativeRefreshAtATurnsEdgesIsOwed(t *testing.T) {
+	for _, stage := range []string{"started", "ran"} {
+		t.Run(stage, func(t *testing.T) {
+			f := newNativeFixture(t)
+			s := f.session(Options{})
+			var status ModelsStatus
+			var once sync.Once
+			s.turnSeam = func(at string) {
+				if at != stage {
+					return
+				}
+				once.Do(func() {
+					if err := modeltable.SetKey(f.dir, "nokey", "sk-nokey-at-the-edge-0342"); err != nil {
+						t.Error(err)
+					}
+					r, err := s.RefreshModels(context.Background(), "")
+					if err != nil {
+						t.Error(err)
+					}
+					status = r.Status
+				})
+			}
+			if err := s.Start(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			takeStartDelta(t, s.log)
+			f.models["test/a"].push(answer("hi"))
+			if _, err := s.Prompt(context.Background(), "hello"); err != nil {
+				t.Fatalf("the turn: %v", err)
+			}
+			if status != ModelsPending {
+				t.Errorf("a refresh at the turn's %s edge = %q; want pending", stage, status)
+			}
+			if got := offeredIDs(s.Snapshot().Models); !slices.Contains(got, "nokey/d") {
+				t.Fatalf("after the turn the list is %v; want nokey/d taken up at its end", got)
+			}
+			evs := deltaSettled(t, s)
+			done, cat := eventIndex(evs, func(ev Event) bool { return ev.Type == EventDone }), eventIndex(evs, hasCatalog)
+			if done < 0 || cat < done {
+				t.Fatalf("the catalog is event %d and the turn's ending %d; want the catalog after the ending", cat, done)
+			}
+		})
+	}
+}
+
+// TestNativeACatalogPublishedUnderAFreshClaimGoesFirst (plan 034 C4r, r9 #4,
+// the start's other side): a reload that read the claim free just before a
+// prompt took it publishes — the turn's start reload waits for it on modelsMu
+// — and its catalog is flushed by that start reload, so it reaches the stream
+// ahead of the turn's first word even with the outbox's drainer held until
+// something flushes. Negative control: a start reload that flushes only its
+// own catalog lets the turn's text overtake it.
+func TestNativeACatalogPublishedUnderAFreshClaimGoesFirst(t *testing.T) {
+	f := newNativeFixture(t)
+	s := f.session(Options{})
+	var armed atomic.Bool
+	gate := make(chan struct{})
+	var opened sync.Once
+	open := func() { opened.Do(func() { close(gate) }) }
+	t.Cleanup(open)
+	s.log.hooks = &logHooks{
+		outboxAdmitting: func(int) {
+			if armed.Load() {
+				<-gate
+			}
+		},
+		flushParked: func(uint64) {
+			if armed.Load() {
+				open()
+			}
+		},
+	}
+	reached, release := make(chan struct{}), make(chan struct{})
+	var paused sync.Once
+	s.reloadSeam = func(stage string) {
+		if stage == "unclaimed" {
+			paused.Do(func() { close(reached); <-release })
+		}
+	}
+	if err := s.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	takeStartDelta(t, s.log)
+	if err := modeltable.SetKey(f.dir, "nokey", "sk-nokey-fresh-claim-0343"); err != nil {
+		t.Fatal(err)
+	}
+	refreshed := make(chan ModelsRefresh, 1)
+	go func() {
+		r, _ := s.RefreshModels(context.Background(), "")
+		refreshed <- r
+	}()
+	await(t, reached, "the reload past the claim")
+	run := s.Begin("hello") // the claim, taken after the reload read it free
+	armed.Store(true)
+	close(release)
+	if r := await(t, refreshed, "the reload"); r.Status != ModelsApplied {
+		t.Fatalf("premise: the reload that read the claim free = %+v; want applied", r)
+	}
+	f.models["test/a"].push(answer("hi"))
+	if _, err := run(context.Background()); err != nil {
+		t.Fatalf("the turn: %v", err)
+	}
+	evs := drained(s)
+	cat, text := eventIndex(evs, hasCatalog), eventIndex(evs, func(ev Event) bool { return ev.Type == EventText })
+	if cat < 0 || text < 0 || cat > text {
+		t.Fatalf("the catalog is event %d and the turn's first text %d; want the catalog first", cat, text)
+	}
+}
+
+// TestNativeAReloadMidTurnLearnsNoKey (plan 034 C4r, r9 #7a): the reviewer's
+// interleaving — a turn on test/a, whose frozen prompt names the working
+// directory; mid-turn a switch to other/c for the next turn, and other's key
+// stored as that very path; a refresh — is pending, and learns nothing while
+// the turn runs: the session neither redacts the path nor refuses, and the
+// turn, whose every request has carried the path in its prompt since the
+// session opened, ends as it would have had the key not been stored (the
+// timing before C4: a key stored mid-turn was learned at the next turn). The
+// turn's end takes the reload up after its ending: the key is learned, one
+// note says every turn is refused from now on, and the next turn is refused
+// before anything is sent. Negative control: a reload that learns its keys
+// before it decides it is owed learns the path mid-turn, and the harness's
+// step boundary ends the turn with the refusal.
+func TestNativeAReloadMidTurnLearnsNoKey(t *testing.T) {
+	ws := t.TempDir()
+	if err := modeltable.KeyProblem(ws); err != nil {
+		t.Fatalf("the workspace path cannot be a key (%v), so the case proves nothing", err)
+	}
+	f := newNativeFixture(t)
+	var diag lockedDiag
+	s := f.started(Options{Workspace: ws, Diag: &diag})
+	h := newHeld(t)
+	f.models["test/a"].push(h.step(textParts("working"), finishParts(fantasy.FinishReasonStop)))
+	out := startPrompt(s, "go")
+	await(t, h.reached, "the held step")
+	if _, err := s.SetModel(context.Background(), "", "other/c"); err != nil {
+		t.Fatalf("a switch for the next turn: %v", err)
+	}
+	if err := modeltable.SetKey(f.dir, "other", ws); err != nil {
+		t.Fatal(err)
+	}
+	if r := refresh(t, s, ""); r.Status != ModelsPending {
+		t.Fatalf("RefreshModels mid-turn = %+v; want pending", r)
+	}
+	if s.hs.Redact(ws) != ws {
+		t.Error("the pending reload taught the session the key mid-turn")
+	}
+	close(h.release)
+	if o := await(t, out, "the turn"); o.err != nil {
+		t.Fatalf("the turn = %v; want it to end as it would have", o.err)
+	}
+	if s.hs.Redact(ws) == ws {
+		t.Fatal("the turn's end did not take the reload up: the key is not learned")
+	}
+	if d := diag.String(); strings.Count(d, "appears in its frozen prompt") != 1 || strings.Contains(d, ws) {
+		t.Fatalf("Diag = %q; want one note of the refusal, never the key", d)
+	}
+	f.models["other/c"].push(answer("never sent"))
+	if _, err := s.Prompt(context.Background(), "next"); err == nil || !strings.Contains(err.Error(), "frozen prompt") {
+		t.Fatalf("the next turn = %v; want the frozen-key refusal", err)
+	}
+	if n := f.models["other/c"].callCount(); n != 0 {
+		t.Fatalf("other/c was sent %d requests; want none", n)
+	}
+}
+
+// TestNativeAFetchHeldBackIsReadAtTheTurnsEnd (Q14 c, plan 034 C4r): a
+// fetched list's reload reads the files whatever their stamps say — a list
+// rewritten within one tick of the file system's clock can leave them so —
+// and one a turn held back keeps that when the turn's end takes it up
+// (forced): the files are read again and published, though no stamp moved.
+// The control: an ordinary refresh with nothing changed is current. Negative
+// control: an owed reload that trusts the stamps answers current at the
+// turn's end, and nothing is published after the ending.
+func TestNativeAFetchHeldBackIsReadAtTheTurnsEnd(t *testing.T) {
+	f := newNativeFixture(t)
+	s := f.started(Options{})
+	if r := refresh(t, s, ""); r.Status != ModelsCurrent {
+		t.Fatalf("control: with nothing changed RefreshModels = %+v; want current", r)
+	}
+	h := newHeld(t)
+	f.models["test/a"].push(h.step(textParts("working"), finishParts(fantasy.FinishReasonStop)))
+	out := startPrompt(s, "go")
+	await(t, h.reached, "the held step")
+	if got := s.reloadModels(reloadFetched); got != ModelsPending {
+		t.Fatalf("a fetched list's reload mid-turn = %s; want pending", got)
+	}
+	close(h.release)
+	if o := await(t, out, "the turn"); o.err != nil {
+		t.Fatalf("the turn: %v", o.err)
+	}
+	evs := deltaSettled(t, s)
+	done, cat := eventIndex(evs, func(ev Event) bool { return ev.Type == EventDone }), eventIndex(evs, hasCatalog)
+	if done < 0 || cat < done {
+		t.Fatalf("the catalog is event %d and the turn's ending %d; want the held fetch's catalog after the ending", cat, done)
 	}
 }

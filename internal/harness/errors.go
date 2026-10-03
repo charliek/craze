@@ -147,9 +147,11 @@ var (
 	// those can be rewritten, and every later request would carry the key
 	// again, so from then on every Run, Compact and Wake is refused with it,
 	// having sent and written nothing, until Close (after which they are
-	// ErrClosed). LearnKeys returns it too, from the call that found the
-	// key. The key is learned all the same, for everything the session
-	// still redacts. The text names no key and no surface.
+	// ErrClosed); a turn already running when the key was learned ends with
+	// it at its next step boundary, sending no request after it (plan 034
+	// C4r). LearnKeys returns it too, from the call that found the key. The
+	// key is learned all the same, for everything the session still
+	// redacts. The text names no key and no surface.
 	ErrStoredKeyFrozen = errors.New("harness: a newly stored API key appears in this session's frozen prompt; start a new session")
 
 	// ErrEmptyPrompt is Run's refusal of a prompt with nothing but

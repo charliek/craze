@@ -421,13 +421,13 @@ wire_model = "wire-x"
 	}
 }
 
-// TestSpendIsUnchangedAcrossASwap (A23): what a session spent is priced by
-// the current table, and an identity it does not price by the table the
-// session opened with — so handing it a table that dropped the priced model
-// it spent on, once it has switched off it, changes neither the turn's spend
-// nor the session's. The control: the spend was priced (non-zero, not
-// Unpriced). Negative control: a pricer without the open-time fallback marks
-// the spend Unpriced and loses its cost.
+// TestSpendIsUnchangedAcrossASwap (A23): what a session spent is priced at
+// the time of use (spend.go) — so handing it a table that dropped the priced
+// model it spent on, once it has switched off it, changes neither the turn's
+// spend nor the session's. The control: the spend was priced (non-zero, not
+// Unpriced). Negative control: a spend that prices every usage through the
+// current table each time, with no open-time fallback either, marks the
+// spend Unpriced and loses its cost.
 func TestSpendIsUnchangedAcrossASwap(t *testing.T) {
 	f := newFixture(t, "http://127.0.0.1:1/v1")
 	in, out := 2.0, 8.0
@@ -455,4 +455,88 @@ func TestSpendIsUnchangedAcrossASwap(t *testing.T) {
 	if after != before || turnAfter != turn {
 		t.Fatalf("spend after the swap = %+v (turn %+v); want %+v (turn %+v)", after, turnAfter, before, turn)
 	}
+}
+
+// TestSpendIsPricedAtTheTimeOfUse (A23; plan 034 C4r, r9 #5): usage keeps
+// the price it was used at, whatever a table swapped in later says. Two
+// sequences: a model only a later table listed and priced — not the opened
+// one — spent on, switched off, and dropped by the next table, whose usage is
+// still priced at what it cost; and a model whose rates a later table
+// changed, whose earlier usage is not repriced — while a turn on it under the
+// new table is priced at the new rates (the control that the new table
+// prices what is used under it). Negative control: a spend that prices every
+// usage through the current table (and the opened one) each time leaves the
+// first sequence's usage unpriced and reprices the second's.
+func TestSpendIsPricedAtTheTimeOfUse(t *testing.T) {
+	providers, models := fixtureTOML("http://127.0.0.1:1/v1")
+	priced := func(models, alias string, in, out float64) string {
+		return models + fmt.Sprintf("\n[models.%q.cost]\ninput = %v\noutput = %v\n", alias, in, out)
+	}
+
+	t.Run("a model a later table listed, then dropped", func(t *testing.T) {
+		f := newFixture(t, "http://127.0.0.1:1/v1")
+		s := f.open(f.options())
+		if _, ok := f.table.Models["test/e"]; ok {
+			t.Fatal("premise: the opened table lists test/e")
+		}
+		f.models["test/e"] = &scripted{provider: "test", wire: "wire-e"}
+		if err := s.SetTable(tableFrom(t, providers, priced(withModelE(models), "test/e", 2, 8)), nil); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.SetModel("test/e"); err != nil {
+			t.Fatal(err)
+		}
+		f.models["test/e"].push(answerWith("priced"))
+		run(t, s, "spend on e")
+		turn, before := s.spend(1)
+		if before.CostPicoUSD == 0 || before.Unpriced {
+			t.Fatalf("control: the spend on test/e is %+v; want it priced", before)
+		}
+		if err := s.SetModel("test/a"); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.SetTable(tableFrom(t, providers, models), nil); err != nil {
+			t.Fatal(err)
+		}
+		if slices.Contains(aliasesOf(s), "test/e") {
+			t.Fatal("premise: the last table still lists test/e")
+		}
+		if turnAfter, after := s.spend(1); after != before || turnAfter != turn {
+			t.Fatalf("spend after the drop = %+v (turn %+v); want %+v (turn %+v)", after, turnAfter, before, turn)
+		}
+	})
+
+	t.Run("a model whose rates a later table changed", func(t *testing.T) {
+		f := newFixture(t, "http://127.0.0.1:1/v1")
+		in, out := 2.0, 8.0
+		m := f.table.Models["test/a"]
+		m.Cost = &modeltable.Cost{Input: &in, Output: &out}
+		f.table.Models["test/a"] = m
+		s := f.open(f.options())
+		f.models["test/a"].push(answerWith("at the old rates"))
+		run(t, s, "spend on a")
+		turn, before := s.spend(1)
+		if before.CostPicoUSD == 0 || before.Unpriced {
+			t.Fatalf("control: the spend on test/a is %+v; want it priced", before)
+		}
+		if err := s.SetModel("test/b"); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.SetTable(tableFrom(t, providers, priced(models, "test/a", 20, 80)), nil); err != nil {
+			t.Fatal(err)
+		}
+		if turnAfter, after := s.spend(1); after != before || turnAfter != turn {
+			t.Fatalf("spend after the new rates = %+v (turn %+v); want %+v (turn %+v)", after, turnAfter, before, turn)
+		}
+		if err := s.SetModel("test/a"); err != nil {
+			t.Fatal(err)
+		}
+		f.models["test/a"].push(answerWith("at the new rates"))
+		run(t, s, "spend on a again")
+		second, total := s.spend(2)
+		if second.CostPicoUSD != 10*turn.CostPicoUSD || total.CostPicoUSD != before.CostPicoUSD+second.CostPicoUSD {
+			t.Fatalf("the turn under the new table cost %d (session %d); want ten times the first's %d, added to it",
+				second.CostPicoUSD, total.CostPicoUSD, turn.CostPicoUSD)
+		}
+	})
 }

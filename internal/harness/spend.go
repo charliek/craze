@@ -38,12 +38,20 @@ import (
 // at the output rate, and its cache reads and writes at theirs, exact in int64.
 // Every usage is priced by its own model's (provider, wire model), whatever
 // alias it names (modeltable.Table.Price, R2-7); one with no price marks the
-// sum Unpriced and adds its tokens and no cost. The table is the session's
-// current one, and an identity it does not price is priced by the table the
-// session opened with (plan 034 §3.4, A23): a table swapped in while the
-// session runs prices the models it lists, and one it dropped — a provider
-// removed, an alias gone — keeps the price it had, so a swap never changes
-// what the session has spent.
+// sum Unpriced and adds its tokens and no cost.
+//
+// A usage is priced at the time of use, and keeps that price (plan 034 §3.4,
+// A23; C4r, r9 #5): the first time a Spent counts it — the one after the
+// step, the compaction or the Replay that wrote it, with no table swapped in
+// meanwhile, since SetTable is refused while a turn or a Replay runs — its
+// rates are read from the session's table as it is then, an identity that
+// table does not price from the table the session opened with, and recorded
+// against the entry that holds it (Session.prices); usage no entry holds is
+// priced the same way as it is noted (noteUnsaved). A table swapped in later
+// prices only what is used under it: usage on a model it dropped — a provider
+// removed, an alias gone — is not unpriced, and usage on a model whose rates
+// it changed is not repriced, so a swap never changes what the session has
+// spent.
 
 // unsavedUsage is usage this incarnation was billed for that no entry holds
 // (§3.14): a step no append wrote — its save failed (DiagSaveFailed), it was
@@ -55,20 +63,32 @@ import (
 // by exactly them.
 type unsavedUsage struct {
 	turn  int
-	model store.Model
 	usage store.Usage
+	// price is m's rates as the session's table had them when the usage was
+	// noted (the time of use, above).
+	price priced
 }
 
 // noteUnsaved records usage the session was billed for in turn, on m, that no
-// entry holds, so its spend still counts it. A usage of nothing records
-// nothing.
+// entry holds, so its spend still counts it, priced now (the time of use). A
+// usage of nothing records nothing.
 func (s *Session) noteUnsaved(turn int, m store.Model, u store.Usage) {
 	if u == (store.Usage{}) {
 		return
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.unsaved = append(s.unsaved, unsavedUsage{turn: turn, model: m, usage: u})
+	p := pricer{table: s.table, opened: s.openTable}
+	s.unsaved = append(s.unsaved, unsavedUsage{turn: turn, usage: u, price: p.lookup(m)})
+}
+
+// usageKey names one priced usage (Session.prices): the entry that holds it
+// and the identity it is priced by — an entry's own usage and its sub-agent
+// rows, one key per model among them, since one entry's usages of one
+// identity were used under one table.
+type usageKey struct {
+	entry               string
+	provider, wireModel string
 }
 
 // stepSpent is the Spent after turn's step d, which ran on m: the step
@@ -98,34 +118,57 @@ func (s *Session) spent(turn int, next modeltable.Resolved) Spent {
 
 // spend is turn's spend and the session's, by the rule above: every usage on
 // the transcript's path, and every one this incarnation observed unsaved,
-// priced through the session's table, and the open-time table for what it
-// does not price. It takes the session's lock and the store's, one at a time,
-// and holds neither while it prices.
+// each at its price at the time of use — the one recorded when it was first
+// counted, or, for a usage counted now for the first time, the session's
+// table's (the open-time table's for an identity it does not price),
+// recorded here. It takes the store's lock and then the session's, one at a
+// time: the walk holds neither, and under the session's only the prices not
+// yet recorded are read, a few identities per call.
 func (s *Session) spend(turn int) (inTurn, session Spend) {
-	s.mu.Lock()
-	p := pricer{table: s.table, opened: s.openTable}
-	unsaved := slices.Clone(s.unsaved)
-	s.mu.Unlock()
-
+	type use struct {
+		key    usageKey
+		usage  store.Usage
+		inTurn bool
+	}
 	tr := s.store.Transcript()
 	path, _ := tr.Branch(tr.Leaf()) // the leaf is always known
+	var uses []use
 	var turns turnReader
 	for i := range path {
 		e := &path[i]
 		turns.read(e)
 		entryUsage(e, func(m store.Model, u store.Usage) {
-			rates, ok := p.price(m)
-			session.add(u, rates, ok)
-			if turns.turn == turn {
-				inTurn.add(u, rates, ok)
-			}
+			uses = append(uses, use{key: usageKey{entry: e.ID, provider: m.Provider, wireModel: m.WireModel}, usage: u, inTurn: turns.turn == turn})
 		})
 	}
+
+	s.mu.Lock()
+	p := pricer{table: s.table, opened: s.openTable}
+	prices := make([]priced, len(uses))
+	for i, u := range uses {
+		pr, ok := s.prices[u.key]
+		if !ok {
+			pr = p.lookup(store.Model{Provider: u.key.provider, WireModel: u.key.wireModel})
+			if s.prices == nil {
+				s.prices = make(map[usageKey]priced)
+			}
+			s.prices[u.key] = pr
+		}
+		prices[i] = pr
+	}
+	unsaved := slices.Clone(s.unsaved)
+	s.mu.Unlock()
+
+	for i, u := range uses {
+		session.add(u.usage, prices[i].rates, prices[i].ok)
+		if u.inTurn {
+			inTurn.add(u.usage, prices[i].rates, prices[i].ok)
+		}
+	}
 	for _, u := range unsaved {
-		rates, ok := p.price(u.model)
-		session.add(u.usage, rates, ok)
+		session.add(u.usage, u.price.rates, u.price.ok)
 		if u.turn == turn {
-			inTurn.add(u.usage, rates, ok)
+			inTurn.add(u.usage, u.price.rates, u.price.ok)
 		}
 	}
 	return inTurn, session
@@ -176,11 +219,11 @@ type priced struct {
 	ok    bool
 }
 
-// price is m's identity's rates, and whether the table prices it.
-func (p *pricer) price(m store.Model) (modeltable.Rates, bool) {
+// lookup is m's identity's rates, and whether the table prices it.
+func (p *pricer) lookup(m store.Model) priced {
 	key := [2]string{m.Provider, m.WireModel}
 	if pr, ok := p.seen[key]; ok {
-		return pr.rates, pr.ok
+		return pr
 	}
 	var pr priced
 	pr.rates, pr.ok = p.table.Price(m.Provider, m.WireModel)
@@ -191,7 +234,7 @@ func (p *pricer) price(m store.Model) (modeltable.Rates, bool) {
 		p.seen = make(map[[2]string]priced)
 	}
 	p.seen[key] = pr
-	return pr.rates, pr.ok
+	return pr
 }
 
 // add adds u to sp: its tokens always, and, when it is priced at r, its cost

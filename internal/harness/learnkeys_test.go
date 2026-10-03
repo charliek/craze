@@ -11,6 +11,7 @@ import (
 	"sync"
 	"testing"
 
+	"charm.land/fantasy"
 	"github.com/charliek/craze/internal/harness/modeltable"
 	"github.com/charliek/craze/internal/harness/redact"
 	"github.com/charliek/craze/internal/harness/tool"
@@ -456,5 +457,132 @@ func TestLearnKeysIsSerialized(t *testing.T) {
 		if red.String(k) != redact.Marker {
 			t.Fatal("the turn installed a redactor that misses a key learned concurrently")
 		}
+	}
+}
+
+// TestAKeyLearnedMidTurnEndsTheTurn (plan 034 C4r, r9 #7a's defence in
+// depth): a key learned while a turn runs — here mid-request, as the native
+// adapter's learning by any path could land — that is inside the frozen
+// prompt puts the session in its refusal state, and the turn sends no request
+// after the step boundary that sees it: the step's tool call runs and the
+// step is persisted, as every finished step is, and the turn ends with
+// ErrStoredKeyFrozen instead of asking the model again with the prompt that
+// holds the key. The next turn is refused at its admission, as before. The
+// control: the same turn with a key that is in no frozen surface learned at
+// the same moment goes on to its second request. Negative control: a turn
+// that does not look at the refusal state at its boundaries (refusingNow
+// always false) sends the second request, its system prompt holding the
+// key, and ends well.
+func TestAKeyLearnedMidTurnEndsTheTurn(t *testing.T) {
+	for _, c := range []struct {
+		name   string
+		key    func(f *fixture) string
+		frozen bool
+	}{
+		{"in the prompt", func(f *fixture) string { return f.workspace }, true},
+		{"nowhere in what is sent", func(*fixture) string { return "sk-not-in-what-is-sent-0341" }, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			f := newFixture(t, "http://127.0.0.1:1/v1")
+			s := f.open(f.options())
+			key := c.key(f)
+			if err := modeltable.KeyProblem(key); err != nil {
+				t.Fatalf("the planted key cannot be a key (%v), so the case proves nothing", err)
+			}
+			if strings.Contains(s.system, key) != c.frozen {
+				t.Fatalf("control: the key is in the system prompt: %v, want %v", !c.frozen, c.frozen)
+			}
+			m := f.models["test/a"]
+			g := newGate()
+			m.push(g.hold(callParts("c1", "todo_write", `{"todos":[{"id":"a","content":"first"}]}`),
+				finish(fantasy.FinishReasonToolCalls)), answerWith("second"))
+			var ev events
+			out := start(context.Background(), s, "go", ev.sink)
+			await(t, g.reached, "the first request")
+			_, err := s.LearnKeys([]modeltable.Secret{modeltable.Secret(key)})
+			if c.frozen != errors.Is(err, ErrStoredKeyFrozen) {
+				t.Fatalf("LearnKeys mid-turn = %v; want the refusal state: %v", err, c.frozen)
+			}
+			close(g.release)
+			o := await(t, out, "the turn")
+			requests := m.requests()
+			if !c.frozen {
+				if o.err != nil || len(requests) != 2 {
+					t.Fatalf("control: the turn = %v after %d requests; want it to go on to its second", o.err, len(requests))
+				}
+				return
+			}
+			if !errors.Is(o.err, ErrStoredKeyFrozen) || strings.Contains(o.err.Error(), key) {
+				t.Fatalf("the turn = %v; want ErrStoredKeyFrozen, quoting no key", o.err)
+			}
+			if len(requests) != 1 {
+				t.Fatalf("%d requests; want the first alone: a request after the key was learned carried it", len(requests))
+			}
+			dones := of[StepDone](ev.list())
+			if len(dones) != 1 || !dones[0].Saved {
+				t.Fatalf("the step the key was learned in reported %+v; want it persisted", dones)
+			}
+			if _, err := s.Run(context.Background(), "and again", nil); !errors.Is(err, ErrStoredKeyFrozen) {
+				t.Fatalf("the next Run = %v; want ErrStoredKeyFrozen", err)
+			}
+			if n := len(m.requests()); n != 1 {
+				t.Fatalf("%d requests after the refused Run; want 1", n)
+			}
+		})
+	}
+}
+
+// TestAKeyLearnedMidTurnStopsItsCompaction (plan 034 C4r, r9 #7a's defence
+// in depth, at the boundaries around a compaction, whose summarizer's request
+// sends the frozen prompt too): a key inside the frozen prompt learned during
+// a step that leaves the context at the threshold, or during a request the
+// provider then refuses as too large, stops the turn there — no mid-turn or
+// overflow compaction runs, no request follows; one learned while the
+// mid-turn compaction's summarizer runs stops the turn before the next
+// segment's first request. Each ends with the refusal. Negative controls:
+// restartDue, or overflowed, that does not look at the refusal state
+// compacts first, its summarizer's request carrying the key; a prepareStep
+// that does not look sends the next segment's request after the compaction.
+func TestAKeyLearnedMidTurnStopsItsCompaction(t *testing.T) {
+	for _, c := range []struct {
+		name        string
+		seeded      bool
+		steps       func(g *gate) []step
+		requests    int
+		summarizers int
+	}{
+		{"at the threshold", false, func(g *gate) []step {
+			return []step{g.hold(bareCall("c1", "nope", `{"n":1}`), finishUsing(fantasy.FinishReasonToolCalls, over)), summaryOf("never")}
+		}, 1, 0},
+		{"on an overflow", true, func(g *gate) []step { return []step{g.hold(nil, errorPart(overflowErr())), summaryOf("never")} }, 2, 0},
+		{"during the compaction", false, func(g *gate) []step {
+			return []step{toolStep(1, over), heldSummary(g, "the first step")}
+		}, 2, 1},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			f := newFixture(t, "http://127.0.0.1:1/v1")
+			windowed(f, "test/a", testWindow, 0)
+			s := f.open(f.options())
+			a := f.models["test/a"]
+			if c.seeded {
+				a.push(answerWith("hi"))
+				run(t, s, "hello")
+			}
+			g := newGate()
+			a.push(append(c.steps(g), answerWith("never"))...)
+			out := start(context.Background(), s, "go", nil)
+			await(t, g.reached, "the request")
+			if _, err := s.LearnKeys([]modeltable.Secret{modeltable.Secret(f.workspace)}); !errors.Is(err, ErrStoredKeyFrozen) {
+				t.Fatalf("premise: LearnKeys = %v; want the refusal state", err)
+			}
+			close(g.release)
+			o := await(t, out, "the turn")
+			if !errors.Is(o.err, ErrStoredKeyFrozen) {
+				t.Fatalf("the turn = %+v, %v; want ErrStoredKeyFrozen", o.res, o.err)
+			}
+			if reqs := a.requests(); len(reqs) != c.requests || summarizers(reqs) != c.summarizers {
+				t.Fatalf("%d requests, %d of them the summarizer; want %d, %d of them", len(reqs), summarizers(reqs), c.requests, c.summarizers)
+			}
+		})
 	}
 }

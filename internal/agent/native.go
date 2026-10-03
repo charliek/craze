@@ -316,15 +316,20 @@ type nativeSession struct {
 	// modelsMu serializes the model table's reloads with each other and with
 	// SetModel and SetConfig (native_models.go, plan 034 §3.4): taken with no
 	// lock of the adapter's or the harness's held and never under one, and
-	// held across the files' reading and the harness's switch or swap — no
-	// network, no turn. models is what the reloads keep between them, under
-	// it.
+	// held across the files' reading and the harness's switch or swap — a
+	// switch's client built under it, local work all, no network, no turn.
+	// models is what the reloads keep between them, under it.
 	modelsMu sync.Mutex
 	models   modelsWatch
-	// reloadOwed says a reload was held back — by a turn holding the harness,
-	// or a load's replay — and is the next turn's end's, or the load's end's,
-	// to take up (native_models.go's step 5). Under s.mu.
+	// reloadOwed says a reload was held back — by a turn's claim, or a load's
+	// replay — and is the turn's end's, or the load's end's, to take up
+	// (native_models.go's step 5). Under s.mu.
 	reloadOwed bool
+	// catalogQueued says a catalog delta — a reload's, or a switch's that
+	// took an unfunded model off the list — was enqueued since a turn's edge
+	// last flushed one (reloadFlushed): the next turn's start flushes it
+	// before the turn says anything, its end after its ending. Under s.mu.
+	catalogQueued bool
 	// setModelSeam runs in SetModel and SetConfig between their reading of
 	// what the session offers and the harness's switch, with modelsMu held
 	// and no other lock: the window a reload must not land in (plan 034 §3.4,
@@ -333,10 +338,19 @@ type nativeSession struct {
 	setModelSeam func()
 	// reloadSeam runs inside a reload, with modelsMu held and no other lock:
 	// "stamped" once the inputs are stat'ed and before the table is read,
-	// "computed" once everything is built and before the harness takes it.
-	// **A test seam: nil in production**, set only by a test in this package
-	// before Start.
+	// "computed" once everything is built and before the claim is read, and
+	// "unclaimed" once the claim was read free and before the harness takes
+	// the table. **A test seam: nil in production**, set only by a test in
+	// this package before Start.
 	reloadSeam func(stage string)
+	// turnSeam runs in prompt on the turn's goroutine with no lock held:
+	// "started" once the turn's start reload is done and before the harness's
+	// turn begins, "ran" once the harness's turn has returned — no longer
+	// holding the harness — and before the turn's ending is out. Both are
+	// windows a reload must not publish in (plan 034 C4r, r9 #4). **A test
+	// seam: nil in production**, set only by a test in this package before
+	// Start.
+	turnSeam func(stage string)
 }
 
 // steerText is one interjection in both of its spellings: sent is what went
@@ -1385,10 +1399,12 @@ type nativeOpened struct {
 	// the memory read at start (§3.4): a switch made in this session does not
 	// reorder it. A reload of the table computes it again, the memory with it
 	// (native_models.go, plan 034 §3.4): a provider connected while the
-	// session runs is offered from then on. A model it leaves out is one this
-	// session's SetModel does not know (MatchModel over the snapshot), as an
-	// unknown alias always was; --model still resolves against the whole
-	// table (tableModels).
+	// session runs is offered from then on; and a switch away from a model
+	// the table no longer funds — kept listed only while the session ran on
+	// it — takes that one row out (SetModel, C4r). A model it leaves out is
+	// one this session's SetModel does not know (MatchModel over the
+	// snapshot), as an unknown alias always was; --model still resolves
+	// against the whole table (tableModels).
 	choices []modeltable.Choice
 }
 
@@ -1846,8 +1862,9 @@ func (s *nativeSession) prompt(ctx context.Context, text string, rel chan struct
 		// section that releases the claim, so one marked owed after this
 		// reading finds the claim released and swaps on its own
 		// (native_models.go's step 5) — and taken up below, on every way a
-		// turn ends, before the next turn's claim reaches the harness (whose
-		// own start reloads besides).
+		// turn ends, after its ending is out (above, before this defer) and
+		// before the next turn's claim reaches the harness (whose own start
+		// reloads besides).
 		owed := s.takeOwedLocked()
 		s.mu.Unlock()
 		if owed {
@@ -1977,9 +1994,14 @@ func (s *nativeSession) prompt(ctx context.Context, text string, rel chan struct
 	s.learnStoredKeys(hs)
 	// Then the models funded since the last turn (plan 034 §3.4, Q14 a):
 	// after the keys, so a table that names a key just stored is read by a
-	// session that already redacts it, and before the harness's claim, so the
-	// turn — and every sub-agent it starts — runs on one table.
+	// session that already redacts it, and under this turn's claim, before
+	// the harness's turn begins, so the turn — and every sub-agent it starts
+	// — runs on one table. From here until the ending is out, any other
+	// reload is owed (native_models.go's step 5).
 	s.reloadFlushed(reloadTurn)
+	if seam := s.turnSeam; seam != nil {
+		seam("started")
+	}
 	// A turn a person started — this one: a wake never comes here — lifts the
 	// ChatGPT plan's usage latch (P33), which a usage-limit error set for the
 	// whole process: the person has seen the message and asks again.
@@ -2022,6 +2044,9 @@ func (s *nativeSession) prompt(ctx context.Context, text string, rel chan struct
 			}
 		}
 		res, err = hs.RunWith(turnCtx, sent, images, s.sink)
+	}
+	if seam := s.turnSeam; seam != nil {
+		seam("ran")
 	}
 	// Translated the moment Run hands it over, and before anything reads it:
 	// what a turn could not answer comes back in the spelling craze sent, and
@@ -2565,6 +2590,17 @@ func (s *nativeSession) Close() error {
 // the model table lands between the model the list offered and the switch
 // the harness makes, so a model the session offers is one it switches to. The
 // memory is written after, outside it.
+//
+// The model the session runs on, asked for again, is built again from the
+// table while the table still resolves it — how a rotated key is taken up —
+// and is otherwise no switch (plan 034 C4r, r9 #1): that is the carry (Q16),
+// a reload keeping the running model listed when the table it read no longer
+// has its alias or funds its key, and building it from that table could only
+// fail. Then nothing is built, its client is kept (P8), and the answer is
+// the switch's — announced and remembered — as it always is. A switch away
+// from a model the table no longer funds takes it off the list in the
+// switch's own delta, at a new revision (resolvesLocked, announce): the list
+// then offers only what a switch back would take.
 func (s *nativeSession) SetModel(_ context.Context, cause, modelID string) (SetOutcome, error) {
 	s.modelsMu.Lock()
 	sw, err := s.setModelLocked(cause, modelID)
@@ -2591,7 +2627,7 @@ type switched struct {
 func (s *nativeSession) setModelLocked(cause, modelID string) (switched, error) {
 	s.mu.Lock()
 	sw := switched{hs: s.hs, table: s.table, home: s.home}
-	models := s.snap.Models
+	models, current := s.snap.Models, s.snap.CurrentModel
 	loading := s.loading
 	seam := s.setModelSeam
 	s.mu.Unlock()
@@ -2609,17 +2645,66 @@ func (s *nativeSession) setModelLocked(cause, modelID string) (switched, error) 
 	if seam != nil {
 		seam()
 	}
-	if err := sw.hs.SetModel(alias); err != nil {
-		return switched{}, phraseSetupError(err, sw.table, alias)
+	// The running model asked for again, and no longer resolved by the
+	// table — the carry — is no switch (SetModel's comment): the harness is
+	// not asked, and its client stays. Resolved, it is built again, as any
+	// switch is.
+	drop := ""
+	if alias != current || s.resolvesLocked(sw.table, current) {
+		if err := sw.hs.SetModel(alias); err != nil {
+			return switched{}, phraseSetupError(err, sw.table, alias)
+		}
+		if alias != current && !s.resolvesLocked(sw.table, current) {
+			drop = current
+		}
 	}
 	// The confirmed model is the harness's own, captured where the snapshot
 	// took it: MatchModel resolves an alias — a prefix, a display name — to a
 	// canonical id, so the value that was asked for and the value the delta
 	// carries are not always the same string (SetOutcome).
-	if sw.model, sw.effort, sw.ticket, err = s.announceCurrent(cause); err != nil {
+	if sw.model, sw.effort, sw.ticket, err = s.announce(cause, drop); err != nil {
 		return switched{}, err
 	}
 	return sw, nil
+}
+
+// resolvesLocked reports whether table, the one the session holds, resolves
+// alias now — judged as Choices judges a model, by Resolve with one sealed
+// reading of the environment. A model it does not is a carried one (Q16)
+// whose alias or key a reload found gone, which the list keeps only while
+// the session runs on it (modeltable.Table.Choices' P7). A session whose
+// table a test's seam handed in is never reloaded, so carries nothing: true.
+// modelsMu is held.
+func (s *nativeSession) resolvesLocked(table *modeltable.Table, alias string) bool {
+	if alias == "" || !s.models.reloadable {
+		return true
+	}
+	getenv, release := sealedGetenv(s.models.getenv)
+	defer release()
+	_, err := table.Resolve(alias, getenv)
+	return err == nil
+}
+
+// withoutChoice is list without alias's row, the model memory's ranks after
+// it moved up one, so they still run 1, 2, 3… (modeltable.Choices); false, and
+// nil, when list has no such row. list is not written to.
+func withoutChoice(list []ModelInfo, alias string) ([]ModelInfo, bool) {
+	i := slices.IndexFunc(list, func(m ModelInfo) bool { return m.ID == alias })
+	if i < 0 {
+		return nil, false
+	}
+	rank := list[i].Recent
+	out := make([]ModelInfo, 0, len(list)-1)
+	for j, m := range list {
+		if j == i {
+			continue
+		}
+		if rank > 0 && m.Recent > rank {
+			m.Recent--
+		}
+		out = append(out, m)
+	}
+	return out, true
 }
 
 // remember records a model or effort switch this session made, as the newest
@@ -2684,6 +2769,18 @@ func (s *nativeSession) remember(hs *harness.Session, table *modeltable.Table, h
 // stopped admitting, so the setter answers "closed" rather than a success
 // whose delta went nowhere.
 func (s *nativeSession) announceCurrent(cause string) (model, effort string, t *Ticket, err error) {
+	return s.announce(cause, "")
+}
+
+// announce is announceCurrent for a switch that leaves drop — the model it
+// switched away from — unfunded (resolvesLocked; "" for none): in the same
+// section, and the same delta, drop's row leaves the list, at the next
+// revision (plan 034 C4r, r9 #1), so no client is offered a model the session
+// would refuse to switch back to, mid-turn included — the delta is the
+// switch's, said when the switch is. A drop that is the current model, or no
+// row of the list, changes nothing. The revision is the reloads' generation
+// (native_models.go), taken under modelsMu, which the setters hold.
+func (s *nativeSession) announce(cause, drop string) (model, effort string, t *Ticket, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closed {
@@ -2697,10 +2794,19 @@ func (s *nativeSession) announceCurrent(cause string) (model, effort string, t *
 			break
 		}
 	}
-	return model, effort, s.enqueueDeltaLocked(cause, Event{}, &StateDelta{
+	delta := &StateDelta{
 		Model:  &model,
 		Config: &ConfigState{Options: cloneConfig(s.snap.Config)},
-	}), nil
+	}
+	if drop != "" && drop != model {
+		if infos, ok := withoutChoice(s.snap.Models, drop); ok {
+			s.models.gen++
+			s.snap.Models, s.snap.CatalogRevision = infos, s.models.gen
+			delta.Catalog = &CatalogState{Models: slices.Clone(infos), Revision: s.models.gen}
+			s.catalogQueued = true
+		}
+	}
+	return model, effort, s.enqueueDeltaLocked(cause, Event{}, delta), nil
 }
 
 // enqueueDeltaLocked is live.go's, for this session: one EventMeta carrying st,

@@ -18,10 +18,11 @@ import (
 //     send-now, and — once a native session has reloaded its table — the
 //     models it offers), the todo list, the roster, the ordered tools, the
 //     queue and the agent's own turn (transcript.Model.Mirror);
-//  2. Backend.Info(), the session's facts as it started: the provider — by
-//     name, for its local vocabulary; its capabilities come from Info through
-//     caps() — the provider's session id, and the model and mode catalogs, the
-//     model catalog only until the fold carries one (plan 034 §3.4);
+//  2. Backend.Info(), the session's facts: the provider — by name, for its
+//     local vocabulary; its capabilities come from Info through caps() — the
+//     provider's session id, and the model and mode catalogs, the model
+//     catalog only while it is newer than the one the fold carries (plan 034
+//     §3.4, C4r);
 //  3. the overlays below: what this client's own commands confirmed that the
 //     fold has not caught up with yet.
 //
@@ -49,14 +50,18 @@ func (m *Model) recompute() {
 		f = m.shared.Mirror()
 	}
 	m.retireReached(f.Settings)
-	// The models the session offers: the fold's catalog section once a
-	// delta has carried one — a native session that reloaded its table
-	// (plan 034 §3.4) — and the session's own list as it started otherwise.
-	// The fold is preferred because it is ordered with every other section
-	// this client folds; Info is read live in process and is a reply's copy
-	// over the socket, and either can be ahead of or behind the stream.
+	// The models the session offers: of the fold's catalog section — once a
+	// delta has carried one, a native session that reloaded its table (plan
+	// 034 §3.4) — and Info's list, the newer by revision; at the same
+	// revision they are one list, and the fold's is taken, ordered with every
+	// other section this client folds. Info is read live in process, so it
+	// can be ahead of the stream: a session that published two revisions
+	// before this client folded the first shows the second from Info, and
+	// the first, folded after, must not bring back what the second took away
+	// (C4r, r9 #8). Over the socket Info's revision is 0 until the wire
+	// carries it (C5), and the fold's list is taken whenever there is one.
 	models := info.Models
-	if c := f.Settings.Catalog; c != nil {
+	if c := f.Settings.Catalog; c != nil && c.Revision >= info.CatalogRevision {
 		models = c.Models
 	}
 	snap := agent.Snapshot{
