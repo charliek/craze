@@ -450,11 +450,24 @@ var eventScenarios = []eventScenario{
 		name: "Esc while an accepted redirect is exchanged: the wait reports the cancel, with Esc's reason",
 		run: func(t *testing.T, sc *scenarioRun) error {
 			sc.hold(&sc.f.holdExchange)
+			arrived := make(chan struct{}, 1)
+			sc.f.mu.Lock()
+			sc.f.exchangeIn = arrived
+			sc.f.mu.Unlock()
 			a := sc.begin(BeginOptions{PasteOnly: true})
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			sc.pasteOK(a)
 			done := waitAsync(t, a, ctx)
+			// The Esc comes once the fake has the exchange: Wait has taken the
+			// redirect by then, so the close cannot win Wait's own select
+			// between the redirect and the close (plan 034 C2br4; the same
+			// reason as TestEndedFollowsTheOutcome, review r5 #9).
+			select {
+			case <-arrived:
+			case <-time.After(10 * time.Second):
+				t.Fatal("the exchange never reached the fake")
+			}
 			a.Close(CloseEsc)
 			if evs := sc.sink.all(); len(evs) != 2 {
 				t.Fatalf("the close of a sign-in being finished reported its outcome itself (%d events)", len(evs))

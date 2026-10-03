@@ -2056,11 +2056,12 @@ func TestConnectSignInLogsTheModelFetchCutShortAtShutdown(t *testing.T) {
 	iss.mu.Unlock()
 	t.Cleanup(func() { close(hold) })
 	// The fetch's cancellation report (models_failed) is held until the
-	// shutdown's awaitEnds is about to wait for the finishing command
-	// (onAwaitEnds, after the cancel), so the record can land only while the
-	// shutdown joins the command: without that wait the log closes first,
-	// every time (review r7 #5). A signal, not a sleep; the deadline fails
-	// the test rather than hanging it.
+	// shutdown's awaitEnds is about to block on the finishing command
+	// (onAwaitEnds, inside its loop, which fires only when that command has
+	// not finished), so the record can land only while the shutdown joins the
+	// command: without the loop the seam never fires and the test fails at its
+	// deadline, every time (reviews r7 #5, r8 #3). A signal, not a sleep; the
+	// deadline fails the test rather than hanging it.
 	waiting := make(chan struct{})
 	var waitOnce sync.Once
 	onAwaitEnds = func() { waitOnce.Do(func() { close(waiting) }) }

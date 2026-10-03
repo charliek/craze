@@ -602,19 +602,26 @@ func (s *signInRuns) awaitEnds(d time.Duration) {
 			return
 		}
 	}
-	if len(fins) > 0 && onAwaitEnds != nil {
-		onAwaitEnds()
-	}
 	for _, f := range fins {
+		select {
+		case <-f.done:
+			continue
+		default:
+		}
+		if onAwaitEnds != nil {
+			onAwaitEnds()
+		}
 		if !within(f.done) {
 			return
 		}
 	}
 }
 
-// onAwaitEnds is a test's seam: nil in production, called once by awaitEnds,
-// after closeAll has cancelled the finishing commands and right before it
-// waits for them (review r7 #5).
+// onAwaitEnds is a test's seam: nil in production, called by awaitEnds inside
+// its finishing-command loop, right before it blocks on a command that has
+// not finished — so it fires only when the join really waits, and a test
+// that holds a record until it fires proves the join by construction
+// (reviews r7 #5, r8 #3).
 var onAwaitEnds func()
 
 // logFor is the runs' sign-in log, opened in dir the first time it is asked
