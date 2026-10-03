@@ -4873,3 +4873,138 @@ lane work. What it inherits:
 - **Directional, not designed:** a host-side roster push behind a capability
   (P1's alternative, if polling ever costs too much), remote-machine listing
   (S4c), per-model `/effort` choices from the catalog cache.
+
+## Plan 035 — S3 readiness and flakes
+
+Plan 035 readies S3 (the shed lane) and pulls in the flakes and minor bugs found
+in six days of CI (09-27 to 10-02). It is cut into two PRs, PR 1 first, so
+that PR 2's many CI runs are not spent diagnosing known flakes (P1). The plan
+lives outside the repo; its amendments (X1–X14 for PR 1) are the truth.
+
+### PR 1 — flakes and minor bugs
+
+PR: (to be filled at merge)
+
+Branch `feature/plan-035-flakes`, base `79a8adc`. Each commit was gated before
+it landed and reviewed by SHA; a review's fixes land as their own `Cnr` commit,
+not an amend (X1). Every flake was diagnosed from its log, its code and a forced
+repro, never retried (P13).
+
+- **C1 — R1, the macOS reaper flake** (`TestEveryGroupSignalPrecedesTheReap/a_clean_exit`, run 37005407853).
+  The kqueue `NOTE_EXIT` can arrive before the leader turns `SZOMB`, so the
+  darwin group scan counted the agent itself as a live member: a needless TERM
+  and a 20 ms poll. The scan now skips the agent's own pid and any member
+  marked `P_WEXIT` (`procEntry`, `liveMember`, `kinfoProcs`); the final group
+  SIGKILL before the reap stays unconditional. Evidence: the darwin stub test
+  is red under the old rule on the mac-mini, and a probe confirmed the exported
+  `P_WEXIT` bit live (X9).
+- **C2–C2r3 — SF-122** (`craze prompt --json` exiting before its last event).
+  `readChain` now tracks `foreignOpen` (set by a running `EventForeignTurn`,
+  cleared by an ended one), and the signal exit waits for it, still bounded by
+  `signalUntil`. A forced ordering (a seam between storing the flag and
+  emitting) is red without it. V2's `sigint-foreign-turn-holds-the-drain`
+  ×20: the candidate printed all 15 lines 20/20, the baseline lost the closing
+  line in 2/20 and 3/20 (X2). C2r, C2r2 and C2r3 are the review rounds' fixes
+  (below); X12 notes the one new stderr line.
+- **C3 — the start-settings flake** (`TestADetachedHostSetsItsStartSettingsBeforeAnyPrompt`).
+  Test infrastructure, not production: the fake agent's FIFO gate took a
+  writer's close for a release, and X69 (`3d6fd24`) fixed CI's failure; a
+  close/reopen gap after EOF could still lose the next byte, so the gate is now
+  opened read-write and never sees EOF. Production ordering is sound: prompts
+  are accepted only after the start returns, and the start awaits each set's
+  answer (X5). Red on main ("no serving host after 30s"), 5/5 green with it.
+- **C4 — the close fence, #14, and the stderr diagnosis.** The close fence:
+  the server queues the detach reply and its writer can send it before the same
+  locked section uncounts the attachment; not a production bug (consumers err
+  toward keeping the host); the test now waits for the count to leave 2, then
+  expects exactly 1 (a 20 ms delay was red 5/5; natural rate 6/6000 on one CPU,
+  0/4000 after). #14: see below. `TestSessionJournalsTheAgentsStderr` needed no
+  change here (X10, SF-134).
+- **C5 — the triage of the rest.** Fixed here: `TestServeFailsAStartWhoseAgentCannotBeRecorded`
+  (the test read the host log once, before `serveHost.start` wrote its line; it
+  now waits up to `serveStep`; red 3/3 with a forced 500 ms delay); the
+  `TestBashRedactsItsOutput` spill wait (a per-call `spillWait`, the production
+  value unchanged; red 3/3 under a forced 1.5 s stall, with two negative
+  controls) (X3); and #14's three siblings, converted to the gate-held fallback
+  (`expand_test.go`, `promptnotes_test.go`, `session_queue_test.go`; each red
+  3/3 at a 3.5 s delay unconverted, green converted). Everything else was
+  already fixed by a later commit, or became a row (the table).
+- **C5r — r5's assertion gap.** `TestForeignTurnRefusalIsNotATurnThatFailed`
+  scanned for an `EventError` right after the refused prompt returned, which
+  nothing ordered after the refusal's own events. It now releases the fallback
+  and waits for its end event first. With a refusal that emits an error, plus a
+  collector delay, the old scan stayed green (vacuous) and the new one is red
+  (X14).
+
+**The flake table's outcome.** The plan's table was a starting point, and
+several cells were wrong; the corrected facts are in the table.
+
+| Flake | OS / job | Run id(s) | Outcome |
+|---|---|---|---|
+| `TestEveryGroupSignalPrecedesTheReap/a_clean_exit` (acp) | macOS / test | 37005407853 | fixed here by C1 |
+| `TestSessionJournalsTheAgentsStderr` (agent) | **macOS** / test-race (not ubuntu: the ubuntu job of 36667761335 failed only the bash test) | 36667761335, 36854912370 | already fixed by `cab2868` (waits 500 ms for the copy; a 100 ms delay red 5/5 before, green after); residual at 600 ms is SF-134 (X10) |
+| `TestTheCloseFenceIsReversible` (control) | macOS / test-race | 36879160234 | fixed here by C4 |
+| `TestADetachedHostSetsItsStartSettingsBeforeAnyPrompt` (cli) | macOS / test | **36960561110 only** (36960556742 failed only the Python row) | CI's failure already fixed by `3d6fd24` (X69); the leftover FIFO race fixed here by C3; its vacuous "early" check is SF-136 (X5) |
+| `TestServeFailsAStartWhoseAgentCannotBeRecorded` (cli) | ubuntu / test-race | 36729655954 | fixed here by C5 |
+| `test_new_starts_sessions_that_ps_lists` (tests/cli) | macOS / cli | 36960556742 only (36960561110 passed the cli job) | already fixed by `3d6fd24`; the failure was **not** "ids equal" (the ids differed and the second row's `ready` was still False), and there is no production bug (X6) |
+| `TestAReplyFollowsItsEvents/cancel` (control) | ubuntu / test-race | 36441018310 | already fixed by `0b09094`; **not a panic** (the panic lines are the tui package's deliberate `beginPanics` fixture, #19): the failure was `forward_test.go:155: a quiet command emitted` (X6) |
+| `TestNoResetEscapesTheSocketRunsVerdict/after_the_barrier` (tui) | ubuntu / test-race | 36441018310 | already fixed by `0b09094` (X6, X8) |
+| `TestAttachMidTurnOverTheSocketReproducesTheFirst/every_cut…` (engine) | ubuntu / test-race | 36446564500, 36446575203 | already fixed by `83d3c66`, `7ffbedc`; its residual at a 5 % quota is SF-133 (X8) |
+| `TestSimultaneousDisconnectsAreDialledPast` (roster) | macOS / test | 36667190566 | already fixed by `25deb26` (X3) |
+| `TestARestoredRowReappears` (tui) | ubuntu / test | 36445790377 | already fixed by `de5c6c9` (X8) |
+| `TestNativeCloseReturnsWhileTheToolsFlushIsParked` (agent) | ubuntu / test | 36291767908 | already fixed by `17ecc75` (X3) |
+| `TestACancelledRowSourcedRefusalIsNotRestored/a_submit_from_a_row` (engine) | ubuntu / test | 36395323364 (it failed in `make test-race`, not `go test -v`) | already fixed by `741710d` (X8) |
+| `TestBashRedactsItsOutput` (opencode) | ubuntu / test | 36667761335 (09-30 main) | fixed here by C5; the siblings' exposure is SF-132 |
+| #14 `TestForeignTurnRefusalIsNotATurnThatFailed` (agent) | ubuntu / race | (09-16, PR #13) | closed by C4 |
+
+"Already fixed" means each has a forced repro that is red on the old test and
+green on `79a8adc`, plus `-race -count=20` and 5/5 at a 5 % CPU quota. One more
+flake, found locally by C3's diagnosis, is SF-135.
+
+**Issue #14** is closed by C4: the fake agent gained a gate-held fallback (the
+`HOLD-FALLBACK` marker, carried by the interjection's text, which becomes the
+fallback turn's own prompt), so the test no longer races the 3 s idle hold that
+`9a1fc13` had only widened. The old 50 ms + 200 ms delays were red 5/5; at head
+a 3 s + 3.5 s delay was also red and the gate-held test is green under both;
+the test went from about 2.6 s to 0.04 s. `docs/development/testing.md`
+documents the marker.
+
+**SF-118 is closed**, with no recurrence since its fix `a703c0c` (2026-10-02
+03:35Z) across every CI run since: about 25 `test-race` runs on both OSes, on
+main and the plan 032/033 PR branches (the last failure, run 36957765188,
+predates the fix). If this PR's own CI shows one, it is reopened. **SF-122 is
+closed** by C2–C2r3.
+
+**Review rounds.** C1: astra, no findings (the XNU facts it checked: the
+exported `P_WEXIT` is synthesized from `P_LEXIT`; signals to such a process are
+discarded anyway; pid equals pgid; the tests are non-vacuous). C2: astra r2
+found three (a signal-induced terminal ending bypassed the wait, the test's
+negative control was not deterministic, and a failed cleanup could leave
+`runChain` alive for `foreignMax`), fixed in C2r; r3 found two in the held
+state (later events replacing the held failure, and a permission rejected
+during the held wait still exiting 0), fixed in C2r2 (held means draining:
+later endings are not results, `finishRun`'s precedence, and a rejection
+promotes a held nil to exit 1); r4 found no production defect and one test
+fixture that published the foreign turn's `started` with the session's flag
+still down, an order the session never produces, fixed in C2r3 (the turn now
+opens, flag first, inside the successor's `Begin`, the one window where r3's
+race is reachable); r6 found nothing in C2r3. C3–C5 change no production
+behaviour beyond a test seam, so one sol batch (r5) reviewed them: no defect
+introduced, and one assertion gap older than C4, fixed in C5r.
+
+**Lessons for a later plan.**
+
+- A `mac-test.sh` run whose remote `bash -c` could not parse an unquoted
+  `-run '^(…)$'` regex reported `MAC_EXIT=0` with no test run (X4): a mac run
+  must report go test's own exit and fail when its log holds no `ok` or `---`
+  line.
+- Concurrent gates share golangci-lint's lock, and the second fails ("parallel
+  golangci-lint is running", exit 3) before any test runs (X13): a
+  second runner must wait for the lock (`--allow-serial-runners`).
+- The probe confirmed the exported `P_WEXIT` bit live on the mac-mini, but the
+  `NOTE_EXIT`-before-`SZOMB` window was not reproduced there: zero scan lines in
+  800 `a_clean_exit` runs, even under CPU hogs, against one hit in about 200 on
+  CI's macOS VM (X9). That ordering rests on CI run 37005407853 and XNU's
+  source; the deterministic regression is the darwin stub test.
+
+Rows added to `13`: SF-132–SF-136 (SF-128–SF-131 are reserved for PR 2).
