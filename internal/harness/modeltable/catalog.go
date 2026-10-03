@@ -43,9 +43,23 @@ type Catalog struct {
 
 // ChatGPTDefaults is the catalog's [chatgpt_defaults] (plan 033 §3.11).
 type ChatGPTDefaults struct {
-	// Start is the slug a new session with nothing remembered and an unfunded
-	// default starts on among the plan's models (StartModel), "" for none.
-	Start string
+	// Start is the slugs a new session with nothing remembered and an unfunded
+	// default starts on among the plan's models (StartModel), in order of
+	// preference: the first one the account lists and the sign-in funds wins
+	// (plan 034 Q4). Nil is no preference; present, it is non-empty and
+	// unique (validateChatGPT). It is catalog-only, so it is an array outright.
+	Start []string
+	// startSet says the file wrote start, even as an empty array, so
+	// validation can refuse `start = []` and still read an absent key as no
+	// preference.
+	startSet bool
+	// ModelsClientVersion is the client_version every request for the plan's
+	// model list carries (plan 034 §3.1, D-82): the server gates the list on
+	// it, so craze claims one version it has tested. Required when the
+	// catalog ships the chatgpt provider on its driver; dotted numeric, one
+	// to three parts of one to six digits. It is the downgrade-safe reader's
+	// pin too (withDiscovered).
+	ModelsClientVersion string
 	// Models are craze's settings for a slug, laid over what the account's
 	// list says of it; nil for none.
 	Models map[string]ChatGPTModelDefaults
@@ -94,8 +108,9 @@ type catalogDoc struct {
 }
 
 type catalogChatGPTDoc struct {
-	Start  string                            `toml:"start"`
-	Models map[string]catalogChatGPTModelDoc `toml:"models"`
+	Start               []string                          `toml:"start"`
+	ModelsClientVersion string                            `toml:"models_client_version"`
+	Models              map[string]catalogChatGPTModelDoc `toml:"models"`
 }
 
 type catalogChatGPTModelDoc struct {
@@ -163,6 +178,8 @@ func parseCatalog(name string, data []byte) (*Catalog, error) {
 	}
 	if g := d.ChatGPT; g != nil {
 		c.ChatGPT.Start = g.Start
+		c.ChatGPT.startSet = g.Start != nil
+		c.ChatGPT.ModelsClientVersion = g.ModelsClientVersion
 		for slug, e := range g.Models {
 			if c.ChatGPT.Models == nil {
 				c.ChatGPT.Models = make(map[string]ChatGPTModelDefaults, len(g.Models))
@@ -214,6 +231,19 @@ func CatalogEnvNames() []string {
 	return envKeyNames(c.Providers)
 }
 
+// ChatGPTModelsClientVersion is the client_version the shipped catalog pins
+// for every request for the ChatGPT plan's model list (plan 034 §3.1, D-82):
+// the harness may not import chatgptauth, and chatgptauth may not import this
+// package, so a caller passes it from one to the other. It is "" only when
+// the embedded catalog does not decode, which TestShippedCatalog fails on.
+func ChatGPTModelsClientVersion() string {
+	c, err := shippedCatalog()
+	if err != nil {
+		return ""
+	}
+	return c.ChatGPT.ModelsClientVersion
+}
+
 // Clone is a deep copy of c: no map, slice or pointer of the copy is c's, so a
 // table merged from it can be changed without changing c (plan 031 §3.1). A
 // nil c clones to nil.
@@ -237,7 +267,9 @@ func (c *Catalog) Clone() *Catalog {
 		r.WireModels = slices.Clone(r.WireModels)
 		out.Retired = append(out.Retired, r)
 	}
-	out.ChatGPT.Start = c.ChatGPT.Start
+	out.ChatGPT.Start = slices.Clone(c.ChatGPT.Start)
+	out.ChatGPT.startSet = c.ChatGPT.startSet
+	out.ChatGPT.ModelsClientVersion = c.ChatGPT.ModelsClientVersion
 	for slug, d := range c.ChatGPT.Models {
 		if out.ChatGPT.Models == nil {
 			out.ChatGPT.Models = make(map[string]ChatGPTModelDefaults, len(c.ChatGPT.Models))
@@ -367,17 +399,33 @@ func (c *Catalog) validate(name string) error {
 // and a tool profile is one craze has. Slugs are checked in sorted order.
 func (c *Catalog) validateChatGPT(name string) error {
 	d := c.ChatGPT
-	if d.Start == "" && len(d.Models) == 0 {
-		return nil
-	}
 	at := func(table, key, reason string) error {
 		return &FileError{File: name, Table: table, Key: key, Reason: reason}
 	}
-	if p, ok := c.Providers[ChatGPTProvider]; !ok || p.Driver != DriverChatGPT {
+	p, shipsChatGPT := c.Providers[ChatGPTProvider]
+	shipsChatGPT = shipsChatGPT && p.Driver == DriverChatGPT
+	if shipsChatGPT && d.ModelsClientVersion == "" {
+		return at("chatgpt_defaults", "models_client_version", "missing: the catalog ships the "+ChatGPTProvider+" provider, whose model list the server gates on a client version (plan 034 §3.1)")
+	}
+	if !d.startSet && len(d.Start) == 0 && d.ModelsClientVersion == "" && len(d.Models) == 0 {
+		return nil
+	}
+	if !shipsChatGPT {
 		return at("chatgpt_defaults", "", fmt.Sprintf("no provider %q on driver %q ships for these settings to apply to", ChatGPTProvider, DriverChatGPT))
 	}
-	if d.Start != "" && !chatgptSlug.MatchString(d.Start) {
-		return at("chatgpt_defaults", "start", "not a model slug")
+	if v := d.ModelsClientVersion; !validPinVersion(v) {
+		return at("chatgpt_defaults", "models_client_version", fmt.Sprintf("%q is not a dotted version: one to three numeric parts of one to six digits, as 0.160.0", v))
+	}
+	if d.startSet && len(d.Start) == 0 {
+		return at("chatgpt_defaults", "start", "is empty: list at least one model slug, or leave start out for no preference")
+	}
+	for i, s := range d.Start {
+		switch {
+		case !chatgptSlug.MatchString(s):
+			return at("chatgpt_defaults", "start", fmt.Sprintf("entry %d is not a model slug", i+1))
+		case slices.Contains(d.Start[:i], s):
+			return at("chatgpt_defaults", "start", fmt.Sprintf("lists %s twice", s))
+		}
 	}
 	for _, slug := range slices.Sorted(maps.Keys(d.Models)) {
 		m := d.Models[slug]

@@ -13,6 +13,7 @@ import (
 
 	"github.com/charliek/craze/internal/agent"
 	"github.com/charliek/craze/internal/backend"
+	"github.com/charliek/craze/internal/chatgptauth"
 	"github.com/charliek/craze/internal/harness/modeltable"
 	"github.com/charliek/craze/internal/paths"
 )
@@ -207,7 +208,7 @@ func (d connectDialog) provider() (modeltable.ProviderInfo, bool) {
 // the field and its refusal gone with it, and the sign-in's attempt ended
 // with its listener (plan 033 §3.13).
 func (d connectDialog) leaveKeyStep() connectDialog {
-	d.signIn.end()
+	d.signIn.end(chatgptauth.CloseEsc)
 	d.step, d.field, d.key, d.keyErr, d.signIn = connectPick, 0, textinput.Model{}, "", signInState{}
 	return d
 }
@@ -223,10 +224,12 @@ func (d connectDialog) leaveKeyStep() connectDialog {
 // the session list, where nothing reaches the field behind it again, or
 // quits).
 func (m Model) dropConnect() Model {
+	// A sign-in running in the box ends for the quit or the session's end
+	// (CloseShutdown), before the box's own close would call it a dialog's.
+	m.cdlg.signIn.end(chatgptauth.CloseShutdown)
 	if m.dialog == dialogConnect {
 		return m.closeDialog(false)
 	}
-	m.cdlg.signIn.end()
 	m.cdlg = connectDialog{}
 	return m
 }
@@ -462,7 +465,7 @@ func (m Model) applyConnect(msg connectAnswer) (Model, tea.Cmd) {
 		if m.dialog == dialogModel && m.mdlg.gen == msg.gen {
 			m.mdlg.connect = msg.show
 		}
-	case signInBegunMsg, signInDoneMsg, signInFinishedMsg:
+	case signInBegunMsg, signInDoneMsg, signInFinishedMsg, signInShownMsg, signInCopiedMsg, signInLogOffMsg:
 		return m.applySignIn(msg)
 	}
 	return m, nil
@@ -721,10 +724,14 @@ func (m Model) connectKeyBody(inner, budget int) []string {
 }
 
 // connectDialogClick is a press on a body row: on step one a provider's row
-// opens its key field, or its sign-in, as Enter on it does; nothing else in
+// opens its key field, or its sign-in, as Enter on it does; on the sign-in, a
+// row of the address copies it (signInClick, plan 034 Q10); nothing else in
 // the box acts.
 func (m Model) connectDialogClick(i int) (tea.Model, tea.Cmd) {
-	if m.cdlg.step != connectPick {
+	switch m.cdlg.step {
+	case connectSignIn:
+		return m.signInClick(i)
+	case connectKey:
 		return m, nil
 	}
 	plan := m.connectPickPlan(m.lay.Dialog.W-dialogBorder, m.lay.Dialog.H-dialogBorder)

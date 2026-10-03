@@ -869,7 +869,8 @@ ChatGPT plan).
 
 **Its models are the account's own**, not the catalog's: the list ChatGPT
 offers the signed-in account, fetched when you sign in and again, in the
-background, by a native session that starts with a list over a day old. Each
+background, by a native session that starts with a list over a day old, or one
+fetched by a craze that asked for a different client version (see below). Each
 is `chatgpt/<slug>` — `chatgpt/gpt-5.6-sol`, say — for `--model` and
 `/model`, named as ChatGPT names it with ` (ChatGPT plan)` after, and listed
 in `/model` together, in the account's order. Its context window is the one
@@ -881,12 +882,20 @@ are not offered; a session already on one keeps it in its picker, as with any
 provider that loses its key.
 
 The shipped catalog's `[chatgpt_defaults]` table holds craze's own settings for
-the plan's models, laid over the account's list: `start`, the model a new
-session starts on when nothing it remembers is funded and the default model is
-not either (`gpt-5.6-sol`), and per-slug `name`, `efforts` (which can only
+the plan's models, laid over the account's list: `start`, an ordered list of
+the models a new session starts on when nothing it remembers is funded and the
+default model is not either (`gpt-6.1-sol`, then `gpt-5.6-sol`; the first the
+account lists wins), and per-slug `name`, `efforts` (which can only
 narrow the account's), `default_effort` and `tool_profile` (`gpt-6-astra`
 defaults to `low`). It ships in the binary like the rest of the catalog; it is
 not a `models.toml` setting.
+
+ChatGPT lists its newer models only for a client that says which version it
+is, so craze asks for the list as one pinned version that it has tested; the
+list's file records it, and a list fetched with another version is fetched
+again at the next sign-in or session start. A model the list says needs a newer
+client than the one this craze pins is not offered. The pin ships in the binary
+and is not something to set.
 
 **Its files** are in the native directory (`~/.craze/native/`, or
 `$CRAZE_HOME/native/`), each `0600`, the sign-in's under `auth/`, a directory

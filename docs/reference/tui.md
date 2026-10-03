@@ -228,8 +228,10 @@ A **new** native session starts where you left off: a model or effort picked
 in any native session's [`/model`](#model-dialog) is remembered, and the next
 session with no `--model` starts on the newest remembered model whose provider
 has a key, at the effort last used on it. With no remembered model it can use,
-it starts on the model table's default, and if that has no key, on the first
-model that has one, with a note. `--model` picks the model for one start — at
+it starts on the model table's default; if that has no key and the ChatGPT plan
+is signed in, on the first of the plan's preferred models its account lists
+(`gpt-6.1-sol`, then `gpt-5.6-sol`); and otherwise on the first model that has a
+key, with a note. `--model` picks the model for one start — at
 the effort remembered for that model — and is never remembered itself. A
 resume is never moved by the memory: it keeps its transcript's model and
 effort, as above.
@@ -302,7 +304,7 @@ off.
 | `Ctrl+T`, `/tasks` | tasks panel: compact → expanded → hidden |
 | `Ctrl+G`, `/theme` | theme picker |
 | `Ctrl+O` | expand / collapse transcript detail (diff hunks, command output, thoughts) — works inside the sub-agent view too |
-| `Ctrl+Y` | copy the mouse selection, or the last reply when there is none (works with `--no-mouse`); inside the sub-agent view, copy from it |
+| `Ctrl+Y` | copy the mouse selection, or the last reply when there is none (works with `--no-mouse`); inside the sub-agent view, copy from it; in `/connect`'s ChatGPT sign-in, copy its address |
 | `↑` `↓` | move the keyboard out of the composer (draft or not) and then between rows: the selected row carries a `❯` gutter mark and the composer loses its cursor. `↑` reaches the queue band first and the sub-agent rows when nothing is queued; `↓` reaches the sub-agent rows first and the queue band when there are none. `↑` past the first row, `Esc`, or typing anything returns to the composer; inside the sub-agent view, scroll it; with the slash menu or the [`@` file popup](#file-mentions) open, move its highlighted row instead, wrapping at either end; in a dialog, move its selection (in `/help`, scroll the box) |
 | `Enter` while the sub-agent rows have the keyboard | open it in the main area, read-only (see [Sub-agent view](#sub-agent-view)) |
 | `Backspace` / `Delete` on a focused **running** sub-agent row, or inside a running sub-agent's view | stop that one sub-agent (native only); on any other row or provider the key falls through as if unhandled |
@@ -531,7 +533,7 @@ else: there are no inline previews.
 | Paste, or drag-and-drop a file into the terminal | a bracketed paste whose every word is the absolute path of an image (`png`, `jpg`, `jpeg`, `gif`, `webp`, `bmp`) becomes one chip per path. Quotes, backslash escapes, `file://` URLs and a leading `~/` are understood, and several paths may be separated by spaces or newlines |
 | `Ctrl+V` with an image on the clipboard | the image becomes a chip (on macOS only PNG clipboard data is read, which is what a screenshot is; a JPEG, GIF or WebP on the clipboard is not). With no image on the clipboard it pastes the clipboard's text, as it always has |
 | `Alt+V` | the same as `Ctrl+V` (the keys table and `/help` name `Ctrl+V` only) |
-| An **empty** paste | what a terminal sends when you paste an image it cannot paste as text: craze looks for an image on the clipboard. It does not look over SSH (`SSH_CONNECTION` or `SSH_TTY` set), where the clipboard craze can read is the remote machine's, not yours |
+| An **empty** paste | what a terminal sends when you paste an image it cannot paste as text: craze looks for an image on the clipboard. It does not look over SSH (`SSH_CONNECTION`, `SSH_CLIENT` or `SSH_TTY` set), where the clipboard craze can read is the remote machine's, not yours |
 
 Reading the clipboard's image needs `wl-paste` (Wayland), `xclip` (X11) or, on
 macOS, `osascript`. Without the tool, or without an image, `Ctrl+V` pastes text.
@@ -1579,28 +1581,73 @@ provider has no key.
 row opens **`Sign in with ChatGPT`**, which runs the same sign-in as [`craze
 auth login chatgpt`](cli.md#signing-in-to-the-chatgpt-plan) inside the box.
 
-- **The address.** The box shows the address to open in a browser, where you
-  sign in to ChatGPT and approve craze. `Ctrl+Y` copies it whole — through the
-  terminal (OSC 52) where the terminal supports it, so it reaches the clipboard
-  of the machine you are typing on even over SSH — and the box cuts it with `…`
-  when the window is too short to show it all. The address carries no token.
+- **The address.** The box — as wide as the terminal leaves it, up to 104
+  columns — shows the address to open in a browser, where you sign in to
+  ChatGPT and approve craze. It carries no token. Its rows are cut at the
+  width, never at a word, and the box cuts the last one with `…` when the
+  window is too short to show it all. There are three ways to get it into a
+  browser, each of them the whole address however the box wraps or cuts it:
+    - **Click it**, on any of its rows, or press **`Ctrl+Y`**: craze copies it
+      through the terminal (OSC 52, so it reaches the clipboard of the machine
+      you are typing on even over SSH) and the system clipboard. The box says
+      `Copied the address. Paste it into a browser. Nothing on the clipboard?
+      Cmd/Ctrl+click it (some terminals need Shift while craze holds the
+      mouse).` until the next key, or for 10 seconds — craze cannot tell
+      whether a clipboard took the copy. An address too long to copy whole
+      (over 64 KiB, which only a damaged registration file could make) is not
+      copied at all, rather than cut short: the box says `The address is too
+      long to copy (over 64 KiB), so nothing was copied.` Under `--no-mouse` a
+      click is the terminal's own, `Ctrl+Y` still copies, and the footer says
+      `ctrl+y copies the address`.
+    - **Cmd/Ctrl+click it**: each row of the address is a terminal hyperlink
+      (OSC 8) to the whole address, all of them one link, so a terminal with
+      hyperlinks opens the whole address from any row. Which modifier yours
+      wants while craze holds the mouse is under [Terminals](#terminals). With
+      `TERM=dumb`, or on the Linux console (`TERM=linux`), the rows are plain
+      text, and so is an address craze would not link: one that is not
+      ChatGPT's own sign-in endpoint (`https://auth.openai.com/…`) in printable
+      ASCII, at most 2048 bytes.
+    - **Copy it from the shell instead**: [`craze auth login
+      chatgpt`](cli.md#signing-in-to-the-chatgpt-plan) prints it plain, on one
+      line — the way that works in any terminal.
 - **The way back.** craze waits for the browser to come back to it on
   `127.0.0.1` (`Waiting for the browser.`). When the browser is on another
   machine, the page it lands on after you approve does not load: copy that
   page's whole address from the address bar, paste it into the field under the
-  address — a terminal paste or `Ctrl+V` — and press `Enter`. If craze could
-  not listen, the hint names the address the browser lands on. The field masks
-  everything in it with `•`, as the key field does — the address too — so an
-  API key pasted there out of habit is never drawn, not even before `Enter`,
-  and not when it is pasted onto the end of the address either. The line under
-  the field says what it holds instead, never repeating any of it: `That's the
-  redirect address: press enter to sign in.` once it is this sign-in's address
-  as the browser was sent to it — `http://127.0.0.1:<port>/auth/callback` with
-  a one-time code and the sign-in's state — and `Paste the whole address the
-  browser was sent to.` for anything else. A line that is not an address, or
-  the address of another sign-in, is refused in the field, which is emptied,
-  and is never repeated. Whichever comes first, the browser's return or the
-  pasted address, finishes the sign-in (`Signing in…`).
+  address — a terminal paste or `Ctrl+V` — and press `Enter`.
+    - **Over SSH** (`SSH_CONNECTION`, `SSH_CLIENT` or `SSH_TTY` set) the hint
+      leads with that: `craze runs on another machine (SSH). Open the address
+      on your computer and approve. When the browser can't connect to
+      127.0.0.1, copy that page's address and paste it here — or forward the
+      port first: ssh -L 1455:127.0.0.1:1455.` The port is the one craze
+      listens on — a re-login whose 1455 is taken listens on another, and the
+      line names that one. With the port forwarded — the SSH session started
+      with `ssh -L 1455:127.0.0.1:1455 <host>`, or the forward added to a
+      running one with OpenSSH's `~C` escape — the browser's return reaches
+      craze through the tunnel, and there is nothing to paste.
+    - **If craze could not listen** — another program has `127.0.0.1:1455`,
+      say — the box says why, `craze is not listening for the browser: another
+      program is using 127.0.0.1:1455.`, and the hint says the browser's page
+      will not load and names the address it lands on. It offers no forward:
+      nothing of craze's listens on the port.
+    - **The browser's return from a different sign-in attempt** — an earlier
+      attempt's approval, or another craze's — is refused by craze's listener,
+      and the box says so once: `The browser came back from a different
+      sign-in attempt. Use the address shown now.`
+    - **The field** masks everything in it with `•`, as the key field does —
+      the address too — so an API key pasted there out of habit is never
+      drawn, not even before `Enter`, and not when it is pasted onto the end
+      of the address either. The line under the field says what it holds
+      instead, never repeating any of it: `That's the redirect address: press
+      enter to sign in.` once it is this sign-in's address as the browser was
+      sent to it — `http://127.0.0.1:<port>/auth/callback` with a one-time
+      code and the sign-in's state — and `Paste the whole address the browser
+      was sent to.` for anything else. A line that is not an address, or the
+      address of another sign-in, is refused in the field, which is emptied,
+      and is never repeated; the redirect of an earlier sign-in is told so,
+      `That is the redirect of an earlier sign-in attempt. Use the address
+      shown now.` Whichever comes first, the browser's return or the pasted
+      address, finishes the sign-in (`Signing in…`).
 - **`Esc`** goes back to step one and stops the sign-in, closing craze's
   listener; so does every other way out of the box, and every way craze
   exits — a quit, the terminal closing, `SIGTERM`, or craze failing.
@@ -1609,7 +1656,7 @@ auth login chatgpt`](cli.md#signing-in-to-the-chatgpt-plan) inside the box.
   one-time notice follows — `You're using your ChatGPT plan.` and `Eligible
   usage in this app uses your ChatGPT plan. Manage usage in your ChatGPT
   settings: https://chatgpt.com/settings/usage` — and is not shown again. Then
-  craze fetches the plan's models (`ChatGPT plan models: chatgpt/gpt-5.6-sol,
+  craze fetches the plan's models (`ChatGPT plan models: chatgpt/gpt-6.1-sol,
   …`) and says `New sessions offer the ChatGPT plan's models; to use them in
   this conversation, /exit and run craze -c.` An account that did not allow
   plan usage gets `Signed in to ChatGPT as <email>, but ChatGPT plan usage is
@@ -1617,7 +1664,36 @@ auth login chatgpt`](cli.md#signing-in-to-the-chatgpt-plan) inside the box.
   plan usage when ChatGPT asks.` A sign-in that fails — declined in the
   browser, refused by ChatGPT, or for another account than the one this craze
   directory is registered with — closes the box with an error row, `/connect:
-  …`, naming the step and ChatGPT's error code, never a token.
+  …`, naming the step and ChatGPT's error code, never a token; a step that ran
+  out of time is named too, `/connect: exchange: timed out after 30s`.
+
+**Troubleshooting a sign-in: the sign-in log.** Every `/connect` sign-in is
+recorded, as `craze auth login chatgpt`'s is, in the TUI's craze directory's
+`native/logs/signin.log` (0600 in a 0700 directory, 1 MiB with one rotation to
+`signin.log.1`): one JSON line per thing that happened — the attempt's start,
+whether craze could listen for the browser and why not, a refused paste and
+which part of it was wrong, the listener refusing the browser's return from a
+different attempt (counted, not repeated), the address copied (a click or
+`Ctrl+Y`),
+the redirect, the attempt's one outcome, and the model list fetched after it.
+Its records say `"surface":"tui"`, and a sign-in the box ends says why:
+`"reason":"esc"`, `"dialog"` (the box closed another way, or the session was
+switched) or `"shutdown"` (craze quit, or the session ended). The log is
+value-free — it never holds an address, a pasted line, a code, a state, a
+token, an email or any text a server sent, and craze writes `invalid` for a
+value it does not know — so it is safe to share. Each event and field is
+described in [the CLI reference's sign-in
+log](cli.md#the-sign-in-log). A log craze cannot keep — its directory a
+symbolic link, writable by other users or another user's, or the file not a
+plain file of its own — is one note in the transcript, `the sign-in log is
+off: …`, written when craze finds out, as the sign-in starts or when a later
+record fails, and the sign-in goes on without it. A sign-in never waits on the
+log. When craze quits it waits at most a second in all for a sign-in still
+finishing to record its outcome and for a model list still being fetched after
+one, which it cancels (`models_failed`, `"class":"cancelled"`), then a second
+more for the log to be written. A log that fails then — or is not written
+within that second — is the same mention, once, as a line on the terminal
+after craze's screen is gone: `craze: the sign-in log is off: …`.
 
 **Refused while work runs.** While a turn is running — yours, another
 client's, or the agent's own — or a sub-agent is still running in the
@@ -1793,7 +1869,7 @@ clickable cannot drift apart:
 | The banner line inside the sub-agent view | Returns to the main transcript (same as `Esc`) |
 | Model name in status row 1 | Opens the model dialog (same as `/model`) |
 | `◆ agent` mode chip in status row 2 | Cycles the mode (same as `Shift+Tab`) |
-| A row inside an open dialog | Picks that row; a `/help` row is inert |
+| A row inside an open dialog | Picks that row; a `/help` row is inert; in `/connect`'s sign-in, a row of the address copies the whole address (same as `Ctrl+Y`) and the rest are inert |
 | Anywhere outside an open dialog | Closes it, applying nothing |
 | The transcript | Starts a selection |
 
@@ -1850,3 +1926,33 @@ Turning mouse reporting on takes native drag-select away from the terminal, and
 craze's own selection replaces it. To reach the terminal's instead — to select
 across the whole scrollback, say — hold `Shift` while dragging (`Option` in
 macOS terminals), or start craze with `--no-mouse`.
+
+### Terminals
+
+Two of craze's mouse-era features lean on the terminal: a copy reaches the
+clipboard through OSC 52 (above), and `/connect`'s ChatGPT sign-in draws its
+address as an OSC 8 hyperlink (see [Signing in to the ChatGPT
+plan](#connect)). What each terminal needs:
+
+- **Ghostty** opens a link with `Cmd`+click on macOS (`Ctrl`+click
+  elsewhere). A copy reaches the clipboard as its `clipboard-write` setting
+  allows; set `clipboard-write = allow` if one never arrives.
+- **iTerm2** opens a link with `Cmd`+click.
+- **kitty** hands a plain click to the application while it holds the mouse:
+  open the link with `Ctrl+Shift`+click.
+- **WezTerm** hands a click to the application while it holds the mouse
+  unless `Shift` is held: `Shift`+click opens the link.
+- **GNOME Terminal** opens a link with `Ctrl`+click, not `Shift`+click.
+  Should a `Ctrl`+click reach craze instead, add `Shift` (`Ctrl+Shift`+click),
+  which keeps the click from an application holding the mouse in the VTE
+  terminals. Other VTE terminals, such as Tilix, typically use `Ctrl`+click
+  too.
+- **tmux** passes links through from 3.4 on, once told the outer terminal
+  has them: `set -as terminal-features ',*:hyperlinks'`. Copies need `set -g
+  set-clipboard on`, as above.
+- **The Linux console** (`TERM=linux`) and `TERM=dumb` get the address as
+  plain text: craze draws no link there.
+
+Where neither a copy nor a link gets through, `craze auth login chatgpt`
+prints the address on one line, plain, for the terminal's own selection (see
+[the CLI reference](cli.md#signing-in-to-the-chatgpt-plan)).

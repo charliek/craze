@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/url"
 	"slices"
 	"strings"
@@ -12,10 +13,12 @@ import (
 
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/charliek/craze/internal/chatgptauth"
 	"github.com/charliek/craze/internal/harness/modeltable"
+	"github.com/charliek/craze/internal/signinlog"
 )
 
 // /connect's third step (plan 033 §3.13, owner decision 10): Sign in with
@@ -25,10 +28,17 @@ import (
 // runs the whole sign-in craze auth login chatgpt runs (chatgptauth.Begin),
 // into this TUI's native directory.
 //
-//   - The step shows the authorization address, and Ctrl+Y copies it through
-//     the TUI's own copy (copyText: OSC 52, then the native tool), so a person
-//     on another machine — over SSH, say — can open it in their own browser.
-//     It carries no token: craze never sends id_token_hint (P21).
+//   - The step shows the authorization address, and Ctrl+Y — or a click on
+//     any of its rows — copies it through the TUI's own copy (copyText: OSC
+//     52, then the native tool), so a person on another machine — over SSH,
+//     say — can open it in their own browser; a line in the box says so, and
+//     what to do when nothing reached the clipboard (plan 034 §3.2, Q10). Each
+//     row of it is also a terminal hyperlink to the whole address (OSC 8, Q9;
+//     linkRow), so a Cmd/Ctrl+click opens it whole however the box wraps or
+//     cuts it. It carries no token: craze never sends id_token_hint (P21).
+//   - One layout plan (signInPlan) says which row is which, for the drawing
+//     and for a click alike, so a click can only copy from a row that shows
+//     the address.
 //   - The wait is a plain tea.Cmd under a context the step owns, never a gated
 //     call: a gated call has the gate's 15-second deadline and holds every key
 //     typed meanwhile (gate.go, gateDeadline), and a browser's approval takes
@@ -46,9 +56,15 @@ import (
 //     field says, in one of two fixed texts, whether what it holds is this
 //     attempt's redirect address (signInStatus) — never a word of it. The
 //     listener and the paste race inside the attempt, and whichever is
-//     accepted first wins (chatgptauth.Attempt). A line that is not an address
-//     is refused before the attempt sees it, never quoted, and the field is
-//     emptied, as is one the attempt refuses.
+//     accepted first wins (chatgptauth.Attempt). Enter hands the line to the
+//     attempt, which judges it (plan 034 §3.3): one that is not an address,
+//     one too long, another attempt's redirect or another address is refused
+//     in the field — phrased from the attempt's refusal (pasteRefusalText),
+//     never quoting it — and the field is emptied. Over SSH, or when craze
+//     could not listen, the hint under the address leads with the paste path
+//     (plan 034 Q12): the browser's page will not load, so its address is what
+//     to paste — and, over SSH with a listener, the ssh -L line that forwards
+//     the listener's port instead (signInState.hint).
 //   - Every way out of the step ends the attempt and closes its listener with
 //     every connection to it (signInState.end): Esc, which goes back to step
 //     one; the dialog closing for any reason (closeDialog); the dialog dropped
@@ -75,6 +91,21 @@ import (
 //   - It writes to this TUI's CRAZE_HOME (Model.nativeDir, R2): the directory a
 //     host under that home reads. A session attached from a shell with another
 //     CRAZE_HOME reads its own.
+//   - Every attempt is logged, value-free, in that directory's sign-in log
+//     (plan 034 §3.3, Q5; internal/signinlog), surface tui: the attempt reports
+//     its events to the run's observer (observeSignIn), which records each one
+//     — its begin, the listener's refusals, a refused paste, its redirect, its
+//     one outcome with why (the CloseReason every way out passes), the address
+//     copied, and the model fetch after it. The log is opened, on the Update,
+//     the first time a sign-in begins — its open touches no file, so nothing
+//     waits on it — and closed by finishRun once every attempt still running
+//     has reported its end (signInRuns). A log that cannot be kept is one
+//     transcript note, as it stops (signInLogCmd), and the sign-in goes on.
+//     Two of the events
+//     are also lines in the box (plan 034 Q8; signInShown): why craze is not
+//     listening for the browser (the begin's reason), and the listener's
+//     refusal of the browser's return from a different attempt — each a fixed
+//     text, never a value.
 //   - Refused while work runs, as a key is (connectBusy): when the step would
 //     open, and at a pasted address's Enter, where the field keeps the address
 //     for a later Enter. A browser's redirect to the listener is not asked;
@@ -91,8 +122,20 @@ const (
 	// connectSignInStarting is the step until the attempt has begun.
 	connectSignInStarting = "Starting the sign-in…"
 	// connectSignInWaiting is the hint under the address while a listener
-	// waits for the browser.
+	// waits for the browser, craze running on this machine.
 	connectSignInWaiting = "Waiting for the browser. If it is on another machine, paste the address it lands on:"
+	// The hint over SSH, or with no listener (plan 034 Q12; signInState.hint):
+	// the paste path first. connectSignInSSH opens it over SSH; with a
+	// listener, connectSignInSSHListening follows, naming the listener's port
+	// twice (the ssh -L forward); with none, connectSignInSSHPasteOnly,
+	// naming the address the browser lands on. On this machine with no
+	// listener the hint is connectSignInPasteOnly alone. A forward to a port
+	// craze is not listening on would reach whatever holds it, so a
+	// paste-only hint offers none.
+	connectSignInSSH          = "craze runs on another machine (SSH). Open the address on your computer and approve. "
+	connectSignInSSHListening = "When the browser can't connect to 127.0.0.1, copy that page's address and paste it here — or forward the port first: ssh -L %s:127.0.0.1:%s."
+	connectSignInSSHPasteOnly = "The browser's page will not load: copy its whole address (it starts with %s) and paste it here:"
+	connectSignInPasteOnly    = "The browser's page will not load after you approve: copy its whole address (it starts with %s) and paste it here:"
 	// connectSignInHanded replaces the hint and the field once a pasted
 	// address was accepted: the exchange is under way.
 	connectSignInHanded = "Signing in…"
@@ -101,27 +144,71 @@ const (
 	// anything of the field's, which is masked.
 	connectSignInReady     = "That's the redirect address: press enter to sign in."
 	connectSignInPasteHint = "Paste the whole address the browser was sent to."
-	// The footers: while the attempt begins, while it waits, and once the
-	// address is handed over.
-	connectSignInStartHint  = "esc back"
-	connectSignInWaitHint   = "ctrl+y copies the address · enter · esc back"
-	connectSignInHandedHint = "esc cancels"
-	// connectSignInCopied is the status row's note after Ctrl+Y.
+	// The footers: while the attempt begins, while it waits — with the mouse,
+	// a narrow box's shorter form, and with --no-mouse, where a click is the
+	// terminal's own — and once the address is handed over.
+	connectSignInStartHint      = "esc back"
+	connectSignInWaitHint       = "click or ctrl+y copies · enter · esc back"
+	connectSignInWaitHintNarrow = "click/ctrl+y copies · enter · esc"
+	connectSignInWaitHintKeys   = "ctrl+y copies the address · enter · esc back"
+	connectSignInHandedHint     = "esc cancels"
+	// connectSignInCopied is the status row's note after a copy (Ctrl+Y or a
+	// click).
 	connectSignInCopied = "copied the sign-in address"
+	// The box's line after a copy (plan 034 Q10; signInState.copied), until
+	// the next key or for signInCopiedLinger: what was done, and — the address
+	// being a link (Q9) — what to do when OSC 52 reached no clipboard. Plain
+	// rows have no link to click, so they say the first part alone.
+	connectSignInCopiedLine     = "Copied the address. Paste it into a browser."
+	connectSignInCopiedLinkLine = connectSignInCopiedLine + " Nothing on the clipboard? Cmd/Ctrl+click it (some terminals need Shift while craze holds the mouse)."
+	// connectSignInUncopiedLine takes the copied line's place when the
+	// address is longer than a copy takes whole (clipboardMax): nothing is
+	// copied, rather than an address cut short (plan 034 review r4 #5a).
+	connectSignInUncopiedLine = "The address is too long to copy (over 64 KiB), so nothing was copied."
+	// connectSignInOtherAttempt is the listener's refusal of a redirect with a
+	// code and another attempt's state (plan 034 Q8): said once an attempt,
+	// in the words of the paste's own refusal of one (connectSignInEarlierText).
+	connectSignInOtherAttempt = "The browser came back from a different sign-in attempt. Use the address shown now."
 	// connectBusySignInText is a pasted address's Enter refused because work
 	// started while the box was open. The address stays in the field.
 	connectBusySignInText = "Finish or stop the running work first, then press enter to sign in."
+	// connectSignInEarlierText is a pasted address refused because it is the
+	// sign-in's redirect address with another attempt's state (plan 034
+	// §3.3, chatgptauth.PartState): the browser's return from an attempt
+	// before this one.
+	connectSignInEarlierText = "That is the redirect of an earlier sign-in attempt. Use the address shown now."
 	// connectPlanOffMark tags, in step one, a provider signed in to by an
 	// account that did not grant plan usage (modeltable.KeyPlanDisabled).
 	connectPlanOffMark = "plan usage off"
 	// connectRedirectMax is the longest line the field takes as a pasted
-	// address, as craze auth reads at most 16 KiB: a real one is a few
-	// hundred bytes, and a longer line is not one.
-	connectRedirectMax = 16 << 10
+	// address: the attempt's own bound (chatgptauth.MaxPaste), which craze
+	// auth reads by too. A real one is a few hundred bytes, and a longer line
+	// is not one.
+	connectRedirectMax = chatgptauth.MaxPaste
 	// signInFinishTimeout bounds the work after a sign-in: the notice
 	// recorded and the model list fetched.
 	signInFinishTimeout = time.Minute
+	// signInDialogWidth is the widest the step's box gets (plan 034 Q11;
+	// dialogMaxWidth): wider than every other dialog, so the address takes
+	// half the rows at 100 columns and more. It cannot make it one row.
+	signInDialogWidth = 104
+	// signInLinkPrefix opens the OSC 8 id every row of one attempt's address
+	// shares (linkRow), so a terminal highlights the rows as one link; the
+	// attempt's id (chatgptauth.Attempt.ID) follows.
+	signInLinkPrefix = "craze-signin-"
+	// signInShownMax is how many shown events a run holds unread
+	// (signInShown): the listener reports each kind once an attempt, so it
+	// never fills; one past it is dropped rather than block the listener.
+	signInShownMax = 4
+	// signInEndWait bounds finishRun's wait for the outcomes of the attempts
+	// still running (signInRuns.awaitEnds), before the sign-in log closes —
+	// which waits for its own writer as long again at most.
+	signInEndWait = time.Second
 )
+
+// signInCopiedLinger is how long the box's copied line stays without a key
+// (plan 034 Q10): a variable only so a test can run its tick.
+var signInCopiedLinger = 10 * time.Second
 
 // The texts the transcript gets once a sign-in is done: craze auth login
 // chatgpt's (C15), with /connect as the way to run it again.
@@ -139,29 +226,46 @@ const (
 // and OpenAI, and the step's own work — its frames, the race, Esc — is tested
 // apart from the sign-in's, which chatgptauth's tests cover.
 type signInAttempt interface {
+	// ID is the attempt's random id (chatgptauth.Attempt.ID): the address's
+	// link id (signInLink).
+	ID() string
 	URL() string
 	RedirectURI() string
 	Listening() bool
 	Paste(raw string) error
 	Wait(ctx context.Context) (chatgptauth.Result, error)
-	Close()
+	Close(reason chatgptauth.CloseReason)
+	Report(kind chatgptauth.EventKind)
+	Observer() func(chatgptauth.Event)
+	// Ended is closed once the attempt has reported its one outcome
+	// (chatgptauth.Attempt.Ended): what finishRun waits for before it closes
+	// the sign-in log (signInRuns.awaitEnds).
+	Ended() <-chan struct{}
 }
 
 // The step's seams: chatgptauth in craze; stand-ins in this package's tests,
 // which must never reach OpenAI. Each is read on the Update goroutine and
 // handed to its command (sendCopy says why).
 var (
-	beginSignIn = func(ctx context.Context, dir string) (signInAttempt, error) {
-		a, err := chatgptauth.Begin(ctx, dir, chatgptauth.BeginOptions{})
+	// beginSignIn begins an attempt into dir that reports its events to
+	// observe (chatgptauth.BeginOptions.Observe).
+	beginSignIn = func(ctx context.Context, dir string, observe func(chatgptauth.Event)) (signInAttempt, error) {
+		a, err := chatgptauth.Begin(ctx, dir, chatgptauth.BeginOptions{Observe: observe})
 		if err != nil {
 			return nil, err
 		}
 		return a, nil
 	}
-	fetchPlanModels = func(ctx context.Context, dir string) (*chatgptauth.Models, error) {
-		return chatgptauth.FetchModels(ctx, chatgptauth.Source(dir))
+	// fetchPlanModels fetches the plan's models into dir after a sign-in,
+	// reporting to observe, the attempt's observer (Attempt.Observer).
+	fetchPlanModels = func(ctx context.Context, dir string, observe func(chatgptauth.Event)) (*chatgptauth.Models, error) {
+		return chatgptauth.FetchModels(ctx, chatgptauth.Source(dir), chatgptauth.FetchOptions{
+			ClientVersion: modeltable.ChatGPTModelsClientVersion(), Observe: observe,
+		})
 	}
 	markNoticeShown = chatgptauth.MarkNoticeShown
+	// openSignInLog opens the native directory's sign-in log.
+	openSignInLog = signinlog.Open
 )
 
 // signInState is step three's own state (connectDialog.signIn): the zero value
@@ -172,8 +276,9 @@ type signInState struct {
 	runs *signInRuns
 	run  uint64
 	// cancel ends the run: the context the begin and the wait run under,
-	// whose end closes the attempt's listener (chatgptauth.Attempt.Wait).
-	cancel context.CancelFunc
+	// whose end closes the attempt's listener (chatgptauth.Attempt.Wait). Its
+	// cause carries the end's reason (signInEnded).
+	cancel context.CancelCauseFunc
 	// att is the attempt, once it has begun; url and redirect are its
 	// authorization and redirect addresses, listening whether a loopback
 	// listener waits for the browser. state is the state url carries
@@ -187,21 +292,58 @@ type signInState struct {
 	// handed says a pasted address was accepted: the attempt is finishing,
 	// and the field is gone.
 	handed bool
+	// link is the OSC 8 id every address row is a link under (signInLink,
+	// plan 034 Q9), or "" when the rows are drawn plain; ssh says craze runs
+	// over SSH (Model.overSSH), which the hint leads with (Q12). Both are
+	// judged once, as the attempt is adopted.
+	link string
+	ssh  bool
+	// why is why craze is not listening for the browser, from the attempt's
+	// begin (listenerMissing, Q8), or ""; other says the listener refused the
+	// browser's return from a different attempt (Q8). Each is a line in the
+	// box.
+	why   string
+	other bool
+	// copied says the box shows the copied line (Q10): from a copy until the
+	// next key, or until the tick of copy number copies (signInCopiedMsg).
+	// uncopied says that line says the address was too long to copy, and
+	// nothing was (review r4 #5a).
+	copied   bool
+	uncopied bool
+	copies   uint64
 }
 
-// end ends the run, if there is one: the context cancelled, and the attempt
+// end ends the run, if there is one, for reason (plan 034 §3.3): the attempt
 // closed with its listener and every connection to it — the one the step
 // adopted, or one Begin has returned whose answer the step has not seen yet
-// (signInRuns). It is safe to call more than once, and on a copy: the copies
-// share the run.
-func (s signInState) end() {
-	s.runs.end(s.run)
-	if s.cancel != nil {
-		s.cancel()
-	}
+// (signInRuns) — and the context cancelled. The attempt is closed first, so
+// an attempt still waiting ends cancelled with reason; one that has ended
+// already takes the close as cleanup. It is safe to call more than once, and
+// on a copy: the copies share the run, and the first reason is the one kept.
+func (s signInState) end(reason chatgptauth.CloseReason) {
 	if s.att != nil {
-		s.att.Close()
+		s.att.Close(reason)
 	}
+	s.runs.end(s.run, reason)
+	if s.cancel != nil {
+		s.cancel(&signInEnded{reason: reason})
+	}
+}
+
+// signInEnded is the cause a run's context is cancelled with: why it ended,
+// for an attempt Begin returns after its run did (beginSignInCmd).
+type signInEnded struct{ reason chatgptauth.CloseReason }
+
+func (e *signInEnded) Error() string { return "the sign-in ended: " + string(e.reason) }
+
+// endReason is why ctx's run ended, by its cause; CloseDialog when it says
+// none.
+func endReason(ctx context.Context) chatgptauth.CloseReason {
+	var e *signInEnded
+	if errors.As(context.Cause(ctx), &e) {
+		return e.reason
+	}
+	return chatgptauth.CloseDialog
 }
 
 // signInRuns is every /connect sign-in run not yet ended, by its number: the
@@ -218,101 +360,513 @@ func (s signInState) end() {
 // between — would otherwise leave that attempt listening. Whichever comes
 // second, the end or the record, closes it. Nil — a model a test built on its
 // own — holds nothing, and every method allows it.
+//
+// It also holds the runs' sign-in log (plan 034 §3.3): opened, on the Update,
+// the first time a run begins (logFor) — its open touches no file, so no
+// begin waits on it, and every begin, overlapping ones included, shares the
+// one log (review r3 #4, #8b) — from the native directory the run signs in
+// to — the TUI's Config.NativeDir, so a test with a temp NativeDir never
+// touches ~/.craze — and closed by finishRun (closeLog), once closeAll has
+// had every run still open end and awaitEnds has waited, bounded, for each
+// one's outcome to be reported (review r3 #8a). live is every run whose
+// outcome may still be to come: its begin not yet returned, or its attempt
+// not yet ended, whether or not its step has ended it. finishing is every
+// signed-in run's finishing command still running (finishSignInCmd) — the
+// model fetch, whose outcome is the attempt's in the log too — which closeAll
+// cancels and awaitEnds waits for in the same bound (review r6 #1); closing
+// says closeAll has run, and no finishing command starts after it.
 type signInRuns struct {
-	mu   sync.Mutex
-	open map[uint64]*signInRun
+	mu        sync.Mutex
+	open      map[uint64]*signInRun
+	live      map[uint64]*signInRun
+	finishing map[*signInFinish]struct{}
+	closing   bool
+
+	logMu     sync.Mutex
+	logClosed bool
+	log       *signinlog.Log
+	logErr    error         // the open's refusal
+	logTold   bool          // the one transcript note was written
+	logDone   chan struct{} // closed by closeLog: the log's wait (signInLogCmd) ends
 }
 
-// signInRun is one run's: its context's cancel and, once begun, its attempt.
+// signInRun is one run's: its context's cancel, once begun its attempt, and
+// begun, closed once its begin's command has done with Begin — returned, its
+// attempt closed when the run had ended meanwhile (beginSignInCmd). att is
+// read and written under signInRuns.mu.
 type signInRun struct {
-	cancel context.CancelFunc
+	cancel context.CancelCauseFunc
 	att    signInAttempt
+	begun  chan struct{}
 }
 
-// stop cancels the run's context and closes its attempt, if it has one.
-func (r *signInRun) stop() {
-	r.cancel()
-	if r.att != nil {
-		r.att.Close()
+// signInFinish is one finishing command's (finishSignInCmd): the cancel of
+// the context its work runs under, and done, closed as it returns.
+type signInFinish struct {
+	cancel context.CancelFunc
+	done   chan struct{}
+}
+
+// stop closes att, the run's attempt, if it has one, for reason, and cancels
+// the run's context.
+func (r *signInRun) stop(att signInAttempt, reason chatgptauth.CloseReason) {
+	if att != nil {
+		att.Close(reason)
+	}
+	r.cancel(&signInEnded{reason: reason})
+}
+
+// settled says the run's outcome is in: its begin has returned, and its
+// attempt — if Begin made one — has reported its end. s.mu is held.
+func (r *signInRun) settled() bool {
+	select {
+	case <-r.begun:
+	default:
+		return false
+	}
+	if r.att == nil {
+		return true
+	}
+	select {
+	case <-r.att.Ended():
+		return true
+	default:
+		return false
 	}
 }
 
-// add records run, its begin and wait to run under cancel's context.
-func (s *signInRuns) add(run uint64, cancel context.CancelFunc) {
+// add records run, its begin and wait to run under cancel's context, and
+// forgets the live runs whose outcomes are in.
+func (s *signInRuns) add(run uint64, cancel context.CancelCauseFunc) {
 	if s == nil {
 		return
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.open == nil {
-		s.open = map[uint64]*signInRun{}
+		s.open, s.live = map[uint64]*signInRun{}, map[uint64]*signInRun{}
 	}
-	s.open[run] = &signInRun{cancel: cancel}
+	for n, r := range s.live {
+		if r.settled() {
+			delete(s.live, n)
+		}
+	}
+	r := &signInRun{cancel: cancel, begun: make(chan struct{})}
+	s.open[run], s.live[run] = r, r
 }
 
 // adopt records att as run's attempt, Begin having returned it, and says
 // whether the run is still open. False is a run already ended — by its step
 // or by finishRun — whose attempt nothing else will close: the caller closes
-// it.
+// it. The attempt is recorded either way, so finishRun waits for its outcome
+// (awaitEnds).
 func (s *signInRuns) adopt(run uint64, att signInAttempt) bool {
 	if s == nil {
 		return true
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	r, ok := s.open[run]
-	if ok {
+	if r := s.live[run]; r != nil {
 		r.att = att
 	}
+	_, ok := s.open[run]
 	return ok
 }
 
-// end ends run, if it is still open: its context cancelled, its attempt
-// closed, and the run forgotten.
-func (s *signInRuns) end(run uint64) {
+// begun says run's begin has done with Begin (signInRun.begun):
+// beginSignInCmd's, on every way out of it.
+func (s *signInRuns) begun(run uint64) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if r := s.live[run]; r != nil {
+		close(r.begun)
+	}
+}
+
+// end ends run, if it is still open, for reason: its attempt closed, its
+// context cancelled, and the run forgotten — but for its outcome, which
+// awaitEnds still waits for.
+func (s *signInRuns) end(run uint64, reason chatgptauth.CloseReason) {
 	if s == nil {
 		return
 	}
 	s.mu.Lock()
 	r := s.open[run]
 	delete(s.open, run)
+	var att signInAttempt
+	if r != nil {
+		att = r.att
+	}
 	s.mu.Unlock()
 	if r != nil {
-		r.stop()
+		r.stop(att, reason)
 	}
 }
 
-// closeAll ends every run still open: finishRun's, on every exit path.
-func (s *signInRuns) closeAll() {
+// closeAll ends every run still open, for reason, and cancels every
+// finishing command still running, none starting after it: finishRun's, on
+// every exit path (CloseShutdown).
+func (s *signInRuns) closeAll(reason chatgptauth.CloseReason) {
 	if s == nil {
 		return
 	}
 	s.mu.Lock()
 	open := s.open
-	s.open = nil
+	s.open, s.closing = nil, true
+	atts := make(map[uint64]signInAttempt, len(open))
+	for n, r := range open {
+		atts[n] = r.att
+	}
+	fins := make([]*signInFinish, 0, len(s.finishing))
+	for f := range s.finishing {
+		fins = append(fins, f)
+	}
 	s.mu.Unlock()
-	for _, r := range open {
-		r.stop()
+	for n, r := range open {
+		r.stop(atts[n], reason)
+	}
+	for _, f := range fins {
+		f.cancel()
+	}
+}
+
+// startFinish records a finishing command (finishSignInCmd) as it starts,
+// under cancel, and answers the func it calls as it returns; nil once
+// closeAll has run — the program is ending, and the command does nothing.
+func (s *signInRuns) startFinish(cancel context.CancelFunc) func() {
+	if s == nil {
+		return func() {}
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closing {
+		return nil
+	}
+	f := &signInFinish{cancel: cancel, done: make(chan struct{})}
+	if s.finishing == nil {
+		s.finishing = map[*signInFinish]struct{}{}
+	}
+	s.finishing[f] = struct{}{}
+	return func() {
+		s.mu.Lock()
+		delete(s.finishing, f)
+		s.mu.Unlock()
+		close(f.done)
+	}
+}
+
+// awaitEnds waits, within d in all, for the outcome of every run that may
+// still have one to report (live): its begin to return — Begin reports a
+// failure's outcome before it returns — and its attempt, if it made one, to
+// report its end (Ended): a Wait finishing an accepted redirect reports it as
+// it returns, after the Close that ended its run (review r3 #8a). Then, in
+// the same d, for every finishing command closeAll cancelled to return, its
+// model fetch's outcome reported (review r6 #1). finishRun's, after closeAll
+// and before closeLog, so those outcomes are logged.
+func (s *signInRuns) awaitEnds(d time.Duration) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	runs := make([]*signInRun, 0, len(s.live))
+	for _, r := range s.live {
+		runs = append(runs, r)
+	}
+	fins := make([]*signInFinish, 0, len(s.finishing))
+	for f := range s.finishing {
+		fins = append(fins, f)
+	}
+	s.mu.Unlock()
+	t := time.NewTimer(d)
+	defer t.Stop()
+	// within waits for c within what is left of d: false once d is spent.
+	within := func(c <-chan struct{}) bool {
+		select {
+		case <-c:
+			return true
+		case <-t.C:
+			return false
+		}
+	}
+	for _, r := range runs {
+		if !within(r.begun) {
+			return
+		}
+		s.mu.Lock()
+		att := r.att
+		s.mu.Unlock()
+		if att != nil && !within(att.Ended()) {
+			return
+		}
+	}
+	for _, f := range fins {
+		select {
+		case <-f.done:
+			continue
+		default:
+		}
+		if onAwaitEnds != nil {
+			onAwaitEnds()
+		}
+		if !within(f.done) {
+			return
+		}
+	}
+}
+
+// onAwaitEnds is a test's seam: nil in production, called by awaitEnds inside
+// its finishing-command loop, right before it blocks on a command that has
+// not finished — so it fires only when the join really waits, and a test
+// that holds a record until it fires proves the join by construction
+// (reviews r7 #5, r8 #3).
+var onAwaitEnds func()
+
+// logFor is the runs' sign-in log, opened in dir the first time it is asked
+// for, and the command that waits for it to stop (signInLogCmd) when this is
+// that first time, else nil: the log is nil when it could not be opened
+// (logErr says why, which the command delivers at once), or once closeLog has
+// run — a run that begins as the program ends logs nothing. It runs on the
+// Update (openSignInStep), under logMu: the open touches no file
+// (signinlog.Open), so nothing waits on it, and a second begin overlapping
+// the first — Esc and back while the first is still beginning — shares the
+// log the first opened (review r3 #8b).
+func (s *signInRuns) logFor(dir string) (*signinlog.Log, tea.Cmd) {
+	if s == nil || dir == "" {
+		return nil, nil
+	}
+	s.logMu.Lock()
+	defer s.logMu.Unlock()
+	switch {
+	case s.logClosed:
+		return nil, nil
+	case s.log != nil || s.logErr != nil:
+		return s.log, nil
+	}
+	s.log, s.logErr = openSignInLog(dir)
+	s.logDone = make(chan struct{})
+	return s.log, signInLogCmd(s.log, s.logErr, s.logDone)
+}
+
+// signInLogOffMsg is the sign-in log's stop (signInLogCmd): the transcript's
+// one note about it (signInRuns.mention). It is the TUI's, whichever session
+// it shows — the log is the TUI's for its life, as presenceCmd's count is —
+// so it carries no session stamp, and no switch drops it.
+type signInLogOffMsg struct{}
+
+func (signInLogOffMsg) connectAnswer() {}
+
+// signInLogCmd waits for the sign-in log to stop — refused as its writer set
+// it up, or broken by a record, the last of a sign-in's included — and
+// answers signInLogOffMsg, so the note is written as it happens, not with
+// some later answer (review r3 #8c); at once when the open itself was
+// refused (err). It ends with no message once closeLog has run (done). Armed
+// once, with the log (logFor).
+func signInLogCmd(l *signinlog.Log, err error, done <-chan struct{}) tea.Cmd {
+	return func() tea.Msg {
+		if err != nil {
+			return signInLogOffMsg{}
+		}
+		select {
+		case <-l.Stopped():
+			return signInLogOffMsg{}
+		case <-done:
+			return nil
+		}
+	}
+}
+
+// mention is the transcript's one note about the sign-in log, once: why it
+// was refused when it opened, or why it stopped since; "" otherwise, and ever
+// after the note was written — here, or by closeLog as the program ends.
+func (s *signInRuns) mention() string {
+	if s == nil {
+		return ""
+	}
+	s.logMu.Lock()
+	defer s.logMu.Unlock()
+	if s.logTold {
+		return ""
+	}
+	err := s.logErr
+	if err == nil {
+		err = s.log.Failure()
+	}
+	if err == nil {
+		return ""
+	}
+	s.logTold = true
+	return signInLogNote(err)
+}
+
+// signInLogNote is the one mention of err, why the sign-in log stopped: the
+// transcript's note, or the line finishRun prints once the screen is
+// restored. signinlog's errors say what failed and where — a step, a path in
+// the native directory, an errno — never anything a record holds.
+func signInLogNote(err error) string {
+	return "the sign-in log is off: " + sanitizeLine(err.Error())
+}
+
+// closeLog closes the runs' sign-in log, flushing it for at most a second,
+// and ends its wait (signInLogCmd): finishRun's, after closeAll and
+// awaitEnds, so every run's end is written first. Safe to call more than
+// once.
+//
+// It answers the log's failure the transcript has not mentioned — the open
+// refused, the flush broke the log (Failure), or ran out of its second
+// (Close's error) — and counts it mentioned: finishRun prints it, once the
+// screen is restored. The wait it ends can no longer deliver it, and no
+// Update would apply it now (plan 034 review r5 #6). nil when there is none,
+// or the transcript has it.
+func (s *signInRuns) closeLog() error {
+	if s == nil {
+		return nil
+	}
+	s.logMu.Lock()
+	l := s.log
+	if s.logDone != nil && !s.logClosed {
+		close(s.logDone)
+	}
+	s.logClosed = true
+	s.logMu.Unlock()
+	err := l.Close()
+	s.logMu.Lock()
+	defer s.logMu.Unlock()
+	if f := l.Failure(); f != nil {
+		err = f
+	}
+	if s.logErr != nil {
+		err = s.logErr
+	}
+	if err == nil || s.logTold {
+		return nil
+	}
+	s.logTold = true
+	return err
+}
+
+// observeSignIn is a run's observer (chatgptauth.BeginOptions.Observe), called
+// on whichever goroutine the attempt reports on: the fan-out every event goes
+// through. Its first leg records the event in the sign-in log, surface tui.
+// Its second, show, hands the events the step draws a line for to the step
+// (signInShown.show; plan 034 Q8). nil shows nothing.
+func observeSignIn(log *signinlog.Log, show func(chatgptauth.Event)) func(chatgptauth.Event) {
+	return func(ev chatgptauth.Event) {
+		log.Record(ev, signinlog.SurfaceTUI)
+		if show != nil {
+			show(ev)
+		}
+	}
+}
+
+// signInShown is one run's events the step draws a line for (plan 034 Q8),
+// from the attempt's observer — on whichever goroutine the attempt reports on
+// — to the step:
+//
+//   - the attempt's begin, which says why there is no listener (Mode
+//     paste-only, Reason port_busy or listen_failed). Begin reports it on the
+//     begin's own goroutine before it returns, so the begin's answer carries
+//     it (signInBegunMsg.begin): no frame draws the paste-only step without
+//     its reason, and nothing races the answer that adopts the attempt;
+//   - the listener's refusal of a redirect with a code and another attempt's
+//     state (RefusalOtherAttempt), which can come at any time: it is queued
+//     here, never blocking the listener's page, and delivered to the model by
+//     a command stamped with the dialog's and the run's numbers
+//     (signInEventsCmd), as the wait's answer is.
+//
+// Every other event is the log's alone. done is closed when the run's wait
+// has returned, which ends the delivering command with the attempt.
+type signInShown struct {
+	mu     sync.Mutex
+	begin  chatgptauth.Event
+	events chan chatgptauth.Event
+	done   chan struct{}
+	once   sync.Once
+}
+
+func newSignInShown() *signInShown {
+	return &signInShown{events: make(chan chatgptauth.Event, signInShownMax), done: make(chan struct{})}
+}
+
+// show is the run's observer's second leg (observeSignIn).
+func (s *signInShown) show(ev chatgptauth.Event) {
+	switch {
+	case ev.Kind == chatgptauth.EventBegin:
+		s.mu.Lock()
+		s.begin = ev
+		s.mu.Unlock()
+	case ev.Kind == chatgptauth.EventListenerRefused && ev.Refusal == chatgptauth.RefusalOtherAttempt:
+		select {
+		case s.events <- ev:
+		default:
+		}
+	}
+}
+
+// begun is the attempt's begin, as Begin reported it: the zero Event before.
+func (s *signInShown) begun() chatgptauth.Event {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.begin
+}
+
+// waited says the run's wait has returned: nothing more is delivered.
+func (s *signInShown) waited() { s.once.Do(func() { close(s.done) }) }
+
+// signInEventsCmd delivers the run's next queued event (signInShown) as a
+// signInShownMsg stamped with the dialog numbered gen and the step numbered
+// run — whose application asks for the one after it (next) while the step is
+// open — or nothing, once the run has ended (ctx) or its wait has returned.
+func signInEventsCmd(ctx context.Context, gen, run uint64, shown *signInShown) tea.Cmd {
+	return func() tea.Msg {
+		select {
+		case ev := <-shown.events:
+			return signInShownMsg{gen: gen, run: run, ev: ev, next: signInEventsCmd(ctx, gen, run, shown)}
+		case <-ctx.Done():
+		case <-shown.done:
+		}
+		return nil
 	}
 }
 
 // signInBegunMsg is a run's begin, for the step numbered run of the dialog
-// numbered gen: the attempt and the wait to run over it, or why it could not
-// begin. It is never dropped unread (it is no shownStamped): applySignIn
-// closes an attempt whose step is gone.
+// numbered gen: the attempt, its begin's event (signInShown), the wait to run
+// over it and the delivery of its shown events, or why it could not begin. It
+// is never dropped unread (it is no shownStamped): applySignIn closes an
+// attempt whose step is gone.
 type signInBegunMsg struct {
 	gen, run uint64
 	att      signInAttempt
+	begin    chatgptauth.Event
 	wait     tea.Cmd
+	events   tea.Cmd
 	err      error
 }
 
+// signInShownMsg is one of a run's shown events (signInShown), for the step
+// numbered run of the dialog numbered gen: dropped once that step is gone.
+// next delivers the one after it.
+type signInShownMsg struct {
+	gen, run uint64
+	ev       chatgptauth.Event
+	next     tea.Cmd
+}
+
+// signInCopiedMsg is the copied line's time up (signInCopiedLinger) for copy
+// number n of the step numbered run of the dialog numbered gen: it ends the
+// line only while that copy is the step's last.
+type signInCopiedMsg struct{ gen, run, n uint64 }
+
 // signInDoneMsg is a run's wait: the sign-in's result, or why it ended. It
-// carries the account's email, never a token.
+// carries the account's email, never a token, and the attempt's observer, for
+// the model fetch that follows a sign-in (Attempt.Observer).
 type signInDoneMsg struct {
 	gen, run uint64
 	res      chatgptauth.Result
 	err      error
+	observe  func(chatgptauth.Event)
 }
 
 // signInFinishedMsg is the work after a sign-in, off the Update: the plan's
@@ -329,6 +883,8 @@ type signInFinishedMsg struct {
 func (signInBegunMsg) connectAnswer()    {}
 func (signInDoneMsg) connectAnswer()     {}
 func (signInFinishedMsg) connectAnswer() {}
+func (signInShownMsg) connectAnswer()    {}
+func (signInCopiedMsg) connectAnswer()   {}
 
 func (m signInFinishedMsg) shownUnder() uint64 { return m.shownGen }
 
@@ -348,7 +904,8 @@ func (m Model) pickConnectProvider() (Model, tea.Cmd) {
 // its own (Model.connSeq), which is also its field's: a clipboard paste asked
 // for in it lands in it alone (keyField). The run is recorded in the model's
 // shared set (Model.signIns), so every exit ends it, those no Update sees
-// included (finishRun).
+// included (finishRun). The sign-in log is the set's, opened here the first
+// time (logFor), which arms the wait for its stop with the begin.
 func (m Model) openSignInStep() (Model, tea.Cmd) {
 	if m.connectBusy() {
 		m = m.closeDialog(false)
@@ -365,11 +922,12 @@ func (m Model) openSignInStep() (Model, tea.Cmd) {
 	// craze reads it itself, tagged with this field (pasteFromClipboard).
 	ti.KeyMap.Paste.SetEnabled(false)
 	m.connSeq++
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancelCause(context.Background())
 	m.signIns.add(m.connSeq, cancel)
 	m.cdlg.step, m.cdlg.field, m.cdlg.key, m.cdlg.keyErr = connectSignIn, m.connSeq, ti, ""
 	m.cdlg.signIn = signInState{runs: m.signIns, run: m.connSeq, cancel: cancel}
-	return m, beginSignInCmd(ctx, m.signIns, m.cdlg.gen, m.connSeq, m.nativeDir)
+	log, logWait := m.signIns.logFor(m.nativeDir)
+	return m, tea.Batch(beginSignInCmd(ctx, m.signIns, log, m.cdlg.gen, m.connSeq, m.nativeDir), logWait)
 }
 
 // errNoSignInDir is a sign-in with no native directory to sign in to.
@@ -380,38 +938,48 @@ var errNoSignInDir = errors.New("there is no craze directory to sign in to (set 
 // Begin returns it (signInRuns.adopt), so whatever ends the run — the step, or
 // finishRun on an exit no Update sees — closes it even when this command's
 // answer is never read; an attempt that begins after the run has ended is
-// closed here. The wait over it is made here, with ctx, for the step to run
-// once it adopts the attempt (applySignIn).
-func beginSignInCmd(ctx context.Context, runs *signInRuns, gen, run uint64, dir string) tea.Cmd {
+// closed here, for the run's own reason (endReason). The wait over it is made
+// here, with ctx, for the step to run once it adopts the attempt
+// (applySignIn). The attempt reports to the run's observer (observeSignIn),
+// over log, the runs' sign-in log, and the run's shown events (signInShown):
+// its begin, read as Begin returns, and the delivery of the rest, made here
+// with ctx too. However it returns, it says so to runs (signInRuns.begun),
+// for finishRun's wait for the run's outcome.
+func beginSignInCmd(ctx context.Context, runs *signInRuns, log *signinlog.Log, gen, run uint64, dir string) tea.Cmd {
 	begin := beginSignIn
 	return func() tea.Msg {
+		defer runs.begun(run)
 		msg := signInBegunMsg{gen: gen, run: run}
 		if dir == "" {
 			msg.err = errNoSignInDir
 			return msg
 		}
-		att, err := begin(ctx, dir)
+		shown := newSignInShown()
+		att, err := begin(ctx, dir, observeSignIn(log, shown.show))
 		if err != nil {
 			msg.err = err
 			return msg
 		}
 		if !runs.adopt(run, att) || ctx.Err() != nil {
-			att.Close()
+			att.Close(endReason(ctx))
 			msg.err = context.Canceled
 			return msg
 		}
-		msg.att, msg.wait = att, waitSignInCmd(ctx, gen, run, att)
+		msg.att, msg.begin = att, shown.begun()
+		msg.wait, msg.events = waitSignInCmd(ctx, gen, run, att, shown), signInEventsCmd(ctx, gen, run, shown)
 		return msg
 	}
 }
 
 // waitSignInCmd waits for att's redirect — the listener's or a pasted one —
 // and the sign-in it finishes (chatgptauth.Attempt.Wait), under ctx: the
-// step's end cancels it, which closes the listener.
-func waitSignInCmd(ctx context.Context, gen, run uint64, att signInAttempt) tea.Cmd {
+// step's end cancels it, which closes the listener. Its return ends the
+// delivery of the run's shown events (signInShown.waited).
+func waitSignInCmd(ctx context.Context, gen, run uint64, att signInAttempt, shown *signInShown) tea.Cmd {
 	return func() tea.Msg {
 		res, err := att.Wait(ctx)
-		return signInDoneMsg{gen: gen, run: run, res: res, err: err}
+		shown.waited()
+		return signInDoneMsg{gen: gen, run: run, res: res, err: err, observe: att.Observer()}
 	}
 }
 
@@ -421,15 +989,22 @@ func (m Model) signInOpen(gen, run uint64) bool {
 	return m.dialog == dialogConnect && m.cdlg.gen == gen && m.cdlg.step == connectSignIn && m.cdlg.field == run
 }
 
-// applySignIn applies the step's answers (applyConnect).
+// applySignIn applies the step's answers (applyConnect), and the sign-in
+// log's stop: its one note, why it could not be kept (signInRuns.mention).
 func (m Model) applySignIn(msg connectAnswer) (Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case signInLogOffMsg:
+		if note := m.signIns.mention(); note != "" {
+			m.addNote(note)
+		}
 	case signInBegunMsg:
 		if !m.signInOpen(msg.gen, msg.run) {
 			// The step has gone — Esc, the box closed, a switch — and its
-			// end found no attempt to close yet: this one is closed now.
+			// end found no attempt to close yet: this one is closed now. (An
+			// end that found it closed it with its own reason already, which
+			// the attempt keeps: this close is then a no-op.)
 			if msg.att != nil {
-				msg.att.Close()
+				msg.att.Close(chatgptauth.CloseDialog)
 			}
 			return m, nil
 		}
@@ -441,7 +1016,22 @@ func (m Model) applySignIn(msg connectAnswer) (Model, tea.Cmd) {
 		s := &m.cdlg.signIn
 		s.att, s.url, s.redirect, s.listening = msg.att, msg.att.URL(), msg.att.RedirectURI(), msg.att.Listening()
 		s.state = authState(s.url)
-		return m, msg.wait
+		s.link, s.ssh, s.why = signInLink(s.url, msg.att.ID(), m.getenv), m.overSSH(), listenerMissing(msg.begin)
+		return m, tea.Batch(msg.wait, msg.events)
+	case signInShownMsg:
+		// Another dialog's, or another run's — Esc and back opened a new
+		// one — is dropped, and so is the delivery after it.
+		if !m.signInOpen(msg.gen, msg.run) {
+			return m, nil
+		}
+		if msg.ev.Kind == chatgptauth.EventListenerRefused && msg.ev.Refusal == chatgptauth.RefusalOtherAttempt {
+			m.cdlg.signIn.other = true
+		}
+		return m, msg.next
+	case signInCopiedMsg:
+		if s := &m.cdlg.signIn; m.signInOpen(msg.gen, msg.run) && s.copies == msg.n {
+			s.copied = false
+		}
 	case signInDoneMsg:
 		open := m.signInOpen(msg.gen, msg.run)
 		if msg.err != nil {
@@ -450,6 +1040,9 @@ func (m Model) applySignIn(msg connectAnswer) (Model, tea.Cmd) {
 			if !open {
 				return m, nil
 			}
+			// The wait has returned: the attempt reported its outcome, and
+			// the box's close is cleanup (CloseDone), not a cancel.
+			m.cdlg.signIn.end(chatgptauth.CloseDone)
 			m = m.closeDialog(false)
 			m.addError("/connect: " + signInFailureText(msg.err))
 			return m, nil
@@ -458,9 +1051,10 @@ func (m Model) applySignIn(msg connectAnswer) (Model, tea.Cmd) {
 		// the tokens are installed, so it is said even when the person
 		// left the step as the browser came back.
 		if open {
+			m.cdlg.signIn.end(chatgptauth.CloseDone)
 			m = m.closeDialog(false)
 		}
-		return m.signedIn(msg.res)
+		return m.signedIn(msg.res, msg.observe)
 	case signInFinishedMsg:
 		if msg.noticeErr != "" {
 			m.addNote("the notice above could not be recorded as shown, so it may be shown again: " + msg.noticeErr)
@@ -481,9 +1075,10 @@ func (m Model) applySignIn(msg connectAnswer) (Model, tea.Cmd) {
 // signedIn writes a finished sign-in to the transcript (plan 033 §3.13): the
 // account, then — with plan usage, the first time this registration signs in
 // with it — the notice, then, off the Update, the notice recorded and the
-// plan's models fetched (finishSignInCmd). Without plan usage, the
-// explanation and how to grant it.
-func (m Model) signedIn(res chatgptauth.Result) (Model, tea.Cmd) {
+// plan's models fetched (finishSignInCmd), reporting to observe, the
+// attempt's observer. Without plan usage, the explanation and how to grant
+// it.
+func (m Model) signedIn(res chatgptauth.Result, observe func(chatgptauth.Event)) (Model, tea.Cmd) {
 	who := signedInPrefix
 	if e := sanitizeLine(res.Email); e != "" {
 		who += " as " + e
@@ -498,25 +1093,37 @@ func (m Model) signedIn(res chatgptauth.Result) (Model, tea.Cmd) {
 		m.addNote(chatgptauth.NoticeTitle)
 		m.addNote(chatgptauth.Notice)
 	}
-	return m, finishSignInCmd(m.shownGen, m.nativeDir, res.ShowNotice)
+	return m, finishSignInCmd(m.signIns, m.shownGen, m.nativeDir, res.ShowNotice, observe)
 }
 
 // finishSignInCmd is the work after a sign-in, off the Update: the notice
 // recorded as shown when it was (noticeShown), then the plan's models fetched
-// into dir, as aliases. A failure of either is a note: the sign-in stands, and
-// a native session fetches the list when it opens.
-func finishSignInCmd(shown uint64, dir string, noticeShown bool) tea.Cmd {
+// into dir, as aliases, the fetch reporting to observe. A failure of either is
+// a note: the sign-in stands, and a native session fetches the list when it
+// opens.
+//
+// It is recorded in runs while it runs (startFinish), so the program's end
+// cancels it and waits for it, bounded, before the sign-in log closes: the
+// fetch's outcome — fetched, empty or failed, cancelled by the end itself —
+// is the attempt's last record (review r6 #1). One that would start after
+// that end does nothing.
+func finishSignInCmd(runs *signInRuns, shown uint64, dir string, noticeShown bool, observe func(chatgptauth.Event)) tea.Cmd {
 	mark, fetch := markNoticeShown, fetchPlanModels
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), signInFinishTimeout)
 		defer cancel()
+		done := runs.startFinish(cancel)
+		if done == nil {
+			return nil
+		}
+		defer done()
 		msg := signInFinishedMsg{shownGen: shown}
 		if noticeShown {
 			if err := mark(ctx, dir); err != nil {
 				msg.noticeErr = signInErrorText(err)
 			}
 		}
-		models, err := fetch(ctx, dir)
+		models, err := fetch(ctx, dir, observe)
 		if err != nil {
 			msg.modelsErr = signInErrorText(err)
 			return msg
@@ -544,10 +1151,12 @@ func signInFailureText(err error) string {
 }
 
 // handleSignInKey is step three's keyboard: Esc goes back to step one,
-// ending the attempt; Ctrl+Y copies the address; Enter hands the field's
-// address to the attempt; Ctrl+V pastes the clipboard into this field and no
-// other; every other key — a terminal's bracketed paste among them — is the
-// field's, until an address has been handed over.
+// ending the attempt; Ctrl+Y copies the address (copySignInAddress); Enter
+// hands the field's address to the attempt; Ctrl+V pastes the clipboard into
+// this field and no other; every other key — a terminal's bracketed paste
+// among them — is the field's, until an address has been handed over. Every
+// key but Ctrl+Y has ended the copied line already, whatever layer takes it
+// (handleKey; plan 034 Q10).
 func (m Model) handleSignInKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	s := m.cdlg.signIn
 	switch msg.Type {
@@ -555,10 +1164,7 @@ func (m Model) handleSignInKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.cdlg = m.cdlg.leaveKeyStep()
 		return m, nil
 	case tea.KeyCtrlY:
-		if s.url == "" {
-			return m, nil
-		}
-		return m, copyText(m.shownGen, s.url, connectSignInCopied)
+		return m.copySignInAddress()
 	case tea.KeyEnter:
 		return m.pasteSignIn(), nil
 	case tea.KeyCtrlV:
@@ -579,60 +1185,75 @@ func (m Model) handleSignInKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
-// pasteSignIn is Enter on the field: its address handed to the attempt
+// copySignInAddress is Ctrl+Y on the step, or a click on a row of the address
+// (plan 034 Q10; signInClick): the authorization address — the attempt's own
+// bytes, whole, however the box wraps or cuts it — through the TUI's copy
+// (copyText: OSC 52, then the native tool), with the status row's note; and
+// the box's copied line, until the next key or for signInCopiedLinger, whose
+// tick is stamped with this copy's number, so an earlier copy's tick never
+// ends a later copy's line. The attempt is told (address_copied), for the
+// sign-in log; whether a clipboard took the address no one can tell. Nothing
+// happens before the attempt has begun. An address longer than a copy takes
+// whole (clipboardMax, which copyText would cut it to) is not copied at all:
+// the line says so instead (connectSignInUncopiedLine), nothing is reported,
+// and nothing reaches a clipboard — a cut address would carry no state, and
+// the box would claim a copy it did not make (plan 034 review r4 #5a).
+func (m Model) copySignInAddress() (Model, tea.Cmd) {
+	s := &m.cdlg.signIn
+	if s.url == "" {
+		return m, nil
+	}
+	s.copies++
+	s.copied = true
+	s.uncopied = len(s.url) > clipboardMax
+	gen, run, n := m.cdlg.gen, s.run, s.copies
+	tick := tea.Tick(signInCopiedLinger, func(time.Time) tea.Msg { return signInCopiedMsg{gen: gen, run: run, n: n} })
+	if s.uncopied {
+		return m, tick
+	}
+	s.att.Report(chatgptauth.EventAddressCopied)
+	return m, tea.Batch(copyText(m.shownGen, s.url, connectSignInCopied), tick)
+}
+
+// pasteSignIn is Enter on the field: its line handed to the attempt
 // (Attempt.Paste), whose wait then finishes the sign-in. Nothing happens
 // before the attempt has begun, after an address was handed over, or with the
 // field empty. Work that started while the box was open refuses it, the
-// address kept for a later Enter. A line that is not an address, one too long
-// to be one, or one the attempt refuses is refused in the field, which is
-// emptied; the line is never quoted. An address the attempt finds over — the
-// browser's came first — is as good as handed: the wait is finishing.
+// address kept for a later Enter. The attempt judges the line (plan 034
+// §3.3): one that is not an address, one too long to be one, or one that is
+// not this attempt's redirect is refused in the field, which is emptied,
+// phrased from the attempt's refusal (pasteRefusalText); the line is never
+// quoted. An address the attempt finds over — the browser's came first — is
+// as good as handed: the wait is finishing. The line goes to the attempt as
+// the field holds it, blanks and all, so its length bound is the raw line's
+// here as in craze auth (plan 034 X13, review r3 #6): blanks are trimmed only
+// to tell an empty field.
 func (m Model) pasteSignIn() Model {
 	s := m.cdlg.signIn
-	line := strings.TrimSpace(m.cdlg.key.Value())
-	if s.att == nil || s.handed || line == "" {
+	line := m.cdlg.key.Value()
+	if s.att == nil || s.handed || strings.TrimSpace(line) == "" {
 		return m
 	}
 	if m.connectBusy() {
 		m.cdlg.keyErr = connectBusySignInText
 		return m
 	}
-	why := redirectRefusal(line, s.redirect)
-	if why == "" {
-		switch err := s.att.Paste(line); {
-		case err == nil, errors.Is(err, chatgptauth.ErrAttemptOver):
-			m.cdlg.signIn.handed = true
-			m.cdlg.key.Reset()
-			m.cdlg.keyErr = ""
-			return m
-		default:
-			why = "That is not this sign-in's redirect address. " + pasteWhat(s.redirect)
-		}
-	}
 	m.cdlg.key.Reset()
-	m.cdlg.keyErr = why
+	switch err := s.att.Paste(line); {
+	case err == nil, errors.Is(err, chatgptauth.ErrAttemptOver):
+		m.cdlg.signIn.handed = true
+		m.cdlg.keyErr = ""
+	default:
+		m.cdlg.keyErr = pasteRefusalText(err, s.redirect)
+	}
 	return m
 }
 
-// redirectRefusal is why line cannot be the sign-in's redirect before the
-// attempt is asked — too long, or not an address at all — and "" when it is
-// an address the attempt must judge. It never quotes the line: one that is
-// not an address is most likely a key put where the plan's sign-in goes, and
-// is told the plan takes none (craze auth's rule, plan 033 §3.13).
-func redirectRefusal(line, redirect string) string {
-	if len(line) > connectRedirectMax {
-		return "That is too long to be the redirect address. " + pasteWhat(redirect)
-	}
-	if u, err := url.Parse(line); err != nil || u.Scheme == "" || u.Host == "" {
-		return "That is not an address: the ChatGPT plan is funded by signing in, never by an API key. " + pasteWhat(redirect)
-	}
-	return ""
-}
-
-// pasteWhat says what to paste instead: the address the browser was sent to,
-// which starts with the attempt's redirect address.
-func pasteWhat(redirect string) string {
-	return "Paste the whole address the browser was sent to; it starts with " + sanitizeLine(redirect) + "."
+// pasteRefusalText is why the attempt refused a pasted line, phrased from its
+// refusal as craze auth phrases it (chatgptauth.PasteRefusalText), never
+// quoting it — an earlier attempt's redirect as connectSignInEarlierText.
+func pasteRefusalText(err error, redirect string) string {
+	return chatgptauth.PasteRefusalText(err, sanitizeLine(redirect), connectSignInEarlierText)
 }
 
 // signInField is the field as the step draws it: every character masked, as
@@ -680,12 +1301,13 @@ func (m Model) signInStatus() (text string, ready bool) {
 // redirect carries. A key glued onto the address changes its path or its
 // state, so it is not one; a declined approval's redirect, which has no code,
 // is not either, though Enter still hands it over, to be told as declined.
-// Nor is anything Enter would refuse before the attempt sees it
-// (redirectRefusal): an address padded past connectRedirectMax is told "too
-// long" on Enter, so it never reads as ready (review r16 b).
+// Nor is anything the attempt would refuse as too long on Enter: a field
+// longer than connectRedirectMax, its blanks counted — the attempt bounds the
+// raw line (plan 034 X13, review r3 #6) — never reads as ready (review r16
+// b).
 func redirectReady(value, redirect, state string) bool {
 	v := strings.TrimSpace(value)
-	if redirect == "" || state == "" || strings.ContainsFunc(v, unicode.IsSpace) || redirectRefusal(v, redirect) != "" {
+	if redirect == "" || state == "" || strings.ContainsFunc(v, unicode.IsSpace) || len(value) > connectRedirectMax {
 		return false
 	}
 	want, err := url.Parse(redirect)
@@ -712,37 +1334,202 @@ func authState(authURL string) string {
 }
 
 // hint is the line under the address: how the redirect comes back, or that
-// it has.
+// it has (plan 034 Q12). On this machine with a listener it is
+// connectSignInWaiting, as it always was. Over SSH (ssh) it leads with the
+// paste path — the browser is on the person's own computer, where the
+// listener's page cannot load — and, with a listener, offers the forward of
+// its port: the redirect's, which a re-login's fallback may have moved off
+// 1455. With no listener (paste-only: 1455 busy, or no listener to be had)
+// the browser's page will not load anywhere, which it says, naming the
+// address it lands on; it offers no forward, since nothing of craze's
+// listens on that port — whatever holds it would get the redirect.
 func (s signInState) hint() string {
-	switch {
+	redirect := sanitizeLine(s.redirect)
+	switch port := redirectPort(s.redirect); {
 	case s.handed:
 		return connectSignInHanded
-	case s.listening:
+	case s.listening && !s.ssh:
 		return connectSignInWaiting
+	case s.listening && port != "":
+		return connectSignInSSH + fmt.Sprintf(connectSignInSSHListening, port, port)
+	case s.ssh:
+		return connectSignInSSH + fmt.Sprintf(connectSignInSSHPasteOnly, redirect)
 	}
-	return "After you approve, paste the address the browser lands on (it starts with " + sanitizeLine(s.redirect) + "):"
+	return fmt.Sprintf(connectSignInPasteOnly, redirect)
 }
 
-// signInBody is step three at an inner size: the title, the introduction, the
-// address, the hint, the field, the line under it — its refusal, or else its
-// status (signInStatus) — and the footer, top to bottom. A short box keeps,
-// in order: the title, the field and the line under it; the address's first
-// row; the footer, which says Ctrl+Y copies the whole address; the hint,
-// which says how the paste path ends; the introduction; and the rest of the
-// address, its last row shown ending in "…" when it is cut.
-func (m Model) signInBody(inner, budget int) []string {
+// redirectPort is the port of the attempt's redirect address — the listener's
+// — or "" when it names none.
+func redirectPort(redirect string) string {
+	u, err := url.Parse(redirect)
+	if err != nil {
+		return ""
+	}
+	return sanitizeLine(u.Port())
+}
+
+// listenerMissing is why the attempt has no listener, from its begin (plan
+// 034 Q8; signInShown): 127.0.0.1:<port> in use, or not to be had — in craze
+// auth's words (internal/cli) — or "" for an attempt that listens, one that
+// is paste-only because it was asked to be (the TUI asks for none), or a
+// begin that was not reported.
+func listenerMissing(begun chatgptauth.Event) string {
+	if begun.Kind != chatgptauth.EventBegin || begun.Mode != chatgptauth.ModePasteOnly {
+		return ""
+	}
+	addr := "127.0.0.1"
+	if begun.Port > 0 {
+		addr = fmt.Sprintf("127.0.0.1:%d", begun.Port)
+	}
+	switch begun.Reason {
+	case chatgptauth.ReasonPortBusy:
+		return "craze is not listening for the browser: another program is using " + addr + "."
+	case chatgptauth.ReasonListenFailed:
+		return "craze is not listening for the browser: it could not listen on " + addr + "."
+	}
+	return ""
+}
+
+// signInLink is the OSC 8 id the address's rows are links under (plan 034
+// Q9), or "" for plain rows: when the address is not one a link may point to
+// (chatgptauth.LinkableAuthorizeURL: its bytes as the attempt made them, all
+// printable ASCII, on production's authorize endpoint), when the attempt's id
+// is not one — 8 lowercase hex digits, chatgptauth's form; the id is a
+// parameter of the escape, so nothing else may go in it — or on a terminal
+// that would draw the escape as text, or has no hyperlinks: TERM dumb, or the
+// Linux console's linux, read through getenv (Config.Getenv).
+func signInLink(url, id string, getenv func(string) string) string {
+	switch getenv("TERM") {
+	case "dumb", "linux":
+		return ""
+	}
+	if !chatgptauth.LinkableAuthorizeURL(url) || !attemptIDForm(id) {
+		return ""
+	}
+	return signInLinkPrefix + id
+}
+
+// attemptIDForm says id is an attempt id as chatgptauth makes one: 8
+// lowercase hex digits.
+func attemptIDForm(id string) bool {
+	if len(id) != 8 {
+		return false
+	}
+	for i := range len(id) {
+		if c := id[i]; (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+// linkRow is row — one row of the address, already cut to the box ("…"),
+// clamped and styled — as an OSC 8 hyperlink to url under id (plan 034 Q9):
+// the open before it and the close after it, BEL-terminated (x/ansi's form),
+// so the link ends inside the row, before the box pads and borders it. Every
+// escape is zero cells wide, so the row is as wide as it was. Nothing
+// downstream cuts the close off: dialogView's clamp and spliceRow's cuts keep
+// every escape sequence past a cut (ansi.Truncate, ansi.TruncateLeft), which
+// TestSignInLinkSurvivesEveryCut holds them to.
+func linkRow(row, url, id string) string {
+	return ansi.SetHyperlink(url, "id="+id) + row + ansi.ResetHyperlink()
+}
+
+// copiedLine is the box's line after a copy (plan 034 Q10): with a link to
+// Cmd/Ctrl+click when nothing reached the clipboard, or without one for plain
+// rows; or, when the address was too long to copy, that it was not copied
+// (review r4 #5a).
+func (s signInState) copiedLine() string {
+	if s.uncopied {
+		return connectSignInUncopiedLine
+	}
+	if s.link != "" {
+		return connectSignInCopiedLinkLine
+	}
+	return connectSignInCopiedLine
+}
+
+// signInFooter is the step's key hint at an inner width: the begin's; the
+// wait's — a click and Ctrl+Y copying, in a shorter form where it does not
+// fit, or Ctrl+Y alone with --no-mouse, where a click is the terminal's own;
+// and the one once the address is handed over.
+func (m Model) signInFooter(inner int) string {
 	s := m.cdlg.signIn
-	dim, plain := styleFG(m.theme.Dim), styleFG(m.theme.FG)
-	title := m.dialogTitle(connectSignInTitle, inner)
+	switch {
+	case s.att == nil:
+		return connectSignInStartHint
+	case s.handed:
+		return connectSignInHandedHint
+	case !m.mouseEnabled:
+		return connectSignInWaitHintKeys
+	case lipgloss.Width(connectSignInWaitHint) > inner:
+		return connectSignInWaitHintNarrow
+	}
+	return connectSignInWaitHint
+}
+
+// signInRowKind is what one row of the step is (signInPlan).
+type signInRowKind int
+
+const (
+	signInRowTitle signInRowKind = iota
+	signInRowStarting
+	signInRowIntro
+	signInRowAddress
+	signInRowWhy
+	signInRowHint
+	signInRowField
+	signInRowRefusal
+	signInRowStatus
+	signInRowOther
+	signInRowCopied
+	signInRowFooter
+)
+
+// signInRow is one row of the step: its kind, and its text, wrapped to the
+// box — the field's, which draws itself, has none.
+type signInRow struct {
+	kind signInRowKind
+	text string
+}
+
+// signInPlan is step three at an inner size (plan 034 §3.2): its rows in
+// display order — the title, the introduction, the address, why craze is not
+// listening (Q8), the hint, the field, the line under it (its refusal, or
+// else its status, signInStatus), the browser's return from a different
+// attempt (Q8), the copied line (Q10) and the footer — and whether the status
+// says the field holds this attempt's redirect. The renderer (signInBody) and
+// the hit-tester (signInClick) both take it, so a click copies only from a
+// row that is drawn as the address.
+//
+// A short box keeps, in order: the title; the field and the line under it;
+// the address's first row; the copied line, the answer to the click or the
+// Ctrl+Y just made, which goes again at the next key; the footer, which says
+// a click or Ctrl+Y copies the whole address; the browser's return from a
+// different attempt, news the field cannot show; the hint, which says how the
+// paste path ends; why craze is not listening, which the hint's paste path
+// already works around; the introduction; and the rest of the address, its
+// last row shown ending in "…" when it is cut. Once an
+// address is handed over, the two lines about the paste path — the other
+// attempt's return and why craze is not listening — are done with and go.
+// Before the attempt has begun it is the title, the starting line and the
+// footer.
+type signInPlan struct {
+	rows  []signInRow
+	ready bool
+}
+
+func (m Model) signInPlan(inner, budget int) signInPlan {
+	s := m.cdlg.signIn
+	p := signInPlan{rows: []signInRow{{kind: signInRowTitle, text: connectSignInTitle}}}
 	if s.att == nil {
-		rows := []string{title}
 		if budget >= 2 {
-			rows = append(rows, dim.Render(clampWidth(connectSignInStarting, inner)))
+			p.rows = append(p.rows, signInRow{kind: signInRowStarting, text: connectSignInStarting})
 		}
 		if budget >= 3 {
-			rows = append(rows, m.dialogFooter(connectSignInStartHint, inner))
+			p.rows = append(p.rows, signInRow{kind: signInRowFooter, text: m.signInFooter(inner)})
 		}
-		return rows
+		return p
 	}
 	room := budget - 1 // the title
 	take := func(rows []string) []string {
@@ -752,57 +1539,114 @@ func (m Model) signInBody(inner, budget int) []string {
 	}
 	var field []string
 	if !s.handed {
-		field = take([]string{dialogInputView(m.signInField(), inner)})
+		field = take([]string{""})
 	}
 	// A refusal is the field's news while it stands, and the status says
 	// what the field holds otherwise: one of them under the field.
-	var errs, status []string
-	statusStyle := dim
+	var refusal, status []string
 	if m.cdlg.keyErr != "" {
-		errs = take(dialogWrap(m.cdlg.keyErr, inner))
+		refusal = take(dialogWrap(m.cdlg.keyErr, inner))
 	} else if text, ready := m.signInStatus(); text != "" {
-		status = take(dialogWrap(text, inner))
-		if ready {
-			statusStyle = styleFG(m.theme.OK)
-		}
+		status, p.ready = take(dialogWrap(text, inner)), ready
 	}
 	// The address is cut at the width, never at a word: a URL's hyphens and
 	// slashes are no place to break it (dialogWrap would), and its rows are
-	// what a person copies by hand when Ctrl+Y cannot reach their clipboard.
+	// what a person copies by hand when nothing else reaches their
+	// clipboard.
 	all := strings.Split(ansi.Hardwrap(sanitizeLine(s.url), inner, false), "\n")
-	link := take(all[:min(len(all), 1)])
-	footer := len(take([]string{""})) == 1
+	address := take(all[:min(len(all), 1)])
+	var copied, other, why []string
+	if s.copied {
+		copied = take(dialogWrap(s.copiedLine(), inner))
+	}
+	footer := take([]string{m.signInFooter(inner)})
+	if s.other && !s.handed {
+		other = take(dialogWrap(connectSignInOtherAttempt, inner))
+	}
 	hint := take(dialogWrap(s.hint(), inner))
+	if s.why != "" && !s.handed {
+		why = take(dialogWrap(s.why, inner))
+	}
 	intro := take(dialogWrap(connectSignInIntro, inner))
-	link = append(slices.Clone(link), take(all[len(link):])...)
-	if n := len(link); n > 0 && n < len(all) {
-		last := []rune(link[n-1])
-		link[n-1] = string(last[:max(len(last)-1, 0)]) + "…"
+	address = append(slices.Clone(address), take(all[len(address):])...)
+	if n := len(address); n > 0 && n < len(all) {
+		last := []rune(address[n-1])
+		address[n-1] = string(last[:max(len(last)-1, 0)]) + "…"
 	}
-
-	rows := []string{title}
-	for _, r := range intro {
-		rows = append(rows, dim.Render(clampWidth(r, inner)))
-	}
-	for _, r := range link {
-		rows = append(rows, plain.Render(clampWidth(r, inner)))
-	}
-	for _, r := range hint {
-		rows = append(rows, dim.Render(clampWidth(r, inner)))
-	}
-	rows = append(rows, field...)
-	for _, r := range status {
-		rows = append(rows, statusStyle.Render(clampWidth(r, inner)))
-	}
-	for _, e := range errs {
-		rows = append(rows, styleFG(m.theme.Err).Render(clampWidth(e, inner)))
-	}
-	if footer {
-		hintText := connectSignInWaitHint
-		if s.handed {
-			hintText = connectSignInHandedHint
+	for _, part := range []struct {
+		kind  signInRowKind
+		texts []string
+	}{
+		{signInRowIntro, intro}, {signInRowAddress, address}, {signInRowWhy, why}, {signInRowHint, hint},
+		{signInRowField, field}, {signInRowRefusal, refusal}, {signInRowStatus, status},
+		{signInRowOther, other}, {signInRowCopied, copied}, {signInRowFooter, footer},
+	} {
+		for _, text := range part.texts {
+			p.rows = append(p.rows, signInRow{kind: part.kind, text: text})
 		}
-		rows = append(rows, m.dialogFooter(hintText, inner))
+	}
+	return p
+}
+
+// signInBody is step three drawn from its plan (signInPlan), each row styled
+// by its kind and clamped to the box. Each row of the address is a link to
+// the whole address — the attempt's own bytes — when the attempt's is one
+// (signInState.link, linkRow): made last, after the row is cut, clamped and
+// styled, so the link closes inside the row, before the box pads and borders
+// it.
+func (m Model) signInBody(inner, budget int) []string {
+	s := m.cdlg.signIn
+	p := m.signInPlan(inner, budget)
+	rows := make([]string, 0, len(p.rows))
+	for _, r := range p.rows {
+		var row string
+		switch r.kind {
+		case signInRowTitle:
+			row = m.dialogTitle(r.text, inner)
+		case signInRowField:
+			row = dialogInputView(m.signInField(), inner)
+		case signInRowFooter:
+			row = m.dialogFooter(r.text, inner)
+		case signInRowAddress:
+			row = styleFG(m.theme.FG).Render(clampWidth(r.text, inner))
+			if s.link != "" {
+				row = linkRow(row, s.url, s.link)
+			}
+		default:
+			row = m.signInRowStyle(r.kind, p.ready).Render(clampWidth(r.text, inner))
+		}
+		rows = append(rows, row)
 	}
 	return rows
+}
+
+// signInRowStyle is a text row's style by its kind: a refusal's error colour;
+// the status's ok colour when it says the field holds the redirect; the
+// warning colour for the two lines about what went wrong — why craze is not
+// listening, the other attempt's return, an address too long to copy; the ok
+// colour for the copied line; dim for the rest.
+func (m Model) signInRowStyle(kind signInRowKind, ready bool) lipgloss.Style {
+	switch {
+	case kind == signInRowRefusal:
+		return styleFG(m.theme.Err)
+	case kind == signInRowCopied && m.cdlg.signIn.uncopied:
+		return styleFG(m.theme.Warn)
+	case kind == signInRowStatus && ready, kind == signInRowCopied:
+		return styleFG(m.theme.OK)
+	case kind == signInRowWhy, kind == signInRowOther:
+		return styleFG(m.theme.Warn)
+	}
+	return styleFG(m.theme.Dim)
+}
+
+// signInClick is a press on body row i of the step (connectDialogClick),
+// mapped through the plan the box was drawn from (signInPlan) at the box's
+// own size: a row of the address copies the whole address (copySignInAddress,
+// plan 034 Q10), as Ctrl+Y does; every other row does nothing.
+func (m Model) signInClick(i int) (tea.Model, tea.Cmd) {
+	p := m.signInPlan(m.lay.Dialog.W-dialogBorder, m.lay.Dialog.H-dialogBorder)
+	if i < 0 || i >= len(p.rows) || p.rows[i].kind != signInRowAddress {
+		return m, nil
+	}
+	return m.copySignInAddress()
 }

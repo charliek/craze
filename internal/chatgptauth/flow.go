@@ -14,12 +14,14 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 )
 
 // exchangeTimeout bounds a sign-in's work after its redirect arrives: the
-// code exchange, the key set and the install.
-const exchangeTimeout = 30 * time.Second
+// code exchange, the key set and the install. A variable only so a test can
+// run a step past a short one (plan 034 A14).
+var exchangeTimeout = 30 * time.Second
 
 // listen opens the callback listener on 127.0.0.1:port (0 is any free port):
 // a seam for the tests, which cannot count on port 1455 being free.
@@ -27,11 +29,33 @@ var listen = func(port int) (net.Listener, error) {
 	return net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
 }
 
+// beforeRefuse runs as the listener reaches a refusal, before it is counted:
+// nil in production; a test holds a refusal there while the attempt ends
+// (plan 034 review r3 #5).
+var beforeRefuse func(Refusal)
+
 // BeginOptions are a sign-in's choices.
 type BeginOptions struct {
 	// PasteOnly starts no listener: the redirect can only be pasted
 	// (craze auth login --no-browser, or a host the browser cannot reach).
 	PasteOnly bool
+	// Observe, when set, is told the attempt's events (plan 034 §3.3, Q6;
+	// event.go): its begin — or its failure to begin — the listener's
+	// refusals, the pasted lines it refused, its redirect, its one terminal
+	// outcome, and what the UI reports through Report. It is called on
+	// whichever goroutine the event happens on (the caller's, the listener's,
+	// Wait's), never with the attempt's state locks (mu, emu) held, and must
+	// not block for long: the listener's page waits for it, and so does the
+	// attempt's end while a listener's refusal is being reported — the two
+	// are reported in order, under the attempt's order lock (omu), so no
+	// refusal is reported after the outcome (review r3 #5). For the same
+	// reason it must not end the attempt (Close) from a listener's refusal
+	// (listener_refused). It may close it from any event of the end — the
+	// counts (listener_refusals) and the outcome itself, signed in, declined,
+	// failed or cancelled: the attempt is marked ended before they are
+	// reported, and a Close of an ended attempt takes no lock the report
+	// holds (review r5 #4). Each Event is value-free.
+	Observe func(Event)
 }
 
 // Attempt is one sign-in in progress (plan 033 §3.10, P21): the
@@ -58,13 +82,48 @@ type Attempt struct {
 	ln  net.Listener // nil when paste-only
 	srv *http.Server
 
-	mu   sync.Mutex
-	over bool // a redirect was accepted, or the attempt was closed
+	// id is the attempt's random id, began when Begin started, and observe
+	// the observer its events go to (BeginOptions.Observe; nil: none).
+	id      string
+	began   time.Time
+	observe func(Event)
+
+	mu       sync.Mutex
+	over     bool // a redirect was accepted, or the attempt was closed
+	accepted bool // a redirect was accepted: Wait will have it
 
 	got       chan url.Values // the accepted redirect's query; buffered, sent once
 	closed    chan struct{}
 	closeOnce sync.Once
 	waited    atomic.Bool
+
+	// emu guards the events' bookkeeping, apart from mu, so an event is
+	// never reported with either held. waiting says Wait is between its
+	// start and its outcome; closeReason is the first Close's reason
+	// (closeCalled says there was one); refused counts the listener's
+	// refusals by kind.
+	emu         sync.Mutex
+	waiting     bool
+	closeCalled bool
+	closeReason CloseReason
+	refused     map[Refusal]int
+	// omu orders the listener's refusals with the attempt's end (plan 034
+	// review r3 #5): a refusal is counted and, the first of its kind,
+	// reported (refuse), and the end takes the counts and reports them and
+	// the outcome (end), each whole under it — so once the attempt has
+	// ended no refusal is counted or reported, and every one counted is in
+	// the end's totals. It is taken before emu, and is the one lock held as
+	// the observer is called. endc is closed once the outcome is reported
+	// (Ended).
+	omu  sync.Mutex
+	endc chan struct{}
+	// ended says the attempt's one terminal outcome has been taken
+	// (endLocked): set under omu and emu, before the end is reported, and
+	// never cleared. A Close or a Wait's settle reads it before omu and,
+	// set, takes neither lock — it has nothing to report — so an observer
+	// that closes the attempt from the end's report, which holds omu, does
+	// not wait on itself (review r5 #4).
+	ended atomic.Bool
 }
 
 // Result is a finished sign-in. PlanUsage false means the account signed in
@@ -97,23 +156,41 @@ type Result struct {
 // challenge, the API as its resource, and the full scope set. ctx bounds
 // Begin alone (the host id's lock); the attempt lives until Wait returns or
 // Close is called.
+//
+// The attempt's first event is its begin (plan 034 §3.3, Q8): listening or
+// paste-only, the redirect's port, and why it is paste-only, or not on 1455
+// (ReasonRequested, ReasonPortBusy, ReasonListenFailed) — reported before the
+// listener takes its first request. A Begin that fails reports its attempt's
+// one terminal outcome instead: failed, with the step and class, or
+// cancelled when ctx ended it. A lock held past its bound is a
+// StepTimeoutError naming the step (A14).
 func Begin(ctx context.Context, dir string, opts BeginOptions) (*Attempt, error) {
-	ends, err := currentEndpoints()
-	if err != nil {
+	id, began := newAttemptID(), time.Now()
+	fail := func(err error) (*Attempt, error) {
+		ev := failureEvent(EventFailed, err, StepBegin)
+		if ctx.Err() != nil {
+			ev = Event{Kind: EventCancelled, Reason: ReasonContext}
+		}
+		ev.Attempt, ev.Elapsed = id, time.Since(began)
+		report(opts.Observe, ev)
 		return nil, err
 	}
+	ends, err := currentEndpoints()
+	if err != nil {
+		return fail(err)
+	}
 	if err := ensureAuthDir(dir); err != nil {
-		return nil, err
+		return fail(err)
 	}
 	host, err := hostID(ctx, dir)
 	if err != nil {
-		return nil, err
+		return fail(lockTimeout(StepBegin, signInLockName, err))
 	}
 	// A registration file craze did not write is no registration: this
 	// attempt registers anew, and its install replaces the file.
 	c, err := ReadClient(dir)
 	if err != nil && !errors.Is(err, errCorrupt) {
-		return nil, err
+		return fail(err)
 	}
 	a := &Attempt{
 		dir:      dir,
@@ -122,15 +199,19 @@ func Begin(ctx context.Context, dir string, opts BeginOptions) (*Attempt, error)
 		state:    randomString(24),
 		nonce:    randomString(24),
 		verifier: randomString(48),
+		id:       id,
+		began:    began,
+		observe:  opts.Observe,
 		got:      make(chan url.Values, 1),
 		closed:   make(chan struct{}),
+		endc:     make(chan struct{}),
 	}
 	if !a.register {
 		a.clientID, a.subject = c.ClientID, c.Subject
 	}
-	port := callbackPort
+	port, why := callbackPort, ReasonRequested
 	if !opts.PasteOnly {
-		a.ln, port = a.openListener()
+		a.ln, port, why = a.openListener()
 	}
 	a.redirect = &url.URL{Scheme: "http", Host: net.JoinHostPort("127.0.0.1", strconv.Itoa(port)), Path: callbackPath}
 
@@ -141,7 +222,7 @@ func Begin(ctx context.Context, dir string, opts BeginOptions) (*Attempt, error)
 		q.Set("agent_name_hint", agentName)
 	} else {
 		q.Set("client_id", a.clientID)
-		if c.Email != "" {
+		if loginHint(c.Email) {
 			q.Set("login_hint", c.Email)
 		}
 		if !c.PlanUsage {
@@ -159,6 +240,12 @@ func Begin(ctx context.Context, dir string, opts BeginOptions) (*Attempt, error)
 	q.Set("code_challenge", base64URL(sum[:]))
 	a.authURL = ends.authorize() + "?" + q.Encode()
 
+	ev := a.event(EventBegin)
+	ev.Mode, ev.Port, ev.Reason, ev.Registration = ModePasteOnly, port, why, registrationOf(a.register)
+	if a.ln != nil {
+		ev.Mode = ModeListening
+	}
+	a.emit(ev)
 	if a.ln != nil {
 		a.srv = &http.Server{Handler: a, ReadHeaderTimeout: 10 * time.Second}
 		a.srv.SetKeepAlivesEnabled(false)
@@ -167,26 +254,54 @@ func Begin(ctx context.Context, dir string, opts BeginOptions) (*Attempt, error)
 	return a, nil
 }
 
+// maxLoginHint is the longest email sent as a re-login's login_hint: RFC
+// 5321's longest path, an address's own bound.
+const maxLoginHint = 254
+
+// loginHint says email, the saved registration's, may go in the authorization
+// address as its login_hint: not empty, at most maxLoginHint bytes, and one
+// line of no control character. The registration file is not validated as it
+// is read, so an oversized or multi-line email in it would otherwise make an
+// address no clipboard takes whole (plan 034 review r4 #5a); a re-login
+// without the hint signs in all the same — the person picks the account.
+func loginHint(email string) bool {
+	if email == "" || len(email) > maxLoginHint {
+		return false
+	}
+	for i := 0; i < len(email); i++ {
+		if c := email[i]; c < 0x20 || c == 0x7f {
+			return false
+		}
+	}
+	return true
+}
+
 // openListener binds the callback listener: 1455, then — once registered —
 // any free port. It answers the listener (nil when none could be bound: the
-// attempt is paste-only) and the redirect's port.
-func (a *Attempt) openListener() (net.Listener, int) {
-	if ln, err := listen(callbackPort); err == nil {
-		return ln, callbackPort
+// attempt is paste-only), the redirect's port, and why the listener is not on
+// 1455 ("" when it is): the port busy, or a bind that failed otherwise.
+func (a *Attempt) openListener() (net.Listener, int, Reason) {
+	ln, err := listen(callbackPort)
+	if err == nil {
+		return ln, callbackPort, ""
+	}
+	why := ReasonListenFailed
+	if errors.Is(err, syscall.EADDRINUSE) {
+		why = ReasonPortBusy
 	}
 	if a.register {
-		return nil, callbackPort
+		return nil, callbackPort, why
 	}
-	ln, err := listen(0)
+	ln, err = listen(0)
 	if err != nil {
-		return nil, callbackPort
+		return nil, callbackPort, ReasonListenFailed
 	}
 	addr, ok := ln.Addr().(*net.TCPAddr)
 	if !ok {
 		_ = ln.Close()
-		return nil, callbackPort
+		return nil, callbackPort, ReasonListenFailed
 	}
-	return ln, addr.Port
+	return ln, addr.Port, why
 }
 
 // URL is the authorization URL to open in a browser. It carries no token.
@@ -200,11 +315,65 @@ func (a *Attempt) RedirectURI() string { return a.redirect.String() }
 // paste-only attempt.
 func (a *Attempt) Listening() bool { return a.ln != nil }
 
+// ID is the attempt's id: 8 random lowercase hex digits, carried by every
+// event of the attempt (plan 034 §3.3).
+func (a *Attempt) ID() string { return a.id }
+
+// Ended is closed once the attempt's one terminal outcome has been reported
+// to its observer — by a Close, or by Wait as it returns. A UI ending with
+// the program waits on it, bounded, before it closes the sign-in log, so an
+// outcome Wait is still finishing is logged (plan 034 review r3 #8a).
+func (a *Attempt) Ended() <-chan struct{} { return a.endc }
+
 // Close cancels the attempt, if it is still waiting, and closes the
 // listener with every connection to it — a browser's spare connection
 // included, which would otherwise swallow a later attempt's redirect (pi's
 // lesson). It is safe to call more than once, and after Wait.
-func (a *Attempt) Close() {
+//
+// reason is why (plan 034 §3.3). An attempt that has not ended reports its
+// one terminal outcome here, cancelled with reason, before Close returns —
+// when no redirect was accepted (whatever Wait is doing, it can only end
+// cancelled now), or when no Wait is running. One whose Wait is finishing an
+// accepted redirect reports its outcome as Wait returns: signed in or failed,
+// or cancelled with this reason if the close's cancel cut the exchange short.
+// One that has ended — signed in, declined, failed — reports nothing more: a
+// close after a sign-in is cleanup, not a cancel. The first Close's reason is
+// the one kept.
+//
+// An observer may call it from the end's own report (BeginOptions.Observe):
+// the attempt is marked ended before its end is reported, and a Close of an
+// ended attempt only closes the listener, taking no event lock (review r5
+// #4).
+func (a *Attempt) Close(reason CloseReason) {
+	a.mu.Lock()
+	accepted := a.accepted
+	a.over = true // no redirect is accepted after this
+	a.mu.Unlock()
+	if a.ended.Load() {
+		a.shut()
+		return
+	}
+	a.omu.Lock()
+	defer a.omu.Unlock()
+	var evs []Event
+	a.emu.Lock()
+	if !a.closeCalled {
+		a.closeCalled, a.closeReason = true, reason
+	}
+	if !a.ended.Load() && (!a.waiting || !accepted) {
+		t := a.event(EventCancelled)
+		t.Reason = Reason(a.closeReason)
+		evs = a.endLocked(t)
+	}
+	a.emu.Unlock()
+	a.shut()
+	a.end(evs)
+}
+
+// shut ends the attempt's wait and closes the listener, once: Close's work,
+// and Wait's own cleanup once it has its redirect or its context ends, which
+// is no close a caller asked for and reports nothing.
+func (a *Attempt) shut() {
 	a.closeOnce.Do(func() {
 		a.mu.Lock()
 		a.over = true
@@ -216,24 +385,183 @@ func (a *Attempt) Close() {
 	})
 }
 
-// Paste hands the attempt a redirect URL the person copied from the browser
-// — the page that could not load, on a machine the listener is not on. It
-// must be this attempt's redirect address and path, then carry its state;
-// anything else is ErrRedirectMismatch and the attempt goes on waiting.
-// Once a redirect has been accepted, or the attempt closed, it is
-// ErrAttemptOver. An accepted one is finished by Wait.
-func (a *Attempt) Paste(raw string) error {
-	u, err := url.Parse(strings.TrimSpace(raw))
-	if err != nil || u.Scheme != a.redirect.Scheme || u.Host != a.redirect.Host ||
-		u.Path != a.redirect.Path || u.User != nil {
-		return ErrRedirectMismatch
+// Report reports kind, something only the UI sees — the browser opened, or
+// not, or the address copied — as the attempt's event (plan 034 §3.3). Any
+// other kind is ignored: the attempt's own events are its own to report.
+func (a *Attempt) Report(kind EventKind) {
+	switch kind {
+	case EventBrowserOpened, EventBrowserFailed, EventAddressCopied:
+		a.emit(a.event(kind))
 	}
-	q := u.Query()
-	if err := a.accept(q); err != nil {
+}
+
+// Observer is the attempt's observer for its model fetch
+// (FetchOptions.Observe): it stamps each event with the attempt's id, so the
+// fetch that follows a sign-in is the attempt's in the log. nil when the
+// attempt has no observer. It holds the id and the observer alone, not the
+// attempt — whose state, nonce and verifier it would otherwise keep alive
+// for as long as the fetch runs.
+func (a *Attempt) Observer() func(Event) {
+	id, observe := a.id, a.observe
+	if observe == nil {
+		return nil
+	}
+	return func(ev Event) {
+		ev.Attempt = id
+		observe(ev)
+	}
+}
+
+// event is a fresh event of the attempt: kind, its id and the time since it
+// began.
+func (a *Attempt) event(kind EventKind) Event {
+	return Event{Kind: kind, Attempt: a.id, Elapsed: time.Since(a.began)}
+}
+
+// emit reports evs to the observer, in order. Never called with mu or emu
+// held.
+func (a *Attempt) emit(evs ...Event) {
+	for _, ev := range evs {
+		report(a.observe, ev)
+	}
+}
+
+// end reports evs, the attempt's end (endLocked) — nothing when it is not
+// the end — and then says it has ended (Ended). omu is held, emu is not.
+func (a *Attempt) end(evs []Event) {
+	if len(evs) == 0 {
+		return
+	}
+	a.emit(evs...)
+	close(a.endc)
+}
+
+// endLocked marks the attempt ended and answers what its end reports: for each
+// kind the listener refused more than once, the count, then t, the terminal
+// outcome. omu and emu are held; the caller reports them (end) once emu is
+// released, omu still held.
+func (a *Attempt) endLocked(t Event) []Event {
+	a.ended.Store(true)
+	var evs []Event
+	for _, r := range []Refusal{RefusalOtherAttempt, RefusalNotOurs, RefusalOver} {
+		if n := a.refused[r]; n > 1 {
+			ev := a.event(EventListenerRefusals)
+			ev.Refusal, ev.Status, ev.Count = r, refusalStatus(r), n
+			evs = append(evs, ev)
+		}
+	}
+	return append(evs, t)
+}
+
+// refusalStatus is the listener's page status for a refusal of kind r.
+func refusalStatus(r Refusal) int {
+	if r == RefusalOver {
+		return http.StatusGone
+	}
+	return http.StatusBadRequest
+}
+
+// refuse counts the listener's refusal of kind r and reports the first of
+// its kind (plan 034 Q8: a flood on 127.0.0.1:1455 is counted, not repeated;
+// endLocked reports the count). The count and the report are one section
+// under omu, the end's (review r3 #5): a refusal that reaches it once the
+// attempt has ended is neither counted nor reported — the end's totals and
+// its outcome are the last word. It answers the refusal's page status
+// (refusalStatus) either way, so the page and the log cannot disagree.
+func (a *Attempt) refuse(r Refusal) int {
+	if beforeRefuse != nil {
+		beforeRefuse(r)
+	}
+	a.omu.Lock()
+	defer a.omu.Unlock()
+	a.emu.Lock()
+	if a.ended.Load() {
+		a.emu.Unlock()
+		return refusalStatus(r)
+	}
+	if a.refused == nil {
+		a.refused = map[Refusal]int{}
+	}
+	a.refused[r]++
+	first := a.refused[r] == 1
+	a.emu.Unlock()
+	if first {
+		ev := a.event(EventListenerRefused)
+		ev.Refusal, ev.Status = r, refusalStatus(r)
+		a.emit(ev)
+	}
+	return refusalStatus(r)
+}
+
+// Paste hands the attempt a redirect URL the person copied from the browser
+// — the page that could not load, on a machine the listener is not on. The
+// line is judged here, for both UIs (plan 034 §3.3, Q6): one longer than
+// MaxPaste, or not an address at all, is a *PasteError saying so; an address
+// that is not this attempt's redirect address and path, or does not carry its
+// state, is a *PasteError naming the part (Part). Every PasteError is
+// ErrRedirectMismatch to errors.Is, and the attempt goes on waiting. Once a
+// redirect has been accepted, or the attempt closed, it is ErrAttemptOver. An
+// accepted one is finished by Wait. Each refusal is reported (paste_refused),
+// never the line.
+func (a *Attempt) Paste(raw string) error {
+	q, err := a.pasted(raw)
+	if err != nil {
+		ev := a.event(EventPasteRefused)
+		var pe *PasteError
+		if errors.As(err, &pe) {
+			ev.Refusal, ev.Part = pe.Refusal, pe.Part
+		} else {
+			ev.Refusal = RefusalOver
+		}
+		a.emit(ev)
 		return err
 	}
-	a.got <- q
+	a.handOver(q, ViaPaste)
 	return nil
+}
+
+// pasted is Paste's judgement of raw: its query when it is this attempt's
+// redirect and the attempt takes it, else why not. The length is raw's, as a
+// UI read it, before its blanks are trimmed.
+func (a *Attempt) pasted(raw string) (url.Values, error) {
+	if len(raw) > MaxPaste {
+		return nil, &PasteError{Refusal: RefusalTooLong}
+	}
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return nil, &PasteError{Refusal: RefusalNotAddress}
+	}
+	if part := a.mismatch(u); part != "" {
+		return nil, &PasteError{Refusal: RefusalMismatch, Part: part}
+	}
+	q := u.Query()
+	switch err := a.accept(q); {
+	case errors.Is(err, ErrRedirectMismatch):
+		return nil, &PasteError{Refusal: RefusalMismatch, Part: PartState}
+	case err != nil:
+		return nil, err
+	}
+	return q, nil
+}
+
+// mismatch is the first part of u that is not this attempt's redirect address
+// — its scheme, a user, its host or port, its path — or "" when u is the
+// redirect address (whatever its query holds). The same comparison as before
+// the parts had names: u's host and port, together, must be the redirect's.
+func (a *Attempt) mismatch(u *url.URL) Part {
+	switch {
+	case u.Scheme != a.redirect.Scheme:
+		return PartScheme
+	case u.User != nil:
+		return PartUserinfo
+	case u.Host != a.redirect.Host && u.Hostname() != a.redirect.Hostname():
+		return PartHost
+	case u.Host != a.redirect.Host:
+		return PartPort
+	case u.Path != a.redirect.Path:
+		return PartPath
+	}
+	return ""
 }
 
 // accept takes q as the attempt's redirect if it carries the attempt's state
@@ -248,7 +576,7 @@ func (a *Attempt) accept(q url.Values) error {
 	if subtle.ConstantTimeCompare([]byte(q.Get("state")), []byte(a.state)) != 1 {
 		return ErrRedirectMismatch
 	}
-	a.over = true
+	a.over, a.accepted = true, true
 	return nil
 }
 
@@ -266,6 +594,14 @@ const (
 // connection; only GET of the callback path with the attempt's state is
 // taken, and the page is written before the redirect is handed to Wait, so
 // the listener's closing cannot cut it off.
+//
+// A refusal on the callback path is counted, and the first of its kind in the
+// attempt reported, before its page is written (plan 034 Q8): a redirect
+// carrying a code and another state (another attempt's), any other request
+// without this state, and anything once the attempt is over. A request off
+// the callback path — a browser's favicon, a port scan — is a 404 and never
+// reported. An accepted redirect is reported once its page is on the wire,
+// before Wait has it, so the redirect always precedes the outcome.
 func (a *Attempt) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	h := w.Header()
 	h.Set("Content-Security-Policy", "default-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
@@ -283,10 +619,14 @@ func (a *Attempt) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	switch err := a.accept(q); {
 	case errors.Is(err, ErrAttemptOver):
-		page(w, http.StatusGone, pageOver)
+		page(w, a.refuse(RefusalOver), pageOver)
 		return
 	case err != nil:
-		page(w, http.StatusBadRequest, pageNotOurs)
+		kind := RefusalNotOurs
+		if q.Get("code") != "" && q.Get("state") != "" {
+			kind = RefusalOtherAttempt
+		}
+		page(w, a.refuse(kind), pageNotOurs)
 		return
 	}
 	if q.Get("error") != "" {
@@ -295,6 +635,15 @@ func (a *Attempt) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		page(w, http.StatusOK, pageReceived)
 	}
 	_ = http.NewResponseController(w).Flush()
+	a.handOver(q, ViaListener)
+}
+
+// handOver reports the accepted redirect q, which came via, and hands it to
+// Wait: reported first, so the redirect always precedes the outcome.
+func (a *Attempt) handOver(q url.Values, via Via) {
+	ev := a.event(EventRedirectReceived)
+	ev.Via = via
+	a.emit(ev)
 	a.got <- q
 }
 
@@ -321,23 +670,86 @@ func page(w http.ResponseWriter, status int, text string) {
 // false) and removes any there were. A refused registration
 // (invalid_client) drops the saved client id, so the next attempt registers
 // anew.
+//
+// A step that runs past exchangeTimeout is a StepTimeoutError naming it
+// (plan 034 A14). Wait reports the attempt's terminal outcome as it returns
+// (settle), unless a Close already has: signed in, declined or failed; or
+// cancelled, with the reason of the Close whose cancel cut the exchange
+// short — and when ctx ended it with no Close yet, the caller's Close, which
+// follows on every way out, reports it instead.
 func (a *Attempt) Wait(ctx context.Context) (Result, error) {
 	if !a.waited.CompareAndSwap(false, true) {
 		return Result{}, errors.New("chatgptauth: Wait was already called on this sign-in attempt")
 	}
+	a.emu.Lock()
+	a.waiting = true
+	a.emu.Unlock()
+	res, err := a.wait(ctx)
+	a.settle(ctx, res, err)
+	return res, err
+}
+
+// wait is Wait's work.
+func (a *Attempt) wait(ctx context.Context) (Result, error) {
 	var q url.Values
 	select {
 	case q = <-a.got:
 	case <-ctx.Done():
-		a.Close()
+		a.shut()
 		return Result{}, ctx.Err()
 	case <-a.closed:
 		return Result{}, ErrAttemptOver
 	}
-	a.Close()
-	ctx, cancel := context.WithTimeout(ctx, exchangeTimeout)
+	a.shut()
+	fctx, cancel := context.WithTimeout(ctx, exchangeTimeout)
 	defer cancel()
-	return a.finish(ctx, q)
+	res, err := a.finish(fctx, q)
+	return res, deadlineAt(ctx, err, StepExchange, func(Step) time.Duration { return exchangeTimeout })
+}
+
+// settle reports the attempt's terminal outcome as Wait returns it with res
+// and err, unless one was reported already: signed in, declined in the
+// browser, failed (its step, status, code, class and check), or cancelled —
+// ctx done, or the attempt closed — with the Close's reason. A cancel with no
+// Close yet is left to the Close. An attempt that has ended — a Close
+// reported it — takes no omu: there is nothing to report, and this Wait may
+// be an observer's, from the end's report, which holds it (review r5 #4).
+func (a *Attempt) settle(ctx context.Context, res Result, err error) {
+	if a.ended.Load() {
+		a.emu.Lock()
+		a.waiting = false
+		a.emu.Unlock()
+		return
+	}
+	a.omu.Lock()
+	defer a.omu.Unlock()
+	var evs []Event
+	a.emu.Lock()
+	a.waiting = false
+	if !a.ended.Load() {
+		var t Event
+		switch {
+		case err == nil:
+			t = a.event(EventSignedIn)
+			t.Usage, t.Registration = usageOf(res.PlanUsage), registrationOf(res.Registered)
+		case ctx.Err() != nil || errors.Is(err, ErrAttemptOver):
+			if a.closeCalled {
+				t = a.event(EventCancelled)
+				t.Reason = Reason(a.closeReason)
+			}
+		case errors.Is(err, ErrAccessDenied):
+			t = a.event(EventDeclined)
+			t.Step, t.Code = StepAuthorize, "access_denied"
+		default:
+			t = failureEvent(EventFailed, err, "")
+			t.Attempt, t.Elapsed = a.id, time.Since(a.began)
+		}
+		if t.Kind != "" {
+			evs = a.endLocked(t)
+		}
+	}
+	a.emu.Unlock()
+	a.end(evs)
 }
 
 // finish is Wait's work once the redirect is in hand.
@@ -350,20 +762,20 @@ func (a *Attempt) finish(ctx context.Context, q url.Values) (Result, error) {
 	}
 	code := q.Get("code")
 	if code == "" {
-		return Result{}, errors.New("chatgptauth: the redirect carries no authorization code")
+		return Result{}, badRedirect("chatgptauth: the redirect carries no authorization code")
 	}
 	clientID := a.clientID
 	got := q.Get("client_id")
 	switch {
 	case a.register && (got == "" || got == dynamicClient):
-		return Result{}, errors.New("chatgptauth: the registration is incomplete: the redirect carries no issued client id")
+		return Result{}, badRedirect("chatgptauth: the registration is incomplete: the redirect carries no issued client id")
 	case a.register:
 		clientID = got
 	case got != "" && got != a.clientID:
-		return Result{}, errors.New("chatgptauth: the redirect names another client id than craze's registration; nothing was changed")
+		return Result{}, badRedirect("chatgptauth: the redirect names another client id than craze's registration; nothing was changed")
 	}
 	if !validClientID(clientID) {
-		return Result{}, errors.New("chatgptauth: the issued client id is not one craze can use")
+		return Result{}, badRedirect("chatgptauth: the issued client id is not one craze can use")
 	}
 
 	form := url.Values{}
@@ -373,7 +785,7 @@ func (a *Attempt) finish(ctx context.Context, q url.Values) (Result, error) {
 	form.Set("code_verifier", a.verifier)
 	form.Set("redirect_uri", a.redirect.String())
 	form.Set("resource", resource)
-	reply, sent, err := a.ends.postToken(ctx, "exchange", form)
+	reply, sent, err := a.ends.postToken(ctx, StepExchange, form)
 	if err != nil {
 		if oe := refusal(err); oe != nil && oe.Code == codeInvalidClient && !a.register {
 			if derr := dropClientID(ctx, a.dir, clientID); derr != nil {
@@ -384,10 +796,10 @@ func (a *Attempt) finish(ctx context.Context, q url.Values) (Result, error) {
 		return Result{}, err
 	}
 	if !strings.EqualFold(reply.TokenType, "Bearer") {
-		return Result{}, errors.New("chatgptauth: exchange: the token type is not Bearer")
+		return Result{}, badReply(StepExchange, "the token type is not Bearer")
 	}
 	if reply.AccessToken == "" {
-		return Result{}, errors.New("chatgptauth: exchange: the reply has no access token")
+		return Result{}, badReply(StepExchange, "the reply has no access token")
 	}
 	keys, err := a.ends.fetchJWKS(ctx)
 	if err != nil {
@@ -400,7 +812,7 @@ func (a *Attempt) finish(ctx context.Context, q url.Values) (Result, error) {
 		return Result{}, err
 	}
 	if c := accessClientID(reply.AccessToken); c != "" && c != clientID {
-		return Result{}, errors.New("chatgptauth: exchange: the access token is for another client id")
+		return Result{}, badReply(StepExchange, "the access token is for another client id")
 	}
 	// A reply without a scope granted what was asked (RFC 6749 §5.1: the
 	// field may be left out when it is identical to the request's).
@@ -411,26 +823,26 @@ func (a *Attempt) finish(ctx context.Context, q url.Values) (Result, error) {
 	plan := hasScope(granted, planScope)
 	life, lifeOK := reply.expiresIn()
 	if plan && (reply.RefreshToken == "" || !lifeOK) {
-		return Result{}, errors.New("chatgptauth: exchange: the reply has no refresh token or no expiry")
+		return Result{}, badReply(StepExchange, "the reply has no refresh token or no expiry")
 	}
 
 	unlock, err := lock(ctx, a.dir)
 	if err != nil {
-		return Result{}, fmt.Errorf("chatgptauth: taking the sign-in lock: %w", err)
+		return Result{}, lockTimeout(StepInstall, signInLockName, fmt.Errorf("chatgptauth: taking the sign-in lock: %w", err))
 	}
 	defer unlock()
 	prev, err := ReadClient(a.dir)
 	if err != nil && !errors.Is(err, errCorrupt) {
-		return Result{}, err
+		return Result{}, atStep(StepInstall, err)
 	}
 	shown := prev.NoticeShown && prev.ClientID == clientID && prev.Subject == claims.Subject
 	c := Client{ClientID: clientID, Subject: claims.Subject, Email: claims.Email, PlanUsage: plan, NoticeShown: shown}
 	if err := writeClient(a.dir, c); err != nil {
-		return Result{}, err
+		return Result{}, atStep(StepInstall, err)
 	}
 	res := Result{Email: claims.Email, PlanUsage: plan, Registered: a.register, ShowNotice: plan && !shown}
 	if !plan {
-		return res, removeRecord(a.dir)
+		return res, atStep(StepInstall, removeRecord(a.dir))
 	}
 	rec := &record{
 		Version:           recordVersion,
@@ -449,7 +861,7 @@ func (a *Attempt) finish(ctx context.Context, q url.Values) (Result, error) {
 		LastRefresh:       sent.UTC(),
 	}
 	if err := writeRecord(a.dir, rec, false); err != nil {
-		return Result{}, err
+		return Result{}, atStep(StepInstall, err)
 	}
 	return res, nil
 }

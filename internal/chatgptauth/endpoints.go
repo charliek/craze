@@ -82,6 +82,46 @@ func (e endpoints) authorize() string { return e.issuer + authorizePath }
 func (e endpoints) token() string     { return e.issuer + tokenPath }
 func (e endpoints) discovery() string { return e.issuer + discoveryPath }
 
+// MaxLinkableURL is the longest authorization address a UI makes a terminal
+// hyperlink of (LinkableAuthorizeURL): a real one is well under a kilobyte,
+// and terminals cap an OSC 8 URI at a few kilobytes.
+const MaxLinkableURL = 2048
+
+// LinkableAuthorizeURL reports whether raw — an attempt's authorization
+// address, its bytes as Attempt.URL answers them — may be the target of a
+// terminal hyperlink, OSC 8 (plan 034 §3.2, Q9): at most MaxLinkableURL bytes,
+// every byte printable ASCII (0x21–0x7E: no blank, no control, no DEL, nothing
+// outside ASCII — so nothing in it can end the escape sequence early or read
+// as another one), and the production authorize endpoint itself,
+// https://auth.openai.com/api/accounts/authorize, with its query and nothing
+// else: no user, no other port, path or fragment. The address is checked as
+// it is, never decoded or rebuilt, so a link can only ever point where craze
+// built the address to.
+//
+// The test overrides are never linkable: an override is a loopback http URL by
+// construction (loopbackHTTP), and a link must be https on production's
+// authorize endpoint. A sign-in against a test's fake issuer draws its address
+// plain.
+func LinkableAuthorizeURL(raw string) bool {
+	if raw == "" || len(raw) > MaxLinkableURL {
+		return false
+	}
+	for i := 0; i < len(raw); i++ {
+		if c := raw[i]; c < 0x21 || c > 0x7e {
+			return false
+		}
+	}
+	// The prefix fixes the scheme, the host — no user before it, no port
+	// after it — and the path; what follows it is the query or nothing.
+	rest, ok := strings.CutPrefix(raw, endpoints{issuer: productionIssuer}.authorize())
+	if !ok || (rest != "" && rest[0] != '?') || strings.ContainsRune(rest, '#') {
+		return false
+	}
+	u, err := url.Parse(raw)
+	return err == nil && u.Scheme == "https" && u.User == nil && u.Opaque == "" &&
+		u.Host == strings.TrimPrefix(productionIssuer, "https://") && u.Path == authorizePath && u.Fragment == ""
+}
+
 // currentEndpoints is production's endpoints, or the test overrides'.
 func currentEndpoints() (endpoints, error) {
 	e := endpoints{issuer: productionIssuer, api: productionAPI}
@@ -171,28 +211,31 @@ const maxReply = 1 << 20
 // do sends req with the client and answers its body (within limit) and
 // status. A redirect is errRedirect; a transport error is returned with the
 // step named and the context's error preferred, so a cancel reads as one.
-func do(ctx context.Context, step string, req *http.Request, limit int64) (int, http.Header, []byte, error) {
+// Every error is labelled with step (stepError, plan 034 §3.3), which leaves
+// its text as it was: the owner of the step's deadline names a timeout by it
+// (deadlineAt), and the sign-in log records it.
+func do(ctx context.Context, step Step, req *http.Request, limit int64) (int, http.Header, []byte, error) {
 	req.Header.Set("User-Agent", userAgent)
 	resp, err := httpClient().Do(req)
 	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
-			return 0, nil, nil, ctxErr
+			return 0, nil, nil, &stepError{step: step, err: ctxErr}
 		}
-		return 0, nil, nil, fmt.Errorf("chatgptauth: %s: %w", step, transportError(err))
+		return 0, nil, nil, &stepError{step: step, err: fmt.Errorf("chatgptauth: %s: %w", step, transportError(err))}
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode >= 300 && resp.StatusCode <= 399 {
-		return resp.StatusCode, nil, nil, fmt.Errorf("chatgptauth: %s: %w", step, errRedirect)
+		return resp.StatusCode, nil, nil, &stepError{step: step, status: resp.StatusCode, err: fmt.Errorf("chatgptauth: %s: %w", step, errRedirect)}
 	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
 	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
-			return 0, nil, nil, ctxErr
+			return 0, nil, nil, &stepError{step: step, err: ctxErr}
 		}
-		return 0, nil, nil, fmt.Errorf("chatgptauth: %s: reading the reply: %w", step, transportError(err))
+		return 0, nil, nil, &stepError{step: step, err: fmt.Errorf("chatgptauth: %s: reading the reply: %w", step, transportError(err))}
 	}
 	if int64(len(body)) > limit {
-		return 0, nil, nil, fmt.Errorf("chatgptauth: %s: the reply is larger than %d bytes", step, limit)
+		return 0, nil, nil, badReply(step, fmt.Sprintf("the reply is larger than %d bytes", limit))
 	}
 	return resp.StatusCode, resp.Header, body, nil
 }
@@ -224,7 +267,7 @@ func (e endpoints) discover(ctx context.Context) (discoveryDoc, error) {
 		return discoveryDoc{}, err
 	}
 	req.Header.Set("Accept", "application/json")
-	status, _, body, err := do(ctx, "discovery", req, maxReply)
+	status, _, body, err := do(ctx, StepDiscovery, req, maxReply)
 	if err != nil {
 		return discoveryDoc{}, err
 	}
@@ -233,14 +276,14 @@ func (e endpoints) discover(ctx context.Context) (discoveryDoc, error) {
 	}
 	var doc discoveryDoc
 	if err := json.Unmarshal(body, &doc); err != nil {
-		return discoveryDoc{}, errors.New("chatgptauth: discovery: the OpenID configuration is not JSON")
+		return discoveryDoc{}, badReply(StepDiscovery, "the OpenID configuration is not JSON")
 	}
 	if doc.Issuer != "" && strings.TrimSuffix(doc.Issuer, "/") != e.issuer {
-		return discoveryDoc{}, errors.New("chatgptauth: discovery: the OpenID configuration names another issuer")
+		return discoveryDoc{}, badReply(StepDiscovery, "the OpenID configuration names another issuer")
 	}
 	for _, u := range []string{doc.JWKSURI, doc.RevocationEndpoint} {
 		if u != "" && !sameOrigin(u, e.issuer) {
-			return discoveryDoc{}, errors.New("chatgptauth: discovery: an endpoint in the OpenID configuration is not on the issuer's host")
+			return discoveryDoc{}, badReply(StepDiscovery, "an endpoint in the OpenID configuration is not on the issuer's host")
 		}
 	}
 	return doc, nil

@@ -15,6 +15,7 @@ import (
 
 	"github.com/charliek/craze/internal/chatgptauth"
 	"github.com/charliek/craze/internal/harness/modeltable"
+	"github.com/charliek/craze/internal/signinlog"
 )
 
 // craze auth for the ChatGPT plan (plan 033 §3.13, owner decisions 4 and 10,
@@ -34,6 +35,14 @@ import (
 // chatgptauth's errors name a step, a status and an OAuth code, nothing a
 // server sent, and a pasted line that is not this sign-in's redirect — an API
 // key pasted out of habit, say — is never repeated back.
+//
+// Every attempt is logged, value-free, in the native directory's sign-in log
+// (plan 034 §3.3, Q5; internal/signinlog), surface cli: chatgptauth reports
+// the attempt's events to the observer signIn gives it, which records each
+// one, and says on stderr — through the stdin reader's event loop — what only
+// the attempt sees: why it is paste-only when the port was busy, and once,
+// that the browser came back from another attempt (Q8). A log that cannot be
+// kept is one note on stderr, and the sign-in goes on.
 
 // signInAttempt is the part of a chatgptauth.Attempt the CLI drives: a seam,
 // so the tests can stand in for the browser and OpenAI (auth_chatgpt_test.go)
@@ -46,7 +55,9 @@ type signInAttempt interface {
 	Listening() bool
 	Paste(raw string) error
 	Wait(ctx context.Context) (chatgptauth.Result, error)
-	Close()
+	Close(reason chatgptauth.CloseReason)
+	Report(kind chatgptauth.EventKind)
+	Observer() func(chatgptauth.Event)
 }
 
 // The sign-in's seams: chatgptauth and the platform in craze; stand-ins in
@@ -59,9 +70,15 @@ var (
 		}
 		return a, nil
 	}
-	fetchPlanModels = func(ctx context.Context, dir string) (*chatgptauth.Models, error) {
-		return chatgptauth.FetchModels(ctx, chatgptauth.Source(dir))
+	// fetchPlanModels fetches the plan's models into dir after a sign-in,
+	// reporting to observe, the attempt's observer (Attempt.Observer).
+	fetchPlanModels = func(ctx context.Context, dir string, observe func(chatgptauth.Event)) (*chatgptauth.Models, error) {
+		return chatgptauth.FetchModels(ctx, chatgptauth.Source(dir), chatgptauth.FetchOptions{
+			ClientVersion: modeltable.ChatGPTModelsClientVersion(), Observe: observe,
+		})
 	}
+	// openSignInLog opens the native directory's sign-in log.
+	openSignInLog   = signinlog.Open
 	markNoticeShown = chatgptauth.MarkNoticeShown
 	signOutChatGPT  = chatgptauth.Logout
 	// openBrowser opens url in the desktop's browser (startBrowser), only
@@ -120,11 +137,12 @@ func guiSession(goos string, getenv func(string) string) bool {
 	return false
 }
 
-// maxRedirectLine is the longest line the sign-in reads as a pasted redirect.
-// A real one is a few hundred bytes (an address, a code, the scopes, the
-// state and the client id); a longer line is not one, and the rest of it is
-// read and dropped.
-const maxRedirectLine = 16 << 10
+// maxRedirectLine is the longest line the sign-in reads as a pasted redirect:
+// the attempt's own bound (chatgptauth.MaxPaste). A real one is a few hundred
+// bytes (an address, a code, the scopes, the state and the client id); of a
+// longer line one byte past the bound is kept, for the attempt to refuse as
+// too long, and the rest is read and dropped.
+const maxRedirectLine = chatgptauth.MaxPaste
 
 // redirectPrompt is the sign-in's prompt for a pasted redirect, on a
 // terminal only.
@@ -149,13 +167,21 @@ func (c *signalCause) code() int {
 }
 
 // pasteEvent is what the stdin reader tells the sign-in of a line it read: one
-// it refused, to say why (never the line); a paste accepted (acceptedPaste
-// says what for); or, on a terminal, a blank one, for the prompt to be drawn
-// again.
+// it refused, with text saying why (never the line); a paste accepted
+// (acceptedPaste says what for); or, on a terminal, a blank one, for the
+// prompt to be drawn again. The attempt's observer sends one too, its text
+// what the listener saw (plan 034 Q8), printed as a refusal is, the prompt
+// drawn again.
 type pasteEvent struct {
-	refusal string
-	pasted  bool
+	text   string
+	pasted bool
 }
+
+// otherAttemptText is what the sign-in says, once, when the listener refused
+// a redirect carrying a code and another attempt's state (plan 034 Q8): the
+// browser came back from an earlier sign-in — one cancelled, or another
+// craze's.
+const otherAttemptText = "The browser came back from a different sign-in attempt. Use the address shown above."
 
 // acceptedPaste is where a pasted redirect the attempt accepted led — its
 // origin and path (receivedAt), never its query — for the sign-in to confirm
@@ -199,6 +225,30 @@ func receivedText(at string) string {
 func (a *authRun) signIn() error {
 	ctx, cancel := context.WithCancelCause(a.context())
 	defer cancel(nil)
+	// The sign-in log (plan 034 §3.3), opened first and closed last, so the
+	// attempt's terminal outcome — reported as the attempt is closed, below —
+	// is written before it closes. Its open touches no file (review r3 #4):
+	// its writer sets it up and writes beside the sign-in, which never waits
+	// on it, and its Close waits at most a second. One that cannot be kept —
+	// refused as it was set up, or broken by any record, the last one
+	// included — or that closes with records its writer never reached in that
+	// second is one note, at the end once its Close has let the writer
+	// finish, and changes nothing else (the TUI's finishRun says the same,
+	// plan 034 review r5 #6).
+	logOff := func(err error) {
+		if err != nil {
+			a.note("the sign-in log is off: " + err.Error())
+		}
+	}
+	log, err := openSignInLog(a.dir)
+	logOff(err)
+	defer func() {
+		err := log.Close()
+		if f := log.Failure(); f != nil {
+			err = f
+		}
+		logOff(err)
+	}()
 	sigs := make(chan os.Signal, 1)
 	notifySignInSignals(sigs)
 	defer stopSignInSignals(sigs)
@@ -227,18 +277,41 @@ func (a *authRun) signIn() error {
 		}
 	}()
 
-	att, err := beginSignIn(ctx, a.dir, chatgptauth.BeginOptions{PasteOnly: a.noBrowser})
+	done := make(chan struct{})
+	defer close(done)
+	events := make(chan pasteEvent)
+	// The attempt's observer: every event to the log, and the listener's
+	// refusal of another attempt's redirect — reported once per attempt — to
+	// the loop below, to say (other). It never blocks: the attempt reports a
+	// listener's refusal under the lock its end takes too (plan 034 review r3
+	// #5), so an observer waiting on this loop could hold up the deferred
+	// Close below once the loop has returned. begun is the attempt's begin,
+	// which Begin reports on this goroutine before it returns.
+	var begun chatgptauth.Event
+	other := make(chan struct{}, 1)
+	observe := func(ev chatgptauth.Event) {
+		log.Record(ev, signinlog.SurfaceCLI)
+		switch {
+		case ev.Kind == chatgptauth.EventBegin:
+			begun = ev
+		case ev.Kind == chatgptauth.EventListenerRefused && ev.Refusal == chatgptauth.RefusalOtherAttempt:
+			select {
+			case other <- struct{}{}:
+			default:
+			}
+		}
+	}
+	att, err := beginSignIn(ctx, a.dir, chatgptauth.BeginOptions{PasteOnly: a.noBrowser, Observe: observe})
 	if err != nil {
 		return a.signInFailed(ctx, err)
 	}
 	// Ctrl-C, a failure or success: the listener is closed with every
-	// connection to it before craze returns (Wait closes it too).
-	defer att.Close()
-	a.introduceSignIn(att)
+	// connection to it before craze returns (Wait closes it too), with why
+	// (signInCloseReason): the attempt's cancel, when that is what ended it,
+	// is reported here.
+	defer func() { att.Close(signInCloseReason(ctx)) }()
+	a.introduceSignIn(att, begun)
 
-	done := make(chan struct{})
-	defer close(done)
-	events := make(chan pasteEvent)
 	var accepted acceptedPaste
 	// The stdin reader and the wait each put the echo back if they panic
 	// (restoreOnPanic): a panic on a goroutine of their own ends craze
@@ -268,23 +341,11 @@ func (a *authRun) signIn() error {
 		}
 	}
 	for {
+		var ev pasteEvent
 		select {
-		case ev := <-events:
-			if open {
-				fmt.Fprintln(a.errw)
-				open = false
-			}
-			if ev.pasted {
-				confirm()
-				continue
-			}
-			if ev.refusal != "" {
-				fmt.Fprintln(a.errw, ev.refusal)
-			}
-			if a.tty != nil {
-				fmt.Fprint(a.errw, redirectPrompt)
-				open = true
-			}
+		case ev = <-events:
+		case <-other:
+			ev = pasteEvent{text: otherAttemptText}
 		case w := <-result:
 			if open {
 				// The prompt's line, left open by a listener's redirect, by
@@ -299,9 +360,42 @@ func (a *authRun) signIn() error {
 			if w.err != nil {
 				return a.signInFailed(ctx, w.err)
 			}
-			return a.signedIn(ctx, w.res)
+			return a.signedIn(ctx, w.res, att.Observer())
+		}
+		if open {
+			fmt.Fprintln(a.errw)
+			open = false
+		}
+		if ev.pasted {
+			confirm()
+			continue
+		}
+		if ev.text != "" {
+			fmt.Fprintln(a.errw, ev.text)
+		}
+		if a.tty != nil {
+			fmt.Fprint(a.errw, redirectPrompt)
+			open = true
 		}
 	}
+}
+
+// signInCloseReason is why the sign-in closes its attempt, by what ended ctx
+// (plan 034 §3.3): a signal, stdin's end on a paste-only attempt, or the
+// command's own context; otherwise the sign-in is done with it — its wait has
+// returned, and the close is cleanup.
+func signInCloseReason(ctx context.Context) chatgptauth.CloseReason {
+	cause := context.Cause(ctx)
+	var sig *signalCause
+	switch {
+	case errors.As(cause, &sig):
+		return chatgptauth.CloseSignal
+	case errors.Is(cause, errNoRedirect):
+		return chatgptauth.CloseNoInput
+	case ctx.Err() != nil:
+		return chatgptauth.CloseShutdown
+	}
+	return chatgptauth.CloseDone
 }
 
 // restoreOnPanic is deferred by each goroutine signIn starts that runs the
@@ -322,15 +416,19 @@ func restoreOnPanic(restore func()) {
 
 // introduceSignIn prints the authorization URL and how the redirect comes
 // back, and opens the browser in a desktop session unless --no-browser
-// said not to. All of it is on stderr, with the prompts; the URL carries no
-// token (P21: no id_token_hint), so it may be copied anywhere.
-func (a *authRun) introduceSignIn(att signInAttempt) {
+// said not to (reporting whether it could, plan 034 §3.3). All of it is on
+// stderr, with the prompts; the URL carries no token (P21: no id_token_hint),
+// so it may be copied anywhere. begun is the attempt's begin: a paste-only
+// attempt says why the listener is missing when it was not asked for (Q8).
+func (a *authRun) introduceSignIn(att signInAttempt, begun chatgptauth.Event) {
 	redirect := sanitizeLine(att.RedirectURI())
 	fmt.Fprintf(a.errw, "Sign in with ChatGPT to use your ChatGPT plan in craze. Open this address in a browser and approve craze:\n\n  %s\n\n", sanitizeLine(att.URL()))
 	if !a.noBrowser && guiSession(browserGOOS, a.getenv) {
 		if err := openBrowser(att.URL()); err != nil {
+			att.Report(chatgptauth.EventBrowserFailed)
 			fmt.Fprintf(a.errw, "craze could not open a browser (%s); open the address yourself.\n", sanitizeLine(err.Error()))
 		} else {
+			att.Report(chatgptauth.EventBrowserOpened)
 			fmt.Fprintln(a.errw, "craze opened it in your browser.")
 		}
 	}
@@ -338,6 +436,9 @@ func (a *authRun) introduceSignIn(att signInAttempt) {
 		fmt.Fprintf(a.errw, "craze is waiting for the browser to come back to %s.\n", redirect)
 		fmt.Fprintln(a.errw, "If the browser is on another machine, that page will not load there: copy its whole address from the address bar and paste it here.")
 	} else {
+		if why := listenerMissing(begun); why != "" {
+			fmt.Fprintln(a.errw, why)
+		}
 		fmt.Fprintf(a.errw, "After you approve, the browser goes to an address starting with %s, which will not load: copy its whole address from the address bar and paste it here.\n", redirect)
 	}
 	if a.tty != nil {
@@ -345,16 +446,39 @@ func (a *authRun) introduceSignIn(att signInAttempt) {
 	}
 }
 
+// listenerMissing is why a paste-only attempt has no listener when no one
+// asked for that (plan 034 Q8): 127.0.0.1:<port> in use, or not to be had;
+// "" when the attempt was paste-only by request, or says nothing.
+func listenerMissing(begun chatgptauth.Event) string {
+	if begun.Mode != chatgptauth.ModePasteOnly {
+		return ""
+	}
+	addr := "127.0.0.1"
+	if begun.Port > 0 {
+		addr = fmt.Sprintf("127.0.0.1:%d", begun.Port)
+	}
+	switch begun.Reason {
+	case chatgptauth.ReasonPortBusy:
+		return "craze is not listening for the browser: another program is using " + addr + "."
+	case chatgptauth.ReasonListenFailed:
+		return "craze is not listening for the browser: it could not listen on " + addr + "."
+	}
+	return ""
+}
+
 // readRedirects reads stdin a line at a time and hands each non-blank one to
 // the attempt as a pasted redirect, until one is accepted or the attempt is
-// over. A line it refuses is told to the sign-in as a reason, never quoted:
-// whatever was pasted by mistake — a key included — is not repeated. One
-// accepted is recorded with where it led (accepted) and told, and on a terminal
-// a blank line is told too, so the prompt — whose Enter did not echo — is
-// drawn again. At the end of stdin a paste-only attempt is cancelled
-// (errNoRedirect), since nothing else can finish it; one with a listener goes
-// on waiting for the browser. It never writes: the sign-in prints what it
-// sends, until done.
+// over. The attempt judges every line (chatgptauth.Attempt.Paste, plan 034
+// §3.3): one too long — handed over cut one byte past the bound, so the
+// attempt refuses it as too long — one that is not an address, one that is
+// another attempt's. A line it refuses is told to the sign-in as a reason
+// phrased from the refusal (pasteRefusalText), never quoted: whatever was
+// pasted by mistake — a key included — is not repeated. One accepted is
+// recorded with where it led (accepted) and told, and on a terminal a blank
+// line is told too, so the prompt — whose Enter did not echo — is drawn again.
+// At the end of stdin a paste-only attempt is cancelled (errNoRedirect), since
+// nothing else can finish it; one with a listener goes on waiting for the
+// browser. It never writes: the sign-in prints what it sends, until done.
 func (a *authRun) readRedirects(att signInAttempt, accepted *acceptedPaste, cancel context.CancelCauseFunc, events chan<- pasteEvent, done <-chan struct{}) {
 	send := func(ev pasteEvent) bool {
 		select {
@@ -367,24 +491,21 @@ func (a *authRun) readRedirects(att signInAttempt, accepted *acceptedPaste, canc
 	br := bufio.NewReader(a.in)
 	for {
 		line, long, err := readRedirectLine(br)
-		line = strings.TrimSpace(line)
+		if !long {
+			line = strings.TrimSpace(line)
+		}
 		switch {
-		case line != "" || long:
-			// A line too long, or not an address at all, never reaches the
-			// attempt: it is not a redirect, and may be a key.
-			refusal := redirectRefusal(line, long, att.RedirectURI())
-			if refusal == "" {
-				switch perr := accepted.paste(att, line); {
-				case perr == nil:
-					send(pasteEvent{pasted: true})
-					return
-				case errors.Is(perr, chatgptauth.ErrAttemptOver):
+		case line != "":
+			switch perr := accepted.paste(att, line); {
+			case perr == nil:
+				send(pasteEvent{pasted: true})
+				return
+			case errors.Is(perr, chatgptauth.ErrAttemptOver):
+				return
+			default:
+				if !send(pasteEvent{text: pasteRefusalText(perr, att.RedirectURI())}) {
 					return
 				}
-				refusal = "That is not this sign-in's redirect address. " + pasteWhat(att.RedirectURI())
-			}
-			if !send(pasteEvent{refusal: refusal}) {
-				return
 			}
 		case err == nil && a.tty != nil:
 			if !send(pasteEvent{}) {
@@ -401,45 +522,38 @@ func (a *authRun) readRedirects(att signInAttempt, accepted *acceptedPaste, canc
 }
 
 // readRedirectLine is br's next line, without its line ending, keeping at
-// most maxRedirectLine bytes and saying whether there were more (long). err
-// is io.EOF, or the read's error, once nothing more can be read.
+// most maxRedirectLine+1 bytes of it and saying whether it was longer than
+// maxRedirectLine (long): a long line is kept cut one byte past the bound, as
+// is, so the attempt still sees it is too long. Of a line longer than the
+// bound plus its ending, the bytes past those are read and dropped: what is
+// kept holds no newline, and is past the bound with or without a last "\r".
+// err is io.EOF, or the read's error, once nothing more can be read.
 func readRedirectLine(br *bufio.Reader) (line string, long bool, err error) {
 	var b strings.Builder
 	for {
 		chunk, rerr := br.ReadSlice('\n')
-		if b.Len()+len(chunk) > maxRedirectLine+2 {
-			long = true
-		} else {
-			b.Write(chunk)
+		if room := maxRedirectLine + 3 - b.Len(); room > 0 {
+			b.Write(chunk[:min(len(chunk), room)])
 		}
 		if errors.Is(rerr, bufio.ErrBufferFull) {
 			continue
 		}
 		line = strings.TrimSuffix(strings.TrimSuffix(b.String(), "\n"), "\r")
-		if len(line) > maxRedirectLine {
-			long = true
-		}
-		if long {
-			line = ""
+		if long = len(line) > maxRedirectLine; long {
+			line = line[:maxRedirectLine+1]
 		}
 		return line, long, rerr
 	}
 }
 
-// redirectRefusal is why line, pasted at the sign-in, cannot be its redirect
-// before the attempt is asked — too long, or not an address at all — and ""
-// when it is an address the attempt must judge. It never quotes the line: a
-// line that is not an address is most likely a key typed where the plan's
-// sign-in goes, and is told the plan takes none (plan 033 §3.13: no API-key
-// login for the ChatGPT plan).
-func redirectRefusal(line string, long bool, redirect string) string {
-	if long {
-		return "That is too long to be the redirect address. " + pasteWhat(redirect)
-	}
-	if u, err := url.Parse(line); err != nil || u.Scheme == "" || u.Host == "" {
-		return "That is not an address: the ChatGPT plan is funded by signing in, never by an API key. " + pasteWhat(redirect)
-	}
-	return ""
+// earlierAttemptText is what the sign-in says of a pasted redirect of an
+// earlier attempt: the right address with another state (plan 034 §3.3).
+const earlierAttemptText = "That is the redirect of an earlier sign-in attempt. Use the address shown above."
+
+// pasteRefusalText is why a pasted line was refused, phrased from the
+// attempt's refusal (chatgptauth.PasteRefusalText), never quoting it.
+func pasteRefusalText(err error, redirect string) string {
+	return chatgptauth.PasteRefusalText(err, sanitizeLine(redirect), earlierAttemptText)
 }
 
 // receivedAt is the address line, an accepted paste, was for: its scheme,
@@ -451,12 +565,6 @@ func receivedAt(line string) string {
 		return ""
 	}
 	return sanitizeLine(u.Scheme + "://" + u.Host + u.Path)
-}
-
-// pasteWhat says what to paste instead: the address the browser was sent
-// to, which starts with the attempt's redirect address.
-func pasteWhat(redirect string) string {
-	return fmt.Sprintf("Paste the whole address the browser was sent to; it starts with %s.", sanitizeLine(redirect))
 }
 
 // signInFailed is the sign-in's exit for err, by what ended it: a signal
@@ -489,8 +597,9 @@ func signInErrorText(err error) string {
 // to grant it: signing in again, which asks ChatGPT for consent again
 // (prompt=consent, chatgptauth.Begin). A notice that cannot be recorded or a
 // model list that cannot be fetched is a note: the sign-in stands, and a
-// native session fetches the list when it opens.
-func (a *authRun) signedIn(ctx context.Context, res chatgptauth.Result) error {
+// native session fetches the list when it opens. The fetch reports to
+// observe, the attempt's observer, so the log has it as the attempt's.
+func (a *authRun) signedIn(ctx context.Context, res chatgptauth.Result, observe func(chatgptauth.Event)) error {
 	who := "Signed in to ChatGPT"
 	if res.Email != "" {
 		who += " as " + sanitizeLine(res.Email)
@@ -508,7 +617,7 @@ func (a *authRun) signedIn(ctx context.Context, res chatgptauth.Result) error {
 			a.note("the notice above could not be recorded as shown, so it may be shown again: " + signInErrorText(err))
 		}
 	}
-	models, err := fetchPlanModels(ctx, a.dir)
+	models, err := fetchPlanModels(ctx, a.dir, observe)
 	if err != nil {
 		a.note("the plan's model list could not be fetched (" + signInErrorText(err) + "); a native session fetches it when it opens")
 		var sig *signalCause

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
 	"slices"
 	"sort"
@@ -30,14 +31,17 @@ const maxModelsFile = 1 << 20
 // fetches it again in the background (plan 033 §3.10).
 const ModelsMaxAge = 24 * time.Hour
 
-// modelsTimeout bounds one fetch of the model list.
-const modelsTimeout = 30 * time.Second
+// modelsTimeout bounds one fetch of the model list. A variable only so a test
+// can run the fetch past a short one (plan 034 A14).
+var modelsTimeout = 30 * time.Second
 
 // Model is one model of the plan's list as craze keeps it (P34): the slug a
 // request names, the name shown, the context window, the reasoning efforts
 // as the server lists them (modeltable keeps the ones a request may send),
 // the default effort, the input modalities (vision), the server's ordering
-// priority, and whether it takes parallel tool calls (nil: not said).
+// priority, whether it takes parallel tool calls (nil: not said), and the
+// least client_version the server says it needs (plan 034 §3.1; "" when the
+// reply gave none or gave one that is not short printable text).
 type Model struct {
 	Slug              string   `json:"slug"`
 	DisplayName       string   `json:"display_name"`
@@ -47,6 +51,7 @@ type Model struct {
 	InputModalities   []string `json:"input_modalities"`
 	Priority          int      `json:"priority"`
 	ParallelToolCalls *bool    `json:"parallel_tool_calls,omitempty"`
+	MinClientVersion  string   `json:"minimal_client_version,omitempty"`
 }
 
 // Models is chatgpt-models.json (plan 033 §3.10, P34): the list of models
@@ -56,36 +61,184 @@ type Model struct {
 // the server's X-Models-Etag and when it was fetched. Only models the server
 // lists for display (visibility "list") are kept, in priority order.
 //
+// ClientVersion is the client_version the list was fetched with (plan 034
+// §3.1, D-82): the server gates the list on it, so a list fetched with another
+// version, or none (a legacy file), is stale (modelsCurrent) and fetched
+// again. Each model keeps the server's minimal_client_version, which
+// modeltable's reader compares with its own pin, so a binary with an older pin
+// never offers a model a newer one fetched. Both fields are optional and
+// modelsVersion stays 1: a legacy file stays readable.
+//
 // modeltable reads this file itself (the harness may not import this
 // package, D-02), so its shape is a contract: a change here is a change
 // there.
 type Models struct {
-	Version    int       `json:"version"`
-	Subject    string    `json:"subject"`
-	ClientID   string    `json:"client_id"`
-	ModelsEtag string    `json:"models_etag,omitempty"`
-	FetchedAt  time.Time `json:"fetched_at"`
-	Models     []Model   `json:"models"`
+	Version       int       `json:"version"`
+	Subject       string    `json:"subject"`
+	ClientID      string    `json:"client_id"`
+	ModelsEtag    string    `json:"models_etag,omitempty"`
+	ClientVersion string    `json:"client_version,omitempty"`
+	FetchedAt     time.Time `json:"fetched_at"`
+	Models        []Model   `json:"models"`
 }
 
+// FetchOptions are what a caller says about one model-list fetch.
+type FetchOptions struct {
+	// ClientVersion is the client_version the request carries (plan 034 Q1):
+	// the caller passes the shipped catalog's pin
+	// (modeltable.ChatGPTModelsClientVersion), since this package may not
+	// import the harness. Empty is ErrClientVersionRequired, before any
+	// request.
+	ClientVersion string
+	// Observe, when set, is told how the fetch went (plan 034 §3.3): the
+	// list fetched (its model count), an empty reply that kept the cache, or
+	// the failure (its step, status, code and class) — each with
+	// ClientVersion and the fetch's duration. The fetch after a sign-in passes
+	// its attempt's (Attempt.Observer), so its events carry the attempt's id.
+	// RefreshModels reports only a fetch it made. Called on the fetching
+	// goroutine; each Event is value-free.
+	Observe func(Event)
+}
+
+// report tells o's observer how a fetch went — fetched (m), empty
+// (ErrModelsEmpty), or failed (err) — and how long it took.
+func (o FetchOptions) report(m *Models, err error, took time.Duration) {
+	if o.Observe == nil {
+		return
+	}
+	var ev Event
+	switch {
+	case err == nil:
+		ev = Event{Kind: EventModelsFetched, Models: len(m.Models)}
+	case errors.Is(err, ErrModelsEmpty):
+		ev = Event{Kind: EventModelsEmpty}
+	default:
+		ev = failureEvent(EventModelsFailed, err, StepModels)
+	}
+	ev.ClientVersion, ev.Elapsed = o.ClientVersion, took
+	o.Observe(ev)
+}
+
+// fetchTimeout is the bound a model fetch's step ran out of: a token
+// renewal's own (refreshTimeout), else the fetch's (modelsTimeout).
+func fetchTimeout(step Step) time.Duration {
+	if step == StepRefresh {
+		return refreshTimeout
+	}
+	return modelsTimeout
+}
+
+var (
+	// ErrClientVersionRequired is FetchModels' and RefreshModels' error for
+	// an empty FetchOptions.ClientVersion: the server's list without one is
+	// the short one (plan 034 Q1), so craze never sends it.
+	ErrClientVersionRequired = errors.New("chatgptauth: the model list is fetched with a client_version")
+
+	// ErrModelsEmpty is FetchModels' error for a reply with no visible model
+	// when the account's cache has some: the cache is kept (plan 034 Q3), as a
+	// server-side minimum above the pin would otherwise wipe the list. The
+	// wrapped message names the pin.
+	ErrModelsEmpty = errors.New("chatgptauth: the plan's model list came back empty")
+)
+
 // FetchModels fetches the plan's model list with src's token (GET
-// /v1/models; a 401 renews the token once, as a request does) and writes it
-// to dir's chatgpt-models.json, 0600, bound to the account the token belongs
-// to. The server's ordering is its priority field; If-None-Match is not
-// relied on (the spike saw no 304).
-func FetchModels(ctx context.Context, src *TokenSource) (*Models, error) {
+// /v1/models?client_version=…; a 401 renews the token once, as a request
+// does) and writes it to dir's chatgpt-models.json, 0600, bound to the
+// account the token belongs to and to the client version it was fetched with.
+// The server's ordering is its priority field; If-None-Match is not relied on
+// (the spike saw no 304).
+//
+// A reply with no visible model, when the account's cache has some, writes
+// nothing and is ErrModelsEmpty (plan 034 Q3); with no usable cache the empty
+// list is written as it was. The cache check and the write are one critical
+// section under the list's own lock (chatgpt-models.json.lock, the one
+// RefreshModels takes), taken after the reply — never held across the
+// request — so a concurrent host's non-empty list cannot land between them
+// and be overwritten by an empty one (plan 034 r1 #2).
+//
+// A request that runs past modelsTimeout, or a lock held past lockWait, is a
+// StepTimeoutError naming the step (plan 034 A14). opts.Observe is told how
+// the fetch went.
+func FetchModels(ctx context.Context, src *TokenSource, opts FetchOptions) (*Models, error) {
+	start := time.Now()
+	m, err := fetchModels(ctx, src, opts)
+	opts.report(m, err, time.Since(start))
+	return m, err
+}
+
+// fetchModels is FetchModels' work.
+func fetchModels(ctx context.Context, src *TokenSource, opts FetchOptions) (*Models, error) {
+	f, err := fetchModelList(ctx, src, opts)
+	if err != nil {
+		return nil, err
+	}
+	if afterModelsReply != nil {
+		afterModelsReply()
+	}
+	unlock, err := lockModels(ctx, src.dir)
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
+	return storeModels(src.dir, opts, f)
+}
+
+// fetchedModels is one reply of the model list, parsed, with the account the
+// token that fetched it belongs to.
+type fetchedModels struct {
+	list []Model
+	etag string
+	rec  *record
+}
+
+// lockModels takes dir's model-list lock: at once when it is free, else —
+// after onLockBusy — waiting for it within lockWait, giving up when ctx is
+// done. The directory is made first.
+func lockModels(ctx context.Context, dir string) (func(), error) {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return nil, err
+	}
+	path := ModelsFile(dir) + ".lock"
+	unlock, err := atomicfile.LockWithin(path, 0)
+	if errors.Is(err, atomicfile.ErrLockBusy) {
+		if onLockBusy != nil {
+			onLockBusy()
+		}
+		unlock, err = atomicfile.LockContext(ctx, path, lockWait)
+	}
+	if err != nil {
+		return nil, lockTimeout(StepModels, modelsLockName, fmt.Errorf("chatgptauth: taking the model list's lock: %w", err))
+	}
+	return unlock, nil
+}
+
+// fetchModelList is the request half of FetchModels: the list, parsed, and
+// the account that fetched it. It touches no file of the model list. A
+// deadline that ran out within ctx is a StepTimeoutError naming its step.
+func fetchModelList(ctx context.Context, src *TokenSource, opts FetchOptions) (*fetchedModels, error) {
+	if opts.ClientVersion == "" {
+		return nil, ErrClientVersionRequired
+	}
 	ends, err := currentEndpoints()
 	if err != nil {
 		return nil, err
 	}
-	ctx, cancel := context.WithTimeout(ctx, modelsTimeout)
+	listURL := ends.api + "/models?" + url.Values{"client_version": {opts.ClientVersion}}.Encode()
+	rctx, cancel := context.WithTimeout(ctx, modelsTimeout)
 	defer cancel()
+	f, err := requestModelList(rctx, src, ends, listURL)
+	return f, deadlineAt(ctx, err, StepModels, fetchTimeout)
+}
+
+// requestModelList is fetchModelList's request, under its deadline: a 401
+// renews the token once.
+func requestModelList(ctx context.Context, src *TokenSource, ends endpoints, listURL string) (*fetchedModels, error) {
 	for retried := false; ; retried = true {
 		tok, gen, rec, err := src.token(ctx)
 		if err != nil {
 			return nil, err
 		}
-		status, hdr, body, err := ends.apiGET(ctx, ends.api+"/models", tok)
+		status, hdr, body, err := ends.apiGET(ctx, listURL, tok)
 		if err != nil {
 			return nil, err
 		}
@@ -100,29 +253,50 @@ func FetchModels(ctx context.Context, src *TokenSource) (*Models, error) {
 		}
 		list, err := parseModels(body)
 		if err != nil {
-			return nil, err
+			return nil, atStep(StepModels, err)
 		}
-		m := &Models{
-			Version:    modelsVersion,
-			Subject:    rec.Subject,
-			ClientID:   rec.ClientID,
-			ModelsEtag: etagOf(hdr),
-			FetchedAt:  now().UTC(),
-			Models:     list,
-		}
-		b, err := json.MarshalIndent(m, "", "  ")
-		if err != nil {
-			return nil, err
-		}
-		if err := os.MkdirAll(src.dir, 0o700); err != nil {
-			return nil, err
-		}
-		if err := atomicfile.Write(ModelsFile(src.dir), append(b, '\n'), 0o600); err != nil {
-			return nil, err
-		}
-		return m, nil
+		return &fetchedModels{list: list, etag: etagOf(hdr), rec: rec}, nil
 	}
 }
+
+// storeModels is the write half of FetchModels: the empty-reply rule, then
+// the file. The caller holds dir's model-list lock.
+func storeModels(dir string, opts FetchOptions, f *fetchedModels) (*Models, error) {
+	if len(f.list) == 0 {
+		if old, err := ReadModels(dir); err == nil && len(old.Models) > 0 &&
+			old.Subject == f.rec.Subject && old.ClientID == f.rec.ClientID {
+			return nil, fmt.Errorf("%w (client_version %s)", ErrModelsEmpty, opts.ClientVersion)
+		}
+	}
+	if inModelsLock != nil {
+		inModelsLock()
+	}
+	m := &Models{
+		Version:       modelsVersion,
+		Subject:       f.rec.Subject,
+		ClientID:      f.rec.ClientID,
+		ModelsEtag:    f.etag,
+		ClientVersion: opts.ClientVersion,
+		FetchedAt:     now().UTC(),
+		Models:        f.list,
+	}
+	b, err := json.MarshalIndent(m, "", "  ")
+	if err != nil {
+		return nil, err
+	}
+	if err := atomicfile.Write(ModelsFile(dir), append(b, '\n'), 0o600); err != nil {
+		return nil, atStep(StepModels, err)
+	}
+	return m, nil
+}
+
+// afterModelsReply and inModelsLock are test seams: the first runs between
+// FetchModels' reply and its lock, the second inside the critical section
+// between the cache check and the write.
+var (
+	afterModelsReply func()
+	inModelsLock     func()
+)
 
 // errOffAPI is a bearer request to anywhere but the API's origin.
 var errOffAPI = errors.New("chatgptauth: a request with the ChatGPT token may go only to the API's host")
@@ -141,7 +315,7 @@ func (e endpoints) apiGET(ctx context.Context, rawURL, token string) (int, http.
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Accept", "application/json")
-	return do(ctx, "models", req, maxModelsReply)
+	return do(ctx, StepModels, req, maxModelsReply)
 }
 
 // parseModels reads the list's {"models":[…]} (codex's catalog shape, not
@@ -153,7 +327,7 @@ func parseModels(body []byte) ([]Model, error) {
 		Models []json.RawMessage `json:"models"`
 	}
 	if err := json.Unmarshal(body, &doc); err != nil || doc.Models == nil {
-		return nil, errors.New("chatgptauth: models: the reply is not a model list")
+		return nil, badReply(StepModels, "the reply is not a model list")
 	}
 	var out []Model
 	for _, raw := range doc.Models {
@@ -169,6 +343,9 @@ func parseModels(body []byte) ([]Model, error) {
 			DefaultReasoningLevel     string `json:"default_reasoning_level"`
 			SupportsParallelToolCalls *bool  `json:"supports_parallel_tool_calls"`
 			Priority                  int    `json:"priority"`
+			// Decoded apart: a minimum that is not a string (a number, an
+			// object, null) costs the minimum, never the model (r1 #4).
+			MinimalClientVersion json.RawMessage `json:"minimal_client_version"`
 		}
 		if json.Unmarshal(raw, &m) != nil || m.Visibility != "list" || !identifier(m.Slug, 64) || m.ContextWindow < 0 {
 			continue
@@ -186,6 +363,10 @@ func parseModels(body []byte) ([]Model, error) {
 			ContextWindow:     m.ContextWindow,
 			Priority:          m.Priority,
 			ParallelToolCalls: m.SupportsParallelToolCalls,
+		}
+		var minVersion string
+		if json.Unmarshal(m.MinimalClientVersion, &minVersion) == nil && identifier(minVersion, 32) {
+			model.MinClientVersion = minVersion
 		}
 		for _, l := range m.SupportedReasoningLevels {
 			if identifier(l.Effort, 32) && !slices.Contains(model.Efforts, l.Effort) {
@@ -252,45 +433,52 @@ func ReadModels(dir string) (*Models, error) {
 // than maxAge, or another account's than chatgpt-client.json's — the
 // background refresh a session's open runs (plan 033 §3.10). The check is
 // made again under the list's own lock (chatgpt-models.json.lock), so
-// several hosts opening at once fetch it once. It answers whether it
-// fetched.
-func RefreshModels(ctx context.Context, src *TokenSource, maxAge time.Duration) (bool, error) {
-	if modelsCurrent(src.dir, maxAge) {
-		return false, nil
+// several hosts opening at once fetch it once. A list fetched with another
+// client_version than opts', or none, is not current (plan 034 Q3). It
+// answers whether it fetched. opts.Observe is told how a fetch it made went,
+// or why it could not decide; a list it found current is no event.
+func RefreshModels(ctx context.Context, src *TokenSource, maxAge time.Duration, opts FetchOptions) (bool, error) {
+	start := time.Now()
+	m, err := refreshModels(ctx, src, maxAge, opts)
+	if m != nil || err != nil {
+		opts.report(m, err, time.Since(start))
 	}
-	if err := os.MkdirAll(src.dir, 0o700); err != nil {
-		return false, err
+	return m != nil, err
+}
+
+// refreshModels is RefreshModels' work: the list it fetched, or nil when the
+// cache was current.
+func refreshModels(ctx context.Context, src *TokenSource, maxAge time.Duration, opts FetchOptions) (*Models, error) {
+	if opts.ClientVersion == "" {
+		return nil, ErrClientVersionRequired
 	}
-	path := ModelsFile(src.dir) + ".lock"
-	unlock, err := atomicfile.LockWithin(path, 0)
-	if errors.Is(err, atomicfile.ErrLockBusy) {
-		if onLockBusy != nil {
-			onLockBusy()
-		}
-		unlock, err = atomicfile.LockContext(ctx, path, lockWait)
+	if modelsCurrent(src.dir, maxAge, opts.ClientVersion) {
+		return nil, nil
 	}
+	unlock, err := lockModels(ctx, src.dir)
 	if err != nil {
-		return false, fmt.Errorf("chatgptauth: taking the model list's lock: %w", err)
+		return nil, err
 	}
 	defer unlock()
-	if modelsCurrent(src.dir, maxAge) {
-		return false, nil
+	if modelsCurrent(src.dir, maxAge, opts.ClientVersion) {
+		return nil, nil
 	}
-	if _, err := FetchModels(ctx, src); err != nil {
-		return false, err
+	f, err := fetchModelList(ctx, src, opts)
+	if err != nil {
+		return nil, err
 	}
-	return true, nil
+	return storeModels(src.dir, opts, f)
 }
 
 // modelsCurrent says dir's model list is the registered account's and was
-// fetched less than maxAge ago (and not in the future).
-func modelsCurrent(dir string, maxAge time.Duration) bool {
+// fetched less than maxAge ago (and not in the future) with clientVersion.
+func modelsCurrent(dir string, maxAge time.Duration, clientVersion string) bool {
 	m, err := ReadModels(dir)
 	if err != nil {
 		return false
 	}
 	c, err := ReadClient(dir)
-	if err != nil || c.ClientID == "" || m.ClientID != c.ClientID || m.Subject != c.Subject {
+	if err != nil || c.ClientID == "" || m.ClientID != c.ClientID || m.Subject != c.Subject || m.ClientVersion != clientVersion {
 		return false
 	}
 	age := now().Sub(m.FetchedAt)

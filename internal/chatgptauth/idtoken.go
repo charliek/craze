@@ -21,8 +21,9 @@ const clockSkew = 5 * time.Second
 // minRSABits is the smallest JWKS key an id_token is checked against.
 const minRSABits = 2048
 
-// errIDToken is any id_token that does not validate. Which check failed is
-// the error's text, never a claim's value.
+// errIDToken is any id_token that does not validate: every *idTokenError is
+// it to errors.Is. Which check failed is the error's text and its Check,
+// never a claim's value.
 var errIDToken = errors.New("chatgptauth: the sign-in's id_token is not valid")
 
 func base64URL(b []byte) string { return base64.RawURLEncoding.EncodeToString(b) }
@@ -41,21 +42,22 @@ func (e endpoints) fetchJWKS(ctx context.Context) (*jwks, error) {
 		return nil, err
 	}
 	if doc.JWKSURI == "" {
-		return nil, errors.New("chatgptauth: discovery: the OpenID configuration names no jwks_uri")
+		return nil, badReply(StepDiscovery, "the OpenID configuration names no jwks_uri")
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, doc.JWKSURI, nil)
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("Accept", "application/json")
-	status, _, body, err := do(ctx, "jwks", req, maxReply)
+	status, _, body, err := do(ctx, StepJWKS, req, maxReply)
 	if err != nil {
 		return nil, err
 	}
 	if status != http.StatusOK {
 		return nil, &OAuthError{Step: "jwks", Status: status}
 	}
-	return parseJWKS(body)
+	keys, err := parseJWKS(body)
+	return keys, atStep(StepJWKS, err)
 }
 
 func parseJWKS(body []byte) (*jwks, error) {
@@ -70,7 +72,7 @@ func parseJWKS(body []byte) (*jwks, error) {
 		} `json:"keys"`
 	}
 	if err := json.Unmarshal(body, &doc); err != nil {
-		return nil, errors.New("chatgptauth: jwks: the key set is not JSON")
+		return nil, badReply(StepJWKS, "the key set is not JSON")
 	}
 	out := &jwks{keys: map[string]*rsa.PublicKey{}}
 	for _, k := range doc.Keys {
@@ -90,7 +92,7 @@ func parseJWKS(body []byte) (*jwks, error) {
 		out.keys[k.Kid] = &rsa.PublicKey{N: n, E: e}
 	}
 	if len(out.keys) == 0 {
-		return nil, errors.New("chatgptauth: jwks: the key set has no RSA signing key")
+		return nil, badReply(StepJWKS, "the key set has no RSA signing key")
 	}
 	return out, nil
 }
@@ -128,15 +130,16 @@ type idWant struct {
 // verifyIDToken validates raw (plan 033 §3.10, the sign-in docs' step 4): an
 // RS256 signature by one of keys, then iss, aud (= the issued client id, with
 // azp when there are several audiences), exp and nbf within clockSkew of
-// now, the nonce, and a subject — the saved one on a re-login. The error says
-// which check failed; no claim's value is ever in it.
+// now, the nonce, and a subject — the saved one on a re-login. The error, an
+// *idTokenError, says which check failed, in words and as a Check (plan 034
+// §3.3); no claim's value is ever in it.
 func verifyIDToken(raw string, keys *jwks, want idWant, now time.Time) (idClaims, error) {
-	fail := func(what string) (idClaims, error) {
-		return idClaims{}, errors.New(errIDToken.Error() + ": " + what)
+	fail := func(check Check, what string) (idClaims, error) {
+		return idClaims{}, &idTokenError{check: check, what: what}
 	}
 	parts := strings.Split(raw, ".")
 	if len(parts) != 3 {
-		return fail("not a signed JWT")
+		return fail(CheckFormat, "not a signed JWT")
 	}
 	var hdr struct {
 		Alg string `json:"alg"`
@@ -144,26 +147,26 @@ func verifyIDToken(raw string, keys *jwks, want idWant, now time.Time) (idClaims
 	}
 	hb, err := base64.RawURLEncoding.DecodeString(parts[0])
 	if err != nil || json.Unmarshal(hb, &hdr) != nil {
-		return fail("its header does not decode")
+		return fail(CheckHeader, "its header does not decode")
 	}
 	if hdr.Alg != "RS256" {
-		return fail("it is not signed with RS256")
+		return fail(CheckAlg, "it is not signed with RS256")
 	}
 	key := keys.key(hdr.Kid)
 	if key == nil {
-		return fail("no key in the issuer's key set signed it")
+		return fail(CheckKey, "no key in the issuer's key set signed it")
 	}
 	sig, err := base64.RawURLEncoding.DecodeString(parts[2])
 	if err != nil {
-		return fail("its signature does not decode")
+		return fail(CheckSignature, "its signature does not decode")
 	}
 	sum := sha256.Sum256([]byte(parts[0] + "." + parts[1]))
 	if rsa.VerifyPKCS1v15(key, crypto.SHA256, sum[:], sig) != nil {
-		return fail("its signature does not verify")
+		return fail(CheckSignature, "its signature does not verify")
 	}
 	pb, err := base64.RawURLEncoding.DecodeString(parts[1])
 	if err != nil {
-		return fail("its claims do not decode")
+		return fail(CheckClaims, "its claims do not decode")
 	}
 	var c struct {
 		Iss   string          `json:"iss"`
@@ -176,43 +179,43 @@ func verifyIDToken(raw string, keys *jwks, want idWant, now time.Time) (idClaims
 		Email string          `json:"email"`
 	}
 	if err := json.Unmarshal(pb, &c); err != nil {
-		return fail("its claims do not decode")
+		return fail(CheckClaims, "its claims do not decode")
 	}
 	if c.Iss != want.issuer {
-		return fail("another issuer issued it")
+		return fail(CheckIssuer, "another issuer issued it")
 	}
 	var auds []string
 	var one string
 	if json.Unmarshal(c.Aud, &one) == nil {
 		auds = []string{one}
 	} else if json.Unmarshal(c.Aud, &auds) != nil {
-		return fail("its audience does not decode")
+		return fail(CheckAudience, "its audience does not decode")
 	}
 	found := false
 	for _, a := range auds {
 		found = found || a == want.clientID
 	}
 	if !found || (len(auds) > 1 && c.Azp != want.clientID) {
-		return fail("it is not for craze's client id")
+		return fail(CheckAudience, "it is not for craze's client id")
 	}
 	exp, ok := unixTime(c.Exp)
 	if !ok {
-		return fail("it has no expiry")
+		return fail(CheckExpiry, "it has no expiry")
 	}
 	if !now.Before(exp.Add(clockSkew)) {
-		return fail("it has expired")
+		return fail(CheckExpiry, "it has expired")
 	}
 	if nbf, ok := unixTime(c.Nbf); ok && now.Add(clockSkew).Before(nbf) {
-		return fail("it is not valid yet")
+		return fail(CheckNotBefore, "it is not valid yet")
 	}
 	if want.nonce == "" || c.Nonce != want.nonce {
-		return fail("its nonce is not this sign-in's")
+		return fail(CheckNonce, "its nonce is not this sign-in's")
 	}
 	if c.Sub == "" {
-		return fail("it names no account")
+		return fail(CheckSubject, "it names no account")
 	}
 	if want.subject != "" && c.Sub != want.subject {
-		return fail("it is for another account than the one craze is registered with")
+		return fail(CheckSubject, "it is for another account than the one craze is registered with")
 	}
 	return idClaims{Subject: c.Sub, Email: c.Email}, nil
 }

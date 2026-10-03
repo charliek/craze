@@ -55,6 +55,10 @@ RESOURCE = "https://api.openai.com/v1"
 FULL_SCOPE = "openid profile email offline_access resource.invoke chatgpt.tokens.use.direct"
 IDENTITY_SCOPE = "openid profile email offline_access"
 DYNAMIC_CLIENT = "dynamic_agent_client"
+# The fake's error_description: text from the server, which craze never
+# repeats -- the sign-in log's scan looks for it (plan 034 A11), so it is a
+# value no record could hold by chance.
+ERROR_DESCRIPTION = "fixture-error-description-3b9e7c"
 
 AUTHORIZE_PATH = "/api/accounts/authorize"
 TOKEN_PATH = "/api/accounts/oauth/token"
@@ -157,28 +161,53 @@ def sign_jwt(key: RSAKey, kid: str, claims: dict) -> str:
 
 
 def default_models() -> list[dict]:
-    """The plan's list, in the server's shape: shown models in priority
-    order gpt-6-astra, gpt-5.6-sol, gpt-5.6-luna; one hidden, which craze
-    must not offer."""
+    """The plan's list as the live server answers a client at or above its
+    newest minimum (plan 034 §3.1): eight shown models in priority order
+    gpt-6.1-sol, gpt-6-astra, gpt-6-sol, gpt-6-luna, gpt-5.6-sol,
+    gpt-5.6-terra, gpt-5.6-luna, gpt-5.5, each with its
+    minimal_client_version, and two hidden, which craze must not offer. The
+    fake gates the reply on the client_version of the request (gated_models)."""
 
     def levels(*efforts: str) -> list[dict]:
         return [{"effort": e, "description": e} for e in efforts]
 
+    def shown(slug: str, name: str, priority: int, minimum: str, modalities: list[str], efforts: list[str],
+              default: str, **extra: object) -> dict:
+        return {"slug": slug, "display_name": name, "visibility": "list", "priority": priority,
+                "context_window": 272000, "minimal_client_version": minimum, "input_modalities": modalities,
+                "supported_reasoning_levels": levels(*efforts), "default_reasoning_level": default, **extra}
+
+    text, image = ["text"], ["text", "image"]
     return [
-        {"slug": "gpt-5.6-luna", "display_name": "GPT-5.6-Luna", "visibility": "list", "priority": 9,
-         "context_window": 272000, "input_modalities": ["text"], "supported_reasoning_levels": levels("low", "medium"),
-         "default_reasoning_level": "medium", "supports_parallel_tool_calls": False},
-        {"slug": "gpt-6-astra", "display_name": "GPT-6-Astra", "visibility": "list", "priority": 2,
-         "context_window": 272000, "input_modalities": ["text", "image"],
-         "supported_reasoning_levels": levels("low", "medium", "high", "xhigh", "max", "ultra"),
-         "default_reasoning_level": "medium", "supports_parallel_tool_calls": True,
-         "base_instructions": "a codex prompt craze does not keep"},
+        shown("gpt-5.6-luna", "GPT-5.6-Luna", 9, "0.144.0", text, ["low", "medium"], "medium",
+              supports_parallel_tool_calls=False),
+        shown("gpt-6-astra", "GPT-6-Astra", 2, "0.153.0", image, ["low", "medium", "high", "xhigh", "max", "ultra"],
+              "medium", supports_parallel_tool_calls=True, base_instructions="a codex prompt craze does not keep"),
         {"slug": "gpt-reserve", "display_name": "GPT-Reserve", "visibility": "hide", "priority": 1,
-         "context_window": 272000},
-        {"slug": "gpt-5.6-sol", "display_name": "GPT-5.6-Sol", "visibility": "list", "priority": 5,
-         "context_window": 272000, "input_modalities": ["text", "image"],
-         "supported_reasoning_levels": levels("low", "medium", "high"), "default_reasoning_level": "low"},
+         "context_window": 272000, "minimal_client_version": "0.144.0"},
+        shown("gpt-5.6-sol", "GPT-5.6-Sol", 5, "0.144.0", image, ["low", "medium", "high"], "low"),
+        shown("gpt-6.1-sol", "GPT-6.1-Sol", 1, "0.153.0", image, ["low", "medium", "high", "xhigh"], "medium",
+              supports_parallel_tool_calls=True),
+        shown("gpt-6-sol", "GPT-6-Sol", 3, "0.155.0", image, ["low", "medium", "high"], "medium"),
+        shown("gpt-6-luna", "GPT-6-Luna", 4, "0.155.0", text, ["low", "medium"], "medium"),
+        shown("gpt-5.6-terra", "GPT-5.6-Terra", 6, "0.144.0", text, ["low", "medium", "high"], "medium"),
+        shown("gpt-5.5", "GPT-5.5", 10, "0.124.0", text, ["low", "medium", "high"], "medium"),
+        {"slug": "codex-auto-review", "display_name": "Codex Auto Review", "visibility": "hide", "priority": 43,
+         "context_window": 272000, "minimal_client_version": "0.98.0"},
     ]
+
+
+def _version(v: str) -> tuple[int, ...]:
+    parts = [int(p) for p in v.split(".")]
+    while parts and parts[-1] == 0:
+        parts.pop()  # 0.160 == 0.160.0
+    return tuple(parts)
+
+
+def gated_models(models: list[dict], client_version: str) -> list[dict]:
+    """The reply for a client at client_version: the entries whose
+    minimal_client_version it meets (0.0.1 meets none of the live list's)."""
+    return [m for m in models if _version(client_version) >= _version(m.get("minimal_client_version", "0"))]
 
 
 @dataclass
@@ -214,8 +243,13 @@ class FakeIssuer:
     exchanges: list[Exchange] = field(default_factory=list)
     revokes: list[dict[str, str]] = field(default_factory=list)
     models_gets: int = 0
+    model_versions: list[str] = field(default_factory=list)  # each list request's client_version
+    models_without_version: int = 0  # list requests with no (or several) client_version: answered 400
     issued: list[str] = field(default_factory=list)
     stray: list[str] = field(default_factory=list)  # requests to paths the fake does not serve
+    codes: list[str] = field(default_factory=list)  # every authorization code issued
+    verifiers: list[str] = field(default_factory=list)  # every code_verifier an exchange sent
+    redirects: list[str] = field(default_factory=list)  # every address the browser was sent back to
 
     def __repr__(self) -> str:
         return f"FakeIssuer({self.url if self._server else 'not started'})"
@@ -283,7 +317,10 @@ class FakeIssuer:
             self.authorizations.append(q)
         redirect = q["redirect_uri"]
         if decline:
-            return redirect + "?" + urlencode({"error": "access_denied", "state": q["state"]})
+            back = redirect + "?" + urlencode({"error": "access_denied", "state": q["state"], "error_description": ERROR_DESCRIPTION})
+            with self._lock:
+                self.redirects.append(back)
+            return back
         registering = q["client_id"] == DYNAMIC_CLIENT
         client = self.issue_client if registering else q["client_id"]
         code = "fake-code-" + secrets.token_hex(8)
@@ -298,7 +335,11 @@ class FakeIssuer:
         out = {"code": code, "state": q["state"], "scope": self.scope}
         if registering:
             out["client_id"] = client
-        return redirect + "?" + urlencode(out)
+        back = redirect + "?" + urlencode(out)
+        with self._lock:
+            self.codes.append(code)
+            self.redirects.append(back)
+        return back
 
     # -- the leak scan ----------------------------------------------------
 
@@ -328,6 +369,20 @@ class FakeIssuer:
         with self._lock:
             needles = [v.encode() for v in self.issued]
         return sorted(p for p in root.rglob("*") if p.is_file() and any(n in p.read_bytes() for n in needles))
+
+    def secret_values(self) -> list[str]:
+        """Every value of the sign-ins this fake served that craze must never
+        log (plan 034 A11): the tokens it issued, the codes and the verifiers
+        it saw, each authorization's state, nonce, PKCE challenge, host id
+        and login_hint, the account's email and subject, the issued client
+        id, the error_description, and every address the browser was sent
+        back to. Short generic values are left out (they could be any text)."""
+        with self._lock:
+            values = [*self.issued, *self.codes, *self.verifiers, *self.redirects]
+            for q in self.authorizations:
+                values += [q.get(k, "") for k in ("state", "nonce", "code_challenge", "ext_agent_host_id", "login_hint")]
+        values += [self.email, self.subject, self.issue_client, ERROR_DESCRIPTION]
+        return [v for v in dict.fromkeys(values) if len(v) >= 8]
 
     def revoked_issued_refresh_tokens(self) -> int:
         """How many refresh tokens this fake issued were revoked through its
@@ -364,13 +419,24 @@ class FakeIssuer:
             }]})
         elif path == MODELS_PATH:
             token = h.headers.get("Authorization", "").removeprefix("Bearer ")
+            # keep_blank_values: `client_version=&client_version=0.160.0` is two
+            # values, one blank, and a 400 (plan 034 r1 #8).
+            versions = parse_qs(urlsplit(h.path).query, keep_blank_values=True).get("client_version", [])
             with self._lock:
                 self.models_gets += 1
                 live = token in self._access
+                if len(versions) != 1 or not versions[0]:
+                    self.models_without_version += 1
+                else:
+                    self.model_versions.append(versions[0])
+            if len(versions) != 1 or not versions[0]:
+                self._json(h, 400, {"error": {"code": "client_version_required"}})
+                return
             if not live:
                 self._json(h, 401, {"error": {"code": "invalid_api_key"}})
                 return
-            self._json(h, 200, {"models": self.models}, {"X-Models-Etag": "fake-models-etag-1"})
+            self._json(h, 200, {"models": gated_models(self.models, versions[0])},
+                       {"X-Models-Etag": "fake-models-etag-1"})
         else:
             with self._lock:
                 self.stray.append(f"GET {path}")
@@ -433,6 +499,7 @@ class FakeIssuer:
             with self._lock:
                 pending = self._pending.pop(form.get("code", ""), None)
                 verifier = form.get("code_verifier", "")
+                self.verifiers.append(verifier)
                 pkce_ok = (
                     pending is not None
                     and not self.wrong_challenge
@@ -446,7 +513,7 @@ class FakeIssuer:
                 )
                 self.exchanges.append(Exchange(form.get("client_id", ""), form.get("redirect_uri", ""), pkce_ok, granted))
                 if not granted:
-                    self._json(h, 400, {"error": "invalid_grant", "error_description": "refused"})
+                    self._json(h, 400, {"error": "invalid_grant", "error_description": ERROR_DESCRIPTION})
                     return
                 access, refresh = self._mint(pending["client"])
                 id_token = self._id_token(pending["client"], pending["nonce"])

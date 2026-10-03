@@ -60,7 +60,7 @@ func TestFirstRegistration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer a.Close()
+	defer a.Close(CloseDone)
 	q := authQuery(t, a)
 	host, err := os.ReadFile(HostIDFile(dir))
 	if err != nil {
@@ -130,7 +130,7 @@ func TestFirstRegistration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	b.Close()
+	b.Close(CloseDone)
 	if authQuery(t, b).Get("ext_agent_host_id") != q.Get("ext_agent_host_id") {
 		t.Fatal("a second attempt sent another host id")
 	}
@@ -239,7 +239,7 @@ func TestRelogin(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	a.Close()
+	a.Close(CloseDone)
 	aq := authQuery(t, a)
 	if aq.Get("client_id") != testClient || aq.Get("login_hint") != testEmail || aq.Get("redirect_uri") != "http://127.0.0.1:1455/auth/callback" {
 		t.Fatalf("re-login: client_id %q, login_hint %q, redirect %q", aq.Get("client_id"), aq.Get("login_hint"), aq.Get("redirect_uri"))
@@ -263,7 +263,7 @@ func TestRelogin(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer b.Close()
+	defer b.Close(CloseDone)
 	if !b.Listening() || len(*taken) != 2 || (*taken)[1] != 0 {
 		t.Fatalf("a re-login with 1455 taken tried %v, listening %v; want 1455 then any port", *taken, b.Listening())
 	}
@@ -290,7 +290,7 @@ func TestRelogin(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	off.Close()
+	off.Close(CloseDone)
 	if authQuery(t, off).Get("prompt") != "consent" {
 		t.Fatal("plan usage off: the re-login did not ask for consent again")
 	}
@@ -458,7 +458,7 @@ func TestSignInWithoutPlanScope(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	a.Close()
+	a.Close(CloseDone)
 	if authQuery(t, a).Get("prompt") != "consent" {
 		t.Fatal("the next attempt did not ask for consent")
 	}
@@ -482,7 +482,7 @@ func TestCorruptRegistrationRegistersAnew(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	a.Close()
+	a.Close(CloseDone)
 	if authQuery(t, a).Get("client_id") != testClient {
 		t.Fatal("a valid registration did not re-log in")
 	}
@@ -540,7 +540,7 @@ func TestInvalidClientAtExchange(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	next.Close()
+	next.Close(CloseDone)
 	if q := authQuery(t, next); q.Get("client_id") != dynamicClient || q.Get("agent_name_hint") != "craze" {
 		t.Fatal("after invalid_client the next attempt does not register anew")
 	}
@@ -654,7 +654,7 @@ func TestPastedRedirect(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer a.Close()
+	defer a.Close(CloseDone)
 	q := f.authorize(t, a.URL())
 	wrongState := url.Values{}
 	for k, v := range q {
@@ -699,7 +699,7 @@ func TestListenerChecksPathAndState(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer a.Close()
+	defer a.Close(CloseDone)
 	q := f.authorize(t, a.URL())
 	bad := url.Values{"code": {q.Get("code")}, "state": {"not-ours"}}
 	check := func(resp *http.Response, status int) {
@@ -830,7 +830,7 @@ func TestListenerClosesOnCancel(t *testing.T) {
 			if how == "cancel" {
 				cancel()
 			} else {
-				a.Close()
+				a.Close(CloseDone)
 				want = ErrAttemptOver
 			}
 			select {
@@ -874,7 +874,7 @@ func TestRedirectsRefused(t *testing.T) {
 	f.redirectPath = map[string]bool{"/v1/models": true}
 	signIn(t, f, dir)
 	src := newSource(dir)
-	if _, err := FetchModels(context.Background(), src); !errors.Is(err, errRedirect) {
+	if _, err := FetchModels(context.Background(), src, FetchOptions{ClientVersion: testPin}); !errors.Is(err, errRedirect) {
 		t.Fatalf("FetchModels = %v, want the redirect refused", err)
 	}
 	f.mu.Lock()
@@ -884,7 +884,7 @@ func TestRedirectsRefused(t *testing.T) {
 	if hits != 0 {
 		t.Fatalf("a redirect target was asked %d times", hits)
 	}
-	if _, err := FetchModels(context.Background(), src); err != nil {
+	if _, err := FetchModels(context.Background(), src, FetchOptions{ClientVersion: testPin}); err != nil {
 		t.Fatalf("FetchModels without the redirect = %v", err)
 	}
 }
@@ -908,7 +908,7 @@ func TestNonAPIHostRefused(t *testing.T) {
 	if _, _, _, err := ends.apiGET(context.Background(), "https://api.openai.com.evil.test/v1/models", "fake-bearer-value"); !errors.Is(err, errOffAPI) {
 		t.Fatalf("a bearer request to a look-alike host = %v, want errOffAPI", err)
 	}
-	if status, _, _, err := ends.apiGET(context.Background(), f.URL()+"/v1/models", "fake-bearer-value"); err != nil || status != 401 {
+	if status, _, _, err := ends.apiGET(context.Background(), f.URL()+"/v1/models?client_version="+testPin, "fake-bearer-value"); err != nil || status != 401 {
 		t.Fatalf("the API's own URL: %d, %v; want the fake's 401", status, err)
 	}
 	if _, _, _, _, m := other.countsAll(); m != 0 {
@@ -992,6 +992,93 @@ func TestOverridesAreLoopbackOnly(t *testing.T) {
 	}
 }
 
+// TestLinkableAuthorizeURL (plan 034 §3.2, Q9): what a UI may make a terminal
+// hyperlink of — the authorization address Begin builds on production's
+// endpoints, a first registration's and a re-login's (whose login_hint and
+// prompt make it the longest), as Attempt.URL answers it — and what it may
+// not: a control character, DEL, a blank or a byte outside ASCII anywhere in
+// it, one byte past MaxLinkableURL, http, another host — a look-alike, one
+// behind a user, another port — another path, a fragment, and the address a
+// test's fake issuer builds (loopback http, never linkable). The real
+// addresses are the controls, and so is the longest address that may be one.
+func TestLinkableAuthorizeURL(t *testing.T) {
+	setEnv(t, map[string]string{})
+	// A first registration's address and a re-login's, built by Begin on
+	// production's endpoints: paste-only, so nothing listens and nothing is
+	// sent anywhere.
+	first, err := Begin(context.Background(), nativeDir(t), BeginOptions{PasteOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer first.Close(CloseDone)
+	dir := nativeDir(t)
+	if err := ensureAuthDir(dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeClient(dir, Client{ClientID: testClient, Subject: testSubject, Email: testEmail}); err != nil {
+		t.Fatal(err)
+	}
+	relogin, err := Begin(context.Background(), dir, BeginOptions{PasteOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer relogin.Close(CloseDone)
+	if !strings.Contains(relogin.URL(), "login_hint=") || !strings.Contains(relogin.URL(), "prompt=consent") {
+		t.Fatal("the re-login's address is not the long one")
+	}
+	real := first.URL()
+	const base = "https://auth.openai.com/api/accounts/authorize"
+	longest := base + "?a=" + strings.Repeat("b", MaxLinkableURL-len(base)-len("?a="))
+	for _, tc := range []struct {
+		name string
+		raw  string
+		ok   bool
+	}{
+		{"a first registration's address", real, true},
+		{"a re-login's address", relogin.URL(), true},
+		{"the endpoint with no query", base, true},
+		{"the longest that may be one", longest, true},
+		{"one byte longer", longest + "c", false},
+		{"empty", "", false},
+		{"a control character", real + "\x07", false},
+		{"an escape", strings.Replace(real, "state=", "\x1b]8;;x\x07state=", 1), false},
+		{"a newline", real + "\n", false},
+		{"DEL", real + "\x7f", false},
+		{"a blank", strings.Replace(real, "state=", "state= ", 1), false},
+		{"a tab", real + "\t", false},
+		{"non-ASCII", real + "é", false},
+		{"a C1 byte", real + "\x9c", false},
+		{"http", "http" + strings.TrimPrefix(real, "https"), false},
+		{"another host", strings.Replace(real, "auth.openai.com", "auth.openai.com.evil.test", 1), false},
+		{"another host's look-alike", strings.Replace(real, "auth.openai.com", "auth-openai.com", 1), false},
+		{"a user", strings.Replace(real, "https://", "https://evil.test@", 1), false},
+		{"the host as a user", strings.Replace(real, "auth.openai.com/", "auth.openai.com@evil.test/", 1), false},
+		{"another port", strings.Replace(real, "auth.openai.com/", "auth.openai.com:8443/", 1), false},
+		{"another path", strings.Replace(real, "/authorize?", "/authorize/x?", 1), false},
+		{"a path after a slash", strings.Replace(real, "/authorize?", "/authorize/?", 1), false},
+		{"a fragment", real + "#x", false},
+		{"upper-case host", strings.Replace(real, "auth.openai.com", "AUTH.openai.com", 1), false},
+	} {
+		if got := LinkableAuthorizeURL(tc.raw); got != tc.ok {
+			t.Errorf("%s: LinkableAuthorizeURL = %v, want %v", tc.name, got, tc.ok)
+		}
+	}
+
+	// A sign-in against a test's fake issuer: its address is loopback http,
+	// never a link.
+	f := newFake(t)
+	useFake(t, f)
+	useListener(t, false)
+	a, err := Begin(context.Background(), nativeDir(t), BeginOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close(CloseDone)
+	if LinkableAuthorizeURL(a.URL()) {
+		t.Fatal("a fake issuer's authorization address is linkable")
+	}
+}
+
 // TestHostIDIsKept: a host-id file holding something else is an error, never
 // replaced; the control is the made one, read back unchanged.
 func TestHostIDIsKept(t *testing.T) {
@@ -1011,5 +1098,54 @@ func TestHostIDIsKept(t *testing.T) {
 	}
 	if b, _ := os.ReadFile(HostIDFile(dir)); string(b) != "someone@example.test\n" {
 		t.Fatal("a bad host-id file was replaced")
+	}
+}
+
+// TestLoginHintIsBounded (plan 034 review r4 #5a): a re-login sends the saved
+// email as login_hint only when it can be one — at most 254 bytes (RFC 5321's
+// longest path), on one line with no control character — so an oversized or
+// multi-line email in a registration file craze does not validate cannot make
+// an address too long to copy whole; the re-login goes on without the hint.
+// The controls are the account's email and one of exactly 254 bytes, sent.
+func TestLoginHintIsBounded(t *testing.T) {
+	setEnv(t, map[string]string{})
+	at254 := strings.Repeat("a", 254-len("@example.com")) + "@example.com"
+	for _, tc := range []struct {
+		name, email string
+		sent        bool
+	}{
+		{"the account's email", testEmail, true},
+		{"254 bytes", at254, true},
+		{"255 bytes", "a" + at254, false},
+		{"22,000 bytes", strings.Repeat("+", 22000) + "@example.com", false},
+		{"two lines", "you@example.com\nother@example.com", false},
+		{"a carriage return", "you@example.com\r", false},
+		{"a tab", "you@exam\tple.com", false},
+		{"DEL", "you@example.com\x7f", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := nativeDir(t)
+			if err := ensureAuthDir(dir); err != nil {
+				t.Fatal(err)
+			}
+			if err := writeClient(dir, Client{ClientID: testClient, Subject: testSubject, Email: tc.email, PlanUsage: true}); err != nil {
+				t.Fatal(err)
+			}
+			a, err := Begin(context.Background(), dir, BeginOptions{PasteOnly: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer a.Close(CloseDone)
+			q := authQuery(t, a)
+			if q.Get("client_id") != testClient {
+				t.Fatal("not a re-login")
+			}
+			if got := q.Has("login_hint"); got != tc.sent || (got && q.Get("login_hint") != tc.email) {
+				t.Fatalf("login_hint sent %v (%d bytes); want sent %v", got, len(q.Get("login_hint")), tc.sent)
+			}
+			if !tc.sent && len(a.URL()) > 2048 {
+				t.Fatalf("the address is %d bytes without the hint", len(a.URL()))
+			}
+		})
 	}
 }

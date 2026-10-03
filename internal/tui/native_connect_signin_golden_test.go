@@ -46,19 +46,27 @@ func runSignInFrame(t *testing.T, planOff bool, cols, rows int, keys string) str
 // on the plan's row, the first with nothing funding it.
 const signInOpenKeys = "<wait:idle>/connect<enter><wait:text:Gamma><enter><wait:text:Open this address>"
 
-// signInEnd is the address's last row at a 52-cell box, as the box draws it
-// (its border before it): the URL is shown to its end. The border keeps it
-// from matching the same characters elsewhere in the address.
-var signInEnd = "│" + signInURL[len(signInURL)-len(signInURL)%52:] + " "
+// signInEndAt is the address's last row in the box on a terminal cols wide,
+// as the box draws it (its border before it): the URL is shown to its end.
+// The border keeps it from matching the same characters elsewhere in the
+// address.
+func signInEndAt(cols int) string {
+	return "│" + signInURL[len(signInURL)-len(signInURL)%signInInner(cols):] + " "
+}
 
-// TestFrameGoldenNativeConnectSignIn is the step as it opens: the title, the
-// address whole at 100x30 — a listener waits for the browser, and the hint
-// says what to paste from another machine — and, at 80x24, an attempt with no
-// listener, whose hint names the address the browser lands on, the address
-// cut to fit with "…" and Ctrl+Y in the footer to copy it whole. Every run's
-// attempt is still open when the frame is taken — its listener up, its wait
-// waiting — which is what TestFrameGoldenNativeConnectSignInCancel's Esc
-// changes (the control for its checks).
+// signInEnd is the address's last row on a terminal 100 columns wide.
+var signInEnd = signInEndAt(100)
+
+// TestFrameGoldenNativeConnectSignIn is the step as it opens, in a box as
+// wide as the terminal leaves it up to signInDialogWidth (plan 034 Q11): the
+// title and the address whole, at 100x30 a listener waiting for the browser —
+// the hint says what to paste from another machine — and at 80x24 an attempt
+// with no listener, whose hint says the browser's page will not load and
+// names the address it lands on (Q12), with a click or Ctrl+Y in the footer
+// to copy it whole. Every run's attempt is still open when the frame is taken
+// — its listener up, its wait waiting — which is what
+// TestFrameGoldenNativeConnectSignInCancel's Esc changes (the control for its
+// checks). A cut address's "…" is TestSignInLinksAtEveryBudget's.
 func TestFrameGoldenNativeConnectSignIn(t *testing.T) {
 	for _, tc := range []struct {
 		cols, rows int
@@ -66,11 +74,11 @@ func TestFrameGoldenNativeConnectSignIn(t *testing.T) {
 		want, not  []string
 	}{
 		{100, 30, true,
-			[]string{connectSignInTitle, connectSignInIntro, signInURL[:52], signInEnd, "Waiting for the browser.", connectSignInWaitHint},
-			[]string{"…", connectKeyTitle, "•"}},
+			[]string{connectSignInTitle, connectSignInIntro, signInURL[:signInInner(100)], signInEnd, "Waiting for the browser.", connectSignInWaitHint},
+			[]string{"…", connectKeyTitle, "•", "SSH", "ssh -L"}},
 		{80, 24, false,
-			[]string{connectSignInTitle, signInURL[:52], "After you approve, paste the address the browser", signInRedirect, "…", connectSignInWaitHint},
-			[]string{signInEnd, "Waiting for the browser.", "•"}},
+			[]string{connectSignInTitle, signInURL[:signInInner(80)], signInEndAt(80), "The browser's page will not load after you approve", signInRedirect, connectSignInWaitHint},
+			[]string{"…", "Waiting for the browser.", "•", "SSH", "ssh -L"}},
 	} {
 		t.Run(fmt.Sprintf("%dx%d", tc.cols, tc.rows), func(t *testing.T) {
 			s := standInSignIn(t, func() *fakeSignIn { return newFakeSignIn(tc.listening, chatgptauth.Result{}) })

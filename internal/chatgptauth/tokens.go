@@ -80,7 +80,7 @@ func hasScope(scopes []string, s string) bool {
 // the request was sent (the access token's lifetime counts from then, so its
 // expiry is never later than the server's). A refusal is an *OAuthError
 // carrying the reply's error code; the body itself is never kept.
-func (e endpoints) postToken(ctx context.Context, step string, form url.Values) (*tokenReply, time.Time, error) {
+func (e endpoints) postToken(ctx context.Context, step Step, form url.Values) (*tokenReply, time.Time, error) {
 	sent := now()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, e.token(), strings.NewReader(form.Encode()))
 	if err != nil {
@@ -93,11 +93,11 @@ func (e endpoints) postToken(ctx context.Context, step string, form url.Values) 
 		return nil, sent, err
 	}
 	if status != http.StatusOK {
-		return nil, sent, oauthError(step, status, body)
+		return nil, sent, oauthError(string(step), status, body)
 	}
 	var r tokenReply
 	if err := json.Unmarshal(body, &r); err != nil {
-		return nil, sent, errors.New("chatgptauth: " + step + ": the reply is not a token response")
+		return nil, sent, badReply(step, "the reply is not a token response")
 	}
 	return &r, sent, nil
 }

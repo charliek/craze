@@ -1,10 +1,11 @@
 package cli
 
 import (
+	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
 
@@ -19,163 +20,6 @@ func readLog(t *testing.T, p string) string {
 		t.Fatal(err)
 	}
 	return string(b)
-}
-
-// TestHostLogRotatesOnceAtTheCap is §3.3's cap: a write that would take the
-// log past it first moves the log to <log>.1 — replacing the rotation before —
-// and starts a new one, 0600; a write larger than the cap on its own lands
-// whole in a fresh file; a log already there is appended to, its size counted.
-func TestHostLogRotatesOnceAtTheCap(t *testing.T) {
-	env, _ := serveHome(t)
-	dir := filepath.Join(t.TempDir(), "logs")
-	path := filepath.Join(dir, "h.log")
-	l, err := openHostLog(env, path, 10)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = l.Close() }()
-	if di, err := os.Stat(dir); err != nil || di.Mode().Perm() != 0o700 {
-		t.Fatalf("a missing log directory is made 0700: %v, %v", di.Mode(), err)
-	}
-	write := func(s string) {
-		t.Helper()
-		if n, err := l.Write([]byte(s)); n != len(s) || err != nil {
-			t.Fatalf("write %q: %d, %v", s, n, err)
-		}
-	}
-	want := func(cur, rotated string) {
-		t.Helper()
-		if got := readLog(t, path); got != cur {
-			t.Fatalf("the log holds %q, want %q", got, cur)
-		}
-		if got := readLog(t, path+".1"); got != rotated {
-			t.Fatalf("the rotation holds %q, want %q", got, rotated)
-		}
-	}
-	write("aaaa\n")
-	write("bbbb\n")
-	want("aaaa\nbbbb\n", "")
-	write("cccc\n")
-	want("cccc\n", "aaaa\nbbbb\n")
-	write("dddddddd\n")
-	want("dddddddd\n", "cccc\n")
-	write(strings.Repeat("e", 25))
-	want(strings.Repeat("e", 25), "dddddddd\n")
-	if fi, err := os.Stat(path); err != nil || fi.Mode().Perm() != 0o600 {
-		t.Fatalf("a rotated log is %v, %v; want 0600", fi.Mode(), err)
-	}
-	if err := l.Close(); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := l.Write([]byte("x")); err == nil {
-		t.Fatal("a closed log took a write")
-	}
-
-	again, err := openHostLog(env, path, 29)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = again.Close() }()
-	if _, err := again.Write([]byte("ffff\n")); err != nil {
-		t.Fatal(err)
-	}
-	// 25 bytes were there already, counted: five more pass a cap of 29.
-	want("ffff\n", strings.Repeat("e", 25))
-}
-
-// TestHostLogRefusesWhatIsNotAFile: a symlink at the log's name is refused,
-// never written through, and so is a FIFO, which would hold the host on its
-// first line.
-func TestHostLogRefusesWhatIsNotAFile(t *testing.T) {
-	env, _ := serveHome(t)
-	dir := t.TempDir()
-	target := filepath.Join(dir, "target")
-	if err := os.WriteFile(target, []byte("keep"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	link := filepath.Join(dir, "link.log")
-	if err := os.Symlink(target, link); err != nil {
-		t.Fatal(err)
-	}
-	if l, err := openHostLog(env, link, hostLogMax); err == nil {
-		_ = l.Close()
-		t.Fatal("a symlinked log was opened")
-	}
-	if b, _ := os.ReadFile(target); string(b) != "keep" {
-		t.Fatalf("the link's target was written: %q", b)
-	}
-	fifo := filepath.Join(dir, "fifo.log")
-	if err := syscall.Mkfifo(fifo, 0o600); err != nil {
-		t.Skipf("mkfifo: %v", err)
-	}
-	if l, err := openHostLog(env, fifo, hostLogMax); err == nil {
-		_ = l.Close()
-		t.Fatal("a FIFO was opened as a log")
-	}
-}
-
-// TestHostLogFinishesARotationWhoseOpenFailed (astra r3-c2 5): a rotation
-// whose rename succeeded and whose new log could not be opened goes on
-// writing to the renamed file, and finishes — the open retried before each
-// write, never the rename, whose source is gone — as soon as the open works
-// again: the new log takes the next write, the rotation keeps what was written
-// meanwhile, and rotating at the cap resumes as before.
-func TestHostLogFinishesARotationWhoseOpenFailed(t *testing.T) {
-	env, _ := serveHome(t)
-	path := filepath.Join(t.TempDir(), "h.log")
-	l, err := openHostLog(env, path, 10)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = l.Close() }()
-	write := func(s string) {
-		t.Helper()
-		if n, err := l.Write([]byte(s)); n != len(s) || err != nil {
-			t.Fatalf("write %q: %d, %v", s, n, err)
-		}
-	}
-	want := func(cur, rotated string) {
-		t.Helper()
-		if got := readLog(t, path); got != cur {
-			t.Fatalf("the log holds %q, want %q", got, cur)
-		}
-		if got := readLog(t, path+".1"); got != rotated {
-			t.Fatalf("the rotation holds %q, want %q", got, rotated)
-		}
-	}
-	write("aaaa\n")
-	write("bbbb\n")
-	// The open fails exactly between the rename and the open: the rename is
-	// the real one, and so is every open after the failure clears.
-	failing := true
-	opens := 0
-	l.open = func(p string, flag int) (*os.File, error) {
-		opens++
-		if failing {
-			return nil, syscall.EMFILE
-		}
-		return openLogFile(p, flag)
-	}
-	write("cccc\n")
-	if _, err := os.Lstat(path); !os.IsNotExist(err) {
-		t.Fatalf("the log was not renamed away: %v", err)
-	}
-	want("", "aaaa\nbbbb\ncccc\n")
-	write("dddd\n")
-	want("", "aaaa\nbbbb\ncccc\ndddd\n")
-	if opens != 2 {
-		t.Fatalf("the open was tried %d times, want once per write", opens)
-	}
-	failing = false
-	write("eeee\n")
-	want("eeee\n", "aaaa\nbbbb\ncccc\ndddd\n")
-	write("ffff\n")
-	want("eeee\nffff\n", "aaaa\nbbbb\ncccc\ndddd\n")
-	write("gggg\n")
-	want("gggg\n", "eeee\nffff\n")
-	if opens != 4 {
-		t.Fatalf("%d opens, want the retry and one rotation's", opens)
-	}
 }
 
 // TestHostLogIsOpenedFresh (astra r3-c2 3): a log reused from a host gone a
@@ -214,4 +58,94 @@ func TestHostLogIsOpenedFresh(t *testing.T) {
 	if got := readLog(t, path); got != "old\nnew\n" {
 		t.Fatalf("the log holds %q: a sweep took it from under its host", got)
 	}
+}
+
+// TestHostLogMakesItsDirectory: a missing log directory is made 0700, and a
+// write past the cap rotates through the wrapper as through caplog.
+func TestHostLogMakesItsDirectory(t *testing.T) {
+	env, _ := serveHome(t)
+	dir := filepath.Join(t.TempDir(), "logs")
+	path := filepath.Join(dir, "h.log")
+	l, err := openHostLog(env, path, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = l.Close() }()
+	if di, err := os.Stat(dir); err != nil || di.Mode().Perm() != 0o700 {
+		t.Fatalf("a missing log directory is made 0700: %v, %v", di.Mode(), err)
+	}
+	for _, s := range []string{"aaaa\n", "bbbb\n", "cccc\n"} {
+		if _, err := l.Write([]byte(s)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if readLog(t, path) != "cccc\n" || readLog(t, path+".1") != "aaaa\nbbbb\n" {
+		t.Fatalf("the wrapper did not rotate at the cap: %q, %q", readLog(t, path), readLog(t, path+".1"))
+	}
+}
+
+// hostLogCrashEnv names the re-exec that TestHostLogCrashOutputFollowsRotations
+// runs: its value is the directory the child works in.
+const hostLogCrashEnv = "CRAZE_HOSTLOG_CRASH_CHILD"
+
+// hostLogCrashMarker is the text the child panics with.
+const hostLogCrashMarker = "hostlog-crash-marker-5c1d"
+
+// TestHostLogCrashOutputFollowsRotations (plan 034 §3.3): the host log keeps
+// the runtime's crash output pointed at its current file, through the opener's
+// hook, across a rotation — a panic after a rotation is in the new log, which
+// is what a detached host's /dev/null stderr depends on — and Close gives it
+// back to stderr, so a panic after Close is in no log.
+func TestHostLogCrashOutputFollowsRotations(t *testing.T) {
+	for _, closed := range []bool{false, true} {
+		dir := t.TempDir()
+		cmd := exec.Command(os.Args[0], "-test.run=^TestHostLogCrashChild$")
+		cmd.Env = append(os.Environ(), hostLogCrashEnv+"="+dir)
+		if closed {
+			cmd.Env = append(cmd.Env, "CRAZE_HOSTLOG_CRASH_CLOSE=1")
+		}
+		out, err := cmd.CombinedOutput()
+		var ee *exec.ExitError
+		if !errors.As(err, &ee) {
+			t.Fatalf("closed=%v: the child was meant to die of its panic: %v\n%s", closed, err, out)
+		}
+		if !strings.Contains(string(out), hostLogCrashMarker) {
+			t.Fatalf("closed=%v: the child did not panic with the marker:\n%s", closed, out)
+		}
+		cur, rotated := readLog(t, filepath.Join(dir, "h.log")), readLog(t, filepath.Join(dir, "h.log.1"))
+		if rotated == "" {
+			t.Fatalf("closed=%v: the child never rotated", closed)
+		}
+		if got := strings.Contains(cur, hostLogCrashMarker); got == closed {
+			t.Fatalf("closed=%v: the panic is in the current log: %v (%q)", closed, got, cur)
+		}
+		if strings.Contains(rotated, hostLogCrashMarker) {
+			t.Fatalf("closed=%v: the panic went to the rotated-away log", closed)
+		}
+	}
+}
+
+// TestHostLogCrashChild is the child of
+// TestHostLogCrashOutputFollowsRotations; run directly it does nothing.
+func TestHostLogCrashChild(t *testing.T) {
+	dir := os.Getenv(hostLogCrashEnv)
+	if dir == "" {
+		t.Skip("only runs as TestHostLogCrashOutputFollowsRotations's child")
+	}
+	env, _ := serveHome(t)
+	l, err := openHostLog(env, filepath.Join(dir, "h.log"), 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range []string{"aaaa\n", "bbbb\n", "cccc\n"} {
+		if _, err := l.Write([]byte(s)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if os.Getenv("CRAZE_HOSTLOG_CRASH_CLOSE") != "" {
+		if err := l.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	panic(hostLogCrashMarker)
 }

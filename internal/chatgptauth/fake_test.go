@@ -18,8 +18,10 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -62,6 +64,11 @@ const (
 	testSubject = "user-fake-subject-0001"
 	testEmail   = "person@example.test"
 	testClient  = "oaiapp_fakeclient000000000001"
+	// testErrorDescription is the fake's error_description and error message:
+	// text from the server, which nothing may repeat — the sign-in log's scan
+	// looks for it (plan 034 A11), so it is a value no record could hold by
+	// chance.
+	testErrorDescription = "fake-error-description-5e1d0c"
 )
 
 // pendingCode is an authorization code the fake issued and has not
@@ -100,9 +107,12 @@ type fakeOpenAI struct {
 	holdRefresh    chan struct{}                    // a refresh waits on it, when set
 	refreshArrived chan struct{}                    // a refresh signals it on arrival, when set
 	holdModels     chan struct{}                    // a model list request waits on it, when set
+	holdExchange   chan struct{}                    // a code exchange waits on it, when set
+	exchangeIn     chan struct{}                    // a code exchange signals it on arrival, before holdExchange, when set
 	modelsArrived  chan struct{}                    // signalled on a model list request, when set
 	modelsErr      string                           // an error code the model list answers (400, {"error":{"code":…}})
 	redirectPath   map[string]bool                  // these paths answer 302 to /elsewhere
+	failPath       map[string]int                   // these paths answer this status, with an empty JSON object
 	jwksURI        string                           // the discovery document's jwks_uri ("" = ours)
 	models         []map[string]any
 	modelsEtag     string
@@ -110,6 +120,8 @@ type fakeOpenAI struct {
 
 	// Records.
 	n          int
+	codes      []string // every authorization code issued, for the leak scans
+	verifiers  []string // every code_verifier an exchange sent, for the leak scans
 	pending    map[string]pendingCode
 	access     map[string]string // live access token → its client id
 	refresh    map[string]string // refresh token → "live", "rotated" or "revoked"
@@ -120,6 +132,12 @@ type fakeOpenAI struct {
 	revokes    []url.Values
 	modelsGets int
 	elsewhere  int
+	// versions is each model list request's client_version, in order;
+	// noVersion counts the requests that carried none or more than one, which
+	// the fake answers 400 and the cleanup fails the test over (plan 034 A1),
+	// unless the test took them with takeNoVersion.
+	versions  []string
+	noVersion int
 }
 
 func newFake(t *testing.T) *fakeOpenAI {
@@ -139,9 +157,29 @@ func newFake(t *testing.T) *fakeOpenAI {
 	}
 	f.srv = httptest.NewServer(http.HandlerFunc(f.serve))
 	t.Cleanup(f.srv.Close)
+	t.Cleanup(func() {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		if f.noVersion != 0 {
+			t.Errorf("the fake refused %d model list request(s) without a client_version (plan 034 A1)", f.noVersion)
+		}
+	})
 	return f
 }
 
+// testPin is the client_version the tests fetch the list with: the value of
+// the shipped catalog's pin today (modeltable.ChatGPTModelsClientVersion).
+// chatgptauth takes the pin from its caller and its tests do not import the
+// harness, so this is a stand-in, not a copy that must track a bump: the fake
+// serves the full list to any version above its newest minimum.
+const testPin = "0.160.0"
+
+// defaultModels is the live server's list for a client at or above the newest
+// minimum (plan 034 §3.1, probed 2026-10-03): eight models shown for display,
+// each with its minimal_client_version, in the live priority order, plus the
+// entries a list never shows (hidden) and two it must not offer (a slug and a
+// name that could not be shown safely). The server's gate is applied by the
+// fake's /v1/models, from each entry's minimal_client_version.
 func defaultModels() []map[string]any {
 	levels := func(es ...string) []any {
 		var out []any
@@ -150,20 +188,73 @@ func defaultModels() []map[string]any {
 		}
 		return out
 	}
+	text, image := []any{"text"}, []any{"text", "image"}
 	return []map[string]any{
-		{"slug": "gpt-6-astra", "display_name": "GPT-6-Astra", "visibility": "list", "priority": 2, "context_window": 272000,
-			"max_context_window": 872000, "input_modalities": []any{"text", "image"}, "supported_reasoning_levels": levels("low", "medium", "high", "xhigh", "max", "ultra"),
+		{"slug": "gpt-6.1-sol", "display_name": "GPT-6.1-Sol", "visibility": "list", "priority": 1, "context_window": 272000, "minimal_client_version": "0.153.0",
+			"input_modalities": image, "supported_reasoning_levels": levels("low", "medium", "high", "xhigh"), "default_reasoning_level": "medium", "supports_parallel_tool_calls": true},
+		{"slug": "gpt-6-astra", "display_name": "GPT-6-Astra", "visibility": "list", "priority": 2, "context_window": 272000, "minimal_client_version": "0.153.0",
+			"max_context_window": 872000, "input_modalities": image, "supported_reasoning_levels": levels("low", "medium", "high", "xhigh", "max", "ultra"),
 			"default_reasoning_level": "medium", "supports_parallel_tool_calls": true, "base_instructions": strings.Repeat("codex prompt ", 50)},
-		{"slug": "gpt-reserve", "display_name": "GPT-Reserve", "visibility": "hide", "priority": 4, "context_window": 272000},
-		{"slug": "gpt-5.6-luna", "display_name": "GPT-5.6-Luna", "visibility": "list", "priority": 9, "context_window": 272000,
-			"input_modalities": []any{"text"}, "supported_reasoning_levels": levels("low", "medium"), "default_reasoning_level": "medium",
+		{"slug": "gpt-6-sol", "display_name": "GPT-6-Sol", "visibility": "list", "priority": 3, "context_window": 272000, "minimal_client_version": "0.155.0",
+			"input_modalities": image, "supported_reasoning_levels": levels("low", "medium", "high"), "default_reasoning_level": "medium"},
+		{"slug": "gpt-6-luna", "display_name": "GPT-6-Luna", "visibility": "list", "priority": 4, "context_window": 272000, "minimal_client_version": "0.155.0",
+			"input_modalities": text, "supported_reasoning_levels": levels("low", "medium"), "default_reasoning_level": "medium"},
+		{"slug": "gpt-5.6-sol", "display_name": "GPT-5.6-Sol", "visibility": "list", "priority": 5, "context_window": 272000, "minimal_client_version": "0.144.0",
+			"input_modalities": image, "supported_reasoning_levels": levels("low", "medium", "high"), "default_reasoning_level": "low"},
+		{"slug": "gpt-5.6-terra", "display_name": "GPT-5.6-Terra", "visibility": "list", "priority": 6, "context_window": 272000, "minimal_client_version": "0.144.0",
+			"input_modalities": text, "supported_reasoning_levels": levels("low", "medium", "high"), "default_reasoning_level": "medium"},
+		{"slug": "gpt-5.6-luna", "display_name": "GPT-5.6-Luna", "visibility": "list", "priority": 9, "context_window": 272000, "minimal_client_version": "0.144.0",
+			"input_modalities": text, "supported_reasoning_levels": levels("low", "medium"), "default_reasoning_level": "medium",
 			"supports_parallel_tool_calls": false},
-		{"slug": "gpt-5.6-sol", "display_name": "GPT-5.6-Sol", "visibility": "list", "priority": 5, "context_window": 272000,
-			"input_modalities": []any{"text", "image"}, "supported_reasoning_levels": levels("low", "medium", "high"), "default_reasoning_level": "low"},
-		{"slug": "bad slug!", "display_name": "Bad", "visibility": "list", "priority": 1},
-		{"slug": "gpt-esc", "display_name": "Evil\x1b[31m", "visibility": "list", "priority": 1},
-		{"slug": "codex-auto-review", "display_name": "Codex Auto Review", "visibility": "hide", "priority": 43},
+		{"slug": "gpt-5.5", "display_name": "GPT-5.5", "visibility": "list", "priority": 10, "context_window": 272000, "minimal_client_version": "0.124.0",
+			"input_modalities": text, "supported_reasoning_levels": levels("low", "medium", "high"), "default_reasoning_level": "medium"},
+		{"slug": "gpt-reserve", "display_name": "GPT-Reserve", "visibility": "hide", "priority": 4, "context_window": 272000, "minimal_client_version": "0.144.0"},
+		{"slug": "bad slug!", "display_name": "Bad", "visibility": "list", "priority": 1, "minimal_client_version": "0.1.0"},
+		{"slug": "gpt-esc", "display_name": "Evil\x1b[31m", "visibility": "list", "priority": 1, "minimal_client_version": "0.1.0"},
+		{"slug": "codex-auto-review", "display_name": "Codex Auto Review", "visibility": "hide", "priority": 43, "minimal_client_version": "0.98.0"},
 	}
+}
+
+// versionAtLeast says client_version v meets min, both dotted numeric
+// (missing parts 0): the fake's own compare, written apart from modeltable's
+// so a bug in one is not copied into the other.
+func versionAtLeast(v, min string) bool {
+	num := func(s string) []int {
+		var out []int
+		for _, p := range strings.Split(s, ".") {
+			n, _ := strconv.Atoi(p)
+			out = append(out, n)
+		}
+		return out
+	}
+	a, b := num(v), num(min)
+	for i := 0; i < len(a) || i < len(b); i++ {
+		var x, y int
+		if i < len(a) {
+			x = a[i]
+		}
+		if i < len(b) {
+			y = b[i]
+		}
+		if x != y {
+			return x > y
+		}
+	}
+	return true
+}
+
+// gatedModels is f.models as the server answers a client at version v: only
+// the entries whose minimal_client_version v meets (an entry with none is
+// always listed). "0.0.1" meets none of the live list's, so the reply is
+// empty, as the live one was.
+func gatedModels(models []map[string]any, v string) []map[string]any {
+	out := []map[string]any{}
+	for _, m := range models {
+		if min, _ := m["minimal_client_version"].(string); min == "" || versionAtLeast(v, min) {
+			out = append(out, m)
+		}
+	}
+	return out
 }
 
 // URL is the fake's origin: the issuer override.
@@ -265,6 +356,7 @@ func (f *fakeOpenAI) authorizeErr(authURL string) (url.Values, error) {
 		clientID = f.issueClient
 	}
 	code := "fake-code-" + randHex(8)
+	f.codes = append(f.codes, code)
 	f.pending[code] = pendingCode{challenge: q.Get("code_challenge"), redirect: q.Get("redirect_uri"), clientID: clientID, nonce: q.Get("nonce")}
 	out := url.Values{"code": {code}, "state": {q.Get("state")}, "scope": {f.scope}}
 	switch {
@@ -291,13 +383,17 @@ func (f *fakeOpenAI) serve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	f.mu.Lock()
-	redirect := f.redirectPath[r.URL.Path]
+	redirect, fail := f.redirectPath[r.URL.Path], f.failPath[r.URL.Path]
 	if r.URL.Path == "/elsewhere" {
 		f.elsewhere++
 	}
 	f.mu.Unlock()
 	if redirect {
 		http.Redirect(w, r, "/elsewhere", http.StatusFound)
+		return
+	}
+	if fail != 0 {
+		f.writeJSON(w, fail, map[string]any{})
 		return
 	}
 	switch r.URL.Path {
@@ -345,13 +441,23 @@ func (f *fakeOpenAI) serve(w http.ResponseWriter, r *http.Request) {
 		if hold != nil {
 			<-hold
 		}
+		vs := r.URL.Query()["client_version"]
+		f.mu.Lock()
+		if len(vs) != 1 || vs[0] == "" {
+			f.noVersion++
+			f.mu.Unlock()
+			f.writeJSON(w, 400, map[string]any{"error": map[string]any{"code": "client_version_required", "message": "the fake refuses a model list request without exactly one client_version"}})
+			return
+		}
+		f.versions = append(f.versions, vs[0])
+		f.mu.Unlock()
 		tok, _ := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
 		f.mu.Lock()
 		_, live := f.access[tok]
-		models, etag, refuse := f.models, f.modelsEtag, f.modelsErr
+		models, etag, refuse := gatedModels(f.models, vs[0]), f.modelsEtag, f.modelsErr
 		f.mu.Unlock()
 		if refuse != "" {
-			f.writeJSON(w, 400, map[string]any{"error": map[string]any{"code": refuse, "message": "refused"}})
+			f.writeJSON(w, 400, map[string]any{"error": map[string]any{"code": refuse, "message": testErrorDescription}})
 			return
 		}
 		if !live {
@@ -378,14 +484,24 @@ func (f *fakeOpenAI) token(w http.ResponseWriter, r *http.Request) {
 	switch form.Get("grant_type") {
 	case "authorization_code":
 		f.mu.Lock()
+		arrived, hold := f.exchangeIn, f.holdExchange
+		f.mu.Unlock()
+		if arrived != nil {
+			arrived <- struct{}{}
+		}
+		if hold != nil {
+			<-hold
+		}
+		f.mu.Lock()
 		defer f.mu.Unlock()
 		f.exchanges++
+		f.verifiers = append(f.verifiers, form.Get("code_verifier"))
 		p, ok := f.pending[form.Get("code")]
 		delete(f.pending, form.Get("code"))
 		sum := sha256.Sum256([]byte(form.Get("code_verifier")))
 		switch {
 		case f.exchangeErr != "":
-			f.writeJSON(w, 400, map[string]any{"error": f.exchangeErr, "error_description": "refused"})
+			f.writeJSON(w, 400, map[string]any{"error": f.exchangeErr, "error_description": testErrorDescription})
 			return
 		case !ok || p.clientID != form.Get("client_id") || p.redirect != form.Get("redirect_uri") || b64(sum[:]) != p.challenge:
 			f.writeJSON(w, 400, map[string]any{"error": "invalid_grant"})
@@ -456,6 +572,17 @@ func (f *fakeOpenAI) lifeLocked() int {
 	return 3600
 }
 
+// takeNoVersion returns how many model list requests lacked a client_version
+// and forgets them, so a test that sends one on purpose is not failed by the
+// cleanup.
+func (f *fakeOpenAI) takeNoVersion() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	n := f.noVersion
+	f.noVersion = 0
+	return n
+}
+
 // counts is the fake's request counts.
 func (f *fakeOpenAI) counts() (exchanges, refreshes, revokes, models int) {
 	f.mu.Lock()
@@ -524,7 +651,7 @@ func useListener(t *testing.T, busy1455 bool) *[]int {
 		asked = append(asked, port)
 		mu.Unlock()
 		if port == callbackPort && busy1455 {
-			return nil, errors.New("address already in use")
+			return nil, &net.OpError{Op: "listen", Net: "tcp", Err: os.NewSyscallError("bind", syscall.EADDRINUSE)}
 		}
 		return net.Listen("tcp", "127.0.0.1:0")
 	}
@@ -534,6 +661,25 @@ func useListener(t *testing.T, busy1455 bool) *[]int {
 		}
 	})
 	return &asked
+}
+
+// unbindable makes 1455 refuse its bind for a reason other than its being
+// busy (EACCES: a port the user may not bind) — and, with every, any other
+// port too — for one test: the listener's other failure, ReasonListenFailed
+// (plan 034 A10, review r6 #6). A port it lets through is any free one.
+func unbindable(t *testing.T, every bool) {
+	t.Helper()
+	listen = func(port int) (net.Listener, error) {
+		if port == callbackPort || every {
+			return nil, &net.OpError{Op: "listen", Net: "tcp", Err: os.NewSyscallError("bind", syscall.EACCES)}
+		}
+		return net.Listen("tcp", "127.0.0.1:0")
+	}
+	t.Cleanup(func() {
+		listen = func(port int) (net.Listener, error) {
+			return net.Listen("tcp", net.JoinHostPort("127.0.0.1", fmt.Sprint(port)))
+		}
+	})
 }
 
 // nativeDir is a fresh native directory under the test's temp dir.
@@ -559,7 +705,7 @@ func signInErr(f *fakeOpenAI, dir string) (Result, error) {
 	if err != nil {
 		return Result{}, fmt.Errorf("Begin: %w", err)
 	}
-	defer a.Close()
+	defer a.Close(CloseDone)
 	q, err := f.authorizeErr(a.URL())
 	if err != nil {
 		return Result{}, err

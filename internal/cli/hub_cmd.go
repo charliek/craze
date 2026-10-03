@@ -92,12 +92,9 @@ func openHubLog(env rundir.Env, path string) (io.Writer, func(), error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	if l.size > l.max {
-		if err := l.f.Truncate(0); err != nil {
-			_ = l.Close()
-			return nil, nil, err
-		}
-		l.size = 0
+	if err := l.TruncateIfOver(); err != nil {
+		_ = l.Close()
+		return nil, nil, err
 	}
 	return l, func() { _ = l.Close() }, nil
 }

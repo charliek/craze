@@ -1,25 +1,25 @@
                                                                                                     
                                                                                                     
-                       ╭────────────────────────────────────────────────────╮                       
-                       │Sign in with ChatGPT                                │                       
-                       │Open this address in a browser and approve craze:   │                       
-                       │https://auth.openai.com/api/accounts/authorize?agent│                       
-                       │_name_hint=craze&client_id=dynamic_agent_client&code│                       
-                       │_challenge=golden-challenge-0123456789abcdefABCDEFGH│                       
-                       │IJKL&code_challenge_method=S256&ext_agent_host_id=ur│                       
-                       │n%3Auuid%3A3f2b8c4e-1d6a-4e9b-8f7c-2a5d9e0b1c34&nonc│                       
-                       │e=golden-nonce-0123456789abcdefABCD&redirect_uri=htt│                       
-                       │p%3A%2F%2F127.0.0.1%3A1455%2Fauth%2Fcallback&resourc│                       
-                       │e=https%3A%2F%2Fapi.openai.com%2Fv1&response_type=co│                       
-                       │de&scope=openid+profile+email+offline_access+resourc│                       
-                       │e.invoke+chatgpt.tokens.use.direct&state=golden-stat│                       
-                       │e-0123456789abcdefABCD                              │                       
-                       │Waiting for the browser. If it is on another        │                       
-                       │machine, paste the address it lands on:             │                       
-                       │❯ ••••••••••••••••••••••••••••••••••••••••••••••••• │                       
-                       │That's the redirect address: press enter to sign in.│                       
-                       │ctrl+y copies the address · enter · esc back        │                       
-                       ╰────────────────────────────────────────────────────╯                       
+                                                                                                    
+                                                                                                    
+                                                                                                    
+  ╭──────────────────────────────────────────────────────────────────────────────────────────────╮  
+  │Sign in with ChatGPT                                                                          │  
+  │Open this address in a browser and approve craze:                                             │  
+  │https://auth.openai.com/api/accounts/authorize?agent_name_hint=craze&client_id=dynamic_agent_c│  
+  │lient&code_challenge=golden-challenge-0123456789abcdefABCDEFGHIJKL&code_challenge_method=S256&│  
+  │ext_agent_host_id=urn%3Auuid%3A3f2b8c4e-1d6a-4e9b-8f7c-2a5d9e0b1c34&nonce=golden-nonce-0123456│  
+  │789abcdefABCD&redirect_uri=http%3A%2F%2F127.0.0.1%3A1455%2Fauth%2Fcallback&resource=https%3A%2│  
+  │F%2Fapi.openai.com%2Fv1&response_type=code&scope=openid+profile+email+offline_access+resource.│  
+  │invoke+chatgpt.tokens.use.direct&state=golden-state-0123456789abcdefABCD                      │  
+  │Waiting for the browser. If it is on another machine, paste the address it lands on:          │  
+  │❯ ••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••• │  
+  │That's the redirect address: press enter to sign in.                                          │  
+  │click or ctrl+y copies · enter · esc back                                                     │  
+  ╰──────────────────────────────────────────────────────────────────────────────────────────────╯  
+                                                                                                    
+                                                                                                    
+                                                                                                    
                                                                                                     
                                                                                                     
                                                                                                     

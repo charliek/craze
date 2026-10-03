@@ -591,34 +591,63 @@ func TestSetKeyRefusesTheSignInProvider(t *testing.T) {
 	}
 }
 
-// TestChatGPTDefaultsAreStrict (§3.11): [chatgpt_defaults] decodes as
-// strictly as the rest of the catalog — a key a slug's table does not have is
-// refused — and validate refuses each setting that cannot stand: a start or
-// slug that is not one, an effort no request can carry ("ultra"), a default
-// outside its efforts, an unknown tool profile, and the section with no
-// chatgpt provider to apply to. The control is the shipped catalog, valid.
+// TestChatGPTDefaultsAreStrict (§3.11, plan 034 §3.1): [chatgpt_defaults]
+// decodes as strictly as the rest of the catalog — a key a slug's table does
+// not have is refused, and so is start as a string — and validate refuses each
+// setting that cannot stand: a missing or malformed models_client_version, a
+// start that is empty, repeats a slug or names one that is not, a slug that is
+// not one, an effort no request can carry ("ultra"), a default outside its
+// efforts, an unknown tool profile, and the section with no chatgpt provider to
+// apply to. The control is the shipped catalog, valid.
 func TestChatGPTDefaultsAreStrict(t *testing.T) {
 	const head = "version = 1\ndefault_model = \"m\"\n\n[providers.p]\nname = \"P\"\ndriver = \"openrouter\"\nenv_keys = [\"P_KEY\"]\n\n" +
 		"[providers.chatgpt]\nname = \"ChatGPT plan\"\ndriver = \"chatgpt\"\n\n[models.m]\nprovider = \"p\"\nwire_model = \"w\"\n"
-	if _, err := parseCatalog(CatalogFile, []byte(head+"\n[chatgpt_defaults.models.\"gpt-x\"]\ncolour = \"red\"\n")); err == nil {
+	const pin = "\n[chatgpt_defaults]\nmodels_client_version = \"0.160.0\"\n"
+	if _, err := parseCatalog(CatalogFile, []byte(head+pin+"\n[chatgpt_defaults.models.\"gpt-x\"]\ncolour = \"red\"\n")); err == nil {
 		t.Fatal("an unknown key in a slug's table decoded")
 	} else {
 		wantFileError(t, err, CatalogFile, `chatgpt_defaults.models.gpt-x`, "colour")
 	}
+	// start is an array outright: a string is a decode error, never read as
+	// a one-slug list.
+	if _, err := parseCatalog(CatalogFile, []byte(head+pin+"start = \"gpt-6.1-sol\"\n")); err == nil {
+		t.Fatal("start as a string decoded")
+	}
 	for _, tc := range []struct{ name, section, table, key string }{
-		{"a start that is not a slug", "[chatgpt_defaults]\nstart = \"no such/slug\"\n", "chatgpt_defaults", "start"},
-		{"ultra", "[chatgpt_defaults.models.\"gpt-x\"]\nefforts = [\"low\", \"ultra\"]\n", `chatgpt_defaults.models.gpt-x`, "efforts"},
-		{"a default effort no request carries", "[chatgpt_defaults.models.\"gpt-x\"]\ndefault_effort = \"ultra\"\n", `chatgpt_defaults.models.gpt-x`, "default_effort"},
-		{"a default outside its efforts", "[chatgpt_defaults.models.\"gpt-x\"]\nefforts = [\"low\"]\ndefault_effort = \"high\"\n", `chatgpt_defaults.models.gpt-x`, "default_effort"},
-		{"an unknown tool profile", "[chatgpt_defaults.models.\"gpt-x\"]\ntool_profile = \"gpt\"\n", `chatgpt_defaults.models.gpt-x`, "tool_profile"},
+		{"no pin", "\n[chatgpt_defaults]\nstart = [\"gpt-x\"]\n", "chatgpt_defaults", "models_client_version"},
+		{"no section at all", "", "chatgpt_defaults", "models_client_version"},
+		{"an empty pin", "\n[chatgpt_defaults]\nmodels_client_version = \"\"\n", "chatgpt_defaults", "models_client_version"},
+		{"a pin with a letter", "\n[chatgpt_defaults]\nmodels_client_version = \"0.160.x\"\n", "chatgpt_defaults", "models_client_version"},
+		{"a pin of four parts", "\n[chatgpt_defaults]\nmodels_client_version = \"0.160.0.1\"\n", "chatgpt_defaults", "models_client_version"},
+		{"a pin part of seven digits", "\n[chatgpt_defaults]\nmodels_client_version = \"0.1600000.0\"\n", "chatgpt_defaults", "models_client_version"},
+		{"a pin with an empty part", "\n[chatgpt_defaults]\nmodels_client_version = \"0..1\"\n", "chatgpt_defaults", "models_client_version"},
+		{"an empty start", pin + "start = []\n", "chatgpt_defaults", "start"},
+		{"a repeated start", pin + "start = [\"gpt-x\", \"gpt-y\", \"gpt-x\"]\n", "chatgpt_defaults", "start"},
+		{"a start that is not a slug", pin + "start = [\"gpt-x\", \"no such/slug\"]\n", "chatgpt_defaults", "start"},
+		{"ultra", pin + "[chatgpt_defaults.models.\"gpt-x\"]\nefforts = [\"low\", \"ultra\"]\n", `chatgpt_defaults.models.gpt-x`, "efforts"},
+		{"a default effort no request carries", pin + "[chatgpt_defaults.models.\"gpt-x\"]\ndefault_effort = \"ultra\"\n", `chatgpt_defaults.models.gpt-x`, "default_effort"},
+		{"a default outside its efforts", pin + "[chatgpt_defaults.models.\"gpt-x\"]\nefforts = [\"low\"]\ndefault_effort = \"high\"\n", `chatgpt_defaults.models.gpt-x`, "default_effort"},
+		{"an unknown tool profile", pin + "[chatgpt_defaults.models.\"gpt-x\"]\ntool_profile = \"gpt\"\n", `chatgpt_defaults.models.gpt-x`, "tool_profile"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			c, err := parseCatalog(CatalogFile, []byte(head+"\n"+tc.section))
+			c, err := parseCatalog(CatalogFile, []byte(head+tc.section))
 			if err != nil {
 				t.Fatal(err)
 			}
 			wantFileError(t, c.validate(CatalogFile), CatalogFile, tc.table, tc.key)
 		})
+	}
+	// The controls: a pin of one to three parts, leading zeros, and a start
+	// of several slugs validate; so does no start at all.
+	for _, ok := range []string{pin, "\n[chatgpt_defaults]\nmodels_client_version = \"1\"\nstart = [\"gpt-x\"]\n",
+		"\n[chatgpt_defaults]\nmodels_client_version = \"000.0160\"\nstart = [\"gpt-x\", \"gpt-y\"]\n"} {
+		c, err := parseCatalog(CatalogFile, []byte(head+ok))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := c.validate(CatalogFile); err != nil {
+			t.Fatalf("control %q: %v", ok, err)
+		}
 	}
 	c, err := ShippedCatalog()
 	if err != nil {

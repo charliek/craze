@@ -256,6 +256,81 @@ type chatgptModelEntry struct {
 	InputModalities   []string `json:"input_modalities"`
 	Priority          int      `json:"priority"`
 	ParallelToolCalls *bool    `json:"parallel_tool_calls"`
+	// MinClientVersion is the least client_version the server says the model
+	// needs (plan 034 §3.1); "" when the list does not say. It is decoded
+	// from MinVersionRaw apart from the rest, so a value that is not a JSON
+	// string (a number, an object, null) reads as none — fail-open — instead
+	// of failing the whole entry (plan 034 r1 #4).
+	MinClientVersion string          `json:"-"`
+	MinVersionRaw    json.RawMessage `json:"minimal_client_version"`
+}
+
+// maxMinVersionParts is how many dotted parts a model's minimum may have
+// before it is read as malformed. The catalog's own pin is held to at most
+// three (validPinVersion); a server's minimum is read more leniently, since a
+// four-part one would still compare correctly and refusing it would only
+// offer a model the pin may not meet.
+const maxMinVersionParts = 4
+
+// parseVersion reads a dotted numeric version: one to maxParts parts of one
+// to six ASCII digits each (leading zeros allowed), the parts as numbers. A
+// part over six digits, any other character, an empty part or an empty
+// string is malformed (ok false).
+func parseVersion(s string, maxParts int) (parts []int, ok bool) {
+	if s == "" {
+		return nil, false
+	}
+	for _, p := range strings.Split(s, ".") {
+		if len(p) == 0 || len(p) > 6 || len(parts) == maxParts {
+			return nil, false
+		}
+		n := 0
+		for _, c := range []byte(p) {
+			if c < '0' || c > '9' {
+				return nil, false
+			}
+			n = n*10 + int(c-'0')
+		}
+		parts = append(parts, n)
+	}
+	return parts, true
+}
+
+// validPinVersion says s is a catalog pin: dotted numeric, one to three
+// parts of one to six digits (plan 034 Q1).
+func validPinVersion(s string) bool {
+	_, ok := parseVersion(s, 3)
+	return ok
+}
+
+// minimumMet says a model whose minimum client version is min may be offered
+// to a client at pin (plan 034 Q3, the downgrade-safe read): equal passes,
+// missing parts are 0 (0.160 is 0.160.0), and a missing or malformed min, or
+// a malformed pin, passes — fail-open, because the server already filtered
+// the list for the version it was fetched with and a value this package
+// cannot read is no reason to hide a model the server offered.
+func minimumMet(min, pin string) bool {
+	m, ok := parseVersion(min, maxMinVersionParts)
+	if !ok {
+		return true
+	}
+	p, ok := parseVersion(pin, maxMinVersionParts)
+	if !ok {
+		return true
+	}
+	for i := 0; i < max(len(m), len(p)); i++ {
+		var a, b int
+		if i < len(m) {
+			a = m[i]
+		}
+		if i < len(p) {
+			b = p[i]
+		}
+		if a != b {
+			return a < b
+		}
+	}
+	return true
 }
 
 // discovered is what withDiscovered added to a catalog: the alias of each
@@ -285,7 +360,10 @@ type discovered struct {
 // carry (never "ultra"); its default effort craze's, else the list's, when it
 // is one of those; vision when the list takes image input; parallel tool calls
 // as the list says (nil when it does not); no cost — the plan is not billed
-// per token; and the defaults' tool profile.
+// per token; and the defaults' tool profile. An entry whose
+// minimal_client_version is above the catalog's models_client_version is left
+// out without a warning (a downgrade-safe read, plan 034 Q3); a missing or
+// unreadable minimum keeps it.
 func withDiscovered(cat *Catalog, dir string) (*discovered, []string) {
 	if p, ok := cat.Providers[ChatGPTProvider]; !ok || p.Driver != DriverChatGPT || dir == "" {
 		return nil, nil
@@ -330,6 +408,8 @@ func withDiscovered(cat *Catalog, dir string) (*discovered, []string) {
 			skip(i, "", "it is not a model entry")
 			continue
 		}
+		// Only a JSON string is a minimum; anything else is none.
+		_ = json.Unmarshal(m.MinVersionRaw, &m.MinClientVersion)
 		entries = append(entries, entry{i, m})
 	}
 	// The list's own order is its priority (chatgptauth sorts it so); the
@@ -352,6 +432,11 @@ func withDiscovered(cat *Catalog, dir string) (*discovered, []string) {
 			continue
 		case hasModel(cat.Models, alias):
 			skip(e.i, m.Slug, "the model is listed twice, or its alias is already a model")
+			continue
+		case !minimumMet(m.MinClientVersion, cat.ChatGPT.ModelsClientVersion):
+			// A list fetched by a newer craze whose pin is higher than this
+			// one's: an older binary never offers what it has not verified
+			// (plan 034 Q3). Silent, as a model the account does not list is.
 			continue
 		}
 		model := discoveredModel(m, cat.ChatGPT.Models[m.Slug])
