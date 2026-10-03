@@ -12,6 +12,28 @@ import (
 	"github.com/charliek/craze/internal/acp"
 )
 
+// openGateWriter opens a FIFO's write end once its reader has it open. The
+// open is non-blocking, retrying ENXIO (no reader yet; the same errno on Linux
+// and macOS) until a deadline that fails the test, so a reader that never
+// opens leaves no goroutine blocked in an open that nothing can interrupt.
+func openGateWriter(t *testing.T, fifo string) *os.File {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		w, err := os.OpenFile(fifo, os.O_WRONLY|syscall.O_NONBLOCK, 0)
+		if err == nil {
+			return w
+		}
+		if !errors.Is(err, syscall.ENXIO) {
+			t.Fatal(err)
+		}
+		if !time.Now().Before(deadline) {
+			t.Fatal("the gate's reader never opened the FIFO")
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
 // TestAwaitGateHoldsUntilItsByte is CRAZE_FAKE_GATE's barrier: awaitGate
 // returns at once with no path, and with one it returns only once it has read
 // a byte. Opening the FIFO for writing completes only when awaitGate has
@@ -29,10 +51,7 @@ func TestAwaitGateHoldsUntilItsByte(t *testing.T) {
 		awaitGate(fifo)
 		close(done)
 	}()
-	w, err := os.OpenFile(fifo, os.O_WRONLY, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
+	w := openGateWriter(t, fifo)
 	defer w.Close()
 	select {
 	case <-done:
@@ -67,10 +86,7 @@ func TestASetGateHoldsAWriterWhileItWaits(t *testing.T) {
 		awaitSetGate(fifo)
 		close(done)
 	}()
-	before, err := os.OpenFile(fifo, os.O_WRONLY, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
+	before := openGateWriter(t, fifo)
 	if err := before.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -84,10 +100,7 @@ func TestASetGateHoldsAWriterWhileItWaits(t *testing.T) {
 	if !errors.Is(err, syscall.EAGAIN) {
 		t.Fatalf("a reader of the waiting set's FIFO: %d, %v; want EAGAIN (empty, with a writer), not an end of file (0)", n, err)
 	}
-	w, err := os.OpenFile(fifo, os.O_WRONLY, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
+	w := openGateWriter(t, fifo)
 	defer w.Close()
 	if _, err := w.Write([]byte{1}); err != nil {
 		t.Fatal(err)
@@ -188,10 +201,7 @@ func TestSigintHoldTurnTwoEndsOnTheGate(t *testing.T) {
 	}
 	t.Setenv("CRAZE_FAKE_GATE", fifo)
 	w, id := sigintHoldSecondPrompt(t)
-	f, err := os.OpenFile(fifo, os.O_WRONLY, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
+	f := openGateWriter(t, fifo)
 	defer f.Close()
 	w.answerTo(id, 200*time.Millisecond)
 	if _, err := f.Write([]byte{1}); err != nil {
@@ -273,10 +283,7 @@ func TestTheSharedGateLosesNoByte(t *testing.T) {
 	t.Setenv("CRAZE_FAKE_GATE", fifo)
 	s := &server{}
 	gate := s.gate()
-	w, err := os.OpenFile(fifo, os.O_WRONLY, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
+	w := openGateWriter(t, fifo)
 	if _, err := w.Write([]byte{1, 1}); err != nil {
 		t.Fatal(err)
 	}

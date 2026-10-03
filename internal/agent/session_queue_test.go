@@ -62,12 +62,19 @@ func foreignTurnCounts(evs []Event) (started, ended int) {
 	return started, ended
 }
 
+// gateWatchdog is the deadlock watchdog for a wait on the fake agent: far
+// longer than any wait that is working, for the reason waitUntil spells out.
+const gateWatchdog = 3 * time.Second
+
 // fakeAgentGate points the fake agent's CRAZE_FAKE_GATE at a fresh FIFO — so
 // it must run before the session starts the agent — and returns what releases
 // one held step, or one held fallback turn: it writes the one byte the fake's
-// shared gate reader takes (cmd/craze-fake-agent/server.go, gate). Opening
-// the FIFO waits for that reader to have it open, so each release has the
-// same deadlock watchdog as waitUntil and fails the test rather than hang it.
+// shared gate reader takes (cmd/craze-fake-agent/server.go, gate). The write
+// end is opened non-blocking, retrying ENXIO (no reader has the FIFO yet — the
+// same errno on Linux and macOS) until gateWatchdog, so a fake that never
+// opens its reader fails the test at the deadline with nothing left blocked in
+// an open: a blocking open would strand its goroutine, which nothing can
+// interrupt or join.
 func fakeAgentGate(t *testing.T) func() {
 	t.Helper()
 	fifo := filepath.Join(t.TempDir(), "gate")
@@ -77,27 +84,48 @@ func fakeAgentGate(t *testing.T) func() {
 	t.Setenv("CRAZE_FAKE_GATE", fifo)
 	return func() {
 		t.Helper()
-		done := make(chan error, 1)
-		go func() {
-			w, err := os.OpenFile(fifo, os.O_WRONLY, 0)
-			if err != nil {
-				done <- err
+		deadline := time.Now().Add(gateWatchdog)
+		for {
+			w, err := os.OpenFile(fifo, os.O_WRONLY|syscall.O_NONBLOCK, 0)
+			if err == nil {
+				_, err = w.Write([]byte{1})
+				if cerr := w.Close(); err == nil {
+					err = cerr
+				}
+				if err != nil {
+					t.Fatalf("releasing the fake agent's gate: %v", err)
+				}
 				return
 			}
-			_, err = w.Write([]byte{1})
-			if cerr := w.Close(); err == nil {
-				err = cerr
-			}
-			done <- err
-		}()
-		select {
-		case err := <-done:
-			if err != nil {
+			if !errors.Is(err, syscall.ENXIO) {
 				t.Fatalf("releasing the fake agent's gate: %v", err)
 			}
-		case <-time.After(60 * time.Second):
-			t.Fatal("releasing the fake agent's gate: its reader never opened the FIFO")
+			if !time.Now().Before(deadline) {
+				t.Fatal("releasing the fake agent's gate: its reader never opened the FIFO")
+			}
+			time.Sleep(5 * time.Millisecond)
 		}
+	}
+}
+
+// awaitInitialPrompt waits for the gate-held tests' initial prompt to return,
+// with the deadlock watchdog. On a miss it closes the session — which ends the
+// prompt — and joins the prompt's goroutine within logWatchdog before failing,
+// so a stuck prompt fails the test at the bound, not at the package timeout,
+// and leaves no goroutine behind.
+func awaitInitialPrompt(t *testing.T, s *session, done <-chan struct{}) {
+	t.Helper()
+	select {
+	case <-done:
+		return
+	case <-time.After(gateWatchdog):
+	}
+	_ = s.Close()
+	select {
+	case <-done:
+		t.Fatal("the initial prompt never completed; closing the session ended it")
+	case <-time.After(logWatchdog):
+		t.Fatal("the initial prompt never completed, and closing the session did not end it")
 	}
 }
 
@@ -222,7 +250,7 @@ func TestForeignTurnAccessorAgreesWithSnapshot(t *testing.T) {
 	}
 	release() // step1
 	release() // step2
-	<-done
+	awaitInitialPrompt(t, s, done)
 	waitUntil(t, "the foreign turn to start", func() bool { return s.Snapshot().ForeignTurn })
 	// ForeignTurn is the same flag Snapshot() reports, plan 021's leaf
 	// accessor (§3.3): once the snapshot has caught the flag, the leaf must
@@ -302,7 +330,7 @@ func TestForeignTurnRefusalIsNotATurnThatFailed(t *testing.T) {
 	}
 	release() // step1
 	release() // step2
-	<-done
+	awaitInitialPrompt(t, s, done)
 	// The start event, not the snapshot flag: the flag flips before the event
 	// is emitted, so waiting on it would leave the "no error reached the
 	// stream" check below reading a log the collector has not caught up with —

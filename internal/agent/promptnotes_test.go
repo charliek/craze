@@ -268,7 +268,7 @@ func TestPromptNotesRecordAWireRefusalAndAnInterjection(t *testing.T) {
 	}
 	release() // step1
 	release() // step2
-	<-done
+	awaitInitialPrompt(t, s, done)
 	waitUntil(t, "the foreign turn's start event", func() bool {
 		started, _ := foreignTurnCounts(log.snapshot())
 		return started > 0

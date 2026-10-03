@@ -643,7 +643,7 @@ func TestForeignTurnRefusalEmitsNoCommand(t *testing.T) {
 	}
 	release() // step1
 	release() // step2
-	<-done
+	awaitInitialPrompt(t, s, done)
 	// The start event rather than the snapshot flag, for the reason spelled
 	// out in TestPopQueueRefusesDuringAForeignTurn: the flag flips first, so
 	// waiting on it would let the check below read a log the collector has not
