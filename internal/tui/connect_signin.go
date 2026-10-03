@@ -602,12 +602,20 @@ func (s *signInRuns) awaitEnds(d time.Duration) {
 			return
 		}
 	}
+	if len(fins) > 0 && onAwaitEnds != nil {
+		onAwaitEnds()
+	}
 	for _, f := range fins {
 		if !within(f.done) {
 			return
 		}
 	}
 }
+
+// onAwaitEnds is a test's seam: nil in production, called once by awaitEnds,
+// after closeAll has cancelled the finishing commands and right before it
+// waits for them (review r7 #5).
+var onAwaitEnds func()
 
 // logFor is the runs' sign-in log, opened in dir the first time it is asked
 // for, and the command that waits for it to stop (signInLogCmd) when this is

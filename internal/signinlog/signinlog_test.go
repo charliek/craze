@@ -732,6 +732,13 @@ func TestCloseIsBounded(t *testing.T) {
 	if err := l.Close(); err != nil {
 		t.Fatalf("a second Close = %v", err)
 	}
+	// The abandoned writer is let go by release; join it before the next
+	// part (and the cleanup of lockWait), as Close never does.
+	select {
+	case <-l.done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the abandoned writer never finished after the lock was released")
+	}
 
 	native = nativeDir(t)
 	l = mustOpen(t, native, Options{})

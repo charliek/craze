@@ -347,7 +347,9 @@ func TestNativeChatGPTSessionCompletesAToolTurn(t *testing.T) {
 	for i, r := range reqs {
 		if r.path != "/v1/responses" || r.header.Get("Authorization") != "Bearer "+planAccess ||
 			r.header.Get("session-id") != snap.SessionID || snap.SessionID == "" || !strings.Contains(r.body, `"model":"gpt-5.6-sol"`) {
-			t.Fatalf("request %d: %s %q session-id %q (want %q)", i, r.path, r.header.Get("Authorization"), r.header.Get("session-id"), snap.SessionID)
+			t.Fatalf("request %d: %s bearer-matches %t session-id %q (want %q) model-in-body %t", i, r.path,
+				r.header.Get("Authorization") == "Bearer "+planAccess, r.header.Get("session-id"), snap.SessionID,
+				strings.Contains(r.body, `"model":"gpt-5.6-sol"`))
 		}
 	}
 	if !strings.Contains(reqs[1].body, "function_call_output") || !strings.Contains(reqs[1].body, "hello world") {

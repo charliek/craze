@@ -126,6 +126,14 @@ type Log struct {
 	max   int64
 	stall <-chan struct{} // Options.Stall
 
+	// The seams as they stood at open: the writer reads these, never the
+	// package variables, which a test may set again while a writer abandoned
+	// by Close still runs (Close never joins it).
+	lockWait       time.Duration
+	uid            func() int
+	afterLogsCheck func()
+	beforeCreate   func(name string)
+
 	queue chan []byte   // rendered records, waiting for the writer
 	ready chan struct{} // closed once the writer's setup is over, passed or not
 	done  chan struct{} // closed once the writer has returned
@@ -160,6 +168,7 @@ func OpenWith(nativeDir string, o Options) (*Log, error) {
 	}
 	l := &Log{
 		dir: nativeDir, max: o.Max, stall: o.Stall,
+		lockWait: lockWait, uid: uid, afterLogsCheck: afterLogsCheck, beforeCreate: beforeCreate,
 		queue: make(chan []byte, queueLen), ready: make(chan struct{}), done: make(chan struct{}),
 		stopped: make(chan struct{}),
 	}
@@ -325,7 +334,7 @@ func (l *Log) write(rec []byte) error {
 		return err
 	}
 	defer func() { _ = lf.Close() }()
-	unlock, err := atomicfile.FlockWithin(lf, lockWait)
+	unlock, err := atomicfile.FlockWithin(lf, l.lockWait)
 	if err != nil {
 		return err
 	}
@@ -392,11 +401,11 @@ func (l *Log) openLogs(root *os.Root) (*os.Root, error) {
 	if err != nil {
 		return nil, fmt.Errorf("signinlog: %w", err)
 	}
-	if err := checkLogs(li, path); err != nil {
+	if err := checkLogs(li, path, l.uid()); err != nil {
 		return nil, err
 	}
-	if afterLogsCheck != nil {
-		afterLogsCheck()
+	if l.afterLogsCheck != nil {
+		l.afterLogsCheck()
 	}
 	logs, err := root.OpenRoot(paths.LogsName + "/.")
 	if err != nil {
@@ -404,7 +413,7 @@ func (l *Log) openLogs(root *os.Root) (*os.Root, error) {
 	}
 	di, err := logs.Stat(".")
 	if err == nil {
-		err = checkLogs(di, path)
+		err = checkLogs(di, path, l.uid())
 	}
 	if err == nil && !os.SameFile(li, di) {
 		err = fmt.Errorf("signinlog: %s changed as it was opened", path)
@@ -419,7 +428,7 @@ func (l *Log) openLogs(root *os.Root) (*os.Root, error) {
 // checkLogs refuses fi, the logs directory at path — its name's look, or the
 // directory opened — when it is a symlink, not a directory, writable by group
 // or others, or another user's.
-func checkLogs(fi os.FileInfo, path string) error {
+func checkLogs(fi os.FileInfo, path string, uid int) error {
 	switch {
 	case fi.Mode()&fs.ModeSymlink != 0:
 		return fmt.Errorf("signinlog: %s is a symbolic link; the sign-in log is kept only in a directory of its own", path)
@@ -427,7 +436,7 @@ func checkLogs(fi os.FileInfo, path string) error {
 		return fmt.Errorf("signinlog: %s is not a directory", path)
 	case fi.Mode().Perm()&0o022 != 0:
 		return fmt.Errorf("signinlog: %s is writable by other users (mode %04o)", path, fi.Mode().Perm())
-	case owner(fi) != uid():
+	case owner(fi) != uid:
 		return fmt.Errorf("signinlog: %s belongs to another user", path)
 	}
 	return nil
@@ -460,8 +469,8 @@ func (l *Log) openFile(logs *os.Root, name string, flag int) (*os.File, error) {
 		if !errors.Is(err, fs.ErrNotExist) {
 			break
 		}
-		if beforeCreate != nil {
-			beforeCreate(name)
+		if l.beforeCreate != nil {
+			l.beforeCreate(name)
 		}
 		f, err = logs.OpenFile(name, flag|os.O_CREATE|os.O_EXCL|syscall.O_NONBLOCK, 0o600)
 		if !errors.Is(err, fs.ErrExist) {
@@ -471,7 +480,7 @@ func (l *Log) openFile(logs *os.Root, name string, flag int) (*os.File, error) {
 	if err != nil {
 		return nil, fmt.Errorf("signinlog: opening %s: %w", path, err)
 	}
-	if err := checkFile(logs, name, path, f); err != nil {
+	if err := checkFile(logs, name, path, f, l.uid()); err != nil {
 		_ = f.Close()
 		return nil, err
 	}
@@ -485,7 +494,7 @@ func (l *Log) openFile(logs *os.Root, name string, flag int) (*os.File, error) {
 // checkFile refuses f, opened as name in logs, unless it is a regular file —
 // not a symlink, not a FIFO — that the name still is, the user's own, with no
 // other name (nlink 1). A file wider than 0600 is narrowed to it.
-func checkFile(logs *os.Root, name, path string, f *os.File) error {
+func checkFile(logs *os.Root, name, path string, f *os.File, uid int) error {
 	fi, err := f.Stat()
 	if err != nil {
 		return fmt.Errorf("signinlog: %w", err)
@@ -504,7 +513,7 @@ func checkFile(logs *os.Root, name, path string, f *os.File) error {
 		return fmt.Errorf("signinlog: %s changed as it was opened", path)
 	case !ok:
 		return fmt.Errorf("signinlog: %s cannot be checked", path)
-	case int(st.Uid) != uid():
+	case int(st.Uid) != uid:
 		return fmt.Errorf("signinlog: %s belongs to another user", path)
 	case uint64(st.Nlink) != 1:
 		return fmt.Errorf("signinlog: %s has another name (a hard link)", path)

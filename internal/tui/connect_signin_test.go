@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"math/big"
 	"net"
 	"net/http"
@@ -1507,8 +1508,24 @@ func TestConnectSignInPastedRedirectAgainstFakeIssuer(t *testing.T) {
 // tuiSignInLog is dir's sign-in log: its records, decoded, and its text.
 func tuiSignInLog(t *testing.T, dir string) ([]map[string]any, string) {
 	t.Helper()
+	return readTUISignInLog(t, dir, false)
+}
+
+// pollSignInLog is tuiSignInLog for a polling loop (review r7 #5): a log not
+// yet created — its writer goroutine not yet scheduled — is no records, not a
+// failure, so the loop waits for it; any other read error still fails.
+func pollSignInLog(t *testing.T, dir string) ([]map[string]any, string) {
+	t.Helper()
+	return readTUISignInLog(t, dir, true)
+}
+
+func readTUISignInLog(t *testing.T, dir string, missingOK bool) ([]map[string]any, string) {
+	t.Helper()
 	b, err := os.ReadFile(filepath.Join(dir, paths.LogsName, signinlog.FileName))
 	if err != nil {
+		if missingOK && errors.Is(err, fs.ErrNotExist) {
+			return nil, ""
+		}
 		t.Fatal(err)
 	}
 	var recs []map[string]any
@@ -1935,7 +1952,7 @@ func TestConnectSignInNotesALogBrokenAfterItsLastAnswer(t *testing.T) {
 	tm, _ = m.Update(runCmd(finish)) // the model fetch's answer: the last
 	m = tm.(Model)
 	for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(2 * time.Millisecond) {
-		if recs, _ := tuiSignInLog(t, dir); len(recs) == 1 {
+		if recs, _ := pollSignInLog(t, dir); len(recs) == 1 {
 			break
 		}
 		if time.Now().After(deadline) {
@@ -1988,7 +2005,7 @@ func TestConnectSignInMentionsALogBrokenAtShutdown(t *testing.T) {
 			initial, dir := signInModel(t, false)
 			beginStep(t, initial)
 			for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(2 * time.Millisecond) {
-				if recs, _ := tuiSignInLog(t, dir); len(recs) == 1 {
+				if recs, _ := pollSignInLog(t, dir); len(recs) == 1 {
 					break
 				}
 				if time.Now().After(deadline) {
@@ -2038,6 +2055,30 @@ func TestConnectSignInLogsTheModelFetchCutShortAtShutdown(t *testing.T) {
 	iss.modelsHold, iss.modelsHeld = hold, held
 	iss.mu.Unlock()
 	t.Cleanup(func() { close(hold) })
+	// The fetch's cancellation report (models_failed) is held until the
+	// shutdown's awaitEnds is about to wait for the finishing command
+	// (onAwaitEnds, after the cancel), so the record can land only while the
+	// shutdown joins the command: without that wait the log closes first,
+	// every time (review r7 #5). A signal, not a sleep; the deadline fails
+	// the test rather than hanging it.
+	waiting := make(chan struct{})
+	var waitOnce sync.Once
+	onAwaitEnds = func() { waitOnce.Do(func() { close(waiting) }) }
+	t.Cleanup(func() { onAwaitEnds = nil })
+	fetch := fetchPlanModels
+	fetchPlanModels = func(ctx context.Context, dir string, observe func(chatgptauth.Event)) (*chatgptauth.Models, error) {
+		return fetch(ctx, dir, func(ev chatgptauth.Event) {
+			if ev.Kind == chatgptauth.EventModelsFailed {
+				select {
+				case <-waiting:
+				case <-time.After(10 * time.Second):
+					t.Error("the shutdown never waited for the finishing command")
+				}
+			}
+			observe(ev)
+		})
+	}
+	t.Cleanup(func() { fetchPlanModels = fetch })
 	initial, dir := signInModel(t, false)
 	m, wait := beginStep(t, initial)
 	done := runWait(t, m, wait)
