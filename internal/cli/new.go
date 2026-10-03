@@ -91,6 +91,12 @@ func runNew(cmd *cobra.Command, f *newFlags, args []string) error {
 		return usagef("craze new: --fast and --no-fast are mutually exclusive")
 	}
 	out := cmd.OutOrStdout()
+	// A stdout whose reader has gone fails its write with EPIPE rather than
+	// killing craze new with SIGPIPE before its stderr line (plan 035 r18): a
+	// failure printed as JSON first must still say why on stderr and exit 1,
+	// as cli.md's "--json failures" promises, and so must a result that
+	// cannot be written.
+	ignoreSIGPIPE()
 	// fail is every exit-1 path before the session started (SF-124, plan 035
 	// P5): the stderr line as ever and, under --json, one JSON object on
 	// stdout first (newFailureJSON).

@@ -458,6 +458,29 @@ def test_new_refuses_with_the_hubs_words(craze_bin: Path, fake_agent_bin: Path, 
     _cleanup_stops(_the_hub(_home()), tmp_path, fake_agent_bin)
 
 
+def test_new_json_failure_with_its_stdout_gone_still_says_why(craze_bin: Path, tmp_path: Path) -> None:
+    """A `craze new --json` failure whose stdout reader has already gone: the
+    JSON object cannot be written, but craze new still exits 1 with its stderr
+    line, not killed by SIGPIPE before it (plan 035 r18; cli.md's "--json
+    failures"). The directory's failure comes before any hub is asked."""
+    missing = tmp_path / "no-such-dir"
+    r, w = os.pipe()
+    os.close(r)  # the reader is gone before craze new writes a byte
+    try:
+        out = subprocess.run(
+            [str(craze_bin), "new", "--json", "-C", str(missing), "hello"],
+            stdin=subprocess.DEVNULL,
+            stdout=w,
+            stderr=subprocess.PIPE,
+            env=os.environ.copy(),
+            timeout=6 * WAIT,
+        )
+    finally:
+        os.close(w)
+    assert out.returncode == 1, (out.returncode, out.stderr)
+    assert out.stderr.startswith(b"craze new: ") and str(missing).encode() in out.stderr, out.stderr
+
+
 def test_new_json_refusal_is_the_wire_error(craze_bin: Path, fake_agent_bin: Path, tmp_path: Path) -> None:
     """SF-124: `craze new --json` refused by the hub prints one JSON object on
     stdout, {"error": <the wire's error>}: .error.data.code and .reason are
