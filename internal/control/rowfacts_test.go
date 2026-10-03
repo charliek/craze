@@ -151,7 +151,10 @@ type failStart struct {
 
 func (s *failStart) Start(context.Context) error { return s.err }
 
-// TestARowOfAFailedStartSaysWhy: startFailed and the error's first line.
+// TestARowOfAFailedStartSaysWhy: startFailed and the error's first line, and
+// no model: the stub's snapshot names one ("grok", as an agent's session/new
+// can before a later start step fails), which a failed start's row does not
+// list (r16).
 func TestARowOfAFailedStartSaysWhy(t *testing.T) {
 	boom := errors.New("cursor-agent: not logged in\nrun `cursor-agent login` first")
 	h := newHost(t, withRowFacts(), withoutStart(),
@@ -164,6 +167,12 @@ func TestARowOfAFailedStartSaysWhy(t *testing.T) {
 	row := list(t, a)
 	if !row.StartFailed || row.StartErr != "cursor-agent: not logged in" || row.Activity != protocol.ActivityError || row.Since.IsZero() {
 		t.Fatalf("a failed start's row: %+v", row)
+	}
+	if h.eng.State().CurrentModel == "" {
+		t.Fatal("the stub's snapshot names no model: the next check would be vacuous")
+	}
+	if row.Model != "" {
+		t.Fatalf("a failed start's row lists model %q", row.Model)
 	}
 }
 
