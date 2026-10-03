@@ -330,11 +330,21 @@ func TestForeignTurnRefusalIsNotATurnThatFailed(t *testing.T) {
 	if turnAfter != turnBefore {
 		t.Fatalf("a refused prompt spent turn %d (was %d)", turnAfter, turnBefore)
 	}
+	release() // the fallback turn
+	waitUntil(t, "the foreign turn to end", func() bool { return !s.Snapshot().ForeignTurn })
+	// The scan waits for the fallback's end event, not for the refused call to
+	// have returned: the start-event wait above orders events before the
+	// refusal, and nothing orders the scan after what the refusal itself emits.
+	// The collector appends on one goroutine in emit order, so once the end
+	// event, caused strictly after the refusal, is in the log, an EventError the
+	// refusal emitted before returning is in it too.
+	waitUntil(t, "the foreign turn's end event", func() bool {
+		_, ended := foreignTurnCounts(log.snapshot())
+		return ended > 0
+	})
 	for _, ev := range log.snapshot() {
 		if ev.Type == EventError {
 			t.Fatalf("a refusal must not reach the stream: %v", ev.Err)
 		}
 	}
-	release() // the fallback turn
-	waitUntil(t, "the foreign turn to end", func() bool { return !s.Snapshot().ForeignTurn })
 }
