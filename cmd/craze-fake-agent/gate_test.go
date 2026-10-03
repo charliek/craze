@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"syscall"
@@ -45,6 +46,56 @@ func TestAwaitGateHoldsUntilItsByte(t *testing.T) {
 	case <-done:
 	case <-time.After(10 * time.Second):
 		t.Fatal("the gate did not open on its byte")
+	}
+}
+
+// TestASetGateHoldsAWriterWhileItWaits is CRAZE_FAKE_SET_GATE's wait (plan 035
+// C3): while a set waits, its FIFO has a write end of the wait's own, so a
+// writer that closes without writing — the test's writer for the set before
+// — leaves it empty, not at an end of file: that close is no release, and the
+// next writer's byte cannot be dropped with the pipe. A reader that does not
+// wait tells the two apart (EAGAIN, or a read of 0), and the next byte
+// releases the set. Opening the FIFO for writing completes only once the wait
+// has it open, so the check is a fact, not a timing.
+func TestASetGateHoldsAWriterWhileItWaits(t *testing.T) {
+	fifo := filepath.Join(t.TempDir(), "set-gate")
+	if err := syscall.Mkfifo(fifo, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan struct{})
+	go func() {
+		awaitSetGate(fifo)
+		close(done)
+	}()
+	before, err := os.OpenFile(fifo, os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := before.Close(); err != nil {
+		t.Fatal(err)
+	}
+	fd, err := syscall.Open(fifo, syscall.O_RDONLY|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var b [1]byte
+	n, err := syscall.Read(fd, b[:])
+	_ = syscall.Close(fd)
+	if !errors.Is(err, syscall.EAGAIN) {
+		t.Fatalf("a reader of the waiting set's FIFO: %d, %v; want EAGAIN (empty, with a writer), not an end of file (0)", n, err)
+	}
+	w, err := os.OpenFile(fifo, os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.Close()
+	if _, err := w.Write([]byte{1}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the set was not released by its byte")
 	}
 }
 
