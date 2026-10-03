@@ -406,6 +406,12 @@ func (o *promptOpts) readChain(ctx context.Context, eng *engine.Engine, stopped 
 	// or given up on. signalUntil bounds what this run still waits for afterwards.
 	signalDone := false
 	var signalUntil time.Time
+	// foreignOpen says this reader has seen the agent's own turn start and not
+	// yet seen it end. The session's flag is not enough for the wait after a
+	// signal: the session clears it before it publishes the turn's ended event
+	// (agent's onForeignTurn), so a look in between finds the turn over with its
+	// closing bracket still to come, and an exit there leaves it off stdout.
+	foreignOpen := false
 
 	poll := time.NewTicker(o.foreignPoll())
 	defer poll.Stop()
@@ -432,7 +438,7 @@ func (o *promptOpts) readChain(ctx context.Context, eng *engine.Engine, stopped 
 			st := eng.State()
 			if waiting || gaveUp || (st.Turn != "" && st.Waiting) {
 				switch {
-				case signalDone && !st.ForeignTurn:
+				case signalDone && !st.ForeignTurn && !foreignOpen:
 					return &exitError{code: 1, msg: ""}
 				case !time.Now().Before(signalUntil):
 					if st.ForeignTurn {
@@ -482,6 +488,9 @@ func (o *promptOpts) readChain(ctx context.Context, eng *engine.Engine, stopped 
 				if st := eng.State(); st.Turn != curTurn || !st.Waiting {
 					streamErr = ev.Err
 				}
+			}
+			if ev.Type == agent.EventForeignTurn && ev.ForeignTurn != nil {
+				foreignOpen = ev.ForeignTurn.Running
 			}
 			if ev.Type != agent.EventTurn || ev.Turn == nil {
 				continue
