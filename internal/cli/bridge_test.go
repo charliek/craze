@@ -980,6 +980,25 @@ func TestMatchSessionTiers(t *testing.T) {
 	if got := matchSession([]rundir.Entry{a, d}, "abcd"); len(got) != 2 {
 		t.Fatalf("an ambiguous suffix matched %+v, want both", got)
 	}
+	// An entry whose ids are not known yet (an empty craze id or host id)
+	// never matches a partial id; its known fields still do.
+	blank := rundir.Entry{ProviderSessionID: "prov-x"}
+	if got := matchSession([]rundir.Entry{blank, a}, "abcd"); len(got) != 1 || got[0] != a {
+		t.Fatalf("an entry with empty ids matched a partial: %+v, want a alone", got)
+	}
+	if got := matchSession([]rundir.Entry{blank}, "prov-x"); len(got) != 1 {
+		t.Fatalf("an entry with empty ids lost its exact provider id: %+v", got)
+	}
+	// One id a prefix of another: the whole id is exact and decides; a token
+	// that is only a prefix of both is ambiguous.
+	short := rundir.Entry{CrazeSessionID: "0193eeee", HostID: "h5h5h5h5h5h5"}
+	long := rundir.Entry{CrazeSessionID: "0193eeee-5555", HostID: "h6h6h6h6h6h6"}
+	if got := matchSession([]rundir.Entry{short, long}, "0193eeee"); len(got) != 1 || got[0] != short {
+		t.Fatalf("the whole shorter id matched %+v, want it alone", got)
+	}
+	if got := matchSession([]rundir.Entry{short, long}, "0193ee"); len(got) != 2 {
+		t.Fatalf("a prefix of both matched %+v, want both (ambiguous)", got)
+	}
 }
 
 // TestMatchSessionExactBeatsASuffix: an exact match on any field, even of

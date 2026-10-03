@@ -896,7 +896,10 @@ session the first one started rather than start a second.
 
 **`--json` failures.** With `--json`, every failure other than a usage error
 (exit 2, plain) also prints **one JSON object** on stdout before the exit; the
-stderr line and exit 1 are as without `--json`. A refusal by the hub is the
+stderr line and exit 1 are as without `--json`. The one exception is stdout
+itself failing: a result that cannot be written (stdout closed, a full disk)
+exits 1 with the write's error on stderr, and stdout may hold nothing or part
+of the object. A refusal by the hub is the
 wire's error, whole, under one key, so a script reads `.error.data.code`,
 `.error.data.reason` and `.error.data.cause` where it reads them on the wire:
 
