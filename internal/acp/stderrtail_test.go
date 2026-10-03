@@ -225,8 +225,29 @@ func TestStderrTailAnswersAtItsWait(t *testing.T) {
 				return realSignal(pid, sig)
 			}
 			t.Cleanup(func() { sendSignal = realSignal })
+			// Initialize's goroutine, joined last of all — after the Close, the
+			// KILL's release and the FIFO's close, which are what let a pending
+			// call end — so a failing subtest does not leave it running into
+			// the next (astra r17).
+			var initDone chan struct{}
+			t.Cleanup(func() {
+				if initDone == nil {
+					return
+				}
+				select {
+				case <-initDone:
+				case <-time.After(10 * time.Second):
+					t.Error("Initialize had not returned 10s into the cleanup")
+				}
+			})
 			var sink syncBuffer
-			c := spawnShell(t, `(trap '' TERM; read _ < '`+gate+`'; echo tool-later >&2; sleep 60) & `+
+			// The tool ends with the FIFO, not on a timer: it opens the FIFO
+			// once (fd 3: no second open to block on a writer already gone),
+			// and its second read returns at the test's close of the write end
+			// (an EOF), so it is gone even where no group KILL comes — the
+			// fallback reaper sends none (astra r17) — and a first read that
+			// meets that EOF ends it there too.
+			c := spawnShell(t, `(trap '' TERM; exec 3< '`+gate+`'; read _ <&3 || exit 0; echo tool-later >&2; read _ <&3) & `+
 				`read line; echo agent-last >&2; exit 7`, &sink)
 			group.Store(int64(c.child.pgid))
 			// After spawnShell's, so it runs before the Close: a failing test
@@ -237,7 +258,9 @@ func TestStderrTailAnswersAtItsWait(t *testing.T) {
 			ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
 			defer cancel()
 			initialized := make(chan error, 1)
+			initDone = make(chan struct{})
 			go func() {
+				defer close(initDone)
 				_, err := c.Initialize(ctx)
 				initialized <- err
 			}()
