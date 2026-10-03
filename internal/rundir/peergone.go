@@ -32,6 +32,13 @@ import (
 //     POLLHUP once this side can send no more, which the peer's close does and
 //     its write-shutdown does not.
 //
+// Only those two kinds are supported, a pipe (or FIFO) and a Unix stream
+// socket. A TCP socket whose peer closed gracefully sits in CLOSE_WAIT,
+// writable, with neither POLLHUP nor POLLERR, so the probe would answer "not
+// gone" for ever, and reading its FIN as "gone" would break a legitimate
+// half-close. A datagram socket has no peer to be gone. Both are unsupported,
+// which turns the probe off.
+//
 // POLLOUT itself, room to write, says nothing either way and is ignored. A
 // socket this side has shut for writing itself is reported gone on macOS (and
 // on Linux once the peer has shut its own): nothing could be sent to that peer
@@ -41,8 +48,8 @@ import (
 // reader of a pipe this process writes, or the other end of a Unix stream
 // socket) has gone entirely. supported is false when it cannot tell, and the
 // caller then stops asking, which is never worse than not asking at all: a
-// descriptor that is neither a pipe (or FIFO) nor a socket (a regular file,
-// /dev/null, a terminal), one poll calls invalid (POLLNVAL), or one that
+// descriptor that is neither a pipe (or FIFO) nor a Unix stream socket (a
+// regular file, /dev/null, a terminal, a TCP or datagram socket), one poll calls invalid (POLLNVAL), or one that
 // cannot be reached (rc closed) or read (fstat or poll failing). A poll
 // interrupted by a signal has learned nothing: not gone, still supported, for
 // the next look to ask again.
@@ -58,7 +65,11 @@ func PeerGone(rc syscall.RawConn) (gone, supported bool) {
 			return
 		}
 		switch uint32(st.Mode) & unix.S_IFMT {
-		case unix.S_IFIFO, unix.S_IFSOCK:
+		case unix.S_IFIFO:
+		case unix.S_IFSOCK:
+			if !unixStreamSocket(int(fd)) {
+				return
+			}
 		default:
 			return
 		}
@@ -75,4 +86,19 @@ func PeerGone(rc syscall.RawConn) (gone, supported bool) {
 		return false, false
 	}
 	return revents&(unix.POLLHUP|unix.POLLERR) != 0, true
+}
+
+// unixStreamSocket reports whether the socket fd is a Unix-domain stream
+// socket, the one socket kind whose hang-up bits tell a peer gone from a peer
+// half-closed. A socket whose family or type cannot be read is not.
+func unixStreamSocket(fd int) bool {
+	sa, err := unix.Getsockname(fd)
+	if err != nil {
+		return false
+	}
+	if _, ok := sa.(*unix.SockaddrUnix); !ok {
+		return false
+	}
+	typ, err := unix.GetsockoptInt(fd, unix.SOL_SOCKET, unix.SO_TYPE)
+	return err == nil && typ == unix.SOCK_STREAM
 }

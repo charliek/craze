@@ -560,11 +560,13 @@ characters**; a shorter one matches nothing (`no session <id>`). The hub's
 - stdin's EOF half-closes the socket's write side (`CloseWrite`) and keeps
   reading the socket — the session may still have plenty left to send.
 - From stdin's EOF the bridge looks at its stdout about once a second: a
-  reader gone entirely (a pipe whose reader closed, a socket whose peer
-  closed, as when an SSH connection drops) closes the socket and exits 1,
-  `craze bridge: its reader went away (stdout closed)`, since a quiet session
-  would never write the byte whose failure says so. A stdout that is neither
-  a pipe nor a socket (a file, a terminal) is not looked at.
+  reader gone entirely (a pipe whose reader closed, a Unix stream socket
+  whose peer closed, as when an SSH connection drops) closes the socket and
+  exits 1, `craze bridge: its reader went away (stdout closed)`, since a quiet
+  session would never write the byte whose failure says so. The look starts at
+  stdin's EOF; a reader lost while stdin is still open is found by the next
+  failed write instead. A stdout that is neither a pipe nor a Unix stream
+  socket (a file, a terminal, a TCP socket) is not looked at.
 - The socket's own EOF ends the pump and exits 0.
 
 **The error contract: every failure is one line on stderr, exit 1.** That

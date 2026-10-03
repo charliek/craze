@@ -81,7 +81,10 @@ import (
 // probed at once and then every clientProbeEvery (watchClient,
 // rundir.PeerGone: no byte written), and a client gone closes both legs. A
 // client that only half-closed, and still reads, is not gone: it keeps the
-// splice and is delivered everything the host still sends.
+// splice and is delivered everything the host still sends. The probe arms only
+// at that EOF: a client that closes while upstream is still blocked writing to
+// a host that stopped reading is reaped by the write-stall bound (spliceStall)
+// instead.
 
 // The splice's bounds: variables only so a test can change them (never in
 // parallel).

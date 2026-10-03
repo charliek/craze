@@ -5,6 +5,7 @@ package rundir
 import (
 	"errors"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"sync"
@@ -109,6 +110,61 @@ func TestPeerGoneOnASocketItsPeerHalfClosed(t *testing.T) {
 		t.Fatal(err)
 	}
 	wantPeerGone(t, "a socket whose peer has closed", ours, true, true)
+}
+
+// TestPeerGoneCannotTellATCPOrDatagramSocket: only a Unix stream socket's
+// hang-up bits tell a peer gone from a peer half-closed. A TCP connection
+// whose peer closed gracefully sits in CLOSE_WAIT, writable, with neither
+// POLLHUP nor POLLERR, so it is unsupported both before and after the peer
+// closes (never "supported, and never gone"); a Unix datagram socket has no
+// peer to be gone.
+func TestPeerGoneCannotTellATCPOrDatagramSocket(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	accepted := make(chan net.Conn, 1)
+	go func() {
+		c, aerr := ln.Accept()
+		if aerr != nil {
+			close(accepted)
+			return
+		}
+		accepted <- c
+	}()
+	client, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = client.Close() })
+	server, ok := <-accepted
+	if !ok {
+		t.Fatal("accept failed")
+	}
+	t.Cleanup(func() { _ = server.Close() })
+	tcpFile, err := client.(*net.TCPConn).File()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = tcpFile.Close() })
+	wantPeerGone(t, "a TCP socket whose peer is open", tcpFile, false, false)
+	if err := server.Close(); err != nil {
+		t.Fatal(err)
+	}
+	// The peer's FIN has landed: this side reads its end.
+	if n, err := client.Read(make([]byte, 8)); n != 0 || !errors.Is(err, io.EOF) {
+		t.Fatalf("after the peer's close this side read %d bytes (%v), want its end", n, err)
+	}
+	wantPeerGone(t, "a TCP socket whose peer has closed", tcpFile, false, false)
+
+	fds, err := unix.Socketpair(unix.AF_UNIX, unix.SOCK_DGRAM, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dgram := os.NewFile(uintptr(fds[0]), "dgram")
+	t.Cleanup(func() { _ = dgram.Close(); _ = unix.Close(fds[1]) })
+	wantPeerGone(t, "a Unix datagram socket", dgram, false, false)
 }
 
 // TestPeerGoneCannotTellAFileOrADevice: a regular file and /dev/null are

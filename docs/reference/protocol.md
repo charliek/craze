@@ -1370,8 +1370,11 @@ Closing is carried through:
   stops counting toward the host's idle exit — and still answers what it
   admitted, which reaches the client;
 - a client gone entirely, not just half-closed, ends the splice within about
-  a second: the hub closes both legs, however quiet the host is (a client
-  that only half-closed, and still reads, keeps the splice);
+  a second once the splice has read the client's EOF and half-closed the host
+  leg: the hub closes both legs, however quiet the host is (a client that
+  only half-closed, and still reads, keeps the splice). A client that closes
+  while the splice is still blocked writing to a host that has stopped reading
+  has not reached that point, and is reaped by the write-stall bound instead;
 - the host's end (its connection closed) closes the client's connection;
 - any other failure closes both.
 
