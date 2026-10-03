@@ -19,9 +19,17 @@ var kevent = unix.Kevent
 // test can fail it; nothing else replaces it.
 var kinfoProc = unix.SysctlKinfoProc
 
+// kinfoProcs is unix.SysctlKinfoProcSlice, the group scan's: a variable so a
+// test can hand it a listing; nothing else replaces it.
+var kinfoProcs = unix.SysctlKinfoProcSlice
+
 // szomb is a zombie's p_stat, SZOMB in sys/proc.h, which x/sys/unix does not
 // name.
 const szomb = 5
+
+// pWexit is the p_flag bit of a process working on its exit, P_WEXIT in XNU's
+// bsd/sys/proc.h, which x/sys/unix does not name.
+const pWexit = 0x00002000
 
 // exitPoll is how often the exit watch, while it waits, also asks the kernel
 // whether the process is a zombie already (isZombie): a belt to the kqueue's
@@ -180,19 +188,24 @@ func awaitZombie(pid int) error {
 	}
 }
 
-// groupHasLiveMember reports whether a process that is not a zombie is in the
-// process group pgid: the kernel's kinfo_proc for every process in it (sysctl
-// kern.proc.pgrp, one snapshot), whose p_stat is SZOMB for a zombie. A macOS
-// process becomes a zombie only once its last thread has exited.
+// groupHasLiveMember reports whether the process group pgid has a live member
+// (liveMember): the kernel's kinfo_proc for every process in it (sysctl
+// kern.proc.pgrp, one snapshot), whose p_stat is SZOMB for a zombie and whose
+// p_flag has P_WEXIT for a process in its exit. The agent leads the group, so
+// pgid is its pid too. A macOS process becomes a zombie only once its last
+// thread has exited.
 func groupHasLiveMember(pgid int) (bool, error) {
-	procs, err := unix.SysctlKinfoProcSlice("kern.proc.pgrp", pgid)
+	procs, err := kinfoProcs("kern.proc.pgrp", pgid)
 	if err != nil {
 		return true, err
 	}
-	for _, p := range procs {
-		if p.Proc.P_stat != szomb {
-			return true, nil
+	entries := make([]procEntry, len(procs))
+	for i, p := range procs {
+		entries[i] = procEntry{
+			pid:     int(p.Proc.P_pid),
+			zombie:  p.Proc.P_stat == szomb,
+			exiting: p.Proc.P_flag&pWexit != 0,
 		}
 	}
-	return false, nil
+	return liveMember(entries, pgid), nil
 }
