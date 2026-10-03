@@ -429,14 +429,18 @@ func (o *promptOpts) readChain(ctx context.Context, eng *engine.Engine, stopped 
 	// yet seen it end. The session's flag is not enough for the wait after a
 	// signal: the session clears it before it publishes the turn's ended event
 	// (agent's onForeignTurn), so a look in between finds the turn over with its
-	// closing bracket still to come, and an exit there leaves it off stdout.
+	// closing bracket still to come, and an exit there leaves it off stdout. Nor
+	// is this enough alone: the session raises the flag before it publishes the
+	// started, so the flag can say a turn is open whose opening bracket is still
+	// to come. The wait after a signal reads the two together.
 	foreignOpen := false
 	// held says the chain's last ending has been read and kept back, and heldErr
 	// is what that ending returns. An ending that arrives after a signal can be
 	// the stop's own doing — a refused claim the stop settled, or a turn that
 	// settled once the stop had cleared its queue — with the agent's turn still
-	// open on this reader's stream, and returning it at once would leave that
-	// turn's closing bracket off stdout as surely as an exit on the flag alone.
+	// open, on this reader's stream or in the session's flag (foreignOpen), and
+	// returning it at once would leave that turn's closing bracket off stdout as
+	// surely as an exit on the flag alone.
 	// So it waits with the states below, and ends the run when that wait does.
 	//
 	// Holding is the run's last reading begun early (finishRun), and it reads by
@@ -567,11 +571,20 @@ func (o *promptOpts) readChain(ctx context.Context, eng *engine.Engine, stopped 
 				if o.afterTurnEnded != nil {
 					o.afterTurnEnded()
 				}
-				if over && ctx.Err() != nil && foreignOpen {
+				if over && ctx.Err() != nil && (foreignOpen || eng.State().ForeignTurn) {
 					// The chain is over, but after a signal and with the agent's
-					// own turn seen to start and not yet to end: the run holds this
-					// ending and waits for that turn's closing bracket, bounded as
-					// every wait after a signal is, and then returns it (held).
+					// own turn still open: the run holds this ending and waits for
+					// that turn's closing bracket, bounded as every wait after a
+					// signal is, and then returns it (held).
+					//
+					// Open is either half, as at the top of the loop: the turn seen
+					// to start and not yet to end, or the session's flag. The flag
+					// alone is a turn whose started is still to come: the session
+					// raises it before it publishes that started (agent's
+					// onForeignTurn), and this ending, which the engine publishes on
+					// a path of its own, can reach the stream in between. Returning
+					// here would leave that started to the final sweep, with no
+					// ended behind it.
 					held, heldErr = true, err
 					continue
 				}
