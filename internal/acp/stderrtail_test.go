@@ -2,9 +2,11 @@ package acp
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -163,11 +165,15 @@ func clip(s string) string {
 
 // TestStderrTailAnswersAtItsWait: a tool the agent left in its group, immune
 // to SIGTERM, holds the stderr pipe open after the agent exits, so the copy
-// runs on until the reaper's group cleanup KILLs it. The call pending at the
-// exit still fails at once with the exit's status (X72), and StderrTail, its
-// wait up, answers with what has arrived — the agent's last line — while the
-// copy is still running; the copy carries on unaffected, and what the tool
-// writes afterwards reaches the sink and the tail.
+// runs on until the reaper's group cleanup KILLs it. StderrTail, its wait up,
+// answers with what has arrived — the agent's last line — while the copy is
+// still running; the copy carries on unaffected, and what the tool writes
+// afterwards reaches the sink and the tail. The call pending at the exit
+// fails with the exit's status however the exit was observed: at once when
+// the observation carried the status (X72) — always on Linux, and on macOS
+// unless its zombie poll saw the exit before the kqueue's event did — and at
+// the reap when it did not (X71), the path the second subtest forces
+// (withoutStatus).
 //
 // Nothing here races the reaper (astra r11 6). The tool opens its FIFO only
 // after its trap, and the test's end of it opens only once the tool's has
@@ -178,67 +184,125 @@ func clip(s string) string {
 // to reach that KILL — its TERM sent and ignored — and only then asks for the
 // tail and lets the tool go. The grace's own expiry is the reaper's tests'
 // (TestWhatTheAgentLeftBehindDiesAtItsExit).
+//
+// Nor does the test wait on what the held KILL holds up (astra r13 3): an
+// exit observed without its status fails the pending call only at the reap,
+// which comes after that KILL. So Initialize runs on a goroutine of its own,
+// under a bound of its own, and the test goroutine reaches the KILL, asks
+// for the tail and lets the tool and the KILL go without it, collecting its
+// answer after. That the call failed before the reap is checked only where
+// the status was out before the reaper reached its KILL. A failure anywhere
+// lets the tool go, then the KILL, before the Close, so nothing is left
+// running.
 func TestStderrTailAnswersAtItsWait(t *testing.T) {
-	gate := filepath.Join(t.TempDir(), "go")
-	if err := syscall.Mkfifo(gate, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	// The hold on the cleanup's KILL, to this agent's group alone. Put in
-	// before the Spawn, so it is taken out after the Close.
-	var group atomic.Int64
-	held, let := make(chan struct{}), make(chan struct{})
-	var holdOnce, letOnce sync.Once
-	letGo := func() { letOnce.Do(func() { close(let) }) }
-	realSignal := sendSignal
-	sendSignal = func(pid int, sig syscall.Signal) error {
-		if sig == syscall.SIGKILL && pid == -int(group.Load()) {
-			holdOnce.Do(func() { close(held) })
-			<-let
-		}
-		return realSignal(pid, sig)
-	}
-	t.Cleanup(func() { sendSignal = realSignal })
-	var sink syncBuffer
-	c := spawnShell(t, `(trap '' TERM; read _ < '`+gate+`'; echo tool-later >&2; sleep 60) & `+
-		`read line; echo agent-last >&2; exit 7`, &sink)
-	group.Store(int64(c.child.pgid))
-	// After spawnShell's, so it runs before the Close: a failing test lets
-	// the KILL go.
-	t.Cleanup(letGo)
-	fifo := openWhenRead(t, gate)
-	_, err := c.Initialize(t.Context())
-	var ee *ExitError
-	if !errors.As(err, &ee) || ee.ExitCode() != 7 {
-		t.Fatalf("Initialize = %v, want it failed with the agent's exit status 7", err)
-	}
-	sink.waitFor(t, "agent-last\n")
-	select {
-	case <-held:
-	case <-time.After(20 * time.Second):
-		t.Fatal("the reaper never reached its cleanup's KILL of the agent's group")
-	}
-	const wait = 100 * time.Millisecond
-	asked := time.Now()
-	got := c.StderrTail(wait)
-	if took := time.Since(asked); took < wait {
-		t.Fatalf("StderrTail answered after %v, before its %v wait was up, with the copy still running", took, wait)
-	}
-	select {
-	case <-c.child.stderrDone:
-		t.Fatal("the copy had ended: the tool holding the pipe is gone, so this proves nothing")
-	default:
-	}
-	if string(got) != "agent-last\n" {
-		t.Fatalf("StderrTail = %q, want what had arrived, %q", got, "agent-last\n")
-	}
-	if _, err := fifo.Write([]byte("\n")); err != nil {
-		t.Fatalf("letting the tool go: %v", err)
-	}
-	sink.waitFor(t, "tool-later\n")
-	letGo()
-	_ = c.Close()
-	if got := string(c.StderrTail(0)); got != "agent-last\ntool-later\n" {
-		t.Fatalf("StderrTail after the reap = %q, want both lines", got)
+	for _, tc := range []struct {
+		name     string
+		noStatus bool
+	}{
+		{"as the platform observes the exit", false},
+		{"an exit observed without its status", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.noStatus {
+				withoutStatus(t)
+			}
+			gate := filepath.Join(t.TempDir(), "go")
+			if err := syscall.Mkfifo(gate, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			// The hold on the cleanup's KILL, to this agent's group alone. Put
+			// in before the Spawn, so it is taken out after the Close.
+			var group atomic.Int64
+			held, let := make(chan struct{}), make(chan struct{})
+			var holdOnce, letOnce sync.Once
+			letGo := func() { letOnce.Do(func() { close(let) }) }
+			realSignal := sendSignal
+			sendSignal = func(pid int, sig syscall.Signal) error {
+				if sig == syscall.SIGKILL && pid == -int(group.Load()) {
+					holdOnce.Do(func() { close(held) })
+					<-let
+				}
+				return realSignal(pid, sig)
+			}
+			t.Cleanup(func() { sendSignal = realSignal })
+			var sink syncBuffer
+			c := spawnShell(t, `(trap '' TERM; read _ < '`+gate+`'; echo tool-later >&2; sleep 60) & `+
+				`read line; echo agent-last >&2; exit 7`, &sink)
+			group.Store(int64(c.child.pgid))
+			// After spawnShell's, so it runs before the Close: a failing test
+			// lets the KILL go. openWhenRead's, after it, lets the tool go
+			// first.
+			t.Cleanup(letGo)
+			fifo := openWhenRead(t, gate)
+			ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
+			defer cancel()
+			initialized := make(chan error, 1)
+			go func() {
+				_, err := c.Initialize(ctx)
+				initialized <- err
+			}()
+			failedWith7 := func(err error) {
+				t.Helper()
+				var ee *ExitError
+				if !errors.As(err, &ee) || ee.ExitCode() != 7 {
+					t.Fatalf("Initialize = %v, want it failed with the agent's exit status 7", err)
+				}
+			}
+			sink.waitFor(t, "agent-last\n")
+			select {
+			case <-held:
+			case <-time.After(20 * time.Second):
+				t.Fatal("the reaper never reached its cleanup's KILL of the agent's group")
+			}
+			// The reaper is held before its reap. An observation that carried
+			// the status published it before the cleanup began, and the call
+			// pending at the exit fails with it then; one that did not leaves
+			// both to the reap.
+			statusAtExit := isClosed(c.child.statusCh)
+			switch {
+			case tc.noStatus && statusAtExit:
+				t.Fatalf("a status (%v) published at an exit observed without one", c.child.exitErr)
+			case !tc.noStatus && !statusAtExit && runtime.GOOS != "darwin":
+				t.Fatal("the observation carried no status: off macOS it always does")
+			case !tc.noStatus && !statusAtExit:
+				t.Log("macOS observed the exit without its status: the call fails at the reap")
+			}
+			if statusAtExit {
+				select {
+				case err := <-initialized:
+					failedWith7(err)
+				case <-time.After(10 * time.Second):
+					t.Fatal("the call pending at the exit did not fail at its status, the reaper held before its reap")
+				}
+			}
+			const wait = 100 * time.Millisecond
+			asked := time.Now()
+			got := c.StderrTail(wait)
+			if took := time.Since(asked); took < wait {
+				t.Fatalf("StderrTail answered after %v, before its %v wait was up, with the copy still running", took, wait)
+			}
+			select {
+			case <-c.child.stderrDone:
+				t.Fatal("the copy had ended: the tool holding the pipe is gone, so this proves nothing")
+			default:
+			}
+			if string(got) != "agent-last\n" {
+				t.Fatalf("StderrTail = %q, want what had arrived, %q", got, "agent-last\n")
+			}
+			if _, err := fifo.Write([]byte("\n")); err != nil {
+				t.Fatalf("letting the tool go: %v", err)
+			}
+			sink.waitFor(t, "tool-later\n")
+			letGo()
+			if !statusAtExit {
+				// The reap's status, within Initialize's bound.
+				failedWith7(<-initialized)
+			}
+			_ = c.Close()
+			if got := string(c.StderrTail(0)); got != "agent-last\ntool-later\n" {
+				t.Fatalf("StderrTail after the reap = %q, want both lines", got)
+			}
+		})
 	}
 }
 

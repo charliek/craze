@@ -601,9 +601,10 @@ start fails — its agent binary missing, a locked keychain — or does not end
 within 60 s is `not_accepting`, reason `start_failed`, `data.cause` the
 host's first error line. For a start that failed because its agent exited
 with a non-zero status or a signal after craze sent `initialize`, that line
-is craze's error followed by the agent's last non-blank stderr lines — what
-reached craze within half a second of the exit, sanitized, folded onto the
-line with ` / `, at most 512 bytes, not redacted: `acp: agent exited: exit
+is craze's error followed by the agent's last non-blank stderr lines — from
+what craze had captured when the failed start collected them, first waiting up
+to half a second for its copy of that stderr to finish; sanitized, folded onto
+the line with ` / `, at most 512 bytes, not redacted: `acp: agent exited: exit
 status 1: Error: Your macOS login keychain is locked. / Run security
 unlock-keychain and try again.` — and on macOS, when the host runs outside
 the GUI login session, a hint naming the hub's pid (below). An agent that

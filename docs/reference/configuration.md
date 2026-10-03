@@ -376,9 +376,10 @@ A host's log can hold what its agent printed to stderr; treat it like the
 
 A start that fails because its agent exited — with a non-zero status or a
 signal, after craze sent it `initialize` — also carries **the agent's last
-non-blank stderr lines** in its error: what the agent wrote that reached craze
-within half a second of the exit, sanitized, folded onto one line with ` / `,
-at most 512 bytes (a longer last line keeps its end). They go wherever a
+non-blank stderr lines** in its error, from the stderr craze had captured when
+the failed start collected it — first waiting up to half a second for its copy
+of that stderr to finish — sanitized, folded onto one line with ` / `, at most
+512 bytes (a longer last line keeps its end). They go wherever a
 detached host's start failure goes: a client attached to it,
 `session.create`'s `data.cause`, `craze new`'s line. An agent that exits
 before craze sends `initialize`, or exits 0, gets craze's own error only. The

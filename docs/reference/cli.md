@@ -884,10 +884,11 @@ failed (`the session did not start: …`, its host's error), a
 directory that does not exist, no provider. When a start failed because the
 agent exited with a non-zero status or a signal after craze sent it
 `initialize`, the error ends with **the agent's own last words**: its last
-non-blank stderr lines that reached craze within half a second of the exit,
-sanitized and folded onto the line with ` / `, at most 512 bytes, and **not
-redacted** — `acp: agent exited: exit status 1: Error: Your macOS login
-keychain is locked. / Run security unlock-keychain and try again.` for
+non-blank stderr lines, from what craze had captured when the failed start
+collected them — first waiting up to half a second for its copy of that stderr
+to finish — sanitized and folded onto the line with ` / `, at most 512 bytes,
+and **not redacted** — `acp: agent exited: exit status 1: Error: Your macOS
+login keychain is locked. / Run security unlock-keychain and try again.` for
 `cursor` on a locked keychain. An agent that exits before craze sends
 `initialize`, or exits 0, gets craze's own words only. Everything the agent
 printed is in the [host's log](configuration.md#host-logs). So is a session that started and
