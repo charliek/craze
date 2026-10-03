@@ -806,7 +806,7 @@ func TestSignInSaysWhyCrazeIsNotListening(t *testing.T) {
 				}
 				return
 			}
-			if at < 1 || p.rows[at-1].kind != signInRowAddress || p.rows[at+1].kind != signInRowHint || !strings.Contains(plainView(m), tc.want) {
+			if at < 1 || at+1 >= len(p.rows) || p.rows[at-1].kind != signInRowAddress || p.rows[at+1].kind != signInRowHint || !strings.Contains(plainView(m), tc.want) {
 				t.Fatalf("the reason is not a line between the address and the hint:\n%s", plainView(m))
 			}
 		})
