@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -835,6 +836,37 @@ func TestAHalfClosedConnectionKeepsDelivering(t *testing.T) {
 		t.Fatalf("the reset: %+v", rp)
 	}
 	a.expectClosed()
+}
+
+// TestTheHostKeepsAQuietHalfClosedAttachment (plan 035 C9, SF-123): the rule
+// SF-123's fix keeps. craze bridge and the hub's splice end a client gone
+// entirely; the host never ends a half-closed one. An attached client that
+// half-closes has left the count (the host has read its end), and its
+// connection stays open while the session says nothing for longer than those
+// one-second looks: a read across 2 s finds neither a line nor the end. What
+// the session says next is delivered. The negative control: a host that
+// closed a half-closed attachment at its peer's end, or once it had been
+// quiet a second, fails the quiet read.
+func TestTheHostKeepsAQuietHalfClosedAttachment(t *testing.T) {
+	h := newHost(t)
+	l := watchAttachments(h)
+	a := h.dial()
+	a.sayHello(nil)
+	a.attach(attachParams(h))
+	a.note(protocol.NotifySynchronized)
+	l.wantCounts(t, "attached", 1)
+	if err := a.nc.CloseWrite(); err != nil {
+		t.Fatal(err)
+	}
+	l.wantCounts(t, "half-closed", 1, 0)
+	_ = a.nc.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if line, err := a.lr.ReadLine(); !errors.Is(err, os.ErrDeadlineExceeded) {
+		t.Fatalf("a quiet half-closed attachment read %q (%v), want nothing at all: the host wrote or closed", line, err)
+	}
+	h.publish(agent.Event{Type: agent.EventText, Text: "after the quiet"})
+	if _, ev := eventOf(t, a.note(protocol.NotifyEvent)); ev.Type != agent.EventText || ev.Text != "after the quiet" {
+		t.Fatalf("after the quiet: %+v", ev)
+	}
 }
 
 // TestAnOwedReadyIsNotLostToTheClose (§3.4, astra r8 5): a when: "now" attach

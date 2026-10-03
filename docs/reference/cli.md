@@ -539,6 +539,12 @@ several is an error listing them on one line.
 - stdout carries only bytes read off the socket, flushed as they arrive.
 - stdin's EOF half-closes the socket's write side (`CloseWrite`) and keeps
   reading the socket — the session may still have plenty left to send.
+- From stdin's EOF the bridge looks at its stdout about once a second: a
+  reader gone entirely (a pipe whose reader closed, a socket whose peer
+  closed, as when an SSH connection drops) closes the socket and exits 1,
+  `craze bridge: its reader went away (stdout closed)`, since a quiet session
+  would never write the byte whose failure says so. A stdout that is neither
+  a pipe nor a socket (a file, a terminal) is not looked at.
 - The socket's own EOF ends the pump and exits 0.
 
 **The error contract: every failure is one line on stderr, exit 1.** That

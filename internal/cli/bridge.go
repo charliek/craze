@@ -234,6 +234,15 @@ const pumpChunk = 64 << 10
 // An error there — a read off stdin, or a write to conn — ends the pump at
 // once with that error, without waiting for conn to end on its own, mirroring
 // roost's select (bridge.rs:93-108).
+//
+// The pump keeps reading conn after stdin's EOF only while stdout has a
+// reader to take what it reads (plan 035 C9, SF-123). An SSH connection that
+// drops ends stdin and stdout's reader together, and a quiet session writes
+// nothing, so no EPIPE ever says so: the bridge, and the host's or the hub's
+// end of its socket, would linger. So from stdin's EOF the pump probes stdout
+// (watchReader), and a reader gone entirely closes the socket and ends the
+// pump with errReaderGone. A reader that is still there, a client that only
+// reads to the end, is relayed every byte as before.
 func pump(stdin io.Reader, stdout io.Writer, conn *net.UnixConn) error {
 	ignoreSIGPIPE()
 	downCh := make(chan error, 1)
@@ -248,9 +257,82 @@ func pump(stdin io.Reader, stdout io.Writer, conn *net.UnixConn) error {
 		if err != nil {
 			return err
 		}
-		// stdin's clean EOF: the half-close is already done. Keep waiting on
-		// the socket, which owns the exit.
-		return <-downCh
+	}
+	// stdin's clean EOF: the half-close is already done. Keep waiting on the
+	// socket, which owns the exit, unless stdout's reader goes first. The
+	// probe has stopped by the time the pump returns.
+	gone, stop := watchReader(stdout)
+	defer stop()
+	select {
+	case err := <-downCh:
+		return err
+	case <-gone:
+		_ = conn.Close()
+		return errReaderGone
+	}
+}
+
+// errReaderGone ends a pump whose stdout's reader has gone entirely
+// (watchReader): craze bridge's "its reader went away" line, exit 1.
+var errReaderGone = errors.New("its reader went away (stdout closed)")
+
+// readerProbeEvery is how often the pump's probe looks at stdout once stdin
+// has ended (watchReader).
+const readerProbeEvery = time.Second
+
+// readerProbed is told what each of the probe's looks at stdout found
+// (rundir.PeerGone's answer), and readerProbeEnded that the probe has
+// stopped: seams for the pump's tests, no-ops in production.
+var (
+	readerProbed     = func(gone, supported bool) {}
+	readerProbeEnded = func() {}
+)
+
+// watchReader probes stdout for a reader gone entirely, at once and then
+// every readerProbeEvery, with rundir.PeerGone, which writes nothing: gone is
+// closed when it finds one. stop ends the probe and returns once it has
+// stopped. Only a stdout whose descriptor can be reached (an *os.File, or
+// any other syscall.Conn) is probed, through its SyscallConn, never Fd, which
+// would switch it to blocking mode. A probe that cannot tell (a regular file,
+// a terminal: PeerGone's supported false) stops at its first look, and gone
+// is then never closed: the pump goes on as it did before the probe.
+func watchReader(stdout io.Writer) (gone <-chan struct{}, stop func()) {
+	sc, ok := stdout.(syscall.Conn)
+	if !ok {
+		return nil, func() {}
+	}
+	rc, err := sc.SyscallConn()
+	if err != nil {
+		return nil, func() {}
+	}
+	goneCh := make(chan struct{})
+	quit := make(chan struct{})
+	ended := make(chan struct{})
+	go func() {
+		defer close(ended)
+		defer readerProbeEnded()
+		tick := time.NewTicker(readerProbeEvery)
+		defer tick.Stop()
+		for {
+			g, supported := rundir.PeerGone(rc)
+			readerProbed(g, supported)
+			if !supported {
+				return
+			}
+			if g {
+				close(goneCh)
+				return
+			}
+			select {
+			case <-quit:
+				return
+			case <-tick.C:
+			}
+		}
+	}()
+	return goneCh, func() {
+		close(quit)
+		<-ended
 	}
 }
 

@@ -71,6 +71,17 @@ import (
 // connection stays a client — keeping the hub from its idle exit — until both
 // legs are closed. The teardown ends a splice in two steps (server.closeAll):
 // both legs half-closed, then closed.
+//
+// A client gone entirely, not just half-closed, ends the splice too (plan 035
+// C9, SF-123): from the client's EOF nothing reads the client leg, and a host
+// that keeps a half-closed client's attachment (S2's half-close) and has
+// nothing to say would never write the byte that fails on it, so a client
+// whose SSH connection dropped would leave its splice, and a hub client,
+// behind for good. So once the host leg is half-closed, the client leg is
+// probed at once and then every clientProbeEvery (watchClient,
+// rundir.PeerGone: no byte written), and a client gone closes both legs. A
+// client that only half-closed, and still reads, is not gone: it keeps the
+// splice and is delivered everything the host still sends.
 
 // The splice's bounds: variables only so a test can change them (never in
 // parallel).
@@ -89,6 +100,10 @@ var (
 
 // spliceChunk is a splice copy's buffer: 32 KiB per direction.
 const spliceChunk = 32 << 10
+
+// clientProbeEvery is how often a splice whose client has half-closed looks
+// at the client leg for a client gone entirely (watchClient).
+const clientProbeEvery = time.Second
 
 // spliceAttempts is how many attempts spliceStall is cut into, as the host's
 // writer cuts its own (internal/control's writeAttempts): each socket write
@@ -267,6 +282,11 @@ type splice struct {
 	// up is the client-to-host direction's counts, down the host-to-client
 	// one's: what the tests see of the backpressure.
 	up, down flow
+	// probed, when set, is told what each of watchClient's looks at the
+	// client leg found (rundir.PeerGone's answer): a seam for the tests,
+	// which set it from the handedOff hook before the splice runs; nil in
+	// production.
+	probed func(gone, supported bool)
 }
 
 // flow is one direction of a splice: the bytes it has read and written, and
@@ -292,8 +312,9 @@ func (sp *splice) run() {
 }
 
 // upstream is the client-to-host direction: the buffered bytes first, then
-// the copy. The client's EOF closes the host leg's writing half; an error
-// closes both legs.
+// the copy. The client's EOF closes the host leg's writing half, and from
+// then the client leg is watched for a client gone entirely (watchClient);
+// an error closes both legs.
 func (sp *splice) upstream() {
 	if len(sp.pre) > 0 {
 		sp.up.read.Add(int64(len(sp.pre)))
@@ -308,6 +329,45 @@ func (sp *splice) upstream() {
 	}
 	if err := sp.host.CloseWrite(); err != nil {
 		sp.close()
+		return
+	}
+	go sp.watchClient()
+}
+
+// watchClient probes the client leg, at once and then every
+// clientProbeEvery, for a client gone entirely (rundir.PeerGone), until the
+// splice has ended (done). A client gone closes both legs, which ends the
+// splice: the host leg's read in downstream, otherwise waiting on a host with
+// nothing to say, fails with it. A leg the probe cannot tell about (PeerGone's
+// supported false, a leg already closed among them) stops the watch, and the
+// splice goes on as it did before the probe. The teardown's half-close of a
+// client leg already at its EOF reads as a client gone too (rundir.PeerGone:
+// nothing can be sent either way), which may close the legs before the
+// teardown's own close does; nothing could have reached that client anyway.
+func (sp *splice) watchClient() {
+	rc, err := sp.client.SyscallConn()
+	if err != nil {
+		return
+	}
+	tick := time.NewTicker(clientProbeEvery)
+	defer tick.Stop()
+	for {
+		gone, supported := rundir.PeerGone(rc)
+		if sp.probed != nil {
+			sp.probed(gone, supported)
+		}
+		if !supported {
+			return
+		}
+		if gone {
+			sp.close()
+			return
+		}
+		select {
+		case <-sp.done:
+			return
+		case <-tick.C:
+		}
 	}
 }
 

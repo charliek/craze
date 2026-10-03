@@ -9,11 +9,14 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
 	"github.com/spf13/cobra"
+	"golang.org/x/sys/unix"
 
+	"github.com/charliek/craze/internal/protocol"
 	"github.com/charliek/craze/internal/rundir"
 )
 
@@ -492,6 +495,322 @@ func TestPumpStdoutWriteFailureExitsWithAnError(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "write stdout") {
 		t.Fatalf("got %v, want it to name the stdout write", err)
+	}
+}
+
+// ------------------------------------------------- the stdout probe (SF-123)
+
+// probeWait bounds a wait on the probe or the server that is not itself a
+// timing assertion: generous, for a starved CPU.
+const probeWait = 10 * time.Second
+
+// probeLook is one of the pump's probe's looks at stdout: rundir.PeerGone's
+// answer.
+type probeLook struct{ gone, supported bool }
+
+// probeWatch is the pump's probe as one test sees it (readerProbed,
+// readerProbeEnded): each look on looks, and ended closed once it stopped.
+type probeWatch struct {
+	looks chan probeLook
+	ended chan struct{}
+}
+
+// watchProbe installs a probeWatch for one test (never in parallel), the
+// seams restored when it ends.
+func watchProbe(t *testing.T) *probeWatch {
+	t.Helper()
+	pw := &probeWatch{looks: make(chan probeLook, 64), ended: make(chan struct{})}
+	prevProbed, prevEnded := readerProbed, readerProbeEnded
+	var once sync.Once
+	readerProbed = func(gone, supported bool) {
+		select {
+		case pw.looks <- probeLook{gone, supported}:
+		default:
+		}
+	}
+	readerProbeEnded = func() { once.Do(func() { close(pw.ended) }) }
+	t.Cleanup(func() { readerProbed, readerProbeEnded = prevProbed, prevEnded })
+	return pw
+}
+
+// look checks the probe's next look found (gone, supported), within
+// probeWait.
+func (pw *probeWatch) look(t *testing.T, gone, supported bool) {
+	t.Helper()
+	select {
+	case l := <-pw.looks:
+		if l.gone != gone || l.supported != supported {
+			t.Fatalf("the probe's look found (gone %v, supported %v), want (%v, %v)", l.gone, l.supported, gone, supported)
+		}
+	case <-time.After(probeWait):
+		t.Fatalf("the probe took no look within %v", probeWait)
+	}
+}
+
+// acceptPump is the server's end of the connection the pump dialled.
+func acceptPump(t *testing.T, ln *net.UnixListener) *net.UnixConn {
+	t.Helper()
+	_ = ln.SetDeadline(time.Now().Add(probeWait))
+	sc, err := ln.AcceptUnix()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = sc.Close() })
+	return sc
+}
+
+// readToEnd is everything the server reads up to the pump's half-close
+// (stdin's EOF), within probeWait.
+func readToEnd(t *testing.T, sc *net.UnixConn) string {
+	t.Helper()
+	_ = sc.SetReadDeadline(time.Now().Add(probeWait))
+	b, err := io.ReadAll(sc)
+	if err != nil {
+		t.Fatalf("the server's read up to the pump's half-close: %v", err)
+	}
+	return string(b)
+}
+
+// stdoutPipe is an os.Pipe for the pump's stdout: closed, both ends, when
+// the test ends.
+func stdoutPipe(t *testing.T) (r, w *os.File) {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = r.Close(); _ = w.Close() })
+	return r, w
+}
+
+// pumpReturns is the pump's error once it returns, within d of now.
+func pumpReturns(t *testing.T, done <-chan error, d time.Duration, what string) error {
+	t.Helper()
+	select {
+	case err := <-done:
+		return err
+	case <-time.After(d):
+		t.Fatalf("the pump did not return within %v %s", d, what)
+		return nil
+	}
+}
+
+// wantEPIPE checks the server's next write fails with EPIPE: the pump closed
+// the socket.
+func wantEPIPE(t *testing.T, sc *net.UnixConn) {
+	t.Helper()
+	_ = sc.SetWriteDeadline(time.Now().Add(probeWait))
+	if _, err := sc.Write([]byte("anyone?\n")); !errors.Is(err, syscall.EPIPE) {
+		t.Fatalf("the server's write after the pump ended: %v, want EPIPE (the socket closed)", err)
+	}
+}
+
+// TestPumpEndsOnceStdoutsReaderGoes (plan 035 C9, SF-123): after stdin's
+// EOF, a stdout pipe whose reader closes (an SSH connection dropped) ends the
+// pump within 3 s of the close though the session says nothing at all: it
+// returns errReaderGone, and it closed the socket, so the server's next write
+// fails with EPIPE. The probe's first look, before the close, found the
+// reader there. The negative control: with the probe off, nothing ever ends
+// this pump, and the bound fails.
+func TestPumpEndsOnceStdoutsReaderGoes(t *testing.T) {
+	pw := watchProbe(t)
+	ln, path := pumpListener(t)
+	conn := dialPump(t, path)
+	r, w := stdoutPipe(t)
+	done := make(chan error, 1)
+	go func() { done <- pump(strings.NewReader("ping"), w, conn) }()
+	sc := acceptPump(t, ln)
+	if got := readToEnd(t, sc); got != "ping" {
+		t.Fatalf("the server read %q, want %q", got, "ping")
+	}
+	pw.look(t, false, true)
+
+	if err := r.Close(); err != nil {
+		t.Fatal(err)
+	}
+	err := pumpReturns(t, done, 3*time.Second, "of its stdout's reader closing")
+	if !errors.Is(err, errReaderGone) {
+		t.Fatalf("the pump returned %v, want errReaderGone", err)
+	}
+	wantEPIPE(t, sc)
+}
+
+// TestPumpKeepsALiveReaderToTheEnd (plan 035 C9): a stdout pipe whose reader
+// is still there keeps the pump past stdin's EOF while the session is quiet,
+// the probe looking twice and finding it there each time, and the pump then
+// relays what the session says and exits 0 at its end. The negative control:
+// a probe that took any revent (POLLOUT, room to write) for a reader gone
+// ends the pump at its first look.
+func TestPumpKeepsALiveReaderToTheEnd(t *testing.T) {
+	pw := watchProbe(t)
+	ln, path := pumpListener(t)
+	conn := dialPump(t, path)
+	r, w := stdoutPipe(t)
+	read := make(chan []byte, 1)
+	go func() {
+		b, _ := io.ReadAll(r)
+		read <- b
+	}()
+	done := make(chan error, 1)
+	go func() { done <- pump(strings.NewReader("ping"), w, conn) }()
+	sc := acceptPump(t, ln)
+	if got := readToEnd(t, sc); got != "ping" {
+		t.Fatalf("the server read %q, want %q", got, "ping")
+	}
+	pw.look(t, false, true)
+	pw.look(t, false, true)
+
+	if _, err := sc.Write([]byte("pong")); err != nil {
+		t.Fatal(err)
+	}
+	_ = sc.Close()
+	if err := pumpReturns(t, done, probeWait, "of the socket's end"); err != nil {
+		t.Fatalf("pump: %v", err)
+	}
+	_ = w.Close()
+	if got := <-read; string(got) != "pong" {
+		t.Fatalf("stdout's reader got %q, want %q", got, "pong")
+	}
+}
+
+// TestPumpOnOneSocketAsStdinAndStdout (plan 035 C9, A9): some sshd builds
+// hand a command one socket as its stdin and its stdout (here two descriptors
+// for it, as fd 0 and fd 1 are). A peer that only shut its writing half
+// (SHUT_WR) has ended the bridge's stdin, and still reads: the probe finds it
+// there, look after look, and it gets what the session says after. Its close
+// then ends the pump within 3 s, errReaderGone, and the server's next write
+// fails with EPIPE. The negative controls: a probe that took POLLOUT for a
+// reader gone ends the pump before "pong" reaches the peer; one that ignored
+// POLLHUP never ends it, and the bound fails.
+func TestPumpOnOneSocketAsStdinAndStdout(t *testing.T) {
+	pw := watchProbe(t)
+	ln, path := pumpListener(t)
+	conn := dialPump(t, path)
+	fds, err := unix.Socketpair(unix.AF_UNIX, unix.SOCK_STREAM, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stdin := os.NewFile(uintptr(fds[0]), "stdin")
+	t.Cleanup(func() { _ = stdin.Close() })
+	dup, err := unix.Dup(fds[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	stdout := os.NewFile(uintptr(dup), "stdout")
+	t.Cleanup(func() { _ = stdout.Close() })
+	pf := os.NewFile(uintptr(fds[1]), "peer")
+	fc, err := net.FileConn(pf)
+	_ = pf.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	peer := fc.(*net.UnixConn)
+	t.Cleanup(func() { _ = peer.Close() })
+
+	if _, err := peer.Write([]byte("ping")); err != nil {
+		t.Fatal(err)
+	}
+	if err := peer.CloseWrite(); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- pump(stdin, stdout, conn) }()
+	sc := acceptPump(t, ln)
+	if got := readToEnd(t, sc); got != "ping" {
+		t.Fatalf("the server read %q, want %q", got, "ping")
+	}
+	pw.look(t, false, true)
+	pw.look(t, false, true)
+	if _, err := sc.Write([]byte("pong\n")); err != nil {
+		t.Fatal(err)
+	}
+	_ = peer.SetReadDeadline(time.Now().Add(probeWait))
+	got, err := protocol.NewLineReader(peer, 0).ReadLine()
+	if err != nil || string(got) != "pong" {
+		t.Fatalf("the half-closed peer read %q (%v), want %q", got, err, "pong")
+	}
+
+	if err := peer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	err = pumpReturns(t, done, 3*time.Second, "of its stdin-and-stdout socket's peer closing")
+	if !errors.Is(err, errReaderGone) {
+		t.Fatalf("the pump returned %v, want errReaderGone", err)
+	}
+	wantEPIPE(t, sc)
+}
+
+// TestPumpDoesNotProbeARegularFile (plan 035 C9): a regular file as stdout
+// cannot be probed: the probe's first look says so (supported false) and the
+// probe stops there, while the pump goes on to the socket's end and exits 0,
+// every byte in the file. The negative controls: a probe that polled a
+// regular file anyway (no fstat check) keeps looking and never stops; one
+// that took "cannot tell" for "gone" ends the pump.
+func TestPumpDoesNotProbeARegularFile(t *testing.T) {
+	pw := watchProbe(t)
+	ln, path := pumpListener(t)
+	conn := dialPump(t, path)
+	out := filepath.Join(t.TempDir(), "stdout")
+	f, err := os.Create(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = f.Close() })
+	done := make(chan error, 1)
+	go func() { done <- pump(strings.NewReader("ping"), f, conn) }()
+	sc := acceptPump(t, ln)
+	if got := readToEnd(t, sc); got != "ping" {
+		t.Fatalf("the server read %q, want %q", got, "ping")
+	}
+	pw.look(t, false, false)
+	select {
+	case <-pw.ended:
+	case <-time.After(probeWait):
+		t.Fatal("the probe of a regular file did not stop at its first look")
+	}
+	select {
+	case err := <-done:
+		t.Fatalf("the pump returned (%v) with the socket still open", err)
+	default:
+	}
+
+	if _, err := sc.Write([]byte("pong")); err != nil {
+		t.Fatal(err)
+	}
+	_ = sc.Close()
+	if err := pumpReturns(t, done, probeWait, "of the socket's end"); err != nil {
+		t.Fatalf("pump: %v", err)
+	}
+	if b, err := os.ReadFile(out); err != nil || string(b) != "pong" {
+		t.Fatalf("the file holds %q (%v), want %q", b, err, "pong")
+	}
+}
+
+// TestPumpStopsItsProbeWhenItReturns (plan 035 C9): the probe runs only while
+// the pump does. A pump that returns, here at the socket's end with stdout's
+// reader still there, has stopped its probe by then. The negative control: a
+// pump that left its probe running returns with the probe still looking.
+func TestPumpStopsItsProbeWhenItReturns(t *testing.T) {
+	pw := watchProbe(t)
+	ln, path := pumpListener(t)
+	conn := dialPump(t, path)
+	r, w := stdoutPipe(t)
+	go func() { _, _ = io.Copy(io.Discard, r) }()
+	done := make(chan error, 1)
+	go func() { done <- pump(strings.NewReader("ping"), w, conn) }()
+	sc := acceptPump(t, ln)
+	if got := readToEnd(t, sc); got != "ping" {
+		t.Fatalf("the server read %q, want %q", got, "ping")
+	}
+	pw.look(t, false, true)
+	_ = sc.Close()
+	if err := pumpReturns(t, done, probeWait, "of the socket's end"); err != nil {
+		t.Fatalf("pump: %v", err)
+	}
+	select {
+	case <-pw.ended:
+	default:
+		t.Fatal("the pump returned with its probe still running")
 	}
 }
 
