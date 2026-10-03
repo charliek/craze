@@ -82,6 +82,46 @@ func (e endpoints) authorize() string { return e.issuer + authorizePath }
 func (e endpoints) token() string     { return e.issuer + tokenPath }
 func (e endpoints) discovery() string { return e.issuer + discoveryPath }
 
+// MaxLinkableURL is the longest authorization address a UI makes a terminal
+// hyperlink of (LinkableAuthorizeURL): a real one is well under a kilobyte,
+// and terminals cap an OSC 8 URI at a few kilobytes.
+const MaxLinkableURL = 2048
+
+// LinkableAuthorizeURL reports whether raw — an attempt's authorization
+// address, its bytes as Attempt.URL answers them — may be the target of a
+// terminal hyperlink, OSC 8 (plan 034 §3.2, Q9): at most MaxLinkableURL bytes,
+// every byte printable ASCII (0x21–0x7E: no blank, no control, no DEL, nothing
+// outside ASCII — so nothing in it can end the escape sequence early or read
+// as another one), and the production authorize endpoint itself,
+// https://auth.openai.com/api/accounts/authorize, with its query and nothing
+// else: no user, no other port, path or fragment. The address is checked as
+// it is, never decoded or rebuilt, so a link can only ever point where craze
+// built the address to.
+//
+// The test overrides are never linkable: an override is a loopback http URL by
+// construction (loopbackHTTP), and a link must be https on production's
+// authorize endpoint. A sign-in against a test's fake issuer draws its address
+// plain.
+func LinkableAuthorizeURL(raw string) bool {
+	if raw == "" || len(raw) > MaxLinkableURL {
+		return false
+	}
+	for i := 0; i < len(raw); i++ {
+		if c := raw[i]; c < 0x21 || c > 0x7e {
+			return false
+		}
+	}
+	// The prefix fixes the scheme, the host — no user before it, no port
+	// after it — and the path; what follows it is the query or nothing.
+	rest, ok := strings.CutPrefix(raw, endpoints{issuer: productionIssuer}.authorize())
+	if !ok || (rest != "" && rest[0] != '?') || strings.ContainsRune(rest, '#') {
+		return false
+	}
+	u, err := url.Parse(raw)
+	return err == nil && u.Scheme == "https" && u.User == nil && u.Opaque == "" &&
+		u.Host == strings.TrimPrefix(productionIssuer, "https://") && u.Path == authorizePath && u.Fragment == ""
+}
+
 // currentEndpoints is production's endpoints, or the test overrides'.
 func currentEndpoints() (endpoints, error) {
 	e := endpoints{issuer: productionIssuer, api: productionAPI}

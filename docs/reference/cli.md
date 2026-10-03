@@ -1030,6 +1030,12 @@ Received the redirect to http://127.0.0.1:1455/auth/callback; signing in.
 the only way in: the way to sign in from an SSH session or a container. With
 stdin not a terminal, each line of it is taken as a pasted address.
 
+The address is printed plain, on one line — no box, no escape sequences — so
+any terminal can select it whole, and one that finds links in text can open
+it. It is the fallback for a terminal where `/connect`'s box gets the address
+to neither the clipboard nor a link (see [the TUI
+reference](tui.md#terminals)).
+
 ```bash
 craze auth login chatgpt                # opens the browser on a desktop, else prints the address
 craze auth login chatgpt --no-browser   # paste the redirect address from any machine
@@ -1116,7 +1122,7 @@ help.
 |---|---|---|
 | `begin` | A sign-in started. | `mode`: `listening` (craze waits on 127.0.0.1 for the browser) or `paste_only`. `reason`, when it does not listen on 1455: `requested` (`--no-browser`), `port_busy` (another program has the port), `listen_failed`. `port`. `registration`: `new` (craze registers with ChatGPT) or `reused`. |
 | `browser_opened`, `browser_failed` | craze opened the address in a browser, or could not. | — |
-| `address_copied` | `Ctrl+Y` in `/connect` copied the address; whether a clipboard took it is not known. | — |
+| `address_copied` | A click on the address, or `Ctrl+Y`, in `/connect` copied it; whether a clipboard took it is not known. | — |
 | `listener_refused` | The listener refused a request on its callback path, the first of its kind in the attempt (the rest are counted). A request to any other path — a browser's favicon — is never recorded. | `refusal`: `other_attempt` (the browser came back from a different sign-in attempt), `not_ours` (another request without the sign-in's state), `over` (the sign-in already had its redirect). `status`: 400, or 410 for `over`. |
 | `listener_refusals` | At the attempt's end, how many times one kind was refused, when it was more than once. | `refusal`, `status`, `count`. |
 | `paste_refused` | A pasted line was refused. | `refusal`: `too_long`, `not_address` (an API key pasted out of habit, say), `mismatch`, `over`. `part`, of a `mismatch`: `scheme`, `userinfo`, `host`, `port`, `path`, or `state` (the redirect of an earlier attempt). |

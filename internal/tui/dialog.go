@@ -95,10 +95,17 @@ func (m Model) dialogRect(lay frameLayout) rect {
 
 // dialogMaxWidth is how wide this dialog is allowed to get. Help is the one
 // that carries a two-column key table, and 54 cells would truncate half the
-// descriptions it exists to show.
+// descriptions it exists to show. /connect's sign-in step shows an address of
+// several hundred characters (plan 034 Q11): as wide as the terminal leaves
+// it, up to signInDialogWidth, so the address takes fewer rows; its rows and
+// its hit-test take their width from the box dialogRect makes of this
+// (signInPlan).
 func (m Model) dialogMaxWidth() int {
-	if m.dialog == dialogHelp {
+	switch {
+	case m.dialog == dialogHelp:
 		return helpDialogWidth
+	case m.dialog == dialogConnect && m.cdlg.step == connectSignIn:
+		return min(m.width-dialogGutter, signInDialogWidth)
 	}
 	return dialogMaxWidth
 }

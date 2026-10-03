@@ -992,6 +992,93 @@ func TestOverridesAreLoopbackOnly(t *testing.T) {
 	}
 }
 
+// TestLinkableAuthorizeURL (plan 034 §3.2, Q9): what a UI may make a terminal
+// hyperlink of — the authorization address Begin builds on production's
+// endpoints, a first registration's and a re-login's (whose login_hint and
+// prompt make it the longest), as Attempt.URL answers it — and what it may
+// not: a control character, DEL, a blank or a byte outside ASCII anywhere in
+// it, one byte past MaxLinkableURL, http, another host — a look-alike, one
+// behind a user, another port — another path, a fragment, and the address a
+// test's fake issuer builds (loopback http, never linkable). The real
+// addresses are the controls, and so is the longest address that may be one.
+func TestLinkableAuthorizeURL(t *testing.T) {
+	setEnv(t, map[string]string{})
+	// A first registration's address and a re-login's, built by Begin on
+	// production's endpoints: paste-only, so nothing listens and nothing is
+	// sent anywhere.
+	first, err := Begin(context.Background(), nativeDir(t), BeginOptions{PasteOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer first.Close(CloseDone)
+	dir := nativeDir(t)
+	if err := ensureAuthDir(dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeClient(dir, Client{ClientID: testClient, Subject: testSubject, Email: testEmail}); err != nil {
+		t.Fatal(err)
+	}
+	relogin, err := Begin(context.Background(), dir, BeginOptions{PasteOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer relogin.Close(CloseDone)
+	if !strings.Contains(relogin.URL(), "login_hint=") || !strings.Contains(relogin.URL(), "prompt=consent") {
+		t.Fatal("the re-login's address is not the long one")
+	}
+	real := first.URL()
+	const base = "https://auth.openai.com/api/accounts/authorize"
+	longest := base + "?a=" + strings.Repeat("b", MaxLinkableURL-len(base)-len("?a="))
+	for _, tc := range []struct {
+		name string
+		raw  string
+		ok   bool
+	}{
+		{"a first registration's address", real, true},
+		{"a re-login's address", relogin.URL(), true},
+		{"the endpoint with no query", base, true},
+		{"the longest that may be one", longest, true},
+		{"one byte longer", longest + "c", false},
+		{"empty", "", false},
+		{"a control character", real + "\x07", false},
+		{"an escape", strings.Replace(real, "state=", "\x1b]8;;x\x07state=", 1), false},
+		{"a newline", real + "\n", false},
+		{"DEL", real + "\x7f", false},
+		{"a blank", strings.Replace(real, "state=", "state= ", 1), false},
+		{"a tab", real + "\t", false},
+		{"non-ASCII", real + "é", false},
+		{"a C1 byte", real + "\x9c", false},
+		{"http", "http" + strings.TrimPrefix(real, "https"), false},
+		{"another host", strings.Replace(real, "auth.openai.com", "auth.openai.com.evil.test", 1), false},
+		{"another host's look-alike", strings.Replace(real, "auth.openai.com", "auth-openai.com", 1), false},
+		{"a user", strings.Replace(real, "https://", "https://evil.test@", 1), false},
+		{"the host as a user", strings.Replace(real, "auth.openai.com/", "auth.openai.com@evil.test/", 1), false},
+		{"another port", strings.Replace(real, "auth.openai.com/", "auth.openai.com:8443/", 1), false},
+		{"another path", strings.Replace(real, "/authorize?", "/authorize/x?", 1), false},
+		{"a path after a slash", strings.Replace(real, "/authorize?", "/authorize/?", 1), false},
+		{"a fragment", real + "#x", false},
+		{"upper-case host", strings.Replace(real, "auth.openai.com", "AUTH.openai.com", 1), false},
+	} {
+		if got := LinkableAuthorizeURL(tc.raw); got != tc.ok {
+			t.Errorf("%s: LinkableAuthorizeURL = %v, want %v", tc.name, got, tc.ok)
+		}
+	}
+
+	// A sign-in against a test's fake issuer: its address is loopback http,
+	// never a link.
+	f := newFake(t)
+	useFake(t, f)
+	useListener(t, false)
+	a, err := Begin(context.Background(), nativeDir(t), BeginOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close(CloseDone)
+	if LinkableAuthorizeURL(a.URL()) {
+		t.Fatal("a fake issuer's authorization address is linkable")
+	}
+}
+
 // TestHostIDIsKept: a host-id file holding something else is an error, never
 // replaced; the control is the made one, read back unchanged.
 func TestHostIDIsKept(t *testing.T) {

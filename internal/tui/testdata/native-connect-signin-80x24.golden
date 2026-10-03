@@ -1,22 +1,22 @@
-             ╭────────────────────────────────────────────────────╮             
-             │Sign in with ChatGPT                                │             
-             │Open this address in a browser and approve craze:   │             
-             │https://auth.openai.com/api/accounts/authorize?agent│             
-             │_name_hint=craze&client_id=dynamic_agent_client&code│             
-             │_challenge=golden-challenge-0123456789abcdefABCDEFGH│             
-             │IJKL&code_challenge_method=S256&ext_agent_host_id=ur│             
-             │n%3Auuid%3A3f2b8c4e-1d6a-4e9b-8f7c-2a5d9e0b1c34&nonc│             
-             │e=golden-nonce-0123456789abcdefABCD&redirect_uri=htt│             
-             │p%3A%2F%2F127.0.0.1%3A1455%2Fauth%2Fcallback&resourc│             
-             │e=https%3A%2F%2Fapi.openai.com%2Fv1&response_type=co│             
-             │de&scope=openid+profile+email+offline_access+resourc│             
-             │e.invoke+chatgpt.tokens.use.direct&state=golden-sta…│             
-             │After you approve, paste the address the browser    │             
-             │lands on (it starts with                            │             
-             │http://127.0.0.1:1455/auth/callback):               │             
-             │❯                                                   │             
-             │ctrl+y copies the address · enter · esc back        │             
-             ╰────────────────────────────────────────────────────╯             
+                                                                                
+  ╭──────────────────────────────────────────────────────────────────────────╮  
+  │Sign in with ChatGPT                                                      │  
+  │Open this address in a browser and approve craze:                         │  
+  │https://auth.openai.com/api/accounts/authorize?agent_name_hint=craze&clien│  
+  │t_id=dynamic_agent_client&code_challenge=golden-challenge-0123456789abcdef│  
+  │ABCDEFGHIJKL&code_challenge_method=S256&ext_agent_host_id=urn%3Auuid%3A3f2│  
+  │b8c4e-1d6a-4e9b-8f7c-2a5d9e0b1c34&nonce=golden-nonce-0123456789abcdefABCD&│  
+  │redirect_uri=http%3A%2F%2F127.0.0.1%3A1455%2Fauth%2Fcallback&resource=http│  
+  │s%3A%2F%2Fapi.openai.com%2Fv1&response_type=code&scope=openid+profile+emai│  
+  │l+offline_access+resource.invoke+chatgpt.tokens.use.direct&state=golden-st│  
+  │ate-0123456789abcdefABCD                                                  │  
+  │The browser's page will not load after you approve: copy its whole address│  
+  │(it starts with http://127.0.0.1:1455/auth/callback) and paste it here:   │  
+  │❯                                                                         │  
+  │click or ctrl+y copies · enter · esc back                                 │  
+  ╰──────────────────────────────────────────────────────────────────────────╯  
+                                                                                
+                                                                                
 ──────────────────────────────────────────────────────────────────────── craze ─
 ❯ message  / for commands                                                       
 ────────────────────────────────────────────────────────────────────────────────

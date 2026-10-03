@@ -2,6 +2,7 @@ package tui
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"crypto"
 	"crypto/rand"
@@ -61,6 +62,11 @@ const (
 	// signInPasted is the browser's redirect for the stand-in: a one-time
 	// code and the attempt's state, as the address bar shows it.
 	signInPasted = signInRedirect + "?code=golden-code-4f2a9c&scope=openid+profile+email&state=" + signInGoldenState
+	// signInAttemptID is the stand-in's attempt id, fixed so a raw frame's
+	// link id (plan 034 Q9) is too.
+	signInAttemptID = "0a1b2c3d"
+	// signInLinkID is the OSC 8 id the stand-in's address rows share.
+	signInLinkID = signInLinkPrefix + signInAttemptID
 )
 
 var signInURL = "https://auth.openai.com/api/accounts/authorize?" + url.Values{
@@ -90,6 +96,13 @@ type fakeSignIn struct {
 	err       error
 	ln        net.Listener
 	lnErr     error // the listener could not be opened: the begin's error
+	// url, redirect and id are the authorization address, the redirect
+	// address and the attempt's id — signInURL, signInRedirect and
+	// signInAttemptID unless a test sets another; emit is what the stand-in
+	// reports to its observer before the begin returns, as chatgptauth.Begin
+	// reports its begin (plan 034 §3.3).
+	url, redirect, id string
+	emit              []chatgptauth.Event
 
 	mu       sync.Mutex
 	over     bool
@@ -136,8 +149,9 @@ func newFakeSignIn(listening bool, res chatgptauth.Result) *fakeSignIn {
 	return f
 }
 
-func (f *fakeSignIn) URL() string         { return signInURL }
-func (f *fakeSignIn) RedirectURI() string { return signInRedirect }
+func (f *fakeSignIn) ID() string          { return cmp.Or(f.id, signInAttemptID) }
+func (f *fakeSignIn) URL() string         { return cmp.Or(f.url, signInURL) }
+func (f *fakeSignIn) RedirectURI() string { return cmp.Or(f.redirect, signInRedirect) }
 func (f *fakeSignIn) Listening() bool     { return f.listening }
 
 // Paste judges raw as chatgptauth.Attempt.Paste does (plan 034 §3.3): longer
@@ -331,6 +345,11 @@ func standInSignIn(t *testing.T, make func() *fakeSignIn) *signInStandIns {
 		}
 		f.observe = observe
 		s.made = append(s.made, f)
+		for _, ev := range f.emit {
+			if observe != nil {
+				observe(ev)
+			}
+		}
 		return f, nil
 	}
 	fetchPlanModels = func(ctx context.Context, dir string, observe func(chatgptauth.Event)) (*chatgptauth.Models, error) {
@@ -364,8 +383,8 @@ func (s *signInStandIns) all() []*fakeSignIn {
 }
 
 // signInRunFrames are the step's commands as a goroutine's stack names them:
-// the begin's and the wait's.
-var signInRunFrames = []string{"internal/tui.beginSignInCmd.func", "internal/tui.waitSignInCmd.func"}
+// the begin's, the wait's and the delivery of its shown events.
+var signInRunFrames = []string{"internal/tui.beginSignInCmd.func", "internal/tui.waitSignInCmd.func", "internal/tui.signInEventsCmd.func"}
 
 // signInRunning says whether any goroutine is running one of the step's
 // commands, or chatgptauth's listener (whose Serve runs in Begin's closure).
@@ -1001,14 +1020,18 @@ func signInFieldRow(view string) string {
 	return ""
 }
 
+// signInInner is the sign-in box's inner width on a terminal cols wide (plan
+// 034 Q11): as wide as the terminal leaves it, up to signInDialogWidth.
+func signInInner(cols int) int { return min(cols-dialogGutter, signInDialogWidth) - dialogBorder }
+
 // assertSignInFieldMasked fails the test unless view — a frame already
-// screened for the canary key, a box of the widest a dialog gets — draws its
+// screened for the canary key, on a terminal 100 columns wide — draws its
 // address field as value's masks alone: one per character, as far as the
 // field is wide, and nothing else but the cursor's blank.
 func assertSignInFieldMasked(t *testing.T, view, value string) {
 	t.Helper()
 	row := signInFieldRow(view)
-	want := min(len([]rune(value)), dialogFieldWidth(dialogMaxWidth-dialogBorder))
+	want := min(len([]rune(value)), dialogFieldWidth(signInInner(100)))
 	if strings.Trim(row, string(connectMask)+" ") != "" || strings.Count(row, string(connectMask)) != want {
 		t.Fatalf("the field is not drawn as %d masks (row %q, the field holding %d bytes)", want, row, len(value))
 	}

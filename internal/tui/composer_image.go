@@ -451,11 +451,19 @@ func (m Model) pasteClipboardImage(msg pasteMsg) (tea.Model, tea.Cmd) {
 	return m, m.updateComposer(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(msg.text), Paste: true})
 }
 
-// overSSH reports that the TUI runs in an SSH session (SSH_CONNECTION or
-// SSH_TTY set): the clipboard tools there read the remote machine's
-// clipboard, not the one the user pasted from (§3.3).
+// overSSH reports that the TUI runs in an SSH session: any of the variables
+// sshd sets for one (SSH_CONNECTION, SSH_CLIENT or SSH_TTY, the three craze
+// auth's guiSession reads), through Config.Getenv. The clipboard tools there
+// read the remote machine's clipboard, not the one the user pasted from
+// (§3.3), and /connect's sign-in leads with the paste path (plan 034 Q12):
+// the browser is on the user's own machine.
 func (m Model) overSSH() bool {
-	return m.getenv("SSH_CONNECTION") != "" || m.getenv("SSH_TTY") != ""
+	for _, v := range []string{"SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY"} {
+		if m.getenv(v) != "" {
+			return true
+		}
+	}
+	return false
 }
 
 // addImages makes chips of add — each entry's source, the text it stands in

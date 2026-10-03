@@ -465,7 +465,7 @@ func (m Model) applyConnect(msg connectAnswer) (Model, tea.Cmd) {
 		if m.dialog == dialogModel && m.mdlg.gen == msg.gen {
 			m.mdlg.connect = msg.show
 		}
-	case signInBegunMsg, signInDoneMsg, signInFinishedMsg:
+	case signInBegunMsg, signInDoneMsg, signInFinishedMsg, signInShownMsg, signInCopiedMsg:
 		return m.applySignIn(msg)
 	}
 	return m, nil
@@ -724,10 +724,14 @@ func (m Model) connectKeyBody(inner, budget int) []string {
 }
 
 // connectDialogClick is a press on a body row: on step one a provider's row
-// opens its key field, or its sign-in, as Enter on it does; nothing else in
+// opens its key field, or its sign-in, as Enter on it does; on the sign-in, a
+// row of the address copies it (signInClick, plan 034 Q10); nothing else in
 // the box acts.
 func (m Model) connectDialogClick(i int) (tea.Model, tea.Cmd) {
-	if m.cdlg.step != connectPick {
+	switch m.cdlg.step {
+	case connectSignIn:
+		return m.signInClick(i)
+	case connectKey:
 		return m, nil
 	}
 	plan := m.connectPickPlan(m.lay.Dialog.W-dialogBorder, m.lay.Dialog.H-dialogBorder)
