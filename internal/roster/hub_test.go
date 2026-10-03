@@ -234,6 +234,13 @@ func TestAHubRosterPollsOnlyWhileARunIsOpen(t *testing.T) {
 // answered with sessions exactly as given (raw JSON, written as it stands).
 func rawHost(t *testing.T, socket, id, sessions string) {
 	t.Helper()
+	rawHostOf(t, socket, id, func() string { return sessions })
+}
+
+// rawHostOf is rawHost answering each sessions.list with what sessions
+// returns when it is asked: a host whose row the test changes between polls.
+func rawHostOf(t *testing.T, socket, id string, sessions func() string) {
+	t.Helper()
 	l, err := net.Listen("unix", socket)
 	if err != nil {
 		t.Fatal(err)
@@ -257,7 +264,7 @@ func rawHost(t *testing.T, socket, id, sessions string) {
 			}
 			result := string(hello)
 			if req.Method == protocol.MethodSessionsList {
-				result = `{"epoch":"` + id + `","cursor":7,"sessions":` + sessions + `}`
+				result = `{"epoch":"` + id + `","cursor":7,"sessions":` + sessions() + `}`
 			}
 			if _, err := c.Write([]byte(`{"jsonrpc":"2.0","id":` + string(req.ID) + `,"result":` + result + "}\n")); err != nil {
 				return

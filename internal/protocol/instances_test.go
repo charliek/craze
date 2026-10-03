@@ -93,6 +93,13 @@ func TestInstancesValidate(t *testing.T) {
 		Prompted:  true}
 	rowStartFailed := protocol.SessionRow{SessionInfo: withFacts, Activity: protocol.ActivityError,
 		Since: instanceTime, StartFailed: true, StartErr: "cursor-agent: not logged in"}
+	// Plan 035 C11's model (SF-114): the session's current model id, exact
+	// and so unbounded, as session.state's settings.model is — a long one
+	// is on the schema as it stands, never cut.
+	rowModel := rowFacts
+	rowModel.Model = "grok-4.7-build-fast"
+	rowLongModel := rowFacts
+	rowLongModel.Model = strings.Repeat("openrouter/vendor/a-model-id-", 100)
 	// Plan 032 §3.14's presence (SF-64): a row of a presence host carries how
 	// many clients are attached, omitted when none is.
 	withPresence := withFacts
@@ -287,6 +294,12 @@ func TestInstancesValidate(t *testing.T) {
 			strings.Replace(rosterLastTurn(rowFacts), `"prompted":true`, `"prompted":true,"preview":"…"`, 1), false},
 		{"a head ask whose summary is not text", "sessions.list.json", "result",
 			strings.Replace(rosterLastTurn(rowFacts), `"summary":"Run `+"`go test ./...`"+`"`, `"summary":["Run"]`, 1), false},
+		{"a roster row with its model", "sessions.list.json", "result", rosterLastTurn(rowModel), true},
+		{"a roster row whose model id is long: no bound", "sessions.list.json", "result", rosterLastTurn(rowLongModel), true},
+		{"a roster row whose model is not a string", "sessions.list.json", "result",
+			strings.Replace(rosterLastTurn(rowModel), `"model":"grok-4.7-build-fast"`, `"model":4.7`, 1), false},
+		{"a roster row whose model is an object", "sessions.list.json", "result",
+			strings.Replace(rosterLastTurn(rowModel), `"model":"grok-4.7-build-fast"`, `"model":{"id":"grok-4.7-build-fast"}`, 1), false},
 		{"a presence host's row, two attached", "sessions.list.json", "result", rosterLastTurn(rowPresence), true},
 		{"a presence host's row, nobody attached", "sessions.list.json", "result", rosterLastTurn(rowNobody), true},
 		{"a row whose attached is negative", "sessions.list.json", "result",

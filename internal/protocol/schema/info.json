@@ -43,6 +43,7 @@
         "startFailed": {"type": "boolean", "description": "A row fact: the session's start failed. Absent is false on a rowFacts host."},
         "startErr": {"$ref": "#/$defs/rowText", "description": "A row fact: the first line of a failed start's error."},
         "prompted": {"type": "boolean", "description": "A row fact: a turn has been started at all. Absent is false on a rowFacts host."},
+        "model": {"type": "string", "description": "A row fact (plan 035): the session's current model id, exact — session.state's settings.model, what a session.set of kind model names — not display text, and never cut: unbounded, as settings.model is. Absent means unknown on any host, a rowFacts host from before plan 035 included."},
         "attached": {"type": "integer", "minimum": 0, "description": "Where the session capability presence is true: how many clients are attached to the session as the row is read — every attachment the host counts (pending, live or closing, not one whose peer has half-closed) and, on a TUI-hosted session, the hosting TUI's own seat. Absent is 0 on a presence host, and unknown on any other."}
       },
       "required": ["title", "activity", "foreignTurn", "pendingAsks"],

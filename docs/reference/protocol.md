@@ -254,7 +254,7 @@ A row is the [session info document](#the-session-info-document) plus:
 | `pendingAsks` | how many asks are open |
 | `headAsk` | `{id, kind, label, summary?}`, the first open ask (absent when none is); `summary` is a [row fact](#the-row-facts) |
 | `lastTurn` | how the last turn ended — [below](#the-last-turn); absent while a turn runs, before any has ended, and from an older host |
-| `doing`, `lastReply`, `since`, `startFailed`, `startErr`, `prompted` | the [row facts](#the-row-facts), where the session capability `rowFacts` is `true` |
+| `doing`, `lastReply`, `since`, `startFailed`, `startErr`, `prompted`, `model` | the [row facts](#the-row-facts), where the session capability `rowFacts` is `true` |
 | `attached` | where the session capability `presence` is `true`: how many clients are attached as the row is read — the count a [`presence`](#presence) notification carries; absent is `0` on such a host, and unknown on any other |
 
 `activity`/`foreignTurn` answer "is it running"; `pendingAsks`/`headAsk`
@@ -267,8 +267,9 @@ A host whose session capability `rowFacts` is `true` — every craze from plan
 030's session list on, detached or TUI-hosted — puts on its row what a list of
 every session needs to say what each one wants without attaching to any. Each
 is omitted when unset, so on such a host an absent one is its zero (`""`,
-`false`); on a host without `rowFacts` (an older one) none is there and a
-client reads the row as it was.
+`false`) — except `model`, which a `rowFacts` host from before plan 035 does
+not send, so an absent `model` is unknown on any host; on a host without
+`rowFacts` (an older one) none is there and a client reads the row as it was.
 
 | field | |
 |---|---|
@@ -278,10 +279,11 @@ client reads the row as it was.
 | `since` | when the row entered its current state, on the host's clock, UTC — the first of these that holds: **needs you** (`pendingAsks` > 0), **failed** (`startFailed`, or `lastTurn.outcome` failed — or `activity` error with neither `lastTurn` nor `foreignTurn`: a failure whose ending is still on its way), **working** (`activity` starting, replaying, working or closing, or `foreignTurn`), **idle**. A turn that follows another from the queue in the same settlement keeps the first one's |
 | `startFailed`, `startErr` | the session's start failed, and the first line of its error |
 | `prompted` | a turn has been started at all |
+| `model` | the session's current model id, exactly as `session.state`'s `settings.model` gives it and a `session.set` of kind `model` names it: an identifier, not display text, and never cut, so it has no length bound. Absent means unknown |
 
-Every string is one line — the first non-blank one, trimmed, tabs expanded,
-control characters dropped — of at most 200 terminal cells, an ellipsis
-ending one that was cut. The host computes them from its engine's own
+Every string but `model` is one line — the first non-blank one, trimmed, tabs
+expanded, control characters dropped — of at most 200 terminal cells, an
+ellipsis ending one that was cut. The host computes them from its engine's own
 transcript model and ask registry when the row is asked for: like the rest
 of the row, a read, not a cut through the stream.
 

@@ -2,6 +2,7 @@ package roster_test
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -146,5 +147,35 @@ func TestFromRosterRow(t *testing.T) {
 	rr.Row = json.RawMessage(`{"activity":5}`)
 	if _, err := roster.FromRosterRow(rr); err == nil {
 		t.Fatal("a row that does not decode was read")
+	}
+}
+
+// TestARowsModel (plan 035 C11, SF-114): a row's model is the session's, as
+// the host wrote it — exact, and whole however long — and a rowFacts host's
+// row from before 035, which carries the row facts but no model, reads as
+// unknown: "", as an S2 host's row does.
+func TestARowsModel(t *testing.T) {
+	const facts = `"capabilities":{"rowFacts":true},"prompted":true`
+	long := strings.Repeat("openrouter/vendor/a-model-id-", 40)
+	for _, c := range []struct {
+		name, row, want string
+		rowFacts        bool
+	}{
+		{"a 035 host's row", `{"sessionId":"s-1","activity":"idle",` + facts + `,"model":"grok-4.7-build-fast"}`, "grok-4.7-build-fast", true},
+		{"a long id, whole", `{"sessionId":"s-1","activity":"idle",` + facts + `,"model":"` + long + `"}`, long, true},
+		{"an older rowFacts host's row", `{"sessionId":"s-1","activity":"idle",` + facts + `}`, "", true},
+		{"an S2 host's row", `{"sessionId":"s-1","activity":"idle"}`, "", false},
+	} {
+		got, err := roster.FromRosterRow(protocol.RosterRow{HostID: "0123456789ab", SessionID: "s-1",
+			Status: protocol.RosterReachable, Row: json.RawMessage(c.row)})
+		switch {
+		case err != nil || got.Session == nil:
+			t.Fatalf("%s: FromRosterRow = %+v, %v", c.name, got, err)
+		case got.Session.Model != c.want:
+			t.Errorf("%s: model %q, want %q", c.name, got.Session.Model, c.want)
+		case got.Session.RowFacts != c.rowFacts || got.Session.Prompted != c.rowFacts:
+			t.Errorf("%s: rowFacts %v, prompted %v; want %v: the row is not the host's it names", c.name,
+				got.Session.RowFacts, got.Session.Prompted, c.rowFacts)
+		}
 	}
 }

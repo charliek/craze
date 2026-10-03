@@ -249,10 +249,11 @@ def test_ps_lists_detached_sessions_and_attach_reaches_one(
 ) -> None:
     """A7: two sessions, each in a terminal of its own, every terminal hung
     up -- the hosts stay -- and `craze ps` lists both from the hub it starts:
-    each one's short id, idle, its provider, its directory, its first prompt
-    as its title. `--json` prints the hub's roster (its epoch the hub's id);
-    `--no-hub` reads the hosts itself and says so. Then `craze attach` in one
-    session's directory reaches it."""
+    each one's short id, idle, its provider, its model (the fake agent's
+    current one, `default`: plan 035 C11), its directory, its first prompt as
+    its title. `--json` prints the hub's roster (its epoch the hub's id), each
+    row's model exact; `--no-hub` reads the hosts itself and says so. Then
+    `craze attach` in one session's directory reaches it."""
     monkeypatch.delenv("CRAZE_DETACH", raising=False)
     seed_host_idle_exit(tmp_path)
     work = {"first session": tmp_path / "proj-a", "second session": tmp_path / "proj-b"}
@@ -275,7 +276,7 @@ def test_ps_lists_detached_sessions_and_attach_reaches_one(
         row = rows[sid[-8:]]
         ws = Path(e["workspace"])
         text = next(t for t, w in work.items() if w.resolve() == ws.resolve())
-        assert row["STATE"] == "idle" and row["PROVIDER"] == "cursor" and row["MODEL"] == "-", row
+        assert row["STATE"] == "idle" and row["PROVIDER"] == "cursor" and row["MODEL"] == "default", row
         assert row["DIR"] in ("~/" + ws.name, str(ws)), row
         assert row["TITLE"] == text, row
     rec = _the_hub(tmp_path)
@@ -288,6 +289,7 @@ def test_ps_lists_detached_sessions_and_attach_reaches_one(
     for r in doc["sessions"]:
         assert r["hostId"] == entries[r["sessionId"]]["hostId"] and r["status"] == "reachable", r
         assert r["row"]["sessionId"] == r["sessionId"] and r["row"]["activity"] == "idle", r
+        assert r["row"]["model"] == "default", r
 
     out = _ps(craze_bin, tmp_path, "--no-hub")
     assert out.returncode == 0, out.stderr

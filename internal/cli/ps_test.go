@@ -45,14 +45,16 @@ func psRosterRow(t *testing.T, n int, sessionID string, status protocol.RosterSt
 	return rr
 }
 
-// psFixture is a roster with a row in every state, given out of order.
+// psFixture is a roster with a row in every state, given out of order: the
+// rows of 035 hosts carrying their model (SF-114), an older host's (d004,
+// e005) and a row not yet read (c003) none.
 func psFixture(t *testing.T, home string) protocol.HubSessionsListResult {
 	t.Helper()
 	long := strings.Repeat("a very long title that goes on ", 5)
 	idle := protocol.ActivityIdle
 	return protocol.HubSessionsListResult{Epoch: "0a1b2c3d4e5f", Cursor: 9, Sessions: []protocol.RosterRow{
 		psRosterRow(t, 6, "0192f0aa-6666-7000-8000-00000000f006", protocol.RosterUnreachable, "cursor", "/srv/f",
-			&protocol.SessionRow{Activity: idle, Title: "gone quiet", Since: psNow.Add(-90 * time.Minute)}),
+			&protocol.SessionRow{Activity: idle, Title: "gone quiet", Since: psNow.Add(-90 * time.Minute), Model: "composer"}),
 		psRosterRow(t, 5, "0192f0aa-5555-7000-8000-00000000e005", protocol.RosterReachable, "cursor", home+"/older",
 			&protocol.SessionRow{Activity: idle}),
 		psRosterRow(t, 4, "0192f0aa-4444-7000-8000-00000000d004", protocol.RosterReachable, "grok", "/srv/d",
@@ -61,12 +63,12 @@ func psFixture(t *testing.T, home string) protocol.HubSessionsListResult {
 		psRosterRow(t, 3, "0192f0aa-3333-7000-8000-00000000c003", protocol.RosterConnecting, "cursor", home, nil),
 		psRosterRow(t, 2, "0192f0aa-2222-7000-8000-00000000b002", protocol.RosterReachable, "cursor", "/srv/b",
 			&protocol.SessionRow{SessionInfo: protocol.SessionInfo{Provider: protocol.Provider{Name: "grok"}, Workspace: "/srv/b2"},
-				Activity: idle, ForeignTurn: true, Title: long, Since: psNow.Add(-42 * time.Second)}),
+				Activity: idle, ForeignTurn: true, Title: long, Since: psNow.Add(-42 * time.Second), Model: "grok-4.7"}),
 		psRosterRow(t, 1, "0192f0aa-1111-7000-8000-00000000a001", protocol.RosterReachable, "cursor", home+"/proj-a",
 			&protocol.SessionRow{Activity: protocol.ActivityWorking, PendingAsks: 1, Title: "fix the flaky test",
-				Since: psNow.Add(-2 * time.Minute)}),
+				Since: psNow.Add(-2 * time.Minute), Model: "sonnet-4.6"}),
 		psRosterRow(t, 7, "0192f0aa-7777-7000-8000-00000000e007", protocol.RosterReachable, "native", home+"/newer",
-			&protocol.SessionRow{Activity: idle, Since: psNow.Add(-5 * time.Minute)}),
+			&protocol.SessionRow{Activity: idle, Since: psNow.Add(-5 * time.Minute), Model: "glm-5.3"}),
 	}}
 }
 
@@ -75,21 +77,21 @@ func psFixture(t *testing.T, home string) protocol.HubSessionsListResult {
 // characters; the host's answer's provider and directory over its registry
 // entry's, ~ for HOME; the title the session's own, else the index's, else
 // "-", one line and cut to 100 cells with an ellipsis; SINCE in one unit, "-"
-// with no time; MODEL "-" (no row carries it, SF-114). The negative control
-// is any change to the format.
+// with no time; MODEL the row's own model id (SF-114), "-" from a row that
+// says none or no row. The negative control is any change to the format.
 func TestPsTable(t *testing.T) {
 	home := "/home/u"
 	titles := map[string]string{"0192f0aa-3333-7000-8000-00000000c003": "the index's title"}
 	got := psTable(psRows(psFixture(t, home), home, titles, psNow), 0)
 	want := "" +
-		"SESSION   STATE        PROVIDER  MODEL  DIR       SINCE  TITLE\n" +
-		"0000a001  needs you    cursor    -      ~/proj-a  2m     fix the flaky test\n" +
-		"0000b002  working      grok      -      /srv/b2   42s    " + strings.Repeat("a very long title that goes on ", 3) + "a very…\n" +
-		"0000c003  starting     cursor    -      ~         3h     the index's title\n" +
-		"0000d004  failed       grok      -      /srv/d    6d     a red line\n" +
-		"0000e007  idle         native    -      ~/newer   5m     -\n" +
-		"0000e005  idle         cursor    -      ~/older   -      -\n" +
-		"0000f006  unreachable  cursor    -      /srv/f    1h     gone quiet\n"
+		"SESSION   STATE        PROVIDER  MODEL       DIR       SINCE  TITLE\n" +
+		"0000a001  needs you    cursor    sonnet-4.6  ~/proj-a  2m     fix the flaky test\n" +
+		"0000b002  working      grok      grok-4.7    /srv/b2   42s    " + strings.Repeat("a very long title that goes on ", 3) + "a very…\n" +
+		"0000c003  starting     cursor    -           ~         3h     the index's title\n" +
+		"0000d004  failed       grok      -           /srv/d    6d     a red line\n" +
+		"0000e007  idle         native    glm-5.3     ~/newer   5m     -\n" +
+		"0000e005  idle         cursor    -           ~/older   -      -\n" +
+		"0000f006  unreachable  cursor    composer    /srv/f    1h     gone quiet\n"
 	if got != want {
 		t.Fatalf("craze ps's table:\n%s\nwant:\n%s", got, want)
 	}
@@ -124,22 +126,22 @@ func TestPsFitsTheTerminal(t *testing.T) {
 			}
 		}
 	}
-	// The columns before the title take 57 cells with the plain rows: at 67
+	// The columns before the title take 62 cells with the plain rows: at 72
 	// the long title has the 10 left.
-	long := strings.Split(psTable(plain, 67), "\n")[2]
-	if ansi.StringWidth(long) != 67 || !strings.HasSuffix(long, "a very lo…") {
-		t.Fatalf("at 67 cells the long title's line is %q", long)
+	long := strings.Split(psTable(plain, 72), "\n")[2]
+	if ansi.StringWidth(long) != 72 || !strings.HasSuffix(long, "a very lo…") {
+		t.Fatalf("at 72 cells the long title's line is %q", long)
 	}
 	want := "" +
-		"SESSION   STATE        PROVIDER  MODEL  DIR                    SINCE  TITLE\n" +
-		"0000a001  needs you    cursor    -      ~/proj-a               2m     fix the f…\n" +
-		"0000b002  working      grok      -      /srv/b2                42s    a very lo…\n" +
-		"0000c003  starting     cursor    -      ~                      3h     -\n" +
-		"0000d004  failed       grok      -      /srv/d                 6d     a red line\n" +
-		"0000e008  idle         cursor    -      …/long/workspace/path  1m     deep\n" +
-		"0000e007  idle         native    -      ~/newer                5m     -\n" +
-		"0000e005  idle         cursor    -      ~/older                -      -\n" +
-		"0000f006  unreachable  cursor    -      /srv/f                 1h     gone quiet\n"
+		"SESSION   STATE        PROVIDER  MODEL       DIR               SINCE  TITLE\n" +
+		"0000a001  needs you    cursor    sonnet-4.6  ~/proj-a          2m     fix the f…\n" +
+		"0000b002  working      grok      grok-4.7    /srv/b2           42s    a very lo…\n" +
+		"0000c003  starting     cursor    -           ~                 3h     -\n" +
+		"0000d004  failed       grok      -           /srv/d            6d     a red line\n" +
+		"0000e008  idle         cursor    -           …/workspace/path  1m     deep\n" +
+		"0000e007  idle         native    glm-5.3     ~/newer           5m     -\n" +
+		"0000e005  idle         cursor    -           ~/older           -      -\n" +
+		"0000f006  unreachable  cursor    composer    /srv/f            1h     gone quiet\n"
 	if got := psTable(deep, 80); got != want {
 		t.Fatalf("at 80 cells:\n%s\nwant:\n%s", got, want)
 	}
@@ -148,6 +150,42 @@ func TestPsFitsTheTerminal(t *testing.T) {
 	}
 	if got := psTable(nil, 10); got != "no sessio…\n" {
 		t.Fatalf("at 10 cells, no sessions: %q", got)
+	}
+}
+
+// TestPsCapsTheModel (plan 035 C11): MODEL is the row's model id cut with an
+// ellipsis to psModelCells, as a title is cut — an id at the cap kept whole,
+// a longer one cut — so a long id widens the column no further; one line,
+// its escape sequences and controls gone. The negative control is the cap
+// removed: the long id whole, and the column as wide as it.
+func TestPsCapsTheModel(t *testing.T) {
+	atCap := strings.Repeat("m", psModelCells)
+	idle := protocol.ActivityIdle
+	res := protocol.HubSessionsListResult{Epoch: "0a1b2c3d4e5f", Sessions: []protocol.RosterRow{
+		psRosterRow(t, 1, "0192f0aa-1111-7000-8000-00000000a001", protocol.RosterReachable, "cursor", "/srv/a",
+			&protocol.SessionRow{Activity: idle, Model: atCap}),
+		psRosterRow(t, 2, "0192f0aa-2222-7000-8000-00000000b002", protocol.RosterReachable, "cursor", "/srv/b",
+			&protocol.SessionRow{Activity: idle, Model: "openrouter/anthropic/claude-sonnet-4.6-thinking-high"}),
+		psRosterRow(t, 3, "0192f0aa-3333-7000-8000-00000000c003", protocol.RosterReachable, "grok", "/srv/c",
+			&protocol.SessionRow{Activity: idle, Model: "grok\x1b[31m-4.7\nfast"}),
+	}}
+	rows := psRows(res, "/home/u", nil, psNow)
+	got := map[string]string{}
+	for _, r := range rows {
+		got[r.cells[0]] = r.cells[3]
+	}
+	want := map[string]string{"0000a001": atCap, "0000b002": "openrouter/anthropic/claude-son…", "0000c003": "grok-4.7 fast"}
+	for id, w := range want {
+		if got[id] != w {
+			t.Errorf("session %s's MODEL %q, want %q", id, got[id], w)
+		}
+	}
+	if w := ansi.StringWidth(got["0000b002"]); w != psModelCells {
+		t.Errorf("the cut model is %d cells, want %d", w, psModelCells)
+	}
+	header := strings.Split(psTable(rows, 0), "\n")[0]
+	if w := strings.Index(header, "DIR") - strings.Index(header, "MODEL"); w != psModelCells+2 {
+		t.Fatalf("the MODEL column takes %d cells, want %d and its two spaces: %q", w, psModelCells+2, header)
 	}
 }
 
@@ -180,10 +218,11 @@ func TestPsNothingRunning(t *testing.T) {
 // ------------------------------------------------------------- the paths
 
 // psHost serves an in-process fake host, session id, listed in the process
-// environment's registry, in workspace; it is closed when the test ends.
-func psHost(t *testing.T, env rundir.Env, hostID, sessionID, workspace string) {
+// environment's registry, in workspace — its row carrying the row facts,
+// its model among them, when rowFacts; it is closed when the test ends.
+func psHost(t *testing.T, env rundir.Env, hostID, sessionID, workspace string, rowFacts bool) {
 	t.Helper()
-	h, err := fakehost.New(fakehost.Options{HostID: hostID, CrazeSessionID: sessionID, Workspace: workspace})
+	h, err := fakehost.New(fakehost.Options{HostID: hostID, CrazeSessionID: sessionID, Workspace: workspace, RowFacts: rowFacts})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -206,16 +245,20 @@ func psHost(t *testing.T, env rundir.Env, hostID, sessionID, workspace string) {
 }
 
 // psTwo is two fake hosts in env, their workspaces under HOME, and the rows
-// craze ps prints for them: SESSION, PROVIDER and DIR, keyed by short id.
-func psTwo(t *testing.T, env rundir.Env) map[string][2]string {
+// craze ps prints for them: SESSION, PROVIDER, DIR and MODEL, keyed by short
+// id. The first host's row carries the row facts, and so its session's model
+// (the fake host's grok, SF-114); the second is an older host's, with no
+// model to show.
+func psTwo(t *testing.T, env rundir.Env) map[string][3]string {
 	t.Helper()
 	ids := []string{"0192f0aa-1111-7000-8000-0000000a0001", "0192f0aa-2222-7000-8000-0000000b0002"}
-	want := map[string][2]string{}
+	models := []string{"grok", "-"}
+	want := map[string][3]string{}
 	for i, id := range ids {
 		ws := filepath.Join(env.Home, "ws"+string(rune('1'+i)))
-		psHost(t, env, "00000000000"+string(rune('1'+i)), id, ws)
+		psHost(t, env, "00000000000"+string(rune('1'+i)), id, ws, i == 0)
 		// The fake host's session names no provider.
-		want[psShort(id)] = [2]string{"-", "~/ws" + string(rune('1'+i))}
+		want[psShort(id)] = [3]string{"-", "~/ws" + string(rune('1'+i)), models[i]}
 	}
 	return want
 }
@@ -251,16 +294,21 @@ func psColumns(t *testing.T, out string) [][]string {
 }
 
 // checkPsRows checks craze ps's table lists exactly want's sessions, each
-// with its provider and directory, MODEL and TITLE "-" — and each idle, or,
-// should the scheduler starve the one poll each host gets, unreachable.
-func checkPsRows(t *testing.T, out string, want map[string][2]string) {
+// with its provider, directory and model, TITLE "-" — and each idle, or,
+// should the scheduler starve the one poll each host gets, unreachable, its
+// row then not yet read and so its MODEL "-".
+func checkPsRows(t *testing.T, out string, want map[string][3]string) {
 	t.Helper()
 	rows := psColumns(t, out)
 	var got []string
 	for _, r := range rows {
 		got = append(got, r[0])
 		w, ok := want[r[0]]
-		if !ok || r[2] != w[0] || r[4] != w[1] || r[3] != "-" || r[6] != "-" {
+		model := w[2]
+		if r[1] == "unreachable" {
+			model = "-"
+		}
+		if !ok || r[2] != w[0] || r[4] != w[1] || r[3] != model || r[6] != "-" {
 			t.Errorf("craze ps's row %q, want %s %v", r, r[0], w)
 		}
 		switch r[1] {
@@ -372,7 +420,7 @@ func TestPsThroughTheHub(t *testing.T) {
 	for _, r := range res.Sessions {
 		got = append(got, psShort(r.SessionID))
 	}
-	if len(got) != 2 || want[got[0]] == [2]string{} || want[got[1]] == [2]string{} {
+	if len(got) != 2 || want[got[0]] == [3]string{} || want[got[1]] == [3]string{} {
 		t.Fatalf("the hub's roster lists %v, want %v", got, want)
 	}
 }

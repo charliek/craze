@@ -776,10 +776,10 @@ craze session id, whichever terminal or `CRAZE_HOME` started it — one row
 each, from [the hub](#the-hub)'s roster:
 
 ```text
-SESSION   STATE        PROVIDER  MODEL  DIR       SINCE  TITLE
-0000a001  needs you    cursor    -      ~/proj-a  2m     fix the flaky test
-0000c003  starting     cursor    -      ~         3h     add the ps command
-0000e007  idle         native    -      ~/newer   5m     -
+SESSION   STATE        PROVIDER  MODEL                       DIR       SINCE  TITLE
+0000a001  needs you    cursor    sonnet-4.6                  ~/proj-a  2m     fix the flaky test
+0000c003  starting     cursor    -                           ~         3h     add the ps command
+0000e007  idle         native    muse-spark-1.3-contributor  ~/newer   5m     -
 ```
 
 | Column | |
@@ -787,7 +787,7 @@ SESSION   STATE        PROVIDER  MODEL  DIR       SINCE  TITLE
 | `SESSION` | The last eight characters of the session's craze id: its random end. A craze id is a UUIDv7, whose first characters are its clock's, the same for every session started within a minute or so. `--json`, `craze attach --session` and `craze bridge --session` take the whole id |
 | `STATE` | The session list's state: `needs you` (an ask is open), `working`, `starting` (its host has not answered yet), `failed` (its start or its last turn failed), `idle`, or `unreachable` (listed, and its socket does not answer) |
 | `PROVIDER` | The session's provider |
-| `MODEL` | `-` for now: a session's row does not carry the model it runs |
+| `MODEL` | The session's current model id, as `--model` takes it (its row's [`model`](protocol.md#the-row-facts)), cut with `…` to 32 cells; `-` when its host does not say (a craze from before plan 035) or has not answered yet. `--json` carries the whole id |
 | `DIR` | The session's working directory, `~` for `$HOME` |
 | `SINCE` | How long the session has been in its state, in one unit (`42s`, `5m`, `3h`, `6d`); `-` when its host does not say (an older craze) |
 | `TITLE` | The session's title, else its first prompt (the session index's title), else `-`: one line, cut with `…` to what is left of the terminal's width, or to 100 cells when stdout is not a terminal |
