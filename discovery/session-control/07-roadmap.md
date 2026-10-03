@@ -235,6 +235,16 @@ process ("mobile first").
 - **Order (SD-34):** S3 runs after S4b, and after shed has made its first
   release of its own lane work. It starts with a hub roster and `create`,
   both available from S4b.
+- **Ready from craze's side (Plan 035).** The roster rows carry the session's
+  model; `session.create` fails with the agent's own words and, on macOS, a
+  hint when the hub was not started in the GUI login session; `craze new
+  --json` fails as JSON; `--session` takes `craze ps`'s short ids; a dropped
+  `craze bridge --hub` is reaped within about a second. Its limits: run the
+  lane's `craze bridge` through a GUI-session process such as
+  `shed-host-agent` on macOS (SF-126, explained; SF-130 if the error proves
+  not enough), and a client that half-closes and then drops over Tailscale SSH
+  leaves its bridge and splice until the host's next write (SF-139). See
+  `12`, Plan 035 PR 2, and `13`.
 - Size: M, about 3k lines of Rust plus the lane-transport change in
   `shed-core`.
 - **Exit**: shed's own bar. craze started in a roost tab; from the Flutter
@@ -414,8 +424,11 @@ rows (SF-86, SF-99, SF-61) passed a fake-agent smoke at PR 1's tip (SF-86
 again by eye in V4); SF-102's render bounds are V8's. No golden moved but the
 four SF-86 frames the owner allowed. The execution amendments X1–X82, the
 review record, V1–V8 and the handoff are in `12`; what it found and did not
-do is `13`, SF-104–SF-127. **S3 (the shed lane) is next**, after shed's
-first release of its own lane work.
+do is `13`, SF-104–SF-141 (Plan 035's PR 2 added SF-118 reopened, SF-128,
+SF-130 and SF-138–SF-141). **S3 (the shed lane) is next**, after shed's
+first release of its own lane work, and craze's side is ready for it (Plan 035:
+`12`'s PR 2 section and its handoff; the limits are `13`'s SF-126, SF-130 and
+SF-139).
 
 ### S4c — remote-machine listing (directional)
 

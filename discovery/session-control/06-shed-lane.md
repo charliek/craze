@@ -115,6 +115,14 @@ reconnect, no reseed, no flicker after backgrounding).
    **Accepted risk:** the stream is re-exposed on the device's loopback with
    no peer identity, as roost's already is. "No tokens" is a property of the
    machine running craze, not of the client device.
+   **Known residual (SF-139):** `craze bridge` and the hub's splice now end
+   within about a second of a client that has closed entirely (Plan 035; a
+   killed ssh client over Tailscale SSH was reaped in about 1 s), and a client
+   that half-closes still receives. But a client that closes its stdin and
+   *then* drops, over Tailscale SSH, leaves the bridge and splice until the
+   host's next write (tailscaled keeps its end of the bridge's stdout pipe
+   open, so nothing shows the client has gone). It holds the hub from its idle
+   exit, not the host; the lane's reconnect loop should expect it.
 3. macOS limit to record in shed's `create` capability: `cursor-agent` started
    under plain ssh fails on a locked login keychain, so `session.create` over
    the bridge cannot start cursor sessions there. A hub keeps the login session

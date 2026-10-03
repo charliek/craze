@@ -4879,11 +4879,11 @@ lane work. What it inherits:
 Plan 035 readies S3 (the shed lane) and pulls in the flakes and minor bugs found
 in six days of CI (09-27 to 10-02). It is cut into two PRs, PR 1 first, so
 that PR 2's many CI runs are not spent diagnosing known flakes (P1). The plan
-lives outside the repo; its amendments (X1–X20 for PR 1) are the truth.
+lives outside the repo; its amendments (X1–X20 for PR 1, X21–X41 for PR 2) are the truth.
 
 ### PR 1 — flakes and minor bugs
 
-PR: (to be filled at merge)
+PR: #83, merged as 19ef439 (2026-10-03).
 
 Branch `feature/plan-035-flakes`, base `79a8adc`. Each commit was gated before
 it landed and reviewed by SHA; a review's fixes land as their own `Cnr` commit,
@@ -4979,7 +4979,7 @@ documents the marker.
 **SF-118 is closed**, with no recurrence since its fix `a703c0c` (2026-10-02
 03:35Z) across every CI run since: about 25 `test-race` runs on both OSes, on
 main and the plan 032/033 PR branches (the last failure, run 36957765188,
-predates the fix). If this PR's own CI shows one, it is reopened. **SF-122 is
+predates the fix). If this PR's own CI shows one, it is reopened. (It was reopened by PR 2's gate-at c10, X34, below.) **SF-122 is
 closed** by C2–C2r4; its remaining microsecond window is SF-137.
 
 **Review rounds.** C1: astra, no findings (the XNU facts it checked: the
@@ -5020,4 +5020,133 @@ gaps, fixed in C5r2, and an overbroad claim in this record, corrected here.
   CI's macOS VM (X9). That ordering rests on CI run 37005407853 and XNU's
   source; the deterministic regression is the darwin stub test.
 
-Rows added to `13`: SF-132–SF-136 (SF-128–SF-131 are reserved for PR 2).
+Rows added to `13`: SF-132–SF-137 (PR 2's rows are in its section below).
+
+### PR 2 — S3 readiness
+
+Branch `feature/plan-035-s3-ready`, commits C7, C9, C10, C11 and their review
+fixes (C12 is this record). A review's fixes landed as their own commits (X1).
+
+- **C7, C7r, C7r2, C7r3 — SF-125 and SF-126.** A failed start now says the agent's own
+  words: a bounded tail of its last non-blank stderr lines (512 bytes, folded
+  to one line, a long last line keeping its end) joins `data.cause` when the
+  agent exited non-zero or by signal after `initialize`, within a bounded wait
+  for the stderr copy. On macOS a second sentence says what the login session
+  may have to do with it: the hub reads its audit session's flags
+  (`getaudit_addr`, `HAS_GRAPHIC_ACCESS`), and `craze serve` builds the hint
+  (`loginSessionHint`, naming the hub's pid) and passes it in
+  (`StartErrExitHint`, X21); Linux and a GUI-session hub get no hint. The fake
+  agent's `exit-two-lines` pins it byte for byte; `craze prompt --json`'s
+  startup failure is byte-identical to `79a8adc`. r11 found a credential at the
+  start of an oversized last line (X25's prefix cut) and two test races: C7r
+  keeps the line's last 512 bytes instead (X32) and adds a test-only tail-wait
+  seam (X38); r13 found a darwin-only test deadlock (a status-less exit
+  observation under the test's SIGKILL hold) and a docs overstatement: C7r2
+  (X40); r17's two cleanup gaps: C7r3 (the tool ends with its FIFO; Initialize
+  joined last, X42).
+- **C9, C9r — SF-123.** A `craze bridge` (and a hub splice) whose client has gone
+  entirely now ends. `rundir.PeerGone` polls a pipe or an AF_UNIX stream socket
+  for `POLLERR`/`POLLHUP` (linux and darwin; the two semantics were confirmed
+  from the kernel sources), the bridge's probe starts at stdin's EOF and the
+  splice's watcher at the host leg's half-close, each looking once at once and
+  then every second (X27–X29). A half-closed client that still reads keeps
+  receiving. r12 found TCP sockets wrongly counted as supported and a docs
+  omission; C9r limits it to pipes and AF_UNIX streams and states when the
+  splice's bound arms; r14 found nothing. Residuals are SF-138 and SF-139.
+- **C10, C10r — SF-124, SF-115, SF-127.** `craze new --json` prints the protocol
+  error as one JSON object (code, reason, message, `data.cause`) with exit 1;
+  `--session` resolves in tiers, the first that matches deciding: an exact id
+  of any kind, then a craze-id suffix (what `craze ps` shows), a craze-id
+  prefix, a host-id prefix; a partial id needs 4 characters, a provider id
+  matches only whole, and two sessions in the deciding tier are refused as an
+  ambiguous whole id is. r15 found one exit-1 path with
+  no JSON, a failed stdout write of the result: `cli.md` names that one
+  exception (X33) and the matcher's two edges are pinned. SF-127 closed with
+  docs only (V5, below).
+- **C11, C11r — SF-114.** `SessionRow.model` carries a session's current model id
+  through the host's `sessions.list` and the hub's roster, and `craze ps`'s
+  MODEL shows it (`-` for an older host), capped at 32 cells (X35). It rides
+  `rowFacts`, so only fixture 17 and its schema copy moved (A12; NC2 moved
+  fixtures 14, 16, 18-20 and 22-23, which is what proves it). r16 found the row
+  of a failed start (after `session/new` installed a model) retaining it; C11r
+  lists none.
+- **X34 — SF-118 reopened.** `3c38753` is the diagnostics commit: after gate-at c10
+  failed `TestEnsureOutlastsAHubTearingDown` ("did not exit within 30s of
+  SIGTERM", the child having logged "stopped" within the second, `syscall.Exit`
+  already in place since `a703c0c`), the hub helper's report gains each
+  thread's `/proc` state and wchan and how long the child outlived the step.
+  Not retried; the row is back in `13` with the same id.
+
+**Decisions.** P2, the owner's: explain the macOS login-session limit, do not
+relocate the hub; C8 (a launchd spawn) was removed, and what it would take is
+SF-130. The planner's P3–P9 shipped as planned: P3 and P4 are C7's tail and
+hint, P5 SF-124's JSON, P6 SF-115's short ids, P7 the model on the row (and
+SF-128, the TUI list, left alone), P8 no craze-owned default model (SF-127's
+docs), and P9 the peer-gone probe and its tests.
+SF-129 and SF-131 are not used: V5 did not reproduce SF-127's model difference
+(X41) and C8 was removed.
+
+**Execution decisions.** X21: the hint is built by `craze serve` and passed into
+the session, because it must be in the error before `Engine.Started` stores its
+text; no wire change. X32: the tail keeps the last 512 bytes of an oversized
+line and is not redacted (no generic redactor exists; the cause reaches only the
+user whose host log holds all of stderr), recorded as SF-141. X33: an unwritable
+stdout cannot carry JSON, so `cli.md` names it. X35: MODEL is a fixed 32 cells
+and gives none back on a narrow terminal. X38: `CRAZE_TEST_STDERR_TAIL_WAIT`
+stretches both bounded waits for the stderr copy (the failed start's and the
+reaper's), since stretching one was proven insufficient, and works only when
+`testing.Testing()` is true. X26: V5 ran after C11, since it reads grok's model
+through `craze ps` MODEL.
+
+**Review rounds.** r11 (astra, C7): a credential could sit at the start of a cut
+line, and two test races; V2 independently re-compared at 103/103. r12 (astra,
+C9): no half-close, data-loss or accounting issue; TCP wrongly "supported", the
+arming condition undocumented. r13 (astra, C7r): no production regression;
+a darwin test deadlock and a docs overstatement. r14 (astra, C9r): no findings.
+r15 (sol, C10): the matcher correct; the stdout-write exception. r16 (astra,
+C11): wire-compatible; a failed start's row kept its model. r17 (astra, C7r2):
+the deadlock fixed and the docs accurate; two cleanup gaps on failing or
+fallback paths (the tool outliving the test where no group KILL comes, an
+unjoined Initialize), fixed in C7r3 and left to the branch-level review.
+
+**Verification.** V2 at C7: 103/103 normalized outputs and exit results match
+`6581e0a`; V2 at the tip: (to be filled). A12: only fixture 17 moved. On the
+mac-mini (X41): V3 over plain ssh with a real cursor and no GUI-born hub failed
+as pinned, with cursor's two keychain lines and the hint naming the hub's pid,
+and from the GUI session, after that hub was stopped, the create started cursor
+(the hub logging audit flags 0x1 and then 0x2030); an agent-not-found failure
+gets no hint and `craze prompt --json`'s startup failure is unchanged; a
+`79a8adc` host shows MODEL `-` beside a candidate host's `default`. V4, over
+real Tailscale SSH (stdin and stdout are pipes): killing the ssh client reaped
+the bridge in 1.002, 0.951 and 0.946 s, with the hub's splice "ended" line and
+its sockets back from 5 to 3; the half-closed-then-dropped case is SF-139. On
+Linux, with a socketpair and a pipe variant standing in for sshd (X39): a full
+close exits in 0.001 s and a half-closed client keeps receiving. V5 did not
+reproduce SF-127: hub-created and TUI-launched grok, same cwd, both started on
+`grok-4.7`, neither argv has a model flag, and craze sends grok no model on
+either path, so Plan 032's `muse-spark-1.3-contributor` was grok's own choice
+at that moment. Darwin tests also passed on the mac-mini (`-race` for C9, the
+darwin stub tests for C7 and C7r); the V3 optional file-credential-store leg was
+skipped (SF-130's row records it).
+
+**Coordination with Plan 034.** No conflict: 034's PR 2 touches protocol.md's
+`state` sections, a new `session.models.refresh`, and schema/info.json and
+control/info.go, not `session.create` or the splice sections. 035's PR 1
+landed first and 034 rebases onto it; for PR 2, whichever lands second
+re-records fixture 17 and its schema copy (034 takes fixtures 24 and 25; 035
+adds none).
+
+PR: (to be filled at merge)
+
+#### Handoff to S3
+
+Shed's lane can rely on these now: the hub's roster rows carry `model`;
+`session.create`'s failures carry the agent's own words in `data.cause`, and on
+macOS the hint when the hub was not started in the GUI login session;
+`craze new --json` fails as one JSON object; `--session` takes the short ids
+`craze ps` shows; and a dropped `craze bridge --hub` (the client closing
+entirely) is reaped within about a second. Its limits: run the lane's `craze
+bridge` through a GUI-session process such as `shed-host-agent` on macOS, so no
+bridge gives birth to an ssh-session hub (SF-126, `06` item 3); a client that
+half-closes and then drops over Tailscale SSH leaves its bridge and splice until
+the host's next write (SF-139); and SF-130 if the error proves not to be enough.
