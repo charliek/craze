@@ -1277,13 +1277,21 @@ func (h *foreignEndHold) waitKept(t *testing.T) {
 // the agent's own turn bracketed exactly once on stdout.
 func (h *foreignEndHold) exitsOne(t *testing.T) {
 	t.Helper()
+	err := h.exits(t)
+	var ee *exitError
+	if !errors.As(err, &ee) || ee.code != 1 {
+		t.Fatalf("err %v", err)
+	}
+}
+
+// exits releases the held event and returns what the run then returns, having
+// checked that the agent's own turn is bracketed exactly once on stdout.
+func (h *foreignEndHold) exits(t *testing.T) error {
+	t.Helper()
 	h.release()
+	var err error
 	select {
-	case err := <-h.done:
-		var ee *exitError
-		if !errors.As(err, &ee) || ee.code != 1 {
-			t.Fatalf("err %v", err)
-		}
+	case err = <-h.done:
 	case <-time.After(stubWatchdog):
 		t.Fatal("the agent's turn ended and the signalled run did not exit")
 	}
@@ -1302,6 +1310,50 @@ func (h *foreignEndHold) exitsOne(t *testing.T) {
 	if started != 1 || ended != 1 {
 		t.Fatalf("the agent's own turn must be bracketed once: %d started, %d ended\n%s", started, ended, h.out.String())
 	}
+	return err
+}
+
+// returns releases the held event and returns what the run then returns, with no
+// word about stdout: for a test that has cut it, where the closing bracket is the
+// write that fails.
+func (h *foreignEndHold) returns(t *testing.T) error {
+	t.Helper()
+	h.release()
+	select {
+	case err := <-h.done:
+		return err
+	case <-time.After(stubWatchdog):
+		t.Fatal("the agent's turn ended and the signalled run did not exit")
+		return nil
+	}
+}
+
+// holdLastEnding runs a one-turn chain into the held state and returns once the
+// run is waiting there with its stop done. The agent's own turn opens inside
+// craze's turn and stays open; craze's turn ends end_turn, with streamErr on its
+// stream unless that is nil; and the signal lands in the gap after that ending is
+// judged and before the run looks for one (promptOpts.afterTurnEnded). So the run
+// holds what the ending said without the signal: streamErr, or — with none —
+// success, the late-signal window drive keeps on purpose. The agent's ended event
+// is parked (holdForeignEnd), so nothing ends the wait until the test says so.
+func holdLastEnding(t *testing.T, streamErr error) (*foreignEndHold, *stubSession) {
+	t.Helper()
+	o := stubOpts(&bytes.Buffer{}, &bytes.Buffer{})
+	// A budget nothing in these tests may reach: the ended event ends the wait.
+	o.foreignMax = time.Hour
+	var s *stubSession
+	turn := endTurn()
+	turn.before = func() { s.setForeign(true) }
+	if streamErr != nil {
+		turn.emit = append([]agent.Event{{Type: agent.EventError, Err: streamErr}}, turn.emit...)
+	}
+	s = newStubSession(t, turn)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	o.afterTurnEnded = sync.OnceFunc(cancel)
+	h := holdForeignEnd(t, o, s, func() error { return runChain(o, ctx, s, "go") })
+	h.waitKept(t)
+	return h, s
 }
 
 // cutWriter is stdout that can be cut: once it is, every write fails. A run
@@ -1414,6 +1466,139 @@ func TestASignalThatSettlesARefusedClaimWaitsForTheForeignTurnsEndedLine(t *test
 	if got := s.sent(); len(got) != 1 {
 		t.Fatalf("the engine claims nothing while the agent holds the session: %v", got)
 	}
+}
+
+// TestAHeldStreamErrorOutlivesTheSuccessorsRefusedEnding is astra's r3 on C2r,
+// finding 1. A turn whose stream carried an error ends the chain on that error
+// even when the engine has already claimed its successor — turnEnded judges the
+// stream's error before Next — so the ending a signal makes the run hold can
+// have a turn of craze's own behind it. Here that successor is refused, because
+// the agent has started a turn of its own, and parked; the signal lands as turn
+// one's ending is judged; and the stop settles the successor as the refusal it
+// was. Its start and its ending are read while turn one's ending is held, and a
+// run that judged them would return the signal's silent exit in place of the
+// error the chain ended on. The held run reads them as the final sweep would —
+// written, not judged — and returns turn one's error once the agent's turn ends.
+//
+// The stream is r3's: the agent's turn opens ahead of turn one's ending, as a
+// direct publication overtakes the engine's batch, while the session's flag is
+// still down for the successor's claim; the flag goes up as the successor is
+// refused, and the stop's cancel takes it down again (holdForeignEnd).
+func TestAHeldStreamErrorOutlivesTheSuccessorsRefusedEnding(t *testing.T) {
+	o := stubOpts(&bytes.Buffer{}, &bytes.Buffer{})
+	// A budget nothing in this test may reach: the ended event ends the wait.
+	o.foreignMax = time.Hour
+	boom := errors.New("turn one's stream failed")
+	var s *stubSession
+	s = newStubSession(t,
+		stubTurn{
+			emit: []agent.Event{
+				{Type: agent.EventError, Err: boom},
+				{Type: agent.EventForeignTurn, ForeignTurn: &agent.ForeignTurnInfo{ID: "interject-fallback-1", Running: true}},
+				{Type: agent.EventDone, StopReason: "end_turn"},
+			},
+			res: agent.Result{StopReason: "end_turn"},
+		},
+		stubTurn{
+			before: func() {
+				s.mu.Lock()
+				s.foreign = true
+				s.mu.Unlock()
+			},
+			err: agent.ErrForeignTurn,
+		},
+	)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	// The run stops in the gap after turn one's ending is judged, and the signal
+	// lands there once the successor's claim is parked.
+	judged, landed := make(chan struct{}), make(chan struct{})
+	o.afterTurnEnded = sync.OnceFunc(func() {
+		close(judged)
+		<-landed
+	})
+	land := sync.OnceFunc(func() { close(landed) })
+
+	h := holdForeignEnd(t, o, s, func() error { return runChain(o, ctx, s, "go", "follow-up") })
+	// Registered after the hold's own cleanup, so it runs first: a run still
+	// stopped in the gap is let go before that cleanup waits for it.
+	t.Cleanup(land)
+	select {
+	case <-judged:
+	case err := <-h.done:
+		t.Fatalf("the run exited (%#v) before it judged turn one's ending\n%s", err, h.out.String())
+	case <-time.After(stubWatchdog):
+		t.Fatal("the run never judged turn one's ending")
+	}
+	waitFor(t, "the successor's claim to be parked", func() bool {
+		st := s.engine().State()
+		return st.Waiting && st.Turn == "turn-2"
+	})
+	cancel()
+	land()
+	h.waitKept(t)
+	// The successor's ending is the stop's, enqueued before the stop returned and
+	// so before the run was told it was done. Turn events print nothing, so the
+	// run cannot be watched reading it; the barrier puts it on the stream ahead of
+	// the agent's ended event, which is published only once released.
+	syncCtx, cancelSync := context.WithTimeout(context.Background(), stubWatchdog)
+	defer cancelSync()
+	if err := s.engine().Sync(syncCtx); err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+	if err := h.exits(t); !errors.Is(err, boom) {
+		t.Fatalf("err %#v, want the stream error the chain ended on", err)
+	}
+}
+
+// TestAWriteThatFailsWhileAnEndingIsHeldKeepsTheSweepsPrecedence is the other
+// route r3's finding 1 names. A run holding the chain's last ending is doing the
+// final sweep's reading early, so a write that fails there is judged as the
+// sweep judges one (finishRun): the first failure wins. A held failure stands
+// against the write's, and a held success is no failure, so the write's error
+// is the run's.
+func TestAWriteThatFailsWhileAnEndingIsHeldKeepsTheSweepsPrecedence(t *testing.T) {
+	boom := errors.New("the turn's stream failed")
+	for _, tc := range []struct {
+		name      string
+		streamErr error
+		want      error
+	}{
+		{name: "a held failure stands", streamErr: boom, want: boom},
+		{name: "a held success gives way", want: errStdoutCut},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h, _ := holdLastEnding(t, tc.streamErr)
+			// The agent's ended event is the run's next write, and it fails.
+			h.out.cut()
+			if err := h.returns(t); !errors.Is(err, tc.want) {
+				t.Fatalf("err %#v, want %v", err, tc.want)
+			}
+		})
+	}
+}
+
+// TestAPermissionRefusedWhileAnEndingIsHeldFailsTheRun is astra's r3 on C2r,
+// finding 2. The chain's last turn ends end_turn and is judged before the signal
+// lands, so the ending held says the run succeeded. The agent then asks a
+// permission while the run waits for its turn to end, and the run refuses it. A
+// permission any reader refuses fails the run — the final sweep's rule, and this
+// reader is that sweep begun early — so the run exits 1, not 0.
+func TestAPermissionRefusedWhileAnEndingIsHeldFailsTheRun(t *testing.T) {
+	h, s := holdLastEnding(t, nil)
+	s.emit(agent.Event{Type: agent.EventPermission, Permission: &agent.PermissionEvent{
+		ID:   "perm-1",
+		Tool: "Shell",
+		Options: []agent.PermissionOption{
+			{OptionID: "opt-allow", Kind: "allow_once"},
+			{OptionID: "opt-reject", Kind: "reject_once"},
+		},
+	}})
+	waitFor(t, "the held run to answer the agent's permission", func() bool { return s.answered() == 1 })
+	if got := s.answers(); got[0] != "opt-reject" {
+		t.Fatalf("with no --permission-decision the run refuses: %v", got)
+	}
+	h.exitsOne(t)
 }
 
 // blockingWriter is stdout that stops the run mid-line: it blocks the first
