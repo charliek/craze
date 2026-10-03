@@ -239,7 +239,10 @@ process ("mobile first").
   model; `session.create` fails with the agent's own words and, on macOS, a
   hint when the hub was not started in the GUI login session; `craze new
   --json` fails as JSON; `--session` takes `craze ps`'s short ids; a dropped
-  `craze bridge --hub` is reaped within about a second. Its limits: run the
+  `craze bridge --hub` is reaped within about a second once the splice has
+  read the client's end (a client that closes while the splice's upstream copy
+  is blocked on a host that stopped reading waits for the 60 s write-stall
+  bound). Its limits: run the
   lane's `craze bridge` through a GUI-session process such as
   `shed-host-agent` on macOS (SF-126, explained; SF-130 if the error proves
   not enough), and a client that half-closes and then drops over Tailscale SSH

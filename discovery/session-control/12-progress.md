@@ -5053,7 +5053,7 @@ fixes (C12 is this record). A review's fixes landed as their own commits (X1).
   receiving. r12 found TCP sockets wrongly counted as supported and a docs
   omission; C9r limits it to pipes and AF_UNIX streams and states when the
   splice's bound arms; r14 found nothing. Residuals are SF-138 and SF-139.
-- **C10, C10r — SF-124, SF-115, SF-127.** `craze new --json` prints the protocol
+- **C10, C10r, C10r2 — SF-124, SF-115, SF-127.** `craze new --json` prints the protocol
   error as one JSON object (code, reason, message, `data.cause`) with exit 1;
   `--session` resolves in tiers, the first that matches deciding: an exact id
   of any kind, then a craze-id suffix (what `craze ps` shows), a craze-id
@@ -5061,8 +5061,9 @@ fixes (C12 is this record). A review's fixes landed as their own commits (X1).
   matches only whole, and two sessions in the deciding tier are refused as an
   ambiguous whole id is. r15 found one exit-1 path with
   no JSON, a failed stdout write of the result: `cli.md` names that one
-  exception (X33) and the matcher's two edges are pinned. SF-127 closed with
-  docs only (V5, below).
+  exception (X33) and the matcher's two edges are pinned; r18 found a closed
+  stdout killing `craze new` by SIGPIPE before its stderr line, and C10r2 makes
+  that write fail with EPIPE instead. SF-127 closed with docs only (V5, below).
 - **C11, C11r — SF-114.** `SessionRow.model` carries a session's current model id
   through the host's `sessions.list` and the hub's roster, and `craze ps`'s
   MODEL shows it (`-` for an older host), capped at 32 cells (X35). It rides
@@ -5107,10 +5108,15 @@ r15 (sol, C10): the matcher correct; the stdout-write exception. r16 (astra,
 C11): wire-compatible; a failed start's row kept its model. r17 (astra, C7r2):
 the deadlock fixed and the docs accurate; two cleanup gaps on failing or
 fallback paths (the tool outliving the test where no group KILL comes, an
-unjoined Initialize), fixed in C7r3 and left to the branch-level review.
+unjoined Initialize), fixed in C7r3 and left to the branch-level review. r18
+(astra, the branch): the wire, the seams and the bridge/splice interactions
+clean; `craze new --json` with its stdout's reader gone was killed by SIGPIPE
+before its stderr line (C10's new write on the failure path), fixed in C10r2
+(`ignoreSIGPIPE`, a real broken-pipe test); and this record's handoff had
+dropped C9r's arming condition, restored here.
 
 **Verification.** V2 at C7: 103/103 normalized outputs and exit results match
-`6581e0a`; V2 at the tip: (to be filled). A12: only fixture 17 moved. On the
+`6581e0a`; V2 at the tip (`1a8a2a5`): 102/103 SAME, the one DIFF the baseline's own loss of the closing line in `sigint-foreign-turn-holds-the-drain` (SF-122 in `6581e0a`; the candidate printed all 15). A12: only fixture 17 moved. On the
 mac-mini (X41): V3 over plain ssh with a real cursor and no GUI-born hub failed
 as pinned, with cursor's two keychain lines and the hint naming the hub's pid,
 and from the GUI session, after that hub was stopped, the create started cursor
@@ -5145,7 +5151,10 @@ Shed's lane can rely on these now: the hub's roster rows carry `model`;
 macOS the hint when the hub was not started in the GUI login session;
 `craze new --json` fails as one JSON object; `--session` takes the short ids
 `craze ps` shows; and a dropped `craze bridge --hub` (the client closing
-entirely) is reaped within about a second. Its limits: run the lane's `craze
+entirely) is reaped within about a second once the splice has read the client's
+end (a client that closes while the splice's upstream copy is blocked on a host
+that stopped reading waits for the 60 s write-stall bound instead). Its limits:
+run the lane's `craze
 bridge` through a GUI-session process such as `shed-host-agent` on macOS, so no
 bridge gives birth to an ssh-session hub (SF-126, `06` item 3); a client that
 half-closes and then drops over Tailscale SSH leaves its bridge and splice until
