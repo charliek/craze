@@ -162,9 +162,16 @@ func runNew(cmd *cobra.Command, f *newFlags, args []string) error {
 		if ws == "" {
 			ws = abs
 		}
-		fmt.Fprintf(out, "started %s in %s\n", psShort(res.Session.SessionID), psLine(psTilde(env.Home, ws)))
+		// A write that fails (stdout's reader gone: EPIPE, ignoreSIGPIPE) is the
+		// run's failure, as the --json result's is: exit 1 with the write's
+		// error, never a silent exit 0 (plan 035 r19).
+		if _, err := fmt.Fprintf(out, "started %s in %s\n", psShort(res.Session.SessionID), psLine(psTilde(env.Home, ws))); err != nil {
+			return err
+		}
 		if res.Prompt == protocol.CreatePromptUnknown {
-			fmt.Fprintln(out, newPromptLost)
+			if _, err := fmt.Fprintln(out, newPromptLost); err != nil {
+				return err
+			}
 		}
 	}
 	if res.Prompt == protocol.CreatePromptRefused {

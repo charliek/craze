@@ -481,6 +481,37 @@ def test_new_json_failure_with_its_stdout_gone_still_says_why(craze_bin: Path, t
     assert out.stderr.startswith(b"craze new: ") and str(missing).encode() in out.stderr, out.stderr
 
 
+def test_new_started_with_its_stdout_gone_fails_not_silently(craze_bin: Path, fake_agent_bin: Path, tmp_path: Path) -> None:
+    """A `craze new` whose session starts but whose `started` line cannot be
+    written (stdout's reader already gone) exits 1 with the write's error on
+    stderr -- not 0 with nothing said, nor killed by SIGPIPE (plan 035 r19).
+    The session itself started: it is listed."""
+    craze_home = Path(os.environ["CRAZE_HOME"])
+    craze_home.mkdir(parents=True, exist_ok=True)
+    (craze_home / "config.toml").write_text(
+        f'host_idle_exit = "{TEST_HOST_IDLE_EXIT}"\n\n[agents]\ncursor = "{fake_agent_bin}"\n', encoding="utf-8"
+    )
+    work = tmp_path / "proj-gone"
+    work.mkdir()
+    r, w = os.pipe()
+    os.close(r)  # the reader is gone before craze new writes a byte
+    try:
+        out = subprocess.run(
+            [str(craze_bin), "new", "-C", str(work), "--provider", "cursor"],
+            stdin=subprocess.DEVNULL,
+            stdout=w,
+            stderr=subprocess.PIPE,
+            env=os.environ.copy(),
+            timeout=6 * WAIT,
+        )
+    finally:
+        os.close(w)
+    assert out.returncode == 1, (out.returncode, out.stderr)
+    assert b"broken pipe" in out.stderr.lower(), out.stderr
+    assert [e for e in _entries(_home()) if e.get("requestId") and e.get("workspace") == str(work)], "no session started"
+    _cleanup_stops(_the_hub(_home()), tmp_path, fake_agent_bin)
+
+
 def test_new_json_refusal_is_the_wire_error(craze_bin: Path, fake_agent_bin: Path, tmp_path: Path) -> None:
     """SF-124: `craze new --json` refused by the hub prints one JSON object on
     stdout, {"error": <the wire's error>}: .error.data.code and .reason are
