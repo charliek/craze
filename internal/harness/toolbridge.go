@@ -560,8 +560,7 @@ func mergeUsage(children []*tool.ChildUsage) []store.ModelUsage {
 		if ch == nil || ch.Usage == (tool.Usage{}) {
 			continue
 		}
-		u := store.Usage{Input: ch.Usage.Input, Output: ch.Usage.Output, Reasoning: ch.Usage.Reasoning,
-			CacheRead: ch.Usage.CacheRead, CacheCreation: ch.Usage.CacheCreation}
+		u := storeUsage(ch.Usage)
 		i := slices.IndexFunc(rows, func(r store.ModelUsage) bool {
 			return r.Provider == ch.Provider && r.Model == ch.Model && r.WireModel == ch.WireModel
 		})
@@ -574,6 +573,11 @@ func mergeUsage(children []*tool.ChildUsage) []store.ModelUsage {
 		r.CacheRead, r.CacheCreation = r.CacheRead+u.CacheRead, r.CacheCreation+u.CacheCreation
 	}
 	return rows
+}
+
+// storeUsage is a sub-agent's usage in the store's shape, field for field.
+func storeUsage(u tool.Usage) store.Usage {
+	return store.Usage{Input: u.Input, Output: u.Output, Reasoning: u.Reasoning, CacheRead: u.CacheRead, CacheCreation: u.CacheCreation}
 }
 
 // pairable reports whether calls can be answered pairably: every provider

@@ -10,10 +10,12 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"charm.land/fantasy"
 	"github.com/charliek/craze/internal/harness/modeltable"
 	"github.com/charliek/craze/internal/harness/redact"
+	"github.com/charliek/craze/internal/harness/store"
 	"github.com/charliek/craze/internal/harness/tool"
 )
 
@@ -584,5 +586,306 @@ func TestAKeyLearnedMidTurnStopsItsCompaction(t *testing.T) {
 				t.Fatalf("%d requests, %d of them the summarizer; want %d, %d of them", len(reqs), summarizers(reqs), c.requests, c.summarizers)
 			}
 		})
+	}
+}
+
+// TestAKeyLearnedDuringARequestStopsItsRetry (plan 034 C4r2, r11 #2a): a key
+// inside the frozen prompt learned while a step's request is outstanding,
+// which then fails, before any output, with an error Fantasy retries, gets
+// no retry: Fantasy's retry re-sends the step's prepared request around the
+// model's Stream alone, outside PrepareStep, so the refusal gate on the turn's
+// model refuses it, nothing is sent, no Retrying is announced, and the turn
+// ends with ErrStoredKeyFrozen; the next turn is refused at its admission.
+// The control: a key in no frozen surface learned at the same moment, and the
+// request is retried, announced, and the turn ends well. Negative controls: a
+// gate that does not look at the refusal state re-sends the request, its
+// system prompt holding the key; a retry hook that does not look announces a
+// retry that never comes.
+func TestAKeyLearnedDuringARequestStopsItsRetry(t *testing.T) {
+	for _, c := range []struct {
+		name   string
+		key    func(f *fixture) string
+		frozen bool
+	}{
+		{"in the prompt", func(f *fixture) string { return f.workspace }, true},
+		{"nowhere in what is sent", func(*fixture) string { return "sk-not-in-what-is-sent-0351" }, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			f := newFixture(t, "http://127.0.0.1:1/v1")
+			s := f.open(f.options())
+			key := c.key(f)
+			if err := modeltable.KeyProblem(key); err != nil {
+				t.Fatalf("the planted key cannot be a key (%v), so the case proves nothing", err)
+			}
+			if strings.Contains(s.system, key) != c.frozen {
+				t.Fatalf("control: the key is in the system prompt: %v, want %v", !c.frozen, c.frozen)
+			}
+			m := f.models["test/a"]
+			g := newGate()
+			busy := &fantasy.ProviderError{Message: "overloaded", StatusCode: 503, ResponseHeaders: map[string]string{"retry-after-ms": "1"}}
+			m.push(g.hold(nil, errorPart(busy)), answerWith("retried"))
+			var ev events
+			out := start(context.Background(), s, "go", ev.sink)
+			await(t, g.reached, "the first request")
+			_, err := s.LearnKeys([]modeltable.Secret{modeltable.Secret(key)})
+			if c.frozen != errors.Is(err, ErrStoredKeyFrozen) {
+				t.Fatalf("LearnKeys mid-request = %v; want the refusal state: %v", err, c.frozen)
+			}
+			close(g.release)
+			o := await(t, out, "the turn")
+			requests, retries := m.requests(), of[Retrying](ev.list())
+			if !c.frozen {
+				if o.err != nil || len(requests) != 2 || len(retries) != 1 {
+					t.Fatalf("control: the turn = %v after %d requests and %d retries announced; want it retried once and ended well",
+						o.err, len(requests), len(retries))
+				}
+				return
+			}
+			if !strings.Contains(textOf(requests[0].Prompt[0]), key) {
+				t.Fatal("premise: the first request's system prompt does not hold the key")
+			}
+			if !errors.Is(o.err, ErrStoredKeyFrozen) || strings.Contains(o.err.Error(), key) {
+				t.Fatalf("the turn = %v; want ErrStoredKeyFrozen, quoting no key", o.err)
+			}
+			if len(requests) != 1 {
+				t.Fatalf("%d requests; want the first alone: the retry, sent after the key was learned, carried it", len(requests))
+			}
+			if len(retries) != 0 {
+				t.Fatalf("Retrying announced %+v; want none: no retry follows", retries)
+			}
+			if !empty(o.res) {
+				t.Fatalf("the refused turn's Result = %+v; want nothing", o.res)
+			}
+			if _, err := s.Run(context.Background(), "and again", nil); !errors.Is(err, ErrStoredKeyFrozen) {
+				t.Fatalf("the next Run = %v; want ErrStoredKeyFrozen", err)
+			}
+			if n := len(m.requests()); n != 1 {
+				t.Fatalf("%d requests after the refused Run; want 1", n)
+			}
+		})
+	}
+}
+
+// TestAKeyLearnedDuringASummarizerRequestStopsItsAttempts (plan 034 C4r2, r11
+// #2b): every summarizer attempt sends the frozen prompt, so a key inside it
+// learned while an attempt's request is outstanding stops the attempts there
+// — whatever would have made another: a failure the attempts retry, a
+// degenerate summary, the aligned form's overflow, which switches to the text
+// form at once. No further request is sent and the refusal surfaces: a manual
+// /compact returns ErrStoredKeyFrozen, and a turn whose compaction it was —
+// before its first request, between two segments, or for an overflow —
+// ends with it, automatic compaction left as it was. A billed attempt is on a
+// failure entry, as a cancelled compaction's is; an unbilled one writes none.
+// The control: a key in no frozen surface learned at the same moment, and the
+// next attempt is sent and summarizes. Negative controls: an attempts loop
+// that does not look at the refusal state sends the next attempt, its system
+// prompt holding the key; a mid-turn or pre-turn compaction that reads the
+// refusal as a summarizer failure switches automatic compaction off; an
+// overflow compaction that does reads the turn's end as the overflow.
+func TestAKeyLearnedDuringASummarizerRequestStopsItsAttempts(t *testing.T) {
+	retryable := func() []fantasy.StreamPart {
+		return errorPart(&fantasy.ProviderError{StatusCode: 500, Message: "boom"})
+	}
+	degenerate := func() []fantasy.StreamPart { return cat(textParts(shortSummary), finish(fantasy.FinishReasonStop)) }
+	alignedOverflow := func() []fantasy.StreamPart { return errorPart(overflowErr()) }
+	for _, c := range []struct {
+		name  string
+		kind  string // manual, pre-turn, mid-turn, overflow
+		fails func() []fantasy.StreamPart
+		// billed says the held attempt reports usage, which a failure entry
+		// then holds; before is the requests ahead of the held one.
+		billed bool
+		before int
+	}{
+		{"a manual compaction, after a retryable failure", "manual", retryable, false, 1},
+		{"a manual compaction, after a degenerate summary", "manual", degenerate, true, 1},
+		{"a manual compaction, after the aligned form overflowed", "manual", alignedOverflow, false, 1},
+		{"a pre-turn compaction, after a retryable failure", "pre-turn", retryable, false, 1},
+		{"a mid-turn compaction, after a retryable failure", "mid-turn", retryable, false, 1},
+		{"an overflow compaction, after a retryable failure", "overflow", retryable, false, 2},
+	} {
+		for _, frozen := range []bool{true, false} {
+			name := c.name + ", a key in no frozen surface"
+			if frozen {
+				name = c.name + ", a key in the prompt"
+			}
+			t.Run(name, func(t *testing.T) {
+				f := newFixture(t, "http://127.0.0.1:1/v1")
+				windowed(f, "test/a", testWindow, 0)
+				s := f.open(f.options())
+				s.sleep = func(context.Context, time.Duration) {}
+				a := f.models["test/a"]
+				key := "sk-not-in-what-is-sent-0352"
+				if frozen {
+					key = f.workspace
+				}
+				if strings.Contains(s.system, key) != frozen {
+					t.Fatalf("control: the key is in the system prompt: %v, want %v", !frozen, frozen)
+				}
+				g := newGate()
+				held := g.hold(nil, c.fails())
+				type ended struct {
+					res Result
+					err error
+				}
+				out := make(chan ended, 1)
+				switch c.kind {
+				case "manual":
+					a.push(answerWith("hi"))
+					run(t, s, "hello")
+					a.push(held, summaryOf("the next attempt"))
+					go func() {
+						res, err := s.Compact(context.Background(), "", "/compact", nil)
+						out <- ended{res, err}
+					}()
+				case "pre-turn":
+					a.push(answerSpending("hi", over))
+					run(t, s, "hello")
+					a.push(held, summaryOf("the next attempt"), answerWith("done"))
+					go func() {
+						res, err := s.Run(context.Background(), "again", nil)
+						out <- ended{res, err}
+					}()
+				case "mid-turn":
+					a.push(toolStep(1, over), held, summaryOf("the next attempt"), answerWith("done"))
+					go func() {
+						res, err := s.Run(context.Background(), "go", nil)
+						out <- ended{res, err}
+					}()
+				case "overflow":
+					a.push(answerWith("hi"))
+					run(t, s, "hello")
+					a.push(overflowed(), held, summaryOf("the next attempt"), answerWith("done"))
+					go func() {
+						res, err := s.Run(context.Background(), "again", nil)
+						out <- ended{res, err}
+					}()
+				}
+				await(t, g.reached, "the summarizer's first request")
+				if n := len(a.requests()); n != c.before+1 || summarizers(a.requests()) != 1 {
+					t.Fatalf("premise: %d requests, %d of them the summarizer's; want %d, the last the held attempt", n, summarizers(a.requests()), c.before+1)
+				}
+				if _, err := s.LearnKeys([]modeltable.Secret{modeltable.Secret(key)}); frozen != errors.Is(err, ErrStoredKeyFrozen) {
+					t.Fatalf("LearnKeys during the attempt = %v; want the refusal state: %v", err, frozen)
+				}
+				close(g.release)
+				o := await(t, out, "the compaction's end")
+				reqs := a.requests()
+				if !frozen {
+					if o.err != nil || o.res.StopReason != StopEndTurn || summarizers(reqs) != 2 {
+						t.Fatalf("control: %+v, %v after %d summarizer requests; want the next attempt sent and the turn ended well",
+							o.res, o.err, summarizers(reqs))
+					}
+					return
+				}
+				if !errors.Is(o.err, ErrStoredKeyFrozen) || strings.Contains(o.err.Error(), key) {
+					t.Fatalf("the end = %+v, %v; want ErrStoredKeyFrozen, quoting no key", o.res, o.err)
+				}
+				if len(reqs) != c.before+1 || summarizers(reqs) != 1 {
+					t.Fatalf("%d requests, %d of them the summarizer's; want none after the held attempt: the next one carried the key",
+						len(reqs), summarizers(reqs))
+				}
+				s.mu.Lock()
+				off := s.autoOff.on
+				s.mu.Unlock()
+				if off {
+					t.Fatal("the refusal switched automatic compaction off, as a summarizer failure does")
+				}
+				entries := compactionEntries(t, s)
+				if !c.billed {
+					if len(entries) != 0 {
+						t.Fatalf("compaction entries = %+v; want none: nothing was billed", entries)
+					}
+					return
+				}
+				if len(entries) != 1 || entries[0].Compaction.Succeeded() || entries[0].Usage == nil || *entries[0].Usage == (store.Usage{}) ||
+					entries[0].Compaction.Error != cleanErrorText(ErrStoredKeyFrozen) {
+					t.Fatalf("compaction entries = %+v; want one failure holding the billed attempt, the refusal its error", entries)
+				}
+			})
+		}
+	}
+}
+
+// TestAKeyLearnedWhileASubagentRunsStopsTheSubagent (plan 034 C4r2, r11 #2c):
+// a key learned while a sub-agent runs reaches it — every attached child
+// learns the parent's keys, as AddSecrets visits them — and is judged by the
+// child's own frozen surfaces: one inside the prompt it inherited puts the
+// child in its refusal state, so its turn sends no request after its next
+// boundary and fails. A background child does so while its parent idles,
+// which is when an idle reload learns keys; a foreground child mid-call, the
+// parent's turn ending with the refusal after it. The control: a key in no
+// frozen surface, and the child goes on to its second request. Negative
+// control: a LearnKeys that teaches the parent alone leaves the child sending
+// its second request, the key in its system prompt.
+func TestAKeyLearnedWhileASubagentRunsStopsTheSubagent(t *testing.T) {
+	for _, background := range []bool{true, false} {
+		for _, frozen := range []bool{true, false} {
+			name := "foreground"
+			if background {
+				name = "background"
+			}
+			if frozen {
+				name += ", a key in the prompt it inherited"
+			} else {
+				name += ", a key in no frozen surface"
+			}
+			t.Run(name, func(t *testing.T) {
+				b := openBG(t)
+				a := b.routers["test/a"]
+				key := "sk-not-in-what-is-sent-0353"
+				if frozen {
+					key = b.workspace
+				}
+				w := newWorker()
+				// The child's first step makes a call, and holds; its second
+				// answers.
+				a.route("child work", w.step(bareCall("c1", "nope", `{"n":1}`), finish(fantasy.FinishReasonToolCalls)), answerWith("done"))
+				var ev events
+				var out <-chan outcome
+				if background {
+					a.route("go", callStep(bgPart(t, "a1", "job", "child work")), answerWith("started"))
+					if res, err := b.s.Run(context.Background(), "go", ev.sink); err != nil || res.StopReason != StopEndTurn {
+						t.Fatalf("the spawning turn = %+v, %v; want end_turn", res, err)
+					}
+				} else {
+					a.route("go", callStep(agentPart(t, "a1", task("job", "child work"))), answerWith("never"))
+					out = start(context.Background(), b.s, "go", ev.sink)
+				}
+				await(t, w.reached, "the child's first step")
+				id := startedWith(t, ev.list(), "child work").ID
+				if got := textOf(a.requests("child work")[0].Prompt[0]); strings.Contains(got, key) != frozen {
+					t.Fatalf("premise: the child's system prompt holds the key: %v, want %v", !frozen, frozen)
+				}
+				if _, err := b.s.LearnKeys([]modeltable.Secret{modeltable.Secret(key)}); frozen != errors.Is(err, ErrStoredKeyFrozen) {
+					t.Fatalf("LearnKeys = %v; want the parent's refusal state: %v", err, frozen)
+				}
+				close(w.release)
+				var status string
+				if background {
+					await(t, b.pending, "the child's result")
+					status = resultOf(t, b.s, id).status
+				} else {
+					o := await(t, out, "the parent's turn")
+					if frozen != errors.Is(o.err, ErrStoredKeyFrozen) {
+						t.Fatalf("the parent's turn = %v; want the refusal: %v", o.err, frozen)
+					}
+					status = of[SubagentFinished](ev.list())[0].Status
+				}
+				n := len(a.requests("child work"))
+				if !frozen {
+					if n != 2 || status != SubagentCompleted {
+						t.Fatalf("control: the child sent %d requests and ended %q; want its second request sent and completed", n, status)
+					}
+					return
+				}
+				if n != 1 {
+					t.Fatalf("the child sent %d requests; want its first alone: the next, after the key was learned, carried it", n)
+				}
+				if status != SubagentFailed {
+					t.Fatalf("the child ended %q; want failed, with the refusal", status)
+				}
+			})
+		}
 	}
 }

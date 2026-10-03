@@ -416,6 +416,12 @@ type Session struct {
 	// when it was used, and kept, so a table swapped in later neither
 	// unprices nor reprices it (plan 034 C4r, r9 #5).
 	prices map[usageKey]priced
+	// carried are the background sub-agents' usages delivered into this
+	// session's entries, each with the rates its child was opened under, by
+	// the row it was merged into (spend.go's carry, plan 034 C4r2, r11 #5):
+	// spend prices them at those rates, never at the table's when the result
+	// arrived. One per delivered result that spent anything.
+	carried map[rowKey][]carriedUsage
 }
 
 // renderer is what the session hands its store (store.Renderer, plan 028
@@ -1114,20 +1120,36 @@ func (s *Session) Redact(text string) string { return s.redactor().String(text) 
 // (toolset.learn): Redact covers them at once, and the next turn adopts the
 // redactor over them as it begins, so a turn already running keeps the one it
 // began with (R1). They are only ever added. A sub-agent opened from then on
-// starts with them (r2-1); one already running keeps what it has, and what it
-// reports through the runner is redacted with them anyway (union).
+// starts with them (r2-1).
 //
 // A new key inside what the session sends unredacted with every request — its
 // system prompt, its encoded tools or its plan file's path — is learned all the
 // same, and puts the session in the refusal state: every Run, Compact and Wake
 // from then on is ErrStoredKeyFrozen, until Close (r2-2), and a turn running
-// as it is learned sends no request after its next step boundary and ends
-// with it (turn.refusingNow, plan 034 C4r). LearnKeys returns
-// ErrStoredKeyFrozen from the call that found one; nil otherwise, including
-// from a later call on a session already refusing.
+// as it is learned sends no request after its next step boundary, retry or
+// summarizer attempt and ends with it (turn.refusingNow, plan 034 C4r, C4r2).
+// LearnKeys returns ErrStoredKeyFrozen from the call that found one; nil
+// otherwise, including from a later call on a session already refusing.
 //
-// It is safe from any goroutine, a closed session included, and takes only the
-// toolset's lock, a leaf: learning is serialized there.
+// Every sub-agent already attached learns them too (plan 034 C4r2, r11 #2c),
+// each by its own toolset, as AddSecrets visits them: a background child runs
+// on while its parent idles, and a reload learns keys then, so a key inside
+// the child's own frozen surfaces — the parent's prompt it inherited, its role
+// section, its tools, its plan path — puts that child in its refusal state,
+// judged by those surfaces, and its turn sends no request after its next
+// boundary. Like the parent's, the child's running turn keeps its redactor
+// (R1): nothing is installed, and what it reports through the runner is
+// redacted with the parent's keys anyway (union). A child still opening is
+// caught up from the parent's learned keys as it is attached
+// (attachCaughtUp): the parent learns before it reads the registry, and an
+// attachment reads the learned keys after it is recorded, so every child
+// meets every key one way or the other. The error is the parent's alone: a
+// child's refusal ends that child's turn, which its parent reads as a failed
+// sub-agent.
+//
+// It is safe from any goroutine, a closed session included, and takes the
+// toolset's lock, a leaf — learning is serialized there — and, briefly, the
+// runner's registry lock, then each child's toolset lock, one at a time.
 func (s *Session) LearnKeys(keys []modeltable.Secret) (skipped []error, err error) {
 	vals := make([]string, 0, len(keys))
 	for i, k := range keys {
@@ -1143,8 +1165,14 @@ func (s *Session) LearnKeys(keys []modeltable.Secret) (skipped []error, err erro
 			vals = append(vals, v)
 		}
 	}
-	if len(vals) > 0 && s.tools.learn(vals) {
+	if len(vals) == 0 {
+		return skipped, nil
+	}
+	if s.tools.learn(vals) {
 		err = ErrStoredKeyFrozen
+	}
+	for _, child := range s.subs.liveChildren() {
+		child.tools.learn(vals)
 	}
 	return skipped, err
 }

@@ -123,6 +123,12 @@ type bgResult struct {
 	status string
 	text   string
 	usage  *tool.ChildUsage
+	// price is the rates usage is priced at (plan 034 C4r2, r11 #5): its
+	// model's, as the parent priced a usage of it when the child was opened
+	// — the table the child runs on for its whole life — which travel with
+	// the usage to the entry that commits it (commit, Session.carry), so a
+	// table the parent takes meanwhile does not reprice it.
+	price priced
 	// keys are the keys the child knew, covered by the session's redaction
 	// until the result is committed — moved into spent then, for the rest of
 	// the delivering turn — or reported undelivered (childKeys).
@@ -175,6 +181,7 @@ type bgChild struct {
 	cancel context.CancelCauseFunc
 	prompt string      // the call's prompt, as the model wrote it: redacted just before the child is sent it
 	ran    store.Model // the model the child runs on
+	price  priced      // ran's rates at the child's open (bgResult.price)
 	start  time.Time
 	// gate is closed once the call has reported the child started, so every
 	// event of the child comes after its SubagentStarted (§3.9's order).
@@ -251,7 +258,7 @@ func (r *subagents) runBackground(ctx context.Context, link *turnLink, call tool
 		return abortedResult() // Close sealed the registry since the child registered
 	}
 	b = &bgChild{h: h, res: res, child: child, ctx: childCtx, cancel: cancel, prompt: call.Prompt, ran: ran,
-		start: time.Now(), gate: make(chan struct{})}
+		price: parent.priceAt(c.view.table, ran), start: time.Now(), gate: make(chan struct{})}
 	go r.work(b)
 	// The gate opens however this returns, a panicking sink included, so the
 	// goroutine counted in launch always runs to its end.
@@ -376,7 +383,7 @@ func (r *subagents) publish(b *bgChild, text string, usage *tool.ChildUsage, sta
 	keys := b.child.tools.knownKeys()
 	r.regMu.Lock()
 	res := b.res
-	res.text, res.usage, res.status, res.keys = text, usage, status, keys
+	res.text, res.usage, res.status, res.keys, res.price = text, usage, status, keys, b.price
 	r.finished++
 	res.seq = r.finished
 	res.state = resultPending
@@ -628,19 +635,34 @@ var attrEscaper = strings.NewReplacer("&", "&amp;", `"`, "&quot;", "<", "&lt;", 
 // turn reserved that pick chooses and that are still reserved: an append
 // wrote them, which no cancel after it undoes. Each one's keys move into spent,
 // covered for the rest of the turn that delivered it.
+//
+// And each one's usage, with the rates its child was opened under, is handed
+// to the session's spend against the entry's row that holds it (Session.carry,
+// plan 034 C4r2, r11 #5) — once regMu is released, since the session's lock
+// is never taken under the registry's. The append that wrote the entry is the
+// turn's, and so is every Spent: the next one, which first counts the entry,
+// comes after this.
 func (r *subagents) commit(turn int, entry string, pick func(*bgResult) bool) {
 	if r == nil {
 		return
 	}
+	var rows []carriedRow
 	r.regMu.Lock()
-	defer r.regMu.Unlock()
 	for _, res := range r.results {
 		if res.state == resultReserved && res.own.turn == turn && pick(res) {
 			res.state, res.entry = resultCommitted, entry
 			r.spendLocked(res.keys)
 			res.keys = nil
+			if u := res.usage; u != nil && u.Usage != (tool.Usage{}) {
+				rows = append(rows, carriedRow{
+					key:   rowKey{entry: entry, provider: u.Provider, alias: u.Model, wireModel: u.WireModel},
+					usage: carriedUsage{usage: storeUsage(u.Usage), price: res.price},
+				})
+			}
 		}
 	}
+	r.regMu.Unlock()
+	r.s.carry(rows)
 }
 
 // commitIDs commits the results turn's steps reserved among ids (commit): the

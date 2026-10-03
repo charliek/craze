@@ -412,7 +412,10 @@ func (s *Session) run(ctx context.Context, text string, files []fantasy.FilePart
 	if compacted {
 		history = s.rebuildHistory(t)
 	}
-	agent := s.newAgent(m.lm, s.system, t.agentTools())
+	// The agent holds the turn's model behind the refusal gate (refusalGate,
+	// plan 034 C4r2): every request Fantasy sends — a retry's included — asks
+	// the refusal state first.
+	agent := s.newAgent(refusalGate{LanguageModel: m.lm, t: t}, s.system, t.agentTools())
 
 	// The segmented turn (plan 028 §3.11, owner decision 2): one turn is a
 	// loop over segments, each one agent.Stream. A segment ends at a step
@@ -474,7 +477,9 @@ func (s *Session) run(ctx context.Context, text string, files []fantasy.FilePart
 			held, sent := t.failedRequest()
 			if cerr := s.overflowCompaction(t, sent); cerr != nil {
 				var saveErr *errCompactionSaveFailed
-				if errors.As(cerr, &saveErr) || turnCtx.Err() != nil {
+				// A summarizer that found the session refusing (compactRefused)
+				// stops the turn as the refusal, between requests.
+				if errors.As(cerr, &saveErr) || turnCtx.Err() != nil || errors.Is(cerr, ErrStoredKeyFrozen) {
 					return t.stopBeforeRequest(cerr)
 				}
 				// The summarizer failed (its failure entry is written): the
@@ -968,16 +973,17 @@ func (t *turn) halted([]fantasy.StepResult) bool {
 
 // refusingNow is the refusal state checked at a step boundary — after a step
 // (halted), before a request (prepareStep), before a segment's or an
-// overflow's compaction (restartDue, overflowed) — and remembered for the
-// turn (refused). begin refuses a turn in that state before anything is
-// sent; this is the defence in depth for a key learned while the turn runs
-// (plan 034 C4r, r9 #7a): the native adapter learns a reload's keys only when
-// no turn holds the session, but a key learned mid-turn by any path — a
-// stored key, a sign-in's token — that is inside the frozen prompt, the tools
-// or the plan path is in every request the turn would still send, so none is
-// sent after the boundary that sees it, and the turn ends with the refusal
-// (finish, stopBeforeRequest). A turn a test built with no toolset is never
-// refusing. mu is held.
+// overflow's compaction (restartDue, overflowed) — and before every request
+// Fantasy sends, a retry's included (refusalGate, retry; plan 034 C4r2), and
+// remembered for the turn (refused). begin refuses a turn in that state before
+// anything is sent; this is the defence in depth for a key learned while the
+// turn runs (plan 034 C4r, r9 #7a): the native adapter learns a reload's keys
+// only when no turn holds the session, but a key learned mid-turn by any path
+// — a stored key, a sign-in's token — that is inside the frozen prompt, the
+// tools or the plan path is in every request the turn would still send, so
+// none is sent after the boundary that sees it, and the turn ends with the
+// refusal (finish, stopBeforeRequest). A turn a test built with no toolset is
+// never refusing. mu is held.
 func (t *turn) refusingNow() bool {
 	if !t.refused && t.tools != nil && t.tools.refusing.Load() {
 		t.refused = true
@@ -1188,15 +1194,58 @@ func (t *turn) firstOutput() {
 // retry is OnRetry. A retry replays the step from the start and every
 // callback fires again (plan 018 §2.4): what the failed attempt streamed is
 // not part of the answer, and a call it began never arrives.
+//
+// A session found refusing here (refusingNow, plan 034 C4r2, r11 #2a) gets no
+// retry: Fantasy would re-send the step's request as PrepareStep prepared it —
+// its retry loop wraps the model's Stream alone, outside PrepareStep — and a
+// key learned while the failed attempt was outstanding is inside it. The hook
+// cannot stop Fantasy's loop (it returns nothing), so the refusal gate does:
+// the retry's Stream is refused with ErrStoredKeyFrozen, sending nothing, once
+// Fantasy's backoff has run out, and run ends the turn with it
+// (refusedRequest). The failed attempt is settled as any retried one is, and
+// no Retrying is announced: no retry follows.
 func (t *turn) retry(err *fantasy.ProviderError, delay time.Duration) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.resetDeltas()
 	t.settleCalls(incomplete)
 	t.resetCalls(false)
+	if t.refusingNow() {
+		return
+	}
 	t.retries++
 	t.stepStart, t.firstToken = time.Now().Add(delay), 0
 	t.emit(Retrying{Delay: delay, Attempt: t.retries, Reason: t.redactor().String(retryReason(err))})
+}
+
+// refusalGate is the turn's model as its agent holds it (plan 034 C4r2, r11
+// #2a): m.lm, whose Stream first asks the refusal state (refusingNow) and,
+// with the session refusing, sends nothing and fails with ErrStoredKeyFrozen.
+// prepareStep asks the same before each step's request; the gate asks it
+// before every request Fantasy sends, which a step's retry is too (retry): a
+// key learned while a request is outstanding that is inside what every
+// request sends is in the retry's as well. Every other method is m.lm's.
+//
+// ErrStoredKeyFrozen is not one Fantasy retries — not a provider error, not a
+// transport one — so the step ends with it, wrapped in Fantasy's RetryError,
+// whose Unwrap is the last attempt's error, and run ends the turn with the
+// refusal (refusedRequest, stopBeforeRequest). It holds no lock of its own:
+// it takes the turn's for the one reading, and Fantasy calls Stream with none
+// of the turn's held. A thin adapter over Fantasy's LanguageModel, nothing
+// more (the harness's Fantasy coupling stays at its edges).
+type refusalGate struct {
+	fantasy.LanguageModel
+	t *turn
+}
+
+func (g refusalGate) Stream(ctx context.Context, call fantasy.Call) (fantasy.StreamResponse, error) {
+	g.t.mu.Lock()
+	refusing := g.t.refusingNow()
+	g.t.mu.Unlock()
+	if refusing {
+		return nil, ErrStoredKeyFrozen
+	}
+	return g.LanguageModel.Stream(ctx, call)
 }
 
 // retryReason is a retried failure on one line.
@@ -1513,7 +1562,12 @@ func (t *turn) finish(res *fantasy.AgentResult, err error) (out Result, ferr err
 // segment, or after a finished step, which is persisted and its calls
 // answered — settled again here, a no-op for every call that ran, as finish's
 // defence is — so the turn fails with ErrStoredKeyFrozen, and persists
-// nothing more.
+// nothing more. So does a retry the refusal gate refused (refusalGate, plan
+// 034 C4r2), whose failed attempt retry settled, and a compaction whose
+// summarizer found the session refusing before an attempt (compactRefused):
+// the pre-turn, the mid-turn and the overflow one alike. The refusal is read
+// here (refusingNow), not only remembered: a summarizer's refusal is the
+// session's, which no boundary of the turn has seen yet.
 func (t *turn) stopBeforeRequest(err error) (Result, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -1522,7 +1576,7 @@ func (t *turn) stopBeforeRequest(err error) (Result, error) {
 	if errors.As(err, new(*errCompactionSaveFailed)) {
 		return Result{Unanswered: unanswered}, fmt.Errorf("harness: saving the compaction: %w", t.tools.redactErr(err))
 	}
-	if t.refused && errors.Is(err, ErrStoredKeyFrozen) {
+	if errors.Is(err, ErrStoredKeyFrozen) && t.refusingNow() {
 		t.settleCalls(incomplete)
 		return Result{Unanswered: unanswered}, ErrStoredKeyFrozen
 	}
@@ -1530,8 +1584,12 @@ func (t *turn) stopBeforeRequest(err error) (Result, error) {
 }
 
 // refusedRequest reports whether err, the error a segment's agent.Stream
-// returned, is prepareStep's refusal of the request it was preparing
-// (refusingNow): nothing of that request went out.
+// returned, is prepareStep's refusal of the request it was preparing, or the
+// refusal gate's of a request Fantasy was about to send — a retry's
+// (refusalGate, plan 034 C4r2) — (refusingNow): nothing of that request went
+// out. A retried step's earlier attempt did, and failed before any output
+// (Fantasy retries nothing else, D-32): retry settled it, and nothing of it
+// is kept.
 func (t *turn) refusedRequest(err error) bool {
 	if !errors.Is(err, ErrStoredKeyFrozen) {
 		return false

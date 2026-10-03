@@ -56,7 +56,8 @@ import (
 //     a failure, a wake's, a /compact's — takes it up once the ending is out,
 //     before the next turn's claim (owed below). The turn's own start reload
 //     (reloadTurn) is the one that goes on under the claim, before the
-//     harness's turn begins. Otherwise the harness takes the table
+//     harness's turn begins — and, for a wake, before its opening bracket
+//     (plan 034 C4r2, r11 #3). Otherwise the harness takes the table
 //     (SetTable), and only then is the session taught every key the table
 //     holds (LearnKeys), so a model it offers is one whose key it redacts,
 //     and an owed reload learns nothing until it is taken up (r9 #7a); a
@@ -82,7 +83,8 @@ import (
 // # Triggers (Q14)
 //
 //   - a turn's start — a prompt's, a /compact's, a wake's — beside the key
-//     learning (native_keys.go), before the harness's claim;
+//     learning (native_keys.go), before the harness's claim (and a wake's
+//     opening);
 //   - RefreshModels (ModelsRefresher), which the wire's session.models.refresh
 //     calls, and which also starts the age- and version-aware fetch of the
 //     plan's list (refreshModelsLocked);
@@ -402,8 +404,9 @@ func (s *nativeSession) takeOwedLocked() bool {
 //     under the turn's claim, before the harness's turn begins: a model
 //     funded since the last turn is offered from this turn on, and a
 //     sub-agent this turn starts can name it; the list is out before the turn
-//     says anything — and so is one a reload that read the claim free just
-//     before it was taken published meanwhile (step 5);
+//     says anything — a wake's opening bracket included (native_wake.go) —
+//     and so is one a reload that read the claim free just before it was
+//     taken published meanwhile (step 5);
 //   - reloadOwed, a turn's or a load's end taking up a reload that was owed,
 //     once the claim is released and the turn's ending out, before the next
 //     turn's claim, whose own start reloads too: the list a turn's end left

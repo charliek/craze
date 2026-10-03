@@ -167,11 +167,13 @@ func (s *Session) compacted(m model, res CompactResult) {
 //
 // compacted says a compaction succeeded, so run rebuilds the history. err is
 // non-nil only when the turn must stop before its first request: the
-// compaction was cancelled (the turn's context), or its entry could not be
-// written (*errCompactionSaveFailed, P5), which outranks the cancel. A
-// summarizer that failed is not: its failure entry is written, automatic
-// compaction is switched off (PD14), and the turn goes on with the context it
-// had. Nothing to compact — a new session whose own prompt is over — is no
+// compaction was cancelled (the turn's context), its entry could not be
+// written (*errCompactionSaveFailed, P5), which outranks the cancel, or its
+// summarizer found the session refusing (ErrStoredKeyFrozen, compactRefused,
+// plan 034 C4r2): the turn ends with the refusal, and automatic compaction is
+// not switched off for it. A summarizer that failed is not: its failure entry
+// is written, automatic compaction is switched off (PD14), and the turn goes
+// on with the context it had. Nothing to compact — a new session whose own prompt is over — is no
 // compaction and no error: the request goes out as it is.
 //
 // A compaction that ran and lets the turn go on — to a summary, or to a
@@ -213,7 +215,7 @@ func (s *Session) preTurnCompaction(t *turn, prompt fantasy.Message) (compacted 
 		s.compacted(m, res)
 	case errors.Is(err, store.ErrNothingToCompact):
 		return false, nil
-	case errors.As(err, &saveErr), t.ctx.Err() != nil:
+	case errors.As(err, &saveErr), t.ctx.Err() != nil, errors.Is(err, ErrStoredKeyFrozen):
 		return false, err
 	default:
 		s.suppressAuto(m)
@@ -267,8 +269,9 @@ func (s *Session) midTurnDue(m model) bool {
 // nothing; a summarizer failure, its entry written, suppresses automatic
 // compaction and the turn goes on with the context it had; and err is
 // non-nil only when the turn must stop between requests: the compaction was
-// cancelled, or its entry could not be written (*errCompactionSaveFailed,
-// P5), which outranks the cancel.
+// cancelled, its entry could not be written (*errCompactionSaveFailed, P5),
+// which outranks the cancel, or its summarizer found the session refusing
+// (ErrStoredKeyFrozen, plan 034 C4r2).
 func (s *Session) midTurnCompaction(t *turn) error {
 	m := t.model
 	res, err := s.compact(t.ctx, m, t.number, store.CompactionAuto, "", "", t.emitLocked)
@@ -279,7 +282,7 @@ func (s *Session) midTurnCompaction(t *turn) error {
 		return nil
 	case errors.Is(err, store.ErrNothingToCompact):
 		return nil
-	case errors.As(err, &saveErr), t.ctx.Err() != nil:
+	case errors.As(err, &saveErr), t.ctx.Err() != nil, errors.Is(err, ErrStoredKeyFrozen):
 		return err
 	default:
 		s.suppressAuto(m)

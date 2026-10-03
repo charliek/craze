@@ -1028,3 +1028,75 @@ func TestSameNativeDirComparesWhereTheFilesAre(t *testing.T) {
 		t.Error("a directory is the same as none")
 	}
 }
+
+// TestNativeAWakesCatalogLandsOutsideItsBracket (plan 034 C4r2, r11 #3): a
+// wake's start reload — the models funded since the last turn — runs under the
+// wake's claim and before its opening bracket, so the catalog it publishes is
+// out ahead of the opening, never inside the bracket. Two sequences: a key
+// saved while the session idles, which the wake's own start reload takes up;
+// and a refresh that read the claim free just before the wake took it, held
+// at that point while the wake claims — its catalog is enqueued while the
+// wake's start reload waits for it on modelsMu, and that start flushes it
+// before the opening. The control: the catalog is published, and the wake
+// delivers its result. Negative control: a wake that publishes its opening
+// before its start reload has the catalog land inside the bracket, in both.
+func TestNativeAWakesCatalogLandsOutsideItsBracket(t *testing.T) {
+	for _, raced := range []bool{false, true} {
+		name := "the wake's own start reload"
+		if raced {
+			name = "a refresh racing the wake's claim"
+		}
+		t.Run(name, func(t *testing.T) {
+			var armed atomic.Bool
+			reached, release := make(chan struct{}), make(chan struct{})
+			var paused sync.Once
+			t.Cleanup(func() { closeOnce(release) })
+			rig := newWakeRigWith(t, Options{}, wakeSeams{reload: func(stage string) {
+				if stage == "unclaimed" && armed.Load() {
+					paused.Do(func() { close(reached); <-release })
+				}
+			}})
+			child := newHeld(t)
+			id := rig.spawnOne(child, answer("noted"))
+			// While the session idles: a key saved for nokey, which funds
+			// nokey/d.
+			if err := modeltable.SetKey(rig.f.dir, "nokey", "sk-nokey-before-the-wake-0354"); err != nil {
+				t.Fatal(err)
+			}
+			refreshed := make(chan ModelsRefresh, 1)
+			if raced {
+				armed.Store(true)
+				go func() {
+					r, _ := rig.s.RefreshModels(context.Background(), "")
+					refreshed <- r
+				}()
+				await(t, reached, "the refresh past the claim")
+			}
+			rig.finish(child, id)
+			rig.awaitDecided(true, "the result pending")
+			if raced {
+				// The wake has claimed after the refresh read the claim free.
+				close(release)
+				if r := await(t, refreshed, "the refresh"); r.Status != ModelsApplied {
+					t.Fatalf("premise: the refresh that read the claim free = %+v; want applied", r)
+				}
+			}
+			rig.bracket(false, 1, "wake-1")
+			evs := rig.w.events()
+			cat := eventIndex(evs, hasCatalog)
+			opening, ending := indexWhere(evs, 0, isBracket(true)), indexWhere(evs, 0, isBracket(false))
+			if cat < 0 || !slices.Contains(offeredIDs(evs[cat].State.Catalog.Models), "nokey/d") {
+				t.Fatalf("control: no catalog offering nokey/d was published: %s", strings.Join(rig.w.kinds(), ", "))
+			}
+			if opening < 0 || ending < 0 || (cat > opening && cat < ending) {
+				t.Fatalf("the catalog is event %d, inside the wake's bracket (%d..%d); want it before the opening or after the ending", cat, opening, ending)
+			}
+			if cat > opening {
+				t.Fatalf("the catalog is event %d, after the wake's opening %d; want the wake's start to publish it first", cat, opening)
+			}
+			if reqs := rig.resultRequests(); len(reqs) != 1 {
+				t.Fatalf("control: %d requests carried the result; want the wake's one", len(reqs))
+			}
+		})
+	}
+}

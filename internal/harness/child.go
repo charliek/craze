@@ -80,8 +80,10 @@ type ChildOptions struct {
 	// them, so the child's own Keys would not find them, and it starts with
 	// them instead — its redactor, and every refusal Open makes of a key in
 	// its home or its prompt, cover them from before anything is built. A
-	// child already running when the parent learns one keeps the keys it
-	// opened with (R1); what it reports reaches the parent through the
+	// child already running when the parent learns one learns it too
+	// (LearnKeys, plan 034 C4r2): its running turn keeps the redactor it
+	// began with (R1), and a key inside its own frozen surfaces puts it in
+	// its refusal state; what it reports reaches the parent through the
 	// runner's union, which reads the parent's keys at each use. Set by the
 	// runner alone.
 	learned []string

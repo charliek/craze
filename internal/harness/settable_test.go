@@ -540,3 +540,115 @@ func TestSpendIsPricedAtTheTimeOfUse(t *testing.T) {
 		}
 	})
 }
+
+// TestABackgroundChildsUsageIsPricedAtItsOwnTable (plan 034 C4r2, r11 #5): a
+// background child runs under the table its parent held when the call
+// started it, and its usage reaches the parent only when its result is
+// delivered — after the parent has taken another table, here one that prices
+// the child's model at ten times the rates. That usage is priced at the rates
+// the child was opened under, which travel with it to the entry that commits
+// it: delivered by a wake, and by an agent_output call in a step whose
+// foreground child, on the same model, is used under the new table — the two
+// merged into one row, each part at its own rates. The parent's own model is
+// unpriced, so the session's cost is the children's alone. The control: the
+// new table does price the model at the new rates (the premise). Negative
+// control: a spend that prices a delivered row at the table's rates when it is
+// first counted (no carried rates) charges the background usage ten times.
+func TestABackgroundChildsUsageIsPricedAtItsOwnTable(t *testing.T) {
+	providers, models := fixtureTOML("http://127.0.0.1:1/v1")
+	newRates := tableFrom(t, providers, models+"\n[models.\"test/b\".cost]\ninput = 20\noutput = 80\n")
+	costAt := func(u Usage, r modeltable.Rates) int64 {
+		return u.Input*r.Input + u.Output*r.Output + u.CacheRead*r.CacheRead + u.CacheCreation*r.CacheWrite
+	}
+	open := func(t *testing.T) (*bg, modeltable.Rates, modeltable.Rates) {
+		t.Helper()
+		var opened *modeltable.Table
+		b := openBG(t, func(o *Options) {
+			in, out := 2.0, 8.0
+			m := o.Table.Models["test/b"]
+			m.Cost = &modeltable.Cost{Input: &in, Output: &out}
+			o.Table.Models["test/b"] = m
+			opened = o.Table
+		})
+		r1, ok1 := opened.Price("test", "wire-b")
+		r2, ok2 := newRates.Price("test", "wire-b")
+		if _, own := opened.Price("test", "wire-a"); own || !ok1 || !ok2 || r2 == r1 || costAt(oneStep(1), r2) != 10*costAt(oneStep(1), r1) {
+			t.Fatalf("premise: test/a priced %v; test/b at %+v, then %+v; want test/a unpriced and the new rates ten times the old", own, r1, r2)
+		}
+		return b, r1, r2
+	}
+	// spawnOnB runs the first turn, which starts one background child on
+	// test/b, held by the worker it returns.
+	spawnOnB := func(t *testing.T, b *bg) (*worker, string) {
+		t.Helper()
+		w := newWorker()
+		b.routers["test/b"].route("child work", w.step(openText("did child work"), finishText()))
+		b.routers["test/a"].route("go", callStep(bgPart(t, "a1", "job", "child work", "model", "test/b")), answerWith("started"))
+		var ev events
+		if res, err := b.s.Run(context.Background(), "go", ev.sink); err != nil || res.StopReason != StopEndTurn {
+			t.Fatalf("the spawning turn = %+v, %v; want end_turn", res, err)
+		}
+		st := startedWith(t, ev.list(), "child work")
+		if !st.Background || st.Model != "test/b" {
+			t.Fatalf("SubagentStarted = %+v; want a background child on test/b", st)
+		}
+		await(t, w.reached, "the child mid-step")
+		// The parent idles, the child runs on, and the parent takes the table
+		// that prices test/b at ten times.
+		if err := b.s.SetTable(newRates, nil); err != nil {
+			t.Fatalf("SetTable while the child runs: %v", err)
+		}
+		return w, st.ID
+	}
+
+	t.Run("delivered by a wake", func(t *testing.T) {
+		b, r1, _ := open(t)
+		w, id := spawnOnB(t, b)
+		b.finish(t, w)
+		b.routers["test/a"].route("go", answerWith("noted"))
+		if res, err := b.s.Wake(context.Background(), nil); err != nil || res.StopReason != StopEndTurn {
+			t.Fatalf("Wake = %+v, %v", res, err)
+		}
+		tr := transcript(t, b.s)
+		e := tr.Entries[entryIndex(tr, resultOf(t, b.s, id).entry)]
+		if !reflect.DeepEqual(e.SubagentUsage, []ModelUsage{{Provider: "test", Model: "test/b", WireModel: "wire-b", Usage: oneStep(1)}}) {
+			t.Fatalf("the wake's entry carries %+v; want the child's one row", e.SubagentUsage)
+		}
+		_, session := b.s.spend(2)
+		if want := costAt(oneStep(1), r1); session.CostPicoUSD != want {
+			t.Fatalf("the session cost %d; want %d, the child's usage at the rates it was opened under", session.CostPicoUSD, want)
+		}
+	})
+
+	t.Run("read by agent_output beside a foreground child on the same model", func(t *testing.T) {
+		b, r1, r2 := open(t)
+		w, id := spawnOnB(t, b)
+		atStep, ready := make(chan struct{}), make(chan struct{})
+		b.routers["test/b"].route("fg work", answerWith("fg done"))
+		b.routers["test/a"].route("go",
+			func(ctx context.Context, yield func(fantasy.StreamPart) bool) {
+				// Past the step's boundary: the result is taken by the call,
+				// not the boundary.
+				close(atStep)
+				<-ready
+				callStep(outputPart(t, "o1", id, 0), agentPart(t, "f1", task("fg", "fg work", "model", "test/b")))(ctx, yield)
+			},
+			answerWith("done"))
+		out := start(context.Background(), b.s, "next", nil)
+		await(t, atStep, "the step after its boundary")
+		b.finish(t, w)
+		close(ready)
+		if got := await(t, out, "the turn"); got.err != nil {
+			t.Fatal(got.err)
+		}
+		tr := transcript(t, b.s)
+		e := tr.Entries[entryIndex(tr, resultOf(t, b.s, id).entry)]
+		if e.Message.Role != fantasy.MessageRoleTool || !reflect.DeepEqual(e.SubagentUsage, []ModelUsage{{Provider: "test", Model: "test/b", WireModel: "wire-b", Usage: oneStep(2)}}) {
+			t.Fatalf("the result's entry (%s) carries %+v; want the tool entry, both children merged in one row", e.Message.Role, e.SubagentUsage)
+		}
+		_, session := b.s.spend(2)
+		if want := costAt(oneStep(1), r1) + costAt(oneStep(1), r2); session.CostPicoUSD != want {
+			t.Fatalf("the session cost %d; want %d: the background child's usage at its rates, the foreground child's at the new", session.CostPicoUSD, want)
+		}
+	})
+}

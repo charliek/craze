@@ -3031,10 +3031,11 @@ func (s *nativeSession) Snapshot() Snapshot {
 // runs — the one turn native starts without a craze prompt, delivering a
 // background sub-agent's result (native_wake.go, plan 026 §3.11) — and false
 // otherwise. It is set and cleared in the same s.mu sections that claim and
-// release the wake and enqueue its brackets, so the engine, which reads it
-// under e.mu → s.mu before every Begin, sees the wake exactly when Begin would
-// be refused for it; and s.snap.ForeignTurn moves with it, so Snapshot()
-// answers the same.
+// release the wake — the release enqueues the ending bracket; the opening
+// follows the claim once the wake's start is out (plan 034 C4r2) — so the
+// engine, which reads it under e.mu → s.mu before every Begin, sees the wake
+// exactly when Begin would be refused for it; and s.snap.ForeignTurn moves
+// with it, so Snapshot() answers the same.
 func (s *nativeSession) ForeignTurn() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
