@@ -4879,7 +4879,7 @@ lane work. What it inherits:
 Plan 035 readies S3 (the shed lane) and pulls in the flakes and minor bugs found
 in six days of CI (09-27 to 10-02). It is cut into two PRs, PR 1 first, so
 that PR 2's many CI runs are not spent diagnosing known flakes (P1). The plan
-lives outside the repo; its amendments (X1–X14 for PR 1) are the truth.
+lives outside the repo; its amendments (X1–X17 for PR 1) are the truth.
 
 ### PR 1 — flakes and minor bugs
 
@@ -4935,6 +4935,11 @@ repro, never retried (P13).
   and waits for its end event first. With a refusal that emits an error, plus a
   collector delay, the old scan stayed green (vacuous) and the new one is red
   (X14).
+- **C5r2 — r7's test-lifecycle gaps.** The gate writers in the agent tests and
+  the fake agent's gate tests open their FIFO without blocking and retry
+  `ENXIO` up to a deadline, where a writer goroutine could block in `open`
+  forever. The four gate-held tests bound their first prompt's completion and
+  join its goroutine (X17).
 
 **The flake table's outcome.** The plan's table was a starting point, and
 several cells were wrong; the corrected facts are in the table.
@@ -4958,8 +4963,10 @@ several cells were wrong; the corrected facts are in the table.
 | #14 `TestForeignTurnRefusalIsNotATurnThatFailed` (agent) | ubuntu / race | (09-16, PR #13) | closed by C4 |
 
 "Already fixed" means each has a forced repro that is red on the old test and
-green on `79a8adc`, plus `-race -count=20` and 5/5 at a 5 % CPU quota. One more
-flake, found locally by C3's diagnosis, is SF-135.
+green on `79a8adc`, and passes `-race -count=20`. Each also passes 5/5 at a 5 %
+CPU quota except the every-cut subtest, which still fails its own per-step
+limit there (SF-133). One more flake, found locally by C3's diagnosis, is
+SF-135.
 
 **Issue #14** is closed by C4: the fake agent gained a gate-held fallback (the
 `HOLD-FALLBACK` marker, carried by the interjection's text, which becomes the
@@ -4990,7 +4997,9 @@ still down, an order the session never produces, fixed in C2r3 (the turn now
 opens, flag first, inside the successor's `Begin`, the one window where r3's
 race is reachable); r6 found nothing in C2r3. C3–C5 change no production
 behaviour beyond a test seam, so one sol batch (r5) reviewed them: no defect
-introduced, and one assertion gap older than C4, fixed in C5r.
+introduced, and one assertion gap older than C4, fixed in C5r. The branch-level
+sol review (r7) found no production regression and three P3s: two test-lifecycle
+gaps, fixed in C5r2, and an overbroad claim in this record, corrected here.
 
 **Lessons for a later plan.**
 
