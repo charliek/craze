@@ -1138,8 +1138,10 @@ Every attempt has exactly one of `signed_in`, `declined`, `failed` and
 began, or how long a model fetch took — and `dropped`, how many records were
 lost just before it because the log was busy. A log craze cannot keep — its
 directory a symbolic link, writable by other users or another user's, or the
-file not a plain file of its own — is one `note:` on stderr, and the sign-in
-goes on without it.
+file not a plain file of its own — is one `note:` on stderr as the command
+ends, and the sign-in goes on without it. A sign-in never waits on the log: it
+is written beside the sign-in, and at the end craze waits at most a second for
+what is still to be written.
 
 ### craze auth logout
 

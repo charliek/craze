@@ -1100,3 +1100,52 @@ func TestHostIDIsKept(t *testing.T) {
 		t.Fatal("a bad host-id file was replaced")
 	}
 }
+
+// TestLoginHintIsBounded (plan 034 review r4 #5a): a re-login sends the saved
+// email as login_hint only when it can be one — at most 254 bytes (RFC 5321's
+// longest path), on one line with no control character — so an oversized or
+// multi-line email in a registration file craze does not validate cannot make
+// an address too long to copy whole; the re-login goes on without the hint.
+// The controls are the account's email and one of exactly 254 bytes, sent.
+func TestLoginHintIsBounded(t *testing.T) {
+	setEnv(t, map[string]string{})
+	at254 := strings.Repeat("a", 254-len("@example.com")) + "@example.com"
+	for _, tc := range []struct {
+		name, email string
+		sent        bool
+	}{
+		{"the account's email", testEmail, true},
+		{"254 bytes", at254, true},
+		{"255 bytes", "a" + at254, false},
+		{"22,000 bytes", strings.Repeat("+", 22000) + "@example.com", false},
+		{"two lines", "you@example.com\nother@example.com", false},
+		{"a carriage return", "you@example.com\r", false},
+		{"a tab", "you@exam\tple.com", false},
+		{"DEL", "you@example.com\x7f", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := nativeDir(t)
+			if err := ensureAuthDir(dir); err != nil {
+				t.Fatal(err)
+			}
+			if err := writeClient(dir, Client{ClientID: testClient, Subject: testSubject, Email: tc.email, PlanUsage: true}); err != nil {
+				t.Fatal(err)
+			}
+			a, err := Begin(context.Background(), dir, BeginOptions{PasteOnly: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer a.Close(CloseDone)
+			q := authQuery(t, a)
+			if q.Get("client_id") != testClient {
+				t.Fatal("not a re-login")
+			}
+			if got := q.Has("login_hint"); got != tc.sent || (got && q.Get("login_hint") != tc.email) {
+				t.Fatalf("login_hint sent %v (%d bytes); want sent %v", got, len(q.Get("login_hint")), tc.sent)
+			}
+			if !tc.sent && len(a.URL()) > 2048 {
+				t.Fatalf("the address is %d bytes without the hint", len(a.URL()))
+			}
+		})
+	}
+}

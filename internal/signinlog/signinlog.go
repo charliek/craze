@@ -34,14 +34,20 @@
 //
 // # Never in a sign-in's way
 //
-// Record never blocks and never fails: it renders the line and hands it to a
-// bounded queue (64) that one writer goroutine per Log drains; a full queue,
-// or a lock another process holds past its bound, drops the record, and the
-// count of dropped records goes with the next record written. A refusal or a
-// failed write stops the log for good (Failure says why, for the surface to
-// mention once: a transcript note in the TUI, a stderr line in the CLI) — a
-// sign-in is never failed or delayed by it. Close flushes the queue for at
-// most a second.
+// Open touches no file: it answers the Log at once and starts its writer, one
+// goroutine per Log, which makes the directories and checks the files as
+// every record will (setup) and then writes the queue (plan 034 review r3 #4):
+// a file system that hangs — a mount gone away — or a lock another craze
+// holds stalls the writer, never the sign-in. Record never blocks and never
+// fails: it renders the line and hands it to a bounded queue (64); a full
+// queue, or a lock another process holds past its bound — at setup, at the
+// first record or at any other — drops the record, and the count of dropped
+// records goes with the next record written. A refusal or a failed write
+// stops the log for good (Failure says why, and Stopped is closed then, for
+// the surface to mention it once, as it happens: a transcript note in the
+// TUI, a stderr line in the CLI) — a sign-in is never failed or delayed by
+// it. Close flushes the queue for at most a second, and a writer stuck in the
+// file system past that is left behind, never waited for.
 package signinlog
 
 import (
@@ -90,28 +96,39 @@ const (
 
 // The seams: lockWait bounds a record's wait for another writer's lock (a
 // record that waits longer is dropped and counted); uid is the user the log's
-// directory and files must belong to; now stamps a record. Tests change them.
+// directory and files must belong to; now stamps a record. afterLogsCheck runs
+// between the look at logs and its open, and beforeCreate before a file is
+// created, each nil in production: a test swaps a name there, as another
+// process could. Tests change them.
 var (
-	lockWait = time.Second
-	uid      = os.Getuid
-	now      = time.Now
+	lockWait       = time.Second
+	uid            = os.Getuid
+	now            = time.Now
+	afterLogsCheck func()
+	beforeCreate   func(name string)
 )
 
 // Options are a test's: the zero value is production's.
 type Options struct {
 	// Max is the size signin.log rotates at; 0 is DefaultMax.
 	Max int64
+	// Stall, when set, holds the writer before it touches a file until it is
+	// closed: a file system that hangs (plan 034 review r3 #4), for a test of
+	// a surface that must not wait on the log.
+	Stall <-chan struct{}
 }
 
 // Log is the sign-in log of one native directory, for one process. Its
 // methods are safe for concurrent use, and a nil *Log — the log a surface
 // could not open — takes every call and does nothing.
 type Log struct {
-	dir string
-	max int64
+	dir   string
+	max   int64
+	stall <-chan struct{} // Options.Stall
 
-	queue chan []byte // rendered records, waiting for the writer
-	done  chan struct{}
+	queue chan []byte   // rendered records, waiting for the writer
+	ready chan struct{} // closed once the writer's setup is over, passed or not
+	done  chan struct{} // closed once the writer has returned
 
 	mu     sync.Mutex // orders Record's send with Close's close of queue
 	closed bool
@@ -119,18 +136,21 @@ type Log struct {
 	dropped atomic.Int64
 	off     atomic.Bool
 
-	failMu sync.Mutex
-	fail   error
+	failMu  sync.Mutex
+	fail    error
+	stopped chan struct{} // closed by disable, with fail set
 }
 
 // Open is OpenWith with production's options.
 func Open(nativeDir string) (*Log, error) { return OpenWith(nativeDir, Options{}) }
 
-// OpenWith opens nativeDir's sign-in log, making the native directory and its
-// logs directory when missing, and checks it as every record will — the
-// directory, the lock and signin.log itself — before it answers, so a refusal
-// is its error: the surface mentions it once and logs nothing. It starts the
-// log's writer, which Close stops.
+// OpenWith answers nativeDir's sign-in log at once, and starts its writer,
+// which Close stops. It touches no file (plan 034 review r3 #4): the writer
+// makes the native directory and its logs directory when missing and checks
+// the log as every record will — the directory, the lock and signin.log
+// itself (setup) — so a refusal, like a write that fails later, stops the log
+// on the writer's goroutine and is told by Stopped and Failure, never by
+// OpenWith. Its one error is a native directory that is not named.
 func OpenWith(nativeDir string, o Options) (*Log, error) {
 	if nativeDir == "" {
 		return nil, errors.New("signinlog: there is no native directory to keep the sign-in log in")
@@ -138,12 +158,10 @@ func OpenWith(nativeDir string, o Options) (*Log, error) {
 	if o.Max <= 0 {
 		o.Max = DefaultMax
 	}
-	if err := os.MkdirAll(nativeDir, 0o700); err != nil {
-		return nil, fmt.Errorf("signinlog: %w", err)
-	}
-	l := &Log{dir: nativeDir, max: o.Max, queue: make(chan []byte, queueLen), done: make(chan struct{})}
-	if err := l.write(nil); err != nil {
-		return nil, err
+	l := &Log{
+		dir: nativeDir, max: o.Max, stall: o.Stall,
+		queue: make(chan []byte, queueLen), ready: make(chan struct{}), done: make(chan struct{}),
+		stopped: make(chan struct{}),
 	}
 	go l.run()
 	return l, nil
@@ -170,8 +188,9 @@ func (l *Log) Record(ev chatgptauth.Event, surface string) {
 	}
 }
 
-// Failure is why the log stopped — refused or broken after it opened — or nil
-// while it is writing. It is sticky; the surface mentions it once.
+// Failure is why the log stopped — refused as it was set up, or broken by a
+// record — or nil while it is writing. It is sticky; the surface mentions it
+// once.
 func (l *Log) Failure() error {
 	if l == nil {
 		return nil
@@ -181,12 +200,25 @@ func (l *Log) Failure() error {
 	return l.fail
 }
 
+// Stopped is closed when the log stops, Failure saying why, and never
+// otherwise: a surface waits on it to mention the failure as it happens —
+// after the last record of a sign-in too (plan 034 review r3 #8c). A nil
+// Log's is nil: it never stops.
+func (l *Log) Stopped() <-chan struct{} {
+	if l == nil {
+		return nil
+	}
+	return l.stopped
+}
+
 // errFlush is Close's answer when the writer had not finished within
 // closeWait: the records still queued may be lost.
 var errFlush = errors.New("signinlog: the log closed before every record was written")
 
 // Close stops taking records and waits up to a second for the queued ones to
-// be written. It is safe to call more than once.
+// be written: a writer still at it then — stuck in the file system, or behind
+// another craze's lock — is left to finish or not on its own, never joined.
+// It is safe to call more than once.
 func (l *Log) Close() error { return l.closeWithin(closeWait) }
 
 func (l *Log) closeWithin(d time.Duration) error {
@@ -211,11 +243,17 @@ func (l *Log) closeWithin(d time.Duration) error {
 	}
 }
 
-// run is the log's writer: each queued record is written with the count of
-// those dropped before it (write). A lock held past lockWait drops the record
-// and counts it; any other failure stops the log (disable).
+// run is the log's writer: its setup, then each queued record written with
+// the count of those dropped before it (write). A lock held past lockWait
+// drops the record and counts it — the first record's as any other's (plan
+// 034 review r3 #3b); any other failure stops the log (disable).
 func (l *Log) run() {
 	defer close(l.done)
+	if l.stall != nil {
+		<-l.stall
+	}
+	l.setup()
+	close(l.ready)
 	for rec := range l.queue {
 		if l.off.Load() {
 			continue
@@ -230,13 +268,34 @@ func (l *Log) run() {
 	}
 }
 
-// disable stops the log for good, keeping the first reason.
+// setup makes the native directory, when missing, and checks the log as every
+// record will (write with no record): a log craze cannot keep stops before
+// the first record, so the surface can say so as a sign-in begins. Another
+// writer's lock held past lockWait is no refusal — the lock is busy, not
+// unsafe — so setup leaves the log on and the first record tries again (r3
+// #3b). The native directory is opened as "<dir>/.", so a FIFO put where it
+// goes fails the open at once rather than waiting for a writer (r3 #2).
+func (l *Log) setup() {
+	if err := os.MkdirAll(l.dir, 0o700); err != nil {
+		l.disable(fmt.Errorf("signinlog: %w", err))
+		return
+	}
+	switch err := l.write(nil); {
+	case err == nil, errors.Is(err, atomicfile.ErrLockBusy):
+	default:
+		l.disable(err)
+	}
+}
+
+// disable stops the log for good, keeping the first reason, and closes
+// Stopped once.
 func (l *Log) disable(err error) {
 	l.off.Store(true)
 	l.failMu.Lock()
 	defer l.failMu.Unlock()
 	if l.fail == nil {
 		l.fail = err
+		close(l.stopped)
 	}
 }
 
@@ -244,11 +303,14 @@ func (l *Log) disable(err error) {
 // line carrying the count of the records dropped before it — taken once the
 // lock is held, so the records dropped while this one waited for it ride on
 // it too — rotating first when the line would take the file past the cap.
-// With rec nil it makes and checks everything and writes nothing (OpenWith).
+// With rec nil it makes and checks everything and writes nothing (setup).
 // Everything is opened afresh, through an os.Root of the native directory,
-// and closed before it returns.
+// and closed before it returns. The native directory is opened as "<dir>/.":
+// the kernel takes every name but the last as a directory or fails, so
+// whatever has been put where it goes — a FIFO, which an open would wait on —
+// fails at once.
 func (l *Log) write(rec []byte) error {
-	root, err := os.OpenRoot(l.dir)
+	root, err := os.OpenRoot(l.dir + string(os.PathSeparator) + ".")
 	if err != nil {
 		return fmt.Errorf("signinlog: %w", err)
 	}
@@ -310,8 +372,17 @@ func (l *Log) path(name string) string {
 
 // openLogs opens the logs directory in root, making it 0700 when missing, and
 // refuses it when it is a symlink, not a directory, writable by group or
-// others, or another user's. The directory opened is checked to be the one
-// looked at.
+// others, or another user's — as the name looks, and then as the directory
+// opened is (plan 034 review r3 #2): the descriptor is checked (checkLogs) and
+// must be the directory looked at, and it is what every record's files are
+// reached through.
+//
+// The name is opened as "logs/.": an os.Root opens every name but the last
+// with O_DIRECTORY|O_NOFOLLOW, and the last, ".", is that directory itself.
+// So whatever was put at the name since the look — a FIFO, which a plain open
+// would wait on for a writer forever — fails the open at once (ENOTDIR); a
+// symlink there is followed only within the native directory, and only to a
+// directory, which the identity check then refuses.
 func (l *Log) openLogs(root *os.Root) (*os.Root, error) {
 	path := filepath.Join(l.dir, paths.LogsName)
 	if err := root.Mkdir(paths.LogsName, 0o700); err != nil && !errors.Is(err, fs.ErrExist) {
@@ -321,35 +392,60 @@ func (l *Log) openLogs(root *os.Root) (*os.Root, error) {
 	if err != nil {
 		return nil, fmt.Errorf("signinlog: %w", err)
 	}
-	switch {
-	case li.Mode()&fs.ModeSymlink != 0:
-		return nil, fmt.Errorf("signinlog: %s is a symbolic link; the sign-in log is kept only in a directory of its own", path)
-	case !li.IsDir():
-		return nil, fmt.Errorf("signinlog: %s is not a directory", path)
-	case li.Mode().Perm()&0o022 != 0:
-		return nil, fmt.Errorf("signinlog: %s is writable by other users (mode %04o)", path, li.Mode().Perm())
-	case owner(li) != uid():
-		return nil, fmt.Errorf("signinlog: %s belongs to another user", path)
+	if err := checkLogs(li, path); err != nil {
+		return nil, err
 	}
-	logs, err := root.OpenRoot(paths.LogsName)
+	if afterLogsCheck != nil {
+		afterLogsCheck()
+	}
+	logs, err := root.OpenRoot(paths.LogsName + "/.")
 	if err != nil {
-		return nil, fmt.Errorf("signinlog: %w", err)
+		return nil, fmt.Errorf("signinlog: opening %s: %w", path, err)
 	}
 	di, err := logs.Stat(".")
-	if err != nil || !os.SameFile(li, di) {
+	if err == nil {
+		err = checkLogs(di, path)
+	}
+	if err == nil && !os.SameFile(li, di) {
+		err = fmt.Errorf("signinlog: %s changed as it was opened", path)
+	}
+	if err != nil {
 		_ = logs.Close()
-		return nil, fmt.Errorf("signinlog: %s changed as it was opened", path)
+		return nil, err
 	}
 	return logs, nil
 }
+
+// checkLogs refuses fi, the logs directory at path — its name's look, or the
+// directory opened — when it is a symlink, not a directory, writable by group
+// or others, or another user's.
+func checkLogs(fi os.FileInfo, path string) error {
+	switch {
+	case fi.Mode()&fs.ModeSymlink != 0:
+		return fmt.Errorf("signinlog: %s is a symbolic link; the sign-in log is kept only in a directory of its own", path)
+	case !fi.IsDir():
+		return fmt.Errorf("signinlog: %s is not a directory", path)
+	case fi.Mode().Perm()&0o022 != 0:
+		return fmt.Errorf("signinlog: %s is writable by other users (mode %04o)", path, fi.Mode().Perm())
+	case owner(fi) != uid():
+		return fmt.Errorf("signinlog: %s belongs to another user", path)
+	}
+	return nil
+}
+
+// openTries bounds openFile's opens of a name that keeps going and coming
+// back between its two opens.
+const openTries = 3
 
 // openFile opens name in logs for flag, creating it 0600 when it does not
 // exist, and checks it (checkFile). An existing name is opened without
 // O_CREATE, so a symlink there — which an os.Root follows within the native
 // directory — creates nothing before it is refused; a missing one is created
-// with O_EXCL, which never follows a symlink. O_NONBLOCK keeps a FIFO from
-// blocking the open (it fails, or is refused as not a regular file), and is
-// cleared for the write.
+// with O_EXCL, which never follows a symlink. A create that finds the name
+// made since — another craze making the same file at the same moment — opens
+// what it made instead, and checks it as any other (plan 034 review r3 #3a),
+// up to openTries times. O_NONBLOCK keeps a FIFO from blocking the open (it
+// fails, or is refused as not a regular file), and is cleared for the write.
 func (l *Log) openFile(logs *os.Root, name string, flag int) (*os.File, error) {
 	path := l.path(name)
 	// A symlink is refused by name first, for the message; checkFile refuses
@@ -357,9 +453,20 @@ func (l *Log) openFile(logs *os.Root, name string, flag int) (*os.File, error) {
 	if li, err := logs.Lstat(name); err == nil && li.Mode()&fs.ModeSymlink != 0 {
 		return nil, fmt.Errorf("signinlog: %s is a symbolic link", path)
 	}
-	f, err := logs.OpenFile(name, flag|syscall.O_NONBLOCK, 0)
-	if errors.Is(err, fs.ErrNotExist) {
+	var f *os.File
+	var err error
+	for range openTries {
+		f, err = logs.OpenFile(name, flag|syscall.O_NONBLOCK, 0)
+		if !errors.Is(err, fs.ErrNotExist) {
+			break
+		}
+		if beforeCreate != nil {
+			beforeCreate(name)
+		}
 		f, err = logs.OpenFile(name, flag|os.O_CREATE|os.O_EXCL|syscall.O_NONBLOCK, 0o600)
+		if !errors.Is(err, fs.ErrExist) {
+			break
+		}
 	}
 	if err != nil {
 		return nil, fmt.Errorf("signinlog: opening %s: %w", path, err)

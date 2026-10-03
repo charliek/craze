@@ -1593,9 +1593,12 @@ auth login chatgpt`](cli.md#signing-in-to-the-chatgpt-plan) inside the box.
       `Copied the address. Paste it into a browser. Nothing on the clipboard?
       Cmd/Ctrl+click it (some terminals need Shift while craze holds the
       mouse).` until the next key, or for 10 seconds — craze cannot tell
-      whether a clipboard took the copy. Under `--no-mouse` a click is the
-      terminal's own, `Ctrl+Y` still copies, and the footer says `ctrl+y copies
-      the address`.
+      whether a clipboard took the copy. An address too long to copy whole
+      (over 64 KiB, which only a damaged registration file could make) is not
+      copied at all, rather than cut short: the box says `The address is too
+      long to copy (over 64 KiB), so nothing was copied.` Under `--no-mouse` a
+      click is the terminal's own, `Ctrl+Y` still copies, and the footer says
+      `ctrl+y copies the address`.
     - **Cmd/Ctrl+click it**: each row of the address is a terminal hyperlink
       (OSC 8) to the whole address, all of them one link, so a terminal with
       hyperlinks opens the whole address from any row. Which modifier yours
@@ -1683,7 +1686,10 @@ described in [the CLI reference's sign-in
 log](cli.md#the-sign-in-log). A log craze cannot keep — its directory a
 symbolic link, writable by other users or another user's, or the file not a
 plain file of its own — is one note in the transcript, `the sign-in log is
-off: …`, and the sign-in goes on without it.
+off: …`, written when craze finds out, as the sign-in starts or when a later
+record fails, and the sign-in goes on without it. A sign-in never waits on the
+log; when craze quits it waits at most a second for a sign-in still finishing
+to record its outcome, and a second more for the log to be written.
 
 **Refused while work runs.** While a turn is running — yours, another
 client's, or the agent's own — or a sub-agent is still running in the

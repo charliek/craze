@@ -29,6 +29,11 @@ var listen = func(port int) (net.Listener, error) {
 	return net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
 }
 
+// beforeRefuse runs as the listener reaches a refusal, before it is counted:
+// nil in production; a test holds a refusal there while the attempt ends
+// (plan 034 review r3 #5).
+var beforeRefuse func(Refusal)
+
 // BeginOptions are a sign-in's choices.
 type BeginOptions struct {
 	// PasteOnly starts no listener: the redirect can only be pasted
@@ -39,8 +44,13 @@ type BeginOptions struct {
 	// refusals, the pasted lines it refused, its redirect, its one terminal
 	// outcome, and what the UI reports through Report. It is called on
 	// whichever goroutine the event happens on (the caller's, the listener's,
-	// Wait's), never with the attempt's locks held, and must not block for
-	// long: the listener's page waits for it. Each Event is value-free.
+	// Wait's), never with the attempt's state locks (mu, emu) held, and must
+	// not block for long: the listener's page waits for it, and so does the
+	// attempt's end while a listener's refusal is being reported — the two
+	// are reported in order, under the attempt's order lock (omu), so no
+	// refusal is reported after the outcome (review r3 #5). For the same
+	// reason it must not end the attempt (Close) from a listener's refusal.
+	// Each Event is value-free.
 	Observe func(Event)
 }
 
@@ -87,7 +97,7 @@ type Attempt struct {
 	// never reported with either held. waiting says Wait is between its
 	// start and its outcome; closeReason is the first Close's reason
 	// (closeCalled says there was one); ended says the attempt's one terminal
-	// outcome has been reported (endLocked); refused counts the listener's
+	// outcome has been taken (endLocked); refused counts the listener's
 	// refusals by kind.
 	emu         sync.Mutex
 	waiting     bool
@@ -95,6 +105,16 @@ type Attempt struct {
 	closeReason CloseReason
 	ended       bool
 	refused     map[Refusal]int
+	// omu orders the listener's refusals with the attempt's end (plan 034
+	// review r3 #5): a refusal is counted and, the first of its kind,
+	// reported (refuse), and the end takes the counts and reports them and
+	// the outcome (end), each whole under it — so once the attempt has
+	// ended no refusal is counted or reported, and every one counted is in
+	// the end's totals. It is taken before emu, and is the one lock held as
+	// the observer is called. endc is closed once the outcome is reported
+	// (Ended).
+	omu  sync.Mutex
+	endc chan struct{}
 }
 
 // Result is a finished sign-in. PlanUsage false means the account signed in
@@ -175,6 +195,7 @@ func Begin(ctx context.Context, dir string, opts BeginOptions) (*Attempt, error)
 		observe:  opts.Observe,
 		got:      make(chan url.Values, 1),
 		closed:   make(chan struct{}),
+		endc:     make(chan struct{}),
 	}
 	if !a.register {
 		a.clientID, a.subject = c.ClientID, c.Subject
@@ -192,7 +213,7 @@ func Begin(ctx context.Context, dir string, opts BeginOptions) (*Attempt, error)
 		q.Set("agent_name_hint", agentName)
 	} else {
 		q.Set("client_id", a.clientID)
-		if c.Email != "" {
+		if loginHint(c.Email) {
 			q.Set("login_hint", c.Email)
 		}
 		if !c.PlanUsage {
@@ -222,6 +243,28 @@ func Begin(ctx context.Context, dir string, opts BeginOptions) (*Attempt, error)
 		go func() { _ = a.srv.Serve(a.ln) }()
 	}
 	return a, nil
+}
+
+// maxLoginHint is the longest email sent as a re-login's login_hint: RFC
+// 5321's longest path, an address's own bound.
+const maxLoginHint = 254
+
+// loginHint says email, the saved registration's, may go in the authorization
+// address as its login_hint: not empty, at most maxLoginHint bytes, and one
+// line of no control character. The registration file is not validated as it
+// is read, so an oversized or multi-line email in it would otherwise make an
+// address no clipboard takes whole (plan 034 review r4 #5a); a re-login
+// without the hint signs in all the same — the person picks the account.
+func loginHint(email string) bool {
+	if email == "" || len(email) > maxLoginHint {
+		return false
+	}
+	for i := 0; i < len(email); i++ {
+		if c := email[i]; c < 0x20 || c == 0x7f {
+			return false
+		}
+	}
+	return true
 }
 
 // openListener binds the callback listener: 1455, then — once registered —
@@ -267,6 +310,12 @@ func (a *Attempt) Listening() bool { return a.ln != nil }
 // event of the attempt (plan 034 §3.3).
 func (a *Attempt) ID() string { return a.id }
 
+// Ended is closed once the attempt's one terminal outcome has been reported
+// to its observer — by a Close, or by Wait as it returns. A UI ending with
+// the program waits on it, bounded, before it closes the sign-in log, so an
+// outcome Wait is still finishing is logged (plan 034 review r3 #8a).
+func (a *Attempt) Ended() <-chan struct{} { return a.endc }
+
 // Close cancels the attempt, if it is still waiting, and closes the
 // listener with every connection to it — a browser's spare connection
 // included, which would otherwise swallow a later attempt's redirect (pi's
@@ -286,6 +335,8 @@ func (a *Attempt) Close(reason CloseReason) {
 	accepted := a.accepted
 	a.over = true // no redirect is accepted after this
 	a.mu.Unlock()
+	a.omu.Lock()
+	defer a.omu.Unlock()
 	var evs []Event
 	a.emu.Lock()
 	if !a.closeCalled {
@@ -298,7 +349,7 @@ func (a *Attempt) Close(reason CloseReason) {
 	}
 	a.emu.Unlock()
 	a.shut()
-	a.emit(evs...)
+	a.end(evs)
 }
 
 // shut ends the attempt's wait and closes the listener, once: Close's work,
@@ -357,9 +408,20 @@ func (a *Attempt) emit(evs ...Event) {
 	}
 }
 
+// end reports evs, the attempt's end (endLocked) — nothing when it is not
+// the end — and then says it has ended (Ended). omu is held, emu is not.
+func (a *Attempt) end(evs []Event) {
+	if len(evs) == 0 {
+		return
+	}
+	a.emit(evs...)
+	close(a.endc)
+}
+
 // endLocked marks the attempt ended and answers what its end reports: for each
 // kind the listener refused more than once, the count, then t, the terminal
-// outcome. emu is held; the caller emits them once it is released.
+// outcome. omu and emu are held; the caller reports them (end) once emu is
+// released, omu still held.
 func (a *Attempt) endLocked(t Event) []Event {
 	a.ended = true
 	var evs []Event
@@ -383,10 +445,22 @@ func refusalStatus(r Refusal) int {
 
 // refuse counts the listener's refusal of kind r and reports the first of
 // its kind (plan 034 Q8: a flood on 127.0.0.1:1455 is counted, not repeated;
-// endLocked reports the count). It answers the refusal's page status
-// (refusalStatus), so the page and the log cannot disagree.
+// endLocked reports the count). The count and the report are one section
+// under omu, the end's (review r3 #5): a refusal that reaches it once the
+// attempt has ended is neither counted nor reported — the end's totals and
+// its outcome are the last word. It answers the refusal's page status
+// (refusalStatus) either way, so the page and the log cannot disagree.
 func (a *Attempt) refuse(r Refusal) int {
+	if beforeRefuse != nil {
+		beforeRefuse(r)
+	}
+	a.omu.Lock()
+	defer a.omu.Unlock()
 	a.emu.Lock()
+	if a.ended {
+		a.emu.Unlock()
+		return refusalStatus(r)
+	}
 	if a.refused == nil {
 		a.refused = map[Refusal]int{}
 	}
@@ -621,6 +695,8 @@ func (a *Attempt) wait(ctx context.Context) (Result, error) {
 // ctx done, or the attempt closed — with the Close's reason. A cancel with no
 // Close yet is left to the Close.
 func (a *Attempt) settle(ctx context.Context, res Result, err error) {
+	a.omu.Lock()
+	defer a.omu.Unlock()
 	var evs []Event
 	a.emu.Lock()
 	a.waiting = false
@@ -647,7 +723,7 @@ func (a *Attempt) settle(ctx context.Context, res Result, err error) {
 		}
 	}
 	a.emu.Unlock()
-	a.emit(evs...)
+	a.end(evs)
 }
 
 // finish is Wait's work once the redirect is in hand.

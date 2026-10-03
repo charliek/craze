@@ -227,8 +227,12 @@ func (a *authRun) signIn() error {
 	defer cancel(nil)
 	// The sign-in log (plan 034 §3.3), opened first and closed last, so the
 	// attempt's terminal outcome — reported as the attempt is closed, below —
-	// is written before it closes. One that cannot be kept is one note, now
-	// or at the end, and changes nothing else.
+	// is written before it closes. Its open touches no file (review r3 #4):
+	// its writer sets it up and writes beside the sign-in, which never waits
+	// on it, and its Close waits at most a second. One that cannot be kept —
+	// refused as it was set up, or broken by any record, the last one
+	// included — is one note, at the end once its Close has let the writer
+	// finish, and changes nothing else.
 	logOff := func(err error) {
 		if err != nil {
 			a.note("the sign-in log is off: " + err.Error())
@@ -273,9 +277,13 @@ func (a *authRun) signIn() error {
 	events := make(chan pasteEvent)
 	// The attempt's observer: every event to the log, and the listener's
 	// refusal of another attempt's redirect — reported once per attempt — to
-	// the loop below, to say. begun is the attempt's begin, which Begin
-	// reports on this goroutine before it returns.
+	// the loop below, to say (other). It never blocks: the attempt reports a
+	// listener's refusal under the lock its end takes too (plan 034 review r3
+	// #5), so an observer waiting on this loop could hold up the deferred
+	// Close below once the loop has returned. begun is the attempt's begin,
+	// which Begin reports on this goroutine before it returns.
 	var begun chatgptauth.Event
+	other := make(chan struct{}, 1)
 	observe := func(ev chatgptauth.Event) {
 		log.Record(ev, signinlog.SurfaceCLI)
 		switch {
@@ -283,8 +291,8 @@ func (a *authRun) signIn() error {
 			begun = ev
 		case ev.Kind == chatgptauth.EventListenerRefused && ev.Refusal == chatgptauth.RefusalOtherAttempt:
 			select {
-			case events <- pasteEvent{text: otherAttemptText}:
-			case <-done:
+			case other <- struct{}{}:
+			default:
 			}
 		}
 	}
@@ -328,23 +336,11 @@ func (a *authRun) signIn() error {
 		}
 	}
 	for {
+		var ev pasteEvent
 		select {
-		case ev := <-events:
-			if open {
-				fmt.Fprintln(a.errw)
-				open = false
-			}
-			if ev.pasted {
-				confirm()
-				continue
-			}
-			if ev.text != "" {
-				fmt.Fprintln(a.errw, ev.text)
-			}
-			if a.tty != nil {
-				fmt.Fprint(a.errw, redirectPrompt)
-				open = true
-			}
+		case ev = <-events:
+		case <-other:
+			ev = pasteEvent{text: otherAttemptText}
 		case w := <-result:
 			if open {
 				// The prompt's line, left open by a listener's redirect, by
@@ -360,6 +356,21 @@ func (a *authRun) signIn() error {
 				return a.signInFailed(ctx, w.err)
 			}
 			return a.signedIn(ctx, w.res, att.Observer())
+		}
+		if open {
+			fmt.Fprintln(a.errw)
+			open = false
+		}
+		if ev.pasted {
+			confirm()
+			continue
+		}
+		if ev.text != "" {
+			fmt.Fprintln(a.errw, ev.text)
+		}
+		if a.tty != nil {
+			fmt.Fprint(a.errw, redirectPrompt)
+			open = true
 		}
 	}
 }

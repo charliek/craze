@@ -1977,9 +1977,12 @@ func finishRun(out io.Writer, final tea.Model, m Model, h Host) (bool, error) {
 	// of SIGTERM, SIGHUP or a recovered panic passed through requestQuit's
 	// dropConnect (review r14 2). The set reaches an attempt Begin returned
 	// whose answer the program stopped before reading, too. Each reports its
-	// end (CloseShutdown) to the sign-in log, which is then closed, flushed
-	// for at most a second (plan 034 §3.3).
+	// end (CloseShutdown) to the sign-in log — or, a Wait finishing a
+	// redirect or a Begin still running, reports it as it returns, which is
+	// waited for, a second at most (awaitEnds, plan 034 review r3 #8a) — and
+	// the log is then closed, flushed for at most a second (plan 034 §3.3).
 	m.signIns.closeAll(chatgptauth.CloseShutdown)
+	m.signIns.awaitEnds(signInEndWait)
 	m.signIns.closeLog()
 	// And a backend a switch let go of, or a dial answered after the user
 	// had moved on, whose close — a command — the program stopped before it
@@ -2971,6 +2974,13 @@ func (m Model) dialogClick(row int) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// The sign-in step's copied line lasts until the next key (plan 034 Q10):
+	// every key but the Ctrl+Y that copies ends it, here, before any layer
+	// takes the key — Ctrl+C's stop of running work among them, which never
+	// reaches the step (review r4 #5b).
+	if msg.Type != tea.KeyCtrlY {
+		m.cdlg.signIn.copied = false
+	}
 	// The session list is the first rung while it is open (plan 030 §3.10):
 	// ahead of Ctrl+D and Ctrl+C, a card, a dialog, the confirm line and the
 	// sub-agent view, none of which may take a key from it.

@@ -7,6 +7,7 @@ import (
 	"io"
 	"io/fs"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"os"
 	"slices"
@@ -862,8 +863,10 @@ func TestClassOfIsTypedNotTextual(t *testing.T) {
 
 // TestObserverIsCalledOutsideTheLocks (plan 034 §3.3): an observer that calls
 // back into the attempt — what a UI's observer may do — does not deadlock:
-// every event is reported with neither of the attempt's locks held. The
-// control is the run finishing at all; a held lock would hang it.
+// every event is reported with neither of the attempt's state locks (mu,
+// emu) held; only the order lock (omu) may be, as a listener's refusal and
+// the outcome are reported (review r3 #5). The control is the run finishing
+// at all; a held lock would hang it.
 func TestObserverIsCalledOutsideTheLocks(t *testing.T) {
 	f := newFake(t)
 	useFake(t, f)
@@ -918,4 +921,145 @@ func TestObserverIsCalledOutsideTheLocks(t *testing.T) {
 	if !slices.Contains(seen, EventListenerRefused) || !slices.Contains(seen, EventPasteRefused) || !slices.Contains(seen, EventCancelled) {
 		t.Fatalf("the observer saw %v", seen)
 	}
+}
+
+// TestNoRefusalAfterTheEnd (plan 034 review r3 #5): a listener's refusal that
+// reaches the attempt as it ends — its handler paused before it counted, the
+// attempt closed meanwhile, the handler let go — is neither counted nor
+// reported: nothing follows the outcome, and the count the end reported
+// (none for one refusal, its total for more) is the attempt's count. The
+// first of its kind, and a second after one already reported, are both
+// held; the control is the refusals before the pause, counted and reported.
+func TestNoRefusalAfterTheEnd(t *testing.T) {
+	for _, before := range []int{0, 1} {
+		t.Run(fmt.Sprintf("%d before", before), func(t *testing.T) {
+			f := newFake(t)
+			useFake(t, f)
+			useListener(t, false)
+			sink := &eventSink{}
+			a, err := Begin(context.Background(), nativeDir(t), BeginOptions{Observe: sink.observe})
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { a.Close(CloseDone) })
+			// other is the browser's return from another attempt, to the
+			// attempt's own handler.
+			other := func() {
+				req := httptest.NewRequest(http.MethodGet, callbackPath+"?code=fake-code-other&state=another-attempts-state", nil)
+				a.ServeHTTP(httptest.NewRecorder(), req)
+			}
+			for range before {
+				other()
+			}
+			reached, resume := make(chan struct{}), make(chan struct{})
+			var once sync.Once
+			setVar(t, &beforeRefuse, func(Refusal) {
+				once.Do(func() {
+					close(reached)
+					<-resume
+				})
+			})
+			handled := make(chan struct{})
+			go func() {
+				defer close(handled)
+				other()
+			}()
+			<-reached
+			a.Close(CloseEsc)
+			close(resume)
+			<-handled
+
+			evs := sink.all()
+			if last := evs[len(evs)-1]; last.Kind != EventCancelled || last.Reason != Reason(CloseEsc) {
+				t.Fatalf("the last event is %+v; want the outcome, cancelled by esc:\n%s", last, eventsText(evs))
+			}
+			refused, totals := 0, 0
+			for _, ev := range evs {
+				switch ev.Kind {
+				case EventListenerRefused:
+					refused++
+				case EventListenerRefusals:
+					totals++
+				}
+			}
+			a.emu.Lock()
+			n := a.refused[RefusalOtherAttempt]
+			a.emu.Unlock()
+			if n != before || refused != before || totals != 0 {
+				t.Fatalf("counted %d, reported %d and %d totals; want the %d before the end alone:\n%s", n, refused, totals, before, eventsText(evs))
+			}
+			select {
+			case <-a.Ended():
+			default:
+				t.Fatal("the attempt reported its outcome but Ended is open")
+			}
+		})
+	}
+}
+
+// TestEndedFollowsTheOutcome (plan 034 review r3 #8a): Ended is closed only
+// once the attempt's one outcome has been reported — by Close when no Wait
+// is finishing a redirect, and by Wait as it returns when one is, which a UI
+// ending with the program waits for before it closes the sign-in log. The
+// control is Ended open before either.
+func TestEndedFollowsTheOutcome(t *testing.T) {
+	ended := func(a *Attempt) bool {
+		select {
+		case <-a.Ended():
+			return true
+		default:
+			return false
+		}
+	}
+	t.Run("closed", func(t *testing.T) {
+		f := newFake(t)
+		useFake(t, f)
+		a, err := Begin(context.Background(), nativeDir(t), BeginOptions{PasteOnly: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if ended(a) {
+			t.Fatal("the control: Ended is closed before the attempt ended")
+		}
+		a.Close(CloseEsc)
+		if !ended(a) {
+			t.Fatal("Close reported the outcome but Ended is open")
+		}
+	})
+	t.Run("a Wait finishing its redirect", func(t *testing.T) {
+		f := newFake(t)
+		useFake(t, f)
+		hold := make(chan struct{})
+		var once sync.Once
+		release := func() { once.Do(func() { close(hold) }) }
+		t.Cleanup(release) // a failed test leaves no exchange held
+		f.mu.Lock()
+		f.holdExchange = hold
+		f.mu.Unlock()
+		sink := &eventSink{}
+		a, err := Begin(context.Background(), nativeDir(t), BeginOptions{PasteOnly: true, Observe: sink.observe})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := a.Paste(a.RedirectURI() + "?" + f.authorize(t, a.URL()).Encode()); err != nil {
+			t.Fatal(err)
+		}
+		waited := waitAsync(t, a, context.Background())
+		a.Close(CloseShutdown) // the Wait is finishing the redirect: the outcome is Wait's
+		if ended(a) {
+			t.Fatal("Ended closed before the Wait finishing the redirect reported its outcome")
+		}
+		release()
+		if err := await(t, waited, "the wait"); err != nil {
+			t.Fatalf("the Wait = %v", err)
+		}
+		select {
+		case <-a.Ended():
+		case <-time.After(10 * time.Second):
+			t.Fatal("Ended never closed after the Wait reported its outcome")
+		}
+		if evs := sink.all(); evs[len(evs)-1].Kind != EventSignedIn {
+			t.Fatalf("the outcome is not the last event:\n%s", eventsText(evs))
+		}
+	})
 }

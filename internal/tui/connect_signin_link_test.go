@@ -998,3 +998,81 @@ func TestFrameNativeConnectSignInListenerNews(t *testing.T) {
 		}
 	}
 }
+
+// TestSignInRefusesToCopyAnAddressTooLong (plan 034 review r4 #5a): an address
+// longer than a copy takes whole (clipboardMax) — one a registration file's
+// oversized email could make before chatgptauth bounded the login hint — is
+// not copied at all by Ctrl+Y or a click: nothing reaches a clipboard, the
+// attempt is told of no copy, and the box says the address was too long to
+// copy instead of "Copied". The control is the address as it is, copied
+// whole and said so.
+func TestSignInRefusesToCopyAnAddressTooLong(t *testing.T) {
+	prev := signInCopiedLinger
+	signInCopiedLinger = time.Millisecond
+	t.Cleanup(func() { signInCopiedLinger = prev })
+	for _, long := range []bool{true, false} {
+		t.Run(map[bool]string{true: "too long", false: "control"}[long], func(t *testing.T) {
+			rec := captureCopies(t)
+			addr := signInURL
+			if long {
+				addr += "&login_hint=" + strings.Repeat("a", clipboardMax)
+			}
+			m, _ := signInStepAt(t, 100, 30, nil, false, func() *fakeSignIn {
+				f := listeningStandIn()
+				f.url = addr
+				return f
+			})
+			f := m.cdlg.signIn.att.(*fakeSignIn)
+			r := m.lay.Dialog
+			p := m.signInPlan(r.W-dialogBorder, r.H-dialogBorder)
+			i := slices.IndexFunc(p.rows, func(r signInRow) bool { return r.kind == signInRowAddress })
+			for _, how := range []tea.Msg{
+				tea.KeyMsg{Type: tea.KeyCtrlY},
+				tea.MouseMsg{X: r.X + 2, Y: r.Y + 1 + i, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress},
+			} {
+				tm, cmd := m.Update(how)
+				got := tm.(Model)
+				copied := slices.ContainsFunc(runAll(t, cmd), func(msg tea.Msg) bool {
+					_, ok := msg.(clipboardDoneMsg)
+					return ok
+				})
+				view := plainView(got)
+				if long {
+					if copied || len(rec.copies()) != 0 || len(f.reports()) != 0 {
+						t.Fatalf("%T copied an address too long to copy whole (%d copies, %v reported)", how, len(rec.copies()), f.reports())
+					}
+					if !strings.Contains(view, connectSignInUncopiedLine) || strings.Contains(view, connectSignInCopiedLine) {
+						t.Fatalf("%T: the box does not say the address was too long to copy:\n%s", how, view)
+					}
+					continue
+				}
+				if c := rec.copies(); !copied || len(c) == 0 || c[len(c)-1] != addr || !strings.Contains(view, connectSignInCopiedLine) {
+					t.Fatalf("the control: %T did not copy the address whole and say so", how)
+				}
+			}
+		})
+	}
+}
+
+// TestSignInCopiedLineEndsAtAnInterceptedKey (plan 034 review r4 #5b): the
+// copied line goes at the next key even when a layer above the step takes
+// it: Ctrl+C while work runs stops the work and never reaches the step, whose
+// box stays open — and its copied line is gone all the same. The control is
+// the copied line before the key.
+func TestSignInCopiedLineEndsAtAnInterceptedKey(t *testing.T) {
+	captureCopies(t)
+	m, _ := signInStepAt(t, 100, 30, nil, false, listeningStandIn)
+	m, _ = press(m, tea.KeyMsg{Type: tea.KeyCtrlY})
+	if !m.cdlg.signIn.copied || !strings.Contains(plainView(m), connectSignInCopiedLine) {
+		t.Fatal("the control: Ctrl+Y shows no copied line")
+	}
+	m.status = statusWorking
+	tm, _ := m.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
+	m = tm.(Model)
+	if m.dialog != dialogConnect || m.cdlg.step != connectSignIn {
+		t.Fatal("Ctrl+C with work running closed the sign-in step")
+	}
+	if m.cdlg.signIn.copied || strings.Contains(plainView(m), connectSignInCopiedLine) {
+		t.Fatalf("Ctrl+C, taken before the step, left the copied line:\n%s", plainView(m))
+	}
+}

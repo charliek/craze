@@ -60,14 +60,29 @@ func readLog(t *testing.T, native, name string) string {
 	return string(b)
 }
 
-// mustOpen opens native's log with o, which must not be refused.
+// mustOpen opens native's log with o, which must not be refused: its setup
+// over (ready) and the log on.
 func mustOpen(t *testing.T, native string, o Options) *Log {
 	t.Helper()
 	l, err := OpenWith(native, o)
 	if err != nil {
 		t.Fatal(err)
 	}
+	awaitReady(t, l)
+	if err := l.Failure(); err != nil {
+		t.Fatalf("the log was refused: %v", err)
+	}
 	return l
+}
+
+// awaitReady waits a few seconds for l's setup to be over, passed or not.
+func awaitReady(t *testing.T, l *Log) {
+	t.Helper()
+	select {
+	case <-l.ready:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the log's setup never finished")
+	}
 }
 
 // mustClose closes l, which must have written everything and not stopped.
@@ -382,22 +397,29 @@ func TestWriterChild(t *testing.T) {
 	writeAll(t, parts[0], w, max)
 }
 
-// refusedOpen opens native's log, which must be refused with a message
-// holding want; and no record reaches what the refusal protects.
+// refusedOpen opens native's log, which must be refused, as its writer sets
+// it up, within a few seconds, with a Failure holding want, Stopped closed;
+// and a record after reaches nothing the refusal protects.
 func refusedOpen(t *testing.T, native, want string) {
 	t.Helper()
 	l, err := Open(native)
-	if err == nil {
-		_ = l.Close()
-		t.Fatalf("the log was opened; want it refused (%s)", want)
+	if err != nil {
+		t.Fatalf("Open answered %v; a refusal is the writer's", err)
 	}
-	if !strings.Contains(err.Error(), want) {
-		t.Fatalf("the refusal says %q; want it to say %q", err, want)
+	defer func() { _ = l.Close() }()
+	select {
+	case <-l.Stopped():
+	case <-time.After(10 * time.Second):
+		t.Fatalf("the log was not refused; want it refused (%s)", want)
 	}
+	if err := l.Failure(); err == nil || !strings.Contains(err.Error(), want) {
+		t.Fatalf("the refusal says %v; want it to say %q", err, want)
+	}
+	l.Record(begin(attemptID8, 0), SurfaceCLI) // dropped: the log is off
 }
 
-// TestRefusesWhatIsNotItsOwn (plan 034 A12): the log refuses — at Open, with
-// a reason naming the path — a logs directory that is a symlink, is not a
+// TestRefusesWhatIsNotItsOwn (plan 034 A12): the log refuses — as it is set
+// up, with a reason naming the path — a logs directory that is a symlink, is not a
 // directory, is writable by group or others, or belongs to another user; and
 // a signin.log (or its lock) that is a symlink, a FIFO, another name of a file
 // (a hard link), or another user's. A symlink is not followed: its target is
@@ -645,8 +667,8 @@ func holdLock(t *testing.T, native string) func() {
 func TestDropsAreCounted(t *testing.T) {
 	t.Run("the lock held past its bound", func(t *testing.T) {
 		native := nativeDir(t)
-		l := mustOpen(t, native, Options{})
 		setVar(t, &lockWait, 20*time.Millisecond)
+		l := mustOpen(t, native, Options{})
 		release := holdLock(t, native)
 		for i := range 3 {
 			l.Record(begin(attemptID8, i), SurfaceCLI)
@@ -662,8 +684,8 @@ func TestDropsAreCounted(t *testing.T) {
 	})
 	t.Run("the queue full", func(t *testing.T) {
 		native := nativeDir(t)
-		l := mustOpen(t, native, Options{})
 		setVar(t, &lockWait, time.Minute)
+		l := mustOpen(t, native, Options{})
 		release := holdLock(t, native)
 		l.Record(begin(attemptID8, 0), SurfaceCLI)
 		waitFor(t, func() bool { return len(l.queue) == 0 }) // the writer has it, and waits
@@ -695,8 +717,8 @@ func TestDropsAreCounted(t *testing.T) {
 // writes everything.
 func TestCloseIsBounded(t *testing.T) {
 	native := nativeDir(t)
-	l := mustOpen(t, native, Options{})
 	setVar(t, &lockWait, time.Minute)
+	l := mustOpen(t, native, Options{})
 	release := holdLock(t, native)
 	l.Record(begin(attemptID8, 0), SurfaceCLI)
 	start := time.Now()
@@ -856,5 +878,231 @@ func TestDepsAreItsOwn(t *testing.T) {
 	}
 	if !slices.Equal(craze, want) {
 		t.Fatalf("signinlog imports %v of craze; want %v", craze, want)
+	}
+}
+
+// TestOpenTouchesNoFile (plan 034 review r3 #4): Open answers at once and
+// leaves every file to its writer, so a file system that hangs — Stall, the
+// writer held before it touches a file — never holds up a sign-in: nothing is
+// made while the writer is held, Record does not block, and Close gives up on
+// it within its bound. The control is the same writer let go: it makes the
+// files and writes what was queued.
+func TestOpenTouchesNoFile(t *testing.T) {
+	native := nativeDir(t)
+	stall := make(chan struct{})
+	start := time.Now()
+	l, err := OpenWith(native, Options{Stall: stall})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := range 3 {
+		l.Record(begin(attemptID8, i), SurfaceTUI)
+	}
+	if d := time.Since(start); d > 2*time.Second {
+		t.Fatalf("Open and three records took %s with the writer held", d)
+	}
+	if _, err := os.Lstat(native); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("Open made the native directory itself (%v); the writer is held", err)
+	}
+	start = time.Now()
+	if err := l.closeWithin(100 * time.Millisecond); !errors.Is(err, errFlush) {
+		t.Fatalf("Close with the writer held = %v; want errFlush", err)
+	}
+	if d := time.Since(start); d > 5*time.Second {
+		t.Fatalf("Close waited %s for a held writer", d)
+	}
+	close(stall)
+	select {
+	case <-l.done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the control: the writer let go never finished")
+	}
+	if l.Failure() != nil || strings.Count(readLog(t, native, FileName), "\n") != 3 {
+		t.Fatalf("the control: the writer let go wrote %q (%v); want the 3 queued records", readLog(t, native, FileName), l.Failure())
+	}
+}
+
+// TestNoOpenWaitsOnAFIFO (plan 034 review r3 #2): a FIFO where logs goes is
+// refused at once, never opened — one there before the look, and one swapped
+// in between the look and the open (afterLogsCheck), which a plain open would
+// wait on for a writer forever; and a directory swapped in there instead is
+// refused as changed. The same holds for the native directory itself, which
+// each record opens as "<dir>/.": a FIFO swapped in there after setup stops
+// the log at the next record rather than holding its writer. The control is
+// the swap seam left empty: the log opens and writes.
+func TestNoOpenWaitsOnAFIFO(t *testing.T) {
+	// within fails the test unless f answers within a few seconds; a FIFO
+	// left with a writer-less open behind is opened for writing once the
+	// test is done, so no open outlives it.
+	within := func(t *testing.T, fifo string, f func()) {
+		t.Helper()
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			f()
+		}()
+		select {
+		case <-done:
+		case <-time.After(10 * time.Second):
+			if w, err := os.OpenFile(fifo, os.O_WRONLY|syscall.O_NONBLOCK, 0); err == nil {
+				_ = w.Close()
+			}
+			<-done
+			t.Fatal("an open waited on a FIFO")
+		}
+	}
+	// swapLogs makes the next look-then-open of logs find a directory and
+	// open what to put there.
+	swapLogs := func(t *testing.T, native string, put func(string) error) {
+		t.Helper()
+		var once sync.Once
+		setVar(t, &afterLogsCheck, func() {
+			once.Do(func() {
+				if err := os.Rename(logsDir(native), logsDir(native)+".looked"); err != nil {
+					t.Error(err)
+				}
+				if err := put(logsDir(native)); err != nil {
+					t.Error(err)
+				}
+			})
+		})
+	}
+	mkfifo := func(p string) error { return syscall.Mkfifo(p, 0o600) }
+	t.Run("a FIFO at logs", func(t *testing.T) {
+		native := nativeDir(t)
+		if err := os.MkdirAll(native, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := mkfifo(logsDir(native)); err != nil {
+			t.Skipf("no FIFO here: %v", err)
+		}
+		within(t, logsDir(native), func() { refusedOpen(t, native, "is not a directory") })
+	})
+	t.Run("a FIFO swapped in after the look", func(t *testing.T) {
+		native := nativeDir(t)
+		swapLogs(t, native, mkfifo)
+		within(t, logsDir(native), func() { refusedOpen(t, native, "opening "+logsDir(native)) })
+	})
+	t.Run("another directory swapped in after the look", func(t *testing.T) {
+		native := nativeDir(t)
+		swapLogs(t, native, func(p string) error { return os.Mkdir(p, 0o700) })
+		refusedOpen(t, native, "changed as it was opened")
+	})
+	t.Run("a FIFO swapped in at the native directory", func(t *testing.T) {
+		native := nativeDir(t)
+		l := mustOpen(t, native, Options{})
+		defer func() { _ = l.Close() }()
+		if err := os.Rename(native, native+".set-up"); err != nil {
+			t.Fatal(err)
+		}
+		if err := mkfifo(native); err != nil {
+			t.Skipf("no FIFO here: %v", err)
+		}
+		// A writer held in an open of the FIFO is let go when the test ends.
+		t.Cleanup(func() {
+			if w, err := os.OpenFile(native, os.O_WRONLY|syscall.O_NONBLOCK, 0); err == nil {
+				_ = w.Close()
+			}
+		})
+		within(t, native, func() {
+			l.Record(begin(attemptID8, 0), SurfaceCLI)
+			select {
+			case <-l.Stopped():
+			case <-time.After(10 * time.Second):
+				t.Error("a record's open of the native directory did not fail")
+				return
+			}
+			if err := l.Failure(); err == nil || !strings.Contains(err.Error(), "not a directory") {
+				t.Errorf("the record's refusal = %v; want not a directory", err)
+			}
+		})
+	})
+	t.Run("control", func(t *testing.T) {
+		native := nativeDir(t)
+		l := mustOpen(t, native, Options{})
+		l.Record(begin(attemptID8, 0), SurfaceCLI)
+		mustClose(t, l)
+		if strings.Count(readLog(t, native, FileName), "\n") != 1 {
+			t.Fatal("the control: the log did not write")
+		}
+	})
+}
+
+// TestACreateRaceIsNoRefusal (plan 034 review r3 #3a): two crazes making the
+// lock or the log at the same moment — the other one's create landing between
+// this one's open, which found nothing, and its O_EXCL create — is not a
+// refusal: the loser opens and checks the file the winner made, and the log
+// stays on. The control is the file made in that window as a symlink instead,
+// which is still refused.
+func TestACreateRaceIsNoRefusal(t *testing.T) {
+	for _, name := range []string{lockName, FileName} {
+		t.Run(name, func(t *testing.T) {
+			native := nativeDir(t)
+			raced := 0
+			setVar(t, &beforeCreate, func(n string) {
+				if n == name && raced == 0 {
+					raced++
+					if err := os.WriteFile(logPath(native, n), nil, 0o600); err != nil {
+						t.Error(err)
+					}
+				}
+			})
+			l := mustOpen(t, native, Options{})
+			l.Record(begin(attemptID8, 0), SurfaceCLI)
+			mustClose(t, l)
+			if raced != 1 || strings.Count(readLog(t, native, FileName), "\n") != 1 {
+				t.Fatalf("raced %d times; the log holds %q", raced, readLog(t, native, FileName))
+			}
+		})
+	}
+	t.Run("control: a symlink made in the window", func(t *testing.T) {
+		native := nativeDir(t)
+		setVar(t, &beforeCreate, func(n string) {
+			if n == FileName {
+				_ = os.Symlink("../elsewhere", logPath(native, n))
+			}
+		})
+		refusedOpen(t, native, FileName)
+		if _, err := os.Lstat(filepath.Join(native, "elsewhere")); !errors.Is(err, fs.ErrNotExist) {
+			t.Fatal("the symlink's target was created")
+		}
+	})
+}
+
+// TestLockBusyAtSetupIsADrop (plan 034 review r3 #3b): another craze holding
+// the lock past lockWait as the log is set up, and at its first record, is
+// contention, not an unsafe log: the log stays on, the first record is
+// dropped and counted, and the record after the lock is let go is written
+// with that count. The control is the record after, which carries none.
+func TestLockBusyAtSetupIsADrop(t *testing.T) {
+	native := nativeDir(t)
+	if err := os.MkdirAll(native, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(logsDir(native), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	setVar(t, &lockWait, 20*time.Millisecond)
+	release := holdLock(t, native)
+	l, err := Open(native)
+	if err != nil {
+		t.Fatal(err)
+	}
+	awaitReady(t, l)
+	if err := l.Failure(); err != nil {
+		t.Fatalf("a lock held at setup stopped the log: %v", err)
+	}
+	l.Record(begin(attemptID8, 0), SurfaceCLI)
+	waitFor(t, func() bool { return l.dropped.Load() == 1 })
+	if err := l.Failure(); err != nil {
+		t.Fatalf("a lock held at the first record stopped the log: %v", err)
+	}
+	release()
+	l.Record(begin(attemptID8, 1), SurfaceCLI)
+	l.Record(begin(attemptID8, 2), SurfaceCLI)
+	mustClose(t, l)
+	lines := strings.Split(strings.TrimSuffix(readLog(t, native, FileName), "\n"), "\n")
+	if len(lines) != 2 || !strings.HasSuffix(lines[0], `"port":1001,"dropped":1}`) || strings.Contains(lines[1], "dropped") {
+		t.Fatalf("after the first record dropped at a held lock the log holds:\n%s", strings.Join(lines, "\n"))
 	}
 }

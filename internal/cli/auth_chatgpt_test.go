@@ -1467,3 +1467,71 @@ func TestAuthLoginChatGPTSaysTheListenerSawAnotherAttempt(t *testing.T) {
 		t.Fatal("the sign-in log holds a value of the request or the account")
 	}
 }
+
+// TestAuthLoginChatGPTNeverWaitsOnTheLog (plan 034 review r3 #4): a sign-in
+// log whose writer is stuck in the file system — held before it touches a
+// file, for good (signinlog.Options.Stall) — holds up neither the sign-in's
+// begin nor its wait nor its end: the sign-in finishes as ever, within the
+// log's one-second close, and says nothing of the log (nothing failed; what
+// was queued is lost with the writer). The control is the sign-in itself,
+// which prints what it always does.
+func TestAuthLoginChatGPTNeverWaitsOnTheLog(t *testing.T) {
+	authNative(t)
+	f := useFakeSignIn(t)
+	f.begin = chatgptauth.Event{Kind: chatgptauth.EventBegin, Attempt: "0a1b2c3d", Mode: chatgptauth.ModeListening, Port: 1455, Registration: chatgptauth.RegistrationNew}
+	stall := make(chan struct{}) // never closed: the writer touches nothing, ever
+	prev := openSignInLog
+	openSignInLog = func(dir string) (*signinlog.Log, error) {
+		return signinlog.OpenWith(dir, signinlog.Options{Stall: stall})
+	}
+	t.Cleanup(func() { openSignInLog = prev })
+	start := time.Now()
+	stdout, stderr, err := runSignIn(t, strings.NewReader(signInGood+"\n"), "auth", "login", "chatgpt")()
+	if err != nil || stdout != signedInLine+noticeLines+modelsLine {
+		t.Fatalf("login = %q, %v; a stuck log must not stop the sign-in", stdout, err)
+	}
+	if d := time.Since(start); d > 5*time.Second {
+		t.Fatalf("the sign-in took %s behind a stuck log", d)
+	}
+	if strings.Contains(stderr, "sign-in log") {
+		t.Fatalf("a stuck writer was noted as a failure:\n%s", stderr)
+	}
+}
+
+// TestAuthLoginChatGPTNotesALogBrokenByItsLastRecord (plan 034 review r3
+// #8c): a log that breaks at the sign-in's very last record — its directory
+// made writable by others just before the model fetch reports — is still one
+// note on stderr, at the end, once the log's close has let its writer reach
+// it. The control is the record before the break, which is written.
+func TestAuthLoginChatGPTNotesALogBrokenByItsLastRecord(t *testing.T) {
+	native := authNative(t)
+	f := useFakeSignIn(t)
+	f.begin = chatgptauth.Event{Kind: chatgptauth.EventBegin, Attempt: "0a1b2c3d", Mode: chatgptauth.ModeListening, Port: 1455, Registration: chatgptauth.RegistrationNew}
+	logs := filepath.Join(native, paths.LogsName)
+	fetch := fetchPlanModels
+	fetchPlanModels = func(ctx context.Context, dir string, observe func(chatgptauth.Event)) (*chatgptauth.Models, error) {
+		// The begin is written before the log is broken: the control.
+		for deadline := time.Now().Add(10 * time.Second); len(signInRecords(t, native)) != 1; time.Sleep(2 * time.Millisecond) {
+			if time.Now().After(deadline) {
+				t.Error("the begin was never written")
+				break
+			}
+		}
+		if err := os.Chmod(logs, 0o777); err != nil {
+			t.Error(err)
+		}
+		observe(chatgptauth.Event{Kind: chatgptauth.EventModelsFetched, Attempt: "0a1b2c3d", Models: 2, ClientVersion: "0.160.0"})
+		return fetch(ctx, dir, observe)
+	}
+	t.Cleanup(func() { fetchPlanModels = fetch })
+	stdout, stderr, err := runSignIn(t, strings.NewReader(signInGood+"\n"), "auth", "login", "chatgpt")()
+	if err != nil || stdout != signedInLine+noticeLines+modelsLine {
+		t.Fatalf("login = %q, %v; a broken log must not stop the sign-in", stdout, err)
+	}
+	if n := strings.Count(stderr, "note: the sign-in log is off: "); n != 1 || !strings.Contains(stderr, "is writable by other users") {
+		t.Fatalf("stderr:\n%s\nwant one note saying the log's directory is writable by others", stderr)
+	}
+	if got := recordKinds(signInRecords(t, native)); !slices.Equal(got, []string{"begin"}) {
+		t.Fatalf("the log holds %v; want the begin before the break, alone", got)
+	}
+}

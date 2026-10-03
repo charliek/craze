@@ -465,7 +465,7 @@ func (m Model) applyConnect(msg connectAnswer) (Model, tea.Cmd) {
 		if m.dialog == dialogModel && m.mdlg.gen == msg.gen {
 			m.mdlg.connect = msg.show
 		}
-	case signInBegunMsg, signInDoneMsg, signInFinishedMsg, signInShownMsg, signInCopiedMsg:
+	case signInBegunMsg, signInDoneMsg, signInFinishedMsg, signInShownMsg, signInCopiedMsg, signInLogOffMsg:
 		return m.applySignIn(msg)
 	}
 	return m, nil
