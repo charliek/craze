@@ -1472,9 +1472,10 @@ func TestAuthLoginChatGPTSaysTheListenerSawAnotherAttempt(t *testing.T) {
 // log whose writer is stuck in the file system — held before it touches a
 // file, for good (signinlog.Options.Stall) — holds up neither the sign-in's
 // begin nor its wait nor its end: the sign-in finishes as ever, within the
-// log's one-second close, and says nothing of the log (nothing failed; what
-// was queued is lost with the writer). The control is the sign-in itself,
-// which prints what it always does.
+// log's one-second close, and says once, at the end, that the log closed
+// with records unwritten — what was queued is lost with the writer — as the
+// TUI says it (review r5 #6). The control is the sign-in itself, which prints
+// what it always does.
 func TestAuthLoginChatGPTNeverWaitsOnTheLog(t *testing.T) {
 	authNative(t)
 	f := useFakeSignIn(t)
@@ -1493,8 +1494,8 @@ func TestAuthLoginChatGPTNeverWaitsOnTheLog(t *testing.T) {
 	if d := time.Since(start); d > 5*time.Second {
 		t.Fatalf("the sign-in took %s behind a stuck log", d)
 	}
-	if strings.Contains(stderr, "sign-in log") {
-		t.Fatalf("a stuck writer was noted as a failure:\n%s", stderr)
+	if n := strings.Count(stderr, "sign-in log"); n != 1 || !strings.Contains(stderr, "note: the sign-in log is off: signinlog: the log closed before every record was written\n") {
+		t.Fatalf("stderr:\n%s\nwant one note saying the log closed with records unwritten", stderr)
 	}
 }
 

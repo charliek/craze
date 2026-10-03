@@ -29,8 +29,10 @@ const freshFor = 5 * time.Minute
 // then it leaves, so a long-lived host's set stays small.
 const retireAfter = time.Hour
 
-// refreshTimeout bounds a refresh's request (plan 033 §3.10: 30 s).
-const refreshTimeout = 30 * time.Second
+// refreshTimeout bounds a refresh's request (plan 033 §3.10: 30 s). A
+// variable only so a test can run a renewal past a short one (plan 034 A14,
+// review r6 #6).
+var refreshTimeout = 30 * time.Second
 
 // writeTries is how often a rotated record's write is tried before the
 // failure is surfaced (plan 033 §3.10: the write, then twice more).

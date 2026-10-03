@@ -178,7 +178,7 @@ func signInStepAt(t *testing.T, cols, rows int, env map[string]string, noMouse b
 		}
 		return getenv(k)
 	}})
-	t.Cleanup(m.signIns.closeLog)
+	t.Cleanup(func() { _ = m.signIns.closeLog() })
 	m, _ = typeCommand(t, m, "/connect")
 	if p, ok := m.cdlg.provider(); !ok || !p.SignIn {
 		t.Fatalf("step one does not open on the ChatGPT plan (on %q)", p.Name)

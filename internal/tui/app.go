@@ -1979,11 +1979,17 @@ func finishRun(out io.Writer, final tea.Model, m Model, h Host) (bool, error) {
 	// whose answer the program stopped before reading, too. Each reports its
 	// end (CloseShutdown) to the sign-in log — or, a Wait finishing a
 	// redirect or a Begin still running, reports it as it returns, which is
-	// waited for, a second at most (awaitEnds, plan 034 review r3 #8a) — and
-	// the log is then closed, flushed for at most a second (plan 034 §3.3).
+	// waited for, a second at most (awaitEnds, plan 034 review r3 #8a), as
+	// is a signed-in run's model fetch, cancelled with it (review r6 #1) — and
+	// the log is then closed, flushed for at most a second (plan 034 §3.3). A
+	// failure of the log the transcript never said — the flush's own, which
+	// no Update applies now — is one line here, the alt screen gone (review
+	// r5 #6).
 	m.signIns.closeAll(chatgptauth.CloseShutdown)
 	m.signIns.awaitEnds(signInEndWait)
-	m.signIns.closeLog()
+	if err := m.signIns.closeLog(); err != nil {
+		_, _ = fmt.Fprintln(out, "craze: "+signInLogNote(err))
+	}
 	// And a backend a switch let go of, or a dial answered after the user
 	// had moved on, whose close — a command — the program stopped before it
 	// ran (plan 030 §3.11): a view close each, bounded, side by side.

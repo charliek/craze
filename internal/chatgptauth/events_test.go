@@ -13,6 +13,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -569,6 +570,38 @@ var eventScenarios = []eventScenario{
 		wantErr: "chatgptauth: the sign-in's id_token is not valid: its signature does not verify",
 	},
 	{
+		name: "the issuer's OpenID configuration refused: named by its step",
+		run: func(t *testing.T, sc *scenarioRun) error {
+			sc.f.mu.Lock()
+			sc.f.failPath = map[string]int{discoveryPath: http.StatusServiceUnavailable}
+			sc.f.mu.Unlock()
+			a := sc.begin(BeginOptions{PasteOnly: true})
+			sc.pasteOK(a)
+			_, err := a.Wait(context.Background())
+			sc.keep(sc.f.issued...)
+			return err
+		},
+		want:    []Event{evPasteBegin, evPasted, evFailed(StepDiscovery, http.StatusServiceUnavailable, "", ClassRefused, "")},
+		wantErr: "chatgptauth: discovery refused (HTTP 503)",
+	},
+	{
+		name: "the issuer's key set answers with a redirect: named by its step",
+		run: func(t *testing.T, sc *scenarioRun) error {
+			sc.f.mu.Lock()
+			sc.f.redirectPath = map[string]bool{"/jwks": true}
+			sc.f.mu.Unlock()
+			a := sc.begin(BeginOptions{PasteOnly: true})
+			sc.pasteOK(a)
+			_, err := a.Wait(context.Background())
+			sc.keep(sc.f.issued...)
+			if !errors.Is(err, errRedirect) {
+				t.Fatalf("Wait = %v; want the key set's redirect refused", err)
+			}
+			return err
+		},
+		want: []Event{evPasteBegin, evPasted, evFailed(StepJWKS, http.StatusFound, "", ClassHTTPRedirect, "")},
+	},
+	{
 		name: "a redirect with no code",
 		run: func(t *testing.T, sc *scenarioRun) error {
 			a := sc.begin(BeginOptions{PasteOnly: true})
@@ -689,6 +722,47 @@ var eventScenarios = []eventScenario{
 		want: []Event{evBegin(ModeListening, anyPort, ReasonPortBusy, RegistrationReused), evCancelled(CloseEsc)},
 	},
 	{
+		name: "1455 cannot be bound, not busy: a registration is paste-only, and says why",
+		run: func(t *testing.T, sc *scenarioRun) error {
+			unbindable(t, false)
+			a := sc.begin(BeginOptions{})
+			if a.Listening() {
+				t.Fatal("a registration listened with 1455 unbindable")
+			}
+			a.Close(CloseEsc)
+			return nil
+		},
+		want: []Event{evBegin(ModePasteOnly, callbackPort, ReasonListenFailed, RegistrationNew), evCancelled(CloseEsc)},
+	},
+	{
+		name: "1455 cannot be bound, not busy: a re-login listens on another port, and says why",
+		run: func(t *testing.T, sc *scenarioRun) error {
+			sc.registered()
+			unbindable(t, false)
+			a := sc.begin(BeginOptions{})
+			if !a.Listening() {
+				t.Fatal("a re-login did not listen on another port")
+			}
+			a.Close(CloseEsc)
+			return nil
+		},
+		want: []Event{evBegin(ModeListening, anyPort, ReasonListenFailed, RegistrationReused), evCancelled(CloseEsc)},
+	},
+	{
+		name: "no port can be bound: a re-login is paste-only, and says why",
+		run: func(t *testing.T, sc *scenarioRun) error {
+			sc.registered()
+			unbindable(t, true)
+			a := sc.begin(BeginOptions{})
+			if a.Listening() {
+				t.Fatal("a re-login listened with no port to bind")
+			}
+			a.Close(CloseEsc)
+			return nil
+		},
+		want: []Event{evBegin(ModePasteOnly, callbackPort, ReasonListenFailed, RegistrationReused), evCancelled(CloseEsc)},
+	},
+	{
 		name: "what the UI reports, and nothing else",
 		run: func(t *testing.T, sc *scenarioRun) error {
 			a := sc.begin(BeginOptions{PasteOnly: true})
@@ -755,6 +829,47 @@ var eventScenarios = []eventScenario{
 		},
 		want:    []Event{evPasteBegin, evPasted, evSignedIn, {Kind: EventModelsFailed, Step: StepModels, Class: ClassTimeout, ClientVersion: testPin}},
 		wantErr: "chatgptauth: models: timed out after 50ms waiting for the model list's lock, which another craze process holds",
+	},
+	{
+		name: "the model list's token renewal refused: named by its step",
+		run: func(t *testing.T, sc *scenarioRun) error {
+			a := sc.signIn()
+			// The API no longer takes the sign-in's access token: the fetch
+			// renews it once (a 401), and the renewal is refused.
+			sc.f.mu.Lock()
+			clear(sc.f.access)
+			sc.f.refreshErr = "invalid_grant"
+			sc.f.mu.Unlock()
+			err := sc.fetch(a, testPin)
+			sc.keep(sc.f.issued...)
+			if !errors.Is(err, ErrSignInAgain) {
+				t.Fatalf("a refused renewal = %v; want ErrSignInAgain", err)
+			}
+			return err
+		},
+		want: []Event{evPasteBegin, evPasted, evSignedIn, {
+			Kind: EventModelsFailed, Step: StepRefresh, Status: 400, Code: "invalid_grant", Class: ClassRefused, ClientVersion: testPin,
+		}},
+		wantErr: "chatgptauth: the ChatGPT sign-in is no longer valid; sign in again: chatgptauth: refresh refused (HTTP 400, invalid_grant)",
+	},
+	{
+		name: "the model list's token renewal runs past its deadline: named by its step (A14)",
+		run: func(t *testing.T, sc *scenarioRun) error {
+			a := sc.signIn()
+			setVar(t, &refreshTimeout, 300*time.Millisecond)
+			sc.hold(&sc.f.holdRefresh)
+			sc.f.mu.Lock()
+			clear(sc.f.access)
+			sc.f.mu.Unlock()
+			err := sc.fetch(a, testPin)
+			sc.keep(sc.f.issued...)
+			if !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("a timed-out renewal = %v; want it to be context.DeadlineExceeded still", err)
+			}
+			return err
+		},
+		want:    []Event{evPasteBegin, evPasted, evSignedIn, {Kind: EventModelsFailed, Step: StepRefresh, Class: ClassTimeout, ClientVersion: testPin}},
+		wantErr: "chatgptauth: refresh: timed out after 300ms",
 	},
 }
 
@@ -887,7 +1002,7 @@ func TestObserverIsCalledOutsideTheLocks(t *testing.T) {
 		_ = a.over
 		a.mu.Unlock()
 		a.emu.Lock()
-		_ = a.ended
+		_ = a.waiting
 		a.emu.Unlock()
 	}
 	var err error
@@ -1001,7 +1116,10 @@ func TestNoRefusalAfterTheEnd(t *testing.T) {
 // once the attempt's one outcome has been reported — by Close when no Wait
 // is finishing a redirect, and by Wait as it returns when one is, which a UI
 // ending with the program waits for before it closes the sign-in log. The
-// control is Ended open before either.
+// control is Ended open before either. The close of a Wait finishing its
+// redirect comes once the fake has the exchange (exchangeIn): the Wait has
+// taken the redirect by then, so the close cannot win the Wait's own choice
+// between the redirect and the close (review r5 #9).
 func TestEndedFollowsTheOutcome(t *testing.T) {
 	ended := func(a *Attempt) bool {
 		select {
@@ -1029,12 +1147,12 @@ func TestEndedFollowsTheOutcome(t *testing.T) {
 	t.Run("a Wait finishing its redirect", func(t *testing.T) {
 		f := newFake(t)
 		useFake(t, f)
-		hold := make(chan struct{})
+		hold, arrived := make(chan struct{}), make(chan struct{}, 1)
 		var once sync.Once
 		release := func() { once.Do(func() { close(hold) }) }
 		t.Cleanup(release) // a failed test leaves no exchange held
 		f.mu.Lock()
-		f.holdExchange = hold
+		f.holdExchange, f.exchangeIn = hold, arrived
 		f.mu.Unlock()
 		sink := &eventSink{}
 		a, err := Begin(context.Background(), nativeDir(t), BeginOptions{PasteOnly: true, Observe: sink.observe})
@@ -1045,6 +1163,11 @@ func TestEndedFollowsTheOutcome(t *testing.T) {
 			t.Fatal(err)
 		}
 		waited := waitAsync(t, a, context.Background())
+		select {
+		case <-arrived:
+		case <-time.After(10 * time.Second):
+			t.Fatal("the exchange never reached the fake")
+		}
 		a.Close(CloseShutdown) // the Wait is finishing the redirect: the outcome is Wait's
 		if ended(a) {
 			t.Fatal("Ended closed before the Wait finishing the redirect reported its outcome")
@@ -1062,4 +1185,136 @@ func TestEndedFollowsTheOutcome(t *testing.T) {
 			t.Fatalf("the outcome is not the last event:\n%s", eventsText(evs))
 		}
 	})
+}
+
+// TestAnObserverMayEndTheAttemptFromItsEnd (plan 034 review r5 #4): an
+// observer that closes the attempt as it is told its outcome — a UI's
+// cleanup on signed in or cancelled — or waits on it then, returns, and the
+// attempt's Ended closes: the end is reported under the order lock (omu),
+// and neither a Close nor a Wait's settle of an ended attempt takes it. Each
+// terminal outcome is driven — cancelled by a Close; signed in, declined,
+// failed, and cancelled as a close cut the exchange short, by a Wait — on a
+// goroutine of its own under a deadline, so a deadlock fails the test rather
+// than hang it, and the attempt is cleaned up by shut, which takes no event
+// lock. The control is the observer's own call: it ran, once, for the
+// outcome named.
+func TestAnObserverMayEndTheAttemptFromItsEnd(t *testing.T) {
+	paste := func(t *testing.T, f *fakeOpenAI, a *Attempt, q url.Values) {
+		t.Helper()
+		if q == nil {
+			q = f.authorize(t, a.URL())
+		}
+		if err := a.Paste(a.RedirectURI() + "?" + q.Encode()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, tc := range []struct {
+		name string
+		want EventKind
+		// wait has the observer call Wait from the outcome, not Close.
+		wait bool
+		// setup readies the attempt on the test's goroutine and answers what
+		// ends it, run on a goroutine of its own.
+		setup func(t *testing.T, f *fakeOpenAI, a *Attempt) func()
+	}{
+		{name: "cancelled by a Close", want: EventCancelled, setup: func(*testing.T, *fakeOpenAI, *Attempt) func() {
+			return nil
+		}},
+		{name: "cancelled by a Close, the observer waiting", want: EventCancelled, wait: true, setup: func(*testing.T, *fakeOpenAI, *Attempt) func() {
+			return nil
+		}},
+		{name: "signed in", want: EventSignedIn, setup: func(t *testing.T, f *fakeOpenAI, a *Attempt) func() {
+			paste(t, f, a, nil)
+			return func() { _, _ = a.Wait(context.Background()) }
+		}},
+		{name: "declined", want: EventDeclined, setup: func(t *testing.T, f *fakeOpenAI, a *Attempt) func() {
+			paste(t, f, a, url.Values{"error": {"access_denied"}, "state": {a.state}})
+			return func() { _, _ = a.Wait(context.Background()) }
+		}},
+		{name: "failed", want: EventFailed, setup: func(t *testing.T, f *fakeOpenAI, a *Attempt) func() {
+			f.mu.Lock()
+			f.exchangeErr = "invalid_grant"
+			f.mu.Unlock()
+			paste(t, f, a, nil)
+			return func() { _, _ = a.Wait(context.Background()) }
+		}},
+		{name: "cancelled as a close cut the exchange short", want: EventCancelled, setup: func(t *testing.T, f *fakeOpenAI, a *Attempt) func() {
+			hold, arrived := make(chan struct{}), make(chan struct{}, 1)
+			t.Cleanup(func() { close(hold) })
+			f.mu.Lock()
+			f.holdExchange, f.exchangeIn = hold, arrived
+			f.mu.Unlock()
+			paste(t, f, a, nil)
+			ctx, cancel := context.WithCancel(context.Background())
+			t.Cleanup(cancel)
+			waited := waitAsync(t, a, ctx)
+			select {
+			case <-arrived:
+			case <-time.After(10 * time.Second):
+				t.Fatal("the exchange never reached the fake")
+			}
+			return func() {
+				a.Close(CloseEsc) // the Wait is finishing the redirect: the outcome is Wait's
+				cancel()
+				<-waited
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFake(t)
+			useFake(t, f)
+			var att atomic.Pointer[Attempt]
+			var mu sync.Mutex
+			var told []EventKind
+			observe := func(ev Event) {
+				switch ev.Kind {
+				case EventSignedIn, EventDeclined, EventFailed, EventCancelled:
+				default:
+					return
+				}
+				a := att.Load()
+				if a == nil {
+					return
+				}
+				mu.Lock()
+				told = append(told, ev.Kind)
+				mu.Unlock()
+				if tc.wait {
+					_, _ = a.Wait(context.Background())
+				} else {
+					a.Close(CloseDone)
+				}
+			}
+			a, err := Begin(context.Background(), nativeDir(t), BeginOptions{PasteOnly: true, Observe: observe})
+			if err != nil {
+				t.Fatal(err)
+			}
+			att.Store(a)
+			t.Cleanup(a.shut)
+			end := tc.setup(t, f, a)
+			if end == nil {
+				end = func() { a.Close(CloseEsc) }
+			}
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				end()
+			}()
+			select {
+			case <-done:
+			case <-time.After(10 * time.Second):
+				t.Fatal("an observer ending the attempt from its outcome deadlocked")
+			}
+			select {
+			case <-a.Ended():
+			default:
+				t.Fatal("the attempt reported its outcome but Ended is open")
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			if !slices.Equal(told, []EventKind{tc.want}) {
+				t.Fatalf("the observer was told %v; want the one outcome, %s", told, tc.want)
+			}
+		})
+	}
 }

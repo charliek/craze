@@ -370,11 +370,17 @@ func endReason(ctx context.Context) chatgptauth.CloseReason {
 // had every run still open end and awaitEnds has waited, bounded, for each
 // one's outcome to be reported (review r3 #8a). live is every run whose
 // outcome may still be to come: its begin not yet returned, or its attempt
-// not yet ended, whether or not its step has ended it.
+// not yet ended, whether or not its step has ended it. finishing is every
+// signed-in run's finishing command still running (finishSignInCmd) — the
+// model fetch, whose outcome is the attempt's in the log too — which closeAll
+// cancels and awaitEnds waits for in the same bound (review r6 #1); closing
+// says closeAll has run, and no finishing command starts after it.
 type signInRuns struct {
-	mu   sync.Mutex
-	open map[uint64]*signInRun
-	live map[uint64]*signInRun
+	mu        sync.Mutex
+	open      map[uint64]*signInRun
+	live      map[uint64]*signInRun
+	finishing map[*signInFinish]struct{}
+	closing   bool
 
 	logMu     sync.Mutex
 	logClosed bool
@@ -392,6 +398,13 @@ type signInRun struct {
 	cancel context.CancelCauseFunc
 	att    signInAttempt
 	begun  chan struct{}
+}
+
+// signInFinish is one finishing command's (finishSignInCmd): the cancel of
+// the context its work runs under, and done, closed as it returns.
+type signInFinish struct {
+	cancel context.CancelFunc
+	done   chan struct{}
 }
 
 // stop closes att, the run's attempt, if it has one, for reason, and cancels
@@ -493,22 +506,55 @@ func (s *signInRuns) end(run uint64, reason chatgptauth.CloseReason) {
 	}
 }
 
-// closeAll ends every run still open, for reason: finishRun's, on every exit
-// path (CloseShutdown).
+// closeAll ends every run still open, for reason, and cancels every
+// finishing command still running, none starting after it: finishRun's, on
+// every exit path (CloseShutdown).
 func (s *signInRuns) closeAll(reason chatgptauth.CloseReason) {
 	if s == nil {
 		return
 	}
 	s.mu.Lock()
 	open := s.open
-	s.open = nil
+	s.open, s.closing = nil, true
 	atts := make(map[uint64]signInAttempt, len(open))
 	for n, r := range open {
 		atts[n] = r.att
 	}
+	fins := make([]*signInFinish, 0, len(s.finishing))
+	for f := range s.finishing {
+		fins = append(fins, f)
+	}
 	s.mu.Unlock()
 	for n, r := range open {
 		r.stop(atts[n], reason)
+	}
+	for _, f := range fins {
+		f.cancel()
+	}
+}
+
+// startFinish records a finishing command (finishSignInCmd) as it starts,
+// under cancel, and answers the func it calls as it returns; nil once
+// closeAll has run — the program is ending, and the command does nothing.
+func (s *signInRuns) startFinish(cancel context.CancelFunc) func() {
+	if s == nil {
+		return func() {}
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closing {
+		return nil
+	}
+	f := &signInFinish{cancel: cancel, done: make(chan struct{})}
+	if s.finishing == nil {
+		s.finishing = map[*signInFinish]struct{}{}
+	}
+	s.finishing[f] = struct{}{}
+	return func() {
+		s.mu.Lock()
+		delete(s.finishing, f)
+		s.mu.Unlock()
+		close(f.done)
 	}
 }
 
@@ -516,8 +562,10 @@ func (s *signInRuns) closeAll(reason chatgptauth.CloseReason) {
 // still have one to report (live): its begin to return — Begin reports a
 // failure's outcome before it returns — and its attempt, if it made one, to
 // report its end (Ended): a Wait finishing an accepted redirect reports it as
-// it returns, after the Close that ended its run (review r3 #8a). finishRun's,
-// after closeAll and before closeLog, so those outcomes are logged.
+// it returns, after the Close that ended its run (review r3 #8a). Then, in
+// the same d, for every finishing command closeAll cancelled to return, its
+// model fetch's outcome reported (review r6 #1). finishRun's, after closeAll
+// and before closeLog, so those outcomes are logged.
 func (s *signInRuns) awaitEnds(d time.Duration) {
 	if s == nil {
 		return
@@ -527,24 +575,35 @@ func (s *signInRuns) awaitEnds(d time.Duration) {
 	for _, r := range s.live {
 		runs = append(runs, r)
 	}
+	fins := make([]*signInFinish, 0, len(s.finishing))
+	for f := range s.finishing {
+		fins = append(fins, f)
+	}
 	s.mu.Unlock()
 	t := time.NewTimer(d)
 	defer t.Stop()
-	for _, r := range runs {
+	// within waits for c within what is left of d: false once d is spent.
+	within := func(c <-chan struct{}) bool {
 		select {
-		case <-r.begun:
+		case <-c:
+			return true
 		case <-t.C:
+			return false
+		}
+	}
+	for _, r := range runs {
+		if !within(r.begun) {
 			return
 		}
 		s.mu.Lock()
 		att := r.att
 		s.mu.Unlock()
-		if att == nil {
-			continue
+		if att != nil && !within(att.Ended()) {
+			return
 		}
-		select {
-		case <-att.Ended():
-		case <-t.C:
+	}
+	for _, f := range fins {
+		if !within(f.done) {
 			return
 		}
 	}
@@ -606,7 +665,7 @@ func signInLogCmd(l *signinlog.Log, err error, done <-chan struct{}) tea.Cmd {
 
 // mention is the transcript's one note about the sign-in log, once: why it
 // was refused when it opened, or why it stopped since; "" otherwise, and ever
-// after the note was written.
+// after the note was written — here, or by closeLog as the program ends.
 func (s *signInRuns) mention() string {
 	if s == nil {
 		return ""
@@ -624,6 +683,14 @@ func (s *signInRuns) mention() string {
 		return ""
 	}
 	s.logTold = true
+	return signInLogNote(err)
+}
+
+// signInLogNote is the one mention of err, why the sign-in log stopped: the
+// transcript's note, or the line finishRun prints once the screen is
+// restored. signinlog's errors say what failed and where — a step, a path in
+// the native directory, an errno — never anything a record holds.
+func signInLogNote(err error) string {
 	return "the sign-in log is off: " + sanitizeLine(err.Error())
 }
 
@@ -631,9 +698,16 @@ func (s *signInRuns) mention() string {
 // and ends its wait (signInLogCmd): finishRun's, after closeAll and
 // awaitEnds, so every run's end is written first. Safe to call more than
 // once.
-func (s *signInRuns) closeLog() {
+//
+// It answers the log's failure the transcript has not mentioned — the open
+// refused, the flush broke the log (Failure), or ran out of its second
+// (Close's error) — and counts it mentioned: finishRun prints it, once the
+// screen is restored. The wait it ends can no longer deliver it, and no
+// Update would apply it now (plan 034 review r5 #6). nil when there is none,
+// or the transcript has it.
+func (s *signInRuns) closeLog() error {
 	if s == nil {
-		return
+		return nil
 	}
 	s.logMu.Lock()
 	l := s.log
@@ -642,7 +716,20 @@ func (s *signInRuns) closeLog() {
 	}
 	s.logClosed = true
 	s.logMu.Unlock()
-	_ = l.Close()
+	err := l.Close()
+	s.logMu.Lock()
+	defer s.logMu.Unlock()
+	if f := l.Failure(); f != nil {
+		err = f
+	}
+	if s.logErr != nil {
+		err = s.logErr
+	}
+	if err == nil || s.logTold {
+		return nil
+	}
+	s.logTold = true
+	return err
 }
 
 // observeSignIn is a run's observer (chatgptauth.BeginOptions.Observe), called
@@ -991,7 +1078,7 @@ func (m Model) signedIn(res chatgptauth.Result, observe func(chatgptauth.Event))
 		m.addNote(chatgptauth.NoticeTitle)
 		m.addNote(chatgptauth.Notice)
 	}
-	return m, finishSignInCmd(m.shownGen, m.nativeDir, res.ShowNotice, observe)
+	return m, finishSignInCmd(m.signIns, m.shownGen, m.nativeDir, res.ShowNotice, observe)
 }
 
 // finishSignInCmd is the work after a sign-in, off the Update: the notice
@@ -999,11 +1086,22 @@ func (m Model) signedIn(res chatgptauth.Result, observe func(chatgptauth.Event))
 // into dir, as aliases, the fetch reporting to observe. A failure of either is
 // a note: the sign-in stands, and a native session fetches the list when it
 // opens.
-func finishSignInCmd(shown uint64, dir string, noticeShown bool, observe func(chatgptauth.Event)) tea.Cmd {
+//
+// It is recorded in runs while it runs (startFinish), so the program's end
+// cancels it and waits for it, bounded, before the sign-in log closes: the
+// fetch's outcome — fetched, empty or failed, cancelled by the end itself —
+// is the attempt's last record (review r6 #1). One that would start after
+// that end does nothing.
+func finishSignInCmd(runs *signInRuns, shown uint64, dir string, noticeShown bool, observe func(chatgptauth.Event)) tea.Cmd {
 	mark, fetch := markNoticeShown, fetchPlanModels
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), signInFinishTimeout)
 		defer cancel()
+		done := runs.startFinish(cancel)
+		if done == nil {
+			return nil
+		}
+		defer done()
 		msg := signInFinishedMsg{shownGen: shown}
 		if noticeShown {
 			if err := mark(ctx, dir); err != nil {

@@ -108,9 +108,11 @@ type fakeOpenAI struct {
 	refreshArrived chan struct{}                    // a refresh signals it on arrival, when set
 	holdModels     chan struct{}                    // a model list request waits on it, when set
 	holdExchange   chan struct{}                    // a code exchange waits on it, when set
+	exchangeIn     chan struct{}                    // a code exchange signals it on arrival, before holdExchange, when set
 	modelsArrived  chan struct{}                    // signalled on a model list request, when set
 	modelsErr      string                           // an error code the model list answers (400, {"error":{"code":…}})
 	redirectPath   map[string]bool                  // these paths answer 302 to /elsewhere
+	failPath       map[string]int                   // these paths answer this status, with an empty JSON object
 	jwksURI        string                           // the discovery document's jwks_uri ("" = ours)
 	models         []map[string]any
 	modelsEtag     string
@@ -381,13 +383,17 @@ func (f *fakeOpenAI) serve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	f.mu.Lock()
-	redirect := f.redirectPath[r.URL.Path]
+	redirect, fail := f.redirectPath[r.URL.Path], f.failPath[r.URL.Path]
 	if r.URL.Path == "/elsewhere" {
 		f.elsewhere++
 	}
 	f.mu.Unlock()
 	if redirect {
 		http.Redirect(w, r, "/elsewhere", http.StatusFound)
+		return
+	}
+	if fail != 0 {
+		f.writeJSON(w, fail, map[string]any{})
 		return
 	}
 	switch r.URL.Path {
@@ -478,8 +484,11 @@ func (f *fakeOpenAI) token(w http.ResponseWriter, r *http.Request) {
 	switch form.Get("grant_type") {
 	case "authorization_code":
 		f.mu.Lock()
-		hold := f.holdExchange
+		arrived, hold := f.exchangeIn, f.holdExchange
 		f.mu.Unlock()
+		if arrived != nil {
+			arrived <- struct{}{}
+		}
 		if hold != nil {
 			<-hold
 		}
@@ -652,6 +661,25 @@ func useListener(t *testing.T, busy1455 bool) *[]int {
 		}
 	})
 	return &asked
+}
+
+// unbindable makes 1455 refuse its bind for a reason other than its being
+// busy (EACCES: a port the user may not bind) — and, with every, any other
+// port too — for one test: the listener's other failure, ReasonListenFailed
+// (plan 034 A10, review r6 #6). A port it lets through is any free one.
+func unbindable(t *testing.T, every bool) {
+	t.Helper()
+	listen = func(port int) (net.Listener, error) {
+		if port == callbackPort || every {
+			return nil, &net.OpError{Op: "listen", Net: "tcp", Err: os.NewSyscallError("bind", syscall.EACCES)}
+		}
+		return net.Listen("tcp", "127.0.0.1:0")
+	}
+	t.Cleanup(func() {
+		listen = func(port int) (net.Listener, error) {
+			return net.Listen("tcp", net.JoinHostPort("127.0.0.1", fmt.Sprint(port)))
+		}
+	})
 }
 
 // nativeDir is a fresh native directory under the test's temp dir.

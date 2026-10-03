@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"slices"
@@ -22,6 +23,7 @@ import (
 	"github.com/charliek/craze/internal/harness/modeltable"
 	"github.com/charliek/craze/internal/harness/redact"
 	"github.com/charliek/craze/internal/harness/tool/opencode"
+	"github.com/charliek/craze/internal/paths"
 )
 
 // The ChatGPT plan through the native adapter (plan 033 §3.12, C14). Every
@@ -54,6 +56,7 @@ type fakeEndpoint struct {
 
 type fakeRequest struct {
 	path   string
+	query  url.Values
 	header http.Header
 	body   string
 }
@@ -64,7 +67,7 @@ func newFakeEndpoint(t *testing.T) *fakeEndpoint {
 	e.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		b, _ := io.ReadAll(r.Body)
 		e.mu.Lock()
-		e.seen = append(e.seen, fakeRequest{path: r.URL.Path, header: r.Header.Clone(), body: string(b)})
+		e.seen = append(e.seen, fakeRequest{path: r.URL.Path, query: r.URL.Query(), header: r.Header.Clone(), body: string(b)})
 		var next http.HandlerFunc
 		if len(e.replies) > 0 {
 			next, e.replies = e.replies[0], e.replies[1:]
@@ -544,6 +547,99 @@ func TestNativeModelsRefreshNoteIsRedacted(t *testing.T) {
 	got := fmt.Sprint(modelsRefreshNote(err, s.hs.Redact).Fields["error"])
 	if strings.Contains(got, planAccess) || !strings.Contains(got, redact.Marker) {
 		t.Fatalf("the note = %q, want the token redacted", got)
+	}
+}
+
+// TestNativeModelsRefreshRefetchesAnotherClientVersion (plan 034 A1, Q3;
+// review r6 #6): a session's open fetches the plan's model list again when
+// the cache is fresh by age but was fetched with another client_version, or
+// with none (a legacy file): the request carries the shipped catalog's pin,
+// exactly once, and the list is written with it. The host's refresh has no
+// observer, so it never writes the sign-in log: nothing is made under
+// <native>/logs. The control is a cache fetched with the pin, whose open
+// asks for nothing.
+func TestNativeModelsRefreshRefetchesAnotherClientVersion(t *testing.T) {
+	pin := modeltable.ChatGPTModelsClientVersion()
+	for _, tc := range []struct {
+		name, version string
+		fetched       bool
+	}{
+		{"the pin (control)", pin, false},
+		{"another version", "0.1.0", true},
+		{"none, a legacy cache", "", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			api, _ := noOpenAI(t)
+			api.queue(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, `{"models":[{"slug":"gpt-6.1-sol","display_name":"GPT-6.1 Sol","visibility":"list","priority":0,`+
+					`"context_window":272000,"input_modalities":["text"],"supported_reasoning_levels":[{"effort":"low"}],"default_reasoning_level":"low"}]}`)
+			})
+			home := t.TempDir()
+			t.Setenv("CRAZE_HOME", home)
+			dir := filepath.Join(home, "native")
+			writePlanAccount(t, dir)
+			writePlanTokens(t, dir, planAccess, planRefresh, "inc-1", 1)
+			fetchedWith(t, dir, tc.version)
+			s := newNative(Options{Workspace: t.TempDir(), ContentHome: t.TempDir()}, func(o *harness.Options) {
+				o.Getenv = func(string) string { return "" }
+			})
+			closeAtCleanup(t, s)
+			if err := s.Start(context.Background()); err != nil {
+				t.Fatalf("Start: %v", err)
+			}
+			s.mu.Lock()
+			refreshed := s.refreshed
+			s.mu.Unlock()
+			if refreshed == nil {
+				t.Fatal("an account signed in with plan usage started no refresh")
+			}
+			await(t, refreshed, "the model list's refresh")
+			reqs := api.requests()
+			m, err := chatgptauth.ReadModels(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !tc.fetched {
+				if len(reqs) != 0 || len(m.Models) != 1 || m.Models[0].Slug != "gpt-5.6-sol" {
+					t.Fatalf("the control: a list fetched with the pin was fetched again (%d requests)", len(reqs))
+				}
+			} else {
+				if len(reqs) != 1 || reqs[0].path != "/v1/models" || !slices.Equal(reqs[0].query["client_version"], []string{pin}) {
+					// The path and the version alone: a request's headers carry
+					// the bearer.
+					var seen []string
+					for _, r := range reqs {
+						seen = append(seen, fmt.Sprintf("%s client_version=%q", r.path, r.query["client_version"]))
+					}
+					t.Fatalf("the refresh's requests: %v; want one model list request carrying client_version %s", seen, pin)
+				}
+				if m.ClientVersion != pin || len(m.Models) != 1 || m.Models[0].Slug != "gpt-6.1-sol" {
+					t.Fatalf("the list written: client_version %q, %d models; want the fetched list, with the pin", m.ClientVersion, len(m.Models))
+				}
+			}
+			if _, err := os.Lstat(filepath.Join(dir, paths.LogsName)); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("the host's refresh made the sign-in log's directory (%v)", err)
+			}
+		})
+	}
+}
+
+// fetchedWith rewrites dir's model list as fetched now with client_version
+// v ("" is none: a legacy file), fresh by age whatever its version.
+func fetchedWith(t *testing.T, dir, v string) {
+	t.Helper()
+	m, err := chatgptauth.ReadModels(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.ClientVersion, m.FetchedAt = v, time.Now().UTC()
+	b, err := json.Marshal(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(chatgptauth.ModelsFile(dir), b, 0o600); err != nil {
+		t.Fatal(err)
 	}
 }
 

@@ -468,7 +468,7 @@ func signInModel(t *testing.T, planOff bool) (Model, string) {
 	// The sign-in log the first begin opens is closed when the test ends —
 	// after its attempts (beginStep's cleanup), so their ends are written —
 	// as finishRun closes it, so its writer outlives no test.
-	t.Cleanup(m.signIns.closeLog)
+	t.Cleanup(func() { _ = m.signIns.closeLog() })
 	m, _ = typeCommand(t, m, "/connect")
 	if p, ok := m.cdlg.provider(); !ok || !p.SignIn {
 		t.Fatalf("step one does not open on the ChatGPT plan (on %q)", p.Name)
@@ -1219,6 +1219,8 @@ type fakeIssuer struct {
 	// hold, when set, keeps a code exchange waiting — until it is closed or
 	// the request is cancelled — after saying on held that it arrived.
 	hold, held chan struct{}
+	// modelsHold and modelsHeld are hold and held for a model list request.
+	modelsHold, modelsHeld chan struct{}
 }
 
 // fakeCode is an authorization code the fake issued and has not exchanged.
@@ -1304,6 +1306,12 @@ func (f *fakeIssuer) serve(w http.ResponseWriter, r *http.Request) {
 			f.json(w, 400, map[string]any{"error": map[string]any{"code": "client_version_required"}})
 			return
 		}
+		f.mu.Lock()
+		hold, held := f.modelsHold, f.modelsHeld
+		f.mu.Unlock()
+		if !f.await(r, hold, held) {
+			return
+		}
 		tok, _ := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
 		f.mu.Lock()
 		live := f.access[tok]
@@ -1322,6 +1330,24 @@ func (f *fakeIssuer) serve(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// await holds r, when hold is set, until hold is closed or r is cancelled,
+// having said on held that it arrived; false is r cancelled, unanswered.
+func (f *fakeIssuer) await(r *http.Request, hold, held chan struct{}) bool {
+	if hold == nil {
+		return true
+	}
+	select {
+	case held <- struct{}{}:
+	default:
+	}
+	select {
+	case <-hold:
+		return true
+	case <-r.Context().Done():
+		return false
+	}
+}
+
 // token is the exchange: the code, its client, its redirect and its PKCE
 // verifier checked, then dummy tokens and an id_token signed for the nonce.
 func (f *fakeIssuer) token(w http.ResponseWriter, r *http.Request) {
@@ -1332,16 +1358,8 @@ func (f *fakeIssuer) token(w http.ResponseWriter, r *http.Request) {
 	f.mu.Lock()
 	hold, held := f.hold, f.held
 	f.mu.Unlock()
-	if hold != nil {
-		select {
-		case held <- struct{}{}:
-		default:
-		}
-		select {
-		case <-hold:
-		case <-r.Context().Done():
-			return
-		}
+	if !f.await(r, hold, held) {
+		return
 	}
 	form := r.PostForm
 	f.mu.Lock()
@@ -1462,7 +1480,9 @@ func TestConnectSignInPastedRedirectAgainstFakeIssuer(t *testing.T) {
 
 	// The sign-in log (plan 034 §3.3, A11): the attempt, surface tui, from
 	// its begin to its model fetch, holding none of the sign-in's values.
-	m.signIns.closeLog()
+	if err := m.signIns.closeLog(); err != nil {
+		t.Fatalf("the sign-in log failed: %v", err)
+	}
 	recs, raw := tuiSignInLog(t, dir)
 	if got, want := recordKinds(recs), []string{"begin", "redirect_received", "signed_in", "models_fetched"}; !slices.Equal(got, want) {
 		t.Fatalf("the sign-in log holds %v; want %v", got, want)
@@ -1637,7 +1657,9 @@ func TestConnectSignInEscClosesTheRealListener(t *testing.T) {
 	awaitNoSignInRun(t)
 	// The log has the attempt's begin and its one outcome: cancelled by Esc
 	// (plan 034 §3.3).
-	m.signIns.closeLog()
+	if err := m.signIns.closeLog(); err != nil {
+		t.Fatalf("the sign-in log failed: %v", err)
+	}
 	recs, _ := tuiSignInLog(t, dir)
 	if got := recordKinds(recs); !slices.Equal(got, []string{"begin", "cancelled"}) || recs[1]["reason"] != "esc" || recs[0]["registration"] != "reused" {
 		t.Fatalf("the sign-in log holds %v; want the re-login's begin, then cancelled by esc", recs)
@@ -1649,9 +1671,11 @@ func TestConnectSignInEscClosesTheRealListener(t *testing.T) {
 // for good (signinlog.Options.Stall) — holds up nothing of a /connect
 // sign-in: the box opens and the attempt begins, the pasted redirect is
 // handed over and the wait answers, and finishRun ends it all within the
-// log's one-second close. The whole run is timed on a goroutine of its own,
-// so a sign-in that did wait fails the test rather than hang it. The control
-// is the sign-in's own course, each step of which is checked.
+// log's one-second close — and says, once the screen is restored, that the
+// log closed with records unwritten (review r5 #6). The whole run is timed
+// on a goroutine of its own, so a sign-in that did wait fails the test
+// rather than hang it. The control is the sign-in's own course, each step of
+// which is checked.
 func TestConnectSignInNeverWaitsOnTheLog(t *testing.T) {
 	standInSignIn(t, func() *fakeSignIn { return newFakeSignIn(true, chatgptauth.Result{}) })
 	// The writer is held for good — it touches nothing, ever — unless the
@@ -1687,7 +1711,11 @@ func TestConnectSignInNeverWaitsOnTheLog(t *testing.T) {
 			if _, ok := runCmd(wait).(signInDoneMsg); !ok {
 				return "the wait did not answer"
 			}
-			_, _ = finishRun(io.Discard, nil, initial, nil)
+			var out bytes.Buffer
+			_, _ = finishRun(&out, nil, initial, nil)
+			if want := "craze: the sign-in log is off: signinlog: the log closed before every record was written\n"; out.String() != want {
+				return fmt.Sprintf("finishRun printed %q; want %q", out.String(), want)
+			}
 			return ""
 		}()
 	}()
@@ -1743,15 +1771,18 @@ func TestConnectSignInPasteIsTheRawLine(t *testing.T) {
 	}
 }
 
-// TestConnectSignInLogsAnOutcomeFinishingAtShutdown (plan 034 review r3 #8a):
-// the TUI quits — finishRun, as a SIGTERM's exit — while the attempt's wait
-// is exchanging the code of a pasted redirect: the close leaves the outcome
-// to the wait, which reports it as the exchange is cut short, and finishRun
-// waits for it before it closes the sign-in log, so the log holds the
-// attempt's begin, its redirect and its one outcome, cancelled by the
-// shutdown. The attempt is chatgptauth's own, against the fake issuer, whose
-// exchange is held. The control is the exchange under way when finishRun
-// runs.
+// TestConnectSignInLogsAnOutcomeFinishingAtShutdown (plan 034 review r3 #8a,
+// r5 #9): the TUI quits — finishRun, as a SIGTERM's exit — while the
+// attempt's wait is exchanging the code of a pasted redirect: the close
+// leaves the outcome to the wait, which reports it as the exchange is cut
+// short, and finishRun waits for it (awaitEnds) before it closes the sign-in
+// log, so the log holds the attempt's begin, its redirect and its one
+// outcome, cancelled by the shutdown. The attempt is chatgptauth's own,
+// against the fake issuer, whose exchange is held; and its outcome's report
+// is held too until the shutdown asks for the attempt's end (endAsked) — so
+// it can land only after the attempt's Close has returned, and only while
+// something waits for it: without that wait the log closes first, every
+// time. The control is the exchange under way when finishRun runs.
 func TestConnectSignInLogsAnOutcomeFinishingAtShutdown(t *testing.T) {
 	iss := newFakeIssuer(t)
 	hold, held := make(chan struct{}), make(chan struct{}, 1)
@@ -1759,9 +1790,27 @@ func TestConnectSignInLogsAnOutcomeFinishingAtShutdown(t *testing.T) {
 	iss.hold, iss.held = hold, held
 	iss.mu.Unlock()
 	t.Cleanup(func() { close(hold) })
+	gate := make(chan struct{})
+	var once sync.Once
+	let := func() { once.Do(func() { close(gate) }) }
+	begin := beginSignIn
+	beginSignIn = func(ctx context.Context, dir string, observe func(chatgptauth.Event)) (signInAttempt, error) {
+		att, err := begin(ctx, dir, func(ev chatgptauth.Event) {
+			if ev.Kind == chatgptauth.EventCancelled {
+				<-gate
+			}
+			observe(ev)
+		})
+		if err != nil {
+			return nil, err
+		}
+		return endAsked{signInAttempt: att, asked: let}, nil
+	}
+	t.Cleanup(func() { beginSignIn = begin })
 	initial, dir := signInModel(t, false)
 	m, wait := beginStep(t, initial)
 	done := runWait(t, m, wait)
+	t.Cleanup(let) // before the wait's join: a failed test holds no report
 	m, _ = press(m, pasteKey(iss.authorize(t, m.cdlg.signIn.url)))
 	m, _ = press(m, enter())
 	if !m.cdlg.signIn.handed {
@@ -1782,11 +1831,27 @@ func TestConnectSignInLogsAnOutcomeFinishingAtShutdown(t *testing.T) {
 	}
 }
 
-// TestConnectSignInOverlappingBeginsShareTheLog (plan 034 review r3 #8b): Esc
-// while a sign-in is still beginning, and Enter again, overlaps two begins;
-// both report to the one sign-in log — opened on the Update by the first,
-// with the one wait for its stop — so both begins are in it. The control is
-// the first begin still running as the second begins.
+// endAsked is a sign-in's attempt whose Ended, once asked for, calls asked
+// first: a test's way to know something waits for the attempt's end.
+type endAsked struct {
+	signInAttempt
+	asked func()
+}
+
+func (e endAsked) Ended() <-chan struct{} {
+	e.asked()
+	return e.signInAttempt.Ended()
+}
+
+// TestConnectSignInOverlappingBeginsShareTheLog (plan 034 review r3 #8b, r5
+// #9): Esc while a sign-in is still beginning, and Enter again, overlaps two
+// begins; both report to the one sign-in log — opened on the Update by the
+// first, with the one wait for its stop — so both begins are in it. It is a
+// guard, no longer a reproduction: r3 #8b's window — a second begin
+// capturing no log while the first was still opening it in a command — is
+// gone since the log opens on the Update and touches no file (logFor), so
+// what this holds is that overlapping begins share one log and one wait.
+// The control is the first begin still running as the second begins.
 func TestConnectSignInOverlappingBeginsShareTheLog(t *testing.T) {
 	standInSignIn(t, func() *fakeSignIn { return newFakeSignIn(false, chatgptauth.Result{}) })
 	release, holding := make(chan struct{}), make(chan struct{})
@@ -1897,5 +1962,108 @@ func TestConnectSignInNotesALogBrokenAfterItsLastAnswer(t *testing.T) {
 	m = tm.(Model)
 	if text := transcriptText(m); strings.Count(text, "the sign-in log is off: ") != 1 || !strings.Contains(text, "is writable by other users") {
 		t.Fatalf("want one note saying the log's directory is writable by others:\n%s", text)
+	}
+	// The note is the one mention: the program's end prints nothing more
+	// (review r5 #6).
+	var out bytes.Buffer
+	_, _ = finishRun(&out, nil, initial, nil)
+	if out.Len() != 0 {
+		t.Fatalf("finishRun mentioned the log a second time: %q", out.String())
+	}
+}
+
+// TestConnectSignInMentionsALogBrokenAtShutdown (plan 034 review r5 #6): the
+// sign-in log breaking as the TUI quits — its directory made writable by
+// others after the attempt's begin was written, before the shutdown's
+// cancel, the attempt's outcome, is — is still its one mention: no Update
+// applies a note now, so finishRun prints it as one line once the screen is
+// restored, and the log's close answers nothing more after. The attempt is
+// chatgptauth's own, against the fake issuer, which reports its outcome as
+// finishRun closes it. The control is the log left alone: the outcome
+// written, and nothing printed.
+func TestConnectSignInMentionsALogBrokenAtShutdown(t *testing.T) {
+	for _, broken := range []bool{false, true} {
+		t.Run(map[bool]string{false: "control", true: "broken"}[broken], func(t *testing.T) {
+			newFakeIssuer(t)
+			initial, dir := signInModel(t, false)
+			beginStep(t, initial)
+			for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(2 * time.Millisecond) {
+				if recs, _ := tuiSignInLog(t, dir); len(recs) == 1 {
+					break
+				}
+				if time.Now().After(deadline) {
+					t.Fatal("the control: the begin was never written")
+				}
+			}
+			if broken {
+				if err := os.Chmod(filepath.Join(dir, paths.LogsName), 0o777); err != nil {
+					t.Fatal(err)
+				}
+			}
+			var out bytes.Buffer
+			_, _ = finishRun(&out, nil, initial, nil)
+			if err := initial.signIns.closeLog(); err != nil {
+				t.Fatalf("the log's second close answered %v; want its failure mentioned once", err)
+			}
+			if !broken {
+				if out.Len() != 0 {
+					t.Fatalf("the control: finishRun printed %q", out.String())
+				}
+				recs, _ := tuiSignInLog(t, dir)
+				if got := recordKinds(recs); !slices.Equal(got, []string{"begin", "cancelled"}) || recs[1]["reason"] != "shutdown" {
+					t.Fatalf("the control: the sign-in log holds %v; want the begin and the shutdown's cancel", got)
+				}
+				return
+			}
+			line := out.String()
+			if strings.Count(line, "\n") != 1 || !strings.HasPrefix(line, "craze: the sign-in log is off: ") || !strings.Contains(line, "is writable by other users") {
+				t.Fatalf("finishRun printed %q; want one line saying the log's directory is writable by others", line)
+			}
+		})
+	}
+}
+
+// TestConnectSignInLogsTheModelFetchCutShortAtShutdown (plan 034 review r6
+// #1): the TUI quits while a sign-in's model fetch — the work after the
+// sign-in (finishSignInCmd) — waits for the model list: finishRun cancels the
+// fetch and waits for it, in the shutdown's one bound, before it closes the
+// sign-in log, so the log holds the fetch's outcome, cut short by the
+// shutdown (models_failed, cancelled), after the sign-in's. The attempt is
+// chatgptauth's own, against the fake issuer, whose model list is held. The
+// control is the fetch under way when finishRun runs.
+func TestConnectSignInLogsTheModelFetchCutShortAtShutdown(t *testing.T) {
+	iss := newFakeIssuer(t)
+	hold, held := make(chan struct{}), make(chan struct{}, 1)
+	iss.mu.Lock()
+	iss.modelsHold, iss.modelsHeld = hold, held
+	iss.mu.Unlock()
+	t.Cleanup(func() { close(hold) })
+	initial, dir := signInModel(t, false)
+	m, wait := beginStep(t, initial)
+	done := runWait(t, m, wait)
+	m, _ = press(m, pasteKey(iss.authorize(t, m.cdlg.signIn.url)))
+	m, _ = press(m, enter())
+	answer, ok := awaitMsg(t, done).(signInDoneMsg)
+	if !ok || answer.err != nil {
+		t.Fatal("the sign-in did not finish")
+	}
+	_, finish := m.Update(answer)
+	finished := make(chan tea.Msg, 1)
+	go func() { finished <- runCmd(finish) }()
+	select {
+	case <-held:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the control: the model fetch never began")
+	}
+	_, _ = finishRun(io.Discard, nil, initial, nil)
+	recs, _ := tuiSignInLog(t, dir)
+	if got, want := recordKinds(recs), []string{"begin", "redirect_received", "signed_in", "models_failed"}; !slices.Equal(got, want) {
+		t.Fatalf("the sign-in log holds %v; want the sign-in, then its model fetch cut short", got)
+	}
+	if r := recs[3]; r["class"] != "cancelled" || r["client_version"] != modeltable.ChatGPTModelsClientVersion() || r["attempt"] != recs[0]["attempt"] {
+		t.Fatalf("the model fetch's record: %v; want the attempt's, cancelled, with the pin", r)
+	}
+	if msg, ok := awaitMsg(t, finished).(signInFinishedMsg); !ok || msg.modelsErr == "" {
+		t.Fatalf("the finishing command answered %+v; want the fetch's failure", msg)
 	}
 }

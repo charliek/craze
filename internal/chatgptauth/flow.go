@@ -49,8 +49,12 @@ type BeginOptions struct {
 	// attempt's end while a listener's refusal is being reported — the two
 	// are reported in order, under the attempt's order lock (omu), so no
 	// refusal is reported after the outcome (review r3 #5). For the same
-	// reason it must not end the attempt (Close) from a listener's refusal.
-	// Each Event is value-free.
+	// reason it must not end the attempt (Close) from a listener's refusal
+	// (listener_refused). It may close it from any event of the end — the
+	// counts (listener_refusals) and the outcome itself, signed in, declined,
+	// failed or cancelled: the attempt is marked ended before they are
+	// reported, and a Close of an ended attempt takes no lock the report
+	// holds (review r5 #4). Each Event is value-free.
 	Observe func(Event)
 }
 
@@ -96,14 +100,12 @@ type Attempt struct {
 	// emu guards the events' bookkeeping, apart from mu, so an event is
 	// never reported with either held. waiting says Wait is between its
 	// start and its outcome; closeReason is the first Close's reason
-	// (closeCalled says there was one); ended says the attempt's one terminal
-	// outcome has been taken (endLocked); refused counts the listener's
+	// (closeCalled says there was one); refused counts the listener's
 	// refusals by kind.
 	emu         sync.Mutex
 	waiting     bool
 	closeCalled bool
 	closeReason CloseReason
-	ended       bool
 	refused     map[Refusal]int
 	// omu orders the listener's refusals with the attempt's end (plan 034
 	// review r3 #5): a refusal is counted and, the first of its kind,
@@ -115,6 +117,13 @@ type Attempt struct {
 	// (Ended).
 	omu  sync.Mutex
 	endc chan struct{}
+	// ended says the attempt's one terminal outcome has been taken
+	// (endLocked): set under omu and emu, before the end is reported, and
+	// never cleared. A Close or a Wait's settle reads it before omu and,
+	// set, takes neither lock — it has nothing to report — so an observer
+	// that closes the attempt from the end's report, which holds omu, does
+	// not wait on itself (review r5 #4).
+	ended atomic.Bool
 }
 
 // Result is a finished sign-in. PlanUsage false means the account signed in
@@ -330,11 +339,20 @@ func (a *Attempt) Ended() <-chan struct{} { return a.endc }
 // One that has ended — signed in, declined, failed — reports nothing more: a
 // close after a sign-in is cleanup, not a cancel. The first Close's reason is
 // the one kept.
+//
+// An observer may call it from the end's own report (BeginOptions.Observe):
+// the attempt is marked ended before its end is reported, and a Close of an
+// ended attempt only closes the listener, taking no event lock (review r5
+// #4).
 func (a *Attempt) Close(reason CloseReason) {
 	a.mu.Lock()
 	accepted := a.accepted
 	a.over = true // no redirect is accepted after this
 	a.mu.Unlock()
+	if a.ended.Load() {
+		a.shut()
+		return
+	}
 	a.omu.Lock()
 	defer a.omu.Unlock()
 	var evs []Event
@@ -342,7 +360,7 @@ func (a *Attempt) Close(reason CloseReason) {
 	if !a.closeCalled {
 		a.closeCalled, a.closeReason = true, reason
 	}
-	if !a.ended && (!a.waiting || !accepted) {
+	if !a.ended.Load() && (!a.waiting || !accepted) {
 		t := a.event(EventCancelled)
 		t.Reason = Reason(a.closeReason)
 		evs = a.endLocked(t)
@@ -423,7 +441,7 @@ func (a *Attempt) end(evs []Event) {
 // outcome. omu and emu are held; the caller reports them (end) once emu is
 // released, omu still held.
 func (a *Attempt) endLocked(t Event) []Event {
-	a.ended = true
+	a.ended.Store(true)
 	var evs []Event
 	for _, r := range []Refusal{RefusalOtherAttempt, RefusalNotOurs, RefusalOver} {
 		if n := a.refused[r]; n > 1 {
@@ -457,7 +475,7 @@ func (a *Attempt) refuse(r Refusal) int {
 	a.omu.Lock()
 	defer a.omu.Unlock()
 	a.emu.Lock()
-	if a.ended {
+	if a.ended.Load() {
 		a.emu.Unlock()
 		return refusalStatus(r)
 	}
@@ -693,14 +711,22 @@ func (a *Attempt) wait(ctx context.Context) (Result, error) {
 // and err, unless one was reported already: signed in, declined in the
 // browser, failed (its step, status, code, class and check), or cancelled —
 // ctx done, or the attempt closed — with the Close's reason. A cancel with no
-// Close yet is left to the Close.
+// Close yet is left to the Close. An attempt that has ended — a Close
+// reported it — takes no omu: there is nothing to report, and this Wait may
+// be an observer's, from the end's report, which holds it (review r5 #4).
 func (a *Attempt) settle(ctx context.Context, res Result, err error) {
+	if a.ended.Load() {
+		a.emu.Lock()
+		a.waiting = false
+		a.emu.Unlock()
+		return
+	}
 	a.omu.Lock()
 	defer a.omu.Unlock()
 	var evs []Event
 	a.emu.Lock()
 	a.waiting = false
-	if !a.ended {
+	if !a.ended.Load() {
 		var t Event
 		switch {
 		case err == nil:

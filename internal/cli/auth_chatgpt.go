@@ -231,8 +231,10 @@ func (a *authRun) signIn() error {
 	// its writer sets it up and writes beside the sign-in, which never waits
 	// on it, and its Close waits at most a second. One that cannot be kept —
 	// refused as it was set up, or broken by any record, the last one
-	// included — is one note, at the end once its Close has let the writer
-	// finish, and changes nothing else.
+	// included — or that closes with records its writer never reached in that
+	// second is one note, at the end once its Close has let the writer
+	// finish, and changes nothing else (the TUI's finishRun says the same,
+	// plan 034 review r5 #6).
 	logOff := func(err error) {
 		if err != nil {
 			a.note("the sign-in log is off: " + err.Error())
@@ -241,8 +243,11 @@ func (a *authRun) signIn() error {
 	log, err := openSignInLog(a.dir)
 	logOff(err)
 	defer func() {
-		_ = log.Close()
-		logOff(log.Failure())
+		err := log.Close()
+		if f := log.Failure(); f != nil {
+			err = f
+		}
+		logOff(err)
 	}()
 	sigs := make(chan os.Signal, 1)
 	notifySignInSignals(sigs)

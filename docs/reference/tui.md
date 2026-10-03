@@ -1688,8 +1688,12 @@ symbolic link, writable by other users or another user's, or the file not a
 plain file of its own — is one note in the transcript, `the sign-in log is
 off: …`, written when craze finds out, as the sign-in starts or when a later
 record fails, and the sign-in goes on without it. A sign-in never waits on the
-log; when craze quits it waits at most a second for a sign-in still finishing
-to record its outcome, and a second more for the log to be written.
+log. When craze quits it waits at most a second in all for a sign-in still
+finishing to record its outcome and for a model list still being fetched after
+one, which it cancels (`models_failed`, `"class":"cancelled"`), then a second
+more for the log to be written. A log that fails then — or is not written
+within that second — is the same mention, once, as a line on the terminal
+after craze's screen is gone: `craze: the sign-in log is off: …`.
 
 **Refused while work runs.** While a turn is running — yours, another
 client's, or the agent's own — or a sub-agent is still running in the
@@ -1934,9 +1938,15 @@ plan](#connect)). What each terminal needs:
   elsewhere). A copy reaches the clipboard as its `clipboard-write` setting
   allows; set `clipboard-write = allow` if one never arrives.
 - **iTerm2** opens a link with `Cmd`+click.
-- **kitty**, **WezTerm** and the **VTE** terminals (GNOME Terminal, Tilix and
-  others) hand a click to the application while it holds the mouse: click the
-  link with `Ctrl+Shift` held in kitty, `Shift` in the others.
+- **kitty** hands a plain click to the application while it holds the mouse:
+  open the link with `Ctrl+Shift`+click.
+- **WezTerm** hands a click to the application while it holds the mouse
+  unless `Shift` is held: `Shift`+click opens the link.
+- **GNOME Terminal** opens a link with `Ctrl`+click, not `Shift`+click.
+  Should a `Ctrl`+click reach craze instead, add `Shift` (`Ctrl+Shift`+click),
+  which keeps the click from an application holding the mouse in the VTE
+  terminals. Other VTE terminals, such as Tilix, typically use `Ctrl`+click
+  too.
 - **tmux** passes links through from 3.4 on, once told the outer terminal
   has them: `set -as terminal-features ',*:hyperlinks'`. Copies need `set -g
   set-clipboard on`, as above.
