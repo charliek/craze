@@ -236,6 +236,9 @@ type hooks struct {
 	rosterBudget  time.Duration
 	flushTimer    func(time.Duration) (<-chan time.Time, func())
 	rosterApplied func(roster.Snapshot)
+	// rosterPaused is told, on the poll's goroutine, each time a Pause has
+	// taken effect: the poll asks no host until the next Resume.
+	rosterPaused func()
 	// subscribed runs between a subscription's registration and its reply's
 	// write; subscriptions is told, on the connection's goroutine, how many
 	// subscriptions the connection holds once it has registered a new one.
