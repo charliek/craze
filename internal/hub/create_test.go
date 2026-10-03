@@ -75,9 +75,11 @@ func TestCreateStartsASession(t *testing.T) {
 		t.Fatalf("the created session's own row: %+v, %v, %v", srow, ok, err)
 	}
 	cmd, argv := s.cmd(0)
+	// --hub-pid: this hub (in this process), for the host's macOS
+	// login-session hint (plan 035 P3).
 	for _, want := range []string{"serve", "--host-id=" + row.HostID, "--workspace=" + work, "--provider=cursor",
 		"--model=m-1", "--effort=high", "--fast", "--no-force", "--no-host-status", "--request-id=req-1",
-		"--request-hash=" + e.RequestHash} {
+		"--request-hash=" + e.RequestHash, "--hub-pid=" + strconv.Itoa(os.Getpid())} {
 		if !slices.Contains(argv, want) {
 			t.Errorf("the host's command line %q lacks %s", argv, want)
 		}

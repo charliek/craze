@@ -117,7 +117,14 @@ reconnect, no reseed, no flicker after backgrounding).
    machine running craze, not of the client device.
 3. macOS limit to record in shed's `create` capability: `cursor-agent` started
    under plain ssh fails on a locked login keychain, so `session.create` over
-   the bridge cannot start cursor sessions there.
+   the bridge cannot start cursor sessions there. A hub keeps the login session
+   of whichever command first started it, and every session it creates
+   inherits it (SF-126), so **shed's lane should run `craze bridge` through a
+   GUI-session process such as `shed-host-agent`** (a LaunchAgent in the GUI
+   domain), so that a bridge never gives birth to an ssh-session hub;
+   otherwise the limit applies only while no GUI-born hub is running. A create
+   that fails this way says so (plan 035): its `data.cause` carries cursor's
+   own lines and a hint naming the hub's pid to stop.
 4. `RcKind` gains `craze`; shed-mobile's `LANE_KINDS` gains it; fake host
    fixtures join `shedtest` so the mobile integration cells run hermetically.
 5. Acceptance is shed's bar: start craze in a roost tab, then from the Flutter

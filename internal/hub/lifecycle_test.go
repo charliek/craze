@@ -6,6 +6,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -93,6 +94,44 @@ func TestAHubServesItsHello(t *testing.T) {
 	lockFree(t, env)
 	if !strings.Contains(rn.stderr.String(), "stopping: SIGTERM") {
 		t.Fatalf("the hub did not say why it stopped: %s", rn.stderr)
+	}
+}
+
+// TestAHubLogsItsLoginSession (plan 035 P3, A7): as it starts, a hub on macOS
+// logs which login session it runs in — every host it creates inherits it —
+// with its raw audit flags, the session forced here (rundir.GUISessionEnv) so
+// the test is the machine's on neither OS; where the session is not known —
+// Linux, unforced — it logs nothing about it.
+func TestAHubLogsItsLoginSession(t *testing.T) {
+	for _, tc := range []struct {
+		forced, want string
+	}{
+		{"0", "craze hub: macOS login session: not GUI (audit flags 0x1)\n"},
+		{"1", "craze hub: macOS login session: GUI (audit flags 0x2030)\n"},
+		{"", ""},
+	} {
+		t.Run("forced "+tc.forced, func(t *testing.T) {
+			if tc.forced == "" && runtime.GOOS == "darwin" {
+				t.Skip("unforced, macOS's session is known: the darwin test logs it")
+			}
+			t.Setenv(rundir.GUISessionEnv, tc.forced)
+			rn := runIn(t, testEnv(t), quiet())
+			if line := rn.line(t); !line.OK {
+				t.Fatalf("ready line %+v", line)
+			}
+			log := rn.stderr.String()
+			if tc.want == "" {
+				if strings.Contains(log, "login session") {
+					t.Fatalf("a hub whose session is not known logged one: %s", log)
+				}
+			} else if !strings.Contains(log, tc.want) {
+				t.Fatalf("the hub's log lacks %q: %s", tc.want, log)
+			}
+			rn.sigs <- syscall.SIGTERM
+			if err := rn.stopped(t); err != nil {
+				t.Fatalf("Run: %v", err)
+			}
+		})
 	}
 }
 

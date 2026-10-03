@@ -807,7 +807,11 @@ without it, and the next `craze ps` starts another.
 
 Its log is `~/.cache/craze/host-logs/hub-<ns>.log`, beside the
 [host logs](configuration.md#host-logs) (under the process's own `$HOME`;
-`<ns>` names the craze directory), rotated once at 4 MiB like a host's.
+`<ns>` names the craze directory), rotated once at 4 MiB like a host's. On
+macOS it says, as the hub starts, which login session the hub runs in —
+`macOS login session: GUI (audit flags 0x2030)`, or `not GUI` for one first
+started over `ssh` — because every session it creates inherits it
+([`craze new`](#craze-new) says why that matters).
 
 ## craze new
 
@@ -848,8 +852,14 @@ hands a host the launch's `--agent-bin` or `CRAZE_AGENT_BIN`. It persists its
 provider as the next plain launch's default, as every new session does.
 
 A refusal is the hub's own words on one line, exit 1 — a session whose start
-failed (`the session did not start: …`, its agent's first error line), a
-directory that does not exist, no provider. So is a session that started and
+failed (`the session did not start: …`, its host's error), a
+directory that does not exist, no provider. When a start failed because the
+agent exited, the error ends with **the agent's own last words**: its last
+non-blank stderr lines, sanitized and folded onto the line with ` / `, at most
+512 bytes — `acp: agent exited: exit status 1: Error: Your macOS login
+keychain is locked. / Run security unlock-keychain and try again.` for
+`cursor` on a locked keychain. Everything the agent printed is in the
+[host's log](configuration.md#host-logs). So is a session that started and
 refused its first prompt: it runs on, idle, and the line says why. A hub from
 before `craze new` says `this hub (craze <v>) cannot create sessions; it exits
 when idle`: it is not replaced, and the next `craze new` after it has gone
@@ -858,9 +868,21 @@ connection to the hub that ends before the answer (the hub restarted
 mid-create) is tried once more under the same id, so the new hub answers the
 session the first one started rather than start a second.
 
-On macOS a session the hub creates runs in the hub's security session: a hub
-first started over `ssh` cannot start a `cursor` session (its keychain is
-locked there), and says so as a start that failed.
+On macOS a session the hub creates runs in the hub's login (security)
+session, and a hub keeps the session of whichever command first started it
+for as long as it runs — and it runs while any session does. The login
+keychain, which `cursor` needs, is unlocked only in the GUI login session, so
+**start craze, or its hub, from a terminal in your Mac's login session** — a
+Roost tab, Terminal.app — for agents that need it. A hub first started over
+`ssh` cannot start a `cursor` session: the start fails, and its error ends
+with a hint saying so and naming the hub's pid, `…; this session runs outside
+your macOS login session (its launcher was started over ssh): if the agent
+needs the login keychain, as cursor does, stop the hub with kill 4242 (no
+session ends) and run this again from a terminal in your Mac's login session
+(a Roost tab, Terminal.app)`. `kill <hub pid>` ends only the hub: every
+session runs on, and the next `craze new` starts a hub where it runs. The
+hint is added only when the agent exited, and it says "if": being outside the
+login session does not prove the keychain is what stopped the agent.
 
 ## craze auth
 

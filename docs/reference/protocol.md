@@ -595,8 +595,15 @@ will start a session: a repeat (below) is answered without them. A host that fai
 `unavailable`, reason `spawn_failed` — the hub has ended it. A session whose
 start fails — its agent binary missing, a locked keychain — or does not end
 within 60 s is `not_accepting`, reason `start_failed`, `data.cause` the
-host's first error line; the hub stops that host (`session.stop`, then, its
-own child, its termination: SIGTERM, a grace, SIGKILL, and its reap) — a host
+host's first error line. For a start that failed because its agent exited,
+that line is craze's error followed by the agent's last non-blank stderr
+lines (sanitized, folded onto the line with ` / `, at most 512 bytes:
+`acp: agent exited: exit status 1: Error: Your macOS login keychain is
+locked. / Run security unlock-keychain and try again.`), and on macOS, when
+the host runs outside the GUI login session, a hint naming the hub's pid
+(below); none of it is a field of its own. The hub stops that host
+(`session.stop`, then, its own child, its termination: SIGTERM, a grace,
+SIGKILL, and its reap) — a host
 that does not exit even then, stuck in an uninterruptible wait, is left as
 it is. More than 16 creates
 in flight are `unavailable`, reason `busy`; a hub tearing down answers
@@ -632,9 +639,16 @@ retry](#errors-and-retry)).
 bound (10 s); past it their waiters see the connection close, and a host
 already started runs on, its `requestId` intact for the next hub to join.
 
-On macOS a session the hub creates runs in the hub's security session: a hub
-first started over `ssh` cannot start a `cursor` session, whose keychain is
-locked there — a start that failed, `start_failed`.
+On macOS a session the hub creates runs in the hub's login (security)
+session: a hub first started over `ssh` cannot start a `cursor` session,
+whose keychain is locked there — a start that failed, `start_failed`. Its
+`data.cause` then ends, after cursor's own lines, with `; this session runs
+outside your macOS login session (its launcher was started over ssh): if the
+agent needs the login keychain, as cursor does, stop the hub with kill <hub
+pid> (no session ends) and run this again from a terminal in your Mac's login
+session (a Roost tab, Terminal.app)`. The host adds it only when its agent
+exited and its session lacks the GUI login's graphic access; a client should
+show the cause as it is, not parse it.
 
 ## Notifications
 
