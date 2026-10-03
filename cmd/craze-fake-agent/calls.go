@@ -74,12 +74,26 @@ func (s *server) setGated(msg *acp.Message, handle func(*acp.Message)) {
 	}()
 }
 
-// awaitSetGate is one set's release: a byte read from the FIFO at path. An
-// end of file is no release — the FIFO is opened afresh and read again — since
+// awaitSetGate is one set's release: a byte read from the FIFO at path.
+//
+// The FIFO is opened for reading and writing, so the wait holds a write end of
+// its own until its byte (plan 035 C3). Its read never ends on an end of file:
 // a set whose gate opens while the test's writer for the set before it is
 // still open would otherwise read that writer's close as its own release, and
-// answer before the test let it go (plan 032 X69: seen on macOS CI).
+// answer before the test let it go (plan 032 X69: seen on macOS CI). Nor does
+// the pipe run out of ends while the set waits: X69's gate opened it afresh
+// after such an end of file, and the test's next writer could open, write and
+// close before the old open was closed — whose close then dropped the byte
+// with the pipe, as gate's doc tells for CRAZE_FAKE_GATE, and held the set for
+// ever. A FIFO that will not open read-write falls back to that reopening
+// read.
 func awaitSetGate(path string) {
+	if f, err := os.OpenFile(path, os.O_RDWR, 0); err == nil {
+		defer f.Close()
+		var b [1]byte
+		_, _ = f.Read(b[:])
+		return
+	}
 	for {
 		f, err := os.Open(path)
 		if err != nil {

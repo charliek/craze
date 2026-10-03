@@ -549,6 +549,11 @@ func TestTheCloseFenceIsReversible(t *testing.T) {
 	}
 	_, resp := b.until(b.send(protocol.MethodSessionDetach, protocol.DetachParams{SessionID: sid(h), Subscription: res.Subscription}))
 	ok[protocol.Empty](t, resp)
+	// The detach's reply is queued and its attachment closed in one conn.mu
+	// section, but the writer takes the reply without conn.mu: it can be on
+	// the socket, and read, before that section has taken the attachment out
+	// of the count. So the count is waited for, not read once.
+	waitFor(t, "the detached attachment to leave the count", func() bool { return h.srv.Attached() != 2 })
 	if got := h.srv.Attached(); got != 1 {
 		t.Fatalf("after a detach the server counts %d, want 1", got)
 	}

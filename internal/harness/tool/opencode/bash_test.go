@@ -1105,6 +1105,12 @@ func (s *snapshots) all() []string {
 // (modelStream), and the second pass holds back the last bytes of what it
 // is given — here the first pass's marker — as it holds back the end of any
 // output, until more comes or the output ends.
+//
+// It reads the spill file, and is not about the spill wait
+// (TestBashSlowSpillLosesNothing and TestSpillerAbandonDropsTheBacklog pin
+// that): its calls give the spill writer 20 s, not spillWait, to finish the
+// file. A CI filesystem stalled past the real 1 s cost a run the file, offered
+// to nobody as designed (run 36667761335, plan 035 C5).
 func TestBashRedactsItsOutput(t *testing.T) {
 	t.Parallel()
 	const split = `printf 'before\n'; printf 'sk-canary-'; sleep 0.8; printf 'alpha-0001\n'; sleep 0.8; printf 'after\n'`
@@ -1112,7 +1118,9 @@ func TestBashRedactsItsOutput(t *testing.T) {
 		env := bashEnv(t, red)
 		var s snapshots
 		env.Progress = s.add
-		res := runBash(t, env, map[string]any{"command": command})
+		c := prepareBash(t, env, map[string]any{"command": command})
+		c.spillWait = 20 * time.Second
+		res := startBash(t, c, env).await(t, 30*time.Second)
 		return res, s.all(), env
 	}
 	leaks := func(s string) bool { return strings.Contains(s, "sk-canary-") || strings.Contains(s, "alpha-0001") }

@@ -83,6 +83,19 @@ type promptOpts struct {
 	// does.
 	beforeGiveUp      func()
 	beforeDrainGiveUp func()
+	// keptWaiting is a test seam too, nil in production: it runs on the run's
+	// own goroutine each time the run, a signal having arrived, looks at what it
+	// is waiting for and decides to keep waiting, with whether the stop the
+	// signal asked for is done. It is the one moment a test can name for "the run
+	// knew its stop was over and did not exit": the stop's own calls returning
+	// say nothing about whether the run has looked since.
+	keptWaiting func(signalDone bool)
+	// afterTurnEnded is one more, nil in production: it runs on the run's own
+	// goroutine once turnEnded has said what a turn's ending means for the chain
+	// and before the run looks at whether a signal has arrived. A signal can land
+	// in that gap, on an ending judged without it, and a test cannot otherwise
+	// put one there.
+	afterTurnEnded func()
 }
 
 // foreignBudget is how long craze waits on turns the agent started on its own.
@@ -313,13 +326,8 @@ func (o *promptOpts) drive(ctx context.Context, eng *engine.Engine, text string)
 // is answered like any other. A write that fails means the JSON on stdout is
 // incomplete, which is an error even when everything else succeeded, and a
 // permission refused on the way out is still a refusal. retErr is what run is
-// about to return: the first failure wins.
+// about to return: the first failure wins (firstFailure).
 func (o *promptOpts) finishRun(sess agent.Session, decisions *[]string, retErr error) error {
-	fail := func(err error) {
-		if retErr == nil {
-			retErr = err
-		}
-	}
 	// Each sweep is preceded by the barrier that makes "enqueued" mean
 	// "delivered": what the engine authored on the way out — a signal's queue
 	// removals above all — is published asynchronously, and a non-blocking read
@@ -329,12 +337,23 @@ func (o *promptOpts) finishRun(sess agent.Session, decisions *[]string, retErr e
 		o.syncEvents, o.flushEvents, o.syncEvents, o.drainSubagents, o.settleAttachProbe,
 	} {
 		r, err := step(sess, decisions)
-		if r {
-			fail(&exitError{code: 1, msg: ""})
-		}
-		if err != nil {
-			fail(err)
-		}
+		retErr = firstFailure(retErr, r, err)
+	}
+	return retErr
+}
+
+// firstFailure is the precedence the run's last reading keeps, over what one
+// reader reports: rejected, a permission it refused, and err, its own failure.
+// A failure the run already has stands. Short of one, a refusal is the run's exit
+// 1, and short of that the reader's error is the run's. finishRun applies it to
+// each sweep, and readChain to everything it reads once it holds the chain's last
+// ending, which is that same reading begun early.
+func firstFailure(retErr error, rejected bool, err error) error {
+	if retErr == nil && rejected {
+		retErr = &exitError{code: 1, msg: ""}
+	}
+	if retErr == nil {
+		retErr = err
 	}
 	return retErr
 }
@@ -406,6 +425,43 @@ func (o *promptOpts) readChain(ctx context.Context, eng *engine.Engine, stopped 
 	// or given up on. signalUntil bounds what this run still waits for afterwards.
 	signalDone := false
 	var signalUntil time.Time
+	// foreignOpen says this reader has seen the agent's own turn start and not
+	// yet seen it end. The session's flag is not enough for the wait after a
+	// signal: the session clears it before it publishes the turn's ended event
+	// (agent's onForeignTurn), so a look in between finds the turn over with its
+	// closing bracket still to come, and an exit there leaves it off stdout. Nor
+	// is this enough alone: the session raises the flag before it publishes the
+	// started, so the flag can say a turn is open whose opening bracket is still
+	// to come. The wait after a signal reads the two together.
+	foreignOpen := false
+	// held says the chain's last ending has been read and kept back, and heldErr
+	// is what that ending returns. An ending that arrives after a signal can be
+	// the stop's own doing — a refused claim the stop settled, or a turn that
+	// settled once the stop had cleared its queue — with the agent's turn still
+	// open, on this reader's stream or in the session's flag (foreignOpen), and
+	// returning it at once would leave that turn's closing bracket off stdout as
+	// surely as an exit on the flag alone.
+	// So it waits with the states below, and ends the run when that wait does.
+	//
+	// Holding is the run's last reading begun early (finishRun), and it reads by
+	// that reading's rules. What arrives is still written and answered, but a
+	// turn's start or ending is no longer the chain's: an ending that failed on
+	// its stream's error can have a successor already away behind it (turnEnded
+	// judges that error before Next), and judging the successor's ending would
+	// replace the one the chain ended on. And what the reading reports is judged
+	// as finishRun judges it (firstFailure): a failure held stands against a write
+	// that fails, and a success held gives way to that write or to a permission
+	// refused.
+	held := false
+	var heldErr error
+	// signalExit is what a signal's wait ends the run with: the ending it held,
+	// if it holds one, and otherwise the signal's own exit 1.
+	signalExit := func() error {
+		if held {
+			return heldErr
+		}
+		return &exitError{code: 1, msg: ""}
+	}
 
 	poll := time.NewTicker(o.foreignPoll())
 	defer poll.Stop()
@@ -421,24 +477,28 @@ func (o *promptOpts) readChain(ctx context.Context, eng *engine.Engine, stopped 
 		// craze's own from being abandoned mid-flight: while one is genuinely
 		// running its cancelled ending is on its way, and that ending is what ends
 		// the chain. The states where nothing is owed to this run are: a drain held
-		// behind the agent's turn, a claim parked waiting to be taken again, and a
+		// behind the agent's turn, a claim parked waiting to be taken again, a
 		// wait already given up on, whose turn cannot settle until a cancel comes
-		// back. The bound is the same budget the baseline's own foreign-turn wait
-		// used, and past it this prints the line that wait printed.
+		// back, and a chain whose last ending is already read and held. The bound
+		// is the same budget the baseline's own foreign-turn wait used, and past it
+		// this prints the line that wait printed.
 		if ctx.Err() != nil {
 			if signalUntil.IsZero() {
 				signalUntil = time.Now().Add(o.foreignBudget())
 			}
 			st := eng.State()
-			if waiting || gaveUp || (st.Turn != "" && st.Waiting) {
+			if held || waiting || gaveUp || (st.Turn != "" && st.Waiting) {
 				switch {
-				case signalDone && !st.ForeignTurn:
-					return &exitError{code: 1, msg: ""}
+				case signalDone && !st.ForeignTurn && !foreignOpen:
+					return signalExit()
 				case !time.Now().Before(signalUntil):
 					if st.ForeignTurn {
 						fmt.Fprintf(o.stderr, "craze: the agent is still running a turn of its own after %s\n", o.foreignBudget())
 					}
-					return &exitError{code: 1, msg: ""}
+					return signalExit()
+				}
+				if o.keptWaiting != nil {
+					o.keptWaiting(signalDone)
 				}
 			}
 		}
@@ -449,12 +509,26 @@ func (o *promptOpts) readChain(ctx context.Context, eng *engine.Engine, stopped 
 		select {
 		case ev, ok := <-events:
 			if !ok {
-				// Only the log's own close ends the primary, and nothing closes
-				// it while this reads: the session went away mid-chain.
+				// The primary is never closed, not even by the log's own Close
+				// (agent.EventLog.Primary), so this is not a way out any wait
+				// here can count on. A primary that did close would be the
+				// session gone mid-chain.
 				return &exitError{code: 1, msg: ""}
 			}
 			r, err := o.consume(ev, decisions)
 			rejected = rejected || r
+			if ev.Type == agent.EventForeignTurn && ev.ForeignTurn != nil {
+				foreignOpen = ev.ForeignTurn.Running
+			}
+			if held {
+				// The chain is over and its ending held: nothing read now is
+				// judged as the chain's, and a write that fails ends the wait on
+				// the first failure (held).
+				if heldErr = firstFailure(heldErr, r, err); err != nil {
+					return heldErr
+				}
+				continue
+			}
 			if err != nil {
 				return err
 			}
@@ -494,6 +568,26 @@ func (o *promptOpts) readChain(ctx context.Context, eng *engine.Engine, stopped 
 			case agent.TurnEnded:
 				inTurn = false
 				over, err := o.turnEnded(ctx, eng, ev.Turn, streamErr, gaveUp, rejected)
+				if o.afterTurnEnded != nil {
+					o.afterTurnEnded()
+				}
+				if over && ctx.Err() != nil && (foreignOpen || eng.State().ForeignTurn) {
+					// The chain is over, but after a signal and with the agent's
+					// own turn still open: the run holds this ending and waits for
+					// that turn's closing bracket, bounded as every wait after a
+					// signal is, and then returns it (held).
+					//
+					// Open is either half, as at the top of the loop: the turn seen
+					// to start and not yet to end, or the session's flag. The flag
+					// alone is a turn whose started is still to come: the session
+					// raises it before it publishes that started (agent's
+					// onForeignTurn), and this ending, which the engine publishes on
+					// a path of its own, can reach the stream in between. Returning
+					// here would leave that started to the final sweep, with no
+					// ended behind it.
+					held, heldErr = true, err
+					continue
+				}
 				if over {
 					return err
 				}

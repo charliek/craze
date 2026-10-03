@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -191,5 +192,77 @@ func TestAFailingZombieQueryFallsBack(t *testing.T) {
 	var ee *ExitError
 	if !errors.As(c.child.exitErr, &ee) || ee.Error() != "exit status 3" {
 		t.Fatalf("exit %v, want exit status 3", c.child.exitErr)
+	}
+}
+
+// srun is a runnable process's p_stat, SRUN in sys/proc.h.
+const srun = 2
+
+// pLP64 is the p_flag bit every 64-bit process has, P_LP64 in XNU's
+// bsd/sys/proc.h.
+const pLP64 = 0x00000004
+
+// stubLeaderInExit puts a stub over the group scan's sysctl (kinfoProcs) for
+// the rest of the test: a group is listed as its leader alone — the agent,
+// whose pid is the group's id — runnable, with P_WEXIT among its flags, as
+// macOS can list an agent whose NOTE_EXIT came before its zombie state (run
+// 37005407853). It counts the scans.
+func stubLeaderInExit(t *testing.T) *atomic.Int32 {
+	t.Helper()
+	var scans atomic.Int32
+	real := kinfoProcs
+	kinfoProcs = func(name string, args ...int) ([]unix.KinfoProc, error) {
+		if name != "kern.proc.pgrp" || len(args) != 1 {
+			return real(name, args...)
+		}
+		scans.Add(1)
+		var kp unix.KinfoProc
+		kp.Proc.P_pid = int32(args[0])
+		kp.Proc.P_stat = srun
+		kp.Proc.P_flag = pLP64 | pWexit
+		return []unix.KinfoProc{kp}, nil
+	}
+	// Registered before any Spawn, so it runs after every Close.
+	t.Cleanup(func() { kinfoProcs = real })
+	return &scans
+}
+
+// TestALeaderInExitCostsTheCleanupNothing (plan 035 P10): a group listed as
+// the agent alone, still in its exit — runnable, P_WEXIT set, not yet a
+// zombie — has no live member, so the cleanup sends nothing and waits for
+// nothing: the last SIGKILL is the reaper's, after it (reap), not the
+// cleanup's. Under the old rule, any member not a zombie live, it sent a
+// SIGTERM and polled out the grace. The child is made up — its pid beyond
+// macOS's 99999, so no group has its id — and only its cleanup runs.
+func TestALeaderInExitCostsTheCleanupNothing(t *testing.T) {
+	r := recordLife(t)
+	scans := stubLeaderInExit(t)
+	const agent = 1 << 30
+	ch := &Child{pid: agent, pgid: agent}
+	ch.cleanGroup()
+	if got := groupSignals(r.of(agent)); got != "" {
+		t.Fatalf("the cleanup sent the group %q, want nothing", got)
+	}
+	if scans.Load() == 0 {
+		t.Fatal("the cleanup never scanned the group")
+	}
+}
+
+// TestALeaderInExitCostsTheGroupOnlyTheLastKill (plan 035 P10): the whole
+// reaper, over an agent's clean exit, its scans listing the agent still in
+// its exit, sends the group the last SIGKILL alone, before the reap, and
+// nothing after it: TestEveryGroupSignalPrecedesTheReap's "a clean exit",
+// with the schedule run 37005407853 met — the NOTE_EXIT ahead of the zombie —
+// forced.
+func TestALeaderInExitCostsTheGroupOnlyTheLastKill(t *testing.T) {
+	r := recordLife(t)
+	scans := stubLeaderInExit(t)
+	c := spawnShell(t, "exit 0", nil)
+	sent := checkSignalsPrecedeTheReap(t, r, eventsAtTheReap(t, r, c.child))
+	if got, want := groupSignals(sent), fmt.Sprintf("%d ", syscall.SIGKILL); got != want {
+		t.Fatalf("group signals %q, want %q", got, want)
+	}
+	if scans.Load() == 0 {
+		t.Fatal("the cleanup never scanned the group")
 	}
 }

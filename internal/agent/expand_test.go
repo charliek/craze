@@ -610,7 +610,13 @@ func TestRefusedPromptEmitsNoCommand(t *testing.T) {
 // Only cursor sessions have plugins and only grok runs turns of its own, so the
 // two are put in one session by hand: the lookup a cursor session would have,
 // on the wire that can refuse this way.
+//
+// The foreign turn is held by the fake agent's gate, as in
+// TestForeignTurnRefusalIsNotATurnThatFailed (issue #14): a fallback that ran
+// for a fixed window could end before a slow poll saw its start, and the
+// prompt would then succeed where it had to be refused.
 func TestForeignTurnRefusalEmitsNoCommand(t *testing.T) {
+	release := fakeAgentGate(t)
 	s := startGrokScript(t, "grok-long-turn-fallback", true)
 	entries := DiscoverPlugins(PluginScan{Dirs: true}, t.TempDir(), "", []string{probeFixtureDir(t)})
 	s.mu.Lock()
@@ -630,10 +636,14 @@ func TestForeignTurnRefusalEmitsNoCommand(t *testing.T) {
 		}
 	}()
 	waitPromptOnWire(t, s)
-	if err := s.Interject(t.Context(), "BANANA"); err != nil {
+	// The interjection is the fallback turn's text, and the marker in it holds
+	// that turn until the gate's next byte.
+	if err := s.Interject(t.Context(), "BANANA HOLD-FALLBACK"); err != nil {
 		t.Fatalf("interject: %v", err)
 	}
-	<-done
+	release() // step1
+	release() // step2
+	awaitInitialPrompt(t, s, done)
 	// The start event rather than the snapshot flag, for the reason spelled
 	// out in TestPopQueueRefusesDuringAForeignTurn: the flag flips first, so
 	// waiting on it would let the check below read a log the collector has not
@@ -643,19 +653,28 @@ func TestForeignTurnRefusalEmitsNoCommand(t *testing.T) {
 		return started > 0
 	})
 
-	if _, err := s.Prompt(context.Background(), "/probe-plugin:probe-echo banana"); !errors.Is(err, ErrForeignTurn) {
+	// A prompt that reached the agent would run a turn whose steps the gate
+	// holds, so the deadline is what makes it fail here rather than hang.
+	refusedCtx, cancelRefused := context.WithTimeout(context.Background(), logWatchdog)
+	defer cancelRefused()
+	if _, err := s.Prompt(refusedCtx, "/probe-plugin:probe-echo banana"); !errors.Is(err, ErrForeignTurn) {
 		t.Fatalf("prompt during a foreign turn: %v", err)
 	}
 
+	release() // the fallback turn
 	waitUntil(t, "the foreign turn to end", func() bool { return !s.Snapshot().ForeignTurn })
 
-	// The foreign turn's end is not a safe marker: the fake ends it on its own
-	// clock, independent of anything the refused prompt did. A later plain
-	// prompt run to completion is. EventDone comes only from a prompt of
+	// The foreign turn's end is not a safe marker: the fake ends it on the
+	// gate's byte, independent of anything the refused prompt did. A later
+	// plain prompt run to completion is. EventDone comes only from a prompt of
 	// craze's own that reached the wire — never from a foreign turn — so the
 	// second one is this prompt's, caused strictly after the refusal; the
 	// collector appends on one goroutine in channel order, so by then it holds
-	// every event the refused call could have emitted.
+	// every event the refused call could have emitted. Its two steps wait on
+	// the gate as well; the fake's reader holds the FIFO open, so their bytes
+	// can be written ahead and wait in it for each step in turn.
+	release() // the plain prompt's step1
+	release() // the plain prompt's step2
 	markerCtx, cancelMarker := context.WithTimeout(t.Context(), 15*time.Second)
 	defer cancelMarker()
 	if _, err := s.Prompt(markerCtx, "plain prompt after the foreign turn"); err != nil {

@@ -179,6 +179,9 @@ Environment:
                        on that byte, answered as echo, and every step of the
                        long-turn scripts waits for one (CRAZE_FAKE_STEP is
                        then unused): a turn held for as long as the test needs.
+                       So does a grok-long-turn-fallback fallback turn whose
+                       interjection's text contains HOLD-FALLBACK, in place of
+                       its fixed window.
   CRAZE_FAKE_DUMP_PROMPTS=<path>  every script appends one JSON line to this
                        file per session/prompt it reads ({"prompt":[blocks]},
                        each block as prompt-dump describes it) and per

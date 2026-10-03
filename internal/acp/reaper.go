@@ -34,13 +34,16 @@ import (
 //     wait holds the reaper until then, exactly as cmd.Wait always has:
 //     nothing is left to send, and it cannot be reaped before it exits.
 //  3. Group cleanup, the zombie pinning the group's id. While the group has a
-//     live member — a process in it that is not a zombie, or a zombie leader
-//     of threads still running (groupHasLiveMember; the zombie agent itself
-//     still answers kill(-pgid, 0), so that cannot tell) — SIGTERM to the group, a poll every groupPoll up to the grace,
-//     SIGKILL, and a poll up to the grace again. An agent that exits on its
-//     own goes through this too, so the tools it leaves running die at its
-//     exit, not at a later Close. A group whose only member is the zombie
-//     costs no signal and no wait. Then one last SIGKILL to the group,
+//     live member (groupHasLiveMember; the zombie agent itself still answers
+//     kill(-pgid, 0), so that cannot tell) — on Linux a process in it that is
+//     not a zombie, or a zombie leader of threads still running; on macOS a
+//     process in it that is not the agent, not a zombie and not marked
+//     P_WEXIT, in its exit already (liveMember) — SIGTERM to the group, a poll
+//     every groupPoll up to the grace, SIGKILL, and a poll up to the grace
+//     again. An agent that exits on its own goes through this too, so the
+//     tools it leaves running die at its exit, not at a later Close. A group
+//     whose only member is the agent — a zombie, or on macOS still in its
+//     exit — costs no signal and no wait. Then one last SIGKILL to the group,
 //     whatever the scans said: a scan is not atomic (Linux reads /proc a
 //     process at a time, so a member can fork after the listing and exit
 //     before its own read), and the zombie still pins the id.
@@ -339,4 +342,33 @@ func parseStat(line []byte) (procStat, bool) {
 		return procStat{}, false
 	}
 	return procStat{state: f[0][0], pgrp: pgrp, threads: threads}, true
+}
+
+// procEntry is what the reaper reads of one process in a listing of the
+// agent's group: its pid, whether it is a zombie, and whether it is in its
+// exit already. macOS's scan fills it from the kernel's kinfo_proc
+// (reaper_darwin.go).
+type procEntry struct {
+	pid     int
+	zombie  bool
+	exiting bool
+}
+
+// liveMember reports whether entries, a listing of the agent's group taken
+// after the agent's exit was observed, holds a live member: a process that is
+// not the agent, not a zombie and not exiting. The agent is never one, though
+// it may not be a zombie yet: macOS posts the kqueue's NOTE_EXIT while the
+// process is still in its exit — P_WEXIT set in its p_flag, its p_stat not
+// yet SZOMB — so a scan right after the observation could find the agent
+// itself, and cost a clean exit a SIGTERM and a poll (plan 035 P10). A member
+// marked exiting is on the same way out, and becomes a zombie with no signal
+// sent. Linux's scan keeps its own rule (reaper_linux.go). It lives here, not
+// in the macOS file, so every platform's tests check it.
+func liveMember(entries []procEntry, agent int) bool {
+	for _, e := range entries {
+		if e.pid != agent && !e.zombie && !e.exiting {
+			return true
+		}
+	}
+	return false
 }

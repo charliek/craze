@@ -3,7 +3,10 @@ package agent
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -57,6 +60,73 @@ func foreignTurnCounts(evs []Event) (started, ended int) {
 		}
 	}
 	return started, ended
+}
+
+// gateWatchdog is the deadlock watchdog for a wait on the fake agent: far
+// longer than any wait that is working, for the reason waitUntil spells out.
+const gateWatchdog = 60 * time.Second
+
+// fakeAgentGate points the fake agent's CRAZE_FAKE_GATE at a fresh FIFO — so
+// it must run before the session starts the agent — and returns what releases
+// one held step, or one held fallback turn: it writes the one byte the fake's
+// shared gate reader takes (cmd/craze-fake-agent/server.go, gate). The write
+// end is opened non-blocking, retrying ENXIO (no reader has the FIFO yet — the
+// same errno on Linux and macOS) until gateWatchdog, so a fake that never
+// opens its reader fails the test at the deadline with nothing left blocked in
+// an open: a blocking open would strand its goroutine, which nothing can
+// interrupt or join.
+func fakeAgentGate(t *testing.T) func() {
+	t.Helper()
+	fifo := filepath.Join(t.TempDir(), "gate")
+	if err := syscall.Mkfifo(fifo, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CRAZE_FAKE_GATE", fifo)
+	return func() {
+		t.Helper()
+		deadline := time.Now().Add(gateWatchdog)
+		for {
+			w, err := os.OpenFile(fifo, os.O_WRONLY|syscall.O_NONBLOCK, 0)
+			if err == nil {
+				_, err = w.Write([]byte{1})
+				if cerr := w.Close(); err == nil {
+					err = cerr
+				}
+				if err != nil {
+					t.Fatalf("releasing the fake agent's gate: %v", err)
+				}
+				return
+			}
+			if !errors.Is(err, syscall.ENXIO) {
+				t.Fatalf("releasing the fake agent's gate: %v", err)
+			}
+			if !time.Now().Before(deadline) {
+				t.Fatal("releasing the fake agent's gate: its reader never opened the FIFO")
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+}
+
+// awaitInitialPrompt waits for the gate-held tests' initial prompt to return,
+// with the deadlock watchdog. On a miss it closes the session — which ends the
+// prompt — and joins the prompt's goroutine within logWatchdog before failing,
+// so a stuck prompt fails the test at the bound, not at the package timeout,
+// and leaves no goroutine behind.
+func awaitInitialPrompt(t *testing.T, s *session, done <-chan struct{}) {
+	t.Helper()
+	select {
+	case <-done:
+		return
+	case <-time.After(gateWatchdog):
+	}
+	_ = s.Close()
+	select {
+	case <-done:
+		t.Fatal("the initial prompt never completed; closing the session ended it")
+	case <-time.After(logWatchdog):
+		t.Fatal("the initial prompt never completed, and closing the session did not end it")
+	}
 }
 
 // countType is how many events of one type the log holds.
@@ -156,7 +226,13 @@ func TestInterjectRefusedInEveryStrandedState(t *testing.T) {
 // Snapshot() reports (plan 021's leaf accessor, §3.3) — both read s.foreign
 // under s.mu — driven through a real grok foreign-turn fallback so the
 // property is checked against the wire, not just the field.
+//
+// The foreign turn is held by the fake agent's gate, as in
+// TestForeignTurnRefusalIsNotATurnThatFailed (issue #14): a fallback that ran
+// for a fixed window could end between the poll that saw the flag and the
+// accessor's read, and the two would then disagree on timing alone.
 func TestForeignTurnAccessorAgreesWithSnapshot(t *testing.T) {
+	release := fakeAgentGate(t)
 	s := startGrokScript(t, "grok-long-turn-fallback", true)
 	log := collect(t, s)
 	done := make(chan struct{})
@@ -167,10 +243,14 @@ func TestForeignTurnAccessorAgreesWithSnapshot(t *testing.T) {
 		}
 	}()
 	waitPromptOnWire(t, s)
-	if err := s.Interject(t.Context(), "BANANA"); err != nil {
+	// The interjection is the fallback turn's text, and the marker in it holds
+	// that turn until the gate's next byte.
+	if err := s.Interject(t.Context(), "BANANA HOLD-FALLBACK"); err != nil {
 		t.Fatalf("interject: %v", err)
 	}
-	<-done
+	release() // step1
+	release() // step2
+	awaitInitialPrompt(t, s, done)
 	waitUntil(t, "the foreign turn to start", func() bool { return s.Snapshot().ForeignTurn })
 	// ForeignTurn is the same flag Snapshot() reports, plan 021's leaf
 	// accessor (§3.3): once the snapshot has caught the flag, the leaf must
@@ -178,6 +258,7 @@ func TestForeignTurnAccessorAgreesWithSnapshot(t *testing.T) {
 	if !s.ForeignTurn() {
 		t.Fatal("ForeignTurn() disagrees with Snapshot().ForeignTurn while a foreign turn is running")
 	}
+	release() // the fallback turn
 	waitUntil(t, "the foreign turn to end", func() bool { return !s.Snapshot().ForeignTurn })
 	if s.ForeignTurn() {
 		t.Fatal("ForeignTurn() disagrees with Snapshot().ForeignTurn once the foreign turn ended")
@@ -224,7 +305,14 @@ func TestInterjectRefusedAfterAFailedTurn(t *testing.T) {
 // TestForeignTurnRefusalIsNotATurnThatFailed: the prompt never left craze, so
 // nothing about it belongs in the stream. Emitting an error for it would put an
 // error line in front of a caller that is about to retry and succeed.
+//
+// The foreign turn is held by the fake agent's gate, not a clock (issue #14):
+// a fallback that ran for a fixed window could end before a slow poll saw its
+// start, and the prompt then succeeded where it had to be refused. The gate
+// holds each of the turn's two steps too, so the interjection lands while the
+// turn is known to run.
 func TestForeignTurnRefusalIsNotATurnThatFailed(t *testing.T) {
+	release := fakeAgentGate(t)
 	s := startGrokScript(t, "grok-long-turn-fallback", true)
 	log := collect(t, s)
 	done := make(chan struct{})
@@ -235,10 +323,14 @@ func TestForeignTurnRefusalIsNotATurnThatFailed(t *testing.T) {
 		}
 	}()
 	waitPromptOnWire(t, s)
-	if err := s.Interject(t.Context(), "BANANA"); err != nil {
+	// The interjection is the fallback turn's text, and the marker in it holds
+	// that turn until the gate's next byte.
+	if err := s.Interject(t.Context(), "BANANA HOLD-FALLBACK"); err != nil {
 		t.Fatalf("interject: %v", err)
 	}
-	<-done
+	release() // step1
+	release() // step2
+	awaitInitialPrompt(t, s, done)
 	// The start event, not the snapshot flag: the flag flips before the event
 	// is emitted, so waiting on it would leave the "no error reached the
 	// stream" check below reading a log the collector has not caught up with —
@@ -252,7 +344,12 @@ func TestForeignTurnRefusalIsNotATurnThatFailed(t *testing.T) {
 	s.mu.Lock()
 	turnBefore := s.turn
 	s.mu.Unlock()
-	if _, err := s.Prompt(context.Background(), "next"); !errors.Is(err, ErrForeignTurn) {
+	// A refusal never reaches the agent. A prompt that did would run a turn
+	// whose steps the gate holds, so the watchdog's deadline is what makes it
+	// fail here rather than hang.
+	ctx, cancel := context.WithTimeout(context.Background(), logWatchdog)
+	defer cancel()
+	if _, err := s.Prompt(ctx, "next"); !errors.Is(err, ErrForeignTurn) {
 		t.Fatalf("prompt during a foreign turn: %v", err)
 	}
 	s.mu.Lock()
@@ -261,10 +358,21 @@ func TestForeignTurnRefusalIsNotATurnThatFailed(t *testing.T) {
 	if turnAfter != turnBefore {
 		t.Fatalf("a refused prompt spent turn %d (was %d)", turnAfter, turnBefore)
 	}
+	release() // the fallback turn
+	waitUntil(t, "the foreign turn to end", func() bool { return !s.Snapshot().ForeignTurn })
+	// The scan waits for the fallback's end event, not for the refused call to
+	// have returned: the start-event wait above orders events before the
+	// refusal, and nothing orders the scan after what the refusal itself emits.
+	// The collector appends on one goroutine in emit order, so once the end
+	// event, caused strictly after the refusal, is in the log, an EventError the
+	// refusal emitted before returning is in it too.
+	waitUntil(t, "the foreign turn's end event", func() bool {
+		_, ended := foreignTurnCounts(log.snapshot())
+		return ended > 0
+	})
 	for _, ev := range log.snapshot() {
 		if ev.Type == EventError {
 			t.Fatalf("a refusal must not reach the stream: %v", ev.Err)
 		}
 	}
-	waitUntil(t, "the foreign turn to end", func() bool { return !s.Snapshot().ForeignTurn })
 }

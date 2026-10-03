@@ -1062,3 +1062,26 @@ func TestParseStat(t *testing.T) {
 		}
 	}
 }
+
+// TestLiveMember (plan 035 P10): in a listing of the agent's group taken after
+// its exit was observed, the agent's own entry is not live, though it may not
+// be a zombie yet; nor is a member in its exit, or a zombie; any other member
+// is, wherever it is listed.
+func TestLiveMember(t *testing.T) {
+	const agent = 4240
+	for _, tc := range []struct {
+		name    string
+		entries []procEntry
+		live    bool
+	}{
+		{"the agent, running with no flags", []procEntry{{pid: agent}}, false},
+		{"a member in its exit", []procEntry{{pid: 4242, exiting: true}}, false},
+		{"a zombie member", []procEntry{{pid: 4242, zombie: true}}, false},
+		{"a running member", []procEntry{{pid: 4242}}, true},
+		{"a running member listed last", []procEntry{{pid: agent, exiting: true}, {pid: 4241, zombie: true}, {pid: 4243, exiting: true}, {pid: 4242}}, true},
+	} {
+		if got := liveMember(tc.entries, agent); got != tc.live {
+			t.Errorf("%s: liveMember(%+v, %d) = %v, want %v", tc.name, tc.entries, agent, got, tc.live)
+		}
+	}
+}

@@ -251,7 +251,7 @@ func (b *bashTool) Prepare(env tool.Env, c tool.Call) (tool.Prepared, error) {
 		return nil, err
 	}
 	call := &bashCall{host: b.host, id: c.ID, command: command, dir: env.Workspace, timeout: defaultTimeout,
-		ops: realOps, spillCap: maxSpillBytes}
+		ops: realOps, spillCap: maxSpillBytes, spillWait: spillWait}
 	// `params.workdir ? resolvePath(params.workdir, ...) : directory`
 	// (shell.ts:612-614): an empty workdir is the workspace. Whether it
 	// exists is checked when the call runs, since an earlier call in the
@@ -300,9 +300,14 @@ type bashCall struct {
 	background, foreground bool
 
 	// ops is the call's filesystem and process work, which tests replace to
-	// stall any one piece of it; spillCap bounds what the spill file holds.
-	ops      ops
-	spillCap int64
+	// stall any one piece of it; spillCap bounds what the spill file holds;
+	// spillWait bounds the wait, once the output has ended, for the spill
+	// writer to finish the file — the constant spillWait, but in a test that
+	// needs the file and is about something else, which gives the writer
+	// longer so that a slow filesystem cannot cost it the file (plan 035 C5).
+	ops       ops
+	spillCap  int64
+	spillWait time.Duration
 }
 
 // ops is every call a bash call makes that can stall on a filesystem that
@@ -462,7 +467,7 @@ func (j *bashJob) ended(ctx context.Context, why ending, reaped bool, stopProgre
 
 	kept, cut, trunc, capped, spill := j.out.finish()
 	if spill != nil {
-		wait := spillWait
+		wait := j.c.spillWait
 		if tool.SessionClosing(ctx, j.closing) {
 			wait = 0
 		}

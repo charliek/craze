@@ -464,8 +464,16 @@ func TestServeFailsAStartWhoseAgentCannotBeRecorded(t *testing.T) {
 		t.Fatalf("the session's state: activity %s, start failed %v, %q; want a failed start, %q…", st.Activity, st.StartFailed, st.Err, want)
 	}
 	waitGroupGone(t, rec.pgid)
-	if out := r.stderr.String(); !strings.Contains(out, "craze serve: the session did not start: "+want) {
-		t.Fatalf("the log: %s", out)
+	// The engine holds the failed start (Started) before its Start returns to
+	// serveHost.start, which is what writes it on the log: a state that says
+	// so can be read before the line is written, so the line is waited for.
+	logged := "craze serve: the session did not start: " + want
+	deadline = time.Now().Add(serveStep)
+	for !strings.Contains(r.stderr.String(), logged) {
+		if time.Now().After(deadline) {
+			t.Fatalf("the log after %v: %s", serveStep, r.stderr)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 	r.sigs <- syscall.SIGTERM
 	if err := r.result(t, serveStep); err != nil {
