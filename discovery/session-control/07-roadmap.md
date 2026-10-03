@@ -13,7 +13,7 @@ non-test source lines, from the reference reviews (`09`).
 | done | S4a | complete (Plan 030, with S5; 5 PRs: #66, #68, #70, #71, PR 4) | Detached hosts: `craze serve`, hosts born detached, `session.stop`, idle exit |
 | done | S5 | complete (Plan 030, with S4a) | Agent view in the TUI: a session list of every running session on the machine, new sessions started from it, composer `@` mentions |
 | done | S4b | complete (Plan 032; 5 PRs: #75, #76, #78, #79, #81) | The hub (local machine only): `craze ps`, `hub.sock`, `sessions.subscribe` on the hub, `session.create` |
-| 1 | S3 | not started (next, after shed's first release of its own lane work) | `shed-craze` lane adapter in shed; craze in shed-mobile's `LANE_KINDS` |
+| 1 | S3 | not started on shed's side (next, after shed's first release of its own lane work); craze's side ready (Plan 035; 2 PRs: #83, #84) | `shed-craze` lane adapter in shed; craze in shed-mobile's `LANE_KINDS` |
 | 2 | S4c | directional | Remote-machine listing: the hub roster across machines (SD-38) |
 | 2 | S6 | directional | `craze web`: hub serves WebSocket + a web bundle on loopback / tailnet |
 | 2 | S7 | directional | Outbound relay uplink and a hosted server; enrollment, scopes, TLS |

@@ -5145,7 +5145,7 @@ landed first and 034 rebases onto it; for PR 2, whichever lands second
 re-records fixture 17 and its schema copy (034 takes fixtures 24 and 25; 035
 adds none).
 
-PR: `feature/plan-035-s3-ready`, to be merged with a merge commit (whose message names the PR).
+PR: #84, merged as 23fcc74 (2026-10-03).
 
 #### Handoff to S3
 
