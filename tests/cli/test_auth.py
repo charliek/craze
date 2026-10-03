@@ -626,18 +626,26 @@ def test_chatgpt_sign_in_hides_a_pasted_key(craze_bin: Path, issuer: FakeIssuer)
 
 
 @contextmanager
-def port_1455_taken() -> Iterator[None]:
-    """Port 1455 on 127.0.0.1 held by this test, so craze's listener must
-    take another: a re-login may, once registered (P21). If something else
-    already holds it, it is taken all the same."""
+def port_1455_taken(deadline: float = 60.0) -> Iterator[None]:
+    """Port 1455 on 127.0.0.1 held by this test for the whole block, so
+    craze's listener must take another: a re-login may, once registered (P21).
+    Something else may hold it when this starts (several suites run at once on
+    one box): the bind is retried until it succeeds, and the test fails, naming
+    the port, if it never does -- never carried on without holding it, since
+    craze would then take 1455 itself."""
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    end = time.monotonic() + deadline
     try:
-        try:
-            s.bind(("127.0.0.1", 1455))
-            s.listen(1)
-        except OSError:
-            pass
+        while True:
+            try:
+                s.bind(("127.0.0.1", 1455))
+                s.listen(1)
+                break
+            except OSError as e:
+                if time.monotonic() >= end:
+                    pytest.fail(f"127.0.0.1:1455 stayed held by another process for {deadline:.0f}s: {e}", pytrace=False)
+                time.sleep(0.2)
         yield
     finally:
         s.close()

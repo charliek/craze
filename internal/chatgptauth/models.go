@@ -115,8 +115,59 @@ var (
 //
 // A reply with no visible model, when the account's cache has some, writes
 // nothing and is ErrModelsEmpty (plan 034 Q3); with no usable cache the empty
-// list is written as it was.
+// list is written as it was. The cache check and the write are one critical
+// section under the list's own lock (chatgpt-models.json.lock, the one
+// RefreshModels takes), taken after the reply — never held across the
+// request — so a concurrent host's non-empty list cannot land between them
+// and be overwritten by an empty one (plan 034 r1 #2).
 func FetchModels(ctx context.Context, src *TokenSource, opts FetchOptions) (*Models, error) {
+	f, err := fetchModelList(ctx, src, opts)
+	if err != nil {
+		return nil, err
+	}
+	if afterModelsReply != nil {
+		afterModelsReply()
+	}
+	unlock, err := lockModels(ctx, src.dir)
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
+	return storeModels(src.dir, opts, f)
+}
+
+// fetchedModels is one reply of the model list, parsed, with the account the
+// token that fetched it belongs to.
+type fetchedModels struct {
+	list []Model
+	etag string
+	rec  *record
+}
+
+// lockModels takes dir's model-list lock: at once when it is free, else —
+// after onLockBusy — waiting for it within lockWait, giving up when ctx is
+// done. The directory is made first.
+func lockModels(ctx context.Context, dir string) (func(), error) {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return nil, err
+	}
+	path := ModelsFile(dir) + ".lock"
+	unlock, err := atomicfile.LockWithin(path, 0)
+	if errors.Is(err, atomicfile.ErrLockBusy) {
+		if onLockBusy != nil {
+			onLockBusy()
+		}
+		unlock, err = atomicfile.LockContext(ctx, path, lockWait)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("chatgptauth: taking the model list's lock: %w", err)
+	}
+	return unlock, nil
+}
+
+// fetchModelList is the request half of FetchModels: the list, parsed, and
+// the account that fetched it. It touches no file of the model list.
+func fetchModelList(ctx context.Context, src *TokenSource, opts FetchOptions) (*fetchedModels, error) {
 	if opts.ClientVersion == "" {
 		return nil, ErrClientVersionRequired
 	}
@@ -149,34 +200,48 @@ func FetchModels(ctx context.Context, src *TokenSource, opts FetchOptions) (*Mod
 		if err != nil {
 			return nil, err
 		}
-		if len(list) == 0 {
-			if old, err := ReadModels(src.dir); err == nil && len(old.Models) > 0 &&
-				old.Subject == rec.Subject && old.ClientID == rec.ClientID {
-				return nil, fmt.Errorf("%w (client_version %s)", ErrModelsEmpty, opts.ClientVersion)
-			}
-		}
-		m := &Models{
-			Version:       modelsVersion,
-			Subject:       rec.Subject,
-			ClientID:      rec.ClientID,
-			ModelsEtag:    etagOf(hdr),
-			ClientVersion: opts.ClientVersion,
-			FetchedAt:     now().UTC(),
-			Models:        list,
-		}
-		b, err := json.MarshalIndent(m, "", "  ")
-		if err != nil {
-			return nil, err
-		}
-		if err := os.MkdirAll(src.dir, 0o700); err != nil {
-			return nil, err
-		}
-		if err := atomicfile.Write(ModelsFile(src.dir), append(b, '\n'), 0o600); err != nil {
-			return nil, err
-		}
-		return m, nil
+		return &fetchedModels{list: list, etag: etagOf(hdr), rec: rec}, nil
 	}
 }
+
+// storeModels is the write half of FetchModels: the empty-reply rule, then
+// the file. The caller holds dir's model-list lock.
+func storeModels(dir string, opts FetchOptions, f *fetchedModels) (*Models, error) {
+	if len(f.list) == 0 {
+		if old, err := ReadModels(dir); err == nil && len(old.Models) > 0 &&
+			old.Subject == f.rec.Subject && old.ClientID == f.rec.ClientID {
+			return nil, fmt.Errorf("%w (client_version %s)", ErrModelsEmpty, opts.ClientVersion)
+		}
+	}
+	if inModelsLock != nil {
+		inModelsLock()
+	}
+	m := &Models{
+		Version:       modelsVersion,
+		Subject:       f.rec.Subject,
+		ClientID:      f.rec.ClientID,
+		ModelsEtag:    f.etag,
+		ClientVersion: opts.ClientVersion,
+		FetchedAt:     now().UTC(),
+		Models:        f.list,
+	}
+	b, err := json.MarshalIndent(m, "", "  ")
+	if err != nil {
+		return nil, err
+	}
+	if err := atomicfile.Write(ModelsFile(dir), append(b, '\n'), 0o600); err != nil {
+		return nil, err
+	}
+	return m, nil
+}
+
+// afterModelsReply and inModelsLock are test seams: the first runs between
+// FetchModels' reply and its lock, the second inside the critical section
+// between the cache check and the write.
+var (
+	afterModelsReply func()
+	inModelsLock     func()
+)
 
 // errOffAPI is a bearer request to anywhere but the API's origin.
 var errOffAPI = errors.New("chatgptauth: a request with the ChatGPT token may go only to the API's host")
@@ -223,7 +288,9 @@ func parseModels(body []byte) ([]Model, error) {
 			DefaultReasoningLevel     string `json:"default_reasoning_level"`
 			SupportsParallelToolCalls *bool  `json:"supports_parallel_tool_calls"`
 			Priority                  int    `json:"priority"`
-			MinimalClientVersion      string `json:"minimal_client_version"`
+			// Decoded apart: a minimum that is not a string (a number, an
+			// object, null) costs the minimum, never the model (r1 #4).
+			MinimalClientVersion json.RawMessage `json:"minimal_client_version"`
 		}
 		if json.Unmarshal(raw, &m) != nil || m.Visibility != "list" || !identifier(m.Slug, 64) || m.ContextWindow < 0 {
 			continue
@@ -242,8 +309,9 @@ func parseModels(body []byte) ([]Model, error) {
 			Priority:          m.Priority,
 			ParallelToolCalls: m.SupportsParallelToolCalls,
 		}
-		if identifier(m.MinimalClientVersion, 32) {
-			model.MinClientVersion = m.MinimalClientVersion
+		var minVersion string
+		if json.Unmarshal(m.MinimalClientVersion, &minVersion) == nil && identifier(minVersion, 32) {
+			model.MinClientVersion = minVersion
 		}
 		for _, l := range m.SupportedReasoningLevels {
 			if identifier(l.Effort, 32) && !slices.Contains(model.Efforts, l.Effort) {
@@ -320,25 +388,19 @@ func RefreshModels(ctx context.Context, src *TokenSource, maxAge time.Duration, 
 	if modelsCurrent(src.dir, maxAge, opts.ClientVersion) {
 		return false, nil
 	}
-	if err := os.MkdirAll(src.dir, 0o700); err != nil {
-		return false, err
-	}
-	path := ModelsFile(src.dir) + ".lock"
-	unlock, err := atomicfile.LockWithin(path, 0)
-	if errors.Is(err, atomicfile.ErrLockBusy) {
-		if onLockBusy != nil {
-			onLockBusy()
-		}
-		unlock, err = atomicfile.LockContext(ctx, path, lockWait)
-	}
+	unlock, err := lockModels(ctx, src.dir)
 	if err != nil {
-		return false, fmt.Errorf("chatgptauth: taking the model list's lock: %w", err)
+		return false, err
 	}
 	defer unlock()
 	if modelsCurrent(src.dir, maxAge, opts.ClientVersion) {
 		return false, nil
 	}
-	if _, err := FetchModels(ctx, src, opts); err != nil {
+	f, err := fetchModelList(ctx, src, opts)
+	if err != nil {
+		return false, err
+	}
+	if _, err := storeModels(src.dir, opts, f); err != nil {
 		return false, err
 	}
 	return true, nil

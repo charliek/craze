@@ -1030,6 +1030,7 @@ func TestConnectSignInEndsAtFinishRun(t *testing.T) {
 // token value it issues is kept, so a test can look for each in what the TUI
 // shows.
 type fakeIssuer struct {
+	t   *testing.T
 	srv *httptest.Server
 	key *rsa.PrivateKey
 
@@ -1055,7 +1056,7 @@ func newFakeIssuer(t *testing.T) *fakeIssuer {
 	if err != nil {
 		t.Fatal(err)
 	}
-	f := &fakeIssuer{key: k, pending: map[string]fakeCode{}, access: map[string]bool{}}
+	f := &fakeIssuer{t: t, key: k, pending: map[string]fakeCode{}, access: map[string]bool{}}
 	f.srv = httptest.NewServer(http.HandlerFunc(f.serve))
 	t.Cleanup(f.srv.Close)
 	t.Setenv(chatgptauth.IssuerEnv, f.srv.URL)
@@ -1116,6 +1117,13 @@ func (f *fakeIssuer) serve(w http.ResponseWriter, r *http.Request) {
 	case "/api/accounts/oauth/token":
 		f.token(w, r)
 	case "/v1/models":
+		// The real server's list needs exactly one client_version (plan 034
+		// r1 #8): a request without it fails the test.
+		if vs := r.URL.Query()["client_version"]; len(vs) != 1 || vs[0] == "" {
+			f.t.Errorf("model list request client_version = %q, want exactly one non-empty value", vs)
+			f.json(w, 400, map[string]any{"error": map[string]any{"code": "client_version_required"}})
+			return
+		}
 		tok, _ := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
 		f.mu.Lock()
 		live := f.access[tok]

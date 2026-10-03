@@ -257,8 +257,12 @@ type chatgptModelEntry struct {
 	Priority          int      `json:"priority"`
 	ParallelToolCalls *bool    `json:"parallel_tool_calls"`
 	// MinClientVersion is the least client_version the server says the model
-	// needs (plan 034 §3.1); "" when the list does not say.
-	MinClientVersion string `json:"minimal_client_version"`
+	// needs (plan 034 §3.1); "" when the list does not say. It is decoded
+	// from MinVersionRaw apart from the rest, so a value that is not a JSON
+	// string (a number, an object, null) reads as none — fail-open — instead
+	// of failing the whole entry (plan 034 r1 #4).
+	MinClientVersion string          `json:"-"`
+	MinVersionRaw    json.RawMessage `json:"minimal_client_version"`
 }
 
 // maxMinVersionParts is how many dotted parts a model's minimum may have
@@ -404,6 +408,8 @@ func withDiscovered(cat *Catalog, dir string) (*discovered, []string) {
 			skip(i, "", "it is not a model entry")
 			continue
 		}
+		// Only a JSON string is a minimum; anything else is none.
+		_ = json.Unmarshal(m.MinVersionRaw, &m.MinClientVersion)
 		entries = append(entries, entry{i, m})
 	}
 	// The list's own order is its priority (chatgptauth sorts it so); the

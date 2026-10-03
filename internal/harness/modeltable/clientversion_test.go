@@ -197,3 +197,27 @@ func TestStartModelOrderedChatGPTStart(t *testing.T) {
 		t.Fatalf("no start: StartModel = %q, want the first resolving alias chatgpt/gpt-5.5", got)
 	}
 }
+
+// TestDiscoveredModelsKeepAModelWithANonStringMinimum (plan 034 r1 #4): a
+// minimal_client_version that is not a JSON string is read as no minimum, so
+// the model stays; it never fails the entry.
+func TestDiscoveredModelsKeepAModelWithANonStringMinimum(t *testing.T) {
+	for _, v := range []string{`999`, `1.5`, `{"a":"9.9.9"}`, `null`, `[]`, `["9.9.9"]`, `true`} {
+		dir := t.TempDir()
+		signInAs(t, dir, registration(planSubject, planClient, true), true)
+		withPlanModels(t, dir, fmt.Sprintf(`{"version":1,"subject":%q,"client_id":%q,"fetched_at":"2026-10-01T00:00:00Z","models":[
+{"slug":"gpt-odd","display_name":"Odd","context_window":1000,"efforts":["low"],"input_modalities":["text"],"priority":0,"minimal_client_version":%s},
+{"slug":"gpt-ok","display_name":"Ok","context_window":1000,"efforts":["low"],"input_modalities":["text"],"priority":1}
+]}`, planSubject, planClient, v))
+		tbl, err := Load(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := strings.Join(planAliases(tbl), ","); got != "chatgpt/gpt-odd,chatgpt/gpt-ok" {
+			t.Errorf("minimum %s: plan aliases = %s, want both models", v, got)
+		}
+		if len(tbl.Warnings) != 0 {
+			t.Errorf("minimum %s: warnings %q", v, tbl.Warnings)
+		}
+	}
+}

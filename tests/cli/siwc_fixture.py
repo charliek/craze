@@ -391,7 +391,9 @@ class FakeIssuer:
             }]})
         elif path == MODELS_PATH:
             token = h.headers.get("Authorization", "").removeprefix("Bearer ")
-            versions = parse_qs(urlsplit(h.path).query).get("client_version", [])
+            # keep_blank_values: `client_version=&client_version=0.160.0` is two
+            # values, one blank, and a 400 (plan 034 r1 #8).
+            versions = parse_qs(urlsplit(h.path).query, keep_blank_values=True).get("client_version", [])
             with self._lock:
                 self.models_gets += 1
                 live = token in self._access

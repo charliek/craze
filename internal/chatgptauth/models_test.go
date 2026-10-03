@@ -427,3 +427,115 @@ func TestParseModelsKeepsOnlyShortPrintableMinimums(t *testing.T) {
 		}
 	}
 }
+
+// goodModelsFile fetches the fake's full list at the pin, returns the bytes
+// FetchModels wrote and removes the file, so a test can land that list as a
+// "concurrent host's" write.
+func goodModelsFile(t *testing.T, src *TokenSource, dir string) []byte {
+	t.Helper()
+	if _, err := FetchModels(context.Background(), src, FetchOptions{ClientVersion: testPin}); err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(ModelsFile(dir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(ModelsFile(dir)); err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
+
+// landUnderLock writes b as the model list the way a concurrent host does:
+// under the list's lock.
+func landUnderLock(dir string, b []byte) error {
+	unlock, err := lockModels(context.Background(), dir)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	return os.WriteFile(ModelsFile(dir), b, 0o600)
+}
+
+// TestFetchModelsEmptyReplyIsOneCriticalSection (plan 034 r1 #2): a
+// concurrent host's non-empty list that lands while an empty reply is
+// between its cache check and its write must not be overwritten. The
+// concurrent writer takes the list's lock, so with FetchModels holding it
+// the writer waits (busy) and lands after; without the lock it lands inside
+// the section and the empty list overwrites it.
+func TestFetchModelsEmptyReplyIsOneCriticalSection(t *testing.T) {
+	f := newFake(t)
+	useFake(t, f)
+	dir := nativeDir(t)
+	signIn(t, f, dir)
+	src := newSource(dir)
+	good := goodModelsFile(t, src, dir)
+
+	busy := onBusy(t)
+	done := make(chan error, 1)
+	inModelsLock = func() {
+		go func() { done <- landUnderLock(dir, good) }()
+		// The writer either finishes (no lock held here: the bug) or finds
+		// the lock busy (held: the fix); both end this wait.
+		select {
+		case <-busy:
+		case err := <-done:
+			done <- err
+		case <-time.After(60 * time.Second):
+			t.Error("the concurrent writer neither finished nor found the lock busy")
+		}
+	}
+	t.Cleanup(func() { inModelsLock = nil })
+	if _, err := FetchModels(context.Background(), src, FetchOptions{ClientVersion: "0.0.1"}); err != nil {
+		t.Fatalf("the empty reply over no cache: %v", err)
+	}
+	if err := await(t, done, "the concurrent writer"); err != nil {
+		t.Fatal(err)
+	}
+	got, err := ReadModels(dir)
+	if err != nil || len(got.Models) == 0 {
+		t.Fatalf("the concurrent host's list on disk = %+v, %v; an empty reply overwrote it", got, err)
+	}
+}
+
+// TestFetchModelsEmptyReplyAfterAConcurrentWrite (plan 034 r1 #2): a
+// non-empty list that landed between the reply and the lock is the cache the
+// empty reply checks, so it is kept.
+func TestFetchModelsEmptyReplyAfterAConcurrentWrite(t *testing.T) {
+	f := newFake(t)
+	useFake(t, f)
+	dir := nativeDir(t)
+	signIn(t, f, dir)
+	src := newSource(dir)
+	good := goodModelsFile(t, src, dir)
+
+	afterModelsReply = func() {
+		if err := landUnderLock(dir, good); err != nil {
+			t.Error(err)
+		}
+	}
+	t.Cleanup(func() { afterModelsReply = nil })
+	if _, err := FetchModels(context.Background(), src, FetchOptions{ClientVersion: "0.0.1"}); !errors.Is(err, ErrModelsEmpty) {
+		t.Fatalf("FetchModels = %v, want ErrModelsEmpty", err)
+	}
+	if after, _ := os.ReadFile(ModelsFile(dir)); string(after) != string(good) {
+		t.Fatal("the empty reply rewrote the list a concurrent host wrote")
+	}
+}
+
+// TestParseModelsKeepsAModelWithANonStringMinimum (plan 034 r1 #4): a
+// minimal_client_version that is not a JSON string costs only the minimum.
+func TestParseModelsKeepsAModelWithANonStringMinimum(t *testing.T) {
+	for _, v := range []string{`160`, `1.5`, `{}`, `{"a":"0.1.0"}`, `null`, `[]`, `["0.1.0"]`, `true`} {
+		body := `{"models":[
+{"slug":"a","visibility":"list","priority":0,"minimal_client_version":` + v + `},
+{"slug":"b","visibility":"list","priority":1,"minimal_client_version":"0.153.0"}]}`
+		list, err := parseModels([]byte(body))
+		if err != nil || len(list) != 2 {
+			t.Fatalf("minimum %s: parseModels = %+v, %v; want both models", v, list, err)
+		}
+		if list[0].Slug != "a" || list[0].MinClientVersion != "" || list[1].MinClientVersion != "0.153.0" {
+			t.Errorf("minimum %s: models = %+v", v, list)
+		}
+	}
+}
