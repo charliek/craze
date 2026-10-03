@@ -55,6 +55,10 @@ RESOURCE = "https://api.openai.com/v1"
 FULL_SCOPE = "openid profile email offline_access resource.invoke chatgpt.tokens.use.direct"
 IDENTITY_SCOPE = "openid profile email offline_access"
 DYNAMIC_CLIENT = "dynamic_agent_client"
+# The fake's error_description: text from the server, which craze never
+# repeats -- the sign-in log's scan looks for it (plan 034 A11), so it is a
+# value no record could hold by chance.
+ERROR_DESCRIPTION = "fixture-error-description-3b9e7c"
 
 AUTHORIZE_PATH = "/api/accounts/authorize"
 TOKEN_PATH = "/api/accounts/oauth/token"
@@ -243,6 +247,9 @@ class FakeIssuer:
     models_without_version: int = 0  # list requests with no (or several) client_version: answered 400
     issued: list[str] = field(default_factory=list)
     stray: list[str] = field(default_factory=list)  # requests to paths the fake does not serve
+    codes: list[str] = field(default_factory=list)  # every authorization code issued
+    verifiers: list[str] = field(default_factory=list)  # every code_verifier an exchange sent
+    redirects: list[str] = field(default_factory=list)  # every address the browser was sent back to
 
     def __repr__(self) -> str:
         return f"FakeIssuer({self.url if self._server else 'not started'})"
@@ -310,7 +317,10 @@ class FakeIssuer:
             self.authorizations.append(q)
         redirect = q["redirect_uri"]
         if decline:
-            return redirect + "?" + urlencode({"error": "access_denied", "state": q["state"]})
+            back = redirect + "?" + urlencode({"error": "access_denied", "state": q["state"], "error_description": ERROR_DESCRIPTION})
+            with self._lock:
+                self.redirects.append(back)
+            return back
         registering = q["client_id"] == DYNAMIC_CLIENT
         client = self.issue_client if registering else q["client_id"]
         code = "fake-code-" + secrets.token_hex(8)
@@ -325,7 +335,11 @@ class FakeIssuer:
         out = {"code": code, "state": q["state"], "scope": self.scope}
         if registering:
             out["client_id"] = client
-        return redirect + "?" + urlencode(out)
+        back = redirect + "?" + urlencode(out)
+        with self._lock:
+            self.codes.append(code)
+            self.redirects.append(back)
+        return back
 
     # -- the leak scan ----------------------------------------------------
 
@@ -355,6 +369,20 @@ class FakeIssuer:
         with self._lock:
             needles = [v.encode() for v in self.issued]
         return sorted(p for p in root.rglob("*") if p.is_file() and any(n in p.read_bytes() for n in needles))
+
+    def secret_values(self) -> list[str]:
+        """Every value of the sign-ins this fake served that craze must never
+        log (plan 034 A11): the tokens it issued, the codes and the verifiers
+        it saw, each authorization's state, nonce, PKCE challenge, host id
+        and login_hint, the account's email and subject, the issued client
+        id, the error_description, and every address the browser was sent
+        back to. Short generic values are left out (they could be any text)."""
+        with self._lock:
+            values = [*self.issued, *self.codes, *self.verifiers, *self.redirects]
+            for q in self.authorizations:
+                values += [q.get(k, "") for k in ("state", "nonce", "code_challenge", "ext_agent_host_id", "login_hint")]
+        values += [self.email, self.subject, self.issue_client, ERROR_DESCRIPTION]
+        return [v for v in dict.fromkeys(values) if len(v) >= 8]
 
     def revoked_issued_refresh_tokens(self) -> int:
         """How many refresh tokens this fake issued were revoked through its
@@ -471,6 +499,7 @@ class FakeIssuer:
             with self._lock:
                 pending = self._pending.pop(form.get("code", ""), None)
                 verifier = form.get("code_verifier", "")
+                self.verifiers.append(verifier)
                 pkce_ok = (
                     pending is not None
                     and not self.wrong_challenge
@@ -484,7 +513,7 @@ class FakeIssuer:
                 )
                 self.exchanges.append(Exchange(form.get("client_id", ""), form.get("redirect_uri", ""), pkce_ok, granted))
                 if not granted:
-                    self._json(h, 400, {"error": "invalid_grant", "error_description": "refused"})
+                    self._json(h, 400, {"error": "invalid_grant", "error_description": ERROR_DESCRIPTION})
                     return
                 access, refresh = self._mint(pending["client"])
                 id_token = self._id_token(pending["client"], pending["nonce"])

@@ -14,15 +14,19 @@ import (
 	"syscall"
 )
 
-// Options are a Log's hooks. Both run with the log's lock held, so they are
-// ordered with the writes and with each other, and must not call back into the
-// Log.
+// Options are a Log's hooks. Once New has returned, both run with the log's
+// lock held, so they are ordered with the writes and with each other, and must
+// not call back into the Log; New's own call of OnOpen is before the Log is
+// published, when nothing else can reach it, and takes no lock.
 type Options struct {
 	// OnOpen is called with the file a Log has just started writing to: the
-	// first one, as New returns, and every one a rotation opens, after it has
-	// replaced the old file and before the old one is closed. A user that
-	// points a process-wide resource at the file (hostlog's crash output)
-	// re-points it here, so it is never left on a file this Log has closed.
+	// first one, before New returns, and every one a rotation opens, once it
+	// has replaced the old file — after the old one is closed (reopenLocked).
+	// A user that points a process-wide resource at the file (hostlog's crash
+	// output) re-points it here, so it is never left on a file this Log has
+	// closed for longer than the rotation itself (the runtime keeps a
+	// duplicate of the crash output's descriptor, so a fatal error in that
+	// instant still lands in the renamed file).
 	OnOpen func(f *os.File)
 	// OnClose is called by Close, once, before the file is closed: a user
 	// that gave a process-wide resource the file gives it back here, while

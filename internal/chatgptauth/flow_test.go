@@ -60,7 +60,7 @@ func TestFirstRegistration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer a.Close()
+	defer a.Close(CloseDone)
 	q := authQuery(t, a)
 	host, err := os.ReadFile(HostIDFile(dir))
 	if err != nil {
@@ -130,7 +130,7 @@ func TestFirstRegistration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	b.Close()
+	b.Close(CloseDone)
 	if authQuery(t, b).Get("ext_agent_host_id") != q.Get("ext_agent_host_id") {
 		t.Fatal("a second attempt sent another host id")
 	}
@@ -239,7 +239,7 @@ func TestRelogin(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	a.Close()
+	a.Close(CloseDone)
 	aq := authQuery(t, a)
 	if aq.Get("client_id") != testClient || aq.Get("login_hint") != testEmail || aq.Get("redirect_uri") != "http://127.0.0.1:1455/auth/callback" {
 		t.Fatalf("re-login: client_id %q, login_hint %q, redirect %q", aq.Get("client_id"), aq.Get("login_hint"), aq.Get("redirect_uri"))
@@ -263,7 +263,7 @@ func TestRelogin(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer b.Close()
+	defer b.Close(CloseDone)
 	if !b.Listening() || len(*taken) != 2 || (*taken)[1] != 0 {
 		t.Fatalf("a re-login with 1455 taken tried %v, listening %v; want 1455 then any port", *taken, b.Listening())
 	}
@@ -290,7 +290,7 @@ func TestRelogin(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	off.Close()
+	off.Close(CloseDone)
 	if authQuery(t, off).Get("prompt") != "consent" {
 		t.Fatal("plan usage off: the re-login did not ask for consent again")
 	}
@@ -458,7 +458,7 @@ func TestSignInWithoutPlanScope(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	a.Close()
+	a.Close(CloseDone)
 	if authQuery(t, a).Get("prompt") != "consent" {
 		t.Fatal("the next attempt did not ask for consent")
 	}
@@ -482,7 +482,7 @@ func TestCorruptRegistrationRegistersAnew(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	a.Close()
+	a.Close(CloseDone)
 	if authQuery(t, a).Get("client_id") != testClient {
 		t.Fatal("a valid registration did not re-log in")
 	}
@@ -540,7 +540,7 @@ func TestInvalidClientAtExchange(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	next.Close()
+	next.Close(CloseDone)
 	if q := authQuery(t, next); q.Get("client_id") != dynamicClient || q.Get("agent_name_hint") != "craze" {
 		t.Fatal("after invalid_client the next attempt does not register anew")
 	}
@@ -654,7 +654,7 @@ func TestPastedRedirect(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer a.Close()
+	defer a.Close(CloseDone)
 	q := f.authorize(t, a.URL())
 	wrongState := url.Values{}
 	for k, v := range q {
@@ -699,7 +699,7 @@ func TestListenerChecksPathAndState(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer a.Close()
+	defer a.Close(CloseDone)
 	q := f.authorize(t, a.URL())
 	bad := url.Values{"code": {q.Get("code")}, "state": {"not-ours"}}
 	check := func(resp *http.Response, status int) {
@@ -830,7 +830,7 @@ func TestListenerClosesOnCancel(t *testing.T) {
 			if how == "cancel" {
 				cancel()
 			} else {
-				a.Close()
+				a.Close(CloseDone)
 				want = ErrAttemptOver
 			}
 			select {

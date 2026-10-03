@@ -7,6 +7,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/charliek/craze/internal/backend"
+	"github.com/charliek/craze/internal/chatgptauth"
 )
 
 // Opening a session in place (plan 030 §3.11): the TUI leaves the session it
@@ -90,7 +91,7 @@ type sessionSeed struct {
 // was running ends here, its listener closed (plan 033 §3.13), since nothing
 // would reach its step again.
 func (m Model) withSession(seed sessionSeed) Model {
-	m.cdlg.signIn.end()
+	m.cdlg.signIn.end(chatgptauth.CloseDialog)
 	s := Model{
 		// ---- The TUI's: kept across every session it shows.
 		theme:  m.theme,

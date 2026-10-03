@@ -21,6 +21,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -63,6 +64,11 @@ const (
 	testSubject = "user-fake-subject-0001"
 	testEmail   = "person@example.test"
 	testClient  = "oaiapp_fakeclient000000000001"
+	// testErrorDescription is the fake's error_description and error message:
+	// text from the server, which nothing may repeat — the sign-in log's scan
+	// looks for it (plan 034 A11), so it is a value no record could hold by
+	// chance.
+	testErrorDescription = "fake-error-description-5e1d0c"
 )
 
 // pendingCode is an authorization code the fake issued and has not
@@ -101,6 +107,7 @@ type fakeOpenAI struct {
 	holdRefresh    chan struct{}                    // a refresh waits on it, when set
 	refreshArrived chan struct{}                    // a refresh signals it on arrival, when set
 	holdModels     chan struct{}                    // a model list request waits on it, when set
+	holdExchange   chan struct{}                    // a code exchange waits on it, when set
 	modelsArrived  chan struct{}                    // signalled on a model list request, when set
 	modelsErr      string                           // an error code the model list answers (400, {"error":{"code":…}})
 	redirectPath   map[string]bool                  // these paths answer 302 to /elsewhere
@@ -111,6 +118,8 @@ type fakeOpenAI struct {
 
 	// Records.
 	n          int
+	codes      []string // every authorization code issued, for the leak scans
+	verifiers  []string // every code_verifier an exchange sent, for the leak scans
 	pending    map[string]pendingCode
 	access     map[string]string // live access token → its client id
 	refresh    map[string]string // refresh token → "live", "rotated" or "revoked"
@@ -345,6 +354,7 @@ func (f *fakeOpenAI) authorizeErr(authURL string) (url.Values, error) {
 		clientID = f.issueClient
 	}
 	code := "fake-code-" + randHex(8)
+	f.codes = append(f.codes, code)
 	f.pending[code] = pendingCode{challenge: q.Get("code_challenge"), redirect: q.Get("redirect_uri"), clientID: clientID, nonce: q.Get("nonce")}
 	out := url.Values{"code": {code}, "state": {q.Get("state")}, "scope": {f.scope}}
 	switch {
@@ -441,7 +451,7 @@ func (f *fakeOpenAI) serve(w http.ResponseWriter, r *http.Request) {
 		models, etag, refuse := gatedModels(f.models, vs[0]), f.modelsEtag, f.modelsErr
 		f.mu.Unlock()
 		if refuse != "" {
-			f.writeJSON(w, 400, map[string]any{"error": map[string]any{"code": refuse, "message": "refused"}})
+			f.writeJSON(w, 400, map[string]any{"error": map[string]any{"code": refuse, "message": testErrorDescription}})
 			return
 		}
 		if !live {
@@ -468,14 +478,21 @@ func (f *fakeOpenAI) token(w http.ResponseWriter, r *http.Request) {
 	switch form.Get("grant_type") {
 	case "authorization_code":
 		f.mu.Lock()
+		hold := f.holdExchange
+		f.mu.Unlock()
+		if hold != nil {
+			<-hold
+		}
+		f.mu.Lock()
 		defer f.mu.Unlock()
 		f.exchanges++
+		f.verifiers = append(f.verifiers, form.Get("code_verifier"))
 		p, ok := f.pending[form.Get("code")]
 		delete(f.pending, form.Get("code"))
 		sum := sha256.Sum256([]byte(form.Get("code_verifier")))
 		switch {
 		case f.exchangeErr != "":
-			f.writeJSON(w, 400, map[string]any{"error": f.exchangeErr, "error_description": "refused"})
+			f.writeJSON(w, 400, map[string]any{"error": f.exchangeErr, "error_description": testErrorDescription})
 			return
 		case !ok || p.clientID != form.Get("client_id") || p.redirect != form.Get("redirect_uri") || b64(sum[:]) != p.challenge:
 			f.writeJSON(w, 400, map[string]any{"error": "invalid_grant"})
@@ -625,7 +642,7 @@ func useListener(t *testing.T, busy1455 bool) *[]int {
 		asked = append(asked, port)
 		mu.Unlock()
 		if port == callbackPort && busy1455 {
-			return nil, errors.New("address already in use")
+			return nil, &net.OpError{Op: "listen", Net: "tcp", Err: os.NewSyscallError("bind", syscall.EADDRINUSE)}
 		}
 		return net.Listen("tcp", "127.0.0.1:0")
 	}
@@ -660,7 +677,7 @@ func signInErr(f *fakeOpenAI, dir string) (Result, error) {
 	if err != nil {
 		return Result{}, fmt.Errorf("Begin: %w", err)
 	}
-	defer a.Close()
+	defer a.Close(CloseDone)
 	q, err := f.authorizeErr(a.URL())
 	if err != nil {
 		return Result{}, err

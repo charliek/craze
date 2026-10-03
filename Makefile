@@ -71,7 +71,11 @@ test:
 # usage latch and Values are read from other goroutines, and its tests race a
 # refresh against a sign-out, a sign-in and a second process — joined in C13,
 # the commit that creates it) with the lock and durable write it builds on
-# (internal/atomicfile).
+# (internal/atomicfile), the capped log writer (plan 034 C2a), and the
+# sign-in log (plan 034 §3.3: Record is called from the listener's, the
+# wait's and the UI's goroutines while one writer goroutine drains its queue,
+# and its tests race two Logs and two processes across a rotation — joined in
+# C2b, the commit that creates it).
 # Packages run concurrently, so the wall clock is about the slowest
 # of them. CI runs this same target, so a local pass and a CI pass mean the
 # same thing; the two flakes that reached main in 2026-09 only ever showed
@@ -82,7 +86,7 @@ test:
 # internal/tui's -race run at 636s and 547s (ubuntu's at about 431s), so the
 # old 15m would be clipped by the next slower runner.
 test-race:
-	CRAZE_GOLDEN_TRANSPORT=both go test -timeout 20m -race ./internal/acp ./internal/agent ./internal/engine/... ./internal/host ./internal/tui ./internal/harness/... ./internal/journal/... ./internal/transcript/... ./internal/protocol/... ./internal/control/... ./internal/remote/... ./internal/fakehost/... ./internal/rundir/... ./internal/backend/... ./internal/cli ./internal/roster ./internal/modelcache ./internal/hostspawn ./internal/hub ./internal/chatgptauth ./internal/atomicfile ./internal/caplog
+	CRAZE_GOLDEN_TRANSPORT=both go test -timeout 20m -race ./internal/acp ./internal/agent ./internal/engine/... ./internal/host ./internal/tui ./internal/harness/... ./internal/journal/... ./internal/transcript/... ./internal/protocol/... ./internal/control/... ./internal/remote/... ./internal/fakehost/... ./internal/rundir/... ./internal/backend/... ./internal/cli ./internal/roster ./internal/modelcache ./internal/hostspawn ./internal/hub ./internal/chatgptauth ./internal/atomicfile ./internal/caplog ./internal/signinlog
 
 test-cli:
 	@if [ ! -f tests/cli/pyproject.toml ]; then echo "tests/cli not present yet"; exit 0; fi

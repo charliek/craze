@@ -13,6 +13,7 @@ import (
 
 	"github.com/charliek/craze/internal/agent"
 	"github.com/charliek/craze/internal/backend"
+	"github.com/charliek/craze/internal/chatgptauth"
 	"github.com/charliek/craze/internal/harness/modeltable"
 	"github.com/charliek/craze/internal/paths"
 )
@@ -207,7 +208,7 @@ func (d connectDialog) provider() (modeltable.ProviderInfo, bool) {
 // the field and its refusal gone with it, and the sign-in's attempt ended
 // with its listener (plan 033 §3.13).
 func (d connectDialog) leaveKeyStep() connectDialog {
-	d.signIn.end()
+	d.signIn.end(chatgptauth.CloseEsc)
 	d.step, d.field, d.key, d.keyErr, d.signIn = connectPick, 0, textinput.Model{}, "", signInState{}
 	return d
 }
@@ -223,10 +224,12 @@ func (d connectDialog) leaveKeyStep() connectDialog {
 // the session list, where nothing reaches the field behind it again, or
 // quits).
 func (m Model) dropConnect() Model {
+	// A sign-in running in the box ends for the quit or the session's end
+	// (CloseShutdown), before the box's own close would call it a dialog's.
+	m.cdlg.signIn.end(chatgptauth.CloseShutdown)
 	if m.dialog == dialogConnect {
 		return m.closeDialog(false)
 	}
-	m.cdlg.signIn.end()
 	m.cdlg = connectDialog{}
 	return m
 }

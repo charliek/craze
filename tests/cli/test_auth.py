@@ -18,7 +18,10 @@ login is Sign in with ChatGPT, driven here on a real terminal against
 siwc_fixture's fake issuer -- the paste flow, a re-login through the loopback
 listener, plan usage turned off, Ctrl-C, the list's three rows, logout -- with
 every token value the fake issued scanned for in everything craze printed and
-every file it wrote (A17). A failing check never prints it either (review r2): it fails
+every file it wrote (A17). Each sign-in is also in the native directory's
+sign-in log (plan 034 §3.3, A11, A12), which is scanned byte for byte for
+every value of the fake's sign-ins and their percent-encodings, and whose
+records are checked against what happened. A failing check never prints it either (review r2): it fails
 through no_canary -- which command, which stream, where, and the text with the
 key masked -- without a traceback, whose frames would show the arguments that
 hold it; and the parametrized cases name the key by the placeholder KEY, so no
@@ -27,6 +30,7 @@ case's parameters hold it.
 
 from __future__ import annotations
 
+import json
 import os
 import pty
 import re
@@ -40,7 +44,7 @@ import urllib.request
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, quote, quote_plus, urlsplit
 
 import pytest
 
@@ -509,6 +513,43 @@ def no_token_anywhere(fake: FakeIssuer, *, allowed: tuple[Path, ...] = ()) -> No
             pytest.fail(f"an issued token value is in {holding}", pytrace=False)
 
 
+def signin_log() -> list[dict]:
+    """The sign-in log's records (plan 034 §3.3), oldest first, from both its
+    files: the logs directory 0700 and each file 0600. Records are value-free,
+    so a failure may print them."""
+    logs = native_dir() / "logs"
+    assert mode(logs) == 0o700
+    records = []
+    for name in ("signin.log.1", "signin.log"):
+        path = logs / name
+        if path.exists():
+            assert mode(path) == 0o600, name
+            records += [json.loads(line) for line in path.read_text().splitlines()]
+    return records
+
+
+def assert_signin_log_value_free(fake: FakeIssuer, *extra: str) -> list[dict]:
+    """Plan 034 A11, over the binary: neither sign-in log file holds any value
+    of the fake's sign-ins (FakeIssuer.secret_values) or of extra -- the
+    addresses and lines the test handled -- nor any of their percent-encodings,
+    scanned byte for byte. A failure names the value's length, never the
+    value, and has no traceback. Answers the records."""
+    values = [v for v in dict.fromkeys([*fake.secret_values(), *extra]) if len(v) >= 8]
+    if len(values) < 5:
+        pytest.fail("the sign-in log's scan has almost nothing to look for; it would pass vacuously", pytrace=False)
+    files = [p for p in (native_dir() / "logs" / "signin.log", native_dir() / "logs" / "signin.log.1") if p.exists()]
+    if not files:
+        pytest.fail("there is no sign-in log to scan", pytrace=False)
+    for path in files:
+        data = path.read_bytes()
+        for value in values:
+            for form in {value, quote(value, safe=""), quote(value), quote_plus(value)}:
+                if form.encode() in data:
+                    pytest.fail(f"{path.name} holds a fixture value ({len(value)} bytes) or one of its percent-encodings",
+                                pytrace=False)
+    return signin_log()
+
+
 def test_chatgpt_sign_in_by_paste_list_and_logout(craze_bin: Path, issuer: FakeIssuer) -> None:
     """A17, A19: the paste-only sign-in a person on another machine uses
     (`--no-browser`, P25) from first registration to logout. The URL is a
@@ -522,7 +563,10 @@ def test_chatgpt_sign_in_by_paste_list_and_logout(craze_bin: Path, issuer: FakeI
     one not among them). The files are 0600 in a 0700 directory, the list
     row says who is signed in, and logout revokes the refresh token and
     deletes the tokens, keeping the registration. No token value is printed,
-    or written anywhere but the token file, which logout removes."""
+    or written anywhere but the token file, which logout removes. The sign-in
+    log has the attempt, value-free (plan 034 A11): its begin, the stale
+    redirect refused as an earlier attempt's, the redirect, the sign-in and
+    the model fetch."""
     env = plan_env(issuer)
     proc = run_craze(craze_bin, "auth", "list", env=env)
     assert list_rows(proc.stdout)[0] == PLAN_ROW
@@ -549,8 +593,8 @@ def test_chatgpt_sign_in_by_paste_list_and_logout(craze_bin: Path, issuer: FakeI
 
     redirect = issuer.authorize(url)
     term.type(stale(redirect) + "\n")
-    screen = term.wait_for("That is not this sign-in's redirect address.")
-    assert "Redirect address: \nThat is not this sign-in's redirect address." in screen, screen
+    screen = term.wait_for("That is the redirect of an earlier sign-in attempt.")
+    assert "Redirect address: \nThat is the redirect of an earlier sign-in attempt. Use the address shown above." in screen, screen
     lacks(issuer, "the terminal", screen, "an-earlier-attempt")
     term.type(redirect + "\n")
     screen = term.finish(0)
@@ -566,6 +610,14 @@ def test_chatgpt_sign_in_by_paste_list_and_logout(craze_bin: Path, issuer: FakeI
         issuer.issue_client, CALLBACK, True, True)
     assert issuer.models_gets == 1
     assert issuer.model_versions == [PIN]
+    records = assert_signin_log_value_free(issuer, url, stale(redirect), redirect)
+    assert [r["event"] for r in records] == ["begin", "paste_refused", "redirect_received", "signed_in", "models_fetched"], records
+    assert {r["surface"] for r in records} == {"cli"} and len({r["attempt"] for r in records}) == 1, records
+    assert (records[0]["mode"], records[0]["reason"], records[0]["port"], records[0]["registration"]) == (
+        "paste_only", "requested", 1455, "new"), records
+    assert (records[1]["refusal"], records[1]["part"]) == ("mismatch", "state"), records
+    assert (records[2]["via"], records[3]["usage"], records[3]["registration"]) == ("paste", "plan", "new"), records
+    assert (records[4]["models"], records[4]["client_version"]) == (8, PIN), records
     cache = (native_dir() / "chatgpt-models.json").read_text()
     assert f'"client_version": "{PIN}"' in cache and '"minimal_client_version": "0.153.0"' in cache, cache
 
@@ -685,6 +737,14 @@ def test_chatgpt_relogin_through_the_listener(craze_bin: Path, issuer: FakeIssue
     with pytest.raises(OSError):
         socket.create_connection(("127.0.0.1", int(port)), timeout=2).close()
     assert plan_row(craze_bin, issuer) == SIGNED_IN_ROW
+    # The re-login in the sign-in log (plan 034 Q8): listening on another
+    # port because 1455 was busy, the redirect through the listener.
+    records = assert_signin_log_value_free(issuer, url)
+    relogin = [r for r in records if r["attempt"] == records[-1]["attempt"]]
+    assert [r["event"] for r in relogin] == ["begin", "redirect_received", "signed_in", "models_fetched"], relogin
+    assert (relogin[0]["mode"], relogin[0]["reason"], relogin[0]["port"], relogin[0]["registration"]) == (
+        "listening", "port_busy", int(port), "reused"), relogin
+    assert (relogin[1]["via"], relogin[2]["registration"]) == ("listener", "reused"), relogin
 
 
 def test_chatgpt_plan_usage_off_then_ctrl_c(craze_bin: Path, issuer: FakeIssuer) -> None:
@@ -713,6 +773,12 @@ def test_chatgpt_plan_usage_off_then_ctrl_c(craze_bin: Path, issuer: FakeIssuer)
     shows(issuer, "the terminal", screen, "craze auth login: the sign-in was cancelled; nothing was changed\n")
     assert plan_row(craze_bin, issuer) == PLAN_OFF_ROW
     assert len(issuer.exchanges) == 1
+    # Both attempts in the sign-in log: the first signed in with plan usage
+    # off, the second cancelled by the signal.
+    records = assert_signin_log_value_free(issuer)
+    first = [r for r in records if r["attempt"] == records[0]["attempt"]]
+    assert (first[-1]["event"], first[-1]["usage"]) == ("signed_in", "off"), records
+    assert (records[-1]["event"], records[-1]["reason"]) == ("cancelled", "signal"), records
 
 
 def test_chatgpt_takes_no_key(craze_bin: Path, issuer: FakeIssuer) -> None:
@@ -728,6 +794,12 @@ def test_chatgpt_takes_no_key(craze_bin: Path, issuer: FakeIssuer) -> None:
     assert "API key: " not in proc.stderr
     assert not providers_toml().exists() and not (auth_dir() / "chatgpt.json").exists()
     assert issuer.exchanges == []
+    # The sign-in log has the key refused as no address, and the attempt
+    # cancelled at stdin's end; the key itself is nowhere in it.
+    no_canary("craze auth login chatgpt", "the sign-in log", (native_dir() / "logs" / "signin.log").read_text())
+    records = signin_log()
+    assert [r["event"] for r in records] == ["begin", "paste_refused", "cancelled"], records
+    assert (records[1]["refusal"], records[2]["reason"]) == ("not_address", "no_input"), records
 
 
 @pytest.mark.parametrize("refusal", ["declined", "tampered id_token", "wrong verifier"])
@@ -761,6 +833,29 @@ def test_chatgpt_sign_in_refusals(craze_bin: Path, issuer: FakeIssuer, refusal: 
     assert not (auth_dir() / "chatgpt.json").exists()
     proc = run_craze(craze_bin, "auth", "list", env=plan_env(issuer))
     assert list_rows(proc.stdout)[0] == PLAN_ROW
+    # The outcome in the sign-in log, value-free (plan 034 A10, A11).
+    records = assert_signin_log_value_free(issuer, url)
+    outcome = {
+        "declined": {"event": "declined", "step": "authorize", "code": "access_denied"},
+        "tampered id_token": {"event": "failed", "step": "id_token", "class": "id_token", "check": "signature"},
+        "wrong verifier": {"event": "failed", "step": "exchange", "status": 400, "code": "invalid_grant", "class": "refused"},
+    }[refusal]
+    assert {k: records[-1].get(k) for k in outcome} == outcome, records
+
+
+def test_chatgpt_refused_sign_in_log_never_fails_the_sign_in(craze_bin: Path, issuer: FakeIssuer) -> None:
+    """Plan 034 A12, over the binary: a sign-in log craze must refuse -- its
+    directory writable by the group -- is one note on the terminal, naming
+    why, and the sign-in finishes as ever; nothing is written there."""
+    logs = native_dir() / "logs"
+    logs.mkdir(parents=True, mode=0o700)
+    logs.chmod(0o770)
+    screen = paste_sign_in(craze_bin, issuer)
+    shows(issuer, "the terminal", screen, "Signed in to ChatGPT as person@example.test.\n")
+    if screen.count("note: the sign-in log is off: ") != 1 or "is writable by other users" not in screen:
+        pytest.fail(f"want one note saying the log's directory is writable by others:\n{issuer.masked(screen)}", pytrace=False)
+    assert list(logs.iterdir()) == []
+    assert plan_row(craze_bin, issuer) == SIGNED_IN_ROW
 
 
 def test_chatgpt_logout_unconfirmed(craze_bin: Path, issuer: FakeIssuer) -> None:

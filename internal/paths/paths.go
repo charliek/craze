@@ -37,6 +37,13 @@ const (
 	removedConfigEnv = "CRAZE_CONFIG"
 )
 
+// LogsName is the logs directory's fixed name inside the native directory,
+// <native>/logs: where the sign-in log, signin.log, is kept (plan 034 §3.3,
+// Q5; internal/signinlog), 0700. It is a name, not a path, because the log
+// opens it through an os.Root of the native directory the caller holds (the
+// TUI's Config.NativeDir, the CLI's NativeDir), never through CrazeDir.
+const LogsName = "logs"
+
 // RemovedConfigEnv is the removed config-file variable's name, for the one
 // place outside this package that must name it: the hub's environment
 // contract (internal/hub, plan 032 §3.5, P13), which hands it on absolute, as

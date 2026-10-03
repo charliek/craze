@@ -171,28 +171,31 @@ const maxReply = 1 << 20
 // do sends req with the client and answers its body (within limit) and
 // status. A redirect is errRedirect; a transport error is returned with the
 // step named and the context's error preferred, so a cancel reads as one.
-func do(ctx context.Context, step string, req *http.Request, limit int64) (int, http.Header, []byte, error) {
+// Every error is labelled with step (stepError, plan 034 §3.3), which leaves
+// its text as it was: the owner of the step's deadline names a timeout by it
+// (deadlineAt), and the sign-in log records it.
+func do(ctx context.Context, step Step, req *http.Request, limit int64) (int, http.Header, []byte, error) {
 	req.Header.Set("User-Agent", userAgent)
 	resp, err := httpClient().Do(req)
 	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
-			return 0, nil, nil, ctxErr
+			return 0, nil, nil, &stepError{step: step, err: ctxErr}
 		}
-		return 0, nil, nil, fmt.Errorf("chatgptauth: %s: %w", step, transportError(err))
+		return 0, nil, nil, &stepError{step: step, err: fmt.Errorf("chatgptauth: %s: %w", step, transportError(err))}
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode >= 300 && resp.StatusCode <= 399 {
-		return resp.StatusCode, nil, nil, fmt.Errorf("chatgptauth: %s: %w", step, errRedirect)
+		return resp.StatusCode, nil, nil, &stepError{step: step, status: resp.StatusCode, err: fmt.Errorf("chatgptauth: %s: %w", step, errRedirect)}
 	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
 	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
-			return 0, nil, nil, ctxErr
+			return 0, nil, nil, &stepError{step: step, err: ctxErr}
 		}
-		return 0, nil, nil, fmt.Errorf("chatgptauth: %s: reading the reply: %w", step, transportError(err))
+		return 0, nil, nil, &stepError{step: step, err: fmt.Errorf("chatgptauth: %s: reading the reply: %w", step, transportError(err))}
 	}
 	if int64(len(body)) > limit {
-		return 0, nil, nil, fmt.Errorf("chatgptauth: %s: the reply is larger than %d bytes", step, limit)
+		return 0, nil, nil, badReply(step, fmt.Sprintf("the reply is larger than %d bytes", limit))
 	}
 	return resp.StatusCode, resp.Header, body, nil
 }
@@ -224,7 +227,7 @@ func (e endpoints) discover(ctx context.Context) (discoveryDoc, error) {
 		return discoveryDoc{}, err
 	}
 	req.Header.Set("Accept", "application/json")
-	status, _, body, err := do(ctx, "discovery", req, maxReply)
+	status, _, body, err := do(ctx, StepDiscovery, req, maxReply)
 	if err != nil {
 		return discoveryDoc{}, err
 	}
@@ -233,14 +236,14 @@ func (e endpoints) discover(ctx context.Context) (discoveryDoc, error) {
 	}
 	var doc discoveryDoc
 	if err := json.Unmarshal(body, &doc); err != nil {
-		return discoveryDoc{}, errors.New("chatgptauth: discovery: the OpenID configuration is not JSON")
+		return discoveryDoc{}, badReply(StepDiscovery, "the OpenID configuration is not JSON")
 	}
 	if doc.Issuer != "" && strings.TrimSuffix(doc.Issuer, "/") != e.issuer {
-		return discoveryDoc{}, errors.New("chatgptauth: discovery: the OpenID configuration names another issuer")
+		return discoveryDoc{}, badReply(StepDiscovery, "the OpenID configuration names another issuer")
 	}
 	for _, u := range []string{doc.JWKSURI, doc.RevocationEndpoint} {
 		if u != "" && !sameOrigin(u, e.issuer) {
-			return discoveryDoc{}, errors.New("chatgptauth: discovery: an endpoint in the OpenID configuration is not on the issuer's host")
+			return discoveryDoc{}, badReply(StepDiscovery, "an endpoint in the OpenID configuration is not on the issuer's host")
 		}
 	}
 	return doc, nil

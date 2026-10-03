@@ -31,8 +31,9 @@ const maxModelsFile = 1 << 20
 // fetches it again in the background (plan 033 §3.10).
 const ModelsMaxAge = 24 * time.Hour
 
-// modelsTimeout bounds one fetch of the model list.
-const modelsTimeout = 30 * time.Second
+// modelsTimeout bounds one fetch of the model list. A variable only so a test
+// can run the fetch past a short one (plan 034 A14).
+var modelsTimeout = 30 * time.Second
 
 // Model is one model of the plan's list as craze keeps it (P34): the slug a
 // request names, the name shown, the context window, the reasoning efforts
@@ -81,9 +82,7 @@ type Models struct {
 	Models        []Model   `json:"models"`
 }
 
-// FetchOptions are what a caller says about one model-list fetch. A later
-// field (plan 034 C2b's event observer) is added here, so FetchModels and
-// RefreshModels keep their signatures.
+// FetchOptions are what a caller says about one model-list fetch.
 type FetchOptions struct {
 	// ClientVersion is the client_version the request carries (plan 034 Q1):
 	// the caller passes the shipped catalog's pin
@@ -91,6 +90,42 @@ type FetchOptions struct {
 	// import the harness. Empty is ErrClientVersionRequired, before any
 	// request.
 	ClientVersion string
+	// Observe, when set, is told how the fetch went (plan 034 §3.3): the
+	// list fetched (its model count), an empty reply that kept the cache, or
+	// the failure (its step, status, code and class) — each with
+	// ClientVersion and the fetch's duration. The fetch after a sign-in passes
+	// its attempt's (Attempt.Observer), so its events carry the attempt's id.
+	// RefreshModels reports only a fetch it made. Called on the fetching
+	// goroutine; each Event is value-free.
+	Observe func(Event)
+}
+
+// report tells o's observer how a fetch went — fetched (m), empty
+// (ErrModelsEmpty), or failed (err) — and how long it took.
+func (o FetchOptions) report(m *Models, err error, took time.Duration) {
+	if o.Observe == nil {
+		return
+	}
+	var ev Event
+	switch {
+	case err == nil:
+		ev = Event{Kind: EventModelsFetched, Models: len(m.Models)}
+	case errors.Is(err, ErrModelsEmpty):
+		ev = Event{Kind: EventModelsEmpty}
+	default:
+		ev = failureEvent(EventModelsFailed, err, StepModels)
+	}
+	ev.ClientVersion, ev.Elapsed = o.ClientVersion, took
+	o.Observe(ev)
+}
+
+// fetchTimeout is the bound a model fetch's step ran out of: a token
+// renewal's own (refreshTimeout), else the fetch's (modelsTimeout).
+func fetchTimeout(step Step) time.Duration {
+	if step == StepRefresh {
+		return refreshTimeout
+	}
+	return modelsTimeout
 }
 
 var (
@@ -120,7 +155,19 @@ var (
 // RefreshModels takes), taken after the reply — never held across the
 // request — so a concurrent host's non-empty list cannot land between them
 // and be overwritten by an empty one (plan 034 r1 #2).
+//
+// A request that runs past modelsTimeout, or a lock held past lockWait, is a
+// StepTimeoutError naming the step (plan 034 A14). opts.Observe is told how
+// the fetch went.
 func FetchModels(ctx context.Context, src *TokenSource, opts FetchOptions) (*Models, error) {
+	start := time.Now()
+	m, err := fetchModels(ctx, src, opts)
+	opts.report(m, err, time.Since(start))
+	return m, err
+}
+
+// fetchModels is FetchModels' work.
+func fetchModels(ctx context.Context, src *TokenSource, opts FetchOptions) (*Models, error) {
 	f, err := fetchModelList(ctx, src, opts)
 	if err != nil {
 		return nil, err
@@ -160,13 +207,14 @@ func lockModels(ctx context.Context, dir string) (func(), error) {
 		unlock, err = atomicfile.LockContext(ctx, path, lockWait)
 	}
 	if err != nil {
-		return nil, fmt.Errorf("chatgptauth: taking the model list's lock: %w", err)
+		return nil, lockTimeout(StepModels, modelsLockName, fmt.Errorf("chatgptauth: taking the model list's lock: %w", err))
 	}
 	return unlock, nil
 }
 
 // fetchModelList is the request half of FetchModels: the list, parsed, and
-// the account that fetched it. It touches no file of the model list.
+// the account that fetched it. It touches no file of the model list. A
+// deadline that ran out within ctx is a StepTimeoutError naming its step.
 func fetchModelList(ctx context.Context, src *TokenSource, opts FetchOptions) (*fetchedModels, error) {
 	if opts.ClientVersion == "" {
 		return nil, ErrClientVersionRequired
@@ -176,8 +224,15 @@ func fetchModelList(ctx context.Context, src *TokenSource, opts FetchOptions) (*
 		return nil, err
 	}
 	listURL := ends.api + "/models?" + url.Values{"client_version": {opts.ClientVersion}}.Encode()
-	ctx, cancel := context.WithTimeout(ctx, modelsTimeout)
+	rctx, cancel := context.WithTimeout(ctx, modelsTimeout)
 	defer cancel()
+	f, err := requestModelList(rctx, src, ends, listURL)
+	return f, deadlineAt(ctx, err, StepModels, fetchTimeout)
+}
+
+// requestModelList is fetchModelList's request, under its deadline: a 401
+// renews the token once.
+func requestModelList(ctx context.Context, src *TokenSource, ends endpoints, listURL string) (*fetchedModels, error) {
 	for retried := false; ; retried = true {
 		tok, gen, rec, err := src.token(ctx)
 		if err != nil {
@@ -198,7 +253,7 @@ func fetchModelList(ctx context.Context, src *TokenSource, opts FetchOptions) (*
 		}
 		list, err := parseModels(body)
 		if err != nil {
-			return nil, err
+			return nil, atStep(StepModels, err)
 		}
 		return &fetchedModels{list: list, etag: etagOf(hdr), rec: rec}, nil
 	}
@@ -230,7 +285,7 @@ func storeModels(dir string, opts FetchOptions, f *fetchedModels) (*Models, erro
 		return nil, err
 	}
 	if err := atomicfile.Write(ModelsFile(dir), append(b, '\n'), 0o600); err != nil {
-		return nil, err
+		return nil, atStep(StepModels, err)
 	}
 	return m, nil
 }
@@ -260,7 +315,7 @@ func (e endpoints) apiGET(ctx context.Context, rawURL, token string) (int, http.
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Accept", "application/json")
-	return do(ctx, "models", req, maxModelsReply)
+	return do(ctx, StepModels, req, maxModelsReply)
 }
 
 // parseModels reads the list's {"models":[…]} (codex's catalog shape, not
@@ -272,7 +327,7 @@ func parseModels(body []byte) ([]Model, error) {
 		Models []json.RawMessage `json:"models"`
 	}
 	if err := json.Unmarshal(body, &doc); err != nil || doc.Models == nil {
-		return nil, errors.New("chatgptauth: models: the reply is not a model list")
+		return nil, badReply(StepModels, "the reply is not a model list")
 	}
 	var out []Model
 	for _, raw := range doc.Models {
@@ -380,30 +435,39 @@ func ReadModels(dir string) (*Models, error) {
 // made again under the list's own lock (chatgpt-models.json.lock), so
 // several hosts opening at once fetch it once. A list fetched with another
 // client_version than opts', or none, is not current (plan 034 Q3). It
-// answers whether it fetched.
+// answers whether it fetched. opts.Observe is told how a fetch it made went,
+// or why it could not decide; a list it found current is no event.
 func RefreshModels(ctx context.Context, src *TokenSource, maxAge time.Duration, opts FetchOptions) (bool, error) {
+	start := time.Now()
+	m, err := refreshModels(ctx, src, maxAge, opts)
+	if m != nil || err != nil {
+		opts.report(m, err, time.Since(start))
+	}
+	return m != nil, err
+}
+
+// refreshModels is RefreshModels' work: the list it fetched, or nil when the
+// cache was current.
+func refreshModels(ctx context.Context, src *TokenSource, maxAge time.Duration, opts FetchOptions) (*Models, error) {
 	if opts.ClientVersion == "" {
-		return false, ErrClientVersionRequired
+		return nil, ErrClientVersionRequired
 	}
 	if modelsCurrent(src.dir, maxAge, opts.ClientVersion) {
-		return false, nil
+		return nil, nil
 	}
 	unlock, err := lockModels(ctx, src.dir)
 	if err != nil {
-		return false, err
+		return nil, err
 	}
 	defer unlock()
 	if modelsCurrent(src.dir, maxAge, opts.ClientVersion) {
-		return false, nil
+		return nil, nil
 	}
 	f, err := fetchModelList(ctx, src, opts)
 	if err != nil {
-		return false, err
+		return nil, err
 	}
-	if _, err := storeModels(src.dir, opts, f); err != nil {
-		return false, err
-	}
-	return true, nil
+	return storeModels(src.dir, opts, f)
 }
 
 // modelsCurrent says dir's model list is the registered account's and was

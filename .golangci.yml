@@ -87,6 +87,24 @@ linters:
             - "!$test"
           allow:
             - $gostd
+        # The sign-in log (plan 034 §3.3, D-83): outside the harness, built on
+        # the standard library and the three craze leaves it needs —
+        # internal/chatgptauth (the events and the sets every field is
+        # validated against), internal/atomicfile (the lock every record takes)
+        # and internal/paths (the logs directory's name) — and nothing else:
+        # never the harness, nor the TUI or the CLI, which write it. Strict, so
+        # any other package is denied by default. Non-test files only, as
+        # caplog's rule: its tests are free to import more.
+        signinlog:
+          list-mode: strict
+          files:
+            - "**/internal/signinlog/**"
+            - "!$test"
+          allow:
+            - $gostd
+            - github.com/charliek/craze/internal/chatgptauth
+            - github.com/charliek/craze/internal/atomicfile
+            - github.com/charliek/craze/internal/paths
         # The engine's own import boundary (plan 021 §3.1): it sits above the
         # provider seam (agent.Session) and knows nothing of any one client or
         # provider transport, so a non-test file here may import neither

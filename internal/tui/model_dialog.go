@@ -13,6 +13,7 @@ import (
 
 	"github.com/charliek/craze/internal/agent"
 	"github.com/charliek/craze/internal/backend"
+	"github.com/charliek/craze/internal/chatgptauth"
 	"github.com/charliek/craze/internal/engine"
 )
 
@@ -511,7 +512,7 @@ func (m Model) closeDialog(revert bool) Model {
 		// outlives the dialog (plan 031 §3.9, astra 15). So does a sign-in's
 		// attempt, its listener closed (plan 033 §3.13).
 		m.dialog = dialogNone
-		m.cdlg.signIn.end()
+		m.cdlg.signIn.end(chatgptauth.CloseDialog)
 		m.cdlg = connectDialog{}
 	case dialogHelp:
 		m.dialog = dialogNone

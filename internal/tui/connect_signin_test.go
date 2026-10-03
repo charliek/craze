@@ -20,6 +20,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -31,6 +32,8 @@ import (
 
 	"github.com/charliek/craze/internal/chatgptauth"
 	"github.com/charliek/craze/internal/harness/modeltable"
+	"github.com/charliek/craze/internal/paths"
+	"github.com/charliek/craze/internal/signinlog"
 )
 
 // /connect's ChatGPT sign-in (plan 033 §3.13) as unit tests: the TUI's seams
@@ -75,11 +78,12 @@ var signInURL = "https://auth.openai.com/api/accounts/authorize?" + url.Values{
 }.Encode()
 
 // fakeSignIn is a stand-in chatgptauth.Attempt: its addresses are fixed, a
-// pasted redirect is taken when it is the stand-in's address with its state,
-// and Wait answers res (or err) once one arrives — pasted, or the browser's
-// (browse) — the context's error once ctx ends, closing it, and
-// ErrAttemptOver once it is closed. When it listens it holds a real loopback
-// listener, so a test can see Esc close it.
+// pasted line is judged as the real attempt judges it (Paste), a redirect is
+// taken when it is the stand-in's address with its state, and Wait answers
+// res (or err) once one arrives — pasted, or the browser's (browse) — the
+// context's error once ctx ends, closing it, and ErrAttemptOver once it is
+// closed. When it listens it holds a real loopback listener, so a test can
+// see Esc close it. It records every Close's reason and every Report.
 type fakeSignIn struct {
 	listening bool
 	res       chatgptauth.Result
@@ -87,10 +91,13 @@ type fakeSignIn struct {
 	ln        net.Listener
 	lnErr     error // the listener could not be opened: the begin's error
 
-	mu      sync.Mutex
-	over    bool
-	pastes  int // redirects taken
-	refused int // pastes refused as another attempt's
+	mu       sync.Mutex
+	over     bool
+	pastes   int                       // redirects taken
+	refusals []chatgptauth.PasteError  // every paste refused, as the attempt refused it
+	reasons  []chatgptauth.CloseReason // every Close's reason, in order
+	reported []chatgptauth.EventKind   // every Report's kind
+	observe  func(chatgptauth.Event)   // the begin's observer
 
 	got        chan struct{}
 	closed     chan struct{}
@@ -133,19 +140,29 @@ func (f *fakeSignIn) URL() string         { return signInURL }
 func (f *fakeSignIn) RedirectURI() string { return signInRedirect }
 func (f *fakeSignIn) Listening() bool     { return f.listening }
 
+// Paste judges raw as chatgptauth.Attempt.Paste does (plan 034 §3.3): longer
+// than MaxPaste, not an address, another address than the stand-in's redirect
+// (PartPath), the attempt over, or its redirect address with another state
+// (PartState).
 func (f *fakeSignIn) Paste(raw string) error {
-	u, err := url.Parse(strings.TrimSpace(raw))
-	if err != nil || u.Scheme+"://"+u.Host+u.Path != signInRedirect {
-		return chatgptauth.ErrRedirectMismatch
-	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if f.over {
-		return chatgptauth.ErrAttemptOver
+	refuse := func(pe chatgptauth.PasteError) error {
+		f.refusals = append(f.refusals, pe)
+		return &pe
 	}
-	if u.Query().Get("state") != signInGoldenState {
-		f.refused++
-		return chatgptauth.ErrRedirectMismatch
+	u, err := url.Parse(strings.TrimSpace(raw))
+	switch {
+	case len(raw) > chatgptauth.MaxPaste:
+		return refuse(chatgptauth.PasteError{Refusal: chatgptauth.RefusalTooLong})
+	case err != nil || u.Scheme == "" || u.Host == "":
+		return refuse(chatgptauth.PasteError{Refusal: chatgptauth.RefusalNotAddress})
+	case u.Scheme+"://"+u.Host+u.Path != signInRedirect:
+		return refuse(chatgptauth.PasteError{Refusal: chatgptauth.RefusalMismatch, Part: chatgptauth.PartPath})
+	case f.over:
+		return chatgptauth.ErrAttemptOver
+	case u.Query().Get("state") != signInGoldenState:
+		return refuse(chatgptauth.PasteError{Refusal: chatgptauth.RefusalMismatch, Part: chatgptauth.PartState})
 	}
 	f.over = true
 	f.pastes++
@@ -168,17 +185,54 @@ func (f *fakeSignIn) Wait(ctx context.Context) (chatgptauth.Result, error) {
 	defer f.waitedOnce.Do(func() { close(f.waited) })
 	select {
 	case <-f.got:
-		f.Close()
+		f.shut()
 		return f.res, f.err
 	case <-ctx.Done():
-		f.Close()
+		f.shut()
 		return chatgptauth.Result{}, ctx.Err()
 	case <-f.closed:
 		return chatgptauth.Result{}, chatgptauth.ErrAttemptOver
 	}
 }
 
-func (f *fakeSignIn) Close() {
+// Close records why, and closes the stand-in, once.
+func (f *fakeSignIn) Close(reason chatgptauth.CloseReason) {
+	f.mu.Lock()
+	f.reasons = append(f.reasons, reason)
+	f.mu.Unlock()
+	f.shut()
+}
+
+// Report records kind.
+func (f *fakeSignIn) Report(kind chatgptauth.EventKind) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.reported = append(f.reported, kind)
+}
+
+// Observer is the begin's observer, as the real attempt's is.
+func (f *fakeSignIn) Observer() func(chatgptauth.Event) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.observe
+}
+
+// closeReasons is every Close's reason so far, and reports every Report's
+// kind.
+func (f *fakeSignIn) closeReasons() []chatgptauth.CloseReason {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return slices.Clone(f.reasons)
+}
+
+func (f *fakeSignIn) reports() []chatgptauth.EventKind {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return slices.Clone(f.reported)
+}
+
+// shut is the close itself: Wait's own, which no caller asked for.
+func (f *fakeSignIn) shut() {
 	f.closeOnce.Do(func() {
 		f.mu.Lock()
 		f.over = true
@@ -199,10 +253,17 @@ func (f *fakeSignIn) isClosed() bool {
 	}
 }
 
+// counts is the redirects taken, and the pastes refused as another
+// attempt's (PartState).
 func (f *fakeSignIn) counts() (pastes, refused int) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return f.pastes, f.refused
+	for _, pe := range f.refusals {
+		if pe.Part == chatgptauth.PartState {
+			refused++
+		}
+	}
+	return f.pastes, refused
 }
 
 // listenerUp says the stand-in's listener still takes connections.
@@ -240,6 +301,10 @@ type signInStandIns struct {
 	fetchErr error
 	marks    atomic.Int32
 	fetches  atomic.Int32
+	// observed counts the model fetches handed an observer, and begunWith
+	// the begins handed one.
+	observed  atomic.Int32
+	begunWith atomic.Int32
 }
 
 // standInSignIn swaps the step's seams for stand-ins until the test ends. Its
@@ -250,10 +315,13 @@ func standInSignIn(t *testing.T, make func() *fakeSignIn) *signInStandIns {
 	t.Helper()
 	s := &signInStandIns{make: make}
 	prevBegin, prevFetch, prevMark := beginSignIn, fetchPlanModels, markNoticeShown
-	beginSignIn = func(ctx context.Context, dir string) (signInAttempt, error) {
+	beginSignIn = func(ctx context.Context, dir string, observe func(chatgptauth.Event)) (signInAttempt, error) {
 		s.mu.Lock()
 		defer s.mu.Unlock()
 		s.dirs = append(s.dirs, dir)
+		if observe != nil {
+			s.begunWith.Add(1)
+		}
 		if s.beginErr != nil {
 			return nil, s.beginErr
 		}
@@ -261,11 +329,15 @@ func standInSignIn(t *testing.T, make func() *fakeSignIn) *signInStandIns {
 		if f.lnErr != nil {
 			return nil, f.lnErr
 		}
+		f.observe = observe
 		s.made = append(s.made, f)
 		return f, nil
 	}
-	fetchPlanModels = func(ctx context.Context, dir string) (*chatgptauth.Models, error) {
+	fetchPlanModels = func(ctx context.Context, dir string, observe func(chatgptauth.Event)) (*chatgptauth.Models, error) {
 		s.fetches.Add(1)
+		if observe != nil {
+			s.observed.Add(1)
+		}
 		if s.fetchErr != nil {
 			return nil, s.fetchErr
 		}
@@ -278,7 +350,7 @@ func standInSignIn(t *testing.T, make func() *fakeSignIn) *signInStandIns {
 	t.Cleanup(func() {
 		beginSignIn, fetchPlanModels, markNoticeShown = prevBegin, prevFetch, prevMark
 		for _, f := range s.all() {
-			f.Close()
+			f.Close(chatgptauth.CloseDone)
 		}
 		awaitNoSignInRun(t)
 	})
@@ -369,6 +441,10 @@ func signInModel(t *testing.T, planOff bool) (Model, string) {
 	t.Helper()
 	dir, getenv := signInFixture(t, planOff)
 	m := connectModel(t, nativeStub(), dir, getenv)
+	// The sign-in log the first begin opens is closed when the test ends —
+	// after its attempts (beginStep's cleanup), so their ends are written —
+	// as finishRun closes it, so its writer outlives no test.
+	t.Cleanup(m.signIns.closeLog)
 	m, _ = typeCommand(t, m, "/connect")
 	if p, ok := m.cdlg.provider(); !ok || !p.SignIn {
 		t.Fatalf("step one does not open on the ChatGPT plan (on %q)", p.Name)
@@ -391,7 +467,7 @@ func beginStep(t *testing.T, m Model) (Model, tea.Cmd) {
 		t.Fatal("Enter on the ChatGPT plan did not begin a sign-in")
 	}
 	if begun.att != nil {
-		t.Cleanup(begun.att.Close)
+		t.Cleanup(func() { begun.att.Close(chatgptauth.CloseDone) })
 	}
 	tm, wait := m.Update(begun)
 	return tm.(Model), wait
@@ -408,7 +484,7 @@ func runWait(t *testing.T, m Model, wait tea.Cmd) <-chan tea.Msg {
 	out := make(chan tea.Msg, 1)
 	joined := make(chan struct{})
 	t.Cleanup(func() {
-		run.end()
+		run.end(chatgptauth.CloseDialog)
 		select {
 		case <-joined:
 		case <-time.After(10 * time.Second):
@@ -522,6 +598,9 @@ func TestConnectSignInEscClosesTheListener(t *testing.T) {
 	if !f.isClosed() || f.listenerUp() {
 		t.Fatal("Esc left the attempt's listener open")
 	}
+	if r := f.closeReasons(); len(r) == 0 || r[0] != chatgptauth.CloseEsc {
+		t.Fatalf("Esc closed the attempt with %v; want esc first (plan 034 §3.3)", r)
+	}
 	if !f.waitEnded(5 * time.Second) {
 		t.Fatal("Esc left the attempt's wait running")
 	}
@@ -545,10 +624,11 @@ func TestConnectSignInEndsOnEveryWayOut(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		out  func(Model) Model
+		why  chatgptauth.CloseReason
 	}{
-		{"closeDialog", func(m Model) Model { return m.closeDialog(true) }},
-		{"dropConnect", func(m Model) Model { return m.dropConnect() }},
-		{"withSession", func(m Model) Model { return m.withSession(sessionSeed{workspace: t.TempDir()}) }},
+		{"closeDialog", func(m Model) Model { return m.closeDialog(true) }, chatgptauth.CloseDialog},
+		{"dropConnect", func(m Model) Model { return m.dropConnect() }, chatgptauth.CloseShutdown},
+		{"withSession", func(m Model) Model { return m.withSession(sessionSeed{workspace: t.TempDir()}) }, chatgptauth.CloseDialog},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			m, _ := signInModel(t, false)
@@ -559,6 +639,9 @@ func TestConnectSignInEndsOnEveryWayOut(t *testing.T) {
 			}
 			if _ = tc.out(m); !f.isClosed() || f.listenerUp() {
 				t.Fatalf("%s left the attempt's listener open", tc.name)
+			}
+			if r := f.closeReasons(); len(r) == 0 || r[0] != tc.why {
+				t.Fatalf("%s closed the attempt with %v; want %s first (plan 034 §3.3)", tc.name, r, tc.why)
 			}
 		})
 	}
@@ -573,14 +656,48 @@ func TestConnectSignInEndsOnEveryWayOut(t *testing.T) {
 		if !f.isClosed() || wait != nil || m.cdlg.signIn.att != nil {
 			t.Fatal("an attempt that began after its step had gone was not closed")
 		}
+		if r := f.closeReasons(); len(r) == 0 || r[0] != chatgptauth.CloseEsc {
+			t.Fatalf("the late attempt was closed with %v; want esc, its run's end (plan 034 §3.3)", r)
+		}
+	})
+	t.Run("a begin its run's end beat", func(t *testing.T) {
+		// The run ends (Esc) while Begin is still running: Begin's attempt
+		// is not adopted, and the command closes it with the run's own
+		// reason, read from its context's cause (endReason).
+		s := standInSignIn(t, func() *fakeSignIn { return newFakeSignIn(true, chatgptauth.Result{}) })
+		release := make(chan struct{})
+		standIn := beginSignIn
+		beginSignIn = func(ctx context.Context, dir string, observe func(chatgptauth.Event)) (signInAttempt, error) {
+			<-release
+			return standIn(ctx, dir, observe)
+		}
+		t.Cleanup(func() { beginSignIn = standIn })
+		m, _ := signInModel(t, false)
+		m, cmd := press(m, enter())
+		answer := make(chan tea.Msg, 1)
+		go func() { answer <- runCmd(cmd) }()
+		_ = pressKey(t, m, tea.KeyEsc)
+		close(release)
+		if begun, ok := awaitMsg(t, answer).(signInBegunMsg); !ok || begun.att != nil {
+			t.Fatal("a begin after its run ended was answered as begun")
+		}
+		made := s.all()
+		if len(made) != 1 || !made[0].isClosed() {
+			t.Fatal("a begin after its run ended left its attempt open")
+		}
+		if r := made[0].closeReasons(); len(r) != 1 || r[0] != chatgptauth.CloseEsc {
+			t.Fatalf("a begin after its run ended was closed with %v; want esc", r)
+		}
+		awaitNoSignInRun(t)
 	})
 }
 
-// TestConnectSignInPasteIsRefusedUnquoted: what Enter hands the attempt.
-// A line that is not an address — a key pasted out of habit — is refused in
-// the field, emptied, never quoted and never handed over; so is another
-// attempt's address. The control is the stand-in's own redirect, which is
-// handed over once and ends the field.
+// TestConnectSignInPasteIsRefusedUnquoted: what Enter hands the attempt, and
+// how its refusal is phrased (plan 034 §3.3: the attempt judges every line).
+// A line that is not an address — a key pasted out of habit — is refused as
+// one, the field emptied, never quoted; another attempt's redirect is told as
+// an earlier attempt's; another address as not this sign-in's. The control is
+// the stand-in's own redirect, which is handed over once and ends the field.
 func TestConnectSignInPasteIsRefusedUnquoted(t *testing.T) {
 	standInSignIn(t, func() *fakeSignIn { return newFakeSignIn(false, chatgptauth.Result{}) })
 	m, _ := signInModel(t, false)
@@ -597,17 +714,22 @@ func TestConnectSignInPasteIsRefusedUnquoted(t *testing.T) {
 	if !strings.Contains(m.cdlg.keyErr, "never by an API key") || m.cdlg.key.Value() != "" {
 		t.Fatalf("a key was not refused as one, the field emptied (%q)", m.cdlg.keyErr)
 	}
-	if p, r := f.counts(); p != 0 || r != 0 {
-		t.Fatal("a line that is not an address reached the attempt")
+	if p, r := f.counts(); p != 0 || r != 0 || !slices.Equal(f.refusals, []chatgptauth.PasteError{{Refusal: chatgptauth.RefusalNotAddress}}) {
+		t.Fatalf("a line that is not an address was taken, or not refused as one (%v)", f.refusals)
 	}
 
 	m, _ = press(m, pasteKey(signInRedirect+"?code=other&state=another-attempts-state"))
 	m, _ = press(m, enter())
-	if !strings.Contains(m.cdlg.keyErr, "not this sign-in's redirect address") || m.cdlg.key.Value() != "" {
-		t.Fatalf("another attempt's address was not refused (%q)", m.cdlg.keyErr)
+	if m.cdlg.keyErr != connectSignInEarlierText || m.cdlg.key.Value() != "" {
+		t.Fatalf("another attempt's redirect was not refused as an earlier attempt's (%q)", m.cdlg.keyErr)
 	}
 	if strings.Contains(connectView(t, m), "another-attempts-state") {
 		t.Fatal("the refusal quotes the pasted address")
+	}
+	m, _ = press(m, pasteKey("http://127.0.0.1:1455/elsewhere?code=other&state="+signInGoldenState))
+	m, _ = press(m, enter())
+	if !strings.Contains(m.cdlg.keyErr, "not this sign-in's redirect address") || m.cdlg.key.Value() != "" {
+		t.Fatalf("another address was not refused as not this sign-in's (%q)", m.cdlg.keyErr)
 	}
 
 	// The control.
@@ -671,6 +793,10 @@ func TestConnectSignInCopiesTheAddress(t *testing.T) {
 	}
 	tm, _ := m.Update(runCmd(cmd))
 	m = tm.(Model)
+	f := m.cdlg.signIn.att.(*fakeSignIn)
+	if len(f.reports()) != 0 {
+		t.Fatal("the control: the attempt was told of a copy before Ctrl+Y")
+	}
 	_, copied := press(m, tea.KeyMsg{Type: tea.KeyCtrlY})
 	done, ok := runCmd(copied).(clipboardDoneMsg)
 	if !ok || done.note != connectSignInCopied {
@@ -678,6 +804,9 @@ func TestConnectSignInCopiesTheAddress(t *testing.T) {
 	}
 	if c := rec.copies(); len(c) != 1 || c[0] != signInURL {
 		t.Fatalf("Ctrl+Y copied %q, not the address", c)
+	}
+	if r := f.reports(); !slices.Equal(r, []chatgptauth.EventKind{chatgptauth.EventAddressCopied}) {
+		t.Fatalf("Ctrl+Y reported %v; want address_copied (plan 034 §3.3)", r)
 	}
 }
 
@@ -749,6 +878,8 @@ func TestConnectSignInFailures(t *testing.T) {
 	}{
 		{"declined", nil, chatgptauth.ErrAccessDenied, "/connect: the sign-in was declined in the browser; nothing was changed"},
 		{"exchange", nil, &chatgptauth.OAuthError{Step: "exchange", Status: 400, Code: "invalid_grant"}, "/connect: exchange refused (HTTP 400, invalid_grant)"},
+		// A step that ran out of time is named (plan 034 A14).
+		{"exchange timed out", nil, &chatgptauth.StepTimeoutError{Step: chatgptauth.StepExchange, After: 30 * time.Second}, "/connect: exchange: timed out after 30s"},
 		{"begin", errors.New("chatgptauth: the host id is malformed"), nil, "/connect: the sign-in could not start: the host id is malformed"},
 		{"control", nil, nil, ""},
 	} {
@@ -999,9 +1130,9 @@ func TestConnectSignInEndsAtFinishRun(t *testing.T) {
 		s := standInSignIn(t, func() *fakeSignIn { return newFakeSignIn(true, chatgptauth.Result{}) })
 		release := make(chan struct{})
 		standIn := beginSignIn
-		beginSignIn = func(ctx context.Context, dir string) (signInAttempt, error) {
+		beginSignIn = func(ctx context.Context, dir string, observe func(chatgptauth.Event)) (signInAttempt, error) {
 			<-release
-			return standIn(ctx, dir)
+			return standIn(ctx, dir, observe)
 		}
 		t.Cleanup(func() { beginSignIn = standIn })
 		initial, _ := signInModel(t, false)
@@ -1265,6 +1396,115 @@ func TestConnectSignInPastedRedirectAgainstFakeIssuer(t *testing.T) {
 		}
 	}
 	awaitNoSignInRun(t)
+
+	// The sign-in log (plan 034 §3.3, A11): the attempt, surface tui, from
+	// its begin to its model fetch, holding none of the sign-in's values.
+	m.signIns.closeLog()
+	recs, raw := tuiSignInLog(t, dir)
+	if got, want := recordKinds(recs), []string{"begin", "redirect_received", "signed_in", "models_fetched"}; !slices.Equal(got, want) {
+		t.Fatalf("the sign-in log holds %v; want %v", got, want)
+	}
+	for _, r := range recs {
+		if r["surface"] != "tui" || r["attempt"] != recs[0]["attempt"] {
+			t.Fatalf("a record is not the attempt's, surface tui: %v", r)
+		}
+	}
+	if recs[2]["usage"] != "plan" || recs[2]["registration"] != "new" || recs[3]["models"] != 1.0 {
+		t.Fatalf("the outcome and the fetch: %v, %v", recs[2], recs[3])
+	}
+	for i, v := range append(secrets, redirect, s.url, s.state, ru.Query().Get("code"), issuerClient, issuerSubject, signInEmail) {
+		for _, form := range []string{v, url.QueryEscape(v), url.PathEscape(v)} {
+			if strings.Contains(raw, form) {
+				t.Fatalf("the sign-in log holds fixture value %d (%d bytes) or one of its encodings", i, len(v))
+			}
+		}
+	}
+}
+
+// tuiSignInLog is dir's sign-in log: its records, decoded, and its text.
+func tuiSignInLog(t *testing.T, dir string) ([]map[string]any, string) {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join(dir, paths.LogsName, signinlog.FileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var recs []map[string]any
+	if len(b) == 0 {
+		return nil, ""
+	}
+	for _, line := range strings.Split(strings.TrimSuffix(string(b), "\n"), "\n") {
+		var rec map[string]any
+		if err := json.Unmarshal([]byte(line), &rec); err != nil {
+			t.Fatalf("a record is not JSON: %v", err)
+		}
+		recs = append(recs, rec)
+	}
+	return recs, string(b)
+}
+
+// recordKinds is the event of each record.
+func recordKinds(recs []map[string]any) []string {
+	var out []string
+	for _, r := range recs {
+		k, _ := r["event"].(string)
+		out = append(out, k)
+	}
+	return out
+}
+
+// TestConnectSignInLogsThroughItsObserver (plan 034 §3.3): each run's begin is
+// handed the observer that records in the TUI's own directory's sign-in log,
+// surface tui, and finishRun flushes it; a log that is refused — a symlink
+// where its directory goes — is one transcript note however many sign-ins
+// begin, and every sign-in begins all the same. The control is a log free to
+// open: no note, and the record written.
+func TestConnectSignInLogsThroughItsObserver(t *testing.T) {
+	for _, refused := range []bool{false, true} {
+		t.Run(map[bool]string{false: "control", true: "refused"}[refused], func(t *testing.T) {
+			s := standInSignIn(t, func() *fakeSignIn { return newFakeSignIn(false, chatgptauth.Result{}) })
+			initial, dir := signInModel(t, false)
+			elsewhere := t.TempDir()
+			if refused {
+				if err := os.Symlink(elsewhere, filepath.Join(dir, paths.LogsName)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			m := initial
+			for range 2 {
+				m, _ = beginStep(t, m)
+				f := m.cdlg.signIn.att.(*fakeSignIn)
+				if f.Observer() == nil {
+					t.Fatal("the begin was handed no observer")
+				}
+				f.Observer()(chatgptauth.Event{Kind: chatgptauth.EventBegin, Attempt: "0a1b2c3d", Mode: chatgptauth.ModePasteOnly, Port: 1455})
+				m = pressKey(t, m, tea.KeyEsc) // back to step one, the plan still selected
+			}
+			_, _ = finishRun(io.Discard, nil, initial, nil)
+			if initial.signIns.logFor(dir) != nil {
+				t.Fatal("finishRun left the sign-in log open")
+			}
+			notes := strings.Count(transcriptText(m), "the sign-in log is off: ")
+			if ents, _ := os.ReadDir(elsewhere); len(ents) != 0 {
+				t.Fatal("the log was written through the symlink")
+			}
+			if s.begunWith.Load() < 2 {
+				t.Fatal("a begin was handed no observer")
+			}
+			if refused {
+				if notes != 1 || !strings.Contains(transcriptText(m), "is a symbolic link") {
+					t.Fatalf("want one note saying the log's directory is a symlink:\n%s", transcriptText(m))
+				}
+				return
+			}
+			if notes != 0 {
+				t.Fatalf("the control noted the log:\n%s", transcriptText(m))
+			}
+			recs, _ := tuiSignInLog(t, dir)
+			if len(recs) != 2 || recs[0]["surface"] != "tui" || recs[0]["event"] != "begin" {
+				t.Fatalf("the log holds %v; want the two begins, surface tui, flushed by finishRun", recs)
+			}
+		})
+	}
 }
 
 // TestConnectSignInEscClosesTheRealListener: the same Esc as
@@ -1279,7 +1519,7 @@ func TestConnectSignInPastedRedirectAgainstFakeIssuer(t *testing.T) {
 // before Esc, which takes a connection.
 func TestConnectSignInEscClosesTheRealListener(t *testing.T) {
 	newFakeIssuer(t)
-	m, _ := signInModel(t, true)
+	m, dir := signInModel(t, true)
 	m, wait := beginStep(t, m)
 	done := runWait(t, m, wait)
 	s := m.cdlg.signIn
@@ -1304,4 +1544,11 @@ func TestConnectSignInEscClosesTheRealListener(t *testing.T) {
 		t.Fatal("Esc did not go back to step one")
 	}
 	awaitNoSignInRun(t)
+	// The log has the attempt's begin and its one outcome: cancelled by Esc
+	// (plan 034 §3.3).
+	m.signIns.closeLog()
+	recs, _ := tuiSignInLog(t, dir)
+	if got := recordKinds(recs); !slices.Equal(got, []string{"begin", "cancelled"}) || recs[1]["reason"] != "esc" || recs[0]["registration"] != "reused" {
+		t.Fatalf("the sign-in log holds %v; want the re-login's begin, then cancelled by esc", recs)
+	}
 }

@@ -3,11 +3,14 @@ package cli
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
+	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"sync"
@@ -20,14 +23,18 @@ import (
 
 	"github.com/charliek/craze/internal/chatgptauth"
 	"github.com/charliek/craze/internal/harness/modeltable"
+	"github.com/charliek/craze/internal/paths"
+	"github.com/charliek/craze/internal/signinlog"
 )
 
 // craze auth for the ChatGPT plan (plan 033 §3.13). These tests drive the
 // CLI's own work — the waits, the texts, the browser rule, Ctrl-C — through
 // auth_chatgpt.go's seams, with a stand-in for chatgptauth's Attempt
 // (fakeSignIn) that keeps its documented contract: a redirect is accepted
-// once, pasted or from the listener; anything else pasted is
-// ErrRedirectMismatch; a cancelled Wait closes the attempt. The sign-in's
+// once, pasted or from the listener; anything else pasted is refused as the
+// attempt refuses it (a *chatgptauth.PasteError: too long, not an address, or
+// the part that is not this attempt's redirect); a cancelled Wait closes the
+// attempt. The sign-in's
 // real wire — PKCE, state, the id_token over JWKS — is chatgptauth's own
 // tests' and tests/cli/test_auth.py's, against fake issuers. No test here
 // opens a browser or reaches OpenAI (TestMain fences the endpoints anyway).
@@ -57,6 +64,9 @@ type fakeSignIn struct {
 	markErr     error
 	logout      chatgptauth.LogoutResult
 	logoutErr   error
+	// begin, when its Kind is set, is the event the stand-in's begin reports
+	// to the sign-in's observer, as chatgptauth.Begin reports its own.
+	begin chatgptauth.Event
 	// pasteHold, when set, keeps an accepted Paste from returning until it is
 	// closed, and waitHold a Wait whose redirect is in: a case orders the
 	// sign-in's loop with them (TestAuthLoginChatGPTConfirmsAPasteEitherWay).
@@ -66,8 +76,12 @@ type fakeSignIn struct {
 	mu       sync.Mutex
 	opts     chatgptauth.BeginOptions
 	pastes   []string
+	refusals []chatgptauth.PasteError // every paste refused, as the attempt refused it
 	over     bool
 	closed   bool
+	reasons  []chatgptauth.CloseReason // every Close's reason, in order
+	reported []chatgptauth.EventKind   // every Report's kind
+	observed bool                      // the model fetch was handed an observer
 	opened   []string
 	marked   int
 	fetched  int
@@ -104,19 +118,25 @@ func useFakeSignIn(t *testing.T) *fakeSignIn {
 	})
 	beginSignIn = func(_ context.Context, dir string, opts chatgptauth.BeginOptions) (signInAttempt, error) {
 		f.mu.Lock()
-		defer f.mu.Unlock()
 		if f.beginErr != nil {
+			f.mu.Unlock()
 			return nil, f.beginErr
 		}
 		f.opts = opts
 		if opts.PasteOnly {
 			f.listening = false
 		}
+		begin := f.begin
+		f.mu.Unlock()
+		if begin.Kind != "" && opts.Observe != nil {
+			opts.Observe(begin)
+		}
 		return f, nil
 	}
-	fetchPlanModels = func(ctx context.Context, _ string) (*chatgptauth.Models, error) {
+	fetchPlanModels = func(ctx context.Context, _ string, observe func(chatgptauth.Event)) (*chatgptauth.Models, error) {
 		f.mu.Lock()
 		f.fetched++
+		f.observed = observe != nil
 		block, models, err := f.fetchBlocks, f.models, f.fetchErr
 		f.mu.Unlock()
 		if block {
@@ -171,16 +191,32 @@ func (f *fakeSignIn) Listening() bool {
 	return f.listening
 }
 
+// Paste judges raw as chatgptauth.Attempt.Paste does (plan 034 §3.3): longer
+// than MaxPaste, not an address, or — once the attempt is not over — another
+// address than the stand-in's redirect (PartPath), or its redirect address
+// with another query (PartState: the stand-in's state is its only one).
 func (f *fakeSignIn) Paste(raw string) error {
 	f.mu.Lock()
 	f.pastes = append(f.pastes, raw)
+	refuse := func(pe chatgptauth.PasteError) error {
+		f.refusals = append(f.refusals, pe)
+		f.mu.Unlock()
+		return &pe
+	}
+	trimmed := strings.TrimSpace(raw)
+	u, err := url.Parse(trimmed)
 	switch {
+	case len(raw) > chatgptauth.MaxPaste:
+		return refuse(chatgptauth.PasteError{Refusal: chatgptauth.RefusalTooLong})
+	case err != nil || u.Scheme == "" || u.Host == "":
+		return refuse(chatgptauth.PasteError{Refusal: chatgptauth.RefusalNotAddress})
 	case f.over:
 		f.mu.Unlock()
 		return chatgptauth.ErrAttemptOver
-	case strings.TrimSpace(raw) != signInGood:
-		f.mu.Unlock()
-		return chatgptauth.ErrRedirectMismatch
+	case trimmed != signInGood && u.Scheme+"://"+u.Host+u.Path == signInRedirect:
+		return refuse(chatgptauth.PasteError{Refusal: chatgptauth.RefusalMismatch, Part: chatgptauth.PartState})
+	case trimmed != signInGood:
+		return refuse(chatgptauth.PasteError{Refusal: chatgptauth.RefusalMismatch, Part: chatgptauth.PartPath})
 	}
 	f.over = true
 	close(f.got)
@@ -211,14 +247,24 @@ func (f *fakeSignIn) Wait(ctx context.Context) (chatgptauth.Result, error) {
 		}
 		return f.result, f.waitErr
 	case <-ctx.Done():
-		f.Close()
+		f.shut()
 		return chatgptauth.Result{}, ctx.Err()
 	case <-f.closedCh:
 		return chatgptauth.Result{}, chatgptauth.ErrAttemptOver
 	}
 }
 
-func (f *fakeSignIn) Close() {
+// Close records why, and closes the stand-in, once.
+func (f *fakeSignIn) Close(reason chatgptauth.CloseReason) {
+	f.mu.Lock()
+	f.reasons = append(f.reasons, reason)
+	f.mu.Unlock()
+	f.shut()
+}
+
+// shut is the close itself: a Wait's own, on its context's end, which no
+// caller asked for.
+func (f *fakeSignIn) shut() {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if !f.closed {
@@ -226,6 +272,21 @@ func (f *fakeSignIn) Close() {
 		f.over = true
 		close(f.closedCh)
 	}
+}
+
+// Report records kind.
+func (f *fakeSignIn) Report(kind chatgptauth.EventKind) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.reported = append(f.reported, kind)
+}
+
+// Observer is the begin's observer, as the real attempt's is: what the
+// sign-in hands the model fetch.
+func (f *fakeSignIn) Observer() func(chatgptauth.Event) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.opts.Observe
 }
 
 // signal sends sig to the sign-in as the OS would, once it is waiting.
@@ -323,14 +384,17 @@ func TestGUISession(t *testing.T) {
 // TestAuthLoginChatGPTPasted: with stdin not a terminal, `craze auth login
 // chatgpt --no-browser` is a paste-only sign-in: it prints the address and
 // what to paste, refuses — without quoting — a line that is not an address
-// (a key, the likeliest mistake, never reaches the attempt) and an address
-// that is not this sign-in's, takes the right one, and prints the account,
-// the one-time notice (recorded as shown) and the plan's models, fetched.
+// (a key, the likeliest mistake: the attempt refuses it, plan 034 §3.3), the
+// redirect of an earlier attempt and another address, takes the right one,
+// and prints the account, the one-time notice (recorded as shown) and the
+// plan's models, fetched with the attempt's observer. A blank line reaches no
+// attempt. The attempt is closed as done.
 func TestAuthLoginChatGPTPasted(t *testing.T) {
 	native := authNative(t)
 	f := useFakeSignIn(t)
 	wrong := signInRedirect + "?code=stub-code&state=another-attempt"
-	stdin := strings.NewReader(authKey + "\n\n" + wrong + "\n" + signInGood + "\n")
+	other := "http://127.0.0.1:1455/elsewhere?code=stub-code&state=stub-state"
+	stdin := strings.NewReader(authKey + "\n\n" + wrong + "\n" + other + "\n" + signInGood + "\n")
 	stdout, stderr, err := runSignIn(t, stdin, "auth", "login", "chatgpt", "--no-browser")()
 	if err != nil {
 		t.Fatalf("login: %v\nstderr: %s", err, maskKeys(stderr))
@@ -342,6 +406,7 @@ func TestAuthLoginChatGPTPasted(t *testing.T) {
 		"  " + signInURL + "\n\n" +
 		"After you approve, the browser goes to an address starting with " + signInRedirect + ", which will not load: copy its whole address from the address bar and paste it here.\n" +
 		"That is not an address: the ChatGPT plan is funded by signing in, never by an API key. Paste the whole address the browser was sent to; it starts with " + signInRedirect + ".\n" +
+		"That is the redirect of an earlier sign-in attempt. Use the address shown above.\n" +
 		"That is not this sign-in's redirect address. Paste the whole address the browser was sent to; it starts with " + signInRedirect + ".\n"
 	if stderr != wantErr {
 		t.Fatalf("stderr:\n%s\nwant:\n%s", maskKeys(stderr), wantErr)
@@ -351,17 +416,24 @@ func TestAuthLoginChatGPTPasted(t *testing.T) {
 	if !f.opts.PasteOnly {
 		t.Fatal("--no-browser did not make the sign-in paste-only")
 	}
-	if len(f.pastes) != 2 || f.pastes[0] != wrong || f.pastes[1] != signInGood {
-		t.Fatalf("the attempt was handed %d lines; want the two addresses alone (no key, no blank line)", len(f.pastes))
+	if len(f.pastes) != 4 || f.pastes[0] != authKey || f.pastes[1] != wrong || f.pastes[2] != other || f.pastes[3] != signInGood {
+		t.Fatalf("the attempt was handed %d lines; want the key and the three addresses (no blank line)", len(f.pastes))
 	}
-	if f.marked != 1 || f.fetched != 1 {
-		t.Fatalf("notice recorded %d times, models fetched %d times; want 1 and 1", f.marked, f.fetched)
+	if want := []chatgptauth.PasteError{
+		{Refusal: chatgptauth.RefusalNotAddress},
+		{Refusal: chatgptauth.RefusalMismatch, Part: chatgptauth.PartState},
+		{Refusal: chatgptauth.RefusalMismatch, Part: chatgptauth.PartPath},
+	}; !slices.Equal(f.refusals, want) {
+		t.Fatalf("the attempt refused %v; want %v", f.refusals, want)
 	}
-	if len(f.opened) != 0 {
-		t.Fatal("a browser was opened")
+	if f.marked != 1 || f.fetched != 1 || !f.observed {
+		t.Fatalf("notice recorded %d times, models fetched %d times (with the observer: %v); want 1, 1 and true", f.marked, f.fetched, f.observed)
 	}
-	if !f.closed {
-		t.Fatal("the attempt was not closed")
+	if len(f.opened) != 0 || len(f.reported) != 0 {
+		t.Fatalf("a browser was opened (reported %v)", f.reported)
+	}
+	if !f.closed || !slices.Equal(f.reasons, []chatgptauth.CloseReason{chatgptauth.CloseDone}) {
+		t.Fatalf("the attempt was closed with %v; want done", f.reasons)
 	}
 	if _, err := os.Stat(filepath.Join(native, modeltable.ProvidersFile)); !errors.Is(err, os.ErrNotExist) {
 		t.Fatal("the sign-in wrote providers.toml")
@@ -385,9 +457,11 @@ func TestAuthLoginChatGPTNoticeOnce(t *testing.T) {
 }
 
 // TestAuthLoginChatGPTKeyIsRefused (plan 033 §3.13, X134): a key piped into
-// `craze auth login chatgpt` is never stored, asked for, handed to the
-// sign-in or repeated: the line is refused as not an address, saying the plan
-// takes no key, and a paste-only sign-in whose stdin then ends exits 1.
+// `craze auth login chatgpt` is never stored, asked for or repeated: the
+// attempt refuses it as not an address (plan 034 §3.3: the pre-check is the
+// attempt's), and the sign-in says the plan takes no key; a paste-only
+// sign-in whose stdin then ends exits 1, its attempt closed for the end of its
+// input.
 func TestAuthLoginChatGPTKeyIsRefused(t *testing.T) {
 	native := authNative(t)
 	f := useFakeSignIn(t)
@@ -402,11 +476,11 @@ func TestAuthLoginChatGPTKeyIsRefused(t *testing.T) {
 	if strings.Contains(stderr, "API key: ") {
 		t.Fatal("a key was asked for")
 	}
-	if len(f.pastes) != 0 {
-		t.Fatal("the key reached the sign-in attempt")
+	if !slices.Equal(f.refusals, []chatgptauth.PasteError{{Refusal: chatgptauth.RefusalNotAddress}}) {
+		t.Fatalf("the attempt refused %v; want the key, as not an address", f.refusals)
 	}
-	if !f.closed {
-		t.Fatal("the attempt was not closed")
+	if !f.closed || !slices.Equal(f.reasons, []chatgptauth.CloseReason{chatgptauth.CloseNoInput}) {
+		t.Fatalf("the attempt was closed with %v; want no_input", f.reasons)
 	}
 	if storedKey(t, native, "chatgpt") != "" {
 		t.Fatal("the key was stored")
@@ -476,8 +550,8 @@ func TestAuthLoginChatGPTSignalCancels(t *testing.T) {
 			if stdout != "" || f.fetched != 0 {
 				t.Fatalf("stdout %q, models fetched %d times", stdout, f.fetched)
 			}
-			if !f.closed {
-				t.Fatal("the attempt — and its listener — was not closed")
+			if !f.closed || !slices.Equal(f.reasons, []chatgptauth.CloseReason{chatgptauth.CloseSignal}) {
+				t.Fatalf("the attempt — and its listener — was closed with %v; want signal", f.reasons)
 			}
 		})
 	}
@@ -495,6 +569,9 @@ func TestAuthLoginChatGPTFailures(t *testing.T) {
 	}{
 		{"declined", nil, chatgptauth.ErrAccessDenied, "craze auth login: the sign-in was declined in the browser; nothing was changed"},
 		{"exchange refused", nil, &chatgptauth.OAuthError{Step: "exchange", Status: 400, Code: "invalid_grant"}, "craze auth login: exchange refused (HTTP 400, invalid_grant)"},
+		// A step that ran out of time is named (plan 034 A14).
+		{"exchange timed out", nil, &chatgptauth.StepTimeoutError{Step: chatgptauth.StepExchange, After: 30 * time.Second}, "craze auth login: exchange: timed out after 30s"},
+		{"a lock held", &chatgptauth.StepTimeoutError{Step: chatgptauth.StepBegin, After: time.Minute, Lock: "the sign-in lock"}, nil, "craze auth login: begin: timed out after 1m0s waiting for the sign-in lock, which another craze process holds"},
 		{"no host id", errors.New("chatgptauth: /x/auth/host-id does not hold a urn:uuid host id; remove it to make a new one"), nil, "craze auth login: /x/auth/host-id does not hold a urn:uuid host id"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
@@ -584,11 +661,19 @@ func TestAuthLoginChatGPTBrowser(t *testing.T) {
 				t.Fatal(err)
 			}
 			var want []string
+			var reported []chatgptauth.EventKind
 			if c.opened {
 				want = []string{signInURL}
+				reported = []chatgptauth.EventKind{chatgptauth.EventBrowserOpened}
+				if c.openErr != nil {
+					reported = []chatgptauth.EventKind{chatgptauth.EventBrowserFailed}
+				}
 			}
 			if !slices.Equal(f.opened, want) {
 				t.Fatalf("opened %q; want %q", f.opened, want)
+			}
+			if !slices.Equal(f.reported, reported) {
+				t.Fatalf("reported %v; want %v", f.reported, reported)
 			}
 			said := strings.Contains(stderr, "craze opened it in your browser.") || strings.Contains(stderr, "craze could not open a browser")
 			if c.says == "" && said || c.says != "" && !strings.Contains(stderr, c.says) {
@@ -718,12 +803,13 @@ func (noEcho) restore() {}
 // sign-in's prompt the moment it shows — out of habit, where a key prompt
 // would be — is on no part of the terminal: not echoed as it arrives, nor in
 // the refusal, which says the plan takes no key and draws the prompt again.
-// The redirect pasted after it signs in, the key never handed to the attempt.
+// The redirect pasted after it signs in; the attempt refused the key as not
+// an address (plan 034 §3.3), keeping nothing of it.
 // ptyAuth checks the whole screen, stdout and the error. The control is the
 // same keyboard with the echo left on (muteSignIn a no-op): the key is on that
 // screen, so the check finds a key the terminal echoes.
 func TestAuthLoginChatGPTHidesAPastedKey(t *testing.T) {
-	refused := "That is not an address: the ChatGPT plan is funded by signing in, never by an API key. " + pasteWhat(signInRedirect)
+	refused := pasteRefusalText(&chatgptauth.PasteError{Refusal: chatgptauth.RefusalNotAddress}, signInRedirect)
 	drive := func(tail *ptyTail, ptmx *os.File) {
 		typeAtPrompt(t, tail, ptmx, redirectPrompt, authKey)
 		seePrompt(t, tail, refused+"\r\n"+redirectPrompt)
@@ -743,8 +829,9 @@ func TestAuthLoginChatGPTHidesAPastedKey(t *testing.T) {
 		if !strings.Contains(got, want) {
 			t.Fatalf("the screen lacks %q:\n%s", want, maskKeys(got))
 		}
-		if stdout != signedInLine+noticeLines+modelsLine || len(f.pastes) != 1 || f.pastes[0] != signInGood {
-			t.Fatalf("stdout %q, %d pastes", stdout, len(f.pastes))
+		if stdout != signedInLine+noticeLines+modelsLine || len(f.pastes) != 2 || f.pastes[1] != signInGood ||
+			!slices.Equal(f.refusals, []chatgptauth.PasteError{{Refusal: chatgptauth.RefusalNotAddress}}) {
+			t.Fatalf("stdout %q, %d pastes, refused %v; want the key refused as not an address, then the redirect", stdout, len(f.pastes), f.refusals)
 		}
 	})
 	t.Run("control: the echo on", func(t *testing.T) {
@@ -934,7 +1021,7 @@ func TestAuthLoginChatGPTRealCancel(t *testing.T) {
 			if _, err := ptmx.WriteString(signInRedirect + "?code=x&state=not-this-attempts\n"); err != nil {
 				t.Fatal(err)
 			}
-			if !tail.wait("That is not this sign-in's redirect address.", 10*time.Second) {
+			if !tail.wait("That is the redirect of an earlier sign-in attempt. Use the address shown above.", 10*time.Second) {
 				t.Fatalf("the wrong address was not refused:\n%s", tail.text())
 			}
 			if err := cmd.Process.Signal(sig); err != nil {
@@ -981,10 +1068,12 @@ type panicSignIn struct {
 	once   sync.Once
 }
 
-func (p *panicSignIn) URL() string         { return signInURL }
-func (p *panicSignIn) RedirectURI() string { return signInRedirect }
-func (p *panicSignIn) Listening() bool     { return false }
-func (p *panicSignIn) Close()              {}
+func (p *panicSignIn) URL() string                       { return signInURL }
+func (p *panicSignIn) RedirectURI() string               { return signInRedirect }
+func (p *panicSignIn) Listening() bool                   { return false }
+func (p *panicSignIn) Close(chatgptauth.CloseReason)     {}
+func (p *panicSignIn) Report(chatgptauth.EventKind)      {}
+func (p *panicSignIn) Observer() func(chatgptauth.Event) { return nil }
 
 func (p *panicSignIn) Paste(string) error {
 	if p.where == "reader" {
@@ -1087,20 +1176,25 @@ func TestAuthLoginChatGPTSignalWhileFetchingModels(t *testing.T) {
 }
 
 // TestReadRedirectLine: a pasted line is read whole, its line ending (LF or
-// CRLF) dropped; a line over maxRedirectLine bytes is reported long and kept
-// as nothing, all of it read, so the next line is read whole after it; the
-// last line needs no newline. A long line is refused as too long, unquoted.
+// CRLF) dropped; a line over maxRedirectLine bytes — however much over — is
+// reported long and kept cut one byte past the bound, all of it read, so the
+// next line is read whole after it; the last line needs no newline. The cut
+// line is one the attempt refuses as too long (chatgptauth.MaxPaste is the
+// bound), phrased unquoted; the control is a line of exactly the bound, which
+// the attempt judges as an address.
 func TestReadRedirectLine(t *testing.T) {
 	long := strings.Repeat("x", maxRedirectLine+1)
+	longer := strings.Repeat("z", 3*maxRedirectLine) + "\r"
 	exact := strings.Repeat("y", maxRedirectLine)
-	br := bufio.NewReader(strings.NewReader(signInGood + "\r\n" + long + "\n" + exact + "\n" + "last"))
+	br := bufio.NewReader(strings.NewReader(signInGood + "\r\n" + long + "\n" + longer + "\n" + exact + "\n" + "last"))
 	for i, want := range []struct {
 		line string
 		long bool
 		err  error
 	}{
 		{signInGood, false, nil},
-		{"", true, nil},
+		{long, true, nil},
+		{longer[:maxRedirectLine+1], true, nil},
 		{exact, false, nil},
 		{"last", false, io.EOF},
 	} {
@@ -1109,11 +1203,267 @@ func TestReadRedirectLine(t *testing.T) {
 			t.Fatalf("line %d = (%d bytes, long %v, %v); want (%d bytes, long %v, %v)", i, len(line), isLong, err, len(want.line), want.long, want.err)
 		}
 	}
-	got := redirectRefusal("", true, signInRedirect)
+	if maxRedirectLine != chatgptauth.MaxPaste {
+		t.Fatalf("the reader's bound %d is not the attempt's %d", maxRedirectLine, chatgptauth.MaxPaste)
+	}
+	got := pasteRefusalText(&chatgptauth.PasteError{Refusal: chatgptauth.RefusalTooLong}, signInRedirect)
 	if got != "That is too long to be the redirect address. Paste the whole address the browser was sent to; it starts with "+signInRedirect+"." {
 		t.Fatalf("the long line's refusal = %q", got)
 	}
-	if redirectRefusal(signInGood, false, signInRedirect) != "" {
-		t.Fatal("an address is refused before the attempt judges it")
+}
+
+// signInRecords is native's sign-in log, each record decoded (plan 034
+// §3.3): nil when there is none.
+func signInRecords(t *testing.T, native string) []map[string]any {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join(native, paths.LogsName, signinlog.FileName))
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out []map[string]any
+	for _, line := range strings.Split(strings.TrimSuffix(string(b), "\n"), "\n") {
+		var rec map[string]any
+		if err := json.Unmarshal([]byte(line), &rec); err != nil {
+			t.Fatalf("a sign-in log record is not JSON: %v", err)
+		}
+		out = append(out, rec)
+	}
+	return out
+}
+
+// recordKinds is the event of each record.
+func recordKinds(recs []map[string]any) []string {
+	var out []string
+	for _, r := range recs {
+		s, _ := r["event"].(string)
+		out = append(out, s)
+	}
+	return out
+}
+
+// TestAuthLoginChatGPTSaysWhyItIsNotListening (plan 034 Q8, §3.3): an attempt
+// that is paste-only because it could not listen says so on stderr, before
+// what to paste — the port busy, or no listener to be had; one paste-only by
+// request (--no-browser) says nothing of a port, the control. The attempt's
+// begin is in the sign-in log, surface cli.
+func TestAuthLoginChatGPTSaysWhyItIsNotListening(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		why  chatgptauth.Reason
+		argv []string
+		says string
+	}{
+		{"port busy", chatgptauth.ReasonPortBusy, nil, "craze is not listening for the browser: another program is using 127.0.0.1:1455.\n"},
+		{"no listener", chatgptauth.ReasonListenFailed, nil, "craze is not listening for the browser: it could not listen on 127.0.0.1:1455.\n"},
+		{"by request", chatgptauth.ReasonRequested, []string{"--no-browser"}, ""},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			native := authNative(t)
+			f := useFakeSignIn(t)
+			f.begin = chatgptauth.Event{
+				Kind: chatgptauth.EventBegin, Attempt: "0a1b2c3d", Mode: chatgptauth.ModePasteOnly, Port: 1455,
+				Reason: c.why, Registration: chatgptauth.RegistrationNew,
+			}
+			argv := append([]string{"auth", "login", "chatgpt"}, c.argv...)
+			_, stderr, err := runSignIn(t, strings.NewReader(signInGood+"\n"), argv...)()
+			if err != nil {
+				t.Fatal(err)
+			}
+			paste := "After you approve, the browser goes to an address starting with "
+			switch {
+			case c.says != "" && !strings.Contains(stderr, c.says+paste):
+				t.Fatalf("stderr:\n%s\nwant %q before what to paste", stderr, c.says)
+			case c.says == "" && strings.Contains(stderr, "not listening"):
+				t.Fatalf("the control: a paste-only sign-in by request spoke of a port:\n%s", stderr)
+			}
+			recs := signInRecords(t, native)
+			if len(recs) != 1 || recs[0]["event"] != "begin" || recs[0]["surface"] != "cli" || recs[0]["attempt"] != "0a1b2c3d" || recs[0]["reason"] != string(c.why) {
+				t.Fatalf("the sign-in log holds %v; want the begin, surface cli", recs)
+			}
+		})
+	}
+}
+
+// TestAuthLoginChatGPTRefusedLogIsOneNote (plan 034 A12): a sign-in log that
+// is refused — a symlink where its directory goes — is one note on stderr,
+// naming why, and the sign-in goes on and finishes as ever, nothing written
+// through the symlink. The control is the same sign-in with the log's
+// directory free: no note.
+func TestAuthLoginChatGPTRefusedLogIsOneNote(t *testing.T) {
+	for _, refused := range []bool{true, false} {
+		t.Run(map[bool]string{true: "refused", false: "control"}[refused], func(t *testing.T) {
+			native := authNative(t)
+			useFakeSignIn(t)
+			elsewhere := t.TempDir()
+			if refused {
+				if err := os.MkdirAll(native, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(elsewhere, filepath.Join(native, paths.LogsName)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			stdout, stderr, err := runSignIn(t, strings.NewReader(signInGood+"\n"), "auth", "login", "chatgpt")()
+			if err != nil || stdout != signedInLine+noticeLines+modelsLine {
+				t.Fatalf("login = %q, %v; a refused log must not stop the sign-in", stdout, err)
+			}
+			notes := strings.Count(stderr, "note: the sign-in log is off: ")
+			switch {
+			case refused && (notes != 1 || !strings.Contains(stderr, "is a symbolic link")):
+				t.Fatalf("stderr:\n%s\nwant one note saying the log's directory is a symlink", stderr)
+			case !refused && notes != 0:
+				t.Fatalf("the control noted the log:\n%s", stderr)
+			}
+			if ents, _ := os.ReadDir(elsewhere); len(ents) != 0 {
+				t.Fatal("the log was written through the symlink")
+			}
+		})
+	}
+}
+
+// TestAuthLoginChatGPTSaysTheListenerSawAnotherAttempt (plan 034 A13, Q8): the
+// real attempt (chatgptauth, no stand-in), a re-login listening on 127.0.0.1:
+// a redirect carrying a code and another attempt's state, sent to the
+// listener three times — an earlier attempt's browser — is said once on
+// stderr, and logged once, its count at the attempt's end; a 404 is neither.
+// Ctrl-C then ends it, logged as the signal's. Nothing leaves the machine:
+// the endpoints are TestMain's fence, and no request is due before a redirect
+// is accepted.
+func TestAuthLoginChatGPTSaysTheListenerSawAnotherAttempt(t *testing.T) {
+	native := authNative(t)
+	if err := os.MkdirAll(filepath.Join(native, "auth"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	client := `{"client_id":"oaiapp_stub0000000000000001","subject":"user-stub","email":"` + signInEmail + `","plan_usage":true,"notice_shown":true}`
+	if err := os.WriteFile(chatgptauth.ClientFile(native), []byte(client), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, v := range []string{"DISPLAY", "WAYLAND_DISPLAY"} {
+		t.Setenv(v, "")
+	}
+	t.Setenv("SSH_CONNECTION", "10.0.0.2 5555 10.0.0.1 22")
+	var mu sync.Mutex
+	var sigs chan<- os.Signal
+	prevNotify, prevStop := notifySignInSignals, stopSignInSignals
+	notifySignInSignals = func(c chan<- os.Signal) {
+		mu.Lock()
+		defer mu.Unlock()
+		sigs = c
+	}
+	stopSignInSignals = func(chan<- os.Signal) {}
+	t.Cleanup(func() { notifySignInSignals, stopSignInSignals = prevNotify, prevStop })
+
+	stdinR, stdinW := io.Pipe()
+	t.Cleanup(func() { _ = stdinW.Close() })
+	var out, errw lockedBuffer
+	cmd := NewRootCmd()
+	cmd.SetIn(stdinR)
+	cmd.SetOut(&out)
+	cmd.SetErr(&errw)
+	cmd.SetArgs([]string{"auth", "login", "chatgpt"})
+	done := make(chan error, 1)
+	ended := make(chan struct{})
+	go func() {
+		defer close(ended)
+		done <- cmd.Execute()
+	}()
+	// However the test ends, the command is ended and joined.
+	t.Cleanup(func() {
+		mu.Lock()
+		c := sigs
+		mu.Unlock()
+		if c != nil {
+			select {
+			case c <- syscall.SIGINT:
+			default:
+			}
+		}
+		select {
+		case <-ended:
+		case <-time.After(10 * time.Second):
+			t.Error("the sign-in outlived its test")
+		}
+	})
+
+	waiting := regexp.MustCompile(`craze is waiting for the browser to come back to (http://127\.0\.0\.1:\d+/auth/callback)\.`)
+	var callback string
+	deadline := time.Now().Add(10 * time.Second)
+	for callback == "" {
+		if m := waiting.FindStringSubmatch(errw.String()); m != nil {
+			callback = m[1]
+		} else if time.Now().After(deadline) {
+			t.Fatalf("the sign-in never listened:\n%s", errw.String())
+		} else {
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+	get := func(u string) int {
+		t.Helper()
+		resp, err := http.Get(u)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = resp.Body.Close()
+		return resp.StatusCode
+	}
+	base := strings.TrimSuffix(callback, "/auth/callback")
+	if got := get(base + "/favicon.ico"); got != http.StatusNotFound {
+		t.Fatalf("a request off the callback path = %d; want 404", got)
+	}
+	for range 3 {
+		if got := get(callback + "?code=fake-code-earlier&state=an-earlier-attempts-state"); got != http.StatusBadRequest {
+			t.Fatalf("another attempt's redirect = %d; want 400", got)
+		}
+	}
+	deadline = time.Now().Add(10 * time.Second)
+	for !strings.Contains(errw.String(), otherAttemptText) {
+		if time.Now().After(deadline) {
+			t.Fatalf("the sign-in never said the browser came back from another attempt:\n%s", errw.String())
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	mu.Lock()
+	c := sigs
+	mu.Unlock()
+	c <- syscall.SIGINT
+	var err error
+	select {
+	case err = <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the sign-in never ended on SIGINT")
+	}
+	wantExit(t, err, 130, "the sign-in was cancelled")
+	if n := strings.Count(errw.String(), otherAttemptText); n != 1 {
+		t.Fatalf("the sign-in said the other attempt's return %d times; want once:\n%s", n, errw.String())
+	}
+	if strings.Contains(errw.String(), "an-earlier-attempts-state") || strings.Contains(errw.String(), "fake-code-earlier") {
+		t.Fatal("the other attempt's redirect was quoted")
+	}
+	recs := signInRecords(t, native)
+	if got, want := recordKinds(recs), []string{"begin", "listener_refused", "listener_refusals", "cancelled"}; !slices.Equal(got, want) {
+		t.Fatalf("the sign-in log holds %v; want %v", got, want)
+	}
+	if recs[1]["refusal"] != "other_attempt" || recs[1]["status"] != 400.0 || recs[1]["count"] != nil {
+		t.Fatalf("the refusal's record = %v", recs[1])
+	}
+	if recs[2]["refusal"] != "other_attempt" || recs[2]["count"] != 3.0 {
+		t.Fatalf("the refusals' count = %v; want 3", recs[2])
+	}
+	if recs[3]["reason"] != "signal" {
+		t.Fatalf("the outcome = %v; want cancelled by the signal", recs[3])
+	}
+	for _, r := range recs {
+		if r["surface"] != "cli" || r["attempt"] != recs[0]["attempt"] {
+			t.Fatalf("a record is not the attempt's, surface cli: %v", r)
+		}
+		if r["status"] == 404.0 {
+			t.Fatal("a 404 was logged")
+		}
+	}
+	if b, _ := os.ReadFile(filepath.Join(native, paths.LogsName, signinlog.FileName)); strings.Contains(string(b), "earlier") || strings.Contains(string(b), signInEmail) {
+		t.Fatal("the sign-in log holds a value of the request or the account")
 	}
 }

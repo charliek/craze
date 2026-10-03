@@ -608,6 +608,12 @@ var tuiSites = []tuiSite{
 	{"connect_signin.go", "signInErrorText", "Error", "err", 1, proofLocal},
 	{"connect_signin.go", "signInFailureText", "Is", "chatgptauth.ErrAccessDenied", 1, proofLocal},
 	{"connect_signin.go", "pasteSignIn", "Is", "chatgptauth.ErrAttemptOver", 1, proofLocal},
+	// The cause the step cancels its own run's context with, and the sign-in
+	// log's refusal — each made and read in this process, never a Backend
+	// call's answer. (The attempt's typed paste refusal is read in
+	// chatgptauth.PasteRefusalText.)
+	{"connect_signin.go", "endReason", "As", "&e", 1, proofLocal},
+	{"connect_signin.go", "mention", "Error", "err", 1, proofLocal},
 	// The composer's images (plan 033 §3.3): a pasted file and the
 	// clipboard's image, read, processed and stored in this process — never
 	// a Backend call's answer.

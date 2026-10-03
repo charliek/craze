@@ -423,7 +423,7 @@ func (s *TokenSource) refresh(ctx context.Context, cur *record, forced bool) (st
 	form.Set("client_id", cur.ClientID)
 	form.Set("refresh_token", cur.RefreshToken)
 	form.Set("resource", resource)
-	reply, sent, err := ends.postToken(rctx, "refresh", form)
+	reply, sent, err := ends.postToken(rctx, StepRefresh, form)
 	if err != nil {
 		if oe := refusal(err); oe != nil && (signInAgainCodes[oe.Code] || oe.Code == codeInvalidClient) {
 			s.endSignIn(cur, oe.Code == codeInvalidClient, false)

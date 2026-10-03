@@ -1058,12 +1058,20 @@ registration with ChatGPT, so the browser asks only which account to use.
 
 A pasted line that is not this sign-in's address is refused — never repeated
 back — and craze goes on waiting: one that is not an address at all (a key,
-say) is told the plan takes none. With `--no-browser`, or when stdin is not a
+say) is told the plan takes none, and the address of an earlier sign-in's
+redirect is told `That is the redirect of an earlier sign-in attempt. Use the
+address shown above.` When the browser comes back to craze's listener from a
+different sign-in attempt — an earlier one's approval, say — craze says so,
+once: `The browser came back from a different sign-in attempt. Use the address
+shown above.` When craze could not listen at all, it says why before what to
+paste: `craze is not listening for the browser: another program is using
+127.0.0.1:1455.` With `--no-browser`, or when stdin is not a
 terminal and no listener runs, the end of stdin with no address accepted is
 exit 1. Ctrl-C cancels the sign-in and closes the listener, exit 130, and
 changes nothing; it, `SIGTERM` and `SIGHUP` leave the terminal's echo on. Declining in the browser is exit 1, as is any error from
 ChatGPT's sign-in service, which is named by its step, its HTTP status and its
-OAuth error code — never a token, which craze never prints.
+OAuth error code — never a token, which craze never prints. A step that runs
+out of time is named too: `craze auth login: exchange: timed out after 30s`.
 
 An account that signs in without allowing craze to use its plan — the
 permission ChatGPT asks for alongside the sign-in — is signed in with plan
@@ -1074,6 +1082,58 @@ usage off: craze keeps no tokens, its models cannot be used, and the next
 Signed in to ChatGPT as you@example.com, but ChatGPT plan usage is off: the account did not allow craze to use its ChatGPT plan, so the plan's models cannot be used.
 To turn it on, run craze auth login chatgpt again and allow ChatGPT plan usage when ChatGPT asks.
 ```
+
+#### The sign-in log
+
+Every sign-in — `craze auth login chatgpt` and the TUI's
+[`/connect`](tui.md#connect) alike — is recorded in the craze directory's
+`native/logs/signin.log`, one JSON line per thing that happened, from the
+attempt's start to its one outcome and the model list fetched after it: the
+place to look when a sign-in did not finish. The `logs` directory is 0700 and
+the file 0600. At 1 MiB the file is rotated once, to `signin.log.1`, so the
+two hold the last 2 MiB at most. Several crazes may write it at once; each line
+is appended whole, under a lock.
+
+The log is **value-free**: a record holds the time, which surface wrote it
+(`cli` or `tui`), the attempt's id — 8 random hex digits, the same on every
+record of one attempt — the event, and the fields below: fixed words, HTTP
+statuses, a port, counts and milliseconds. It never holds an address or its
+query, a pasted line, an authorization code, a state, a nonce, a PKCE value,
+the host id, a token, an email, the account's id, the client id, or any text a
+server sent. craze checks every field as it writes it, and writes `invalid` for
+a value outside its fixed set, so the log is safe to share when asking for
+help.
+
+```text
+{"time":"2026-10-03T12:34:56.789Z","surface":"cli","attempt":"0a1b2c3d","event":"begin","mode":"paste_only","reason":"port_busy","port":1455,"registration":"new","elapsed_ms":3}
+{"time":"2026-10-03T12:35:26.789Z","surface":"cli","attempt":"0a1b2c3d","event":"paste_refused","refusal":"mismatch","part":"state","elapsed_ms":30000}
+{"time":"2026-10-03T12:35:41.789Z","surface":"cli","attempt":"0a1b2c3d","event":"redirect_received","via":"paste","elapsed_ms":45000}
+{"time":"2026-10-03T12:35:42.789Z","surface":"cli","attempt":"0a1b2c3d","event":"signed_in","usage":"plan","registration":"new","elapsed_ms":46000}
+{"time":"2026-10-03T12:35:43.589Z","surface":"cli","attempt":"0a1b2c3d","event":"models_fetched","models":8,"client_version":"0.160.0","elapsed_ms":800}
+```
+
+| Event | What happened | Its fields |
+|---|---|---|
+| `begin` | A sign-in started. | `mode`: `listening` (craze waits on 127.0.0.1 for the browser) or `paste_only`. `reason`, when it does not listen on 1455: `requested` (`--no-browser`), `port_busy` (another program has the port), `listen_failed`. `port`. `registration`: `new` (craze registers with ChatGPT) or `reused`. |
+| `browser_opened`, `browser_failed` | craze opened the address in a browser, or could not. | — |
+| `address_copied` | `Ctrl+Y` in `/connect` copied the address; whether a clipboard took it is not known. | — |
+| `listener_refused` | The listener refused a request on its callback path, the first of its kind in the attempt (the rest are counted). A request to any other path — a browser's favicon — is never recorded. | `refusal`: `other_attempt` (the browser came back from a different sign-in attempt), `not_ours` (another request without the sign-in's state), `over` (the sign-in already had its redirect). `status`: 400, or 410 for `over`. |
+| `listener_refusals` | At the attempt's end, how many times one kind was refused, when it was more than once. | `refusal`, `status`, `count`. |
+| `paste_refused` | A pasted line was refused. | `refusal`: `too_long`, `not_address` (an API key pasted out of habit, say), `mismatch`, `over`. `part`, of a `mismatch`: `scheme`, `userinfo`, `host`, `port`, `path`, or `state` (the redirect of an earlier attempt). |
+| `redirect_received` | The browser's redirect arrived. | `via`: `listener` or `paste`. |
+| `signed_in` | The sign-in finished. | `usage`: `plan`, or `off` (plan usage not allowed). `registration`. |
+| `declined` | The sign-in was declined in the browser. | `step` `authorize`, `code` `access_denied`. |
+| `failed` | The sign-in failed. | `step`: `begin`, `authorize`, `redirect`, `exchange`, `discovery`, `jwks`, `id_token` or `install`. `class`: `refused` (ChatGPT said no), `timeout` (the step ran out of time, or waited too long for another craze's lock), `network`, `dns`, `tls`, `http_redirect`, `bad_reply`, `bad_redirect`, `id_token`, `filesystem`, `cancelled`, `signed_out`, `sign_in_again`, `plan_usage_off`, `usage_limited`, `config` or `other`. For a refusal, `status` and `code` (an OAuth error code craze knows, or `unrecognised`); for an id_token, the `check` that failed (`signature`, `iss`, `aud`, `exp`, `nonce`, `subject`, …). |
+| `cancelled` | The sign-in was stopped before it finished. | `reason`: `signal` (Ctrl-C, `SIGTERM`, `SIGHUP`), `no_input` (stdin ended), `esc`, `dialog` (the box closed another way, or the session was switched), `shutdown` (craze quit, or the session ended), `context`, `done`. |
+| `models_fetched`, `models_empty`, `models_failed` | The plan's model list after a sign-in: fetched (`models`, how many), an empty reply that kept the list before, or the failure (`step`, `status`, `code`, `class`). | `client_version`: the version craze asks for the list with. |
+
+Every attempt has exactly one of `signed_in`, `declined`, `failed` and
+`cancelled`. A record may also carry `elapsed_ms` — the time since its attempt
+began, or how long a model fetch took — and `dropped`, how many records were
+lost just before it because the log was busy. A log craze cannot keep — its
+directory a symbolic link, writable by other users or another user's, or the
+file not a plain file of its own — is one `note:` on stderr, and the sign-in
+goes on without it.
 
 ### craze auth logout
 

@@ -1601,8 +1601,10 @@ auth login chatgpt`](cli.md#signing-in-to-the-chatgpt-plan) inside the box.
   a one-time code and the sign-in's state — and `Paste the whole address the
   browser was sent to.` for anything else. A line that is not an address, or
   the address of another sign-in, is refused in the field, which is emptied,
-  and is never repeated. Whichever comes first, the browser's return or the
-  pasted address, finishes the sign-in (`Signing in…`).
+  and is never repeated; the redirect of an earlier sign-in is told so, `That
+  is the redirect of an earlier sign-in attempt. Use the address shown now.`
+  Whichever comes first, the browser's return or the pasted address, finishes
+  the sign-in (`Signing in…`).
 - **`Esc`** goes back to step one and stops the sign-in, closing craze's
   listener; so does every other way out of the box, and every way craze
   exits — a quit, the terminal closing, `SIGTERM`, or craze failing.
@@ -1619,7 +1621,28 @@ auth login chatgpt`](cli.md#signing-in-to-the-chatgpt-plan) inside the box.
   plan usage when ChatGPT asks.` A sign-in that fails — declined in the
   browser, refused by ChatGPT, or for another account than the one this craze
   directory is registered with — closes the box with an error row, `/connect:
-  …`, naming the step and ChatGPT's error code, never a token.
+  …`, naming the step and ChatGPT's error code, never a token; a step that ran
+  out of time is named too, `/connect: exchange: timed out after 30s`.
+
+**Troubleshooting a sign-in: the sign-in log.** Every `/connect` sign-in is
+recorded, as `craze auth login chatgpt`'s is, in the TUI's craze directory's
+`native/logs/signin.log` (0600 in a 0700 directory, 1 MiB with one rotation to
+`signin.log.1`): one JSON line per thing that happened — the attempt's start,
+whether craze could listen for the browser and why not, a refused paste and
+which part of it was wrong, the listener refusing the browser's return from a
+different attempt (counted, not repeated), the address copied with `Ctrl+Y`,
+the redirect, the attempt's one outcome, and the model list fetched after it.
+Its records say `"surface":"tui"`, and a sign-in the box ends says why:
+`"reason":"esc"`, `"dialog"` (the box closed another way, or the session was
+switched) or `"shutdown"` (craze quit, or the session ended). The log is
+value-free — it never holds an address, a pasted line, a code, a state, a
+token, an email or any text a server sent, and craze writes `invalid` for a
+value it does not know — so it is safe to share. Each event and field is
+described in [the CLI reference's sign-in
+log](cli.md#the-sign-in-log). A log craze cannot keep — its directory a
+symbolic link, writable by other users or another user's, or the file not a
+plain file of its own — is one note in the transcript, `the sign-in log is
+off: …`, and the sign-in goes on without it.
 
 **Refused while work runs.** While a turn is running — yours, another
 client's, or the agent's own — or a sub-agent is still running in the

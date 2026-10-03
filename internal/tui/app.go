@@ -19,6 +19,7 @@ import (
 
 	"github.com/charliek/craze/internal/agent"
 	"github.com/charliek/craze/internal/backend"
+	"github.com/charliek/craze/internal/chatgptauth"
 	"github.com/charliek/craze/internal/engine"
 	"github.com/charliek/craze/internal/host"
 	"github.com/charliek/craze/internal/sessions"
@@ -1975,8 +1976,11 @@ func finishRun(out io.Writer, final tea.Model, m Model, h Host) (bool, error) {
 	// is ended the same way, before the engine's Close, which may block: none
 	// of SIGTERM, SIGHUP or a recovered panic passed through requestQuit's
 	// dropConnect (review r14 2). The set reaches an attempt Begin returned
-	// whose answer the program stopped before reading, too.
-	m.signIns.closeAll()
+	// whose answer the program stopped before reading, too. Each reports its
+	// end (CloseShutdown) to the sign-in log, which is then closed, flushed
+	// for at most a second (plan 034 §3.3).
+	m.signIns.closeAll(chatgptauth.CloseShutdown)
+	m.signIns.closeLog()
 	// And a backend a switch let go of, or a dial answered after the user
 	// had moved on, whose close — a command — the program stopped before it
 	// ran (plan 030 §3.11): a view close each, bounded, side by side.
