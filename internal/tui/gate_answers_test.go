@@ -1004,6 +1004,7 @@ func TestTheEngineBackendRefusesAStaleEpochBeforeCallingTheEngine(t *testing.T) 
 		"Ask":            func() error { _, _, err := b.Ask(stale, "ask-1"); return err },
 		"Settings":       func() error { _, err := b.Settings(stale); return err },
 		"LastTurn":       func() error { _, err := b.LastTurn(stale); return err },
+		"RefreshModels":  func() error { _, err := b.RefreshModels(stale, "/n"); return err },
 	}
 	// Every command and read of the interface, by name: a new one is fenced
 	// or this fails.

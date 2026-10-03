@@ -75,7 +75,7 @@
       "additionalProperties": false
     },
     "settings": {
-      "description": "The settings, each list section in the event codec's own section shape, absent when empty; usage, the last usage section a delta carried (native only), absent when none has.",
+      "description": "The settings, each list section in the event codec's own section shape, absent when empty; usage, the last usage section a delta carried (native only), absent when none has; catalog, likewise the last catalog section a delta carried (a native session that reloaded its model table), absent when none has.",
       "type": "object",
       "properties": {
         "title": {"type": "string"},
@@ -86,6 +86,7 @@
         "plugins": {"$ref": "event.json#/$defs/plugins"},
         "sendNow": {"$ref": "event.json#/$defs/sendNow"},
         "usage": {"$ref": "event.json#/$defs/usage"},
+        "catalog": {"$ref": "event.json#/$defs/catalog"},
         "truncated": {"$ref": "#/$defs/settingsTruncated"}
       },
       "additionalProperties": false

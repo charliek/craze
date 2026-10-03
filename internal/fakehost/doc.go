@@ -26,7 +26,13 @@
 // "host", …}). The same line's models (Options.Models, plan 031 §3.6) gives
 // the Stub the catalog a native session advertises — remembered models with
 // their rank, the catalogs' "recent" — in place of its own; the Stub's
-// provider stays its own, since only the catalog is on trial.
+// provider stays its own, since only the catalog is on trial. Its
+// modelsRefresh (Options.ModelsRefresh, plan 034 §3.4) makes the session the
+// Stub as one that takes up models while it runs (tui.RefreshingStub):
+// capabilities.modelsRefresh, session.models.refresh served, and the catalog
+// section on the stream when a refresh takes up what the stage_models op
+// staged. Without it, the Host refuses the method as an ACP session's host
+// does (models_refresh_unsupported).
 //
 // A Host is served on a listener its caller makes, listed nowhere, unless it
 // is registered (Register, plan 032 §3.15): then it is bound and listed in a

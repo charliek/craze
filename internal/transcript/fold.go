@@ -697,9 +697,19 @@ var deltaFields = []deltaField{
 	// Catalog (plan 034 §3.4, Q17): the models a native session offers now,
 	// list and revision, a copy of the delta's so the model holds nothing the
 	// event it came from does. It has no truncation mark to clear.
+	//
+	// The revision guard (C5): a section whose revision is lower than the one
+	// the model holds is not applied, so an older list never replaces a newer
+	// one — the rule every client of the wire holds. A session's revisions
+	// only grow, in seq order, within its incarnation, and a restore (a new
+	// incarnation's snapshot among them) rebuilds the model whole, so the
+	// stream as a host commits it never meets the guard: it is what keeps a
+	// reconnect's replay, or anything else that hands a fold an older section
+	// after a newer one, from bringing back a list the session has moved past.
+	// The same revision is applied: it is the same list.
 	{name: "Catalog", apply: func(m *Model, st *agent.StateDelta, _ time.Time) {
-		if st.Catalog != nil {
-			m.settings.Catalog = cloneCatalog(st.Catalog)
+		if c := st.Catalog; c != nil && (m.settings.Catalog == nil || c.Revision >= m.settings.Catalog.Revision) {
+			m.settings.Catalog = cloneCatalog(c)
 		}
 	}},
 	// Reason names what happened to a send-now; alone it draws nothing, and

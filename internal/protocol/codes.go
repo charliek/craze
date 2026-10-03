@@ -169,6 +169,10 @@ const (
 	// capability says stop: false — a TUI-hosted session, or a host from
 	// before plan 030 (§3.9; plan 030 §3.6a).
 	ReasonStopUnsupported Reason = "stop_unsupported"
+	// ReasonModelsRefreshUnsupported is session.models.refresh on a session
+	// whose capability modelsRefresh is false — an ACP session's host (plan
+	// 034 §3.4). A host from before the method answers it unknown_method.
+	ReasonModelsRefreshUnsupported Reason = "models_refresh_unsupported"
 	// ReasonRosterUnsupported is sessions.subscribe on a host
 	// (rosterSubscribe: false); the hub defines it (S4).
 	ReasonRosterUnsupported Reason = "roster_unsupported"
@@ -293,6 +297,7 @@ var reasons = []ReasonInfo{
 	{ReasonUnsupported, CodeUnsupported, true, false},
 	{ReasonUnknownMethod, CodeUnsupported, false, false},
 	{ReasonStopUnsupported, CodeUnsupported, false, false},
+	{ReasonModelsRefreshUnsupported, CodeUnsupported, false, false},
 	{ReasonRosterUnsupported, CodeUnsupported, false, false},
 	{ReasonHubOnly, CodeUnsupported, false, false},
 	{ReasonHostOnly, CodeUnsupported, false, false},

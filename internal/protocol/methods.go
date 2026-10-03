@@ -30,6 +30,14 @@ const (
 	MethodAsksAnswer        = "asks.answer"
 )
 
+// MethodModelsRefresh is plan 034's (§3.4, Q17): a native session takes up
+// the models funded since it opened — a key saved, the ChatGPT plan signed in
+// to or out of — without a turn. It is session-scoped and not mutating (no
+// commandId, no receipt: a resend asks again), and a host serves it where the
+// session capability modelsRefresh is true, answering it
+// models_refresh_unsupported otherwise.
+const MethodModelsRefresh = "session.models.refresh"
+
 // MethodSessionCreate is the hub's (plan 032 §3.10, P5): it starts a session
 // in a new host and answers once the session has started. It is neither
 // session-scoped — the session does not exist yet — nor mutating: the hub
@@ -94,21 +102,31 @@ type MethodInfo struct {
 	// host serves. The method is the hub's (sessions.subscribe,
 	// roster_unsupported: rosterSubscribe is false; session.connect and
 	// session.create, hub_only, X6) — which no host serves — or one a host
-	// serves only where Capability says so (session.stop, stop_unsupported).
-	// Such a method's schema is protocol 1's all the same.
+	// serves only where Capability says so (session.stop, stop_unsupported;
+	// session.models.refresh, models_refresh_unsupported). Such a method's
+	// schema is protocol 1's all the same.
 	HostUnsupported Reason
 	// Capability, when set, is the session capability (its wire name) whose
 	// true says a host serves the method (plan 030 §3.6a): a host whose
 	// capability is false answers HostUnsupported, one whose capability is
 	// true serves it. session.stop's is stop — true on every `craze serve`,
-	// false on a TUI-hosted session and on an older host. "" for a method
-	// whose HostUnsupported, if any, holds on every host.
+	// false on a TUI-hosted session and on an older host;
+	// session.models.refresh's is modelsRefresh — true for a native session,
+	// whoever hosts it, absent for an ACP session and on an older host (plan
+	// 034 §3.4). "" for a method whose HostUnsupported, if any, holds on
+	// every host.
 	Capability string
 }
 
 // CapabilityStop is the session capability that says a host serves
 // session.stop (MethodInfo.Capability; SessionCapabilities.Stop's wire name).
 const CapabilityStop = "stop"
+
+// CapabilityModelsRefresh is the session capability that says a host serves
+// session.models.refresh (plan 034 §3.4; SessionCapabilities.ModelsRefresh's
+// wire name): true for a native session, and absent — false — for an ACP
+// session and on an older host.
+const CapabilityModelsRefresh = "modelsRefresh"
 
 var methods = []MethodInfo{
 	{Name: MethodHello, Tolerant: true},
@@ -131,6 +149,7 @@ var methods = []MethodInfo{
 	{Name: MethodSessionSetTitle, SessionScoped: true, Mutating: true},
 	{Name: MethodSubagentCancel, SessionScoped: true, Mutating: true},
 	{Name: MethodSessionStop, SessionScoped: true, Mutating: true, HostUnsupported: ReasonStopUnsupported, Capability: CapabilityStop},
+	{Name: MethodModelsRefresh, SessionScoped: true, HostUnsupported: ReasonModelsRefreshUnsupported, Capability: CapabilityModelsRefresh},
 	{Name: MethodAsksList, SessionScoped: true},
 	{Name: MethodAsksGet, SessionScoped: true},
 	{Name: MethodAsksAnswer, SessionScoped: true, Mutating: true},

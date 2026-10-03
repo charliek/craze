@@ -93,13 +93,17 @@ func (c *conn) dispatch(line []byte) {
 	case c.bound == nil:
 		c.replyErr(req.id, refused(protocol.CodeBadRequest, protocol.ReasonHelloRequired,
 			"%s before hello: every method but hello needs one first", req.method))
-	case info.HostUnsupported != "" && !c.srv.serves(info):
+	case info.HostUnsupported != "" && !c.srv.serves(info, c.bound):
 		// The hub's methods, and one this server does not serve because the
 		// capability that gates it is false (session.stop with no
-		// Options.Stop: plan 030 §3.6a) — answered exactly as every host
-		// before plan 030 answered it.
-		c.replyErr(req.id, refused(protocol.CodeUnsupported, info.HostUnsupported,
-			"%s is not served by a session host", req.method))
+		// Options.Stop: plan 030 §3.6a — answered exactly as every host
+		// before plan 030 answered it; session.models.refresh for a session
+		// that cannot take up models, an ACP session's: plan 034 §3.4).
+		msg := "%s is not served by a session host"
+		if info.Capability == protocol.CapabilityModelsRefresh {
+			msg = "%s is not served for this session: it cannot take up models while it runs"
+		}
+		c.replyErr(req.id, refused(protocol.CodeUnsupported, info.HostUnsupported, msg, req.method))
 	default:
 		b := c.bound
 		c.srv.handlers.add()

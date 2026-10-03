@@ -46,13 +46,14 @@
       "additionalProperties": false
     },
     "settings": {
-      "description": "The session's live settings: the current model and mode (\"\" when none), the config options as the event codec's config section, and what the session has spent as its usage section — a native session's, once its first step or its load reported one; absent otherwise, never null or {}.",
+      "description": "The session's live settings: the current model and mode (\"\" when none), the config options as the event codec's config section, what the session has spent as its usage section — a native session's, once its first step or its load reported one; absent otherwise, never null or {} — and the models it offers now as the catalog section, once a native session has reloaded its model table (revision 1 on); absent before then, when the list is the info document's.",
       "type": "object",
       "properties": {
         "model": {"type": "string"},
         "mode": {"type": "string"},
         "config": {"$ref": "event.json#/$defs/config"},
-        "usage": {"$ref": "event.json#/$defs/usage"}
+        "usage": {"$ref": "event.json#/$defs/usage"},
+        "catalog": {"$ref": "event.json#/$defs/catalog"}
       },
       "required": ["model", "mode", "config"],
       "additionalProperties": false

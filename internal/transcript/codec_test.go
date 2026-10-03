@@ -35,11 +35,7 @@ var snapEpoch = time.Date(2026, 9, 22, 8, 0, 0, 0, time.FixedZone("UTC-7", -7*36
 // carry yet, as "DeclaringType.Field", each with its reason: the filler sets
 // them like every other field and the comparison requires them to decode as
 // zero (the event codec's codecExcluded, internal/agent).
-var snapExcluded = map[string]string{
-	// Plan 034 C4 folds the section; its snapshot wire shape and schema are
-	// C5's, which removes this line.
-	"Settings.Catalog": "plan 034's catalog section, carried in a snapshot from C5",
-}
+var snapExcluded = map[string]string{}
 
 // snapFiller sets every field reachable from a value, each from one counter so
 // no two hold the same value.

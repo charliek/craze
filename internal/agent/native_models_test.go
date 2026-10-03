@@ -978,3 +978,53 @@ func TestNativeAFetchHeldBackIsReadAtTheTurnsEnd(t *testing.T) {
 		t.Fatalf("the catalog is event %d and the turn's ending %d; want the held fetch's catalog after the ending", cat, done)
 	}
 }
+
+// TestSameNativeDirComparesWhereTheFilesAre (plan 034 §3.4, A26's sameDir):
+// two spellings of one directory are the same — a trailing slash, a "..", a
+// relative path from the process's own directory, and a symlink to it, which
+// is resolved only once the cleaned paths differ — and another directory, one
+// that does not exist, and "" are not. Negative control: a comparison of
+// cleaned paths alone calls the symlink another directory.
+func TestSameNativeDirComparesWhereTheFilesAre(t *testing.T) {
+	root := t.TempDir()
+	native := filepath.Join(root, "home", ".craze", "native")
+	if err := os.MkdirAll(native, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(root, "link")
+	if err := os.Symlink(filepath.Join(root, "home"), link); err != nil {
+		t.Fatal(err)
+	}
+	other := filepath.Join(root, "other", ".craze", "native")
+	if err := os.MkdirAll(other, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	rel, err := filepath.Rel(wd, native)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		a    string
+		same bool
+	}{
+		{native, true},
+		{native + "/", true},
+		{filepath.Join(native, "..", "native"), true},
+		{rel, true},
+		{filepath.Join(link, ".craze", "native"), true},
+		{other, false},
+		{filepath.Join(root, "nowhere", ".craze", "native"), false},
+		{"", false},
+	} {
+		if got := SameNativeDir(tc.a, native); got != tc.same {
+			t.Errorf("SameNativeDir(%q, the native dir) = %v, want %v", tc.a, got, tc.same)
+		}
+	}
+	if SameNativeDir(native, "") {
+		t.Error("a directory is the same as none")
+	}
+}

@@ -3,6 +3,8 @@ package control
 import (
 	"context"
 	"errors"
+	"path/filepath"
+	"unicode/utf8"
 
 	"github.com/charliek/craze/internal/agent"
 	"github.com/charliek/craze/internal/engine"
@@ -95,6 +97,8 @@ func (c *conn) run(b *bound, info protocol.MethodInfo, req *request) outcome {
 		o = c.asksAnswer(b, info, req)
 	case protocol.MethodSessionStop:
 		o = c.sessionStop(b, info, req)
+	case protocol.MethodModelsRefresh:
+		o = c.modelsRefresh(b, info, req)
 	default:
 		// Every method protocol.Method knows is answered above, or in
 		// dispatch (hello, and the ones a host does not serve).
@@ -306,6 +310,44 @@ func (c *conn) asksGet(b *bound, info protocol.MethodInfo, req *request) outcome
 		return refusal(failed(err))
 	}
 	return answer(protocol.AsksGetResult{Ask: rec})
+}
+
+// modelsRefresh is session.models.refresh (plan 034 §3.4, Q17): the engine's
+// RefreshModels, reached only for a session whose capability modelsRefresh is
+// true (dispatch refuses it models_refresh_unsupported otherwise). It is no
+// command — no commandId, no receipt, no host-wide command slot: a resend asks
+// again — but its reply waits for the reply barrier as a command's does, so
+// an applied refresh's catalog delta is on this connection's attachment
+// before the answer that says so. A nativeDir must be absolute (a relative one
+// names nothing a host can compare) and at most NativeDirMax characters, as
+// the schema says. The call runs on a server-owned context (commandCtx), so a
+// lost connection cancels nothing.
+func (c *conn) modelsRefresh(b *bound, info protocol.MethodInfo, req *request) outcome {
+	var p protocol.ModelsRefreshParams
+	check := func() *protocol.Error {
+		switch {
+		case p.NativeDir == "":
+		case utf8.RuneCountInString(p.NativeDir) > protocol.NativeDirMax:
+			return badParams("params.nativeDir is longer than %d characters", protocol.NativeDirMax)
+		case !filepath.IsAbs(p.NativeDir):
+			return badParams("params.nativeDir %q is not an absolute path", p.NativeDir)
+		}
+		return nil
+	}
+	if perr := c.params(b, info, req, &p, check); perr != nil {
+		return refusal(perr)
+	}
+	ctx, cancel := commandCtx()
+	res, err := b.eng.RefreshModels(ctx, p.NativeDir)
+	cancel()
+	o := answer(protocol.ModelsRefreshResult{Status: protocol.ModelsStatus(res.Status), Revision: res.Revision, SameDir: res.SameDir})
+	if err != nil {
+		o = refusal(engineError(err))
+	}
+	if _, _, ok := c.barrier(b); !ok {
+		return outcome{}
+	}
+	return o
 }
 
 // --------------------------------------------------------------- commands

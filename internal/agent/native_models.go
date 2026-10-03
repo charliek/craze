@@ -436,7 +436,7 @@ func (s *nativeSession) RefreshModels(_ context.Context, nativeDir string) (Mode
 	}
 	var out ModelsRefresh
 	if nativeDir != "" {
-		same := home != "" && filepath.Clean(nativeDir) == filepath.Clean(home)
+		same := SameNativeDir(nativeDir, home)
 		out.SameDir = &same
 	}
 	if fetchesPlanList(signIn) {
@@ -452,3 +452,29 @@ func (s *nativeSession) RefreshModels(_ context.Context, nativeDir string) (Mode
 }
 
 var _ ModelsRefresher = (*nativeSession)(nil)
+
+// SameNativeDir reports whether a and b name one native directory (plan 034
+// §3.4, Q17's sameDir): a client's, sent with session.models.refresh, and the
+// one a session reads its models from. Paths are not secrets, and the answer
+// is all that leaves. Each is made absolute and cleaned, and two that still
+// differ are compared once more with every symlink resolved — a CRAZE_HOME
+// reached through a link, macOS's /var and /private/var — which costs a few
+// lstats and is done only then. A path that does not resolve (it does not
+// exist on this machine) is compared as cleaned alone. "" is no directory,
+// and the same as none.
+func SameNativeDir(a, b string) bool {
+	if a == "" || b == "" {
+		return false
+	}
+	ca, errA := filepath.Abs(a)
+	cb, errB := filepath.Abs(b)
+	if errA != nil || errB != nil {
+		ca, cb = filepath.Clean(a), filepath.Clean(b)
+	}
+	if ca == cb {
+		return true
+	}
+	ra, errA := filepath.EvalSymlinks(ca)
+	rb, errB := filepath.EvalSymlinks(cb)
+	return errA == nil && errB == nil && ra == rb
+}

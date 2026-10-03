@@ -280,9 +280,19 @@ type Provider struct {
 
 // Catalogs is what the session can be switched to: its models and its modes,
 // empty until the session is ready.
+//
+// Models is the list the session offers as the document is built, which a
+// native session's reload changes while it runs (plan 034 §3.4, Q17): the
+// attach reply, the ready notification and a sessions.list row each carry the
+// list as it stands then. Revision is that list's revision — the event
+// codec's catalog section's, which numbers each change the stream carries —
+// omitted while 0: the list the session started with, every ACP session's,
+// and every older host's. A client that folds the stream's catalog section
+// shows whichever of the two lists is newer by revision, never an older one.
 type Catalogs struct {
-	Models []CatalogModel `json:"models"`
-	Modes  []CatalogMode  `json:"modes"`
+	Models   []CatalogModel `json:"models"`
+	Modes    []CatalogMode  `json:"modes"`
+	Revision uint64         `json:"revision,omitempty"`
 }
 
 // CatalogModel is one model a session.set of kind model can name.
@@ -332,6 +342,14 @@ type CatalogMode struct {
 // notification and puts attached on the session's sessions.list row. It is
 // omitted when false, as rowFacts is: absent is an older host, which sends no
 // presence, and a client then shows no count.
+//
+// ModelsRefresh is the session's own (plan 034 §3.4, Q17): true where the
+// session can take up models funded while it runs — a native session, whose
+// agent.ModelsRefresher the host's engine reaches — and so the host serves
+// session.models.refresh for it, detached or TUI-hosted. It is omitted when
+// false, as rowFacts is: absent is an ACP session, or an older host, which
+// answers the method unsupported (models_refresh_unsupported, or
+// unknown_method from a host from before it), and a client makes no call.
 type SessionCapabilities struct {
 	Interject           bool `json:"interject"`
 	SubagentCancel      bool `json:"subagentCancel"`
@@ -351,6 +369,7 @@ type SessionCapabilities struct {
 	Stop                bool `json:"stop"`
 	RowFacts            bool `json:"rowFacts,omitempty"`
 	Presence            bool `json:"presence,omitempty"`
+	ModelsRefresh       bool `json:"modelsRefresh,omitempty"`
 }
 
 // SessionRow is one sessions.list row (plan 027 §3.3): the info document
@@ -899,11 +918,18 @@ type ArmedSend struct {
 // session has spent as the event codec's usage section
 // (event.json#/$defs/usage; plan 028 §3.14) — a native session's once it
 // has one, absent otherwise: never null or {}.
+//
+// Catalog is the models the session offers now as the event codec's catalog
+// section (event.json#/$defs/catalog; plan 034 §3.4): {"models": […],
+// "revision": n}, present once a native session has reloaded its model table
+// (revision 1 on), as the stream's own section is, and absent otherwise —
+// before then the list is the info document's, revision 0.
 type Settings struct {
-	Model  string          `json:"model"`
-	Mode   string          `json:"mode"`
-	Config json.RawMessage `json:"config"`
-	Usage  json.RawMessage `json:"usage,omitempty"`
+	Model   string          `json:"model"`
+	Mode    string          `json:"mode"`
+	Config  json.RawMessage `json:"config"`
+	Usage   json.RawMessage `json:"usage,omitempty"`
+	Catalog json.RawMessage `json:"catalog,omitempty"`
 }
 
 // SnapshotParams is session.snapshot's params, which ask for one bounded
@@ -1143,6 +1169,68 @@ type StopParams struct {
 	SessionID string `json:"sessionId"`
 	CommandID string `json:"commandId"`
 }
+
+// ModelsRefreshParams is session.models.refresh's params (plan 034 §3.4,
+// Q17), which ask a native session to take up the models funded since it
+// opened — a key saved, the ChatGPT plan signed in to or out of — now rather
+// than at its next turn. It is served where the session capability
+// modelsRefresh is true; a host whose capability is false answers
+// unsupported, reason models_refresh_unsupported. It is not mutating: it
+// carries no commandId, keeps no receipt, and a resend — of a call whose
+// answer was lost, or of one answered — asks again and changes nothing more.
+//
+// NativeDir is the craze native directory the client itself reads and writes
+// its keys and sign-ins in, an absolute path of at most NativeDirMax
+// characters, absent for none: the answer's sameDir says whether it is the
+// one the session reads its models from (the home mismatch: a client and a
+// host in different CRAZE_HOMEs). Paths are not secrets.
+type ModelsRefreshParams struct {
+	SessionID string `json:"sessionId"`
+	NativeDir string `json:"nativeDir,omitempty"`
+}
+
+// ModelsRefreshResult is what a refresh came to: its status, the revision of
+// the list the session offers after it (the catalog section's; 0 for the list
+// it started with), and, when the call named a nativeDir, whether that is the
+// session's own. The reply follows the catalog delta an applied refresh
+// published on the connection's attachment (the reply barrier), so a client
+// that reads applied has already been handed the list.
+type ModelsRefreshResult struct {
+	Status   ModelsStatus `json:"status"`
+	Revision uint64       `json:"revision"`
+	SameDir  *bool        `json:"sameDir,omitempty"`
+}
+
+// ModelsStatus is what a refresh of a session's models came to
+// (agent.ModelsStatus).
+type ModelsStatus string
+
+const (
+	// ModelsApplied: what the session reads its models from had changed, and
+	// it offers what that funds now; the catalog delta carrying the list
+	// precedes the reply.
+	ModelsApplied ModelsStatus = "applied"
+	// ModelsCurrent: nothing it reads its models from had changed.
+	ModelsCurrent ModelsStatus = "current"
+	// ModelsPending: they had changed while a turn ran (or a load replayed);
+	// the session takes them up as that ends, and its catalog delta follows
+	// then.
+	ModelsPending ModelsStatus = "pending"
+	// ModelsUnsupported: the session cannot take up models while it runs —
+	// an ACP session. Its host refuses the method instead (its capability
+	// modelsRefresh is false: unsupported, reason models_refresh_unsupported),
+	// which craze's own client reports as this status, as an in-process
+	// session reports it: the value is in the set so the two read alike.
+	ModelsUnsupported ModelsStatus = "unsupported"
+	// ModelsFailed: the files could not be read as a model table; the list is
+	// as it was, and the host journals why (value-free).
+	ModelsFailed ModelsStatus = "failed"
+)
+
+var modelsStatuses = []ModelsStatus{ModelsApplied, ModelsCurrent, ModelsPending, ModelsUnsupported, ModelsFailed}
+
+// ModelsStatuses is every refresh status, applied first.
+func ModelsStatuses() []ModelsStatus { return slices.Clone(modelsStatuses) }
 
 // ------------------------------------------------------------------- asks
 

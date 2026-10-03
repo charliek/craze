@@ -86,6 +86,19 @@ type Options struct {
 	// the catalog is the Stub's, and the wire is exactly what it was.
 	Models []agent.ModelInfo
 
+	// ModelsRefresh is plan 034's opt-in (§3.4, Q17): every incarnation's
+	// session is the Stub as one that takes up models while it runs
+	// (tui.RefreshingStub) — capabilities.modelsRefresh in the info document,
+	// session.models.refresh served, and the catalog section on the stream
+	// when a refresh takes up what the stage_models op staged. NativeDir is
+	// the native directory that session reads, what a refresh's sameDir
+	// compares a client's with; "" is /home/fake/.craze/native. Off, the Host
+	// is an ACP session's host as far as the method goes — it refuses it,
+	// models_refresh_unsupported — and its wire is exactly what it was. It
+	// does not go with Start.
+	ModelsRefresh bool
+	NativeDir     string
+
 	// Start, when set, is the first incarnation's start (plan 032 §3.10's
 	// tests): the Host serves its engine before the start has run — a
 	// client's attach with when: ready waits for it, as on a real host whose
@@ -116,8 +129,16 @@ func (o Options) withDefaults() Options {
 	if o.CrazeSessionID == "" {
 		o.CrazeSessionID = "session-fake-1"
 	}
+	if o.ModelsRefresh && o.NativeDir == "" {
+		o.NativeDir = defaultNativeDir
+	}
 	return o
 }
+
+// defaultNativeDir is a ModelsRefresh Host's native directory when Options
+// names none: a path no machine running the fixtures is expected to have, so
+// a refresh compares it as cleaned alone (agent.SameNativeDir).
+const defaultNativeDir = "/home/fake/.craze/native"
 
 // clock is the Host's one clock: control.Options.Clock, engine.Options's
 // ReceiptClock and the Stub's own Clock all read it, so every timestamp on
@@ -228,6 +249,11 @@ func New(o Options) (*Host, error) { return newHost(o, hostHooks{}) }
 // newHost is New with a test's seams (hostHooks).
 func newHost(o Options, hooks hostHooks) (*Host, error) {
 	o = o.withDefaults()
+	if o.ModelsRefresh && o.Start != nil {
+		// gatedStart embeds the Stub, so its session would not refresh: no
+		// test needs the two together.
+		return nil, errors.New("fakehost: Options.ModelsRefresh does not go with Options.Start")
+	}
 	h := &Host{opts: o, clk: newClock(), hooks: hooks, stopHeard: make(chan struct{})}
 	co := control.Options{
 		Log:            o.Log,
@@ -269,6 +295,10 @@ func (h *Host) newIncarnation() error {
 		stub.SetModels(h.opts.Models)
 	}
 	var sess agent.Session = stub
+	if h.opts.ModelsRefresh {
+		stub.SetNativeDir(h.opts.NativeDir)
+		sess = tui.RefreshingStub{Stub: stub}
+	}
 	if f := h.hooks.session; f != nil {
 		sess = f(stub)
 	}
@@ -515,7 +545,9 @@ func (h *Host) Incarnation() string { return h.currentEngine().State().Incarnati
 // run_stop (RunStop): the stop sequence of a Host built with Options.Stop,
 // run where a fixture's script says. Plan 032 adds unlist (Unlist): a
 // registered Host leaving the registry, for the hub's roster (fixture 20).
-// Do is what runs an
+// Plan 034 adds stage_models (StageModels): what the next
+// session.models.refresh of a Host built with Options.ModelsRefresh takes up
+// (fixture 24). Do is what runs an
 // op to completion — the op, then the log flushed (syncLog) — so a caller
 // that needs the script's seq order goes through Do, as both of those do; the
 // "end" op also waits there, before it cancels, for the Stub to have opened
@@ -811,6 +843,13 @@ func (h *Host) OversizedEvent() {
 // wall-clock wait (fixture 13).
 func (h *Host) AdvanceClock(d time.Duration) { h.clk.advance(d) }
 
+// StageModels is a change to what the session reads its models from — a key
+// saved, a plan signed in to — which the next session.models.refresh takes up
+// (plan 034 §3.4; tui.Stub.StageModels). It publishes nothing itself: the
+// refresh publishes the catalog section. Meaningful on a Host built with
+// Options.ModelsRefresh; on another, nothing ever takes it up.
+func (h *Host) StageModels(models []agent.ModelInfo) { h.currentStub().StageModels(models) }
+
 // Quit closes the Host: cmd/craze-fake-host's "quit" op and stdin EOF both
 // mean this.
 func (h *Host) Quit(ctx context.Context) error { return h.Close(ctx) }
@@ -913,6 +952,10 @@ type opParams struct {
 
 	// stall_writes, advance_clock
 	MS int `json:"ms,omitempty"`
+
+	// stage_models: the list the next refresh takes up, each model as the
+	// info document's catalog model is written (id, name, recent).
+	Models []protocol.CatalogModel `json:"models,omitempty"`
 
 	// text, when Text is "": Bytes of filler ("x") instead of literal text —
 	// fixture 4's deterministic overflow, a single push too large for a small
@@ -1022,6 +1065,12 @@ func (h *Host) do(p opParams) error {
 		h.OversizedEvent()
 	case "advance_clock":
 		h.AdvanceClock(time.Duration(p.MS) * time.Millisecond)
+	case "stage_models":
+		models := make([]agent.ModelInfo, len(p.Models))
+		for i, m := range p.Models {
+			models[i] = agent.ModelInfo{ID: m.ID, Name: m.Name, Recent: m.Recent}
+		}
+		h.StageModels(models)
 	default:
 		return fmt.Errorf("fakehost: unknown op %q", p.Name)
 	}

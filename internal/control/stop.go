@@ -105,11 +105,19 @@ type StopRequest struct {
 }
 
 // serves reports whether this server serves a method a host may refuse
-// (protocol.MethodInfo.HostUnsupported): one gated by a session capability
-// it advertises — session.stop, with Options.Stop set. The hub's methods are
-// never served.
-func (s *Server) serves(info protocol.MethodInfo) bool {
-	return info.Capability == protocol.CapabilityStop && s.opts.Stop != nil
+// (protocol.MethodInfo.HostUnsupported) to the connection bound as b: one
+// gated by a session capability its info document advertises — session.stop,
+// with Options.Stop set; session.models.refresh, where b's engine's session
+// can take up models (engine.RefreshesModels: the capability modelsRefresh,
+// sessionInfoReady). The hub's methods are never served.
+func (s *Server) serves(info protocol.MethodInfo, b *bound) bool {
+	switch info.Capability {
+	case protocol.CapabilityStop:
+		return s.opts.Stop != nil
+	case protocol.CapabilityModelsRefresh:
+		return b.eng.RefreshesModels()
+	}
+	return false
 }
 
 // FenceAttaches raises a close fence over the server's attach reservations

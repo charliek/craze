@@ -74,8 +74,9 @@ type fixtureLine struct {
 
 // fixtureHost is a fixture's host line: which of Options' plan 030 opt-ins
 // its Host is built with (Options.Stop, PermissionMode, StartedAt, RowFacts),
-// plan 031's model catalog (Options.Models) and plan 032's presence
-// (Options.Presence).
+// plan 031's model catalog (Options.Models), plan 032's presence
+// (Options.Presence) and plan 034's models refresh (Options.ModelsRefresh,
+// NativeDir).
 type fixtureHost struct {
 	// HubCreates is the hub's, in a two-socket fixture: one that serves
 	// session.create (hub.Options.Creates), its hosts this test binary run
@@ -90,6 +91,10 @@ type fixtureHost struct {
 	// Models is written as the catalog's own models are: id, name and, for
 	// a remembered one, recent.
 	Models []protocol.CatalogModel `json:"models,omitempty"`
+	// ModelsRefresh and NativeDir are plan 034's (Options.ModelsRefresh,
+	// Options.NativeDir): a session that takes up models while it runs.
+	ModelsRefresh bool   `json:"modelsRefresh,omitempty"`
+	NativeDir     string `json:"nativeDir,omitempty"`
 }
 
 // options is the Options a host line asks for; nil is the zero value.
@@ -102,7 +107,7 @@ func (fh *fixtureHost) options() Options {
 		models = append(models, agent.ModelInfo{ID: m.ID, Name: m.Name, Recent: m.Recent})
 	}
 	return Options{Stop: fh.Stop, PermissionMode: fh.PermissionMode, StartedAt: fh.StartedAt, RowFacts: fh.RowFacts,
-		Presence: fh.Presence, Models: models}
+		Presence: fh.Presence, Models: models, ModelsRefresh: fh.ModelsRefresh, NativeDir: fh.NativeDir}
 }
 
 // rawFixtureLine is one line of the file, its own bytes kept beside its

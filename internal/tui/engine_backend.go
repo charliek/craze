@@ -224,6 +224,16 @@ func (b *engineBackend) Settings(ctx context.Context) (backend.Settings, error) 
 	return backend.Settings{Model: snap.CurrentModel, Mode: snap.CurrentMode, Config: snap.Config}, nil
 }
 
+// RefreshModels is the engine's (plan 034 §3.4): the session's own reload,
+// on this tea.Cmd's goroutine, ModelsUnsupported for a session that cannot
+// (an ACP session) — so a client reads one answer in both transports.
+func (b *engineBackend) RefreshModels(ctx context.Context, nativeDir string) (agent.ModelsRefresh, error) {
+	if err := b.fence(ctx); err != nil {
+		return agent.ModelsRefresh{}, err
+	}
+	return b.eng.RefreshModels(ctx, nativeDir)
+}
+
 // LastTurn is State()'s (plan 030 §3.7): read directly, as every in-process
 // read is. In process no restore ever comes, so the model never asks it; it
 // is here because the socket's is (backend.Backend.LastTurn).
@@ -263,6 +273,7 @@ func (b *engineBackend) Info() backend.SessionInfo {
 		Capabilities:      st.Provider.Capabilities(),
 		Models:            st.Models,
 		CatalogRevision:   st.CatalogRevision,
+		ModelsRefresh:     b.eng.RefreshesModels(),
 		Modes:             st.Modes,
 		RetryHorizon:      st.RetryHorizon,
 	}
