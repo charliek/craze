@@ -225,28 +225,10 @@ func TestSigintHoldCancelledTurnDoesNotTakeTheNextGateByte(t *testing.T) {
 	}
 	t.Setenv("CRAZE_FAKE_GATE", fifo)
 	w, id2 := sigintHoldSecondPrompt(t)
-	// Opening the writer blocks until the shared reader has the FIFO open, so
-	// it gets its own bound: a reader that never starts fails here, not at the
-	// package timeout.
-	opened := make(chan *os.File, 1)
-	go func() {
-		f, err := os.OpenFile(fifo, os.O_WRONLY, 0)
-		if err != nil {
-			t.Error(err)
-			close(opened)
-			return
-		}
-		opened <- f
-	}()
-	var f *os.File
-	select {
-	case f = <-opened:
-		if f == nil {
-			t.FailNow()
-		}
-	case <-time.After(pmWait):
-		t.Fatalf("the gate's reader did not open the FIFO within %s", pmWait)
-	}
+	// The writer opens only once the shared reader has the FIFO open, under
+	// openGateWriter's own bound: a reader that never starts fails here, not at
+	// the package timeout, and leaves no goroutine blocked in the open.
+	f := openGateWriter(t, fifo)
 	defer f.Close()
 	raw, _ := json.Marshal(map[string]any{"sessionId": fakeSessionID})
 	if err := w.enc.WriteMessage(&acp.Message{Method: acp.MethodSessionCancel, Params: raw}); err != nil {
@@ -284,6 +266,7 @@ func TestTheSharedGateLosesNoByte(t *testing.T) {
 	s := &server{}
 	gate := s.gate()
 	w := openGateWriter(t, fifo)
+	defer w.Close() // a failed write's t.Fatal still closes it
 	if _, err := w.Write([]byte{1, 1}); err != nil {
 		t.Fatal(err)
 	}

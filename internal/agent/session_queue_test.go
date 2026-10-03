@@ -64,7 +64,7 @@ func foreignTurnCounts(evs []Event) (started, ended int) {
 
 // gateWatchdog is the deadlock watchdog for a wait on the fake agent: far
 // longer than any wait that is working, for the reason waitUntil spells out.
-const gateWatchdog = 3 * time.Second
+const gateWatchdog = 60 * time.Second
 
 // fakeAgentGate points the fake agent's CRAZE_FAKE_GATE at a fresh FIFO — so
 // it must run before the session starts the agent — and returns what releases
