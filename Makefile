@@ -82,7 +82,7 @@ test:
 # internal/tui's -race run at 636s and 547s (ubuntu's at about 431s), so the
 # old 15m would be clipped by the next slower runner.
 test-race:
-	CRAZE_GOLDEN_TRANSPORT=both go test -timeout 20m -race ./internal/acp ./internal/agent ./internal/engine/... ./internal/host ./internal/tui ./internal/harness/... ./internal/journal/... ./internal/transcript/... ./internal/protocol/... ./internal/control/... ./internal/remote/... ./internal/fakehost/... ./internal/rundir/... ./internal/backend/... ./internal/cli ./internal/roster ./internal/modelcache ./internal/hostspawn ./internal/hub ./internal/chatgptauth ./internal/atomicfile
+	CRAZE_GOLDEN_TRANSPORT=both go test -timeout 20m -race ./internal/acp ./internal/agent ./internal/engine/... ./internal/host ./internal/tui ./internal/harness/... ./internal/journal/... ./internal/transcript/... ./internal/protocol/... ./internal/control/... ./internal/remote/... ./internal/fakehost/... ./internal/rundir/... ./internal/backend/... ./internal/cli ./internal/roster ./internal/modelcache ./internal/hostspawn ./internal/hub ./internal/chatgptauth ./internal/atomicfile ./internal/caplog
 
 test-cli:
 	@if [ ! -f tests/cli/pyproject.toml ]; then echo "tests/cli not present yet"; exit 0; fi

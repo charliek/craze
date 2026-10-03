@@ -76,6 +76,17 @@ linters:
             - "!$test"
           allow:
             - $gostd
+        # The capped log writer (plan 034 §3.3): a leaf the host log and the
+        # sign-in log both build on, the standard library only, so it can be
+        # shared without taking on anything of either's. Non-test files only,
+        # as protocol's rule above: its tests are free to import more.
+        caplog:
+          list-mode: strict
+          files:
+            - "**/internal/caplog/**"
+            - "!$test"
+          allow:
+            - $gostd
         # The engine's own import boundary (plan 021 §3.1): it sits above the
         # provider seam (agent.Session) and knows nothing of any one client or
         # provider transport, so a non-test file here may import neither
