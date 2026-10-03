@@ -336,6 +336,13 @@ type stubSession struct {
 	// moment the test can name: a reader that looks at the flag inside it sees
 	// the agent's turn over and its ended event not yet on the stream.
 	beforeForeignEmit func(running bool)
+	// beforeBegin, when set, runs at the top of Begin, outside the lock, with the
+	// prompt's text. A claim the engine makes is made under its own lock, after
+	// it has read the session's flag and before it publishes the batch the claim
+	// belongs to, so a hook that waits here holds the engine inside that window:
+	// the agent's own notification, which takes none of the engine's locks, can
+	// land in it at a moment the test names.
+	beforeBegin func(text string)
 	// cancelHold, when set, makes Cancel wait for it to be closed or for its own
 	// context to end, whichever comes first: an agent whose stdin is wedged, whose
 	// cancel write never lands, and whose caller is therefore bounded by nothing
@@ -402,8 +409,16 @@ func (s *stubSession) Start(context.Context) error { return nil }
 // records an attempt the same way. A Begin while the slot is claimed claims
 // nothing and its continuation refuses, which is the contract the engine's
 // admission is built on, and with refuseWhileForeign set a claim made while the
-// agent holds the session refuses in the same way a live one does.
+// agent holds the session refuses in the same way a live one does. beforeBegin
+// runs first, outside the lock, so a flag it lets change is the one the claim
+// reads.
 func (s *stubSession) Begin(text string) func(context.Context) (agent.Result, error) {
+	s.mu.Lock()
+	hook := s.beforeBegin
+	s.mu.Unlock()
+	if hook != nil {
+		hook(text)
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.prompts = append(s.prompts, text)
@@ -1480,34 +1495,47 @@ func TestASignalThatSettlesARefusedClaimWaitsForTheForeignTurnsEndedLine(t *test
 // error the chain ended on. The held run reads them as the final sweep would —
 // written, not judged — and returns turn one's error once the agent's turn ends.
 //
-// The stream is r3's: the agent's turn opens ahead of turn one's ending, as a
-// direct publication overtakes the engine's batch, while the session's flag is
-// still down for the successor's claim; the flag goes up as the successor is
-// refused, and the stop's cancel takes it down again (holdForeignEnd).
+// The stream is r3's, on the schedule a live session produces (astra's r4 on
+// C2r2, finding 6). The agent's turn opens in the one window that puts its start
+// ahead of turn one's ending and still lets the successor be claimed: turn one
+// has published its done and returned, the engine's settlement has read the
+// session's flag down and is claiming the successor (stubSession.beforeBegin),
+// and the settlement's batch — turn one's ending, then the successor's start — is
+// not yet published. The agent's notification lands there on a goroutine of its
+// own and does what a live session's does (agent's onForeignTurn): the flag
+// first, then the started event. The successor's continuation then finds the
+// flag up and is refused (refuseWhileForeign), as a live prompt is by its client,
+// which learns of the agent's turn before the session does; and the stop's cancel
+// takes the flag down again (holdForeignEnd).
 func TestAHeldStreamErrorOutlivesTheSuccessorsRefusedEnding(t *testing.T) {
 	o := stubOpts(&bytes.Buffer{}, &bytes.Buffer{})
 	// A budget nothing in this test may reach: the ended event ends the wait.
 	o.foreignMax = time.Hour
 	boom := errors.New("turn one's stream failed")
-	var s *stubSession
-	s = newStubSession(t,
-		stubTurn{
-			emit: []agent.Event{
-				{Type: agent.EventError, Err: boom},
-				{Type: agent.EventForeignTurn, ForeignTurn: &agent.ForeignTurnInfo{ID: "interject-fallback-1", Running: true}},
-				{Type: agent.EventDone, StopReason: "end_turn"},
-			},
-			res: agent.Result{StopReason: "end_turn"},
+	s := newStubSession(t, stubTurn{
+		emit: []agent.Event{
+			{Type: agent.EventError, Err: boom},
+			{Type: agent.EventDone, StopReason: "end_turn"},
 		},
-		stubTurn{
-			before: func() {
-				s.mu.Lock()
-				s.foreign = true
-				s.mu.Unlock()
-			},
-			err: agent.ErrForeignTurn,
-		},
-	)
+		res: agent.Result{StopReason: "end_turn"},
+	})
+	s.refuseWhileForeign = true
+	// The agent's notification, on a goroutine of its own, while the engine waits
+	// in the successor's claim; the claim goes on once the started event is on the
+	// stream.
+	open := sync.OnceFunc(func() {
+		notified := make(chan struct{})
+		go func() {
+			defer close(notified)
+			s.setForeign(true)
+		}()
+		<-notified
+	})
+	s.beforeBegin = func(text string) {
+		if text == "follow-up" {
+			open()
+		}
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	// The run stops in the gap after turn one's ending is judged, and the signal
