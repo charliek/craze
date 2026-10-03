@@ -316,14 +316,15 @@ type CatalogMode struct {
 //
 // RowFacts is the host's own too (plan 030 §3.8): true where the session's
 // sessions.list row carries the row facts — HeadAsk.Summary, Doing,
-// LastReply, Since, StartFailed, StartErr and Prompted (SessionRow) — every
-// craze from plan 030's PR 2 on, whether it runs detached or in its TUI. It
-// is a session capability and not a connection one because it describes the
-// row, and a row travels on its own: a hub's roster (S4b) carries rows of
-// hosts of different builds, each saying what its own row holds. It is
-// omitted when false — which is every older host's document, and the fake
-// host's by default (X1), so no fixture from before it moves — and so absent
-// means an older host: a client then reads the row as S2's.
+// LastReply, Since, StartFailed, StartErr and Prompted, and from plan 035
+// Model (SessionRow) — every craze from plan 030's PR 2 on, whether it runs
+// detached or in its TUI. It is a session capability and not a connection
+// one because it describes the row, and a row travels on its own: a hub's
+// roster (S4b) carries rows of hosts of different builds, each saying what
+// its own row holds. It is omitted when false — which is every older host's
+// document, and the fake host's by default (X1), so no fixture from before it
+// moves — and so absent means an older host: a client then reads the row as
+// S2's.
 //
 // Presence is the host's own too (plan 032 §3.14, SF-64): true where the
 // host counts the clients attached to the session — every craze from plan 032
@@ -376,12 +377,14 @@ type SessionRow struct {
 	// The row facts (plan 030 §3.8, §3.10), carried where the session
 	// capability rowFacts is true and absent from an older host's row. Each is
 	// omitted when unset, so on a host that has them an absent one is its zero
-	// — "" or false — and on one that does not, unknown. The engine computes
+	// — "" or false — and on one that does not, unknown. The one exception is
+	// Model (plan 035 §3.2 C11, SF-114): rowFacts hosts from before it omit it
+	// too, so an absent model is unknown on any host. The engine computes
 	// them from its own transcript model and ask registry when the request is
 	// answered: a read, like the rest of the row, not a cut through the
-	// stream. Every string is one line — the first non-blank one, tabs
-	// expanded — at most RowTextCells cells, an ellipsis ending one that was
-	// cut. HeadAsk.Summary is the head ask's.
+	// stream. Every string but Model is one line — the first non-blank one,
+	// tabs expanded — at most RowTextCells cells, an ellipsis ending one that
+	// was cut. HeadAsk.Summary is the head ask's.
 	//
 	// Doing is what a working session is doing: the title of the most
 	// recently started tool of the running turn still running, else
@@ -404,6 +407,11 @@ type SessionRow struct {
 	// Prompted says a turn has been started at all (StateResult.Prompted): a
 	// session that never was has nothing to resume.
 	Prompted bool `json:"prompted,omitempty"`
+	// Model is the session's current model id, exact (not display text):
+	// session.state's Settings.Model, what a session.set of kind model and
+	// --model name, never cut — unbounded, as that is. Absent means unknown,
+	// on any host, including a rowFacts host from before 035.
+	Model string `json:"model,omitempty"`
 
 	// Attached is how many clients are attached to the session as the row is
 	// read (plan 032 §3.14, SF-64): every attachment the host counts —

@@ -1,6 +1,7 @@
 package control_test
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"testing"
@@ -30,7 +31,8 @@ func list(t *testing.T, c *client) protocol.SessionRow {
 }
 
 // TestARowWithoutRowFactsIsS2s: no capability, no fact — even for a session
-// with a turn run and an ask open — so an older host's row is what it was.
+// with a turn run and an ask open, and the model (plan 035 C11), though the
+// session has one — so an older host's row is what it was.
 func TestARowWithoutRowFactsIsS2s(t *testing.T) {
 	h := newHost(t)
 	a := h.dial()
@@ -46,6 +48,8 @@ func TestARowWithoutRowFactsIsS2s(t *testing.T) {
 		t.Fatalf("the head ask %+v, want no summary", row.HeadAsk)
 	case row.Doing != "" || row.LastReply != "" || !row.Since.IsZero() || row.StartFailed || row.StartErr != "" || row.Prompted:
 		t.Fatalf("an S2 row carries row facts: %+v", row)
+	case row.Model != "" || h.stub.Snapshot().CurrentModel == "":
+		t.Fatalf("an S2 row carries the model %q (the session's is %q)", row.Model, h.stub.Snapshot().CurrentModel)
 	}
 }
 
@@ -65,6 +69,8 @@ func TestARowCarriesTheRowFacts(t *testing.T) {
 		t.Fatalf("a fresh session: %+v", row)
 	case row.Since.IsZero() || row.Since.Location() != time.UTC:
 		t.Fatalf("since %v, want the start's, in UTC", row.Since)
+	case row.Model != "grok":
+		t.Fatalf("a fresh session's model %q, want the session's grok", row.Model)
 	}
 	idleSince := row.Since
 	if att := ok[protocol.AttachResult](t, a.call(protocol.MethodSessionAttach, protocol.AttachParams{SessionID: sid(h)})); !att.Session.Capabilities.RowFacts {
@@ -101,6 +107,42 @@ func TestARowCarriesTheRowFacts(t *testing.T) {
 	}
 }
 
+// TestARowCarriesTheSessionsModel (plan 035 C11, SF-114): a rowFacts host's
+// row carries the session's current model id, exact — what session.state's
+// settings say — and follows it: a session.set of kind model moves the row,
+// and a session whose model goes to none has a row with no model member at
+// all, which a client reads as unknown. The negative control is
+// TestARowWithoutRowFactsIsS2s: the same session's row, without the
+// capability, carries none.
+func TestARowCarriesTheSessionsModel(t *testing.T) {
+	h := newHost(t, withRowFacts())
+	a := h.dial()
+	a.sayHello(nil)
+	if row := list(t, a); row.Model != "grok" {
+		t.Fatalf("the row's model %q, want the session's grok", row.Model)
+	}
+
+	res := ok[protocol.SetResult](t, a.call(protocol.MethodSessionSet, protocol.SetParams{SessionID: sid(h), CommandID: a.cmd(),
+		Setting: protocol.Setting{Kind: protocol.SettingModel, Value: "fast"}}))
+	if res.Value != "fast" {
+		t.Fatalf("the set's answer: %+v", res)
+	}
+	st := ok[protocol.StateResult](t, a.call(protocol.MethodSessionState, protocol.StateParams{SessionID: sid(h)}))
+	if row := list(t, a); row.Model != "fast" || st.Settings.Model != "fast" {
+		t.Fatalf("after the set: the row's model %q, session.state's %q; want fast for both", row.Model, st.Settings.Model)
+	}
+
+	// The model gone to none: the member is left out, not "".
+	if _, err := h.stub.SetModel(context.Background(), "test", ""); err != nil {
+		t.Fatal(err)
+	}
+	resp := a.call(protocol.MethodSessionsList, protocol.SessionsListParams{})
+	if l := ok[protocol.SessionsListResult](t, resp); len(l.Sessions) != 1 || l.Sessions[0].Model != "" ||
+		bytes.Contains(resp.Result, []byte(`"model"`)) {
+		t.Fatalf("a session with no model listed as %s", resp.Result)
+	}
+}
+
 // failStart is the Stub with a start that fails.
 type failStart struct {
 	*tui.Stub
@@ -109,7 +151,10 @@ type failStart struct {
 
 func (s *failStart) Start(context.Context) error { return s.err }
 
-// TestARowOfAFailedStartSaysWhy: startFailed and the error's first line.
+// TestARowOfAFailedStartSaysWhy: startFailed and the error's first line, and
+// no model: the stub's snapshot names one ("grok", as an agent's session/new
+// can before a later start step fails), which a failed start's row does not
+// list (r16).
 func TestARowOfAFailedStartSaysWhy(t *testing.T) {
 	boom := errors.New("cursor-agent: not logged in\nrun `cursor-agent login` first")
 	h := newHost(t, withRowFacts(), withoutStart(),
@@ -122,6 +167,12 @@ func TestARowOfAFailedStartSaysWhy(t *testing.T) {
 	row := list(t, a)
 	if !row.StartFailed || row.StartErr != "cursor-agent: not logged in" || row.Activity != protocol.ActivityError || row.Since.IsZero() {
 		t.Fatalf("a failed start's row: %+v", row)
+	}
+	if h.eng.State().CurrentModel == "" {
+		t.Fatal("the stub's snapshot names no model: the next check would be vacuous")
+	}
+	if row.Model != "" {
+		t.Fatalf("a failed start's row lists model %q", row.Model)
 	}
 }
 

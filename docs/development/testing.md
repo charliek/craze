@@ -268,6 +268,21 @@ keeps their behaviour otherwise unchanged. It is the canary the
 `test_tui.py` cases for issue #23 use to prove the agent's own stderr is
 gated on the run having failed.
 
+The `exit-two-lines` script is the fake's start failure: it reads craze's
+`initialize`, leaves it unanswered, writes `Error: KEYCHAIN LOCKED` and `Run
+unlock and retry.` to stderr and exits 1 — an agent that dies at its start the
+way cursor does on a locked keychain. It reads the request first so the call
+always fails with the exit's status, never with the broken pipe a write to an
+agent already gone would get. The start-failure tests
+(`internal/cli/starterr_test.go`) use it, with `CRAZE_TEST_GUI_SESSION=0` or
+`1` forcing the macOS login session craze reads (`rundir.GUISession`) — honoured
+only in a test binary's own processes — so the login-session hint is tested on
+every OS. Those that pin the agent's exact words set
+`CRAZE_TEST_STDERR_TAIL_WAIT=10s` (`acp.StderrWaitEnv`, honoured the same way),
+which stretches craze's two half-second waits for the copy of the agent's
+stderr — the reaper's before it closes the pipe, and the failed start's — so a
+starved copy cannot cut the lines. A wait ends as soon as the copy does.
+
 `CRAZE_FAKE_SESSION_ID=<id>` makes `session/new` answer that session id
 instead of `fake-session-1`. The session index keys a row by provider and
 that id, so two sessions of one test `HOME` under the default would be one

@@ -254,7 +254,7 @@ A row is the [session info document](#the-session-info-document) plus:
 | `pendingAsks` | how many asks are open |
 | `headAsk` | `{id, kind, label, summary?}`, the first open ask (absent when none is); `summary` is a [row fact](#the-row-facts) |
 | `lastTurn` | how the last turn ended — [below](#the-last-turn); absent while a turn runs, before any has ended, and from an older host |
-| `doing`, `lastReply`, `since`, `startFailed`, `startErr`, `prompted` | the [row facts](#the-row-facts), where the session capability `rowFacts` is `true` |
+| `doing`, `lastReply`, `since`, `startFailed`, `startErr`, `prompted`, `model` | the [row facts](#the-row-facts), where the session capability `rowFacts` is `true` |
 | `attached` | where the session capability `presence` is `true`: how many clients are attached as the row is read — the count a [`presence`](#presence) notification carries; absent is `0` on such a host, and unknown on any other |
 
 `activity`/`foreignTurn` answer "is it running"; `pendingAsks`/`headAsk`
@@ -267,8 +267,9 @@ A host whose session capability `rowFacts` is `true` — every craze from plan
 030's session list on, detached or TUI-hosted — puts on its row what a list of
 every session needs to say what each one wants without attaching to any. Each
 is omitted when unset, so on such a host an absent one is its zero (`""`,
-`false`); on a host without `rowFacts` (an older one) none is there and a
-client reads the row as it was.
+`false`) — except `model`, which a `rowFacts` host from before plan 035 does
+not send, so an absent `model` is unknown on any host; on a host without
+`rowFacts` (an older one) none is there and a client reads the row as it was.
 
 | field | |
 |---|---|
@@ -278,10 +279,11 @@ client reads the row as it was.
 | `since` | when the row entered its current state, on the host's clock, UTC — the first of these that holds: **needs you** (`pendingAsks` > 0), **failed** (`startFailed`, or `lastTurn.outcome` failed — or `activity` error with neither `lastTurn` nor `foreignTurn`: a failure whose ending is still on its way), **working** (`activity` starting, replaying, working or closing, or `foreignTurn`), **idle**. A turn that follows another from the queue in the same settlement keeps the first one's |
 | `startFailed`, `startErr` | the session's start failed, and the first line of its error |
 | `prompted` | a turn has been started at all |
+| `model` | the session's current model id, exactly as `session.state`'s `settings.model` gives it and a `session.set` of kind `model` names it: an identifier, not display text, and never cut, so it has no length bound. Absent means unknown |
 
-Every string is one line — the first non-blank one, trimmed, tabs expanded,
-control characters dropped — of at most 200 terminal cells, an ellipsis
-ending one that was cut. The host computes them from its engine's own
+Every string but `model` is one line — the first non-blank one, trimmed, tabs
+expanded, control characters dropped — of at most 200 terminal cells, an
+ellipsis ending one that was cut. The host computes them from its engine's own
 transcript model and ask registry when the row is asked for: like the rest
 of the row, a read, not a cut through the stream.
 
@@ -554,7 +556,9 @@ is a provider id; absent, it is the hub's configured default — `provider` in
 the hub's `config.toml`, read at each create (the provider the last session
 to start persisted) — and with none configured the create is `bad_request`.
 `model`, `effort` and `fast` are the session's start settings, each absent
-for the provider's own default. `permissionMode`, absent, is a plain
+for the provider's own default: an absent `model` is the agent's own default
+model (craze keeps no default model of its own for an ACP provider, and a
+launch without `--model` passes none either). `permissionMode`, absent, is a plain
 launch's: `bypass`, `--force`'s default — `config.toml` has no permission
 setting. No params member names an agent binary: the host finds
 its own (`[agents]`, then `PATH`), and the hub hands it neither a launch's
@@ -595,8 +599,19 @@ will start a session: a repeat (below) is answered without them. A host that fai
 `unavailable`, reason `spawn_failed` — the hub has ended it. A session whose
 start fails — its agent binary missing, a locked keychain — or does not end
 within 60 s is `not_accepting`, reason `start_failed`, `data.cause` the
-host's first error line; the hub stops that host (`session.stop`, then, its
-own child, its termination: SIGTERM, a grace, SIGKILL, and its reap) — a host
+host's first error line. For a start that failed because its agent exited
+with a non-zero status or a signal after craze sent `initialize`, that line
+is craze's error followed by the agent's last non-blank stderr lines — from
+what craze had captured when the failed start collected them, first waiting up
+to half a second for its copy of that stderr to finish; sanitized, folded onto
+the line with ` / `, at most 512 bytes, not redacted: `acp: agent exited: exit
+status 1: Error: Your macOS login keychain is locked. / Run security
+unlock-keychain and try again.` — and on macOS, when the host runs outside
+the GUI login session, a hint naming the hub's pid (below). An agent that
+exits before `initialize` is sent, or exits 0, leaves craze's error alone,
+with no hint. None of it is a field of its own. The hub stops that host
+(`session.stop`, then, its own child, its termination: SIGTERM, a grace,
+SIGKILL, and its reap) — a host
 that does not exit even then, stuck in an uninterruptible wait, is left as
 it is. More than 16 creates
 in flight are `unavailable`, reason `busy`; a hub tearing down answers
@@ -632,9 +647,16 @@ retry](#errors-and-retry)).
 bound (10 s); past it their waiters see the connection close, and a host
 already started runs on, its `requestId` intact for the next hub to join.
 
-On macOS a session the hub creates runs in the hub's security session: a hub
-first started over `ssh` cannot start a `cursor` session, whose keychain is
-locked there — a start that failed, `start_failed`.
+On macOS a session the hub creates runs in the hub's login (security)
+session: a hub first started over `ssh` cannot start a `cursor` session,
+whose keychain is locked there — a start that failed, `start_failed`. Its
+`data.cause` then ends, after cursor's own lines, with `; this session runs
+outside your macOS login session (its launcher was started over ssh): if the
+agent needs the login keychain, as cursor does, stop the hub with kill <hub
+pid> (no session ends) and run this again from a terminal in your Mac's login
+session (a Roost tab, Terminal.app)`. The host adds it only when its agent
+exited and its session lacks the GUI login's graphic access; a client should
+show the cause as it is, not parse it.
 
 ## Notifications
 
@@ -1353,6 +1375,12 @@ Closing is carried through:
   leg's **writing half** only: the host sees the client go — its attachment
   stops counting toward the host's idle exit — and still answers what it
   admitted, which reaches the client;
+- a client gone entirely, not just half-closed, ends the splice within about
+  a second once the splice has read the client's EOF and half-closed the host
+  leg: the hub closes both legs, however quiet the host is (a client that
+  only half-closed, and still reads, keeps the splice). A client that closes
+  while the splice is still blocked writing to a host that has stopped reading
+  has not reached that point, and is reaped by the write-stall bound instead;
 - the host's end (its connection closed) closes the client's connection;
 - any other failure closes both.
 

@@ -521,7 +521,7 @@ the client's job, not this command's.
 
 | Flag | Description |
 |------|-------------|
-| `--session` | A craze session id, a provider session id, or a host id (default: the one running session) |
+| `--session` | A craze session id, a provider session id, or a host id, or a short form of one ([short ids](#short-session-ids)) (default: the one running session) |
 | `--hub` | Relay to this machine's [hub](#the-hub) instead, starting it when none runs. Not with `--session` |
 
 `--session`'s id is resolved against the registry under the bridge
@@ -534,11 +534,39 @@ true for an ordinary SSH login as the same user, not guaranteed in general.
 With no `--session`, exactly one live host in total is the target; zero or
 several is an error listing them on one line.
 
+### Short session ids
+
+`craze bridge --session` and `craze attach --session` take the short id
+[`craze ps`](#craze-ps) prints, not only a whole id. The tiers are tried in
+this order, and **the first tier that matches decides**:
+
+1. an exact match on any field of any live session: its craze session id, its
+   provider session id or its host id;
+2. a craze session id's **end** (`craze ps`'s `SESSION` is its last eight
+   characters);
+3. a craze session id's beginning;
+4. a host id's beginning.
+
+Within the deciding tier, two different sessions are ambiguous and refused
+(the error lists them, as an exact clash always was); one session matching by
+several fields counts once. A provider session id must be given whole: its
+shape is the agent's. A suffix or a prefix needs **at least four
+characters**; a shorter one matches nothing (`no session <id>`). The hub's
+`session.connect` stays exact: the roster gives it whole ids.
+
 **The pump** (roost's bridge rules):
 
 - stdout carries only bytes read off the socket, flushed as they arrive.
 - stdin's EOF half-closes the socket's write side (`CloseWrite`) and keeps
   reading the socket — the session may still have plenty left to send.
+- From stdin's EOF the bridge looks at its stdout about once a second: a
+  reader gone entirely (a pipe whose reader closed, a Unix stream socket
+  whose peer closed, as when an SSH connection drops) closes the socket and
+  exits 1, `craze bridge: its reader went away (stdout closed)`, since a quiet
+  session would never write the byte whose failure says so. The look starts at
+  stdin's EOF; a reader lost while stdin is still open is found by the next
+  failed write instead. A stdout that is neither a pipe nor a Unix stream
+  socket (a file, a terminal, a TCP socket) is not looked at.
 - The socket's own EOF ends the pump and exits 0.
 
 **The error contract: every failure is one line on stderr, exit 1.** That
@@ -599,7 +627,7 @@ running (see [Quitting vs. the session ending](#quitting-vs-the-session-ending))
 
 | Flag | Description |
 |------|-------------|
-| `--session` | A craze session id, a provider session id, or a host id (default: the one session running in this directory) |
+| `--session` | A craze session id, a provider session id, or a host id, or a short form of one ([short ids](#short-session-ids)) (default: the one session running in this directory) |
 | `--theme` | TUI theme preset. See [Configuration](configuration.md) |
 | `--no-mouse` | Disable mouse reporting (wheel scroll and clicks) |
 | `--no-background` | Keep the terminal's own background and text colours instead of the theme's |
@@ -614,8 +642,8 @@ craze attach: --continue does not apply: attach joins a running session
 ### Resolution
 
 With an explicit `--session`, the one entry it names (matched the way
-[`craze bridge`](#craze-bridge) matches, by craze session id, provider
-session id or host id); an invalid `--session` — whatever its value, `""`
+[`craze bridge`](#craze-bridge) matches: by craze session id, provider
+session id or host id, or a [short id](#short-session-ids)); an invalid `--session` — whatever its value, `""`
 included — is a usage error, exit 2, before a registry read builds a path.
 No match is exit 1:
 
@@ -748,10 +776,10 @@ craze session id, whichever terminal or `CRAZE_HOME` started it — one row
 each, from [the hub](#the-hub)'s roster:
 
 ```text
-SESSION   STATE        PROVIDER  MODEL  DIR       SINCE  TITLE
-0000a001  needs you    cursor    -      ~/proj-a  2m     fix the flaky test
-0000c003  starting     cursor    -      ~         3h     add the ps command
-0000e007  idle         native    -      ~/newer   5m     -
+SESSION   STATE        PROVIDER  MODEL                       DIR       SINCE  TITLE
+0000a001  needs you    cursor    sonnet-4.6                  ~/proj-a  2m     fix the flaky test
+0000c003  starting     cursor    -                           ~         3h     add the ps command
+0000e007  idle         native    muse-spark-1.3-contributor  ~/newer   5m     -
 ```
 
 | Column | |
@@ -759,7 +787,7 @@ SESSION   STATE        PROVIDER  MODEL  DIR       SINCE  TITLE
 | `SESSION` | The last eight characters of the session's craze id: its random end. A craze id is a UUIDv7, whose first characters are its clock's, the same for every session started within a minute or so. `--json`, `craze attach --session` and `craze bridge --session` take the whole id |
 | `STATE` | The session list's state: `needs you` (an ask is open), `working`, `starting` (its host has not answered yet), `failed` (its start or its last turn failed), `idle`, or `unreachable` (listed, and its socket does not answer) |
 | `PROVIDER` | The session's provider |
-| `MODEL` | `-` for now: a session's row does not carry the model it runs |
+| `MODEL` | The session's current model id, as `--model` takes it (its row's [`model`](protocol.md#the-row-facts)), cut with `…` to 32 cells; `-` when its host does not say (a craze from before plan 035) or has not answered yet. `--json` carries the whole id |
 | `DIR` | The session's working directory, `~` for `$HOME` |
 | `SINCE` | How long the session has been in its state, in one unit (`42s`, `5m`, `3h`, `6d`); `-` when its host does not say (an older craze) |
 | `TITLE` | The session's title, else its first prompt (the session index's title), else `-`: one line, cut with `…` to what is left of the terminal's width, or to 100 cells when stdout is not a terminal |
@@ -807,7 +835,11 @@ without it, and the next `craze ps` starts another.
 
 Its log is `~/.cache/craze/host-logs/hub-<ns>.log`, beside the
 [host logs](configuration.md#host-logs) (under the process's own `$HOME`;
-`<ns>` names the craze directory), rotated once at 4 MiB like a host's.
+`<ns>` names the craze directory), rotated once at 4 MiB like a host's. On
+macOS it says, as the hub starts, which login session the hub runs in —
+`macOS login session: GUI (audit flags 0x2030)`, or `not GUI` for one first
+started over `ssh` — because every session it creates inherits it
+([`craze new`](#craze-new) says why that matters).
 
 ## craze new
 
@@ -836,7 +868,7 @@ list (`←`) and `craze ps` find it — until its host's idle exit.
 |------|-------------|
 | `-C`, `--dir <dir>` | Start the session in this directory (default: the current one) |
 | `--provider <id>` | The session's provider. Without it the hub's configured default — `provider` in `config.toml`, the one the last session to start persisted — and with none configured the create is refused |
-| `--model <id>` | The model to start on |
+| `--model <id>` | The model to start on. Without it the session uses the agent's own default: craze keeps no default model of its own for an ACP provider |
 | `--effort <value>` | The effort to start at, where the model offers one (as the [session flag](#flags)) |
 | `--fast` / `--no-fast` | The fast setting to start with, where the model offers one |
 | `--no-force` | The session's agent asks for permission, and a client answers (the default is a plain launch's: `--force`'s bypass — `config.toml` has no permission setting) |
@@ -848,8 +880,18 @@ hands a host the launch's `--agent-bin` or `CRAZE_AGENT_BIN`. It persists its
 provider as the next plain launch's default, as every new session does.
 
 A refusal is the hub's own words on one line, exit 1 — a session whose start
-failed (`the session did not start: …`, its agent's first error line), a
-directory that does not exist, no provider. So is a session that started and
+failed (`the session did not start: …`, its host's error), a
+directory that does not exist, no provider. When a start failed because the
+agent exited with a non-zero status or a signal after craze sent it
+`initialize`, the error ends with **the agent's own last words**: its last
+non-blank stderr lines, from what craze had captured when the failed start
+collected them — first waiting up to half a second for its copy of that stderr
+to finish — sanitized and folded onto the line with ` / `, at most 512 bytes,
+and **not redacted** — `acp: agent exited: exit status 1: Error: Your macOS
+login keychain is locked. / Run security unlock-keychain and try again.` for
+`cursor` on a locked keychain. An agent that exits before craze sends
+`initialize`, or exits 0, gets craze's own words only. Everything the agent
+printed is in the [host's log](configuration.md#host-logs). So is a session that started and
 refused its first prompt: it runs on, idle, and the line says why. A hub from
 before `craze new` says `this hub (craze <v>) cannot create sessions; it exits
 when idle`: it is not replaced, and the next `craze new` after it has gone
@@ -858,9 +900,45 @@ connection to the hub that ends before the answer (the hub restarted
 mid-create) is tried once more under the same id, so the new hub answers the
 session the first one started rather than start a second.
 
-On macOS a session the hub creates runs in the hub's security session: a hub
-first started over `ssh` cannot start a `cursor` session (its keychain is
-locked there), and says so as a start that failed.
+**`--json` failures.** With `--json`, every failure other than a usage error
+(exit 2, plain) also prints **one JSON object** on stdout before the exit; the
+stderr line and exit 1 are as without `--json`. The one exception is stdout
+itself failing: a result that cannot be written (stdout closed, a full disk)
+exits 1 with the write's error on stderr, and stdout may hold nothing or part
+of the object. A refusal by the hub is the
+wire's error, whole, under one key, so a script reads `.error.data.code`,
+`.error.data.reason` and `.error.data.cause` where it reads them on the wire:
+
+```json
+{"error":{"code":-32000,"message":"the session did not start: acp: agent exited: exit status 1: Error: KEYCHAIN LOCKED / Run unlock and retry.","data":{"code":"not_accepting","reason":"start_failed","cause":"acp: agent exited: exit status 1: Error: KEYCHAIN LOCKED / Run unlock and retry."}}}
+```
+
+Any other failure (no hub to be had, a `-C` that is no directory, an answer
+that does not decode) is the message alone:
+
+```json
+{"error":{"message":"/no/such/dir is not a directory"}}
+```
+
+A success has no `error` key, and a session that started but refused its first
+prompt is still the success object (exit 1, as before). Check the exit code,
+then `.error`.
+
+On macOS a session the hub creates runs in the hub's login (security)
+session, and a hub keeps the session of whichever command first started it
+for as long as it runs — and it runs while any session does. The login
+keychain, which `cursor` needs, is unlocked only in the GUI login session, so
+**start craze, or its hub, from a terminal in your Mac's login session** — a
+Roost tab, Terminal.app — for agents that need it. A hub first started over
+`ssh` cannot start a `cursor` session: the start fails, and its error ends
+with a hint saying so and naming the hub's pid, `…; this session runs outside
+your macOS login session (its launcher was started over ssh): if the agent
+needs the login keychain, as cursor does, stop the hub with kill 4242 (no
+session ends) and run this again from a terminal in your Mac's login session
+(a Roost tab, Terminal.app)`. `kill <hub pid>` ends only the hub: every
+session runs on, and the next `craze new` starts a hub where it runs. The
+hint is added only when the agent exited, and it says "if": being outside the
+login session does not prove the keychain is what stopped the agent.
 
 ## craze auth
 

@@ -45,6 +45,86 @@ func TestNewRefusesBeforeTheHub(t *testing.T) {
 	}
 }
 
+// TestNewJSONFailures (SF-124, plan 035 P5, A10): with --json every exit-1
+// path before the session started prints exactly one JSON object on stdout —
+// {"error":{"message":…}} for an invalid -C and for no hub — the stderr line
+// and the exit code as without --json; a usage error stays plain.
+func TestNewJSONFailures(t *testing.T) {
+	serveHome(t)
+	type failure struct {
+		Error struct {
+			Message string `json:"message"`
+			Data    *struct{}
+		} `json:"error"`
+	}
+	for _, tc := range []struct {
+		argv   []string
+		stderr *regexp.Regexp
+	}{
+		{[]string{"new", "--json", "-C", "/no/such/dir"}, regexp.MustCompile(`^craze new: /no/such/dir is not a directory\n$`)},
+		{[]string{"new", "--json", "-C", t.TempDir(), "hello"}, regexp.MustCompile(`^craze new: hub: no hub in a test binary[^\n]*\n$`)},
+	} {
+		stdout, stderr, code := executeErr(tc.argv)
+		var got failure
+		if code != 1 || !tc.stderr.MatchString(stderr) || strings.Count(stdout, "\n") != 1 ||
+			json.Unmarshal([]byte(stdout), &got) != nil || got.Error.Message == "" ||
+			stderr != "craze new: "+got.Error.Message+"\n" {
+			t.Fatalf("%v exited %d: stdout %q, stderr %q", tc.argv, code, stdout, stderr)
+		}
+		var keys map[string]json.RawMessage
+		if err := json.Unmarshal([]byte(stdout), &keys); err != nil || len(keys) != 1 {
+			t.Fatalf("%v printed %q, want the one key \"error\"", tc.argv, stdout)
+		}
+	}
+	stdout, stderr, code := executeErr([]string{"new", "--json", "--fast", "--no-fast"})
+	if code != 2 || stdout != "" || stderr != "craze new: --fast and --no-fast are mutually exclusive\n" {
+		t.Fatalf("the usage error exited %d: stdout %q, stderr %q", code, stdout, stderr)
+	}
+}
+
+// TestNewFailureJSON: a protocol refusal is {"error": <protocol.Error>}, whole
+// — code, message, data.code, data.reason, data.cause — a wrapped one too; any
+// other error is {"error":{"message": msg}}.
+func TestNewFailureJSON(t *testing.T) {
+	perr := &protocol.Error{Code: -32000, Message: "the session did not start: boom",
+		Data: protocol.ErrorData{Code: protocol.CodeNotAccepting, Reason: protocol.ReasonStartFailed, Cause: "boom"}}
+	for _, err := range []error{perr, fmt.Errorf("create: %w", perr)} {
+		want := `{"error":{"code":-32000,"message":"the session did not start: boom","data":{"code":"not_accepting","reason":"start_failed","cause":"boom"}}}`
+		if got := string(newFailureJSON(err, "ignored")); got != want {
+			t.Fatalf("a refusal: %s\nwant %s", got, want)
+		}
+	}
+	if got, want := string(newFailureJSON(errors.New("x"), "hub: down")), `{"error":{"message":"hub: down"}}`; got != want {
+		t.Fatalf("a plain failure: %s, want %s", got, want)
+	}
+	if got, want := string(newFailureJSON(nil, "bad")), `{"error":{"message":"bad"}}`; got != want {
+		t.Fatalf("no error: %s, want %s", got, want)
+	}
+}
+
+// TestNewJSONRefusedThroughAHub: a hub's refusal — no provider named and none
+// configured (params.provider is required) — is {"error": <protocol.Error>}
+// with data.code and data.reason, the stderr line and exit 1 unchanged.
+func TestNewJSONRefusedThroughAHub(t *testing.T) {
+	env, _ := serveHome(t)
+	config := "host_idle_exit = \"30s\"\n"
+	if err := os.WriteFile(filepath.Join(env.CrazeDir, "config.toml"), []byte(config), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	hubAsChild(t, cliChildHubHosts+"=1")
+	stdout, stderr, code := executeErr([]string{"new", "--json", "-C", t.TempDir(), "hello"})
+	var got struct {
+		Error protocol.Error `json:"error"`
+	}
+	if code != 1 || strings.Count(stdout, "\n") != 1 || json.Unmarshal([]byte(stdout), &got) != nil {
+		t.Fatalf("craze new --json exited %d: stdout %q, stderr %q (hub log: %s)", code, stdout, stderr, hubLog(env)())
+	}
+	if got.Error.Data.Code != protocol.CodeBadRequest || !strings.HasPrefix(got.Error.Message, "params.provider is required") ||
+		got.Error.Data.Reason == "" || stderr != "craze new: "+got.Error.Message+"\n" {
+		t.Fatalf("the refusal: %+v, stderr %q", got.Error, stderr)
+	}
+}
+
 // TestNewThroughAHubFromAnotherDirectory (plan 032 §3.5's environment
 // contract, §3.18): craze new run in workspace A with a relative CRAZE_HOME
 // creates a session in B through the hub it spawns. The hub and the host it

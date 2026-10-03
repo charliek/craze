@@ -367,6 +367,7 @@ func (h *hub) run(ctx context.Context) error {
 	h.lock = lock
 	h.openLog()
 	h.logf("hub %s (pid %d, craze %s) starting for namespace %s", h.id, h.pid, h.version, h.ns)
+	h.logLoginSession()
 	if err := h.start(); err != nil {
 		h.undo()
 		err = h.startFailed(err)
@@ -386,6 +387,23 @@ func (h *hub) run(ctx context.Context) error {
 	h.teardown(cause)
 	h.closeLogNow()
 	return nil
+}
+
+// logLoginSession says, on macOS, which login session the hub runs in (plan
+// 035 P3, SF-126): every host it creates inherits it, and a hub first started
+// over ssh keeps that session — outside the GUI login's, whose keychain
+// cursor needs — for as long as it lives. Its raw audit flags go with it. Said
+// only where the session is known; never a reason to do anything else.
+func (h *hub) logLoginSession() {
+	flags, gui, known := rundir.GUISession()
+	if !known {
+		return
+	}
+	which := "not GUI"
+	if gui {
+		which = "GUI"
+	}
+	h.logf("macOS login session: %s (audit flags %#x)", which, flags)
 }
 
 // startFailed is a hub that could not come up: its ready line and its log say

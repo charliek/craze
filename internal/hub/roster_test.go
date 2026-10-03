@@ -321,6 +321,46 @@ func TestUnknownMembersPassThroughTheHub(t *testing.T) {
 	}
 }
 
+// TestAModelChangeIsUpserted (plan 035 C11, SF-114): a host's row carrying
+// its model reaches a subscriber as the host sent it, and a change of the
+// model alone is upserted in the round that reads it, the row again as sent;
+// a rowFacts host's row from before 035, which says no model, is forwarded
+// with none — the hub adds nothing. The negative control: a round that
+// changes nothing sends nothing, so the upsert that follows is the model's.
+func TestAModelChangeIsUpserted(t *testing.T) {
+	const facts = `"capabilities":{"rowFacts":true},"prompted":true`
+	withModel := func(model string) string {
+		return `{"sessionId":"` + sessionOf(1) + `","activity":"idle","title":"x",` + facts + `,"model":"` + model + `"}`
+	}
+	older := `{"sessionId":"` + sessionOf(2) + `","activity":"idle","title":"y",` + facts + `}`
+	m := newMemHosts(t)
+	a := m.add(1, withModel("grok-4.7-build-fast"))
+	b := m.add(2, older)
+	rg := newRosterRig(t, testEnv(t), rigOpts{clock: true, hk: func(hk *hooks) { installMem(t, hk, m) }})
+	p := dialPeer(t, rg.sock)
+	sub := p.subscribe()
+	if r := rowOf(sub.Sessions, a); r == nil || string(r.Row) != withModel("grok-4.7-build-fast") {
+		t.Fatalf("the model's row in the reply: %+v", r)
+	}
+	if r := rowOf(sub.Sessions, b); r == nil || string(r.Row) != older {
+		t.Fatalf("an older rowFacts host's row in the reply: %+v", r)
+	}
+
+	from := rg.snaps.mark()
+	rg.clk.advance(time.Second)
+	rg.tick()
+	rg.applied("the quiet round read both", from, readAt(rg.clk.now(), a, b))
+	p.nothing("a round that changed nothing")
+
+	m.setRow(a, withModel("fast"))
+	rg.clk.advance(time.Second)
+	rg.tick()
+	if n := p.roster(); len(n.Removes) != 0 || len(n.Upserts) != 1 || n.Upserts[0].HostID != a ||
+		string(n.Upserts[0].Row) != withModel("fast") {
+		t.Fatalf("the model's change: %+v", n)
+	}
+}
+
 // TestTheSizeContract (limits.go, C9 r13 3): each step of the contract, in
 // its order, each marking the row approximate — host strings cut at a
 // character past their bounds (and not at them), a host row over 16 KiB

@@ -680,8 +680,12 @@ func (h *hub) create(ctx context.Context, p createReq) createAnswer {
 	}
 	hostID := rundir.NewHostID()
 	logPath := filepath.Join(dir, hostID+".log")
+	// HubPID: the host inherits this hub's login session, so a start it words
+	// for macOS's login session names this hub as the one to stop (plan 035
+	// P3).
 	spec := hostspawn.Spec{HostID: hostID, Log: logPath, Workspace: q.Cwd, Provider: p.provider, Model: q.Model,
-		Effort: q.Effort, Fast: q.Fast, NoForce: q.PermissionMode == protocol.PermissionPrompt, NoHostStatus: true}
+		Effort: q.Effort, Fast: q.Fast, NoForce: q.PermissionMode == protocol.PermissionPrompt, NoHostStatus: true,
+		HubPID: h.pid}
 	if q.RequestID != "" {
 		spec.RequestID, spec.RequestHash = q.RequestID, p.hash
 	}

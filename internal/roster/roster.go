@@ -202,6 +202,10 @@ type Session struct {
 	StartFailed bool
 	StartErr    string
 	Prompted    bool
+	// Model is the session's current model id, exact (plan 035 §3.2 C11,
+	// SF-114): "" is unknown on any host — an older one, and a rowFacts host
+	// from before 035, whose row has the facts above but not this.
+	Model string
 }
 
 // HeadAsk is the first open ask: its id, kind, the label its card draws, and
@@ -219,7 +223,7 @@ func sessionOf(r protocol.SessionRow) *Session {
 		StartedAt: r.StartedAt, PermissionMode: permissionMode(r.PermissionMode),
 		Stop: r.Capabilities.Stop, RowFacts: r.Capabilities.RowFacts,
 		Doing: r.Doing, LastReply: r.LastReply, Since: r.Since,
-		StartFailed: r.StartFailed, StartErr: r.StartErr, Prompted: r.Prompted,
+		StartFailed: r.StartFailed, StartErr: r.StartErr, Prompted: r.Prompted, Model: r.Model,
 	}
 	if a := r.HeadAsk; a != nil {
 		s.HeadAsk = &HeadAsk{ID: a.ID, Kind: a.Kind, Label: a.Label, Summary: a.Summary}

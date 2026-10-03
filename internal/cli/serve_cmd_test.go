@@ -731,6 +731,11 @@ func TestServeTakesEverySessionFlag(t *testing.T) {
 					o.LoadSessionID != "" {
 					t.Fatalf("options %+v", o)
 				}
+				// A host's start failure says the agent's own words (plan
+				// 035 P4); TestOnlyServeOptsIntoTheAgentsWords is the TUI's.
+				if !o.StartErrAgentStderr {
+					t.Fatal("craze serve's session does not opt into the agent's words")
+				}
 			},
 			mode: protocol.PermissionPrompt,
 		},

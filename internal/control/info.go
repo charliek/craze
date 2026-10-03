@@ -120,7 +120,12 @@ func headAsk(st engine.State) *protocol.HeadAsk {
 // rowFacts puts the row facts on row (plan 030 §3.8, §3.10): the engine's,
 // computed now from st — the State the row was built from, so the facts
 // describe the row they go on — each left out when unset. Since goes on the
-// wire in UTC, as startedAt does.
+// wire in UTC, as startedAt does. The model (plan 035 §3.2 C11, SF-114) is
+// st's current model id as it stands, exact, as session.state's settings
+// carry it — left out of a row whose start failed: a start can fail after
+// the agent named its model (a start setting that never answers, after
+// session/new reported it), and a row that never ran a model should not
+// list one (r16).
 func rowFacts(row *protocol.SessionRow, eng *engine.Engine, st engine.State) {
 	f := eng.RowFacts(st)
 	if row.HeadAsk != nil {
@@ -132,6 +137,9 @@ func rowFacts(row *protocol.SessionRow, eng *engine.Engine, st engine.State) {
 	}
 	row.StartFailed, row.StartErr = st.StartFailed, f.StartErr
 	row.Prompted = st.Prompted
+	if !st.StartFailed {
+		row.Model = st.CurrentModel
+	}
 }
 
 // stateResult is session.state's result: State's projection and the host's

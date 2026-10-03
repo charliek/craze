@@ -76,8 +76,8 @@ var watch = watchExit
 
 // sendSignal is kill(2): pid, or -pgid for a process group. Only the reaper
 // calls it. It is a variable so a test can see every signal and when it came
-// against the reap (TestEveryGroupSignalPrecedesTheReap); nothing else
-// replaces it.
+// against the reap (TestEveryGroupSignalPrecedesTheReap), or hold one until
+// it has looked (TestStderrTailAnswersAtItsWait); nothing else replaces it.
 var sendSignal = func(pid int, sig syscall.Signal) error { return syscall.Kill(pid, sig) }
 
 // wait4 is the fallback's wait4(2), never blocking: a variable so a test can
@@ -178,7 +178,7 @@ func (ch *Child) groupLive() bool {
 	return live || err != nil
 }
 
-// stderrDrain bounds drainStderr's wait.
+// stderrDrain bounds drainStderr's wait (StderrWait: a test can stretch it).
 const stderrDrain = 500 * time.Millisecond
 
 // drainStderr waits, up to stderrDrain, for the copy of the agent's stderr to
@@ -188,7 +188,7 @@ const stderrDrain = 500 * time.Millisecond
 // up the end comes at once; only a process that left the group (setsid) can
 // still hold the pipe, and the bound is for that.
 func (ch *Child) drainStderr() {
-	drain := time.NewTimer(stderrDrain)
+	drain := time.NewTimer(StderrWait(stderrDrain))
 	defer drain.Stop()
 	select {
 	case <-ch.stderrDone:

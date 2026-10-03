@@ -776,18 +776,26 @@ func endProcess(t *testing.T, pid int, dir string) {
 	if alive(pid) {
 		state := procSignalState(pid)
 		var dump []byte
+		// How long the child outlived the step, as a SIGQUIT's wait sees it:
+		// one gone at once was ending just then (SF-118: exits that took the
+		// whole step), one still there was not ending at all.
+		outlived := "it was still there after the SIGQUIT's wait"
 		if dir != "" {
 			_ = syscall.Kill(pid, syscall.SIGQUIT)
-			quit := time.Now().Add(5 * time.Second)
+			quitStart := time.Now()
+			quit := quitStart.Add(5 * time.Second)
 			for alive(pid) && time.Now().Before(quit) {
 				time.Sleep(10 * time.Millisecond)
+			}
+			if !alive(pid) {
+				outlived = fmt.Sprintf("it was gone %v into the SIGQUIT's wait", time.Since(quitStart).Round(time.Millisecond))
 			}
 		}
 		_ = syscall.Kill(pid, syscall.SIGKILL)
 		if dir != "" {
 			dump, _ = os.ReadFile(filepath.Join(dir, strconv.Itoa(pid)))
 		}
-		t.Errorf("hub child %d did not exit within %v of SIGTERM; killed\n%s\n--- its stderr, a SIGQUIT's dump:\n%s", pid, step, state, dump)
+		t.Errorf("hub child %d did not exit within %v of SIGTERM; killed (%s)\n%s\n--- its stderr, a SIGQUIT's dump:\n%s", pid, step, outlived, state, dump)
 	}
 }
 
@@ -813,6 +821,20 @@ func procSignalState(pid int) string {
 	}
 	if w, err := os.ReadFile(fmt.Sprintf("/proc/%d/wchan", pid)); err == nil {
 		out = append(out, "wchan:\t"+string(w))
+	}
+	// Each thread's state and wait channel too: a child that logged "stopped"
+	// and called exit, yet stayed for the whole step, was in its exit with a
+	// thread the exit had to wait for (SF-118, reopened by plan 035 X34), and
+	// which thread, waiting where, is what the process-wide lines cannot say.
+	if tasks, err := os.ReadDir(fmt.Sprintf("/proc/%d/task", pid)); err == nil {
+		for _, task := range tasks {
+			tid, err := strconv.Atoi(task.Name())
+			if err != nil {
+				continue
+			}
+			w, _ := os.ReadFile(fmt.Sprintf("/proc/%d/task/%d/wchan", pid, tid))
+			out = append(out, fmt.Sprintf("task %d:\t%s %s", tid, taskState(pid, tid), w))
+		}
 	}
 	return strings.Join(out, "\n")
 }

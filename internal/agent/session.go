@@ -870,6 +870,21 @@ type Options struct {
 	// default.
 	Effort string
 	Fast   *bool
+	// StartErrAgentStderr puts a failed start in the agent's own words (plan
+	// 035 C7, SF-125): when an ACP session's start fails because its agent
+	// exited — an *acp.ExitError in the error's chain — the error Start
+	// returns, and journals, gains the agent's last non-blank stderr lines,
+	// sanitized and folded onto one line, at most 512 bytes
+	// (decorateStartErr). Only craze serve sets it: a detached host's start
+	// failure travels as one line of text to whoever attached or created it.
+	// craze prompt and the in-process TUI leave it off, and their start
+	// failures read exactly as before (P4).
+	StartErrAgentStderr bool
+	// StartErrExitHint is said after that, on the same line, for the same
+	// failures and under the same option: text the host builds for its own
+	// situation (craze serve's macOS login-session hint, plan 035 P3). ""
+	// says nothing; it must be one line.
+	StartErrExitHint string
 	// Stderr is the agent child's own stderr sink. Diag is where craze's own
 	// notes about this session go — discoverPlugins' warn closure — and
 	// falls back to Stderr when nil, so headless craze prompt and craze

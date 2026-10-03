@@ -387,6 +387,47 @@ func TestAHostIsAskedOverTheConnectionItKeeps(t *testing.T) {
 	}
 }
 
+// TestAModelChangeIsPublished (plan 035 C11, SF-114): a host's row carrying
+// its model is read into the session's Model, and a change of the model
+// alone — every other member as it was — is a change the list's roster
+// publishes, in the round that reads it (Session.equal), as it would a title
+// or an ask.
+func TestAModelChangeIsPublished(t *testing.T) {
+	g := newRegistry(t)
+	var mu sync.Mutex
+	model := "grok-4.7-build-fast"
+	setModel := func(m string) {
+		mu.Lock()
+		defer mu.Unlock()
+		model = m
+	}
+	socket := filepath.Join(g.dir, "model")
+	rawHostOf(t, socket, hostID(1), func() string {
+		mu.Lock()
+		defer mu.Unlock()
+		return `[{"sessionId":"` + sessionID(1) + `","activity":"idle","title":"kept",` +
+			`"capabilities":{"rowFacts":true},"prompted":true,"model":"` + model + `"}]`
+	})
+	g.list(rundir.Entry{Protocol: 1, HostID: hostID(1), Socket: socket, CrazeSessionID: sessionID(1), Ready: true})
+	rg := newRig(t, g, nil, nil)
+	modelIs := func(want string) func(roster.Snapshot) bool {
+		return func(s roster.Snapshot) bool {
+			r := row(s, hostID(1))
+			return r != nil && r.Session != nil && r.Session.Model == want
+		}
+	}
+	s := rg.until("the host's model", modelIs("grok-4.7-build-fast"))
+	if sess := row(s, hostID(1)).Session; !sess.RowFacts || !sess.Prompted || sess.Title != "kept" {
+		t.Fatalf("the row's session: %+v", sess)
+	}
+	setModel("fast")
+	rg.tick()
+	s = rg.until("the model's change", modelIs("fast"))
+	if sess := row(s, hostID(1)).Session; sess.Title != "kept" || !sess.Prompted {
+		t.Fatalf("the row's session after the model's change: %+v", sess)
+	}
+}
+
 // TestAHostThatStopsAnsweringSpendsOneAttemptsBudget: a dial that never
 // completes, a hello never answered and a sessions.list never answered each
 // end the attempt at its budget — its connection closed — and the host is

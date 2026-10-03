@@ -249,10 +249,11 @@ def test_ps_lists_detached_sessions_and_attach_reaches_one(
 ) -> None:
     """A7: two sessions, each in a terminal of its own, every terminal hung
     up -- the hosts stay -- and `craze ps` lists both from the hub it starts:
-    each one's short id, idle, its provider, its directory, its first prompt
-    as its title. `--json` prints the hub's roster (its epoch the hub's id);
-    `--no-hub` reads the hosts itself and says so. Then `craze attach` in one
-    session's directory reaches it."""
+    each one's short id, idle, its provider, its model (the fake agent's
+    current one, `default`: plan 035 C11), its directory, its first prompt as
+    its title. `--json` prints the hub's roster (its epoch the hub's id), each
+    row's model exact; `--no-hub` reads the hosts itself and says so. Then
+    `craze attach` in one session's directory reaches it."""
     monkeypatch.delenv("CRAZE_DETACH", raising=False)
     seed_host_idle_exit(tmp_path)
     work = {"first session": tmp_path / "proj-a", "second session": tmp_path / "proj-b"}
@@ -275,7 +276,7 @@ def test_ps_lists_detached_sessions_and_attach_reaches_one(
         row = rows[sid[-8:]]
         ws = Path(e["workspace"])
         text = next(t for t, w in work.items() if w.resolve() == ws.resolve())
-        assert row["STATE"] == "idle" and row["PROVIDER"] == "cursor" and row["MODEL"] == "-", row
+        assert row["STATE"] == "idle" and row["PROVIDER"] == "cursor" and row["MODEL"] == "default", row
         assert row["DIR"] in ("~/" + ws.name, str(ws)), row
         assert row["TITLE"] == text, row
     rec = _the_hub(tmp_path)
@@ -288,6 +289,7 @@ def test_ps_lists_detached_sessions_and_attach_reaches_one(
     for r in doc["sessions"]:
         assert r["hostId"] == entries[r["sessionId"]]["hostId"] and r["status"] == "reachable", r
         assert r["row"]["sessionId"] == r["sessionId"] and r["row"]["activity"] == "idle", r
+        assert r["row"]["model"] == "default", r
 
     out = _ps(craze_bin, tmp_path, "--no-hub")
     assert out.returncode == 0, out.stderr
@@ -452,5 +454,76 @@ def test_new_refuses_with_the_hubs_words(craze_bin: Path, fake_agent_bin: Path, 
     out = _new(craze_bin, "-C", str(tmp_path), "hello")
     assert out.returncode == 1 and out.stdout == b"", out
     assert out.stderr.startswith(b"craze new: params.provider is required") and out.stderr.count(b"\n") == 1, out.stderr
+    assert not [e for e in _entries(_home()) if e.get("requestId")]
+    _cleanup_stops(_the_hub(_home()), tmp_path, fake_agent_bin)
+
+
+def test_new_json_failure_with_its_stdout_gone_still_says_why(craze_bin: Path, tmp_path: Path) -> None:
+    """A `craze new --json` failure whose stdout reader has already gone: the
+    JSON object cannot be written, but craze new still exits 1 with its stderr
+    line, not killed by SIGPIPE before it (plan 035 r18; cli.md's "--json
+    failures"). The directory's failure comes before any hub is asked."""
+    missing = tmp_path / "no-such-dir"
+    r, w = os.pipe()
+    os.close(r)  # the reader is gone before craze new writes a byte
+    try:
+        out = subprocess.run(
+            [str(craze_bin), "new", "--json", "-C", str(missing), "hello"],
+            stdin=subprocess.DEVNULL,
+            stdout=w,
+            stderr=subprocess.PIPE,
+            env=os.environ.copy(),
+            timeout=6 * WAIT,
+        )
+    finally:
+        os.close(w)
+    assert out.returncode == 1, (out.returncode, out.stderr)
+    assert out.stderr.startswith(b"craze new: ") and str(missing).encode() in out.stderr, out.stderr
+
+
+def test_new_started_with_its_stdout_gone_fails_not_silently(craze_bin: Path, fake_agent_bin: Path, tmp_path: Path) -> None:
+    """A `craze new` whose session starts but whose `started` line cannot be
+    written (stdout's reader already gone) exits 1 with the write's error on
+    stderr -- not 0 with nothing said, nor killed by SIGPIPE (plan 035 r19).
+    The session itself started: it is listed."""
+    craze_home = Path(os.environ["CRAZE_HOME"])
+    craze_home.mkdir(parents=True, exist_ok=True)
+    (craze_home / "config.toml").write_text(
+        f'host_idle_exit = "{TEST_HOST_IDLE_EXIT}"\n\n[agents]\ncursor = "{fake_agent_bin}"\n', encoding="utf-8"
+    )
+    work = tmp_path / "proj-gone"
+    work.mkdir()
+    r, w = os.pipe()
+    os.close(r)  # the reader is gone before craze new writes a byte
+    try:
+        out = subprocess.run(
+            [str(craze_bin), "new", "-C", str(work), "--provider", "cursor"],
+            stdin=subprocess.DEVNULL,
+            stdout=w,
+            stderr=subprocess.PIPE,
+            env=os.environ.copy(),
+            timeout=6 * WAIT,
+        )
+    finally:
+        os.close(w)
+    assert out.returncode == 1, (out.returncode, out.stderr)
+    assert b"broken pipe" in out.stderr.lower(), out.stderr
+    assert [e for e in _entries(_home()) if e.get("requestId") and e.get("workspace") == str(work)], "no session started"
+    _cleanup_stops(_the_hub(_home()), tmp_path, fake_agent_bin)
+
+
+def test_new_json_refusal_is_the_wire_error(craze_bin: Path, fake_agent_bin: Path, tmp_path: Path) -> None:
+    """SF-124: `craze new --json` refused by the hub prints one JSON object on
+    stdout, {"error": <the wire's error>}: .error.data.code and .reason are
+    where a script reads them on the wire. The stderr line and exit 1 are as
+    without --json. Nothing is started."""
+    out = _new(craze_bin, "--json", "-C", str(tmp_path), "hello")
+    assert out.returncode == 1, out
+    assert out.stderr.startswith(b"craze new: params.provider is required") and out.stderr.count(b"\n") == 1, out.stderr
+    assert out.stdout.count(b"\n") == 1, out.stdout
+    body = json.loads(out.stdout)
+    assert list(body) == ["error"], body
+    assert body["error"]["data"]["code"] == "bad_request" and body["error"]["data"]["reason"], body
+    assert body["error"]["message"].startswith("params.provider is required"), body
     assert not [e for e in _entries(_home()) if e.get("requestId")]
     _cleanup_stops(_the_hub(_home()), tmp_path, fake_agent_bin)

@@ -131,7 +131,8 @@ const attachHint = "attach to one with: craze attach --session <id>"
 // resolveAttach picks the one live session craze attach joins (§3.15):
 //
 //   - With --session, the entry it names — by craze session id, provider
-//     session id or host id, matched as craze bridge matches (matchSession);
+//     session id or host id, matched as craze bridge matches (matchSession:
+//     exactly, or by a craze id's suffix or prefix, or a host id's prefix);
 //     none is exit 1, `craze attach: no session <id>`, and several (ids do
 //     not collide in practice, but nothing here assumes it) exit 2, listing
 //     them.

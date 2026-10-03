@@ -189,6 +189,10 @@ type Child struct {
 	shutdownCh   chan struct{}
 	shutdownOnce sync.Once
 	stderrDone   chan struct{}
+	// stderrTail keeps the end of what the agent wrote to its stderr, on its
+	// way to the sink (Client.StderrTail); nil for a child Spawn did not
+	// start.
+	stderrTail *stderrTail
 }
 
 // newChild starts watching cmd, just started, and its reaper. Whether the
@@ -332,8 +336,11 @@ func Spawn(opts SpawnOptions) (*Client, error) {
 	if stderrDst == nil {
 		stderrDst = io.Discard
 	}
+	// Every byte still reaches the sink; the recorder keeps the last of
+	// them for a failed start's words (Client.StderrTail).
+	child.stderrTail = newStderrTail(stderrDst)
 	go func() {
-		_, _ = io.Copy(stderrDst, stderr)
+		_, _ = io.Copy(child.stderrTail, stderr)
 		close(child.stderrDone)
 	}()
 

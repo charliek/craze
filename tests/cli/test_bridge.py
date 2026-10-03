@@ -17,6 +17,8 @@ import time
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from conftest import REMOVED_CONFIG_ENV, both_modes, host_env_names  # noqa: F401
 from test_tui import PTYCraze, _wait_entry, _wait_fake_gone, _wait_glob, quit_craze
 
@@ -287,7 +289,9 @@ def test_bridge_stdout_write_failure_exits_one_not_a_signal(
     killing the process (§3.10): Go's default action for a write to a broken
     pipe on fd 1 is process death unless something is notified for it, which
     is exactly what this proves end to end, with a real closed pipe, not a
-    mock."""
+    mock. stdin stays open until the bridge has exited: from stdin's end the
+    bridge also probes its stdout (plan 035 C9), which would find the closed
+    pipe too, and this case is the write's."""
     with PTYCraze(craze_bin, fake_agent_bin, tmp_path) as tui:
         tui.wait_contains("cursor")
         entry = _wait_running_entry(tmp_path / ".cache" / "craze")
@@ -304,9 +308,9 @@ def test_bridge_stdout_write_failure_exits_one_not_a_signal(
         # a connection binds once -- the reply itself is what matters), so
         # the bridge's conn -> stdout direction has something to relay.
         _send(bridge, _hello("2"))
-        bridge.stdin.close()
 
         code = bridge.wait(timeout=WAIT)
+        bridge.stdin.close()
         stderr = bridge.stderr.read()
         assert code == 1, (code, stderr)
         assert stderr.startswith(b"craze bridge: "), stderr
@@ -315,6 +319,97 @@ def test_bridge_stdout_write_failure_exits_one_not_a_signal(
         # (review item 7): Go's os.File.Write on a pipe with no reader left
         # returns EPIPE, whose errno text is "broken pipe".
         assert b"EPIPE" in stderr or b"broken pipe" in stderr, stderr
+
+        quit_craze(tui)
+    _wait_fake_gone(fake_agent_bin)
+
+
+def _popen_hub_bridge(craze_bin: Path, home: Path) -> subprocess.Popen:
+    """A long-lived `craze bridge --hub` for the TUI at HOME home: the test's
+    environment otherwise, so the hub it starts carries the test's marker
+    (conftest.marker_pids) and host_cleanup stops it."""
+    env = os.environ.copy()
+    env["HOME"] = str(home)
+    env.pop("CRAZE_HOME", None)
+    return subprocess.Popen(
+        [str(craze_bin), "bridge", "--hub"],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=env,
+    )
+
+
+def _presence(proc: subprocess.Popen) -> int:
+    """The attached count of the next presence notification on proc's
+    stdout, every line before it read and dropped."""
+    while True:
+        msg = json.loads(_recv_line(proc))
+        if msg.get("method") == "presence":
+            return msg["params"]["attached"]
+
+
+def _hub_log_has(home: Path, needle: str, timeout: float = WAIT) -> str:
+    """The hub's log under home once it holds needle, within timeout."""
+    deadline = time.monotonic() + timeout
+    while True:
+        logs = sorted((home / ".cache" / "craze" / "host-logs").glob("hub-*.log"))
+        text = "".join(p.read_text(encoding="utf-8") for p in logs)
+        if needle in text:
+            return text
+        assert time.monotonic() < deadline, f"the hub's log never said {needle!r}: {text!r}"
+        time.sleep(0.05)
+
+
+@pytest.mark.parametrize("via", ["direct", "hub"])
+def test_bridge_exits_once_its_reader_goes_away(
+    craze_bin: Path, fake_agent_bin: Path, tmp_path: Path, both_modes: str, via: str
+) -> None:
+    """SF-123 (plan 035 C9, A9): an attached bridge whose stdin ends and whose
+    stdout's reader then goes away -- an SSH connection dropped -- exits 1 on
+    its own, though the session says nothing: from stdin's end it probes its
+    stdout, finds the reader gone, and closes its socket. Through the hub
+    (`--hub`, session.connect), the splice then finds its client gone entirely
+    and ends, and the hub logs it.
+
+    The host's last line, its presence after the half-close, is read before
+    stdout closes, so nothing but the probe can end the bridge: a line meeting
+    the closed stdout (EPIPE) would end it as well, with no fix at all. The
+    negative controls: without the probe the bridge never exits; without the
+    splice's watcher the hub never logs the splice's end."""
+    with PTYCraze(craze_bin, fake_agent_bin, tmp_path) as tui:
+        tui.wait_contains("cursor")
+        entry = _wait_running_entry(tmp_path / ".cache" / "craze")
+        sid = entry["crazeSessionId"]
+
+        if via == "direct":
+            bridge = _popen_bridge(craze_bin, tmp_path, ["--session", sid])
+        else:
+            bridge = _popen_hub_bridge(craze_bin, tmp_path)
+            _send(bridge, _hello("hub"))
+            hub_hello = json.loads(_recv_line(bridge, timeout=3 * WAIT))
+            assert hub_hello["result"]["endpoint"]["kind"] == "hub", hub_hello
+            _send(bridge, {"jsonrpc": "2.0", "id": "c", "method": "session.connect", "params": {"sessionId": sid}})
+            connected = json.loads(_recv_line(bridge))
+            assert connected == {"jsonrpc": "2.0", "id": "c", "result": {}}, connected
+        _send(bridge, _hello("1"))
+        host_hello = json.loads(_recv_line(bridge))
+        assert host_hello["result"]["endpoint"]["hostId"] == entry["hostId"], host_hello
+        _send(bridge, {"jsonrpc": "2.0", "id": "2", "method": "session.attach", "params": {"sessionId": sid}})
+        attached = _presence(bridge)
+
+        bridge.stdin.close()
+        # The half-close takes the bridge's attachment out of the count, and
+        # the host says so: the last line it writes on this connection.
+        assert _presence(bridge) == attached - 1
+        bridge.stdout.close()
+
+        code = bridge.wait(timeout=WAIT)
+        stderr = bridge.stderr.read()
+        assert code == 1, (code, stderr)
+        assert stderr == b"craze bridge: its reader went away (stdout closed)\n", stderr
+        if via == "hub":
+            _hub_log_has(tmp_path, f"the splice to host {entry['hostId']} (session {sid}) ended")
 
         quit_craze(tui)
     _wait_fake_gone(fake_agent_bin)

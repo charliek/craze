@@ -129,10 +129,10 @@ func entryID(e rundir.Entry) string {
 //
 //   - With no --session, exactly one live host in total is the target; zero
 //     or several is an error listing them on the one line.
-//   - With --session, the live entries whose crazeSessionId, providerSessionId
-//     or hostId equals it exactly; none is the contract line "no session
-//     <id>"; more than one (ids do not collide in practice, but nothing here
-//     assumes it) is an error naming them.
+//   - With --session, the live entries matchSession names (an exact id, or a
+//     craze id's suffix or prefix, or a host id's prefix); none is the
+//     contract line "no session <id>"; more than one is an error naming
+//     them.
 func resolveTarget(entries []rundir.Entry, session string) (rundir.Entry, error) {
 	if session == "" {
 		switch len(entries) {
@@ -157,17 +157,48 @@ func resolveTarget(entries []rundir.Entry, session string) (rundir.Entry, error)
 	}
 }
 
-// matchSession is every entry --session names: the live entries whose
-// crazeSessionId, providerSessionId or hostId equals it exactly (§3.10). craze
-// bridge and craze attach resolve an id the same way (§3.15).
+// minPartialID is the fewest characters of a --session that may match as a
+// suffix or a prefix: fewer would name too many sessions to be an address.
+const minPartialID = 4
+
+// matchSession is every entry --session names (§3.10, SF-115, plan 035 P6).
+// craze bridge and craze attach resolve an id the same way (§3.15). The
+// tiers, in order, and the first that matches any entry decides:
+//
+//  1. an exact match on any field of any entry: crazeSessionId,
+//     providerSessionId or hostId;
+//  2. a crazeSessionId suffix (craze ps prints an id's last 8 characters);
+//  3. a crazeSessionId prefix;
+//  4. a hostId prefix.
+//
+// Within a tier, an entry that matches by several fields counts once. A
+// provider id matches only exactly (its shape is the agent's), and a suffix
+// or prefix needs minPartialID characters. The hub's session.connect stays
+// exact.
 func matchSession(entries []rundir.Entry, session string) []rundir.Entry {
-	var matches []rundir.Entry
-	for _, e := range entries {
-		if e.CrazeSessionID == session || e.ProviderSessionID == session || e.HostID == session {
-			matches = append(matches, e)
+	tiers := []func(rundir.Entry) bool{
+		func(e rundir.Entry) bool {
+			return e.CrazeSessionID == session || e.ProviderSessionID == session || e.HostID == session
+		},
+		func(e rundir.Entry) bool { return strings.HasSuffix(e.CrazeSessionID, session) },
+		func(e rundir.Entry) bool { return strings.HasPrefix(e.CrazeSessionID, session) },
+		func(e rundir.Entry) bool { return strings.HasPrefix(e.HostID, session) },
+	}
+	for i, tier := range tiers {
+		if i > 0 && len(session) < minPartialID {
+			break
+		}
+		var matches []rundir.Entry
+		for _, e := range entries {
+			if tier(e) {
+				matches = append(matches, e)
+			}
+		}
+		if len(matches) > 0 {
+			return matches
 		}
 	}
-	return matches
+	return nil
 }
 
 // formatEntries is several entries named on the one line every bridge error
@@ -234,6 +265,15 @@ const pumpChunk = 64 << 10
 // An error there — a read off stdin, or a write to conn — ends the pump at
 // once with that error, without waiting for conn to end on its own, mirroring
 // roost's select (bridge.rs:93-108).
+//
+// The pump keeps reading conn after stdin's EOF only while stdout has a
+// reader to take what it reads (plan 035 C9, SF-123). An SSH connection that
+// drops ends stdin and stdout's reader together, and a quiet session writes
+// nothing, so no EPIPE ever says so: the bridge, and the host's or the hub's
+// end of its socket, would linger. So from stdin's EOF the pump probes stdout
+// (watchReader), and a reader gone entirely closes the socket and ends the
+// pump with errReaderGone. A reader that is still there, a client that only
+// reads to the end, is relayed every byte as before.
 func pump(stdin io.Reader, stdout io.Writer, conn *net.UnixConn) error {
 	ignoreSIGPIPE()
 	downCh := make(chan error, 1)
@@ -248,9 +288,82 @@ func pump(stdin io.Reader, stdout io.Writer, conn *net.UnixConn) error {
 		if err != nil {
 			return err
 		}
-		// stdin's clean EOF: the half-close is already done. Keep waiting on
-		// the socket, which owns the exit.
-		return <-downCh
+	}
+	// stdin's clean EOF: the half-close is already done. Keep waiting on the
+	// socket, which owns the exit, unless stdout's reader goes first. The
+	// probe has stopped by the time the pump returns.
+	gone, stop := watchReader(stdout)
+	defer stop()
+	select {
+	case err := <-downCh:
+		return err
+	case <-gone:
+		_ = conn.Close()
+		return errReaderGone
+	}
+}
+
+// errReaderGone ends a pump whose stdout's reader has gone entirely
+// (watchReader): craze bridge's "its reader went away" line, exit 1.
+var errReaderGone = errors.New("its reader went away (stdout closed)")
+
+// readerProbeEvery is how often the pump's probe looks at stdout once stdin
+// has ended (watchReader).
+const readerProbeEvery = time.Second
+
+// readerProbed is told what each of the probe's looks at stdout found
+// (rundir.PeerGone's answer), and readerProbeEnded that the probe has
+// stopped: seams for the pump's tests, no-ops in production.
+var (
+	readerProbed     = func(gone, supported bool) {}
+	readerProbeEnded = func() {}
+)
+
+// watchReader probes stdout for a reader gone entirely, at once and then
+// every readerProbeEvery, with rundir.PeerGone, which writes nothing: gone is
+// closed when it finds one. stop ends the probe and returns once it has
+// stopped. Only a stdout whose descriptor can be reached (an *os.File, or
+// any other syscall.Conn) is probed, through its SyscallConn, never Fd, which
+// would switch it to blocking mode. A probe that cannot tell (a regular file,
+// a terminal: PeerGone's supported false) stops at its first look, and gone
+// is then never closed: the pump goes on as it did before the probe.
+func watchReader(stdout io.Writer) (gone <-chan struct{}, stop func()) {
+	sc, ok := stdout.(syscall.Conn)
+	if !ok {
+		return nil, func() {}
+	}
+	rc, err := sc.SyscallConn()
+	if err != nil {
+		return nil, func() {}
+	}
+	goneCh := make(chan struct{})
+	quit := make(chan struct{})
+	ended := make(chan struct{})
+	go func() {
+		defer close(ended)
+		defer readerProbeEnded()
+		tick := time.NewTicker(readerProbeEvery)
+		defer tick.Stop()
+		for {
+			g, supported := rundir.PeerGone(rc)
+			readerProbed(g, supported)
+			if !supported {
+				return
+			}
+			if g {
+				close(goneCh)
+				return
+			}
+			select {
+			case <-quit:
+				return
+			case <-tick.C:
+			}
+		}
+	}()
+	return goneCh, func() {
+		close(quit)
+		<-ended
 	}
 }
 

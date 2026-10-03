@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"fmt"
 	"os"
 	"strings"
@@ -84,6 +85,13 @@ Flags:
                       cancels, instead of racing session/cancel against
                       session/prompt on the wire
           authfail    initialize ok, authenticate error
+          exit-two-lines reads its first request (craze's initialize), leaves
+                      it unanswered, writes "Error: KEYCHAIN LOCKED" and "Run
+                      unlock and retry." to stderr and exits 1: an agent that
+                      dies at its start with two lines to say why, as cursor
+                      does on a locked keychain. The request is read first,
+                      so it was written before the exit: the call fails with
+                      the exit's status, never with a write's broken pipe
           long-reply  echo's session, but every prompt is answered with 600
                       message chunks, "line 1" to "line 600", then end_turn
           turnfail    a normal session whose session/prompt fails with a
@@ -256,16 +264,33 @@ func main() {
 		"load", "grok-load", "load-missing", "load-hang", "load-long", "load-settings",
 		"permodel", "permodel-empty", "permodel-noreply", "permodel-refuse", "permodel-nomodel",
 		"permodel-pushbefore", "permodel-pushafter", "permodel-pushmodel-after",
-		"prompt-dump", "grok-prompt-dump", "reject-image", "grok-reject-image":
+		"prompt-dump", "grok-prompt-dump", "reject-image", "grok-reject-image",
+		"exit-two-lines":
 	default:
 		fmt.Fprintf(os.Stderr, "craze-fake-agent: unknown script %q\n", script)
 		os.Exit(2)
 	}
 	dumpArgv()
+	if script == "exit-two-lines" {
+		exitTwoLines()
+	}
 	if err := run(script); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
+}
+
+// exitTwoLines is exit-two-lines (plan 035 A6): an agent that dies at its
+// start with two lines on its stderr, as cursor does on a locked keychain.
+// It reads its first request — craze's initialize — before it says anything,
+// so that request was written while the agent ran: the call is still pending
+// at the exit and fails with the exit's status (acp: agent exited: exit
+// status 1), never with the broken pipe a write to an agent already gone
+// would get, whatever the scheduling.
+func exitTwoLines() {
+	_, _ = bufio.NewReader(os.Stdin).ReadString('\n')
+	fmt.Fprint(os.Stderr, "Error: KEYCHAIN LOCKED\nRun unlock and retry.\n")
+	os.Exit(1)
 }
 
 func dumpArgv() {

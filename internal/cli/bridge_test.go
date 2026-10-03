@@ -7,13 +7,17 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
 	"github.com/spf13/cobra"
+	"golang.org/x/sys/unix"
 
+	"github.com/charliek/craze/internal/protocol"
 	"github.com/charliek/craze/internal/rundir"
 )
 
@@ -495,6 +499,322 @@ func TestPumpStdoutWriteFailureExitsWithAnError(t *testing.T) {
 	}
 }
 
+// ------------------------------------------------- the stdout probe (SF-123)
+
+// probeWait bounds a wait on the probe or the server that is not itself a
+// timing assertion: generous, for a starved CPU.
+const probeWait = 10 * time.Second
+
+// probeLook is one of the pump's probe's looks at stdout: rundir.PeerGone's
+// answer.
+type probeLook struct{ gone, supported bool }
+
+// probeWatch is the pump's probe as one test sees it (readerProbed,
+// readerProbeEnded): each look on looks, and ended closed once it stopped.
+type probeWatch struct {
+	looks chan probeLook
+	ended chan struct{}
+}
+
+// watchProbe installs a probeWatch for one test (never in parallel), the
+// seams restored when it ends.
+func watchProbe(t *testing.T) *probeWatch {
+	t.Helper()
+	pw := &probeWatch{looks: make(chan probeLook, 64), ended: make(chan struct{})}
+	prevProbed, prevEnded := readerProbed, readerProbeEnded
+	var once sync.Once
+	readerProbed = func(gone, supported bool) {
+		select {
+		case pw.looks <- probeLook{gone, supported}:
+		default:
+		}
+	}
+	readerProbeEnded = func() { once.Do(func() { close(pw.ended) }) }
+	t.Cleanup(func() { readerProbed, readerProbeEnded = prevProbed, prevEnded })
+	return pw
+}
+
+// look checks the probe's next look found (gone, supported), within
+// probeWait.
+func (pw *probeWatch) look(t *testing.T, gone, supported bool) {
+	t.Helper()
+	select {
+	case l := <-pw.looks:
+		if l.gone != gone || l.supported != supported {
+			t.Fatalf("the probe's look found (gone %v, supported %v), want (%v, %v)", l.gone, l.supported, gone, supported)
+		}
+	case <-time.After(probeWait):
+		t.Fatalf("the probe took no look within %v", probeWait)
+	}
+}
+
+// acceptPump is the server's end of the connection the pump dialled.
+func acceptPump(t *testing.T, ln *net.UnixListener) *net.UnixConn {
+	t.Helper()
+	_ = ln.SetDeadline(time.Now().Add(probeWait))
+	sc, err := ln.AcceptUnix()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = sc.Close() })
+	return sc
+}
+
+// readToEnd is everything the server reads up to the pump's half-close
+// (stdin's EOF), within probeWait.
+func readToEnd(t *testing.T, sc *net.UnixConn) string {
+	t.Helper()
+	_ = sc.SetReadDeadline(time.Now().Add(probeWait))
+	b, err := io.ReadAll(sc)
+	if err != nil {
+		t.Fatalf("the server's read up to the pump's half-close: %v", err)
+	}
+	return string(b)
+}
+
+// stdoutPipe is an os.Pipe for the pump's stdout: closed, both ends, when
+// the test ends.
+func stdoutPipe(t *testing.T) (r, w *os.File) {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = r.Close(); _ = w.Close() })
+	return r, w
+}
+
+// pumpReturns is the pump's error once it returns, within d of now.
+func pumpReturns(t *testing.T, done <-chan error, d time.Duration, what string) error {
+	t.Helper()
+	select {
+	case err := <-done:
+		return err
+	case <-time.After(d):
+		t.Fatalf("the pump did not return within %v %s", d, what)
+		return nil
+	}
+}
+
+// wantEPIPE checks the server's next write fails with EPIPE: the pump closed
+// the socket.
+func wantEPIPE(t *testing.T, sc *net.UnixConn) {
+	t.Helper()
+	_ = sc.SetWriteDeadline(time.Now().Add(probeWait))
+	if _, err := sc.Write([]byte("anyone?\n")); !errors.Is(err, syscall.EPIPE) {
+		t.Fatalf("the server's write after the pump ended: %v, want EPIPE (the socket closed)", err)
+	}
+}
+
+// TestPumpEndsOnceStdoutsReaderGoes (plan 035 C9, SF-123): after stdin's
+// EOF, a stdout pipe whose reader closes (an SSH connection dropped) ends the
+// pump within 3 s of the close though the session says nothing at all: it
+// returns errReaderGone, and it closed the socket, so the server's next write
+// fails with EPIPE. The probe's first look, before the close, found the
+// reader there. The negative control: with the probe off, nothing ever ends
+// this pump, and the bound fails.
+func TestPumpEndsOnceStdoutsReaderGoes(t *testing.T) {
+	pw := watchProbe(t)
+	ln, path := pumpListener(t)
+	conn := dialPump(t, path)
+	r, w := stdoutPipe(t)
+	done := make(chan error, 1)
+	go func() { done <- pump(strings.NewReader("ping"), w, conn) }()
+	sc := acceptPump(t, ln)
+	if got := readToEnd(t, sc); got != "ping" {
+		t.Fatalf("the server read %q, want %q", got, "ping")
+	}
+	pw.look(t, false, true)
+
+	if err := r.Close(); err != nil {
+		t.Fatal(err)
+	}
+	err := pumpReturns(t, done, 3*time.Second, "of its stdout's reader closing")
+	if !errors.Is(err, errReaderGone) {
+		t.Fatalf("the pump returned %v, want errReaderGone", err)
+	}
+	wantEPIPE(t, sc)
+}
+
+// TestPumpKeepsALiveReaderToTheEnd (plan 035 C9): a stdout pipe whose reader
+// is still there keeps the pump past stdin's EOF while the session is quiet,
+// the probe looking twice and finding it there each time, and the pump then
+// relays what the session says and exits 0 at its end. The negative control:
+// a probe that took any revent (POLLOUT, room to write) for a reader gone
+// ends the pump at its first look.
+func TestPumpKeepsALiveReaderToTheEnd(t *testing.T) {
+	pw := watchProbe(t)
+	ln, path := pumpListener(t)
+	conn := dialPump(t, path)
+	r, w := stdoutPipe(t)
+	read := make(chan []byte, 1)
+	go func() {
+		b, _ := io.ReadAll(r)
+		read <- b
+	}()
+	done := make(chan error, 1)
+	go func() { done <- pump(strings.NewReader("ping"), w, conn) }()
+	sc := acceptPump(t, ln)
+	if got := readToEnd(t, sc); got != "ping" {
+		t.Fatalf("the server read %q, want %q", got, "ping")
+	}
+	pw.look(t, false, true)
+	pw.look(t, false, true)
+
+	if _, err := sc.Write([]byte("pong")); err != nil {
+		t.Fatal(err)
+	}
+	_ = sc.Close()
+	if err := pumpReturns(t, done, probeWait, "of the socket's end"); err != nil {
+		t.Fatalf("pump: %v", err)
+	}
+	_ = w.Close()
+	if got := <-read; string(got) != "pong" {
+		t.Fatalf("stdout's reader got %q, want %q", got, "pong")
+	}
+}
+
+// TestPumpOnOneSocketAsStdinAndStdout (plan 035 C9, A9): some sshd builds
+// hand a command one socket as its stdin and its stdout (here two descriptors
+// for it, as fd 0 and fd 1 are). A peer that only shut its writing half
+// (SHUT_WR) has ended the bridge's stdin, and still reads: the probe finds it
+// there, look after look, and it gets what the session says after. Its close
+// then ends the pump within 3 s, errReaderGone, and the server's next write
+// fails with EPIPE. The negative controls: a probe that took POLLOUT for a
+// reader gone ends the pump before "pong" reaches the peer; one that ignored
+// POLLHUP never ends it, and the bound fails.
+func TestPumpOnOneSocketAsStdinAndStdout(t *testing.T) {
+	pw := watchProbe(t)
+	ln, path := pumpListener(t)
+	conn := dialPump(t, path)
+	fds, err := unix.Socketpair(unix.AF_UNIX, unix.SOCK_STREAM, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stdin := os.NewFile(uintptr(fds[0]), "stdin")
+	t.Cleanup(func() { _ = stdin.Close() })
+	dup, err := unix.Dup(fds[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	stdout := os.NewFile(uintptr(dup), "stdout")
+	t.Cleanup(func() { _ = stdout.Close() })
+	pf := os.NewFile(uintptr(fds[1]), "peer")
+	fc, err := net.FileConn(pf)
+	_ = pf.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	peer := fc.(*net.UnixConn)
+	t.Cleanup(func() { _ = peer.Close() })
+
+	if _, err := peer.Write([]byte("ping")); err != nil {
+		t.Fatal(err)
+	}
+	if err := peer.CloseWrite(); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- pump(stdin, stdout, conn) }()
+	sc := acceptPump(t, ln)
+	if got := readToEnd(t, sc); got != "ping" {
+		t.Fatalf("the server read %q, want %q", got, "ping")
+	}
+	pw.look(t, false, true)
+	pw.look(t, false, true)
+	if _, err := sc.Write([]byte("pong\n")); err != nil {
+		t.Fatal(err)
+	}
+	_ = peer.SetReadDeadline(time.Now().Add(probeWait))
+	got, err := protocol.NewLineReader(peer, 0).ReadLine()
+	if err != nil || string(got) != "pong" {
+		t.Fatalf("the half-closed peer read %q (%v), want %q", got, err, "pong")
+	}
+
+	if err := peer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	err = pumpReturns(t, done, 3*time.Second, "of its stdin-and-stdout socket's peer closing")
+	if !errors.Is(err, errReaderGone) {
+		t.Fatalf("the pump returned %v, want errReaderGone", err)
+	}
+	wantEPIPE(t, sc)
+}
+
+// TestPumpDoesNotProbeARegularFile (plan 035 C9): a regular file as stdout
+// cannot be probed: the probe's first look says so (supported false) and the
+// probe stops there, while the pump goes on to the socket's end and exits 0,
+// every byte in the file. The negative controls: a probe that polled a
+// regular file anyway (no fstat check) keeps looking and never stops; one
+// that took "cannot tell" for "gone" ends the pump.
+func TestPumpDoesNotProbeARegularFile(t *testing.T) {
+	pw := watchProbe(t)
+	ln, path := pumpListener(t)
+	conn := dialPump(t, path)
+	out := filepath.Join(t.TempDir(), "stdout")
+	f, err := os.Create(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = f.Close() })
+	done := make(chan error, 1)
+	go func() { done <- pump(strings.NewReader("ping"), f, conn) }()
+	sc := acceptPump(t, ln)
+	if got := readToEnd(t, sc); got != "ping" {
+		t.Fatalf("the server read %q, want %q", got, "ping")
+	}
+	pw.look(t, false, false)
+	select {
+	case <-pw.ended:
+	case <-time.After(probeWait):
+		t.Fatal("the probe of a regular file did not stop at its first look")
+	}
+	select {
+	case err := <-done:
+		t.Fatalf("the pump returned (%v) with the socket still open", err)
+	default:
+	}
+
+	if _, err := sc.Write([]byte("pong")); err != nil {
+		t.Fatal(err)
+	}
+	_ = sc.Close()
+	if err := pumpReturns(t, done, probeWait, "of the socket's end"); err != nil {
+		t.Fatalf("pump: %v", err)
+	}
+	if b, err := os.ReadFile(out); err != nil || string(b) != "pong" {
+		t.Fatalf("the file holds %q (%v), want %q", b, err, "pong")
+	}
+}
+
+// TestPumpStopsItsProbeWhenItReturns (plan 035 C9): the probe runs only while
+// the pump does. A pump that returns, here at the socket's end with stdout's
+// reader still there, has stopped its probe by then. The negative control: a
+// pump that left its probe running returns with the probe still looking.
+func TestPumpStopsItsProbeWhenItReturns(t *testing.T) {
+	pw := watchProbe(t)
+	ln, path := pumpListener(t)
+	conn := dialPump(t, path)
+	r, w := stdoutPipe(t)
+	go func() { _, _ = io.Copy(io.Discard, r) }()
+	done := make(chan error, 1)
+	go func() { done <- pump(strings.NewReader("ping"), w, conn) }()
+	sc := acceptPump(t, ln)
+	if got := readToEnd(t, sc); got != "ping" {
+		t.Fatalf("the server read %q, want %q", got, "ping")
+	}
+	pw.look(t, false, true)
+	_ = sc.Close()
+	if err := pumpReturns(t, done, probeWait, "of the socket's end"); err != nil {
+		t.Fatalf("pump: %v", err)
+	}
+	select {
+	case <-pw.ended:
+	default:
+		t.Fatal("the pump returned with its probe still running")
+	}
+}
+
 // TestDialAndPumpPeerCheckRunsBeforeTheFirstByte: a refusing peer check
 // closes the connection before pump ever runs, so the accept side reads
 // nothing at all (§3.8's "the client checks the server after dial", §3.10).
@@ -616,4 +936,107 @@ func TestBridgeHelpIsNotAFailure(t *testing.T) {
 	if !strings.Contains(stdout, "craze bridge") {
 		t.Fatalf("stdout = %q, want usage naming the command", stdout)
 	}
+}
+
+// -------------------------------------------------- short ids (SF-115, P6)
+
+// TestMatchSessionTiers is plan 035 P6: the first tier that matches decides —
+// exact on any field of any entry, then a craze-id suffix, a craze-id prefix,
+// a host-id prefix — and within it two entries are ambiguous.
+func TestMatchSessionTiers(t *testing.T) {
+	a := rundir.Entry{CrazeSessionID: "0193aaaa-1111-7000-8000-00000000abcd", ProviderSessionID: "prov-a", HostID: "h1h1h1h1h1h1"}
+	b := rundir.Entry{CrazeSessionID: "0193bbbb-2222-7000-8000-00000000ef01", ProviderSessionID: "prov-b", HostID: "h2h2h2h2h2h2"}
+	c := rundir.Entry{CrazeSessionID: "abcd0000-3333-7000-8000-0000000000cc", ProviderSessionID: "prov-c", HostID: "zz00zz00zz00"}
+	entries := []rundir.Entry{a, b, c}
+	for _, tc := range []struct {
+		name, session string
+		want          []rundir.Entry
+	}{
+		{"an 8-character suffix (craze ps's id)", "0000abcd", []rundir.Entry{a}},
+		{"4 characters match a suffix", "abcd", []rundir.Entry{a}},
+		{"3 characters match nothing", "bcd", nil},
+		{"the full craze id", a.CrazeSessionID, []rundir.Entry{a}},
+		{"a craze-id prefix", "0193bbbb-22", []rundir.Entry{b}},
+		{"a host-id prefix", "h2h2h2", []rundir.Entry{b}},
+		{"a host-id prefix under 4 characters", "h2h", nil},
+		{"the whole host id", "h1h1h1h1h1h1", []rundir.Entry{a}},
+		{"a provider id exactly", "prov-b", []rundir.Entry{b}},
+		{"no partial provider id", "prov", nil},
+		{"no partial provider id, long", "prov-", nil},
+		{"a suffix beats a prefix", "abcd", []rundir.Entry{a}},
+		{"nothing", "nonesuch", nil},
+	} {
+		if got := matchSession(entries, tc.session); !slices.Equal(got, tc.want) {
+			t.Errorf("%s: --session %q matched %+v, want %+v", tc.name, tc.session, got, tc.want)
+		}
+	}
+	// "abcd" is a's suffix and c's prefix: the suffix tier decides, so c is
+	// not an ambiguity (the tier-order negative control).
+	if got := matchSession(entries, "abcd"); len(got) != 1 || got[0] != a {
+		t.Fatalf("abcd: %+v, want a alone", got)
+	}
+	// Two entries in the deciding tier are ambiguous.
+	d := rundir.Entry{CrazeSessionID: "0193dddd-4444-7000-8000-00000000abcd", HostID: "h4h4h4h4h4h4"}
+	if got := matchSession([]rundir.Entry{a, d}, "abcd"); len(got) != 2 {
+		t.Fatalf("an ambiguous suffix matched %+v, want both", got)
+	}
+	// An entry whose ids are not known yet (an empty craze id or host id)
+	// never matches a partial id; its known fields still do.
+	blank := rundir.Entry{ProviderSessionID: "prov-x"}
+	if got := matchSession([]rundir.Entry{blank, a}, "abcd"); len(got) != 1 || got[0] != a {
+		t.Fatalf("an entry with empty ids matched a partial: %+v, want a alone", got)
+	}
+	if got := matchSession([]rundir.Entry{blank}, "prov-x"); len(got) != 1 {
+		t.Fatalf("an entry with empty ids lost its exact provider id: %+v", got)
+	}
+	// One id a prefix of another: the whole id is exact and decides; a token
+	// that is only a prefix of both is ambiguous.
+	short := rundir.Entry{CrazeSessionID: "0193eeee", HostID: "h5h5h5h5h5h5"}
+	long := rundir.Entry{CrazeSessionID: "0193eeee-5555", HostID: "h6h6h6h6h6h6"}
+	if got := matchSession([]rundir.Entry{short, long}, "0193eeee"); len(got) != 1 || got[0] != short {
+		t.Fatalf("the whole shorter id matched %+v, want it alone", got)
+	}
+	if got := matchSession([]rundir.Entry{short, long}, "0193ee"); len(got) != 2 {
+		t.Fatalf("a prefix of both matched %+v, want both (ambiguous)", got)
+	}
+}
+
+// TestMatchSessionExactBeatsASuffix: an exact match on any field, even of
+// another entry, decides before a suffix does.
+func TestMatchSessionExactBeatsASuffix(t *testing.T) {
+	suffixed := rundir.Entry{CrazeSessionID: "0193aaaa-1111-7000-8000-0000abcdabcd", HostID: "h1h1h1h1h1h1"}
+	exact := rundir.Entry{CrazeSessionID: "other", ProviderSessionID: "abcdabcd", HostID: "h2h2h2h2h2h2"}
+	got := matchSession([]rundir.Entry{suffixed, exact}, "abcdabcd")
+	if len(got) != 1 || got[0] != exact {
+		t.Fatalf("matched %+v, want the exact match alone", got)
+	}
+}
+
+// TestMatchSessionCountsAnEntryOnce: an entry matching a tier by several
+// fields is one match, not an ambiguity.
+func TestMatchSessionCountsAnEntryOnce(t *testing.T) {
+	both := rundir.Entry{CrazeSessionID: "same-id", ProviderSessionID: "same-id", HostID: "same-id"}
+	if got := matchSession([]rundir.Entry{both, {CrazeSessionID: "x", HostID: "y"}}, "same-id"); len(got) != 1 || got[0] != both {
+		t.Fatalf("matched %+v, want the one entry once", got)
+	}
+	e := rundir.Entry{CrazeSessionID: "abcd1234abcd1234", HostID: "abcd1234abcd"}
+	if got := matchSession([]rundir.Entry{e}, "abcd1234"); len(got) != 1 {
+		t.Fatalf("a prefix of the craze id and the host id matched %+v, want one", got)
+	}
+}
+
+// TestResolveTargetShortIDs: craze bridge --session takes a short id, refuses
+// an ambiguous one in the same words as an exact clash, and says the same
+// no-match line.
+func TestResolveTargetShortIDs(t *testing.T) {
+	a := rundir.Entry{CrazeSessionID: "0193aaaa-1111-7000-8000-00000000abcd", HostID: "aaaaaaaaaaaa", Provider: "cursor", Workspace: "/a"}
+	d := rundir.Entry{CrazeSessionID: "0193dddd-4444-7000-8000-00000000abcd", HostID: "dddddddddddd", Provider: "grok", Workspace: "/d"}
+	_, err := resolveTarget([]rundir.Entry{a, d}, "0000abcd")
+	assertBridgeError(t, err, 1, "craze bridge: 2 sessions match --session 0000abcd: "+
+		a.CrazeSessionID+" (cursor, /a), "+d.CrazeSessionID+" (grok, /d)")
+	if got, err := resolveTarget([]rundir.Entry{a}, "0000abcd"); err != nil || got != a {
+		t.Fatalf("--session 0000abcd: %+v, %v; want %+v", got, err, a)
+	}
+	_, err = resolveTarget([]rundir.Entry{a}, "bcd")
+	assertBridgeError(t, err, 1, "craze bridge: no session bcd")
 }

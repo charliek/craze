@@ -55,3 +55,17 @@ func TestArgsPassTheRequestOnlyWhenSet(t *testing.T) {
 		}
 	}
 }
+
+// TestArgsPassTheHubPIDOnlyWhenSet (plan 035 P3): a hub's create hands its
+// host --hub-pid, its own pid, for the macOS login-session hint to name;
+// every other spawn — a TUI's launch, the list's — passes none.
+func TestArgsPassTheHubPIDOnlyWhenSet(t *testing.T) {
+	if argv := Args(Spec{HostID: "0123456789ab", Log: "/l", HubPID: 4242}); !slices.Contains(argv, "--hub-pid=4242") {
+		t.Fatalf("%q lacks --hub-pid=4242", argv)
+	}
+	for _, a := range Args(Spec{HostID: "0123456789ab", Log: "/l"}) {
+		if strings.HasPrefix(a, "--hub-pid") {
+			t.Fatalf("a spawn with no hub passes %s", a)
+		}
+	}
+}

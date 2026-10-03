@@ -499,6 +499,192 @@ func TestHalfCloseBothWays(t *testing.T) {
 	waitFor(t, "the hub counts no client", func() bool { return clients(rg.h) == 0 })
 }
 
+// probeLook is one of a splice's watcher's looks at its client leg:
+// rundir.PeerGone's answer.
+type probeLook struct{ gone, supported bool }
+
+// probedRig is a splice rig whose splices report each of their watchers'
+// looks on the channel it returns.
+func probedRig(t *testing.T, env rundir.Env) (*spliceRig, <-chan probeLook) {
+	t.Helper()
+	looks := make(chan probeLook, 64)
+	rg := newSpliceRig(t, env, func(k *hooks) {
+		prev := k.handedOff
+		k.handedOff = func(sp *splice) {
+			sp.probed = func(gone, supported bool) {
+				select {
+				case looks <- probeLook{gone, supported}:
+				default:
+				}
+			}
+			prev(sp)
+		}
+	})
+	return rg, looks
+}
+
+// look checks the watcher's next look found (gone, supported), within step.
+func look(t *testing.T, looks <-chan probeLook, gone, supported bool) {
+	t.Helper()
+	select {
+	case l := <-looks:
+		if l.gone != gone || l.supported != supported {
+			t.Fatalf("the watcher's look found (gone %v, supported %v), want (%v, %v)", l.gone, l.supported, gone, supported)
+		}
+	case <-time.After(step):
+		t.Fatalf("the watcher took no look within %v", step)
+	}
+}
+
+// TestASpliceEndsWhenItsClientIsGone (plan 035 C9, SF-123, A9): a client gone
+// entirely ends its splice within 3 s of its close, though its host stays
+// completely idle (what it had to say read, and nothing written after): both
+// legs are closed, the hub counts no client within the same 3 s, and the
+// host's next write fails. So it goes whether the client closes at once, or
+// half-closes first and closes later, as craze bridge does when its SSH
+// connection drops (its stdin ends, then its probe closes the socket); the
+// watcher looked at the half-closed client twice first and found it there.
+// The negative controls: with no watcher, or one that ignored POLLHUP, the
+// splice of an idle host never ends, and the bound fails.
+func TestASpliceEndsWhenItsClientIsGone(t *testing.T) {
+	for _, halfFirst := range []bool{false, true} {
+		name := "the close alone"
+		if halfFirst {
+			name = "a half-close, then the close"
+		}
+		t.Run(name, func(t *testing.T) { spliceClientGone(t, halfFirst) })
+	}
+}
+
+func spliceClientGone(t *testing.T, halfFirst bool) {
+	env := testEnv(t)
+	rh := newRawHost(t, env, hostOf(5), sessionOf(5))
+	rg, looks := probedRig(t, env)
+	p := dialPeer(t, rg.sock)
+	if m := p.call(protocol.MethodSessionConnect, protocol.ConnectParams{SessionID: sessionOf(5)}); m.Error != nil {
+		t.Fatalf("connect: %s", clip(m.raw))
+	}
+	hc := rh.accept(t)
+	sp := rg.splice(t)
+	// A line each way, each read: what the host had to say is drained, and
+	// from here it writes nothing.
+	if _, err := p.nc.Write([]byte("from the client\n")); err != nil {
+		t.Fatal(err)
+	}
+	_ = hc.SetReadDeadline(time.Now().Add(step))
+	hlr := protocol.NewLineReader(hc, 0)
+	if got, err := hlr.ReadLine(); err != nil || string(got) != "from the client" {
+		t.Fatalf("the host read %q (%v)", got, err)
+	}
+	if _, err := hc.Write([]byte("from the host\n")); err != nil {
+		t.Fatal(err)
+	}
+	_ = p.nc.SetReadDeadline(time.Now().Add(step))
+	if got, err := p.lr.ReadLine(); err != nil || string(got) != "from the host" {
+		t.Fatalf("the client read %q (%v)", got, err)
+	}
+	if n := clients(rg.h); n != 1 {
+		t.Fatalf("the hub counts %d clients with one splice", n)
+	}
+
+	uc := p.nc.(*net.UnixConn)
+	if halfFirst {
+		if err := uc.CloseWrite(); err != nil {
+			t.Fatal(err)
+		}
+		// The host reads the client's end: the host leg is half-closed, and
+		// the watcher is on.
+		if _, err := hlr.ReadLine(); !errors.Is(err, io.EOF) {
+			t.Fatalf("the host's read after the client's half-close: %v, want its end", err)
+		}
+		look(t, looks, false, true)
+		look(t, looks, false, true)
+	}
+	if err := uc.Close(); err != nil {
+		t.Fatal(err)
+	}
+	closed := time.Now()
+	select {
+	case <-sp.done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("the splice outlived its client's close by 3 s with its host idle")
+	}
+	for clients(rg.h) != 0 {
+		if time.Since(closed) > 3*time.Second {
+			t.Fatalf("the hub still counts %d clients 3 s after the splice's client closed", clients(rg.h))
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	_ = hc.SetWriteDeadline(time.Now().Add(step))
+	if _, err := hc.Write([]byte("anyone?\n")); err == nil {
+		t.Fatal("the host leg is still open after the splice ended")
+	}
+}
+
+// TestAHalfClosedClientKeepsItsSplice (plan 035 C9, A9; S2's half-close): a
+// spliced, attached client that only half-closed, and still reads, is not
+// gone. The watcher looks at it twice, a second apart, and finds it there;
+// what the host says after that still reaches it, and the splice, and the
+// hub's client, stay. The negative control: a watcher that took any revent
+// (POLLOUT, room to write) for a client gone ends the splice at its first
+// look, and the event never arrives.
+func TestAHalfClosedClientKeepsItsSplice(t *testing.T) {
+	env := testEnv(t)
+	h6, _ := hostIn(t, env, 6)
+	counts := make(chan int, 64)
+	h6.AddAttachmentsListener(func(n int) {
+		select {
+		case counts <- n:
+		default:
+		}
+	})
+	count := func(want int) {
+		t.Helper()
+		for {
+			select {
+			case n := <-counts:
+				if n == want {
+					return
+				}
+			case <-time.After(step):
+				t.Fatalf("the host's attachments never reached %d", want)
+			}
+		}
+	}
+	rg, looks := probedRig(t, env)
+	p, _ := connected(t, rg.sock, sessionOf(6))
+	sp := rg.splice(t)
+	if m := p.call(protocol.MethodSessionAttach, protocol.AttachParams{SessionID: sessionOf(6)}); m.Error != nil {
+		t.Fatalf("attach: %s", clip(m.raw))
+	}
+	if m := p.read(); m.Method != protocol.NotifySynchronized {
+		t.Fatalf("after the attach: %s", clip(m.raw))
+	}
+	count(1)
+
+	if err := p.nc.(*net.UnixConn).CloseWrite(); err != nil {
+		t.Fatal(err)
+	}
+	count(0)
+	look(t, looks, false, true)
+	look(t, looks, false, true)
+	h6.Text("", "after two looks")
+	for {
+		m := p.read()
+		if m.Method == protocol.NotifyEvent && bytes.Contains(m.Params, []byte("after two looks")) {
+			break
+		}
+	}
+	select {
+	case <-sp.done:
+		t.Fatal("the splice of a half-closed client that still reads ended")
+	default:
+	}
+	if n := clients(rg.h); n != 1 {
+		t.Fatalf("the hub counts %d clients with a half-closed client's splice", n)
+	}
+}
+
 // TestBackpressureIsBounded (§3.7): a client that reads nothing while its
 // host floods it stops the splice's copy toward it, and so the copy's reads
 // from the host: the hub holds at most its one buffer of the flood — what it

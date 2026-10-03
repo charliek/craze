@@ -374,6 +374,32 @@ The launcher names it whenever a host could not start. A spawned host's
 A host's log can hold what its agent printed to stderr; treat it like the
 [journal](#session-journal).
 
+A start that fails because its agent exited — with a non-zero status or a
+signal, after craze sent it `initialize` — also carries **the agent's last
+non-blank stderr lines** in its error, from the stderr craze had captured when
+the failed start collected it — first waiting up to half a second for its copy
+of that stderr to finish — sanitized, folded onto one line with ` / `, at most
+512 bytes (a longer last line keeps its end). They go wherever a
+detached host's start failure goes: a client attached to it,
+`session.create`'s `data.cause`, `craze new`'s line. An agent that exits
+before craze sends `initialize`, or exits 0, gets craze's own error only. The
+lines are **not redacted**: they are the end of what the host's log holds, and
+an agent's stderr can hold a token, so only that tail leaves the log. This is
+the detached host's alone: the in-process TUI (`detach = false`) and `craze
+prompt` say craze's own error only, so the two TUIs word the same failed start
+differently.
+
+On macOS a host runs in the login session of whoever started it: a detached
+TUI's host in its terminal's, a host the hub created in the hub's — and a hub
+keeps the session of whichever command first started it, while any session
+runs. The login keychain, which `cursor` needs, is unlocked only in the GUI
+login session, so start craze, and its hub, from a terminal in your Mac's
+login session (a Roost tab, Terminal.app). A host outside it whose agent
+exited that way ends its start error with a hint saying so: for a host the hub created
+it names the hub to stop (`kill <hub pid>` ends only the hub; no session
+ends), and for one a TUI launched it says to start the session from the login
+session's terminal.
+
 ### Model catalog cache
 
 cursor, grok and gx name the models they offer only once a session has

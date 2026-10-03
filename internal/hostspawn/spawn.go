@@ -46,6 +46,7 @@ import (
 	"os"
 	"os/exec"
 	"slices"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -131,12 +132,17 @@ type Spec struct {
 	// (plan 032 §3.10), its idempotency id and its params' hash, which the
 	// host writes into its registry entry.
 	RequestID, RequestHash string
+	// HubPID is --hub-pid, passed only when set (plan 035 P3): the pid of the
+	// hub that creates the host, so a start failure the host words for macOS's
+	// login session can name the hub to stop. An internal flag between the
+	// hub and its hosts, not part of the wire protocol.
+	HubPID int
 }
 
 // Args is craze serve's command line for s: the host's id and log, then every
 // session flag s carries — each only when it says something — and --load,
-// --no-host-status, --request-id and --request-hash. Every value is spelled
-// --flag=value, so none is read as a flag of its own.
+// --no-host-status, --request-id, --request-hash and --hub-pid. Every value
+// is spelled --flag=value, so none is read as a flag of its own.
 func Args(s Spec) []string {
 	argv := []string{"serve", "--host-id=" + s.HostID, "--log=" + s.Log}
 	str := func(name, v string) {
@@ -177,6 +183,9 @@ func Args(s Spec) []string {
 	}
 	str("request-id", s.RequestID)
 	str("request-hash", s.RequestHash)
+	if s.HubPID > 0 {
+		argv = append(argv, "--hub-pid="+strconv.Itoa(s.HubPID))
+	}
 	return argv
 }
 

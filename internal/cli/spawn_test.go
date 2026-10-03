@@ -1065,6 +1065,11 @@ func TestSpawnArgvCarriesEverySessionFlag(t *testing.T) {
 			if f.load != tc.load || f.hostID != "0123456789ab" || f.log != "/h/0123456789ab.log" {
 				t.Fatalf("serve's own: load %q, host id %q, log %q", f.load, f.hostID, f.log)
 			}
+			// A TUI's launch has no hub: its host's login-session hint is
+			// the terminal's form (plan 035 P3).
+			if cmd.Flags().Changed("hub-pid") || f.hubPID != 0 {
+				t.Fatalf("a TUI's launch passes --hub-pid: %q", argv)
+			}
 			for _, name := range []string{"workspace", "provider", "model", "effort", "fast", "no-fast", "agent-bin", "plugin-dir", "no-force", "ask", "plan", "continue", "load", "no-host-status"} {
 				set := cmd.Flags().Changed(name)
 				given := map[string]bool{

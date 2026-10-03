@@ -423,12 +423,15 @@ var (
 // says the failure is one of those the body used to answer with an inner
 // Close; the paths that only give the start back (unstart) keep doing that.
 // A Close racing this start can cut that admission first, which
-// noteStartFailed accepts and counts.
+// noteStartFailed accepts and counts. A failure is put in the agent's own
+// words (decorateStartErr) before it is noted, so the note and the error
+// returned say the same.
 func (s *session) Start(ctx context.Context) error {
 	teardown, err := s.start(ctx)
 	if err == nil {
 		return nil
 	}
+	err = s.decorateStartErr(err)
 	s.log.noteStartFailed(err)
 	if teardown {
 		if s.opts.KeepLogOnFailedStart {

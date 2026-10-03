@@ -47,6 +47,12 @@ const (
 	psTitleCells = 100
 	psTitleMin   = 10
 	psDirMin     = 10
+	// psModelCells is the widest the MODEL column is: a model id is the
+	// row's exact one (plan 035 §3.2 C11) and unbounded, so a longer one is
+	// cut with an ellipsis, as a title is, rather than widening every row.
+	// It holds every model of craze's shipped catalog whole (the longest
+	// alias is 29); an agent's own ids are its own.
+	psModelCells = 32
 	// psShortID is how many characters of a craze session id craze ps shows.
 	psShortID = 8
 	// psNone is a cell craze ps has nothing for.
@@ -174,9 +180,10 @@ var psHeader = [7]string{"SESSION", "STATE", "PROVIDER", "MODEL", "DIR", "SINCE"
 // first, then by craze session id. The state and since are the list's rule
 // (roster.Row's); the provider and directory are the host's answer's, else
 // its registry entry's; the title the session's own, else the session
-// index's (titles, by craze id), as the list's. No row carries the model the
-// session runs now, so MODEL is "-" (SF-114). Every cell is one line, its
-// escape sequences and controls gone.
+// index's (titles, by craze id), as the list's; the model the session's
+// current model id as its row says it (SF-114), cut to psModelCells, "-"
+// where the row does not say (an older host, or one not yet read). Every
+// cell is one line, its escape sequences and controls gone.
 func psRows(res protocol.HubSessionsListResult, home string, titles map[string]string, now time.Time) []psRow {
 	rows := make([]psRow, 0, len(res.Sessions))
 	for _, rr := range res.Sessions {
@@ -186,7 +193,7 @@ func psRows(res protocol.HubSessionsListResult, home string, titles map[string]s
 			rr.Row = nil
 			r, _ = roster.FromRosterRow(rr)
 		}
-		provider, dir, title := r.Host.Provider, r.Host.Workspace, ""
+		provider, model, dir, title := r.Host.Provider, "", r.Host.Workspace, ""
 		if s := r.Session; s != nil {
 			if s.Provider != "" {
 				provider = s.Provider
@@ -194,7 +201,7 @@ func psRows(res protocol.HubSessionsListResult, home string, titles map[string]s
 			if s.Workspace != "" {
 				dir = s.Workspace
 			}
-			title = s.Title
+			model, title = s.Model, s.Title
 		}
 		if psLine(title) == "" {
 			title = titles[rr.SessionID]
@@ -204,7 +211,7 @@ func psRows(res protocol.HubSessionsListResult, home string, titles map[string]s
 			psShort(rr.SessionID),
 			row.state.String(),
 			psLine(provider),
-			psNone,
+			psClip(psLine(model), psModelCells),
 			psLine(psTilde(home, dir)),
 			psAge(now, row.since),
 			psLine(title),
@@ -293,9 +300,9 @@ func psTable(rows []psRow, width int) string {
 	return b.String()
 }
 
-// psClip is line cut with an ellipsis to width cells, when width is a
-// terminal's (> 0): no line craze ps prints is wider than its terminal —
-// psNoSessions included (r25 5).
+// psClip is line cut with an ellipsis to width cells, when width is > 0: a
+// terminal's — no line craze ps prints is wider than its terminal,
+// psNoSessions included (r25 5) — or the MODEL column's psModelCells.
 func psClip(line string, width int) string {
 	if width > 0 && ansi.StringWidth(line) > width {
 		return ansi.Truncate(line, width, "…")

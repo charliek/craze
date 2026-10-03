@@ -108,6 +108,10 @@ type serveFlags struct {
 	// (hidden): the hub's session.create that spawned this host (plan 032
 	// §3.10), written into its registry entry; "" for any other host.
 	requestID, requestHash string
+	// hubPID is --hub-pid (hidden): the pid of the hub that created this
+	// host (plan 035 P3), named by the macOS login-session hint
+	// (loginSessionHint); 0 for any other host.
+	hubPID int
 	// ready is the spawner's ready pipe (CRAZE_READY_FD, ready.go), taken
 	// before anything else runs; nil for a host run by hand. Not a flag.
 	ready *readyPipe
@@ -214,10 +218,14 @@ func registerServeFlags(cmd *cobra.Command, f *serveFlags) {
 	// retried create's session.
 	cmd.Flags().StringVar(&f.requestID, "request-id", "", "the hub's create request id (set by the hub)")
 	cmd.Flags().StringVar(&f.requestHash, "request-hash", "", "the hub's create request's params hash (set by the hub)")
+	// The hub's too (plan 035 P3): its own pid, for a start failure that
+	// tells the user which hub to stop.
+	cmd.Flags().IntVar(&f.hubPID, "hub-pid", 0, "the pid of the hub that created this host (set by the hub)")
 	_ = cmd.Flags().MarkHidden("host-id")
 	_ = cmd.Flags().MarkHidden("no-host-status")
 	_ = cmd.Flags().MarkHidden("request-id")
 	_ = cmd.Flags().MarkHidden("request-hash")
+	_ = cmd.Flags().MarkHidden("hub-pid")
 }
 
 // serveSignals is craze serve's signal set, registered for the command's
@@ -474,6 +482,13 @@ func serveSession(cmd *cobra.Command, f *serveFlags, env hostEnv, sigs <-chan os
 	// form) rather than the stream's end, and one that attaches afterwards is
 	// refused start_failed.
 	opts.KeepLogOnFailedStart = true
+	// Its start failure travels as one line of text to whoever attached or
+	// created it, so a start that failed because the agent exited says the
+	// agent's own last words, and on macOS what its login session may have to
+	// do with it (plan 035 C7, P3, P4). craze prompt and the in-process TUI
+	// do neither.
+	opts.StartErrAgentStderr = true
+	opts.StartErrExitHint = loginSessionHint(f.hubPID)
 	// A spawned host records its agents' process groups for its spawner's
 	// last resort (plan 030 §3.4, X22), and an agent it cannot record does
 	// not run; one run by hand has no spawner to read them.
@@ -708,6 +723,31 @@ func (h *serveHost) start(persist bool, p resolvedProvider) {
 			fmt.Fprintf(h.log, "craze: not saving the provider: %v\n", err)
 		}
 	}
+}
+
+// loginSessionHint is what a host on macOS adds to a start that failed
+// because its agent exited (agent.Options.StartErrExitHint; plan 035 P3,
+// SF-126), when its audit session lacks the GUI login's graphic access
+// (rundir.GUISession): "" otherwise, and on every other OS. A host inherits
+// its login session from whoever spawned it — craze moves no process into
+// another — so a host the hub created runs in the hub's, and one a TUI
+// launched in that terminal's. The keychain cursor needs is unlocked only in
+// the GUI login session; whether it is what failed this start, the flag
+// cannot say (a keychain can be locked in the GUI session too, or unlocked by
+// hand over ssh), so the hint says "if". hubPID, the hub that created the
+// host (--hub-pid), is the one to stop; a host with none was launched from a
+// terminal, which is what has to change. One line, craze's own words.
+func loginSessionHint(hubPID int) string {
+	if _, gui, known := rundir.GUISession(); !known || gui {
+		return ""
+	}
+	hint := "; this session runs outside your macOS login session (its launcher was started over ssh): " +
+		"if the agent needs the login keychain, as cursor does,"
+	if hubPID > 0 {
+		return hint + fmt.Sprintf(" stop the hub with kill %d (no session ends) and run this again "+
+			"from a terminal in your Mac's login session (a Roost tab, Terminal.app)", hubPID)
+	}
+	return hint + " start this session from a terminal in your Mac's login session (a Roost tab, Terminal.app)"
 }
 
 // wait parks craze serve's goroutine until the host is asked to stop: a
