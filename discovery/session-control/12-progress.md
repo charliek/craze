@@ -5053,7 +5053,7 @@ fixes (C12 is this record). A review's fixes landed as their own commits (X1).
   receiving. r12 found TCP sockets wrongly counted as supported and a docs
   omission; C9r limits it to pipes and AF_UNIX streams and states when the
   splice's bound arms; r14 found nothing. Residuals are SF-138 and SF-139.
-- **C10, C10r, C10r2 — SF-124, SF-115, SF-127.** `craze new --json` prints the protocol
+- **C10, C10r, C10r2, C10r3 — SF-124, SF-115, SF-127.** `craze new --json` prints the protocol
   error as one JSON object (code, reason, message, `data.cause`) with exit 1;
   `--session` resolves in tiers, the first that matches deciding: an exact id
   of any kind, then a craze-id suffix (what `craze ps` shows), a craze-id
@@ -5063,7 +5063,8 @@ fixes (C12 is this record). A review's fixes landed as their own commits (X1).
   no JSON, a failed stdout write of the result: `cli.md` names that one
   exception (X33) and the matcher's two edges are pinned; r18 found a closed
   stdout killing `craze new` by SIGPIPE before its stderr line, and C10r2 makes
-  that write fail with EPIPE instead. SF-127 closed with docs only (V5, below).
+  that write fail with EPIPE instead; C10r3 makes the plain `started` line's
+  failed write fail the run too (r19). SF-127 closed with docs only (V5, below).
 - **C11, C11r — SF-114.** `SessionRow.model` carries a session's current model id
   through the host's `sessions.list` and the hub's roster, and `craze ps`'s
   MODEL shows it (`-` for an older host), capped at 32 cells (X35). It rides
@@ -5113,10 +5114,12 @@ unjoined Initialize), fixed in C7r3 and left to the branch-level review. r18
 clean; `craze new --json` with its stdout's reader gone was killed by SIGPIPE
 before its stderr line (C10's new write on the failure path), fixed in C10r2
 (`ignoreSIGPIPE`, a real broken-pipe test); and this record's handoff had
-dropped C9r's arming condition, restored here.
+dropped C9r's arming condition, restored here. r19 (sol, C10r2): a plain
+`craze new` whose `started` line could not be written then exited 0, silently;
+C10r3 returns that write's error, exit 1.
 
 **Verification.** V2 at C7: 103/103 normalized outputs and exit results match
-`6581e0a`; V2 at the tip (`1a8a2a5`): 102/103 SAME, the one DIFF the baseline's own loss of the closing line in `sigint-foreign-turn-holds-the-drain` (SF-122 in `6581e0a`; the candidate printed all 15). A12: only fixture 17 moved. On the
+`6581e0a`; at `1a8a2a5`, 102/103, the one DIFF the baseline's own loss of the closing line in `sigint-foreign-turn-holds-the-drain` (SF-122 in `6581e0a`; the candidate printed all 15); at `8bf6d96`, 103/103, and that scenario ×20 there gave the candidate 15 lines every time (the baseline lost lines in 3). A12: only fixture 17 moved. On the
 mac-mini (X41): V3 over plain ssh with a real cursor and no GUI-born hub failed
 as pinned, with cursor's two keychain lines and the hint naming the hub's pid,
 and from the GUI session, after that hub was stopped, the create started cursor
@@ -5142,7 +5145,7 @@ landed first and 034 rebases onto it; for PR 2, whichever lands second
 re-records fixture 17 and its schema copy (034 takes fixtures 24 and 25; 035
 adds none).
 
-PR: (to be filled at merge)
+PR: `feature/plan-035-s3-ready`, to be merged with a merge commit (whose message names the PR).
 
 #### Handoff to S3
 
