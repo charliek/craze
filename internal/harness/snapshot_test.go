@@ -284,7 +284,7 @@ func TestChildrenCarryTheSessionStart(t *testing.T) {
 	}
 	openChild := func(t *testing.T, parent *Session, alias string) *Session {
 		t.Helper()
-		child, err := parent.subs.openChild(&childHandle{id: "child-" + strings.ReplaceAll(alias, "/", "-")},
+		child, err := parent.subs.openChild(parent.view(), &childHandle{id: "child-" + strings.ReplaceAll(alias, "/", "-")},
 			tool.SubagentCall{ID: "t1.1.1"}, tool.Persona{Name: "reviewer", Role: role, AllTools: true}, alias, "", modeAgent)
 		if err != nil {
 			t.Fatalf("openChild(%s): %v", alias, err)

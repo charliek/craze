@@ -38,7 +38,12 @@ import (
 // at the output rate, and its cache reads and writes at theirs, exact in int64.
 // Every usage is priced by its own model's (provider, wire model), whatever
 // alias it names (modeltable.Table.Price, R2-7); one with no price marks the
-// sum Unpriced and adds its tokens and no cost.
+// sum Unpriced and adds its tokens and no cost. The table is the session's
+// current one, and an identity it does not price is priced by the table the
+// session opened with (plan 034 §3.4, A23): a table swapped in while the
+// session runs prices the models it lists, and one it dropped — a provider
+// removed, an alias gone — keeps the price it had, so a swap never changes
+// what the session has spent.
 
 // unsavedUsage is usage this incarnation was billed for that no entry holds
 // (§3.14): a step no append wrote — its save failed (DiagSaveFailed), it was
@@ -93,11 +98,12 @@ func (s *Session) spent(turn int, next modeltable.Resolved) Spent {
 
 // spend is turn's spend and the session's, by the rule above: every usage on
 // the transcript's path, and every one this incarnation observed unsaved,
-// priced through the session's table. It takes the session's lock and the
-// store's, one at a time, and holds neither while it prices.
+// priced through the session's table, and the open-time table for what it
+// does not price. It takes the session's lock and the store's, one at a time,
+// and holds neither while it prices.
 func (s *Session) spend(turn int) (inTurn, session Spend) {
 	s.mu.Lock()
-	p := pricer{table: s.table}
+	p := pricer{table: s.table, opened: s.openTable}
 	unsaved := slices.Clone(s.unsaved)
 	s.mu.Unlock()
 
@@ -155,10 +161,13 @@ func rowModel(row store.ModelUsage) store.Model {
 // pricer prices usage through a model table by identity — (provider, wire
 // model), never the alias a record names (modeltable.Table.Price, R2-7) —
 // looking each identity up once: Price rebuilds the table's identity map on
-// every call (X42), and one Spent may price many records of a few models.
+// every call (X42), and one Spent may price many records of a few models. An
+// identity table does not price is priced by opened, the table the session
+// opened with, when that is another one (plan 034 §3.4); nil is none.
 type pricer struct {
-	table *modeltable.Table
-	seen  map[[2]string]priced
+	table  *modeltable.Table
+	opened *modeltable.Table
+	seen   map[[2]string]priced
 }
 
 // priced is one identity's lookup: its rates, and whether it has any.
@@ -175,6 +184,9 @@ func (p *pricer) price(m store.Model) (modeltable.Rates, bool) {
 	}
 	var pr priced
 	pr.rates, pr.ok = p.table.Price(m.Provider, m.WireModel)
+	if !pr.ok && p.opened != nil && p.opened != p.table {
+		pr.rates, pr.ok = p.opened.Price(m.Provider, m.WireModel)
+	}
 	if p.seen == nil {
 		p.seen = make(map[[2]string]priced)
 	}

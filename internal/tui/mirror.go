@@ -15,11 +15,13 @@ import (
 //
 //  1. m.shared, this client's own fold of the stream: the settings (title,
 //     mode, model, config, the catalogs of commands and plugins, the armed
-//     send-now), the todo list, the roster, the ordered tools, the queue and
-//     the agent's own turn (transcript.Model.Mirror);
-//  2. Backend.Info(), the session's static facts: the provider — by name, for
-//     its local vocabulary; its capabilities come from Info through caps() —
-//     the provider's session id, and the model and mode catalogs;
+//     send-now, and — once a native session has reloaded its table — the
+//     models it offers), the todo list, the roster, the ordered tools, the
+//     queue and the agent's own turn (transcript.Model.Mirror);
+//  2. Backend.Info(), the session's facts as it started: the provider — by
+//     name, for its local vocabulary; its capabilities come from Info through
+//     caps() — the provider's session id, and the model and mode catalogs, the
+//     model catalog only until the fold carries one (plan 034 §3.4);
 //  3. the overlays below: what this client's own commands confirmed that the
 //     fold has not caught up with yet.
 //
@@ -47,8 +49,18 @@ func (m *Model) recompute() {
 		f = m.shared.Mirror()
 	}
 	m.retireReached(f.Settings)
+	// The models the session offers: the fold's catalog section once a
+	// delta has carried one — a native session that reloaded its table
+	// (plan 034 §3.4) — and the session's own list as it started otherwise.
+	// The fold is preferred because it is ordered with every other section
+	// this client folds; Info is read live in process and is a reply's copy
+	// over the socket, and either can be ahead of or behind the stream.
+	models := info.Models
+	if c := f.Settings.Catalog; c != nil {
+		models = c.Models
+	}
 	snap := agent.Snapshot{
-		Models:       info.Models,
+		Models:       models,
 		Modes:        info.Modes,
 		Commands:     f.Settings.Commands,
 		Config:       f.Settings.Config,

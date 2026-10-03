@@ -295,7 +295,7 @@ func TestChildOpenedAfterLearningStartsWithTheKeys(t *testing.T) {
 	persona := tool.Persona{Name: "reviewer", Role: "Check with " + stored + ".\n", Path: "/p/" + stored + "/reviewer.md", AllTools: true}
 	open := func(id string) *Session {
 		t.Helper()
-		child, err := parent.subs.openChild(&childHandle{id: id}, tool.SubagentCall{ID: "t1.1.1"}, persona, "test/a", "", modeAgent)
+		child, err := parent.subs.openChild(parent.view(), &childHandle{id: id}, tool.SubagentCall{ID: "t1.1.1"}, persona, "test/a", "", modeAgent)
 		if err != nil {
 			t.Fatalf("openChild: %v", err)
 		}

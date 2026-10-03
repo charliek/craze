@@ -222,6 +222,9 @@ func (s *nativeSession) wakeTurn(hs *harness.Session, ctx context.Context) (res 
 		}
 	}()
 	s.learnStoredKeys(hs)
+	// The models funded since the last turn, as a prompt's start reloads them
+	// (native_models.go, plan 034 §3.4): before the harness's claim.
+	s.reloadFlushed(reloadTurn)
 	return hs.Wake(ctx, s.sink)
 }
 
@@ -248,6 +251,9 @@ func (s *nativeSession) endWake(id, reason string, tok TurnToken, rel chan struc
 		ID: id, Reason: reason,
 	}})
 	s.wakeEndingQueued = true
+	// A reload this wake held back, read in the section that releases the
+	// claim, as prompt's release reads it (native_models.go's step 5).
+	owed := s.takeOwedLocked()
 	s.mu.Unlock()
 	if ended != nil {
 		ended()
@@ -256,6 +262,9 @@ func (s *nativeSession) endWake(id, reason string, tok TurnToken, rel chan struc
 	s.mu.Lock()
 	s.wakeEndingQueued = false
 	s.mu.Unlock()
+	if owed {
+		s.reloadFlushed(reloadOwed)
+	}
 	s.noteWake(id, reason, res, err)
 	s.kickWake()
 }

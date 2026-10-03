@@ -61,6 +61,9 @@ type Dispatcher struct {
 	// vision is Env.Vision and Env.ModelName, set as each turn begins
 	// (SetVision); nil, before the first, is no vision and no name.
 	vision atomic.Pointer[turnModel]
+	// environ is Env.Environ once the session has narrowed it (SetEnviron);
+	// nil keeps the one the dispatcher was built with.
+	environ atomic.Pointer[[]string]
 
 	// interval is the progress throttle's; tests replace it.
 	interval time.Duration
@@ -135,6 +138,17 @@ func (d *Dispatcher) SetRedactor(r *redact.Replacer) { d.red.Store(r) }
 // dispatcher is built.
 func (d *Dispatcher) SetPlanPath(path string) { d.planPath.Store(&path) }
 
+// SetEnviron makes environ the environment every call prepared or run from
+// now on is handed (Env.Environ): the session's, less the variables a model
+// table it took since it opened knows hold a key (plan 034 §3.4, A23) — a
+// provider configured while it runs can be offered, and its variable must
+// then reach no command the session starts. A call already running keeps the
+// Env it was given, as with SetRedactor; a command it started has the
+// environment it started with. environ must not be changed after it is
+// handed over, and nil is refused as Env.Environ's nil is (a tool that starts
+// processes runs none). It is safe to call while calls run.
+func (d *Dispatcher) SetEnviron(environ []string) { d.environ.Store(&environ) }
+
 // turnModel is what a turn's calls are told of the model it runs on
 // (Env.Vision, Env.ModelName).
 type turnModel struct {
@@ -165,8 +179,8 @@ func (d *Dispatcher) model() turnModel {
 func (d *Dispatcher) redactor() *redact.Replacer { return d.red.Load() }
 
 // callEnv is the Env one call gets: the session's, with this call's
-// progress and the redactor, the plan file and the turn's model of the
-// moment.
+// progress and the redactor, the plan file, the turn's model and the
+// environment of the moment.
 func (d *Dispatcher) callEnv(progress Progress) Env {
 	env := d.env
 	env.Progress, env.Redactor, env.live = progress, d.redactor(), &d.red
@@ -175,6 +189,9 @@ func (d *Dispatcher) callEnv(progress Progress) Env {
 	}
 	m := d.model()
 	env.Vision, env.ModelName = m.vision, m.name
+	if e := d.environ.Load(); e != nil {
+		env.Environ = *e
+	}
 	return env
 }
 

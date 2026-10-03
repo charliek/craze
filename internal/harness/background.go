@@ -225,7 +225,7 @@ func (r *subagents) runBackground(ctx context.Context, link *turnLink, call tool
 			r.retire(h)
 		}
 	}()
-	child, err := r.openChild(h, call, persona, alias, effort, mode)
+	child, err := r.openChild(c.view, h, call, persona, alias, effort, mode)
 	if err != nil {
 		return failedResult(err.Error(), "")
 	}

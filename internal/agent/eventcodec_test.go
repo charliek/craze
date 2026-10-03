@@ -29,6 +29,10 @@ import (
 // test: a codec that began carrying one fails it.
 var codecExcluded = map[string]string{
 	"Event.Seq": "the record envelope's (Record.Seq, the journal line's seq), not the codec object's; Record.Event sets it back",
+	// Plan 034 C4 adds the section in process (the primary carries the value
+	// itself); its wire shape, schema and published copy are C5's, which
+	// removes this line.
+	"StateDelta.Catalog": "plan 034's catalog section, carried on the wire from C5 (the in-process primary carries the value)",
 }
 
 // codecExclusion is why typ's field is one of codecExcluded, or "".

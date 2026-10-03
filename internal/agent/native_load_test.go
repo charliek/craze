@@ -159,6 +159,9 @@ func loadLine(ev Event) string {
 		if st.Plugins != nil {
 			parts = append(parts, "plugins")
 		}
+		if st.Catalog != nil {
+			parts = append(parts, fmt.Sprintf("catalog=%d@%d", len(st.Catalog.Models), st.Catalog.Revision))
+		}
 		return "meta " + strings.Join(parts, " ") + mark
 	}
 	return string(ev.Type) + mark

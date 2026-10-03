@@ -23,10 +23,29 @@ import (
 	"github.com/charliek/craze/internal/harness/modeltable"
 )
 
+// tableView is one reading of the session's model table and the matcher over
+// it (Session.table, Session.matchModel), taken under the session's lock: what
+// one child operation — its model, its effort and its Open — resolves against
+// and opens with, so the three never read two tables (plan 034 §3.4, A21). A
+// SetTable is refused while the turn that makes the call runs, so a call's
+// view is the table the turn began with; reading it once makes that a fact
+// of the code rather than of the schedule.
+type tableView struct {
+	table *modeltable.Table
+	match func(raw string) (alias string, ok bool)
+}
+
+// view is the session's table and matcher as they stand now: one tableView.
+func (s *Session) view() tableView {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return tableView{table: s.table, match: s.matchModel}
+}
+
 // childModelInput is what resolveChildModel needs to pick a sub-agent's
 // model: the call's own `model`, if any, and the persona's `model:`, if any.
 // The third candidate, the configured default, is read off the table itself
-// (Table.Subagents.Model), so it needs no field here.
+// (Table.Subagents.Model, of the view's table), so it needs no field here.
 //
 // ParentAlias and ParentEffort are the RUNNING TURN's model and effort
 // (turn.model, via t.model.r.Alias / t.model.effort), not the session's
@@ -46,7 +65,7 @@ type childModelInput struct {
 // parent's model; a recognised tier name — a BuiltinTiers name or a key
 // under [subagents.tiers] — maps through the table's tier map, and an
 // unmapped tier is the parent's model; anything else is matched as an alias
-// (Session.matchModel, the adapter's `--model` normalisation). A candidate
+// (the view's matcher, the adapter's `--model` normalisation). A candidate
 // that resolves to a model whose provider has no key is treated as
 // unresolved too: Open would only fail on it later, and content — a
 // persona's or the default's choice — is not allowed to fail the call for a
@@ -57,8 +76,9 @@ type childModelInput struct {
 // tier the table has; one with no key errors naming the provider (never the
 // key). A persona or default candidate that fails either way falls through
 // to the next one with a single warn line, because content is not the
-// model's choice.
-func (s *Session) resolveChildModel(in childModelInput, warn func(string)) (alias string, err error) {
+// model's choice. Every candidate is read against v, the call's one reading
+// of the table (tableView).
+func (s *Session) resolveChildModel(v tableView, in childModelInput, warn func(string)) (alias string, err error) {
 	type candidate struct {
 		raw      string
 		label    string
@@ -67,21 +87,21 @@ func (s *Session) resolveChildModel(in childModelInput, warn func(string)) (alia
 	candidates := []candidate{
 		{in.Call, "the call's model", true},
 		{in.Persona, "the persona's model", false},
-		{s.table.Subagents.Model, "the configured sub-agent default model", false},
+		{v.table.Subagents.Model, "the configured sub-agent default model", false},
 	}
 	for _, c := range candidates {
 		if c.raw == "" {
 			continue
 		}
-		got, recognized := s.resolveModelValue(c.raw, in.ParentAlias)
+		got, recognized := v.resolveModelValue(c.raw, in.ParentAlias)
 		if !recognized {
 			if c.required {
-				return "", unknownModelError(s.quoteRaw(c.raw), s.table)
+				return "", unknownModelError(s.quoteRaw(c.raw), v.table)
 			}
 			warnLine(warn, fmt.Sprintf("%s %q does not name a model, a tier, or \"inherit\"; falling through to the next default", c.label, c.raw))
 			continue
 		}
-		if _, rerr := s.table.Resolve(got, s.getenv); rerr != nil {
+		if _, rerr := v.table.Resolve(got, s.getenv); rerr != nil {
 			if c.required {
 				return "", fmt.Errorf("%s %q: %w", c.label, c.raw, rerr)
 			}
@@ -106,8 +126,9 @@ func (s *Session) resolveChildModel(in childModelInput, warn func(string)) (alia
 // error. A persona or default effort it does not offer falls through with a
 // warn line. alias with no effort control (no Efforts at all) resolves to
 // "", and a call effort on it fails the same way, its list read as "none".
-func (s *Session) resolveChildEffort(alias, callEffort, personaEffort, parentAlias, parentEffort string, warn func(string)) (string, error) {
-	m, ok := s.table.Models[alias]
+// alias's entry and the configured default are v's (tableView).
+func (s *Session) resolveChildEffort(v tableView, alias, callEffort, personaEffort, parentAlias, parentEffort string, warn func(string)) (string, error) {
+	m, ok := v.table.Models[alias]
 	if !ok {
 		// Unreachable: resolveChildModel only ever returns a table alias.
 		return "", fmt.Errorf("harness: sub-agent model %q is not in the table", alias)
@@ -124,11 +145,11 @@ func (s *Session) resolveChildEffort(alias, callEffort, personaEffort, parentAli
 		}
 		warnLine(warn, fmt.Sprintf("the persona's effort %q is not offered by %q; falling through to the next default", personaEffort, alias))
 	}
-	if s.table.Subagents.Effort != "" {
-		if slices.Contains(m.Efforts, s.table.Subagents.Effort) {
-			return s.table.Subagents.Effort, nil
+	if def := v.table.Subagents.Effort; def != "" {
+		if slices.Contains(m.Efforts, def) {
+			return def, nil
 		}
-		warnLine(warn, fmt.Sprintf("the configured sub-agent default effort %q is not offered by %q; falling through to the next default", s.table.Subagents.Effort, alias))
+		warnLine(warn, fmt.Sprintf("the configured sub-agent default effort %q is not offered by %q; falling through to the next default", def, alias))
 	}
 	if alias == parentAlias && parentEffort != "" {
 		return parentEffort, nil
@@ -141,17 +162,17 @@ func (s *Session) resolveChildEffort(alias, callEffort, personaEffort, parentAli
 // the table's tiers, an unmapped one resolving to parentAlias; anything else
 // is matched as an alias. recognized is false only in the last case, when
 // nothing matches.
-func (s *Session) resolveModelValue(raw, parentAlias string) (alias string, recognized bool) {
+func (v tableView) resolveModelValue(raw, parentAlias string) (alias string, recognized bool) {
 	if strings.EqualFold(raw, "inherit") {
 		return parentAlias, true
 	}
-	if tierAlias, isTier := s.tierAlias(raw); isTier {
+	if tierAlias, isTier := v.tierAlias(raw); isTier {
 		if tierAlias == "" {
 			return parentAlias, true
 		}
 		return tierAlias, true
 	}
-	return s.matchModelAlias(raw)
+	return v.matchModelAlias(raw)
 }
 
 // tierAlias is what tier name raw maps to in the table: the mapped alias
@@ -159,9 +180,9 @@ func (s *Session) resolveModelValue(raw, parentAlias string) (alias string, reco
 // lowercase by validateSubagents), else "" with isTier true when raw is one
 // of BuiltinTiers (recognised, but unmapped, so the caller falls back to the
 // parent's model), else isTier false when raw is not a tier name at all.
-func (s *Session) tierAlias(raw string) (alias string, isTier bool) {
+func (v tableView) tierAlias(raw string) (alias string, isTier bool) {
 	lower := strings.ToLower(raw)
-	if a, ok := s.table.Subagents.Tiers[lower]; ok {
+	if a, ok := v.table.Subagents.Tiers[lower]; ok {
 		return a, true
 	}
 	for _, t := range modeltable.BuiltinTiers {
@@ -172,15 +193,15 @@ func (s *Session) tierAlias(raw string) (alias string, isTier bool) {
 	return "", false
 }
 
-// matchModelAlias is raw matched against the table's aliases: Session.matchModel
-// (the adapter's `--model` normalisation) when set, else an exact,
+// matchModelAlias is raw matched against the table's aliases: the view's
+// matcher (the adapter's `--model` normalisation) when set, else an exact,
 // case-sensitive alias match, which is what Options.MatchModel's doc
 // promises for a nil matcher.
-func (s *Session) matchModelAlias(raw string) (alias string, ok bool) {
-	if s.matchModel != nil {
-		return s.matchModel(raw)
+func (v tableView) matchModelAlias(raw string) (alias string, ok bool) {
+	if v.match != nil {
+		return v.match(raw)
 	}
-	if _, ok := s.table.Models[raw]; ok {
+	if _, ok := v.table.Models[raw]; ok {
 		return raw, true
 	}
 	return "", false

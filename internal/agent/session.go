@@ -314,6 +314,16 @@ type StateDelta struct {
 	// has spent something has spent it — so a non-nil Usage is always the
 	// whole of it, and no ACP session ever sends one.
 	Usage *UsageState
+	// Catalog is the models the session offers, as Snapshot.Models now
+	// stands, and the list's revision (plan 034 §3.4, Q17): a native session's
+	// reload of its model table while it runs — a key saved, a plan signed in
+	// to or out of, the plan's list fetched again — authored under its lock in
+	// the section that swapped the list. It is never inside a load's replay
+	// bracket: a reload that lands there waits for the end bracket. It carries
+	// the whole list, and its Revision only ever grows within one incarnation;
+	// no ACP session sends one, and a session that has not reloaded has sent
+	// none (its list is the one it started with, revision 0).
+	Catalog *CatalogState
 	// Reason names what happened, from the SendNow* constants below. It usually
 	// stands beside the section it is about — a send-now that was lost — but it
 	// may stand alone, with every section nil: that is a delta whose news is the
@@ -365,6 +375,16 @@ type (
 	CommandsState struct{ Commands []CommandInfo }
 	PluginsState  struct{ Plugins []PluginCommand }
 )
+
+// CatalogState is the catalog section of a StateDelta (plan 034 §3.4, Q17):
+// every model the session offers now, in the picker's order, and the
+// revision of that list — Snapshot.CatalogRevision's. A section of its own
+// rather than a bare list, as the other list sections are: nil means
+// untouched, and the revision rides with the list it numbers.
+type CatalogState struct {
+	Models   []ModelInfo
+	Revision uint64
+}
 
 // SendNowState is the send-now section of a StateDelta: what the engine has
 // armed, or — with Armed false — that it has nothing armed any more. The text
@@ -482,6 +502,9 @@ type CommandInfo struct {
 }
 
 type Snapshot struct {
+	// Models are the models the session offers. A native session's change
+	// while it runs (plan 034 §3.4): each change is a StateDelta.Catalog
+	// carrying the whole list and its revision, CatalogRevision.
 	Models         []ModelInfo
 	Modes          []ModeInfo
 	Commands       []CommandInfo
@@ -512,6 +535,11 @@ type Snapshot struct {
 	// reports one, and always nil for an ACP session. Its own copy, cloned by
 	// Snapshot.
 	Usage *UsageState
+	// CatalogRevision is the revision of Models (plan 034 §3.4, Q17): 0 for
+	// the list a session started with, and the Revision of the last
+	// StateDelta.Catalog after it, read with Models in one locked section, so
+	// the two always describe one list. Only a native session moves it.
+	CatalogRevision uint64
 }
 
 // SubagentInfo is one grok child or cursor task, in spawn order on Snapshot.
@@ -1191,3 +1219,68 @@ type Clocked interface {
 type SubagentCanceller interface {
 	CancelSubagent(id string) error
 }
+
+// ModelsRefresher is a session that can take up models funded while it runs
+// (plan 034 §3.4, Q14, Q17): a native session reloads its model table — the
+// providers.toml and models.toml of the directory it opened, and the ChatGPT
+// plan's registration, model list and sign-in beside them — and offers what
+// is funded now. Like SubagentCanceller it is optional and found by a type
+// assertion; the native session implements it, an ACP session does not (its
+// caller answers ModelsUnsupported for one).
+//
+// The contract:
+//
+//   - RefreshModels runs the reload now and answers with what it came to,
+//     the list's revision after it, and — when nativeDir is not "" — whether
+//     that is the directory the session reads (the home mismatch a client in
+//     another CRAZE_HOME would otherwise not see). A reload that changes the
+//     list publishes it as a StateDelta.Catalog before it returns.
+//   - It also starts the age- and version-aware fetch of the ChatGPT plan's
+//     list for an account signed in with plan usage: in the background, one
+//     at a time (a call while one is in flight joins it), bounded by the
+//     fetch's own timeout and by Close. A list it fetches is taken up by a
+//     reload of its own, published the same way; the answer does not wait for
+//     it.
+//   - It waits on nothing but the local reload: the files' stat and, when
+//     they changed, their reading — no network, no turn. It is idempotent:
+//     a second call with nothing changed answers ModelsCurrent.
+//   - A turn running when the files changed makes the answer ModelsPending:
+//     the reload is taken up as the turn ends, before the next turn begins.
+//   - It errors only for a session not started or closed.
+type ModelsRefresher interface {
+	RefreshModels(ctx context.Context, nativeDir string) (ModelsRefresh, error)
+}
+
+// ModelsRefresh is what one RefreshModels came to.
+type ModelsRefresh struct {
+	// Status is one of the Models* statuses.
+	Status ModelsStatus
+	// Revision is the revision of the list the session offers after the call
+	// (Snapshot.CatalogRevision): a pending reload's is the list still
+	// offered.
+	Revision uint64
+	// SameDir says whether the call's nativeDir is the directory the session
+	// reads its models from, compared as cleaned paths; nil when the call
+	// named none.
+	SameDir *bool
+}
+
+// ModelsStatus is what a refresh of a session's models came to.
+type ModelsStatus string
+
+const (
+	// ModelsApplied: the files had changed and the session offers what they
+	// fund now, published as a StateDelta.Catalog.
+	ModelsApplied ModelsStatus = "applied"
+	// ModelsCurrent: nothing the session reads its models from had changed.
+	ModelsCurrent ModelsStatus = "current"
+	// ModelsPending: they had changed while a turn ran, or while a load
+	// replayed; the session takes them up as that ends.
+	ModelsPending ModelsStatus = "pending"
+	// ModelsUnsupported: the session cannot take up models while it runs —
+	// an ACP session — which the caller answers without asking it.
+	ModelsUnsupported ModelsStatus = "unsupported"
+	// ModelsFailed: the files could not be read as a model table; the list is
+	// as it was, and the reason is journaled (value-free).
+	ModelsFailed ModelsStatus = "failed"
+)

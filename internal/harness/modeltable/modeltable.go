@@ -193,6 +193,21 @@ type Table struct {
 	// models when the default is not funded (plan 033 §3.11, plan 034 Q4);
 	// nil for none.
 	chatgptStart []string
+
+	// carried binds each model Carry put in this table to the ChatGPT account
+	// its entry was bound to where it came from — the zero Account for one
+	// that was bound to none — so a running session's model resolves bound as
+	// it did when it was built, whatever this table's own list says (plan 034
+	// §3.4, Q16). Resolve reads it before discovered. nil for a table nothing
+	// was carried into.
+	carried map[string]Account
+	// unkeyed are the variables WithholdFrozen found holding a value a
+	// session cannot redact out of what it has already sent: each reads as
+	// unset to Resolve and Keys (envOf), so it funds nothing and a switch's
+	// key resolution never meets it, while CredentialEnvNames still names it,
+	// so a command the session runs is started without it (plan 034 §3.4,
+	// A22). Sorted; nil for none.
+	unkeyed []string
 }
 
 // Provider is one provider: shipped, overridden in providers.toml, or the
@@ -291,6 +306,14 @@ type Subagents struct {
 	// to the parent's own model rather than failing. nil means the owner
 	// configured none.
 	Tiers map[string]string
+}
+
+// Clone is s with a tier map of its own (nil for none): a running session
+// carries its opened table's section into every table it takes later (plan
+// 034 §3.4, Q13), and the two must not share the map.
+func (s Subagents) Clone() Subagents {
+	s.Tiers = maps.Clone(s.Tiers)
+	return s
 }
 
 // The [compaction] defaults (plan 028 §3.6, owner decision 1): compact on
@@ -1026,8 +1049,10 @@ func httpURL(s string) bool {
 // is the one that list was bound to (the registration's subject and client
 // id), and is ErrOtherAccount otherwise (plan 033 C14r, r12 #4); it resolves
 // bound to that account (Resolved.Account), which its driver holds every
-// request to (C14r2, r13 d). Choices keeps listing a session's current model
-// all the same (P7).
+// request to (C14r2, r13 d). A model Carry put in the table resolves bound to
+// the account its entry was bound to where it came from, not to this table's
+// list (plan 034 Q16). Choices keeps listing a session's current model all
+// the same (P7).
 //
 // A missing key fails only the models that need it: Load accepts a provider
 // with no key at all, so one unfunded provider never hides the others.
@@ -1041,9 +1066,7 @@ func (t *Table) Resolve(alias string, getenv func(string) string) (Resolved, err
 		// Unreachable for a table from Load or one that passed Validate.
 		return Resolved{}, fmt.Errorf("modeltable: model %q names provider %q, which does not exist", alias, m.Provider)
 	}
-	if getenv == nil {
-		getenv = os.Getenv
-	}
+	getenv = t.envOf(getenv)
 	var key Secret
 	var auth, credDir string
 	var bound Account
@@ -1052,11 +1075,11 @@ func (t *Table) Resolve(alias string, getenv func(string) string) (Resolved, err
 		if via != KeySignedIn {
 			return Resolved{}, signInError(m.Provider, via)
 		}
-		if _, listed := t.discovered[alias]; listed {
-			if account != t.discoveredFor {
+		if want, ok := t.boundAccount(alias); ok {
+			if account != want {
 				return Resolved{}, fmt.Errorf("%w (model %q)", ErrOtherAccount, alias)
 			}
-			bound = t.discoveredFor
+			bound = want
 		}
 		auth, credDir = AuthSignIn, t.signIn
 	} else {
@@ -1219,11 +1242,11 @@ func (t *Table) CredentialEnvNames() []string {
 // nothing is skipped without a word: there is nothing it could have paid
 // for). An inline key that fails either rule still fails, naming the
 // provider, never the value: Load refuses one, so only a table built in
-// memory can hold it.
+// memory can hold it. A variable WithholdFrozen marked reads as unset (plan
+// 034 §3.4, envOf): its value is inside what a running session has already
+// sent.
 func (t *Table) Keys(getenv func(string) string) ([]Secret, error) {
-	if getenv == nil {
-		getenv = os.Getenv
-	}
+	getenv = t.envOf(getenv)
 	var keys []Secret
 	for _, id := range slices.Sorted(maps.Keys(t.Providers)) {
 		p := t.Providers[id]

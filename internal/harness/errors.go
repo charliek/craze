@@ -84,6 +84,22 @@ var (
 	// on it (plan 028 §3.4).
 	ErrInTurn = errors.New("harness: a turn is already running")
 
+	// ErrTurnRunning is SetTable's refusal while a turn — a Run, a Compact,
+	// a Wake — or a Replay holds the session (plan 034 §3.4): a turn reads
+	// one model table from its begin to its end, every sub-agent it starts
+	// included, so a table that arrives meanwhile is the caller's to hand
+	// over again once the turn has ended. Nothing is changed. It is not the
+	// store's busy error: nothing is wrong with the session, only early.
+	ErrTurnRunning = errors.New("harness: a turn is running; the model table can be swapped once it ends")
+
+	// errTableChanged is SetModel's refusal when the model table was swapped
+	// (SetTable) while it built the new model's client twice running (plan
+	// 034 §3.4): the switch is judged against the table the session holds,
+	// never one it has stopped holding, and two swaps inside one switch are
+	// not worth a third build. Nothing is changed. The native adapter never
+	// meets it: its switches and its swaps take turns (native.go's modelsMu).
+	errTableChanged = errors.New("harness: the model table changed during the switch; try again")
+
 	// ErrReplayed is Replay's refusal of a second replay: a session's stored
 	// conversation is walked once, before its first turn (plan 028 §3.4).
 	ErrReplayed = errors.New("harness: the session has already been replayed")

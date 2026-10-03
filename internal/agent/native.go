@@ -148,9 +148,11 @@ type nativeSession struct {
 	started bool
 	closed  bool
 	hs      *harness.Session
-	// table is the model table the harness was opened with, kept to phrase a
-	// switch's missing key the way Start phrases one, and to name a model the
-	// memory records by its identity in this table (plan 031 r2-5).
+	// table is the model table the harness holds — the one it was opened
+	// with, and each a reload has published since (native_models.go, plan 034
+	// §3.4) — kept to phrase a switch's missing key the way Start phrases one,
+	// to name a model the memory records by its identity in this table (plan
+	// 031 r2-5), and to carry the running model's entry into the next.
 	table *modeltable.Table
 	// home is the Home the harness was opened with (open(), after the seam),
 	// set with table: the directory whose recent.json a switch made in this
@@ -159,8 +161,9 @@ type nativeSession struct {
 	// could answer differently by then (panel astra 12).
 	home string
 	// efforts are the effort levels each alias offers, from the harness's
-	// model list at Start; the effort option is rebuilt from them whenever
-	// the current model or effort changes.
+	// model list at Start and from each table a reload publishes; the effort
+	// option is rebuilt from them whenever the current model or effort
+	// changes.
 	efforts map[string][]string
 	// plugins is every content entry the scan at Start found, hidden ones
 	// included, and snap.Plugins is the resolved row for each one that is not
@@ -268,6 +271,13 @@ type nativeSession struct {
 	// primary send and a closed done are a random choice, so that window
 	// cannot be pinned from inside the publish.
 	loadEndSeam func()
+	// loadReplayedSeam runs in load once the replay's walk has returned and
+	// before the install delta and the end bracket, with no lock held: the
+	// harness no longer refuses a table there, so it is the window only
+	// s.loading keeps a reload's catalog delta out of (plan 034 §3.4, A19).
+	// **A test seam: nil in production**, set only by a test in this package
+	// before Start.
+	loadReplayedSeam func()
 
 	// keys is the session's look at the providers.toml of the Home it opened
 	// the harness with, made at every turn's start so the session learns the
@@ -294,10 +304,39 @@ type nativeSession struct {
 	// unsubscribe ends the harness's subscription to signIn (AddSecrets),
 	// made as the harness opened; Close calls it. nil with no signIn.
 	unsubscribe func()
-	// refreshed is closed when the background fetch of the plan's model list
-	// that open started has returned, nil when none was started; Close waits
-	// for it, after done has cancelled it.
+	// refreshed is closed when the latest background fetch of the plan's
+	// model list has returned — open's, or one RefreshModels started — nil
+	// when none was started; fetching says one is in flight, so a refresh
+	// asked meanwhile joins it rather than starting a second
+	// (refreshModelsLocked). Fetches run one at a time, so the latest's end
+	// is every one's; Close waits for it, after done has cancelled it.
 	refreshed chan struct{}
+	fetching  bool
+
+	// modelsMu serializes the model table's reloads with each other and with
+	// SetModel and SetConfig (native_models.go, plan 034 §3.4): taken with no
+	// lock of the adapter's or the harness's held and never under one, and
+	// held across the files' reading and the harness's switch or swap — no
+	// network, no turn. models is what the reloads keep between them, under
+	// it.
+	modelsMu sync.Mutex
+	models   modelsWatch
+	// reloadOwed says a reload was held back — by a turn holding the harness,
+	// or a load's replay — and is the next turn's end's, or the load's end's,
+	// to take up (native_models.go's step 5). Under s.mu.
+	reloadOwed bool
+	// setModelSeam runs in SetModel and SetConfig between their reading of
+	// what the session offers and the harness's switch, with modelsMu held
+	// and no other lock: the window a reload must not land in (plan 034 §3.4,
+	// A24). **A test seam: nil in production**, set only by a test in this
+	// package, under s.mu.
+	setModelSeam func()
+	// reloadSeam runs inside a reload, with modelsMu held and no other lock:
+	// "stamped" once the inputs are stat'ed and before the table is read,
+	// "computed" once everything is built and before the harness takes it.
+	// **A test seam: nil in production**, set only by a test in this package
+	// before Start.
+	reloadSeam func(stage string)
 }
 
 // steerText is one interjection in both of its spellings: sent is what went
@@ -533,12 +572,8 @@ func (s *nativeSession) start(context.Context) error {
 	s.startSettings(hs, efforts)
 	// The models the session offers — the ones whose provider has a key,
 	// and the one it runs on — in the picker's order, each with its rank in
-	// the model memory (plan 031 §3.6; nativeOpened.choices). The name is
-	// sanitized here: it is text from a file the owner edits by hand.
-	infos := make([]ModelInfo, 0, len(opened.choices))
-	for _, c := range opened.choices {
-		infos = append(infos, ModelInfo{ID: c.Alias, Name: sanitizeLine(c.Name), Recent: c.Recent})
-	}
+	// the model memory (plan 031 §3.6; nativeOpened.choices).
+	infos := choiceInfos(opened.choices)
 	// The scan and the instruction loader ran inside open(), before the
 	// harness was opened, because the prompt they feed is frozen there (§3.4)
 	// — but still out here rather than under a lock, for the reason the tables
@@ -561,11 +596,7 @@ func (s *nativeSession) start(context.Context) error {
 	// The plan's model list is fetched again in the background only for an
 	// account signed in with plan usage (refreshModelsLocked): read here,
 	// before s.mu, which every Snapshot takes.
-	refresh := false
-	if opened.signIn != nil {
-		st, err := chatgptauth.ReadStatus(opened.signIn.Dir())
-		refresh = err == nil && st.SignedIn && st.PlanUsage
-	}
+	refresh := fetchesPlanList(opened.signIn)
 
 	s.mu.Lock()
 	if s.closed {
@@ -623,6 +654,16 @@ func (s *nativeSession) start(context.Context) error {
 		s.mu.Unlock()
 		if err := s.load(hs); err != nil {
 			return err
+		}
+		// A reload the replay held back — the plan's list fetched while it
+		// ran, say — is taken up now that the end bracket is out (plan 034
+		// §3.4, A19): after it, never inside it, and before Start returns, so
+		// before any turn.
+		s.mu.Lock()
+		owed := s.takeOwedLocked()
+		s.mu.Unlock()
+		if owed {
+			s.reloadFlushed(reloadOwed)
 		}
 		s.notePromptSources(hs, content.extras)
 		return nil
@@ -766,6 +807,9 @@ func (s *nativeSession) load(hs *harness.Session) error {
 		s.mu.Unlock()
 	}()
 	replayErr := hs.Replay(s.sink)
+	if seam := s.loadReplayedSeam; seam != nil {
+		seam()
+	}
 	s.mu.Lock()
 	closed := s.closed
 	if replayErr == nil && !closed {
@@ -1031,6 +1075,9 @@ func (s *nativeSession) open() (*harness.Session, nativeOpened, nativeLoad, erro
 	// the session reading the real environment again (sealedGetenv).
 	getenv, release := sealedGetenv(hopts.Getenv)
 	defer release()
+	// The environment before the seal, which each reload of the table seals
+	// a reading of its own (native_models.go).
+	unsealed := hopts.Getenv
 	hopts.Getenv = getenv
 	if hopts.Home == "" {
 		return nil, nativeOpened{}, none, errors.New("native: there is no craze directory to read the model table from (set HOME or CRAZE_HOME)")
@@ -1058,12 +1105,22 @@ func (s *nativeSession) open() (*harness.Session, nativeOpened, nativeLoad, erro
 		// The shipped catalog with the user's files merged over it (plan 031
 		// §3.2): both files are optional, so an empty directory is the
 		// catalog alone, and a machine with nothing funded is startModel's
-		// to explain.
+		// to explain. Its inputs are stamped first, as every reload stamps
+		// them (native_models.go), so a file changed between this reading and
+		// the first turn is reloaded then. Only a table read here is ever
+		// reloaded: one the seam handed in is the test's own.
+		stamps := statModelInputs(hopts.Home)
 		table, err := modeltable.Load(hopts.Home)
 		if err != nil {
 			return nil, nativeOpened{}, none, fmt.Errorf("native: %w", err)
 		}
 		hopts.Table = table
+		// Set under modelsMu, like everything the reloads keep, though none
+		// can run before the harness is installed.
+		s.modelsMu.Lock()
+		s.models.getenv, s.models.reloadable = unsealed, true
+		s.models.stamps, s.models.read = stamps, true
+		s.modelsMu.Unlock()
 	}
 	table := hopts.Table
 	for _, w := range table.Warnings {
@@ -1252,16 +1309,37 @@ func modelsRefreshNote(err error, redact func(string) string) journal.DiagNote {
 	return journal.DiagNote{Kind: diagModelsRefresh, Fields: map[string]any{"error": sanitizeLine(redact(err.Error()))}}
 }
 
+// fetchesPlanList reports whether the plan's model list is fetched again for
+// src's account (refreshModelsLocked): one signed in with plan usage, since
+// anything else would only fail; false for no src. It reads the
+// registration's file, so its callers read it before s.mu.
+func fetchesPlanList(src *chatgptauth.TokenSource) bool {
+	if src == nil {
+		return false
+	}
+	st, err := chatgptauth.ReadStatus(src.Dir())
+	return err == nil && st.SignedIn && st.PlanUsage
+}
+
 // refreshModelsLocked fetches the ChatGPT plan's model list again in the
-// background when it is over a day old, missing or another account's (plan
-// 033 §3.10, §3.12): the next session's table offers what this one fetched —
-// this session keeps the table it opened with (plan 031 P8). Start asks only
-// for an account signed in with plan usage; anything else would only fail.
-// The fetch takes the list's own lock and checks its age again under it, so
-// hosts opening at once fetch it once. Close cancels it (done) and waits for
-// it (refreshed). A failure is journaled through redact, the session's
-// redactor (modelsRefreshNote). s.mu is held: it only starts the goroutine.
+// background when it is over a day old, missing, another account's or
+// fetched with another client_version (plan 033 §3.10, §3.12; plan 034 Q3).
+// Start asks for it, and RefreshModels (plan 034 §3.4, Q14 b), only for an
+// account signed in with plan usage; anything else would only fail. One runs
+// at a time: one asked while another is in flight joins it (fetching), and a
+// closed session starts none. The fetch takes the list's own lock and checks
+// its age again under it, so hosts opening at once fetch it once, bounded by
+// its own timeout. A list it wrote is taken up by a reload of the session's
+// table through the same transaction every reload goes through
+// (native_models.go, Q14 c) — never swapped in here. It writes no sign-in log
+// (no Observe). Close cancels it (done) and waits for it (refreshed). A
+// failure is journaled through redact, the session's redactor
+// (modelsRefreshNote). s.mu is held: it only starts the goroutine.
 func (s *nativeSession) refreshModelsLocked(src *chatgptauth.TokenSource, redact func(string) string) {
+	if s.fetching || s.closed {
+		return
+	}
+	s.fetching = true
 	done := make(chan struct{})
 	s.refreshed = done
 	go func() {
@@ -1275,9 +1353,16 @@ func (s *nativeSession) refreshModelsLocked(src *chatgptauth.TokenSource, redact
 			case <-ctx.Done():
 			}
 		}()
-		if _, err := chatgptauth.RefreshModels(ctx, src, chatgptauth.ModelsMaxAge, chatgptauth.FetchOptions{ClientVersion: modeltable.ChatGPTModelsClientVersion()}); err != nil && ctx.Err() == nil {
+		fetched, err := chatgptauth.RefreshModels(ctx, src, chatgptauth.ModelsMaxAge, chatgptauth.FetchOptions{ClientVersion: modeltable.ChatGPTModelsClientVersion()})
+		if err != nil && ctx.Err() == nil {
 			s.log.Note(modelsRefreshNote(err, redact))
 		}
+		if fetched && ctx.Err() == nil {
+			s.reloadModels(reloadFetched)
+		}
+		s.mu.Lock()
+		s.fetching = false
+		s.mu.Unlock()
 	}()
 }
 
@@ -1296,13 +1381,13 @@ type nativeOpened struct {
 	// choices is the advertised list (plan 031 §3.6, owner decision Q4):
 	// the table's models whose provider has a key, plus the model the
 	// session runs on (P7), the remembered ones first, by rank, then the
-	// rest by name (modeltable.Table.Choices). It is computed once, at
-	// start, from the memory read at start (§3.4): a switch made in this
-	// session reorders the next session's picker, not this one's, and a
-	// provider connected while it runs is offered only by a new session or
-	// after /exit and craze -c (P8). A model it leaves out is one this
-	// session's SetModel does not know (MatchModel over the snapshot), as
-	// an unknown alias always was; --model still resolves against the whole
+	// rest by name (modeltable.Table.Choices). It is computed at start, from
+	// the memory read at start (§3.4): a switch made in this session does not
+	// reorder it. A reload of the table computes it again, the memory with it
+	// (native_models.go, plan 034 §3.4): a provider connected while the
+	// session runs is offered from then on. A model it leaves out is one this
+	// session's SetModel does not know (MatchModel over the snapshot), as an
+	// unknown alias always was; --model still resolves against the whole
 	// table (tableModels).
 	choices []modeltable.Choice
 }
@@ -1397,7 +1482,8 @@ func (s *nativeSession) newSessionModel(hopts *harness.Options, recent []modelta
 // exchange for closing a window between two calls microseconds apart. So the
 // seal covers exactly the window it was for, and nothing after it. (A switch
 // of the session's own model is to a model its picker offers, which were
-// judged funded at start: plan 031 §3.6, nativeOpened.choices.)
+// judged funded at start or at the last reload of the table, each with a seal
+// of its own: plan 031 §3.6, nativeOpened.choices, native_models.go.)
 //
 // The harness calls it from its own goroutines, so both halves are guarded.
 func sealedGetenv(getenv func(string) string) (read func(string) string, release func()) {
@@ -1543,6 +1629,18 @@ func nativeCurrentMode(mode string) string {
 		return nativeAgentMode
 	}
 	return mode
+}
+
+// choiceInfos is the model list a snapshot shows for a picker's choices
+// (modeltable.Table.Choices), in their order, each with its rank in the model
+// memory; the name is sanitized, since it is text from a file the owner edits
+// by hand. Start's list and every reload's (native_models.go) are built by it.
+func choiceInfos(choices []modeltable.Choice) []ModelInfo {
+	infos := make([]ModelInfo, 0, len(choices))
+	for _, c := range choices {
+		infos = append(infos, ModelInfo{ID: c.Alias, Name: sanitizeLine(c.Name), Recent: c.Recent})
+	}
+	return infos
 }
 
 // tableModels is the model list a snapshot shows for table: aliases as ids,
@@ -1744,7 +1842,17 @@ func (s *nativeSession) prompt(ctx context.Context, text string, rel chan struct
 			s.released = nil
 		}
 		close(rel)
+		// A reload of the model table this turn held back is read in the
+		// section that releases the claim, so one marked owed after this
+		// reading finds the claim released and swaps on its own
+		// (native_models.go's step 5) — and taken up below, on every way a
+		// turn ends, before the next turn's claim reaches the harness (whose
+		// own start reloads besides).
+		owed := s.takeOwedLocked()
 		s.mu.Unlock()
+		if owed {
+			s.reloadFlushed(reloadOwed)
+		}
 		// Every release of the claim — this turn's success, its failure, a
 		// cancel, a withdrawal, a closed or unstarted session — rechecks for a
 		// background result the turn left pending (native_wake.go): one that
@@ -1867,6 +1975,11 @@ func (s *nativeSession) prompt(ctx context.Context, text string, rel chan struct
 	// puts the harness in its refusal state, and the Run or Compact below is
 	// refused with nothing sent.
 	s.learnStoredKeys(hs)
+	// Then the models funded since the last turn (plan 034 §3.4, Q14 a):
+	// after the keys, so a table that names a key just stored is read by a
+	// session that already redacts it, and before the harness's claim, so the
+	// turn — and every sub-agent it starts — runs on one table.
+	s.reloadFlushed(reloadTurn)
 	// A turn a person started — this one: a wake never comes here — lifts the
 	// ChatGPT plan's usage latch (P33), which a usage-limit error set for the
 	// whole process: the person has seen the message and asks again.
@@ -2446,36 +2559,67 @@ func (s *nativeSession) Close() error {
 // and leaves the current model in place. A switch that took is announced
 // (announceCurrent), because the new model can bring or take away the effort
 // option, and then remembered for the next session (remember, plan 031 §3.4).
+//
+// The list it matches against, the harness's switch and the announcement are
+// one modelsMu section (native_models.go, plan 034 §3.4, A24): no reload of
+// the model table lands between the model the list offered and the switch
+// the harness makes, so a model the session offers is one it switches to. The
+// memory is written after, outside it.
 func (s *nativeSession) SetModel(_ context.Context, cause, modelID string) (SetOutcome, error) {
+	s.modelsMu.Lock()
+	sw, err := s.setModelLocked(cause, modelID)
+	s.modelsMu.Unlock()
+	if err != nil {
+		return SetOutcome{}, err
+	}
+	s.remember(sw.hs, sw.table, sw.home, sw.model, sw.effort)
+	return SetOutcome{Value: sw.model, Ticket: sw.ticket}, nil
+}
+
+// switched is what a switch SetModel or SetConfig made confirmed — the model
+// and effort the harness holds now, and the delta's ticket — and the harness,
+// table and home its memory is written with (remember), outside modelsMu.
+type switched struct {
+	model, effort string
+	ticket        *Ticket
+	hs            *harness.Session
+	table         *modeltable.Table
+	home          string
+}
+
+// setModelLocked is SetModel's switch, modelsMu held.
+func (s *nativeSession) setModelLocked(cause, modelID string) (switched, error) {
 	s.mu.Lock()
-	hs, table, home := s.hs, s.table, s.home
+	sw := switched{hs: s.hs, table: s.table, home: s.home}
 	models := s.snap.Models
 	loading := s.loading
+	seam := s.setModelSeam
 	s.mu.Unlock()
 	// A load's harness is installed before its replay, and the session is not
 	// started until the end bracket (s.loading). loading only ever goes down
 	// once the harness is set, so a setter that passed this check enqueues
 	// behind the end bracket.
-	if hs == nil || loading {
-		return SetOutcome{}, fmt.Errorf("agent: session not started")
+	if sw.hs == nil || loading {
+		return switched{}, fmt.Errorf("agent: session not started")
 	}
 	alias, err := MatchModel(Snapshot{Models: models}, modelID)
 	if err != nil {
-		return SetOutcome{}, fmt.Errorf("native: %v", err)
+		return switched{}, fmt.Errorf("native: %v", err)
 	}
-	if err := hs.SetModel(alias); err != nil {
-		return SetOutcome{}, phraseSetupError(err, table, alias)
+	if seam != nil {
+		seam()
+	}
+	if err := sw.hs.SetModel(alias); err != nil {
+		return switched{}, phraseSetupError(err, sw.table, alias)
 	}
 	// The confirmed model is the harness's own, captured where the snapshot
 	// took it: MatchModel resolves an alias — a prefix, a display name — to a
 	// canonical id, so the value that was asked for and the value the delta
 	// carries are not always the same string (SetOutcome).
-	model, effort, t, err := s.announceCurrent(cause)
-	if err != nil {
-		return SetOutcome{}, err
+	if sw.model, sw.effort, sw.ticket, err = s.announceCurrent(cause); err != nil {
+		return switched{}, err
 	}
-	s.remember(hs, table, home, model, effort)
-	return SetOutcome{Value: model, Ticket: t}, nil
+	return sw, nil
 }
 
 // remember records a model or effort switch this session made, as the newest
@@ -2664,44 +2808,61 @@ func phraseModeError(err error, id string) error {
 // effort levels (Session): on this session only SetModel moves the model, and
 // the engine's worker runs one Set at a time, so the check is the worker's own
 // made again — what it adds is that a caller without an engine is held to the
-// binding too.
+// binding too. Like SetModel's, its reading of the levels, the harness's
+// switch and the announcement are one modelsMu section (plan 034 §3.4, A24):
+// the levels it judges by are the ones the session offers when it switches.
 func (s *nativeSession) SetConfig(_ context.Context, cause, id, value, forModel string) (SetOutcome, error) {
 	if id != nativeEffortID {
 		return SetOutcome{}, ErrUnsupported
 	}
+	s.modelsMu.Lock()
+	sw, err := s.setConfigLocked(cause, value, forModel)
+	s.modelsMu.Unlock()
+	if err != nil {
+		return SetOutcome{}, err
+	}
+	s.remember(sw.hs, sw.table, sw.home, sw.model, sw.effort)
+	return SetOutcome{Value: sw.effort, Ticket: sw.ticket}, nil
+}
+
+// setConfigLocked is SetConfig's switch of the effort, modelsMu held.
+func (s *nativeSession) setConfigLocked(cause, value, forModel string) (switched, error) {
 	s.mu.Lock()
-	hs, table, home := s.hs, s.table, s.home
+	sw := switched{hs: s.hs, table: s.table, home: s.home}
 	alias := s.snap.CurrentModel
 	levels := s.efforts[alias]
 	loading := s.loading
+	seam := s.setModelSeam
 	s.mu.Unlock()
-	if hs == nil || loading { // SetModel's refusal, for its reason
-		return SetOutcome{}, fmt.Errorf("agent: session not started")
+	if sw.hs == nil || loading { // SetModel's refusal, for its reason
+		return switched{}, fmt.Errorf("agent: session not started")
 	}
 	if forModel != "" && alias != forModel {
-		return SetOutcome{}, ErrStaleModel
+		return switched{}, ErrStaleModel
 	}
 	// Checked here as well as by the harness so the refusal can name what
 	// the model does offer. "" is the model's default and always allowed.
 	if value != "" && !slices.Contains(levels, value) {
 		if len(levels) == 0 {
-			return SetOutcome{}, fmt.Errorf("native: model %q has no effort control", alias)
+			return switched{}, fmt.Errorf("native: model %q has no effort control", alias)
 		}
-		return SetOutcome{}, fmt.Errorf("native: model %q offers effort %s, not %q", alias, strings.Join(levels, ", "), value)
+		return switched{}, fmt.Errorf("native: model %q offers effort %s, not %q", alias, strings.Join(levels, ", "), value)
 	}
-	if err := hs.SetEffort(value); err != nil {
-		return SetOutcome{}, phraseSetupError(err, table, alias)
+	if seam != nil {
+		seam()
+	}
+	if err := sw.hs.SetEffort(value); err != nil {
+		return switched{}, phraseSetupError(err, sw.table, alias)
 	}
 	// The confirmed effort, not the one asked for: "" means the model's own
 	// default, and what the harness resolved it to is what the delta carries
 	// (SetOutcome, r23 finding 4) — and what the memory records, with the
 	// model it was set on.
-	model, effort, t, err := s.announceCurrent(cause)
-	if err != nil {
-		return SetOutcome{}, err
+	var err error
+	if sw.model, sw.effort, sw.ticket, err = s.announceCurrent(cause); err != nil {
+		return switched{}, err
 	}
-	s.remember(hs, table, home, model, effort)
-	return SetOutcome{Value: effort, Ticket: t}, nil
+	return sw, nil
 }
 
 // SetTitle is /rename: local, pinned against the title the first prompt would

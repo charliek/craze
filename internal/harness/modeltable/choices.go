@@ -14,11 +14,11 @@ import (
 // row to pre-select.
 //
 // It is the rule every picker of native models goes through: a session's own
-// /model (the advertised list, internal/agent's native adapter, computed once
-// when the session starts — §3.4: a switch reorders the next session's
-// picker, not this one's) and plan 030's session list (§3.12, with no current
-// model). The order is the whole of how a picker says what is recent: no
-// label (owner, Q4).
+// /model (the advertised list, internal/agent's native adapter, computed when
+// the session starts and again whenever it reloads its table — plan 034
+// §3.4; a switch alone does not reorder it) and plan 030's session list
+// (§3.12, with no current model). The order is the whole of how a picker says
+// what is recent: no label (owner, Q4).
 
 // Choice is one model a picker offers: its alias, its display name (the
 // table's name, or the alias when it has none), its provider, and its rank in

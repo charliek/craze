@@ -108,7 +108,9 @@ type Options struct {
 	// Workspace is the session's working directory; absolute. The system
 	// prompt names it, and the transcript is filed under it.
 	Workspace string
-	// Table is the model catalog. The session reads it and never changes it.
+	// Table is the model catalog the session opens with. The session never
+	// changes it; SetTable hands the session another while it runs (plan 034
+	// §3.4), and spend still prices from this one what the newer cannot.
 	Table *modeltable.Table
 	// Model is the alias the session starts on; "" is the table's default.
 	// For a resumed session (Resume) "" is unspecified — the transcript's own
@@ -235,7 +237,8 @@ type Options struct {
 	// harness itself never imports internal/agent. It resolves a sub-agent
 	// call's `model` field to a table alias (subagent_models.go, plan 026
 	// §3.6); nothing else in the harness uses it. nil is exact alias match
-	// only: a call's `model` must name a table alias byte for byte.
+	// only: a call's `model` must name a table alias byte for byte. SetTable
+	// replaces it with a matcher over the table it installs.
 	MatchModel func(raw string) (alias string, ok bool)
 	// Warn is a diagnostic channel for runtime fall-throughs that are not
 	// errors: a sub-agent persona's or the configured default's model or
@@ -350,12 +353,22 @@ type Session struct {
 	// events are stamped with, as the transcript is.
 	now func() time.Time
 
-	// matchModel and warn are Options.MatchModel and Options.Warn, read only
-	// by a sub-agent's model and effort resolution (subagent_models.go, plan
-	// 026 §3.6). Neither is defaulted here: matchModel's nil behaviour (exact
-	// alias match) and warn's (discard) are handled where each is called.
-	matchModel func(raw string) (alias string, ok bool)
-	warn       func(string)
+	// warn is Options.Warn, read by a sub-agent's model and effort resolution
+	// (subagent_models.go, plan 026 §3.6) and a resume's fall-backs. It is not
+	// defaulted here: its nil behaviour (discard) is handled where it is
+	// called.
+	warn func(string)
+
+	// openTable is Options.Table, the table the session was opened with,
+	// fixed at Open: spend prices a usage whose identity the current table
+	// does not price with it (spend.go, plan 034 §3.4), so a swap that drops
+	// a model the session spent on never changes what it spent.
+	openTable *modeltable.Table
+	// setModelBuilt runs in SetModel once the new model's client is built and
+	// before the switch is installed, with no lock held: the window a SetTable
+	// can land in (plan 034 §3.4, A24). **A test seam: nil in production**,
+	// set only by a test in this package before the switch.
+	setModelBuilt func()
 
 	// sleep is compact's backoff between summarizer attempts (compact.go,
 	// plan 028 §3.8 item 5): a context-aware wait in production (defaultSleep)
@@ -363,8 +376,19 @@ type Session struct {
 	// test's no-op or recorder otherwise, so a retry test takes no real time.
 	sleep func(context.Context, time.Duration)
 
-	mu      sync.Mutex
-	table   *modeltable.Table
+	mu sync.Mutex
+	// table is the model table and matchModel the matcher over it: the
+	// adapter's `--model` normalisation (Options.MatchModel), read only by a
+	// sub-agent's model resolution (subagent_models.go, plan 026 §3.6), nil
+	// for exact alias match. Both are swapped together, by SetTable, while no
+	// turn runs (plan 034 §3.4), and read under mu — a child operation reads
+	// them once, as a tableView, and resolves and opens from that one
+	// reading. The table always holds the entry of the model cur runs on,
+	// under its alias (SetTable carries it, SetModel installs only a model
+	// built from the table it finds still installed).
+	table      *modeltable.Table
+	matchModel func(raw string) (alias string, ok bool)
+
 	cur     model  // what the next turn runs on; Current reports it
 	logged  logged // what the transcript was last told the model, effort and mode are
 	closed  bool
@@ -505,6 +529,7 @@ func Open(opts Options) (*Session, error) {
 		newAgent:           defaultAgent,
 		newSummarizerAgent: defaultSummarizerAgent,
 		table:              opts.Table,
+		openTable:          opts.Table,
 		child:              child != nil,
 		matchModel:         opts.MatchModel,
 		warn:               opts.Warn,
@@ -746,39 +771,140 @@ func carriedEffort(current string, r modeltable.Resolved) string {
 // which takes it up). A key that cannot be redacted, or that is already
 // inside what this session sends with every request, refuses the switch and
 // leaves the model in place.
+//
+// The switch is judged against the table the session holds when it is
+// installed (plan 034 §3.4, A24): the client is built outside the lock, and a
+// SetTable that swapped the table meanwhile sends it round again, against the
+// new one — so a model the new table no longer has is refused as unknown, and
+// the session never runs on a model its table does not list. A second swap
+// inside the second build refuses the switch (errTableChanged).
 func (s *Session) SetModel(alias string) error {
-	s.mu.Lock()
-	table, closed := s.table, s.closed
-	s.mu.Unlock()
-	if closed {
-		return ErrClosed
+	for attempt := 0; ; attempt++ {
+		s.mu.Lock()
+		table, closed := s.table, s.closed
+		s.mu.Unlock()
+		if closed {
+			return ErrClosed
+		}
+		// Built outside the lock: NewModel is the caller's code, and a sink
+		// calling Current must never wait on it.
+		m, err := s.build(table, alias)
+		if err != nil {
+			return err
+		}
+		if err := s.tools.check(m.r); err != nil {
+			return err
+		}
+		// Outside the lock, like the build: it reads the environment. It only
+		// resolves; the next turn takes the redactor up (begin), so a turn
+		// already running keeps the one it has redacted its steps with, and a
+		// switch that fails below leaves nothing installed either.
+		if err := s.tools.resolve(table, s.getenv); err != nil {
+			return err
+		}
+		if seam := s.setModelBuilt; seam != nil {
+			seam()
+		}
+		s.mu.Lock()
+		if s.closed {
+			s.mu.Unlock()
+			return ErrClosed
+		}
+		if s.table != table {
+			s.mu.Unlock()
+			if attempt == 0 {
+				continue
+			}
+			return errTableChanged
+		}
+		if m, err = withEffort(m, carriedEffort(s.cur.effort, m.r)); err != nil {
+			s.mu.Unlock()
+			return err
+		}
+		s.cur = m
+		s.mu.Unlock()
+		return nil
 	}
-	// Built outside the lock: NewModel is the caller's code, and a sink
-	// calling Current must never wait on it.
-	m, err := s.build(table, alias)
-	if err != nil {
-		return err
+}
+
+// SetTable hands the session another model table, and the matcher over it
+// (Options.MatchModel's), while it runs (plan 034 §3.4, Q13–Q16): what models
+// it offers and can resolve — a switch, a sub-agent's model — from now on.
+//
+//   - It refuses with ErrTurnRunning while a turn or a Replay holds the
+//     session, so a turn — and every sub-agent it starts — reads one table
+//     from its begin to its end; the caller hands it over again once the turn
+//     has ended. After Close it is ErrClosed. Either way nothing changes.
+//   - The model the session runs on is carried into t unchanged (Q16,
+//     modeltable.Table.Carry): its entry, its provider when t has none, and
+//     the account it is bound to — whether or not t still has its alias or
+//     funds it, so it is always listed (P7) and what the table says of it is
+//     what its client was built from. Its client is not rebuilt: nothing is
+//     resolved and no model is built here; the next switch builds from t.
+//   - The opened table's compaction and sub-agent settings are carried into t
+//     too: a swap changes what models are offered and resolvable, never when
+//     the session compacts nor what its agent tool's model menu, frozen into
+//     the tools at Open, says (Q13).
+//   - Every variable t knows holds a key is taken out of the environment of
+//     every command the session starts from now on — and every running
+//     sub-agent's — added to the ones it already was (A23): a provider
+//     configured since Open can be switched to now, so its key is a
+//     credential of the session's.
+//
+// t becomes the session's: SetTable writes the carried entries into it, so it
+// must be a table no session holds — a fresh Load — and the caller must not
+// change it afterwards. Keys are not learned here: the
+// caller teaches the session the new table's keys first (LearnKeys), having
+// withheld any it cannot take (FrozenKey, modeltable.Table.WithholdFrozen).
+// The current model and effort are untouched, and nothing is written to the
+// transcript.
+func (s *Session) SetTable(t *modeltable.Table, match func(raw string) (alias string, ok bool)) error {
+	if t == nil {
+		return errors.New("harness: no model table")
 	}
-	if err := s.tools.check(m.r); err != nil {
-		return err
-	}
-	// Outside the lock, like the build: it reads the environment. It only
-	// resolves; the next turn takes the redactor up (begin), so a turn
-	// already running keeps the one it has redacted its steps with, and a
-	// switch that fails below leaves nothing installed either.
-	if err := s.tools.resolve(table, s.getenv); err != nil {
-		return err
+	if s.child {
+		return errors.New("harness: a sub-agent keeps the table it opened with")
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.closed {
+	switch {
+	case s.closed:
 		return ErrClosed
+	case s.running:
+		return ErrTurnRunning
 	}
-	if m, err = withEffort(m, carriedEffort(s.cur.effort, m.r)); err != nil {
-		return err
+	t.Carry(s.table, s.cur.r.Alias)
+	t.Subagents = s.table.Subagents.Clone()
+	t.Compaction = s.table.Compaction
+	// The environment narrows before the table changes, in this section, so
+	// no command started under the new table — the session's, or a running
+	// background sub-agent's — is started with a variable it knows holds a
+	// key. s.mu → the toolset's lock, as begin takes it; → regMu, as SetMode
+	// takes it; and a child's toolset lock after regMu is released: leaves.
+	names := t.CredentialEnvNames()
+	s.tools.narrowEnviron(names)
+	for _, c := range s.subs.liveChildren() {
+		c.tools.narrowEnviron(names)
 	}
-	s.cur = m
+	s.table, s.matchModel = t, match
 	return nil
+}
+
+// FrozenKey reports whether key, trimmed, is inside what the session sends
+// unredacted with every request and cannot rewrite — its system prompt, its
+// encoded tools or its plan file's path (toolset.frozenHolds) — so that
+// learning it would put the session in its refusal state (LearnKeys) and a
+// switch to a model it funds would be refused (resolve's errFrozenKey). A
+// value that cannot be a key (modeltable.KeyProblem) never is. The native
+// adapter withholds a provider with such a key from a reload, so the picker
+// never offers what a switch would refuse (plan 034 §3.4, A22). Safe from any
+// goroutine: it takes the toolset's lock, a leaf.
+func (s *Session) FrozenKey(key string) bool {
+	v := strings.TrimSpace(key)
+	if v == "" || modeltable.KeyProblem(v) != nil {
+		return false
+	}
+	return s.tools.holdsFrozen(v)
 }
 
 // SetEffort sets the effort the next turn asks for; "" means the current
@@ -957,12 +1083,13 @@ func (s *Session) SessionStartSHA256() string { return promptDigest(s.tools.star
 func (s *Session) Redact(text string) string { return s.redactor().String(text) }
 
 // LearnKeys teaches the session keys stored in providers.toml since it opened
-// (plan 031 §3.8, P8), so that it can redact them. The session's table, its
-// models and its tools' environment stay what they were at Open: a stored key
-// is never one it sends, only one it may meet — in a file a tool reads, in
-// what a command prints, in a prompt the user pastes it into. The adapter
-// calls it at the start of every turn it runs (a prompt, /compact, a wake),
-// with every inline key the file holds when it has changed.
+// (plan 031 §3.8, P8), so that it can redact them: a key it may meet — in a
+// file a tool reads, in what a command prints, in a prompt the user pastes it
+// into — whether or not it is one the session sends. The adapter calls it at
+// the start of every turn it runs (a prompt, /compact, a wake), with every
+// inline key the file holds when it has changed, and with every key of a
+// model table it reloads before handing it over (SetTable, plan 034 §3.4), so
+// a model the session offers is one whose key it already redacts.
 //
 // Each value is trimmed and held to modeltable.KeyProblem (r2-3): one that
 // cannot be a key — shorter than modeltable.MinKeyLen, or overlapping the

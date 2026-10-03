@@ -132,16 +132,20 @@ type Backend interface {
 	// ctx carries another epoch is refused with ErrStaleEpoch before
 	// anything is sent (CheckEpoch). It waits on nothing.
 	Epoch() uint64
-	// Info is the session's static facts (§3.13), fixed once the session is
-	// up: the provider's name and label, its capabilities as advertised
-	// (never rebuilt from the client binary's own provider table — astra
-	// 25), the provider and craze session ids, the model and mode catalogs,
-	// the incarnation and the retry horizon. In process it reads
-	// State().Snapshot's static fields; over the socket it is the attach
-	// reply's copy, replaced by each Ready and Restore as the stream receives
-	// them. It waits on nothing, and before Start (over the socket: before
-	// the first attach reply) it reflects the configured provider, as the
-	// TUI does today (GLM 11).
+	// Info is the session's facts (§3.13), fixed once the session is up —
+	// but for its model catalog: the provider's name and label, its
+	// capabilities as advertised (never rebuilt from the client binary's own
+	// provider table — astra 25), the provider and craze session ids, the
+	// model and mode catalogs, the incarnation and the retry horizon. In
+	// process it reads State().Snapshot's fields, the model list as the
+	// session holds it now; over the socket it is the attach reply's copy,
+	// replaced by each Ready and Restore as the stream receives them. A
+	// native session's model list can change while it runs (plan 034 §3.4):
+	// each change is a StateDelta.Catalog in the stream, which a client's
+	// fold holds and prefers to this list (tui's mirror). It waits on
+	// nothing, and before Start (over the socket: before the first attach
+	// reply) it reflects the configured provider, as the TUI does today
+	// (GLM 11).
 	Info() SessionInfo
 
 	// Read is the stream: one item at a time, in order, from one reader.

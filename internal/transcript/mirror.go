@@ -67,6 +67,7 @@ func (m *Model) Mirror() Mirror {
 		cu := *u
 		mr.Settings.Usage = &cu
 	}
+	mr.Settings.Catalog = cloneCatalog(m.settings.Catalog)
 	if f := m.turn.Foreign; f != nil {
 		cf := *f
 		mr.Turn.Foreign = &cf
@@ -96,6 +97,16 @@ func (m *Model) Mirror() Mirror {
 		mr.Tools = appendTools(mr.Tools, m.subs[id].live())
 	}
 	return mr
+}
+
+// cloneCatalog is a catalog section the caller owns, its list included; nil
+// for nil (plan 034 §3.4). A ModelInfo holds only values, so one copy of the
+// list owns it whole.
+func cloneCatalog(c *agent.CatalogState) *agent.CatalogState {
+	if c == nil {
+		return nil
+	}
+	return &agent.CatalogState{Models: slices.Clone(c.Models), Revision: c.Revision}
 }
 
 // cloneOptions is a config catalog the caller owns: each option, and each

@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -815,5 +816,60 @@ func TestCurrentRedactorFollowsTheSession(t *testing.T) {
 	env := testEnv(t, keyA)
 	if env.CurrentRedactor() != env.Redactor {
 		t.Fatal("an Env the dispatcher did not hand out has a CurrentRedactor of its own")
+	}
+}
+
+// TestSetEnvironReachesTheNextCall (plan 034 §3.4, A23): a call prepared and
+// run after SetEnviron is handed the new environment, so a variable the
+// session narrowed out reaches no command started from then on; a call
+// already running keeps the Env it began with (the control), as with
+// SetRedactor. Negative control: callEnv ignoring the stored environment
+// hands the second call the first's, and the test fails on that line.
+func TestSetEnvironReachesTheNextCall(t *testing.T) {
+	running, narrowed := make(chan struct{}), make(chan struct{})
+	var seen [][]string
+	var mu sync.Mutex
+	probe := newFake("probe", func(_ context.Context, env Env, in fakeInput) Result {
+		if in.Text == "hold" {
+			close(running)
+			<-narrowed
+		}
+		mu.Lock()
+		seen = append(seen, env.Environ)
+		mu.Unlock()
+		return Result{Text: "ok"}
+	})
+	env := testEnv(t)
+	env.Environ = []string{"PATH=/bin", "NEW_PROVIDER_KEY=v"}
+	d := newDispatcher(t, env, nil, probe)
+	prepare := func(id, text string) {
+		t.Helper()
+		if _, res, ok := d.Prepare(Call{ID: id, CallID: "call_" + id, Tool: "probe", Input: input(t, fakeInput{Text: text})}); !ok {
+			t.Fatalf("Prepare refused %s: %s", id, res.Text)
+		}
+	}
+	prepare("t1.1.1", "hold")
+	done := make(chan Result, 1)
+	go func() { done <- d.Run(context.Background(), "t1.1.1", nil) }()
+	<-running
+	d.SetEnviron([]string{"PATH=/bin"})
+	close(narrowed)
+	if res := <-done; res.IsError {
+		t.Fatalf("the held call failed: %s", res.Text)
+	}
+	prepare("t1.1.2", "after")
+	if res := d.Run(context.Background(), "t1.1.2", nil); res.IsError {
+		t.Fatalf("the later call failed: %s", res.Text)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(seen) != 2 {
+		t.Fatalf("%d calls ran; want 2", len(seen))
+	}
+	if !slices.Contains(seen[0], "NEW_PROVIDER_KEY=v") {
+		t.Fatalf("control: the call already running was handed %q; want the environment it began with", seen[0])
+	}
+	if slices.Contains(seen[1], "NEW_PROVIDER_KEY=v") || !slices.Contains(seen[1], "PATH=/bin") {
+		t.Fatalf("the call after SetEnviron was handed %q; want the narrowed environment", seen[1])
 	}
 }

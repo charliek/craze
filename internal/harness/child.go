@@ -85,6 +85,13 @@ type ChildOptions struct {
 	// runner's union, which reads the parent's keys at each use. Set by the
 	// runner alone.
 	learned []string
+	// dropEnv are the variables the parent keeps out of its commands when the
+	// child is opened (toolset.envNames, plan 034 §3.4): every one a table the
+	// parent has held knows holds a key. The child keeps them out of its own
+	// commands too, beside every one its table names — it opens on the
+	// parent's current table, which may no longer name a variable the parent
+	// still treats as a credential. Set by the runner alone.
+	dropEnv []string
 	// Mode is the parent's mode when the child opens; Options.Mode is not
 	// read for a child. SetMode on a child is ErrChildMode (§3.5).
 	Mode string

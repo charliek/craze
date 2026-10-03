@@ -694,6 +694,14 @@ var deltaFields = []deltaField{
 			m.settings.Usage = &u
 		}
 	}},
+	// Catalog (plan 034 §3.4, Q17): the models a native session offers now,
+	// list and revision, a copy of the delta's so the model holds nothing the
+	// event it came from does. It has no truncation mark to clear.
+	{name: "Catalog", apply: func(m *Model, st *agent.StateDelta, _ time.Time) {
+		if st.Catalog != nil {
+			m.settings.Catalog = cloneCatalog(st.Catalog)
+		}
+	}},
 	// Reason names what happened to a send-now; alone it draws nothing, and
 	// its words are the client's toasts, never rows.
 	{name: "Reason", report: true, apply: func(*Model, *agent.StateDelta, time.Time) {}},

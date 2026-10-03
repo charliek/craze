@@ -234,8 +234,12 @@ func (b *engineBackend) LastTurn(ctx context.Context) (*engine.LastTurn, error) 
 	return b.eng.State().LastTurn, nil
 }
 
-// Info is the session's static facts (§3.13), read from State().Snapshot's
-// static fields and State's own (Incarnation, CrazeSessionID, RetryHorizon).
+// Info is the session's facts (§3.13), read from State().Snapshot's fields
+// and State's own (Incarnation, CrazeSessionID, RetryHorizon). Models is the
+// session's list as it stands at the call, which a native session's reload
+// can change (plan 034 §3.4); the mirror prefers the fold's catalog section
+// once the stream has carried one, so what the TUI draws moves with the
+// stream it folds, not with this read (mirror.go).
 // It waits on nothing: State() reads the session's snapshot outside the
 // engine's mutex and merges the engine's own fields in only briefly under it
 // (engine/state.go's State doc), exactly what Settings above already reads on

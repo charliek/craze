@@ -882,6 +882,7 @@ func Restore(s *Snapshot, o Options) *Model {
 		c := *u
 		m.settings.Usage = &c
 	}
+	m.settings.Catalog = cloneCatalog(s.Settings.Catalog)
 	m.queue = nilIfEmpty(slices.Clone(s.Queue))
 	for _, id := range s.TruncatedQueue {
 		if !slices.ContainsFunc(m.queue, func(q agent.QueuedPrompt) bool { return q.ID == id }) {
