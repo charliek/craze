@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"syscall"
@@ -935,4 +936,88 @@ func TestBridgeHelpIsNotAFailure(t *testing.T) {
 	if !strings.Contains(stdout, "craze bridge") {
 		t.Fatalf("stdout = %q, want usage naming the command", stdout)
 	}
+}
+
+// -------------------------------------------------- short ids (SF-115, P6)
+
+// TestMatchSessionTiers is plan 035 P6: the first tier that matches decides —
+// exact on any field of any entry, then a craze-id suffix, a craze-id prefix,
+// a host-id prefix — and within it two entries are ambiguous.
+func TestMatchSessionTiers(t *testing.T) {
+	a := rundir.Entry{CrazeSessionID: "0193aaaa-1111-7000-8000-00000000abcd", ProviderSessionID: "prov-a", HostID: "h1h1h1h1h1h1"}
+	b := rundir.Entry{CrazeSessionID: "0193bbbb-2222-7000-8000-00000000ef01", ProviderSessionID: "prov-b", HostID: "h2h2h2h2h2h2"}
+	c := rundir.Entry{CrazeSessionID: "abcd0000-3333-7000-8000-0000000000cc", ProviderSessionID: "prov-c", HostID: "zz00zz00zz00"}
+	entries := []rundir.Entry{a, b, c}
+	for _, tc := range []struct {
+		name, session string
+		want          []rundir.Entry
+	}{
+		{"an 8-character suffix (craze ps's id)", "0000abcd", []rundir.Entry{a}},
+		{"4 characters match a suffix", "abcd", []rundir.Entry{a}},
+		{"3 characters match nothing", "bcd", nil},
+		{"the full craze id", a.CrazeSessionID, []rundir.Entry{a}},
+		{"a craze-id prefix", "0193bbbb-22", []rundir.Entry{b}},
+		{"a host-id prefix", "h2h2h2", []rundir.Entry{b}},
+		{"a host-id prefix under 4 characters", "h2h", nil},
+		{"the whole host id", "h1h1h1h1h1h1", []rundir.Entry{a}},
+		{"a provider id exactly", "prov-b", []rundir.Entry{b}},
+		{"no partial provider id", "prov", nil},
+		{"no partial provider id, long", "prov-", nil},
+		{"a suffix beats a prefix", "abcd", []rundir.Entry{a}},
+		{"nothing", "nonesuch", nil},
+	} {
+		if got := matchSession(entries, tc.session); !slices.Equal(got, tc.want) {
+			t.Errorf("%s: --session %q matched %+v, want %+v", tc.name, tc.session, got, tc.want)
+		}
+	}
+	// "abcd" is a's suffix and c's prefix: the suffix tier decides, so c is
+	// not an ambiguity (the tier-order negative control).
+	if got := matchSession(entries, "abcd"); len(got) != 1 || got[0] != a {
+		t.Fatalf("abcd: %+v, want a alone", got)
+	}
+	// Two entries in the deciding tier are ambiguous.
+	d := rundir.Entry{CrazeSessionID: "0193dddd-4444-7000-8000-00000000abcd", HostID: "h4h4h4h4h4h4"}
+	if got := matchSession([]rundir.Entry{a, d}, "abcd"); len(got) != 2 {
+		t.Fatalf("an ambiguous suffix matched %+v, want both", got)
+	}
+}
+
+// TestMatchSessionExactBeatsASuffix: an exact match on any field, even of
+// another entry, decides before a suffix does.
+func TestMatchSessionExactBeatsASuffix(t *testing.T) {
+	suffixed := rundir.Entry{CrazeSessionID: "0193aaaa-1111-7000-8000-0000abcdabcd", HostID: "h1h1h1h1h1h1"}
+	exact := rundir.Entry{CrazeSessionID: "other", ProviderSessionID: "abcdabcd", HostID: "h2h2h2h2h2h2"}
+	got := matchSession([]rundir.Entry{suffixed, exact}, "abcdabcd")
+	if len(got) != 1 || got[0] != exact {
+		t.Fatalf("matched %+v, want the exact match alone", got)
+	}
+}
+
+// TestMatchSessionCountsAnEntryOnce: an entry matching a tier by several
+// fields is one match, not an ambiguity.
+func TestMatchSessionCountsAnEntryOnce(t *testing.T) {
+	both := rundir.Entry{CrazeSessionID: "same-id", ProviderSessionID: "same-id", HostID: "same-id"}
+	if got := matchSession([]rundir.Entry{both, {CrazeSessionID: "x", HostID: "y"}}, "same-id"); len(got) != 1 || got[0] != both {
+		t.Fatalf("matched %+v, want the one entry once", got)
+	}
+	e := rundir.Entry{CrazeSessionID: "abcd1234abcd1234", HostID: "abcd1234abcd"}
+	if got := matchSession([]rundir.Entry{e}, "abcd1234"); len(got) != 1 {
+		t.Fatalf("a prefix of the craze id and the host id matched %+v, want one", got)
+	}
+}
+
+// TestResolveTargetShortIDs: craze bridge --session takes a short id, refuses
+// an ambiguous one in the same words as an exact clash, and says the same
+// no-match line.
+func TestResolveTargetShortIDs(t *testing.T) {
+	a := rundir.Entry{CrazeSessionID: "0193aaaa-1111-7000-8000-00000000abcd", HostID: "aaaaaaaaaaaa", Provider: "cursor", Workspace: "/a"}
+	d := rundir.Entry{CrazeSessionID: "0193dddd-4444-7000-8000-00000000abcd", HostID: "dddddddddddd", Provider: "grok", Workspace: "/d"}
+	_, err := resolveTarget([]rundir.Entry{a, d}, "0000abcd")
+	assertBridgeError(t, err, 1, "craze bridge: 2 sessions match --session 0000abcd: "+
+		a.CrazeSessionID+" (cursor, /a), "+d.CrazeSessionID+" (grok, /d)")
+	if got, err := resolveTarget([]rundir.Entry{a}, "0000abcd"); err != nil || got != a {
+		t.Fatalf("--session 0000abcd: %+v, %v; want %+v", got, err, a)
+	}
+	_, err = resolveTarget([]rundir.Entry{a}, "bcd")
+	assertBridgeError(t, err, 1, "craze bridge: no session bcd")
 }

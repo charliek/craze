@@ -129,10 +129,10 @@ func entryID(e rundir.Entry) string {
 //
 //   - With no --session, exactly one live host in total is the target; zero
 //     or several is an error listing them on the one line.
-//   - With --session, the live entries whose crazeSessionId, providerSessionId
-//     or hostId equals it exactly; none is the contract line "no session
-//     <id>"; more than one (ids do not collide in practice, but nothing here
-//     assumes it) is an error naming them.
+//   - With --session, the live entries matchSession names (an exact id, or a
+//     craze id's suffix or prefix, or a host id's prefix); none is the
+//     contract line "no session <id>"; more than one is an error naming
+//     them.
 func resolveTarget(entries []rundir.Entry, session string) (rundir.Entry, error) {
 	if session == "" {
 		switch len(entries) {
@@ -157,17 +157,48 @@ func resolveTarget(entries []rundir.Entry, session string) (rundir.Entry, error)
 	}
 }
 
-// matchSession is every entry --session names: the live entries whose
-// crazeSessionId, providerSessionId or hostId equals it exactly (§3.10). craze
-// bridge and craze attach resolve an id the same way (§3.15).
+// minPartialID is the fewest characters of a --session that may match as a
+// suffix or a prefix: fewer would name too many sessions to be an address.
+const minPartialID = 4
+
+// matchSession is every entry --session names (§3.10, SF-115, plan 035 P6).
+// craze bridge and craze attach resolve an id the same way (§3.15). The
+// tiers, in order, and the first that matches any entry decides:
+//
+//  1. an exact match on any field of any entry: crazeSessionId,
+//     providerSessionId or hostId;
+//  2. a crazeSessionId suffix (craze ps prints an id's last 8 characters);
+//  3. a crazeSessionId prefix;
+//  4. a hostId prefix.
+//
+// Within a tier, an entry that matches by several fields counts once. A
+// provider id matches only exactly (its shape is the agent's), and a suffix
+// or prefix needs minPartialID characters. The hub's session.connect stays
+// exact.
 func matchSession(entries []rundir.Entry, session string) []rundir.Entry {
-	var matches []rundir.Entry
-	for _, e := range entries {
-		if e.CrazeSessionID == session || e.ProviderSessionID == session || e.HostID == session {
-			matches = append(matches, e)
+	tiers := []func(rundir.Entry) bool{
+		func(e rundir.Entry) bool {
+			return e.CrazeSessionID == session || e.ProviderSessionID == session || e.HostID == session
+		},
+		func(e rundir.Entry) bool { return strings.HasSuffix(e.CrazeSessionID, session) },
+		func(e rundir.Entry) bool { return strings.HasPrefix(e.CrazeSessionID, session) },
+		func(e rundir.Entry) bool { return strings.HasPrefix(e.HostID, session) },
+	}
+	for i, tier := range tiers {
+		if i > 0 && len(session) < minPartialID {
+			break
+		}
+		var matches []rundir.Entry
+		for _, e := range entries {
+			if tier(e) {
+				matches = append(matches, e)
+			}
+		}
+		if len(matches) > 0 {
+			return matches
 		}
 	}
-	return matches
+	return nil
 }
 
 // formatEntries is several entries named on the one line every bridge error

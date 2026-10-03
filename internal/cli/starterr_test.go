@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -316,6 +317,17 @@ func TestNewSaysTheAgentsWordsThroughAHub(t *testing.T) {
 			stdout, stderr, code := executeErr([]string{"new", "-C", ws, "--provider", "cursor"})
 			if code != 1 || stdout != "" || stderr != "craze new: the session did not start: "+want+"\n" {
 				t.Fatalf("craze new exited %d: stdout %q, stderr %q", code, stdout, stderr)
+			}
+			// --json (plan 035 P5, A10): the same refusal on stdout, whole, so
+			// a script reads .error.data.cause where it reads it on the wire.
+			stdout, stderr, code = executeErr([]string{"new", "--json", "-C", ws, "--provider", "cursor"})
+			var got struct {
+				Error protocol.Error `json:"error"`
+			}
+			if code != 1 || stderr != "craze new: the session did not start: "+want+"\n" || strings.Count(stdout, "\n") != 1 ||
+				json.Unmarshal([]byte(stdout), &got) != nil || got.Error.Data.Code != protocol.CodeNotAccepting ||
+				got.Error.Data.Reason != protocol.ReasonStartFailed || got.Error.Data.Cause != want {
+				t.Fatalf("craze new --json exited %d: stdout %q, stderr %q", code, stdout, stderr)
 			}
 		})
 	}

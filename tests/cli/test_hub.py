@@ -454,3 +454,20 @@ def test_new_refuses_with_the_hubs_words(craze_bin: Path, fake_agent_bin: Path, 
     assert out.stderr.startswith(b"craze new: params.provider is required") and out.stderr.count(b"\n") == 1, out.stderr
     assert not [e for e in _entries(_home()) if e.get("requestId")]
     _cleanup_stops(_the_hub(_home()), tmp_path, fake_agent_bin)
+
+
+def test_new_json_refusal_is_the_wire_error(craze_bin: Path, fake_agent_bin: Path, tmp_path: Path) -> None:
+    """SF-124: `craze new --json` refused by the hub prints one JSON object on
+    stdout, {"error": <the wire's error>}: .error.data.code and .reason are
+    where a script reads them on the wire. The stderr line and exit 1 are as
+    without --json. Nothing is started."""
+    out = _new(craze_bin, "--json", "-C", str(tmp_path), "hello")
+    assert out.returncode == 1, out
+    assert out.stderr.startswith(b"craze new: params.provider is required") and out.stderr.count(b"\n") == 1, out.stderr
+    assert out.stdout.count(b"\n") == 1, out.stdout
+    body = json.loads(out.stdout)
+    assert list(body) == ["error"], body
+    assert body["error"]["data"]["code"] == "bad_request" and body["error"]["data"]["reason"], body
+    assert body["error"]["message"].startswith("params.provider is required"), body
+    assert not [e for e in _entries(_home()) if e.get("requestId")]
+    _cleanup_stops(_the_hub(_home()), tmp_path, fake_agent_bin)

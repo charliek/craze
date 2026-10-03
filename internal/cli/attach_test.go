@@ -451,3 +451,26 @@ func readsAttachments(b interface{}) bool {
 	r, ok := b.(interface{ ReadsAttachments() bool })
 	return ok && r.ReadsAttachments()
 }
+
+// TestAttachResolvesShortIDs (SF-115, plan 035 P6): craze attach --session
+// takes the same short ids as craze bridge — a craze-id suffix, prefix or a
+// host-id prefix of 4 characters or more — and an ambiguous one is exit 2,
+// listed; fewer than 4 is no session.
+func TestAttachResolvesShortIDs(t *testing.T) {
+	here := t.TempDir()
+	a := rundir.Entry{CrazeSessionID: "0193aaaa-1111-7000-8000-00000000abcd", HostID: "aaaaaaaaaaaa", Workspace: "/a"}
+	d := rundir.Entry{CrazeSessionID: "0193dddd-4444-7000-8000-00000000abcd", HostID: "dddddddddddd", Workspace: "/d"}
+	for _, id := range []string{"0000abcd", "abcd", "0193aaaa-11", "aaaaaa"} {
+		got, err := resolveAttach([]rundir.Entry{d, a}, id, true, here, func() map[string]string { return nil })
+		if id == "abcd" || id == "0000abcd" {
+			assertExit(t, err, 2, "craze attach: 2 sessions match --session "+id+":\n"+
+				"  "+d.CrazeSessionID+"  /d\n  "+a.CrazeSessionID+"  /a")
+			continue
+		}
+		if err != nil || got != a {
+			t.Fatalf("--session %s: %+v, %v; want %+v", id, got, err, a)
+		}
+	}
+	_, err := resolveAttach([]rundir.Entry{a}, "bcd", true, here, noTitles(t))
+	assertExit(t, err, 1, "craze attach: no session bcd")
+}

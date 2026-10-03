@@ -554,7 +554,9 @@ is a provider id; absent, it is the hub's configured default — `provider` in
 the hub's `config.toml`, read at each create (the provider the last session
 to start persisted) — and with none configured the create is `bad_request`.
 `model`, `effort` and `fast` are the session's start settings, each absent
-for the provider's own default. `permissionMode`, absent, is a plain
+for the provider's own default: an absent `model` is the agent's own default
+model (craze keeps no default model of its own for an ACP provider, and a
+launch without `--model` passes none either). `permissionMode`, absent, is a plain
 launch's: `bypass`, `--force`'s default — `config.toml` has no permission
 setting. No params member names an agent binary: the host finds
 its own (`[agents]`, then `PATH`), and the hub hands it neither a launch's

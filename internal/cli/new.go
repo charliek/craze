@@ -35,7 +35,8 @@ import (
 // started rather than start a second (protocol.md: a create is retried only
 // under its own requestId). Any refusal is the hub's words, exit 1; so is a
 // session that started and refused its first prompt (the result says so, and
-// the session runs on, idle).
+// the session runs on, idle). With --json every one of those failures also
+// prints one JSON object on stdout (newFailureJSON); usage errors stay plain.
 
 const (
 	// newBudget bounds a craze new: the hub's Ensure, and the create, which
@@ -89,24 +90,35 @@ func runNew(cmd *cobra.Command, f *newFlags, args []string) error {
 	if f.fast && f.noFast {
 		return usagef("craze new: --fast and --no-fast are mutually exclusive")
 	}
+	out := cmd.OutOrStdout()
+	// fail is every exit-1 path before the session started (SF-124, plan 035
+	// P5): the stderr line as ever and, under --json, one JSON object on
+	// stdout first (newFailureJSON).
+	fail := func(err error, format string, args ...any) error {
+		msg := fmt.Sprintf(format, args...)
+		if f.json {
+			fmt.Fprintf(out, "%s\n", newFailureJSON(err, msg))
+		}
+		return exitf(1, "craze new: %s", msg)
+	}
 	dir := f.dir
 	if dir == "" {
 		wd, err := os.Getwd()
 		if err != nil {
-			return exitf(1, "craze new: the current directory: %v", err)
+			return fail(err, "the current directory: %v", err)
 		}
 		dir = wd
 	}
 	abs, err := filepath.Abs(dir)
 	if err != nil {
-		return exitf(1, "craze new: %s: %v", dir, err)
+		return fail(err, "%s: %v", dir, err)
 	}
 	if st, err := os.Stat(abs); err != nil || !st.IsDir() {
-		return exitf(1, "craze new: %s is not a directory", abs)
+		return fail(nil, "%s is not a directory", abs)
 	}
 	id, err := newRequestID()
 	if err != nil {
-		return exitf(1, "craze new: %v", err)
+		return fail(err, "%v", err)
 	}
 	p := protocol.CreateParams{Cwd: abs, Prompt: strings.Join(args, " "), Provider: strings.TrimSpace(f.provider),
 		Model: strings.TrimSpace(f.model), Effort: strings.TrimSpace(f.effort), RequestID: id}
@@ -129,13 +141,12 @@ func runNew(cmd *cobra.Command, f *newFlags, args []string) error {
 	defer cancel()
 	raw, err := createThroughHub(ctx, env, p)
 	if err != nil {
-		return exitf(1, "craze new: %s", newFailure(err))
+		return fail(err, "%s", newFailure(err))
 	}
 	var res protocol.CreateResult
 	if err := json.Unmarshal(raw, &res); err != nil {
-		return exitf(1, "craze new: the hub's answer: %v", err)
+		return fail(nil, "the hub's answer: %v", err)
 	}
-	out := cmd.OutOrStdout()
 	if f.json {
 		if _, err := fmt.Fprintf(out, "%s\n", raw); err != nil {
 			return err
@@ -184,6 +195,26 @@ func newFailure(err error) string {
 		return sanitizeLine(perr.Message)
 	}
 	return sanitizeLine(err.Error())
+}
+
+// newFailureJSON is a failed craze new's one JSON object (SF-124, plan 035
+// P5): a protocol refusal as {"error": <protocol.Error>}, so a script reads
+// .error.data.code, .reason and .cause where it reads them on the wire; any
+// other failure as {"error":{"message": msg}}. Its key, "error", is not one
+// of session.create's result, so success and failure stay disjoint.
+func newFailureJSON(err error, msg string) []byte {
+	var body any = struct {
+		Message string `json:"message"`
+	}{msg}
+	var perr *protocol.Error
+	if errors.As(err, &perr) {
+		body = perr
+	}
+	raw, merr := json.Marshal(map[string]any{"error": body})
+	if merr != nil {
+		raw = []byte(`{"error":{"message":"craze new failed"}}`)
+	}
+	return raw
 }
 
 // newRequestID is a fresh requestId for one craze new: "new-" and 16 random

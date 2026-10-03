@@ -521,7 +521,7 @@ the client's job, not this command's.
 
 | Flag | Description |
 |------|-------------|
-| `--session` | A craze session id, a provider session id, or a host id (default: the one running session) |
+| `--session` | A craze session id, a provider session id, or a host id, or a short form of one ([short ids](#short-session-ids)) (default: the one running session) |
 | `--hub` | Relay to this machine's [hub](#the-hub) instead, starting it when none runs. Not with `--session` |
 
 `--session`'s id is resolved against the registry under the bridge
@@ -533,6 +533,26 @@ login's own environment can hide or misdirect it, but the SSH exec is
 true for an ordinary SSH login as the same user, not guaranteed in general.
 With no `--session`, exactly one live host in total is the target; zero or
 several is an error listing them on one line.
+
+### Short session ids
+
+`craze bridge --session` and `craze attach --session` take the short id
+[`craze ps`](#craze-ps) prints, not only a whole id. The tiers are tried in
+this order, and **the first tier that matches decides**:
+
+1. an exact match on any field of any live session: its craze session id, its
+   provider session id or its host id;
+2. a craze session id's **end** (`craze ps`'s `SESSION` is its last eight
+   characters);
+3. a craze session id's beginning;
+4. a host id's beginning.
+
+Within the deciding tier, two different sessions are ambiguous and refused
+(the error lists them, as an exact clash always was); one session matching by
+several fields counts once. A provider session id must be given whole: its
+shape is the agent's. A suffix or a prefix needs **at least four
+characters**; a shorter one matches nothing (`no session <id>`). The hub's
+`session.connect` stays exact: the roster gives it whole ids.
 
 **The pump** (roost's bridge rules):
 
@@ -605,7 +625,7 @@ running (see [Quitting vs. the session ending](#quitting-vs-the-session-ending))
 
 | Flag | Description |
 |------|-------------|
-| `--session` | A craze session id, a provider session id, or a host id (default: the one session running in this directory) |
+| `--session` | A craze session id, a provider session id, or a host id, or a short form of one ([short ids](#short-session-ids)) (default: the one session running in this directory) |
 | `--theme` | TUI theme preset. See [Configuration](configuration.md) |
 | `--no-mouse` | Disable mouse reporting (wheel scroll and clicks) |
 | `--no-background` | Keep the terminal's own background and text colours instead of the theme's |
@@ -620,8 +640,8 @@ craze attach: --continue does not apply: attach joins a running session
 ### Resolution
 
 With an explicit `--session`, the one entry it names (matched the way
-[`craze bridge`](#craze-bridge) matches, by craze session id, provider
-session id or host id); an invalid `--session` — whatever its value, `""`
+[`craze bridge`](#craze-bridge) matches: by craze session id, provider
+session id or host id, or a [short id](#short-session-ids)); an invalid `--session` — whatever its value, `""`
 included — is a usage error, exit 2, before a registry read builds a path.
 No match is exit 1:
 
@@ -846,7 +866,7 @@ list (`←`) and `craze ps` find it — until its host's idle exit.
 |------|-------------|
 | `-C`, `--dir <dir>` | Start the session in this directory (default: the current one) |
 | `--provider <id>` | The session's provider. Without it the hub's configured default — `provider` in `config.toml`, the one the last session to start persisted — and with none configured the create is refused |
-| `--model <id>` | The model to start on |
+| `--model <id>` | The model to start on. Without it the session uses the agent's own default: craze keeps no default model of its own for an ACP provider |
 | `--effort <value>` | The effort to start at, where the model offers one (as the [session flag](#flags)) |
 | `--fast` / `--no-fast` | The fast setting to start with, where the model offers one |
 | `--no-force` | The session's agent asks for permission, and a client answers (the default is a plain launch's: `--force`'s bypass — `config.toml` has no permission setting) |
@@ -873,6 +893,27 @@ starts this craze's. Each run creates under a request id of its own, and a
 connection to the hub that ends before the answer (the hub restarted
 mid-create) is tried once more under the same id, so the new hub answers the
 session the first one started rather than start a second.
+
+**`--json` failures.** With `--json`, every failure other than a usage error
+(exit 2, plain) also prints **one JSON object** on stdout before the exit; the
+stderr line and exit 1 are as without `--json`. A refusal by the hub is the
+wire's error, whole, under one key, so a script reads `.error.data.code`,
+`.error.data.reason` and `.error.data.cause` where it reads them on the wire:
+
+```json
+{"error":{"code":-32000,"message":"the session did not start: acp: agent exited: exit status 1: Error: KEYCHAIN LOCKED / Run unlock and retry.","data":{"code":"not_accepting","reason":"start_failed","cause":"acp: agent exited: exit status 1: Error: KEYCHAIN LOCKED / Run unlock and retry."}}}
+```
+
+Any other failure (no hub to be had, a `-C` that is no directory, an answer
+that does not decode) is the message alone:
+
+```json
+{"error":{"message":"/no/such/dir is not a directory"}}
+```
+
+A success has no `error` key, and a session that started but refused its first
+prompt is still the success object (exit 1, as before). Check the exit code,
+then `.error`.
 
 On macOS a session the hub creates runs in the hub's login (security)
 session, and a hub keeps the session of whichever command first started it
