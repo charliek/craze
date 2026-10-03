@@ -244,7 +244,13 @@ func TestPromptNotesRecordAnErroredTurn(t *testing.T) {
 // refuses craze's next prompt before the wire. The accepted interjection is
 // journaled under its own attempt id, not the craze-N id the wire correlates
 // it by — a refused one never spends one of those.
+//
+// The foreign turn is held by the fake agent's gate, as in
+// TestForeignTurnRefusalIsNotATurnThatFailed (issue #14): a fallback that ran
+// for a fixed window could end before a slow poll saw its start, and the
+// prompt would then succeed where it had to be refused.
 func TestPromptNotesRecordAWireRefusalAndAnInterjection(t *testing.T) {
+	release := fakeAgentGate(t)
 	s, w := journaledGrok(t, "grok-long-turn-fallback")
 	log := collect(t, s)
 	done := make(chan struct{})
@@ -255,17 +261,26 @@ func TestPromptNotesRecordAWireRefusalAndAnInterjection(t *testing.T) {
 		}
 	}()
 	waitPromptOnWire(t, s)
-	if err := s.Interject(t.Context(), "BANANA"); err != nil {
+	// The interjection is the fallback turn's text, and the marker in it holds
+	// that turn until the gate's next byte.
+	if err := s.Interject(t.Context(), "BANANA HOLD-FALLBACK"); err != nil {
 		t.Fatalf("interject: %v", err)
 	}
+	release() // step1
+	release() // step2
 	<-done
 	waitUntil(t, "the foreign turn's start event", func() bool {
 		started, _ := foreignTurnCounts(log.snapshot())
 		return started > 0
 	})
-	if _, err := s.Prompt(t.Context(), "refused"); !errors.Is(err, ErrForeignTurn) {
+	// A prompt that reached the agent would run a turn whose steps the gate
+	// holds, so the deadline is what makes it fail here rather than hang.
+	ctx, cancel := context.WithTimeout(t.Context(), logWatchdog)
+	defer cancel()
+	if _, err := s.Prompt(ctx, "refused"); !errors.Is(err, ErrForeignTurn) {
 		t.Fatalf("the prompt during a foreign turn returned %v", err)
 	}
+	release() // the fallback turn
 	waitUntil(t, "the foreign turn to end", func() bool { return !s.Snapshot().ForeignTurn })
 
 	attempts, _ := journaledAttemptsOf(t, s, w)
@@ -273,7 +288,7 @@ func TestPromptNotesRecordAWireRefusalAndAnInterjection(t *testing.T) {
 		t.Fatalf("%d attempts, want the turn, the interjection and the refused prompt", len(attempts))
 	}
 	assertAttempt(t, "the turn", attempts[0], journal.PromptKindPrompt, "do the steps", acp.StopEndTurn, "")
-	assertAttempt(t, "the accepted interjection", attempts[1], journal.PromptKindInterject, "BANANA", "", "")
+	assertAttempt(t, "the accepted interjection", attempts[1], journal.PromptKindInterject, "BANANA HOLD-FALLBACK", "", "")
 	assertAttempt(t, "the refused prompt", attempts[2], journal.PromptKindPrompt, "refused", "", promptEndForeignTurn)
 	if id := jsonString(attempts[1].prompt, "attempt"); !strings.HasPrefix(id, string(journal.PromptKindInterject)+"-") {
 		t.Fatalf("the interjection's attempt id is %q, want the journal's own", id)

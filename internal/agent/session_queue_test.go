@@ -198,7 +198,13 @@ func TestInterjectRefusedInEveryStrandedState(t *testing.T) {
 // Snapshot() reports (plan 021's leaf accessor, §3.3) — both read s.foreign
 // under s.mu — driven through a real grok foreign-turn fallback so the
 // property is checked against the wire, not just the field.
+//
+// The foreign turn is held by the fake agent's gate, as in
+// TestForeignTurnRefusalIsNotATurnThatFailed (issue #14): a fallback that ran
+// for a fixed window could end between the poll that saw the flag and the
+// accessor's read, and the two would then disagree on timing alone.
 func TestForeignTurnAccessorAgreesWithSnapshot(t *testing.T) {
+	release := fakeAgentGate(t)
 	s := startGrokScript(t, "grok-long-turn-fallback", true)
 	log := collect(t, s)
 	done := make(chan struct{})
@@ -209,9 +215,13 @@ func TestForeignTurnAccessorAgreesWithSnapshot(t *testing.T) {
 		}
 	}()
 	waitPromptOnWire(t, s)
-	if err := s.Interject(t.Context(), "BANANA"); err != nil {
+	// The interjection is the fallback turn's text, and the marker in it holds
+	// that turn until the gate's next byte.
+	if err := s.Interject(t.Context(), "BANANA HOLD-FALLBACK"); err != nil {
 		t.Fatalf("interject: %v", err)
 	}
+	release() // step1
+	release() // step2
 	<-done
 	waitUntil(t, "the foreign turn to start", func() bool { return s.Snapshot().ForeignTurn })
 	// ForeignTurn is the same flag Snapshot() reports, plan 021's leaf
@@ -220,6 +230,7 @@ func TestForeignTurnAccessorAgreesWithSnapshot(t *testing.T) {
 	if !s.ForeignTurn() {
 		t.Fatal("ForeignTurn() disagrees with Snapshot().ForeignTurn while a foreign turn is running")
 	}
+	release() // the fallback turn
 	waitUntil(t, "the foreign turn to end", func() bool { return !s.Snapshot().ForeignTurn })
 	if s.ForeignTurn() {
 		t.Fatal("ForeignTurn() disagrees with Snapshot().ForeignTurn once the foreign turn ended")
