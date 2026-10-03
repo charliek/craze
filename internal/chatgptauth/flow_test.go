@@ -874,7 +874,7 @@ func TestRedirectsRefused(t *testing.T) {
 	f.redirectPath = map[string]bool{"/v1/models": true}
 	signIn(t, f, dir)
 	src := newSource(dir)
-	if _, err := FetchModels(context.Background(), src); !errors.Is(err, errRedirect) {
+	if _, err := FetchModels(context.Background(), src, FetchOptions{ClientVersion: testPin}); !errors.Is(err, errRedirect) {
 		t.Fatalf("FetchModels = %v, want the redirect refused", err)
 	}
 	f.mu.Lock()
@@ -884,7 +884,7 @@ func TestRedirectsRefused(t *testing.T) {
 	if hits != 0 {
 		t.Fatalf("a redirect target was asked %d times", hits)
 	}
-	if _, err := FetchModels(context.Background(), src); err != nil {
+	if _, err := FetchModels(context.Background(), src, FetchOptions{ClientVersion: testPin}); err != nil {
 		t.Fatalf("FetchModels without the redirect = %v", err)
 	}
 }
@@ -908,7 +908,7 @@ func TestNonAPIHostRefused(t *testing.T) {
 	if _, _, _, err := ends.apiGET(context.Background(), "https://api.openai.com.evil.test/v1/models", "fake-bearer-value"); !errors.Is(err, errOffAPI) {
 		t.Fatalf("a bearer request to a look-alike host = %v, want errOffAPI", err)
 	}
-	if status, _, _, err := ends.apiGET(context.Background(), f.URL()+"/v1/models", "fake-bearer-value"); err != nil || status != 401 {
+	if status, _, _, err := ends.apiGET(context.Background(), f.URL()+"/v1/models?client_version="+testPin, "fake-bearer-value"); err != nil || status != 401 {
 		t.Fatalf("the API's own URL: %d, %v; want the fake's 401", status, err)
 	}
 	if _, _, _, _, m := other.countsAll(); m != 0 {

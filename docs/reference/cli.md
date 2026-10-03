@@ -1046,7 +1046,7 @@ Redirect address:
 Signed in to ChatGPT as you@example.com.
 You're using your ChatGPT plan.
 Eligible usage in this app uses your ChatGPT plan. Manage usage in your ChatGPT settings: https://chatgpt.com/settings/usage
-ChatGPT plan models: chatgpt/gpt-6-astra, chatgpt/gpt-5.6-sol, chatgpt/gpt-5.6-luna
+ChatGPT plan models: chatgpt/gpt-6.1-sol, chatgpt/gpt-6-astra, chatgpt/gpt-6-sol, chatgpt/gpt-6-luna, chatgpt/gpt-5.6-sol, …
 ```
 
 The two notice lines appear once, the first time an account signs in with

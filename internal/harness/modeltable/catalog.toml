@@ -116,8 +116,28 @@ driver = "chatgpt"
 # is the slug a new session with nothing remembered starts on when the
 # default model is not funded; a slug's table takes name, efforts,
 # default_effort and tool_profile.
+#
+# models_client_version (plan 034 §3.1, D-82) is the client_version every
+# request for the account's model list carries: the server gates the list on
+# it (none sent: 5 models; 0.0.1: none; 0.160.0: all 8, 2026-10-03), so craze
+# claims one version it has tested, not codex's and not a very high one. It is
+# required while the chatgpt provider ships here, and it is not a user key
+# (configuration.md does not list it). Bump it only when a model the plan lists
+# has a minimal_client_version above it AND that model has been verified live
+# (a tool loop, an image, a sub-agent: eval/ and the plan 034 V1 recipe). A
+# bump is a change to this file plus a release: update the value, run the
+# modeltable and chatgptauth tests (the fake server gates on the version),
+# note it in discovery/native-harness/08-decisions.md, and release. A cache
+# fetched with another version is refetched at the next sign-in, open or
+# refresh, and a reader drops a model above its own pin, so an older binary
+# never offers a newer pin's models.
+#
+# start is the ordered preference for a new session's model when nothing is
+# remembered and the default is unfunded: the first slug the account lists and
+# the sign-in funds wins, then the first alias that resolves.
 [chatgpt_defaults]
-start = "gpt-5.6-sol"
+models_client_version = "0.160.0"
+start = ["gpt-6.1-sol", "gpt-5.6-sol"]
 
 [chatgpt_defaults.models."gpt-6-astra"]
 default_effort = "low"

@@ -201,7 +201,7 @@ func TestShippedCatalogOwnerDecisions(t *testing.T) {
 	if c.Providers["chatgpt"].Driver != DriverChatGPT {
 		t.Fatalf("chatgpt's driver = %q", c.Providers["chatgpt"].Driver)
 	}
-	wantDefaults := ChatGPTDefaults{Start: "gpt-5.6-sol", Models: map[string]ChatGPTModelDefaults{"gpt-6-astra": {DefaultEffort: "low"}}}
+	wantDefaults := ChatGPTDefaults{Start: []string{"gpt-6.1-sol", "gpt-5.6-sol"}, startSet: true, ModelsClientVersion: "0.160.0", Models: map[string]ChatGPTModelDefaults{"gpt-6-astra": {DefaultEffort: "low"}}}
 	if !reflect.DeepEqual(c.ChatGPT, wantDefaults) {
 		t.Fatalf("[chatgpt_defaults] = %+v, want %+v", c.ChatGPT, wantDefaults)
 	}

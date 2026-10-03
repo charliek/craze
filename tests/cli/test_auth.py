@@ -307,7 +307,17 @@ NOTICE = (
     "Eligible usage in this app uses your ChatGPT plan. Manage usage in your ChatGPT settings: "
     "https://chatgpt.com/settings/usage\n"
 )
-PLAN_MODELS = "ChatGPT plan models: chatgpt/gpt-6-astra, chatgpt/gpt-5.6-sol, chatgpt/gpt-5.6-luna\n"
+PLAN_MODELS = (
+    "ChatGPT plan models: chatgpt/gpt-6.1-sol, chatgpt/gpt-6-astra, chatgpt/gpt-6-sol, chatgpt/gpt-6-luna, "
+    "chatgpt/gpt-5.6-sol, chatgpt/gpt-5.6-terra, chatgpt/gpt-5.6-luna, chatgpt/gpt-5.5\n"
+)
+# The client_version craze pins for the model list (plan 034 D-82): read from
+# the shipped catalog, so a bump there is not a second edit here.
+PIN = re.search(
+    r'^models_client_version = "([0-9.]+)"$',
+    (Path(__file__).resolve().parents[2] / "internal/harness/modeltable/catalog.toml").read_text(),
+    re.M,
+).group(1)
 HOUR = "An access token already issued may keep working for up to an hour, until it expires.\n"
 AUTHORIZE_URL = re.compile(r"http://127\.0\.0\.1:\d+/api/accounts/authorize\?\S+")
 WAITING = re.compile(r"craze is waiting for the browser to come back to (http://127\.0\.0\.1:(\d+)/auth/callback)\.")
@@ -321,6 +331,7 @@ def issuer() -> Iterator[FakeIssuer]:
     finally:
         fake.close()
         assert not fake.stray, f"craze asked the fake for paths it does not serve: {fake.stray}"
+        assert fake.models_without_version == 0, "craze asked for the model list without a client_version"
 
 
 def plan_env(fake: FakeIssuer) -> dict[str, str]:
@@ -554,6 +565,9 @@ def test_chatgpt_sign_in_by_paste_list_and_logout(craze_bin: Path, issuer: FakeI
     assert (exchange.client_id, exchange.redirect_uri, exchange.pkce_ok, exchange.granted) == (
         issuer.issue_client, CALLBACK, True, True)
     assert issuer.models_gets == 1
+    assert issuer.model_versions == [PIN]
+    cache = (native_dir() / "chatgpt-models.json").read_text()
+    assert f'"client_version": "{PIN}"' in cache and '"minimal_client_version": "0.153.0"' in cache, cache
 
     assert mode(auth_dir()) == 0o700
     for name in ("host-id", "chatgpt-client.json", "chatgpt.json"):

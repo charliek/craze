@@ -159,7 +159,7 @@ var (
 		return a, nil
 	}
 	fetchPlanModels = func(ctx context.Context, dir string) (*chatgptauth.Models, error) {
-		return chatgptauth.FetchModels(ctx, chatgptauth.Source(dir))
+		return chatgptauth.FetchModels(ctx, chatgptauth.Source(dir), chatgptauth.FetchOptions{ClientVersion: modeltable.ChatGPTModelsClientVersion()})
 	}
 	markNoticeShown = chatgptauth.MarkNoticeShown
 )

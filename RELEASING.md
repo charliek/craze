@@ -89,6 +89,9 @@ There is no refresh between releases.
   removed without retiring it fails. The history is **append-only**: a
   catalog change that deletes a line from it is refused in review (the test
   cannot catch a line deleted in the same commit as the model).
+- **Bump** the ChatGPT plan's `models_client_version` (`[chatgpt_defaults]`)
+  only when a model it lists needs a newer one and has been verified live; the
+  procedure is the comment above that table in the catalog.
 - `TestShippedCatalog` (part of `make test`, so of CI) checks the file: it
   rejects a malformed catalog, a `default_model` that is not a model, two
   aliases sharing an identity, a retired alias that is still a model, and a

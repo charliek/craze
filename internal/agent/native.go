@@ -1275,7 +1275,7 @@ func (s *nativeSession) refreshModelsLocked(src *chatgptauth.TokenSource, redact
 			case <-ctx.Done():
 			}
 		}()
-		if _, err := chatgptauth.RefreshModels(ctx, src, chatgptauth.ModelsMaxAge); err != nil && ctx.Err() == nil {
+		if _, err := chatgptauth.RefreshModels(ctx, src, chatgptauth.ModelsMaxAge, chatgptauth.FetchOptions{ClientVersion: modeltable.ChatGPTModelsClientVersion()}); err != nil && ctx.Err() == nil {
 			s.log.Note(modelsRefreshNote(err, redact))
 		}
 	}()

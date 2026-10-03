@@ -228,8 +228,10 @@ A **new** native session starts where you left off: a model or effort picked
 in any native session's [`/model`](#model-dialog) is remembered, and the next
 session with no `--model` starts on the newest remembered model whose provider
 has a key, at the effort last used on it. With no remembered model it can use,
-it starts on the model table's default, and if that has no key, on the first
-model that has one, with a note. `--model` picks the model for one start — at
+it starts on the model table's default; if that has no key and the ChatGPT plan
+is signed in, on the first of the plan's preferred models its account lists
+(`gpt-6.1-sol`, then `gpt-5.6-sol`); and otherwise on the first model that has a
+key, with a note. `--model` picks the model for one start — at
 the effort remembered for that model — and is never remembered itself. A
 resume is never moved by the memory: it keeps its transcript's model and
 effort, as above.
@@ -1609,7 +1611,7 @@ auth login chatgpt`](cli.md#signing-in-to-the-chatgpt-plan) inside the box.
   one-time notice follows — `You're using your ChatGPT plan.` and `Eligible
   usage in this app uses your ChatGPT plan. Manage usage in your ChatGPT
   settings: https://chatgpt.com/settings/usage` — and is not shown again. Then
-  craze fetches the plan's models (`ChatGPT plan models: chatgpt/gpt-5.6-sol,
+  craze fetches the plan's models (`ChatGPT plan models: chatgpt/gpt-6.1-sol,
   …`) and says `New sessions offer the ChatGPT plan's models; to use them in
   this conversation, /exit and run craze -c.` An account that did not allow
   plan usage gets `Signed in to ChatGPT as <email>, but ChatGPT plan usage is

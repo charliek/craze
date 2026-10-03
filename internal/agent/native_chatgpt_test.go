@@ -181,8 +181,8 @@ func writePlanAccount(t *testing.T, dir string) {
 		t.Fatal(err)
 	}
 	parallel := true
-	models, err := json.Marshal(chatgptauth.Models{Version: 1, Subject: planSubject, ClientID: planClient, FetchedAt: time.Now().UTC(),
-		Models: []chatgptauth.Model{{Slug: "gpt-5.6-sol", DisplayName: "GPT-5.6 Sol", ContextWindow: 272000,
+	models, err := json.Marshal(chatgptauth.Models{Version: 1, Subject: planSubject, ClientID: planClient, ClientVersion: modeltable.ChatGPTModelsClientVersion(), FetchedAt: time.Now().UTC(),
+		Models: []chatgptauth.Model{{Slug: "gpt-5.6-sol", MinClientVersion: "0.144.0", DisplayName: "GPT-5.6 Sol", ContextWindow: 272000,
 			Efforts: []string{"low", "medium", "high", "ultra"}, DefaultEffort: "medium", InputModalities: []string{"text"},
 			Priority: 0, ParallelToolCalls: &parallel}}})
 	if err != nil {
@@ -196,7 +196,10 @@ func writePlanAccount(t *testing.T, dir string) {
 // TestChatGPTFilesAreOneContract (plan 033 X120): the sign-in's files have
 // one name everywhere — chatgptauth writes them, modeltable reads them for
 // the plan's models and funding, and the file tools refuse the directory —
-// and the model list chatgptauth writes is one the table reads.
+// and the model list chatgptauth writes is one the table reads — its
+// client_version and each model's minimal_client_version included (plan 034
+// §3.1): the table drops a model whose minimum is above its own pin, and keeps
+// one at it, and chatgptauth's tests' pin is the shipped catalog's.
 func TestChatGPTFilesAreOneContract(t *testing.T) {
 	dir := t.TempDir()
 	for _, pair := range [][2]string{
@@ -220,6 +223,30 @@ func TestChatGPTFilesAreOneContract(t *testing.T) {
 	if err != nil || r.Auth != modeltable.AuthSignIn || r.ParallelToolCalls == nil || !*r.ParallelToolCalls ||
 		strings.Join(r.Efforts, ",") != "low,medium,high" {
 		t.Fatalf("the model chatgptauth's list names = %+v, %v", r, err)
+	}
+
+	// The new fields, written by chatgptauth's own types, are the ones the
+	// table reads: a model above the pin is not offered, one at the pin is.
+	list, err := json.Marshal(chatgptauth.Models{Version: 1, Subject: planSubject, ClientID: planClient,
+		ClientVersion: modeltable.ChatGPTModelsClientVersion(), FetchedAt: time.Now().UTC(),
+		Models: []chatgptauth.Model{
+			{Slug: "gpt-at-the-pin", ContextWindow: 1000, Efforts: []string{"low"}, MinClientVersion: modeltable.ChatGPTModelsClientVersion()},
+			{Slug: "gpt-above-the-pin", ContextWindow: 1000, Efforts: []string{"low"}, MinClientVersion: "999.0.0", Priority: 1},
+		}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(chatgptauth.ModelsFile(dir), list, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if tbl, err = modeltable.Load(dir); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := tbl.Models["chatgpt/gpt-at-the-pin"]; !ok {
+		t.Fatal("a model at the pin is not offered")
+	}
+	if _, ok := tbl.Models["chatgpt/gpt-above-the-pin"]; ok {
+		t.Fatal("a model above the pin is offered: the table does not read chatgptauth's minimal_client_version")
 	}
 }
 
@@ -760,7 +787,7 @@ func TestNativeModelDialogListsThePlanInTheAccountsOrder(t *testing.T) {
 		models = append(models, chatgptauth.Model{Slug: m[0], DisplayName: m[1], ContextWindow: 272000,
 			Efforts: []string{"low", "medium", "high"}, InputModalities: []string{"text"}, Priority: i})
 	}
-	list, err := json.Marshal(chatgptauth.Models{Version: 1, Subject: planSubject, ClientID: planClient, FetchedAt: time.Now().UTC(), Models: models})
+	list, err := json.Marshal(chatgptauth.Models{Version: 1, Subject: planSubject, ClientID: planClient, ClientVersion: modeltable.ChatGPTModelsClientVersion(), FetchedAt: time.Now().UTC(), Models: models})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -188,10 +188,11 @@ type Table struct {
 	// another account in a running process does not fund the first
 	// account's list with the second's sign-in.
 	discoveredFor Account
-	// chatgptStart is the alias [chatgpt_defaults] start names, which
-	// StartModel prefers among the funded models when the default is not
-	// funded (plan 033 §3.11); "" for none.
-	chatgptStart string
+	// chatgptStart is the aliases [chatgpt_defaults] start names, in order of
+	// preference: StartModel takes the first that resolves among the funded
+	// models when the default is not funded (plan 033 §3.11, plan 034 Q4);
+	// nil for none.
+	chatgptStart []string
 }
 
 // Provider is one provider: shipped, overridden in providers.toml, or the

@@ -995,7 +995,7 @@ func TestRefusalsRepeatOnlyKnownCodes(t *testing.T) {
 		f.mu.Lock()
 		f.modelsErr = code
 		f.mu.Unlock()
-		_, err := FetchModels(context.Background(), newSource(dir))
+		_, err := FetchModels(context.Background(), newSource(dir), FetchOptions{ClientVersion: testPin})
 		if err == nil {
 			t.Fatal("FetchModels succeeded against a refusal")
 		}

@@ -303,11 +303,11 @@ func LoadWith(dir string, cat *Catalog) (*Table, error) {
 // discover records what withDiscovered added to cat, the catalog t was
 // merged over: each discovered model still in t, by its rank, as
 // OriginDiscovered unless the user's files overrode it; the account the list
-// was bound to; and the start alias [chatgpt_defaults] names. A nil disc
+// was bound to; and the start aliases [chatgpt_defaults] names, in order. A nil disc
 // discovered nothing.
 func (t *Table) discover(disc *discovered, cat *Catalog) {
-	if s := cat.ChatGPT.Start; s != "" {
-		t.chatgptStart = ChatGPTAliasPrefix + s
+	for _, s := range cat.ChatGPT.Start {
+		t.chatgptStart = append(t.chatgptStart, ChatGPTAliasPrefix+s)
 	}
 	if disc == nil {
 		return
