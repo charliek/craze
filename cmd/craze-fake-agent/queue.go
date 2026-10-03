@@ -282,8 +282,17 @@ const strandFallbackFor = 400 * time.Millisecond
 // succeeded where the test required a refusal. Nothing asserts that this turn
 // is short, and every test that waits for it to end waits on the event, so a
 // generous window costs those tests only the time they would have spent
-// polling anyway.
+// polling anyway. It is still a window: a test that must act during the turn
+// holds it with holdFallbackMarker instead.
 const idleFallbackFor = 3 * time.Second
+
+// holdFallbackMarker in the text a fallback turn is minted from — the
+// interjection that becomes grok's own prompt — holds that turn, with
+// CRAZE_FAKE_GATE set, until the gate's next byte instead of for its fixed
+// window: a foreign turn in progress for exactly as long as the test needs it,
+// with no window to fit into (plan 035 P12, issue #14). Without the gate the
+// marker changes nothing.
+const holdFallbackMarker = "HOLD-FALLBACK"
 
 // endTurn writes one turn's ending: the turn stops being the running one, the
 // queue broadcast says so, and turn_completed, prompt_complete and the RPC
@@ -479,7 +488,7 @@ func (s *server) startFallback(text string, runFor time.Duration) {
 
 func (s *server) runFallback(id, text string, runFor time.Duration) {
 	s.say("noted: " + text)
-	time.Sleep(runFor)
+	s.holdFallback(text, runFor)
 	s.mu.Lock()
 	s.fallbackOn = false
 	s.fallbackID, s.fallbackText = "", ""
@@ -488,4 +497,19 @@ func (s *server) runFallback(id, text string, runFor time.Duration) {
 	// fallback: turn_completed is the whole ending.
 	s.turnCompletedID(fakeSessionID, id, acp.StopEndTurn)
 	s.kickQueue()
+}
+
+// holdFallback is how long the fallback turn holds the session: until the
+// gate's byte when its text carries holdFallbackMarker and CRAZE_FAKE_GATE is
+// set, and runFor otherwise. The gate is the shared reader long-turn steps
+// wait on too, so a test holding both writes one byte per step and then one
+// for the fallback.
+func (s *server) holdFallback(text string, runFor time.Duration) {
+	if strings.Contains(text, holdFallbackMarker) {
+		if gate := s.gate(); gate != nil {
+			<-gate
+			return
+		}
+	}
+	time.Sleep(runFor)
 }
