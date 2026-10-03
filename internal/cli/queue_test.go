@@ -1183,21 +1183,174 @@ func TestASignalWhileTheDrainIsHeldEndsTheRunAtOnce(t *testing.T) {
 	}
 }
 
-// TestASignalWaitsForTheForeignTurnsEndedLine is SF-122 on a forced schedule.
-// A session clears its foreign-turn flag before it publishes the turn's ended
-// event (agent's onForeignTurn), and the wait after a signal used to read the
-// flag alone: a look in that gap found the stop done and the agent's turn over,
-// and the run exited with the turn's closing bracket not yet published — V2's
-// sigint-foreign-turn-holds-the-drain, one line short.
+// foreignEndHold is SF-122's gap, held open where a test can see it. A live
+// session clears its foreign-turn flag before it publishes the turn's ended
+// event (agent's onForeignTurn), and a run that exits in between leaves the
+// agent's turn on stdout started and never ended.
 //
-// The gap is held open here. The cancel the stop writes ends the agent's turn on
-// a goroutine of its own, as the agent's own notification would, and that
-// goroutine parks between the flag and the event. Cancel returns, so the stop is
-// done and the run is told so while the event is parked. The run reads on until
-// the event is released, and then exits 1 with the turn bracketed exactly once.
+// The cancel a signal's stop writes ends the agent's turn on a goroutine of its
+// own, as the agent's own notification would, and that goroutine parks in the
+// gap: the flag is down and the ended event is held. Cancel returns only once it
+// has parked, so by the time the run is told its stop is done, the flag is
+// already down and the event already held. kept is closed the first time the
+// run, told that, looks again and keeps waiting (promptOpts.keptWaiting): the
+// very look at which a run that exits on the flag alone exits instead.
+type foreignEndHold struct {
+	out *cutWriter
+	// kept is closed the first time the run, its stop done, keeps waiting.
+	kept chan struct{}
+	// done is the run's result.
+	done chan error
+	// release lets the held event go. It is idempotent.
+	release func()
+}
+
+// holdForeignEnd arms the hold on s and o and starts run on a goroutine of its
+// own. It arms before the run starts, so nothing the run reads changes under it.
+//
+// Its cleanup never leaves the run behind, whatever the test got to. It lets the
+// held event go, cuts stdout so the run's next write fails whatever the run is
+// waiting for, ends the agent's turn (which is that next write) and waits for
+// the run to return. It is registered after the stub's own, so it runs first:
+// the session is still open while it waits, and no ending it releases is
+// dropped by a close that came first, which would leave the run waiting out its
+// budget on a primary that is never closed.
+func holdForeignEnd(t *testing.T, o *promptOpts, s *stubSession, run func() error) *foreignEndHold {
+	t.Helper()
+	h := &foreignEndHold{out: &cutWriter{}, kept: make(chan struct{}), done: make(chan error, 1)}
+	o.stdout = h.out
+	keep := sync.OnceFunc(func() { close(h.kept) })
+	o.keptWaiting = func(signalDone bool) {
+		if signalDone {
+			keep()
+		}
+	}
+	parked, release := make(chan struct{}), make(chan struct{})
+	park := sync.OnceFunc(func() { close(parked) })
+	h.release = sync.OnceFunc(func() { close(release) })
+	s.mu.Lock()
+	s.beforeForeignEmit = func(running bool) {
+		if !running {
+			park()
+			<-release
+		}
+	}
+	s.onCancel = func() {
+		go s.setForeign(false)
+		<-parked
+	}
+	s.mu.Unlock()
+
+	returned := make(chan struct{})
+	go func() {
+		defer close(returned)
+		h.done <- run()
+	}()
+	t.Cleanup(func() {
+		h.release()
+		h.out.cut()
+		s.setForeign(false)
+		select {
+		case <-returned:
+		case <-time.After(stubWatchdog):
+			t.Errorf("the run was still going %s after its test ended", stubWatchdog)
+		}
+	})
+	return h
+}
+
+// waitKept returns once the run, its stop done, has looked again and kept
+// waiting, and fails the test if the run exits first: exiting there is the bug.
+// The watchdog is only how long a run that does neither is given.
+func (h *foreignEndHold) waitKept(t *testing.T) {
+	t.Helper()
+	select {
+	case <-h.kept:
+	case err := <-h.done:
+		t.Fatalf("the run exited (%#v) before the agent's own turn ended on its stream\n%s", err, h.out.String())
+	case <-time.After(stubWatchdog):
+		t.Fatal("the run neither exited nor kept waiting with its stop done")
+	}
+}
+
+// exitsOne releases the held event and checks that the run then exits 1, with
+// the agent's own turn bracketed exactly once on stdout.
+func (h *foreignEndHold) exitsOne(t *testing.T) {
+	t.Helper()
+	h.release()
+	select {
+	case err := <-h.done:
+		var ee *exitError
+		if !errors.As(err, &ee) || ee.code != 1 {
+			t.Fatalf("err %v", err)
+		}
+	case <-time.After(stubWatchdog):
+		t.Fatal("the agent's turn ended and the signalled run did not exit")
+	}
+	var started, ended int
+	for _, ev := range parseJSONLines(t, h.out.String()) {
+		if ev.m["type"] != "foreign_turn" {
+			continue
+		}
+		switch ev.m["event"] {
+		case "started":
+			started++
+		case "ended":
+			ended++
+		}
+	}
+	if started != 1 || ended != 1 {
+		t.Fatalf("the agent's own turn must be bracketed once: %d started, %d ended\n%s", started, ended, h.out.String())
+	}
+}
+
+// cutWriter is stdout that can be cut: once it is, every write fails. A run
+// whose write fails returns at once, whatever it was waiting for, which is how a
+// test's cleanup ends a run it has given up on. Nothing else can be counted on:
+// the primary is never closed (agent.EventLog.Primary), and a signalled run's
+// own bound is a budget these tests put out of reach.
+type cutWriter struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+	off bool
+}
+
+var errStdoutCut = errors.New("stdout cut")
+
+func (w *cutWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.off {
+		return 0, errStdoutCut
+	}
+	return w.buf.Write(p)
+}
+
+func (w *cutWriter) cut() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.off = true
+}
+
+func (w *cutWriter) String() string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.buf.String()
+}
+
+// TestASignalWaitsForTheForeignTurnsEndedLine is SF-122 on a forced schedule.
+// The wait after a signal used to read the session's foreign-turn flag alone: a
+// look in the gap between the flag and the ended event (foreignEndHold) found
+// the stop done and the agent's turn over, and the run exited with the turn's
+// closing bracket not yet published — V2's sigint-foreign-turn-holds-the-drain,
+// one line short.
+//
+// Here the drain is held behind the agent's turn when the signal lands. The run,
+// told its stop is done with the ended event held, must keep waiting; once the
+// event is released it exits 1 with the turn bracketed exactly once.
 func TestASignalWaitsForTheForeignTurnsEndedLine(t *testing.T) {
-	var stdout, stderr bytes.Buffer
-	o := stubOpts(&stdout, &stderr)
+	var stderr bytes.Buffer
+	o := stubOpts(&bytes.Buffer{}, &stderr)
 	// A budget nothing in this test may reach: the ended event is what ends the
 	// wait.
 	o.foreignMax = time.Hour
@@ -1208,8 +1361,7 @@ func TestASignalWaitsForTheForeignTurnsEndedLine(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	done := make(chan error, 1)
-	go func() { done <- runChain(o, ctx, s, "first", "follow-up") }()
+	h := holdForeignEnd(t, o, s, func() error { return runChain(o, ctx, s, "first", "follow-up") })
 	waitFor(t, "the drain to be held with the row still queued", func() bool {
 		eng := s.engine()
 		if eng == nil {
@@ -1218,56 +1370,49 @@ func TestASignalWaitsForTheForeignTurnsEndedLine(t *testing.T) {
 		st := eng.State()
 		return st.Prompted && st.Activity == engine.ActivityIdle && len(st.Queue) == 1
 	})
-	parked, release := make(chan struct{}), make(chan struct{})
-	unpark := sync.OnceFunc(func() { close(release) })
-	// A test that fails with the event parked still lets it go, so the run it
-	// leaves behind can end.
-	t.Cleanup(unpark)
-	s.mu.Lock()
-	s.beforeForeignEmit = func(running bool) {
-		if !running {
-			close(parked)
-			<-release
-		}
-	}
-	s.onCancel = func() { go s.setForeign(false) }
-	s.mu.Unlock()
 	cancel()
-	select {
-	case <-parked:
-	case <-time.After(stubWatchdog):
-		t.Fatal("the cancel never ended the agent's own turn")
-	}
-	waitFor(t, "the stop's cancel to return", func() bool { return s.cancelsReturned() == 1 })
+	h.waitKept(t)
+	h.exitsOne(t)
+}
 
-	// From here the stop is done, the flag is down and the ended event is parked.
-	// A run that exits on the flag does it now. The look is bounded, and is not
-	// what makes this test pass: a run that waits for the event waits however
-	// long it is held, so this is only how long the other kind is given to show
-	// itself.
-	select {
-	case err := <-done:
-		t.Fatalf("the run exited (%#v) before the agent's own turn ended on its stream\n%s", err, stdout.String())
-	case <-time.After(200 * time.Millisecond):
+// TestASignalThatSettlesARefusedClaimWaitsForTheForeignTurnsEndedLine is the
+// other way into the same gap (astra's r2 on C2, finding 2): an ending of the
+// run's own. The run's claim is refused because the agent is running a turn of
+// its own, and parked to be taken again. A signal's stop settles it, and the
+// stop's cancel ends the agent's turn with its ended event held. That settlement
+// is the chain's last ending, and a run that returned it at once would exit with
+// the agent's turn started on stdout and never ended. The run holds it, waits
+// for the turn's closing bracket as every wait after a signal does, and then
+// returns what the ending said: exit 1, with no word about a claim it gave up
+// on, because it gave up on none.
+func TestASignalThatSettlesARefusedClaimWaitsForTheForeignTurnsEndedLine(t *testing.T) {
+	var stderr bytes.Buffer
+	o := stubOpts(&bytes.Buffer{}, &stderr)
+	// A budget nothing in this test may reach: the ended event is what ends the
+	// wait.
+	o.foreignMax = time.Hour
+	s := newStubSession(t, endTurn())
+	s.refuseWhileForeign = true
+	// The agent is running a turn of its own before the run starts, so its
+	// started line is the first thing the run reads, and the first claim is
+	// refused.
+	s.setForeign(true)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	h := holdForeignEnd(t, o, s, func() error { return runChain(o, ctx, s, "go") })
+	waitFor(t, "the claim to be parked waiting out the agent's own turn", func() bool {
+		eng := s.engine()
+		return eng != nil && eng.State().Waiting
+	})
+	cancel()
+	h.waitKept(t)
+	h.exitsOne(t)
+	if strings.Contains(stderr.String(), "kept the session") {
+		t.Fatalf("a signalled run gave up on no claim: %q", stderr.String())
 	}
-	unpark()
-	select {
-	case err := <-done:
-		var ee *exitError
-		if !errors.As(err, &ee) || ee.code != 1 {
-			t.Fatalf("err %v", err)
-		}
-	case <-time.After(stubWatchdog):
-		t.Fatal("the agent's turn ended and the signalled run did not exit")
-	}
-	var ended int
-	for _, ev := range parseJSONLines(t, stdout.String()) {
-		if ev.m["type"] == "foreign_turn" && ev.m["event"] == "ended" {
-			ended++
-		}
-	}
-	if ended != 1 {
-		t.Fatalf("the agent's own turn must be bracketed once: %d ended lines\n%s", ended, stdout.String())
+	if got := s.sent(); len(got) != 1 {
+		t.Fatalf("the engine claims nothing while the agent holds the session: %v", got)
 	}
 }
 
