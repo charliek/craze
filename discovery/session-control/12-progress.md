@@ -4879,7 +4879,7 @@ lane work. What it inherits:
 Plan 035 readies S3 (the shed lane) and pulls in the flakes and minor bugs found
 in six days of CI (09-27 to 10-02). It is cut into two PRs, PR 1 first, so
 that PR 2's many CI runs are not spent diagnosing known flakes (P1). The plan
-lives outside the repo; its amendments (X1–X17 for PR 1) are the truth.
+lives outside the repo; its amendments (X1–X20 for PR 1) are the truth.
 
 ### PR 1 — flakes and minor bugs
 
@@ -4898,7 +4898,7 @@ repro, never retried (P13).
   SIGKILL before the reap stays unconditional. Evidence: the darwin stub test
   is red under the old rule on the mac-mini, and a probe confirmed the exported
   `P_WEXIT` bit live (X9).
-- **C2–C2r3 — SF-122** (`craze prompt --json` exiting before its last event).
+- **C2–C2r4 — SF-122** (`craze prompt --json` exiting before its last event).
   `readChain` now tracks `foreignOpen` (set by a running `EventForeignTurn`,
   cleared by an ended one), and the signal exit waits for it, still bounded by
   `signalUntil`. A forced ordering (a seam between storing the flag and
@@ -4980,22 +4980,26 @@ documents the marker.
 03:35Z) across every CI run since: about 25 `test-race` runs on both OSes, on
 main and the plan 032/033 PR branches (the last failure, run 36957765188,
 predates the fix). If this PR's own CI shows one, it is reopened. **SF-122 is
-closed** by C2–C2r3.
+closed** by C2–C2r4; its remaining microsecond window is SF-137.
 
 **Review rounds.** C1: astra, no findings (the XNU facts it checked: the
 exported `P_WEXIT` is synthesized from `P_LEXIT`; signals to such a process are
 discarded anyway; pid equals pgid; the tests are non-vacuous). C2: astra r2
 found three (a signal-induced terminal ending bypassed the wait, the test's
 negative control was not deterministic, and a failed cleanup could leave
-`runChain` alive for `foreignMax`), fixed in C2r; r3 found two in the held
-state (later events replacing the held failure, and a permission rejected
-during the held wait still exiting 0), fixed in C2r2 (held means draining:
-later endings are not results, `finishRun`'s precedence, and a rejection
-promotes a held nil to exit 1); r4 found no production defect and one test
-fixture that published the foreign turn's `started` with the session's flag
-still down, an order the session never produces, fixed in C2r3 (the turn now
-opens, flag first, inside the successor's `Begin`, the one window where r3's
-race is reachable); r6 found nothing in C2r3. C3–C5 change no production
+`runChain` alive for `foreignMax`), fixed in C2r; r3 found two in the held state
+(later events replacing the held failure, and a permission rejected during the
+held wait still exiting 0), fixed in C2r2 (held means draining: later endings
+are not results, `finishRun`'s precedence, and a rejection promotes a held nil
+to exit 1); r4 found no production defect and one test fixture that published
+the foreign turn's `started` with the session's flag still down, an order the
+session never produces, fixed in C2r3 (the turn now opens, flag first, inside
+the successor's `Begin`, the one window where r3's race is reachable); r6 found
+nothing in C2r3. On the PR, CodeRabbit found the held branch's last gap: the
+session raises its flag before it publishes `started`, so the chain's ending can
+be read first with `foreignOpen` still false; C2r4 holds on either half
+(`foreignOpen` or the session's flag), as the loop's exit check already did, and
+its implementer proved the residual SF-137 records. C3–C5 change no production
 behaviour beyond a test seam, so one sol batch (r5) reviewed them: no defect
 introduced, and one assertion gap older than C4, fixed in C5r. The branch-level
 sol review (r7) found no production regression and three P3s: two test-lifecycle
