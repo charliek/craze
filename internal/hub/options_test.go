@@ -244,6 +244,12 @@ func TestFindNeverStartsAHub(t *testing.T) {
 	})
 	t.Run("a hub that answers", func(t *testing.T) {
 		noCommand(t)
+		// The hub runs in this process, so its record carries this test
+		// binary's pid and start token: were both hellos starved past their
+		// timeout, Find's step 3 would signal the test process itself. A token
+		// that cannot be checked here makes the hub unverifiable, which step 3
+		// reports and never signals (r2, as the CLI's helper blanks its token).
+		setVar(t, &startToken, func(int) (string, error) { return "", errors.New("no scope here") })
 		env := testEnv(t)
 		rn := runWith(t, env, quiet(), optionsCreates(func(func(string, ...any)) protocol.CreateOptionsResult { return cannedOptions }))
 		line := rn.line(t)
