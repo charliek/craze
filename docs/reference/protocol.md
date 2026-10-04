@@ -1924,13 +1924,14 @@ ours() {
     *) false ;;
   esac
 }
-# pids [fake]: the pid of each process of the recipe's.
-pids() { ps -A -o pid= -o args= | while read -r p a; do ours "$a" "$1" && echo "$p"; done; }
+# pids [fake]: the pid of each process of the recipe's. (-ww: whole command
+# lines, which Linux ps cuts to $COLUMNS when that is set.)
+pids() { ps -A -ww -o pid= -o args= | while read -r p a; do ours "$a" "$1" && echo "$p"; done; }
 # term [fake]: SIGTERM each, its command line checked again just before.
-term() { for p in $(pids "$1"); do ours "$(ps -p "$p" -o args=)" "$1" && kill "$p" 2>/dev/null; done; }
+term() { for p in $(pids "$1"); do ours "$(ps -ww -p "$p" -o args=)" "$1" && kill "$p" 2>/dev/null; done; }
 # left: what is still here, one line each.
 left() {
-  ps -A -o pid= -o args= | while read -r p a; do ours "$a" fake && echo "process $p: $a"; done
+  ps -A -ww -o pid= -o args= | while read -r p a; do ours "$a" fake && echo "process $p: $a"; done
   for f in "$d"/home/.cache/craze/hosts/*.json "$d"/home/.cache/craze/hubs/*.json; do
     [ -f "$f" ] && echo "file $f"
   done
