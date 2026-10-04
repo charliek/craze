@@ -335,18 +335,48 @@ func readConnectProviders(gen uint64, dir string, getenv func(string) string) te
 // the TUI's own seams, and answered for the opening that asked
 // (connectRowMsg). Nothing is asked on an ACP session, whose dialog never has
 // the row, or with no native directory.
-func (m Model) askConnectRow() (Model, tea.Cmd) {
-	if m.dialog != dialogModel || !m.connectOffered() || m.nativeDir == "" {
+//
+// refresh is the dialog opening with a session that takes up models while it
+// runs (canRefreshModels; plan 034 §3.4): the session is asked to, in the same
+// gated call and before the row's question, so a key saved or a plan signed in
+// to since the session opened — by craze auth in another terminal, say — is in
+// the list the box draws once the catalog delta lands (recompute re-renders
+// the box). What the refresh came to is not said: the list is the answer, and
+// a refresh that failed leaves the list as it was.
+func (m Model) askConnectRow(refresh bool) (Model, tea.Cmd) {
+	ask := m.dialog == dialogModel && m.connectOffered() && m.nativeDir != ""
+	if !ask && !refresh {
 		return m, nil
 	}
 	gen, dir, getenv := m.mdlg.gen, m.nativeDir, m.nativeEnv
-	return m.connectCall(func() tea.Msg {
+	row := func() tea.Msg {
 		infos, err := modeltable.Providers(dir, getenv)
 		// A providers.toml that cannot be read says nothing about which
 		// providers are connected: no row, and a typed /connect names the
 		// problem.
 		return connectRowMsg{gen: gen, show: err == nil && firstUnconnected(infos) >= 0}
-	}, connectRowMsg{gen: gen})
+	}
+	if !refresh {
+		return m.connectCall(row, connectRowMsg{gen: gen})
+	}
+	return m.run(gateDeadline,
+		func(ctx context.Context, b backend.Backend) (any, error) {
+			_, _ = refreshModelsCall(m.nativeDir)(ctx, b)
+			if !ask {
+				return nil, nil
+			}
+			return row(), nil
+		},
+		func(m Model, r gateReply) (Model, tea.Cmd) {
+			if !ask {
+				return m, nil
+			}
+			msg, ok := r.result.(connectAnswer)
+			if !ok || r.err != nil {
+				msg = connectRowMsg{gen: gen}
+			}
+			return m.applyConnect(msg)
+		})
 }
 
 // firstUnconnected is the index of the first provider with no usable key —
@@ -394,12 +424,6 @@ func storeErrText(err error, key string) string {
 		return "the key was not saved"
 	}
 	return text
-}
-
-// connectedNote is the notice after a save (plan 031 §3.9): no key material,
-// and what P8 means for this conversation.
-func connectedNote(name string) string {
-	return "Connected " + name + ". New sessions offer its models; to use them in this conversation, /exit and run craze -c."
 }
 
 // brokenKeyNote says p's stored key cannot be used, by the rule and never
@@ -457,10 +481,16 @@ func (m Model) applyConnect(msg connectAnswer) (Model, tea.Cmd) {
 			m.addError("/connect: " + msg.err)
 			return m, nil
 		}
-		m.addNote(connectedNote(msg.name))
-		for _, n := range msg.notes {
-			m.addNote(n)
-		}
+		// The session is asked to take the key's models up (plan 034 §3.4),
+		// and the notice says what came of it; the other providers' notes
+		// follow it, as they always have.
+		return m.thenRefreshModels(func(m Model, r *agent.ModelsRefresh) Model {
+			m.addNote(connectedNote(msg.name, r))
+			for _, n := range msg.notes {
+				m.addNote(n)
+			}
+			return m
+		})
 	case connectRowMsg:
 		if m.dialog == dialogModel && m.mdlg.gen == msg.gen {
 			m.mdlg.connect = msg.show

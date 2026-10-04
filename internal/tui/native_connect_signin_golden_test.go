@@ -24,7 +24,7 @@ func signInConfig(t *testing.T, planOff bool) Config {
 	t.Helper()
 	ws := frameWorkspace(t)
 	dir, getenv := signInFixture(t, planOff)
-	return Config{Session: nativePickerSession(t, ws), Theme: "tokyo-night", Workspace: ws, Yolo: true, NativeDir: dir, Getenv: getenv}
+	return Config{Session: nativePickerSessionAt(t, ws, dir), Theme: "tokyo-night", Workspace: ws, Yolo: true, NativeDir: dir, Getenv: getenv}
 }
 
 // runSignInFrame runs keys over signInConfig at cols x rows, in every

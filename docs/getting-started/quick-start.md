@@ -159,8 +159,8 @@ needs a key for at least one:
     With no key for any provider, the session refuses to start and says how to
     give it one. `/model` switches models, listing those of providers that
     have a key (with a `Connect a provider…` row while some provider has none;
-    `/connect` stores a key from inside the TUI, and a newly connected provider
-    is offered by new sessions). `--model <alias>` starts on one.
+    `/connect` stores a key from inside the TUI, and a newly connected provider's
+    models are in `/model` at once, and in new sessions). `--model <alias>` starts on one.
 
 `craze auth logout fireworks` removes a stored key. Keys, and the two files you
 can use to change or add models, are in [Native models and

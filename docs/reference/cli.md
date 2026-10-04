@@ -1096,9 +1096,11 @@ Every sign-in — `craze auth login chatgpt` and the TUI's
 `native/logs/signin.log`, one JSON line per thing that happened, from the
 attempt's start to its one outcome and the model list fetched after it: the
 place to look when a sign-in did not finish. The `logs` directory is 0700 and
-the file 0600. At 1 MiB the file is rotated once, to `signin.log.1`, so the
-two hold the last 2 MiB at most. Several crazes may write it at once; each line
-is appended whole, under a lock.
+the file 0600. craze rotates the file once, to `signin.log.1` (replacing
+the one before), when a line would take it past 1 MiB, so a log of craze's own
+writing stays near 2 MiB across the two. A file something else grew past that
+size is rotated whole when craze next writes, so the two can then hold more.
+Several crazes may write it at once; each line is appended whole, under a lock.
 
 The log is **value-free**: a record holds the time, which surface wrote it
 (`cli` or `tui`), the attempt's id — 8 random hex digits, the same on every
@@ -1134,8 +1136,11 @@ help.
 | `models_fetched`, `models_empty`, `models_failed` | The plan's model list after a sign-in: fetched (`models`, how many), an empty reply that kept the list before, or the failure (`step`, `status`, `code`, `class`). | `client_version`: the version craze asks for the list with. |
 
 Every attempt has exactly one of `signed_in`, `declined`, `failed` and
-`cancelled`. A record may also carry `elapsed_ms` — the time since its attempt
-began, or how long a model fetch took — and `dropped`, how many records were
+`cancelled`. A record may also carry `elapsed_ms` and `dropped`. `elapsed_ms` is
+the time since its attempt began on an attempt's own events (`begin`,
+`redirect_received`, `signed_in`, `failed` and the rest), but on the model
+events (`models_fetched`, `models_empty`, `models_failed`) it is how long that
+fetch itself took, which is not measured from the attempt's start. `dropped` is how many records were
 lost just before it because the log was busy. A log craze cannot keep — its
 directory a symbolic link, writable by other users or another user's, or the
 file not a plain file of its own — is one `note:` on stderr as the command

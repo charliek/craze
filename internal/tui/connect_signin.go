@@ -16,6 +16,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 
+	"github.com/charliek/craze/internal/agent"
 	"github.com/charliek/craze/internal/chatgptauth"
 	"github.com/charliek/craze/internal/harness/modeltable"
 	"github.com/charliek/craze/internal/signinlog"
@@ -216,9 +217,6 @@ const (
 	signedInPrefix   = "Signed in to ChatGPT"
 	planUsageOffText = ", but ChatGPT plan usage is off: the account did not allow craze to use its ChatGPT plan, so the plan's models cannot be used."
 	planUsageOffHow  = "To turn it on, sign in again with /connect and allow ChatGPT plan usage when ChatGPT asks."
-	// signedInSessionNote is what a sign-in means for this conversation
-	// (plan 031's rule, P8): the connectedNote of a key's save, for the plan.
-	signedInSessionNote = "New sessions offer the ChatGPT plan's models; to use them in this conversation, /exit and run craze -c."
 )
 
 // signInAttempt is the part of a chatgptauth.Attempt the step drives: a seam,
@@ -1067,7 +1065,13 @@ func (m Model) applySignIn(msg connectAnswer) (Model, tea.Cmd) {
 		default:
 			m.addNote("ChatGPT plan models: " + sanitizeLine(strings.Join(msg.aliases, ", ")))
 		}
-		m.addNote(signedInSessionNote)
+		// The plan's list is written (or could not be): the session is asked
+		// to take it up (plan 034 §3.4), and the last note says what came of
+		// it.
+		return m.thenRefreshModels(func(m Model, r *agent.ModelsRefresh) Model {
+			m.addNote(signedInSessionNote(r))
+			return m
+		})
 	}
 	return m, nil
 }

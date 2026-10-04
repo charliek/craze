@@ -1564,8 +1564,13 @@ provider has no key.
 - **`Enter` stores the key.** An empty key, one shorter than 8 bytes, one that
   overlaps the redaction marker, or one over 8 KiB is refused in the field —
   `Not saved: …`, naming the rule, never the key — the field is emptied, and
-  nothing is written. Otherwise the box closes and the transcript says
-  `Connected <Name>. New sessions offer its models; to use them in this
+  nothing is written. Otherwise the box closes, the key is stored, and the
+  running session is asked to take up what it funds ([below](#connect)).
+  The transcript says `Connected <Name>. Its models are in /model now.` — or
+  `Connected <Name>. Its models will be in /model after this turn.` when a turn
+  is running (another client's, or the agent's own: `/connect` itself is refused
+  while one runs). When the session could not take them up — see below — it
+  says `Connected <Name>. New sessions offer its models; to use them in this
   conversation, /exit and run craze -c.` Another provider's stored key that
   cannot be used is kept as it was, and named in a note after it. A store that
   refuses — `providers.toml` a symlink, a file that no longer parses, a lock that
@@ -1657,8 +1662,11 @@ auth login chatgpt`](cli.md#signing-in-to-the-chatgpt-plan) inside the box.
   usage in this app uses your ChatGPT plan. Manage usage in your ChatGPT
   settings: https://chatgpt.com/settings/usage` — and is not shown again. Then
   craze fetches the plan's models (`ChatGPT plan models: chatgpt/gpt-6.1-sol,
-  …`) and says `New sessions offer the ChatGPT plan's models; to use them in
-  this conversation, /exit and run craze -c.` An account that did not allow
+  …`), asks the running session to take the list up, and says `The plan's
+  models are in /model now.` (or `The plan's models will be in /model after
+  this turn.`; when the session could not take them up, the older `New
+  sessions offer the ChatGPT plan's models; to use them in this conversation,
+  /exit and run craze -c.`). An account that did not allow
   plan usage gets `Signed in to ChatGPT as <email>, but ChatGPT plan usage is
   off: …` and `To turn it on, sign in again with /connect and allow ChatGPT
   plan usage when ChatGPT asks.` A sign-in that fails — declined in the
@@ -1711,13 +1719,37 @@ session can lag its host by a moment, and another client attached to the same
 session can start work while the box is open, so the refusal narrows that
 window rather than closing it.
 
-**The running session keeps its models.** A provider connected here — the
-ChatGPT plan signed in to here included — is offered by every new session, and
-by this conversation once you `/exit` and resume it with `craze -c`; the running
-one keeps the model table it started with, and a key you replace reaches it
-only after the same `/exit` and `craze -c`. What the TUI itself lists is read
-afresh each time: the session list's `/provider` and `/model`, and the
-`Connect a provider…` row of `/model`, see a sign-in at once.
+**Models picked up while the session runs.** A native session takes up the
+models a key or a sign-in funds without a restart. The TUI asks it to
+(`session.models.refresh`, see [the protocol](protocol.md#sessionmodelsrefresh))
+in three places: right after `/connect` stores a key, right after a sign-in's
+model list is written (not when the browser's redirect arrives, which is
+earlier), and each time `/model` opens, which also picks up what another
+terminal's `craze auth login` stored. The ask is made with this TUI's craze
+directory, and the session answers whether it is the one it reads. What the
+notice says depends on the answer:
+
+| The session says | `/connect` after a key | `/connect` after a sign-in |
+|---|---|---|
+| it took them up | `Connected <Name>. Its models are in /model now.` | `The plan's models are in /model now.` |
+| a turn is running; it takes them up when the turn ends | `Connected <Name>. Its models will be in /model after this turn.` | `The plan's models will be in /model after this turn.` |
+| it reads another craze directory | the old note, then `This session's host reads another craze directory, so it does not see them.` | the same sentence after the old note |
+| nothing had changed, or the files could not be read | the old note | the old note |
+| it cannot take up models (an ACP session, or a host from before the method), or did not answer | the old note, and no call is made on a session that cannot | the old note |
+
+The old note is `New sessions offer its models; to use them in this
+conversation, /exit and run craze -c.` (`…the ChatGPT plan's models…` for a
+sign-in): the models are in the next session, or in this conversation after
+`/exit` and `craze -c`. The *another craze directory* case is a session
+attached with `craze attach` or a TUI under another `CRAZE_HOME`: this TUI
+wrote its own files, which that session never reads.
+
+The model dialog reads the list the session publishes, so a refresh that lands
+while it is open adds the models to the open box with no reopening, the
+selection staying on the model it was on. The swap changes only what `/model`
+offers and can switch to: a conversation's compaction settings and a
+sub-agent's model menu stay as the session opened them, and a model already
+running stays listed. `/connect` is still refused while a turn runs.
 
 **Where it writes.** `/connect` writes to the `providers.toml` of *this* TUI's
 craze directory (`CRAZE_HOME`, or `~/.craze`), and the ChatGPT plan's sign-in
@@ -1766,12 +1798,13 @@ except one row: while some provider has no key, the list ends with
 opens [`/connect`](#connect) — applying nothing else, as `Esc` would not. It is
 judged when the dialog opens, against the providers this TUI's craze directory
 and environment know (the file `/connect` writes), so it goes once every
-provider has a key, even though the running session's own list does not change
-until `/exit` and `craze -c`. An ACP provider's dialog never has it.
-It judges both when it starts: a model you pick in this session moves up in
-the *next* session's list, not this one's, and a provider you connect while
-the session runs appears in a new session, or in this conversation after
-`/exit` and `craze -c`. A typed `/model <alias>` naming a model the list
+provider has a key. The running session's own list follows a key or a sign-in
+too, [at once](#connect): opening `/model` asks
+the session to take up whatever was funded since it opened, and the list the
+box shows is the session's, re-drawn when it changes. An ACP provider's dialog
+never has the row, and never asks. A model you pick in this session moves up in
+the *next* session's list; this one's order is read again when the session next
+reloads for another reason, such as a key or a sign-in. A typed `/model <alias>` naming a model the list
 leaves out fails as an unknown model does; `--model <alias>` at start still
 resolves against every model craze knows, and refuses one whose provider has
 no key, saying how to give it one.

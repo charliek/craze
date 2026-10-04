@@ -89,7 +89,37 @@ func (m *Model) recompute() {
 	// the fold's word as it stands.
 	armed := f.Settings.SendNow.Armed
 	m.ov.apply(&snap, &queue, &armed)
+	// A catalog whose models change under the open model dialog (a refresh,
+	// another client's key) keeps the selection on the model it was on, or on
+	// the connect row (plan 034 §3.4): the box's selection is an index, and a
+	// list that grew or lost a model would otherwise move it, or leave it on
+	// one the person did not choose. A catalog with the same models in
+	// another order — the current model moves to the top — keeps the index,
+	// as it always has.
+	selID, onRow, selected := "", false, false
+	if m.dialog == dialogModel && !sameModelSet(m.snap.Models, snap.Models) {
+		list := m.dialogModelList()
+		switch {
+		case m.mdlg.connect && m.mdlg.sel == len(list):
+			onRow, selected = true, true
+		case m.mdlg.sel >= 0 && m.mdlg.sel < len(list):
+			selID, selected = list[m.mdlg.sel].ID, true
+		}
+	}
 	m.snap, m.queue, m.sendNowArmed = snap, queue, armed
+	if selected {
+		list := m.dialogModelList()
+		switch {
+		case onRow:
+			m.mdlg.sel = len(list)
+		case m.mdlg.sel >= len(list) || list[m.mdlg.sel].ID != selID:
+			if i := slices.IndexFunc(list, func(md agent.ModelInfo) bool { return md.ID == selID }); i >= 0 {
+				m.mdlg.sel = i
+			} else {
+				m.mdlg.sel = max(min(m.mdlg.sel, m.modelListRows(list)-1), 0)
+			}
+		}
+	}
 	// The host's word on its permission mode and its start (plan 030 §3.7),
 	// read with the rest of its facts, so the status rows move with them.
 	m.hostPerm, m.hostStart = info.PermissionMode, info.StartedAt
@@ -611,4 +641,21 @@ func (m *Model) noteResult(r resultEntry) {
 // restore, a new session).
 func (m *Model) clearOverlays() {
 	m.ov = overlays{}
+}
+
+// sameModelSet reports whether a and b offer the same model ids, in any order.
+func sameModelSet(a, b []agent.ModelInfo) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	ids := make(map[string]struct{}, len(a))
+	for _, md := range a {
+		ids[md.ID] = struct{}{}
+	}
+	for _, md := range b {
+		if _, ok := ids[md.ID]; !ok {
+			return false
+		}
+	}
+	return true
 }

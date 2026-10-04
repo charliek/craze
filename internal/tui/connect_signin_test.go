@@ -1451,7 +1451,7 @@ func TestConnectSignInPastedRedirectAgainstFakeIssuer(t *testing.T) {
 	text := transcriptText(m)
 	for _, want := range []string{
 		signedInPrefix + " as " + signInEmail + ".", chatgptauth.NoticeTitle, chatgptauth.Notice,
-		"ChatGPT plan models: chatgpt/gpt-5.6-sol", signedInSessionNote,
+		"ChatGPT plan models: chatgpt/gpt-5.6-sol", signedInSessionNote(nil),
 	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("the transcript does not say %q:\n%s", want, text)

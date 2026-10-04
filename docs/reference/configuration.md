@@ -817,13 +817,16 @@ only your own.
 
 ### Keys stored while a session runs
 
-A running native session keeps the model table it started with. A provider
-you give a key to while it runs — an `api_key` written into `providers.toml`
-by `craze auth login`, `/connect`, by hand, or by another craze — is offered
-by the next session, or by this conversation after `/exit` and `craze -c`,
-never by the running one.
+A running native session takes up a provider you give a key to while it runs —
+an `api_key` written into `providers.toml` by `craze auth login`, `/connect`,
+by hand, or by another craze — when it next looks: at the start of its next
+turn, or at once when the TUI asks (`/connect` after a save, `/model` when it
+opens; see [the TUI](tui.md#connect)). A
+session that nobody asks, in a terminal that is not a TUI, takes the key up at
+its next turn. What changes is which models are offered and can be switched to:
+a conversation's compaction and sub-agent settings stay as it opened them.
 
-The running session does watch that file, only so it can redact what it
+The running session also watches that file to redact what it
 holds: at the start of every turn (a prompt, a `/compact`, or the delivery of
 a background sub-agent's result) it checks the `providers.toml` of the craze
 directory it started with, and when the file has changed it learns each
