@@ -150,7 +150,9 @@ type wireSettings struct {
 	// §3.4), absent until a delta has carried one: never null or {}. Its
 	// strings are not capped (capSettings): a model id cut short would be one
 	// no session.set could name, and the info document carries the same list
-	// whole.
+	// whole. The session that publishes it holds it to the catalog's own
+	// bounds (agent's boundCatalog, plan 034 C5r), far under ItemCap and the
+	// budget.
 	Catalog json.RawMessage `json:"catalog,omitempty"`
 	// Truncated is Settings.Truncated, absent when no section is marked.
 	Truncated *wireSettingsTruncated `json:"truncated,omitempty"`

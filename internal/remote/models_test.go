@@ -154,6 +154,58 @@ func TestAnUnsupportedRefusalIsUnsupported(t *testing.T) {
 	}
 }
 
+// TestAnOldHostsUnknownMethodIsUnsupported (plan 034 A25: a new client with
+// an old host; C5r, r12 #7): a host from before the method — here a native
+// session's host whose dispatcher is handed the request under a name it does
+// not know, as an older build's is handed session.models.refresh — refuses it
+// -32601, code unsupported, reason unknown_method, not the new reason. The
+// client answers the caller unsupported, with no error, as for the new
+// reason: it decides by the code, never by one reason. The control: the
+// reply on the wire is that refusal. Negative control: a RefreshModels that
+// reads only models_refresh_unsupported as unsupported hands the old host's
+// refusal up as an error.
+func TestAnOldHostsUnknownMethodIsUnsupported(t *testing.T) {
+	h := newHost(t, withRefreshing("/home/host/.craze/native"))
+	tp := newTap(t)
+	s, _ := started(t, h, tp, remote.SessionOptions{})
+	if !s.Info().ModelsRefresh {
+		t.Fatal("premise: the document does not say modelsRefresh")
+	}
+	tp.setRewriteOut(func(l wireLine) []byte {
+		if l.method != protocol.MethodModelsRefresh {
+			return nil
+		}
+		var req protocol.Request
+		if err := json.Unmarshal(l.raw, &req); err != nil {
+			t.Errorf("the refresh request: %v", err)
+			return nil
+		}
+		req.Method = "session.models.refreshed-by-a-later-build"
+		b, err := json.Marshal(req)
+		if err != nil {
+			t.Errorf("the refresh request: %v", err)
+			return nil
+		}
+		return append(b, '\n')
+	})
+	r, err := s.RefreshModels(tctx(t), "/home/tui/.craze/native")
+	if err != nil || r.Status != agent.ModelsUnsupported || r.Revision != 0 || r.SameDir != nil {
+		t.Fatalf("an old host's refusal: %+v, %v; want unsupported and no error", r, err)
+	}
+	var refusals []protocol.ErrorData
+	for _, l := range tp.linesFrom(0) {
+		if !l.out && l.method == protocol.MethodModelsRefresh && l.resp != nil && l.resp.Error != nil {
+			refusals = append(refusals, l.resp.Error.Data)
+			if l.resp.Error.Code != protocol.RPCMethodNotFound {
+				t.Fatalf("control: the host answered %d, want -32601", l.resp.Error.Code)
+			}
+		}
+	}
+	if len(refusals) != 1 || refusals[0].Code != protocol.CodeUnsupported || refusals[0].Reason != protocol.ReasonUnknownMethod {
+		t.Fatalf("control: the host's refusals of the refresh are %+v; want one unsupported/unknown_method", refusals)
+	}
+}
+
 // TestAReconnectNeverRestoresAnOlderCatalog (plan 034 A25: reconnect and
 // replay never restore an older revision): a client folds what Read hands up
 // into a transcript model, as the TUI does. It has folded revision 1 when it

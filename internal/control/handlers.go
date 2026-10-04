@@ -320,12 +320,16 @@ func (c *conn) asksGet(b *bound, info protocol.MethodInfo, req *request) outcome
 // an applied refresh's catalog delta is on this connection's attachment
 // before the answer that says so. A nativeDir must be absolute (a relative one
 // names nothing a host can compare) and at most NativeDirMax characters, as
-// the schema says. The call runs on a server-owned context (commandCtx), so a
-// lost connection cancels nothing.
+// the schema says — and so must one that is present and empty: the schema's
+// pattern refuses "", and the host refuses what its published schema does
+// (plan 034 C5r, r12 #3). Only an absent nativeDir is none. The call runs on a
+// server-owned context (commandCtx), so a lost connection cancels nothing.
 func (c *conn) modelsRefresh(b *bound, info protocol.MethodInfo, req *request) outcome {
 	var p protocol.ModelsRefreshParams
 	check := func() *protocol.Error {
 		switch {
+		case p.NativeDir == "" && hasMember(req.params, "nativeDir"):
+			return badParams("params.nativeDir is empty: an absolute path, or absent for none")
 		case p.NativeDir == "":
 		case utf8.RuneCountInString(p.NativeDir) > protocol.NativeDirMax:
 			return badParams("params.nativeDir is longer than %d characters", protocol.NativeDirMax)

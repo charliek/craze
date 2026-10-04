@@ -595,12 +595,12 @@ type wireState struct {
 // the key (a decoder ignores keys it does not know), so the section is
 // additive: no codec version bump.
 //
-// The list carries what SessionInfo.Catalogs carries, with the same bounds:
-// none of its own. The models come from the session's model table, whose
-// files and fetched list are size-bounded where they are read, and the
-// event as a whole is bounded by the log's record limit like every other.
-// No string is cut: a model id cut short would be one no session.set could
-// name.
+// The list carries what SessionInfo.Catalogs carries, and the native session
+// holds it to the catalog's bounds where it builds it (boundCatalog, plan 034
+// C5r): at most 512 models, each name at most 128 bytes, and a model whose id
+// is over 256 bytes not offered — so the section fits every record limit and
+// snapshot budget whatever the owner's files say. This codec cuts nothing: an
+// id cut short would be one no session.set could name.
 type wireCatalog struct {
 	Models   []wireModelInfo `json:"models,omitempty"`
 	Revision uint64          `json:"revision"`

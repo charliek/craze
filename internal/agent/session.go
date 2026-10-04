@@ -1260,8 +1260,9 @@ type ModelsRefresh struct {
 	// offered.
 	Revision uint64
 	// SameDir says whether the call's nativeDir is the directory the session
-	// reads its models from (SameNativeDir: absolute and cleaned, symlinks
-	// resolved where both resolve); nil when the call named none.
+	// reads its models from (SameNativeDir: absolute and cleaned, and one
+	// directory by the file system's identity where both exist); nil when the
+	// call named none.
 	SameDir *bool
 }
 

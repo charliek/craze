@@ -1183,7 +1183,9 @@ type StopParams struct {
 // its keys and sign-ins in, an absolute path of at most NativeDirMax
 // characters, absent for none: the answer's sameDir says whether it is the
 // one the session reads its models from (the home mismatch: a client and a
-// host in different CRAZE_HOMEs). Paths are not secrets.
+// host in different CRAZE_HOMEs). Paths are not secrets. Present and empty
+// is no path, and refused as one (plan 034 C5r, r12 #3); omitempty means
+// this type never sends it, "" being none here.
 type ModelsRefreshParams struct {
 	SessionID string `json:"sessionId"`
 	NativeDir string `json:"nativeDir,omitempty"`

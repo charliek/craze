@@ -2,8 +2,10 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -12,6 +14,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
+	"unicode/utf8"
 
 	"charm.land/fantasy"
 	"github.com/charliek/craze/internal/chatgptauth"
@@ -982,9 +986,15 @@ func TestNativeAFetchHeldBackIsReadAtTheTurnsEnd(t *testing.T) {
 // TestSameNativeDirComparesWhereTheFilesAre (plan 034 §3.4, A26's sameDir):
 // two spellings of one directory are the same — a trailing slash, a "..", a
 // relative path from the process's own directory, and a symlink to it, which
-// is resolved only once the cleaned paths differ — and another directory, one
-// that does not exist, and "" are not. Negative control: a comparison of
-// cleaned paths alone calls the symlink another directory.
+// is judged by identity only once the cleaned paths differ — and another
+// directory, one that does not exist, and "" are not. On a case-insensitive
+// volume a spelling that differs only in case is the same directory too
+// (plan 034 C5r, r12 #4): judged by the file system's identity, never by
+// strings. The volume is stood in for by a stat that folds case under the
+// test's directory — a real one where the machine has one (macOS's default
+// APFS), which is checked as well. Negative controls: a comparison of cleaned
+// paths alone calls the symlink another directory; one of the paths with
+// their symlinks resolved calls the case-folded spelling another directory.
 func TestSameNativeDirComparesWhereTheFilesAre(t *testing.T) {
 	root := t.TempDir()
 	native := filepath.Join(root, "home", ".craze", "native")
@@ -1026,6 +1036,25 @@ func TestSameNativeDirComparesWhereTheFilesAre(t *testing.T) {
 	}
 	if SameNativeDir(native, "") {
 		t.Error("a directory is the same as none")
+	}
+
+	upper := filepath.Join(root, "HOME", ".CRAZE", "NATIVE")
+	folding := func(p string) (fs.FileInfo, error) {
+		if rest, ok := strings.CutPrefix(p, root); ok {
+			p = root + strings.ToLower(rest)
+		}
+		return os.Stat(p)
+	}
+	if !sameNativeDir(upper, native, folding) || !sameNativeDir(filepath.Join(link, ".CRAZE", "native"), native, folding) {
+		t.Error("on a case-insensitive volume, a spelling that differs in case is another directory")
+	}
+	if sameNativeDir(filepath.Join(root, "OTHER", ".craze", "native"), native, folding) {
+		t.Error("control: on a case-insensitive volume, another directory is the same")
+	}
+	if st, err := os.Stat(upper); err == nil {
+		if want, _ := os.Stat(native); os.SameFile(st, want) && !SameNativeDir(upper, native) {
+			t.Error("this machine's case-insensitive volume: a spelling that differs in case is another directory")
+		}
 	}
 }
 
@@ -1098,5 +1127,243 @@ func TestNativeAWakesCatalogLandsOutsideItsBracket(t *testing.T) {
 				t.Fatalf("control: %d requests carried the result; want the wake's one", len(reqs))
 			}
 		})
+	}
+}
+
+// TestTheCatalogIsHeldToItsBounds (plan 034 C5r, r12 #6): boundCatalog keeps
+// a list within its bounds as it is and cuts one past them — a name of
+// megabytes to catalogNameMax bytes on a rune boundary, ended with an
+// ellipsis; a model whose id is over catalogIDMax left off (one at it kept);
+// the list to its first catalogModelsMax models, the running model kept in
+// the last place when its own is past the cut — and counts each, leaving
+// the list it was handed as it was. Its worst case — every id and name at
+// its bound in characters JSON writes as six bytes — encodes to about 1.2
+// MiB. Negative controls: a bound that does not cut names, keeps an over-long
+// id, does not cap the list or lets the cap take the running model fails it.
+func TestTheCatalogIsHeldToItsBounds(t *testing.T) {
+	small := []ModelInfo{{ID: "a", Name: "A", Recent: 1}, {ID: "b", Name: "B"}}
+	if got, cut := boundCatalog(small, "b"); !slices.Equal(got, small) || cut != (catalogCut{}) {
+		t.Fatalf("control: a list within its bounds came back %+v, cut %+v", got, cut)
+	}
+
+	huge := strings.Repeat("é", 5<<20) // 10 MiB, every rune two bytes
+	long, atBound := strings.Repeat("x", catalogIDMax+1), strings.Repeat("y", catalogIDMax)
+	infos := []ModelInfo{{ID: "first", Name: huge, Recent: 1}, {ID: long, Name: "Long"}, {ID: atBound, Name: "At the bound"}}
+	for i := range 600 {
+		infos = append(infos, ModelInfo{ID: fmt.Sprintf("m%03d", i), Name: fmt.Sprintf("M %d", i)})
+	}
+	infos = append(infos, ModelInfo{ID: "running", Name: "Running"})
+	handed := slices.Clone(infos)
+	got, cut := boundCatalog(infos, "running")
+	if !slices.Equal(infos, handed) {
+		t.Fatal("boundCatalog changed the list it was handed")
+	}
+	if want := (catalogCut{names: 1, ids: 1, over: 603 - catalogModelsMax}); cut != want {
+		t.Fatalf("the cut is %+v, want %+v", cut, want)
+	}
+	if len(got) != catalogModelsMax {
+		t.Fatalf("the list holds %d models, want %d", len(got), catalogModelsMax)
+	}
+	if name := got[0].Name; len(name) > catalogNameMax || !utf8.ValidString(name) || !strings.HasSuffix(name, ellipsis) ||
+		!strings.HasPrefix(huge, strings.TrimSuffix(name, ellipsis)) || got[0].ID != "first" || got[0].Recent != 1 {
+		t.Fatalf("the huge name's row is %q (%d bytes) for %q; want its head within %d bytes, ended with an ellipsis", name, len(name), got[0].ID, catalogNameMax)
+	}
+	if got[1].ID != atBound {
+		t.Fatalf("the second row is %.20q; want the id at the bound, kept", got[1].ID)
+	}
+	for _, m := range got {
+		if len(m.ID) > catalogIDMax {
+			t.Fatalf("an id of %d bytes is offered", len(m.ID))
+		}
+	}
+	if last := got[catalogModelsMax-1]; last.ID != "running" {
+		t.Fatalf("the last row is %q; want the running model, kept past the cut", last.ID)
+	}
+
+	worst := make([]ModelInfo, catalogModelsMax+10)
+	for i := range worst {
+		worst[i] = ModelInfo{ID: strings.Repeat("<", catalogIDMax), Name: strings.Repeat("<", catalogNameMax+1), Recent: i + 1}
+	}
+	bounded, _ := boundCatalog(worst, "")
+	body, err := EncodeCatalogState(&CatalogState{Models: bounded, Revision: 1 << 40})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := len(body); n > 5<<18 {
+		t.Fatalf("the worst bounded list encodes to %d bytes, over 1.25 MiB", n)
+	}
+}
+
+// TestNativeCatalogBoundsAreSaidOnce (plan 034 C5r, r12 #6): a model whose
+// name in models.toml is a megabyte long is offered with its name cut to
+// catalogNameMax bytes — in the list Start publishes and in every reload's,
+// whose catalog section then encodes small — and the cut is said on the
+// session's diagnostics once, value-free (counts and bounds, never the
+// name): a reload that cuts the same again says nothing, nor does one within
+// the bounds. Negative control: a list that is not bounded offers the name
+// whole.
+func TestNativeCatalogBoundsAreSaidOnce(t *testing.T) {
+	f := newNativeFixture(t)
+	table, err := modeltable.Load(f.dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	huge := strings.Repeat("Huge model name ", 1<<16) // 1 MiB
+	m := table.Models["test/b"]
+	m.Name = huge
+	table.Models["test/b"] = m
+	saveTable(t, f.dir, table)
+	var diag lockedDiag
+	s := f.started(Options{Diag: &diag})
+	nameOf := func(models []ModelInfo, id string) string {
+		for _, m := range models {
+			if m.ID == id {
+				return m.Name
+			}
+		}
+		t.Fatalf("%s is not offered: %v", id, offeredIDs(models))
+		return ""
+	}
+	if name := nameOf(s.Snapshot().Models, "test/b"); len(name) > catalogNameMax || !strings.HasPrefix(name, "Huge model name") {
+		t.Fatalf("Start offers test/b as a name of %d bytes; want its head, within %d", len(name), catalogNameMax)
+	}
+
+	if err := modeltable.SetKey(f.dir, "nokey", "sk-nokey-bounded-0371"); err != nil {
+		t.Fatal(err)
+	}
+	refreshApplied(t, s, "")
+	cats := catalogsOf(deltaSettled(t, s))
+	if len(cats) != 1 {
+		t.Fatalf("the refresh published %d catalogs, want 1", len(cats))
+	}
+	if name := nameOf(cats[0].Models, "test/b"); len(name) > catalogNameMax {
+		t.Fatalf("the reload's catalog names test/b in %d bytes", len(name))
+	}
+	if body, err := EncodeCatalogState(cats[0]); err != nil || len(body) > 4<<10 {
+		t.Fatalf("the reload's catalog encodes to %d bytes (%v); want a small section", len(body), err)
+	}
+
+	m.Name = "Model B"
+	table, err = modeltable.Load(f.dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	table.Models["test/b"] = m
+	saveTable(t, f.dir, table)
+	refreshApplied(t, s, "")
+	if name := nameOf(s.Snapshot().Models, "test/b"); name != "Model B" {
+		t.Fatalf("a name within the bound is offered as %q", name)
+	}
+
+	notes := strings.Split(strings.TrimSpace(diag.String()), "\n")
+	var cutNotes []string
+	for _, n := range notes {
+		if strings.Contains(n, "held to its bounds") {
+			cutNotes = append(cutNotes, n)
+		}
+	}
+	if len(cutNotes) != 1 || !strings.Contains(cutNotes[0], fmt.Sprintf("1 model with a name over %d bytes, cut to it", catalogNameMax)) {
+		t.Fatalf("the diagnostics say %q; want one note of the one cut name", cutNotes)
+	}
+	if strings.Contains(diag.String(), "Huge model name") {
+		t.Fatal("the note carries the name it cut")
+	}
+}
+
+// TestNativeAFailedFetchBacksOff (plan 034 C5r, r12 #3b): a fetch of the
+// plan's model list that fails — the open's, here, against an API that
+// answers every request 503 — starts no other for planListRetryBackoff: a
+// refresh asked within it starts none, and still reloads and answers (the
+// list rewritten on disk meanwhile is taken up, applied). Once the backoff
+// has passed on the session's clock, a refresh starts the fetch again. The
+// control: the open's fetch was made and failed, and the later one is made.
+// Negative control: a refreshModelsLocked with no backoff starts a fetch
+// within it.
+func TestNativeAFailedFetchBacksOff(t *testing.T) {
+	api, _ := noOpenAI(t)
+	home := t.TempDir()
+	t.Setenv("CRAZE_HOME", home)
+	dir := filepath.Join(home, "native")
+	writePlanAccount(t, dir)
+	writePlanTokens(t, dir, planAccess, planRefresh, "inc-1", 1)
+	staleModels(t, dir)
+	var (
+		clockMu sync.Mutex
+		now     = time.Date(2026, 10, 3, 12, 0, 0, 0, time.UTC)
+	)
+	advance := func(d time.Duration) {
+		clockMu.Lock()
+		now = now.Add(d)
+		clockMu.Unlock()
+	}
+	s := newNative(Options{Workspace: t.TempDir(), ContentHome: t.TempDir()}, func(o *harness.Options) {
+		o.Getenv = func(string) string { return "" }
+	})
+	s.fetchClock = func() time.Time {
+		clockMu.Lock()
+		defer clockMu.Unlock()
+		return now
+	}
+	closeAtCleanup(t, s)
+	if err := s.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	takeStartDelta(t, s.log)
+	fetch := func() chan struct{} {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		return s.refreshed
+	}
+	listRequests := func() int {
+		n := 0
+		for _, r := range api.requests() {
+			if strings.HasSuffix(r.path, "/models") {
+				n++
+			}
+		}
+		return n
+	}
+	opened := fetch()
+	if opened == nil {
+		t.Fatal("control: the stale list started no fetch")
+	}
+	await(t, opened, "the open's fetch")
+	if n := listRequests(); n != 1 {
+		t.Fatalf("control: the open's fetch made %d model list requests, want 1", n)
+	}
+
+	// Within the backoff: the list rewritten on disk — another model — is
+	// taken up by the refresh's reload, and no fetch starts.
+	advance(planListRetryBackoff - time.Second)
+	m, err := chatgptauth.ReadModels(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	added := m.Models[0]
+	added.Slug, added.DisplayName = "gpt-6.1-sol", "GPT-6.1 Sol"
+	m.Models = append(m.Models, added)
+	b, err := json.Marshal(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(chatgptauth.ModelsFile(dir), b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if r := refresh(t, s, ""); r.Status != ModelsApplied || !slices.Contains(offeredIDs(s.Snapshot().Models), "chatgpt/gpt-6.1-sol") {
+		t.Fatalf("a refresh within the backoff = %+v, offering %v; want applied, the rewritten list's model offered", r, offeredIDs(s.Snapshot().Models))
+	}
+	if got := fetch(); got != opened {
+		t.Fatal("a refresh within the backoff of a failed fetch started another")
+	}
+
+	advance(2 * time.Second)
+	refresh(t, s, "")
+	again := fetch()
+	if again == opened {
+		t.Fatal("a refresh after the backoff started no fetch")
+	}
+	await(t, again, "the fetch after the backoff")
+	if n := listRequests(); n != 2 {
+		t.Fatalf("%d model list requests in all, want the open's and the one after the backoff", n)
 	}
 }

@@ -5,8 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 
 	"github.com/charliek/craze/internal/chatgptauth"
 	"github.com/charliek/craze/internal/harness"
@@ -44,8 +46,8 @@ import (
 //     — one inside its frozen prompt, tools or plan path — is withheld
 //     (A22, WithholdFrozen); its keys are read (Keys); and the picker's list
 //     (Choices, with the model memory read now, one sealed reading of the
-//     environment and the running model), the efforts and the matcher are
-//     built from it.
+//     environment and the running model, held to the catalog's bounds:
+//     boundCatalog), the efforts and the matcher are built from it.
 //  3. A generation is taken: the list's revision, monotonic.
 //  4. While the session is not started, loading or closed, nothing is
 //     published: a load's replay bracket holds the reload until its end
@@ -142,6 +144,9 @@ type modelsWatch struct {
 	// withheld are the providers already said to be withheld (A22), so each
 	// is said once per session.
 	withheld map[string]bool
+	// cut is what the catalog's bounds cut from the list published last
+	// (noteCatalogCut), so a cut that stays is said once.
+	cut catalogCut
 }
 
 // modelStamps are the five inputs' stamps, in the order modelInputs names
@@ -239,7 +244,7 @@ func (s *nativeSession) reloadLocked(reason reloadReason) ModelsStatus {
 		s.noteReloadFailed(hs, err)
 		return ModelsFailed
 	}
-	infos := choiceInfos(t.Choices(modeltable.ReadRecent(home), getenv, current))
+	infos, cut := choiceInfos(t.Choices(modeltable.ReadRecent(home), getenv, current), current)
 	efforts := make(map[string][]string, len(t.Models))
 	for alias, m := range t.Models {
 		efforts[alias] = slices.Clone(m.Efforts)
@@ -332,7 +337,112 @@ func (s *nativeSession) reloadLocked(reason reloadReason) ModelsStatus {
 	s.catalogQueued = true
 	s.mu.Unlock()
 	s.models.stamps, s.models.read, s.models.forced = stamps, true, false
+	s.noteCatalogCut(home, cut)
 	return ModelsApplied
+}
+
+// The catalog's bounds (plan 034 C5r, r12 #6). The list a native session
+// offers is mandatory state wherever it travels — the info document's
+// catalogs.models, the catalog section of a state delta, a snapshot's and
+// session.state's settings.catalog, which the snapshot's per-item cap never
+// cuts — and it comes from files the owner edits by hand, which the model
+// table reads whole: a model named with megabytes of text would make its
+// catalog event an omitted record (a reset for every attached client) and
+// every later snapshot too large to attach with. So the list is held to
+// these where it is built (choiceInfos), for every road at once:
+//
+//   - a model's name — display text only — to catalogNameMax bytes, cut on a
+//     rune boundary and ended with an ellipsis: the bound chatgptauth holds
+//     the plan's display names to, and a sub-agent row's model to
+//     (subagentModelCap);
+//   - a model whose id is over catalogIDMax bytes is not offered at all,
+//     since an id cut short would be one no session.set could name; no real
+//     alias comes near it (the plan's slugs are at most 64 bytes);
+//   - the list to its first catalogModelsMax models, in the picker's order,
+//     the running model kept among them (in the last place, when its own
+//     would be past the cut): a picker always has the current model's row to
+//     select (plan 031 P7). 512 is the hub roster's row bound, and far above
+//     any real table — the shipped catalog and the plan's list together are
+//     a few dozen.
+//
+// Within them the list encodes to at most about 1.2 MiB — every id and name
+// at its bound in characters JSON escapes to six bytes — under the 8 MiB
+// record limit and the 4 MiB default snapshot budget. What a cut took is said
+// once, value-free (noteCatalogCut).
+const (
+	catalogNameMax   = 128
+	catalogIDMax     = 256
+	catalogModelsMax = 512
+)
+
+// catalogCut counts what boundCatalog cut: names shortened, models left off
+// for an id over the bound, and models left off past the list's bound.
+type catalogCut struct{ names, ids, over int }
+
+// boundCatalog is infos within the catalog's bounds (above), current the
+// model the session runs on, and what it cut. infos is not changed.
+func boundCatalog(infos []ModelInfo, current string) ([]ModelInfo, catalogCut) {
+	var cut catalogCut
+	out := make([]ModelInfo, 0, len(infos))
+	at := -1 // the running model's index in out
+	for _, m := range infos {
+		if len(m.ID) > catalogIDMax {
+			cut.ids++
+			continue
+		}
+		if current != "" && m.ID == current {
+			at = len(out)
+		}
+		out = append(out, m)
+	}
+	if len(out) > catalogModelsMax {
+		cut.over = len(out) - catalogModelsMax
+		if at >= catalogModelsMax {
+			out[catalogModelsMax-1] = out[at]
+		}
+		out = slices.Clip(out[:catalogModelsMax])
+	}
+	for i := range out {
+		if len(out[i].Name) > catalogNameMax {
+			out[i].Name = truncateUTF8(out[i].Name, catalogNameMax)
+			cut.names++
+		}
+	}
+	return out, cut
+}
+
+// noteCatalogCut says what the catalog's bounds cut from the list a reload —
+// or Start — publishes, in one line on the session's diagnostics: counts and
+// bounds alone, never a name or an id (they are the very text that was too
+// long, and the owner's own) — and the file they most likely came from, in
+// home, the session's native directory. It is said once until what was cut
+// changes: a list within its bounds clears it. modelsMu is held.
+func (s *nativeSession) noteCatalogCut(home string, cut catalogCut) {
+	if cut == s.models.cut {
+		return
+	}
+	s.models.cut = cut
+	if cut == (catalogCut{}) {
+		return
+	}
+	models := func(n int) string {
+		if n == 1 {
+			return "1 model"
+		}
+		return fmt.Sprintf("%d models", n)
+	}
+	var parts []string
+	if cut.names > 0 {
+		parts = append(parts, fmt.Sprintf("%s with a name over %d bytes, cut to it", models(cut.names), catalogNameMax))
+	}
+	if cut.ids > 0 {
+		parts = append(parts, fmt.Sprintf("%s with an id over %d bytes, not offered", models(cut.ids), catalogIDMax))
+	}
+	if cut.over > 0 {
+		parts = append(parts, fmt.Sprintf("%s past the first %d, not offered", models(cut.over), catalogModelsMax))
+	}
+	s.note("the model list this session offers is held to its bounds: " + strings.Join(parts, "; ") +
+		" — see " + filepath.Join(home, modeltable.ModelsFile))
 }
 
 // heldBack is a reload held back — by a load's replay or a turn's claim, and
@@ -424,8 +534,10 @@ func (s *nativeSession) reloadFlushed(reason reloadReason) {
 
 // RefreshModels is ModelsRefresher (the file's comment, Q14 b): the fetch of
 // the plan's list started in the background when the account is signed in
-// with plan usage, then the reload, now. ctx is not read: the reload reads
-// local files and the fetch has its own bound and Close's.
+// with plan usage — unless one is in flight, or one failed within
+// planListRetryBackoff (refreshModelsLocked) — then the reload, now, which
+// runs and answers whatever became of the fetch. ctx is not read: the reload
+// reads local files and the fetch has its own bound and Close's.
 func (s *nativeSession) RefreshModels(_ context.Context, nativeDir string) (ModelsRefresh, error) {
 	s.mu.Lock()
 	hs, home, signIn := s.hs, s.home, s.signIn
@@ -459,13 +571,19 @@ var _ ModelsRefresher = (*nativeSession)(nil)
 // SameNativeDir reports whether a and b name one native directory (plan 034
 // §3.4, Q17's sameDir): a client's, sent with session.models.refresh, and the
 // one a session reads its models from. Paths are not secrets, and the answer
-// is all that leaves. Each is made absolute and cleaned, and two that still
-// differ are compared once more with every symlink resolved — a CRAZE_HOME
-// reached through a link, macOS's /var and /private/var — which costs a few
-// lstats and is done only then. A path that does not resolve (it does not
-// exist on this machine) is compared as cleaned alone. "" is no directory,
-// and the same as none.
-func SameNativeDir(a, b string) bool {
+// is all that leaves. Each is made absolute and cleaned; two that are then one
+// string are the same. Two that still differ are the same when both exist and
+// are one directory by the file system's own identity (os.SameFile: device and
+// inode) — a CRAZE_HOME reached through a link, macOS's /var and
+// /private/var, and a spelling that differs only in case on a case-insensitive
+// volume, which no comparison of strings, symlinks resolved or not, can tell
+// (plan 034 C5r, r12 #4). A path that does not exist on this machine is
+// compared as cleaned alone. "" is no directory, and the same as none.
+func SameNativeDir(a, b string) bool { return sameNativeDir(a, b, os.Stat) }
+
+// sameNativeDir is SameNativeDir with the stat it judges identity by: os.Stat
+// in production, a test's own to stand in for a case-insensitive volume.
+func sameNativeDir(a, b string, stat func(string) (fs.FileInfo, error)) bool {
 	if a == "" || b == "" {
 		return false
 	}
@@ -477,7 +595,7 @@ func SameNativeDir(a, b string) bool {
 	if ca == cb {
 		return true
 	}
-	ra, errA := filepath.EvalSymlinks(ca)
-	rb, errB := filepath.EvalSymlinks(cb)
-	return errA == nil && errB == nil && ra == rb
+	sa, errA := stat(ca)
+	sb, errB := stat(cb)
+	return errA == nil && errB == nil && os.SameFile(sa, sb)
 }

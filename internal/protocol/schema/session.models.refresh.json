@@ -8,7 +8,7 @@
       "type": "object",
       "properties": {
         "sessionId": {"$ref": "envelope.json#/$defs/sessionId"},
-        "nativeDir": {"type": "string", "maxLength": 4096, "pattern": "^/", "description": "The craze native directory the client reads and writes its keys and sign-ins in, an absolute path; absent for none. The result's sameDir says whether it is the session's own."}
+        "nativeDir": {"type": "string", "maxLength": 4096, "pattern": "^/", "description": "The craze native directory the client reads and writes its keys and sign-ins in, an absolute path; absent for none (an empty string is not none: it is refused bad_request, as any path that is not absolute). The result's sameDir says whether it is the session's own."}
       },
       "required": ["sessionId"],
       "additionalProperties": false
@@ -18,7 +18,7 @@
       "properties": {
         "status": {"type": "string", "enum": ["applied", "current", "pending", "unsupported", "failed"], "description": "applied: what the session reads its models from had changed, and it offers what that funds now (the catalog delta precedes this reply); current: nothing had changed; pending: it had changed while a turn ran or a load replayed, and is taken up as that ends; unsupported: the session cannot take up models while it runs; failed: the files could not be read as a model table, and the list is as it was."},
         "revision": {"type": "integer", "minimum": 0, "description": "The revision of the list the session offers after the call: the catalog section's, 0 for the list it started with. A pending refresh's is the list still offered."},
-        "sameDir": {"type": "boolean", "description": "Whether the params' nativeDir is the directory the session reads its models from (absolute and cleaned, symlinks resolved where both resolve); absent when the call named none."}
+        "sameDir": {"type": "boolean", "description": "Whether the params' nativeDir is the directory the session reads its models from (compared absolute and cleaned, and by the file system's identity where both exist, so a symlink or a spelling a case-insensitive volume folds is the same directory); absent when the call named none."}
       },
       "required": ["status", "revision"],
       "additionalProperties": false

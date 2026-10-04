@@ -2,11 +2,17 @@ package control_test
 
 import (
 	"bytes"
+	"encoding/json"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/charliek/craze/internal/agent"
+	"github.com/charliek/craze/internal/control/wiretest"
 	"github.com/charliek/craze/internal/protocol"
 	"github.com/charliek/craze/internal/transcript"
 	"github.com/charliek/craze/internal/tui"
@@ -69,14 +75,46 @@ func TestModelsRefreshIsServedWhereTheSessionCanRefresh(t *testing.T) {
 // absolute path of at most NativeDirMax characters — -32602, bad_request
 // otherwise, with nothing asked of the session — a field the method does not
 // define is unknown_field, and a session this host does not serve
-// unknown_session. Negative control: a check that lets a relative nativeDir
-// through answers it.
+// unknown_session. A nativeDir that is present and empty is refused the same,
+// as the published schema's pattern refuses it, while one that is absent is
+// none (plan 034 C5r, r12 #3): the host and its schema agree on both, the
+// schema judging each request line as the host does. Negative controls: a
+// check that lets a relative nativeDir through answers it; one that takes an
+// empty nativeDir for none answers that.
 func TestModelsRefreshParamsAreChecked(t *testing.T) {
 	h := newHost(t, withRefresh("/n"))
 	a := h.dial()
 	a.sayHello(nil)
 	refusedWith(t, a.call(protocol.MethodModelsRefresh, protocol.ModelsRefreshParams{SessionID: sid(h), NativeDir: "n"}),
 		protocol.RPCInvalidParams, protocol.CodeBadRequest, protocol.ReasonBadRequest)
+	for _, tc := range []struct {
+		params map[string]any
+		valid  bool
+	}{
+		{map[string]any{"sessionId": sid(h), "nativeDir": ""}, false},
+		{map[string]any{"sessionId": sid(h)}, true},
+	} {
+		params, err := json.Marshal(tc.params)
+		if err != nil {
+			t.Fatal(err)
+		}
+		line, err := json.Marshal(protocol.Request{JSONRPC: protocol.JSONRPCVersion, ID: json.RawMessage(`"99"`),
+			Method: protocol.MethodModelsRefresh, Params: params})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := wiretest.Default().Request(line); (err == nil) != tc.valid {
+			t.Fatalf("the schema judges %s valid=%v (%v); want %v", line, err == nil, err, tc.valid)
+		}
+		resp := a.call(protocol.MethodModelsRefresh, tc.params)
+		if !tc.valid {
+			refusedWith(t, resp, protocol.RPCInvalidParams, protocol.CodeBadRequest, protocol.ReasonBadRequest)
+			continue
+		}
+		if got := ok[protocol.ModelsRefreshResult](t, resp); got.Status != protocol.ModelsCurrent || got.SameDir != nil {
+			t.Fatalf("a refresh with no nativeDir: %+v; want current, no sameDir", got)
+		}
+	}
 	long := "/" + strings.Repeat("é", protocol.NativeDirMax)
 	refusedWith(t, a.call(protocol.MethodModelsRefresh, protocol.ModelsRefreshParams{SessionID: sid(h), NativeDir: long}),
 		protocol.RPCInvalidParams, protocol.CodeBadRequest, protocol.ReasonBadRequest)
@@ -205,5 +243,133 @@ func TestTheRefreshStatusesAreTheAgents(t *testing.T) {
 		if string(wire[i]) != string(a) {
 			t.Fatalf("status %d: the wire's %q, agent's %q", i, wire[i], a)
 		}
+	}
+}
+
+// lockedWriter is an io.Writer a session's diagnostics can be written to from
+// any goroutine, and read back whole.
+type lockedWriter struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (w *lockedWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.b.Write(p)
+}
+
+func (w *lockedWriter) String() string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.b.String()
+}
+
+// nativeTableFiles is a native directory's two model-table files as craze
+// writes them (modeltable.Save's shape, written by hand: this package's tests
+// do not import the harness): one provider, test, whose key is the
+// environment's CRAZE_CONTROL_TEST_KEY, and the shipped catalog off, so the
+// list is these models alone. Each model is an alias and its display name.
+func nativeTableFiles(t *testing.T, dir string, models [][2]string) {
+	t.Helper()
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	providers := "version = 1\n\n[providers.test]\ndriver = \"openai-compat\"\nbase_url = \"http://127.0.0.1:9/v1\"\nenv_keys = [\"CRAZE_CONTROL_TEST_KEY\"]\n"
+	var b strings.Builder
+	b.WriteString("version = 1\ncatalog = false\ndefault_model = \"test/a\"\n")
+	for _, m := range models {
+		b.WriteString("\n[models.\"" + m[0] + "\"]\nprovider = \"test\"\nwire_model = \"wire\"\nname = \"" + m[1] + "\"\n")
+	}
+	if err := os.WriteFile(filepath.Join(dir, "providers.toml"), []byte(providers), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "models.toml"), []byte(b.String()), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestAHugeModelNameKeepsTheSessionAttachable (plan 034 C5r, r12 #6): a real
+// native session behind the host, whose owner names a model with 9 MiB of
+// text in models.toml — over the 8 MiB record limit and the 4 MiB default
+// snapshot budget. The refresh that takes it up publishes its catalog section
+// as an ordinary event, the name cut to 128 bytes, before its applied reply;
+// a client that attaches after it, with the default budget, is answered —
+// the list and the snapshot's settings.catalog bounded alike — and the cut is
+// one note on the session's diagnostics that carries no part of the name.
+// The control: the model is offered (under its cut name). Negative control: a
+// list that is not bounded makes the catalog event an omitted record — a
+// reset where the event was — and the attach after it snapshot_too_large.
+func TestAHugeModelNameKeepsTheSessionAttachable(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("CRAZE_HOME", home)
+	t.Setenv("CRAZE_CONTROL_TEST_KEY", "sk-control-native-0373")
+	dir := filepath.Join(home, "native")
+	nativeTableFiles(t, dir, [][2]string{{"test/a", "Model A"}})
+	var diag lockedWriter
+	h := newHost(t, withSession(func(*tui.Stub) agent.Session {
+		return agent.NewNative(agent.Options{Workspace: t.TempDir(), ContentHome: t.TempDir(), Diag: &diag}, nil)
+	}))
+	a := h.dial()
+	a.sayHello(nil)
+	if r := a.attach(attachParams(h)); !r.Session.Capabilities.ModelsRefresh {
+		t.Fatalf("premise: a native session without modelsRefresh: %+v", r.Session.Capabilities)
+	}
+	a.note(protocol.NotifySynchronized)
+
+	huge := strings.Repeat("Huge model name ", 9<<20/16) // 9 MiB
+	nativeTableFiles(t, dir, [][2]string{{"test/a", "Model A"}, {"test/huge", huge}})
+	bounded := func(what string, models []agent.ModelInfo) {
+		t.Helper()
+		for _, m := range models {
+			if m.ID != "test/huge" {
+				continue
+			}
+			if len(m.Name) > 128 || !utf8.ValidString(m.Name) || !strings.HasPrefix(huge, strings.TrimSuffix(m.Name, "…")) {
+				t.Fatalf("%s names test/huge in %d bytes; want its head, within 128", what, len(m.Name))
+			}
+			return
+		}
+		t.Fatalf("control: %s does not offer test/huge", what)
+	}
+	id := refreshModels(a, h, dir)
+	notes, resp := a.until(id)
+	if len(notes) != 1 || notes[0].Method != protocol.NotifyEvent {
+		var methods []string
+		for _, n := range notes {
+			methods = append(methods, n.Method)
+		}
+		t.Fatalf("the notifications before the reply are %v; want the catalog event alone", methods)
+	}
+	if _, ev := eventOf(t, notes[0]); ev.State == nil || ev.State.Catalog == nil {
+		t.Fatalf("the event before the reply carries no catalog: %+v", ev)
+	} else {
+		bounded("the catalog event", ev.State.Catalog.Models)
+	}
+	if got := ok[protocol.ModelsRefreshResult](t, resp); got.Status != protocol.ModelsApplied || got.SameDir == nil || !*got.SameDir {
+		t.Fatalf("the refresh: %+v; want applied, sameDir true", got)
+	}
+
+	c := h.dial()
+	c.sayHello(nil)
+	r := c.attach(attachParams(h))
+	var infos []agent.ModelInfo
+	for _, m := range r.Session.Catalogs.Models {
+		infos = append(infos, agent.ModelInfo{ID: m.ID, Name: m.Name, Recent: m.Recent})
+	}
+	bounded("the attach's info document", infos)
+	snap, err := transcript.DecodeSnapshot(r.Snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snap.Settings.Catalog == nil {
+		t.Fatal("the attach's snapshot carries no catalog")
+	}
+	bounded("the attach's snapshot", snap.Settings.Catalog.Models)
+	c.note(protocol.NotifySynchronized)
+
+	said := diag.String()
+	if n := strings.Count(said, "held to its bounds"); n != 1 || strings.Contains(said, "Huge model name") {
+		t.Fatalf("the diagnostics say %q; want one value-free note of the cut", said)
 	}
 }

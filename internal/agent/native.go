@@ -312,6 +312,15 @@ type nativeSession struct {
 	// is every one's; Close waits for it, after done has cancelled it.
 	refreshed chan struct{}
 	fetching  bool
+	// fetchFailed is when the latest background fetch of the plan's model
+	// list failed — zero when none has, or the latest succeeded — so a
+	// refresh asked within planListRetryBackoff of it starts no other (plan
+	// 034 C5r, r12 #3b). Under s.mu, as fetching is.
+	fetchFailed time.Time
+	// fetchClock is the clock fetchFailed is read and written on: nil is the
+	// wall clock. **A test seam: nil in production**, set only by a test in
+	// this package before Start.
+	fetchClock func() time.Time
 
 	// modelsMu serializes the model table's reloads with each other and with
 	// SetModel and SetConfig (native_models.go, plan 034 §3.4): taken with no
@@ -586,8 +595,15 @@ func (s *nativeSession) start(context.Context) error {
 	s.startSettings(hs, efforts)
 	// The models the session offers — the ones whose provider has a key,
 	// and the one it runs on — in the picker's order, each with its rank in
-	// the model memory (plan 031 §3.6; nativeOpened.choices).
-	infos := choiceInfos(opened.choices)
+	// the model memory (plan 031 §3.6; nativeOpened.choices) — within the
+	// catalog's bounds, said once when they cut anything (plan 034 C5r, r12
+	// #6). modelsMu is taken for the note's memory, as a reload's; none can
+	// run yet, with no harness installed.
+	current, _ := hs.Current()
+	infos, cut := choiceInfos(opened.choices, current)
+	s.modelsMu.Lock()
+	s.noteCatalogCut(opened.home, cut)
+	s.modelsMu.Unlock()
 	// The scan and the instruction loader ran inside open(), before the
 	// harness was opened, because the prompt they feed is frozen there (§3.4)
 	// — but still out here rather than under a lock, for the reason the tables
@@ -1348,9 +1364,17 @@ func fetchesPlanList(src *chatgptauth.TokenSource) bool {
 // (native_models.go, Q14 c) — never swapped in here. It writes no sign-in log
 // (no Observe). Close cancels it (done) and waits for it (refreshed). A
 // failure is journaled through redact, the session's redactor
-// (modelsRefreshNote). s.mu is held: it only starts the goroutine.
+// (modelsRefreshNote), and starts a backoff: for planListRetryBackoff after a
+// fetch failed, none is started again (plan 034 C5r, r12 #3b) — joining one in
+// flight bounds how many run at once, the backoff how often a client calling
+// session.models.refresh in a loop can make one, while the reload it asks
+// for still runs and answers. A fetch that succeeds, or finds the list
+// current, ends the backoff. s.mu is held: it only starts the goroutine.
 func (s *nativeSession) refreshModelsLocked(src *chatgptauth.TokenSource, redact func(string) string) {
 	if s.fetching || s.closed {
+		return
+	}
+	if !s.fetchFailed.IsZero() && s.fetchNow().Sub(s.fetchFailed) < planListRetryBackoff {
 		return
 	}
 	s.fetching = true
@@ -1368,7 +1392,8 @@ func (s *nativeSession) refreshModelsLocked(src *chatgptauth.TokenSource, redact
 			}
 		}()
 		fetched, err := chatgptauth.RefreshModels(ctx, src, chatgptauth.ModelsMaxAge, chatgptauth.FetchOptions{ClientVersion: modeltable.ChatGPTModelsClientVersion()})
-		if err != nil && ctx.Err() == nil {
+		failed := err != nil && ctx.Err() == nil
+		if failed {
 			s.log.Note(modelsRefreshNote(err, redact))
 		}
 		if fetched && ctx.Err() == nil {
@@ -1376,8 +1401,29 @@ func (s *nativeSession) refreshModelsLocked(src *chatgptauth.TokenSource, redact
 		}
 		s.mu.Lock()
 		s.fetching = false
+		switch {
+		case failed:
+			s.fetchFailed = s.fetchNow()
+		case err == nil:
+			s.fetchFailed = time.Time{}
+		}
 		s.mu.Unlock()
 	}()
+}
+
+// planListRetryBackoff is how long after a failed fetch of the plan's model
+// list no other is started (refreshModelsLocked; plan 034 C5r, r12 #3b): long
+// enough that a client asking in a loop costs the account one request per
+// half minute, short enough that a person retrying after fixing what failed —
+// a network back, a sign-in finished — waits for no more than that.
+const planListRetryBackoff = 30 * time.Second
+
+// fetchNow is fetchClock's reading, the wall clock's when it is nil.
+func (s *nativeSession) fetchNow() time.Time {
+	if s.fetchClock != nil {
+		return s.fetchClock()
+	}
+	return time.Now()
 }
 
 // nativeOpened is what open() resolved beside the harness and the content:
@@ -1650,13 +1696,18 @@ func nativeCurrentMode(mode string) string {
 // choiceInfos is the model list a snapshot shows for a picker's choices
 // (modeltable.Table.Choices), in their order, each with its rank in the model
 // memory; the name is sanitized, since it is text from a file the owner edits
-// by hand. Start's list and every reload's (native_models.go) are built by it.
-func choiceInfos(choices []modeltable.Choice) []ModelInfo {
+// by hand. Start's list and every reload's (native_models.go) are built by it,
+// and so is everything that carries the list — the info document's
+// catalogs.models, the catalog section, the snapshot's and session.state's
+// settings.catalog — so it is where the list is held to the catalog's bounds
+// (boundCatalog; current is the model the session runs on), and it answers
+// what they cut.
+func choiceInfos(choices []modeltable.Choice, current string) ([]ModelInfo, catalogCut) {
 	infos := make([]ModelInfo, 0, len(choices))
 	for _, c := range choices {
 		infos = append(infos, ModelInfo{ID: c.Alias, Name: sanitizeLine(c.Name), Recent: c.Recent})
 	}
-	return infos
+	return boundCatalog(infos, current)
 }
 
 // tableModels is the model list a snapshot shows for table: aliases as ids,

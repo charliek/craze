@@ -536,7 +536,11 @@ funded a model — after it saves a key, after a sign-in has written the plan's
 model list — and when it is about to show the list. It also starts the plan's
 model-list fetch in the background when the list is due (by its age, or a
 list fetched for another `client_version`); a list that fetch brings is taken
-up by the session itself and published the same way.
+up by the session itself and published the same way. One fetch runs at a
+time — a call while one is in flight joins it — and none starts within 30
+seconds of one that failed, so a client calling in a loop costs the account
+at most one request per half minute; the call itself still reloads and
+answers.
 
 It is served where the session capability `modelsRefresh` is `true`: every
 native session, whoever hosts it. Where it is absent — every ACP session, and
@@ -549,13 +553,13 @@ method, `unknown_method`), and craze's own client reads either as the status
 | params | |
 |---|---|
 | `sessionId` | as every session-scoped method |
-| `nativeDir` | optional: the craze native directory the client itself saves keys and sign-ins in — an absolute path, at most 4096 characters, else `-32602`, `bad_request`. Paths are not secrets |
+| `nativeDir` | optional: the craze native directory the client itself saves keys and sign-ins in — an absolute path, at most 4096 characters, else `-32602`, `bad_request`. Absent is none; present and empty is not a path, and refused the same, as the schema's pattern refuses it. Paths are not secrets |
 
 | result | |
 |---|---|
 | `status` | `applied` — what the session reads its models from had changed, and it offers what that funds now; `current` — nothing had changed; `pending` — it had changed while a turn ran (or a load replayed), and the session takes it up as that ends; `unsupported` — the session cannot take up models while it runs; `failed` — the files could not be read as a model table, and the list is as it was (the host journals why, value-free) |
 | `revision` | the [catalog section](#live-models)'s revision of the list the session offers after the call: `0` for the list it started with; a `pending` refresh's is the list still offered |
-| `sameDir` | present when `nativeDir` was: whether it is the directory the session reads its models from (compared absolute and cleaned, and with symlinks resolved where both resolve). `false` is the home mismatch — the client and the session's host run with different `CRAZE_HOME`s, so a key the client saved is not one the session can see |
+| `sameDir` | present when `nativeDir` was: whether it is the directory the session reads its models from — compared absolute and cleaned and, where both exist, by the file system's own identity, so a symlink to it, or a spelling a case-insensitive volume folds to it, is the same directory. `false` is the home mismatch — the client and the session's host run with different `CRAZE_HOME`s, so a key the client saved is not one the session can see |
 
 It is **not mutating**: no `commandId`, no receipt, and a resend — of a call
 whose answer was lost, or of one already answered — only asks again (a second
@@ -1245,11 +1249,16 @@ the session offers now, in the picker's order, and the list's revision:
 ```
 
 - Each model is the info document's catalog model: `id` and `name` always,
-  `recent` its rank and absent for a model not remembered. The list has the
-  same bounds as `catalogs.models` (none of its own: it is the model table's,
-  whose files are size-bounded where the host reads them), and no string in
-  it is ever cut — a model id cut short would be one no `session.set` could
-  name.
+  `recent` its rank and absent for a model not remembered. The list has
+  bounds of its own, which the session keeps where it builds the list — so
+  `catalogs.models` keeps them too, and the section fits every record limit
+  and every snapshot budget whatever the owner's model files say: at most
+  **512** models, in the picker's order, the running model always among them;
+  each `name` at most **128** bytes, a longer one cut on a character boundary
+  and ended with `…`; and a model whose `id` would be over **256** bytes is not
+  offered at all, since an id is never cut — one cut short would be one no
+  `session.set` could name. The session says on its diagnostics, once and
+  without the text, what the bounds cut. Real tables are far inside them.
 - `revision` is always written. It is `0` for the list a session started
   with, and only ever grows within one incarnation, in `seq` order. A change
   found while a turn runs (a `pending` refresh) is published once that turn
@@ -1580,7 +1589,10 @@ again of the second's arrival and of its detach, the row saying `attached: 2`
 `sameDir: true`, then `applied` at revision 1 with `sameDir: false`, its
 `catalog` delta before the reply and on a second client's stream, then
 `current` again — and a third client whose attach reply, snapshot and
-`session.state` carry the new list at its revision (24); and, through the
+`session.state` carry the new list at its revision, then, through the hub, a
+fourth whose splice carries an attach whose snapshot holds the list and that
+client's own refresh, `applied` at revision 2 after its `catalog` delta,
+the delta reaching the three direct clients too (24); and, through the
 hub, the method sent to the hub itself (`host_only`) and, through a splice,
 an ACP-like session whose info document says no `modelsRefresh` — the
 document an older host sends too, to which a client makes no call — refusing
