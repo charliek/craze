@@ -45,9 +45,16 @@ def catalog_env_names() -> tuple[str, ...]:
 
 
 def _bin(env_name: str, *parts: str) -> Path:
+    """A binary under test: bin/<name>, or env_name's override.
+
+    An override is made absolute against the directory pytest runs in, where
+    it was given: a test runs its binaries from directories of its own (a
+    tmp_path as the working directory, a copy, a config.toml naming one), and
+    a relative path would mean something else in each (plan 036 r7).
+    """
     override = os.environ.get(env_name)
     if override:
-        return Path(override)
+        return Path(override).absolute()
     path = ROOT.joinpath(*parts)
     if not path.is_file():
         pytest.fail(f"{path} is missing; run `make build` (or set {env_name})")

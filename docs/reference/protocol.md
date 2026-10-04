@@ -1791,7 +1791,7 @@ set before the first bridge runs.
 | `HOME` | `/tmp/craze-recipe/home` | the registry, `$HOME/.cache/craze/`: where the hub lists hosts and keeps its record, and where `craze-fake-host --registry` lists itself. A scratch one, so no session or hub of the machine's is seen |
 | `CRAZE_HOME` | `/tmp/craze-recipe/craze-home` | `config.toml`, the session index that `recentDirs` reads, and native's keys (there are none). The hub and every host under it share its namespace |
 | `CRAZE_RUNTIME_DIR` | `/tmp/craze-recipe/run` | where the sockets are bound. It must be short, because craze refuses a socket path over 100 bytes ([above](#the-namespace-and-the-socket-path)) and a macOS `$TMPDIR` alone can crowd one out. It is mode `0700`, because craze refuses a runtime directory others can write |
-| `PATH` | `/tmp/craze-recipe/path` | a directory of the recipe's own, holding links to the two programs it runs by name, `craze` and `craze-fake-host`, and nothing else. So `cursor-agent` and `agent` (cursor's two names), `grok` and `gx` are found nowhere, whatever a system directory or the binaries' own directory holds. `cursor` is `unavailable`, "not found", on Linux and macOS alike: a missing binary is reported ahead of the macOS login-session rule, whose answer depends on how the machine was reached. `gx` is not listed |
+| `PATH` | `/tmp/craze-recipe/path` | a directory of the recipe's own, holding copies of the two programs it runs, `craze` and `craze-fake-host`, and nothing else. So `cursor-agent` and `agent` (cursor's two names), `grok` and `gx` are found nowhere, whatever a system directory or `BIN` holds. `cursor` is `unavailable`, "not found", on Linux and macOS alike: a missing binary is reported ahead of the macOS login-session rule, whose answer depends on how the machine was reached. `gx` is not listed |
 | `CRAZE_FAKE_SCRIPT` | `grok-echo` | the fake agent speaks grok's dialect and answers each prompt with `echo: <prompt>`. No other `CRAZE_FAKE_*` variable reaches it |
 | `CRAZE_FAKE_SESSION_ID` | `{dir}` | the fake agent names its session after its working directory (`work`), so each session's index row is its own |
 
@@ -1799,11 +1799,20 @@ Nothing a craze process starts is looked up on `PATH` except the providers'
 binaries, which must not be found. craze runs itself again (its own
 executable, by its full path) as the hub and as each host; the one agent a
 host starts here, grok's, is `[agents].grok`, a full path; and neither fake
-starts anything. So the two links are all the private `PATH` needs. The
+starts anything. So the two programs are all the private `PATH` needs. The
 recipe's own shell commands — the scripts step 1 writes, and the `env`,
-`tail`, `grep`, `ps` and `sleep` they run — run under your `PATH`. Only what
+`tail`, `grep`, `ps`, `date` and `sleep` they run — run under your `PATH`. Only what
 `clean` starts sees the private one, and everything craze starts inherits it
 from there: every bridge, the hub, each host, each agent, and the fake host.
+
+The two programs are copies, not links, and `clean` runs each by its full
+path. So the command line of every craze process of the recipe's starts with
+`/tmp/craze-recipe/path/`: each bridge and the fake host, as `clean` runs
+them, and the hub and each host, which craze runs again by its own path —
+on Linux the real path of the file it runs, which a link would leave in
+`BIN`. Nothing else runs a program from there, unless you do, and that is
+how `cleanup` tells the recipe's processes from any other. (The fake agent runs
+from `BIN`, as `config.toml` names it; its host ends it.)
 
 grok reaches the fake agent only through `config.toml`'s `[agents]`. That is
 the one route to the hub's hosts, because the hub strips `CRAZE_AGENT_BIN`
@@ -1814,11 +1823,11 @@ on every machine.
 **Driving a bridge.** Besides `clean`, step 1 writes five small scripts
 beside the recipe's files:
 
-- `start NAME COMMAND…` runs `COMMAND` under `clean`, in the background. Its
-  stdin is every line appended to `NAME.in`, which `tail -n +1 -f` follows,
-  and it writes `NAME.out` and `NAME.err`. `NAME.pid` records its pid and
-  `NAME.tail` its tail's, for `cleanup`. A bridge, like the fake host, ends
-  when its stdin does, and its stdin ends when its tail is killed.
+- `start NAME PROGRAM ARGS…` runs the recipe's `PROGRAM` under `clean`, in
+  the background. Its stdin is every line appended to `NAME.in`, which
+  `tail -n +1 -f` follows, and it writes `NAME.out` and `NAME.err`. A bridge,
+  like the fake host, ends when its stdin does, and its stdin ends when its
+  tail does.
 - `await NAME TEXT [SECONDS]` prints the lines of `NAME.out` that hold
   `TEXT`, once there is one, waiting at most `SECONDS` (30 if not given).
 - `reply NAME ID [SECONDS]` prints `NAME`'s reply to request `ID` once it has
@@ -1826,10 +1835,11 @@ beside the recipe's files:
   and a reply can come before or after one.
 - `poll NAME SECONDS TEXT METHOD PARAMS` sends `METHOD` with `PARAMS` to
   `NAME` again and again, with the ids 100, 101 and so on, until a reply
-  holds `TEXT`, and prints that reply. `SECONDS` bounds the whole poll: each
-  reply is waited for only as long as is left, the pause between two
-  requests included.
-- `cleanup` ends everything the recipe started (below).
+  holds `TEXT`, and prints that reply. `SECONDS` bounds the whole poll, to
+  the second: its end is fixed once, when it starts (`AWAIT_END`, which
+  `await` then waits until), and every send, reply and pause between two
+  requests comes out of it. A reply that comes after the end is not taken.
+- `cleanup` ends every process of the recipe's (below).
 
 A request is one line appended to `NAME.in` with `printf … >>`, which never
 blocks. A bridge that has died never reads it, and the wait for its reply
@@ -1848,33 +1858,30 @@ it has one, and remove it first.
 BIN=/absolute/path/to/craze/bin
 R=/tmp/craze-recipe
 mkdir -m 700 "$R" "$R/home" "$R/craze-home" "$R/run" "$R/work" "$R/path"
-ln -s "$BIN/craze" "$BIN/craze-fake-host" "$R/path/"
+cp "$BIN/craze" "$BIN/craze-fake-host" "$R/path/"
 cat > "$R/clean" <<EOF
 #!/bin/sh
-exec env -i HOME='$R/home' CRAZE_HOME='$R/craze-home' CRAZE_RUNTIME_DIR='$R/run' PATH='$R/path' CRAZE_FAKE_SCRIPT=grok-echo CRAZE_FAKE_SESSION_ID='{dir}' "\$@"
+# clean PROGRAM ARGS...: the recipe's own copy of PROGRAM, run by its full
+# path with the recipe's environment alone.
+p=\$1; shift
+exec env -i HOME='$R/home' CRAZE_HOME='$R/craze-home' CRAZE_RUNTIME_DIR='$R/run' PATH='$R/path' CRAZE_FAKE_SCRIPT=grok-echo CRAZE_FAKE_SESSION_ID='{dir}' "$R/path/\$p" "\$@"
 EOF
 cat > "$R/start" <<'EOF'
 #!/bin/sh
-# start NAME COMMAND...: COMMAND under clean, in the background, reading what
-# is appended to NAME.in and writing NAME.out and NAME.err. NAME.pid and
-# NAME.tail record its pid and its tail's, each with its command line.
-d=$(dirname "$0"); n=$1; shift
+# start NAME PROGRAM ARGS...: PROGRAM under clean, in the background, reading
+# each line appended to NAME.in and writing NAME.out and NAME.err.
+d=$(dirname "$0"); d=${d#/private}; n=$1; shift
+case $d in /*) ;; *) echo "start: run it by its full path" >&2; exit 2 ;; esac
 : > "$d/$n.in"; : > "$d/$n.err"
-sh -c 'echo "$$ tail -n +1 -f $2" > "$1"; exec tail -n +1 -f "$2"' tail "$d/$n.tail" "$d/$n.in" 2>> "$d/$n.err" |
-  "$d/clean" "$@" > "$d/$n.out" 2>> "$d/$n.err" &
-echo "$! $*" > "$d/$n.pid"
-i=0
-until [ -s "$d/$n.tail" ]; do
-  i=$((i + 1)); if [ "$i" -gt 50 ]; then echo "$n: its tail did not start" >&2; exit 1; fi
-  sleep 0.1
-done
+tail -n +1 -f "$d/$n.in" 2>> "$d/$n.err" | "$d/clean" "$@" > "$d/$n.out" 2>> "$d/$n.err" &
 EOF
 cat > "$R/await" <<'EOF'
 #!/bin/sh
 # await NAME TEXT [SECONDS]: the lines of NAME.out holding TEXT, once there is
-# one, waiting at most SECONDS (30 if not given).
+# one, waiting at most SECONDS (30 if not given) -- or, when AWAIT_END is
+# set, until that time (date +%s).
 out="$(dirname "$0")/$1.out"
-end=$(( $(date +%s) + ${3:-30} ))
+end=${AWAIT_END:-$(( $(date +%s) + ${3:-30} ))}
 until grep -F -- "$2" "$out"; do
   if [ "$(date +%s)" -ge "$end" ]; then echo "nothing in $out holds $2" >&2; exit 1; fi
   sleep 0.1
@@ -1888,52 +1895,59 @@ EOF
 cat > "$R/poll" <<'EOF'
 #!/bin/sh
 # poll NAME SECONDS TEXT METHOD PARAMS: METHOD sent to NAME with ids 100, 101,
-# ... until a reply holds TEXT, which is printed; at most SECONDS in all.
+# ... until a reply holds TEXT, which is printed. Its end is fixed once, here:
+# each reply is waited for until then, and one that comes later is not taken.
 d=$(dirname "$0"); id=100
-end=$(( $(date +%s) + $2 ))
-while :; do
-  left=$(( end - $(date +%s) ))
-  if [ "$left" -le 0 ]; then echo "no reply from $1 held $3 within $2 s" >&2; exit 1; fi
+AWAIT_END=$(( $(date +%s) + $2 )); export AWAIT_END
+while [ "$(date +%s)" -lt "$AWAIT_END" ]; do
   printf '{"jsonrpc":"2.0","id":%d,"method":"%s","params":%s}\n' "$id" "$4" "$5" >> "$d/$1.in"
-  if "$d/reply" "$1" "$id" "$left" | grep -F -- "$3"; then exit 0; fi
+  if r=$("$d/reply" "$1" "$id") && [ "$(date +%s)" -lt "$AWAIT_END" ] &&
+    printf '%s\n' "$r" | grep -F -- "$3"; then exit 0; fi
   id=$((id + 1))
   sleep 0.1
 done
+echo "no reply from $1 held $3 within $2 s" >&2; exit 1
 EOF
 cat > "$R/cleanup" <<'EOF'
 #!/bin/sh
-# cleanup: end everything the recipe started, wait for it to go, and print
+# cleanup: end every process of the recipe's, wait for them to go, and print
 # what is left, or "nothing left". Running it again is harmless.
-d=$(dirname "$0"); cache="$d/home/.cache/craze"
-# running PID TEXT: PID is running, and its command line holds TEXT.
-running() { [ -n "$1" ] && ps -p "$1" -o args= 2>/dev/null | grep -qF -- "$2"; }
-# started FILE...: each pid that start recorded whose process is still that one.
-started() { for f; do [ -f "$f" ] && read -r p c < "$f" && running "$p" "$c" && echo "$p"; done; }
-# listed DIR TEXT: each pid a record in the cache's DIR names that runs TEXT.
-listed() {
-  for f in "$cache/$1"/*.json; do
-    p=$(sed -n 's/^ *"pid": *\([0-9]*\).*/\1/p' "$f" 2>/dev/null); running "$p" "$2" && echo "$p"
-  done
+d=$(dirname "$0"); d=${d#/private}
+case $d in /*) ;; *) echo "cleanup: run it by its full path" >&2; exit 2 ;; esac
+# ours ARGS [fake]: ARGS, a command line, is a process of the recipe's -- a
+# program run from its own copy in path/, or a tail of one of its .in files.
+# The fake host counts only with "fake". (macOS can spell /tmp /private/tmp.)
+ours() {
+  case ${1#/private} in
+    "$d/path/craze-fake-host "*) [ "$2" = fake ] ;;
+    "$d/path/"* | "tail -n +1 -f $d/"*.in) true ;;
+    *) false ;;
+  esac
 }
+# pids [fake]: the pid of each process of the recipe's.
+pids() { ps -A -o pid= -o args= | while read -r p a; do ours "$a" "$1" && echo "$p"; done; }
+# term [fake]: SIGTERM each, its command line checked again just before.
+term() { for p in $(pids "$1"); do ours "$(ps -p "$p" -o args=)" "$1" && kill "$p" 2>/dev/null; done; }
 # left: what is still here, one line each.
 left() {
-  for p in $(started "$d"/*.tail "$d"/*.pid); do echo "process $p: $(ps -p "$p" -o args=)"; done
-  for p in $(listed hosts 'craze serve') $(listed hubs 'craze hub'); do echo "process $p: $(ps -p "$p" -o args=)"; done
-  for f in "$cache"/hosts/*.json "$cache"/hubs/*.json; do [ -f "$f" ] && echo "file $f"; done
+  ps -A -o pid= -o args= | while read -r p a; do ours "$a" fake && echo "process $p: $a"; done
+  for f in "$d"/home/.cache/craze/hosts/*.json "$d"/home/.cache/craze/hubs/*.json; do
+    [ -f "$f" ] && echo "file $f"
+  done
 }
 # waitfor SECONDS COMMAND...: until COMMAND prints nothing, at most SECONDS.
 waitfor() {
   end=$(( $(date +%s) + $1 )); shift
   while [ -n "$("$@")" ] && [ "$(date +%s)" -lt "$end" ]; do sleep 0.1; done
 }
-# 1. Kill each tail, whose end is its stdin's: a bridge, or the fake host,
-#    is told to go, and the fake host unlists itself. SIGTERM each host the
-#    hub created: its stop, which ends its session and its connections.
-for p in $(started "$d"/*.tail) $(listed hosts 'craze serve'); do kill "$p"; done
-waitfor 10 started "$d"/*.pid
-# 2. SIGTERM the hub (its teardown removes its record), and whatever is
-#    still running of the rest.
-for p in $(started "$d"/*.pid) $(listed hosts 'craze serve') $(listed hubs 'craze hub'); do kill "$p"; done
+# 1. SIGTERM each but the fake host: each tail (its end is a bridge's or the
+#    fake host's stdin's), each bridge, each host the hub created (its stop)
+#    and the hub (its teardown, which removes its record). The fake host goes
+#    at its stdin's end, and unlists itself.
+term
+waitfor 10 pids fake
+# 2. SIGTERM any of them still running, the fake host included.
+term fake
 waitfor 10 left
 rest=$(left)
 if [ -z "$rest" ]; then echo "nothing left"; else printf 'left:\n%s\n' "$rest"; exit 1; fi
@@ -2125,23 +2139,26 @@ printf '{"jsonrpc":"2.0","id":5,"method":"session.stop","params":{"sessionId":"%
   cleanup: the cleanup stops the hub, and a hub's SIGTERM ends every splice
   through it, so a session's end that has not yet reached the client is
   lost to it.
-- `cleanup` kills the three tails. The fake host's stdin ends, and it
-  unlists itself and exits. Each bridge's stdin ends, the hub (or the host
-  at the other end of a splice) closes its connection, and the bridge
-  exits. A host the hub created whose session is still running (a run that
-  failed before step 10) is sent SIGTERM, which is its stop: its session
-  ends, and so does the connection of a bridge attached to it. The cleanup
-  waits, for at most 10 s, for the bridges and the fake host to go.
-- It then sends SIGTERM to the hub, its pid read from the hub's record, and
-  to anything of the rest still running. The hub's SIGTERM is its clean
-  teardown. Left alone, a hub exits 60 s after its last client and host
-  have gone.
-- It waits, for at most 10 s more, until none of those processes runs, no
-  registry entry is left in `home/.cache/craze/hosts`, and no hub record
-  (`.json`) in `home/.cache/craze/hubs`. It signals a pid only while its
-  process's command line is the one expected — the one `start` recorded,
-  or `craze serve` or `craze hub` for a pid a record names — so it never
-  signals a process that has since taken the pid.
+- `cleanup` finds the recipe's processes by their command lines: each one
+  that starts with `/tmp/craze-recipe/path/` (or `/private/tmp/…`, as macOS
+  can spell it), and each `tail -n +1 -f` of one of its `.in` files. It
+  sends SIGTERM to each but the fake host. A tail's end is a bridge's stdin's
+  or the fake host's. A host the hub created whose session is still running
+  (a run that failed before step 10) stops, which ends its session. The
+  hub's SIGTERM is its clean teardown, which removes its record; left alone,
+  a hub exits 60 s after its last client and host have gone. The fake host
+  goes at its stdin's end, and unlists itself. The cleanup waits, for at
+  most 10 s, for all of them to go.
+- It then sends SIGTERM to any of them still running, the fake host
+  included (a SIGTERM leaves its registry entry behind), and waits, for at
+  most 10 s more, until none of them runs, no registry entry is left in
+  `home/.cache/craze/hosts`, and no hub record (`.json`) in
+  `home/.cache/craze/hubs`.
+- Each process's command line is read again just before its signal. So
+  `cleanup` signals no process but the recipe's, save in two cases it
+  cannot rule out: a process that ends in the instant between that read
+  and its signal, its pid taken by another process in that same instant;
+  and a program you run from `/tmp/craze-recipe/path` yourself.
 
 It prints `nothing left`, or `left:` and a line for each process or file
 still there, and exits 1. Run it again to retry; it ends only what is still
@@ -2154,9 +2171,11 @@ harmless, since the lock's flock, not the file, is what a running hub holds.
 
 In the test, `conftest.py`'s isolation supplies `HOME`, `CRAZE_HOME` and a
 short `CRAZE_RUNTIME_DIR` in place of `/tmp/craze-recipe`, and its private
-`PATH` holds the same two links, to the binaries under test. Each bridge's
-and the fake host's stdin is a pipe the test holds, so closing it is what
-killing the tail does here. The test files each process the moment it
+`PATH` holds the same two copies, of the binaries under test, each run by
+its full path. The test checks that the hub and the host it creates run the
+copy of craze — the premise of `cleanup`'s rule — and checks the hub's
+again just before it signals it. Each bridge's and the fake host's stdin is
+a pipe the test holds, so closing it is what ending the tail does here. The test files each process the moment it
 starts, before it waits for anything from it, and a fixture that names
 `host_cleanup` as its own dependency closes every stdin first, so even a
 fake host whose ready line never came is ended, and a fake host always

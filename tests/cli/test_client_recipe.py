@@ -5,16 +5,17 @@ real hub" (under "Fixtures and the fake host"): the same environment, the same
 config.toml, the same JSON lines in the same order, and the same answers. A
 change to one is a change to the other.
 
-It drives `craze bridge --hub` as a raw JSON-RPC client -- its stdin and
-stdout are pipes, as an SSH exec's are -- through the small NDJSON reader
-below. The reader tells replies (by `id`) from notifications and keeps both,
+It drives `craze bridge --hub` -- the recipe's own copy of craze -- as a raw
+JSON-RPC client -- its stdin and stdout are pipes, as an SSH exec's are --
+through the small NDJSON reader below. The reader tells replies (by `id`) from notifications and keeps both,
 so no wait depends on the order in which the two interleave. The hub is the
 real one, spawned by the first bridge. Beside it run one `craze-fake-host`,
 listed in the registry as a craze host is, and the session the hub creates:
 a real `craze serve` whose grok is the fake agent. Every wait is bounded and
 waits on its own precondition: a ready line, a reply's id, a notification.
 The two polls, for the echo and for the recent directories, are bounded
-polls of a method, each request given only the time left.
+polls of a method: one deadline, fixed when the poll starts, bounds every
+request's send and reply.
 """
 
 from __future__ import annotations
@@ -22,6 +23,7 @@ from __future__ import annotations
 import json
 import os
 import select
+import shutil
 import signal
 import subprocess
 import time
@@ -56,21 +58,31 @@ HELLO = {"protocols": [1], "client": {"kind": "test", "name": "recipe"}}
 
 def private_path(path_dir: Path, craze_bin: Path, craze_fake_host_bin: Path) -> Path:
     """The recipe's PATH: a directory of its own holding exactly the two
-    programs it runs by name, and nothing else (plan 036 r5).
+    programs it runs, and nothing else (plan 036 r5, r7).
 
     Nothing a craze process starts is looked up on PATH, except the
     providers' binaries, which must not be found. craze re-executes itself
     (os.Executable()) as the hub and as each host. The one agent a host
     starts here, grok's, is config.toml's [agents].grok, an absolute path.
-    Neither fake starts anything. So the list is craze and craze-fake-host,
-    each a symlink to the binary under test. Then cursor's candidates (cursor-agent, then
-    agent), grok and gx are found nowhere, on every machine, wherever the
-    binaries under test live: no system directory, and no directory a
-    CRAZE_BIN override sits in, is ever searched.
+    Neither fake starts anything. So the list is craze and craze-fake-host.
+    Then cursor's candidates (cursor-agent, then agent), grok and gx are
+    found nowhere, on every machine, wherever the binaries under test live:
+    no system directory, and no directory a CRAZE_BIN override sits in, is
+    ever searched.
+
+    Each is a copy of the binary under test, not a link, and runs by its
+    full path here. craze's os.Executable() is, on Linux, the real path of
+    the file it runs (/proc/self/exe), which a link would leave pointing at
+    the original. A copy makes this directory the start of the command line
+    of every craze process the recipe has -- each bridge, the fake host, the
+    hub and each host -- and that is how protocol.md's `cleanup` tells the
+    recipe's processes from any other (steps 7 and 10 check it). The
+    fixtures' paths are absolute (conftest._bin), so a relative override is
+    copied from where pytest runs.
     """
     path_dir.mkdir()
-    for name, target in (("craze", craze_bin), ("craze-fake-host", craze_fake_host_bin)):
-        (path_dir / name).symlink_to(target)
+    for name, source in (("craze", craze_bin), ("craze-fake-host", craze_fake_host_bin)):
+        shutil.copy(source, path_dir / name)
     return path_dir
 
 
@@ -156,11 +168,11 @@ class Bridge:
 
     def __init__(self, env: dict[str, str], stderr: Path) -> None:
         self.stderr = stderr
-        # "craze" is found on env's PATH, the recipe's private one, as
-        # protocol.md's `clean` finds it.
+        # The recipe's own copy of craze, in its PATH directory, run by its
+        # full path, as protocol.md's `clean` runs it.
         with stderr.open("wb") as err:
             self.proc = subprocess.Popen(
-                ["craze", "bridge", "--hub"],
+                [str(Path(env["PATH"]) / "craze"), "bridge", "--hub"],
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=err,
@@ -177,17 +189,20 @@ class Bridge:
         self.proc.stdin.write(json.dumps(msg, separators=(",", ":")).encode() + b"\n")
         self.proc.stdin.flush()
 
-    def call(self, id_: Any, method: str, params: dict, timeout: float = WAIT) -> dict:
+    def call(self, id_: Any, method: str, params: dict, timeout: float = WAIT, deadline: float | None = None) -> dict:
         """Send one request and return its result. The test fails on an
-        error."""
+        error. The reply is waited for until deadline (time.monotonic()),
+        or else until timeout after the call began: either way, the send's
+        own time counts against it."""
+        if deadline is None:
+            deadline = time.monotonic() + timeout
         self.send({"jsonrpc": "2.0", "id": id_, "method": method, "params": params})
-        msg = self.reply(id_, timeout)
+        msg = self.reply(id_, deadline)
         assert "error" not in msg, f"{method} was refused: {msg}"
         return msg["result"]
 
-    def reply(self, id_: Any, timeout: float = WAIT) -> dict:
+    def reply(self, id_: Any, deadline: float) -> dict:
         """The reply to request id_, whole: its result or its error."""
-        deadline = time.monotonic() + timeout
         while id_ not in self._replies:
             self._take(deadline, f"the reply to request {id_!r}")
         return self._replies.pop(id_)
@@ -204,22 +219,21 @@ class Bridge:
         """protocol.md's `poll`: method sent with ids POLL_FIRST_ID, then one
         more each time, until done holds for a result, which is returned.
 
-        timeout bounds the whole poll: the time left is checked before each
-        request and is all its reply is given, and the pause between two
-        requests is taken out of it too.
+        timeout bounds the whole poll: its deadline is fixed once, here, and
+        is checked before each request, carried through the request's send
+        and its reply's wait, and checked again before a result is accepted.
+        The pause between two requests is taken out of it too.
         """
         deadline = time.monotonic() + timeout
         id_ = POLL_FIRST_ID
         result: dict | None = None
-        while True:
-            left = deadline - time.monotonic()
-            if left <= 0:
-                raise AssertionError(f"no {method} reply showed {what} within {timeout:g}s; the last: {result}")
-            result = self.call(id_, method, params, timeout=left)
-            if done(result):
+        while time.monotonic() < deadline:
+            result = self.call(id_, method, params, deadline=deadline)
+            if done(result) and time.monotonic() < deadline:
                 return result
             id_ += 1
             time.sleep(max(0.0, min(0.1, deadline - time.monotonic())))
+        raise AssertionError(f"no {method} reply showed {what} within {timeout:g}s; the last: {result}")
 
     def close(self, timeout: float = WAIT) -> int:
         """Close stdin, read what is left up to the bridge's EOF, and return
@@ -275,10 +289,10 @@ class FakeHost:
 
     def __init__(self, env: dict[str, str], args: list[str], stderr: Path) -> None:
         self.stderr = stderr
-        # Found on env's PATH, as `craze` is (Bridge).
+        # The recipe's own copy, by its full path, as craze's (Bridge).
         with stderr.open("wb") as err:
             self.proc = subprocess.Popen(
-                ["craze-fake-host", *args],
+                [str(Path(env["PATH"]) / "craze-fake-host"), *args],
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=err,
@@ -380,6 +394,19 @@ def _echoed(result: dict) -> bool:
     return any(e.get("kind") == "assistant" and e.get("text") == "echo: hello recipe" for e in entries)
 
 
+def _program(pid: int) -> str:
+    """The program pid runs, as its command line's first word names it
+    (conftest._argv), or "" when that cannot be read. Only its directory is
+    resolved (macOS's /tmp is /private/tmp), never the program itself: a
+    link to craze names the link, and its target is another program. A
+    process whose program is one of the recipe's own copies (private_path)
+    is the recipe's: that is protocol.md's `cleanup` rule."""
+    argv = conftest._argv(pid)
+    if not argv:
+        return ""
+    return os.path.join(os.path.realpath(os.path.dirname(argv[0])), os.path.basename(argv[0]))
+
+
 def _session_closed(notes: list[dict]) -> dict | None:
     return next((n for n in notes if n.get("method") == "reset" and n["params"]["reason"] == "session_closed"), None)
 
@@ -392,7 +419,9 @@ def test_a_client_against_a_real_hub(
     session created through the hub and read back through its splice, the
     recent directory the session leaves, and a cleanup that leaves nothing."""
     # 1. The environment, fixed before the first bridge spawns the hub.
-    env = recipe_env(private_path(tmp_path / "path", craze_bin, craze_fake_host_bin))
+    path_dir = private_path(tmp_path / "path", craze_bin, craze_fake_host_bin)
+    env = recipe_env(path_dir)
+    recipe_craze = os.path.join(os.path.realpath(path_dir), "craze")
 
     # 2. config.toml: the default provider, the hosts' idle exit (the suite's
     # TEST_HOST_IDLE_EXIT), and grok pointed at the fake agent.
@@ -416,6 +445,9 @@ def test_a_client_against_a_real_hub(
     caps = hello["capabilities"]
     assert [c for c in ("rosterSubscribe", "sessionCreate", "connect", "createOptions") if caps.get(c) is not True] == [], caps
     hub_pid = hello["endpoint"]["pid"]
+    # The hub runs the recipe's own craze: craze ran itself again by its own
+    # path, which is the copy's.
+    assert _program(hub_pid) == recipe_craze, conftest._argv(hub_pid)
 
     # 5. What a create can start, exactly.
     options = a.call(2, "sessions.createOptions", {})
@@ -455,6 +487,9 @@ def test_a_client_against_a_real_hub(
     assert created["prompt"] == "accepted", created
     host_id, session_id = created["session"]["hostId"], created["session"]["sessionId"]
     assert created["session"]["host"]["provider"] == "grok", created
+    # So does the host the hub created.
+    host_pid = created["session"]["host"]["pid"]
+    assert _program(host_pid) == recipe_craze, conftest._argv(host_pid)
     a.wait_for(lambda notes: _upsert_of(notes, session_id), f"a roster upsert naming {session_id}")
 
     # 8. Read it back through the hub: hello, the splice, the host's hello,
@@ -478,12 +513,13 @@ def test_a_client_against_a_real_hub(
     assert [os.path.realpath(d["dir"]) for d in dirs] == [os.path.realpath(work)], dirs
 
     # 10. Cleanup. Stop the session (its host closes bridge B's connection)
-    # and wait for its end to reach B. Then protocol.md's `cleanup`, in its
-    # order: every stdin closed -- the fake host's (it unlists itself) and
-    # each bridge's -- and each of them waited for (no created host is left
-    # to SIGTERM: its session is stopped); then SIGTERM to the hub, by the
-    # pid its record names, which is its clean teardown. Then nothing of the
-    # recipe's is left, before host_cleanup looks.
+    # and wait for its end to reach B. Then what protocol.md's `cleanup`
+    # does, one process at a time: every stdin closed -- the fake host's (it
+    # unlists itself) and each bridge's -- and each of them waited for (no
+    # created host is left to SIGTERM: its session is stopped); then SIGTERM
+    # to the hub, its pid the one its record names, and checked just before
+    # to run the recipe's own craze still, which is its clean teardown. Then
+    # nothing of the recipe's is left, before host_cleanup looks.
     assert b.call(5, "session.stop", {"sessionId": session_id, "commandId": "1"}) == {}
     b.wait_for(_session_closed, "reset{session_closed}")
     fake.close_stdin()
@@ -493,6 +529,7 @@ def test_a_client_against_a_real_hub(
     hubs = Path(env["HOME"]) / ".cache" / "craze" / "hubs"
     records = [json.loads(p.read_text(encoding="utf-8")) for p in hubs.glob("*.json")]
     assert [r["pid"] for r in records] == [hub_pid], records
+    assert _program(hub_pid) == recipe_craze, conftest._argv(hub_pid)
     os.kill(hub_pid, signal.SIGTERM)
     deadline = time.monotonic() + WAIT
     while True:
