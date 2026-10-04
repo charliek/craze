@@ -1,8 +1,41 @@
 # 06 — shed lane (S3)
 
-**Order (SD-34):** S3 runs after S4b (the hub) and after shed has made its
-first release of its own lane work, so it starts with a hub roster and
-`session.create` (shed's `create` capability), both brought by S4b.
+> **Design settled 2026-10-03; the brief is shed's
+> [`docs/discovery/craze-lane.md`](https://github.com/charliek/shed/blob/main/docs/discovery/craze-lane.md)
+> (SD-40 to SD-46).** It changes this page in these places, and wins where they
+> differ:
+>
+> - **The hub is a machine-level source, not a lane hung off a roost tab
+>   (SD-42).** One `craze bridge --hub` connection per machine lists every
+>   craze session, tab-hosted or headless, says which providers can start, and
+>   creates sessions; each open transcript is a connection of its own. shed's
+>   contract splits into a machine-level source and a session-level lane with
+>   per-session capabilities.
+> - **Status is craze's for craze sessions (SD-43, replacing SD-15 for
+>   them).** A roost tab craze owns folds into the hub row it names.
+>   **Correction:** roost's ownership key is the *provider* session id
+>   (`internal/tui/host.go`, as SQ5 says), not craze's own; the row's
+>   `providerSessionId` matches it.
+> - **craze is shed's only ACP lane.** gx's lane and shed's
+>   cursor/codex/grok/gx kinds are retired from shed (SD-40), so "the third
+>   lane after opencode and gx" below is history.
+> - **Create picks a provider; settings change in the session.** A provider
+>   availability check and a hub create-options call come first, in craze
+>   (S3a, SD-44, SD-46). A running session's model, effort, fast mode, context
+>   and mode change from one settings sheet (SD-45).
+> - **Item 3 below is corrected.** `shed-host-agent` is shed's credential
+>   broker and runs nothing for lanes. Cursor from the phone on a Mac hub
+>   started over ssh is dimmed for the MVP, and the fix is a follow-up
+>   (SF-126, SD-44).
+> - **Order (SD-46).** S3a (craze) runs first, then S3b (shed and
+>   shed-mobile). shed does not release first.
+>
+> The rest of this page stands as the protocol mapping and the rules shed
+> binds craze to (FRB mirror, two signals, `option_for`, append-only rows).
+
+**Order (SD-34, superseded by SD-46):** S3 runs after S4b (the hub) and after
+shed has made its first release of its own lane work, so it starts with a hub
+roster and `session.create` (shed's `create` capability), both brought by S4b.
 
 How craze becomes the third full agent lane in shed and shed-mobile, after
 `opencode` and `gx`. The work is mostly **in the shed repo**; craze's side is

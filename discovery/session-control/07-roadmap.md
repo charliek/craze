@@ -13,7 +13,7 @@ non-test source lines, from the reference reviews (`09`).
 | done | S4a | complete (Plan 030, with S5; 5 PRs: #66, #68, #70, #71, PR 4) | Detached hosts: `craze serve`, hosts born detached, `session.stop`, idle exit |
 | done | S5 | complete (Plan 030, with S4a) | Agent view in the TUI: a session list of every running session on the machine, new sessions started from it, composer `@` mentions |
 | done | S4b | complete (Plan 032; 5 PRs: #75, #76, #78, #79, #81) | The hub (local machine only): `craze ps`, `hub.sock`, `sessions.subscribe` on the hub, `session.create` |
-| 1 | S3 | not started on shed's side (next, after shed's first release of its own lane work); craze's side ready (Plan 035; 2 PRs: #83, #84) | `shed-craze` lane adapter in shed; craze in shed-mobile's `LANE_KINDS` |
+| 1 | S3 | design settled 2026-10-03 (shed `docs/discovery/craze-lane.md`, SD-40 to SD-46); **S3a (craze) next**, then S3b (shed + shed-mobile); Plan 035 (#83, #84) readied the protocol | craze as shed's machine-level source: provider availability and create options in craze (S3a); the source/lane contract split, `shed-craze`, the desktop and phone clients, gx retired, a settings sheet (S3b) |
 | 2 | S4c | directional | Remote-machine listing: the hub roster across machines (SD-38) |
 | 2 | S6 | directional | `craze web`: hub serves WebSocket + a web bundle on loopback / tailnet |
 | 2 | S7 | directional | Outbound relay uplink and a hosted server; enrollment, scopes, TLS |
@@ -229,12 +229,31 @@ S4b, then S3.**
 
 ### S3 — shed lane
 
-Detail in `06`. Work is in the shed and shed-mobile repos and follows their
-process ("mobile first").
+Detail in `06`; **the design brief is shed's `docs/discovery/craze-lane.md`
+(settled 2026-10-03, SD-40 to SD-46), which wins where `06` differs.** Work is
+in the craze, shed and shed-mobile repos.
 
-- **Order (SD-34):** S3 runs after S4b, and after shed has made its first
-  release of its own lane work. It starts with a hub roster and `create`,
-  both available from S4b.
+- **Order (SD-46, superseding SD-34's gate):** S3 runs in two parts, and shed
+  does not release first; it holds its release until this churn ends.
+  - **S3a, in craze, first (its own plan):**
+    - a provider availability check (`ready`, `needs_setup`, `unavailable`,
+      with reasons and fixes) that the TUI's pickers render, dimming instead
+      of hiding (SD-44);
+    - the hub's create-options call (providers with their state, the default
+      provider, recent directories) behind a connection capability, with
+      schema, fixture 24 and fake-host support;
+    - optionally `craze providers`;
+    - a hermetic recipe for shed's tests (the real hub over `craze-fake-host`
+      entries, creates spawning `craze-fake-agent`).
+  - **S3b, in shed and shed-mobile (one plan run from shed, one PR per
+    repo):**
+    - gx and the direct-agent kinds retired (SD-40);
+    - shed's contract split into a machine-level source and a session-level
+      lane (SD-42);
+    - `shed-craze`;
+    - the Tauri desktop and phone clients, with the create sheet (provider,
+      directory, first prompt; SD-45) and the hub row as the row (SD-43);
+    - last and cuttable, the settings sheet (SD-45).
 - **Ready from craze's side (Plan 035).** The roster rows carry the session's
   model; `session.create` fails with the agent's own words and, on macOS, a
   hint when the hub was not started in the GUI login session; `craze new
@@ -242,18 +261,24 @@ process ("mobile first").
   `craze bridge --hub` is reaped within about a second once the splice has
   read the client's end (a client that closes while the splice's upstream copy
   is blocked on a host that stopped reading waits for the 60 s write-stall
-  bound). Its limits: run the
-  lane's `craze bridge` through a GUI-session process such as
-  `shed-host-agent` on macOS (SF-126, explained; SF-130 if the error proves
-  not enough), and a client that half-closes and then drops over Tailscale SSH
-  leaves its bridge and splice until the host's next write (SF-139). See
-  `12`, Plan 035 PR 2, and `13`.
-- Size: M, about 3k lines of Rust plus the lane-transport change in
-  `shed-core`.
-- **Exit**: shed's own bar. craze started in a roost tab; from the Flutter
-  desktop build and the phone: read the transcript, send a prompt, cancel,
-  answer a permission and a question; background the phone for a minute and
-  resume with no reseed.
+  bound). Its limits: cursor cannot start under a hub first started over ssh
+  on macOS (SF-126, explained; for the MVP the create sheet dims cursor there,
+  SD-44; `shed-host-agent` turned out to be a credential broker that runs
+  nothing for lanes, so the fix is its own follow-up), and a client that
+  half-closes and then drops over Tailscale SSH leaves its bridge and splice
+  until the host's next write (SF-139). See `12`, Plan 035 PR 2, and `13`.
+- Size: S3a is S; S3b is L. That is about 3k lines of Rust for `shed-craze`,
+  plus shed's contract split, two client UIs and the gx deletion (a net
+  reduction).
+- **Exit**: the brief's acceptance. From the Tauri desktop and the phone:
+  - every craze session on a machine is listed, a tab-hosted one as one row;
+  - a session created with a provider, a directory and a first prompt runs
+    headless;
+  - read the transcript, send, interject, cancel, answer a permission and a
+    question, and stop;
+  - background the phone for a minute and resume with no reseed;
+  - if the settings milestone lands, change a cursor session's model, then
+    its effort and fast mode, with an attached TUI showing each change.
 
 ### S4a — detached hosts
 
@@ -428,10 +453,11 @@ again by eye in V4); SF-102's render bounds are V8's. No golden moved but the
 four SF-86 frames the owner allowed. The execution amendments X1–X82, the
 review record, V1–V8 and the handoff are in `12`; what it found and did not
 do is `13`, SF-104–SF-141 (Plan 035's PR 2 added SF-118 reopened, SF-128,
-SF-130 and SF-138–SF-141). **S3 (the shed lane) is next**, after shed's
-first release of its own lane work, and craze's side is ready for it (Plan 035:
-`12`'s PR 2 section and its handoff; the limits are `13`'s SF-126, SF-130 and
-SF-139).
+SF-130 and SF-138–SF-141). **S3 (the shed lane) is next**, and craze's side of
+the protocol is ready for it (Plan 035: `12`'s PR 2 section and its handoff;
+the limits are `13`'s SF-126, SF-130 and SF-139). Its design was settled on
+2026-10-03 (SD-40 to SD-46): S3a in craze first, then S3b in shed, with no shed
+release first (S3 above).
 
 ### S4c — remote-machine listing (directional)
 
