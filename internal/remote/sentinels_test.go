@@ -470,9 +470,12 @@ func TestOnlyTheClientsOwnOutcomesAreOutcomeUnknown(t *testing.T) {
 // approvals, historyCursor, stop) and the host's rowFacts (plan 030 §3.8: what
 // its sessions.list row carries, no concern of a session's client) and
 // presence (plan 032 §3.14: the host's count, which reaches a client on its
-// stream, not in its capabilities) to exactly one agent field.
+// stream, not in its capabilities) and modelsRefresh (plan 034 §3.4:
+// backend.SessionInfo.ModelsRefresh, beside the capabilities) to exactly one
+// agent field.
 func TestEveryWireCapabilityComesBack(t *testing.T) {
-	protocolOwn := map[string]bool{"Cancel": true, "Approvals": true, "HistoryCursor": true, "Stop": true, "RowFacts": true, "Presence": true}
+	protocolOwn := map[string]bool{"Cancel": true, "Approvals": true, "HistoryCursor": true, "Stop": true, "RowFacts": true, "Presence": true,
+		"ModelsRefresh": true}
 	wt := reflect.TypeFor[protocol.SessionCapabilities]()
 	at := reflect.TypeFor[agent.Capabilities]()
 	from := map[string]string{} // agent field → wire field

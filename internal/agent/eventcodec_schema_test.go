@@ -239,3 +239,47 @@ func wireParams(t *testing.T, v any) json.RawMessage {
 	}
 	return json.RawMessage(strings.TrimSuffix(string(b), "\n"))
 }
+
+// TestTheCatalogBoundsAreTheSchemas (plan 034 C5r, r12 #6): event.json states
+// the catalog's bounds the native session holds its list to (boundCatalog),
+// number for number — the list's maxItems, an id's and a name's maxLength —
+// so what a session publishes and what a client may assume are one set.
+// (maxLength counts characters, a bound in bytes no looser.)
+func TestTheCatalogBoundsAreTheSchemas(t *testing.T) {
+	b, err := protocol.SchemaFile(protocol.SchemaEvent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc struct {
+		Defs struct {
+			Catalog struct {
+				Properties struct {
+					Models struct {
+						MaxItems int `json:"maxItems"`
+					} `json:"models"`
+				} `json:"properties"`
+			} `json:"catalog"`
+			CatalogModel struct {
+				Properties struct {
+					ID   struct{ MaxLength int } `json:"id"`
+					Name struct{ MaxLength int } `json:"name"`
+				} `json:"properties"`
+			} `json:"catalogModel"`
+		} `json:"$defs"`
+	}
+	if err := json.Unmarshal(b, &doc); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct {
+		what      string
+		got, want int
+	}{
+		{"catalog.models.maxItems", doc.Defs.Catalog.Properties.Models.MaxItems, catalogModelsMax},
+		{"catalogModel.id.maxLength", doc.Defs.CatalogModel.Properties.ID.MaxLength, catalogIDMax},
+		{"catalogModel.name.maxLength", doc.Defs.CatalogModel.Properties.Name.MaxLength, catalogNameMax},
+	} {
+		if c.got != c.want {
+			t.Errorf("event.json's %s is %d; the session holds the list to %d", c.what, c.got, c.want)
+		}
+	}
+}

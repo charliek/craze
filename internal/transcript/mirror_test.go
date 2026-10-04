@@ -86,6 +86,7 @@ func fullMirrorPrefix(t testing.TB) []agent.Event {
 	t.Helper()
 	title, mode, model := "a title", "plan", "grok"
 	usage, sendNow := filled[agent.UsageState](t), filled[agent.SendNowState](t)
+	catalog := filled[agent.CatalogState](t)
 	row := filled[agent.QueuedPrompt](t)
 	row.ID = "q1"
 	child := filled[agent.SubagentInfo](t)
@@ -100,6 +101,7 @@ func fullMirrorPrefix(t testing.TB) []agent.Event {
 			Plugins:  &agent.PluginsState{Plugins: filled[[]agent.PluginCommand](t)},
 			SendNow:  &sendNow,
 			Usage:    &usage,
+			Catalog:  &catalog,
 		}},
 		{Type: agent.EventQueue, QueueChange: agent.QueueQueued, Queue: &row},
 		{Type: agent.EventSubagent, SubagentChange: agent.SubagentChangeSpawned, Subagent: &child},

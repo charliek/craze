@@ -40,10 +40,13 @@ func TestRefusalQuotesNoKeyFragment(t *testing.T) {
 	fragment := canary[:len(canary)-1]
 	for name, err := range map[string]error{
 		"unknown model": func() error {
-			_, err := s.resolveChildModel(childModelInput{Call: raw, ParentAlias: "test/a"}, nil)
+			_, err := s.resolveChildModel(s.view(), childModelInput{Call: raw, ParentAlias: "test/a"}, nil)
 			return err
 		}(),
-		"effort": func() error { _, err := s.resolveChildEffort("test/a", raw, "", "test/a", "", nil); return err }(),
+		"effort": func() error {
+			_, err := s.resolveChildEffort(s.view(), "test/a", raw, "", "test/a", "", nil)
+			return err
+		}(),
 	} {
 		if err == nil || strings.Contains(err.Error(), fragment) || !strings.Contains(err.Error(), "xxxx") {
 			t.Errorf("%s refusal = %v; want the value quoted with no fragment of the key", name, err)
@@ -53,7 +56,7 @@ func TestRefusalQuotesNoKeyFragment(t *testing.T) {
 	// canary with a newline run inside it: folding makes it the key.
 	folded := resolverSession(t, nil, "", "", nil)
 	folded.tools.red.Store(redact.New("sk-canary not-a-secret"))
-	_, err := folded.resolveChildEffort("test/a", "sk-canary\n\n  not-a-secret", "", "test/a", "", nil)
+	_, err := folded.resolveChildEffort(folded.view(), "test/a", "sk-canary\n\n  not-a-secret", "", "test/a", "", nil)
 	if err == nil || strings.Contains(err.Error(), "not-a-secret") {
 		t.Errorf("effort refusal = %v; want the key folding spelled out redacted", err)
 	}
@@ -154,7 +157,7 @@ func TestResolveChildModelMatrix(t *testing.T) {
 		t.Run(r.name, func(t *testing.T) {
 			s := resolverSession(t, tiers, r.defaultModel, "", r.matchModel)
 			var warnings []string
-			alias, err := s.resolveChildModel(childModelInput{
+			alias, err := s.resolveChildModel(s.view(), childModelInput{
 				Call: r.call, Persona: r.persona,
 				ParentAlias: parentAlias, ParentEffort: "high",
 			}, collectWarn(&warnings))
@@ -186,7 +189,7 @@ func TestResolveChildModelMatrix(t *testing.T) {
 // tier mappings, and the instruction to omit `model`.
 func TestResolveChildModelUnknownListsEveryAliasAndTier(t *testing.T) {
 	s := resolverSession(t, map[string]string{"speedy": "test/b", "careful": "test/a"}, "", "", nil)
-	_, err := s.resolveChildModel(childModelInput{Call: "nope", ParentAlias: "test/a"}, nil)
+	_, err := s.resolveChildModel(s.view(), childModelInput{Call: "nope", ParentAlias: "test/a"}, nil)
 	if err == nil {
 		t.Fatal("err = nil, want the unknown-model error")
 	}
@@ -378,7 +381,7 @@ func TestResolveChildEffortMatrix(t *testing.T) {
 		t.Run(r.name, func(t *testing.T) {
 			s := resolverSession(t, nil, "", r.defaultEffort, nil)
 			var warnings []string
-			got, err := s.resolveChildEffort(r.alias, r.callEffort, r.personaEffort, r.parentAlias, r.parentEffort, collectWarn(&warnings))
+			got, err := s.resolveChildEffort(s.view(), r.alias, r.callEffort, r.personaEffort, r.parentAlias, r.parentEffort, collectWarn(&warnings))
 			if r.wantErr != "" {
 				if err == nil || err.Error() != r.wantErr {
 					t.Fatalf("err = %v, want %q", err, r.wantErr)
@@ -405,7 +408,7 @@ func TestResolveChildEffortMatrix(t *testing.T) {
 // even through a chain of fall-throughs (Options.Warn's "nil discards").
 func TestResolveChildModelWarnNilDiscards(t *testing.T) {
 	s := resolverSession(t, nil, "nokey/d", "", nil)
-	alias, err := s.resolveChildModel(childModelInput{Persona: "bogus", ParentAlias: "test/a"}, nil)
+	alias, err := s.resolveChildModel(s.view(), childModelInput{Persona: "bogus", ParentAlias: "test/a"}, nil)
 	if err != nil || alias != "test/a" {
 		t.Fatalf("resolveChildModel = %q, %v, want test/a, nil", alias, err)
 	}
@@ -416,7 +419,7 @@ func TestResolveChildModelWarnNilDiscards(t *testing.T) {
 // sentinel a caller might match on by mistake.
 func TestUnknownModelErrorIsAPlainError(t *testing.T) {
 	s := resolverSession(t, nil, "", "", nil)
-	_, err := s.resolveChildModel(childModelInput{Call: "nope", ParentAlias: "test/a"}, nil)
+	_, err := s.resolveChildModel(s.view(), childModelInput{Call: "nope", ParentAlias: "test/a"}, nil)
 	if errors.Is(err, modeltable.ErrUnknownModel) {
 		t.Fatal("the call error wraps modeltable.ErrUnknownModel; it must be its own message")
 	}

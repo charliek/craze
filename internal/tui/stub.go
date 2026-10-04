@@ -146,6 +146,9 @@ type Stub struct {
 	// Interjections in stub_queue.go.
 	interjections []string
 	cancelsSent   int
+	// models is what RefreshingStub's refresh reads and writes (plan 034
+	// §3.4; stub_models.go): set-up and state, under mu.
+	models stubModels
 }
 
 // stubCall is one answer the UI sent, or the cancelled outcome Cancel/Close
@@ -315,9 +318,11 @@ func (s *Stub) SetSubagents(subs []agent.SubagentInfo) {
 // SetModels replaces Snapshot.Models, ranks and all (agent.ModelInfo.Recent,
 // plan 031 §3.6), so a test outside this package — the fake host's fixtures,
 // a remote client's — can advertise the catalog a native session does. Like
-// SetTools it is a fixture-only snapshot writer and publishes nothing: no
-// delta carries the model list, which a session fixes when it starts, and the
-// info document reads it off the snapshot.
+// SetTools it is a fixture-only snapshot writer and publishes nothing: it is
+// the list the session starts with, which the info document reads off the
+// snapshot. A list that changes while the session runs is staged and taken up
+// by a refresh (StageModels, RefreshingStub; plan 034 §3.4), which publishes
+// the catalog delta a native session's reload does.
 func (s *Stub) SetModels(models []agent.ModelInfo) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -675,6 +680,10 @@ func (s *Stub) run(ctx context.Context, text string) (agent.Result, error) {
 			s.inPrompt = false
 			s.token = agent.TurnToken{}
 		}
+		// A refresh this turn held back is taken up at its end (plan 034
+		// §3.4; RefreshingStub's pending), after its EventDone; a withdrawn
+		// prompt's claim releases one too.
+		s.adoptPendingModelsLocked()
 		s.mu.Unlock()
 	}()
 	s.mu.Lock()

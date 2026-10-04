@@ -718,7 +718,8 @@ efforts        = ["low", "high"]
 default_effort = "high"
 ```
 
-A model's other optional keys are documented below:
+A model alias is at most 256 bytes: a `models.toml` with a longer one does not
+load, and says which entry. A model's other optional keys are documented below:
 [`max_output_tokens`](#native-output-ceiling), [`cost`](#native-cost),
 [`vision`](#native-vision) and `tool_profile`; `models.toml` also takes
 [`[compaction]`](#native-compaction) and
@@ -816,13 +817,16 @@ only your own.
 
 ### Keys stored while a session runs
 
-A running native session keeps the model table it started with. A provider
-you give a key to while it runs — an `api_key` written into `providers.toml`
-by `craze auth login`, `/connect`, by hand, or by another craze — is offered
-by the next session, or by this conversation after `/exit` and `craze -c`,
-never by the running one.
+A running native session takes up a provider you give a key to while it runs —
+an `api_key` written into `providers.toml` by `craze auth login`, `/connect`,
+by hand, or by another craze — when it next looks: at the start of its next
+turn, or at once when the TUI asks (`/connect` after a save, `/model` when it
+opens; see [the TUI](tui.md#connect)). A
+session that nobody asks, in a terminal that is not a TUI, takes the key up at
+its next turn. What changes is which models are offered and can be switched to:
+a conversation's compaction and sub-agent settings stay as it opened them.
 
-The running session does watch that file, only so it can redact what it
+The running session also watches that file to redact what it
 holds: at the start of every turn (a prompt, a `/compact`, or the delivery of
 a background sub-agent's result) it checks the `providers.toml` of the craze
 directory it started with, and when the file has changed it learns each
@@ -842,9 +846,11 @@ The redaction starts at the next turn, so there is a window: a key stored
 during a turn is learned when the next one starts. From then on a shell
 command still running — a background command's included — redacts it from the
 rest of its output and from its saved output file, but not from what it
-printed before. A sub-agent already running keeps the redaction it started
-with, though what it reports back is redacted of the key; one started after
-the key was learned redacts it.
+printed before. A sub-agent already running — a background one goes on while
+the conversation idles — redacts it at once from what its tools return next,
+so a file it reads afterwards reaches its model with the key redacted; what
+its tools returned before the key was learned is not rewritten. One started
+after the key was learned redacts it from the start.
 
 ### The ChatGPT plan
 
@@ -923,7 +929,9 @@ session already running on one, or a sub-agent, sends nothing on another
 account's sign-in — its next request, a summary's or a wake's too, ends with
 `native: model "chatgpt/…" is from another ChatGPT account's model list; a
 new session offers the signed-in account's models` — and goes on once the
-first account is signed in again.
+first account is signed in again. Switching that session to another model
+lets go of the first account's: `/model` then offers the signed-in account's
+model of the same name, when its list has one.
 
 **Renewal.** An access token lasts about an hour. craze renews it itself when a
 request finds less than five minutes left, so the sign-in lasts until you sign

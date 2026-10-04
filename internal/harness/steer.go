@@ -213,6 +213,15 @@ type splice struct {
 func (t *turn) prepareStep(ctx context.Context, o fantasy.PrepareStepFunctionOptions) (context.Context, fantasy.PrepareStepResult, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	// A key learned since the last boundary that is inside what every
+	// request sends (refusingNow, plan 034 C4r): this request is not sent,
+	// and nothing is taken up for it — the steers stay the box's, to come
+	// back unanswered, and no background result is reserved. Fantasy returns
+	// the error before it opens the step, and run ends the turn
+	// (stopBeforeRequest).
+	if t.refusingNow() {
+		return ctx, fantasy.PrepareStepResult{}, ErrStoredKeyFrozen
+	}
 	if t.segmentFirstRequest {
 		t.replaceSplices(len(o.Messages))
 	}

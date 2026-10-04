@@ -22,10 +22,10 @@ import (
 	"github.com/charliek/craze/internal/transcript"
 )
 
-// The two-socket fixtures' hub (plan 032 §3.15; fixtures 19–22): the real
-// hub, internal/hub's Run, in this process over the fixture's own registry —
-// the production hub but for its idle grace, which is long enough never to
-// end a fixture. Its id, version and this process's pid are named by
+// The two-socket fixtures' hub (plan 032 §3.15; fixtures 19–22, and plan
+// 034's 24 and 25): the real hub, internal/hub's Run, in this process over
+// the fixture's own registry — the production hub but for its idle grace,
+// which is long enough never to end a fixture. Its id, version and this process's pid are named by
 // placeholder in what it writes (fixtureRunner.hubToWire). A fixture whose
 // host line says hubCreates (22) has a hub that creates sessions, each host
 // it spawns this test binary run as a fake craze serve (spawnedChild, below).

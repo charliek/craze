@@ -60,11 +60,12 @@
       "additionalProperties": false
     },
     "catalogs": {
-      "description": "The models and modes the session can be switched to; empty until the session is ready.",
+      "description": "The models and modes the session can be switched to; empty until the session is ready. models is the list as the document is built, which a native session's reload changes while it runs; revision numbers it, as the event stream's catalog section does.",
       "type": "object",
       "properties": {
         "models": {"type": "array", "items": {"$ref": "#/$defs/model"}},
-        "modes": {"type": "array", "items": {"$ref": "#/$defs/mode"}}
+        "modes": {"type": "array", "items": {"$ref": "#/$defs/mode"}},
+        "revision": {"type": "integer", "minimum": 1, "description": "The revision of models: the catalog section's that last changed it. Absent while 0 — the list the session started with, every ACP session's, and every older host's. A client that also folds the stream's catalog section shows whichever list is newer by revision, never an older one."}
       },
       "required": ["models", "modes"],
       "additionalProperties": false
@@ -112,7 +113,8 @@
         "historyCursor": {"type": "boolean"},
         "stop": {"type": "boolean"},
         "rowFacts": {"type": "boolean", "description": "The host's own: the session's sessions.list row carries the row facts (headAsk.summary, doing, lastReply, since, startFailed, startErr, prompted). Absent — false — on an older host, whose row is read as it was."},
-        "presence": {"type": "boolean", "description": "The host's own: the host counts the clients attached to the session, sends each attachment the presence notification, and puts attached on the session's sessions.list row. Absent — false — on an older host, which sends no presence: a client shows no count."}
+        "presence": {"type": "boolean", "description": "The host's own: the host counts the clients attached to the session, sends each attachment the presence notification, and puts attached on the session's sessions.list row. Absent — false — on an older host, which sends no presence: a client shows no count."},
+        "modelsRefresh": {"type": "boolean", "description": "The session can take up models funded while it runs (a native session), and the host serves session.models.refresh for it. Absent — false — for an ACP session, and on an older host: the method is refused there, and a client makes no call."}
       },
       "required": ["interject", "subagentCancel", "subagentBackground", "modes", "effort", "fastToggle", "subagentRows", "subagentTranscript", "todos", "askCards", "planCards", "parameterizedPicker", "cancel", "approvals", "historyCursor", "stop"],
       "additionalProperties": false

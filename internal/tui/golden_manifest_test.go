@@ -142,6 +142,7 @@ var goldenManifest = map[string]goldenRuns{
 	"native-menu-100x30":                     bothTransports,
 	"native-model-dialog-100x30":             bothTransports,
 	"native-model-dialog-connected-100x30":   bothTransports,
+	"native-live-model-dialog-100x30":        bothTransports,
 	"native-mode-100x30":                     bothTransports,
 	"native-plan-denied-100x30":              bothTransports,
 	"native-plan-offer-100x30":               bothTransports,
@@ -513,7 +514,8 @@ func transportList(set map[frameTransport]bool) string {
 // `/fast` and its rule with both set (C17), in process only; and plan 032's
 // `N attached` chip (C18, presence-100x30), plan 033's five composer image
 // chips (C2, composer-image-*) and its six frames of /connect's ChatGPT
-// sign-in (C16, native-connect-signin-*), under both — 134 in all.
+// sign-in (C16, native-connect-signin-*), and plan 034's `/model` after a key
+// saved live (C6, native-live-model-dialog), under both — 135 in all.
 func TestTheGoldenManifestIsEveryGolden(t *testing.T) {
 	files, err := filepath.Glob(filepath.Join("testdata", "*.golden"))
 	if err != nil {
@@ -541,8 +543,8 @@ func TestTheGoldenManifestIsEveryGolden(t *testing.T) {
 			t.Errorf("the manifest runs %s under %v: a golden runs under both transports, or in process alone", name, runs)
 		}
 	}
-	if both != 134 || inprocAlone != 43 {
-		t.Errorf("the manifest lists %d goldens under both transports and %d in process alone, want 134 and 43 (A8)", both, inprocAlone)
+	if both != 135 || inprocAlone != 43 {
+		t.Errorf("the manifest lists %d goldens under both transports and %d in process alone, want 135 and 43 (A8)", both, inprocAlone)
 	}
 }
 

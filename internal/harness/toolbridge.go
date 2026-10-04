@@ -498,7 +498,7 @@ func (t *turn) synthesizeStep(stop string) (done bool, err error) {
 		store.MessageEntry{Message: redactCalls(t.redactor(), assistant), Model: t.model.id(), Effort: t.model.effort, StopReason: stop, Interrupted: true},
 		toolEntry)
 	if err == nil {
-		t.wrote(entries, lead, true, outputCalls(answered))
+		t.wrote(entries, lead, true, answered)
 		t.todosWritten(todos)
 	}
 	return true, err
@@ -521,6 +521,25 @@ func outputCalls(answered []*toolCall) []string {
 		}
 	}
 	return ids
+}
+
+// outputNames are, by harness id, the names each agent_output call among
+// answered that delivered a usage carries it under: its result's Child as
+// the tool entry's rows merged it (subagentUsage), after every redaction the
+// call's result went through (Output's, the dispatcher's). nil when there is
+// none. mu is held.
+func outputNames(answered []*toolCall) map[string]usageNames {
+	var names map[string]usageNames
+	for _, c := range answered {
+		if c.name != tool.AgentOutputTool || c.res == nil || c.res.Child == nil {
+			continue
+		}
+		if names == nil {
+			names = make(map[string]usageNames)
+		}
+		names[c.id] = namesOf(c.res.Child)
+	}
+	return names
 }
 
 // subagentUsage is what the sub-agents of calls spent, one row per model —
@@ -560,8 +579,7 @@ func mergeUsage(children []*tool.ChildUsage) []store.ModelUsage {
 		if ch == nil || ch.Usage == (tool.Usage{}) {
 			continue
 		}
-		u := store.Usage{Input: ch.Usage.Input, Output: ch.Usage.Output, Reasoning: ch.Usage.Reasoning,
-			CacheRead: ch.Usage.CacheRead, CacheCreation: ch.Usage.CacheCreation}
+		u := storeUsage(ch.Usage)
 		i := slices.IndexFunc(rows, func(r store.ModelUsage) bool {
 			return r.Provider == ch.Provider && r.Model == ch.Model && r.WireModel == ch.WireModel
 		})
@@ -574,6 +592,11 @@ func mergeUsage(children []*tool.ChildUsage) []store.ModelUsage {
 		r.CacheRead, r.CacheCreation = r.CacheRead+u.CacheRead, r.CacheCreation+u.CacheCreation
 	}
 	return rows
+}
+
+// storeUsage is a sub-agent's usage in the store's shape, field for field.
+func storeUsage(u tool.Usage) store.Usage {
+	return store.Usage{Input: u.Input, Output: u.Output, Reasoning: u.Reasoning, CacheRead: u.CacheRead, CacheCreation: u.CacheCreation}
 }
 
 // pairable reports whether calls can be answered pairably: every provider

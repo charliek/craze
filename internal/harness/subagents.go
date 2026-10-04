@@ -831,13 +831,16 @@ func (r *subagents) Run(ctx context.Context, call tool.SubagentCall) (res tool.R
 		}
 		return tool.Result{Text: err.Error(), IsError: true, Class: tool.ClassInvalidInput}
 	}
+	// The call's one reading of the model table (plan 034 §3.4, A21): its
+	// model, its effort and its Open all go by it, below and in openChild.
+	c.view = parent.view()
 	parentAlias, parentEffort := link.model.r.Alias, link.model.effort
-	alias, err := parent.resolveChildModel(childModelInput{Call: call.Model, Persona: persona.Model,
+	alias, err := parent.resolveChildModel(c.view, childModelInput{Call: call.Model, Persona: persona.Model,
 		ParentAlias: parentAlias, ParentEffort: parentEffort}, parent.warn)
 	if err != nil {
 		return tool.Result{Text: err.Error(), IsError: true, Class: tool.ClassInvalidInput}
 	}
-	effort, err := parent.resolveChildEffort(alias, call.Effort, persona.Effort, parentAlias, parentEffort, parent.warn)
+	effort, err := parent.resolveChildEffort(c.view, alias, call.Effort, persona.Effort, parentAlias, parentEffort, parent.warn)
 	if err != nil {
 		return tool.Result{Text: err.Error(), IsError: true, Class: tool.ClassInvalidInput}
 	}
@@ -883,6 +886,9 @@ func (r *subagents) Run(ctx context.Context, call tool.SubagentCall) (res tool.R
 // childCall is what a registered call's last word (settle) needs of it, set
 // as the call learns it.
 type childCall struct {
+	// view is the call's one reading of the model table, taken before its
+	// model is resolved and opened with (tableView, plan 034 §3.4).
+	view  tableView
 	h     *childHandle // the registered child's handle; nil before registration
 	child *Session     // the child, once opened; nil before, and for one whose Open failed
 	// completed: the child's turn ended on its own, so its outcome stands
@@ -895,21 +901,22 @@ type childCall struct {
 }
 
 // openChild is step 5's Open: the child session for h, with the parent's own
-// Options and the call's type, model, effort and mode (§3.2).
-func (r *subagents) openChild(h *childHandle, call tool.SubagentCall, persona tool.Persona, alias, effort, mode string) (*Session, error) {
+// Options and the call's type, model, effort and mode (§3.2), on v, the table
+// its model and effort were resolved against (tableView, plan 034 §3.4).
+func (r *subagents) openChild(v tableView, h *childHandle, call tool.SubagentCall, persona tool.Persona, alias, effort, mode string) (*Session, error) {
 	parent := r.s
 	all, ids := childToolSet(persona, parent.tools.offered)
 	open := r.seams.open
 	if open == nil {
 		open = Open
 	}
-	return open(parent.childOpenOptions(alias, effort, &ChildOptions{
+	return open(parent.childOpenOptions(v, alias, effort, &ChildOptions{
 		ID: h.id, ParentSession: parent.ID(), ParentCall: call.ID,
 		Type: persona.Name, PersonaPath: persona.Path, Role: persona.Role,
 		AllTools: all, Tools: ids,
 		BaseSystem: parent.system, BaseProfile: parent.tools.profile, top: parent.base.top,
 		Mode: mode, Strictness: &h.strictness, Locks: parent.tools.locks,
-		learned: parent.tools.learnedKeys(),
+		learned: parent.tools.learnedKeys(), dropEnv: parent.tools.credentialNames(),
 	}))
 }
 
@@ -921,7 +928,7 @@ func (r *subagents) openChild(h *childHandle, call tool.SubagentCall, persona to
 func (r *subagents) runChild(ctx, childCtx context.Context, link *turnLink, call tool.SubagentCall,
 	persona tool.Persona, alias, effort string, c *childCall, mode string) tool.Result {
 	parent, h := r.s, c.h
-	child, err := r.openChild(h, call, persona, alias, effort, mode)
+	child, err := r.openChild(c.view, h, call, persona, alias, effort, mode)
 	if err != nil {
 		// Aborted instead when the parent is gone by the time the call
 		// returns (settle).
@@ -1179,16 +1186,15 @@ func (p childPanic) Error() string { return fmt.Sprintf("it panicked: %v", p.val
 // childOpenOptions are the Options a child of s opens with (§3.2): the
 // parent's own values, its extras cloned and its session-start snapshot, with
 // the child's model and effort and c. Its test seams go with them, so a test's
-// profile and gate are the child's too.
-func (s *Session) childOpenOptions(alias, effort string, c *ChildOptions) Options {
-	s.mu.Lock()
-	table := s.table
-	s.mu.Unlock()
+// profile and gate are the child's too. The table and the matcher are v's, the
+// reading its model and effort were resolved against (plan 034 §3.4): never a
+// second reading of the parent's, which could be another generation's.
+func (s *Session) childOpenOptions(v tableView, alias, effort string, c *ChildOptions) Options {
 	return Options{
-		Home: s.base.home, Workspace: s.base.workspace, Table: table,
+		Home: s.base.home, Workspace: s.base.workspace, Table: v.table,
 		Model: alias, Effort: effort, Prompt: s.base.prompt.clone(), Snapshot: s.base.snapshot, Child: c,
 		NewModel: s.newModel, Getenv: s.getenv, Now: s.base.now, Version: s.base.version,
-		MatchModel: s.matchModel, Warn: s.warn,
+		MatchModel: v.match, Warn: s.warn,
 		tools: s.base.seams,
 	}
 }

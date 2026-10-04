@@ -37,15 +37,23 @@ import (
 //
 // # The transitions (panel P22, astra r14's C9 invariants)
 //
-// The opening is ONE s.mu section: the session started and not closed,
+// The claim is ONE s.mu section: the session started and not closed,
 // nothing claimed (neither a prompt's claim nor a wake's), the fence down and
 // something pending — HasPending takes the harness's registry lock, a leaf
 // (s.mu → regMu already exists through SetMode), and no other harness lock is
 // taken under s.mu — then the claim's bookkeeping exactly as prompt installs
 // a turn's (claimed, inPrompt, a fresh released, the turn's cancel func and
-// ask token), wake and foreign set, s.snap.ForeignTurn with them, and the
-// opening bracket ENQUEUED. Then, with s.mu released, the outbox is flushed,
-// so the bracket is in the record before any of the wake's output.
+// ask token), and wake and foreign set, s.snap.ForeignTurn with them, so the
+// engine queues from here as it does for a wake already open. Then, under the
+// claim and before the opening, the wake's start (wakeTurn): the keys stored
+// since the last turn learned, and the model table's turn-start reload, its
+// catalog — and any a reload that read the claim free just before it was
+// taken published meanwhile (catalogQueued) — flushed, as a prompt's start
+// does (plan 034 C4r2, r11 #3): a catalog lands before a wake's opening or
+// after its ending, never inside. Then the opening bracket is ENQUEUED, in
+// an s.mu section of its own (openWake), and, with s.mu released, the outbox
+// is flushed, so the bracket is in the record before any of the wake's
+// output.
 //
 // The ending is ONE s.mu section too, after the wake's tool rows are settled
 // and its ask token retired outside the lock (as prompt does before its
@@ -191,37 +199,64 @@ func (s *nativeSession) recheckPending() {
 	s.released = rel
 	s.turnCancel, s.turnToken = cancel, tok
 	s.wake, s.foreign, s.snap.ForeignTurn = true, true, true
-	s.log.Enqueue(Event{Type: EventForeignTurn, At: s.Now(), ForeignTurn: &ForeignTurnInfo{
-		ID: id, Text: text, Reason: reason, Running: true,
-	}})
 	s.mu.Unlock()
 	if decided != nil {
 		decided(true)
 	}
-	// The bracket reaches the record before anything the wake says. Bounded
-	// by s.done as every barrier here is: a Close that has begun frees it.
-	_ = s.log.Flush(context.Background(), s.done)
 
-	res, err := s.wakeTurn(hs, turnCtx)
+	res, err := s.wakeTurn(hs, turnCtx, func() { s.openWake(id, reason, text) })
 	cancel()
 	s.endWake(id, reason, tok, rel, res, err)
 }
 
-// wakeTurn runs the wake's turn and recovers a panic from it as a failure of
-// the turn, so the worker — which nothing above recovers for — ends the wake
-// and releases the claim whatever happened inside. Like a prompt's turn it
-// first learns the keys stored since the session started (native_keys.go,
-// plan 031 §3.8): the results it delivers are redacted as it reserves them,
-// with the session's keys as they are then. A key it finds inside the frozen
-// prompt refuses this wake, and HasPending answers false from then on, so no
-// other wake follows it.
-func (s *nativeSession) wakeTurn(hs *harness.Session, ctx context.Context) (res harness.Result, err error) {
+// openWake is the wake's opening bracket (the file's "The transitions"):
+// enqueued in an s.mu section of its own, once the wake's start is out, and
+// flushed with s.mu released, so the bracket reaches the record before
+// anything the wake says. Bounded by s.done as every barrier here is: a Close
+// that has begun frees it.
+func (s *nativeSession) openWake(id, reason, text string) {
+	s.mu.Lock()
+	s.log.Enqueue(Event{Type: EventForeignTurn, At: s.Now(), ForeignTurn: &ForeignTurnInfo{
+		ID: id, Text: text, Reason: reason, Running: true,
+	}})
+	s.mu.Unlock()
+	_ = s.log.Flush(context.Background(), s.done)
+}
+
+// wakeTurn is the wake from its claim to its turn's end: its start, its
+// opening (open) and its turn. It recovers a panic from any of them as a
+// failure of the turn, so the worker — which nothing above recovers for —
+// ends the wake and releases the claim whatever happened inside; the opening
+// goes out on every path, so the ending endWake publishes always closes one.
+//
+// Like a prompt's turn it first learns the keys stored since the session
+// started (native_keys.go, plan 031 §3.8): the results it delivers are
+// redacted as it reserves them, with the session's keys as they are then. A
+// key it finds inside the frozen prompt refuses this wake, and HasPending
+// answers false from then on, so no other wake follows it. Then the models
+// funded since the last turn, as a prompt's start reloads them
+// (native_models.go, plan 034 §3.4): under the wake's claim, before the
+// harness's — and before the opening (plan 034 C4r2, r11 #3), whose bracket
+// no catalog may land inside: reloadFlushed publishes this reload's catalog,
+// and any queued since the last turn's edge, ahead of it. A reload that read
+// the claim free just before the wake took it holds modelsMu until its
+// catalog is enqueued, and this one waits for it there, so that catalog is
+// flushed here too; every reload that reads the claim after is owed, and the
+// ending takes it up after the ending is out.
+func (s *nativeSession) wakeTurn(hs *harness.Session, ctx context.Context, open func()) (res harness.Result, err error) {
+	opened := false
 	defer func() {
 		if v := recover(); v != nil {
 			err = fmt.Errorf("native: the wake panicked: %v", v)
 		}
+		if !opened {
+			open()
+		}
 	}()
 	s.learnStoredKeys(hs)
+	s.reloadFlushed(reloadTurn)
+	opened = true
+	open()
 	return hs.Wake(ctx, s.sink)
 }
 
@@ -248,6 +283,9 @@ func (s *nativeSession) endWake(id, reason string, tok TurnToken, rel chan struc
 		ID: id, Reason: reason,
 	}})
 	s.wakeEndingQueued = true
+	// A reload this wake held back, read in the section that releases the
+	// claim, as prompt's release reads it (native_models.go's step 5).
+	owed := s.takeOwedLocked()
 	s.mu.Unlock()
 	if ended != nil {
 		ended()
@@ -256,6 +294,9 @@ func (s *nativeSession) endWake(id, reason string, tok TurnToken, rel chan struc
 	s.mu.Lock()
 	s.wakeEndingQueued = false
 	s.mu.Unlock()
+	if owed {
+		s.reloadFlushed(reloadOwed)
+	}
 	s.noteWake(id, reason, res, err)
 	s.kickWake()
 }

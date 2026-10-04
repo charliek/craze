@@ -31,6 +31,12 @@ var (
 // every time the test round-trips also shows its location replaced.
 var snapEpoch = time.Date(2026, 9, 22, 8, 0, 0, 0, time.FixedZone("UTC-7", -7*3600))
 
+// snapExcluded names the fields the snapshot codec deliberately does not
+// carry yet, as "DeclaringType.Field", each with its reason: the filler sets
+// them like every other field and the comparison requires them to decode as
+// zero (the event codec's codecExcluded, internal/agent).
+var snapExcluded = map[string]string{}
+
 // snapFiller sets every field reachable from a value, each from one counter so
 // no two hold the same value.
 type snapFiller struct {
@@ -232,7 +238,14 @@ func snapCompare(path string, want, got reflect.Value, d *[]string) {
 	case reflect.Struct:
 		typ := want.Type()
 		for i := range typ.NumField() {
-			snapCompare(path+"."+typ.Field(i).Name, want.Field(i), got.Field(i), d)
+			name := typ.Field(i).Name
+			if why := snapExcluded[typ.Name()+"."+name]; why != "" {
+				if g := got.Field(i); !g.IsZero() {
+					*d = append(*d, fmt.Sprintf("%s.%s: decoded as %v, want zero: the codec does not carry it (%s)", path, name, g.Interface(), why))
+				}
+				continue
+			}
+			snapCompare(path+"."+name, want.Field(i), got.Field(i), d)
 		}
 	case reflect.Interface:
 		diff("no comparison for the interface %s; teach snapCompare one", want.Type())

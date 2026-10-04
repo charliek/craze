@@ -56,6 +56,9 @@ const (
 	// episode, the count starting again whenever its stream reaches
 	// synchronized (§3.14).
 	ReattachesPerEpisode = 8
+	// NativeDirMax bounds session.models.refresh's nativeDir (plan 034 §3.4):
+	// 4096 characters, Linux's PATH_MAX, as session.create's cwd is bounded.
+	NativeDirMax = 4096
 )
 
 // The hub roster's bounds (plan 032 §3.6), which the hub enforces (C11) and

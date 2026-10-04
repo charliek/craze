@@ -930,6 +930,42 @@ func (s *Session) CancelSubagent(ctx context.Context, c engine.Command, id strin
 	}, nil)
 }
 
+// RefreshModels is session.models.refresh (plan 034 §3.4, Q17;
+// backend.Backend.RefreshModels): a read, bound as every read is to the
+// identity the client holds at entry, and resent across a lost connection —
+// the method is idempotent, so asking again is all a resend does. Its reply
+// follows the catalog delta an applied refresh published, so the stream has
+// already queued the list the answer names.
+//
+// A session whose info document does not say modelsRefresh — an ACP session,
+// a host from before the method, or no attach reply yet — is answered
+// agent.ModelsUnsupported here and nothing is sent (A25: no call). A host
+// that refuses the method anyway, code unsupported (models_refresh_unsupported,
+// or unknown_method from an older host the document came from before a
+// reconnect reached it), is answered the same: what a client does with
+// either is the in-process answer's. A status this build does not know is
+// handed up as it came: the caller acts on the ones it knows.
+func (s *Session) RefreshModels(ctx context.Context, nativeDir string) (agent.ModelsRefresh, error) {
+	if err := backend.CheckEpoch(ctx, s.c.Identity()); err != nil {
+		return agent.ModelsRefresh{}, err
+	}
+	if !s.Info().ModelsRefresh {
+		return agent.ModelsRefresh{Status: agent.ModelsUnsupported}, nil
+	}
+	var r protocol.ModelsRefreshResult
+	err := s.read(ctx, protocol.MethodModelsRefresh, func(sid string) any {
+		return protocol.ModelsRefreshParams{SessionID: sid, NativeDir: nativeDir}
+	}, &r)
+	var e *Error
+	switch {
+	case errors.As(err, &e) && e.Code == protocol.CodeUnsupported:
+		return agent.ModelsRefresh{Status: agent.ModelsUnsupported}, nil
+	case err != nil:
+		return agent.ModelsRefresh{}, err
+	}
+	return agent.ModelsRefresh{Status: agent.ModelsStatus(r.Status), Revision: r.Revision, SameDir: r.SameDir}, nil
+}
+
 // Ask is asks.get: the ask id names, and whether the session knows it —
 // unknown_ask is (zero, false, nil), as the in-process registry's miss. The
 // record carries what the wire does (X6): the status, the outcome, who
@@ -1014,6 +1050,8 @@ func sessionInfo(p *protocol.SessionInfo) backend.SessionInfo {
 		Provider:          p.Provider.Name,
 		Label:             p.Provider.Label,
 		Capabilities:      capabilities(p.Capabilities),
+		CatalogRevision:   p.Catalogs.Revision,
+		ModelsRefresh:     p.Capabilities.ModelsRefresh,
 		RetryHorizon:      retryHorizon(p.RetryHorizon),
 		PermissionMode:    permissionMode(p.PermissionMode),
 		StartedAt:         p.StartedAt,
@@ -1046,7 +1084,9 @@ func permissionMode(m protocol.PermissionMode) backend.PermissionMode {
 // inverted; TestEveryWireCapabilityComesBack holds the two to a bijection).
 // cancel, approvals, historyCursor and stop are the protocol's own, stated for
 // every host, and rowFacts the host's (what its sessions.list row carries,
-// plan 030 §3.8), each with no agent field.
+// plan 030 §3.8), each with no agent field; modelsRefresh is the session's,
+// and goes to backend.SessionInfo.ModelsRefresh instead (sessionInfo, plan
+// 034 §3.4).
 func capabilities(c protocol.SessionCapabilities) agent.Capabilities {
 	return agent.Capabilities{
 		Interject:           c.Interject,

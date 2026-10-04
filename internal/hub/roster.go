@@ -190,6 +190,7 @@ func newRoster(h *hub) *rosterState {
 		Dial:    h.hk.rosterDial,
 		Check:   h.hk.rosterCheck,
 		Budget:  h.hk.rosterBudget,
+		Paused:  h.hk.rosterPaused,
 	})
 	return rs
 }

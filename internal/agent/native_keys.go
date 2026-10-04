@@ -15,12 +15,12 @@ import (
 )
 
 // A running native session learns the keys stored in its providers.toml after
-// it opened, so that it can redact them (plan 031 §3.8, P8). The session's
-// model table, its model list, its efforts and its tools' environment stay
-// what they were at Start: a provider connected meanwhile is offered by the
-// next session, not this one, and its key is never one this session sends. It
-// is one this session can meet, though — a tool that reads the file, a
-// command that prints the key, a prompt it is pasted into — and nothing else
+// it opened, so that it can redact them (plan 031 §3.8, P8). Whether the
+// session also offers what such a key funds is the model table's reload
+// (native_models.go, plan 034 §3.4), which runs right after this look at a
+// turn's start; this look is about every stored key the session can meet — a
+// tool that reads the file, a command that prints the key, a prompt it is
+// pasted into — whether it is one the session sends or not, and nothing else
 // would ever redact it.
 //
 // So every turn this adapter runs takes a look first, before anything of the

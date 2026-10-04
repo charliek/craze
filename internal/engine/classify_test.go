@@ -124,7 +124,8 @@ var wireReasons = map[string][]string{
 	"bad_request": {"bad_request", "bad_answer", "hello_required", "unknown_field", "line_too_long",
 		"protocol_version", "bad_token", "already_attached", "connect_not_first", "ambiguous_session", "already_subscribed",
 		"request_conflict"},
-	"unsupported": {"unsupported", "unknown_method", "stop_unsupported", "roster_unsupported", "hub_only", "host_only"},
+	"unsupported": {"unsupported", "unknown_method", "stop_unsupported", "models_refresh_unsupported", "roster_unsupported",
+		"hub_only", "host_only"},
 }
 
 // reasonBelongsToCode reports whether §3.2's table lets a host send reason
@@ -215,6 +216,9 @@ func TestEveryListedEngineReasonIsProduced(t *testing.T) {
 		"snapshot_too_large": true, "hello_required": true, "unknown_field": true, "line_too_long": true,
 		"protocol_version": true, "bad_token": true, "already_attached": true, "unknown_method": true,
 		"stop_unsupported": true, "roster_unsupported": true, "hub_only": true,
+		// The host's own capability gate for session.models.refresh (plan 034
+		// §3.4): refused at dispatch, never by the engine.
+		"models_refresh_unsupported": true,
 		// The hub's (plan 032 §3.15): no engine is involved in any of them.
 		"host_only": true, "connect_not_first": true, "ambiguous_session": true, "already_subscribed": true,
 		"request_conflict": true, "spawn_failed": true, "host_unreachable": true,

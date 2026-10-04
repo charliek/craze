@@ -29,6 +29,20 @@ func decodeParams(raw json.RawMessage, v any) *protocol.Error {
 	return decode(raw, v, true)
 }
 
+// hasMember reports whether raw — params decodeParams has already accepted,
+// so an object — carries the member name at its top level, whatever its
+// value: what tells an optional string that is present and empty from one
+// that is absent, which its decoded field cannot (session.models.refresh's
+// nativeDir, plan 034 C5r).
+func hasMember(raw json.RawMessage, name string) bool {
+	var members map[string]json.RawMessage
+	if json.Unmarshal(raw, &members) != nil {
+		return false
+	}
+	_, ok := members[name]
+	return ok
+}
+
 // decodeTolerant is decodeParams for hello: unknown members are ignored.
 func decodeTolerant(raw json.RawMessage, v any) *protocol.Error {
 	return decode(raw, v, false)

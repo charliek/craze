@@ -471,9 +471,12 @@ func (m Model) openModelDialog() Model {
 
 // showModelDialog is `/model` and the status row's click: the dialog, and on
 // a native session the question whether its list ends with the connect row,
-// asked off the Update (askConnectRow, plan 031 §3.6).
+// asked off the Update (askConnectRow, plan 031 §3.6) — and, on a session
+// that takes up models while it runs, the session asked to take up the ones
+// funded since it opened (plan 034 §3.4).
 func (m Model) showModelDialog() (tea.Model, tea.Cmd) {
-	return m.openModelDialog().askConnectRow()
+	m = m.openModelDialog()
+	return m.askConnectRow(m.canRefreshModels())
 }
 
 // currentOrFirst is the option's current value, or its first advertised one

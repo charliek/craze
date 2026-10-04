@@ -80,11 +80,21 @@ type ChildOptions struct {
 	// them, so the child's own Keys would not find them, and it starts with
 	// them instead — its redactor, and every refusal Open makes of a key in
 	// its home or its prompt, cover them from before anything is built. A
-	// child already running when the parent learns one keeps the keys it
-	// opened with (R1); what it reports reaches the parent through the
-	// runner's union, which reads the parent's keys at each use. Set by the
-	// runner alone.
+	// child already running when the parent learns one learns it too
+	// (LearnKeys, plan 034 C4r2), and its running turn installs it at once,
+	// as AddSecrets does (C4r3, r13 #4) — the child has no next turn to wait
+	// for — while a key inside its own frozen surfaces puts it in its
+	// refusal state; what it reports reaches the parent through the runner's
+	// union, which reads the parent's keys at each use. Set by the runner
+	// alone.
 	learned []string
+	// dropEnv are the variables the parent keeps out of its commands when the
+	// child is opened (toolset.envNames, plan 034 §3.4): every one a table the
+	// parent has held knows holds a key. The child keeps them out of its own
+	// commands too, beside every one its table names — it opens on the
+	// parent's current table, which may no longer name a variable the parent
+	// still treats as a credential. Set by the runner alone.
+	dropEnv []string
 	// Mode is the parent's mode when the child opens; Options.Mode is not
 	// read for a child. SetMode on a child is ErrChildMode (§3.5).
 	Mode string

@@ -142,6 +142,20 @@ type toolset struct {
 	// wake worker does not already take under its own.
 	refusing atomic.Bool
 
+	// environ is the environment a command the session starts gets
+	// (Env.Environ): the user's as it was at Open, less every variable in
+	// envNames and every OPENAI_* (tool.ChildEnviron). envNames is every
+	// variable a model table the session has held knows holds a key — the
+	// one it opened with, and each SetTable handed it since (plan 034 §3.4,
+	// A23) — sorted: names are only ever added, so a variable a provider
+	// configured mid-session declares never reaches a command once the
+	// session can send it, and one a table no longer names is still kept
+	// out. narrowEnviron grows both, under mu, and hands the dispatcher the
+	// new environment; a sub-agent starts with its parent's names
+	// (ChildOptions.dropEnv).
+	environ  []string
+	envNames []string
+
 	// closing is Env.Closing: closed by Close, so a command already
 	// cancelled for another reason is killed at once rather than after its
 	// grace (plan 019 §3.9, §7.7).
@@ -397,7 +411,14 @@ func openTools(home, workspace, mode string, asker tool.Asker, table *modeltable
 		return nil, err
 	}
 
+	// Every variable the table knows holds a key, and for a sub-agent every
+	// one its parent's tables did (ChildOptions.dropEnv, plan 034 §3.4): a
+	// child opens on its parent's current table, which may no longer name one
+	// the parent keeps out of its own commands.
 	keyNames := table.CredentialEnvNames()
+	if child != nil {
+		keyNames = mergeNames(keyNames, child.dropEnv)
+	}
 	// The session's mode wraps the gate it would otherwise use — the test
 	// seam's, or AllowAll — rather than replacing it: a call the mode allows
 	// is still the inner gate's to judge, which is how H3's evaluator will
@@ -450,6 +471,7 @@ func openTools(home, workspace, mode string, asker tool.Asker, table *modeltable
 	if runsJobs {
 		env.Jobs = jobs{r: subs}
 	}
+	ts.environ, ts.envNames = env.Environ, keyNames
 	ts.d, err = tool.NewDispatcher(tool.Options{Tools: tools, Gate: ts.modeGate, Env: env})
 	if err != nil {
 		return nil, fmt.Errorf("harness: %w", err)
@@ -696,6 +718,47 @@ func (ts *toolset) resolve(table *modeltable.Table, getenv func(string) string) 
 	return nil
 }
 
+// holdsFrozen is frozenHolds for one value, under ts.mu (Session.FrozenKey).
+func (ts *toolset) holdsFrozen(key string) bool {
+	ts.mu.Lock()
+	defer ts.mu.Unlock()
+	return ts.frozenHolds([]string{key})
+}
+
+// narrowEnviron adds names to the variables every command the session starts
+// from now on is started without (plan 034 §3.4, A23): the environment is
+// filtered again (tool.ChildEnviron, which only ever removes) and handed to
+// the dispatcher, which gives it to every call from now on — a call already
+// running keeps the one it began with. A name already kept out changes
+// nothing: environ never holds one of envNames, so only the new names remove
+// anything. Under ts.mu, a leaf.
+func (ts *toolset) narrowEnviron(names []string) {
+	ts.mu.Lock()
+	defer ts.mu.Unlock()
+	merged := mergeNames(ts.envNames, names)
+	if len(merged) == len(ts.envNames) {
+		return // envNames is sorted and unique: none of names is new
+	}
+	ts.envNames = merged
+	ts.environ = tool.ChildEnviron(ts.environ, names)
+	ts.d.SetEnviron(ts.environ)
+}
+
+// credentialNames are envNames, a copy the caller owns: what a sub-agent
+// opened now starts without (ChildOptions.dropEnv).
+func (ts *toolset) credentialNames() []string {
+	ts.mu.Lock()
+	defer ts.mu.Unlock()
+	return slices.Clone(ts.envNames)
+}
+
+// mergeNames is a and b together, sorted and without repeats, in a new slice.
+func mergeNames(a, b []string) []string {
+	out := append(slices.Clone(a), b...)
+	slices.Sort(out)
+	return slices.Compact(out)
+}
+
 // frozenHolds reports whether one of keys is inside what this session sends
 // unredacted with every request and cannot rewrite: the system prompt, the
 // whole tools payload — not the descriptions alone: a tool's name, a
@@ -797,9 +860,18 @@ func (ts *toolset) learnLocked(vals []string) (frozen bool) {
 // this instant, by this process (the token source notifies before it writes
 // the file or uses the token), so no request of the session has carried it,
 // and a tool's output that would print it from here on — a cat of the token
-// file, an echo — must not wait for the next turn to be redacted. Every other
-// key still waits for begin: installed grows by vals alone. It reports
-// whether learning found one inside a frozen surface.
+// file, an echo — must not wait for the next turn to be redacted.
+//
+// A running sub-agent takes its parent's stored keys this way too (LearnKeys,
+// plan 034 C4r3, r13 #4), the exception's one other use: a child runs one
+// turn and closes, so a key left for its next turn would never be installed,
+// and a file one of its tools reads would hand the key to its next request.
+// Such a key may already be in the child's history — that is what R1 guards
+// — and the history goes on carrying it, as a parent's running turn carries
+// its frozen prompt (X50); installing only widens what the turn redacts from
+// here on, so nothing new carries it. Every other key still waits for begin:
+// installed grows by vals alone. It reports whether learning found one inside
+// a frozen surface.
 func (ts *toolset) addSecrets(vals []string) (frozen bool) {
 	ts.mu.Lock()
 	defer ts.mu.Unlock()

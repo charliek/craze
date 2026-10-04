@@ -54,12 +54,14 @@ type wakeRig struct {
 
 // wakeSeams is what a test installs before the session starts: the worker's
 // two seams, the log's hooks and its observer (the engine's own hook,
-// log.Observe, which a session without an engine leaves to the test).
+// log.Observe, which a session without an engine leaves to the test), and the
+// model table's reload seam (reloadSeam, native_models.go).
 type wakeSeams struct {
 	seam    func()
 	ended   func()
 	log     *logHooks
 	observe func(Event)
+	reload  func(stage string)
 }
 
 // newWakeRig starts the session; seam, when set, is the worker's wakeSeam.
@@ -97,6 +99,7 @@ func newWakeRigWith(t *testing.T, opts Options, seams wakeSeams) *wakeRig {
 	s.mu.Lock()
 	s.wakeSeam = seams.seam
 	s.wakeEnded = seams.ended
+	s.reloadSeam = seams.reload
 	s.wakeDecided = func(claimed bool) { rig.decided <- claimed }
 	// The before hook sits at the head of the adapter's own sink, which every
 	// event reaches — a turn's through Run's sink, a child's through the one

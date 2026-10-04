@@ -15,11 +15,14 @@ import (
 //
 //  1. m.shared, this client's own fold of the stream: the settings (title,
 //     mode, model, config, the catalogs of commands and plugins, the armed
-//     send-now), the todo list, the roster, the ordered tools, the queue and
-//     the agent's own turn (transcript.Model.Mirror);
-//  2. Backend.Info(), the session's static facts: the provider — by name, for
-//     its local vocabulary; its capabilities come from Info through caps() —
-//     the provider's session id, and the model and mode catalogs;
+//     send-now, and — once a native session has reloaded its table — the
+//     models it offers), the todo list, the roster, the ordered tools, the
+//     queue and the agent's own turn (transcript.Model.Mirror);
+//  2. Backend.Info(), the session's facts: the provider — by name, for its
+//     local vocabulary; its capabilities come from Info through caps() — the
+//     provider's session id, and the model and mode catalogs, the model
+//     catalog only while it is newer than the one the fold carries (plan 034
+//     §3.4, C4r);
 //  3. the overlays below: what this client's own commands confirmed that the
 //     fold has not caught up with yet.
 //
@@ -47,8 +50,22 @@ func (m *Model) recompute() {
 		f = m.shared.Mirror()
 	}
 	m.retireReached(f.Settings)
+	// The models the session offers: of the fold's catalog section — once a
+	// delta has carried one, a native session that reloaded its table (plan
+	// 034 §3.4) — and Info's list, the newer by revision; at the same
+	// revision they are one list, and the fold's is taken, ordered with every
+	// other section this client folds. Info is read live in process, so it
+	// can be ahead of the stream: a session that published two revisions
+	// before this client folded the first shows the second from Info, and
+	// the first, folded after, must not bring back what the second took away
+	// (C4r, r9 #8). Over the socket Info's revision is 0 until the wire
+	// carries it (C5), and the fold's list is taken whenever there is one.
+	models := info.Models
+	if c := f.Settings.Catalog; c != nil && c.Revision >= info.CatalogRevision {
+		models = c.Models
+	}
 	snap := agent.Snapshot{
-		Models:       info.Models,
+		Models:       models,
 		Modes:        info.Modes,
 		Commands:     f.Settings.Commands,
 		Config:       f.Settings.Config,
@@ -72,7 +89,37 @@ func (m *Model) recompute() {
 	// the fold's word as it stands.
 	armed := f.Settings.SendNow.Armed
 	m.ov.apply(&snap, &queue, &armed)
+	// A catalog whose models change under the open model dialog (a refresh,
+	// another client's key) keeps the selection on the model it was on, or on
+	// the connect row (plan 034 §3.4): the box's selection is an index, and a
+	// list that grew or lost a model would otherwise move it, or leave it on
+	// one the person did not choose. A catalog with the same models in
+	// another order — the current model moves to the top — keeps the index,
+	// as it always has.
+	selID, onRow, selected := "", false, false
+	if m.dialog == dialogModel && !sameModelSet(m.snap.Models, snap.Models) {
+		list := m.dialogModelList()
+		switch {
+		case m.mdlg.connect && m.mdlg.sel == len(list):
+			onRow, selected = true, true
+		case m.mdlg.sel >= 0 && m.mdlg.sel < len(list):
+			selID, selected = list[m.mdlg.sel].ID, true
+		}
+	}
 	m.snap, m.queue, m.sendNowArmed = snap, queue, armed
+	if selected {
+		list := m.dialogModelList()
+		switch {
+		case onRow:
+			m.mdlg.sel = len(list)
+		case m.mdlg.sel >= len(list) || list[m.mdlg.sel].ID != selID:
+			if i := slices.IndexFunc(list, func(md agent.ModelInfo) bool { return md.ID == selID }); i >= 0 {
+				m.mdlg.sel = i
+			} else {
+				m.mdlg.sel = max(min(m.mdlg.sel, m.modelListRows(list)-1), 0)
+			}
+		}
+	}
 	// The host's word on its permission mode and its start (plan 030 §3.7),
 	// read with the rest of its facts, so the status rows move with them.
 	m.hostPerm, m.hostStart = info.PermissionMode, info.StartedAt
@@ -594,4 +641,21 @@ func (m *Model) noteResult(r resultEntry) {
 // restore, a new session).
 func (m *Model) clearOverlays() {
 	m.ov = overlays{}
+}
+
+// sameModelSet reports whether a and b offer the same model ids, in any order.
+func sameModelSet(a, b []agent.ModelInfo) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	ids := make(map[string]struct{}, len(a))
+	for _, md := range a {
+		ids[md.ID] = struct{}{}
+	}
+	for _, md := range b {
+		if _, ok := ids[md.ID]; !ok {
+			return false
+		}
+	}
+	return true
 }

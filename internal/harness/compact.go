@@ -156,7 +156,11 @@ var errTextFormOverflow = fmt.Errorf("%w: the compaction's text form does not fi
 // A cancelled ctx ends the attempts where they are: a failure entry is
 // written only if some attempt was billed (its usage is not all zero), and
 // compact returns CompactResult{}, ctx.Err() either way — Session.Compact
-// turns that into a cancelled Result, as Run's finish does.
+// turns that into a cancelled Result, as Run's finish does. A session found
+// in its refusal state before an attempt ends them the same way, with
+// ErrStoredKeyFrozen (compactRefused, plan 034 C4r2), and so does one found
+// in it once the attempts have failed (C4r3): the key was learned during the
+// last attempt, or one that failed fatally.
 func (s *Session) compact(ctx context.Context, m model, turn int, reason, focus, command string, emit func(Event)) (CompactResult, error) {
 	return s.compactOn(ctx, m, m.r, reason == store.CompactionOverflow, 0, turn, reason, focus, command, emit)
 }
@@ -293,6 +297,19 @@ func (s *Session) compactRun(ctx context.Context, m model, fit modeltable.Resolv
 
 attempts:
 	for attempt := 1; attempt <= summarizerAttempts; attempt++ {
+		// Every attempt sends the frozen system prompt (s.system), so a key
+		// learned since the last one — while its request was outstanding, or
+		// during the backoff — that is inside it, the tools or the plan path
+		// puts the session in its refusal state, and no attempt follows (plan
+		// 034 C4r2, r11 #2b): not after a failure the attempts would retry,
+		// nor a degenerate summary, nor the aligned form's overflow, which
+		// switches to the text form at once. Neither summarizer agent prepares
+		// its step (no PrepareStep), and the turn's boundaries guard only the
+		// way into a compaction (restartDue, overflowed), so this is the
+		// summarizer's own; a manual /compact meets it too.
+		if s.tools.refusing.Load() {
+			return s.compactRefused(m, turn, reason, command, usage, before, emit)
+		}
 		var (
 			out string
 			u   store.Usage
@@ -346,6 +363,19 @@ attempts:
 	}
 
 	if reply == "" {
+		// The loop's own check guards only the way into an attempt: a key
+		// learned while the last attempt's request was outstanding, or
+		// while one that then failed fatally — or overflowed the text
+		// form's budget — was, leaves the loop here without meeting it
+		// (plan 034 C4r3, r13 #3). The failure is the refusal's then, as it
+		// would have been had another attempt followed: no failure entry
+		// unless an attempt was billed, automatic compaction left as it
+		// was, and the caller stopping on ErrStoredKeyFrozen — an overflow
+		// recovery's turn included, which would otherwise end with the
+		// overflow.
+		if s.tools.refusing.Load() {
+			return s.compactRefused(m, turn, reason, command, usage, before, emit)
+		}
 		if lastErr == nil {
 			lastErr = errDegenerateSummary
 		}
@@ -375,6 +405,26 @@ func (s *Session) compactCancelled(ctx context.Context, m model, turn int, reaso
 	}
 	emit(Compacted{Phase: CompactionEnded, Reason: reason, TokensBefore: before, Err: "cancelled", Usage: usage})
 	return CompactResult{}, ctx.Err()
+}
+
+// compactRefused is compact's return once the session is refusing before an
+// attempt (plan 034 C4r2, r11 #2b), or after attempts that all failed (C4r3,
+// r13 #3): no further request is sent, and the compaction
+// ends as a cancelled one does (compactCancelled) — a failure entry only if
+// some attempt was billed, so what it spent is held by an entry, and
+// Compacted{ended} with the refusal's own text, which names no key. It
+// returns ErrStoredKeyFrozen, which every caller stops on: the turn ends with
+// the refusal (stopBeforeRequest), and a manual /compact returns it.
+func (s *Session) compactRefused(m model, turn int, reason, command string, usage store.Usage, before int64, emit func(Event)) (CompactResult, error) {
+	msg := cleanErrorText(ErrStoredKeyFrozen)
+	if usage != (store.Usage{}) {
+		if _, err := s.appendCompactionFailure(m, turn, reason, command, usage, msg, emit); err != nil {
+			emit(Compacted{Phase: CompactionEnded, Reason: reason, TokensBefore: before, Err: s.redactor().String(err.Error()), Usage: usage})
+			return CompactResult{}, &errCompactionSaveFailed{err}
+		}
+	}
+	emit(Compacted{Phase: CompactionEnded, Reason: reason, TokensBefore: before, Err: msg, Usage: usage})
+	return CompactResult{}, ErrStoredKeyFrozen
 }
 
 // compactFailed is compact's return once every attempt (or the text form's
@@ -487,9 +537,11 @@ func (s *Session) diagUnsaved(emit func(Event), turn int, reason string, usage s
 // with an error, whatever compact's own would mean for a plain Run:
 // store.ErrNothingToCompact when the context has no message (P35's own
 // wording, "nothing to compact yet", is the adapter's, C13's); a classified
-// summarizer failure otherwise; or *errCompactionSaveFailed, a save failure
-// like any turn's. A cancelled ctx ends the turn cancelled, as any turn's
-// does, with a nil error.
+// summarizer failure otherwise; ErrStoredKeyFrozen when a key learned while
+// it ran put the session in its refusal state before an attempt
+// (compactRefused, plan 034 C4r2); or *errCompactionSaveFailed, a save
+// failure like any turn's. A cancelled ctx ends the turn cancelled, as any
+// turn's does, with a nil error.
 func (s *Session) Compact(ctx context.Context, focus, command string, sink func(Event)) (Result, error) {
 	if sink == nil {
 		sink = func(Event) {}

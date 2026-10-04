@@ -60,7 +60,16 @@ func nativePickerEnv(k string) string {
 // provider has no key, so it is passed over), beta/slow and alpha/two.
 func nativePickerSession(t *testing.T, ws string) agent.Session {
 	t.Helper()
-	home := t.TempDir()
+	return nativePickerSessionAt(t, ws, t.TempDir())
+}
+
+// nativePickerSessionAt is nativePickerSession with home as the directory the
+// session reads its models from and remembers in: the TUI's own native
+// directory (Config.NativeDir) for a fixture that stands for one process, as
+// nativePickerConfig and signInConfig are, so a refresh's sameDir is true as it
+// is in the real program (plan 034 §3.4, A26).
+func nativePickerSessionAt(t *testing.T, ws, home string) agent.Session {
+	t.Helper()
 	table := nativePickerTable()
 	at := time.Date(2026, 9, 30, 10, 0, 0, 0, time.UTC)
 	for _, alias := range []string{"alpha/two", "beta/slow", "gamma/big"} { // oldest first
@@ -90,7 +99,7 @@ func nativePickerConfig(t *testing.T, stored map[string]string) Config {
 	t.Helper()
 	ws := frameWorkspace(t)
 	dir, getenv := connectFixture(t, stored)
-	return Config{Session: nativePickerSession(t, ws), Theme: "tokyo-night", Workspace: ws, Yolo: true, NativeDir: dir, Getenv: getenv}
+	return Config{Session: nativePickerSessionAt(t, ws, dir), Theme: "tokyo-night", Workspace: ws, Yolo: true, NativeDir: dir, Getenv: getenv}
 }
 
 // TestFrameGoldenNativeModelDialog is the dialog as it opens: Alpha One, the

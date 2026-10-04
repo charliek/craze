@@ -211,6 +211,14 @@ type Settings struct {
 	// Snapshot) carries a copy of its own. It has no strings, so no
 	// truncation mark.
 	Usage *agent.UsageState
+	// Catalog is the session's catalog section (plan 034 §3.4, Q17): the
+	// models it offers now and the list's revision, nil until a delta carries
+	// one — which only a native session that reloaded its model table sends;
+	// until then the list a client shows is the one the session started with
+	// (backend.SessionInfo.Models). Like Usage it is the delta's copy, list
+	// and all, replaced whole by the next and never written through, and each
+	// projection carries a copy of its own (cloneCatalog).
+	Catalog *agent.CatalogState
 	// Truncated names the sections the snapshot this model was restored from
 	// carried only the head of some string of (over ItemCap, plan 024 §3.5),
 	// so a client can say so. A model folded from the event stream never sets
@@ -694,6 +702,8 @@ func (m *Model) cutLocked() cut {
 		cu := *u
 		c.settings.Usage = &cu
 	}
+	// The catalog likewise, its list included (plan 034 §3.4).
+	c.settings.Catalog = cloneCatalog(m.settings.Catalog)
 	c.todosTruncated = m.todosTruncated
 	if len(m.queueTruncated) > 0 {
 		c.queueTruncated = maps.Clone(m.queueTruncated)

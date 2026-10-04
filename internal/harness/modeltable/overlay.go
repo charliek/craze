@@ -434,9 +434,10 @@ func checkModelOverlay(file, alias string, o modelOverlay) error {
 	at := func(key, reason string) error {
 		return &FileError{File: file, Table: modelTable(alias), Key: key, Reason: reason}
 	}
+	if r := aliasProblem(alias); r != "" {
+		return at("", r)
+	}
 	switch {
-	case strings.TrimSpace(alias) == "":
-		return at("", "a model alias must not be empty")
 	case o.Provider != nil && *o.Provider == "":
 		return at("provider", "must not be empty: name a provider")
 	case o.WireModel != nil && strings.TrimSpace(*o.WireModel) == "":

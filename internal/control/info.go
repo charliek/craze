@@ -19,8 +19,9 @@ import (
 // which is the provider's answer: stop is the host's own, and a server that
 // serves session.stop turns it on in the document it builds
 // (sessionInfoReady; plan 030 §3.6a), as a server with the row facts turns on
-// rowFacts (§3.8) and one that counts its clients presence (plan 032 §3.14),
-// each omitted while false. TestEveryCapabilityIsOnTheWire
+// rowFacts (§3.8), one that counts its clients presence (plan 032 §3.14) and
+// one whose session can take up models modelsRefresh (plan 034 §3.4), each
+// omitted while false. TestEveryCapabilityIsOnTheWire
 // holds every agent.Capabilities field to a wire name here and in the schema,
 // so a field added to the struct fails the gate until it is mapped.
 func sessionCapabilities(c agent.Capabilities) protocol.SessionCapabilities {
@@ -98,7 +99,15 @@ func (s *Server) sessionInfoReady(eng *engine.Engine) (protocol.SessionInfo, eng
 	// presence is too (plan 032 §3.14): the server counts its clients for
 	// them, and a document of a server that does not leaves it out.
 	info.Capabilities.Presence = s.opts.Presence
+	// modelsRefresh is the session's (plan 034 §3.4): it can take up models
+	// funded while it runs, so this server serves session.models.refresh for
+	// it (serves); left out for one that cannot, an ACP session's.
+	info.Capabilities.ModelsRefresh = eng.RefreshesModels()
 	if ready {
+		// The list as the session offers it now, with its revision, read in
+		// the one State: a native session's reload swaps both in one locked
+		// section (plan 034 §3.4), so they always describe one list.
+		info.Catalogs.Revision = st.CatalogRevision
 		for _, m := range st.Models {
 			info.Catalogs.Models = append(info.Catalogs.Models, protocol.CatalogModel{ID: m.ID, Name: m.Name, Recent: m.Recent})
 		}
@@ -160,6 +169,15 @@ func stateResult(st engine.State) (protocol.StateResult, error) {
 	if err != nil {
 		return protocol.StateResult{}, err
 	}
+	// The catalog section (plan 034 §3.4), as the stream's: present once a
+	// native session has reloaded its model table, absent before — when the
+	// list is the info document's, revision 0.
+	var catalog json.RawMessage
+	if st.CatalogRevision > 0 {
+		if catalog, err = agent.EncodeCatalogState(&agent.CatalogState{Models: st.Models, Revision: st.CatalogRevision}); err != nil {
+			return protocol.StateResult{}, err
+		}
+	}
 	r := protocol.StateResult{
 		Activity:    protocol.Activity(st.Activity),
 		ForeignTurn: st.ForeignTurn,
@@ -172,7 +190,7 @@ func stateResult(st engine.State) (protocol.StateResult, error) {
 		StartFailed: st.StartFailed,
 		Prompted:    st.Prompted,
 		Cancelled:   st.Cancelled,
-		Settings:    protocol.Settings{Model: st.CurrentModel, Mode: st.CurrentMode, Config: config, Usage: usage},
+		Settings:    protocol.Settings{Model: st.CurrentModel, Mode: st.CurrentMode, Config: config, Usage: usage, Catalog: catalog},
 	}
 	if a := st.SendNow; a != nil {
 		r.SendNow = &protocol.ArmedSend{Text: a.Text, FromRow: a.FromRow, Turn: a.Turn, Cause: a.Cause}

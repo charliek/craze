@@ -983,9 +983,19 @@ func TestACrashedHostLeavesWithinOneRound(t *testing.T) {
 func TestThePollRunsOnlyOnDemand(t *testing.T) {
 	m := newMemHosts(t)
 	looped := make(chan struct{})
+	// paused is told each time the poll has taken a Pause: the list's demand
+	// is released before its answer is written, but the poll applies the
+	// Pause on its own goroutine, and a tick it takes first still polls.
+	paused := make(chan struct{}, 8)
 	rg := newRosterRig(t, testEnv(t), rigOpts{clock: true, hk: func(hk *hooks) {
 		installMem(t, hk, m)
 		hk.looping = func() { close(looped) }
+		hk.rosterPaused = func() {
+			select {
+			case paused <- struct{}{}:
+			default:
+			}
+		}
 	}})
 	<-looped
 	a := m.add(1, memRow(1, "one"))
@@ -1001,6 +1011,12 @@ func TestThePollRunsOnlyOnDemand(t *testing.T) {
 		t.Fatal("the idle rule saw a host with no read since it was listed")
 	}
 	q := dialPeer(t, rg.sock)
+	drain := func() { // only a Pause after this point counts for the wait below it
+		for len(paused) > 0 {
+			<-paused
+		}
+	}
+	drain()
 	if l := q.list(); !slices.Equal(ids(l.Sessions), []string{a}) {
 		t.Fatalf("listed %v", ids(l.Sessions))
 	}
@@ -1011,6 +1027,11 @@ func TestThePollRunsOnlyOnDemand(t *testing.T) {
 		t.Fatal("the poll's read did not reach the idle rule")
 	}
 
+	select {
+	case <-paused: // the list's demand is released and the poll has paused
+	case <-time.After(step):
+		t.Fatalf("the poll did not pause after the list's answer within %v", step)
+	}
 	rg.tick() // the list has answered: no demand again
 	p := dialPeer(t, rg.sock)
 	p.subscribe()
@@ -1022,12 +1043,18 @@ func TestThePollRunsOnlyOnDemand(t *testing.T) {
 		t.Fatalf("%d registry reads after a list, a subscription and its tick, want %d", got, reads+3)
 	}
 
+	drain()
 	_ = p.nc.Close()
 	waitFor(t, "the subscription's end", func() bool {
 		rg.h.rs.mu.Lock()
 		defer rg.h.rs.mu.Unlock()
 		return rg.h.rs.demand == 0
 	})
+	select {
+	case <-paused: // the end's release has reached the poll
+	case <-time.After(step):
+		t.Fatalf("the poll did not pause after the subscription's end within %v", step)
+	}
 	rg.tick() // ended: nothing
 	q.list()
 	if got := m.readCount(); got != reads+4 {

@@ -459,6 +459,7 @@ idempotency is its own `requestId`).
 | `session.setTitle` | ✓ | `title` | `{}` | the delta, not the reply, is how a client learns the title took |
 | `session.subagent.cancel` | ✓ | `agentId` | `{}` | stops one running sub-agent; the rest of the turn goes on; its outcome is the child's `finished` row, as an event |
 | `session.stop` | ✓ | — | `{}` | served where the session capability `stop` is `true` (every `craze serve`), from any client: a **receipt**, not the stop's completion — see [`session.stop`](#sessionstop); a host whose `stop` is `false` (a TUI-hosted session, an older host) answers `unsupported`, reason `stop_unsupported` |
+| `session.models.refresh` | | `nativeDir?` | `status`, `revision`, `sameDir?` | served where the session capability `modelsRefresh` is `true` (a native session): the session takes up the models funded since it opened — see [`session.models.refresh`](#sessionmodelsrefresh); idempotent, so not mutating; a session whose `modelsRefresh` is absent (an ACP session) is refused `unsupported`, reason `models_refresh_unsupported` |
 | `asks.list` | | — | `asks[]` (summaries: `id`, `kind`, `label`, `openedAt`) | |
 | `asks.get` | | `askId` | `ask` (the full record, body strings capped at 256 KiB) | |
 | `asks.answer` | ✓ | `askId`, `answer` | `{}` | the first valid answer wins; an invalid one is `bad_request`, reason `bad_answer`, and leaves the ask open |
@@ -523,6 +524,63 @@ joins the first: the host runs its stop once. A stop runs no command of the
 engine's, so it is not in the receipts table: a resend is answered `{}`
 again, never `unknown_command`, and a client that lost the receipt need not
 resend it at all — it watches for the session's end.
+
+### `session.models.refresh`
+
+A native session reloads its model table while it runs — a key saved, the
+ChatGPT plan signed in to or out of, the plan's model list fetched again — and
+offers what is funded now, without the client leaving the conversation. It
+does so on its own at every turn's start; this method asks it to now, so an
+idle session picks a new key up at once. A client sends it when it has just
+funded a model — after it saves a key, after a sign-in has written the plan's
+model list — and when it is about to show the list. It also starts the plan's
+model-list fetch in the background when the list is due (by its age, or a
+list fetched for another `client_version`); a list that fetch brings is taken
+up by the session itself and published the same way. In each session one
+fetch runs at a time — a call while one is in flight joins it — and none
+starts within 30 seconds of one that failed, so a client calling one session
+in a loop costs the account at most one request per half minute. The backoff
+is the session's own, not the account's: each session keeps its own, so
+several sessions open at once can each make a request in the same half
+minute. The call itself still reloads and answers.
+
+It is served where the session capability `modelsRefresh` is `true`: every
+native session, whoever hosts it. Where it is absent — every ACP session, and
+every host from before the method — a client makes **no call**, and a newly
+funded model is the next session's, as it always was; a host refuses the call
+anyway `unsupported`, reason `models_refresh_unsupported` (one from before the
+method, `unknown_method`), and craze's own client reads either as the status
+`unsupported`.
+
+| params | |
+|---|---|
+| `sessionId` | as every session-scoped method |
+| `nativeDir` | optional: the craze native directory the client itself saves keys and sign-ins in — an absolute path, at most 4096 characters, else `-32602`, `bad_request`. Absent is none; present and empty is not a path, and refused the same, as the schema's pattern refuses it. Paths are not secrets |
+
+| result | |
+|---|---|
+| `status` | `applied` — what the session reads its models from had changed, and it offers what that funds now; `current` — nothing had changed; `pending` — it had changed while a turn ran (or a load replayed), and the session takes it up as that ends; `unsupported` — the session cannot take up models while it runs; `failed` — the files could not be read as a model table, and the list is as it was (the host journals why, value-free) |
+| `revision` | the [catalog section](#live-models)'s revision of the list the session offers after the call: `0` for the list it started with; a `pending` refresh's is the list still offered |
+| `sameDir` | present when `nativeDir` was: whether it is the directory the session reads its models from — compared absolute and cleaned and, where both exist, by the file system's own identity, so a symlink to it, or a spelling a case-insensitive volume folds to it, is the same directory. `false` is the home mismatch — the client and the session's host run with different `CRAZE_HOME`s, so a key the client saved is not one the session can see |
+
+It is **not mutating**: no `commandId`, no receipt, and a resend — of a call
+whose answer was lost, or of one already answered — only asks again (a second
+call with nothing changed answers `current`). Its reply waits for the [reply
+barrier](#the-reply-barrier) all the same, so an `applied` answer follows, on
+the calling connection, the `catalog` delta that carried the new list: a
+client that reads `applied` has already been handed what `/model` offers now.
+Every other attached client receives the same delta. The refresh waits only on
+the session's local file reads — never the network, never a turn — and is
+answered `not_accepting` before the session has started and once it has
+closed.
+
+```json
+{"jsonrpc":"2.0","id":"4","method":"session.models.refresh","params":{"sessionId":"session-fake-1","nativeDir":"/home/other/.craze/native"}}
+{"jsonrpc":"2.0","method":"event","params":{"subscription":"s-1","seq":2,"event":{"type":"meta","state":{"catalog":{"models":[{"id":"grok","name":"Grok"},{"id":"fast","name":"Fast"},{"id":"fireworks/kimi-k3","name":"Kimi K3 (Fireworks)","recent":1}],"revision":1}},"at":"2026-01-01T00:00:00Z"}}}
+{"jsonrpc":"2.0","id":"4","result":{"status":"applied","revision":1,"sameDir":false}}
+```
+
+(From the fake host's `24-models-refresh` fixture.)
 
 ### `session.snapshot`
 
@@ -891,7 +949,9 @@ than that is future work behind a new capability.
 Carried by an attach reply's `session`, a `ready` notification's `session`,
 and the first half of a `sessions.list` row. It is **final** once the
 session is up — its catalogs are empty and `providerSessionId` may be `""`
-until then.
+until then — but for a native session's model list, which
+[changes while it runs](#live-models): each document carries the list as it
+stands when it is built.
 
 ```json
 {
@@ -919,7 +979,7 @@ reply](#the-reply)); `capabilities`' fields are documented in full under
 | `hostId` | the host serving this session |
 | `workspace` | the session's working directory |
 | `provider` | `{name, label}` — `name` is the provider id (`cursor`, `grok` or `gx` for the ACP agents, `native` for the one that runs inside craze), `label` what a client shows |
-| `catalogs` | `{models[{id,name,recent?}], modes[{id,name,description}]}` — empty until the session is ready. A model's `recent` is its rank in the native provider's model memory: `1` for the model most recently picked in a native session's `/model` that this session offers, then `2`, `3`…; absent for a model not remembered, for every ACP provider's model, and on an older host. A native session's `models` are only those whose provider has a key, plus the one it runs on, judged once when it starts; a client lists the current model first, then the ranked ones by rank, and shows no label for either |
+| `catalogs` | `{models[{id,name,recent?}], modes[{id,name,description}], revision?}` — empty until the session is ready. A model's `recent` is its rank in the native provider's model memory: `1` for the model most recently picked in a native session's `/model` that this session offers, then `2`, `3`…; absent for a model not remembered, for every ACP provider's model, and on an older host. A native session's `models` are only those whose provider has a key, plus the one it runs on, as the session stands when the document is built: it [changes while the session runs](#live-models) as keys are saved and the ChatGPT plan is signed in to or out of. `revision` is that list's revision, the catalog section's, absent while `0` (the list the session started with, every ACP session's, and every older host's). A client lists the current model first, then the ranked ones by rank, and shows no label for either |
 | `capabilities` | the session's own capability set, below |
 | `retryHorizon` | `{commands, ageMs}` — the command-id table's size and age bound |
 | `permissionMode` | how the host's agent handles permission requests: `bypass` (spawned with `--force`: it runs tools unasked) or `prompt` (`--no-force`: it asks, and a client answers). Absent when the host does not say |
@@ -953,7 +1013,8 @@ hub's result](#the-hubs-result)).
 **Session** (the info document's `capabilities`): every field of the
 engine's own capability set, in its wire name, plus four the protocol states
 for every host of protocol 1 — three always `true`, and `stop`, which says
-what this host can do — and `rowFacts` and `presence`, the host's too:
+what this host can do — and `rowFacts` and `presence`, the host's too, and
+`modelsRefresh`, the session's own:
 
 | wire name | meaning |
 |---|---|
@@ -975,6 +1036,7 @@ what this host can do — and `rowFacts` and `presence`, the host's too:
 | `stop` | the host's own, not the provider's: `true` where [`session.stop`](#sessionstop) is served (every `craze serve`), `false` on a TUI-hosted session and on a host from before it existed |
 | `rowFacts` | the host's own too, and omitted when `false`: the session's `sessions.list` row carries the [row facts](#the-row-facts). It is a session capability, not a connection one, because it describes the row, and a hub's roster carries rows of hosts of different builds |
 | `presence` | the host's own too, and omitted when `false`: the host counts the clients attached to the session, sends each attachment the [`presence`](#presence) notification, and puts `attached` on the session's row |
+| `modelsRefresh` | the session's own, and omitted when `false`: the session takes up models funded while it runs (a native session), so the host serves [`session.models.refresh`](#sessionmodelsrefresh) for it, whether it runs detached or in a TUI. Absent for every ACP session and on an older host: a client makes no call |
 
 A client hides — never merely disables — whatever a capability says this
 session cannot do. A capability the engine's own `agent.Capabilities` grows
@@ -1008,6 +1070,15 @@ is optional the same way, except that its absence is ordinary on any host —
 the model is not remembered — so a catalog with no ranks at all, an ACP
 provider's or an older host's, is listed after the current model in the
 client's own order.
+
+[Live models](#live-models) are announced the same way. Where
+`capabilities.modelsRefresh` is absent — every ACP session, every older host
+— a client makes no `session.models.refresh` call. An absent
+`catalogs.revision` is revision `0`. The state delta's `catalog` section is
+one an older client's decoder skips as it skips any key it does not know (the
+event codec stays at version 1), so an older client attached to a newer host
+keeps the list the info document gave it until it attaches again — what every
+client did before the section existed.
 
 The hub is announced the same way. A client learns it is talking to one from
 `hello`'s `endpoint.kind`, and what it serves from its connection
@@ -1164,6 +1235,62 @@ usage-only delta prints no `craze prompt --json` line, but it takes a `seq`
 like every event. The section is additive, like `compaction`: no codec
 version bump and no capability.
 
+## Live models
+
+A native session's model list changes while it runs: a key saved, the
+ChatGPT plan signed in to or out of, or the plan's list fetched again is
+offered at once (the model it runs on, and everything it froze at open — its
+prompt, its tools, the model-facing `agent` tool's menu, its compaction and
+sub-agent settings — stay as they were). Each change reaches a client as the
+**catalog section**, `{models, revision}`, a state delta section like the
+usage section — `state.catalog` on a `meta` event — carrying the whole list
+the session offers now, in the picker's order, and the list's revision:
+
+```json
+{"type":"meta","state":{"catalog":{"models":[{"id":"grok","name":"Grok"},{"id":"fast","name":"Fast"},{"id":"fireworks/kimi-k3","name":"Kimi K3 (Fireworks)","recent":1}],"revision":1}},"at":"2026-01-01T00:00:00Z"}
+```
+
+- Each model is the info document's catalog model: `id` and `name` always,
+  `recent` its rank and absent for a model not remembered. The list has
+  bounds of its own, which the session keeps where it builds the list — so
+  `catalogs.models` keeps them too, and the section fits every record limit
+  and every snapshot budget whatever the owner's model files say: at most
+  **512** models, in the picker's order, the running model always among them;
+  each `name` at most **128** bytes, a longer one cut on a character boundary
+  and ended with `…`; and a model whose `id` would be over **256** bytes is not
+  offered at all, since an id is never cut — one cut short would be one no
+  `session.set` could name. The session says on its diagnostics, once and
+  without the text, what the bounds cut. Real tables are far inside them.
+- `revision` is always written. It is `0` for the list a session started
+  with, and only ever grows within one incarnation, in `seq` order. A change
+  found while a turn runs (a `pending` refresh) is published once that turn
+  has ended, and none is ever published inside a load's replay bracket.
+- No ACP session publishes one, and neither does a native session before its
+  first change: the key is **absent** then — never `null`, never `{}` — and
+  the list is the info document's.
+
+The section stands in the reads of where things are, as usage does: a
+snapshot's `settings.catalog` (the last section a delta carried) and
+`session.state`'s `settings.catalog` (present from revision `1`), and the
+info document's `catalogs.models`, built from the list as it stands when the
+document is built, with its `catalogs.revision`. So an attach after a change
+— its reply, its snapshot, a `ready` notification, a `sessions.list` row —
+already carries the new list.
+
+**The revision rule.** A client never applies a revision lower than the one
+it holds: a catalog section older than the list it has is ignored, and of the
+list a document carries and the list its fold holds, it shows the one with
+the higher revision (the same revision is the same list). So a reconnect, a
+replay, or a document read before a delta and folded after it never brings
+back a list the session has moved past — a model a reload took away never
+reappears. A new incarnation is a new session: its snapshot replaces the
+fold, and revisions start again from `0`.
+
+A catalog-only delta prints no `craze prompt --json` line, but takes a `seq`
+like every event. The section is additive: no codec version bump; the method
+that asks for a change now, [`session.models.refresh`](#sessionmodelsrefresh),
+has the capability `modelsRefresh`.
+
 ## Errors and retry
 
 A refused call's `error` object:
@@ -1238,7 +1365,7 @@ client never mistakes one for a host's own answer — no host ever sends them.
 | `unavailable` | `log_backed_up`, `ask_unavailable`, `set_unavailable`, `not_run`, `attach_raced`, `not_ready`, `busy`, `closing`; the hub's `spawn_failed`, `host_unreachable` |
 | `failed` | `option_gone`, `failed`, `response_too_large`, `snapshot_too_large` |
 | `bad_request` | `bad_request`, `bad_answer`, `hello_required`, `unknown_field`, `line_too_long`, `protocol_version`, `bad_token`, `already_attached`; the hub's `connect_not_first`, `ambiguous_session`, `already_subscribed`, `request_conflict` |
-| `unsupported` | `unsupported`, `unknown_method`, `stop_unsupported`, `roster_unsupported`, `hub_only`; the hub's `host_only` |
+| `unsupported` | `unsupported`, `unknown_method`, `stop_unsupported`, `models_refresh_unsupported`, `roster_unsupported`, `hub_only`; the hub's `host_only` |
 | `unknown_session` | `unknown_session` |
 | `unknown_ask` | `unknown_ask` |
 | `already_submitted` | `already_submitted` |
@@ -1433,7 +1560,7 @@ embedded copy — e.g. [`hello.json`](protocol/schema/hello.json),
 
 ## Fixtures and the fake host
 
-`internal/fakehost/testdata/wire/*.ndjson` is twenty-three scripted scenarios
+`internal/fakehost/testdata/wire/*.ndjson` is twenty-five scripted scenarios
 against a real `internal/control` server over a real engine (wrapping the
 TUI's own `Stub`, never a fixture-only re-implementation) — hello and a fresh
 attach; a cursor resume and its replay; a foreign-incarnation cursor; a
@@ -1457,19 +1584,31 @@ session and one that is no longer the first (21); against a hub that
 creates sessions, a `session.create` with a first prompt, taken, its repeat
 answered the same, the same `requestId` with other params refused
 `request_conflict`, and a create whose session's start fails,
-`start_failed` with its cause (22); and a presence host
+`start_failed` with its cause (22); a presence host
 counting two clients — each told after its `synchronized`, the first told
 again of the second's arrival and of its detach, the row saying `attached: 2`
-(23). Every line is
+(23); a native-like session's `session.models.refresh` — `current` with
+`sameDir: true`, then `applied` at revision 1 with `sameDir: false`, its
+`catalog` delta before the reply and on a second client's stream, then
+`current` again — and a third client whose attach reply, snapshot and
+`session.state` carry the new list at its revision, then, through the hub, a
+fourth whose splice carries an attach whose snapshot holds the list and that
+client's own refresh, `applied` at revision 2 after its `catalog` delta,
+the delta reaching the three direct clients too (24); and, through the
+hub, the method sent to the hub itself (`host_only`) and, through a splice,
+an ACP-like session whose info document says no `modelsRefresh` — the
+document an older host sends too, to which a client makes no call — refusing
+it `models_refresh_unsupported` (25). Every line is
 `{"conn": N, "dir": "c2s"|"s2c", "msg": {...}}`, plus `{"dir": "op", "op":
 {...}}` lines that are not wire messages at all — they script the host
 directly (emitting text, opening an ask, restarting the engine into a fresh
 incarnation, stalling or dropping connections, running a stop's sequence) —
 and, as a fixture's first line or not at all, `{"dir": "host", "host":
 {...}}`, which says how the host was built: `stop`, `permissionMode`,
-`startedAt`, `rowFacts` and `presence` turn on what an older host does not have, and
-`models` gives it a catalog of its own. The seventeen fixtures
-without one are, byte for byte, an older host to a newer client. `TestWireFixtures` replays
+`startedAt`, `rowFacts`, `presence` and `modelsRefresh` turn on what an older host does not have, and
+`models` gives it a catalog of its own. The seventeen fixtures from before
+`modelsRefresh` without one are, byte for byte, an older host to a newer
+client. `TestWireFixtures` replays
 every one of them byte for byte, validating every line against the schema
 above as it sends or reads it — except a c2s line fixture 10 marks
 `"invalid": true`: deliberately not a well-formed request of a method
@@ -1517,7 +1656,8 @@ then reads the same NDJSON ops described above from stdin —
 `foreign_turn`, `stall_writes`, `resume_writes`, `drop_connections`,
 `restart` (a new incarnation of the same session), `quit`, plus a few the
 fixtures alone need (`spawn_subagent`, `oversized_event`, `advance_clock`,
-`hang_next`, `run_stop`, and `unlist` — a `--registry` host leaving the
+`hang_next`, `run_stop`, `stage_models` — what the next
+`session.models.refresh` of a `modelsRefresh` host takes up — and `unlist` — a `--registry` host leaving the
 registry while it keeps serving the connections it has). Its clock, ids, host id, craze version, pid and token source
 are all deterministic by default, so a script against it produces the same
 wire traffic on every run and every machine (a listed host's registry entry

@@ -27,11 +27,11 @@ import (
 // agent type reaches the wire by a line here — which the completeness test
 // (eventcodec_test.go) refuses to let anyone forget. The flat leaf types
 // (Todo, ToolDiff, PermissionOption, Option, ToolOutput, PluginCommand,
-// ForeignTurnInfo, ReplayInfo, TurnInfo, CompactionInfo, Spend) are converted
-// rather than copied field by field: their wire twins have the same fields in
-// the same order, so a field added to one of them stops this file compiling
-// until the twin has it too. Held by pointer, they convert as pointers, and a
-// nil one converts to nil.
+// ForeignTurnInfo, ReplayInfo, TurnInfo, CompactionInfo, Spend, ModelInfo)
+// are converted rather than copied field by field: their wire twins have the
+// same fields in the same order, so a field added to one of them stops this
+// file compiling until the twin has it too. Held by pointer, they convert as
+// pointers, and a nil one converts to nil.
 //
 // JSON cannot carry every Go value bit for bit, so "lossless" is defined, and
 // the tests hold the codec to exactly this:
@@ -580,9 +580,39 @@ type wireState struct {
 	Plugins  *wirePluginsList `json:"plugins,omitempty"`
 	SendNow  *wireSendNow     `json:"sendNow,omitempty"`
 	Usage    *wireUsage       `json:"usage,omitempty"`
+	Catalog  *wireCatalog     `json:"catalog,omitempty"`
 	Reason   string           `json:"reason,omitempty"`
 	Detail   string           `json:"detail,omitempty"`
 	IndexErr string           `json:"indexErr,omitempty"`
+}
+
+// wireCatalog is a CatalogState (plan 034 §3.4, Q17): the models a native
+// session offers now, under a key of their own as the list sections keep
+// theirs, and the list's revision, always written — the revision is what a
+// client compares, so a 0 is a value here, not an absence. The section itself
+// is absent when nil, never null or {}: no ACP session's delta, and no native
+// session's before its first reload, carries one. An older decoder ignores
+// the key (a decoder ignores keys it does not know), so the section is
+// additive: no codec version bump.
+//
+// The list carries what SessionInfo.Catalogs carries, and the native session
+// holds it to the catalog's bounds where it builds it (boundCatalog, plan 034
+// C5r): at most 512 models, each name at most 128 bytes, and a model whose id
+// is over 256 bytes not offered — so the section fits every record limit and
+// snapshot budget whatever the owner's files say. This codec cuts nothing: an
+// id cut short would be one no session.set could name.
+type wireCatalog struct {
+	Models   []wireModelInfo `json:"models,omitempty"`
+	Revision uint64          `json:"revision"`
+}
+
+// wireModelInfo is ModelInfo, field for field in the same order, so it
+// converts by a plain conversion. Its shape is the info document's catalog
+// model (info.json's model): id and name always written, recent absent for 0.
+type wireModelInfo struct {
+	ID     string `json:"id"`
+	Name   string `json:"name"`
+	Recent int    `json:"recent,omitempty"`
 }
 
 // The three list sections. Each keeps its slice under a key of its own rather
@@ -778,9 +808,29 @@ func toWireEvent(ev Event) wireEvent {
 		w.State.Config = toWireConfig(s.Config)
 		w.State.Commands = toWireCommands(s.Commands)
 		w.State.Plugins = toWirePlugins(s.Plugins)
+		w.State.Catalog = toWireCatalog(s.Catalog)
 	}
 	w.Err = toWireError(ev.Err)
 	return w
+}
+
+// toWireCatalog is a catalog section on the wire, nil for nil: a StateDelta's,
+// a transcript snapshot's and session.state's (EncodeCatalogState).
+func toWireCatalog(c *CatalogState) *wireCatalog {
+	if c == nil {
+		return nil
+	}
+	return &wireCatalog{Revision: c.Revision,
+		Models: convertSlice(c.Models, func(m ModelInfo) wireModelInfo { return wireModelInfo(m) })}
+}
+
+// catalog is a wireCatalog back as a CatalogState, nil for nil.
+func (w *wireCatalog) catalog() *CatalogState {
+	if w == nil {
+		return nil
+	}
+	return &CatalogState{Revision: w.Revision,
+		Models: convertSlice(w.Models, func(m wireModelInfo) ModelInfo { return ModelInfo(m) })}
 }
 
 // toWireUsage is a usage section on the wire, nil for nil: a StateDelta's and
@@ -1063,6 +1113,7 @@ func (w *wireEvent) event() Event {
 		ev.State.Config = s.Config.config()
 		ev.State.Commands = s.Commands.commands()
 		ev.State.Plugins = s.Plugins.plugins()
+		ev.State.Catalog = s.Catalog.catalog()
 	}
 	if e := w.Err; e != nil {
 		ev.Err = &RemoteError{Message: e.Message, Class: e.Class, Code: e.Code}
@@ -1452,6 +1503,22 @@ func EncodeUsageState(u *UsageState) (json.RawMessage, error) {
 func DecodeUsageState(raw json.RawMessage) (*UsageState, error) {
 	w, err := decodeLeaf[wireUsage]("usage", raw)
 	return w.usage(), err
+}
+
+// EncodeCatalogState is c as the event codec writes a StateDelta's Catalog
+// section (plan 034 §3.4), nil for nil: what a transcript snapshot's settings
+// and session.state's settings carry.
+func EncodeCatalogState(c *CatalogState) (json.RawMessage, error) {
+	if c == nil {
+		return nil, nil
+	}
+	return encodeLeaf("catalog", toWireCatalog(c))
+}
+
+// DecodeCatalogState is EncodeCatalogState's inverse.
+func DecodeCatalogState(raw json.RawMessage) (*CatalogState, error) {
+	w, err := decodeLeaf[wireCatalog]("catalog", raw)
+	return w.catalog(), err
 }
 
 // EncodeForeignTurnInfo is f as the event codec writes an EventForeignTurn's

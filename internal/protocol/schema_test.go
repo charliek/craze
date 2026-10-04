@@ -46,6 +46,7 @@ var methodTypes = map[string]struct{ params, result any }{
 	protocol.MethodSessionSetTitle:   {protocol.SetTitleParams{}, protocol.Empty{}},
 	protocol.MethodSubagentCancel:    {protocol.SubagentCancelParams{}, protocol.Empty{}},
 	protocol.MethodSessionStop:       {protocol.StopParams{}, protocol.Empty{}},
+	protocol.MethodModelsRefresh:     {protocol.ModelsRefreshParams{}, protocol.ModelsRefreshResult{}},
 	protocol.MethodAsksList:          {protocol.AsksListParams{}, protocol.AsksListResult{}},
 	protocol.MethodAsksGet:           {protocol.AsksGetParams{}, protocol.AsksGetResult{}},
 	protocol.MethodAsksAnswer:        {protocol.AsksAnswerParams{}, protocol.Empty{}},
@@ -95,6 +96,7 @@ var protocolRaw = map[string]string{
 	"StateResult.queue[]":        "event.json#/$defs/queued",
 	"Settings.config":            "event.json#/$defs/config",
 	"Settings.usage":             "event.json#/$defs/usage",
+	"Settings.catalog":           "event.json#/$defs/catalog",
 	"SnapshotResult.snapshot":    "snapshot.json#",
 	"PromptResult.queued":        "event.json#/$defs/queued",
 	"QueueAddResult.row":         "event.json#/$defs/queued",
@@ -552,6 +554,7 @@ func TestTheSchemaEnumsAreTheGoSets(t *testing.T) {
 		{"turn outcomes", "info.json", "/$defs/turnOutcome/enum", asStrings(protocol.TurnOutcomes())},
 		{"roster statuses", "info.json", "/$defs/rosterStatus/enum", asStrings(protocol.RosterStatuses())},
 		{"create prompt outcomes", "session.create.json", "/$defs/result/properties/prompt/enum", asStrings(protocol.CreatePrompts())},
+		{"models refresh statuses", "session.models.refresh.json", "/$defs/result/properties/status/enum", asStrings(protocol.ModelsStatuses())},
 		{"JSON-RPC integers", "envelope.json", "/$defs/error/properties/code/enum", []string{"-32700", "-32600", "-32601", "-32602", "-32000"}},
 	} {
 		if got := schemaEnum(t, tc.file, tc.pointer); !slices.Equal(got, tc.want) {

@@ -541,10 +541,11 @@ func Reason(err error) string { return classify(err).reason }
 // the primary's own reader and must never wait on anything it would have to
 // read to release. Submit, Disarm, GiveUp, GiveUpDrain, the queue verbs, Asks,
 // Ask, Answer, CancelSubagent, SetTitle, State, NewClientID, ReleaseClient,
-// ClaimClient, Events, Ready and Note wait on nothing: no channel, no provider
-// call, no Publish (Ready hands out a channel and never waits on it). Start,
-// Subscribe, Attach, Interject,
-// Cancel, Stop, Set, Sync, SyncSeq and Close block and belong on a goroutine
+// ClaimClient, Events, Ready, RefreshesModels and Note wait on nothing: no
+// channel, no provider call, no Publish (Ready hands out a channel and never
+// waits on it). Start, Subscribe, Attach, Interject,
+// Cancel, Stop, Set, RefreshModels, Sync, SyncSeq and Close block and belong
+// on a goroutine
 // that is not the primary's reader — a tea.Cmd; Sync and SyncSeq wait for the
 // outbox's drainer, which waits for that reader. Subscribe is among
 // them because it registers inside the log's publishing boundary, which a
@@ -647,6 +648,17 @@ type Control interface {
 	// agent.ErrUnsupported is a session with no per-child stop, and
 	// ErrNotAccepting a closed engine; nothing else gates it (subagent.go).
 	CancelSubagent(c Command, id string) error
+
+	// RefreshesModels says the session can take up models funded while it
+	// runs (agent.ModelsRefresher: a native session), and RefreshModels asks
+	// it to, now (plan 034 §3.4, models.go). RefreshesModels waits on
+	// nothing. RefreshModels is no command — no Command, no receipt,
+	// idempotent — and it blocks on the session's local file reads, so it is
+	// never called from the primary's reader; it answers ModelsUnsupported
+	// for a session that cannot, and ErrNotAccepting for a closed engine or
+	// a session not yet up.
+	RefreshesModels() bool
+	RefreshModels(ctx context.Context, nativeDir string) (agent.ModelsRefresh, error)
 
 	// The session's settings. Set blocks — one FIFO worker asks the provider,
 	// the session writes the change and its delta in one locked section, and

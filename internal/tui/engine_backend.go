@@ -224,6 +224,16 @@ func (b *engineBackend) Settings(ctx context.Context) (backend.Settings, error) 
 	return backend.Settings{Model: snap.CurrentModel, Mode: snap.CurrentMode, Config: snap.Config}, nil
 }
 
+// RefreshModels is the engine's (plan 034 §3.4): the session's own reload,
+// on this tea.Cmd's goroutine, ModelsUnsupported for a session that cannot
+// (an ACP session) — so a client reads one answer in both transports.
+func (b *engineBackend) RefreshModels(ctx context.Context, nativeDir string) (agent.ModelsRefresh, error) {
+	if err := b.fence(ctx); err != nil {
+		return agent.ModelsRefresh{}, err
+	}
+	return b.eng.RefreshModels(ctx, nativeDir)
+}
+
 // LastTurn is State()'s (plan 030 §3.7): read directly, as every in-process
 // read is. In process no restore ever comes, so the model never asks it; it
 // is here because the socket's is (backend.Backend.LastTurn).
@@ -234,8 +244,13 @@ func (b *engineBackend) LastTurn(ctx context.Context) (*engine.LastTurn, error) 
 	return b.eng.State().LastTurn, nil
 }
 
-// Info is the session's static facts (§3.13), read from State().Snapshot's
-// static fields and State's own (Incarnation, CrazeSessionID, RetryHorizon).
+// Info is the session's facts (§3.13), read from State().Snapshot's fields
+// and State's own (Incarnation, CrazeSessionID, RetryHorizon). Models is the
+// session's list as it stands at the call, which a native session's reload
+// can change (plan 034 §3.4), with its revision (CatalogRevision, read in the
+// same snapshot): the mirror shows whichever of this list and the fold's
+// catalog section is newer, so a read here that is ahead of the stream is
+// never undone by an older delta folded after it (mirror.go, C4r r9 #8).
 // It waits on nothing: State() reads the session's snapshot outside the
 // engine's mutex and merges the engine's own fields in only briefly under it
 // (engine/state.go's State doc), exactly what Settings above already reads on
@@ -257,6 +272,8 @@ func (b *engineBackend) Info() backend.SessionInfo {
 		Label:             st.Provider.Label(),
 		Capabilities:      st.Provider.Capabilities(),
 		Models:            st.Models,
+		CatalogRevision:   st.CatalogRevision,
+		ModelsRefresh:     b.eng.RefreshesModels(),
 		Modes:             st.Modes,
 		RetryHorizon:      st.RetryHorizon,
 	}

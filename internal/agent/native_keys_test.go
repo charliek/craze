@@ -402,6 +402,11 @@ func TestNativeLookRecordsTheStampFromBeforeTheReading(t *testing.T) {
 	ws := nativeWorkspaceWith(t, map[string]string{"key.txt": "late " + late + "\n"})
 	f.models["test/a"].push(readStep("c1", "key.txt"), answer("one"), readStep("c2", "key.txt"), answer("two"))
 	s := f.started(Options{Workspace: ws})
+	// The case is about the look alone. A reload of the model table, which
+	// follows the look at a turn's start (native_models.go, plan 034 §3.4),
+	// teaches the session every key the table holds — this one included, in
+	// the same turn — which would hide whichever stamp the look recorded.
+	noReloads(s)
 	var once sync.Once
 	s.keysSeam = func() { once.Do(func() { storeInPlace(t, f.dir, "nokey", late) }) }
 

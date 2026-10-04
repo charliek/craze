@@ -322,6 +322,7 @@
         "plugins": {"$ref": "#/$defs/plugins"},
         "sendNow": {"$ref": "#/$defs/sendNow"},
         "usage": {"$ref": "#/$defs/usage"},
+        "catalog": {"$ref": "#/$defs/catalog"},
         "reason": {"type": "string"},
         "detail": {"type": "string"},
         "indexErr": {"type": "string"}
@@ -338,6 +339,27 @@
         "session": {"$ref": "#/$defs/spend"}
       },
       "required": ["contextTokens", "contextWindow", "turn", "session"],
+      "additionalProperties": false
+    },
+    "catalog": {
+      "description": "The catalog section (CatalogState; native only, absent for every ACP session, for a native session until it first reloads its model table, and never null or {}): every model the session offers now, in the picker's order, and the revision of that list, always written. The revision only ever grows within one incarnation, and a client never applies a revision lower than the one it holds: an older list never replaces a newer one, whatever order a reconnect or a replay brings them in. The session holds the list to these bounds where it builds it, the info document's catalogs.models with it: at most 512 models, in the picker's order with the running model among them; each name at most 128 bytes, cut with an ellipsis; a model whose id would be over 256 bytes is not offered, an id never cut.",
+      "type": "object",
+      "properties": {
+        "models": {"type": "array", "maxItems": 512, "items": {"$ref": "#/$defs/catalogModel"}},
+        "revision": {"type": "integer", "minimum": 0}
+      },
+      "required": ["revision"],
+      "additionalProperties": false
+    },
+    "catalogModel": {
+      "description": "One model the session offers: the info document's catalog model (info.json's model), id and name always written, recent its rank in the native provider's model memory and absent for a model not remembered.",
+      "type": "object",
+      "properties": {
+        "id": {"type": "string", "maxLength": 256},
+        "name": {"type": "string", "maxLength": 128},
+        "recent": {"type": "integer", "minimum": 1}
+      },
+      "required": ["id", "name"],
       "additionalProperties": false
     },
     "spend": {

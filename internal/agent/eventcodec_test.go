@@ -590,6 +590,12 @@ func emitSiteEvents() []emitSiteEvent {
 			Usage: &UsageState{ContextTokens: 12_300, Turn: Spend{Input: 10, Output: 5, Unpriced: true},
 				Session: Spend{Input: 30, Output: 15, Unpriced: true}},
 		}, At: at}},
+		{"a native session's reload, offering a model it was just funded for", Event{Type: EventMeta, State: &StateDelta{
+			Catalog: &CatalogState{Revision: 2, Models: []ModelInfo{
+				{ID: "chatgpt/gpt-6.1-sol", Name: "GPT-6.1 Sol (ChatGPT)", Recent: 1},
+				{ID: "fireworks/kimi-k3", Name: "Kimi K3 (Fireworks)"},
+			}},
+		}, At: at}},
 		{"no time at all", Event{Type: EventText, Text: "x"}},
 	}
 }
@@ -768,6 +774,17 @@ func pinnedWireShapes() []pinnedWireShape {
 			`{"type":"meta","state":{"usage":{"contextTokens":0,"contextWindow":0,` +
 				`"turn":{"input":0,"output":0,"reasoning":0,"cacheRead":0,"cacheCreation":0,"costPicoUsd":0,"unpriced":false},` +
 				`"session":{"input":0,"output":0,"reasoning":0,"cacheRead":0,"cacheCreation":0,"costPicoUsd":0,"unpriced":false}}}}`},
+		// The catalog section (plan 034 §3.4, Q17): the list under a key of
+		// its own, each model as the info document's catalog model — id and
+		// name always, recent absent for 0 — and the revision always, a 0
+		// included; the section absent when nil, as every delta above shows.
+		{Event{Type: EventMeta, State: &StateDelta{Catalog: &CatalogState{Revision: 3, Models: []ModelInfo{
+			{ID: "chatgpt/gpt-6.1-sol", Name: "GPT-6.1 Sol (ChatGPT)", Recent: 1}, {ID: "test/b", Name: ""},
+		}}}},
+			`{"type":"meta","state":{"catalog":{"models":[{"id":"chatgpt/gpt-6.1-sol","name":"GPT-6.1 Sol (ChatGPT)","recent":1},` +
+				`{"id":"test/b","name":""}],"revision":3}}}`},
+		{Event{Type: EventMeta, State: &StateDelta{Catalog: &CatalogState{}}},
+			`{"type":"meta","state":{"catalog":{"revision":0}}}`},
 	}
 }
 
@@ -812,6 +829,69 @@ func TestUsageIsAbsentOnTheWireWhenNil(t *testing.T) {
 	}
 	if back.State == nil || back.State.Usage != nil {
 		t.Fatalf("decoded, the delta has usage %+v", back.State)
+	}
+}
+
+// TestCatalogIsAbsentOnTheWireWhenNil (plan 034 §3.4, A25): a delta with no
+// catalog section carries no "catalog" key at all — never null and never {}
+// — which is every delta an ACP session publishes and every one a native
+// session publishes before its first reload, so no fixture recorded before
+// the section existed moves; and the leaf wrappers agree.
+func TestCatalogIsAbsentOnTheWireWhenNil(t *testing.T) {
+	body, err := EncodeEvent(Event{Type: EventMeta, State: &StateDelta{Model: ptr("grok")}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(body, `"catalog"`) {
+		t.Fatalf("a delta with no catalog section writes one: %s", body)
+	}
+	if raw, err := EncodeCatalogState(nil); raw != nil || err != nil {
+		t.Fatalf("EncodeCatalogState(nil) = %q, %v; want no bytes at all", raw, err)
+	}
+	for _, raw := range []string{"", "null"} {
+		if c, err := DecodeCatalogState(json.RawMessage(raw)); c != nil || err != nil {
+			t.Fatalf("DecodeCatalogState(%q) = %+v, %v; want nil", raw, c, err)
+		}
+	}
+}
+
+// TestADecoderIgnoresASectionItDoesNotKnow (plan 034 A25: an old client with
+// a new host ignores catalog): a client built before the catalog section
+// decodes a catalog delta as it decodes any section it has no field for — the
+// key is skipped, the rest of the event decodes, and the delta is one that
+// touches nothing. That is this decoder's own rule (json.Unmarshal into the
+// wire struct, unknown keys ignored, EventCodecVersion's doc), so it is held
+// here with a section this build does not know either: the catalog's own
+// body under a key no build has. Negative control: a decoder that refuses
+// unknown keys (json.Decoder.DisallowUnknownFields) fails it.
+func TestADecoderIgnoresASectionItDoesNotKnow(t *testing.T) {
+	body, err := EncodeEvent(Event{Type: EventMeta, Cause: "c-1/3", State: &StateDelta{
+		Model:   ptr("chatgpt/gpt-6.1-sol"),
+		Catalog: &CatalogState{Revision: 4, Models: []ModelInfo{{ID: "chatgpt/gpt-6.1-sol", Name: "GPT-6.1 Sol"}}},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	later := strings.Replace(body, `"catalog":`, `"catalogOfALaterBuild":`, 1)
+	if later == body {
+		t.Fatalf("the body carries no catalog section: %s", body)
+	}
+	ev, err := DecodeEvent(later)
+	if err != nil {
+		t.Fatalf("a section this decoder does not know failed the event: %v", err)
+	}
+	if ev.Type != EventMeta || ev.Cause != "c-1/3" || ev.State == nil || ev.State.Model == nil ||
+		*ev.State.Model != "chatgpt/gpt-6.1-sol" || ev.State.Catalog != nil {
+		t.Fatalf("decoded %+v (state %+v); want the meta event with its model and no catalog", ev, ev.State)
+	}
+	// A catalog-only delta decodes as a delta that touches nothing.
+	only, err := EncodeEvent(Event{Type: EventMeta, State: &StateDelta{Catalog: &CatalogState{Revision: 1}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ev, err = DecodeEvent(strings.Replace(only, `"catalog":`, `"catalogOfALaterBuild":`, 1))
+	if err != nil || ev.State == nil || *ev.State != (StateDelta{}) {
+		t.Fatalf("a catalog-only delta of a later build decodes as %+v, %v; want an empty delta", ev.State, err)
 	}
 }
 
@@ -1361,6 +1441,8 @@ func TestLeafWrappersWriteWhatTheEventCarries(t *testing.T) {
 		[]string{"state", "sendNow"}, EncodeSendNowState, DecodeSendNowState)
 	checkLeaf(t, "UsageState", func(v *UsageState) Event { return Event{Type: EventMeta, State: &StateDelta{Usage: v}} },
 		[]string{"state", "usage"}, EncodeUsageState, DecodeUsageState)
+	checkLeaf(t, "CatalogState", func(v *CatalogState) Event { return Event{Type: EventMeta, State: &StateDelta{Catalog: v}} },
+		[]string{"state", "catalog"}, EncodeCatalogState, DecodeCatalogState)
 	checkLeaf(t, "ForeignTurnInfo", func(v *ForeignTurnInfo) Event { return Event{Type: EventForeignTurn, ForeignTurn: v} },
 		[]string{"foreignTurn"}, EncodeForeignTurnInfo, DecodeForeignTurnInfo)
 

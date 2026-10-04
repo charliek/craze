@@ -70,7 +70,13 @@ func connectModelOf(t *testing.T, cfg Config) Model {
 	isolateSkillsHome(t)
 	cfg.Theme, cfg.Workspace, cfg.Model, cfg.Yolo = "tokyo-night", t.TempDir(), "grok", true
 	tm, _ := New(cfg).Update(tea.WindowSizeMsg{Width: 100, Height: 30})
-	return startedLikeInit(t, tm.(Model))
+	m := startedLikeInit(t, tm.(Model))
+	// A box that reaches the ChatGPT sign-in step opens the sign-in log,
+	// whose writer goroutine works in cfg.NativeDir: close it (joining the
+	// writer) before the test's temp directories are removed, as finishRun
+	// does at exit. Registered after the caller's TempDirs, so it runs first.
+	t.Cleanup(func() { _ = m.signIns.closeLog() })
+	return m
 }
 
 // nativeStub is a Stub whose session is a native one, as its facts name it.
@@ -931,7 +937,7 @@ func TestConnectLateAnswers(t *testing.T) {
 	if m.dialog != dialogConnect || m.cdlg.openField() != field || m.cdlg.key.Value() != connectCanary {
 		t.Fatalf("a save's answer touched the box opened since: dialog %v", m.dialog)
 	}
-	if notes, errs := texts(m, entryNote), texts(m, entryError); !slices.Equal(notes, []string{connectedNote("Alpha")}) ||
+	if notes, errs := texts(m, entryNote), texts(m, entryError); !slices.Equal(notes, []string{connectedNote("Alpha", nil)}) ||
 		!slices.Equal(errs, []string{"/connect: the key store did not answer in time"}) {
 		t.Fatalf("a save's answers wrote notes %q, errors %q", notes, errs)
 	}
@@ -942,7 +948,7 @@ func TestConnectLateAnswers(t *testing.T) {
 	before := m.shownGen
 	m = m.withSession(sessionSeed{workspace: m.cwd, provider: "native"})
 	m.shownGen++
-	if m = applyMsg(t, m, connectSavedMsg{shownGen: before, name: "Beta"}); slices.Contains(texts(m, entryNote), connectedNote("Beta")) {
+	if m = applyMsg(t, m, connectSavedMsg{shownGen: before, name: "Beta"}); slices.Contains(texts(m, entryNote), connectedNote("Beta", nil)) {
 		t.Fatal("a save's answer from the conversation left behind was written in this one")
 	}
 
@@ -1001,7 +1007,7 @@ func TestConnectDoubleEnterSavesOnce(t *testing.T) {
 	if got, ok := storedKey(t, dir, "gamma"); !ok || got != connectCanary {
 		t.Fatalf("gamma's key was not stored as pasted (stored: %v)", ok)
 	}
-	if notes := texts(r.m, entryNote); !slices.Equal(notes, []string{connectedNote("Gamma")}) {
+	if notes := texts(r.m, entryNote); !slices.Equal(notes, []string{connectedNote("Gamma", nil)}) {
 		t.Fatalf("notes %q, want one notice", notes)
 	}
 	if errs := texts(r.m, entryError); len(errs) != 0 || len(stub.Prompts()) != 0 {

@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://charliek.github.io/craze/reference/protocol/schema/session.models.refresh.json",
+  "title": "session.models.refresh",
+  "description": "Asks a native session to take up the models funded since it opened (a key saved, the ChatGPT plan signed in to or out of) now, rather than at its next turn, and to fetch the plan's model list again in the background when it is due. Served where the session capability modelsRefresh is true; a host whose capability is false (an ACP session) answers unsupported, reason models_refresh_unsupported, and one from before the method unknown_method. Not mutating: no commandId, no receipt, and a resend asks again. The reply follows the catalog delta an applied refresh published on the connection's attachment.",
+  "$defs": {
+    "params": {
+      "type": "object",
+      "properties": {
+        "sessionId": {"$ref": "envelope.json#/$defs/sessionId"},
+        "nativeDir": {"type": "string", "maxLength": 4096, "pattern": "^/", "description": "The craze native directory the client reads and writes its keys and sign-ins in, an absolute path; absent for none (an empty string is not none: it is refused bad_request, as any path that is not absolute). The result's sameDir says whether it is the session's own."}
+      },
+      "required": ["sessionId"],
+      "additionalProperties": false
+    },
+    "result": {
+      "type": "object",
+      "properties": {
+        "status": {"type": "string", "enum": ["applied", "current", "pending", "unsupported", "failed"], "description": "applied: what the session reads its models from had changed, and it offers what that funds now (the catalog delta precedes this reply); current: nothing had changed; pending: it had changed while a turn ran or a load replayed, and is taken up as that ends; unsupported: the session cannot take up models while it runs; failed: the files could not be read as a model table, and the list is as it was."},
+        "revision": {"type": "integer", "minimum": 0, "description": "The revision of the list the session offers after the call: the catalog section's, 0 for the list it started with. A pending refresh's is the list still offered."},
+        "sameDir": {"type": "boolean", "description": "Whether the params' nativeDir is the directory the session reads its models from (compared absolute and cleaned, and by the file system's identity where both exist, so a symlink or a spelling a case-insensitive volume folds is the same directory); absent when the call named none."}
+      },
+      "required": ["status", "revision"],
+      "additionalProperties": false
+    }
+  }
+}

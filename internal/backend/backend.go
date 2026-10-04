@@ -132,16 +132,21 @@ type Backend interface {
 	// ctx carries another epoch is refused with ErrStaleEpoch before
 	// anything is sent (CheckEpoch). It waits on nothing.
 	Epoch() uint64
-	// Info is the session's static facts (§3.13), fixed once the session is
-	// up: the provider's name and label, its capabilities as advertised
-	// (never rebuilt from the client binary's own provider table — astra
-	// 25), the provider and craze session ids, the model and mode catalogs,
-	// the incarnation and the retry horizon. In process it reads
-	// State().Snapshot's static fields; over the socket it is the attach
-	// reply's copy, replaced by each Ready and Restore as the stream receives
-	// them. It waits on nothing, and before Start (over the socket: before
-	// the first attach reply) it reflects the configured provider, as the
-	// TUI does today (GLM 11).
+	// Info is the session's facts (§3.13), fixed once the session is up —
+	// but for its model catalog: the provider's name and label, its
+	// capabilities as advertised (never rebuilt from the client binary's own
+	// provider table — astra 25), the provider and craze session ids, the
+	// model and mode catalogs, the incarnation and the retry horizon. In
+	// process it reads State().Snapshot's fields, the model list as the
+	// session holds it now; over the socket it is the attach reply's copy,
+	// replaced by each Ready and Restore as the stream receives them. A
+	// native session's model list can change while it runs (plan 034 §3.4):
+	// each change is a StateDelta.Catalog in the stream, which a client's
+	// fold holds, and a client shows whichever of the two is the newer by
+	// revision (SessionInfo.CatalogRevision; tui's mirror). It waits on
+	// nothing, and before Start (over the socket: before the first attach
+	// reply) it reflects the configured provider, as the TUI does today
+	// (GLM 11).
 	Info() SessionInfo
 
 	// Read is the stream: one item at a time, in order, from one reader.
@@ -182,6 +187,20 @@ type Backend interface {
 	// State().Snapshot's; over the socket, session.state's settings. It is
 	// what the multi-Set chains judge their next step on.
 	Settings(ctx context.Context) (Settings, error)
+	// RefreshModels asks the session to take up the models funded since it
+	// opened — a key saved, the ChatGPT plan signed in to or out of — now
+	// (plan 034 §3.4, Q14's trigger b, Q17). nativeDir is the client's own
+	// native directory ("" for none), which the answer's SameDir compares
+	// with the session's. It is no command (no engine.Command, no receipt:
+	// idempotent, and a resend asks again) and a blocking read, for tea.Cmds
+	// only, never Update: in process it is the engine's RefreshModels, over
+	// the socket session.models.refresh, whose reply follows the catalog
+	// delta an applied refresh published. A session that cannot —
+	// SessionInfo.ModelsRefresh false: an ACP session, a host from before the
+	// method — answers agent.ModelsUnsupported with no error, and over the
+	// socket nothing is sent. It is fenced by the epoch ctx carries, like
+	// every read.
+	RefreshModels(ctx context.Context, nativeDir string) (agent.ModelsRefresh, error)
 	// LastTurn is how the session's last turn ended (plan 030 §3.7, SF-57;
 	// engine.State.LastTurn): nil while a turn runs, before any has ended,
 	// and from a host that does not say (one from before plan 030). It is
@@ -290,6 +309,20 @@ type SessionInfo struct {
 	// and mode catalogs, empty until the session is ready.
 	Models []agent.ModelInfo
 	Modes  []agent.ModeInfo
+	// CatalogRevision is the revision of Models (agent.Snapshot's, plan 034
+	// §3.4): 0 for the list a session started with, and for a host that does
+	// not say (one from before the catalog section) — over the socket it is
+	// the info document's catalogs.revision. A client that also folds the
+	// stream's catalog section shows whichever of the two lists is newer
+	// (C4r, r9 #8), never an older one.
+	CatalogRevision uint64
+	// ModelsRefresh says the session can take up models funded while it
+	// runs, and RefreshModels asks it to (plan 034 §3.4, Q17): a native
+	// session, in process (engine.RefreshesModels) or over the socket (the
+	// session capability modelsRefresh, as the host sent it). False for an
+	// ACP session and from a host from before the method: a client then
+	// makes no call.
+	ModelsRefresh bool
 	// RetryHorizon is the command-id table's bound: within it a resent
 	// command id is answered from the table and never re-executes.
 	RetryHorizon engine.RetryHorizon
