@@ -1513,7 +1513,8 @@ func tuiSignInLog(t *testing.T, dir string) ([]map[string]any, string) {
 
 // pollSignInLog is tuiSignInLog for a polling loop (review r7 #5): a log not
 // yet created — its writer goroutine not yet scheduled — is no records, not a
-// failure, so the loop waits for it; any other read error still fails.
+// failure, so the loop waits for it, and a last line its writer has not yet
+// ended is not read; any other read error still fails.
 func pollSignInLog(t *testing.T, dir string) ([]map[string]any, string) {
 	t.Helper()
 	return readTUISignInLog(t, dir, true)
@@ -1532,14 +1533,21 @@ func readTUISignInLog(t *testing.T, dir string, missingOK bool) ([]map[string]an
 	if len(b) == 0 {
 		return nil, ""
 	}
-	for _, line := range strings.Split(strings.TrimSuffix(string(b), "\n"), "\n") {
+	text := string(b)
+	if missingOK { // a poll: the writer may be mid-append, so complete lines only
+		text = text[:strings.LastIndex(text, "\n")+1]
+		if text == "" {
+			return nil, ""
+		}
+	}
+	for _, line := range strings.Split(strings.TrimSuffix(text, "\n"), "\n") {
 		var rec map[string]any
 		if err := json.Unmarshal([]byte(line), &rec); err != nil {
 			t.Fatalf("a record is not JSON: %v", err)
 		}
 		recs = append(recs, rec)
 	}
-	return recs, string(b)
+	return recs, text
 }
 
 // recordKinds is the event of each record.

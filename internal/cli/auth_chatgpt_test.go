@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/url"
@@ -1213,25 +1214,54 @@ func TestReadRedirectLine(t *testing.T) {
 }
 
 // signInRecords is native's sign-in log, each record decoded (plan 034
-// §3.3): nil when there is none.
+// §3.3): nil when there is none. It is strict, for reads made once the log's
+// writer is closed; a poll made while it runs uses pollSignInRecords.
 func signInRecords(t *testing.T, native string) []map[string]any {
 	t.Helper()
-	b, err := os.ReadFile(filepath.Join(native, paths.LogsName, signinlog.FileName))
-	if errors.Is(err, os.ErrNotExist) {
-		return nil
-	}
+	recs, err := readSignInRecords(native, false)
 	if err != nil {
 		t.Fatal(err)
 	}
+	return recs
+}
+
+// pollSignInRecords is signInRecords for a poll made while the log's writer
+// runs, possibly from a goroutine that is not the test's: it decodes only the
+// records already ended by their newline (the writer may be mid-append), and
+// fails with t.Error, never t.Fatal, so it is safe off the test goroutine.
+func pollSignInRecords(t *testing.T, native string) []map[string]any {
+	t.Helper()
+	recs, err := readSignInRecords(native, true)
+	if err != nil {
+		t.Error(err)
+	}
+	return recs
+}
+
+func readSignInRecords(native string, completeOnly bool) ([]map[string]any, error) {
+	b, err := os.ReadFile(filepath.Join(native, paths.LogsName, signinlog.FileName))
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	text := string(b)
+	if completeOnly {
+		text = text[:strings.LastIndex(text, "\n")+1]
+	}
 	var out []map[string]any
-	for _, line := range strings.Split(strings.TrimSuffix(string(b), "\n"), "\n") {
+	for _, line := range strings.Split(strings.TrimSuffix(text, "\n"), "\n") {
+		if line == "" && completeOnly {
+			continue
+		}
 		var rec map[string]any
 		if err := json.Unmarshal([]byte(line), &rec); err != nil {
-			t.Fatalf("a sign-in log record is not JSON: %v", err)
+			return out, fmt.Errorf("a sign-in log record is not JSON: %w", err)
 		}
 		out = append(out, rec)
 	}
-	return out
+	return out, nil
 }
 
 // recordKinds is the event of each record.
@@ -1512,7 +1542,7 @@ func TestAuthLoginChatGPTNotesALogBrokenByItsLastRecord(t *testing.T) {
 	fetch := fetchPlanModels
 	fetchPlanModels = func(ctx context.Context, dir string, observe func(chatgptauth.Event)) (*chatgptauth.Models, error) {
 		// The begin is written before the log is broken: the control.
-		for deadline := time.Now().Add(10 * time.Second); len(signInRecords(t, native)) != 1; time.Sleep(2 * time.Millisecond) {
+		for deadline := time.Now().Add(10 * time.Second); len(pollSignInRecords(t, native)) != 1; time.Sleep(2 * time.Millisecond) {
 			if time.Now().After(deadline) {
 				t.Error("the begin was never written")
 				break
