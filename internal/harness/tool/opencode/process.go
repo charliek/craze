@@ -74,6 +74,19 @@ type group struct {
 	// reaped is closed once the leader has been reaped; state is set then.
 	reaped chan struct{}
 	state  *os.ProcessState
+	// grace is the SIGTERM-to-SIGKILL grace supervise gives the group: 0 is
+	// termGrace, every production group's. A test whose premise needs the
+	// command scheduled inside the grace gives it longer, so a starved CPU
+	// cannot spend the grace before the command runs (plan 036 F2).
+	grace time.Duration
+}
+
+// termGrace is the group's SIGTERM-to-SIGKILL grace (group.grace).
+func (g *group) termGrace() time.Duration {
+	if g.grace > 0 {
+		return g.grace
+	}
+	return termGrace
 }
 
 // startGroup starts cmd, which must set SysProcAttr.Setsid, and watches its
@@ -284,8 +297,8 @@ func (g *group) supervise(ctx context.Context, closing <-chan struct{}, timeout 
 			return
 		}
 		g.terminate()
-		grace = time.After(termGrace)
-		deadline(termGrace + killWait)
+		grace = time.After(g.termGrace())
+		deadline(g.termGrace() + killWait)
 	}
 wait:
 	for exited != nil || output != nil {

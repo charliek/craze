@@ -701,6 +701,12 @@ func TestBashCloseSignal(t *testing.T) {
 		// builtin, which a trapped signal ends at once (bashWaitLoop); its
 		// child ignores SIGTERM.
 		c := prepareBash(t, env, map[string]any{"command": "trap 'echo term > got' TERM; (trap '' TERM; sleep 614) & echo $! > pid; " + bashWaitLoop})
+		// The premise — the close comes inside the cancel's grace — needs the
+		// shell to run its handler before the SIGKILL: a starved CPU could
+		// spend the 3 s grace first (3 runs in 20 under a 2% quota), and the
+		// handler never ran. A minute's grace leaves it time to be scheduled,
+		// and makes the close's cut the stronger claim (plan 036 F2).
+		c.termGrace = time.Minute
 		r := startBash(t, c, env)
 		pid := bashPID(t, filepath.Join(env.Workspace, "pid"), "sleep 614")
 		r.cancel(nil)
@@ -709,7 +715,7 @@ func TestBashCloseSignal(t *testing.T) {
 		closeSession()
 		res := r.await(t, 30*time.Second)
 		if took := time.Since(closed); took > 1500*time.Millisecond {
-			t.Fatalf("Run took %v after a close in the grace; want the grace (%v) cut short", took, planGrace)
+			t.Fatalf("Run took %v after a close in the grace; want the grace (%v) cut short", took, c.termGrace)
 		}
 		if res.Class != tool.ClassAborted || !strings.HasPrefix(res.Text, tool.AbortedText) {
 			t.Fatalf("result = %+v, want the abort it was first", res)
