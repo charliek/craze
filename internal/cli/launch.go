@@ -150,6 +150,8 @@ func runLaunch(cmd *cobra.Command, f *tuiFlags, env hostEnv, diag *deferredStder
 		NoMouse:   f.noMouse,
 		Provider:  resolved.Provider,
 		Providers: pickerProviders(resolved.Provider, f.agentBin),
+		// The picker's states, asked for as it opens (plan 036 §3.3).
+		Availability: pickerAvailabilityFor(resolved.Provider, f.agentBin),
 		// No picker when the provider is known; the picker's choice is
 		// spawned otherwise. The host persists the provider it starts
 		// (serve's persistProvider), so the TUI does not: PersistProvider

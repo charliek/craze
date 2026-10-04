@@ -99,6 +99,19 @@ type Config struct {
 	// agent.DefaultProviders(), every provider that is not optional — which keeps
 	// every test that builds a Config by hand hermetic.
 	Providers []agent.Provider
+	// Availability answers the picker's providers' states (plan 036 §3.3):
+	// internal/cli's availability check over the picker's rows — every listed
+	// provider, and the configured default even when it is a missing gx,
+	// then unavailable. A row it does not name is ready. It reads the disk,
+	// so the picker calls it from a tea.Cmd as it opens, never from Update;
+	// until it answers every row is ready and a choice is taken as ever. A
+	// provider that is not ready is dimmed with its state in the tag, its
+	// reason and fix on the detail line, and refused when chosen — Enter on
+	// it, or Esc and a click outside when it is the default — after
+	// RefuseLoad's refusal. nil is every row ready — every test Config, every
+	// golden but the availability ones, and the frame runner — so they draw
+	// what they always drew.
+	Availability func() []ProviderAvail
 	// ProviderLocked skips the picker: an explicit --provider, or the frame
 	// runner. The session is constructed immediately.
 	ProviderLocked bool
@@ -694,6 +707,13 @@ type Model struct {
 	// rows Esc and Enter act on.
 	providers  []agent.Provider
 	newSession func(agent.Provider) agent.Session
+	// availability is Config.Availability. availSeq is the startup picker's
+	// latest request of it, the only one whose answer is taken
+	// (askProviderAvail), and provAvail that answer by provider id: nil
+	// before one arrives, when every row is ready (plan 036 §3.3, X12).
+	availability func() []ProviderAvail
+	availSeq     uint64
+	provAvail    map[string]ProviderAvail
 
 	// The launch flow (plan 030 §3.5, launch.go): spawnNew and spawnLoad are
 	// Config.NewBackend and Config.LoadBackend, and cont is Config.Continue.
@@ -1681,6 +1701,7 @@ func New(cfg Config) Model {
 		fallbackDefault: cfg.FallbackDefault,
 		providerDefault: prov,
 		providers:       pickerRows(cfg.Providers, prov),
+		availability:    cfg.Availability,
 		newSession:      cfg.NewSession,
 		loadSession:     cfg.LoadSession,
 		spawnNew:        cfg.NewBackend,
@@ -1737,6 +1758,10 @@ func New(cfg Config) Model {
 		m.pickingProvider = true
 		m.dialog = dialogProvider
 		m.providerCursor = m.providerIndex(prov)
+		// The picker's states are asked for as it opens — by Init, which
+		// cannot record the request, so New does, and Init makes the call
+		// (providerAvailCmd).
+		m.askProviderAvail()
 	case m.launch():
 		// The launch flow with its session known: nothing is built here, and
 		// Init spawns it (plan 030 §3.5). New records the attempt Init's call
@@ -2034,7 +2059,9 @@ func (m Model) Init() tea.Cmd {
 	// session's (presenceCmd; nil off the in-process path).
 	presence := presenceCmd(m.localPresence)
 	if m.picking() {
-		return presence
+		// The provider picker's states, asked for off the Update (plan 036
+		// §3.3): nil with no Config.Availability, and for the resume picker.
+		return tea.Batch(presence, m.providerAvailCmd())
 	}
 	if m.spawnWaiting != 0 {
 		// The launch flow's session is not here yet: Init spawns it, and its
@@ -2320,6 +2347,9 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case spawnedMsg:
 		return m.spawned(msg)
+
+	case providerAvailMsg:
+		return m.providerAvailed(msg), nil
 
 	case unstartedSpawnedMsg:
 		return m.unstartedSpawned(msg)

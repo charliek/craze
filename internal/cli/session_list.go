@@ -36,8 +36,13 @@ import (
 type sessionList struct{ l *launcher }
 
 // It starts new sessions from the list (plan 030 §3.13): the list's input is
-// drawn under the rows.
-var _ tui.SessionStarter = sessionList{}
+// drawn under the rows. It says which providers those sessions could run, so
+// the input's /provider dims and refuses one that cannot start (plan 036
+// §3.3).
+var (
+	_ tui.SessionStarter             = sessionList{}
+	_ tui.ProviderAvailabilitySource = sessionList{}
+)
 
 // Roster opens the list's roster through the hub (hub.Roster, plan 032
 // §3.13): it returns at once, its running rows the hub's roster
@@ -72,6 +77,17 @@ func (s sessionList) entryOf(ref roster.Ref) (rundir.Entry, error) {
 		h.Socket = e.Socket
 	}
 	return h.Entry(), nil
+}
+
+// ProviderAvailability is the providers /provider offers, with their states
+// (plan 036 §3.3): the availability check's TUI column as a session the list
+// starts resolves its binary — the launch's own provider's --agent-bin and
+// CRAZE_AGENT_BIN, any other's [agents] or PATH (spawnFor) — over the
+// picker's rows, the launch's resolved provider their configured default
+// (pickerAvailability). Nothing is cached: each opening of /provider asks
+// again, so a binary installed since, or gone, shows.
+func (s sessionList) ProviderAvailability() []tui.ProviderAvail {
+	return pickerAvailability(s.l.launchProvider(), s.l.flags.agentBin, s.l.resolved.Provider)
 }
 
 // RecentDirs is the `@` picker's recent directories (plan 030 §3.15): up to

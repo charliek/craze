@@ -24,7 +24,11 @@ import (
 // session) until it is changed or craze quits, and the input's rule names it.
 //
 //   - /provider lists the providers the startup picker lists (Model.providers:
-//     pickerRows over the availability-filtered list the launch passes).
+//     pickerRows over the availability-filtered list the launch passes) — or,
+//     once the list's ProviderAvailabilitySource has answered (plan 036
+//     §3.3), the providers its latest answer names, a gx installed or gone
+//     since the launch among them: one that is not ready is dimmed with its
+//     reason and refused when chosen (sessProviderChoices).
 //     Choosing one resets the model to that provider's default: native's is
 //     read from its model table off the Update (nativeDefaultModel) — the
 //     model a native session with no --model starts on — and an ACP
@@ -383,11 +387,13 @@ func sessCmdKnownPrefix(word string) bool {
 // ------------------------------------------------------------ the source
 
 // sessCmdSource is the `/` popup's source as the list stands at one sync:
-// the providers /provider offers, what new sessions run now (the notes and
-// the `current` marks), where /model reads an ACP provider's catalog, and the
-// clock the catalog's age is read against.
+// the providers /provider offers (choices) and where their availability is
+// read again (availSrc, nil with no ProviderAvailabilitySource), what new
+// sessions run now (the notes and the `current` marks), where /model reads an
+// ACP provider's catalog, and the clock the catalog's age is read against.
 type sessCmdSource struct {
-	providers  []agent.Provider
+	choices    []provChoice
+	availSrc   ProviderAvailabilitySource
 	provider   agent.Provider
 	provOK     bool
 	provLabel  string
@@ -415,7 +421,7 @@ func (s sessCmdSource) complete(q completeQuery) completeAnswer {
 	arg = strings.TrimSpace(arg)
 	switch strings.ToLower(word) {
 	case sessCmdProvider:
-		return s.providerValues(arg)
+		return s.providerValues(q, arg)
 	case sessCmdModel:
 		return s.modelValues(q, arg)
 	case sessCmdEffort:
@@ -481,20 +487,42 @@ func sessSettingValues(cmd, title string, values []string, current, arg string) 
 	return ans
 }
 
-// providerValues is /provider's list: the startup picker's providers whose id
-// or name starts with arg, case folded, the one new sessions run marked
-// `current`.
-func (s sessCmdSource) providerValues(arg string) completeAnswer {
+// sessProvidersKey keys /provider's read of the providers' availability (plan
+// 036 §3.3): once per opening of its values, as the popup's loads are.
+const sessProvidersKey = "providers"
+
+// providerValues is /provider's list: the providers it offers
+// (sessProviderChoices) whose id or name starts with arg, case folded, the
+// one new sessions run marked `current` — and one that is not ready (plan 036
+// §3.3) with its reason in place of its detail, its state for its note, dim,
+// and its refusal, which enter and tab draw as the popup's note instead of
+// taking it (sessCmdChosen). With a ProviderAvailabilitySource the
+// providers' availability is read again as the values open — the popup's
+// load, off the Update — and the list's latest answer serves until it is
+// back.
+func (s sessCmdSource) providerValues(q completeQuery, arg string) completeAnswer {
 	fold := strings.ToLower(arg)
 	ans := completeAnswer{Title: sessProvidersTitle}
-	for _, p := range s.providers {
-		id := p.Name()
-		if !strings.HasPrefix(strings.ToLower(id), fold) && !strings.HasPrefix(strings.ToLower(p.DisplayName()), fold) {
+	if s.availSrc != nil {
+		if _, back := q.Loaded(sessProvidersKey); !back {
+			src := s.availSrc
+			ans.Load = &completeLoad{Key: sessProvidersKey, Run: func(context.Context) completeLoaded {
+				return completeLoaded{Data: askSessAvail(src)}
+			}}
+		}
+	}
+	for _, c := range s.choices {
+		id := c.p.Name()
+		if !strings.HasPrefix(strings.ToLower(id), fold) && !strings.HasPrefix(strings.ToLower(c.p.DisplayName()), fold) {
 			continue
 		}
 		it := completeItem{Name: sanitizeLine(id), Detail: sessProviderDetail[id], Value: "provider:" + id,
 			Insert: sessCmdProvider + " " + id}
-		if s.provOK && id == s.provider.Name() {
+		switch {
+		case !c.a.ready():
+			it.Detail, it.Note, it.Tone = sanitizeLine(c.a.Reason), c.a.State.word(), completeToneDim
+			it.Refusal = c.refusal()
+		case s.provOK && id == s.provider.Name():
 			it.Note, it.Tone = sessCurrentNote, completeToneAccent
 		}
 		ans.Items = append(ans.Items, it)
@@ -615,8 +643,9 @@ func (s sessCmdSource) loadModels(p agent.Provider) func(context.Context) comple
 func (m Model) sessCmdSourceNow() sessCmdSource {
 	p, ok := m.sessNewProviderOf()
 	st, _ := m.sessions.(SessionStarter)
+	src, _ := m.sessions.(ProviderAvailabilitySource)
 	return sessCmdSource{
-		providers: m.providers, provider: p, provOK: ok, provLabel: m.sessNewProvider(),
+		choices: m.sessProviderChoices(), availSrc: src, provider: p, provOK: ok, provLabel: m.sessNewProvider(),
 		model: m.sessNewModelID(), modelLabel: m.sessNewModel(), effort: sessEffortLabel(m.sessPick), fast: sessFastLabel(m.sessPick),
 		starter: st, nativeDir: m.nativeDir, nativeEnv: m.nativeEnv, now: m.now(), frozen: m.frozen,
 	}
@@ -636,6 +665,12 @@ func (m Model) sessCmdChosen(key tea.KeyType, it completeItem) (Model, tea.Cmd, 
 	case kind == "cmd" && id == sessCmdExit && key == tea.KeyEnter:
 		tm, cmd := m.sessQuit()
 		return tm.(Model), cmd, true
+	case kind == "provider" && it.Refusal != "":
+		// A provider that cannot start (plan 036 §3.3): nothing is taken —
+		// the input and what new sessions run stay as they were — and the
+		// popup, still up, says why.
+		m.sessList.in.cmd.refuse(it.Refusal)
+		return m, nil, true
 	case kind == "provider":
 		p, err := agent.ProviderByName(id)
 		if err != nil {
@@ -655,10 +690,12 @@ func (m Model) sessCmdChosen(key tea.KeyType, it completeItem) (Model, tea.Cmd, 
 
 // sessCmdTyped is enter on a `/provider`, `/model`, `/effort` or `/fast`
 // line the popup did not take — typed in full, or with the popup put away:
-// the provider named, by id or by name (one the startup picker lists); the
-// model id as typed, which the next start applies as --model would; or one
-// of /effort's or /fast's values, case folded, as /provider takes only a
-// provider it lists. ok false: not one of them.
+// the provider named, by id or by name (one /provider offers,
+// sessProviderChoices — refused on the hint line, the input left as typed,
+// when the list's latest availability answer says it cannot start, plan 036
+// §3.3); the model id as typed, which the next start applies as --model
+// would; or one of /effort's or /fast's values, case folded, as /provider
+// takes only a provider it lists. ok false: not one of them.
 func (m Model) sessCmdTyped(line string) (Model, tea.Cmd, bool) {
 	name, args, ok := parseSlashLine(line)
 	if !ok {
@@ -670,8 +707,12 @@ func (m Model) sessCmdTyped(line string) (Model, tea.Cmd, bool) {
 			m.sessNote(sessNeedsProvider+m.sessProviderIDs(), sessNoteErr)
 			return m, nil, true
 		}
-		for _, p := range m.providers {
-			if p.Name() == args || strings.EqualFold(p.Name(), args) || strings.EqualFold(p.DisplayName(), args) {
+		for _, c := range m.sessProviderChoices() {
+			if p := c.p; p.Name() == args || strings.EqualFold(p.Name(), args) || strings.EqualFold(p.DisplayName(), args) {
+				if refusal := c.refusal(); refusal != "" {
+					m.sessNote(refusal, sessNoteErr)
+					return m, nil, true
+				}
 				next, cmd := m.sessPickProvider(p)
 				return next, cmd, true
 			}
@@ -713,11 +754,36 @@ func (m Model) sessCmdTyped(line string) (Model, tea.Cmd, bool) {
 
 // sessProviderIDs is the providers /provider takes, as a note lists them.
 func (m Model) sessProviderIDs() string {
-	ids := make([]string, 0, len(m.providers))
-	for _, p := range m.providers {
-		ids = append(ids, p.Name())
+	choices := m.sessProviderChoices()
+	ids := make([]string, 0, len(choices))
+	for _, c := range choices {
+		ids = append(ids, c.p.Name())
 	}
 	return strings.Join(ids, ", ")
+}
+
+// sessProviderChoices is the providers /provider offers and takes (plan 036
+// §3.3): the list's latest availability answer's, in its order, each with its
+// state — membership recomputed with the states, so a gx installed since the
+// launch is offered and one gone is not, and a missing gx that is the
+// configured default is offered unavailable — each a provider this craze
+// knows; or, with no answer yet (or no ProviderAvailabilitySource), the
+// startup picker's rows, every one ready, as /provider always offered them.
+func (m Model) sessProviderChoices() []provChoice {
+	if !m.sessList.availHave {
+		out := make([]provChoice, 0, len(m.providers))
+		for _, p := range m.providers {
+			out = append(out, provChoice{p: p})
+		}
+		return out
+	}
+	out := make([]provChoice, 0, len(m.sessList.avail))
+	for _, a := range m.sessList.avail {
+		if p, err := agent.ProviderByName(a.ID); err == nil && p.Name() == a.ID {
+			out = append(out, provChoice{p: p, a: a})
+		}
+	}
+	return out
 }
 
 // sessPickProvider is /provider's choice (§3.14): new sessions from the list

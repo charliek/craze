@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 
@@ -212,6 +213,7 @@ func runTUI(cmd *cobra.Command, f *tuiFlags, env hostEnv) error {
 		NoMouse:         f.noMouse,
 		Provider:        resolved.Provider,
 		Providers:       pickerProviders(resolved.Provider, f.agentBin),
+		Availability:    pickerAvailabilityFor(resolved.Provider, f.agentBin),
 		ProviderLocked:  resolved.Locked,
 		PersistProvider: true,
 		FallbackDefault: resolved.Fallback,
@@ -439,14 +441,48 @@ func noSessionMsg(cwd, provider string) string {
 // This filters for availability and nothing else. Inserting the resolved
 // default belongs to tui.New, which guarantees it for every caller rather than
 // for the ones that remember (§3.4).
+//
+// The rows are the availability check's listed providers (plan 036 X13): the
+// check is what leaves a missing gx out, so the picker's rows and its states
+// (pickerAvailability) cannot disagree about which providers there are.
 func pickerProviders(launch agent.Provider, explicitBin string) []agent.Provider {
-	all := agent.Providers()
-	out := make([]agent.Provider, 0, len(all))
-	for _, p := range all {
-		if p.Optional() && !agentBinary(p, launch, explicitBin, nil).resolves(p) {
-			continue
-		}
-		out = append(out, p)
+	avail := availability(processAvailInputs(launch, explicitBin), agent.Providers())
+	out := make([]agent.Provider, 0, len(avail))
+	for _, a := range avail {
+		out = append(out, a.P)
+	}
+	return out
+}
+
+// pickerAvailabilityFor is the startup picker's tui.Config.Availability
+// (plan 036 §3.3): the picker opens only before any session, so the launch's
+// own provider is the resolved one, def, which is the picker's default too.
+func pickerAvailabilityFor(def agent.Provider, explicitBin string) func() []tui.ProviderAvail {
+	return func() []tui.ProviderAvail { return pickerAvailability(def, explicitBin, def) }
+}
+
+// pickerAvailability is the TUI's pickers' availability (plan 036 §3.3,
+// tui.Config.Availability and the session list's /provider): the check's TUI
+// column — binaries resolved as a session of each provider started by this
+// process would resolve them, launch being the launch's own provider (whose
+// alone --agent-bin, explicitBin, and CRAZE_AGENT_BIN are) — over the
+// picker's rows: every listed provider, and def, the picker's configured
+// default, even when it is a gx whose binary is missing, which is then
+// unavailable rather than left out (§3.1's gx row) — the row tui.New always
+// adds for it (pickerRows). It reads the disk: the TUI calls it off its
+// Update.
+func pickerAvailability(launch agent.Provider, explicitBin string, def agent.Provider) []tui.ProviderAvail {
+	in := processAvailInputs(launch, explicitBin)
+	in.pickerDefault = def.Name()
+	rows := agent.Providers()
+	if !slices.ContainsFunc(rows, func(p agent.Provider) bool { return p.Name() == def.Name() }) {
+		// A hidden default (plan 018 §3.4) is a row of the picker's too.
+		rows = append(rows, def)
+	}
+	avail := availability(in, rows)
+	out := make([]tui.ProviderAvail, 0, len(avail))
+	for _, a := range avail {
+		out = append(out, tui.ProviderAvail{ID: a.P.Name(), State: tui.AvailState(a.State), Reason: a.Reason, Fix: a.Fix})
 	}
 	return out
 }

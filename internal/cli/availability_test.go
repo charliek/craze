@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -16,6 +17,7 @@ import (
 	"github.com/charliek/craze/internal/engine"
 	"github.com/charliek/craze/internal/harness/modeltable"
 	"github.com/charliek/craze/internal/rundir"
+	"github.com/charliek/craze/internal/tui"
 )
 
 // The provider availability check (plan 036 §3.1, A1). The table test drives
@@ -627,5 +629,151 @@ func TestAvailabilityIsNeverCached(t *testing.T) {
 	after := availEntries(availability(in, agent.Providers()))
 	if want := []availEntry{cursorReady, grokReady, nativeReady}; !reflect.DeepEqual(after, want) {
 		t.Fatalf("after a grok and a key:\n%+v\nwant:\n%+v", after, want)
+	}
+}
+
+// pickerEntries is the TUI's answer as the cases compare it: by provider id.
+func pickerEntries(as []tui.ProviderAvail) []availEntry {
+	out := make([]availEntry, 0, len(as))
+	for _, a := range as {
+		out = append(out, availEntry{a.ID, string(a.State), a.Reason, a.Fix})
+	}
+	return out
+}
+
+// TestPickerAvailability (plan 036 §3.3, X13): the TUI's pickers' answer is
+// the check's TUI column over the picker's rows — every listed provider; a
+// gx whose binary is missing left out, unless it is the picker's configured
+// default, which is then unavailable in §3.1's words — and the rows
+// pickerProviders gives tui.New are exactly the providers that answer
+// names, less a default only the answer adds (tui.New adds it to the rows
+// itself), so the rows and their states cannot disagree about which
+// providers there are.
+func TestPickerAvailability(t *testing.T) {
+	cursor, gx := agent.CursorProvider(), agent.GxProvider()
+	needsSetup := availEntry{"native", "needs_setup", nativeNoKeyReason, nativeNoKeyFix}
+	gxMissing := availEntry{"gx", "unavailable", "gx not found", "install gx, or set [agents].gx"}
+	for _, tc := range []struct {
+		name   string
+		onPath []string
+		def    agent.Provider
+		want   []availEntry
+		rows   []string
+	}{
+		{name: "gx missing", onPath: []string{"cursor-agent", "grok"}, def: cursor,
+			want: []availEntry{cursorReady, grokReady, needsSetup}, rows: []string{"cursor", "grok", "native"}},
+		{name: "gx missing and the default", onPath: []string{"cursor-agent", "grok"}, def: gx,
+			want: []availEntry{cursorReady, grokReady, gxMissing, needsSetup}, rows: []string{"cursor", "grok", "native"}},
+		{name: "gx installed", onPath: []string{"cursor-agent", "grok", "gx"}, def: cursor,
+			want: []availEntry{cursorReady, grokReady, gxReady, needsSetup}, rows: []string{"cursor", "grok", "gx", "native"}},
+		{name: "gx installed and the default", onPath: []string{"grok", "gx"}, def: gx,
+			want: []availEntry{{"cursor", "unavailable", "cursor-agent not found on PATH", ""}, grokReady, gxReady, needsSetup},
+			rows: []string{"cursor", "grok", "gx", "native"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			availPath(t, tc.onPath...)
+			crazeHome(t)
+			t.Setenv(envAgentBin, "")
+			got := pickerEntries(pickerAvailability(tc.def, "", tc.def))
+			for i := range got {
+				if tc.want[i].ID == "cursor" && tc.want[i].Fix == "" {
+					got[i].Fix = "" // the config path, which the case does not pin
+				}
+			}
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("the picker's answer:\n%+v\nwant:\n%+v", got, tc.want)
+			}
+			rows := providerNames(pickerProviders(tc.def, ""))
+			if !reflect.DeepEqual(rows, tc.rows) {
+				t.Fatalf("the picker's rows %v, want %v", rows, tc.rows)
+			}
+			var listed []string
+			for _, e := range got {
+				if e.ID != tc.def.Name() || slices.Contains(rows, e.ID) {
+					listed = append(listed, e.ID)
+				}
+			}
+			if !slices.Equal(listed, rows) {
+				t.Fatalf("the answer names %v beside the default, the rows are %v", listed, rows)
+			}
+		})
+	}
+}
+
+// TestSessionListAvailabilityFollowsTheBinaries (plan 036 §3.3, A6): the
+// list's /provider asks sessionList at each opening, and it answers from the
+// machine as it is then — a gx installed between two openings is offered,
+// ready, and one removed is gone — with the launch's own --agent-bin
+// resolving the launch's provider, and a gx that is the launch's configured
+// default kept, unavailable.
+func TestSessionListAvailabilityFollowsTheBinaries(t *testing.T) {
+	path := availPath(t, "grok")
+	crazeHome(t)
+	t.Setenv(envAgentBin, "")
+	cursor, gx := agent.CursorProvider(), agent.GxProvider()
+	own := writeExecutable(t, t.TempDir(), "some-agent")
+	list := sessionList{&launcher{flags: tuiFlags{agentBin: own}, resolved: resolvedProvider{Provider: cursor}, own: cursor}}
+	ids := func(as []tui.ProviderAvail) []string {
+		var out []string
+		for _, a := range as {
+			out = append(out, a.ID+":"+string(a.State))
+		}
+		return out
+	}
+	if got, want := ids(list.ProviderAvailability()), []string{"cursor:ready", "grok:ready", "native:needs_setup"}; !slices.Equal(got, want) {
+		t.Fatalf("first opening: %v, want %v", got, want)
+	}
+	bin := writeExecutable(t, path, "gx")
+	if got, want := ids(list.ProviderAvailability()), []string{"cursor:ready", "grok:ready", "gx:ready", "native:needs_setup"}; !slices.Equal(got, want) {
+		t.Fatalf("gx installed: %v, want %v", got, want)
+	}
+	if err := os.Remove(bin); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := ids(list.ProviderAvailability()), []string{"cursor:ready", "grok:ready", "native:needs_setup"}; !slices.Equal(got, want) {
+		t.Fatalf("gx removed: %v, want %v", got, want)
+	}
+	gxDefault := sessionList{&launcher{resolved: resolvedProvider{Provider: gx}, own: gx}}
+	if got, want := ids(gxDefault.ProviderAvailability()), []string{"cursor:unavailable", "grok:ready", "gx:unavailable", "native:needs_setup"}; !slices.Equal(got, want) {
+		t.Fatalf("gx the configured default, missing: %v, want %v", got, want)
+	}
+}
+
+// TestExplicitProviderSkipsAvailability (plan 036 A9, decision 3): an explicit
+// --provider starts its provider whatever availability says — no picker, no
+// refusal. cursor is made unavailable for real: the login session forced
+// outside the GUI's, its binary the fake agent through --agent-bin, so it
+// resolves and the not-GUI rule is what marks it. `--provider cursor` then
+// starts a session of it, which comes up.
+func TestExplicitProviderSkipsAvailability(t *testing.T) {
+	_, ws := serveHome(t)
+	t.Setenv(rundir.GUISessionEnv, "0")
+	t.Setenv("CRAZE_FAKE_SCRIPT", "echo")
+	fake := fakeAgentPath(t)
+	ran := false
+	fakeRun(t, func(cfg tui.Config) (tui.Result, error) {
+		ran = true
+		// The premise: the check this TUI would show marks cursor unavailable.
+		avail := cfg.Availability()
+		if len(avail) == 0 || avail[0].ID != "cursor" || avail[0].State != tui.AvailUnavailable || avail[0].Reason != notGUIReason {
+			t.Fatalf("the premise: cursor is not unavailable outside the login session: %+v", avail)
+		}
+		if !cfg.ProviderLocked || cfg.Provider.Name() != "cursor" || cfg.Session == nil {
+			t.Fatalf("locked %v, provider %q, session %v: want cursor started with no picker",
+				cfg.ProviderLocked, cfg.Provider.Name(), cfg.Session != nil)
+		}
+		s := cfg.Session
+		defer func() { _ = s.Close() }()
+		if err := s.Start(stepCtx(t)); err != nil {
+			t.Fatalf("the explicit cursor session did not start: %v", err)
+		}
+		return tui.Result{}, nil
+	})
+	cmd, f := parseTUIFlags(t, "--provider", "cursor", "--agent-bin", fake, "--workspace", ws)
+	if err := runTUI(cmd, f, hostEnv{}); err != nil {
+		t.Fatalf("runTUI refused the explicit provider: %v", err)
+	}
+	if !ran {
+		t.Fatal("runTUI never reached the TUI")
 	}
 }

@@ -429,8 +429,8 @@ func TestProviderPickerErrorRowNeverTakesTheLastListRow(t *testing.T) {
 		5: {shown: 2, err: true, footer: true},
 	} {
 		top, shown, footer := m.providerDialogPlan(budget)
-		if shown != want.shown || footer != want.footer || m.providerErrShown(budget) != want.err {
-			t.Fatalf("budget %d: shown %d footer %v err %v, want %+v", budget, shown, footer, m.providerErrShown(budget), want)
+		if shown != want.shown || footer != want.footer || m.providerLineShown(budget) != want.err {
+			t.Fatalf("budget %d: shown %d footer %v err %v, want %+v", budget, shown, footer, m.providerLineShown(budget), want)
 		}
 		if m.providerCursor < top || m.providerCursor >= top+shown {
 			t.Fatalf("budget %d: the window [%d,%d) lost the cursor", budget, top, top+shown)

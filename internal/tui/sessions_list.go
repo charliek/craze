@@ -153,6 +153,53 @@ type sessListState struct {
 	// only when Config.Sessions can start sessions (SessionStarter); in.on
 	// false is PR 2's list, which has none.
 	in sessInput
+	// avail is the latest ProviderAvailabilitySource answer this opening of
+	// the list took (plan 036 §3.3): what /provider offers and refuses, and
+	// a typed `/provider <id>` is checked against. availN is its number
+	// (provAvailSeq), so an answer from an older call — the list's own read
+	// landing after /provider's — never replaces a newer one; availHave says
+	// there is one: before it, /provider offers the startup picker's rows,
+	// every one ready.
+	avail     []ProviderAvail
+	availN    uint64
+	availHave bool
+}
+
+// sessAvailAnswer is one ProviderAvailabilitySource answer, numbered as its
+// call started (provAvailSeq).
+type sessAvailAnswer struct {
+	n     uint64
+	avail []ProviderAvail
+}
+
+// sessAvailMsg is the list's own read of the providers' availability as it
+// opens, for its opening gen.
+type sessAvailMsg struct {
+	gen    uint64
+	answer sessAvailAnswer
+}
+
+// askSessAvail is one ProviderAvailabilitySource call, numbered as it starts:
+// off the Update, since it reads the disk.
+func askSessAvail(src ProviderAvailabilitySource) sessAvailAnswer {
+	n := provAvailSeq.Add(1)
+	return sessAvailAnswer{n: n, avail: src.ProviderAvailability()}
+}
+
+// readSessAvail reads the providers' availability off the Update, for the
+// list's opening gen: what a typed `/provider <id>` is checked against before
+// /provider's values have ever been opened.
+func readSessAvail(src ProviderAvailabilitySource, gen uint64) tea.Cmd {
+	return func() tea.Msg { return sessAvailMsg{gen: gen, answer: askSessAvail(src)} }
+}
+
+// takeSessAvail keeps ans as the list's latest availability, unless a newer
+// call's answer is already kept.
+func (l *sessListState) takeSessAvail(ans sessAvailAnswer) {
+	if l.availHave && ans.n <= l.availN {
+		return
+	}
+	l.avail, l.availN, l.availHave = ans.avail, ans.n, true
 }
 
 // sessKey is a line's identity: a running session by its craze id and
@@ -329,10 +376,16 @@ func (m Model) openSessions() (tea.Model, tea.Cmd) {
 		return m, read
 	}
 	// The input under the rows, and the recent directories its `@` offers
-	// (plan 030 §3.13, §3.15), read once for this opening.
+	// (plan 030 §3.13, §3.15), read once for this opening — and the
+	// providers' availability its /provider offers and checks (plan 036
+	// §3.3), read again at each opening of /provider's values.
 	m.sessList.in = newSessInput(m.completeLoads)
 	sync := m.syncSessInput()
-	return m, tea.Batch(read, readRecents(st, m.sessList.gen), sync)
+	var avail tea.Cmd
+	if src, ok := m.sessions.(ProviderAvailabilitySource); ok {
+		avail = readSessAvail(src, m.sessList.gen)
+	}
+	return m, tea.Batch(read, readRecents(st, m.sessList.gen), avail, sync)
 }
 
 // hereKey is the session the model holds, as its row is keyed: zero with
@@ -521,6 +574,16 @@ func (m Model) applySessMsg(msg tea.Msg) (Model, tea.Cmd, bool) {
 		l.in.recents = msg.dirs
 		sync := m.syncSessInput()
 		return m, sync, true
+	case sessAvailMsg:
+		// The list's own read of the providers' availability (plan 036
+		// §3.3): this opening's alone, and only while no newer call's answer
+		// is kept. An open /provider popup is answered again from it.
+		if !l.open || msg.gen != l.gen || !l.in.on {
+			return m, nil, true
+		}
+		l.takeSessAvail(msg.answer)
+		sync := m.syncSessInput()
+		return m, sync, true
 	case completeLoadedMsg:
 		// The `@` popup's listing of a directory, or the `/` popup's models
 		// (C16): the popup takes it only if it still awaits it
@@ -534,6 +597,13 @@ func (m Model) applySessMsg(msg tea.Msg) (Model, tea.Cmd, bool) {
 			return m, nil, true
 		}
 		if msg.source == sessCmdSourceID {
+			// /provider's read of the providers' availability (plan 036
+			// §3.3) is the list's latest too — but only the read this
+			// opening of the popup awaits: one it has stopped awaiting
+			// changes nothing.
+			if ans, ok := msg.res.Data.(sessAvailAnswer); ok && l.in.cmd.awaits(msg) {
+				l.takeSessAvail(ans)
+			}
 			l.in.cmd.setSource(m.sessCmdSourceNow())
 			cmd, _ := l.in.cmd.loaded(msg)
 			return m, cmd, true

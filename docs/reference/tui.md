@@ -22,6 +22,51 @@ spawn. `Enter` on it shows the refusal `--provider native` would have exited 2
 with, as an error row under the list, and the dialog stays open for another
 choice; nothing is saved as the default. Moving the cursor clears the row.
 
+### Provider states
+
+As the dialog opens, craze checks each provider the way
+[`craze providers`](cli.md#craze-providers) does — whether its binary
+resolves, whether native has a model provider with a key, and on a Mac
+whether this craze runs in the login session cursor needs — and marks every
+row that cannot start:
+
+```text
+╭────────────────────────────────────────────────────╮
+│provider                                            │
+│> cursor                       unavailable · default│
+│  grok                                              │
+│  native                                 needs setup│
+│cursor-agent not found on PATH                      │
+│install cursor-agent, or set [agents].cursor in ~/.…│
+│↑↓ · tab · enter starts · esc uses default          │
+╰────────────────────────────────────────────────────╯
+```
+
+- A row that is not ready is dimmed, and its tag says its state —
+  `unavailable` or `needs setup` — before `default`. When the box is too narrow
+  for both, `default` is dropped first.
+- Two lines under the list say why the selected row cannot start and, under
+  that, what to do about it, as `craze providers` would. They are kept, blank
+  on a ready row, whenever any row is not ready, so the box keeps its height
+  as the cursor moves. In a short terminal the second line goes first, before
+  the key hint and any row. With every row ready the dialog looks exactly as
+  it always has.
+- `Enter` on a row that cannot start — or `Esc`, or a click outside the box,
+  when the default cannot start — does not start it: the first line becomes
+  `can't start cursor: <reason>` in red, with that provider's fix under it,
+  and the dialog stays open for another choice. Moving the cursor clears it.
+  A refusal of the command line's (above) is checked first, and takes the
+  first line alone.
+- With no row that can start, every choice is refused; `Ctrl+C` still quits.
+- The check reads only files, never the network, and runs as the dialog
+  opens. Until it answers every row is ready and a choice is taken as it
+  always was.
+
+The states are advice for the dialogs alone: `--provider`, `CRAZE_PROVIDER`
+and `--resume` start exactly as they always have, whatever the check says, so
+a provider it misjudges — cursor's keychain unlocked some other way — can
+still be started by name.
+
 `--resume` shows a **resume** picker instead of that dialog, and `--continue`
 skips both and loads a session directly — see [Resuming a
 session](#resuming-a-session) and [CLI reference](cli.md#-continue-and-resume).
@@ -1067,7 +1112,14 @@ nothing.
 
 - **`/provider`** lists the providers the startup [provider
   dialog](#tui-reference) offers — `gx` only where its binary resolves — the
-  one in use marked `current`. Choosing one **resets the model** to that
+  one in use marked `current`. Each opening checks them again, as the startup
+  dialog does ([provider states](#provider-states)): a `gx` installed since
+  craze started is listed, one removed is not, and a provider that cannot
+  start is dimmed with its reason beside it and its state (`unavailable`,
+  `needs setup`) for its note. `Tab` or `Enter` on one does not choose it:
+  the input and the provider new sessions run stay as they were, and the
+  popup says `can't start <provider>: <reason> — <fix>` in red under the list
+  until the next key. Choosing one that can start **resets the model** to that
   provider's default: for cursor, grok and gx, the agent's own (`default`: no
   model is passed); for native, the model a native session started with no
   `--model` would use ([which model a session starts
@@ -1100,7 +1152,9 @@ nothing.
 Typed in full, `/provider grok`, `/model gpt-6-sol` and `/model default` (the
 provider's own — a catalog model whose id is `default` is picked from the
 popup) do the same without the popup; a provider the picker does not offer is
-refused on the hint line.
+refused on the hint line, and so is one the last check found cannot start,
+with the line left as typed. Before the list's first check has answered, a
+typed provider is taken as it always was.
 
 A session started from the list is saved as the last provider started, as any
 launch is (see [Configuration](configuration.md)), so the next `craze` without

@@ -1262,9 +1262,12 @@ How each is judged:
 
 A reason and a fix are each one line of at most 200 cells. Nothing is cached:
 each run reads `config.toml`, looks the binaries up and reads native's files
-again, with no network request and no keychain access. The states only
-report: an explicit `--provider` or `$CRAZE_PROVIDER` starts a provider
-whatever its state, with the same start error as ever when it cannot start.
+again, with no network request and no keychain access. The TUI's provider
+dialog and the session list's `/provider` show the same states and refuse a
+provider that cannot start when it is picked there ([Provider
+states](tui.md#provider-states)); everywhere else the states only report: an
+explicit `--provider` or `$CRAZE_PROVIDER` starts a provider whatever its
+state, with the same start error as ever when it cannot start.
 
 | Flag | Description |
 |------|-------------|

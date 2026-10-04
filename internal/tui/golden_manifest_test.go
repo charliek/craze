@@ -17,7 +17,7 @@ import (
 // file in testdata/ with the transports its frame runs under. A8's claim —
 // the full TUI runs unchanged over the socket, goldens included — is this
 // list: every golden runs in process AND over the socket, byte-identical
-// against the one file, except the six pre-start picker frames, which are
+// against the one file, except the nine pre-start picker frames, which are
 // direct-Update frames of the provider and resume pickers — dialogs that exist
 // only in the host TUI and never in `craze attach` (Config.Backend has no
 // picker) — and run in process alone; and the one frame of a restore whose
@@ -174,6 +174,9 @@ var goldenManifest = map[string]goldenRuns{
 	"provider-picker-3rows-100x30":           inprocOnly,
 	"provider-picker-3rows-40x12":            inprocOnly,
 	"provider-picker-80x24":                  inprocOnly,
+	"provider-picker-availability-80x24":     inprocOnly,
+	"provider-picker-narrow-40x12":           inprocOnly,
+	"provider-picker-refused-80x24":          inprocOnly,
 	"queue-degrade-40x12":                    bothTransports,
 	"queue-drain-80x24":                      bothTransports,
 	"queue-edit-100x30":                      bothTransports,
@@ -506,7 +509,8 @@ func transportList(set map[frameTransport]bool) string {
 // golden file in testdata/ and no file that is not there, with the counts A8
 // states — 122 goldens in process and over the socket (plan 030's two opened
 // sessions among them, and plan 031's two native model dialogs and five
-// /connect frames), the six picker frames, plan 030's restore-failed, its
+// /connect frames), the six picker frames and plan 036's three of the
+// provider picker with availability (C3), plan 030's restore-failed, its
 // ten session-list frames, the nine of the list's input (C14), the two of
 // the unstarted session (C15), the four of the input's `/` popup (C16) and
 // the four of the composer's `@` popup (C18), and plan 032's list over a
@@ -543,8 +547,8 @@ func TestTheGoldenManifestIsEveryGolden(t *testing.T) {
 			t.Errorf("the manifest runs %s under %v: a golden runs under both transports, or in process alone", name, runs)
 		}
 	}
-	if both != 135 || inprocAlone != 43 {
-		t.Errorf("the manifest lists %d goldens under both transports and %d in process alone, want 135 and 43 (A8)", both, inprocAlone)
+	if both != 135 || inprocAlone != 46 {
+		t.Errorf("the manifest lists %d goldens under both transports and %d in process alone, want 135 and 46 (A8)", both, inprocAlone)
 	}
 }
 
