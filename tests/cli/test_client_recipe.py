@@ -5,7 +5,7 @@ real hub" (under "Fixtures and the fake host"): the same environment, the same
 config.toml, the same JSON lines in the same order, and the same answers. A
 change to one is a change to the other.
 
-It drives `bin/craze bridge --hub` as a raw JSON-RPC client -- its stdin and
+It drives `craze bridge --hub` as a raw JSON-RPC client -- its stdin and
 stdout are pipes, as an SSH exec's are -- through the small NDJSON reader
 below. The reader tells replies (by `id`) from notifications and keeps both,
 so no wait depends on the order in which the two interleave. The hub is the
@@ -13,8 +13,8 @@ real one, spawned by the first bridge. Beside it run one `craze-fake-host`,
 listed in the registry as a craze host is, and the session the hub creates:
 a real `craze serve` whose grok is the fake agent. Every wait is bounded and
 waits on its own precondition: a ready line, a reply's id, a notification.
-The one poll, for the recent directories, is a bounded poll of the method
-itself.
+The two polls, for the echo and for the recent directories, are bounded
+polls of a method, each request given only the time left.
 """
 
 from __future__ import annotations
@@ -45,13 +45,36 @@ CREATE_WAIT = 90.0
 # The host writes the session's index row after its start, so the recent
 # directory can follow the create's answer (plan 036 §3.7 step 9).
 RECENT_WAIT = 5.0
+# A poll numbers its requests from here up, clear of the fixed ids, so the
+# request after it has a fixed id too (protocol.md's `poll`).
+POLL_FIRST_ID = 100
 
 FAKE_HOST_ID = "0a0a0a0a0a0a"
 FAKE_SESSION_ID = "recipe-fake"
 HELLO = {"protocols": [1], "client": {"kind": "test", "name": "recipe"}}
 
 
-def recipe_env(craze_bin: Path) -> dict[str, str]:
+def private_path(path_dir: Path, craze_bin: Path, craze_fake_host_bin: Path) -> Path:
+    """The recipe's PATH: a directory of its own holding exactly the two
+    programs it runs by name, and nothing else (plan 036 r5).
+
+    Nothing a craze process starts is looked up on PATH, except the
+    providers' binaries, which must not be found. craze re-executes itself
+    (os.Executable()) as the hub and as each host. The one agent a host
+    starts here, grok's, is config.toml's [agents].grok, an absolute path.
+    Neither fake starts anything. So the list is craze and craze-fake-host,
+    each a symlink to the binary under test. Then cursor's candidates (cursor-agent, then
+    agent), grok and gx are found nowhere, on every machine, wherever the
+    binaries under test live: no system directory, and no directory a
+    CRAZE_BIN override sits in, is ever searched.
+    """
+    path_dir.mkdir()
+    for name, target in (("craze", craze_bin), ("craze-fake-host", craze_fake_host_bin)):
+        (path_dir / name).symlink_to(target)
+    return path_dir
+
+
+def recipe_env(path_dir: Path) -> dict[str, str]:
     """The recipe's environment: six variables and nothing inherited.
 
     It is built from nothing, as protocol.md's `clean` wrapper runs `env -i`.
@@ -67,13 +90,12 @@ def recipe_env(craze_bin: Path) -> dict[str, str]:
       CRAZE_RUNTIME_DIR the socket base, kept short under /tmp because a
       socket's path is capped at 100 bytes. The last is also the marker that
       conftest.host_cleanup finds this test's processes by.
-    - PATH is craze's own directory, then /usr/bin:/bin. cursor-agent, grok
-      and gx (often installed on a developer's machine) are then not found,
-      so cursor is `unavailable`, "not found", on both OSes, because a missing
-      binary is reported ahead of the macOS login-session rule. gx is not
-      listed. grok reaches the fake agent only through config.toml's
-      [agents], the one route a hub's host takes, since the hub strips
-      CRAZE_AGENT_BIN and CRAZE_PROVIDER.
+    - PATH is private_path's directory alone. cursor-agent, agent, grok and
+      gx are then not found, so cursor is `unavailable`, "not found", on both
+      OSes, because a missing binary is reported ahead of the macOS
+      login-session rule. gx is not listed. grok reaches the fake agent only
+      through config.toml's [agents], the one route a hub's host takes, since
+      the hub strips CRAZE_AGENT_BIN and CRAZE_PROVIDER.
     - CRAZE_FAKE_SCRIPT=grok-echo has the fake agent speak grok's dialect and
       echo each prompt. CRAZE_FAKE_SESSION_ID={dir} has it name its session
       after its working directory, the session's own. No other CRAZE_FAKE_*
@@ -84,7 +106,7 @@ def recipe_env(craze_bin: Path) -> dict[str, str]:
         "HOME": os.environ["HOME"],
         "CRAZE_HOME": os.environ["CRAZE_HOME"],
         "CRAZE_RUNTIME_DIR": os.environ["CRAZE_RUNTIME_DIR"],
-        "PATH": f"{craze_bin.parent}:/usr/bin:/bin",
+        "PATH": str(path_dir),
         "CRAZE_FAKE_SCRIPT": "grok-echo",
         "CRAZE_FAKE_SESSION_ID": "{dir}",
     }
@@ -132,11 +154,13 @@ class Bridge:
     satisfy it, so nothing read on the way is dropped.
     """
 
-    def __init__(self, craze_bin: Path, env: dict[str, str], stderr: Path) -> None:
+    def __init__(self, env: dict[str, str], stderr: Path) -> None:
         self.stderr = stderr
+        # "craze" is found on env's PATH, the recipe's private one, as
+        # protocol.md's `clean` finds it.
         with stderr.open("wb") as err:
             self.proc = subprocess.Popen(
-                [str(craze_bin), "bridge", "--hub"],
+                ["craze", "bridge", "--hub"],
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=err,
@@ -175,6 +199,27 @@ class Bridge:
         while (found := find(self.notes)) is None:
             self._take(deadline, what)
         return found
+
+    def poll(self, method: str, params: dict, done: Callable[[dict], bool], what: str, timeout: float) -> dict:
+        """protocol.md's `poll`: method sent with ids POLL_FIRST_ID, then one
+        more each time, until done holds for a result, which is returned.
+
+        timeout bounds the whole poll: the time left is checked before each
+        request and is all its reply is given, and the pause between two
+        requests is taken out of it too.
+        """
+        deadline = time.monotonic() + timeout
+        id_ = POLL_FIRST_ID
+        result: dict | None = None
+        while True:
+            left = deadline - time.monotonic()
+            if left <= 0:
+                raise AssertionError(f"no {method} reply showed {what} within {timeout:g}s; the last: {result}")
+            result = self.call(id_, method, params, timeout=left)
+            if done(result):
+                return result
+            id_ += 1
+            time.sleep(max(0.0, min(0.1, deadline - time.monotonic())))
 
     def close(self, timeout: float = WAIT) -> int:
         """Close stdin, read what is left up to the bridge's EOF, and return
@@ -220,28 +265,33 @@ class Bridge:
 
 
 class FakeHost:
-    """One `craze-fake-host`, its stdin on a pipe: its NDJSON ops go there,
-    and its stdin's end ends it, as `quit` does."""
+    """One `craze-fake-host`, its stdin on a pipe: its stdin's end is how it
+    is told to go (it unlists itself and exits).
 
-    def __init__(self, fake_host_bin: Path, env: dict[str, str], args: list[str], stderr: Path) -> None:
+    The constructor only starts it. wait_ready reads its ready line, after
+    the caller has taken ownership of it (Procs.fake_host), so a ready line
+    that never comes still leaves it to be ended.
+    """
+
+    def __init__(self, env: dict[str, str], args: list[str], stderr: Path) -> None:
+        self.stderr = stderr
+        # Found on env's PATH, as `craze` is (Bridge).
         with stderr.open("wb") as err:
             self.proc = subprocess.Popen(
-                [str(fake_host_bin), *args],
+                ["craze-fake-host", *args],
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=err,
                 env=env,
             )
+        self.ready: dict = {}
+
+    def wait_ready(self) -> None:
         line = Lines(self.proc.stdout).line(time.monotonic() + WAIT, "craze-fake-host's ready line")
-        assert line is not None, f"craze-fake-host exited before its ready line: {stderr.read_text(encoding='utf-8')!r}"
+        assert line is not None, f"craze-fake-host exited before its ready line: {self.stderr.read_text(encoding='utf-8')!r}"
         # Its socket is bound and its registry entry written before it
         # prints this line.
-        self.ready: dict = json.loads(line)
-
-    def op(self, op: dict) -> None:
-        assert self.proc.stdin is not None
-        self.proc.stdin.write(json.dumps(op).encode() + b"\n")
-        self.proc.stdin.flush()
+        self.ready = json.loads(line)
 
     def close_stdin(self) -> None:
         assert self.proc.stdin is not None
@@ -252,24 +302,27 @@ class FakeHost:
 
 
 class Procs:
-    """The processes one recipe starts, so that its fixture can end them."""
+    """The processes one recipe starts, so that its fixture can end them.
 
-    def __init__(self, craze_bin: Path, fake_host_bin: Path, tmp_path: Path) -> None:
-        self._craze_bin = craze_bin
-        self._fake_host_bin = fake_host_bin
+    Each is filed the moment it is started, before anything waits on it, so
+    every one the test started is ended, however the test stops.
+    """
+
+    def __init__(self, tmp_path: Path) -> None:
         self._tmp_path = tmp_path
         self.fake_hosts: list[FakeHost] = []
         self.bridges: list[Bridge] = []
 
     def fake_host(self, env: dict[str, str], *args: str) -> FakeHost:
         stderr = self._tmp_path / f"fake-host-{len(self.fake_hosts) + 1}.err"
-        host = FakeHost(self._fake_host_bin, env, list(args), stderr)
+        host = FakeHost(env, list(args), stderr)
         self.fake_hosts.append(host)
+        host.wait_ready()
         return host
 
     def bridge(self, env: dict[str, str]) -> Bridge:
         stderr = self._tmp_path / f"bridge-{len(self.bridges) + 1}.err"
-        bridge = Bridge(self._craze_bin, env, stderr)
+        bridge = Bridge(env, stderr)
         self.bridges.append(bridge)
         return bridge
 
@@ -291,7 +344,7 @@ class Procs:
 
 
 @pytest.fixture
-def recipe_procs(host_cleanup: None, craze_bin: Path, craze_fake_host_bin: Path, tmp_path: Path) -> Iterator[Procs]:
+def recipe_procs(host_cleanup: None, tmp_path: Path) -> Iterator[Procs]:
     """The recipe's processes, ended before conftest's cleanup looks for any.
 
     This fixture names host_cleanup as a parameter, so pytest always sets
@@ -302,7 +355,7 @@ def recipe_procs(host_cleanup: None, craze_bin: Path, craze_fake_host_bin: Path,
     It does not handle SIGTERM, so host_cleanup's SIGTERM would kill it before
     it unlists itself, and the registry entry it leaves fails the test.
     """
-    procs = Procs(craze_bin, craze_fake_host_bin, tmp_path)
+    procs = Procs(tmp_path)
     yield procs
     procs.end()
 
@@ -317,17 +370,14 @@ def _upsert_of(notes: list[dict], session_id: str) -> dict | None:
     return None
 
 
-def _echoed(attached: dict, notes: list[dict]) -> bool | None:
-    """True once the session's reply reads `echo: hello recipe`, as a client
-    folds it: the attach snapshot's assistant entries, then each later `text`
-    event. The fake agent sends the echo as two chunks, so a snapshot taken
-    mid-turn can hold the first and an event the second."""
-    snapshot = attached.get("snapshot") or {}
-    text = "".join(e.get("text", "") for e in snapshot.get("main", {}).get("entries", []) if e.get("kind") == "assistant")
-    for note in notes:
-        if note.get("method") == "event" and note["params"]["event"].get("type") == "text":
-            text += note["params"]["event"]["text"]
-    return True if "echo: hello recipe" in text else None
+def _echoed(result: dict) -> bool:
+    """A session.snapshot whose main transcript has an assistant entry whose
+    text is exactly `echo: hello recipe` -- protocol.md's check, the line
+    holding `"kind":"assistant","text":"echo: hello recipe"`. The host folds
+    the echo's chunks into that one entry, so a snapshot taken mid-turn holds
+    only part of it and the poll asks again."""
+    entries = result["snapshot"].get("main", {}).get("entries", [])
+    return any(e.get("kind") == "assistant" and e.get("text") == "echo: hello recipe" for e in entries)
 
 
 def _session_closed(notes: list[dict]) -> dict | None:
@@ -335,14 +385,14 @@ def _session_closed(notes: list[dict]) -> dict | None:
 
 
 def test_a_client_against_a_real_hub(
-    craze_bin: Path, fake_agent_bin: Path, tmp_path: Path, recipe_procs: Procs
+    craze_bin: Path, craze_fake_host_bin: Path, fake_agent_bin: Path, tmp_path: Path, recipe_procs: Procs
 ) -> None:
     """protocol.md's recipe, step by step: what a create sheet reads from a
     real hub (sessions.createOptions), the roster with a fake host in it, a
     session created through the hub and read back through its splice, the
     recent directory the session leaves, and a cleanup that leaves nothing."""
     # 1. The environment, fixed before the first bridge spawns the hub.
-    env = recipe_env(craze_bin)
+    env = recipe_env(private_path(tmp_path / "path", craze_bin, craze_fake_host_bin))
 
     # 2. config.toml: the default provider, the hosts' idle exit (the suite's
     # TEST_HOST_IDLE_EXIT), and grok pointed at the fake agent.
@@ -408,37 +458,42 @@ def test_a_client_against_a_real_hub(
     a.wait_for(lambda notes: _upsert_of(notes, session_id), f"a roster upsert naming {session_id}")
 
     # 8. Read it back through the hub: hello, the splice, the host's hello,
-    # and an attach whose snapshot (or a later event) carries the echo.
+    # the attach, then session.snapshot polled until it holds the whole echo.
     b = recipe_procs.bridge(env)
     assert b.call(1, "hello", HELLO)["endpoint"]["kind"] == "hub"
     assert b.call(2, "session.connect", {"sessionId": host_id}) == {}
     host_hello = b.call(3, "hello", HELLO)
     assert (host_hello["endpoint"]["kind"], host_hello["endpoint"]["hostId"]) == ("host", host_id), host_hello
     attached = b.call(4, "session.attach", {"sessionId": session_id})
-    b.wait_for(lambda notes: _echoed(attached, notes), "echo: hello recipe in the snapshot or an event")
+    assert attached["session"]["sessionId"] == session_id, attached
+    b.poll("session.snapshot", {"sessionId": session_id}, _echoed, "the echo, `echo: hello recipe`", WAIT)
 
     # 9. The session's directory, once its host has written its index row: a
-    # bounded poll of the method.
-    deadline = time.monotonic() + RECENT_WAIT
-    req = 5
-    while not (dirs := a.call(req, "sessions.createOptions", {})["recentDirs"]) and time.monotonic() < deadline:
-        req += 1
-        time.sleep(0.1)
-    assert dirs, f"no recent directory within {RECENT_WAIT:g}s"
-    assert os.path.realpath(dirs[0]["dir"]) == os.path.realpath(work), dirs
+    # bounded poll of the method until a recent directory is the work
+    # directory (protocol.md's poll matches its text, in either spelling).
+    def names_work(result: dict) -> bool:
+        return any(os.path.realpath(d["dir"]) == os.path.realpath(work) for d in result["recentDirs"])
 
-    # 10. Cleanup: stop the session (its host closes bridge B's connection),
-    # quit the fake host, close bridge A, and stop the hub, whose SIGTERM is
-    # its clean teardown. Then nothing of the recipe's is left, before
-    # host_cleanup looks.
+    dirs = a.poll("sessions.createOptions", {}, names_work, "the work directory", RECENT_WAIT)["recentDirs"]
+    assert [os.path.realpath(d["dir"]) for d in dirs] == [os.path.realpath(work)], dirs
+
+    # 10. Cleanup. Stop the session (its host closes bridge B's connection)
+    # and wait for its end to reach B. Then protocol.md's `cleanup`, in its
+    # order: every stdin closed -- the fake host's (it unlists itself) and
+    # each bridge's -- and each of them waited for (no created host is left
+    # to SIGTERM: its session is stopped); then SIGTERM to the hub, by the
+    # pid its record names, which is its clean teardown. Then nothing of the
+    # recipe's is left, before host_cleanup looks.
     assert b.call(5, "session.stop", {"sessionId": session_id, "commandId": "1"}) == {}
     b.wait_for(_session_closed, "reset{session_closed}")
+    fake.close_stdin()
     assert b.close() == 0, b.stderr.read_text(encoding="utf-8")
-    fake.op({"name": "quit"})
-    assert fake.proc.wait(timeout=WAIT) == 0
     assert a.close() == 0, a.stderr.read_text(encoding="utf-8")
-    os.kill(hub_pid, signal.SIGTERM)
+    assert fake.proc.wait(timeout=WAIT) == 0, fake.stderr.read_text(encoding="utf-8")
     hubs = Path(env["HOME"]) / ".cache" / "craze" / "hubs"
+    records = [json.loads(p.read_text(encoding="utf-8")) for p in hubs.glob("*.json")]
+    assert [r["pid"] for r in records] == [hub_pid], records
+    os.kill(hub_pid, signal.SIGTERM)
     deadline = time.monotonic() + WAIT
     while True:
         left = conftest._stray_processes(str(fake_agent_bin))
