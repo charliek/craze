@@ -276,27 +276,34 @@ const availUnlistedReason = "the availability check does not list it"
 // default the TUI alone knows of (a hidden --provider/$CRAZE_PROVIDER, which
 // the check is given and names anyway), which keeps today's rule, ready with
 // no state. The cursor stays on its provider when that row survives, and
-// goes to the default when it does not. An answer that names no provider
-// says nothing of the rows (the check always names native), and leaves them.
+// goes to the default when it does not. An answer that names no known
+// provider leaves the default alone, judged as above (the check always names
+// native, so only a test's callback gives one; plan 036 r11); a nil answer —
+// a callback that returned none — says nothing of the rows, and leaves them.
 func (m Model) reconcileProviderRows(avail []ProviderAvail) Model {
+	def := m.providerDefault
+	if avail == nil || def.Name() == "" {
+		return m
+	}
 	list := make([]agent.Provider, 0, len(avail))
 	for _, a := range avail {
 		if p, err := agent.ProviderByName(a.ID); err == nil && p.Name() == a.ID {
 			list = append(list, p)
 		}
 	}
-	if len(list) == 0 {
-		return m
-	}
-	def := m.providerDefault
-	if _, named := m.provAvail[def.Name()]; !named && def.Name() != "" && !def.Hidden() && !def.InProcess() {
+	if _, named := m.provAvail[def.Name()]; !named && !def.Hidden() && !def.InProcess() {
 		m.provAvail[def.Name()] = ProviderAvail{ID: def.Name(), State: AvailUnavailable, Reason: availUnlistedReason}
 	}
 	at := ""
 	if c := m.providerCursor; c >= 0 && c < len(m.providers) {
 		at = m.providers[c].Name()
 	}
-	m.providers = pickerRows(list, def)
+	if len(list) == 0 {
+		// pickerRows would take an empty list for the built-in set.
+		m.providers = []agent.Provider{def}
+	} else {
+		m.providers = pickerRows(list, def)
+	}
 	m.providerCursor = m.providerIndex(def)
 	for i, p := range m.providers {
 		if p.Name() == at {

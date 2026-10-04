@@ -1064,6 +1064,23 @@ func TestProviderPickerRowsFollowTheAnswers(t *testing.T) {
 			t.Fatalf("Esc to the unlisted default: picking %v, built %v, error %q", next.pickingProvider, log.got(), next.providerErr)
 		}
 	})
+	t.Run("an answer that names no provider", func(t *testing.T) {
+		// Non-nil and empty (r11): the default alone stays, judged as left
+		// out; gx, a row before the answer, can no longer be reached.
+		log := &builtLog{}
+		cfg := availPickerConfig(t, grok, func() []ProviderAvail { return []ProviderAvail{} }, nil, log.build)
+		cfg.Providers = []agent.Provider{cursor, grok, gx, native}
+		m := availPicker(t, cfg, 80, 24)
+		if got := pickerRowNames(m); !slices.Equal(got, []string{"grok"}) || m.providerChoice(grok).a.State != AvailUnavailable {
+			t.Fatalf("rows %v, grok %+v — want the default alone, unavailable", got, m.providerChoice(grok).a)
+		}
+		for _, key := range []tea.KeyType{tea.KeyEnter, tea.KeyEsc} {
+			next, _ := press(m, tea.KeyMsg{Type: key})
+			if !next.pickingProvider || len(log.got()) != 0 {
+				t.Fatalf("%v on the lone default: picking %v, built %v — want it refused", key, next.pickingProvider, log.got())
+			}
+		}
+	})
 	t.Run("an unlisted hidden default", func(t *testing.T) {
 		hidden := plantHidden(t)
 		log := &builtLog{}
