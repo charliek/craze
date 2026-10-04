@@ -3,6 +3,7 @@ package cli
 import (
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -399,18 +400,41 @@ func TestNativeAvailabilityNamesTheFileOnly(t *testing.T) {
 	}
 }
 
-// TestLoadErrFile (plan 036 §3.1): the file a Load error names, by its
+// TestNativeAvailabilityNamesTheFailingFile (plan 036 r1): a models.toml
+// whose key spells providers.toml's path, with a value of the wrong type, is
+// models.toml's error — the key is in the error's body, the file in its head.
+func TestNativeAvailabilityNamesTheFailingFile(t *testing.T) {
+	dir := t.TempDir()
+	writeNativeFile(t, dir, modeltable.ModelsFile,
+		fmt.Sprintf("version = 1\n\n[models.%q]\nname = 17\n", filepath.Join(dir, modeltable.ProvidersFile)))
+	_, err := modeltable.Load(dir)
+	if err == nil || !strings.Contains(err.Error(), filepath.Join(dir, modeltable.ProvidersFile)) {
+		t.Fatalf("Load: %v, want an error whose body spells providers.toml's path", err)
+	}
+	state, reason, _ := nativeAvailability(dir, func(string) string { return "" })
+	if state != availUnavailable || reason != "models.toml could not be read" {
+		t.Fatalf("native: %s %q, want unavailable naming models.toml", state, reason)
+	}
+}
+
+// TestLoadErrFile (plan 036 §3.1, r1): the file a Load error names, by its
 // *modeltable.FileError when it is one — whose File may be a base name alone
-// (Validate's, for a table with no directory) — else by which of the two
-// paths its text carries, else neither.
+// (Validate's, for a table with no directory) — or its *fs.PathError, else by
+// which of the two paths the error begins with, never by one its body spells
+// (a key can), else neither.
 func TestLoadErrFile(t *testing.T) {
 	dir := "/n/native"
+	providers, models := filepath.Join(dir, modeltable.ProvidersFile), filepath.Join(dir, modeltable.ModelsFile)
 	for _, tc := range []struct {
 		err  error
 		want string
 	}{
 		{&modeltable.FileError{File: modeltable.ModelsFile, Key: "default_model", Reason: "x"}, "models.toml"},
-		{fmt.Errorf("modeltable: %s: toml: incompatible types", filepath.Join(dir, modeltable.ProvidersFile)), "providers.toml"},
+		{fmt.Errorf("modeltable: %w", &fs.PathError{Op: "open", Path: providers, Err: fs.ErrPermission}), "providers.toml"},
+		{fmt.Errorf("modeltable: %s: toml: incompatible types", providers), "providers.toml"},
+		{fmt.Errorf("modeltable: %s is missing although %s exists", models, modeltable.ProvidersFile), "models.toml"},
+		{fmt.Errorf(`modeltable: %s: toml: incompatible types: models."%s".name`, models, providers), "models.toml"},
+		{fmt.Errorf(`toml: key %q`, providers), "native's model table"},
 		{fmt.Errorf("modeltable: %s holds neither %s nor %s", dir, modeltable.ProvidersFile, modeltable.ModelsFile), "native's model table"},
 	} {
 		if got := loadErrFile(tc.err, dir); got != tc.want {

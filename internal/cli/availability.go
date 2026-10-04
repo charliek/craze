@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -241,17 +242,25 @@ func nativeAvailability(dir string, getenv func(string) string) (availState, str
 
 // loadErrFile is the base name of the file a modeltable.Load error is about
 // — never anything else of the error — or "native's model table" when the
-// error names neither of dir's two files: a *modeltable.FileError's File,
-// else whichever of the two paths the error's text carries (a value of the
-// wrong type, a file that cannot be read).
+// error names no file: a *modeltable.FileError's File; a file that cannot be
+// read, an *fs.PathError's Path; else one of dir's two files when the error
+// begins with it, as modeltable writes a value of the wrong type ("modeltable:
+// <path>: …") and a file missing beside the other ("modeltable: <path> is
+// missing …"). Only the error's head is matched, never its body: a key in one
+// file can spell the other file's path (plan 036 r1).
 func loadErrFile(err error, dir string) string {
 	var fe *modeltable.FileError
 	if errors.As(err, &fe) {
 		return filepath.Base(fe.File)
 	}
+	var pe *fs.PathError
+	if errors.As(err, &pe) {
+		return filepath.Base(pe.Path)
+	}
 	msg := err.Error()
 	for _, name := range []string{modeltable.ProvidersFile, modeltable.ModelsFile} {
-		if strings.Contains(msg, filepath.Join(dir, name)) {
+		head := "modeltable: " + filepath.Join(dir, name)
+		if rest, ok := strings.CutPrefix(msg, head); ok && (strings.HasPrefix(rest, ":") || strings.HasPrefix(rest, " ")) {
 			return name
 		}
 	}
