@@ -64,6 +64,13 @@ def fake_agent_bin() -> Path:
     return _bin("CRAZE_FAKE_AGENT_BIN", "bin", "craze-fake-agent")
 
 
+@pytest.fixture(scope="session")
+def craze_fake_host_bin() -> Path:
+    """cmd/craze-fake-host: protocol 1's deterministic host, standalone (plan
+    036 §3.7)."""
+    return _bin("CRAZE_FAKE_HOST_BIN", "bin", "craze-fake-host")
+
+
 @pytest.fixture(autouse=True)
 def isolate_run_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     """Isolate everything a craze run reads out of the environment.
