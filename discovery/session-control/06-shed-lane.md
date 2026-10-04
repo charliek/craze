@@ -23,6 +23,15 @@
 >   availability check and a hub create-options call come first, in craze
 >   (S3a, SD-44, SD-46). A running session's model, effort, fast mode, context
 >   and mode change from one settings sheet (SD-45).
+> - **S3a shipped (Plan 036, PR #87).** The hub answers
+>   `sessions.createOptions` (providers with `ready` / `needs_setup` /
+>   `unavailable`, a reason and a fix, the default provider, recent
+>   directories), advertised by the `createOptions` connection capability, and
+>   `craze providers [--hub] [--json]` prints the same. shed's tests can run
+>   the real hub against fake hosts and a fake agent with the verified
+>   hermetic recipe (`docs/reference/protocol.md`, "Testing a client against a
+>   real hub", and `tests/cli/test_client_recipe.py`). S3b, in shed, is next;
+>   the handoff is in `12`, Plan 036.
 > - **Item 3 below is corrected.** `shed-host-agent` is shed's credential
 >   broker and runs nothing for lanes. Cursor from the phone on a Mac hub
 >   started over ssh is dimmed for the MVP, and the fix is a follow-up
