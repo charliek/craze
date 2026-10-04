@@ -39,7 +39,8 @@ import (
 //     sign-in (auth/chatgpt.json, stat only — Resolve reads its state). If none
 //     changed since the last reload that was published — and the list was not
 //     just fetched, nor a shadowing carry just left (reloadLeft), nor either
-//     while a reload was held back (forced) — the answer is ModelsCurrent.
+//     since the last reload that published (forced) — the answer is
+//     ModelsCurrent.
 //  2. Outside every lock of the adapter's and the harness's: the table is
 //     loaded; the running model's entry is carried into it unchanged (Q16,
 //     modeltable.Table.Carry); every provider whose key the session cannot take
@@ -71,7 +72,9 @@ import (
 //     (catalogQueued). A generation older than the one published is dropped.
 //
 // Only a reload that published records the stamps it took in step 1, so one
-// that failed or is owed is made again. A failed Load records nothing and is
+// that failed or is owed is made again — and only one that published clears
+// forced, so an unstamped reading that failed or is owed is made again so
+// (plan 034 C4r5, r16 #1). A failed Load records nothing and is
 // one value-free journal note (models_reload), said once until it changes.
 //
 // SetModel and SetConfig take modelsMu across their reading of the list and
@@ -88,9 +91,12 @@ import (
 // entry was there all along, under the carry — so no stamp would ever take it
 // up, and the list would go on without it (or with the carry's) until some
 // other file moved. Under a turn's claim that reload is owed, as any is, and
-// read regardless of the stamps when it is taken up (forced); the switch's
-// own delta has already taken an unfunded carry off the list meanwhile, so
-// the list never offers what a switch would refuse.
+// read regardless of the stamps when it is taken up (forced); one that fails
+// — a models.toml it cannot read, which no stamp records either — leaves
+// that reading owed to the next trigger, a refresh's or a turn's (forced
+// again; plan 034 C4r5, r16 #1). The switch's own delta has already taken an
+// unfunded carry off the list meanwhile, so the list never offers what a
+// switch would refuse.
 //
 // # Triggers (Q14)
 //
@@ -131,8 +137,8 @@ const (
 
 // unstamped reports whether a reload for r reads the files whatever their
 // stamps say: one following a fetch of the plan's list (reloadFetched) or a
-// switch away from a shadowing carry (reloadLeft). Held back, it makes the
-// reload that takes it up do the same (forced, heldBack).
+// switch away from a shadowing carry (reloadLeft). Held back or failed, it
+// makes the reloads after it do the same until one publishes (forced).
 func (r reloadReason) unstamped() bool {
 	return r == reloadFetched || r == reloadLeft
 }
@@ -164,8 +170,12 @@ type modelsWatch struct {
 	// revision of the list each would publish.
 	gen uint64
 	// forced says a reload that reads the files whatever their stamps say —
-	// a fetched list's, or one leaving a shadowing carry (unstamped) — was
-	// held back (heldBack): the next reload reads them so too.
+	// a fetched list's, or one leaving a shadowing carry (unstamped) — began
+	// and none has published since: held back by a turn or a load, or failed
+	// on the way — a Load error among them, which records no stamp (plan 034
+	// C4r5, r16 #1) — so every reload reads them so until one publishes. It
+	// is set as such a reload begins and cleared only where one publishes:
+	// one attempt per trigger, never a loop of its own.
 	forced bool
 	// problem is the last failure journaled, so one that stays is said once.
 	problem string
@@ -223,6 +233,12 @@ func (s *nativeSession) reloadModels(reason reloadReason) ModelsStatus {
 
 // reloadLocked is reloadModels with modelsMu held.
 func (s *nativeSession) reloadLocked(reason reloadReason) ModelsStatus {
+	// An unstamped reading is owed from here until a reload publishes
+	// (forced): whatever stops this one — a load's bracket, a turn's claim,
+	// a Load that fails — leaves it for the next.
+	if reason.unstamped() {
+		s.models.forced = true
+	}
 	s.mu.Lock()
 	hs, home, prev := s.hs, s.home, s.table
 	closed, loading := s.closed, s.loading
@@ -235,7 +251,7 @@ func (s *nativeSession) reloadLocked(reason reloadReason) ModelsStatus {
 	case closed:
 		return ModelsFailed
 	case loading:
-		return s.heldBack(reason)
+		return ModelsPending // owed (step 4)
 	case hs == nil:
 		return ModelsFailed
 	case !s.models.reloadable:
@@ -243,11 +259,11 @@ func (s *nativeSession) reloadLocked(reason reloadReason) ModelsStatus {
 	}
 
 	// Step 1: the stamps, before anything is read. A fetched list, or a
-	// shadowing carry left behind, is read whatever they say (unstamped), and
-	// so is either one a turn or a load held back (forced), as its own reload
-	// would have read it.
+	// shadowing carry left behind, is read whatever they say (forced, set
+	// above), and so is either one held back or failed since, as its own
+	// reload would have read it.
 	stamps := statModelInputs(home)
-	if s.models.read && stamps == s.models.stamps && !reason.unstamped() && !s.models.forced {
+	if s.models.read && stamps == s.models.stamps && !s.models.forced {
 		return ModelsCurrent
 	}
 	if seam := s.reloadSeam; seam != nil {
@@ -313,7 +329,7 @@ func (s *nativeSession) reloadLocked(reason reloadReason) ModelsStatus {
 	case closed:
 		return ModelsFailed
 	case held:
-		return s.heldBack(reason)
+		return ModelsPending // owed (step 5)
 	}
 	if seam := s.reloadSeam; seam != nil {
 		seam("unclaimed")
@@ -326,7 +342,7 @@ func (s *nativeSession) reloadLocked(reason reloadReason) ModelsStatus {
 			s.mu.Lock()
 			s.reloadOwed = true
 			s.mu.Unlock()
-			return s.heldBack(reason)
+			return ModelsPending
 		}
 		return ModelsFailed // closed
 	}
@@ -480,19 +496,6 @@ func (s *nativeSession) noteCatalogCut(hs *harness.Session, home string, cut cat
 	}
 	s.note(nativeSafe{red: hs.Redact}.line("the model list this session offers is held to its bounds: " + strings.Join(parts, "; ") +
 		" — see " + filepath.Join(home, modeltable.ModelsFile)))
-}
-
-// heldBack is a reload held back — by a load's replay or a turn's claim, and
-// marked owed (s.reloadOwed) in the section that read which, for the load's
-// end or the turn's to take up (steps 4, 5) — and says so: ModelsPending. A
-// fetched list's reload, or one leaving a shadowing carry (unstamped), makes
-// the one that takes it up read the files whatever their stamps say
-// (forced). modelsMu is held.
-func (s *nativeSession) heldBack(reason reloadReason) ModelsStatus {
-	if reason.unstamped() {
-		s.models.forced = true
-	}
-	return ModelsPending
 }
 
 // noteReloadFailed journals a table that would not load (diagModelsReload),

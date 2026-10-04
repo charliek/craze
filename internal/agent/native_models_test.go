@@ -1079,6 +1079,97 @@ func TestNativeLeavingACarryThatShadowsNothingReadsNothing(t *testing.T) {
 	}
 }
 
+// TestNativeAFailedReadOnLeavingACarryStaysOwed (A20, A24; plan 034 C4r5,
+// r16 #1): the reading a switch away from a shadowing carry owes (reloadLeft,
+// whatever the stamps say) stays owed until a reload publishes. The session
+// runs on test/a, whose alias a refresh found gone from models.toml — the
+// carry, over no entry of the files' — and models.toml is then made
+// unreadable by its mode alone, which no stamp records (size, mtime, inode).
+// The switch away to test/b takes, its reload fails, and test/a stays
+// offered. A refresh while the file is still unreadable reads it again and
+// fails again; once it is readable, the next refresh reads it though no
+// stamp moved — applied: test/a no longer offered, a switch back refused —
+// and the one after is current. Each trigger read the files once (the
+// reload's "stamped" stage), and the publication ended the obligation. The
+// controls: the carry was listed before the switch, and the failed reload
+// left it so; the stamps never moved. Negative controls: an obligation
+// recorded only when a reload is held back (before C4r5) answers current to
+// the refresh while the file is unreadable, and to the one after it is
+// readable, test/a still offered; one that a publication does not clear
+// reads the files at the refresh after it, which is applied, not current.
+func TestNativeAFailedReadOnLeavingACarryStaysOwed(t *testing.T) {
+	f := newNativeFixture(t)
+	s := f.started(Options{})
+	gone := nativeTestTable("http://127.0.0.1:9/v1")
+	delete(gone.Models, "test/a")
+	gone.DefaultModel = "test/b"
+	saveTable(t, f.dir, gone)
+	refreshApplied(t, s, "")
+	if snap := s.Snapshot(); snap.CurrentModel != "test/a" || !offers(snap.Models, "test/a") {
+		t.Fatalf("control: the carry is not listed (%v on %s)", offeredIDs(snap.Models), snap.CurrentModel)
+	}
+
+	mpath := filepath.Join(f.dir, modeltable.ModelsFile)
+	fi, err := os.Stat(mpath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mode := fi.Mode().Perm()
+	stamps := statModelInputs(f.dir)
+	if err := os.Chmod(mpath, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(mpath, mode) })
+	if _, err := os.ReadFile(mpath); err == nil {
+		t.Skip("this process reads a file of mode 000 (root, or a file system without modes): the failed read cannot be staged")
+	}
+	if statModelInputs(f.dir) != stamps {
+		t.Fatal("premise: the chmod moved a stamp")
+	}
+	var reads atomic.Int32
+	s.modelsMu.Lock()
+	s.reloadSeam = func(stage string) {
+		if stage == "stamped" {
+			reads.Add(1)
+		}
+	}
+	s.modelsMu.Unlock()
+
+	if _, err := s.SetModel(context.Background(), "", "test/b"); err != nil {
+		t.Fatalf("the switch away: %v", err)
+	}
+	if snap := s.Snapshot(); snap.CurrentModel != "test/b" || !offers(snap.Models, "test/a") {
+		t.Fatalf("control: after a switch away whose reload failed the session runs on %s and offers %v; want test/b, with test/a still listed",
+			snap.CurrentModel, offeredIDs(snap.Models))
+	}
+	if r := refresh(t, s, ""); r.Status != ModelsFailed {
+		t.Fatalf("a refresh while models.toml is unreadable = %+v; want failed: the switch's reading is still owed", r)
+	}
+
+	if err := os.Chmod(mpath, mode); err != nil {
+		t.Fatal(err)
+	}
+	if statModelInputs(f.dir) != stamps {
+		t.Fatal("premise: the chmod back moved a stamp")
+	}
+	if r := refresh(t, s, ""); r.Status != ModelsApplied {
+		t.Fatalf("the refresh once models.toml is readable = %+v; want applied: the switch's reading was owed, whatever the stamps say", r)
+	}
+	if got := offeredIDs(s.Snapshot().Models); slices.Contains(got, "test/a") {
+		t.Fatalf("after the owed reading the list is %v; want test/a, which the files no longer have, gone", got)
+	}
+	if _, err := s.SetModel(context.Background(), "", "test/a"); err == nil {
+		t.Fatal("a switch back to an alias the files no longer have was taken")
+	}
+	if r := refresh(t, s, ""); r.Status != ModelsCurrent {
+		t.Fatalf("a refresh after the owed reading published = %+v; want current: the obligation ended with it", r)
+	}
+	if n := reads.Load(); n != 3 {
+		t.Fatalf("the files were read %d times; want 3: the switch's, the failed refresh's and the applied one's", n)
+	}
+	everyOfferedSwitches(t, s)
+}
+
 // TestNativeRefreshAtATurnsEdgesIsOwed (A18; plan 034 C4r, r9 #4): a refresh
 // while a turn holds the session's claim is pending even where the harness
 // holds no turn — between the turn's own start reload and the harness's
