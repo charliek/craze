@@ -1100,7 +1100,7 @@ the file 0600. craze rotates the file once, to `signin.log.1` (replacing
 the one before), when a line would take it past 1 MiB, so a log of craze's own
 writing stays near 2 MiB across the two. A file something else grew past that
 size is rotated whole when craze next writes, so the two can then hold more.
-Several crazes may write it at once; each line is appended whole, under a lock.
+Several `craze` processes may write it at once; each line is appended whole, under a lock.
 
 The log is **value-free**: a record holds the time, which surface wrote it
 (`cli` or `tui`), the attempt's id — 8 random hex digits, the same on every
